@@ -1,132 +1,81 @@
 package main
 
 import (
-	"encoding/json"
-	"flag"
+	"context"
 	"fmt"
-	"io"
-	"log"
+	"log/slog"
 	"net/http"
+	"os"
+	"strings"
 
-	"gitlab.com/turf-suite/tackle/internal/core"
+	"github.com/jackc/pgx/v5"
+
+	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/openai"
+	"github.com/ryanaldo34/tacklr/server"
+	"github.com/ryanaldo34/tacklr/stores"
+	"github.com/ryanaldo34/tacklr/streaming"
+	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
-var port *int
-
-func init() {
-	port = flag.Int("port", 6969, "Port to run the server")
-}
-
-type promptRequest struct {
-	Prompt string `json:"prompt"`
-}
-
-type sseEvent struct {
-	Type      string          `json:"type"`
-	Content   string          `json:"content,omitempty"`
-	ToolCalls []core.ToolCall `json:"tool_calls,omitempty"`
-	Error     string          `json:"error,omitempty"`
-}
+const defaultSystemPrompt = "You are a helpful assistant with access to a get_weather tool. When asked about the weather, use the tool to look it up before responding."
 
 func main() {
-	flag.Parse()
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /", handlePrompt)
+	cfg := loadServerConfig()
+	level := slog.LevelInfo
+	switch strings.ToLower(cfg.logLevel) {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn", "warning":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	}
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
+
+	var store stores.BaseStore = stores.NewInMemoryStore()
+	if cfg.supabaseDBURL != "" {
+		conn, err := pgx.Connect(context.Background(), cfg.supabaseDBURL)
+		if err != nil {
+			slog.Warn("failed to connect to supabase", "error", err)
+		} else {
+			store = stores.NewPostgresStore(conn)
+			slog.Info("connected to supabase database")
+		}
+	}
+
+	strategy := openai.NewOpenAIInferenceStrategy(http.DefaultClient).
+		WithURL(cfg.openAIBaseURL).
+		WithModel(cfg.openAIModel).
+		WithApiKey(cfg.openAIAPIKey).
+		WithResponseStrategy(cfg.openAIResponseStrategy)
+
+	var streamer tacklr.StreamingStrategy
+	if cfg.agentStreamingStrategy == "buffered" {
+		streamer = streaming.New()
+	}
+
+	registry := server.NewRegistry()
+	registry.Register("default", server.AgentSpec{
+		Config: tacklr.Config{
+			MaxWindowSize: cfg.agentMaxWindowSize,
+			SystemPrompt:  defaultSystemPrompt,
+		},
+		Model:             strategy,
+		WatchDog:          telemetry.New(),
+		StreamingStrategy: streamer,
+		Store:             store,
+	})
+
+	srv := server.New(store, registry)
 
 	s := &http.Server{
-		Addr:    fmt.Sprintf(":%d", *port),
-		Handler: mux,
+		Addr:    fmt.Sprintf(":%d", cfg.port),
+		Handler: srv.Handler(),
 	}
-	log.Printf("Starting server on :%d", *port)
-	log.Fatal(s.ListenAndServe())
-}
-
-func handlePrompt(w http.ResponseWriter, r *http.Request) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming not supported", http.StatusInternalServerError)
-		return
+	slog.Info("starting server", "port", cfg.port)
+	if err := s.ListenAndServe(); err != nil {
+		slog.Error("server failed", "error", err)
+		os.Exit(1)
 	}
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeSSEError(w, flusher, "failed to read request body")
-		return
-	}
-
-	var req promptRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		writeSSEError(w, flusher, "invalid JSON: "+err.Error())
-		return
-	}
-	if req.Prompt == "" {
-		writeSSEError(w, flusher, "prompt is required")
-		return
-	}
-
-	strategy := core.NewOpenAIInferenceStrategy(http.DefaultClient).
-		WithURL("http://localhost:8080/v1").
-		WithModel("gemma-4-26B-A4B-it-UD-Q4_K_M.gguf").
-		WithApiKey("not-needed").
-		WithResponseStrategy("standard")
-
-	getWeather := &core.Tool{
-		Name:        "get_weather",
-		Description: "Get the current weather for a given location",
-		Handler: func(args struct {
-			Location string `json:"location" desc:"City or location name"`
-		}) (string, error) {
-			conditions := []string{"Sunny", "Cloudy", "Rainy", "Windy", "Snowy"}
-			condition := conditions[(len(args.Location))%len(conditions)]
-			temp := 60 + (len(args.Location)*7)%30
-			return fmt.Sprintf(`{"temperature":%d,"condition":"%s","location":"%s"}`, temp, condition, args.Location), nil
-		},
-	}
-	if err := getWeather.Validate(); err != nil {
-		writeSSEError(w, flusher, "tool validation failed: "+err.Error())
-		return
-	}
-
-	harness := &core.AgentHarness{
-		Model:         strategy,
-		Tools:         []*core.Tool{getWeather},
-		SystemPrompt:  "You are a helpful assistant with access to a get_weather tool. When asked about the weather, use the tool to look it up before responding.",
-		WatchDog:      &core.StdioWatchDog{},
-		MaxWindowSize: 8192,
-	}
-	harness.WithStreamingStrategy("buffered")
-
-	events, err := harness.Run(r.Context(), req.Prompt)
-	if err != nil {
-		writeSSEError(w, flusher, "agent error: "+err.Error())
-		return
-	}
-
-	for ev := range events {
-		data, _ := json.Marshal(toSSEEvent(ev))
-		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Type, data)
-		flusher.Flush()
-	}
-}
-
-func toSSEEvent(ev core.StreamEvent) sseEvent {
-	e := sseEvent{Type: string(ev.Type), Content: ev.Content, ToolCalls: ev.ToolCalls}
-	if ev.Error != nil {
-		e.Error = ev.Error.Error()
-	}
-	return e
-}
-
-func writeSSEEvent(w io.Writer, flusher http.Flusher, evType string, data []byte) {
-	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", evType, data)
-	flusher.Flush()
-}
-
-func writeSSEError(w http.ResponseWriter, flusher http.Flusher, msg string) {
-	data, _ := json.Marshal(sseEvent{Type: "error", Error: msg})
-	writeSSEEvent(w, flusher, "error", data)
 }

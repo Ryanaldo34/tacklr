@@ -1,4 +1,4 @@
-package core
+package tacklr
 
 import (
 	"encoding/json"

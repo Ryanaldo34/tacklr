@@ -1,47 +1,50 @@
-package core
+package openai
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/ryanaldo34/tacklr"
 )
 
-func drain(ch <-chan LLMResponseChunk) {
+func drain(ch <-chan tacklr.LLMResponseChunk) {
 	for range ch {
 	}
 }
 
 // invokeCollect calls Invoke with a channel, drains the chunks into a Response,
 // and applies structured-output parsing if the strategy has one configured.
-func invokeCollect(s *OpenAIInferenceStrategy, ctx context.Context, msgs []*Message, tools []*Tool) (*Response, error) {
+func invokeCollect(s *OpenAIInferenceStrategy, ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool) (*tacklr.Response, error) {
 	events, err := s.Invoke(ctx, msgs, tools)
 	if err != nil {
 		return nil, err
 	}
 
-	var resp Response
-	var currentMsg *Message
+	var resp tacklr.Response
+	var currentMsg *tacklr.Message
 	for chunk := range events {
 		switch chunk.Type {
-		case StreamEventMessage:
-			if currentMsg == nil || currentMsg.Role != RoleAssistant {
-				currentMsg = &Message{Role: RoleAssistant}
+		case tacklr.StreamEventMessage:
+			if currentMsg == nil || currentMsg.Role != tacklr.RoleAssistant {
+				currentMsg = &tacklr.Message{Role: tacklr.RoleAssistant}
 				resp.Messages = append(resp.Messages, currentMsg)
 			}
 			currentMsg.Content += chunk.Content
-		case StreamEventFunctionCall:
-			if currentMsg == nil || currentMsg.Role != RoleAssistant {
-				currentMsg = &Message{Role: RoleAssistant}
+		case tacklr.StreamEventFunctionCall:
+			if currentMsg == nil || currentMsg.Role != tacklr.RoleAssistant {
+				currentMsg = &tacklr.Message{Role: tacklr.RoleAssistant}
 				resp.Messages = append(resp.Messages, currentMsg)
 			}
 			currentMsg.ToolCalls = append(currentMsg.ToolCalls, chunk.ToolCalls...)
 		}
 		if chunk.IsComplete {
-			resp.Status = StatusCompleted
+			resp.Status = tacklr.StatusCompleted
 		}
 	}
 
@@ -57,6 +60,8 @@ func invokeCollect(s *OpenAIInferenceStrategy, ctx context.Context, msgs []*Mess
 
 	return &resp, nil
 }
+
+func zeroArgsStringHandler() (string, error) { return "hello", nil }
 
 func TestOpenAIInferenceStrategy_WithApiKeyAndModel(t *testing.T) {
 	s := NewOpenAIInferenceStrategy(http.DefaultClient)
@@ -78,16 +83,16 @@ func TestOpenAIInferenceStrategy_WithApiKeyAndModel(t *testing.T) {
 func TestOpenAIInferenceStrategy_MissingApiKey(t *testing.T) {
 	s := NewOpenAIInferenceStrategy(http.DefaultClient).WithModel("gpt-4o").(*OpenAIInferenceStrategy)
 	_, err := s.Invoke(context.Background(), nil, nil)
-	if err == nil || !strings.Contains(err.Error(), "API key") {
-		t.Fatalf("expected API key error, got: %v", err)
+	if err == nil || !errors.Is(err, tacklr.ErrApiKeyNotSet) {
+		t.Fatalf("expected ErrApiKeyNotSet, got: %v", err)
 	}
 }
 
 func TestOpenAIInferenceStrategy_MissingModel(t *testing.T) {
 	s := NewOpenAIInferenceStrategy(http.DefaultClient).WithApiKey("sk-test").(*OpenAIInferenceStrategy)
 	_, err := s.Invoke(context.Background(), nil, nil)
-	if err == nil || !strings.Contains(err.Error(), "model") {
-		t.Fatalf("expected model error, got: %v", err)
+	if err == nil || !errors.Is(err, tacklr.ErrModelNotSet) {
+		t.Fatalf("expected ErrModelNotSet, got: %v", err)
 	}
 }
 
@@ -170,8 +175,8 @@ func TestOpenAIInferenceStrategy_InvokeSimpleText(t *testing.T) {
 		},
 	}
 
-	resp, err := invokeCollect(s, context.Background(), []*Message{
-		{Role: RoleUser, Content: "Hello!"},
+	resp, err := invokeCollect(s, context.Background(), []*tacklr.Message{
+		{Role: tacklr.RoleUser, Content: "Hello!"},
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -179,8 +184,92 @@ func TestOpenAIInferenceStrategy_InvokeSimpleText(t *testing.T) {
 	if len(resp.Messages) != 1 {
 		t.Fatalf("got %d messages, want 1", len(resp.Messages))
 	}
-	if resp.Messages[0].Role != RoleAssistant || resp.Messages[0].Content != "Hi back!" {
+	if resp.Messages[0].Role != tacklr.RoleAssistant || resp.Messages[0].Content != "Hi back!" {
 		t.Errorf("message = %+v", resp.Messages[0])
+	}
+}
+
+func TestOpenAIInferenceStrategy_InvokeWithReasoningContext(t *testing.T) {
+	var capturedInput []json.RawMessage
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var reqBody struct {
+			Input []json.RawMessage `json:"input"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		capturedInput = reqBody.Input
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"id":     "resp_test",
+			"object": "response",
+			"status": "completed",
+			"output": []map[string]any{
+				{
+					"type":   "message",
+					"id":     "msg_test",
+					"role":   "assistant",
+					"status": "completed",
+					"content": []map[string]any{
+						{"type": "output_text", "text": "Hi back!", "annotations": []any{}},
+					},
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	s := &OpenAIInferenceStrategy{
+		apiKey:     "sk-test",
+		model:      "gpt-4o",
+		httpClient: server.Client(),
+		baseURL:    server.URL,
+		responseHandler: &OpenAINoStreamResponseStrategy{
+			ApiKey:     "sk-test",
+			BaseURL:    server.URL,
+			HttpClient: server.Client(),
+		},
+	}
+
+	resp, err := invokeCollect(s, context.Background(), []*tacklr.Message{
+		{Role: tacklr.RoleUser, Content: "Hello!"},
+		{Role: tacklr.RoleReasoning, Content: "Let me think...", MessageID: "rs_1"},
+		{Role: tacklr.RoleAssistant, Content: "The answer is 42", MessageID: "msg_1"},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Messages) != 1 || resp.Messages[0].Content != "Hi back!" {
+		t.Errorf("unexpected response: %+v", resp.Messages)
+	}
+
+	// Reasoning items are kept in the context window but are not sent back to
+	// the model because the Responses API does not accept them as input.
+	if len(capturedInput) != 2 {
+		t.Fatalf("expected 2 input items (user + assistant), got %d: %s", len(capturedInput), capturedInput)
+	}
+
+	var userItem struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(capturedInput[0], &userItem); err != nil {
+		t.Fatalf("unmarshal user item: %v", err)
+	}
+	if userItem.Role != "user" || userItem.Content != "Hello!" {
+		t.Errorf("user item = %+v", userItem)
+	}
+
+	var assistantItem struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(capturedInput[1], &assistantItem); err != nil {
+		t.Fatalf("unmarshal assistant item: %v", err)
+	}
+	if assistantItem.Role != "assistant" || assistantItem.Content != "The answer is 42" {
+		t.Errorf("assistant item = %+v", assistantItem)
 	}
 }
 
@@ -226,8 +315,8 @@ func TestOpenAIInferenceStrategy_InvokeWithToolCall(t *testing.T) {
 		},
 	}
 
-	resp, err := invokeCollect(s, context.Background(), []*Message{
-		{Role: RoleUser, Content: "What's the weather?"},
+	resp, err := invokeCollect(s, context.Background(), []*tacklr.Message{
+		{Role: tacklr.RoleUser, Content: "What's the weather?"},
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -235,7 +324,7 @@ func TestOpenAIInferenceStrategy_InvokeWithToolCall(t *testing.T) {
 	if len(resp.Messages) != 1 {
 		t.Fatalf("got %d messages, want 1 (merged)", len(resp.Messages))
 	}
-	if resp.Messages[0].Role != RoleAssistant {
+	if resp.Messages[0].Role != tacklr.RoleAssistant {
 		t.Errorf("role = %q", resp.Messages[0].Role)
 	}
 	if resp.Messages[0].Content != "Let me check..." {
@@ -299,8 +388,8 @@ func TestOpenAIInferenceStrategy_InvokeWithMultipleToolCalls(t *testing.T) {
 		},
 	}
 
-	resp, err := invokeCollect(s, context.Background(), []*Message{
-		{Role: RoleUser, Content: "Do two things"},
+	resp, err := invokeCollect(s, context.Background(), []*tacklr.Message{
+		{Role: tacklr.RoleUser, Content: "Do two things"},
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -308,7 +397,7 @@ func TestOpenAIInferenceStrategy_InvokeWithMultipleToolCalls(t *testing.T) {
 	if len(resp.Messages) != 1 {
 		t.Fatalf("got %d messages, want 1 (merged)", len(resp.Messages))
 	}
-	if resp.Messages[0].Role != RoleAssistant {
+	if resp.Messages[0].Role != tacklr.RoleAssistant {
 		t.Errorf("role = %q", resp.Messages[0].Role)
 	}
 	if resp.Messages[0].Content != "Let me check..." {
@@ -366,8 +455,8 @@ func TestOpenAIInferenceStrategy_InvokeWithToolCallsOnly(t *testing.T) {
 		},
 	}
 
-	resp, err := invokeCollect(s, context.Background(), []*Message{
-		{Role: RoleUser, Content: "Run tools"},
+	resp, err := invokeCollect(s, context.Background(), []*tacklr.Message{
+		{Role: tacklr.RoleUser, Content: "Run tools"},
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -375,7 +464,7 @@ func TestOpenAIInferenceStrategy_InvokeWithToolCallsOnly(t *testing.T) {
 	if len(resp.Messages) != 1 {
 		t.Fatalf("got %d messages, want 1 (merged tool calls)", len(resp.Messages))
 	}
-	if resp.Messages[0].Role != RoleAssistant {
+	if resp.Messages[0].Role != tacklr.RoleAssistant {
 		t.Errorf("role = %q", resp.Messages[0].Role)
 	}
 	if resp.Messages[0].Content != "" {
@@ -423,7 +512,7 @@ func TestOpenAIInferenceStrategy_InvokeWithToolsParam(t *testing.T) {
 		},
 	}
 
-	tools := []*Tool{
+	tools := []*tacklr.Tool{
 		{
 			Name:        "get_weather",
 			Description: "Get the weather",
@@ -436,7 +525,7 @@ func TestOpenAIInferenceStrategy_InvokeWithToolsParam(t *testing.T) {
 	}
 	tools[0].Validate()
 
-	_, err := s.Invoke(context.Background(), []*Message{{Role: RoleUser, Content: "Hi"}}, tools)
+	_, err := s.Invoke(context.Background(), []*tacklr.Message{{Role: tacklr.RoleUser, Content: "Hi"}}, tools)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -489,8 +578,8 @@ func TestOpenAIInferenceStrategy_InvokeSystemPromptAsInstructions(t *testing.T) 
 		},
 	}
 
-	_, err := s.Invoke(context.Background(), []*Message{
-		{Role: RoleUser, Content: "Hi"},
+	_, err := s.Invoke(context.Background(), []*tacklr.Message{
+		{Role: tacklr.RoleUser, Content: "Hi"},
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -535,9 +624,9 @@ func TestOpenAIInferenceStrategy_InvokeToolResultToFunctionCallOutput(t *testing
 		},
 	}
 
-	_, err := s.Invoke(context.Background(), []*Message{
-		{Role: RoleUser, Content: "What's the weather?"},
-		{Role: RoleTool, ToolCallID: "call_1", Content: `{"temp":72}`},
+	_, err := s.Invoke(context.Background(), []*tacklr.Message{
+		{Role: tacklr.RoleUser, Content: "What's the weather?"},
+		{Role: tacklr.RoleTool, ToolCallID: "call_1", Content: `{"temp":72}`},
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -561,6 +650,99 @@ func TestOpenAIInferenceStrategy_InvokeToolResultToFunctionCallOutput(t *testing
 	}
 	if item2.Output != `{"temp":72}` {
 		t.Errorf("item2 output = %q", item2.Output)
+	}
+}
+
+func TestOpenAIInferenceStrategy_InvokeReplaysAssistantToolCalls(t *testing.T) {
+	var capturedInput []json.RawMessage
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var reqBody struct {
+			Input json.RawMessage `json:"input"`
+		}
+		json.NewDecoder(r.Body).Decode(&reqBody)
+		json.Unmarshal(reqBody.Input, &capturedInput)
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"id":     "resp_test",
+			"object": "response",
+			"status": "completed",
+			"output": []map[string]any{},
+		})
+	}))
+	defer server.Close()
+
+	s := &OpenAIInferenceStrategy{
+		apiKey:     "sk-test",
+		model:      "gpt-4o",
+		httpClient: server.Client(),
+		baseURL:    server.URL,
+		responseHandler: &OpenAINoStreamResponseStrategy{
+			ApiKey:     "sk-test",
+			BaseURL:    server.URL,
+			HttpClient: server.Client(),
+		},
+	}
+
+	_, err := s.Invoke(context.Background(), []*tacklr.Message{
+		{Role: tacklr.RoleUser, Content: "What's the weather?"},
+		{
+			Role:    tacklr.RoleAssistant,
+			Content: "Let me check...",
+			ToolCalls: []tacklr.ToolCall{
+				{ID: "fc_1", CallID: "call_1", Name: "get_weather", Namespace: "weather", Arguments: `{"location":"NYC"}`},
+				{ID: "fc_2", CallID: "call_2", Name: "get_weather", Arguments: `{"location":"LA"}`},
+			},
+		},
+		{Role: tacklr.RoleTool, ToolCallID: "call_1", Content: `{"temp":72}`},
+		{Role: tacklr.RoleTool, ToolCallID: "call_2", Content: `{"temp":85}`},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(capturedInput) != 6 {
+		t.Fatalf("expected 6 input items, got %d", len(capturedInput))
+	}
+
+	var assistantMsg easyInputRequest
+	if err := json.Unmarshal(capturedInput[1], &assistantMsg); err != nil {
+		t.Fatalf("unmarshal assistant: %v", err)
+	}
+	if assistantMsg.Role != "assistant" || assistantMsg.Content != "Let me check..." {
+		t.Errorf("assistant = %+v", assistantMsg)
+	}
+
+	var fc1 functionCallInputRequest
+	if err := json.Unmarshal(capturedInput[2], &fc1); err != nil {
+		t.Fatalf("unmarshal fc1: %v", err)
+	}
+	if fc1.Type != "function_call" || fc1.ID != "" || fc1.CallID != "call_1" || fc1.Name != "get_weather" || fc1.Arguments != `{"location":"NYC"}` {
+		t.Errorf("fc1 = %+v", fc1)
+	}
+
+	var fc2 functionCallInputRequest
+	if err := json.Unmarshal(capturedInput[3], &fc2); err != nil {
+		t.Fatalf("unmarshal fc2: %v", err)
+	}
+	if fc2.Type != "function_call" || fc2.ID != "" || fc2.CallID != "call_2" || fc2.Name != "get_weather" || fc2.Arguments != `{"location":"LA"}` {
+		t.Errorf("fc2 = %+v", fc2)
+	}
+
+	var out1 functionCallOutputRequest
+	if err := json.Unmarshal(capturedInput[4], &out1); err != nil {
+		t.Fatalf("unmarshal output1: %v", err)
+	}
+	if out1.Type != "function_call_output" || out1.CallID != "call_1" || out1.Output != `{"temp":72}` {
+		t.Errorf("output1 = %+v", out1)
+	}
+
+	var out2 functionCallOutputRequest
+	if err := json.Unmarshal(capturedInput[5], &out2); err != nil {
+		t.Fatalf("unmarshal output2: %v", err)
+	}
+	if out2.Type != "function_call_output" || out2.CallID != "call_2" || out2.Output != `{"temp":85}` {
+		t.Errorf("output2 = %+v", out2)
 	}
 }
 
@@ -590,15 +772,19 @@ func TestOpenAIInferenceStrategy_APIErrorResponse(t *testing.T) {
 		},
 	}
 
-	_, err := s.Invoke(context.Background(), []*Message{{Role: RoleUser, Content: "Hi"}}, nil)
+	_, err := s.Invoke(context.Background(), []*tacklr.Message{{Role: tacklr.RoleUser, Content: "Hi"}}, nil)
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if !strings.Contains(err.Error(), "Invalid model") {
-		t.Errorf("error = %v", err)
+	var apiErr *APIStatusError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected *APIStatusError, got %T: %v", err, err)
 	}
-	if !strings.Contains(err.Error(), "400") {
-		t.Errorf("error missing status code: %v", err)
+	if apiErr.Status != 400 {
+		t.Errorf("status = %d, want 400", apiErr.Status)
+	}
+	if !strings.Contains(apiErr.Body, "Invalid model") {
+		t.Errorf("body = %q, want contains 'Invalid model'", apiErr.Body)
 	}
 }
 
@@ -621,6 +807,10 @@ func TestOpenAIInferenceStrategy_MaxContextWindow(t *testing.T) {
 		{"o3-pro", 200000, false},
 		{"o3-deep-research", 200000, false},
 		{"o4-mini", 200000, false},
+		// Prefix fallbacks (not in modelContextLimits map)
+		{"gpt-5-custom", 1000000, false},
+		{"o4-mini", 200000, false},
+		{"o1-new", 200000, false},
 		// Unknown
 		{"unknown-model", 0, true},
 	}
@@ -631,6 +821,10 @@ func TestOpenAIInferenceStrategy_MaxContextWindow(t *testing.T) {
 		if tc.wantErr {
 			if err == nil {
 				t.Errorf("model %q: expected error, got nil", tc.model)
+				continue
+			}
+			if !errors.Is(err, tacklr.ErrUnknownModel) {
+				t.Errorf("model %q: expected ErrUnknownModel in chain, got: %v", tc.model, err)
 			}
 			continue
 		}
@@ -660,7 +854,7 @@ func TestOpenAIInferenceStrategy_ContextCancellation(t *testing.T) {
 		},
 	}
 
-	_, err := s.Invoke(ctx, []*Message{{Role: RoleUser, Content: "Hi"}}, nil)
+	_, err := s.Invoke(ctx, []*tacklr.Message{{Role: tacklr.RoleUser, Content: "Hi"}}, nil)
 	if err == nil {
 		t.Fatal("expected error from cancelled context")
 	}
@@ -704,7 +898,7 @@ func TestOpenAIInferenceStrategy_UnknownOutputItemSkipped(t *testing.T) {
 		},
 	}
 
-	resp, err := invokeCollect(s, context.Background(), []*Message{{Role: RoleUser, Content: "Think step by step"}}, nil)
+	resp, err := invokeCollect(s, context.Background(), []*tacklr.Message{{Role: tacklr.RoleUser, Content: "Think step by step"}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -796,8 +990,8 @@ func TestOpenAIInferenceStrategy_InvokeWithReasoningLevel(t *testing.T) {
 		},
 	}
 
-	_, err := s.Invoke(context.Background(), []*Message{
-		{Role: RoleUser, Content: "Hello!"},
+	_, err := s.Invoke(context.Background(), []*tacklr.Message{
+		{Role: tacklr.RoleUser, Content: "Hello!"},
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -844,8 +1038,8 @@ func TestOpenAIInferenceStrategy_InvokeWithNamespace(t *testing.T) {
 		},
 	}
 
-	resp, err := invokeCollect(s, context.Background(), []*Message{
-		{Role: RoleUser, Content: "Find customer 123"},
+	resp, err := invokeCollect(s, context.Background(), []*tacklr.Message{
+		{Role: tacklr.RoleUser, Content: "Find customer 123"},
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -898,7 +1092,7 @@ func TestOpenAIInferenceStrategy_InvokeWithNamespacedToolsDefinition(t *testing.
 		},
 	}
 
-	tools := []*Tool{
+	tools := []*tacklr.Tool{
 		{Name: "standalone_tool", Handler: zeroArgsStringHandler},
 		{Name: "get_customer", Namespace: "crm", Handler: zeroArgsStringHandler},
 	}
@@ -906,8 +1100,8 @@ func TestOpenAIInferenceStrategy_InvokeWithNamespacedToolsDefinition(t *testing.
 		t.Validate()
 	}
 
-	_, err := s.Invoke(context.Background(), []*Message{
-		{Role: RoleUser, Content: "Find customer"},
+	_, err := s.Invoke(context.Background(), []*tacklr.Message{
+		{Role: tacklr.RoleUser, Content: "Find customer"},
 	}, tools)
 	if err != nil {
 		t.Fatal(err)
@@ -923,15 +1117,14 @@ func TestOpenAIInferenceStrategy_InvokeWithNamespacedToolsDefinition(t *testing.
 	if parsed[0]["type"] != "function" {
 		t.Errorf("first item type = %v", parsed[0]["type"])
 	}
-	if parsed[1]["type"] != "namespace" {
+	if parsed[0]["name"] != "standalone_tool" {
+		t.Errorf("first item name = %v", parsed[0]["name"])
+	}
+	if parsed[1]["type"] != "function" {
 		t.Errorf("second item type = %v", parsed[1]["type"])
 	}
-	nsTools, ok := parsed[1]["tools"].([]any)
-	if !ok {
-		t.Fatalf("namespace.tools type = %T", parsed[1]["tools"])
-	}
-	if len(nsTools) != 1 {
-		t.Fatalf("expected 1 tool in namespace, got %d", len(nsTools))
+	if parsed[1]["name"] != "crm.get_customer" {
+		t.Errorf("second item name = %v, want crm.get_customer", parsed[1]["name"])
 	}
 }
 
@@ -988,8 +1181,8 @@ func TestOpenAIInferenceStrategy_CountTokens_SimpleMessage(t *testing.T) {
 		},
 	}
 
-	count, err := s.CountTokens(context.Background(), []*Message{
-		{Role: RoleUser, Content: "Hello!"},
+	count, err := s.CountTokens(context.Background(), []*tacklr.Message{
+		{Role: tacklr.RoleUser, Content: "Hello!"},
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -1025,8 +1218,8 @@ func TestOpenAIInferenceStrategy_CountTokens_WithInstructions(t *testing.T) {
 		instructions: "You are helpful.",
 	}
 
-	count, err := s.CountTokens(context.Background(), []*Message{
-		{Role: RoleUser, Content: "Hi"},
+	count, err := s.CountTokens(context.Background(), []*tacklr.Message{
+		{Role: tacklr.RoleUser, Content: "Hi"},
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -1065,7 +1258,7 @@ func TestOpenAIInferenceStrategy_CountTokens_WithTools(t *testing.T) {
 		},
 	}
 
-	tools := []*Tool{
+	tools := []*tacklr.Tool{
 		{
 			Name:        "get_weather",
 			Description: "Get the current weather",
@@ -1078,8 +1271,8 @@ func TestOpenAIInferenceStrategy_CountTokens_WithTools(t *testing.T) {
 	}
 	tools[0].Validate()
 
-	count, err := s.CountTokens(context.Background(), []*Message{
-		{Role: RoleUser, Content: "Weather in NYC?"},
+	count, err := s.CountTokens(context.Background(), []*tacklr.Message{
+		{Role: tacklr.RoleUser, Content: "Weather in NYC?"},
 	}, tools)
 	if err != nil {
 		t.Fatal(err)
@@ -1102,17 +1295,17 @@ func TestOpenAIInferenceStrategy_CountTokens_WithTools(t *testing.T) {
 
 func TestOpenAIInferenceStrategy_CountTokens_MissingApiKey(t *testing.T) {
 	s := NewOpenAIInferenceStrategy(http.DefaultClient).WithModel("gpt-5.5").(*OpenAIInferenceStrategy)
-	_, err := s.CountTokens(context.Background(), []*Message{{Role: RoleUser, Content: "Hi"}}, nil)
-	if err == nil || !strings.Contains(err.Error(), "API key") {
-		t.Fatalf("expected API key error, got: %v", err)
+	_, err := s.CountTokens(context.Background(), []*tacklr.Message{{Role: tacklr.RoleUser, Content: "Hi"}}, nil)
+	if err == nil || !errors.Is(err, tacklr.ErrApiKeyNotSet) {
+		t.Fatalf("expected ErrApiKeyNotSet, got: %v", err)
 	}
 }
 
 func TestOpenAIInferenceStrategy_CountTokens_MissingModel(t *testing.T) {
 	s := NewOpenAIInferenceStrategy(http.DefaultClient).WithApiKey("sk-test").(*OpenAIInferenceStrategy)
-	_, err := s.CountTokens(context.Background(), []*Message{{Role: RoleUser, Content: "Hi"}}, nil)
-	if err == nil || !strings.Contains(err.Error(), "model") {
-		t.Fatalf("expected model error, got: %v", err)
+	_, err := s.CountTokens(context.Background(), []*tacklr.Message{{Role: tacklr.RoleUser, Content: "Hi"}}, nil)
+	if err == nil || !errors.Is(err, tacklr.ErrModelNotSet) {
+		t.Fatalf("expected ErrModelNotSet, got: %v", err)
 	}
 }
 
@@ -1142,12 +1335,19 @@ func TestOpenAIInferenceStrategy_CountTokens_APIError(t *testing.T) {
 		},
 	}
 
-	_, err := s.CountTokens(context.Background(), []*Message{{Role: RoleUser, Content: "Hi"}}, nil)
+	_, err := s.CountTokens(context.Background(), []*tacklr.Message{{Role: tacklr.RoleUser, Content: "Hi"}}, nil)
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if !strings.Contains(err.Error(), "invalid request") {
-		t.Errorf("error = %v", err)
+	var apiErr *APIStatusError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected *APIStatusError, got %T: %v", err, err)
+	}
+	if apiErr.Status != 400 {
+		t.Errorf("status = %d, want 400", apiErr.Status)
+	}
+	if !strings.Contains(apiErr.Body, "invalid request") {
+		t.Errorf("body = %q, want contains 'invalid request'", apiErr.Body)
 	}
 }
 
@@ -1169,8 +1369,8 @@ func TestOpenAIInferenceStrategy_CountTokens_FallbackTiktoken(t *testing.T) {
 		},
 	}
 
-	count, err := s.CountTokens(context.Background(), []*Message{
-		{Role: RoleUser, Content: "Hello, how are you?"},
+	count, err := s.CountTokens(context.Background(), []*tacklr.Message{
+		{Role: tacklr.RoleUser, Content: "Hello, how are you?"},
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -1191,14 +1391,10 @@ func TestOpenAIInferenceStrategy_CountTokens_ContextCancellation(t *testing.T) {
 		baseURL:    "http://does-not-matter",
 	}
 
-	_, err := s.CountTokens(ctx, []*Message{{Role: RoleUser, Content: "Hi"}}, nil)
+	_, err := s.CountTokens(ctx, []*tacklr.Message{{Role: tacklr.RoleUser, Content: "Hi"}}, nil)
 	if err == nil {
 		t.Fatal("expected error from cancelled context")
 	}
-}
-
-func TestInterfaceCompliance(t *testing.T) {
-	var _ InferenceStrategy = (*OpenAIInferenceStrategy)(nil)
 }
 
 func TestOpenAIInferenceStrategy_WithStructuredOutput(t *testing.T) {
@@ -1271,8 +1467,8 @@ func TestOpenAIInferenceStrategy_InvokeWithStructuredOutput(t *testing.T) {
 	}
 	s.WithStructuredOutput(MySchema{})
 
-	_, err := s.Invoke(context.Background(), []*Message{
-		{Role: RoleUser, Content: "Get data"},
+	_, err := s.Invoke(context.Background(), []*tacklr.Message{
+		{Role: tacklr.RoleUser, Content: "Get data"},
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -1337,8 +1533,8 @@ func TestOpenAIInferenceStrategy_InvokeStructuredOutputParsed(t *testing.T) {
 	}
 	s.WithStructuredOutput(MySchema{})
 
-	resp, err := invokeCollect(s, context.Background(), []*Message{
-		{Role: RoleUser, Content: "Get data"},
+	resp, err := invokeCollect(s, context.Background(), []*tacklr.Message{
+		{Role: tacklr.RoleUser, Content: "Get data"},
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -1401,16 +1597,102 @@ func TestOpenAIInferenceStrategy_InvokeStructuredOutputRefusal(t *testing.T) {
 	}
 	s.WithStructuredOutput(MySchema{})
 
-	_, err := s.Invoke(context.Background(), []*Message{
-		{Role: RoleUser, Content: "Help with something bad"},
+	_, err := s.Invoke(context.Background(), []*tacklr.Message{
+		{Role: tacklr.RoleUser, Content: "Help with something bad"},
 	}, nil)
 	if err == nil {
 		t.Fatal("expected error from refusal")
 	}
-	if !strings.Contains(err.Error(), "model refused") {
-		t.Errorf("error = %v, want refused error", err)
+	if !errors.Is(err, tacklr.ErrModelRefused) {
+		t.Errorf("error = %v, want ErrModelRefused", err)
 	}
 	if !strings.Contains(err.Error(), "I'm sorry") {
 		t.Errorf("error should contain refusal message: %v", err)
+	}
+}
+
+func TestEnsureResponseHandler_lazyInit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"id":     "resp_test",
+			"object": "response",
+			"status": "completed",
+			"output": []map[string]any{
+				{
+					"type":   "message",
+					"id":     "msg_test",
+					"role":   "assistant",
+					"status": "completed",
+					"content": []map[string]any{
+						{"type": "output_text", "text": "hi", "annotations": []any{}},
+					},
+				},
+			},
+		})
+	}))
+	defer server.Close()
+
+	// Construct WITHOUT setting responseHandler — lazy init should fire on Invoke
+	s := &OpenAIInferenceStrategy{
+		apiKey:     "sk-test",
+		model:      "gpt-4o",
+		httpClient: server.Client(),
+		baseURL:    server.URL,
+		// responseHandler intentionally nil
+	}
+
+	_, err := s.Invoke(context.Background(), []*tacklr.Message{
+		{Role: tacklr.RoleUser, Content: "Hi"},
+	}, nil)
+	if err != nil {
+		t.Fatalf("lazy init failed: %v", err)
+	}
+	if s.responseHandler == nil {
+		t.Fatal("responseHandler still nil after Invoke — lazy init did not fire")
+	}
+}
+
+func TestWithStructuredOutput_nilResets(t *testing.T) {
+	s := NewOpenAIInferenceStrategy(http.DefaultClient)
+	s.WithStructuredOutput(struct {
+		Name string `json:"name"`
+	}{})
+	if s.structuredOutputSchema == nil {
+		t.Fatal("schema should be set after WithStructuredOutput(struct)")
+	}
+	s.WithStructuredOutput(nil)
+	if s.structuredOutputSchema != nil {
+		t.Error("schema should be nil after WithStructuredOutput(nil)")
+	}
+	if s.structuredOutputName != "" {
+		t.Errorf("name = %q, want empty", s.structuredOutputName)
+	}
+	if s.structuredOutputType != nil {
+		t.Error("type should be nil after reset")
+	}
+}
+
+func TestCountTokens_NonJSONResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte("not json at all"))
+	}))
+	defer server.Close()
+
+	s := &OpenAIInferenceStrategy{
+		apiKey:     "sk-test",
+		model:      "gpt-5.5",
+		httpClient: server.Client(),
+		baseURL:    server.URL,
+	}
+	_, err := s.CountTokens(context.Background(), []*tacklr.Message{
+		{Role: tacklr.RoleUser, Content: "Hi"},
+	}, nil)
+	if err == nil {
+		t.Fatal("expected unmarshal error")
+	}
+	if !strings.Contains(err.Error(), "unmarshal response") {
+		t.Errorf("error = %v, want 'unmarshal response' in chain", err)
 	}
 }

@@ -1,6 +1,7 @@
-package core
+package tacklr
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -8,17 +9,41 @@ import (
 	"time"
 )
 
+// ToolHandlerFunc is a generic tool handler that receives pre-parsed arguments
+// as a map[string]any and a context for cancellation. It is used by tools
+// whose schemas are pre-built (e.g. MCP-discovered tools) rather than derived
+// from a Go struct via reflection.
+type ToolHandlerFunc func(ctx context.Context, args map[string]any, runtime *HarnessRuntime) (string, error)
+
 type Tool struct {
 	Name        string
 	Description string
 	Namespace   string
 	Handler     any
 
+	// Parameters is an optional pre-built JSON schema for the tool's input.
+	// When non-nil, AsJson uses it directly instead of generating a schema
+	// from the Handler's reflect type. Used by MCP-discovered tools.
+	Parameters map[string]any
+
+	// HandlerFunc is an optional generic handler. When non-nil, Invoke calls
+	// it directly instead of using reflection on Handler. Used by
+	// MCP-discovered tools.
+	HandlerFunc ToolHandlerFunc
+
 	handlerType reflect.Type
 }
 
 var timeType = reflect.TypeOf(time.Time{})
 var harnessRuntimeType = reflect.TypeOf(HarnessRuntime{})
+
+// Tool handler args can include a field of type HarnessRuntime (or
+// *HarnessRuntime) to receive the runtime instance. The harness shallow-copies
+// the runtime per tool call with CurrentToolCallID set uniquely for each copy.
+// All map and pointer fields are shared across copies; only CurrentToolCallID
+// is per-call. Tools that mutate runtime.State concurrently must use the
+// StateGet, StateSet, and StateDelete helpers rather than direct map access.
+// Tools that need to raise interrupts should call runtime.RaiseInterrupt.
 
 func typeToJSONSchema(rt reflect.Type, depth int, skipTypes ...reflect.Type) map[string]any {
 	if depth > 10 {
@@ -157,6 +182,9 @@ func (t *Tool) Validate() error {
 	if t.Name == "" {
 		return fmt.Errorf("tool name is required")
 	}
+	if t.HandlerFunc != nil {
+		return nil
+	}
 	fnType := reflect.TypeOf(t.Handler)
 	if fnType == nil || fnType.Kind() != reflect.Func {
 		return fmt.Errorf("handler must be a function")
@@ -218,7 +246,21 @@ func (t *Tool) Validate() error {
 	return nil
 }
 
-func (t *Tool) Invoke(argsJson string, runtime *HarnessRuntime) (string, error) {
+func (t *Tool) Invoke(ctx context.Context, argsJson string, runtime *HarnessRuntime) (string, error) {
+	if t.HandlerFunc != nil {
+		var args map[string]any
+		if argsJson != "" {
+			if err := json.Unmarshal([]byte(argsJson), &args); err != nil {
+				return "", fmt.Errorf("unmarshal args for tool %q: %w", t.Name, err)
+			}
+		}
+		return t.HandlerFunc(ctx, args, runtime)
+	}
+	if t.handlerType == nil {
+		if err := t.Validate(); err != nil {
+			return "", fmt.Errorf("validate tool %q: %w", t.Name, err)
+		}
+	}
 	handlerExecutor := reflect.ValueOf(t.Handler)
 
 	var args []reflect.Value
@@ -269,6 +311,29 @@ func (t *Tool) Invoke(argsJson string, runtime *HarnessRuntime) (string, error) 
 }
 
 func (t *Tool) AsJson() (map[string]any, error) {
+	if t.HandlerFunc != nil {
+		params := t.Parameters
+		if params == nil {
+			params = map[string]any{
+				"type":                 "object",
+				"properties":           map[string]any{},
+				"additionalProperties": false,
+			}
+		}
+		def := map[string]any{
+			"type":        "function",
+			"name":        t.Name,
+			"description": t.Description,
+			"strict":      false,
+			"parameters":  params,
+		}
+		return def, nil
+	}
+	if t.handlerType == nil {
+		if err := t.Validate(); err != nil {
+			return nil, fmt.Errorf("validate tool %q: %w", t.Name, err)
+		}
+	}
 	params := map[string]any{
 		"type":                 "object",
 		"properties":           map[string]any{},
@@ -301,37 +366,26 @@ type ToolNamespace struct {
 // ToolsAsJson serializes tools into a JSON array for the API tools field.
 // Standalone tools (Namespace == "") are serialized as function definitions.
 // Tools with a Namespace are grouped into namespace wrappers.
+// ToolsAsJson serializes tools into a JSON array of flat function
+// definitions for the API tools field. Namespaced tools (e.g. MCP-discovered)
+// are flattened by prefixing the function name with the namespace separated
+// by a dot (e.g. "gmail.search_threads"). The response parser splits the
+// prefix back into namespace + name so findTool can match.
 func ToolsAsJson(tools []*Tool) (string, error) {
 	if len(tools) == 0 {
 		return "[]", nil
 	}
 
-	standalone := make([]*Tool, 0)
-	grouped := map[string][]*Tool{}
+	defs := make([]map[string]any, 0, len(tools))
 	for _, t := range tools {
-		if t.Namespace == "" {
-			standalone = append(standalone, t)
-		} else {
-			grouped[t.Namespace] = append(grouped[t.Namespace], t)
+		def, err := t.AsJson()
+		if err != nil {
+			return "", fmt.Errorf("serialize tool %q: %w", t.Name, err)
 		}
-	}
-
-	defs := make([]map[string]any, 0, len(standalone)+len(grouped))
-	for _, t := range standalone {
-		def, _ := t.AsJson()
+		if t.Namespace != "" {
+			def["name"] = t.Namespace + "." + t.Name
+		}
 		defs = append(defs, def)
-	}
-	for ns, group := range grouped {
-		toolDefs := make([]map[string]any, len(group))
-		for i, t := range group {
-			toolDefs[i], _ = t.AsJson()
-		}
-		defs = append(defs, map[string]any{
-			"type":        "namespace",
-			"name":        ns,
-			"description": "",
-			"tools":       toolDefs,
-		})
 	}
 
 	b, err := json.Marshal(defs)

@@ -1,4 +1,4 @@
-package core
+package openai
 
 import (
 	"bytes"
@@ -7,25 +7,16 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
+
+	"github.com/ryanaldo34/tacklr"
 )
 
-type RawAPIMessage struct {
-	Message    []byte
-	Error      error
-	IsComplete bool
-}
-
-type LLMResponseChunk struct {
-	TurnId     string
-	MessageId  string
-	ToolCalls  []ToolCall
-	Type       StreamEventType
-	Content    string
-	IsComplete bool
-}
-
 type ResponseStrategy interface {
-	Handle(ctx context.Context, payload []byte, events chan<- LLMResponseChunk) error
+	// Handle sends the request payload, parses the response, and emits chunks.
+	// It returns the API response id so callers can chain requests with
+	// previous_response_id.
+	Handle(ctx context.Context, payload []byte, events chan<- tacklr.LLMResponseChunk) (string, error)
 }
 
 type OpenAINoStreamResponseStrategy struct {
@@ -34,32 +25,32 @@ type OpenAINoStreamResponseStrategy struct {
 	HttpClient *http.Client
 }
 
-func (s *OpenAINoStreamResponseStrategy) Handle(ctx context.Context, payload []byte, events chan<- LLMResponseChunk) error {
+func (s *OpenAINoStreamResponseStrategy) Handle(ctx context.Context, payload []byte, events chan<- tacklr.LLMResponseChunk) (string, error) {
 	defer close(events)
 
 	if err := ctx.Err(); err != nil {
-		return err
+		return "", err
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", s.BaseURL+"/responses", bytes.NewReader(payload))
 	if err != nil {
-		return fmt.Errorf("create request: %w", err)
+		return "", fmt.Errorf("create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+s.ApiKey)
 
 	httpResp, err := s.HttpClient.Do(httpReq)
 	if err != nil {
-		return fmt.Errorf("http request: %w", err)
+		return "", fmt.Errorf("http request: %w", err)
 	}
 	defer httpResp.Body.Close()
 
 	respBody, err := io.ReadAll(httpResp.Body)
 	if err != nil {
-		return fmt.Errorf("read response: %w", err)
+		return "", fmt.Errorf("read response: %w", err)
 	}
 	if httpResp.StatusCode != 200 {
-		return fmt.Errorf("API error (status %d): %s", httpResp.StatusCode, extractErrorMessage(respBody))
+		return "", &APIStatusError{Status: httpResp.StatusCode, Body: extractErrorMessage(respBody)}
 	}
 
 	// Parse the response body and emit chunks
@@ -72,11 +63,11 @@ func (s *OpenAINoStreamResponseStrategy) Handle(ctx context.Context, payload []b
 		IncompleteDetails *incompleteDetail `json:"incomplete_details,omitempty"`
 	}
 	if err := json.Unmarshal(respBody, &apiResp); err != nil {
-		return fmt.Errorf("unmarshal response: %w", err)
+		return "", fmt.Errorf("unmarshal response: %w", err)
 	}
 
 	if apiResp.Error != nil {
-		return fmt.Errorf("API error: %s (code: %s)", apiResp.Error.Message, apiResp.Error.Code)
+		return "", &APIStatusError{Status: httpResp.StatusCode, Body: apiResp.Error.Message, Code: apiResp.Error.Code}
 	}
 
 	for _, raw := range apiResp.Output {
@@ -84,7 +75,7 @@ func (s *OpenAINoStreamResponseStrategy) Handle(ctx context.Context, payload []b
 			Type string `json:"type"`
 		}
 		if err := json.Unmarshal(raw, &typeHolder); err != nil {
-			return fmt.Errorf("parse output item type: %w", err)
+			return "", fmt.Errorf("parse output item type: %w", err)
 		}
 
 		switch typeHolder.Type {
@@ -96,7 +87,7 @@ func (s *OpenAINoStreamResponseStrategy) Handle(ctx context.Context, payload []b
 				Content json.RawMessage `json:"content"`
 			}
 			if err := json.Unmarshal(raw, &rawMsg); err != nil {
-				return fmt.Errorf("parse message: %w", err)
+				return "", fmt.Errorf("parse message: %w", err)
 			}
 
 			var contentParts []struct {
@@ -106,12 +97,12 @@ func (s *OpenAINoStreamResponseStrategy) Handle(ctx context.Context, payload []b
 			}
 			if err := json.Unmarshal(rawMsg.Content, &contentParts); err == nil {
 				for _, cp := range contentParts {
-					if cp.Type == ContentTypeRefusal {
-						return fmt.Errorf("model refused: %s", cp.Refusal)
+					if cp.Type == tacklr.ContentTypeRefusal {
+						return "", fmt.Errorf("model refused: %s: %w", cp.Refusal, tacklr.ErrModelRefused)
 					}
-					if cp.Type == ContentTypeOutputText || cp.Type == "text" {
-						events <- LLMResponseChunk{
-							Type:       StreamEventMessage,
+					if cp.Type == tacklr.ContentTypeOutputText || cp.Type == "text" {
+						events <- tacklr.LLMResponseChunk{
+							Type:       tacklr.StreamEventMessage,
 							MessageId:  rawMsg.ID,
 							Content:    cp.Text,
 							IsComplete: rawMsg.Status == "completed",
@@ -129,16 +120,23 @@ func (s *OpenAINoStreamResponseStrategy) Handle(ctx context.Context, payload []b
 				Status    string `json:"status"`
 			}
 			if err := json.Unmarshal(raw, &fc); err != nil {
-				return fmt.Errorf("parse function_call: %w", err)
+				return "", fmt.Errorf("parse function_call: %w", err)
 			}
-			events <- LLMResponseChunk{
-				Type: StreamEventFunctionCall,
-				ToolCalls: []ToolCall{{
+			name := fc.Name
+			namespace := fc.Namespace
+			if namespace == "" && strings.Contains(name, ".") {
+				parts := strings.SplitN(name, ".", 2)
+				namespace = parts[0]
+				name = parts[1]
+			}
+			events <- tacklr.LLMResponseChunk{
+				Type: tacklr.StreamEventFunctionCall,
+				ToolCalls: []tacklr.ToolCall{{
 					ID:        fc.ID,
 					Type:      "function_call",
 					CallID:    fc.CallID,
-					Name:      fc.Name,
-					Namespace: fc.Namespace,
+					Name:      name,
+					Namespace: namespace,
 					Arguments: fc.Arguments,
 					Status:    fc.Status,
 				}},
@@ -164,16 +162,19 @@ func (s *OpenAINoStreamResponseStrategy) Handle(ctx context.Context, payload []b
 					}
 				}
 				if text != "" {
-					events <- LLMResponseChunk{
-						Type:      StreamEventReasoning,
-						MessageId: reasoning.ID,
-						Content:   text,
+					// Mark the reasoning chunk as complete so the agent loop
+					// appends it to the context window as its own message.
+					events <- tacklr.LLMResponseChunk{
+						Type:       tacklr.StreamEventReasoning,
+						MessageId:  reasoning.ID,
+						Content:    text,
+						IsComplete: true,
 					}
 				}
 			}
 		}
 	}
 
-	events <- LLMResponseChunk{IsComplete: true}
-	return nil
+	events <- tacklr.LLMResponseChunk{IsComplete: true}
+	return apiResp.ID, nil
 }

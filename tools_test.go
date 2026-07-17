@@ -1,6 +1,7 @@
-package core
+package tacklr
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -64,7 +65,7 @@ func TestInvoke(t *testing.T) {
 	t.Run("returns raw string", func(t *testing.T) {
 		tool := &Tool{Name: "zero", Handler: zeroArgsStringHandler}
 		mustValidate(t, tool)
-		got, err := tool.Invoke("", nil)
+		got, err := tool.Invoke(context.Background(), "", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -76,7 +77,7 @@ func TestInvoke(t *testing.T) {
 	t.Run("marshals non-string return", func(t *testing.T) {
 		tool := &Tool{Name: "zero_int", Handler: zeroArgsIntHandler}
 		mustValidate(t, tool)
-		got, err := tool.Invoke("", nil)
+		got, err := tool.Invoke(context.Background(), "", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -94,7 +95,7 @@ func TestInvoke(t *testing.T) {
 		}
 		tool := &Tool{Name: "handler", Handler: h}
 		mustValidate(t, tool)
-		got, err := tool.Invoke(`{"name":"test","age":10}`, nil)
+		got, err := tool.Invoke(context.Background(), `{"name":"test","age":10}`, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -106,7 +107,7 @@ func TestInvoke(t *testing.T) {
 	t.Run("propagates handler error", func(t *testing.T) {
 		tool := &Tool{Name: "err", Handler: errHandler}
 		mustValidate(t, tool)
-		_, err := tool.Invoke(`{"name":"x","age":1}`, nil)
+		_, err := tool.Invoke(context.Background(), `{"name":"x","age":1}`, nil)
 		if err == nil || err.Error() != "boom" {
 			t.Fatalf("got %v, want boom", err)
 		}
@@ -115,7 +116,7 @@ func TestInvoke(t *testing.T) {
 	t.Run("bad json args errors", func(t *testing.T) {
 		tool := &Tool{Name: "basic", Handler: basicHandler}
 		mustValidate(t, tool)
-		_, err := tool.Invoke(`{bad`, nil)
+		_, err := tool.Invoke(context.Background(), `{bad`, nil)
 		if err == nil {
 			t.Fatal("expected error")
 		}
@@ -293,16 +294,14 @@ func TestToolsAsJsonWithNamespaces(t *testing.T) {
 	if parsed[0]["type"] != "function" {
 		t.Errorf("first item type = %v", parsed[0]["type"])
 	}
-	if parsed[1]["type"] != "namespace" {
+	if parsed[0]["name"] != "standalone" {
+		t.Errorf("first item name = %v, want standalone", parsed[0]["name"])
+	}
+	if parsed[1]["type"] != "function" {
 		t.Errorf("second item type = %v", parsed[1]["type"])
 	}
-
-	nsTools, ok := parsed[1]["tools"].([]any)
-	if !ok {
-		t.Fatalf("namespace.tools is not []any: %T", parsed[1]["tools"])
-	}
-	if len(nsTools) != 1 {
-		t.Fatalf("expected 1 tool in namespace, got %d", len(nsTools))
+	if parsed[1]["name"] != "crm.get_customer" {
+		t.Errorf("second item name = %v, want crm.get_customer", parsed[1]["name"])
 	}
 } // ---- Helpers ----
 

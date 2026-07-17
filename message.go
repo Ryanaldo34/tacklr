@@ -1,4 +1,4 @@
-package core
+package tacklr
 
 // MessageRole indicates who sent the message.
 type MessageRole string
@@ -6,6 +6,7 @@ type MessageRole string
 const (
 	RoleUser      MessageRole = "user"
 	RoleAssistant MessageRole = "assistant"
+	RoleReasoning MessageRole = "reasoning"
 	RoleSystem    MessageRole = "system"
 	RoleDeveloper MessageRole = "developer"
 	RoleTool      MessageRole = "tool"
@@ -88,7 +89,7 @@ const (
 	StreamEventToolResult   StreamEventType = "tool_result"
 	StreamEventComplete     StreamEventType = "complete"
 	StreamEventError        StreamEventType = "error"
-	StreamEventYield        StreamEventType = "yield"
+	StreamEventInterrupt    StreamEventType = "yield"
 )
 
 // StreamEvent is what the caller receives from AgentHarness.Run.
@@ -102,16 +103,35 @@ type StreamEvent struct {
 	Error     error
 }
 
+// LLMResponseChunk is the streaming unit emitted by an InferenceStrategy's
+// Invoke call. It is the shared contract between inference providers,
+// streaming strategies, and the agent loop.
+type LLMResponseChunk struct {
+	TurnId     string
+	MessageId  string
+	ToolCalls  []ToolCall
+	Type       StreamEventType
+	Content    string
+	IsComplete bool
+}
+
 // Message is the primary conversation unit in the context window.
-// It handles both simple text and structured content, tool calls, and tool results.
+// It handles both simple text and structured content, tool calls, tool results,
+// and reasoning content produced by reasoning models.
 // The Role field determines the purpose:
 //   - system/developer: system instructions
 //   - user: user input (Content or ContentParts)
 //   - assistant: model response (Content + optional ToolCalls)
+//   - reasoning: model reasoning content (a distinct previous-response item)
 //   - tool: result of a tool execution (ToolCallID + Content)
 type Message struct {
 	Role    MessageRole `json:"role"`
 	Content string      `json:"content,omitempty"`
+
+	// MessageID is the provider-assigned identifier for this output item,
+	// used when serializing prior assistant or reasoning turns as typed
+	// response items.
+	MessageID string `json:"message_id,omitempty"`
 
 	ContentParts     []ContentPart `json:"content_parts,omitempty"`
 	ToolCalls        []ToolCall    `json:"tool_calls,omitempty"`
