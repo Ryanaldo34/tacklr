@@ -1,6 +1,7 @@
-package openai
+package inference
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -16,7 +17,6 @@ import (
 	"github.com/ryanaldo34/tacklr"
 )
 
-// OpenAIInferenceStrategy implements tacklr.InferenceStrategy for the OpenAI Responses API.
 type OpenAIInferenceStrategy struct {
 	instructions string
 	apiKey       string
@@ -24,35 +24,20 @@ type OpenAIInferenceStrategy struct {
 	reasoning    string
 	httpClient   *http.Client
 	baseURL      string
-	doStreaming  bool
 
 	structuredOutputSchema map[string]any
 	structuredOutputName   string
 	structuredOutputType   reflect.Type
-	responseHandler        ResponseStrategy
 }
 
 func (s *OpenAIInferenceStrategy) SetSystemPrompt(prompt string) {
 	s.instructions = prompt
 }
 
-// NewOpenAIInferenceStrategy creates a new strategy with the given HTTP client.
 func NewOpenAIInferenceStrategy(client *http.Client) *OpenAIInferenceStrategy {
-	s := &OpenAIInferenceStrategy{
+	return &OpenAIInferenceStrategy{
 		httpClient: client,
 		baseURL:    "https://api.openai.com/v1",
-	}
-	return s
-}
-
-func (s *OpenAIInferenceStrategy) ensureResponseHandler() {
-	if s.responseHandler != nil {
-		return
-	}
-	s.responseHandler = &OpenAINoStreamResponseStrategy{
-		ApiKey:     s.apiKey,
-		BaseURL:    s.baseURL,
-		HttpClient: s.httpClient,
 	}
 }
 
@@ -98,26 +83,6 @@ func (s *OpenAIInferenceStrategy) WithStructuredOutput(v any) tacklr.InferenceSt
 	s.structuredOutputSchema = schema
 	s.structuredOutputName = t.Name()
 	s.structuredOutputType = t
-	return s
-}
-
-func (s *OpenAIInferenceStrategy) WithResponseStrategy(strategy string) tacklr.InferenceStrategy {
-	switch strategy {
-	case "standard":
-		s.doStreaming = false
-		s.responseHandler = &OpenAINoStreamResponseStrategy{
-			ApiKey:     s.apiKey,
-			BaseURL:    s.baseURL,
-			HttpClient: s.httpClient,
-		}
-	default:
-		s.doStreaming = false
-		s.responseHandler = &OpenAINoStreamResponseStrategy{
-			ApiKey:     s.apiKey,
-			BaseURL:    s.baseURL,
-			HttpClient: s.httpClient,
-		}
-	}
 	return s
 }
 
@@ -220,9 +185,7 @@ func (s *OpenAIInferenceStrategy) CountTokens(ctx context.Context, messages []*t
 	}
 
 	if httpResp.StatusCode != 200 {
-		// Some OpenAI providers don't have the token counting endpoint, so we fall back to tiktoken-go
 		if httpResp.StatusCode == 404 {
-			// Use the encoding for gpt 5 series models
 			tke, err := tiktoken.GetEncoding("o200k_base")
 			if err != nil {
 				return 0, fmt.Errorf("tiktoken count tokens: %w", err)
@@ -257,8 +220,6 @@ func (s *OpenAIInferenceStrategy) Invoke(ctx context.Context, messages []*tacklr
 		return nil, fmt.Errorf("invoke: %w", tacklr.ErrModelNotSet)
 	}
 
-	s.ensureResponseHandler()
-
 	items, err := marshalMessagesToInput(messages)
 	if err != nil {
 		return nil, fmt.Errorf("marshal messages: %w", err)
@@ -282,7 +243,7 @@ func (s *OpenAIInferenceStrategy) Invoke(ctx context.Context, messages []*tacklr
 		Model:  s.model,
 		Input:  inputJSON,
 		Tools:  toolsJSON,
-		Stream: s.doStreaming,
+		Stream: true,
 	}
 
 	if s.instructions != "" {
@@ -310,21 +271,179 @@ func (s *OpenAIInferenceStrategy) Invoke(ctx context.Context, messages []*tacklr
 	}
 
 	events := make(chan tacklr.LLMResponseChunk, 10)
-	if s.doStreaming {
+
 		go func() {
-			if _, err := s.responseHandler.Handle(ctx, body, events); err != nil {
-				slog.Warn("response handler failed", "error", err)
-			}
-		}()
-	} else {
-		if _, err := s.responseHandler.Handle(ctx, body, events); err != nil {
-			return nil, fmt.Errorf("response handler: %w", err)
+		defer close(events)
+
+		httpReq, err := http.NewRequestWithContext(ctx, "POST", s.baseURL+"/responses", bytes.NewReader(body))
+		if err != nil {
+			slog.Error("create request", "error", err)
+			return
 		}
-	}
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq.Header.Set("Authorization", "Bearer "+s.apiKey)
+
+		httpResp, err := s.httpClient.Do(httpReq)
+		if err != nil {
+			slog.Error("http request", "error", err)
+			return
+		}
+		defer httpResp.Body.Close()
+
+		if httpResp.StatusCode != 200 {
+			respBody, _ := io.ReadAll(httpResp.Body)
+			slog.Error("non-200 response", "status", httpResp.StatusCode, "body", extractErrorMessage(respBody))
+			return
+		}
+
+		s.parseSSEResponse(httpResp.Body, events)
+	}()
+
 	return events, nil
 }
 
-// --- Mapping logic ---
+func (s *OpenAIInferenceStrategy) parseSSEResponse(body io.Reader, events chan<- tacklr.LLMResponseChunk) {
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
+	var currentItemID string
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		const prefix = "data: "
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		data := line[len(prefix):]
+		if data == "[DONE]" {
+			break
+		}
+
+		var evt struct {
+			Type  string          `json:"type"`
+			Delta string          `json:"delta"`
+			Item  json.RawMessage `json:"item"`
+		}
+		if err := json.Unmarshal([]byte(data), &evt); err != nil {
+			continue
+		}
+
+		switch evt.Type {
+		case "response.output_item.added":
+			var item struct {
+				ID string `json:"id"`
+			}
+			if json.Unmarshal(evt.Item, &item) == nil {
+				currentItemID = item.ID
+			}
+		case "response.output_text.delta":
+			if evt.Delta != "" {
+				events <- tacklr.LLMResponseChunk{
+					Type:       tacklr.StreamEventMessage,
+					MessageId:  currentItemID,
+					Content:    evt.Delta,
+					IsComplete: false,
+				}
+			}
+		case "response.output_item.done":
+			if evt.Item != nil {
+				s.emitOutputItemComplete(evt.Item, events)
+			}
+		}
+	}
+
+	events <- tacklr.LLMResponseChunk{IsComplete: true}
+}
+
+func (s *OpenAIInferenceStrategy) emitOutputItemComplete(raw json.RawMessage, events chan<- tacklr.LLMResponseChunk) {
+	var typeHolder struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(raw, &typeHolder); err != nil {
+		return
+	}
+
+	switch typeHolder.Type {
+	case "message":
+		var msg struct {
+			ID string `json:"id"`
+		}
+		json.Unmarshal(raw, &msg)
+		events <- tacklr.LLMResponseChunk{
+			Type:       tacklr.StreamEventMessage,
+			MessageId:  msg.ID,
+			IsComplete: true,
+		}
+	case "function_call":
+		s.emitFunctionCallChunk(raw, events)
+	case "reasoning":
+		s.emitReasoningChunk(raw, events)
+	}
+}
+
+func (s *OpenAIInferenceStrategy) emitFunctionCallChunk(raw json.RawMessage, events chan<- tacklr.LLMResponseChunk) {
+	var fc struct {
+		ID        string `json:"id"`
+		CallID    string `json:"call_id"`
+		Name      string `json:"name"`
+		Namespace string `json:"namespace"`
+		Arguments string `json:"arguments"`
+		Status    string `json:"status"`
+	}
+	if err := json.Unmarshal(raw, &fc); err != nil {
+		return
+	}
+	name := fc.Name
+	namespace := fc.Namespace
+	if namespace == "" && strings.Contains(name, ".") {
+		parts := strings.SplitN(name, ".", 2)
+		namespace = parts[0]
+		name = parts[1]
+	}
+	events <- tacklr.LLMResponseChunk{
+		Type: tacklr.StreamEventFunctionCall,
+		ToolCalls: []tacklr.ToolCall{{
+			ID:        fc.ID,
+			Type:      "function_call",
+			CallID:    fc.CallID,
+			Name:      name,
+			Namespace: namespace,
+			Arguments: fc.Arguments,
+			Status:    fc.Status,
+		}},
+		IsComplete: fc.Status == "completed",
+	}
+}
+
+func (s *OpenAIInferenceStrategy) emitReasoningChunk(raw json.RawMessage, events chan<- tacklr.LLMResponseChunk) {
+	var reasoning struct {
+		ID      string `json:"id"`
+		Summary []struct {
+			Type string `json:"type"`
+			Text string `json:"text,omitempty"`
+		} `json:"summary,omitempty"`
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text,omitempty"`
+		} `json:"content,omitempty"`
+	}
+	if err := json.Unmarshal(raw, &reasoning); err != nil {
+		return
+	}
+	var text string
+	for _, item := range reasoning.Content {
+		if item.Type == "reasoning_text" {
+			text += item.Text
+		}
+	}
+	if text != "" {
+		events <- tacklr.LLMResponseChunk{
+			Type:       tacklr.StreamEventReasoning,
+			MessageId:  reasoning.ID,
+			Content:    text,
+			IsComplete: true,
+		}
+	}
+}
 
 func marshalMessagesToInput(messages []*tacklr.Message) ([]json.RawMessage, error) {
 	var items []json.RawMessage
@@ -355,9 +474,6 @@ func marshalMessagesToInput(messages []*tacklr.Message) ([]json.RawMessage, erro
 			items = append(items, b)
 
 		case tacklr.RoleAssistant:
-			// Emit assistant text content first, then function_call items,
-			// matching the order the Responses API returns them (message then
-			// function_call). Reversing this can cause 500 errors on Azure.
 			if msg.Content != "" {
 				item := easyInputRequest{
 					Role:    string(msg.Role),

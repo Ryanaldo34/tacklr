@@ -11,7 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/ryanaldo34/tacklr"
-	"github.com/ryanaldo34/tacklr/openai"
+	"github.com/ryanaldo34/tacklr/inference"
 	"github.com/ryanaldo34/tacklr/server"
 	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/streaming"
@@ -44,11 +44,10 @@ func main() {
 		}
 	}
 
-	strategy := openai.NewOpenAIInferenceStrategy(http.DefaultClient).
+	strategy := inference.NewOpenAIInferenceStrategy(http.DefaultClient).
 		WithURL(cfg.openAIBaseURL).
 		WithModel(cfg.openAIModel).
-		WithApiKey(cfg.openAIAPIKey).
-		WithResponseStrategy(cfg.openAIResponseStrategy)
+		WithApiKey(cfg.openAIAPIKey)
 
 	var streamer tacklr.StreamingStrategy
 	if cfg.agentStreamingStrategy == "buffered" {

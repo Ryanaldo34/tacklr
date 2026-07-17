@@ -39,7 +39,6 @@ type InferenceStrategy interface {
 	WithURL(string) InferenceStrategy
 	WithReasoningLevel(string) InferenceStrategy
 	WithStructuredOutput(any) InferenceStrategy
-	WithResponseStrategy(string) InferenceStrategy
 	SetSystemPrompt(string)
 	Invoke(context.Context, []*Message, []*Tool) (chan LLMResponseChunk, error)
 	CountTokens(context.Context, []*Message, []*Tool) (int, error)

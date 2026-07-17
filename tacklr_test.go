@@ -24,8 +24,7 @@ func (m *mockStrategy) WithModel(string) InferenceStrategy            { return m
 func (m *mockStrategy) WithURL(string) InferenceStrategy              { return m }
 func (m *mockStrategy) WithReasoningLevel(string) InferenceStrategy   { return m }
 func (m *mockStrategy) WithStructuredOutput(any) InferenceStrategy    { return m }
-func (m *mockStrategy) WithResponseStrategy(string) InferenceStrategy { return m }
-func (m *mockStrategy) SetSystemPrompt(string)                        {}
+func (m *mockStrategy) SetSystemPrompt(string)                       {}
 func (m *mockStrategy) Reset()                                        {}
 func (m *mockStrategy) CompressContextWindow() error                  { return nil }
 func (m *mockStrategy) MaxContextWindow() (int, error)                { return 0, nil }

@@ -29,7 +29,6 @@ func (m *mockInferenceStrategy) WithModel(string) tacklr.InferenceStrategy      
 func (m *mockInferenceStrategy) WithURL(string) tacklr.InferenceStrategy              { return m }
 func (m *mockInferenceStrategy) WithReasoningLevel(string) tacklr.InferenceStrategy   { return m }
 func (m *mockInferenceStrategy) WithStructuredOutput(any) tacklr.InferenceStrategy    { return m }
-func (m *mockInferenceStrategy) WithResponseStrategy(string) tacklr.InferenceStrategy { return m }
 func (m *mockInferenceStrategy) SetSystemPrompt(string)                                {}
 func (m *mockInferenceStrategy) Reset()                                                {}
 func (m *mockInferenceStrategy) CompressContextWindow() error                          { return nil }

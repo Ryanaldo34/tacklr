@@ -1,4 +1,4 @@
-package openai
+package inference
 
 import (
 	"encoding/json"

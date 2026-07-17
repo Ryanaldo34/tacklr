@@ -11,7 +11,6 @@ type serverConfig struct {
 	openAIBaseURL          string
 	openAIModel            string
 	openAIAPIKey           string
-	openAIResponseStrategy string
 	agentMaxWindowSize     int
 	agentStreamingStrategy string
 	logLevel               string
@@ -27,7 +26,6 @@ func loadServerConfig() serverConfig {
 		openAIBaseURL:           env("OPENAI_BASE_URL", "http://localhost:8080/v1"),
 		openAIModel:             env("OPENAI_MODEL", "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf"),
 		openAIAPIKey:            env("OPENAI_API_KEY", "not-needed"),
-		openAIResponseStrategy:  env("OPENAI_RESPONSE_STRATEGY", "standard"),
 		agentMaxWindowSize:      envInt("AGENT_MAX_WINDOW_SIZE", 8192),
 		agentStreamingStrategy:  env("AGENT_STREAMING_STRATEGY", "buffered"),
 		logLevel:                env("LOG_LEVEL", "info"),
