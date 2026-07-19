@@ -452,10 +452,6 @@ func (a *AgentHarness) initSkills() error {
 	if a.skillsInitialized {
 		return nil
 	}
-	if len(a.skillDirectories) == 0 {
-		a.skillsInitialized = true
-		return nil
-	}
 	loaded, err := skills.LoadDirectories(a.skillDirectories)
 	if err != nil {
 		return err
@@ -464,13 +460,11 @@ func (a *AgentHarness) initSkills() error {
 	for _, skill := range loaded {
 		a.skillByName[skill.Name] = skill
 	}
-	if len(loaded) == 0 {
-		a.skillsInitialized = true
-		return nil
+	if len(loaded) > 0 {
+		a.SystemPrompt = strings.TrimSpace(a.SystemPrompt + "\n\n" + skills.Catalog(loaded))
+		a.Model.SetSystemPrompt(a.SystemPrompt)
+		a.Tools = append(a.Tools, a.skillTool())
 	}
-	a.SystemPrompt = strings.TrimSpace(a.SystemPrompt + "\n\n" + skills.Catalog(loaded))
-	a.Model.SetSystemPrompt(a.SystemPrompt)
-	a.Tools = append(a.Tools, a.skillTool())
 	a.skillsInitialized = true
 	return nil
 }

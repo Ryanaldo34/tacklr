@@ -15,7 +15,6 @@ type Skill struct {
 	Name         string
 	Description  string
 	Instructions string
-	Path         string
 }
 
 // LoadDirectories loads one skill per immediate child directory. Directories
@@ -48,7 +47,6 @@ func LoadDirectories(roots []string) ([]Skill, error) {
 			if err != nil {
 				return nil, fmt.Errorf("skill %q: %w", entry.Name(), err)
 			}
-			skill.Path = path
 			if seen[skill.Name] {
 				return nil, fmt.Errorf("duplicate skill name %q", skill.Name)
 			}
