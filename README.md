@@ -56,4 +56,15 @@ agent := tacklr.NewAgent(
 ```
 
 Each immediate child of a configured directory must contain a `SKILL.md` file
-with `name`, `description`, and an instruction body.
+with YAML front matter containing `name` and `description`, followed by an
+instruction body:
+
+```markdown
+---
+name: testing
+description: Write and validate automated tests for this project.
+---
+
+Follow the project's test conventions and run the relevant tests before
+reporting completion.
+```
