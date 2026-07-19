@@ -96,24 +96,29 @@ func (r *Registry) ListenAndServe(addr string, protocol Protocol) error {
 	if hook == nil {
 		return fmt.Errorf("unsupported protocol: %s", protocol)
 	}
+	validate := validators[protocol]
+	if validate == nil {
+		return fmt.Errorf("no request validator for protocol: %s", protocol)
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /", func(w http.ResponseWriter, req *http.Request) {
-		r.serveSSE(w, req, false, hook)
+		r.serveSSE(w, req, false, hook, validate)
 	})
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, req *http.Request) {
-		r.serveWS(w, req, false, hook)
+		r.serveWS(w, req, false, hook, validate)
 	})
 	mux.HandleFunc("POST /resume", func(w http.ResponseWriter, req *http.Request) {
-		r.serveSSE(w, req, true, hook)
+		r.serveSSE(w, req, true, hook, validate)
 	})
 	mux.HandleFunc("GET /resume", func(w http.ResponseWriter, req *http.Request) {
-		r.serveWS(w, req, true, hook)
+		r.serveWS(w, req, true, hook, validate)
 	})
 	return http.ListenAndServe(addr, mux)
 }
 
 // serveSSE is the common SSE handler for both prompt and resume turns.
-func (r *Registry) serveSSE(w http.ResponseWriter, req *http.Request, resume bool, hook StreamEventHandler) {
+func (r *Registry) serveSSE(w http.ResponseWriter, req *http.Request, resume bool, hook StreamEventHandler, validate RequestValidator) {
 	if !acceptsSSE(req) {
 		http.Error(w, "SSE endpoint requires Accept: text/event-stream", http.StatusNotAcceptable)
 		return
@@ -139,15 +144,8 @@ func (r *Registry) serveSSE(w http.ResponseWriter, req *http.Request, resume boo
 		return
 	}
 
-	var turnReq turnRequest
-	if err := json.Unmarshal(body, &turnReq); err != nil {
-		slog.Debug("sse client error", "error", err)
-		if werr := writeSSEError(w, flusher, clientErrorf(ErrInvalidRequest, "invalid JSON: %v", err).Error()); werr != nil {
-			slog.Warn("failed to write SSE error", "error", werr)
-		}
-		return
-	}
-	if err := validateRequest(turnReq, resume); err != nil {
+	pr, err := validate(body)
+	if err != nil {
 		slog.Debug("sse client error", "error", err)
 		if werr := writeSSEError(w, flusher, err.Error()); werr != nil {
 			slog.Warn("failed to write SSE error", "error", werr)
@@ -155,8 +153,8 @@ func (r *Registry) serveSSE(w http.ResponseWriter, req *http.Request, resume boo
 		return
 	}
 
-	threadID, load := resolveThread(turnReq, resume)
-	h, _, err := r.loadAgent(req.Context(), turnReq.AgentID, threadID, load)
+	threadID, load := resolveThread(pr, resume)
+	h, _, err := r.loadAgent(req.Context(), pr.AgentID, threadID, load)
 	if err != nil {
 		if IsClientError(err) {
 			slog.Debug("sse client error", "error", err)
@@ -165,7 +163,7 @@ func (r *Registry) serveSSE(w http.ResponseWriter, req *http.Request, resume boo
 			}
 			return
 		}
-		slog.Error("failed to load agent", "error", err, "agent_id", turnReq.AgentID, "thread_id", threadID)
+		slog.Error("failed to load agent", "error", err, "agent_id", pr.AgentID, "thread_id", threadID)
 		if werr := writeSSEError(w, flusher, ErrInternal.Error()); werr != nil {
 			slog.Warn("failed to write SSE error", "error", werr)
 		}
@@ -187,7 +185,7 @@ func (r *Registry) serveSSE(w http.ResponseWriter, req *http.Request, resume boo
 		return
 	}
 
-	events, err := runHarness(req.Context(), h, turnReq, resume)
+	events, err := runHarness(req.Context(), h, pr, resume)
 	if err != nil {
 		if IsClientError(err) {
 			slog.Debug("sse client error", "error", err)
@@ -196,7 +194,7 @@ func (r *Registry) serveSSE(w http.ResponseWriter, req *http.Request, resume boo
 			}
 			return
 		}
-		slog.Error("agent run failed", "error", err, "agent_id", turnReq.AgentID, "thread_id", threadID)
+		slog.Error("agent run failed", "error", err, "agent_id", pr.AgentID, "thread_id", threadID)
 		if werr := writeSSEError(w, flusher, ErrInternal.Error()); werr != nil {
 			slog.Warn("failed to write SSE error", "error", werr)
 		}
@@ -220,7 +218,7 @@ func (r *Registry) serveSSE(w http.ResponseWriter, req *http.Request, resume boo
 }
 
 // serveWS is the common WebSocket handler for both prompt and resume turns.
-func (r *Registry) serveWS(w http.ResponseWriter, req *http.Request, resume bool, hook StreamEventHandler) {
+func (r *Registry) serveWS(w http.ResponseWriter, req *http.Request, resume bool, hook StreamEventHandler, validate RequestValidator) {
 	c, err := websocket.Accept(w, req, &websocket.AcceptOptions{InsecureSkipVerify: true})
 	if err != nil {
 		slog.Warn("websocket accept failed", "error", err)
@@ -235,8 +233,8 @@ func (r *Registry) serveWS(w http.ResponseWriter, req *http.Request, resume bool
 	ctx, cancel := context.WithCancel(req.Context())
 	defer cancel()
 
-	var turnReq turnRequest
-	if err := wsjson.Read(ctx, c, &turnReq); err != nil {
+	var raw json.RawMessage
+	if err := wsjson.Read(ctx, c, &raw); err != nil {
 		slog.Debug("failed to read websocket message", "error", err)
 		if werr := writeWSClientError(ctx, c, clientErrorf(ErrInvalidRequest, "failed to read message: %v", err)); werr != nil {
 			slog.Warn("failed to write websocket error", "error", werr)
@@ -256,15 +254,16 @@ func (r *Registry) serveWS(w http.ResponseWriter, req *http.Request, resume bool
 		}
 	}()
 
-	if err := validateRequest(turnReq, resume); err != nil {
+	pr, err := validate(raw)
+	if err != nil {
 		if werr := writeWSClientError(ctx, c, err); werr != nil {
 			slog.Warn("failed to write websocket error", "error", werr)
 		}
 		return
 	}
 
-	threadID, load := resolveThread(turnReq, resume)
-	h, _, err := r.loadAgent(ctx, turnReq.AgentID, threadID, load)
+	threadID, load := resolveThread(pr, resume)
+	h, _, err := r.loadAgent(ctx, pr.AgentID, threadID, load)
 	if err != nil {
 		if IsClientError(err) {
 			if werr := writeWSClientError(ctx, c, err); werr != nil {
@@ -272,7 +271,7 @@ func (r *Registry) serveWS(w http.ResponseWriter, req *http.Request, resume bool
 			}
 			return
 		}
-		slog.Error("failed to load agent", "error", err, "agent_id", turnReq.AgentID, "thread_id", threadID)
+		slog.Error("failed to load agent", "error", err, "agent_id", pr.AgentID, "thread_id", threadID)
 		if werr := writeWSInternalError(ctx, c); werr != nil {
 			slog.Warn("failed to write websocket error", "error", werr)
 		}
@@ -285,7 +284,7 @@ func (r *Registry) serveWS(w http.ResponseWriter, req *http.Request, resume bool
 		return
 	}
 
-	events, err := runHarness(ctx, h, turnReq, resume)
+	events, err := runHarness(ctx, h, pr, resume)
 	if err != nil {
 		if IsClientError(err) {
 			if werr := writeWSClientError(ctx, c, err); werr != nil {
@@ -293,7 +292,7 @@ func (r *Registry) serveWS(w http.ResponseWriter, req *http.Request, resume bool
 			}
 			return
 		}
-		slog.Error("agent run failed", "error", err, "agent_id", turnReq.AgentID, "thread_id", threadID)
+		slog.Error("agent run failed", "error", err, "agent_id", pr.AgentID, "thread_id", threadID)
 		if werr := writeWSInternalError(ctx, c); werr != nil {
 			slog.Warn("failed to write websocket error", "error", werr)
 		}

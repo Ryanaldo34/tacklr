@@ -18,60 +18,27 @@ type turnRequest struct {
 	Responses map[string]json.RawMessage `json:"responses,omitempty"`
 }
 
-// validateRequest validates the fields required for either a prompt or resume
-// turn. It is transport-agnostic; callers know which endpoint they are serving.
-// Returned errors wrap ErrInvalidRequest and are safe to send to the caller.
-func validateRequest(req turnRequest, resume bool) error {
-	if req.AgentID == "" {
-		return clientErrorf(ErrInvalidRequest, "agent_id is required")
-	}
-	if resume {
-		if req.ThreadID == "" {
-			return clientErrorf(ErrInvalidRequest, "thread_id is required")
-		}
-		if len(req.Responses) == 0 {
-			return clientErrorf(ErrInvalidRequest, "responses is required and must not be empty")
-		}
-		if req.Prompt != "" {
-			return clientErrorf(ErrInvalidRequest, "prompt is not allowed on the resume endpoint")
-		}
-		for id, payload := range req.Responses {
-			if !json.Valid(payload) {
-				return clientErrorf(ErrInvalidRequest, "response for interrupt %q is not valid JSON", id)
-			}
-		}
-		return nil
-	}
-	if req.Prompt == "" {
-		return clientErrorf(ErrInvalidRequest, "prompt is required")
-	}
-	if len(req.Responses) != 0 {
-		return clientErrorf(ErrInvalidRequest, "responses are not allowed on the prompt endpoint")
-	}
-	return nil
-}
-
 // resolveThread chooses the thread ID and whether to load an existing session
 // based on the request and endpoint semantics.
-func resolveThread(req turnRequest, resume bool) (threadID string, load bool) {
+func resolveThread(pr *parsedRequest, resume bool) (threadID string, load bool) {
 	if resume {
-		return req.ThreadID, true
+		return pr.ThreadID, true
 	}
-	if req.ThreadID != "" {
-		return req.ThreadID, true
+	if pr.ThreadID != "" {
+		return pr.ThreadID, true
 	}
 	return uuid.New().String(), false
 }
 
 // runHarness executes either a prompt run or a resume from interrupt. The
 // caller owns the harness (and any transport-specific streaming strategy).
-func runHarness(ctx context.Context, h *tacklr.AgentHarness, req turnRequest, resume bool) (<-chan tacklr.StreamEvent, error) {
+func runHarness(ctx context.Context, h *tacklr.AgentHarness, pr *parsedRequest, resume bool) (<-chan tacklr.StreamEvent, error) {
 	if resume {
-		responses := make(map[string][]byte, len(req.Responses))
-		for id, payload := range req.Responses {
+		responses := make(map[string][]byte, len(pr.Responses))
+		for id, payload := range pr.Responses {
 			responses[id] = []byte(payload)
 		}
 		return h.ReturnFromInterrupt(ctx, responses)
 	}
-	return h.Run(ctx, req.Prompt)
+	return h.Run(ctx, pr.Prompt)
 }

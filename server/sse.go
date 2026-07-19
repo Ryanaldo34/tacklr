@@ -58,3 +58,39 @@ func eventToRawSSE(threadID string, ev *streaming.StreamEvent) ([][]byte, error)
 	}
 	return [][]byte{data}, nil
 }
+
+func validateSSERequest(body []byte) (*parsedRequest, error) {
+	var req turnRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		return nil, clientErrorf(ErrInvalidRequest, "invalid JSON: %v", err)
+	}
+	if req.AgentID == "" {
+		return nil, clientErrorf(ErrInvalidRequest, "agent_id is required")
+	}
+	if len(req.Responses) > 0 {
+		if req.ThreadID == "" {
+			return nil, clientErrorf(ErrInvalidRequest, "thread_id is required for resume")
+		}
+		if req.Prompt != "" {
+			return nil, clientErrorf(ErrInvalidRequest, "prompt is not allowed on resume")
+		}
+		for id, payload := range req.Responses {
+			if !json.Valid(payload) {
+				return nil, clientErrorf(ErrInvalidRequest, "response for interrupt %q is not valid JSON", id)
+			}
+		}
+		return &parsedRequest{
+			AgentID:   req.AgentID,
+			ThreadID:  req.ThreadID,
+			Responses: req.Responses,
+		}, nil
+	}
+	if req.Prompt == "" {
+		return nil, clientErrorf(ErrInvalidRequest, "prompt is required")
+	}
+	return &parsedRequest{
+		AgentID:  req.AgentID,
+		ThreadID: req.ThreadID,
+		Prompt:   req.Prompt,
+	}, nil
+}

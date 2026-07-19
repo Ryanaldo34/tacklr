@@ -155,7 +155,7 @@ func TestHandlePrompt_generatesThreadID(t *testing.T) {
 	req := newSSERequest(t, "/", body)
 	rec := httptest.NewRecorder()
 
-	r.serveSSE(rec, req, false, handlers[ProtocolSSE])
+	r.serveSSE(rec, req, false, handlers[ProtocolSSE], validators[ProtocolSSE])
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -186,7 +186,7 @@ func TestHandlePrompt_missingAcceptHeader_returnsNotAcceptable(t *testing.T) {
 	req.Header.Set("Accept", "application/json")
 	rec := httptest.NewRecorder()
 
-	r.serveSSE(rec, req, false, handlers[ProtocolSSE])
+	r.serveSSE(rec, req, false, handlers[ProtocolSSE], validators[ProtocolSSE])
 
 	if rec.Code != http.StatusNotAcceptable {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotAcceptable)
@@ -219,7 +219,7 @@ func TestHandleResume_resolvesInterrupt(t *testing.T) {
 	promptBody := bytes.NewReader([]byte(`{"agent_id":"default","prompt":"start"}`))
 	promptReq := newSSERequest(t, "/", promptBody)
 	promptRec := httptest.NewRecorder()
-	r.serveSSE(promptRec, promptReq, false, handlers[ProtocolSSE])
+	r.serveSSE(promptRec, promptReq, false, handlers[ProtocolSSE], validators[ProtocolSSE])
 
 	events := parseSSEEvents(t, promptRec.Body)
 	var threadID, interruptID string
@@ -248,7 +248,7 @@ func TestHandleResume_resolvesInterrupt(t *testing.T) {
 	resumeBody := fmt.Sprintf(`{"agent_id":"default","thread_id":%q,"responses":{%q:{"interruptId":%q,"selectionIdx":0}}}`, threadID, interruptID, interruptID)
 	resumeReq := newSSERequest(t, "/resume", bytes.NewReader([]byte(resumeBody)))
 	resumeRec := httptest.NewRecorder()
-	r.serveSSE(resumeRec, resumeReq, true, handlers[ProtocolSSE])
+	r.serveSSE(resumeRec, resumeReq, true, handlers[ProtocolSSE], validators[ProtocolSSE])
 
 	if resumeRec.Code != http.StatusOK {
 		t.Fatalf("resume status = %d, want 200", resumeRec.Code)
@@ -279,7 +279,7 @@ func TestHandleResume_unknownThread_returnsError(t *testing.T) {
 	body := bytes.NewReader([]byte(`{"agent_id":"default","thread_id":"nonexistent","responses":{"x":{}}}`))
 	req := newSSERequest(t, "/resume", body)
 	rec := httptest.NewRecorder()
-	r.serveSSE(rec, req, true, handlers[ProtocolSSE])
+	r.serveSSE(rec, req, true, handlers[ProtocolSSE], validators[ProtocolSSE])
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -318,7 +318,7 @@ func TestHandleResume_invalidPayload_returnsError(t *testing.T) {
 
 	// Raise an interrupt first
 	promptRec := httptest.NewRecorder()
-	r.serveSSE(promptRec, newSSERequest(t, "/", bytes.NewReader([]byte(`{"agent_id":"default","prompt":"start"}`))), false, handlers[ProtocolSSE])
+	r.serveSSE(promptRec, newSSERequest(t, "/", bytes.NewReader([]byte(`{"agent_id":"default","prompt":"start"}`))), false, handlers[ProtocolSSE], validators[ProtocolSSE])
 
 	events := parseSSEEvents(t, promptRec.Body)
 	var threadID, interruptID string
@@ -341,7 +341,7 @@ func TestHandleResume_invalidPayload_returnsError(t *testing.T) {
 	// Resume with out-of-bounds selectionIdx
 	resumeBody := fmt.Sprintf(`{"agent_id":"default","thread_id":%q,"responses":{%q:{"interruptId":%q,"selectionIdx":99}}}`, threadID, interruptID, interruptID)
 	resumeRec := httptest.NewRecorder()
-	r.serveSSE(resumeRec, newSSERequest(t, "/resume", bytes.NewReader([]byte(resumeBody))), true, handlers[ProtocolSSE])
+	r.serveSSE(resumeRec, newSSERequest(t, "/resume", bytes.NewReader([]byte(resumeBody))), true, handlers[ProtocolSSE], validators[ProtocolSSE])
 
 	resumeEvents := parseSSEEvents(t, resumeRec.Body)
 	var foundError bool

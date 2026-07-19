@@ -1,6 +1,8 @@
 package server
 
 import (
+	"encoding/json"
+
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
@@ -17,10 +19,23 @@ const (
 // harness.
 type StreamEventHandler func(threadID string, event *streaming.StreamEvent) ([][]byte, error)
 
-type RequestValidator func([]byte) clientError
+// parsedRequest carries the key information extracted from a request body by a
+// protocol validator. It is the standard struct that handlers use to invoke the
+// agent harness, regardless of the transport protocol.
+type parsedRequest struct {
+	AgentID   string
+	ThreadID  string
+	Prompt    string
+	Responses map[string]json.RawMessage
+}
+
+type RequestValidator func([]byte) (*parsedRequest, error)
 
 var handlers = map[Protocol]StreamEventHandler{
 	ProtocolACP: eventToAcpJsonRpc,
 	ProtocolSSE: eventToRawSSE,
 }
-var validators = map[Protocol]RequestValidator{}
+
+var validators = map[Protocol]RequestValidator{
+	ProtocolSSE: validateSSERequest,
+}
