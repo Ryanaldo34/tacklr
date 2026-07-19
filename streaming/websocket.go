@@ -6,7 +6,6 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
-	"github.com/ryanaldo34/tacklr"
 )
 
 // WebSocketStreamer is a StreamingStrategy that forwards inference chunks
@@ -25,11 +24,11 @@ func NewWebSocketStreamer(ctx context.Context, conn *websocket.Conn) *WebSocketS
 	return &WebSocketStreamer{ctx: ctx, conn: conn}
 }
 
-// Stream implements tacklr.StreamingStrategy. It writes each non-empty
-// inference chunk to the WebSocket as a JSON event and also forwards the
-// StreamEvent to out.
-func (s *WebSocketStreamer) Stream(chunk tacklr.LLMResponseChunk, out chan<- tacklr.StreamEvent) error {
-	ev := tacklr.StreamEvent{
+// Stream implements StreamingStrategy. It writes each non-empty inference
+// chunk to the WebSocket as a JSON event and also forwards the StreamEvent
+// to out.
+func (s *WebSocketStreamer) Stream(chunk LLMResponseChunk, out chan<- StreamEvent) error {
+	ev := StreamEvent{
 		Type:      chunk.Type,
 		TurnID:    chunk.TurnId,
 		MessageID: chunk.MessageId,
@@ -38,7 +37,7 @@ func (s *WebSocketStreamer) Stream(chunk tacklr.LLMResponseChunk, out chan<- tac
 	}
 
 	if chunk.Type == "" && chunk.IsComplete {
-		ev.Type = tacklr.StreamEventComplete
+		ev.Type = StreamEventComplete
 	}
 
 	if ev.Type != "" {
@@ -54,7 +53,7 @@ func (s *WebSocketStreamer) Stream(chunk tacklr.LLMResponseChunk, out chan<- tac
 // WriteEvent writes a StreamEvent to the underlying WebSocket connection.
 // github.com/coder/websocket supports concurrent writes, so no additional
 // synchronization is required.
-func (s *WebSocketStreamer) WriteEvent(ev tacklr.StreamEvent) error {
+func (s *WebSocketStreamer) WriteEvent(ev StreamEvent) error {
 	wire := wsServerEvent{
 		Type:      string(ev.Type),
 		TurnID:    ev.TurnID,
@@ -71,11 +70,11 @@ func (s *WebSocketStreamer) WriteEvent(ev tacklr.StreamEvent) error {
 }
 
 type wsServerEvent struct {
-	Type      string             `json:"type"`
-	TurnID    string             `json:"turn_id,omitempty"`
-	MessageID string             `json:"message_id,omitempty"`
-	Content   string             `json:"content,omitempty"`
-	Data      json.RawMessage    `json:"data,omitempty"`
-	ToolCalls []tacklr.ToolCall `json:"tool_calls,omitempty"`
-	Error     string             `json:"error,omitempty"`
+	Type      string          `json:"type"`
+	TurnID    string          `json:"turn_id,omitempty"`
+	MessageID string          `json:"message_id,omitempty"`
+	Content   string          `json:"content,omitempty"`
+	Data      json.RawMessage `json:"data,omitempty"`
+	ToolCalls []ToolCall      `json:"tool_calls,omitempty"`
+	Error     string          `json:"error,omitempty"`
 }

@@ -15,6 +15,50 @@ import (
 	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/skills"
 	"github.com/ryanaldo34/tacklr/stores"
+	"github.com/ryanaldo34/tacklr/streaming"
+)
+
+const (
+	RoleUser      MessageRole = "user"
+	RoleAssistant MessageRole = "assistant"
+	RoleReasoning MessageRole = "reasoning"
+	RoleSystem    MessageRole = "system"
+	RoleDeveloper MessageRole = "developer"
+	RoleTool      MessageRole = "tool"
+
+	StatusInProgress ItemStatus = "in_progress"
+	StatusCompleted  ItemStatus = "completed"
+	StatusIncomplete ItemStatus = "incomplete"
+
+	ContentTypeOutputText = "output_text"
+	ContentTypeInputText  = "input_text"
+	ContentTypeInputImage = "input_image"
+	ContentTypeInputFile  = "input_file"
+	ContentTypeRefusal    = "refusal"
+
+	StreamEventMessage      StreamEventType = "message"
+	StreamEventReasoning    StreamEventType = "reasoning"
+	StreamEventFunctionCall StreamEventType = "function_call"
+	StreamEventToolResult   StreamEventType = "tool_result"
+	StreamEventComplete     StreamEventType = "complete"
+	StreamEventError        StreamEventType = "error"
+	StreamEventInterrupt    StreamEventType = "yield"
+)
+
+type (
+	MessageRole       = streaming.MessageRole
+	ItemStatus        = streaming.ItemStatus
+	ContentPart       = streaming.ContentPart
+	ImageURL          = streaming.ImageURL
+	FileData          = streaming.FileData
+	Annotation        = streaming.Annotation
+	URLAnnotation     = streaming.URLAnnotation
+	ToolCall          = streaming.ToolCall
+	StreamEventType   = streaming.StreamEventType
+	StreamEvent       = streaming.StreamEvent
+	LLMResponseChunk  = streaming.LLMResponseChunk
+	Message           = streaming.Message
+	StreamingStrategy = streaming.StreamingStrategy
 )
 
 var (
@@ -46,10 +90,6 @@ type InferenceStrategy interface {
 	CountTokens(context.Context, []*Message, []*Tool) (int, error)
 	CompressContextWindow() error
 	MaxContextWindow() (int, error)
-}
-
-type StreamingStrategy interface {
-	Stream(LLMResponseChunk, chan<- StreamEvent) error
 }
 
 type AgentWatchDog interface {
@@ -332,7 +372,7 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 								ToolCallID: tc.CallID,
 								Content:    toolErr.Error(),
 							}
-							out <- StreamEvent{Type: StreamEventToolResult, Content: toolResults[i].Content}
+							out <- StreamEvent{Type: StreamEventToolResult, MessageID: tc.CallID, Content: toolResults[i].Content, ToolCalls: []ToolCall{tc}}
 							return
 						}
 						runtimeCopy := a.Runtime
@@ -365,14 +405,14 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 								ToolCallID: tc.CallID,
 								Content:    fmt.Sprintf("An error occurred: %s", err.Error()),
 							}
-							out <- StreamEvent{Type: StreamEventToolResult, Content: toolResults[i].Content}
+							out <- StreamEvent{Type: StreamEventToolResult, MessageID: tc.CallID, Content: toolResults[i].Content, ToolCalls: []ToolCall{tc}}
 						} else {
 							toolResults[i] = &Message{
 								Role:       RoleTool,
 								ToolCallID: tc.CallID,
 								Content:    output,
 							}
-							out <- StreamEvent{Type: StreamEventToolResult, Content: output}
+							out <- StreamEvent{Type: StreamEventToolResult, MessageID: tc.CallID, Content: output, ToolCalls: []ToolCall{tc}}
 						}
 						a.recordToolResult(toolResults[i])
 					}(i, tc)

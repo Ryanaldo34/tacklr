@@ -1,28 +1,26 @@
 package server
 
 import (
-	"net/http"
-
-	"github.com/ryanaldo34/tacklr/stores"
+	"github.com/ryanaldo34/tacklr/streaming"
 )
 
-type Server struct {
-	store    stores.BaseStore
-	provider AgentProvider
-}
+type Protocol string
 
-func New(store stores.BaseStore, provider AgentProvider) *Server {
-	return &Server{
-		store:    store,
-		provider: provider,
-	}
-}
+const (
+	ProtocolACP Protocol = "acp"
+	ProtocolSSE Protocol = "sse"
+)
 
-func (s *Server) Handler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /", s.handlePrompt)
-	mux.HandleFunc("GET /", s.handleWebSocketPrompt)
-	mux.HandleFunc("POST /resume", s.handleResume)
-	mux.HandleFunc("GET /resume", s.handleWebSocketResume)
-	return mux
+// StreamEventHandler converts a StreamEvent into zero or more wire frames to
+// be sent to the client. It is a pure format conversion — content management
+// (buffering, chunking) is handled by the streaming strategy set on the
+// harness.
+type StreamEventHandler func(threadID string, event *streaming.StreamEvent) ([][]byte, error)
+
+type RequestValidator func([]byte) clientError
+
+var handlers = map[Protocol]StreamEventHandler{
+	ProtocolACP: eventToAcpJsonRpc,
+	ProtocolSSE: eventToRawSSE,
 }
+var validators = map[Protocol]RequestValidator{}

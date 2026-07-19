@@ -11,17 +11,16 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
-	"github.com/ryanaldo34/tacklr"
 )
 
 type wsEvent struct {
-	Type      string             `json:"type"`
-	TurnID    string             `json:"turn_id,omitempty"`
-	MessageID string             `json:"message_id,omitempty"`
-	Content   string             `json:"content,omitempty"`
-	Data      json.RawMessage    `json:"data,omitempty"`
-	ToolCalls []tacklr.ToolCall `json:"tool_calls,omitempty"`
-	Error     string             `json:"error,omitempty"`
+	Type      string          `json:"type"`
+	TurnID    string          `json:"turn_id,omitempty"`
+	MessageID string          `json:"message_id,omitempty"`
+	Content   string          `json:"content,omitempty"`
+	Data      json.RawMessage `json:"data,omitempty"`
+	ToolCalls []ToolCall      `json:"tool_calls,omitempty"`
+	Error     string          `json:"error,omitempty"`
 }
 
 func startWSTestServer(t *testing.T) (*httptest.Server, chan wsEvent) {
@@ -78,10 +77,10 @@ func TestWebSocketStreamer_Stream_writesAndForwards(t *testing.T) {
 
 	ctx := context.Background()
 	streamer := NewWebSocketStreamer(ctx, conn)
-	out := make(chan tacklr.StreamEvent, 10)
+	out := make(chan StreamEvent, 10)
 
-	err := streamer.Stream(tacklr.LLMResponseChunk{
-		Type:      tacklr.StreamEventMessage,
+	err := streamer.Stream(LLMResponseChunk{
+		Type:      StreamEventMessage,
 		TurnId:    "turn_1",
 		MessageId: "msg_1",
 		Content:   "hello",
@@ -106,7 +105,7 @@ func TestWebSocketStreamer_Stream_writesAndForwards(t *testing.T) {
 
 	select {
 	case outEv := <-out:
-		if outEv.Type != tacklr.StreamEventMessage || outEv.Content != "hello" {
+		if outEv.Type != StreamEventMessage || outEv.Content != "hello" {
 			t.Errorf("out event = %+v", outEv)
 		}
 	default:
@@ -120,9 +119,9 @@ func TestWebSocketStreamer_Stream_writesCompleteEvent(t *testing.T) {
 
 	ctx := context.Background()
 	streamer := NewWebSocketStreamer(ctx, conn)
-	out := make(chan tacklr.StreamEvent, 10)
+	out := make(chan StreamEvent, 10)
 
-	if err := streamer.Stream(tacklr.LLMResponseChunk{
+	if err := streamer.Stream(LLMResponseChunk{
 		IsComplete: true,
 	}, out); err != nil {
 		t.Fatalf("Stream error: %v", err)
@@ -135,7 +134,7 @@ func TestWebSocketStreamer_Stream_writesCompleteEvent(t *testing.T) {
 
 	select {
 	case outEv := <-out:
-		if outEv.Type != tacklr.StreamEventComplete {
+		if outEv.Type != StreamEventComplete {
 			t.Errorf("out event type = %v", outEv.Type)
 		}
 	default:
@@ -150,8 +149,8 @@ func TestWebSocketStreamer_WriteEvent_nonInferenceEvent(t *testing.T) {
 	ctx := context.Background()
 	streamer := NewWebSocketStreamer(ctx, conn)
 
-	err := streamer.WriteEvent(tacklr.StreamEvent{
-		Type:      tacklr.StreamEventToolResult,
+	err := streamer.WriteEvent(StreamEvent{
+		Type:      StreamEventToolResult,
 		MessageID: "msg_2",
 		Content:   "tool output",
 	})
@@ -167,5 +166,3 @@ func TestWebSocketStreamer_WriteEvent_nonInferenceEvent(t *testing.T) {
 		t.Errorf("content = %q", ev.Content)
 	}
 }
-
-

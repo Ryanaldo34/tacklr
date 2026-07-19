@@ -26,12 +26,13 @@ func TestHandleWebSocket_promptStreamsEvents(t *testing.T) {
 		},
 	}
 
-	srv := &Server{
-		provider: &mockAgentProvider{strategy: strategy, tools: []*tacklr.Tool{}},
-		store:    store,
-	}
+	r := newTestRegistry(store, strategy, []*tacklr.Tool{})
 
-	httpSrv := httptest.NewServer(srv.Handler())
+	handler, err := r.handler(ProtocolSSE)
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpSrv := httptest.NewServer(handler)
 	defer httpSrv.Close()
 
 	ctx := context.Background()
@@ -96,12 +97,13 @@ func TestHandleWebSocket_resumeResolvesInterrupt(t *testing.T) {
 		},
 	}
 
-	srv := &Server{
-		provider: &mockAgentProvider{strategy: strategy, tools: []*tacklr.Tool{interruptTool}},
-		store:    store,
-	}
+	r := newTestRegistry(store, strategy, []*tacklr.Tool{interruptTool})
 
-	httpSrv := httptest.NewServer(srv.Handler())
+	handler, err := r.handler(ProtocolSSE)
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpSrv := httptest.NewServer(handler)
 	defer httpSrv.Close()
 
 	ctx := context.Background()

@@ -1,4 +1,4 @@
-package tacklr
+package streaming
 
 // MessageRole indicates who sent the message.
 type MessageRole string
@@ -46,7 +46,7 @@ type ImageURL struct {
 	Detail string `json:"detail,omitempty"`
 }
 
-// FileData represents a file input by ID, URL, or base64 data.
+// FileData represents an image or file input by ID, URL, or base64 data.
 type FileData struct {
 	FileID   string `json:"file_id,omitempty"`
 	URL      string `json:"url,omitempty"`
