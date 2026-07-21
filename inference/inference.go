@@ -272,7 +272,7 @@ func (s *OpenAIInferenceStrategy) Invoke(ctx context.Context, messages []*tacklr
 
 	events := make(chan tacklr.LLMResponseChunk, 10)
 
-		go func() {
+	go func() {
 		defer close(events)
 
 		httpReq, err := http.NewRequestWithContext(ctx, "POST", s.baseURL+"/responses", bytes.NewReader(body))
@@ -319,12 +319,18 @@ func (s *OpenAIInferenceStrategy) parseSSEResponse(body io.Reader, events chan<-
 		}
 
 		var evt struct {
-			Type  string          `json:"type"`
-			Delta string          `json:"delta"`
-			Item  json.RawMessage `json:"item"`
+			Type   string          `json:"type"`
+			Delta  string          `json:"delta"`
+			Item   json.RawMessage `json:"item"`
+			ItemID string          `json:"item_id"`
 		}
 		if err := json.Unmarshal([]byte(data), &evt); err != nil {
 			continue
+		}
+
+		msgID := currentItemID
+		if evt.ItemID != "" {
+			msgID = evt.ItemID
 		}
 
 		switch evt.Type {
@@ -339,7 +345,16 @@ func (s *OpenAIInferenceStrategy) parseSSEResponse(body io.Reader, events chan<-
 			if evt.Delta != "" {
 				events <- tacklr.LLMResponseChunk{
 					Type:       tacklr.StreamEventMessage,
-					MessageId:  currentItemID,
+					MessageId:  msgID,
+					Content:    evt.Delta,
+					IsComplete: false,
+				}
+			}
+		case "response.reasoning_text.delta":
+			if evt.Delta != "" {
+				events <- tacklr.LLMResponseChunk{
+					Type:       tacklr.StreamEventReasoning,
+					MessageId:  msgID,
 					Content:    evt.Delta,
 					IsComplete: false,
 				}
@@ -351,7 +366,6 @@ func (s *OpenAIInferenceStrategy) parseSSEResponse(body io.Reader, events chan<-
 		}
 	}
 
-	events <- tacklr.LLMResponseChunk{IsComplete: true}
 }
 
 func (s *OpenAIInferenceStrategy) emitOutputItemComplete(raw json.RawMessage, events chan<- tacklr.LLMResponseChunk) {
@@ -416,32 +430,16 @@ func (s *OpenAIInferenceStrategy) emitFunctionCallChunk(raw json.RawMessage, eve
 
 func (s *OpenAIInferenceStrategy) emitReasoningChunk(raw json.RawMessage, events chan<- tacklr.LLMResponseChunk) {
 	var reasoning struct {
-		ID      string `json:"id"`
-		Summary []struct {
-			Type string `json:"type"`
-			Text string `json:"text,omitempty"`
-		} `json:"summary,omitempty"`
-		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text,omitempty"`
-		} `json:"content,omitempty"`
+		ID string `json:"id"`
 	}
 	if err := json.Unmarshal(raw, &reasoning); err != nil {
 		return
 	}
-	var text string
-	for _, item := range reasoning.Content {
-		if item.Type == "reasoning_text" {
-			text += item.Text
-		}
-	}
-	if text != "" {
-		events <- tacklr.LLMResponseChunk{
-			Type:       tacklr.StreamEventReasoning,
-			MessageId:  reasoning.ID,
-			Content:    text,
-			IsComplete: true,
-		}
+	// Deltas already streamed the text; this signals completion for the harness.
+	events <- tacklr.LLMResponseChunk{
+		Type:       tacklr.StreamEventReasoning,
+		MessageId:  reasoning.ID,
+		IsComplete: true,
 	}
 }
 

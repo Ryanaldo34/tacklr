@@ -19,21 +19,19 @@ type turnRequest struct {
 }
 
 // resolveThread chooses the thread ID and whether to load an existing session
-// based on the request and endpoint semantics.
-func resolveThread(pr *parsedRequest, resume bool) (threadID string, load bool) {
-	if resume {
-		return pr.ThreadID, true
-	}
+// based on the request.
+func resolveThread(pr *parsedRequest) (threadID string, load bool) {
 	if pr.ThreadID != "" {
 		return pr.ThreadID, true
 	}
 	return uuid.New().String(), false
 }
 
-// runHarness executes either a prompt run or a resume from interrupt. The
-// caller owns the harness (and any transport-specific streaming strategy).
-func runHarness(ctx context.Context, h *tacklr.AgentHarness, pr *parsedRequest, resume bool) (<-chan tacklr.StreamEvent, error) {
-	if resume {
+// runHarness executes either a prompt run or a resume from interrupt based on
+// whether the request carries interrupt responses. The caller owns the harness
+// (and any transport-specific streaming strategy).
+func runHarness(ctx context.Context, h *tacklr.AgentHarness, pr *parsedRequest) (<-chan tacklr.StreamEvent, error) {
+	if len(pr.Responses) > 0 {
 		responses := make(map[string][]byte, len(pr.Responses))
 		for id, payload := range pr.Responses {
 			responses[id] = []byte(payload)

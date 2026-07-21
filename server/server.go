@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 
+	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
@@ -27,6 +28,17 @@ type parsedRequest struct {
 	ThreadID  string
 	Prompt    string
 	Responses map[string]json.RawMessage
+
+	// ACP JSON-RPC envelope
+	ID     json.RawMessage
+	Method string
+
+	// ACP session lifecycle
+	CWD        string
+	MCPServers []mcp.MCPConfig
+
+	// Extensibility — raw _meta blob for custom fields
+	Meta json.RawMessage
 }
 
 type RequestValidator func([]byte) (*parsedRequest, error)
@@ -38,4 +50,13 @@ var handlers = map[Protocol]StreamEventHandler{
 
 var validators = map[Protocol]RequestValidator{
 	ProtocolSSE: validateSSERequest,
+	ProtocolACP: validateACPRequest,
+}
+
+func GetHandler(protocol Protocol) StreamEventHandler {
+	return handlers[protocol]
+}
+
+func GetValidator(protocol Protocol) RequestValidator {
+	return validators[protocol]
 }

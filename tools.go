@@ -7,6 +7,8 @@ import (
 	"reflect"
 	"strings"
 	"time"
+
+	"github.com/ryanaldo34/tacklr/streaming"
 )
 
 // ToolHandlerFunc is a generic tool handler that receives pre-parsed arguments
@@ -16,9 +18,11 @@ import (
 type ToolHandlerFunc func(ctx context.Context, args map[string]any, runtime *HarnessRuntime) (string, error)
 
 type Tool struct {
+	DisplayName string
 	Name        string
 	Description string
 	Namespace   string
+	Category    streaming.ToolCategory
 	Handler     any
 
 	// Parameters is an optional pre-built JSON schema for the tool's input.

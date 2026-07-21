@@ -215,6 +215,20 @@ func (a *AgentHarness) findTool(name, namespace string) *Tool {
 
 func (a *AgentHarness) streamChunk(chunk LLMResponseChunk, out chan<- StreamEvent) {
 	if a.streamingStrategy != nil {
+		if chunk.Type == streaming.StreamEventFunctionCall {
+			// Model APIs don't return metadata, so we need to look up the tool to get metadata to stream to client
+			for _, tc := range chunk.ToolCalls {
+				tool := a.findTool(tc.Name, tc.Namespace)
+				if tool != nil {
+					tc.Category = tool.Category
+					if tool.DisplayName != "" {
+						tc.Name = tool.DisplayName
+					} else {
+						tc.Name = tool.Name
+					}
+				}
+			}
+		}
 		if err := a.streamingStrategy.Stream(chunk, out); err != nil {
 			slog.Warn("streaming chunk", "error", err)
 			return
@@ -325,8 +339,16 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 						out <- StreamEvent{Type: StreamEventError, Error: fmt.Errorf("run: invoke: %w", err)}
 						return
 					}
+					// Accumulate streamed text so completion frames (which carry
+					// empty Content) still produce a full context-window message.
+					streamedContent := map[string]string{}
 					for chunk := range events {
 						a.streamChunk(chunk, out)
+						if !chunk.IsComplete && chunk.Content != "" &&
+							(chunk.Type == StreamEventMessage || chunk.Type == StreamEventReasoning) {
+							key := string(chunk.Type) + ":" + chunk.MessageId
+							streamedContent[key] += chunk.Content
+						}
 						// Only append completed messages to the context window
 						if chunk.IsComplete {
 							toolCalls = append(toolCalls, chunk.ToolCalls...)
@@ -334,9 +356,14 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 							if chunk.Type == StreamEventReasoning {
 								role = RoleReasoning
 							}
+							content := chunk.Content
+							if content == "" {
+								key := string(chunk.Type) + ":" + chunk.MessageId
+								content = streamedContent[key]
+							}
 							msg := &Message{
 								Role:      role,
-								Content:   chunk.Content,
+								Content:   content,
 								ToolCalls: toolCalls,
 								MessageID: chunk.MessageId,
 							}
@@ -344,10 +371,11 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 							a.recordOutput(msg)
 						}
 					}
-					// If there are no tool calls in the latest completed message, break the loop
-					if len(a.ContextWindow[len(a.ContextWindow)-1].ToolCalls) == 0 {
-						return
-					}
+				// If there are no tool calls in the latest completed message, break the loop
+				if len(a.ContextWindow[len(a.ContextWindow)-1].ToolCalls) == 0 {
+					out <- StreamEvent{Type: StreamEventComplete}
+					return
+				}
 					toolResults = make([]*Message, len(a.ContextWindow[len(a.ContextWindow)-1].ToolCalls))
 				} else {
 					toolResults = make([]*Message, len(a.pendingToolCalls))

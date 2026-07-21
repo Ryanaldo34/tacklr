@@ -12,6 +12,19 @@ const (
 	RoleTool      MessageRole = "tool"
 )
 
+type ToolCategory string
+
+const (
+	ToolCategoryRead    ToolCategory = "read"
+	ToolCategoryEdit    ToolCategory = "edit"
+	ToolCategorySearch  ToolCategory = "search"
+	ToolCategoryFetch   ToolCategory = "fetch"
+	ToolCategoryMove    ToolCategory = "move"
+	ToolCategoryThink   ToolCategory = "think"
+	ToolCategoryExecute ToolCategory = "execute"
+	ToolCategoryDelete  ToolCategory = "delete"
+)
+
 // ItemStatus tracks the lifecycle state of an output item.
 type ItemStatus string
 
@@ -70,13 +83,14 @@ type URLAnnotation struct {
 
 // ToolCall represents an assistant request to invoke a tool.
 type ToolCall struct {
-	ID        string `json:"id,omitempty"`
-	Type      string `json:"type,omitempty"`
-	CallID    string `json:"call_id"`
-	Name      string `json:"name,omitempty"`
-	Namespace string `json:"namespace,omitempty"`
-	Arguments string `json:"arguments,omitempty"`
-	Status    string `json:"status,omitempty"`
+	ID        string       `json:"id,omitempty"`
+	Type      string       `json:"type,omitempty"`
+	CallID    string       `json:"call_id"`
+	Name      string       `json:"name,omitempty"`
+	Category  ToolCategory `json:"category,omitempty"`
+	Namespace string       `json:"namespace,omitempty"`
+	Arguments string       `json:"arguments,omitempty"`
+	Status    string       `json:"status,omitempty"`
 }
 
 // StreamEventType categorizes events sent to the caller.
