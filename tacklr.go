@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/google/uuid"
 	"github.com/ryanaldo34/tacklr/control"
 	"github.com/ryanaldo34/tacklr/mcp"
+	"github.com/ryanaldo34/tacklr/skills"
 	"github.com/ryanaldo34/tacklr/stores"
 )
 
@@ -79,6 +81,9 @@ type AgentHarness struct {
 	streamingStrategy    StreamingStrategy
 	interruptToRequester map[string]string
 	pendingToolCalls     map[string]pendingToolCall
+	skillByName          map[string]skills.Skill
+	skillDirectories     []string
+	skillsInitialized    bool
 	mcpClients           []*mcp.Client
 	mcpInitialized       bool
 }
@@ -252,6 +257,9 @@ func (a *AgentHarness) Close() {
 }
 
 func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEvent, error) {
+	if err := a.initSkills(); err != nil {
+		return nil, fmt.Errorf("load skills: %w", err)
+	}
 	a.initMCP(ctx)
 	out := make(chan StreamEvent)
 	err := a.fitContextWindowBeforeNextTurn(ctx, &Message{Role: RoleUser, Content: prompt}, out)
@@ -416,8 +424,9 @@ func (a *AgentHarness) ReturnFromInterrupt(ctx context.Context, finishedInterrup
 }
 
 type Config struct {
-	MaxWindowSize int
-	SystemPrompt  string
+	MaxWindowSize    int
+	SystemPrompt     string
+	SkillDirectories []string
 }
 
 func NewAgent(cfg Config, model InferenceStrategy, store stores.BaseStore, watchdog AgentWatchDog) *AgentHarness {
@@ -431,11 +440,45 @@ func NewAgent(cfg Config, model InferenceStrategy, store stores.BaseStore, watch
 		Store:                store,
 		Runtime:              runtime,
 		WatchDog:             watchdog,
+		skillDirectories:     cfg.SkillDirectories,
 		ContextWindow:        nil,
 		SessionId:            "",
 		interruptToRequester: make(map[string]string),
 		pendingToolCalls:     make(map[string]pendingToolCall),
 	}
+}
+
+func (a *AgentHarness) initSkills() error {
+	if a.skillsInitialized {
+		return nil
+	}
+	loaded, err := skills.LoadDirectories(a.skillDirectories)
+	if err != nil {
+		return err
+	}
+	a.skillByName = make(map[string]skills.Skill, len(loaded))
+	for _, skill := range loaded {
+		a.skillByName[skill.Name] = skill
+	}
+	if len(loaded) > 0 {
+		a.SystemPrompt = strings.TrimSpace(a.SystemPrompt + "\n\n" + skills.Catalog(loaded))
+		a.Model.SetSystemPrompt(a.SystemPrompt)
+		a.Tools = append(a.Tools, a.skillTool())
+	}
+	a.skillsInitialized = true
+	return nil
+}
+
+func (a *AgentHarness) skillTool() *Tool {
+	return &Tool{Name: "read_skill", Description: "Load the full instructions for an available skill.", Handler: func(args struct {
+		Name string `json:"name" desc:"Skill name from the available skills catalog"`
+	}) (string, error) {
+		skill, ok := a.skillByName[args.Name]
+		if !ok {
+			return "", fmt.Errorf("unknown skill %q", args.Name)
+		}
+		return skill.Instructions, nil
+	}}
 }
 
 func NewAgentHarnessFromSession(ctx context.Context, sessionId string, cfg Config, model InferenceStrategy, store stores.BaseStore, watchdog AgentWatchDog) (*AgentHarness, error) {
@@ -453,7 +496,7 @@ func NewAgentHarnessFromSession(ctx context.Context, sessionId string, cfg Confi
 	}
 	state.Runtime.Store = store
 	state.Runtime.EnsureInitialized()
-	return &AgentHarness{
+	h := &AgentHarness{
 		Model:                model,
 		Store:                store,
 		SessionId:            sessionId,
@@ -461,9 +504,12 @@ func NewAgentHarnessFromSession(ctx context.Context, sessionId string, cfg Confi
 		Runtime:              state.Runtime,
 		WatchDog:             watchdog,
 		MaxWindowSize:        cfg.MaxWindowSize,
+		SystemPrompt:         cfg.SystemPrompt,
 		compressionPrompt:    "",
 		streamingStrategy:    nil,
 		interruptToRequester: state.InterruptToRequester,
 		pendingToolCalls:     state.PendingToolCalls,
-	}, nil
+		skillDirectories:     cfg.SkillDirectories,
+	}
+	return h, nil
 }

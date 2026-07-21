@@ -36,3 +36,35 @@ make vet       # runs go vet
 ## Server
 
 The `cmd/server` directory contains an HTTP/WebSocket/SSE server that uses the tacklr harness. See `.env.example` for configuration.
+
+## Skills
+
+Applications can load local `SKILL.md` directories into an agent with the
+existing `NewAgent` constructor. The first `Run` adds a compact skill catalog
+to the system prompt and registers `read_skill`, allowing the model to load
+full instructions only when needed:
+
+```go
+agent := tacklr.NewAgent(
+    tacklr.Config{
+        MaxWindowSize:    8192,
+        SystemPrompt:     "You are a helpful assistant.",
+        SkillDirectories: []string{"./skills"},
+    },
+    model, store, watchdog,
+)
+```
+
+Each immediate child of a configured directory must contain a `SKILL.md` file
+with YAML front matter containing `name` and `description`, followed by an
+instruction body:
+
+```markdown
+---
+name: testing
+description: Write and validate automated tests for this project.
+---
+
+Follow the project's test conventions and run the relevant tests before
+reporting completion.
+```
