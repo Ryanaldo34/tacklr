@@ -1,18 +1,16 @@
 package streaming
 
-import "github.com/ryanaldo34/tacklr"
-
 type BufferedStreamer struct {
 	content   string
 	msgId     string
-	toolCalls []tacklr.ToolCall
+	toolCalls []ToolCall
 }
 
 func New() *BufferedStreamer { return &BufferedStreamer{} }
 
-func (s *BufferedStreamer) Stream(chunk tacklr.LLMResponseChunk, out chan<- tacklr.StreamEvent) error {
-	if chunk.Type == tacklr.StreamEventReasoning {
-		out <- tacklr.StreamEvent{Type: tacklr.StreamEventReasoning, Content: chunk.Content, MessageID: chunk.MessageId}
+func (s *BufferedStreamer) Stream(chunk LLMResponseChunk, out chan<- StreamEvent) error {
+	if chunk.Type == StreamEventReasoning {
+		out <- StreamEvent{Type: StreamEventReasoning, Content: chunk.Content, MessageID: chunk.MessageId}
 		return nil
 	}
 
@@ -26,7 +24,7 @@ func (s *BufferedStreamer) Stream(chunk tacklr.LLMResponseChunk, out chan<- tack
 	}
 	if chunk.MessageId == s.msgId {
 		s.content += chunk.Content
-		if chunk.Type == tacklr.StreamEventFunctionCall {
+		if chunk.Type == StreamEventFunctionCall {
 			s.toolCalls = append(s.toolCalls, chunk.ToolCalls...)
 		}
 	}
@@ -37,12 +35,12 @@ func (s *BufferedStreamer) Stream(chunk tacklr.LLMResponseChunk, out chan<- tack
 	return nil
 }
 
-func (s *BufferedStreamer) flush(out chan<- tacklr.StreamEvent, typ tacklr.StreamEventType) {
+func (s *BufferedStreamer) flush(out chan<- StreamEvent, typ StreamEventType) {
 	if s.content != "" {
-		out <- tacklr.StreamEvent{Type: typ, Content: s.content, MessageID: s.msgId}
+		out <- StreamEvent{Type: typ, Content: s.content, MessageID: s.msgId}
 	}
 	if len(s.toolCalls) > 0 {
-		out <- tacklr.StreamEvent{Type: tacklr.StreamEventFunctionCall, ToolCalls: s.toolCalls}
+		out <- StreamEvent{Type: StreamEventFunctionCall, ToolCalls: s.toolCalls}
 	}
 	s.content = ""
 	s.toolCalls = nil

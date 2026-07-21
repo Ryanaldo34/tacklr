@@ -13,9 +13,9 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/control"
+	"github.com/ryanaldo34/tacklr/stores"
 )
 
 type mockInferenceStrategy struct {
@@ -24,15 +24,15 @@ type mockInferenceStrategy struct {
 	callNum   atomic.Int64
 }
 
-func (m *mockInferenceStrategy) WithApiKey(string) tacklr.InferenceStrategy           { return m }
-func (m *mockInferenceStrategy) WithModel(string) tacklr.InferenceStrategy            { return m }
-func (m *mockInferenceStrategy) WithURL(string) tacklr.InferenceStrategy              { return m }
-func (m *mockInferenceStrategy) WithReasoningLevel(string) tacklr.InferenceStrategy   { return m }
-func (m *mockInferenceStrategy) WithStructuredOutput(any) tacklr.InferenceStrategy    { return m }
-func (m *mockInferenceStrategy) SetSystemPrompt(string)                                {}
-func (m *mockInferenceStrategy) Reset()                                                {}
-func (m *mockInferenceStrategy) CompressContextWindow() error                          { return nil }
-func (m *mockInferenceStrategy) MaxContextWindow() (int, error)                        { return 0, nil }
+func (m *mockInferenceStrategy) WithApiKey(string) tacklr.InferenceStrategy         { return m }
+func (m *mockInferenceStrategy) WithModel(string) tacklr.InferenceStrategy          { return m }
+func (m *mockInferenceStrategy) WithURL(string) tacklr.InferenceStrategy            { return m }
+func (m *mockInferenceStrategy) WithReasoningLevel(string) tacklr.InferenceStrategy { return m }
+func (m *mockInferenceStrategy) WithStructuredOutput(any) tacklr.InferenceStrategy  { return m }
+func (m *mockInferenceStrategy) SetSystemPrompt(string)                             {}
+func (m *mockInferenceStrategy) Reset()                                             {}
+func (m *mockInferenceStrategy) CompressContextWindow() error                       { return nil }
+func (m *mockInferenceStrategy) MaxContextWindow() (int, error)                     { return 0, nil }
 func (m *mockInferenceStrategy) CountTokens(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool) (int, error) {
 	return 0, nil
 }
@@ -49,27 +49,24 @@ func (m *mockInferenceStrategy) Invoke(ctx context.Context, msgs []*tacklr.Messa
 	return ch, nil
 }
 
-type mockAgentProvider struct {
-	strategy tacklr.InferenceStrategy
-	tools    []*tacklr.Tool
-}
-
-func (p *mockAgentProvider) GetAgent(ctx context.Context, agentID string) (AgentSpec, error) {
-	return AgentSpec{
-		Config: tacklr.Config{
-			MaxWindowSize: 8192,
-			SystemPrompt:  "test prompt",
-		},
-		Model:    p.strategy,
-		Tools:    p.tools,
-		WatchDog: nil,
-	}, nil
-}
-
 func testStore(t *testing.T) *stores.InMemoryStore {
 	t.Helper()
 	t.Cleanup(func() {})
 	return stores.NewInMemoryStore()
+}
+
+func newTestRegistry(store *stores.InMemoryStore, strategy tacklr.InferenceStrategy, tools []*tacklr.Tool) *Registry {
+	r := NewRegistry(store, "default")
+	r.Register("default", AgentSpec{
+		Config: tacklr.Config{
+			MaxWindowSize: 8192,
+			SystemPrompt:  "test prompt",
+		},
+		Model:    strategy,
+		Tools:    tools,
+		WatchDog: nil,
+	})
+	return r
 }
 func newSSERequest(t *testing.T, target string, body io.Reader) *http.Request {
 	t.Helper()
@@ -152,16 +149,13 @@ func TestHandlePrompt_generatesThreadID(t *testing.T) {
 		},
 	}
 
-	srv := &Server{
-		provider: &mockAgentProvider{strategy: strategy, tools: []*tacklr.Tool{}},
-		store:    store,
-	}
+	r := newTestRegistry(store, strategy, []*tacklr.Tool{})
 
 	body := bytes.NewReader([]byte(`{"agent_id":"default","prompt":"hello"}`))
 	req := newSSERequest(t, "/", body)
 	rec := httptest.NewRecorder()
 
-	srv.handlePrompt(rec, req)
+	r.serveSSE(rec, req, handlers[ProtocolSSE], validators[ProtocolSSE])
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -185,17 +179,14 @@ func TestHandlePrompt_generatesThreadID(t *testing.T) {
 
 func TestHandlePrompt_missingAcceptHeader_returnsNotAcceptable(t *testing.T) {
 	store := testStore(t)
-	srv := &Server{
-		provider: &mockAgentProvider{strategy: &mockInferenceStrategy{}, tools: []*tacklr.Tool{}},
-		store:    store,
-	}
+	r := newTestRegistry(store, &mockInferenceStrategy{}, []*tacklr.Tool{})
 
 	body := bytes.NewReader([]byte(`{"agent_id":"default","prompt":"hello"}`))
 	req := httptest.NewRequest(http.MethodPost, "/", body)
 	req.Header.Set("Accept", "application/json")
 	rec := httptest.NewRecorder()
 
-	srv.handlePrompt(rec, req)
+	r.serveSSE(rec, req, handlers[ProtocolSSE], validators[ProtocolSSE])
 
 	if rec.Code != http.StatusNotAcceptable {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotAcceptable)
@@ -222,16 +213,13 @@ func TestHandleResume_resolvesInterrupt(t *testing.T) {
 		},
 	}
 
-	srv := &Server{
-		provider: &mockAgentProvider{strategy: strategy, tools: []*tacklr.Tool{interruptTool}},
-		store:    store,
-	}
+	r := newTestRegistry(store, strategy, []*tacklr.Tool{interruptTool})
 
 	// First, prompt to raise an interrupt
 	promptBody := bytes.NewReader([]byte(`{"agent_id":"default","prompt":"start"}`))
 	promptReq := newSSERequest(t, "/", promptBody)
 	promptRec := httptest.NewRecorder()
-	srv.handlePrompt(promptRec, promptReq)
+	r.serveSSE(promptRec, promptReq, handlers[ProtocolSSE], validators[ProtocolSSE])
 
 	events := parseSSEEvents(t, promptRec.Body)
 	var threadID, interruptID string
@@ -260,7 +248,7 @@ func TestHandleResume_resolvesInterrupt(t *testing.T) {
 	resumeBody := fmt.Sprintf(`{"agent_id":"default","thread_id":%q,"responses":{%q:{"interruptId":%q,"selectionIdx":0}}}`, threadID, interruptID, interruptID)
 	resumeReq := newSSERequest(t, "/resume", bytes.NewReader([]byte(resumeBody)))
 	resumeRec := httptest.NewRecorder()
-	srv.handleResume(resumeRec, resumeReq)
+	r.serveSSE(resumeRec, resumeReq, handlers[ProtocolSSE], validators[ProtocolSSE])
 
 	if resumeRec.Code != http.StatusOK {
 		t.Fatalf("resume status = %d, want 200", resumeRec.Code)
@@ -286,15 +274,12 @@ func TestHandleResume_resolvesInterrupt(t *testing.T) {
 
 func TestHandleResume_unknownThread_returnsError(t *testing.T) {
 	store := testStore(t)
-	srv := &Server{
-		provider: &mockAgentProvider{strategy: &mockInferenceStrategy{}, tools: []*tacklr.Tool{}},
-		store:    store,
-	}
+	r := newTestRegistry(store, &mockInferenceStrategy{}, []*tacklr.Tool{})
 
 	body := bytes.NewReader([]byte(`{"agent_id":"default","thread_id":"nonexistent","responses":{"x":{}}}`))
 	req := newSSERequest(t, "/resume", body)
 	rec := httptest.NewRecorder()
-	srv.handleResume(rec, req)
+	r.serveSSE(rec, req, handlers[ProtocolSSE], validators[ProtocolSSE])
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -329,14 +314,11 @@ func TestHandleResume_invalidPayload_returnsError(t *testing.T) {
 		},
 	}
 
-	srv := &Server{
-		provider: &mockAgentProvider{strategy: strategy, tools: []*tacklr.Tool{interruptTool}},
-		store:    store,
-	}
+	r := newTestRegistry(store, strategy, []*tacklr.Tool{interruptTool})
 
 	// Raise an interrupt first
 	promptRec := httptest.NewRecorder()
-	srv.handlePrompt(promptRec, newSSERequest(t, "/", bytes.NewReader([]byte(`{"agent_id":"default","prompt":"start"}`))))
+	r.serveSSE(promptRec, newSSERequest(t, "/", bytes.NewReader([]byte(`{"agent_id":"default","prompt":"start"}`))), handlers[ProtocolSSE], validators[ProtocolSSE])
 
 	events := parseSSEEvents(t, promptRec.Body)
 	var threadID, interruptID string
@@ -359,7 +341,7 @@ func TestHandleResume_invalidPayload_returnsError(t *testing.T) {
 	// Resume with out-of-bounds selectionIdx
 	resumeBody := fmt.Sprintf(`{"agent_id":"default","thread_id":%q,"responses":{%q:{"interruptId":%q,"selectionIdx":99}}}`, threadID, interruptID, interruptID)
 	resumeRec := httptest.NewRecorder()
-	srv.handleResume(resumeRec, newSSERequest(t, "/resume", bytes.NewReader([]byte(resumeBody))))
+	r.serveSSE(resumeRec, newSSERequest(t, "/resume", bytes.NewReader([]byte(resumeBody))), handlers[ProtocolSSE], validators[ProtocolSSE])
 
 	resumeEvents := parseSSEEvents(t, resumeRec.Body)
 	var foundError bool

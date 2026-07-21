@@ -1,28 +1,62 @@
 package server
 
 import (
-	"net/http"
+	"encoding/json"
 
-	"github.com/ryanaldo34/tacklr/stores"
+	"github.com/ryanaldo34/tacklr/mcp"
+	"github.com/ryanaldo34/tacklr/streaming"
 )
 
-type Server struct {
-	store    stores.BaseStore
-	provider AgentProvider
+type Protocol string
+
+const (
+	ProtocolACP Protocol = "acp"
+	ProtocolSSE Protocol = "sse"
+)
+
+// StreamEventHandler converts a StreamEvent into zero or more wire frames to
+// be sent to the client. It is a pure format conversion — content management
+// (buffering, chunking) is handled by the streaming strategy set on the
+// harness.
+type StreamEventHandler func(threadID string, event *streaming.StreamEvent) ([][]byte, error)
+
+// parsedRequest carries the key information extracted from a request body by a
+// protocol validator. It is the standard struct that handlers use to invoke the
+// agent harness, regardless of the transport protocol.
+type parsedRequest struct {
+	AgentID   string
+	ThreadID  string
+	Prompt    string
+	Responses map[string]json.RawMessage
+
+	// ACP JSON-RPC envelope
+	ID     json.RawMessage
+	Method string
+
+	// ACP session lifecycle
+	CWD        string
+	MCPServers []mcp.MCPConfig
+
+	// Extensibility — raw _meta blob for custom fields
+	Meta json.RawMessage
 }
 
-func New(store stores.BaseStore, provider AgentProvider) *Server {
-	return &Server{
-		store:    store,
-		provider: provider,
-	}
+type RequestValidator func([]byte) (*parsedRequest, error)
+
+var handlers = map[Protocol]StreamEventHandler{
+	ProtocolACP: eventToAcpJsonRpc,
+	ProtocolSSE: eventToRawSSE,
 }
 
-func (s *Server) Handler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /", s.handlePrompt)
-	mux.HandleFunc("GET /", s.handleWebSocketPrompt)
-	mux.HandleFunc("POST /resume", s.handleResume)
-	mux.HandleFunc("GET /resume", s.handleWebSocketResume)
-	return mux
+var validators = map[Protocol]RequestValidator{
+	ProtocolSSE: validateSSERequest,
+	ProtocolACP: validateACPRequest,
+}
+
+func GetHandler(protocol Protocol) StreamEventHandler {
+	return handlers[protocol]
+}
+
+func GetValidator(protocol Protocol) RequestValidator {
+	return validators[protocol]
 }

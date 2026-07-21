@@ -191,6 +191,7 @@ func TestAgentHarness_Run(t *testing.T) {
 		var contentEvents int
 		var functionCallEvents int
 		var toolResultEvents int
+		var toolResultEvent *StreamEvent
 		for ev := range ch {
 			switch ev.Type {
 			case StreamEventMessage:
@@ -199,6 +200,10 @@ func TestAgentHarness_Run(t *testing.T) {
 				functionCallEvents++
 			case StreamEventToolResult:
 				toolResultEvents++
+				if toolResultEvent == nil {
+					ev := ev
+					toolResultEvent = &ev
+				}
 			}
 		}
 
@@ -213,6 +218,28 @@ func TestAgentHarness_Run(t *testing.T) {
 		}
 		if toolResultEvents != 1 {
 			t.Errorf("expected 1 tool result event, got %d", toolResultEvents)
+		}
+		if toolResultEvent == nil {
+			t.Fatal("did not capture a tool result event")
+		}
+		if toolResultEvent.MessageID != "call_1" {
+			t.Errorf("tool result MessageID = %q, want %q", toolResultEvent.MessageID, "call_1")
+		}
+		if len(toolResultEvent.ToolCalls) != 1 {
+			t.Fatalf("tool result ToolCalls length = %d, want 1", len(toolResultEvent.ToolCalls))
+		}
+		got := toolResultEvent.ToolCalls[0]
+		if got.CallID != "call_1" {
+			t.Errorf("tool result ToolCalls[0].CallID = %q, want %q", got.CallID, "call_1")
+		}
+		if got.Name != "greet" {
+			t.Errorf("tool result ToolCalls[0].Name = %q, want %q", got.Name, "greet")
+		}
+		if got.Arguments != `{"Name":"World"}` {
+			t.Errorf("tool result ToolCalls[0].Arguments = %q", got.Arguments)
+		}
+		if got.ID != "call_1" {
+			t.Errorf("tool result ToolCalls[0].ID = %q, want %q", got.ID, "call_1")
 		}
 	})
 

@@ -9,11 +9,11 @@ import (
 )
 
 var (
-	ErrInvalidRequest           = errors.New("invalid request")
-	ErrAgentNotFound            = errors.New("agent not found")
+	ErrInvalidRequest            = errors.New("invalid request")
+	ErrAgentNotFound             = errors.New("agent not found")
 	ErrSessionStoreNotConfigured = errors.New("session store is not configured")
-	ErrStreamingNotSupported    = errors.New("streaming not supported")
-	ErrInternal                 = errors.New("internal server error")
+	ErrStreamingNotSupported     = errors.New("streaming not supported")
+	ErrInternal                  = errors.New("internal server error")
 )
 
 type clientError struct {

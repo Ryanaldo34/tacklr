@@ -2,13 +2,11 @@ package streaming
 
 import (
 	"testing"
-
-	"github.com/ryanaldo34/tacklr"
 )
 
-func collect(out chan tacklr.StreamEvent) []tacklr.StreamEvent {
+func collect(out chan StreamEvent) []StreamEvent {
 	close(out)
-	var events []tacklr.StreamEvent
+	var events []StreamEvent
 	for ev := range out {
 		events = append(events, ev)
 	}
@@ -21,9 +19,9 @@ func TestNew_returnsFreshBufferedStreamer(t *testing.T) {
 		t.Fatal("New() returned nil")
 	}
 
-	out := make(chan tacklr.StreamEvent, 10)
-	err := s.Stream(tacklr.LLMResponseChunk{
-		Type:       tacklr.StreamEventMessage,
+	out := make(chan StreamEvent, 10)
+	err := s.Stream(LLMResponseChunk{
+		Type:       StreamEventMessage,
 		MessageId:  "x",
 		Content:    "hi",
 		IsComplete: true,
@@ -43,9 +41,9 @@ func TestNew_returnsFreshBufferedStreamer(t *testing.T) {
 		t.Errorf("expected MessageID %q, got %q", "x", events[0].MessageID)
 	}
 
-	out2 := make(chan tacklr.StreamEvent, 10)
-	if err := s.Stream(tacklr.LLMResponseChunk{
-		Type:       tacklr.StreamEventMessage,
+	out2 := make(chan StreamEvent, 10)
+	if err := s.Stream(LLMResponseChunk{
+		Type:       StreamEventMessage,
 		MessageId:  "y",
 		Content:    "fresh",
 		IsComplete: true,
@@ -66,9 +64,9 @@ func TestNew_returnsFreshBufferedStreamer(t *testing.T) {
 
 func TestStream_reasoningPassesThrough(t *testing.T) {
 	s := New()
-	out := make(chan tacklr.StreamEvent, 10)
-	if err := s.Stream(tacklr.LLMResponseChunk{
-		Type:      tacklr.StreamEventReasoning,
+	out := make(chan StreamEvent, 10)
+	if err := s.Stream(LLMResponseChunk{
+		Type:      StreamEventReasoning,
 		Content:   "thinking",
 		MessageId: "r1",
 	}, out); err != nil {
@@ -80,8 +78,8 @@ func TestStream_reasoningPassesThrough(t *testing.T) {
 		t.Fatalf("expected exactly 1 reasoning event, got %d: %+v", len(events), events)
 	}
 	ev := events[0]
-	if ev.Type != tacklr.StreamEventReasoning {
-		t.Errorf("expected Type %v, got %v", tacklr.StreamEventReasoning, ev.Type)
+	if ev.Type != StreamEventReasoning {
+		t.Errorf("expected Type %v, got %v", StreamEventReasoning, ev.Type)
 	}
 	if ev.Content != "thinking" {
 		t.Errorf("expected content %q, got %q", "thinking", ev.Content)
@@ -93,13 +91,13 @@ func TestStream_reasoningPassesThrough(t *testing.T) {
 
 func TestStream_accumulatesContentAndFlushesOnComplete(t *testing.T) {
 	s := New()
-	chunks := []tacklr.LLMResponseChunk{
-		{Type: tacklr.StreamEventMessage, MessageId: "m1", Content: "Hello"},
-		{Type: tacklr.StreamEventMessage, MessageId: "m1", Content: " "},
-		{Type: tacklr.StreamEventMessage, MessageId: "m1", Content: "world", IsComplete: true},
+	chunks := []LLMResponseChunk{
+		{Type: StreamEventMessage, MessageId: "m1", Content: "Hello"},
+		{Type: StreamEventMessage, MessageId: "m1", Content: " "},
+		{Type: StreamEventMessage, MessageId: "m1", Content: "world", IsComplete: true},
 	}
 
-	out := make(chan tacklr.StreamEvent, 10)
+	out := make(chan StreamEvent, 10)
 	for _, c := range chunks {
 		if err := s.Stream(c, out); err != nil {
 			t.Fatalf("Stream returned error: %v", err)
@@ -114,8 +112,8 @@ func TestStream_accumulatesContentAndFlushesOnComplete(t *testing.T) {
 		t.Fatalf("expected exactly 1 flushed event, got %d: %+v", len(events), events)
 	}
 	ev := events[0]
-	if ev.Type != tacklr.StreamEventMessage {
-		t.Errorf("expected Type %v, got %v", tacklr.StreamEventMessage, ev.Type)
+	if ev.Type != StreamEventMessage {
+		t.Errorf("expected Type %v, got %v", StreamEventMessage, ev.Type)
 	}
 	if ev.Content != "Hello world" {
 		t.Errorf("expected content %q, got %q", "Hello world", ev.Content)
@@ -127,10 +125,10 @@ func TestStream_accumulatesContentAndFlushesOnComplete(t *testing.T) {
 
 func TestStream_flushesOnMessageIdChange(t *testing.T) {
 	s := New()
-	out := make(chan tacklr.StreamEvent, 10)
+	out := make(chan StreamEvent, 10)
 
-	if err := s.Stream(tacklr.LLMResponseChunk{
-		Type:      tacklr.StreamEventMessage,
+	if err := s.Stream(LLMResponseChunk{
+		Type:      StreamEventMessage,
 		MessageId: "m1",
 		Content:   "first",
 	}, out); err != nil {
@@ -140,8 +138,8 @@ func TestStream_flushesOnMessageIdChange(t *testing.T) {
 		t.Errorf("first chunk should not flush, got %d events", len(out))
 	}
 
-	if err := s.Stream(tacklr.LLMResponseChunk{
-		Type:       tacklr.StreamEventMessage,
+	if err := s.Stream(LLMResponseChunk{
+		Type:       StreamEventMessage,
 		MessageId:  "m2",
 		Content:    "second",
 		IsComplete: true,
@@ -153,8 +151,8 @@ func TestStream_flushesOnMessageIdChange(t *testing.T) {
 	if len(events) != 2 {
 		t.Fatalf("expected 2 flushes, got %d: %+v", len(events), events)
 	}
-	if events[0].Type != tacklr.StreamEventMessage {
-		t.Errorf("first flush: expected Type %v, got %v", tacklr.StreamEventMessage, events[0].Type)
+	if events[0].Type != StreamEventMessage {
+		t.Errorf("first flush: expected Type %v, got %v", StreamEventMessage, events[0].Type)
 	}
 	if events[0].Content != "first" {
 		t.Errorf("first flush: expected content %q, got %q", "first", events[0].Content)
@@ -169,21 +167,21 @@ func TestStream_flushesOnMessageIdChange(t *testing.T) {
 
 func TestStream_accumulatesToolCalls(t *testing.T) {
 	s := New()
-	chunks := []tacklr.LLMResponseChunk{
+	chunks := []LLMResponseChunk{
 		{
-			Type:      tacklr.StreamEventFunctionCall,
+			Type:      StreamEventFunctionCall,
 			MessageId: "m1",
-			ToolCalls: []tacklr.ToolCall{{Name: "t1"}},
+			ToolCalls: []ToolCall{{Name: "t1"}},
 		},
 		{
-			Type:       tacklr.StreamEventFunctionCall,
+			Type:       StreamEventFunctionCall,
 			MessageId:  "m1",
-			ToolCalls:  []tacklr.ToolCall{{Name: "t2"}},
+			ToolCalls:  []ToolCall{{Name: "t2"}},
 			IsComplete: true,
 		},
 	}
 
-	out := make(chan tacklr.StreamEvent, 10)
+	out := make(chan StreamEvent, 10)
 	for _, c := range chunks {
 		if err := s.Stream(c, out); err != nil {
 			t.Fatalf("Stream error: %v", err)
@@ -195,8 +193,8 @@ func TestStream_accumulatesToolCalls(t *testing.T) {
 		t.Fatalf("expected exactly 1 function_call event, got %d: %+v", len(events), events)
 	}
 	ev := events[0]
-	if ev.Type != tacklr.StreamEventFunctionCall {
-		t.Errorf("expected Type %v, got %v", tacklr.StreamEventFunctionCall, ev.Type)
+	if ev.Type != StreamEventFunctionCall {
+		t.Errorf("expected Type %v, got %v", StreamEventFunctionCall, ev.Type)
 	}
 	if len(ev.ToolCalls) != 2 {
 		t.Fatalf("expected 2 tool calls, got %d: %+v", len(ev.ToolCalls), ev.ToolCalls)
@@ -208,8 +206,8 @@ func TestStream_accumulatesToolCalls(t *testing.T) {
 
 func TestStream_skipsEmptyContentFlush(t *testing.T) {
 	s := New()
-	out := make(chan tacklr.StreamEvent, 10)
-	if err := s.Stream(tacklr.LLMResponseChunk{
+	out := make(chan StreamEvent, 10)
+	if err := s.Stream(LLMResponseChunk{
 		Content:    "",
 		IsComplete: true,
 	}, out); err != nil {
@@ -224,12 +222,12 @@ func TestStream_skipsEmptyContentFlush(t *testing.T) {
 
 func TestStream_toolCallOnlyFlush(t *testing.T) {
 	s := New()
-	out := make(chan tacklr.StreamEvent, 10)
-	if err := s.Stream(tacklr.LLMResponseChunk{
-		Type:       tacklr.StreamEventFunctionCall,
+	out := make(chan StreamEvent, 10)
+	if err := s.Stream(LLMResponseChunk{
+		Type:       StreamEventFunctionCall,
 		Content:    "",
 		IsComplete: true,
-		ToolCalls:  []tacklr.ToolCall{{Name: "t"}},
+		ToolCalls:  []ToolCall{{Name: "t"}},
 	}, out); err != nil {
 		t.Fatalf("Stream error: %v", err)
 	}
@@ -238,8 +236,8 @@ func TestStream_toolCallOnlyFlush(t *testing.T) {
 	if len(events) != 1 {
 		t.Fatalf("expected exactly 1 event, got %d: %+v", len(events), events)
 	}
-	if events[0].Type != tacklr.StreamEventFunctionCall {
-		t.Errorf("expected Type %v, got %v", tacklr.StreamEventFunctionCall, events[0].Type)
+	if events[0].Type != StreamEventFunctionCall {
+		t.Errorf("expected Type %v, got %v", StreamEventFunctionCall, events[0].Type)
 	}
 	if len(events[0].ToolCalls) != 1 || events[0].ToolCalls[0].Name != "t" {
 		t.Errorf("unexpected tool calls: %+v", events[0].ToolCalls)
