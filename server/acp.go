@@ -267,6 +267,12 @@ func eventToAcpJsonRpc(threadId string, event *streaming.StreamEvent) ([][]byte,
 	case streaming.StreamEventToolResult:
 		var toStream [][]byte
 		tc := event.ToolCalls[0]
+		var status string
+		if tc.Status == "error" {
+			status = "failed"
+		} else {
+			status = "completed"
+		}
 		data := map[string]any{
 			"jsonrpc": "2.0",
 			"method":  "session/update",
@@ -276,7 +282,7 @@ func eventToAcpJsonRpc(threadId string, event *streaming.StreamEvent) ([][]byte,
 					"sessionUpdate": "tool_call",
 					"toolCallId":    tc.ID,
 					"title":         tc.Name,
-					"status":        "completed",
+					"status":        status,
 					"content":       event.Content,
 				},
 			},

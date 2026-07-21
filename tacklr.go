@@ -371,11 +371,11 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 							a.recordOutput(msg)
 						}
 					}
-				// If there are no tool calls in the latest completed message, break the loop
-				if len(a.ContextWindow[len(a.ContextWindow)-1].ToolCalls) == 0 {
-					out <- StreamEvent{Type: StreamEventComplete}
-					return
-				}
+					// If there are no tool calls in the latest completed message, break the loop
+					if len(a.ContextWindow[len(a.ContextWindow)-1].ToolCalls) == 0 {
+						out <- StreamEvent{Type: StreamEventComplete}
+						return
+					}
 					toolResults = make([]*Message, len(a.ContextWindow[len(a.ContextWindow)-1].ToolCalls))
 				} else {
 					toolResults = make([]*Message, len(a.pendingToolCalls))
@@ -433,6 +433,7 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 								ToolCallID: tc.CallID,
 								Content:    fmt.Sprintf("An error occurred: %s", err.Error()),
 							}
+							tc.Status = "error"
 							out <- StreamEvent{Type: StreamEventToolResult, MessageID: tc.CallID, Content: toolResults[i].Content, ToolCalls: []ToolCall{tc}}
 						} else {
 							toolResults[i] = &Message{
@@ -440,6 +441,7 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 								ToolCallID: tc.CallID,
 								Content:    output,
 							}
+							tc.Status = "success"
 							out <- StreamEvent{Type: StreamEventToolResult, MessageID: tc.CallID, Content: output, ToolCalls: []ToolCall{tc}}
 						}
 						a.recordToolResult(toolResults[i])
