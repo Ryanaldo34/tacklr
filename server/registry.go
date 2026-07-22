@@ -1,12 +1,16 @@
 package server
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
+	"sort"
 	"sync"
 
 	"github.com/coder/websocket"
@@ -29,11 +33,12 @@ type AgentSpec struct {
 }
 
 // sessionState holds per-session configuration provided by the client at
-// session creation time (session/new).
+// session creation time (session/new) and updated via session/set_config_option.
 type sessionState struct {
-	cwd        string
-	mcpServers []mcp.MCPConfig
-	prompted   bool // true after the first prompt turn has been initiated
+	cwd          string
+	mcpServers   []mcp.MCPConfig
+	prompted     bool // true after the first prompt turn has been initiated
+	configValues map[string]string
 }
 
 type Registry struct {
@@ -56,9 +61,42 @@ func (r *Registry) Register(agentID string, spec AgentSpec) {
 	r.agents[agentID] = spec
 }
 
-func (r *Registry) resolveAgentID(agentID string) string {
-	if agentID != "" {
-		return agentID
+// buildConfigOptions returns the ACP config options for a session, with
+// currentAgent as the selected agent value (falls back to defaultAgent).
+func (r *Registry) buildConfigOptions(currentAgent string) []ConfigOption {
+	if currentAgent == "" {
+		currentAgent = r.defaultAgent
+	}
+	ids := make([]string, 0, len(r.agents))
+	for id := range r.agents {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	opts := make([]ConfigOptionValue, 0, len(ids))
+	for _, id := range ids {
+		opts = append(opts, ConfigOptionValue{
+			Value: id,
+			Name:  id,
+		})
+	}
+	return []ConfigOption{
+		{
+			ID:           "agent",
+			Name:         "Agent",
+			Description:  "Select which registered agent handles this session",
+			Category:     "agent",
+			Type:         "select",
+			CurrentValue: currentAgent,
+			Options:      opts,
+		},
+	}
+}
+
+func (r *Registry) sessionAgentID(sess *sessionState) string {
+	if sess != nil && sess.configValues != nil {
+		if id := sess.configValues["agent"]; id != "" {
+			return id
+		}
 	}
 	return r.defaultAgent
 }
@@ -163,6 +201,10 @@ func (r *Registry) HandleRPC(w http.ResponseWriter, req *http.Request, hook Stre
 	pr, err := validate(body)
 	if err != nil {
 		slog.Debug("acp client error", "error", err)
+		// Notifications must never receive a response, including errors.
+		if pr != nil && pr.Notification {
+			return
+		}
 		var id json.RawMessage
 		if pr != nil {
 			id = pr.ID
@@ -171,9 +213,15 @@ func (r *Registry) HandleRPC(w http.ResponseWriter, req *http.Request, hook Stre
 		return
 	}
 
-	pr.AgentID = r.resolveAgentID(pr.AgentID)
-	if pr.AgentID == "" {
-		r.writeJSONRPCError(w, pr.ID, clientErrorf(ErrInvalidRequest, "no agent specified and no default agent configured").Error())
+	// JSON-RPC notifications: handle side effects, never write a response.
+	if pr.Notification {
+		if pr.Method == "session/cancel" && pr.ThreadID != "" {
+			if c, ok := r.activeCtx.LoadAndDelete(pr.ThreadID); ok {
+				c.(context.CancelFunc)()
+			}
+		} else {
+			slog.Debug("ignored acp notification", "method", pr.Method)
+		}
 		return
 	}
 
@@ -182,24 +230,71 @@ func (r *Registry) HandleRPC(w http.ResponseWriter, req *http.Request, hook Stre
 		r.runPromptTurn(w, req, pr, hook)
 	case "initialize":
 		r.writeJSONRPCResult(w, pr.ID, r.acpCapabilities())
+	case "authenticate":
+		r.writeJSONRPCResult(w, pr.ID, map[string]any{})
 	case "session/new":
 		threadID := uuid.New().String()
+		configValues := map[string]string{}
+		if r.defaultAgent != "" {
+			configValues["agent"] = r.defaultAgent
+		}
 		r.sessions.Store(threadID, &sessionState{
-			cwd:        pr.CWD,
-			mcpServers: pr.MCPServers,
+			cwd:          pr.CWD,
+			mcpServers:   pr.MCPServers,
+			configValues: configValues,
 		})
-		r.writeJSONRPCResult(w, pr.ID, map[string]string{"sessionId": threadID})
+		r.writeJSONRPCResult(w, pr.ID, map[string]any{
+			"sessionId":     threadID,
+			"configOptions": r.buildConfigOptions(r.defaultAgent),
+		})
+	case "session/load":
+		state, ok := r.sessions.Load(pr.ThreadID)
+		if !ok {
+			r.writeJSONRPCError(w, pr.ID, clientErrorf(ErrSessionNotFound, "session %q not found", pr.ThreadID).Error())
+			return
+		}
+		sess := state.(*sessionState)
+		agentID := r.sessionAgentID(sess)
+		// No history replay yet; return session metadata only.
+		r.writeJSONRPCResult(w, pr.ID, map[string]any{
+			"sessionId":     pr.ThreadID,
+			"configOptions": r.buildConfigOptions(agentID),
+		})
+	case "session/set_config_option":
+		state, ok := r.sessions.Load(pr.ThreadID)
+		if !ok {
+			r.writeJSONRPCError(w, pr.ID, clientErrorf(ErrSessionNotFound, "session %q not found", pr.ThreadID).Error())
+			return
+		}
+		sess := state.(*sessionState)
+		if sess.configValues == nil {
+			sess.configValues = map[string]string{}
+		}
+		switch pr.ConfigID {
+		case "agent":
+			if _, exists := r.agents[pr.ConfigValue]; !exists {
+				r.writeJSONRPCError(w, pr.ID, clientErrorf(ErrAgentNotFound, "agent %q not found", pr.ConfigValue).Error())
+				return
+			}
+			sess.configValues["agent"] = pr.ConfigValue
+		default:
+			r.writeJSONRPCError(w, pr.ID, clientErrorf(ErrInvalidRequest, "unknown configId %q", pr.ConfigID).Error())
+			return
+		}
+		r.writeJSONRPCResult(w, pr.ID, map[string]any{
+			"configOptions": r.buildConfigOptions(r.sessionAgentID(sess)),
+		})
 	case "session/close":
 		r.sessions.Delete(pr.ThreadID)
 		if c, ok := r.activeCtx.LoadAndDelete(pr.ThreadID); ok {
 			c.(context.CancelFunc)()
 		}
-		r.writeJSONRPCResult(w, pr.ID, struct{}{})
+		r.writeJSONRPCResult(w, pr.ID, map[string]any{})
 	case "session/cancel":
 		if c, ok := r.activeCtx.LoadAndDelete(pr.ThreadID); ok {
 			c.(context.CancelFunc)()
 		}
-		r.writeJSONRPCResult(w, pr.ID, struct{}{})
+		r.writeJSONRPCResult(w, pr.ID, map[string]any{})
 	default:
 		r.writeJSONRPCError(w, pr.ID, "method not found")
 	}
@@ -219,6 +314,12 @@ func (r *Registry) runPromptTurn(w http.ResponseWriter, req *http.Request, pr *p
 		sess = state.(*sessionState)
 	}
 
+	agentID := r.sessionAgentID(sess)
+	if agentID == "" {
+		r.writeJSONRPCError(w, pr.ID, clientErrorf(ErrInvalidRequest, "no agent configured for session and no default agent configured").Error())
+		return
+	}
+
 	load := false
 	if pr.Method == "session/resume" {
 		load = true
@@ -227,13 +328,13 @@ func (r *Registry) runPromptTurn(w http.ResponseWriter, req *http.Request, pr *p
 		sess.prompted = true
 	}
 
-	h, _, err := r.loadAgent(req.Context(), pr.AgentID, threadID, load)
+	h, _, err := r.loadAgent(req.Context(), agentID, threadID, load)
 	if err != nil {
 		if IsClientError(err) {
 			r.writeJSONRPCError(w, pr.ID, err.Error())
 			return
 		}
-		slog.Error("failed to load agent", "error", err, "agent_id", pr.AgentID, "thread_id", threadID)
+		slog.Error("failed to load agent", "error", err, "agent_id", agentID, "thread_id", threadID)
 		r.writeJSONRPCError(w, pr.ID, ErrInternal.Error())
 		return
 	}
@@ -257,7 +358,7 @@ func (r *Registry) runPromptTurn(w http.ResponseWriter, req *http.Request, pr *p
 			r.writeJSONRPCError(w, pr.ID, err.Error())
 			return
 		}
-		slog.Error("agent run failed", "error", err, "agent_id", pr.AgentID, "thread_id", threadID)
+		slog.Error("agent run failed", "error", err, "agent_id", agentID, "thread_id", threadID)
 		r.writeJSONRPCError(w, pr.ID, ErrInternal.Error())
 		return
 	}
@@ -300,6 +401,7 @@ func (r *Registry) acpCapabilities() map[string]any {
 	return map[string]any{
 		"protocolVersion": 1,
 		"agentCapabilities": map[string]any{
+			// Full load requires conversation replay; advertise false until implemented.
 			"loadSession": false,
 			"promptCapabilities": map[string]any{
 				"image":           false,
@@ -316,7 +418,7 @@ func (r *Registry) acpCapabilities() map[string]any {
 		},
 		"agentInfo": map[string]string{
 			"name":    "tacklr",
-			"title":   "Tacklr ACP Test Agent",
+			"title":   "Tacklr ACP",
 			"version": "0.1.0",
 		},
 		"authMethods": []string{},
@@ -340,6 +442,66 @@ func (r *Registry) writeJSONRPCError(w http.ResponseWriter, id json.RawMessage, 
 	if err := json.NewEncoder(w).Encode(data); err != nil {
 		slog.Warn("failed to write JSON-RPC error", "error", err)
 	}
+}
+
+// stdioResponseWriter adapts an io.Writer to http.ResponseWriter for stdio mode.
+// Every Write is flushed when the underlying writer supports Sync.
+type stdioResponseWriter struct {
+	header http.Header
+	w      io.Writer
+}
+
+func (w *stdioResponseWriter) Header() http.Header { return w.header }
+func (w *stdioResponseWriter) Write(b []byte) (int, error) {
+	n, err := w.w.Write(b)
+	if err == nil {
+		if s, ok := w.w.(interface{ Sync() error }); ok {
+			_ = s.Sync()
+		}
+	}
+	return n, err
+}
+func (w *stdioResponseWriter) WriteHeader(int) {}
+
+// ServeACPStdio reads line-delimited JSON-RPC ACP requests from stdin and
+// writes responses to stdout. Each request is processed synchronously through
+// the same HandleRPC dispatch as the HTTP mode.
+func (r *Registry) ServeACPStdio() error {
+	slog.Info("starting ACP stdio mode")
+	return r.ServeACPIO(os.Stdin, os.Stdout)
+}
+
+// ServeACPIO is the testable core of ServeACPStdio: line-delimited JSON-RPC
+// over arbitrary reader/writer streams.
+func (r *Registry) ServeACPIO(in io.Reader, out io.Writer) error {
+	reader := bufio.NewReader(in)
+	for {
+		line, err := reader.ReadBytes('\n')
+		if err != nil {
+			if err == io.EOF {
+				if trimmed := bytes.TrimRight(line, "\n\r"); len(trimmed) > 0 {
+					r.dispatchACPLine(out, trimmed)
+				}
+				return nil
+			}
+			return fmt.Errorf("stdin read: %w", err)
+		}
+		line = bytes.TrimRight(line, "\n\r")
+		if len(line) == 0 {
+			continue
+		}
+		r.dispatchACPLine(out, line)
+	}
+}
+
+func (r *Registry) dispatchACPLine(out io.Writer, body []byte) {
+	req := &http.Request{
+		Method: "POST",
+		Body:   io.NopCloser(bytes.NewReader(body)),
+		Header: http.Header{},
+	}
+	w := &stdioResponseWriter{header: http.Header{}, w: out}
+	r.HandleRPC(w, req, handlers[ProtocolACP], validators[ProtocolACP])
 }
 
 // serveSSE is the common SSE handler for both prompt and resume turns.

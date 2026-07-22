@@ -66,14 +66,29 @@ func TestValidateACPRequest_initialize(t *testing.T) {
 	}
 }
 
-func TestValidateACPRequest_initialize_wrongVersion(t *testing.T) {
+func TestValidateACPRequest_initialize_acceptsHigherVersion(t *testing.T) {
+	// Agent negotiates by responding with its supported version; request may ask higher.
 	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":99}}`)
-	_, err := validateACPRequest(body)
-	if err == nil {
-		t.Fatal("expected error for wrong protocol version")
+	pr, err := validateACPRequest(body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(err.Error(), "unsupported protocol version") {
-		t.Errorf("error = %q, want to contain %q", err.Error(), "unsupported protocol version")
+	if pr.Method != "initialize" {
+		t.Errorf("method = %q, want initialize", pr.Method)
+	}
+}
+
+func TestValidateACPRequest_notification_noID(t *testing.T) {
+	body := []byte(`{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"s1"}}`)
+	pr, err := validateACPRequest(body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !pr.Notification {
+		t.Error("expected Notification=true")
+	}
+	if pr.ThreadID != "s1" {
+		t.Errorf("threadID = %q, want s1", pr.ThreadID)
 	}
 }
 
@@ -92,16 +107,14 @@ func TestValidateACPRequest_sessionNew(t *testing.T) {
 }
 
 func TestValidateACPRequest_sessionNew_withMCPServers(t *testing.T) {
+	// ACP stdio MCP server shapes differ from our MCPConfig; cwd must still parse.
 	body := []byte(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[{"name":"fs","command":"npx","args":["-y","@modelcontextprotocol/server-filesystem"]}]}}`)
 	pr, err := validateACPRequest(body)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(pr.MCPServers) != 1 {
-		t.Fatalf("mcpServers len = %d, want 1", len(pr.MCPServers))
-	}
-	if pr.MCPServers[0].Name != "fs" {
-		t.Errorf("mcpServers[0].Name = %q, want %q", pr.MCPServers[0].Name, "fs")
+	if pr.CWD != "/tmp" {
+		t.Errorf("cwd = %q, want /tmp", pr.CWD)
 	}
 }
 
@@ -192,11 +205,14 @@ func TestValidateACPRequest_wrongJSONRPCVersion(t *testing.T) {
 	}
 }
 
-func TestValidateACPRequest_missingID(t *testing.T) {
-	body := []byte(`{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":1}}`)
-	_, err := validateACPRequest(body)
-	if err == nil {
-		t.Fatal("expected error for missing id")
+func TestValidateACPRequest_missingID_isNotification(t *testing.T) {
+	body := []byte(`{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"x"}}`)
+	pr, err := validateACPRequest(body)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !pr.Notification {
+		t.Error("expected notification when id is absent")
 	}
 }
 
@@ -209,7 +225,7 @@ func TestValidateACPRequest_missingMethod(t *testing.T) {
 }
 
 func TestValidateACPRequest_unsupportedMethod(t *testing.T) {
-	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"session/load","params":{"sessionId":"s1"}}`)
+	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"session/foo","params":{"sessionId":"s1"}}`)
 	_, err := validateACPRequest(body)
 	if err == nil {
 		t.Fatal("expected error for unsupported method")
@@ -219,25 +235,53 @@ func TestValidateACPRequest_unsupportedMethod(t *testing.T) {
 	}
 }
 
-func TestValidateACPRequest_metaAgentID(t *testing.T) {
-	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1},"_meta":{"agentId":"my-agent"}}`)
+func TestValidateACPRequest_sessionLoad(t *testing.T) {
+	body := []byte(`{"jsonrpc":"2.0","id":7,"method":"session/load","params":{"sessionId":"sess-load"}}`)
 	pr, err := validateACPRequest(body)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if pr.AgentID != "my-agent" {
-		t.Errorf("agentID = %q, want %q", pr.AgentID, "my-agent")
+	if pr.ThreadID != "sess-load" {
+		t.Errorf("threadID = %q, want %q", pr.ThreadID, "sess-load")
 	}
 }
 
-func TestValidateACPRequest_metaAgentID_absent(t *testing.T) {
-	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}`)
+func TestValidateACPRequest_sessionLoad_missingSessionID(t *testing.T) {
+	body := []byte(`{"jsonrpc":"2.0","id":7,"method":"session/load","params":{}}`)
+	_, err := validateACPRequest(body)
+	if err == nil {
+		t.Fatal("expected error for missing sessionId")
+	}
+	if !strings.Contains(err.Error(), "sessionId is required") {
+		t.Errorf("error = %q, want to contain %q", err.Error(), "sessionId is required")
+	}
+}
+
+func TestValidateACPRequest_configSet(t *testing.T) {
+	body := []byte(`{"jsonrpc":"2.0","id":8,"method":"session/set_config_option","params":{"sessionId":"sess-1","configId":"agent","value":"custom"}}`)
 	pr, err := validateACPRequest(body)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if pr.AgentID != "" {
-		t.Errorf("agentID = %q, want empty", pr.AgentID)
+	if pr.ThreadID != "sess-1" {
+		t.Errorf("threadID = %q, want %q", pr.ThreadID, "sess-1")
+	}
+	if pr.ConfigID != "agent" {
+		t.Errorf("configId = %q, want %q", pr.ConfigID, "agent")
+	}
+	if pr.ConfigValue != "custom" {
+		t.Errorf("configValue = %q, want %q", pr.ConfigValue, "custom")
+	}
+}
+
+func TestValidateACPRequest_configSet_missingConfigID(t *testing.T) {
+	body := []byte(`{"jsonrpc":"2.0","id":8,"method":"session/set_config_option","params":{"sessionId":"sess-1","value":"custom"}}`)
+	_, err := validateACPRequest(body)
+	if err == nil {
+		t.Fatal("expected error for missing configId")
+	}
+	if !strings.Contains(err.Error(), "configId is required") {
+		t.Errorf("error = %q, want to contain %q", err.Error(), "configId is required")
 	}
 }
 
@@ -492,6 +536,17 @@ func TestHandleRPC_sessionNew(t *testing.T) {
 	if !ok || sessionID == "" {
 		t.Fatalf("expected sessionId in result, got %v", result)
 	}
+	opts, ok := result["configOptions"].([]any)
+	if !ok || len(opts) == 0 {
+		t.Fatalf("expected configOptions in result, got %v", result)
+	}
+	agentOpt := opts[0].(map[string]any)
+	if agentOpt["id"] != "agent" {
+		t.Errorf("configOptions[0].id = %v, want agent", agentOpt["id"])
+	}
+	if agentOpt["currentValue"] != "default" {
+		t.Errorf("configOptions[0].currentValue = %v, want default", agentOpt["currentValue"])
+	}
 }
 
 func TestHandleRPC_sessionNew_storesSessionState(t *testing.T) {
@@ -513,11 +568,15 @@ func TestHandleRPC_sessionNew_storesSessionState(t *testing.T) {
 	if s.cwd != "/home/user" {
 		t.Errorf("cwd = %q, want %q", s.cwd, "/home/user")
 	}
-	if len(s.mcpServers) != 1 {
-		t.Fatalf("mcpServers len = %d, want 1", len(s.mcpServers))
-	}
-	if s.mcpServers[0].Name != "fs" {
-		t.Errorf("mcpServers[0].Name = %q, want %q", s.mcpServers[0].Name, "fs")
+}
+
+func TestHandleRPC_notification_noResponse(t *testing.T) {
+	store := testStore(t)
+	r := newTestRegistry(store, &mockInferenceStrategy{}, []*tacklr.Tool{})
+
+	rec := serveACPRaw(t, r, `{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"s1"}}`)
+	if rec.Body.Len() != 0 {
+		t.Fatalf("expected empty body for notification, got %q", rec.Body.String())
 	}
 }
 
@@ -567,7 +626,7 @@ func TestHandleRPC_unknownMethod(t *testing.T) {
 	store := testStore(t)
 	r := newTestRegistry(store, &mockInferenceStrategy{}, []*tacklr.Tool{})
 
-	rec := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/load","params":{"sessionId":"s1"}}`)
+	rec := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/foo","params":{"sessionId":"s1"}}`)
 
 	var resp map[string]any
 	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
@@ -590,17 +649,63 @@ func TestHandleRPC_invalidRequest(t *testing.T) {
 	}
 }
 
-func TestHandleRPC_noAgentConfigured(t *testing.T) {
+func TestHandleRPC_sessionLoad(t *testing.T) {
 	store := testStore(t)
-	r := NewRegistry(store, "") // no default agent
+	r := newTestRegistry(store, &mockInferenceStrategy{}, []*tacklr.Tool{})
 
-	rec := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
+	rec1 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
+	var resp1 map[string]any
+	_ = json.Unmarshal(rec1.Body.Bytes(), &resp1)
+	sessionID := resp1["result"].(map[string]any)["sessionId"].(string)
 
+	rec2 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"`+sessionID+`"}}`)
+	var resp2 map[string]any
+	_ = json.Unmarshal(rec2.Body.Bytes(), &resp2)
+	if resp2["error"] != nil {
+		t.Fatalf("unexpected error: %v", resp2["error"])
+	}
+	result := resp2["result"].(map[string]any)
+	if result["sessionId"] != sessionID {
+		t.Errorf("sessionId = %v, want %s", result["sessionId"], sessionID)
+	}
+	opts, ok := result["configOptions"].([]any)
+	if !ok || len(opts) == 0 {
+		t.Fatalf("expected configOptions in result, got %v", result)
+	}
+}
+
+func TestHandleRPC_sessionLoad_notFound(t *testing.T) {
+	store := testStore(t)
+	r := newTestRegistry(store, &mockInferenceStrategy{}, []*tacklr.Tool{})
+
+	rec := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/load","params":{"sessionId":"missing"}}`)
 	var resp map[string]any
 	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
 	errObj := resp["error"].(map[string]any)
-	if !strings.Contains(errObj["message"].(string), "no agent specified") {
-		t.Errorf("error message = %v, want to contain %q", errObj["message"], "no agent specified")
+	if !strings.Contains(errObj["message"].(string), "session") {
+		t.Errorf("error message = %v, want to mention session", errObj["message"])
+	}
+}
+
+func TestHandleRPC_noAgentConfigured_onPrompt(t *testing.T) {
+	store := testStore(t)
+	r := NewRegistry(store, "") // no default agent
+
+	rec1 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
+	var resp1 map[string]any
+	_ = json.Unmarshal(rec1.Body.Bytes(), &resp1)
+	if resp1["error"] != nil {
+		t.Fatalf("session/new should succeed without default agent: %v", resp1["error"])
+	}
+	sessionID := resp1["result"].(map[string]any)["sessionId"].(string)
+
+	promptBody := `{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"hi"}]}}`
+	rec2 := serveACPRaw(t, r, promptBody)
+	var resp2 map[string]any
+	_ = json.Unmarshal(rec2.Body.Bytes(), &resp2)
+	errObj := resp2["error"].(map[string]any)
+	if !strings.Contains(errObj["message"].(string), "no agent configured") {
+		t.Errorf("error message = %v, want to contain %q", errObj["message"], "no agent configured")
 	}
 }
 
@@ -721,10 +826,10 @@ func TestHandleRPC_sessionPrompt_stringTurnID(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// handleRPC — meta agentId
+// handleRPC — session/set_config_option
 // ---------------------------------------------------------------------------
 
-func TestHandleRPC_metaAgentID_overridesDefault(t *testing.T) {
+func TestHandleRPC_configSet_agent(t *testing.T) {
 	store := testStore(t)
 	strategy := &mockInferenceStrategy{
 		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
@@ -741,12 +846,198 @@ func TestHandleRPC_metaAgentID_overridesDefault(t *testing.T) {
 		Model:  strategy,
 	})
 
-	// Create session with _meta.agentId = "custom"
-	rec := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"},"_meta":{"agentId":"custom"}}`)
+	rec1 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
+	var resp1 map[string]any
+	_ = json.Unmarshal(rec1.Body.Bytes(), &resp1)
+	sessionID := resp1["result"].(map[string]any)["sessionId"].(string)
 
-	var resp map[string]any
-	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
-	if resp["error"] != nil {
-		t.Fatalf("unexpected error: %v", resp["error"])
+	rec2 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/set_config_option","params":{"sessionId":"`+sessionID+`","configId":"agent","value":"custom"}}`)
+	var resp2 map[string]any
+	_ = json.Unmarshal(rec2.Body.Bytes(), &resp2)
+	if resp2["error"] != nil {
+		t.Fatalf("unexpected error: %v", resp2["error"])
+	}
+	result := resp2["result"].(map[string]any)
+	opts := result["configOptions"].([]any)
+	agentOpt := opts[0].(map[string]any)
+	if agentOpt["currentValue"] != "custom" {
+		t.Errorf("currentValue = %v, want custom", agentOpt["currentValue"])
+	}
+
+	state, _ := r.sessions.Load(sessionID)
+	sess := state.(*sessionState)
+	if sess.configValues["agent"] != "custom" {
+		t.Errorf("configValues[agent] = %q, want custom", sess.configValues["agent"])
+	}
+}
+
+func TestHandleRPC_configSet_unknownAgent(t *testing.T) {
+	store := testStore(t)
+	r := newTestRegistry(store, &mockInferenceStrategy{}, []*tacklr.Tool{})
+
+	rec1 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
+	var resp1 map[string]any
+	_ = json.Unmarshal(rec1.Body.Bytes(), &resp1)
+	sessionID := resp1["result"].(map[string]any)["sessionId"].(string)
+
+	rec2 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/set_config_option","params":{"sessionId":"`+sessionID+`","configId":"agent","value":"missing"}}`)
+	var resp2 map[string]any
+	_ = json.Unmarshal(rec2.Body.Bytes(), &resp2)
+	errObj := resp2["error"].(map[string]any)
+	if !strings.Contains(errObj["message"].(string), "not found") {
+		t.Errorf("error message = %v, want to contain not found", errObj["message"])
+	}
+}
+
+func TestHandleRPC_configSet_unknownConfigID(t *testing.T) {
+	store := testStore(t)
+	r := newTestRegistry(store, &mockInferenceStrategy{}, []*tacklr.Tool{})
+
+	rec1 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
+	var resp1 map[string]any
+	_ = json.Unmarshal(rec1.Body.Bytes(), &resp1)
+	sessionID := resp1["result"].(map[string]any)["sessionId"].(string)
+
+	rec2 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/set_config_option","params":{"sessionId":"`+sessionID+`","configId":"model","value":"x"}}`)
+	var resp2 map[string]any
+	_ = json.Unmarshal(rec2.Body.Bytes(), &resp2)
+	errObj := resp2["error"].(map[string]any)
+	if !strings.Contains(errObj["message"].(string), "unknown configId") {
+		t.Errorf("error message = %v, want to contain unknown configId", errObj["message"])
+	}
+}
+
+func TestHandleRPC_sessionPrompt_usesConfigAgent(t *testing.T) {
+	store := testStore(t)
+	var customInvoked bool
+	r := NewRegistry(store, "default")
+	r.Register("default", AgentSpec{
+		Config: tacklr.Config{MaxWindowSize: 8192, SystemPrompt: "default-prompt"},
+		Model: &mockInferenceStrategy{
+			invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "from-default", IsComplete: true}
+			},
+		},
+	})
+	r.Register("custom", AgentSpec{
+		Config: tacklr.Config{MaxWindowSize: 8192, SystemPrompt: "custom-prompt"},
+		Model: &mockInferenceStrategy{
+			invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+				customInvoked = true
+				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "from-custom", IsComplete: true}
+			},
+		},
+	})
+
+	rec1 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
+	var resp1 map[string]any
+	_ = json.Unmarshal(rec1.Body.Bytes(), &resp1)
+	sessionID := resp1["result"].(map[string]any)["sessionId"].(string)
+
+	serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/set_config_option","params":{"sessionId":"`+sessionID+`","configId":"agent","value":"custom"}}`)
+
+	promptBody := `{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"hi"}]}}`
+	rec3 := serveACPRaw(t, r, promptBody)
+	frames := parseACPFrames(t, rec3.Body)
+	var hasResult bool
+	var sawCustomContent bool
+	for _, f := range frames {
+		if f["result"] != nil {
+			hasResult = true
+		}
+		if f["error"] != nil {
+			t.Fatalf("unexpected error frame: %v", f["error"])
+		}
+		if f["method"] == "session/update" {
+			params := f["params"].(map[string]any)
+			update := params["update"].(map[string]any)
+			if content, ok := update["content"].(map[string]any); ok && content["text"] == "from-custom" {
+				sawCustomContent = true
+			}
+		}
+	}
+	if !hasResult {
+		t.Fatal("expected result frame")
+	}
+	if !customInvoked {
+		t.Error("expected custom agent model to be invoked")
+	}
+	if !sawCustomContent {
+		t.Error("expected streamed content from custom agent")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ServeACPIO (stdio transport)
+// ---------------------------------------------------------------------------
+
+func TestServeACPIO_lifecycleAndPrompt(t *testing.T) {
+	store := testStore(t)
+	strategy := &mockInferenceStrategy{
+		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "hello", IsComplete: true}
+		},
+	}
+	r := newTestRegistry(store, strategy, []*tacklr.Tool{})
+
+	in := strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[{"name":"fs","command":"npx","args":[]}]}}`,
+	}, "\n") + "\n"
+
+	var out bytes.Buffer
+	if err := r.ServeACPIO(strings.NewReader(in), &out); err != nil {
+		t.Fatalf("ServeACPIO: %v", err)
+	}
+
+	frames := parseACPFrames(t, &out)
+	if len(frames) < 2 {
+		t.Fatalf("expected at least 2 frames, got %d: %v", len(frames), frames)
+	}
+	if frames[0]["result"] == nil {
+		t.Fatalf("initialize missing result: %v", frames[0])
+	}
+	initResult := frames[0]["result"].(map[string]any)
+	if initResult["protocolVersion"] != float64(1) {
+		t.Errorf("protocolVersion = %v, want 1", initResult["protocolVersion"])
+	}
+
+	newResult := frames[1]["result"].(map[string]any)
+	sessionID, ok := newResult["sessionId"].(string)
+	if !ok || sessionID == "" {
+		t.Fatalf("session/new missing sessionId: %v", newResult)
+	}
+	opts, ok := newResult["configOptions"].([]any)
+	if !ok || len(opts) == 0 {
+		t.Fatalf("session/new missing configOptions: %v", newResult)
+	}
+
+	// Second IO pass: set agent + prompt against the live session state.
+	in2 := strings.Join([]string{
+		`{"jsonrpc":"2.0","id":3,"method":"session/set_config_option","params":{"sessionId":"` + sessionID + `","configId":"agent","value":"default"}}`,
+		`{"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"hi"}]}}`,
+	}, "\n") + "\n"
+	var out2 bytes.Buffer
+	if err := r.ServeACPIO(strings.NewReader(in2), &out2); err != nil {
+		t.Fatalf("ServeACPIO prompt pass: %v", err)
+	}
+	frames2 := parseACPFrames(t, &out2)
+	var hasUpdate, hasResult bool
+	for _, f := range frames2 {
+		if f["method"] == "session/update" {
+			hasUpdate = true
+		}
+		if f["result"] != nil && f["id"] == float64(4) {
+			hasResult = true
+		}
+		if f["error"] != nil && f["id"] == float64(4) {
+			t.Fatalf("prompt error: %v", f["error"])
+		}
+	}
+	if !hasUpdate {
+		t.Error("expected session/update from prompt")
+	}
+	if !hasResult {
+		t.Error("expected prompt result frame with id 4")
 	}
 }
