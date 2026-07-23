@@ -30,17 +30,24 @@ import "github.com/ryanaldo34/tacklr/streaming"  // streaming strategies
 
 ## Server
 
-The `server` package provides an HTTP/SSE/WebSocket server backed by a `Registry` of agent specs.
+The `server` package separates domain logic (`Registry`) from transport (`Server`)
+and wire format (`Protocol`). Built-in protocols: `server.ACP` (JSON-RPC) and
+`server.SSE` (native SSE/WS).
 
 ```go
 import (
+    "context"
+    "os"
+    "os/signal"
+    "syscall"
+
     "github.com/ryanaldo34/tacklr"
     "github.com/ryanaldo34/tacklr/server"
     "github.com/ryanaldo34/tacklr/stores"
 )
 
 store := stores.NewInMemoryStore()
-r := server.NewRegistry(store)
+r := server.NewRegistry(store, "my-agent")
 r.Register("my-agent", server.AgentSpec{
     Config: tacklr.Config{
         SystemPrompt:  "You are a helpful assistant.",
@@ -50,11 +57,23 @@ r.Register("my-agent", server.AgentSpec{
     Tools: tools,
 })
 
-// Serve over standard SSE/JSON protocol.
-r.ListenAndServe(":8080", server.ProtocolSSE)
+srv := server.NewServer(r, server.SSE) // or server.ACP
+
+ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+defer stop()
+
+// HTTP (routes depend on Protocol.HTTPMode; shuts down on ctx cancel)
+// go srv.ServeHTTP(ctx, ":8080")
+
+// Stdio / NDJSON (returns on EOF or ctx cancel)
+_ = srv.ServeStdio(ctx, os.Stdin, os.Stdout)
 ```
 
-Clients send requests using the tacklr JSON format:
+Domain errors unwrap to sentinels (`server.ErrAgentNotFound`, etc.) via `errors.Is`.
+Wire responses use `PublicError` so internal failures become `ErrInternal`.
+
+
+### SSE clients
 
 ```bash
 # Prompt

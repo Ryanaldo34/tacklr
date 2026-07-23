@@ -51,6 +51,13 @@ type acpSessionIDParams struct {
 	SessionID string `json:"sessionId"`
 }
 
+// acpConfigSetParams holds params for session/set_config_option.
+type acpConfigSetParams struct {
+	SessionID string `json:"sessionId"`
+	ConfigID  string `json:"configId"`
+	Value     string `json:"value"`
+}
+
 func validateACPRequest(body []byte) (*parsedRequest, error) {
 	var env acpRequest
 	if err := json.Unmarshal(body, &env); err != nil {
@@ -59,25 +66,26 @@ func validateACPRequest(body []byte) (*parsedRequest, error) {
 	if env.JSONRPC != "2.0" {
 		return nil, clientErrorf(ErrInvalidRequest, "jsonrpc version must be \"2.0\"")
 	}
-	if env.ID == nil {
-		return nil, clientErrorf(ErrInvalidRequest, "id is required")
-	}
 	if env.Method == "" {
 		return nil, clientErrorf(ErrInvalidRequest, "method is required")
 	}
 
 	pr := &parsedRequest{
-		ID:     env.ID,
-		Method: env.Method,
-		Meta:   env.Meta,
+		ID:           env.ID,
+		Method:       env.Method,
+		Meta:         env.Meta,
+		Notification: env.ID == nil,
 	}
 
-	if env.Meta != nil {
-		var meta struct {
-			AgentID string `json:"agentId"`
+	// JSON-RPC notifications have no id and must not receive a response.
+	if pr.Notification {
+		if env.Method == "session/cancel" && env.Params != nil {
+			var p acpSessionIDParams
+			if err := json.Unmarshal(env.Params, &p); err == nil {
+				pr.ThreadID = p.SessionID
+			}
 		}
-		_ = json.Unmarshal(env.Meta, &meta)
-		pr.AgentID = meta.AgentID
+		return pr, nil
 	}
 
 	switch env.Method {
@@ -91,7 +99,8 @@ func validateACPRequest(body []byte) (*parsedRequest, error) {
 		if err := json.Unmarshal(env.Params, &p); err != nil {
 			return nil, clientErrorf(ErrInvalidRequest, "invalid initialize params: %v", err)
 		}
-		if p.ProtocolVersion != 1 {
+		// Accept any positive protocol version; respond with the version we support.
+		if p.ProtocolVersion < 1 {
 			return nil, clientErrorf(ErrInvalidRequest, "unsupported protocol version %d", p.ProtocolVersion)
 		}
 		return pr, nil
@@ -99,12 +108,29 @@ func validateACPRequest(body []byte) (*parsedRequest, error) {
 		if env.Params == nil {
 			return nil, clientErrorf(ErrInvalidRequest, "params is required for session/new")
 		}
-		var p acpSessionParams
+		// MCP server configs from ACP clients use a different shape (stdio
+		// command/args). Parse cwd only; ignore MCP server details we don't
+		// support over stdio yet so session creation never fails on them.
+		var p struct {
+			Cwd string `json:"cwd"`
+		}
 		if err := json.Unmarshal(env.Params, &p); err != nil {
 			return nil, clientErrorf(ErrInvalidRequest, "invalid session/new params: %v", err)
 		}
 		pr.CWD = p.Cwd
-		pr.MCPServers = p.MCPServers
+		return pr, nil
+	case "session/load":
+		if env.Params == nil {
+			return nil, clientErrorf(ErrInvalidRequest, "params is required for session/load")
+		}
+		var p acpSessionIDParams
+		if err := json.Unmarshal(env.Params, &p); err != nil {
+			return nil, clientErrorf(ErrInvalidRequest, "invalid session/load params: %v", err)
+		}
+		if p.SessionID == "" {
+			return nil, clientErrorf(ErrInvalidRequest, "sessionId is required for session/load")
+		}
+		pr.ThreadID = p.SessionID
 		return pr, nil
 	case "session/prompt":
 		if env.Params == nil {
@@ -130,6 +156,24 @@ func validateACPRequest(body []byte) (*parsedRequest, error) {
 		pr.ThreadID = p.SessionID
 		pr.Prompt = text
 		return pr, nil
+	case "session/set_config_option":
+		if env.Params == nil {
+			return nil, clientErrorf(ErrInvalidRequest, "params is required for session/set_config_option")
+		}
+		var p acpConfigSetParams
+		if err := json.Unmarshal(env.Params, &p); err != nil {
+			return nil, clientErrorf(ErrInvalidRequest, "invalid session/set_config_option params: %v", err)
+		}
+		if p.SessionID == "" {
+			return nil, clientErrorf(ErrInvalidRequest, "sessionId is required for session/set_config_option")
+		}
+		if p.ConfigID == "" {
+			return nil, clientErrorf(ErrInvalidRequest, "configId is required for session/set_config_option")
+		}
+		pr.ThreadID = p.SessionID
+		pr.ConfigID = p.ConfigID
+		pr.ConfigValue = p.Value
+		return pr, nil
 	case "session/resume", "session/close", "session/cancel":
 		if env.Params == nil {
 			return nil, clientErrorf(ErrInvalidRequest, "params is required for %s", env.Method)
@@ -142,6 +186,9 @@ func validateACPRequest(body []byte) (*parsedRequest, error) {
 			return nil, clientErrorf(ErrInvalidRequest, "sessionId is required for %s", env.Method)
 		}
 		pr.ThreadID = p.SessionID
+		return pr, nil
+	case "authenticate":
+		// No auth required; accept empty success.
 		return pr, nil
 	default:
 		return nil, clientErrorf(ErrInvalidRequest, "unsupported method: %s", env.Method)

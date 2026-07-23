@@ -554,7 +554,7 @@ func (a *AgentHarness) skillTool() *Tool {
 func NewAgentHarnessFromSession(ctx context.Context, sessionId string, cfg Config, model InferenceStrategy, store stores.BaseStore, watchdog AgentWatchDog) (*AgentHarness, error) {
 	winBytes, stateBytes, err := store.LoadSession(ctx, sessionId)
 	if err != nil {
-		return nil, fmt.Errorf("load session %q: %w", sessionId, err)
+		return nil, err
 	}
 	var contextWindow []*Message
 	if err := json.Unmarshal(winBytes, &contextWindow); err != nil {
