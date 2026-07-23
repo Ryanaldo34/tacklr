@@ -46,7 +46,6 @@ import (
     "github.com/ryanaldo34/tacklr/stores"
 )
 
-store := stores.NewInMemoryStore()
 r := server.NewRegistry(store, "my-agent")
 r.Register("my-agent", server.AgentSpec{
     Config: tacklr.Config{

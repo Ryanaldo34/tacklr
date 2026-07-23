@@ -101,11 +101,6 @@ type AgentWatchDog interface {
 	RecordToolResult(*Message) error
 }
 
-type pendingToolCall struct {
-	ToolCall        *ToolCall
-	InterruptActive bool
-}
-
 type AgentHarness struct {
 	Model                InferenceStrategy
 	SessionId            string
@@ -120,45 +115,26 @@ type AgentHarness struct {
 	compressionPrompt    string
 	streamingStrategy    StreamingStrategy
 	interruptToRequester map[string]string
-	pendingToolCalls     map[string]pendingToolCall
+	pendingToolCalls     map[string]stores.PendingToolCall
 	skillByName          map[string]skills.Skill
 	skillDirectories     []string
 	skillsInitialized    bool
 	mcpClients           []*mcp.Client
 	mcpInitialized       bool
-}
-
-// harnessSessionState is the persisted portion of AgentHarness required to
-// resume a turn after an interrupt. It is stored alongside the context window.
-type harnessSessionState struct {
-	Runtime              control.HarnessRuntime     `json:"runtime"`
-	PendingToolCalls     map[string]pendingToolCall `json:"pendingToolCalls"`
-	InterruptToRequester map[string]string          `json:"interruptToRequester"`
+	out                  chan streaming.StreamEvent
 }
 
 func (a *AgentHarness) checkpointSession(ctx context.Context) error {
 	slog.Debug("checkpointing session", "session_id", a.SessionId, "context_window_size", len(a.ContextWindow))
-	winJsonb, winErr := json.Marshal(a.ContextWindow)
-	if winErr != nil {
-		return winErr
-	}
-	state := harnessSessionState{
-		Runtime:              a.Runtime,
-		PendingToolCalls:     a.pendingToolCalls,
-		InterruptToRequester: a.interruptToRequester,
-	}
-	stateJsonb, stateErr := json.Marshal(state)
-	if stateErr != nil {
-		slog.Error("failed to marshal session state", "session_id", a.SessionId, "error", stateErr)
-		return stateErr
-	}
 	if a.Store == nil {
 		return nil
 	}
-	if err := a.Store.SaveSession(ctx, a.SessionId, winJsonb, stateJsonb); err != nil {
+
+	checkpoint, err := stores.NewCheckpoint(a.ContextWindow, a.pendingToolCalls, a.interruptToRequester, a.Runtime.State, a.Runtime.PendingInterrupts, a.Runtime.ResolvedInterrupts)
+	if err != nil {
 		return err
 	}
-	return nil
+	return a.Store.SaveSession(ctx, a.SessionId, *checkpoint)
 }
 
 func (a *AgentHarness) fitContextWindowBeforeNextTurn(ctx context.Context, nextPrompt *Message, out chan StreamEvent) error {
@@ -311,6 +287,9 @@ func (a *AgentHarness) Close() {
 }
 
 func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEvent, error) {
+	if a.out == nil {
+		return nil, fmt.Errorf("agent harness: Run called on uninitialized harness")
+	}
 	if err := a.initSkills(); err != nil {
 		return nil, fmt.Errorf("load skills: %w", err)
 	}
@@ -330,7 +309,6 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 				out <- StreamEvent{Type: StreamEventError, Error: fmt.Errorf("run: context cancelled: %w", ctx.Err())}
 				return
 			default:
-				// returning from an interrupt will have pending tool calls to take care of, so we will want to handle those first before doing more work
 				var toolResults []*Message
 				var toolCalls []ToolCall
 				if len(a.pendingToolCalls) == 0 {
@@ -339,8 +317,6 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 						out <- StreamEvent{Type: StreamEventError, Error: fmt.Errorf("run: invoke: %w", err)}
 						return
 					}
-					// Accumulate streamed text so completion frames (which carry
-					// empty Content) still produce a full context-window message.
 					streamedContent := map[string]string{}
 					for chunk := range events {
 						a.streamChunk(chunk, out)
@@ -349,7 +325,6 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 							key := string(chunk.Type) + ":" + chunk.MessageId
 							streamedContent[key] += chunk.Content
 						}
-						// Only append completed messages to the context window
 						if chunk.IsComplete {
 							toolCalls = append(toolCalls, chunk.ToolCalls...)
 							role := RoleAssistant
@@ -371,7 +346,6 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 							a.recordOutput(msg)
 						}
 					}
-					// If there are no tool calls in the latest completed message, break the loop
 					if len(a.ContextWindow[len(a.ContextWindow)-1].ToolCalls) == 0 {
 						out <- StreamEvent{Type: StreamEventComplete}
 						return
@@ -406,7 +380,6 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 						runtimeCopy := a.Runtime
 						runtimeCopy.CurrentToolCallID = tc.CallID
 						output, err := tool.Invoke(ctx, tc.Arguments, &runtimeCopy)
-						// Tools can raise interrupts to pause the loop and return control to the consumer for further input or action
 						var interrupt control.Interrupt
 						if errors.As(err, &interrupt) {
 							intrId := uuid.New().String()
@@ -418,7 +391,7 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 							payload := map[string]any{"interruptId": intrId, "data": serialized}
 							data, _ := json.Marshal(payload)
 							out <- StreamEvent{Type: StreamEventInterrupt, Data: data}
-							a.pendingToolCalls[tc.CallID] = pendingToolCall{ToolCall: &tc, InterruptActive: true}
+							a.pendingToolCalls[tc.CallID] = stores.PendingToolCall{ToolCall: &tc, InterruptActive: true}
 							a.interruptToRequester[intrId] = tc.CallID
 							a.checkpointSession(ctx)
 							return
@@ -426,7 +399,6 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 						if _, ok := a.pendingToolCalls[tc.CallID]; ok {
 							delete(a.pendingToolCalls, tc.CallID)
 						}
-						// Other general errors that were unhandled in the tool call
 						if err != nil {
 							toolResults[i] = &Message{
 								Role:       RoleTool,
@@ -448,15 +420,12 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 					}(i, tc)
 				}
 				runningTools.Wait()
-				// Append only non-nil results (interrupted tools have nil results)
 				for _, r := range toolResults {
 					if r != nil {
 						a.ContextWindow = append(a.ContextWindow, r)
 					}
 				}
 
-				// If all pending tool calls are active interrupts, yield back
-				// to the consumer and wait for ReturnFromInterrupt.
 				if len(a.pendingToolCalls) > 0 {
 					err := a.checkpointSession(ctx)
 					if err != nil {
@@ -485,7 +454,7 @@ func (a *AgentHarness) ReturnFromInterrupt(ctx context.Context, finishedInterrup
 		}
 		delete(a.interruptToRequester, interruptId)
 		if tc, ok := a.pendingToolCalls[toolCallId]; ok {
-			a.pendingToolCalls[toolCallId] = pendingToolCall{ToolCall: tc.ToolCall, InterruptActive: false}
+			a.pendingToolCalls[toolCallId] = stores.PendingToolCall{ToolCall: tc.ToolCall, InterruptActive: false}
 		} else {
 			return nil, fmt.Errorf("no pending tool call found for tool call id %s", toolCallId)
 		}
@@ -499,22 +468,32 @@ type Config struct {
 	SkillDirectories []string
 }
 
-func NewAgent(cfg Config, model InferenceStrategy, store stores.BaseStore, watchdog AgentWatchDog) *AgentHarness {
-	runtime := control.HarnessRuntime{}
+type AgentOptions struct {
+	Config    Config
+	Model     InferenceStrategy
+	Store     stores.BaseStore
+	WatchDog  AgentWatchDog
+	Tools     []*Tool
+}
+
+func NewAgent(opts AgentOptions) *AgentHarness {
+	events := make(chan streaming.StreamEvent)
+	runtime := control.NewRuntime(events, opts.Store, nil)
 	runtime.EnsureInitialized()
-	runtime.Store = store
 	return &AgentHarness{
-		Model:                model,
-		MaxWindowSize:        cfg.MaxWindowSize,
-		SystemPrompt:         cfg.SystemPrompt,
-		Store:                store,
+		Model:                opts.Model,
+		MaxWindowSize:        opts.Config.MaxWindowSize,
+		SystemPrompt:         opts.Config.SystemPrompt,
+		Store:                opts.Store,
 		Runtime:              runtime,
-		WatchDog:             watchdog,
-		skillDirectories:     cfg.SkillDirectories,
+		WatchDog:             opts.WatchDog,
+		Tools:                opts.Tools,
+		skillDirectories:     opts.Config.SkillDirectories,
 		ContextWindow:        nil,
 		SessionId:            "",
 		interruptToRequester: make(map[string]string),
-		pendingToolCalls:     make(map[string]pendingToolCall),
+		pendingToolCalls:     make(map[string]stores.PendingToolCall),
+		out:                  events,
 	}
 }
 
@@ -552,34 +531,34 @@ func (a *AgentHarness) skillTool() *Tool {
 }
 
 func NewAgentHarnessFromSession(ctx context.Context, sessionId string, cfg Config, model InferenceStrategy, store stores.BaseStore, watchdog AgentWatchDog) (*AgentHarness, error) {
-	winBytes, stateBytes, err := store.LoadSession(ctx, sessionId)
+	events := make(chan StreamEvent)
+	checkpoint, err := store.LoadSession(ctx, sessionId)
 	if err != nil {
 		return nil, err
 	}
-	var contextWindow []*Message
-	if err := json.Unmarshal(winBytes, &contextWindow); err != nil {
-		return nil, fmt.Errorf("unmarshal context window: %w", err)
+	runtime := control.NewRuntime(events, store, checkpoint.State.RuntimeState)
+	runtime.EnsureInitialized()
+	if len(checkpoint.State.PendingInterrupts) > 0 {
+		_ = json.Unmarshal(checkpoint.State.PendingInterrupts, &runtime.PendingInterrupts)
 	}
-	var state harnessSessionState
-	if err := json.Unmarshal(stateBytes, &state); err != nil {
-		return nil, fmt.Errorf("unmarshal session state: %w", err)
+	if len(checkpoint.State.ResolvedInterrupts) > 0 {
+		_ = json.Unmarshal(checkpoint.State.ResolvedInterrupts, &runtime.ResolvedInterrupts)
 	}
-	state.Runtime.Store = store
-	state.Runtime.EnsureInitialized()
 	h := &AgentHarness{
 		Model:                model,
 		Store:                store,
 		SessionId:            sessionId,
-		ContextWindow:        contextWindow,
-		Runtime:              state.Runtime,
+		ContextWindow:        checkpoint.ContextWindow,
+		Runtime:              runtime,
 		WatchDog:             watchdog,
 		MaxWindowSize:        cfg.MaxWindowSize,
 		SystemPrompt:         cfg.SystemPrompt,
 		compressionPrompt:    "",
 		streamingStrategy:    nil,
-		interruptToRequester: state.InterruptToRequester,
-		pendingToolCalls:     state.PendingToolCalls,
+		interruptToRequester: checkpoint.State.InterruptToRequester,
+		pendingToolCalls:     checkpoint.State.PendingToolCalls,
 		skillDirectories:     cfg.SkillDirectories,
+		out:                  events,
 	}
 	return h, nil
 }

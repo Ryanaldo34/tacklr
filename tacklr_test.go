@@ -9,8 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/control"
+	"github.com/ryanaldo34/tacklr/stores"
 )
 
 type mockStrategy struct {
@@ -19,15 +19,15 @@ type mockStrategy struct {
 	callNum   atomic.Int64
 }
 
-func (m *mockStrategy) WithApiKey(string) InferenceStrategy           { return m }
-func (m *mockStrategy) WithModel(string) InferenceStrategy            { return m }
-func (m *mockStrategy) WithURL(string) InferenceStrategy              { return m }
-func (m *mockStrategy) WithReasoningLevel(string) InferenceStrategy   { return m }
-func (m *mockStrategy) WithStructuredOutput(any) InferenceStrategy    { return m }
-func (m *mockStrategy) SetSystemPrompt(string)                       {}
-func (m *mockStrategy) Reset()                                        {}
-func (m *mockStrategy) CompressContextWindow() error                  { return nil }
-func (m *mockStrategy) MaxContextWindow() (int, error)                { return 0, nil }
+func (m *mockStrategy) WithApiKey(string) InferenceStrategy         { return m }
+func (m *mockStrategy) WithModel(string) InferenceStrategy          { return m }
+func (m *mockStrategy) WithURL(string) InferenceStrategy            { return m }
+func (m *mockStrategy) WithReasoningLevel(string) InferenceStrategy { return m }
+func (m *mockStrategy) WithStructuredOutput(any) InferenceStrategy  { return m }
+func (m *mockStrategy) SetSystemPrompt(string)                      {}
+func (m *mockStrategy) Reset()                                      {}
+func (m *mockStrategy) CompressContextWindow() error                { return nil }
+func (m *mockStrategy) MaxContextWindow() (int, error)              { return 0, nil }
 func (m *mockStrategy) CountTokens(ctx context.Context, msgs []*Message, tools []*Tool) (int, error) {
 	return 0, nil
 }
@@ -132,12 +132,7 @@ func TestAgentHarness_Run(t *testing.T) {
 				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "Hello!", IsComplete: true}
 			},
 		}
-		ah := &AgentHarness{
-			Model:   strategy,
-			Tools:   []*Tool{validTool},
-			Store:   store,
-		Runtime: HarnessRuntime{Store: store},
-		}
+		ah := NewAgent(AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
 		ch, err := ah.Run(context.Background(), "Hi")
 		if err != nil {
 			t.Fatal(err)
@@ -177,12 +172,7 @@ func TestAgentHarness_Run(t *testing.T) {
 				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "Done!", IsComplete: true}
 			},
 		}
-		ah := &AgentHarness{
-			Model:   strategy,
-			Tools:   []*Tool{validTool},
-			Store:   store,
-		Runtime: HarnessRuntime{Store: store},
-		}
+		ah := NewAgent(AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
 		ch, err := ah.Run(context.Background(), "Say hello")
 		if err != nil {
 			t.Fatal(err)
@@ -258,11 +248,7 @@ func TestAgentHarness_Run(t *testing.T) {
 				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
 			},
 		}
-		ah := &AgentHarness{
-			Model:   strategy,
-			Store:   store,
-		Runtime: HarnessRuntime{Store: store},
-		}
+		ah := NewAgent(AgentOptions{Config: Config{}, Model: strategy, Store: store})
 		ch, err := ah.Run(context.Background(), "test")
 		if err != nil {
 			t.Fatal(err)
@@ -299,12 +285,7 @@ func TestAgentHarness_Run(t *testing.T) {
 				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
 			},
 		}
-		ah := &AgentHarness{
-			Model:   strategy,
-			Tools:   []*Tool{brokenTool},
-			Store:   store,
-		Runtime: HarnessRuntime{Store: store},
-		}
+		ah := NewAgent(AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{brokenTool}})
 		ch, err := ah.Run(context.Background(), "test")
 		if err != nil {
 			t.Fatal(err)
@@ -326,11 +307,7 @@ func TestAgentHarness_Run(t *testing.T) {
 		strategy := &mockStrategy{
 			invokeErr: fmt.Errorf("network error"),
 		}
-		ah := &AgentHarness{
-			Model:   strategy,
-			Store:   store,
-		Runtime: HarnessRuntime{Store: store},
-		}
+		ah := NewAgent(AgentOptions{Config: Config{}, Model: strategy, Store: store})
 		ch, err := ah.Run(context.Background(), "test")
 		if err != nil {
 			t.Fatal(err)
@@ -364,14 +341,7 @@ func TestAgentHarness_Run(t *testing.T) {
 			},
 		}
 
-		ah := &AgentHarness{
-			Model:   strategy,
-			Tools:   []*Tool{interruptTool},
-			Store:   store,
-		Runtime: HarnessRuntime{Store: store},
-		}
-		ah.pendingToolCalls = make(map[string]pendingToolCall)
-		ah.interruptToRequester = make(map[string]string)
+		ah := NewAgent(AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{interruptTool}})
 
 		ch, err := ah.Run(context.Background(), "start")
 		if err != nil {
@@ -465,13 +435,7 @@ func TestReturnFromInterrupt_unknownUUID_returnsError(t *testing.T) {
 			events <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
 		},
 	}
-	ah := &AgentHarness{
-		Model:                strategy,
-		Store:                store,
-		Runtime:              HarnessRuntime{Store: store},
-		interruptToRequester: make(map[string]string),
-		pendingToolCalls:     make(map[string]pendingToolCall),
-	}
+	ah := NewAgent(AgentOptions{Config: Config{}, Model: strategy, Store: store})
 
 	resolved, err := ah.ReturnFromInterrupt(context.Background(), map[string][]byte{
 		"bogus-uuid": []byte(`{}`),
@@ -520,14 +484,7 @@ func TestReturnFromInterrupt_invalidPayload_returnsError(t *testing.T) {
 		},
 	}
 
-	ah := &AgentHarness{
-		Model:                strategy,
-		Tools:                []*Tool{interruptTool},
-		Store:                store,
-		Runtime:              HarnessRuntime{Store: store},
-		pendingToolCalls:     make(map[string]pendingToolCall),
-		interruptToRequester: make(map[string]string),
-	}
+	ah := NewAgent(AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{interruptTool}})
 
 	ch, err := ah.Run(context.Background(), "start")
 	if err != nil {
@@ -571,10 +528,15 @@ func TestNewAgent(t *testing.T) {
 	mockModel := &mockStrategy{}
 	wd := &recordingWatchdog{}
 
-	h := NewAgent(Config{
-		MaxWindowSize: 4096,
-		SystemPrompt:  "test prompt",
-	}, mockModel, store, wd)
+	h := NewAgent(AgentOptions{
+		Config: Config{
+			MaxWindowSize: 4096,
+			SystemPrompt:  "test prompt",
+		},
+		Model:    mockModel,
+		Store:    store,
+		WatchDog: wd,
+	})
 
 	if h.Model != InferenceStrategy(mockModel) {
 		t.Error("Model not wired from arg")
@@ -641,11 +603,8 @@ func TestRun_contextCancellation(t *testing.T) {
 			ch <- LLMResponseChunk{IsComplete: true, Content: "done", Type: StreamEventMessage}
 		},
 	}
-	h := &AgentHarness{
-		Model:         mock,
-		MaxWindowSize: 8192,
-		ContextWindow: []*Message{{Role: RoleUser, Content: "hi"}},
-	}
+	h := NewAgent(AgentOptions{Config: Config{MaxWindowSize: 8192}, Model: mock})
+	h.ContextWindow = []*Message{{Role: RoleUser, Content: "hi"}}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -688,11 +647,7 @@ func TestRun_watchdogInvoked(t *testing.T) {
 		},
 	}
 	wd := &recordingWatchdog{}
-	h := &AgentHarness{
-		Model:         mock,
-		MaxWindowSize: 8192,
-		WatchDog:      wd,
-	}
+	h := NewAgent(AgentOptions{Config: Config{MaxWindowSize: 8192}, Model: mock, WatchDog: wd})
 
 	events, err := h.Run(context.Background(), "hi")
 	if err != nil {
@@ -727,10 +682,7 @@ func TestRun_reasoningCapturedInContextWindow(t *testing.T) {
 			ch <- LLMResponseChunk{IsComplete: true}
 		},
 	}
-	h := &AgentHarness{
-		Model:         mock,
-		MaxWindowSize: 8192,
-	}
+	h := NewAgent(AgentOptions{Config: Config{MaxWindowSize: 8192}, Model: mock})
 
 	events, err := h.Run(context.Background(), "what is the answer?")
 	if err != nil {

@@ -5,8 +5,8 @@ import (
 	"sync"
 
 	"github.com/milvus-io/milvus/client/v2/milvusclient"
-	"github.com/neo4j/neo4j-go-driver/v6/neo4j"
 	"github.com/ryanaldo34/tacklr/stores"
+	"github.com/ryanaldo34/tacklr/streaming"
 )
 
 type ActivityStatus int
@@ -29,14 +29,24 @@ const (
 //
 // Callers must initialize the runtime via EnsureInitialized before use.
 type HarnessRuntime struct {
-	GraphDB            *neo4j.Driver        `json:"-"`
-	VectorDB           *milvusclient.Client `json:"-"`
-	Store              stores.BaseStore     `json:"-"`
-	State              map[string]any       `json:"state"`
-	PendingInterrupts  interruptMap         `json:"pendingInterrupts"`
-	ResolvedInterrupts interruptMap         `json:"resolvedInterrupts"`
-	CurrentToolCallID  string               `json:"-"`
-	mu                 *sync.RWMutex        `json:"-"`
+	VectorDB           *milvusclient.Client
+	Store              stores.BaseStore
+	State              map[string]any
+	PendingInterrupts  interruptMap
+	ResolvedInterrupts interruptMap
+	CurrentToolCallID  string
+	mu                 *sync.RWMutex
+	ch                 chan streaming.StreamEvent
+}
+
+// Runtime hook to emit custom events as updates from tool calls
+func (rt *HarnessRuntime) EmitUpdate(data []byte) {
+	event := streaming.StreamEvent{
+		Type: streaming.StreamEventToolUpdate,
+		Data: data,
+		MessageID: rt.CurrentToolCallID,
+	}
+	rt.ch <- event
 }
 
 // EnsureInitialized initializes the mutex and all maps on the runtime.
@@ -149,6 +159,14 @@ func (rt *HarnessRuntime) RaiseInterrupt(kind string, payload []byte) (Interrupt
 	}
 	rt.PendingInterrupts[rt.CurrentToolCallID] = intr
 	return nil, intr
+}
+
+func NewRuntime(ch chan streaming.StreamEvent, store stores.BaseStore, state map[string]any) HarnessRuntime {
+	if state == nil {
+		state = make(map[string]any)
+	}
+	rt := HarnessRuntime{ch: ch, Store: store, State: state}
+	return rt
 }
 
 // --- Workflow types ---
