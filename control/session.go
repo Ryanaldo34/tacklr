@@ -40,13 +40,20 @@ type HarnessRuntime struct {
 }
 
 // Runtime hook to emit custom events as updates from tool calls
-func (rt *HarnessRuntime) EmitUpdate(data []byte) {
+func (rt *HarnessRuntime) EmitUpdate(message string) {
 	event := streaming.StreamEvent{
-		Type: streaming.StreamEventToolUpdate,
-		Data: data,
+		Type:      streaming.StreamEventToolUpdate,
+		Content:   message,
 		MessageID: rt.CurrentToolCallID,
 	}
 	rt.ch <- event
+}
+
+// SetOutputChannel updates the channel used by EmitUpdate to send tool progress
+// events. Each Run call creates a fresh output channel so that previous closes
+// don't affect active runs.
+func (rt *HarnessRuntime) SetOutputChannel(ch chan streaming.StreamEvent) {
+	rt.ch = ch
 }
 
 // EnsureInitialized initializes the mutex and all maps on the runtime.

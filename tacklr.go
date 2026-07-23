@@ -295,6 +295,7 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 	}
 	a.initMCP(ctx)
 	out := make(chan StreamEvent)
+	a.Runtime.SetOutputChannel(out)
 	err := a.fitContextWindowBeforeNextTurn(ctx, &Message{Role: RoleUser, Content: prompt}, out)
 	if err != nil {
 		return nil, err
@@ -378,7 +379,7 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 							return
 						}
 						runtimeCopy := a.Runtime
-						runtimeCopy.CurrentToolCallID = tc.CallID
+						runtimeCopy.CurrentToolCallID = tc.ID
 						output, err := tool.Invoke(ctx, tc.Arguments, &runtimeCopy)
 						var interrupt control.Interrupt
 						if errors.As(err, &interrupt) {
@@ -391,13 +392,13 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 							payload := map[string]any{"interruptId": intrId, "data": serialized}
 							data, _ := json.Marshal(payload)
 							out <- StreamEvent{Type: StreamEventInterrupt, Data: data}
-							a.pendingToolCalls[tc.CallID] = stores.PendingToolCall{ToolCall: &tc, InterruptActive: true}
-							a.interruptToRequester[intrId] = tc.CallID
+							a.pendingToolCalls[tc.ID] = stores.PendingToolCall{ToolCall: &tc, InterruptActive: true}
+							a.interruptToRequester[intrId] = tc.ID
 							a.checkpointSession(ctx)
 							return
 						}
-						if _, ok := a.pendingToolCalls[tc.CallID]; ok {
-							delete(a.pendingToolCalls, tc.CallID)
+						if _, ok := a.pendingToolCalls[tc.ID]; ok {
+							delete(a.pendingToolCalls, tc.ID)
 						}
 						if err != nil {
 							toolResults[i] = &Message{

@@ -311,6 +311,32 @@ func eventToAcpJsonRpc(threadId string, event *streaming.StreamEvent) ([][]byte,
 			toStream = append(toStream, bytes)
 		}
 		return toStream, nil
+	case streaming.StreamEventToolUpdate:
+		var toStream [][]byte
+		data := map[string]any{
+			"jsonrpc": "2.0",
+			"method":  "session/update",
+			"params": map[string]any{
+				"sessionId": threadId,
+				"update": map[string]any{
+					"sessionUpdate": "tool_call_update",
+					"toolCallId":    event.MessageID,
+					"status":        "in_progress",
+					"content": []map[string]any{
+						{
+							"type": "content",
+							"content": map[string]any{
+								"type": "text",
+								"text": event.Content,
+							},
+						},
+					},
+				},
+			},
+		}
+		bytes, _ := json.Marshal(data)
+		toStream = append(toStream, bytes)
+		return toStream, nil
 	case streaming.StreamEventToolResult:
 		var toStream [][]byte
 		tc := event.ToolCalls[0]
