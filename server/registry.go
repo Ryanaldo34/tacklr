@@ -80,6 +80,7 @@ type Registry struct {
 	store        stores.BaseStore
 	activeCtx    sync.Map // threadID → context.CancelFunc
 	sessions     sync.Map // threadID → *sessionState
+	cancelled    sync.Map // threadID → struct{}
 }
 
 func NewRegistry(store stores.BaseStore, defaultAgent string) *Registry {
@@ -187,9 +188,16 @@ func (r *Registry) CloseSession(sessionID string) {
 
 // CancelSession aborts any active turn for the session without removing it.
 func (r *Registry) CancelSession(sessionID string) {
+	r.cancelled.Store(sessionID, struct{}{})
 	if c, ok := r.activeCtx.LoadAndDelete(sessionID); ok {
 		c.(context.CancelFunc)()
 	}
+}
+
+// WasCancelled reports whether CancelSession was called for this session.
+func (r *Registry) WasCancelled(sessionID string) bool {
+	_, ok := r.cancelled.Load(sessionID)
+	return ok
 }
 
 // RunTurn starts a prompt or resume turn and returns a stream of events.
@@ -269,6 +277,7 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 		defer func() {
 			h.Close()
 			r.activeCtx.Delete(threadID)
+			r.cancelled.Delete(threadID)
 			cancel()
 		}()
 		for {

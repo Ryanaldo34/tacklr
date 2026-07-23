@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -66,6 +67,8 @@ func (s *Server) ServeStdio(ctx context.Context, in io.Reader, out io.Writer) er
 		}
 	}()
 
+	var wg sync.WaitGroup
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -77,8 +80,13 @@ func (s *Server) ServeStdio(ctx context.Context, in io.Reader, out io.Writer) er
 			if rr.err != nil {
 				if errors.Is(rr.err, io.EOF) {
 					if trimmed := bytes.TrimRight(rr.line, "\n\r"); len(trimmed) > 0 {
-						s.HandleMessage(ctx, trimmed, w)
+						wg.Add(1)
+						go func(body []byte) {
+							defer wg.Done()
+							s.HandleMessage(ctx, body, w)
+						}(trimmed)
 					}
+					wg.Wait()
 					return nil
 				}
 				return fmt.Errorf("stdio read: %w", rr.err)
@@ -87,7 +95,11 @@ func (s *Server) ServeStdio(ctx context.Context, in io.Reader, out io.Writer) er
 			if len(line) == 0 {
 				continue
 			}
-			s.HandleMessage(ctx, line, w)
+			wg.Add(1)
+			go func(body []byte) {
+				defer wg.Done()
+				s.HandleMessage(ctx, body, w)
+			}(line)
 		}
 	}
 }
@@ -345,38 +357,81 @@ func (s *Server) handleDirectTurn(ctx context.Context, pr *parsedRequest, w Mess
 
 // streamTurn encodes harness events via Protocol and writes frames.
 // If reqID is non-nil, it is injected into complete/error frames (ACP correlation).
-// ctx cancellation aborts the turn and returns ctx.Err().
+// When the turn ends without a complete/error frame (session/cancel or ctx cancel),
+// a result with stopReason "cancelled" is written for the original request id.
 func (s *Server) streamTurn(ctx context.Context, threadID string, stream *EventStream, w MessageWriter, reqID json.RawMessage) error {
+	finished := false
+	writeCancelled := func() {
+		if finished || len(reqID) == 0 {
+			return
+		}
+		finished = true
+		// ACP: cancelled prompt turns complete with stopReason "cancelled".
+		_ = w.WriteResult(reqID, map[string]string{"stopReason": "cancelled"})
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			stream.Cancel()
-			return ctx.Err()
+			// Drain remaining events briefly so we do not race with a natural complete.
+			for {
+				select {
+				case ev, ok := <-stream.Events:
+					if !ok {
+						writeCancelled()
+						return ctx.Err()
+					}
+					if err := s.writeStreamEvent(threadID, &ev, w, reqID, &finished); err != nil {
+						return err
+					}
+					if finished {
+						return ctx.Err()
+					}
+				default:
+					writeCancelled()
+					return ctx.Err()
+				}
+			}
 		case ev, ok := <-stream.Events:
 			if !ok {
+				writeCancelled()
 				return nil
 			}
-			frames, err := s.Protocol.EncodeEvent(threadID, &ev)
-			if err != nil {
-				return fmt.Errorf("protocol encode: %w", err)
+			if ev.Type == streaming.StreamEventComplete && len(reqID) > 0 && s.Registry.WasCancelled(threadID) {
+				writeCancelled()
+				continue
 			}
-			if reqID != nil && (ev.Type == streaming.StreamEventComplete || ev.Type == streaming.StreamEventError) {
-				for i, frame := range frames {
-					var msg map[string]any
-					if json.Unmarshal(frame, &msg) == nil {
-						msg["id"] = reqID
-						frames[i], _ = json.Marshal(msg)
-					}
-				}
-			}
-			for _, f := range frames {
-				if err := w.WriteFrame(f); err != nil {
-					stream.Cancel()
-					return fmt.Errorf("write frame: %w", err)
-				}
+			if err := s.writeStreamEvent(threadID, &ev, w, reqID, &finished); err != nil {
+				return err
 			}
 		}
 	}
+}
+
+func (s *Server) writeStreamEvent(threadID string, ev *streaming.StreamEvent, w MessageWriter, reqID json.RawMessage, finished *bool) error {
+	if ev.Type == streaming.StreamEventComplete || ev.Type == streaming.StreamEventError {
+		*finished = true
+	}
+	frames, err := s.Protocol.EncodeEvent(threadID, ev)
+	if err != nil {
+		return fmt.Errorf("protocol encode: %w", err)
+	}
+	if len(reqID) > 0 && (ev.Type == streaming.StreamEventComplete || ev.Type == streaming.StreamEventError) {
+		for i, frame := range frames {
+			var msg map[string]any
+			if json.Unmarshal(frame, &msg) == nil {
+				msg["id"] = reqID
+				frames[i], _ = json.Marshal(msg)
+			}
+		}
+	}
+	for _, f := range frames {
+		if err := w.WriteFrame(f); err != nil {
+			return fmt.Errorf("write frame: %w", err)
+		}
+	}
+	return nil
 }
 
 func (s *Server) serveHTTPRPC(w http.ResponseWriter, req *http.Request) {

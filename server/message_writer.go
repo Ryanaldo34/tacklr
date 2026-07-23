@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"sync"
 
 	"github.com/coder/websocket"
 )
@@ -21,18 +22,25 @@ type MessageWriter interface {
 
 // lineMessageWriter writes NDJSON frames (stdio / line-delimited RPC).
 type lineMessageWriter struct {
-	w io.Writer
+	mu sync.Mutex
+	w  io.Writer
 }
 
 func (m *lineMessageWriter) WriteResult(id json.RawMessage, result any) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return writeJSONLine(m.w, map[string]any{"jsonrpc": "2.0", "id": id, "result": result})
 }
 
 func (m *lineMessageWriter) WriteError(id json.RawMessage, err error) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return writeJSONLine(m.w, jsonRPCErrorBody(id, err))
 }
 
 func (m *lineMessageWriter) WriteFrame(data []byte) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if _, err := m.w.Write(data); err != nil {
 		return err
 	}

@@ -57,6 +57,7 @@ func TestJSONRPCErrorCode(t *testing.T) {
 		{clientErrorf(ErrInvalidRequest, "bad"), jsonRPCCodeInvalidRequest},
 		{clientErrorf(ErrMethodNotFound, "nope"), jsonRPCCodeMethodNotFound},
 		{clientErrorf(ErrAgentNotFound, "missing"), jsonRPCCodeApplication},
+		{ErrRequestCancelled, jsonRPCCodeCancelled},
 		{fmt.Errorf("boom"), jsonRPCCodeInternal},
 		{nil, jsonRPCCodeInternal},
 	}

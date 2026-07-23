@@ -995,17 +995,31 @@ func TestServeStdio_lifecycleAndPrompt(t *testing.T) {
 	if len(frames) < 2 {
 		t.Fatalf("expected at least 2 frames, got %d: %v", len(frames), frames)
 	}
-	if frames[0]["result"] == nil {
-		t.Fatalf("initialize missing result: %v", frames[0])
+
+	var initResult, newResult map[string]any
+	var sessionID string
+	for _, f := range frames {
+		res, ok := f["result"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if f["id"] == float64(1) {
+			initResult = res
+		}
+		if f["id"] == float64(2) {
+			newResult = res
+			if sid, ok := res["sessionId"].(string); ok && sid != "" {
+				sessionID = sid
+			}
+		}
 	}
-	initResult := frames[0]["result"].(map[string]any)
+	if initResult == nil {
+		t.Fatalf("no initialize result in frames: %v", frames)
+	}
 	if initResult["protocolVersion"] != float64(1) {
 		t.Errorf("protocolVersion = %v, want 1", initResult["protocolVersion"])
 	}
-
-	newResult := frames[1]["result"].(map[string]any)
-	sessionID, ok := newResult["sessionId"].(string)
-	if !ok || sessionID == "" {
+	if sessionID == "" {
 		t.Fatalf("session/new missing sessionId: %v", newResult)
 	}
 	opts, ok := newResult["configOptions"].([]any)
@@ -1091,5 +1105,64 @@ func TestHandleMessage_initialize_recordingWriter(t *testing.T) {
 	}
 	if result["protocolVersion"] != 1 && result["protocolVersion"] != float64(1) {
 		t.Errorf("protocolVersion = %v, want 1", result["protocolVersion"])
+	}
+}
+
+func TestHandleMessage_sessionCancel_stopReasonCancelled(t *testing.T) {
+	started := make(chan struct{})
+	strategy := &mockInferenceStrategy{
+		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			close(started)
+			<-ctx.Done()
+		},
+	}
+	r := newTestRegistry(testStore(t), strategy, nil)
+	srv := NewServer(r, ACP)
+
+	recNew := &recordingMessageWriter{}
+	srv.HandleMessage(context.Background(), []byte(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`), recNew)
+	if len(recNew.Results) != 1 {
+		t.Fatalf("session/new results = %d", len(recNew.Results))
+	}
+	sessionID := recNew.Results[0].Result.(map[string]any)["sessionId"].(string)
+
+	recPrompt := &recordingMessageWriter{}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		body := []byte(`{"jsonrpc":"2.0","id":10,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"hi"}]}}`)
+		srv.HandleMessage(context.Background(), body, recPrompt)
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("prompt did not start")
+	}
+
+	// session/cancel as notification (no id)
+	srv.HandleMessage(context.Background(), []byte(`{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"`+sessionID+`"}}`), &recordingMessageWriter{})
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("prompt did not finish after cancel")
+	}
+
+	var found bool
+	for _, res := range recPrompt.Results {
+		switch m := res.Result.(type) {
+		case map[string]string:
+			if m["stopReason"] == "cancelled" {
+				found = true
+			}
+		case map[string]any:
+			if m["stopReason"] == "cancelled" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected stopReason cancelled, got results=%#v frames=%v", recPrompt.Results, recPrompt.framesAsMaps(t))
 	}
 }

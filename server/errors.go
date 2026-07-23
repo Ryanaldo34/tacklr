@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -25,7 +26,12 @@ const (
 	jsonRPCCodeMethodNotFound = -32601
 	jsonRPCCodeInternal       = -32603
 	jsonRPCCodeApplication    = -32000 // server/application errors (-32000..-32099)
+	jsonRPCCodeCancelled      = -32800 // request cancelled (ACP / LSP convention)
 )
+
+// ErrRequestCancelled is returned when a request is aborted via session/cancel
+// or context cancellation.
+var ErrRequestCancelled = errors.New("request cancelled")
 
 // clientError is a caller-facing error that unwraps to a sentinel.
 type clientError struct {
@@ -77,6 +83,8 @@ func JSONRPCErrorCode(err error) int {
 	switch {
 	case err == nil:
 		return jsonRPCCodeInternal
+	case errors.Is(err, ErrRequestCancelled), errors.Is(err, context.Canceled):
+		return jsonRPCCodeCancelled
 	case errors.Is(err, ErrMethodNotFound):
 		return jsonRPCCodeMethodNotFound
 	case errors.Is(err, ErrInvalidRequest):
