@@ -7,18 +7,58 @@ import (
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
-type Protocol string
+// HTTPMode selects how ServeHTTP binds routes for a Protocol.
+type HTTPMode int
 
 const (
-	ProtocolACP Protocol = "acp"
-	ProtocolSSE Protocol = "sse"
+	// HTTPModeRPC binds a single POST / JSON-RPC endpoint (ACP).
+	HTTPModeRPC HTTPMode = iota
+	// HTTPModeStream binds SSE (POST) and WebSocket (GET) endpoints.
+	HTTPModeStream
 )
 
-// StreamEventHandler converts a StreamEvent into zero or more wire frames to
-// be sent to the client. It is a pure format conversion — content management
-// (buffering, chunking) is handled by the streaming strategy set on the
-// harness.
+// StreamEventHandler converts a StreamEvent into zero or more wire frames.
+// Content management (buffering, chunking) is handled by the streaming strategy
+// on the harness.
 type StreamEventHandler func(threadID string, event *streaming.StreamEvent) ([][]byte, error)
+
+// RequestValidator parses a raw request body into a transport-agnostic request.
+type RequestValidator func([]byte) (*parsedRequest, error)
+
+// Protocol converts between wire format and domain types.
+type Protocol interface {
+	Parse([]byte) (*parsedRequest, error)
+	EncodeEvent(threadID string, event *streaming.StreamEvent) ([][]byte, error)
+	HTTPMode() HTTPMode
+}
+
+// funcProtocol adapts RequestValidator + StreamEventHandler into Protocol.
+type funcProtocol struct {
+	validate RequestValidator
+	encode   StreamEventHandler
+	mode     HTTPMode
+}
+
+func (p *funcProtocol) Parse(body []byte) (*parsedRequest, error) {
+	return p.validate(body)
+}
+
+func (p *funcProtocol) EncodeEvent(threadID string, event *streaming.StreamEvent) ([][]byte, error) {
+	return p.encode(threadID, event)
+}
+
+func (p *funcProtocol) HTTPMode() HTTPMode { return p.mode }
+
+// NewProtocol builds a Protocol from the existing validator/encoder function types.
+func NewProtocol(validate RequestValidator, encode StreamEventHandler, mode HTTPMode) Protocol {
+	return &funcProtocol{validate: validate, encode: encode, mode: mode}
+}
+
+// Built-in protocols.
+var (
+	ACP = NewProtocol(validateACPRequest, eventToAcpJsonRpc, HTTPModeRPC)
+	SSE = NewProtocol(validateSSERequest, eventToRawSSE, HTTPModeStream)
+)
 
 // ConfigOption describes a selectable session configuration option returned by
 // session/new and session/load.
@@ -63,24 +103,4 @@ type parsedRequest struct {
 
 	// Extensibility — raw _meta blob for custom fields
 	Meta json.RawMessage
-}
-
-type RequestValidator func([]byte) (*parsedRequest, error)
-
-var handlers = map[Protocol]StreamEventHandler{
-	ProtocolACP: eventToAcpJsonRpc,
-	ProtocolSSE: eventToRawSSE,
-}
-
-var validators = map[Protocol]RequestValidator{
-	ProtocolSSE: validateSSERequest,
-	ProtocolACP: validateACPRequest,
-}
-
-func GetHandler(protocol Protocol) StreamEventHandler {
-	return handlers[protocol]
-}
-
-func GetValidator(protocol Protocol) RequestValidator {
-	return validators[protocol]
 }

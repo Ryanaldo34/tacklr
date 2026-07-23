@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/streaming"
@@ -44,7 +45,7 @@ func serveACPRaw(t *testing.T, r *Registry, body string) *httptest.ResponseRecor
 	t.Helper()
 	req := newACPRequest(t, body)
 	rec := httptest.NewRecorder()
-	r.HandleRPC(rec, req, handlers[ProtocolACP], validators[ProtocolACP])
+	NewServer(r, ACP).serveHTTPRPC(rec, req)
 	return rec
 }
 
@@ -258,7 +259,7 @@ func TestValidateACPRequest_sessionLoad_missingSessionID(t *testing.T) {
 }
 
 func TestValidateACPRequest_configSet(t *testing.T) {
-	body := []byte(`{"jsonrpc":"2.0","id":8,"method":"session/set_config_option","params":{"sessionId":"sess-1","configId":"agent","value":"custom"}}`)
+	body := []byte(`{"jsonrpc":"2.0","id":8,"method":"session/set_config_option","params":{"sessionId":"sess-1","configId":"model","value":"custom"}}`)
 	pr, err := validateACPRequest(body)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -266,8 +267,8 @@ func TestValidateACPRequest_configSet(t *testing.T) {
 	if pr.ThreadID != "sess-1" {
 		t.Errorf("threadID = %q, want %q", pr.ThreadID, "sess-1")
 	}
-	if pr.ConfigID != "agent" {
-		t.Errorf("configId = %q, want %q", pr.ConfigID, "agent")
+	if pr.ConfigID != "model" {
+		t.Errorf("configId = %q, want %q", pr.ConfigID, "model")
 	}
 	if pr.ConfigValue != "custom" {
 		t.Errorf("configValue = %q, want %q", pr.ConfigValue, "custom")
@@ -541,8 +542,8 @@ func TestHandleRPC_sessionNew(t *testing.T) {
 		t.Fatalf("expected configOptions in result, got %v", result)
 	}
 	agentOpt := opts[0].(map[string]any)
-	if agentOpt["id"] != "agent" {
-		t.Errorf("configOptions[0].id = %v, want agent", agentOpt["id"])
+	if agentOpt["id"] != "model" {
+		t.Errorf("configOptions[0].id = %v, want model", agentOpt["id"])
 	}
 	if agentOpt["currentValue"] != "default" {
 		t.Errorf("configOptions[0].currentValue = %v, want default", agentOpt["currentValue"])
@@ -851,7 +852,7 @@ func TestHandleRPC_configSet_agent(t *testing.T) {
 	_ = json.Unmarshal(rec1.Body.Bytes(), &resp1)
 	sessionID := resp1["result"].(map[string]any)["sessionId"].(string)
 
-	rec2 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/set_config_option","params":{"sessionId":"`+sessionID+`","configId":"agent","value":"custom"}}`)
+	rec2 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/set_config_option","params":{"sessionId":"`+sessionID+`","configId":"model","value":"custom"}}`)
 	var resp2 map[string]any
 	_ = json.Unmarshal(rec2.Body.Bytes(), &resp2)
 	if resp2["error"] != nil {
@@ -880,7 +881,7 @@ func TestHandleRPC_configSet_unknownAgent(t *testing.T) {
 	_ = json.Unmarshal(rec1.Body.Bytes(), &resp1)
 	sessionID := resp1["result"].(map[string]any)["sessionId"].(string)
 
-	rec2 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/set_config_option","params":{"sessionId":"`+sessionID+`","configId":"agent","value":"missing"}}`)
+	rec2 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/set_config_option","params":{"sessionId":"`+sessionID+`","configId":"model","value":"missing"}}`)
 	var resp2 map[string]any
 	_ = json.Unmarshal(rec2.Body.Bytes(), &resp2)
 	errObj := resp2["error"].(map[string]any)
@@ -898,7 +899,7 @@ func TestHandleRPC_configSet_unknownConfigID(t *testing.T) {
 	_ = json.Unmarshal(rec1.Body.Bytes(), &resp1)
 	sessionID := resp1["result"].(map[string]any)["sessionId"].(string)
 
-	rec2 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/set_config_option","params":{"sessionId":"`+sessionID+`","configId":"model","value":"x"}}`)
+	rec2 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/set_config_option","params":{"sessionId":"`+sessionID+`","configId":"unknown","value":"x"}}`)
 	var resp2 map[string]any
 	_ = json.Unmarshal(rec2.Body.Bytes(), &resp2)
 	errObj := resp2["error"].(map[string]any)
@@ -934,7 +935,7 @@ func TestHandleRPC_sessionPrompt_usesConfigAgent(t *testing.T) {
 	_ = json.Unmarshal(rec1.Body.Bytes(), &resp1)
 	sessionID := resp1["result"].(map[string]any)["sessionId"].(string)
 
-	serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/set_config_option","params":{"sessionId":"`+sessionID+`","configId":"agent","value":"custom"}}`)
+	serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/set_config_option","params":{"sessionId":"`+sessionID+`","configId":"model","value":"custom"}}`)
 
 	promptBody := `{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"hi"}]}}`
 	rec3 := serveACPRaw(t, r, promptBody)
@@ -968,10 +969,10 @@ func TestHandleRPC_sessionPrompt_usesConfigAgent(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// ServeACPIO (stdio transport)
+// ServeStdio (stdio transport)
 // ---------------------------------------------------------------------------
 
-func TestServeACPIO_lifecycleAndPrompt(t *testing.T) {
+func TestServeStdio_lifecycleAndPrompt(t *testing.T) {
 	store := testStore(t)
 	strategy := &mockInferenceStrategy{
 		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
@@ -986,8 +987,8 @@ func TestServeACPIO_lifecycleAndPrompt(t *testing.T) {
 	}, "\n") + "\n"
 
 	var out bytes.Buffer
-	if err := r.ServeACPIO(strings.NewReader(in), &out); err != nil {
-		t.Fatalf("ServeACPIO: %v", err)
+	if err := NewServer(r, ACP).ServeStdio(context.Background(), strings.NewReader(in), &out); err != nil {
+		t.Fatalf("ServeStdio: %v", err)
 	}
 
 	frames := parseACPFrames(t, &out)
@@ -1014,12 +1015,12 @@ func TestServeACPIO_lifecycleAndPrompt(t *testing.T) {
 
 	// Second IO pass: set agent + prompt against the live session state.
 	in2 := strings.Join([]string{
-		`{"jsonrpc":"2.0","id":3,"method":"session/set_config_option","params":{"sessionId":"` + sessionID + `","configId":"agent","value":"default"}}`,
+		`{"jsonrpc":"2.0","id":3,"method":"session/set_config_option","params":{"sessionId":"` + sessionID + `","configId":"model","value":"default"}}`,
 		`{"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"hi"}]}}`,
 	}, "\n") + "\n"
 	var out2 bytes.Buffer
-	if err := r.ServeACPIO(strings.NewReader(in2), &out2); err != nil {
-		t.Fatalf("ServeACPIO prompt pass: %v", err)
+	if err := NewServer(r, ACP).ServeStdio(context.Background(), strings.NewReader(in2), &out2); err != nil {
+		t.Fatalf("ServeStdio prompt pass: %v", err)
 	}
 	frames2 := parseACPFrames(t, &out2)
 	var hasUpdate, hasResult bool
@@ -1039,5 +1040,56 @@ func TestServeACPIO_lifecycleAndPrompt(t *testing.T) {
 	}
 	if !hasResult {
 		t.Error("expected prompt result frame with id 4")
+	}
+}
+
+func TestServeStdio_contextCancel(t *testing.T) {
+	r := newTestRegistry(testStore(t), &mockInferenceStrategy{}, nil)
+	srv := NewServer(r, ACP)
+
+	pr, pw := io.Pipe()
+	defer pr.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- srv.ServeStdio(ctx, pr, io.Discard)
+	}()
+
+	// Ensure the server is blocked on a read, then cancel.
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != context.Canceled {
+			t.Fatalf("ServeStdio error = %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ServeStdio did not return after cancel")
+	}
+	_ = pw.Close()
+}
+
+func TestHandleMessage_initialize_recordingWriter(t *testing.T) {
+	r := newTestRegistry(testStore(t), &mockInferenceStrategy{}, nil)
+	srv := NewServer(r, ACP)
+	rec := &recordingMessageWriter{}
+
+	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}`)
+	srv.HandleMessage(context.Background(), body, rec)
+
+	if len(rec.Errors) != 0 {
+		t.Fatalf("unexpected errors: %v", rec.Errors)
+	}
+	if len(rec.Results) != 1 {
+		t.Fatalf("results = %d, want 1", len(rec.Results))
+	}
+	result, ok := rec.Results[0].Result.(map[string]any)
+	if !ok {
+		t.Fatalf("result type %T", rec.Results[0].Result)
+	}
+	if result["protocolVersion"] != 1 && result["protocolVersion"] != float64(1) {
+		t.Errorf("protocolVersion = %v, want 1", result["protocolVersion"])
 	}
 }

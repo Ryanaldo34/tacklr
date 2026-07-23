@@ -10,64 +10,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync/atomic"
 	"testing"
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/control"
-	"github.com/ryanaldo34/tacklr/stores"
 )
 
-type mockInferenceStrategy struct {
-	invokeFn  func(context.Context, []*tacklr.Message, []*tacklr.Tool, chan<- tacklr.LLMResponseChunk)
-	invokeErr error
-	callNum   atomic.Int64
-}
-
-func (m *mockInferenceStrategy) WithApiKey(string) tacklr.InferenceStrategy         { return m }
-func (m *mockInferenceStrategy) WithModel(string) tacklr.InferenceStrategy          { return m }
-func (m *mockInferenceStrategy) WithURL(string) tacklr.InferenceStrategy            { return m }
-func (m *mockInferenceStrategy) WithReasoningLevel(string) tacklr.InferenceStrategy { return m }
-func (m *mockInferenceStrategy) WithStructuredOutput(any) tacklr.InferenceStrategy  { return m }
-func (m *mockInferenceStrategy) SetSystemPrompt(string)                             {}
-func (m *mockInferenceStrategy) Reset()                                             {}
-func (m *mockInferenceStrategy) CompressContextWindow() error                       { return nil }
-func (m *mockInferenceStrategy) MaxContextWindow() (int, error)                     { return 0, nil }
-func (m *mockInferenceStrategy) CountTokens(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool) (int, error) {
-	return 0, nil
-}
-func (m *mockInferenceStrategy) Invoke(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool) (chan tacklr.LLMResponseChunk, error) {
-	if m.invokeErr != nil {
-		return nil, m.invokeErr
-	}
-	m.callNum.Add(1)
-	ch := make(chan tacklr.LLMResponseChunk)
-	go func() {
-		defer close(ch)
-		m.invokeFn(ctx, msgs, tools, ch)
-	}()
-	return ch, nil
-}
-
-func testStore(t *testing.T) *stores.InMemoryStore {
-	t.Helper()
-	t.Cleanup(func() {})
-	return stores.NewInMemoryStore()
-}
-
-func newTestRegistry(store *stores.InMemoryStore, strategy tacklr.InferenceStrategy, tools []*tacklr.Tool) *Registry {
-	r := NewRegistry(store, "default")
-	r.Register("default", AgentSpec{
-		Config: tacklr.Config{
-			MaxWindowSize: 8192,
-			SystemPrompt:  "test prompt",
-		},
-		Model:    strategy,
-		Tools:    tools,
-		WatchDog: nil,
-	})
-	return r
-}
 func newSSERequest(t *testing.T, target string, body io.Reader) *http.Request {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, target, body)
@@ -155,7 +103,7 @@ func TestHandlePrompt_generatesThreadID(t *testing.T) {
 	req := newSSERequest(t, "/", body)
 	rec := httptest.NewRecorder()
 
-	r.serveSSE(rec, req, handlers[ProtocolSSE], validators[ProtocolSSE])
+	NewServer(r, SSE).serveHTTPSSE(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -186,7 +134,7 @@ func TestHandlePrompt_missingAcceptHeader_returnsNotAcceptable(t *testing.T) {
 	req.Header.Set("Accept", "application/json")
 	rec := httptest.NewRecorder()
 
-	r.serveSSE(rec, req, handlers[ProtocolSSE], validators[ProtocolSSE])
+	NewServer(r, SSE).serveHTTPSSE(rec, req)
 
 	if rec.Code != http.StatusNotAcceptable {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotAcceptable)
@@ -219,7 +167,7 @@ func TestHandleResume_resolvesInterrupt(t *testing.T) {
 	promptBody := bytes.NewReader([]byte(`{"agent_id":"default","prompt":"start"}`))
 	promptReq := newSSERequest(t, "/", promptBody)
 	promptRec := httptest.NewRecorder()
-	r.serveSSE(promptRec, promptReq, handlers[ProtocolSSE], validators[ProtocolSSE])
+	NewServer(r, SSE).serveHTTPSSE(promptRec, promptReq)
 
 	events := parseSSEEvents(t, promptRec.Body)
 	var threadID, interruptID string
@@ -248,7 +196,7 @@ func TestHandleResume_resolvesInterrupt(t *testing.T) {
 	resumeBody := fmt.Sprintf(`{"agent_id":"default","thread_id":%q,"responses":{%q:{"interruptId":%q,"selectionIdx":0}}}`, threadID, interruptID, interruptID)
 	resumeReq := newSSERequest(t, "/resume", bytes.NewReader([]byte(resumeBody)))
 	resumeRec := httptest.NewRecorder()
-	r.serveSSE(resumeRec, resumeReq, handlers[ProtocolSSE], validators[ProtocolSSE])
+	NewServer(r, SSE).serveHTTPSSE(resumeRec, resumeReq)
 
 	if resumeRec.Code != http.StatusOK {
 		t.Fatalf("resume status = %d, want 200", resumeRec.Code)
@@ -279,7 +227,7 @@ func TestHandleResume_unknownThread_returnsError(t *testing.T) {
 	body := bytes.NewReader([]byte(`{"agent_id":"default","thread_id":"nonexistent","responses":{"x":{}}}`))
 	req := newSSERequest(t, "/resume", body)
 	rec := httptest.NewRecorder()
-	r.serveSSE(rec, req, handlers[ProtocolSSE], validators[ProtocolSSE])
+	NewServer(r, SSE).serveHTTPSSE(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -318,7 +266,7 @@ func TestHandleResume_invalidPayload_returnsError(t *testing.T) {
 
 	// Raise an interrupt first
 	promptRec := httptest.NewRecorder()
-	r.serveSSE(promptRec, newSSERequest(t, "/", bytes.NewReader([]byte(`{"agent_id":"default","prompt":"start"}`))), handlers[ProtocolSSE], validators[ProtocolSSE])
+	NewServer(r, SSE).serveHTTPSSE(promptRec, newSSERequest(t, "/", bytes.NewReader([]byte(`{"agent_id":"default","prompt":"start"}`))))
 
 	events := parseSSEEvents(t, promptRec.Body)
 	var threadID, interruptID string
@@ -341,7 +289,7 @@ func TestHandleResume_invalidPayload_returnsError(t *testing.T) {
 	// Resume with out-of-bounds selectionIdx
 	resumeBody := fmt.Sprintf(`{"agent_id":"default","thread_id":%q,"responses":{%q:{"interruptId":%q,"selectionIdx":99}}}`, threadID, interruptID, interruptID)
 	resumeRec := httptest.NewRecorder()
-	r.serveSSE(resumeRec, newSSERequest(t, "/resume", bytes.NewReader([]byte(resumeBody))), handlers[ProtocolSSE], validators[ProtocolSSE])
+	NewServer(r, SSE).serveHTTPSSE(resumeRec, newSSERequest(t, "/resume", bytes.NewReader([]byte(resumeBody))))
 
 	resumeEvents := parseSSEEvents(t, resumeRec.Body)
 	var foundError bool
