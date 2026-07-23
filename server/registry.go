@@ -29,6 +29,7 @@ type AgentSpec struct {
 // sessionState holds per-session configuration provided by the client at
 // session creation time (session/new) and updated via session/set_config_option.
 type sessionState struct {
+	mu           sync.Mutex
 	cwd          string
 	mcpServers   []mcp.MCPConfig
 	prompted     bool // true after the first prompt turn has been initiated
@@ -162,18 +163,22 @@ func (r *Registry) SetConfigOption(sessionID, configID, value string) (*SessionV
 		return nil, clientErrorf(ErrSessionNotFound, "session %q not found", sessionID)
 	}
 	sess := state.(*sessionState)
+	sess.mu.Lock()
 	if sess.configValues == nil {
 		sess.configValues = map[string]string{}
 	}
 	switch configID {
 	case "model":
 		if _, exists := r.agents[value]; !exists {
+			sess.mu.Unlock()
 			return nil, clientErrorf(ErrAgentNotFound, "agent %q not found", value)
 		}
 		sess.configValues["agent"] = value
 	default:
+		sess.mu.Unlock()
 		return nil, clientErrorf(ErrInvalidRequest, "unknown configId %q", configID)
 	}
+	sess.mu.Unlock()
 	return &SessionView{
 		SessionID:     sessionID,
 		ConfigOptions: r.buildConfigOptions(r.sessionAgentID(sess)),
@@ -223,10 +228,6 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 		if agentID == "" {
 			return nil, clientErrorf(ErrInvalidRequest, "no agent configured for session and no default agent configured")
 		}
-		// loadSession is not yet implemented — conversation history is not
-		// persisted to the store, so loading would always fail. Always start
-		// with a fresh harness. Session configuration (agent, MCP servers) is
-		// preserved in r.sessions.
 		load = false
 		if sess != nil && !sess.prompted {
 			sess.prompted = true
@@ -336,9 +337,13 @@ func (r *Registry) buildConfigOptions(currentAgent string) []ConfigOption {
 }
 
 func (r *Registry) sessionAgentID(sess *sessionState) string {
-	if sess != nil && sess.configValues != nil {
-		if id := sess.configValues["agent"]; id != "" {
-			return id
+	if sess != nil {
+		sess.mu.Lock()
+		defer sess.mu.Unlock()
+		if sess.configValues != nil {
+			if id := sess.configValues["agent"]; id != "" {
+				return id
+			}
 		}
 	}
 	return r.defaultAgent
@@ -366,7 +371,13 @@ func (r *Registry) loadAgent(ctx context.Context, agentID, threadID string, load
 			return nil, nil, err
 		}
 	} else {
-		h = tacklr.NewAgent(spec.Config, spec.Model, store, spec.WatchDog)
+		h = tacklr.NewAgent(tacklr.AgentOptions{
+			Config:   spec.Config,
+			Model:    spec.Model,
+			Store:    store,
+			WatchDog: spec.WatchDog,
+			Tools:    spec.Tools,
+		})
 	}
 
 	h.SessionId = threadID

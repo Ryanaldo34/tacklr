@@ -445,6 +445,49 @@ func TestEventToAcpJsonRpc_toolResult(t *testing.T) {
 	}
 }
 
+func TestEventToAcpJsonRpc_toolUpdate(t *testing.T) {
+	ev := &streaming.StreamEvent{
+		Type:      streaming.StreamEventToolUpdate,
+		MessageID: "tc-1",
+		Content:   "processing step 1...",
+	}
+	frames, err := eventToAcpJsonRpc("thread-1", ev)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(frames) != 1 {
+		t.Fatalf("frames len = %d, want 1", len(frames))
+	}
+	var msg map[string]any
+	_ = json.Unmarshal(frames[0], &msg)
+	params := msg["params"].(map[string]any)
+	update := params["update"].(map[string]any)
+	if update["sessionUpdate"] != "tool_call_update" {
+		t.Errorf("sessionUpdate = %v, want tool_call_update", update["sessionUpdate"])
+	}
+	if update["status"] != "in_progress" {
+		t.Errorf("status = %v, want in_progress", update["status"])
+	}
+	if update["toolCallId"] != "tc-1" {
+		t.Errorf("toolCallId = %v, want tc-1", update["toolCallId"])
+	}
+	content := update["content"].([]any)
+	if len(content) != 1 {
+		t.Fatalf("content len = %d, want 1", len(content))
+	}
+	inner := content[0].(map[string]any)
+	if inner["type"] != "content" {
+		t.Errorf("inner type = %v, want content", inner["type"])
+	}
+	innerContent := inner["content"].(map[string]any)
+	if innerContent["type"] != "text" {
+		t.Errorf("inner content type = %v, want text", innerContent["type"])
+	}
+	if innerContent["text"] != "processing step 1..." {
+		t.Errorf("inner text = %v, want processing step 1...", innerContent["text"])
+	}
+}
+
 func TestEventToAcpJsonRpc_complete(t *testing.T) {
 	ev := &streaming.StreamEvent{
 		Type:   streaming.StreamEventComplete,
@@ -823,6 +866,95 @@ func TestHandleRPC_sessionPrompt_stringTurnID(t *testing.T) {
 	}
 	if resultFrame["id"] != "req-abc" {
 		t.Errorf("result id = %v, want %q (client request ID)", resultFrame["id"], "req-abc")
+	}
+}
+
+func TestHandleRPC_sessionPrompt_toolProgress(t *testing.T) {
+	store := testStore(t)
+
+	progressTool := &tacklr.Tool{
+		Name: "progress_demo",
+		Handler: func(args struct {
+			Runtime tacklr.HarnessRuntime `json:"-"`
+		}) (string, error) {
+			args.Runtime.EmitUpdate("starting work...")
+			args.Runtime.EmitUpdate("50% complete")
+			args.Runtime.EmitUpdate("almost done")
+			return "task complete!", nil
+		},
+	}
+	if err := progressTool.Validate(); err != nil {
+		t.Fatal(err)
+	}
+
+	var strategy *mockInferenceStrategy
+	strategy = &mockInferenceStrategy{
+		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			if strategy.callNum.Load() > 1 {
+				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "done", IsComplete: true}
+				return
+			}
+			ch <- tacklr.LLMResponseChunk{
+				Type:      tacklr.StreamEventFunctionCall,
+				ToolCalls: []tacklr.ToolCall{{ID: "call_progress", CallID: "call_progress", Name: "progress_demo", Arguments: `{}`}},
+				IsComplete: true,
+			}
+			ch <- tacklr.LLMResponseChunk{IsComplete: true}
+		},
+	}
+
+	r := newTestRegistry(store, strategy, []*tacklr.Tool{progressTool})
+
+	rec1 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
+	var resp1 map[string]any
+	_ = json.Unmarshal(rec1.Body.Bytes(), &resp1)
+	sessionID := resp1["result"].(map[string]any)["sessionId"].(string)
+
+	promptBody := `{"jsonrpc":"2.0","id":10,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"run demo"}]}}`
+	rec2 := serveACPRaw(t, r, promptBody)
+	frames := parseACPFrames(t, rec2.Body)
+
+	var toolCallInProgress bool
+	var toolCallCompleted bool
+	var toolCallUpdateCount int
+	for _, f := range frames {
+		if f["method"] != "session/update" {
+			continue
+		}
+		params := f["params"].(map[string]any)
+		update := params["update"].(map[string]any)
+		switch update["sessionUpdate"].(string) {
+		case "tool_call":
+			switch update["status"].(string) {
+			case "in_progress":
+				toolCallInProgress = true
+			case "completed":
+				toolCallCompleted = true
+			}
+		case "tool_call_update":
+			toolCallUpdateCount++
+		}
+	}
+
+	if !toolCallInProgress {
+		t.Error("expected tool_call with in_progress status")
+	}
+	if toolCallUpdateCount < 1 {
+		t.Errorf("expected at least 1 tool_call_update, got %d", toolCallUpdateCount)
+	}
+	if !toolCallCompleted {
+		t.Error("expected tool_call with completed status")
+	}
+
+	var hasResult bool
+	for _, f := range frames {
+		if f["result"] != nil {
+			hasResult = true
+			break
+		}
+	}
+	if !hasResult {
+		t.Error("expected a result frame")
 	}
 }
 

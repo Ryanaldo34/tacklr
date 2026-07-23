@@ -44,4 +44,3 @@ func TestSentinelWrapping(t *testing.T) {
 		}
 	}
 }
-
