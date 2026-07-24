@@ -39,8 +39,8 @@ type WithEmbedded struct {
 	Extra string `json:"extra"`
 }
 
-func zeroArgsStringHandler(ctx context.Context) (string, error) { return "hello", nil }
-func zeroArgsIntHandler(ctx context.Context) (int, error)       { return 42, nil }
+func zeroArgsStringHandler(ctx context.Context) (string, error)              { return "hello", nil }
+func zeroArgsIntHandler(ctx context.Context) (int, error)                    { return 42, nil }
 func basicHandler(ctx context.Context, args BasicArgs) (string, error)       { return "ok", nil }
 func taggedHandler(ctx context.Context, args TaggedArgs) (string, error)     { return "ok", nil }
 func nestedHandler(ctx context.Context, args NestedArgs) (string, error)     { return "ok", nil }
