@@ -104,7 +104,7 @@ func TestAgentHarness_Run(t *testing.T) {
 
 	interruptTool := NewTool(ToolConfig{
 		Name: "ask_user",
-		Handler: func(ctx context.Context, _ struct{}, runtime HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, _ struct{}, runtime *HarnessRuntime) (string, error) {
 			intr, err := runtime.RaiseInterrupt("user_selection_choice", []byte(optionsJSON))
 			if err != nil {
 				return "", err
@@ -445,7 +445,7 @@ func TestReturnFromInterrupt_invalidPayload_returnsError(t *testing.T) {
 	optionsJSON := `[{"title":"A","description":"opt A","isRecommended":false}]`
 	interruptTool := NewTool(ToolConfig{
 		Name: "ask_user",
-		Handler: func(ctx context.Context, _ struct{}, runtime HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, _ struct{}, runtime *HarnessRuntime) (string, error) {
 			intr, err := runtime.RaiseInterrupt("user_selection_choice", []byte(optionsJSON))
 			if err != nil {
 				return "", err
@@ -528,8 +528,8 @@ func TestNewAgent(t *testing.T) {
 	if h.MaxWindowSize != 4096 {
 		t.Errorf("MaxWindowSize = %d, want 4096", h.MaxWindowSize)
 	}
-	if h.SystemPrompt != "test prompt" {
-		t.Errorf("SystemPrompt = %q, want 'test prompt'", h.SystemPrompt)
+	if h.Instructions != "test prompt" {
+		t.Errorf("SystemPrompt = %q, want 'test prompt'", h.Instructions)
 	}
 	if h.Store != store {
 		t.Error("Store not wired from arg")

@@ -58,7 +58,7 @@ func errHandler(ctx context.Context, args BasicArgs) (string, error) {
 func TestInvoke(t *testing.T) {
 	t.Run("returns raw string", func(t *testing.T) {
 		tool := NewTool(ToolConfig{Name: "zero", Handler: zeroArgsStringHandler})
-		got, err := tool.Invoke(context.Background(), "", HarnessRuntime{})
+		got, err := tool.Invoke(context.Background(), "", &HarnessRuntime{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -69,7 +69,7 @@ func TestInvoke(t *testing.T) {
 
 	t.Run("marshals non-string return", func(t *testing.T) {
 		tool := NewTool(ToolConfig{Name: "zero_int", Handler: zeroArgsIntHandler})
-		got, err := tool.Invoke(context.Background(), "", HarnessRuntime{})
+		got, err := tool.Invoke(context.Background(), "", &HarnessRuntime{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -86,7 +86,7 @@ func TestInvoke(t *testing.T) {
 			return "result", nil
 		}
 		tool := NewTool(ToolConfig{Name: "handler", Handler: h})
-		got, err := tool.Invoke(context.Background(), `{"name":"test","age":10}`, HarnessRuntime{})
+		got, err := tool.Invoke(context.Background(), `{"name":"test","age":10}`, &HarnessRuntime{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -97,7 +97,7 @@ func TestInvoke(t *testing.T) {
 
 	t.Run("propagates handler error", func(t *testing.T) {
 		tool := NewTool(ToolConfig{Name: "err", Handler: errHandler})
-		_, err := tool.Invoke(context.Background(), `{"name":"x","age":1}`, HarnessRuntime{})
+		_, err := tool.Invoke(context.Background(), `{"name":"x","age":1}`, &HarnessRuntime{})
 		if err == nil || err.Error() != "boom" {
 			t.Fatalf("got %v, want boom", err)
 		}
@@ -105,7 +105,7 @@ func TestInvoke(t *testing.T) {
 
 	t.Run("bad json args errors", func(t *testing.T) {
 		tool := NewTool(ToolConfig{Name: "basic", Handler: basicHandler})
-		_, err := tool.Invoke(context.Background(), `{bad`, HarnessRuntime{})
+		_, err := tool.Invoke(context.Background(), `{bad`, &HarnessRuntime{})
 		if err == nil {
 			t.Fatal("expected error")
 		}

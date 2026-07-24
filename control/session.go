@@ -36,6 +36,7 @@ type HarnessRuntime struct {
 	ResolvedInterrupts interruptMap
 	CurrentToolCallID  string
 	Mode               string
+	Plan               []Todo
 	mu                 *sync.RWMutex
 	ch                 chan streaming.StreamEvent
 }

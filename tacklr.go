@@ -6,8 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"slices"
-	"strings"
 	"sync"
 
 	"github.com/google/uuid"
@@ -106,13 +106,13 @@ type AgentHarness struct {
 	SessionId            string
 	Tools                []*Tool
 	MCPConfigs           []mcp.MCPConfig
-	SystemPrompt         string
+	Instructions         string
 	ContextWindow        []*Message
 	Store                stores.BaseStore
 	Runtime              control.HarnessRuntime
 	WatchDog             AgentWatchDog
 	MaxWindowSize        int
-	compressionPrompt    string
+	Plan                 []control.Todo
 	streamingStrategy    StreamingStrategy
 	interruptToRequester map[string]string
 	pendingToolCalls     map[string]stores.PendingToolCall
@@ -137,46 +137,112 @@ func (a *AgentHarness) checkpointSession(ctx context.Context) error {
 	return a.Store.SaveSession(ctx, a.SessionId, *checkpoint)
 }
 
-func (a *AgentHarness) fitContextWindowBeforeNextTurn(ctx context.Context, nextPrompt *Message, out chan StreamEvent) error {
-	if len(a.ContextWindow) == 0 {
-		a.ContextWindow = append(a.ContextWindow, nextPrompt)
-		prompt := nextPrompt.Content
-		if len([]rune(prompt)) > 50 {
-			prompt = string([]rune(prompt)[:50]) + "..."
-		}
-		slog.Info("starting new agent turn", "prompt", prompt)
-		return nil
-	}
-	tempWindow := append(a.ContextWindow, nextPrompt)
-	currSize, err := a.Model.CountTokens(ctx, tempWindow, a.Tools)
-	if err != nil {
-		return fmt.Errorf("count tokens: %w", err)
-	}
-	if currSize <= a.MaxWindowSize {
-		a.ContextWindow = tempWindow
-		return nil
-	}
-	// Compress/Compact the context window which now exceeds the max window size
-	slog.Info("max window size exceeded, compressing context window", "max_size", a.MaxWindowSize, "current_size", currSize)
-	if a.compressionPrompt == "" {
-		a.compressionPrompt = "Please summarize the entire message history into a single, concise summary including key items for your current and past tasks with a primary focus on your current task"
-	}
-	a.Model.SetSystemPrompt(a.compressionPrompt)
-	events, err := a.Model.Invoke(ctx, a.ContextWindow, a.Tools)
-	if err != nil {
-		return fmt.Errorf("invoke: %w", err)
-	}
-	var compressed = &Message{}
-	for chunk := range events {
-		a.streamChunk(chunk, out)
-		compressed.Content += chunk.Content
-		if chunk.IsComplete {
-			compressed.Role = RoleAssistant
-			a.ContextWindow = append(a.ContextWindow[:0], compressed, nextPrompt)
-			a.Model.SetSystemPrompt(a.SystemPrompt)
+func (a *AgentHarness) constructSystemPrompt() string {
+	var skills string
+	if !a.skillsInitialized {
+		err := a.initSkills()
+		if err != nil {
+			slog.Error("failed to load skills", "area", "startup", "error", err)
+		} else {
+			for _, skill := range a.skillByName {
+				skills += fmt.Sprintf(" - %s: %s\n", skill.Name, skill.Description)
+			}
 		}
 	}
-	return nil
+	builtIn := `SYSTEM REQUIREMENTS:
+You are a researcher structuring your workflow around Adaptive Case Management methodologies. Your workflow is simple, get a task -> draft a plan -> execte the plan -> make new discoveries -> adapt plan if needed -> repeat. To get started with planning completion of a new task, you may use tools that have READ access to the knowledge base & any connected services. Tools with WRITE and/or EXECUTE access will be locked until a plan with a todolist has been constructed. Use the create_plan tool to begin the implementation of a plan with an official to-do list. To edit a plan based on new discoveries, use the update_plan tool to add and/or remove items from the to-do list.
+`
+	if skills != "" {
+		builtIn = fmt.Sprintf(`%s
+
+The following skills describe reusable approaches, methodologies, or areas of expertise that can improve task performance.
+
+Each skill includes guidance on when and how it should be applied.
+
+When solving a task:
+- Determine which skills are relevant.
+- Apply only the skills that meaningfully improve the outcome.
+- Combine multiple skills when appropriate.
+- Do not force the use of a skill if it is unrelated to the current task.
+
+%s`, builtIn, skills)
+	}
+	if a.Instructions != "" {
+		builtIn = fmt.Sprintf(`%s
+
+These instructions were provided by the creator of this agent instance.
+
+Treat them as long-term preferences and behavioral guidance.
+
+Follow these instructions unless they conflict with:
+1. System requirements.
+2. Safety requirements.
+3. The user's current request in this conversation.
+
+These instructions describe how the user generally wants you to behave, not what task they are currently asking you to perform.
+
+%s`, builtIn, a.Instructions)
+	}
+	return builtIn
+}
+
+// Ensure we do not exceed the max window size by compressing the context window before adding the next prompt
+func (a *AgentHarness) addToContext(ctx context.Context, newMsg *Message, out chan StreamEvent) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		tempWindow := append(a.ContextWindow, newMsg)
+		currSize, err := a.Model.CountTokens(ctx, tempWindow, a.Tools)
+		if err != nil {
+			slog.Error("failed to count tokens while fitting context window", "area", "context_management", "error", err)
+			return fmt.Errorf("count tokens: %w", err)
+		}
+		if len(a.ContextWindow) == 0 || float64(currSize) <= float64(a.MaxWindowSize)*float64(0.85) {
+			a.ContextWindow = append(a.ContextWindow, newMsg)
+			return nil
+		}
+		slog.Info("max context window size exceeded or approaching, compressing context window", "area", "context_management", "max_size", a.MaxWindowSize, "current_size", currSize)
+		a.Model.SetSystemPrompt(fmt.Sprintf("Please summarize the entire message history into a single, concise summary including key items for your current and past tasks with a primary focus on your current task. Current task or follow-up question to answer: %s", newMsg.Content))
+		var numMessagesToCompress int
+		// calculate number of messages to compress to fit within max window size
+		if currSize > a.MaxWindowSize {
+			diff := currSize - a.MaxWindowSize
+			start := int(math.Round(float64(diff) * 0.25))
+			staged := tempWindow[start:]
+			count, err := a.Model.CountTokens(ctx, staged, a.Tools)
+			if err != nil {
+				return fmt.Errorf("count tokens: %w", err)
+			}
+			for float64(count) > float64(a.MaxWindowSize)*float64(0.85) {
+				start += 1
+				staged = tempWindow[start:]
+				count, err = a.Model.CountTokens(ctx, staged, a.Tools)
+				if err != nil {
+					return fmt.Errorf("count tokens: %w", err)
+				}
+			}
+			numMessagesToCompress = start
+		} else {
+			numMessagesToCompress = int(math.Round(float64(len(a.ContextWindow)) * 0.25))
+		}
+		contextToSummarize := a.ContextWindow[:numMessagesToCompress]
+		events, err := a.Model.Invoke(ctx, contextToSummarize, a.Tools)
+		if err != nil {
+			return fmt.Errorf("invoke: %w", err)
+		}
+		var compressed = &Message{}
+		for chunk := range events {
+			a.streamChunk(chunk, out)
+			compressed.Content += chunk.Content
+			if chunk.IsComplete {
+				compressed.Role = RoleUser
+				a.ContextWindow = append([]*Message{compressed}, tempWindow[numMessagesToCompress:]...)
+				a.Model.SetSystemPrompt(a.constructSystemPrompt())
+			}
+		}
+		return nil
+	}
 }
 
 func (a *AgentHarness) findTool(name, namespace string) *Tool {
@@ -266,7 +332,7 @@ func (a *AgentHarness) initMCP(ctx context.Context) {
 			Description: dt.Description,
 			Namespace:   dt.Namespace,
 			Schema:      dt.Schema,
-			Handler: func(ctx context.Context, args map[string]any, _ HarnessRuntime) (string, error) {
+			Handler: func(ctx context.Context, args map[string]any, _ *HarnessRuntime) (string, error) {
 				return dt.CallFunc(ctx, args)
 			},
 		})
@@ -294,12 +360,15 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 		return nil, fmt.Errorf("load skills: %w", err)
 	}
 	a.initMCP(ctx)
+	// Inject the built-in runtime management & hook tools
+	a.Tools = append(a.Tools, createPlanTool, editPlanTool)
 	out := make(chan StreamEvent)
 	a.Runtime.SetOutputChannel(out)
-	err := a.fitContextWindowBeforeNextTurn(ctx, &Message{Role: RoleUser, Content: prompt}, out)
+	err := a.addToContext(ctx, &Message{Role: RoleUser, Content: prompt}, out)
 	if err != nil {
 		return nil, err
 	}
+	a.Model.SetSystemPrompt(a.constructSystemPrompt())
 
 	go func() {
 		defer close(out)
@@ -347,8 +416,13 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 							a.recordOutput(msg)
 						}
 					}
+					// No tool calls so the turn ends
 					if len(a.ContextWindow[len(a.ContextWindow)-1].ToolCalls) == 0 {
 						out <- StreamEvent{Type: StreamEventComplete}
+						err := a.checkpointSession(ctx)
+						if err != nil {
+							slog.Error("failed to save session", "area", "session_management", "session_id", a.SessionId, "error", err)
+						}
 						return
 					}
 					toolResults = make([]*Message, len(a.ContextWindow[len(a.ContextWindow)-1].ToolCalls))
@@ -378,9 +452,9 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 							out <- StreamEvent{Type: StreamEventToolResult, MessageID: tc.CallID, Content: toolResults[i].Content, ToolCalls: []ToolCall{tc}}
 							return
 						}
-						runtimeCopy := a.Runtime
-						runtimeCopy.CurrentToolCallID = tc.ID
-						output, err := tool.Invoke(ctx, tc.Arguments, runtimeCopy)
+runtimeCopy := a.Runtime
+					runtimeCopy.CurrentToolCallID = tc.ID
+					output, err := tool.Invoke(ctx, tc.Arguments, &runtimeCopy)
 						var interrupt control.Interrupt
 						if errors.As(err, &interrupt) {
 							intrId := uuid.New().String()
@@ -423,10 +497,10 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 				runningTools.Wait()
 				for _, r := range toolResults {
 					if r != nil {
-						a.ContextWindow = append(a.ContextWindow, r)
+						a.addToContext(ctx, r, out)
 					}
 				}
-
+				// There are pending interrupts to be resumed after user input is gathered
 				if len(a.pendingToolCalls) > 0 {
 					err := a.checkpointSession(ctx)
 					if err != nil {
@@ -434,10 +508,6 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 					}
 					return
 				}
-			}
-			err := a.checkpointSession(ctx)
-			if err != nil {
-				slog.Error("failed to save session", "session_id", a.SessionId, "error", err)
 			}
 		}
 	}()
@@ -484,7 +554,7 @@ func NewAgent(opts AgentOptions) *AgentHarness {
 	return &AgentHarness{
 		Model:                opts.Model,
 		MaxWindowSize:        opts.Config.MaxWindowSize,
-		SystemPrompt:         opts.Config.SystemPrompt,
+		Instructions:         opts.Config.SystemPrompt,
 		Store:                opts.Store,
 		Runtime:              runtime,
 		WatchDog:             opts.WatchDog,
@@ -511,8 +581,6 @@ func (a *AgentHarness) initSkills() error {
 		a.skillByName[skill.Name] = skill
 	}
 	if len(loaded) > 0 {
-		a.SystemPrompt = strings.TrimSpace(a.SystemPrompt + "\n\n" + skills.Catalog(loaded))
-		a.Model.SetSystemPrompt(a.SystemPrompt)
 		a.Tools = append(a.Tools, a.skillTool())
 	}
 	a.skillsInitialized = true
@@ -557,8 +625,7 @@ func NewAgentHarnessFromSession(ctx context.Context, sessionId string, cfg Confi
 		Runtime:              runtime,
 		WatchDog:             watchdog,
 		MaxWindowSize:        cfg.MaxWindowSize,
-		SystemPrompt:         cfg.SystemPrompt,
-		compressionPrompt:    "",
+		Instructions:         cfg.SystemPrompt,
 		streamingStrategy:    nil,
 		interruptToRequester: checkpoint.State.InterruptToRequester,
 		pendingToolCalls:     checkpoint.State.PendingToolCalls,

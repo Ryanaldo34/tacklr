@@ -105,7 +105,7 @@ var getTimeTool = tacklr.NewTool(tacklr.ToolConfig{
 var progressTool = tacklr.NewTool(tacklr.ToolConfig{
 	Name:        "progress_demo",
 	Description: "Demonstrates in-progress streaming updates by emitting progress messages during execution. Use this to verify that tool_call_update events are streamed correctly.",
-	Handler: func(ctx context.Context, _ struct{}, runtime tacklr.HarnessRuntime) (string, error) {
+	Handler: func(ctx context.Context, _ struct{}, runtime *tacklr.HarnessRuntime) (string, error) {
 		runtime.EmitUpdate("starting work...")
 		runtime.EmitUpdate("processing...")
 		runtime.EmitUpdate("almost done")

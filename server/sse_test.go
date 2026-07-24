@@ -27,7 +27,7 @@ func makeInterruptTool(t *testing.T, optionsJSON string) *tacklr.Tool {
 	t.Helper()
 	return tacklr.NewTool(tacklr.ToolConfig{
 		Name: "ask_user",
-		Handler: func(ctx context.Context, _ struct{}, runtime tacklr.HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, _ struct{}, runtime *tacklr.HarnessRuntime) (string, error) {
 			intr, err := runtime.RaiseInterrupt("user_selection_choice", []byte(optionsJSON))
 			if err != nil {
 				return "", err

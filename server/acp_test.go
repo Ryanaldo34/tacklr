@@ -874,7 +874,7 @@ func TestHandleRPC_sessionPrompt_toolProgress(t *testing.T) {
 
 	progressTool := tacklr.NewTool(tacklr.ToolConfig{
 		Name: "progress_demo",
-		Handler: func(ctx context.Context, _ struct{}, runtime tacklr.HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, _ struct{}, runtime *tacklr.HarnessRuntime) (string, error) {
 			runtime.EmitUpdate("starting work...")
 			runtime.EmitUpdate("50% complete")
 			runtime.EmitUpdate("almost done")

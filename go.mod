@@ -25,6 +25,7 @@ require (
 	github.com/coreos/go-semver v0.3.0 // indirect
 	github.com/coreos/go-systemd/v22 v22.3.2 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
+	github.com/deckarep/golang-set/v2 v2.9.0 // indirect
 	github.com/dlclark/regexp2 v1.10.0 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
@@ -98,6 +99,7 @@ require (
 	go.etcd.io/etcd/pkg/v3 v3.5.5 // indirect
 	go.etcd.io/etcd/raft/v3 v3.5.5 // indirect
 	go.etcd.io/etcd/server/v3 v3.5.5 // indirect
+	go.mongodb.org/mongo-driver v1.17.4 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.59.0 // indirect
 	go.opentelemetry.io/otel v1.43.0 // indirect

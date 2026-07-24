@@ -8,10 +8,26 @@ import (
 	"strings"
 	"time"
 
+	mapset "github.com/deckarep/golang-set/v2"
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
-type ToolHandlerFunc func(ctx context.Context, args map[string]any, runtime HarnessRuntime) (string, error)
+type ToolPermission int
+
+const (
+	ReadPermission ToolPermission = iota
+	WritePermission
+	ExecutePermission
+)
+
+var ToolReadAccess = mapset.NewSet[ToolPermission](ReadPermission)
+var ToolWriteAccess = mapset.NewSet[ToolPermission](WritePermission)
+var ToolReadWriteAccess = mapset.NewSet[ToolPermission](ReadPermission, WritePermission)
+var ToolExecuteAccess = mapset.NewSet[ToolPermission](ExecutePermission)
+var ToolReadExecuteAccess = mapset.NewSet[ToolPermission](ReadPermission, ExecutePermission)
+var ToolFullAccess = mapset.NewSet[ToolPermission](ReadPermission, WritePermission, ExecutePermission)
+
+type ToolHandlerFunc func(ctx context.Context, args map[string]any, runtime *HarnessRuntime) (string, error)
 
 type Tool struct {
 	DisplayName string
@@ -19,8 +35,9 @@ type Tool struct {
 	Description string
 	Namespace   string
 	Category    streaming.ToolCategory
+	Access      mapset.Set[ToolPermission]
 
-	handlerFunc func(ctx context.Context, args map[string]any, runtime HarnessRuntime) (string, error)
+	handlerFunc func(ctx context.Context, args map[string]any, runtime *HarnessRuntime) (string, error)
 	parameters  map[string]any
 	strict      bool
 }
@@ -31,7 +48,9 @@ type ToolConfig struct {
 	DisplayName string
 	Namespace   string
 	Category    streaming.ToolCategory
-	Handler     any
+	Access      mapset.Set[ToolPermission]
+
+	Handler any
 }
 
 type mcpToolConfig struct {
@@ -114,6 +133,7 @@ func NewTool(cfg ToolConfig) *Tool {
 		Description: cfg.Description,
 		Namespace:   cfg.Namespace,
 		Category:    cfg.Category,
+		Access:      cfg.Access,
 		strict:      true,
 	}
 	if argsType != nil {
@@ -127,7 +147,7 @@ func NewTool(cfg ToolConfig) *Tool {
 	}
 
 	handlerValue := reflect.ValueOf(cfg.Handler)
-	t.handlerFunc = func(ctx context.Context, args map[string]any, runtime HarnessRuntime) (string, error) {
+	t.handlerFunc = func(ctx context.Context, args map[string]any, runtime *HarnessRuntime) (string, error) {
 		var callArgs []reflect.Value
 
 		callArgs = append(callArgs, reflect.ValueOf(ctx))
@@ -148,9 +168,9 @@ func NewTool(cfg ToolConfig) *Tool {
 
 		if hasRuntime {
 			if runtimeIsPtr {
-				callArgs = append(callArgs, reflect.ValueOf(&runtime))
-			} else {
 				callArgs = append(callArgs, reflect.ValueOf(runtime))
+			} else {
+				callArgs = append(callArgs, reflect.ValueOf(*runtime))
 			}
 		}
 
@@ -191,7 +211,7 @@ func newMCPTool(cfg mcpToolConfig) *Tool {
 	}
 }
 
-func (t *Tool) Invoke(ctx context.Context, argsJson string, runtime HarnessRuntime) (string, error) {
+func (t *Tool) Invoke(ctx context.Context, argsJson string, runtime *HarnessRuntime) (string, error) {
 	var args map[string]any
 	if argsJson != "" {
 		if err := json.Unmarshal([]byte(argsJson), &args); err != nil {
