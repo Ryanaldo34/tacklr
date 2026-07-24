@@ -872,20 +872,15 @@ func TestHandleRPC_sessionPrompt_stringTurnID(t *testing.T) {
 func TestHandleRPC_sessionPrompt_toolProgress(t *testing.T) {
 	store := testStore(t)
 
-	progressTool := &tacklr.Tool{
+	progressTool := tacklr.NewTool(tacklr.ToolConfig{
 		Name: "progress_demo",
-		Handler: func(args struct {
-			Runtime tacklr.HarnessRuntime `json:"-"`
-		}) (string, error) {
-			args.Runtime.EmitUpdate("starting work...")
-			args.Runtime.EmitUpdate("50% complete")
-			args.Runtime.EmitUpdate("almost done")
+		Handler: func(ctx context.Context, _ struct{}, runtime tacklr.HarnessRuntime) (string, error) {
+			runtime.EmitUpdate("starting work...")
+			runtime.EmitUpdate("50% complete")
+			runtime.EmitUpdate("almost done")
 			return "task complete!", nil
 		},
-	}
-	if err := progressTool.Validate(); err != nil {
-		t.Fatal(err)
-	}
+	})
 
 	var strategy *mockInferenceStrategy
 	strategy = &mockInferenceStrategy{

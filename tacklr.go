@@ -261,15 +261,15 @@ func (a *AgentHarness) initMCP(ctx context.Context) {
 
 	discovered, clients := mcp.DiscoverAllTools(ctx, a.MCPConfigs)
 	for _, dt := range discovered {
-		tool := &Tool{
+		tool := newMCPTool(mcpToolConfig{
 			Name:        dt.Name,
 			Description: dt.Description,
 			Namespace:   dt.Namespace,
-			Parameters:  dt.Schema,
-			HandlerFunc: func(ctx context.Context, args map[string]any, _ *HarnessRuntime) (string, error) {
+			Schema:      dt.Schema,
+			Handler: func(ctx context.Context, args map[string]any, _ HarnessRuntime) (string, error) {
 				return dt.CallFunc(ctx, args)
 			},
-		}
+		})
 		a.Tools = append(a.Tools, tool)
 	}
 	a.mcpClients = clients
@@ -380,7 +380,7 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 						}
 						runtimeCopy := a.Runtime
 						runtimeCopy.CurrentToolCallID = tc.ID
-						output, err := tool.Invoke(ctx, tc.Arguments, &runtimeCopy)
+						output, err := tool.Invoke(ctx, tc.Arguments, runtimeCopy)
 						var interrupt control.Interrupt
 						if errors.As(err, &interrupt) {
 							intrId := uuid.New().String()
@@ -470,11 +470,11 @@ type Config struct {
 }
 
 type AgentOptions struct {
-	Config    Config
-	Model     InferenceStrategy
-	Store     stores.BaseStore
-	WatchDog  AgentWatchDog
-	Tools     []*Tool
+	Config   Config
+	Model    InferenceStrategy
+	Store    stores.BaseStore
+	WatchDog AgentWatchDog
+	Tools    []*Tool
 }
 
 func NewAgent(opts AgentOptions) *AgentHarness {
@@ -520,15 +520,19 @@ func (a *AgentHarness) initSkills() error {
 }
 
 func (a *AgentHarness) skillTool() *Tool {
-	return &Tool{Name: "read_skill", Description: "Load the full instructions for an available skill.", Handler: func(args struct {
-		Name string `json:"name" desc:"Skill name from the available skills catalog"`
-	}) (string, error) {
-		skill, ok := a.skillByName[args.Name]
-		if !ok {
-			return "", fmt.Errorf("unknown skill %q", args.Name)
-		}
-		return skill.Instructions, nil
-	}}
+	return NewTool(ToolConfig{
+		Name:        "read_skill",
+		Description: "Load the full instructions for an available skill.",
+		Handler: func(ctx context.Context, args struct {
+			Name string `json:"name" desc:"Skill name from the available skills catalog"`
+		}) (string, error) {
+			skill, ok := a.skillByName[args.Name]
+			if !ok {
+				return "", fmt.Errorf("unknown skill %q", args.Name)
+			}
+			return skill.Instructions, nil
+		},
+	})
 }
 
 func NewAgentHarnessFromSession(ctx context.Context, sessionId string, cfg Config, model InferenceStrategy, store stores.BaseStore, watchdog AgentWatchDog) (*AgentHarness, error) {

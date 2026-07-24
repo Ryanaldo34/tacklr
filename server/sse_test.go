@@ -25,23 +25,17 @@ func newSSERequest(t *testing.T, target string, body io.Reader) *http.Request {
 
 func makeInterruptTool(t *testing.T, optionsJSON string) *tacklr.Tool {
 	t.Helper()
-	tool := &tacklr.Tool{
+	return tacklr.NewTool(tacklr.ToolConfig{
 		Name: "ask_user",
-		Handler: func(args struct {
-			Runtime tacklr.HarnessRuntime `json:"-"`
-		}) (string, error) {
-			intr, err := args.Runtime.RaiseInterrupt("user_selection_choice", []byte(optionsJSON))
+		Handler: func(ctx context.Context, _ struct{}, runtime tacklr.HarnessRuntime) (string, error) {
+			intr, err := runtime.RaiseInterrupt("user_selection_choice", []byte(optionsJSON))
 			if err != nil {
 				return "", err
 			}
 			choice := intr.(*control.UserSelectionInterrupt).ConfirmedChoice
 			return "selected: " + choice.Title, nil
 		},
-	}
-	if err := tool.Validate(); err != nil {
-		t.Fatal(err)
-	}
-	return tool
+	})
 }
 
 func parseSSEEvents(t *testing.T, body io.Reader) []sseEvent {

@@ -88,42 +88,31 @@ func testStore(t *testing.T) *stores.InMemoryStore {
 }
 
 func TestAgentHarness_Run(t *testing.T) {
-	validTool := &Tool{
+	validTool := NewTool(ToolConfig{
 		Name: "greet",
-		Handler: func(args struct{ Name string }) (string, error) {
+		Handler: func(ctx context.Context, args struct{ Name string }) (string, error) {
 			return "Hello " + args.Name, nil
 		},
-	}
-	if err := validTool.Validate(); err != nil {
-		t.Fatal(err)
-	}
+	})
 
-	brokenTool := &Tool{
+	brokenTool := NewTool(ToolConfig{
 		Name:    "broken",
-		Handler: func() (string, error) { return "", fmt.Errorf("handler error") },
-	}
-	if err := brokenTool.Validate(); err != nil {
-		t.Fatal(err)
-	}
+		Handler: func(ctx context.Context) (string, error) { return "", fmt.Errorf("handler error") },
+	})
 
 	optionsJSON := `[{"title":"Option A","description":"First option","isRecommended":true},{"title":"Option B","description":"Second option","isRecommended":false}]`
 
-	interruptTool := &Tool{
+	interruptTool := NewTool(ToolConfig{
 		Name: "ask_user",
-		Handler: func(args struct {
-			Runtime HarnessRuntime `json:"-"`
-		}) (string, error) {
-			intr, err := args.Runtime.RaiseInterrupt("user_selection_choice", []byte(optionsJSON))
+		Handler: func(ctx context.Context, _ struct{}, runtime HarnessRuntime) (string, error) {
+			intr, err := runtime.RaiseInterrupt("user_selection_choice", []byte(optionsJSON))
 			if err != nil {
 				return "", err
 			}
 			choice := intr.(*control.UserSelectionInterrupt).ConfirmedChoice
 			return "selected: " + choice.Title, nil
 		},
-	}
-	if err := interruptTool.Validate(); err != nil {
-		t.Fatal(err)
-	}
+	})
 
 	t.Run("single turn no tool calls", func(t *testing.T) {
 		store := testStore(t)
@@ -454,22 +443,17 @@ func TestReturnFromInterrupt_unknownUUID_returnsError(t *testing.T) {
 func TestReturnFromInterrupt_invalidPayload_returnsError(t *testing.T) {
 	store := testStore(t)
 	optionsJSON := `[{"title":"A","description":"opt A","isRecommended":false}]`
-	interruptTool := &Tool{
+	interruptTool := NewTool(ToolConfig{
 		Name: "ask_user",
-		Handler: func(args struct {
-			Runtime HarnessRuntime `json:"-"`
-		}) (string, error) {
-			intr, err := args.Runtime.RaiseInterrupt("user_selection_choice", []byte(optionsJSON))
+		Handler: func(ctx context.Context, _ struct{}, runtime HarnessRuntime) (string, error) {
+			intr, err := runtime.RaiseInterrupt("user_selection_choice", []byte(optionsJSON))
 			if err != nil {
 				return "", err
 			}
 			choice := intr.(*control.UserSelectionInterrupt).ConfirmedChoice
 			return "selected: " + choice.Title, nil
 		},
-	}
-	if err := interruptTool.Validate(); err != nil {
-		t.Fatal(err)
-	}
+	})
 
 	var callCount int
 	strategy := &mockStrategy{
@@ -574,9 +558,9 @@ func TestWithStreamingStrategy(t *testing.T) {
 
 func TestFindTool_namespaceMatching(t *testing.T) {
 	tools := []*Tool{
-		{Name: "get_customer", Namespace: "crm"},
-		{Name: "get_customer", Namespace: "email"},
-		{Name: "get_weather", Namespace: ""},
+		NewTool(ToolConfig{Name: "get_customer", Namespace: "crm", Handler: func(ctx context.Context) (string, error) { return "", nil }}),
+		NewTool(ToolConfig{Name: "get_customer", Namespace: "email", Handler: func(ctx context.Context) (string, error) { return "", nil }}),
+		NewTool(ToolConfig{Name: "get_weather", Namespace: "", Handler: func(ctx context.Context) (string, error) { return "", nil }}),
 	}
 	h := &AgentHarness{Tools: tools}
 

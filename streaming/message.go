@@ -25,6 +25,14 @@ const (
 	ToolCategoryDelete  ToolCategory = "delete"
 )
 
+type TodoStatus string
+
+const (
+	TodoStatusPending   TodoStatus = "pending"
+	TodoStatusCompleted TodoStatus = "completed"
+	TodoStatusInProgress TodoStatus = "in_progress"
+)
+
 // ItemStatus tracks the lifecycle state of an output item.
 type ItemStatus string
 
