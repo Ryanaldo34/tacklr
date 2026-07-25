@@ -150,7 +150,7 @@ func (a *AgentHarness) constructSystemPrompt() string {
 		}
 	}
 	builtIn := `SYSTEM REQUIREMENTS:
-You are a researcher structuring your workflow around Adaptive Case Management methodologies. Your workflow is simple, get a task -> draft a plan -> execte the plan -> make new discoveries -> adapt plan if needed -> repeat. To get started with planning completion of a new task, you may use tools that have READ access to the knowledge base & any connected services. Tools with WRITE and/or EXECUTE access will be locked until a plan with a todolist has been constructed. Use the create_plan tool to begin the implementation of a plan with an official to-do list. To edit a plan based on new discoveries, use the update_plan tool to add and/or remove items from the to-do list.
+You are a researcher structuring your workflow around Adaptive Case Management methodologies. Your workflow is simple, get a task -> draft a plan -> execte the plan -> make new discoveries -> adapt plan if needed -> repeat. To get started with planning completion of a new task, you may use tools that have READ access to the knowledge base & any connected services. Tools with WRITE and/or EXECUTE access will be locked until a plan with a todolist has been constructed. Use the create_plan tool to begin the implementation of a plan with an official to-do list. To edit a plan based on new discoveries, use the update_plan tool to add and/or remove items from the to-do list. When creating a to-do list for a plan, ensure to build it so tasks are done in a linear sequence. If you manage to inadvertently complete one or more todos at once, you may close them all at once using the complete_todo tool.
 `
 	if skills != "" {
 		builtIn = fmt.Sprintf(`%s
@@ -332,7 +332,7 @@ func (a *AgentHarness) initMCP(ctx context.Context) {
 			Description: dt.Description,
 			Namespace:   dt.Namespace,
 			Schema:      dt.Schema,
-			Handler: func(ctx context.Context, args map[string]any, _ *HarnessRuntime) (string, error) {
+			Handler: func(ctx context.Context, args map[string]any, _ HarnessRuntime) (string, error) {
 				return dt.CallFunc(ctx, args)
 			},
 		})
@@ -361,12 +361,18 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 	}
 	a.initMCP(ctx)
 	// Inject the built-in runtime management & hook tools
-	a.Tools = append(a.Tools, createPlanTool, editPlanTool)
+	a.Tools = append(a.Tools, createPlanTool, editPlanTool, completeTodoTool)
 	out := make(chan StreamEvent)
 	a.Runtime.SetOutputChannel(out)
 	err := a.addToContext(ctx, &Message{Role: RoleUser, Content: prompt}, out)
 	if err != nil {
-		return nil, err
+		// If context is already cancelled, still return the channel so the error
+		// comes through the event stream as expected by callers.
+		go func() {
+			defer close(out)
+			out <- StreamEvent{Type: StreamEventError, Error: fmt.Errorf("run: context cancelled: %w", err)}
+		}()
+		return out, nil
 	}
 	a.Model.SetSystemPrompt(a.constructSystemPrompt())
 
@@ -452,9 +458,9 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 							out <- StreamEvent{Type: StreamEventToolResult, MessageID: tc.CallID, Content: toolResults[i].Content, ToolCalls: []ToolCall{tc}}
 							return
 						}
-runtimeCopy := a.Runtime
-					runtimeCopy.CurrentToolCallID = tc.ID
-					output, err := tool.Invoke(ctx, tc.Arguments, &runtimeCopy)
+						runtimeCopy := a.Runtime
+						runtimeCopy.CurrentToolCallID = tc.ID
+						output, err := tool.Invoke(ctx, tc.Arguments, runtimeCopy)
 						var interrupt control.Interrupt
 						if errors.As(err, &interrupt) {
 							intrId := uuid.New().String()

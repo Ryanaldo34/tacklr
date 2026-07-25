@@ -185,7 +185,7 @@ func (s *OpenAIInferenceStrategy) CountTokens(ctx context.Context, messages []*t
 	}
 
 	if httpResp.StatusCode != 200 {
-		if httpResp.StatusCode == 404 {
+		if httpResp.StatusCode == 404 || httpResp.StatusCode == 400 || httpResp.StatusCode == 422 {
 			tke, err := tiktoken.GetEncoding("o200k_base")
 			if err != nil {
 				return 0, fmt.Errorf("tiktoken count tokens: %w", err)

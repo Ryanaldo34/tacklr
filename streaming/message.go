@@ -113,6 +113,7 @@ const (
 	StreamEventError        StreamEventType = "error"
 	StreamEventInterrupt    StreamEventType = "yield"
 	StreamEventToolUpdate   StreamEventType = "tool_update"
+	StreamEventPlanUpdate   StreamEventType = "plan_update"
 )
 
 // StreamEvent is what the caller receives from AgentHarness.Run.

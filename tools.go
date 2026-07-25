@@ -27,7 +27,7 @@ var ToolExecuteAccess = mapset.NewSet[ToolPermission](ExecutePermission)
 var ToolReadExecuteAccess = mapset.NewSet[ToolPermission](ReadPermission, ExecutePermission)
 var ToolFullAccess = mapset.NewSet[ToolPermission](ReadPermission, WritePermission, ExecutePermission)
 
-type ToolHandlerFunc func(ctx context.Context, args map[string]any, runtime *HarnessRuntime) (string, error)
+type ToolHandlerFunc func(ctx context.Context, args map[string]any, runtime HarnessRuntime) (string, error)
 
 type Tool struct {
 	DisplayName string
@@ -37,7 +37,7 @@ type Tool struct {
 	Category    streaming.ToolCategory
 	Access      mapset.Set[ToolPermission]
 
-	handlerFunc func(ctx context.Context, args map[string]any, runtime *HarnessRuntime) (string, error)
+	handlerFunc func(ctx context.Context, args map[string]any, runtime HarnessRuntime) (string, error)
 	parameters  map[string]any
 	strict      bool
 }
@@ -147,7 +147,7 @@ func NewTool(cfg ToolConfig) *Tool {
 	}
 
 	handlerValue := reflect.ValueOf(cfg.Handler)
-	t.handlerFunc = func(ctx context.Context, args map[string]any, runtime *HarnessRuntime) (string, error) {
+	t.handlerFunc = func(ctx context.Context, args map[string]any, runtime HarnessRuntime) (string, error) {
 		var callArgs []reflect.Value
 
 		callArgs = append(callArgs, reflect.ValueOf(ctx))
@@ -168,9 +168,9 @@ func NewTool(cfg ToolConfig) *Tool {
 
 		if hasRuntime {
 			if runtimeIsPtr {
-				callArgs = append(callArgs, reflect.ValueOf(runtime))
+				callArgs = append(callArgs, reflect.ValueOf(&runtime))
 			} else {
-				callArgs = append(callArgs, reflect.ValueOf(*runtime))
+				callArgs = append(callArgs, reflect.ValueOf(runtime))
 			}
 		}
 
@@ -211,7 +211,7 @@ func newMCPTool(cfg mcpToolConfig) *Tool {
 	}
 }
 
-func (t *Tool) Invoke(ctx context.Context, argsJson string, runtime *HarnessRuntime) (string, error) {
+func (t *Tool) Invoke(ctx context.Context, argsJson string, runtime HarnessRuntime) (string, error) {
 	var args map[string]any
 	if argsJson != "" {
 		if err := json.Unmarshal([]byte(argsJson), &args); err != nil {

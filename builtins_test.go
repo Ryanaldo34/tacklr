@@ -195,9 +195,9 @@ func TestEditPlanTool(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			rt := HarnessRuntime{}
 			rt.EnsureInitialized()
-			rt.Plan = tt.plan
+			rt.PlanSet(tt.plan)
 
-			got, err := editPlanTool.Invoke(context.Background(), tt.args, &rt)
+			got, err := editPlanTool.Invoke(context.Background(), tt.args, rt)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("error = %v, wantErr = %v", err, tt.wantErr)
 			}
@@ -206,7 +206,7 @@ func TestEditPlanTool(t *testing.T) {
 					t.Errorf("got %q, want %q", got, tt.want)
 				}
 				if tt.check != nil {
-					tt.check(t, rt.Plan)
+					tt.check(t, rt.PlanGet())
 				}
 			}
 		})
