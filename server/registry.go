@@ -228,9 +228,11 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 		if agentID == "" {
 			return nil, clientErrorf(ErrInvalidRequest, "no agent configured for session and no default agent configured")
 		}
-		load = false
 		if sess != nil && !sess.prompted {
 			sess.prompted = true
+			load = false // first turn: no checkpoint yet
+		} else {
+			load = true // subsequent turns: restore from store
 		}
 	} else {
 		if agentID == "" {

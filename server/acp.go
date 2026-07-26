@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/ryanaldo34/tacklr/control"
 	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/streaming"
 )
@@ -331,6 +332,35 @@ func eventToAcpJsonRpc(threadId string, event *streaming.StreamEvent) ([][]byte,
 							},
 						},
 					},
+				},
+			},
+		}
+		bytes, _ := json.Marshal(data)
+		toStream = append(toStream, bytes)
+		return toStream, nil
+	case streaming.StreamEventPlanUpdate:
+		var toStream [][]byte
+		var todos []control.Todo
+		err := json.Unmarshal(event.Data, &todos)
+		if err != nil {
+			return nil, err
+		}
+		var entries = make([]map[string]any, 0, len(todos))
+		for _, todo := range todos {
+			entries = append(entries, map[string]any{
+				"content": todo.Title,
+				"status":  todo.Status,
+				"priority": "medium",
+			})
+		}
+		data := map[string]any{
+			"jsonrpc": "2.0",
+			"method":  "session/update",
+			"params": map[string]any{
+				"sessionId": threadId,
+				"update": map[string]any{
+					"sessionUpdate": "plan",
+					"entries": entries,
 				},
 			},
 		}

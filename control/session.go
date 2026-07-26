@@ -1,6 +1,7 @@
 package control
 
 import (
+	"encoding/json"
 	"fmt"
 	"sync"
 
@@ -35,9 +36,12 @@ type HarnessRuntime struct {
 	PendingInterrupts  interruptMap
 	ResolvedInterrupts interruptMap
 	CurrentToolCallID  string
+	Mode               string
 	mu                 *sync.RWMutex
 	ch                 chan streaming.StreamEvent
 }
+
+const planStateKey = "_plan"
 
 // Runtime hook to emit custom events as updates from tool calls
 func (rt *HarnessRuntime) EmitUpdate(message string) {
@@ -47,6 +51,43 @@ func (rt *HarnessRuntime) EmitUpdate(message string) {
 		MessageID: rt.CurrentToolCallID,
 	}
 	rt.ch <- event
+}
+
+// PlanGet returns a shallow copy of the current plan (or nil if not set).
+func (rt *HarnessRuntime) PlanGet() []Todo {
+	rt.mu.RLock()
+	defer rt.mu.RUnlock()
+	if rt.State == nil {
+		return nil
+	}
+	if v, ok := rt.State[planStateKey]; ok {
+		if plan, ok := v.([]Todo); ok {
+			// Return shallow copy so callers can mutate elements safely
+			cp := make([]Todo, len(plan))
+			copy(cp, plan)
+			return cp
+		}
+	}
+	return nil
+}
+
+// PlanSet stores the plan and emits a StreamEventPlanUpdate.
+func (rt *HarnessRuntime) PlanSet(plan []Todo) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if rt.State == nil {
+		rt.State = make(map[string]any)
+	}
+	rt.State[planStateKey] = plan
+	data, _ := json.Marshal(plan)
+	select {
+	case rt.ch <- streaming.StreamEvent{
+		Type: streaming.StreamEventPlanUpdate,
+		Data: data,
+	}:
+	default:
+		// no listener; drop event
+	}
 }
 
 // SetOutputChannel updates the channel used by EmitUpdate to send tool progress
@@ -166,6 +207,26 @@ func (rt *HarnessRuntime) RaiseInterrupt(kind string, payload []byte) (Interrupt
 	}
 	rt.PendingInterrupts[rt.CurrentToolCallID] = intr
 	return nil, intr
+}
+
+// SnapshotState returns copies of the state and interrupt maps under the read
+// lock, safe for concurrent access during checkpointing.
+func (rt *HarnessRuntime) SnapshotState() (state map[string]any, pending, resolved interruptMap) {
+	rt.mu.RLock()
+	defer rt.mu.RUnlock()
+	state = make(map[string]any, len(rt.State))
+	for k, v := range rt.State {
+		state[k] = v
+	}
+	pending = make(interruptMap, len(rt.PendingInterrupts))
+	for k, v := range rt.PendingInterrupts {
+		pending[k] = v
+	}
+	resolved = make(interruptMap, len(rt.ResolvedInterrupts))
+	for k, v := range rt.ResolvedInterrupts {
+		resolved[k] = v
+	}
+	return
 }
 
 func NewRuntime(ch chan streaming.StreamEvent, store stores.BaseStore, state map[string]any) HarnessRuntime {

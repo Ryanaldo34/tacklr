@@ -28,6 +28,51 @@ import "github.com/ryanaldo34/tacklr/stores"     // session stores
 import "github.com/ryanaldo34/tacklr/streaming"  // streaming strategies
 ```
 
+## Tools
+
+Tools are defined using `NewTool`:
+
+```go
+import "github.com/ryanaldo34/tacklr"
+
+type SearchArgs struct {
+    Query string `json:"query" desc:"The search query"`
+    Limit int    `json:"limit" desc:"Max results"`
+}
+
+tool := tacklr.NewTool(tacklr.ToolConfig{
+    Name:        "search_web",
+    Description: "Search the web for information.",
+    Handler: func(ctx context.Context, args SearchArgs, rt tacklr.HarnessRuntime) (string, error) {
+        return doSearch(ctx, args.Query, args.Limit)
+    },
+})
+```
+
+Valid handler signatures:
+- `func(context.Context) (T, error)` — no arguments
+- `func(context.Context, Args) (T, error)` — typed args struct
+- `func(context.Context, Args, HarnessRuntime) (T, error)` — with runtime access
+- `func(context.Context, HarnessRuntime) (T, error)` — runtime only, no args
+
+The args struct is inspected with `reflect` at tool construction to auto-generate the JSON schema. Tags (`json`, `desc`, `enum`) control the schema output. `HarnessRuntime` is passed by value (a shallow copy with `CurrentToolCallID` set uniquely per call), giving tools access to interrupt and progress-update APIs.
+
+MCP-discovered tools are handled internally by the harness — configure `MCPConfigs` in `Config` and the discovery + tool wrapping happens automatically.
+
+### Usage in an agent
+
+```go
+agent := tacklr.NewAgent(tacklr.AgentOptions{
+    Config: tacklr.Config{
+        MaxWindowSize: 8192,
+        SystemPrompt:  "You are a helpful assistant.",
+    },
+    Model: model,
+    Store: store,
+    Tools: []*tacklr.Tool{tool},
+})
+```
+
 ## Server
 
 The `server` package separates domain logic (`Registry`) from transport (`Server`)

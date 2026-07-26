@@ -185,7 +185,7 @@ func (s *OpenAIInferenceStrategy) CountTokens(ctx context.Context, messages []*t
 	}
 
 	if httpResp.StatusCode != 200 {
-		if httpResp.StatusCode == 404 {
+		if httpResp.StatusCode == 404 || httpResp.StatusCode == 400 || httpResp.StatusCode == 422 {
 			tke, err := tiktoken.GetEncoding("o200k_base")
 			if err != nil {
 				return 0, fmt.Errorf("tiktoken count tokens: %w", err)
@@ -293,6 +293,7 @@ func (s *OpenAIInferenceStrategy) Invoke(ctx context.Context, messages []*tacklr
 		if httpResp.StatusCode != 200 {
 			respBody, _ := io.ReadAll(httpResp.Body)
 			slog.Error("non-200 response", "status", httpResp.StatusCode, "body", extractErrorMessage(respBody))
+			events <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventError, Content: extractErrorMessage(respBody)}
 			return
 		}
 

@@ -3,12 +3,11 @@ package tacklr
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 )
-
-// ---- Handler types ----
 
 type BasicArgs struct {
 	Name string `json:"name" desc:"The name"`
@@ -40,32 +39,26 @@ type WithEmbedded struct {
 	Extra string `json:"extra"`
 }
 
-// ---- Handlers ----
-
-func zeroArgsStringHandler() (string, error) { return "hello", nil }
-func zeroArgsIntHandler() (int, error)       { return 42, nil }
-
-func basicHandler(args BasicArgs) (string, error)       { return "ok", nil }
-func taggedHandler(args TaggedArgs) (string, error)     { return "ok", nil }
-func nestedHandler(args NestedArgs) (string, error)     { return "ok", nil }
-func timeHandler(args WithTime) (string, error)         { return "ok", nil }
-func embeddedHandler(args WithEmbedded) (string, error) { return "ok", nil }
+func zeroArgsStringHandler(ctx context.Context) (string, error)              { return "hello", nil }
+func zeroArgsIntHandler(ctx context.Context) (int, error)                    { return 42, nil }
+func basicHandler(ctx context.Context, args BasicArgs) (string, error)       { return "ok", nil }
+func taggedHandler(ctx context.Context, args TaggedArgs) (string, error)     { return "ok", nil }
+func nestedHandler(ctx context.Context, args NestedArgs) (string, error)     { return "ok", nil }
+func timeHandler(ctx context.Context, args WithTime) (string, error)         { return "ok", nil }
+func embeddedHandler(ctx context.Context, args WithEmbedded) (string, error) { return "ok", nil }
 
 type testErr struct{ msg string }
 
 func (e testErr) Error() string { return e.msg }
 
-func errHandler(args BasicArgs) (string, error) {
+func errHandler(ctx context.Context, args BasicArgs) (string, error) {
 	return "", testErr{"boom"}
 }
 
-// ---- Tests ----
-
 func TestInvoke(t *testing.T) {
 	t.Run("returns raw string", func(t *testing.T) {
-		tool := &Tool{Name: "zero", Handler: zeroArgsStringHandler}
-		mustValidate(t, tool)
-		got, err := tool.Invoke(context.Background(), "", nil)
+		tool := NewTool(ToolConfig{Name: "zero", Handler: zeroArgsStringHandler})
+		got, err := tool.Invoke(context.Background(), "", HarnessRuntime{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -75,9 +68,8 @@ func TestInvoke(t *testing.T) {
 	})
 
 	t.Run("marshals non-string return", func(t *testing.T) {
-		tool := &Tool{Name: "zero_int", Handler: zeroArgsIntHandler}
-		mustValidate(t, tool)
-		got, err := tool.Invoke(context.Background(), "", nil)
+		tool := NewTool(ToolConfig{Name: "zero_int", Handler: zeroArgsIntHandler})
+		got, err := tool.Invoke(context.Background(), "", HarnessRuntime{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -87,15 +79,14 @@ func TestInvoke(t *testing.T) {
 	})
 
 	t.Run("unmarshals args and calls handler", func(t *testing.T) {
-		h := func(args BasicArgs) (string, error) {
+		h := func(ctx context.Context, args BasicArgs) (string, error) {
 			if args.Name != "test" || args.Age != 10 {
 				t.Errorf("unexpected args: %+v", args)
 			}
 			return "result", nil
 		}
-		tool := &Tool{Name: "handler", Handler: h}
-		mustValidate(t, tool)
-		got, err := tool.Invoke(context.Background(), `{"name":"test","age":10}`, nil)
+		tool := NewTool(ToolConfig{Name: "handler", Handler: h})
+		got, err := tool.Invoke(context.Background(), `{"name":"test","age":10}`, HarnessRuntime{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -105,18 +96,16 @@ func TestInvoke(t *testing.T) {
 	})
 
 	t.Run("propagates handler error", func(t *testing.T) {
-		tool := &Tool{Name: "err", Handler: errHandler}
-		mustValidate(t, tool)
-		_, err := tool.Invoke(context.Background(), `{"name":"x","age":1}`, nil)
+		tool := NewTool(ToolConfig{Name: "err", Handler: errHandler})
+		_, err := tool.Invoke(context.Background(), `{"name":"x","age":1}`, HarnessRuntime{})
 		if err == nil || err.Error() != "boom" {
 			t.Fatalf("got %v, want boom", err)
 		}
 	})
 
 	t.Run("bad json args errors", func(t *testing.T) {
-		tool := &Tool{Name: "basic", Handler: basicHandler}
-		mustValidate(t, tool)
-		_, err := tool.Invoke(context.Background(), `{bad`, nil)
+		tool := NewTool(ToolConfig{Name: "basic", Handler: basicHandler})
+		_, err := tool.Invoke(context.Background(), `{bad`, HarnessRuntime{})
 		if err == nil {
 			t.Fatal("expected error")
 		}
@@ -125,8 +114,7 @@ func TestInvoke(t *testing.T) {
 
 func TestSchema(t *testing.T) {
 	t.Run("basic fields with desc and required", func(t *testing.T) {
-		tool := &Tool{Name: "basic", Handler: basicHandler}
-		mustValidate(t, tool)
+		tool := NewTool(ToolConfig{Name: "basic", Handler: basicHandler})
 		s := asParams(t, tool)
 		assertObject(t, s)
 		props := s["properties"].(map[string]any)
@@ -144,8 +132,7 @@ func TestSchema(t *testing.T) {
 	})
 
 	t.Run("tags: json rename, enum, skip, optional", func(t *testing.T) {
-		tool := &Tool{Name: "tagged", Handler: taggedHandler}
-		mustValidate(t, tool)
+		tool := NewTool(ToolConfig{Name: "tagged", Handler: taggedHandler})
 		s := asParams(t, tool)
 		props := s["properties"].(map[string]any)
 
@@ -169,8 +156,7 @@ func TestSchema(t *testing.T) {
 	})
 
 	t.Run("nested structs, slices, and maps", func(t *testing.T) {
-		tool := &Tool{Name: "nested", Handler: nestedHandler}
-		mustValidate(t, tool)
+		tool := NewTool(ToolConfig{Name: "nested", Handler: nestedHandler})
 		s := asParams(t, tool)
 		props := s["properties"].(map[string]any)
 
@@ -195,8 +181,7 @@ func TestSchema(t *testing.T) {
 	})
 
 	t.Run("time.Time treated as string", func(t *testing.T) {
-		tool := &Tool{Name: "time", Handler: timeHandler}
-		mustValidate(t, tool)
+		tool := NewTool(ToolConfig{Name: "time", Handler: timeHandler})
 		s := asParams(t, tool)
 		created := s["properties"].(map[string]any)["created_at"].(map[string]any)
 		if created["type"] != "string" || created["description"] != "When created" {
@@ -205,8 +190,7 @@ func TestSchema(t *testing.T) {
 	})
 
 	t.Run("embedded struct flattened", func(t *testing.T) {
-		tool := &Tool{Name: "embedded", Handler: embeddedHandler}
-		mustValidate(t, tool)
+		tool := NewTool(ToolConfig{Name: "embedded", Handler: embeddedHandler})
 		s := asParams(t, tool)
 		props := s["properties"].(map[string]any)
 		if _, ok := props["value"]; !ok {
@@ -220,12 +204,11 @@ func TestSchema(t *testing.T) {
 }
 
 func TestAsJson(t *testing.T) {
-	tool := &Tool{
+	tool := NewTool(ToolConfig{
 		Name:        "get_weather",
 		Description: "Get the weather",
 		Handler:     basicHandler,
-	}
-	mustValidate(t, tool)
+	})
 	def, err := tool.AsJson()
 	if err != nil {
 		t.Fatal(err)
@@ -250,11 +233,8 @@ func TestAsJson(t *testing.T) {
 
 func TestToolsAsJson(t *testing.T) {
 	tools := []*Tool{
-		{Name: "a", Handler: zeroArgsStringHandler},
-		{Name: "b", Handler: basicHandler},
-	}
-	for _, tool := range tools {
-		mustValidate(t, tool)
+		NewTool(ToolConfig{Name: "a", Handler: zeroArgsStringHandler}),
+		NewTool(ToolConfig{Name: "b", Handler: basicHandler}),
 	}
 	raw, err := ToolsAsJson(tools)
 	if err != nil {
@@ -272,11 +252,10 @@ func TestToolsAsJson(t *testing.T) {
 
 func TestToolsAsJsonWithNamespaces(t *testing.T) {
 	tools := []*Tool{
-		{Name: "standalone", Handler: zeroArgsStringHandler},
-		{Name: "get_customer", Namespace: "crm", Handler: zeroArgsStringHandler},
-	}
-	for _, tool := range tools {
-		mustValidate(t, tool)
+		NewTool(ToolConfig{Name: "standalone", Handler: zeroArgsStringHandler}),
+		NewTool(ToolConfig{Name: "get_customer", Namespace: "crm", Handler: func(ctx context.Context) (string, error) {
+			return "", nil
+		}}),
 	}
 
 	raw, err := ToolsAsJson(tools)
@@ -303,156 +282,88 @@ func TestToolsAsJsonWithNamespaces(t *testing.T) {
 	if parsed[1]["name"] != "crm.get_customer" {
 		t.Errorf("second item name = %v, want crm.get_customer", parsed[1]["name"])
 	}
-} // ---- Helpers ----
-
-func assertObject(t *testing.T, s map[string]any) {
-	t.Helper()
-	if s["type"] != "object" || s["additionalProperties"] != false {
-		t.Errorf("expected {type:object, additionalProperties:false}, got %v", s)
-	}
 }
 
-func assertRequired(t *testing.T, s map[string]any, vals ...string) {
-	t.Helper()
-	req := s["required"].([]string)
-	for _, v := range vals {
-		if !contains(req, v) {
-			t.Errorf("required %v missing %q", req, v)
-		}
-	}
-}
-
-func contains(slice []string, val string) bool {
-	for _, v := range slice {
-		if v == val {
-			return true
-		}
-	}
-	return false
-}
-
-func mustValidate(t *testing.T, tool *Tool) {
-	t.Helper()
-	if err := tool.Validate(); err != nil {
-		t.Fatalf("Validate: %v", err)
-	}
-}
-
-func asParams(t *testing.T, tool *Tool) map[string]any {
-	t.Helper()
-	def, err := tool.AsJson()
-	if err != nil {
-		t.Fatalf("AsJson: %v", err)
-	}
-	return def["parameters"].(map[string]any)
-}
-
-func TestTool_Validate(t *testing.T) {
+func TestNewTool_validation(t *testing.T) {
 	t.Run("valid tool", func(t *testing.T) {
-		tool := &Tool{
-			Name:    "my_tool",
-			Handler: zeroArgsStringHandler,
-		}
-		if err := tool.Validate(); err != nil {
-			t.Fatal(err)
+		tool := NewTool(ToolConfig{Name: "my_tool", Handler: zeroArgsStringHandler})
+		if tool == nil {
+			t.Fatal("expected non-nil tool")
 		}
 	})
 
 	t.Run("empty name", func(t *testing.T) {
-		tool := &Tool{Handler: zeroArgsStringHandler}
-		err := tool.Validate()
-		if err == nil || !strings.Contains(err.Error(), "name") {
-			t.Fatalf("got %v, want name error", err)
-		}
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal("expected panic")
+			}
+		}()
+		NewTool(ToolConfig{Handler: zeroArgsStringHandler})
 	})
 
 	t.Run("handler not a function", func(t *testing.T) {
-		tool := &Tool{Name: "t", Handler: "not a func"}
-		err := tool.Validate()
-		if err == nil || !strings.Contains(err.Error(), "must be a function") {
-			t.Fatalf("got %v", err)
-		}
+		defer func() {
+			r := recover()
+			if r == nil {
+				t.Fatal("expected panic")
+			}
+			if !strings.Contains(fmt.Sprint(r), "must be a function") {
+				t.Fatalf("got %v", r)
+			}
+		}()
+		NewTool(ToolConfig{Name: "t", Handler: "not a func"})
 	})
 
 	t.Run("handler wrong return count", func(t *testing.T) {
-		tool := &Tool{Name: "t", Handler: func() string { return "" }}
-		err := tool.Validate()
-		if err == nil || !strings.Contains(err.Error(), "must return") {
-			t.Fatalf("got %v", err)
-		}
+		defer func() {
+			r := recover()
+			if r == nil {
+				t.Fatal("expected panic")
+			}
+			if !strings.Contains(fmt.Sprint(r), "must return") {
+				t.Fatalf("got %v", r)
+			}
+		}()
+		NewTool(ToolConfig{Name: "t", Handler: func() string { return "" }})
 	})
 
 	t.Run("handler wrong return type", func(t *testing.T) {
-		tool := &Tool{Name: "t", Handler: func() (string, string) { return "", "" }}
-		err := tool.Validate()
-		if err == nil || !strings.Contains(err.Error(), "must return") {
-			t.Fatalf("got %v", err)
-		}
+		defer func() {
+			r := recover()
+			if r == nil {
+				t.Fatal("expected panic")
+			}
+			if !strings.Contains(fmt.Sprint(r), "must return") {
+				t.Fatalf("got %v", r)
+			}
+		}()
+		NewTool(ToolConfig{Name: "t", Handler: func() (string, string) { return "", "" }})
 	})
 
 	t.Run("handler arg not struct", func(t *testing.T) {
-		tool := &Tool{Name: "t", Handler: func(s string) (string, error) { return s, nil }}
-		err := tool.Validate()
-		if err == nil || !strings.Contains(err.Error(), "argument must be a struct") {
-			t.Fatalf("got %v", err)
-		}
+		defer func() {
+			r := recover()
+			if r == nil {
+				t.Fatal("expected panic")
+			}
+			if !strings.Contains(fmt.Sprint(r), "must be a struct") {
+				t.Fatalf("got %v", r)
+			}
+		}()
+		NewTool(ToolConfig{Name: "t", Handler: func(ctx context.Context, s string) (string, error) { return s, nil }})
 	})
 
 	t.Run("handler too many args", func(t *testing.T) {
-		tool := &Tool{Name: "t", Handler: func(a, b BasicArgs) (string, error) { return "", nil }}
-		err := tool.Validate()
-		if err == nil || !strings.Contains(err.Error(), "must accept 0 or 1") {
-			t.Fatalf("got %v", err)
-		}
-	})
-
-	t.Run("unsupported field type", func(t *testing.T) {
-		type badArgs struct {
-			Name string `json:"name"`
-			Ch   chan int
-		}
-		tool := &Tool{Name: "t", Handler: func(args badArgs) (string, error) { return "", nil }}
-		err := tool.Validate()
-		if err == nil || !strings.Contains(err.Error(), "not JSON-serializable") {
-			t.Fatalf("got %v, want JSON-serializable error", err)
-		}
-	})
-
-	t.Run("unsupported nested field type", func(t *testing.T) {
-		type deep struct {
-			Fn func() `json:"fn"`
-		}
-		type badNestedArgs struct {
-			Name  string `json:"name"`
-			Inner deep
-		}
-		tool := &Tool{Name: "t", Handler: func(args badNestedArgs) (string, error) { return "", nil }}
-		err := tool.Validate()
-		if err == nil || !strings.Contains(err.Error(), "not JSON-serializable") {
-			t.Fatalf("got %v, want JSON-serializable error", err)
-		}
-	})
-
-	t.Run("pointer to unsupported type rejected", func(t *testing.T) {
-		type ptrBadArgs struct {
-			Fn *struct{ F func() }
-		}
-		tool := &Tool{Name: "t", Handler: func(args ptrBadArgs) (string, error) { return "", nil }}
-		err := tool.Validate()
-		if err == nil || !strings.Contains(err.Error(), "not JSON-serializable") {
-			t.Fatalf("got %v, want JSON-serializable error", err)
-		}
-	})
-
-	t.Run("map with non-string key rejected", func(t *testing.T) {
-		type mapArgs struct {
-			Lookup map[int]string `json:"lookup"`
-		}
-		tool := &Tool{Name: "t", Handler: func(args mapArgs) (string, error) { return "", nil }}
-		err := tool.Validate()
-		if err == nil || !strings.Contains(err.Error(), "map key must be string") {
-			t.Fatalf("got %v, want map key error", err)
-		}
+		defer func() {
+			r := recover()
+			if r == nil {
+				t.Fatal("expected panic")
+			}
+			if !strings.Contains(fmt.Sprint(r), "unexpected parameter type") {
+				t.Fatalf("got %v", r)
+			}
+		}()
+		NewTool(ToolConfig{Name: "t", Handler: func(ctx context.Context, a, b BasicArgs) (string, error) { return "", nil }})
 	})
 }
 
@@ -554,4 +465,39 @@ func TestTypeToJSONSchema(t *testing.T) {
 			t.Errorf("enum = %v", enumVals)
 		}
 	})
+}
+
+func assertObject(t *testing.T, s map[string]any) {
+	t.Helper()
+	if s["type"] != "object" || s["additionalProperties"] != false {
+		t.Errorf("expected {type:object, additionalProperties:false}, got %v", s)
+	}
+}
+
+func assertRequired(t *testing.T, s map[string]any, vals ...string) {
+	t.Helper()
+	req := s["required"].([]string)
+	for _, v := range vals {
+		if !contains(req, v) {
+			t.Errorf("required %v missing %q", req, v)
+		}
+	}
+}
+
+func contains(slice []string, val string) bool {
+	for _, v := range slice {
+		if v == val {
+			return true
+		}
+	}
+	return false
+}
+
+func asParams(t *testing.T, tool *Tool) map[string]any {
+	t.Helper()
+	def, err := tool.AsJson()
+	if err != nil {
+		t.Fatalf("AsJson: %v", err)
+	}
+	return def["parameters"].(map[string]any)
 }
