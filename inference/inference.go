@@ -293,6 +293,7 @@ func (s *OpenAIInferenceStrategy) Invoke(ctx context.Context, messages []*tacklr
 		if httpResp.StatusCode != 200 {
 			respBody, _ := io.ReadAll(httpResp.Body)
 			slog.Error("non-200 response", "status", httpResp.StatusCode, "body", extractErrorMessage(respBody))
+			events <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventError, Content: extractErrorMessage(respBody)}
 			return
 		}
 

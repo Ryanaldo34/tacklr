@@ -11,12 +11,14 @@ import (
 
 	"github.com/ryanaldo34/tacklr/control"
 	"github.com/ryanaldo34/tacklr/stores"
+	"github.com/ryanaldo34/tacklr/streaming"
 )
 
 type mockStrategy struct {
-	invokeFn  func(context.Context, []*Message, []*Tool, chan<- LLMResponseChunk)
-	invokeErr error
-	callNum   atomic.Int64
+	invokeFn    func(context.Context, []*Message, []*Tool, chan<- LLMResponseChunk)
+	invokeErr   error
+	invokeErrFn func(context.Context, []*Message, []*Tool) error
+	callNum     atomic.Int64
 }
 
 func (m *mockStrategy) WithApiKey(string) InferenceStrategy         { return m }
@@ -34,6 +36,11 @@ func (m *mockStrategy) CountTokens(ctx context.Context, msgs []*Message, tools [
 func (m *mockStrategy) Invoke(ctx context.Context, msgs []*Message, tools []*Tool) (chan LLMResponseChunk, error) {
 	if m.invokeErr != nil {
 		return nil, m.invokeErr
+	}
+	if m.invokeErrFn != nil {
+		if err := m.invokeErrFn(ctx, msgs, tools); err != nil {
+			return nil, err
+		}
 	}
 	m.callNum.Add(1)
 	ch := make(chan LLMResponseChunk)
@@ -413,6 +420,251 @@ func TestAgentHarness_Run(t *testing.T) {
 		}
 		if ah.Runtime.HasPendingInterrupt() {
 			t.Error("runtime should have no pending interrupts after resume")
+		}
+	})
+
+	t.Run("complete todo triggers compression between turns", func(t *testing.T) {
+		store := testStore(t)
+		var invokeCount int
+
+		strategy := &mockStrategy{
+			invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, events chan<- LLMResponseChunk) {
+				invokeCount++
+				if invokeCount == 1 {
+					events <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
+						{ID: "call_ct1", CallID: "call_ct1", Name: "complete_todo", Arguments: `{"title":"Task 1"}`},
+					}, IsComplete: true}
+					events <- LLMResponseChunk{IsComplete: true}
+					return
+				}
+				if invokeCount == 2 {
+					events <- LLMResponseChunk{Type: StreamEventMessage, Content: "Mock compressed handoff. Remaining: Task 2.", IsComplete: true}
+					return
+				}
+				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "All done!", IsComplete: true}
+			},
+		}
+
+		ah := NewAgent(AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
+		ah.Runtime.PlanSet([]control.Todo{
+			{Title: "Task 1", Status: streaming.TodoStatusInProgress},
+			{Title: "Task 2", Status: streaming.TodoStatusPending},
+		})
+
+		ch, err := ah.Run(context.Background(), "Complete the first task")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var events []StreamEvent
+		for ev := range ch {
+			events = append(events, ev)
+		}
+
+		if invokeCount != 3 {
+			t.Errorf("expected 3 total invocations, got %d", invokeCount)
+		}
+
+		plan := ah.Runtime.PlanGet()
+		if plan == nil {
+			t.Fatal("plan should not be nil")
+		}
+		if plan[0].Status != streaming.TodoStatusCompleted {
+			t.Errorf("Task 1 status = %q, want %q", plan[0].Status, streaming.TodoStatusCompleted)
+		}
+		if plan[1].Status != streaming.TodoStatusInProgress {
+			t.Errorf("Task 2 status = %q, want %q", plan[1].Status, streaming.TodoStatusInProgress)
+		}
+
+		if len(ah.ContextWindow) != 3 {
+			t.Errorf("expected 3 messages in context window, got %d", len(ah.ContextWindow))
+		} else {
+			if ah.ContextWindow[0].Role != RoleUser {
+				t.Errorf("first message role = %q, want %q", ah.ContextWindow[0].Role, RoleUser)
+			}
+			if ah.ContextWindow[1].Role != RoleAssistant {
+				t.Errorf("second message role = %q, want %q", ah.ContextWindow[1].Role, RoleAssistant)
+			}
+			if !strings.Contains(ah.ContextWindow[1].Content, "Mock compressed handoff") {
+				t.Errorf("compressed message content = %q, want contains 'Mock compressed handoff'", ah.ContextWindow[1].Content)
+			}
+			if ah.ContextWindow[2].Role != RoleAssistant {
+				t.Errorf("third message role = %q, want %q", ah.ContextWindow[2].Role, RoleAssistant)
+			}
+			if !strings.Contains(ah.ContextWindow[2].Content, "All done!") {
+				t.Errorf("final message content = %q, want contains 'All done!'", ah.ContextWindow[2].Content)
+			}
+		}
+
+		var hasComplete bool
+		for _, ev := range events {
+			if ev.Type == StreamEventError {
+				t.Errorf("unexpected error event: %v", ev.Error)
+			}
+			if ev.Type == StreamEventComplete {
+				hasComplete = true
+			}
+		}
+		if !hasComplete {
+			t.Error("expected StreamEventComplete")
+		}
+	})
+
+	t.Run("interrupt skips compression even with completed todos", func(t *testing.T) {
+		store := testStore(t)
+		var invokeCount int
+		var compressionCount int
+
+		strategy := &mockStrategy{
+			invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, events chan<- LLMResponseChunk) {
+				invokeCount++
+				if invokeCount == 1 {
+					events <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
+						{ID: "call_comp1", CallID: "call_comp1", Name: "complete_todo", Arguments: `{"title":"Task 1"}`},
+						{ID: "call_int1", CallID: "call_int1", Name: "ask_user", Arguments: `{}`},
+					}, IsComplete: true}
+					events <- LLMResponseChunk{IsComplete: true}
+				}
+			},
+		}
+
+		ah := NewAgent(AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{interruptTool}})
+		ah.Runtime.PlanSet([]control.Todo{
+			{Title: "Task 1", Status: streaming.TodoStatusInProgress},
+		})
+
+		ch, err := ah.Run(context.Background(), "Start")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var foundInterrupt bool
+		for ev := range ch {
+			if ev.Type == StreamEventInterrupt {
+				foundInterrupt = true
+			}
+			if ev.Type == StreamEventError {
+				t.Errorf("unexpected error: %v", ev.Error)
+			}
+		}
+
+		if !foundInterrupt {
+			t.Fatal("expected interrupt event")
+		}
+		if compressionCount != 0 {
+			t.Errorf("expected 0 compression invocations, got %d", compressionCount)
+		}
+		if len(ah.pendingToolCalls) == 0 {
+			t.Error("expected pending tool calls on interrupt path")
+		}
+
+		plan := ah.Runtime.PlanGet()
+		if plan == nil || len(plan) == 0 {
+			t.Fatal("plan should not be nil or empty")
+		}
+		if plan[0].Status != streaming.TodoStatusCompleted {
+			t.Errorf("Task 1 status = %q, want %q", plan[0].Status, streaming.TodoStatusCompleted)
+		}
+	})
+
+	t.Run("regular tool call without complete_todo skips compression", func(t *testing.T) {
+		store := testStore(t)
+		var invokeCount int
+
+		strategy := &mockStrategy{
+			invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, events chan<- LLMResponseChunk) {
+				invokeCount++
+				if invokeCount == 1 {
+					events <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
+						{ID: "call_greet", CallID: "call_greet", Name: "greet", Arguments: `{"Name":"World"}`},
+					}, IsComplete: true}
+					events <- LLMResponseChunk{IsComplete: true}
+					return
+				}
+				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "Done!", IsComplete: true}
+			},
+		}
+
+		ah := NewAgent(AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
+
+		ch, err := ah.Run(context.Background(), "Greet the world")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		for ev := range ch {
+			if ev.Type == StreamEventError {
+				t.Errorf("unexpected error: %v", ev.Error)
+			}
+		}
+
+		if invokeCount != 2 {
+			t.Errorf("expected 2 total invocations, got %d", invokeCount)
+		}
+		if len(ah.ContextWindow) < 3 {
+			t.Errorf("expected >= 3 messages in context window without compression, got %d", len(ah.ContextWindow))
+		}
+	})
+
+	t.Run("compression error emits error event", func(t *testing.T) {
+		store := testStore(t)
+		var invokeCount int
+		var compressionAttempted bool
+		compressionErr := fmt.Errorf("compression invoke failed")
+
+		strategy := &mockStrategy{
+			invokeErrFn: func(_ context.Context, _ []*Message, tools []*Tool) error {
+				invokeCount++
+				if invokeCount == 1 {
+					return nil
+				}
+				compressionAttempted = true
+				return compressionErr
+			},
+			invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, events chan<- LLMResponseChunk) {
+				events <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
+					{ID: "call_ct_err", CallID: "call_ct_err", Name: "complete_todo", Arguments: `{"title":"Task 1"}`},
+				}, IsComplete: true}
+				events <- LLMResponseChunk{IsComplete: true}
+			},
+		}
+
+		ah := NewAgent(AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
+		ah.Runtime.PlanSet([]control.Todo{
+			{Title: "Task 1", Status: streaming.TodoStatusInProgress},
+		})
+
+		ch, err := ah.Run(context.Background(), "Complete task 1")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var foundError bool
+		var foundComplete bool
+		var eventCount int
+		for ev := range ch {
+			eventCount++
+			t.Logf("event %d: type=%q content=%q error=%v", eventCount, ev.Type, ev.Content, ev.Error)
+			if ev.Type == StreamEventError {
+				foundError = true
+				if !strings.Contains(ev.Content, "compression invoke failed") {
+					t.Errorf("error message = %q, want contains 'compression invoke failed'", ev.Content)
+				}
+			}
+			if ev.Type == StreamEventComplete {
+				foundComplete = true
+			}
+		}
+		t.Logf("events received: %d, compressionAttempted=%v foundError=%v foundComplete=%v", eventCount, compressionAttempted, foundError, foundComplete)
+
+		if !compressionAttempted {
+			t.Error("compression should have been attempted")
+		}
+		if !foundError {
+			t.Error("expected StreamEventError")
+		}
+		if foundComplete {
+			t.Error("should not have StreamEventComplete after compression error")
 		}
 	})
 }

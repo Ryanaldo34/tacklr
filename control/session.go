@@ -209,6 +209,26 @@ func (rt *HarnessRuntime) RaiseInterrupt(kind string, payload []byte) (Interrupt
 	return nil, intr
 }
 
+// SnapshotState returns copies of the state and interrupt maps under the read
+// lock, safe for concurrent access during checkpointing.
+func (rt *HarnessRuntime) SnapshotState() (state map[string]any, pending, resolved interruptMap) {
+	rt.mu.RLock()
+	defer rt.mu.RUnlock()
+	state = make(map[string]any, len(rt.State))
+	for k, v := range rt.State {
+		state[k] = v
+	}
+	pending = make(interruptMap, len(rt.PendingInterrupts))
+	for k, v := range rt.PendingInterrupts {
+		pending[k] = v
+	}
+	resolved = make(interruptMap, len(rt.ResolvedInterrupts))
+	for k, v := range rt.ResolvedInterrupts {
+		resolved[k] = v
+	}
+	return
+}
+
 func NewRuntime(ch chan streaming.StreamEvent, store stores.BaseStore, state map[string]any) HarnessRuntime {
 	if state == nil {
 		state = make(map[string]any)
