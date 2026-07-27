@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/ryanaldo34/tacklr/control"
+	mcpruntime "github.com/ryanaldo34/tacklr/internal/mcp"
 	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/skills"
 	"github.com/ryanaldo34/tacklr/stores"
@@ -120,7 +121,7 @@ type AgentHarness struct {
 	skillByName          map[string]skills.Skill
 	skillDirectories     []string
 	skillsInitialized    bool
-	mcpClients           []*mcp.Client
+	mcpCleanup           func()
 	mcpInitialized       bool
 	out                  chan streaming.StreamEvent
 }
@@ -375,30 +376,27 @@ func (a *AgentHarness) initMCP(ctx context.Context) {
 	}
 	a.mcpInitialized = true
 
-	discovered, clients := mcp.DiscoverAllTools(ctx, a.MCPConfigs)
-	for _, dt := range discovered {
+	a.mcpCleanup = mcpruntime.DiscoverAllTools(ctx, a.MCPConfigs, func(name, description, namespace string, schema map[string]any, handler mcpruntime.ToolHandler) {
 		tool := newMCPTool(mcpToolConfig{
-			Name:        dt.Name,
-			Description: dt.Description,
-			Namespace:   dt.Namespace,
-			Schema:      dt.Schema,
+			Name:        name,
+			Description: description,
+			Namespace:   namespace,
+			Schema:      schema,
 			Handler: func(ctx context.Context, args map[string]any, _ HarnessRuntime) (string, error) {
-				return dt.CallFunc(ctx, args)
+				return handler(ctx, args)
 			},
 		})
 		a.Tools = append(a.Tools, tool)
-	}
-	a.mcpClients = clients
+	})
 }
 
 // Close releases all resources held by the harness, including MCP client
 // connections. It should be called when the harness is no longer needed
 // (typically after the events channel from Run has been drained).
 func (a *AgentHarness) Close() {
-	for _, c := range a.mcpClients {
-		if err := c.Close(); err != nil {
-			slog.Warn("failed to close MCP client", "server", c.Name(), "error", err)
-		}
+	if a.mcpCleanup != nil {
+		a.mcpCleanup()
+		a.mcpCleanup = nil
 	}
 }
 

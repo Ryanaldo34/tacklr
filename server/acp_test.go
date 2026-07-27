@@ -108,14 +108,44 @@ func TestValidateACPRequest_sessionNew(t *testing.T) {
 }
 
 func TestValidateACPRequest_sessionNew_withMCPServers(t *testing.T) {
-	// ACP stdio MCP server shapes differ from our MCPConfig; cwd must still parse.
-	body := []byte(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[{"name":"fs","command":"npx","args":["-y","@modelcontextprotocol/server-filesystem"]}]}}`)
+	body := []byte(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[
+		{"name":"fs","command":"npx","args":["-y","@modelcontextprotocol/server-filesystem"],"env":[{"name":"API_KEY","value":"secret"}]},
+		{"type":"http","name":"api","url":"https://api.example.com/mcp","headers":[{"name":"Authorization","value":"Bearer tok"}]},
+		{"type":"sse","name":"events","url":"https://events.example.com/mcp","headers":[]}
+	]}}`)
 	pr, err := validateACPRequest(body)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if pr.CWD != "/tmp" {
 		t.Errorf("cwd = %q, want /tmp", pr.CWD)
+	}
+	if len(pr.MCPServers) != 3 {
+		t.Fatalf("mcpServers len = %d, want 3", len(pr.MCPServers))
+	}
+
+	stdio := pr.MCPServers[0]
+	if stdio.Name != "fs" || stdio.Command != "npx" {
+		t.Errorf("stdio server = %+v, want name=fs command=npx", stdio)
+	}
+	if len(stdio.Args) != 2 || stdio.Args[0] != "-y" {
+		t.Errorf("stdio args = %v, want [-y @modelcontextprotocol/server-filesystem]", stdio.Args)
+	}
+	if len(stdio.Env) != 1 || stdio.Env[0].Name != "API_KEY" || stdio.Env[0].Value != "secret" {
+		t.Errorf("stdio env = %v, want [API_KEY=secret]", stdio.Env)
+	}
+
+	httpSrv := pr.MCPServers[1]
+	if httpSrv.Type != "http" || httpSrv.URL != "https://api.example.com/mcp" {
+		t.Errorf("http server = %+v, want type=http url=https://api.example.com/mcp", httpSrv)
+	}
+	if len(httpSrv.Headers) != 1 || httpSrv.Headers[0].Name != "Authorization" || httpSrv.Headers[0].Value != "Bearer tok" {
+		t.Errorf("http headers = %v, want [Authorization: Bearer tok]", httpSrv.Headers)
+	}
+
+	sseSrv := pr.MCPServers[2]
+	if sseSrv.Type != "sse" || sseSrv.URL != "https://events.example.com/mcp" {
+		t.Errorf("sse server = %+v, want type=sse url=https://events.example.com/mcp", sseSrv)
 	}
 }
 
@@ -156,13 +186,16 @@ func TestValidateACPRequest_sessionPrompt_emptyPrompt(t *testing.T) {
 }
 
 func TestValidateACPRequest_sessionResume(t *testing.T) {
-	body := []byte(`{"jsonrpc":"2.0","id":4,"method":"session/resume","params":{"sessionId":"sess-2"}}`)
+	body := []byte(`{"jsonrpc":"2.0","id":4,"method":"session/resume","params":{"sessionId":"sess-2","cwd":"/tmp","mcpServers":[{"name":"fs","command":"npx","args":[]}]}}`)
 	pr, err := validateACPRequest(body)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if pr.ThreadID != "sess-2" {
 		t.Errorf("threadID = %q, want %q", pr.ThreadID, "sess-2")
+	}
+	if len(pr.MCPServers) != 1 || pr.MCPServers[0].Command != "npx" {
+		t.Errorf("mcpServers = %v, want one stdio server with command npx", pr.MCPServers)
 	}
 }
 
@@ -237,13 +270,19 @@ func TestValidateACPRequest_unsupportedMethod(t *testing.T) {
 }
 
 func TestValidateACPRequest_sessionLoad(t *testing.T) {
-	body := []byte(`{"jsonrpc":"2.0","id":7,"method":"session/load","params":{"sessionId":"sess-load"}}`)
+	body := []byte(`{"jsonrpc":"2.0","id":7,"method":"session/load","params":{"sessionId":"sess-load","cwd":"/proj","mcpServers":[{"type":"http","name":"api","url":"https://api.example.com/mcp","headers":[]}]}}`)
 	pr, err := validateACPRequest(body)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if pr.ThreadID != "sess-load" {
 		t.Errorf("threadID = %q, want %q", pr.ThreadID, "sess-load")
+	}
+	if pr.CWD != "/proj" {
+		t.Errorf("cwd = %q, want /proj", pr.CWD)
+	}
+	if len(pr.MCPServers) != 1 || pr.MCPServers[0].Type != "http" {
+		t.Errorf("mcpServers = %v, want one http server", pr.MCPServers)
 	}
 }
 
@@ -565,6 +604,13 @@ func TestHandleRPC_initialize(t *testing.T) {
 	if caps["loadSession"] != false {
 		t.Errorf("loadSession = %v, want false", caps["loadSession"])
 	}
+	mcpCaps := caps["mcpCapabilities"].(map[string]any)
+	if mcpCaps["http"] != true {
+		t.Errorf("mcpCapabilities.http = %v, want true", mcpCaps["http"])
+	}
+	if mcpCaps["sse"] != true {
+		t.Errorf("mcpCapabilities.sse = %v, want true", mcpCaps["sse"])
+	}
 }
 
 func TestHandleRPC_sessionNew(t *testing.T) {
@@ -611,6 +657,9 @@ func TestHandleRPC_sessionNew_storesSessionState(t *testing.T) {
 	s := state.(*sessionState)
 	if s.cwd != "/home/user" {
 		t.Errorf("cwd = %q, want %q", s.cwd, "/home/user")
+	}
+	if len(s.mcpServers) != 1 || s.mcpServers[0].Name != "fs" || s.mcpServers[0].Command != "npx" {
+		t.Errorf("mcpServers = %v, want one stdio server fs/npx", s.mcpServers)
 	}
 }
 
@@ -715,6 +764,35 @@ func TestHandleRPC_sessionLoad(t *testing.T) {
 	opts, ok := result["configOptions"].([]any)
 	if !ok || len(opts) == 0 {
 		t.Fatalf("expected configOptions in result, got %v", result)
+	}
+}
+
+func TestHandleRPC_sessionLoad_updatesSessionState(t *testing.T) {
+	store := testStore(t)
+	r := newTestRegistry(store, &mockInferenceStrategy{}, []*tacklr.Tool{})
+
+	rec1 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
+	var resp1 map[string]any
+	_ = json.Unmarshal(rec1.Body.Bytes(), &resp1)
+	sessionID := resp1["result"].(map[string]any)["sessionId"].(string)
+
+	rec2 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"`+sessionID+`","cwd":"/proj","mcpServers":[{"type":"http","name":"api","url":"https://api.example.com/mcp","headers":[{"name":"Authorization","value":"Bearer tok"}]}]}}`)
+	var resp2 map[string]any
+	_ = json.Unmarshal(rec2.Body.Bytes(), &resp2)
+	if resp2["error"] != nil {
+		t.Fatalf("unexpected error: %v", resp2["error"])
+	}
+
+	state, ok := r.sessions.Load(sessionID)
+	if !ok {
+		t.Fatal("expected session state to be stored")
+	}
+	s := state.(*sessionState)
+	if s.cwd != "/proj" {
+		t.Errorf("cwd = %q, want /proj", s.cwd)
+	}
+	if len(s.mcpServers) != 1 || s.mcpServers[0].Type != "http" || s.mcpServers[0].URL != "https://api.example.com/mcp" {
+		t.Errorf("mcpServers = %v, want one http server", s.mcpServers)
 	}
 }
 
@@ -1110,7 +1188,7 @@ func TestServeStdio_lifecycleAndPrompt(t *testing.T) {
 
 	in := strings.Join([]string{
 		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}`,
-		`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[{"name":"fs","command":"npx","args":[]}]}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[{"name":"fs","command":"/bin/true","args":[]}]}}`,
 	}, "\n") + "\n"
 
 	var out bytes.Buffer

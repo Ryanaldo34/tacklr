@@ -59,6 +59,10 @@ type TurnRequest struct {
 	Responses map[string]json.RawMessage
 	Resume    bool
 	Load      bool
+
+	// MCPServers carries the MCP server configs re-specified by the client
+	// on session/resume. When empty, the list stored at session/new is used.
+	MCPServers []mcp.MCPConfig
 }
 
 // EventStream is a running agent turn. Events is closed when the turn ends.
@@ -109,8 +113,8 @@ func (r *Registry) Capabilities() map[string]any {
 				"embeddedContext": true,
 			},
 			"mcpCapabilities": map[string]any{
-				"http": false,
-				"sse":  false,
+				"http": true,
+				"sse":  true,
 			},
 			"sessionCapabilities": map[string]any{
 				"close": struct{}{},
@@ -143,13 +147,19 @@ func (r *Registry) CreateSession(cwd string, mcpServers []mcp.MCPConfig) *Sessio
 	}
 }
 
-// GetSession returns metadata for an existing session.
-func (r *Registry) GetSession(sessionID string) (*SessionView, error) {
+// LoadSession returns metadata for an existing session and refreshes the
+// per-session working directory and MCP server list from the client's
+// session/load request, which re-specifies both in full.
+func (r *Registry) LoadSession(sessionID, cwd string, mcpServers []mcp.MCPConfig) (*SessionView, error) {
 	state, ok := r.sessions.Load(sessionID)
 	if !ok {
 		return nil, clientErrorf(ErrSessionNotFound, "session %q not found", sessionID)
 	}
 	sess := state.(*sessionState)
+	sess.mu.Lock()
+	sess.cwd = cwd
+	sess.mcpServers = mcpServers
+	sess.mu.Unlock()
 	return &SessionView{
 		SessionID:     sessionID,
 		ConfigOptions: r.buildConfigOptions(r.sessionAgentID(sess)),
@@ -252,9 +262,21 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 		return nil, fmt.Errorf("load agent %q: %w", agentID, err)
 	}
 
-	// Merge per-session MCP configs from session/new into the harness.
-	if sess != nil && len(sess.mcpServers) > 0 {
-		h.MCPConfigs = append(h.MCPConfigs, sess.mcpServers...)
+	// Merge per-session MCP configs into the harness. A list supplied with
+	// this request (session/resume re-specifies it) takes precedence and
+	// replaces the stored list; otherwise the session/new list is used.
+	mcpServers := req.MCPServers
+	if sess != nil {
+		sess.mu.Lock()
+		if len(mcpServers) > 0 {
+			sess.mcpServers = mcpServers
+		} else {
+			mcpServers = sess.mcpServers
+		}
+		sess.mu.Unlock()
+	}
+	if len(mcpServers) > 0 {
+		h.MCPConfigs = append(h.MCPConfigs, mcpServers...)
 	}
 
 	runCtx, cancel := context.WithCancel(ctx)

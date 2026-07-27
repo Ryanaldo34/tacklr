@@ -278,7 +278,7 @@ func (s *Server) HandleMessage(ctx context.Context, body []byte, w MessageWriter
 			"configOptions": view.ConfigOptions,
 		})
 	case "session/load":
-		view, err := s.Registry.GetSession(pr.ThreadID)
+		view, err := s.Registry.LoadSession(pr.ThreadID, pr.CWD, pr.MCPServers)
 		if err != nil {
 			_ = w.WriteError(pr.ID, err)
 			return
@@ -309,10 +309,11 @@ func (s *Server) HandleMessage(ctx context.Context, body []byte, w MessageWriter
 
 func (s *Server) handleSessionTurn(ctx context.Context, pr *parsedRequest, w MessageWriter) {
 	stream, err := s.Registry.RunTurn(ctx, TurnRequest{
-		SessionID: pr.ThreadID,
-		Prompt:    pr.Prompt,
-		Responses: pr.Responses,
-		Resume:    pr.Method == "session/resume",
+		SessionID:  pr.ThreadID,
+		Prompt:     pr.Prompt,
+		Responses:  pr.Responses,
+		Resume:     pr.Method == "session/resume",
+		MCPServers: pr.MCPServers,
 	})
 	if err != nil {
 		if !IsClientError(err) {
