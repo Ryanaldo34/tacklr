@@ -1,4 +1,4 @@
-package mcp
+package mcpruntime
 
 import (
 	"errors"
@@ -6,9 +6,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/ryanaldo34/tacklr/mcp"
 )
 
-func TestHeaderTransportInjectsHeadersAndToken(t *testing.T) {
+func TestHeaderTransportInjectsHeaders(t *testing.T) {
 	var gotAuth, gotCustom string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
@@ -19,9 +21,11 @@ func TestHeaderTransportInjectsHeadersAndToken(t *testing.T) {
 	defer ts.Close()
 
 	transport := &headerTransport{
-		base:    http.DefaultTransport,
-		token:   "shhh",
-		headers: map[string]string{"X-Custom": "value"},
+		base: http.DefaultTransport,
+		headers: []mcp.HTTPHeader{
+			{Name: "Authorization", Value: "Bearer shhh"},
+			{Name: "X-Custom", Value: "value"},
+		},
 	}
 
 	req, err := http.NewRequest(http.MethodGet, ts.URL, nil)
@@ -66,9 +70,9 @@ func TestHeaderTransportCapturesForbiddenBody(t *testing.T) {
 		t.Fatalf("expected error for 403, got nil")
 	}
 
-	var httpErr *MCPHTTPError
+	var httpErr *httpError
 	if !errors.As(err, &httpErr) {
-		t.Fatalf("expected *MCPHTTPError, got %T: %v", err, err)
+		t.Fatalf("expected *httpError, got %T: %v", err, err)
 	}
 	if httpErr.Status != http.StatusForbidden {
 		t.Errorf("status = %d, want %d", httpErr.Status, http.StatusForbidden)
@@ -97,9 +101,9 @@ func TestHeaderTransportCapturesInternalServerError(t *testing.T) {
 		t.Fatalf("expected error for 500")
 	}
 
-	var httpErr *MCPHTTPError
+	var httpErr *httpError
 	if !errors.As(err, &httpErr) {
-		t.Fatalf("expected *MCPHTTPError, got %T: %v", err, err)
+		t.Fatalf("expected *httpError, got %T: %v", err, err)
 	}
 	if httpErr.Status != http.StatusInternalServerError {
 		t.Errorf("status = %d, want %d", httpErr.Status, http.StatusInternalServerError)
@@ -149,18 +153,15 @@ func TestHeaderTransportPropagatesRoundTripError(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected connection error")
 	}
-	var httpErr *MCPHTTPError
+	var httpErr *httpError
 	if errors.As(err, &httpErr) {
-		t.Errorf("did not expect *MCPHTTPError for transport failure, got %v", err)
+		t.Errorf("did not expect *httpError for transport failure, got %v", err)
 	}
 }
 
 func TestBuildHTTPClientAlwaysWrapsTransport(t *testing.T) {
-	cfg := MCPConfig{Name: "plain"}
-	client, err := buildHTTPClient(t.Context(), cfg)
-	if err != nil {
-		t.Fatalf("build http client: %v", err)
-	}
+	cfg := mcp.MCPConfig{Name: "plain"}
+	client := buildHTTPClient(cfg)
 	if client.Transport == nil {
 		t.Fatal("expected non-nil transport")
 	}
@@ -170,24 +171,13 @@ func TestBuildHTTPClientAlwaysWrapsTransport(t *testing.T) {
 }
 
 func TestBuildHTTPClientWrapsWithHeaders(t *testing.T) {
-	cfg := MCPConfig{Name: "plain", Headers: map[string]string{"X-Foo": "bar"}}
-	client, err := buildHTTPClient(t.Context(), cfg)
-	if err != nil {
-		t.Fatalf("build http client: %v", err)
-	}
+	cfg := mcp.MCPConfig{Name: "plain", Headers: []mcp.HTTPHeader{{Name: "X-Foo", Value: "bar"}}}
+	client := buildHTTPClient(cfg)
 	transport, ok := client.Transport.(*headerTransport)
 	if !ok {
 		t.Fatalf("expected *headerTransport, got %T", client.Transport)
 	}
-	if transport.headers["X-Foo"] != "bar" {
-		t.Errorf("expected header X-Foo=bar, got %q", transport.headers["X-Foo"])
-	}
-}
-
-func TestBuildHTTPClientRequiresAuth(t *testing.T) {
-	cfg := MCPConfig{Name: "auth", AuthRequired: true}
-	_, err := buildHTTPClient(t.Context(), cfg)
-	if !errors.Is(err, ErrMCPAuthRequired) {
-		t.Errorf("expected ErrMCPAuthRequired, got %v", err)
+	if len(transport.headers) != 1 || transport.headers[0].Name != "X-Foo" || transport.headers[0].Value != "bar" {
+		t.Errorf("expected header X-Foo=bar, got %v", transport.headers)
 	}
 }

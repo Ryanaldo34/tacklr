@@ -109,22 +109,18 @@ func validateACPRequest(body []byte) (*parsedRequest, error) {
 		if env.Params == nil {
 			return nil, clientErrorf(ErrInvalidRequest, "params is required for session/new")
 		}
-		// MCP server configs from ACP clients use a different shape (stdio
-		// command/args). Parse cwd only; ignore MCP server details we don't
-		// support over stdio yet so session creation never fails on them.
-		var p struct {
-			Cwd string `json:"cwd"`
-		}
+		var p acpSessionParams
 		if err := json.Unmarshal(env.Params, &p); err != nil {
 			return nil, clientErrorf(ErrInvalidRequest, "invalid session/new params: %v", err)
 		}
 		pr.CWD = p.Cwd
+		pr.MCPServers = p.MCPServers
 		return pr, nil
 	case "session/load":
 		if env.Params == nil {
 			return nil, clientErrorf(ErrInvalidRequest, "params is required for session/load")
 		}
-		var p acpSessionIDParams
+		var p acpSessionParams
 		if err := json.Unmarshal(env.Params, &p); err != nil {
 			return nil, clientErrorf(ErrInvalidRequest, "invalid session/load params: %v", err)
 		}
@@ -132,6 +128,23 @@ func validateACPRequest(body []byte) (*parsedRequest, error) {
 			return nil, clientErrorf(ErrInvalidRequest, "sessionId is required for session/load")
 		}
 		pr.ThreadID = p.SessionID
+		pr.CWD = p.Cwd
+		pr.MCPServers = p.MCPServers
+		return pr, nil
+	case "session/resume":
+		if env.Params == nil {
+			return nil, clientErrorf(ErrInvalidRequest, "params is required for session/resume")
+		}
+		var p acpSessionParams
+		if err := json.Unmarshal(env.Params, &p); err != nil {
+			return nil, clientErrorf(ErrInvalidRequest, "invalid session/resume params: %v", err)
+		}
+		if p.SessionID == "" {
+			return nil, clientErrorf(ErrInvalidRequest, "sessionId is required for session/resume")
+		}
+		pr.ThreadID = p.SessionID
+		pr.CWD = p.Cwd
+		pr.MCPServers = p.MCPServers
 		return pr, nil
 	case "session/prompt":
 		if env.Params == nil {
@@ -175,7 +188,7 @@ func validateACPRequest(body []byte) (*parsedRequest, error) {
 		pr.ConfigID = p.ConfigID
 		pr.ConfigValue = p.Value
 		return pr, nil
-	case "session/resume", "session/close", "session/cancel":
+	case "session/close", "session/cancel":
 		if env.Params == nil {
 			return nil, clientErrorf(ErrInvalidRequest, "params is required for %s", env.Method)
 		}
@@ -420,7 +433,7 @@ func eventToAcpJsonRpc(threadId string, event *streaming.StreamEvent) ([][]byte,
 		toStream = append(toStream, bytes)
 		return toStream, nil
 	case streaming.StreamEventInterrupt:
-		return nil, fmt.Errorf("no need to process event of type %s", event.Type)
+		return nil, nil // interrupt events are handled in the harness, never encoded over ACP
 	default:
 		slog.Warn("unhandled event type", "type", event.Type)
 		return nil, nil

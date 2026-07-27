@@ -22,7 +22,7 @@ events, err := h.Run(ctx, "your prompt")
 ```go
 import "github.com/ryanaldo34/tacklr/control"    // session/runtime types
 import "github.com/ryanaldo34/tacklr/inference"  // inference strategies
-import "github.com/ryanaldo34/tacklr/mcp"        // MCP client
+import "github.com/ryanaldo34/tacklr/mcp"        // MCP server config types
 import "github.com/ryanaldo34/tacklr/server"     // HTTP/WebSocket/SSE server
 import "github.com/ryanaldo34/tacklr/stores"     // session stores
 import "github.com/ryanaldo34/tacklr/streaming"  // streaming strategies
@@ -57,7 +57,33 @@ Valid handler signatures:
 
 The args struct is inspected with `reflect` at tool construction to auto-generate the JSON schema. Tags (`json`, `desc`, `enum`) control the schema output. `HarnessRuntime` is passed by value (a shallow copy with `CurrentToolCallID` set uniquely per call), giving tools access to interrupt and progress-update APIs.
 
-MCP-discovered tools are handled internally by the harness — configure `MCPConfigs` in `Config` and the discovery + tool wrapping happens automatically.
+MCP-discovered tools are handled internally by the harness — configure `MCPConfigs` (on `AgentSpec` or the harness directly) and the discovery + tool wrapping happens automatically.
+
+## MCP servers
+
+The public `mcp` package exposes only configuration types. Connection, discovery,
+and client lifecycle are internal to the harness.
+
+`mcp.MCPConfig` mirrors the ACP `mcpServers` wire shape and supports all three transports:
+
+```go
+// stdio (default): launch the server as a subprocess
+mcp.MCPConfig{Name: "fs", Command: "npx", Args: []string{"-y", "@modelcontextprotocol/server-filesystem"},
+    Env: []mcp.EnvVariable{{Name: "API_KEY", Value: "secret"}}}
+
+// streamable HTTP
+mcp.MCPConfig{Name: "api", Type: mcp.TransportHTTP, URL: "https://api.example.com/mcp",
+    Headers: []mcp.HTTPHeader{{Name: "Authorization", Value: "Bearer tok"}}}
+
+// SSE (deprecated by the MCP spec)
+mcp.MCPConfig{Name: "events", Type: mcp.TransportSSE, URL: "https://events.example.com/mcp"}
+```
+
+Pass configs via `AgentSpec.MCPConfigs` or the harness `MCPConfigs` field. Over
+ACP, clients supply the same shapes in `session/new`, `session/load`, and
+`session/resume`; the harness connects and discovers tools at the start of the
+next turn. The agent advertises `mcpCapabilities.http` and `mcpCapabilities.sse`
+as supported (stdio is always supported).
 
 ### Usage in an agent
 
