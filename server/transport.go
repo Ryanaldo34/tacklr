@@ -312,7 +312,7 @@ func (s *Server) handleSessionTurn(ctx context.Context, pr *parsedRequest, w Mes
 		SessionID:  pr.ThreadID,
 		Prompt:     pr.Prompt,
 		Responses:  pr.Responses,
-		Resume:     pr.Method == "session/resume",
+		CWD:        pr.CWD,
 		MCPServers: pr.MCPServers,
 	})
 	if err != nil {

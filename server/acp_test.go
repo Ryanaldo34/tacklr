@@ -565,11 +565,14 @@ func TestEventToAcpJsonRpc_error(t *testing.T) {
 	}
 }
 
-func TestEventToAcpJsonRpc_interrupt_returnsError(t *testing.T) {
+func TestEventToAcpJsonRpc_interrupt_skipped(t *testing.T) {
 	ev := &streaming.StreamEvent{Type: streaming.StreamEventInterrupt}
-	_, err := eventToAcpJsonRpc("thread-1", ev)
-	if err == nil {
-		t.Fatal("expected error for interrupt event")
+	frames, err := eventToAcpJsonRpc("thread-1", ev)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(frames) != 0 {
+		t.Errorf("frames = %d, want 0 (skipped)", len(frames))
 	}
 }
 
@@ -751,7 +754,7 @@ func TestHandleRPC_sessionLoad(t *testing.T) {
 	_ = json.Unmarshal(rec1.Body.Bytes(), &resp1)
 	sessionID := resp1["result"].(map[string]any)["sessionId"].(string)
 
-	rec2 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"`+sessionID+`"}}`)
+	rec2 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"`+sessionID+`","cwd":"/tmp"}}`)
 	var resp2 map[string]any
 	_ = json.Unmarshal(rec2.Body.Bytes(), &resp2)
 	if resp2["error"] != nil {
@@ -767,7 +770,7 @@ func TestHandleRPC_sessionLoad(t *testing.T) {
 	}
 }
 
-func TestHandleRPC_sessionLoad_updatesSessionState(t *testing.T) {
+func TestHandleRPC_sessionLoad_updatesSessionMCPServers(t *testing.T) {
 	store := testStore(t)
 	r := newTestRegistry(store, &mockInferenceStrategy{}, []*tacklr.Tool{})
 
@@ -776,7 +779,7 @@ func TestHandleRPC_sessionLoad_updatesSessionState(t *testing.T) {
 	_ = json.Unmarshal(rec1.Body.Bytes(), &resp1)
 	sessionID := resp1["result"].(map[string]any)["sessionId"].(string)
 
-	rec2 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"`+sessionID+`","cwd":"/proj","mcpServers":[{"type":"http","name":"api","url":"https://api.example.com/mcp","headers":[{"name":"Authorization","value":"Bearer tok"}]}]}}`)
+	rec2 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"`+sessionID+`","cwd":"/tmp","mcpServers":[{"type":"http","name":"api","url":"https://api.example.com/mcp","headers":[{"name":"Authorization","value":"Bearer tok"}]}]}}`)
 	var resp2 map[string]any
 	_ = json.Unmarshal(rec2.Body.Bytes(), &resp2)
 	if resp2["error"] != nil {
@@ -788,11 +791,31 @@ func TestHandleRPC_sessionLoad_updatesSessionState(t *testing.T) {
 		t.Fatal("expected session state to be stored")
 	}
 	s := state.(*sessionState)
-	if s.cwd != "/proj" {
-		t.Errorf("cwd = %q, want /proj", s.cwd)
+	if s.cwd != "/tmp" {
+		t.Errorf("cwd = %q, want /tmp (unchanged)", s.cwd)
 	}
 	if len(s.mcpServers) != 1 || s.mcpServers[0].Type != "http" || s.mcpServers[0].URL != "https://api.example.com/mcp" {
 		t.Errorf("mcpServers = %v, want one http server", s.mcpServers)
+	}
+}
+
+func TestHandleRPC_sessionLoad_cwdMismatch(t *testing.T) {
+	store := testStore(t)
+	r := newTestRegistry(store, &mockInferenceStrategy{}, []*tacklr.Tool{})
+
+	rec1 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
+	var resp1 map[string]any
+	_ = json.Unmarshal(rec1.Body.Bytes(), &resp1)
+	sessionID := resp1["result"].(map[string]any)["sessionId"].(string)
+
+	rec2 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"`+sessionID+`","cwd":"/proj"}}`)
+	var resp2 map[string]any
+	_ = json.Unmarshal(rec2.Body.Bytes(), &resp2)
+	if resp2["error"] == nil {
+		t.Fatal("expected error for cwd mismatch")
+	}
+	if !strings.Contains(resp2["error"].(map[string]any)["message"].(string), "cwd") {
+		t.Errorf("error = %v, want cwd mismatch message", resp2["error"])
 	}
 }
 

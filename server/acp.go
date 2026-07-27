@@ -433,7 +433,7 @@ func eventToAcpJsonRpc(threadId string, event *streaming.StreamEvent) ([][]byte,
 		toStream = append(toStream, bytes)
 		return toStream, nil
 	case streaming.StreamEventInterrupt:
-		return nil, fmt.Errorf("no need to process event of type %s", event.Type)
+		return nil, nil // interrupt events are handled in the harness, never encoded over ACP
 	default:
 		slog.Warn("unhandled event type", "type", event.Type)
 		return nil, nil

@@ -46,8 +46,8 @@ type SessionView struct {
 // TurnRequest describes a prompt or resume turn.
 //
 // Session mode (ACP): set SessionID. Agent is resolved from session config.
-// Resume forces a store load; otherwise load follows whether the session has
-// already completed a turn.
+// For session/resume, set MCPServers to replace the stored list and set CWD
+// for validation against the stored working directory.
 //
 // Direct mode (SSE/WS): set AgentID and ThreadID. Load indicates whether to
 // restore the thread from the session store.
@@ -57,8 +57,11 @@ type TurnRequest struct {
 	ThreadID  string
 	Prompt    string
 	Responses map[string]json.RawMessage
-	Resume    bool
 	Load      bool
+
+	// CWD is the client-supplied working directory for session/resume.
+	// If non-empty it must match the session's stored cwd.
+	CWD string
 
 	// MCPServers carries the MCP server configs re-specified by the client
 	// on session/resume. When empty, the list stored at session/new is used.
@@ -147,9 +150,8 @@ func (r *Registry) CreateSession(cwd string, mcpServers []mcp.MCPConfig) *Sessio
 	}
 }
 
-// LoadSession returns metadata for an existing session and refreshes the
-// per-session working directory and MCP server list from the client's
-// session/load request, which re-specifies both in full.
+// LoadSession refreshes the per-session MCP server list from the client's
+// session/load request. The cwd must match the session's stored cwd.
 func (r *Registry) LoadSession(sessionID, cwd string, mcpServers []mcp.MCPConfig) (*SessionView, error) {
 	state, ok := r.sessions.Load(sessionID)
 	if !ok {
@@ -157,7 +159,10 @@ func (r *Registry) LoadSession(sessionID, cwd string, mcpServers []mcp.MCPConfig
 	}
 	sess := state.(*sessionState)
 	sess.mu.Lock()
-	sess.cwd = cwd
+	if cwd != sess.cwd {
+		sess.mu.Unlock()
+		return nil, clientErrorf(ErrInvalidRequest, "cwd %q does not match session cwd %q", cwd, sess.cwd)
+	}
 	sess.mcpServers = mcpServers
 	sess.mu.Unlock()
 	return &SessionView{
@@ -255,6 +260,17 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 		if len(req.Responses) > 0 {
 			load = true
 		}
+	}
+
+	// Validate cwd on session/resume: if provided it must match the stored
+	// working directory set at session/new.
+	if req.CWD != "" && sess != nil {
+		sess.mu.Lock()
+		if req.CWD != sess.cwd {
+			sess.mu.Unlock()
+			return nil, clientErrorf(ErrInvalidRequest, "cwd does not match session cwd")
+		}
+		sess.mu.Unlock()
 	}
 
 	h, _, err := r.loadAgent(ctx, agentID, threadID, load)
