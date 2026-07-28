@@ -128,7 +128,7 @@ func TestAgentHarness_Run(t *testing.T) {
 				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "Hello!", IsComplete: true}
 			},
 		}
-		ah := NewAgent(AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
+		ah := NewAgent(context.Background(), AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
 		ch, err := ah.Run(context.Background(), "Hi")
 		if err != nil {
 			t.Fatal(err)
@@ -168,7 +168,7 @@ func TestAgentHarness_Run(t *testing.T) {
 				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "Done!", IsComplete: true}
 			},
 		}
-		ah := NewAgent(AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
+		ah := NewAgent(context.Background(), AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
 		ch, err := ah.Run(context.Background(), "Say hello")
 		if err != nil {
 			t.Fatal(err)
@@ -244,7 +244,7 @@ func TestAgentHarness_Run(t *testing.T) {
 				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
 			},
 		}
-		ah := NewAgent(AgentOptions{Config: Config{}, Model: strategy, Store: store})
+		ah := NewAgent(context.Background(), AgentOptions{Config: Config{}, Model: strategy, Store: store})
 		ch, err := ah.Run(context.Background(), "test")
 		if err != nil {
 			t.Fatal(err)
@@ -281,7 +281,7 @@ func TestAgentHarness_Run(t *testing.T) {
 				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
 			},
 		}
-		ah := NewAgent(AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{brokenTool}})
+		ah := NewAgent(context.Background(), AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{brokenTool}})
 		ch, err := ah.Run(context.Background(), "test")
 		if err != nil {
 			t.Fatal(err)
@@ -303,7 +303,7 @@ func TestAgentHarness_Run(t *testing.T) {
 		strategy := &mockStrategy{
 			invokeErr: fmt.Errorf("network error"),
 		}
-		ah := NewAgent(AgentOptions{Config: Config{}, Model: strategy, Store: store})
+		ah := NewAgent(context.Background(), AgentOptions{Config: Config{}, Model: strategy, Store: store})
 		ch, err := ah.Run(context.Background(), "test")
 		if err != nil {
 			t.Fatal(err)
@@ -337,7 +337,7 @@ func TestAgentHarness_Run(t *testing.T) {
 			},
 		}
 
-		ah := NewAgent(AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{interruptTool}})
+		ah := NewAgent(context.Background(), AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{interruptTool}})
 
 		ch, err := ah.Run(context.Background(), "start")
 		if err != nil {
@@ -445,7 +445,7 @@ func TestAgentHarness_Run(t *testing.T) {
 			},
 		}
 
-		ah := NewAgent(AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
+		ah := NewAgent(context.Background(), AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
 		ah.Runtime.PlanSet([]control.Todo{
 			{Title: "Task 1", Status: streaming.TodoStatusInProgress},
 			{Title: "Task 2", Status: streaming.TodoStatusPending},
@@ -528,7 +528,7 @@ func TestAgentHarness_Run(t *testing.T) {
 			},
 		}
 
-		ah := NewAgent(AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{interruptTool}})
+		ah := NewAgent(context.Background(), AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{interruptTool}})
 		ah.Runtime.PlanSet([]control.Todo{
 			{Title: "Task 1", Status: streaming.TodoStatusInProgress},
 		})
@@ -585,7 +585,7 @@ func TestAgentHarness_Run(t *testing.T) {
 			},
 		}
 
-		ah := NewAgent(AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
+		ah := NewAgent(context.Background(), AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
 
 		ch, err := ah.Run(context.Background(), "Greet the world")
 		if err != nil {
@@ -629,7 +629,7 @@ func TestAgentHarness_Run(t *testing.T) {
 			},
 		}
 
-		ah := NewAgent(AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
+		ah := NewAgent(context.Background(), AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
 		ah.Runtime.PlanSet([]control.Todo{
 			{Title: "Task 1", Status: streaming.TodoStatusInProgress},
 		})
@@ -676,7 +676,7 @@ func TestReturnFromInterrupt_unknownUUID_returnsError(t *testing.T) {
 			events <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
 		},
 	}
-	ah := NewAgent(AgentOptions{Config: Config{}, Model: strategy, Store: store})
+	ah := NewAgent(context.Background(), AgentOptions{Config: Config{}, Model: strategy, Store: store})
 
 	resolved, err := ah.ReturnFromInterrupt(context.Background(), map[string][]byte{
 		"bogus-uuid": []byte(`{}`),
@@ -720,7 +720,7 @@ func TestReturnFromInterrupt_invalidPayload_returnsError(t *testing.T) {
 		},
 	}
 
-	ah := NewAgent(AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{interruptTool}})
+	ah := NewAgent(context.Background(), AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{interruptTool}})
 
 	ch, err := ah.Run(context.Background(), "start")
 	if err != nil {
@@ -764,7 +764,7 @@ func TestNewAgent(t *testing.T) {
 	mockModel := &mockStrategy{}
 	wd := &recordingWatchdog{}
 
-	h := NewAgent(AgentOptions{
+	h := NewAgent(context.Background(), AgentOptions{
 		Config: Config{
 			MaxWindowSize: 4096,
 			SystemPrompt:  "test prompt",
@@ -839,7 +839,7 @@ func TestRun_contextCancellation(t *testing.T) {
 			ch <- LLMResponseChunk{IsComplete: true, Content: "done", Type: StreamEventMessage}
 		},
 	}
-	h := NewAgent(AgentOptions{Config: Config{MaxWindowSize: 8192}, Model: mock})
+	h := NewAgent(context.Background(), AgentOptions{Config: Config{MaxWindowSize: 8192}, Model: mock})
 	h.ContextWindow = []*Message{{Role: RoleUser, Content: "hi"}}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -883,7 +883,7 @@ func TestRun_watchdogInvoked(t *testing.T) {
 		},
 	}
 	wd := &recordingWatchdog{}
-	h := NewAgent(AgentOptions{Config: Config{MaxWindowSize: 8192}, Model: mock, WatchDog: wd})
+	h := NewAgent(context.Background(), AgentOptions{Config: Config{MaxWindowSize: 8192}, Model: mock, WatchDog: wd})
 
 	events, err := h.Run(context.Background(), "hi")
 	if err != nil {
@@ -918,7 +918,7 @@ func TestRun_reasoningCapturedInContextWindow(t *testing.T) {
 			ch <- LLMResponseChunk{IsComplete: true}
 		},
 	}
-	h := NewAgent(AgentOptions{Config: Config{MaxWindowSize: 8192}, Model: mock})
+	h := NewAgent(context.Background(), AgentOptions{Config: Config{MaxWindowSize: 8192}, Model: mock})
 
 	events, err := h.Run(context.Background(), "what is the answer?")
 	if err != nil {

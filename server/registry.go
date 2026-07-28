@@ -272,15 +272,6 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 		}
 		sess.mu.Unlock()
 	}
-
-	h, _, err := r.loadAgent(ctx, agentID, threadID, load)
-	if err != nil {
-		return nil, fmt.Errorf("load agent %q: %w", agentID, err)
-	}
-
-	// Merge per-session MCP configs into the harness. A list supplied with
-	// this request (session/resume re-specifies it) takes precedence and
-	// replaces the stored list; otherwise the session/new list is used.
 	mcpServers := req.MCPServers
 	if sess != nil {
 		sess.mu.Lock()
@@ -291,8 +282,10 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 		}
 		sess.mu.Unlock()
 	}
-	if len(mcpServers) > 0 {
-		h.MCPConfigs = append(h.MCPConfigs, mcpServers...)
+
+	h, _, err := r.loadAgent(ctx, agentID, threadID, load, mcpServers)
+	if err != nil {
+		return nil, fmt.Errorf("load agent %q: %w", agentID, err)
 	}
 
 	runCtx, cancel := context.WithCancel(ctx)
@@ -389,7 +382,7 @@ func (r *Registry) sessionAgentID(sess *sessionState) string {
 	return r.defaultAgent
 }
 
-func (r *Registry) loadAgent(ctx context.Context, agentID, threadID string, load bool) (*tacklr.AgentHarness, *AgentSpec, error) {
+func (r *Registry) loadAgent(ctx context.Context, agentID, threadID string, load bool, sessionMCP []mcp.MCPConfig) (*tacklr.AgentHarness, *AgentSpec, error) {
 	spec, ok := r.agents[agentID]
 	if !ok {
 		return nil, nil, clientErrorf(ErrAgentNotFound, "agent %q not found", agentID)
@@ -400,29 +393,34 @@ func (r *Registry) loadAgent(ctx context.Context, agentID, threadID string, load
 		store = spec.Store
 	}
 
+	mcpConfigs := make([]mcp.MCPConfig, 0, len(spec.MCPConfigs)+len(sessionMCP))
+	mcpConfigs = append(mcpConfigs, spec.MCPConfigs...)
+	mcpConfigs = append(mcpConfigs, sessionMCP...)
+
+	opts := tacklr.AgentOptions{
+		Config:     spec.Config,
+		Model:      spec.Model,
+		Store:      store,
+		WatchDog:   spec.WatchDog,
+		Tools:      spec.Tools,
+		MCPConfigs: mcpConfigs,
+	}
+
 	var h *tacklr.AgentHarness
 	var err error
 	if load {
 		if store == nil {
 			return nil, nil, clientErrorf(ErrSessionStoreNotConfigured, "session store is not configured")
 		}
-		h, err = tacklr.NewAgentHarnessFromSession(ctx, threadID, spec.Config, spec.Model, store, spec.WatchDog)
+		h, err = tacklr.NewAgentFromSession(ctx, threadID, opts)
 		if err != nil {
 			return nil, nil, err
 		}
 	} else {
-		h = tacklr.NewAgent(tacklr.AgentOptions{
-			Config:   spec.Config,
-			Model:    spec.Model,
-			Store:    store,
-			WatchDog: spec.WatchDog,
-			Tools:    spec.Tools,
-		})
+		h = tacklr.NewAgent(ctx, opts)
 	}
 
 	h.SessionId = threadID
-	h.Tools = spec.Tools
-	h.MCPConfigs = spec.MCPConfigs
 	if spec.StreamingStrategy != nil {
 		h.WithStreamingStrategy(spec.StreamingStrategy)
 	}

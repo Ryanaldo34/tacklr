@@ -114,6 +114,8 @@ type AgentHarness struct {
 	WatchDog             AgentWatchDog
 	MaxWindowSize        int
 	Plan                 []control.Todo
+	subagents            map[string]*AgentHarness
+	subagentDescriptions map[string]string
 	streamingStrategy    StreamingStrategy
 	interruptToRequester map[string]string
 	pendingToolCalls     map[string]stores.PendingToolCall
@@ -180,6 +182,23 @@ When solving a task:
 - Do not force the use of a skill if it is unrelated to the current task.
 
 %s`, builtIn, skills)
+	}
+	if len(a.subagents) > 0 {
+		var subList string
+		for name := range a.subagents {
+			desc := a.subagentDescriptions[name]
+			if desc != "" {
+				subList += fmt.Sprintf(" - %s: %s\n", name, desc)
+			} else {
+				subList += fmt.Sprintf(" - %s\n", name)
+			}
+		}
+		builtIn = fmt.Sprintf(`%s
+
+AVAILABLE SUB-AGENTS:
+You can delegate tasks to specialized sub-agents using the spawn_worker tool. Each sub-agent has its own instructions, tools, and model — choose the one best suited for the task. Only spawn a worker if you are confident it will provide value in running several subtasks in parallel or a task requires significant research or analysis and you only want access to the final output. You may spawn multiple workers to run subtasks in parallel. Always prefer structuring a plan into smaller, more manageable steps rather than a single, complex task requiring several subagents to complete.
+
+%s`, builtIn, subList)
 	}
 	if a.Instructions != "" {
 		builtIn = fmt.Sprintf(`%s
@@ -365,13 +384,16 @@ func (a *AgentHarness) WithStreamingStrategy(strategy StreamingStrategy) *AgentH
 
 // initMCP connects to all configured MCP servers, discovers their tools, and
 // appends them to a.Tools. It is idempotent — subsequent calls are no-ops so
-// that ReturnFromInterrupt → Run does not re-discover.
+// that ReturnFromInterrupt → Run does not re-discover. When no configs are set
+// yet, initialization is deferred so callers can still supply MCPConfigs later.
 //
 // Unreachable servers are logged and skipped; their tools are not injected
 // into the context window but reachable servers' tools are still available.
 func (a *AgentHarness) initMCP(ctx context.Context) {
-	if a.mcpInitialized || len(a.MCPConfigs) == 0 {
-		a.mcpInitialized = true
+	if a.mcpInitialized {
+		return
+	}
+	if len(a.MCPConfigs) == 0 {
 		return
 	}
 	a.mcpInitialized = true
@@ -410,6 +432,9 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 	a.initMCP(ctx)
 	// Inject the built-in runtime management & hook tools
 	a.Tools = append(a.Tools, createPlanTool, editPlanTool, completeTodoTool)
+	if len(a.subagents) > 0 {
+		a.Tools = append(a.Tools, a.spawnTool())
+	}
 	out := make(chan StreamEvent)
 	a.Runtime.SetOutputChannel(out)
 	err := a.addToContext(ctx, &Message{Role: RoleUser, Content: prompt}, out)
@@ -577,8 +602,8 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 						slog.Info("todos completed", "session_id", a.SessionId, "todos_completed", todosCompleted)
 						err = a.compressWindowAfterTodoComplete(ctx)
 						if err != nil {
-						slog.Error("failed to compress window after todo complete", "session_id", a.SessionId, "error", err)
-						out <- StreamEvent{Type: StreamEventError, Content: err.Error()}
+							slog.Error("failed to compress window after todo complete", "session_id", a.SessionId, "error", err)
+							out <- StreamEvent{Type: StreamEventError, Content: err.Error()}
 							return
 						}
 						err = a.checkpointSession(ctx)
@@ -620,19 +645,22 @@ type Config struct {
 	SkillDirectories []string
 }
 
+// AgentOptions configures a new agent harness via NewAgent or NewAgentFromSession.
 type AgentOptions struct {
-	Config   Config
-	Model    InferenceStrategy
-	Store    stores.BaseStore
-	WatchDog AgentWatchDog
-	Tools    []*Tool
+	Config     Config
+	Model      InferenceStrategy
+	Store      stores.BaseStore
+	WatchDog   AgentWatchDog
+	Tools      []*Tool
+	MCPConfigs []mcp.MCPConfig
+	SubAgents  []*SubAgent
 }
 
-func NewAgent(opts AgentOptions) *AgentHarness {
+func NewAgent(ctx context.Context, opts AgentOptions) *AgentHarness {
 	events := make(chan streaming.StreamEvent)
 	runtime := control.NewRuntime(events, opts.Store, nil)
 	runtime.EnsureInitialized()
-	return &AgentHarness{
+	h := &AgentHarness{
 		Model:                opts.Model,
 		MaxWindowSize:        opts.Config.MaxWindowSize,
 		Instructions:         opts.Config.SystemPrompt,
@@ -640,13 +668,22 @@ func NewAgent(opts AgentOptions) *AgentHarness {
 		Runtime:              runtime,
 		WatchDog:             opts.WatchDog,
 		Tools:                opts.Tools,
+		MCPConfigs:           opts.MCPConfigs,
 		skillDirectories:     opts.Config.SkillDirectories,
 		ContextWindow:        nil,
 		SessionId:            "",
+		subagents:            make(map[string]*AgentHarness),
+		subagentDescriptions: make(map[string]string),
 		interruptToRequester: make(map[string]string),
 		pendingToolCalls:     make(map[string]stores.PendingToolCall),
 		out:                  events,
 	}
+	h.initMCP(ctx)
+	if err := h.initSkills(); err != nil {
+		slog.Error("failed to initialize skills", "error", err)
+	}
+	h.initSubAgentWorkers(opts.SubAgents)
+	return h
 }
 
 func (a *AgentHarness) initSkills() error {
@@ -684,13 +721,18 @@ func (a *AgentHarness) skillTool() *Tool {
 	})
 }
 
-func NewAgentHarnessFromSession(ctx context.Context, sessionId string, cfg Config, model InferenceStrategy, store stores.BaseStore, watchdog AgentWatchDog) (*AgentHarness, error) {
+// NewAgentFromSession restores a harness from a stored session checkpoint using
+// the same AgentOptions shape as NewAgent.
+func NewAgentFromSession(ctx context.Context, sessionId string, opts AgentOptions) (*AgentHarness, error) {
+	if opts.Store == nil {
+		return nil, fmt.Errorf("agent harness: store is required to load session %q", sessionId)
+	}
 	events := make(chan StreamEvent)
-	checkpoint, err := store.LoadSession(ctx, sessionId)
+	checkpoint, err := opts.Store.LoadSession(ctx, sessionId)
 	if err != nil {
 		return nil, err
 	}
-	runtime := control.NewRuntime(events, store, checkpoint.State.RuntimeState)
+	runtime := control.NewRuntime(events, opts.Store, checkpoint.State.RuntimeState)
 	runtime.EnsureInitialized()
 	if len(checkpoint.State.PendingInterrupts) > 0 {
 		_ = json.Unmarshal(checkpoint.State.PendingInterrupts, &runtime.PendingInterrupts)
@@ -698,20 +740,34 @@ func NewAgentHarnessFromSession(ctx context.Context, sessionId string, cfg Confi
 	if len(checkpoint.State.ResolvedInterrupts) > 0 {
 		_ = json.Unmarshal(checkpoint.State.ResolvedInterrupts, &runtime.ResolvedInterrupts)
 	}
+	if checkpoint.State.InterruptToRequester == nil {
+		checkpoint.State.InterruptToRequester = make(map[string]string)
+	}
+	if checkpoint.State.PendingToolCalls == nil {
+		checkpoint.State.PendingToolCalls = make(map[string]stores.PendingToolCall)
+	}
 	h := &AgentHarness{
-		Model:                model,
-		Store:                store,
+		Model:                opts.Model,
+		Store:                opts.Store,
 		SessionId:            sessionId,
 		ContextWindow:        checkpoint.ContextWindow,
 		Runtime:              runtime,
-		WatchDog:             watchdog,
-		MaxWindowSize:        cfg.MaxWindowSize,
-		Instructions:         cfg.SystemPrompt,
-		streamingStrategy:    nil,
+		WatchDog:             opts.WatchDog,
+		Tools:                opts.Tools,
+		MCPConfigs:           opts.MCPConfigs,
+		MaxWindowSize:        opts.Config.MaxWindowSize,
+		Instructions:         opts.Config.SystemPrompt,
+		skillDirectories:     opts.Config.SkillDirectories,
+		subagents:            make(map[string]*AgentHarness),
+		subagentDescriptions: make(map[string]string),
 		interruptToRequester: checkpoint.State.InterruptToRequester,
 		pendingToolCalls:     checkpoint.State.PendingToolCalls,
-		skillDirectories:     cfg.SkillDirectories,
 		out:                  events,
 	}
+	h.initMCP(ctx)
+	if err := h.initSkills(); err != nil {
+		slog.Error("failed to initialize skills", "error", err)
+	}
+	h.initSubAgentWorkers(opts.SubAgents)
 	return h, nil
 }
