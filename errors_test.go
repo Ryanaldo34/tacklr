@@ -13,6 +13,12 @@ func TestSentinelsAreDistinct(t *testing.T) {
 		ErrModelNotSet,
 		ErrUnknownModel,
 		ErrToolNotFound,
+		ErrWorkerNotFound,
+		ErrWorkerNoOutput,
+		ErrWorkerIncomplete,
+		ErrWorkerNoModel,
+		ErrEmptyWorkerTask,
+		ErrWorkerParkMissing,
 	}
 	for i, a := range sentinels {
 		for j, b := range sentinels {
@@ -36,6 +42,12 @@ func TestSentinelWrapping(t *testing.T) {
 		ErrModelNotSet,
 		ErrUnknownModel,
 		ErrToolNotFound,
+		ErrWorkerNotFound,
+		ErrWorkerNoOutput,
+		ErrWorkerIncomplete,
+		ErrWorkerNoModel,
+		ErrEmptyWorkerTask,
+		ErrWorkerParkMissing,
 	}
 	for _, sentinel := range sentinels {
 		wrapped := fmt.Errorf("context: %w", sentinel)

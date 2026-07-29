@@ -6,6 +6,52 @@ import (
 	"testing"
 )
 
+func TestAdoptInterrupt_parksUnderCurrentToolCall(t *testing.T) {
+	rt := HarnessRuntime{}
+	rt.EnsureInitialized()
+	rt.CurrentToolCallID = "spawn_tc"
+
+	// Simulate a child interrupt object.
+	child := &UserSelectionInterrupt{
+		Options: []UserChoice{{Title: "A"}, {Title: "B"}},
+	}
+	intr, err := rt.AdoptInterrupt(child)
+	if err == nil {
+		t.Fatal("first AdoptInterrupt should return interrupt as error")
+	}
+	if intr != nil {
+		t.Fatal("first return value should be nil")
+	}
+	if !rt.HasPendingInterrupt() {
+		t.Fatal("expected pending interrupt after adopt")
+	}
+	got, ok := rt.PendingInterrupt("spawn_tc")
+	if !ok || got != child {
+		t.Fatal("pending interrupt should be the adopted instance")
+	}
+
+	// Resolve then adopt again should surface resolved via Take/resume path.
+	if _, err := rt.ReturnInterrupt("spawn_tc", []byte(`{"selectionIdx":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	// Adopt when resolved: returns resolved, nil error
+	rt.CurrentToolCallID = "spawn_tc"
+	// Put resolved back for Adopt's resume branch — Return already moved to Resolved.
+	// AdoptInterrupt checks Resolved first.
+	// After ReturnInterrupt, Resolved has the interrupt. Adopt should take it.
+	resolved, err := rt.AdoptInterrupt(child)
+	if err != nil {
+		t.Fatalf("adopt on resume path: %v", err)
+	}
+	if resolved == nil {
+		t.Fatal("expected resolved interrupt")
+	}
+	usi := resolved.(*UserSelectionInterrupt)
+	if usi.ConfirmedChoice == nil || usi.ConfirmedChoice.Title != "B" {
+		t.Fatalf("confirmed choice = %v", usi.ConfirmedChoice)
+	}
+}
+
 func TestRaiseInterrupt_firstCallReturnsAsError(t *testing.T) {
 	rt := HarnessRuntime{}
 	rt.EnsureInitialized()

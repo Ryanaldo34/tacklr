@@ -171,6 +171,54 @@ func (rt *HarnessRuntime) ReturnInterrupt(id string, result []byte) (Interrupt, 
 	return intr, nil
 }
 
+// AdoptInterrupt parks an existing Interrupt under CurrentToolCallID without
+// going through the factory/InitFromPayload path. Used by spawn_worker to
+// bubble a child interrupt onto the parent Runtime. Returns the interrupt as
+// an error so the harness parks the tool like a normal RaiseInterrupt yield.
+//
+// If a resolved interrupt already exists for CurrentToolCallID (resume path),
+// it is removed and (resolved, nil) is returned — though spawn_worker normally
+// detects resume via park metadata before calling AdoptInterrupt.
+func (rt *HarnessRuntime) AdoptInterrupt(intr Interrupt) (Interrupt, error) {
+	if intr == nil {
+		return nil, fmt.Errorf("adopt interrupt: interrupt is nil")
+	}
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if rt.CurrentToolCallID == "" {
+		return nil, fmt.Errorf("adopt interrupt: CurrentToolCallID is empty")
+	}
+	if resolved, ok := rt.ResolvedInterrupts[rt.CurrentToolCallID]; ok {
+		delete(rt.ResolvedInterrupts, rt.CurrentToolCallID)
+		return resolved, nil
+	}
+	if rt.PendingInterrupts == nil {
+		rt.PendingInterrupts = interruptMap{}
+	}
+	rt.PendingInterrupts[rt.CurrentToolCallID] = intr
+	return nil, intr
+}
+
+// TakeResolvedInterrupt removes and returns a resolved interrupt for id, if any.
+func (rt *HarnessRuntime) TakeResolvedInterrupt(id string) (Interrupt, bool) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	intr, ok := rt.ResolvedInterrupts[id]
+	if !ok {
+		return nil, false
+	}
+	delete(rt.ResolvedInterrupts, id)
+	return intr, true
+}
+
+// PendingInterrupt returns the pending interrupt for id, if any.
+func (rt *HarnessRuntime) PendingInterrupt(id string) (Interrupt, bool) {
+	rt.mu.RLock()
+	defer rt.mu.RUnlock()
+	intr, ok := rt.PendingInterrupts[id]
+	return intr, ok
+}
+
 // RaiseInterrupt is the hook for tools to raise interrupts and yield control
 // back to the consumer for additional input or confirmation.
 //

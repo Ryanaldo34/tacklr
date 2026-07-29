@@ -21,6 +21,7 @@ type AgentSpec struct {
 	Model             tacklr.InferenceStrategy
 	Tools             []*tacklr.Tool
 	MCPConfigs        []mcp.MCPConfig
+	SubAgents         []*tacklr.SubAgent
 	WatchDog          tacklr.AgentWatchDog
 	StreamingStrategy tacklr.StreamingStrategy
 	Store             stores.BaseStore
@@ -404,6 +405,7 @@ func (r *Registry) loadAgent(ctx context.Context, agentID, threadID string, load
 		WatchDog:   spec.WatchDog,
 		Tools:      spec.Tools,
 		MCPConfigs: mcpConfigs,
+		SubAgents:  spec.SubAgents,
 	}
 
 	var h *tacklr.AgentHarness

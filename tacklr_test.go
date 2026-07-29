@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -794,6 +796,92 @@ func TestNewAgent(t *testing.T) {
 	}
 	if h.SessionId != "" {
 		t.Errorf("SessionId = %q, want empty", h.SessionId)
+	}
+}
+
+func TestConstructSystemPrompt_holistic(t *testing.T) {
+	// Skills + subagents + creator instructions must all compose after NewAgent
+	// (skills are initialized at construction, so the prompt must still include them).
+	skillsRoot := t.TempDir()
+	writeSkill := func(dir, name, desc, body string) {
+		t.Helper()
+		path := filepath.Join(skillsRoot, dir)
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		content := fmt.Sprintf("---\nname: %s\ndescription: %s\n---\n\n%s\n", name, desc, body)
+		if err := os.WriteFile(filepath.Join(path, "SKILL.md"), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeSkill("research", "research-skill", "How to research topics", "Use search carefully.")
+	writeSkill("coding", "coding-skill", "How to write code", "Prefer clear diffs.")
+
+	model := &mockStrategy{}
+	h := NewAgent(context.Background(), AgentOptions{
+		Config: Config{
+			MaxWindowSize:    8192,
+			SystemPrompt:     "Prefer concise answers and cite sources when possible.",
+			SkillDirectories: []string{skillsRoot},
+		},
+		Model: model,
+		SubAgents: []*SubAgent{
+			{WorkerName: "researcher", Model: model, Description: "deep research worker"},
+			{WorkerName: "coder", Model: model, Description: "implementation worker"},
+		},
+	})
+
+	prompt := h.constructSystemPrompt()
+
+	// Base system requirements always present.
+	if !strings.Contains(prompt, "SYSTEM REQUIREMENTS:") {
+		t.Fatal("missing SYSTEM REQUIREMENTS section")
+	}
+
+	// Skills section with catalog entries (sorted by name).
+	if !strings.Contains(prompt, "The following skills describe reusable approaches") {
+		t.Fatal("missing skills preamble")
+	}
+	codingIdx := strings.Index(prompt, " - coding-skill: How to write code\n")
+	researchIdx := strings.Index(prompt, " - research-skill: How to research topics\n")
+	if codingIdx < 0 || researchIdx < 0 {
+		t.Fatalf("missing skill catalog lines in prompt:\n%s", prompt)
+	}
+	if codingIdx > researchIdx {
+		t.Error("skills should be listed in sorted name order (coding before research)")
+	}
+
+	// Sub-agents section with sorted workers.
+	if !strings.Contains(prompt, "AVAILABLE SUB-AGENTS:") {
+		t.Fatal("missing AVAILABLE SUB-AGENTS section")
+	}
+	if !strings.Contains(prompt, "spawn_worker") {
+		t.Error("sub-agents section should mention spawn_worker")
+	}
+	coderIdx := strings.Index(prompt, " - coder: implementation worker\n")
+	researcherIdx := strings.Index(prompt, " - researcher: deep research worker\n")
+	if coderIdx < 0 || researcherIdx < 0 {
+		t.Fatalf("missing sub-agent catalog lines in prompt:\n%s", prompt)
+	}
+	if coderIdx > researcherIdx {
+		t.Error("sub-agents should be listed in sorted name order (coder before researcher)")
+	}
+
+	// Creator instructions last.
+	if !strings.Contains(prompt, "These instructions were provided by the creator of this agent instance") {
+		t.Fatal("missing creator instructions preamble")
+	}
+	if !strings.Contains(prompt, "Prefer concise answers and cite sources when possible.") {
+		t.Fatal("missing creator instructions body")
+	}
+
+	// Section order: base → skills → subagents → creator instructions.
+	sysIdx := strings.Index(prompt, "SYSTEM REQUIREMENTS:")
+	skillsIdx := strings.Index(prompt, "The following skills describe reusable approaches")
+	subsIdx := strings.Index(prompt, "AVAILABLE SUB-AGENTS:")
+	creatorIdx := strings.Index(prompt, "These instructions were provided by the creator")
+	if !(sysIdx < skillsIdx && skillsIdx < subsIdx && subsIdx < creatorIdx) {
+		t.Fatalf("unexpected section order: sys=%d skills=%d subs=%d creator=%d", sysIdx, skillsIdx, subsIdx, creatorIdx)
 	}
 }
 
