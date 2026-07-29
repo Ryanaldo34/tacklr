@@ -4,7 +4,41 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/ryanaldo34/tacklr/streaming"
 )
+
+func TestPlanGet_rehydratesAfterJSONRoundTrip(t *testing.T) {
+	rt := HarnessRuntime{}
+	rt.EnsureInitialized()
+	rt.PlanSet([]Todo{
+		{Title: "Task 1", Status: streaming.TodoStatusCompleted, Description: "done"},
+		{Title: "Task 2", Status: streaming.TodoStatusInProgress, Description: "next"},
+	})
+
+	// Simulate checkpoint JSON round-trip of Runtime.State.
+	raw, err := json.Marshal(rt.State)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reloaded map[string]any
+	if err := json.Unmarshal(raw, &reloaded); err != nil {
+		t.Fatal(err)
+	}
+	rt2 := HarnessRuntime{State: reloaded}
+	rt2.EnsureInitialized()
+
+	plan := rt2.PlanGet()
+	if len(plan) != 2 {
+		t.Fatalf("plan len = %d, want 2", len(plan))
+	}
+	if plan[0].Title != "Task 1" || plan[0].Status != streaming.TodoStatusCompleted {
+		t.Errorf("plan[0] = %+v", plan[0])
+	}
+	if plan[1].Title != "Task 2" || plan[1].Status != streaming.TodoStatusInProgress {
+		t.Errorf("plan[1] = %+v", plan[1])
+	}
+}
 
 func TestAdoptInterrupt_parksUnderCurrentToolCall(t *testing.T) {
 	rt := HarnessRuntime{}

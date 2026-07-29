@@ -360,6 +360,17 @@ func TestAgentHarness_Run(t *testing.T) {
 					t.Fatal(err)
 				}
 				interruptId = payload.InterruptId
+				// data must be a nested JSON object (not base64 string from []byte marshal).
+				if len(payload.Data) == 0 || payload.Data[0] != '{' {
+					t.Fatalf("interrupt data must be JSON object, got %s", payload.Data)
+				}
+				var usi control.UserSelectionInterrupt
+				if err := json.Unmarshal(payload.Data, &usi); err != nil {
+					t.Fatalf("unmarshal interrupt data into UserSelectionInterrupt: %v\ndata=%s", err, payload.Data)
+				}
+				if len(usi.Options) != 2 {
+					t.Fatalf("options = %d, want 2", len(usi.Options))
+				}
 			case StreamEventToolResult:
 				t.Error("should not have tool result on first run")
 			}
@@ -428,6 +439,7 @@ func TestAgentHarness_Run(t *testing.T) {
 	t.Run("complete todo triggers compression between turns", func(t *testing.T) {
 		store := testStore(t)
 		var invokeCount int
+		var compressHadTools bool
 
 		strategy := &mockStrategy{
 			invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, events chan<- LLMResponseChunk) {
@@ -440,6 +452,12 @@ func TestAgentHarness_Run(t *testing.T) {
 					return
 				}
 				if invokeCount == 2 {
+					// Handoff compress: no tools, reasoning must not land in context.
+					if len(tools) != 0 {
+						compressHadTools = true
+					}
+					events <- LLMResponseChunk{Type: StreamEventReasoning, Content: "SECRET_REASONING_SHOULD_NOT_PERSIST", IsComplete: false}
+					events <- LLMResponseChunk{Type: StreamEventReasoning, IsComplete: true}
 					events <- LLMResponseChunk{Type: StreamEventMessage, Content: "Mock compressed handoff. Remaining: Task 2.", IsComplete: true}
 					return
 				}
@@ -466,6 +484,9 @@ func TestAgentHarness_Run(t *testing.T) {
 		if invokeCount != 3 {
 			t.Errorf("expected 3 total invocations, got %d", invokeCount)
 		}
+		if compressHadTools {
+			t.Error("handoff compress Invoke must pass nil/empty tools")
+		}
 
 		plan := ah.Runtime.PlanGet()
 		if plan == nil {
@@ -478,23 +499,24 @@ func TestAgentHarness_Run(t *testing.T) {
 			t.Errorf("Task 2 status = %q, want %q", plan[1].Status, streaming.TodoStatusInProgress)
 		}
 
-		if len(ah.ContextWindow) != 3 {
-			t.Errorf("expected 3 messages in context window, got %d", len(ah.ContextWindow))
+		// Post-compress: developer handoff only; next model turn appends assistant.
+		if len(ah.ContextWindow) != 2 {
+			t.Errorf("expected 2 messages in context window (handoff + final), got %d", len(ah.ContextWindow))
 		} else {
-			if ah.ContextWindow[0].Role != RoleUser {
-				t.Errorf("first message role = %q, want %q", ah.ContextWindow[0].Role, RoleUser)
+			if ah.ContextWindow[0].Role != RoleDeveloper {
+				t.Errorf("handoff role = %q, want developer", ah.ContextWindow[0].Role)
+			}
+			if !strings.Contains(ah.ContextWindow[0].Content, "Mock compressed handoff") {
+				t.Errorf("compressed message content = %q, want contains 'Mock compressed handoff'", ah.ContextWindow[0].Content)
+			}
+			if strings.Contains(ah.ContextWindow[0].Content, "SECRET_REASONING_SHOULD_NOT_PERSIST") {
+				t.Errorf("handoff must not include compress reasoning text, got %q", ah.ContextWindow[0].Content)
 			}
 			if ah.ContextWindow[1].Role != RoleAssistant {
 				t.Errorf("second message role = %q, want %q", ah.ContextWindow[1].Role, RoleAssistant)
 			}
-			if !strings.Contains(ah.ContextWindow[1].Content, "Mock compressed handoff") {
-				t.Errorf("compressed message content = %q, want contains 'Mock compressed handoff'", ah.ContextWindow[1].Content)
-			}
-			if ah.ContextWindow[2].Role != RoleAssistant {
-				t.Errorf("third message role = %q, want %q", ah.ContextWindow[2].Role, RoleAssistant)
-			}
-			if !strings.Contains(ah.ContextWindow[2].Content, "All done!") {
-				t.Errorf("final message content = %q, want contains 'All done!'", ah.ContextWindow[2].Content)
+			if !strings.Contains(ah.ContextWindow[1].Content, "All done!") {
+				t.Errorf("final message content = %q, want contains 'All done!'", ah.ContextWindow[1].Content)
 			}
 		}
 
@@ -505,6 +527,13 @@ func TestAgentHarness_Run(t *testing.T) {
 			}
 			if ev.Type == StreamEventComplete {
 				hasComplete = true
+			}
+			// Compress is silent: handoff text and its reasoning must not stream.
+			if strings.Contains(ev.Content, "Mock compressed handoff") {
+				t.Errorf("compress handoff must not stream to client, got event type=%v content=%q", ev.Type, ev.Content)
+			}
+			if strings.Contains(ev.Content, "SECRET_REASONING_SHOULD_NOT_PERSIST") {
+				t.Errorf("compress reasoning must not stream to client, got event type=%v content=%q", ev.Type, ev.Content)
 			}
 		}
 		if !hasComplete {
@@ -830,12 +859,30 @@ func TestConstructSystemPrompt_holistic(t *testing.T) {
 			{WorkerName: "coder", Model: model, Description: "implementation worker"},
 		},
 	})
+	h.Runtime.PlanSet([]control.Todo{
+		{Title: "Echo", Status: streaming.TodoStatusCompleted},
+		{Title: "Get time", Status: streaming.TodoStatusInProgress},
+	})
 
 	prompt := h.constructSystemPrompt()
 
 	// Base system requirements always present.
 	if !strings.Contains(prompt, "SYSTEM REQUIREMENTS:") {
 		t.Fatal("missing SYSTEM REQUIREMENTS section")
+	}
+	// Mutable plan status must not live in the system prompt (prompt caching).
+	if strings.Contains(prompt, "[in_progress] Get time") || strings.Contains(prompt, "[completed] Echo") {
+		t.Fatal("mutable plan todo lines must not appear in constructSystemPrompt")
+	}
+	if !strings.Contains(prompt, "If a plan already exists") {
+		t.Error("system prompt should explain how to continue an existing plan")
+	}
+	if !strings.Contains(prompt, "list_plan") {
+		t.Error("system prompt should mention list_plan for exact todo titles")
+	}
+	// Plan lives in runtime; agent reads it via list_plan, not prompt injection.
+	if len(h.ContextWindow) != 0 {
+		t.Error("plan state must not be persisted into ContextWindow by constructSystemPrompt")
 	}
 
 	// Skills section with catalog entries (sorted by name).

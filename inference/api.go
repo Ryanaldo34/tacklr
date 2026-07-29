@@ -72,8 +72,12 @@ type jsonSchemaFormat struct {
 	Strict bool           `json:"strict"`
 }
 
+// reasoningDetail is the Responses API reasoning config.
+// Azure OpenAI / Foundry and OpenAI stream shareable thought text via
+// response.reasoning_summary_text.delta when Summary is set (e.g. "auto").
 type reasoningDetail struct {
-	Effort string `json:"effort,omitempty"`
+	Effort  string `json:"effort,omitempty"`
+	Summary string `json:"summary,omitempty"`
 }
 
 type easyInputRequest struct {

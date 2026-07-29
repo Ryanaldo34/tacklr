@@ -69,18 +69,65 @@ type TurnRequest struct {
 	MCPServers []mcp.MCPConfig
 }
 
-// EventStream is a running agent turn. Events is closed when the turn ends.
-// Cancel aborts the turn; it is safe to call multiple times.
+// EventStream is a running agent turn. Events is closed when the current
+// harness run finishes (complete, error, or interrupt park). Cancel aborts
+// the turn and closes the harness; it is safe to call multiple times.
+//
+// Harness remains open after an interrupt so ACP can call ResumeInterrupts
+// mid-prompt. Callers must Cancel or Close when the turn is fully done.
 type EventStream struct {
-	Events <-chan streaming.StreamEvent
-	cancel context.CancelFunc
+	Events  <-chan streaming.StreamEvent
+	Harness *tacklr.AgentHarness
+	runCtx  context.Context
+	cancel  context.CancelFunc
+	onDone  func() // registry cleanup (e.g. clear cancelled flag)
+	closed  bool
+	mu      sync.Mutex
 }
 
-// Cancel aborts the running turn.
+// Cancel aborts the running turn and releases the harness.
 func (s *EventStream) Cancel() {
-	if s != nil && s.cancel != nil {
+	if s == nil {
+		return
+	}
+	if s.cancel != nil {
 		s.cancel()
 	}
+	s.Close()
+}
+
+// Close releases harness resources without cancelling context (idempotent).
+func (s *EventStream) Close() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
+	s.closed = true
+	if s.Harness != nil {
+		s.Harness.Close()
+		s.Harness = nil
+	}
+	if s.onDone != nil {
+		s.onDone()
+		s.onDone = nil
+	}
+}
+
+// ResumeInterrupts resolves pending interrupts and returns a new event stream
+// from the same harness (ACP mid-turn elicitation resume).
+func (s *EventStream) ResumeInterrupts(ctx context.Context, responses map[string][]byte) (<-chan streaming.StreamEvent, error) {
+	if s == nil || s.Harness == nil {
+		return nil, fmt.Errorf("event stream: no harness for resume")
+	}
+	c := s.runCtx
+	if c == nil || c.Err() != nil {
+		c = ctx
+	}
+	return s.Harness.ReturnFromInterrupt(c, responses)
 }
 
 type Registry struct {
@@ -102,35 +149,6 @@ func NewRegistry(store stores.BaseStore, defaultAgent string) *Registry {
 
 func (r *Registry) Register(agentID string, spec AgentSpec) {
 	r.agents[agentID] = spec
-}
-
-// Capabilities returns the ACP initialize advertisement.
-func (r *Registry) Capabilities() map[string]any {
-	return map[string]any{
-		"protocolVersion": 1,
-		"agentCapabilities": map[string]any{
-			// Full load requires conversation replay; advertise false until implemented.
-			"loadSession": false,
-			"promptCapabilities": map[string]any{
-				"image":           false,
-				"audio":           false,
-				"embeddedContext": true,
-			},
-			"mcpCapabilities": map[string]any{
-				"http": true,
-				"sse":  true,
-			},
-			"sessionCapabilities": map[string]any{
-				"close": struct{}{},
-			},
-		},
-		"agentInfo": map[string]string{
-			"name":    "tacklr",
-			"title":   "Tacklr ACP",
-			"version": "0.1.0",
-		},
-		"authMethods": []string{},
-	}
 }
 
 // CreateSession registers a new session and returns its view.
@@ -306,15 +324,13 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 		return nil, fmt.Errorf("run harness: %w", err)
 	}
 
+	// Forward harness events on a dedicated channel. Do not Close the harness
+	// when the channel ends — interrupt parks leave the harness alive for
+	// ResumeInterrupts. streamTurn / Cancel owns final Close.
 	out := make(chan streaming.StreamEvent)
 	go func() {
 		defer close(out)
-		defer func() {
-			h.Close()
-			r.activeCtx.Delete(threadID)
-			r.cancelled.Delete(threadID)
-			cancel()
-		}()
+		defer r.activeCtx.Delete(threadID)
 		for {
 			select {
 			case <-runCtx.Done():
@@ -332,7 +348,15 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 		}
 	}()
 
-	return &EventStream{Events: out, cancel: cancel}, nil
+	return &EventStream{
+		Events:  out,
+		Harness: h,
+		runCtx:  runCtx,
+		cancel:  cancel,
+		onDone: func() {
+			r.cancelled.Delete(threadID)
+		},
+	}, nil
 }
 
 // buildConfigOptions returns the ACP config options for a session, with

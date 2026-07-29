@@ -54,21 +54,35 @@ func (rt *HarnessRuntime) EmitUpdate(message string) {
 }
 
 // PlanGet returns a shallow copy of the current plan (or nil if not set).
+// After a session checkpoint JSON round-trip, the plan may be stored as
+// []any / map[string]any; those shapes are rehydrated into []Todo.
 func (rt *HarnessRuntime) PlanGet() []Todo {
 	rt.mu.RLock()
 	defer rt.mu.RUnlock()
 	if rt.State == nil {
 		return nil
 	}
-	if v, ok := rt.State[planStateKey]; ok {
-		if plan, ok := v.([]Todo); ok {
-			// Return shallow copy so callers can mutate elements safely
-			cp := make([]Todo, len(plan))
-			copy(cp, plan)
-			return cp
-		}
+	v, ok := rt.State[planStateKey]
+	if !ok || v == nil {
+		return nil
 	}
-	return nil
+	if plan, ok := v.([]Todo); ok {
+		cp := make([]Todo, len(plan))
+		copy(cp, plan)
+		return cp
+	}
+	// Checkpoint reload: rehydrate from JSON-compatible types.
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil
+	}
+	var plan []Todo
+	if err := json.Unmarshal(b, &plan); err != nil {
+		return nil
+	}
+	cp := make([]Todo, len(plan))
+	copy(cp, plan)
+	return cp
 }
 
 // PlanSet stores the plan and emits a StreamEventPlanUpdate.

@@ -2,8 +2,10 @@ package tacklr
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/ryanaldo34/tacklr/control"
 	"github.com/ryanaldo34/tacklr/streaming"
@@ -27,21 +29,145 @@ type completeTodoArgs struct {
 	Title string `json:"title"`
 }
 
+type askUserChoiceOption struct {
+	Title         string `json:"title" desc:"Short label shown to the user"`
+	Description   string `json:"description" desc:"Optional longer explanation"`
+	IsRecommended bool   `json:"is_recommended" desc:"Hint that this is the preferred option"`
+}
+
+type askUserChoiceArgs struct {
+	Question string                `json:"question" desc:"What to ask the user"`
+	Choices  []askUserChoiceOption `json:"choices" desc:"2 or more mutually exclusive options"`
+}
+
+var askUserChoiceTool = NewTool(ToolConfig{
+	Name:        "ask_user_choice",
+	DisplayName: "Ask User Choice",
+	Description: "Ask the user a multiple-choice clarification question and wait for their selection. Use when you need a discrete decision before continuing. Provide clear, mutually exclusive options.",
+	Category:    streaming.ToolCategoryThink,
+	Handler: func(ctx context.Context, args askUserChoiceArgs, runtime control.HarnessRuntime) (string, error) {
+		if strings.TrimSpace(args.Question) == "" {
+			return "", fmt.Errorf("question is required")
+		}
+		if len(args.Choices) < 2 {
+			return "", fmt.Errorf("at least 2 choices are required")
+		}
+		seen := make(map[string]struct{}, len(args.Choices))
+		options := make([]control.UserChoice, 0, len(args.Choices))
+		for i, c := range args.Choices {
+			title := strings.TrimSpace(c.Title)
+			if title == "" {
+				return "", fmt.Errorf("choice %d: title is required", i)
+			}
+			if _, ok := seen[title]; ok {
+				return "", fmt.Errorf("duplicate choice title %q", title)
+			}
+			seen[title] = struct{}{}
+			options = append(options, control.UserChoice{
+				Title:         title,
+				Description:   c.Description,
+				IsRecommended: c.IsRecommended,
+			})
+		}
+		optionsJSON, err := json.Marshal(options)
+		if err != nil {
+			return "", fmt.Errorf("marshal choices: %w", err)
+		}
+		if runtime.CurrentToolCallID != "" {
+			runtime.StateSet(askUserQuestionStateKey(runtime.CurrentToolCallID), args.Question)
+		}
+
+		intr, err := runtime.RaiseInterrupt("user_selection_choice", optionsJSON)
+		if err != nil {
+			return "", err
+		}
+		choice := intr.(*control.UserSelectionInterrupt).ConfirmedChoice
+		if choice == nil {
+			return "", fmt.Errorf("user selection missing confirmed choice")
+		}
+		if choice.Description != "" {
+			return fmt.Sprintf("User selected %q — %s", choice.Title, choice.Description), nil
+		}
+		return fmt.Sprintf("User selected %q", choice.Title), nil
+	},
+})
+
+func askUserQuestionStateKey(toolCallID string) string {
+	return "_ask_user_question:" + toolCallID
+}
+
+// AskUserQuestionFromState returns a question string stashed by ask_user_choice
+// for the given tool call id, if any.
+func AskUserQuestionFromState(rt control.HarnessRuntime, toolCallID string) string {
+	if toolCallID == "" {
+		return ""
+	}
+	v, ok := rt.StateGet(askUserQuestionStateKey(toolCallID))
+	if !ok {
+		return ""
+	}
+	s, _ := v.(string)
+	return s
+}
+
 var createPlanTool = NewTool(ToolConfig{
 	Name:        "create_plan",
 	DisplayName: "Create Plan",
-	Description: "Creates a plan in the form of a task or todo list to logically break up a complex task into smaller, manageable steps. Must be called before any real work begins after the planning process.",
+	Description: "Creates a plan in the form of a task or todo list to logically break up a complex task into smaller, manageable steps. Call only when no active plan exists. If a plan is already active, use edit_plan or complete_todo instead of create_plan.",
 	Category:    streaming.ToolCategoryThink,
 	Handler: func(ctx context.Context, args createTodosArgs, runtime control.HarnessRuntime) (string, error) {
-		runtime.PlanSet(args.Todos)
+		if existing := runtime.PlanGet(); len(existing) > 0 {
+			return "", fmt.Errorf("an active plan already exists (%d todos); use edit_plan to modify it or complete_todo to progress — do not call create_plan again", len(existing))
+		}
+		if len(args.Todos) == 0 {
+			return "", fmt.Errorf("plan must include at least one todo")
+		}
+		// Normalize: first incomplete todo is in_progress; others pending unless already completed.
+		todos := make([]control.Todo, len(args.Todos))
+		copy(todos, args.Todos)
+		started := false
+		for i := range todos {
+			if todos[i].Status == streaming.TodoStatusCompleted {
+				continue
+			}
+			if !started {
+				todos[i].Status = streaming.TodoStatusInProgress
+				started = true
+			} else if todos[i].Status == "" {
+				todos[i].Status = streaming.TodoStatusPending
+			}
+		}
+		runtime.PlanSet(todos)
 		return "Plan created successfully", nil
+	},
+})
+
+var listPlanTool = NewTool(ToolConfig{
+	Name:        "list_plan",
+	DisplayName: "List Plan",
+	Description: "Returns the active plan todo list exactly as stored (titles, statuses, descriptions, in order). Use before complete_todo or edit_plan so titles match exactly. Call after a handoff or whenever plan titles are unclear.",
+	Category:    streaming.ToolCategoryThink,
+	Handler: func(ctx context.Context, runtime control.HarnessRuntime) (string, error) {
+		plan := runtime.PlanGet()
+		if len(plan) == 0 {
+			return "", fmt.Errorf("no plan exists")
+		}
+		var b strings.Builder
+		fmt.Fprintf(&b, "Active plan (%d todos):\n", len(plan))
+		for i, todo := range plan {
+			fmt.Fprintf(&b, "%d. [%s] %s\n", i+1, todo.Status, todo.Title)
+			if todo.Description != "" {
+				fmt.Fprintf(&b, "   Description: %s\n", todo.Description)
+			}
+		}
+		return strings.TrimRight(b.String(), "\n"), nil
 	},
 })
 
 var completeTodoTool = NewTool(ToolConfig{
 	Name:        "complete_todo",
 	DisplayName: "Complete Todo",
-	Description: "Marks a todo as completed. Cannot complete a todo that is already completed or not found in the plan.",
+	Description: "Marks a todo as completed by exact title (must match list_plan / create_plan titles). Cannot complete a todo that is already completed or not found in the plan.",
 	Category:    streaming.ToolCategoryThink,
 	Handler: func(ctx context.Context, args completeTodoArgs, runtime control.HarnessRuntime) (string, error) {
 		plan := runtime.PlanGet()

@@ -104,6 +104,7 @@ func validateACPRequest(body []byte) (*parsedRequest, error) {
 		if p.ProtocolVersion < 1 {
 			return nil, clientErrorf(ErrInvalidRequest, "unsupported protocol version %d", p.ProtocolVersion)
 		}
+		pr.ClientCapsRaw = env.Params
 		return pr, nil
 	case "session/new":
 		if env.Params == nil {
