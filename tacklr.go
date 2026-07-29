@@ -21,6 +21,17 @@ import (
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
+// firstUserMessage returns a copy of the first user message in the window, or nil.
+func firstUserMessage(window []*Message) *Message {
+	for _, m := range window {
+		if m != nil && m.Role == RoleUser {
+			cp := *m
+			return &cp
+		}
+	}
+	return nil
+}
+
 const (
 	RoleUser      MessageRole = "user"
 	RoleAssistant MessageRole = "assistant"
@@ -314,20 +325,41 @@ Current plan todos:
 	if err != nil {
 		return err
 	}
-	// Silent: never streamChunk. Strip embedded think blocks before store.
-	var handoffBody strings.Builder
+	// Silent: do not stream compress output. Assemble handoff the same way Run
+	// builds assistant messages — deltas by type+id, take the last completed
+	// StreamEventMessage full text (not a concat of every chunk).
+	streamedContent := map[string]string{}
+	var lastCompletedMessage string
 	for chunk := range events {
 		if chunk.Type == StreamEventError {
 			return fmt.Errorf("compress: %s", chunk.Content)
 		}
-		if chunk.Type == StreamEventMessage && chunk.Content != "" {
-			handoffBody.WriteString(chunk.Content)
+		if !chunk.IsComplete && chunk.Content != "" &&
+			(chunk.Type == StreamEventMessage || chunk.Type == StreamEventReasoning) {
+			key := string(chunk.Type) + ":" + chunk.MessageId
+			streamedContent[key] += chunk.Content
+		}
+		if chunk.IsComplete && chunk.Type == StreamEventMessage {
+			content := chunk.Content
+			if content == "" {
+				key := string(chunk.Type) + ":" + chunk.MessageId
+				content = streamedContent[key]
+			}
+			if content != "" {
+				lastCompletedMessage = content
+			}
 		}
 	}
 
-	// Stored as developer; marshaled as system on the wire (see inference).
+	// Keep the original user message + handoff. Dropping the user left only a
+	// system-style handoff and the model free-associated a fake conversation.
+	firstUser := firstUserMessage(a.ContextWindow)
+	if firstUser == nil {
+		firstUser = &Message{Role: RoleUser, Content: "Continue the active plan."}
+	}
 	a.ContextWindow = []*Message{
-		{Role: RoleDeveloper, Content: handoffBody.String()},
+		firstUser,
+		{Role: RoleDeveloper, Content: lastCompletedMessage},
 	}
 	a.Model.SetSystemPrompt(a.constructSystemPrompt())
 	return nil

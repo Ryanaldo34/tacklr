@@ -452,13 +452,18 @@ func TestAgentHarness_Run(t *testing.T) {
 					return
 				}
 				if invokeCount == 2 {
-					// Handoff compress: no tools, reasoning must not land in context.
+					// Handoff compress: tools may be present; handoff is the last
+					// completed message text only (not every stream chunk).
 					if len(tools) != 0 {
 						compressHadTools = true
 					}
-					events <- LLMResponseChunk{Type: StreamEventReasoning, Content: "SECRET_REASONING_SHOULD_NOT_PERSIST", IsComplete: false}
-					events <- LLMResponseChunk{Type: StreamEventReasoning, IsComplete: true}
-					events <- LLMResponseChunk{Type: StreamEventMessage, Content: "Mock compressed handoff. Remaining: Task 2.", IsComplete: true}
+					events <- LLMResponseChunk{Type: StreamEventReasoning, MessageId: "rs_c", Content: "SECRET_REASONING", IsComplete: false}
+					events <- LLMResponseChunk{Type: StreamEventReasoning, MessageId: "rs_c", IsComplete: true}
+					// Streamed deltas then complete (empty content on done, like real SSE).
+					events <- LLMResponseChunk{Type: StreamEventMessage, MessageId: "msg_c", Content: "Mock compressed handoff. ", IsComplete: false}
+					events <- LLMResponseChunk{Type: StreamEventMessage, MessageId: "msg_c", Content: "Remaining: Task 2.", IsComplete: false}
+					events <- LLMResponseChunk{Type: StreamEventMessage, MessageId: "msg_c", IsComplete: true}
+					// Earlier completed message must not win over the last one.
 					return
 				}
 				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "All done!", IsComplete: true}
@@ -484,8 +489,8 @@ func TestAgentHarness_Run(t *testing.T) {
 		if invokeCount != 3 {
 			t.Errorf("expected 3 total invocations, got %d", invokeCount)
 		}
-		if compressHadTools {
-			t.Error("handoff compress Invoke must pass nil/empty tools")
+		if !compressHadTools {
+			t.Error("handoff compress Invoke should still receive tools for schema/context")
 		}
 
 		plan := ah.Runtime.PlanGet()
@@ -499,24 +504,30 @@ func TestAgentHarness_Run(t *testing.T) {
 			t.Errorf("Task 2 status = %q, want %q", plan[1].Status, streaming.TodoStatusInProgress)
 		}
 
-		// Post-compress: developer handoff only; next model turn appends assistant.
-		if len(ah.ContextWindow) != 2 {
-			t.Errorf("expected 2 messages in context window (handoff + final), got %d", len(ah.ContextWindow))
+		// Post-compress: [original user, developer handoff]; next turn appends assistant.
+		if len(ah.ContextWindow) != 3 {
+			t.Errorf("expected 3 messages (user, handoff, final), got %d", len(ah.ContextWindow))
 		} else {
-			if ah.ContextWindow[0].Role != RoleDeveloper {
-				t.Errorf("handoff role = %q, want developer", ah.ContextWindow[0].Role)
+			if ah.ContextWindow[0].Role != RoleUser {
+				t.Errorf("first message role = %q, want user (original request must not be dropped)", ah.ContextWindow[0].Role)
 			}
-			if !strings.Contains(ah.ContextWindow[0].Content, "Mock compressed handoff") {
-				t.Errorf("compressed message content = %q, want contains 'Mock compressed handoff'", ah.ContextWindow[0].Content)
+			if ah.ContextWindow[0].Content != "Complete the first task" {
+				t.Errorf("first message content = %q, want original user prompt", ah.ContextWindow[0].Content)
 			}
-			if strings.Contains(ah.ContextWindow[0].Content, "SECRET_REASONING_SHOULD_NOT_PERSIST") {
-				t.Errorf("handoff must not include compress reasoning text, got %q", ah.ContextWindow[0].Content)
+			if ah.ContextWindow[1].Role != RoleDeveloper {
+				t.Errorf("handoff role = %q, want developer", ah.ContextWindow[1].Role)
 			}
-			if ah.ContextWindow[1].Role != RoleAssistant {
-				t.Errorf("second message role = %q, want %q", ah.ContextWindow[1].Role, RoleAssistant)
+			if ah.ContextWindow[1].Content != "Mock compressed handoff. Remaining: Task 2." {
+				t.Errorf("handoff content = %q, want last completed message full text only", ah.ContextWindow[1].Content)
 			}
-			if !strings.Contains(ah.ContextWindow[1].Content, "All done!") {
-				t.Errorf("final message content = %q, want contains 'All done!'", ah.ContextWindow[1].Content)
+			if strings.Contains(ah.ContextWindow[1].Content, "SECRET_REASONING") {
+				t.Errorf("handoff must not include reasoning stream content, got %q", ah.ContextWindow[1].Content)
+			}
+			if ah.ContextWindow[2].Role != RoleAssistant {
+				t.Errorf("third message role = %q, want assistant", ah.ContextWindow[2].Role)
+			}
+			if !strings.Contains(ah.ContextWindow[2].Content, "All done!") {
+				t.Errorf("final message content = %q, want contains 'All done!'", ah.ContextWindow[2].Content)
 			}
 		}
 
