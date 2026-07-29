@@ -52,10 +52,17 @@ type Protocol interface {
 	OnStreamEvent(ctx context.Context, env ProtocolEnv, threadID string, stream *EventStream, ev streaming.StreamEvent, reqID json.RawMessage) StreamControl
 
 	// OnStreamClosed is called when the event channel closes without Finished.
+	// cancelled is true when the turn context was cancelled (session/cancel or parent ctx).
 	OnStreamClosed(ctx context.Context, env ProtocolEnv, threadID string, reqID json.RawMessage, cancelled bool) error
 }
 
 // runTurnStream pumps a harness event stream through a protocol stream policy.
+//
+// Cancellation uses a single source of truth: stream.TurnContext() (the turn
+// context created in RunTurn as a child of the request/connection ctx).
+// session/cancel and connection teardown both cancel that context; producers
+// (harness + registry forwarder) stop; this loop exits when Events closes or
+// TurnContext is done, then writes one terminal result via OnStreamClosed.
 func runTurnStream(
 	ctx context.Context,
 	env ProtocolEnv,
@@ -64,11 +71,21 @@ func runTurnStream(
 	stream *EventStream,
 	reqID json.RawMessage,
 ) error {
+	if stream == nil {
+		return nil
+	}
+
+	// Prefer the turn context: it is cancelled by session/cancel and by parent ctx.
+	turnCtx := stream.TurnContext()
+	if turnCtx == nil {
+		turnCtx = ctx
+	}
+
 	events := stream.Events
 	finished := false
 
 	writeFrames := func(frames [][]byte) error {
-		if env.Conn == nil || env.Conn.Writer == nil {
+		if env.Conn == nil || env.Conn.Writer == nil || len(frames) == 0 {
 			return nil
 		}
 		for _, f := range frames {
@@ -79,49 +96,50 @@ func runTurnStream(
 		return nil
 	}
 
+	// discard remaining events until the channel is closed (producers exit via turnCtx).
+	discardUntilClosed := func() {
+		for range events {
+		}
+	}
+
+	end := func(cancelled bool) error {
+		if finished {
+			if cancelled {
+				return context.Canceled
+			}
+			return nil
+		}
+		finished = true
+		// Ensure turn ctx is cancelled so any residual producers stop.
+		stream.Cancel()
+		if err := proto.OnStreamClosed(ctx, env, threadID, reqID, cancelled); err != nil && !cancelled {
+			return err
+		}
+		if cancelled {
+			return context.Canceled
+		}
+		return nil
+	}
+
 	for {
 		select {
-		case <-ctx.Done():
-			stream.Cancel()
-			for {
-				select {
-				case ev, ok := <-events:
-					if !ok {
-						if !finished {
-							_ = proto.OnStreamClosed(ctx, env, threadID, reqID, true)
-						}
-						return ctx.Err()
-					}
-					ctrl := proto.OnStreamEvent(ctx, env, threadID, stream, ev, reqID)
-					_ = writeFrames(ctrl.Frames)
-					if ctrl.Finished {
-						return ctx.Err()
-					}
-					if ctrl.ReplaceEvents != nil {
-						events = ctrl.ReplaceEvents
-					}
-				default:
-					if !finished {
-						_ = proto.OnStreamClosed(ctx, env, threadID, reqID, true)
-					}
-					return ctx.Err()
-				}
-			}
+		case <-turnCtx.Done():
+			// Stop encoding updates; wait for the event channel to close.
+			discardUntilClosed()
+			return end(true)
+
 		case ev, ok := <-events:
 			if !ok {
-				if !finished {
-					cancelled := env.Registry != nil && env.Registry.WasCancelled(threadID)
-					if err := proto.OnStreamClosed(ctx, env, threadID, reqID, cancelled); err != nil {
-						return err
-					}
-				}
-				return nil
+				// Channel closed: cancelled if turn ctx was cancelled, else natural/park end.
+				return end(turnCtx.Err() != nil)
 			}
 			ctrl := proto.OnStreamEvent(ctx, env, threadID, stream, ev, reqID)
 			if err := writeFrames(ctrl.Frames); err != nil {
+				stream.Cancel()
 				return err
 			}
 			if ctrl.Err != nil {
+				stream.Cancel()
 				return ctrl.Err
 			}
 			if ctrl.ReplaceEvents != nil {
@@ -135,4 +153,3 @@ func runTurnStream(
 		}
 	}
 }
-

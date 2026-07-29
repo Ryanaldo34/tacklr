@@ -140,7 +140,10 @@ func (p acpProtocol) handleSessionTurn(ctx context.Context, env ProtocolEnv, pr 
 		_ = env.Conn.Writer.WriteError(pr.ID, err)
 		return err
 	}
-	defer stream.Cancel()
+	defer func() {
+		stream.Cancel()
+		stream.Close()
+	}()
 	threadID := pr.ThreadID
 	if stream.Harness != nil && stream.Harness.SessionId != "" {
 		threadID = stream.Harness.SessionId
@@ -168,7 +171,7 @@ func (p acpProtocol) OnStreamEvent(ctx context.Context, env ProtocolEnv, threadI
 		return StreamControl{ReplaceEvents: newEvents}
 	}
 
-	if ev.Type == streaming.StreamEventComplete && len(reqID) > 0 && env.Registry.WasCancelled(threadID) {
+	if ev.Type == streaming.StreamEventComplete && len(reqID) > 0 && stream.Cancelled() {
 		_ = env.Conn.Writer.WriteResult(reqID, map[string]string{"stopReason": "cancelled"})
 		return StreamControl{Finished: true}
 	}

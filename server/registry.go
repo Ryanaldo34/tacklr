@@ -70,33 +70,48 @@ type TurnRequest struct {
 }
 
 // EventStream is a running agent turn. Events is closed when the current
-// harness run finishes (complete, error, or interrupt park). Cancel aborts
-// the turn and closes the harness; it is safe to call multiple times.
+// harness run finishes (complete, error, interrupt park) or the turn context
+// is cancelled and the registry forwarder exits.
 //
-// Harness remains open after an interrupt so ACP can call ResumeInterrupts
-// mid-prompt. Callers must Cancel or Close when the turn is fully done.
+// Cancel cancels the turn context (session/cancel). Close releases harness
+// resources after the turn has ended. Callers typically:
+//
+//	defer func() { stream.Cancel(); stream.Close() }()
+//
+// Harness remains usable after an interrupt park so ResumeInterrupts can run
+// before Close.
 type EventStream struct {
 	Events  <-chan streaming.StreamEvent
 	Harness *tacklr.AgentHarness
 	runCtx  context.Context
 	cancel  context.CancelFunc
-	onDone  func() // registry cleanup (e.g. clear cancelled flag)
 	closed  bool
 	mu      sync.Mutex
 }
 
-// Cancel aborts the running turn and releases the harness.
-func (s *EventStream) Cancel() {
+// TurnContext is the context for this turn (cancelled by session/cancel or parent).
+func (s *EventStream) TurnContext() context.Context {
 	if s == nil {
-		return
+		return nil
 	}
-	if s.cancel != nil {
-		s.cancel()
-	}
-	s.Close()
+	return s.runCtx
 }
 
-// Close releases harness resources without cancelling context (idempotent).
+// Cancelled reports whether the turn context has been cancelled.
+func (s *EventStream) Cancelled() bool {
+	return s != nil && s.runCtx != nil && s.runCtx.Err() != nil
+}
+
+// Cancel cancels the turn context so producers stop. Safe to call multiple times.
+// Does not release the harness; call Close after the event pump finishes.
+func (s *EventStream) Cancel() {
+	if s == nil || s.cancel == nil {
+		return
+	}
+	s.cancel()
+}
+
+// Close releases harness resources (idempotent). Prefer after Cancel / stream end.
 func (s *EventStream) Close() {
 	if s == nil {
 		return
@@ -110,10 +125,6 @@ func (s *EventStream) Close() {
 	if s.Harness != nil {
 		s.Harness.Close()
 		s.Harness = nil
-	}
-	if s.onDone != nil {
-		s.onDone()
-		s.onDone = nil
 	}
 }
 
@@ -134,9 +145,9 @@ type Registry struct {
 	agents       map[string]AgentSpec
 	defaultAgent string
 	store        stores.BaseStore
-	activeCtx    sync.Map // threadID → context.CancelFunc
-	sessions     sync.Map // threadID → *sessionState
-	cancelled    sync.Map // threadID → struct{}
+	// activeTurns maps session/thread id → cancel for the in-flight turn context.
+	activeTurns sync.Map // string → context.CancelFunc
+	sessions    sync.Map // string → *sessionState
 }
 
 func NewRegistry(store stores.BaseStore, defaultAgent string) *Registry {
@@ -225,18 +236,13 @@ func (r *Registry) CloseSession(sessionID string) {
 	r.CancelSession(sessionID)
 }
 
-// CancelSession aborts any active turn for the session without removing it.
+// CancelSession cancels the in-flight turn context for the session (if any).
+// Session state is preserved. The turn context is the single cancel signal for
+// harness work, the registry forwarder, and runTurnStream.
 func (r *Registry) CancelSession(sessionID string) {
-	r.cancelled.Store(sessionID, struct{}{})
-	if c, ok := r.activeCtx.LoadAndDelete(sessionID); ok {
+	if c, ok := r.activeTurns.Load(sessionID); ok {
 		c.(context.CancelFunc)()
 	}
-}
-
-// WasCancelled reports whether CancelSession was called for this session.
-func (r *Registry) WasCancelled(sessionID string) bool {
-	_, ok := r.cancelled.Load(sessionID)
-	return ok
 }
 
 // RunTurn starts a prompt or resume turn and returns a stream of events.
@@ -307,8 +313,10 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 		return nil, fmt.Errorf("load agent %q: %w", agentID, err)
 	}
 
-	runCtx, cancel := context.WithCancel(ctx)
-	r.activeCtx.Store(threadID, cancel)
+	// turnCtx is a child of the request/connection ctx so either parent cancel
+	// or session/cancel stops the turn. Stored for CancelSession.
+	turnCtx, cancel := context.WithCancel(ctx)
+	r.activeTurns.Store(threadID, cancel)
 
 	pr := &parsedRequest{
 		AgentID:   agentID,
@@ -316,24 +324,23 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 		Prompt:    req.Prompt,
 		Responses: req.Responses,
 	}
-	events, err := runHarness(runCtx, h, pr)
+	events, err := runHarness(turnCtx, h, pr)
 	if err != nil {
-		r.activeCtx.Delete(threadID)
+		r.activeTurns.Delete(threadID)
 		cancel()
 		h.Close()
 		return nil, fmt.Errorf("run harness: %w", err)
 	}
 
-	// Forward harness events on a dedicated channel. Do not Close the harness
-	// when the channel ends — interrupt parks leave the harness alive for
-	// ResumeInterrupts. streamTurn / Cancel owns final Close.
+	// Forward harness events until the turn context is done or the harness ends.
+	// Closing out unblocks runTurnStream; do not Close the harness here (interrupt park).
 	out := make(chan streaming.StreamEvent)
 	go func() {
 		defer close(out)
-		defer r.activeCtx.Delete(threadID)
+		defer r.activeTurns.Delete(threadID)
 		for {
 			select {
-			case <-runCtx.Done():
+			case <-turnCtx.Done():
 				return
 			case ev, ok := <-events:
 				if !ok {
@@ -341,7 +348,7 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 				}
 				select {
 				case out <- ev:
-				case <-runCtx.Done():
+				case <-turnCtx.Done():
 					return
 				}
 			}
@@ -351,11 +358,8 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 	return &EventStream{
 		Events:  out,
 		Harness: h,
-		runCtx:  runCtx,
+		runCtx:  turnCtx,
 		cancel:  cancel,
-		onDone: func() {
-			r.cancelled.Delete(threadID)
-		},
 	}, nil
 }
 

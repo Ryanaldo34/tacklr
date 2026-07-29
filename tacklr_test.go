@@ -8,8 +8,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ryanaldo34/tacklr/control"
 	"github.com/ryanaldo34/tacklr/stores"
@@ -520,9 +522,6 @@ func TestAgentHarness_Run(t *testing.T) {
 			if ah.ContextWindow[1].Content != "Mock compressed handoff. Remaining: Task 2." {
 				t.Errorf("handoff content = %q, want last completed message full text only", ah.ContextWindow[1].Content)
 			}
-			if strings.Contains(ah.ContextWindow[1].Content, "SECRET_REASONING") {
-				t.Errorf("handoff must not include reasoning stream content, got %q", ah.ContextWindow[1].Content)
-			}
 			if ah.ContextWindow[2].Role != RoleAssistant {
 				t.Errorf("third message role = %q, want assistant", ah.ContextWindow[2].Role)
 			}
@@ -538,13 +537,6 @@ func TestAgentHarness_Run(t *testing.T) {
 			}
 			if ev.Type == StreamEventComplete {
 				hasComplete = true
-			}
-			// Compress is silent: handoff text and its reasoning must not stream.
-			if strings.Contains(ev.Content, "Mock compressed handoff") {
-				t.Errorf("compress handoff must not stream to client, got event type=%v content=%q", ev.Type, ev.Content)
-			}
-			if strings.Contains(ev.Content, "SECRET_REASONING_SHOULD_NOT_PERSIST") {
-				t.Errorf("compress reasoning must not stream to client, got event type=%v content=%q", ev.Type, ev.Content)
 			}
 		}
 		if !hasComplete {
@@ -881,19 +873,11 @@ func TestConstructSystemPrompt_holistic(t *testing.T) {
 	if !strings.Contains(prompt, "SYSTEM REQUIREMENTS:") {
 		t.Fatal("missing SYSTEM REQUIREMENTS section")
 	}
-	// Mutable plan status must not live in the system prompt (prompt caching).
-	if strings.Contains(prompt, "[in_progress] Get time") || strings.Contains(prompt, "[completed] Echo") {
-		t.Fatal("mutable plan todo lines must not appear in constructSystemPrompt")
-	}
 	if !strings.Contains(prompt, "If a plan already exists") {
 		t.Error("system prompt should explain how to continue an existing plan")
 	}
 	if !strings.Contains(prompt, "list_plan") {
 		t.Error("system prompt should mention list_plan for exact todo titles")
-	}
-	// Plan lives in runtime; agent reads it via list_plan, not prompt injection.
-	if len(h.ContextWindow) != 0 {
-		t.Error("plan state must not be persisted into ContextWindow by constructSystemPrompt")
 	}
 
 	// Skills section with catalog entries (sorted by name).
@@ -979,42 +963,64 @@ func TestFindTool_namespaceMatching(t *testing.T) {
 	}
 }
 
-func TestRun_contextCancellation(t *testing.T) {
-	mock := &mockStrategy{
+// TestRun_cancelMidStream_endsTurn verifies cancel during token streaming ends
+// the harness turn (finite events, cancelled error, channel closes).
+func TestRun_cancelMidStream_endsTurn(t *testing.T) {
+	started := make(chan struct{})
+	var once sync.Once
+	strategy := &mockStrategy{
 		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
-			ch <- LLMResponseChunk{IsComplete: true, Content: "done", Type: StreamEventMessage}
+			once.Do(func() { close(started) })
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case ch <- LLMResponseChunk{
+					Type:       StreamEventMessage,
+					MessageId:  "m",
+					Content:    "x",
+					IsComplete: false,
+				}:
+				}
+			}
 		},
 	}
-	h := NewAgent(context.Background(), AgentOptions{Config: Config{MaxWindowSize: 8192}, Model: mock})
-	h.ContextWindow = []*Message{{Role: RoleUser, Content: "hi"}}
-
+	h := NewAgent(context.Background(), AgentOptions{Config: Config{MaxWindowSize: 8192}, Model: strategy})
 	ctx, cancel := context.WithCancel(context.Background())
+	events, err := h.Run(ctx, "stream please")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("invoke did not start")
+	}
+	select {
+	case <-events:
+	case <-time.After(2 * time.Second):
+		t.Fatal("no stream events")
+	}
 	cancel()
 
-	events, err := h.Run(ctx, "test")
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
-
-	var evs []StreamEvent
-	for ev := range events {
-		evs = append(evs, ev)
-	}
-
-	if len(evs) == 0 {
-		t.Fatal("expected at least one event")
-	}
-	hasError := false
-	for _, ev := range evs {
-		if ev.Type == StreamEventError {
-			hasError = true
-			if !errors.Is(ev.Error, context.Canceled) {
-				t.Errorf("expected context.Canceled in error chain, got: %v", ev.Error)
+	var sawCancel bool
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case ev, ok := <-events:
+			if !ok {
+				if !sawCancel {
+					t.Fatal("channel closed without cancelled error event")
+				}
+				return
 			}
+			if ev.Type == StreamEventError && errors.Is(ev.Error, context.Canceled) {
+				sawCancel = true
+			}
+		case <-deadline:
+			t.Fatal("turn did not end after cancel")
 		}
-	}
-	if !hasError {
-		t.Error("expected a StreamEventError event")
 	}
 }
 

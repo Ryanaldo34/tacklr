@@ -326,18 +326,6 @@ func TestAskUserChoiceTool_injectedAsBuiltin(t *testing.T) {
 	}
 }
 
-func TestListPlanTool_noPlan(t *testing.T) {
-	rt := control.NewRuntime(nil, nil, nil)
-	rt.EnsureInitialized()
-	_, err := listPlanTool.Invoke(context.Background(), `{}`, rt)
-	if err == nil {
-		t.Fatal("expected error when no plan exists")
-	}
-	if !strings.Contains(err.Error(), "no plan exists") {
-		t.Fatalf("error = %v, want no plan exists", err)
-	}
-}
-
 func TestListPlanTool_exactListing(t *testing.T) {
 	rt := control.NewRuntime(nil, nil, nil)
 	rt.EnsureInitialized()

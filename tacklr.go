@@ -494,13 +494,30 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 	}
 	a.Model.SetSystemPrompt(a.constructSystemPrompt())
 
+	// sendEvent is cancel-aware so we never block forever writing after the
+	// registry forwarder has stopped reading (session/cancel).
+	sendEvent := func(ev StreamEvent) bool {
+		select {
+		case <-ctx.Done():
+			return false
+		case out <- ev:
+			return true
+		}
+	}
+	emitCancelled := func() {
+		select {
+		case out <- StreamEvent{Type: StreamEventError, Error: fmt.Errorf("run: context cancelled: %w", ctx.Err())}:
+		default:
+		}
+	}
+
 	go func() {
 		defer close(out)
 		a.Runtime.EnsureInitialized()
 		for {
 			select {
 			case <-ctx.Done():
-				out <- StreamEvent{Type: StreamEventError, Error: fmt.Errorf("run: context cancelled: %w", ctx.Err())}
+				emitCancelled()
 				return
 			default:
 				var toolResults []*Message
@@ -508,12 +525,36 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 				if len(a.pendingToolCalls) == 0 {
 					events, err := a.Model.Invoke(ctx, a.ContextWindow, a.Tools)
 					if err != nil {
-						out <- StreamEvent{Type: StreamEventError, Error: fmt.Errorf("run: invoke: %w", err)}
+						if ctx.Err() != nil {
+							emitCancelled()
+							return
+						}
+						_ = sendEvent(StreamEvent{Type: StreamEventError, Error: fmt.Errorf("run: invoke: %w", err)})
 						return
 					}
 					streamedContent := map[string]string{}
 					for chunk := range events {
-						a.streamChunk(chunk, out)
+						// session/cancel cancels ctx; stop streaming immediately
+						// (do not keep pumping model tokens or running tools afterward).
+						if ctx.Err() != nil {
+							emitCancelled()
+							return
+						}
+						// Enrich tool metadata then send without blocking past cancel.
+						if a.streamingStrategy != nil {
+							a.streamChunk(chunk, out)
+						} else {
+							if !sendEvent(StreamEvent{
+								Type:      chunk.Type,
+								TurnID:    chunk.TurnId,
+								MessageID: chunk.MessageId,
+								ToolCalls: chunk.ToolCalls,
+								Content:   chunk.Content,
+							}) {
+								emitCancelled()
+								return
+							}
+						}
 						if !chunk.IsComplete && chunk.Content != "" &&
 							(chunk.Type == StreamEventMessage || chunk.Type == StreamEventReasoning) {
 							key := string(chunk.Type) + ":" + chunk.MessageId
@@ -543,6 +584,10 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 							a.recordOutput(msg)
 						}
 					}
+					if ctx.Err() != nil {
+						emitCancelled()
+						return
+					}
 					// No tool calls so the turn ends
 					if len(toolCalls) == 0 {
 						out <- StreamEvent{Type: StreamEventComplete}
@@ -563,12 +608,20 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 					}
 				}
 
+				if ctx.Err() != nil {
+					emitCancelled()
+					return
+				}
+
 				var runningTools sync.WaitGroup
 				var todosCompleted atomic.Int32
 				for i, tc := range toolCalls {
 					runningTools.Add(1)
 					go func(i int, tc ToolCall) {
 						defer runningTools.Done()
+						if ctx.Err() != nil {
+							return
+						}
 						tool := a.findTool(tc.Name, tc.Namespace)
 						if tool == nil {
 							toolErr := fmt.Errorf("tool %q: %w", tc.Name, ErrToolNotFound)
@@ -640,6 +693,10 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 					}(i, tc)
 				}
 				runningTools.Wait()
+				if ctx.Err() != nil {
+					emitCancelled()
+					return
+				}
 				for _, r := range toolResults {
 					if r != nil {
 						a.addToContext(ctx, r, out)

@@ -76,7 +76,10 @@ func (p sseProtocol) handleSSE(env ProtocolEnv, w http.ResponseWriter, r *http.R
 		_ = mw.WriteError(nil, err)
 		return
 	}
-	defer stream.Cancel()
+	defer func() {
+		stream.Cancel()
+		stream.Close()
+	}()
 	if stream.Harness != nil && stream.Harness.SessionId != "" {
 		threadID = stream.Harness.SessionId
 	}
@@ -136,7 +139,10 @@ func (p sseProtocol) handleWS(env ProtocolEnv, w http.ResponseWriter, r *http.Re
 		_ = writeWSJSON(ctx, c, wsServerEvent{Type: "error", Content: PublicError(err).Error()})
 		return
 	}
-	defer stream.Cancel()
+	defer func() {
+		stream.Cancel()
+		stream.Close()
+	}()
 	if stream.Harness != nil && stream.Harness.SessionId != "" {
 		threadID = stream.Harness.SessionId
 	}
