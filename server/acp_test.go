@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -476,11 +478,66 @@ func TestEventToAcpJsonRpc_toolResult(t *testing.T) {
 	_ = json.Unmarshal(frames[0], &msg)
 	params := msg["params"].(map[string]any)
 	update := params["update"].(map[string]any)
+	if update["sessionUpdate"] != "tool_call_update" {
+		t.Errorf("sessionUpdate = %v, want tool_call_update", update["sessionUpdate"])
+	}
 	if update["status"] != "completed" {
 		t.Errorf("status = %v, want completed", update["status"])
 	}
-	if update["content"] != "file contents here" {
-		t.Errorf("content = %v, want %q", update["content"], "file contents here")
+	if update["toolCallId"] != "tc-1" {
+		t.Errorf("toolCallId = %v, want tc-1", update["toolCallId"])
+	}
+	content, ok := update["content"].([]any)
+	if !ok || len(content) != 1 {
+		t.Fatalf("content = %v, want ACP ToolCallContent array of length 1", update["content"])
+	}
+	inner := content[0].(map[string]any)
+	if inner["type"] != "content" {
+		t.Errorf("inner type = %v, want content", inner["type"])
+	}
+	innerContent := inner["content"].(map[string]any)
+	if innerContent["text"] != "file contents here" {
+		t.Errorf("inner text = %v, want %q", innerContent["text"], "file contents here")
+	}
+}
+
+func TestEventToAcpJsonRpc_toolResult_callIDFallback(t *testing.T) {
+	// llama.cpp-style: only call_id set
+	ev := &streaming.StreamEvent{
+		Type:    streaming.StreamEventToolResult,
+		Content: "ok",
+		ToolCalls: []tacklr.ToolCall{
+			{CallID: "fc_only", Name: "echo", Status: "success"},
+		},
+	}
+	frames, err := eventToAcpJsonRpc("thread-1", ev)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var msg map[string]any
+	_ = json.Unmarshal(frames[0], &msg)
+	update := msg["params"].(map[string]any)["update"].(map[string]any)
+	if update["toolCallId"] != "fc_only" {
+		t.Errorf("toolCallId = %v, want fc_only (CallID fallback)", update["toolCallId"])
+	}
+}
+
+func TestEventToAcpJsonRpc_functionCall_callIDFallback(t *testing.T) {
+	ev := &streaming.StreamEvent{
+		Type: streaming.StreamEventFunctionCall,
+		ToolCalls: []tacklr.ToolCall{
+			{CallID: "fc_only", Name: "echo"},
+		},
+	}
+	frames, err := eventToAcpJsonRpc("thread-1", ev)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var msg map[string]any
+	_ = json.Unmarshal(frames[0], &msg)
+	update := msg["params"].(map[string]any)["update"].(map[string]any)
+	if update["toolCallId"] != "fc_only" {
+		t.Errorf("toolCallId = %v, want fc_only", update["toolCallId"])
 	}
 }
 
@@ -666,16 +723,6 @@ func TestHandleRPC_sessionNew_storesSessionState(t *testing.T) {
 	}
 }
 
-func TestHandleRPC_notification_noResponse(t *testing.T) {
-	store := testStore(t)
-	r := newTestRegistry(store, &mockInferenceStrategy{}, []*tacklr.Tool{})
-
-	rec := serveACPRaw(t, r, `{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"s1"}}`)
-	if rec.Body.Len() != 0 {
-		t.Fatalf("expected empty body for notification, got %q", rec.Body.String())
-	}
-}
-
 func TestHandleRPC_sessionClose_deletesSessionState(t *testing.T) {
 	store := testStore(t)
 	r := newTestRegistry(store, &mockInferenceStrategy{}, []*tacklr.Tool{})
@@ -695,26 +742,6 @@ func TestHandleRPC_sessionClose_deletesSessionState(t *testing.T) {
 	_, ok := r.sessions.Load(sessionID)
 	if ok {
 		t.Error("expected session state to be deleted after close")
-	}
-}
-
-func TestHandleRPC_sessionCancel_preservesSessionState(t *testing.T) {
-	store := testStore(t)
-	r := newTestRegistry(store, &mockInferenceStrategy{}, []*tacklr.Tool{})
-
-	rec1 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
-	var resp1 map[string]any
-	_ = json.Unmarshal(rec1.Body.Bytes(), &resp1)
-	sessionID := resp1["result"].(map[string]any)["sessionId"].(string)
-
-	rec2 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/cancel","params":{"sessionId":"`+sessionID+`"}}`)
-	if rec2.Code != http.StatusOK {
-		t.Fatalf("cancel status = %d, want 200", rec2.Code)
-	}
-
-	_, ok := r.sessions.Load(sessionID)
-	if !ok {
-		t.Error("expected session state to be preserved after cancel")
 	}
 }
 
@@ -1029,6 +1056,9 @@ func TestHandleRPC_sessionPrompt_toolProgress(t *testing.T) {
 			}
 		case "tool_call_update":
 			toolCallUpdateCount++
+			if s, _ := update["status"].(string); s == "completed" {
+				toolCallCompleted = true
+			}
 		}
 	}
 
@@ -1039,7 +1069,7 @@ func TestHandleRPC_sessionPrompt_toolProgress(t *testing.T) {
 		t.Errorf("expected at least 1 tool_call_update, got %d", toolCallUpdateCount)
 	}
 	if !toolCallCompleted {
-		t.Error("expected tool_call with completed status")
+		t.Error("expected tool_call_update with completed status")
 	}
 
 	var hasResult bool
@@ -1336,12 +1366,33 @@ func TestHandleMessage_initialize_recordingWriter(t *testing.T) {
 	}
 }
 
-func TestHandleMessage_sessionCancel_stopReasonCancelled(t *testing.T) {
+// TestACP_sessionCancel_midPrompt is the integration coverage for session/cancel:
+// mid-stream cancel ends the prompt with stopReason cancelled promptly and
+// keeps the session registered for later use.
+func TestACP_sessionCancel_midPrompt(t *testing.T) {
 	started := make(chan struct{})
+	var startedOnce sync.Once
+	const earlyText = "streaming-early"
+	var chunksSent atomic.Int64
+
 	strategy := &mockInferenceStrategy{
 		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-			close(started)
-			<-ctx.Done()
+			startedOnce.Do(func() { close(started) })
+			// Stream until ctx is cancelled (session/cancel). If cancel is ignored
+			// the prompt goroutine will not finish within the test deadline.
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case ch <- tacklr.LLMResponseChunk{
+					Type:       tacklr.StreamEventMessage,
+					MessageId:  "m1",
+					Content:    earlyText,
+					IsComplete: false,
+				}:
+					chunksSent.Add(1)
+				}
+			}
 		},
 	}
 	r := newTestRegistry(testStore(t), strategy, nil)
@@ -1368,7 +1419,19 @@ func TestHandleMessage_sessionCancel_stopReasonCancelled(t *testing.T) {
 		t.Fatal("prompt did not start")
 	}
 
-	// session/cancel as notification (no id)
+	// Wait until the client has received at least one agent_message_chunk, then cancel.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for first stream frame")
+		}
+		if messageChunkCount(recPrompt) > 0 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	framesBeforeCancel := messageChunkCount(recPrompt)
+
 	srv.HandleMessage(context.Background(), []byte(`{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"`+sessionID+`"}}`), &recordingMessageWriter{})
 
 	select {
@@ -1377,20 +1440,58 @@ func TestHandleMessage_sessionCancel_stopReasonCancelled(t *testing.T) {
 		t.Fatal("prompt did not finish after cancel")
 	}
 
-	var found bool
+	// Desired: prompt result is stopReason cancelled.
+	var cancelled bool
 	for _, res := range recPrompt.Results {
 		switch m := res.Result.(type) {
 		case map[string]string:
 			if m["stopReason"] == "cancelled" {
-				found = true
+				cancelled = true
 			}
 		case map[string]any:
 			if m["stopReason"] == "cancelled" {
-				found = true
+				cancelled = true
 			}
 		}
 	}
-	if !found {
-		t.Fatalf("expected stopReason cancelled, got results=%#v frames=%v", recPrompt.Results, recPrompt.framesAsMaps(t))
+	if !cancelled {
+		t.Fatalf("want stopReason cancelled, results=%#v frames=%v", recPrompt.Results, recPrompt.framesAsMaps(t))
 	}
+
+	// Desired: streaming was underway (we saw early text) and cancel bounded growth.
+	framesAfter := messageChunkCount(recPrompt)
+	if framesBeforeCancel < 1 {
+		t.Fatal("expected agent_message_chunk before cancel")
+	}
+	// Allow a small in-flight race, but cancel must not leave an unbounded flood.
+	if framesAfter > framesBeforeCancel+32 {
+		t.Fatalf("too many message chunks after cancel: before=%d after=%d (model sent %d)",
+			framesBeforeCancel, framesAfter, chunksSent.Load())
+	}
+
+	// Desired: session remains registered after cancel.
+	if _, ok := r.sessions.Load(sessionID); !ok {
+		t.Fatal("session should remain registered after cancel")
+	}
+}
+
+func messageChunkCount(w *recordingMessageWriter) int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	n := 0
+	for _, f := range w.Frames {
+		var frame map[string]any
+		if json.Unmarshal(f, &frame) != nil {
+			continue
+		}
+		if frame["method"] != "session/update" {
+			continue
+		}
+		params, _ := frame["params"].(map[string]any)
+		update, _ := params["update"].(map[string]any)
+		if update["sessionUpdate"] == "agent_message_chunk" {
+			n++
+		}
+	}
+	return n
 }

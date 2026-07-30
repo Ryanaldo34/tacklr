@@ -5,9 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ryanaldo34/tacklr/control"
 	"github.com/ryanaldo34/tacklr/stores"
@@ -128,7 +132,7 @@ func TestAgentHarness_Run(t *testing.T) {
 				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "Hello!", IsComplete: true}
 			},
 		}
-		ah := NewAgent(AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
+		ah := NewAgent(context.Background(), AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
 		ch, err := ah.Run(context.Background(), "Hi")
 		if err != nil {
 			t.Fatal(err)
@@ -168,7 +172,7 @@ func TestAgentHarness_Run(t *testing.T) {
 				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "Done!", IsComplete: true}
 			},
 		}
-		ah := NewAgent(AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
+		ah := NewAgent(context.Background(), AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
 		ch, err := ah.Run(context.Background(), "Say hello")
 		if err != nil {
 			t.Fatal(err)
@@ -244,7 +248,7 @@ func TestAgentHarness_Run(t *testing.T) {
 				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
 			},
 		}
-		ah := NewAgent(AgentOptions{Config: Config{}, Model: strategy, Store: store})
+		ah := NewAgent(context.Background(), AgentOptions{Config: Config{}, Model: strategy, Store: store})
 		ch, err := ah.Run(context.Background(), "test")
 		if err != nil {
 			t.Fatal(err)
@@ -266,6 +270,56 @@ func TestAgentHarness_Run(t *testing.T) {
 		}
 	})
 
+	t.Run("incomplete function call gets terminal failed result", func(t *testing.T) {
+		// Announced (streamed) but IsComplete=false must not leave clients stuck on in_progress.
+		store := testStore(t)
+		strategy := &mockStrategy{
+			invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, events chan<- LLMResponseChunk) {
+				events <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
+					{ID: "fc_inc", CallID: "fc_inc", Name: "greet", Arguments: `{`},
+				}, IsComplete: false}
+				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "gave up", IsComplete: true}
+			},
+		}
+		ah := NewAgent(context.Background(), AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
+		ch, err := ah.Run(context.Background(), "test")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var sawFunctionCall bool
+		var toolResults []StreamEvent
+		var sawComplete bool
+		for ev := range ch {
+			switch ev.Type {
+			case StreamEventFunctionCall:
+				sawFunctionCall = true
+			case StreamEventToolResult:
+				toolResults = append(toolResults, ev)
+			case StreamEventComplete:
+				sawComplete = true
+			}
+		}
+		if !sawFunctionCall {
+			t.Error("expected function call announcement")
+		}
+		if len(toolResults) != 1 {
+			t.Fatalf("tool results = %d, want 1 failed close", len(toolResults))
+		}
+		if toolResults[0].Content != "tool call incomplete" {
+			t.Errorf("content = %q, want tool call incomplete", toolResults[0].Content)
+		}
+		if len(toolResults[0].ToolCalls) != 1 || toolResults[0].ToolCalls[0].Status != "error" {
+			t.Errorf("expected error status on incomplete tool, got %+v", toolResults[0].ToolCalls)
+		}
+		if toolResults[0].MessageID != "fc_inc" {
+			t.Errorf("MessageID = %q, want fc_inc", toolResults[0].MessageID)
+		}
+		if !sawComplete {
+			t.Error("expected turn complete after closing incomplete tool")
+		}
+	})
+
 	t.Run("tool handler error", func(t *testing.T) {
 		store := testStore(t)
 		var callCount int
@@ -281,7 +335,7 @@ func TestAgentHarness_Run(t *testing.T) {
 				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
 			},
 		}
-		ah := NewAgent(AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{brokenTool}})
+		ah := NewAgent(context.Background(), AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{brokenTool}})
 		ch, err := ah.Run(context.Background(), "test")
 		if err != nil {
 			t.Fatal(err)
@@ -303,7 +357,7 @@ func TestAgentHarness_Run(t *testing.T) {
 		strategy := &mockStrategy{
 			invokeErr: fmt.Errorf("network error"),
 		}
-		ah := NewAgent(AgentOptions{Config: Config{}, Model: strategy, Store: store})
+		ah := NewAgent(context.Background(), AgentOptions{Config: Config{}, Model: strategy, Store: store})
 		ch, err := ah.Run(context.Background(), "test")
 		if err != nil {
 			t.Fatal(err)
@@ -337,7 +391,7 @@ func TestAgentHarness_Run(t *testing.T) {
 			},
 		}
 
-		ah := NewAgent(AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{interruptTool}})
+		ah := NewAgent(context.Background(), AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{interruptTool}})
 
 		ch, err := ah.Run(context.Background(), "start")
 		if err != nil {
@@ -358,6 +412,17 @@ func TestAgentHarness_Run(t *testing.T) {
 					t.Fatal(err)
 				}
 				interruptId = payload.InterruptId
+				// data must be a nested JSON object (not base64 string from []byte marshal).
+				if len(payload.Data) == 0 || payload.Data[0] != '{' {
+					t.Fatalf("interrupt data must be JSON object, got %s", payload.Data)
+				}
+				var usi control.UserSelectionInterrupt
+				if err := json.Unmarshal(payload.Data, &usi); err != nil {
+					t.Fatalf("unmarshal interrupt data into UserSelectionInterrupt: %v\ndata=%s", err, payload.Data)
+				}
+				if len(usi.Options) != 2 {
+					t.Fatalf("options = %d, want 2", len(usi.Options))
+				}
 			case StreamEventToolResult:
 				t.Error("should not have tool result on first run")
 			}
@@ -426,6 +491,8 @@ func TestAgentHarness_Run(t *testing.T) {
 	t.Run("complete todo triggers compression between turns", func(t *testing.T) {
 		store := testStore(t)
 		var invokeCount int
+		var compressHadTools bool
+		var continueSawNudge bool
 
 		strategy := &mockStrategy{
 			invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, events chan<- LLMResponseChunk) {
@@ -438,14 +505,31 @@ func TestAgentHarness_Run(t *testing.T) {
 					return
 				}
 				if invokeCount == 2 {
-					events <- LLMResponseChunk{Type: StreamEventMessage, Content: "Mock compressed handoff. Remaining: Task 2.", IsComplete: true}
+					// Handoff compress: tools may be present; handoff is the last
+					// completed message text only (not every stream chunk).
+					if len(tools) != 0 {
+						compressHadTools = true
+					}
+					events <- LLMResponseChunk{Type: StreamEventReasoning, MessageId: "rs_c", Content: "SECRET_REASONING", IsComplete: false}
+					events <- LLMResponseChunk{Type: StreamEventReasoning, MessageId: "rs_c", IsComplete: true}
+					// Streamed deltas then complete (empty content on done, like real SSE).
+					events <- LLMResponseChunk{Type: StreamEventMessage, MessageId: "msg_c", Content: "Mock compressed handoff. ", IsComplete: false}
+					events <- LLMResponseChunk{Type: StreamEventMessage, MessageId: "msg_c", Content: "Remaining: Task 2.", IsComplete: false}
+					events <- LLMResponseChunk{Type: StreamEventMessage, MessageId: "msg_c", IsComplete: true}
+					// Earlier completed message must not win over the last one.
 					return
+				}
+				// Post-compress continue turn should include the open-plan nudge.
+				for _, m := range msgs {
+					if m != nil && m.Role == RoleDeveloper && m.Content == continuePlanNudge {
+						continueSawNudge = true
+					}
 				}
 				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "All done!", IsComplete: true}
 			},
 		}
 
-		ah := NewAgent(AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
+		ah := NewAgent(context.Background(), AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
 		ah.Runtime.PlanSet([]control.Todo{
 			{Title: "Task 1", Status: streaming.TodoStatusInProgress},
 			{Title: "Task 2", Status: streaming.TodoStatusPending},
@@ -464,6 +548,12 @@ func TestAgentHarness_Run(t *testing.T) {
 		if invokeCount != 3 {
 			t.Errorf("expected 3 total invocations, got %d", invokeCount)
 		}
+		if !compressHadTools {
+			t.Error("handoff compress Invoke should still receive tools for schema/context")
+		}
+		if !continueSawNudge {
+			t.Error("continue Invoke after compress should include continuePlanNudge (open todos remain)")
+		}
 
 		plan := ah.Runtime.PlanGet()
 		if plan == nil {
@@ -476,23 +566,33 @@ func TestAgentHarness_Run(t *testing.T) {
 			t.Errorf("Task 2 status = %q, want %q", plan[1].Status, streaming.TodoStatusInProgress)
 		}
 
-		if len(ah.ContextWindow) != 3 {
-			t.Errorf("expected 3 messages in context window, got %d", len(ah.ContextWindow))
+		// Post-compress: [user, handoff, continue nudge]; next turn appends assistant.
+		if len(ah.ContextWindow) != 4 {
+			t.Errorf("expected 4 messages (user, handoff, continue nudge, final), got %d", len(ah.ContextWindow))
 		} else {
 			if ah.ContextWindow[0].Role != RoleUser {
-				t.Errorf("first message role = %q, want %q", ah.ContextWindow[0].Role, RoleUser)
+				t.Errorf("first message role = %q, want user (original request must not be dropped)", ah.ContextWindow[0].Role)
 			}
-			if ah.ContextWindow[1].Role != RoleAssistant {
-				t.Errorf("second message role = %q, want %q", ah.ContextWindow[1].Role, RoleAssistant)
+			if ah.ContextWindow[0].Content != "Complete the first task" {
+				t.Errorf("first message content = %q, want original user prompt", ah.ContextWindow[0].Content)
 			}
-			if !strings.Contains(ah.ContextWindow[1].Content, "Mock compressed handoff") {
-				t.Errorf("compressed message content = %q, want contains 'Mock compressed handoff'", ah.ContextWindow[1].Content)
+			if ah.ContextWindow[1].Role != RoleDeveloper {
+				t.Errorf("handoff role = %q, want developer", ah.ContextWindow[1].Role)
 			}
-			if ah.ContextWindow[2].Role != RoleAssistant {
-				t.Errorf("third message role = %q, want %q", ah.ContextWindow[2].Role, RoleAssistant)
+			if ah.ContextWindow[1].Content != "Mock compressed handoff. Remaining: Task 2." {
+				t.Errorf("handoff content = %q, want last completed message full text only", ah.ContextWindow[1].Content)
 			}
-			if !strings.Contains(ah.ContextWindow[2].Content, "All done!") {
-				t.Errorf("final message content = %q, want contains 'All done!'", ah.ContextWindow[2].Content)
+			if ah.ContextWindow[2].Role != RoleDeveloper {
+				t.Errorf("nudge role = %q, want developer", ah.ContextWindow[2].Role)
+			}
+			if ah.ContextWindow[2].Content != continuePlanNudge {
+				t.Errorf("nudge content = %q, want continuePlanNudge", ah.ContextWindow[2].Content)
+			}
+			if ah.ContextWindow[3].Role != RoleAssistant {
+				t.Errorf("fourth message role = %q, want assistant", ah.ContextWindow[3].Role)
+			}
+			if !strings.Contains(ah.ContextWindow[3].Content, "All done!") {
+				t.Errorf("final message content = %q, want contains 'All done!'", ah.ContextWindow[3].Content)
 			}
 		}
 
@@ -528,7 +628,7 @@ func TestAgentHarness_Run(t *testing.T) {
 			},
 		}
 
-		ah := NewAgent(AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{interruptTool}})
+		ah := NewAgent(context.Background(), AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{interruptTool}})
 		ah.Runtime.PlanSet([]control.Todo{
 			{Title: "Task 1", Status: streaming.TodoStatusInProgress},
 		})
@@ -585,7 +685,7 @@ func TestAgentHarness_Run(t *testing.T) {
 			},
 		}
 
-		ah := NewAgent(AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
+		ah := NewAgent(context.Background(), AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
 
 		ch, err := ah.Run(context.Background(), "Greet the world")
 		if err != nil {
@@ -603,6 +703,60 @@ func TestAgentHarness_Run(t *testing.T) {
 		}
 		if len(ah.ContextWindow) < 3 {
 			t.Errorf("expected >= 3 messages in context window without compression, got %d", len(ah.ContextWindow))
+		}
+	})
+
+	t.Run("complete last todo skips continue nudge", func(t *testing.T) {
+		store := testStore(t)
+		var invokeCount int
+		var continueSawNudge bool
+
+		strategy := &mockStrategy{
+			invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, events chan<- LLMResponseChunk) {
+				invokeCount++
+				if invokeCount == 1 {
+					events <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
+						{ID: "call_ct_last", CallID: "call_ct_last", Name: "complete_todo", Arguments: `{"title":"Only"}`},
+					}, IsComplete: true}
+					events <- LLMResponseChunk{IsComplete: true}
+					return
+				}
+				if invokeCount == 2 {
+					events <- LLMResponseChunk{Type: StreamEventMessage, MessageId: "msg_h", Content: "All work done handoff.", IsComplete: true}
+					return
+				}
+				for _, m := range msgs {
+					if m != nil && m.Role == RoleDeveloper && m.Content == continuePlanNudge {
+						continueSawNudge = true
+					}
+				}
+				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "Plan finished.", IsComplete: true}
+			},
+		}
+
+		ah := NewAgent(context.Background(), AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
+		ah.Runtime.PlanSet([]control.Todo{
+			{Title: "Only", Status: streaming.TodoStatusInProgress},
+		})
+
+		ch, err := ah.Run(context.Background(), "Finish the plan")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for range ch {
+		}
+
+		if invokeCount != 3 {
+			t.Errorf("invokeCount = %d, want 3", invokeCount)
+		}
+		if continueSawNudge {
+			t.Error("should not append continuePlanNudge when all todos are completed")
+		}
+		// [user, handoff, assistant] — no nudge
+		if len(ah.ContextWindow) != 3 {
+			t.Errorf("context len = %d, want 3 (user, handoff, assistant)", len(ah.ContextWindow))
+		} else if ah.ContextWindow[1].Content != "All work done handoff." {
+			t.Errorf("handoff = %q", ah.ContextWindow[1].Content)
 		}
 	})
 
@@ -629,7 +783,7 @@ func TestAgentHarness_Run(t *testing.T) {
 			},
 		}
 
-		ah := NewAgent(AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
+		ah := NewAgent(context.Background(), AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
 		ah.Runtime.PlanSet([]control.Todo{
 			{Title: "Task 1", Status: streaming.TodoStatusInProgress},
 		})
@@ -676,7 +830,7 @@ func TestReturnFromInterrupt_unknownUUID_returnsError(t *testing.T) {
 			events <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
 		},
 	}
-	ah := NewAgent(AgentOptions{Config: Config{}, Model: strategy, Store: store})
+	ah := NewAgent(context.Background(), AgentOptions{Config: Config{}, Model: strategy, Store: store})
 
 	resolved, err := ah.ReturnFromInterrupt(context.Background(), map[string][]byte{
 		"bogus-uuid": []byte(`{}`),
@@ -720,7 +874,7 @@ func TestReturnFromInterrupt_invalidPayload_returnsError(t *testing.T) {
 		},
 	}
 
-	ah := NewAgent(AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{interruptTool}})
+	ah := NewAgent(context.Background(), AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{interruptTool}})
 
 	ch, err := ah.Run(context.Background(), "start")
 	if err != nil {
@@ -764,7 +918,7 @@ func TestNewAgent(t *testing.T) {
 	mockModel := &mockStrategy{}
 	wd := &recordingWatchdog{}
 
-	h := NewAgent(AgentOptions{
+	h := NewAgent(context.Background(), AgentOptions{
 		Config: Config{
 			MaxWindowSize: 4096,
 			SystemPrompt:  "test prompt",
@@ -794,6 +948,102 @@ func TestNewAgent(t *testing.T) {
 	}
 	if h.SessionId != "" {
 		t.Errorf("SessionId = %q, want empty", h.SessionId)
+	}
+}
+
+func TestConstructSystemPrompt_holistic(t *testing.T) {
+	// Skills + subagents + creator instructions must all compose after NewAgent
+	// (skills are initialized at construction, so the prompt must still include them).
+	skillsRoot := t.TempDir()
+	writeSkill := func(dir, name, desc, body string) {
+		t.Helper()
+		path := filepath.Join(skillsRoot, dir)
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		content := fmt.Sprintf("---\nname: %s\ndescription: %s\n---\n\n%s\n", name, desc, body)
+		if err := os.WriteFile(filepath.Join(path, "SKILL.md"), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeSkill("research", "research-skill", "How to research topics", "Use search carefully.")
+	writeSkill("coding", "coding-skill", "How to write code", "Prefer clear diffs.")
+
+	model := &mockStrategy{}
+	h := NewAgent(context.Background(), AgentOptions{
+		Config: Config{
+			MaxWindowSize:    8192,
+			SystemPrompt:     "Prefer concise answers and cite sources when possible.",
+			SkillDirectories: []string{skillsRoot},
+		},
+		Model: model,
+		SubAgents: []*SubAgent{
+			{WorkerName: "researcher", Model: model, Description: "deep research worker"},
+			{WorkerName: "coder", Model: model, Description: "implementation worker"},
+		},
+	})
+	h.Runtime.PlanSet([]control.Todo{
+		{Title: "Echo", Status: streaming.TodoStatusCompleted},
+		{Title: "Get time", Status: streaming.TodoStatusInProgress},
+	})
+
+	prompt := h.constructSystemPrompt()
+
+	// Base system requirements always present.
+	if !strings.Contains(prompt, "SYSTEM REQUIREMENTS:") {
+		t.Fatal("missing SYSTEM REQUIREMENTS section")
+	}
+	if !strings.Contains(prompt, "If a plan already exists") {
+		t.Error("system prompt should explain how to continue an existing plan")
+	}
+	if !strings.Contains(prompt, "list_plan") {
+		t.Error("system prompt should mention list_plan for exact todo titles")
+	}
+
+	// Skills section with catalog entries (sorted by name).
+	if !strings.Contains(prompt, "The following skills describe reusable approaches") {
+		t.Fatal("missing skills preamble")
+	}
+	codingIdx := strings.Index(prompt, " - coding-skill: How to write code\n")
+	researchIdx := strings.Index(prompt, " - research-skill: How to research topics\n")
+	if codingIdx < 0 || researchIdx < 0 {
+		t.Fatalf("missing skill catalog lines in prompt:\n%s", prompt)
+	}
+	if codingIdx > researchIdx {
+		t.Error("skills should be listed in sorted name order (coding before research)")
+	}
+
+	// Sub-agents section with sorted workers.
+	if !strings.Contains(prompt, "AVAILABLE SUB-AGENTS:") {
+		t.Fatal("missing AVAILABLE SUB-AGENTS section")
+	}
+	if !strings.Contains(prompt, "spawn_worker") {
+		t.Error("sub-agents section should mention spawn_worker")
+	}
+	coderIdx := strings.Index(prompt, " - coder: implementation worker\n")
+	researcherIdx := strings.Index(prompt, " - researcher: deep research worker\n")
+	if coderIdx < 0 || researcherIdx < 0 {
+		t.Fatalf("missing sub-agent catalog lines in prompt:\n%s", prompt)
+	}
+	if coderIdx > researcherIdx {
+		t.Error("sub-agents should be listed in sorted name order (coder before researcher)")
+	}
+
+	// Creator instructions last.
+	if !strings.Contains(prompt, "These instructions were provided by the creator of this agent instance") {
+		t.Fatal("missing creator instructions preamble")
+	}
+	if !strings.Contains(prompt, "Prefer concise answers and cite sources when possible.") {
+		t.Fatal("missing creator instructions body")
+	}
+
+	// Section order: base → skills → subagents → creator instructions.
+	sysIdx := strings.Index(prompt, "SYSTEM REQUIREMENTS:")
+	skillsIdx := strings.Index(prompt, "The following skills describe reusable approaches")
+	subsIdx := strings.Index(prompt, "AVAILABLE SUB-AGENTS:")
+	creatorIdx := strings.Index(prompt, "These instructions were provided by the creator")
+	if !(sysIdx < skillsIdx && skillsIdx < subsIdx && subsIdx < creatorIdx) {
+		t.Fatalf("unexpected section order: sys=%d skills=%d subs=%d creator=%d", sysIdx, skillsIdx, subsIdx, creatorIdx)
 	}
 }
 
@@ -833,42 +1083,64 @@ func TestFindTool_namespaceMatching(t *testing.T) {
 	}
 }
 
-func TestRun_contextCancellation(t *testing.T) {
-	mock := &mockStrategy{
+// TestRun_cancelMidStream_endsTurn verifies cancel during token streaming ends
+// the harness turn (finite events, cancelled error, channel closes).
+func TestRun_cancelMidStream_endsTurn(t *testing.T) {
+	started := make(chan struct{})
+	var once sync.Once
+	strategy := &mockStrategy{
 		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
-			ch <- LLMResponseChunk{IsComplete: true, Content: "done", Type: StreamEventMessage}
+			once.Do(func() { close(started) })
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case ch <- LLMResponseChunk{
+					Type:       StreamEventMessage,
+					MessageId:  "m",
+					Content:    "x",
+					IsComplete: false,
+				}:
+				}
+			}
 		},
 	}
-	h := NewAgent(AgentOptions{Config: Config{MaxWindowSize: 8192}, Model: mock})
-	h.ContextWindow = []*Message{{Role: RoleUser, Content: "hi"}}
-
+	h := NewAgent(context.Background(), AgentOptions{Config: Config{MaxWindowSize: 8192}, Model: strategy})
 	ctx, cancel := context.WithCancel(context.Background())
+	events, err := h.Run(ctx, "stream please")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("invoke did not start")
+	}
+	select {
+	case <-events:
+	case <-time.After(2 * time.Second):
+		t.Fatal("no stream events")
+	}
 	cancel()
 
-	events, err := h.Run(ctx, "test")
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
-
-	var evs []StreamEvent
-	for ev := range events {
-		evs = append(evs, ev)
-	}
-
-	if len(evs) == 0 {
-		t.Fatal("expected at least one event")
-	}
-	hasError := false
-	for _, ev := range evs {
-		if ev.Type == StreamEventError {
-			hasError = true
-			if !errors.Is(ev.Error, context.Canceled) {
-				t.Errorf("expected context.Canceled in error chain, got: %v", ev.Error)
+	var sawCancel bool
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case ev, ok := <-events:
+			if !ok {
+				if !sawCancel {
+					t.Fatal("channel closed without cancelled error event")
+				}
+				return
 			}
+			if ev.Type == StreamEventError && errors.Is(ev.Error, context.Canceled) {
+				sawCancel = true
+			}
+		case <-deadline:
+			t.Fatal("turn did not end after cancel")
 		}
-	}
-	if !hasError {
-		t.Error("expected a StreamEventError event")
 	}
 }
 
@@ -883,7 +1155,7 @@ func TestRun_watchdogInvoked(t *testing.T) {
 		},
 	}
 	wd := &recordingWatchdog{}
-	h := NewAgent(AgentOptions{Config: Config{MaxWindowSize: 8192}, Model: mock, WatchDog: wd})
+	h := NewAgent(context.Background(), AgentOptions{Config: Config{MaxWindowSize: 8192}, Model: mock, WatchDog: wd})
 
 	events, err := h.Run(context.Background(), "hi")
 	if err != nil {
@@ -918,7 +1190,7 @@ func TestRun_reasoningCapturedInContextWindow(t *testing.T) {
 			ch <- LLMResponseChunk{IsComplete: true}
 		},
 	}
-	h := NewAgent(AgentOptions{Config: Config{MaxWindowSize: 8192}, Model: mock})
+	h := NewAgent(context.Background(), AgentOptions{Config: Config{MaxWindowSize: 8192}, Model: mock})
 
 	events, err := h.Run(context.Background(), "what is the answer?")
 	if err != nil {

@@ -4,7 +4,87 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/ryanaldo34/tacklr/streaming"
 )
+
+func TestPlanGet_rehydratesAfterJSONRoundTrip(t *testing.T) {
+	rt := HarnessRuntime{}
+	rt.EnsureInitialized()
+	rt.PlanSet([]Todo{
+		{Title: "Task 1", Status: streaming.TodoStatusCompleted, Description: "done"},
+		{Title: "Task 2", Status: streaming.TodoStatusInProgress, Description: "next"},
+	})
+
+	// Simulate checkpoint JSON round-trip of Runtime.State.
+	raw, err := json.Marshal(rt.State)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reloaded map[string]any
+	if err := json.Unmarshal(raw, &reloaded); err != nil {
+		t.Fatal(err)
+	}
+	rt2 := HarnessRuntime{State: reloaded}
+	rt2.EnsureInitialized()
+
+	plan := rt2.PlanGet()
+	if len(plan) != 2 {
+		t.Fatalf("plan len = %d, want 2", len(plan))
+	}
+	if plan[0].Title != "Task 1" || plan[0].Status != streaming.TodoStatusCompleted {
+		t.Errorf("plan[0] = %+v", plan[0])
+	}
+	if plan[1].Title != "Task 2" || plan[1].Status != streaming.TodoStatusInProgress {
+		t.Errorf("plan[1] = %+v", plan[1])
+	}
+}
+
+func TestAdoptInterrupt_parksUnderCurrentToolCall(t *testing.T) {
+	rt := HarnessRuntime{}
+	rt.EnsureInitialized()
+	rt.CurrentToolCallID = "spawn_tc"
+
+	// Simulate a child interrupt object.
+	child := &UserSelectionInterrupt{
+		Options: []UserChoice{{Title: "A"}, {Title: "B"}},
+	}
+	intr, err := rt.AdoptInterrupt(child)
+	if err == nil {
+		t.Fatal("first AdoptInterrupt should return interrupt as error")
+	}
+	if intr != nil {
+		t.Fatal("first return value should be nil")
+	}
+	if !rt.HasPendingInterrupt() {
+		t.Fatal("expected pending interrupt after adopt")
+	}
+	got, ok := rt.PendingInterrupt("spawn_tc")
+	if !ok || got != child {
+		t.Fatal("pending interrupt should be the adopted instance")
+	}
+
+	// Resolve then adopt again should surface resolved via Take/resume path.
+	if _, err := rt.ReturnInterrupt("spawn_tc", []byte(`{"selectionIdx":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	// Adopt when resolved: returns resolved, nil error
+	rt.CurrentToolCallID = "spawn_tc"
+	// Put resolved back for Adopt's resume branch — Return already moved to Resolved.
+	// AdoptInterrupt checks Resolved first.
+	// After ReturnInterrupt, Resolved has the interrupt. Adopt should take it.
+	resolved, err := rt.AdoptInterrupt(child)
+	if err != nil {
+		t.Fatalf("adopt on resume path: %v", err)
+	}
+	if resolved == nil {
+		t.Fatal("expected resolved interrupt")
+	}
+	usi := resolved.(*UserSelectionInterrupt)
+	if usi.ConfirmedChoice == nil || usi.ConfirmedChoice.Title != "B" {
+		t.Fatalf("confirmed choice = %v", usi.ConfirmedChoice)
+	}
+}
 
 func TestRaiseInterrupt_firstCallReturnsAsError(t *testing.T) {
 	rt := HarnessRuntime{}

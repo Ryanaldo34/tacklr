@@ -13,7 +13,10 @@ go get github.com/ryanaldo34/tacklr
 ```go
 import "github.com/ryanaldo34/tacklr"
 
-h := tacklr.NewAgent(tacklr.Config{MaxWindowSize: 8192}, model, runtime, watchdog)
+h := tacklr.NewAgent(ctx, tacklr.AgentOptions{
+    Config: tacklr.Config{MaxWindowSize: 8192},
+    Model:  model,
+})
 events, err := h.Run(ctx, "your prompt")
 ```
 
@@ -79,23 +82,31 @@ mcp.MCPConfig{Name: "api", Type: mcp.TransportHTTP, URL: "https://api.example.co
 mcp.MCPConfig{Name: "events", Type: mcp.TransportSSE, URL: "https://events.example.com/mcp"}
 ```
 
-Pass configs via `AgentSpec.MCPConfigs` or the harness `MCPConfigs` field. Over
-ACP, clients supply the same shapes in `session/new`, `session/load`, and
-`session/resume`; the harness connects and discovers tools at the start of the
-next turn. The agent advertises `mcpCapabilities.http` and `mcpCapabilities.sse`
-as supported (stdio is always supported).
+Pass configs via `AgentOptions.MCPConfigs` (or `AgentSpec.MCPConfigs` on the
+server). Discovery runs during `NewAgent` / `NewAgentFromSession`. Over ACP,
+clients supply the same shapes in `session/new`, `session/load`, and
+`session/resume`. The agent advertises `mcpCapabilities.http` and
+`mcpCapabilities.sse` as supported (stdio is always supported).
 
 ### Usage in an agent
 
 ```go
-agent := tacklr.NewAgent(tacklr.AgentOptions{
+agent := tacklr.NewAgent(ctx, tacklr.AgentOptions{
     Config: tacklr.Config{
         MaxWindowSize: 8192,
         SystemPrompt:  "You are a helpful assistant.",
     },
-    Model: model,
-    Store: store,
-    Tools: []*tacklr.Tool{tool},
+    Model:      model,
+    Store:      store,
+    Tools:      []*tacklr.Tool{tool},
+    MCPConfigs: []mcp.MCPConfig{{Name: "fs", Command: "npx", Args: []string{"-y", "@modelcontextprotocol/server-filesystem"}}},
+})
+
+// Restore from a checkpoint with the same options shape:
+agent, err := tacklr.NewAgentFromSession(ctx, sessionID, tacklr.AgentOptions{
+    Config: cfg,
+    Model:  model,
+    Store:  store,
 })
 ```
 
@@ -162,19 +173,20 @@ WebSocket connections use the same JSON payload as the initial message (GET / fo
 ## Skills
 
 Applications can load local `SKILL.md` directories into an agent with the
-existing `NewAgent` constructor. The first `Run` adds a compact skill catalog
-to the system prompt and registers `read_skill`, allowing the model to load
-full instructions only when needed:
+`NewAgent` constructor. Skills are initialized at construction time; a compact
+skill catalog is added to the system prompt and `read_skill` is registered so
+the model can load full instructions only when needed:
 
 ```go
-agent := tacklr.NewAgent(
-    tacklr.Config{
+agent := tacklr.NewAgent(ctx, tacklr.AgentOptions{
+    Config: tacklr.Config{
         MaxWindowSize:    8192,
         SystemPrompt:     "You are a helpful assistant.",
         SkillDirectories: []string{"./skills"},
     },
-    model, store, watchdog,
-)
+    Model: model,
+    Store: store,
+})
 ```
 
 Each immediate child of a configured directory must contain a `SKILL.md` file

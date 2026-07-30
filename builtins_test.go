@@ -2,11 +2,52 @@ package tacklr
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/ryanaldo34/tacklr/control"
 	"github.com/ryanaldo34/tacklr/streaming"
 )
+
+func TestCreatePlanTool_rejectsWhenActivePlanExists(t *testing.T) {
+	rt := control.NewRuntime(nil, nil, nil)
+	rt.EnsureInitialized()
+	rt.PlanSet([]control.Todo{
+		{Title: "existing", Status: streaming.TodoStatusInProgress},
+	})
+
+	_, err := createPlanTool.Invoke(context.Background(), `{"todos":[{"title":"new","status":"pending","description":""}]}`, rt)
+	if err == nil {
+		t.Fatal("expected error when create_plan is called with an active plan")
+	}
+	if !strings.Contains(err.Error(), "active plan already exists") {
+		t.Fatalf("error = %v, want mention of active plan", err)
+	}
+	// Original plan must be unchanged.
+	plan := rt.PlanGet()
+	if len(plan) != 1 || plan[0].Title != "existing" {
+		t.Fatalf("plan = %v, want original single todo", plan)
+	}
+}
+
+func TestCreatePlanTool_createsWhenNoPlan(t *testing.T) {
+	rt := control.NewRuntime(nil, nil, nil)
+	rt.EnsureInitialized()
+
+	got, err := createPlanTool.Invoke(context.Background(), `{"todos":[{"title":"a","status":"pending","description":"d"}]}`, rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "Plan created successfully" {
+		t.Fatalf("got %q", got)
+	}
+	plan := rt.PlanGet()
+	if len(plan) != 1 || plan[0].Title != "a" {
+		t.Fatalf("plan = %v", plan)
+	}
+}
 
 func TestEditPlanTool(t *testing.T) {
 	pending := control.Todo{Title: "pending", Status: streaming.TodoStatusPending}
@@ -210,5 +251,120 @@ func TestEditPlanTool(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestAskUserChoiceTool_raiseAndResume(t *testing.T) {
+	rt := control.NewRuntime(make(chan streaming.StreamEvent, 4), nil, nil)
+	rt.EnsureInitialized()
+	rt.CurrentToolCallID = "tc_ask"
+
+	args, _ := json.Marshal(map[string]any{
+		"question": "Which approach?",
+		"choices": []map[string]any{
+			{"title": "Fast", "description": "ship now", "is_recommended": true},
+			{"title": "Careful", "description": "more tests"},
+		},
+	})
+
+	_, err := askUserChoiceTool.Invoke(context.Background(), string(args), rt)
+	if err == nil {
+		t.Fatal("first invoke should raise interrupt")
+	}
+	var intr control.Interrupt
+	if !errors.As(err, &intr) {
+		t.Fatalf("expected Interrupt, got %T %v", err, err)
+	}
+	if q := AskUserQuestionFromState(rt, "tc_ask"); q != "Which approach?" {
+		t.Errorf("question state = %q", q)
+	}
+
+	// Resolve and re-invoke (harness re-execution pattern).
+	if _, err := rt.ReturnInterrupt("tc_ask", []byte(`{"selectionIdx":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	got, err := askUserChoiceTool.Invoke(context.Background(), string(args), rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `User selected "Careful" — more tests`
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestAskUserChoiceTool_validation(t *testing.T) {
+	rt := control.NewRuntime(nil, nil, nil)
+	rt.EnsureInitialized()
+	rt.CurrentToolCallID = "tc"
+
+	cases := []struct {
+		name string
+		args string
+	}{
+		{"empty question", `{"question":"","choices":[{"title":"A"},{"title":"B"}]}`},
+		{"one choice", `{"question":"q","choices":[{"title":"A"}]}`},
+		{"duplicate titles", `{"question":"q","choices":[{"title":"A"},{"title":"A"}]}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := askUserChoiceTool.Invoke(context.Background(), tc.args, rt)
+			if err == nil {
+				t.Fatal("expected validation error")
+			}
+		})
+	}
+}
+
+func TestAskUserChoiceTool_injectedAsBuiltin(t *testing.T) {
+	h := NewAgent(context.Background(), AgentOptions{
+		Config: Config{MaxWindowSize: 1024},
+		Model:  &mockStrategy{},
+	})
+	if h.findTool("ask_user_choice", "") == nil {
+		t.Fatal("ask_user_choice should be injected as a builtin")
+	}
+}
+
+func TestListPlanTool_exactListing(t *testing.T) {
+	rt := control.NewRuntime(nil, nil, nil)
+	rt.EnsureInitialized()
+	rt.PlanSet([]control.Todo{
+		{Title: "Exact Title One", Status: streaming.TodoStatusCompleted, Description: "done work"},
+		{Title: "Exact Title Two", Status: streaming.TodoStatusInProgress, Description: "now"},
+		{Title: "Exact Title Three", Status: streaming.TodoStatusPending},
+	})
+
+	got, err := listPlanTool.Invoke(context.Background(), `{}`, rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Titles verbatim, order preserved, statuses and descriptions present.
+	wantParts := []string{
+		"Active plan (3 todos):",
+		"1. [completed] Exact Title One",
+		"Description: done work",
+		"2. [in_progress] Exact Title Two",
+		"Description: now",
+		"3. [pending] Exact Title Three",
+	}
+	for _, p := range wantParts {
+		if !strings.Contains(got, p) {
+			t.Fatalf("list_plan output missing %q\n---\n%s", p, got)
+		}
+	}
+	// No empty description line for the third item.
+	if strings.Count(got, "Description:") != 2 {
+		t.Fatalf("expected 2 description lines, got output:\n%s", got)
+	}
+}
+
+func TestListPlanTool_injectedAsBuiltin(t *testing.T) {
+	h := NewAgent(context.Background(), AgentOptions{
+		Config: Config{MaxWindowSize: 1024},
+		Model:  &mockStrategy{},
+	})
+	if h.findTool("list_plan", "") == nil {
+		t.Fatal("list_plan should be injected as a builtin")
 	}
 }

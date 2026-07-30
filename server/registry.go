@@ -21,6 +21,7 @@ type AgentSpec struct {
 	Model             tacklr.InferenceStrategy
 	Tools             []*tacklr.Tool
 	MCPConfigs        []mcp.MCPConfig
+	SubAgents         []*tacklr.SubAgent
 	WatchDog          tacklr.AgentWatchDog
 	StreamingStrategy tacklr.StreamingStrategy
 	Store             stores.BaseStore
@@ -68,27 +69,85 @@ type TurnRequest struct {
 	MCPServers []mcp.MCPConfig
 }
 
-// EventStream is a running agent turn. Events is closed when the turn ends.
-// Cancel aborts the turn; it is safe to call multiple times.
+// EventStream is a running agent turn. Events is closed when the current
+// harness run finishes (complete, error, interrupt park) or the turn context
+// is cancelled and the registry forwarder exits.
+//
+// Cancel cancels the turn context (session/cancel). Close releases harness
+// resources after the turn has ended. Callers typically:
+//
+//	defer func() { stream.Cancel(); stream.Close() }()
+//
+// Harness remains usable after an interrupt park so ResumeInterrupts can run
+// before Close.
 type EventStream struct {
-	Events <-chan streaming.StreamEvent
-	cancel context.CancelFunc
+	Events  <-chan streaming.StreamEvent
+	Harness *tacklr.AgentHarness
+	runCtx  context.Context
+	cancel  context.CancelFunc
+	closed  bool
+	mu      sync.Mutex
 }
 
-// Cancel aborts the running turn.
-func (s *EventStream) Cancel() {
-	if s != nil && s.cancel != nil {
-		s.cancel()
+// TurnContext is the context for this turn (cancelled by session/cancel or parent).
+func (s *EventStream) TurnContext() context.Context {
+	if s == nil {
+		return nil
 	}
+	return s.runCtx
+}
+
+// Cancelled reports whether the turn context has been cancelled.
+func (s *EventStream) Cancelled() bool {
+	return s != nil && s.runCtx != nil && s.runCtx.Err() != nil
+}
+
+// Cancel cancels the turn context so producers stop. Safe to call multiple times.
+// Does not release the harness; call Close after the event pump finishes.
+func (s *EventStream) Cancel() {
+	if s == nil || s.cancel == nil {
+		return
+	}
+	s.cancel()
+}
+
+// Close releases harness resources (idempotent). Prefer after Cancel / stream end.
+func (s *EventStream) Close() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
+	s.closed = true
+	if s.Harness != nil {
+		s.Harness.Close()
+		s.Harness = nil
+	}
+}
+
+// ResumeInterrupts resolves pending interrupts and returns a new event stream
+// from the same harness (ACP mid-turn elicitation resume).
+func (s *EventStream) ResumeInterrupts(ctx context.Context, responses map[string][]byte) (<-chan streaming.StreamEvent, error) {
+	if s == nil || s.Harness == nil {
+		return nil, fmt.Errorf("event stream: no harness for resume")
+	}
+	c := s.runCtx
+	if c == nil || c.Err() != nil {
+		c = ctx
+	}
+	return s.Harness.ReturnFromInterrupt(c, responses)
 }
 
 type Registry struct {
 	agents       map[string]AgentSpec
 	defaultAgent string
 	store        stores.BaseStore
-	activeCtx    sync.Map // threadID → context.CancelFunc
-	sessions     sync.Map // threadID → *sessionState
-	cancelled    sync.Map // threadID → struct{}
+	// activeTurns maps session/thread id → cancel for the in-flight turn context.
+	activeTurns sync.Map // string → context.CancelFunc
+	sessions    sync.Map // string → *sessionState
 }
 
 func NewRegistry(store stores.BaseStore, defaultAgent string) *Registry {
@@ -101,35 +160,6 @@ func NewRegistry(store stores.BaseStore, defaultAgent string) *Registry {
 
 func (r *Registry) Register(agentID string, spec AgentSpec) {
 	r.agents[agentID] = spec
-}
-
-// Capabilities returns the ACP initialize advertisement.
-func (r *Registry) Capabilities() map[string]any {
-	return map[string]any{
-		"protocolVersion": 1,
-		"agentCapabilities": map[string]any{
-			// Full load requires conversation replay; advertise false until implemented.
-			"loadSession": false,
-			"promptCapabilities": map[string]any{
-				"image":           false,
-				"audio":           false,
-				"embeddedContext": true,
-			},
-			"mcpCapabilities": map[string]any{
-				"http": true,
-				"sse":  true,
-			},
-			"sessionCapabilities": map[string]any{
-				"close": struct{}{},
-			},
-		},
-		"agentInfo": map[string]string{
-			"name":    "tacklr",
-			"title":   "Tacklr ACP",
-			"version": "0.1.0",
-		},
-		"authMethods": []string{},
-	}
 }
 
 // CreateSession registers a new session and returns its view.
@@ -206,18 +236,13 @@ func (r *Registry) CloseSession(sessionID string) {
 	r.CancelSession(sessionID)
 }
 
-// CancelSession aborts any active turn for the session without removing it.
+// CancelSession cancels the in-flight turn context for the session (if any).
+// Session state is preserved. The turn context is the single cancel signal for
+// harness work, the registry forwarder, and runTurnStream.
 func (r *Registry) CancelSession(sessionID string) {
-	r.cancelled.Store(sessionID, struct{}{})
-	if c, ok := r.activeCtx.LoadAndDelete(sessionID); ok {
+	if c, ok := r.activeTurns.Load(sessionID); ok {
 		c.(context.CancelFunc)()
 	}
-}
-
-// WasCancelled reports whether CancelSession was called for this session.
-func (r *Registry) WasCancelled(sessionID string) bool {
-	_, ok := r.cancelled.Load(sessionID)
-	return ok
 }
 
 // RunTurn starts a prompt or resume turn and returns a stream of events.
@@ -272,15 +297,6 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 		}
 		sess.mu.Unlock()
 	}
-
-	h, _, err := r.loadAgent(ctx, agentID, threadID, load)
-	if err != nil {
-		return nil, fmt.Errorf("load agent %q: %w", agentID, err)
-	}
-
-	// Merge per-session MCP configs into the harness. A list supplied with
-	// this request (session/resume re-specifies it) takes precedence and
-	// replaces the stored list; otherwise the session/new list is used.
 	mcpServers := req.MCPServers
 	if sess != nil {
 		sess.mu.Lock()
@@ -291,12 +307,16 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 		}
 		sess.mu.Unlock()
 	}
-	if len(mcpServers) > 0 {
-		h.MCPConfigs = append(h.MCPConfigs, mcpServers...)
+
+	h, _, err := r.loadAgent(ctx, agentID, threadID, load, mcpServers)
+	if err != nil {
+		return nil, fmt.Errorf("load agent %q: %w", agentID, err)
 	}
 
-	runCtx, cancel := context.WithCancel(ctx)
-	r.activeCtx.Store(threadID, cancel)
+	// turnCtx is a child of the request/connection ctx so either parent cancel
+	// or session/cancel stops the turn. Stored for CancelSession.
+	turnCtx, cancel := context.WithCancel(ctx)
+	r.activeTurns.Store(threadID, cancel)
 
 	pr := &parsedRequest{
 		AgentID:   agentID,
@@ -304,26 +324,23 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 		Prompt:    req.Prompt,
 		Responses: req.Responses,
 	}
-	events, err := runHarness(runCtx, h, pr)
+	events, err := runHarness(turnCtx, h, pr)
 	if err != nil {
-		r.activeCtx.Delete(threadID)
+		r.activeTurns.Delete(threadID)
 		cancel()
 		h.Close()
 		return nil, fmt.Errorf("run harness: %w", err)
 	}
 
+	// Forward harness events until the turn context is done or the harness ends.
+	// Closing out unblocks runTurnStream; do not Close the harness here (interrupt park).
 	out := make(chan streaming.StreamEvent)
 	go func() {
 		defer close(out)
-		defer func() {
-			h.Close()
-			r.activeCtx.Delete(threadID)
-			r.cancelled.Delete(threadID)
-			cancel()
-		}()
+		defer r.activeTurns.Delete(threadID)
 		for {
 			select {
-			case <-runCtx.Done():
+			case <-turnCtx.Done():
 				return
 			case ev, ok := <-events:
 				if !ok {
@@ -331,14 +348,19 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 				}
 				select {
 				case out <- ev:
-				case <-runCtx.Done():
+				case <-turnCtx.Done():
 					return
 				}
 			}
 		}
 	}()
 
-	return &EventStream{Events: out, cancel: cancel}, nil
+	return &EventStream{
+		Events:  out,
+		Harness: h,
+		runCtx:  turnCtx,
+		cancel:  cancel,
+	}, nil
 }
 
 // buildConfigOptions returns the ACP config options for a session, with
@@ -389,7 +411,7 @@ func (r *Registry) sessionAgentID(sess *sessionState) string {
 	return r.defaultAgent
 }
 
-func (r *Registry) loadAgent(ctx context.Context, agentID, threadID string, load bool) (*tacklr.AgentHarness, *AgentSpec, error) {
+func (r *Registry) loadAgent(ctx context.Context, agentID, threadID string, load bool, sessionMCP []mcp.MCPConfig) (*tacklr.AgentHarness, *AgentSpec, error) {
 	spec, ok := r.agents[agentID]
 	if !ok {
 		return nil, nil, clientErrorf(ErrAgentNotFound, "agent %q not found", agentID)
@@ -400,29 +422,35 @@ func (r *Registry) loadAgent(ctx context.Context, agentID, threadID string, load
 		store = spec.Store
 	}
 
+	mcpConfigs := make([]mcp.MCPConfig, 0, len(spec.MCPConfigs)+len(sessionMCP))
+	mcpConfigs = append(mcpConfigs, spec.MCPConfigs...)
+	mcpConfigs = append(mcpConfigs, sessionMCP...)
+
+	opts := tacklr.AgentOptions{
+		Config:     spec.Config,
+		Model:      spec.Model,
+		Store:      store,
+		WatchDog:   spec.WatchDog,
+		Tools:      spec.Tools,
+		MCPConfigs: mcpConfigs,
+		SubAgents:  spec.SubAgents,
+	}
+
 	var h *tacklr.AgentHarness
 	var err error
 	if load {
 		if store == nil {
 			return nil, nil, clientErrorf(ErrSessionStoreNotConfigured, "session store is not configured")
 		}
-		h, err = tacklr.NewAgentHarnessFromSession(ctx, threadID, spec.Config, spec.Model, store, spec.WatchDog)
+		h, err = tacklr.NewAgentFromSession(ctx, threadID, opts)
 		if err != nil {
 			return nil, nil, err
 		}
 	} else {
-		h = tacklr.NewAgent(tacklr.AgentOptions{
-			Config:   spec.Config,
-			Model:    spec.Model,
-			Store:    store,
-			WatchDog: spec.WatchDog,
-			Tools:    spec.Tools,
-		})
+		h = tacklr.NewAgent(ctx, opts)
 	}
 
 	h.SessionId = threadID
-	h.Tools = spec.Tools
-	h.MCPConfigs = spec.MCPConfigs
 	if spec.StreamingStrategy != nil {
 		h.WithStreamingStrategy(spec.StreamingStrategy)
 	}

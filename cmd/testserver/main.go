@@ -33,10 +33,19 @@ func main() {
 
 	model := inference.NewOpenAIInferenceStrategy(&http.Client{
 		Timeout: 120 * time.Second,
-	}).
-		WithURL(os.Getenv("OPENAI_BASE_URL")).
+	})
+	model.WithURL(os.Getenv("OPENAI_BASE_URL")).
 		WithApiKey(os.Getenv("OPENAI_API_KEY")).
 		WithModel(os.Getenv("OPENAI_MODEL"))
+
+	// Azure OpenAI / Foundry reasoning models need reasoning.effort + summary
+	// so thought text streams as reasoning_summary_text (→ agent_thought_chunk).
+	if effort := os.Getenv("OPENAI_REASONING_EFFORT"); effort != "" {
+		model.WithReasoningLevel(effort)
+	}
+	if summary := os.Getenv("OPENAI_REASONING_SUMMARY"); summary != "" {
+		model.WithReasoningSummary(summary)
+	}
 
 	model.SetSystemPrompt(defaultSystemPrompt)
 

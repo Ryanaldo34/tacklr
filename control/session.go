@@ -54,21 +54,35 @@ func (rt *HarnessRuntime) EmitUpdate(message string) {
 }
 
 // PlanGet returns a shallow copy of the current plan (or nil if not set).
+// After a session checkpoint JSON round-trip, the plan may be stored as
+// []any / map[string]any; those shapes are rehydrated into []Todo.
 func (rt *HarnessRuntime) PlanGet() []Todo {
 	rt.mu.RLock()
 	defer rt.mu.RUnlock()
 	if rt.State == nil {
 		return nil
 	}
-	if v, ok := rt.State[planStateKey]; ok {
-		if plan, ok := v.([]Todo); ok {
-			// Return shallow copy so callers can mutate elements safely
-			cp := make([]Todo, len(plan))
-			copy(cp, plan)
-			return cp
-		}
+	v, ok := rt.State[planStateKey]
+	if !ok || v == nil {
+		return nil
 	}
-	return nil
+	if plan, ok := v.([]Todo); ok {
+		cp := make([]Todo, len(plan))
+		copy(cp, plan)
+		return cp
+	}
+	// Checkpoint reload: rehydrate from JSON-compatible types.
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil
+	}
+	var plan []Todo
+	if err := json.Unmarshal(b, &plan); err != nil {
+		return nil
+	}
+	cp := make([]Todo, len(plan))
+	copy(cp, plan)
+	return cp
 }
 
 // PlanSet stores the plan and emits a StreamEventPlanUpdate.
@@ -169,6 +183,54 @@ func (rt *HarnessRuntime) ReturnInterrupt(id string, result []byte) (Interrupt, 
 	delete(rt.PendingInterrupts, id)
 	rt.ResolvedInterrupts[id] = intr
 	return intr, nil
+}
+
+// AdoptInterrupt parks an existing Interrupt under CurrentToolCallID without
+// going through the factory/InitFromPayload path. Used by spawn_worker to
+// bubble a child interrupt onto the parent Runtime. Returns the interrupt as
+// an error so the harness parks the tool like a normal RaiseInterrupt yield.
+//
+// If a resolved interrupt already exists for CurrentToolCallID (resume path),
+// it is removed and (resolved, nil) is returned — though spawn_worker normally
+// detects resume via park metadata before calling AdoptInterrupt.
+func (rt *HarnessRuntime) AdoptInterrupt(intr Interrupt) (Interrupt, error) {
+	if intr == nil {
+		return nil, fmt.Errorf("adopt interrupt: interrupt is nil")
+	}
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if rt.CurrentToolCallID == "" {
+		return nil, fmt.Errorf("adopt interrupt: CurrentToolCallID is empty")
+	}
+	if resolved, ok := rt.ResolvedInterrupts[rt.CurrentToolCallID]; ok {
+		delete(rt.ResolvedInterrupts, rt.CurrentToolCallID)
+		return resolved, nil
+	}
+	if rt.PendingInterrupts == nil {
+		rt.PendingInterrupts = interruptMap{}
+	}
+	rt.PendingInterrupts[rt.CurrentToolCallID] = intr
+	return nil, intr
+}
+
+// TakeResolvedInterrupt removes and returns a resolved interrupt for id, if any.
+func (rt *HarnessRuntime) TakeResolvedInterrupt(id string) (Interrupt, bool) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	intr, ok := rt.ResolvedInterrupts[id]
+	if !ok {
+		return nil, false
+	}
+	delete(rt.ResolvedInterrupts, id)
+	return intr, true
+}
+
+// PendingInterrupt returns the pending interrupt for id, if any.
+func (rt *HarnessRuntime) PendingInterrupt(id string) (Interrupt, bool) {
+	rt.mu.RLock()
+	defer rt.mu.RUnlock()
+	intr, ok := rt.PendingInterrupts[id]
+	return intr, ok
 }
 
 // RaiseInterrupt is the hook for tools to raise interrupts and yield control

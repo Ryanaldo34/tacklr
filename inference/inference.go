@@ -21,9 +21,13 @@ type OpenAIInferenceStrategy struct {
 	instructions string
 	apiKey       string
 	model        string
-	reasoning    string
-	httpClient   *http.Client
-	baseURL      string
+	// reasoning effort: "low" | "medium" | "high" (provider-specific).
+	reasoning string
+	// reasoningSummary: "auto" | "concise" | "detailed". Empty omits the field.
+	// Required for Azure OpenAI/Foundry to stream response.reasoning_summary_text.delta.
+	reasoningSummary string
+	httpClient       *http.Client
+	baseURL          string
 
 	structuredOutputSchema map[string]any
 	structuredOutputName   string
@@ -58,6 +62,18 @@ func (s *OpenAIInferenceStrategy) WithURL(url string) tacklr.InferenceStrategy {
 
 func (s *OpenAIInferenceStrategy) WithReasoningLevel(level string) tacklr.InferenceStrategy {
 	s.reasoning = level
+	// Default summary so Azure OpenAI / OpenAI stream thought deltas as
+	// response.reasoning_summary_text.delta (mapped to StreamEventReasoning).
+	if level != "" && s.reasoningSummary == "" {
+		s.reasoningSummary = "auto"
+	}
+	return s
+}
+
+// WithReasoningSummary sets reasoning.summary on Responses API requests
+// ("auto", "concise", "detailed"). Empty clears it.
+func (s *OpenAIInferenceStrategy) WithReasoningSummary(summary string) *OpenAIInferenceStrategy {
+	s.reasoningSummary = summary
 	return s
 }
 
@@ -250,8 +266,11 @@ func (s *OpenAIInferenceStrategy) Invoke(ctx context.Context, messages []*tacklr
 		reqBody.Instructions = &s.instructions
 	}
 
-	if s.reasoning != "" {
-		reqBody.Reasoning = &reasoningDetail{Effort: s.reasoning}
+	if s.reasoning != "" || s.reasoningSummary != "" {
+		reqBody.Reasoning = &reasoningDetail{
+			Effort:  s.reasoning,
+			Summary: s.reasoningSummary,
+		}
 	}
 
 	if s.structuredOutputSchema != nil {
@@ -304,6 +323,10 @@ func (s *OpenAIInferenceStrategy) Invoke(ctx context.Context, messages []*tacklr
 }
 
 func (s *OpenAIInferenceStrategy) parseSSEResponse(body io.Reader, events chan<- tacklr.LLMResponseChunk) {
+	// Match main-branch classification: output_text is always a message chunk.
+	// DeepSeek on Foundry streams thinking inside output_text (e.g. <think> tags);
+	// reclassifying those deltas as StreamEventReasoning broke ACP clients that
+	// already handled thinking correctly from agent_message_chunk on main.
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
 	var currentItemID string
@@ -351,7 +374,9 @@ func (s *OpenAIInferenceStrategy) parseSSEResponse(body io.Reader, events chan<-
 					IsComplete: false,
 				}
 			}
-		case "response.reasoning_text.delta":
+		case "response.reasoning_text.delta", "response.reasoning_summary_text.delta":
+			// Explicit reasoning channels (OpenAI/Azure o-series style) → thought.
+			// Keep summary as additive; do not invent reclassification of output_text.
 			if evt.Delta != "" {
 				events <- tacklr.LLMResponseChunk{
 					Type:       tacklr.StreamEventReasoning,
@@ -414,12 +439,23 @@ func (s *OpenAIInferenceStrategy) emitFunctionCallChunk(raw json.RawMessage, eve
 		namespace = parts[0]
 		name = parts[1]
 	}
+	// llama.cpp (and some local servers) only set call_id; OpenAI often sets both.
+	// Normalize so ACP toolCallId / harness CurrentToolCallID are never empty when
+	// either field is present.
+	id := fc.ID
+	callID := fc.CallID
+	if id == "" {
+		id = callID
+	}
+	if callID == "" {
+		callID = id
+	}
 	events <- tacklr.LLMResponseChunk{
 		Type: tacklr.StreamEventFunctionCall,
 		ToolCalls: []tacklr.ToolCall{{
-			ID:        fc.ID,
+			ID:        id,
 			Type:      "function_call",
-			CallID:    fc.CallID,
+			CallID:    callID,
 			Name:      name,
 			Namespace: namespace,
 			Arguments: fc.Arguments,
@@ -461,14 +497,28 @@ func marshalMessagesToInput(messages []*tacklr.Message) ([]json.RawMessage, erro
 			}
 			items = append(items, b)
 
-		case tacklr.RoleUser:
+		case tacklr.RoleUser, tacklr.RoleSystem:
 			item := easyInputRequest{
 				Role:    string(msg.Role),
 				Content: msg.Content,
 			}
 			b, err := json.Marshal(item)
 			if err != nil {
-				return nil, fmt.Errorf("marshal user message: %w", err)
+				return nil, fmt.Errorf("marshal %s message: %w", msg.Role, err)
+			}
+			items = append(items, b)
+
+		case tacklr.RoleDeveloper:
+			// Wire as system so models treat handoff/plan as instructions, not a
+			// conversational turn to answer (Foundry/DeepSeek was echoing
+			// developer-role handoff text into agent_message_chunk).
+			item := easyInputRequest{
+				Role:    string(tacklr.RoleSystem),
+				Content: msg.Content,
+			}
+			b, err := json.Marshal(item)
+			if err != nil {
+				return nil, fmt.Errorf("marshal developer message: %w", err)
 			}
 			items = append(items, b)
 
