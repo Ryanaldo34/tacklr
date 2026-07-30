@@ -1018,8 +1018,8 @@ func TestHandleRPC_sessionPrompt_toolProgress(t *testing.T) {
 				return
 			}
 			ch <- tacklr.LLMResponseChunk{
-				Type:      tacklr.StreamEventFunctionCall,
-				ToolCalls: []tacklr.ToolCall{{ID: "call_progress", CallID: "call_progress", Name: "progress_demo", Arguments: `{}`}},
+				Type:       tacklr.StreamEventFunctionCall,
+				ToolCalls:  []tacklr.ToolCall{{ID: "call_progress", CallID: "call_progress", Name: "progress_demo", Arguments: `{}`}},
 				IsComplete: true,
 			}
 			ch <- tacklr.LLMResponseChunk{IsComplete: true}
@@ -1395,7 +1395,8 @@ func TestACP_sessionCancel_midPrompt(t *testing.T) {
 			}
 		},
 	}
-	r := newTestRegistry(testStore(t), strategy, nil)
+	store := testStore(t)
+	r := newTestRegistry(store, strategy, nil)
 	srv := NewServer(r, ACP)
 
 	recNew := &recordingMessageWriter{}
@@ -1472,6 +1473,63 @@ func TestACP_sessionCancel_midPrompt(t *testing.T) {
 	// Desired: session remains registered after cancel.
 	if _, ok := r.sessions.Load(sessionID); !ok {
 		t.Fatal("session should remain registered after cancel")
+	}
+	// Approach A: empty checkpoint exists from session/new so load is real, not only fallback.
+	if _, err := store.LoadSession(context.Background(), sessionID); err != nil {
+		t.Fatalf("empty checkpoint should exist after session/new: %v", err)
+	}
+
+	// Desired: a subsequent prompt on the same session completes normally.
+	strategy.invokeFn = func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+		ch <- tacklr.LLMResponseChunk{
+			Type:       tacklr.StreamEventMessage,
+			MessageId:  "m2",
+			Content:    "after-cancel",
+			IsComplete: true,
+		}
+	}
+	recPrompt2 := &recordingMessageWriter{}
+	body2 := []byte(`{"jsonrpc":"2.0","id":11,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"again"}]}}`)
+	srv.HandleMessage(context.Background(), body2, recPrompt2)
+
+	if len(recPrompt2.Errors) > 0 {
+		t.Fatalf("post-cancel prompt errors: %#v", recPrompt2.Errors)
+	}
+	var endTurn bool
+	var sawAfter bool
+	for _, frame := range recPrompt2.framesAsMaps(t) {
+		if res, ok := frame["result"].(map[string]any); ok && res["stopReason"] == "end_turn" {
+			endTurn = true
+		}
+		if frame["method"] != "session/update" {
+			continue
+		}
+		params, _ := frame["params"].(map[string]any)
+		update, _ := params["update"].(map[string]any)
+		if update["sessionUpdate"] != "agent_message_chunk" {
+			continue
+		}
+		if content, ok := update["content"].(map[string]any); ok && content["text"] == "after-cancel" {
+			sawAfter = true
+		}
+	}
+	for _, res := range recPrompt2.Results {
+		switch m := res.Result.(type) {
+		case map[string]string:
+			if m["stopReason"] == "end_turn" {
+				endTurn = true
+			}
+		case map[string]any:
+			if m["stopReason"] == "end_turn" {
+				endTurn = true
+			}
+		}
+	}
+	if !endTurn {
+		t.Fatalf("post-cancel prompt want stopReason end_turn, results=%#v frames=%v", recPrompt2.Results, recPrompt2.framesAsMaps(t))
+	}
+	if !sawAfter {
+		t.Fatal("post-cancel prompt should stream new content")
 	}
 }
 

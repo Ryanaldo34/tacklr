@@ -6,9 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math"
 	"slices"
-	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -148,6 +146,8 @@ type AgentHarness struct {
 	mcpInitialized    bool
 	builtinsInjected  bool
 	out               chan streaming.StreamEvent
+	contextMgr        ContextManager
+	contextPolicy     ContextPolicy
 }
 
 func (a *AgentHarness) checkpointSession(ctx context.Context) error {
@@ -238,153 +238,61 @@ These instructions describe how the user generally wants you to behave, not what
 	return builtIn
 }
 
-// Ensure we do not exceed the max window size by compressing the context window before adding the next prompt
+// addToContext fits newMsg into the window via ContextManager (collapse when needed).
 func (a *AgentHarness) addToContext(ctx context.Context, newMsg *Message, out chan StreamEvent) error {
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-		tempWindow := append(a.ContextWindow, newMsg)
-		currSize, err := a.Model.CountTokens(ctx, tempWindow, a.Tools)
-		if err != nil {
-			slog.Error("failed to count tokens while fitting context window", "area", "context_management", "error", err)
-			return fmt.Errorf("count tokens: %w", err)
-		}
-		if len(a.ContextWindow) == 0 || float64(currSize) <= float64(a.MaxWindowSize)*float64(0.85) {
-			a.ContextWindow = append(a.ContextWindow, newMsg)
-			return nil
-		}
-		slog.Info("max context window size exceeded or approaching, compressing context window", "area", "context_management", "max_size", a.MaxWindowSize, "current_size", currSize)
-		a.Model.SetSystemPrompt(fmt.Sprintf("Please summarize the entire message history into a single, concise summary including key items for your current and past tasks with a primary focus on your current task. Current task or follow-up question to answer: %s", newMsg.Content))
-		var numMessagesToCompress int
-		// calculate number of messages to compress to fit within max window size
-		if currSize > a.MaxWindowSize {
-			diff := currSize - a.MaxWindowSize
-			start := int(math.Round(float64(diff) * 0.25))
-			staged := tempWindow[start:]
-			count, err := a.Model.CountTokens(ctx, staged, a.Tools)
-			if err != nil {
-				return fmt.Errorf("count tokens: %w", err)
-			}
-			for float64(count) > float64(a.MaxWindowSize)*float64(0.85) {
-				start += 1
-				staged = tempWindow[start:]
-				count, err = a.Model.CountTokens(ctx, staged, a.Tools)
-				if err != nil {
-					return fmt.Errorf("count tokens: %w", err)
-				}
-			}
-			numMessagesToCompress = start
-		} else {
-			numMessagesToCompress = int(math.Round(float64(len(a.ContextWindow)) * 0.25))
-		}
-		contextToSummarize := a.ContextWindow[:numMessagesToCompress]
-		events, err := a.Model.Invoke(ctx, contextToSummarize, a.Tools)
-		if err != nil {
-			return fmt.Errorf("invoke: %w", err)
-		}
-		firstUserMsg := a.ContextWindow[0]
-		var compressed = &Message{Role: RoleAssistant}
-		for chunk := range events {
-			if chunk.Type == StreamEventError {
-				return fmt.Errorf("compress: %s", chunk.Content)
-			}
-			a.streamChunk(chunk, out)
-			compressed.Content += chunk.Content
-		}
-		a.ContextWindow = append([]*Message{firstUserMsg, compressed}, tempWindow[numMessagesToCompress:]...)
-		a.Model.SetSystemPrompt(a.constructSystemPrompt())
-		return nil
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-}
-
-func (a *AgentHarness) compressWindowAfterTodoComplete(ctx context.Context) error {
-	var plan strings.Builder
-	for _, todo := range a.Runtime.PlanGet() {
-		line := fmt.Sprintf("- %s: %s\nStatus: %s\n", todo.Title, todo.Description, todo.Status)
-		plan.WriteString(line)
-	}
-	// Factual notes only. Avoid user-facing directives — they get stored and
-	// models often read them aloud on the next turn.
-	prompt := fmt.Sprintf(
-		`Your task is to produce a handoff for someone to complete the remaining todo items in the plan, not a summary of the completed work, but rather, an informative overview of the process that has completed the work so far. You will ensure to inform the handoff recipient that this is a work in progress and that they should expect to complete the remaining todo items. This is your only task, and you will not add any additional commentary, thoughts, etc. This is not a generic summary as the handoff needs to include the following sections:
-	Objective: Overall mission and success criteria analyzed from the plan and to-do items. This is outlined by the original user prompt and should be carried forward in the handoff (or is in previous handoff summaries).
-	Completed Work: What is now true because of the completed todo(s) and an overview of the current state of the plan & implementation. Someone should know exactly what was done & what work is remaining and be able to pick up the remaining work seamlessly.
-	Key Decisions: Architectural or implementation choices that should not be revisited.
-	State Changes: Files changed, APIs added/removed, new abstractions, configuration changes, etc.
-	Discoveries: Facts learned that affect remaining work.
-	Constraints: Requirements, assumptions, and invariants that future todos must respect.
-	Remaining Work: Newly discovered tasks, blockers, or dependencies.
-	Validation: What was verified and what still requires verification.
-	Relevant Context for Remaining Todos: Only information the next todos are likely to need which was gathered or observed in the completed work.
-
-Current plan todos:
-%s`, plan.String())
-	a.Model.SetSystemPrompt(prompt)
-	events, err := a.Model.Invoke(ctx, a.ContextWindow, a.Tools)
+	mgr := a.contextManager()
+	res, err := mgr.Fit(ctx, FitInput{
+		Window:              a.ContextWindow,
+		NewMsg:              newMsg,
+		Tools:               a.Tools,
+		MaxSize:             a.MaxWindowSize,
+		Policy:              a.contextPolicyOrDefault(),
+		Model:               a.Model,
+		RestoreSystemPrompt: a.constructSystemPrompt(),
+	})
 	if err != nil {
 		return err
 	}
-	// Silent: do not stream compress output. Assemble handoff the same way Run
-	// builds assistant messages — deltas by type+id, take the last completed
-	// StreamEventMessage full text (not a concat of every chunk).
-	streamedContent := map[string]string{}
-	var lastCompletedMessage string
-	for chunk := range events {
-		if chunk.Type == StreamEventError {
-			return fmt.Errorf("compress: %s", chunk.Content)
-		}
-		if !chunk.IsComplete && chunk.Content != "" &&
-			(chunk.Type == StreamEventMessage || chunk.Type == StreamEventReasoning) {
-			key := string(chunk.Type) + ":" + chunk.MessageId
-			streamedContent[key] += chunk.Content
-		}
-		if chunk.IsComplete && chunk.Type == StreamEventMessage {
-			content := chunk.Content
-			if content == "" {
-				key := string(chunk.Type) + ":" + chunk.MessageId
-				content = streamedContent[key]
-			}
-			if content != "" {
-				lastCompletedMessage = content
-			}
+	for _, chunk := range res.Chunks {
+		if !a.streamChunk(ctx, chunk, out) {
+			return ctx.Err()
 		}
 	}
-
-	// Keep the original user message + handoff. Dropping the user left only a
-	// system-style handoff and the model free-associated a fake conversation.
-	firstUser := firstUserMessage(a.ContextWindow)
-	if firstUser == nil {
-		firstUser = &Message{Role: RoleUser, Content: "Continue the active plan."}
-	}
-	a.ContextWindow = []*Message{
-		firstUser,
-		{Role: RoleDeveloper, Content: lastCompletedMessage},
-	}
-	// DeepSeek/Foundry often treats the handoff as a status update for the human
-	// and replies with prose (no tools) → premature end_turn. Nudge continuation
-	// while the plan still has open work.
-	if planHasOpenTodos(a.Runtime.PlanGet()) {
-		a.ContextWindow = append(a.ContextWindow, &Message{
-			Role:    RoleDeveloper,
-			Content: continuePlanNudge,
-		})
-	}
-	a.Model.SetSystemPrompt(a.constructSystemPrompt())
+	a.ContextWindow = res.Window
 	return nil
 }
 
-// continuePlanNudge is appended after handoff compression when todos remain so
-// the next Invoke keeps tool-calling instead of ending the turn.
-const continuePlanNudge = `The plan still has incomplete todos. Continue executing now: work the in-progress todo (or the next pending one), call tools as needed, and do not stop for user confirmation. Do not restate the handoff; act on the next todo.`
-
-func planHasOpenTodos(plan []control.Todo) bool {
-	for _, todo := range plan {
-		if todo.Status != streaming.TodoStatusCompleted {
-			return true
-		}
+func (a *AgentHarness) compressWindowAfterTodoComplete(ctx context.Context) error {
+	mgr := a.contextManager()
+	res, err := mgr.Handoff(ctx, HandoffInput{
+		Window:              a.ContextWindow,
+		Plan:                a.Runtime.PlanGet(),
+		Tools:               a.Tools,
+		Model:               a.Model,
+		RestoreSystemPrompt: a.constructSystemPrompt(),
+	})
+	if err != nil {
+		return err
 	}
-	return false
+	a.ContextWindow = res.Window
+	return nil
+}
+
+func (a *AgentHarness) contextManager() ContextManager {
+	if a.contextMgr != nil {
+		return a.contextMgr
+	}
+	return NewModelContextManager()
+}
+
+func (a *AgentHarness) contextPolicyOrDefault() ContextPolicy {
+	if a.contextPolicy.PressureRatio > 0 || a.contextPolicy.CompressFraction > 0 {
+		return a.contextPolicy
+	}
+	return DefaultContextPolicy()
 }
 
 func (a *AgentHarness) findTool(name, namespace string) *Tool {
@@ -397,10 +305,54 @@ func (a *AgentHarness) findTool(name, namespace string) *Tool {
 	return a.Tools[idx]
 }
 
-func (a *AgentHarness) streamChunk(chunk LLMResponseChunk, out chan<- StreamEvent) {
+// emit sends an event without blocking past cancel. Returns false if ctx is done.
+//
+// Prefer ctx.Err() for non-blocking "should we stop?" checks between steps.
+// Use select on ctx.Done() only when waiting (channel send/recv). Done() returns
+// the same channel for a given Context; it does not allocate a new one each call.
+func emit(ctx context.Context, out chan<- StreamEvent, ev StreamEvent) bool {
+	if out == nil {
+		return false
+	}
+	// Fast path: already cancelled — avoid racing a send.
+	if ctx.Err() != nil {
+		return false
+	}
+	select {
+	case <-ctx.Done():
+		return false
+	case out <- ev:
+		return true
+	}
+}
+
+// recvChunk waits for the next model chunk or context cancel.
+// ok is false when the stream channel is closed. err is ctx.Err() on cancel.
+func recvChunk(ctx context.Context, events <-chan LLMResponseChunk) (chunk LLMResponseChunk, ok bool, err error) {
+	select {
+	case <-ctx.Done():
+		return LLMResponseChunk{}, false, ctx.Err()
+	case chunk, ok = <-events:
+		return chunk, ok, nil
+	}
+}
+
+// emitNonBlocking tries to send without waiting; used for cancel notices so we
+// never block the producer on a full or unattended channel.
+func emitNonBlocking(out chan<- StreamEvent, ev StreamEvent) {
+	if out == nil {
+		return
+	}
+	select {
+	case out <- ev:
+	default:
+	}
+}
+
+// streamChunk enriches and emits one model chunk. Returns false if cancelled.
+func (a *AgentHarness) streamChunk(ctx context.Context, chunk LLMResponseChunk, out chan<- StreamEvent) bool {
 	if a.streamingStrategy != nil {
 		if chunk.Type == streaming.StreamEventFunctionCall {
-			// Model APIs don't return metadata, so we need to look up the tool to get metadata to stream to client
 			for i := range chunk.ToolCalls {
 				tool := a.findTool(chunk.ToolCalls[i].Name, chunk.ToolCalls[i].Namespace)
 				if tool != nil {
@@ -413,13 +365,24 @@ func (a *AgentHarness) streamChunk(chunk LLMResponseChunk, out chan<- StreamEven
 				}
 			}
 		}
+		// Buffered strategies may still block on out; prefer cancel via parent ctx
+		// by not calling Stream when already cancelled.
+		if ctx.Err() != nil {
+			return false
+		}
 		if err := a.streamingStrategy.Stream(chunk, out); err != nil {
 			slog.Warn("streaming chunk", "error", err)
-			return
+			return true
 		}
-		return
+		return true
 	}
-	defaultStream(chunk, out)
+	return emit(ctx, out, StreamEvent{
+		Type:      chunk.Type,
+		TurnID:    chunk.TurnId,
+		MessageID: chunk.MessageId,
+		ToolCalls: chunk.ToolCalls,
+		Content:   chunk.Content,
+	})
 }
 
 // toolCallKey is the stable identifier used for ACP toolCallId and lifecycle maps.
@@ -430,30 +393,42 @@ func toolCallKey(tc ToolCall) string {
 	return tc.CallID
 }
 
-func (a *AgentHarness) recordOutput(msg *Message) {
-	if a.WatchDog != nil {
-		if err := a.WatchDog.RecordOutput(msg); err != nil {
-			slog.Warn("failure to record model output", "error", err)
-		}
+// recordWatchdog records assistant output or tool results on the optional watchdog.
+func (a *AgentHarness) recordWatchdog(msg *Message) {
+	if a.WatchDog == nil || msg == nil {
+		return
+	}
+	var err error
+	switch msg.Role {
+	case RoleTool:
+		err = a.WatchDog.RecordToolResult(msg)
+	default:
+		err = a.WatchDog.RecordOutput(msg)
+	}
+	if err != nil {
+		slog.Warn("watchdog record failed", "role", msg.Role, "error", err)
 	}
 }
 
-func (a *AgentHarness) recordToolResult(msg *Message) {
-	if a.WatchDog != nil {
-		if err := a.WatchDog.RecordToolResult(msg); err != nil {
-			slog.Warn("failed to record tool result", "error", err)
-		}
+// emitToolResult records a tool result message, stores it for the turn, and
+// emits StreamEventToolResult. Returns the tool message for the context window.
+func (a *AgentHarness) emitToolResult(ctx context.Context, out chan<- StreamEvent, tc ToolCall, content, status string) *Message {
+	if status != "" {
+		tc.Status = status
 	}
-}
-
-func defaultStream(chunk LLMResponseChunk, out chan<- StreamEvent) {
-	out <- StreamEvent{
-		Type:      chunk.Type,
-		TurnID:    chunk.TurnId,
-		MessageID: chunk.MessageId,
-		ToolCalls: chunk.ToolCalls,
-		Content:   chunk.Content,
+	msg := &Message{
+		Role:       RoleTool,
+		ToolCallID: tc.CallID,
+		Content:    content,
 	}
+	_ = emit(ctx, out, StreamEvent{
+		Type:      StreamEventToolResult,
+		MessageID: toolCallKey(tc),
+		Content:   content,
+		ToolCalls: []ToolCall{tc},
+	})
+	a.recordWatchdog(msg)
+	return msg
 }
 
 func (a *AgentHarness) WithStreamingStrategy(strategy StreamingStrategy) *AgentHarness {
@@ -512,308 +487,252 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 	a.injectBuiltinTools()
 	out := make(chan StreamEvent)
 	a.Runtime.SetOutputChannel(out)
-	err := a.addToContext(ctx, &Message{Role: RoleUser, Content: prompt}, out)
-	if err != nil {
-		// If context is already cancelled, still return the channel so the error
-		// comes through the event stream as expected by callers.
-		go func() {
-			defer close(out)
-			out <- StreamEvent{Type: StreamEventError, Error: fmt.Errorf("run: context cancelled: %w", err)}
-		}()
-		return out, nil
-	}
-	a.Model.SetSystemPrompt(a.constructSystemPrompt())
 
-	// sendEvent is cancel-aware so we never block forever writing after the
-	// registry forwarder has stopped reading (session/cancel).
-	sendEvent := func(ev StreamEvent) bool {
-		select {
-		case <-ctx.Done():
-			return false
-		case out <- ev:
-			return true
-		}
-	}
 	emitCancelled := func() {
-		select {
-		case out <- StreamEvent{Type: StreamEventError, Error: fmt.Errorf("run: context cancelled: %w", ctx.Err())}:
-		default:
-		}
+		emitNonBlocking(out, StreamEvent{Type: StreamEventError, Error: fmt.Errorf("run: context cancelled: %w", ctx.Err())})
 	}
 
+	// All work that may stream into out runs in this goroutine so callers can
+	// drain the channel (addToContext window-pressure compress streams summaries).
 	go func() {
 		defer close(out)
-		a.Runtime.EnsureInitialized()
-		for {
-			select {
-			case <-ctx.Done():
+		if err := a.addToContext(ctx, &Message{Role: RoleUser, Content: prompt}, out); err != nil {
+			if ctx.Err() != nil {
 				emitCancelled()
 				return
-			default:
-				var toolResults []*Message
-				var toolCalls []ToolCall
-				if len(a.pendingToolCalls) == 0 {
-					events, err := a.Model.Invoke(ctx, a.ContextWindow, a.Tools)
-					if err != nil {
-						if ctx.Err() != nil {
-							emitCancelled()
-							return
-						}
-						_ = sendEvent(StreamEvent{Type: StreamEventError, Error: fmt.Errorf("run: invoke: %w", err)})
+			}
+			_ = emit(ctx, out, StreamEvent{Type: StreamEventError, Error: fmt.Errorf("run: %w", err)})
+			return
+		}
+		a.Model.SetSystemPrompt(a.constructSystemPrompt())
+		a.Runtime.EnsureInitialized()
+		for {
+			// Non-blocking poll: use Err(), not select+default (same Done channel,
+			// clearer cooperative cancel between turn phases).
+			if ctx.Err() != nil {
+				emitCancelled()
+				return
+			}
+			var toolResults []*Message
+			var toolCalls []ToolCall
+			if len(a.pendingToolCalls) == 0 {
+				events, err := a.Model.Invoke(ctx, a.ContextWindow, a.Tools)
+				if err != nil {
+					if ctx.Err() != nil {
+						emitCancelled()
 						return
 					}
-					streamedContent := map[string]string{}
-					// Lifecycle bookkeeping: every function_call forwarded to the client is
-					// announced. Incomplete calls (IsComplete=false) are not executed, so we
-					// must emit a terminal failed result or the UI stays on in_progress.
-					announced := make(map[string]ToolCall)
-					announceOrder := make([]string, 0)
-					failAnnounced := func(reason string) {
-						for _, id := range announceOrder {
-							tc := announced[id]
-							tc.Status = "error"
-							_ = sendEvent(StreamEvent{
-								Type:      StreamEventToolResult,
-								MessageID: toolCallKey(tc),
-								Content:   reason,
-								ToolCalls: []ToolCall{tc},
-							})
-						}
-						announceOrder = nil
-						announced = make(map[string]ToolCall)
+					_ = emit(ctx, out, StreamEvent{Type: StreamEventError, Error: fmt.Errorf("run: invoke: %w", err)})
+					return
+				}
+				asm := newStreamAssembler()
+				// Lifecycle bookkeeping: every function_call forwarded to the client is
+				// announced. Incomplete calls (IsComplete=false) are not executed, so we
+				// must emit a terminal failed result or the UI stays on in_progress.
+				announced := make(map[string]ToolCall)
+				announceOrder := make([]string, 0)
+				failAnnounced := func(reason string) {
+					for _, id := range announceOrder {
+						tc := announced[id]
+						tc.Status = "error"
+						_ = emit(ctx, out, StreamEvent{
+							Type:      StreamEventToolResult,
+							MessageID: toolCallKey(tc),
+							Content:   reason,
+							ToolCalls: []ToolCall{tc},
+						})
 					}
-					for chunk := range events {
-						// session/cancel cancels ctx; stop streaming immediately
-						// (do not keep pumping model tokens or running tools afterward).
-						if ctx.Err() != nil {
-							failAnnounced("tool call cancelled")
-							emitCancelled()
-							return
-						}
-						// Enrich tool metadata then send without blocking past cancel.
-						if a.streamingStrategy != nil {
-							a.streamChunk(chunk, out)
-						} else {
-							if !sendEvent(StreamEvent{
-								Type:      chunk.Type,
-								TurnID:    chunk.TurnId,
-								MessageID: chunk.MessageId,
-								ToolCalls: chunk.ToolCalls,
-								Content:   chunk.Content,
-							}) {
-								failAnnounced("tool call cancelled")
-								emitCancelled()
-								return
-							}
-						}
-						if chunk.Type == StreamEventFunctionCall {
-							for _, tc := range chunk.ToolCalls {
-								key := toolCallKey(tc)
-								if key == "" {
-									continue
-								}
-								if _, seen := announced[key]; !seen {
-									announceOrder = append(announceOrder, key)
-								}
-								announced[key] = tc
-							}
-						}
-						if !chunk.IsComplete && chunk.Content != "" &&
-							(chunk.Type == StreamEventMessage || chunk.Type == StreamEventReasoning) {
-							key := string(chunk.Type) + ":" + chunk.MessageId
-							streamedContent[key] += chunk.Content
-						}
-						if chunk.IsComplete {
-							toolCalls = append(toolCalls, chunk.ToolCalls...)
-							role := RoleAssistant
-							if chunk.Type == StreamEventReasoning {
-								role = RoleReasoning
-							}
-							content := chunk.Content
-							if content == "" {
-								key := string(chunk.Type) + ":" + chunk.MessageId
-								content = streamedContent[key]
-							}
-							// Per-chunk tool calls on the stored message; cumulative
-							// toolCalls is used for execution below.
-							msgTools := append([]ToolCall(nil), chunk.ToolCalls...)
-							msg := &Message{
-								Role:      role,
-								Content:   content,
-								ToolCalls: msgTools,
-								MessageID: chunk.MessageId,
-							}
-							a.ContextWindow = append(a.ContextWindow, msg)
-							a.recordOutput(msg)
-						}
-					}
-					if ctx.Err() != nil {
+					announceOrder = nil
+					announced = make(map[string]ToolCall)
+				}
+				// Wait on stream or cancel — do not use bare range (blocks until
+				// producer closes even after ctx cancel if the model ignores ctx).
+				for {
+					chunk, ok, err := recvChunk(ctx, events)
+					if err != nil {
 						failAnnounced("tool call cancelled")
 						emitCancelled()
 						return
 					}
-					// Close announced tool calls that will not be executed (incomplete status).
-					executable := make(map[string]struct{}, len(toolCalls))
-					for _, tc := range toolCalls {
-						if key := toolCallKey(tc); key != "" {
-							executable[key] = struct{}{}
-						}
+					if !ok {
+						break
 					}
-					for _, id := range announceOrder {
-						if _, ok := executable[id]; ok {
-							continue
-						}
-						tc := announced[id]
-						tc.Status = "error"
-						if !sendEvent(StreamEvent{
-							Type:      StreamEventToolResult,
-							MessageID: toolCallKey(tc),
-							Content:   "tool call incomplete",
-							ToolCalls: []ToolCall{tc},
-						}) {
-							emitCancelled()
-							return
-						}
-					}
-					// No executable tool calls so the turn ends
-					if len(toolCalls) == 0 {
-						out <- StreamEvent{Type: StreamEventComplete}
-						err := a.checkpointSession(ctx)
-						if err != nil {
-							slog.Error("failed to save session", "area", "session_management", "session_id", a.SessionId, "error", err)
-						}
+					if !a.streamChunk(ctx, chunk, out) {
+						failAnnounced("tool call cancelled")
+						emitCancelled()
 						return
 					}
-					toolResults = make([]*Message, len(toolCalls))
-				} else {
-					toolResults = make([]*Message, len(a.pendingToolCalls))
-					toolCalls = make([]ToolCall, 0, len(a.pendingToolCalls))
-					for _, tc := range a.pendingToolCalls {
-						if !tc.InterruptActive {
-							toolCalls = append(toolCalls, *tc.ToolCall)
+					if chunk.Type == StreamEventFunctionCall {
+						for _, tc := range chunk.ToolCalls {
+							key := toolCallKey(tc)
+							if key == "" {
+								continue
+							}
+							if _, seen := announced[key]; !seen {
+								announceOrder = append(announceOrder, key)
+							}
+							announced[key] = tc
+						}
+					}
+					asm.AddDelta(chunk)
+					if chunk.IsComplete {
+						toolCalls = append(toolCalls, chunk.ToolCalls...)
+						if chunk.Type == StreamEventMessage || chunk.Type == StreamEventReasoning {
+							msg := asm.MessageFromComplete(chunk)
+							a.ContextWindow = append(a.ContextWindow, msg)
+							a.recordWatchdog(msg)
 						}
 					}
 				}
-
 				if ctx.Err() != nil {
+					failAnnounced("tool call cancelled")
 					emitCancelled()
 					return
 				}
-
-				var runningTools sync.WaitGroup
-				var todosCompleted atomic.Int32
-				for i, tc := range toolCalls {
-					runningTools.Add(1)
-					go func(i int, tc ToolCall) {
-						defer runningTools.Done()
-						if ctx.Err() != nil {
-							return
-						}
-						tcKey := toolCallKey(tc)
-						tool := a.findTool(tc.Name, tc.Namespace)
-						if tool == nil {
-							toolErr := fmt.Errorf("tool %q: %w", tc.Name, ErrToolNotFound)
-							toolResults[i] = &Message{
-								Role:       RoleTool,
-								ToolCallID: tc.CallID,
-								Content:    toolErr.Error(),
-							}
-							out <- StreamEvent{Type: StreamEventToolResult, MessageID: tcKey, Content: toolResults[i].Content, ToolCalls: []ToolCall{tc}}
-							return
-						}
-						runtimeCopy := a.Runtime
-						runtimeCopy.CurrentToolCallID = tcKey
-						output, err := tool.Invoke(ctx, tc.Arguments, runtimeCopy)
-						var interrupt control.Interrupt
-						if errors.As(err, &interrupt) {
-							intrId := uuid.New().String()
-							serialized, err := interrupt.Serialize()
-							if err != nil {
-								out <- StreamEvent{Type: StreamEventError, Error: fmt.Errorf("serialize interrupt: %w", err)}
-								return
-							}
-							// json.RawMessage embeds the already-serialized interrupt as a
-							// nested object. Plain []byte would base64-encode as a string
-							// and break consumers that unmarshal data into the interrupt type.
-							payload := map[string]any{"interruptId": intrId, "data": json.RawMessage(serialized)}
-							data, err := json.Marshal(payload)
-							if err != nil {
-								out <- StreamEvent{Type: StreamEventError, Error: fmt.Errorf("marshal interrupt: %w", err)}
-								return
-							}
-							out <- StreamEvent{Type: StreamEventInterrupt, MessageID: tcKey, Data: data}
-							a.pendingMu.Lock()
-							a.pendingToolCalls[tcKey] = stores.PendingToolCall{ToolCall: &tc, InterruptActive: true}
-							a.interruptToRequester[intrId] = tcKey
-							a.pendingMu.Unlock()
-							a.checkpointSession(ctx)
-							return
-						}
-						a.pendingMu.Lock()
-						if _, ok := a.pendingToolCalls[tcKey]; ok {
-							delete(a.pendingToolCalls, tcKey)
-						}
-						a.pendingMu.Unlock()
-						if err != nil {
-							toolResults[i] = &Message{
-								Role:       RoleTool,
-								ToolCallID: tc.CallID,
-								Content:    fmt.Sprintf("An error occurred: %s", err.Error()),
-							}
-							tc.Status = "error"
-							out <- StreamEvent{Type: StreamEventToolResult, MessageID: tcKey, Content: toolResults[i].Content, ToolCalls: []ToolCall{tc}}
-						} else {
-							// Only successful complete_todo runs trigger compression.
-							// Counting failures (e.g. already completed) re-entered
-							// handoff compress + model turns and could loop forever.
-							if tc.Name == "complete_todo" {
-								todosCompleted.Add(1)
-							}
-							toolResults[i] = &Message{
-								Role:       RoleTool,
-								ToolCallID: tc.CallID,
-								Content:    output,
-							}
-							tc.Status = "success"
-							out <- StreamEvent{Type: StreamEventToolResult, MessageID: tcKey, Content: output, ToolCalls: []ToolCall{tc}}
-						}
-						a.recordToolResult(toolResults[i])
-					}(i, tc)
-				}
-				runningTools.Wait()
-				if ctx.Err() != nil {
-					emitCancelled()
-					return
-				}
-				for _, r := range toolResults {
-					if r != nil {
-						a.addToContext(ctx, r, out)
+				// Close announced tool calls that will not be executed (incomplete status).
+				executable := make(map[string]struct{}, len(toolCalls))
+				for _, tc := range toolCalls {
+					if key := toolCallKey(tc); key != "" {
+						executable[key] = struct{}{}
 					}
 				}
-				// There are pending interrupts to be resumed after user input is gathered
-				a.pendingMu.Lock()
-				hasPending := len(a.pendingToolCalls) > 0
-				a.pendingMu.Unlock()
-				if hasPending {
+				for _, id := range announceOrder {
+					if _, ok := executable[id]; ok {
+						continue
+					}
+					tc := announced[id]
+					tc.Status = "error"
+					if !emit(ctx, out, StreamEvent{
+						Type:      StreamEventToolResult,
+						MessageID: toolCallKey(tc),
+						Content:   "tool call incomplete",
+						ToolCalls: []ToolCall{tc},
+					}) {
+						emitCancelled()
+						return
+					}
+				}
+				// No executable tool calls so the turn ends
+				if len(toolCalls) == 0 {
+					if !emit(ctx, out, StreamEvent{Type: StreamEventComplete}) {
+						emitCancelled()
+						return
+					}
 					err := a.checkpointSession(ctx)
 					if err != nil {
-						slog.Error("failed to save session", "session_id", a.SessionId, "error", err)
+						slog.Error("failed to save session", "area", "session_management", "session_id", a.SessionId, "error", err)
 					}
 					return
-				} else if n := todosCompleted.Load(); n > 0 {
-					slog.Info("todos completed", "session_id", a.SessionId, "todos_completed", n)
-					err = a.compressWindowAfterTodoComplete(ctx)
-					if err != nil {
-						slog.Error("failed to compress window after todo complete", "session_id", a.SessionId, "error", err)
-						out <- StreamEvent{Type: StreamEventError, Content: err.Error()}
+				}
+				toolResults = make([]*Message, len(toolCalls))
+			} else {
+				toolResults = make([]*Message, len(a.pendingToolCalls))
+				toolCalls = make([]ToolCall, 0, len(a.pendingToolCalls))
+				for _, tc := range a.pendingToolCalls {
+					if !tc.InterruptActive {
+						toolCalls = append(toolCalls, *tc.ToolCall)
+					}
+				}
+			}
+
+			if ctx.Err() != nil {
+				emitCancelled()
+				return
+			}
+
+			var runningTools sync.WaitGroup
+			var todosCompleted atomic.Int32
+			for i, tc := range toolCalls {
+				runningTools.Add(1)
+				go func(i int, tc ToolCall) {
+					defer runningTools.Done()
+					if ctx.Err() != nil {
 						return
 					}
-					err = a.checkpointSession(ctx)
-					if err != nil {
-						slog.Error("failed to save session", "session_id", a.SessionId, "error", err)
-						out <- StreamEvent{Type: StreamEventError, Content: err.Error()}
+					tcKey := toolCallKey(tc)
+					tool := a.findTool(tc.Name, tc.Namespace)
+					if tool == nil {
+						toolErr := fmt.Errorf("tool %q: %w", tc.Name, ErrToolNotFound)
+						toolResults[i] = a.emitToolResult(ctx, out, tc, toolErr.Error(), "error")
 						return
 					}
+					runtimeCopy := a.Runtime
+					runtimeCopy.CurrentToolCallID = tcKey
+					output, err := tool.Invoke(ctx, tc.Arguments, runtimeCopy)
+					var interrupt control.Interrupt
+					if errors.As(err, &interrupt) {
+						intrId := uuid.New().String()
+						serialized, err := interrupt.Serialize()
+						if err != nil {
+							_ = emit(ctx, out, StreamEvent{Type: StreamEventError, Error: fmt.Errorf("serialize interrupt: %w", err)})
+							return
+						}
+						// json.RawMessage embeds the already-serialized interrupt as a
+						// nested object. Plain []byte would base64-encode as a string
+						// and break consumers that unmarshal data into the interrupt type.
+						payload := map[string]any{"interruptId": intrId, "data": json.RawMessage(serialized)}
+						data, err := json.Marshal(payload)
+						if err != nil {
+							_ = emit(ctx, out, StreamEvent{Type: StreamEventError, Error: fmt.Errorf("marshal interrupt: %w", err)})
+							return
+						}
+						_ = emit(ctx, out, StreamEvent{Type: StreamEventInterrupt, MessageID: tcKey, Data: data})
+						a.pendingMu.Lock()
+						a.pendingToolCalls[tcKey] = stores.PendingToolCall{ToolCall: &tc, InterruptActive: true}
+						a.interruptToRequester[intrId] = tcKey
+						a.pendingMu.Unlock()
+						a.checkpointSession(ctx)
+						return
+					}
+					a.pendingMu.Lock()
+					if _, ok := a.pendingToolCalls[tcKey]; ok {
+						delete(a.pendingToolCalls, tcKey)
+					}
+					a.pendingMu.Unlock()
+					if err != nil {
+						toolResults[i] = a.emitToolResult(ctx, out, tc, fmt.Sprintf("An error occurred: %s", err.Error()), "error")
+					} else {
+						// Only successful complete_todo runs trigger compression.
+						// Counting failures (e.g. already completed) re-entered
+						// handoff compress + model turns and could loop forever.
+						if tc.Name == "complete_todo" {
+							todosCompleted.Add(1)
+						}
+						toolResults[i] = a.emitToolResult(ctx, out, tc, output, "success")
+					}
+				}(i, tc)
+			}
+			runningTools.Wait()
+			if ctx.Err() != nil {
+				emitCancelled()
+				return
+			}
+			for _, r := range toolResults {
+				if r != nil {
+					a.addToContext(ctx, r, out)
+				}
+			}
+			// There are pending interrupts to be resumed after user input is gathered
+			a.pendingMu.Lock()
+			hasPending := len(a.pendingToolCalls) > 0
+			a.pendingMu.Unlock()
+			if hasPending {
+				err := a.checkpointSession(ctx)
+				if err != nil {
+					slog.Error("failed to save session", "session_id", a.SessionId, "error", err)
+				}
+				return
+			} else if n := todosCompleted.Load(); n > 0 {
+				slog.Info("todos completed", "session_id", a.SessionId, "todos_completed", n)
+				if err := a.compressWindowAfterTodoComplete(ctx); err != nil {
+					slog.Error("failed to compress window after todo complete", "session_id", a.SessionId, "error", err)
+					_ = emit(ctx, out, StreamEvent{Type: StreamEventError, Content: err.Error()})
+					return
+				}
+				if err := a.checkpointSession(ctx); err != nil {
+					slog.Error("failed to save session", "session_id", a.SessionId, "error", err)
+					_ = emit(ctx, out, StreamEvent{Type: StreamEventError, Content: err.Error()})
+					return
 				}
 			}
 		}
@@ -866,7 +785,15 @@ func NewAgent(ctx context.Context, opts AgentOptions) *AgentHarness {
 	events := make(chan streaming.StreamEvent)
 	runtime := control.NewRuntime(events, opts.Store, nil)
 	runtime.EnsureInitialized()
-	h := &AgentHarness{
+	h := newHarnessBase(opts, runtime, events)
+	h.finishInit(ctx, opts.SubAgents)
+	return h
+}
+
+// newHarnessBase builds the shared AgentHarness fields for NewAgent and
+// NewAgentFromSession. Session-specific fields may be overwritten by the caller.
+func newHarnessBase(opts AgentOptions, runtime control.HarnessRuntime, out chan streaming.StreamEvent) *AgentHarness {
+	return &AgentHarness{
 		Model:                opts.Model,
 		MaxWindowSize:        opts.Config.MaxWindowSize,
 		Instructions:         opts.Config.SystemPrompt,
@@ -883,15 +810,20 @@ func NewAgent(ctx context.Context, opts AgentOptions) *AgentHarness {
 		pendingToolCalls:     make(map[string]stores.PendingToolCall),
 		interruptPayloads:    make(map[string][]byte),
 		parkedWorkersLive:    make(map[string]*AgentHarness),
-		out:                  events,
+		out:                  out,
+		contextMgr:           NewModelContextManager(),
+		contextPolicy:        DefaultContextPolicy(),
 	}
+}
+
+// finishInit runs one-time skill/MCP/subagent/builtin setup shared by constructors.
+func (h *AgentHarness) finishInit(ctx context.Context, subAgents []*SubAgent) {
 	h.initMCP(ctx)
 	if err := h.initSkills(); err != nil {
 		slog.Error("failed to initialize skills", "error", err)
 	}
-	h.initSubAgentWorkers(opts.SubAgents)
+	h.initSubAgentWorkers(subAgents)
 	h.injectBuiltinTools()
-	return h
 }
 
 // injectBuiltinTools appends plan tools and spawn_worker (when subagents are
@@ -967,30 +899,11 @@ func NewAgentFromSession(ctx context.Context, sessionId string, opts AgentOption
 	if checkpoint.State.PendingToolCalls == nil {
 		checkpoint.State.PendingToolCalls = make(map[string]stores.PendingToolCall)
 	}
-	h := &AgentHarness{
-		Model:                opts.Model,
-		Store:                opts.Store,
-		SessionId:            sessionId,
-		ContextWindow:        checkpoint.ContextWindow,
-		Runtime:              runtime,
-		WatchDog:             opts.WatchDog,
-		Tools:                opts.Tools,
-		MCPConfigs:           opts.MCPConfigs,
-		MaxWindowSize:        opts.Config.MaxWindowSize,
-		Instructions:         opts.Config.SystemPrompt,
-		skillDirectories:     opts.Config.SkillDirectories,
-		subagents:            make(map[string]*SubAgent),
-		interruptToRequester: checkpoint.State.InterruptToRequester,
-		pendingToolCalls:     checkpoint.State.PendingToolCalls,
-		interruptPayloads:    make(map[string][]byte),
-		parkedWorkersLive:    make(map[string]*AgentHarness),
-		out:                  events,
-	}
-	h.initMCP(ctx)
-	if err := h.initSkills(); err != nil {
-		slog.Error("failed to initialize skills", "error", err)
-	}
-	h.initSubAgentWorkers(opts.SubAgents)
-	h.injectBuiltinTools()
+	h := newHarnessBase(opts, runtime, events)
+	h.SessionId = sessionId
+	h.ContextWindow = checkpoint.ContextWindow
+	h.interruptToRequester = checkpoint.State.InterruptToRequester
+	h.pendingToolCalls = checkpoint.State.PendingToolCalls
+	h.finishInit(ctx, opts.SubAgents)
 	return h, nil
 }

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -163,6 +164,9 @@ func (r *Registry) Register(agentID string, spec AgentSpec) {
 }
 
 // CreateSession registers a new session and returns its view.
+// When a store is configured, it also writes an empty checkpoint so subsequent
+// prompts can load without treating "registered but never checkpointed" as a
+// special case (session load approach A).
 func (r *Registry) CreateSession(cwd string, mcpServers []mcp.MCPConfig) *SessionView {
 	threadID := uuid.New().String()
 	configValues := map[string]string{}
@@ -174,6 +178,13 @@ func (r *Registry) CreateSession(cwd string, mcpServers []mcp.MCPConfig) *Sessio
 		mcpServers:   mcpServers,
 		configValues: configValues,
 	})
+	if r.store != nil {
+		if cp, err := stores.NewCheckpoint(nil, nil, nil, nil, nil, nil); err != nil {
+			slog.Warn("failed to build empty session checkpoint", "session_id", threadID, "error", err)
+		} else if err := r.store.SaveSession(context.Background(), threadID, *cp); err != nil {
+			slog.Warn("failed to save empty session checkpoint", "session_id", threadID, "error", err)
+		}
+	}
 	return &SessionView{
 		SessionID:     threadID,
 		ConfigOptions: r.buildConfigOptions(r.defaultAgent),
@@ -444,7 +455,15 @@ func (r *Registry) loadAgent(ctx context.Context, agentID, threadID string, load
 		}
 		h, err = tacklr.NewAgentFromSession(ctx, threadID, opts)
 		if err != nil {
-			return nil, nil, err
+			// ACP session may still be registered after a cancelled first turn that
+			// never checkpointed. Only then start a fresh harness for re-prompt.
+			// Unknown thread IDs (SSE resume without a store row) still fail.
+			_, sessionKnown := r.sessions.Load(threadID)
+			if sessionKnown && errors.Is(err, stores.ErrSessionNotFound) {
+				h = tacklr.NewAgent(ctx, opts)
+			} else {
+				return nil, nil, err
+			}
 		}
 	} else {
 		h = tacklr.NewAgent(ctx, opts)
