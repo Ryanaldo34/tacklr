@@ -39,8 +39,8 @@ func newMCPHTTPServer(t *testing.T, tools map[string]string) *httptest.Server {
 
 func TestDiscoverAllTools_connectsDiscoversAndInvokes(t *testing.T) {
 	hs := newMCPHTTPServer(t, map[string]string{
-		"echo":  "pong",
-		"fail":  "ERR:boom",
+		"echo": "pong",
+		"fail": "ERR:boom",
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

@@ -19,15 +19,15 @@ import (
 )
 
 type mockStrategy struct {
-	invokeFn       func(context.Context, []*Message, []*Tool, chan<- LLMResponseChunk)
-	invokeErr      error
-	invokeErrFn    func(context.Context, []*Message, []*Tool) error
-	countTokensFn  func(context.Context, []*Message, []*Tool) (int, error)
-	systemPrompts  []string
-	lastInvokeMsgs []*Message
+	invokeFn        func(context.Context, []*Message, []*Tool, chan<- LLMResponseChunk)
+	invokeErr       error
+	invokeErrFn     func(context.Context, []*Message, []*Tool) error
+	countTokensFn   func(context.Context, []*Message, []*Tool) (int, error)
+	systemPrompts   []string
+	lastInvokeMsgs  []*Message
 	lastInvokeTools []*Tool
-	callNum        atomic.Int64
-	mu             sync.Mutex
+	callNum         atomic.Int64
+	mu              sync.Mutex
 }
 
 func (m *mockStrategy) WithApiKey(string) InferenceStrategy         { return m }
@@ -1047,7 +1047,6 @@ func TestNewAgent(t *testing.T) {
 	}
 }
 
-
 func TestFindTool_namespaceMatching(t *testing.T) {
 	tools := []*Tool{
 		NewTool(ToolConfig{Name: "get_customer", Namespace: "crm", Handler: func(ctx context.Context) (string, error) { return "", nil }}),
@@ -1509,5 +1508,207 @@ func TestRun_completeTodo_persistsPlanInStore(t *testing.T) {
 	}
 	if plan[0].Title != "Ship" || plan[0].Status != streaming.TodoStatusCompleted {
 		t.Fatalf("restored plan = %+v, want Ship completed", plan[0])
+	}
+}
+
+// stubContextManager records Fit/Handoff so AgentOptions.ContextManager injection
+// is proven end-to-end through Run (not only unit-level Fit calls).
+type stubContextManager struct {
+	fitCalls     atomic.Int64
+	handoffCalls atomic.Int64
+	fitWindow    []*Message
+}
+
+func (s *stubContextManager) Fit(ctx context.Context, in FitInput) (FitResult, error) {
+	s.fitCalls.Add(1)
+	w := append(append([]*Message(nil), in.Window...), in.NewMsg)
+	s.fitWindow = w
+	return FitResult{Window: w}, nil
+}
+
+func (s *stubContextManager) Handoff(ctx context.Context, in HandoffInput) (HandoffResult, error) {
+	s.handoffCalls.Add(1)
+	// Minimal handoff shape: keep last user + a developer summary.
+	return HandoffResult{Window: []*Message{
+		{Role: RoleUser, Content: "goal"},
+		{Role: RoleDeveloper, Content: "stub handoff"},
+	}}, nil
+}
+
+// TestNewAgent_injectsContextManager: Run uses the injected Fit path; complete_todo
+// uses the injected Handoff path.
+func TestNewAgent_injectsContextManager(t *testing.T) {
+	store := testStore(t)
+	cm := &stubContextManager{}
+	var invokeCount int
+	strategy := &mockStrategy{
+		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, events chan<- LLMResponseChunk) {
+			invokeCount++
+			if invokeCount == 1 {
+				events <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
+					{ID: "ct", CallID: "ct", Name: "complete_todo", Arguments: `{"title":"T1"}`},
+				}, IsComplete: true}
+				events <- LLMResponseChunk{IsComplete: true}
+				return
+			}
+			// ModelContextManager would call Invoke for handoff; stub does not.
+			// Continue turn after handoff.
+			events <- LLMResponseChunk{Type: StreamEventMessage, Content: "after stub handoff", IsComplete: true}
+		},
+	}
+	ah := NewAgent(context.Background(), AgentOptions{
+		Config:         Config{MaxWindowSize: 8192},
+		Model:          strategy,
+		Store:          store,
+		ContextManager: cm,
+	})
+	ah.Runtime.PlanSet([]control.Todo{
+		{Title: "T1", Status: streaming.TodoStatusInProgress},
+		{Title: "T2", Status: streaming.TodoStatusPending},
+	})
+	ch, err := ah.Run(context.Background(), "go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawFinal bool
+	for ev := range ch {
+		if ev.Type == StreamEventMessage && ev.Content == "after stub handoff" {
+			sawFinal = true
+		}
+		if ev.Type == StreamEventError {
+			t.Fatalf("error event: %v", ev.Error)
+		}
+	}
+	if cm.fitCalls.Load() < 1 {
+		t.Fatalf("Fit calls = %d, want >= 1 (user prompt / tool results)", cm.fitCalls.Load())
+	}
+	if cm.handoffCalls.Load() != 1 {
+		t.Fatalf("Handoff calls = %d, want 1", cm.handoffCalls.Load())
+	}
+	if !sawFinal {
+		t.Fatal("expected final message after stub handoff continue turn")
+	}
+	// Window should reflect stub handoff, not model-generated handoff text.
+	var sawStub bool
+	for _, m := range ah.ContextWindow {
+		if m != nil && m.Role == RoleDeveloper && m.Content == "stub handoff" {
+			sawStub = true
+		}
+	}
+	if !sawStub {
+		t.Fatalf("context window missing stub handoff: %+v", ah.ContextWindow)
+	}
+}
+
+// TestNewAgentFromSession_resumesPendingToolInterrupt: park on interrupt, reload
+// from store (simulating process boundary), resolve and complete the tool.
+func TestNewAgentFromSession_resumesPendingToolInterrupt(t *testing.T) {
+	store := testStore(t)
+	interruptTool := NewTool(ToolConfig{
+		Name: "ask_user",
+		Handler: func(ctx context.Context, _ struct{}, runtime *control.HarnessRuntime) (string, error) {
+			intr, err := runtime.RaiseInterrupt("user_selection_choice", []byte(
+				`[{"title":"Yes","description":"","isRecommended":true},{"title":"No","description":"","isRecommended":false}]`,
+			))
+			if err != nil {
+				return "", err
+			}
+			choice := intr.(*control.UserSelectionInterrupt).ConfirmedChoice
+			return "chose:" + choice.Title, nil
+		},
+	})
+
+	var callCount int
+	strategy := &mockStrategy{
+		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, events chan<- LLMResponseChunk) {
+			callCount++
+			if callCount == 1 {
+				events <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
+					{ID: "call_park", CallID: "call_park", Name: "ask_user", Arguments: `{}`},
+				}, IsComplete: true}
+				events <- LLMResponseChunk{IsComplete: true}
+				return
+			}
+			events <- LLMResponseChunk{Type: StreamEventMessage, Content: "resumed after reload", IsComplete: true}
+		},
+	}
+
+	ah := NewAgent(context.Background(), AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  strategy,
+		Store:  store,
+		Tools:  []*Tool{interruptTool},
+	})
+	ah.SessionId = "sess-pending-resume"
+
+	ch, err := ah.Run(context.Background(), "need a choice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var interruptId string
+	for ev := range ch {
+		if ev.Type == StreamEventInterrupt {
+			var payload struct {
+				InterruptId string `json:"interruptId"`
+			}
+			if err := json.Unmarshal(ev.Data, &payload); err != nil {
+				t.Fatal(err)
+			}
+			interruptId = payload.InterruptId
+		}
+	}
+	if interruptId == "" {
+		t.Fatal("expected interrupt id from first run")
+	}
+	if len(ah.pendingToolCalls) != 1 {
+		t.Fatalf("pending tools = %d, want 1", len(ah.pendingToolCalls))
+	}
+
+	// Process boundary: drop live harness, reload checkpoint.
+	restored, err := NewAgentFromSession(context.Background(), "sess-pending-resume", AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  strategy,
+		Store:  store,
+		Tools:  []*Tool{interruptTool},
+	})
+	if err != nil {
+		t.Fatalf("NewAgentFromSession: %v", err)
+	}
+	if len(restored.pendingToolCalls) != 1 {
+		t.Fatalf("restored pending tools = %d, want 1", len(restored.pendingToolCalls))
+	}
+	if !restored.pendingToolCalls["call_park"].InterruptActive {
+		t.Fatal("restored pending tool should still be InterruptActive")
+	}
+	if !restored.Runtime.HasPendingInterrupt() {
+		t.Fatal("restored runtime should have pending interrupt")
+	}
+
+	resolution := fmt.Sprintf(`{"interruptId":%q,"selectionIdx":0}`, interruptId)
+	out, err := restored.ReturnFromInterrupt(context.Background(), map[string][]byte{
+		interruptId: []byte(resolution),
+	})
+	if err != nil {
+		t.Fatalf("ReturnFromInterrupt: %v", err)
+	}
+	var toolResult, finalMsg string
+	for ev := range out {
+		switch ev.Type {
+		case StreamEventToolResult:
+			toolResult = ev.Content
+		case StreamEventMessage:
+			finalMsg = ev.Content
+		case StreamEventError:
+			t.Fatalf("error after resume: %v", ev.Error)
+		}
+	}
+	if !strings.Contains(toolResult, "chose:Yes") {
+		t.Fatalf("tool result = %q, want chose:Yes", toolResult)
+	}
+	if finalMsg != "resumed after reload" {
+		t.Fatalf("final = %q", finalMsg)
+	}
+	if len(restored.pendingToolCalls) != 0 {
+		t.Fatalf("pending after resume = %d, want 0", len(restored.pendingToolCalls))
 	}
 }

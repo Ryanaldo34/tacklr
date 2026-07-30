@@ -79,17 +79,13 @@ func TestLogTurnError_andClientBridgeErrorResponse(t *testing.T) {
 	// Wait for frame
 	deadline := time.Now().Add(time.Second)
 	for {
-		w.mu.Lock()
-		n := len(w.Frames)
-		w.mu.Unlock()
-		if n > 0 || time.Now().After(deadline) {
+		frames := w.SnapshotFrames()
+		if len(frames) > 0 || time.Now().After(deadline) {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	w.mu.Lock()
-	frame := w.Frames[0]
-	w.mu.Unlock()
+	frame := w.SnapshotFrames()[0]
 	var req struct {
 		ID int64 `json:"id"`
 	}
@@ -399,9 +395,7 @@ func TestClientBridge_concurrentCalls(t *testing.T) {
 	}
 	// Complete any waiters we can.
 	time.Sleep(20 * time.Millisecond)
-	w.mu.Lock()
-	frames := append([][]byte(nil), w.Frames...)
-	w.mu.Unlock()
+	frames := w.SnapshotFrames()
 	for _, f := range frames {
 		var req struct {
 			ID int64 `json:"id"`

@@ -1,15 +1,56 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 
+	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/control"
 	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/streaming"
 )
+
+// ACP stop reasons for session/prompt PromptResponse (spec Prompt Turn).
+const (
+	stopReasonEndTurn         = "end_turn"
+	stopReasonMaxTokens       = "max_tokens"
+	stopReasonMaxTurnRequests = "max_turn_requests"
+	stopReasonRefusal         = "refusal"
+	stopReasonCancelled       = "cancelled"
+)
+
+// stopReasonFromError maps harness terminal errors to ACP stopReason values.
+// ok is false when the error is not a semantic turn stop (use JSON-RPC error).
+func stopReasonFromError(err error) (reason string, ok bool) {
+	if err == nil {
+		return "", false
+	}
+	switch {
+	case errors.Is(err, context.Canceled), errors.Is(err, ErrRequestCancelled):
+		return stopReasonCancelled, true
+	case errors.Is(err, tacklr.ErrModelRefused):
+		return stopReasonRefusal, true
+	case errors.Is(err, tacklr.ErrMaxTokens):
+		return stopReasonMaxTokens, true
+	case errors.Is(err, tacklr.ErrMaxTurnRequests):
+		return stopReasonMaxTurnRequests, true
+	default:
+		// Harness cancel notices wrap context.Canceled under fmt.Errorf.
+		if strings.Contains(strings.ToLower(err.Error()), "context cancelled") ||
+			strings.Contains(strings.ToLower(err.Error()), "context canceled") {
+			return stopReasonCancelled, true
+		}
+		return "", false
+	}
+}
+
+func acpPromptResult(stopReason string) map[string]string {
+	return map[string]string{"stopReason": stopReason}
+}
 
 // acpRequest is the JSON-RPC 2.0 envelope for ACP requests.
 type acpRequest struct {
@@ -354,8 +395,8 @@ func eventToAcpJsonRpc(threadId string, event *streaming.StreamEvent) ([][]byte,
 		var entries = make([]map[string]any, 0, len(todos))
 		for _, todo := range todos {
 			entries = append(entries, map[string]any{
-				"content": todo.Title,
-				"status":  todo.Status,
+				"content":  todo.Title,
+				"status":   todo.Status,
 				"priority": "medium",
 			})
 		}
@@ -366,7 +407,7 @@ func eventToAcpJsonRpc(threadId string, event *streaming.StreamEvent) ([][]byte,
 				"sessionId": threadId,
 				"update": map[string]any{
 					"sessionUpdate": "plan",
-					"entries": entries,
+					"entries":       entries,
 				},
 			},
 		}
@@ -413,22 +454,36 @@ func eventToAcpJsonRpc(threadId string, event *streaming.StreamEvent) ([][]byte,
 		data := map[string]any{
 			"jsonrpc": "2.0",
 			"id":      event.TurnID,
-			"result": map[string]string{
-				"stopReason": "end_turn",
-			},
+			"result":  acpPromptResult(stopReasonEndTurn),
 		}
 		bytes, _ := json.Marshal(data)
 		toStream = append(toStream, bytes)
 		return toStream, nil
 	case streaming.StreamEventError:
-		// TODO: make better errors such as max tokens reached, model refusal, etc.
 		var toStream [][]byte
+		// Semantic stop reasons are successful PromptResponse results, not RPC errors.
+		if reason, ok := stopReasonFromError(event.Error); ok {
+			data := map[string]any{
+				"jsonrpc": "2.0",
+				"id":      event.TurnID,
+				"result":  acpPromptResult(reason),
+			}
+			bytes, _ := json.Marshal(data)
+			toStream = append(toStream, bytes)
+			return toStream, nil
+		}
+		msg := "internal error"
+		if event.Error != nil {
+			msg = event.Error.Error()
+		} else if event.Content != "" {
+			msg = event.Content
+		}
 		data := map[string]any{
 			"jsonrpc": "2.0",
 			"id":      event.TurnID,
 			"error": map[string]any{
-				"code":    -32603,
-				"message": event.Error.Error(),
+				"code":    jsonRPCCodeInternal,
+				"message": msg,
 			},
 		}
 		bytes, _ := json.Marshal(data)

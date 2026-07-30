@@ -148,6 +148,10 @@ type LLMResponseChunk struct {
 	Type       StreamEventType
 	Content    string
 	IsComplete bool
+	// Error is set on terminal provider failures (Type == StreamEventError).
+	// Harness copies it onto StreamEvent.Error so protocols can errors.Is
+	// stop-reason sentinels (refusal, max_tokens, …).
+	Error error
 }
 
 // Message is the primary conversation unit in the context window.

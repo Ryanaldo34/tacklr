@@ -43,14 +43,21 @@ type HarnessRuntime struct {
 
 const planStateKey = "_plan"
 
-// Runtime hook to emit custom events as updates from tool calls
+// Runtime hook to emit custom events as updates from tool calls.
+// Non-blocking: drops if no listener or channel full so tools never hang.
 func (rt *HarnessRuntime) EmitUpdate(message string) {
+	if rt.ch == nil {
+		return
+	}
 	event := streaming.StreamEvent{
 		Type:      streaming.StreamEventToolUpdate,
 		Content:   message,
 		MessageID: rt.CurrentToolCallID,
 	}
-	rt.ch <- event
+	select {
+	case rt.ch <- event:
+	default:
+	}
 }
 
 // PlanGet returns a shallow copy of the current plan (or nil if not set).
@@ -85,29 +92,36 @@ func (rt *HarnessRuntime) PlanGet() []Todo {
 	return cp
 }
 
-// PlanSet stores the plan and emits a StreamEventPlanUpdate.
+// PlanSet stores the plan and emits a StreamEventPlanUpdate when an output
+// channel is attached (active Run). Unlike EmitUpdate progress pings, plan
+// updates block until the turn consumer accepts them so clients never miss
+// plan reshapes mid-turn. When ch is nil (before Run / after Run exits), only
+// state is updated.
 func (rt *HarnessRuntime) PlanSet(plan []Todo) {
 	rt.mu.Lock()
-	defer rt.mu.Unlock()
 	if rt.State == nil {
 		rt.State = make(map[string]any)
 	}
 	rt.State[planStateKey] = plan
+	ch := rt.ch
+	rt.mu.Unlock()
+
 	data, _ := json.Marshal(plan)
-	select {
-	case rt.ch <- streaming.StreamEvent{
+	if ch == nil {
+		return
+	}
+	ch <- streaming.StreamEvent{
 		Type: streaming.StreamEventPlanUpdate,
 		Data: data,
-	}:
-	default:
-		// no listener; drop event
 	}
 }
 
-// SetOutputChannel updates the channel used by EmitUpdate to send tool progress
-// events. Each Run call creates a fresh output channel so that previous closes
-// don't affect active runs.
+// SetOutputChannel updates the channel used by EmitUpdate and PlanSet.
+// Each Run call creates a fresh output channel and clears it (nil) on exit so
+// tools never send on a closed channel after the turn ends.
 func (rt *HarnessRuntime) SetOutputChannel(ch chan streaming.StreamEvent) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
 	rt.ch = ch
 }
 

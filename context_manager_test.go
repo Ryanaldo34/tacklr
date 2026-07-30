@@ -2,6 +2,7 @@ package tacklr
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -125,6 +126,62 @@ func TestModelContextManager_Handoff_windowShape(t *testing.T) {
 	}
 }
 
+func TestModelContextManager_Fit_countTokensError(t *testing.T) {
+	model := &mockStrategy{
+		countTokensFn: func(context.Context, []*Message, []*Tool) (int, error) {
+			return 0, fmt.Errorf("token service unavailable")
+		},
+	}
+	_, err := NewModelContextManager().Fit(context.Background(), FitInput{
+		Window:  []*Message{{Role: RoleUser, Content: "x"}},
+		NewMsg:  &Message{Role: RoleUser, Content: "y"},
+		MaxSize: 100,
+		Policy:  DefaultContextPolicy(),
+		Model:   model,
+	})
+	if err == nil || !strings.Contains(err.Error(), "token service unavailable") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestModelContextManager_Fit_streamFitSummaryFalse_noChunks(t *testing.T) {
+	model := &mockStrategy{
+		countTokensFn: func(_ context.Context, msgs []*Message, _ []*Tool) (int, error) {
+			return contentTokenEstimate(msgs), nil
+		},
+		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
+			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "SUM", IsComplete: true}
+		},
+	}
+	policy := DefaultContextPolicy()
+	policy.StreamFitSummary = false
+	res, err := NewModelContextManager().Fit(context.Background(), FitInput{
+		Window: []*Message{
+			{Role: RoleUser, Content: "goal"},
+			{Role: RoleAssistant, Content: strings.Repeat("x", 80)},
+		},
+		NewMsg:  &Message{Role: RoleUser, Content: "more"},
+		MaxSize: 100,
+		Policy:  policy,
+		Model:   model,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Chunks) != 0 {
+		t.Fatalf("chunks = %d, want 0 when StreamFitSummary=false", len(res.Chunks))
+	}
+	var saw bool
+	for _, m := range res.Window {
+		if m != nil && m.Content == "SUM" {
+			saw = true
+		}
+	}
+	if !saw {
+		t.Fatal("summary still stored in window")
+	}
+}
+
 func TestModelContextManager_Handoff_allTodosDone_noNudge(t *testing.T) {
 	model := &mockStrategy{
 		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
@@ -142,5 +199,37 @@ func TestModelContextManager_Handoff_allTodosDone_noNudge(t *testing.T) {
 	}
 	if len(res.Window) != 2 {
 		t.Fatalf("len = %d, want 2 without nudge", len(res.Window))
+	}
+}
+
+func TestModelContextManager_Fit_nilNewMsg_returnsWindow(t *testing.T) {
+	window := []*Message{{Role: RoleUser, Content: "keep"}}
+	res, err := NewModelContextManager().Fit(context.Background(), FitInput{
+		Window:  window,
+		NewMsg:  nil,
+		MaxSize: 100,
+		Policy:  DefaultContextPolicy(),
+		Model:   &mockStrategy{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Window) != 1 || res.Window[0].Content != "keep" {
+		t.Fatalf("window = %+v", res.Window)
+	}
+}
+
+func TestModelContextManager_Fit_cancelledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := NewModelContextManager().Fit(ctx, FitInput{
+		Window:  nil,
+		NewMsg:  &Message{Role: RoleUser, Content: "x"},
+		MaxSize: 100,
+		Policy:  DefaultContextPolicy(),
+		Model:   &mockStrategy{},
+	})
+	if err == nil {
+		t.Fatal("expected cancelled context error")
 	}
 }

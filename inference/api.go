@@ -3,6 +3,9 @@ package inference
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
+
+	"github.com/ryanaldo34/tacklr"
 )
 
 // APIStatusError conveys an HTTP error response from an upstream LLM API.
@@ -41,6 +44,72 @@ func extractErrorMessage(body []byte) string {
 		return errResp.Error.Message
 	}
 	return string(body)
+}
+
+// ClassifyProviderFailure maps an HTTP status + body to a typed error.
+// High-confidence refusal / max-token signals wrap tacklr stop-reason sentinels;
+// everything else is *APIStatusError (unmapped → protocol internal error).
+func ClassifyProviderFailure(status int, body []byte) error {
+	msg := extractErrorMessage(body)
+	code, errType := parseAPIErrorMeta(body)
+	apiErr := &APIStatusError{Status: status, Body: msg, Code: code}
+	lower := strings.ToLower(msg + " " + code + " " + errType)
+
+	if isRefusalSignal(lower) {
+		return tacklr.WrapStopReason(tacklr.ErrModelRefused, apiErr)
+	}
+	if isMaxTokensSignal(lower) {
+		return tacklr.WrapStopReason(tacklr.ErrMaxTokens, apiErr)
+	}
+	return apiErr
+}
+
+// ClassifyIncompleteReason maps Responses API incomplete_details.reason (or
+// similar) to a stop-reason sentinel when known.
+func ClassifyIncompleteReason(reason string) error {
+	r := strings.ToLower(strings.TrimSpace(reason))
+	if r == "" {
+		return nil
+	}
+	if isMaxTokensSignal(r) || r == "max_output_tokens" || r == "max_tokens" {
+		return tacklr.WrapStopReason(tacklr.ErrMaxTokens, fmt.Errorf("incomplete: %s", reason))
+	}
+	if isRefusalSignal(r) || r == "content_filter" {
+		return tacklr.WrapStopReason(tacklr.ErrModelRefused, fmt.Errorf("incomplete: %s", reason))
+	}
+	return fmt.Errorf("response incomplete: %s", reason)
+}
+
+func parseAPIErrorMeta(body []byte) (code, errType string) {
+	var errResp struct {
+		Error apiErrorDetail `json:"error"`
+	}
+	if json.Unmarshal(body, &errResp) == nil {
+		return errResp.Error.Code, errResp.Error.Type
+	}
+	return "", ""
+}
+
+func isRefusalSignal(lower string) bool {
+	return strings.Contains(lower, "content_filter") ||
+		strings.Contains(lower, "content filter") ||
+		strings.Contains(lower, "refusal") ||
+		strings.Contains(lower, "refused") ||
+		errTypeIs(lower, "invalid_prompt") // some providers use this for blocked prompts
+}
+
+func isMaxTokensSignal(lower string) bool {
+	return strings.Contains(lower, "max_output_tokens") ||
+		strings.Contains(lower, "max_tokens") ||
+		strings.Contains(lower, "maximum context length") ||
+		strings.Contains(lower, "context_length_exceeded") ||
+		strings.Contains(lower, "context length") ||
+		strings.Contains(lower, "token limit") ||
+		strings.Contains(lower, "finish_reason") && strings.Contains(lower, "length")
+}
+
+func errTypeIs(lower, want string) bool {
+	return strings.Contains(lower, want)
 }
 
 type countTokensRequest struct {
