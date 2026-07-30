@@ -439,12 +439,23 @@ func (s *OpenAIInferenceStrategy) emitFunctionCallChunk(raw json.RawMessage, eve
 		namespace = parts[0]
 		name = parts[1]
 	}
+	// llama.cpp (and some local servers) only set call_id; OpenAI often sets both.
+	// Normalize so ACP toolCallId / harness CurrentToolCallID are never empty when
+	// either field is present.
+	id := fc.ID
+	callID := fc.CallID
+	if id == "" {
+		id = callID
+	}
+	if callID == "" {
+		callID = id
+	}
 	events <- tacklr.LLMResponseChunk{
 		Type: tacklr.StreamEventFunctionCall,
 		ToolCalls: []tacklr.ToolCall{{
-			ID:        fc.ID,
+			ID:        id,
 			Type:      "function_call",
-			CallID:    fc.CallID,
+			CallID:    callID,
 			Name:      name,
 			Namespace: namespace,
 			Arguments: fc.Arguments,

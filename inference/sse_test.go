@@ -73,3 +73,62 @@ func TestParseSSE_reasoningTextIsReasoning(t *testing.T) {
 		t.Fatalf("reasoning = %q", got)
 	}
 }
+
+func TestParseSSE_functionCall_llamaShape_normalizesIDs(t *testing.T) {
+	// llama.cpp: call_id only, no id field (matches live gemma server).
+	body := strings.Join([]string{
+		`data: {"type":"response.output_item.added","item":{"arguments":"","call_id":"fc_abc","name":"echo","type":"function_call","status":"in_progress"}}`,
+		`data: {"type":"response.function_call_arguments.delta","delta":"{}","item_id":"fc_abc"}`,
+		`data: {"type":"response.output_item.done","item":{"type":"function_call","status":"completed","arguments":"{\"message\":\"hi\"}","call_id":"fc_abc","name":"echo"}}`,
+		`data: [DONE]`,
+		"",
+	}, "\n")
+	chunks := collectSSE(t, body)
+	var fc *tacklr.LLMResponseChunk
+	for i := range chunks {
+		if chunks[i].Type == tacklr.StreamEventFunctionCall {
+			fc = &chunks[i]
+			break
+		}
+	}
+	if fc == nil {
+		t.Fatal("expected function_call chunk")
+	}
+	if !fc.IsComplete {
+		t.Error("expected IsComplete for status=completed")
+	}
+	if len(fc.ToolCalls) != 1 {
+		t.Fatalf("tool calls = %d", len(fc.ToolCalls))
+	}
+	tc := fc.ToolCalls[0]
+	if tc.ID != "fc_abc" {
+		t.Errorf("ID = %q, want fc_abc (normalized from call_id)", tc.ID)
+	}
+	if tc.CallID != "fc_abc" {
+		t.Errorf("CallID = %q, want fc_abc", tc.CallID)
+	}
+	if tc.Name != "echo" {
+		t.Errorf("Name = %q", tc.Name)
+	}
+	if tc.Arguments != `{"message":"hi"}` {
+		t.Errorf("Arguments = %q", tc.Arguments)
+	}
+}
+
+func TestParseSSE_functionCall_incompleteNotComplete(t *testing.T) {
+	body := strings.Join([]string{
+		`data: {"type":"response.output_item.done","item":{"type":"function_call","status":"incomplete","arguments":"{","call_id":"fc_x","name":"echo"}}`,
+		`data: [DONE]`,
+		"",
+	}, "\n")
+	chunks := collectSSE(t, body)
+	if len(chunks) != 1 {
+		t.Fatalf("chunks = %d, want 1", len(chunks))
+	}
+	if chunks[0].IsComplete {
+		t.Error("incomplete status must not set IsComplete")
+	}
+	if chunks[0].ToolCalls[0].ID != "fc_x" {
+		t.Errorf("ID = %q, want normalized fc_x", chunks[0].ToolCalls[0].ID)
+	}
+}

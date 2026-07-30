@@ -270,6 +270,56 @@ func TestAgentHarness_Run(t *testing.T) {
 		}
 	})
 
+	t.Run("incomplete function call gets terminal failed result", func(t *testing.T) {
+		// Announced (streamed) but IsComplete=false must not leave clients stuck on in_progress.
+		store := testStore(t)
+		strategy := &mockStrategy{
+			invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, events chan<- LLMResponseChunk) {
+				events <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
+					{ID: "fc_inc", CallID: "fc_inc", Name: "greet", Arguments: `{`},
+				}, IsComplete: false}
+				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "gave up", IsComplete: true}
+			},
+		}
+		ah := NewAgent(context.Background(), AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
+		ch, err := ah.Run(context.Background(), "test")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var sawFunctionCall bool
+		var toolResults []StreamEvent
+		var sawComplete bool
+		for ev := range ch {
+			switch ev.Type {
+			case StreamEventFunctionCall:
+				sawFunctionCall = true
+			case StreamEventToolResult:
+				toolResults = append(toolResults, ev)
+			case StreamEventComplete:
+				sawComplete = true
+			}
+		}
+		if !sawFunctionCall {
+			t.Error("expected function call announcement")
+		}
+		if len(toolResults) != 1 {
+			t.Fatalf("tool results = %d, want 1 failed close", len(toolResults))
+		}
+		if toolResults[0].Content != "tool call incomplete" {
+			t.Errorf("content = %q, want tool call incomplete", toolResults[0].Content)
+		}
+		if len(toolResults[0].ToolCalls) != 1 || toolResults[0].ToolCalls[0].Status != "error" {
+			t.Errorf("expected error status on incomplete tool, got %+v", toolResults[0].ToolCalls)
+		}
+		if toolResults[0].MessageID != "fc_inc" {
+			t.Errorf("MessageID = %q, want fc_inc", toolResults[0].MessageID)
+		}
+		if !sawComplete {
+			t.Error("expected turn complete after closing incomplete tool")
+		}
+	})
+
 	t.Run("tool handler error", func(t *testing.T) {
 		store := testStore(t)
 		var callCount int
@@ -442,6 +492,7 @@ func TestAgentHarness_Run(t *testing.T) {
 		store := testStore(t)
 		var invokeCount int
 		var compressHadTools bool
+		var continueSawNudge bool
 
 		strategy := &mockStrategy{
 			invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, events chan<- LLMResponseChunk) {
@@ -467,6 +518,12 @@ func TestAgentHarness_Run(t *testing.T) {
 					events <- LLMResponseChunk{Type: StreamEventMessage, MessageId: "msg_c", IsComplete: true}
 					// Earlier completed message must not win over the last one.
 					return
+				}
+				// Post-compress continue turn should include the open-plan nudge.
+				for _, m := range msgs {
+					if m != nil && m.Role == RoleDeveloper && m.Content == continuePlanNudge {
+						continueSawNudge = true
+					}
 				}
 				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "All done!", IsComplete: true}
 			},
@@ -494,6 +551,9 @@ func TestAgentHarness_Run(t *testing.T) {
 		if !compressHadTools {
 			t.Error("handoff compress Invoke should still receive tools for schema/context")
 		}
+		if !continueSawNudge {
+			t.Error("continue Invoke after compress should include continuePlanNudge (open todos remain)")
+		}
 
 		plan := ah.Runtime.PlanGet()
 		if plan == nil {
@@ -506,9 +566,9 @@ func TestAgentHarness_Run(t *testing.T) {
 			t.Errorf("Task 2 status = %q, want %q", plan[1].Status, streaming.TodoStatusInProgress)
 		}
 
-		// Post-compress: [original user, developer handoff]; next turn appends assistant.
-		if len(ah.ContextWindow) != 3 {
-			t.Errorf("expected 3 messages (user, handoff, final), got %d", len(ah.ContextWindow))
+		// Post-compress: [user, handoff, continue nudge]; next turn appends assistant.
+		if len(ah.ContextWindow) != 4 {
+			t.Errorf("expected 4 messages (user, handoff, continue nudge, final), got %d", len(ah.ContextWindow))
 		} else {
 			if ah.ContextWindow[0].Role != RoleUser {
 				t.Errorf("first message role = %q, want user (original request must not be dropped)", ah.ContextWindow[0].Role)
@@ -522,11 +582,17 @@ func TestAgentHarness_Run(t *testing.T) {
 			if ah.ContextWindow[1].Content != "Mock compressed handoff. Remaining: Task 2." {
 				t.Errorf("handoff content = %q, want last completed message full text only", ah.ContextWindow[1].Content)
 			}
-			if ah.ContextWindow[2].Role != RoleAssistant {
-				t.Errorf("third message role = %q, want assistant", ah.ContextWindow[2].Role)
+			if ah.ContextWindow[2].Role != RoleDeveloper {
+				t.Errorf("nudge role = %q, want developer", ah.ContextWindow[2].Role)
 			}
-			if !strings.Contains(ah.ContextWindow[2].Content, "All done!") {
-				t.Errorf("final message content = %q, want contains 'All done!'", ah.ContextWindow[2].Content)
+			if ah.ContextWindow[2].Content != continuePlanNudge {
+				t.Errorf("nudge content = %q, want continuePlanNudge", ah.ContextWindow[2].Content)
+			}
+			if ah.ContextWindow[3].Role != RoleAssistant {
+				t.Errorf("fourth message role = %q, want assistant", ah.ContextWindow[3].Role)
+			}
+			if !strings.Contains(ah.ContextWindow[3].Content, "All done!") {
+				t.Errorf("final message content = %q, want contains 'All done!'", ah.ContextWindow[3].Content)
 			}
 		}
 
@@ -637,6 +703,60 @@ func TestAgentHarness_Run(t *testing.T) {
 		}
 		if len(ah.ContextWindow) < 3 {
 			t.Errorf("expected >= 3 messages in context window without compression, got %d", len(ah.ContextWindow))
+		}
+	})
+
+	t.Run("complete last todo skips continue nudge", func(t *testing.T) {
+		store := testStore(t)
+		var invokeCount int
+		var continueSawNudge bool
+
+		strategy := &mockStrategy{
+			invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, events chan<- LLMResponseChunk) {
+				invokeCount++
+				if invokeCount == 1 {
+					events <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
+						{ID: "call_ct_last", CallID: "call_ct_last", Name: "complete_todo", Arguments: `{"title":"Only"}`},
+					}, IsComplete: true}
+					events <- LLMResponseChunk{IsComplete: true}
+					return
+				}
+				if invokeCount == 2 {
+					events <- LLMResponseChunk{Type: StreamEventMessage, MessageId: "msg_h", Content: "All work done handoff.", IsComplete: true}
+					return
+				}
+				for _, m := range msgs {
+					if m != nil && m.Role == RoleDeveloper && m.Content == continuePlanNudge {
+						continueSawNudge = true
+					}
+				}
+				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "Plan finished.", IsComplete: true}
+			},
+		}
+
+		ah := NewAgent(context.Background(), AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
+		ah.Runtime.PlanSet([]control.Todo{
+			{Title: "Only", Status: streaming.TodoStatusInProgress},
+		})
+
+		ch, err := ah.Run(context.Background(), "Finish the plan")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for range ch {
+		}
+
+		if invokeCount != 3 {
+			t.Errorf("invokeCount = %d, want 3", invokeCount)
+		}
+		if continueSawNudge {
+			t.Error("should not append continuePlanNudge when all todos are completed")
+		}
+		// [user, handoff, assistant] — no nudge
+		if len(ah.ContextWindow) != 3 {
+			t.Errorf("context len = %d, want 3 (user, handoff, assistant)", len(ah.ContextWindow))
+		} else if ah.ContextWindow[1].Content != "All work done handoff." {
+			t.Errorf("handoff = %q", ah.ContextWindow[1].Content)
 		}
 	})
 

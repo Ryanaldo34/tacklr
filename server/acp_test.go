@@ -478,11 +478,66 @@ func TestEventToAcpJsonRpc_toolResult(t *testing.T) {
 	_ = json.Unmarshal(frames[0], &msg)
 	params := msg["params"].(map[string]any)
 	update := params["update"].(map[string]any)
+	if update["sessionUpdate"] != "tool_call_update" {
+		t.Errorf("sessionUpdate = %v, want tool_call_update", update["sessionUpdate"])
+	}
 	if update["status"] != "completed" {
 		t.Errorf("status = %v, want completed", update["status"])
 	}
-	if update["content"] != "file contents here" {
-		t.Errorf("content = %v, want %q", update["content"], "file contents here")
+	if update["toolCallId"] != "tc-1" {
+		t.Errorf("toolCallId = %v, want tc-1", update["toolCallId"])
+	}
+	content, ok := update["content"].([]any)
+	if !ok || len(content) != 1 {
+		t.Fatalf("content = %v, want ACP ToolCallContent array of length 1", update["content"])
+	}
+	inner := content[0].(map[string]any)
+	if inner["type"] != "content" {
+		t.Errorf("inner type = %v, want content", inner["type"])
+	}
+	innerContent := inner["content"].(map[string]any)
+	if innerContent["text"] != "file contents here" {
+		t.Errorf("inner text = %v, want %q", innerContent["text"], "file contents here")
+	}
+}
+
+func TestEventToAcpJsonRpc_toolResult_callIDFallback(t *testing.T) {
+	// llama.cpp-style: only call_id set
+	ev := &streaming.StreamEvent{
+		Type:    streaming.StreamEventToolResult,
+		Content: "ok",
+		ToolCalls: []tacklr.ToolCall{
+			{CallID: "fc_only", Name: "echo", Status: "success"},
+		},
+	}
+	frames, err := eventToAcpJsonRpc("thread-1", ev)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var msg map[string]any
+	_ = json.Unmarshal(frames[0], &msg)
+	update := msg["params"].(map[string]any)["update"].(map[string]any)
+	if update["toolCallId"] != "fc_only" {
+		t.Errorf("toolCallId = %v, want fc_only (CallID fallback)", update["toolCallId"])
+	}
+}
+
+func TestEventToAcpJsonRpc_functionCall_callIDFallback(t *testing.T) {
+	ev := &streaming.StreamEvent{
+		Type: streaming.StreamEventFunctionCall,
+		ToolCalls: []tacklr.ToolCall{
+			{CallID: "fc_only", Name: "echo"},
+		},
+	}
+	frames, err := eventToAcpJsonRpc("thread-1", ev)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var msg map[string]any
+	_ = json.Unmarshal(frames[0], &msg)
+	update := msg["params"].(map[string]any)["update"].(map[string]any)
+	if update["toolCallId"] != "fc_only" {
+		t.Errorf("toolCallId = %v, want fc_only", update["toolCallId"])
 	}
 }
 
@@ -1001,6 +1056,9 @@ func TestHandleRPC_sessionPrompt_toolProgress(t *testing.T) {
 			}
 		case "tool_call_update":
 			toolCallUpdateCount++
+			if s, _ := update["status"].(string); s == "completed" {
+				toolCallCompleted = true
+			}
 		}
 	}
 
@@ -1011,7 +1069,7 @@ func TestHandleRPC_sessionPrompt_toolProgress(t *testing.T) {
 		t.Errorf("expected at least 1 tool_call_update, got %d", toolCallUpdateCount)
 	}
 	if !toolCallCompleted {
-		t.Error("expected tool_call with completed status")
+		t.Error("expected tool_call_update with completed status")
 	}
 
 	var hasResult bool

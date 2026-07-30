@@ -315,7 +315,7 @@ func eventToAcpJsonRpc(threadId string, event *streaming.StreamEvent) ([][]byte,
 					"sessionId": threadId,
 					"update": map[string]any{
 						"sessionUpdate": "tool_call",
-						"toolCallId":    toolCall.ID,
+						"toolCallId":    acpToolCallID(toolCall),
 						"title":         toolCall.Name,
 						"status":        "in_progress",
 						"kind":          toolCall.Category,
@@ -337,15 +337,7 @@ func eventToAcpJsonRpc(threadId string, event *streaming.StreamEvent) ([][]byte,
 					"sessionUpdate": "tool_call_update",
 					"toolCallId":    event.MessageID,
 					"status":        "in_progress",
-					"content": []map[string]any{
-						{
-							"type": "content",
-							"content": map[string]any{
-								"type": "text",
-								"text": event.Content,
-							},
-						},
-					},
+					"content":       acpToolCallContent(event.Content),
 				},
 			},
 		}
@@ -382,6 +374,10 @@ func eventToAcpJsonRpc(threadId string, event *streaming.StreamEvent) ([][]byte,
 		toStream = append(toStream, bytes)
 		return toStream, nil
 	case streaming.StreamEventToolResult:
+		if len(event.ToolCalls) == 0 {
+			slog.Warn("tool_result event missing ToolCalls")
+			return nil, nil
+		}
 		var toStream [][]byte
 		tc := event.ToolCalls[0]
 		var status string
@@ -390,18 +386,23 @@ func eventToAcpJsonRpc(threadId string, event *streaming.StreamEvent) ([][]byte,
 		} else {
 			status = "completed"
 		}
+		// Terminal status uses tool_call_update with ACP ToolCallContent[] (not a bare string).
+		update := map[string]any{
+			"sessionUpdate": "tool_call_update",
+			"toolCallId":    acpToolCallID(tc),
+			"title":         tc.Name,
+			"status":        status,
+		}
+		if event.Content != "" {
+			update["content"] = acpToolCallContent(event.Content)
+			update["rawOutput"] = map[string]any{"output": event.Content}
+		}
 		data := map[string]any{
 			"jsonrpc": "2.0",
 			"method":  "session/update",
 			"params": map[string]any{
 				"sessionId": threadId,
-				"update": map[string]any{
-					"sessionUpdate": "tool_call",
-					"toolCallId":    tc.ID,
-					"title":         tc.Name,
-					"status":        status,
-					"content":       event.Content,
-				},
+				"update":    update,
 			},
 		}
 		bytes, _ := json.Marshal(data)
@@ -438,5 +439,26 @@ func eventToAcpJsonRpc(threadId string, event *streaming.StreamEvent) ([][]byte,
 	default:
 		slog.Warn("unhandled event type", "type", event.Type)
 		return nil, nil
+	}
+}
+
+// acpToolCallID prefers ID, then CallID — providers like llama.cpp may only set one.
+func acpToolCallID(tc streaming.ToolCall) string {
+	if tc.ID != "" {
+		return tc.ID
+	}
+	return tc.CallID
+}
+
+// acpToolCallContent wraps plain text as ACP ToolCallContent[].
+func acpToolCallContent(text string) []map[string]any {
+	return []map[string]any{
+		{
+			"type": "content",
+			"content": map[string]any{
+				"type": "text",
+				"text": text,
+			},
+		},
 	}
 }
