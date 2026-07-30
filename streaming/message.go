@@ -1,3 +1,14 @@
+// Package streaming holds protocol-agnostic conversation and stream types
+// shared by inference, the agent harness, and server protocols (ACP, SSE,
+// and future A2A).
+//
+// Layering:
+//   - inference: provider wire (e.g. OpenAI SSE) → LLMResponseChunk
+//   - harness: agent loop → StreamEvent (tools, interrupts, complete, cancel)
+//   - server.Protocol: StreamEvent → client wire (ACP session/update, SSE, A2A, …)
+//
+// This package does not parse provider SSE and does not encode client protocols.
+// Client presentation belongs on server.Protocol.OnStreamEvent / OnStreamClosed.
 package streaming
 
 // MessageRole indicates who sent the message.
@@ -28,8 +39,8 @@ const (
 type TodoStatus string
 
 const (
-	TodoStatusPending   TodoStatus = "pending"
-	TodoStatusCompleted TodoStatus = "completed"
+	TodoStatusPending    TodoStatus = "pending"
+	TodoStatusCompleted  TodoStatus = "completed"
 	TodoStatusInProgress TodoStatus = "in_progress"
 )
 
@@ -116,7 +127,8 @@ const (
 	StreamEventPlanUpdate   StreamEventType = "plan_update"
 )
 
-// StreamEvent is what the caller receives from AgentHarness.Run.
+// StreamEvent is the harness interior event bus. Protocols map these events
+// to wire formats; the harness does not own ACP/SSE/A2A framing.
 type StreamEvent struct {
 	Type      StreamEventType
 	TurnID    string
@@ -128,8 +140,7 @@ type StreamEvent struct {
 }
 
 // LLMResponseChunk is the streaming unit emitted by an InferenceStrategy's
-// Invoke call. It is the shared contract between inference providers,
-// streaming strategies, and the agent loop.
+// Invoke call. Provider parse only — not client-facing wire.
 type LLMResponseChunk struct {
 	TurnId     string
 	MessageId  string
@@ -137,6 +148,10 @@ type LLMResponseChunk struct {
 	Type       StreamEventType
 	Content    string
 	IsComplete bool
+	// Error is set on terminal provider failures (Type == StreamEventError).
+	// Harness copies it onto StreamEvent.Error so protocols can errors.Is
+	// stop-reason sentinels (refusal, max_tokens, …).
+	Error error
 }
 
 // Message is the primary conversation unit in the context window.

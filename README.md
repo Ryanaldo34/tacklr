@@ -1,197 +1,241 @@
-# tacklr
+# Tacklr
 
-Agent harness for building LLM-powered applications with tool use, session management, MCP support, and streaming.
+**An opinionated agent harness SDK for Go** — structured context, real protocols, tools & MCP, built for production agents (not demo chat wrappers).
 
-## Install
+Tacklr defines *how* agents should run: plan → execute → hand off clean context → continue. It is a **framework**, not a grab-bag of helpers.
 
 ```bash
 go get github.com/ryanaldo34/tacklr
 ```
 
-## Usage
+---
 
-```go
-import "github.com/ryanaldo34/tacklr"
+## Why Tacklr?
 
-h := tacklr.NewAgent(ctx, tacklr.AgentOptions{
-    Config: tacklr.Config{MaxWindowSize: 8192},
-    Model:  model,
-})
-events, err := h.Run(ctx, "your prompt")
+| Idea | What you get |
+|------|----------------|
+| **Structured context** | Adaptive Case Management–style plans (`create_plan` / `complete_todo`). Completing a todo compresses into a **handoff** for the next work—not a vague “summarize everything.” |
+| **Protocol-native** | Speak **ACP** (editors like Zed) or **SSE/WS** over the same registry. Architecture is ready for **A2A** as another protocol plug-in. |
+| **Clear layers** | Inference parses the model wire; the harness owns the agent loop; protocols own client streaming. Easy to test and extend. |
+| **Tools & MCP** | Reflect-based tools plus MCP discovery (stdio / HTTP / SSE) without bolting on a second agent runtime. |
+| **Cloud-minded Go** | Small surface, stdlib-first, sessions you can checkpoint and reload. |
+
+**Who it’s for:** teams embedding agents in products, IDE integrations, or services that need cancellable turns, interrupts, and durable session state—not one-off scripts.
+
+---
+
+## Architecture
+
+```text
+  Model provider (OpenAI-compatible / Foundry / …)
+            │
+            ▼  LLMResponseChunk
+     ┌──────────────┐
+     │  inference   │  parse provider SSE only
+     └──────┬───────┘
+            ▼
+     ┌──────────────┐
+     │   harness    │  plan, tools, handoff, cancel
+     │   (tacklr)   │  emits StreamEvent bus
+     └──────┬───────┘
+            ▼  StreamEvent (protocol-agnostic)
+     ┌──────────────┐
+     │    server    │  Registry + Protocol
+     │  ACP · SSE   │  (A2A later: same plug)
+     └──────────────┘
+            │
+            ▼  client wire (JSON-RPC / SSE / …)
 ```
 
-### Subpackages
+| Package | Responsibility |
+|---------|----------------|
+| `tacklr` | Agent harness, tools, context Fit/Handoff, skills, subagents |
+| `inference` | OpenAI-compatible Responses API + SSE → `LLMResponseChunk` |
+| `streaming` | Shared types: `Message`, `StreamEvent`, `ToolCall` (not wire codecs) |
+| `server` | `Registry`, transports, **protocols** (`ACP`, `SSE`) |
+| `stores` | Session checkpoints (in-memory; Postgres available) |
+| `mcp` | MCP **config** types only (discovery is internal) |
+| `control` | Runtime, plan, interrupts |
+| `skills` | Load `SKILL.md` catalogs |
+
+**Invariant:** client presentation lives on `server.Protocol` (`OnStreamEvent` / `OnStreamClosed`). The harness never owns ACP/SSE framing—so a future A2A protocol is another implementation, not a harness rewrite.
+
+---
+
+## Quick start
+
+### 1. Minimal agent (library)
 
 ```go
-import "github.com/ryanaldo34/tacklr/control"    // session/runtime types
-import "github.com/ryanaldo34/tacklr/inference"  // inference strategies
-import "github.com/ryanaldo34/tacklr/mcp"        // MCP server config types
-import "github.com/ryanaldo34/tacklr/server"     // HTTP/WebSocket/SSE server
-import "github.com/ryanaldo34/tacklr/stores"     // session stores
-import "github.com/ryanaldo34/tacklr/streaming"  // streaming strategies
+package main
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"os"
+	"time"
+
+	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/inference"
+	"github.com/ryanaldo34/tacklr/stores"
+)
+
+func main() {
+	ctx := context.Background()
+
+	model := inference.NewOpenAIInferenceStrategy(&http.Client{Timeout: 2 * time.Minute})
+	model.WithURL(os.Getenv("OPENAI_BASE_URL")). // e.g. https://api.openai.com/v1
+							WithApiKey(os.Getenv("OPENAI_API_KEY")).
+							WithModel(os.Getenv("OPENAI_MODEL"))
+
+	agent := tacklr.NewAgent(ctx, tacklr.AgentOptions{
+		Config: tacklr.Config{
+			MaxWindowSize: 8192,
+			SystemPrompt:  "You are a concise assistant.",
+		},
+		Model: model,
+		Store: stores.NewInMemoryStore(),
+		// Tools: []*tacklr.Tool{myTool}, // optional
+	})
+	defer agent.Close()
+
+	events, err := agent.Run(ctx, "Say hello in one short sentence.")
+	if err != nil {
+		panic(err)
+	}
+	for ev := range events {
+		switch ev.Type {
+		case tacklr.StreamEventMessage:
+			fmt.Print(ev.Content)
+		case tacklr.StreamEventError:
+			fmt.Println("error:", ev.Error, ev.Content)
+		case tacklr.StreamEventComplete:
+			fmt.Println()
+		}
+	}
+}
 ```
 
-## Tools
-
-Tools are defined using `NewTool`:
+### 2. Define a tool
 
 ```go
-import "github.com/ryanaldo34/tacklr"
-
 type SearchArgs struct {
-    Query string `json:"query" desc:"The search query"`
-    Limit int    `json:"limit" desc:"Max results"`
+	Query string `json:"query" desc:"The search query"`
+	Limit int    `json:"limit,omitempty" desc:"Max results"`
 }
 
 tool := tacklr.NewTool(tacklr.ToolConfig{
-    Name:        "search_web",
-    Description: "Search the web for information.",
-    Handler: func(ctx context.Context, args SearchArgs, rt tacklr.HarnessRuntime) (string, error) {
-        return doSearch(ctx, args.Query, args.Limit)
-    },
+	Name:        "search_web",
+	Description: "Search the web for information.",
+	Handler: func(ctx context.Context, args SearchArgs, rt tacklr.HarnessRuntime) (string, error) {
+		// rt: plan, interrupts, progress updates
+		return doSearch(ctx, args.Query, args.Limit)
+	},
 })
 ```
 
-Valid handler signatures:
-- `func(context.Context) (T, error)` — no arguments
-- `func(context.Context, Args) (T, error)` — typed args struct
-- `func(context.Context, Args, HarnessRuntime) (T, error)` — with runtime access
-- `func(context.Context, HarnessRuntime) (T, error)` — runtime only, no args
+Handler shapes:
 
-The args struct is inspected with `reflect` at tool construction to auto-generate the JSON schema. Tags (`json`, `desc`, `enum`) control the schema output. `HarnessRuntime` is passed by value (a shallow copy with `CurrentToolCallID` set uniquely per call), giving tools access to interrupt and progress-update APIs.
+- `func(context.Context) (T, error)`
+- `func(context.Context, Args) (T, error)`
+- `func(context.Context, Args, HarnessRuntime) (T, error)`
+- `func(context.Context, HarnessRuntime) (T, error)`
 
-MCP-discovered tools are handled internally by the harness — configure `MCPConfigs` (on `AgentSpec` or the harness directly) and the discovery + tool wrapping happens automatically.
+JSON schema is derived from the args struct (`json`, `desc`, `enum` tags).
 
-## MCP servers
-
-The public `mcp` package exposes only configuration types. Connection, discovery,
-and client lifecycle are internal to the harness.
-
-`mcp.MCPConfig` mirrors the ACP `mcpServers` wire shape and supports all three transports:
+### 3. Serve over ACP (e.g. Zed) or SSE
 
 ```go
-// stdio (default): launch the server as a subprocess
-mcp.MCPConfig{Name: "fs", Command: "npx", Args: []string{"-y", "@modelcontextprotocol/server-filesystem"},
-    Env: []mcp.EnvVariable{{Name: "API_KEY", Value: "secret"}}}
-
-// streamable HTTP
-mcp.MCPConfig{Name: "api", Type: mcp.TransportHTTP, URL: "https://api.example.com/mcp",
-    Headers: []mcp.HTTPHeader{{Name: "Authorization", Value: "Bearer tok"}}}
-
-// SSE (deprecated by the MCP spec)
-mcp.MCPConfig{Name: "events", Type: mcp.TransportSSE, URL: "https://events.example.com/mcp"}
-```
-
-Pass configs via `AgentOptions.MCPConfigs` (or `AgentSpec.MCPConfigs` on the
-server). Discovery runs during `NewAgent` / `NewAgentFromSession`. Over ACP,
-clients supply the same shapes in `session/new`, `session/load`, and
-`session/resume`. The agent advertises `mcpCapabilities.http` and
-`mcpCapabilities.sse` as supported (stdio is always supported).
-
-### Usage in an agent
-
-```go
-agent := tacklr.NewAgent(ctx, tacklr.AgentOptions{
-    Config: tacklr.Config{
-        MaxWindowSize: 8192,
-        SystemPrompt:  "You are a helpful assistant.",
-    },
-    Model:      model,
-    Store:      store,
-    Tools:      []*tacklr.Tool{tool},
-    MCPConfigs: []mcp.MCPConfig{{Name: "fs", Command: "npx", Args: []string{"-y", "@modelcontextprotocol/server-filesystem"}}},
+store := stores.NewInMemoryStore()
+reg := server.NewRegistry(store, "my-agent")
+reg.Register("my-agent", server.AgentSpec{
+	Name: "Demo",
+	Config: tacklr.Config{
+		MaxWindowSize: 8192,
+		SystemPrompt:  "You are a helpful assistant.",
+	},
+	Model: model,
+	Tools: []*tacklr.Tool{tool},
 })
 
-// Restore from a checkpoint with the same options shape:
-agent, err := tacklr.NewAgentFromSession(ctx, sessionID, tacklr.AgentOptions{
-    Config: cfg,
-    Model:  model,
-    Store:  store,
-})
-```
-
-## Server
-
-The `server` package separates domain logic (`Registry`) from transport (`Server`)
-and wire format (`Protocol`). Built-in protocols: `server.ACP` (JSON-RPC) and
-`server.SSE` (native SSE/WS).
-
-```go
-import (
-    "context"
-    "os"
-    "os/signal"
-    "syscall"
-
-    "github.com/ryanaldo34/tacklr"
-    "github.com/ryanaldo34/tacklr/server"
-    "github.com/ryanaldo34/tacklr/stores"
-)
-
-r := server.NewRegistry(store, "my-agent")
-r.Register("my-agent", server.AgentSpec{
-    Config: tacklr.Config{
-        SystemPrompt:  "You are a helpful assistant.",
-        MaxWindowSize: 8192,
-    },
-    Model: model,  // any tacklr.InferenceStrategy
-    Tools: tools,
-})
-
-srv := server.NewServer(r, server.SSE) // or server.ACP
-
-ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-defer stop()
-
-// HTTP (routes depend on Protocol.HTTPMode; shuts down on ctx cancel)
-// go srv.ServeHTTP(ctx, ":8080")
-
-// Stdio / NDJSON (returns on EOF or ctx cancel)
+// Editor / ACP stdio
+srv := server.NewServer(reg, server.ACP)
 _ = srv.ServeStdio(ctx, os.Stdin, os.Stdout)
+
+// Or HTTP + SSE
+// srv := server.NewServer(reg, server.SSE)
+// _ = srv.ServeHTTP(ctx, ":8080")
 ```
 
-Domain errors unwrap to sentinels (`server.ErrAgentNotFound`, etc.) via `errors.Is`.
-Wire responses use `PublicError` so internal failures become `ErrInternal`.
-
-
-### SSE clients
+**SSE prompt:**
 
 ```bash
-# Prompt
 curl -N -X POST http://localhost:8080/ \
   -H "Accept: text/event-stream" \
   -d '{"agent_id":"my-agent","prompt":"Hello"}'
+```
 
-# Resume from interrupt
+**Resume after interrupt:**
+
+```bash
 curl -N -X POST http://localhost:8080/resume \
   -H "Accept: text/event-stream" \
   -d '{"agent_id":"my-agent","thread_id":"<id>","responses":{"<interruptId>":{"selectionIdx":0}}}'
 ```
 
-WebSocket connections use the same JSON payload as the initial message (GET / for prompt, GET /resume for resume).
+WebSocket uses the same JSON body (GET `/` or GET `/resume`).
 
-## Skills
+### 4. Try the included test server
 
-Applications can load local `SKILL.md` directories into an agent with the
-`NewAgent` constructor. Skills are initialized at construction time; a compact
-skill catalog is added to the system prompt and `read_skill` is registered so
-the model can load full instructions only when needed:
+```bash
+# .env: OPENAI_BASE_URL, OPENAI_API_KEY, OPENAI_MODEL
+go run ./cmd/testserver          # HTTP ACP on :3000 (or PORT)
+go run ./cmd/testserver --stdio  # ACP over stdio
+```
+
+---
+
+## MCP servers
+
+Config only in the public `mcp` package; the harness connects and discovers tools.
+
+```go
+// stdio
+mcp.MCPConfig{Name: "fs", Command: "npx", Args: []string{"-y", "@modelcontextprotocol/server-filesystem"}}
+
+// streamable HTTP
+mcp.MCPConfig{Name: "api", Type: mcp.TransportHTTP, URL: "https://api.example.com/mcp",
+	Headers: []mcp.HTTPHeader{{Name: "Authorization", Value: "Bearer tok"}}}
+```
 
 ```go
 agent := tacklr.NewAgent(ctx, tacklr.AgentOptions{
-    Config: tacklr.Config{
-        MaxWindowSize:    8192,
-        SystemPrompt:     "You are a helpful assistant.",
-        SkillDirectories: []string{"./skills"},
-    },
-    Model: model,
-    Store: store,
+	Config:     tacklr.Config{MaxWindowSize: 8192},
+	Model:      model,
+	Store:      store,
+	MCPConfigs: []mcp.MCPConfig{{Name: "fs", Command: "npx", Args: []string{"-y", "@modelcontextprotocol/server-filesystem"}}},
 })
 ```
 
-Each immediate child of a configured directory must contain a `SKILL.md` file
-with YAML front matter containing `name` and `description`, followed by an
-instruction body:
+Over ACP, clients can also pass `mcpServers` on `session/new` / load / resume.
+
+---
+
+## Skills
+
+Point `SkillDirectories` at folders of `SKILL.md` files. A short catalog goes into the system prompt; the model loads full text via `read_skill` when needed.
+
+```go
+agent := tacklr.NewAgent(ctx, tacklr.AgentOptions{
+	Config: tacklr.Config{
+		MaxWindowSize:    8192,
+		SkillDirectories: []string{"./skills"},
+	},
+	Model: model,
+	Store: store,
+})
+```
 
 ```markdown
 ---
@@ -199,14 +243,53 @@ name: testing
 description: Write and validate automated tests for this project.
 ---
 
-Follow the project's test conventions and run the relevant tests before
-reporting completion.
+Follow the project's test conventions and run tests before claiming done.
 ```
 
-## Build
+---
+
+## Sessions & context
+
+```go
+// Fresh agent
+agent := tacklr.NewAgent(ctx, opts)
+
+// Later: restore checkpoint
+agent, err := tacklr.NewAgentFromSession(ctx, sessionID, opts)
+```
+
+- **Fit** — when the window is large, compress older history before adding new messages.  
+- **Handoff** — after a successful `complete_todo`, replace noise with a structured handoff for remaining work.  
+- **Cancel** — one turn context: `session/cancel` or parent cancel stops model stream, tools, and protocol pump.
+
+---
+
+## Packages (import map)
+
+```go
+import "github.com/ryanaldo34/tacklr"            // harness, tools
+import "github.com/ryanaldo34/tacklr/inference"  // OpenAI-compatible strategy
+import "github.com/ryanaldo34/tacklr/server"     // Registry, ACP, SSE
+import "github.com/ryanaldo34/tacklr/stores"     // InMemory (and Postgres)
+import "github.com/ryanaldo34/tacklr/mcp"        // MCPConfig types
+import "github.com/ryanaldo34/tacklr/streaming"  // shared event/message types
+import "github.com/ryanaldo34/tacklr/control"    // runtime / plan / interrupts
+import "github.com/ryanaldo34/tacklr/skills"     // skill loading
+```
+
+---
+
+## Develop
 
 ```bash
-make test      # runs all tests
-make vet       # runs go vet
+make test   # go test ./...
+make vet    # go vet
 ```
-```
+
+See `AGENTS.md` for contribution ethos (context design, testing philosophy, Go standards).
+
+---
+
+## License
+
+See [LICENSE](LICENSE).

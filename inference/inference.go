@@ -291,12 +291,25 @@ func (s *OpenAIInferenceStrategy) Invoke(ctx context.Context, messages []*tacklr
 
 	events := make(chan tacklr.LLMResponseChunk, 10)
 
+	// sendChunk delivers a chunk unless ctx is already cancelled (avoids blocking
+	// the HTTP goroutine after session/cancel when the consumer has stopped).
+	sendChunk := func(chunk tacklr.LLMResponseChunk) {
+		if ctx.Err() != nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+		case events <- chunk:
+		}
+	}
+
 	go func() {
 		defer close(events)
 
 		httpReq, err := http.NewRequestWithContext(ctx, "POST", s.baseURL+"/responses", bytes.NewReader(body))
 		if err != nil {
 			slog.Error("create request", "error", err)
+			sendChunk(tacklr.LLMResponseChunk{Type: tacklr.StreamEventError, Content: fmt.Sprintf("create request: %v", err)})
 			return
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
@@ -305,24 +318,33 @@ func (s *OpenAIInferenceStrategy) Invoke(ctx context.Context, messages []*tacklr
 		httpResp, err := s.httpClient.Do(httpReq)
 		if err != nil {
 			slog.Error("http request", "error", err)
+			// Always surface terminal transport failures as stream errors so
+			// clients and tests share one contract (no silent channel close).
+			sendChunk(tacklr.LLMResponseChunk{Type: tacklr.StreamEventError, Content: fmt.Sprintf("http request: %v", err)})
 			return
 		}
 		defer httpResp.Body.Close()
 
 		if httpResp.StatusCode != 200 {
 			respBody, _ := io.ReadAll(httpResp.Body)
-			slog.Error("non-200 response", "status", httpResp.StatusCode, "body", extractErrorMessage(respBody))
-			events <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventError, Content: extractErrorMessage(respBody)}
+			classified := ClassifyProviderFailure(httpResp.StatusCode, respBody)
+			slog.Error("non-200 response", "status", httpResp.StatusCode, "error", classified)
+			sendChunk(tacklr.LLMResponseChunk{
+				Type:       tacklr.StreamEventError,
+				Content:    classified.Error(),
+				Error:      classified,
+				IsComplete: true,
+			})
 			return
 		}
 
-		s.parseSSEResponse(httpResp.Body, events)
+		s.parseSSEResponse(ctx, httpResp.Body, events)
 	}()
 
 	return events, nil
 }
 
-func (s *OpenAIInferenceStrategy) parseSSEResponse(body io.Reader, events chan<- tacklr.LLMResponseChunk) {
+func (s *OpenAIInferenceStrategy) parseSSEResponse(ctx context.Context, body io.Reader, events chan<- tacklr.LLMResponseChunk) {
 	// Match main-branch classification: output_text is always a message chunk.
 	// DeepSeek on Foundry streams thinking inside output_text (e.g. <think> tags);
 	// reclassifying those deltas as StreamEventReasoning broke ACP clients that
@@ -331,6 +353,9 @@ func (s *OpenAIInferenceStrategy) parseSSEResponse(body io.Reader, events chan<-
 	scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
 	var currentItemID string
 	for scanner.Scan() {
+		if ctx != nil && ctx.Err() != nil {
+			return
+		}
 		line := scanner.Text()
 
 		const prefix = "data: "
@@ -389,9 +414,60 @@ func (s *OpenAIInferenceStrategy) parseSSEResponse(body io.Reader, events chan<-
 			if evt.Item != nil {
 				s.emitOutputItemComplete(evt.Item, events)
 			}
+		case "response.incomplete", "response.failed":
+			// Terminal incomplete / failed response — classify incomplete reason when present.
+			var payload struct {
+				Response struct {
+					Status            string            `json:"status"`
+					IncompleteDetails *incompleteDetail `json:"incomplete_details"`
+					Error             *apiErrorDetail   `json:"error"`
+				} `json:"response"`
+				// Some payloads put fields at top level.
+				IncompleteDetails *incompleteDetail `json:"incomplete_details"`
+				Error             *apiErrorDetail   `json:"error"`
+			}
+			_ = json.Unmarshal([]byte(data), &payload)
+			detail := payload.Response.IncompleteDetails
+			if detail == nil {
+				detail = payload.IncompleteDetails
+			}
+			var classified error
+			if detail != nil && detail.Reason != "" {
+				classified = ClassifyIncompleteReason(detail.Reason)
+			}
+			if classified == nil {
+				apiErr := &APIStatusError{Status: 200, Body: "response incomplete or failed"}
+				if payload.Response.Error != nil {
+					apiErr.Body = payload.Response.Error.Message
+					apiErr.Code = payload.Response.Error.Code
+				} else if payload.Error != nil {
+					apiErr.Body = payload.Error.Message
+					apiErr.Code = payload.Error.Code
+				}
+				if apiErr.Code != "" || (apiErr.Body != "" && apiErr.Body != "response incomplete or failed") {
+					classified = ClassifyProviderFailure(200, mustJSON(map[string]any{
+						"error": map[string]string{"code": apiErr.Code, "message": apiErr.Body, "type": ""},
+					}))
+				}
+				if classified == nil {
+					classified = apiErr
+				}
+			}
+			events <- tacklr.LLMResponseChunk{
+				Type:       tacklr.StreamEventError,
+				Content:    classified.Error(),
+				Error:      classified,
+				IsComplete: true,
+			}
+			return
 		}
 	}
 
+}
+
+func mustJSON(v any) []byte {
+	b, _ := json.Marshal(v)
+	return b
 }
 
 func (s *OpenAIInferenceStrategy) emitOutputItemComplete(raw json.RawMessage, events chan<- tacklr.LLMResponseChunk) {
@@ -405,9 +481,28 @@ func (s *OpenAIInferenceStrategy) emitOutputItemComplete(raw json.RawMessage, ev
 	switch typeHolder.Type {
 	case "message":
 		var msg struct {
-			ID string `json:"id"`
+			ID      string `json:"id"`
+			Status  string `json:"status"`
+			Content []struct {
+				Type    string `json:"type"`
+				Refusal string `json:"refusal"`
+				Text    string `json:"text"`
+			} `json:"content"`
 		}
-		json.Unmarshal(raw, &msg)
+		_ = json.Unmarshal(raw, &msg)
+		// Refusal-only completed message → terminal stop reason, not end_turn.
+		if isRefusalMessage(msg.Content) {
+			text := refusalText(msg.Content)
+			err := tacklr.WrapStopReason(tacklr.ErrModelRefused, fmt.Errorf("%s", text))
+			events <- tacklr.LLMResponseChunk{
+				Type:       tacklr.StreamEventError,
+				MessageId:  msg.ID,
+				Content:    err.Error(),
+				Error:      err,
+				IsComplete: true,
+			}
+			return
+		}
 		events <- tacklr.LLMResponseChunk{
 			Type:       tacklr.StreamEventMessage,
 			MessageId:  msg.ID,
@@ -418,6 +513,41 @@ func (s *OpenAIInferenceStrategy) emitOutputItemComplete(raw json.RawMessage, ev
 	case "reasoning":
 		s.emitReasoningChunk(raw, events)
 	}
+}
+
+func isRefusalMessage(parts []struct {
+	Type    string `json:"type"`
+	Refusal string `json:"refusal"`
+	Text    string `json:"text"`
+}) bool {
+	if len(parts) == 0 {
+		return false
+	}
+	sawRefusal := false
+	for _, p := range parts {
+		switch p.Type {
+		case "refusal":
+			sawRefusal = true
+		case "output_text":
+			if strings.TrimSpace(p.Text) != "" {
+				return false
+			}
+		}
+	}
+	return sawRefusal
+}
+
+func refusalText(parts []struct {
+	Type    string `json:"type"`
+	Refusal string `json:"refusal"`
+	Text    string `json:"text"`
+}) string {
+	for _, p := range parts {
+		if p.Type == "refusal" && p.Refusal != "" {
+			return p.Refusal
+		}
+	}
+	return "model refused"
 }
 
 func (s *OpenAIInferenceStrategy) emitFunctionCallChunk(raw json.RawMessage, events chan<- tacklr.LLMResponseChunk) {

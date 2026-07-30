@@ -1,6 +1,7 @@
 package inference
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -12,7 +13,7 @@ func collectSSE(t *testing.T, body string) []tacklr.LLMResponseChunk {
 	s := NewOpenAIInferenceStrategy(nil)
 	ch := make(chan tacklr.LLMResponseChunk, 64)
 	go func() {
-		s.parseSSEResponse(strings.NewReader(body), ch)
+		s.parseSSEResponse(context.Background(), strings.NewReader(body), ch)
 		close(ch)
 	}()
 	var out []tacklr.LLMResponseChunk

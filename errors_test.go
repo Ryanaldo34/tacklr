@@ -9,6 +9,8 @@ import (
 func TestSentinelsAreDistinct(t *testing.T) {
 	sentinels := []error{
 		ErrModelRefused,
+		ErrMaxTokens,
+		ErrMaxTurnRequests,
 		ErrApiKeyNotSet,
 		ErrModelNotSet,
 		ErrUnknownModel,
@@ -35,9 +37,25 @@ func TestSentinelsAreDistinct(t *testing.T) {
 	}
 }
 
+func TestWrapStopReason_preservesIs(t *testing.T) {
+	cause := fmt.Errorf("content_filter")
+	err := WrapStopReason(ErrModelRefused, cause)
+	if !errors.Is(err, ErrModelRefused) {
+		t.Fatalf("errors.Is ErrModelRefused = false for %v", err)
+	}
+	if !errors.Is(err, cause) {
+		t.Fatalf("errors.Is cause = false for %v", err)
+	}
+	if WrapStopReason(ErrMaxTokens, nil) != ErrMaxTokens {
+		t.Fatal("nil cause should return kind")
+	}
+}
+
 func TestSentinelWrapping(t *testing.T) {
 	sentinels := []error{
 		ErrModelRefused,
+		ErrMaxTokens,
+		ErrMaxTurnRequests,
 		ErrApiKeyNotSet,
 		ErrModelNotSet,
 		ErrUnknownModel,

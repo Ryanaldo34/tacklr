@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -622,6 +623,38 @@ func TestEventToAcpJsonRpc_error(t *testing.T) {
 	}
 }
 
+func TestEventToAcpJsonRpc_error_stopReasons(t *testing.T) {
+	cases := []struct {
+		err  error
+		want string
+	}{
+		{tacklr.ErrModelRefused, "refusal"},
+		{tacklr.ErrMaxTokens, "max_tokens"},
+		{tacklr.ErrMaxTurnRequests, "max_turn_requests"},
+		{fmt.Errorf("run: context cancelled: %w", context.Canceled), "cancelled"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.want, func(t *testing.T) {
+			frames, err := eventToAcpJsonRpc("t", &streaming.StreamEvent{
+				Type:  streaming.StreamEventError,
+				Error: tc.err,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var msg map[string]any
+			_ = json.Unmarshal(frames[0], &msg)
+			if msg["error"] != nil {
+				t.Fatalf("want result not error: %v", msg)
+			}
+			res := msg["result"].(map[string]any)
+			if res["stopReason"] != tc.want {
+				t.Fatalf("stopReason = %v, want %s", res["stopReason"], tc.want)
+			}
+		})
+	}
+}
+
 func TestEventToAcpJsonRpc_interrupt_skipped(t *testing.T) {
 	ev := &streaming.StreamEvent{Type: streaming.StreamEventInterrupt}
 	frames, err := eventToAcpJsonRpc("thread-1", ev)
@@ -1018,8 +1051,8 @@ func TestHandleRPC_sessionPrompt_toolProgress(t *testing.T) {
 				return
 			}
 			ch <- tacklr.LLMResponseChunk{
-				Type:      tacklr.StreamEventFunctionCall,
-				ToolCalls: []tacklr.ToolCall{{ID: "call_progress", CallID: "call_progress", Name: "progress_demo", Arguments: `{}`}},
+				Type:       tacklr.StreamEventFunctionCall,
+				ToolCalls:  []tacklr.ToolCall{{ID: "call_progress", CallID: "call_progress", Name: "progress_demo", Arguments: `{}`}},
 				IsComplete: true,
 			}
 			ch <- tacklr.LLMResponseChunk{IsComplete: true}
@@ -1395,7 +1428,8 @@ func TestACP_sessionCancel_midPrompt(t *testing.T) {
 			}
 		},
 	}
-	r := newTestRegistry(testStore(t), strategy, nil)
+	store := testStore(t)
+	r := newTestRegistry(store, strategy, nil)
 	srv := NewServer(r, ACP)
 
 	recNew := &recordingMessageWriter{}
@@ -1455,31 +1489,88 @@ func TestACP_sessionCancel_midPrompt(t *testing.T) {
 		}
 	}
 	if !cancelled {
-		t.Fatalf("want stopReason cancelled, results=%#v frames=%v", recPrompt.Results, recPrompt.framesAsMaps(t))
+		t.Fatalf("want stopReason cancelled, results=%#v frames=%v", recPrompt.Results, recPrompt.FramesAsMaps(t))
 	}
 
-	// Desired: streaming was underway (we saw early text) and cancel bounded growth.
-	framesAfter := messageChunkCount(recPrompt)
+	// Desired: streaming was underway and cancel stops the model (stable send count).
 	if framesBeforeCancel < 1 {
 		t.Fatal("expected agent_message_chunk before cancel")
 	}
-	// Allow a small in-flight race, but cancel must not leave an unbounded flood.
-	if framesAfter > framesBeforeCancel+32 {
-		t.Fatalf("too many message chunks after cancel: before=%d after=%d (model sent %d)",
-			framesBeforeCancel, framesAfter, chunksSent.Load())
+	sentAtDone := chunksSent.Load()
+	time.Sleep(30 * time.Millisecond)
+	sentLater := chunksSent.Load()
+	// After the prompt finishes, the model must not keep producing forever.
+	if sentLater > sentAtDone+8 {
+		t.Fatalf("model still sending after cancel settled: at_done=%d later=%d frames=%d",
+			sentAtDone, sentLater, messageChunkCount(recPrompt))
 	}
 
 	// Desired: session remains registered after cancel.
 	if _, ok := r.sessions.Load(sessionID); !ok {
 		t.Fatal("session should remain registered after cancel")
 	}
+	// Approach A: empty checkpoint exists from session/new so load is real, not only fallback.
+	if _, err := store.LoadSession(context.Background(), sessionID); err != nil {
+		t.Fatalf("empty checkpoint should exist after session/new: %v", err)
+	}
+
+	// Desired: a subsequent prompt on the same session completes normally.
+	strategy.invokeFn = func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+		ch <- tacklr.LLMResponseChunk{
+			Type:       tacklr.StreamEventMessage,
+			MessageId:  "m2",
+			Content:    "after-cancel",
+			IsComplete: true,
+		}
+	}
+	recPrompt2 := &recordingMessageWriter{}
+	body2 := []byte(`{"jsonrpc":"2.0","id":11,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"again"}]}}`)
+	srv.HandleMessage(context.Background(), body2, recPrompt2)
+
+	if len(recPrompt2.Errors) > 0 {
+		t.Fatalf("post-cancel prompt errors: %#v", recPrompt2.Errors)
+	}
+	var endTurn bool
+	var sawAfter bool
+	for _, frame := range recPrompt2.FramesAsMaps(t) {
+		if res, ok := frame["result"].(map[string]any); ok && res["stopReason"] == "end_turn" {
+			endTurn = true
+		}
+		if frame["method"] != "session/update" {
+			continue
+		}
+		params, _ := frame["params"].(map[string]any)
+		update, _ := params["update"].(map[string]any)
+		if update["sessionUpdate"] != "agent_message_chunk" {
+			continue
+		}
+		if content, ok := update["content"].(map[string]any); ok && content["text"] == "after-cancel" {
+			sawAfter = true
+		}
+	}
+	for _, res := range recPrompt2.Results {
+		switch m := res.Result.(type) {
+		case map[string]string:
+			if m["stopReason"] == "end_turn" {
+				endTurn = true
+			}
+		case map[string]any:
+			if m["stopReason"] == "end_turn" {
+				endTurn = true
+			}
+		}
+	}
+	if !endTurn {
+		t.Fatalf("post-cancel prompt want stopReason end_turn, results=%#v frames=%v", recPrompt2.Results, recPrompt2.FramesAsMaps(t))
+	}
+	if !sawAfter {
+		t.Fatal("post-cancel prompt should stream new content")
+	}
 }
 
 func messageChunkCount(w *recordingMessageWriter) int {
-	w.mu.Lock()
-	defer w.mu.Unlock()
 	n := 0
-	for _, f := range w.Frames {
+	for _, f := range w.SnapshotFrames() {
 		var frame map[string]any
 		if json.Unmarshal(f, &frame) != nil {
 			continue

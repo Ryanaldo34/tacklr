@@ -24,7 +24,7 @@ type sessionState struct {
 
 type SessionCheckpoint struct {
 	ContextWindow []*streaming.Message `json:"contextWindow"`
-	State         sessionState        `json:"state"`
+	State         sessionState         `json:"state"`
 }
 
 func NewCheckpoint(contextWindow []*streaming.Message, pendingToolCalls map[string]PendingToolCall, interruptToRequester map[string]string, runtimeState map[string]any, pendingInterrupts, resolvedInterrupts any) (*SessionCheckpoint, error) {

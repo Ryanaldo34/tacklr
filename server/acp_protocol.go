@@ -172,7 +172,7 @@ func (p acpProtocol) OnStreamEvent(ctx context.Context, env ProtocolEnv, threadI
 	}
 
 	if ev.Type == streaming.StreamEventComplete && len(reqID) > 0 && stream.Cancelled() {
-		_ = env.Conn.Writer.WriteResult(reqID, map[string]string{"stopReason": "cancelled"})
+		_ = env.Conn.Writer.WriteResult(reqID, acpPromptResult(stopReasonCancelled))
 		return StreamControl{Finished: true}
 	}
 
@@ -190,7 +190,7 @@ func (p acpProtocol) OnStreamClosed(ctx context.Context, env ProtocolEnv, thread
 		return nil
 	}
 	if cancelled {
-		return env.Conn.Writer.WriteResult(reqID, map[string]string{"stopReason": "cancelled"})
+		return env.Conn.Writer.WriteResult(reqID, acpPromptResult(stopReasonCancelled))
 	}
 	// Parked for user input without mid-turn elicitation resolution.
 	return env.Conn.Writer.WriteError(reqID, clientErrorf(ErrInvalidRequest,

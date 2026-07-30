@@ -3,6 +3,7 @@ package skills
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -30,5 +31,18 @@ func TestLoadDirectories(t *testing.T) {
 	}
 	if len(loaded) != 1 || loaded[0].Name != "weather" {
 		t.Fatalf("unexpected skills: %#v", loaded)
+	}
+}
+
+func TestCatalog_listsNameAndDescription(t *testing.T) {
+	got := Catalog([]Skill{
+		{Name: "a", Description: "Alpha"},
+		{Name: "b", Description: "Beta"},
+	})
+	if !strings.Contains(got, "Available skills") {
+		t.Fatalf("missing preamble: %q", got)
+	}
+	if !strings.Contains(got, "- a: Alpha") || !strings.Contains(got, "- b: Beta") {
+		t.Fatalf("catalog = %q", got)
 	}
 }

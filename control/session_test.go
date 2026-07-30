@@ -8,6 +8,42 @@ import (
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
+func TestPlanSet_withoutChannel_updatesStateOnly(t *testing.T) {
+	rt := HarnessRuntime{}
+	rt.EnsureInitialized()
+	rt.PlanSet([]Todo{{Title: "A", Status: streaming.TodoStatusPending}})
+	plan := rt.PlanGet()
+	if len(plan) != 1 || plan[0].Title != "A" {
+		t.Fatalf("plan = %+v", plan)
+	}
+}
+
+func TestPlanSet_withChannel_deliversPlanUpdate(t *testing.T) {
+	ch := make(chan streaming.StreamEvent, 1)
+	rt := NewRuntime(ch, nil, nil)
+	rt.EnsureInitialized()
+	rt.PlanSet([]Todo{
+		{Title: "Ship", Status: streaming.TodoStatusInProgress, Description: "d"},
+	})
+	select {
+	case ev := <-ch:
+		if ev.Type != streaming.StreamEventPlanUpdate {
+			t.Fatalf("type = %v, want plan update", ev.Type)
+		}
+		if !strings.Contains(string(ev.Data), "Ship") {
+			t.Fatalf("data = %s", ev.Data)
+		}
+	default:
+		t.Fatal("expected plan update on output channel")
+	}
+	// After detach, PlanSet must not hang or panic.
+	rt.SetOutputChannel(nil)
+	rt.PlanSet([]Todo{{Title: "Ship", Status: streaming.TodoStatusCompleted}})
+	if got := rt.PlanGet(); got[0].Status != streaming.TodoStatusCompleted {
+		t.Fatalf("status after detach = %q", got[0].Status)
+	}
+}
+
 func TestPlanGet_rehydratesAfterJSONRoundTrip(t *testing.T) {
 	rt := HarnessRuntime{}
 	rt.EnsureInitialized()

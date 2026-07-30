@@ -16,11 +16,11 @@ import (
 
 // Sentinel errors for the subagent orchestrator.
 var (
-	ErrWorkerNotFound   = errors.New("worker not found")
-	ErrWorkerNoOutput   = errors.New("worker produced no output")
-	ErrWorkerIncomplete = errors.New("worker finished without completing")
-	ErrWorkerNoModel    = errors.New("worker has no model")
-	ErrEmptyWorkerTask  = errors.New("worker task is empty")
+	ErrWorkerNotFound    = errors.New("worker not found")
+	ErrWorkerNoOutput    = errors.New("worker produced no output")
+	ErrWorkerIncomplete  = errors.New("worker finished without completing")
+	ErrWorkerNoModel     = errors.New("worker has no model")
+	ErrEmptyWorkerTask   = errors.New("worker task is empty")
 	ErrWorkerParkMissing = errors.New("parked worker state is missing")
 )
 
@@ -421,13 +421,33 @@ func collectChildInterrupts(worker *AgentHarness, drainedIDs []string) (ids []st
 	return ids, primary
 }
 
-// --- park metadata helpers ---
+// --- park metadata (durable Runtime.State + live harness cache) ---
+
+// parkStore groups parked-worker get/set/clear over durable state and the
+// same-process live map. Callers use a.parks().
+type parkStore struct {
+	h *AgentHarness
+}
+
+func (a *AgentHarness) parks() parkStore { return parkStore{h: a} }
 
 func (a *AgentHarness) getParkMeta(toolCallID string) *parkedWorkerMeta {
+	return a.parks().get(toolCallID)
+}
+
+func (a *AgentHarness) setPark(toolCallID string, meta parkedWorkerMeta, worker *AgentHarness) {
+	a.parks().set(toolCallID, meta, worker)
+}
+
+func (a *AgentHarness) clearPark(toolCallID string) {
+	a.parks().clear(toolCallID)
+}
+
+func (p parkStore) get(toolCallID string) *parkedWorkerMeta {
 	if toolCallID == "" {
 		return nil
 	}
-	parks := a.loadParkMap()
+	parks := p.load()
 	if meta, ok := parks[toolCallID]; ok {
 		cp := meta
 		return &cp
@@ -435,44 +455,44 @@ func (a *AgentHarness) getParkMeta(toolCallID string) *parkedWorkerMeta {
 	return nil
 }
 
-func (a *AgentHarness) setPark(toolCallID string, meta parkedWorkerMeta, worker *AgentHarness) {
-	parks := a.loadParkMap()
+func (p parkStore) set(toolCallID string, meta parkedWorkerMeta, worker *AgentHarness) {
+	parks := p.load()
 	parks[toolCallID] = meta
-	a.storeParkMap(parks)
+	p.store(parks)
 
-	a.parkMu.Lock()
-	if a.parkedWorkersLive == nil {
-		a.parkedWorkersLive = make(map[string]*AgentHarness)
+	p.h.parkMu.Lock()
+	if p.h.parkedWorkersLive == nil {
+		p.h.parkedWorkersLive = make(map[string]*AgentHarness)
 	}
 	if worker != nil {
-		a.parkedWorkersLive[toolCallID] = worker
+		p.h.parkedWorkersLive[toolCallID] = worker
 	}
-	a.parkMu.Unlock()
+	p.h.parkMu.Unlock()
 }
 
-func (a *AgentHarness) clearPark(toolCallID string) {
+func (p parkStore) clear(toolCallID string) {
 	if toolCallID == "" {
 		return
 	}
-	parks := a.loadParkMap()
+	parks := p.load()
 	if _, ok := parks[toolCallID]; ok {
 		delete(parks, toolCallID)
-		a.storeParkMap(parks)
+		p.store(parks)
 	}
-	a.parkMu.Lock()
-	live := a.parkedWorkersLive[toolCallID]
-	delete(a.parkedWorkersLive, toolCallID)
-	a.parkMu.Unlock()
+	p.h.parkMu.Lock()
+	live := p.h.parkedWorkersLive[toolCallID]
+	delete(p.h.parkedWorkersLive, toolCallID)
+	p.h.parkMu.Unlock()
 	if live != nil {
 		live.Close()
 	}
-	if a.interruptPayloads != nil {
-		delete(a.interruptPayloads, toolCallID)
+	if p.h.interruptPayloads != nil {
+		delete(p.h.interruptPayloads, toolCallID)
 	}
 }
 
-func (a *AgentHarness) loadParkMap() map[string]parkedWorkerMeta {
-	raw, ok := a.Runtime.StateGet(parkedWorkersStateKey)
+func (p parkStore) load() map[string]parkedWorkerMeta {
+	raw, ok := p.h.Runtime.StateGet(parkedWorkersStateKey)
 	if !ok || raw == nil {
 		return map[string]parkedWorkerMeta{}
 	}
@@ -505,9 +525,9 @@ func (a *AgentHarness) loadParkMap() map[string]parkedWorkerMeta {
 	}
 }
 
-func (a *AgentHarness) storeParkMap(parks map[string]parkedWorkerMeta) {
+func (p parkStore) store(parks map[string]parkedWorkerMeta) {
 	if len(parks) == 0 {
-		a.Runtime.StateDelete(parkedWorkersStateKey)
+		p.h.Runtime.StateDelete(parkedWorkersStateKey)
 		return
 	}
 	b, err := json.Marshal(parks)
@@ -516,7 +536,7 @@ func (a *AgentHarness) storeParkMap(parks map[string]parkedWorkerMeta) {
 		return
 	}
 	// Store as string so checkpoint JSON round-trips cleanly.
-	a.Runtime.StateSet(parkedWorkersStateKey, string(b))
+	p.h.Runtime.StateSet(parkedWorkersStateKey, string(b))
 }
 
 // workerDrainResult is the outcome of draining a child event stream.

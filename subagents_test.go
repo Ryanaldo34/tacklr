@@ -840,4 +840,3 @@ func TestBuiltinToolsInjectedOnce(t *testing.T) {
 		t.Errorf("plan tools duplicated: edit=%d complete=%d", countNamed("edit_plan"), countNamed("complete_todo"))
 	}
 }
-

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 
@@ -78,6 +79,136 @@ func acpSessionID(t *testing.T, rec *httptest.ResponseRecorder) string {
 		t.Fatalf("missing sessionId in result: %v", resp)
 	}
 	return sessionID
+}
+
+// When one MCP server is unreachable, the other server's tools still appear
+// and can be invoked successfully.
+func TestHandleRPC_sessionMCPServers_partialFailureStillExposesHealthyTools(t *testing.T) {
+	good := newTestMCPServer(t, "ping")
+	store := testStore(t)
+	var invokeCount int
+	strategy := &mockInferenceStrategy{
+		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			invokeCount++
+			if invokeCount == 1 {
+				// Assert healthy tool is present, dead server is not.
+				var names []string
+				for _, tool := range tools {
+					names = append(names, tool.Namespace+"/"+tool.Name)
+				}
+				if !slices.Contains(names, "good/ping") {
+					t.Errorf("expected good/ping in tools, got %v", names)
+				}
+				if slices.Contains(names, "dead/anything") {
+					t.Errorf("dead server tools should be absent, got %v", names)
+				}
+				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventFunctionCall, ToolCalls: []tacklr.ToolCall{
+					{ID: "c1", CallID: "c1", Name: "ping", Namespace: "good", Arguments: `{}`},
+				}, IsComplete: true}
+				ch <- tacklr.LLMResponseChunk{IsComplete: true}
+				return
+			}
+			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "partial ok", IsComplete: true}
+		},
+	}
+	r := newTestRegistry(store, strategy, nil)
+
+	// dead URL: nothing listening
+	body := `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[` +
+		`{"type":"http","name":"dead","url":"http://127.0.0.1:1","headers":[]},` +
+		`{"type":"http","name":"good","url":"` + good.URL + `","headers":[]}` +
+		`]}}`
+	rec1 := serveACPRaw(t, r, body)
+	sessionID := acpSessionID(t, rec1)
+
+	rec2 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"`+sessionID+`","prompt":[{"type":"text","text":"ping"}]}}`)
+	blob, _ := json.Marshal(parseACPFrames(t, rec2.Body))
+	if !strings.Contains(string(blob), "ok") {
+		t.Fatalf("expected MCP tool result ok from healthy server; frames=%s", blob)
+	}
+	if !strings.Contains(string(blob), "partial ok") {
+		t.Fatalf("expected final message; frames=%s", blob)
+	}
+}
+
+// After discovery, the model can invoke a namespaced MCP tool and the handler
+// result is delivered as a tool result event to the client.
+func TestHandleRPC_sessionMCPServers_toolCallReturnsResult(t *testing.T) {
+	mcpHTTP := newTestMCPServer(t, "greet")
+	store := testStore(t)
+	var invokeCount int
+	strategy := &mockInferenceStrategy{
+		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			invokeCount++
+			if invokeCount == 1 {
+				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventFunctionCall, ToolCalls: []tacklr.ToolCall{
+					{ID: "call_mcp", CallID: "call_mcp", Name: "greet", Namespace: "testmcp", Arguments: `{}`},
+				}, IsComplete: true}
+				ch <- tacklr.LLMResponseChunk{IsComplete: true}
+				return
+			}
+			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "mcp done", IsComplete: true}
+		},
+	}
+	r := newTestRegistry(store, strategy, []*tacklr.Tool{})
+
+	rec1 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[{"type":"http","name":"testmcp","url":"`+mcpHTTP.URL+`","headers":[]}]}}`)
+	sessionID := acpSessionID(t, rec1)
+
+	rec2 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"`+sessionID+`","prompt":[{"type":"text","text":"call greet"}]}}`)
+	frames := parseACPFrames(t, rec2.Body)
+
+	var toolResultText string
+	var sawFinal bool
+	for _, f := range frames {
+		if f["error"] != nil {
+			t.Fatalf("prompt error: %v", f["error"])
+		}
+		if f["method"] != "session/update" {
+			continue
+		}
+		params, _ := f["params"].(map[string]any)
+		update, _ := params["update"].(map[string]any)
+		switch update["sessionUpdate"] {
+		case "tool_call_update":
+			// content may be a list of {type,text}
+			if content, ok := update["content"].([]any); ok {
+				for _, c := range content {
+					m, _ := c.(map[string]any)
+					if m["type"] == "text" {
+						if txt, ok := m["text"].(string); ok {
+							toolResultText += txt
+						}
+					}
+				}
+			}
+			if content, ok := update["content"].(map[string]any); ok {
+				if txt, ok := content["text"].(string); ok {
+					toolResultText += txt
+				}
+			}
+			if raw, ok := update["rawOutput"].(string); ok {
+				toolResultText += raw
+			}
+		case "agent_message_chunk":
+			if content, ok := update["content"].(map[string]any); ok && content["text"] == "mcp done" {
+				sawFinal = true
+			}
+		}
+	}
+	if !strings.Contains(toolResultText, "ok") {
+		// Fallback: scan all frames as text for "ok" tool output.
+		blob, _ := json.Marshal(frames)
+		if !strings.Contains(string(blob), "ok") {
+			t.Fatalf("expected MCP tool result containing ok, frames=%s", blob)
+		}
+	}
+	if !sawFinal {
+		t.Error("expected final agent message after MCP tool result")
+	}
+	if invokeCount != 2 {
+		t.Errorf("invokeCount = %d, want 2", invokeCount)
+	}
 }
 
 // A client-supplied http MCP server in session/new is connected to by the
