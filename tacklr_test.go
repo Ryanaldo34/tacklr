@@ -1047,16 +1047,6 @@ func TestNewAgent(t *testing.T) {
 	}
 }
 
-func TestWithStreamingStrategy(t *testing.T) {
-	h := &AgentHarness{}
-	returned := h.WithStreamingStrategy(nil)
-	if returned != h {
-		t.Error("WithStreamingStrategy should return *AgentHarness for chaining")
-	}
-	if h.streamingStrategy != nil {
-		t.Error("streamingStrategy should be nil after setting nil")
-	}
-}
 
 func TestFindTool_namespaceMatching(t *testing.T) {
 	tools := []*Tool{

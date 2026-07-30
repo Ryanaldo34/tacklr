@@ -38,6 +38,13 @@ type HTTPRoute struct {
 
 // Protocol is a complete wire façade over Registry.
 // Transports only provide Conn I/O; protocols own methods, routes, and stream policy.
+//
+// Multi-protocol model (ACP, SSE, future A2A):
+//   - Registry.RunTurn produces protocol-agnostic streaming.StreamEvent values.
+//   - runTurnStream pumps those events through OnStreamEvent / OnStreamClosed.
+//   - Each Protocol maps StreamEvent → its client wire (JSON-RPC, SSE, A2A tasks, …).
+//
+// Adding a protocol should not require harness streaming changes.
 type Protocol interface {
 	Name() string
 
@@ -48,7 +55,8 @@ type Protocol interface {
 	// HTTPRoutes returns routes to mount for ServeHTTP. Nil/empty is fine.
 	HTTPRoutes() []HTTPRoute
 
-	// OnStreamEvent handles one harness event during an active turn.
+	// OnStreamEvent encodes one harness StreamEvent for the client connection.
+	// This is the extension point for ACP, SSE, and future A2A framing.
 	OnStreamEvent(ctx context.Context, env ProtocolEnv, threadID string, stream *EventStream, ev streaming.StreamEvent, reqID json.RawMessage) StreamControl
 
 	// OnStreamClosed is called when the event channel closes without Finished.

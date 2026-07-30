@@ -58,19 +58,18 @@ const (
 )
 
 type (
-	MessageRole       = streaming.MessageRole
-	ItemStatus        = streaming.ItemStatus
-	ContentPart       = streaming.ContentPart
-	ImageURL          = streaming.ImageURL
-	FileData          = streaming.FileData
-	Annotation        = streaming.Annotation
-	URLAnnotation     = streaming.URLAnnotation
-	ToolCall          = streaming.ToolCall
-	StreamEventType   = streaming.StreamEventType
-	StreamEvent       = streaming.StreamEvent
-	LLMResponseChunk  = streaming.LLMResponseChunk
-	Message           = streaming.Message
-	StreamingStrategy = streaming.StreamingStrategy
+	MessageRole      = streaming.MessageRole
+	ItemStatus       = streaming.ItemStatus
+	ContentPart      = streaming.ContentPart
+	ImageURL         = streaming.ImageURL
+	FileData         = streaming.FileData
+	Annotation       = streaming.Annotation
+	URLAnnotation    = streaming.URLAnnotation
+	ToolCall         = streaming.ToolCall
+	StreamEventType  = streaming.StreamEventType
+	StreamEvent      = streaming.StreamEvent
+	LLMResponseChunk = streaming.LLMResponseChunk
+	Message          = streaming.Message
 )
 
 var (
@@ -126,7 +125,6 @@ type AgentHarness struct {
 	MaxWindowSize        int
 	Plan                 []control.Todo
 	subagents            map[string]*SubAgent
-	streamingStrategy    StreamingStrategy
 	interruptToRequester map[string]string
 	pendingToolCalls     map[string]stores.PendingToolCall
 	pendingMu            sync.Mutex
@@ -349,38 +347,31 @@ func emitNonBlocking(out chan<- StreamEvent, ev StreamEvent) {
 	}
 }
 
-// streamChunk enriches and emits one model chunk. Returns false if cancelled.
+// streamChunk emits a StreamEvent onto the harness bus. For function_call
+// chunks, client-facing tool metadata (display name, category) is applied on a
+// copy so execution still uses the real tool Name. Wire framing (ACP, SSE,
+// future A2A) is owned by server.Protocol — not here.
 func (a *AgentHarness) streamChunk(ctx context.Context, chunk LLMResponseChunk, out chan<- StreamEvent) bool {
-	if a.streamingStrategy != nil {
-		if chunk.Type == streaming.StreamEventFunctionCall {
-			for i := range chunk.ToolCalls {
-				tool := a.findTool(chunk.ToolCalls[i].Name, chunk.ToolCalls[i].Namespace)
-				if tool != nil {
-					chunk.ToolCalls[i].Category = tool.Category
-					if tool.DisplayName != "" {
-						chunk.ToolCalls[i].Name = tool.DisplayName
-					} else {
-						chunk.ToolCalls[i].Name = tool.Name
-					}
-				}
+	toolCalls := chunk.ToolCalls
+	if chunk.Type == streaming.StreamEventFunctionCall && len(chunk.ToolCalls) > 0 {
+		// Do not mutate chunk.ToolCalls — the Run loop appends them for Invoke.
+		toolCalls = append([]ToolCall(nil), chunk.ToolCalls...)
+		for i := range toolCalls {
+			tool := a.findTool(toolCalls[i].Name, toolCalls[i].Namespace)
+			if tool == nil {
+				continue
+			}
+			toolCalls[i].Category = tool.Category
+			if tool.DisplayName != "" {
+				toolCalls[i].Name = tool.DisplayName
 			}
 		}
-		// Buffered strategies may still block on out; prefer cancel via parent ctx
-		// by not calling Stream when already cancelled.
-		if ctx.Err() != nil {
-			return false
-		}
-		if err := a.streamingStrategy.Stream(chunk, out); err != nil {
-			slog.Warn("streaming chunk", "error", err)
-			return true
-		}
-		return true
 	}
 	return emit(ctx, out, StreamEvent{
 		Type:      chunk.Type,
 		TurnID:    chunk.TurnId,
 		MessageID: chunk.MessageId,
-		ToolCalls: chunk.ToolCalls,
+		ToolCalls: toolCalls,
 		Content:   chunk.Content,
 	})
 }
@@ -429,11 +420,6 @@ func (a *AgentHarness) emitToolResult(ctx context.Context, out chan<- StreamEven
 	})
 	a.recordWatchdog(msg)
 	return msg
-}
-
-func (a *AgentHarness) WithStreamingStrategy(strategy StreamingStrategy) *AgentHarness {
-	a.streamingStrategy = strategy
-	return a
 }
 
 // initMCP connects to all configured MCP servers, discovers their tools, and

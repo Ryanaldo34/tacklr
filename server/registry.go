@@ -17,15 +17,14 @@ import (
 )
 
 type AgentSpec struct {
-	Name              string
-	Config            tacklr.Config
-	Model             tacklr.InferenceStrategy
-	Tools             []*tacklr.Tool
-	MCPConfigs        []mcp.MCPConfig
-	SubAgents         []*tacklr.SubAgent
-	WatchDog          tacklr.AgentWatchDog
-	StreamingStrategy tacklr.StreamingStrategy
-	Store             stores.BaseStore
+	Name       string
+	Config     tacklr.Config
+	Model      tacklr.InferenceStrategy
+	Tools      []*tacklr.Tool
+	MCPConfigs []mcp.MCPConfig
+	SubAgents  []*tacklr.SubAgent
+	WatchDog   tacklr.AgentWatchDog
+	Store      stores.BaseStore
 }
 
 // sessionState holds per-session configuration provided by the client at
@@ -470,9 +469,6 @@ func (r *Registry) loadAgent(ctx context.Context, agentID, threadID string, load
 	}
 
 	h.SessionId = threadID
-	if spec.StreamingStrategy != nil {
-		h.WithStreamingStrategy(spec.StreamingStrategy)
-	}
 	return h, &spec, nil
 }
 
