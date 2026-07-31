@@ -165,7 +165,7 @@ type AgentHarness struct {
 	out               chan streaming.StreamEvent
 	contextMgr        ContextManager
 	contextPolicy     ContextPolicy
-	toolRunner        *ToolRunner
+	toolRunner        *toolRunner
 }
 
 func (a *AgentHarness) checkpointSession(ctx context.Context) error {
@@ -707,7 +707,11 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 						// json.RawMessage embeds the already-serialized interrupt as a
 						// nested object. Plain []byte would base64-encode as a string
 						// and break consumers that unmarshal data into the interrupt type.
-						payload := map[string]any{"interruptId": intrId, "data": json.RawMessage(serialized)}
+						payload := map[string]any{
+							"interruptId": intrId,
+							"type":        interrupt.TypeName(),
+							"data":        json.RawMessage(serialized),
+						}
 						data, err := json.Marshal(payload)
 						if err != nil {
 							_ = emit(ctx, out, StreamEvent{Type: StreamEventError, Error: fmt.Errorf("marshal interrupt: %w", err)})
@@ -824,7 +828,8 @@ type AgentOptions struct {
 	// ContextPolicy overrides default pressure/compress ratios when non-zero fields are set.
 	ContextPolicy ContextPolicy
 	// ToolInterceptors wrap every harness tool call (outermost first).
-	// nil uses DefaultToolInterceptors(); a non-nil empty slice disables them.
+	// nil uses the built-in chain (planning write lock, permission gate).
+	// A non-nil slice replaces that chain entirely; empty disables interceptors.
 	ToolInterceptors []ToolInterceptor
 }
 
@@ -871,9 +876,9 @@ func newHarnessBase(opts AgentOptions, runtime control.HarnessRuntime, out chan 
 		h.contextPolicy = DefaultContextPolicy()
 	}
 	if opts.ToolInterceptors != nil {
-		h.toolRunner = NewToolRunner(opts.ToolInterceptors...)
+		h.toolRunner = newToolRunner(opts.ToolInterceptors...)
 	} else {
-		h.toolRunner = NewToolRunner(DefaultToolInterceptors()...)
+		h.toolRunner = newToolRunner(planningWriteLock, toolPermissionGate)
 	}
 	return h
 }

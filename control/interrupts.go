@@ -95,6 +95,132 @@ func (c *UserSelectionInterrupt) Error() string {
 	return string(b)
 }
 
+// ACP PermissionOptionKind values.
+const (
+	PermissionAllowOnce    = "allow_once"
+	PermissionAllowAlways  = "allow_always"
+	PermissionRejectOnce   = "reject_once"
+	PermissionRejectAlways = "reject_always"
+)
+
+// PermissionOption is a single choice offered when a tool requires user approval.
+// Field names match ACP session/request_permission options.
+type PermissionOption struct {
+	OptionID string `json:"optionId"`
+	Name     string `json:"name"`
+	Kind     string `json:"kind"`
+}
+
+// DefaultPermissionOptions are the standard ACP permission choices.
+func DefaultPermissionOptions() []PermissionOption {
+	return []PermissionOption{
+		{OptionID: "allow-once", Name: "Allow once", Kind: PermissionAllowOnce},
+		{OptionID: "allow-always", Name: "Allow always", Kind: PermissionAllowAlways},
+		{OptionID: "reject-once", Name: "Reject", Kind: PermissionRejectOnce},
+		{OptionID: "reject-always", Name: "Reject always", Kind: PermissionRejectAlways},
+	}
+}
+
+// ToolPermissionPayload is the consumer resolution for a tool permission interrupt.
+type ToolPermissionPayload struct {
+	InterruptId string `json:"interruptId,omitempty"`
+	OptionID    string `json:"optionId"`
+}
+
+// ToolPermissionInterrupt asks the user to approve or reject a tool call.
+type ToolPermissionInterrupt struct {
+	ToolName string             `json:"toolName,omitempty"`
+	Options  []PermissionOption `json:"options"`
+
+	// Set by Return after the consumer selects an option.
+	SelectedOptionID string `json:"-"`
+	SelectedKind     string `json:"-"`
+	Allowed          bool   `json:"-"`
+}
+
+func (p *ToolPermissionInterrupt) TypeName() string { return "tool_permission" }
+
+func (p *ToolPermissionInterrupt) Serialize() ([]byte, error) {
+	return json.Marshal(p)
+}
+
+func (p *ToolPermissionInterrupt) InitFromPayload(payload []byte) error {
+	if len(payload) == 0 || string(payload) == "null" {
+		p.Options = DefaultPermissionOptions()
+		return nil
+	}
+	var init struct {
+		ToolName string             `json:"toolName"`
+		Options  []PermissionOption `json:"options"`
+	}
+	if err := json.Unmarshal(payload, &init); err != nil {
+		return err
+	}
+	p.ToolName = init.ToolName
+	if len(init.Options) == 0 {
+		p.Options = DefaultPermissionOptions()
+	} else {
+		p.Options = init.Options
+	}
+	return nil
+}
+
+func (p *ToolPermissionInterrupt) ValidatePayload(payload []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		return fmt.Errorf("invalid JSON: %w", err)
+	}
+	if _, ok := raw["optionId"]; !ok {
+		return errors.New("missing required field: optionId")
+	}
+	var res ToolPermissionPayload
+	if err := json.Unmarshal(payload, &res); err != nil {
+		return fmt.Errorf("invalid payload shape: %w", err)
+	}
+	for i := range p.Options {
+		if p.Options[i].OptionID == res.OptionID {
+			return nil
+		}
+	}
+	return fmt.Errorf("unknown optionId %q", res.OptionID)
+}
+
+func (p *ToolPermissionInterrupt) Return(payload []byte) error {
+	var res ToolPermissionPayload
+	if err := json.Unmarshal(payload, &res); err != nil {
+		return err
+	}
+	var opt *PermissionOption
+	for i := range p.Options {
+		if p.Options[i].OptionID == res.OptionID {
+			opt = &p.Options[i]
+			break
+		}
+	}
+	if opt == nil {
+		return fmt.Errorf("unknown optionId %q", res.OptionID)
+	}
+	p.SelectedOptionID = opt.OptionID
+	p.SelectedKind = opt.Kind
+	switch opt.Kind {
+	case PermissionAllowOnce, PermissionAllowAlways:
+		p.Allowed = true
+	case PermissionRejectOnce, PermissionRejectAlways:
+		p.Allowed = false
+	default:
+		return fmt.Errorf("unknown permission kind %q", opt.Kind)
+	}
+	return nil
+}
+
+func (p *ToolPermissionInterrupt) Error() string {
+	b, err := json.Marshal(p)
+	if err != nil {
+		return "[failed to marshal interrupt]"
+	}
+	return string(b)
+}
+
 // --- Interrupt registry & polymorphic JSON ---
 
 // interruptFactories creates fresh, empty Interrupt values for a given type name.
@@ -116,6 +242,7 @@ func registerInterrupt(factory func() Interrupt) {
 
 func init() {
 	registerInterrupt(func() Interrupt { return &UserSelectionInterrupt{} })
+	registerInterrupt(func() Interrupt { return &ToolPermissionInterrupt{} })
 }
 
 // payloadInitializer is an optional capability that Interrupt types implement

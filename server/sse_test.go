@@ -214,6 +214,110 @@ func TestHandleResume_resolvesInterrupt(t *testing.T) {
 	}
 }
 
+func TestHandleResume_toolPermission_allowAndReject(t *testing.T) {
+	// SSE yield + /resume for tool_permission: allow runs the handler; reject
+	// surfaces a permission-denied tool result without executing it.
+	for _, tc := range []struct {
+		name       string
+		optionID   string
+		wantResult string
+		wantDenied bool
+	}{
+		{name: "allow", optionID: "allow-once", wantResult: "secret-ok"},
+		{name: "reject", optionID: "reject-once", wantDenied: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := testStore(t)
+			var ran bool
+			sensitive := tacklr.NewTool(tacklr.ToolConfig{
+				Name:               "sensitive",
+				PermissionRequired: true,
+				Handler: func(ctx context.Context) (string, error) {
+					ran = true
+					return "secret-ok", nil
+				},
+			})
+			var callCount int
+			strategy := &mockInferenceStrategy{
+				invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+					callCount++
+					if callCount == 1 {
+						ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventFunctionCall, ToolCalls: []tacklr.ToolCall{
+							{ID: "call_sens", CallID: "call_sens", Name: "sensitive", Arguments: `{}`},
+						}, IsComplete: true}
+						ch <- tacklr.LLMResponseChunk{IsComplete: true}
+						return
+					}
+					ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "done", IsComplete: true}
+				},
+			}
+			r := newTestRegistry(store, strategy, []*tacklr.Tool{sensitive})
+
+			promptRec := httptest.NewRecorder()
+			NewServer(r, SSE).serveHTTPSSE(promptRec, newSSERequest(t, "/", bytes.NewReader([]byte(`{"agent_id":"default","prompt":"start"}`))))
+
+			events := parseSSEEvents(t, promptRec.Body)
+			var threadID, interruptID string
+			for _, ev := range events {
+				if ev.Type == "thread" {
+					threadID = ev.Content
+				}
+				if ev.Type == "yield" {
+					var payload struct {
+						InterruptId string `json:"interruptId"`
+						Type        string `json:"type"`
+					}
+					if err := json.Unmarshal(ev.Data, &payload); err == nil {
+						interruptID = payload.InterruptId
+						if payload.Type != "tool_permission" {
+							t.Fatalf("yield type = %q", payload.Type)
+						}
+					}
+				}
+			}
+			if threadID == "" || interruptID == "" {
+				t.Fatalf("missing thread/interrupt, events=%+v", events)
+			}
+
+			resumeBody := fmt.Sprintf(`{"agent_id":"default","thread_id":%q,"responses":{%q:{"optionId":%q}}}`, threadID, interruptID, tc.optionID)
+			resumeRec := httptest.NewRecorder()
+			NewServer(r, SSE).serveHTTPSSE(resumeRec, newSSERequest(t, "/resume", bytes.NewReader([]byte(resumeBody))))
+			if resumeRec.Code != http.StatusOK {
+				t.Fatalf("resume status = %d", resumeRec.Code)
+			}
+
+			resumeEvents := parseSSEEvents(t, resumeRec.Body)
+			var foundResult, foundDone, foundDenied bool
+			for _, ev := range resumeEvents {
+				if ev.Type == "tool_result" {
+					if strings.Contains(ev.Content, "secret-ok") {
+						foundResult = true
+					}
+					if strings.Contains(ev.Content, "permission denied") {
+						foundDenied = true
+					}
+				}
+				if ev.Type == "message" && ev.Content == "done" {
+					foundDone = true
+				}
+			}
+			if !foundDone {
+				t.Errorf("expected done message, got %+v", resumeEvents)
+			}
+			if tc.wantDenied {
+				if !foundDenied {
+					t.Errorf("expected permission denied tool_result, got %+v", resumeEvents)
+				}
+				if ran {
+					t.Error("handler ran on reject")
+				}
+			} else if !foundResult {
+				t.Errorf("expected tool_result %q, got %+v", tc.wantResult, resumeEvents)
+			}
+		})
+	}
+}
+
 func TestHandleResume_unknownThread_returnsError(t *testing.T) {
 	store := testStore(t)
 	r := newTestRegistry(store, &mockInferenceStrategy{}, []*tacklr.Tool{})

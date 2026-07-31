@@ -2,10 +2,14 @@ package tacklr
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+
+	"github.com/ryanaldo34/tacklr/control"
 )
 
 // ToolInvocation is a single tool call as it moves through the runner chain.
+// Exported so consumers can implement custom ToolInterceptors via AgentOptions.
 type ToolInvocation struct {
 	Tool     *Tool
 	ArgsJSON string
@@ -18,31 +22,23 @@ type ToolCallFunc func(ctx context.Context, inv ToolInvocation) (string, error)
 // ToolInterceptor gates or wraps a tool call. Call next to continue the chain;
 // return without calling next to short-circuit with a result for the context window.
 // Close over any state the interceptor needs.
+//
+// When AgentOptions.ToolInterceptors is nil, the harness installs its built-in
+// chain (planning write lock, then permission gate). A non-nil slice replaces
+// that chain entirely (empty disables interceptors).
 type ToolInterceptor func(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error)
 
-// ToolRunner executes tool calls through an ordered interceptor chain.
-// The final step always invokes the tool.
-type ToolRunner struct {
+type toolRunner struct {
 	interceptors []ToolInterceptor
 }
 
-// NewToolRunner builds a runner that applies interceptors in the given order
-// (first interceptor is outermost).
-func NewToolRunner(interceptors ...ToolInterceptor) *ToolRunner {
+func newToolRunner(interceptors ...ToolInterceptor) *toolRunner {
 	cp := make([]ToolInterceptor, len(interceptors))
 	copy(cp, interceptors)
-	return &ToolRunner{interceptors: cp}
+	return &toolRunner{interceptors: cp}
 }
 
-// DefaultToolInterceptors returns the harness default interceptor chain.
-func DefaultToolInterceptors() []ToolInterceptor {
-	return []ToolInterceptor{
-		PlanningWriteLock,
-	}
-}
-
-// Run passes the invocation through interceptors, then invokes the tool.
-func (r *ToolRunner) Run(ctx context.Context, inv ToolInvocation) (string, error) {
+func (r *toolRunner) Run(ctx context.Context, inv ToolInvocation) (string, error) {
 	if inv.Tool == nil {
 		return "", fmt.Errorf("%w", ErrToolNotFound)
 	}
@@ -65,15 +61,92 @@ func (r *ToolRunner) Run(ctx context.Context, inv ToolInvocation) (string, error
 	return next(ctx, inv)
 }
 
-// PlanningWriteLock denies tools that require Write access while no plan exists
-// (planning mode: create_plan has not established a todo list yet).
-func PlanningWriteLock(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error) {
-	if requiresWrite(inv.Tool) && len(inv.Runtime.PlanGet()) == 0 {
+// planningWriteLock denies tools that require Write access while no plan exists.
+func planningWriteLock(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error) {
+	if inv.Tool != nil && inv.Tool.Access != nil && inv.Tool.Access.Contains(WritePermission) &&
+		len(inv.Runtime.PlanGet()) == 0 {
 		return "", fmt.Errorf("%w: write tools are locked until create_plan establishes a todo list", ErrToolPermissionDenied)
 	}
 	return next(ctx, inv)
 }
 
-func requiresWrite(tool *Tool) bool {
-	return tool != nil && tool.Access != nil && tool.Access.Contains(WritePermission)
+// toolPermissionGate raises a tool_permission interrupt when PermissionRequired
+// is set. allow_always / reject_always choices are remembered for the session.
+func toolPermissionGate(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error) {
+	if inv.Tool == nil || !inv.Tool.PermissionRequired {
+		return next(ctx, inv)
+	}
+
+	name := inv.Tool.Name
+	if permissionSetHas(inv.Runtime, permissionAlwaysDenyKey, name) {
+		return "", fmt.Errorf("%w: tool %q is always rejected for this session", ErrToolPermissionDenied, name)
+	}
+	if permissionSetHas(inv.Runtime, permissionAlwaysAllowKey, name) {
+		return next(ctx, inv)
+	}
+
+	initPayload, err := json.Marshal(map[string]any{"toolName": name})
+	if err != nil {
+		return "", fmt.Errorf("marshal permission interrupt: %w", err)
+	}
+	intr, err := inv.Runtime.RaiseInterrupt("tool_permission", initPayload)
+	if err != nil {
+		return "", err
+	}
+	perm, ok := intr.(*control.ToolPermissionInterrupt)
+	if !ok || perm == nil {
+		return "", fmt.Errorf("tool permission: unexpected interrupt type %T", intr)
+	}
+
+	switch perm.SelectedKind {
+	case control.PermissionAllowAlways:
+		permissionRemember(inv.Runtime, permissionAlwaysAllowKey, name)
+	case control.PermissionRejectAlways:
+		permissionRemember(inv.Runtime, permissionAlwaysDenyKey, name)
+	}
+
+	if !perm.Allowed {
+		return "", fmt.Errorf("%w: user rejected tool %q", ErrToolPermissionDenied, name)
+	}
+	return next(ctx, inv)
+}
+
+const (
+	permissionAlwaysAllowKey = "_permission_always_allow"
+	permissionAlwaysDenyKey  = "_permission_always_deny"
+)
+
+func permissionSetHas(rt HarnessRuntime, key, toolName string) bool {
+	v, ok := rt.StateGet(key)
+	if !ok || v == nil {
+		return false
+	}
+	switch s := v.(type) {
+	case map[string]bool:
+		return s[toolName]
+	case map[string]any:
+		b, _ := s[toolName].(bool)
+		return b
+	default:
+		return false
+	}
+}
+
+func permissionRemember(rt HarnessRuntime, key, toolName string) {
+	set := make(map[string]bool)
+	if v, ok := rt.StateGet(key); ok && v != nil {
+		switch m := v.(type) {
+		case map[string]bool:
+			for k, b := range m {
+				set[k] = b
+			}
+		case map[string]any:
+			for k, raw := range m {
+				b, _ := raw.(bool)
+				set[k] = b
+			}
+		}
+	}
+	set[toolName] = true
+	rt.StateSet(key, set)
 }

@@ -195,6 +195,47 @@ func TestRaiseInterrupt_unknownKindReturnsError(t *testing.T) {
 	}
 }
 
+// Tool permission interrupt payload outcomes (package-local; harness/SSE/ACP
+// cover the full protocol path).
+func TestToolPermissionInterrupt_returnOutcomes(t *testing.T) {
+	rt := HarnessRuntime{}
+	rt.EnsureInitialized()
+
+	initPayload, _ := json.Marshal(map[string]any{"toolName": "mutate"})
+
+	rt.CurrentToolCallID = "perm_allow"
+	_, _ = rt.RaiseInterrupt("tool_permission", initPayload)
+	if _, err := rt.ReturnInterrupt("perm_allow", []byte(`{"optionId":"allow-once"}`)); err != nil {
+		t.Fatal(err)
+	}
+	intr, err := rt.RaiseInterrupt("tool_permission", initPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := intr.(*ToolPermissionInterrupt); !p.Allowed || p.SelectedKind != PermissionAllowOnce {
+		t.Fatalf("allow: %+v", p)
+	}
+
+	rt.CurrentToolCallID = "perm_reject"
+	_, _ = rt.RaiseInterrupt("tool_permission", initPayload)
+	if _, err := rt.ReturnInterrupt("perm_reject", []byte(`{"optionId":"reject-once"}`)); err != nil {
+		t.Fatal(err)
+	}
+	intr, err = rt.RaiseInterrupt("tool_permission", initPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := intr.(*ToolPermissionInterrupt); p.Allowed {
+		t.Fatal("expected reject")
+	}
+
+	rt.CurrentToolCallID = "perm_bad"
+	_, _ = rt.RaiseInterrupt("tool_permission", initPayload)
+	if _, err := rt.ReturnInterrupt("perm_bad", []byte(`{"optionId":"not-a-real-option"}`)); err == nil {
+		t.Fatal("expected invalid optionId to fail")
+	}
+}
+
 func TestReturnInterrupt_notFoundReturnsError(t *testing.T) {
 	rt := HarnessRuntime{}
 	rt.EnsureInitialized()

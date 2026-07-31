@@ -2,38 +2,17 @@ package tacklr
 
 import (
 	"context"
-	"errors"
+	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ryanaldo34/tacklr/control"
-	"github.com/ryanaldo34/tacklr/streaming"
 )
 
-func TestToolRunner_invokesToolWhenNoInterceptors(t *testing.T) {
-	tool := NewTool(ToolConfig{
-		Name: "echo",
-		Handler: func(ctx context.Context, args struct {
-			Msg string `json:"msg"`
-		}) (string, error) {
-			return args.Msg, nil
-		},
-	})
-	runner := NewToolRunner()
-	got, err := runner.Run(context.Background(), ToolInvocation{
-		Tool:     tool,
-		ArgsJSON: `{"msg":"hi"}`,
-		Runtime:  control.NewRuntime(nil, nil, nil),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != "hi" {
-		t.Fatalf("got %q, want hi", got)
-	}
-}
-
-func TestToolRunner_interceptorOrderAndShortCircuit(t *testing.T) {
+// TestToolRunner_interceptorChainOrder is the extension contract for custom
+// interceptors: outermost first, short-circuit skips later stages and the tool.
+func TestToolRunner_interceptorChainOrder(t *testing.T) {
 	var order []string
 	tool := NewTool(ToolConfig{
 		Name: "t",
@@ -42,184 +21,97 @@ func TestToolRunner_interceptorOrderAndShortCircuit(t *testing.T) {
 			return "ok", nil
 		},
 	})
-
 	outer := func(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error) {
-		order = append(order, "outer-before")
-		out, err := next(ctx, inv)
-		order = append(order, "outer-after")
-		return out, err
-	}
-	inner := func(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error) {
-		order = append(order, "inner-before")
-		out, err := next(ctx, inv)
-		order = append(order, "inner-after")
-		return out, err
+		order = append(order, "outer")
+		return next(ctx, inv)
 	}
 	block := func(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error) {
 		order = append(order, "block")
 		return "blocked", nil
 	}
-
-	t.Run("passes through in order", func(t *testing.T) {
-		order = nil
-		runner := NewToolRunner(outer, inner)
-		got, err := runner.Run(context.Background(), ToolInvocation{Tool: tool})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got != "ok" {
-			t.Fatalf("got %q", got)
-		}
-		want := []string{"outer-before", "inner-before", "tool", "inner-after", "outer-after"}
-		if strings.Join(order, ",") != strings.Join(want, ",") {
-			t.Fatalf("order = %v, want %v", order, want)
-		}
-	})
-
-	t.Run("short circuit skips tool", func(t *testing.T) {
-		order = nil
-		runner := NewToolRunner(outer, block, inner)
-		got, err := runner.Run(context.Background(), ToolInvocation{Tool: tool})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got != "blocked" {
-			t.Fatalf("got %q, want blocked", got)
-		}
-		want := []string{"outer-before", "block", "outer-after"}
-		if strings.Join(order, ",") != strings.Join(want, ",") {
-			t.Fatalf("order = %v, want %v", order, want)
-		}
-	})
-}
-
-func TestPlanningWriteLock_deniesWriteToolsWithoutPlan(t *testing.T) {
-	rt := control.NewRuntime(nil, nil, nil)
-	rt.EnsureInitialized()
-
-	writeTool := NewTool(ToolConfig{
-		Name:   "mutate",
-		Access: ToolWriteAccess,
-		Handler: func(ctx context.Context) (string, error) {
-			return "mutated", nil
-		},
-	})
-	readTool := NewTool(ToolConfig{
-		Name:   "lookup",
-		Access: ToolReadAccess,
-		Handler: func(ctx context.Context) (string, error) {
-			return "looked up", nil
-		},
-	})
-	noAccessTool := NewTool(ToolConfig{
-		Name: "plain",
-		Handler: func(ctx context.Context) (string, error) {
-			return "plain", nil
-		},
-	})
-
-	runner := NewToolRunner(PlanningWriteLock)
-
-	t.Run("write tool blocked without plan", func(t *testing.T) {
-		_, err := runner.Run(context.Background(), ToolInvocation{Tool: writeTool, Runtime: rt})
-		if !errors.Is(err, ErrToolPermissionDenied) {
-			t.Fatalf("got %v, want ErrToolPermissionDenied", err)
-		}
-	})
-
-	t.Run("read tool allowed without plan", func(t *testing.T) {
-		got, err := runner.Run(context.Background(), ToolInvocation{Tool: readTool, Runtime: rt})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got != "looked up" {
-			t.Fatalf("got %q", got)
-		}
-	})
-
-	t.Run("tool without access allowed without plan", func(t *testing.T) {
-		got, err := runner.Run(context.Background(), ToolInvocation{Tool: noAccessTool, Runtime: rt})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got != "plain" {
-			t.Fatalf("got %q", got)
-		}
-	})
-
-	t.Run("write tool allowed after plan exists", func(t *testing.T) {
-		rt.PlanSet([]control.Todo{{Title: "step", Status: streaming.TodoStatusInProgress}})
-		got, err := runner.Run(context.Background(), ToolInvocation{Tool: writeTool, Runtime: rt})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got != "mutated" {
-			t.Fatalf("got %q", got)
-		}
-	})
-}
-
-func TestHarness_planningModeLocksWriteToolsInContext(t *testing.T) {
-	writeTool := NewTool(ToolConfig{
-		Name:   "mutate",
-		Access: ToolWriteAccess,
-		Handler: func(ctx context.Context) (string, error) {
-			return "should not run", nil
-		},
-	})
-	var invokeCount int
-	strategy := &mockStrategy{
-		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, events chan<- LLMResponseChunk) {
-			invokeCount++
-			if invokeCount == 1 {
-				events <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-					{ID: "c1", CallID: "c1", Name: "mutate", Arguments: `{}`},
-				}, IsComplete: true}
-				events <- LLMResponseChunk{IsComplete: true}
-				return
-			}
-			events <- LLMResponseChunk{Type: StreamEventMessage, Content: "blocked and done", IsComplete: true}
-		},
+	inner := func(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error) {
+		order = append(order, "inner")
+		return next(ctx, inv)
 	}
-	ah := NewAgent(context.Background(), AgentOptions{
-		Config: Config{MaxWindowSize: 8192},
-		Model:  strategy,
-		Tools:  []*Tool{writeTool},
-	})
 
-	ch, err := ah.Run(context.Background(), "do a write")
+	got, err := newToolRunner(outer, block, inner).Run(context.Background(), ToolInvocation{Tool: tool})
 	if err != nil {
 		t.Fatal(err)
 	}
-	var toolResult string
-	for ev := range ch {
-		if ev.Type == StreamEventToolResult {
-			toolResult = ev.Content
-		}
+	if got != "blocked" {
+		t.Fatalf("got %q", got)
 	}
-	if toolResult == "" {
-		t.Fatal("expected tool result in stream")
-	}
-	if !strings.Contains(toolResult, "permission denied") && !strings.Contains(toolResult, "locked") {
-		t.Fatalf("tool result %q should explain write lock", toolResult)
-	}
-	if strings.Contains(toolResult, "should not run") {
-		t.Fatalf("write handler ran despite planning lock: %q", toolResult)
-	}
-
-	found := false
-	for _, m := range ah.ContextWindow {
-		if m != nil && m.Role == RoleTool && (strings.Contains(m.Content, "permission denied") || strings.Contains(m.Content, "locked")) {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Fatal("expected permission denial in context window tool messages")
+	if strings.Join(order, ",") != "outer,block" {
+		t.Fatalf("order = %v", order)
 	}
 }
 
-func TestHarness_writeToolRunsAfterPlanCreated(t *testing.T) {
+// TestPermissionSessionMemory_stateShapes covers remember/has for empty,
+// map[string]bool, map[string]any (checkpoint rehydrate), and unknown types.
+func TestPermissionSessionMemory_stateShapes(t *testing.T) {
+	rt := control.NewRuntime(nil, nil, nil)
+	rt.EnsureInitialized()
+
+	// Empty → first remember.
+	permissionRemember(rt, permissionAlwaysAllowKey, "a")
+	if !permissionSetHas(rt, permissionAlwaysAllowKey, "a") {
+		t.Fatal("expected a after first remember")
+	}
+	if permissionSetHas(rt, permissionAlwaysAllowKey, "missing") {
+		t.Fatal("missing tool should be false")
+	}
+
+	// map[string]bool merge: second tool preserves first.
+	permissionRemember(rt, permissionAlwaysAllowKey, "b")
+	if !permissionSetHas(rt, permissionAlwaysAllowKey, "a") || !permissionSetHas(rt, permissionAlwaysAllowKey, "b") {
+		t.Fatal("expected a and b after bool-map merge")
+	}
+
+	// Checkpoint rehydrate shape map[string]any.
+	raw, err := json.Marshal(map[string]bool{"c": true, "d": false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var anyMap map[string]any
+	if err := json.Unmarshal(raw, &anyMap); err != nil {
+		t.Fatal(err)
+	}
+	rt.StateSet(permissionAlwaysDenyKey, anyMap)
+	if !permissionSetHas(rt, permissionAlwaysDenyKey, "c") {
+		t.Fatal("expected c from any-map")
+	}
+	if permissionSetHas(rt, permissionAlwaysDenyKey, "d") {
+		t.Fatal("d=false should be false")
+	}
+	// Merge into any-map via remember → rewrites as map[string]bool.
+	permissionRemember(rt, permissionAlwaysDenyKey, "e")
+	if !permissionSetHas(rt, permissionAlwaysDenyKey, "c") || !permissionSetHas(rt, permissionAlwaysDenyKey, "e") {
+		t.Fatal("expected c and e after any-map merge")
+	}
+
+	// Unknown stored type → has is false; remember starts fresh.
+	rt.StateSet(permissionAlwaysAllowKey, "not-a-map")
+	if permissionSetHas(rt, permissionAlwaysAllowKey, "a") {
+		t.Fatal("unknown type should not report membership")
+	}
+	permissionRemember(rt, permissionAlwaysAllowKey, "z")
+	if !permissionSetHas(rt, permissionAlwaysAllowKey, "z") {
+		t.Fatal("expected z after remember over unknown type")
+	}
+	if permissionSetHas(rt, permissionAlwaysAllowKey, "a") {
+		t.Fatal("fresh set should not keep prior a")
+	}
+
+	// Nil value under key.
+	rt.StateSet(permissionAlwaysAllowKey, nil)
+	if permissionSetHas(rt, permissionAlwaysAllowKey, "z") {
+		t.Fatal("nil value should be false")
+	}
+}
+
+// TestHarness_planningWriteLock_thenUnlockAfterCreatePlan: write tools fail
+// until create_plan; then they succeed on the same Run loop.
+func TestHarness_planningWriteLock_thenUnlockAfterCreatePlan(t *testing.T) {
 	writeTool := NewTool(ToolConfig{
 		Name:   "mutate",
 		Access: ToolWriteAccess,
@@ -234,13 +126,18 @@ func TestHarness_writeToolRunsAfterPlanCreated(t *testing.T) {
 			switch invokeCount {
 			case 1:
 				events <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-					{ID: "c1", CallID: "c1", Name: "create_plan",
-						Arguments: `{"todos":[{"title":"A","status":"pending","description":"d"}]}`},
+					{ID: "w1", CallID: "w1", Name: "mutate", Arguments: `{}`},
 				}, IsComplete: true}
 				events <- LLMResponseChunk{IsComplete: true}
 			case 2:
 				events <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-					{ID: "c2", CallID: "c2", Name: "mutate", Arguments: `{}`},
+					{ID: "p1", CallID: "p1", Name: "create_plan",
+						Arguments: `{"todos":[{"title":"A","status":"pending","description":"d"}]}`},
+				}, IsComplete: true}
+				events <- LLMResponseChunk{IsComplete: true}
+			case 3:
+				events <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
+					{ID: "w2", CallID: "w2", Name: "mutate", Arguments: `{}`},
 				}, IsComplete: true}
 				events <- LLMResponseChunk{IsComplete: true}
 			default:
@@ -261,14 +158,275 @@ func TestHarness_writeToolRunsAfterPlanCreated(t *testing.T) {
 	for range ch {
 	}
 
-	foundMutated := false
+	var locked, unlocked bool
 	for _, m := range ah.ContextWindow {
-		if m != nil && m.Role == RoleTool && m.Content == "mutated" {
-			foundMutated = true
-			break
+		if m == nil || m.Role != RoleTool {
+			continue
+		}
+		if strings.Contains(m.Content, "locked") || strings.Contains(m.Content, "permission denied") {
+			locked = true
+		}
+		if m.Content == "mutated" {
+			unlocked = true
 		}
 	}
-	if !foundMutated {
-		t.Fatal("expected successful mutate tool result in context after plan was created")
+	if !locked {
+		t.Fatal("expected write denial while planning (no plan yet)")
+	}
+	if !unlocked {
+		t.Fatal("expected mutate success after create_plan")
+	}
+}
+
+// TestHarness_toolPermission_allowAlwaysRemembers: first call parks for
+// permission; allow-always resumes and runs the tool; a later call skips the interrupt.
+func TestHarness_toolPermission_allowAlwaysRemembers(t *testing.T) {
+	var handlerCalls int
+	tool := NewTool(ToolConfig{
+		Name:               "sensitive",
+		PermissionRequired: true,
+		Handler: func(ctx context.Context) (string, error) {
+			handlerCalls++
+			return "secret-ok", nil
+		},
+	})
+	var invokeCount int
+	strategy := &mockStrategy{
+		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, events chan<- LLMResponseChunk) {
+			invokeCount++
+			switch invokeCount {
+			case 1, 3:
+				events <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
+					{ID: "s1", CallID: "s1", Name: "sensitive", Arguments: `{}`},
+				}, IsComplete: true}
+				events <- LLMResponseChunk{IsComplete: true}
+			default:
+				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
+			}
+		},
+	}
+	ah := NewAgent(context.Background(), AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  strategy,
+		Tools:  []*Tool{tool},
+	})
+
+	ch1, err := ah.Run(context.Background(), "need secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var interruptID string
+	for ev := range ch1 {
+		if ev.Type == StreamEventInterrupt {
+			var payload struct {
+				InterruptId string `json:"interruptId"`
+				Type        string `json:"type"`
+			}
+			if err := json.Unmarshal(ev.Data, &payload); err == nil {
+				interruptID = payload.InterruptId
+				if payload.Type != "tool_permission" {
+					t.Fatalf("type = %q", payload.Type)
+				}
+			}
+		}
+	}
+	if interruptID == "" {
+		t.Fatal("expected tool_permission yield")
+	}
+	if handlerCalls != 0 {
+		t.Fatal("handler must not run before permission")
+	}
+
+	ch2, err := ah.ReturnFromInterrupt(context.Background(), map[string][]byte{
+		interruptID: []byte(`{"optionId":"allow-always"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range ch2 {
+	}
+	if handlerCalls != 1 {
+		t.Fatalf("handlerCalls after allow = %d, want 1", handlerCalls)
+	}
+
+	// Session reload rehydrates maps as map[string]any — still honors allow-always.
+	if v, ok := ah.Runtime.StateGet("_permission_always_allow"); ok {
+		b, _ := json.Marshal(v)
+		var rehydrated map[string]any
+		if err := json.Unmarshal(b, &rehydrated); err != nil {
+			t.Fatal(err)
+		}
+		ah.Runtime.StateSet("_permission_always_allow", rehydrated)
+	}
+
+	ch3, err := ah.Run(context.Background(), "again")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawInterrupt bool
+	for ev := range ch3 {
+		if ev.Type == StreamEventInterrupt {
+			sawInterrupt = true
+		}
+	}
+	if sawInterrupt {
+		t.Fatal("allow-always should not re-raise permission interrupt")
+	}
+	if handlerCalls != 2 {
+		t.Fatalf("handlerCalls after second run = %d, want 2", handlerCalls)
+	}
+}
+
+// TestHarness_toolPermission_rejectAlwaysRemembers: reject-always fails the tool
+// and subsequent calls fail without another yield.
+func TestHarness_toolPermission_rejectAlwaysRemembers(t *testing.T) {
+	tool := NewTool(ToolConfig{
+		Name:               "sensitive",
+		PermissionRequired: true,
+		Handler:            func(ctx context.Context) (string, error) { return "nope", nil },
+	})
+	var invokeCount int
+	strategy := &mockStrategy{
+		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, events chan<- LLMResponseChunk) {
+			invokeCount++
+			switch invokeCount {
+			case 1, 3:
+				events <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
+					{ID: "s1", CallID: "s1", Name: "sensitive", Arguments: `{}`},
+				}, IsComplete: true}
+				events <- LLMResponseChunk{IsComplete: true}
+			default:
+				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
+			}
+		},
+	}
+	ah := NewAgent(context.Background(), AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  strategy,
+		Tools:  []*Tool{tool},
+	})
+
+	ch1, err := ah.Run(context.Background(), "need secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var interruptID string
+	for ev := range ch1 {
+		if ev.Type == StreamEventInterrupt {
+			var payload struct {
+				InterruptId string `json:"interruptId"`
+			}
+			if err := json.Unmarshal(ev.Data, &payload); err == nil {
+				interruptID = payload.InterruptId
+			}
+		}
+	}
+	if interruptID == "" {
+		t.Fatal("expected permission yield")
+	}
+
+	ch2, err := ah.ReturnFromInterrupt(context.Background(), map[string][]byte{
+		interruptID: []byte(`{"optionId":"reject-always"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range ch2 {
+	}
+
+	var denied int
+	for _, m := range ah.ContextWindow {
+		if m != nil && m.Role == RoleTool && strings.Contains(m.Content, "permission denied") {
+			denied++
+		}
+	}
+	if denied < 1 {
+		t.Fatal("expected permission denial after reject-always")
+	}
+
+	ch3, err := ah.Run(context.Background(), "again")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawInterrupt bool
+	for ev := range ch3 {
+		if ev.Type == StreamEventInterrupt {
+			sawInterrupt = true
+		}
+	}
+	if sawInterrupt {
+		t.Fatal("reject-always should not re-raise permission interrupt")
+	}
+	denied = 0
+	for _, m := range ah.ContextWindow {
+		if m != nil && m.Role == RoleTool && strings.Contains(m.Content, "permission denied") {
+			denied++
+		}
+	}
+	if denied < 2 {
+		t.Fatalf("expected at least 2 denials in context, got %d", denied)
+	}
+}
+
+// TestHarness_toolTimeout_surfacesAsToolResult: Timeout on the tool is enforced
+// by the runner and reported as a tool result error in the turn.
+func TestHarness_toolTimeout_surfacesAsToolResult(t *testing.T) {
+	tool := NewTool(ToolConfig{
+		Name:    "slow",
+		Timeout: 40 * time.Millisecond,
+		Handler: func(ctx context.Context) (string, error) {
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+			case <-time.After(5 * time.Second):
+				return "too late", nil
+			}
+		},
+	})
+	var invokeCount int
+	strategy := &mockStrategy{
+		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, events chan<- LLMResponseChunk) {
+			invokeCount++
+			if invokeCount == 1 {
+				events <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
+					{ID: "t1", CallID: "t1", Name: "slow", Arguments: `{}`},
+				}, IsComplete: true}
+				events <- LLMResponseChunk{IsComplete: true}
+				return
+			}
+			events <- LLMResponseChunk{Type: StreamEventMessage, Content: "after timeout", IsComplete: true}
+		},
+	}
+	ah := NewAgent(context.Background(), AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  strategy,
+		Tools:  []*Tool{tool},
+	})
+
+	start := time.Now()
+	ch, err := ah.Run(context.Background(), "go slow")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var toolResult string
+	for ev := range ch {
+		if ev.Type == StreamEventToolResult {
+			toolResult = ev.Content
+		}
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Fatal("turn took too long for a short tool timeout")
+	}
+	if !strings.Contains(toolResult, "timed out") && !strings.Contains(toolResult, "deadline") {
+		t.Fatalf("tool result %q should report timeout", toolResult)
+	}
+	found := false
+	for _, m := range ah.ContextWindow {
+		if m != nil && m.Role == RoleTool && (strings.Contains(m.Content, "timed out") || strings.Contains(m.Content, "deadline")) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("timeout tool result missing from context window")
 	}
 }

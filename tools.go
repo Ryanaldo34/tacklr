@@ -39,6 +39,8 @@ type Tool struct {
 	Access      mapset.Set[ToolPermission]
 	// Timeout is an optional per-invocation deadline. Zero means none.
 	Timeout time.Duration
+	// PermissionRequired asks the user to approve the tool before it runs.
+	PermissionRequired bool
 
 	handlerFunc func(ctx context.Context, args map[string]any, runtime HarnessRuntime) (string, error)
 	parameters  map[string]any
@@ -53,6 +55,8 @@ type ToolConfig struct {
 	Category    streaming.ToolCategory
 	Access      mapset.Set[ToolPermission]
 	Timeout     time.Duration
+	// PermissionRequired asks the user to approve the tool before it runs.
+	PermissionRequired bool
 
 	Handler any
 }
@@ -133,14 +137,15 @@ func NewTool(cfg ToolConfig) *Tool {
 	}
 
 	t := &Tool{
-		Name:        cfg.Name,
-		DisplayName: cfg.DisplayName,
-		Description: cfg.Description,
-		Namespace:   cfg.Namespace,
-		Category:    cfg.Category,
-		Access:      cfg.Access,
-		Timeout:     cfg.Timeout,
-		strict:      true,
+		Name:               cfg.Name,
+		DisplayName:        cfg.DisplayName,
+		Description:        cfg.Description,
+		Namespace:          cfg.Namespace,
+		Category:           cfg.Category,
+		Access:             cfg.Access,
+		Timeout:            cfg.Timeout,
+		PermissionRequired: cfg.PermissionRequired,
+		strict:             true,
 	}
 	if argsType != nil {
 		t.parameters = typeToJSONSchema(argsType, 0)
