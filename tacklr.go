@@ -73,14 +73,15 @@ type (
 )
 
 var (
-	ErrModelRefused    = errors.New("model refused")
-	ErrMaxTokens       = errors.New("max tokens reached")
-	ErrMaxTurnRequests = errors.New("max turn model requests exceeded")
-	ErrApiKeyNotSet    = errors.New("api key not set")
-	ErrModelNotSet     = errors.New("model not set")
-	ErrUnknownModel    = errors.New("unknown model")
-	ErrToolNotFound = errors.New("tool not found")
-	ErrToolTimeout  = errors.New("tool timed out")
+	ErrModelRefused         = errors.New("model refused")
+	ErrMaxTokens            = errors.New("max tokens reached")
+	ErrMaxTurnRequests      = errors.New("max turn model requests exceeded")
+	ErrApiKeyNotSet         = errors.New("api key not set")
+	ErrModelNotSet          = errors.New("model not set")
+	ErrUnknownModel         = errors.New("unknown model")
+	ErrToolNotFound         = errors.New("tool not found")
+	ErrToolTimeout          = errors.New("tool timed out")
+	ErrToolPermissionDenied = errors.New("tool permission denied")
 )
 
 // WrapStopReason wraps a cause under a terminal stop-reason sentinel so
@@ -164,6 +165,7 @@ type AgentHarness struct {
 	out               chan streaming.StreamEvent
 	contextMgr        ContextManager
 	contextPolicy     ContextPolicy
+	toolRunner        *ToolRunner
 }
 
 func (a *AgentHarness) checkpointSession(ctx context.Context) error {
@@ -689,7 +691,11 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 					}
 					runtimeCopy := a.Runtime
 					runtimeCopy.CurrentToolCallID = tcKey
-					output, err := tool.Invoke(ctx, tc.Arguments, runtimeCopy)
+					output, err := a.toolRunner.Run(ctx, ToolInvocation{
+						Tool:     tool,
+						ArgsJSON: tc.Arguments,
+						Runtime:  runtimeCopy,
+					})
 					var interrupt control.Interrupt
 					if errors.As(err, &interrupt) {
 						intrId := uuid.New().String()
@@ -817,6 +823,9 @@ type AgentOptions struct {
 	ContextManager ContextManager
 	// ContextPolicy overrides default pressure/compress ratios when non-zero fields are set.
 	ContextPolicy ContextPolicy
+	// ToolInterceptors wrap every harness tool call (outermost first).
+	// nil uses DefaultToolInterceptors(); a non-nil empty slice disables them.
+	ToolInterceptors []ToolInterceptor
 }
 
 func NewAgent(ctx context.Context, opts AgentOptions) *AgentHarness {
@@ -860,6 +869,11 @@ func newHarnessBase(opts AgentOptions, runtime control.HarnessRuntime, out chan 
 	}
 	if h.contextPolicy.PressureRatio <= 0 && h.contextPolicy.CompressFraction <= 0 {
 		h.contextPolicy = DefaultContextPolicy()
+	}
+	if opts.ToolInterceptors != nil {
+		h.toolRunner = NewToolRunner(opts.ToolInterceptors...)
+	} else {
+		h.toolRunner = NewToolRunner(DefaultToolInterceptors()...)
 	}
 	return h
 }
