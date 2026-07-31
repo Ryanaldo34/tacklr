@@ -502,7 +502,9 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 	}
 	a.initMCP(ctx)
 	a.injectBuiltinTools()
-	out := make(chan StreamEvent)
+	// Buffered so tool EmitUpdate (non-blocking) is not dropped while the Run
+	// loop is busy or the consumer has not yet entered its receive loop.
+	out := make(chan StreamEvent, streamEventBuffer)
 	a.Runtime.SetOutputChannel(out)
 
 	emitCancelled := func() {
@@ -792,26 +794,31 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 }
 
 func (a *AgentHarness) ReturnFromInterrupt(ctx context.Context, finishedInterrupts map[string][]byte) (<-chan StreamEvent, error) {
+	a.pendingMu.Lock()
 	if a.interruptPayloads == nil {
 		a.interruptPayloads = make(map[string][]byte)
 	}
 	for interruptId, payload := range finishedInterrupts {
 		toolCallId, ok := a.interruptToRequester[interruptId]
 		if !ok {
+			a.pendingMu.Unlock()
 			return nil, fmt.Errorf("no tool call id found for interrupt %s: %w", interruptId, control.ErrInterruptNotFound)
 		}
 		// Stash payload so spawn_worker can forward it to a parked child.
 		a.interruptPayloads[toolCallId] = payload
 		if _, err := a.Runtime.ReturnInterrupt(toolCallId, payload); err != nil {
+			a.pendingMu.Unlock()
 			return nil, fmt.Errorf("return from interrupt %q: %w", interruptId, err)
 		}
 		delete(a.interruptToRequester, interruptId)
 		if tc, ok := a.pendingToolCalls[toolCallId]; ok {
 			a.pendingToolCalls[toolCallId] = stores.PendingToolCall{ToolCall: tc.ToolCall, InterruptActive: false}
 		} else {
+			a.pendingMu.Unlock()
 			return nil, fmt.Errorf("no pending tool call found for tool call id %s", toolCallId)
 		}
 	}
+	a.pendingMu.Unlock()
 	return a.Run(ctx, "")
 }
 
@@ -843,10 +850,14 @@ type AgentOptions struct {
 	ToolInterceptors []ToolInterceptor
 }
 
+// streamEventBuffer sizes the harness event bus so non-blocking EmitUpdate
+// (progress, worker status) is not dropped when the consumer is briefly behind.
+const streamEventBuffer = 64
+
 func NewAgent(ctx context.Context, opts AgentOptions) *AgentHarness {
 	// Runtime output channel is nil until Run; PlanSet before Run only mutates state.
 	// a.out is a non-nil sentinel so Run can detect an initialized harness.
-	events := make(chan streaming.StreamEvent)
+	events := make(chan streaming.StreamEvent, streamEventBuffer)
 	runtime := control.NewRuntime(nil, opts.Store, nil)
 	runtime.EnsureInitialized()
 	h := newHarnessBase(opts, runtime, events)

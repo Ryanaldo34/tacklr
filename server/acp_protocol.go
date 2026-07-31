@@ -75,11 +75,14 @@ func (p acpProtocol) HandleInbound(ctx context.Context, env ProtocolEnv, body []
 	case "session/prompt", "session/resume":
 		return p.handleSessionTurn(ctx, env, pr)
 	case "initialize":
-		if env.Conn.RPC != nil && len(pr.ClientCapsRaw) > 0 {
-			env.Conn.Caps = ParseClientCapabilities(pr.ClientCapsRaw)
-			env.Conn.RPC.Caps = env.Conn.Caps
-		} else if len(pr.ClientCapsRaw) > 0 {
-			env.Conn.Caps = ParseClientCapabilities(pr.ClientCapsRaw)
+		if len(pr.ClientCapsRaw) > 0 {
+			caps := ParseClientCapabilities(pr.ClientCapsRaw)
+			if env.Conn != nil {
+				env.Conn.Caps = caps
+				if env.Conn.RPC != nil {
+					env.Conn.RPC.SetCaps(caps)
+				}
+			}
 		}
 		return env.Conn.Writer.WriteResult(pr.ID, acpInitializeResult())
 	case "authenticate":

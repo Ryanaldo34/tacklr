@@ -55,8 +55,6 @@ func (s *Server) ServeStdio(ctx context.Context, in io.Reader, out io.Writer) er
 	s.Client = bridge
 	defer func() { s.Client = nil }()
 
-	conn := &Conn{Writer: w, RPC: bridge}
-	env := ProtocolEnv{Registry: s.Registry, Conn: conn}
 	proto := s.primary()
 
 	readCh := make(chan stdioReadResult, 1)
@@ -77,13 +75,19 @@ func (s *Server) ServeStdio(ctx context.Context, in io.Reader, out io.Writer) er
 	}()
 
 	var wg sync.WaitGroup
+	// Each inbound line gets its own Conn so concurrent handlers do not race on
+	// Caps. Capabilities are loaded from / stored on the bridge under its mutex.
 	dispatch := func(body []byte) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			// Keep Conn caps/RPC in sync if initialize updated bridge caps.
-			conn.Caps = bridge.Caps
-			if err := proto.HandleInbound(ctx, env, body); err != nil {
+			reqConn := &Conn{
+				Writer: w,
+				RPC:    bridge,
+				Caps:   bridge.GetCaps(),
+			}
+			reqEnv := ProtocolEnv{Registry: s.Registry, Conn: reqConn}
+			if err := proto.HandleInbound(ctx, reqEnv, body); err != nil {
 				slog.Debug("inbound handler", "error", err, "protocol", proto.Name())
 			}
 		}()
@@ -189,7 +193,7 @@ func waitHTTPServer(ctx context.Context, shutdown func(context.Context) error, e
 func (s *Server) HandleMessage(ctx context.Context, body []byte, w MessageWriter) {
 	conn := &Conn{Writer: w, RPC: s.Client}
 	if s.Client != nil {
-		conn.Caps = s.Client.Caps
+		conn.Caps = s.Client.GetCaps()
 		conn.RPC = s.Client
 	}
 	env := ProtocolEnv{Registry: s.Registry, Conn: conn}

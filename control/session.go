@@ -47,16 +47,20 @@ const planStateKey = "_plan"
 // Runtime hook to emit custom events as updates from tool calls.
 // Non-blocking: drops if no listener or channel full so tools never hang.
 func (rt *HarnessRuntime) EmitUpdate(message string) {
-	if rt.ch == nil {
+	rt.mu.RLock()
+	ch := rt.ch
+	msgID := rt.CurrentToolCallID
+	rt.mu.RUnlock()
+	if ch == nil {
 		return
 	}
 	event := streaming.StreamEvent{
 		Type:      streaming.StreamEventToolUpdate,
 		Content:   message,
-		MessageID: rt.CurrentToolCallID,
+		MessageID: msgID,
 	}
 	select {
-	case rt.ch <- event:
+	case ch <- event:
 	default:
 	}
 }
