@@ -32,7 +32,7 @@ func SelectionToElicitationParams(sessionID, toolCallID, question string, opts [
 			return nil, fmt.Errorf("option %d: empty title", i)
 		}
 		titles = append(titles, o.Title)
-		msg.WriteString(fmt.Sprintf("%d. %s", i+1, o.Title))
+		fmt.Fprintf(&msg, "%d. %s", i+1, o.Title)
 		if o.Description != "" {
 			msg.WriteString(" — ")
 			msg.WriteString(o.Description)
@@ -96,21 +96,4 @@ func ElicitationResultToSelectionPayload(raw json.RawMessage, opts []control.Use
 	default:
 		return action, nil, fmt.Errorf("unknown elicitation action %q", action)
 	}
-}
-
-// ParseUserSelectionFromInterruptData extracts options from StreamEventInterrupt Data
-// payload shape {"interruptId":"...","data":<serialized UserSelectionInterrupt>}.
-func ParseUserSelectionFromInterruptData(data []byte) (interruptID string, opts []control.UserChoice, err error) {
-	var envelope struct {
-		InterruptId string          `json:"interruptId"`
-		Data        json.RawMessage `json:"data"`
-	}
-	if err := json.Unmarshal(data, &envelope); err != nil {
-		return "", nil, err
-	}
-	var usi control.UserSelectionInterrupt
-	if err := json.Unmarshal(envelope.Data, &usi); err != nil {
-		return "", nil, fmt.Errorf("unmarshal selection interrupt: %w", err)
-	}
-	return envelope.InterruptId, usi.Options, nil
 }

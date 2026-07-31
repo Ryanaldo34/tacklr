@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/google/uuid"
+
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/stores"
@@ -178,9 +179,9 @@ func (r *Registry) CreateSession(cwd string, mcpServers []mcp.MCPConfig) *Sessio
 		configValues: configValues,
 	})
 	if r.store != nil {
-		if cp, err := stores.NewCheckpoint(nil, nil, nil, nil, nil, nil); err != nil {
-			slog.Warn("failed to build empty session checkpoint", "session_id", threadID, "error", err)
-		} else if err := r.store.SaveSession(context.Background(), threadID, *cp); err != nil {
+		// Empty checkpoint (all nil inputs) never fails to build.
+		cp, _ := stores.NewCheckpoint(nil, nil, nil, nil, nil, nil)
+		if err := r.store.SaveSession(context.Background(), threadID, *cp); err != nil {
 			slog.Warn("failed to save empty session checkpoint", "session_id", threadID, "error", err)
 		}
 	}
@@ -197,7 +198,10 @@ func (r *Registry) LoadSession(sessionID, cwd string, mcpServers []mcp.MCPConfig
 	if !ok {
 		return nil, clientErrorf(ErrSessionNotFound, "session %q not found", sessionID)
 	}
-	sess := state.(*sessionState)
+	sess, ok := state.(*sessionState)
+	if !ok {
+		return nil, clientErrorf(ErrSessionNotFound, "session %q not found", sessionID)
+	}
 	sess.mu.Lock()
 	if cwd != sess.cwd {
 		sess.mu.Unlock()
@@ -217,7 +221,10 @@ func (r *Registry) SetConfigOption(sessionID, configID, value string) (*SessionV
 	if !ok {
 		return nil, clientErrorf(ErrSessionNotFound, "session %q not found", sessionID)
 	}
-	sess := state.(*sessionState)
+	sess, ok := state.(*sessionState)
+	if !ok {
+		return nil, clientErrorf(ErrSessionNotFound, "session %q not found", sessionID)
+	}
 	sess.mu.Lock()
 	if sess.configValues == nil {
 		sess.configValues = map[string]string{}
@@ -251,7 +258,9 @@ func (r *Registry) CloseSession(sessionID string) {
 // harness work, the registry forwarder, and runTurnStream.
 func (r *Registry) CancelSession(sessionID string) {
 	if c, ok := r.activeTurns.Load(sessionID); ok {
-		c.(context.CancelFunc)()
+		if cancel, ok := c.(context.CancelFunc); ok {
+			cancel()
+		}
 	}
 }
 
@@ -262,7 +271,9 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 	var sess *sessionState
 	if req.SessionID != "" {
 		if state, ok := r.sessions.Load(req.SessionID); ok {
-			sess = state.(*sessionState)
+			if s, ok := state.(*sessionState); ok {
+				sess = s
+			}
 		}
 	}
 

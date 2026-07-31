@@ -13,10 +13,13 @@
 
 # Code coverage profiles and other test artifacts
 *.out
-coverage.*
+coverage.out
+coverage.html
+coverage-summary.md
+coverage.breakdown
 *.coverprofile
 profile.cov
-
+# Keep docs/badges/coverage.json tracked (README shields endpoint).
 # Dependency directories (remove the comment below to include it)
 # vendor/
 

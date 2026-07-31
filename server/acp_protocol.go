@@ -27,7 +27,7 @@ func (acpProtocol) Name() string { return "acp" }
 
 func (p acpProtocol) HTTPRoutes() []HTTPRoute {
 	return []HTTPRoute{{
-		Method:  "POST",
+		Method:  http.MethodPost,
 		Pattern: "/",
 		Handler: p.handleHTTP,
 	}}
@@ -56,15 +56,9 @@ func (p acpProtocol) HandleInbound(ctx context.Context, env ProtocolEnv, body []
 
 	pr, err := validateACPRequest(body)
 	if err != nil {
+		// validateACPRequest always returns a nil *parsedRequest on error.
 		slog.Debug("client error", "error", err)
-		if pr != nil && pr.Notification {
-			return nil
-		}
-		var id json.RawMessage
-		if pr != nil {
-			id = pr.ID
-		}
-		_ = env.Conn.Writer.WriteError(id, err)
+		_ = env.Conn.Writer.WriteError(nil, err)
 		return err
 	}
 
@@ -81,11 +75,14 @@ func (p acpProtocol) HandleInbound(ctx context.Context, env ProtocolEnv, body []
 	case "session/prompt", "session/resume":
 		return p.handleSessionTurn(ctx, env, pr)
 	case "initialize":
-		if env.Conn.RPC != nil && len(pr.ClientCapsRaw) > 0 {
-			env.Conn.Caps = ParseClientCapabilities(pr.ClientCapsRaw)
-			env.Conn.RPC.Caps = env.Conn.Caps
-		} else if len(pr.ClientCapsRaw) > 0 {
-			env.Conn.Caps = ParseClientCapabilities(pr.ClientCapsRaw)
+		if len(pr.ClientCapsRaw) > 0 {
+			caps := ParseClientCapabilities(pr.ClientCapsRaw)
+			if env.Conn != nil {
+				env.Conn.Caps = caps
+				if env.Conn.RPC != nil {
+					env.Conn.RPC.SetCaps(caps)
+				}
+			}
 		}
 		return env.Conn.Writer.WriteResult(pr.ID, acpInitializeResult())
 	case "authenticate":
@@ -156,11 +153,10 @@ func (p acpProtocol) handleSessionTurn(ctx context.Context, env ProtocolEnv, pr 
 }
 
 func (p acpProtocol) OnStreamEvent(ctx context.Context, env ProtocolEnv, threadID string, stream *EventStream, ev streaming.StreamEvent, reqID json.RawMessage) StreamControl {
-	// Mid-turn elicitation for user selection.
-	if ev.Type == streaming.StreamEventInterrupt && env.Conn != nil && env.Conn.Caps.ElicitationForm && env.Conn.RPC != nil {
-		newEvents, err := resolveSelectionViaElicitation(ctx, env, threadID, stream, &ev)
+	if ev.Type == streaming.StreamEventInterrupt && env.Conn != nil && env.Conn.RPC != nil {
+		newEvents, err := resolveInterruptViaACP(ctx, env, threadID, stream, &ev)
 		if err != nil {
-			slog.Warn("elicitation failed", "error", err, "thread_id", threadID)
+			slog.Warn("acp interrupt resolution failed", "error", err, "thread_id", threadID)
 			frames, _ := eventToAcpJsonRpc(threadID, &streaming.StreamEvent{
 				Type:  streaming.StreamEventError,
 				Error: err,
@@ -168,7 +164,10 @@ func (p acpProtocol) OnStreamEvent(ctx context.Context, env ProtocolEnv, threadI
 			frames = injectReqID(frames, reqID, true)
 			return StreamControl{Frames: frames, Finished: true, Err: err}
 		}
-		return StreamControl{ReplaceEvents: newEvents}
+		if newEvents != nil {
+			return StreamControl{ReplaceEvents: newEvents}
+		}
+		// nil, nil → client cannot resolve mid-turn; park for OnStreamClosed.
 	}
 
 	if ev.Type == streaming.StreamEventComplete && len(reqID) > 0 && stream.Cancelled() {
@@ -192,9 +191,9 @@ func (p acpProtocol) OnStreamClosed(ctx context.Context, env ProtocolEnv, thread
 	if cancelled {
 		return env.Conn.Writer.WriteResult(reqID, acpPromptResult(stopReasonCancelled))
 	}
-	// Parked for user input without mid-turn elicitation resolution.
+	// Parked for user input without mid-turn client RPC resolution.
 	return env.Conn.Writer.WriteError(reqID, clientErrorf(ErrInvalidRequest,
-		"turn requires user input but client does not support elicitation form mode"))
+		"turn requires user input but client cannot resolve interrupts mid-turn"))
 }
 
 func injectReqID(frames [][]byte, reqID json.RawMessage, terminal bool) [][]byte {
@@ -212,6 +211,52 @@ func injectReqID(frames [][]byte, reqID json.RawMessage, terminal bool) [][]byte
 		}
 	}
 	return out
+}
+
+// resolveInterruptViaACP handles mid-turn interrupts over client RPC.
+// Returns (nil, nil) when this interrupt kind cannot be resolved mid-turn
+// (caller parks the turn). Returns (events, nil) on successful resume.
+func resolveInterruptViaACP(ctx context.Context, env ProtocolEnv, threadID string, stream *EventStream, ev *streaming.StreamEvent) (<-chan streaming.StreamEvent, error) {
+	envl, err := ParseInterruptEnvelope(ev.Data)
+	if err != nil {
+		return nil, fmt.Errorf("parse interrupt envelope: %w", err)
+	}
+	kind := envl.Type
+	if kind == "" {
+		// Backward compat: older yields without type are user selections.
+		kind = "user_selection_choice"
+	}
+	switch kind {
+	case "tool_permission":
+		return resolvePermissionViaRequest(ctx, env, threadID, stream, ev)
+	case "user_selection_choice":
+		if !env.Conn.Caps.ElicitationForm {
+			return nil, nil
+		}
+		return resolveSelectionViaElicitation(ctx, env, threadID, stream, ev)
+	default:
+		return nil, fmt.Errorf("unsupported interrupt type %q", kind)
+	}
+}
+
+func resolvePermissionViaRequest(ctx context.Context, env ProtocolEnv, threadID string, stream *EventStream, ev *streaming.StreamEvent) (<-chan streaming.StreamEvent, error) {
+	interruptID, perm, err := ParseToolPermissionFromInterruptData(ev.Data)
+	if err != nil {
+		return nil, fmt.Errorf("parse permission interrupt: %w", err)
+	}
+	params := PermissionToACPParams(threadID, ev.MessageID, perm)
+	raw, err := env.Conn.RPC.Call(ctx, "session/request_permission", params)
+	if err != nil {
+		return nil, fmt.Errorf("session/request_permission: %w", err)
+	}
+	resolution, cancelled, err := RequestPermissionResultToPayload(raw)
+	if err != nil {
+		return nil, err
+	}
+	if cancelled {
+		return nil, fmt.Errorf("permission request cancelled")
+	}
+	return stream.ResumeInterrupts(ctx, map[string][]byte{interruptID: resolution})
 }
 
 func resolveSelectionViaElicitation(ctx context.Context, env ProtocolEnv, threadID string, stream *EventStream, ev *streaming.StreamEvent) (<-chan streaming.StreamEvent, error) {
@@ -240,10 +285,8 @@ func resolveSelectionViaElicitation(ctx context.Context, env ProtocolEnv, thread
 		return stream.ResumeInterrupts(ctx, map[string][]byte{interruptID: resolution})
 	case "decline":
 		return nil, fmt.Errorf("user declined to answer")
-	case "cancel":
+	default: // "cancel" — ElicitationResultToSelectionPayload rejects any other action.
 		return nil, fmt.Errorf("user cancelled the prompt")
-	default:
-		return nil, fmt.Errorf("unexpected elicitation action %q", action)
 	}
 }
 

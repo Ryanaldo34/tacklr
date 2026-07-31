@@ -7,6 +7,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
+
 	"github.com/ryanaldo34/tacklr"
 )
 
@@ -36,5 +37,8 @@ func writeWSInternalError(ctx context.Context, c *websocket.Conn) error {
 }
 
 func writeWSJSON(ctx context.Context, c *websocket.Conn, v any) error {
-	return wsjson.Write(ctx, c, v)
+	return wsWriteJSON(ctx, c, v)
 }
+
+// wsWriteJSON is the WebSocket JSON write implementation. Tests may swap it.
+var wsWriteJSON = wsjson.Write

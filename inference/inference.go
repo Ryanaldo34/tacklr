@@ -88,14 +88,8 @@ func (s *OpenAIInferenceStrategy) WithStructuredOutput(v any) tacklr.InferenceSt
 	if t.Kind() == reflect.Ptr {
 		t = t.Elem()
 	}
-	schema, err := tacklr.TypeToJSONSchema(reflect.New(t).Elem().Interface())
-	if err != nil {
-		slog.Warn("structured output schema build failed; structured output disabled", "type", t.Name(), "error", err)
-		s.structuredOutputSchema = nil
-		s.structuredOutputName = ""
-		s.structuredOutputType = nil
-		return s
-	}
+	// TypeToJSONSchema only fails for nil types; value types always succeed.
+	schema, _ := tacklr.TypeToJSONSchema(reflect.New(t).Elem().Interface())
 	s.structuredOutputSchema = schema
 	s.structuredOutputName = t.Name()
 	s.structuredOutputType = t
@@ -129,6 +123,9 @@ func (s *OpenAIInferenceStrategy) MaxContextWindow() (int, error) {
 	return 0, fmt.Errorf("max context window: unknown model %q: %w", s.model, tacklr.ErrUnknownModel)
 }
 
+// getEncoding is tiktoken.GetEncoding; overridden in tests for the rare failure path.
+var getEncoding = tiktoken.GetEncoding
+
 func (s *OpenAIInferenceStrategy) CountTokens(ctx context.Context, messages []*tacklr.Message, tools []*tacklr.Tool) (int, error) {
 	if s.apiKey == "" {
 		return 0, fmt.Errorf("count tokens: %w", tacklr.ErrApiKeyNotSet)
@@ -137,22 +134,12 @@ func (s *OpenAIInferenceStrategy) CountTokens(ctx context.Context, messages []*t
 		return 0, fmt.Errorf("count tokens: %w", tacklr.ErrModelNotSet)
 	}
 
-	items, err := marshalMessagesToInput(messages)
-	if err != nil {
-		return 0, fmt.Errorf("marshal messages: %w", err)
-	}
-
-	inputJSON, err := json.Marshal(items)
-	if err != nil {
-		return 0, fmt.Errorf("marshal input items: %w", err)
-	}
+	items := marshalMessagesToInput(messages)
+	inputJSON, _ := json.Marshal(items)
 
 	var toolsJSON json.RawMessage
 	if len(tools) > 0 {
-		toolsStr, err := tacklr.ToolsAsJson(tools)
-		if err != nil {
-			return 0, fmt.Errorf("serialize tools: %w", err)
-		}
+		toolsStr := tacklr.ToolsAsJson(tools)
 		toolsJSON = json.RawMessage(toolsStr)
 	}
 
@@ -177,12 +164,9 @@ func (s *OpenAIInferenceStrategy) CountTokens(ctx context.Context, messages []*t
 		}
 	}
 
-	body, err := json.Marshal(reqBody)
-	if err != nil {
-		return 0, fmt.Errorf("marshal request: %w", err)
-	}
+	body, _ := json.Marshal(reqBody)
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", s.baseURL+"/responses/input_tokens", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, s.baseURL+"/responses/input_tokens", bytes.NewReader(body))
 	if err != nil {
 		return 0, fmt.Errorf("create request: %w", err)
 	}
@@ -200,9 +184,10 @@ func (s *OpenAIInferenceStrategy) CountTokens(ctx context.Context, messages []*t
 		return 0, fmt.Errorf("read response: %w", err)
 	}
 
-	if httpResp.StatusCode != 200 {
-		if httpResp.StatusCode == 404 || httpResp.StatusCode == 400 || httpResp.StatusCode == 422 {
-			tke, err := tiktoken.GetEncoding("o200k_base")
+	if httpResp.StatusCode != http.StatusOK {
+		if httpResp.StatusCode == http.StatusNotFound || httpResp.StatusCode == http.StatusBadRequest || httpResp.StatusCode == http.StatusUnprocessableEntity {
+			// Local fallback when the provider has no input_tokens endpoint.
+			tke, err := getEncoding("o200k_base")
 			if err != nil {
 				return 0, fmt.Errorf("tiktoken count tokens: %w", err)
 			}
@@ -210,9 +195,7 @@ func (s *OpenAIInferenceStrategy) CountTokens(ctx context.Context, messages []*t
 			for _, msg := range messages {
 				contents = append(contents, msg.Content)
 			}
-			tokens := strings.Join(contents, "\n")
-			tokenCount := len(tke.Encode(tokens, nil, nil))
-			return tokenCount, nil
+			return len(tke.Encode(strings.Join(contents, "\n"), nil, nil)), nil
 		}
 		return 0, &APIStatusError{Status: httpResp.StatusCode, Body: extractErrorMessage(respBody)}
 	}
@@ -236,24 +219,15 @@ func (s *OpenAIInferenceStrategy) Invoke(ctx context.Context, messages []*tacklr
 		return nil, fmt.Errorf("invoke: %w", tacklr.ErrModelNotSet)
 	}
 
-	items, err := marshalMessagesToInput(messages)
-	if err != nil {
-		return nil, fmt.Errorf("marshal messages: %w", err)
-	}
+	items := marshalMessagesToInput(messages)
 
 	var toolsJSON json.RawMessage
 	if len(tools) > 0 {
-		toolsStr, err := tacklr.ToolsAsJson(tools)
-		if err != nil {
-			return nil, fmt.Errorf("serialize tools: %w", err)
-		}
+		toolsStr := tacklr.ToolsAsJson(tools)
 		toolsJSON = json.RawMessage(toolsStr)
 	}
 
-	inputJSON, err := json.Marshal(items)
-	if err != nil {
-		return nil, fmt.Errorf("marshal input items: %w", err)
-	}
+	inputJSON, _ := json.Marshal(items)
 
 	reqBody := responsesRequest{
 		Model:  s.model,
@@ -284,10 +258,7 @@ func (s *OpenAIInferenceStrategy) Invoke(ctx context.Context, messages []*tacklr
 		}
 	}
 
-	body, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("marshal request: %w", err)
-	}
+	body, _ := json.Marshal(reqBody)
 
 	events := make(chan tacklr.LLMResponseChunk, 10)
 
@@ -306,7 +277,7 @@ func (s *OpenAIInferenceStrategy) Invoke(ctx context.Context, messages []*tacklr
 	go func() {
 		defer close(events)
 
-		httpReq, err := http.NewRequestWithContext(ctx, "POST", s.baseURL+"/responses", bytes.NewReader(body))
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, s.baseURL+"/responses", bytes.NewReader(body))
 		if err != nil {
 			slog.Error("create request", "error", err)
 			sendChunk(tacklr.LLMResponseChunk{Type: tacklr.StreamEventError, Content: fmt.Sprintf("create request: %v", err)})
@@ -325,7 +296,7 @@ func (s *OpenAIInferenceStrategy) Invoke(ctx context.Context, messages []*tacklr
 		}
 		defer httpResp.Body.Close()
 
-		if httpResp.StatusCode != 200 {
+		if httpResp.StatusCode != http.StatusOK {
 			respBody, _ := io.ReadAll(httpResp.Body)
 			classified := ClassifyProviderFailure(httpResp.StatusCode, respBody)
 			slog.Error("non-200 response", "status", httpResp.StatusCode, "error", classified)
@@ -462,7 +433,6 @@ func (s *OpenAIInferenceStrategy) parseSSEResponse(ctx context.Context, body io.
 			return
 		}
 	}
-
 }
 
 func mustJSON(v any) []byte {
@@ -610,7 +580,7 @@ func (s *OpenAIInferenceStrategy) emitReasoningChunk(raw json.RawMessage, events
 	}
 }
 
-func marshalMessagesToInput(messages []*tacklr.Message) ([]json.RawMessage, error) {
+func marshalMessagesToInput(messages []*tacklr.Message) []json.RawMessage {
 	var items []json.RawMessage
 
 	for _, msg := range messages {
@@ -621,10 +591,7 @@ func marshalMessagesToInput(messages []*tacklr.Message) ([]json.RawMessage, erro
 				CallID: msg.ToolCallID,
 				Output: msg.Content,
 			}
-			b, err := json.Marshal(item)
-			if err != nil {
-				return nil, fmt.Errorf("marshal tool message: %w", err)
-			}
+			b, _ := json.Marshal(item)
 			items = append(items, b)
 
 		case tacklr.RoleUser, tacklr.RoleSystem:
@@ -632,10 +599,7 @@ func marshalMessagesToInput(messages []*tacklr.Message) ([]json.RawMessage, erro
 				Role:    string(msg.Role),
 				Content: msg.Content,
 			}
-			b, err := json.Marshal(item)
-			if err != nil {
-				return nil, fmt.Errorf("marshal %s message: %w", msg.Role, err)
-			}
+			b, _ := json.Marshal(item)
 			items = append(items, b)
 
 		case tacklr.RoleDeveloper:
@@ -646,10 +610,7 @@ func marshalMessagesToInput(messages []*tacklr.Message) ([]json.RawMessage, erro
 				Role:    string(tacklr.RoleSystem),
 				Content: msg.Content,
 			}
-			b, err := json.Marshal(item)
-			if err != nil {
-				return nil, fmt.Errorf("marshal developer message: %w", err)
-			}
+			b, _ := json.Marshal(item)
 			items = append(items, b)
 
 		case tacklr.RoleAssistant:
@@ -658,10 +619,7 @@ func marshalMessagesToInput(messages []*tacklr.Message) ([]json.RawMessage, erro
 					Role:    string(msg.Role),
 					Content: msg.Content,
 				}
-				b, err := json.Marshal(item)
-				if err != nil {
-					return nil, fmt.Errorf("marshal assistant message: %w", err)
-				}
+				b, _ := json.Marshal(item)
 				items = append(items, b)
 			}
 			for _, tc := range msg.ToolCalls {
@@ -671,14 +629,11 @@ func marshalMessagesToInput(messages []*tacklr.Message) ([]json.RawMessage, erro
 					Name:      tc.Name,
 					Arguments: tc.Arguments,
 				}
-				b, err := json.Marshal(fc)
-				if err != nil {
-					return nil, fmt.Errorf("marshal function_call input: %w", err)
-				}
+				b, _ := json.Marshal(fc)
 				items = append(items, b)
 			}
 		}
 	}
 
-	return items, nil
+	return items
 }

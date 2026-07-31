@@ -81,10 +81,11 @@ var askUserChoiceTool = NewTool(ToolConfig{
 		if err != nil {
 			return "", err
 		}
-		choice := intr.(*control.UserSelectionInterrupt).ConfirmedChoice
-		if choice == nil {
+		usi, ok := intr.(*control.UserSelectionInterrupt)
+		if !ok || usi.ConfirmedChoice == nil {
 			return "", fmt.Errorf("user selection missing confirmed choice")
 		}
+		choice := usi.ConfirmedChoice
 		if choice.Description != "" {
 			return fmt.Sprintf("User selected %q — %s", choice.Title, choice.Description), nil
 		}

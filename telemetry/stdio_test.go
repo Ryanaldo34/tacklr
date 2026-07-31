@@ -67,7 +67,6 @@ func TestAllMethods_returnNil(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		c := c
 		t.Run(c.name, func(t *testing.T) {
 			defer func() {
 				if r := recover(); r != nil {
@@ -106,7 +105,7 @@ func TestRecordOutput_roleGuard(t *testing.T) {
 	if err := s.RecordOutput(&tacklr.Message{Role: tacklr.RoleUser, Content: "user msg"}); err != nil {
 		t.Fatalf("RecordOutput(user) returned error: %v", err)
 	}
-	if bytes.Contains([]byte(buf.String()), []byte("agent output")) {
+	if bytes.Contains(buf.Bytes(), []byte("agent output")) {
 		t.Fatalf("expected RoleUser to NOT log 'agent output', got: %s", buf.String())
 	}
 
@@ -115,7 +114,7 @@ func TestRecordOutput_roleGuard(t *testing.T) {
 	if err := s.RecordOutput(&tacklr.Message{Role: tacklr.RoleAssistant, Content: "assistant msg"}); err != nil {
 		t.Fatalf("RecordOutput(assistant) returned error: %v", err)
 	}
-	if !bytes.Contains([]byte(buf.String()), []byte("agent output")) {
+	if !bytes.Contains(buf.Bytes(), []byte("agent output")) {
 		t.Fatalf("expected RoleAssistant to log 'agent output', got: %s", buf.String())
 	}
 }

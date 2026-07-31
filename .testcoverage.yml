@@ -1,0 +1,49 @@
+# Test coverage gates for Tacklr.
+# Enforced in CI via go-test-coverage (https://github.com/vladopajic/go-test-coverage).
+#
+# Thresholds mirror project standards:
+#   - control, inference, internal/mcp, skills, telemetry → 100%
+#   - server → 99%+
+#   - root harness → 90%+ (raise as coverage work lands)
+#   - stores → 90% after excluding postgres (intentionally not unit-tested)
+
+profile: coverage.out
+
+threshold:
+  file: 0
+  # Default for any package that appears in the profile and is not overridden.
+  package: 80
+  # Module total after excludes (~96.5% today).
+  total: 95
+
+# First matching override wins (specific packages first).
+override:
+  - path: github.com/ryanaldo34/tacklr/control$
+    threshold: 100
+  - path: github.com/ryanaldo34/tacklr/inference$
+    threshold: 100
+  - path: github.com/ryanaldo34/tacklr/internal/mcp$
+    threshold: 100
+  - path: github.com/ryanaldo34/tacklr/skills$
+    threshold: 100
+  - path: github.com/ryanaldo34/tacklr/telemetry$
+    threshold: 100
+  - path: github.com/ryanaldo34/tacklr/server$
+    threshold: 99
+  - path: github.com/ryanaldo34/tacklr/stores$
+    threshold: 90
+  - path: github.com/ryanaldo34/tacklr$
+    threshold: 90
+
+exclude:
+  # Repo-relative paths (matched as regexes against file paths).
+  paths:
+    - cmd/testserver
+    - internal/testkit
+    - stores/postgres.go
+
+breakdown-file-name: coverage.breakdown
+
+diff:
+  base-breakdown-file-name: ""
+  threshold: null

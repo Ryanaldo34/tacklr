@@ -95,6 +95,24 @@ func TestInMemoryStore_saveOverwritesSession(t *testing.T) {
 	}
 }
 
+func TestNewCheckpoint_nilInterruptBlobsAndMarshalError(t *testing.T) {
+	cp, err := NewCheckpoint(nil, nil, nil, map[string]any{"k": 1}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cp.State.PendingInterrupts != nil || cp.State.ResolvedInterrupts != nil {
+		t.Fatalf("nil blobs should stay nil: pending=%v resolved=%v",
+			cp.State.PendingInterrupts, cp.State.ResolvedInterrupts)
+	}
+	// json.Marshal of a channel fails — exercise error return path.
+	if _, err := NewCheckpoint(nil, nil, nil, nil, make(chan int), nil); err == nil {
+		t.Fatal("expected marshal error for pending interrupts")
+	}
+	if _, err := NewCheckpoint(nil, nil, nil, nil, nil, make(chan int)); err == nil {
+		t.Fatal("expected marshal error for resolved interrupts")
+	}
+}
+
 func TestInMemoryStore_concurrentSaveLoad(t *testing.T) {
 	store := NewInMemoryStore()
 	ctx := context.Background()

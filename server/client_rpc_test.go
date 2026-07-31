@@ -91,6 +91,94 @@ func TestClientBridge_CallAndResponse(t *testing.T) {
 	}
 }
 
+func TestClientBridge_noBridgeAndMarshal(t *testing.T) {
+	var b *ClientBridge
+	if _, err := b.Call(context.Background(), "m", nil); err == nil {
+		t.Fatal("nil bridge")
+	}
+	b = NewClientBridge(nil)
+	if _, err := b.Call(context.Background(), "m", nil); err == nil {
+		t.Fatal("nil writer")
+	}
+	// unmarshalable params
+	w := &recordingWriter{}
+	b = NewClientBridge(w)
+	if _, err := b.Call(context.Background(), "m", make(chan int)); err == nil {
+		t.Fatal("want marshal error")
+	}
+}
+
+func TestClientBridge_errorResponseAndConcurrent(t *testing.T) {
+	w := &recordingWriter{}
+	b := NewClientBridge(w)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	done := make(chan struct{})
+	var callErr error
+	go func() {
+		defer close(done)
+		_, callErr = b.Call(ctx, "ping", nil)
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		w.mu.Lock()
+		n := len(w.frames)
+		w.mu.Unlock()
+		if n > 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	w.mu.Lock()
+	frame := w.frames[0]
+	w.mu.Unlock()
+	var req struct {
+		ID int64 `json:"id"`
+	}
+	_ = json.Unmarshal(frame, &req)
+	resp, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      req.ID,
+		"error":   map[string]any{"code": -32000, "message": "nope"},
+	})
+	if !b.TryCompleteResponse(resp) {
+		t.Fatal("TryCompleteResponse failed")
+	}
+	<-done
+	if callErr == nil || !strings.Contains(callErr.Error(), "nope") {
+		t.Fatalf("callErr = %v", callErr)
+	}
+	if b.TryCompleteResponse([]byte(`{"jsonrpc":"2.0","method":"x"}`)) {
+		t.Fatal("request should not complete waiter")
+	}
+
+	// Concurrent calls should not panic.
+	var wg sync.WaitGroup
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			cctx, ccancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+			defer ccancel()
+			_, _ = b.Call(cctx, "m", map[string]int{"i": i})
+		}(i)
+	}
+	time.Sleep(15 * time.Millisecond)
+	w.mu.Lock()
+	frames := append([][]byte(nil), w.frames...)
+	w.mu.Unlock()
+	for _, f := range frames {
+		var r struct {
+			ID int64 `json:"id"`
+		}
+		if json.Unmarshal(f, &r) == nil && r.ID > 0 {
+			okResp, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": r.ID, "result": map[string]any{}})
+			b.TryCompleteResponse(okResp)
+		}
+	}
+	wg.Wait()
+}
+
 func TestParseClientCapabilities(t *testing.T) {
 	caps := ParseClientCapabilities([]byte(`{
 		"protocolVersion": 1,

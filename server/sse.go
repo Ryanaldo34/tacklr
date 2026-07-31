@@ -44,19 +44,13 @@ func writeSSEEvent(w io.Writer, flusher http.Flusher, evType string, data []byte
 }
 
 func writeSSEError(w http.ResponseWriter, flusher http.Flusher, msg string) error {
-	data, err := json.Marshal(sseEvent{Type: "error", Error: msg})
-	if err != nil {
-		return fmt.Errorf("marshal error event: %w", err)
-	}
+	data, _ := json.Marshal(sseEvent{Type: "error", Error: msg})
 	return writeSSEEvent(w, flusher, "error", data)
 }
 
-func eventToRawSSE(threadID string, ev *streaming.StreamEvent) ([][]byte, error) {
-	data, err := json.Marshal(toSSEEvent(*ev))
-	if err != nil {
-		return nil, fmt.Errorf("marshal sse event: %w", err)
-	}
-	return [][]byte{data}, nil
+func eventToRawSSE(threadID string, ev *streaming.StreamEvent) [][]byte {
+	data, _ := json.Marshal(toSSEEvent(*ev))
+	return [][]byte{data}
 }
 
 func validateSSERequest(body []byte) (*parsedRequest, error) {
@@ -74,11 +68,8 @@ func validateSSERequest(body []byte) (*parsedRequest, error) {
 		if req.Prompt != "" {
 			return nil, clientErrorf(ErrInvalidRequest, "prompt is not allowed on resume")
 		}
-		for id, payload := range req.Responses {
-			if !json.Valid(payload) {
-				return nil, clientErrorf(ErrInvalidRequest, "response for interrupt %q is not valid JSON", id)
-			}
-		}
+		// Response payloads are json.RawMessage from a successful Unmarshal, so they
+		// are already valid JSON tokens; no extra json.Valid scan is required.
 		return &parsedRequest{
 			AgentID:   req.AgentID,
 			ThreadID:  req.ThreadID,

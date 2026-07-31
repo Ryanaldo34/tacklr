@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -68,7 +69,7 @@ func main() {
 		slog.Info("starting acp test server", "mode", "stdio")
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		if err := srv.ServeStdio(ctx, os.Stdin, os.Stdout); err != nil && err != context.Canceled {
+		if err := srv.ServeStdio(ctx, os.Stdin, os.Stdout); err != nil && !errors.Is(err, context.Canceled) {
 			slog.Error("stdio mode error", "error", err)
 			os.Exit(1)
 		}
@@ -87,7 +88,7 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := srv.ServeHTTP(ctx, addr); err != nil && err != context.Canceled {
+	if err := srv.ServeHTTP(ctx, addr); err != nil && !errors.Is(err, context.Canceled) {
 		slog.Error("server error", "error", err)
 		os.Exit(1)
 	}

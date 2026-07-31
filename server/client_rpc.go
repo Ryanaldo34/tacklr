@@ -50,6 +50,7 @@ type ClientBridge struct {
 	mu   sync.Mutex
 	seq  atomic.Int64
 	wait map[string]*rpcWaiter
+	// Caps is protected by mu; use GetCaps/SetCaps from concurrent stdio handlers.
 	Caps ClientCapabilities
 }
 
@@ -59,6 +60,26 @@ func NewClientBridge(w MessageWriter) *ClientBridge {
 		w:    w,
 		wait: make(map[string]*rpcWaiter),
 	}
+}
+
+// GetCaps returns a snapshot of client capabilities (safe for concurrent use).
+func (b *ClientBridge) GetCaps() ClientCapabilities {
+	if b == nil {
+		return ClientCapabilities{}
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.Caps
+}
+
+// SetCaps stores client capabilities (safe for concurrent use).
+func (b *ClientBridge) SetCaps(c ClientCapabilities) {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.Caps = c
 }
 
 // Call sends a JSON-RPC request and waits for the matching response or ctx cancel.
@@ -125,9 +146,8 @@ func (b *ClientBridge) TryCompleteResponse(body []byte) bool {
 	if env.Method != "" || len(env.ID) == 0 || string(env.ID) == "null" {
 		return false
 	}
-	idKey := string(env.ID)
 	b.mu.Lock()
-	waiter, ok := b.wait[idKey]
+	waiter, ok := b.wait[string(env.ID)]
 	b.mu.Unlock()
 	if !ok {
 		return false

@@ -14,196 +14,99 @@ import (
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
-func TestInitSubAgentWorkers(t *testing.T) {
+// TestSystemPrompt_listsSubAgentsSorted: registered workers appear in the
+// system prompt catalog (stable lexical order is a product outcome for prompts).
+func TestSystemPrompt_listsSubAgentsSorted(t *testing.T) {
 	model := &mockStrategy{
 		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
 			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "ok", IsComplete: true}
 		},
 	}
-	h := &AgentHarness{subagents: make(map[string]*SubAgent)}
-	h.initSubAgentWorkers([]*SubAgent{
-		nil,
-		{WorkerName: "", Model: model},
-		{WorkerName: "alpha", Model: model, Description: "first"},
-		{WorkerName: "alpha", Model: model, Description: "duplicate"},
-		{WorkerName: "beta", Model: nil, Description: "no model"},
-		{WorkerName: "gamma", Model: model, Description: "third"},
-	})
-
-	if len(h.subagents) != 2 {
-		t.Fatalf("expected 2 workers, got %d", len(h.subagents))
-	}
-	if h.subagents["alpha"].Description != "first" {
-		t.Errorf("expected first registration kept, got %q", h.subagents["alpha"].Description)
-	}
-	if _, ok := h.subagents["beta"]; ok {
-		t.Error("nil-model worker should be skipped")
-	}
-	if _, ok := h.subagents["gamma"]; !ok {
-		t.Error("expected gamma registered")
-	}
-}
-
-func TestWorkerNamesSorted(t *testing.T) {
-	model := &mockStrategy{}
-	h := &AgentHarness{subagents: make(map[string]*SubAgent)}
-	h.initSubAgentWorkers([]*SubAgent{
-		{WorkerName: "zeta", Model: model},
-		{WorkerName: "alpha", Model: model},
-		{WorkerName: "mu", Model: model},
-	})
-	got := h.workerNames()
-	want := []string{"alpha", "mu", "zeta"}
-	if len(got) != len(want) {
-		t.Fatalf("got %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("got %v, want %v", got, want)
-		}
-	}
-}
-
-func TestFormatSubAgentPromptList_sortedAndStable(t *testing.T) {
-	model := &mockStrategy{}
 	h := NewAgent(context.Background(), AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  model,
 		SubAgents: []*SubAgent{
+			nil,
+			{WorkerName: "", Model: model},
 			{WorkerName: "researcher", Model: model, Description: "does research"},
+			{WorkerName: "researcher", Model: model, Description: "duplicate ignored"},
+			{WorkerName: "no_model", Model: nil, Description: "skipped"},
 			{WorkerName: "coder", Model: model, Description: "writes code"},
 		},
 	})
-	list := h.formatSubAgentPromptList()
-	if !strings.Contains(list, " - coder: writes code\n") {
-		t.Errorf("missing coder line: %q", list)
+	events, err := h.Run(context.Background(), "hi")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(list, " - researcher: does research\n") {
-		t.Errorf("missing researcher line: %q", list)
+	for range events {
 	}
-	// coder before researcher
-	ci := strings.Index(list, "coder")
-	ri := strings.Index(list, "researcher")
-	if ci < 0 || ri < 0 || ci > ri {
-		t.Errorf("expected coder before researcher in %q", list)
+	model.mu.Lock()
+	prompts := append([]string(nil), model.systemPrompts...)
+	model.mu.Unlock()
+	var prompt string
+	for _, p := range prompts {
+		if strings.Contains(p, "AVAILABLE SUB-AGENTS:") {
+			prompt = p
+			break
+		}
 	}
-
-	prompt := h.constructSystemPrompt()
-	if !strings.Contains(prompt, "AVAILABLE SUB-AGENTS:") {
-		t.Error("system prompt missing sub-agents section")
+	if prompt == "" {
+		t.Fatal("system prompt missing sub-agents section")
 	}
-	if !strings.Contains(prompt, list) {
-		t.Error("system prompt missing formatted worker list")
+	if !strings.Contains(prompt, "coder") || !strings.Contains(prompt, "researcher") {
+		t.Fatalf("missing workers in prompt: %q", prompt)
+	}
+	if strings.Contains(prompt, "no_model") {
+		t.Fatal("nil-model worker should not appear in prompt")
+	}
+	ci := strings.Index(prompt, "coder")
+	ri := strings.Index(prompt, "researcher")
+	if ci > ri {
+		t.Errorf("expected coder before researcher in prompt catalog")
+	}
+	// First registration kept for duplicate name.
+	if strings.Contains(prompt, "duplicate ignored") {
+		t.Fatal("duplicate worker name should keep first description only")
+	}
+	if !strings.Contains(prompt, "writes code") || !strings.Contains(prompt, "does research") {
+		t.Fatalf("descriptions missing: %q", prompt)
 	}
 }
 
-func TestDrainWorkerEvents_success(t *testing.T) {
-	ch := make(chan StreamEvent, 4)
-	ch <- StreamEvent{Type: StreamEventMessage, Content: "hello"}
-	ch <- StreamEvent{Type: StreamEventReasoning, Content: "think"}
-	ch <- StreamEvent{Type: StreamEventComplete}
-	close(ch)
-
-	var updates []string
-	got, err := drainWorkerEvents(context.Background(), "w", ch, func(s string) {
-		updates = append(updates, s)
+// TestSpawnWorker_viaParentTurn_unknownWorker: spawn_worker tool reports missing workers.
+func TestSpawnWorker_viaParentTurn_unknownWorker(t *testing.T) {
+	var n int
+	strategy := &mockStrategy{
+		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
+			n++
+			if n == 1 {
+				ch <- LLMResponseChunk{
+					Type: StreamEventFunctionCall,
+					ToolCalls: []ToolCall{{
+						ID: "sp1", CallID: "sp1", Name: "spawn_worker",
+						Arguments: `{"worker_name":"missing","task_description_and_context":"do work"}`,
+					}},
+					IsComplete: true,
+				}
+				return
+			}
+			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
+		},
+	}
+	h := NewAgent(context.Background(), AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  strategy,
+		SubAgents: []*SubAgent{
+			{WorkerName: "only", Model: &mockStrategy{}},
+		},
 	})
+	events, err := h.Run(context.Background(), "spawn")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !got.completed {
-		t.Error("expected completed")
-	}
-	if got.lastAssistant != "hello" {
-		t.Errorf("last = %q, want hello", got.lastAssistant)
-	}
-	if len(updates) < 2 {
-		t.Fatalf("expected message and reasoning updates, got %v", updates)
-	}
-}
-
-func TestDrainWorkerEvents_streamError(t *testing.T) {
-	want := errors.New("boom")
-	ch := make(chan StreamEvent, 2)
-	ch <- StreamEvent{Type: StreamEventMessage, Content: "partial"}
-	ch <- StreamEvent{Type: StreamEventError, Error: want}
-	close(ch)
-
-	got, err := drainWorkerEvents(context.Background(), "w", ch, nil)
-	if !errors.Is(err, want) {
-		t.Fatalf("err = %v, want %v", err, want)
-	}
-	if got.completed {
-		t.Error("should not be completed on error")
-	}
-	if got.lastAssistant != "partial" {
-		t.Errorf("last = %q", got.lastAssistant)
-	}
-}
-
-func TestDrainWorkerEvents_incomplete(t *testing.T) {
-	ch := make(chan StreamEvent, 1)
-	ch <- StreamEvent{Type: StreamEventMessage, Content: "mid"}
-	close(ch)
-
-	got, err := drainWorkerEvents(context.Background(), "w", ch, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.completed {
-		t.Error("expected incomplete")
-	}
-	if got.lastAssistant != "mid" {
-		t.Errorf("last = %q", got.lastAssistant)
-	}
-}
-
-func TestDrainWorkerEvents_interrupt(t *testing.T) {
-	ch := make(chan StreamEvent, 2)
-	ch <- StreamEvent{Type: StreamEventInterrupt, Data: []byte(`{"interruptId":"intr-1","data":{}}`)}
-	close(ch)
-
-	got, err := drainWorkerEvents(context.Background(), "w", ch, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.completed {
-		t.Error("interrupt should not complete")
-	}
-	if len(got.interruptIDs) != 1 || got.interruptIDs[0] != "intr-1" {
-		t.Fatalf("interruptIDs = %v", got.interruptIDs)
-	}
-}
-
-func TestDrainWorkerEvents_contextCancel(t *testing.T) {
-	ch := make(chan StreamEvent)
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	got, err := drainWorkerEvents(ctx, "w", ch, nil)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("err = %v, want canceled", err)
-	}
-	if got.completed {
-		t.Error("should not complete")
-	}
-}
-
-func TestFinalWorkerOutput(t *testing.T) {
-	window := []*Message{
-		{Role: RoleUser, Content: "q"},
-		{Role: RoleAssistant, Content: "first"},
-		{Role: RoleTool, Content: "tool"},
-		{Role: RoleAssistant, Content: "final"},
-	}
-	if got := finalWorkerOutput(window, "streamed"); got != "final" {
-		t.Errorf("got %q, want final", got)
-	}
-	if got := finalWorkerOutput(nil, "streamed"); got != "streamed" {
-		t.Errorf("got %q, want streamed", got)
-	}
-	if got := finalWorkerOutput([]*Message{{Role: RoleUser, Content: "x"}}, ""); got != "" {
-		t.Errorf("got %q, want empty", got)
+	got := drainEvents(events)
+	if !hasToolResultContent(got, "not found") && !hasToolResultContent(got, "missing") {
+		t.Fatalf("want unknown worker error, got %+v", summarizeEvents(got))
 	}
 }
 

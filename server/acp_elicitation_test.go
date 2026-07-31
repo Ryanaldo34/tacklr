@@ -211,6 +211,465 @@ func idMatch(id any, want int) bool {
 	}
 }
 
+// TestACP_requestPermission_allowsToolAndCompletes: PermissionRequired tool raises
+// tool_permission; client approves via session/request_permission; tool runs.
+func TestACP_requestPermission_allowsToolAndCompletes(t *testing.T) {
+	sensitive := tacklr.NewTool(tacklr.ToolConfig{
+		Name:               "sensitive",
+		PermissionRequired: true,
+		Handler: func(ctx context.Context) (string, error) {
+			return "secret-ok", nil
+		},
+	})
+	var invokeCount int
+	strategy := &mockInferenceStrategy{
+		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			invokeCount++
+			if invokeCount == 1 {
+				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventFunctionCall, ToolCalls: []tacklr.ToolCall{
+					{ID: "call_sens", CallID: "call_sens", Name: "sensitive", Arguments: `{}`},
+				}, IsComplete: true}
+				ch <- tacklr.LLMResponseChunk{IsComplete: true}
+				return
+			}
+			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "all clear", IsComplete: true}
+		},
+	}
+
+	r := newTestRegistry(testStore(t), strategy, []*tacklr.Tool{sensitive})
+	srv := NewServer(r, ACP)
+
+	serverIn, clientToServer := io.Pipe()
+	clientFromServer, serverOut := io.Pipe()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- srv.ServeStdio(ctx, serverIn, serverOut)
+	}()
+	t.Cleanup(func() {
+		_ = clientToServer.Close()
+		_ = serverIn.Close()
+		_ = clientFromServer.Close()
+		_ = serverOut.Close()
+		cancel()
+		select {
+		case <-errCh:
+		case <-time.After(time.Second):
+		}
+	})
+
+	writeLine := func(s string) {
+		t.Helper()
+		if _, err := io.WriteString(clientToServer, s+"\n"); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+	// No elicitation needed; request_permission uses the client RPC bridge.
+	writeLine(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}`)
+	writeLine(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp"}}`)
+
+	scanner := bufio.NewScanner(clientFromServer)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	var (
+		sessionID     string
+		sawPermission bool
+		sawToolResult bool
+		sawFinalMsg   bool
+		endTurn       bool
+		promptDone    bool
+		promptSent    bool
+	)
+
+	readFrame := func() map[string]any {
+		t.Helper()
+		lineCh := make(chan string, 1)
+		errCh := make(chan error, 1)
+		go func() {
+			if scanner.Scan() {
+				lineCh <- scanner.Text()
+				return
+			}
+			errCh <- scanner.Err()
+		}()
+		select {
+		case <-ctx.Done():
+			t.Fatal("context done before prompt completed")
+		case err := <-errCh:
+			if err != nil {
+				t.Fatalf("scan: %v", err)
+			}
+			t.Fatal("server closed stdout early")
+		case line := <-lineCh:
+			var frame map[string]any
+			if err := json.Unmarshal([]byte(line), &frame); err != nil {
+				t.Fatalf("bad frame %q: %v", line, err)
+			}
+			return frame
+		case <-time.After(4 * time.Second):
+			t.Fatal("timed out waiting for server frame")
+		}
+		return nil
+	}
+
+	for !promptDone {
+		frame := readFrame()
+
+		if res, ok := frame["result"].(map[string]any); ok {
+			if sid, ok := res["sessionId"].(string); ok && sid != "" {
+				sessionID = sid
+			}
+			if idMatch(frame["id"], 20) && res["stopReason"] == "end_turn" {
+				endTurn = true
+				promptDone = true
+			}
+		}
+		if errObj, ok := frame["error"].(map[string]any); ok && idMatch(frame["id"], 20) {
+			t.Fatalf("prompt error: %v", errObj)
+		}
+
+		if frame["method"] == "session/request_permission" {
+			sawPermission = true
+			params, _ := frame["params"].(map[string]any)
+			if params["sessionId"] != sessionID {
+				t.Fatalf("permission sessionId = %v", params["sessionId"])
+			}
+			tc, _ := params["toolCall"].(map[string]any)
+			if tc["toolCallId"] != "call_sens" {
+				t.Fatalf("toolCallId = %v", tc["toolCallId"])
+			}
+			resp, _ := json.Marshal(map[string]any{
+				"jsonrpc": "2.0",
+				"id":      frame["id"],
+				"result": map[string]any{
+					"outcome": map[string]any{
+						"outcome":  "selected",
+						"optionId": "allow-once",
+					},
+				},
+			})
+			writeLine(string(resp))
+		}
+
+		if frame["method"] == "session/update" {
+			params, _ := frame["params"].(map[string]any)
+			update, _ := params["update"].(map[string]any)
+			switch update["sessionUpdate"] {
+			case "tool_call_update":
+				blob, _ := json.Marshal(update)
+				if strings.Contains(string(blob), "secret-ok") {
+					sawToolResult = true
+				}
+			case "agent_message_chunk":
+				if content, ok := update["content"].(map[string]any); ok && content["text"] == "all clear" {
+					sawFinalMsg = true
+				}
+			}
+		}
+
+		if sessionID != "" && !promptSent {
+			promptSent = true
+			writeLine(`{"jsonrpc":"2.0","id":20,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"run sensitive"}]}}`)
+		}
+	}
+
+	if !sawPermission {
+		t.Fatal("expected session/request_permission to client")
+	}
+	if !sawToolResult {
+		t.Error("expected tool result after allow")
+	}
+	if !sawFinalMsg {
+		t.Error("expected final agent message")
+	}
+	if !endTurn {
+		t.Error("expected end_turn")
+	}
+}
+
+// TestACP_requestPermission_rejectFailsToolAndCompletes: user rejects via
+// session/request_permission; tool does not run; turn still completes.
+func TestACP_requestPermission_rejectFailsToolAndCompletes(t *testing.T) {
+	var ran bool
+	sensitive := tacklr.NewTool(tacklr.ToolConfig{
+		Name:               "sensitive",
+		PermissionRequired: true,
+		Handler: func(ctx context.Context) (string, error) {
+			ran = true
+			return "secret-ok", nil
+		},
+	})
+	var invokeCount int
+	strategy := &mockInferenceStrategy{
+		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			invokeCount++
+			if invokeCount == 1 {
+				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventFunctionCall, ToolCalls: []tacklr.ToolCall{
+					{ID: "call_sens", CallID: "call_sens", Name: "sensitive", Arguments: `{}`},
+				}, IsComplete: true}
+				ch <- tacklr.LLMResponseChunk{IsComplete: true}
+				return
+			}
+			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "moved on", IsComplete: true}
+		},
+	}
+
+	r := newTestRegistry(testStore(t), strategy, []*tacklr.Tool{sensitive})
+	srv := NewServer(r, ACP)
+
+	serverIn, clientToServer := io.Pipe()
+	clientFromServer, serverOut := io.Pipe()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- srv.ServeStdio(ctx, serverIn, serverOut)
+	}()
+	t.Cleanup(func() {
+		_ = clientToServer.Close()
+		_ = serverIn.Close()
+		_ = clientFromServer.Close()
+		_ = serverOut.Close()
+		cancel()
+		select {
+		case <-errCh:
+		case <-time.After(time.Second):
+		}
+	})
+
+	writeLine := func(s string) {
+		t.Helper()
+		if _, err := io.WriteString(clientToServer, s+"\n"); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+	writeLine(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}`)
+	writeLine(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp"}}`)
+
+	scanner := bufio.NewScanner(clientFromServer)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	var (
+		sessionID     string
+		sawPermission bool
+		sawDenied     bool
+		sawFinalMsg   bool
+		endTurn       bool
+		promptDone    bool
+		promptSent    bool
+	)
+
+	readFrame := func() map[string]any {
+		t.Helper()
+		lineCh := make(chan string, 1)
+		errCh := make(chan error, 1)
+		go func() {
+			if scanner.Scan() {
+				lineCh <- scanner.Text()
+				return
+			}
+			errCh <- scanner.Err()
+		}()
+		select {
+		case <-ctx.Done():
+			t.Fatal("context done before prompt completed")
+		case err := <-errCh:
+			if err != nil {
+				t.Fatalf("scan: %v", err)
+			}
+			t.Fatal("server closed stdout early")
+		case line := <-lineCh:
+			var frame map[string]any
+			if err := json.Unmarshal([]byte(line), &frame); err != nil {
+				t.Fatalf("bad frame %q: %v", line, err)
+			}
+			return frame
+		case <-time.After(4 * time.Second):
+			t.Fatal("timed out waiting for server frame")
+		}
+		return nil
+	}
+
+	for !promptDone {
+		frame := readFrame()
+
+		if res, ok := frame["result"].(map[string]any); ok {
+			if sid, ok := res["sessionId"].(string); ok && sid != "" {
+				sessionID = sid
+			}
+			if idMatch(frame["id"], 21) && res["stopReason"] == "end_turn" {
+				endTurn = true
+				promptDone = true
+			}
+		}
+		if errObj, ok := frame["error"].(map[string]any); ok && idMatch(frame["id"], 21) {
+			t.Fatalf("prompt error: %v", errObj)
+		}
+
+		if frame["method"] == "session/request_permission" {
+			sawPermission = true
+			params, _ := frame["params"].(map[string]any)
+			opts, _ := params["options"].([]any)
+			if len(opts) < 2 {
+				t.Fatalf("expected permission options, got %v", opts)
+			}
+			resp, _ := json.Marshal(map[string]any{
+				"jsonrpc": "2.0",
+				"id":      frame["id"],
+				"result": map[string]any{
+					"outcome": map[string]any{
+						"outcome":  "selected",
+						"optionId": "reject-once",
+					},
+				},
+			})
+			writeLine(string(resp))
+		}
+
+		if frame["method"] == "session/update" {
+			params, _ := frame["params"].(map[string]any)
+			update, _ := params["update"].(map[string]any)
+			switch update["sessionUpdate"] {
+			case "tool_call_update":
+				blob, _ := json.Marshal(update)
+				if strings.Contains(string(blob), "permission denied") {
+					sawDenied = true
+				}
+			case "agent_message_chunk":
+				if content, ok := update["content"].(map[string]any); ok && content["text"] == "moved on" {
+					sawFinalMsg = true
+				}
+			}
+		}
+
+		if sessionID != "" && !promptSent {
+			promptSent = true
+			writeLine(`{"jsonrpc":"2.0","id":21,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"run sensitive"}]}}`)
+		}
+	}
+
+	if !sawPermission {
+		t.Fatal("expected session/request_permission")
+	}
+	if !sawDenied {
+		t.Error("expected failed tool update with permission denied")
+	}
+	if ran {
+		t.Error("handler must not run on reject")
+	}
+	if !sawFinalMsg {
+		t.Error("expected final agent message")
+	}
+	if !endTurn {
+		t.Error("expected end_turn")
+	}
+}
+
+// TestACP_requestPermission_cancelledEndsPrompt: cancelled outcome ends the turn.
+func TestACP_requestPermission_cancelledEndsPrompt(t *testing.T) {
+	sensitive := tacklr.NewTool(tacklr.ToolConfig{
+		Name:               "sensitive",
+		PermissionRequired: true,
+		Handler:            func(ctx context.Context) (string, error) { return "nope", nil },
+	})
+	strategy := &mockInferenceStrategy{
+		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventFunctionCall, ToolCalls: []tacklr.ToolCall{
+				{ID: "c1", CallID: "c1", Name: "sensitive", Arguments: `{}`},
+			}, IsComplete: true}
+			ch <- tacklr.LLMResponseChunk{IsComplete: true}
+		},
+	}
+	r := newTestRegistry(testStore(t), strategy, []*tacklr.Tool{sensitive})
+	srv := NewServer(r, ACP)
+
+	serverIn, clientToServer := io.Pipe()
+	clientFromServer, serverOut := io.Pipe()
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.ServeStdio(ctx, serverIn, serverOut) }()
+	t.Cleanup(func() {
+		_ = clientToServer.Close()
+		_ = serverIn.Close()
+		_ = clientFromServer.Close()
+		_ = serverOut.Close()
+		cancel()
+		select {
+		case <-errCh:
+		case <-time.After(time.Second):
+		}
+	})
+
+	write := func(s string) {
+		if _, err := io.WriteString(clientToServer, s+"\n"); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+	write(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}`)
+	write(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp"}}`)
+
+	scanner := bufio.NewScanner(clientFromServer)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	var sessionID string
+	var sawPermission, promptSent, promptDone, sawError bool
+
+	for !promptDone {
+		lineCh := make(chan string, 1)
+		go func() {
+			if scanner.Scan() {
+				lineCh <- scanner.Text()
+			}
+		}()
+		var line string
+		select {
+		case <-ctx.Done():
+			t.Fatal("timeout")
+		case line = <-lineCh:
+		case <-time.After(4 * time.Second):
+			t.Fatal("frame timeout")
+		}
+		var frame map[string]any
+		if err := json.Unmarshal([]byte(line), &frame); err != nil {
+			t.Fatal(err)
+		}
+		if res, ok := frame["result"].(map[string]any); ok {
+			if sid, ok := res["sessionId"].(string); ok && sid != "" {
+				sessionID = sid
+			}
+		}
+		if frame["method"] == "session/request_permission" {
+			sawPermission = true
+			resp, _ := json.Marshal(map[string]any{
+				"jsonrpc": "2.0",
+				"id":      frame["id"],
+				"result":  map[string]any{"outcome": map[string]any{"outcome": "cancelled"}},
+			})
+			write(string(resp))
+		}
+		if errObj, ok := frame["error"].(map[string]any); ok && idMatch(frame["id"], 22) {
+			sawError = true
+			promptDone = true
+			_ = errObj
+		}
+		if sessionID != "" && !promptSent {
+			promptSent = true
+			write(`{"jsonrpc":"2.0","id":22,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"x"}]}}`)
+		}
+	}
+	if !sawPermission {
+		t.Fatal("expected request_permission")
+	}
+	if !sawError {
+		t.Fatal("expected prompt error after cancelled permission")
+	}
+}
+
 // TestACP_elicitationForm_declineEndsPrompt: client declines form → turn errors, no resume invoke.
 func TestACP_elicitationForm_declineEndsPrompt(t *testing.T) {
 	optionsJSON := `[{"title":"A","description":"","isRecommended":true},{"title":"B","description":"","isRecommended":false}]`

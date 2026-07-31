@@ -90,7 +90,6 @@ func runTurnStream(
 	}
 
 	events := stream.Events
-	finished := false
 
 	writeFrames := func(frames [][]byte) error {
 		if env.Conn == nil || env.Conn.Writer == nil || len(frames) == 0 {
@@ -107,17 +106,11 @@ func runTurnStream(
 	// discard remaining events until the channel is closed (producers exit via turnCtx).
 	discardUntilClosed := func() {
 		for range events {
+			// drain only; encoding already stopped
 		}
 	}
 
 	end := func(cancelled bool) error {
-		if finished {
-			if cancelled {
-				return context.Canceled
-			}
-			return nil
-		}
-		finished = true
 		// Ensure turn ctx is cancelled so any residual producers stop.
 		stream.Cancel()
 		if err := proto.OnStreamClosed(ctx, env, threadID, reqID, cancelled); err != nil && !cancelled {
@@ -155,7 +148,6 @@ func runTurnStream(
 				continue
 			}
 			if ctrl.Finished {
-				finished = true
 				return nil
 			}
 		}

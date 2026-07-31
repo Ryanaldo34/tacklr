@@ -15,6 +15,8 @@ func TestSentinelsAreDistinct(t *testing.T) {
 		ErrModelNotSet,
 		ErrUnknownModel,
 		ErrToolNotFound,
+		ErrToolTimeout,
+		ErrToolPermissionDenied,
 		ErrWorkerNotFound,
 		ErrWorkerNoOutput,
 		ErrWorkerIncomplete,
@@ -46,8 +48,12 @@ func TestWrapStopReason_preservesIs(t *testing.T) {
 	if !errors.Is(err, cause) {
 		t.Fatalf("errors.Is cause = false for %v", err)
 	}
-	if WrapStopReason(ErrMaxTokens, nil) != ErrMaxTokens {
+	if !errors.Is(WrapStopReason(ErrMaxTokens, nil), ErrMaxTokens) {
 		t.Fatal("nil cause should return kind")
+	}
+	// nil kind preserves the cause as-is.
+	if !errors.Is(WrapStopReason(nil, cause), cause) {
+		t.Fatal("nil kind should return cause")
 	}
 }
 
@@ -60,6 +66,8 @@ func TestSentinelWrapping(t *testing.T) {
 		ErrModelNotSet,
 		ErrUnknownModel,
 		ErrToolNotFound,
+		ErrToolTimeout,
+		ErrToolPermissionDenied,
 		ErrWorkerNotFound,
 		ErrWorkerNoOutput,
 		ErrWorkerIncomplete,

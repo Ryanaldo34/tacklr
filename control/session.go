@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/milvus-io/milvus/client/v2/milvusclient"
+
 	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/streaming"
 )
@@ -46,16 +47,20 @@ const planStateKey = "_plan"
 // Runtime hook to emit custom events as updates from tool calls.
 // Non-blocking: drops if no listener or channel full so tools never hang.
 func (rt *HarnessRuntime) EmitUpdate(message string) {
-	if rt.ch == nil {
+	rt.mu.RLock()
+	ch := rt.ch
+	msgID := rt.CurrentToolCallID
+	rt.mu.RUnlock()
+	if ch == nil {
 		return
 	}
 	event := streaming.StreamEvent{
 		Type:      streaming.StreamEventToolUpdate,
 		Content:   message,
-		MessageID: rt.CurrentToolCallID,
+		MessageID: msgID,
 	}
 	select {
-	case rt.ch <- event:
+	case ch <- event:
 	default:
 	}
 }
@@ -79,6 +84,7 @@ func (rt *HarnessRuntime) PlanGet() []Todo {
 		return cp
 	}
 	// Checkpoint reload: rehydrate from JSON-compatible types.
+	// Non-marshalable values (e.g. channels) yield empty/failed rehydrate → nil.
 	b, err := json.Marshal(v)
 	if err != nil {
 		return nil

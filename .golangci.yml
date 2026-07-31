@@ -1,0 +1,215 @@
+# golangci-lint for Tacklr.
+#
+# Inspired by production Go configs used by projects like moby/docker and
+# HashiCorp: curated linters, explicit enable list, formatters separate.
+# Tuned for this repo’s standards: modern Go, stdlib-first, explicit errors,
+# outcome-oriented tests, public SDK surface.
+#
+# Docs: https://golangci-lint.run/docs/configuration/file/
+
+version: "2"
+
+run:
+  # Go version comes from the toolchain on PATH / go.mod (CI installs go1.26.x).
+  timeout: 5m
+  tests: true
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/ryanaldo34/tacklr
+
+linters:
+  default: none
+  enable:
+    # --- Correctness (must-pass) ---
+    - errcheck
+    - errorlint
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - durationcheck
+    - makezero
+    - nilerr
+    - reassign
+    - copyloopvar
+    - bodyclose
+
+    # --- Style / modern Go ---
+    - revive
+    - misspell
+    - unconvert
+    - usestdlibvars
+    - dogsled
+    - nakedret
+    - predeclared
+    - whitespace
+    - asasalint
+    - gocritic
+
+    # --- Security ---
+    - gosec
+
+  settings:
+    errcheck:
+      check-blank: false
+      check-type-assertions: true
+
+    errorlint:
+      # Prefer %w and errors.Is/As (matches Tacklr error-wrapping standards).
+      errorf: true
+      asserts: true
+      comparison: true
+
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment # micro-optimization, not design-critical
+        - shadow         # common with if err := in Go; low signal here
+        - inline         # too noisy on reflect / constants
+
+    staticcheck:
+      checks:
+        - all
+        - -ST1000 # package comments optional for small internal packages
+        - -ST1003 # short package names (mcp, etc.) are intentional
+        - -ST1016 # receiver name consistency (mixed a/h historically)
+        - -QF1001 # De Morgan rewrites are optional style
+        - -QF1012 # Fprintf vs WriteString style preference
+        - -SA9003 # empty branch style in tests
+        - -S1009  # nil+len checks sometimes intentional
+
+    revive:
+      # Explicit rule set — no “nanny” rules that fight intentional style.
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: if-return
+        - name: increment-decrement
+        - name: var-declaration
+        - name: package-comments
+          disabled: true
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: indent-error-flow
+        - name: empty-block
+        - name: superfluous-else
+          arguments:
+            - preserve-scope
+        - name: unused-parameter
+          disabled: true
+        - name: unreachable-code
+        - name: redefines-builtin-id
+        - name: use-any
+        # Keep exported API docs for the public SDK without ST1000 package spam.
+        - name: exported
+          disabled: true # enable later once public API docs are complete
+        # JSON wire fields often use Id (ACP / JSON-RPC conventions).
+        - name: var-naming
+          disabled: true
+        # fmt.Errorf("static") without %w is fine; do not force errors.New churn.
+        - name: use-errors-new
+          disabled: true
+        - name: unexported-return
+          disabled: true
+        # AgentHarness historically mixes (a *AgentHarness) and (h *AgentHarness).
+        - name: receiver-naming
+          disabled: true
+        - name: var-declaration
+          disabled: true
+
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - performance
+      disabled-checks:
+        - hugeParam
+        - rangeValCopy
+        - commentedOutCode
+        - ifElseChain
+        - appendAssign
+        - singleCaseSwitch
+
+    gosec:
+      excludes:
+        - G101 # hardcoded credentials: false positives in tests/examples
+        - G404 # weak RNG in tests
+        - G304 # intentional path variables in agent harness / skills loader
+
+    nakedret:
+      max-func-lines: 40
+
+    misspell:
+      locale: US
+      # Protocol / domain language (ACP stop reasons, British spelling in specs).
+      ignore-rules:
+        - cancelled
+        - cancelling
+
+    usestdlibvars:
+      http-method: true
+      http-status-code: true
+      time-layout: true
+
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - std-error-handling
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec
+          - bodyclose
+          - gocritic
+
+      - path: ^cmd/
+        linters:
+          - revive
+          - gosec
+          - gocritic
+
+      # Empty select/for blocks are intentional in cancel tests.
+      - path: _test\.go
+        text: "empty-block"
+        linters:
+          - revive
+
+      # Drain loops intentionally empty.
+      - text: "empty-block"
+        path: server/protocol\.go
+        linters:
+          - revive
+
+      # stdlib constants in tests are optional style.
+      - path: _test\.go
+        linters:
+          - usestdlibvars
+
+      # Local MCP stdio launches trusted config commands.
+      - path: internal/mcp/
+        text: "G204"
+        linters:
+          - gosec
+
+    warn-unused: true
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+severity:
+  default: error

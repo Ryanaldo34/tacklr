@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
 	"github.com/ryanaldo34/tacklr"
 )
 
@@ -25,7 +26,7 @@ func TestWebSocket_promptStreamsMessageAndComplete(t *testing.T) {
 	mux := http.NewServeMux()
 	env := ProtocolEnv{Registry: r, Conn: &Conn{}}
 	for _, route := range SSE.HTTPRoutes() {
-		if route.Method == "GET" && route.Pattern == "/" {
+		if route.Method == http.MethodGet && route.Pattern == "/" {
 			mux.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
 				route.Handler(env, w, req)
 			})
@@ -89,5 +90,60 @@ func TestWebSocket_promptStreamsMessageAndComplete(t *testing.T) {
 	}
 	if !sawComplete {
 		t.Error("expected complete event")
+	}
+}
+
+// TestWebSocket_invalidRequestAndTurnError covers WS validation failure and
+// RunTurn error framing on the GET / path.
+func TestWebSocket_invalidRequestAndTurnError(t *testing.T) {
+	r := newTestRegistry(testStore(t), &mockInferenceStrategy{}, nil)
+	mux := http.NewServeMux()
+	env := ProtocolEnv{Registry: r, Conn: &Conn{}}
+	for _, route := range SSE.HTTPRoutes() {
+		if route.Method == http.MethodGet && route.Pattern == "/" {
+			mux.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
+				route.Handler(env, w, req)
+			})
+		}
+	}
+	hs := httptest.NewServer(mux)
+	t.Cleanup(hs.Close)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	wsURL := "ws" + strings.TrimPrefix(hs.URL, "http")
+
+	// Invalid body → error frame.
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Write(ctx, websocket.MessageText, []byte(`{`)); err != nil {
+		t.Fatal(err)
+	}
+	_, data, err := conn.Read(ctx)
+	_ = conn.Close(websocket.StatusNormalClosure, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "error") && !strings.Contains(string(data), "invalid") {
+		t.Fatalf("want error frame, got %s", data)
+	}
+
+	// Unknown agent → error frame.
+	conn2, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn2.Write(ctx, websocket.MessageText, []byte(`{"agent_id":"missing","prompt":"x"}`)); err != nil {
+		t.Fatal(err)
+	}
+	_, data2, err := conn2.Read(ctx)
+	_ = conn2.Close(websocket.StatusNormalClosure, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data2), "error") && !strings.Contains(string(data2), "not found") {
+		t.Fatalf("want agent error, got %s", data2)
 	}
 }

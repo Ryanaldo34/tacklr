@@ -368,3 +368,454 @@ func TestListPlanTool_injectedAsBuiltin(t *testing.T) {
 		t.Fatal("list_plan should be injected as a builtin")
 	}
 }
+
+// --- Parent harness outcomes for builtin plan / ask_user tools ---
+
+// TestRun_completeTodo_skipsAlreadyCompletedNext: completing a todo when the
+// next items are already completed advances past them or finishes the plan.
+func TestRun_completeTodo_skipsAlreadyCompletedNext(t *testing.T) {
+	var n int
+	strategy := &mockStrategy{
+		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
+			n++
+			switch n {
+			case 1:
+				ch <- LLMResponseChunk{
+					Type: StreamEventFunctionCall,
+					ToolCalls: []ToolCall{{
+						ID: "p1", CallID: "p1", Name: "create_plan",
+						Arguments: `{"todos":[{"title":"A","description":"a"},{"title":"B","description":"b","status":"completed"},{"title":"C","description":"c"}]}`,
+					}},
+					IsComplete: true,
+				}
+			case 2:
+				ch <- LLMResponseChunk{
+					Type: StreamEventFunctionCall,
+					ToolCalls: []ToolCall{{
+						ID: "c1", CallID: "c1", Name: "complete_todo",
+						Arguments: `{"title":"A"}`,
+					}},
+					IsComplete: true,
+				}
+			default:
+				ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
+			}
+		},
+	}
+	h := NewAgent(context.Background(), AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  strategy,
+		Store:  testStore(t),
+	})
+	h.SessionId = "plan-skip"
+	events, err := h.Run(context.Background(), "plan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := drainEvents(events)
+	if !hasToolResultContent(got, "starting \"C\"") && !hasToolResultContent(got, "Todo completed") {
+		t.Fatalf("want complete_todo to advance past completed B, got %+v", summarizeEvents(got))
+	}
+	plan := h.Runtime.PlanGet()
+	if len(plan) != 3 {
+		t.Fatalf("plan len = %d", len(plan))
+	}
+	if plan[2].Status != streaming.TodoStatusInProgress && plan[2].Status != streaming.TodoStatusCompleted {
+		// After complete A, C should be in_progress (B was already completed).
+		t.Fatalf("plan statuses = %v %v %v", plan[0].Status, plan[1].Status, plan[2].Status)
+	}
+}
+
+// TestRun_planToolValidationOutcomes: empty create_plan, missing complete_todo, list_plan.
+func TestRun_planToolValidationOutcomes(t *testing.T) {
+	var n int
+	strategy := &mockStrategy{
+		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
+			n++
+			switch n {
+			case 1:
+				ch <- LLMResponseChunk{
+					Type: StreamEventFunctionCall,
+					ToolCalls: []ToolCall{{
+						ID: "p1", CallID: "p1", Name: "create_plan",
+						Arguments: `{"todos":[]}`,
+					}},
+					IsComplete: true,
+				}
+			case 2:
+				ch <- LLMResponseChunk{
+					Type: StreamEventFunctionCall,
+					ToolCalls: []ToolCall{{
+						ID: "p2", CallID: "p2", Name: "create_plan",
+						Arguments: `{"todos":[{"title":"Only","description":"d"}]}`,
+					}},
+					IsComplete: true,
+				}
+			case 3:
+				ch <- LLMResponseChunk{
+					Type: StreamEventFunctionCall,
+					ToolCalls: []ToolCall{{
+						ID: "c1", CallID: "c1", Name: "complete_todo",
+						Arguments: `{"title":"Missing"}`,
+					}},
+					IsComplete: true,
+				}
+			case 4:
+				ch <- LLMResponseChunk{
+					Type: StreamEventFunctionCall,
+					ToolCalls: []ToolCall{{
+						ID: "l1", CallID: "l1", Name: "list_plan",
+						Arguments: `{}`,
+					}},
+					IsComplete: true,
+				}
+			default:
+				ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
+			}
+		},
+	}
+	h := NewAgent(context.Background(), AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  strategy,
+	})
+	events, err := h.Run(context.Background(), "plan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := drainEvents(events)
+	if !hasToolResultContent(got, "at least one todo") {
+		t.Fatalf("want empty plan error, got %+v", summarizeEvents(got))
+	}
+	if !hasToolResultContent(got, "not found") {
+		t.Fatalf("want missing todo error, got %+v", summarizeEvents(got))
+	}
+	if !hasToolResultContent(got, "Active plan") {
+		t.Fatalf("want list_plan listing, got %+v", summarizeEvents(got))
+	}
+}
+
+// TestRun_askUserChoice_withoutDescription_formatsSelection: selection without
+// a description still returns a clear confirmation string after resume.
+
+// TestRun_askUserChoice_withoutDescription_formatsSelection: selection without
+// a description still returns a clear confirmation string after resume.
+func TestRun_askUserChoice_withoutDescription_formatsSelection(t *testing.T) {
+	optionsJSON := `[{"title":"A","description":"","isRecommended":true},{"title":"B","description":"","isRecommended":false}]`
+	// Drive via ask_user_choice builtin after create_plan unlock is not needed
+	// (ask is think category). Resume via ReturnFromInterrupt.
+	var phase int
+	strategy := &mockStrategy{
+		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
+			phase++
+			if phase == 1 {
+				ch <- LLMResponseChunk{
+					Type: StreamEventFunctionCall,
+					ToolCalls: []ToolCall{{
+						ID: "ask1", CallID: "ask1", Name: "ask_user_choice",
+						Arguments: `{"question":"Pick?","choices":[{"title":"A"},{"title":"B"}]}`,
+					}},
+					IsComplete: true,
+				}
+				return
+			}
+			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
+		},
+	}
+	h := NewAgent(context.Background(), AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  strategy,
+		Store:  testStore(t),
+	})
+	h.SessionId = "ask-sess"
+	events, err := h.Run(context.Background(), "ask")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var interruptID string
+	for ev := range events {
+		if ev.Type == StreamEventInterrupt {
+			var env struct {
+				InterruptId string `json:"interruptId"`
+			}
+			_ = json.Unmarshal(ev.Data, &env)
+			interruptID = env.InterruptId
+		}
+	}
+	if interruptID == "" {
+		t.Fatal("expected interrupt")
+	}
+	// Question stashed for protocol elicitation.
+	if q := AskUserQuestionFromState(h.Runtime, "ask1"); q != "Pick?" {
+		t.Fatalf("question = %q", q)
+	}
+	if AskUserQuestionFromState(h.Runtime, "") != "" {
+		t.Fatal("empty tool call id should yield empty question")
+	}
+	if AskUserQuestionFromState(h.Runtime, "missing") != "" {
+		t.Fatal("unknown tool call should yield empty question")
+	}
+
+	resumed, err := h.ReturnFromInterrupt(context.Background(), map[string][]byte{
+		interruptID: []byte(`{"selectionIdx":0}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := drainEvents(resumed)
+	if !hasToolResultContent(got, `User selected "A"`) {
+		t.Fatalf("want selection text, got %+v", summarizeEvents(got))
+	}
+	_ = optionsJSON
+}
+
+func TestRun_listPlan_noPlan_toolError(t *testing.T) {
+	var n int
+	strategy := &mockStrategy{
+		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
+			n++
+			if n == 1 {
+				ch <- LLMResponseChunk{
+					Type: StreamEventFunctionCall,
+					ToolCalls: []ToolCall{{
+						ID: "l1", CallID: "l1", Name: "list_plan", Arguments: `{}`,
+					}},
+					IsComplete: true,
+				}
+				return
+			}
+			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "ok", IsComplete: true}
+		},
+	}
+	h := NewAgent(context.Background(), AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  strategy,
+	})
+	events, err := h.Run(context.Background(), "list")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := drainEvents(events)
+	if !hasToolResultContent(got, "no plan") {
+		t.Fatalf("%+v", summarizeEvents(got))
+	}
+}
+
+func TestRun_completeTodo_alreadyCompleted_toolError(t *testing.T) {
+	// Pre-seed a plan with A already completed; completing A again is a tool error.
+	var n int
+	strategy := &mockStrategy{
+		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
+			n++
+			if n == 1 {
+				ch <- LLMResponseChunk{
+					Type: StreamEventFunctionCall,
+					ToolCalls: []ToolCall{{
+						ID: "c1", CallID: "c1", Name: "complete_todo",
+						Arguments: `{"title":"A"}`,
+					}},
+					IsComplete: true,
+				}
+				return
+			}
+			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "ok", IsComplete: true}
+		},
+	}
+	h := NewAgent(context.Background(), AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  strategy,
+	})
+	h.Runtime.PlanSet([]control.Todo{
+		{Title: "A", Status: streaming.TodoStatusCompleted},
+		{Title: "B", Status: streaming.TodoStatusInProgress},
+	})
+	events, err := h.Run(context.Background(), "plan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := drainEvents(events)
+	if !hasToolResultContent(got, "already completed") {
+		t.Fatalf("%+v", summarizeEvents(got))
+	}
+}
+
+func TestRun_editPlan_noPlan_toolError(t *testing.T) {
+	var n int
+	strategy := &mockStrategy{
+		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
+			n++
+			if n == 1 {
+				ch <- LLMResponseChunk{
+					Type: StreamEventFunctionCall,
+					ToolCalls: []ToolCall{{
+						ID: "e1", CallID: "e1", Name: "edit_plan",
+						Arguments: `{"toDelete":["x"]}`,
+					}},
+					IsComplete: true,
+				}
+				return
+			}
+			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "ok", IsComplete: true}
+		},
+	}
+	h := NewAgent(context.Background(), AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  strategy,
+	})
+	events, err := h.Run(context.Background(), "edit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := drainEvents(events)
+	if !hasToolResultContent(got, "no plan") {
+		t.Fatalf("%+v", summarizeEvents(got))
+	}
+}
+
+func TestRun_askUserChoice_emptyChoiceTitle_toolError(t *testing.T) {
+	var n int
+	strategy := &mockStrategy{
+		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
+			n++
+			if n == 1 {
+				ch <- LLMResponseChunk{
+					Type: StreamEventFunctionCall,
+					ToolCalls: []ToolCall{{
+						ID: "a1", CallID: "a1", Name: "ask_user_choice",
+						Arguments: `{"question":"q","choices":[{"title":"  "},{"title":"B"}]}`,
+					}},
+					IsComplete: true,
+				}
+				return
+			}
+			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "ok", IsComplete: true}
+		},
+	}
+	h := NewAgent(context.Background(), AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  strategy,
+	})
+	events, err := h.Run(context.Background(), "ask")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := drainEvents(events)
+	if !hasToolResultContent(got, "title is required") {
+		t.Fatalf("%+v", summarizeEvents(got))
+	}
+}
+
+// --- Message stream assembler via parent turn ---
+
+// TestCompleteTodo_allRemainingCompleted: completing last open todo when later
+// ones are already completed reports all-done.
+func TestCompleteTodo_allRemainingCompleted(t *testing.T) {
+	rt := control.NewRuntime(nil, nil, nil)
+	rt.EnsureInitialized()
+	rt.PlanSet([]control.Todo{
+		{Title: "A", Status: streaming.TodoStatusInProgress},
+		{Title: "B", Status: streaming.TodoStatusCompleted},
+		{Title: "C", Status: streaming.TodoStatusCompleted},
+	})
+	got, err := completeTodoTool.Invoke(context.Background(), `{"title":"A"}`, rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "All todos completed") {
+		t.Fatalf("got %q", got)
+	}
+}
+
+// TestRun_completeTodo_noPlan_toolError: complete_todo without a plan fails clearly.
+
+// TestRun_completeTodo_noPlan_toolError: complete_todo without a plan fails clearly.
+func TestRun_completeTodo_noPlan_toolError(t *testing.T) {
+	var n int
+	strategy := &mockStrategy{
+		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
+			n++
+			if n == 1 {
+				ch <- LLMResponseChunk{
+					Type: StreamEventFunctionCall,
+					ToolCalls: []ToolCall{{
+						ID: "c1", CallID: "c1", Name: "complete_todo",
+						Arguments: `{"title":"A"}`,
+					}},
+					IsComplete: true,
+				}
+				return
+			}
+			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "ok", IsComplete: true}
+		},
+	}
+	h := NewAgent(context.Background(), AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  strategy,
+	})
+	events, err := h.Run(context.Background(), "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := drainEvents(events)
+	if !hasToolResultContent(got, "no plan") {
+		t.Fatalf("%+v", summarizeEvents(got))
+	}
+}
+
+// TestNewTool_depthLimitAndSkipTypes: deeply nested schema degrades safely;
+// time.Time fields are skipped in schemas.
+
+func TestRun_completeTodo_persistsPlanInStore(t *testing.T) {
+	store := testStore(t)
+	var invokeCount int
+	strategy := &mockStrategy{
+		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, events chan<- LLMResponseChunk) {
+			invokeCount++
+			if invokeCount == 1 {
+				events <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
+					{ID: "call_ct", CallID: "call_ct", Name: "complete_todo", Arguments: `{"title":"Ship"}`},
+				}, IsComplete: true}
+				events <- LLMResponseChunk{IsComplete: true}
+				return
+			}
+			if invokeCount == 2 {
+				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "handoff body", IsComplete: true}
+				return
+			}
+			events <- LLMResponseChunk{Type: StreamEventMessage, Content: "continued", IsComplete: true}
+		},
+	}
+
+	ah := NewAgent(context.Background(), AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  strategy,
+		Store:  store,
+	})
+	ah.SessionId = "sess-plan-persist"
+	ah.Runtime.PlanSet([]control.Todo{
+		{Title: "Ship", Status: streaming.TodoStatusInProgress},
+	})
+
+	ch, err := ah.Run(context.Background(), "finish ship")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range ch {
+	}
+
+	// Reload via NewAgentFromSession and assert plan status survived the checkpoint.
+	restored, err := NewAgentFromSession(context.Background(), "sess-plan-persist", AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  &mockStrategy{},
+		Store:  store,
+	})
+	if err != nil {
+		t.Fatalf("NewAgentFromSession: %v", err)
+	}
+	plan := restored.Runtime.PlanGet()
+	if len(plan) != 1 {
+		t.Fatalf("restored plan len = %d, want 1", len(plan))
+	}
+	if plan[0].Title != "Ship" || plan[0].Status != streaming.TodoStatusCompleted {
+		t.Fatalf("restored plan = %+v, want Ship completed", plan[0])
+	}
+}

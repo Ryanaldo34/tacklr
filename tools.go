@@ -3,12 +3,14 @@ package tacklr
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
 	"time"
 
 	mapset "github.com/deckarep/golang-set/v2"
+
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
@@ -36,6 +38,10 @@ type Tool struct {
 	Namespace   string
 	Category    streaming.ToolCategory
 	Access      mapset.Set[ToolPermission]
+	// Timeout is an optional per-invocation deadline. Zero means none.
+	Timeout time.Duration
+	// PermissionRequired asks the user to approve the tool before it runs.
+	PermissionRequired bool
 
 	handlerFunc func(ctx context.Context, args map[string]any, runtime HarnessRuntime) (string, error)
 	parameters  map[string]any
@@ -49,6 +55,9 @@ type ToolConfig struct {
 	Namespace   string
 	Category    streaming.ToolCategory
 	Access      mapset.Set[ToolPermission]
+	Timeout     time.Duration
+	// PermissionRequired asks the user to approve the tool before it runs.
+	PermissionRequired bool
 
 	Handler any
 }
@@ -59,6 +68,7 @@ type mcpToolConfig struct {
 	DisplayName string
 	Namespace   string
 	Schema      map[string]any
+	Timeout     time.Duration
 	Handler     ToolHandlerFunc
 }
 
@@ -83,6 +93,8 @@ func NewTool(cfg ToolConfig) *Tool {
 	}
 
 	numIn := fnType.NumIn()
+	// Handlers are at most (ctx, args, runtime). Extra params are rejected below
+	// when the third parameter is not HarnessRuntime (or via count when >3).
 	if numIn > 3 {
 		panic(fmt.Sprintf("tool %q: handler has too many parameters (%d)", cfg.Name, numIn))
 	}
@@ -93,6 +105,7 @@ func NewTool(cfg ToolConfig) *Tool {
 	}
 
 	var argsType reflect.Type
+	var argsIsPtr bool
 	var hasRuntime bool
 	var runtimeIsPtr bool
 
@@ -108,6 +121,7 @@ func NewTool(cfg ToolConfig) *Tool {
 			runtimeIsPtr = pType.Kind() == reflect.Ptr
 		} else if baseType.Kind() == reflect.Struct {
 			argsType = baseType
+			argsIsPtr = pType.Kind() == reflect.Ptr
 			idx++
 			if idx < numIn {
 				rType := fnType.In(idx)
@@ -128,13 +142,15 @@ func NewTool(cfg ToolConfig) *Tool {
 	}
 
 	t := &Tool{
-		Name:        cfg.Name,
-		DisplayName: cfg.DisplayName,
-		Description: cfg.Description,
-		Namespace:   cfg.Namespace,
-		Category:    cfg.Category,
-		Access:      cfg.Access,
-		strict:      true,
+		Name:               cfg.Name,
+		DisplayName:        cfg.DisplayName,
+		Description:        cfg.Description,
+		Namespace:          cfg.Namespace,
+		Category:           cfg.Category,
+		Access:             cfg.Access,
+		Timeout:            cfg.Timeout,
+		PermissionRequired: cfg.PermissionRequired,
+		strict:             true,
 	}
 	if argsType != nil {
 		t.parameters = typeToJSONSchema(argsType, 0)
@@ -163,7 +179,11 @@ func NewTool(cfg ToolConfig) *Tool {
 					return "", fmt.Errorf("unmarshal args: %w", err)
 				}
 			}
-			callArgs = append(callArgs, argPtr.Elem())
+			if argsIsPtr {
+				callArgs = append(callArgs, argPtr)
+			} else {
+				callArgs = append(callArgs, argPtr.Elem())
+			}
 		}
 
 		if hasRuntime {
@@ -205,6 +225,7 @@ func newMCPTool(cfg mcpToolConfig) *Tool {
 		DisplayName: cfg.DisplayName,
 		Description: cfg.Description,
 		Namespace:   cfg.Namespace,
+		Timeout:     cfg.Timeout,
 		strict:      false,
 		parameters:  params,
 		handlerFunc: cfg.Handler,
@@ -218,10 +239,41 @@ func (t *Tool) Invoke(ctx context.Context, argsJson string, runtime HarnessRunti
 			return "", fmt.Errorf("unmarshal args for tool %q: %w", t.Name, err)
 		}
 	}
-	return t.handlerFunc(ctx, args, runtime)
+
+	if t.Timeout <= 0 {
+		return t.handlerFunc(ctx, args, runtime)
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, t.Timeout)
+	defer cancel()
+
+	type outcome struct {
+		out string
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		out, err := t.handlerFunc(callCtx, args, runtime)
+		done <- outcome{out: out, err: err}
+	}()
+
+	select {
+	case res := <-done:
+		if res.err != nil && ctx.Err() == nil && errors.Is(res.err, context.DeadlineExceeded) {
+			return "", fmt.Errorf("tool %q: %w", t.Name, ErrToolTimeout)
+		}
+		return res.out, res.err
+	case <-callCtx.Done():
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		return "", fmt.Errorf("tool %q: %w", t.Name, ErrToolTimeout)
+	}
 }
 
-func (t *Tool) AsJson() (map[string]any, error) {
+// AsJson returns the OpenAI-style function tool definition for this tool.
+// parameters is never nil on the returned map.
+func (t *Tool) AsJson() map[string]any {
 	params := t.parameters
 	if params == nil {
 		params = map[string]any{
@@ -230,14 +282,13 @@ func (t *Tool) AsJson() (map[string]any, error) {
 			"additionalProperties": false,
 		}
 	}
-	def := map[string]any{
+	return map[string]any{
 		"type":        "function",
 		"name":        t.Name,
 		"description": t.Description,
 		"strict":      t.strict,
 		"parameters":  params,
 	}
-	return def, nil
 }
 
 func typeToJSONSchema(rt reflect.Type, depth int, skipTypes ...reflect.Type) map[string]any {
@@ -378,26 +429,22 @@ type ToolNamespace struct {
 	Description string
 }
 
-func ToolsAsJson(tools []*Tool) (string, error) {
+// ToolsAsJson serializes tool definitions for model requests. An empty catalog
+// is "[]". Namespace-qualified names use "namespace.name".
+func ToolsAsJson(tools []*Tool) string {
 	if len(tools) == 0 {
-		return "[]", nil
+		return "[]"
 	}
 
 	defs := make([]map[string]any, 0, len(tools))
 	for _, t := range tools {
-		def, err := t.AsJson()
-		if err != nil {
-			return "", fmt.Errorf("serialize tool %q: %w", t.Name, err)
-		}
+		def := t.AsJson()
 		if t.Namespace != "" {
 			def["name"] = t.Namespace + "." + t.Name
 		}
 		defs = append(defs, def)
 	}
 
-	b, err := json.Marshal(defs)
-	if err != nil {
-		return "", err
-	}
-	return string(b), nil
+	b, _ := json.Marshal(defs)
+	return string(b)
 }
