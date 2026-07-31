@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -262,13 +263,14 @@ func TestValidateACPRequest_missingMethod(t *testing.T) {
 }
 
 func TestValidateACPRequest_unsupportedMethod(t *testing.T) {
+	// Unknown methods are admitted so HandleInbound can return MethodNotFound.
 	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"session/foo","params":{"sessionId":"s1"}}`)
-	_, err := validateACPRequest(body)
-	if err == nil {
-		t.Fatal("expected error for unsupported method")
+	pr, err := validateACPRequest(body)
+	if err != nil {
+		t.Fatalf("unexpected validate error: %v", err)
 	}
-	if !strings.Contains(err.Error(), "unsupported method") {
-		t.Errorf("error = %q, want to contain %q", err.Error(), "unsupported method")
+	if pr.Method != "session/foo" {
+		t.Fatalf("method = %q", pr.Method)
 	}
 }
 
@@ -666,6 +668,100 @@ func TestEventToAcpJsonRpc_interrupt_skipped(t *testing.T) {
 	}
 }
 
+func TestACP_OnStreamClosed_cancelledVsPark(t *testing.T) {
+	p := acpProtocol{}
+	w := &recordingMessageWriter{}
+	env := ProtocolEnv{Conn: &Conn{Writer: w}}
+	if err := p.OnStreamClosed(context.Background(), env, "t", json.RawMessage(`1`), true); err != nil {
+		t.Fatal(err)
+	}
+	if len(w.Results) != 1 {
+		t.Fatalf("results = %d", len(w.Results))
+	}
+	w2 := &recordingMessageWriter{}
+	env2 := ProtocolEnv{Conn: &Conn{Writer: w2}}
+	_ = p.OnStreamClosed(context.Background(), env2, "t", json.RawMessage(`2`), false)
+	if len(w2.Errors) != 1 {
+		t.Fatalf("errors = %d", len(w2.Errors))
+	}
+	if err := p.OnStreamClosed(context.Background(), env, "t", nil, false); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEventToAcpJsonRpc_errorWithErrorField(t *testing.T) {
+	frames, err := eventToAcpJsonRpc("s1", &streaming.StreamEvent{
+		Type:  streaming.StreamEventError,
+		Error: errors.New("explode"),
+	})
+	if err != nil || len(frames) == 0 || !strings.Contains(string(frames[0]), "explode") {
+		t.Fatalf("%v %v", err, frames)
+	}
+}
+
+func TestInjectReqID_nonJSONFrame(t *testing.T) {
+	out := injectReqID([][]byte{[]byte("not-json"), []byte(`{"a":1}`)}, json.RawMessage(`7`), true)
+	if len(out) != 2 || string(out[0]) != "not-json" {
+		t.Fatalf("%v", out)
+	}
+}
+
+func TestACP_handleHTTP_initialize(t *testing.T) {
+	r := newTestRegistry(testStore(t), &mockInferenceStrategy{}, nil)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader([]byte(
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}`,
+	)))
+	acpProtocol{}.handleHTTP(ProtocolEnv{Registry: r, Conn: &Conn{}}, rec, req)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "protocolVersion") {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestValidateACPRequest_moreParamEdges(t *testing.T) {
+	cases := []struct {
+		body string
+		want string
+	}{
+		{`{"jsonrpc":"2.0","id":1,"method":"initialize"}`, "params is required"},
+		{`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":0}}`, "unsupported protocol version"},
+		{`{"jsonrpc":"2.0","id":1,"method":"initialize","params":"bad"}`, "invalid initialize params"},
+		{`{"jsonrpc":"2.0","id":1,"method":"session/new"}`, "params is required"},
+		{`{"jsonrpc":"2.0","id":1,"method":"session/new","params":"x"}`, "invalid session/new"},
+		{`{"jsonrpc":"2.0","id":1,"method":"session/load"}`, "params is required"},
+		{`{"jsonrpc":"2.0","id":1,"method":"session/load","params":"bad"}`, "invalid session/load"},
+		{`{"jsonrpc":"2.0","id":1,"method":"session/load","params":{"cwd":"/t"}}`, "sessionId is required"},
+		{`{"jsonrpc":"2.0","id":1,"method":"session/resume"}`, "params is required"},
+		{`{"jsonrpc":"2.0","id":1,"method":"session/resume","params":"bad"}`, "invalid session/resume"},
+		{`{"jsonrpc":"2.0","id":1,"method":"session/resume","params":{"cwd":"/t"}}`, "sessionId is required"},
+		{`{"jsonrpc":"2.0","id":1,"method":"session/set_config_option"}`, "params is required"},
+		{`{"jsonrpc":"2.0","id":1,"method":"session/set_config_option","params":"bad"}`, "invalid session/set_config_option"},
+		{`{"jsonrpc":"2.0","id":1,"method":"session/set_config_option","params":{"sessionId":"s"}}`, "configId is required"},
+		{`{"jsonrpc":"2.0","id":1,"method":"session/close"}`, "params is required"},
+		{`{"jsonrpc":"2.0","id":1,"method":"session/close","params":"bad"}`, "invalid session/close"},
+		{`{"jsonrpc":"2.0","id":1,"method":"session/close","params":{}}`, "sessionId is required"},
+		{`{"jsonrpc":"2.0","id":1,"method":"session/prompt"}`, "params is required"},
+		{`{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":"bad"}`, "invalid session/prompt"},
+		{`{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{"sessionId":"s","prompt":[]}}`, "prompt must not be empty"},
+		{`{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{"sessionId":"s","prompt":[{"type":"text","text":""}]}}`, "non-empty text"},
+		{`{"jsonrpc":"2.0","id":1,"method":"authenticate"}`, ""},
+		{`{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"s1"}}`, ""},
+	}
+	for _, tc := range cases {
+		pr, err := validateACPRequest([]byte(tc.body))
+		if tc.want == "" {
+			if err != nil {
+				t.Errorf("%s: unexpected err %v", tc.body, err)
+			}
+			_ = pr
+			continue
+		}
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err=%v want %q", tc.body, err, tc.want)
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // handleRPC — lifecycle methods
 // ---------------------------------------------------------------------------
@@ -787,8 +883,12 @@ func TestHandleRPC_unknownMethod(t *testing.T) {
 	var resp map[string]any
 	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
 	errObj := resp["error"].(map[string]any)
-	if !strings.Contains(errObj["message"].(string), "unsupported method") {
-		t.Errorf("error message = %v, want to contain %q", errObj["message"], "unsupported method")
+	msg, _ := errObj["message"].(string)
+	if !strings.Contains(msg, "method not found") {
+		t.Errorf("error message = %v, want to contain %q", msg, "method not found")
+	}
+	if code, _ := errObj["code"].(float64); int(code) != jsonRPCCodeMethodNotFound {
+		t.Errorf("error code = %v, want %d", errObj["code"], jsonRPCCodeMethodNotFound)
 	}
 }
 

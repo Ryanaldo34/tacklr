@@ -12,6 +12,53 @@ import (
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
+func TestResolveInterruptViaACP_dispatchOutcomes(t *testing.T) {
+	// Unsupported kind.
+	data, _ := json.Marshal(map[string]any{
+		"interruptId": "i1",
+		"type":        "not_a_real_kind",
+		"data":        map[string]any{},
+	})
+	_, err := resolveInterruptViaACP(context.Background(), ProtocolEnv{Conn: &Conn{RPC: NewClientBridge(&recordingWriter{})}}, "s", &EventStream{}, &streaming.StreamEvent{Data: data})
+	if err == nil || !strings.Contains(err.Error(), "unsupported") {
+		t.Fatalf("unsupported: %v", err)
+	}
+
+	// Bad envelope.
+	_, err = resolveInterruptViaACP(context.Background(), ProtocolEnv{Conn: &Conn{RPC: NewClientBridge(&recordingWriter{})}}, "s", &EventStream{}, &streaming.StreamEvent{Data: []byte(`{`)})
+	if err == nil {
+		t.Fatal("expected parse error")
+	}
+
+	// User selection without elicitation form capability → park (nil, nil).
+	usi := control.UserSelectionInterrupt{Options: []control.UserChoice{{Title: "A"}, {Title: "B"}}}
+	ser, _ := usi.Serialize()
+	selData, _ := json.Marshal(map[string]any{
+		"interruptId": "i2",
+		"type":        "user_selection_choice",
+		"data":        json.RawMessage(ser),
+	})
+	ch, err := resolveInterruptViaACP(context.Background(), ProtocolEnv{Conn: &Conn{
+		RPC:  NewClientBridge(&recordingWriter{}),
+		Caps: ClientCapabilities{ElicitationForm: false},
+	}}, "s", &EventStream{}, &streaming.StreamEvent{Data: selData, MessageID: "tc"})
+	if err != nil || ch != nil {
+		t.Fatalf("no-form park: ch=%v err=%v", ch, err)
+	}
+
+	// Empty type defaults to user_selection_choice (same park without form).
+	legacy, _ := json.Marshal(map[string]any{
+		"interruptId": "i3",
+		"data":        json.RawMessage(ser),
+	})
+	ch, err = resolveInterruptViaACP(context.Background(), ProtocolEnv{Conn: &Conn{
+		RPC: NewClientBridge(&recordingWriter{}),
+	}}, "s", &EventStream{}, &streaming.StreamEvent{Data: legacy})
+	if err != nil || ch != nil {
+		t.Fatalf("legacy type park: ch=%v err=%v", ch, err)
+	}
+}
+
 // TestResolvePermissionViaRequest_outcomes exercises every return path of
 // resolvePermissionViaRequest through a real ClientBridge.
 func TestResolvePermissionViaRequest_outcomes(t *testing.T) {

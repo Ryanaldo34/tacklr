@@ -19,6 +19,21 @@ func TestRequestPermissionResultToPayload_cancelled(t *testing.T) {
 	if !cancelled {
 		t.Fatal("expected cancelled")
 	}
+	if _, _, err := RequestPermissionResultToPayload(json.RawMessage(`{`)); err == nil {
+		t.Fatal("bad json")
+	}
+	if _, _, err := RequestPermissionResultToPayload(json.RawMessage(`{"outcome":{"outcome":"weird"}}`)); err == nil {
+		t.Fatal("unknown outcome")
+	}
+	if _, _, err := RequestPermissionResultToPayload(json.RawMessage(`{"outcome":{"outcome":"selected"}}`)); err == nil {
+		t.Fatal("selected without optionId")
+	}
+}
+
+func TestParseInterruptEnvelope_missingID(t *testing.T) {
+	if _, err := ParseInterruptEnvelope([]byte(`{"type":"x","data":{}}`)); err == nil {
+		t.Fatal("expected missing interruptId")
+	}
 }
 
 func TestPermissionToACPParams_emptyToolName(t *testing.T) {

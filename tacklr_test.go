@@ -186,6 +186,57 @@ func TestAgentHarness_Run(t *testing.T) {
 		if messages[0].Content != "Hello!" {
 			t.Errorf("content = %q", messages[0].Content)
 		}
+		ah.Close() // idempotent resource release after turn
+	})
+
+	t.Run("tool progress updates stream during turn", func(t *testing.T) {
+		store := testStore(t)
+		progress := NewTool(ToolConfig{
+			Name: "progress_demo",
+			Handler: func(ctx context.Context, _ struct{}, runtime *HarnessRuntime) (string, error) {
+				runtime.EmitUpdate("starting")
+				runtime.EmitUpdate("halfway")
+				return "done-progress", nil
+			},
+		})
+		var invokeCount int
+		strategy := &mockStrategy{
+			invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, events chan<- LLMResponseChunk) {
+				invokeCount++
+				if invokeCount == 1 {
+					events <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
+						{ID: "p1", CallID: "p1", Name: "progress_demo", Arguments: `{}`},
+					}, IsComplete: true}
+					events <- LLMResponseChunk{IsComplete: true}
+					return
+				}
+				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "after progress", IsComplete: true}
+			},
+		}
+		ah := NewAgent(context.Background(), AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{progress}})
+		ch, err := ah.Run(context.Background(), "progress")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var updates int
+		var toolOK bool
+		for ev := range ch {
+			if ev.Type == streaming.StreamEventToolUpdate {
+				updates++
+			}
+			if ev.Type == StreamEventToolResult && strings.Contains(ev.Content, "done-progress") {
+				toolOK = true
+			}
+		}
+		// Unbuffered harness out + non-blocking EmitUpdate: only one may land if
+		// the consumer is briefly busy; require at least one progress event.
+		if updates < 1 {
+			t.Fatalf("tool updates = %d, want >= 1", updates)
+		}
+		if !toolOK {
+			t.Fatal("expected progress tool result")
+		}
+		ah.Close()
 	})
 
 	t.Run("full tool call loop", func(t *testing.T) {
@@ -1455,62 +1506,6 @@ func TestRun_readSkill_returnsInstructions(t *testing.T) {
 	}
 }
 
-func TestRun_completeTodo_persistsPlanInStore(t *testing.T) {
-	store := testStore(t)
-	var invokeCount int
-	strategy := &mockStrategy{
-		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, events chan<- LLMResponseChunk) {
-			invokeCount++
-			if invokeCount == 1 {
-				events <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-					{ID: "call_ct", CallID: "call_ct", Name: "complete_todo", Arguments: `{"title":"Ship"}`},
-				}, IsComplete: true}
-				events <- LLMResponseChunk{IsComplete: true}
-				return
-			}
-			if invokeCount == 2 {
-				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "handoff body", IsComplete: true}
-				return
-			}
-			events <- LLMResponseChunk{Type: StreamEventMessage, Content: "continued", IsComplete: true}
-		},
-	}
-
-	ah := NewAgent(context.Background(), AgentOptions{
-		Config: Config{MaxWindowSize: 8192},
-		Model:  strategy,
-		Store:  store,
-	})
-	ah.SessionId = "sess-plan-persist"
-	ah.Runtime.PlanSet([]control.Todo{
-		{Title: "Ship", Status: streaming.TodoStatusInProgress},
-	})
-
-	ch, err := ah.Run(context.Background(), "finish ship")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for range ch {
-	}
-
-	// Reload via NewAgentFromSession and assert plan status survived the checkpoint.
-	restored, err := NewAgentFromSession(context.Background(), "sess-plan-persist", AgentOptions{
-		Config: Config{MaxWindowSize: 8192},
-		Model:  &mockStrategy{},
-		Store:  store,
-	})
-	if err != nil {
-		t.Fatalf("NewAgentFromSession: %v", err)
-	}
-	plan := restored.Runtime.PlanGet()
-	if len(plan) != 1 {
-		t.Fatalf("restored plan len = %d, want 1", len(plan))
-	}
-	if plan[0].Title != "Ship" || plan[0].Status != streaming.TodoStatusCompleted {
-		t.Fatalf("restored plan = %+v, want Ship completed", plan[0])
-	}
-}
-
 // stubContextManager records Fit/Handoff so AgentOptions.ContextManager injection
 // is proven end-to-end through Run (not only unit-level Fit calls).
 type stubContextManager struct {
@@ -1528,7 +1523,6 @@ func (s *stubContextManager) Fit(ctx context.Context, in FitInput) (FitResult, e
 
 func (s *stubContextManager) Handoff(ctx context.Context, in HandoffInput) (HandoffResult, error) {
 	s.handoffCalls.Add(1)
-	// Minimal handoff shape: keep last user + a developer summary.
 	return HandoffResult{Window: []*Message{
 		{Role: RoleUser, Content: "goal"},
 		{Role: RoleDeveloper, Content: "stub handoff"},

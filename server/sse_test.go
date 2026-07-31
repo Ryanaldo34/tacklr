@@ -23,6 +23,41 @@ func newSSERequest(t *testing.T, target string, body io.Reader) *http.Request {
 	return req
 }
 
+func TestSSEProtocol_HandleInbound_noop(t *testing.T) {
+	if err := SSE.HandleInbound(context.Background(), ProtocolEnv{}, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidateSSERequest_errorAndOKPaths(t *testing.T) {
+	cases := []struct {
+		body string
+		want string
+	}{
+		{`{`, "invalid JSON"},
+		{`{"prompt":"x"}`, "agent_id is required"},
+		{`{"agent_id":"a","responses":{"i":{}},"prompt":"x"}`, "thread_id is required"},
+		{`{"agent_id":"a","thread_id":"t","responses":{"i":{}},"prompt":"x"}`, "prompt is not allowed"},
+		{`{"agent_id":"a","thread_id":"t","responses":{"i":{`, "invalid JSON"},
+		{`{"agent_id":"a"}`, "prompt is required"},
+	}
+	for _, tc := range cases {
+		_, err := validateSSERequest([]byte(tc.body))
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("body %s: err=%v want %q", tc.body, err, tc.want)
+		}
+	}
+	pr, err := validateSSERequest([]byte(`{"agent_id":"default","prompt":"hi","thread_id":"t1"}`))
+	if err != nil || pr.Prompt != "hi" {
+		t.Fatalf("ok: %+v %v", pr, err)
+	}
+	// Resume responses path.
+	pr, err = validateSSERequest([]byte(`{"agent_id":"default","thread_id":"t1","responses":{"i":{"optionId":"allow-once"}}}`))
+	if err != nil || len(pr.Responses) != 1 {
+		t.Fatalf("resume: %+v %v", pr, err)
+	}
+}
+
 func makeInterruptTool(t *testing.T, optionsJSON string) *tacklr.Tool {
 	t.Helper()
 	return tacklr.NewTool(tacklr.ToolConfig{

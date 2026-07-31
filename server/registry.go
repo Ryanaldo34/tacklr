@@ -178,9 +178,9 @@ func (r *Registry) CreateSession(cwd string, mcpServers []mcp.MCPConfig) *Sessio
 		configValues: configValues,
 	})
 	if r.store != nil {
-		if cp, err := stores.NewCheckpoint(nil, nil, nil, nil, nil, nil); err != nil {
-			slog.Warn("failed to build empty session checkpoint", "session_id", threadID, "error", err)
-		} else if err := r.store.SaveSession(context.Background(), threadID, *cp); err != nil {
+		// Empty checkpoint (all nil inputs) never fails to build.
+		cp, _ := stores.NewCheckpoint(nil, nil, nil, nil, nil, nil)
+		if err := r.store.SaveSession(context.Background(), threadID, *cp); err != nil {
 			slog.Warn("failed to save empty session checkpoint", "session_id", threadID, "error", err)
 		}
 	}

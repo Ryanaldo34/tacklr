@@ -79,6 +79,7 @@ func (rt *HarnessRuntime) PlanGet() []Todo {
 		return cp
 	}
 	// Checkpoint reload: rehydrate from JSON-compatible types.
+	// Non-marshalable values (e.g. channels) yield empty/failed rehydrate → nil.
 	b, err := json.Marshal(v)
 	if err != nil {
 		return nil

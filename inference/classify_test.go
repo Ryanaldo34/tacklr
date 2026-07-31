@@ -43,18 +43,22 @@ func TestClassifyProviderFailure_unmapped(t *testing.T) {
 	}
 }
 
-func TestClassifyIncompleteReason(t *testing.T) {
-	err := ClassifyIncompleteReason("max_output_tokens")
-	if !errors.Is(err, tacklr.ErrMaxTokens) {
-		t.Fatalf("err = %v", err)
+func TestClassifyIncompleteReason_allOutcomes(t *testing.T) {
+	if err := ClassifyIncompleteReason(""); err != nil {
+		t.Fatalf("empty: %v", err)
 	}
-	err = ClassifyIncompleteReason("content_filter")
-	if !errors.Is(err, tacklr.ErrModelRefused) {
-		t.Fatalf("err = %v", err)
+	if err := ClassifyIncompleteReason("max_output_tokens"); !errors.Is(err, tacklr.ErrMaxTokens) {
+		t.Fatalf("max_output_tokens: %v", err)
 	}
-	err = ClassifyIncompleteReason("other")
+	if err := ClassifyIncompleteReason("max_tokens"); !errors.Is(err, tacklr.ErrMaxTokens) {
+		t.Fatalf("max_tokens: %v", err)
+	}
+	if err := ClassifyIncompleteReason("content_filter"); !errors.Is(err, tacklr.ErrModelRefused) {
+		t.Fatalf("content_filter: %v", err)
+	}
+	err := ClassifyIncompleteReason("other")
 	if err == nil || errors.Is(err, tacklr.ErrMaxTokens) {
-		t.Fatalf("err = %v", err)
+		t.Fatalf("other: %v", err)
 	}
 	if !strings.Contains(err.Error(), "incomplete") {
 		t.Fatalf("err = %v", err)

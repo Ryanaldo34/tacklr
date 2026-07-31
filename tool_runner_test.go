@@ -6,12 +6,11 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/ryanaldo34/tacklr/control"
 )
 
 // TestToolRunner_interceptorChainOrder is the extension contract for custom
 // interceptors: outermost first, short-circuit skips later stages and the tool.
+// Nil interceptors in the chain are skipped.
 func TestToolRunner_interceptorChainOrder(t *testing.T) {
 	var order []string
 	tool := NewTool(ToolConfig{
@@ -34,7 +33,7 @@ func TestToolRunner_interceptorChainOrder(t *testing.T) {
 		return next(ctx, inv)
 	}
 
-	got, err := newToolRunner(outer, block, inner).Run(context.Background(), ToolInvocation{Tool: tool})
+	got, err := newToolRunner(outer, nil, block, inner).Run(context.Background(), ToolInvocation{Tool: tool})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,68 +43,10 @@ func TestToolRunner_interceptorChainOrder(t *testing.T) {
 	if strings.Join(order, ",") != "outer,block" {
 		t.Fatalf("order = %v", order)
 	}
-}
 
-// TestPermissionSessionMemory_stateShapes covers remember/has for empty,
-// map[string]bool, map[string]any (checkpoint rehydrate), and unknown types.
-func TestPermissionSessionMemory_stateShapes(t *testing.T) {
-	rt := control.NewRuntime(nil, nil, nil)
-	rt.EnsureInitialized()
-
-	// Empty → first remember.
-	permissionRemember(rt, permissionAlwaysAllowKey, "a")
-	if !permissionSetHas(rt, permissionAlwaysAllowKey, "a") {
-		t.Fatal("expected a after first remember")
-	}
-	if permissionSetHas(rt, permissionAlwaysAllowKey, "missing") {
-		t.Fatal("missing tool should be false")
-	}
-
-	// map[string]bool merge: second tool preserves first.
-	permissionRemember(rt, permissionAlwaysAllowKey, "b")
-	if !permissionSetHas(rt, permissionAlwaysAllowKey, "a") || !permissionSetHas(rt, permissionAlwaysAllowKey, "b") {
-		t.Fatal("expected a and b after bool-map merge")
-	}
-
-	// Checkpoint rehydrate shape map[string]any.
-	raw, err := json.Marshal(map[string]bool{"c": true, "d": false})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var anyMap map[string]any
-	if err := json.Unmarshal(raw, &anyMap); err != nil {
-		t.Fatal(err)
-	}
-	rt.StateSet(permissionAlwaysDenyKey, anyMap)
-	if !permissionSetHas(rt, permissionAlwaysDenyKey, "c") {
-		t.Fatal("expected c from any-map")
-	}
-	if permissionSetHas(rt, permissionAlwaysDenyKey, "d") {
-		t.Fatal("d=false should be false")
-	}
-	// Merge into any-map via remember → rewrites as map[string]bool.
-	permissionRemember(rt, permissionAlwaysDenyKey, "e")
-	if !permissionSetHas(rt, permissionAlwaysDenyKey, "c") || !permissionSetHas(rt, permissionAlwaysDenyKey, "e") {
-		t.Fatal("expected c and e after any-map merge")
-	}
-
-	// Unknown stored type → has is false; remember starts fresh.
-	rt.StateSet(permissionAlwaysAllowKey, "not-a-map")
-	if permissionSetHas(rt, permissionAlwaysAllowKey, "a") {
-		t.Fatal("unknown type should not report membership")
-	}
-	permissionRemember(rt, permissionAlwaysAllowKey, "z")
-	if !permissionSetHas(rt, permissionAlwaysAllowKey, "z") {
-		t.Fatal("expected z after remember over unknown type")
-	}
-	if permissionSetHas(rt, permissionAlwaysAllowKey, "a") {
-		t.Fatal("fresh set should not keep prior a")
-	}
-
-	// Nil value under key.
-	rt.StateSet(permissionAlwaysAllowKey, nil)
-	if permissionSetHas(rt, permissionAlwaysAllowKey, "z") {
-		t.Fatal("nil value should be false")
+	// Nil tool is a not-found outcome for custom runners.
+	if _, err := newToolRunner().Run(context.Background(), ToolInvocation{}); err == nil {
+		t.Fatal("want tool not found for nil tool")
 	}
 }
 

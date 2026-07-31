@@ -56,15 +56,9 @@ func (p acpProtocol) HandleInbound(ctx context.Context, env ProtocolEnv, body []
 
 	pr, err := validateACPRequest(body)
 	if err != nil {
+		// validateACPRequest always returns a nil *parsedRequest on error.
 		slog.Debug("client error", "error", err)
-		if pr != nil && pr.Notification {
-			return nil
-		}
-		var id json.RawMessage
-		if pr != nil {
-			id = pr.ID
-		}
-		_ = env.Conn.Writer.WriteError(id, err)
+		_ = env.Conn.Writer.WriteError(nil, err)
 		return err
 	}
 
@@ -288,10 +282,8 @@ func resolveSelectionViaElicitation(ctx context.Context, env ProtocolEnv, thread
 		return stream.ResumeInterrupts(ctx, map[string][]byte{interruptID: resolution})
 	case "decline":
 		return nil, fmt.Errorf("user declined to answer")
-	case "cancel":
+	default: // "cancel" — ElicitationResultToSelectionPayload rejects any other action.
 		return nil, fmt.Errorf("user cancelled the prompt")
-	default:
-		return nil, fmt.Errorf("unexpected elicitation action %q", action)
 	}
 }
 

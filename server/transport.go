@@ -38,6 +38,11 @@ func (s *Server) primary() Protocol {
 	return s.Protocols[0]
 }
 
+type stdioReadResult struct {
+	line []byte
+	err  error
+}
+
 // ServeStdio serves line-delimited JSON messages over in/out.
 func (s *Server) ServeStdio(ctx context.Context, in io.Reader, out io.Writer) error {
 	if ctx == nil {
@@ -53,18 +58,14 @@ func (s *Server) ServeStdio(ctx context.Context, in io.Reader, out io.Writer) er
 	env := ProtocolEnv{Registry: s.Registry, Conn: conn}
 	proto := s.primary()
 
-	type readResult struct {
-		line []byte
-		err  error
-	}
-	readCh := make(chan readResult, 1)
+	readCh := make(chan stdioReadResult, 1)
 
 	go func() {
 		defer close(readCh)
 		for {
 			line, err := reader.ReadBytes('\n')
 			select {
-			case readCh <- readResult{line: line, err: err}:
+			case readCh <- stdioReadResult{line: line, err: err}:
 				if err != nil {
 					return
 				}
@@ -87,12 +88,25 @@ func (s *Server) ServeStdio(ctx context.Context, in io.Reader, out io.Writer) er
 		}()
 	}
 
+	return runStdioLoop(ctx, readCh, bridge, dispatch, &wg)
+}
+
+// runStdioLoop is the ServeStdio select loop. Extracted so the readCh-closed
+// path can be tested without racing the real reader goroutine.
+func runStdioLoop(
+	ctx context.Context,
+	readCh <-chan stdioReadResult,
+	bridge *ClientBridge,
+	dispatch func([]byte),
+	wg *sync.WaitGroup,
+) error {
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case rr, ok := <-readCh:
 			if !ok {
+				// Reader exited without a final result (typically parent cancel).
 				return ctx.Err()
 			}
 			if rr.err != nil {
@@ -119,15 +133,11 @@ func (s *Server) ServeStdio(ctx context.Context, in io.Reader, out io.Writer) er
 	}
 }
 
-// ServeHTTP starts an HTTP server mounting all protocol routes.
-func (s *Server) ServeHTTP(ctx context.Context, addr string) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
+// HTTPMux mounts all protocol HTTP routes. Used by ServeHTTP and tests.
+func (s *Server) HTTPMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	for _, p := range s.Protocols {
-		proto := p
-		for _, route := range proto.HTTPRoutes() {
+		for _, route := range p.HTTPRoutes() {
 			r := route
 			pattern := r.Method + " " + r.Pattern
 			mux.HandleFunc(pattern, func(w http.ResponseWriter, req *http.Request) {
@@ -136,18 +146,30 @@ func (s *Server) ServeHTTP(ctx context.Context, addr string) error {
 			})
 		}
 	}
+	return mux
+}
 
-	hs := &http.Server{Addr: addr, Handler: mux}
+// ServeHTTP starts an HTTP server mounting all protocol routes.
+func (s *Server) ServeHTTP(ctx context.Context, addr string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	hs := &http.Server{Addr: addr, Handler: s.HTTPMux()}
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- hs.ListenAndServe()
 	}()
+	return waitHTTPServer(ctx, hs.Shutdown, errCh)
+}
 
+// waitHTTPServer waits for ListenAndServe to exit or ctx cancel, then maps
+// shutdown/listen errors to the ServeHTTP return value. Extracted for tests.
+func waitHTTPServer(ctx context.Context, shutdown func(context.Context) error, errCh <-chan error) error {
 	select {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), defaultHTTPShutdown)
 		defer cancel()
-		_ = hs.Shutdown(shutdownCtx)
+		_ = shutdown(shutdownCtx)
 		err := <-errCh
 		if err == nil || errors.Is(err, http.ErrServerClosed) {
 			return ctx.Err()

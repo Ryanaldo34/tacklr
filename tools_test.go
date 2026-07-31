@@ -235,10 +235,7 @@ func TestAsJson(t *testing.T) {
 		Description: "Get the weather",
 		Handler:     basicHandler,
 	})
-	def, err := tool.AsJson()
-	if err != nil {
-		t.Fatal(err)
-	}
+	def := tool.AsJson()
 
 	if def["type"] != "function" {
 		t.Errorf("type = %v", def["type"])
@@ -262,10 +259,7 @@ func TestToolsAsJson(t *testing.T) {
 		NewTool(ToolConfig{Name: "a", Handler: zeroArgsStringHandler}),
 		NewTool(ToolConfig{Name: "b", Handler: basicHandler}),
 	}
-	raw, err := ToolsAsJson(tools)
-	if err != nil {
-		t.Fatal(err)
-	}
+	raw := ToolsAsJson(tools)
 
 	var parsed []map[string]any
 	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
@@ -284,10 +278,7 @@ func TestToolsAsJsonWithNamespaces(t *testing.T) {
 		}}),
 	}
 
-	raw, err := ToolsAsJson(tools)
-	if err != nil {
-		t.Fatal(err)
-	}
+	raw := ToolsAsJson(tools)
 
 	var parsed []map[string]any
 	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
@@ -385,11 +376,15 @@ func TestNewTool_validation(t *testing.T) {
 			if r == nil {
 				t.Fatal("expected panic")
 			}
-			if !strings.Contains(fmt.Sprint(r), "unexpected parameter type") {
+			msg := fmt.Sprint(r)
+			if !strings.Contains(msg, "too many parameters") && !strings.Contains(msg, "unexpected parameter") {
 				t.Fatalf("got %v", r)
 			}
 		}()
-		NewTool(ToolConfig{Name: "t", Handler: func(ctx context.Context, a, b BasicArgs) (string, error) { return "", nil }})
+		// Four parameters exceeds (ctx, args, runtime).
+		NewTool(ToolConfig{Name: "t", Handler: func(ctx context.Context, a BasicArgs, b BasicArgs, c BasicArgs) (string, error) {
+			return "", nil
+		}})
 	})
 }
 
@@ -521,9 +516,5 @@ func contains(slice []string, val string) bool {
 
 func asParams(t *testing.T, tool *Tool) map[string]any {
 	t.Helper()
-	def, err := tool.AsJson()
-	if err != nil {
-		t.Fatalf("AsJson: %v", err)
-	}
-	return def["parameters"].(map[string]any)
+	return tool.AsJson()["parameters"].(map[string]any)
 }

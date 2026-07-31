@@ -448,6 +448,10 @@ func (a *AgentHarness) emitToolResult(ctx context.Context, out chan<- StreamEven
 	return msg
 }
 
+// discoverAllTools is the MCP discovery entry used by initMCP. Tests may swap
+// it to inject tools without a live MCP transport.
+var discoverAllTools = mcpruntime.DiscoverAllTools
+
 // initMCP connects to all configured MCP servers, discovers their tools, and
 // appends them to a.Tools. It is idempotent — subsequent calls are no-ops so
 // that ReturnFromInterrupt → Run does not re-discover. When no configs are set
@@ -464,7 +468,7 @@ func (a *AgentHarness) initMCP(ctx context.Context) {
 	}
 	a.mcpInitialized = true
 
-	a.mcpCleanup = mcpruntime.DiscoverAllTools(ctx, a.MCPConfigs, func(name, description, namespace string, schema map[string]any, handler mcpruntime.ToolHandler) {
+	a.mcpCleanup = discoverAllTools(ctx, a.MCPConfigs, func(name, description, namespace string, schema map[string]any, handler mcpruntime.ToolHandler) {
 		tool := newMCPTool(mcpToolConfig{
 			Name:        name,
 			Description: description,

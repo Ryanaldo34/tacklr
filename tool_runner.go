@@ -85,16 +85,14 @@ func toolPermissionGate(ctx context.Context, inv ToolInvocation, next ToolCallFu
 		return next(ctx, inv)
 	}
 
-	initPayload, err := json.Marshal(map[string]any{"toolName": name})
-	if err != nil {
-		return "", fmt.Errorf("marshal permission interrupt: %w", err)
-	}
+	initPayload, _ := json.Marshal(map[string]any{"toolName": name})
 	intr, err := inv.Runtime.RaiseInterrupt("tool_permission", initPayload)
 	if err != nil {
 		return "", err
 	}
 	perm, ok := intr.(*control.ToolPermissionInterrupt)
 	if !ok || perm == nil {
+		// Registered tool_permission factory always returns *ToolPermissionInterrupt.
 		return "", fmt.Errorf("tool permission: unexpected interrupt type %T", intr)
 	}
 

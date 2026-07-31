@@ -247,7 +247,8 @@ func validateACPRequest(body []byte) (*parsedRequest, error) {
 		// No auth required; accept empty success.
 		return pr, nil
 	default:
-		return nil, clientErrorf(ErrInvalidRequest, "unsupported method: %s", env.Method)
+		// Admit unknown methods so HandleInbound can return JSON-RPC MethodNotFound.
+		return pr, nil
 	}
 }
 

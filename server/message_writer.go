@@ -94,7 +94,7 @@ type sseMessageWriter struct {
 func (m *sseMessageWriter) WriteResult(id json.RawMessage, result any) error {
 	data, err := json.Marshal(map[string]any{"id": id, "result": result})
 	if err != nil {
-		return err
+		return err // e.g. channel in result
 	}
 	return writeSSEEvent(m.w, m.flusher, "result", data)
 }

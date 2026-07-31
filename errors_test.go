@@ -51,6 +51,10 @@ func TestWrapStopReason_preservesIs(t *testing.T) {
 	if WrapStopReason(ErrMaxTokens, nil) != ErrMaxTokens {
 		t.Fatal("nil cause should return kind")
 	}
+	// nil kind preserves the cause as-is.
+	if WrapStopReason(nil, cause) != cause {
+		t.Fatal("nil kind should return cause")
+	}
 }
 
 func TestSentinelWrapping(t *testing.T) {

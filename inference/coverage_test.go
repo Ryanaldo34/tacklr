@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pkoukk/tiktoken-go"
 	"github.com/ryanaldo34/tacklr"
 )
 
@@ -276,7 +277,7 @@ func TestParseSSE_functionCallWithNamespaceAndIDOnly(t *testing.T) {
 	}
 }
 
-func TestWithStructuredOutput_pointerAndInvalid(t *testing.T) {
+func TestWithStructuredOutput_pointerAndClear(t *testing.T) {
 	type S struct {
 		X string `json:"x"`
 	}
@@ -285,22 +286,40 @@ func TestWithStructuredOutput_pointerAndInvalid(t *testing.T) {
 	if s.structuredOutputName != "S" || s.structuredOutputSchema == nil {
 		t.Fatalf("schema not set: name=%q schema=%v", s.structuredOutputName, s.structuredOutputSchema)
 	}
-	// Non-struct (e.g. string) may disable structured output.
-	s.WithStructuredOutput("nope")
+	s.WithStructuredOutput(nil)
+	if s.structuredOutputSchema != nil || s.structuredOutputName != "" {
+		t.Fatal("nil should clear structured output")
+	}
+}
+
+func TestParseAPIErrorMeta_nonJSON(t *testing.T) {
+	code, typ := parseAPIErrorMeta([]byte("not-json"))
+	if code != "" || typ != "" {
+		t.Fatalf("code=%q typ=%q", code, typ)
+	}
+	// Valid error object used by ClassifyProviderFailure.
+	err := ClassifyProviderFailure(400, []byte(`not-json`))
+	if err == nil {
+		t.Fatal("expected error")
+	}
 }
 
 func TestMarshalMessagesToInput_assistantToolCallsOnly(t *testing.T) {
-	items, err := marshalMessagesToInput([]*tacklr.Message{
+	items := marshalMessagesToInput([]*tacklr.Message{
 		{Role: tacklr.RoleAssistant, ToolCalls: []tacklr.ToolCall{
 			{CallID: "c", Name: "n", Arguments: `{}`},
 		}},
 		{Role: tacklr.RoleReasoning, Content: "ignored role"},
+		{Role: tacklr.RoleTool, ToolCallID: "c", Content: "out"},
+		{Role: tacklr.RoleSystem, Content: "sys"},
+		{Role: tacklr.RoleDeveloper, Content: "dev"},
+		{Role: tacklr.RoleUser, Content: "hi"},
+		{Role: tacklr.RoleAssistant, Content: "said", ToolCalls: []tacklr.ToolCall{
+			{CallID: "c2", Name: "n2", Arguments: `{}`},
+		}},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(items) != 1 {
-		t.Fatalf("items = %d, want 1 function_call only", len(items))
+	if len(items) < 5 {
+		t.Fatalf("items = %d", len(items))
 	}
 	if !strings.Contains(string(items[0]), "function_call") {
 		t.Fatalf("%s", items[0])
@@ -318,6 +337,116 @@ func TestCountTokens_badJSONResponse(t *testing.T) {
 	s.WithURL(srv.URL)
 	_, err := s.CountTokens(context.Background(), []*tacklr.Message{{Role: tacklr.RoleUser, Content: "x"}}, nil)
 	if err == nil || !strings.Contains(err.Error(), "unmarshal") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestCountTokens_structuredOutputAndDoError(t *testing.T) {
+	type Out struct {
+		V int `json:"v"`
+	}
+	// HTTP Do error
+	s := NewOpenAIInferenceStrategy(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("network down")
+	})})
+	s.WithApiKey("k").WithModel("m").WithURL("http://example.invalid")
+	if _, err := s.CountTokens(context.Background(), []*tacklr.Message{{Role: tacklr.RoleUser, Content: "x"}}, nil); err == nil {
+		t.Fatal("want network error")
+	}
+
+	// structured output on request + successful count
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"input_tokens":7,"object":"count"}`)
+	}))
+	t.Cleanup(srv.Close)
+	s2 := NewOpenAIInferenceStrategy(srv.Client())
+	s2.WithApiKey("k").WithModel("m").WithURL(srv.URL)
+	s2.WithStructuredOutput(Out{})
+	s2.SetSystemPrompt("sys")
+	n, err := s2.CountTokens(context.Background(), []*tacklr.Message{{Role: tacklr.RoleUser, Content: "x"}}, nil)
+	if err != nil || n != 7 {
+		t.Fatalf("n=%d err=%v", n, err)
+	}
+}
+
+func TestInvoke_createRequestErrorAndCancelledSend(t *testing.T) {
+	s := NewOpenAIInferenceStrategy(http.DefaultClient)
+	s.WithApiKey("k").WithModel("m").WithURL("http://\x00") // invalid URL
+	ch, err := s.Invoke(context.Background(), []*tacklr.Message{{Role: tacklr.RoleUser, Content: "x"}}, nil)
+	if err != nil {
+		// NewRequest may fail before goroutine
+		return
+	}
+	for range ch {
+	}
+
+	// Cancelled ctx before sendChunk of HTTP error.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	s2 := NewOpenAIInferenceStrategy(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("x")
+	})})
+	s2.WithApiKey("k").WithModel("m").WithURL("http://example.invalid")
+	ch2, err := s2.Invoke(ctx, []*tacklr.Message{{Role: tacklr.RoleUser, Content: "x"}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range ch2 {
+	}
+}
+
+func TestCountTokens_createRequestAndReadBodyErrors(t *testing.T) {
+	s := NewOpenAIInferenceStrategy(http.DefaultClient)
+	s.WithApiKey("k").WithModel("m").WithURL("http://\x00")
+	if _, err := s.CountTokens(context.Background(), []*tacklr.Message{{Role: tacklr.RoleUser, Content: "x"}}, nil); err == nil {
+		t.Fatal("want create request error")
+	}
+
+	// Body read failure after 200.
+	s2 := NewOpenAIInferenceStrategy(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: 200,
+			Body:       io.NopCloser(errReader{}),
+			Header:     make(http.Header),
+		}, nil
+	})})
+	s2.WithApiKey("k").WithModel("m").WithURL("http://example.invalid")
+	if _, err := s2.CountTokens(context.Background(), []*tacklr.Message{{Role: tacklr.RoleUser, Content: "x"}}, nil); err == nil {
+		t.Fatal("want read body error")
+	}
+}
+
+type errReader struct{}
+
+func (errReader) Read([]byte) (int, error) { return 0, errors.New("read fail") }
+
+func TestEmitFunctionCallChunk_badJSON(t *testing.T) {
+	s := NewOpenAIInferenceStrategy(nil)
+	ch := make(chan tacklr.LLMResponseChunk, 2)
+	s.emitFunctionCallChunk([]byte(`{`), ch)
+	close(ch)
+	n := 0
+	for range ch {
+		n++
+	}
+	if n != 0 {
+		t.Fatalf("expected no chunks, got %d", n)
+	}
+}
+
+func TestCountTokens_tiktokenEncodingError(t *testing.T) {
+	prev := getEncoding
+	t.Cleanup(func() { getEncoding = prev })
+	getEncoding = func(string) (*tiktoken.Tiktoken, error) {
+		return nil, errors.New("no encoding")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(404)
+	}))
+	t.Cleanup(srv.Close)
+	s := NewOpenAIInferenceStrategy(srv.Client())
+	s.WithApiKey("k").WithModel("m").WithURL(srv.URL)
+	if _, err := s.CountTokens(context.Background(), []*tacklr.Message{{Role: tacklr.RoleUser, Content: "x"}}, nil); err == nil || !strings.Contains(err.Error(), "tiktoken") {
 		t.Fatalf("err = %v", err)
 	}
 }

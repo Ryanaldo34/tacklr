@@ -88,10 +88,7 @@ func (c *UserSelectionInterrupt) Return(payload []byte) error {
 }
 
 func (c *UserSelectionInterrupt) Error() string {
-	b, err := json.Marshal(c)
-	if err != nil {
-		return "[failed to marshal interrupt]"
-	}
+	b, _ := json.Marshal(c) // value type always marshals
 	return string(b)
 }
 
@@ -214,10 +211,7 @@ func (p *ToolPermissionInterrupt) Return(payload []byte) error {
 }
 
 func (p *ToolPermissionInterrupt) Error() string {
-	b, err := json.Marshal(p)
-	if err != nil {
-		return "[failed to marshal interrupt]"
-	}
+	b, _ := json.Marshal(p) // value type always marshals
 	return string(b)
 }
 
@@ -275,10 +269,8 @@ func (m interruptMap) MarshalJSON() ([]byte, error) {
 	}
 	envelopes := make(map[string]interruptEnvelope, len(m))
 	for k, intr := range m {
-		data, err := json.Marshal(intr)
-		if err != nil {
-			return nil, fmt.Errorf("marshal interrupt %q: %w", k, err)
-		}
+		// Registered interrupt types are plain JSON structs.
+		data, _ := json.Marshal(intr)
 		envelopes[k] = interruptEnvelope{Type: intr.TypeName(), Data: data}
 	}
 	return json.Marshal(envelopes)

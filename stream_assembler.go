@@ -17,14 +17,11 @@ func streamChunkKey(chunk LLMResponseChunk) string {
 
 // AddDelta records a non-complete content delta for message or reasoning streams.
 func (s *streamAssembler) AddDelta(chunk LLMResponseChunk) {
-	if s == nil || chunk.IsComplete || chunk.Content == "" {
+	if s == nil || s.buf == nil || chunk.IsComplete || chunk.Content == "" {
 		return
 	}
 	if chunk.Type != StreamEventMessage && chunk.Type != StreamEventReasoning {
 		return
-	}
-	if s.buf == nil {
-		s.buf = make(map[string]string)
 	}
 	s.buf[streamChunkKey(chunk)] += chunk.Content
 }

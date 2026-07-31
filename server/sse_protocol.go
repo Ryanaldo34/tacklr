@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -156,10 +155,7 @@ func (p sseProtocol) handleWS(env ProtocolEnv, w http.ResponseWriter, r *http.Re
 }
 
 func (p sseProtocol) OnStreamEvent(ctx context.Context, env ProtocolEnv, threadID string, stream *EventStream, ev streaming.StreamEvent, reqID json.RawMessage) StreamControl {
-	frames, err := eventToRawSSE(threadID, &ev)
-	if err != nil {
-		return StreamControl{Err: fmt.Errorf("protocol encode: %w", err)}
-	}
+	frames := eventToRawSSE(threadID, &ev)
 	terminal := ev.Type == streaming.StreamEventComplete || ev.Type == streaming.StreamEventError
 	return StreamControl{Frames: frames, Finished: terminal}
 }
