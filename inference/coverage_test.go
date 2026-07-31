@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/pkoukk/tiktoken-go"
+
 	"github.com/ryanaldo34/tacklr"
 )
 

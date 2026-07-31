@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"time"
 )
 
 // Server serves a Registry over one or more wire Protocols.
@@ -154,7 +155,7 @@ func (s *Server) ServeHTTP(ctx context.Context, addr string) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	hs := &http.Server{Addr: addr, Handler: s.HTTPMux()}
+	hs := &http.Server{Addr: addr, Handler: s.HTTPMux(), ReadHeaderTimeout: 10 * time.Second}
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- hs.ListenAndServe()
@@ -203,7 +204,7 @@ func (s *Server) serveHTTPRPC(w http.ResponseWriter, req *http.Request) {
 	for _, p := range s.Protocols {
 		if p.Name() == "acp" {
 			for _, route := range p.HTTPRoutes() {
-				if route.Method == "POST" && route.Pattern == "/" {
+				if route.Method == http.MethodPost && route.Pattern == "/" {
 					route.Handler(env, w, req)
 					return
 				}
@@ -225,7 +226,7 @@ func (s *Server) serveHTTPSSE(w http.ResponseWriter, req *http.Request) {
 			continue
 		}
 		for _, route := range p.HTTPRoutes() {
-			if route.Method == "POST" && route.Pattern == path {
+			if route.Method == http.MethodPost && route.Pattern == path {
 				route.Handler(env, w, req)
 				return
 			}
@@ -237,7 +238,7 @@ func (s *Server) serveHTTPSSE(w http.ResponseWriter, req *http.Request) {
 			continue
 		}
 		for _, route := range p.HTTPRoutes() {
-			if route.Method == "POST" && route.Pattern == "/" {
+			if route.Method == http.MethodPost && route.Pattern == "/" {
 				route.Handler(env, w, req)
 				return
 			}

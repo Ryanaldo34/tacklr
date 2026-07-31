@@ -125,9 +125,8 @@ func (b *ClientBridge) TryCompleteResponse(body []byte) bool {
 	if env.Method != "" || len(env.ID) == 0 || string(env.ID) == "null" {
 		return false
 	}
-	idKey := string(env.ID)
 	b.mu.Lock()
-	waiter, ok := b.wait[idKey]
+	waiter, ok := b.wait[string(env.ID)]
 	b.mu.Unlock()
 	if !ok {
 		return false

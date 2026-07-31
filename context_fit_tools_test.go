@@ -172,11 +172,7 @@ func TestModelContextManager_Handoff_nilModelAndCancelAndStreamError(t *testing.
 // --- Tool definition / invoke outcomes ---
 
 func TestNewTool_schemaOutcomes_nestedFloatUnexportedAndDeep(t *testing.T) {
-	type deep10 struct {
-		V string `json:"v"`
-	}
-	// Build nested structs dynamically via nested embedding would be heavy;
-	// use a struct with float + unexported field + pointer args.
+	// Struct with float + unexported field + pointer args.
 	type args struct {
 		Score  float64 `json:"score" desc:"score"`
 		hidden string  // unexported — omitted from schema
@@ -187,6 +183,7 @@ func TestNewTool_schemaOutcomes_nestedFloatUnexportedAndDeep(t *testing.T) {
 	tool := NewTool(ToolConfig{
 		Name: "schema_edge",
 		Handler: func(ctx context.Context, a args) (string, error) {
+			_ = a.hidden // field exists for schema-omission check only
 			return "ok", nil
 		},
 	})
@@ -256,50 +253,10 @@ func TestTool_AsJson_nilParametersDefaults(t *testing.T) {
 // --- Subagent parent outcomes ---
 
 func TestSpawnWorker_incompleteStream_errors(t *testing.T) {
-	// Worker streams a message then closes without complete → incomplete outcome.
+	// StreamEventError with empty Error/Content → "worker stream error with no details".
 	workerModel := &mockStrategy{
 		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
-			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "partial", IsComplete: true}
-			// no complete event from harness if we don't get IsComplete path...
-			// Actually Run emits Complete when no tools. So we get complete.
-			// Force incomplete by never finishing: hang until cancel, or
-			// emit only incomplete deltas then close invoke channel without complete message.
-		},
-	}
-	// Override: empty invoke leaves stream closed with no complete from worker Run —
-	// worker Run still emits Complete when toolCalls empty after message.
-	// Use invoke that never sends IsComplete message and no chunks — channel closes,
-	// modelFailed false, toolCalls empty → Complete is emitted.
-	// To get incomplete drain: worker must not emit Complete. That happens when
-	// worker parks on interrupt without complete, or errors.
-	// Incomplete without interrupt: drainWorkerEvents when stream ends without complete
-	// and without error — worker Run always emits complete or error or interrupt.
-	// Looking at Run: always emits Complete if no tools. So incomplete path is when
-	// stream closes early without complete — e.g. cancel during worker without error event.
-	// Alternative: mock by using runWorker after crafting... stick to interrupt-less
-	// incomplete via stream that only has message without going through full Run.
-	// Simplest parent path: worker model returns invoke error-less empty channel quickly
-	// and Run still completes.
-	// Actually drain incomplete is when completed=false and no interrupts — e.g.
-	// worker emits messages then channel closes without Complete/Error/Interrupt.
-	// AgentHarness.Run always emits Complete or Error. So incomplete needs
-	// interrupt path with empty collectChildInterrupts.
-	// Worker raises interrupt then stream ends without complete — park path.
-	// For ErrWorkerIncomplete: drained without complete, childIntr nil.
-	// That happens if interrupt IDs empty/unparseable.
-	workerModel = &mockStrategy{
-		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
-			// Emit a yield with bad data so parseInterruptID fails, then end without complete.
-			// But Run won't emit Interrupt without tool interrupt.
-			// Force via tool interrupt with empty envelope id?
-			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "x", IsComplete: true}
-		},
-	}
-	_ = workerModel
-	// Use spawn with worker that errors mid-stream via StreamEventError without Error field.
-	workerModel = &mockStrategy{
-		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
-			ch <- LLMResponseChunk{Type: StreamEventError, Content: ""} // no Error, empty content
+			ch <- LLMResponseChunk{Type: StreamEventError, Content: ""}
 		},
 	}
 	h := NewAgent(context.Background(), AgentOptions{
@@ -315,7 +272,6 @@ func TestSpawnWorker_incompleteStream_errors(t *testing.T) {
 	if err == nil {
 		t.Fatal("want worker error")
 	}
-	// Either "no details" or content-based error.
 	if !strings.Contains(err.Error(), "no details") && !strings.Contains(err.Error(), "failed") {
 		t.Fatalf("err = %v", err)
 	}

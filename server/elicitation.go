@@ -32,7 +32,7 @@ func SelectionToElicitationParams(sessionID, toolCallID, question string, opts [
 			return nil, fmt.Errorf("option %d: empty title", i)
 		}
 		titles = append(titles, o.Title)
-		msg.WriteString(fmt.Sprintf("%d. %s", i+1, o.Title))
+		fmt.Fprintf(&msg, "%d. %s", i+1, o.Title)
 		if o.Description != "" {
 			msg.WriteString(" — ")
 			msg.WriteString(o.Description)

@@ -1467,7 +1467,7 @@ func TestServeStdio_contextCancel(t *testing.T) {
 
 	select {
 	case err := <-errCh:
-		if err != context.Canceled {
+		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("ServeStdio error = %v, want context.Canceled", err)
 		}
 	case <-time.After(2 * time.Second):

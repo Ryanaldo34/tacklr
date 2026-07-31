@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/milvus-io/milvus/client/v2/milvusclient"
+
 	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/streaming"
 )

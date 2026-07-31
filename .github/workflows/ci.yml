@@ -1,0 +1,172 @@
+# Continuous integration for Tacklr.
+# Runs on pull requests and pushes to main: format, lint, build, test, coverage.
+
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: "1.26.x"
+  GOLANGCI_LINT_VERSION: v2.12.2
+  # Keep in sync with go install path used below.
+  GO_TEST_COVERAGE_VERSION: v2.17.0
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Format (gofmt)
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "The following files are not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
+          args: --timeout=5m
+          only-new-issues: false
+
+  test:
+    name: Build, Test & Coverage
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Verify go.mod tidy
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+      # Race detector and coverage profiles are separate: -race can flake under
+      # heavy concurrency in integration-style harness tests; coverage still uses
+      # atomic mode for correct multi-goroutine counts.
+      - name: Test (race)
+        run: go test -race -count=1 ./...
+
+      - name: Test with coverage
+        run: |
+          go test -count=1 -covermode=atomic -coverprofile=coverage.out ./...
+          go tool cover -func=coverage.out | tail -1
+          go tool cover -html=coverage.out -o coverage.html
+
+      - name: Coverage summary (markdown)
+        id: cov_summary
+        run: |
+          chmod +x scripts/coverage-summary.sh scripts/update-coverage-badge.sh
+          scripts/coverage-summary.sh coverage.out | tee coverage-summary.md
+          scripts/update-coverage-badge.sh coverage.out docs/badges/coverage.json
+          {
+            echo "body<<EOF"
+            cat coverage-summary.md
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Enforce coverage thresholds
+        uses: vladopajic/go-test-coverage@v2
+        with:
+          config: ./.testcoverage.yml
+          # Continue so we still upload artifacts / comment when thresholds fail.
+          continue-on-error: true
+        id: coverage
+
+      - name: Fail if coverage below threshold
+        if: steps.coverage.outcome == 'failure'
+        run: |
+          echo "::error::Coverage thresholds not met (see .testcoverage.yml)."
+          exit 1
+
+      - name: Upload coverage artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ github.sha }}
+          path: |
+            coverage.out
+            coverage.html
+            coverage-summary.md
+            coverage.breakdown
+            docs/badges/coverage.json
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Comment coverage on PR
+        if: github.event_name == 'pull_request' && always()
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: coverage
+          recreate: true
+          message: |
+            ## Test coverage
+            ${{ steps.cov_summary.outputs.body }}
+
+            Gates are defined in `.testcoverage.yml` (package floors + 95% total after excludes).
+            Download the **coverage.html** workflow artifact for a line-level report.
+
+      # Keep README coverage badge current on main (shields.io endpoint JSON).
+      - name: Commit coverage badge
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore: update coverage badge [skip ci]"
+          file_pattern: docs/badges/coverage.json
+          commit_user_name: github-actions[bot]
+          commit_user_email: 41898282+github-actions[bot]@users.noreply.github.com
+
+      # Optional: add repository secret CODECOV_TOKEN to publish to Codecov.
+      - name: Upload to Codecov
+        continue-on-error: true
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage.out
+          flags: unittests
+          name: tacklr
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false

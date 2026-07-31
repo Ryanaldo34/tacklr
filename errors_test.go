@@ -48,11 +48,11 @@ func TestWrapStopReason_preservesIs(t *testing.T) {
 	if !errors.Is(err, cause) {
 		t.Fatalf("errors.Is cause = false for %v", err)
 	}
-	if WrapStopReason(ErrMaxTokens, nil) != ErrMaxTokens {
+	if !errors.Is(WrapStopReason(ErrMaxTokens, nil), ErrMaxTokens) {
 		t.Fatal("nil cause should return kind")
 	}
 	// nil kind preserves the cause as-is.
-	if WrapStopReason(nil, cause) != cause {
+	if !errors.Is(WrapStopReason(nil, cause), cause) {
 		t.Fatal("nil kind should return cause")
 	}
 }

@@ -27,8 +27,8 @@ func TestElicitation_paramsAndResultOutcomes(t *testing.T) {
 		t.Fatalf("decline: action=%s res=%s err=%v", action, res, err)
 	}
 	action, res, err = ElicitationResultToSelectionPayload([]byte(`{"action":"cancel"}`), opts)
-	if err != nil || action != "cancel" {
-		t.Fatalf("cancel: %s %v", action, err)
+	if err != nil || action != "cancel" || res != nil {
+		t.Fatalf("cancel: action=%s res=%s err=%v", action, res, err)
 	}
 	if _, _, err := ElicitationResultToSelectionPayload([]byte(`{"action":"accept","content":{}}`), opts); err == nil {
 		t.Fatal("accept without choice")

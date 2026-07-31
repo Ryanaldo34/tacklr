@@ -335,7 +335,7 @@ func (a *AgentHarness) attachParkedWorker(ctx context.Context, toolCallID string
 	}
 	worker, err := NewAgentFromSession(ctx, meta.WorkerSessionID, a.workerOptsFromSpec(spec))
 	if err != nil {
-		return nil, fmt.Errorf("%w: load session %q: %v", ErrWorkerParkMissing, meta.WorkerSessionID, err)
+		return nil, fmt.Errorf("%w: load session %q: %w", ErrWorkerParkMissing, meta.WorkerSessionID, err)
 	}
 	// Cache for subsequent re-parks in this process.
 	a.parkMu.Lock()

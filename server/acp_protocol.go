@@ -27,7 +27,7 @@ func (acpProtocol) Name() string { return "acp" }
 
 func (p acpProtocol) HTTPRoutes() []HTTPRoute {
 	return []HTTPRoute{{
-		Method:  "POST",
+		Method:  http.MethodPost,
 		Pattern: "/",
 		Handler: p.handleHTTP,
 	}}

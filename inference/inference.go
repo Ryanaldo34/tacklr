@@ -166,7 +166,7 @@ func (s *OpenAIInferenceStrategy) CountTokens(ctx context.Context, messages []*t
 
 	body, _ := json.Marshal(reqBody)
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", s.baseURL+"/responses/input_tokens", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, s.baseURL+"/responses/input_tokens", bytes.NewReader(body))
 	if err != nil {
 		return 0, fmt.Errorf("create request: %w", err)
 	}
@@ -184,8 +184,8 @@ func (s *OpenAIInferenceStrategy) CountTokens(ctx context.Context, messages []*t
 		return 0, fmt.Errorf("read response: %w", err)
 	}
 
-	if httpResp.StatusCode != 200 {
-		if httpResp.StatusCode == 404 || httpResp.StatusCode == 400 || httpResp.StatusCode == 422 {
+	if httpResp.StatusCode != http.StatusOK {
+		if httpResp.StatusCode == http.StatusNotFound || httpResp.StatusCode == http.StatusBadRequest || httpResp.StatusCode == http.StatusUnprocessableEntity {
 			// Local fallback when the provider has no input_tokens endpoint.
 			tke, err := getEncoding("o200k_base")
 			if err != nil {
@@ -277,7 +277,7 @@ func (s *OpenAIInferenceStrategy) Invoke(ctx context.Context, messages []*tacklr
 	go func() {
 		defer close(events)
 
-		httpReq, err := http.NewRequestWithContext(ctx, "POST", s.baseURL+"/responses", bytes.NewReader(body))
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, s.baseURL+"/responses", bytes.NewReader(body))
 		if err != nil {
 			slog.Error("create request", "error", err)
 			sendChunk(tacklr.LLMResponseChunk{Type: tacklr.StreamEventError, Content: fmt.Sprintf("create request: %v", err)})
@@ -296,7 +296,7 @@ func (s *OpenAIInferenceStrategy) Invoke(ctx context.Context, messages []*tacklr
 		}
 		defer httpResp.Body.Close()
 
-		if httpResp.StatusCode != 200 {
+		if httpResp.StatusCode != http.StatusOK {
 			respBody, _ := io.ReadAll(httpResp.Body)
 			classified := ClassifyProviderFailure(httpResp.StatusCode, respBody)
 			slog.Error("non-200 response", "status", httpResp.StatusCode, "error", classified)
@@ -433,7 +433,6 @@ func (s *OpenAIInferenceStrategy) parseSSEResponse(ctx context.Context, body io.
 			return
 		}
 	}
-
 }
 
 func mustJSON(v any) []byte {

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/control"
 	"github.com/ryanaldo34/tacklr/stores"
@@ -429,7 +430,7 @@ func TestServeHTTP_nilContext(t *testing.T) {
 	// nil ctx → Background; cancel via short-lived listen failure on bad addr already tested.
 	// Exercise nil branch then immediate return via listen error.
 	r := newTestRegistry(testStore(t), &mockInferenceStrategy{}, nil)
-	err := NewServer(r, SSE).ServeHTTP(nil, "bad:addr:port")
+	err := NewServer(r, SSE).ServeHTTP(nil, "bad:addr:port") //nolint:staticcheck // intentional nil ctx branch
 	if err == nil {
 		t.Fatal("want listen error")
 	}
@@ -877,7 +878,7 @@ func TestServeStdio_edges(t *testing.T) {
 	// nil ctx + empty lines + EOF without trailing newline
 	var out bytes.Buffer
 	in := strings.NewReader("\n\n" + `{"jsonrpc":"2.0","id":1,"method":"authenticate","params":{}}`)
-	if err := srv.ServeStdio(nil, in, &out); err != nil {
+	if err := srv.ServeStdio(nil, in, &out); err != nil { //nolint:staticcheck // intentional nil ctx branch
 		t.Fatalf("nil ctx serve: %v", err)
 	}
 	if !strings.Contains(out.String(), "result") {
@@ -971,7 +972,7 @@ func TestHandleWS_acceptFailAndReadFail(t *testing.T) {
 	mux := http.NewServeMux()
 	env := ProtocolEnv{Registry: r, Conn: &Conn{}}
 	for _, route := range SSE.HTTPRoutes() {
-		if route.Method == "GET" && route.Pattern == "/" {
+		if route.Method == http.MethodGet && route.Pattern == "/" {
 			mux.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
 				route.Handler(env, w, req)
 			})
@@ -997,7 +998,7 @@ func TestHandleWS_nonClientRunErrorAndWriteThreadFail(t *testing.T) {
 	mux := http.NewServeMux()
 	env := ProtocolEnv{Registry: r, Conn: &Conn{}}
 	for _, route := range SSE.HTTPRoutes() {
-		if route.Method == "GET" && route.Pattern == "/" {
+		if route.Method == http.MethodGet && route.Pattern == "/" {
 			mux.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
 				route.Handler(env, w, req)
 			})
@@ -1041,7 +1042,7 @@ func TestHandleWS_nonClientRunErrorAndWriteThreadFail(t *testing.T) {
 	mux2 := http.NewServeMux()
 	env2 := ProtocolEnv{Registry: r2, Conn: &Conn{}}
 	for _, route := range SSE.HTTPRoutes() {
-		if route.Method == "GET" && route.Pattern == "/" {
+		if route.Method == http.MethodGet && route.Pattern == "/" {
 			mux2.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
 				route.Handler(env2, w, req)
 			})

@@ -263,45 +263,9 @@ func TestSpawnWorker_resumeMissingPayload_errors(t *testing.T) {
 	}
 }
 
-// TestSpawnWorker_incompleteWithoutInterrupt_errors: worker stream ends without
-// complete and without a bubbled interrupt → incomplete outcome.
-func TestSpawnWorker_incompleteWithoutInterrupt_errors(t *testing.T) {
-	// Yield event with unparseable interrupt id so drain records nothing useful,
-	// then channel closes without complete — via model that only sends a bare
-	// incomplete path. Easiest: worker Run that emits Interrupt with empty data
-	// cannot happen without tool. Use stream error with empty details instead
-	// (already covered). Here force incomplete by cancelling after message
-	// without waiting for complete — cancel path is ErrCanceled.
-	//
-	// Park store set with empty child interrupts + drain interrupt with bad JSON:
-	workerModel := &mockStrategy{
-		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
-			// Message only; Run will still emit Complete after. So use invokeErr empty...
-			// Instead hang until parent cancel after first event is hard.
-			// Emit function call incomplete style that causes Run to complete tools empty.
-			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "hi", IsComplete: true}
-		},
-	}
-	// This completes successfully. For ErrWorkerIncomplete we need drain without
-	// complete. That requires the worker event channel to close without Complete.
-	// AgentHarness.Run always sends Complete unless error/cancel/interrupt park.
-	// Interrupt park is the incomplete-with-interrupt path.
-	// Incomplete-without-interrupt: interrupt IDs present but collectChildInterrupts returns nil.
-	// e.g. interrupt id not mapped on worker.
-	optionsJSON := `[{"title":"A","description":"","isRecommended":true},{"title":"B","description":"","isRecommended":false}]`
-	interruptTool := NewTool(ToolConfig{
-		Name: "ask_user",
-		Handler: func(ctx context.Context, _ struct{}, runtime *HarnessRuntime) (string, error) {
-			// Raise then the stream parks — normal bubble path.
-			_, err := runtime.RaiseInterrupt("user_selection_choice", []byte(optionsJSON))
-			return "", err
-		},
-	})
-	_ = interruptTool
-	_ = workerModel
-	// Corrupt interrupt id path via parseInterruptID: covered when Data is empty/bad
-	// during drain — inject by custom worker is hard without changing Run.
-	// Assert parseInterruptID outcomes through a worker error stream is enough.
+// TestParseInterruptID_shapes: empty/invalid interrupt envelopes yield no id;
+// well-formed data returns the interrupt id used for park/resume.
+func TestParseInterruptID_shapes(t *testing.T) {
 	if parseInterruptID(nil) != "" {
 		t.Fatal("empty id")
 	}

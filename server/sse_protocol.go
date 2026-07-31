@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	"github.com/coder/websocket"
+
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
@@ -26,10 +27,10 @@ func (sseProtocol) HandleInbound(ctx context.Context, env ProtocolEnv, body []by
 
 func (p sseProtocol) HTTPRoutes() []HTTPRoute {
 	return []HTTPRoute{
-		{Method: "POST", Pattern: "/", Handler: p.handleSSE},
-		{Method: "POST", Pattern: "/resume", Handler: p.handleSSE},
-		{Method: "GET", Pattern: "/", Handler: p.handleWS},
-		{Method: "GET", Pattern: "/resume", Handler: p.handleWS},
+		{Method: http.MethodPost, Pattern: "/", Handler: p.handleSSE},
+		{Method: http.MethodPost, Pattern: "/resume", Handler: p.handleSSE},
+		{Method: http.MethodGet, Pattern: "/", Handler: p.handleWS},
+		{Method: http.MethodGet, Pattern: "/resume", Handler: p.handleWS},
 	}
 }
 

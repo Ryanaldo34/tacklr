@@ -4,6 +4,6 @@ import (
 	"io"
 )
 
-func readAllLimited(r io.Reader, max int64) ([]byte, error) {
-	return io.ReadAll(io.LimitReader(r, max))
+func readAllLimited(r io.Reader, limit int64) ([]byte, error) {
+	return io.ReadAll(io.LimitReader(r, limit))
 }

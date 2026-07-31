@@ -36,7 +36,7 @@ func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 32*1024))
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return nil, &httpError{Status: resp.StatusCode, Body: string(body)}
 	}
 
