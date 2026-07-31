@@ -3,6 +3,7 @@ package tacklr
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -36,6 +37,8 @@ type Tool struct {
 	Namespace   string
 	Category    streaming.ToolCategory
 	Access      mapset.Set[ToolPermission]
+	// Timeout is an optional per-invocation deadline. Zero means none.
+	Timeout time.Duration
 
 	handlerFunc func(ctx context.Context, args map[string]any, runtime HarnessRuntime) (string, error)
 	parameters  map[string]any
@@ -49,6 +52,7 @@ type ToolConfig struct {
 	Namespace   string
 	Category    streaming.ToolCategory
 	Access      mapset.Set[ToolPermission]
+	Timeout     time.Duration
 
 	Handler any
 }
@@ -59,6 +63,7 @@ type mcpToolConfig struct {
 	DisplayName string
 	Namespace   string
 	Schema      map[string]any
+	Timeout     time.Duration
 	Handler     ToolHandlerFunc
 }
 
@@ -134,6 +139,7 @@ func NewTool(cfg ToolConfig) *Tool {
 		Namespace:   cfg.Namespace,
 		Category:    cfg.Category,
 		Access:      cfg.Access,
+		Timeout:     cfg.Timeout,
 		strict:      true,
 	}
 	if argsType != nil {
@@ -205,6 +211,7 @@ func newMCPTool(cfg mcpToolConfig) *Tool {
 		DisplayName: cfg.DisplayName,
 		Description: cfg.Description,
 		Namespace:   cfg.Namespace,
+		Timeout:     cfg.Timeout,
 		strict:      false,
 		parameters:  params,
 		handlerFunc: cfg.Handler,
@@ -218,7 +225,36 @@ func (t *Tool) Invoke(ctx context.Context, argsJson string, runtime HarnessRunti
 			return "", fmt.Errorf("unmarshal args for tool %q: %w", t.Name, err)
 		}
 	}
-	return t.handlerFunc(ctx, args, runtime)
+
+	if t.Timeout <= 0 {
+		return t.handlerFunc(ctx, args, runtime)
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, t.Timeout)
+	defer cancel()
+
+	type outcome struct {
+		out string
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		out, err := t.handlerFunc(callCtx, args, runtime)
+		done <- outcome{out: out, err: err}
+	}()
+
+	select {
+	case res := <-done:
+		if res.err != nil && ctx.Err() == nil && errors.Is(res.err, context.DeadlineExceeded) {
+			return "", fmt.Errorf("tool %q: %w", t.Name, ErrToolTimeout)
+		}
+		return res.out, res.err
+	case <-callCtx.Done():
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		return "", fmt.Errorf("tool %q: %w", t.Name, ErrToolTimeout)
+	}
 }
 
 func (t *Tool) AsJson() (map[string]any, error) {

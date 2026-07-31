@@ -3,6 +3,7 @@ package tacklr
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -108,6 +109,105 @@ func TestInvoke(t *testing.T) {
 		_, err := tool.Invoke(context.Background(), `{bad`, HarnessRuntime{})
 		if err == nil {
 			t.Fatal("expected error")
+		}
+	})
+
+	t.Run("tool timeout cancels handler context and returns ErrToolTimeout", func(t *testing.T) {
+		started := make(chan struct{})
+		tool := NewTool(ToolConfig{
+			Name:    "slow",
+			Timeout: 40 * time.Millisecond,
+			Handler: func(ctx context.Context) (string, error) {
+				close(started)
+				select {
+				case <-ctx.Done():
+					return "", ctx.Err()
+				case <-time.After(5 * time.Second):
+					return "too late", nil
+				}
+			},
+		})
+		if tool.Timeout != 40*time.Millisecond {
+			t.Fatalf("Timeout = %v, want 40ms", tool.Timeout)
+		}
+
+		start := time.Now()
+		_, err := tool.Invoke(context.Background(), "", HarnessRuntime{})
+		elapsed := time.Since(start)
+		if !errors.Is(err, ErrToolTimeout) {
+			t.Fatalf("got %v, want ErrToolTimeout", err)
+		}
+		select {
+		case <-started:
+		default:
+			t.Fatal("handler was not started")
+		}
+		if elapsed > time.Second {
+			t.Fatalf("Invoke took %v, expected tool timeout to return promptly", elapsed)
+		}
+	})
+
+	t.Run("tool timeout enforced when handler ignores context", func(t *testing.T) {
+		tool := NewTool(ToolConfig{
+			Name:    "blocking",
+			Timeout: 30 * time.Millisecond,
+			Handler: func(ctx context.Context) (string, error) {
+				time.Sleep(5 * time.Second)
+				return "too late", nil
+			},
+		})
+
+		start := time.Now()
+		_, err := tool.Invoke(context.Background(), "", HarnessRuntime{})
+		elapsed := time.Since(start)
+		if !errors.Is(err, ErrToolTimeout) {
+			t.Fatalf("got %v, want ErrToolTimeout", err)
+		}
+		if elapsed > time.Second {
+			t.Fatalf("Invoke took %v, expected harness to return on timeout", elapsed)
+		}
+	})
+
+	t.Run("parent cancellation is not reported as tool timeout", func(t *testing.T) {
+		tool := NewTool(ToolConfig{
+			Name:    "slow",
+			Timeout: time.Second,
+			Handler: func(ctx context.Context) (string, error) {
+				<-ctx.Done()
+				return "", ctx.Err()
+			},
+		})
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		_, err := tool.Invoke(ctx, "", HarnessRuntime{})
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		if errors.Is(err, ErrToolTimeout) {
+			t.Fatalf("got ErrToolTimeout, want parent cancellation: %v", err)
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("got %v, want context.Canceled", err)
+		}
+	})
+
+	t.Run("zero timeout does not impose a deadline", func(t *testing.T) {
+		tool := NewTool(ToolConfig{
+			Name: "no_timeout",
+			Handler: func(ctx context.Context) (string, error) {
+				if _, ok := ctx.Deadline(); ok {
+					t.Error("expected no deadline on call context")
+				}
+				return "ok", nil
+			},
+		})
+		got, err := tool.Invoke(context.Background(), "", HarnessRuntime{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "ok" {
+			t.Errorf("got %q, want ok", got)
 		}
 	})
 }

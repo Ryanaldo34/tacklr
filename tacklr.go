@@ -79,7 +79,8 @@ var (
 	ErrApiKeyNotSet    = errors.New("api key not set")
 	ErrModelNotSet     = errors.New("model not set")
 	ErrUnknownModel    = errors.New("unknown model")
-	ErrToolNotFound    = errors.New("tool not found")
+	ErrToolNotFound = errors.New("tool not found")
+	ErrToolTimeout  = errors.New("tool timed out")
 )
 
 // WrapStopReason wraps a cause under a terminal stop-reason sentinel so
