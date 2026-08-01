@@ -183,11 +183,10 @@ func (a *AgentHarness) checkpointSession(ctx context.Context) error {
 	if a.Store == nil {
 		return nil
 	}
-
-	state, pendingInterrupts, resolvedInterrupts := a.Runtime.SnapshotState()
-	if a.session != nil {
-		a.session.ExportInto(state)
+	if a.session == nil {
+		a.session = control.NewSessionManager()
 	}
+
 	a.pendingMu.Lock()
 	ptc := make(map[string]stores.PendingToolCall, len(a.pendingToolCalls))
 	for k, v := range a.pendingToolCalls {
@@ -199,11 +198,11 @@ func (a *AgentHarness) checkpointSession(ctx context.Context) error {
 	}
 	a.pendingMu.Unlock()
 
-	checkpoint, err := stores.NewCheckpoint(a.context.Snapshot(), ptc, itr, state, pendingInterrupts, resolvedInterrupts)
+	cp, err := control.NewCheckpointer().Capture(a.context.Snapshot(), a.session, ptc, itr)
 	if err != nil {
 		return err
 	}
-	return a.Store.SaveSession(ctx, a.SessionId, *checkpoint)
+	return a.Store.SaveSession(ctx, a.SessionId, *cp)
 }
 
 func (a *AgentHarness) constructSystemPrompt() string {
@@ -1004,19 +1003,22 @@ type AgentOptions struct {
 const streamEventBuffer = 64
 
 func NewAgent(ctx context.Context, opts AgentOptions) *AgentHarness {
-	// Runtime output channel is nil until Run; PlanSet before Run only mutates state.
+	// Runtime output channel is nil until Run; plan mutations before Run only update SessionManager.
 	// a.out is a non-nil sentinel so Run can detect an initialized harness.
 	events := make(chan streaming.StreamEvent, streamEventBuffer)
-	runtime := control.NewRuntime(nil, opts.Store, nil)
-	runtime.EnsureInitialized()
-	h := newHarnessBase(opts, runtime, events)
+	sm := control.NewSessionManager()
+	runtime := control.NewRuntime(nil, opts.Store, sm)
+	h := newHarnessBase(opts, runtime, sm, events)
 	h.finishInit(ctx, opts.SubAgents)
 	return h
 }
 
 // newHarnessBase builds the shared AgentHarness fields for NewAgent and
-// NewAgentFromSession. Session-specific fields may be overwritten by the caller.
-func newHarnessBase(opts AgentOptions, runtime control.HarnessRuntime, out chan streaming.StreamEvent) *AgentHarness {
+// NewAgentFromSession. sm and runtime must share the same SessionManager backend.
+func newHarnessBase(opts AgentOptions, runtime control.HarnessRuntime, sm *control.SessionManager, out chan streaming.StreamEvent) *AgentHarness {
+	if sm == nil {
+		sm = control.NewSessionManager()
+	}
 	h := &AgentHarness{
 		Model:                opts.Model,
 		MaxWindowSize:        opts.Config.MaxWindowSize,
@@ -1024,6 +1026,7 @@ func newHarnessBase(opts AgentOptions, runtime control.HarnessRuntime, out chan 
 		Instructions:         opts.Config.SystemPrompt,
 		Store:                opts.Store,
 		Runtime:              runtime,
+		session:              sm,
 		WatchDog:             opts.WatchDog,
 		Tools:                opts.Tools,
 		MCPConfigs:           opts.MCPConfigs,
@@ -1047,9 +1050,6 @@ func newHarnessBase(opts AgentOptions, runtime control.HarnessRuntime, out chan 
 	}
 	if h.tasks == nil {
 		h.tasks = NewDefaultModelTasks(h.Model, h.context, h.contextPolicy, h.MaxWindowSize)
-	}
-	if h.session == nil {
-		h.session = control.NewSessionManager()
 	}
 	if opts.ToolInterceptors != nil {
 		h.toolRunner = newToolRunner(opts.ToolInterceptors...)
@@ -1157,38 +1157,18 @@ func NewAgentFromSession(ctx context.Context, sessionId string, opts AgentOption
 	if err != nil {
 		return nil, err
 	}
-	// Same as NewAgent: attach output channel only for the active Run.
-	runtimeState := checkpoint.State.RuntimeState
 	sm := control.NewSessionManager()
-	sm.LoadFromState(runtimeState)
-	control.StripPlanKeys(runtimeState)
-	runtime := control.NewRuntime(nil, opts.Store, runtimeState)
-	runtime.EnsureInitialized()
-	if len(checkpoint.State.PendingInterrupts) > 0 {
-		_ = json.Unmarshal(checkpoint.State.PendingInterrupts, &runtime.PendingInterrupts)
+	applied, err := control.NewCheckpointer().Apply(checkpoint, sm)
+	if err != nil {
+		return nil, err
 	}
-	if len(checkpoint.State.ResolvedInterrupts) > 0 {
-		_ = json.Unmarshal(checkpoint.State.ResolvedInterrupts, &runtime.ResolvedInterrupts)
-	}
-	if checkpoint.State.InterruptToRequester == nil {
-		checkpoint.State.InterruptToRequester = make(map[string]string)
-	}
-	if checkpoint.State.PendingToolCalls == nil {
-		checkpoint.State.PendingToolCalls = make(map[string]stores.PendingToolCall)
-	}
-	h := newHarnessBase(opts, runtime, events)
-	h.session = sm
-	// Rebind hooks/interceptors that close over session (newHarnessBase used empty manager).
-	if opts.ToolInterceptors == nil {
-		h.toolRunner = newToolRunner(h.planningWriteLock, toolPermissionGate)
-	}
-	if opts.ToolResultHooks == nil {
-		h.toolResultHooks = newToolResultHookRegistry(defaultToolResultHooks(h.session))
-	}
+	// Same as NewAgent: output channel is nil until Run.
+	runtime := control.NewRuntime(nil, opts.Store, sm)
+	h := newHarnessBase(opts, runtime, sm, events)
 	h.SessionId = sessionId
-	h.context.Restore(checkpoint.ContextWindow)
-	h.interruptToRequester = checkpoint.State.InterruptToRequester
-	h.pendingToolCalls = checkpoint.State.PendingToolCalls
+	h.context.Restore(applied.Window)
+	h.interruptToRequester = applied.InterruptToRequester
+	h.pendingToolCalls = applied.PendingToolCalls
 	h.finishInit(ctx, opts.SubAgents)
 	return h, nil
 }

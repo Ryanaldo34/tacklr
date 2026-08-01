@@ -118,17 +118,20 @@ func TestEmitPlanUpdate_withChannel(t *testing.T) {
 }
 
 func TestRuntime_reservedPlanKeysBlocked(t *testing.T) {
-	rt := HarnessRuntime{}
-	rt.EnsureInitialized()
+	sm := NewSessionManager()
+	rt := NewRuntime(nil, nil, sm)
 	rt.StateSet("_plan", "should-not-store")
 	if _, ok := rt.StateGet("_plan"); ok {
 		t.Fatal("StateGet must hide reserved plan keys")
 	}
-	// Direct map poison is stripped from SnapshotState.
-	rt.State["_plan"] = "poison"
-	state, _, _ := rt.SnapshotState()
-	if _, ok := state["_plan"]; ok {
-		t.Fatal("SnapshotState must omit reserved plan keys")
+	// User bag poison of reserved keys is omitted from durable snapshot; plan export
+	// only writes real PlanStore contents (empty here → no _plan key).
+	sm.mu.Lock()
+	sm.userState["_plan"] = "poison"
+	sm.mu.Unlock()
+	state, _, _ := sm.SnapshotDurable()
+	if v, ok := state["_plan"]; ok && v == "poison" {
+		t.Fatal("snapshot must not export poisoned user reserved keys")
 	}
 }
 

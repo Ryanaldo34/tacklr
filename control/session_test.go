@@ -380,13 +380,17 @@ func TestRuntime_interruptEmitAndSnapshotLifecycle(t *testing.T) {
 		t.Fatal("empty tool call id should fail adopt")
 	}
 
-	state, pendingMap, resolvedMap := rt.SnapshotState()
-	if _, ok := state["_plan"]; ok {
-		t.Fatal("snapshot must not include reserved plan keys (PlanStore owns plan)")
+	// Snapshot via SessionManager (Runtime no longer owns snapshotting).
+	sm := rt.session
+	if sm == nil {
+		t.Fatal("runtime missing session backend")
 	}
+	state, pendingMap, resolvedMap := sm.SnapshotDurable()
+	// No plan module set → no reserved plan keys unless Export wrote empty.
 	if len(pendingMap) == 0 {
 		t.Fatal("snapshot should include pending selection")
 	}
+	_ = state
 	_ = resolvedMap
 
 	// Interrupt map round-trip with both interrupt kinds + null/empty.

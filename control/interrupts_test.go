@@ -111,31 +111,29 @@ func TestRuntime_remainingSessionBranches(t *testing.T) {
 		t.Fatal("expected init error")
 	}
 
-	// AdoptInterrupt with nil PendingInterrupts map.
-	rt2 := HarnessRuntime{}
-	rt2.EnsureInitialized()
-	rt2.PendingInterrupts = nil
+	// AdoptInterrupt allocates pending map as needed.
+	rt2 := NewRuntime(nil, nil, nil)
 	rt2.CurrentToolCallID = "adopt1"
 	if _, err := rt2.AdoptInterrupt(&UserSelectionInterrupt{Options: []UserChoice{{Title: "A"}, {Title: "B"}}}); err == nil {
 		t.Fatal("adopt returns interrupt as error")
 	}
-	if rt2.PendingInterrupts == nil {
-		t.Fatal("PendingInterrupts should be allocated")
+	if !rt2.HasPendingInterrupt() {
+		t.Fatal("pending interrupt should be stored")
 	}
 
 	// ReturnInterrupt when Return fails after Validate (permission option with bad kind).
-	rt3 := HarnessRuntime{}
-	rt3.EnsureInitialized()
-	rt3.PendingInterrupts["p1"] = &ToolPermissionInterrupt{
+	sm3 := NewSessionManager()
+	sm3.pending["p1"] = &ToolPermissionInterrupt{
 		Options: []PermissionOption{{OptionID: "x", Name: "X", Kind: "not_valid"}},
 	}
+	rt3 := NewRuntime(nil, nil, sm3)
 	if _, err := rt3.ReturnInterrupt("p1", []byte(`{"optionId":"x"}`)); err == nil {
 		t.Fatal("expected return error after validate")
 	}
 
-	// SnapshotState copies resolved map.
-	rt3.ResolvedInterrupts["r1"] = &UserSelectionInterrupt{Options: []UserChoice{{Title: "Z"}, {Title: "Y"}}}
-	_, _, resolved := rt3.SnapshotState()
+	// SnapshotDurable copies resolved map.
+	sm3.resolved["r1"] = &UserSelectionInterrupt{Options: []UserChoice{{Title: "Z"}, {Title: "Y"}}}
+	_, _, resolved := sm3.SnapshotDurable()
 	if len(resolved) != 1 {
 		t.Fatalf("resolved snapshot = %d", len(resolved))
 	}
