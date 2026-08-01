@@ -266,7 +266,7 @@ func resolveSelectionViaElicitation(ctx context.Context, env ProtocolEnv, thread
 	}
 	question := ""
 	if stream.Harness != nil {
-		question = tacklr.AskUserQuestionFromState(stream.Harness.Runtime, ev.MessageID)
+		question = tacklr.AskUserQuestionFromState(&stream.Harness.Runtime, ev.MessageID)
 	}
 	params, err := SelectionToElicitationParams(threadID, ev.MessageID, question, opts)
 	if err != nil {

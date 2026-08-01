@@ -276,6 +276,27 @@ func (m interruptMap) MarshalJSON() ([]byte, error) {
 	return json.Marshal(envelopes)
 }
 
+// cloneInterrupt returns a deep copy via JSON so SnapshotState does not share
+// live Interrupt pointers with concurrent ReturnInterrupt mutations.
+func cloneInterrupt(intr Interrupt) Interrupt {
+	if intr == nil {
+		return nil
+	}
+	factory, ok := interruptFactories[intr.TypeName()]
+	if !ok {
+		return nil
+	}
+	data, err := json.Marshal(intr)
+	if err != nil {
+		return nil
+	}
+	cp := factory()
+	if err := json.Unmarshal(data, cp); err != nil {
+		return nil
+	}
+	return cp
+}
+
 func (m *interruptMap) UnmarshalJSON(b []byte) error {
 	if len(b) == 0 || string(b) == "null" {
 		*m = nil

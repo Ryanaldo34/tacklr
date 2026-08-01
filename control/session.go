@@ -21,6 +21,14 @@ const (
 	ActivityFailed
 )
 
+// runtimeOutput holds the turn event channel behind a pointer shared across
+// HarnessRuntime shallow copies. By-value Runtime copies must not race with
+// SetOutputChannel (which would otherwise write a channel field in the struct).
+type runtimeOutput struct {
+	mu sync.RWMutex
+	ch chan streaming.StreamEvent
+}
+
 // HarnessRuntime is the runtime hook into global state and services used by the
 // harness and its tools. It is shallow-copied per tool invocation with
 // CurrentToolCallID set uniquely per copy. All pointer and map fields are
@@ -40,7 +48,7 @@ type HarnessRuntime struct {
 	CurrentToolCallID  string
 	Mode               string
 	mu                 *sync.RWMutex
-	ch                 chan streaming.StreamEvent
+	out                *runtimeOutput
 }
 
 const (
@@ -53,17 +61,14 @@ const (
 // Runtime hook to emit custom events as updates from tool calls.
 // Non-blocking: drops if no listener or channel full so tools never hang.
 func (rt *HarnessRuntime) EmitUpdate(message string) {
-	rt.mu.RLock()
-	ch := rt.ch
-	msgID := rt.CurrentToolCallID
-	rt.mu.RUnlock()
+	ch := rt.outputChannel()
 	if ch == nil {
 		return
 	}
 	event := streaming.StreamEvent{
 		Type:      streaming.StreamEventToolUpdate,
 		Content:   message,
-		MessageID: msgID,
+		MessageID: rt.CurrentToolCallID,
 	}
 	select {
 	case ch <- event:
@@ -115,13 +120,13 @@ func (rt *HarnessRuntime) PlanSet(plan []Todo) {
 		rt.State = make(map[string]any)
 	}
 	rt.State[planStateKey] = plan
-	ch := rt.ch
 	rt.mu.Unlock()
 
-	data, _ := json.Marshal(plan)
+	ch := rt.outputChannel()
 	if ch == nil {
 		return
 	}
+	data, _ := json.Marshal(plan)
 	ch <- streaming.StreamEvent{
 		Type: streaming.StreamEventPlanUpdate,
 		Data: data,
@@ -176,9 +181,20 @@ func (rt *HarnessRuntime) ConsumePlanDocumentUpdated() bool {
 // Each Run call creates a fresh output channel and clears it (nil) on exit so
 // tools never send on a closed channel after the turn ends.
 func (rt *HarnessRuntime) SetOutputChannel(ch chan streaming.StreamEvent) {
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	rt.ch = ch
+	rt.EnsureInitialized()
+	rt.out.mu.Lock()
+	rt.out.ch = ch
+	rt.out.mu.Unlock()
+}
+
+func (rt *HarnessRuntime) outputChannel() chan streaming.StreamEvent {
+	if rt.out == nil {
+		return nil
+	}
+	rt.out.mu.RLock()
+	ch := rt.out.ch
+	rt.out.mu.RUnlock()
+	return ch
 }
 
 // EnsureInitialized initializes the mutex and all maps on the runtime.
@@ -187,6 +203,9 @@ func (rt *HarnessRuntime) SetOutputChannel(ch chan streaming.StreamEvent) {
 func (rt *HarnessRuntime) EnsureInitialized() {
 	if rt.mu == nil {
 		rt.mu = &sync.RWMutex{}
+	}
+	if rt.out == nil {
+		rt.out = &runtimeOutput{}
 	}
 	if rt.PendingInterrupts == nil {
 		rt.PendingInterrupts = interruptMap{}
@@ -343,6 +362,8 @@ func (rt *HarnessRuntime) RaiseInterrupt(kind string, payload []byte) (Interrupt
 
 // SnapshotState returns copies of the state and interrupt maps under the read
 // lock, safe for concurrent access during checkpointing.
+// Interrupts are deep-cloned so later marshal of the snapshot does not race
+// with ReturnInterrupt mutating the live pending entries.
 func (rt *HarnessRuntime) SnapshotState() (state map[string]any, pending, resolved interruptMap) {
 	rt.mu.RLock()
 	defer rt.mu.RUnlock()
@@ -352,11 +373,15 @@ func (rt *HarnessRuntime) SnapshotState() (state map[string]any, pending, resolv
 	}
 	pending = make(interruptMap, len(rt.PendingInterrupts))
 	for k, v := range rt.PendingInterrupts {
-		pending[k] = v
+		if cp := cloneInterrupt(v); cp != nil {
+			pending[k] = cp
+		}
 	}
 	resolved = make(interruptMap, len(rt.ResolvedInterrupts))
 	for k, v := range rt.ResolvedInterrupts {
-		resolved[k] = v
+		if cp := cloneInterrupt(v); cp != nil {
+			resolved[k] = cp
+		}
 	}
 	return
 }
@@ -365,7 +390,12 @@ func NewRuntime(ch chan streaming.StreamEvent, store stores.BaseStore, state map
 	if state == nil {
 		state = make(map[string]any)
 	}
-	rt := HarnessRuntime{ch: ch, Store: store, State: state}
+	rt := HarnessRuntime{
+		Store: store,
+		State: state,
+		mu:    &sync.RWMutex{},
+		out:   &runtimeOutput{ch: ch},
+	}
 	return rt
 }
 

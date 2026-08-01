@@ -100,9 +100,10 @@ func askUserQuestionStateKey(toolCallID string) string {
 }
 
 // AskUserQuestionFromState returns a question string stashed by ask_user_choice
-// for the given tool call id, if any.
-func AskUserQuestionFromState(rt control.HarnessRuntime, toolCallID string) string {
-	if toolCallID == "" {
+// for the given tool call id, if any. Takes a pointer so concurrent Run teardown
+// (SetOutputChannel) does not race a by-value Runtime copy.
+func AskUserQuestionFromState(rt *control.HarnessRuntime, toolCallID string) string {
+	if rt == nil || toolCallID == "" {
 		return ""
 	}
 	v, ok := rt.StateGet(askUserQuestionStateKey(toolCallID))

@@ -327,7 +327,7 @@ func TestAskUserChoiceTool_raiseAndResume(t *testing.T) {
 	if !errors.As(err, &intr) {
 		t.Fatalf("expected Interrupt, got %T %v", err, err)
 	}
-	if q := AskUserQuestionFromState(rt, "tc_ask"); q != "Which approach?" {
+	if q := AskUserQuestionFromState(&rt, "tc_ask"); q != "Which approach?" {
 		t.Errorf("question state = %q", q)
 	}
 
@@ -597,13 +597,13 @@ func TestRun_askUserChoice_withoutDescription_formatsSelection(t *testing.T) {
 		t.Fatal("expected interrupt")
 	}
 	// Question stashed for protocol elicitation.
-	if q := AskUserQuestionFromState(h.Runtime, "ask1"); q != "Pick?" {
+	if q := AskUserQuestionFromState(&h.Runtime, "ask1"); q != "Pick?" {
 		t.Fatalf("question = %q", q)
 	}
-	if AskUserQuestionFromState(h.Runtime, "") != "" {
+	if AskUserQuestionFromState(&h.Runtime, "") != "" {
 		t.Fatal("empty tool call id should yield empty question")
 	}
-	if AskUserQuestionFromState(h.Runtime, "missing") != "" {
+	if AskUserQuestionFromState(&h.Runtime, "missing") != "" {
 		t.Fatal("unknown tool call should yield empty question")
 	}
 

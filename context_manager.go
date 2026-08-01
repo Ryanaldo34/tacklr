@@ -3,6 +3,7 @@ package tacklr
 import (
 	"fmt"
 	"slices"
+	"sync"
 
 	"github.com/ryanaldo34/tacklr/control"
 	"github.com/ryanaldo34/tacklr/streaming"
@@ -35,9 +36,11 @@ func DefaultContextPolicy() ContextPolicy {
 // ContextManager owns the conversation message list and pure structural transforms.
 // It does not call inference or count tokens; ModelTasks performs model work and
 // applies results via Replace / InstallPlanDocument.
+//
+// Implementations must be safe for concurrent Snapshot during checkpoint while
+// another Run on the same harness Absorbs/Replaces after interrupt resume.
 type ContextManager interface {
-	// Messages returns the live window. Callers must not mutate the slice header
-	// or reorder elements; treat it as read-only.
+	// Messages returns a snapshot of the live window (safe to retain after return).
 	Messages() []*Message
 	// Snapshot returns a shallow copy of the message pointer slice for checkpointing.
 	// Message values are shared (pointers), not deep-cloned.
@@ -58,6 +61,7 @@ type ContextManager interface {
 // ModelContextManager is the default ContextManager implementation.
 // Name is historical; it does not use a model.
 type ModelContextManager struct {
+	mu     sync.RWMutex
 	window []*Message
 }
 
@@ -67,17 +71,21 @@ func NewModelContextManager() *ModelContextManager {
 }
 
 func (m *ModelContextManager) Messages() []*Message {
-	return m.window
-}
-
-func (m *ModelContextManager) Snapshot() []*Message {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	if len(m.window) == 0 {
 		return nil
 	}
 	return slices.Clone(m.window)
 }
 
+func (m *ModelContextManager) Snapshot() []*Message {
+	return m.Messages()
+}
+
 func (m *ModelContextManager) Restore(window []*Message) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if len(window) == 0 {
 		m.window = nil
 		return
@@ -87,6 +95,8 @@ func (m *ModelContextManager) Restore(window []*Message) {
 }
 
 func (m *ModelContextManager) Replace(window []*Message) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	// Ownership transfer: Absorb/Handoff already allocated the new slice.
 	m.window = window
 }
@@ -95,6 +105,8 @@ func (m *ModelContextManager) Add(msg *Message) {
 	if msg == nil {
 		return
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.window = append(m.window, msg)
 }
 
@@ -102,6 +114,8 @@ func (m *ModelContextManager) InstallPlanDocument(planRaw string) error {
 	if planRaw == "" {
 		return fmt.Errorf("install plan document: no plan document")
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if len(m.window) == 0 || m.window[0] == nil {
 		return fmt.Errorf("install plan document: empty window")
 	}
