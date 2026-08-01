@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/ryanaldo34/tacklr/interrupt"
 	"io"
 	"strings"
 	"sync"
@@ -13,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/interrupt"
 )
 
 // TestACP_elicitationForm_resolvesInterruptAndCompletes is the mid-turn

@@ -134,7 +134,7 @@ func Init(ctx context.Context, cfg Config) (shutdown func(context.Context) error
 	return func(ctx context.Context) error {
 		var first error
 		if mp != nil {
-			if err := mp.Shutdown(ctx); err != nil && first == nil {
+			if err := mp.Shutdown(ctx); err != nil {
 				first = err
 			}
 		}

@@ -13,22 +13,33 @@ import (
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
-func testPlanTools() (create, edit, complete, list *Tool, store *session.PlanStore) {
+// planToolsFixture holds builtin plan tools sharing one PlanStore.
+type planToolsFixture struct {
+	create, edit, complete, list *Tool
+	store                        *session.PlanStore
+}
+
+func testPlanTools() planToolsFixture {
 	sm := session.NewSessionManager()
-	store = sm.Plan()
 	s := internalSession{sm: sm}
-	return newCreatePlanTool(s), newEditPlanTool(s), newCompleteTodoTool(s), newListPlanTool(s), store
+	return planToolsFixture{
+		create:   newCreatePlanTool(s),
+		edit:     newEditPlanTool(s),
+		complete: newCompleteTodoTool(s),
+		list:     newListPlanTool(s),
+		store:    sm.Plan(),
+	}
 }
 
 func TestCreatePlanTool_rejectsWhenActivePlanExists(t *testing.T) {
-	create, _, _, _, store := testPlanTools()
+	pt := testPlanTools()
 	rt := session.NewRuntime(nil, nil, nil)
 	rt.EnsureInitialized()
-	store.Set([]Todo{
+	pt.store.Set([]Todo{
 		{Title: "existing", Status: streaming.TodoStatusInProgress},
 	})
 
-	_, err := create.Invoke(context.Background(), `{"plan":"draft","todos":[{"title":"new","status":"pending","description":""}]}`, rt)
+	_, err := pt.create.Invoke(context.Background(), `{"plan":"draft","todos":[{"title":"new","status":"pending","description":""}]}`, rt)
 	if err == nil {
 		t.Fatal("expected error when create_plan is called with an active plan")
 	}
@@ -36,67 +47,67 @@ func TestCreatePlanTool_rejectsWhenActivePlanExists(t *testing.T) {
 		t.Fatalf("error = %v, want mention of active plan", err)
 	}
 	// Original plan must be unchanged.
-	plan := store.Get()
+	plan := pt.store.Get()
 	if len(plan) != 1 || plan[0].Title != "existing" {
 		t.Fatalf("plan = %v, want original single todo", plan)
 	}
 }
 
 func TestCreatePlanTool_createsWhenNoPlan(t *testing.T) {
-	create, _, _, _, store := testPlanTools()
+	pt := testPlanTools()
 	rt := session.NewRuntime(nil, nil, nil)
 	rt.EnsureInitialized()
 
-	got, err := create.Invoke(context.Background(), `{"plan":"CoS: ship it","todos":[{"title":"a","status":"pending","description":"d"}]}`, rt)
+	got, err := pt.create.Invoke(context.Background(), `{"plan":"CoS: ship it","todos":[{"title":"a","status":"pending","description":"d"}]}`, rt)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got != "Plan created successfully" {
 		t.Fatalf("got %q", got)
 	}
-	plan := store.Get()
+	plan := pt.store.Get()
 	if len(plan) != 1 || plan[0].Title != "a" {
 		t.Fatalf("plan = %v", plan)
 	}
-	if store.Document() != "CoS: ship it" {
-		t.Fatalf("plan document = %q", store.Document())
+	if pt.store.Document() != "CoS: ship it" {
+		t.Fatalf("plan document = %q", pt.store.Document())
 	}
 }
 
 func TestCreatePlanTool_rejectsEmptyPlanDocument(t *testing.T) {
-	create, _, _, _, _ := testPlanTools()
+	pt := testPlanTools()
 	rt := session.NewRuntime(nil, nil, nil)
 	rt.EnsureInitialized()
-	_, err := create.Invoke(context.Background(), `{"plan":"  ","todos":[{"title":"a","status":"pending","description":""}]}`, rt)
+	_, err := pt.create.Invoke(context.Background(), `{"plan":"  ","todos":[{"title":"a","status":"pending","description":""}]}`, rt)
 	if err == nil || !strings.Contains(err.Error(), "plan document text is required") {
 		t.Fatalf("err = %v", err)
 	}
 }
 
 func TestEditPlanTool_identicalPlanDocument_rejected(t *testing.T) {
-	_, edit, _, _, store := testPlanTools()
+	pt := testPlanTools()
 	rt := session.NewRuntime(nil, nil, nil)
 	rt.EnsureInitialized()
-	store.Set([]Todo{{Title: "a", Status: streaming.TodoStatusPending}})
-	store.SetDocument("same plan")
+	pt.store.Set([]Todo{{Title: "a", Status: streaming.TodoStatusPending}})
+	pt.store.SetDocument("same plan")
 
-	_, err := edit.Invoke(context.Background(), `{"plan":"same plan","toAdd":[],"toDelete":[]}`, rt)
+	_, err := pt.edit.Invoke(context.Background(), `{"plan":"same plan","toAdd":[],"toDelete":[]}`, rt)
 	if err == nil || !strings.Contains(err.Error(), "unchanged") {
 		t.Fatalf("err = %v", err)
 	}
-	if store.Document() != "same plan" {
-		t.Fatalf("document changed: %q", store.Document())
+	if pt.store.Document() != "same plan" {
+		t.Fatalf("document changed: %q", pt.store.Document())
 	}
-	if store.ConsumeDocumentUpdated() {
+	if pt.store.ConsumeDocumentUpdated() {
 		t.Fatal("should not mark updated on rejected identical plan")
 	}
 }
 
 func TestCreatePlanTool_returnsInstallEffect(t *testing.T) {
-	create, _, _, _, _ := testPlanTools()
+	pt := testPlanTools()
 	rt := session.NewRuntime(nil, nil, nil)
 	rt.EnsureInitialized()
-	res, err := create.invoke(context.Background(), `{"plan":"CoS: ship","todos":[{"title":"a","status":"pending","description":"d"}]}`, rt)
+	res, err := pt.create.invoke(context.Background(), `{"plan":"CoS: ship","todos":[{"title":"a","status":"pending","description":"d"}]}`, rt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,27 +123,27 @@ func TestCreatePlanTool_returnsInstallEffect(t *testing.T) {
 }
 
 func TestEditPlanTool_newPlanDocument_returnsHandoffEffect(t *testing.T) {
-	_, edit, _, _, store := testPlanTools()
+	pt := testPlanTools()
 	rt := session.NewRuntime(nil, nil, nil)
 	rt.EnsureInitialized()
-	store.Set([]Todo{{Title: "a", Status: streaming.TodoStatusPending}})
-	store.SetDocument("old")
+	pt.store.Set([]Todo{{Title: "a", Status: streaming.TodoStatusPending}})
+	pt.store.SetDocument("old")
 
-	res, err := edit.invoke(context.Background(), `{"plan":"new full plan","toAdd":[],"toDelete":[]}`, rt)
+	res, err := pt.edit.invoke(context.Background(), `{"plan":"new full plan","toAdd":[],"toDelete":[]}`, rt)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if res.output != "Plan edited successfully" {
 		t.Fatalf("got %q", res.output)
 	}
-	if store.Document() != "new full plan" {
-		t.Fatalf("document = %q", store.Document())
+	if pt.store.Document() != "new full plan" {
+		t.Fatalf("document = %q", pt.store.Document())
 	}
 	if res.disp.Effect != EffectHandoff {
 		t.Fatalf("effect = %v, want handoff from BuiltinResult", res.disp.Effect)
 	}
 	// BuiltinResult consumes the document-updated flag so hooks do not double-fire.
-	if store.ConsumeDocumentUpdated() {
+	if pt.store.ConsumeDocumentUpdated() {
 		t.Fatal("updated flag should already be consumed by edit_plan")
 	}
 }
@@ -322,12 +333,12 @@ func TestEditPlanTool(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, edit, _, _, store := testPlanTools()
+			pt := testPlanTools()
 			rt := HarnessRuntime{}
 			rt.EnsureInitialized()
-			store.Set(tt.plan)
+			pt.store.Set(tt.plan)
 
-			got, err := edit.Invoke(context.Background(), tt.args, rt)
+			got, err := pt.edit.Invoke(context.Background(), tt.args, rt)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("error = %v, wantErr = %v", err, tt.wantErr)
 			}
@@ -336,7 +347,7 @@ func TestEditPlanTool(t *testing.T) {
 					t.Errorf("got %q, want %q", got, tt.want)
 				}
 				if tt.check != nil {
-					tt.check(t, store.Get())
+					tt.check(t, pt.store.Get())
 				}
 			}
 		})
@@ -416,16 +427,16 @@ func TestAskUserChoiceTool_injectedAsBuiltin(t *testing.T) {
 }
 
 func TestListPlanTool_exactListing(t *testing.T) {
-	_, _, _, list, store := testPlanTools()
+	pt := testPlanTools()
 	rt := session.NewRuntime(nil, nil, nil)
 	rt.EnsureInitialized()
-	store.Set([]Todo{
+	pt.store.Set([]Todo{
 		{Title: "Exact Title One", Status: streaming.TodoStatusCompleted, Description: "done work"},
 		{Title: "Exact Title Two", Status: streaming.TodoStatusInProgress, Description: "now"},
 		{Title: "Exact Title Three", Status: streaming.TodoStatusPending},
 	})
 
-	got, err := list.Invoke(context.Background(), `{}`, rt)
+	got, err := pt.list.Invoke(context.Background(), `{}`, rt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -799,15 +810,15 @@ func TestRun_askUserChoice_emptyChoiceTitle_toolError(t *testing.T) {
 // TestCompleteTodo_allRemainingCompleted: completing last open todo when later
 // ones are already completed reports all-done.
 func TestCompleteTodo_allRemainingCompleted(t *testing.T) {
-	_, _, complete, _, store := testPlanTools()
+	pt := testPlanTools()
 	rt := session.NewRuntime(nil, nil, nil)
 	rt.EnsureInitialized()
-	store.Set([]Todo{
+	pt.store.Set([]Todo{
 		{Title: "A", Status: streaming.TodoStatusInProgress},
 		{Title: "B", Status: streaming.TodoStatusCompleted},
 		{Title: "C", Status: streaming.TodoStatusCompleted},
 	})
-	got, err := complete.Invoke(context.Background(), `{"title":"A"}`, rt)
+	got, err := pt.complete.Invoke(context.Background(), `{"title":"A"}`, rt)
 	if err != nil {
 		t.Fatal(err)
 	}

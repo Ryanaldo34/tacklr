@@ -240,6 +240,7 @@ func New(typeName string) (Interrupt, bool) {
 }
 
 // Clone returns a deep copy via JSON for checkpoint snapshots.
+// Returns nil if the type is unknown or serialization fails (best-effort).
 func Clone(intr Interrupt) Interrupt {
 	if intr == nil {
 		return nil
@@ -248,14 +249,14 @@ func Clone(intr Interrupt) Interrupt {
 	if !ok {
 		return nil
 	}
+	// Success-only path: avoid "err != nil then return nil" (nilerr).
 	data, err := json.Marshal(intr)
-	if err != nil {
-		return nil
+	if err == nil {
+		if err = json.Unmarshal(data, cp); err == nil {
+			return cp
+		}
 	}
-	if err := json.Unmarshal(data, cp); err != nil {
-		return nil
-	}
-	return cp
+	return nil
 }
 
 func init() {
