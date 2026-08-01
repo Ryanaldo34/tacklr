@@ -19,14 +19,26 @@ import (
 	"github.com/ryanaldo34/tacklr/inference"
 	"github.com/ryanaldo34/tacklr/server"
 	"github.com/ryanaldo34/tacklr/stores"
+	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
 func main() {
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	baseLog := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})
+	slog.SetDefault(telemetry.NewLogger(baseLog))
 	loadDotEnv(".env")
 	if d := execDir(); d != "" {
 		loadDotEnv(filepath.Join(filepath.Dir(d), ".env"))
 	}
+
+	otelShutdown, err := telemetry.Init(context.Background(), telemetry.Config{
+		ServiceName: "tacklr-testserver",
+		Insecure:    true,
+	})
+	if err != nil {
+		slog.Error("otel init failed", "error", err)
+		os.Exit(1)
+	}
+	defer func() { _ = otelShutdown(context.Background()) }()
 
 	defaultAgent := "test-agent"
 

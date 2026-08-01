@@ -3,20 +3,21 @@ package telemetry
 import (
 	"log/slog"
 
-	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/streaming"
 )
 
+// StdioWatchDog implements tacklr.AgentWatchDog via streaming.Message (type alias).
 type StdioWatchDog struct{}
 
 func New() *StdioWatchDog { return &StdioWatchDog{} }
 
-func (s *StdioWatchDog) RecordThinking(msg *tacklr.Message) error {
+func (s *StdioWatchDog) RecordThinking(msg *streaming.Message) error {
 	slog.Debug("agent thinking", "content", msg.Content)
 	return nil
 }
 
-func (s *StdioWatchDog) RecordOutput(msg *tacklr.Message) error {
-	if msg.Role == tacklr.RoleAssistant {
+func (s *StdioWatchDog) RecordOutput(msg *streaming.Message) error {
+	if msg.Role == streaming.RoleAssistant {
 		slog.Info("agent output", "content", msg.Content, "tool_calls", len(msg.ToolCalls))
 	}
 	return nil
@@ -32,7 +33,7 @@ func (s *StdioWatchDog) RecordTokens(input, output int) error {
 	return nil
 }
 
-func (s *StdioWatchDog) RecordToolCalls(msg *tacklr.Message) error {
+func (s *StdioWatchDog) RecordToolCalls(msg *streaming.Message) error {
 	names := make([]string, len(msg.ToolCalls))
 	for i, tc := range msg.ToolCalls {
 		names[i] = tc.Name
@@ -41,7 +42,7 @@ func (s *StdioWatchDog) RecordToolCalls(msg *tacklr.Message) error {
 	return nil
 }
 
-func (s *StdioWatchDog) RecordToolResult(msg *tacklr.Message) error {
+func (s *StdioWatchDog) RecordToolResult(msg *streaming.Message) error {
 	slog.Info("tool result", "tool_call_id", msg.ToolCallID, "content", msg.Content)
 	return nil
 }

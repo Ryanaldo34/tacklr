@@ -272,6 +272,37 @@ agent, err := tacklr.NewAgentFromSession(ctx, sessionID, opts)
 
 ---
 
+## Observability (OTLP)
+
+Each registry turn is one root span with only agent-lifecycle children:
+
+```text
+tacklr.turn
+  event: prompt.received | resume.received
+  tacklr.tool              # create_plan, work tools, complete_todo, …
+  tacklr.plan.install      # plan document placed in context
+  tacklr.context.handoff   # after todo complete / plan revise
+  event: turn.ended
+```
+
+Streaming messages, absorb, and compress are not traced (plumbing, not milestones). slog gets `trace_id`/`span_id` for correlation but is not mirrored onto spans.
+
+```go
+import "github.com/ryanaldo34/tacklr/telemetry"
+
+shutdown, err := telemetry.Init(ctx, telemetry.Config{
+    ServiceName:  "my-agent-server",
+    OTLPEndpoint: "localhost:4317", // or set OTEL_EXPORTER_OTLP_ENDPOINT
+    Insecure:     true,
+})
+slog.SetDefault(telemetry.NewLogger(slog.NewTextHandler(os.Stderr, nil)))
+defer shutdown(ctx)
+```
+
+Without an endpoint (and without `OTEL_EXPORTER_OTLP_ENDPOINT`), tracing is a no-op. Prompt/tool body text is not attached by default.
+
+---
+
 ## Packages (import map)
 
 ```go
@@ -283,6 +314,7 @@ import "github.com/ryanaldo34/tacklr/mcp"        // MCPConfig types
 import "github.com/ryanaldo34/tacklr/streaming"  // shared event/message types
 import "github.com/ryanaldo34/tacklr/control"    // runtime / plan / interrupts
 import "github.com/ryanaldo34/tacklr/skills"     // skill loading
+import "github.com/ryanaldo34/tacklr/telemetry"  // OTLP tracing + slog span bridge
 ```
 
 ---

@@ -11,6 +11,9 @@ import (
 	"sync/atomic"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/ryanaldo34/tacklr/control"
 	mcpruntime "github.com/ryanaldo34/tacklr/internal/mcp"
@@ -18,6 +21,7 @@ import (
 	"github.com/ryanaldo34/tacklr/skills"
 	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/streaming"
+	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
 const (
@@ -378,10 +382,26 @@ func (a *AgentHarness) addToContext(ctx context.Context, newMsg *Message, out ch
 func (a *AgentHarness) applyBatchToolResultEffect(ctx context.Context, effect ToolResultEffect) error {
 	switch effect {
 	case EffectInstallPlanDocument:
-		slog.Info("installing plan document into context", "session_id", a.SessionId)
-		return a.context.InstallPlanDocument(a.Runtime.PlanDocumentGet())
+		doc := a.Runtime.PlanDocumentGet()
+		// Milestone: plan document installed into the context window.
+		ctx, span := telemetry.Tracer().Start(ctx, telemetry.SpanPlanInstall,
+			trace.WithAttributes(
+				attribute.String(telemetry.AttrArea, telemetry.AreaContext),
+				attribute.String(telemetry.AttrSessionID, a.SessionId),
+			),
+		)
+		defer span.End()
+		slog.InfoContext(ctx, "installing plan document into context", "session_id", a.SessionId, "area", telemetry.AreaContext)
+		if err := a.context.InstallPlanDocument(doc); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			span.SetAttributes(attribute.String(telemetry.AttrOutcome, telemetry.OutcomeError))
+			return err
+		}
+		span.SetAttributes(attribute.String(telemetry.AttrOutcome, telemetry.OutcomeOK))
+		return nil
 	case EffectHandoff:
-		slog.Info("todos completed or plan revised; running handoff", "session_id", a.SessionId)
+		slog.InfoContext(ctx, "todos completed or plan revised; running handoff", "session_id", a.SessionId, "area", telemetry.AreaContext)
 		return a.tasks.Handoff(ctx, a.Runtime.PlanGet(), a.Runtime.PlanDocumentGet(), a.Tools, a.constructSystemPrompt())
 	default:
 		return nil
@@ -763,15 +783,41 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 						return
 					}
 					tcKey := toolCallKey(tc)
+					// Milestone: each tool call (create_plan, complete_todo, work tools, …).
+					toolCtx, toolSpan := telemetry.Tracer().Start(ctx, telemetry.SpanTool,
+						trace.WithAttributes(
+							attribute.String(telemetry.AttrArea, telemetry.AreaHarness),
+							attribute.String(telemetry.AttrToolName, tc.Name),
+							attribute.String(telemetry.AttrToolNS, tc.Namespace),
+						),
+					)
+					defer toolSpan.End()
+
+					finishTool := func(status string, err error) {
+						toolSpan.SetAttributes(attribute.String(telemetry.AttrToolStatus, status))
+						if err != nil {
+							toolSpan.RecordError(err)
+							toolSpan.SetStatus(codes.Error, err.Error())
+							toolSpan.SetAttributes(attribute.String(telemetry.AttrOutcome, telemetry.OutcomeError))
+							return
+						}
+						if status == "error" {
+							toolSpan.SetAttributes(attribute.String(telemetry.AttrOutcome, telemetry.OutcomeError))
+							return
+						}
+						toolSpan.SetAttributes(attribute.String(telemetry.AttrOutcome, telemetry.OutcomeOK))
+					}
+
 					tool := a.findTool(tc.Name, tc.Namespace)
 					if tool == nil {
 						toolErr := fmt.Errorf("tool %q: %w", tc.Name, ErrToolNotFound)
-						toolResults[i] = a.emitToolResult(ctx, out, tc, toolErr.Error(), "error")
+						finishTool("error", toolErr)
+						toolResults[i] = a.emitToolResult(toolCtx, out, tc, toolErr.Error(), "error")
 						return
 					}
 					runtimeCopy := a.Runtime
 					runtimeCopy.CurrentToolCallID = tcKey
-					output, err := a.toolRunner.Run(ctx, ToolInvocation{
+					output, err := a.toolRunner.Run(toolCtx, ToolInvocation{
 						Tool:     tool,
 						ArgsJSON: tc.Arguments,
 						Runtime:  runtimeCopy,
@@ -781,7 +827,8 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 						intrId := uuid.New().String()
 						serialized, err := interrupt.Serialize()
 						if err != nil {
-							_ = emit(ctx, out, StreamEvent{Type: StreamEventError, Error: fmt.Errorf("serialize interrupt: %w", err)})
+							finishTool("error", err)
+							_ = emit(toolCtx, out, StreamEvent{Type: StreamEventError, Error: fmt.Errorf("serialize interrupt: %w", err)})
 							return
 						}
 						// json.RawMessage embeds the already-serialized interrupt as a
@@ -794,25 +841,28 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 						}
 						data, err := json.Marshal(payload)
 						if err != nil {
-							_ = emit(ctx, out, StreamEvent{Type: StreamEventError, Error: fmt.Errorf("marshal interrupt: %w", err)})
+							finishTool("error", err)
+							_ = emit(toolCtx, out, StreamEvent{Type: StreamEventError, Error: fmt.Errorf("marshal interrupt: %w", err)})
 							return
 						}
-						_ = emit(ctx, out, StreamEvent{Type: StreamEventInterrupt, MessageID: tcKey, Data: data})
+						finishTool("interrupt", nil)
+						_ = emit(toolCtx, out, StreamEvent{Type: StreamEventInterrupt, MessageID: tcKey, Data: data})
 						a.pendingMu.Lock()
 						a.pendingToolCalls[tcKey] = stores.PendingToolCall{ToolCall: &tc, InterruptActive: true}
 						a.interruptToRequester[intrId] = tcKey
 						a.pendingMu.Unlock()
-						_ = a.checkpointSession(ctx)
+						_ = a.checkpointSession(toolCtx)
 						return
 					}
 					a.pendingMu.Lock()
 					delete(a.pendingToolCalls, tcKey)
 					a.pendingMu.Unlock()
 					if err != nil {
-						toolResults[i] = a.emitToolResult(ctx, out, tc, fmt.Sprintf("An error occurred: %s", err.Error()), "error")
+						finishTool("error", err)
+						toolResults[i] = a.emitToolResult(toolCtx, out, tc, fmt.Sprintf("An error occurred: %s", err.Error()), "error")
 						return
 					}
-					disp := a.toolResultHooks.observe(ctx, ToolResultObservation{
+					disp := a.toolResultHooks.observe(toolCtx, ToolResultObservation{
 						Name:     tc.Name,
 						ArgsJSON: tc.Arguments,
 						Output:   output,
@@ -822,7 +872,8 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 					if disp.SuppressWindowMessage {
 						suppressWindow[i].Store(true)
 					}
-					toolResults[i] = a.emitToolResult(ctx, out, tc, output, "success")
+					finishTool("success", nil)
+					toolResults[i] = a.emitToolResult(toolCtx, out, tc, output, "success")
 				}(i, tc)
 			}
 			runningTools.Wait()
@@ -850,18 +901,18 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 			if hasPending {
 				err := a.checkpointSession(ctx)
 				if err != nil {
-					slog.Error("failed to save session", "session_id", a.SessionId, "error", err)
+					slog.ErrorContext(ctx, "failed to save session", "session_id", a.SessionId, "error", err)
 				}
 				return
 			}
 			if effect := batchEffects.resolved(); effect != EffectNone {
 				if err := a.applyBatchToolResultEffect(ctx, effect); err != nil {
-					slog.Error("failed to apply tool result context effect", "session_id", a.SessionId, "effect", effect, "error", err)
+					slog.ErrorContext(ctx, "failed to apply tool result context effect", "session_id", a.SessionId, "effect", effect, "error", err)
 					_ = emit(ctx, out, StreamEvent{Type: StreamEventError, Content: err.Error()})
 					return
 				}
 				if err := a.checkpointSession(ctx); err != nil {
-					slog.Error("failed to save session", "session_id", a.SessionId, "error", err)
+					slog.ErrorContext(ctx, "failed to save session", "session_id", a.SessionId, "error", err)
 					_ = emit(ctx, out, StreamEvent{Type: StreamEventError, Content: err.Error()})
 					return
 				}

@@ -10,11 +10,15 @@ import (
 	"sync"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/streaming"
+	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
 type AgentSpec struct {
@@ -334,9 +338,31 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 		return nil, fmt.Errorf("load agent %q: %w", agentID, err)
 	}
 
-	// turnCtx is a child of the request/connection ctx so either parent cancel
-	// or session/cancel stops the turn. Stored for CancelSession.
+	turnKind := "prompt"
+	if len(req.Responses) > 0 {
+		turnKind = "resume"
+	}
 	turnCtx, cancel := context.WithCancel(ctx)
+	// Span attributes: searchable dimensions (area, ids, kind). Dynamic sizes on events.
+	turnCtx, turnSpan := telemetry.Tracer().Start(turnCtx, telemetry.SpanTurn,
+		trace.WithAttributes(
+			attribute.String(telemetry.AttrArea, telemetry.AreaRegistry),
+			attribute.String(telemetry.AttrAgentID, agentID),
+			attribute.String(telemetry.AttrThreadID, threadID),
+			attribute.String(telemetry.AttrSessionID, req.SessionID),
+			attribute.String(telemetry.AttrTurnKind, turnKind),
+			attribute.Bool(telemetry.AttrLoadSession, load),
+		),
+	)
+	if turnKind == "prompt" {
+		turnSpan.AddEvent(telemetry.EventPromptReceived, trace.WithAttributes(
+			attribute.Int(telemetry.EventAttrPromptLen, len(req.Prompt)),
+		))
+	} else {
+		turnSpan.AddEvent(telemetry.EventResumeReceived, trace.WithAttributes(
+			attribute.Int(telemetry.EventAttrResumeInterruptCount, len(req.Responses)),
+		))
+	}
 	r.activeTurns.Store(threadID, cancel)
 
 	pr := &parsedRequest{
@@ -345,9 +371,22 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 		Prompt:    req.Prompt,
 		Responses: req.Responses,
 	}
+	endTurn := func(outcome string, err error) {
+		turnSpan.SetAttributes(attribute.String(telemetry.AttrOutcome, outcome))
+		if err != nil {
+			turnSpan.RecordError(err)
+			turnSpan.SetStatus(codes.Error, err.Error())
+		}
+		turnSpan.AddEvent(telemetry.EventTurnEnded, trace.WithAttributes(
+			attribute.String(telemetry.EventAttrOutcome, outcome),
+		))
+	}
+
 	events, err := runHarness(turnCtx, h, pr)
 	if err != nil {
 		r.activeTurns.Delete(threadID)
+		endTurn(telemetry.OutcomeError, err)
+		turnSpan.End()
 		cancel()
 		h.Close()
 		return nil, fmt.Errorf("run harness: %w", err)
@@ -359,17 +398,35 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 	go func() {
 		defer close(out)
 		defer r.activeTurns.Delete(threadID)
+		defer turnSpan.End()
+		var streamErr error
+		endOutcome := telemetry.OutcomeOK
 		for {
 			select {
 			case <-turnCtx.Done():
+				endTurn(telemetry.OutcomeCancelled, turnCtx.Err())
 				return
 			case ev, ok := <-events:
 				if !ok {
+					if streamErr != nil {
+						endOutcome = telemetry.OutcomeError
+						endTurn(endOutcome, streamErr)
+					} else {
+						endTurn(endOutcome, nil)
+					}
 					return
+				}
+				if ev.Type == streaming.StreamEventError {
+					if ev.Error != nil {
+						streamErr = ev.Error
+					} else if ev.Content != "" {
+						streamErr = fmt.Errorf("%s", ev.Content)
+					}
 				}
 				select {
 				case out <- ev:
 				case <-turnCtx.Done():
+					endTurn(telemetry.OutcomeCancelled, turnCtx.Err())
 					return
 				}
 			}
