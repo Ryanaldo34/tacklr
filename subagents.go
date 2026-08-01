@@ -145,7 +145,7 @@ func (a *AgentHarness) runWorker(ctx context.Context, workerName, task string, r
 	toolCallID := runtime.CurrentToolCallID
 	logAttrs := []any{
 		"area", "subagent",
-		"session_id", a.SessionId,
+		"session_id", a.sessionId,
 		"worker", workerName,
 		"tool_call_id", toolCallID,
 		"task_len", len(task),
@@ -250,7 +250,7 @@ func (a *AgentHarness) runWorker(ctx context.Context, workerName, task string, r
 	}
 
 	// Ensure child is durable when a store is available.
-	if worker.Store != nil && worker.SessionId != "" {
+	if worker.store != nil && worker.sessionId != "" {
 		if err := worker.checkpointSession(ctx); err != nil {
 			slog.Error("failed to checkpoint worker", append(logAttrs, "error", err)...)
 			// Continue with live park; durability is best-effort here.
@@ -259,7 +259,7 @@ func (a *AgentHarness) runWorker(ctx context.Context, workerName, task string, r
 
 	parkMeta := parkedWorkerMeta{
 		WorkerName:        workerName,
-		WorkerSessionID:   worker.SessionId,
+		WorkerSessionID:   worker.sessionId,
 		Task:              task,
 		ChildInterruptIDs: childIntrIDs,
 	}
@@ -270,7 +270,7 @@ func (a *AgentHarness) runWorker(ctx context.Context, workerName, task string, r
 	slog.Info("bubbling worker interrupt", append(logAttrs,
 		"elapsed", elapsed,
 		"child_interrupts", len(childIntrIDs),
-		"worker_session_id", worker.SessionId,
+		"worker_session_id", worker.sessionId,
 	)...)
 
 	// Adopt the same interrupt object onto the parent Runtime under this
@@ -285,19 +285,19 @@ func (a *AgentHarness) runWorker(ctx context.Context, workerName, task string, r
 }
 
 func (a *AgentHarness) newWorkerHarness(ctx context.Context, workerName, parentToolCallID string, spec *SubAgent) *AgentHarness {
-	sessionID := workerSessionID(a.SessionId, workerName, parentToolCallID)
+	sessionID := workerSessionID(a.sessionId, workerName, parentToolCallID)
 	worker := NewAgent(ctx, AgentOptions{
 		Config: Config{
-			MaxWindowSize: a.MaxWindowSize,
+			MaxWindowSize: a.maxWindowSize,
 			SystemPrompt:  spec.Instructions,
 		},
 		Model:      spec.Model,
 		Tools:      slices.Clone(spec.Tools),
-		MCPConfigs: slices.Clone(a.MCPConfigs),
-		Store:      a.Store,
+		MCPConfigs: slices.Clone(a.mcpConfigs),
+		Store:      a.store,
 		SubAgents:  spec.SubAgents,
 	})
-	worker.SessionId = sessionID
+	worker.sessionId = sessionID
 	return worker
 }
 
@@ -311,13 +311,13 @@ func workerSessionID(parentSessionID, workerName, parentToolCallID string) strin
 func (a *AgentHarness) workerOptsFromSpec(spec *SubAgent) AgentOptions {
 	return AgentOptions{
 		Config: Config{
-			MaxWindowSize: a.MaxWindowSize,
+			MaxWindowSize: a.maxWindowSize,
 			SystemPrompt:  spec.Instructions,
 		},
 		Model:      spec.Model,
 		Tools:      slices.Clone(spec.Tools),
-		MCPConfigs: slices.Clone(a.MCPConfigs),
-		Store:      a.Store,
+		MCPConfigs: slices.Clone(a.mcpConfigs),
+		Store:      a.store,
 		SubAgents:  spec.SubAgents,
 	}
 }
@@ -330,7 +330,7 @@ func (a *AgentHarness) attachParkedWorker(ctx context.Context, toolCallID string
 	}
 	a.parkMu.Unlock()
 
-	if a.Store == nil || meta.WorkerSessionID == "" {
+	if a.store == nil || meta.WorkerSessionID == "" {
 		return nil, fmt.Errorf("%w: no live worker and no durable session", ErrWorkerParkMissing)
 	}
 	worker, err := NewAgentFromSession(ctx, meta.WorkerSessionID, a.workerOptsFromSpec(spec))
@@ -393,7 +393,7 @@ func collectChildInterrupts(worker *AgentHarness, drainedIDs []string) (ids []st
 		if !ok {
 			continue
 		}
-		if intr, ok := worker.Runtime.PendingInterrupt(tcID); ok {
+		if intr, ok := worker.runtime.PendingInterrupt(tcID); ok {
 			primary = intr
 			break
 		}
@@ -404,7 +404,7 @@ func collectChildInterrupts(worker *AgentHarness, drainedIDs []string) (ids []st
 			if !ptc.InterruptActive {
 				continue
 			}
-			if intr, ok := worker.Runtime.PendingInterrupt(tcID); ok {
+			if intr, ok := worker.runtime.PendingInterrupt(tcID); ok {
 				primary = intr
 				// Ensure we have at least one interrupt id for resume forwarding.
 				if len(ids) == 0 {
@@ -492,7 +492,7 @@ func (p parkStore) clear(toolCallID string) {
 }
 
 func (p parkStore) load() map[string]parkedWorkerMeta {
-	raw, ok := p.h.Runtime.StateGet(parkedWorkersStateKey)
+	raw, ok := p.h.runtime.StateGet(parkedWorkersStateKey)
 	if !ok || raw == nil {
 		return map[string]parkedWorkerMeta{}
 	}
@@ -527,7 +527,7 @@ func (p parkStore) load() map[string]parkedWorkerMeta {
 
 func (p parkStore) store(parks map[string]parkedWorkerMeta) {
 	if len(parks) == 0 {
-		p.h.Runtime.StateDelete(parkedWorkersStateKey)
+		p.h.runtime.StateDelete(parkedWorkersStateKey)
 		return
 	}
 	b, err := json.Marshal(parks)
@@ -536,7 +536,7 @@ func (p parkStore) store(parks map[string]parkedWorkerMeta) {
 		return
 	}
 	// Store as string so checkpoint JSON round-trips cleanly.
-	p.h.Runtime.StateSet(parkedWorkersStateKey, string(b))
+	p.h.runtime.StateSet(parkedWorkersStateKey, string(b))
 }
 
 // workerDrainResult is the outcome of draining a child event stream.

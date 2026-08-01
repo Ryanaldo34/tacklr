@@ -31,6 +31,12 @@ var ToolFullAccess = mapset.NewSet[ToolPermission](ReadPermission, WritePermissi
 
 type ToolHandlerFunc func(ctx context.Context, args map[string]any, runtime HarnessRuntime) (string, error)
 
+// toolCallResult is the internal success path for a single tool invoke.
+type toolCallResult struct {
+	output string
+	disp   ToolResultDisposition
+}
+
 type Tool struct {
 	DisplayName string
 	Name        string
@@ -43,7 +49,7 @@ type Tool struct {
 	// PermissionRequired asks the user to approve the tool before it runs.
 	PermissionRequired bool
 
-	handlerFunc func(ctx context.Context, args map[string]any, runtime HarnessRuntime) (string, error)
+	handlerFunc func(ctx context.Context, args map[string]any, runtime HarnessRuntime) (toolCallResult, error)
 	parameters  map[string]any
 	strict      bool
 }
@@ -163,7 +169,7 @@ func NewTool(cfg ToolConfig) *Tool {
 	}
 
 	handlerValue := reflect.ValueOf(cfg.Handler)
-	t.handlerFunc = func(ctx context.Context, args map[string]any, runtime HarnessRuntime) (string, error) {
+	t.handlerFunc = func(ctx context.Context, args map[string]any, runtime HarnessRuntime) (toolCallResult, error) {
 		var callArgs []reflect.Value
 
 		callArgs = append(callArgs, reflect.ValueOf(ctx))
@@ -173,10 +179,10 @@ func NewTool(cfg ToolConfig) *Tool {
 			if len(args) > 0 {
 				b, err := json.Marshal(args)
 				if err != nil {
-					return "", fmt.Errorf("marshal args: %w", err)
+					return toolCallResult{}, fmt.Errorf("marshal args: %w", err)
 				}
 				if err := json.Unmarshal(b, argPtr.Interface()); err != nil {
-					return "", fmt.Errorf("unmarshal args: %w", err)
+					return toolCallResult{}, fmt.Errorf("unmarshal args: %w", err)
 				}
 			}
 			if argsIsPtr {
@@ -196,16 +202,19 @@ func NewTool(cfg ToolConfig) *Tool {
 
 		results := handlerValue.Call(callArgs)
 		if err, ok := results[1].Interface().(error); ok && err != nil {
-			return "", err
+			return toolCallResult{}, err
 		}
 		if results[0].Kind() == reflect.String {
-			return results[0].String(), nil
+			return toolCallResult{output: results[0].String()}, nil
+		}
+		if br, ok := results[0].Interface().(BuiltinResult); ok {
+			return toolCallResult{output: br.Output, disp: br.disposition()}, nil
 		}
 		b, err := json.Marshal(results[0].Interface())
 		if err != nil {
-			return "", fmt.Errorf("marshal result: %w", err)
+			return toolCallResult{}, fmt.Errorf("marshal result: %w", err)
 		}
-		return string(b), nil
+		return toolCallResult{output: string(b)}, nil
 	}
 
 	return t
@@ -228,15 +237,26 @@ func newMCPTool(cfg mcpToolConfig) *Tool {
 		Timeout:     cfg.Timeout,
 		strict:      false,
 		parameters:  params,
-		handlerFunc: cfg.Handler,
+		handlerFunc: func(ctx context.Context, args map[string]any, runtime HarnessRuntime) (toolCallResult, error) {
+			out, err := cfg.Handler(ctx, args, runtime)
+			return toolCallResult{output: out}, err
+		},
 	}
 }
 
+// Invoke runs the tool and returns the model-visible output string.
+// Framework BuiltinResult values surface only their Output here; context
+// effects travel through the harness tool runner.
 func (t *Tool) Invoke(ctx context.Context, argsJson string, runtime HarnessRuntime) (string, error) {
+	res, err := t.invoke(ctx, argsJson, runtime)
+	return res.output, err
+}
+
+func (t *Tool) invoke(ctx context.Context, argsJson string, runtime HarnessRuntime) (toolCallResult, error) {
 	var args map[string]any
 	if argsJson != "" {
 		if err := json.Unmarshal([]byte(argsJson), &args); err != nil {
-			return "", fmt.Errorf("unmarshal args for tool %q: %w", t.Name, err)
+			return toolCallResult{}, fmt.Errorf("unmarshal args for tool %q: %w", t.Name, err)
 		}
 	}
 
@@ -248,26 +268,26 @@ func (t *Tool) Invoke(ctx context.Context, argsJson string, runtime HarnessRunti
 	defer cancel()
 
 	type outcome struct {
-		out string
+		res toolCallResult
 		err error
 	}
 	done := make(chan outcome, 1)
 	go func() {
-		out, err := t.handlerFunc(callCtx, args, runtime)
-		done <- outcome{out: out, err: err}
+		res, err := t.handlerFunc(callCtx, args, runtime)
+		done <- outcome{res: res, err: err}
 	}()
 
 	select {
 	case res := <-done:
 		if res.err != nil && ctx.Err() == nil && errors.Is(res.err, context.DeadlineExceeded) {
-			return "", fmt.Errorf("tool %q: %w", t.Name, ErrToolTimeout)
+			return toolCallResult{}, fmt.Errorf("tool %q: %w", t.Name, ErrToolTimeout)
 		}
-		return res.out, res.err
+		return res.res, res.err
 	case <-callCtx.Done():
 		if err := ctx.Err(); err != nil {
-			return "", err
+			return toolCallResult{}, err
 		}
-		return "", fmt.Errorf("tool %q: %w", t.Name, ErrToolTimeout)
+		return toolCallResult{}, fmt.Errorf("tool %q: %w", t.Name, ErrToolTimeout)
 	}
 }
 

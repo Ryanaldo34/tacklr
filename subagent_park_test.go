@@ -146,17 +146,17 @@ func TestSpawnWorker_parkMetaLoadShapes(t *testing.T) {
 	ps := parkStore{h: h}
 
 	// string
-	h.Runtime.StateSet(parkedWorkersStateKey, string(b))
+	h.runtime.StateSet(parkedWorkersStateKey, string(b))
 	if got := ps.load(); got["tc"].WorkerName != "researcher" {
 		t.Fatalf("string load: %+v", got)
 	}
 	// []byte
-	h.Runtime.StateSet(parkedWorkersStateKey, b)
+	h.runtime.StateSet(parkedWorkersStateKey, b)
 	if got := ps.load(); got["tc"].Task != "task" {
 		t.Fatalf("bytes load: %+v", got)
 	}
 	// typed map
-	h.Runtime.StateSet(parkedWorkersStateKey, parks)
+	h.runtime.StateSet(parkedWorkersStateKey, parks)
 	if got := ps.load(); len(got["tc"].ChildInterruptIDs) != 1 {
 		t.Fatalf("typed map: %+v", got)
 	}
@@ -165,23 +165,23 @@ func TestSpawnWorker_parkMetaLoadShapes(t *testing.T) {
 	if err := json.Unmarshal(b, &anyMap); err != nil {
 		t.Fatal(err)
 	}
-	h.Runtime.StateSet(parkedWorkersStateKey, anyMap)
+	h.runtime.StateSet(parkedWorkersStateKey, anyMap)
 	if got := ps.load(); got["tc"].WorkerSessionID != "w/sess" {
 		t.Fatalf("any map: %+v", got)
 	}
 	// corrupt string → empty
-	h.Runtime.StateSet(parkedWorkersStateKey, "{not-json")
+	h.runtime.StateSet(parkedWorkersStateKey, "{not-json")
 	if got := ps.load(); len(got) != 0 {
 		t.Fatalf("corrupt: %+v", got)
 	}
 	// store empty deletes key
 	ps.store(map[string]parkedWorkerMeta{})
-	if _, ok := h.Runtime.StateGet(parkedWorkersStateKey); ok {
+	if _, ok := h.runtime.StateGet(parkedWorkersStateKey); ok {
 		t.Fatal("empty store should delete key")
 	}
 	// store non-empty
 	ps.store(parks)
-	if _, ok := h.Runtime.StateGet(parkedWorkersStateKey); !ok {
+	if _, ok := h.runtime.StateGet(parkedWorkersStateKey); !ok {
 		t.Fatal("expected park state set")
 	}
 }
@@ -200,17 +200,17 @@ func TestSpawnWorker_resumeMissingPayload_errors(t *testing.T) {
 		},
 		Store: testStore(t),
 	})
-	h.SessionId = "parent"
-	h.Runtime.CurrentToolCallID = "spawn_x"
+	h.sessionId = "parent"
+	h.runtime.CurrentToolCallID = "spawn_x"
 	// Plant park meta without child resolution payloads.
 	parkStore{h: h}.set("spawn_x", parkedWorkerMeta{
 		WorkerName:        "researcher",
-		WorkerSessionID:   workerSessionID(h.SessionId, "researcher", "spawn_x"),
+		WorkerSessionID:   workerSessionID(h.sessionId, "researcher", "spawn_x"),
 		Task:              "resume me",
 		ChildInterruptIDs: []string{"missing-child"},
 	}, nil)
 	// Ensure a worker session exists so attach can load (or fail cleanly).
-	_, err := h.runWorker(context.Background(), "researcher", "resume me", h.Runtime)
+	_, err := h.runWorker(context.Background(), "researcher", "resume me", h.runtime)
 	if err == nil {
 		t.Fatal("want resume error")
 	}
@@ -269,7 +269,7 @@ func TestReturnFromInterrupt_nilPayloadMap_initializes(t *testing.T) {
 		Tools:  []*Tool{tool},
 		Store:  testStore(t),
 	})
-	h.SessionId = "ret-nil"
+	h.sessionId = "ret-nil"
 	events, err := h.Run(context.Background(), "q")
 	if err != nil {
 		t.Fatal(err)
@@ -332,26 +332,26 @@ func TestPermissionRemember_boolMapMerge(t *testing.T) {
 		Tools: []*Tool{t1, t2},
 	})
 	// After first remember cycle, shape is map[string]bool — seed both.
-	h.Runtime.StateSet(permissionAlwaysAllowKey, map[string]bool{"t1": true, "t2": true})
+	h.runtime.StateSet(permissionAlwaysAllowKey, map[string]bool{"t1": true, "t2": true})
 	// One more remember merge path
-	permissionRemember(h.Runtime, permissionAlwaysAllowKey, "t3")
-	if !permissionSetHas(h.Runtime, permissionAlwaysAllowKey, "t1") || !permissionSetHas(h.Runtime, permissionAlwaysAllowKey, "t3") {
+	permissionRemember(h.runtime, permissionAlwaysAllowKey, "t3")
+	if !permissionSetHas(h.runtime, permissionAlwaysAllowKey, "t1") || !permissionSetHas(h.runtime, permissionAlwaysAllowKey, "t3") {
 		t.Fatal("bool map merge lost entries")
 	}
 	// unknown type default
-	h.Runtime.StateSet(permissionAlwaysAllowKey, 42)
-	if permissionSetHas(h.Runtime, permissionAlwaysAllowKey, "t1") {
+	h.runtime.StateSet(permissionAlwaysAllowKey, 42)
+	if permissionSetHas(h.runtime, permissionAlwaysAllowKey, "t1") {
 		t.Fatal("unknown type should miss")
 	}
 	// remember over unknown starts fresh
-	permissionRemember(h.Runtime, permissionAlwaysAllowKey, "fresh")
-	if !permissionSetHas(h.Runtime, permissionAlwaysAllowKey, "fresh") {
+	permissionRemember(h.runtime, permissionAlwaysAllowKey, "fresh")
+	if !permissionSetHas(h.runtime, permissionAlwaysAllowKey, "fresh") {
 		t.Fatal("fresh")
 	}
 	// any-map merge
-	h.Runtime.StateSet(permissionAlwaysDenyKey, map[string]any{"bad": true})
-	permissionRemember(h.Runtime, permissionAlwaysDenyKey, "also")
-	if !permissionSetHas(h.Runtime, permissionAlwaysDenyKey, "bad") || !permissionSetHas(h.Runtime, permissionAlwaysDenyKey, "also") {
+	h.runtime.StateSet(permissionAlwaysDenyKey, map[string]any{"bad": true})
+	permissionRemember(h.runtime, permissionAlwaysDenyKey, "also")
+	if !permissionSetHas(h.runtime, permissionAlwaysDenyKey, "bad") || !permissionSetHas(h.runtime, permissionAlwaysDenyKey, "also") {
 		t.Fatal("any-map merge")
 	}
 }

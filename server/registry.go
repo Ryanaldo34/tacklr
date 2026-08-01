@@ -601,7 +601,7 @@ func (r *Registry) loadAgent(ctx context.Context, agentID, threadID string, load
 		h = tacklr.NewAgent(ctx, opts)
 	}
 
-	h.SessionId = threadID
+	h.BindSessionID(threadID)
 	return h, &spec, nil
 }
 

@@ -115,7 +115,7 @@ func TestSpawnWorker_unknownWorker(t *testing.T) {
 		Config: Config{MaxWindowSize: 8192},
 		Model:  &mockStrategy{},
 	})
-	_, err := h.runWorker(context.Background(), "missing", "do something", h.Runtime)
+	_, err := h.runWorker(context.Background(), "missing", "do something", h.runtime)
 	if !errors.Is(err, ErrWorkerNotFound) {
 		t.Fatalf("err = %v, want ErrWorkerNotFound", err)
 	}
@@ -130,7 +130,7 @@ func TestSpawnWorker_emptyTask(t *testing.T) {
 			{WorkerName: "researcher", Model: workerModel},
 		},
 	})
-	_, err := h.runWorker(context.Background(), "researcher", "   ", h.Runtime)
+	_, err := h.runWorker(context.Background(), "researcher", "   ", h.runtime)
 	if !errors.Is(err, ErrEmptyWorkerTask) {
 		t.Fatalf("err = %v, want ErrEmptyWorkerTask", err)
 	}
@@ -221,9 +221,9 @@ func TestSpawnWorker_streamError(t *testing.T) {
 		},
 	})
 	out := make(chan StreamEvent, 16)
-	h.Runtime.SetOutputChannel(out)
+	h.runtime.SetOutputChannel(out)
 
-	_, err := h.runWorker(context.Background(), "researcher", "do work", h.Runtime)
+	_, err := h.runWorker(context.Background(), "researcher", "do work", h.runtime)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -250,9 +250,9 @@ func TestSpawnWorker_noOutput(t *testing.T) {
 		},
 	})
 	out := make(chan StreamEvent, 16)
-	h.Runtime.SetOutputChannel(out)
+	h.runtime.SetOutputChannel(out)
 
-	_, err := h.runWorker(context.Background(), "researcher", "do work", h.Runtime)
+	_, err := h.runWorker(context.Background(), "researcher", "do work", h.runtime)
 	if !errors.Is(err, ErrWorkerNoOutput) {
 		t.Fatalf("err = %v, want ErrWorkerNoOutput", err)
 	}
@@ -272,12 +272,12 @@ func TestSpawnWorker_contextCancel(t *testing.T) {
 		},
 	})
 	out := make(chan StreamEvent, 16)
-	h.Runtime.SetOutputChannel(out)
+	h.runtime.SetOutputChannel(out)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err := h.runWorker(ctx, "researcher", "do work", h.Runtime)
+	_, err := h.runWorker(ctx, "researcher", "do work", h.runtime)
 	if err == nil {
 		t.Fatal("expected error on cancel")
 	}
@@ -346,7 +346,7 @@ func TestSpawnWorker_interruptPropagatesAndResumes(t *testing.T) {
 			{WorkerName: "researcher", Model: workerModel, Tools: []*Tool{interruptTool}},
 		},
 	})
-	h.SessionId = "sess-root"
+	h.sessionId = "sess-root"
 
 	events, err := h.Run(context.Background(), "use worker with interrupt")
 	if err != nil {
@@ -484,7 +484,7 @@ func TestSpawnWorker_nestedInterruptPropagates(t *testing.T) {
 			},
 		},
 	})
-	h.SessionId = "sess-nested"
+	h.sessionId = "sess-nested"
 
 	events, err := h.Run(context.Background(), "nested interrupt")
 	if err != nil {
@@ -584,7 +584,7 @@ func TestSpawnWorker_interruptSurvivesSessionReload(t *testing.T) {
 		},
 	}
 	h := NewAgent(context.Background(), opts)
-	h.SessionId = "sess-reload"
+	h.sessionId = "sess-reload"
 
 	events, err := h.Run(context.Background(), "start")
 	if err != nil {
@@ -668,9 +668,9 @@ func TestSpawnWorker_toolsSliceIsolation(t *testing.T) {
 		},
 	})
 	out := make(chan StreamEvent, 16)
-	h.Runtime.SetOutputChannel(out)
+	h.runtime.SetOutputChannel(out)
 
-	result, err := h.runWorker(context.Background(), "researcher", "isolate tools", h.Runtime)
+	result, err := h.runWorker(context.Background(), "researcher", "isolate tools", h.runtime)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -710,7 +710,7 @@ func TestBuiltinToolsInjectedOnce(t *testing.T) {
 
 	countNamed := func(name string) int {
 		n := 0
-		for _, tool := range h.Tools {
+		for _, tool := range h.tools {
 			if tool.Name == name {
 				n++
 			}

@@ -136,15 +136,15 @@ func newCreatePlanTool(s internalSession) *Tool {
 		DisplayName: "Create Plan",
 		Description: "Creates a project plan document and a linear todo list derived from it. Pass the full plaintext plan in plan and the derived todos in todos. Call only when no active plan exists. If a plan is already active, use edit_plan or complete_todo instead of create_plan.",
 		Category:    streaming.ToolCategoryThink,
-		Handler: func(ctx context.Context, args createTodosArgs, _ HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, args createTodosArgs, _ HarnessRuntime) (BuiltinResult, error) {
 			if existing := s.sm.Plan().Get(); len(existing) > 0 {
-				return "", fmt.Errorf("an active plan already exists (%d todos); use edit_plan to modify it or complete_todo to progress — do not call create_plan again", len(existing))
+				return BuiltinResult{}, fmt.Errorf("an active plan already exists (%d todos); use edit_plan to modify it or complete_todo to progress — do not call create_plan again", len(existing))
 			}
 			if strings.TrimSpace(args.Plan) == "" {
-				return "", fmt.Errorf("plan document text is required")
+				return BuiltinResult{}, fmt.Errorf("plan document text is required")
 			}
 			if len(args.Todos) == 0 {
-				return "", fmt.Errorf("plan must include at least one todo")
+				return BuiltinResult{}, fmt.Errorf("plan must include at least one todo")
 			}
 			todos := make([]Todo, len(args.Todos))
 			copy(todos, args.Todos)
@@ -162,7 +162,11 @@ func newCreatePlanTool(s internalSession) *Tool {
 			}
 			s.sm.Plan().SetDocument(args.Plan)
 			s.setTodos(todos)
-			return "Plan created successfully", nil
+			return BuiltinResult{
+				Output:                "Plan created successfully",
+				Effect:                EffectInstallPlanDocument,
+				SuppressWindowMessage: true,
+			}, nil
 		},
 	})
 }
@@ -197,15 +201,18 @@ func newCompleteTodoTool(s internalSession) *Tool {
 		DisplayName: "Complete Todo",
 		Description: "Marks a todo as completed by exact title (must match list_plan / create_plan titles). Cannot complete a todo that is already completed or not found in the plan.",
 		Category:    streaming.ToolCategoryThink,
-		Handler: func(ctx context.Context, args completeTodoArgs, _ HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, args completeTodoArgs, _ HarnessRuntime) (BuiltinResult, error) {
 			plan := s.sm.Plan().Get()
 			if plan == nil {
-				return "", fmt.Errorf("no plan exists")
+				return BuiltinResult{}, fmt.Errorf("no plan exists")
+			}
+			handoff := func(msg string) (BuiltinResult, error) {
+				return BuiltinResult{Output: msg, Effect: EffectHandoff}, nil
 			}
 			for i, todo := range plan {
 				if todo.Title == args.Title {
 					if todo.Status == streaming.TodoStatusCompleted {
-						return "", fmt.Errorf("todo %q is already completed", args.Title)
+						return BuiltinResult{}, fmt.Errorf("todo %q is already completed", args.Title)
 					}
 					plan[i].Status = streaming.TodoStatusCompleted
 					if len(plan)-1 > i {
@@ -215,22 +222,22 @@ func newCompleteTodoTool(s internalSession) *Tool {
 								if plan[j].Status != streaming.TodoStatusCompleted {
 									plan[j].Status = streaming.TodoStatusInProgress
 									s.setTodos(plan)
-									return fmt.Sprintf("Todo completed successfully, now starting %q with description: %q", plan[j].Title, plan[j].Description), nil
+									return handoff(fmt.Sprintf("Todo completed successfully, now starting %q with description: %q", plan[j].Title, plan[j].Description))
 								}
 								j++
 							}
 							s.setTodos(plan)
-							return "All todos completed successfully", nil
+							return handoff("All todos completed successfully")
 						}
 						plan[i+1].Status = streaming.TodoStatusInProgress
 						s.setTodos(plan)
-						return fmt.Sprintf("Todo completed successfully, now starting %q with description: %q", plan[i+1].Title, plan[i+1].Description), nil
+						return handoff(fmt.Sprintf("Todo completed successfully, now starting %q with description: %q", plan[i+1].Title, plan[i+1].Description))
 					}
 					s.setTodos(plan)
-					return "All todos completed successfully", nil
+					return handoff("All todos completed successfully")
 				}
 			}
-			return "", fmt.Errorf("todo %q not found in plan", args.Title)
+			return BuiltinResult{}, fmt.Errorf("todo %q not found in plan", args.Title)
 		},
 	})
 }
@@ -241,23 +248,23 @@ func newEditPlanTool(s internalSession) *Tool {
 		DisplayName: "Edit Plan",
 		Description: "Edits an existing plan by removing and/or adding todos. Optionally replace the full plaintext plan document via plan (must differ from the current document). Omit plan when only changing todos. Cannot delete completed todos.",
 		Category:    streaming.ToolCategoryThink,
-		Handler: func(ctx context.Context, args editTodosArgs, _ HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, args editTodosArgs, _ HarnessRuntime) (BuiltinResult, error) {
 			plan := s.sm.Plan().Get()
 			if plan == nil {
-				return "", fmt.Errorf("no plan exists")
+				return BuiltinResult{}, fmt.Errorf("no plan exists")
 			}
 
 			trimmedPlan := strings.TrimSpace(args.Plan)
 			if trimmedPlan != "" {
 				existing := strings.TrimSpace(s.sm.Plan().Document())
 				if trimmedPlan == existing {
-					return "", fmt.Errorf("plan document is unchanged; omit plan or provide a revised full plan")
+					return BuiltinResult{}, fmt.Errorf("plan document is unchanged; omit plan or provide a revised full plan")
 				}
 			}
 
 			for _, todo := range args.ToAdd {
 				if todo.Order < 0 || todo.Order > len(plan) {
-					return "", fmt.Errorf("order %d is out of bounds (plan has %d items)", todo.Order, len(plan))
+					return BuiltinResult{}, fmt.Errorf("order %d is out of bounds (plan has %d items)", todo.Order, len(plan))
 				}
 				plan = slices.Insert(plan, todo.Order, todo.Todo)
 			}
@@ -267,7 +274,7 @@ func newEditPlanTool(s internalSession) *Tool {
 				for i, t := range plan {
 					if t.Title == title {
 						if t.Status == streaming.TodoStatusCompleted {
-							return "", fmt.Errorf("cannot delete completed todo: %q", title)
+							return BuiltinResult{}, fmt.Errorf("cannot delete completed todo: %q", title)
 						}
 						plan = slices.Delete(plan, i, i+1)
 						found = true
@@ -275,14 +282,18 @@ func newEditPlanTool(s internalSession) *Tool {
 					}
 				}
 				if !found {
-					return "", fmt.Errorf("todo %q not found in plan", title)
+					return BuiltinResult{}, fmt.Errorf("todo %q not found in plan", title)
 				}
 			}
 			s.setTodos(plan)
 			if trimmedPlan != "" {
 				s.sm.Plan().SetDocument(args.Plan)
 			}
-			return "Plan edited successfully", nil
+			effect := EffectNone
+			if s.sm.Plan().ConsumeDocumentUpdated() {
+				effect = EffectHandoff
+			}
+			return BuiltinResult{Output: "Plan edited successfully", Effect: effect}, nil
 		},
 	})
 }

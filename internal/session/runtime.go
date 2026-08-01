@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"sync"
 
-	"github.com/milvus-io/milvus/client/v2/milvusclient"
-
 	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/streaming"
@@ -19,12 +17,10 @@ type runtimeOutput struct {
 }
 
 // Runtime is the tool-facing hook surface: StateGet/Set, interrupts, EmitUpdate,
-// Store, CurrentToolCallID. Session data lives on SessionManager (unexported field).
+// Store, CurrentToolCallID. Session data lives on SessionManager (unexported).
 // Re-exported publicly as tacklr.HarnessRuntime.
 type Runtime struct {
-	VectorDB          *milvusclient.Client
 	Store             stores.BaseStore
-	Mode              string
 	CurrentToolCallID string
 
 	session *SessionManager
@@ -53,12 +49,6 @@ func (rt *Runtime) EnsureInitialized() {
 	if rt.out == nil {
 		rt.out = &runtimeOutput{}
 	}
-}
-
-// Session returns the backend manager (harness/builtins only; same module).
-func (rt *Runtime) Session() *SessionManager {
-	rt.EnsureInitialized()
-	return rt.session
 }
 
 func (rt *Runtime) EmitUpdate(message string) {

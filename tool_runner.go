@@ -38,13 +38,18 @@ func newToolRunner(interceptors ...ToolInterceptor) *toolRunner {
 	return &toolRunner{interceptors: cp}
 }
 
-func (r *toolRunner) Run(ctx context.Context, inv ToolInvocation) (string, error) {
+// Run executes the interceptor chain and the tool. Disposition comes only from
+// the final tool invoke (BuiltinResult); interceptor short-circuits yield none.
+func (r *toolRunner) Run(ctx context.Context, inv ToolInvocation) (string, ToolResultDisposition, error) {
 	if inv.Tool == nil {
-		return "", fmt.Errorf("%w", ErrToolNotFound)
+		return "", ToolResultDisposition{}, fmt.Errorf("%w", ErrToolNotFound)
 	}
 
+	var toolDisp ToolResultDisposition
 	next := ToolCallFunc(func(ctx context.Context, inv ToolInvocation) (string, error) {
-		return inv.Tool.Invoke(ctx, inv.ArgsJSON, inv.Runtime)
+		res, err := inv.Tool.invoke(ctx, inv.ArgsJSON, inv.Runtime)
+		toolDisp = res.disp
+		return res.output, err
 	})
 
 	for i := len(r.interceptors) - 1; i >= 0; i-- {
@@ -58,7 +63,8 @@ func (r *toolRunner) Run(ctx context.Context, inv ToolInvocation) (string, error
 		}
 	}
 
-	return next(ctx, inv)
+	out, err := next(ctx, inv)
+	return out, toolDisp, err
 }
 
 // toolPermissionGate raises a tool_permission interrupt when PermissionRequired

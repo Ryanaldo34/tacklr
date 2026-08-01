@@ -237,7 +237,19 @@ This keeps product tools from breaking the planning system by accident.
 ### MCP and skills
 
 - **MCP** — pass `MCPConfigs` on the agent (or via ACP session); tools are discovered and run for you.  
-- **Skills** — folders of `SKILL.md`; a short catalog is in the system prompt; full text loads via `read_skill` when needed.
+- **Skills** — set `Config.SkillDirectories` to folders of `SKILL.md` (default `skills.DirectoryLoader`). Inject `AgentOptions.SkillsLoader` for non-filesystem sources. A short catalog lands in the system prompt; full text loads via `read_skill` when needed.
+
+### Public harness surface
+
+`AgentHarness` fields are unexported. Hosts use:
+
+- `NewAgent` / `NewAgentFromSession` + `AgentOptions` (model, store, tools, MCP, skills, interceptors, hooks)
+- `SessionID()` / `BindSessionID` (registry thread binding)
+- `ToolRuntime()` for interrupt helpers that need `*HarnessRuntime`
+- `Messages()` / `RestoreMessages` for the conversation window
+- `Run` / `ReturnFromInterrupt` / `Close`
+
+Plan builtins return typed `BuiltinResult` effects (install plan, handoff) instead of name-keyed hooks.
 
 ---
 
@@ -289,11 +301,12 @@ Rough map for a Grafana stack: **Tempo** = traces, **Mimir/Prometheus** = metric
 | `inference` | OpenAI-compatible model client |
 | `server` | Registry + ACP / SSE |
 | `stores` | Session checkpoints |
-| `control` | Runtime hooks, session state, checkpoint build/apply |
+| `interrupt` | Interrupt types and registry for tool pause/resume |
 | `streaming` | Shared message/event types |
-| `mcp` | MCP config types |
-| `skills` | `SKILL.md` loading |
+| `mcp` | MCP config types (public) |
+| `skills` | `SKILL.md` loading (`Loader` injectable) |
 | `telemetry` | OTEL init, metrics helpers, log correlation |
+| `internal/session` | Session manager, plan store, checkpointer, tool runtime |
 
 ---
 

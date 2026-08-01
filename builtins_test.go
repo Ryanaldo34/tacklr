@@ -92,25 +92,48 @@ func TestEditPlanTool_identicalPlanDocument_rejected(t *testing.T) {
 	}
 }
 
-func TestEditPlanTool_newPlanDocument_setsUpdatedFlag(t *testing.T) {
+func TestCreatePlanTool_returnsInstallEffect(t *testing.T) {
+	create, _, _, _, _ := testPlanTools()
+	rt := session.NewRuntime(nil, nil, nil)
+	rt.EnsureInitialized()
+	res, err := create.invoke(context.Background(), `{"plan":"CoS: ship","todos":[{"title":"a","status":"pending","description":"d"}]}`, rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.output != "Plan created successfully" {
+		t.Fatalf("output = %q", res.output)
+	}
+	if res.disp.Effect != EffectInstallPlanDocument {
+		t.Fatalf("effect = %v, want install", res.disp.Effect)
+	}
+	if !res.disp.SuppressWindowMessage {
+		t.Fatal("create_plan should suppress window tool message")
+	}
+}
+
+func TestEditPlanTool_newPlanDocument_returnsHandoffEffect(t *testing.T) {
 	_, edit, _, _, store := testPlanTools()
 	rt := session.NewRuntime(nil, nil, nil)
 	rt.EnsureInitialized()
 	store.Set([]Todo{{Title: "a", Status: streaming.TodoStatusPending}})
 	store.SetDocument("old")
 
-	got, err := edit.Invoke(context.Background(), `{"plan":"new full plan","toAdd":[],"toDelete":[]}`, rt)
+	res, err := edit.invoke(context.Background(), `{"plan":"new full plan","toAdd":[],"toDelete":[]}`, rt)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "Plan edited successfully" {
-		t.Fatalf("got %q", got)
+	if res.output != "Plan edited successfully" {
+		t.Fatalf("got %q", res.output)
 	}
 	if store.Document() != "new full plan" {
 		t.Fatalf("document = %q", store.Document())
 	}
-	if !store.ConsumeDocumentUpdated() {
-		t.Fatal("expected updated flag for handoff hook")
+	if res.disp.Effect != EffectHandoff {
+		t.Fatalf("effect = %v, want handoff from BuiltinResult", res.disp.Effect)
+	}
+	// BuiltinResult consumes the document-updated flag so hooks do not double-fire.
+	if store.ConsumeDocumentUpdated() {
+		t.Fatal("updated flag should already be consumed by edit_plan")
 	}
 }
 
@@ -474,7 +497,7 @@ func TestRun_completeTodo_skipsAlreadyCompletedNext(t *testing.T) {
 		Model:  strategy,
 		Store:  testStore(t),
 	})
-	h.SessionId = "plan-skip"
+	h.sessionId = "plan-skip"
 	events, err := h.Run(context.Background(), "plan")
 	if err != nil {
 		t.Fatal(err)
@@ -593,7 +616,7 @@ func TestRun_askUserChoice_withoutDescription_formatsSelection(t *testing.T) {
 		Model:  strategy,
 		Store:  testStore(t),
 	})
-	h.SessionId = "ask-sess"
+	h.sessionId = "ask-sess"
 	events, err := h.Run(context.Background(), "ask")
 	if err != nil {
 		t.Fatal(err)
@@ -612,13 +635,13 @@ func TestRun_askUserChoice_withoutDescription_formatsSelection(t *testing.T) {
 		t.Fatal("expected interrupt")
 	}
 	// Question stashed for protocol elicitation.
-	if q := AskUserQuestionFromState(&h.Runtime, "ask1"); q != "Pick?" {
+	if q := AskUserQuestionFromState(&h.runtime, "ask1"); q != "Pick?" {
 		t.Fatalf("question = %q", q)
 	}
-	if AskUserQuestionFromState(&h.Runtime, "") != "" {
+	if AskUserQuestionFromState(&h.runtime, "") != "" {
 		t.Fatal("empty tool call id should yield empty question")
 	}
-	if AskUserQuestionFromState(&h.Runtime, "missing") != "" {
+	if AskUserQuestionFromState(&h.runtime, "missing") != "" {
 		t.Fatal("unknown tool call should yield empty question")
 	}
 
@@ -1008,7 +1031,7 @@ func TestRun_completeTodo_persistsPlanInStore(t *testing.T) {
 		Model:  strategy,
 		Store:  store,
 	})
-	ah.SessionId = "sess-plan-persist"
+	ah.sessionId = "sess-plan-persist"
 	ah.session.Plan().Set([]Todo{
 		{Title: "Ship", Status: streaming.TodoStatusInProgress},
 	})

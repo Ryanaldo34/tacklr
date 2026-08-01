@@ -566,7 +566,7 @@ func TestAgentHarness_Run(t *testing.T) {
 		if len(ah.pendingToolCalls) != 0 {
 			t.Errorf("pendingToolCalls after resume = %d, want 0", len(ah.pendingToolCalls))
 		}
-		if ah.Runtime.HasPendingInterrupt() {
+		if ah.runtime.HasPendingInterrupt() {
 			t.Error("runtime should have no pending interrupts after resume")
 		}
 	})
@@ -1075,26 +1075,26 @@ func TestNewAgent(t *testing.T) {
 		WatchDog: wd,
 	})
 
-	if h.Model != InferenceStrategy(mockModel) {
+	if h.model != InferenceStrategy(mockModel) {
 		t.Error("Model not wired from arg")
 	}
-	if h.MaxWindowSize != 4096 {
-		t.Errorf("MaxWindowSize = %d, want 4096", h.MaxWindowSize)
+	if h.maxWindowSize != 4096 {
+		t.Errorf("MaxWindowSize = %d, want 4096", h.maxWindowSize)
 	}
-	if h.Instructions != "test prompt" {
-		t.Errorf("SystemPrompt = %q, want 'test prompt'", h.Instructions)
+	if h.instructions != "test prompt" {
+		t.Errorf("SystemPrompt = %q, want 'test prompt'", h.instructions)
 	}
-	if h.Store != store {
+	if h.store != store {
 		t.Error("Store not wired from arg")
 	}
-	if h.WatchDog != AgentWatchDog(wd) {
+	if h.watchDog != AgentWatchDog(wd) {
 		t.Error("WatchDog not wired from arg")
 	}
 	if len(h.Messages()) != 0 {
 		t.Error("Messages should be empty on init")
 	}
-	if h.SessionId != "" {
-		t.Errorf("SessionId = %q, want empty", h.SessionId)
+	if h.sessionId != "" {
+		t.Errorf("SessionId = %q, want empty", h.sessionId)
 	}
 }
 
@@ -1104,7 +1104,7 @@ func TestFindTool_namespaceMatching(t *testing.T) {
 		NewTool(ToolConfig{Name: "get_customer", Namespace: "email", Handler: func(ctx context.Context) (string, error) { return "", nil }}),
 		NewTool(ToolConfig{Name: "get_weather", Namespace: "", Handler: func(ctx context.Context) (string, error) { return "", nil }}),
 	}
-	h := &AgentHarness{Tools: tools}
+	h := &AgentHarness{tools: tools}
 
 	if h.findTool("get_customer", "crm") == nil {
 		t.Error("expected to find tool in crm namespace")
@@ -1648,7 +1648,7 @@ func TestNewAgentFromSession_resumesPendingToolInterrupt(t *testing.T) {
 		Store:  store,
 		Tools:  []*Tool{interruptTool},
 	})
-	ah.SessionId = "sess-pending-resume"
+	ah.sessionId = "sess-pending-resume"
 
 	ch, err := ah.Run(context.Background(), "need a choice")
 	if err != nil {
@@ -1689,7 +1689,7 @@ func TestNewAgentFromSession_resumesPendingToolInterrupt(t *testing.T) {
 	if !restored.pendingToolCalls["call_park"].InterruptActive {
 		t.Fatal("restored pending tool should still be InterruptActive")
 	}
-	if !restored.Runtime.HasPendingInterrupt() {
+	if !restored.runtime.HasPendingInterrupt() {
 		t.Fatal("restored runtime should have pending interrupt")
 	}
 

@@ -495,7 +495,7 @@ func TestRun_checkpointSaveFailure_turnStillCompletes(t *testing.T) {
 		Model:  strategy,
 		Store:  failSaveStore{},
 	})
-	h.SessionId = "sess-save-fail"
+	h.sessionId = "sess-save-fail"
 	events, err := h.Run(context.Background(), "hi")
 	if err != nil {
 		t.Fatal(err)
