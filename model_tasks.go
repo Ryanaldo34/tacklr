@@ -12,7 +12,6 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/ryanaldo34/tacklr/control"
 	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
@@ -36,7 +35,7 @@ type ModelTasks interface {
 	Absorb(ctx context.Context, msg *Message, tools []*Tool, systemPrompt string) (AbsorbResult, error)
 
 	// Handoff rebuilds context after complete_todo or plan-document edit.
-	Handoff(ctx context.Context, plan []control.Todo, planDoc string, tools []*Tool, systemPrompt string) error
+	Handoff(ctx context.Context, plan []Todo, planDoc string, tools []*Tool, systemPrompt string) error
 }
 
 // DefaultModelTasks is the standard ModelTasks implementation.
@@ -95,7 +94,7 @@ func (t *DefaultModelTasks) Absorb(ctx context.Context, msg *Message, tools []*T
 	return AbsorbResult{SummaryChunks: chunks}, nil
 }
 
-func (t *DefaultModelTasks) Handoff(ctx context.Context, plan []control.Todo, planDoc string, tools []*Tool, systemPrompt string) error {
+func (t *DefaultModelTasks) Handoff(ctx context.Context, plan []Todo, planDoc string, tools []*Tool, systemPrompt string) error {
 	open := 0
 	for i := range plan {
 		if plan[i].Status != streaming.TodoStatusCompleted {
@@ -273,7 +272,7 @@ func (t *DefaultModelTasks) stageMessages(n int) []*Message {
 func handoffGenerate(
 	ctx context.Context,
 	window []*Message,
-	plan []control.Todo,
+	plan []Todo,
 	planDoc string,
 	model InferenceStrategy,
 	tools []*Tool,

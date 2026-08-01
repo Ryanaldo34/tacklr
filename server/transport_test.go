@@ -279,7 +279,7 @@ func TestEventToAcpJsonRpc_moreEventShapes(t *testing.T) {
 	}
 	// Plan update.
 	plan, _ := json.Marshal([]map[string]any{{"title": "A", "status": "pending", "description": ""}})
-	// control.Todo uses Title/Status — marshal from control shape
+	// Todo uses Title/Status — marshal from control shape
 	frames, err = eventToAcpJsonRpc("s", &streaming.StreamEvent{
 		Type: streaming.StreamEventPlanUpdate,
 		Data: []byte(`[{"title":"A","status":"pending","description":""}]`),

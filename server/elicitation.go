@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ryanaldo34/tacklr/control"
+	"github.com/ryanaldo34/tacklr/interrupt"
 )
 
 // ElicitationResult is the Client response to elicitation/create.
@@ -16,7 +16,7 @@ type ElicitationResult struct {
 
 // SelectionToElicitationParams builds form-mode elicitation/create params from
 // a user-selection interrupt.
-func SelectionToElicitationParams(sessionID, toolCallID, question string, opts []control.UserChoice) (map[string]any, error) {
+func SelectionToElicitationParams(sessionID, toolCallID, question string, opts []interrupt.UserChoice) (map[string]any, error) {
 	if len(opts) < 2 {
 		return nil, fmt.Errorf("elicitation requires at least 2 options")
 	}
@@ -67,7 +67,7 @@ func SelectionToElicitationParams(sessionID, toolCallID, question string, opts [
 
 // ElicitationResultToSelectionPayload maps an accept response to the harness
 // interrupt resolution payload. Returns action and optional selection JSON.
-func ElicitationResultToSelectionPayload(raw json.RawMessage, opts []control.UserChoice) (action string, resolution []byte, err error) {
+func ElicitationResultToSelectionPayload(raw json.RawMessage, opts []interrupt.UserChoice) (action string, resolution []byte, err error) {
 	var res ElicitationResult
 	if err := json.Unmarshal(raw, &res); err != nil {
 		return "", nil, fmt.Errorf("unmarshal elicitation result: %w", err)

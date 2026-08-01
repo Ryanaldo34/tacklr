@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ryanaldo34/tacklr/control"
+	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
@@ -365,7 +365,7 @@ func (a *AgentHarness) childResolutionPayloads(parentToolCallID string, meta *pa
 	return out
 }
 
-func collectChildInterrupts(worker *AgentHarness, drainedIDs []string) (ids []string, primary control.Interrupt) {
+func collectChildInterrupts(worker *AgentHarness, drainedIDs []string) (ids []string, primary interrupt.Interrupt) {
 	if worker == nil {
 		return nil, nil
 	}

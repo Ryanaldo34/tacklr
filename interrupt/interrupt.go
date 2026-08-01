@@ -1,4 +1,4 @@
-package control
+package interrupt
 
 import (
 	"encoding/json"
@@ -215,17 +215,13 @@ func (p *ToolPermissionInterrupt) Error() string {
 	return string(b)
 }
 
-// --- Interrupt registry & polymorphic JSON ---
+// --- Interrupt registry ---
 
-// interruptFactories creates fresh, empty Interrupt values for a given type name.
-// Used by both RaiseInterrupt (which then calls InitFromPayload to populate
-// from the tool-author-provided payload) and interruptMap.UnmarshalJSON
-// (which then calls json.Unmarshal on the saved struct data).
 var interruptFactories = map[string]func() Interrupt{}
 
-// registerInterrupt adds a factory for an Interrupt type under its TypeName.
-// It is called at package init time for each concrete Interrupt implementation.
-func registerInterrupt(factory func() Interrupt) {
+// Register adds a factory for an Interrupt type under its TypeName.
+// Call at init for custom interrupts so checkpoints can rehydrate them.
+func Register(factory func() Interrupt) {
 	intr := factory()
 	name := intr.TypeName()
 	if _, ok := interruptFactories[name]; ok {
@@ -234,55 +230,21 @@ func registerInterrupt(factory func() Interrupt) {
 	interruptFactories[name] = factory
 }
 
-func init() {
-	registerInterrupt(func() Interrupt { return &UserSelectionInterrupt{} })
-	registerInterrupt(func() Interrupt { return &ToolPermissionInterrupt{} })
-}
-
-// payloadInitializer is an optional capability that Interrupt types implement
-// to populate themselves from the raw payload provided to RaiseInterrupt.
-// The payload format is type-specific (e.g., []UserChoice for
-// UserSelectionInterrupt) and may differ from the struct's own JSON shape.
-// This is detected via type assertion, so it stays off the public Interrupt
-// interface.
-type payloadInitializer interface {
-	InitFromPayload([]byte) error
-}
-
-func (c *UserSelectionInterrupt) InitFromPayload(payload []byte) error {
-	return json.Unmarshal(payload, &c.Options)
-}
-
-type interruptEnvelope struct {
-	Type string          `json:"type"`
-	Data json.RawMessage `json:"data"`
-}
-
-// interruptMap is a map[string]Interrupt with polymorphic JSON marshaling.
-// Each entry is wrapped in an interruptEnvelope so the concrete Interrupt
-// type can be reconstructed on unmarshal via the interruptFactories registry.
-type interruptMap map[string]Interrupt
-
-func (m interruptMap) MarshalJSON() ([]byte, error) {
-	if m == nil {
-		return []byte("null"), nil
+// New returns a fresh Interrupt for a registered type name.
+func New(typeName string) (Interrupt, bool) {
+	f, ok := interruptFactories[typeName]
+	if !ok {
+		return nil, false
 	}
-	envelopes := make(map[string]interruptEnvelope, len(m))
-	for k, intr := range m {
-		// Registered interrupt types are plain JSON structs.
-		data, _ := json.Marshal(intr)
-		envelopes[k] = interruptEnvelope{Type: intr.TypeName(), Data: data}
-	}
-	return json.Marshal(envelopes)
+	return f(), true
 }
 
-// cloneInterrupt returns a deep copy via JSON so checkpoint snapshots do not
-// share live Interrupt pointers with concurrent ReturnInterrupt mutations.
-func cloneInterrupt(intr Interrupt) Interrupt {
+// Clone returns a deep copy via JSON for checkpoint snapshots.
+func Clone(intr Interrupt) Interrupt {
 	if intr == nil {
 		return nil
 	}
-	factory, ok := interruptFactories[intr.TypeName()]
+	cp, ok := New(intr.TypeName())
 	if !ok {
 		return nil
 	}
@@ -290,33 +252,23 @@ func cloneInterrupt(intr Interrupt) Interrupt {
 	if err != nil {
 		return nil
 	}
-	cp := factory()
 	if err := json.Unmarshal(data, cp); err != nil {
 		return nil
 	}
 	return cp
 }
 
-func (m *interruptMap) UnmarshalJSON(b []byte) error {
-	if len(b) == 0 || string(b) == "null" {
-		*m = nil
-		return nil
-	}
-	var envelopes map[string]interruptEnvelope
-	if err := json.Unmarshal(b, &envelopes); err != nil {
-		return err
-	}
-	*m = make(interruptMap, len(envelopes))
-	for k, env := range envelopes {
-		factory, ok := interruptFactories[env.Type]
-		if !ok {
-			return fmt.Errorf("unknown interrupt type: %s", env.Type)
-		}
-		intr := factory()
-		if err := json.Unmarshal(env.Data, intr); err != nil {
-			return fmt.Errorf("unmarshal interrupt %q: %w", k, err)
-		}
-		(*m)[k] = intr
-	}
-	return nil
+func init() {
+	Register(func() Interrupt { return &UserSelectionInterrupt{} })
+	Register(func() Interrupt { return &ToolPermissionInterrupt{} })
+}
+
+// PayloadInitializer is an optional capability Interrupt types implement
+// to populate themselves from the raw payload provided to RaiseInterrupt.
+type PayloadInitializer interface {
+	InitFromPayload([]byte) error
+}
+
+func (c *UserSelectionInterrupt) InitFromPayload(payload []byte) error {
+	return json.Unmarshal(payload, &c.Options)
 }

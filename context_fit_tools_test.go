@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ryanaldo34/tacklr/control"
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
@@ -110,7 +109,7 @@ func TestDefaultModelTasks_Handoff_cancelAndStreamError(t *testing.T) {
 		{Role: RoleAssistant, Content: "a"},
 	})
 	tasks = NewDefaultModelTasks(strategy, cm, DefaultContextPolicy(), 8192)
-	err := tasks.Handoff(context.Background(), []control.Todo{{Title: "t", Status: streaming.TodoStatusInProgress}}, "", nil, "sys")
+	err := tasks.Handoff(context.Background(), []Todo{{Title: "t", Status: streaming.TodoStatusInProgress}}, "", nil, "sys")
 	if err == nil || !strings.Contains(err.Error(), "boom") {
 		t.Fatalf("err = %v", err)
 	}

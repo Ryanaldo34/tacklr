@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ryanaldo34/tacklr/control"
+	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/stores"
 )
 
@@ -243,7 +243,7 @@ func TestReturnFromInterrupt_nilPayloadMap_initializes(t *testing.T) {
 			if err != nil {
 				return "", err
 			}
-			return intr.(*control.UserSelectionInterrupt).ConfirmedChoice.Title, nil
+			return intr.(*interrupt.UserSelectionInterrupt).ConfirmedChoice.Title, nil
 		},
 	})
 	var n int

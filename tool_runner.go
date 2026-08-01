@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/ryanaldo34/tacklr/control"
+	"github.com/ryanaldo34/tacklr/interrupt"
 )
 
 // ToolInvocation is a single tool call as it moves through the runner chain.
@@ -81,16 +81,16 @@ func toolPermissionGate(ctx context.Context, inv ToolInvocation, next ToolCallFu
 	if err != nil {
 		return "", err
 	}
-	perm, ok := intr.(*control.ToolPermissionInterrupt)
+	perm, ok := intr.(*interrupt.ToolPermissionInterrupt)
 	if !ok || perm == nil {
 		// Registered tool_permission factory always returns *ToolPermissionInterrupt.
 		return "", fmt.Errorf("tool permission: unexpected interrupt type %T", intr)
 	}
 
 	switch perm.SelectedKind {
-	case control.PermissionAllowAlways:
+	case interrupt.PermissionAllowAlways:
 		permissionRemember(inv.Runtime, permissionAlwaysAllowKey, name)
-	case control.PermissionRejectAlways:
+	case interrupt.PermissionRejectAlways:
 		permissionRemember(inv.Runtime, permissionAlwaysDenyKey, name)
 	}
 

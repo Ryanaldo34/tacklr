@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/ryanaldo34/tacklr"
-	"github.com/ryanaldo34/tacklr/control"
 	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/streaming"
 )
@@ -388,7 +387,7 @@ func eventToAcpJsonRpc(threadId string, event *streaming.StreamEvent) ([][]byte,
 		return toStream, nil
 	case streaming.StreamEventPlanUpdate:
 		var toStream [][]byte
-		var todos []control.Todo
+		var todos []streaming.Todo
 		err := json.Unmarshal(event.Data, &todos)
 		if err != nil {
 			return nil, err

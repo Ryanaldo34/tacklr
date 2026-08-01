@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync/atomic"
 
-	"github.com/ryanaldo34/tacklr/control"
+	session "github.com/ryanaldo34/tacklr/internal/session"
 )
 
 // ToolResultEffect is applied once after a successful tool batch (no pending interrupts).
@@ -23,7 +23,7 @@ type ToolResultObservation struct {
 	Name     string
 	ArgsJSON string
 	Output   string
-	Runtime  control.HarnessRuntime
+	Runtime  HarnessRuntime
 }
 
 // ToolResultDisposition is returned by a ToolResultHook after a tool finishes.
@@ -52,7 +52,7 @@ func newToolResultHookRegistry(hooks map[string]ToolResultHook) *toolResultHookR
 	return &toolResultHookRegistry{byName: cp}
 }
 
-func defaultToolResultHooks(sm *control.SessionManager) map[string]ToolResultHook {
+func defaultToolResultHooks(sm *session.SessionManager) map[string]ToolResultHook {
 	return map[string]ToolResultHook{
 		"create_plan":   createPlanResultHook,
 		"complete_todo": completeTodoResultHook,

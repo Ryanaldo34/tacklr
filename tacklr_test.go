@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ryanaldo34/tacklr/control"
+	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/streaming"
 )
@@ -152,7 +152,7 @@ func TestAgentHarness_Run(t *testing.T) {
 			if err != nil {
 				return "", err
 			}
-			choice := intr.(*control.UserSelectionInterrupt).ConfirmedChoice
+			choice := intr.(*interrupt.UserSelectionInterrupt).ConfirmedChoice
 			return "selected: " + choice.Title, nil
 		},
 	})
@@ -499,7 +499,7 @@ func TestAgentHarness_Run(t *testing.T) {
 				if len(payload.Data) == 0 || payload.Data[0] != '{' {
 					t.Fatalf("interrupt data must be JSON object, got %s", payload.Data)
 				}
-				var usi control.UserSelectionInterrupt
+				var usi interrupt.UserSelectionInterrupt
 				if err := json.Unmarshal(payload.Data, &usi); err != nil {
 					t.Fatalf("unmarshal interrupt data into UserSelectionInterrupt: %v\ndata=%s", err, payload.Data)
 				}
@@ -613,7 +613,7 @@ func TestAgentHarness_Run(t *testing.T) {
 		}
 
 		ah := NewAgent(context.Background(), AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
-		ah.session.Plan().Set([]control.Todo{
+		ah.session.Plan().Set([]Todo{
 			{Title: "Task 1", Status: streaming.TodoStatusInProgress},
 			{Title: "Task 2", Status: streaming.TodoStatusPending},
 		})
@@ -713,7 +713,7 @@ func TestAgentHarness_Run(t *testing.T) {
 		}
 
 		ah := NewAgent(context.Background(), AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{interruptTool}})
-		ah.session.Plan().Set([]control.Todo{
+		ah.session.Plan().Set([]Todo{
 			{Title: "Task 1", Status: streaming.TodoStatusInProgress},
 		})
 
@@ -882,7 +882,7 @@ func TestAgentHarness_Run(t *testing.T) {
 		}
 
 		ah := NewAgent(context.Background(), AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
-		ah.session.Plan().Set([]control.Todo{
+		ah.session.Plan().Set([]Todo{
 			{Title: "Only", Status: streaming.TodoStatusInProgress},
 		})
 
@@ -931,7 +931,7 @@ func TestAgentHarness_Run(t *testing.T) {
 		}
 
 		ah := NewAgent(context.Background(), AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
-		ah.session.Plan().Set([]control.Todo{
+		ah.session.Plan().Set([]Todo{
 			{Title: "Task 1", Status: streaming.TodoStatusInProgress},
 		})
 
@@ -1003,7 +1003,7 @@ func TestReturnFromInterrupt_invalidPayload_returnsError(t *testing.T) {
 			if err != nil {
 				return "", err
 			}
-			choice := intr.(*control.UserSelectionInterrupt).ConfirmedChoice
+			choice := intr.(*interrupt.UserSelectionInterrupt).ConfirmedChoice
 			return "selected: " + choice.Title, nil
 		},
 	})
@@ -1534,7 +1534,7 @@ func (s *stubModelTasks) Absorb(ctx context.Context, msg *Message, tools []*Tool
 	return AbsorbResult{}, nil
 }
 
-func (s *stubModelTasks) Handoff(ctx context.Context, plan []control.Todo, planDoc string, tools []*Tool, systemPrompt string) error {
+func (s *stubModelTasks) Handoff(ctx context.Context, plan []Todo, planDoc string, tools []*Tool, systemPrompt string) error {
 	s.handoffCalls.Add(1)
 	s.cm.Replace([]*Message{
 		{Role: RoleUser, Content: "goal"},
@@ -1572,7 +1572,7 @@ func TestNewAgent_injectsModelTasks(t *testing.T) {
 		ContextManager: cm,
 		ModelTasks:     st,
 	})
-	ah.session.Plan().Set([]control.Todo{
+	ah.session.Plan().Set([]Todo{
 		{Title: "T1", Status: streaming.TodoStatusInProgress},
 		{Title: "T2", Status: streaming.TodoStatusPending},
 	})
@@ -1615,14 +1615,14 @@ func TestNewAgentFromSession_resumesPendingToolInterrupt(t *testing.T) {
 	store := testStore(t)
 	interruptTool := NewTool(ToolConfig{
 		Name: "ask_user",
-		Handler: func(ctx context.Context, _ struct{}, runtime *control.HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, _ struct{}, runtime *HarnessRuntime) (string, error) {
 			intr, err := runtime.RaiseInterrupt("user_selection_choice", []byte(
 				`[{"title":"Yes","description":"","isRecommended":true},{"title":"No","description":"","isRecommended":false}]`,
 			))
 			if err != nil {
 				return "", err
 			}
-			choice := intr.(*control.UserSelectionInterrupt).ConfirmedChoice
+			choice := intr.(*interrupt.UserSelectionInterrupt).ConfirmedChoice
 			return "chose:" + choice.Title, nil
 		},
 	})

@@ -16,8 +16,9 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/ryanaldo34/tacklr/control"
 	mcpruntime "github.com/ryanaldo34/tacklr/internal/mcp"
+	session "github.com/ryanaldo34/tacklr/internal/session"
+	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/skills"
 	"github.com/ryanaldo34/tacklr/stores"
@@ -92,10 +93,7 @@ func WrapStopReason(kind, cause error) error {
 	return fmt.Errorf("%w: %w", kind, cause)
 }
 
-// HarnessRuntime is re-exported from the control package so that tools.go
 // and test files can reference it without the control package prefix.
-type HarnessRuntime = control.HarnessRuntime
-
 type Response struct {
 	Status            ItemStatus
 	Messages          []*Message
@@ -131,14 +129,14 @@ type AgentHarness struct {
 	MCPConfigs    []mcp.MCPConfig
 	Instructions  string
 	Store         stores.BaseStore
-	Runtime       control.HarnessRuntime
+	Runtime       HarnessRuntime
 	WatchDog      AgentWatchDog
 	MaxWindowSize int
 	// maxTurnRequests caps Model.Invoke per Run (0 = unlimited). From Config.
 	maxTurnRequests int
 	// session is the internal SessionManager (plan and future modules).
 	// Not exposed to user tools — only builtins/interceptors close over it.
-	session              *control.SessionManager
+	session              *session.SessionManager
 	subagents            map[string]*SubAgent
 	interruptToRequester map[string]string
 	pendingToolCalls     map[string]stores.PendingToolCall
@@ -185,7 +183,7 @@ func (a *AgentHarness) checkpointSession(ctx context.Context) error {
 		return nil
 	}
 	if a.session == nil {
-		a.session = control.NewSessionManager()
+		a.session = session.NewSessionManager()
 	}
 
 	a.pendingMu.Lock()
@@ -199,7 +197,7 @@ func (a *AgentHarness) checkpointSession(ctx context.Context) error {
 	}
 	a.pendingMu.Unlock()
 
-	cp, err := control.NewCheckpointer().Capture(a.context.Snapshot(), a.session, ptc, itr)
+	cp, err := session.NewCheckpointer().Capture(a.context.Snapshot(), a.session, ptc, itr)
 	if err != nil {
 		telemetry.InstrumentsFromContext(ctx).RecordCheckpointSave(ctx, telemetry.OutcomeError)
 		return err
@@ -416,7 +414,7 @@ func (a *AgentHarness) applyBatchToolResultEffect(ctx context.Context, effect To
 		return nil
 	case EffectHandoff:
 		slog.InfoContext(ctx, "todos completed or plan revised; running handoff", "session_id", a.SessionId, "area", telemetry.AreaContext)
-		var todos []control.Todo
+		var todos []Todo
 		var doc string
 		if a.session != nil {
 			todos = a.session.Plan().Get()
@@ -853,7 +851,7 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 						ArgsJSON: tc.Arguments,
 						Runtime:  runtimeCopy,
 					})
-					var interrupt control.Interrupt
+					var interrupt interrupt.Interrupt
 					if errors.As(err, &interrupt) {
 						intrId := uuid.New().String()
 						serialized, err := interrupt.Serialize()
@@ -965,7 +963,7 @@ func (a *AgentHarness) ReturnFromInterrupt(ctx context.Context, finishedInterrup
 		toolCallId, ok := a.interruptToRequester[interruptId]
 		if !ok {
 			a.pendingMu.Unlock()
-			return nil, fmt.Errorf("no tool call id found for interrupt %s: %w", interruptId, control.ErrInterruptNotFound)
+			return nil, fmt.Errorf("no tool call id found for interrupt %s: %w", interruptId, interrupt.ErrInterruptNotFound)
 		}
 		// Stash payload so spawn_worker can forward it to a parked child.
 		a.interruptPayloads[toolCallId] = payload
@@ -1027,8 +1025,8 @@ func NewAgent(ctx context.Context, opts AgentOptions) *AgentHarness {
 	// Runtime output channel is nil until Run; plan mutations before Run only update SessionManager.
 	// a.out is a non-nil sentinel so Run can detect an initialized harness.
 	events := make(chan streaming.StreamEvent, streamEventBuffer)
-	sm := control.NewSessionManager()
-	runtime := control.NewRuntime(nil, opts.Store, sm)
+	sm := session.NewSessionManager()
+	runtime := session.NewRuntime(nil, opts.Store, sm)
 	h := newHarnessBase(opts, runtime, sm, events)
 	h.finishInit(ctx, opts.SubAgents)
 	return h
@@ -1036,9 +1034,9 @@ func NewAgent(ctx context.Context, opts AgentOptions) *AgentHarness {
 
 // newHarnessBase builds the shared AgentHarness fields for NewAgent and
 // NewAgentFromSession. sm and runtime must share the same SessionManager backend.
-func newHarnessBase(opts AgentOptions, runtime control.HarnessRuntime, sm *control.SessionManager, out chan streaming.StreamEvent) *AgentHarness {
+func newHarnessBase(opts AgentOptions, runtime HarnessRuntime, sm *session.SessionManager, out chan streaming.StreamEvent) *AgentHarness {
 	if sm == nil {
-		sm = control.NewSessionManager()
+		sm = session.NewSessionManager()
 	}
 	h := &AgentHarness{
 		Model:                opts.Model,
@@ -1104,7 +1102,7 @@ func (a *AgentHarness) injectBuiltinTools() {
 		return
 	}
 	if a.session == nil {
-		a.session = control.NewSessionManager()
+		a.session = session.NewSessionManager()
 	}
 	s := internalSession{
 		sm:            a.session,
@@ -1178,13 +1176,13 @@ func NewAgentFromSession(ctx context.Context, sessionId string, opts AgentOption
 	if err != nil {
 		return nil, err
 	}
-	sm := control.NewSessionManager()
-	applied, err := control.NewCheckpointer().Apply(checkpoint, sm)
+	sm := session.NewSessionManager()
+	applied, err := session.NewCheckpointer().Apply(checkpoint, sm)
 	if err != nil {
 		return nil, err
 	}
 	// Same as NewAgent: output channel is nil until Run.
-	runtime := control.NewRuntime(nil, opts.Store, sm)
+	runtime := session.NewRuntime(nil, opts.Store, sm)
 	h := newHarnessBase(opts, runtime, sm, events)
 	h.SessionId = sessionId
 	h.context.Restore(applied.Window)

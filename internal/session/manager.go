@@ -1,9 +1,11 @@
-package control
+package session
 
 import (
 	"encoding/json"
 	"fmt"
 	"sync"
+
+	"github.com/ryanaldo34/tacklr/interrupt"
 )
 
 // SessionManager owns all durable and live session data for one agent harness
@@ -120,17 +122,17 @@ func (s *SessionManager) hasPendingInterrupt() bool {
 	return len(s.pending) > 0
 }
 
-func (s *SessionManager) returnInterrupt(id string, result []byte) (Interrupt, error) {
+func (s *SessionManager) returnInterrupt(id string, result []byte) (interrupt.Interrupt, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.ensure()
 	intr, ok := s.pending[id]
 	if !ok {
-		return nil, fmt.Errorf("interrupt %q: %w", id, ErrInterruptNotFound)
+		return nil, fmt.Errorf("interrupt %q: %w", id, interrupt.ErrInterruptNotFound)
 	}
-	if validator, ok := intr.(PayloadValidator); ok {
+	if validator, ok := intr.(interrupt.PayloadValidator); ok {
 		if err := validator.ValidatePayload(result); err != nil {
-			return nil, fmt.Errorf("%w: %w", ErrInvalidPayload, err)
+			return nil, fmt.Errorf("%w: %w", interrupt.ErrInvalidPayload, err)
 		}
 	}
 	if err := intr.Return(result); err != nil {
@@ -141,7 +143,7 @@ func (s *SessionManager) returnInterrupt(id string, result []byte) (Interrupt, e
 	return intr, nil
 }
 
-func (s *SessionManager) adoptInterrupt(toolCallID string, intr Interrupt) (Interrupt, error) {
+func (s *SessionManager) adoptInterrupt(toolCallID string, intr interrupt.Interrupt) (interrupt.Interrupt, error) {
 	if intr == nil {
 		return nil, fmt.Errorf("adopt interrupt: interrupt is nil")
 	}
@@ -159,7 +161,7 @@ func (s *SessionManager) adoptInterrupt(toolCallID string, intr Interrupt) (Inte
 	return nil, intr
 }
 
-func (s *SessionManager) takeResolvedInterrupt(id string) (Interrupt, bool) {
+func (s *SessionManager) takeResolvedInterrupt(id string) (interrupt.Interrupt, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	intr, ok := s.resolved[id]
@@ -170,14 +172,14 @@ func (s *SessionManager) takeResolvedInterrupt(id string) (Interrupt, bool) {
 	return intr, true
 }
 
-func (s *SessionManager) pendingInterrupt(id string) (Interrupt, bool) {
+func (s *SessionManager) pendingInterrupt(id string) (interrupt.Interrupt, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	intr, ok := s.pending[id]
 	return intr, ok
 }
 
-func (s *SessionManager) raiseInterrupt(toolCallID string, kind string, payload []byte) (Interrupt, error) {
+func (s *SessionManager) raiseInterrupt(toolCallID string, kind string, payload []byte) (interrupt.Interrupt, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.ensure()
@@ -185,12 +187,11 @@ func (s *SessionManager) raiseInterrupt(toolCallID string, kind string, payload 
 		delete(s.resolved, toolCallID)
 		return resolved, nil
 	}
-	factory, ok := interruptFactories[kind]
+	intr, ok := interrupt.New(kind)
 	if !ok {
 		return nil, fmt.Errorf("%q is not a valid interrupt type", kind)
 	}
-	intr := factory()
-	if init, ok := intr.(payloadInitializer); ok {
+	if init, ok := intr.(interrupt.PayloadInitializer); ok {
 		if err := init.InitFromPayload(payload); err != nil {
 			return nil, fmt.Errorf("init interrupt payload: %w", err)
 		}
@@ -217,13 +218,13 @@ func (s *SessionManager) SnapshotDurable() (runtimeState map[string]any, pending
 	}
 	pending = make(interruptMap, len(s.pending))
 	for k, v := range s.pending {
-		if cp := cloneInterrupt(v); cp != nil {
+		if cp := interrupt.Clone(v); cp != nil {
 			pending[k] = cp
 		}
 	}
 	resolved = make(interruptMap, len(s.resolved))
 	for k, v := range s.resolved {
-		if cp := cloneInterrupt(v); cp != nil {
+		if cp := interrupt.Clone(v); cp != nil {
 			resolved[k] = cp
 		}
 	}

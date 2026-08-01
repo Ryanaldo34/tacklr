@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/ryanaldo34/tacklr/control"
+	"github.com/ryanaldo34/tacklr/interrupt"
 )
 
 // Thin wire-shape checks for paths that protocol integration tests do not hit
@@ -37,8 +37,8 @@ func TestParseInterruptEnvelope_missingID(t *testing.T) {
 }
 
 func TestPermissionToACPParams_emptyToolName(t *testing.T) {
-	params := PermissionToACPParams("sess", "call_1", control.ToolPermissionInterrupt{
-		Options: control.DefaultPermissionOptions(),
+	params := PermissionToACPParams("sess", "call_1", interrupt.ToolPermissionInterrupt{
+		Options: interrupt.DefaultPermissionOptions(),
 	})
 	tc := params["toolCall"].(map[string]any)
 	if tc["title"] != "Tool call" {

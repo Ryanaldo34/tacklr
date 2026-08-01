@@ -9,7 +9,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/ryanaldo34/tacklr/control"
+	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/streaming"
 )
@@ -295,7 +295,7 @@ func TestSpawnWorker_interruptPropagatesAndResumes(t *testing.T) {
 			if err != nil {
 				return "", err
 			}
-			choice := intr.(*control.UserSelectionInterrupt).ConfirmedChoice
+			choice := intr.(*interrupt.UserSelectionInterrupt).ConfirmedChoice
 			return "selected: " + choice.Title, nil
 		},
 	})
@@ -410,7 +410,7 @@ func TestSpawnWorker_nestedInterruptPropagates(t *testing.T) {
 			if err != nil {
 				return "", err
 			}
-			return "picked:" + intr.(*control.UserSelectionInterrupt).ConfirmedChoice.Title, nil
+			return "picked:" + intr.(*interrupt.UserSelectionInterrupt).ConfirmedChoice.Title, nil
 		},
 	})
 
@@ -536,7 +536,7 @@ func TestSpawnWorker_interruptSurvivesSessionReload(t *testing.T) {
 			if err != nil {
 				return "", err
 			}
-			return "ok:" + intr.(*control.UserSelectionInterrupt).ConfirmedChoice.Title, nil
+			return "ok:" + intr.(*interrupt.UserSelectionInterrupt).ConfirmedChoice.Title, nil
 		},
 	})
 

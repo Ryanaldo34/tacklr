@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/ryanaldo34/tacklr"
-	"github.com/ryanaldo34/tacklr/control"
+	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
@@ -31,7 +31,7 @@ func TestResolveInterruptViaACP_dispatchOutcomes(t *testing.T) {
 	}
 
 	// User selection without elicitation form capability → park (nil, nil).
-	usi := control.UserSelectionInterrupt{Options: []control.UserChoice{{Title: "A"}, {Title: "B"}}}
+	usi := interrupt.UserSelectionInterrupt{Options: []interrupt.UserChoice{{Title: "A"}, {Title: "B"}}}
 	ser, _ := usi.Serialize()
 	selData, _ := json.Marshal(map[string]any{
 		"interruptId": "i2",
@@ -70,9 +70,9 @@ func TestResolvePermissionViaRequest_outcomes(t *testing.T) {
 		}
 	}
 	goodData := func() []byte {
-		perm := control.ToolPermissionInterrupt{
+		perm := interrupt.ToolPermissionInterrupt{
 			ToolName: "sensitive",
-			Options:  control.DefaultPermissionOptions(),
+			Options:  interrupt.DefaultPermissionOptions(),
 		}
 		ser, err := perm.Serialize()
 		if err != nil {

@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/ryanaldo34/tacklr/control"
+	"github.com/ryanaldo34/tacklr/interrupt"
 )
 
 // InterruptEventEnvelope is the harness StreamEventInterrupt Data shape.
@@ -28,12 +28,12 @@ func ParseInterruptEnvelope(data []byte) (InterruptEventEnvelope, error) {
 
 // ParseUserSelectionFromInterruptData extracts options from StreamEventInterrupt Data
 // payload shape {"interruptId":"...","data":<serialized UserSelectionInterrupt>}.
-func ParseUserSelectionFromInterruptData(data []byte) (interruptID string, opts []control.UserChoice, err error) {
+func ParseUserSelectionFromInterruptData(data []byte) (interruptID string, opts []interrupt.UserChoice, err error) {
 	env, err := ParseInterruptEnvelope(data)
 	if err != nil {
 		return "", nil, err
 	}
-	var usi control.UserSelectionInterrupt
+	var usi interrupt.UserSelectionInterrupt
 	if err := json.Unmarshal(env.Data, &usi); err != nil {
 		return "", nil, fmt.Errorf("unmarshal selection interrupt: %w", err)
 	}
@@ -41,7 +41,7 @@ func ParseUserSelectionFromInterruptData(data []byte) (interruptID string, opts 
 }
 
 // ParseToolPermissionFromInterruptData extracts a tool permission interrupt from yield data.
-func ParseToolPermissionFromInterruptData(data []byte) (interruptID string, perm control.ToolPermissionInterrupt, err error) {
+func ParseToolPermissionFromInterruptData(data []byte) (interruptID string, perm interrupt.ToolPermissionInterrupt, err error) {
 	env, err := ParseInterruptEnvelope(data)
 	if err != nil {
 		return "", perm, err
@@ -50,13 +50,13 @@ func ParseToolPermissionFromInterruptData(data []byte) (interruptID string, perm
 		return "", perm, fmt.Errorf("unmarshal permission interrupt: %w", err)
 	}
 	if len(perm.Options) == 0 {
-		perm.Options = control.DefaultPermissionOptions()
+		perm.Options = interrupt.DefaultPermissionOptions()
 	}
 	return env.InterruptId, perm, nil
 }
 
 // PermissionToACPParams builds session/request_permission params.
-func PermissionToACPParams(sessionID, toolCallID string, perm control.ToolPermissionInterrupt) map[string]any {
+func PermissionToACPParams(sessionID, toolCallID string, perm interrupt.ToolPermissionInterrupt) map[string]any {
 	options := make([]map[string]any, 0, len(perm.Options))
 	for _, o := range perm.Options {
 		options = append(options, map[string]any{
@@ -103,7 +103,7 @@ func RequestPermissionResultToPayload(raw json.RawMessage) (resolution []byte, c
 		if res.Outcome.OptionID == "" {
 			return nil, false, fmt.Errorf("selected outcome missing optionId")
 		}
-		resolution, err = json.Marshal(control.ToolPermissionPayload{OptionID: res.Outcome.OptionID})
+		resolution, err = json.Marshal(interrupt.ToolPermissionPayload{OptionID: res.Outcome.OptionID})
 		return resolution, false, err
 	default:
 		return nil, false, fmt.Errorf("unknown permission outcome %q", res.Outcome.Outcome)

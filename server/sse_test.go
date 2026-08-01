@@ -13,7 +13,7 @@ import (
 	"testing"
 
 	"github.com/ryanaldo34/tacklr"
-	"github.com/ryanaldo34/tacklr/control"
+	"github.com/ryanaldo34/tacklr/interrupt"
 )
 
 func newSSERequest(t *testing.T, target string, body io.Reader) *http.Request {
@@ -67,7 +67,7 @@ func makeInterruptTool(t *testing.T, optionsJSON string) *tacklr.Tool {
 			if err != nil {
 				return "", err
 			}
-			choice := intr.(*control.UserSelectionInterrupt).ConfirmedChoice
+			choice := intr.(*interrupt.UserSelectionInterrupt).ConfirmedChoice
 			return "selected: " + choice.Title, nil
 		},
 	})

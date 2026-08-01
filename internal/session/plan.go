@@ -1,4 +1,4 @@
-package control
+package session
 
 import (
 	"encoding/json"

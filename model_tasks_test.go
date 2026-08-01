@@ -6,7 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ryanaldo34/tacklr/control"
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
@@ -91,7 +90,7 @@ func TestDefaultModelTasks_Handoff_windowShape(t *testing.T) {
 		{Role: RoleAssistant, Content: "working"},
 	})
 	tasks := NewDefaultModelTasks(model, cm, DefaultContextPolicy(), 8192)
-	err := tasks.Handoff(context.Background(), []control.Todo{
+	err := tasks.Handoff(context.Background(), []Todo{
 		{Title: "A", Status: streaming.TodoStatusCompleted},
 		{Title: "B", Status: streaming.TodoStatusInProgress},
 	}, "", nil, "sys")
@@ -119,7 +118,7 @@ func TestDefaultModelTasks_Handoff_includesFullPlanDocument(t *testing.T) {
 		{Role: RoleAssistant, Content: "noise"},
 	})
 	tasks := NewDefaultModelTasks(model, cm, DefaultContextPolicy(), 8192)
-	err := tasks.Handoff(context.Background(), []control.Todo{
+	err := tasks.Handoff(context.Background(), []Todo{
 		{Title: "A", Status: streaming.TodoStatusCompleted},
 		{Title: "B", Status: streaming.TodoStatusInProgress},
 	}, "CoS: done right", nil, "")
@@ -182,7 +181,7 @@ func TestDefaultModelTasks_Handoff_allTodosDone_noNudge(t *testing.T) {
 	cm := NewModelContextManager()
 	cm.Restore([]*Message{{Role: RoleUser, Content: "x"}})
 	tasks := NewDefaultModelTasks(model, cm, DefaultContextPolicy(), 8192)
-	err := tasks.Handoff(context.Background(), []control.Todo{
+	err := tasks.Handoff(context.Background(), []Todo{
 		{Title: "Only", Status: streaming.TodoStatusCompleted},
 	}, "", nil, "")
 	if err != nil {

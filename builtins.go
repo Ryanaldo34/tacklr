@@ -7,18 +7,19 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/ryanaldo34/tacklr/control"
+	session "github.com/ryanaldo34/tacklr/internal/session"
+	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
 type createTodosArgs struct {
-	Plan  string         `json:"plan" desc:"Full plaintext project plan (CoS, POS, WBS, scope, requirements). Required."`
-	Todos []control.Todo `json:"todos"`
+	Plan  string `json:"plan" desc:"Full plaintext project plan (CoS, POS, WBS, scope, requirements). Required."`
+	Todos []Todo `json:"todos"`
 }
 
 type todoEdit struct {
-	Todo  control.Todo `json:"todo"`
-	Order int          `json:"order"`
+	Todo  Todo `json:"todo"`
+	Order int  `json:"order"`
 }
 
 type editTodosArgs struct {
@@ -45,12 +46,12 @@ type askUserChoiceArgs struct {
 // internalSession is the harness-internal handle closed over by built-in tools.
 // User tools never receive this — only public HarnessRuntime for DI/interrupts.
 type internalSession struct {
-	sm *control.SessionManager
+	sm *session.SessionManager
 	// emitPlanTodos streams StreamEventPlanUpdate after todo list changes (nil in unit tests).
-	emitPlanTodos func([]control.Todo)
+	emitPlanTodos func([]Todo)
 }
 
-func (s internalSession) setTodos(todos []control.Todo) {
+func (s internalSession) setTodos(todos []Todo) {
 	s.sm.Plan().Set(todos)
 	if s.emitPlanTodos != nil {
 		s.emitPlanTodos(todos)
@@ -62,7 +63,7 @@ var askUserChoiceTool = NewTool(ToolConfig{
 	DisplayName: "Ask User Choice",
 	Description: "Ask the user a multiple-choice clarification question and wait for their selection. Use when you need a discrete decision before continuing. Provide clear, mutually exclusive options.",
 	Category:    streaming.ToolCategoryThink,
-	Handler: func(ctx context.Context, args askUserChoiceArgs, runtime control.HarnessRuntime) (string, error) {
+	Handler: func(ctx context.Context, args askUserChoiceArgs, runtime HarnessRuntime) (string, error) {
 		if strings.TrimSpace(args.Question) == "" {
 			return "", fmt.Errorf("question is required")
 		}
@@ -70,7 +71,7 @@ var askUserChoiceTool = NewTool(ToolConfig{
 			return "", fmt.Errorf("at least 2 choices are required")
 		}
 		seen := make(map[string]struct{}, len(args.Choices))
-		options := make([]control.UserChoice, 0, len(args.Choices))
+		options := make([]interrupt.UserChoice, 0, len(args.Choices))
 		for i, c := range args.Choices {
 			title := strings.TrimSpace(c.Title)
 			if title == "" {
@@ -80,7 +81,7 @@ var askUserChoiceTool = NewTool(ToolConfig{
 				return "", fmt.Errorf("duplicate choice title %q", title)
 			}
 			seen[title] = struct{}{}
-			options = append(options, control.UserChoice{
+			options = append(options, interrupt.UserChoice{
 				Title:         title,
 				Description:   c.Description,
 				IsRecommended: c.IsRecommended,
@@ -98,7 +99,7 @@ var askUserChoiceTool = NewTool(ToolConfig{
 		if err != nil {
 			return "", err
 		}
-		usi, ok := intr.(*control.UserSelectionInterrupt)
+		usi, ok := intr.(*interrupt.UserSelectionInterrupt)
 		if !ok || usi.ConfirmedChoice == nil {
 			return "", fmt.Errorf("user selection missing confirmed choice")
 		}
@@ -117,7 +118,7 @@ func askUserQuestionStateKey(toolCallID string) string {
 // AskUserQuestionFromState returns a question string stashed by ask_user_choice
 // for the given tool call id, if any. Takes a pointer so concurrent Run teardown
 // (SetOutputChannel) does not race a by-value Runtime copy.
-func AskUserQuestionFromState(rt *control.HarnessRuntime, toolCallID string) string {
+func AskUserQuestionFromState(rt *HarnessRuntime, toolCallID string) string {
 	if rt == nil || toolCallID == "" {
 		return ""
 	}
@@ -135,7 +136,7 @@ func newCreatePlanTool(s internalSession) *Tool {
 		DisplayName: "Create Plan",
 		Description: "Creates a project plan document and a linear todo list derived from it. Pass the full plaintext plan in plan and the derived todos in todos. Call only when no active plan exists. If a plan is already active, use edit_plan or complete_todo instead of create_plan.",
 		Category:    streaming.ToolCategoryThink,
-		Handler: func(ctx context.Context, args createTodosArgs, _ control.HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, args createTodosArgs, _ HarnessRuntime) (string, error) {
 			if existing := s.sm.Plan().Get(); len(existing) > 0 {
 				return "", fmt.Errorf("an active plan already exists (%d todos); use edit_plan to modify it or complete_todo to progress — do not call create_plan again", len(existing))
 			}
@@ -145,7 +146,7 @@ func newCreatePlanTool(s internalSession) *Tool {
 			if len(args.Todos) == 0 {
 				return "", fmt.Errorf("plan must include at least one todo")
 			}
-			todos := make([]control.Todo, len(args.Todos))
+			todos := make([]Todo, len(args.Todos))
 			copy(todos, args.Todos)
 			started := false
 			for i := range todos {
@@ -172,7 +173,7 @@ func newListPlanTool(s internalSession) *Tool {
 		DisplayName: "List Plan",
 		Description: "Returns the active plan todo list exactly as stored (titles, statuses, descriptions, in order). Use before complete_todo or edit_plan so titles match exactly. Call after a handoff or whenever plan titles are unclear.",
 		Category:    streaming.ToolCategoryThink,
-		Handler: func(ctx context.Context, _ control.HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, _ HarnessRuntime) (string, error) {
 			plan := s.sm.Plan().Get()
 			if len(plan) == 0 {
 				return "", fmt.Errorf("no plan exists")
@@ -196,7 +197,7 @@ func newCompleteTodoTool(s internalSession) *Tool {
 		DisplayName: "Complete Todo",
 		Description: "Marks a todo as completed by exact title (must match list_plan / create_plan titles). Cannot complete a todo that is already completed or not found in the plan.",
 		Category:    streaming.ToolCategoryThink,
-		Handler: func(ctx context.Context, args completeTodoArgs, _ control.HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, args completeTodoArgs, _ HarnessRuntime) (string, error) {
 			plan := s.sm.Plan().Get()
 			if plan == nil {
 				return "", fmt.Errorf("no plan exists")
@@ -240,7 +241,7 @@ func newEditPlanTool(s internalSession) *Tool {
 		DisplayName: "Edit Plan",
 		Description: "Edits an existing plan by removing and/or adding todos. Optionally replace the full plaintext plan document via plan (must differ from the current document). Omit plan when only changing todos. Cannot delete completed todos.",
 		Category:    streaming.ToolCategoryThink,
-		Handler: func(ctx context.Context, args editTodosArgs, _ control.HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, args editTodosArgs, _ HarnessRuntime) (string, error) {
 			plan := s.sm.Plan().Get()
 			if plan == nil {
 				return "", fmt.Errorf("no plan exists")
