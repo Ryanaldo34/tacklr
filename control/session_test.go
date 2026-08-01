@@ -8,101 +8,6 @@ import (
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
-func TestPlanSet_withoutChannel_updatesStateOnly(t *testing.T) {
-	rt := HarnessRuntime{}
-	rt.EnsureInitialized()
-	rt.PlanSet([]Todo{{Title: "A", Status: streaming.TodoStatusPending}})
-	plan := rt.PlanGet()
-	if len(plan) != 1 || plan[0].Title != "A" {
-		t.Fatalf("plan = %+v", plan)
-	}
-}
-
-func TestPlanDocumentSet_get_and_consumeUpdated(t *testing.T) {
-	rt := HarnessRuntime{}
-	rt.EnsureInitialized()
-	if rt.PlanDocumentGet() != "" {
-		t.Fatal("expected empty document")
-	}
-	// Initial install does not mark updated (create_plan path).
-	rt.PlanDocumentSet("draft v1")
-	if rt.PlanDocumentGet() != "draft v1" {
-		t.Fatalf("got %q", rt.PlanDocumentGet())
-	}
-	if rt.ConsumePlanDocumentUpdated() {
-		t.Fatal("initial set must not mark updated")
-	}
-	rt.PlanDocumentSet("draft v1")
-	if rt.ConsumePlanDocumentUpdated() {
-		t.Fatal("identical body should not mark updated")
-	}
-	rt.PlanDocumentSet("draft v2")
-	if !rt.ConsumePlanDocumentUpdated() {
-		t.Fatal("expected updated after change to existing draft")
-	}
-	if rt.ConsumePlanDocumentUpdated() {
-		t.Fatal("flag should clear after consume")
-	}
-}
-
-func TestPlanSet_withChannel_deliversPlanUpdate(t *testing.T) {
-	ch := make(chan streaming.StreamEvent, 1)
-	rt := NewRuntime(ch, nil, nil)
-	rt.EnsureInitialized()
-	rt.PlanSet([]Todo{
-		{Title: "Ship", Status: streaming.TodoStatusInProgress, Description: "d"},
-	})
-	select {
-	case ev := <-ch:
-		if ev.Type != streaming.StreamEventPlanUpdate {
-			t.Fatalf("type = %v, want plan update", ev.Type)
-		}
-		if !strings.Contains(string(ev.Data), "Ship") {
-			t.Fatalf("data = %s", ev.Data)
-		}
-	default:
-		t.Fatal("expected plan update on output channel")
-	}
-	// After detach, PlanSet must not hang or panic.
-	rt.SetOutputChannel(nil)
-	rt.PlanSet([]Todo{{Title: "Ship", Status: streaming.TodoStatusCompleted}})
-	if got := rt.PlanGet(); got[0].Status != streaming.TodoStatusCompleted {
-		t.Fatalf("status after detach = %q", got[0].Status)
-	}
-}
-
-func TestPlanGet_rehydratesAfterJSONRoundTrip(t *testing.T) {
-	rt := HarnessRuntime{}
-	rt.EnsureInitialized()
-	rt.PlanSet([]Todo{
-		{Title: "Task 1", Status: streaming.TodoStatusCompleted, Description: "done"},
-		{Title: "Task 2", Status: streaming.TodoStatusInProgress, Description: "next"},
-	})
-
-	// Simulate checkpoint JSON round-trip of Runtime.State.
-	raw, err := json.Marshal(rt.State)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var reloaded map[string]any
-	if err := json.Unmarshal(raw, &reloaded); err != nil {
-		t.Fatal(err)
-	}
-	rt2 := HarnessRuntime{State: reloaded}
-	rt2.EnsureInitialized()
-
-	plan := rt2.PlanGet()
-	if len(plan) != 2 {
-		t.Fatalf("plan len = %d, want 2", len(plan))
-	}
-	if plan[0].Title != "Task 1" || plan[0].Status != streaming.TodoStatusCompleted {
-		t.Errorf("plan[0] = %+v", plan[0])
-	}
-	if plan[1].Title != "Task 2" || plan[1].Status != streaming.TodoStatusInProgress {
-		t.Errorf("plan[1] = %+v", plan[1])
-	}
-}
-
 func TestAdoptInterrupt_parksUnderCurrentToolCall(t *testing.T) {
 	rt := HarnessRuntime{}
 	rt.EnsureInitialized()
@@ -397,16 +302,8 @@ func TestRuntime_interruptEmitAndSnapshotLifecycle(t *testing.T) {
 	rt := NewRuntime(ch, nil, nil)
 	rt.EnsureInitialized()
 
-	// PlanGet with no plan.
-	if p := rt.PlanGet(); p != nil {
-		t.Fatalf("empty plan = %v, want nil", p)
-	}
-	// Corrupt plan value rehydrates to nil (unmarshal fails).
-	rt.StateSet("_plan", "not-a-plan")
-	if p := rt.PlanGet(); p != nil {
-		t.Fatalf("corrupt plan = %v, want nil", p)
-	}
-	rt.PlanSet([]Todo{{Title: "T", Status: streaming.TodoStatusPending}})
+	// EmitPlanUpdate delivers plan updates on the output channel.
+	rt.EmitPlanUpdate([]Todo{{Title: "T", Status: streaming.TodoStatusPending}})
 	<-ch // plan update
 
 	// EmitUpdate delivers when capacity allows; drops when full or ch nil.
@@ -484,8 +381,8 @@ func TestRuntime_interruptEmitAndSnapshotLifecycle(t *testing.T) {
 	}
 
 	state, pendingMap, resolvedMap := rt.SnapshotState()
-	if state["_plan"] == nil {
-		t.Fatal("snapshot missing plan")
+	if _, ok := state["_plan"]; ok {
+		t.Fatal("snapshot must not include reserved plan keys (PlanStore owns plan)")
 	}
 	if len(pendingMap) == 0 {
 		t.Fatal("snapshot should include pending selection")

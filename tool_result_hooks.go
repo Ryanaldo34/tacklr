@@ -52,11 +52,16 @@ func newToolResultHookRegistry(hooks map[string]ToolResultHook) *toolResultHookR
 	return &toolResultHookRegistry{byName: cp}
 }
 
-func defaultToolResultHooks() map[string]ToolResultHook {
+func defaultToolResultHooks(sm *control.SessionManager) map[string]ToolResultHook {
 	return map[string]ToolResultHook{
 		"create_plan":   createPlanResultHook,
 		"complete_todo": completeTodoResultHook,
-		"edit_plan":     editPlanResultHook,
+		"edit_plan": func(_ context.Context, _ ToolResultObservation) ToolResultDisposition {
+			if sm != nil && sm.Plan().ConsumeDocumentUpdated() {
+				return ToolResultDisposition{Effect: EffectHandoff}
+			}
+			return ToolResultDisposition{}
+		},
 	}
 }
 
@@ -77,13 +82,6 @@ func createPlanResultHook(_ context.Context, _ ToolResultObservation) ToolResult
 
 func completeTodoResultHook(_ context.Context, _ ToolResultObservation) ToolResultDisposition {
 	return ToolResultDisposition{Effect: EffectHandoff}
-}
-
-func editPlanResultHook(_ context.Context, obs ToolResultObservation) ToolResultDisposition {
-	if obs.Runtime.ConsumePlanDocumentUpdated() {
-		return ToolResultDisposition{Effect: EffectHandoff}
-	}
-	return ToolResultDisposition{}
 }
 
 type batchToolResultEffects struct {

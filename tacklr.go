@@ -134,8 +134,10 @@ type AgentHarness struct {
 	WatchDog      AgentWatchDog
 	MaxWindowSize int
 	// maxTurnRequests caps Model.Invoke per Run (0 = unlimited). From Config.
-	maxTurnRequests      int
-	Plan                 []control.Todo
+	maxTurnRequests int
+	// session is the internal SessionManager (plan and future modules).
+	// Not exposed to user tools — only builtins/interceptors close over it.
+	session              *control.SessionManager
 	subagents            map[string]*SubAgent
 	interruptToRequester map[string]string
 	pendingToolCalls     map[string]stores.PendingToolCall
@@ -183,6 +185,9 @@ func (a *AgentHarness) checkpointSession(ctx context.Context) error {
 	}
 
 	state, pendingInterrupts, resolvedInterrupts := a.Runtime.SnapshotState()
+	if a.session != nil {
+		a.session.ExportInto(state)
+	}
 	a.pendingMu.Lock()
 	ptc := make(map[string]stores.PendingToolCall, len(a.pendingToolCalls))
 	for k, v := range a.pendingToolCalls {
@@ -382,7 +387,10 @@ func (a *AgentHarness) addToContext(ctx context.Context, newMsg *Message, out ch
 func (a *AgentHarness) applyBatchToolResultEffect(ctx context.Context, effect ToolResultEffect) error {
 	switch effect {
 	case EffectInstallPlanDocument:
-		doc := a.Runtime.PlanDocumentGet()
+		doc := ""
+		if a.session != nil {
+			doc = a.session.Plan().Document()
+		}
 		// Milestone: plan document installed into the context window.
 		ctx, span := telemetry.Tracer().Start(ctx, telemetry.SpanPlanInstall,
 			trace.WithAttributes(
@@ -402,7 +410,13 @@ func (a *AgentHarness) applyBatchToolResultEffect(ctx context.Context, effect To
 		return nil
 	case EffectHandoff:
 		slog.InfoContext(ctx, "todos completed or plan revised; running handoff", "session_id", a.SessionId, "area", telemetry.AreaContext)
-		return a.tasks.Handoff(ctx, a.Runtime.PlanGet(), a.Runtime.PlanDocumentGet(), a.Tools, a.constructSystemPrompt())
+		var todos []control.Todo
+		var doc string
+		if a.session != nil {
+			todos = a.session.Plan().Get()
+			doc = a.session.Plan().Document()
+		}
+		return a.tasks.Handoff(ctx, todos, doc, a.Tools, a.constructSystemPrompt())
 	default:
 		return nil
 	}
@@ -1034,15 +1048,18 @@ func newHarnessBase(opts AgentOptions, runtime control.HarnessRuntime, out chan 
 	if h.tasks == nil {
 		h.tasks = NewDefaultModelTasks(h.Model, h.context, h.contextPolicy, h.MaxWindowSize)
 	}
+	if h.session == nil {
+		h.session = control.NewSessionManager()
+	}
 	if opts.ToolInterceptors != nil {
 		h.toolRunner = newToolRunner(opts.ToolInterceptors...)
 	} else {
-		h.toolRunner = newToolRunner(planningWriteLock, toolPermissionGate)
+		h.toolRunner = newToolRunner(h.planningWriteLock, toolPermissionGate)
 	}
 	if opts.ToolResultHooks != nil {
 		h.toolResultHooks = newToolResultHookRegistry(opts.ToolResultHooks)
 	} else {
-		h.toolResultHooks = newToolResultHookRegistry(defaultToolResultHooks())
+		h.toolResultHooks = newToolResultHookRegistry(defaultToolResultHooks(h.session))
 	}
 	return h
 }
@@ -1059,15 +1076,39 @@ func (h *AgentHarness) finishInit(ctx context.Context, subAgents []*SubAgent) {
 
 // injectBuiltinTools appends plan tools and spawn_worker (when subagents are
 // registered) exactly once. Safe to call from NewAgent and Run.
+// Plan tools close over SessionManager; they do not use Runtime for plan state.
+// EmitPlanUpdate is only for streaming todo-list updates to clients.
 func (a *AgentHarness) injectBuiltinTools() {
 	if a.builtinsInjected {
 		return
 	}
-	a.Tools = append(a.Tools, createPlanTool, editPlanTool, completeTodoTool, listPlanTool, askUserChoiceTool)
+	if a.session == nil {
+		a.session = control.NewSessionManager()
+	}
+	s := internalSession{
+		sm:            a.session,
+		emitPlanTodos: a.Runtime.EmitPlanUpdate,
+	}
+	a.Tools = append(a.Tools,
+		newCreatePlanTool(s),
+		newEditPlanTool(s),
+		newCompleteTodoTool(s),
+		newListPlanTool(s),
+		askUserChoiceTool,
+	)
 	if len(a.subagents) > 0 {
 		a.Tools = append(a.Tools, a.spawnTool())
 	}
 	a.builtinsInjected = true
+}
+
+// planningWriteLock denies tools that require Write access while no plan exists.
+func (a *AgentHarness) planningWriteLock(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error) {
+	if inv.Tool != nil && inv.Tool.Access != nil && inv.Tool.Access.Contains(WritePermission) &&
+		(a.session == nil || !a.session.HasActivePlan()) {
+		return "", fmt.Errorf("%w: write tools are locked until create_plan establishes a todo list", ErrToolPermissionDenied)
+	}
+	return next(ctx, inv)
 }
 
 func (a *AgentHarness) initSkills() error {
@@ -1117,7 +1158,11 @@ func NewAgentFromSession(ctx context.Context, sessionId string, opts AgentOption
 		return nil, err
 	}
 	// Same as NewAgent: attach output channel only for the active Run.
-	runtime := control.NewRuntime(nil, opts.Store, checkpoint.State.RuntimeState)
+	runtimeState := checkpoint.State.RuntimeState
+	sm := control.NewSessionManager()
+	sm.LoadFromState(runtimeState)
+	control.StripPlanKeys(runtimeState)
+	runtime := control.NewRuntime(nil, opts.Store, runtimeState)
 	runtime.EnsureInitialized()
 	if len(checkpoint.State.PendingInterrupts) > 0 {
 		_ = json.Unmarshal(checkpoint.State.PendingInterrupts, &runtime.PendingInterrupts)
@@ -1132,6 +1177,14 @@ func NewAgentFromSession(ctx context.Context, sessionId string, opts AgentOption
 		checkpoint.State.PendingToolCalls = make(map[string]stores.PendingToolCall)
 	}
 	h := newHarnessBase(opts, runtime, events)
+	h.session = sm
+	// Rebind hooks/interceptors that close over session (newHarnessBase used empty manager).
+	if opts.ToolInterceptors == nil {
+		h.toolRunner = newToolRunner(h.planningWriteLock, toolPermissionGate)
+	}
+	if opts.ToolResultHooks == nil {
+		h.toolResultHooks = newToolResultHookRegistry(defaultToolResultHooks(h.session))
+	}
 	h.SessionId = sessionId
 	h.context.Restore(checkpoint.ContextWindow)
 	h.interruptToRequester = checkpoint.State.InterruptToRequester

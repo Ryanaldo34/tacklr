@@ -3,7 +3,6 @@ package control
 import (
 	"fmt"
 	"strings"
-	"sync"
 	"testing"
 )
 
@@ -103,23 +102,8 @@ func TestInterruptMap_unmarshalCorruptData(t *testing.T) {
 }
 
 func TestRuntime_remainingSessionBranches(t *testing.T) {
-	// PlanGet with nil State (mutex still required for lock).
-	rt := HarnessRuntime{mu: new(sync.RWMutex)}
-	if p := rt.PlanGet(); p != nil {
-		t.Fatalf("nil state plan = %v", p)
-	}
-
-	// PlanSet initializes nil State.
-	rt.PlanSet([]Todo{{Title: "n", Status: "pending"}})
-	if rt.State == nil || rt.PlanGet()[0].Title != "n" {
-		t.Fatal("PlanSet should init state")
-	}
-
-	// PlanGet marshal failure for non-JSON plan value.
-	rt.StateSet(planStateKey, make(chan int))
-	if p := rt.PlanGet(); p != nil {
-		t.Fatalf("chan plan = %v", p)
-	}
+	rt := HarnessRuntime{}
+	rt.EnsureInitialized()
 
 	// RaiseInterrupt init failure.
 	rt.CurrentToolCallID = "bad_init"

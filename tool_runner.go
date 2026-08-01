@@ -61,15 +61,6 @@ func (r *toolRunner) Run(ctx context.Context, inv ToolInvocation) (string, error
 	return next(ctx, inv)
 }
 
-// planningWriteLock denies tools that require Write access while no plan exists.
-func planningWriteLock(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error) {
-	if inv.Tool != nil && inv.Tool.Access != nil && inv.Tool.Access.Contains(WritePermission) &&
-		len(inv.Runtime.PlanGet()) == 0 {
-		return "", fmt.Errorf("%w: write tools are locked until create_plan establishes a todo list", ErrToolPermissionDenied)
-	}
-	return next(ctx, inv)
-}
-
 // toolPermissionGate raises a tool_permission interrupt when PermissionRequired
 // is set. allow_always / reject_always choices are remembered for the session.
 func toolPermissionGate(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error) {

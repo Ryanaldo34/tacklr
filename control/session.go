@@ -3,7 +3,6 @@ package control
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
 	"sync"
 
 	"github.com/milvus-io/milvus/client/v2/milvusclient"
@@ -29,14 +28,18 @@ type runtimeOutput struct {
 	ch chan streaming.StreamEvent
 }
 
-// HarnessRuntime is the runtime hook into global state and services used by the
-// harness and its tools. It is shallow-copied per tool invocation with
-// CurrentToolCallID set uniquely per copy. All pointer and map fields are
-// shared across copies; only CurrentToolCallID is per-call.
+// HarnessRuntime is the public dependency-injection surface for custom tools:
+// interrupts, EmitUpdate, user State bag, Store, and CurrentToolCallID.
+// It is shallow-copied per tool invocation with CurrentToolCallID set uniquely
+// per copy. All pointer and map fields are shared across copies.
+//
+// Framework session mutation (plan, and future internal modules) lives on
+// SessionManager — not Runtime. Built-in tools close over SessionManager;
+// user tools never receive it. Reserved plan keys are blocked in StateGet/StateSet.
 //
 // Concurrent access to State, PendingInterrupts, and ResolvedInterrupts is
-// guarded by mu. Tool handlers that mutate State must use the StateGet,
-// StateSet, and StateDelete helpers rather than direct map access.
+// guarded by mu. Tool handlers that mutate State must use StateGet/StateSet/
+// StateDelete rather than direct map access.
 //
 // Callers must initialize the runtime via EnsureInitialized before use.
 type HarnessRuntime struct {
@@ -50,13 +53,6 @@ type HarnessRuntime struct {
 	mu                 *sync.RWMutex
 	out                *runtimeOutput
 }
-
-const (
-	planStateKey         = "_plan"
-	planDocumentStateKey = "_plan_document"
-	// planDocumentUpdatedKey is set when the draft text changes; result hooks consume it.
-	planDocumentUpdatedKey = "_plan_document_updated"
-)
 
 // Runtime hook to emit custom events as updates from tool calls.
 // Non-blocking: drops if no listener or channel full so tools never hang.
@@ -76,52 +72,12 @@ func (rt *HarnessRuntime) EmitUpdate(message string) {
 	}
 }
 
-// PlanGet returns a shallow copy of the current plan (or nil if not set).
-// After a session checkpoint JSON round-trip, the plan may be stored as
-// []any / map[string]any; those shapes are rehydrated into []Todo.
-func (rt *HarnessRuntime) PlanGet() []Todo {
-	rt.mu.RLock()
-	defer rt.mu.RUnlock()
-	if rt.State == nil {
-		return nil
-	}
-	v, ok := rt.State[planStateKey]
-	if !ok || v == nil {
-		return nil
-	}
-	if plan, ok := v.([]Todo); ok {
-		cp := make([]Todo, len(plan))
-		copy(cp, plan)
-		return cp
-	}
-	// Checkpoint reload: rehydrate from JSON-compatible types.
-	// Non-marshalable values (e.g. channels) yield empty/failed rehydrate → nil.
-	b, err := json.Marshal(v)
-	if err != nil {
-		return nil
-	}
-	var plan []Todo
-	if err := json.Unmarshal(b, &plan); err != nil {
-		return nil
-	}
-	cp := make([]Todo, len(plan))
-	copy(cp, plan)
-	return cp
-}
-
-// PlanSet stores the plan and emits a StreamEventPlanUpdate when an output
-// channel is attached (active Run). Unlike EmitUpdate progress pings, plan
-// updates block until the turn consumer accepts them so clients never miss
-// plan reshapes mid-turn. When ch is nil (before Run / after Run exits), only
-// state is updated.
-func (rt *HarnessRuntime) PlanSet(plan []Todo) {
-	rt.mu.Lock()
-	if rt.State == nil {
-		rt.State = make(map[string]any)
-	}
-	rt.State[planStateKey] = plan
-	rt.mu.Unlock()
-
+// EmitPlanUpdate publishes a StreamEventPlanUpdate (todo list reshape) when an
+// output channel is attached. This is a stream utility for clients (ACP plan
+// sessionUpdate, etc.), not session storage — SessionManager.Plan holds state.
+// Unlike EmitUpdate progress pings, plan updates block until the turn consumer
+// accepts them. When ch is nil (before Run / after Run exits), this is a no-op.
+func (rt *HarnessRuntime) EmitPlanUpdate(plan []Todo) {
 	ch := rt.outputChannel()
 	if ch == nil {
 		return
@@ -133,51 +89,7 @@ func (rt *HarnessRuntime) PlanSet(plan []Todo) {
 	}
 }
 
-// PlanDocumentGet returns the full plaintext project plan draft, or "" if none.
-func (rt *HarnessRuntime) PlanDocumentGet() string {
-	rt.mu.RLock()
-	defer rt.mu.RUnlock()
-	if rt.State == nil {
-		return ""
-	}
-	s, _ := rt.State[planDocumentStateKey].(string)
-	return s
-}
-
-// PlanDocumentSet stores the plaintext project plan draft.
-// Marks the document updated only when replacing an existing draft with different
-// text (edits), not on the initial install from create_plan.
-func (rt *HarnessRuntime) PlanDocumentSet(plan string) {
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	if rt.State == nil {
-		rt.State = make(map[string]any)
-	}
-	prev, _ := rt.State[planDocumentStateKey].(string)
-	rt.State[planDocumentStateKey] = plan
-	if prev != "" && strings.TrimSpace(prev) != strings.TrimSpace(plan) {
-		rt.State[planDocumentUpdatedKey] = true
-	}
-}
-
-// ConsumePlanDocumentUpdated returns whether the plan document was updated
-// since the last consume, and clears the flag.
-func (rt *HarnessRuntime) ConsumePlanDocumentUpdated() bool {
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	if rt.State == nil {
-		return false
-	}
-	v, ok := rt.State[planDocumentUpdatedKey]
-	if !ok {
-		return false
-	}
-	delete(rt.State, planDocumentUpdatedKey)
-	b, _ := v.(bool)
-	return b
-}
-
-// SetOutputChannel updates the channel used by EmitUpdate and PlanSet.
+// SetOutputChannel updates the channel used by EmitUpdate and EmitPlanUpdate.
 // Each Run call creates a fresh output channel and clears it (nil) on exit so
 // tools never send on a closed channel after the turn ends.
 func (rt *HarnessRuntime) SetOutputChannel(ch chan streaming.StreamEvent) {
@@ -220,7 +132,11 @@ func (rt *HarnessRuntime) EnsureInitialized() {
 
 // StateGet returns a value for the given key from the state map.
 // Safe for concurrent access across tool goroutines.
+// Reserved plan keys are never returned (use PlanStore via the harness).
 func (rt *HarnessRuntime) StateGet(key string) (any, bool) {
+	if IsReservedRuntimeStateKey(key) {
+		return nil, false
+	}
 	rt.mu.RLock()
 	defer rt.mu.RUnlock()
 	v, ok := rt.State[key]
@@ -229,7 +145,11 @@ func (rt *HarnessRuntime) StateGet(key string) (any, bool) {
 
 // StateSet stores a key-value pair in the state map.
 // Safe for concurrent access across tool goroutines.
+// Reserved plan keys are ignored so user tools cannot corrupt ACM state.
 func (rt *HarnessRuntime) StateSet(key string, value any) {
+	if IsReservedRuntimeStateKey(key) {
+		return
+	}
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	rt.State[key] = value
@@ -238,6 +158,9 @@ func (rt *HarnessRuntime) StateSet(key string, value any) {
 // StateDelete removes a key from the state map.
 // Safe for concurrent access across tool goroutines.
 func (rt *HarnessRuntime) StateDelete(key string) {
+	if IsReservedRuntimeStateKey(key) {
+		return
+	}
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	delete(rt.State, key)
@@ -364,11 +287,15 @@ func (rt *HarnessRuntime) RaiseInterrupt(kind string, payload []byte) (Interrupt
 // lock, safe for concurrent access during checkpointing.
 // Interrupts are deep-cloned so later marshal of the snapshot does not race
 // with ReturnInterrupt mutating the live pending entries.
+// Reserved plan keys are omitted; the harness merges SessionManager via ExportInto.
 func (rt *HarnessRuntime) SnapshotState() (state map[string]any, pending, resolved interruptMap) {
 	rt.mu.RLock()
 	defer rt.mu.RUnlock()
 	state = make(map[string]any, len(rt.State))
 	for k, v := range rt.State {
+		if IsReservedRuntimeStateKey(k) {
+			continue
+		}
 		state[k] = v
 	}
 	pending = make(interruptMap, len(rt.PendingInterrupts))
