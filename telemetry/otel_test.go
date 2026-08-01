@@ -24,13 +24,28 @@ func TestInit_emptyEndpoint_noop(t *testing.T) {
 	}
 }
 
+func TestTracerFromContext_prefersInjectedTracer(t *testing.T) {
+	exp := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp))
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+
+	injected := TracerFromProvider(tp)
+	ctx := ContextWithTracer(context.Background(), injected)
+	_, span := TracerFromContext(ctx).Start(ctx, SpanTurn)
+	span.End()
+	_ = tp.ForceFlush(context.Background())
+	if len(exp.GetSpans()) == 0 {
+		t.Fatal("expected span on injected provider")
+	}
+}
+
 func TestTracer_recordsTurnLifecycleSpans(t *testing.T) {
 	exp := tracetest.NewInMemoryExporter()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp))
-	SetTracerProviderForTest(tp)
+	SetTracerProvider(tp)
 	t.Cleanup(func() {
 		_ = tp.Shutdown(context.Background())
-		SetTracerProviderForTest(nil)
+		SetTracerProvider(nil)
 	})
 
 	ctx, span := Tracer().Start(context.Background(), SpanTurn,
@@ -118,10 +133,10 @@ func TestTracer_recordsTurnLifecycleSpans(t *testing.T) {
 func TestSpanHandler_correlatesTraceIDsWithoutSpanEvents(t *testing.T) {
 	exp := tracetest.NewInMemoryExporter()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp))
-	SetTracerProviderForTest(tp)
+	SetTracerProvider(tp)
 	t.Cleanup(func() {
 		_ = tp.Shutdown(context.Background())
-		SetTracerProviderForTest(nil)
+		SetTracerProvider(nil)
 	})
 
 	var buf captureHandler

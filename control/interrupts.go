@@ -276,8 +276,8 @@ func (m interruptMap) MarshalJSON() ([]byte, error) {
 	return json.Marshal(envelopes)
 }
 
-// cloneInterrupt returns a deep copy via JSON so SnapshotState does not share
-// live Interrupt pointers with concurrent ReturnInterrupt mutations.
+// cloneInterrupt returns a deep copy via JSON so checkpoint snapshots do not
+// share live Interrupt pointers with concurrent ReturnInterrupt mutations.
 func cloneInterrupt(intr Interrupt) Interrupt {
 	if intr == nil {
 		return nil

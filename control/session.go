@@ -10,15 +10,6 @@ import (
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
-type ActivityStatus int
-
-const (
-	ActivityPending ActivityStatus = iota
-	ActivityInProgress
-	ActivityCompleted
-	ActivityFailed
-)
-
 // runtimeOutput holds the turn event channel behind a pointer shared across
 // HarnessRuntime shallow copies. By-value Runtime copies must not race with
 // SetOutputChannel (which would otherwise write a channel field in the struct).
@@ -28,25 +19,24 @@ type runtimeOutput struct {
 }
 
 // HarnessRuntime is the public hook surface for user-defined tools:
-// StateGet/Set, interrupts, EmitUpdate, Store, and CurrentToolCallID.
+// StateGet/Set/Delete, interrupts, EmitUpdate, Store, and CurrentToolCallID.
 //
-// It does not own session data or checkpoint logic. Durable and live session
-// state lives on SessionManager; Runtime is a thin facade (shallow-copied per
-// tool call with only CurrentToolCallID unique per copy).
+// It does not own session data or checkpoint logic. Those live on SessionManager
+// (backend) and Checkpointer (wire format). Runtime is a thin facade, shallow-copied
+// per tool call with only CurrentToolCallID unique per copy.
 //
-// Framework modules (plan, …) are never reachable through Runtime.
-// Checkpoint capture/restore is control.Checkpointer's job.
-//
-// Callers must build Runtime via NewRuntime so the SessionManager backend is set.
+// Framework modules (plan, …) are not reachable through Runtime.
+// Prefer NewRuntime so the SessionManager backend is set.
 type HarnessRuntime struct {
+	// Optional DI fields for product tools (not used by built-ins).
 	VectorDB *milvusclient.Client
 	Store    stores.BaseStore
+	Mode     string
 	// CurrentToolCallID is set per tool invocation on a shallow copy.
 	CurrentToolCallID string
-	Mode              string
 
-	// session is the shared backend (user state, interrupts, plan). Unexported
-	// so packages outside control cannot reach SessionManager via Runtime.
+	// session is the shared backend. Unexported so external packages cannot
+	// reach SessionManager through Runtime.
 	session *SessionManager
 	out     *runtimeOutput
 }
@@ -65,7 +55,8 @@ func NewRuntime(ch chan streaming.StreamEvent, store stores.BaseStore, sm *Sessi
 	}
 }
 
-// EnsureInitialized is a no-op when built via NewRuntime; kept for older call sites.
+// EnsureInitialized attaches a SessionManager and output box when missing
+// (zero-value Runtime in tests). NewRuntime already initializes both.
 func (rt *HarnessRuntime) EnsureInitialized() {
 	if rt.session == nil {
 		rt.session = NewSessionManager()
@@ -178,24 +169,4 @@ func (rt *HarnessRuntime) PendingInterrupt(id string) (Interrupt, bool) {
 func (rt *HarnessRuntime) RaiseInterrupt(kind string, payload []byte) (Interrupt, error) {
 	rt.EnsureInitialized()
 	return rt.session.raiseInterrupt(rt.CurrentToolCallID, kind, payload)
-}
-
-// --- Workflow types ---
-
-type Activity struct {
-	Status              ActivityStatus `json:"status"`
-	AcceptanceCriteria  string         `json:"acceptanceCriteria"`
-	Order               int            `json:"order"`
-	PredecessorActivity *Activity
-	SuccessorActivity   *Activity
-}
-
-type TurnGoal struct {
-	Description        string `json:"description"`
-	AcceptanceCriteria string `json:"acceptanceCriteria"`
-}
-
-type ExecutionSession struct {
-	CurrentGoal TurnGoal
-	Runtime     *HarnessRuntime
 }

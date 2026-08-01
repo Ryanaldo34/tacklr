@@ -391,7 +391,7 @@ func (a *AgentHarness) applyBatchToolResultEffect(ctx context.Context, effect To
 			doc = a.session.Plan().Document()
 		}
 		// Milestone: plan document installed into the context window.
-		ctx, span := telemetry.Tracer().Start(ctx, telemetry.SpanPlanInstall,
+		ctx, span := telemetry.TracerFromContext(ctx).Start(ctx, telemetry.SpanPlanInstall,
 			trace.WithAttributes(
 				attribute.String(telemetry.AttrArea, telemetry.AreaContext),
 				attribute.String(telemetry.AttrSessionID, a.SessionId),
@@ -619,8 +619,8 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 
 	// All work that may stream into out runs in this goroutine so callers can
 	// drain the channel (addToContext window-pressure compress streams summaries).
-	// Clear the runtime channel on exit so post-Run PlanSet/EmitUpdate do not
-	// send on a closed channel (constructor keeps ch nil until the first Run).
+	// Clear the runtime channel on exit so post-Run EmitUpdate does not send
+	// on a closed channel (output channel is nil until the first Run).
 	go func() {
 		defer close(out)
 		defer a.Runtime.SetOutputChannel(nil)
@@ -797,7 +797,7 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 					}
 					tcKey := toolCallKey(tc)
 					// Milestone: each tool call (create_plan, complete_todo, work tools, …).
-					toolCtx, toolSpan := telemetry.Tracer().Start(ctx, telemetry.SpanTool,
+					toolCtx, toolSpan := telemetry.TracerFromContext(ctx).Start(ctx, telemetry.SpanTool,
 						trace.WithAttributes(
 							attribute.String(telemetry.AttrArea, telemetry.AreaHarness),
 							attribute.String(telemetry.AttrToolName, tc.Name),

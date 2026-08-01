@@ -896,7 +896,7 @@ func TestACP_elicitation_malformedInterruptEndsTurn(t *testing.T) {
 	}
 }
 
-// TestACP_createPlan_streamsPlanUpdate: PlanSet emits plan sessionUpdate over ACP.
+// TestACP_createPlan_streamsPlanUpdate: create_plan streams plan sessionUpdate over ACP.
 func TestACP_createPlan_streamsPlanUpdate(t *testing.T) {
 	store := testStore(t)
 	var n int

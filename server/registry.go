@@ -150,17 +150,55 @@ type Registry struct {
 	agents       map[string]AgentSpec
 	defaultAgent string
 	store        stores.BaseStore
+	// tracer creates turn (and, via context, harness) spans. Defaults to global.
+	tracer trace.Tracer
 	// activeTurns maps session/thread id → cancel for the in-flight turn context.
 	activeTurns sync.Map // string → context.CancelFunc
 	sessions    sync.Map // string → *sessionState
 }
 
-func NewRegistry(store stores.BaseStore, defaultAgent string) *Registry {
-	return &Registry{
+// RegistryOption configures NewRegistry.
+type RegistryOption func(*Registry)
+
+// WithTracerProvider sets the OpenTelemetry TracerProvider used for turn
+// telemetry. Tacklr builds a tracer named telemetry.InstrumentationName.
+// When omitted, the process-global provider is used (see telemetry.Init /
+// telemetry.SetTracerProvider).
+func WithTracerProvider(tp trace.TracerProvider) RegistryOption {
+	return func(r *Registry) {
+		if tp != nil {
+			r.tracer = telemetry.TracerFromProvider(tp)
+		}
+	}
+}
+
+// WithTracer sets an explicit Tracer for turn telemetry (advanced).
+// Prefer WithTracerProvider so instrumentation naming stays consistent.
+func WithTracer(t trace.Tracer) RegistryOption {
+	return func(r *Registry) {
+		if t != nil {
+			r.tracer = t
+		}
+	}
+}
+
+// NewRegistry builds a registry. Optional opts configure telemetry and other hooks.
+func NewRegistry(store stores.BaseStore, defaultAgent string, opts ...RegistryOption) *Registry {
+	r := &Registry{
 		agents:       make(map[string]AgentSpec),
 		defaultAgent: defaultAgent,
 		store:        store,
+		tracer:       telemetry.Tracer(),
 	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(r)
+		}
+	}
+	if r.tracer == nil {
+		r.tracer = telemetry.Tracer()
+	}
+	return r
 }
 
 func (r *Registry) Register(agentID string, spec AgentSpec) {
@@ -343,8 +381,10 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 		turnKind = "resume"
 	}
 	turnCtx, cancel := context.WithCancel(ctx)
+	// Prefer registry tracer (injected provider) for this turn and all harness children.
+	turnCtx = telemetry.ContextWithTracer(turnCtx, r.tracer)
 	// Span attributes: searchable dimensions (area, ids, kind). Dynamic sizes on events.
-	turnCtx, turnSpan := telemetry.Tracer().Start(turnCtx, telemetry.SpanTurn,
+	turnCtx, turnSpan := r.tracer.Start(turnCtx, telemetry.SpanTurn,
 		trace.WithAttributes(
 			attribute.String(telemetry.AttrArea, telemetry.AreaRegistry),
 			attribute.String(telemetry.AttrAgentID, agentID),

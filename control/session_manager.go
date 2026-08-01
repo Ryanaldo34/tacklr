@@ -277,24 +277,3 @@ func (s *SessionManager) LoadInterruptsJSON(pendingJSON, resolvedJSON []byte) er
 	}
 	return nil
 }
-
-// ExportInto is kept for plan-only merge when runtimeState is built elsewhere.
-// Prefer SnapshotDurable for full checkpoint capture.
-func (s *SessionManager) ExportInto(state map[string]any) {
-	if state == nil {
-		return
-	}
-	if s == nil {
-		StripPlanKeys(state)
-		return
-	}
-	s.Plan().ExportInto(state)
-}
-
-// LoadFromState hydrates plan only (legacy name). Prefer LoadUserAndPlanState.
-func (s *SessionManager) LoadFromState(state map[string]any) {
-	if s == nil {
-		return
-	}
-	s.Plan().LoadFromState(state)
-}

@@ -19,7 +19,46 @@ import (
 	"go.opentelemetry.io/otel/trace/noop"
 )
 
-const instrumentationName = "github.com/ryanaldo34/tacklr"
+// InstrumentationName is the OpenTelemetry instrumentation library name for
+// Tacklr spans. Hosts that build a Tracer from their own TracerProvider should
+// use this name (or call TracerFromProvider).
+const InstrumentationName = "github.com/ryanaldo34/tacklr"
+
+// tracerContextKey carries an optional per-request Tracer on context so child
+// spans (harness tools, handoff) use the same provider as the registry turn root.
+type tracerContextKey struct{}
+
+// ContextWithTracer returns a child context that causes TracerFromContext to
+// prefer t over the global provider. A nil t is ignored.
+func ContextWithTracer(ctx context.Context, t trace.Tracer) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if t == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, tracerContextKey{}, t)
+}
+
+// TracerFromContext returns the tracer attached with ContextWithTracer, or the
+// global package tracer when none is set (and when t was never injected).
+func TracerFromContext(ctx context.Context) trace.Tracer {
+	if ctx != nil {
+		if t, ok := ctx.Value(tracerContextKey{}).(trace.Tracer); ok && t != nil {
+			return t
+		}
+	}
+	return Tracer()
+}
+
+// TracerFromProvider returns a Tacklr-scoped Tracer from tp.
+// If tp is nil, returns the global Tracer().
+func TracerFromProvider(tp trace.TracerProvider) trace.Tracer {
+	if tp == nil {
+		return Tracer()
+	}
+	return tp.Tracer(InstrumentationName)
+}
 
 // Config configures OTLP tracing. An empty OTLPEndpoint (and no OTEL env endpoint)
 // installs a no-op provider so library consumers pay almost nothing until Init.
@@ -125,13 +164,16 @@ func Init(ctx context.Context, cfg Config) (shutdown func(context.Context) error
 	return tp.Shutdown, nil
 }
 
-// Tracer returns the package tracer (noop-safe when Init was not called with an endpoint).
+// Tracer returns the package tracer from the global TracerProvider
+// (noop-safe when Init was not called with an endpoint and nothing else set the global provider).
 func Tracer() trace.Tracer {
-	return otel.Tracer(instrumentationName)
+	return otel.Tracer(InstrumentationName)
 }
 
-// SetTracerProviderForTest installs tp as the global provider (tests).
-func SetTracerProviderForTest(tp trace.TracerProvider) {
+// SetTracerProvider installs tp as the process-wide OpenTelemetry TracerProvider.
+// Hosts that already own OTEL should prefer server.WithTracerProvider on the
+// registry instead of replacing the global. Pass nil for a no-op provider.
+func SetTracerProvider(tp trace.TracerProvider) {
 	if tp == nil {
 		tp = noop.NewTracerProvider()
 	}

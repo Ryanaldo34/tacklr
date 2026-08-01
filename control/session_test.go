@@ -294,9 +294,9 @@ func TestStateGet_stateSetConcurrent(t *testing.T) {
 	}
 }
 
-// TestRuntime_interruptEmitAndSnapshotLifecycle exercises the session-facing
-// runtime surface used during a real turn: plan edges, emit updates, raise /
-// return / take interrupts, Serialize/Error, and SnapshotState for checkpoints.
+// TestRuntime_interruptEmitAndSnapshotLifecycle exercises Runtime hooks used
+// during a turn: plan emit, EmitUpdate, interrupt raise/return/take, and
+// SessionManager.SnapshotDurable for checkpoints.
 func TestRuntime_interruptEmitAndSnapshotLifecycle(t *testing.T) {
 	ch := make(chan streaming.StreamEvent, 2)
 	rt := NewRuntime(ch, nil, nil)

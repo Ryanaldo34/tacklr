@@ -41,12 +41,12 @@ go get github.com/ryanaldo34/tacklr
      └──────┬───────┘
             ▼
      ┌──────────────┐
-     │   harness    │  plan, tools, handoff, cancel
-     │   (tacklr)   │  emits StreamEvent bus
+     │   harness    │  tools, plan builtins, handoff, cancel
+     │   (tacklr)   │  SessionManager + Checkpointer; StreamEvent bus
      └──────┬───────┘
             ▼  StreamEvent (protocol-agnostic)
      ┌──────────────┐
-     │    server    │  Registry + Protocol
+     │    server    │  Registry + Protocol (+ optional TracerProvider)
      │  ACP · SSE   │  (A2A later: same plug)
      └──────────────┘
             │
@@ -55,14 +55,25 @@ go get github.com/ryanaldo34/tacklr
 
 | Package | Responsibility |
 |---------|----------------|
-| `tacklr` | Agent harness, tools, context Fit/Handoff, skills, subagents |
+| `tacklr` | Agent harness, tools, context absorb/handoff, skills, subagents |
 | `inference` | OpenAI-compatible Responses API + SSE → `LLMResponseChunk` |
 | `streaming` | Shared types: `Message`, `StreamEvent`, `ToolCall` (not wire codecs) |
 | `server` | `Registry`, transports, **protocols** (`ACP`, `SSE`) |
-| `stores` | Session checkpoints (in-memory; Postgres available) |
+| `stores` | Session checkpoint persistence (in-memory; Postgres available) |
 | `mcp` | MCP **config** types only (discovery is internal) |
-| `control` | Runtime, plan, interrupts |
+| `control` | `HarnessRuntime` (tool hooks), `SessionManager` (session state), `Checkpointer`, plan, interrupts |
 | `skills` | Load `SKILL.md` catalogs |
+| `telemetry` | OTLP init, slog↔trace correlation, injectable tracer helpers |
+
+### Runtime vs session state
+
+| Surface | Who uses it | Holds |
+|---------|-------------|--------|
+| **`HarnessRuntime`** | User-defined tools | DI hooks: `StateGet`/`StateSet`, interrupts, `EmitUpdate`, `Store` |
+| **`SessionManager`** | Built-ins + harness (not user tools) | Plan module, user State bag, interrupts (backend for Runtime) |
+| **`Checkpointer`** | Harness save/load | Capture/Apply `SessionCheckpoint` wire format |
+
+User tools never receive `SessionManager`. Plan mutation is framework-only (via builtins that close over the manager).
 
 **Invariant:** client presentation lives on `server.Protocol` (`OnStreamEvent` / `OnStreamClosed`). The harness never owns ACP/SSE framing—so a future A2A protocol is another implementation, not a harness rewrite.
 
@@ -260,14 +271,14 @@ Follow the project's test conventions and run tests before claiming done.
 // Fresh agent
 agent := tacklr.NewAgent(ctx, opts)
 
-// Later: restore checkpoint
+// Later: restore checkpoint (SessionManager + window via Checkpointer)
 agent, err := tacklr.NewAgentFromSession(ctx, sessionID, opts)
 ```
 
-- **Fit** — when the window is large, compress older history before adding new messages.  
-- **Plan document** — `create_plan` stores the full plaintext plan and prunes the window to `[user, plan]`.  
+- **Absorb / compress** — when the window is large, compress older history before adding new messages (not traced as lifecycle spans).  
+- **Plan document** — `create_plan` stores the full plaintext plan on `SessionManager` and prunes the window to `[user, plan]`.  
 - **Handoff** — after a successful `complete_todo` (or `edit_plan` when the plan text changes), rebuild as `[user, plan, handoff, …]` so the full draft stays separate from the process handoff.  
- 
+- **Checkpoint** — `Checkpointer` snapshots window, plan, user State, interrupts, and pending tools; `stores.BaseStore` persists the blob.  
 - **Cancel** — one turn context: `session/cancel` or parent cancel stops model stream, tools, and protocol pump.
 
 ---
@@ -287,6 +298,8 @@ tacklr.turn
 
 Streaming messages, absorb, and compress are not traced (plumbing, not milestones). slog gets `trace_id`/`span_id` for correlation but is not mirrored onto spans.
 
+**Process-wide (simple servers):**
+
 ```go
 import "github.com/ryanaldo34/tacklr/telemetry"
 
@@ -299,7 +312,16 @@ slog.SetDefault(telemetry.NewLogger(slog.NewTextHandler(os.Stderr, nil)))
 defer shutdown(ctx)
 ```
 
-Without an endpoint (and without `OTEL_EXPORTER_OTLP_ENDPOINT`), tracing is a no-op. Prompt/tool body text is not attached by default.
+**Library / host already owns OTEL:** inject your provider into the registry so Tacklr does not replace the global provider:
+
+```go
+reg := server.NewRegistry(store, "default",
+    server.WithTracerProvider(myTracerProvider),
+)
+// Optional: telemetry.Init only if *you* want Tacklr to own process-wide OTEL.
+```
+
+Without an endpoint (and without `OTEL_EXPORTER_OTLP_ENDPOINT`), and without injection, tracing is a no-op. Prompt/tool body text is not attached by default.
 
 ---
 
@@ -308,13 +330,13 @@ Without an endpoint (and without `OTEL_EXPORTER_OTLP_ENDPOINT`), tracing is a no
 ```go
 import "github.com/ryanaldo34/tacklr"            // harness, tools
 import "github.com/ryanaldo34/tacklr/inference"  // OpenAI-compatible strategy
-import "github.com/ryanaldo34/tacklr/server"     // Registry, ACP, SSE
+import "github.com/ryanaldo34/tacklr/server"     // Registry, ACP, SSE (+ WithTracerProvider)
 import "github.com/ryanaldo34/tacklr/stores"     // InMemory (and Postgres)
 import "github.com/ryanaldo34/tacklr/mcp"        // MCPConfig types
 import "github.com/ryanaldo34/tacklr/streaming"  // shared event/message types
-import "github.com/ryanaldo34/tacklr/control"    // runtime / plan / interrupts
+import "github.com/ryanaldo34/tacklr/control"    // Runtime, SessionManager, Checkpointer, plan, interrupts
 import "github.com/ryanaldo34/tacklr/skills"     // skill loading
-import "github.com/ryanaldo34/tacklr/telemetry"  // OTLP tracing + slog span bridge
+import "github.com/ryanaldo34/tacklr/telemetry"  // OTLP init, slog bridge, tracer helpers
 ```
 
 ---

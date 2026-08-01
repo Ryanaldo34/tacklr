@@ -39,7 +39,7 @@ type SubAgent struct {
 	SubAgents []*SubAgent
 }
 
-// parkedWorkerMeta is durable park metadata stored in Runtime.State.
+// parkedWorkerMeta is durable park metadata stored in user State (SessionManager bag).
 // Live harness pointers are not stored here; they live in parkedWorkersLive.
 type parkedWorkerMeta struct {
 	WorkerName        string   `json:"workerName"`
@@ -421,7 +421,7 @@ func collectChildInterrupts(worker *AgentHarness, drainedIDs []string) (ids []st
 	return ids, primary
 }
 
-// --- park metadata (durable Runtime.State + live harness cache) ---
+// --- park metadata (durable user State + live harness cache) ---
 
 // parkStore groups parked-worker get/set/clear over durable state and the
 // same-process live map. Callers use a.parks().

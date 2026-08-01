@@ -6,15 +6,15 @@ import (
 	"sync"
 )
 
-// Reserved Runtime.State keys used only for checkpoint wire format.
-// Plan data lives in PlanStore; these keys must not be used via StateGet/StateSet.
+// Reserved keys in the checkpoint RuntimeState map for the plan module.
+// Live plan data is on PlanStore (via SessionManager); user StateGet/StateSet block these keys.
 const (
 	planStateKey           = "_plan"
 	planDocumentStateKey   = "_plan_document"
 	planDocumentUpdatedKey = "_plan_document_updated"
 )
 
-// IsReservedRuntimeStateKey reports keys owned by the harness plan store.
+// IsReservedRuntimeStateKey reports keys owned by SessionManager plan export.
 // User tools must not read or write these via StateGet/StateSet.
 func IsReservedRuntimeStateKey(key string) bool {
 	switch key {
@@ -25,9 +25,8 @@ func IsReservedRuntimeStateKey(key string) bool {
 	}
 }
 
-// PlanStore holds the session plan document and todo list for Adaptive Case
-// Management. It is harness-internal: built-in plan tools and framework
-// interceptors use it; custom tools never receive a handle to it.
+// PlanStore holds the plan document and todo list for Adaptive Case Management.
+// It is a SessionManager module — not exposed on HarnessRuntime.
 type PlanStore struct {
 	mu              sync.RWMutex
 	todos           []Todo

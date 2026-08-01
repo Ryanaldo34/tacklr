@@ -103,7 +103,7 @@ func (t *DefaultModelTasks) Handoff(ctx context.Context, plan []control.Todo, pl
 		}
 	}
 	// Milestone: context handoff after todo complete / plan revise.
-	ctx, span := telemetry.Tracer().Start(ctx, telemetry.SpanContextHandoff,
+	ctx, span := telemetry.TracerFromContext(ctx).Start(ctx, telemetry.SpanContextHandoff,
 		trace.WithAttributes(
 			attribute.String(telemetry.AttrArea, telemetry.AreaModelTasks),
 			attribute.Int(telemetry.AttrOpenTodos, open),
