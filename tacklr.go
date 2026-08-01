@@ -125,7 +125,6 @@ type AgentHarness struct {
 	Tools         []*Tool
 	MCPConfigs    []mcp.MCPConfig
 	Instructions  string
-	ContextWindow []*Message
 	Store         stores.BaseStore
 	Runtime       control.HarnessRuntime
 	WatchDog      AgentWatchDog
@@ -153,14 +152,28 @@ type AgentHarness struct {
 	mcpInitialized    bool
 	builtinsInjected  bool
 	out               chan streaming.StreamEvent
-	contextMgr        ContextManager
-	contextPolicy     ContextPolicy
-	toolRunner        *toolRunner
-	toolResultHooks   *toolResultHookRegistry
+	// context owns the conversation message list (structure only).
+	context ContextManager
+	// tasks runs product model ops (Turn, Absorb, Handoff) against context + Model.
+	tasks           ModelTasks
+	contextPolicy   ContextPolicy
+	toolRunner      *toolRunner
+	toolResultHooks *toolResultHookRegistry
+}
+
+// Messages returns the live conversation window owned by the context manager.
+func (a *AgentHarness) Messages() []*Message {
+	return a.context.Messages()
+}
+
+// RestoreMessages replaces the conversation window (session load helpers and tests).
+func (a *AgentHarness) RestoreMessages(window []*Message) {
+	a.context.Restore(window)
 }
 
 func (a *AgentHarness) checkpointSession(ctx context.Context) error {
-	slog.Debug("checkpointing session", "session_id", a.SessionId, "context_window_size", len(a.ContextWindow))
+	msgs := a.Messages()
+	slog.Debug("checkpointing session", "session_id", a.SessionId, "context_window_size", len(msgs))
 	if a.Store == nil {
 		return nil
 	}
@@ -177,7 +190,7 @@ func (a *AgentHarness) checkpointSession(ctx context.Context) error {
 	}
 	a.pendingMu.Unlock()
 
-	checkpoint, err := stores.NewCheckpoint(a.ContextWindow, ptc, itr, state, pendingInterrupts, resolvedInterrupts)
+	checkpoint, err := stores.NewCheckpoint(a.context.Snapshot(), ptc, itr, state, pendingInterrupts, resolvedInterrupts)
 	if err != nil {
 		return err
 	}
@@ -345,60 +358,20 @@ These instructions describe how the user generally wants you to behave, not what
 	return builtIn
 }
 
-// addToContext fits newMsg into the window via ContextManager (collapse when needed).
+// addToContext absorbs a message via ModelTasks (may compress under pressure).
 func (a *AgentHarness) addToContext(ctx context.Context, newMsg *Message, out chan StreamEvent) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	mgr := a.contextManager()
-	res, err := mgr.Fit(ctx, FitInput{
-		Window:              a.ContextWindow,
-		NewMsg:              newMsg,
-		Tools:               a.Tools,
-		MaxSize:             a.MaxWindowSize,
-		Policy:              a.contextPolicyOrDefault(),
-		Model:               a.Model,
-		RestoreSystemPrompt: a.constructSystemPrompt(),
-	})
+	res, err := a.tasks.Absorb(ctx, newMsg, a.Tools, a.constructSystemPrompt())
 	if err != nil {
 		return err
 	}
-	for _, chunk := range res.Chunks {
+	for _, chunk := range res.SummaryChunks {
 		if !a.streamChunk(ctx, chunk, out) {
 			return ctx.Err()
 		}
 	}
-	a.ContextWindow = res.Window
-	return nil
-}
-
-func (a *AgentHarness) compressWindowAfterTodoComplete(ctx context.Context) error {
-	mgr := a.contextManager()
-	res, err := mgr.Handoff(ctx, HandoffInput{
-		Window:              a.ContextWindow,
-		Plan:                a.Runtime.PlanGet(),
-		PlanDocument:        a.Runtime.PlanDocumentGet(),
-		Tools:               a.Tools,
-		Model:               a.Model,
-		RestoreSystemPrompt: a.constructSystemPrompt(),
-	})
-	if err != nil {
-		return err
-	}
-	a.ContextWindow = res.Window
-	return nil
-}
-
-func (a *AgentHarness) installPlanDocument() error {
-	raw := a.Runtime.PlanDocumentGet()
-	if raw == "" {
-		return fmt.Errorf("install plan document: no plan document in runtime")
-	}
-	if len(a.ContextWindow) == 0 || a.ContextWindow[0] == nil {
-		return fmt.Errorf("install plan document: empty window")
-	}
-	user := *a.ContextWindow[0]
-	a.ContextWindow = []*Message{&user, buildPlanDocumentMessage(raw)}
 	return nil
 }
 
@@ -406,20 +379,13 @@ func (a *AgentHarness) applyBatchToolResultEffect(ctx context.Context, effect To
 	switch effect {
 	case EffectInstallPlanDocument:
 		slog.Info("installing plan document into context", "session_id", a.SessionId)
-		return a.installPlanDocument()
+		return a.context.InstallPlanDocument(a.Runtime.PlanDocumentGet())
 	case EffectHandoff:
 		slog.Info("todos completed or plan revised; running handoff", "session_id", a.SessionId)
-		return a.compressWindowAfterTodoComplete(ctx)
+		return a.tasks.Handoff(ctx, a.Runtime.PlanGet(), a.Runtime.PlanDocumentGet(), a.Tools, a.constructSystemPrompt())
 	default:
 		return nil
 	}
-}
-
-func (a *AgentHarness) contextManager() ContextManager {
-	if a.contextMgr != nil {
-		return a.contextMgr
-	}
-	return NewModelContextManager()
 }
 
 func (a *AgentHarness) contextPolicyOrDefault() ContextPolicy {
@@ -640,7 +606,6 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 			_ = emit(ctx, out, StreamEvent{Type: StreamEventError, Error: fmt.Errorf("run: %w", err)})
 			return
 		}
-		a.Model.SetSystemPrompt(a.constructSystemPrompt())
 		a.Runtime.EnsureInitialized()
 		turnModelRequests := 0
 		for {
@@ -660,7 +625,7 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 					})
 					return
 				}
-				events, err := a.Model.Invoke(ctx, a.ContextWindow, a.Tools)
+				events, err := a.tasks.Turn(ctx, a.Tools, a.constructSystemPrompt())
 				if err != nil {
 					if ctx.Err() != nil {
 						emitCancelled()
@@ -730,7 +695,7 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 						toolCalls = append(toolCalls, chunk.ToolCalls...)
 						if chunk.Type == StreamEventMessage || chunk.Type == StreamEventReasoning {
 							msg := asm.MessageFromComplete(chunk)
-							a.ContextWindow = append(a.ContextWindow, msg)
+							a.context.Add(msg)
 							a.recordWatchdog(msg)
 						}
 					}
@@ -960,8 +925,10 @@ type AgentOptions struct {
 	Tools      []*Tool
 	MCPConfigs []mcp.MCPConfig
 	SubAgents  []*SubAgent
-	// ContextManager overrides Fit/Handoff policy (nil → NewModelContextManager).
+	// ContextManager owns the conversation window (nil → NewModelContextManager).
 	ContextManager ContextManager
+	// ModelTasks runs Turn/Absorb/Handoff (nil → DefaultModelTasks from Model + context).
+	ModelTasks ModelTasks
 	// ContextPolicy overrides default pressure/compress ratios when non-zero fields are set.
 	ContextPolicy ContextPolicy
 	// ToolInterceptors wrap every harness tool call (outermost first).
@@ -1003,7 +970,6 @@ func newHarnessBase(opts AgentOptions, runtime control.HarnessRuntime, out chan 
 		Tools:                opts.Tools,
 		MCPConfigs:           opts.MCPConfigs,
 		skillDirectories:     opts.Config.SkillDirectories,
-		ContextWindow:        nil,
 		SessionId:            "",
 		subagents:            make(map[string]*SubAgent),
 		interruptToRequester: make(map[string]string),
@@ -1011,14 +977,18 @@ func newHarnessBase(opts AgentOptions, runtime control.HarnessRuntime, out chan 
 		interruptPayloads:    make(map[string][]byte),
 		parkedWorkersLive:    make(map[string]*AgentHarness),
 		out:                  out,
-		contextMgr:           opts.ContextManager,
+		context:              opts.ContextManager,
+		tasks:                opts.ModelTasks,
 		contextPolicy:        opts.ContextPolicy,
 	}
-	if h.contextMgr == nil {
-		h.contextMgr = NewModelContextManager()
+	if h.context == nil {
+		h.context = NewModelContextManager()
 	}
 	if h.contextPolicy.PressureRatio <= 0 && h.contextPolicy.CompressFraction <= 0 {
 		h.contextPolicy = DefaultContextPolicy()
+	}
+	if h.tasks == nil {
+		h.tasks = NewDefaultModelTasks(h.Model, h.context, h.contextPolicy, h.MaxWindowSize)
 	}
 	if opts.ToolInterceptors != nil {
 		h.toolRunner = newToolRunner(opts.ToolInterceptors...)
@@ -1119,7 +1089,7 @@ func NewAgentFromSession(ctx context.Context, sessionId string, opts AgentOption
 	}
 	h := newHarnessBase(opts, runtime, events)
 	h.SessionId = sessionId
-	h.ContextWindow = checkpoint.ContextWindow
+	h.context.Restore(checkpoint.ContextWindow)
 	h.interruptToRequester = checkpoint.State.InterruptToRequester
 	h.pendingToolCalls = checkpoint.State.PendingToolCalls
 	h.finishInit(ctx, opts.SubAgents)

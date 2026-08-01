@@ -819,8 +819,8 @@ func TestRun_createPlan_installsPlanDocumentAndPrunesWindow(t *testing.T) {
 			t.Fatalf("events=%+v", summarizeEvents(got))
 		}
 	}
-	if len(h.ContextWindow) < 2 || !isPlanDocument(h.ContextWindow[1]) {
-		t.Fatalf("window = %+v", h.ContextWindow)
+	if len(h.Messages()) < 2 || !isPlanDocument(h.Messages()[1]) {
+		t.Fatalf("window = %+v", h.Messages())
 	}
 	if h.Runtime.PlanDocumentGet() != "CoS: ship quality" {
 		t.Fatalf("document = %q", h.Runtime.PlanDocumentGet())
@@ -861,17 +861,17 @@ func TestRun_completeTodo_withPlanDocument_preservesFullPlan(t *testing.T) {
 	}
 	_ = drainEvents(events)
 
-	if len(h.ContextWindow) < 4 {
-		t.Fatalf("window len = %d, window=%+v", len(h.ContextWindow), h.ContextWindow)
+	if len(h.Messages()) < 4 {
+		t.Fatalf("window len = %d, window=%+v", len(h.Messages()), h.Messages())
 	}
-	if !isPlanDocument(h.ContextWindow[1]) || rawPlanFromDocumentMessage(h.ContextWindow[1]) != "FULL PLAN DRAFT" {
-		t.Fatalf("plan = %+v", h.ContextWindow[1])
+	if !isPlanDocument(h.Messages()[1]) || rawPlanFromDocumentMessage(h.Messages()[1]) != "FULL PLAN DRAFT" {
+		t.Fatalf("plan = %+v", h.Messages()[1])
 	}
-	if h.ContextWindow[2].Role != RoleDeveloper || h.ContextWindow[2].Content != "handoff notes" {
-		t.Fatalf("handoff = %+v", h.ContextWindow[2])
+	if h.Messages()[2].Role != RoleDeveloper || h.Messages()[2].Content != "handoff notes" {
+		t.Fatalf("handoff = %+v", h.Messages()[2])
 	}
-	if h.ContextWindow[3].Content != continuePlanNudge {
-		t.Fatalf("nudge = %+v", h.ContextWindow[3])
+	if h.Messages()[3].Content != continuePlanNudge {
+		t.Fatalf("nudge = %+v", h.Messages()[3])
 	}
 }
 
@@ -918,11 +918,11 @@ func TestRun_editPlan_planChange_triggersHandoff(t *testing.T) {
 	if h.Runtime.PlanDocumentGet() != "revised blueprint" {
 		t.Fatalf("document = %q", h.Runtime.PlanDocumentGet())
 	}
-	if len(h.ContextWindow) < 3 || !isPlanDocument(h.ContextWindow[1]) {
-		t.Fatalf("window = %+v", h.ContextWindow)
+	if len(h.Messages()) < 3 || !isPlanDocument(h.Messages()[1]) {
+		t.Fatalf("window = %+v", h.Messages())
 	}
-	if rawPlanFromDocumentMessage(h.ContextWindow[1]) != "revised blueprint" {
-		t.Fatalf("plan msg = %+v", h.ContextWindow[1])
+	if rawPlanFromDocumentMessage(h.Messages()[1]) != "revised blueprint" {
+		t.Fatalf("plan msg = %+v", h.Messages()[1])
 	}
 	if !handoffSawPlan {
 		t.Fatal("continue turn should see revised plan document in window")

@@ -18,6 +18,33 @@ func TestPlanSet_withoutChannel_updatesStateOnly(t *testing.T) {
 	}
 }
 
+func TestPlanDocumentSet_get_and_consumeUpdated(t *testing.T) {
+	rt := HarnessRuntime{}
+	rt.EnsureInitialized()
+	if rt.PlanDocumentGet() != "" {
+		t.Fatal("expected empty document")
+	}
+	// Initial install does not mark updated (create_plan path).
+	rt.PlanDocumentSet("draft v1")
+	if rt.PlanDocumentGet() != "draft v1" {
+		t.Fatalf("got %q", rt.PlanDocumentGet())
+	}
+	if rt.ConsumePlanDocumentUpdated() {
+		t.Fatal("initial set must not mark updated")
+	}
+	rt.PlanDocumentSet("draft v1")
+	if rt.ConsumePlanDocumentUpdated() {
+		t.Fatal("identical body should not mark updated")
+	}
+	rt.PlanDocumentSet("draft v2")
+	if !rt.ConsumePlanDocumentUpdated() {
+		t.Fatal("expected updated after change to existing draft")
+	}
+	if rt.ConsumePlanDocumentUpdated() {
+		t.Fatal("flag should clear after consume")
+	}
+}
+
 func TestPlanSet_withChannel_deliversPlanUpdate(t *testing.T) {
 	ch := make(chan streaming.StreamEvent, 1)
 	rt := NewRuntime(ch, nil, nil)

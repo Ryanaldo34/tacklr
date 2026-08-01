@@ -905,7 +905,7 @@ func TestACP_createPlan_streamsPlanUpdate(t *testing.T) {
 			n++
 			if n == 1 {
 				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventFunctionCall, ToolCalls: []tacklr.ToolCall{
-					{ID: "cp", CallID: "cp", Name: "create_plan", Arguments: `{"todos":[{"title":"One","status":"pending","description":"d"},{"title":"Two","status":"pending","description":""}]}`},
+					{ID: "cp", CallID: "cp", Name: "create_plan", Arguments: `{"plan":"P","todos":[{"title":"One","status":"pending","description":"d"},{"title":"Two","status":"pending","description":""}]}`},
 				}, IsComplete: true}
 				ch <- tacklr.LLMResponseChunk{IsComplete: true}
 				return
@@ -958,7 +958,7 @@ func TestACP_sessionCheckpoint_secondPromptContinuesPlan(t *testing.T) {
 				switch turn1Steps {
 				case 1:
 					ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventFunctionCall, ToolCalls: []tacklr.ToolCall{
-						{ID: "cp", CallID: "cp", Name: "create_plan", Arguments: `{"todos":[{"title":"Alpha","status":"pending","description":"a"},{"title":"Beta","status":"pending","description":"b"}]}`},
+						{ID: "cp", CallID: "cp", Name: "create_plan", Arguments: `{"plan":"P","todos":[{"title":"Alpha","status":"pending","description":"a"},{"title":"Beta","status":"pending","description":"b"}]}`},
 					}, IsComplete: true}
 					ch <- tacklr.LLMResponseChunk{IsComplete: true}
 				case 2:

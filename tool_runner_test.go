@@ -274,7 +274,7 @@ func TestHarness_toolPermission_rejectAlwaysRemembers(t *testing.T) {
 	}
 
 	var denied int
-	for _, m := range ah.ContextWindow {
+	for _, m := range ah.Messages() {
 		if m != nil && m.Role == RoleTool && strings.Contains(m.Content, "permission denied") {
 			denied++
 		}
@@ -297,7 +297,7 @@ func TestHarness_toolPermission_rejectAlwaysRemembers(t *testing.T) {
 		t.Fatal("reject-always should not re-raise permission interrupt")
 	}
 	denied = 0
-	for _, m := range ah.ContextWindow {
+	for _, m := range ah.Messages() {
 		if m != nil && m.Role == RoleTool && strings.Contains(m.Content, "permission denied") {
 			denied++
 		}
@@ -360,7 +360,7 @@ func TestHarness_toolTimeout_surfacesAsToolResult(t *testing.T) {
 		t.Fatalf("tool result %q should report timeout", toolResult)
 	}
 	found := false
-	for _, m := range ah.ContextWindow {
+	for _, m := range ah.Messages() {
 		if m != nil && m.Role == RoleTool && (strings.Contains(m.Content, "timed out") || strings.Contains(m.Content, "deadline")) {
 			found = true
 		}

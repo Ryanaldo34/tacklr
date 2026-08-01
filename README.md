@@ -20,7 +20,7 @@ go get github.com/ryanaldo34/tacklr
 
 | Idea | What you get |
 |------|----------------|
-| **Structured context** | Adaptive Case Management–style plans (`create_plan` / `complete_todo`). Completing a todo compresses into a **handoff** for the next work—not a vague “summarize everything.” |
+| **Structured context** | Adaptive Case Management–style plans (`create_plan` with a plaintext plan + todos, `edit_plan`, `complete_todo`). The plan document stays in context; completing a todo or revising the plan compresses into a **handoff** for the next work—not a vague “summarize everything.” |
 | **Protocol-native** | Speak **ACP** (editors like Zed) or **SSE/WS** over the same registry. Architecture is ready for **A2A** as another protocol plug-in. |
 | **Clear layers** | Inference parses the model wire; the harness owns the agent loop; protocols own client streaming. Easy to test and extend. |
 | **Tools & MCP** | Reflect-based tools plus MCP discovery (stdio / HTTP / SSE) without bolting on a second agent runtime. |
@@ -265,7 +265,9 @@ agent, err := tacklr.NewAgentFromSession(ctx, sessionID, opts)
 ```
 
 - **Fit** — when the window is large, compress older history before adding new messages.  
-- **Handoff** — after a successful `complete_todo`, replace noise with a structured handoff for remaining work.  
+- **Plan document** — `create_plan` stores the full plaintext plan and prunes the window to `[user, plan]`.  
+- **Handoff** — after a successful `complete_todo` (or `edit_plan` when the plan text changes), rebuild as `[user, plan, handoff, …]` so the full draft stays separate from the process handoff.  
+ 
 - **Cancel** — one turn context: `session/cancel` or parent cancel stops model stream, tools, and protocol pump.
 
 ---
