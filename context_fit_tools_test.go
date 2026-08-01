@@ -12,31 +12,24 @@ import (
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
-// --- Context manager outcomes (public ContextManager surface used by the harness) ---
+// --- ModelTasks absorb/handoff outcomes used by the harness ---
 
-func TestModelContextManager_Fit_defaultPolicyAndNilModel(t *testing.T) {
-	// Zero policy ratios → defaults; nil model → append-only without compression.
-	window := []*Message{{Role: RoleUser, Content: "u"}}
-	res, err := NewModelContextManager().Fit(context.Background(), FitInput{
-		Window:  window,
-		NewMsg:  &Message{Role: RoleUser, Content: "next"},
-		MaxSize: 10,
-		Policy:  ContextPolicy{}, // zeros
-		Model:   nil,
-	})
+func TestDefaultModelTasks_Absorb_defaultPolicyAndNilModel(t *testing.T) {
+	cm := NewModelContextManager()
+	cm.Restore([]*Message{{Role: RoleUser, Content: "u"}})
+	tasks := NewDefaultModelTasks(nil, cm, ContextPolicy{}, 10)
+	_, err := tasks.Absorb(context.Background(), &Message{Role: RoleUser, Content: "next"}, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Window) != 2 {
-		t.Fatalf("len = %d", len(res.Window))
+	if len(cm.Messages()) != 2 {
+		t.Fatalf("len = %d", len(cm.Messages()))
 	}
 }
 
-func TestModelContextManager_Fit_oversize_compressesAndRestoresPrompt(t *testing.T) {
-	// Window over MaxSize forces the progressive start search and summary invoke.
+func TestDefaultModelTasks_Absorb_oversize_compressesAndRestoresPrompt(t *testing.T) {
 	strategy := &mockStrategy{
 		countTokensFn: func(ctx context.Context, msgs []*Message, tools []*Tool) (int, error) {
-			// Large while full window; smaller after compress prefix drops.
 			n := 0
 			for _, m := range msgs {
 				if m != nil {
@@ -49,46 +42,35 @@ func TestModelContextManager_Fit_oversize_compressesAndRestoresPrompt(t *testing
 			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "SUMMARY", IsComplete: true}
 		},
 	}
-	window := []*Message{
+	cm := NewModelContextManager()
+	cm.Restore([]*Message{
 		{Role: RoleUser, Content: strings.Repeat("u", 40)},
 		{Role: RoleAssistant, Content: strings.Repeat("a", 40)},
 		{Role: RoleUser, Content: strings.Repeat("b", 40)},
 		{Role: RoleAssistant, Content: strings.Repeat("c", 40)},
-	}
-	res, err := NewModelContextManager().Fit(context.Background(), FitInput{
-		Window:              window,
-		NewMsg:              &Message{Role: RoleUser, Content: "q"},
-		MaxSize:             80,
-		Policy:              ContextPolicy{PressureRatio: 0.5, CompressFraction: 0.25, StreamFitSummary: true},
-		Model:               strategy,
-		RestoreSystemPrompt: "restored-system",
-		Tools:               nil,
 	})
+	tasks := NewDefaultModelTasks(strategy, cm, ContextPolicy{PressureRatio: 0.5, CompressFraction: 0.25, StreamFitSummary: true}, 80)
+	_, err := tasks.Absorb(context.Background(), &Message{Role: RoleUser, Content: "q"}, nil, "restored-system")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Window) < 2 {
-		t.Fatalf("expected compressed window, got %d", len(res.Window))
-	}
-	// Summary content present somewhere after compress.
 	found := false
-	for _, m := range res.Window {
+	for _, m := range cm.Messages() {
 		if m != nil && strings.Contains(m.Content, "SUMMARY") {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("expected summary in window: %+v", res.Window)
+		t.Fatalf("expected summary: %+v", cm.Messages())
 	}
 	strategy.mu.Lock()
 	defer strategy.mu.Unlock()
-	// Last SetSystemPrompt should restore caller prompt after compress.
 	if len(strategy.systemPrompts) == 0 || strategy.systemPrompts[len(strategy.systemPrompts)-1] != "restored-system" {
 		t.Fatalf("system prompts = %v", strategy.systemPrompts)
 	}
 }
 
-func TestModelContextManager_Fit_compressStreamError(t *testing.T) {
+func TestDefaultModelTasks_Absorb_compressStreamError(t *testing.T) {
 	strategy := &mockStrategy{
 		countTokensFn: func(ctx context.Context, msgs []*Message, tools []*Tool) (int, error) {
 			return 1000, nil
@@ -97,75 +79,40 @@ func TestModelContextManager_Fit_compressStreamError(t *testing.T) {
 			ch <- LLMResponseChunk{Type: StreamEventError, Content: "compress failed"}
 		},
 	}
-	_, err := NewModelContextManager().Fit(context.Background(), FitInput{
-		Window: []*Message{
-			{Role: RoleUser, Content: "u"},
-			{Role: RoleAssistant, Content: "a"},
-		},
-		NewMsg:  &Message{Role: RoleUser, Content: "n"},
-		MaxSize: 10,
-		Policy:  DefaultContextPolicy(),
-		Model:   strategy,
+	cm := NewModelContextManager()
+	cm.Restore([]*Message{
+		{Role: RoleUser, Content: "u"},
+		{Role: RoleAssistant, Content: "a"},
 	})
+	tasks := NewDefaultModelTasks(strategy, cm, DefaultContextPolicy(), 10)
+	_, err := tasks.Absorb(context.Background(), &Message{Role: RoleUser, Content: "n"}, nil, "")
 	if err == nil || !strings.Contains(err.Error(), "compress") {
 		t.Fatalf("err = %v", err)
 	}
 }
 
-func TestModelContextManager_Handoff_nilModelAndCancelAndStreamError(t *testing.T) {
-	m := NewModelContextManager()
-	// Cancelled
+func TestDefaultModelTasks_Handoff_cancelAndStreamError(t *testing.T) {
+	cm := NewModelContextManager()
+	cm.Restore([]*Message{{Role: RoleUser, Content: "u"}})
+	tasks := NewDefaultModelTasks(&mockStrategy{}, cm, DefaultContextPolicy(), 8192)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := m.Handoff(ctx, HandoffInput{
-		Window: []*Message{{Role: RoleUser, Content: "u"}},
-		Model:  &mockStrategy{},
-	}); err == nil {
+	if err := tasks.Handoff(ctx, nil, "", nil, ""); err == nil {
 		t.Fatal("want cancel")
 	}
-	// Nil model is rejected
-	if _, err := m.Handoff(context.Background(), HandoffInput{
-		Window: []*Message{{Role: RoleUser, Content: "u"}},
-		Model:  nil,
-	}); err == nil || !strings.Contains(err.Error(), "model") {
-		t.Fatalf("nil model: %v", err)
-	}
-	// Stream error during handoff summary
 	strategy := &mockStrategy{
 		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
 			ch <- LLMResponseChunk{Type: StreamEventError, Content: "handoff boom"}
 		},
 	}
-	_, err := m.Handoff(context.Background(), HandoffInput{
-		Window: []*Message{
-			{Role: RoleUser, Content: "u"},
-			{Role: RoleAssistant, Content: "a"},
-			{Role: RoleUser, Content: "more"},
-		},
-		Plan:                []control.Todo{{Title: "t", Status: streaming.TodoStatusInProgress}},
-		Model:               strategy,
-		RestoreSystemPrompt: "sys",
+	cm.Restore([]*Message{
+		{Role: RoleUser, Content: "u"},
+		{Role: RoleAssistant, Content: "a"},
 	})
+	tasks = NewDefaultModelTasks(strategy, cm, DefaultContextPolicy(), 8192)
+	err := tasks.Handoff(context.Background(), []control.Todo{{Title: "t", Status: streaming.TodoStatusInProgress}}, "", nil, "sys")
 	if err == nil || !strings.Contains(err.Error(), "boom") {
 		t.Fatalf("err = %v", err)
-	}
-	// Happy path with open todos includes continue nudge.
-	strategy2 := &mockStrategy{
-		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
-			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "handoff text", IsComplete: true}
-		},
-	}
-	res, err := m.Handoff(context.Background(), HandoffInput{
-		Window:              []*Message{{Role: RoleAssistant, Content: "only-assistant"}}, // no user → default first user
-		Plan:                []control.Todo{{Title: "t", Status: streaming.TodoStatusInProgress}},
-		Model:               strategy2,
-		RestoreSystemPrompt: "sys",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(res.Window) < 3 {
-		t.Fatalf("want firstUser+handoff+nudge, got %d", len(res.Window))
 	}
 }
 
@@ -340,13 +287,13 @@ func TestRun_messageDeltas_assembledOnComplete(t *testing.T) {
 	}
 	drainEvents(events)
 	found := false
-	for _, m := range h.ContextWindow {
+	for _, m := range h.Messages() {
 		if m != nil && m.Role == RoleAssistant && strings.Contains(m.Content, "Hello") {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("window = %+v", h.ContextWindow)
+		t.Fatalf("window = %+v", h.Messages())
 	}
 }
 

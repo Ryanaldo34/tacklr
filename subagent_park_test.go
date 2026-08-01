@@ -12,9 +12,9 @@ import (
 	"github.com/ryanaldo34/tacklr/stores"
 )
 
-// TestRun_usesDefaultContextManagerAndPolicyWhenCleared: clearing injected
-// manager/policy after construct still allows a successful turn (defaults apply).
-func TestRun_usesDefaultContextManagerAndPolicyWhenCleared(t *testing.T) {
+// TestRun_usesDefaultContextPolicyWhenCleared: zeroing policy after construct
+// still allows a successful turn (DefaultContextPolicy applies).
+func TestRun_usesDefaultContextPolicyWhenCleared(t *testing.T) {
 	strategy := &mockStrategy{
 		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
 			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "ok", IsComplete: true}
@@ -24,7 +24,6 @@ func TestRun_usesDefaultContextManagerAndPolicyWhenCleared(t *testing.T) {
 		Config: Config{MaxWindowSize: 8192},
 		Model:  strategy,
 	})
-	h.contextMgr = nil
 	h.contextPolicy = ContextPolicy{}
 	events, err := h.Run(context.Background(), "hi")
 	if err != nil {
@@ -119,49 +118,6 @@ func TestNewTool_pointerArgsAndNonStringResultAndBadArgs(t *testing.T) {
 	_, err = tool3.Invoke(context.Background(), "", HarnessRuntime{})
 	if err == nil {
 		t.Fatal("want marshal result error")
-	}
-}
-
-// TestModelContextManager_Fit_countTokensDuringCompressSearch: progressive
-// compress start search when window exceeds MaxSize.
-func TestModelContextManager_Fit_countTokensDuringCompressSearch(t *testing.T) {
-	calls := 0
-	strategy := &mockStrategy{
-		countTokensFn: func(ctx context.Context, msgs []*Message, tools []*Tool) (int, error) {
-			calls++
-			// Full window+new is over MaxSize; shorter suffixes eventually fall under pressure.
-			if len(msgs) >= 4 {
-				return 80, nil
-			}
-			return 10, nil
-		},
-		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
-			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "sum", IsComplete: true}
-		},
-	}
-	window := []*Message{
-		{Role: RoleUser, Content: "a1"},
-		{Role: RoleAssistant, Content: "a2"},
-		{Role: RoleUser, Content: "a3"},
-		{Role: RoleAssistant, Content: "a4"},
-		{Role: RoleUser, Content: "a5"},
-	}
-	res, err := NewModelContextManager().Fit(context.Background(), FitInput{
-		Window:  window,
-		NewMsg:  &Message{Role: RoleUser, Content: "q"},
-		MaxSize: 50,
-		// Over MaxSize (80>50) with small seed start so the progressive search loop runs.
-		Policy: ContextPolicy{PressureRatio: 0.5, CompressFraction: 0.05, StreamFitSummary: false},
-		Model:  strategy,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(res.Window) == 0 {
-		t.Fatal("empty window")
-	}
-	if calls < 2 {
-		t.Fatalf("expected multiple CountTokens during search, got %d", calls)
 	}
 }
 

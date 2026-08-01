@@ -232,7 +232,7 @@ func (a *AgentHarness) runWorker(ctx context.Context, workerName, task string, r
 	}
 	if drained.completed {
 		a.clearPark(toolCallID)
-		result := finalWorkerOutput(worker.ContextWindow, drained.lastAssistant)
+		result := finalWorkerOutput(worker.Messages(), drained.lastAssistant)
 		if result == "" {
 			slog.Warn("worker produced no output", append(logAttrs, "elapsed", elapsed)...)
 			return "", fmt.Errorf("worker %q: %w", workerName, ErrWorkerNoOutput)

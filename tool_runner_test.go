@@ -73,7 +73,7 @@ func TestHarness_planningWriteLock_thenUnlockAfterCreatePlan(t *testing.T) {
 			case 2:
 				events <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
 					{ID: "p1", CallID: "p1", Name: "create_plan",
-						Arguments: `{"todos":[{"title":"A","status":"pending","description":"d"}]}`},
+						Arguments: `{"plan":"P","todos":[{"title":"A","status":"pending","description":"d"}]}`},
 				}, IsComplete: true}
 				events <- LLMResponseChunk{IsComplete: true}
 			case 3:
@@ -96,18 +96,16 @@ func TestHarness_planningWriteLock_thenUnlockAfterCreatePlan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for range ch {
-	}
-
+	// Pre-plan denial is only on the stream; create_plan prunes the window.
 	var locked, unlocked bool
-	for _, m := range ah.ContextWindow {
-		if m == nil || m.Role != RoleTool {
+	for ev := range ch {
+		if ev.Type != StreamEventToolResult {
 			continue
 		}
-		if strings.Contains(m.Content, "locked") || strings.Contains(m.Content, "permission denied") {
+		if strings.Contains(ev.Content, "locked") || strings.Contains(ev.Content, "permission denied") {
 			locked = true
 		}
-		if m.Content == "mutated" {
+		if ev.Content == "mutated" {
 			unlocked = true
 		}
 	}
@@ -276,7 +274,7 @@ func TestHarness_toolPermission_rejectAlwaysRemembers(t *testing.T) {
 	}
 
 	var denied int
-	for _, m := range ah.ContextWindow {
+	for _, m := range ah.Messages() {
 		if m != nil && m.Role == RoleTool && strings.Contains(m.Content, "permission denied") {
 			denied++
 		}
@@ -299,7 +297,7 @@ func TestHarness_toolPermission_rejectAlwaysRemembers(t *testing.T) {
 		t.Fatal("reject-always should not re-raise permission interrupt")
 	}
 	denied = 0
-	for _, m := range ah.ContextWindow {
+	for _, m := range ah.Messages() {
 		if m != nil && m.Role == RoleTool && strings.Contains(m.Content, "permission denied") {
 			denied++
 		}
@@ -362,7 +360,7 @@ func TestHarness_toolTimeout_surfacesAsToolResult(t *testing.T) {
 		t.Fatalf("tool result %q should report timeout", toolResult)
 	}
 	found := false
-	for _, m := range ah.ContextWindow {
+	for _, m := range ah.Messages() {
 		if m != nil && m.Role == RoleTool && (strings.Contains(m.Content, "timed out") || strings.Contains(m.Content, "deadline")) {
 			found = true
 		}

@@ -3,6 +3,7 @@ package control
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/milvus-io/milvus/client/v2/milvusclient"
@@ -42,7 +43,12 @@ type HarnessRuntime struct {
 	ch                 chan streaming.StreamEvent
 }
 
-const planStateKey = "_plan"
+const (
+	planStateKey         = "_plan"
+	planDocumentStateKey = "_plan_document"
+	// planDocumentUpdatedKey is set when the draft text changes; result hooks consume it.
+	planDocumentUpdatedKey = "_plan_document_updated"
+)
 
 // Runtime hook to emit custom events as updates from tool calls.
 // Non-blocking: drops if no listener or channel full so tools never hang.
@@ -120,6 +126,50 @@ func (rt *HarnessRuntime) PlanSet(plan []Todo) {
 		Type: streaming.StreamEventPlanUpdate,
 		Data: data,
 	}
+}
+
+// PlanDocumentGet returns the full plaintext project plan draft, or "" if none.
+func (rt *HarnessRuntime) PlanDocumentGet() string {
+	rt.mu.RLock()
+	defer rt.mu.RUnlock()
+	if rt.State == nil {
+		return ""
+	}
+	s, _ := rt.State[planDocumentStateKey].(string)
+	return s
+}
+
+// PlanDocumentSet stores the plaintext project plan draft.
+// Marks the document updated only when replacing an existing draft with different
+// text (edits), not on the initial install from create_plan.
+func (rt *HarnessRuntime) PlanDocumentSet(plan string) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if rt.State == nil {
+		rt.State = make(map[string]any)
+	}
+	prev, _ := rt.State[planDocumentStateKey].(string)
+	rt.State[planDocumentStateKey] = plan
+	if prev != "" && strings.TrimSpace(prev) != strings.TrimSpace(plan) {
+		rt.State[planDocumentUpdatedKey] = true
+	}
+}
+
+// ConsumePlanDocumentUpdated returns whether the plan document was updated
+// since the last consume, and clears the flag.
+func (rt *HarnessRuntime) ConsumePlanDocumentUpdated() bool {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if rt.State == nil {
+		return false
+	}
+	v, ok := rt.State[planDocumentUpdatedKey]
+	if !ok {
+		return false
+	}
+	delete(rt.State, planDocumentUpdatedKey)
+	b, _ := v.(bool)
+	return b
 }
 
 // SetOutputChannel updates the channel used by EmitUpdate and PlanSet.

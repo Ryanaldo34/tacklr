@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -18,7 +19,7 @@ func TestCreatePlanTool_rejectsWhenActivePlanExists(t *testing.T) {
 		{Title: "existing", Status: streaming.TodoStatusInProgress},
 	})
 
-	_, err := createPlanTool.Invoke(context.Background(), `{"todos":[{"title":"new","status":"pending","description":""}]}`, rt)
+	_, err := createPlanTool.Invoke(context.Background(), `{"plan":"draft","todos":[{"title":"new","status":"pending","description":""}]}`, rt)
 	if err == nil {
 		t.Fatal("expected error when create_plan is called with an active plan")
 	}
@@ -36,7 +37,7 @@ func TestCreatePlanTool_createsWhenNoPlan(t *testing.T) {
 	rt := control.NewRuntime(nil, nil, nil)
 	rt.EnsureInitialized()
 
-	got, err := createPlanTool.Invoke(context.Background(), `{"todos":[{"title":"a","status":"pending","description":"d"}]}`, rt)
+	got, err := createPlanTool.Invoke(context.Background(), `{"plan":"CoS: ship it","todos":[{"title":"a","status":"pending","description":"d"}]}`, rt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,6 +47,57 @@ func TestCreatePlanTool_createsWhenNoPlan(t *testing.T) {
 	plan := rt.PlanGet()
 	if len(plan) != 1 || plan[0].Title != "a" {
 		t.Fatalf("plan = %v", plan)
+	}
+	if rt.PlanDocumentGet() != "CoS: ship it" {
+		t.Fatalf("plan document = %q", rt.PlanDocumentGet())
+	}
+}
+
+func TestCreatePlanTool_rejectsEmptyPlanDocument(t *testing.T) {
+	rt := control.NewRuntime(nil, nil, nil)
+	rt.EnsureInitialized()
+	_, err := createPlanTool.Invoke(context.Background(), `{"plan":"  ","todos":[{"title":"a","status":"pending","description":""}]}`, rt)
+	if err == nil || !strings.Contains(err.Error(), "plan document text is required") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestEditPlanTool_identicalPlanDocument_rejected(t *testing.T) {
+	rt := control.NewRuntime(nil, nil, nil)
+	rt.EnsureInitialized()
+	rt.PlanSet([]control.Todo{{Title: "a", Status: streaming.TodoStatusPending}})
+	rt.PlanDocumentSet("same plan")
+
+	_, err := editPlanTool.Invoke(context.Background(), `{"plan":"same plan","toAdd":[],"toDelete":[]}`, rt)
+	if err == nil || !strings.Contains(err.Error(), "unchanged") {
+		t.Fatalf("err = %v", err)
+	}
+	if rt.PlanDocumentGet() != "same plan" {
+		t.Fatalf("document changed: %q", rt.PlanDocumentGet())
+	}
+	if rt.ConsumePlanDocumentUpdated() {
+		t.Fatal("should not mark updated on rejected identical plan")
+	}
+}
+
+func TestEditPlanTool_newPlanDocument_setsUpdatedFlag(t *testing.T) {
+	rt := control.NewRuntime(nil, nil, nil)
+	rt.EnsureInitialized()
+	rt.PlanSet([]control.Todo{{Title: "a", Status: streaming.TodoStatusPending}})
+	rt.PlanDocumentSet("old")
+
+	got, err := editPlanTool.Invoke(context.Background(), `{"plan":"new full plan","toAdd":[],"toDelete":[]}`, rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "Plan edited successfully" {
+		t.Fatalf("got %q", got)
+	}
+	if rt.PlanDocumentGet() != "new full plan" {
+		t.Fatalf("document = %q", rt.PlanDocumentGet())
+	}
+	if !rt.ConsumePlanDocumentUpdated() {
+		t.Fatal("expected updated flag for handoff hook")
 	}
 }
 
@@ -384,7 +436,7 @@ func TestRun_completeTodo_skipsAlreadyCompletedNext(t *testing.T) {
 					Type: StreamEventFunctionCall,
 					ToolCalls: []ToolCall{{
 						ID: "p1", CallID: "p1", Name: "create_plan",
-						Arguments: `{"todos":[{"title":"A","description":"a"},{"title":"B","description":"b","status":"completed"},{"title":"C","description":"c"}]}`,
+						Arguments: `{"plan":"P","todos":[{"title":"A","description":"a"},{"title":"B","description":"b","status":"completed"},{"title":"C","description":"c"}]}`,
 					}},
 					IsComplete: true,
 				}
@@ -438,7 +490,7 @@ func TestRun_planToolValidationOutcomes(t *testing.T) {
 					Type: StreamEventFunctionCall,
 					ToolCalls: []ToolCall{{
 						ID: "p1", CallID: "p1", Name: "create_plan",
-						Arguments: `{"todos":[]}`,
+						Arguments: `{"plan":"P","todos":[]}`,
 					}},
 					IsComplete: true,
 				}
@@ -447,7 +499,7 @@ func TestRun_planToolValidationOutcomes(t *testing.T) {
 					Type: StreamEventFunctionCall,
 					ToolCalls: []ToolCall{{
 						ID: "p2", CallID: "p2", Name: "create_plan",
-						Arguments: `{"todos":[{"title":"Only","description":"d"}]}`,
+						Arguments: `{"plan":"Only plan","todos":[{"title":"Only","description":"d"}]}`,
 					}},
 					IsComplete: true,
 				}
@@ -725,7 +777,157 @@ func TestCompleteTodo_allRemainingCompleted(t *testing.T) {
 	}
 }
 
-// TestRun_completeTodo_noPlan_toolError: complete_todo without a plan fails clearly.
+func TestRun_createPlan_installsPlanDocumentAndPrunesWindow(t *testing.T) {
+	var n int
+	strategy := &mockStrategy{
+		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
+			n++
+			if n == 1 {
+				ch <- LLMResponseChunk{
+					Type: StreamEventFunctionCall,
+					ToolCalls: []ToolCall{{
+						ID: "p1", CallID: "p1", Name: "create_plan",
+						Arguments: `{"plan":"CoS: ship quality","todos":[{"title":"A","status":"pending","description":"d"}]}`,
+					}},
+					IsComplete: true,
+				}
+				return
+			}
+			if len(msgs) != 2 || msgs[0].Role != RoleUser || !isPlanDocument(msgs[1]) {
+				ch <- LLMResponseChunk{Type: StreamEventError, Content: fmt.Sprintf("bad window: %+v", msgs)}
+				return
+			}
+			if rawPlanFromDocumentMessage(msgs[1]) != "CoS: ship quality" {
+				ch <- LLMResponseChunk{Type: StreamEventError, Content: "plan body mismatch"}
+				return
+			}
+			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "executing", IsComplete: true}
+		},
+	}
+	h := NewAgent(context.Background(), AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  strategy,
+		Store:  testStore(t),
+	})
+	events, err := h.Run(context.Background(), "build the thing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := drainEvents(events)
+	for _, ev := range got {
+		if ev.Type == StreamEventError {
+			t.Fatalf("events=%+v", summarizeEvents(got))
+		}
+	}
+	if len(h.Messages()) < 2 || !isPlanDocument(h.Messages()[1]) {
+		t.Fatalf("window = %+v", h.Messages())
+	}
+	if h.Runtime.PlanDocumentGet() != "CoS: ship quality" {
+		t.Fatalf("document = %q", h.Runtime.PlanDocumentGet())
+	}
+}
+
+func TestRun_completeTodo_withPlanDocument_preservesFullPlan(t *testing.T) {
+	var n int
+	strategy := &mockStrategy{
+		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
+			n++
+			switch n {
+			case 1:
+				ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
+					{ID: "c1", CallID: "c1", Name: "complete_todo", Arguments: `{"title":"A"}`},
+				}, IsComplete: true}
+			case 2:
+				ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "handoff notes", IsComplete: true}
+			default:
+				ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "next", IsComplete: true}
+			}
+		},
+	}
+	h := NewAgent(context.Background(), AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  strategy,
+		Store:  testStore(t),
+	})
+	h.Runtime.PlanSet([]control.Todo{
+		{Title: "A", Status: streaming.TodoStatusInProgress},
+		{Title: "B", Status: streaming.TodoStatusPending},
+	})
+	h.Runtime.PlanDocumentSet("FULL PLAN DRAFT")
+
+	events, err := h.Run(context.Background(), "go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = drainEvents(events)
+
+	if len(h.Messages()) < 4 {
+		t.Fatalf("window len = %d, window=%+v", len(h.Messages()), h.Messages())
+	}
+	if !isPlanDocument(h.Messages()[1]) || rawPlanFromDocumentMessage(h.Messages()[1]) != "FULL PLAN DRAFT" {
+		t.Fatalf("plan = %+v", h.Messages()[1])
+	}
+	if h.Messages()[2].Role != RoleDeveloper || h.Messages()[2].Content != "handoff notes" {
+		t.Fatalf("handoff = %+v", h.Messages()[2])
+	}
+	if h.Messages()[3].Content != continuePlanNudge {
+		t.Fatalf("nudge = %+v", h.Messages()[3])
+	}
+}
+
+func TestRun_editPlan_planChange_triggersHandoff(t *testing.T) {
+	var n int
+	var handoffSawPlan bool
+	strategy := &mockStrategy{
+		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
+			n++
+			switch n {
+			case 1:
+				ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
+					{ID: "e1", CallID: "e1", Name: "edit_plan",
+						Arguments: `{"plan":"revised blueprint","toAdd":[],"toDelete":[]}`},
+				}, IsComplete: true}
+			case 2:
+				ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "post-edit handoff", IsComplete: true}
+			default:
+				for _, m := range msgs {
+					if isPlanDocument(m) && rawPlanFromDocumentMessage(m) == "revised blueprint" {
+						handoffSawPlan = true
+					}
+				}
+				ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "ok", IsComplete: true}
+			}
+		},
+	}
+	h := NewAgent(context.Background(), AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  strategy,
+		Store:  testStore(t),
+	})
+	h.Runtime.PlanSet([]control.Todo{
+		{Title: "A", Status: streaming.TodoStatusInProgress},
+		{Title: "B", Status: streaming.TodoStatusPending},
+	})
+	h.Runtime.PlanDocumentSet("old blueprint")
+
+	events, err := h.Run(context.Background(), "revise")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = drainEvents(events)
+	if h.Runtime.PlanDocumentGet() != "revised blueprint" {
+		t.Fatalf("document = %q", h.Runtime.PlanDocumentGet())
+	}
+	if len(h.Messages()) < 3 || !isPlanDocument(h.Messages()[1]) {
+		t.Fatalf("window = %+v", h.Messages())
+	}
+	if rawPlanFromDocumentMessage(h.Messages()[1]) != "revised blueprint" {
+		t.Fatalf("plan msg = %+v", h.Messages()[1])
+	}
+	if !handoffSawPlan {
+		t.Fatal("continue turn should see revised plan document in window")
+	}
+}
 
 // TestRun_completeTodo_noPlan_toolError: complete_todo without a plan fails clearly.
 func TestRun_completeTodo_noPlan_toolError(t *testing.T) {

@@ -650,32 +650,32 @@ func TestAgentHarness_Run(t *testing.T) {
 		}
 
 		// Post-compress: [user, handoff, continue nudge]; next turn appends assistant.
-		if len(ah.ContextWindow) != 4 {
-			t.Errorf("expected 4 messages (user, handoff, continue nudge, final), got %d", len(ah.ContextWindow))
+		if len(ah.Messages()) != 4 {
+			t.Errorf("expected 4 messages (user, handoff, continue nudge, final), got %d", len(ah.Messages()))
 		} else {
-			if ah.ContextWindow[0].Role != RoleUser {
-				t.Errorf("first message role = %q, want user (original request must not be dropped)", ah.ContextWindow[0].Role)
+			if ah.Messages()[0].Role != RoleUser {
+				t.Errorf("first message role = %q, want user (original request must not be dropped)", ah.Messages()[0].Role)
 			}
-			if ah.ContextWindow[0].Content != "Complete the first task" {
-				t.Errorf("first message content = %q, want original user prompt", ah.ContextWindow[0].Content)
+			if ah.Messages()[0].Content != "Complete the first task" {
+				t.Errorf("first message content = %q, want original user prompt", ah.Messages()[0].Content)
 			}
-			if ah.ContextWindow[1].Role != RoleDeveloper {
-				t.Errorf("handoff role = %q, want developer", ah.ContextWindow[1].Role)
+			if ah.Messages()[1].Role != RoleDeveloper {
+				t.Errorf("handoff role = %q, want developer", ah.Messages()[1].Role)
 			}
-			if ah.ContextWindow[1].Content != "Mock compressed handoff. Remaining: Task 2." {
-				t.Errorf("handoff content = %q, want last completed message full text only", ah.ContextWindow[1].Content)
+			if ah.Messages()[1].Content != "Mock compressed handoff. Remaining: Task 2." {
+				t.Errorf("handoff content = %q, want last completed message full text only", ah.Messages()[1].Content)
 			}
-			if ah.ContextWindow[2].Role != RoleDeveloper {
-				t.Errorf("nudge role = %q, want developer", ah.ContextWindow[2].Role)
+			if ah.Messages()[2].Role != RoleDeveloper {
+				t.Errorf("nudge role = %q, want developer", ah.Messages()[2].Role)
 			}
-			if ah.ContextWindow[2].Content != continuePlanNudge {
-				t.Errorf("nudge content = %q, want continuePlanNudge", ah.ContextWindow[2].Content)
+			if ah.Messages()[2].Content != continuePlanNudge {
+				t.Errorf("nudge content = %q, want continuePlanNudge", ah.Messages()[2].Content)
 			}
-			if ah.ContextWindow[3].Role != RoleAssistant {
-				t.Errorf("fourth message role = %q, want assistant", ah.ContextWindow[3].Role)
+			if ah.Messages()[3].Role != RoleAssistant {
+				t.Errorf("fourth message role = %q, want assistant", ah.Messages()[3].Role)
 			}
-			if !strings.Contains(ah.ContextWindow[3].Content, "All done!") {
-				t.Errorf("final message content = %q, want contains 'All done!'", ah.ContextWindow[3].Content)
+			if !strings.Contains(ah.Messages()[3].Content, "All done!") {
+				t.Errorf("final message content = %q, want contains 'All done!'", ah.Messages()[3].Content)
 			}
 		}
 
@@ -750,14 +750,14 @@ func TestAgentHarness_Run(t *testing.T) {
 		}
 
 		// Window keeps the live turn (user + tool traffic), not a post-handoff reshape.
-		if len(ah.ContextWindow) < 2 {
-			t.Fatalf("context window too short: %d", len(ah.ContextWindow))
+		if len(ah.Messages()) < 2 {
+			t.Fatalf("context window too short: %d", len(ah.Messages()))
 		}
-		if ah.ContextWindow[0].Role != RoleUser || ah.ContextWindow[0].Content != "Start" {
-			t.Errorf("first message = %+v, want original user prompt", ah.ContextWindow[0])
+		if ah.Messages()[0].Role != RoleUser || ah.Messages()[0].Content != "Start" {
+			t.Errorf("first message = %+v, want original user prompt", ah.Messages()[0])
 		}
 		var hasDeveloperHandoff bool
-		for _, m := range ah.ContextWindow {
+		for _, m := range ah.Messages() {
 			if m != nil && m.Role == RoleDeveloper {
 				hasDeveloperHandoff = true
 			}
@@ -826,7 +826,7 @@ func TestAgentHarness_Run(t *testing.T) {
 		}
 
 		var sawUser, sawTool, sawAssistant bool
-		for _, m := range ah.ContextWindow {
+		for _, m := range ah.Messages() {
 			if m == nil {
 				continue
 			}
@@ -849,7 +849,7 @@ func TestAgentHarness_Run(t *testing.T) {
 		}
 		if !sawUser || !sawTool || !sawAssistant {
 			t.Errorf("window missing expected roles: user=%v tool=%v assistant=%v window=%+v",
-				sawUser, sawTool, sawAssistant, ah.ContextWindow)
+				sawUser, sawTool, sawAssistant, ah.Messages())
 		}
 	})
 
@@ -900,10 +900,10 @@ func TestAgentHarness_Run(t *testing.T) {
 			t.Error("should not append continuePlanNudge when all todos are completed")
 		}
 		// [user, handoff, assistant] — no nudge
-		if len(ah.ContextWindow) != 3 {
-			t.Errorf("context len = %d, want 3 (user, handoff, assistant)", len(ah.ContextWindow))
-		} else if ah.ContextWindow[1].Content != "All work done handoff." {
-			t.Errorf("handoff = %q", ah.ContextWindow[1].Content)
+		if len(ah.Messages()) != 3 {
+			t.Errorf("context len = %d, want 3 (user, handoff, assistant)", len(ah.Messages()))
+		} else if ah.Messages()[1].Content != "All work done handoff." {
+			t.Errorf("handoff = %q", ah.Messages()[1].Content)
 		}
 	})
 
@@ -1090,8 +1090,8 @@ func TestNewAgent(t *testing.T) {
 	if h.WatchDog != AgentWatchDog(wd) {
 		t.Error("WatchDog not wired from arg")
 	}
-	if h.ContextWindow != nil {
-		t.Error("ContextWindow should be nil on init")
+	if len(h.Messages()) != 0 {
+		t.Error("Messages should be empty on init")
 	}
 	if h.SessionId != "" {
 		t.Errorf("SessionId = %q, want empty", h.SessionId)
@@ -1239,12 +1239,12 @@ func TestRun_reasoningCapturedInContextWindow(t *testing.T) {
 	for range events {
 	}
 
-	if len(h.ContextWindow) < 3 {
-		t.Fatalf("expected at least 3 messages in context window, got %d", len(h.ContextWindow))
+	if len(h.Messages()) < 3 {
+		t.Fatalf("expected at least 3 messages in context window, got %d", len(h.Messages()))
 	}
 
 	var reasoningMsg, assistantMsg *Message
-	for _, m := range h.ContextWindow {
+	for _, m := range h.Messages() {
 		if m.Role == RoleReasoning && m.Content == "Let me think about this..." {
 			reasoningMsg = m
 		}
@@ -1330,17 +1330,17 @@ func TestRun_windowPressure_summarizesAndPreservesUser(t *testing.T) {
 	if final != "answer after compress" {
 		t.Fatalf("final content = %q", final)
 	}
-	if len(ah.ContextWindow) == 0 || ah.ContextWindow[0].Role != RoleUser || ah.ContextWindow[0].Content != "original user goal" {
-		t.Fatalf("first message must remain original user, got %+v", ah.ContextWindow)
+	if len(ah.Messages()) == 0 || ah.Messages()[0].Role != RoleUser || ah.Messages()[0].Content != "original user goal" {
+		t.Fatalf("first message must remain original user, got %+v", ah.Messages())
 	}
 	var sawSummary bool
-	for _, m := range ah.ContextWindow {
+	for _, m := range ah.Messages() {
 		if m != nil && m.Role == RoleAssistant && m.Content == summaryText {
 			sawSummary = true
 		}
 	}
 	if !sawSummary {
-		t.Fatalf("expected summary assistant message in window, got %+v", ah.ContextWindow)
+		t.Fatalf("expected summary assistant message in window, got %+v", ah.Messages())
 	}
 }
 
@@ -1391,10 +1391,10 @@ func TestRun_windowPressure_onToolResult_summarizes(t *testing.T) {
 		Store:  store,
 		Tools:  []*Tool{greet},
 	})
-	ah.ContextWindow = []*Message{
+	ah.RestoreMessages([]*Message{
 		{Role: RoleUser, Content: "start"},
 		{Role: RoleAssistant, Content: strings.Repeat("a", 40)},
-	}
+	})
 
 	ch, err := ah.Run(context.Background(), "use greet")
 	if err != nil {
@@ -1415,8 +1415,8 @@ func TestRun_windowPressure_onToolResult_summarizes(t *testing.T) {
 	if final != "after tool compress" {
 		t.Fatalf("final = %q", final)
 	}
-	if ah.ContextWindow[0].Role != RoleUser || ah.ContextWindow[0].Content != "start" {
-		t.Fatalf("must preserve original user, got %+v", ah.ContextWindow[0])
+	if ah.Messages()[0].Role != RoleUser || ah.Messages()[0].Content != "start" {
+		t.Fatalf("must preserve original user, got %+v", ah.Messages()[0])
 	}
 }
 
@@ -1506,55 +1506,71 @@ func TestRun_readSkill_returnsInstructions(t *testing.T) {
 	}
 }
 
-// stubContextManager records Fit/Handoff so AgentOptions.ContextManager injection
-// is proven end-to-end through Run (not only unit-level Fit calls).
-type stubContextManager struct {
-	fitCalls     atomic.Int64
+// stubModelTasks records Absorb/Handoff/Turn for AgentOptions.ModelTasks injection.
+type stubModelTasks struct {
+	cm           ContextManager
+	absorbCalls  atomic.Int64
 	handoffCalls atomic.Int64
-	fitWindow    []*Message
+	turnCalls    atomic.Int64
+	turnFn       func(ctx context.Context, tools []*Tool, systemPrompt string) (<-chan LLMResponseChunk, error)
 }
 
-func (s *stubContextManager) Fit(ctx context.Context, in FitInput) (FitResult, error) {
-	s.fitCalls.Add(1)
-	w := append(append([]*Message(nil), in.Window...), in.NewMsg)
-	s.fitWindow = w
-	return FitResult{Window: w}, nil
+func (s *stubModelTasks) Turn(ctx context.Context, tools []*Tool, systemPrompt string) (<-chan LLMResponseChunk, error) {
+	s.turnCalls.Add(1)
+	if s.turnFn != nil {
+		return s.turnFn(ctx, tools, systemPrompt)
+	}
+	ch := make(chan LLMResponseChunk, 1)
+	ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "ok", IsComplete: true}
+	close(ch)
+	return ch, nil
 }
 
-func (s *stubContextManager) Handoff(ctx context.Context, in HandoffInput) (HandoffResult, error) {
+func (s *stubModelTasks) Absorb(ctx context.Context, msg *Message, tools []*Tool, systemPrompt string) (AbsorbResult, error) {
+	s.absorbCalls.Add(1)
+	if msg != nil {
+		s.cm.Add(msg)
+	}
+	return AbsorbResult{}, nil
+}
+
+func (s *stubModelTasks) Handoff(ctx context.Context, plan []control.Todo, planDoc string, tools []*Tool, systemPrompt string) error {
 	s.handoffCalls.Add(1)
-	return HandoffResult{Window: []*Message{
+	s.cm.Replace([]*Message{
 		{Role: RoleUser, Content: "goal"},
 		{Role: RoleDeveloper, Content: "stub handoff"},
-	}}, nil
+	})
+	return nil
 }
 
-// TestNewAgent_injectsContextManager: Run uses the injected Fit path; complete_todo
-// uses the injected Handoff path.
-func TestNewAgent_injectsContextManager(t *testing.T) {
+// TestNewAgent_injectsModelTasks: Run uses injected Absorb/Turn; complete_todo uses Handoff.
+func TestNewAgent_injectsModelTasks(t *testing.T) {
 	store := testStore(t)
-	cm := &stubContextManager{}
+	cm := NewModelContextManager()
 	var invokeCount int
-	strategy := &mockStrategy{
-		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, events chan<- LLMResponseChunk) {
+	st := &stubModelTasks{
+		cm: cm,
+		turnFn: func(ctx context.Context, tools []*Tool, systemPrompt string) (<-chan LLMResponseChunk, error) {
 			invokeCount++
+			ch := make(chan LLMResponseChunk, 4)
 			if invokeCount == 1 {
-				events <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
+				ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
 					{ID: "ct", CallID: "ct", Name: "complete_todo", Arguments: `{"title":"T1"}`},
 				}, IsComplete: true}
-				events <- LLMResponseChunk{IsComplete: true}
-				return
+				ch <- LLMResponseChunk{IsComplete: true}
+			} else {
+				ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "after stub handoff", IsComplete: true}
 			}
-			// ModelContextManager would call Invoke for handoff; stub does not.
-			// Continue turn after handoff.
-			events <- LLMResponseChunk{Type: StreamEventMessage, Content: "after stub handoff", IsComplete: true}
+			close(ch)
+			return ch, nil
 		},
 	}
 	ah := NewAgent(context.Background(), AgentOptions{
 		Config:         Config{MaxWindowSize: 8192},
-		Model:          strategy,
+		Model:          &mockStrategy{},
 		Store:          store,
 		ContextManager: cm,
+		ModelTasks:     st,
 	})
 	ah.Runtime.PlanSet([]control.Todo{
 		{Title: "T1", Status: streaming.TodoStatusInProgress},
@@ -1573,24 +1589,23 @@ func TestNewAgent_injectsContextManager(t *testing.T) {
 			t.Fatalf("error event: %v", ev.Error)
 		}
 	}
-	if cm.fitCalls.Load() < 1 {
-		t.Fatalf("Fit calls = %d, want >= 1 (user prompt / tool results)", cm.fitCalls.Load())
+	if st.absorbCalls.Load() < 1 {
+		t.Fatalf("Absorb calls = %d, want >= 1", st.absorbCalls.Load())
 	}
-	if cm.handoffCalls.Load() != 1 {
-		t.Fatalf("Handoff calls = %d, want 1", cm.handoffCalls.Load())
+	if st.handoffCalls.Load() != 1 {
+		t.Fatalf("Handoff calls = %d, want 1", st.handoffCalls.Load())
 	}
 	if !sawFinal {
 		t.Fatal("expected final message after stub handoff continue turn")
 	}
-	// Window should reflect stub handoff, not model-generated handoff text.
 	var sawStub bool
-	for _, m := range ah.ContextWindow {
+	for _, m := range ah.Messages() {
 		if m != nil && m.Role == RoleDeveloper && m.Content == "stub handoff" {
 			sawStub = true
 		}
 	}
 	if !sawStub {
-		t.Fatalf("context window missing stub handoff: %+v", ah.ContextWindow)
+		t.Fatalf("context window missing stub handoff: %+v", ah.Messages())
 	}
 }
 
