@@ -2,6 +2,7 @@ package tacklr
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/ryanaldo34/tacklr/control"
 	"github.com/ryanaldo34/tacklr/streaming"
@@ -9,6 +10,7 @@ import (
 
 // ContextPolicy controls when and how conversation windows are reshaped under pressure.
 // Used by ModelTasks.Absorb, not by ContextManager itself.
+// Small value type — pass by value.
 type ContextPolicy struct {
 	// PressureRatio is the fraction of MaxSize at which Absorb starts collapsing
 	// (e.g. 0.85 means compress when estimated tokens exceed 85% of max).
@@ -37,11 +39,13 @@ type ContextManager interface {
 	// Messages returns the live window. Callers must not mutate the slice header
 	// or reorder elements; treat it as read-only.
 	Messages() []*Message
-	// Snapshot returns a shallow copy of the message slice for checkpointing.
+	// Snapshot returns a shallow copy of the message pointer slice for checkpointing.
+	// Message values are shared (pointers), not deep-cloned.
 	Snapshot() []*Message
-	// Restore replaces the window (session load and tests).
+	// Restore copies window into internal storage (safe for external/session slices).
 	Restore(window []*Message)
-	// Replace is Restore with a clearer name for model-task apply paths.
+	// Replace takes ownership of window without copying the slice.
+	// Caller must not reuse the slice after Replace.
 	Replace(window []*Message)
 
 	// Add appends a message without pressure fitting (streamed assistant/reasoning).
@@ -67,26 +71,24 @@ func (m *ModelContextManager) Messages() []*Message {
 }
 
 func (m *ModelContextManager) Snapshot() []*Message {
-	if m.window == nil {
+	if len(m.window) == 0 {
 		return nil
 	}
-	cp := make([]*Message, len(m.window))
-	copy(cp, m.window)
-	return cp
+	return slices.Clone(m.window)
 }
 
 func (m *ModelContextManager) Restore(window []*Message) {
-	m.Replace(window)
-}
-
-func (m *ModelContextManager) Replace(window []*Message) {
-	if window == nil {
+	if len(window) == 0 {
 		m.window = nil
 		return
 	}
-	cp := make([]*Message, len(window))
-	copy(cp, window)
-	m.window = cp
+	// Copy so session/test callers keep independent slice headers.
+	m.window = slices.Clone(window)
+}
+
+func (m *ModelContextManager) Replace(window []*Message) {
+	// Ownership transfer: Absorb/Handoff already allocated the new slice.
+	m.window = window
 }
 
 func (m *ModelContextManager) Add(msg *Message) {
@@ -103,8 +105,8 @@ func (m *ModelContextManager) InstallPlanDocument(planRaw string) error {
 	if len(m.window) == 0 || m.window[0] == nil {
 		return fmt.Errorf("install plan document: empty window")
 	}
-	user := *m.window[0]
-	m.window = []*Message{&user, buildPlanDocumentMessage(planRaw)}
+	// Keep the existing user message pointer; only drop the rest.
+	m.window = []*Message{m.window[0], buildPlanDocumentMessage(planRaw)}
 	return nil
 }
 
@@ -125,8 +127,8 @@ func protectedPrefixLen(window []*Message) int {
 const continuePlanNudge = `The plan still has incomplete todos. Continue executing now: work the in-progress todo (or the next pending one), call tools as needed, and do not stop for user confirmation. Do not restate the handoff; act on the next todo.`
 
 func planHasOpenTodos(plan []control.Todo) bool {
-	for _, todo := range plan {
-		if todo.Status != streaming.TodoStatusCompleted {
+	for i := range plan {
+		if plan[i].Status != streaming.TodoStatusCompleted {
 			return true
 		}
 	}

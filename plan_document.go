@@ -2,10 +2,11 @@ package tacklr
 
 import "strings"
 
-// planDocumentPrefix identifies durable plan messages so Fit can protect them.
+// planDocumentPrefix identifies durable plan messages so Absorb can protect them.
 const planDocumentPrefix = "PROJECT PLAN\n────────────\n"
 
 func formatPlanDocument(raw string) string {
+	// Two-part concat; compiler emits efficient allocation.
 	return planDocumentPrefix + raw
 }
 
@@ -14,6 +15,9 @@ func isPlanDocument(m *Message) bool {
 }
 
 func rawPlanFromDocumentMessage(m *Message) string {
+	if m == nil {
+		return ""
+	}
 	return strings.TrimPrefix(m.Content, planDocumentPrefix)
 }
 

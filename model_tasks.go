@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"slices"
 	"strings"
 
 	"github.com/ryanaldo34/tacklr/control"
 )
 
 // AbsorbResult is returned by ModelTasks.Absorb after incorporating a message.
+// Small value type (slice header only).
 type AbsorbResult struct {
 	// SummaryChunks when StreamFitSummary is true; harness streams to the client.
 	SummaryChunks []LLMResponseChunk
@@ -32,11 +34,16 @@ type ModelTasks interface {
 }
 
 // DefaultModelTasks is the standard ModelTasks implementation.
+// Stored as a pointer on the harness (interface holds *DefaultModelTasks).
 type DefaultModelTasks struct {
 	model   InferenceStrategy
 	context ContextManager
 	policy  ContextPolicy
 	maxSize int
+
+	// countScratch is reused by absorbFit's progressive token-count search so
+	// each pressure step does not allocate a new message pointer slice.
+	countScratch []*Message
 }
 
 // NewDefaultModelTasks wires provider + context structure for product model ops.
@@ -72,10 +79,11 @@ func (t *DefaultModelTasks) Absorb(ctx context.Context, msg *Message, tools []*T
 	if msg == nil {
 		return AbsorbResult{}, nil
 	}
-	window, chunks, err := absorbFit(ctx, t.context.Messages(), msg, t.model, tools, t.maxSize, t.policy, systemPrompt)
+	window, chunks, err := t.absorbFit(ctx, t.context.Messages(), msg, tools, systemPrompt)
 	if err != nil {
 		return AbsorbResult{}, err
 	}
+	// window is freshly allocated; Replace takes ownership (no second copy).
 	t.context.Replace(window)
 	return AbsorbResult{SummaryChunks: chunks}, nil
 }
@@ -91,16 +99,16 @@ func (t *DefaultModelTasks) Handoff(ctx context.Context, plan []control.Todo, pl
 
 // absorbFit collapses under pressure then appends newMsg.
 // Uses InferenceStrategy.CountTokens (provider-specific) and Invoke for summary.
-func absorbFit(
+func (t *DefaultModelTasks) absorbFit(
 	ctx context.Context,
 	window []*Message,
 	newMsg *Message,
-	model InferenceStrategy,
 	tools []*Tool,
-	maxSize int,
-	policy ContextPolicy,
 	restoreSystemPrompt string,
 ) ([]*Message, []LLMResponseChunk, error) {
+	model := t.model
+	policy := t.policy
+	maxSize := t.maxSize
 	if policy.PressureRatio <= 0 {
 		policy.PressureRatio = DefaultContextPolicy().PressureRatio
 	}
@@ -108,30 +116,41 @@ func absorbFit(
 		policy.CompressFraction = DefaultContextPolicy().CompressFraction
 	}
 
-	tempWindow := append(append([]*Message(nil), window...), newMsg)
-	if model == nil {
-		return tempWindow, nil, nil
+	// countView = window + newMsg in reusable scratch (not retained as the stored window).
+	fullN := len(window) + 1
+	countView := t.stageMessages(fullN)
+	copy(countView, window)
+	countView[len(window)] = newMsg
+
+	// ownedCopy returns a slice Replace can take ownership of.
+	ownedCopy := func(src []*Message) []*Message {
+		return slices.Clone(src)
 	}
 
-	currSize, err := model.CountTokens(ctx, tempWindow, tools)
+	if model == nil {
+		return ownedCopy(countView), nil, nil
+	}
+
+	currSize, err := model.CountTokens(ctx, countView, tools)
 	if err != nil {
 		slog.Error("failed to count tokens while absorbing message", "area", "model_tasks", "error", err)
 		return nil, nil, fmt.Errorf("count tokens: %w", err)
 	}
 	if len(window) == 0 || float64(currSize) <= float64(maxSize)*policy.PressureRatio {
-		return tempWindow, nil, nil
+		return ownedCopy(countView), nil, nil
 	}
 
 	slog.Info("max context window size exceeded or approaching, compressing context window",
 		"area", "model_tasks", "max_size", maxSize, "current_size", currSize)
 
-	model.SetSystemPrompt(fmt.Sprintf(
-		"Please summarize the entire message history into a single, concise summary including key items for your current and past tasks with a primary focus on your current task. Current task or follow-up question to answer: %s",
-		newMsg.Content,
-	))
+	var sumPrompt strings.Builder
+	sumPrompt.Grow(280 + len(newMsg.Content))
+	sumPrompt.WriteString("Please summarize the entire message history into a single, concise summary including key items for your current and past tasks with a primary focus on your current task. Current task or follow-up question to answer: ")
+	sumPrompt.WriteString(newMsg.Content)
+	model.SetSystemPrompt(sumPrompt.String())
 
 	anchorLen := protectedPrefixLen(window)
-	if anchorLen == 0 {
+	if anchorLen < 1 {
 		anchorLen = 1
 	}
 	if anchorLen > len(window) {
@@ -143,15 +162,17 @@ func absorbFit(
 		if restoreSystemPrompt != "" {
 			model.SetSystemPrompt(restoreSystemPrompt)
 		}
-		return tempWindow, nil, nil
+		return ownedCopy(countView), nil, nil
 	}
 
-	rebuild := func(mid []*Message) []*Message {
-		out := make([]*Message, 0, anchorLen+len(mid)+1)
-		out = append(out, anchors...)
-		out = append(out, mid...)
-		out = append(out, newMsg)
-		return out
+	// Progressive CountTokens probes reuse countScratch (no alloc per step).
+	stageCount := func(from int) []*Message {
+		n := anchorLen + (len(unprotected) - from) + 1
+		buf := t.stageMessages(n)
+		copy(buf, anchors)
+		copy(buf[anchorLen:], unprotected[from:])
+		buf[n-1] = newMsg
+		return buf
 	}
 
 	numMessagesToCompress := int(math.Round(float64(len(unprotected)) * policy.CompressFraction))
@@ -165,7 +186,7 @@ func absorbFit(
 			start = len(unprotected)
 		}
 		for start < len(unprotected) {
-			count, err := model.CountTokens(ctx, rebuild(unprotected[start:]), tools)
+			count, err := model.CountTokens(ctx, stageCount(start), tools)
 			if err != nil {
 				return nil, nil, fmt.Errorf("count tokens: %w", err)
 			}
@@ -189,6 +210,7 @@ func absorbFit(
 	}
 
 	compressed := &Message{Role: RoleAssistant}
+	var summary strings.Builder
 	var chunks []LLMResponseChunk
 	for chunk := range events {
 		if chunk.Type == StreamEventError {
@@ -197,14 +219,32 @@ func absorbFit(
 		if policy.StreamFitSummary {
 			chunks = append(chunks, chunk)
 		}
-		compressed.Content += chunk.Content
+		summary.WriteString(chunk.Content)
 	}
+	compressed.Content = summary.String()
 
-	mid := append([]*Message{compressed}, unprotected[numMessagesToCompress:]...)
+	// Single final allocation: anchors + summary + remaining unprotected + newMsg.
+	rest := unprotected[numMessagesToCompress:]
+	out := make([]*Message, 0, anchorLen+1+len(rest)+1)
+	out = append(out, anchors...)
+	out = append(out, compressed)
+	out = append(out, rest...)
+	out = append(out, newMsg)
+
 	if restoreSystemPrompt != "" {
 		model.SetSystemPrompt(restoreSystemPrompt)
 	}
-	return rebuild(mid), chunks, nil
+	return out, chunks, nil
+}
+
+// stageMessages returns t.countScratch resized to n (grows capacity when needed).
+func (t *DefaultModelTasks) stageMessages(n int) []*Message {
+	if cap(t.countScratch) < n {
+		t.countScratch = make([]*Message, n)
+	} else {
+		t.countScratch = t.countScratch[:n]
+	}
+	return t.countScratch
 }
 
 func handoffGenerate(
@@ -227,12 +267,13 @@ func handoffGenerate(
 	}
 
 	var planB strings.Builder
-	for _, todo := range plan {
-		line := fmt.Sprintf("- %s: %s\nStatus: %s\n", todo.Title, todo.Description, todo.Status)
-		planB.WriteString(line)
+	planB.Grow(len(plan) * 64)
+	for i := range plan {
+		todo := &plan[i]
+		fmt.Fprintf(&planB, "- %s: %s\nStatus: %s\n", todo.Title, todo.Description, todo.Status)
 	}
-	prompt := fmt.Sprintf(
-		`Your task is to produce a handoff for someone to complete the remaining todo items in the plan, not a summary of the completed work, but rather, an informative overview of the process that has completed the work so far. You will ensure to inform the handoff recipient that this is a work in progress and that they should expect to complete the remaining todo items. This is your only task, and you will not add any additional commentary, thoughts, etc. This is not a generic summary as the handoff needs to include the following sections:
+
+	const handoffPreamble = `Your task is to produce a handoff for someone to complete the remaining todo items in the plan, not a summary of the completed work, but rather, an informative overview of the process that has completed the work so far. You will ensure to inform the handoff recipient that this is a work in progress and that they should expect to complete the remaining todo items. This is your only task, and you will not add any additional commentary, thoughts, etc. This is not a generic summary as the handoff needs to include the following sections:
 	Objective: Overall mission and success criteria (brief; a durable PROJECT PLAN document will remain in context — do not restate the full blueprint).
 	Completed Work: What is now true because of the completed todo(s) and an overview of the current state of the plan & implementation. Someone should know exactly what was done & what work is remaining and be able to pick up the remaining work seamlessly.
 	Key Decisions: Architectural or implementation choices that should not be revisited.
@@ -244,9 +285,13 @@ func handoffGenerate(
 	Relevant Context for Remaining Todos: Only information the next todos are likely to need which was gathered or observed in the completed work.
 
 Current plan todos:
-%s`, planB.String())
+`
+	var prompt strings.Builder
+	prompt.Grow(len(handoffPreamble) + planB.Len())
+	prompt.WriteString(handoffPreamble)
+	prompt.WriteString(planB.String())
 
-	model.SetSystemPrompt(prompt)
+	model.SetSystemPrompt(prompt.String())
 	events, err := model.Invoke(ctx, window, tools)
 	if err != nil {
 		return nil, err
@@ -266,9 +311,9 @@ Current plan todos:
 		}
 	}
 
-	user := *window[0]
+	// Reuse window[0] pointer (original user). Cap 4: user, plan?, handoff, nudge?
 	out := make([]*Message, 0, 4)
-	out = append(out, &user)
+	out = append(out, window[0])
 	if planDoc != "" {
 		out = append(out, buildPlanDocumentMessage(planDoc))
 	}
