@@ -388,13 +388,6 @@ func (a *AgentHarness) applyBatchToolResultEffect(ctx context.Context, effect To
 	}
 }
 
-func (a *AgentHarness) contextPolicyOrDefault() ContextPolicy {
-	if a.contextPolicy.PressureRatio > 0 || a.contextPolicy.CompressFraction > 0 {
-		return a.contextPolicy
-	}
-	return DefaultContextPolicy()
-}
-
 func (a *AgentHarness) findTool(name, namespace string) *Tool {
 	idx := slices.IndexFunc(a.Tools, func(t *Tool) bool {
 		return t.Name == name && t.Namespace == namespace

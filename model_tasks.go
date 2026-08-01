@@ -122,13 +122,8 @@ func (t *DefaultModelTasks) absorbFit(
 	copy(countView, window)
 	countView[len(window)] = newMsg
 
-	// ownedCopy returns a slice Replace can take ownership of.
-	ownedCopy := func(src []*Message) []*Message {
-		return slices.Clone(src)
-	}
-
 	if model == nil {
-		return ownedCopy(countView), nil, nil
+		return slices.Clone(countView), nil, nil
 	}
 
 	currSize, err := model.CountTokens(ctx, countView, tools)
@@ -137,7 +132,7 @@ func (t *DefaultModelTasks) absorbFit(
 		return nil, nil, fmt.Errorf("count tokens: %w", err)
 	}
 	if len(window) == 0 || float64(currSize) <= float64(maxSize)*policy.PressureRatio {
-		return ownedCopy(countView), nil, nil
+		return slices.Clone(countView), nil, nil
 	}
 
 	slog.Info("max context window size exceeded or approaching, compressing context window",
@@ -162,7 +157,7 @@ func (t *DefaultModelTasks) absorbFit(
 		if restoreSystemPrompt != "" {
 			model.SetSystemPrompt(restoreSystemPrompt)
 		}
-		return ownedCopy(countView), nil, nil
+		return slices.Clone(countView), nil, nil
 	}
 
 	// Progressive CountTokens probes reuse countScratch (no alloc per step).
