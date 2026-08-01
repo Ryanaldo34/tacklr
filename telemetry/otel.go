@@ -8,20 +8,22 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/propagation"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 	"go.opentelemetry.io/otel/trace"
-	"go.opentelemetry.io/otel/trace/noop"
+	tracenoop "go.opentelemetry.io/otel/trace/noop"
 )
 
 // InstrumentationName is the OpenTelemetry instrumentation library name for
-// Tacklr spans. Hosts that build a Tracer from their own TracerProvider should
-// use this name (or call TracerFromProvider).
+// Tacklr spans and meters. Hosts that build Tracer/Meter from their own providers
+// should use this name (or call TracerFromProvider / MeterFromProvider).
 const InstrumentationName = "github.com/ryanaldo34/tacklr"
 
 // tracerContextKey carries an optional per-request Tracer on context so child
@@ -41,7 +43,7 @@ func ContextWithTracer(ctx context.Context, t trace.Tracer) context.Context {
 }
 
 // TracerFromContext returns the tracer attached with ContextWithTracer, or the
-// global package tracer when none is set (and when t was never injected).
+// global package tracer when none is set.
 func TracerFromContext(ctx context.Context) trace.Tracer {
 	if ctx != nil {
 		if t, ok := ctx.Value(tracerContextKey{}).(trace.Tracer); ok && t != nil {
@@ -60,53 +62,43 @@ func TracerFromProvider(tp trace.TracerProvider) trace.Tracer {
 	return tp.Tracer(InstrumentationName)
 }
 
-// Config configures OTLP tracing. An empty OTLPEndpoint (and no OTEL env endpoint)
-// installs a no-op provider so library consumers pay almost nothing until Init.
+// Config configures OTLP traces and metrics for a simple host process.
+// An empty OTLPEndpoint (and no OTEL env endpoint) installs no-op providers.
 type Config struct {
 	ServiceName    string
 	ServiceVersion string
 	// OTLPEndpoint is host:port or full URL. Empty uses OTEL_EXPORTER_OTLP_ENDPOINT
-	// when set; if still empty, tracing is no-op.
+	// when set; if still empty, tracing and metrics are no-op.
 	OTLPEndpoint string
 	// Protocol is "grpc" (default) or "http".
 	Protocol string
-	// Insecure disables TLS for the exporter (local collectors).
+	// Insecure disables TLS for the exporters (local collectors / Alloy).
 	Insecure bool
-	// SampleRatio in (0,1]; values <=0 are treated as 1.0 (always sample).
+	// SampleRatio in (0,1]; values <=0 are treated as 1.0 (always sample traces).
 	SampleRatio float64
+	// DisableMetrics skips MeterProvider setup (traces only). Default false:
+	// the same OTLP endpoint receives metrics for LGTM (Mimir/Prometheus path).
+	DisableMetrics bool
 }
 
-// Init installs a global TracerProvider and text-map propagator.
-// Returns a shutdown function that flushes exporters.
+// Init installs global TracerProvider and MeterProvider (unless DisableMetrics)
+// plus a W3C text-map propagator. One OTLP endpoint serves both signals so hosts
+// can point Alloy/Collector at a single address for Tempo + Mimir.
+// Returns a shutdown that flushes exporters.
 func Init(ctx context.Context, cfg Config) (shutdown func(context.Context) error, err error) {
 	endpoint := strings.TrimSpace(cfg.OTLPEndpoint)
 	if endpoint == "" {
 		endpoint = strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
 	}
 	if endpoint == "" {
-		otel.SetTracerProvider(noop.NewTracerProvider())
+		SetTracerProvider(nil)
+		SetMeterProvider(nil)
 		return func(context.Context) error { return nil }, nil
 	}
 
-	serviceName := cfg.ServiceName
-	if serviceName == "" {
-		if v := strings.TrimSpace(os.Getenv("OTEL_SERVICE_NAME")); v != "" {
-			serviceName = v
-		} else {
-			serviceName = "tacklr"
-		}
-	}
-
-	res, err := resource.Merge(
-		resource.Default(),
-		resource.NewWithAttributes(
-			semconv.SchemaURL,
-			semconv.ServiceName(serviceName),
-			semconv.ServiceVersion(cfg.ServiceVersion),
-		),
-	)
+	res, err := DefaultResource(cfg.ServiceName, cfg.ServiceVersion)
 	if err != nil {
-		return nil, fmt.Errorf("otel resource: %w", err)
+		return nil, err
 	}
 
 	protocol := strings.ToLower(strings.TrimSpace(cfg.Protocol))
@@ -116,19 +108,56 @@ func Init(ctx context.Context, cfg Config) (shutdown func(context.Context) error
 	if protocol == "" {
 		protocol = "grpc"
 	}
-
+	insecure := cfg.Insecure || strings.HasPrefix(endpoint, "http://") || !strings.Contains(endpoint, "://")
 	host := stripScheme(endpoint)
+
+	tp, err := newOTLPTracerProvider(ctx, host, protocol, insecure, cfg.SampleRatio, res)
+	if err != nil {
+		return nil, err
+	}
+	otel.SetTracerProvider(tp)
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
+		propagation.TraceContext{},
+		propagation.Baggage{},
+	))
+
+	var mp *sdkmetric.MeterProvider
+	if !cfg.DisableMetrics {
+		mp, err = newOTLPMeterProvider(ctx, host, protocol, insecure, res)
+		if err != nil {
+			_ = tp.Shutdown(ctx)
+			return nil, err
+		}
+		SetMeterProvider(mp)
+	}
+
+	return func(ctx context.Context) error {
+		var first error
+		if mp != nil {
+			if err := mp.Shutdown(ctx); err != nil && first == nil {
+				first = err
+			}
+		}
+		if err := tp.Shutdown(ctx); err != nil && first == nil {
+			first = err
+		}
+		return first
+	}, nil
+}
+
+func newOTLPTracerProvider(ctx context.Context, host, protocol string, insecure bool, sampleRatio float64, res *resource.Resource) (*sdktrace.TracerProvider, error) {
 	var exp *otlptrace.Exporter
+	var err error
 	switch protocol {
 	case "http", "http/protobuf":
 		opts := []otlptracehttp.Option{otlptracehttp.WithEndpoint(host)}
-		if cfg.Insecure || strings.HasPrefix(endpoint, "http://") {
+		if insecure {
 			opts = append(opts, otlptracehttp.WithInsecure())
 		}
 		exp, err = otlptracehttp.New(ctx, opts...)
 	case "grpc":
 		opts := []otlptracegrpc.Option{otlptracegrpc.WithEndpoint(host)}
-		if cfg.Insecure || strings.HasPrefix(endpoint, "http://") || !strings.Contains(endpoint, "://") {
+		if insecure {
 			opts = append(opts, otlptracegrpc.WithInsecure())
 		}
 		exp, err = otlptracegrpc.New(ctx, opts...)
@@ -136,10 +165,10 @@ func Init(ctx context.Context, cfg Config) (shutdown func(context.Context) error
 		return nil, fmt.Errorf("otel: unknown protocol %q", protocol)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("otel exporter: %w", err)
+		return nil, fmt.Errorf("otel trace exporter: %w", err)
 	}
 
-	ratio := cfg.SampleRatio
+	ratio := sampleRatio
 	if ratio <= 0 || ratio > 1 {
 		ratio = 1
 	}
@@ -150,22 +179,48 @@ func Init(ctx context.Context, cfg Config) (shutdown func(context.Context) error
 		sampler = sdktrace.ParentBased(sdktrace.TraceIDRatioBased(ratio))
 	}
 
-	tp := sdktrace.NewTracerProvider(
+	return sdktrace.NewTracerProvider(
 		sdktrace.WithBatcher(exp, sdktrace.WithBatchTimeout(2*time.Second)),
 		sdktrace.WithResource(res),
 		sdktrace.WithSampler(sampler),
-	)
-	otel.SetTracerProvider(tp)
-	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
-		propagation.TraceContext{},
-		propagation.Baggage{},
-	))
+	), nil
+}
 
-	return tp.Shutdown, nil
+func newOTLPMeterProvider(ctx context.Context, host, protocol string, insecure bool, res *resource.Resource) (*sdkmetric.MeterProvider, error) {
+	var reader sdkmetric.Reader
+	switch protocol {
+	case "http", "http/protobuf":
+		opts := []otlpmetrichttp.Option{otlpmetrichttp.WithEndpoint(host)}
+		if insecure {
+			opts = append(opts, otlpmetrichttp.WithInsecure())
+		}
+		exp, err := otlpmetrichttp.New(ctx, opts...)
+		if err != nil {
+			return nil, fmt.Errorf("otel metric exporter: %w", err)
+		}
+		reader = sdkmetric.NewPeriodicReader(exp, sdkmetric.WithInterval(10*time.Second))
+	case "grpc":
+		opts := []otlpmetricgrpc.Option{otlpmetricgrpc.WithEndpoint(host)}
+		if insecure {
+			opts = append(opts, otlpmetricgrpc.WithInsecure())
+		}
+		exp, err := otlpmetricgrpc.New(ctx, opts...)
+		if err != nil {
+			return nil, fmt.Errorf("otel metric exporter: %w", err)
+		}
+		reader = sdkmetric.NewPeriodicReader(exp, sdkmetric.WithInterval(10*time.Second))
+	default:
+		return nil, fmt.Errorf("otel: unknown protocol %q", protocol)
+	}
+
+	return sdkmetric.NewMeterProvider(
+		sdkmetric.WithResource(res),
+		sdkmetric.WithReader(reader),
+	), nil
 }
 
 // Tracer returns the package tracer from the global TracerProvider
-// (noop-safe when Init was not called with an endpoint and nothing else set the global provider).
+// (noop-safe when Init was not called with an endpoint).
 func Tracer() trace.Tracer {
 	return otel.Tracer(InstrumentationName)
 }
@@ -175,7 +230,7 @@ func Tracer() trace.Tracer {
 // registry instead of replacing the global. Pass nil for a no-op provider.
 func SetTracerProvider(tp trace.TracerProvider) {
 	if tp == nil {
-		tp = noop.NewTracerProvider()
+		tp = tracenoop.NewTracerProvider()
 	}
 	otel.SetTracerProvider(tp)
 }

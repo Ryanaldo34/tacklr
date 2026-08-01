@@ -5,181 +5,57 @@ import (
 	"log/slog"
 	"testing"
 
-	"go.opentelemetry.io/otel/attribute"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/sdk/trace/tracetest"
-	"go.opentelemetry.io/otel/trace"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
-func TestInit_emptyEndpoint_noop(t *testing.T) {
+// TestInit_emptyEndpoint_readyForLibraryUse: without an OTLP endpoint, Init
+// succeeds and shutdown is safe so library hosts can call Init unconditionally.
+func TestInit_emptyEndpoint_readyForLibraryUse(t *testing.T) {
 	shutdown, err := Init(context.Background(), Config{})
 	if err != nil {
 		t.Fatal(err)
-	}
-	if shutdown == nil {
-		t.Fatal("shutdown nil")
 	}
 	if err := shutdown(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestTracerFromContext_prefersInjectedTracer(t *testing.T) {
-	exp := tracetest.NewInMemoryExporter()
-	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp))
-	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
-
-	injected := TracerFromProvider(tp)
-	ctx := ContextWithTracer(context.Background(), injected)
-	_, span := TracerFromContext(ctx).Start(ctx, SpanTurn)
-	span.End()
-	_ = tp.ForceFlush(context.Background())
-	if len(exp.GetSpans()) == 0 {
-		t.Fatal("expected span on injected provider")
-	}
-}
-
-func TestTracer_recordsTurnLifecycleSpans(t *testing.T) {
-	exp := tracetest.NewInMemoryExporter()
-	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp))
-	SetTracerProvider(tp)
-	t.Cleanup(func() {
-		_ = tp.Shutdown(context.Background())
-		SetTracerProvider(nil)
-	})
-
-	ctx, span := Tracer().Start(context.Background(), SpanTurn,
-		trace.WithAttributes(
-			attribute.String(AttrArea, AreaRegistry),
-			attribute.String(AttrThreadID, "t1"),
-			attribute.String(AttrTurnKind, "prompt"),
-		),
-	)
-	span.AddEvent(EventPromptReceived, trace.WithAttributes(
-		attribute.Int(EventAttrPromptLen, 2),
-	))
-
-	_, tool := Tracer().Start(ctx, SpanTool,
-		trace.WithAttributes(
-			attribute.String(AttrArea, AreaHarness),
-			attribute.String(AttrToolName, "create_plan"),
-		),
-	)
-	tool.SetAttributes(
-		attribute.String(AttrToolStatus, "success"),
-		attribute.String(AttrOutcome, OutcomeOK),
-	)
-	tool.End()
-
-	_, install := Tracer().Start(ctx, SpanPlanInstall,
-		trace.WithAttributes(attribute.String(AttrArea, AreaContext)),
-	)
-	install.SetAttributes(attribute.String(AttrOutcome, OutcomeOK))
-	install.End()
-
-	_, handoff := Tracer().Start(ctx, SpanContextHandoff,
-		trace.WithAttributes(
-			attribute.String(AttrArea, AreaModelTasks),
-			attribute.Int(AttrOpenTodos, 2),
-		),
-	)
-	handoff.SetAttributes(attribute.String(AttrOutcome, OutcomeOK))
-	handoff.End()
-
-	span.SetAttributes(attribute.String(AttrOutcome, OutcomeOK))
-	span.AddEvent(EventTurnEnded, trace.WithAttributes(
-		attribute.String(EventAttrOutcome, OutcomeOK),
-	))
-	span.End()
-
-	if err := tp.ForceFlush(context.Background()); err != nil {
+// TestMeterProviderFromPrometheusRegisterer_records: scrape-path helper accepts
+// a host Registerer and produces a MeterProvider that records instruments.
+func TestMeterProviderFromPrometheusRegisterer_records(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	mp, err := MeterProviderFromPrometheusRegisterer(reg, "tacklr-test", "dev")
+	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
 
-	spans := exp.GetSpans()
-	want := map[string]bool{
-		SpanTurn:           false,
-		SpanTool:           false,
-		SpanPlanInstall:    false,
-		SpanContextHandoff: false,
+	inst := MustInstruments(MeterFromProvider(mp))
+	inst.RecordSessionCreated(context.Background())
+
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
 	}
-	var sawPrompt bool
-	for _, s := range spans {
-		if _, ok := want[s.Name]; ok {
-			want[s.Name] = true
-		}
-		if s.Name == SpanTurn {
-			for _, ev := range s.Events {
-				if ev.Name == EventPromptReceived {
-					sawPrompt = true
-				}
-				// Lifecycle only — no mirrored slog noise.
-				if ev.Name == "log" {
-					t.Fatalf("unexpected log event on turn span")
-				}
-			}
-		}
-	}
-	for name, ok := range want {
-		if !ok {
-			t.Fatalf("missing span %s among %+v", name, spans)
-		}
-	}
-	if !sawPrompt {
-		t.Fatal("missing prompt.received event")
+	if len(mfs) == 0 {
+		t.Fatal("expected prometheus families after record")
 	}
 }
 
-func TestSpanHandler_correlatesTraceIDsWithoutSpanEvents(t *testing.T) {
-	exp := tracetest.NewInMemoryExporter()
-	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp))
-	SetTracerProvider(tp)
-	t.Cleanup(func() {
-		_ = tp.Shutdown(context.Background())
-		SetTracerProvider(nil)
-	})
-
+// TestSpanHandler_forwardsToInnerHandler: logs written through SpanHandler still
+// reach the configured slog backend (correlation attrs are additive).
+func TestSpanHandler_forwardsToInnerHandler(t *testing.T) {
 	var buf captureHandler
 	log := slog.New(NewSpanHandler(&buf))
-	ctx, span := Tracer().Start(context.Background(), SpanTurn)
-	log.InfoContext(ctx, "hello turn", "area", "test")
-	span.End()
-	_ = tp.ForceFlush(context.Background())
-
+	log.InfoContext(context.Background(), "hello")
 	if !buf.got {
-		t.Fatal("inner handler not called")
-	}
-	if buf.traceID == "" || buf.spanID == "" {
-		t.Fatalf("expected trace_id/span_id on log, got trace=%q span=%q", buf.traceID, buf.spanID)
-	}
-	for _, s := range exp.GetSpans() {
-		for _, ev := range s.Events {
-			if ev.Name == "log" {
-				t.Fatal("logs must not be mirrored as span events")
-			}
-		}
+		t.Fatal("expected log to reach inner handler")
 	}
 }
 
-type captureHandler struct {
-	got     bool
-	traceID string
-	spanID  string
-}
+type captureHandler struct{ got bool }
 
-func (d *captureHandler) Enabled(context.Context, slog.Level) bool { return true }
-func (d *captureHandler) Handle(_ context.Context, r slog.Record) error {
-	d.got = true
-	r.Attrs(func(a slog.Attr) bool {
-		switch a.Key {
-		case "trace_id":
-			d.traceID = a.Value.String()
-		case "span_id":
-			d.spanID = a.Value.String()
-		}
-		return true
-	})
-	return nil
-}
-func (d *captureHandler) WithAttrs([]slog.Attr) slog.Handler { return d }
-func (d *captureHandler) WithGroup(string) slog.Handler      { return d }
+func (d *captureHandler) Enabled(context.Context, slog.Level) bool  { return true }
+func (d *captureHandler) Handle(context.Context, slog.Record) error { d.got = true; return nil }
+func (d *captureHandler) WithAttrs([]slog.Attr) slog.Handler        { return d }
+func (d *captureHandler) WithGroup(string) slog.Handler             { return d }

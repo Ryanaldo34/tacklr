@@ -164,6 +164,7 @@ func (t *DefaultModelTasks) absorbFit(
 
 	slog.InfoContext(ctx, "max context window size exceeded or approaching, compressing context window",
 		"area", telemetry.AreaModelTasks, "max_size", maxSize, "current_size", currSize)
+	telemetry.InstrumentsFromContext(ctx).RecordCompress(ctx, telemetry.AgentIDFromContext(ctx))
 
 	var sumPrompt strings.Builder
 	sumPrompt.Grow(280 + len(newMsg.Content))

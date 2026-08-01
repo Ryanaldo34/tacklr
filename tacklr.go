@@ -9,6 +9,7 @@ import (
 	"slices"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
@@ -200,9 +201,15 @@ func (a *AgentHarness) checkpointSession(ctx context.Context) error {
 
 	cp, err := control.NewCheckpointer().Capture(a.context.Snapshot(), a.session, ptc, itr)
 	if err != nil {
+		telemetry.InstrumentsFromContext(ctx).RecordCheckpointSave(ctx, telemetry.OutcomeError)
 		return err
 	}
-	return a.Store.SaveSession(ctx, a.SessionId, *cp)
+	if err := a.Store.SaveSession(ctx, a.SessionId, *cp); err != nil {
+		telemetry.InstrumentsFromContext(ctx).RecordCheckpointSave(ctx, telemetry.OutcomeError)
+		return err
+	}
+	telemetry.InstrumentsFromContext(ctx).RecordCheckpointSave(ctx, telemetry.OutcomeOK)
+	return nil
 }
 
 func (a *AgentHarness) constructSystemPrompt() string {
@@ -415,7 +422,11 @@ func (a *AgentHarness) applyBatchToolResultEffect(ctx context.Context, effect To
 			todos = a.session.Plan().Get()
 			doc = a.session.Plan().Document()
 		}
-		return a.tasks.Handoff(ctx, todos, doc, a.Tools, a.constructSystemPrompt())
+		err := a.tasks.Handoff(ctx, todos, doc, a.Tools, a.constructSystemPrompt())
+		if err == nil {
+			telemetry.InstrumentsFromContext(ctx).RecordHandoff(ctx, telemetry.AgentIDFromContext(ctx))
+		}
+		return err
 	default:
 		return nil
 	}
@@ -797,6 +808,7 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 					}
 					tcKey := toolCallKey(tc)
 					// Milestone: each tool call (create_plan, complete_todo, work tools, …).
+					toolStart := time.Now()
 					toolCtx, toolSpan := telemetry.TracerFromContext(ctx).Start(ctx, telemetry.SpanTool,
 						trace.WithAttributes(
 							attribute.String(telemetry.AttrArea, telemetry.AreaHarness),
@@ -812,13 +824,19 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 							toolSpan.RecordError(err)
 							toolSpan.SetStatus(codes.Error, err.Error())
 							toolSpan.SetAttributes(attribute.String(telemetry.AttrOutcome, telemetry.OutcomeError))
-							return
-						}
-						if status == "error" {
+						} else if status == "error" {
 							toolSpan.SetAttributes(attribute.String(telemetry.AttrOutcome, telemetry.OutcomeError))
-							return
+						} else {
+							toolSpan.SetAttributes(attribute.String(telemetry.AttrOutcome, telemetry.OutcomeOK))
 						}
-						toolSpan.SetAttributes(attribute.String(telemetry.AttrOutcome, telemetry.OutcomeOK))
+						telemetry.InstrumentsFromContext(ctx).RecordTool(
+							toolCtx,
+							telemetry.AgentIDFromContext(ctx),
+							tc.Name,
+							tc.Namespace,
+							status,
+							time.Since(toolStart),
+						)
 					}
 
 					tool := a.findTool(tc.Name, tc.Namespace)
@@ -858,6 +876,9 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 							_ = emit(toolCtx, out, StreamEvent{Type: StreamEventError, Error: fmt.Errorf("marshal interrupt: %w", err)})
 							return
 						}
+						telemetry.InstrumentsFromContext(ctx).RecordInterrupt(
+							toolCtx, telemetry.AgentIDFromContext(ctx), interrupt.TypeName(),
+						)
 						finishTool("interrupt", nil)
 						_ = emit(toolCtx, out, StreamEvent{Type: StreamEventInterrupt, MessageID: tcKey, Data: data})
 						a.pendingMu.Lock()

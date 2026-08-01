@@ -30,6 +30,8 @@ func main() {
 		loadDotEnv(filepath.Join(filepath.Dir(d), ".env"))
 	}
 
+	// OTLP traces + metrics to Alloy/Collector (OTEL_EXPORTER_OTLP_ENDPOINT).
+	// Host LGTM: Tempo (traces), Mimir/Prometheus (metrics); ship slog to Loki separately.
 	otelShutdown, err := telemetry.Init(context.Background(), telemetry.Config{
 		ServiceName: "tacklr-testserver",
 		Insecure:    true,
@@ -64,6 +66,7 @@ func main() {
 
 	tools := []*tacklr.Tool{echoTool, getTimeTool, progressTool}
 
+	// After Init, global TracerProvider + MeterProvider are set; registry uses them by default.
 	reg := server.NewRegistry(store, defaultAgent)
 	reg.Register(defaultAgent, server.AgentSpec{
 		Name: "Tacklr Test Agent",

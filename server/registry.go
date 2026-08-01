@@ -8,10 +8,12 @@ import (
 	"log/slog"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/ryanaldo34/tacklr"
@@ -152,6 +154,8 @@ type Registry struct {
 	store        stores.BaseStore
 	// tracer creates turn (and, via context, harness) spans. Defaults to global.
 	tracer trace.Tracer
+	// instruments records Prometheus-compatible OTel metrics. Defaults to global meter.
+	instruments *telemetry.Instruments
 	// activeTurns maps session/thread id → cancel for the in-flight turn context.
 	activeTurns sync.Map // string → context.CancelFunc
 	sessions    sync.Map // string → *sessionState
@@ -182,6 +186,17 @@ func WithTracer(t trace.Tracer) RegistryOption {
 	}
 }
 
+// WithMeterProvider sets the OpenTelemetry MeterProvider for turn/tool metrics.
+// Preferred path: host configures OTLP metrics export (Alloy/Collector → Prometheus/Mimir).
+// When omitted, the process-global meter is used.
+func WithMeterProvider(mp metric.MeterProvider) RegistryOption {
+	return func(r *Registry) {
+		if mp != nil {
+			r.instruments = telemetry.MustInstruments(telemetry.MeterFromProvider(mp))
+		}
+	}
+}
+
 // NewRegistry builds a registry. Optional opts configure telemetry and other hooks.
 func NewRegistry(store stores.BaseStore, defaultAgent string, opts ...RegistryOption) *Registry {
 	r := &Registry{
@@ -189,6 +204,7 @@ func NewRegistry(store stores.BaseStore, defaultAgent string, opts ...RegistryOp
 		defaultAgent: defaultAgent,
 		store:        store,
 		tracer:       telemetry.Tracer(),
+		instruments:  telemetry.MustInstruments(telemetry.Meter()),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -197,6 +213,9 @@ func NewRegistry(store stores.BaseStore, defaultAgent string, opts ...RegistryOp
 	}
 	if r.tracer == nil {
 		r.tracer = telemetry.Tracer()
+	}
+	if r.instruments == nil {
+		r.instruments = telemetry.MustInstruments(telemetry.Meter())
 	}
 	return r
 }
@@ -220,6 +239,7 @@ func (r *Registry) CreateSession(cwd string, mcpServers []mcp.MCPConfig) *Sessio
 		mcpServers:   mcpServers,
 		configValues: configValues,
 	})
+	r.instruments.RecordSessionCreated(context.Background())
 	if r.store != nil {
 		// Empty checkpoint (all nil inputs) never fails to build.
 		cp, _ := stores.NewCheckpoint(nil, nil, nil, nil, nil, nil)
@@ -381,8 +401,12 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 		turnKind = "resume"
 	}
 	turnCtx, cancel := context.WithCancel(ctx)
-	// Prefer registry tracer (injected provider) for this turn and all harness children.
+	// Prefer registry tracer/instruments for this turn and harness children.
 	turnCtx = telemetry.ContextWithTracer(turnCtx, r.tracer)
+	turnCtx = telemetry.ContextWithInstruments(turnCtx, r.instruments)
+	turnCtx = telemetry.ContextWithAgentID(turnCtx, agentID)
+	turnStart := time.Now()
+	r.instruments.RecordTurnStart(turnCtx, agentID)
 	// Span attributes: searchable dimensions (area, ids, kind). Dynamic sizes on events.
 	turnCtx, turnSpan := r.tracer.Start(turnCtx, telemetry.SpanTurn,
 		trace.WithAttributes(
@@ -420,6 +444,7 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 		turnSpan.AddEvent(telemetry.EventTurnEnded, trace.WithAttributes(
 			attribute.String(telemetry.EventAttrOutcome, outcome),
 		))
+		r.instruments.RecordTurnEnd(turnCtx, agentID, turnKind, outcome, time.Since(turnStart))
 	}
 
 	events, err := runHarness(turnCtx, h, pr)
