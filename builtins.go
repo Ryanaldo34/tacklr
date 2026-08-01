@@ -12,6 +12,7 @@ import (
 )
 
 type createTodosArgs struct {
+	Plan  string         `json:"plan" desc:"Full plaintext project plan (CoS, POS, WBS, scope, requirements). Required."`
 	Todos []control.Todo `json:"todos"`
 }
 
@@ -23,6 +24,7 @@ type todoEdit struct {
 type editTodosArgs struct {
 	ToDelete []string   `json:"toDelete"`
 	ToAdd    []todoEdit `json:"toAdd"`
+	Plan     string     `json:"plan" desc:"Optional. Full revised plaintext project plan. Omit or empty to leave the plan document unchanged. Must differ from the current plan when provided."`
 }
 
 type completeTodoArgs struct {
@@ -114,11 +116,14 @@ func AskUserQuestionFromState(rt control.HarnessRuntime, toolCallID string) stri
 var createPlanTool = NewTool(ToolConfig{
 	Name:        "create_plan",
 	DisplayName: "Create Plan",
-	Description: "Creates a plan in the form of a task or todo list to logically break up a complex task into smaller, manageable steps. Call only when no active plan exists. If a plan is already active, use edit_plan or complete_todo instead of create_plan.",
+	Description: "Creates a project plan document and a linear todo list derived from it. Pass the full plaintext plan in plan and the derived todos in todos. Call only when no active plan exists. If a plan is already active, use edit_plan or complete_todo instead of create_plan.",
 	Category:    streaming.ToolCategoryThink,
 	Handler: func(ctx context.Context, args createTodosArgs, runtime control.HarnessRuntime) (string, error) {
 		if existing := runtime.PlanGet(); len(existing) > 0 {
 			return "", fmt.Errorf("an active plan already exists (%d todos); use edit_plan to modify it or complete_todo to progress — do not call create_plan again", len(existing))
+		}
+		if strings.TrimSpace(args.Plan) == "" {
+			return "", fmt.Errorf("plan document text is required")
 		}
 		if len(args.Todos) == 0 {
 			return "", fmt.Errorf("plan must include at least one todo")
@@ -138,6 +143,7 @@ var createPlanTool = NewTool(ToolConfig{
 				todos[i].Status = streaming.TodoStatusPending
 			}
 		}
+		runtime.PlanDocumentSet(args.Plan)
 		runtime.PlanSet(todos)
 		return "Plan created successfully", nil
 	},
@@ -211,12 +217,20 @@ var completeTodoTool = NewTool(ToolConfig{
 var editPlanTool = NewTool(ToolConfig{
 	Name:        "edit_plan",
 	DisplayName: "Edit Plan",
-	Description: "Edits an existing plan by removing specified todos and/or adding new ones at a given position. Cannot delete or edit completed todos.",
+	Description: "Edits an existing plan by removing and/or adding todos. Optionally replace the full plaintext plan document via plan (must differ from the current document). Omit plan when only changing todos. Cannot delete completed todos.",
 	Category:    streaming.ToolCategoryThink,
 	Handler: func(ctx context.Context, args editTodosArgs, runtime control.HarnessRuntime) (string, error) {
 		plan := runtime.PlanGet()
 		if plan == nil {
 			return "", fmt.Errorf("no plan exists")
+		}
+
+		trimmedPlan := strings.TrimSpace(args.Plan)
+		if trimmedPlan != "" {
+			existing := strings.TrimSpace(runtime.PlanDocumentGet())
+			if trimmedPlan == existing {
+				return "", fmt.Errorf("plan document is unchanged; omit plan or provide a revised full plan")
+			}
 		}
 
 		for _, todo := range args.ToAdd {
@@ -243,6 +257,9 @@ var editPlanTool = NewTool(ToolConfig{
 			}
 		}
 		runtime.PlanSet(plan)
+		if trimmedPlan != "" {
+			runtime.PlanDocumentSet(args.Plan)
+		}
 		return "Plan edited successfully", nil
 	},
 })

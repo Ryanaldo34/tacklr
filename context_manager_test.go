@@ -113,7 +113,7 @@ func TestModelContextManager_Handoff_windowShape(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(res.Window) != 3 {
-		t.Fatalf("window len = %d, want 3 (user, handoff, nudge)", len(res.Window))
+		t.Fatalf("window len = %d, want 3 (user, handoff, nudge) without plan doc", len(res.Window))
 	}
 	if res.Window[0].Role != RoleUser || res.Window[0].Content != "build it" {
 		t.Errorf("user = %+v", res.Window[0])
@@ -123,6 +123,41 @@ func TestModelContextManager_Handoff_windowShape(t *testing.T) {
 	}
 	if res.Window[2].Role != RoleDeveloper || res.Window[2].Content != continuePlanNudge {
 		t.Errorf("nudge = %+v", res.Window[2])
+	}
+}
+
+func TestModelContextManager_Handoff_includesFullPlanDocument(t *testing.T) {
+	model := &mockStrategy{
+		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
+			ch <- LLMResponseChunk{Type: StreamEventMessage, MessageId: "h", Content: "HANDOFF_BODY", IsComplete: true}
+		},
+	}
+	res, err := NewModelContextManager().Handoff(context.Background(), HandoffInput{
+		Window: []*Message{
+			{Role: RoleUser, Content: "build it"},
+			{Role: RoleAssistant, Content: "noise"},
+		},
+		Plan: []control.Todo{
+			{Title: "A", Status: streaming.TodoStatusCompleted},
+			{Title: "B", Status: streaming.TodoStatusInProgress},
+		},
+		PlanDocument: "CoS: done right",
+		Model:        model,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Window) != 4 {
+		t.Fatalf("window len = %d, want 4 (user, plan, handoff, nudge)", len(res.Window))
+	}
+	if !isPlanDocument(res.Window[1]) || rawPlanFromDocumentMessage(res.Window[1]) != "CoS: done right" {
+		t.Fatalf("plan msg = %+v", res.Window[1])
+	}
+	if res.Window[2].Content != "HANDOFF_BODY" {
+		t.Fatalf("handoff = %q", res.Window[2].Content)
+	}
+	if res.Window[3].Content != continuePlanNudge {
+		t.Fatalf("nudge = %q", res.Window[3].Content)
 	}
 }
 

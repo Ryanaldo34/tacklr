@@ -149,6 +149,14 @@ func TestModelContextManager_Handoff_nilModelAndCancelAndStreamError(t *testing.
 	if err == nil || !strings.Contains(err.Error(), "boom") {
 		t.Fatalf("err = %v", err)
 	}
+	// Empty window is invalid (harness always has the original user at [0]).
+	if _, err := m.Handoff(context.Background(), HandoffInput{
+		Window: nil,
+		Plan:   []control.Todo{{Title: "t", Status: streaming.TodoStatusInProgress}},
+		Model:  &mockStrategy{},
+	}); err == nil || !strings.Contains(err.Error(), "empty window") {
+		t.Fatalf("want empty window error, got %v", err)
+	}
 	// Happy path with open todos includes continue nudge.
 	strategy2 := &mockStrategy{
 		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
@@ -156,7 +164,10 @@ func TestModelContextManager_Handoff_nilModelAndCancelAndStreamError(t *testing.
 		},
 	}
 	res, err := m.Handoff(context.Background(), HandoffInput{
-		Window:              []*Message{{Role: RoleAssistant, Content: "only-assistant"}}, // no user → default first user
+		Window: []*Message{
+			{Role: RoleUser, Content: "task"},
+			{Role: RoleAssistant, Content: "working"},
+		},
 		Plan:                []control.Todo{{Title: "t", Status: streaming.TodoStatusInProgress}},
 		Model:               strategy2,
 		RestoreSystemPrompt: "sys",
