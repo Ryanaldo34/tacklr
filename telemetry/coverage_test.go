@@ -1,6 +1,7 @@
 package telemetry
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log/slog"
@@ -17,6 +18,26 @@ import (
 
 	"github.com/ryanaldo34/tacklr/streaming"
 )
+
+// TestInstallDefaultWithOTLP_writesToBaseHandler: dual-write setup used by
+// testserver must still emit slog records to the local handler (OTLP side is
+// noop-safe without a collector).
+func TestInstallDefaultWithOTLP_writesToBaseHandler(t *testing.T) {
+	var buf bytes.Buffer
+	base := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})
+	InstallDefaultWithOTLP(base, NewOTLPSlogHandler("cov-test"))
+	slog.Info("dual-write smoke")
+	if !strings.Contains(buf.String(), "dual-write smoke") {
+		t.Fatalf("base handler missing log: %q", buf.String())
+	}
+	// MultiHandler group/attrs stay usable.
+	mh := MultiHandler{base}
+	if !mh.Enabled(context.Background(), slog.LevelInfo) {
+		t.Fatal("enabled")
+	}
+	_ = mh.WithAttrs([]slog.Attr{slog.String("k", "v")})
+	_ = mh.WithGroup("g")
+}
 
 // TestInstruments_recordAllPaths exercises every instrument helper (including nil receiver).
 func TestInstruments_recordAllPaths(t *testing.T) {
@@ -43,10 +64,14 @@ func TestInstruments_recordAllPaths(t *testing.T) {
 	inst.RecordTurnEnd(ctx, "agent-1", "prompt", OutcomeOK, 10*time.Millisecond)
 	inst.RecordTool(ctx, "agent-1", "search", "web", "success", time.Millisecond)
 	inst.RecordInterrupt(ctx, "agent-1", "user_selection_choice")
-	inst.RecordHandoff(ctx, "agent-1")
+	inst.RecordHandoff(ctx, "agent-1", HandoffOutcomeOK)
+	inst.RecordHandoff(ctx, "agent-1", HandoffOutcomeFallback)
 	inst.RecordCompress(ctx, "agent-1")
 	inst.RecordSessionCreated(ctx)
 	inst.RecordCheckpointSave(ctx, OutcomeOK)
+	inst.RecordModel(ctx, "agent-1", ModelPhaseTurn, OutcomeOK, ErrorClassOK, 5*time.Millisecond)
+	inst.RecordModel(ctx, "agent-1", ModelPhaseHandoff, OutcomeError, ErrorClassProvider4xx, time.Millisecond)
+	inst.RecordTokens(ctx, "agent-1", 10, 20, 3)
 
 	// Nil receiver no-ops.
 	var nilInst *Instruments
@@ -54,10 +79,12 @@ func TestInstruments_recordAllPaths(t *testing.T) {
 	nilInst.RecordTurnEnd(ctx, "a", "k", OutcomeOK, 0)
 	nilInst.RecordTool(ctx, "a", "t", "", "ok", 0)
 	nilInst.RecordInterrupt(ctx, "a", "k")
-	nilInst.RecordHandoff(ctx, "a")
+	nilInst.RecordHandoff(ctx, "a", HandoffOutcomeOK)
 	nilInst.RecordCompress(ctx, "a")
 	nilInst.RecordSessionCreated(ctx)
 	nilInst.RecordCheckpointSave(ctx, OutcomeError)
+	nilInst.RecordModel(ctx, "a", ModelPhaseTurn, OutcomeOK, ErrorClassOK, 0)
+	nilInst.RecordTokens(ctx, "a", 1, 1, 1)
 
 	// Context helpers for meters/instruments (nil meter/instruments are no-ops).
 	if ContextWithMeter(context.Background(), nil) == nil {

@@ -1,4 +1,4 @@
-.PHONY: test vet lint fmt cover coverage check
+.PHONY: test vet lint fmt cover coverage check testserver
 
 # Race-enabled tests (same as CI).
 test:
@@ -35,3 +35,7 @@ check: vet lint test coverage
 	if [ -n "$$unformatted" ]; then \
 		echo "gofmt needed on:"; echo "$$unformatted"; exit 1; \
 	fi
+
+# Local ACP harness (reads OTEL_* / .env; see cmd/testserver).
+testserver:
+	go run ./cmd/testserver

@@ -305,25 +305,82 @@ func TestParseAPIErrorMeta_nonJSON(t *testing.T) {
 	}
 }
 
-func TestMarshalMessagesToInput_assistantToolCallsOnly(t *testing.T) {
+// TestMarshalMessagesToInput_responsesToolAndReasoningWire: one coverage of
+// Responses multi-turn input shape — interleaved call/output, no item id on
+// function_call, status on tool items, empty args → {}, reasoning summary
+// required without status, roles including system-wired developer.
+func TestMarshalMessagesToInput_responsesToolAndReasoningWire(t *testing.T) {
 	items := marshalMessagesToInput([]*tacklr.Message{
+		{Role: tacklr.RoleUser, Content: "hi"},
+		{Role: tacklr.RoleReasoning, MessageID: "rs_1", Content: "thought trail"},
+		{Role: tacklr.RoleReasoning, MessageID: "rs_empty"},
 		{Role: tacklr.RoleAssistant, ToolCalls: []tacklr.ToolCall{
-			{CallID: "c", Name: "n", Arguments: `{}`},
+			{ID: "fc_item_1", CallID: "call_aaa", Name: "web_search", Arguments: `{"query":"q"}`},
+			{ID: "fc_item_2", CallID: "call_bbb", Name: "list_plan"}, // empty args
 		}},
-		{Role: tacklr.RoleReasoning, Content: "ignored role"},
-		{Role: tacklr.RoleTool, ToolCallID: "c", Content: "out"},
+		{Role: tacklr.RoleTool, ToolCallID: "call_aaa", Content: "hits"},
+		{Role: tacklr.RoleTool, ToolCallID: "call_bbb", Content: "plan"},
 		{Role: tacklr.RoleSystem, Content: "sys"},
 		{Role: tacklr.RoleDeveloper, Content: "dev"},
-		{Role: tacklr.RoleUser, Content: "hi"},
-		{Role: tacklr.RoleAssistant, Content: "said", ToolCalls: []tacklr.ToolCall{
-			{CallID: "c2", Name: "n2", Arguments: `{}`},
-		}},
+		{Role: tacklr.RoleAssistant, Content: "said"},
 	})
-	if len(items) < 5 {
-		t.Fatalf("items = %d", len(items))
+	// user, rs_1, rs_empty, fc_aaa, out_aaa, fc_bbb, out_bbb, sys, dev-as-sys, said
+	if len(items) != 10 {
+		t.Fatalf("items = %d, want 10: %v", len(items), items)
 	}
-	if !strings.Contains(string(items[0]), "function_call") {
-		t.Fatalf("%s", items[0])
+
+	var rs map[string]any
+	if err := json.Unmarshal(items[1], &rs); err != nil {
+		t.Fatal(err)
+	}
+	if rs["type"] != "reasoning" || rs["id"] != "rs_1" {
+		t.Fatalf("reasoning = %#v", rs)
+	}
+	if _, hasStatus := rs["status"]; hasStatus {
+		t.Fatalf("reasoning input must omit status: %#v", rs)
+	}
+	sum, ok := rs["summary"].([]any)
+	if !ok || len(sum) != 1 {
+		t.Fatalf("summary = %#v", rs["summary"])
+	}
+	part, _ := sum[0].(map[string]any)
+	if part["type"] != "summary_text" || part["text"] != "thought trail" {
+		t.Fatalf("summary part = %#v", part)
+	}
+	var rsEmpty map[string]any
+	if err := json.Unmarshal(items[2], &rsEmpty); err != nil {
+		t.Fatal(err)
+	}
+	emptySum, ok := rsEmpty["summary"].([]any)
+	if !ok || len(emptySum) != 0 {
+		t.Fatalf("empty reasoning summary = %#v, want []", rsEmpty["summary"])
+	}
+
+	var fc1, out1, fc2, out2 map[string]any
+	_ = json.Unmarshal(items[3], &fc1)
+	_ = json.Unmarshal(items[4], &out1)
+	_ = json.Unmarshal(items[5], &fc2)
+	_ = json.Unmarshal(items[6], &out2)
+	if fc1["type"] != "function_call" || fc1["call_id"] != "call_aaa" || fc1["status"] != "completed" {
+		t.Fatalf("fc1 = %#v", fc1)
+	}
+	if _, hasID := fc1["id"]; hasID {
+		t.Fatalf("function_call must omit provider item id: %#v", fc1)
+	}
+	if out1["type"] != "function_call_output" || out1["call_id"] != "call_aaa" || out1["output"] != "hits" || out1["status"] != "completed" {
+		t.Fatalf("out1 = %#v", out1)
+	}
+	if fc2["call_id"] != "call_bbb" || fc2["arguments"] != "{}" {
+		t.Fatalf("fc2 empty-args = %#v", fc2)
+	}
+	if out2["output"] != "plan" {
+		t.Fatalf("out2 = %#v", out2)
+	}
+
+	var dev map[string]any
+	_ = json.Unmarshal(items[8], &dev)
+	if dev["role"] != "system" || dev["content"] != "dev" {
+		t.Fatalf("developer must wire as system: %#v", dev)
 	}
 }
 
@@ -467,9 +524,9 @@ func TestWithReasoningLevel_setsDefaultSummary(t *testing.T) {
 func TestEmitOutputItemComplete_ignoresBadJSON(t *testing.T) {
 	s := NewOpenAIInferenceStrategy(nil)
 	ch := make(chan tacklr.LLMResponseChunk, 4)
-	s.emitOutputItemComplete([]byte(`{`), ch)
-	s.emitOutputItemComplete([]byte(`{"type":"message","id":"m"}`), ch)
-	s.emitReasoningChunk([]byte(`{`), ch) // unmarshal fail: no send
+	s.emitOutputItemComplete([]byte(`{`), ch, nil)
+	s.emitOutputItemComplete([]byte(`{"type":"message","id":"m"}`), ch, nil)
+	s.emitReasoningChunk([]byte(`{`), ch, nil) // unmarshal fail: no send
 	close(ch)
 	var n int
 	for range ch {

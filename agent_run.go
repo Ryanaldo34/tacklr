@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -42,19 +43,29 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 	// drain the channel (addToContext window-pressure compress streams summaries).
 	// Clear the runtime channel on exit so post-Run EmitUpdate does not send
 	// on a closed channel (output channel is nil until the first Run).
+	//
+	// Durability: every Run exit path persists session state (complete, interrupt
+	// park, cancel, model/tool/effect errors). Mid-turn interrupt also persists
+	// immediately so clients can resume after process restart.
 	go func() {
 		defer close(out)
 		defer a.runtime.SetOutputChannel(nil)
+		defer a.persistSession(ctx, "run_exit")
 		if err := a.addToContext(ctx, &Message{Role: RoleUser, Content: prompt}, out); err != nil {
 			if ctx.Err() != nil {
 				emitCancelled()
 				return
 			}
+			// Absorb may fail during pressure compress (model invoke).
+			a.stripUnpairedToolCallsAfterInferenceError()
 			_ = emit(ctx, out, StreamEvent{Type: StreamEventError, Error: fmt.Errorf("run: %w", err)})
 			return
 		}
 		a.runtime.EnsureInitialized()
 		turnModelRequests := 0
+		// True after at least one tool batch was executed this Run. Used so a later
+		// model failure is not misread as "the last tool failed" (common in Zed ACP).
+		hadToolRound := false
 		for {
 			// Non-blocking poll: use Err(), not select+default (same Done channel,
 			// clearer cooperative cancel between turn phases).
@@ -72,13 +83,23 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 					})
 					return
 				}
-				events, err := a.tasks.Turn(ctx, a.tools, a.constructSystemPrompt())
+				turnCtx := ctx
+				if hadToolRound {
+					// Static after_tools flag for the next tacklr.model span + log event.
+					turnCtx = telemetry.ContextWithAfterTools(ctx)
+				}
+				events, err := a.tasks.Turn(turnCtx, a.tools, a.constructSystemPrompt())
 				if err != nil {
 					if ctx.Err() != nil {
 						emitCancelled()
 						return
 					}
-					_ = emit(ctx, out, StreamEvent{Type: StreamEventError, Error: fmt.Errorf("run: invoke: %w", err)})
+					phase := "run: invoke"
+					if hadToolRound {
+						phase = "run: model after tools"
+					}
+					a.stripUnpairedToolCallsAfterInferenceError()
+					_ = emit(ctx, out, StreamEvent{Type: StreamEventError, Error: fmt.Errorf("%s: %w", phase, err)})
 					return
 				}
 				turnModelRequests++
@@ -115,6 +136,11 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 					if !ok {
 						break
 					}
+					// Tag provider failures that follow a successful tool batch so hosts
+					// (e.g. Zed) do not attribute response.failed to list_plan/etc.
+					if hadToolRound && (chunk.Type == StreamEventError || chunk.Error != nil) {
+						chunk = tagModelAfterToolsError(chunk)
+					}
 					if !a.streamChunk(ctx, chunk, out) {
 						failAnnounced("tool call cancelled")
 						emitCancelled()
@@ -148,6 +174,8 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 					}
 				}
 				if modelFailed {
+					// Checkpoint (via run_exit) must not re-submit unpaired function_calls.
+					a.stripUnpairedToolCallsAfterInferenceError()
 					return
 				}
 				if ctx.Err() != nil {
@@ -184,12 +212,17 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 						emitCancelled()
 						return
 					}
-					err := a.checkpointSession(ctx)
-					if err != nil {
-						slog.Error("failed to save session", "area", "session_management", "session_id", a.sessionId, "error", err)
-					}
+					// defer run_exit also persists; explicit reason for metrics/logs clarity.
+					a.persistSession(ctx, "turn_complete")
 					return
 				}
+				// Responses multi-turn input needs each function_call_output paired
+				// with a prior function_call (same call_id). Record the assistant
+				// tool-call turn before tool results.
+				a.context.Add(&Message{
+					Role:      RoleAssistant,
+					ToolCalls: append([]ToolCall(nil), toolCalls...),
+				})
 				toolResults = make([]*Message, len(toolCalls))
 			} else {
 				toolResults = make([]*Message, len(a.pendingToolCalls))
@@ -295,7 +328,8 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 						a.pendingToolCalls[tcKey] = stores.PendingToolCall{ToolCall: &tc, InterruptActive: true}
 						a.interruptToRequester[intrId] = tcKey
 						a.pendingMu.Unlock()
-						_ = a.checkpointSession(toolCtx)
+						// Persist before parking so resume works after process restart.
+						a.persistSession(toolCtx, "interrupt")
 						return
 					}
 					a.pendingMu.Lock()
@@ -330,6 +364,9 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 				emitCancelled()
 				return
 			}
+			if len(toolCalls) > 0 {
+				hadToolRound = true
+			}
 			for i, r := range toolResults {
 				if r == nil || suppressWindow[i].Load() {
 					continue
@@ -339,6 +376,8 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 						emitCancelled()
 						return
 					}
+					// Pressure compress is a model call; sanitize before checkpoint.
+					a.stripUnpairedToolCallsAfterInferenceError()
 					_ = emit(ctx, out, StreamEvent{Type: StreamEventError, Error: fmt.Errorf("run: %w", err)})
 					return
 				}
@@ -348,23 +387,17 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 			hasPending := len(a.pendingToolCalls) > 0
 			a.pendingMu.Unlock()
 			if hasPending {
-				err := a.checkpointSession(ctx)
-				if err != nil {
-					slog.ErrorContext(ctx, "failed to save session", "session_id", a.sessionId, "error", err)
-				}
+				a.persistSession(ctx, "interrupt_park")
 				return
 			}
 			if effect := batchEffects.resolved(); effect != EffectNone {
 				if err := a.applyBatchToolResultEffect(ctx, effect); err != nil {
 					slog.ErrorContext(ctx, "failed to apply tool result context effect", "session_id", a.sessionId, "effect", effect, "error", err)
 					_ = emit(ctx, out, StreamEvent{Type: StreamEventError, Content: err.Error()})
+					// Still durable: plan may already have been updated by the tool.
 					return
 				}
-				if err := a.checkpointSession(ctx); err != nil {
-					slog.ErrorContext(ctx, "failed to save session", "session_id", a.sessionId, "error", err)
-					_ = emit(ctx, out, StreamEvent{Type: StreamEventError, Content: err.Error()})
-					return
-				}
+				a.persistSession(ctx, "effect_applied")
 			}
 		}
 	}()
@@ -398,4 +431,26 @@ func (a *AgentHarness) ReturnFromInterrupt(ctx context.Context, finishedInterrup
 	}
 	a.pendingMu.Unlock()
 	return a.Run(ctx, "")
+}
+
+// tagModelAfterToolsError rewrites a provider error chunk so clients can tell
+// the tool batch succeeded and the subsequent model request failed.
+func tagModelAfterToolsError(chunk LLMResponseChunk) LLMResponseChunk {
+	const prefix = "model after tools: "
+	if chunk.Error != nil {
+		if !strings.Contains(chunk.Error.Error(), "model after tools") {
+			chunk.Error = fmt.Errorf("%s%w", prefix, chunk.Error)
+		}
+		if chunk.Content == "" {
+			chunk.Content = chunk.Error.Error()
+		} else if !strings.Contains(chunk.Content, "model after tools") {
+			chunk.Content = prefix + chunk.Content
+		}
+		return chunk
+	}
+	if chunk.Content != "" && !strings.Contains(chunk.Content, "model after tools") {
+		chunk.Content = prefix + chunk.Content
+		chunk.Error = errors.New(chunk.Content)
+	}
+	return chunk
 }

@@ -23,6 +23,22 @@ func (e *APIStatusError) Error() string {
 	return fmt.Sprintf("api error (status %d): %s", e.Status, e.Body)
 }
 
+// ProviderHTTPStatus implements tacklr.ProviderStatus.
+func (e *APIStatusError) ProviderHTTPStatus() int {
+	if e == nil {
+		return 0
+	}
+	return e.Status
+}
+
+// ProviderErrorCode implements tacklr.ProviderStatus.
+func (e *APIStatusError) ProviderErrorCode() string {
+	if e == nil {
+		return ""
+	}
+	return e.Code
+}
+
 type apiErrorDetail struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
@@ -128,6 +144,9 @@ type responsesRequest struct {
 	Stream       bool             `json:"stream,omitempty"`
 	Reasoning    *reasoningDetail `json:"reasoning,omitempty"`
 	Text         *textFormat      `json:"text,omitempty"`
+	// MaxOutputTokens caps completion size (reasoning + visible text). Omit when 0.
+	// Azure often ends streams as response.incomplete with empty details when this is too low.
+	MaxOutputTokens int `json:"max_output_tokens,omitempty"`
 }
 
 type textFormat struct {
@@ -155,17 +174,37 @@ type easyInputRequest struct {
 }
 
 type functionCallInputRequest struct {
-	Type      string `json:"type"`
-	ID        string `json:"id,omitempty"`
+	Type string `json:"type"`
+	// Pairing uses call_id. Provider item ids (fc_…) are output identifiers and
+	// are not re-submitted as input (Responses multi-turn tool history).
 	CallID    string `json:"call_id"`
 	Name      string `json:"name"`
 	Arguments string `json:"arguments"`
+	// Lifecycle status for completed tool turns in multi-turn input.
+	Status string `json:"status"`
 }
 
 type functionCallOutputRequest struct {
 	Type   string `json:"type"`
 	CallID string `json:"call_id"`
 	Output string `json:"output"`
+	Status string `json:"status"`
+}
+
+// reasoningInputRequest is a Responses API reasoning item for multi-turn history.
+// OpenAI / Azure Foundry require `summary` on input reasoning items (even when
+// empty). Omitting it yields missing_required_parameter on models like GPT Luna.
+// Do not send output-only fields such as status — unknown_parameter on input.
+type reasoningInputRequest struct {
+	Type string `json:"type"`
+	ID   string `json:"id,omitempty"`
+	// Summary is required on the wire; never omit (use empty slice, not null).
+	Summary []reasoningSummaryPart `json:"summary"`
+}
+
+type reasoningSummaryPart struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
 }
 
 var modelContextLimits = map[string]int{

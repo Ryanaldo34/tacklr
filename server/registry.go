@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 
@@ -32,6 +33,8 @@ type AgentSpec struct {
 	SubAgents  []*tacklr.SubAgent
 	WatchDog   tacklr.AgentWatchDog
 	Store      stores.BaseStore
+	// ExaAPIKey enables built-in web_search and web_fetch (or use process EXA_API_KEY).
+	ExaAPIKey string
 }
 
 // sessionState holds per-session configuration provided by the client at
@@ -418,14 +421,15 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 			attribute.Bool(telemetry.AttrLoadSession, load),
 		),
 	)
+	// Lifecycle milestones as OTel log events (span-correlated), not span.AddEvent.
 	if turnKind == "prompt" {
-		turnSpan.AddEvent(telemetry.EventPromptReceived, trace.WithAttributes(
-			attribute.Int(telemetry.EventAttrPromptLen, len(req.Prompt)),
-		))
+		telemetry.EmitEvent(turnCtx, telemetry.EventPromptReceived,
+			log.Int(telemetry.EventAttrPromptLen, len(req.Prompt)),
+		)
 	} else {
-		turnSpan.AddEvent(telemetry.EventResumeReceived, trace.WithAttributes(
-			attribute.Int(telemetry.EventAttrResumeInterruptCount, len(req.Responses)),
-		))
+		telemetry.EmitEvent(turnCtx, telemetry.EventResumeReceived,
+			log.Int(telemetry.EventAttrResumeInterruptCount, len(req.Responses)),
+		)
 	}
 	r.activeTurns.Store(threadID, cancel)
 
@@ -441,9 +445,9 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 			turnSpan.RecordError(err)
 			turnSpan.SetStatus(codes.Error, err.Error())
 		}
-		turnSpan.AddEvent(telemetry.EventTurnEnded, trace.WithAttributes(
-			attribute.String(telemetry.EventAttrOutcome, outcome),
-		))
+		telemetry.EmitEvent(turnCtx, telemetry.EventTurnEnded,
+			log.String(telemetry.EventAttrOutcome, outcome),
+		)
 		r.instruments.RecordTurnEnd(turnCtx, agentID, turnKind, outcome, time.Since(turnStart))
 	}
 
@@ -577,6 +581,7 @@ func (r *Registry) loadAgent(ctx context.Context, agentID, threadID string, load
 		Tools:      spec.Tools,
 		MCPConfigs: mcpConfigs,
 		SubAgents:  spec.SubAgents,
+		ExaAPIKey:  spec.ExaAPIKey,
 	}
 
 	var h *tacklr.AgentHarness

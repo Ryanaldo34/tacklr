@@ -8,12 +8,17 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
+	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
+	"go.opentelemetry.io/otel/log/global"
+	lognoop "go.opentelemetry.io/otel/log/noop"
 	"go.opentelemetry.io/otel/propagation"
+	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -77,13 +82,18 @@ type Config struct {
 	// SampleRatio in (0,1]; values <=0 are treated as 1.0 (always sample traces).
 	SampleRatio float64
 	// DisableMetrics skips MeterProvider setup (traces only). Default false:
-	// the same OTLP endpoint receives metrics for LGTM (Mimir/Prometheus path).
+	// the same OTLP endpoint receives metrics.
 	DisableMetrics bool
+	// DisableLogs skips LoggerProvider setup. Default false: lifecycle events
+	// (prompt.received, provider.failed, …) export as OTel log records correlated
+	// to the active span (preferred over span.AddEvent).
+	DisableLogs bool
 }
 
-// Init installs global TracerProvider and MeterProvider (unless DisableMetrics)
-// plus a W3C text-map propagator. One OTLP endpoint serves both signals so hosts
-// can point Alloy/Collector at a single address for Tempo + Mimir.
+// Init installs global TracerProvider, MeterProvider (unless DisableMetrics),
+// LoggerProvider (unless DisableLogs), and a W3C text-map propagator. One OTLP
+// endpoint serves traces, metrics, and logs so hosts can point a collector at a
+// single address (Tempo + Mimir/Prometheus + Loki).
 // Returns a shutdown that flushes exporters.
 func Init(ctx context.Context, cfg Config) (shutdown func(context.Context) error, err error) {
 	endpoint := strings.TrimSpace(cfg.OTLPEndpoint)
@@ -93,6 +103,7 @@ func Init(ctx context.Context, cfg Config) (shutdown func(context.Context) error
 	if endpoint == "" {
 		SetTracerProvider(nil)
 		SetMeterProvider(nil)
+		global.SetLoggerProvider(lognoop.NewLoggerProvider())
 		return func(context.Context) error { return nil }, nil
 	}
 
@@ -131,10 +142,28 @@ func Init(ctx context.Context, cfg Config) (shutdown func(context.Context) error
 		SetMeterProvider(mp)
 	}
 
+	var lp *sdklog.LoggerProvider
+	if !cfg.DisableLogs {
+		lp, err = newOTLPLoggerProvider(ctx, host, protocol, insecure, res)
+		if err != nil {
+			if mp != nil {
+				_ = mp.Shutdown(ctx)
+			}
+			_ = tp.Shutdown(ctx)
+			return nil, err
+		}
+		global.SetLoggerProvider(lp)
+	}
+
 	return func(ctx context.Context) error {
 		var first error
+		if lp != nil {
+			if err := lp.Shutdown(ctx); err != nil {
+				first = err
+			}
+		}
 		if mp != nil {
-			if err := mp.Shutdown(ctx); err != nil {
+			if err := mp.Shutdown(ctx); err != nil && first == nil {
 				first = err
 			}
 		}
@@ -143,6 +172,34 @@ func Init(ctx context.Context, cfg Config) (shutdown func(context.Context) error
 		}
 		return first
 	}, nil
+}
+
+func newOTLPLoggerProvider(ctx context.Context, host, protocol string, insecure bool, res *resource.Resource) (*sdklog.LoggerProvider, error) {
+	var exporter sdklog.Exporter
+	var err error
+	switch protocol {
+	case "http", "http/protobuf":
+		opts := []otlploghttp.Option{otlploghttp.WithEndpoint(host)}
+		if insecure {
+			opts = append(opts, otlploghttp.WithInsecure())
+		}
+		exporter, err = otlploghttp.New(ctx, opts...)
+	case "grpc":
+		opts := []otlploggrpc.Option{otlploggrpc.WithEndpoint(host)}
+		if insecure {
+			opts = append(opts, otlploggrpc.WithInsecure())
+		}
+		exporter, err = otlploggrpc.New(ctx, opts...)
+	default:
+		return nil, fmt.Errorf("otel: unknown protocol %q", protocol)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("otel log exporter: %w", err)
+	}
+	return sdklog.NewLoggerProvider(
+		sdklog.WithResource(res),
+		sdklog.WithProcessor(sdklog.NewBatchProcessor(exporter)),
+	), nil
 }
 
 func newOTLPTracerProvider(ctx context.Context, host, protocol string, insecure bool, sampleRatio float64, res *resource.Resource) (*sdktrace.TracerProvider, error) {

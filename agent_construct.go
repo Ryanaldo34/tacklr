@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 
+	"github.com/ryanaldo34/tacklr/internal/exa"
 	session "github.com/ryanaldo34/tacklr/internal/session"
 	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/skills"
@@ -49,6 +51,10 @@ type AgentOptions struct {
 	// SkillsLoader discovers skills from Config.SkillDirectories.
 	// nil uses skills.DirectoryLoader (filesystem SKILL.md trees).
 	SkillsLoader skills.Loader
+	// ExaAPIKey enables built-in web_search and web_fetch. When empty, EXA_API_KEY
+	// from the process environment is used. When both are empty, those tools
+	// are not registered.
+	ExaAPIKey string
 }
 
 // streamEventBuffer sizes the harness event bus so non-blocking EmitUpdate
@@ -88,6 +94,7 @@ func newHarnessBase(opts AgentOptions, runtime HarnessRuntime, sm *session.Sessi
 		mcpConfigs:           opts.MCPConfigs,
 		skillDirectories:     opts.Config.SkillDirectories,
 		skillsLoader:         opts.SkillsLoader,
+		exaAPIKey:            resolveExaAPIKey(opts.ExaAPIKey),
 		sessionId:            "",
 		subagents:            make(map[string]*SubAgent),
 		interruptToRequester: make(map[string]string),
@@ -149,6 +156,10 @@ func (a *AgentHarness) injectBuiltinTools() {
 		newListPlanTool(s),
 		askUserChoiceTool,
 	)
+	if key := strings.TrimSpace(a.exaAPIKey); key != "" {
+		client := exa.NewClient(key)
+		a.tools = append(a.tools, newWebSearchTool(client), newWebFetchTool(client))
+	}
 	if len(a.subagents) > 0 {
 		a.tools = append(a.tools, a.spawnTool())
 	}

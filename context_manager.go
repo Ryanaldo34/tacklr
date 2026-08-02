@@ -3,10 +3,15 @@ package tacklr
 import (
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/ryanaldo34/tacklr/streaming"
 )
+
+// Context window manager and durable plan-document message helpers.
+
+// Source: context_manager.go
 
 // ContextPolicy controls when and how conversation windows are reshaped under pressure.
 // Used by ModelTasks.Absorb, not by ContextManager itself.
@@ -146,4 +151,32 @@ func planHasOpenTodos(plan []Todo) bool {
 		}
 	}
 	return false
+}
+
+// Source: plan_document.go
+
+// planDocumentPrefix identifies durable plan messages so Absorb can protect them.
+const planDocumentPrefix = "PROJECT PLAN\n────────────\n"
+
+func formatPlanDocument(raw string) string {
+	// Two-part concat; compiler emits efficient allocation.
+	return planDocumentPrefix + raw
+}
+
+func isPlanDocument(m *Message) bool {
+	return m != nil && strings.HasPrefix(m.Content, planDocumentPrefix)
+}
+
+func rawPlanFromDocumentMessage(m *Message) string {
+	if m == nil {
+		return ""
+	}
+	return strings.TrimPrefix(m.Content, planDocumentPrefix)
+}
+
+func buildPlanDocumentMessage(raw string) *Message {
+	return &Message{
+		Role:    RoleDeveloper,
+		Content: formatPlanDocument(raw),
+	}
 }

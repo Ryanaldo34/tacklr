@@ -195,11 +195,17 @@ curl -N -X POST http://localhost:8080/ \
 
 ### Try the test server
 
+`cmd/testserver` is a harness **showcase**: no toy host tools. The agent only gets Tacklr builtins (`create_plan`, `list_plan`, `edit_plan`, `complete_todo`, `ask_user_choice`, and `web_search` when `EXA_API_KEY` is set), plus optional skills via `SKILL_DIRECTORIES`.
+
+By default it exports OTLP traces/metrics/logs to **`localhost:4317` (gRPC)** with `service.name=tacklr-testserver` when a collector is listening. Override with `OTEL_*` env vars, or set `OTEL_SDK_DISABLED=true` to turn exporters off.
+
 ```bash
 # .env: OPENAI_BASE_URL, OPENAI_API_KEY, OPENAI_MODEL
-# optional: OTEL_EXPORTER_OTLP_ENDPOINT for traces + metrics (e.g. localhost:4317)
-go run ./cmd/testserver          # HTTP ACP (PORT or :3000)
-go run ./cmd/testserver --stdio  # ACP over stdio
+# optional: EXA_API_KEY, SKILL_DIRECTORIES, MAX_WINDOW_SIZE, OTEL_*
+go build -o bin/testserver ./cmd/testserver
+./bin/testserver --stdio   # ACP (Zed, etc.)
+./bin/testserver           # HTTP ACP (PORT or :3000)
+# or: make testserver
 ```
 
 ---
@@ -234,10 +240,11 @@ On save, a **Checkpointer** packages conversation window, plan, tool/user state,
 
 This keeps product tools from breaking the planning system by accident.
 
-### MCP and skills
+### MCP, skills, and web search
 
 - **MCP** — pass `MCPConfigs` on the agent (or via ACP session); tools are discovered and run for you.  
 - **Skills** — set `Config.SkillDirectories` to folders of `SKILL.md` (default `skills.DirectoryLoader`). Inject `AgentOptions.SkillsLoader` for non-filesystem sources. A short catalog lands in the system prompt; full text loads via `read_skill` when needed.
+- **Web search (Exa)** — when `EXA_API_KEY` is set in the environment (or `AgentOptions.ExaAPIKey`), the harness injects a built-in `web_search` tool (read access, token-efficient **highlights** by default). Hosts that use `.env` should load it before `NewAgent` (the test server already does). No Exa Go SDK; the harness calls Exa’s REST API.
 
 ### Public harness surface
 
@@ -289,7 +296,7 @@ reg := server.NewRegistry(store, "my-agent", server.WithMeterProvider(mp))
 
 With no endpoint and no injection, traces and metrics are no-ops. Prompt/tool **content** is not attached by default.
 
-Rough map for a Grafana stack: **Tempo** = traces, **Mimir/Prometheus** = metrics, **Loki** = logs (you ship slog yourself).
+OTLP is the export path for traces, metrics, and logs. Point any collector (or vendor backend) at `OTEL_EXPORTER_OTLP_ENDPOINT`. slog can dual-write to stderr and OTLP via `telemetry.InstallDefaultWithOTLP`.
 
 ---
 

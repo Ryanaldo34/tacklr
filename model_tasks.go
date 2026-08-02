@@ -2,11 +2,13 @@ package tacklr
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
 	"slices"
 	"strings"
+	"sync"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -15,6 +17,72 @@ import (
 	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
+
+// ModelTasks product ops and stream assembly for turn/handoff/compress.
+
+// Source: stream_assembler.go
+
+// streamAssembler accumulates model stream deltas by type+message id and
+// resolves full content when a complete chunk arrives (with empty Content).
+// Shared by the Run turn loop and ContextManager.Handoff.
+type streamAssembler struct {
+	buf map[string]string
+}
+
+func newStreamAssembler() *streamAssembler {
+	return &streamAssembler{buf: make(map[string]string)}
+}
+
+func streamChunkKey(chunk LLMResponseChunk) string {
+	return string(chunk.Type) + ":" + chunk.MessageId
+}
+
+// AddDelta records a non-complete content delta for message or reasoning streams.
+func (s *streamAssembler) AddDelta(chunk LLMResponseChunk) {
+	if s == nil || s.buf == nil || chunk.IsComplete || chunk.Content == "" {
+		return
+	}
+	if chunk.Type != StreamEventMessage && chunk.Type != StreamEventReasoning {
+		return
+	}
+	s.buf[streamChunkKey(chunk)] += chunk.Content
+}
+
+// CompleteContent returns the full text for a completed chunk, preferring
+// chunk.Content and falling back to accumulated deltas.
+func (s *streamAssembler) CompleteContent(chunk LLMResponseChunk) string {
+	if chunk.Content != "" {
+		return chunk.Content
+	}
+	if s == nil || s.buf == nil {
+		return ""
+	}
+	return s.buf[streamChunkKey(chunk)]
+}
+
+// MessageFromComplete builds a context-window Message for a completed
+// message or reasoning chunk (not function calls).
+func (s *streamAssembler) MessageFromComplete(chunk LLMResponseChunk) *Message {
+	role := RoleAssistant
+	if chunk.Type == StreamEventReasoning {
+		role = RoleReasoning
+	}
+	return &Message{
+		Role:      role,
+		Content:   s.CompleteContent(chunk),
+		ToolCalls: append([]ToolCall(nil), chunk.ToolCalls...),
+		MessageID: chunk.MessageId,
+	}
+}
+
+// Source: model_tasks.go
+
+// modelTelemetrySource is optionally implemented by InferenceStrategy so model
+// spans can set static GenAI identity attrs at start.
+type modelTelemetrySource interface {
+	ModelName() string
+	BaseURL() string
+}
 
 // AbsorbResult is returned by ModelTasks.Absorb after incorporating a message.
 // Small value type (slice header only).
@@ -45,6 +113,8 @@ type DefaultModelTasks struct {
 	context ContextManager
 	policy  ContextPolicy
 	maxSize int
+	// modelSeq is a 1-based Invoke counter for tacklr.model.seq (turn lifetime).
+	modelSeq int
 
 	// countScratch is reused by absorbFit's progressive token-count search so
 	// each pressure step does not allocate a new message pointer slice.
@@ -71,10 +141,24 @@ func (t *DefaultModelTasks) Turn(ctx context.Context, tools []*Tool, systemPromp
 	if t.model == nil {
 		return nil, fmt.Errorf("turn: model is required")
 	}
+	// Context is only reshaped on Absorb pressure (token threshold) or Handoff
+	// after complete_todo / plan revision — never by dropping tool history here.
 	if systemPrompt != "" {
 		t.model.SetSystemPrompt(systemPrompt)
 	}
-	return t.model.Invoke(ctx, t.context.Messages(), tools)
+	msgs := t.context.Messages()
+	t.modelSeq++
+	ctx = withModelIdentity(ctx, t.model)
+	if telemetry.AfterToolsFromContext(ctx) {
+		telemetry.EmitModelAfterTools(ctx)
+	}
+	ctx, span := telemetry.StartModelSpan(ctx, telemetry.ModelPhaseTurn, t.modelSeq, windowShape(msgs))
+	ch, err := t.model.Invoke(ctx, msgs, tools)
+	if err != nil {
+		endModelFromErr(ctx, span, telemetry.ModelPhaseTurn, err, telemetry.TokenUsage{})
+		return nil, err
+	}
+	return watchModelStream(ctx, span, telemetry.ModelPhaseTurn, ch), nil
 }
 
 func (t *DefaultModelTasks) Absorb(ctx context.Context, msg *Message, tools []*Tool, systemPrompt string) (AbsorbResult, error) {
@@ -111,15 +195,21 @@ func (t *DefaultModelTasks) Handoff(ctx context.Context, plan []Todo, planDoc st
 	defer span.End()
 	slog.InfoContext(ctx, "running context handoff", "area", telemetry.AreaModelTasks, "open_todos", open)
 
-	window, err := handoffGenerate(ctx, t.context.Messages(), plan, planDoc, t.model, tools, systemPrompt)
+	window, usedFallback, err := handoffGenerate(ctx, t.context.Messages(), plan, planDoc, t.model, tools, systemPrompt)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		span.SetAttributes(attribute.String(telemetry.AttrOutcome, telemetry.OutcomeError))
+		span.SetAttributes(attribute.String(telemetry.AttrOutcome, telemetry.HandoffOutcomeError))
+		telemetry.InstrumentsFromContext(ctx).RecordHandoff(ctx, telemetry.AgentIDFromContext(ctx), telemetry.HandoffOutcomeError)
 		return err
 	}
 	t.context.Replace(window)
-	span.SetAttributes(attribute.String(telemetry.AttrOutcome, telemetry.OutcomeOK))
+	outcome := telemetry.HandoffOutcomeOK
+	if usedFallback {
+		outcome = telemetry.HandoffOutcomeFallback
+	}
+	span.SetAttributes(attribute.String(telemetry.AttrOutcome, outcome))
+	telemetry.InstrumentsFromContext(ctx).RecordHandoff(ctx, telemetry.AgentIDFromContext(ctx), outcome)
 	return nil
 }
 
@@ -226,22 +316,41 @@ func (t *DefaultModelTasks) absorbFit(
 		numMessagesToCompress = len(unprotected)
 	}
 
-	events, err := model.Invoke(ctx, unprotected[:numMessagesToCompress], tools)
+	// Summarization only — no tool catalog. The unprotected slice is the real
+	// history under pressure (including tool results); do not invent alternate
+	// windows for provider quirks.
+	compressSrc := unprotected[:numMessagesToCompress]
+	t.modelSeq++
+	mctx := withModelIdentity(ctx, model)
+	mctx, mspan := telemetry.StartModelSpan(mctx, telemetry.ModelPhaseCompress, t.modelSeq, windowShape(compressSrc))
+	events, err := model.Invoke(mctx, compressSrc, nil)
 	if err != nil {
-		return nil, nil, true, fmt.Errorf("invoke: %w", err)
+		endModelFromErr(mctx, mspan, telemetry.ModelPhaseCompress, err, telemetry.TokenUsage{})
+		return nil, nil, true, fmt.Errorf("compress invoke: %w", err)
 	}
 
 	summaryMsg := &Message{Role: RoleAssistant}
 	var summary strings.Builder
 	var outChunks []LLMResponseChunk
+	var streamErr error
+	var usage telemetry.TokenUsage
 	for chunk := range events {
+		mergeTokenUsage(&usage, chunk)
 		if chunk.Type == StreamEventError {
-			return nil, nil, true, fmt.Errorf("compress: %s", chunk.Content)
+			streamErr = fmt.Errorf("compress: %s", chunk.Content)
+			if chunk.Error != nil {
+				streamErr = fmt.Errorf("compress: %w", chunk.Error)
+			}
+			break
 		}
 		if policy.StreamFitSummary {
 			outChunks = append(outChunks, chunk)
 		}
 		summary.WriteString(chunk.Content)
+	}
+	endModelFromErr(mctx, mspan, telemetry.ModelPhaseCompress, streamErr, usage)
+	if streamErr != nil {
+		return nil, nil, true, streamErr
 	}
 	summaryMsg.Content = summary.String()
 
@@ -277,15 +386,15 @@ func handoffGenerate(
 	model InferenceStrategy,
 	tools []*Tool,
 	restoreSystemPrompt string,
-) ([]*Message, error) {
+) ([]*Message, bool, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if model == nil {
-		return nil, fmt.Errorf("handoff: model is required")
+		return nil, false, fmt.Errorf("handoff: model is required")
 	}
 	if len(window) == 0 || window[0] == nil {
-		return nil, fmt.Errorf("handoff: empty window")
+		return nil, false, fmt.Errorf("handoff: empty window")
 	}
 
 	var planB strings.Builder
@@ -314,22 +423,51 @@ Current plan todos:
 	prompt.WriteString(planB.String())
 
 	model.SetSystemPrompt(prompt.String())
-	events, err := model.Invoke(ctx, window, tools)
-	if err != nil {
-		return nil, err
-	}
-
-	asm := newStreamAssembler()
+	// Handoff is a pure writing task over the current window — tools are not
+	// offered. On model failure, install a plan-derived handoff so ACM still
+	// rebuilds context (todo complete must not leave a half-applied effect).
+	// modelSeq is on the receiver only when called via *DefaultModelTasks methods;
+	// handoffGenerate is a free function — start span without seq when 0.
+	mctx := withModelIdentity(ctx, model)
+	mctx, mspan := telemetry.StartModelSpan(mctx, telemetry.ModelPhaseHandoff, 0, windowShape(window))
+	events, err := model.Invoke(mctx, window, nil)
 	var lastCompletedMessage string
-	for chunk := range events {
-		if chunk.Type == StreamEventError {
-			return nil, fmt.Errorf("compress: %s", chunk.Content)
-		}
-		asm.AddDelta(chunk)
-		if chunk.IsComplete && chunk.Type == StreamEventMessage {
-			if content := asm.CompleteContent(chunk); content != "" {
-				lastCompletedMessage = content
+	usedFallback := false
+	if err != nil {
+		endModelFromErr(mctx, mspan, telemetry.ModelPhaseHandoff, err, telemetry.TokenUsage{})
+		slog.ErrorContext(ctx, "handoff invoke failed; using plan-derived fallback",
+			"area", telemetry.AreaModelTasks, "error", err)
+		lastCompletedMessage = fallbackHandoffContent(plan)
+		usedFallback = true
+	} else {
+		asm := newStreamAssembler()
+		var streamErr error
+		var usage telemetry.TokenUsage
+		for chunk := range events {
+			mergeTokenUsage(&usage, chunk)
+			if chunk.Type == StreamEventError {
+				streamErr = fmt.Errorf("handoff: %s", chunk.Content)
+				if chunk.Error != nil {
+					streamErr = fmt.Errorf("handoff: %w", chunk.Error)
+				}
+				break
 			}
+			asm.AddDelta(chunk)
+			if chunk.IsComplete && chunk.Type == StreamEventMessage {
+				if content := asm.CompleteContent(chunk); content != "" {
+					lastCompletedMessage = content
+				}
+			}
+		}
+		endModelFromErr(mctx, mspan, telemetry.ModelPhaseHandoff, streamErr, usage)
+		if streamErr != nil {
+			slog.ErrorContext(ctx, "handoff model stream failed; using plan-derived fallback",
+				"area", telemetry.AreaModelTasks, "error", streamErr)
+			lastCompletedMessage = fallbackHandoffContent(plan)
+			usedFallback = true
+		} else if strings.TrimSpace(lastCompletedMessage) == "" {
+			lastCompletedMessage = fallbackHandoffContent(plan)
+			usedFallback = true
 		}
 	}
 
@@ -349,5 +487,155 @@ Current plan todos:
 	if restoreSystemPrompt != "" {
 		model.SetSystemPrompt(restoreSystemPrompt)
 	}
-	return out, nil
+	return out, usedFallback, nil
+}
+
+func windowShape(msgs []*Message) telemetry.WindowShape {
+	pairs := 0
+	for _, m := range msgs {
+		if m != nil && m.Role == RoleAssistant && len(m.ToolCalls) > 0 {
+			pairs++
+		}
+	}
+	return telemetry.WindowShape{Messages: len(msgs), ToolPairs: pairs}
+}
+
+func withModelIdentity(ctx context.Context, model InferenceStrategy) context.Context {
+	if model == nil {
+		return ctx
+	}
+	src, ok := model.(modelTelemetrySource)
+	if !ok {
+		return ctx
+	}
+	return telemetry.ContextWithModelIdentity(ctx, telemetry.ModelIdentity{
+		Provider:  telemetry.InferProviderName(src.BaseURL()),
+		Model:     src.ModelName(),
+		Operation: telemetry.GenAIOperationChat,
+	})
+}
+
+func mergeTokenUsage(u *telemetry.TokenUsage, chunk LLMResponseChunk) {
+	if u == nil {
+		return
+	}
+	if chunk.InputTokens > 0 {
+		u.Input = chunk.InputTokens
+	}
+	if chunk.OutputTokens > 0 {
+		u.Output = chunk.OutputTokens
+	}
+	if chunk.ReasoningTokens > 0 {
+		u.Reasoning = chunk.ReasoningTokens
+	}
+}
+
+func endModelFromErr(ctx context.Context, span trace.Span, phase string, err error, usage telemetry.TokenUsage) {
+	httpStatus, code := 0, ""
+	if err != nil {
+		var ps ProviderStatus
+		if errors.As(err, &ps) {
+			httpStatus = ps.ProviderHTTPStatus()
+			code = ps.ProviderErrorCode()
+		}
+	}
+	telemetry.EndModelSpan(ctx, span, phase, err, httpStatus, code, usage)
+}
+
+// watchModelStream ends the model span when the provider stream closes, on
+// cancel, or on a terminal stream error. Span end is idempotent so cancel and
+// close cannot double-End. After a stream error (or when the consumer stops
+// reading), remaining provider chunks are drained without blocking forever so
+// the span always finishes even if the harness returns early.
+func watchModelStream(ctx context.Context, span trace.Span, phase string, in <-chan LLMResponseChunk) <-chan LLMResponseChunk {
+	out := make(chan LLMResponseChunk, 16)
+	go func() {
+		defer close(out)
+		var streamErr error
+		var usage telemetry.TokenUsage
+		var endOnce sync.Once
+		end := func(err error) {
+			endOnce.Do(func() {
+				endModelFromErr(ctx, span, phase, err, usage)
+			})
+		}
+		// Always end the span if we exit for any reason (panic-safe bookkeeping).
+		// Read streamErr at exit time (not when defer is registered).
+		defer func() { end(streamErr) }()
+
+		forward := func(chunk LLMResponseChunk) (stop bool) {
+			select {
+			case out <- chunk:
+				return false
+			case <-ctx.Done():
+				streamErr = ctx.Err()
+				end(streamErr)
+				return true
+			}
+		}
+
+		// Drain provider channel without blocking on a dead consumer.
+		drainIn := func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case _, ok := <-in:
+					if !ok {
+						return
+					}
+				}
+			}
+		}
+
+		for {
+			select {
+			case <-ctx.Done():
+				streamErr = ctx.Err()
+				end(streamErr)
+				// Best-effort: drop remaining provider chunks so the HTTP goroutine can exit.
+				drainIn()
+				return
+			case chunk, ok := <-in:
+				if !ok {
+					end(streamErr)
+					return
+				}
+				mergeTokenUsage(&usage, chunk)
+				if chunk.Type == StreamEventError || chunk.Error != nil {
+					streamErr = chunk.Error
+					if streamErr == nil && chunk.Content != "" {
+						streamErr = errors.New(chunk.Content)
+					}
+					// Deliver the error chunk when possible, then end the span
+					// immediately so mid-stream failures are visible even if the
+					// harness stops reading before the provider channel closes.
+					_ = forward(chunk)
+					end(streamErr)
+					drainIn()
+					return
+				}
+				if forward(chunk) {
+					drainIn()
+					return
+				}
+			}
+		}
+	}()
+	return out
+}
+
+// fallbackHandoffContent builds a plan-derived handoff when the model stream
+// fails or returns no message so the window can still be rebuilt to the ACM
+// handoff shape (user, plan document, handoff, optional continue nudge).
+func fallbackHandoffContent(plan []Todo) string {
+	var b strings.Builder
+	b.WriteString("Handoff (fallback — model handoff stream failed or was empty).\n")
+	b.WriteString("This is work in progress; complete remaining todos from the plan document and list below.\n\n")
+	b.WriteString("Current plan todos:\n")
+	for i := range plan {
+		todo := &plan[i]
+		fmt.Fprintf(&b, "- [%s] %s: %s\n", todo.Status, todo.Title, todo.Description)
+	}
+	return b.String()
 }

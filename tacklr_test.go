@@ -574,7 +574,7 @@ func TestAgentHarness_Run(t *testing.T) {
 	t.Run("complete todo triggers compression between turns", func(t *testing.T) {
 		store := testStore(t)
 		var invokeCount int
-		var compressHadTools bool
+		var handoffHadNoTools bool
 		var continueSawNudge bool
 
 		strategy := &mockStrategy{
@@ -588,10 +588,9 @@ func TestAgentHarness_Run(t *testing.T) {
 					return
 				}
 				if invokeCount == 2 {
-					// Handoff compress: tools may be present; handoff is the last
-					// completed message text only (not every stream chunk).
-					if len(tools) != 0 {
-						compressHadTools = true
+					// Handoff is text-only: tools must not be offered (Azure fails otherwise).
+					if tools == nil || len(tools) == 0 {
+						handoffHadNoTools = true
 					}
 					events <- LLMResponseChunk{Type: StreamEventReasoning, MessageId: "rs_c", Content: "SECRET_REASONING", IsComplete: false}
 					events <- LLMResponseChunk{Type: StreamEventReasoning, MessageId: "rs_c", IsComplete: true}
@@ -631,8 +630,8 @@ func TestAgentHarness_Run(t *testing.T) {
 		if invokeCount != 3 {
 			t.Errorf("expected 3 total invocations, got %d", invokeCount)
 		}
-		if !compressHadTools {
-			t.Error("handoff compress Invoke should still receive tools for schema/context")
+		if !handoffHadNoTools {
+			t.Error("handoff Invoke must not receive tools (Azure response.failed with tool schemas)")
 		}
 		if !continueSawNudge {
 			t.Error("continue Invoke after compress should include continuePlanNudge (open todos remain)")
@@ -853,10 +852,11 @@ func TestAgentHarness_Run(t *testing.T) {
 		}
 	})
 
-	t.Run("complete last todo skips continue nudge", func(t *testing.T) {
+	t.Run("complete last todo skips handoff", func(t *testing.T) {
+		// Final complete_todo must not collapse context or spend a handoff model call.
 		store := testStore(t)
 		var invokeCount int
-		var continueSawNudge bool
+		var sawHandoffDeveloper bool
 
 		strategy := &mockStrategy{
 			invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, events chan<- LLMResponseChunk) {
@@ -868,13 +868,9 @@ func TestAgentHarness_Run(t *testing.T) {
 					events <- LLMResponseChunk{IsComplete: true}
 					return
 				}
-				if invokeCount == 2 {
-					events <- LLMResponseChunk{Type: StreamEventMessage, MessageId: "msg_h", Content: "All work done handoff.", IsComplete: true}
-					return
-				}
 				for _, m := range msgs {
-					if m != nil && m.Role == RoleDeveloper && m.Content == continuePlanNudge {
-						continueSawNudge = true
+					if m != nil && m.Role == RoleDeveloper {
+						sawHandoffDeveloper = true
 					}
 				}
 				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "Plan finished.", IsComplete: true}
@@ -890,49 +886,66 @@ func TestAgentHarness_Run(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for range ch {
+		var sawToolDone, sawFinal bool
+		for ev := range ch {
+			if ev.Type == StreamEventToolResult && strings.Contains(ev.Content, "All todos completed") {
+				sawToolDone = true
+			}
+			if ev.Type == StreamEventMessage && ev.Content == "Plan finished." {
+				sawFinal = true
+			}
 		}
-
-		if invokeCount != 3 {
-			t.Errorf("invokeCount = %d, want 3", invokeCount)
+		if !sawToolDone {
+			t.Error("want complete_todo all-done tool result")
 		}
-		if continueSawNudge {
-			t.Error("should not append continuePlanNudge when all todos are completed")
+		if !sawFinal {
+			t.Error("want final assistant wrap-up message")
 		}
-		// [user, handoff, assistant] — no nudge
-		if len(ah.Messages()) != 3 {
-			t.Errorf("context len = %d, want 3 (user, handoff, assistant)", len(ah.Messages()))
-		} else if ah.Messages()[1].Content != "All work done handoff." {
-			t.Errorf("handoff = %q", ah.Messages()[1].Content)
+		// tool turn + wrap-up turn only (no handoff Invoke).
+		if invokeCount != 2 {
+			t.Errorf("invokeCount = %d, want 2 (no handoff model call)", invokeCount)
+		}
+		if sawHandoffDeveloper {
+			t.Error("should not insert developer handoff when plan is fully done")
 		}
 	})
 
-	t.Run("compression error emits error event", func(t *testing.T) {
+	t.Run("handoff invoke error soft-fails with fallback", func(t *testing.T) {
+		// Mid-plan complete_todo must not die when the handoff model call fails
+		// (Azure response.failed). We install a plan-derived fallback and continue.
 		store := testStore(t)
 		var invokeCount int
-		var compressionAttempted bool
-		compressionErr := fmt.Errorf("compression invoke failed")
+		var handoffAttempted bool
 
 		strategy := &mockStrategy{
 			invokeErrFn: func(_ context.Context, _ []*Message, tools []*Tool) error {
 				invokeCount++
 				if invokeCount == 1 {
-					return nil
+					return nil // allow complete_todo turn
 				}
-				compressionAttempted = true
-				return compressionErr
+				if invokeCount == 2 {
+					handoffAttempted = true
+					return fmt.Errorf("compression invoke failed")
+				}
+				return nil // post-handoff turn
 			},
 			invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, events chan<- LLMResponseChunk) {
-				events <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-					{ID: "call_ct_err", CallID: "call_ct_err", Name: "complete_todo", Arguments: `{"title":"Task 1"}`},
-				}, IsComplete: true}
-				events <- LLMResponseChunk{IsComplete: true}
+				if invokeCount <= 1 {
+					events <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
+						{ID: "call_ct_err", CallID: "call_ct_err", Name: "complete_todo", Arguments: `{"title":"Task 1"}`},
+					}, IsComplete: true}
+					events <- LLMResponseChunk{IsComplete: true}
+					return
+				}
+				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "continuing", IsComplete: true}
 			},
 		}
 
 		ah := NewAgent(context.Background(), AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
+		// Two todos so completing Task 1 still triggers handoff.
 		ah.session.Plan().Set([]Todo{
 			{Title: "Task 1", Status: streaming.TodoStatusInProgress},
+			{Title: "Task 2", Status: streaming.TodoStatusPending},
 		})
 
 		ch, err := ah.Run(context.Background(), "Complete task 1")
@@ -940,32 +953,29 @@ func TestAgentHarness_Run(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		var foundError bool
 		var foundComplete bool
-		var eventCount int
 		for ev := range ch {
-			eventCount++
-			t.Logf("event %d: type=%q content=%q error=%v", eventCount, ev.Type, ev.Content, ev.Error)
-			if ev.Type == StreamEventError {
-				foundError = true
-				if !strings.Contains(ev.Content, "compression invoke failed") {
-					t.Errorf("error message = %q, want contains 'compression invoke failed'", ev.Content)
-				}
-			}
 			if ev.Type == StreamEventComplete {
 				foundComplete = true
 			}
+			if ev.Type == StreamEventError {
+				t.Fatalf("did not expect error after soft-fail handoff: %v %q", ev.Error, ev.Content)
+			}
 		}
-		t.Logf("events received: %d, compressionAttempted=%v foundError=%v foundComplete=%v", eventCount, compressionAttempted, foundError, foundComplete)
-
-		if !compressionAttempted {
-			t.Error("compression should have been attempted")
+		if !handoffAttempted {
+			t.Error("handoff invoke should have been attempted")
 		}
-		if !foundError {
-			t.Error("expected StreamEventError")
+		if !foundComplete {
+			t.Error("expected StreamEventComplete after soft-fail handoff")
 		}
-		if foundComplete {
-			t.Error("should not have StreamEventComplete after compression error")
+		foundFallback := false
+		for _, m := range ah.Messages() {
+			if m.Role == RoleDeveloper && strings.Contains(m.Content, "fallback") {
+				foundFallback = true
+			}
+		}
+		if !foundFallback {
+			t.Fatalf("expected fallback handoff in window, got %+v", ah.Messages())
 		}
 	})
 }

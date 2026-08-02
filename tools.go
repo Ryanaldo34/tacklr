@@ -7,12 +7,17 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	mapset "github.com/deckarep/golang-set/v2"
 
 	"github.com/ryanaldo34/tacklr/streaming"
 )
+
+// Tool definitions, JSON schema, and post-tool ACM result hooks.
+
+// Source: tools.go
 
 type ToolPermission int
 
@@ -159,12 +164,14 @@ func NewTool(cfg ToolConfig) *Tool {
 		strict:             true,
 	}
 	if argsType != nil {
-		t.parameters = typeToJSONSchema(argsType, 0)
+		// strict:true tools require every properties key in required (OpenAI / DeepSeek).
+		t.parameters = typeToJSONSchema(argsType, 0, true)
 	} else {
 		t.parameters = map[string]any{
 			"type":                 "object",
 			"properties":           map[string]any{},
 			"additionalProperties": false,
+			"required":             []string{},
 		}
 	}
 
@@ -311,7 +318,11 @@ func (t *Tool) AsJson() map[string]any {
 	}
 }
 
-func typeToJSONSchema(rt reflect.Type, depth int, skipTypes ...reflect.Type) map[string]any {
+// typeToJSONSchema builds a JSON Schema for rt.
+// When strict is true (OpenAI/DeepSeek function tools), every property name is
+// listed in required, and omitempty/pointer fields are typed as T|null so the
+// model may pass null for unused optionals.
+func typeToJSONSchema(rt reflect.Type, depth int, strict bool, skipTypes ...reflect.Type) map[string]any {
 	if depth > 10 {
 		return map[string]any{"type": "string"}
 	}
@@ -368,7 +379,7 @@ func typeToJSONSchema(rt reflect.Type, depth int, skipTypes ...reflect.Type) map
 			}
 
 			if f.Anonymous && name == f.Name && f.Type.Kind() == reflect.Struct {
-				emb := typeToJSONSchema(f.Type, depth+1, skipTypes...)
+				emb := typeToJSONSchema(f.Type, depth+1, strict, skipTypes...)
 				if p, ok := emb["properties"].(map[string]any); ok {
 					for k, v := range p {
 						properties[k] = v
@@ -380,8 +391,8 @@ func typeToJSONSchema(rt reflect.Type, depth int, skipTypes ...reflect.Type) map
 				continue
 			}
 
-			isOptional := f.Type.Kind() == reflect.Ptr || opts == "omitempty"
-			schema := typeToJSONSchema(f.Type, depth+1, skipTypes...)
+			isOptional := f.Type.Kind() == reflect.Ptr || strings.Contains(opts, "omitempty")
+			schema := typeToJSONSchema(f.Type, depth+1, strict, skipTypes...)
 
 			if desc := f.Tag.Get("desc"); desc != "" {
 				schema["description"] = desc
@@ -390,8 +401,12 @@ func typeToJSONSchema(rt reflect.Type, depth int, skipTypes ...reflect.Type) map
 				schema["enum"] = strings.Split(enum, ",")
 			}
 
+			if strict && isOptional {
+				schema = makeSchemaNullable(schema)
+			}
+
 			properties[name] = schema
-			if !isOptional {
+			if strict || !isOptional {
 				required = append(required, name)
 			}
 		}
@@ -401,7 +416,8 @@ func typeToJSONSchema(rt reflect.Type, depth int, skipTypes ...reflect.Type) map
 			"properties":           properties,
 			"additionalProperties": false,
 		}
-		if len(required) > 0 {
+		// Strict tool schemas always include required (may be empty).
+		if strict || len(required) > 0 {
 			result["required"] = required
 		}
 		return result
@@ -410,14 +426,14 @@ func typeToJSONSchema(rt reflect.Type, depth int, skipTypes ...reflect.Type) map
 	if rt.Kind() == reflect.Slice || rt.Kind() == reflect.Array {
 		return map[string]any{
 			"type":  "array",
-			"items": typeToJSONSchema(rt.Elem(), depth+1, skipTypes...),
+			"items": typeToJSONSchema(rt.Elem(), depth+1, strict, skipTypes...),
 		}
 	}
 
 	if rt.Kind() == reflect.Map {
 		return map[string]any{
 			"type":                 "object",
-			"additionalProperties": typeToJSONSchema(rt.Elem(), depth+1, skipTypes...),
+			"additionalProperties": typeToJSONSchema(rt.Elem(), depth+1, strict, skipTypes...),
 		}
 	}
 
@@ -436,12 +452,39 @@ func typeToJSONSchema(rt reflect.Type, depth int, skipTypes ...reflect.Type) map
 	return map[string]any{"type": jsonType}
 }
 
+// makeSchemaNullable rewrites a schema type to accept null (strict optional fields).
+func makeSchemaNullable(schema map[string]any) map[string]any {
+	if schema == nil {
+		return map[string]any{"type": []any{"string", "null"}}
+	}
+	switch t := schema["type"].(type) {
+	case string:
+		if t == "null" {
+			return schema
+		}
+		schema["type"] = []any{t, "null"}
+	case []any:
+		hasNull := false
+		for _, x := range t {
+			if s, ok := x.(string); ok && s == "null" {
+				hasNull = true
+				break
+			}
+		}
+		if !hasNull {
+			schema["type"] = append(append([]any{}, t...), "null")
+		}
+	}
+	return schema
+}
+
 func TypeToJSONSchema(v any) (map[string]any, error) {
 	rt := reflect.TypeOf(v)
 	if rt == nil {
 		return nil, fmt.Errorf("cannot generate JSON schema from nil value")
 	}
-	return typeToJSONSchema(rt, 0), nil
+	// Non-strict: omitempty fields stay optional (structured outputs / hosts).
+	return typeToJSONSchema(rt, 0, false), nil
 }
 
 type ToolNamespace struct {
@@ -467,4 +510,113 @@ func ToolsAsJson(tools []*Tool) string {
 
 	b, _ := json.Marshal(defs)
 	return string(b)
+}
+
+// Source: tool_result_hooks.go
+
+// ToolResultEffect is applied once after a successful tool batch (no pending interrupts).
+type ToolResultEffect int
+
+const (
+	EffectNone ToolResultEffect = iota
+	// EffectInstallPlanDocument prunes the window to [user, plan document].
+	EffectInstallPlanDocument
+	// EffectHandoff rebuilds to [user, plan?, handoff, nudge?].
+	EffectHandoff
+)
+
+// BuiltinResult is the success value for framework builtins that drive ACM
+// context effects. Prefer returning this from plan tools instead of relying on
+// name-keyed ToolResultHooks. Invoke still surfaces Output as the tool string.
+type BuiltinResult struct {
+	Output string
+	// Effect is merged across the batch and applied once at batch end.
+	Effect ToolResultEffect
+	// SuppressWindowMessage skips adding the tool-result Message to the window;
+	// the client still receives StreamEventToolResult.
+	SuppressWindowMessage bool
+}
+
+// disposition converts a BuiltinResult into the mergeable tool disposition.
+func (r BuiltinResult) disposition() ToolResultDisposition {
+	return ToolResultDisposition{
+		Effect:                r.Effect,
+		SuppressWindowMessage: r.SuppressWindowMessage,
+	}
+}
+
+// ToolResultObservation is a successful tool invocation observed by a hook.
+type ToolResultObservation struct {
+	Name     string
+	ArgsJSON string
+	Output   string
+	Runtime  HarnessRuntime
+}
+
+// ToolResultDisposition is returned by a tool (via BuiltinResult) or a
+// ToolResultHook after a tool finishes successfully.
+type ToolResultDisposition struct {
+	// Effect is merged across the batch and applied once at batch end.
+	Effect ToolResultEffect
+	// SuppressWindowMessage skips adding the tool-result Message to the window;
+	// the client still receives StreamEventToolResult.
+	SuppressWindowMessage bool
+}
+
+// ToolResultHook observes a finished successful tool and may queue window effects.
+// Hooks run after the tool returns and before the tool result is emitted.
+// Window rebuilds are deferred to end of batch via Effect.
+// Plan builtins return BuiltinResult instead; hooks remain for host tools.
+type ToolResultHook func(ctx context.Context, obs ToolResultObservation) ToolResultDisposition
+
+type toolResultHookRegistry struct {
+	byName map[string]ToolResultHook
+}
+
+func newToolResultHookRegistry(hooks map[string]ToolResultHook) *toolResultHookRegistry {
+	cp := make(map[string]ToolResultHook, len(hooks))
+	for k, v := range hooks {
+		cp[k] = v
+	}
+	return &toolResultHookRegistry{byName: cp}
+}
+
+func (r *toolResultHookRegistry) observe(ctx context.Context, obs ToolResultObservation) ToolResultDisposition {
+	if r == nil {
+		return ToolResultDisposition{}
+	}
+	hook := r.byName[obs.Name]
+	if hook == nil {
+		return ToolResultDisposition{}
+	}
+	return hook(ctx, obs)
+}
+
+type batchToolResultEffects struct {
+	installPlan atomic.Bool
+	handoff     atomic.Bool
+	suppress    atomic.Bool
+}
+
+func (b *batchToolResultEffects) merge(d ToolResultDisposition) {
+	switch d.Effect {
+	case EffectInstallPlanDocument:
+		b.installPlan.Store(true)
+	case EffectHandoff:
+		b.handoff.Store(true)
+	}
+	if d.SuppressWindowMessage {
+		b.suppress.Store(true)
+	}
+}
+
+// resolved prefers install over handoff when both appear in one batch.
+func (b *batchToolResultEffects) resolved() ToolResultEffect {
+	if b.installPlan.Load() {
+		return EffectInstallPlanDocument
+	}
+	if b.handoff.Load() {
+		return EffectHandoff
+	}
+	return EffectNone
 }

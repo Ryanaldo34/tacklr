@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -13,8 +14,10 @@ import (
 	"strings"
 
 	"github.com/pkoukk/tiktoken-go"
+	"go.opentelemetry.io/otel/log"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
 type OpenAIInferenceStrategy struct {
@@ -26,8 +29,10 @@ type OpenAIInferenceStrategy struct {
 	// reasoningSummary: "auto" | "concise" | "detailed". Empty omits the field.
 	// Required for Azure OpenAI/Foundry to stream response.reasoning_summary_text.delta.
 	reasoningSummary string
-	httpClient       *http.Client
-	baseURL          string
+	// maxOutputTokens is sent as max_output_tokens when > 0 (Azure/OpenAI Responses).
+	maxOutputTokens int
+	httpClient      *http.Client
+	baseURL         string
 
 	structuredOutputSchema map[string]any
 	structuredOutputName   string
@@ -55,6 +60,22 @@ func (s *OpenAIInferenceStrategy) WithModel(model string) tacklr.InferenceStrate
 	return s
 }
 
+// ModelName returns the configured deployment/model id (telemetry GenAI attrs).
+func (s *OpenAIInferenceStrategy) ModelName() string {
+	if s == nil {
+		return ""
+	}
+	return s.model
+}
+
+// BaseURL returns the configured API base URL (telemetry provider inference).
+func (s *OpenAIInferenceStrategy) BaseURL() string {
+	if s == nil {
+		return ""
+	}
+	return s.baseURL
+}
+
 func (s *OpenAIInferenceStrategy) WithURL(url string) tacklr.InferenceStrategy {
 	s.baseURL = url
 	return s
@@ -74,6 +95,17 @@ func (s *OpenAIInferenceStrategy) WithReasoningLevel(level string) tacklr.Infere
 // ("auto", "concise", "detailed"). Empty clears it.
 func (s *OpenAIInferenceStrategy) WithReasoningSummary(summary string) *OpenAIInferenceStrategy {
 	s.reasoningSummary = summary
+	return s
+}
+
+// WithMaxOutputTokens sets Responses API max_output_tokens (0 omits the field).
+// Raise this for Azure reasoning models after large tool results (e.g. web_search)
+// so streams do not end as bare response.incomplete.
+func (s *OpenAIInferenceStrategy) WithMaxOutputTokens(n int) *OpenAIInferenceStrategy {
+	if n < 0 {
+		n = 0
+	}
+	s.maxOutputTokens = n
 	return s
 }
 
@@ -235,6 +267,9 @@ func (s *OpenAIInferenceStrategy) Invoke(ctx context.Context, messages []*tacklr
 		Tools:  toolsJSON,
 		Stream: true,
 	}
+	if s.maxOutputTokens > 0 {
+		reqBody.MaxOutputTokens = s.maxOutputTokens
+	}
 
 	if s.instructions != "" {
 		reqBody.Instructions = &s.instructions
@@ -259,6 +294,7 @@ func (s *OpenAIInferenceStrategy) Invoke(ctx context.Context, messages []*tacklr
 	}
 
 	body, _ := json.Marshal(reqBody)
+	inputSummary := summarizeInputItems(items)
 
 	events := make(chan tacklr.LLMResponseChunk, 10)
 
@@ -299,7 +335,7 @@ func (s *OpenAIInferenceStrategy) Invoke(ctx context.Context, messages []*tacklr
 		if httpResp.StatusCode != http.StatusOK {
 			respBody, _ := io.ReadAll(httpResp.Body)
 			classified := ClassifyProviderFailure(httpResp.StatusCode, respBody)
-			slog.Error("non-200 response", "status", httpResp.StatusCode, "error", classified)
+			emitProviderFailed(ctx, classified, httpResp.StatusCode, inputSummary, string(respBody))
 			sendChunk(tacklr.LLMResponseChunk{
 				Type:       tacklr.StreamEventError,
 				Content:    classified.Error(),
@@ -309,13 +345,13 @@ func (s *OpenAIInferenceStrategy) Invoke(ctx context.Context, messages []*tacklr
 			return
 		}
 
-		s.parseSSEResponse(ctx, httpResp.Body, events)
+		s.parseSSEResponse(ctx, httpResp.Body, events, inputSummary)
 	}()
 
 	return events, nil
 }
 
-func (s *OpenAIInferenceStrategy) parseSSEResponse(ctx context.Context, body io.Reader, events chan<- tacklr.LLMResponseChunk) {
+func (s *OpenAIInferenceStrategy) parseSSEResponse(ctx context.Context, body io.Reader, events chan<- tacklr.LLMResponseChunk, inputSummary string) {
 	// Match main-branch classification: output_text is always a message chunk.
 	// DeepSeek on Foundry streams thinking inside output_text (e.g. <think> tags);
 	// reclassifying those deltas as StreamEventReasoning broke ACP clients that
@@ -323,6 +359,9 @@ func (s *OpenAIInferenceStrategy) parseSSEResponse(ctx context.Context, body io.
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
 	var currentItemID string
+	// item IDs that already streamed reasoning_*_text.delta — avoid replaying
+	// the full summary on output_item.done (would duplicate ACP thought chunks).
+	reasoningStreamed := make(map[string]struct{})
 	for scanner.Scan() {
 		if ctx != nil && ctx.Err() != nil {
 			return
@@ -343,6 +382,7 @@ func (s *OpenAIInferenceStrategy) parseSSEResponse(ctx context.Context, body io.
 			Delta  string          `json:"delta"`
 			Item   json.RawMessage `json:"item"`
 			ItemID string          `json:"item_id"`
+			Error  *apiErrorDetail `json:"error"`
 		}
 		if err := json.Unmarshal([]byte(data), &evt); err != nil {
 			continue
@@ -374,6 +414,9 @@ func (s *OpenAIInferenceStrategy) parseSSEResponse(ctx context.Context, body io.
 			// Explicit reasoning channels (OpenAI/Azure o-series style) → thought.
 			// Keep summary as additive; do not invent reclassification of output_text.
 			if evt.Delta != "" {
+				if msgID != "" {
+					reasoningStreamed[msgID] = struct{}{}
+				}
 				events <- tacklr.LLMResponseChunk{
 					Type:       tacklr.StreamEventReasoning,
 					MessageId:  msgID,
@@ -383,47 +426,15 @@ func (s *OpenAIInferenceStrategy) parseSSEResponse(ctx context.Context, body io.
 			}
 		case "response.output_item.done":
 			if evt.Item != nil {
-				s.emitOutputItemComplete(evt.Item, events)
+				s.emitOutputItemComplete(evt.Item, events, reasoningStreamed)
 			}
-		case "response.incomplete", "response.failed":
-			// Terminal incomplete / failed response — classify incomplete reason when present.
-			var payload struct {
-				Response struct {
-					Status            string            `json:"status"`
-					IncompleteDetails *incompleteDetail `json:"incomplete_details"`
-					Error             *apiErrorDetail   `json:"error"`
-				} `json:"response"`
-				// Some payloads put fields at top level.
-				IncompleteDetails *incompleteDetail `json:"incomplete_details"`
-				Error             *apiErrorDetail   `json:"error"`
-			}
-			_ = json.Unmarshal([]byte(data), &payload)
-			detail := payload.Response.IncompleteDetails
-			if detail == nil {
-				detail = payload.IncompleteDetails
-			}
-			var classified error
-			if detail != nil && detail.Reason != "" {
-				classified = ClassifyIncompleteReason(detail.Reason)
-			}
+		case "error":
+			// Azure mid-stream errors often use type=error with HTTP 200.
+			_, classified := classifyTerminalSSE("error", data)
 			if classified == nil {
-				apiErr := &APIStatusError{Status: 200, Body: "response incomplete or failed"}
-				if payload.Response.Error != nil {
-					apiErr.Body = payload.Response.Error.Message
-					apiErr.Code = payload.Response.Error.Code
-				} else if payload.Error != nil {
-					apiErr.Body = payload.Error.Message
-					apiErr.Code = payload.Error.Code
-				}
-				if apiErr.Code != "" || (apiErr.Body != "" && apiErr.Body != "response incomplete or failed") {
-					classified = ClassifyProviderFailure(200, mustJSON(map[string]any{
-						"error": map[string]string{"code": apiErr.Code, "message": apiErr.Body, "type": ""},
-					}))
-				}
-				if classified == nil {
-					classified = apiErr
-				}
+				classified = &APIStatusError{Status: 200, Body: "stream error event"}
 			}
+			emitProviderFailed(ctx, classified, 200, inputSummary, data)
 			events <- tacklr.LLMResponseChunk{
 				Type:       tacklr.StreamEventError,
 				Content:    classified.Error(),
@@ -431,8 +442,212 @@ func (s *OpenAIInferenceStrategy) parseSSEResponse(ctx context.Context, body io.
 				IsComplete: true,
 			}
 			return
+		case "response.incomplete", "response.failed", "response.completed":
+			// Terminal incomplete/failed, or completed-with-bad-status (some Azure builds).
+			if terminal, classified := classifyTerminalSSE(evt.Type, data); terminal {
+				emitProviderFailed(ctx, classified, 200, inputSummary, data)
+				events <- tacklr.LLMResponseChunk{
+					Type:       tacklr.StreamEventError,
+					Content:    classified.Error(),
+					Error:      classified,
+					IsComplete: true,
+				}
+				return
+			}
+			// Successful response.completed: surface token usage for model spans/metrics.
+			if evt.Type == "response.completed" {
+				if u, ok := parseResponseUsage(data); ok {
+					events <- tacklr.LLMResponseChunk{
+						Type:            tacklr.StreamEventComplete,
+						IsComplete:      true,
+						InputTokens:     u.Input,
+						OutputTokens:    u.Output,
+						ReasoningTokens: u.Reasoning,
+					}
+				}
+			}
 		}
 	}
+}
+
+// responseUsage is the token counts we care about from Responses API usage.
+type responseUsage struct {
+	Input     int
+	Output    int
+	Reasoning int
+}
+
+// parseResponseUsage extracts usage from a response.completed SSE payload.
+func parseResponseUsage(data string) (responseUsage, bool) {
+	var payload struct {
+		Response struct {
+			Usage *struct {
+				InputTokens  int `json:"input_tokens"`
+				OutputTokens int `json:"output_tokens"`
+				// Nested details (OpenAI / Azure Responses).
+				OutputTokensDetails *struct {
+					ReasoningTokens int `json:"reasoning_tokens"`
+				} `json:"output_tokens_details"`
+				// Flat alternate some gateways emit.
+				ReasoningTokens int `json:"reasoning_tokens"`
+			} `json:"usage"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal([]byte(data), &payload); err != nil || payload.Response.Usage == nil {
+		return responseUsage{}, false
+	}
+	u := payload.Response.Usage
+	out := responseUsage{
+		Input:  u.InputTokens,
+		Output: u.OutputTokens,
+	}
+	if u.OutputTokensDetails != nil && u.OutputTokensDetails.ReasoningTokens > 0 {
+		out.Reasoning = u.OutputTokensDetails.ReasoningTokens
+	} else if u.ReasoningTokens > 0 {
+		out.Reasoning = u.ReasoningTokens
+	}
+	if out.Input == 0 && out.Output == 0 && out.Reasoning == 0 {
+		return responseUsage{}, false
+	}
+	return out, true
+}
+
+// classifyTerminalSSE maps Responses SSE terminal events to a harness error.
+// Returns terminal=false for response.completed with a successful status.
+func classifyTerminalSSE(evtType, data string) (terminal bool, err error) {
+	var payload struct {
+		Response struct {
+			Status            string            `json:"status"`
+			IncompleteDetails *incompleteDetail `json:"incomplete_details"`
+			Error             *apiErrorDetail   `json:"error"`
+			// Azure occasionally nests error fields without full apiErrorDetail shape.
+			ErrorCode    string `json:"error_code"`
+			ErrorMessage string `json:"error_message"`
+		} `json:"response"`
+		IncompleteDetails *incompleteDetail `json:"incomplete_details"`
+		Error             *apiErrorDetail   `json:"error"`
+		// Azure sometimes puts reason as a bare string.
+		Reason string `json:"reason"`
+	}
+	_ = json.Unmarshal([]byte(data), &payload)
+
+	status := strings.TrimSpace(payload.Response.Status)
+	if evtType == "response.completed" {
+		// Successful completion — not an error path.
+		if status == "" || status == "completed" {
+			return false, nil
+		}
+		if status != "incomplete" && status != "failed" && status != "cancelled" {
+			return false, nil
+		}
+	}
+
+	detail := payload.Response.IncompleteDetails
+	if detail == nil {
+		detail = payload.IncompleteDetails
+	}
+	reason := ""
+	if detail != nil {
+		reason = strings.TrimSpace(detail.Reason)
+	}
+	if reason == "" {
+		reason = strings.TrimSpace(payload.Reason)
+	}
+
+	if reason != "" {
+		if classified := ClassifyIncompleteReason(reason); classified != nil {
+			return true, classified
+		}
+	}
+
+	apiErr := &APIStatusError{Status: 200, Body: "response incomplete or failed"}
+	if payload.Response.Error != nil {
+		apiErr.Body = payload.Response.Error.Message
+		apiErr.Code = payload.Response.Error.Code
+		if payload.Response.Error.Type != "" && apiErr.Body == "" {
+			apiErr.Body = payload.Response.Error.Type
+		}
+	} else if payload.Error != nil {
+		apiErr.Body = payload.Error.Message
+		apiErr.Code = payload.Error.Code
+	} else if payload.Response.ErrorMessage != "" {
+		apiErr.Body = payload.Response.ErrorMessage
+		apiErr.Code = payload.Response.ErrorCode
+	}
+	// Enrich opaque bodies so clients/logs show Azure status/reason.
+	if apiErr.Body == "" || apiErr.Body == "response incomplete or failed" {
+		parts := []string{"response incomplete or failed"}
+		if status != "" {
+			parts = append(parts, "status="+status)
+		}
+		if reason != "" {
+			parts = append(parts, "reason="+reason)
+		}
+		if apiErr.Code != "" {
+			parts = append(parts, "code="+apiErr.Code)
+		}
+		if evtType != "" {
+			parts = append(parts, "event="+evtType)
+		}
+		apiErr.Body = strings.Join(parts, "; ")
+	}
+	if apiErr.Code != "" || (apiErr.Body != "" && !strings.HasPrefix(apiErr.Body, "response incomplete or failed")) {
+		classified := ClassifyProviderFailure(200, mustJSON(map[string]any{
+			"error": map[string]string{"code": apiErr.Code, "message": apiErr.Body, "type": ""},
+		}))
+		if classified != nil {
+			return true, classified
+		}
+	}
+	// Always log raw snip — Zed ACP stderr is the host debug stream.
+	slog.Error("provider terminal SSE without classifiable reason",
+		"event", evtType, "status", status, "reason", reason, "code", apiErr.Code,
+		"body_snip", truncateForLog(data, 800))
+	return true, apiErr
+}
+
+func truncateForLog(s string, n int) string {
+	if n <= 0 || len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
+}
+
+// emitProviderFailed records a span-correlated OTel log event (preferred over
+// span.AddEvent) and mirrors detail to slog for ACP stderr.
+func emitProviderFailed(ctx context.Context, err error, httpStatus int, inputItems, body string) {
+	code := ""
+	if err != nil {
+		var api *APIStatusError
+		if errors.As(err, &api) && api != nil {
+			if httpStatus == 0 {
+				httpStatus = api.Status
+			}
+			code = api.Code
+		}
+	}
+	snip := truncateForLog(body, 800)
+	attrs := []log.KeyValue{
+		log.String(telemetry.EventAttrInputItems, inputItems),
+		log.String(telemetry.EventAttrBodySnip, snip),
+	}
+	if httpStatus > 0 {
+		attrs = append(attrs, log.Int(telemetry.AttrHTTPStatus, httpStatus))
+	}
+	if code != "" {
+		attrs = append(attrs, log.String(telemetry.AttrErrorCode, code))
+	}
+	if err != nil {
+		attrs = append(attrs, log.String("error", err.Error()))
+	}
+	telemetry.EmitEventSeverity(ctx, telemetry.EventProviderFailed, log.SeverityError, attrs...)
+	slog.ErrorContext(ctx, "provider terminal failure",
+		"error", err,
+		"status", httpStatus,
+		"code", code,
+		"input_items", inputItems,
+		"body_snip", snip,
+	)
 }
 
 func mustJSON(v any) []byte {
@@ -440,7 +655,7 @@ func mustJSON(v any) []byte {
 	return b
 }
 
-func (s *OpenAIInferenceStrategy) emitOutputItemComplete(raw json.RawMessage, events chan<- tacklr.LLMResponseChunk) {
+func (s *OpenAIInferenceStrategy) emitOutputItemComplete(raw json.RawMessage, events chan<- tacklr.LLMResponseChunk, reasoningStreamed map[string]struct{}) {
 	var typeHolder struct {
 		Type string `json:"type"`
 	}
@@ -481,7 +696,7 @@ func (s *OpenAIInferenceStrategy) emitOutputItemComplete(raw json.RawMessage, ev
 	case "function_call":
 		s.emitFunctionCallChunk(raw, events)
 	case "reasoning":
-		s.emitReasoningChunk(raw, events)
+		s.emitReasoningChunk(raw, events, reasoningStreamed)
 	}
 }
 
@@ -565,75 +780,226 @@ func (s *OpenAIInferenceStrategy) emitFunctionCallChunk(raw json.RawMessage, eve
 	}
 }
 
-func (s *OpenAIInferenceStrategy) emitReasoningChunk(raw json.RawMessage, events chan<- tacklr.LLMResponseChunk) {
+func (s *OpenAIInferenceStrategy) emitReasoningChunk(raw json.RawMessage, events chan<- tacklr.LLMResponseChunk, reasoningStreamed map[string]struct{}) {
 	var reasoning struct {
-		ID string `json:"id"`
+		ID      string `json:"id"`
+		Summary []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"summary"`
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
 	}
 	if err := json.Unmarshal(raw, &reasoning); err != nil {
 		return
 	}
-	// Deltas already streamed the text; this signals completion for the harness.
+	// Prefer client-visible summary; fall back to plain reasoning_text when present.
+	var text strings.Builder
+	for _, p := range reasoning.Summary {
+		if p.Text == "" {
+			continue
+		}
+		if p.Type == "" || p.Type == "summary_text" {
+			text.WriteString(p.Text)
+		}
+	}
+	if text.Len() == 0 {
+		for _, p := range reasoning.Content {
+			if p.Text == "" {
+				continue
+			}
+			if p.Type == "" || p.Type == "reasoning_text" {
+				text.WriteString(p.Text)
+			}
+		}
+	}
+	// If deltas already went to ACP as thought chunks, only signal completion
+	// (empty Content) so Zed does not render the full summary a second time.
+	content := ""
+	if text.Len() > 0 {
+		if _, streamed := reasoningStreamed[reasoning.ID]; !streamed {
+			content = text.String()
+		}
+	}
 	events <- tacklr.LLMResponseChunk{
 		Type:       tacklr.StreamEventReasoning,
 		MessageId:  reasoning.ID,
+		Content:    content,
 		IsComplete: true,
 	}
 }
 
 func marshalMessagesToInput(messages []*tacklr.Message) []json.RawMessage {
+	// Responses API requires each function_call to be immediately followed by its
+	// function_call_output (same call_id). Parallel tool batches must interleave
+	// call→output, not emit all calls then all outputs.
+	paired := make(map[*tacklr.Message]bool)
 	var items []json.RawMessage
 
+	appendJSON := func(v any) {
+		b, _ := json.Marshal(v)
+		items = append(items, b)
+	}
+
+	takeToolOutput := func(callID string) *tacklr.Message {
+		if callID == "" {
+			return nil
+		}
+		for _, m := range messages {
+			if m == nil || m.Role != tacklr.RoleTool || paired[m] {
+				continue
+			}
+			if m.ToolCallID == callID {
+				paired[m] = true
+				return m
+			}
+		}
+		return nil
+	}
+
+	appendFunctionCall := func(tc tacklr.ToolCall) {
+		callID := tc.CallID
+		if callID == "" {
+			callID = tc.ID
+		}
+		name := tc.Name
+		if tc.Namespace != "" && name != "" && !strings.Contains(name, ".") {
+			name = tc.Namespace + "." + name
+		}
+		args := tc.Arguments
+		if args == "" {
+			args = "{}"
+		}
+		status := string(tacklr.StatusCompleted)
+		if tc.Status == string(tacklr.StatusInProgress) || tc.Status == string(tacklr.StatusIncomplete) {
+			status = tc.Status
+		}
+		appendJSON(functionCallInputRequest{
+			Type:      "function_call",
+			CallID:    callID,
+			Name:      name,
+			Arguments: args,
+			Status:    status,
+		})
+		if out := takeToolOutput(callID); out != nil {
+			appendJSON(functionCallOutputRequest{
+				Type:   "function_call_output",
+				CallID: callID,
+				Output: out.Content,
+				Status: string(tacklr.StatusCompleted),
+			})
+		}
+	}
+
 	for _, msg := range messages {
+		if msg == nil {
+			continue
+		}
 		switch msg.Role {
 		case tacklr.RoleTool:
-			item := functionCallOutputRequest{
+			if paired[msg] {
+				continue
+			}
+			// Orphan tool result (no prior function_call in window) — still emit
+			// so the model sees the output; pairing is best-effort.
+			appendJSON(functionCallOutputRequest{
 				Type:   "function_call_output",
 				CallID: msg.ToolCallID,
 				Output: msg.Content,
-			}
-			b, _ := json.Marshal(item)
-			items = append(items, b)
+				Status: string(tacklr.StatusCompleted),
+			})
+			paired[msg] = true
 
 		case tacklr.RoleUser, tacklr.RoleSystem:
-			item := easyInputRequest{
+			appendJSON(easyInputRequest{
 				Role:    string(msg.Role),
 				Content: msg.Content,
-			}
-			b, _ := json.Marshal(item)
-			items = append(items, b)
+			})
 
 		case tacklr.RoleDeveloper:
 			// Wire as system so models treat handoff/plan as instructions, not a
 			// conversational turn to answer (Foundry/DeepSeek was echoing
 			// developer-role handoff text into agent_message_chunk).
-			item := easyInputRequest{
+			appendJSON(easyInputRequest{
 				Role:    string(tacklr.RoleSystem),
 				Content: msg.Content,
+			})
+
+		case tacklr.RoleReasoning:
+			// Responses multi-turn: pass prior reasoning items back with the tool
+			// turn. `summary` is required (empty array when none). Do not send
+			// status — that is an output field and Azure rejects it on input.
+			// Harness Message.Content holds streamed thought; map to summary_text.
+			item := reasoningInputRequest{
+				Type:    "reasoning",
+				ID:      msg.MessageID,
+				Summary: []reasoningSummaryPart{},
 			}
-			b, _ := json.Marshal(item)
-			items = append(items, b)
+			if text := strings.TrimSpace(msg.Content); text != "" {
+				item.Summary = []reasoningSummaryPart{{
+					Type: "summary_text",
+					Text: text,
+				}}
+			}
+			appendJSON(item)
 
 		case tacklr.RoleAssistant:
 			if msg.Content != "" {
-				item := easyInputRequest{
+				appendJSON(easyInputRequest{
 					Role:    string(msg.Role),
 					Content: msg.Content,
-				}
-				b, _ := json.Marshal(item)
-				items = append(items, b)
+				})
 			}
 			for _, tc := range msg.ToolCalls {
-				fc := functionCallInputRequest{
-					Type:      "function_call",
-					CallID:    tc.CallID,
-					Name:      tc.Name,
-					Arguments: tc.Arguments,
-				}
-				b, _ := json.Marshal(fc)
-				items = append(items, b)
+				appendFunctionCall(tc)
 			}
 		}
 	}
 
 	return items
+}
+
+// summarizeInputItems is a short, safe log line of request input shape (types,
+// call_ids) for diagnosing provider terminal failures.
+func summarizeInputItems(items []json.RawMessage) string {
+	if len(items) == 0 {
+		return "empty"
+	}
+	parts := make([]string, 0, len(items))
+	for i, raw := range items {
+		var head struct {
+			Type   string `json:"type"`
+			Role   string `json:"role"`
+			CallID string `json:"call_id"`
+			Status string `json:"status"`
+			Name   string `json:"name"`
+			ID     string `json:"id"`
+		}
+		_ = json.Unmarshal(raw, &head)
+		kind := head.Type
+		if kind == "" {
+			kind = "message:" + head.Role
+		}
+		extra := ""
+		if head.CallID != "" {
+			extra += " call_id=" + head.CallID
+		}
+		if head.Name != "" {
+			extra += " name=" + head.Name
+		}
+		if head.Status != "" {
+			extra += " status=" + head.Status
+		}
+		if head.ID != "" {
+			extra += " id=" + head.ID
+		}
+		parts = append(parts, fmt.Sprintf("%d:%s%s", i, kind, extra))
+		if i >= 24 {
+			parts = append(parts, fmt.Sprintf("…+%d more", len(items)-i-1))
+			break
+		}
+	}
+	return strings.Join(parts, "; ")
 }

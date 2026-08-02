@@ -6,6 +6,8 @@ import (
 	"github.com/ryanaldo34/tacklr/interrupt"
 )
 
+// keep
+
 // customInterrupt is only for RegisterInterrupt coverage.
 type customInterrupt struct{}
 

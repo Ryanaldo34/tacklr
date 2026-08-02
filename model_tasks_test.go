@@ -2,12 +2,43 @@ package tacklr
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
+
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"github.com/ryanaldo34/tacklr/streaming"
+	"github.com/ryanaldo34/tacklr/telemetry"
 )
+
+// ModelTasks, stream assembly, and model-stream span lifecycle outcomes.
+
+func TestStreamAssembler_deltasAndComplete(t *testing.T) {
+	asm := newStreamAssembler()
+	asm.AddDelta(LLMResponseChunk{Type: StreamEventMessage, MessageId: "m1", Content: "hel", IsComplete: false})
+	asm.AddDelta(LLMResponseChunk{Type: StreamEventMessage, MessageId: "m1", Content: "lo", IsComplete: false})
+	// Empty complete uses buffer.
+	got := asm.CompleteContent(LLMResponseChunk{Type: StreamEventMessage, MessageId: "m1", IsComplete: true})
+	if got != "hello" {
+		t.Fatalf("CompleteContent = %q, want hello", got)
+	}
+	// Explicit content wins.
+	got = asm.CompleteContent(LLMResponseChunk{Type: StreamEventMessage, MessageId: "m1", Content: "x", IsComplete: true})
+	if got != "x" {
+		t.Fatalf("explicit content = %q", got)
+	}
+	msg := asm.MessageFromComplete(LLMResponseChunk{
+		Type: StreamEventReasoning, MessageId: "r1", Content: "think", IsComplete: true,
+	})
+	if msg.Role != RoleReasoning || msg.Content != "think" || msg.MessageID != "r1" {
+		t.Fatalf("%+v", msg)
+	}
+}
 
 func TestDefaultModelTasks_Absorb_underPressure_summarizes(t *testing.T) {
 	var invokeCount int
@@ -224,6 +255,50 @@ func TestDefaultModelTasks_Handoff_errors(t *testing.T) {
 	}
 }
 
+// TestDefaultModelTasks_Handoff_streamError_usesFallback: Azure response.failed
+// during handoff must not fail complete_todo — window still gets a handoff message.
+func TestDefaultModelTasks_Handoff_streamError_usesFallback(t *testing.T) {
+	var sawTools []*Tool
+	strategy := &mockStrategy{
+		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
+			sawTools = tools
+			ch <- LLMResponseChunk{
+				Type:       StreamEventError,
+				Content:    "api error (status 200): response incomplete or failed; status=failed",
+				IsComplete: true,
+			}
+		},
+	}
+	cm := NewModelContextManager()
+	cm.Restore([]*Message{{Role: RoleUser, Content: "ship feature"}})
+	tools := []*Tool{NewTool(ToolConfig{Name: "web_search", Handler: func(ctx context.Context) (string, error) { return "", nil }})}
+	tasks := NewDefaultModelTasks(strategy, cm, DefaultContextPolicy(), 8192)
+	err := tasks.Handoff(context.Background(), []Todo{
+		{Title: "A", Status: streaming.TodoStatusCompleted, Description: "done"},
+		{Title: "B", Status: streaming.TodoStatusInProgress, Description: "next"},
+	}, "plan doc", tools, "sys")
+	if err != nil {
+		t.Fatalf("handoff should soft-fail: %v", err)
+	}
+	if sawTools != nil {
+		t.Fatalf("handoff must invoke without tools, got %d tools", len(sawTools))
+	}
+	msgs := cm.Messages()
+	if len(msgs) < 2 {
+		t.Fatalf("window = %d", len(msgs))
+	}
+	// developer handoff content should mention fallback / remaining work
+	found := false
+	for _, m := range msgs {
+		if m.Role == RoleDeveloper && strings.Contains(m.Content, "fallback") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected fallback handoff message, got %+v", msgs)
+	}
+}
+
 func TestDefaultModelTasks_Absorb_countTokensDuringCompressSearch(t *testing.T) {
 	calls := 0
 	strategy := &mockStrategy{
@@ -253,5 +328,100 @@ func TestDefaultModelTasks_Absorb_countTokensDuringCompressSearch(t *testing.T) 
 	}
 	if calls < 2 {
 		t.Fatalf("expected multiple CountTokens, got %d", calls)
+	}
+}
+
+// TestWatchModelStream_cancelEndsSpan: cancel mid-stream must finish the model
+// span and close the consumer channel (no leaked open span).
+func TestWatchModelStream_cancelEndsSpan(t *testing.T) {
+	sr := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sr))
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+
+	ctx := telemetry.ContextWithTracer(context.Background(), tp.Tracer("test"))
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	in := make(chan LLMResponseChunk)
+	ctx, span := telemetry.StartModelSpan(ctx, telemetry.ModelPhaseTurn, 1, telemetry.WindowShape{Messages: 1})
+	out := watchModelStream(ctx, span, telemetry.ModelPhaseTurn, in)
+
+	go func() {
+		select {
+		case in <- LLMResponseChunk{Type: StreamEventMessage, Content: "partial"}:
+		case <-ctx.Done():
+		}
+		<-ctx.Done()
+		close(in)
+	}()
+
+	select {
+	case <-out:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for first chunk")
+	}
+	cancel()
+
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case _, ok := <-out:
+			if !ok {
+				goto closed
+			}
+		case <-deadline:
+			t.Fatal("watchModelStream did not close after cancel")
+		}
+	}
+closed:
+	time.Sleep(20 * time.Millisecond)
+	if len(sr.Ended()) != 1 {
+		t.Fatalf("ended model spans = %d, want 1", len(sr.Ended()))
+	}
+	if sr.Ended()[0].Status().Code != codes.Error {
+		t.Fatalf("cancelled model span status = %v, want Error", sr.Ended()[0].Status())
+	}
+}
+
+// TestWatchModelStream_streamErrorEndsSpanEvenIfConsumerStops: after a provider
+// error, the model span ends even if the harness stops reading (early return).
+func TestWatchModelStream_streamErrorEndsSpanEvenIfConsumerStops(t *testing.T) {
+	sr := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sr))
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+
+	ctx := telemetry.ContextWithTracer(context.Background(), tp.Tracer("test"))
+	in := make(chan LLMResponseChunk, 8)
+	ctx, span := telemetry.StartModelSpan(ctx, telemetry.ModelPhaseTurn, 2, telemetry.WindowShape{})
+	out := watchModelStream(ctx, span, telemetry.ModelPhaseTurn, in)
+
+	in <- LLMResponseChunk{Type: StreamEventMessage, Content: "hi"}
+	in <- LLMResponseChunk{Type: StreamEventError, Content: "provider boom", Error: errors.New("provider boom")}
+	for i := 0; i < 32; i++ {
+		in <- LLMResponseChunk{Type: StreamEventMessage, Content: "noise"}
+	}
+	close(in)
+
+	// Deliver message + error, then abandon (agent_run modelFailed).
+	for range 2 {
+		select {
+		case _, ok := <-out:
+			if !ok {
+				t.Fatal("out closed before error chunk")
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timeout reading error path")
+		}
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && len(sr.Ended()) < 1 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(sr.Ended()) != 1 {
+		t.Fatalf("ended model spans = %d, want 1", len(sr.Ended()))
+	}
+	if sr.Ended()[0].Status().Code != codes.Error {
+		t.Fatalf("error model span status = %v, want Error", sr.Ended()[0].Status())
 	}
 }

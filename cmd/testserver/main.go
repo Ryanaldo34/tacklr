@@ -1,3 +1,6 @@
+// Command testserver is a local ACP harness for exercising Tacklr’s built-in
+// agent tooling (plan/todos, ask_user_choice, web_search/web_fetch when EXA_API_KEY is set,
+// skills when configured) over HTTP or stdio — not a product demo with toy tools.
 package main
 
 import (
@@ -23,17 +26,22 @@ import (
 )
 
 func main() {
+	// Stderr first so early loadDotEnv / Init failures are visible; after Init we
+	// dual-write to OTLP logs when a collector is configured.
 	baseLog := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})
 	slog.SetDefault(telemetry.NewLogger(baseLog))
 	loadDotEnv(".env")
 	if d := execDir(); d != "" {
 		loadDotEnv(filepath.Join(filepath.Dir(d), ".env"))
 	}
+	// Default OTLP endpoint for local collectors; set OTEL_SDK_DISABLED=true to off.
+	applyDefaultOTELEnv()
 
-	// OTLP traces + metrics to Alloy/Collector (OTEL_EXPORTER_OTLP_ENDPOINT).
-	// Host LGTM: Tempo (traces), Mimir/Prometheus (metrics); ship slog to Loki separately.
+	// OTLP traces + metrics + logs (default localhost:4317 / grpc).
+	// ACP HTTP on PORT (default 3000).
+	serviceName := envOr("OTEL_SERVICE_NAME", "tacklr-testserver")
 	otelShutdown, err := telemetry.Init(context.Background(), telemetry.Config{
-		ServiceName: "tacklr-testserver",
+		ServiceName: serviceName,
 		Insecure:    true,
 	})
 	if err != nil {
@@ -42,7 +50,20 @@ func main() {
 	}
 	defer func() { _ = otelShutdown(context.Background()) }()
 
-	defaultAgent := "test-agent"
+	if disabledOTEL() {
+		// Keep stderr-only when OTEL is explicitly off.
+		slog.SetDefault(telemetry.NewLogger(baseLog))
+		slog.Info("otel exporters disabled (OTEL_SDK_DISABLED=true)")
+	} else {
+		// Dual-write slog → stderr + OTLP logs.
+		telemetry.InstallDefaultWithOTLP(baseLog, telemetry.NewOTLPSlogHandler(serviceName))
+		slog.Info("otel exporters enabled",
+			"endpoint", envOr("OTEL_EXPORTER_OTLP_ENDPOINT", "localhost:4317"),
+			"protocol", envOr("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc"),
+			"service", serviceName,
+			"signals", "traces,metrics,logs",
+		)
+	}
 
 	store := stores.NewInMemoryStore()
 
@@ -53,30 +74,76 @@ func main() {
 		WithApiKey(os.Getenv("OPENAI_API_KEY")).
 		WithModel(os.Getenv("OPENAI_MODEL"))
 
-	// Azure OpenAI / Foundry reasoning models need reasoning.effort + summary
-	// so thought text streams as reasoning_summary_text (→ agent_thought_chunk).
-	if effort := os.Getenv("OPENAI_REASONING_EFFORT"); effort != "" {
+	// Reasoning models (GPT Luna, o-series, …) only stream client-visible thought
+	// when the Responses request asks for a summary. Without this, Foundry may
+	// still emit reasoning items (needed for multi-turn tool pairing) but no
+	// reasoning_summary_text.delta — so Zed never gets agent_thought_chunk.
+	// Defaults: summary=auto. Override with OPENAI_REASONING_SUMMARY; set
+	// OPENAI_REASONING_EFFORT for effort (also implies summary=auto when unset).
+	if effort := strings.TrimSpace(os.Getenv("OPENAI_REASONING_EFFORT")); effort != "" {
 		model.WithReasoningLevel(effort)
 	}
-	if summary := os.Getenv("OPENAI_REASONING_SUMMARY"); summary != "" {
+	if summary := strings.TrimSpace(os.Getenv("OPENAI_REASONING_SUMMARY")); summary != "" {
 		model.WithReasoningSummary(summary)
+	} else if strings.TrimSpace(os.Getenv("OPENAI_REASONING_EFFORT")) == "" {
+		model.WithReasoningSummary("auto")
+	}
+	// Avoid bare response.incomplete after large tool turns (web_search + plan).
+	// Override with MAX_OUTPUT_TOKENS; default high enough for reasoning summaries.
+	maxOut := 32_768
+	if v := strings.TrimSpace(os.Getenv("MAX_OUTPUT_TOKENS")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			maxOut = n
+		}
+	}
+	if maxOut > 0 {
+		model.WithMaxOutputTokens(maxOut)
 	}
 
-	model.SetSystemPrompt(defaultSystemPrompt)
+	// Context window budget (tokens) for pressure/compress.
+	maxWindow := 1_000_000
+	if v := strings.TrimSpace(os.Getenv("MAX_WINDOW_SIZE")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			maxWindow = n
+		}
+	}
 
-	tools := []*tacklr.Tool{echoTool, getTimeTool, progressTool}
+	// Optional skills directories (colon-separated, like PATH).
+	var skillDirs []string
+	if raw := strings.TrimSpace(os.Getenv("SKILL_DIRECTORIES")); raw != "" {
+		for _, p := range strings.Split(raw, string(os.PathListSeparator)) {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				skillDirs = append(skillDirs, p)
+			}
+		}
+	}
 
-	// After Init, global TracerProvider + MeterProvider are set; registry uses them by default.
+	// Host tools intentionally empty: the harness injects plan builtins,
+	// ask_user_choice, and web_search/web_fetch (when EXA_API_KEY / ExaAPIKey is set).
+	exaKey := strings.TrimSpace(os.Getenv("EXA_API_KEY"))
+
+	defaultAgent := "test-agent"
 	reg := server.NewRegistry(store, defaultAgent)
 	reg.Register(defaultAgent, server.AgentSpec{
-		Name: "Tacklr Test Agent",
+		Name: "Tacklr",
 		Config: tacklr.Config{
-			MaxWindowSize: 128000,
-			SystemPrompt:  defaultSystemPrompt,
+			MaxWindowSize: maxWindow,
+			// Empty: rely on harness Adaptive Case Management system prompt only.
+			SystemPrompt:     "",
+			SkillDirectories: skillDirs,
 		},
-		Model: model,
-		Tools: tools,
+		Model:     model,
+		Tools:     nil,
+		ExaAPIKey: exaKey,
 	})
+
+	slog.Info("harness showcase",
+		"max_window_size", maxWindow,
+		"skill_dirs", len(skillDirs),
+		"web_tools", exaKey != "",
+		"host_tools", 0,
+	)
 
 	srv := server.NewServer(reg, server.ACP)
 
@@ -109,41 +176,6 @@ func main() {
 	}
 }
 
-var echoTool = tacklr.NewTool(tacklr.ToolConfig{
-	Name:        "echo",
-	Description: "Echoes back whatever message you send. Use this to verify tool calling works.",
-	Handler: func(ctx context.Context, args struct {
-		Message string `json:"message" desc:"Message to echo back"`
-	}) (string, error) {
-		return args.Message, nil
-	},
-})
-
-var getTimeTool = tacklr.NewTool(tacklr.ToolConfig{
-	Name:        "get_time",
-	Description: "Returns the current date and time. Use this when you need to know what time it is.",
-	Handler: func(ctx context.Context) (string, error) {
-		return time.Now().Format(time.RFC1123), nil
-	},
-})
-
-var progressTool = tacklr.NewTool(tacklr.ToolConfig{
-	Name:        "progress_demo",
-	Description: "Demonstrates in-progress streaming updates by emitting progress messages during execution. Use this to verify that tool_call_update events are streamed correctly.",
-	Handler: func(ctx context.Context, _ struct{}, runtime *tacklr.HarnessRuntime) (string, error) {
-		runtime.EmitUpdate("starting work...")
-		runtime.EmitUpdate("processing...")
-		runtime.EmitUpdate("almost done")
-		return "task complete!", nil
-	},
-})
-
-var defaultSystemPrompt = strings.TrimSpace(`You are a helpful assistant running in an ACP test harness.
-You have access to tools that let you echo messages, check the current time, and demonstrate progress streaming.
-Use the echo tool when asked to repeat or echo something.
-Use the get_time tool when asked about the current date or time.
-Use the progress_demo tool when asked to demonstrate progress updates or tool_call_update streaming.`)
-
 // execDir returns the directory containing the running binary.
 func execDir() string {
 	exe, err := os.Executable()
@@ -151,6 +183,37 @@ func execDir() string {
 		return "."
 	}
 	return filepath.Dir(exe)
+}
+
+func envOr(key, fallback string) string {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		return v
+	}
+	return fallback
+}
+
+func disabledOTEL() bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("OTEL_SDK_DISABLED")))
+	return v == "true" || v == "1"
+}
+
+// applyDefaultOTELEnv fills unset OTEL_* vars so a local collector can be used
+// without extra agent env (e.g. Zed ACP). Override via environment or .env.
+func applyDefaultOTELEnv() {
+	if disabledOTEL() {
+		// Explicit disable: clear endpoint so telemetry.Init installs no-ops.
+		_ = os.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+		return
+	}
+	if strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")) == "" {
+		_ = os.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "localhost:4317")
+	}
+	if strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_PROTOCOL")) == "" {
+		_ = os.Setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc")
+	}
+	if strings.TrimSpace(os.Getenv("OTEL_SERVICE_NAME")) == "" {
+		_ = os.Setenv("OTEL_SERVICE_NAME", "tacklr-testserver")
+	}
 }
 
 // loadDotEnv reads a .env file and sets each KEY=VALUE pair as an environment

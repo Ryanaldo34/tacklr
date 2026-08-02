@@ -175,9 +175,12 @@ func TestSchema(t *testing.T) {
 			t.Errorf("enum = %v", enumVals)
 		}
 
-		assertRequired(t, s, "field_name")
-		if contains(s["required"].([]string), "optional") {
-			t.Error("optional (pointer+omitempty) should not be required")
+		// Strict tool schemas list every property in required; optionals are T|null.
+		assertRequired(t, s, "field_name", "optional")
+		opt := props["optional"].(map[string]any)
+		optType, ok := opt["type"].([]any)
+		if !ok || len(optType) != 2 {
+			t.Fatalf("optional type should be [string,null], got %v", opt["type"])
 		}
 	})
 

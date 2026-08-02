@@ -10,7 +10,7 @@ import (
 )
 
 // DefaultResource builds a shared Resource for TracerProvider and MeterProvider
-// so Grafana/LGTM backends correlate service.name across Tempo, Mimir, and logs.
+// so backends can correlate service.name across traces, metrics, and logs.
 func DefaultResource(serviceName, serviceVersion string) (*resource.Resource, error) {
 	if strings.TrimSpace(serviceName) == "" {
 		if v := strings.TrimSpace(os.Getenv("OTEL_SERVICE_NAME")); v != "" {

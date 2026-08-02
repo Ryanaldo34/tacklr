@@ -5,8 +5,14 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/ryanaldo34/tacklr/internal/session"
+	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/streaming"
 )
+
+// Core types, errors, and public re-exports for harness consumers.
+
+// Source: types.go
 
 const (
 	RoleUser      MessageRole = "user"
@@ -75,6 +81,13 @@ func WrapStopReason(kind, cause error) error {
 	return fmt.Errorf("%w: %w", kind, cause)
 }
 
+// ProviderStatus is optionally implemented by InferenceStrategy errors so the
+// harness can annotate model spans without depending on a specific provider package.
+type ProviderStatus interface {
+	ProviderHTTPStatus() int
+	ProviderErrorCode() string
+}
+
 // and test files can reference it without the control package prefix.
 type Response struct {
 	Status            ItemStatus
@@ -102,4 +115,41 @@ type AgentWatchDog interface {
 	RecordTokens(int, int) error
 	RecordToolCalls(*Message) error
 	RecordToolResult(*Message) error
+}
+
+// Source: export.go
+
+// HarnessRuntime is the public tool hook surface (state, interrupts, emit).
+// Session internals are not accessible through it.
+type HarnessRuntime = session.Runtime
+
+// Todo is a plan list item (also used in plan_update stream payloads).
+type Todo = streaming.Todo
+
+// Re-export interrupt extension types for tool authors.
+type (
+	Interrupt               = interrupt.Interrupt
+	PayloadValidator        = interrupt.PayloadValidator
+	UserChoice              = interrupt.UserChoice
+	UserSelectionInterrupt  = interrupt.UserSelectionInterrupt
+	ToolPermissionInterrupt = interrupt.ToolPermissionInterrupt
+	PermissionOption        = interrupt.PermissionOption
+)
+
+var (
+	ErrInterruptNotFound     = interrupt.ErrInterruptNotFound
+	ErrInvalidPayload        = interrupt.ErrInvalidPayload
+	DefaultPermissionOptions = interrupt.DefaultPermissionOptions
+)
+
+const (
+	PermissionAllowOnce    = interrupt.PermissionAllowOnce
+	PermissionAllowAlways  = interrupt.PermissionAllowAlways
+	PermissionRejectOnce   = interrupt.PermissionRejectOnce
+	PermissionRejectAlways = interrupt.PermissionRejectAlways
+)
+
+// RegisterInterrupt registers a custom interrupt factory for checkpoint rehydrate.
+func RegisterInterrupt(factory func() Interrupt) {
+	interrupt.Register(factory)
 }

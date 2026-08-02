@@ -807,23 +807,65 @@ func TestRun_askUserChoice_emptyChoiceTitle_toolError(t *testing.T) {
 
 // --- Message stream assembler via parent turn ---
 
-// TestCompleteTodo_allRemainingCompleted: completing last open todo when later
-// ones are already completed reports all-done.
-func TestCompleteTodo_allRemainingCompleted(t *testing.T) {
-	pt := testPlanTools()
+// TestCompleteTodo_effectsByRemainingWork: handoff only while open work remains;
+// completing the last open todo (sole or after already-done siblings) is EffectNone.
+func TestCompleteTodo_effectsByRemainingWork(t *testing.T) {
 	rt := session.NewRuntime(nil, nil, nil)
 	rt.EnsureInitialized()
-	pt.store.Set([]Todo{
-		{Title: "A", Status: streaming.TodoStatusInProgress},
-		{Title: "B", Status: streaming.TodoStatusCompleted},
-		{Title: "C", Status: streaming.TodoStatusCompleted},
-	})
-	got, err := pt.complete.Invoke(context.Background(), `{"title":"A"}`, rt)
-	if err != nil {
-		t.Fatal(err)
+	cases := []struct {
+		name       string
+		plan       []Todo
+		title      string
+		wantEffect ToolResultEffect
+		wantSubstr string
+	}{
+		{
+			name: "mid-plan advances next",
+			plan: []Todo{
+				{Title: "A", Status: streaming.TodoStatusInProgress},
+				{Title: "B", Description: "next", Status: streaming.TodoStatusPending},
+			},
+			title:      "A",
+			wantEffect: EffectHandoff,
+			wantSubstr: `starting "B"`,
+		},
+		{
+			name: "last open with completed siblings",
+			plan: []Todo{
+				{Title: "A", Status: streaming.TodoStatusInProgress},
+				{Title: "B", Status: streaming.TodoStatusCompleted},
+				{Title: "C", Status: streaming.TodoStatusCompleted},
+			},
+			title:      "A",
+			wantEffect: EffectNone,
+			wantSubstr: "All todos completed",
+		},
+		{
+			name: "sole item",
+			plan: []Todo{
+				{Title: "Only", Status: streaming.TodoStatusInProgress},
+			},
+			title:      "Only",
+			wantEffect: EffectNone,
+			wantSubstr: "All todos completed",
+		},
 	}
-	if !strings.Contains(got, "All todos completed") {
-		t.Fatalf("got %q", got)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pt := testPlanTools()
+			pt.store.Set(append([]Todo(nil), tc.plan...))
+			args, _ := json.Marshal(map[string]string{"title": tc.title})
+			res, err := pt.complete.invoke(context.Background(), string(args), rt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.disp.Effect != tc.wantEffect {
+				t.Fatalf("effect = %v, want %v", res.disp.Effect, tc.wantEffect)
+			}
+			if !strings.Contains(res.output, tc.wantSubstr) {
+				t.Fatalf("output = %q, want substr %q", res.output, tc.wantSubstr)
+			}
+		})
 	}
 }
 

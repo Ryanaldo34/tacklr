@@ -11,41 +11,53 @@ import (
 
 // Metric names (OTel). Prometheus export sanitizes '.' → '_'.
 const (
-	MetricTurnDuration   = "tacklr.turn.duration"
-	MetricTurnTotal      = "tacklr.turn.total"
-	MetricTurnActive     = "tacklr.turn.active"
-	MetricToolCalls      = "tacklr.tool.calls"
-	MetricToolDuration   = "tacklr.tool.duration"
-	MetricInterruptTotal = "tacklr.interrupt.total"
-	MetricHandoffTotal   = "tacklr.context.handoff.total"
-	MetricCompressTotal  = "tacklr.context.compress.total"
-	MetricSessionCreated = "tacklr.session.created.total"
-	MetricCheckpointSave = "tacklr.checkpoint.save.total"
+	MetricTurnDuration    = "tacklr.turn.duration"
+	MetricTurnTotal       = "tacklr.turn.total"
+	MetricTurnActive      = "tacklr.turn.active"
+	MetricToolCalls       = "tacklr.tool.calls"
+	MetricToolDuration    = "tacklr.tool.duration"
+	MetricInterruptTotal  = "tacklr.interrupt.total"
+	MetricHandoffTotal    = "tacklr.context.handoff.total"
+	MetricCompressTotal   = "tacklr.context.compress.total"
+	MetricSessionCreated  = "tacklr.session.created.total"
+	MetricCheckpointSave  = "tacklr.checkpoint.save.total"
+	MetricModelDuration   = "tacklr.model.duration"
+	MetricModelTotal      = "tacklr.model.total"
+	MetricTokensInput     = "tacklr.tokens.input"
+	MetricTokensOutput    = "tacklr.tokens.output"
+	MetricTokensReasoning = "tacklr.tokens.reasoning"
 )
 
-// Label keys (low cardinality only).
+// Label keys (low cardinality only — closed enums / config ids, never free text).
 const (
-	LabelAgentID  = "agent_id"
-	LabelTurnKind = "turn_kind"
-	LabelOutcome  = "outcome"
-	LabelTool     = "tool"
-	LabelToolNS   = "tool_namespace"
-	LabelStatus   = "status"
-	LabelKind     = "kind" // interrupt kind
+	LabelAgentID    = "agent_id"
+	LabelTurnKind   = "turn_kind"
+	LabelOutcome    = "outcome"
+	LabelTool       = "tool"
+	LabelToolNS     = "tool_namespace"
+	LabelStatus     = "status"
+	LabelKind       = "kind" // interrupt kind
+	LabelModelPhase = "model_phase"
+	LabelErrorClass = "error_class"
 )
 
 // Instruments holds cached metric instruments for one Meter.
 type Instruments struct {
-	turnDuration   metric.Float64Histogram
-	turnTotal      metric.Int64Counter
-	turnActive     metric.Int64UpDownCounter
-	toolCalls      metric.Int64Counter
-	toolDuration   metric.Float64Histogram
-	interruptTotal metric.Int64Counter
-	handoffTotal   metric.Int64Counter
-	compressTotal  metric.Int64Counter
-	sessionCreated metric.Int64Counter
-	checkpointSave metric.Int64Counter
+	turnDuration    metric.Float64Histogram
+	turnTotal       metric.Int64Counter
+	turnActive      metric.Int64UpDownCounter
+	toolCalls       metric.Int64Counter
+	toolDuration    metric.Float64Histogram
+	interruptTotal  metric.Int64Counter
+	handoffTotal    metric.Int64Counter
+	compressTotal   metric.Int64Counter
+	sessionCreated  metric.Int64Counter
+	checkpointSave  metric.Int64Counter
+	modelDuration   metric.Float64Histogram
+	modelTotal      metric.Int64Counter
+	tokensInput     metric.Int64Counter
+	tokensOutput    metric.Int64Counter
+	tokensReasoning metric.Int64Counter
 }
 
 // MustInstruments builds instruments from m. Panics only on programmer error
@@ -128,6 +140,37 @@ func NewInstruments(m metric.Meter) (*Instruments, error) {
 	if err != nil {
 		return nil, err
 	}
+	i.modelDuration, err = m.Float64Histogram(MetricModelDuration,
+		metric.WithDescription("Model invoke duration (turn | handoff | compress)"),
+		metric.WithUnit("s"),
+	)
+	if err != nil {
+		return nil, err
+	}
+	i.modelTotal, err = m.Int64Counter(MetricModelTotal,
+		metric.WithDescription("Model invokes by phase, outcome, and error class"),
+	)
+	if err != nil {
+		return nil, err
+	}
+	i.tokensInput, err = m.Int64Counter(MetricTokensInput,
+		metric.WithDescription("Provider-reported input tokens"),
+	)
+	if err != nil {
+		return nil, err
+	}
+	i.tokensOutput, err = m.Int64Counter(MetricTokensOutput,
+		metric.WithDescription("Provider-reported output tokens"),
+	)
+	if err != nil {
+		return nil, err
+	}
+	i.tokensReasoning, err = m.Int64Counter(MetricTokensReasoning,
+		metric.WithDescription("Provider-reported reasoning tokens when present"),
+	)
+	if err != nil {
+		return nil, err
+	}
 	return i, nil
 }
 
@@ -176,11 +219,63 @@ func (i *Instruments) RecordInterrupt(ctx context.Context, agentID, kind string)
 	))
 }
 
-func (i *Instruments) RecordHandoff(ctx context.Context, agentID string) {
+// RecordHandoff records a context handoff. outcome is a closed enum
+// (HandoffOutcomeOK | HandoffOutcomeFallback | HandoffOutcomeError).
+func (i *Instruments) RecordHandoff(ctx context.Context, agentID, outcome string) {
 	if i == nil {
 		return
 	}
-	i.handoffTotal.Add(ctx, 1, metric.WithAttributes(attribute.String(LabelAgentID, agentID)))
+	if outcome == "" {
+		outcome = HandoffOutcomeOK
+	}
+	i.handoffTotal.Add(ctx, 1, metric.WithAttributes(
+		attribute.String(LabelAgentID, agentID),
+		attribute.String(LabelOutcome, outcome),
+	))
+}
+
+// RecordModel records one model invoke (duration + count). phase and errClass
+// must be closed enums (ModelPhase* / ErrorClass*).
+func (i *Instruments) RecordModel(ctx context.Context, agentID, phase, outcome, errClass string, d time.Duration) {
+	if i == nil {
+		return
+	}
+	if phase == "" {
+		phase = ModelPhaseTurn
+	}
+	if outcome == "" {
+		outcome = OutcomeOK
+	}
+	if errClass == "" {
+		errClass = ErrorClassOK
+	}
+	attrs := metric.WithAttributes(
+		attribute.String(LabelAgentID, agentID),
+		attribute.String(LabelModelPhase, phase),
+		attribute.String(LabelOutcome, outcome),
+		attribute.String(LabelErrorClass, errClass),
+	)
+	i.modelTotal.Add(ctx, 1, attrs)
+	if d > 0 {
+		i.modelDuration.Record(ctx, d.Seconds(), attrs)
+	}
+}
+
+// RecordTokens adds provider-reported token counts (no high-cardinality labels).
+func (i *Instruments) RecordTokens(ctx context.Context, agentID string, input, output, reasoning int) {
+	if i == nil {
+		return
+	}
+	attrs := metric.WithAttributes(attribute.String(LabelAgentID, agentID))
+	if input > 0 {
+		i.tokensInput.Add(ctx, int64(input), attrs)
+	}
+	if output > 0 {
+		i.tokensOutput.Add(ctx, int64(output), attrs)
+	}
+	if reasoning > 0 {
+		i.tokensReasoning.Add(ctx, int64(reasoning), attrs)
+	}
 }
 
 func (i *Instruments) RecordCompress(ctx context.Context, agentID string) {
