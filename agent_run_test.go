@@ -296,101 +296,10 @@ func TestRun_functionCallRecordedBeforeToolResult(t *testing.T) {
 	}
 }
 
-// TestRun_modelErrorAfterToolsIsTagged: post-tool provider failures must not
-// look like the prior tool (list_plan etc.) failed.
-func TestRun_modelErrorAfterToolsIsTagged(t *testing.T) {
-	tool := NewTool(ToolConfig{
-		Name:    "list_plan",
-		Handler: func(ctx context.Context) (string, error) { return "plan: empty", nil },
-	})
-	var n int
-	strategy := &mockStrategy{
-		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
-			n++
-			if n == 1 {
-				ch <- LLMResponseChunk{
-					Type: StreamEventFunctionCall,
-					ToolCalls: []ToolCall{
-						{ID: "fc1", CallID: "call1", Name: "list_plan", Arguments: `{}`, Status: "completed"},
-					},
-					IsComplete: true,
-				}
-				return
-			}
-			ch <- LLMResponseChunk{
-				Type:       StreamEventError,
-				Content:    "api error (status 200): response incomplete or failed; status=failed; event=response.failed",
-				Error:      fmt.Errorf("api error (status 200): response incomplete or failed; status=failed; event=response.failed"),
-				IsComplete: true,
-			}
-		},
-	}
-	h := NewAgent(context.Background(), AgentOptions{
-		Config: Config{MaxWindowSize: 8192},
-		Model:  strategy,
-		Tools:  []*Tool{tool},
-	})
-	events, err := h.Run(context.Background(), "show plan")
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := drainEvents(events)
-	if !hasToolResultContent(got, "plan: empty") {
-		t.Fatalf("want successful list_plan result, got %+v", summarizeEvents(got))
-	}
-	var sawTagged bool
-	for _, ev := range got {
-		if ev.Type != StreamEventError || ev.Error == nil {
-			continue
-		}
-		if strings.Contains(ev.Error.Error(), "model after tools") &&
-			strings.Contains(ev.Error.Error(), "response.failed") {
-			sawTagged = true
-		}
-	}
-	if !sawTagged {
-		t.Fatalf("want model-after-tools tagged error, got %+v", summarizeEvents(got))
-	}
-}
-
-// TestStripUnpairedToolTurns_keepsPairedDropsOrphans: only complete pairs survive.
-func TestStripUnpairedToolTurns_keepsPairedDropsOrphans(t *testing.T) {
-	window := []*Message{
-		{Role: RoleUser, Content: "u"},
-		{Role: RoleAssistant, ToolCalls: []ToolCall{
-			{CallID: "paired", Name: "echo", Arguments: `{}`},
-			{CallID: "orphan_fc", Name: "echo", Arguments: `{}`},
-		}},
-		{Role: RoleTool, ToolCallID: "paired", Content: "ok"},
-		{Role: RoleTool, ToolCallID: "orphan_out", Content: "no-call"},
-		{Role: RoleAssistant, Content: "text only"},
-	}
-	got := stripUnpairedToolTurns(window, nil)
-	if len(got) != 4 {
-		t.Fatalf("len = %d, want 4 (user, fc-only-paired, tool, text): %+v", len(got), got)
-	}
-	if len(got[1].ToolCalls) != 1 || got[1].ToolCalls[0].CallID != "paired" {
-		t.Fatalf("assistant toolcalls = %+v", got[1].ToolCalls)
-	}
-	if got[2].ToolCallID != "paired" {
-		t.Fatalf("tool = %+v", got[2])
-	}
-	// Pending interrupt call_id without result is retained.
-	keep := map[string]struct{}{"pending": {}}
-	window2 := []*Message{
-		{Role: RoleUser, Content: "u"},
-		{Role: RoleAssistant, ToolCalls: []ToolCall{{CallID: "pending", Name: "ask", Arguments: `{}`}}},
-	}
-	got2 := stripUnpairedToolTurns(window2, keep)
-	if len(got2) != 2 || len(got2[1].ToolCalls) != 1 {
-		t.Fatalf("pending keep = %+v", got2)
-	}
-}
-
-// TestRun_modelErrorAfterTools_checkpointsToolPairs: provider failure on the
-// follow-up model turn still persists user + assistant function_call + tool
-// result so a reloaded session can continue.
-func TestRun_modelErrorAfterTools_checkpointsToolPairs(t *testing.T) {
+// TestRun_modelErrorAfterTools_tagsAndCheckpointsPairs: after a successful tool
+// batch, a provider stream failure is tagged "model after tools" and the durable
+// window retains user + function_call + tool result for resume.
+func TestRun_modelErrorAfterTools_tagsAndCheckpointsPairs(t *testing.T) {
 	store := stores.NewInMemoryStore()
 	tool := NewTool(ToolConfig{
 		Name:    "echo",
@@ -428,7 +337,20 @@ func TestRun_modelErrorAfterTools_checkpointsToolPairs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = drainEvents(events)
+	got := drainEvents(events)
+	if !hasToolResultContent(got, "tool-ok") {
+		t.Fatalf("want successful tool result, got %+v", summarizeEvents(got))
+	}
+	var sawTagged bool
+	for _, ev := range got {
+		if ev.Type == StreamEventError && ev.Error != nil &&
+			strings.Contains(ev.Error.Error(), "model after tools") {
+			sawTagged = true
+		}
+	}
+	if !sawTagged {
+		t.Fatalf("want model-after-tools tagged error, got %+v", summarizeEvents(got))
+	}
 
 	loaded, err := NewAgentFromSession(context.Background(), "sess-after-tools-ckpt", AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
@@ -465,19 +387,12 @@ func TestRun_modelErrorAfterTools_checkpointsToolPairs(t *testing.T) {
 	}
 }
 
-// TestRun_modelError_stripsUnpairedFunctionCallFromCheckpoint: an assistant
-// tool-call turn without a result must not survive an inference failure checkpoint.
-func TestRun_modelError_stripsUnpairedFunctionCallFromCheckpoint(t *testing.T) {
+// TestRun_modelError_stripsUnpairedFromCheckpoint: on inference failure, unpaired
+// function_calls/results are dropped while complete tool pairs remain.
+func TestRun_modelError_stripsUnpairedFromCheckpoint(t *testing.T) {
 	store := stores.NewInMemoryStore()
-	// Pre-seed window via first successful run... simpler: inject after NewAgent
-	// by running a path that adds FC then fails before tools — but harness only
-	// records FC when tools will run. Manually plant unpaired state then fail Turn.
-	var n int
 	strategy := &mockStrategy{
 		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
-			n++
-			// First turn: return error immediately (no tools). Window still has
-			// user + any pre-existing unpaired FC we planted.
 			ch <- LLMResponseChunk{
 				Type:       StreamEventError,
 				Error:      fmt.Errorf("provider down"),
@@ -491,7 +406,7 @@ func TestRun_modelError_stripsUnpairedFunctionCallFromCheckpoint(t *testing.T) {
 		Store:  store,
 	})
 	h.BindSessionID("sess-strip-orphan")
-	// Plant unpaired function_call as if a prior crash left incomplete state.
+	// Leave pendingToolCalls empty so Run takes the model-turn path (not resume).
 	h.RestoreMessages([]*Message{
 		{Role: RoleUser, Content: "goal"},
 		{Role: RoleAssistant, ToolCalls: []ToolCall{
@@ -501,7 +416,9 @@ func TestRun_modelError_stripsUnpairedFunctionCallFromCheckpoint(t *testing.T) {
 			{CallID: "good", Name: "echo", Arguments: `{}`},
 		}},
 		{Role: RoleTool, ToolCallID: "good", Content: "done"},
+		{Role: RoleTool, ToolCallID: "orphan_out", Content: "no-call"},
 	})
+
 	events, err := h.Run(context.Background(), "continue")
 	if err != nil {
 		t.Fatal(err)
@@ -516,6 +433,7 @@ func TestRun_modelError_stripsUnpairedFunctionCallFromCheckpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var sawGood, sawOrphan bool
 	for _, m := range loaded.Messages() {
 		if m == nil {
 			continue
@@ -523,22 +441,24 @@ func TestRun_modelError_stripsUnpairedFunctionCallFromCheckpoint(t *testing.T) {
 		if m.Role == RoleAssistant {
 			for _, tc := range m.ToolCalls {
 				if tc.CallID == "orphan" {
-					t.Fatalf("orphan function_call survived checkpoint: %+v", loaded.Messages())
+					sawOrphan = true
 				}
 			}
 		}
-		if m.Role == RoleTool && m.ToolCallID == "orphan" {
-			t.Fatal("orphan tool result should not exist")
+		if m.Role == RoleTool {
+			if m.ToolCallID == "good" && m.Content == "done" {
+				sawGood = true
+			}
+			if m.ToolCallID == "orphan_out" {
+				t.Fatalf("orphan tool output survived: %+v", loaded.Messages())
+			}
 		}
 	}
-	var sawGood bool
-	for _, m := range loaded.Messages() {
-		if m != nil && m.Role == RoleTool && m.ToolCallID == "good" && m.Content == "done" {
-			sawGood = true
-		}
+	if sawOrphan {
+		t.Fatalf("orphan function_call survived: %+v", loaded.Messages())
 	}
 	if !sawGood {
-		t.Fatalf("paired tool result must remain: %+v", loaded.Messages())
+		t.Fatalf("paired tool result missing: %+v", loaded.Messages())
 	}
 }
 

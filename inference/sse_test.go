@@ -56,72 +56,44 @@ func TestParseSSE_outputTextAlwaysMessage_likeMain(t *testing.T) {
 	}
 }
 
-func TestParseSSE_reasoningTextIsReasoning(t *testing.T) {
+// TestParseSSE_reasoningThoughtChunks: one stream covering deltas, done-only
+// summary (ACP thought when no deltas), and no duplicate summary after deltas.
+func TestParseSSE_reasoningThoughtChunks(t *testing.T) {
 	body := strings.Join([]string{
-		`data: {"type":"response.reasoning_text.delta","item_id":"rs_3","delta":"raw cot"}`,
-		`data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_3","delta":" summary"}`,
-		`data: [DONE]`,
-		"",
-	}, "\n")
-	chunks := collectSSE(t, body)
-	var parts []string
-	for _, c := range chunks {
-		if c.Type != tacklr.StreamEventReasoning {
-			t.Fatalf("expected reasoning, got %+v", c)
-		}
-		parts = append(parts, c.Content)
-	}
-	if got := strings.Join(parts, ""); got != "raw cot summary" {
-		t.Fatalf("reasoning = %q", got)
-	}
-}
-
-// TestParseSSE_reasoningDoneWithoutDeltas_emitsSummary: Foundry often delivers
-// summary only on output_item.done — must become a thought chunk for ACP.
-func TestParseSSE_reasoningDoneWithoutDeltas_emitsSummary(t *testing.T) {
-	body := strings.Join([]string{
+		`data: {"type":"response.reasoning_text.delta","item_id":"rs_live","delta":"raw cot"}`,
+		`data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_live","delta":" summary"}`,
+		`data: {"type":"response.output_item.done","item":{"type":"reasoning","id":"rs_live","summary":[{"type":"summary_text","text":"raw cot summary full"}]}}`,
 		`data: {"type":"response.output_item.done","item":{"type":"reasoning","id":"rs_sum","status":"completed","summary":[{"type":"summary_text","text":"Plan the tool call"}],"content":[]}}`,
 		`data: [DONE]`,
 		"",
 	}, "\n")
 	chunks := collectSSE(t, body)
-	var got string
-	for _, c := range chunks {
-		if c.Type == tacklr.StreamEventReasoning && c.IsComplete {
-			got = c.Content
-		}
-	}
-	if got != "Plan the tool call" {
-		t.Fatalf("reasoning complete content = %q", got)
-	}
-}
-
-// TestParseSSE_reasoningDoneAfterDeltas_noDuplicateSummary: live deltas already
-// went to the client; done must not resend the full summary text.
-func TestParseSSE_reasoningDoneAfterDeltas_noDuplicateSummary(t *testing.T) {
-	body := strings.Join([]string{
-		`data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_d","delta":"step one"}`,
-		`data: {"type":"response.output_item.done","item":{"type":"reasoning","id":"rs_d","summary":[{"type":"summary_text","text":"step one full"}]}}`,
-		`data: [DONE]`,
-		"",
-	}, "\n")
-	chunks := collectSSE(t, body)
-	var deltaText, doneText string
+	var liveDelta, liveDone, sumDone string
 	for _, c := range chunks {
 		if c.Type != tacklr.StreamEventReasoning {
-			continue
+			t.Fatalf("expected reasoning only, got %+v", c)
 		}
-		if c.IsComplete {
-			doneText = c.Content
-		} else {
-			deltaText += c.Content
+		switch c.MessageId {
+		case "rs_live":
+			if c.IsComplete {
+				liveDone = c.Content
+			} else {
+				liveDelta += c.Content
+			}
+		case "rs_sum":
+			if c.IsComplete {
+				sumDone = c.Content
+			}
 		}
 	}
-	if deltaText != "step one" {
-		t.Fatalf("delta = %q", deltaText)
+	if liveDelta != "raw cot summary" {
+		t.Fatalf("live deltas = %q", liveDelta)
 	}
-	if doneText != "" {
-		t.Fatalf("done content = %q, want empty to avoid duplicate thought chunk", doneText)
+	if liveDone != "" {
+		t.Fatalf("live done content = %q, want empty (no duplicate thought)", liveDone)
+	}
+	if sumDone != "Plan the tool call" {
+		t.Fatalf("done-only summary = %q", sumDone)
 	}
 }
 
