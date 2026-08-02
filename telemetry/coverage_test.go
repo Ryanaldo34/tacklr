@@ -43,10 +43,14 @@ func TestInstruments_recordAllPaths(t *testing.T) {
 	inst.RecordTurnEnd(ctx, "agent-1", "prompt", OutcomeOK, 10*time.Millisecond)
 	inst.RecordTool(ctx, "agent-1", "search", "web", "success", time.Millisecond)
 	inst.RecordInterrupt(ctx, "agent-1", "user_selection_choice")
-	inst.RecordHandoff(ctx, "agent-1")
+	inst.RecordHandoff(ctx, "agent-1", HandoffOutcomeOK)
+	inst.RecordHandoff(ctx, "agent-1", HandoffOutcomeFallback)
 	inst.RecordCompress(ctx, "agent-1")
 	inst.RecordSessionCreated(ctx)
 	inst.RecordCheckpointSave(ctx, OutcomeOK)
+	inst.RecordModel(ctx, "agent-1", ModelPhaseTurn, OutcomeOK, ErrorClassOK, 5*time.Millisecond)
+	inst.RecordModel(ctx, "agent-1", ModelPhaseHandoff, OutcomeError, ErrorClassProvider4xx, time.Millisecond)
+	inst.RecordTokens(ctx, "agent-1", 10, 20, 3)
 
 	// Nil receiver no-ops.
 	var nilInst *Instruments
@@ -54,10 +58,12 @@ func TestInstruments_recordAllPaths(t *testing.T) {
 	nilInst.RecordTurnEnd(ctx, "a", "k", OutcomeOK, 0)
 	nilInst.RecordTool(ctx, "a", "t", "", "ok", 0)
 	nilInst.RecordInterrupt(ctx, "a", "k")
-	nilInst.RecordHandoff(ctx, "a")
+	nilInst.RecordHandoff(ctx, "a", HandoffOutcomeOK)
 	nilInst.RecordCompress(ctx, "a")
 	nilInst.RecordSessionCreated(ctx)
 	nilInst.RecordCheckpointSave(ctx, OutcomeError)
+	nilInst.RecordModel(ctx, "a", ModelPhaseTurn, OutcomeOK, ErrorClassOK, 0)
+	nilInst.RecordTokens(ctx, "a", 1, 1, 1)
 
 	// Context helpers for meters/instruments (nil meter/instruments are no-ops).
 	if ContextWithMeter(context.Background(), nil) == nil {

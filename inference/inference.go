@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -13,8 +14,10 @@ import (
 	"strings"
 
 	"github.com/pkoukk/tiktoken-go"
+	"go.opentelemetry.io/otel/log"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
 type OpenAIInferenceStrategy struct {
@@ -55,6 +58,22 @@ func (s *OpenAIInferenceStrategy) WithApiKey(key string) tacklr.InferenceStrateg
 func (s *OpenAIInferenceStrategy) WithModel(model string) tacklr.InferenceStrategy {
 	s.model = model
 	return s
+}
+
+// ModelName returns the configured deployment/model id (telemetry GenAI attrs).
+func (s *OpenAIInferenceStrategy) ModelName() string {
+	if s == nil {
+		return ""
+	}
+	return s.model
+}
+
+// BaseURL returns the configured API base URL (telemetry provider inference).
+func (s *OpenAIInferenceStrategy) BaseURL() string {
+	if s == nil {
+		return ""
+	}
+	return s.baseURL
 }
 
 func (s *OpenAIInferenceStrategy) WithURL(url string) tacklr.InferenceStrategy {
@@ -316,11 +335,7 @@ func (s *OpenAIInferenceStrategy) Invoke(ctx context.Context, messages []*tacklr
 		if httpResp.StatusCode != http.StatusOK {
 			respBody, _ := io.ReadAll(httpResp.Body)
 			classified := ClassifyProviderFailure(httpResp.StatusCode, respBody)
-			slog.Error("non-200 response",
-				"status", httpResp.StatusCode, "error", classified,
-				"input_items", inputSummary,
-				"body_snip", truncateForLog(string(respBody), 1200),
-			)
+			emitProviderFailed(ctx, classified, httpResp.StatusCode, inputSummary, string(respBody))
 			sendChunk(tacklr.LLMResponseChunk{
 				Type:       tacklr.StreamEventError,
 				Content:    classified.Error(),
@@ -419,11 +434,7 @@ func (s *OpenAIInferenceStrategy) parseSSEResponse(ctx context.Context, body io.
 			if classified == nil {
 				classified = &APIStatusError{Status: 200, Body: "stream error event"}
 			}
-			slog.Error("provider stream error event",
-				"error", classified,
-				"input_items", inputSummary,
-				"body_snip", truncateForLog(data, 2000),
-			)
+			emitProviderFailed(ctx, classified, 200, inputSummary, data)
 			events <- tacklr.LLMResponseChunk{
 				Type:       tacklr.StreamEventError,
 				Content:    classified.Error(),
@@ -434,12 +445,7 @@ func (s *OpenAIInferenceStrategy) parseSSEResponse(ctx context.Context, body io.
 		case "response.incomplete", "response.failed", "response.completed":
 			// Terminal incomplete/failed, or completed-with-bad-status (some Azure builds).
 			if classified, terminal := classifyTerminalSSE(evt.Type, data); terminal {
-				slog.Error("provider terminal SSE failure",
-					"event", evt.Type,
-					"error", classified,
-					"input_items", inputSummary,
-					"body_snip", truncateForLog(data, 2000),
-				)
+				emitProviderFailed(ctx, classified, 200, inputSummary, data)
 				events <- tacklr.LLMResponseChunk{
 					Type:       tacklr.StreamEventError,
 					Content:    classified.Error(),
@@ -448,8 +454,62 @@ func (s *OpenAIInferenceStrategy) parseSSEResponse(ctx context.Context, body io.
 				}
 				return
 			}
+			// Successful response.completed: surface token usage for model spans/metrics.
+			if evt.Type == "response.completed" {
+				if u, ok := parseResponseUsage(data); ok {
+					events <- tacklr.LLMResponseChunk{
+						Type:            tacklr.StreamEventComplete,
+						IsComplete:      true,
+						InputTokens:     u.Input,
+						OutputTokens:    u.Output,
+						ReasoningTokens: u.Reasoning,
+					}
+				}
+			}
 		}
 	}
+}
+
+// responseUsage is the token counts we care about from Responses API usage.
+type responseUsage struct {
+	Input     int
+	Output    int
+	Reasoning int
+}
+
+// parseResponseUsage extracts usage from a response.completed SSE payload.
+func parseResponseUsage(data string) (responseUsage, bool) {
+	var payload struct {
+		Response struct {
+			Usage *struct {
+				InputTokens  int `json:"input_tokens"`
+				OutputTokens int `json:"output_tokens"`
+				// Nested details (OpenAI / Azure Responses).
+				OutputTokensDetails *struct {
+					ReasoningTokens int `json:"reasoning_tokens"`
+				} `json:"output_tokens_details"`
+				// Flat alternate some gateways emit.
+				ReasoningTokens int `json:"reasoning_tokens"`
+			} `json:"usage"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal([]byte(data), &payload); err != nil || payload.Response.Usage == nil {
+		return responseUsage{}, false
+	}
+	u := payload.Response.Usage
+	out := responseUsage{
+		Input:  u.InputTokens,
+		Output: u.OutputTokens,
+	}
+	if u.OutputTokensDetails != nil && u.OutputTokensDetails.ReasoningTokens > 0 {
+		out.Reasoning = u.OutputTokensDetails.ReasoningTokens
+	} else if u.ReasoningTokens > 0 {
+		out.Reasoning = u.ReasoningTokens
+	}
+	if out.Input == 0 && out.Output == 0 && out.Reasoning == 0 {
+		return responseUsage{}, false
+	}
+	return out, true
 }
 
 // classifyTerminalSSE maps Responses SSE terminal events to a harness error.
@@ -551,6 +611,43 @@ func truncateForLog(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// emitProviderFailed records a span-correlated OTel log event (preferred over
+// span.AddEvent) and mirrors detail to slog for ACP stderr.
+func emitProviderFailed(ctx context.Context, err error, httpStatus int, inputItems, body string) {
+	code := ""
+	if err != nil {
+		var api *APIStatusError
+		if errors.As(err, &api) && api != nil {
+			if httpStatus == 0 {
+				httpStatus = api.Status
+			}
+			code = api.Code
+		}
+	}
+	snip := truncateForLog(body, 800)
+	attrs := []log.KeyValue{
+		log.String(telemetry.EventAttrInputItems, inputItems),
+		log.String(telemetry.EventAttrBodySnip, snip),
+	}
+	if httpStatus > 0 {
+		attrs = append(attrs, log.Int(telemetry.AttrHTTPStatus, httpStatus))
+	}
+	if code != "" {
+		attrs = append(attrs, log.String(telemetry.AttrErrorCode, code))
+	}
+	if err != nil {
+		attrs = append(attrs, log.String("error", err.Error()))
+	}
+	telemetry.EmitEventSeverity(ctx, telemetry.EventProviderFailed, log.SeverityError, attrs...)
+	slog.ErrorContext(ctx, "provider terminal failure",
+		"error", err,
+		"status", httpStatus,
+		"code", code,
+		"input_items", inputItems,
+		"body_snip", snip,
+	)
 }
 
 func mustJSON(v any) []byte {

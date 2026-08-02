@@ -299,7 +299,7 @@ func workerSessionID(parentSessionID, workerName, parentToolCallID string) strin
 }
 
 func (a *AgentHarness) workerOptsFromSpec(spec *SubAgent) AgentOptions {
-	// Preserve parent Exa key so workers get web_search when the parent did
+	// Preserve parent Exa key so workers get web_search / web_fetch when the parent did
 	// (env still works if options key is empty).
 	return AgentOptions{
 		Config: Config{

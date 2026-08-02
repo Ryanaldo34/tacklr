@@ -51,9 +51,9 @@ type AgentOptions struct {
 	// SkillsLoader discovers skills from Config.SkillDirectories.
 	// nil uses skills.DirectoryLoader (filesystem SKILL.md trees).
 	SkillsLoader skills.Loader
-	// ExaAPIKey enables the built-in web_search tool. When empty, EXA_API_KEY
-	// from the process environment is used. When both are empty, web_search
-	// is not registered.
+	// ExaAPIKey enables built-in web_search and web_fetch. When empty, EXA_API_KEY
+	// from the process environment is used. When both are empty, those tools
+	// are not registered.
 	ExaAPIKey string
 }
 
@@ -157,7 +157,8 @@ func (a *AgentHarness) injectBuiltinTools() {
 		askUserChoiceTool,
 	)
 	if key := strings.TrimSpace(a.exaAPIKey); key != "" {
-		a.tools = append(a.tools, newWebSearchTool(exa.NewClient(key)))
+		client := exa.NewClient(key)
+		a.tools = append(a.tools, newWebSearchTool(client), newWebFetchTool(client))
 	}
 	if len(a.subagents) > 0 {
 		a.tools = append(a.tools, a.spawnTool())

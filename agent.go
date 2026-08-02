@@ -56,7 +56,7 @@ type AgentHarness struct {
 	skillDirectories  []string
 	skillsLoader      skills.Loader
 	skillsInitialized bool
-	// exaAPIKey enables the web_search builtin when non-empty (from options or EXA_API_KEY).
+	// exaAPIKey enables web_search / web_fetch builtins when non-empty (options or EXA_API_KEY).
 	exaAPIKey        string
 	mcpCleanup       func()
 	mcpInitialized   bool
@@ -290,15 +290,8 @@ Simple follow-up questions that do not change project scope do **not** require c
 If an active to-do is sufficiently large and parallel work would improve efficiency, delegate portions of that to-do to available subagents and use their summarized results to complete the parent task.
 
 `
-	if a.findTool("web_search", "") != nil {
-		builtIn = fmt.Sprintf(`%s
-
-### Web search
-
-You have the web_search tool for live web information (Exa). Prefer content_mode highlights for iterative research to keep context small. Write specific natural-language queries; use include_domains for trusted sources instead of site: operators. Use category (company, people, news, publication, …) when it matches the task.
-
-`, builtIn)
-	}
+	// web_search / web_fetch are described only via tool schemas (provider tool list).
+	// Do not add usage policy here.
 	if skillCatalog != "" {
 		builtIn = fmt.Sprintf(`%s
 
@@ -388,11 +381,8 @@ func (a *AgentHarness) applyBatchToolResultEffect(ctx context.Context, effect To
 			todos = a.session.Plan().Get()
 			doc = a.session.Plan().Document()
 		}
-		err := a.tasks.Handoff(ctx, todos, doc, a.tools, a.constructSystemPrompt())
-		if err == nil {
-			telemetry.InstrumentsFromContext(ctx).RecordHandoff(ctx, telemetry.AgentIDFromContext(ctx))
-		}
-		return err
+		// Handoff metrics (ok | fallback | error) are recorded inside ModelTasks.Handoff.
+		return a.tasks.Handoff(ctx, todos, doc, a.tools, a.constructSystemPrompt())
 	default:
 		return nil
 	}
@@ -457,6 +447,11 @@ func emitNonBlocking(out chan<- StreamEvent, ev StreamEvent) {
 // copy so execution still uses the real tool Name. Wire framing (ACP, SSE,
 // future A2A) is owned by server.Protocol — not here.
 func (a *AgentHarness) streamChunk(ctx context.Context, chunk LLMResponseChunk, out chan<- StreamEvent) bool {
+	// Provider usage is carried on StreamEventComplete from the inference layer.
+	// That is not a harness terminal event — Run emits complete when the turn ends.
+	if chunk.Type == StreamEventComplete {
+		return true
+	}
 	toolCalls := chunk.ToolCalls
 	if chunk.Type == streaming.StreamEventFunctionCall && len(chunk.ToolCalls) > 0 {
 		// Do not mutate chunk.ToolCalls — the Run loop appends them for Invoke.

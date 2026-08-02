@@ -22,16 +22,18 @@ const (
 )
 
 // webSearchArgs is the agent-facing surface for the Exa-backed web_search tool.
+// Descriptions here are what the model sees in the tool schema — keep them
+// general guidance, not host allowlists.
 type webSearchArgs struct {
-	Query string `json:"query" desc:"Natural-language search query. Prefer full sentences describing what you need (entities, timeframe, constraints). Do not use site: operators; use include_domains instead."`
+	Query string `json:"query" desc:"Natural-language search query. Write a full sentence or question with the entities, place, and constraints you care about (not keyword soup). Put site constraints in include_domains, not as site: in the query."`
 
-	Type string `json:"type,omitempty" enum:"auto,fast,instant,deep-lite,deep,deep-reasoning" desc:"Search mode. auto = default balance. fast/instant = lower latency. deep-lite/deep/deep-reasoning = multi-step research (slower, richer)."`
+	Type string `json:"type,omitempty" enum:"auto,fast,instant,deep-lite,deep,deep-reasoning" desc:"Search mode. Prefer auto. fast/instant = lower latency. deep-lite/deep/deep-reasoning = multi-step research (slower, richer)."`
 
-	NumResults int `json:"num_results,omitempty" desc:"How many results to return (1-10). Default 8. Prefer fewer + deeper queries for token efficiency."`
+	NumResults int `json:"num_results,omitempty" desc:"How many results to return (1-10). Default 8. Prefer a sharper query over maxing this out."`
 
-	Category string `json:"category,omitempty" enum:"company,people,news,publication,personal site,financial report" desc:"Optional specialized index. company/people do not support published-date or exclude_domains filters."`
+	Category string `json:"category,omitempty" enum:"company,people,news,publication,personal site,financial report" desc:"Optional specialized index — omit for general web search (most tasks). company=company profiles; people=person profiles; news=news articles; publication=scholarly papers/preprints/journals only (not general web or government pages); personal site=personal sites/blogs; financial report=filings and financial reports. company and people do not support exclude_domains or published-date filters. If category and include_domains conflict, omit category and search the open web."`
 
-	IncludeDomains []string `json:"include_domains,omitempty" desc:"Only these hostnames, path prefixes (exa.ai/blog), or wildcards (*.substack.com)."`
+	IncludeDomains []string `json:"include_domains,omitempty" desc:"Only these hostnames, path prefixes (exa.ai/blog), or wildcards (*.substack.com). Use instead of site: in the query. Works best without category, or with a category whose index actually includes those hosts."`
 	ExcludeDomains []string `json:"exclude_domains,omitempty" desc:"Drop these domains/paths. Not valid with category company or people."`
 
 	StartPublishedDate string `json:"start_published_date,omitempty" desc:"ISO-8601 lower bound on published date (e.g. 2024-01-01T00:00:00Z). Not valid with company/people."`
@@ -39,11 +41,11 @@ type webSearchArgs struct {
 
 	MaxAgeHours *int `json:"max_age_hours,omitempty" desc:"Content freshness in hours. Omit for Exa default. 0 = always livecrawl; -1 = cache only; positive = use cache if younger than N hours."`
 
-	ContentMode string `json:"content_mode,omitempty" enum:"highlights,text,both" desc:"What to extract per result. highlights (default) = token-efficient excerpts for multi-step agents. text = fuller page text. both = highlights plus capped text."`
+	ContentMode string `json:"content_mode,omitempty" enum:"highlights,text,both" desc:"What to extract per result. Prefer highlights (default) for multi-step agents. text = fuller page text. both = highlights plus capped text."`
 
 	MaxTextCharacters int `json:"max_text_characters,omitempty" desc:"When content_mode is text or both, cap full text characters per result (default 4000, max 10000)."`
 
-	SystemPrompt string `json:"system_prompt,omitempty" desc:"Optional guidance for synthesis/planning (e.g. prefer official sources, avoid duplicates). Most useful with deep* types."`
+	SystemPrompt string `json:"system_prompt,omitempty" desc:"Optional guidance for synthesis/planning (e.g. prefer primary sources). Most useful with deep* types; leave empty otherwise."`
 
 	UserLocation string `json:"user_location,omitempty" desc:"Two-letter ISO country code for geo-biased results (e.g. US)."`
 }
@@ -56,11 +58,26 @@ func resolveExaAPIKey(optsKey string) string {
 	return strings.TrimSpace(os.Getenv(envExaAPIKey))
 }
 
+// Tool description is the primary guidance surface (not the system prompt).
+const webSearchToolDescription = `Search the live web (Exa) and return compact results for research.
+
+Prefer natural-language queries: full sentences or questions that name the subject, place, and what you need — not bare keywords or site: operators.
+
+Default (most tasks): set query only; leave category unset; content_mode highlights. Use include_domains only when you must stay on specific hosts. For a full page body once you have a URL, use web_fetch instead of re-searching.
+
+category selects a specialized index, not a topic tag — omit it unless you specifically need that index:
+- company / people — profiles (no exclude_domains or published-date filters)
+- news — news articles
+- publication — scholarly papers and journals only, not general or government web pages
+- personal site — personal sites/blogs
+- financial report — filings and financial reports
+If a call fails because filters conflict, retry with a clearer query and omit category (and/or domain filters) rather than stacking more constraints.`
+
 func newWebSearchTool(client *exa.Client) *Tool {
 	return NewTool(ToolConfig{
 		Name:        "web_search",
 		DisplayName: "Web Search",
-		Description: "Search the live web via Exa and return token-efficient results for research. Write natural-language queries (full sentences with entities and constraints). Prefer content_mode highlights for iterative work; use include_domains instead of site: operators. Use category for company/people/news/publication indexes when relevant.",
+		Description: webSearchToolDescription,
 		Category:    streaming.ToolCategorySearch,
 		Access:      ToolReadAccess,
 		Timeout:     webSearchToolTimeout,
@@ -186,8 +203,23 @@ func formatWebSearchResult(query, searchType string, resp *exa.SearchResponse) s
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Web search results\nQuery: %s\nMode: %s | Results: %d\n", query, searchType, len(resp.Results))
+	b.WriteString(formatExaResults(resp.Results, 2000))
 
-	for i, r := range resp.Results {
+	if resp.Output != nil && len(resp.Output.Content) > 0 {
+		b.WriteString("\n## Synthesized output\n")
+		b.WriteString(formatSynthesisContent(resp.Output.Content))
+		b.WriteByte('\n')
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// formatExaResults writes shared title/url/highlights/text blocks for search and fetch.
+func formatExaResults(results []exa.SearchResult, textCap int) string {
+	if textCap <= 0 {
+		textCap = 2000
+	}
+	var b strings.Builder
+	for i, r := range results {
 		title := strings.TrimSpace(r.Title)
 		if title == "" {
 			title = "(untitled)"
@@ -220,16 +252,10 @@ func formatWebSearchResult(query, searchType string, resp *exa.SearchResponse) s
 			fmt.Fprintf(&b, "- Summary: %s\n", truncateRunes(s, 1200))
 		}
 		if t := strings.TrimSpace(r.Text); t != "" {
-			fmt.Fprintf(&b, "- Text: %s\n", truncateRunes(t, 2000))
+			fmt.Fprintf(&b, "- Text: %s\n", truncateRunes(t, textCap))
 		}
 	}
-
-	if resp.Output != nil && len(resp.Output.Content) > 0 {
-		b.WriteString("\n## Synthesized output\n")
-		b.WriteString(formatSynthesisContent(resp.Output.Content))
-		b.WriteByte('\n')
-	}
-	return strings.TrimRight(b.String(), "\n")
+	return b.String()
 }
 
 func formatSynthesisContent(raw json.RawMessage) string {

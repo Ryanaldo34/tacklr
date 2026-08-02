@@ -1,5 +1,5 @@
 // Command testserver is a local ACP harness for exercising Tacklr’s built-in
-// agent tooling (plan/todos, ask_user_choice, web_search when EXA_API_KEY is set,
+// agent tooling (plan/todos, ask_user_choice, web_search/web_fetch when EXA_API_KEY is set,
 // skills when configured) over HTTP or stdio — not a product demo with toy tools.
 package main
 
@@ -26,6 +26,8 @@ import (
 )
 
 func main() {
+	// Stderr first so early loadDotEnv / Init failures are visible; after Init we
+	// dual-write to OTLP logs (Loki via the LGTM collector) when OTEL is enabled.
 	baseLog := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})
 	slog.SetDefault(telemetry.NewLogger(baseLog))
 	loadDotEnv(".env")
@@ -36,12 +38,15 @@ func main() {
 	// extra agent env. Override anytime; set OTEL_SDK_DISABLED=true to turn off.
 	applyDefaultOTELEnv()
 
-	// OTLP traces + metrics → collector (default localhost:4317 / grpc).
+	// OTLP traces + metrics + logs → collector (default localhost:4317 / grpc).
 	// Grafana UI: http://127.0.0.1:3001 (admin/admin). ACP HTTP on PORT (default 3000).
+	// Logs: LoggerProvider (lifecycle events) + otelslog (slog → Loki).
 	serviceName := envOr("OTEL_SERVICE_NAME", "tacklr-testserver")
 	otelShutdown, err := telemetry.Init(context.Background(), telemetry.Config{
 		ServiceName: serviceName,
 		Insecure:    true,
+		// DisableLogs stays false so provider.failed / model.after_tools / turn
+		// events and slog bridge records reach Loki.
 	})
 	if err != nil {
 		slog.Error("otel init failed", "error", err)
@@ -50,12 +55,18 @@ func main() {
 	defer func() { _ = otelShutdown(context.Background()) }()
 
 	if disabledOTEL() {
+		// Keep stderr-only when OTEL is explicitly off.
+		slog.SetDefault(telemetry.NewLogger(baseLog))
 		slog.Info("otel exporters disabled (OTEL_SDK_DISABLED=true)")
 	} else {
+		// Dual-write slog → stderr + OTLP logs (collector → Loki).
+		telemetry.InstallDefaultWithOTLP(baseLog, telemetry.NewOTLPSlogHandler(serviceName))
 		slog.Info("otel exporters enabled",
 			"endpoint", envOr("OTEL_EXPORTER_OTLP_ENDPOINT", "localhost:4317"),
 			"protocol", envOr("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc"),
 			"service", serviceName,
+			"signals", "traces,metrics,logs",
+			"logs_sink", "otlp→loki",
 		)
 	}
 
@@ -114,7 +125,7 @@ func main() {
 	}
 
 	// Host tools intentionally empty: the harness injects plan builtins,
-	// ask_user_choice, and web_search (when EXA_API_KEY / ExaAPIKey is set).
+	// ask_user_choice, and web_search/web_fetch (when EXA_API_KEY / ExaAPIKey is set).
 	exaKey := strings.TrimSpace(os.Getenv("EXA_API_KEY"))
 
 	defaultAgent := "test-agent"
@@ -135,7 +146,7 @@ func main() {
 	slog.Info("harness showcase",
 		"max_window_size", maxWindow,
 		"skill_dirs", len(skillDirs),
-		"web_search", exaKey != "",
+		"web_tools", exaKey != "",
 		"host_tools", 0,
 	)
 

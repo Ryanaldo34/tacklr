@@ -23,6 +23,22 @@ func (e *APIStatusError) Error() string {
 	return fmt.Sprintf("api error (status %d): %s", e.Status, e.Body)
 }
 
+// ProviderHTTPStatus implements tacklr.ProviderStatus.
+func (e *APIStatusError) ProviderHTTPStatus() int {
+	if e == nil {
+		return 0
+	}
+	return e.Status
+}
+
+// ProviderErrorCode implements tacklr.ProviderStatus.
+func (e *APIStatusError) ProviderErrorCode() string {
+	if e == nil {
+		return ""
+	}
+	return e.Code
+}
+
 type apiErrorDetail struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`

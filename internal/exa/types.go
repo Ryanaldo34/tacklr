@@ -63,3 +63,31 @@ type SearchResult struct {
 type SynthesisOutput struct {
 	Content json.RawMessage `json:"content,omitempty"`
 }
+
+// ContentsRequest is POST /contents (known URLs or prior result ids).
+// Provide urls or ids, not both. Content options are top-level (not nested).
+type ContentsRequest struct {
+	URLs        []string `json:"urls,omitempty"`
+	IDs         []string `json:"ids,omitempty"`
+	Text        any      `json:"text,omitempty"`       // bool or TextOptions
+	Highlights  any      `json:"highlights,omitempty"` // bool or HighlightsOptions
+	MaxAgeHours *int     `json:"maxAgeHours,omitempty"`
+}
+
+// ContentsResponse is the body for a successful POST /contents call.
+type ContentsResponse struct {
+	RequestID string              `json:"requestId"`
+	Results   []SearchResult      `json:"results"`
+	Statuses  []ContentsURLStatus `json:"statuses,omitempty"`
+}
+
+// ContentsURLStatus reports per-URL fetch outcome from /contents.
+type ContentsURLStatus struct {
+	ID     string `json:"id"`
+	Status string `json:"status"` // success | error
+	Source string `json:"source,omitempty"`
+	Error  *struct {
+		Tag            string `json:"tag,omitempty"`
+		HTTPStatusCode *int   `json:"httpStatusCode,omitempty"`
+	} `json:"error,omitempty"`
+}

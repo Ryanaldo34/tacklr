@@ -152,6 +152,12 @@ type LLMResponseChunk struct {
 	// Harness copies it onto StreamEvent.Error so protocols can errors.Is
 	// stop-reason sentinels (refusal, max_tokens, …).
 	Error error
+
+	// Token usage when the provider reports it (typically on StreamEventComplete
+	// after response.completed). Zero means unknown / not reported.
+	InputTokens     int
+	OutputTokens    int
+	ReasoningTokens int
 }
 
 // Message is the primary conversation unit in the context window.

@@ -172,7 +172,7 @@ func TestWebSearchTool_invokeAgainstServer(t *testing.T) {
 	}
 }
 
-// TestInjectBuiltinTools_webSearchGatedOnAPIKey registers the tool only with a key.
+// TestInjectBuiltinTools_webSearchGatedOnAPIKey registers web tools only with a key.
 func TestInjectBuiltinTools_webSearchGatedOnAPIKey(t *testing.T) {
 	t.Setenv("EXA_API_KEY", "")
 	hOff := NewAgent(context.Background(), AgentOptions{
@@ -191,13 +191,13 @@ func TestInjectBuiltinTools_webSearchGatedOnAPIKey(t *testing.T) {
 	if hOn.findTool("web_search", "") == nil {
 		t.Fatal("expected web_search from options key")
 	}
-	// Prompt mentions web search only when the tool is present.
-	prompt := hOn.constructSystemPrompt()
-	if !strings.Contains(prompt, "web_search") {
-		t.Fatal("system prompt should mention web_search when enabled")
+	if hOn.findTool("web_fetch", "") == nil {
+		t.Fatal("expected web_fetch from options key")
 	}
-	if strings.Contains(hOff.constructSystemPrompt(), "web_search") {
-		t.Fatal("system prompt should omit web_search when disabled")
+	// Tool schemas carry usage guidance — system prompt does not.
+	if strings.Contains(hOn.constructSystemPrompt(), "web_search") ||
+		strings.Contains(hOn.constructSystemPrompt(), "web_fetch") {
+		t.Fatal("system prompt must not document web tools")
 	}
 
 	t.Setenv("EXA_API_KEY", "from-env")
@@ -205,8 +205,8 @@ func TestInjectBuiltinTools_webSearchGatedOnAPIKey(t *testing.T) {
 		Config: Config{MaxWindowSize: 1024},
 		Model:  &mockStrategy{},
 	})
-	if hEnv.findTool("web_search", "") == nil {
-		t.Fatal("expected web_search from env")
+	if hEnv.findTool("web_search", "") == nil || hEnv.findTool("web_fetch", "") == nil {
+		t.Fatal("expected web tools from env")
 	}
 }
 

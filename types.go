@@ -75,6 +75,13 @@ func WrapStopReason(kind, cause error) error {
 	return fmt.Errorf("%w: %w", kind, cause)
 }
 
+// ProviderStatus is optionally implemented by InferenceStrategy errors so the
+// harness can annotate model spans without depending on a specific provider package.
+type ProviderStatus interface {
+	ProviderHTTPStatus() int
+	ProviderErrorCode() string
+}
+
 // and test files can reference it without the control package prefix.
 type Response struct {
 	Status            ItemStatus

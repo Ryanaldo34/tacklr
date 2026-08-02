@@ -17,7 +17,7 @@ const (
 	maxErrorBody   = 512
 )
 
-// Client calls Exa’s Search API.
+// Client calls Exa’s Search and Contents APIs.
 type Client struct {
 	APIKey     string
 	BaseURL    string
@@ -37,19 +37,52 @@ func NewClient(apiKey string) *Client {
 
 // Search performs POST /search. req.Query must be non-empty.
 func (c *Client) Search(ctx context.Context, req SearchRequest) (*SearchResponse, error) {
-	if c == nil {
-		return nil, fmt.Errorf("exa: client is nil")
-	}
-	if strings.TrimSpace(c.APIKey) == "" {
-		return nil, fmt.Errorf("exa: API key is required")
+	if err := c.requireKey(); err != nil {
+		return nil, err
 	}
 	if strings.TrimSpace(req.Query) == "" {
 		return nil, fmt.Errorf("exa: query is required")
 	}
+	var out SearchResponse
+	if err := c.postJSON(ctx, "/search", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
 
+// Contents performs POST /contents for known URLs (or prior result ids).
+// Provide at least one of URLs or IDs.
+func (c *Client) Contents(ctx context.Context, req ContentsRequest) (*ContentsResponse, error) {
+	if err := c.requireKey(); err != nil {
+		return nil, err
+	}
+	if len(req.URLs) == 0 && len(req.IDs) == 0 {
+		return nil, fmt.Errorf("exa: urls or ids is required")
+	}
+	if len(req.URLs) > 0 && len(req.IDs) > 0 {
+		return nil, fmt.Errorf("exa: provide urls or ids, not both")
+	}
+	var out ContentsResponse
+	if err := c.postJSON(ctx, "/contents", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) requireKey() error {
+	if c == nil {
+		return fmt.Errorf("exa: client is nil")
+	}
+	if strings.TrimSpace(c.APIKey) == "" {
+		return fmt.Errorf("exa: API key is required")
+	}
+	return nil
+}
+
+func (c *Client) postJSON(ctx context.Context, path string, req any, out any) error {
 	body, err := json.Marshal(req)
 	if err != nil {
-		return nil, fmt.Errorf("exa: marshal request: %w", err)
+		return fmt.Errorf("exa: marshal request: %w", err)
 	}
 
 	base := c.BaseURL
@@ -58,9 +91,9 @@ func (c *Client) Search(ctx context.Context, req SearchRequest) (*SearchResponse
 	}
 	base = strings.TrimRight(base, "/")
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/search", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, base+path, bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("exa: build request: %w", err)
+		return fmt.Errorf("exa: build request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("x-api-key", c.APIKey)
@@ -71,15 +104,20 @@ func (c *Client) Search(ctx context.Context, req SearchRequest) (*SearchResponse
 		hc = &http.Client{Timeout: defaultTimeout}
 	}
 
+	op := strings.TrimPrefix(path, "/")
+	if op == "" {
+		op = "request"
+	}
+
 	resp, err := hc.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("exa search: %w", err)
+		return fmt.Errorf("exa %s: %w", op, err)
 	}
 	defer resp.Body.Close()
 
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20)) // 8 MiB safety cap
 	if err != nil {
-		return nil, fmt.Errorf("exa search: read body: %w", err)
+		return fmt.Errorf("exa %s: read body: %w", op, err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		msg := strings.TrimSpace(string(raw))
@@ -89,12 +127,14 @@ func (c *Client) Search(ctx context.Context, req SearchRequest) (*SearchResponse
 		if msg == "" {
 			msg = resp.Status
 		}
-		return nil, fmt.Errorf("exa search: status %d: %s", resp.StatusCode, msg)
+		return fmt.Errorf("exa %s: status %d: %s", op, resp.StatusCode, msg)
 	}
 
-	var out SearchResponse
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("exa search: decode response: %w", err)
+	if out == nil {
+		return nil
 	}
-	return &out, nil
+	if err := json.Unmarshal(raw, out); err != nil {
+		return fmt.Errorf("exa %s: decode response: %w", op, err)
+	}
+	return nil
 }

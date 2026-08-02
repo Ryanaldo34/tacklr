@@ -83,7 +83,12 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 					})
 					return
 				}
-				events, err := a.tasks.Turn(ctx, a.tools, a.constructSystemPrompt())
+				turnCtx := ctx
+				if hadToolRound {
+					// Static after_tools flag for the next tacklr.model span + log event.
+					turnCtx = telemetry.ContextWithAfterTools(ctx)
+				}
+				events, err := a.tasks.Turn(turnCtx, a.tools, a.constructSystemPrompt())
 				if err != nil {
 					if ctx.Err() != nil {
 						emitCancelled()

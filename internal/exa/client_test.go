@@ -101,6 +101,70 @@ func TestClient_Search_validation(t *testing.T) {
 	}
 }
 
+// TestClient_Contents_success posts urls and parses page text.
+func TestClient_Contents_success(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/contents" || r.Method != http.MethodPost {
+			t.Fatalf("path/method = %s %s", r.Method, r.URL.Path)
+		}
+		b, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(b, &gotBody); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"requestId":"c1",
+			"results":[{
+				"title":"Paper",
+				"url":"https://arxiv.org/abs/1",
+				"text":"abstract body"
+			}],
+			"statuses":[{"id":"https://arxiv.org/abs/1","status":"success","source":"cached"}]
+		}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	c := exa.NewClient("test-key")
+	c.BaseURL = srv.URL
+	c.HTTPClient = srv.Client()
+
+	resp, err := c.Contents(context.Background(), exa.ContentsRequest{
+		URLs: []string{"https://arxiv.org/abs/1"},
+		Text: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	urls, _ := gotBody["urls"].([]any)
+	if len(urls) != 1 {
+		t.Fatalf("body = %#v", gotBody)
+	}
+	if gotBody["text"] != true {
+		t.Fatalf("text field = %#v", gotBody["text"])
+	}
+	if len(resp.Results) != 1 || resp.Results[0].Text != "abstract body" {
+		t.Fatalf("resp = %+v", resp)
+	}
+	if len(resp.Statuses) != 1 || resp.Statuses[0].Status != "success" {
+		t.Fatalf("statuses = %+v", resp.Statuses)
+	}
+}
+
+// TestClient_Contents_validation rejects empty urls and mixed urls+ids.
+func TestClient_Contents_validation(t *testing.T) {
+	c := exa.NewClient("k")
+	if _, err := c.Contents(context.Background(), exa.ContentsRequest{}); err == nil {
+		t.Fatal("want missing urls")
+	}
+	if _, err := c.Contents(context.Background(), exa.ContentsRequest{
+		URLs: []string{"https://a.com"},
+		IDs:  []string{"id1"},
+	}); err == nil || !strings.Contains(err.Error(), "not both") {
+		t.Fatalf("want urls-or-ids: %v", err)
+	}
+}
+
 // TestClient_Search_contextCancel fails the in-flight request.
 func TestClient_Search_contextCancel(t *testing.T) {
 	started := make(chan struct{})
