@@ -3,6 +3,7 @@ package tacklr
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -236,6 +237,308 @@ func TestRun_unknownTool_surfacesToolResultError(t *testing.T) {
 	got := drainEvents(events)
 	if !hasToolResultContent(got, "not found") && !hasToolResultContent(got, "does_not_exist") {
 		t.Fatalf("want unknown tool error result, got %+v", summarizeEvents(got))
+	}
+}
+
+// TestRun_functionCallRecordedBeforeToolResult: Azure-style pairing — the next
+// model invoke sees an assistant function_call whose call_id matches the tool output.
+func TestRun_functionCallRecordedBeforeToolResult(t *testing.T) {
+	tool := NewTool(ToolConfig{
+		Name:    "echo",
+		Handler: func(ctx context.Context) (string, error) { return "pong", nil },
+	})
+	var n int
+	var second []*Message
+	strategy := &mockStrategy{
+		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
+			n++
+			if n == 1 {
+				ch <- LLMResponseChunk{
+					Type: StreamEventFunctionCall,
+					ToolCalls: []ToolCall{
+						{ID: "fc_item", CallID: "call_abc123", Name: "echo", Arguments: `{}`},
+					},
+					IsComplete: true,
+				}
+				return
+			}
+			second = append([]*Message(nil), msgs...)
+			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
+		},
+	}
+	h := NewAgent(context.Background(), AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  strategy,
+		Tools:  []*Tool{tool},
+	})
+	events, err := h.Run(context.Background(), "go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = drainEvents(events)
+	if n < 2 {
+		t.Fatalf("want second model invoke, got %d", n)
+	}
+	var sawFC, sawOut bool
+	for _, m := range second {
+		if m.Role == RoleAssistant && len(m.ToolCalls) == 1 {
+			tc := m.ToolCalls[0]
+			if tc.CallID == "call_abc123" && tc.ID == "fc_item" {
+				sawFC = true
+			}
+		}
+		if m.Role == RoleTool && m.ToolCallID == "call_abc123" {
+			sawOut = true
+		}
+	}
+	if !sawFC || !sawOut {
+		t.Fatalf("second invoke msgs missing paired function_call/tool: sawFC=%v sawOut=%v msgs=%+v", sawFC, sawOut, second)
+	}
+}
+
+// TestRun_modelErrorAfterToolsIsTagged: post-tool provider failures must not
+// look like the prior tool (list_plan etc.) failed.
+func TestRun_modelErrorAfterToolsIsTagged(t *testing.T) {
+	tool := NewTool(ToolConfig{
+		Name:    "list_plan",
+		Handler: func(ctx context.Context) (string, error) { return "plan: empty", nil },
+	})
+	var n int
+	strategy := &mockStrategy{
+		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
+			n++
+			if n == 1 {
+				ch <- LLMResponseChunk{
+					Type: StreamEventFunctionCall,
+					ToolCalls: []ToolCall{
+						{ID: "fc1", CallID: "call1", Name: "list_plan", Arguments: `{}`, Status: "completed"},
+					},
+					IsComplete: true,
+				}
+				return
+			}
+			ch <- LLMResponseChunk{
+				Type:       StreamEventError,
+				Content:    "api error (status 200): response incomplete or failed; status=failed; event=response.failed",
+				Error:      fmt.Errorf("api error (status 200): response incomplete or failed; status=failed; event=response.failed"),
+				IsComplete: true,
+			}
+		},
+	}
+	h := NewAgent(context.Background(), AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  strategy,
+		Tools:  []*Tool{tool},
+	})
+	events, err := h.Run(context.Background(), "show plan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := drainEvents(events)
+	if !hasToolResultContent(got, "plan: empty") {
+		t.Fatalf("want successful list_plan result, got %+v", summarizeEvents(got))
+	}
+	var sawTagged bool
+	for _, ev := range got {
+		if ev.Type != StreamEventError || ev.Error == nil {
+			continue
+		}
+		if strings.Contains(ev.Error.Error(), "model after tools") &&
+			strings.Contains(ev.Error.Error(), "response.failed") {
+			sawTagged = true
+		}
+	}
+	if !sawTagged {
+		t.Fatalf("want model-after-tools tagged error, got %+v", summarizeEvents(got))
+	}
+}
+
+// TestStripUnpairedToolTurns_keepsPairedDropsOrphans: only complete pairs survive.
+func TestStripUnpairedToolTurns_keepsPairedDropsOrphans(t *testing.T) {
+	window := []*Message{
+		{Role: RoleUser, Content: "u"},
+		{Role: RoleAssistant, ToolCalls: []ToolCall{
+			{CallID: "paired", Name: "echo", Arguments: `{}`},
+			{CallID: "orphan_fc", Name: "echo", Arguments: `{}`},
+		}},
+		{Role: RoleTool, ToolCallID: "paired", Content: "ok"},
+		{Role: RoleTool, ToolCallID: "orphan_out", Content: "no-call"},
+		{Role: RoleAssistant, Content: "text only"},
+	}
+	got := stripUnpairedToolTurns(window, nil)
+	if len(got) != 4 {
+		t.Fatalf("len = %d, want 4 (user, fc-only-paired, tool, text): %+v", len(got), got)
+	}
+	if len(got[1].ToolCalls) != 1 || got[1].ToolCalls[0].CallID != "paired" {
+		t.Fatalf("assistant toolcalls = %+v", got[1].ToolCalls)
+	}
+	if got[2].ToolCallID != "paired" {
+		t.Fatalf("tool = %+v", got[2])
+	}
+	// Pending interrupt call_id without result is retained.
+	keep := map[string]struct{}{"pending": {}}
+	window2 := []*Message{
+		{Role: RoleUser, Content: "u"},
+		{Role: RoleAssistant, ToolCalls: []ToolCall{{CallID: "pending", Name: "ask", Arguments: `{}`}}},
+	}
+	got2 := stripUnpairedToolTurns(window2, keep)
+	if len(got2) != 2 || len(got2[1].ToolCalls) != 1 {
+		t.Fatalf("pending keep = %+v", got2)
+	}
+}
+
+// TestRun_modelErrorAfterTools_checkpointsToolPairs: provider failure on the
+// follow-up model turn still persists user + assistant function_call + tool
+// result so a reloaded session can continue.
+func TestRun_modelErrorAfterTools_checkpointsToolPairs(t *testing.T) {
+	store := stores.NewInMemoryStore()
+	tool := NewTool(ToolConfig{
+		Name:    "echo",
+		Handler: func(ctx context.Context) (string, error) { return "tool-ok", nil },
+	})
+	var n int
+	strategy := &mockStrategy{
+		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
+			n++
+			if n == 1 {
+				ch <- LLMResponseChunk{
+					Type: StreamEventFunctionCall,
+					ToolCalls: []ToolCall{
+						{ID: "fc_echo", CallID: "call_echo", Name: "echo", Arguments: `{}`},
+					},
+					IsComplete: true,
+				}
+				return
+			}
+			ch <- LLMResponseChunk{
+				Type:       StreamEventError,
+				Error:      fmt.Errorf("api error (status 200): response incomplete or failed; status=failed"),
+				IsComplete: true,
+			}
+		},
+	}
+	h := NewAgent(context.Background(), AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  strategy,
+		Tools:  []*Tool{tool},
+		Store:  store,
+	})
+	h.BindSessionID("sess-after-tools-ckpt")
+	events, err := h.Run(context.Background(), "do the tool then die")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = drainEvents(events)
+
+	loaded, err := NewAgentFromSession(context.Background(), "sess-after-tools-ckpt", AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  &mockStrategy{},
+		Store:  store,
+		Tools:  []*Tool{tool},
+	})
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	var sawUser, sawFC, sawTool bool
+	for _, m := range loaded.Messages() {
+		if m == nil {
+			continue
+		}
+		switch m.Role {
+		case RoleUser:
+			if m.Content == "do the tool then die" {
+				sawUser = true
+			}
+		case RoleAssistant:
+			if len(m.ToolCalls) == 1 && m.ToolCalls[0].CallID == "call_echo" {
+				sawFC = true
+			}
+		case RoleTool:
+			if m.ToolCallID == "call_echo" && m.Content == "tool-ok" {
+				sawTool = true
+			}
+		}
+	}
+	if !sawUser || !sawFC || !sawTool {
+		t.Fatalf("checkpoint missing pairs: user=%v fc=%v tool=%v window=%+v",
+			sawUser, sawFC, sawTool, loaded.Messages())
+	}
+}
+
+// TestRun_modelError_stripsUnpairedFunctionCallFromCheckpoint: an assistant
+// tool-call turn without a result must not survive an inference failure checkpoint.
+func TestRun_modelError_stripsUnpairedFunctionCallFromCheckpoint(t *testing.T) {
+	store := stores.NewInMemoryStore()
+	// Pre-seed window via first successful run... simpler: inject after NewAgent
+	// by running a path that adds FC then fails before tools — but harness only
+	// records FC when tools will run. Manually plant unpaired state then fail Turn.
+	var n int
+	strategy := &mockStrategy{
+		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
+			n++
+			// First turn: return error immediately (no tools). Window still has
+			// user + any pre-existing unpaired FC we planted.
+			ch <- LLMResponseChunk{
+				Type:       StreamEventError,
+				Error:      fmt.Errorf("provider down"),
+				IsComplete: true,
+			}
+		},
+	}
+	h := NewAgent(context.Background(), AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  strategy,
+		Store:  store,
+	})
+	h.BindSessionID("sess-strip-orphan")
+	// Plant unpaired function_call as if a prior crash left incomplete state.
+	h.RestoreMessages([]*Message{
+		{Role: RoleUser, Content: "goal"},
+		{Role: RoleAssistant, ToolCalls: []ToolCall{
+			{CallID: "orphan", Name: "echo", Arguments: `{}`},
+		}},
+		{Role: RoleAssistant, ToolCalls: []ToolCall{
+			{CallID: "good", Name: "echo", Arguments: `{}`},
+		}},
+		{Role: RoleTool, ToolCallID: "good", Content: "done"},
+	})
+	events, err := h.Run(context.Background(), "continue")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = drainEvents(events)
+
+	loaded, err := NewAgentFromSession(context.Background(), "sess-strip-orphan", AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  &mockStrategy{},
+		Store:  store,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range loaded.Messages() {
+		if m == nil {
+			continue
+		}
+		if m.Role == RoleAssistant {
+			for _, tc := range m.ToolCalls {
+				if tc.CallID == "orphan" {
+					t.Fatalf("orphan function_call survived checkpoint: %+v", loaded.Messages())
+				}
+			}
+		}
+		if m.Role == RoleTool && m.ToolCallID == "orphan" {
+			t.Fatal("orphan tool result should not exist")
+		}
+	}
+	var sawGood bool
+	for _, m := range loaded.Messages() {
+		if m != nil && m.Role == RoleTool && m.ToolCallID == "good" && m.Content == "done" {
+			sawGood = true
+		}
+	}
+	if !sawGood {
+		t.Fatalf("paired tool result must remain: %+v", loaded.Messages())
 	}
 }
 
@@ -503,6 +806,36 @@ func TestRun_checkpointSaveFailure_turnStillCompletes(t *testing.T) {
 	got := drainEvents(events)
 	if !hasEventType(got, StreamEventComplete) {
 		t.Fatalf("want complete despite save fail, got %+v", summarizeEvents(got))
+	}
+}
+
+// TestRun_modelError_stillCheckpoints: unexpected invoke failure still leaves
+// a durable session (user prompt at minimum) for resume/reload.
+func TestRun_modelError_stillCheckpoints(t *testing.T) {
+	store := stores.NewInMemoryStore()
+	h := NewAgent(context.Background(), AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  &mockStrategy{invokeErr: errors.New("provider down")},
+		Store:  store,
+	})
+	h.BindSessionID("sess-err-ckpt")
+	events, err := h.Run(context.Background(), "remember this user goal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = drainEvents(events)
+
+	loaded, err := NewAgentFromSession(context.Background(), "sess-err-ckpt", AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  &mockStrategy{},
+		Store:  store,
+	})
+	if err != nil {
+		t.Fatalf("reload after error: %v", err)
+	}
+	msgs := loaded.Messages()
+	if len(msgs) == 0 || msgs[0].Role != RoleUser || msgs[0].Content != "remember this user goal" {
+		t.Fatalf("want checkpointed user message, got %+v", msgs)
 	}
 }
 

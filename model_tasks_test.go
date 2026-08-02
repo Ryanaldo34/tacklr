@@ -224,6 +224,50 @@ func TestDefaultModelTasks_Handoff_errors(t *testing.T) {
 	}
 }
 
+// TestDefaultModelTasks_Handoff_streamError_usesFallback: Azure response.failed
+// during handoff must not fail complete_todo — window still gets a handoff message.
+func TestDefaultModelTasks_Handoff_streamError_usesFallback(t *testing.T) {
+	var sawTools []*Tool
+	strategy := &mockStrategy{
+		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
+			sawTools = tools
+			ch <- LLMResponseChunk{
+				Type:       StreamEventError,
+				Content:    "api error (status 200): response incomplete or failed; status=failed",
+				IsComplete: true,
+			}
+		},
+	}
+	cm := NewModelContextManager()
+	cm.Restore([]*Message{{Role: RoleUser, Content: "ship feature"}})
+	tools := []*Tool{NewTool(ToolConfig{Name: "web_search", Handler: func(ctx context.Context) (string, error) { return "", nil }})}
+	tasks := NewDefaultModelTasks(strategy, cm, DefaultContextPolicy(), 8192)
+	err := tasks.Handoff(context.Background(), []Todo{
+		{Title: "A", Status: streaming.TodoStatusCompleted, Description: "done"},
+		{Title: "B", Status: streaming.TodoStatusInProgress, Description: "next"},
+	}, "plan doc", tools, "sys")
+	if err != nil {
+		t.Fatalf("handoff should soft-fail: %v", err)
+	}
+	if sawTools != nil {
+		t.Fatalf("handoff must invoke without tools, got %d tools", len(sawTools))
+	}
+	msgs := cm.Messages()
+	if len(msgs) < 2 {
+		t.Fatalf("window = %d", len(msgs))
+	}
+	// developer handoff content should mention fallback / remaining work
+	found := false
+	for _, m := range msgs {
+		if m.Role == RoleDeveloper && strings.Contains(m.Content, "fallback") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected fallback handoff message, got %+v", msgs)
+	}
+}
+
 func TestDefaultModelTasks_Absorb_countTokensDuringCompressSearch(t *testing.T) {
 	calls := 0
 	strategy := &mockStrategy{

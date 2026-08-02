@@ -71,6 +71,8 @@ func (t *DefaultModelTasks) Turn(ctx context.Context, tools []*Tool, systemPromp
 	if t.model == nil {
 		return nil, fmt.Errorf("turn: model is required")
 	}
+	// Context is only reshaped on Absorb pressure (token threshold) or Handoff
+	// after complete_todo / plan revision — never by dropping tool history here.
 	if systemPrompt != "" {
 		t.model.SetSystemPrompt(systemPrompt)
 	}
@@ -226,9 +228,12 @@ func (t *DefaultModelTasks) absorbFit(
 		numMessagesToCompress = len(unprotected)
 	}
 
-	events, err := model.Invoke(ctx, unprotected[:numMessagesToCompress], tools)
+	// Summarization only — no tool catalog. The unprotected slice is the real
+	// history under pressure (including tool results); do not invent alternate
+	// windows for provider quirks.
+	events, err := model.Invoke(ctx, unprotected[:numMessagesToCompress], nil)
 	if err != nil {
-		return nil, nil, true, fmt.Errorf("invoke: %w", err)
+		return nil, nil, true, fmt.Errorf("compress invoke: %w", err)
 	}
 
 	summaryMsg := &Message{Role: RoleAssistant}
@@ -314,22 +319,36 @@ Current plan todos:
 	prompt.WriteString(planB.String())
 
 	model.SetSystemPrompt(prompt.String())
-	events, err := model.Invoke(ctx, window, tools)
-	if err != nil {
-		return nil, err
-	}
-
-	asm := newStreamAssembler()
+	// Handoff is a pure writing task over the current window — tools are not
+	// offered. On model failure, install a plan-derived handoff so ACM still
+	// rebuilds context (todo complete must not leave a half-applied effect).
+	events, err := model.Invoke(ctx, window, nil)
 	var lastCompletedMessage string
-	for chunk := range events {
-		if chunk.Type == StreamEventError {
-			return nil, fmt.Errorf("compress: %s", chunk.Content)
-		}
-		asm.AddDelta(chunk)
-		if chunk.IsComplete && chunk.Type == StreamEventMessage {
-			if content := asm.CompleteContent(chunk); content != "" {
-				lastCompletedMessage = content
+	if err != nil {
+		slog.ErrorContext(ctx, "handoff invoke failed; using plan-derived fallback",
+			"area", telemetry.AreaModelTasks, "error", err)
+		lastCompletedMessage = fallbackHandoffContent(plan)
+	} else {
+		asm := newStreamAssembler()
+		var streamErr error
+		for chunk := range events {
+			if chunk.Type == StreamEventError {
+				streamErr = fmt.Errorf("handoff: %s", chunk.Content)
+				break
 			}
+			asm.AddDelta(chunk)
+			if chunk.IsComplete && chunk.Type == StreamEventMessage {
+				if content := asm.CompleteContent(chunk); content != "" {
+					lastCompletedMessage = content
+				}
+			}
+		}
+		if streamErr != nil {
+			slog.ErrorContext(ctx, "handoff model stream failed; using plan-derived fallback",
+				"area", telemetry.AreaModelTasks, "error", streamErr)
+			lastCompletedMessage = fallbackHandoffContent(plan)
+		} else if strings.TrimSpace(lastCompletedMessage) == "" {
+			lastCompletedMessage = fallbackHandoffContent(plan)
 		}
 	}
 
@@ -350,4 +369,19 @@ Current plan todos:
 		model.SetSystemPrompt(restoreSystemPrompt)
 	}
 	return out, nil
+}
+
+// fallbackHandoffContent builds a plan-derived handoff when the model stream
+// fails or returns no message so the window can still be rebuilt to the ACM
+// handoff shape (user, plan document, handoff, optional continue nudge).
+func fallbackHandoffContent(plan []Todo) string {
+	var b strings.Builder
+	b.WriteString("Handoff (fallback — model handoff stream failed or was empty).\n")
+	b.WriteString("This is work in progress; complete remaining todos from the plan document and list below.\n\n")
+	b.WriteString("Current plan todos:\n")
+	for i := range plan {
+		todo := &plan[i]
+		fmt.Fprintf(&b, "- [%s] %s: %s\n", todo.Status, todo.Title, todo.Description)
+	}
+	return b.String()
 }

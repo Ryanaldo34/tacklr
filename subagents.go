@@ -286,17 +286,7 @@ func (a *AgentHarness) runWorker(ctx context.Context, workerName, task string, r
 
 func (a *AgentHarness) newWorkerHarness(ctx context.Context, workerName, parentToolCallID string, spec *SubAgent) *AgentHarness {
 	sessionID := workerSessionID(a.sessionId, workerName, parentToolCallID)
-	worker := NewAgent(ctx, AgentOptions{
-		Config: Config{
-			MaxWindowSize: a.maxWindowSize,
-			SystemPrompt:  spec.Instructions,
-		},
-		Model:      spec.Model,
-		Tools:      slices.Clone(spec.Tools),
-		MCPConfigs: slices.Clone(a.mcpConfigs),
-		Store:      a.store,
-		SubAgents:  spec.SubAgents,
-	})
+	worker := NewAgent(ctx, a.workerOptsFromSpec(spec))
 	worker.sessionId = sessionID
 	return worker
 }
@@ -309,6 +299,8 @@ func workerSessionID(parentSessionID, workerName, parentToolCallID string) strin
 }
 
 func (a *AgentHarness) workerOptsFromSpec(spec *SubAgent) AgentOptions {
+	// Preserve parent Exa key so workers get web_search when the parent did
+	// (env still works if options key is empty).
 	return AgentOptions{
 		Config: Config{
 			MaxWindowSize: a.maxWindowSize,
@@ -319,6 +311,7 @@ func (a *AgentHarness) workerOptsFromSpec(spec *SubAgent) AgentOptions {
 		MCPConfigs: slices.Clone(a.mcpConfigs),
 		Store:      a.store,
 		SubAgents:  spec.SubAgents,
+		ExaAPIKey:  a.exaAPIKey,
 	}
 }
 

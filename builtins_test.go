@@ -808,7 +808,7 @@ func TestRun_askUserChoice_emptyChoiceTitle_toolError(t *testing.T) {
 // --- Message stream assembler via parent turn ---
 
 // TestCompleteTodo_allRemainingCompleted: completing last open todo when later
-// ones are already completed reports all-done.
+// ones are already completed reports all-done and skips handoff (agent should wrap up).
 func TestCompleteTodo_allRemainingCompleted(t *testing.T) {
 	pt := testPlanTools()
 	rt := session.NewRuntime(nil, nil, nil)
@@ -818,12 +818,56 @@ func TestCompleteTodo_allRemainingCompleted(t *testing.T) {
 		{Title: "B", Status: streaming.TodoStatusCompleted},
 		{Title: "C", Status: streaming.TodoStatusCompleted},
 	})
-	got, err := pt.complete.Invoke(context.Background(), `{"title":"A"}`, rt)
+	res, err := pt.complete.invoke(context.Background(), `{"title":"A"}`, rt)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(got, "All todos completed") {
-		t.Fatalf("got %q", got)
+	if !strings.Contains(res.output, "All todos completed") {
+		t.Fatalf("got %q", res.output)
+	}
+	if res.disp.Effect != EffectNone {
+		t.Fatalf("effect = %v, want EffectNone (no handoff when plan fully done)", res.disp.Effect)
+	}
+}
+
+// TestCompleteTodo_lastItem_noHandoff: completing the sole open todo does not collapse context.
+func TestCompleteTodo_lastItem_noHandoff(t *testing.T) {
+	pt := testPlanTools()
+	rt := session.NewRuntime(nil, nil, nil)
+	rt.EnsureInitialized()
+	pt.store.Set([]Todo{
+		{Title: "Only", Status: streaming.TodoStatusInProgress},
+	})
+	res, err := pt.complete.invoke(context.Background(), `{"title":"Only"}`, rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.output, "All todos completed") {
+		t.Fatalf("got %q", res.output)
+	}
+	if res.disp.Effect != EffectNone {
+		t.Fatalf("effect = %v, want EffectNone", res.disp.Effect)
+	}
+}
+
+// TestCompleteTodo_midPlan_handoff: completing a todo with open work remaining triggers handoff.
+func TestCompleteTodo_midPlan_handoff(t *testing.T) {
+	pt := testPlanTools()
+	rt := session.NewRuntime(nil, nil, nil)
+	rt.EnsureInitialized()
+	pt.store.Set([]Todo{
+		{Title: "A", Status: streaming.TodoStatusInProgress},
+		{Title: "B", Description: "next", Status: streaming.TodoStatusPending},
+	})
+	res, err := pt.complete.invoke(context.Background(), `{"title":"A"}`, rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.output, `starting "B"`) {
+		t.Fatalf("got %q", res.output)
+	}
+	if res.disp.Effect != EffectHandoff {
+		t.Fatalf("effect = %v, want EffectHandoff", res.disp.Effect)
 	}
 }
 

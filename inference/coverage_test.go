@@ -310,7 +310,6 @@ func TestMarshalMessagesToInput_assistantToolCallsOnly(t *testing.T) {
 		{Role: tacklr.RoleAssistant, ToolCalls: []tacklr.ToolCall{
 			{CallID: "c", Name: "n", Arguments: `{}`},
 		}},
-		{Role: tacklr.RoleReasoning, Content: "ignored role"},
 		{Role: tacklr.RoleTool, ToolCallID: "c", Content: "out"},
 		{Role: tacklr.RoleSystem, Content: "sys"},
 		{Role: tacklr.RoleDeveloper, Content: "dev"},
@@ -324,6 +323,133 @@ func TestMarshalMessagesToInput_assistantToolCallsOnly(t *testing.T) {
 	}
 	if !strings.Contains(string(items[0]), "function_call") {
 		t.Fatalf("%s", items[0])
+	}
+	var fc map[string]any
+	if err := json.Unmarshal(items[0], &fc); err != nil {
+		t.Fatal(err)
+	}
+	if fc["call_id"] != "c" {
+		t.Fatalf("want call_id = c, got %#v", fc)
+	}
+	if _, hasID := fc["id"]; hasID {
+		t.Fatalf("function_call must omit provider item id on input, got %#v", fc)
+	}
+	if fc["status"] != "completed" {
+		t.Fatalf("function_call status = %#v, want completed", fc["status"])
+	}
+}
+
+// TestMarshalMessagesToInput_reasoningIncludesSummary: OpenAI/Azure require
+// summary on reasoning input items (missing_required_parameter otherwise).
+func TestMarshalMessagesToInput_reasoningIncludesSummary(t *testing.T) {
+	items := marshalMessagesToInput([]*tacklr.Message{
+		{Role: tacklr.RoleUser, Content: "hi"},
+		{Role: tacklr.RoleReasoning, MessageID: "rs_1", Content: "thought trail"},
+		{Role: tacklr.RoleReasoning, MessageID: "rs_empty"},
+	})
+	if len(items) != 3 {
+		t.Fatalf("items = %d", len(items))
+	}
+	var withText, empty map[string]any
+	if err := json.Unmarshal(items[1], &withText); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(items[2], &empty); err != nil {
+		t.Fatal(err)
+	}
+	if withText["type"] != "reasoning" || withText["id"] != "rs_1" {
+		t.Fatalf("reasoning = %#v", withText)
+	}
+	if _, hasStatus := withText["status"]; hasStatus {
+		t.Fatalf("reasoning input must not include status, got %#v", withText)
+	}
+	sum, ok := withText["summary"].([]any)
+	if !ok || len(sum) != 1 {
+		t.Fatalf("summary = %#v, want one summary_text part", withText["summary"])
+	}
+	part, _ := sum[0].(map[string]any)
+	if part["type"] != "summary_text" || part["text"] != "thought trail" {
+		t.Fatalf("summary part = %#v", part)
+	}
+	// Empty thought still emits summary: [] (not null / omitted).
+	if empty["summary"] == nil {
+		t.Fatalf("empty reasoning must include summary array, got %#v", empty)
+	}
+	emptySum, ok := empty["summary"].([]any)
+	if !ok || len(emptySum) != 0 {
+		t.Fatalf("empty summary = %#v, want []", empty["summary"])
+	}
+	if !strings.Contains(string(items[2]), `"summary"`) {
+		t.Fatalf("wire missing summary key: %s", items[2])
+	}
+	if strings.Contains(string(items[1]), `"status"`) {
+		t.Fatalf("reasoning wire must omit status: %s", items[1])
+	}
+}
+
+// TestMarshalMessagesToInput_azureToolPairing: call_id pairing, no re-submit of fc_ id,
+// and function_call immediately followed by its output.
+func TestMarshalMessagesToInput_azureToolPairing(t *testing.T) {
+	items := marshalMessagesToInput([]*tacklr.Message{
+		{Role: tacklr.RoleAssistant, ToolCalls: []tacklr.ToolCall{
+			{ID: "fc_item_1", CallID: "call_6dbd6018e5ce49d2b1952173", Name: "web_search", Arguments: `{"query":"q"}`},
+			{ID: "fc_item_2", CallID: "call_bbbb", Name: "list_plan", Arguments: `{}`},
+		}},
+		{Role: tacklr.RoleTool, ToolCallID: "call_6dbd6018e5ce49d2b1952173", Content: "hits"},
+		{Role: tacklr.RoleTool, ToolCallID: "call_bbbb", Content: "plan empty"},
+	})
+	if len(items) != 4 {
+		t.Fatalf("items = %d, want 4 interleaved pairs, got %v", len(items), items)
+	}
+	var fc1, out1, fc2, out2 map[string]any
+	if err := json.Unmarshal(items[0], &fc1); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(items[1], &out1); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(items[2], &fc2); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(items[3], &out2); err != nil {
+		t.Fatal(err)
+	}
+	if fc1["type"] != "function_call" || fc1["call_id"] != "call_6dbd6018e5ce49d2b1952173" {
+		t.Fatalf("function_call = %#v", fc1)
+	}
+	if _, hasID := fc1["id"]; hasID {
+		t.Fatalf("must omit id on function_call input, got %#v", fc1)
+	}
+	if fc1["status"] != "completed" {
+		t.Fatalf("function_call status = %#v", fc1["status"])
+	}
+	if out1["type"] != "function_call_output" || out1["call_id"] != "call_6dbd6018e5ce49d2b1952173" {
+		t.Fatalf("function_call_output = %#v", out1)
+	}
+	if out1["status"] != "completed" || out1["output"] != "hits" {
+		t.Fatalf("function_call_output = %#v", out1)
+	}
+	if fc2["call_id"] != "call_bbbb" || out2["output"] != "plan empty" {
+		t.Fatalf("second pair: fc=%#v out=%#v", fc2, out2)
+	}
+}
+
+// TestMarshalMessagesToInput_emptyArgsBecomeObject: Azure validators reject "".
+func TestMarshalMessagesToInput_emptyArgsBecomeObject(t *testing.T) {
+	items := marshalMessagesToInput([]*tacklr.Message{
+		{Role: tacklr.RoleAssistant, ToolCalls: []tacklr.ToolCall{
+			{CallID: "c", Name: "list_plan"},
+		}},
+	})
+	var fc map[string]any
+	if err := json.Unmarshal(items[0], &fc); err != nil {
+		t.Fatal(err)
+	}
+	if fc["arguments"] != "{}" {
+		t.Fatalf("arguments = %#v, want {}", fc["arguments"])
+	}
+	if fc["status"] != "completed" {
+		t.Fatalf("status = %#v", fc["status"])
 	}
 }
 
@@ -467,9 +593,9 @@ func TestWithReasoningLevel_setsDefaultSummary(t *testing.T) {
 func TestEmitOutputItemComplete_ignoresBadJSON(t *testing.T) {
 	s := NewOpenAIInferenceStrategy(nil)
 	ch := make(chan tacklr.LLMResponseChunk, 4)
-	s.emitOutputItemComplete([]byte(`{`), ch)
-	s.emitOutputItemComplete([]byte(`{"type":"message","id":"m"}`), ch)
-	s.emitReasoningChunk([]byte(`{`), ch) // unmarshal fail: no send
+	s.emitOutputItemComplete([]byte(`{`), ch, nil)
+	s.emitOutputItemComplete([]byte(`{"type":"message","id":"m"}`), ch, nil)
+	s.emitReasoningChunk([]byte(`{`), ch, nil) // unmarshal fail: no send
 	close(ch)
 	var n int
 	for range ch {

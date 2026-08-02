@@ -195,12 +195,32 @@ curl -N -X POST http://localhost:8080/ \
 
 ### Try the test server
 
+`cmd/testserver` is a harness **showcase**: no toy host tools. The agent only gets Tacklr builtins (`create_plan`, `list_plan`, `edit_plan`, `complete_todo`, `ask_user_choice`, and `web_search` when `EXA_API_KEY` is set), plus optional skills via `SKILL_DIRECTORIES`.
+
+By default it exports OTLP traces/metrics to **`localhost:4317` (gRPC)** with `service.name=tacklr-testserver` (for local `make lgtm-up`). Override with `OTEL_*` env vars, or set `OTEL_SDK_DISABLED=true` to turn exporters off.
+
 ```bash
 # .env: OPENAI_BASE_URL, OPENAI_API_KEY, OPENAI_MODEL
-# optional: OTEL_EXPORTER_OTLP_ENDPOINT for traces + metrics (e.g. localhost:4317)
-go run ./cmd/testserver          # HTTP ACP (PORT or :3000)
-go run ./cmd/testserver --stdio  # ACP over stdio
+# optional: EXA_API_KEY, SKILL_DIRECTORIES, MAX_WINDOW_SIZE, OTEL_*
+go build -o bin/testserver ./cmd/testserver
+./bin/testserver --stdio   # ACP (Zed, etc.) — OTEL defaults on
+./bin/testserver           # HTTP ACP (PORT or :3000)
 ```
+
+### Local LGTM (Grafana + OTLP) via Apple `container`
+
+Uses the all-in-one [`grafana/otel-lgtm`](https://github.com/grafana/docker-otel-lgtm) image with Apple’s container runtime (not Docker Desktop).
+
+```bash
+make lgtm-up          # pull + run tacklr-lgtm (Grafana :3001, OTLP :4317/:4318)
+make lgtm-testserver  # ACP testserver with OTEL_* pointed at LGTM
+# Grafana: http://127.0.0.1:3001  (admin / admin)
+make lgtm-down
+```
+
+Pre-installs common Grafana Explore apps: logs, traces, metrics drilldown, Pyroscope. Built-in datasources: Prometheus, Loki, Tempo, Pyroscope. See `deploy/lgtm/env.example` and `scripts/lgtm-up.sh`.
+
+**Port note:** Grafana is published on **3001** so the testserver can keep ACP HTTP on **3000**.
 
 ---
 
@@ -234,10 +254,11 @@ On save, a **Checkpointer** packages conversation window, plan, tool/user state,
 
 This keeps product tools from breaking the planning system by accident.
 
-### MCP and skills
+### MCP, skills, and web search
 
 - **MCP** — pass `MCPConfigs` on the agent (or via ACP session); tools are discovered and run for you.  
 - **Skills** — set `Config.SkillDirectories` to folders of `SKILL.md` (default `skills.DirectoryLoader`). Inject `AgentOptions.SkillsLoader` for non-filesystem sources. A short catalog lands in the system prompt; full text loads via `read_skill` when needed.
+- **Web search (Exa)** — when `EXA_API_KEY` is set in the environment (or `AgentOptions.ExaAPIKey`), the harness injects a built-in `web_search` tool (read access, token-efficient **highlights** by default). Hosts that use `.env` should load it before `NewAgent` (the test server already does). No Exa Go SDK; the harness calls Exa’s REST API.
 
 ### Public harness surface
 
@@ -289,7 +310,7 @@ reg := server.NewRegistry(store, "my-agent", server.WithMeterProvider(mp))
 
 With no endpoint and no injection, traces and metrics are no-ops. Prompt/tool **content** is not attached by default.
 
-Rough map for a Grafana stack: **Tempo** = traces, **Mimir/Prometheus** = metrics, **Loki** = logs (you ship slog yourself).
+Rough map for a Grafana stack: **Tempo** = traces, **Prometheus** (in `otel-lgtm`) = metrics, **Loki** = logs (slog stays on stderr with `trace_id`/`span_id` via `telemetry.NewLogger`; ship to Loki with your log pipeline or an OTLP log bridge later). Local all-in-one: `make lgtm-up`.
 
 ---
 

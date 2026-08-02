@@ -1,4 +1,4 @@
-.PHONY: test vet lint fmt cover coverage check
+.PHONY: test vet lint fmt cover coverage check lgtm-up lgtm-down lgtm-logs lgtm-testserver testserver
 
 # Race-enabled tests (same as CI).
 test:
@@ -35,3 +35,25 @@ check: vet lint test coverage
 	if [ -n "$$unformatted" ]; then \
 		echo "gofmt needed on:"; echo "$$unformatted"; exit 1; \
 	fi
+
+# --- Local LGTM (Apple container runtime + grafana/otel-lgtm) ---
+# Pulls Loki/Grafana/Tempo/Prometheus(+Mimir path)/Pyroscope + OTel Collector in one container.
+lgtm-up:
+	@chmod +x scripts/lgtm-up.sh scripts/lgtm-down.sh scripts/lgtm-testserver.sh
+	./scripts/lgtm-up.sh
+
+lgtm-down:
+	@chmod +x scripts/lgtm-down.sh
+	./scripts/lgtm-down.sh
+
+lgtm-logs:
+	@container logs -f $${LGTM_CONTAINER_NAME:-tacklr-lgtm}
+
+# ACP testserver with OTLP defaults aimed at make lgtm-up.
+lgtm-testserver:
+	@chmod +x scripts/lgtm-testserver.sh
+	./scripts/lgtm-testserver.sh
+
+# Testserver without forcing LGTM env (still reads OTEL_* from the environment / .env).
+testserver:
+	go run ./cmd/testserver

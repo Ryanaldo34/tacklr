@@ -159,12 +159,14 @@ func NewTool(cfg ToolConfig) *Tool {
 		strict:             true,
 	}
 	if argsType != nil {
-		t.parameters = typeToJSONSchema(argsType, 0)
+		// strict:true tools require every properties key in required (OpenAI / DeepSeek).
+		t.parameters = typeToJSONSchema(argsType, 0, true)
 	} else {
 		t.parameters = map[string]any{
 			"type":                 "object",
 			"properties":           map[string]any{},
 			"additionalProperties": false,
+			"required":             []string{},
 		}
 	}
 
@@ -311,7 +313,11 @@ func (t *Tool) AsJson() map[string]any {
 	}
 }
 
-func typeToJSONSchema(rt reflect.Type, depth int, skipTypes ...reflect.Type) map[string]any {
+// typeToJSONSchema builds a JSON Schema for rt.
+// When strict is true (OpenAI/DeepSeek function tools), every property name is
+// listed in required, and omitempty/pointer fields are typed as T|null so the
+// model may pass null for unused optionals.
+func typeToJSONSchema(rt reflect.Type, depth int, strict bool, skipTypes ...reflect.Type) map[string]any {
 	if depth > 10 {
 		return map[string]any{"type": "string"}
 	}
@@ -368,7 +374,7 @@ func typeToJSONSchema(rt reflect.Type, depth int, skipTypes ...reflect.Type) map
 			}
 
 			if f.Anonymous && name == f.Name && f.Type.Kind() == reflect.Struct {
-				emb := typeToJSONSchema(f.Type, depth+1, skipTypes...)
+				emb := typeToJSONSchema(f.Type, depth+1, strict, skipTypes...)
 				if p, ok := emb["properties"].(map[string]any); ok {
 					for k, v := range p {
 						properties[k] = v
@@ -380,8 +386,8 @@ func typeToJSONSchema(rt reflect.Type, depth int, skipTypes ...reflect.Type) map
 				continue
 			}
 
-			isOptional := f.Type.Kind() == reflect.Ptr || opts == "omitempty"
-			schema := typeToJSONSchema(f.Type, depth+1, skipTypes...)
+			isOptional := f.Type.Kind() == reflect.Ptr || strings.Contains(opts, "omitempty")
+			schema := typeToJSONSchema(f.Type, depth+1, strict, skipTypes...)
 
 			if desc := f.Tag.Get("desc"); desc != "" {
 				schema["description"] = desc
@@ -390,8 +396,12 @@ func typeToJSONSchema(rt reflect.Type, depth int, skipTypes ...reflect.Type) map
 				schema["enum"] = strings.Split(enum, ",")
 			}
 
+			if strict && isOptional {
+				schema = makeSchemaNullable(schema)
+			}
+
 			properties[name] = schema
-			if !isOptional {
+			if strict || !isOptional {
 				required = append(required, name)
 			}
 		}
@@ -401,7 +411,8 @@ func typeToJSONSchema(rt reflect.Type, depth int, skipTypes ...reflect.Type) map
 			"properties":           properties,
 			"additionalProperties": false,
 		}
-		if len(required) > 0 {
+		// Strict tool schemas always include required (may be empty).
+		if strict || len(required) > 0 {
 			result["required"] = required
 		}
 		return result
@@ -410,14 +421,14 @@ func typeToJSONSchema(rt reflect.Type, depth int, skipTypes ...reflect.Type) map
 	if rt.Kind() == reflect.Slice || rt.Kind() == reflect.Array {
 		return map[string]any{
 			"type":  "array",
-			"items": typeToJSONSchema(rt.Elem(), depth+1, skipTypes...),
+			"items": typeToJSONSchema(rt.Elem(), depth+1, strict, skipTypes...),
 		}
 	}
 
 	if rt.Kind() == reflect.Map {
 		return map[string]any{
 			"type":                 "object",
-			"additionalProperties": typeToJSONSchema(rt.Elem(), depth+1, skipTypes...),
+			"additionalProperties": typeToJSONSchema(rt.Elem(), depth+1, strict, skipTypes...),
 		}
 	}
 
@@ -436,12 +447,39 @@ func typeToJSONSchema(rt reflect.Type, depth int, skipTypes ...reflect.Type) map
 	return map[string]any{"type": jsonType}
 }
 
+// makeSchemaNullable rewrites a schema type to accept null (strict optional fields).
+func makeSchemaNullable(schema map[string]any) map[string]any {
+	if schema == nil {
+		return map[string]any{"type": []any{"string", "null"}}
+	}
+	switch t := schema["type"].(type) {
+	case string:
+		if t == "null" {
+			return schema
+		}
+		schema["type"] = []any{t, "null"}
+	case []any:
+		hasNull := false
+		for _, x := range t {
+			if s, ok := x.(string); ok && s == "null" {
+				hasNull = true
+				break
+			}
+		}
+		if !hasNull {
+			schema["type"] = append(append([]any{}, t...), "null")
+		}
+	}
+	return schema
+}
+
 func TypeToJSONSchema(v any) (map[string]any, error) {
 	rt := reflect.TypeOf(v)
 	if rt == nil {
 		return nil, fmt.Errorf("cannot generate JSON schema from nil value")
 	}
-	return typeToJSONSchema(rt, 0), nil
+	// Non-strict: omitempty fields stay optional (structured outputs / hosts).
+	return typeToJSONSchema(rt, 0, false), nil
 }
 
 type ToolNamespace struct {

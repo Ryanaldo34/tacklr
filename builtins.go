@@ -199,15 +199,20 @@ func newCompleteTodoTool(s internalSession) *Tool {
 	return NewTool(ToolConfig{
 		Name:        "complete_todo",
 		DisplayName: "Complete Todo",
-		Description: "Marks a todo as completed by exact title (must match list_plan / create_plan titles). Cannot complete a todo that is already completed or not found in the plan.",
+		Description: "Marks a todo as completed by exact title (must match list_plan / create_plan titles). Cannot complete a todo that is already completed or not found in the plan. When open work remains, advances the next todo and runs a context handoff. When the plan is fully done, returns success without a handoff so the agent can finish the user-facing answer.",
 		Category:    streaming.ToolCategoryThink,
 		Handler: func(ctx context.Context, args completeTodoArgs, _ HarnessRuntime) (BuiltinResult, error) {
 			plan := s.sm.Plan().Get()
 			if plan == nil {
 				return BuiltinResult{}, fmt.Errorf("no plan exists")
 			}
+			// Handoff only when another open todo must be picked up. Completing the
+			// final item should leave context intact so the agent can wrap up.
 			handoff := func(msg string) (BuiltinResult, error) {
 				return BuiltinResult{Output: msg, Effect: EffectHandoff}, nil
+			}
+			allDone := func(msg string) (BuiltinResult, error) {
+				return BuiltinResult{Output: msg, Effect: EffectNone}, nil
 			}
 			for i, todo := range plan {
 				if todo.Title == args.Title {
@@ -227,14 +232,14 @@ func newCompleteTodoTool(s internalSession) *Tool {
 								j++
 							}
 							s.setTodos(plan)
-							return handoff("All todos completed successfully")
+							return allDone("All todos completed successfully")
 						}
 						plan[i+1].Status = streaming.TodoStatusInProgress
 						s.setTodos(plan)
 						return handoff(fmt.Sprintf("Todo completed successfully, now starting %q with description: %q", plan[i+1].Title, plan[i+1].Description))
 					}
 					s.setTodos(plan)
-					return handoff("All todos completed successfully")
+					return allDone("All todos completed successfully")
 				}
 			}
 			return BuiltinResult{}, fmt.Errorf("todo %q not found in plan", args.Title)

@@ -32,6 +32,8 @@ type AgentSpec struct {
 	SubAgents  []*tacklr.SubAgent
 	WatchDog   tacklr.AgentWatchDog
 	Store      stores.BaseStore
+	// ExaAPIKey enables the built-in web_search tool (or use process EXA_API_KEY).
+	ExaAPIKey string
 }
 
 // sessionState holds per-session configuration provided by the client at
@@ -577,6 +579,7 @@ func (r *Registry) loadAgent(ctx context.Context, agentID, threadID string, load
 		Tools:      spec.Tools,
 		MCPConfigs: mcpConfigs,
 		SubAgents:  spec.SubAgents,
+		ExaAPIKey:  spec.ExaAPIKey,
 	}
 
 	var h *tacklr.AgentHarness

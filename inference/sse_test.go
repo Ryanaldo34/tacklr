@@ -14,7 +14,7 @@ func collectSSE(t *testing.T, body string) []tacklr.LLMResponseChunk {
 	s := NewOpenAIInferenceStrategy(nil)
 	ch := make(chan tacklr.LLMResponseChunk, 64)
 	go func() {
-		s.parseSSEResponse(context.Background(), strings.NewReader(body), ch)
+		s.parseSSEResponse(context.Background(), strings.NewReader(body), ch, "")
 		close(ch)
 	}()
 	var out []tacklr.LLMResponseChunk
@@ -73,6 +73,55 @@ func TestParseSSE_reasoningTextIsReasoning(t *testing.T) {
 	}
 	if got := strings.Join(parts, ""); got != "raw cot summary" {
 		t.Fatalf("reasoning = %q", got)
+	}
+}
+
+// TestParseSSE_reasoningDoneWithoutDeltas_emitsSummary: Foundry often delivers
+// summary only on output_item.done — must become a thought chunk for ACP.
+func TestParseSSE_reasoningDoneWithoutDeltas_emitsSummary(t *testing.T) {
+	body := strings.Join([]string{
+		`data: {"type":"response.output_item.done","item":{"type":"reasoning","id":"rs_sum","status":"completed","summary":[{"type":"summary_text","text":"Plan the tool call"}],"content":[]}}`,
+		`data: [DONE]`,
+		"",
+	}, "\n")
+	chunks := collectSSE(t, body)
+	var got string
+	for _, c := range chunks {
+		if c.Type == tacklr.StreamEventReasoning && c.IsComplete {
+			got = c.Content
+		}
+	}
+	if got != "Plan the tool call" {
+		t.Fatalf("reasoning complete content = %q", got)
+	}
+}
+
+// TestParseSSE_reasoningDoneAfterDeltas_noDuplicateSummary: live deltas already
+// went to the client; done must not resend the full summary text.
+func TestParseSSE_reasoningDoneAfterDeltas_noDuplicateSummary(t *testing.T) {
+	body := strings.Join([]string{
+		`data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_d","delta":"step one"}`,
+		`data: {"type":"response.output_item.done","item":{"type":"reasoning","id":"rs_d","summary":[{"type":"summary_text","text":"step one full"}]}}`,
+		`data: [DONE]`,
+		"",
+	}, "\n")
+	chunks := collectSSE(t, body)
+	var deltaText, doneText string
+	for _, c := range chunks {
+		if c.Type != tacklr.StreamEventReasoning {
+			continue
+		}
+		if c.IsComplete {
+			doneText = c.Content
+		} else {
+			deltaText += c.Content
+		}
+	}
+	if deltaText != "step one" {
+		t.Fatalf("delta = %q", deltaText)
+	}
+	if doneText != "" {
+		t.Fatalf("done content = %q, want empty to avoid duplicate thought chunk", doneText)
 	}
 }
 
@@ -145,7 +194,7 @@ func TestParseSSE_incompleteFailedAndRefusal(t *testing.T) {
 		t.Fatalf("failed chunks = %+v", chunks)
 	}
 
-	// Incomplete without classifiable reason still errors.
+	// Incomplete without classifiable reason still errors (enriched body).
 	bodyBare := strings.Join([]string{
 		`data: {"type":"response.incomplete","response":{"status":"incomplete"}}`,
 		`data: [DONE]`,
@@ -154,6 +203,33 @@ func TestParseSSE_incompleteFailedAndRefusal(t *testing.T) {
 	chunks = collectSSE(t, bodyBare)
 	if len(chunks) == 0 || chunks[0].Error == nil {
 		t.Fatalf("bare incomplete = %+v", chunks)
+	}
+	if !strings.Contains(chunks[0].Error.Error(), "status=incomplete") {
+		t.Fatalf("want status in error, got %v", chunks[0].Error)
+	}
+
+	// response.completed with incomplete status is also terminal.
+	bodyCompletedInc := strings.Join([]string{
+		`data: {"type":"response.completed","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}`,
+		`data: [DONE]`,
+		"",
+	}, "\n")
+	chunks = collectSSE(t, bodyCompletedInc)
+	if len(chunks) == 0 || !errors.Is(chunks[0].Error, tacklr.ErrMaxTokens) {
+		t.Fatalf("completed+incomplete = %+v", chunks)
+	}
+
+	// Successful response.completed must not emit an error chunk.
+	bodyOK := strings.Join([]string{
+		`data: {"type":"response.completed","response":{"status":"completed"}}`,
+		`data: [DONE]`,
+		"",
+	}, "\n")
+	chunks = collectSSE(t, bodyOK)
+	for _, c := range chunks {
+		if c.Type == tacklr.StreamEventError {
+			t.Fatalf("successful completed should not error: %+v", c)
+		}
 	}
 
 	// Failed with provider error object → ClassifyProviderFailure (mustJSON path).
@@ -244,7 +320,7 @@ func TestParseSSE_incompleteFailedAndRefusal(t *testing.T) {
 	ch := make(chan tacklr.LLMResponseChunk, 8)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	s.parseSSEResponse(ctx, strings.NewReader(bodyReason), ch)
+	s.parseSSEResponse(ctx, strings.NewReader(bodyReason), ch, "")
 	close(ch)
 	for range ch {
 	}

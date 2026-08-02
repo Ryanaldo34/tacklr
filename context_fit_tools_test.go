@@ -109,9 +109,19 @@ func TestDefaultModelTasks_Handoff_cancelAndStreamError(t *testing.T) {
 		{Role: RoleAssistant, Content: "a"},
 	})
 	tasks = NewDefaultModelTasks(strategy, cm, DefaultContextPolicy(), 8192)
+	// Stream failure soft-fails: plan-derived fallback handoff, no error return.
 	err := tasks.Handoff(context.Background(), []Todo{{Title: "t", Status: streaming.TodoStatusInProgress}}, "", nil, "sys")
-	if err == nil || !strings.Contains(err.Error(), "boom") {
-		t.Fatalf("err = %v", err)
+	if err != nil {
+		t.Fatalf("want soft-fail success, got %v", err)
+	}
+	found := false
+	for _, m := range cm.Messages() {
+		if m.Role == RoleDeveloper && strings.Contains(m.Content, "fallback") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected fallback handoff, got %+v", cm.Messages())
 	}
 }
 
