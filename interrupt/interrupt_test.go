@@ -204,10 +204,10 @@ func TestRegister_New_Clone(t *testing.T) {
 
 type fakeInterrupt struct{ name string }
 
-func (f fakeInterrupt) TypeName() string             { return f.name }
-func (f fakeInterrupt) Serialize() ([]byte, error)   { return []byte(`{}`), nil }
-func (f fakeInterrupt) Return([]byte) error          { return nil }
-func (f fakeInterrupt) Error() string                { return f.name }
+func (f fakeInterrupt) TypeName() string           { return f.name }
+func (f fakeInterrupt) Serialize() ([]byte, error) { return []byte(`{}`), nil }
+func (f fakeInterrupt) Return([]byte) error        { return nil }
+func (f fakeInterrupt) Error() string              { return f.name }
 
 // TestInterrupt_asError confirms errors.As works for tool return paths.
 func TestInterrupt_asError(t *testing.T) {

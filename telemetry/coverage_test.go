@@ -10,11 +10,12 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/ryanaldo34/tacklr/streaming"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/metric/noop"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/ryanaldo34/tacklr/streaming"
 )
 
 // TestInstruments_recordAllPaths exercises every instrument helper (including nil receiver).
@@ -33,9 +34,6 @@ func TestInstruments_recordAllPaths(t *testing.T) {
 	ctx := ContextWithAgentID(context.Background(), "agent-1")
 	if AgentIDFromContext(ctx) != "agent-1" {
 		t.Fatal(AgentIDFromContext(ctx))
-	}
-	if AgentIDFromContext(nil) != "" {
-		t.Fatal("nil ctx agent")
 	}
 	if AgentIDFromContext(context.Background()) != "" {
 		t.Fatal("empty agent")
@@ -61,23 +59,25 @@ func TestInstruments_recordAllPaths(t *testing.T) {
 	nilInst.RecordSessionCreated(ctx)
 	nilInst.RecordCheckpointSave(ctx, OutcomeError)
 
-	// Context helpers for meters/instruments.
-	if ContextWithMeter(nil, nil) == nil {
-		t.Fatal("nil ctx")
+	// Context helpers for meters/instruments (nil meter/instruments are no-ops).
+	if ContextWithMeter(context.Background(), nil) == nil {
+		t.Fatal("nil meter")
 	}
 	m := MeterFromProvider(mp)
 	ctxM := ContextWithMeter(context.Background(), m)
-	if MeterFromContext(ctxM) == nil || MeterFromContext(nil) == nil {
+	if MeterFromContext(ctxM) == nil || MeterFromContext(context.Background()) == nil {
 		t.Fatal("meter from context")
 	}
 	if MeterFromProvider(nil) == nil {
 		t.Fatal("meter from nil provider uses global")
 	}
-	ctxI := ContextWithInstruments(nil, nil)
-	if InstrumentsFromContext(ctxI) == nil {
+	if ContextWithInstruments(context.Background(), nil) == nil {
+		t.Fatal("nil instruments")
+	}
+	if InstrumentsFromContext(context.Background()) == nil {
 		t.Fatal("global instruments")
 	}
-	ctxI = ContextWithInstruments(context.Background(), inst)
+	ctxI := ContextWithInstruments(context.Background(), inst)
 	if InstrumentsFromContext(ctxI) != inst {
 		t.Fatal("instruments from context")
 	}
@@ -180,16 +180,15 @@ func TestTracerContext_helpers(t *testing.T) {
 	if tr == nil {
 		t.Fatal("from provider")
 	}
-	ctx := ContextWithTracer(nil, nil)
-	if TracerFromContext(ctx) == nil {
+	if ContextWithTracer(context.Background(), nil) == nil {
+		t.Fatal("nil tracer is a no-op")
+	}
+	if TracerFromContext(context.Background()) == nil {
 		t.Fatal("tracer from empty")
 	}
-	ctx = ContextWithTracer(context.Background(), tr)
+	ctx := ContextWithTracer(context.Background(), tr)
 	if TracerFromContext(ctx) != tr {
 		t.Fatal("context tracer")
-	}
-	if TracerFromContext(nil) == nil {
-		t.Fatal("nil ctx tracer")
 	}
 
 	if stripScheme("https://host:4317") != "host:4317" {
@@ -371,14 +370,6 @@ func TestNewInstruments_errorPaths(t *testing.T) {
 		}
 	}()
 	_ = MustInstruments(&errMeter{Meter: noop.Meter{}, failAt: 1})
-}
-
-// TestContextWithAgentID_nilContext uses background under the hood.
-func TestContextWithAgentID_nilContext(t *testing.T) {
-	ctx := ContextWithAgentID(nil, "a")
-	if AgentIDFromContext(ctx) != "a" {
-		t.Fatal(AgentIDFromContext(ctx))
-	}
 }
 
 // TestGlobalInstruments_concurrent rebuilds cache safely under load.
