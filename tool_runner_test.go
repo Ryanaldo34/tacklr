@@ -20,6 +20,7 @@ func TestToolRunner_interceptorChainOrder(t *testing.T) {
 			return "ok", nil
 		},
 	})
+	// interceptors keep the public (string, error) shape; disposition is tool-only.
 	outer := func(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error) {
 		order = append(order, "outer")
 		return next(ctx, inv)
@@ -33,7 +34,7 @@ func TestToolRunner_interceptorChainOrder(t *testing.T) {
 		return next(ctx, inv)
 	}
 
-	got, err := newToolRunner(outer, nil, block, inner).Run(context.Background(), ToolInvocation{Tool: tool})
+	got, _, err := newToolRunner(outer, nil, block, inner).Run(context.Background(), ToolInvocation{Tool: tool})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +46,7 @@ func TestToolRunner_interceptorChainOrder(t *testing.T) {
 	}
 
 	// Nil tool is a not-found outcome for custom runners.
-	if _, err := newToolRunner().Run(context.Background(), ToolInvocation{}); err == nil {
+	if _, _, err := newToolRunner().Run(context.Background(), ToolInvocation{}); err == nil {
 		t.Fatal("want tool not found for nil tool")
 	}
 }
@@ -189,13 +190,13 @@ func TestHarness_toolPermission_allowAlwaysRemembers(t *testing.T) {
 	}
 
 	// Session reload rehydrates maps as map[string]any — still honors allow-always.
-	if v, ok := ah.Runtime.StateGet("_permission_always_allow"); ok {
+	if v, ok := ah.runtime.StateGet("_permission_always_allow"); ok {
 		b, _ := json.Marshal(v)
 		var rehydrated map[string]any
 		if err := json.Unmarshal(b, &rehydrated); err != nil {
 			t.Fatal(err)
 		}
-		ah.Runtime.StateSet("_permission_always_allow", rehydrated)
+		ah.runtime.StateSet("_permission_always_allow", rehydrated)
 	}
 
 	ch3, err := ah.Run(context.Background(), "again")

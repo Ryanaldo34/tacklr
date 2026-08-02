@@ -19,6 +19,20 @@ func writeSkill(t *testing.T, root, dir, name, desc, body string) {
 	}
 }
 
+// TestDirectoryLoader_implementsLoader is the injectable skills.Loader path.
+func TestDirectoryLoader_implementsLoader(t *testing.T) {
+	root := t.TempDir()
+	writeSkill(t, root, "alpha", "alpha", "Alpha skill", "Do alpha things.")
+	var loader Loader = DirectoryLoader{}
+	loaded, err := loader.Load([]string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded) != 1 || loaded[0].Name != "alpha" {
+		t.Fatalf("loaded = %#v", loaded)
+	}
+}
+
 // TestLoadDirectories_catalogAndFailurePaths loads a multi-skill tree (happy
 // path + catalog) and asserts each documented failure return as its own outcome.
 func TestLoadDirectories_catalogAndFailurePaths(t *testing.T) {

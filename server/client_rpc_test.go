@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ryanaldo34/tacklr/control"
+	"github.com/ryanaldo34/tacklr/interrupt"
 )
 
 type recordingWriter struct {
@@ -200,7 +200,7 @@ func TestParseClientCapabilities(t *testing.T) {
 }
 
 func TestSelectionToElicitationParams(t *testing.T) {
-	params, err := SelectionToElicitationParams("sess1", "tc1", "Pick one", []control.UserChoice{
+	params, err := SelectionToElicitationParams("sess1", "tc1", "Pick one", []interrupt.UserChoice{
 		{Title: "A", Description: "first", IsRecommended: true},
 		{Title: "B", Description: "second"},
 	})
@@ -217,7 +217,7 @@ func TestSelectionToElicitationParams(t *testing.T) {
 }
 
 func TestElicitationResultToSelectionPayload(t *testing.T) {
-	opts := []control.UserChoice{{Title: "A"}, {Title: "B"}}
+	opts := []interrupt.UserChoice{{Title: "A"}, {Title: "B"}}
 	raw, _ := json.Marshal(map[string]any{
 		"action":  "accept",
 		"content": map[string]any{"choice": "B"},
@@ -249,8 +249,8 @@ func containsAll(s string, parts ...string) bool {
 }
 
 func TestParseUserSelectionFromInterruptData(t *testing.T) {
-	usi := control.UserSelectionInterrupt{
-		Options: []control.UserChoice{{Title: "A"}, {Title: "B"}},
+	usi := interrupt.UserSelectionInterrupt{
+		Options: []interrupt.UserChoice{{Title: "A"}, {Title: "B"}},
 	}
 	serialized, err := usi.Serialize()
 	if err != nil {

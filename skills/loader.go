@@ -17,6 +17,21 @@ type Skill struct {
 	Instructions string
 }
 
+// Loader discovers skills for the harness. Hosts can inject a custom Loader via
+// AgentOptions.SkillsLoader (for example to load from object storage).
+type Loader interface {
+	Load(directories []string) ([]Skill, error)
+}
+
+// DirectoryLoader loads one skill per immediate child directory under each root.
+// It is the default when AgentOptions.SkillsLoader is nil.
+type DirectoryLoader struct{}
+
+// Load implements Loader using LoadDirectories.
+func (DirectoryLoader) Load(directories []string) ([]Skill, error) {
+	return LoadDirectories(directories)
+}
+
 // LoadDirectories loads one skill per immediate child directory. Directories
 // are processed in lexical order and duplicate skill names are rejected.
 func LoadDirectories(roots []string) ([]Skill, error) {

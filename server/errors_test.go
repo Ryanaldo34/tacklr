@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/ryanaldo34/tacklr/control"
+	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/stores"
 )
 
@@ -21,8 +21,8 @@ func TestIsClientError(t *testing.T) {
 		{"method not found", clientErrorf(ErrMethodNotFound, "method not found"), true},
 		{"wrapped client", fmt.Errorf("load agent: %w", clientErrorf(ErrAgentNotFound, "missing")), true},
 		{"session not found", fmt.Errorf("load: %w", stores.ErrSessionNotFound), true},
-		{"interrupt not found", fmt.Errorf("return: %w", control.ErrInterruptNotFound), true},
-		{"invalid payload", fmt.Errorf("return: %w", control.ErrInvalidPayload), true},
+		{"interrupt not found", fmt.Errorf("return: %w", interrupt.ErrInterruptNotFound), true},
+		{"invalid payload", fmt.Errorf("return: %w", interrupt.ErrInvalidPayload), true},
 		{"internal", fmt.Errorf("something broke"), false},
 		{"nil", nil, false},
 	}

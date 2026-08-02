@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ryanaldo34/tacklr/control"
+	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/streaming"
 )
@@ -152,7 +152,7 @@ func TestAgentHarness_Run(t *testing.T) {
 			if err != nil {
 				return "", err
 			}
-			choice := intr.(*control.UserSelectionInterrupt).ConfirmedChoice
+			choice := intr.(*interrupt.UserSelectionInterrupt).ConfirmedChoice
 			return "selected: " + choice.Title, nil
 		},
 	})
@@ -499,7 +499,7 @@ func TestAgentHarness_Run(t *testing.T) {
 				if len(payload.Data) == 0 || payload.Data[0] != '{' {
 					t.Fatalf("interrupt data must be JSON object, got %s", payload.Data)
 				}
-				var usi control.UserSelectionInterrupt
+				var usi interrupt.UserSelectionInterrupt
 				if err := json.Unmarshal(payload.Data, &usi); err != nil {
 					t.Fatalf("unmarshal interrupt data into UserSelectionInterrupt: %v\ndata=%s", err, payload.Data)
 				}
@@ -566,7 +566,7 @@ func TestAgentHarness_Run(t *testing.T) {
 		if len(ah.pendingToolCalls) != 0 {
 			t.Errorf("pendingToolCalls after resume = %d, want 0", len(ah.pendingToolCalls))
 		}
-		if ah.Runtime.HasPendingInterrupt() {
+		if ah.runtime.HasPendingInterrupt() {
 			t.Error("runtime should have no pending interrupts after resume")
 		}
 	})
@@ -613,7 +613,7 @@ func TestAgentHarness_Run(t *testing.T) {
 		}
 
 		ah := NewAgent(context.Background(), AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
-		ah.Runtime.PlanSet([]control.Todo{
+		ah.session.Plan().Set([]Todo{
 			{Title: "Task 1", Status: streaming.TodoStatusInProgress},
 			{Title: "Task 2", Status: streaming.TodoStatusPending},
 		})
@@ -638,7 +638,7 @@ func TestAgentHarness_Run(t *testing.T) {
 			t.Error("continue Invoke after compress should include continuePlanNudge (open todos remain)")
 		}
 
-		plan := ah.Runtime.PlanGet()
+		plan := ah.session.Plan().Get()
 		if plan == nil {
 			t.Fatal("plan should not be nil")
 		}
@@ -713,7 +713,7 @@ func TestAgentHarness_Run(t *testing.T) {
 		}
 
 		ah := NewAgent(context.Background(), AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{interruptTool}})
-		ah.Runtime.PlanSet([]control.Todo{
+		ah.session.Plan().Set([]Todo{
 			{Title: "Task 1", Status: streaming.TodoStatusInProgress},
 		})
 
@@ -766,7 +766,7 @@ func TestAgentHarness_Run(t *testing.T) {
 			t.Error("parked interrupt turn should not replace history with a developer handoff")
 		}
 
-		plan := ah.Runtime.PlanGet()
+		plan := ah.session.Plan().Get()
 		if plan == nil || len(plan) == 0 {
 			t.Fatal("plan should not be nil or empty")
 		}
@@ -882,7 +882,7 @@ func TestAgentHarness_Run(t *testing.T) {
 		}
 
 		ah := NewAgent(context.Background(), AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
-		ah.Runtime.PlanSet([]control.Todo{
+		ah.session.Plan().Set([]Todo{
 			{Title: "Only", Status: streaming.TodoStatusInProgress},
 		})
 
@@ -931,7 +931,7 @@ func TestAgentHarness_Run(t *testing.T) {
 		}
 
 		ah := NewAgent(context.Background(), AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
-		ah.Runtime.PlanSet([]control.Todo{
+		ah.session.Plan().Set([]Todo{
 			{Title: "Task 1", Status: streaming.TodoStatusInProgress},
 		})
 
@@ -1003,7 +1003,7 @@ func TestReturnFromInterrupt_invalidPayload_returnsError(t *testing.T) {
 			if err != nil {
 				return "", err
 			}
-			choice := intr.(*control.UserSelectionInterrupt).ConfirmedChoice
+			choice := intr.(*interrupt.UserSelectionInterrupt).ConfirmedChoice
 			return "selected: " + choice.Title, nil
 		},
 	})
@@ -1075,26 +1075,26 @@ func TestNewAgent(t *testing.T) {
 		WatchDog: wd,
 	})
 
-	if h.Model != InferenceStrategy(mockModel) {
+	if h.model != InferenceStrategy(mockModel) {
 		t.Error("Model not wired from arg")
 	}
-	if h.MaxWindowSize != 4096 {
-		t.Errorf("MaxWindowSize = %d, want 4096", h.MaxWindowSize)
+	if h.maxWindowSize != 4096 {
+		t.Errorf("MaxWindowSize = %d, want 4096", h.maxWindowSize)
 	}
-	if h.Instructions != "test prompt" {
-		t.Errorf("SystemPrompt = %q, want 'test prompt'", h.Instructions)
+	if h.instructions != "test prompt" {
+		t.Errorf("SystemPrompt = %q, want 'test prompt'", h.instructions)
 	}
-	if h.Store != store {
+	if h.store != store {
 		t.Error("Store not wired from arg")
 	}
-	if h.WatchDog != AgentWatchDog(wd) {
+	if h.watchDog != AgentWatchDog(wd) {
 		t.Error("WatchDog not wired from arg")
 	}
 	if len(h.Messages()) != 0 {
 		t.Error("Messages should be empty on init")
 	}
-	if h.SessionId != "" {
-		t.Errorf("SessionId = %q, want empty", h.SessionId)
+	if h.sessionId != "" {
+		t.Errorf("SessionId = %q, want empty", h.sessionId)
 	}
 }
 
@@ -1104,7 +1104,7 @@ func TestFindTool_namespaceMatching(t *testing.T) {
 		NewTool(ToolConfig{Name: "get_customer", Namespace: "email", Handler: func(ctx context.Context) (string, error) { return "", nil }}),
 		NewTool(ToolConfig{Name: "get_weather", Namespace: "", Handler: func(ctx context.Context) (string, error) { return "", nil }}),
 	}
-	h := &AgentHarness{Tools: tools}
+	h := &AgentHarness{tools: tools}
 
 	if h.findTool("get_customer", "crm") == nil {
 		t.Error("expected to find tool in crm namespace")
@@ -1534,7 +1534,7 @@ func (s *stubModelTasks) Absorb(ctx context.Context, msg *Message, tools []*Tool
 	return AbsorbResult{}, nil
 }
 
-func (s *stubModelTasks) Handoff(ctx context.Context, plan []control.Todo, planDoc string, tools []*Tool, systemPrompt string) error {
+func (s *stubModelTasks) Handoff(ctx context.Context, plan []Todo, planDoc string, tools []*Tool, systemPrompt string) error {
 	s.handoffCalls.Add(1)
 	s.cm.Replace([]*Message{
 		{Role: RoleUser, Content: "goal"},
@@ -1572,7 +1572,7 @@ func TestNewAgent_injectsModelTasks(t *testing.T) {
 		ContextManager: cm,
 		ModelTasks:     st,
 	})
-	ah.Runtime.PlanSet([]control.Todo{
+	ah.session.Plan().Set([]Todo{
 		{Title: "T1", Status: streaming.TodoStatusInProgress},
 		{Title: "T2", Status: streaming.TodoStatusPending},
 	})
@@ -1615,14 +1615,14 @@ func TestNewAgentFromSession_resumesPendingToolInterrupt(t *testing.T) {
 	store := testStore(t)
 	interruptTool := NewTool(ToolConfig{
 		Name: "ask_user",
-		Handler: func(ctx context.Context, _ struct{}, runtime *control.HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, _ struct{}, runtime *HarnessRuntime) (string, error) {
 			intr, err := runtime.RaiseInterrupt("user_selection_choice", []byte(
 				`[{"title":"Yes","description":"","isRecommended":true},{"title":"No","description":"","isRecommended":false}]`,
 			))
 			if err != nil {
 				return "", err
 			}
-			choice := intr.(*control.UserSelectionInterrupt).ConfirmedChoice
+			choice := intr.(*interrupt.UserSelectionInterrupt).ConfirmedChoice
 			return "chose:" + choice.Title, nil
 		},
 	})
@@ -1648,7 +1648,7 @@ func TestNewAgentFromSession_resumesPendingToolInterrupt(t *testing.T) {
 		Store:  store,
 		Tools:  []*Tool{interruptTool},
 	})
-	ah.SessionId = "sess-pending-resume"
+	ah.sessionId = "sess-pending-resume"
 
 	ch, err := ah.Run(context.Background(), "need a choice")
 	if err != nil {
@@ -1689,7 +1689,7 @@ func TestNewAgentFromSession_resumesPendingToolInterrupt(t *testing.T) {
 	if !restored.pendingToolCalls["call_park"].InterruptActive {
 		t.Fatal("restored pending tool should still be InterruptActive")
 	}
-	if !restored.Runtime.HasPendingInterrupt() {
+	if !restored.runtime.HasPendingInterrupt() {
 		t.Fatal("restored runtime should have pending interrupt")
 	}
 

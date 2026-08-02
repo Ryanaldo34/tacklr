@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ryanaldo34/tacklr/control"
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
@@ -110,7 +109,7 @@ func TestDefaultModelTasks_Handoff_cancelAndStreamError(t *testing.T) {
 		{Role: RoleAssistant, Content: "a"},
 	})
 	tasks = NewDefaultModelTasks(strategy, cm, DefaultContextPolicy(), 8192)
-	err := tasks.Handoff(context.Background(), []control.Todo{{Title: "t", Status: streaming.TodoStatusInProgress}}, "", nil, "sys")
+	err := tasks.Handoff(context.Background(), []Todo{{Title: "t", Status: streaming.TodoStatusInProgress}}, "", nil, "sys")
 	if err == nil || !strings.Contains(err.Error(), "boom") {
 		t.Fatalf("err = %v", err)
 	}
@@ -214,8 +213,8 @@ func TestSpawnWorker_incompleteStream_errors(t *testing.T) {
 		},
 	})
 	out := make(chan StreamEvent, 16)
-	h.Runtime.SetOutputChannel(out)
-	_, err := h.runWorker(context.Background(), "w", "task", h.Runtime)
+	h.runtime.SetOutputChannel(out)
+	_, err := h.runWorker(context.Background(), "w", "task", h.runtime)
 	if err == nil {
 		t.Fatal("want worker error")
 	}
@@ -232,7 +231,7 @@ func TestSpawnWorker_emptyTask_errors(t *testing.T) {
 			{WorkerName: "w", Model: &mockStrategy{}},
 		},
 	})
-	_, err := h.runWorker(context.Background(), "w", "   ", h.Runtime)
+	_, err := h.runWorker(context.Background(), "w", "   ", h.runtime)
 	if !errors.Is(err, ErrEmptyWorkerTask) {
 		t.Fatalf("err = %v", err)
 	}
@@ -253,8 +252,8 @@ func TestSpawnWorker_reasoningUpdatesForwarded(t *testing.T) {
 		},
 	})
 	updates := make(chan StreamEvent, 32)
-	h.Runtime.SetOutputChannel(updates)
-	got, err := h.runWorker(context.Background(), "thinker", "reason", h.Runtime)
+	h.runtime.SetOutputChannel(updates)
+	got, err := h.runWorker(context.Background(), "thinker", "reason", h.runtime)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,9 +330,9 @@ func TestRun_permissionAllowAlways_survivesAnyMapRehydrate(t *testing.T) {
 		Tools:  []*Tool{permTool},
 		Store:  store,
 	})
-	h.SessionId = "perm-sess"
+	h.sessionId = "perm-sess"
 	// Seed allow list in the rehydrated any-map shape.
-	h.Runtime.StateSet(permissionAlwaysAllowKey, map[string]any{"secret": true})
+	h.runtime.StateSet(permissionAlwaysAllowKey, map[string]any{"secret": true})
 	events, err := h.Run(context.Background(), "go")
 	if err != nil {
 		t.Fatal(err)

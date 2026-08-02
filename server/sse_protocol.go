@@ -80,8 +80,8 @@ func (p sseProtocol) handleSSE(env ProtocolEnv, w http.ResponseWriter, r *http.R
 		stream.Cancel()
 		stream.Close()
 	}()
-	if stream.Harness != nil && stream.Harness.SessionId != "" {
-		threadID = stream.Harness.SessionId
+	if stream.Harness != nil && stream.Harness.SessionID() != "" {
+		threadID = stream.Harness.SessionID()
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -143,8 +143,8 @@ func (p sseProtocol) handleWS(env ProtocolEnv, w http.ResponseWriter, r *http.Re
 		stream.Cancel()
 		stream.Close()
 	}()
-	if stream.Harness != nil && stream.Harness.SessionId != "" {
-		threadID = stream.Harness.SessionId
+	if stream.Harness != nil && stream.Harness.SessionID() != "" {
+		threadID = stream.Harness.SessionID()
 	}
 	if err := writeWSJSON(ctx, c, wsServerEvent{Type: "thread", Content: threadID}); err != nil {
 		return

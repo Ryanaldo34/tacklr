@@ -8,18 +8,38 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ryanaldo34/tacklr/control"
+	session "github.com/ryanaldo34/tacklr/internal/session"
+	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
+// planToolsFixture holds builtin plan tools sharing one PlanStore.
+type planToolsFixture struct {
+	create, edit, complete, list *Tool
+	store                        *session.PlanStore
+}
+
+func testPlanTools() planToolsFixture {
+	sm := session.NewSessionManager()
+	s := internalSession{sm: sm}
+	return planToolsFixture{
+		create:   newCreatePlanTool(s),
+		edit:     newEditPlanTool(s),
+		complete: newCompleteTodoTool(s),
+		list:     newListPlanTool(s),
+		store:    sm.Plan(),
+	}
+}
+
 func TestCreatePlanTool_rejectsWhenActivePlanExists(t *testing.T) {
-	rt := control.NewRuntime(nil, nil, nil)
+	pt := testPlanTools()
+	rt := session.NewRuntime(nil, nil, nil)
 	rt.EnsureInitialized()
-	rt.PlanSet([]control.Todo{
+	pt.store.Set([]Todo{
 		{Title: "existing", Status: streaming.TodoStatusInProgress},
 	})
 
-	_, err := createPlanTool.Invoke(context.Background(), `{"plan":"draft","todos":[{"title":"new","status":"pending","description":""}]}`, rt)
+	_, err := pt.create.Invoke(context.Background(), `{"plan":"draft","todos":[{"title":"new","status":"pending","description":""}]}`, rt)
 	if err == nil {
 		t.Fatal("expected error when create_plan is called with an active plan")
 	}
@@ -27,99 +47,126 @@ func TestCreatePlanTool_rejectsWhenActivePlanExists(t *testing.T) {
 		t.Fatalf("error = %v, want mention of active plan", err)
 	}
 	// Original plan must be unchanged.
-	plan := rt.PlanGet()
+	plan := pt.store.Get()
 	if len(plan) != 1 || plan[0].Title != "existing" {
 		t.Fatalf("plan = %v, want original single todo", plan)
 	}
 }
 
 func TestCreatePlanTool_createsWhenNoPlan(t *testing.T) {
-	rt := control.NewRuntime(nil, nil, nil)
+	pt := testPlanTools()
+	rt := session.NewRuntime(nil, nil, nil)
 	rt.EnsureInitialized()
 
-	got, err := createPlanTool.Invoke(context.Background(), `{"plan":"CoS: ship it","todos":[{"title":"a","status":"pending","description":"d"}]}`, rt)
+	got, err := pt.create.Invoke(context.Background(), `{"plan":"CoS: ship it","todos":[{"title":"a","status":"pending","description":"d"}]}`, rt)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got != "Plan created successfully" {
 		t.Fatalf("got %q", got)
 	}
-	plan := rt.PlanGet()
+	plan := pt.store.Get()
 	if len(plan) != 1 || plan[0].Title != "a" {
 		t.Fatalf("plan = %v", plan)
 	}
-	if rt.PlanDocumentGet() != "CoS: ship it" {
-		t.Fatalf("plan document = %q", rt.PlanDocumentGet())
+	if pt.store.Document() != "CoS: ship it" {
+		t.Fatalf("plan document = %q", pt.store.Document())
 	}
 }
 
 func TestCreatePlanTool_rejectsEmptyPlanDocument(t *testing.T) {
-	rt := control.NewRuntime(nil, nil, nil)
+	pt := testPlanTools()
+	rt := session.NewRuntime(nil, nil, nil)
 	rt.EnsureInitialized()
-	_, err := createPlanTool.Invoke(context.Background(), `{"plan":"  ","todos":[{"title":"a","status":"pending","description":""}]}`, rt)
+	_, err := pt.create.Invoke(context.Background(), `{"plan":"  ","todos":[{"title":"a","status":"pending","description":""}]}`, rt)
 	if err == nil || !strings.Contains(err.Error(), "plan document text is required") {
 		t.Fatalf("err = %v", err)
 	}
 }
 
 func TestEditPlanTool_identicalPlanDocument_rejected(t *testing.T) {
-	rt := control.NewRuntime(nil, nil, nil)
+	pt := testPlanTools()
+	rt := session.NewRuntime(nil, nil, nil)
 	rt.EnsureInitialized()
-	rt.PlanSet([]control.Todo{{Title: "a", Status: streaming.TodoStatusPending}})
-	rt.PlanDocumentSet("same plan")
+	pt.store.Set([]Todo{{Title: "a", Status: streaming.TodoStatusPending}})
+	pt.store.SetDocument("same plan")
 
-	_, err := editPlanTool.Invoke(context.Background(), `{"plan":"same plan","toAdd":[],"toDelete":[]}`, rt)
+	_, err := pt.edit.Invoke(context.Background(), `{"plan":"same plan","toAdd":[],"toDelete":[]}`, rt)
 	if err == nil || !strings.Contains(err.Error(), "unchanged") {
 		t.Fatalf("err = %v", err)
 	}
-	if rt.PlanDocumentGet() != "same plan" {
-		t.Fatalf("document changed: %q", rt.PlanDocumentGet())
+	if pt.store.Document() != "same plan" {
+		t.Fatalf("document changed: %q", pt.store.Document())
 	}
-	if rt.ConsumePlanDocumentUpdated() {
+	if pt.store.ConsumeDocumentUpdated() {
 		t.Fatal("should not mark updated on rejected identical plan")
 	}
 }
 
-func TestEditPlanTool_newPlanDocument_setsUpdatedFlag(t *testing.T) {
-	rt := control.NewRuntime(nil, nil, nil)
+func TestCreatePlanTool_returnsInstallEffect(t *testing.T) {
+	pt := testPlanTools()
+	rt := session.NewRuntime(nil, nil, nil)
 	rt.EnsureInitialized()
-	rt.PlanSet([]control.Todo{{Title: "a", Status: streaming.TodoStatusPending}})
-	rt.PlanDocumentSet("old")
-
-	got, err := editPlanTool.Invoke(context.Background(), `{"plan":"new full plan","toAdd":[],"toDelete":[]}`, rt)
+	res, err := pt.create.invoke(context.Background(), `{"plan":"CoS: ship","todos":[{"title":"a","status":"pending","description":"d"}]}`, rt)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "Plan edited successfully" {
-		t.Fatalf("got %q", got)
+	if res.output != "Plan created successfully" {
+		t.Fatalf("output = %q", res.output)
 	}
-	if rt.PlanDocumentGet() != "new full plan" {
-		t.Fatalf("document = %q", rt.PlanDocumentGet())
+	if res.disp.Effect != EffectInstallPlanDocument {
+		t.Fatalf("effect = %v, want install", res.disp.Effect)
 	}
-	if !rt.ConsumePlanDocumentUpdated() {
-		t.Fatal("expected updated flag for handoff hook")
+	if !res.disp.SuppressWindowMessage {
+		t.Fatal("create_plan should suppress window tool message")
+	}
+}
+
+func TestEditPlanTool_newPlanDocument_returnsHandoffEffect(t *testing.T) {
+	pt := testPlanTools()
+	rt := session.NewRuntime(nil, nil, nil)
+	rt.EnsureInitialized()
+	pt.store.Set([]Todo{{Title: "a", Status: streaming.TodoStatusPending}})
+	pt.store.SetDocument("old")
+
+	res, err := pt.edit.invoke(context.Background(), `{"plan":"new full plan","toAdd":[],"toDelete":[]}`, rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.output != "Plan edited successfully" {
+		t.Fatalf("got %q", res.output)
+	}
+	if pt.store.Document() != "new full plan" {
+		t.Fatalf("document = %q", pt.store.Document())
+	}
+	if res.disp.Effect != EffectHandoff {
+		t.Fatalf("effect = %v, want handoff from BuiltinResult", res.disp.Effect)
+	}
+	// BuiltinResult consumes the document-updated flag so hooks do not double-fire.
+	if pt.store.ConsumeDocumentUpdated() {
+		t.Fatal("updated flag should already be consumed by edit_plan")
 	}
 }
 
 func TestEditPlanTool(t *testing.T) {
-	pending := control.Todo{Title: "pending", Status: streaming.TodoStatusPending}
-	completed := control.Todo{Title: "completed", Status: streaming.TodoStatusCompleted}
-	inProgress := control.Todo{Title: "in_progress", Status: streaming.TodoStatusInProgress}
+	pending := Todo{Title: "pending", Status: streaming.TodoStatusPending}
+	completed := Todo{Title: "completed", Status: streaming.TodoStatusCompleted}
+	inProgress := Todo{Title: "in_progress", Status: streaming.TodoStatusInProgress}
 
 	tests := []struct {
 		name    string
-		plan    []control.Todo
+		plan    []Todo
 		args    string
 		want    string
 		wantErr bool
-		check   func(*testing.T, []control.Todo)
+		check   func(*testing.T, []Todo)
 	}{
 		{
 			name: "add at beginning",
-			plan: []control.Todo{pending, pending},
+			plan: []Todo{pending, pending},
 			args: `{"toAdd":[{"todo":{"title":"new","status":"pending","description":""},"order":0}]}`,
 			want: "Plan edited successfully",
-			check: func(t *testing.T, plan []control.Todo) {
+			check: func(t *testing.T, plan []Todo) {
 				if len(plan) != 3 || plan[0].Title != "new" {
 					t.Errorf("expected [new, pending, pending], got %v", plan)
 				}
@@ -127,10 +174,10 @@ func TestEditPlanTool(t *testing.T) {
 		},
 		{
 			name: "add at end",
-			plan: []control.Todo{pending, pending},
+			plan: []Todo{pending, pending},
 			args: `{"toAdd":[{"todo":{"title":"new","status":"pending","description":""},"order":2}]}`,
 			want: "Plan edited successfully",
-			check: func(t *testing.T, plan []control.Todo) {
+			check: func(t *testing.T, plan []Todo) {
 				if len(plan) != 3 || plan[2].Title != "new" {
 					t.Errorf("expected [pending, pending, new], got %v", plan)
 				}
@@ -138,10 +185,10 @@ func TestEditPlanTool(t *testing.T) {
 		},
 		{
 			name: "add in middle",
-			plan: []control.Todo{{Title: "a"}, {Title: "b"}},
+			plan: []Todo{{Title: "a"}, {Title: "b"}},
 			args: `{"toAdd":[{"todo":{"title":"mid","status":"pending","description":""},"order":1}]}`,
 			want: "Plan edited successfully",
-			check: func(t *testing.T, plan []control.Todo) {
+			check: func(t *testing.T, plan []Todo) {
 				if len(plan) != 3 || plan[1].Title != "mid" {
 					t.Errorf("expected [a, mid, b], got %v", plan)
 				}
@@ -149,22 +196,22 @@ func TestEditPlanTool(t *testing.T) {
 		},
 		{
 			name:    "add with negative order",
-			plan:    []control.Todo{pending},
+			plan:    []Todo{pending},
 			args:    `{"toAdd":[{"todo":{"title":"x","status":"pending","description":""},"order":-1}]}`,
 			wantErr: true,
 		},
 		{
 			name:    "add with order past end",
-			plan:    []control.Todo{pending},
+			plan:    []Todo{pending},
 			args:    `{"toAdd":[{"todo":{"title":"x","status":"pending","description":""},"order":2}]}`,
 			wantErr: true,
 		},
 		{
 			name: "delete pending todo",
-			plan: []control.Todo{pending, inProgress},
+			plan: []Todo{pending, inProgress},
 			args: `{"toDelete":["pending"]}`,
 			want: "Plan edited successfully",
-			check: func(t *testing.T, plan []control.Todo) {
+			check: func(t *testing.T, plan []Todo) {
 				if len(plan) != 1 || plan[0].Title != "in_progress" {
 					t.Errorf("expected [in_progress], got %v", plan)
 				}
@@ -172,22 +219,22 @@ func TestEditPlanTool(t *testing.T) {
 		},
 		{
 			name:    "delete completed todo",
-			plan:    []control.Todo{pending, completed, inProgress},
+			plan:    []Todo{pending, completed, inProgress},
 			args:    `{"toDelete":["completed"]}`,
 			wantErr: true,
 		},
 		{
 			name:    "delete nonexistent todo",
-			plan:    []control.Todo{pending},
+			plan:    []Todo{pending},
 			args:    `{"toDelete":["does_not_exist"]}`,
 			wantErr: true,
 		},
 		{
 			name: "delete multiple",
-			plan: []control.Todo{{Title: "a"}, {Title: "b"}, {Title: "c"}},
+			plan: []Todo{{Title: "a"}, {Title: "b"}, {Title: "c"}},
 			args: `{"toDelete":["a","c"]}`,
 			want: "Plan edited successfully",
-			check: func(t *testing.T, plan []control.Todo) {
+			check: func(t *testing.T, plan []Todo) {
 				if len(plan) != 1 || plan[0].Title != "b" {
 					t.Errorf("expected [b], got %v", plan)
 				}
@@ -195,10 +242,10 @@ func TestEditPlanTool(t *testing.T) {
 		},
 		{
 			name: "add and delete combined",
-			plan: []control.Todo{{Title: "a"}, {Title: "b"}},
+			plan: []Todo{{Title: "a"}, {Title: "b"}},
 			args: `{"toDelete":["a"],"toAdd":[{"todo":{"title":"c","status":"pending","description":""},"order":1}]}`,
 			want: "Plan edited successfully",
-			check: func(t *testing.T, plan []control.Todo) {
+			check: func(t *testing.T, plan []Todo) {
 				if len(plan) != 2 || plan[0].Title != "c" || plan[1].Title != "b" {
 					t.Errorf("expected [c, b], got %v", plan)
 				}
@@ -206,16 +253,16 @@ func TestEditPlanTool(t *testing.T) {
 		},
 		{
 			name:    "delete empty string title",
-			plan:    []control.Todo{pending, inProgress},
+			plan:    []Todo{pending, inProgress},
 			args:    `{"toDelete":[""]}`,
 			wantErr: true,
 		},
 		{
 			name: "add todo with empty title",
-			plan: []control.Todo{pending},
+			plan: []Todo{pending},
 			args: `{"toAdd":[{"todo":{"title":"","status":"pending","description":""},"order":0}]}`,
 			want: "Plan edited successfully",
-			check: func(t *testing.T, plan []control.Todo) {
+			check: func(t *testing.T, plan []Todo) {
 				if len(plan) != 2 || plan[0].Title != "" {
 					t.Errorf("expected empty title at index 0, got %v", plan)
 				}
@@ -223,10 +270,10 @@ func TestEditPlanTool(t *testing.T) {
 		},
 		{
 			name: "delete from multiple todos with same title deletes first",
-			plan: []control.Todo{{Title: "dup"}, {Title: "dup"}, {Title: "other"}},
+			plan: []Todo{{Title: "dup"}, {Title: "dup"}, {Title: "other"}},
 			args: `{"toDelete":["dup"]}`,
 			want: "Plan edited successfully",
-			check: func(t *testing.T, plan []control.Todo) {
+			check: func(t *testing.T, plan []Todo) {
 				if len(plan) != 2 || plan[0].Title != "dup" || plan[1].Title != "other" {
 					t.Errorf("expected [dup, other], got %v", plan)
 				}
@@ -234,10 +281,10 @@ func TestEditPlanTool(t *testing.T) {
 		},
 		{
 			name: "add at order equal to plan length (append)",
-			plan: []control.Todo{{Title: "a"}, {Title: "b"}},
+			plan: []Todo{{Title: "a"}, {Title: "b"}},
 			args: `{"toAdd":[{"todo":{"title":"c","status":"pending","description":""},"order":2}]}`,
 			want: "Plan edited successfully",
-			check: func(t *testing.T, plan []control.Todo) {
+			check: func(t *testing.T, plan []Todo) {
 				if len(plan) != 3 || plan[2].Title != "c" {
 					t.Errorf("expected [a, b, c], got %v", plan)
 				}
@@ -245,10 +292,10 @@ func TestEditPlanTool(t *testing.T) {
 		},
 		{
 			name: "add to empty plan at order 0",
-			plan: []control.Todo{},
+			plan: []Todo{},
 			args: `{"toAdd":[{"todo":{"title":"first","status":"pending","description":""},"order":0}]}`,
 			want: "Plan edited successfully",
-			check: func(t *testing.T, plan []control.Todo) {
+			check: func(t *testing.T, plan []Todo) {
 				if len(plan) != 1 || plan[0].Title != "first" {
 					t.Errorf("expected [first], got %v", plan)
 				}
@@ -256,16 +303,16 @@ func TestEditPlanTool(t *testing.T) {
 		},
 		{
 			name:    "add to empty plan at order > 0 fails",
-			plan:    []control.Todo{},
+			plan:    []Todo{},
 			args:    `{"toAdd":[{"todo":{"title":"x","status":"pending","description":""},"order":1}]}`,
 			wantErr: true,
 		},
 		{
 			name: "delete all todos from plan",
-			plan: []control.Todo{{Title: "a"}, {Title: "b"}, {Title: "c"}},
+			plan: []Todo{{Title: "a"}, {Title: "b"}, {Title: "c"}},
 			args: `{"toDelete":["a","b","c"]}`,
 			want: "Plan edited successfully",
-			check: func(t *testing.T, plan []control.Todo) {
+			check: func(t *testing.T, plan []Todo) {
 				if len(plan) != 0 {
 					t.Errorf("expected empty plan, got %v", plan)
 				}
@@ -273,10 +320,10 @@ func TestEditPlanTool(t *testing.T) {
 		},
 		{
 			name: "add multiple todos in sequence",
-			plan: []control.Todo{{Title: "a"}},
+			plan: []Todo{{Title: "a"}},
 			args: `{"toAdd":[{"todo":{"title":"b","status":"pending","description":""},"order":1},{"todo":{"title":"c","status":"pending","description":""},"order":2}]}`,
 			want: "Plan edited successfully",
-			check: func(t *testing.T, plan []control.Todo) {
+			check: func(t *testing.T, plan []Todo) {
 				if len(plan) != 3 || plan[0].Title != "a" || plan[1].Title != "b" || plan[2].Title != "c" {
 					t.Errorf("expected [a, b, c], got %v", plan)
 				}
@@ -286,11 +333,12 @@ func TestEditPlanTool(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			pt := testPlanTools()
 			rt := HarnessRuntime{}
 			rt.EnsureInitialized()
-			rt.PlanSet(tt.plan)
+			pt.store.Set(tt.plan)
 
-			got, err := editPlanTool.Invoke(context.Background(), tt.args, rt)
+			got, err := pt.edit.Invoke(context.Background(), tt.args, rt)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("error = %v, wantErr = %v", err, tt.wantErr)
 			}
@@ -299,7 +347,7 @@ func TestEditPlanTool(t *testing.T) {
 					t.Errorf("got %q, want %q", got, tt.want)
 				}
 				if tt.check != nil {
-					tt.check(t, rt.PlanGet())
+					tt.check(t, pt.store.Get())
 				}
 			}
 		})
@@ -307,7 +355,7 @@ func TestEditPlanTool(t *testing.T) {
 }
 
 func TestAskUserChoiceTool_raiseAndResume(t *testing.T) {
-	rt := control.NewRuntime(make(chan streaming.StreamEvent, 4), nil, nil)
+	rt := session.NewRuntime(make(chan streaming.StreamEvent, 4), nil, nil)
 	rt.EnsureInitialized()
 	rt.CurrentToolCallID = "tc_ask"
 
@@ -323,7 +371,7 @@ func TestAskUserChoiceTool_raiseAndResume(t *testing.T) {
 	if err == nil {
 		t.Fatal("first invoke should raise interrupt")
 	}
-	var intr control.Interrupt
+	var intr interrupt.Interrupt
 	if !errors.As(err, &intr) {
 		t.Fatalf("expected Interrupt, got %T %v", err, err)
 	}
@@ -346,7 +394,7 @@ func TestAskUserChoiceTool_raiseAndResume(t *testing.T) {
 }
 
 func TestAskUserChoiceTool_validation(t *testing.T) {
-	rt := control.NewRuntime(nil, nil, nil)
+	rt := session.NewRuntime(nil, nil, nil)
 	rt.EnsureInitialized()
 	rt.CurrentToolCallID = "tc"
 
@@ -379,15 +427,16 @@ func TestAskUserChoiceTool_injectedAsBuiltin(t *testing.T) {
 }
 
 func TestListPlanTool_exactListing(t *testing.T) {
-	rt := control.NewRuntime(nil, nil, nil)
+	pt := testPlanTools()
+	rt := session.NewRuntime(nil, nil, nil)
 	rt.EnsureInitialized()
-	rt.PlanSet([]control.Todo{
+	pt.store.Set([]Todo{
 		{Title: "Exact Title One", Status: streaming.TodoStatusCompleted, Description: "done work"},
 		{Title: "Exact Title Two", Status: streaming.TodoStatusInProgress, Description: "now"},
 		{Title: "Exact Title Three", Status: streaming.TodoStatusPending},
 	})
 
-	got, err := listPlanTool.Invoke(context.Background(), `{}`, rt)
+	got, err := pt.list.Invoke(context.Background(), `{}`, rt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -459,7 +508,7 @@ func TestRun_completeTodo_skipsAlreadyCompletedNext(t *testing.T) {
 		Model:  strategy,
 		Store:  testStore(t),
 	})
-	h.SessionId = "plan-skip"
+	h.sessionId = "plan-skip"
 	events, err := h.Run(context.Background(), "plan")
 	if err != nil {
 		t.Fatal(err)
@@ -468,7 +517,7 @@ func TestRun_completeTodo_skipsAlreadyCompletedNext(t *testing.T) {
 	if !hasToolResultContent(got, "starting \"C\"") && !hasToolResultContent(got, "Todo completed") {
 		t.Fatalf("want complete_todo to advance past completed B, got %+v", summarizeEvents(got))
 	}
-	plan := h.Runtime.PlanGet()
+	plan := h.session.Plan().Get()
 	if len(plan) != 3 {
 		t.Fatalf("plan len = %d", len(plan))
 	}
@@ -578,7 +627,7 @@ func TestRun_askUserChoice_withoutDescription_formatsSelection(t *testing.T) {
 		Model:  strategy,
 		Store:  testStore(t),
 	})
-	h.SessionId = "ask-sess"
+	h.sessionId = "ask-sess"
 	events, err := h.Run(context.Background(), "ask")
 	if err != nil {
 		t.Fatal(err)
@@ -597,13 +646,13 @@ func TestRun_askUserChoice_withoutDescription_formatsSelection(t *testing.T) {
 		t.Fatal("expected interrupt")
 	}
 	// Question stashed for protocol elicitation.
-	if q := AskUserQuestionFromState(&h.Runtime, "ask1"); q != "Pick?" {
+	if q := AskUserQuestionFromState(&h.runtime, "ask1"); q != "Pick?" {
 		t.Fatalf("question = %q", q)
 	}
-	if AskUserQuestionFromState(&h.Runtime, "") != "" {
+	if AskUserQuestionFromState(&h.runtime, "") != "" {
 		t.Fatal("empty tool call id should yield empty question")
 	}
-	if AskUserQuestionFromState(&h.Runtime, "missing") != "" {
+	if AskUserQuestionFromState(&h.runtime, "missing") != "" {
 		t.Fatal("unknown tool call should yield empty question")
 	}
 
@@ -676,7 +725,7 @@ func TestRun_completeTodo_alreadyCompleted_toolError(t *testing.T) {
 		Config: Config{MaxWindowSize: 8192},
 		Model:  strategy,
 	})
-	h.Runtime.PlanSet([]control.Todo{
+	h.session.Plan().Set([]Todo{
 		{Title: "A", Status: streaming.TodoStatusCompleted},
 		{Title: "B", Status: streaming.TodoStatusInProgress},
 	})
@@ -761,14 +810,15 @@ func TestRun_askUserChoice_emptyChoiceTitle_toolError(t *testing.T) {
 // TestCompleteTodo_allRemainingCompleted: completing last open todo when later
 // ones are already completed reports all-done.
 func TestCompleteTodo_allRemainingCompleted(t *testing.T) {
-	rt := control.NewRuntime(nil, nil, nil)
+	pt := testPlanTools()
+	rt := session.NewRuntime(nil, nil, nil)
 	rt.EnsureInitialized()
-	rt.PlanSet([]control.Todo{
+	pt.store.Set([]Todo{
 		{Title: "A", Status: streaming.TodoStatusInProgress},
 		{Title: "B", Status: streaming.TodoStatusCompleted},
 		{Title: "C", Status: streaming.TodoStatusCompleted},
 	})
-	got, err := completeTodoTool.Invoke(context.Background(), `{"title":"A"}`, rt)
+	got, err := pt.complete.Invoke(context.Background(), `{"title":"A"}`, rt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -822,8 +872,8 @@ func TestRun_createPlan_installsPlanDocumentAndPrunesWindow(t *testing.T) {
 	if len(h.Messages()) < 2 || !isPlanDocument(h.Messages()[1]) {
 		t.Fatalf("window = %+v", h.Messages())
 	}
-	if h.Runtime.PlanDocumentGet() != "CoS: ship quality" {
-		t.Fatalf("document = %q", h.Runtime.PlanDocumentGet())
+	if h.session.Plan().Document() != "CoS: ship quality" {
+		t.Fatalf("document = %q", h.session.Plan().Document())
 	}
 }
 
@@ -849,11 +899,11 @@ func TestRun_completeTodo_withPlanDocument_preservesFullPlan(t *testing.T) {
 		Model:  strategy,
 		Store:  testStore(t),
 	})
-	h.Runtime.PlanSet([]control.Todo{
+	h.session.Plan().Set([]Todo{
 		{Title: "A", Status: streaming.TodoStatusInProgress},
 		{Title: "B", Status: streaming.TodoStatusPending},
 	})
-	h.Runtime.PlanDocumentSet("FULL PLAN DRAFT")
+	h.session.Plan().SetDocument("FULL PLAN DRAFT")
 
 	events, err := h.Run(context.Background(), "go")
 	if err != nil {
@@ -904,19 +954,19 @@ func TestRun_editPlan_planChange_triggersHandoff(t *testing.T) {
 		Model:  strategy,
 		Store:  testStore(t),
 	})
-	h.Runtime.PlanSet([]control.Todo{
+	h.session.Plan().Set([]Todo{
 		{Title: "A", Status: streaming.TodoStatusInProgress},
 		{Title: "B", Status: streaming.TodoStatusPending},
 	})
-	h.Runtime.PlanDocumentSet("old blueprint")
+	h.session.Plan().SetDocument("old blueprint")
 
 	events, err := h.Run(context.Background(), "revise")
 	if err != nil {
 		t.Fatal(err)
 	}
 	_ = drainEvents(events)
-	if h.Runtime.PlanDocumentGet() != "revised blueprint" {
-		t.Fatalf("document = %q", h.Runtime.PlanDocumentGet())
+	if h.session.Plan().Document() != "revised blueprint" {
+		t.Fatalf("document = %q", h.session.Plan().Document())
 	}
 	if len(h.Messages()) < 3 || !isPlanDocument(h.Messages()[1]) {
 		t.Fatalf("window = %+v", h.Messages())
@@ -992,8 +1042,8 @@ func TestRun_completeTodo_persistsPlanInStore(t *testing.T) {
 		Model:  strategy,
 		Store:  store,
 	})
-	ah.SessionId = "sess-plan-persist"
-	ah.Runtime.PlanSet([]control.Todo{
+	ah.sessionId = "sess-plan-persist"
+	ah.session.Plan().Set([]Todo{
 		{Title: "Ship", Status: streaming.TodoStatusInProgress},
 	})
 
@@ -1013,7 +1063,7 @@ func TestRun_completeTodo_persistsPlanInStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAgentFromSession: %v", err)
 	}
-	plan := restored.Runtime.PlanGet()
+	plan := restored.session.Plan().Get()
 	if len(plan) != 1 {
 		t.Fatalf("restored plan len = %d, want 1", len(plan))
 	}

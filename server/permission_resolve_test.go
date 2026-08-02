@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/ryanaldo34/tacklr"
-	"github.com/ryanaldo34/tacklr/control"
+	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
@@ -31,7 +31,7 @@ func TestResolveInterruptViaACP_dispatchOutcomes(t *testing.T) {
 	}
 
 	// User selection without elicitation form capability → park (nil, nil).
-	usi := control.UserSelectionInterrupt{Options: []control.UserChoice{{Title: "A"}, {Title: "B"}}}
+	usi := interrupt.UserSelectionInterrupt{Options: []interrupt.UserChoice{{Title: "A"}, {Title: "B"}}}
 	ser, _ := usi.Serialize()
 	selData, _ := json.Marshal(map[string]any{
 		"interruptId": "i2",
@@ -70,9 +70,9 @@ func TestResolvePermissionViaRequest_outcomes(t *testing.T) {
 		}
 	}
 	goodData := func() []byte {
-		perm := control.ToolPermissionInterrupt{
+		perm := interrupt.ToolPermissionInterrupt{
 			ToolName: "sensitive",
-			Options:  control.DefaultPermissionOptions(),
+			Options:  interrupt.DefaultPermissionOptions(),
 		}
 		ser, err := perm.Serialize()
 		if err != nil {
@@ -157,20 +157,21 @@ func TestResolvePermissionViaRequest_outcomes(t *testing.T) {
 			PermissionRequired: true,
 			Handler:            func(ctx context.Context) (string, error) { return "ok", nil },
 		})
+		ms := &mockInferenceStrategy{
+			invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventFunctionCall, ToolCalls: []tacklr.ToolCall{
+					{ID: "call_1", CallID: "call_1", Name: "sensitive", Arguments: `{}`},
+				}, IsComplete: true}
+				ch <- tacklr.LLMResponseChunk{IsComplete: true}
+			},
+		}
 		h := tacklr.NewAgent(context.Background(), tacklr.AgentOptions{
 			Config: tacklr.Config{MaxWindowSize: 8192},
-			Model: &mockInferenceStrategy{
-				invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-					ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventFunctionCall, ToolCalls: []tacklr.ToolCall{
-						{ID: "call_1", CallID: "call_1", Name: "sensitive", Arguments: `{}`},
-					}, IsComplete: true}
-					ch <- tacklr.LLMResponseChunk{IsComplete: true}
-				},
-			},
-			Store: store,
-			Tools: []*tacklr.Tool{sensitive},
+			Model:  ms,
+			Store:  store,
+			Tools:  []*tacklr.Tool{sensitive},
 		})
-		h.SessionId = "sess-perm-resolve"
+		h.BindSessionID("sess-perm-resolve")
 		events, err := h.Run(context.Background(), "go")
 		if err != nil {
 			t.Fatal(err)
@@ -186,10 +187,8 @@ func TestResolvePermissionViaRequest_outcomes(t *testing.T) {
 		}
 
 		// After park, model on resume should finish cleanly.
-		if ms, ok := h.Model.(*mockInferenceStrategy); ok {
-			ms.invokeFn = func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "done", IsComplete: true}
-			}
+		ms.invokeFn = func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "done", IsComplete: true}
 		}
 
 		w := &recordingWriter{}

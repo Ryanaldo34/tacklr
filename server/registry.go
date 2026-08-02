@@ -8,13 +8,19 @@ import (
 	"log/slog"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/streaming"
+	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
 type AgentSpec struct {
@@ -146,17 +152,72 @@ type Registry struct {
 	agents       map[string]AgentSpec
 	defaultAgent string
 	store        stores.BaseStore
+	// tracer creates turn (and, via context, harness) spans. Defaults to global.
+	tracer trace.Tracer
+	// instruments records Prometheus-compatible OTel metrics. Defaults to global meter.
+	instruments *telemetry.Instruments
 	// activeTurns maps session/thread id → cancel for the in-flight turn context.
 	activeTurns sync.Map // string → context.CancelFunc
 	sessions    sync.Map // string → *sessionState
 }
 
-func NewRegistry(store stores.BaseStore, defaultAgent string) *Registry {
-	return &Registry{
+// RegistryOption configures NewRegistry.
+type RegistryOption func(*Registry)
+
+// WithTracerProvider sets the OpenTelemetry TracerProvider used for turn
+// telemetry. Tacklr builds a tracer named telemetry.InstrumentationName.
+// When omitted, the process-global provider is used (see telemetry.Init /
+// telemetry.SetTracerProvider).
+func WithTracerProvider(tp trace.TracerProvider) RegistryOption {
+	return func(r *Registry) {
+		if tp != nil {
+			r.tracer = telemetry.TracerFromProvider(tp)
+		}
+	}
+}
+
+// WithTracer sets an explicit Tracer for turn telemetry (advanced).
+// Prefer WithTracerProvider so instrumentation naming stays consistent.
+func WithTracer(t trace.Tracer) RegistryOption {
+	return func(r *Registry) {
+		if t != nil {
+			r.tracer = t
+		}
+	}
+}
+
+// WithMeterProvider sets the OpenTelemetry MeterProvider for turn/tool metrics.
+// Preferred path: host configures OTLP metrics export (Alloy/Collector → Prometheus/Mimir).
+// When omitted, the process-global meter is used.
+func WithMeterProvider(mp metric.MeterProvider) RegistryOption {
+	return func(r *Registry) {
+		if mp != nil {
+			r.instruments = telemetry.MustInstruments(telemetry.MeterFromProvider(mp))
+		}
+	}
+}
+
+// NewRegistry builds a registry. Optional opts configure telemetry and other hooks.
+func NewRegistry(store stores.BaseStore, defaultAgent string, opts ...RegistryOption) *Registry {
+	r := &Registry{
 		agents:       make(map[string]AgentSpec),
 		defaultAgent: defaultAgent,
 		store:        store,
+		tracer:       telemetry.Tracer(),
+		instruments:  telemetry.MustInstruments(telemetry.Meter()),
 	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(r)
+		}
+	}
+	if r.tracer == nil {
+		r.tracer = telemetry.Tracer()
+	}
+	if r.instruments == nil {
+		r.instruments = telemetry.MustInstruments(telemetry.Meter())
+	}
+	return r
 }
 
 func (r *Registry) Register(agentID string, spec AgentSpec) {
@@ -178,6 +239,7 @@ func (r *Registry) CreateSession(cwd string, mcpServers []mcp.MCPConfig) *Sessio
 		mcpServers:   mcpServers,
 		configValues: configValues,
 	})
+	r.instruments.RecordSessionCreated(context.Background())
 	if r.store != nil {
 		// Empty checkpoint (all nil inputs) never fails to build.
 		cp, _ := stores.NewCheckpoint(nil, nil, nil, nil, nil, nil)
@@ -334,9 +396,37 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 		return nil, fmt.Errorf("load agent %q: %w", agentID, err)
 	}
 
-	// turnCtx is a child of the request/connection ctx so either parent cancel
-	// or session/cancel stops the turn. Stored for CancelSession.
+	turnKind := "prompt"
+	if len(req.Responses) > 0 {
+		turnKind = "resume"
+	}
 	turnCtx, cancel := context.WithCancel(ctx)
+	// Prefer registry tracer/instruments for this turn and harness children.
+	turnCtx = telemetry.ContextWithTracer(turnCtx, r.tracer)
+	turnCtx = telemetry.ContextWithInstruments(turnCtx, r.instruments)
+	turnCtx = telemetry.ContextWithAgentID(turnCtx, agentID)
+	turnStart := time.Now()
+	r.instruments.RecordTurnStart(turnCtx, agentID)
+	// Span attributes: searchable dimensions (area, ids, kind). Dynamic sizes on events.
+	turnCtx, turnSpan := r.tracer.Start(turnCtx, telemetry.SpanTurn,
+		trace.WithAttributes(
+			attribute.String(telemetry.AttrArea, telemetry.AreaRegistry),
+			attribute.String(telemetry.AttrAgentID, agentID),
+			attribute.String(telemetry.AttrThreadID, threadID),
+			attribute.String(telemetry.AttrSessionID, req.SessionID),
+			attribute.String(telemetry.AttrTurnKind, turnKind),
+			attribute.Bool(telemetry.AttrLoadSession, load),
+		),
+	)
+	if turnKind == "prompt" {
+		turnSpan.AddEvent(telemetry.EventPromptReceived, trace.WithAttributes(
+			attribute.Int(telemetry.EventAttrPromptLen, len(req.Prompt)),
+		))
+	} else {
+		turnSpan.AddEvent(telemetry.EventResumeReceived, trace.WithAttributes(
+			attribute.Int(telemetry.EventAttrResumeInterruptCount, len(req.Responses)),
+		))
+	}
 	r.activeTurns.Store(threadID, cancel)
 
 	pr := &parsedRequest{
@@ -345,9 +435,23 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 		Prompt:    req.Prompt,
 		Responses: req.Responses,
 	}
+	endTurn := func(outcome string, err error) {
+		turnSpan.SetAttributes(attribute.String(telemetry.AttrOutcome, outcome))
+		if err != nil {
+			turnSpan.RecordError(err)
+			turnSpan.SetStatus(codes.Error, err.Error())
+		}
+		turnSpan.AddEvent(telemetry.EventTurnEnded, trace.WithAttributes(
+			attribute.String(telemetry.EventAttrOutcome, outcome),
+		))
+		r.instruments.RecordTurnEnd(turnCtx, agentID, turnKind, outcome, time.Since(turnStart))
+	}
+
 	events, err := runHarness(turnCtx, h, pr)
 	if err != nil {
 		r.activeTurns.Delete(threadID)
+		endTurn(telemetry.OutcomeError, err)
+		turnSpan.End()
 		cancel()
 		h.Close()
 		return nil, fmt.Errorf("run harness: %w", err)
@@ -359,17 +463,35 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 	go func() {
 		defer close(out)
 		defer r.activeTurns.Delete(threadID)
+		defer turnSpan.End()
+		var streamErr error
+		endOutcome := telemetry.OutcomeOK
 		for {
 			select {
 			case <-turnCtx.Done():
+				endTurn(telemetry.OutcomeCancelled, turnCtx.Err())
 				return
 			case ev, ok := <-events:
 				if !ok {
+					if streamErr != nil {
+						endOutcome = telemetry.OutcomeError
+						endTurn(endOutcome, streamErr)
+					} else {
+						endTurn(endOutcome, nil)
+					}
 					return
+				}
+				if ev.Type == streaming.StreamEventError {
+					if ev.Error != nil {
+						streamErr = ev.Error
+					} else if ev.Content != "" {
+						streamErr = fmt.Errorf("%s", ev.Content)
+					}
 				}
 				select {
 				case out <- ev:
 				case <-turnCtx.Done():
+					endTurn(telemetry.OutcomeCancelled, turnCtx.Err())
 					return
 				}
 			}
@@ -479,7 +601,7 @@ func (r *Registry) loadAgent(ctx context.Context, agentID, threadID string, load
 		h = tacklr.NewAgent(ctx, opts)
 	}
 
-	h.SessionId = threadID
+	h.BindSessionID(threadID)
 	return h, &spec, nil
 }
 

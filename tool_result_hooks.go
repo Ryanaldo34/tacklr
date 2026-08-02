@@ -3,8 +3,6 @@ package tacklr
 import (
 	"context"
 	"sync/atomic"
-
-	"github.com/ryanaldo34/tacklr/control"
 )
 
 // ToolResultEffect is applied once after a successful tool batch (no pending interrupts).
@@ -18,15 +16,36 @@ const (
 	EffectHandoff
 )
 
+// BuiltinResult is the success value for framework builtins that drive ACM
+// context effects. Prefer returning this from plan tools instead of relying on
+// name-keyed ToolResultHooks. Invoke still surfaces Output as the tool string.
+type BuiltinResult struct {
+	Output string
+	// Effect is merged across the batch and applied once at batch end.
+	Effect ToolResultEffect
+	// SuppressWindowMessage skips adding the tool-result Message to the window;
+	// the client still receives StreamEventToolResult.
+	SuppressWindowMessage bool
+}
+
+// disposition converts a BuiltinResult into the mergeable tool disposition.
+func (r BuiltinResult) disposition() ToolResultDisposition {
+	return ToolResultDisposition{
+		Effect:                r.Effect,
+		SuppressWindowMessage: r.SuppressWindowMessage,
+	}
+}
+
 // ToolResultObservation is a successful tool invocation observed by a hook.
 type ToolResultObservation struct {
 	Name     string
 	ArgsJSON string
 	Output   string
-	Runtime  control.HarnessRuntime
+	Runtime  HarnessRuntime
 }
 
-// ToolResultDisposition is returned by a ToolResultHook after a tool finishes.
+// ToolResultDisposition is returned by a tool (via BuiltinResult) or a
+// ToolResultHook after a tool finishes successfully.
 type ToolResultDisposition struct {
 	// Effect is merged across the batch and applied once at batch end.
 	Effect ToolResultEffect
@@ -38,6 +57,7 @@ type ToolResultDisposition struct {
 // ToolResultHook observes a finished successful tool and may queue window effects.
 // Hooks run after the tool returns and before the tool result is emitted.
 // Window rebuilds are deferred to end of batch via Effect.
+// Plan builtins return BuiltinResult instead; hooks remain for host tools.
 type ToolResultHook func(ctx context.Context, obs ToolResultObservation) ToolResultDisposition
 
 type toolResultHookRegistry struct {
@@ -52,15 +72,10 @@ func newToolResultHookRegistry(hooks map[string]ToolResultHook) *toolResultHookR
 	return &toolResultHookRegistry{byName: cp}
 }
 
-func defaultToolResultHooks() map[string]ToolResultHook {
-	return map[string]ToolResultHook{
-		"create_plan":   createPlanResultHook,
-		"complete_todo": completeTodoResultHook,
-		"edit_plan":     editPlanResultHook,
-	}
-}
-
 func (r *toolResultHookRegistry) observe(ctx context.Context, obs ToolResultObservation) ToolResultDisposition {
+	if r == nil {
+		return ToolResultDisposition{}
+	}
 	hook := r.byName[obs.Name]
 	if hook == nil {
 		return ToolResultDisposition{}
@@ -68,27 +83,10 @@ func (r *toolResultHookRegistry) observe(ctx context.Context, obs ToolResultObse
 	return hook(ctx, obs)
 }
 
-func createPlanResultHook(_ context.Context, _ ToolResultObservation) ToolResultDisposition {
-	return ToolResultDisposition{
-		Effect:                EffectInstallPlanDocument,
-		SuppressWindowMessage: true,
-	}
-}
-
-func completeTodoResultHook(_ context.Context, _ ToolResultObservation) ToolResultDisposition {
-	return ToolResultDisposition{Effect: EffectHandoff}
-}
-
-func editPlanResultHook(_ context.Context, obs ToolResultObservation) ToolResultDisposition {
-	if obs.Runtime.ConsumePlanDocumentUpdated() {
-		return ToolResultDisposition{Effect: EffectHandoff}
-	}
-	return ToolResultDisposition{}
-}
-
 type batchToolResultEffects struct {
 	installPlan atomic.Bool
 	handoff     atomic.Bool
+	suppress    atomic.Bool
 }
 
 func (b *batchToolResultEffects) merge(d ToolResultDisposition) {
@@ -97,6 +95,9 @@ func (b *batchToolResultEffects) merge(d ToolResultDisposition) {
 		b.installPlan.Store(true)
 	case EffectHandoff:
 		b.handoff.Store(true)
+	}
+	if d.SuppressWindowMessage {
+		b.suppress.Store(true)
 	}
 }
 

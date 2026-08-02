@@ -38,7 +38,7 @@ Go has a rich standard library. Whenever possible, use the standard library over
 
 ### Philosophy
 
-We do not care about unit tests. We aim for high-value, outcome-oriented integration tests instead. With AI, the overhead of maintaining large integration tests instead of several smaller, more focused unit tests is not a factor anymore. Therefore, unit tests are not necessary. We should not test implementation details, and instead should test greater outcomes being met. We will not test for something *not existing* or *not happening* but should test for something that *should happen* or is *expected to happen* instead. This is much more effective in catching genuine regressions, making tests less brittle when implementation details change that don't change the outcome. We should aim for 100% coverage built on integration tests, with each test case testing a specific return path as an outcome. We should not have duplicate return path coverage across test cases. We should aim for brevity over test volume, or as few tests cases to get to 100% coverage as possible.
+We do not care about unit tests. We aim for high-value, outcome-oriented integration tests instead. With AI, the overhead of maintaining large integration tests instead of several smaller, more focused unit tests is not a factor anymore. Therefore, unit tests are not necessary in most cases. Prefer unit tests when we are testing significant, encapsulated implementation details which are not easily tested for in integration tests. We should not test implementation details when integration testing, and instead should test greater outcomes being met. We will not test for something *not existing* or *not happening* but should test for something that *should happen* or is *expected to happen* instead. This is much more effective in catching genuine regressions, making tests less brittle when implementation details change that don't change the outcome. We should aim for 100% coverage built primarily on integration tests covering as many branches as possible at once, with each test case testing a specific return path as an outcome. We should not have duplicate return path coverage across test cases. We should aim for brevity over test volume, or as few tests cases to get to 100% coverage as possible.
 
 ### Test Style Guide
 
@@ -51,6 +51,7 @@ We do not care about unit tests. We aim for high-value, outcome-oriented integra
 - Prefer explicitness over cleverness
 - Build small composable components with clear responsibilities rather than large abstractions that hide behavior
 - Design around interfaces that represent capabilities rather than implementation details
+- APIs consumers shouldn't have access to need to be encapsulated. As this is meant to be a public library, we don't want importers shooting themselves in the foot accessing APIs and data that should be encapsualted and hidden from the user.
 - Prefer immutable inputs and explicit outputs whenever practical
 - Build systems that can be inspected and tested at every stage
 - Before introducing an abstraction, ask:

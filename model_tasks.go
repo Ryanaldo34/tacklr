@@ -8,7 +8,12 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/ryanaldo34/tacklr/control"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/ryanaldo34/tacklr/streaming"
+	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
 // AbsorbResult is returned by ModelTasks.Absorb after incorporating a message.
@@ -30,7 +35,7 @@ type ModelTasks interface {
 	Absorb(ctx context.Context, msg *Message, tools []*Tool, systemPrompt string) (AbsorbResult, error)
 
 	// Handoff rebuilds context after complete_todo or plan-document edit.
-	Handoff(ctx context.Context, plan []control.Todo, planDoc string, tools []*Tool, systemPrompt string) error
+	Handoff(ctx context.Context, plan []Todo, planDoc string, tools []*Tool, systemPrompt string) error
 }
 
 // DefaultModelTasks is the standard ModelTasks implementation.
@@ -79,7 +84,8 @@ func (t *DefaultModelTasks) Absorb(ctx context.Context, msg *Message, tools []*T
 	if msg == nil {
 		return AbsorbResult{}, nil
 	}
-	window, chunks, err := t.absorbFit(ctx, t.context.Messages(), msg, tools, systemPrompt)
+	// Absorb/compress is context plumbing — not a turn-lifecycle span.
+	window, chunks, _, err := t.absorbFit(ctx, t.context.Messages(), msg, tools, systemPrompt)
 	if err != nil {
 		return AbsorbResult{}, err
 	}
@@ -88,12 +94,32 @@ func (t *DefaultModelTasks) Absorb(ctx context.Context, msg *Message, tools []*T
 	return AbsorbResult{SummaryChunks: chunks}, nil
 }
 
-func (t *DefaultModelTasks) Handoff(ctx context.Context, plan []control.Todo, planDoc string, tools []*Tool, systemPrompt string) error {
+func (t *DefaultModelTasks) Handoff(ctx context.Context, plan []Todo, planDoc string, tools []*Tool, systemPrompt string) error {
+	open := 0
+	for i := range plan {
+		if plan[i].Status != streaming.TodoStatusCompleted {
+			open++
+		}
+	}
+	// Milestone: context handoff after todo complete / plan revise.
+	ctx, span := telemetry.TracerFromContext(ctx).Start(ctx, telemetry.SpanContextHandoff,
+		trace.WithAttributes(
+			attribute.String(telemetry.AttrArea, telemetry.AreaModelTasks),
+			attribute.Int(telemetry.AttrOpenTodos, open),
+		),
+	)
+	defer span.End()
+	slog.InfoContext(ctx, "running context handoff", "area", telemetry.AreaModelTasks, "open_todos", open)
+
 	window, err := handoffGenerate(ctx, t.context.Messages(), plan, planDoc, t.model, tools, systemPrompt)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		span.SetAttributes(attribute.String(telemetry.AttrOutcome, telemetry.OutcomeError))
 		return err
 	}
 	t.context.Replace(window)
+	span.SetAttributes(attribute.String(telemetry.AttrOutcome, telemetry.OutcomeOK))
 	return nil
 }
 
@@ -105,7 +131,7 @@ func (t *DefaultModelTasks) absorbFit(
 	newMsg *Message,
 	tools []*Tool,
 	restoreSystemPrompt string,
-) ([]*Message, []LLMResponseChunk, error) {
+) (out []*Message, chunks []LLMResponseChunk, compressed bool, err error) {
 	model := t.model
 	policy := t.policy
 	maxSize := t.maxSize
@@ -123,20 +149,21 @@ func (t *DefaultModelTasks) absorbFit(
 	countView[len(window)] = newMsg
 
 	if model == nil {
-		return slices.Clone(countView), nil, nil
+		return slices.Clone(countView), nil, false, nil
 	}
 
 	currSize, err := model.CountTokens(ctx, countView, tools)
 	if err != nil {
-		slog.Error("failed to count tokens while absorbing message", "area", "model_tasks", "error", err)
-		return nil, nil, fmt.Errorf("count tokens: %w", err)
+		slog.ErrorContext(ctx, "failed to count tokens while absorbing message", "area", "model_tasks", "error", err)
+		return nil, nil, false, fmt.Errorf("count tokens: %w", err)
 	}
 	if len(window) == 0 || float64(currSize) <= float64(maxSize)*policy.PressureRatio {
-		return slices.Clone(countView), nil, nil
+		return slices.Clone(countView), nil, false, nil
 	}
 
-	slog.Info("max context window size exceeded or approaching, compressing context window",
-		"area", "model_tasks", "max_size", maxSize, "current_size", currSize)
+	slog.InfoContext(ctx, "max context window size exceeded or approaching, compressing context window",
+		"area", telemetry.AreaModelTasks, "max_size", maxSize, "current_size", currSize)
+	telemetry.InstrumentsFromContext(ctx).RecordCompress(ctx, telemetry.AgentIDFromContext(ctx))
 
 	var sumPrompt strings.Builder
 	sumPrompt.Grow(280 + len(newMsg.Content))
@@ -157,7 +184,7 @@ func (t *DefaultModelTasks) absorbFit(
 		if restoreSystemPrompt != "" {
 			model.SetSystemPrompt(restoreSystemPrompt)
 		}
-		return slices.Clone(countView), nil, nil
+		return slices.Clone(countView), nil, false, nil
 	}
 
 	// Progressive CountTokens probes reuse countScratch (no alloc per step).
@@ -183,7 +210,7 @@ func (t *DefaultModelTasks) absorbFit(
 		for start < len(unprotected) {
 			count, err := model.CountTokens(ctx, stageCount(start), tools)
 			if err != nil {
-				return nil, nil, fmt.Errorf("count tokens: %w", err)
+				return nil, nil, true, fmt.Errorf("count tokens: %w", err)
 			}
 			if float64(count) <= float64(maxSize)*policy.PressureRatio {
 				break
@@ -201,35 +228,35 @@ func (t *DefaultModelTasks) absorbFit(
 
 	events, err := model.Invoke(ctx, unprotected[:numMessagesToCompress], tools)
 	if err != nil {
-		return nil, nil, fmt.Errorf("invoke: %w", err)
+		return nil, nil, true, fmt.Errorf("invoke: %w", err)
 	}
 
-	compressed := &Message{Role: RoleAssistant}
+	summaryMsg := &Message{Role: RoleAssistant}
 	var summary strings.Builder
-	var chunks []LLMResponseChunk
+	var outChunks []LLMResponseChunk
 	for chunk := range events {
 		if chunk.Type == StreamEventError {
-			return nil, nil, fmt.Errorf("compress: %s", chunk.Content)
+			return nil, nil, true, fmt.Errorf("compress: %s", chunk.Content)
 		}
 		if policy.StreamFitSummary {
-			chunks = append(chunks, chunk)
+			outChunks = append(outChunks, chunk)
 		}
 		summary.WriteString(chunk.Content)
 	}
-	compressed.Content = summary.String()
+	summaryMsg.Content = summary.String()
 
 	// Single final allocation: anchors + summary + remaining unprotected + newMsg.
 	rest := unprotected[numMessagesToCompress:]
-	out := make([]*Message, 0, anchorLen+1+len(rest)+1)
+	out = make([]*Message, 0, anchorLen+1+len(rest)+1)
 	out = append(out, anchors...)
-	out = append(out, compressed)
+	out = append(out, summaryMsg)
 	out = append(out, rest...)
 	out = append(out, newMsg)
 
 	if restoreSystemPrompt != "" {
 		model.SetSystemPrompt(restoreSystemPrompt)
 	}
-	return out, chunks, nil
+	return out, outChunks, true, nil
 }
 
 // stageMessages returns t.countScratch resized to n (grows capacity when needed).
@@ -245,7 +272,7 @@ func (t *DefaultModelTasks) stageMessages(n int) []*Message {
 func handoffGenerate(
 	ctx context.Context,
 	window []*Message,
-	plan []control.Todo,
+	plan []Todo,
 	planDoc string,
 	model InferenceStrategy,
 	tools []*Tool,

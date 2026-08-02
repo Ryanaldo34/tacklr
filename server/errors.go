@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/ryanaldo34/tacklr/control"
+	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/stores"
 )
 
@@ -57,8 +57,8 @@ func IsClientError(err error) bool {
 		return true
 	}
 	return errors.Is(err, stores.ErrSessionNotFound) ||
-		errors.Is(err, control.ErrInterruptNotFound) ||
-		errors.Is(err, control.ErrInvalidPayload) ||
+		errors.Is(err, interrupt.ErrInterruptNotFound) ||
+		errors.Is(err, interrupt.ErrInvalidPayload) ||
 		errors.Is(err, ErrInvalidRequest) ||
 		errors.Is(err, ErrMethodNotFound) ||
 		errors.Is(err, ErrAgentNotFound) ||

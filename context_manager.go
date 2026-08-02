@@ -5,7 +5,6 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/ryanaldo34/tacklr/control"
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
@@ -140,7 +139,7 @@ func protectedPrefixLen(window []*Message) int {
 // Turn keeps tool-calling instead of ending the turn.
 const continuePlanNudge = `The plan still has incomplete todos. Continue executing now: work the in-progress todo (or the next pending one), call tools as needed, and do not stop for user confirmation. Do not restate the handoff; act on the next todo.`
 
-func planHasOpenTodos(plan []control.Todo) bool {
+func planHasOpenTodos(plan []Todo) bool {
 	for i := range plan {
 		if plan[i].Status != streaming.TodoStatusCompleted {
 			return true

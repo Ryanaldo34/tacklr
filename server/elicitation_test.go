@@ -3,15 +3,15 @@ package server
 import (
 	"testing"
 
-	"github.com/ryanaldo34/tacklr/control"
+	"github.com/ryanaldo34/tacklr/interrupt"
 )
 
 func TestElicitation_paramsAndResultOutcomes(t *testing.T) {
-	opts := []control.UserChoice{{Title: "A"}, {Title: "B"}}
-	if _, err := SelectionToElicitationParams("s", "tc", "", []control.UserChoice{{Title: "only"}}); err == nil {
+	opts := []interrupt.UserChoice{{Title: "A"}, {Title: "B"}}
+	if _, err := SelectionToElicitationParams("s", "tc", "", []interrupt.UserChoice{{Title: "only"}}); err == nil {
 		t.Fatal("want error for <2 options")
 	}
-	if _, err := SelectionToElicitationParams("s", "tc", "Q", []control.UserChoice{{Title: ""}, {Title: "B"}}); err == nil {
+	if _, err := SelectionToElicitationParams("s", "tc", "Q", []interrupt.UserChoice{{Title: ""}, {Title: "B"}}); err == nil {
 		t.Fatal("want error for empty title")
 	}
 	params, err := SelectionToElicitationParams("s", "tc", "Pick", opts)

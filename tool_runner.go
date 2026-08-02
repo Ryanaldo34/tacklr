@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/ryanaldo34/tacklr/control"
+	"github.com/ryanaldo34/tacklr/interrupt"
 )
 
 // ToolInvocation is a single tool call as it moves through the runner chain.
@@ -38,13 +38,18 @@ func newToolRunner(interceptors ...ToolInterceptor) *toolRunner {
 	return &toolRunner{interceptors: cp}
 }
 
-func (r *toolRunner) Run(ctx context.Context, inv ToolInvocation) (string, error) {
+// Run executes the interceptor chain and the tool. Disposition comes only from
+// the final tool invoke (BuiltinResult); interceptor short-circuits yield none.
+func (r *toolRunner) Run(ctx context.Context, inv ToolInvocation) (string, ToolResultDisposition, error) {
 	if inv.Tool == nil {
-		return "", fmt.Errorf("%w", ErrToolNotFound)
+		return "", ToolResultDisposition{}, fmt.Errorf("%w", ErrToolNotFound)
 	}
 
+	var toolDisp ToolResultDisposition
 	next := ToolCallFunc(func(ctx context.Context, inv ToolInvocation) (string, error) {
-		return inv.Tool.Invoke(ctx, inv.ArgsJSON, inv.Runtime)
+		res, err := inv.Tool.invoke(ctx, inv.ArgsJSON, inv.Runtime)
+		toolDisp = res.disp
+		return res.output, err
 	})
 
 	for i := len(r.interceptors) - 1; i >= 0; i-- {
@@ -58,16 +63,8 @@ func (r *toolRunner) Run(ctx context.Context, inv ToolInvocation) (string, error
 		}
 	}
 
-	return next(ctx, inv)
-}
-
-// planningWriteLock denies tools that require Write access while no plan exists.
-func planningWriteLock(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error) {
-	if inv.Tool != nil && inv.Tool.Access != nil && inv.Tool.Access.Contains(WritePermission) &&
-		len(inv.Runtime.PlanGet()) == 0 {
-		return "", fmt.Errorf("%w: write tools are locked until create_plan establishes a todo list", ErrToolPermissionDenied)
-	}
-	return next(ctx, inv)
+	out, err := next(ctx, inv)
+	return out, toolDisp, err
 }
 
 // toolPermissionGate raises a tool_permission interrupt when PermissionRequired
@@ -90,16 +87,16 @@ func toolPermissionGate(ctx context.Context, inv ToolInvocation, next ToolCallFu
 	if err != nil {
 		return "", err
 	}
-	perm, ok := intr.(*control.ToolPermissionInterrupt)
+	perm, ok := intr.(*interrupt.ToolPermissionInterrupt)
 	if !ok || perm == nil {
 		// Registered tool_permission factory always returns *ToolPermissionInterrupt.
 		return "", fmt.Errorf("tool permission: unexpected interrupt type %T", intr)
 	}
 
 	switch perm.SelectedKind {
-	case control.PermissionAllowAlways:
+	case interrupt.PermissionAllowAlways:
 		permissionRemember(inv.Runtime, permissionAlwaysAllowKey, name)
-	case control.PermissionRejectAlways:
+	case interrupt.PermissionRejectAlways:
 		permissionRemember(inv.Runtime, permissionAlwaysDenyKey, name)
 	}
 

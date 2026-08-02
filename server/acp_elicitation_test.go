@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/ryanaldo34/tacklr"
-	"github.com/ryanaldo34/tacklr/control"
+	"github.com/ryanaldo34/tacklr/interrupt"
 )
 
 // TestACP_elicitationForm_resolvesInterruptAndCompletes is the mid-turn
@@ -23,12 +23,12 @@ func TestACP_elicitationForm_resolvesInterruptAndCompletes(t *testing.T) {
 	optionsJSON := `[{"title":"Option A","description":"First","isRecommended":true},{"title":"Option B","description":"Second","isRecommended":false}]`
 	interruptTool := tacklr.NewTool(tacklr.ToolConfig{
 		Name: "ask_user",
-		Handler: func(ctx context.Context, _ struct{}, runtime *control.HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, _ struct{}, runtime *tacklr.HarnessRuntime) (string, error) {
 			intr, err := runtime.RaiseInterrupt("user_selection_choice", []byte(optionsJSON))
 			if err != nil {
 				return "", err
 			}
-			choice := intr.(*control.UserSelectionInterrupt).ConfirmedChoice
+			choice := intr.(*interrupt.UserSelectionInterrupt).ConfirmedChoice
 			return "selected: " + choice.Title, nil
 		},
 	})
@@ -675,7 +675,7 @@ func TestACP_elicitationForm_declineEndsPrompt(t *testing.T) {
 	optionsJSON := `[{"title":"A","description":"","isRecommended":true},{"title":"B","description":"","isRecommended":false}]`
 	interruptTool := tacklr.NewTool(tacklr.ToolConfig{
 		Name: "ask_user",
-		Handler: func(ctx context.Context, _ struct{}, runtime *control.HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, _ struct{}, runtime *tacklr.HarnessRuntime) (string, error) {
 			_, err := runtime.RaiseInterrupt("user_selection_choice", []byte(optionsJSON))
 			return "", err
 		},
@@ -754,7 +754,7 @@ func TestACP_elicitationForm_cancelEndsPrompt(t *testing.T) {
 	optionsJSON := `[{"title":"A","description":"","isRecommended":true},{"title":"B","description":"","isRecommended":false}]`
 	interruptTool := tacklr.NewTool(tacklr.ToolConfig{
 		Name: "ask_user",
-		Handler: func(ctx context.Context, _ struct{}, runtime *control.HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, _ struct{}, runtime *tacklr.HarnessRuntime) (string, error) {
 			_, err := runtime.RaiseInterrupt("user_selection_choice", []byte(optionsJSON))
 			return "", err
 		},
@@ -830,7 +830,7 @@ func TestACP_elicitation_malformedInterruptEndsTurn(t *testing.T) {
 	optionsJSON := `[{"title":"only-one"}]` // < 2 options
 	interruptTool := tacklr.NewTool(tacklr.ToolConfig{
 		Name: "ask_user",
-		Handler: func(ctx context.Context, _ struct{}, runtime *control.HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, _ struct{}, runtime *tacklr.HarnessRuntime) (string, error) {
 			_, err := runtime.RaiseInterrupt("user_selection_choice", []byte(optionsJSON))
 			return "", err
 		},
@@ -896,7 +896,7 @@ func TestACP_elicitation_malformedInterruptEndsTurn(t *testing.T) {
 	}
 }
 
-// TestACP_createPlan_streamsPlanUpdate: PlanSet emits plan sessionUpdate over ACP.
+// TestACP_createPlan_streamsPlanUpdate: create_plan streams plan sessionUpdate over ACP.
 func TestACP_createPlan_streamsPlanUpdate(t *testing.T) {
 	store := testStore(t)
 	var n int

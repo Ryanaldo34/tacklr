@@ -49,8 +49,8 @@ func testStore(t *testing.T) *stores.InMemoryStore {
 	return stores.NewInMemoryStore()
 }
 
-func newTestRegistry(store *stores.InMemoryStore, strategy tacklr.InferenceStrategy, tools []*tacklr.Tool) *Registry {
-	r := NewRegistry(store, "default")
+func newTestRegistry(store *stores.InMemoryStore, strategy tacklr.InferenceStrategy, tools []*tacklr.Tool, opts ...RegistryOption) *Registry {
+	r := NewRegistry(store, "default", opts...)
 	r.Register("default", AgentSpec{
 		Config: tacklr.Config{
 			MaxWindowSize: 8192,
