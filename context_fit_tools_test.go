@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ryanaldo34/tacklr/internal/session"
+
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
@@ -178,7 +180,7 @@ func TestTool_Invoke_timeoutDeadlineFromHandler(t *testing.T) {
 			return "", context.DeadlineExceeded
 		},
 	})
-	_, err := tool.Invoke(context.Background(), "", HarnessRuntime{})
+	_, err := tool.invoke(context.Background(), "", HarnessRuntime{})
 	if err == nil || !errors.Is(err, ErrToolTimeout) {
 		t.Fatalf("err = %v, want ErrToolTimeout", err)
 	}
@@ -200,7 +202,8 @@ func TestTool_AsJson_nilParametersDefaults(t *testing.T) {
 	if params["type"] != "object" {
 		t.Fatalf("params = %v", params)
 	}
-	got, err := tool.Invoke(context.Background(), `{}`, HarnessRuntime{})
+	res, err := tool.invoke(context.Background(), `{}`, HarnessRuntime{})
+	got := res.output
 	if err != nil || got != "x" {
 		t.Fatalf("invoke = %q %v", got, err)
 	}
@@ -223,7 +226,7 @@ func TestSpawnWorker_incompleteStream_errors(t *testing.T) {
 		},
 	})
 	out := make(chan StreamEvent, 16)
-	h.runtime.SetOutputChannel(out)
+	session.SetOutputChannel(&h.runtime, out)
 	_, err := h.runWorker(context.Background(), "w", "task", h.runtime)
 	if err == nil {
 		t.Fatal("want worker error")
@@ -262,7 +265,7 @@ func TestSpawnWorker_reasoningUpdatesForwarded(t *testing.T) {
 		},
 	})
 	updates := make(chan StreamEvent, 32)
-	h.runtime.SetOutputChannel(updates)
+	session.SetOutputChannel(&h.runtime, updates)
 	got, err := h.runWorker(context.Background(), "thinker", "reason", h.runtime)
 	if err != nil {
 		t.Fatal(err)

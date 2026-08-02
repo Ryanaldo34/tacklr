@@ -304,17 +304,11 @@ type agentIDContextKey struct{}
 
 // ContextWithAgentID attaches agent_id for tool/handoff metrics.
 func ContextWithAgentID(ctx context.Context, agentID string) context.Context {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	return context.WithValue(ctx, agentIDContextKey{}, agentID)
 }
 
 // AgentIDFromContext returns agent_id or "".
 func AgentIDFromContext(ctx context.Context) string {
-	if ctx == nil {
-		return ""
-	}
 	s, _ := ctx.Value(agentIDContextKey{}).(string)
 	return s
 }

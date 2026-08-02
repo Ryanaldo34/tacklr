@@ -17,8 +17,6 @@ import (
 
 // Tool definitions, JSON schema, and post-tool ACM result hooks.
 
-// Source: tools.go
-
 type ToolPermission int
 
 const (
@@ -215,7 +213,13 @@ func NewTool(cfg ToolConfig) *Tool {
 			return toolCallResult{output: results[0].String()}, nil
 		}
 		if br, ok := results[0].Interface().(BuiltinResult); ok {
-			return toolCallResult{output: br.Output, disp: br.disposition()}, nil
+			return toolCallResult{
+				output: br.Output,
+				disp: ToolResultDisposition{
+					Effect:                br.Effect,
+					SuppressWindowMessage: br.SuppressWindowMessage,
+				},
+			}, nil
 		}
 		b, err := json.Marshal(results[0].Interface())
 		if err != nil {
@@ -251,14 +255,8 @@ func newMCPTool(cfg mcpToolConfig) *Tool {
 	}
 }
 
-// Invoke runs the tool and returns the model-visible output string.
-// Framework BuiltinResult values surface only their Output here; context
-// effects travel through the harness tool runner.
-func (t *Tool) Invoke(ctx context.Context, argsJson string, runtime HarnessRuntime) (string, error) {
-	res, err := t.invoke(ctx, argsJson, runtime)
-	return res.output, err
-}
-
+// invoke runs the tool handler. Only the harness tool runner should call this
+// so interceptors, permissions, and effects apply.
 func (t *Tool) invoke(ctx context.Context, argsJson string, runtime HarnessRuntime) (toolCallResult, error) {
 	var args map[string]any
 	if argsJson != "" {
@@ -478,6 +476,8 @@ func makeSchemaNullable(schema map[string]any) map[string]any {
 	return schema
 }
 
+// TypeToJSONSchema builds a JSON Schema for v.
+// Prefer NewTool typed handlers for tools; this is mainly for structured model output.
 func TypeToJSONSchema(v any) (map[string]any, error) {
 	rt := reflect.TypeOf(v)
 	if rt == nil {
@@ -512,40 +512,29 @@ func ToolsAsJson(tools []*Tool) string {
 	return string(b)
 }
 
-// Source: tool_result_hooks.go
-
-// ToolResultEffect is applied once after a successful tool batch (no pending interrupts).
+// ToolResultEffect is applied once after a successful tool batch (no open interrupts).
 type ToolResultEffect int
 
 const (
 	EffectNone ToolResultEffect = iota
-	// EffectInstallPlanDocument prunes the window to [user, plan document].
+	// EffectInstallPlanDocument sets the window to [user, plan document].
 	EffectInstallPlanDocument
-	// EffectHandoff rebuilds to [user, plan?, handoff, nudge?].
+	// EffectHandoff rebuilds the window for the next open todos.
 	EffectHandoff
 )
 
-// BuiltinResult is the success value for framework builtins that drive ACM
-// context effects. Prefer returning this from plan tools instead of relying on
-// name-keyed ToolResultHooks. Invoke still surfaces Output as the tool string.
+// BuiltinResult is a tool success that can queue ACM window effects.
+// Output is the model-visible tool string. Plan tools use this type.
 type BuiltinResult struct {
 	Output string
-	// Effect is merged across the batch and applied once at batch end.
+	// Effect is merged for the batch and applied once at batch end.
 	Effect ToolResultEffect
-	// SuppressWindowMessage skips adding the tool-result Message to the window;
-	// the client still receives StreamEventToolResult.
+	// SuppressWindowMessage omits the tool Message from the window.
+	// The client still receives StreamEventToolResult.
 	SuppressWindowMessage bool
 }
 
-// disposition converts a BuiltinResult into the mergeable tool disposition.
-func (r BuiltinResult) disposition() ToolResultDisposition {
-	return ToolResultDisposition{
-		Effect:                r.Effect,
-		SuppressWindowMessage: r.SuppressWindowMessage,
-	}
-}
-
-// ToolResultObservation is a successful tool invocation observed by a hook.
+// ToolResultObservation is a successful tool result seen by a ToolResultHook.
 type ToolResultObservation struct {
 	Name     string
 	ArgsJSON string
@@ -553,20 +542,14 @@ type ToolResultObservation struct {
 	Runtime  HarnessRuntime
 }
 
-// ToolResultDisposition is returned by a tool (via BuiltinResult) or a
-// ToolResultHook after a tool finishes successfully.
+// ToolResultDisposition is the window effect from a BuiltinResult or ToolResultHook.
 type ToolResultDisposition struct {
-	// Effect is merged across the batch and applied once at batch end.
-	Effect ToolResultEffect
-	// SuppressWindowMessage skips adding the tool-result Message to the window;
-	// the client still receives StreamEventToolResult.
+	Effect                ToolResultEffect
 	SuppressWindowMessage bool
 }
 
-// ToolResultHook observes a finished successful tool and may queue window effects.
-// Hooks run after the tool returns and before the tool result is emitted.
-// Window rebuilds are deferred to end of batch via Effect.
-// Plan builtins return BuiltinResult instead; hooks remain for host tools.
+// ToolResultHook runs after a successful host tool and before the tool result is emitted.
+// Effects apply at batch end. Plan builtins use BuiltinResult instead.
 type ToolResultHook func(ctx context.Context, obs ToolResultObservation) ToolResultDisposition
 
 type toolResultHookRegistry struct {

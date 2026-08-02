@@ -34,11 +34,6 @@ func NewServer(r *Registry, protocols ...Protocol) *Server {
 	return &Server{Registry: r, Protocols: protocols}
 }
 
-// primary is the connection-oriented protocol (first registered).
-func (s *Server) primary() Protocol {
-	return s.Protocols[0]
-}
-
 type stdioReadResult struct {
 	line []byte
 	err  error
@@ -46,16 +41,13 @@ type stdioReadResult struct {
 
 // ServeStdio serves line-delimited JSON messages over in/out.
 func (s *Server) ServeStdio(ctx context.Context, in io.Reader, out io.Writer) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	reader := bufio.NewReader(in)
 	w := &lineMessageWriter{w: out}
 	bridge := NewClientBridge(w)
 	s.Client = bridge
 	defer func() { s.Client = nil }()
 
-	proto := s.primary()
+	proto := s.Protocols[0]
 
 	readCh := make(chan stdioReadResult, 1)
 
@@ -156,9 +148,6 @@ func (s *Server) HTTPMux() *http.ServeMux {
 
 // ServeHTTP starts an HTTP server mounting all protocol routes.
 func (s *Server) ServeHTTP(ctx context.Context, addr string) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	hs := &http.Server{Addr: addr, Handler: s.HTTPMux(), ReadHeaderTimeout: 10 * time.Second}
 	errCh := make(chan error, 1)
 	go func() {
@@ -197,7 +186,7 @@ func (s *Server) HandleMessage(ctx context.Context, body []byte, w MessageWriter
 		conn.RPC = s.Client
 	}
 	env := ProtocolEnv{Registry: s.Registry, Conn: conn}
-	if err := s.primary().HandleInbound(ctx, env, body); err != nil {
+	if err := s.Protocols[0].HandleInbound(ctx, env, body); err != nil {
 		slog.Debug("HandleMessage", "error", err)
 	}
 }

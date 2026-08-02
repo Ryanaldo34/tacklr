@@ -298,7 +298,7 @@ func TestRun_functionCallRecordedBeforeToolResult(t *testing.T) {
 }
 
 // TestRun_modelErrorAfterTools_tagsAndCheckpointsPairs: after a successful tool
-// batch, a provider stream failure is tagged "model after tools" and the durable
+// batch, a provider stream failure is marked ErrModelAfterTools and the durable
 // window retains user + function_call + tool result for resume.
 func TestRun_modelErrorAfterTools_tagsAndCheckpointsPairs(t *testing.T) {
 	store := stores.NewInMemoryStore()
@@ -322,7 +322,7 @@ func TestRun_modelErrorAfterTools_tagsAndCheckpointsPairs(t *testing.T) {
 			}
 			ch <- LLMResponseChunk{
 				Type:       StreamEventError,
-				Error:      fmt.Errorf("api error (status 200): response incomplete or failed; status=failed"),
+				Error:      fmt.Errorf("provider HTTP 200: stream ended without a usable response; status=failed"),
 				IsComplete: true,
 			}
 		},
@@ -333,7 +333,7 @@ func TestRun_modelErrorAfterTools_tagsAndCheckpointsPairs(t *testing.T) {
 		Tools:  []*Tool{tool},
 		Store:  store,
 	})
-	h.BindSessionID("sess-after-tools-ckpt")
+	h.sessionId = "sess-after-tools-ckpt"
 	events, err := h.Run(context.Background(), "do the tool then die")
 	if err != nil {
 		t.Fatal(err)
@@ -344,13 +344,12 @@ func TestRun_modelErrorAfterTools_tagsAndCheckpointsPairs(t *testing.T) {
 	}
 	var sawTagged bool
 	for _, ev := range got {
-		if ev.Type == StreamEventError && ev.Error != nil &&
-			strings.Contains(ev.Error.Error(), "model after tools") {
+		if ev.Type == StreamEventError && ev.Error != nil && errors.Is(ev.Error, ErrModelAfterTools) {
 			sawTagged = true
 		}
 	}
 	if !sawTagged {
-		t.Fatalf("want model-after-tools tagged error, got %+v", summarizeEvents(got))
+		t.Fatalf("want ErrModelAfterTools, got %+v", summarizeEvents(got))
 	}
 
 	loaded, err := NewAgentFromSession(context.Background(), "sess-after-tools-ckpt", AgentOptions{
@@ -406,9 +405,9 @@ func TestRun_modelError_stripsUnpairedFromCheckpoint(t *testing.T) {
 		Model:  strategy,
 		Store:  store,
 	})
-	h.BindSessionID("sess-strip-orphan")
+	h.sessionId = "sess-strip-orphan"
 	// Leave pendingToolCalls empty so Run takes the model-turn path (not resume).
-	h.RestoreMessages([]*Message{
+	h.restoreMessages([]*Message{
 		{Role: RoleUser, Content: "goal"},
 		{Role: RoleAssistant, ToolCalls: []ToolCall{
 			{CallID: "orphan", Name: "echo", Arguments: `{}`},
@@ -739,7 +738,7 @@ func TestRun_modelError_stillCheckpoints(t *testing.T) {
 		Model:  &mockStrategy{invokeErr: errors.New("provider down")},
 		Store:  store,
 	})
-	h.BindSessionID("sess-err-ckpt")
+	h.sessionId = "sess-err-ckpt"
 	events, err := h.Run(context.Background(), "remember this user goal")
 	if err != nil {
 		t.Fatal(err)
@@ -836,7 +835,7 @@ func TestRun_stdioWatchDog_turnCompletes(t *testing.T) {
 	h := NewAgent(context.Background(), AgentOptions{
 		Config:   Config{MaxWindowSize: 8192, SystemPrompt: "test"},
 		Model:    strategy,
-		WatchDog: telemetry.New(),
+		WatchDog: telemetry.NewStdioWatchDog(),
 	})
 	t.Cleanup(h.Close)
 

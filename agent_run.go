@@ -6,16 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/google/uuid"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/trace"
 
+	"github.com/ryanaldo34/tacklr/internal/session"
 	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/telemetry"
@@ -30,45 +26,37 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 	}
 	a.initMCP(ctx)
 	a.injectBuiltinTools()
-	// Buffered so tool EmitUpdate (non-blocking) is not dropped while the Run
-	// loop is busy or the consumer has not yet entered its receive loop.
 	out := make(chan StreamEvent, streamEventBuffer)
-	a.runtime.SetOutputChannel(out)
+	session.SetOutputChannel(&a.runtime, out)
 
 	emitCancelled := func() {
-		emitNonBlocking(out, StreamEvent{Type: StreamEventError, Error: fmt.Errorf("run: context cancelled: %w", ctx.Err())})
+		select {
+		case out <- StreamEvent{Type: StreamEventError, Error: fmt.Errorf("run: context cancelled: %w", ctx.Err())}:
+		default:
+		}
 	}
 
-	// All work that may stream into out runs in this goroutine so callers can
-	// drain the channel (addToContext window-pressure compress streams summaries).
-	// Clear the runtime channel on exit so post-Run EmitUpdate does not send
-	// on a closed channel (output channel is nil until the first Run).
-	//
-	// Durability: every Run exit path persists session state (complete, interrupt
-	// park, cancel, model/tool/effect errors). Mid-turn interrupt also persists
-	// immediately so clients can resume after process restart.
+	// Run work is async so the caller can drain out. Clear the runtime output
+	// channel on exit. Every exit path checkpoints; interrupt park also saves
+	// mid-turn for resume after restart.
 	go func() {
 		defer close(out)
-		defer a.runtime.SetOutputChannel(nil)
+		defer session.SetOutputChannel(&a.runtime, nil)
 		defer a.persistSession(ctx, "run_exit")
 		if err := a.addToContext(ctx, &Message{Role: RoleUser, Content: prompt}, out); err != nil {
 			if ctx.Err() != nil {
 				emitCancelled()
 				return
 			}
-			// Absorb may fail during pressure compress (model invoke).
 			a.stripUnpairedToolCallsAfterInferenceError()
 			_ = emit(ctx, out, StreamEvent{Type: StreamEventError, Error: fmt.Errorf("run: %w", err)})
 			return
 		}
-		a.runtime.EnsureInitialized()
+		session.EnsureInitialized(&a.runtime)
 		turnModelRequests := 0
-		// True after at least one tool batch was executed this Run. Used so a later
-		// model failure is not misread as "the last tool failed" (common in Zed ACP).
+		// hadToolRound: true after a tool batch so model errors are not treated as tool failures.
 		hadToolRound := false
 		for {
-			// Non-blocking poll: use Err(), not select+default (same Done channel,
-			// clearer cooperative cancel between turn phases).
 			if ctx.Err() != nil {
 				emitCancelled()
 				return
@@ -85,7 +73,6 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 				}
 				turnCtx := ctx
 				if hadToolRound {
-					// Static after_tools flag for the next tacklr.model span + log event.
 					turnCtx = telemetry.ContextWithAfterTools(ctx)
 				}
 				events, err := a.tasks.Turn(turnCtx, a.tools, a.constructSystemPrompt())
@@ -94,19 +81,22 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 						emitCancelled()
 						return
 					}
-					phase := "run: invoke"
+					var outErr error
 					if hadToolRound {
-						phase = "run: model after tools"
+						outErr = fmt.Errorf("%w: %w", ErrModelAfterTools, err)
+					} else {
+						outErr = fmt.Errorf("model request failed: %w", err)
 					}
 					a.stripUnpairedToolCallsAfterInferenceError()
-					_ = emit(ctx, out, StreamEvent{Type: StreamEventError, Error: fmt.Errorf("%s: %w", phase, err)})
+					if !emit(ctx, out, StreamEvent{Type: StreamEventError, Error: outErr}) {
+						emitCancelled()
+					}
 					return
 				}
 				turnModelRequests++
 				asm := newStreamAssembler()
-				// Lifecycle bookkeeping: every function_call forwarded to the client is
-				// announced. Incomplete calls (IsComplete=false) are not executed, so we
-				// must emit a terminal failed result or the UI stays on in_progress.
+				// Track announced function_calls so incomplete ones get a failed result
+				// (clients otherwise stay in_progress).
 				announced := make(map[string]ToolCall)
 				announceOrder := make([]string, 0)
 				failAnnounced := func(reason string) {
@@ -123,21 +113,21 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 					announceOrder = nil
 					announced = make(map[string]ToolCall)
 				}
-				// Wait on stream or cancel — do not use bare range (blocks until
-				// producer closes even after ctx cancel if the model ignores ctx).
+				// Select on cancel: bare range would ignore ctx if the model keeps the channel open.
 				modelFailed := false
 				for {
-					chunk, ok, err := recvChunk(ctx, events)
-					if err != nil {
+					var chunk LLMResponseChunk
+					var ok bool
+					select {
+					case <-ctx.Done():
 						failAnnounced("tool call cancelled")
 						emitCancelled()
 						return
+					case chunk, ok = <-events:
 					}
 					if !ok {
 						break
 					}
-					// Tag provider failures that follow a successful tool batch so hosts
-					// (e.g. Zed) do not attribute response.failed to list_plan/etc.
 					if hadToolRound && (chunk.Type == StreamEventError || chunk.Error != nil) {
 						chunk = tagModelAfterToolsError(chunk)
 					}
@@ -174,7 +164,6 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 					}
 				}
 				if modelFailed {
-					// Checkpoint (via run_exit) must not re-submit unpaired function_calls.
 					a.stripUnpairedToolCallsAfterInferenceError()
 					return
 				}
@@ -183,7 +172,6 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 					emitCancelled()
 					return
 				}
-				// Close announced tool calls that will not be executed (incomplete status).
 				executable := make(map[string]struct{}, len(toolCalls))
 				for _, tc := range toolCalls {
 					if key := toolCallKey(tc); key != "" {
@@ -206,19 +194,15 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 						return
 					}
 				}
-				// No executable tool calls so the turn ends
 				if len(toolCalls) == 0 {
 					if !emit(ctx, out, StreamEvent{Type: StreamEventComplete}) {
 						emitCancelled()
 						return
 					}
-					// defer run_exit also persists; explicit reason for metrics/logs clarity.
 					a.persistSession(ctx, "turn_complete")
 					return
 				}
-				// Responses multi-turn input needs each function_call_output paired
-				// with a prior function_call (same call_id). Record the assistant
-				// tool-call turn before tool results.
+				// Record the assistant tool-call turn before tool results (Responses pairing).
 				a.context.Add(&Message{
 					Role:      RoleAssistant,
 					ToolCalls: append([]ToolCall(nil), toolCalls...),
@@ -250,42 +234,12 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 						return
 					}
 					tcKey := toolCallKey(tc)
-					// Milestone: each tool call (create_plan, complete_todo, work tools, …).
-					toolStart := time.Now()
-					toolCtx, toolSpan := telemetry.TracerFromContext(ctx).Start(ctx, telemetry.SpanTool,
-						trace.WithAttributes(
-							attribute.String(telemetry.AttrArea, telemetry.AreaHarness),
-							attribute.String(telemetry.AttrToolName, tc.Name),
-							attribute.String(telemetry.AttrToolNS, tc.Namespace),
-						),
-					)
-					defer toolSpan.End()
-
-					finishTool := func(status string, err error) {
-						toolSpan.SetAttributes(attribute.String(telemetry.AttrToolStatus, status))
-						if err != nil {
-							toolSpan.RecordError(err)
-							toolSpan.SetStatus(codes.Error, err.Error())
-							toolSpan.SetAttributes(attribute.String(telemetry.AttrOutcome, telemetry.OutcomeError))
-						} else if status == "error" {
-							toolSpan.SetAttributes(attribute.String(telemetry.AttrOutcome, telemetry.OutcomeError))
-						} else {
-							toolSpan.SetAttributes(attribute.String(telemetry.AttrOutcome, telemetry.OutcomeOK))
-						}
-						telemetry.InstrumentsFromContext(ctx).RecordTool(
-							toolCtx,
-							telemetry.AgentIDFromContext(ctx),
-							tc.Name,
-							tc.Namespace,
-							status,
-							time.Since(toolStart),
-						)
-					}
+					toolCtx, toolSpan := telemetry.StartToolSpan(ctx, tc.Name, tc.Namespace)
 
 					tool := a.findTool(tc.Name, tc.Namespace)
 					if tool == nil {
 						toolErr := fmt.Errorf("tool %q: %w", tc.Name, ErrToolNotFound)
-						finishTool("error", toolErr)
+						toolSpan.Finish("error", toolErr)
 						toolResults[i] = a.emitToolResult(toolCtx, out, tc, toolErr.Error(), "error")
 						return
 					}
@@ -301,13 +255,11 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 						intrId := uuid.New().String()
 						serialized, err := interrupt.Serialize()
 						if err != nil {
-							finishTool("error", err)
+							toolSpan.Finish("error", err)
 							_ = emit(toolCtx, out, StreamEvent{Type: StreamEventError, Error: fmt.Errorf("serialize interrupt: %w", err)})
 							return
 						}
-						// json.RawMessage embeds the already-serialized interrupt as a
-						// nested object. Plain []byte would base64-encode as a string
-						// and break consumers that unmarshal data into the interrupt type.
+						// Use json.RawMessage so interrupt data is nested JSON, not base64.
 						payload := map[string]any{
 							"interruptId": intrId,
 							"type":        interrupt.TypeName(),
@@ -315,20 +267,19 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 						}
 						data, err := json.Marshal(payload)
 						if err != nil {
-							finishTool("error", err)
+							toolSpan.Finish("error", err)
 							_ = emit(toolCtx, out, StreamEvent{Type: StreamEventError, Error: fmt.Errorf("marshal interrupt: %w", err)})
 							return
 						}
 						telemetry.InstrumentsFromContext(ctx).RecordInterrupt(
 							toolCtx, telemetry.AgentIDFromContext(ctx), interrupt.TypeName(),
 						)
-						finishTool("interrupt", nil)
+						toolSpan.Finish("interrupt", nil)
 						_ = emit(toolCtx, out, StreamEvent{Type: StreamEventInterrupt, MessageID: tcKey, Data: data})
 						a.pendingMu.Lock()
 						a.pendingToolCalls[tcKey] = stores.PendingToolCall{ToolCall: &tc, InterruptActive: true}
 						a.interruptToRequester[intrId] = tcKey
 						a.pendingMu.Unlock()
-						// Persist before parking so resume works after process restart.
 						a.persistSession(toolCtx, "interrupt")
 						return
 					}
@@ -336,11 +287,10 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 					delete(a.pendingToolCalls, tcKey)
 					a.pendingMu.Unlock()
 					if err != nil {
-						finishTool("error", err)
-						toolResults[i] = a.emitToolResult(toolCtx, out, tc, fmt.Sprintf("An error occurred: %s", err.Error()), "error")
+						toolSpan.Finish("error", err)
+						toolResults[i] = a.emitToolResult(toolCtx, out, tc, err.Error(), "error")
 						return
 					}
-					// BuiltinResult effects first; optional host ToolResultHooks merge after.
 					batchEffects.merge(toolDisp)
 					if toolDisp.SuppressWindowMessage {
 						suppressWindow[i].Store(true)
@@ -355,7 +305,7 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 					if hookDisp.SuppressWindowMessage {
 						suppressWindow[i].Store(true)
 					}
-					finishTool("success", nil)
+					toolSpan.Finish("success", nil)
 					toolResults[i] = a.emitToolResult(toolCtx, out, tc, output, "success")
 				}(i, tc)
 			}
@@ -376,13 +326,11 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 						emitCancelled()
 						return
 					}
-					// Pressure compress is a model call; sanitize before checkpoint.
 					a.stripUnpairedToolCallsAfterInferenceError()
 					_ = emit(ctx, out, StreamEvent{Type: StreamEventError, Error: fmt.Errorf("run: %w", err)})
 					return
 				}
 			}
-			// There are pending interrupts to be resumed after user input is gathered
 			a.pendingMu.Lock()
 			hasPending := len(a.pendingToolCalls) > 0
 			a.pendingMu.Unlock()
@@ -394,7 +342,6 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 				if err := a.applyBatchToolResultEffect(ctx, effect); err != nil {
 					slog.ErrorContext(ctx, "failed to apply tool result context effect", "session_id", a.sessionId, "effect", effect, "error", err)
 					_ = emit(ctx, out, StreamEvent{Type: StreamEventError, Content: err.Error()})
-					// Still durable: plan may already have been updated by the tool.
 					return
 				}
 				a.persistSession(ctx, "effect_applied")
@@ -415,9 +362,8 @@ func (a *AgentHarness) ReturnFromInterrupt(ctx context.Context, finishedInterrup
 			a.pendingMu.Unlock()
 			return nil, fmt.Errorf("no tool call id found for interrupt %s: %w", interruptId, interrupt.ErrInterruptNotFound)
 		}
-		// Stash payload so spawn_worker can forward it to a parked child.
 		a.interruptPayloads[toolCallId] = payload
-		if _, err := a.runtime.ReturnInterrupt(toolCallId, payload); err != nil {
+		if _, err := session.ReturnInterrupt(&a.runtime, toolCallId, payload); err != nil {
 			a.pendingMu.Unlock()
 			return nil, fmt.Errorf("return from interrupt %q: %w", interruptId, err)
 		}
@@ -433,24 +379,18 @@ func (a *AgentHarness) ReturnFromInterrupt(ctx context.Context, finishedInterrup
 	return a.Run(ctx, "")
 }
 
-// tagModelAfterToolsError rewrites a provider error chunk so clients can tell
-// the tool batch succeeded and the subsequent model request failed.
+// tagModelAfterToolsError wraps a stream error with ErrModelAfterTools.
 func tagModelAfterToolsError(chunk LLMResponseChunk) LLMResponseChunk {
-	const prefix = "model after tools: "
 	if chunk.Error != nil {
-		if !strings.Contains(chunk.Error.Error(), "model after tools") {
-			chunk.Error = fmt.Errorf("%s%w", prefix, chunk.Error)
+		if !errors.Is(chunk.Error, ErrModelAfterTools) {
+			chunk.Error = fmt.Errorf("%w: %w", ErrModelAfterTools, chunk.Error)
 		}
-		if chunk.Content == "" {
-			chunk.Content = chunk.Error.Error()
-		} else if !strings.Contains(chunk.Content, "model after tools") {
-			chunk.Content = prefix + chunk.Content
-		}
+		chunk.Content = chunk.Error.Error()
 		return chunk
 	}
-	if chunk.Content != "" && !strings.Contains(chunk.Content, "model after tools") {
-		chunk.Content = prefix + chunk.Content
-		chunk.Error = errors.New(chunk.Content)
+	if chunk.Content != "" {
+		chunk.Error = fmt.Errorf("%w: %s", ErrModelAfterTools, chunk.Content)
+		chunk.Content = chunk.Error.Error()
 	}
 	return chunk
 }

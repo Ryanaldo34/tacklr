@@ -10,7 +10,7 @@ import (
 
 func TestClassifyProviderFailure_refusal(t *testing.T) {
 	body := []byte(`{"error":{"message":"Your request was blocked by content_filter","code":"content_filter","type":"invalid_request_error"}}`)
-	err := ClassifyProviderFailure(400, body)
+	err := classifyProviderFailure(400, body)
 	if !errors.Is(err, tacklr.ErrModelRefused) {
 		t.Fatalf("err = %v, want ErrModelRefused", err)
 	}
@@ -25,7 +25,7 @@ func TestClassifyProviderFailure_refusal(t *testing.T) {
 
 func TestClassifyProviderFailure_maxTokens(t *testing.T) {
 	body := []byte(`{"error":{"message":"This model's maximum context length is 128000 tokens","code":"context_length_exceeded"}}`)
-	err := ClassifyProviderFailure(400, body)
+	err := classifyProviderFailure(400, body)
 	if !errors.Is(err, tacklr.ErrMaxTokens) {
 		t.Fatalf("err = %v, want ErrMaxTokens", err)
 	}
@@ -33,7 +33,7 @@ func TestClassifyProviderFailure_maxTokens(t *testing.T) {
 
 func TestClassifyProviderFailure_unmapped(t *testing.T) {
 	body := []byte(`{"error":{"message":"internal overload","code":"server_error"}}`)
-	err := ClassifyProviderFailure(500, body)
+	err := classifyProviderFailure(500, body)
 	if errors.Is(err, tacklr.ErrModelRefused) || errors.Is(err, tacklr.ErrMaxTokens) {
 		t.Fatalf("should not map overload: %v", err)
 	}
@@ -44,19 +44,19 @@ func TestClassifyProviderFailure_unmapped(t *testing.T) {
 }
 
 func TestClassifyIncompleteReason_allOutcomes(t *testing.T) {
-	if err := ClassifyIncompleteReason(""); err != nil {
+	if err := classifyIncompleteReason(""); err != nil {
 		t.Fatalf("empty: %v", err)
 	}
-	if err := ClassifyIncompleteReason("max_output_tokens"); !errors.Is(err, tacklr.ErrMaxTokens) {
+	if err := classifyIncompleteReason("max_output_tokens"); !errors.Is(err, tacklr.ErrMaxTokens) {
 		t.Fatalf("max_output_tokens: %v", err)
 	}
-	if err := ClassifyIncompleteReason("max_tokens"); !errors.Is(err, tacklr.ErrMaxTokens) {
+	if err := classifyIncompleteReason("max_tokens"); !errors.Is(err, tacklr.ErrMaxTokens) {
 		t.Fatalf("max_tokens: %v", err)
 	}
-	if err := ClassifyIncompleteReason("content_filter"); !errors.Is(err, tacklr.ErrModelRefused) {
+	if err := classifyIncompleteReason("content_filter"); !errors.Is(err, tacklr.ErrModelRefused) {
 		t.Fatalf("content_filter: %v", err)
 	}
-	err := ClassifyIncompleteReason("other")
+	err := classifyIncompleteReason("other")
 	if err == nil || errors.Is(err, tacklr.ErrMaxTokens) {
 		t.Fatalf("other: %v", err)
 	}

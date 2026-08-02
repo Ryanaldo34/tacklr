@@ -60,20 +60,13 @@ func (s *OpenAIInferenceStrategy) WithModel(model string) tacklr.InferenceStrate
 	return s
 }
 
-// ModelName returns the configured deployment/model id (telemetry GenAI attrs).
-func (s *OpenAIInferenceStrategy) ModelName() string {
+// ModelTelemetryIdentity implements the optional harness hook so model spans
+// get GenAI provider/model attrs without exporting raw config fields.
+func (s *OpenAIInferenceStrategy) ModelTelemetryIdentity() telemetry.ModelIdentity {
 	if s == nil {
-		return ""
+		return telemetry.ModelIdentity{}
 	}
-	return s.model
-}
-
-// BaseURL returns the configured API base URL (telemetry provider inference).
-func (s *OpenAIInferenceStrategy) BaseURL() string {
-	if s == nil {
-		return ""
-	}
-	return s.baseURL
+	return telemetry.NewModelIdentity(s.model, s.baseURL)
 }
 
 func (s *OpenAIInferenceStrategy) WithURL(url string) tacklr.InferenceStrategy {
@@ -200,14 +193,14 @@ func (s *OpenAIInferenceStrategy) CountTokens(ctx context.Context, messages []*t
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, s.baseURL+"/responses/input_tokens", bytes.NewReader(body))
 	if err != nil {
-		return 0, fmt.Errorf("create request: %w", err)
+		return 0, fmt.Errorf("build token-count request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+s.apiKey)
 
 	httpResp, err := s.httpClient.Do(httpReq)
 	if err != nil {
-		return 0, fmt.Errorf("http request: %w", err)
+		return 0, fmt.Errorf("token-count request failed: %w", err)
 	}
 	defer httpResp.Body.Close()
 
@@ -259,7 +252,10 @@ func (s *OpenAIInferenceStrategy) Invoke(ctx context.Context, messages []*tacklr
 		toolsJSON = json.RawMessage(toolsStr)
 	}
 
-	inputJSON, _ := json.Marshal(items)
+	inputJSON, err := json.Marshal(items)
+	if err != nil {
+		return nil, fmt.Errorf("marshal model input: %w", err)
+	}
 
 	reqBody := responsesRequest{
 		Model:  s.model,
@@ -293,7 +289,10 @@ func (s *OpenAIInferenceStrategy) Invoke(ctx context.Context, messages []*tacklr
 		}
 	}
 
-	body, _ := json.Marshal(reqBody)
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("marshal model request: %w", err)
+	}
 	inputSummary := summarizeInputItems(items)
 
 	events := make(chan tacklr.LLMResponseChunk, 10)
@@ -309,14 +308,26 @@ func (s *OpenAIInferenceStrategy) Invoke(ctx context.Context, messages []*tacklr
 		case events <- chunk:
 		}
 	}
+	sendErr := func(err error) {
+		if err == nil {
+			return
+		}
+		sendChunk(tacklr.LLMResponseChunk{
+			Type:       tacklr.StreamEventError,
+			Content:    err.Error(),
+			Error:      err,
+			IsComplete: true,
+		})
+	}
 
 	go func() {
 		defer close(events)
 
 		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, s.baseURL+"/responses", bytes.NewReader(body))
 		if err != nil {
-			slog.Error("create request", "error", err)
-			sendChunk(tacklr.LLMResponseChunk{Type: tacklr.StreamEventError, Content: fmt.Sprintf("create request: %v", err)})
+			err = fmt.Errorf("build provider request: %w", err)
+			slog.ErrorContext(ctx, "failed to build model provider request", "error", err)
+			sendErr(err)
 			return
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
@@ -324,24 +335,22 @@ func (s *OpenAIInferenceStrategy) Invoke(ctx context.Context, messages []*tacklr
 
 		httpResp, err := s.httpClient.Do(httpReq)
 		if err != nil {
-			slog.Error("http request", "error", err)
-			// Always surface terminal transport failures as stream errors so
-			// clients and tests share one contract (no silent channel close).
-			sendChunk(tacklr.LLMResponseChunk{Type: tacklr.StreamEventError, Content: fmt.Sprintf("http request: %v", err)})
+			err = fmt.Errorf("model provider request failed: %w", err)
+			slog.ErrorContext(ctx, "model provider request failed", "error", err)
+			// Surface transport failures as stream errors (no silent channel close).
+			sendErr(err)
 			return
 		}
 		defer httpResp.Body.Close()
 
 		if httpResp.StatusCode != http.StatusOK {
-			respBody, _ := io.ReadAll(httpResp.Body)
-			classified := ClassifyProviderFailure(httpResp.StatusCode, respBody)
+			respBody, readErr := io.ReadAll(httpResp.Body)
+			if readErr != nil {
+				slog.WarnContext(ctx, "could not read provider error body", "error", readErr, "http_status", httpResp.StatusCode)
+			}
+			classified := classifyProviderFailure(httpResp.StatusCode, respBody)
 			emitProviderFailed(ctx, classified, httpResp.StatusCode, inputSummary, string(respBody))
-			sendChunk(tacklr.LLMResponseChunk{
-				Type:       tacklr.StreamEventError,
-				Content:    classified.Error(),
-				Error:      classified,
-				IsComplete: true,
-			})
+			sendErr(classified)
 			return
 		}
 
@@ -555,12 +564,12 @@ func classifyTerminalSSE(evtType, data string) (terminal bool, err error) {
 	}
 
 	if reason != "" {
-		if classified := ClassifyIncompleteReason(reason); classified != nil {
+		if classified := classifyIncompleteReason(reason); classified != nil {
 			return true, classified
 		}
 	}
 
-	apiErr := &APIStatusError{Status: 200, Body: "response incomplete or failed"}
+	apiErr := &APIStatusError{Status: 200, Body: ""}
 	if payload.Response.Error != nil {
 		apiErr.Body = payload.Response.Error.Message
 		apiErr.Code = payload.Response.Error.Code
@@ -574,36 +583,35 @@ func classifyTerminalSSE(evtType, data string) (terminal bool, err error) {
 		apiErr.Body = payload.Response.ErrorMessage
 		apiErr.Code = payload.Response.ErrorCode
 	}
-	// Enrich opaque bodies so clients/logs show Azure status/reason.
-	if apiErr.Body == "" || apiErr.Body == "response incomplete or failed" {
-		parts := []string{"response incomplete or failed"}
+	// Human-readable body when the provider sent no message.
+	if strings.TrimSpace(apiErr.Body) == "" {
+		var parts []string
+		parts = append(parts, "stream ended without a usable response")
 		if status != "" {
 			parts = append(parts, "status="+status)
 		}
 		if reason != "" {
 			parts = append(parts, "reason="+reason)
 		}
-		if apiErr.Code != "" {
-			parts = append(parts, "code="+apiErr.Code)
-		}
 		if evtType != "" {
 			parts = append(parts, "event="+evtType)
 		}
 		apiErr.Body = strings.Join(parts, "; ")
 	}
-	if apiErr.Code != "" || (apiErr.Body != "" && !strings.HasPrefix(apiErr.Body, "response incomplete or failed")) {
-		classified := ClassifyProviderFailure(200, mustJSON(map[string]any{
-			"error": map[string]string{"code": apiErr.Code, "message": apiErr.Body, "type": ""},
-		}))
-		if classified != nil {
-			return true, classified
-		}
+	classified := classifyAPIStatus(apiErr, "")
+	// Known stop-reason sentinels are already actionable; skip noisy raw dumps.
+	if errors.Is(classified, tacklr.ErrModelRefused) || errors.Is(classified, tacklr.ErrMaxTokens) {
+		return true, classified
 	}
-	// Always log raw snip — Zed ACP stderr is the host debug stream.
-	slog.Error("provider terminal SSE without classifiable reason",
-		"event", evtType, "status", status, "reason", reason, "code", apiErr.Code,
-		"body_snip", truncateForLog(data, 800))
-	return true, apiErr
+	slog.Error("model stream ended with a provider error",
+		"event", evtType,
+		"response_status", status,
+		"reason", reason,
+		"error_code", apiErr.Code,
+		"error", classified,
+		"response_excerpt", truncateForLog(data, 400),
+	)
+	return true, classified
 }
 
 func truncateForLog(s string, n int) string {
@@ -613,8 +621,7 @@ func truncateForLog(s string, n int) string {
 	return s[:n] + "…"
 }
 
-// emitProviderFailed records a span-correlated OTel log event (preferred over
-// span.AddEvent) and mirrors detail to slog for ACP stderr.
+// emitProviderFailed records a span-correlated OTel log event and a clear slog line.
 func emitProviderFailed(ctx context.Context, err error, httpStatus int, inputItems, body string) {
 	code := ""
 	if err != nil {
@@ -626,7 +633,7 @@ func emitProviderFailed(ctx context.Context, err error, httpStatus int, inputIte
 			code = api.Code
 		}
 	}
-	snip := truncateForLog(body, 800)
+	snip := truncateForLog(body, 400)
 	attrs := []log.KeyValue{
 		log.String(telemetry.EventAttrInputItems, inputItems),
 		log.String(telemetry.EventAttrBodySnip, snip),
@@ -641,18 +648,13 @@ func emitProviderFailed(ctx context.Context, err error, httpStatus int, inputIte
 		attrs = append(attrs, log.String("error", err.Error()))
 	}
 	telemetry.EmitEventSeverity(ctx, telemetry.EventProviderFailed, log.SeverityError, attrs...)
-	slog.ErrorContext(ctx, "provider terminal failure",
+	slog.ErrorContext(ctx, "model provider returned a terminal failure",
 		"error", err,
-		"status", httpStatus,
-		"code", code,
-		"input_items", inputItems,
-		"body_snip", snip,
+		"http_status", httpStatus,
+		"error_code", code,
+		"request_shape", inputItems,
+		"response_excerpt", snip,
 	)
-}
-
-func mustJSON(v any) []byte {
-	b, _ := json.Marshal(v)
-	return b
 }
 
 func (s *OpenAIInferenceStrategy) emitOutputItemComplete(raw json.RawMessage, events chan<- tacklr.LLMResponseChunk, reasoningStreamed map[string]struct{}) {

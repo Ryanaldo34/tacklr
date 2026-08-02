@@ -17,10 +17,17 @@ type APIStatusError struct {
 }
 
 func (e *APIStatusError) Error() string {
-	if e.Code != "" {
-		return fmt.Sprintf("api error (status %d): %s (code: %s)", e.Status, e.Body, e.Code)
+	if e == nil {
+		return "provider error"
 	}
-	return fmt.Sprintf("api error (status %d): %s", e.Status, e.Body)
+	msg := strings.TrimSpace(e.Body)
+	if msg == "" {
+		msg = "no error body"
+	}
+	if e.Code != "" {
+		return fmt.Sprintf("provider HTTP %d (%s): %s", e.Status, e.Code, msg)
+	}
+	return fmt.Sprintf("provider HTTP %d: %s", e.Status, msg)
 }
 
 // ProviderHTTPStatus implements tacklr.ProviderStatus.
@@ -62,15 +69,21 @@ func extractErrorMessage(body []byte) string {
 	return string(body)
 }
 
-// ClassifyProviderFailure maps an HTTP status + body to a typed error.
+// classifyProviderFailure maps an HTTP status + body to a typed error.
 // High-confidence refusal / max-token signals wrap tacklr stop-reason sentinels;
-// everything else is *APIStatusError (unmapped → protocol internal error).
-func ClassifyProviderFailure(status int, body []byte) error {
+// everything else is *APIStatusError.
+func classifyProviderFailure(status int, body []byte) error {
 	msg := extractErrorMessage(body)
 	code, errType := parseAPIErrorMeta(body)
-	apiErr := &APIStatusError{Status: status, Body: msg, Code: code}
-	lower := strings.ToLower(msg + " " + code + " " + errType)
+	return classifyAPIStatus(&APIStatusError{Status: status, Body: msg, Code: code}, errType)
+}
 
+// classifyAPIStatus applies refusal/max-token signals to a structured provider error.
+func classifyAPIStatus(apiErr *APIStatusError, errType string) error {
+	if apiErr == nil {
+		return nil
+	}
+	lower := strings.ToLower(apiErr.Body + " " + apiErr.Code + " " + errType)
 	if isRefusalSignal(lower) {
 		return tacklr.WrapStopReason(tacklr.ErrModelRefused, apiErr)
 	}
@@ -80,20 +93,20 @@ func ClassifyProviderFailure(status int, body []byte) error {
 	return apiErr
 }
 
-// ClassifyIncompleteReason maps Responses API incomplete_details.reason (or
+// classifyIncompleteReason maps Responses API incomplete_details.reason (or
 // similar) to a stop-reason sentinel when known.
-func ClassifyIncompleteReason(reason string) error {
+func classifyIncompleteReason(reason string) error {
 	r := strings.ToLower(strings.TrimSpace(reason))
 	if r == "" {
 		return nil
 	}
 	if isMaxTokensSignal(r) || r == "max_output_tokens" || r == "max_tokens" {
-		return tacklr.WrapStopReason(tacklr.ErrMaxTokens, fmt.Errorf("incomplete: %s", reason))
+		return tacklr.WrapStopReason(tacklr.ErrMaxTokens, fmt.Errorf("response incomplete (%s)", reason))
 	}
 	if isRefusalSignal(r) || r == "content_filter" {
-		return tacklr.WrapStopReason(tacklr.ErrModelRefused, fmt.Errorf("incomplete: %s", reason))
+		return tacklr.WrapStopReason(tacklr.ErrModelRefused, fmt.Errorf("response incomplete (%s)", reason))
 	}
-	return fmt.Errorf("response incomplete: %s", reason)
+	return fmt.Errorf("response incomplete (%s)", reason)
 }
 
 func parseAPIErrorMeta(body []byte) (code, errType string) {
@@ -111,7 +124,7 @@ func isRefusalSignal(lower string) bool {
 		strings.Contains(lower, "content filter") ||
 		strings.Contains(lower, "refusal") ||
 		strings.Contains(lower, "refused") ||
-		errTypeIs(lower, "invalid_prompt") // some providers use this for blocked prompts
+		strings.Contains(lower, "invalid_prompt")
 }
 
 func isMaxTokensSignal(lower string) bool {
@@ -121,11 +134,7 @@ func isMaxTokensSignal(lower string) bool {
 		strings.Contains(lower, "context_length_exceeded") ||
 		strings.Contains(lower, "context length") ||
 		strings.Contains(lower, "token limit") ||
-		strings.Contains(lower, "finish_reason") && strings.Contains(lower, "length")
-}
-
-func errTypeIs(lower, want string) bool {
-	return strings.Contains(lower, want)
+		(strings.Contains(lower, "finish_reason") && strings.Contains(lower, "length"))
 }
 
 type countTokensRequest struct {

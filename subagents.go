@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ryanaldo34/tacklr/internal/session"
 	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/streaming"
 )
@@ -157,7 +158,7 @@ func (a *AgentHarness) runWorker(ctx context.Context, workerName, task string, r
 
 	// Drop any residual resolved interrupt for this spawn call — resume is
 	// driven by park metadata + stashed resolution payloads, not RaiseInterrupt.
-	_, _ = runtime.TakeResolvedInterrupt(toolCallID)
+	_, _ = session.TakeResolvedInterrupt(&runtime, toolCallID)
 
 	var worker *AgentHarness
 	var closeOnExit bool
@@ -276,7 +277,7 @@ func (a *AgentHarness) runWorker(ctx context.Context, workerName, task string, r
 	// Adopt the same interrupt object onto the parent Runtime under this
 	// spawn_worker tool call id, then return it as an error so the parent
 	// harness parks spawn_worker like any other tool interrupt.
-	_, adoptErr := runtime.AdoptInterrupt(childIntr)
+	_, adoptErr := session.AdoptInterrupt(&runtime, childIntr)
 	if adoptErr == nil {
 		// Resume signal from AdoptInterrupt — unexpected during bubble.
 		return "", fmt.Errorf("worker %q: unexpected resolved interrupt during bubble", workerName)
@@ -386,7 +387,7 @@ func collectChildInterrupts(worker *AgentHarness, drainedIDs []string) (ids []st
 		if !ok {
 			continue
 		}
-		if intr, ok := worker.runtime.PendingInterrupt(tcID); ok {
+		if intr, ok := session.PendingInterrupt(&worker.runtime, tcID); ok {
 			primary = intr
 			break
 		}
@@ -397,7 +398,7 @@ func collectChildInterrupts(worker *AgentHarness, drainedIDs []string) (ids []st
 			if !ptc.InterruptActive {
 				continue
 			}
-			if intr, ok := worker.runtime.PendingInterrupt(tcID); ok {
+			if intr, ok := session.PendingInterrupt(&worker.runtime, tcID); ok {
 				primary = intr
 				// Ensure we have at least one interrupt id for resume forwarding.
 				if len(ids) == 0 {

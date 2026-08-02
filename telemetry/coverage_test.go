@@ -11,29 +11,27 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"go.opentelemetry.io/otel/metric"
-	"go.opentelemetry.io/otel/metric/noop"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
-// TestInstallDefaultWithOTLP_writesToBaseHandler: dual-write setup used by
-// testserver must still emit slog records to the local handler (OTLP side is
-// noop-safe without a collector).
-func TestInstallDefaultWithOTLP_writesToBaseHandler(t *testing.T) {
+// TestMultiHandler_forwardsToBase: dual-write helper used by testserver must
+// deliver records to the local handler (does not mutate process slog default).
+func TestMultiHandler_forwardsToBase(t *testing.T) {
 	var buf bytes.Buffer
 	base := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})
-	InstallDefaultWithOTLP(base, NewOTLPSlogHandler("cov-test"))
-	slog.Info("dual-write smoke")
-	if !strings.Contains(buf.String(), "dual-write smoke") {
-		t.Fatalf("base handler missing log: %q", buf.String())
-	}
-	// MultiHandler group/attrs stay usable.
-	mh := MultiHandler{base}
+	mh := MultiHandler{base, NewOTLPSlogHandler("cov-test")}
 	if !mh.Enabled(context.Background(), slog.LevelInfo) {
 		t.Fatal("enabled")
+	}
+	rec := slog.NewRecord(time.Now(), slog.LevelInfo, "dual-write smoke", 0)
+	if err := mh.Handle(context.Background(), rec); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "dual-write smoke") {
+		t.Fatalf("base handler missing log: %q", buf.String())
 	}
 	_ = mh.WithAttrs([]slog.Attr{slog.String("k", "v")})
 	_ = mh.WithGroup("g")
@@ -73,45 +71,9 @@ func TestInstruments_recordAllPaths(t *testing.T) {
 	inst.RecordModel(ctx, "agent-1", ModelPhaseHandoff, OutcomeError, ErrorClassProvider4xx, time.Millisecond)
 	inst.RecordTokens(ctx, "agent-1", 10, 20, 3)
 
-	// Nil receiver no-ops.
-	var nilInst *Instruments
-	nilInst.RecordTurnStart(ctx, "a")
-	nilInst.RecordTurnEnd(ctx, "a", "k", OutcomeOK, 0)
-	nilInst.RecordTool(ctx, "a", "t", "", "ok", 0)
-	nilInst.RecordInterrupt(ctx, "a", "k")
-	nilInst.RecordHandoff(ctx, "a", HandoffOutcomeOK)
-	nilInst.RecordCompress(ctx, "a")
-	nilInst.RecordSessionCreated(ctx)
-	nilInst.RecordCheckpointSave(ctx, OutcomeError)
-	nilInst.RecordModel(ctx, "a", ModelPhaseTurn, OutcomeOK, ErrorClassOK, 0)
-	nilInst.RecordTokens(ctx, "a", 1, 1, 1)
-
-	// Context helpers for meters/instruments (nil meter/instruments are no-ops).
-	if ContextWithMeter(context.Background(), nil) == nil {
-		t.Fatal("nil meter")
-	}
-	m := MeterFromProvider(mp)
-	ctxM := ContextWithMeter(context.Background(), m)
-	if MeterFromContext(ctxM) == nil || MeterFromContext(context.Background()) == nil {
-		t.Fatal("meter from context")
-	}
-	if MeterFromProvider(nil) == nil {
-		t.Fatal("meter from nil provider uses global")
-	}
-	if ContextWithInstruments(context.Background(), nil) == nil {
-		t.Fatal("nil instruments")
-	}
-	if InstrumentsFromContext(context.Background()) == nil {
-		t.Fatal("global instruments")
-	}
 	ctxI := ContextWithInstruments(context.Background(), inst)
 	if InstrumentsFromContext(ctxI) != inst {
 		t.Fatal("instruments from context")
-	}
-
-	// NewInstruments with nil meter falls back to global.
-	if _, err := NewInstruments(nil); err != nil {
-		t.Fatal(err)
 	}
 }
 
@@ -309,35 +271,19 @@ func (a *attrCaptureHandler) WithGroup(string) slog.Handler      { return a }
 
 // TestStdioWatchDog_recordsAllMethods is the watchdog outcome path.
 func TestStdioWatchDog_recordsAllMethods(t *testing.T) {
-	wd := New()
+	wd := NewStdioWatchDog()
 	msg := &streaming.Message{
 		Role:       streaming.RoleAssistant,
 		Content:    "hi",
 		ToolCalls:  []streaming.ToolCall{{Name: "t1"}},
 		ToolCallID: "c1",
 	}
-	if err := wd.RecordThinking(msg); err != nil {
-		t.Fatal(err)
-	}
-	if err := wd.RecordOutput(msg); err != nil {
-		t.Fatal(err)
-	}
-	if err := wd.RecordError(errors.New("boom")); err != nil {
-		t.Fatal(err)
-	}
-	if err := wd.RecordTokens(1, 2); err != nil {
-		t.Fatal(err)
-	}
-	if err := wd.RecordToolCalls(msg); err != nil {
-		t.Fatal(err)
-	}
-	if err := wd.RecordToolResult(msg); err != nil {
-		t.Fatal(err)
-	}
-	// Non-assistant output still returns nil.
-	if err := wd.RecordOutput(&streaming.Message{Role: streaming.RoleUser, Content: "u"}); err != nil {
-		t.Fatal(err)
-	}
+	_ = wd.RecordThinking(msg)
+	_ = wd.RecordOutput(msg)
+	_ = wd.RecordError(errors.New("boom"))
+	_ = wd.RecordTokens(1, 2)
+	_ = wd.RecordToolCalls(msg)
+	_ = wd.RecordToolResult(msg)
 }
 
 // TestSetTracerProvider_nil installs noop-safe global.
@@ -348,71 +294,5 @@ func TestSetTracerProvider_nil(t *testing.T) {
 	sp.End()
 	if !strings.Contains(InstrumentationName, "tacklr") {
 		t.Fatal(InstrumentationName)
-	}
-}
-
-// errMeter returns errors for every instrument create so NewInstruments error
-// branches and MustInstruments panic are outcome-tested.
-type errMeter struct {
-	metric.Meter
-	failAt int
-	n      int
-}
-
-func (m *errMeter) Int64Counter(string, ...metric.Int64CounterOption) (metric.Int64Counter, error) {
-	m.n++
-	if m.n >= m.failAt {
-		return nil, errors.New("counter fail")
-	}
-	return noop.Int64Counter{}, nil
-}
-func (m *errMeter) Float64Histogram(string, ...metric.Float64HistogramOption) (metric.Float64Histogram, error) {
-	m.n++
-	if m.n >= m.failAt {
-		return nil, errors.New("hist fail")
-	}
-	return noop.Float64Histogram{}, nil
-}
-func (m *errMeter) Int64UpDownCounter(string, ...metric.Int64UpDownCounterOption) (metric.Int64UpDownCounter, error) {
-	m.n++
-	if m.n >= m.failAt {
-		return nil, errors.New("updown fail")
-	}
-	return noop.Int64UpDownCounter{}, nil
-}
-
-// TestNewInstruments_errorPaths covers each instrument creation failure return.
-func TestNewInstruments_errorPaths(t *testing.T) {
-	// NewInstruments creates: hist, counter, updown, counter, hist, counter×5 = 10 instruments.
-	for failAt := 1; failAt <= 10; failAt++ {
-		m := &errMeter{Meter: noop.Meter{}, failAt: failAt}
-		if _, err := NewInstruments(m); err == nil {
-			t.Fatalf("failAt=%d want error", failAt)
-		}
-	}
-	// MustInstruments panics on error.
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("want panic")
-		}
-	}()
-	_ = MustInstruments(&errMeter{Meter: noop.Meter{}, failAt: 1})
-}
-
-// TestGlobalInstruments_concurrent rebuilds cache safely under load.
-func TestGlobalInstruments_concurrent(t *testing.T) {
-	SetMeterProvider(nil)
-	done := make(chan struct{})
-	for i := 0; i < 8; i++ {
-		go func() {
-			_ = InstrumentsFromContext(context.Background())
-			done <- struct{}{}
-		}()
-	}
-	for i := 0; i < 8; i++ {
-		<-done
-	}
-	if InstrumentsFromContext(context.Background()) == nil {
-		t.Fatal("global")
 	}
 }

@@ -40,9 +40,6 @@ func MeterFromProvider(mp metric.MeterProvider) metric.Meter {
 // ContextWithMeter attaches m for MeterFromContext. Prefer ContextWithInstruments
 // when instruments are pre-built for a registry.
 func ContextWithMeter(ctx context.Context, m metric.Meter) context.Context {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	if m == nil {
 		return ctx
 	}
@@ -51,19 +48,14 @@ func ContextWithMeter(ctx context.Context, m metric.Meter) context.Context {
 
 // MeterFromContext returns a context meter or the global Meter.
 func MeterFromContext(ctx context.Context) metric.Meter {
-	if ctx != nil {
-		if m, ok := ctx.Value(meterContextKey{}).(metric.Meter); ok && m != nil {
-			return m
-		}
+	if m, ok := ctx.Value(meterContextKey{}).(metric.Meter); ok && m != nil {
+		return m
 	}
 	return Meter()
 }
 
 // ContextWithInstruments attaches pre-built Instruments for the turn (and children).
 func ContextWithInstruments(ctx context.Context, inst *Instruments) context.Context {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	if inst == nil {
 		return ctx
 	}
@@ -73,10 +65,8 @@ func ContextWithInstruments(ctx context.Context, inst *Instruments) context.Cont
 // InstrumentsFromContext returns instruments from context, or a shared set bound
 // to the global meter (lazy).
 func InstrumentsFromContext(ctx context.Context) *Instruments {
-	if ctx != nil {
-		if inst, ok := ctx.Value(instrumentsContextKey{}).(*Instruments); ok && inst != nil {
-			return inst
-		}
+	if inst, ok := ctx.Value(instrumentsContextKey{}).(*Instruments); ok && inst != nil {
+		return inst
 	}
 	return globalInstruments()
 }

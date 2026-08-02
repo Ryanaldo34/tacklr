@@ -43,12 +43,10 @@ type askUserChoiceArgs struct {
 	Choices  []askUserChoiceOption `json:"choices" desc:"2 or more mutually exclusive options"`
 }
 
-// internalSession is the harness-internal handle closed over by built-in tools.
-// User tools never receive this — only public HarnessRuntime for DI/interrupts.
+// internalSession is closed over by plan builtins (not given to host tools).
 type internalSession struct {
-	sm *session.SessionManager
-	// emitPlanTodos streams StreamEventPlanUpdate after todo list changes (nil in unit tests).
-	emitPlanTodos func([]Todo)
+	sm            *session.SessionManager
+	emitPlanTodos func([]Todo) // plan_update stream; nil in some unit tests
 }
 
 func (s internalSession) setTodos(todos []Todo) {
@@ -115,10 +113,8 @@ func askUserQuestionStateKey(toolCallID string) string {
 	return "_ask_user_question:" + toolCallID
 }
 
-// AskUserQuestionFromState returns a question string stashed by ask_user_choice
-// for the given tool call id, if any. Takes a pointer so concurrent Run teardown
-// (SetOutputChannel) does not race a by-value Runtime copy.
-func AskUserQuestionFromState(rt *HarnessRuntime, toolCallID string) string {
+// askUserQuestionFromState returns a question string stashed by ask_user_choice.
+func askUserQuestionFromState(rt *HarnessRuntime, toolCallID string) string {
 	if rt == nil || toolCallID == "" {
 		return ""
 	}

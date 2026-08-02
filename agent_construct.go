@@ -14,19 +14,24 @@ import (
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
+// Config is harness limits and prompt settings.
 type Config struct {
 	MaxWindowSize    int
 	SystemPrompt     string
 	SkillDirectories []string
-	// MaxTurnRequests caps Model.Invoke calls within a single Run turn.
-	// 0 means unlimited. When exceeded, the turn ends with ErrMaxTurnRequests.
+	// MaxTurnRequests limits Model.Invoke calls per Run. 0 = unlimited.
+	// Exceeding the limit ends the turn with ErrMaxTurnRequests.
 	MaxTurnRequests int
 }
 
-// AgentOptions configures a new agent harness via NewAgent or NewAgentFromSession.
+// AgentOptions configures NewAgent and NewAgentFromSession.
+//
+// Usual fields: Config, Model, Store, Tools, MCPConfigs, SubAgents, SessionID.
+// ContextManager, ModelTasks, and ContextPolicy override the built-in ACM path;
+// leave them nil unless you replace that path.
 type AgentOptions struct {
 	Config Config
-	// SessionID binds this harness to a durable thread/session id (registry sets this).
+	// SessionID is the durable thread id. Set at construction; do not change mid-turn.
 	SessionID  string
 	Model      InferenceStrategy
 	Store      stores.BaseStore
@@ -34,36 +39,34 @@ type AgentOptions struct {
 	Tools      []*Tool
 	MCPConfigs []mcp.MCPConfig
 	SubAgents  []*SubAgent
-	// ContextManager owns the conversation window (nil → NewModelContextManager).
+	// ContextManager is the conversation window. Nil uses NewModelContextManager.
 	ContextManager ContextManager
-	// ModelTasks runs Turn/Absorb/Handoff (nil → DefaultModelTasks from Model + context).
+	// ModelTasks runs Turn, Absorb, and Handoff. Nil uses DefaultModelTasks.
 	ModelTasks ModelTasks
-	// ContextPolicy overrides default pressure/compress ratios when non-zero fields are set.
+	// ContextPolicy sets pressure/compress ratios when non-zero fields are set.
 	ContextPolicy ContextPolicy
-	// ToolInterceptors wrap every harness tool call (outermost first).
-	// nil uses the built-in chain (planning write lock, permission gate).
-	// A non-nil slice replaces that chain entirely; empty disables interceptors.
+	// ToolInterceptors wrap each tool call (outermost first).
+	// Nil: built-in planning lock and permission gate.
+	// Non-nil: replaces that chain (empty slice disables interceptors).
 	ToolInterceptors []ToolInterceptor
-	// ToolResultHooks map tool names to post-success context effects for host tools.
-	// Plan builtins return BuiltinResult instead of relying on name-keyed hooks.
-	// nil (or empty) means no host hooks.
+	// ToolResultHooks map tool name → post-success window effects for host tools.
+	// Plan builtins use BuiltinResult instead.
 	ToolResultHooks map[string]ToolResultHook
-	// SkillsLoader discovers skills from Config.SkillDirectories.
-	// nil uses skills.DirectoryLoader (filesystem SKILL.md trees).
+	// SkillsLoader loads skills from Config.SkillDirectories.
+	// Nil uses skills.DirectoryLoader.
 	SkillsLoader skills.Loader
-	// ExaAPIKey enables built-in web_search and web_fetch. When empty, EXA_API_KEY
-	// from the process environment is used. When both are empty, those tools
-	// are not registered.
+	// ExaAPIKey enables web_search and web_fetch. Empty falls back to EXA_API_KEY.
+	// When both are empty, those tools are not registered.
 	ExaAPIKey string
 }
 
-// streamEventBuffer sizes the harness event bus so non-blocking EmitUpdate
-// (progress, worker status) is not dropped when the consumer is briefly behind.
+// streamEventBuffer is the harness event channel size so EmitUpdate is not dropped
+// when the consumer lags briefly.
 const streamEventBuffer = 64
 
+// NewAgent builds a harness. out is a non-nil sentinel so Run can detect init;
+// the live event bus is installed on Run.
 func NewAgent(ctx context.Context, opts AgentOptions) *AgentHarness {
-	// Runtime output channel is nil until Run; plan mutations before Run only update SessionManager.
-	// a.out is a non-nil sentinel so Run can detect an initialized harness.
 	events := make(chan streaming.StreamEvent, streamEventBuffer)
 	sm := session.NewSessionManager()
 	runtime := session.NewRuntime(nil, opts.Store, sm)
@@ -75,8 +78,7 @@ func NewAgent(ctx context.Context, opts AgentOptions) *AgentHarness {
 	return h
 }
 
-// newHarnessBase builds the shared AgentHarness fields for NewAgent and
-// NewAgentFromSession. sm and runtime must share the same SessionManager backend.
+// newHarnessBase fills shared fields. sm and runtime must share one SessionManager.
 func newHarnessBase(opts AgentOptions, runtime HarnessRuntime, sm *session.SessionManager, out chan streaming.StreamEvent) *AgentHarness {
 	if sm == nil {
 		sm = session.NewSessionManager()
@@ -124,7 +126,6 @@ func newHarnessBase(opts AgentOptions, runtime HarnessRuntime, sm *session.Sessi
 	return h
 }
 
-// finishInit runs one-time skill/MCP/subagent/builtin setup shared by constructors.
 func (h *AgentHarness) finishInit(ctx context.Context, subAgents []*SubAgent) {
 	h.initMCP(ctx)
 	if err := h.initSkills(); err != nil {
@@ -134,10 +135,7 @@ func (h *AgentHarness) finishInit(ctx context.Context, subAgents []*SubAgent) {
 	h.injectBuiltinTools()
 }
 
-// injectBuiltinTools appends plan tools and spawn_worker (when subagents are
-// registered) exactly once. Safe to call from NewAgent and Run.
-// Plan tools close over SessionManager; they do not use Runtime for plan state.
-// EmitPlanUpdate is only for streaming todo-list updates to clients.
+// injectBuiltinTools registers plan tools, optional web tools, and spawn_worker once.
 func (a *AgentHarness) injectBuiltinTools() {
 	if a.builtinsInjected {
 		return
@@ -146,8 +144,10 @@ func (a *AgentHarness) injectBuiltinTools() {
 		a.session = session.NewSessionManager()
 	}
 	s := internalSession{
-		sm:            a.session,
-		emitPlanTodos: a.runtime.EmitPlanUpdate,
+		sm: a.session,
+		emitPlanTodos: func(plan []streaming.Todo) {
+			session.EmitPlanUpdate(&a.runtime, plan)
+		},
 	}
 	a.tools = append(a.tools,
 		newCreatePlanTool(s),
@@ -166,7 +166,7 @@ func (a *AgentHarness) injectBuiltinTools() {
 	a.builtinsInjected = true
 }
 
-// planningWriteLock denies tools that require Write access while no plan exists.
+// planningWriteLock blocks write tools until create_plan has set a plan.
 func (a *AgentHarness) planningWriteLock(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error) {
 	if inv.Tool != nil && inv.Tool.Access != nil && inv.Tool.Access.Contains(WritePermission) &&
 		(a.session == nil || !a.session.HasActivePlan()) {
@@ -214,13 +214,13 @@ func (a *AgentHarness) skillTool() *Tool {
 	})
 }
 
-// NewAgentFromSession restores a harness from a stored session checkpoint using
-// the same AgentOptions shape as NewAgent.
+// NewAgentFromSession loads a harness from a session checkpoint.
+// opts.Store is required. Uses the same AgentOptions shape as NewAgent.
 func NewAgentFromSession(ctx context.Context, sessionId string, opts AgentOptions) (*AgentHarness, error) {
 	if opts.Store == nil {
 		return nil, fmt.Errorf("agent harness: store is required to load session %q", sessionId)
 	}
-	events := make(chan StreamEvent)
+	events := make(chan StreamEvent, streamEventBuffer)
 	checkpoint, err := opts.Store.LoadSession(ctx, sessionId)
 	if err != nil {
 		return nil, err
@@ -230,7 +230,6 @@ func NewAgentFromSession(ctx context.Context, sessionId string, opts AgentOption
 	if err != nil {
 		return nil, err
 	}
-	// Same as NewAgent: output channel is nil until Run.
 	runtime := session.NewRuntime(nil, opts.Store, sm)
 	h := newHarnessBase(opts, runtime, sm, events)
 	h.sessionId = sessionId

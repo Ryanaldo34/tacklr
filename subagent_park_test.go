@@ -82,12 +82,13 @@ func TestNewTool_pointerArgsAndNonStringResultAndBadArgs(t *testing.T) {
 			return a.Name, nil
 		},
 	})
-	got, err := tool.Invoke(context.Background(), `{"name":"x"}`, HarnessRuntime{})
+	res, err := tool.invoke(context.Background(), `{"name":"x"}`, HarnessRuntime{})
+	got := res.output
 	if err != nil || got != "x" {
 		t.Fatalf("got %q %v", got, err)
 	}
 	// Type mismatch in JSON → invoke error.
-	_, err = tool.Invoke(context.Background(), `{"name":123}`, HarnessRuntime{})
+	_, err = tool.invoke(context.Background(), `{"name":123}`, HarnessRuntime{})
 	if err == nil {
 		t.Fatal("want unmarshal error")
 	}
@@ -103,7 +104,8 @@ func TestNewTool_pointerArgsAndNonStringResultAndBadArgs(t *testing.T) {
 			}{N: 7}, nil
 		},
 	})
-	got, err = tool2.Invoke(context.Background(), "", HarnessRuntime{})
+	res, err = tool2.invoke(context.Background(), "", HarnessRuntime{})
+	got = res.output
 	if err != nil || !strings.Contains(got, "7") {
 		t.Fatalf("got %q %v", got, err)
 	}
@@ -115,7 +117,7 @@ func TestNewTool_pointerArgsAndNonStringResultAndBadArgs(t *testing.T) {
 			return make(chan int), nil
 		},
 	})
-	_, err = tool3.Invoke(context.Background(), "", HarnessRuntime{})
+	_, err = tool3.invoke(context.Background(), "", HarnessRuntime{})
 	if err == nil {
 		t.Fatal("want marshal result error")
 	}

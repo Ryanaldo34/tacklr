@@ -103,17 +103,14 @@ func TestWSMessageWriter_resultErrorAndHelpers(t *testing.T) {
 	if err := mw.WriteError(json.RawMessage(`10`), clientErrorf(ErrInvalidRequest, "ws-err")); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeWSClientError(ctx, serverConn, errors.New("clienty")); err != nil {
-		t.Fatal(err)
-	}
-	if err := writeWSInternalError(ctx, serverConn); err != nil {
+	if err := wsWriteJSON(ctx, serverConn, map[string]any{"type": "error", "error": "clienty"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := mw.WriteFrame([]byte(`{"type":"message","content":"f"}`)); err != nil {
 		t.Fatal(err)
 	}
 
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 4; i++ {
 		readCtx, c := context.WithTimeout(ctx, 500*time.Millisecond)
 		_, _, err := client.Read(readCtx)
 		c()

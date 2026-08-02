@@ -38,9 +38,6 @@ type tracerContextKey struct{}
 // ContextWithTracer returns a child context that causes TracerFromContext to
 // prefer t over the global provider. A nil t is ignored.
 func ContextWithTracer(ctx context.Context, t trace.Tracer) context.Context {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	if t == nil {
 		return ctx
 	}
@@ -50,10 +47,8 @@ func ContextWithTracer(ctx context.Context, t trace.Tracer) context.Context {
 // TracerFromContext returns the tracer attached with ContextWithTracer, or the
 // global package tracer when none is set.
 func TracerFromContext(ctx context.Context) trace.Tracer {
-	if ctx != nil {
-		if t, ok := ctx.Value(tracerContextKey{}).(trace.Tracer); ok && t != nil {
-			return t
-		}
+	if t, ok := ctx.Value(tracerContextKey{}).(trace.Tracer); ok && t != nil {
+		return t
 	}
 	return Tracer()
 }

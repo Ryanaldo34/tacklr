@@ -10,10 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/trace"
-
 	mcpruntime "github.com/ryanaldo34/tacklr/internal/mcp"
 	session "github.com/ryanaldo34/tacklr/internal/session"
 	"github.com/ryanaldo34/tacklr/mcp"
@@ -23,91 +19,78 @@ import (
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
+// AgentHarness is the product agent. Create with NewAgent or NewAgentFromSession.
+// Fields are unexported.
 type AgentHarness struct {
-	// Construct only via NewAgent / NewAgentFromSession. Fields are unexported
-	// so hosts cannot rewire harness state mid-turn.
-	model         InferenceStrategy
-	sessionId     string
-	tools         []*Tool
-	mcpConfigs    []mcp.MCPConfig
-	instructions  string
-	store         stores.BaseStore
-	runtime       HarnessRuntime
-	watchDog      AgentWatchDog
-	maxWindowSize int
-	// maxTurnRequests caps Model.Invoke per Run (0 = unlimited). From Config.
-	maxTurnRequests int
-	// session is the internal SessionManager (plan and future modules).
-	session              *session.SessionManager
-	subagents            map[string]*SubAgent
+	model           InferenceStrategy
+	sessionId       string
+	tools           []*Tool
+	mcpConfigs      []mcp.MCPConfig
+	instructions    string
+	store           stores.BaseStore
+	runtime         HarnessRuntime
+	watchDog        AgentWatchDog
+	maxWindowSize   int
+	maxTurnRequests int // 0 = unlimited; from Config.MaxTurnRequests
+	session         *session.SessionManager
+	subagents       map[string]*SubAgent
+	// interruptToRequester maps interrupt id → tool call id for resume.
 	interruptToRequester map[string]string
 	pendingToolCalls     map[string]stores.PendingToolCall
 	pendingMu            sync.Mutex
-	// interruptPayloads stores the consumer resolution payload for each
-	// parent tool call id after ReturnFromInterrupt, so spawn_worker can
-	// forward the same bytes into a parked child harness.
+	// interruptPayloads maps parent tool call id → resume payload for workers.
 	interruptPayloads map[string][]byte
-	// parkedWorkersLive is a same-process cache of parked child harnesses
-	// keyed by the parent spawn_worker tool call id. Durable park metadata
-	// lives in Runtime.State; this map is not checkpointed.
+	// parkedWorkersLive maps spawn_worker tool call id → live child harness.
+	// Durable park metadata is in Runtime state; this map is not checkpointed.
 	parkedWorkersLive map[string]*AgentHarness
 	parkMu            sync.Mutex
 	skillByName       map[string]skills.Skill
 	skillDirectories  []string
 	skillsLoader      skills.Loader
 	skillsInitialized bool
-	// exaAPIKey enables web_search / web_fetch builtins when non-empty (options or EXA_API_KEY).
-	exaAPIKey        string
-	mcpCleanup       func()
-	mcpInitialized   bool
-	builtinsInjected bool
-	out              chan streaming.StreamEvent
-	// context owns the conversation message list (structure only).
-	context ContextManager
-	// tasks runs product model ops (Turn, Absorb, Handoff) against context + Model.
-	tasks           ModelTasks
-	contextPolicy   ContextPolicy
-	toolRunner      *toolRunner
-	toolResultHooks *toolResultHookRegistry
+	exaAPIKey         string
+	mcpCleanup        func()
+	mcpInitialized    bool
+	builtinsInjected  bool
+	out               chan streaming.StreamEvent
+	context           ContextManager
+	tasks             ModelTasks
+	contextPolicy     ContextPolicy
+	toolRunner        *toolRunner
+	toolResultHooks   *toolResultHookRegistry
 }
 
-// SessionID returns the durable session/thread id for this harness (may be empty).
+// SessionID returns the durable session id, or empty if unbound.
+// Set with AgentOptions.SessionID at construction.
 func (a *AgentHarness) SessionID() string { return a.sessionId }
 
-// BindSessionID sets the session id after construction (registry thread binding).
-func (a *AgentHarness) BindSessionID(id string) { a.sessionId = id }
-
-// ToolRuntime returns a pointer to the harness runtime for interrupt/state helpers.
-func (a *AgentHarness) ToolRuntime() *HarnessRuntime { return &a.runtime }
-
-// Messages returns the live conversation window owned by the context manager.
+// Messages returns a snapshot of the conversation window.
+// Observation only; do not use this to rehydrate or rewrite the window.
 func (a *AgentHarness) Messages() []*Message {
 	return a.context.Messages()
 }
 
-// RestoreMessages replaces the conversation window (session load helpers and tests).
-func (a *AgentHarness) RestoreMessages(window []*Message) {
+// AskUserQuestion returns the ask_user_choice question for toolCallID, or empty.
+// Used by ACP elicitation.
+func (a *AgentHarness) AskUserQuestion(toolCallID string) string {
+	return askUserQuestionFromState(&a.runtime, toolCallID)
+}
+
+func (a *AgentHarness) restoreMessages(window []*Message) {
 	a.context.Restore(window)
 }
 
-// checkpointSaveTimeout bounds durable save when the turn context is already
-// cancelled (abort / client disconnect). Long enough for local or cloud stores.
+// checkpointSaveTimeout is the max save duration when the turn context is cancelled.
 const checkpointSaveTimeout = 10 * time.Second
 
-// persistSession writes a durable snapshot of harness state for recovery.
-//
-// This is the fail-safe entry point for all Run exit paths (complete, interrupt
-// park, cancel, model/tool errors). It never returns an error to callers:
-// save failures are logged and metered so the turn can still finish cleanly.
-//
-// Skips when there is no store or no session id (in-memory demos without binding).
-// Save always uses a bounded context that survives turn cancel so aborts still
-// leave a checkpoint.
+// persistSession saves harness state on every Run exit path.
+// Failures are logged only; the turn still ends. Skips when store or session id
+// is missing. Uses a timeout that outlives turn cancel so abort still checkpoints.
 func (a *AgentHarness) persistSession(ctx context.Context, reason string) {
 	if a == nil || a.store == nil || strings.TrimSpace(a.sessionId) == "" {
 		return
 	}
-	// Preserve trace/baggage from the turn without inheriting cancel.
+	// Keep trace context; drop cancel so save can finish after abort.
 	parent := context.Background()
 	if ctx != nil {
 		parent = context.WithoutCancel(ctx)
@@ -132,9 +115,8 @@ func (a *AgentHarness) persistSession(ctx context.Context, reason string) {
 	)
 }
 
-// checkpointSession captures window, plan/session state, and pending tool maps
-// then saves via BaseStore. Prefer persistSession from Run paths so save
-// failures stay non-fatal and cancel-safe.
+// checkpointSession builds and stores a SessionCheckpoint. Call persistSession
+// from Run so save errors stay non-fatal.
 func (a *AgentHarness) checkpointSession(ctx context.Context) error {
 	msgs := a.Messages()
 	slog.Debug("checkpointing session", "session_id", a.sessionId, "context_window_size", len(msgs))
@@ -290,8 +272,6 @@ Simple follow-up questions that do not change project scope do **not** require c
 If an active to-do is sufficiently large and parallel work would improve efficiency, delegate portions of that to-do to available subagents and use their summarized results to complete the parent task.
 
 `
-	// web_search / web_fetch are described only via tool schemas (provider tool list).
-	// Do not add usage policy here.
 	if skillCatalog != "" {
 		builtIn = fmt.Sprintf(`%s
 
@@ -332,7 +312,7 @@ These instructions describe how the user generally wants you to behave, not what
 	return builtIn
 }
 
-// addToContext absorbs a message via ModelTasks (may compress under pressure).
+// addToContext absorbs newMsg (may compress under pressure) and streams summary chunks.
 func (a *AgentHarness) addToContext(ctx context.Context, newMsg *Message, out chan StreamEvent) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -356,23 +336,11 @@ func (a *AgentHarness) applyBatchToolResultEffect(ctx context.Context, effect To
 		if a.session != nil {
 			doc = a.session.Plan().Document()
 		}
-		// Milestone: plan document installed into the context window.
-		ctx, span := telemetry.TracerFromContext(ctx).Start(ctx, telemetry.SpanPlanInstall,
-			trace.WithAttributes(
-				attribute.String(telemetry.AttrArea, telemetry.AreaContext),
-				attribute.String(telemetry.AttrSessionID, a.sessionId),
-			),
-		)
-		defer span.End()
+		ctx, span := telemetry.StartPlanInstallSpan(ctx, a.sessionId)
 		slog.InfoContext(ctx, "installing plan document into context", "session_id", a.sessionId, "area", telemetry.AreaContext)
-		if err := a.context.InstallPlanDocument(doc); err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
-			span.SetAttributes(attribute.String(telemetry.AttrOutcome, telemetry.OutcomeError))
-			return err
-		}
-		span.SetAttributes(attribute.String(telemetry.AttrOutcome, telemetry.OutcomeOK))
-		return nil
+		err := a.context.InstallPlanDocument(doc)
+		span.End(err)
+		return err
 	case EffectHandoff:
 		slog.InfoContext(ctx, "todos completed or plan revised; running handoff", "session_id", a.sessionId, "area", telemetry.AreaContext)
 		var todos []Todo
@@ -381,7 +349,6 @@ func (a *AgentHarness) applyBatchToolResultEffect(ctx context.Context, effect To
 			todos = a.session.Plan().Get()
 			doc = a.session.Plan().Document()
 		}
-		// Handoff metrics (ok | fallback | error) are recorded inside ModelTasks.Handoff.
 		return a.tasks.Handoff(ctx, todos, doc, a.tools, a.constructSystemPrompt())
 	default:
 		return nil
@@ -398,17 +365,9 @@ func (a *AgentHarness) findTool(name, namespace string) *Tool {
 	return a.tools[idx]
 }
 
-// emit sends an event without blocking past cancel. Returns false if ctx is done.
-//
-// Prefer ctx.Err() for non-blocking "should we stop?" checks between steps.
-// Use select on ctx.Done() only when waiting (channel send/recv). Done() returns
-// the same channel for a given Context; it does not allocate a new one each call.
+// emit sends ev or returns false when ctx is done.
 func emit(ctx context.Context, out chan<- StreamEvent, ev StreamEvent) bool {
-	if out == nil {
-		return false
-	}
-	// Fast path: already cancelled — avoid racing a send.
-	if ctx.Err() != nil {
+	if out == nil || ctx.Err() != nil {
 		return false
 	}
 	select {
@@ -419,42 +378,15 @@ func emit(ctx context.Context, out chan<- StreamEvent, ev StreamEvent) bool {
 	}
 }
 
-// recvChunk waits for the next model chunk or context cancel.
-// ok is false when the stream channel is closed. err is ctx.Err() on cancel.
-func recvChunk(ctx context.Context, events <-chan LLMResponseChunk) (chunk LLMResponseChunk, ok bool, err error) {
-	select {
-	case <-ctx.Done():
-		return LLMResponseChunk{}, false, ctx.Err()
-	case chunk, ok = <-events:
-		return chunk, ok, nil
-	}
-}
-
-// emitNonBlocking tries to send without waiting; used for cancel notices so we
-// never block the producer on a full or unattended channel.
-func emitNonBlocking(out chan<- StreamEvent, ev StreamEvent) {
-	if out == nil {
-		return
-	}
-	select {
-	case out <- ev:
-	default:
-	}
-}
-
-// streamChunk emits a StreamEvent onto the harness bus. For function_call
-// chunks, client-facing tool metadata (display name, category) is applied on a
-// copy so execution still uses the real tool Name. Wire framing (ACP, SSE,
-// future A2A) is owned by server.Protocol — not here.
+// streamChunk maps a model chunk to a harness StreamEvent.
+// Function-call display name/category are set on a copy; execution still uses
+// the real tool Name. Ignores StreamEventComplete (usage only; Run ends the turn).
 func (a *AgentHarness) streamChunk(ctx context.Context, chunk LLMResponseChunk, out chan<- StreamEvent) bool {
-	// Provider usage is carried on StreamEventComplete from the inference layer.
-	// That is not a harness terminal event — Run emits complete when the turn ends.
 	if chunk.Type == StreamEventComplete {
 		return true
 	}
 	toolCalls := chunk.ToolCalls
 	if chunk.Type == streaming.StreamEventFunctionCall && len(chunk.ToolCalls) > 0 {
-		// Do not mutate chunk.ToolCalls — the Run loop appends them for Invoke.
 		toolCalls = append([]ToolCall(nil), chunk.ToolCalls...)
 		for i := range toolCalls {
 			tool := a.findTool(toolCalls[i].Name, toolCalls[i].Namespace)
@@ -481,9 +413,7 @@ func (a *AgentHarness) streamChunk(ctx context.Context, chunk LLMResponseChunk, 
 	})
 }
 
-// toolCallKey is the stable identifier used for ACP toolCallId and lifecycle maps.
-// Prefer provider item id when present; fall back to call_id (llama.cpp often
-// only sets call_id).
+// toolCallKey is the client/lifecycle id: provider item id, else call_id.
 func toolCallKey(tc ToolCall) string {
 	if tc.ID != "" {
 		return tc.ID
@@ -491,9 +421,7 @@ func toolCallKey(tc ToolCall) string {
 	return tc.CallID
 }
 
-// toolCallWireID is the id used on Responses API function_call / function_call_output
-// (JSON field call_id). Prefer CallID; fall back to ID when only one is set
-// (llama.cpp call_id-only; some Azure payloads set both with different values).
+// toolCallWireID is the Responses API call_id field: CallID, else ID.
 func toolCallWireID(tc ToolCall) string {
 	if tc.CallID != "" {
 		return tc.CallID
@@ -501,16 +429,11 @@ func toolCallWireID(tc ToolCall) string {
 	return tc.ID
 }
 
-// stripUnpairedToolCallsAfterInferenceError prepares the live window for the
-// deferred run_exit checkpoint after a provider/model failure. Keeps the window
-// otherwise intact, but drops function_call items with no tool result (and tool
-// results with no matching function_call) so the next session prompt does not
-// re-submit invalid Responses pairing. Pending interrupt tool calls are kept
-// without a result so park/resume still works.
-//
-// Call only on inference-error exit paths — not on normal complete or interrupt park.
+// stripUnpairedToolCallsAfterInferenceError removes unpaired function_call /
+// tool-result messages so the next prompt has valid Responses pairing.
+// Keeps pending interrupt tool calls. Call only on inference-error exits.
 func (a *AgentHarness) stripUnpairedToolCallsAfterInferenceError() {
-	if a == nil || a.context == nil {
+	if a.context == nil {
 		return
 	}
 	a.pendingMu.Lock()
@@ -530,8 +453,17 @@ func (a *AgentHarness) stripUnpairedToolCallsAfterInferenceError() {
 
 	before := a.Messages()
 	after := stripUnpairedToolTurns(before, keep)
-	if sameMessageWindow(before, after) {
-		return
+	if len(before) == len(after) {
+		same := true
+		for i := range before {
+			if before[i] != after[i] {
+				same = false
+				break
+			}
+		}
+		if same {
+			return
+		}
 	}
 	a.context.Replace(after)
 	slog.Info("stripped unpaired tool turns after inference error",
@@ -541,8 +473,8 @@ func (a *AgentHarness) stripUnpairedToolCallsAfterInferenceError() {
 	)
 }
 
-// stripUnpairedToolTurns returns a new window without unpaired tool turns.
-// keepCallIDs are call_ids that may lack a tool result (active interrupts).
+// stripUnpairedToolTurns drops unpaired tool turns. keepCallIDs may lack results
+// (active interrupts).
 func stripUnpairedToolTurns(window []*Message, keepCallIDs map[string]struct{}) []*Message {
 	if len(window) == 0 {
 		return window
@@ -614,19 +546,6 @@ func stripUnpairedToolTurns(window []*Message, keepCallIDs map[string]struct{}) 
 	return out
 }
 
-func sameMessageWindow(a, b []*Message) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
-// recordWatchdog records assistant output or tool results on the optional watchdog.
 func (a *AgentHarness) recordWatchdog(msg *Message) {
 	if a.watchDog == nil || msg == nil {
 		return
@@ -639,12 +558,12 @@ func (a *AgentHarness) recordWatchdog(msg *Message) {
 		err = a.watchDog.RecordOutput(msg)
 	}
 	if err != nil {
-		slog.Warn("watchdog record failed", "role", msg.Role, "error", err)
+		slog.WarnContext(context.Background(), "optional watchdog failed to record message",
+			"role", msg.Role, "error", err)
 	}
 }
 
-// emitToolResult records a tool result message, stores it for the turn, and
-// emits StreamEventToolResult. Returns the tool message for the context window.
+// emitToolResult emits StreamEventToolResult and returns the tool Message for the window.
 func (a *AgentHarness) emitToolResult(ctx context.Context, out chan<- StreamEvent, tc ToolCall, content, status string) *Message {
 	if status != "" {
 		tc.Status = status
@@ -664,17 +583,11 @@ func (a *AgentHarness) emitToolResult(ctx context.Context, out chan<- StreamEven
 	return msg
 }
 
-// discoverAllTools is the MCP discovery entry used by initMCP. Tests may swap
-// it to inject tools without a live MCP transport.
+// discoverAllTools is the MCP discovery entry. Tests may replace it.
 var discoverAllTools = mcpruntime.DiscoverAllTools
 
-// initMCP connects to all configured MCP servers, discovers their tools, and
-// appends them to a.tools. It is idempotent — subsequent calls are no-ops so
-// that ReturnFromInterrupt → Run does not re-discover. When no configs are set
-// yet, initialization is deferred so callers can still supply MCPConfigs later.
-//
-// Unreachable servers are logged and skipped; their tools are not injected
-// into the context window but reachable servers' tools are still available.
+// initMCP discovers MCP tools once and appends them. Skips unreachable servers.
+// No-op when already initialized or when no configs are set.
 func (a *AgentHarness) initMCP(ctx context.Context) {
 	if a.mcpInitialized {
 		return
@@ -698,9 +611,8 @@ func (a *AgentHarness) initMCP(ctx context.Context) {
 	})
 }
 
-// Close releases all resources held by the harness, including MCP client
-// connections. It should be called when the harness is no longer needed
-// (typically after the events channel from Run has been drained).
+// Close releases harness resources (for example MCP clients).
+// Call after the Run events channel is drained.
 func (a *AgentHarness) Close() {
 	if a.mcpCleanup != nil {
 		a.mcpCleanup()

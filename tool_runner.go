@@ -8,24 +8,19 @@ import (
 	"github.com/ryanaldo34/tacklr/interrupt"
 )
 
-// ToolInvocation is a single tool call as it moves through the runner chain.
-// Exported so consumers can implement custom ToolInterceptors via AgentOptions.
+// ToolInvocation is one tool call in the interceptor chain.
 type ToolInvocation struct {
 	Tool     *Tool
 	ArgsJSON string
 	Runtime  HarnessRuntime
 }
 
-// ToolCallFunc is the next step in the interceptor chain, or the final invoke.
+// ToolCallFunc is the next interceptor step or the final tool invoke.
 type ToolCallFunc func(ctx context.Context, inv ToolInvocation) (string, error)
 
-// ToolInterceptor gates or wraps a tool call. Call next to continue the chain;
-// return without calling next to short-circuit with a result for the context window.
-// Close over any state the interceptor needs.
-//
-// When AgentOptions.ToolInterceptors is nil, the harness installs its built-in
-// chain (planning write lock, then permission gate). A non-nil slice replaces
-// that chain entirely (empty disables interceptors).
+// ToolInterceptor wraps a tool call. Call next to continue, or return early to
+// short-circuit. Nil ToolInterceptors uses the built-in planning lock and
+// permission gate; a non-nil slice replaces that chain.
 type ToolInterceptor func(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error)
 
 type toolRunner struct {
@@ -38,8 +33,8 @@ func newToolRunner(interceptors ...ToolInterceptor) *toolRunner {
 	return &toolRunner{interceptors: cp}
 }
 
-// Run executes the interceptor chain and the tool. Disposition comes only from
-// the final tool invoke (BuiltinResult); interceptor short-circuits yield none.
+// Run runs the interceptor chain and the tool.
+// Disposition comes from the final invoke (BuiltinResult); short-circuits have none.
 func (r *toolRunner) Run(ctx context.Context, inv ToolInvocation) (string, ToolResultDisposition, error) {
 	if inv.Tool == nil {
 		return "", ToolResultDisposition{}, fmt.Errorf("%w", ErrToolNotFound)
@@ -67,8 +62,8 @@ func (r *toolRunner) Run(ctx context.Context, inv ToolInvocation) (string, ToolR
 	return out, toolDisp, err
 }
 
-// toolPermissionGate raises a tool_permission interrupt when PermissionRequired
-// is set. allow_always / reject_always choices are remembered for the session.
+// toolPermissionGate raises tool_permission when PermissionRequired is set.
+// allow_always and reject_always are stored for the session.
 func toolPermissionGate(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error) {
 	if inv.Tool == nil || !inv.Tool.PermissionRequired {
 		return next(ctx, inv)

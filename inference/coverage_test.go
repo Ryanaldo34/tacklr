@@ -298,8 +298,8 @@ func TestParseAPIErrorMeta_nonJSON(t *testing.T) {
 	if code != "" || typ != "" {
 		t.Fatalf("code=%q typ=%q", code, typ)
 	}
-	// Valid error object used by ClassifyProviderFailure.
-	err := ClassifyProviderFailure(400, []byte(`not-json`))
+	// Valid error object used by classifyProviderFailure.
+	err := classifyProviderFailure(400, []byte(`not-json`))
 	if err == nil {
 		t.Fatal("expected error")
 	}

@@ -204,7 +204,7 @@ func TestParseSSE_incompleteFailedAndRefusal(t *testing.T) {
 		}
 	}
 
-	// Failed with provider error object → ClassifyProviderFailure (mustJSON path).
+	// Failed with provider error object → classifyAPIStatus path.
 	bodyErrObj := strings.Join([]string{
 		`data: {"type":"response.failed","error":{"code":"content_filter","message":"blocked by filter","type":"invalid_request_error"}}`,
 		`data: [DONE]`,

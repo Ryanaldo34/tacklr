@@ -4,10 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 
-	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
@@ -266,7 +266,7 @@ func resolveSelectionViaElicitation(ctx context.Context, env ProtocolEnv, thread
 	}
 	question := ""
 	if stream.Harness != nil {
-		question = tacklr.AskUserQuestionFromState(stream.Harness.ToolRuntime(), ev.MessageID)
+		question = stream.Harness.AskUserQuestion(ev.MessageID)
 	}
 	params, err := SelectionToElicitationParams(threadID, ev.MessageID, question, opts)
 	if err != nil {
@@ -320,5 +320,5 @@ func acpInitializeResult() map[string]any {
 
 func readHTTPBody(r *http.Request) ([]byte, error) {
 	defer r.Body.Close()
-	return readAllLimited(r.Body, 16<<20)
+	return io.ReadAll(io.LimitReader(r.Body, 16<<20))
 }

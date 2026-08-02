@@ -9,16 +9,17 @@ import (
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
-// runtimeOutput holds the turn event channel behind a pointer shared across
-// Runtime shallow copies.
+// runtimeOutput is the turn event channel shared across Runtime value copies.
 type runtimeOutput struct {
 	mu sync.RWMutex
 	ch chan streaming.StreamEvent
 }
 
-// Runtime is the tool-facing hook surface: StateGet/Set, interrupts, EmitUpdate,
-// Store, CurrentToolCallID. Session data lives on SessionManager (unexported).
-// Re-exported publicly as tacklr.HarnessRuntime.
+// Runtime is the tool hook surface (re-exported as tacklr.HarnessRuntime).
+// Methods for tools: EmitUpdate, StateGet, StateSet, StateDelete, RaiseInterrupt.
+// Fields for tools: Store, CurrentToolCallID.
+//
+// Turn lifecycle is package-level functions below (module-only), not methods.
 type Runtime struct {
 	Store             stores.BaseStore
 	CurrentToolCallID string
@@ -27,7 +28,7 @@ type Runtime struct {
 	out     *runtimeOutput
 }
 
-// NewRuntime builds a tool-facing Runtime facade over sm.
+// NewRuntime builds a Runtime over sm.
 func NewRuntime(ch chan streaming.StreamEvent, store stores.BaseStore, sm *SessionManager) Runtime {
 	if sm == nil {
 		sm = NewSessionManager()
@@ -40,8 +41,7 @@ func NewRuntime(ch chan streaming.StreamEvent, store stores.BaseStore, sm *Sessi
 	}
 }
 
-// EnsureInitialized attaches a SessionManager and output box when missing.
-func (rt *Runtime) EnsureInitialized() {
+func (rt *Runtime) ensureInitialized() {
 	if rt.session == nil {
 		rt.session = NewSessionManager()
 	}
@@ -51,6 +51,7 @@ func (rt *Runtime) EnsureInitialized() {
 	}
 }
 
+// EmitUpdate sends a non-blocking tool progress update for the current call.
 func (rt *Runtime) EmitUpdate(message string) {
 	ch := rt.outputChannel()
 	if ch == nil {
@@ -67,31 +68,6 @@ func (rt *Runtime) EmitUpdate(message string) {
 	}
 }
 
-func (rt *Runtime) EmitPlanUpdate(plan []Todo) {
-	ch := rt.outputChannel()
-	if ch == nil {
-		return
-	}
-	data, _ := json.Marshal(plan)
-	// Non-blocking: never hang tests or tool goroutines if the turn consumer
-	// has stopped draining (cancel/teardown). Mid-turn the harness buffer is
-	// sized so plan updates are not dropped under normal load.
-	select {
-	case ch <- streaming.StreamEvent{
-		Type: streaming.StreamEventPlanUpdate,
-		Data: data,
-	}:
-	default:
-	}
-}
-
-func (rt *Runtime) SetOutputChannel(ch chan streaming.StreamEvent) {
-	rt.EnsureInitialized()
-	rt.out.mu.Lock()
-	rt.out.ch = ch
-	rt.out.mu.Unlock()
-}
-
 func (rt *Runtime) outputChannel() chan streaming.StreamEvent {
 	if rt.out == nil {
 		return nil
@@ -102,47 +78,99 @@ func (rt *Runtime) outputChannel() chan streaming.StreamEvent {
 	return ch
 }
 
+// StateGet returns a session value stored with StateSet.
 func (rt *Runtime) StateGet(key string) (any, bool) {
-	rt.EnsureInitialized()
+	rt.ensureInitialized()
 	return rt.session.stateGet(key)
 }
 
+// StateSet stores a session value for tools and interceptors.
 func (rt *Runtime) StateSet(key string, value any) {
-	rt.EnsureInitialized()
+	rt.ensureInitialized()
 	rt.session.stateSet(key, value)
 }
 
+// StateDelete removes a session value.
 func (rt *Runtime) StateDelete(key string) {
-	rt.EnsureInitialized()
+	rt.ensureInitialized()
 	rt.session.stateDelete(key)
 }
 
-func (rt *Runtime) HasPendingInterrupt() bool {
-	rt.EnsureInitialized()
+// RaiseInterrupt parks the current tool until the host resumes with a payload.
+func (rt *Runtime) RaiseInterrupt(kind string, payload []byte) (interrupt.Interrupt, error) {
+	rt.ensureInitialized()
+	return rt.session.raiseInterrupt(rt.CurrentToolCallID, kind, payload)
+}
+
+// Module-only harness control (not methods on Runtime / HarnessRuntime).
+
+// EnsureInitialized prepares session state when missing.
+func EnsureInitialized(rt *Runtime) {
+	if rt == nil {
+		return
+	}
+	rt.ensureInitialized()
+}
+
+// SetOutputChannel binds the turn event channel for EmitUpdate and plan updates.
+func SetOutputChannel(rt *Runtime, ch chan streaming.StreamEvent) {
+	if rt == nil {
+		return
+	}
+	rt.ensureInitialized()
+	rt.out.mu.Lock()
+	rt.out.ch = ch
+	rt.out.mu.Unlock()
+}
+
+// EmitPlanUpdate sends a plan_update stream event (plan tools).
+func EmitPlanUpdate(rt *Runtime, plan []Todo) {
+	if rt == nil {
+		return
+	}
+	ch := rt.outputChannel()
+	if ch == nil {
+		return
+	}
+	data, _ := json.Marshal(plan)
+	select {
+	case ch <- streaming.StreamEvent{
+		Type: streaming.StreamEventPlanUpdate,
+		Data: data,
+	}:
+	default:
+	}
+}
+
+// HasPendingInterrupt is true when any interrupt is still open.
+func HasPendingInterrupt(rt *Runtime) bool {
+	if rt == nil {
+		return false
+	}
+	rt.ensureInitialized()
 	return rt.session.hasPendingInterrupt()
 }
 
-func (rt *Runtime) ReturnInterrupt(id string, result []byte) (interrupt.Interrupt, error) {
-	rt.EnsureInitialized()
+// ReturnInterrupt resolves a parked interrupt with the host payload.
+func ReturnInterrupt(rt *Runtime, id string, result []byte) (interrupt.Interrupt, error) {
+	rt.ensureInitialized()
 	return rt.session.returnInterrupt(id, result)
 }
 
-func (rt *Runtime) AdoptInterrupt(intr interrupt.Interrupt) (interrupt.Interrupt, error) {
-	rt.EnsureInitialized()
+// AdoptInterrupt attaches a child interrupt to the current tool call.
+func AdoptInterrupt(rt *Runtime, intr interrupt.Interrupt) (interrupt.Interrupt, error) {
+	rt.ensureInitialized()
 	return rt.session.adoptInterrupt(rt.CurrentToolCallID, intr)
 }
 
-func (rt *Runtime) TakeResolvedInterrupt(id string) (interrupt.Interrupt, bool) {
-	rt.EnsureInitialized()
+// TakeResolvedInterrupt removes and returns a resolved interrupt if present.
+func TakeResolvedInterrupt(rt *Runtime, id string) (interrupt.Interrupt, bool) {
+	rt.ensureInitialized()
 	return rt.session.takeResolvedInterrupt(id)
 }
 
-func (rt *Runtime) PendingInterrupt(id string) (interrupt.Interrupt, bool) {
-	rt.EnsureInitialized()
+// PendingInterrupt returns an open interrupt for tool-call id if any.
+func PendingInterrupt(rt *Runtime, id string) (interrupt.Interrupt, bool) {
+	rt.ensureInitialized()
 	return rt.session.pendingInterrupt(id)
-}
-
-func (rt *Runtime) RaiseInterrupt(kind string, payload []byte) (interrupt.Interrupt, error) {
-	rt.EnsureInitialized()
-	return rt.session.raiseInterrupt(rt.CurrentToolCallID, kind, payload)
 }

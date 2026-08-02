@@ -10,12 +10,9 @@ import (
 	"testing"
 
 	"github.com/ryanaldo34/tacklr/internal/exa"
-	"github.com/ryanaldo34/tacklr/streaming"
 )
 
 // Tests for Exa-backed web_search and web_fetch tools.
-
-// Source: web_search_test.go
 
 // TestWebSearchTool_strictSchemaRequired ensures every property is in required
 // (OpenAI / DeepSeek strict function tools).
@@ -167,7 +164,8 @@ func TestWebSearchTool_invokeAgainstServer(t *testing.T) {
 	client.HTTPClient = srv.Client()
 	tool := newWebSearchTool(client)
 
-	got, err := tool.Invoke(context.Background(), `{"query":"capital of France"}`, HarnessRuntime{})
+	res, err := tool.invoke(context.Background(), `{"query":"capital of France"}`, HarnessRuntime{})
+	got := res.output
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,11 +226,6 @@ func TestResolveExaAPIKey_optionsWinOverEnv(t *testing.T) {
 		t.Fatal(got)
 	}
 }
-
-// Ensure streaming category constant is used (compile-time link for tools).
-var _ = streaming.ToolCategorySearch
-
-// Source: web_fetch_test.go
 
 // TestWebFetchTool_strictSchemaRequired ensures every property is in required.
 func TestWebFetchTool_strictSchemaRequired(t *testing.T) {
@@ -364,39 +357,5 @@ func TestRunWebFetch_endToEnd(t *testing.T) {
 	}
 	if !strings.Contains(got, "City Code") || !strings.Contains(got, "setbacks") {
 		t.Fatal(got)
-	}
-}
-
-// TestInjectBuiltinTools_webToolsGatedOnAPIKey registers search + fetch with a key.
-func TestInjectBuiltinTools_webToolsGatedOnAPIKey(t *testing.T) {
-	t.Setenv("EXA_API_KEY", "")
-	hOff := NewAgent(context.Background(), AgentOptions{
-		Config: Config{MaxWindowSize: 1024},
-		Model:  &mockStrategy{},
-	})
-	if hOff.findTool("web_search", "") != nil || hOff.findTool("web_fetch", "") != nil {
-		t.Fatal("expected no web tools without key")
-	}
-	// Tool usage lives in schemas only — system prompt must not document them.
-	if strings.Contains(hOff.constructSystemPrompt(), "web_search") ||
-		strings.Contains(hOff.constructSystemPrompt(), "web_fetch") {
-		t.Fatal("system prompt must not mention web tools")
-	}
-
-	hOn := NewAgent(context.Background(), AgentOptions{
-		Config:    Config{MaxWindowSize: 1024},
-		Model:     &mockStrategy{},
-		ExaAPIKey: "from-options",
-	})
-	if hOn.findTool("web_search", "") == nil {
-		t.Fatal("expected web_search")
-	}
-	if hOn.findTool("web_fetch", "") == nil {
-		t.Fatal("expected web_fetch")
-	}
-	prompt := hOn.constructSystemPrompt()
-	if strings.Contains(prompt, "web_search") || strings.Contains(prompt, "web_fetch") ||
-		strings.Contains(prompt, "### Web search") {
-		t.Fatalf("system prompt must not document web tools, got snippet containing web_*:\n%s", prompt)
 	}
 }

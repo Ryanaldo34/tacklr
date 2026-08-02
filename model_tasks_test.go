@@ -264,7 +264,7 @@ func TestDefaultModelTasks_Handoff_streamError_usesFallback(t *testing.T) {
 			sawTools = tools
 			ch <- LLMResponseChunk{
 				Type:       StreamEventError,
-				Content:    "api error (status 200): response incomplete or failed; status=failed",
+				Content:    "provider HTTP 200: stream ended without a usable response; status=failed",
 				IsComplete: true,
 			}
 		},
@@ -344,7 +344,7 @@ func TestWatchModelStream_cancelEndsSpan(t *testing.T) {
 
 	in := make(chan LLMResponseChunk)
 	ctx, span := telemetry.StartModelSpan(ctx, telemetry.ModelPhaseTurn, 1, telemetry.WindowShape{Messages: 1})
-	out := watchModelStream(ctx, span, telemetry.ModelPhaseTurn, in)
+	out := watchModelStream(ctx, span, in)
 
 	go func() {
 		select {
@@ -393,7 +393,7 @@ func TestWatchModelStream_streamErrorEndsSpanEvenIfConsumerStops(t *testing.T) {
 	ctx := telemetry.ContextWithTracer(context.Background(), tp.Tracer("test"))
 	in := make(chan LLMResponseChunk, 8)
 	ctx, span := telemetry.StartModelSpan(ctx, telemetry.ModelPhaseTurn, 2, telemetry.WindowShape{})
-	out := watchModelStream(ctx, span, telemetry.ModelPhaseTurn, in)
+	out := watchModelStream(ctx, span, in)
 
 	in <- LLMResponseChunk{Type: StreamEventMessage, Content: "hi"}
 	in <- LLMResponseChunk{Type: StreamEventError, Content: "provider boom", Error: errors.New("provider boom")}

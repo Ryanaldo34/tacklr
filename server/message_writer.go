@@ -121,11 +121,11 @@ type wsMessageWriter struct {
 }
 
 func (m *wsMessageWriter) WriteResult(id json.RawMessage, result any) error {
-	return writeWSJSON(m.ctx, m.c, map[string]any{"id": id, "result": result})
+	return wsWriteJSON(m.ctx, m.c, map[string]any{"id": id, "result": result})
 }
 
 func (m *wsMessageWriter) WriteError(id json.RawMessage, err error) error {
-	return writeWSJSON(m.ctx, m.c, wsServerEvent{Type: "error", Content: PublicError(err).Error()})
+	return wsWriteJSON(m.ctx, m.c, wsServerEvent{Type: "error", Content: PublicError(err).Error()})
 }
 
 func (m *wsMessageWriter) WriteFrame(data []byte) error {

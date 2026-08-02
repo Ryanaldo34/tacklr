@@ -10,21 +10,11 @@ import (
 	"strings"
 	"sync"
 
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/trace"
-
 	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
-// ModelTasks product ops and stream assembly for turn/handoff/compress.
-
-// Source: stream_assembler.go
-
-// streamAssembler accumulates model stream deltas by type+message id and
-// resolves full content when a complete chunk arrives (with empty Content).
-// Shared by the Run turn loop and ContextManager.Handoff.
+// streamAssembler accumulates stream deltas by type and message id.
 type streamAssembler struct {
 	buf map[string]string
 }
@@ -33,31 +23,22 @@ func newStreamAssembler() *streamAssembler {
 	return &streamAssembler{buf: make(map[string]string)}
 }
 
-func streamChunkKey(chunk LLMResponseChunk) string {
-	return string(chunk.Type) + ":" + chunk.MessageId
-}
-
-// AddDelta records a non-complete content delta for message or reasoning streams.
 func (s *streamAssembler) AddDelta(chunk LLMResponseChunk) {
-	if s == nil || s.buf == nil || chunk.IsComplete || chunk.Content == "" {
+	if chunk.IsComplete || chunk.Content == "" {
 		return
 	}
 	if chunk.Type != StreamEventMessage && chunk.Type != StreamEventReasoning {
 		return
 	}
-	s.buf[streamChunkKey(chunk)] += chunk.Content
+	s.buf[string(chunk.Type)+":"+chunk.MessageId] += chunk.Content
 }
 
-// CompleteContent returns the full text for a completed chunk, preferring
-// chunk.Content and falling back to accumulated deltas.
+// CompleteContent returns chunk.Content, or accumulated deltas if Content is empty.
 func (s *streamAssembler) CompleteContent(chunk LLMResponseChunk) string {
 	if chunk.Content != "" {
 		return chunk.Content
 	}
-	if s == nil || s.buf == nil {
-		return ""
-	}
-	return s.buf[streamChunkKey(chunk)]
+	return s.buf[string(chunk.Type)+":"+chunk.MessageId]
 }
 
 // MessageFromComplete builds a context-window Message for a completed
@@ -75,53 +56,41 @@ func (s *streamAssembler) MessageFromComplete(chunk LLMResponseChunk) *Message {
 	}
 }
 
-// Source: model_tasks.go
-
-// modelTelemetrySource is optionally implemented by InferenceStrategy so model
-// spans can set static GenAI identity attrs at start.
-type modelTelemetrySource interface {
-	ModelName() string
-	BaseURL() string
+// modelIdentityProvider is optionally implemented by InferenceStrategy so model
+// spans can set static GenAI identity attrs at start without exposing provider
+// URL/model fields on the public InferenceStrategy interface.
+type modelIdentityProvider interface {
+	ModelTelemetryIdentity() telemetry.ModelIdentity
 }
 
-// AbsorbResult is returned by ModelTasks.Absorb after incorporating a message.
-// Small value type (slice header only).
+// AbsorbResult is returned by Absorb after incorporating a message.
 type AbsorbResult struct {
-	// SummaryChunks when StreamFitSummary is true; harness streams to the client.
+	// SummaryChunks are compress summaries to stream when StreamFitSummary is true.
 	SummaryChunks []LLMResponseChunk
 }
 
-// ModelTasks runs product-level model operations.
-// It uses InferenceStrategy for transport and provider CountTokens, and
-// ContextManager for reading/applying structured windows.
-// Token counting is not a product method — it stays on InferenceStrategy.
+// ModelTasks is Turn, Absorb, and Handoff against InferenceStrategy and ContextManager.
 type ModelTasks interface {
-	// Turn streams the next agent step for the current context and tools.
+	// Turn streams the next model step for the current window and tools.
 	Turn(ctx context.Context, tools []*Tool, systemPrompt string) (<-chan LLMResponseChunk, error)
-
-	// Absorb incorporates msg under window pressure (may summarize via the model).
+	// Absorb adds msg under window pressure (may summarize).
 	Absorb(ctx context.Context, msg *Message, tools []*Tool, systemPrompt string) (AbsorbResult, error)
-
-	// Handoff rebuilds context after complete_todo or plan-document edit.
+	// Handoff rebuilds context after complete_todo or plan edit.
 	Handoff(ctx context.Context, plan []Todo, planDoc string, tools []*Tool, systemPrompt string) error
 }
 
-// DefaultModelTasks is the standard ModelTasks implementation.
-// Stored as a pointer on the harness (interface holds *DefaultModelTasks).
+// DefaultModelTasks is the product ModelTasks implementation.
 type DefaultModelTasks struct {
-	model   InferenceStrategy
-	context ContextManager
-	policy  ContextPolicy
-	maxSize int
-	// modelSeq is a 1-based Invoke counter for tacklr.model.seq (turn lifetime).
-	modelSeq int
+	model    InferenceStrategy
+	context  ContextManager
+	policy   ContextPolicy
+	maxSize  int
+	modelSeq int // 1-based Invoke count for model span seq
 
-	// countScratch is reused by absorbFit's progressive token-count search so
-	// each pressure step does not allocate a new message pointer slice.
-	countScratch []*Message
+	countScratch []*Message // reused for progressive token counts
 }
 
-// NewDefaultModelTasks wires provider + context structure for product model ops.
+// NewDefaultModelTasks builds DefaultModelTasks for model, context, and policy.
 func NewDefaultModelTasks(model InferenceStrategy, ctx ContextManager, policy ContextPolicy, maxSize int) *DefaultModelTasks {
 	if policy.PressureRatio <= 0 && policy.CompressFraction <= 0 {
 		policy = DefaultContextPolicy()
@@ -148,17 +117,16 @@ func (t *DefaultModelTasks) Turn(ctx context.Context, tools []*Tool, systemPromp
 	}
 	msgs := t.context.Messages()
 	t.modelSeq++
-	ctx = withModelIdentity(ctx, t.model)
-	if telemetry.AfterToolsFromContext(ctx) {
-		telemetry.EmitModelAfterTools(ctx)
+	if src, ok := t.model.(modelIdentityProvider); ok {
+		ctx = telemetry.ContextWithModelIdentity(ctx, src.ModelTelemetryIdentity())
 	}
 	ctx, span := telemetry.StartModelSpan(ctx, telemetry.ModelPhaseTurn, t.modelSeq, windowShape(msgs))
 	ch, err := t.model.Invoke(ctx, msgs, tools)
 	if err != nil {
-		endModelFromErr(ctx, span, telemetry.ModelPhaseTurn, err, telemetry.TokenUsage{})
+		span.End(err, telemetry.TokenUsage{})
 		return nil, err
 	}
-	return watchModelStream(ctx, span, telemetry.ModelPhaseTurn, ch), nil
+	return watchModelStream(ctx, span, ch), nil
 }
 
 func (t *DefaultModelTasks) Absorb(ctx context.Context, msg *Message, tools []*Tool, systemPrompt string) (AbsorbResult, error) {
@@ -168,12 +136,10 @@ func (t *DefaultModelTasks) Absorb(ctx context.Context, msg *Message, tools []*T
 	if msg == nil {
 		return AbsorbResult{}, nil
 	}
-	// Absorb/compress is context plumbing — not a turn-lifecycle span.
 	window, chunks, _, err := t.absorbFit(ctx, t.context.Messages(), msg, tools, systemPrompt)
 	if err != nil {
 		return AbsorbResult{}, err
 	}
-	// window is freshly allocated; Replace takes ownership (no second copy).
 	t.context.Replace(window)
 	return AbsorbResult{SummaryChunks: chunks}, nil
 }
@@ -185,22 +151,12 @@ func (t *DefaultModelTasks) Handoff(ctx context.Context, plan []Todo, planDoc st
 			open++
 		}
 	}
-	// Milestone: context handoff after todo complete / plan revise.
-	ctx, span := telemetry.TracerFromContext(ctx).Start(ctx, telemetry.SpanContextHandoff,
-		trace.WithAttributes(
-			attribute.String(telemetry.AttrArea, telemetry.AreaModelTasks),
-			attribute.Int(telemetry.AttrOpenTodos, open),
-		),
-	)
-	defer span.End()
+	ctx, span := telemetry.StartHandoffSpan(ctx, open)
 	slog.InfoContext(ctx, "running context handoff", "area", telemetry.AreaModelTasks, "open_todos", open)
 
 	window, usedFallback, err := handoffGenerate(ctx, t.context.Messages(), plan, planDoc, t.model, tools, systemPrompt)
 	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-		span.SetAttributes(attribute.String(telemetry.AttrOutcome, telemetry.HandoffOutcomeError))
-		telemetry.InstrumentsFromContext(ctx).RecordHandoff(ctx, telemetry.AgentIDFromContext(ctx), telemetry.HandoffOutcomeError)
+		span.End(telemetry.HandoffOutcomeError, err)
 		return err
 	}
 	t.context.Replace(window)
@@ -208,8 +164,7 @@ func (t *DefaultModelTasks) Handoff(ctx context.Context, plan []Todo, planDoc st
 	if usedFallback {
 		outcome = telemetry.HandoffOutcomeFallback
 	}
-	span.SetAttributes(attribute.String(telemetry.AttrOutcome, outcome))
-	telemetry.InstrumentsFromContext(ctx).RecordHandoff(ctx, telemetry.AgentIDFromContext(ctx), outcome)
+	span.End(outcome, nil)
 	return nil
 }
 
@@ -316,17 +271,18 @@ func (t *DefaultModelTasks) absorbFit(
 		numMessagesToCompress = len(unprotected)
 	}
 
-	// Summarization only — no tool catalog. The unprotected slice is the real
-	// history under pressure (including tool results); do not invent alternate
-	// windows for provider quirks.
+	// Compress unprotected history only; no tools on the summarize call.
 	compressSrc := unprotected[:numMessagesToCompress]
 	t.modelSeq++
-	mctx := withModelIdentity(ctx, model)
+	mctx := ctx
+	if src, ok := model.(modelIdentityProvider); ok {
+		mctx = telemetry.ContextWithModelIdentity(ctx, src.ModelTelemetryIdentity())
+	}
 	mctx, mspan := telemetry.StartModelSpan(mctx, telemetry.ModelPhaseCompress, t.modelSeq, windowShape(compressSrc))
 	events, err := model.Invoke(mctx, compressSrc, nil)
 	if err != nil {
-		endModelFromErr(mctx, mspan, telemetry.ModelPhaseCompress, err, telemetry.TokenUsage{})
-		return nil, nil, true, fmt.Errorf("compress invoke: %w", err)
+		mspan.End(err, telemetry.TokenUsage{})
+		return nil, nil, true, fmt.Errorf("context compress invoke failed: %w", err)
 	}
 
 	summaryMsg := &Message{Role: RoleAssistant}
@@ -337,9 +293,10 @@ func (t *DefaultModelTasks) absorbFit(
 	for chunk := range events {
 		mergeTokenUsage(&usage, chunk)
 		if chunk.Type == StreamEventError {
-			streamErr = fmt.Errorf("compress: %s", chunk.Content)
 			if chunk.Error != nil {
-				streamErr = fmt.Errorf("compress: %w", chunk.Error)
+				streamErr = fmt.Errorf("context compress stream failed: %w", chunk.Error)
+			} else {
+				streamErr = fmt.Errorf("context compress stream failed: %s", chunk.Content)
 			}
 			break
 		}
@@ -348,7 +305,7 @@ func (t *DefaultModelTasks) absorbFit(
 		}
 		summary.WriteString(chunk.Content)
 	}
-	endModelFromErr(mctx, mspan, telemetry.ModelPhaseCompress, streamErr, usage)
+	mspan.End(streamErr, usage)
 	if streamErr != nil {
 		return nil, nil, true, streamErr
 	}
@@ -423,19 +380,19 @@ Current plan todos:
 	prompt.WriteString(planB.String())
 
 	model.SetSystemPrompt(prompt.String())
-	// Handoff is a pure writing task over the current window — tools are not
-	// offered. On model failure, install a plan-derived handoff so ACM still
-	// rebuilds context (todo complete must not leave a half-applied effect).
-	// modelSeq is on the receiver only when called via *DefaultModelTasks methods;
-	// handoffGenerate is a free function — start span without seq when 0.
-	mctx := withModelIdentity(ctx, model)
+	// Handoff is a pure writing task — no tools. On model failure, install a
+	// plan-derived handoff so ACM still rebuilds context.
+	mctx := ctx
+	if src, ok := model.(modelIdentityProvider); ok {
+		mctx = telemetry.ContextWithModelIdentity(ctx, src.ModelTelemetryIdentity())
+	}
 	mctx, mspan := telemetry.StartModelSpan(mctx, telemetry.ModelPhaseHandoff, 0, windowShape(window))
 	events, err := model.Invoke(mctx, window, nil)
 	var lastCompletedMessage string
 	usedFallback := false
 	if err != nil {
-		endModelFromErr(mctx, mspan, telemetry.ModelPhaseHandoff, err, telemetry.TokenUsage{})
-		slog.ErrorContext(ctx, "handoff invoke failed; using plan-derived fallback",
+		mspan.End(err, telemetry.TokenUsage{})
+		slog.ErrorContext(ctx, "handoff model call failed; using plan-derived fallback text",
 			"area", telemetry.AreaModelTasks, "error", err)
 		lastCompletedMessage = fallbackHandoffContent(plan)
 		usedFallback = true
@@ -446,9 +403,10 @@ Current plan todos:
 		for chunk := range events {
 			mergeTokenUsage(&usage, chunk)
 			if chunk.Type == StreamEventError {
-				streamErr = fmt.Errorf("handoff: %s", chunk.Content)
 				if chunk.Error != nil {
-					streamErr = fmt.Errorf("handoff: %w", chunk.Error)
+					streamErr = fmt.Errorf("handoff model stream failed: %w", chunk.Error)
+				} else {
+					streamErr = fmt.Errorf("handoff model stream failed: %s", chunk.Content)
 				}
 				break
 			}
@@ -459,9 +417,9 @@ Current plan todos:
 				}
 			}
 		}
-		endModelFromErr(mctx, mspan, telemetry.ModelPhaseHandoff, streamErr, usage)
+		mspan.End(streamErr, usage)
 		if streamErr != nil {
-			slog.ErrorContext(ctx, "handoff model stream failed; using plan-derived fallback",
+			slog.ErrorContext(ctx, "handoff model stream failed; using plan-derived fallback text",
 				"area", telemetry.AreaModelTasks, "error", streamErr)
 			lastCompletedMessage = fallbackHandoffContent(plan)
 			usedFallback = true
@@ -500,25 +458,7 @@ func windowShape(msgs []*Message) telemetry.WindowShape {
 	return telemetry.WindowShape{Messages: len(msgs), ToolPairs: pairs}
 }
 
-func withModelIdentity(ctx context.Context, model InferenceStrategy) context.Context {
-	if model == nil {
-		return ctx
-	}
-	src, ok := model.(modelTelemetrySource)
-	if !ok {
-		return ctx
-	}
-	return telemetry.ContextWithModelIdentity(ctx, telemetry.ModelIdentity{
-		Provider:  telemetry.InferProviderName(src.BaseURL()),
-		Model:     src.ModelName(),
-		Operation: telemetry.GenAIOperationChat,
-	})
-}
-
 func mergeTokenUsage(u *telemetry.TokenUsage, chunk LLMResponseChunk) {
-	if u == nil {
-		return
-	}
 	if chunk.InputTokens > 0 {
 		u.Input = chunk.InputTokens
 	}
@@ -530,24 +470,9 @@ func mergeTokenUsage(u *telemetry.TokenUsage, chunk LLMResponseChunk) {
 	}
 }
 
-func endModelFromErr(ctx context.Context, span trace.Span, phase string, err error, usage telemetry.TokenUsage) {
-	httpStatus, code := 0, ""
-	if err != nil {
-		var ps ProviderStatus
-		if errors.As(err, &ps) {
-			httpStatus = ps.ProviderHTTPStatus()
-			code = ps.ProviderErrorCode()
-		}
-	}
-	telemetry.EndModelSpan(ctx, span, phase, err, httpStatus, code, usage)
-}
-
-// watchModelStream ends the model span when the provider stream closes, on
-// cancel, or on a terminal stream error. Span end is idempotent so cancel and
-// close cannot double-End. After a stream error (or when the consumer stops
-// reading), remaining provider chunks are drained without blocking forever so
-// the span always finishes even if the harness returns early.
-func watchModelStream(ctx context.Context, span trace.Span, phase string, in <-chan LLMResponseChunk) <-chan LLMResponseChunk {
+// watchModelStream ends the model span when the stream closes, cancels, or errors.
+// Drains remaining provider chunks so the span ends if the harness stops reading.
+func watchModelStream(ctx context.Context, span *telemetry.ModelSpan, in <-chan LLMResponseChunk) <-chan LLMResponseChunk {
 	out := make(chan LLMResponseChunk, 16)
 	go func() {
 		defer close(out)
@@ -555,12 +480,8 @@ func watchModelStream(ctx context.Context, span trace.Span, phase string, in <-c
 		var usage telemetry.TokenUsage
 		var endOnce sync.Once
 		end := func(err error) {
-			endOnce.Do(func() {
-				endModelFromErr(ctx, span, phase, err, usage)
-			})
+			endOnce.Do(func() { span.End(err, usage) })
 		}
-		// Always end the span if we exit for any reason (panic-safe bookkeeping).
-		// Read streamErr at exit time (not when defer is registered).
 		defer func() { end(streamErr) }()
 
 		forward := func(chunk LLMResponseChunk) (stop bool) {
@@ -574,16 +495,11 @@ func watchModelStream(ctx context.Context, span trace.Span, phase string, in <-c
 			}
 		}
 
-		// Drain provider channel without blocking on a dead consumer.
+		// Drain until close. Do not select on ctx.Done (already fired after cancel).
 		drainIn := func() {
 			for {
-				select {
-				case <-ctx.Done():
+				if _, ok := <-in; !ok {
 					return
-				case _, ok := <-in:
-					if !ok {
-						return
-					}
 				}
 			}
 		}
@@ -593,7 +509,6 @@ func watchModelStream(ctx context.Context, span trace.Span, phase string, in <-c
 			case <-ctx.Done():
 				streamErr = ctx.Err()
 				end(streamErr)
-				// Best-effort: drop remaining provider chunks so the HTTP goroutine can exit.
 				drainIn()
 				return
 			case chunk, ok := <-in:
@@ -607,9 +522,6 @@ func watchModelStream(ctx context.Context, span trace.Span, phase string, in <-c
 					if streamErr == nil && chunk.Content != "" {
 						streamErr = errors.New(chunk.Content)
 					}
-					// Deliver the error chunk when possible, then end the span
-					// immediately so mid-stream failures are visible even if the
-					// harness stops reading before the provider channel closes.
 					_ = forward(chunk)
 					end(streamErr)
 					drainIn()

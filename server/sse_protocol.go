@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/coder/websocket"
 
@@ -35,7 +36,7 @@ func (p sseProtocol) HTTPRoutes() []HTTPRoute {
 }
 
 func (p sseProtocol) handleSSE(env ProtocolEnv, w http.ResponseWriter, r *http.Request) {
-	if !acceptsSSE(r) {
+	if !strings.Contains(r.Header.Get("Accept"), "text/event-stream") {
 		http.Error(w, "Accept: text/event-stream required", http.StatusNotAcceptable)
 		return
 	}
@@ -119,7 +120,7 @@ func (p sseProtocol) handleWS(env ProtocolEnv, w http.ResponseWriter, r *http.Re
 	}
 	pr, err := validateSSERequest(data)
 	if err != nil {
-		_ = writeWSJSON(ctx, c, wsServerEvent{Type: "error", Content: PublicError(err).Error()})
+		_ = wsWriteJSON(ctx, c, wsServerEvent{Type: "error", Content: PublicError(err).Error()})
 		return
 	}
 
@@ -136,7 +137,7 @@ func (p sseProtocol) handleWS(env ProtocolEnv, w http.ResponseWriter, r *http.Re
 		if !IsClientError(err) {
 			logTurnError(err, pr.AgentID, threadID)
 		}
-		_ = writeWSJSON(ctx, c, wsServerEvent{Type: "error", Content: PublicError(err).Error()})
+		_ = wsWriteJSON(ctx, c, wsServerEvent{Type: "error", Content: PublicError(err).Error()})
 		return
 	}
 	defer func() {
@@ -146,7 +147,7 @@ func (p sseProtocol) handleWS(env ProtocolEnv, w http.ResponseWriter, r *http.Re
 	if stream.Harness != nil && stream.Harness.SessionID() != "" {
 		threadID = stream.Harness.SessionID()
 	}
-	if err := writeWSJSON(ctx, c, wsServerEvent{Type: "thread", Content: threadID}); err != nil {
+	if err := wsWriteJSON(ctx, c, wsServerEvent{Type: "thread", Content: threadID}); err != nil {
 		return
 	}
 

@@ -10,9 +10,7 @@ import (
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
-// Core types, errors, and public re-exports for harness consumers.
-
-// Source: types.go
+// Shared roles, stream event types, errors, and re-exports for harness hosts.
 
 const (
 	RoleUser      MessageRole = "user"
@@ -66,11 +64,13 @@ var (
 	ErrToolNotFound         = errors.New("tool not found")
 	ErrToolTimeout          = errors.New("tool timed out")
 	ErrToolPermissionDenied = errors.New("tool permission denied")
+	// ErrModelAfterTools is a model failure after a successful tool batch.
+	// Tools completed; the next model request failed.
+	ErrModelAfterTools = errors.New("model request failed after tools completed")
 )
 
-// WrapStopReason wraps a cause under a terminal stop-reason sentinel so
-// protocols can use errors.Is while preserving provider detail in the chain.
-// If cause is nil, kind is returned as-is.
+// WrapStopReason attaches cause under a stop-reason sentinel for errors.Is.
+// Returns kind when cause is nil, or cause when kind is nil.
 func WrapStopReason(kind, cause error) error {
 	if kind == nil {
 		return cause
@@ -81,20 +81,14 @@ func WrapStopReason(kind, cause error) error {
 	return fmt.Errorf("%w: %w", kind, cause)
 }
 
-// ProviderStatus is optionally implemented by InferenceStrategy errors so the
-// harness can annotate model spans without depending on a specific provider package.
+// ProviderStatus supplies HTTP status and error code from a provider error.
+// Optional on InferenceStrategy errors for model-span attributes.
 type ProviderStatus interface {
 	ProviderHTTPStatus() int
 	ProviderErrorCode() string
 }
 
-// and test files can reference it without the control package prefix.
-type Response struct {
-	Status            ItemStatus
-	Messages          []*Message
-	IncompleteDetails string
-}
-
+// InferenceStrategy is the model provider interface used by the harness.
 type InferenceStrategy interface {
 	WithApiKey(string) InferenceStrategy
 	WithModel(string) InferenceStrategy
@@ -108,6 +102,7 @@ type InferenceStrategy interface {
 	MaxContextWindow() (int, error)
 }
 
+// AgentWatchDog records optional turn telemetry (thinking, tools, tokens).
 type AgentWatchDog interface {
 	RecordThinking(*Message) error
 	RecordOutput(*Message) error
@@ -117,16 +112,18 @@ type AgentWatchDog interface {
 	RecordToolResult(*Message) error
 }
 
-// Source: export.go
-
-// HarnessRuntime is the public tool hook surface (state, interrupts, emit).
-// Session internals are not accessible through it.
+// HarnessRuntime is the tool-facing API for handlers and interceptors:
+// EmitUpdate, StateGet, StateSet, StateDelete, RaiseInterrupt, Store,
+// and CurrentToolCallID.
+//
+// Turn lifecycle (output channel, interrupt return, plan stream) is not on
+// this type. Those functions live in internal/session (module-only).
 type HarnessRuntime = session.Runtime
 
-// Todo is a plan list item (also used in plan_update stream payloads).
+// Todo is one plan list item (also used in plan_update stream payloads).
 type Todo = streaming.Todo
 
-// Re-export interrupt extension types for tool authors.
+// Interrupt types re-exported for tool authors.
 type (
 	Interrupt               = interrupt.Interrupt
 	PayloadValidator        = interrupt.PayloadValidator
@@ -149,7 +146,7 @@ const (
 	PermissionRejectAlways = interrupt.PermissionRejectAlways
 )
 
-// RegisterInterrupt registers a custom interrupt factory for checkpoint rehydrate.
+// RegisterInterrupt registers a custom interrupt factory for session rehydrate.
 func RegisterInterrupt(factory func() Interrupt) {
 	interrupt.Register(factory)
 }

@@ -9,7 +9,8 @@ import (
 // StdioWatchDog implements tacklr.AgentWatchDog via streaming.Message (type alias).
 type StdioWatchDog struct{}
 
-func New() *StdioWatchDog { return &StdioWatchDog{} }
+// NewStdioWatchDog returns a watchdog that logs agent activity to slog.
+func NewStdioWatchDog() *StdioWatchDog { return &StdioWatchDog{} }
 
 func (s *StdioWatchDog) RecordThinking(msg *streaming.Message) error {
 	slog.Debug("agent thinking", "content", msg.Content)

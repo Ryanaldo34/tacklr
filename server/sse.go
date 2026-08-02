@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/streaming"
@@ -21,10 +20,6 @@ type sseEvent struct {
 
 type threadEvent struct {
 	ThreadID string `json:"thread_id"`
-}
-
-func acceptsSSE(r *http.Request) bool {
-	return strings.Contains(r.Header.Get("Accept"), "text/event-stream")
 }
 
 func toSSEEvent(ev tacklr.StreamEvent) sseEvent {

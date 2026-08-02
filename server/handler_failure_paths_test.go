@@ -426,11 +426,9 @@ func TestResolveSelectionViaElicitation_withQuestion(t *testing.T) {
 	}
 }
 
-func TestServeHTTP_nilContext(t *testing.T) {
-	// nil ctx → Background; cancel via short-lived listen failure on bad addr already tested.
-	// Exercise nil branch then immediate return via listen error.
+func TestServeHTTP_badAddr(t *testing.T) {
 	r := newTestRegistry(testStore(t), &mockInferenceStrategy{}, nil)
-	err := NewServer(r, SSE).ServeHTTP(nil, "bad:addr:port") //nolint:staticcheck // intentional nil ctx branch
+	err := NewServer(r, SSE).ServeHTTP(context.Background(), "bad:addr:port")
 	if err == nil {
 		t.Fatal("want listen error")
 	}
@@ -875,11 +873,11 @@ func TestServeStdio_edges(t *testing.T) {
 	}, nil)
 	srv := NewServer(r, ACP)
 
-	// nil ctx + empty lines + EOF without trailing newline
+	// empty lines + EOF without trailing newline
 	var out bytes.Buffer
 	in := strings.NewReader("\n\n" + `{"jsonrpc":"2.0","id":1,"method":"authenticate","params":{}}`)
-	if err := srv.ServeStdio(nil, in, &out); err != nil { //nolint:staticcheck // intentional nil ctx branch
-		t.Fatalf("nil ctx serve: %v", err)
+	if err := srv.ServeStdio(context.Background(), in, &out); err != nil {
+		t.Fatalf("serve: %v", err)
 	}
 	if !strings.Contains(out.String(), "result") {
 		t.Fatalf("out=%s", out.String())

@@ -15,8 +15,6 @@ import (
 
 // Web tools (Exa): web_search for discovery, web_fetch for known URLs.
 
-// Source: web_search.go
-
 const (
 	envExaAPIKey            = "EXA_API_KEY"
 	webSearchDefaultResults = 8
@@ -290,8 +288,6 @@ func truncateRunes(s string, maxLen int) string {
 	}
 	return string(r[:maxLen]) + "…"
 }
-
-// Source: web_fetch.go
 
 const (
 	webFetchMaxURLs        = 5

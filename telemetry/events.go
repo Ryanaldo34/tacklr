@@ -13,12 +13,8 @@ func Logger() log.Logger {
 	return global.GetLoggerProvider().Logger(InstrumentationName)
 }
 
-// EmitEvent emits an OpenTelemetry log record interpreted as an event
-// (non-empty EventName). Pass the active span context so backends correlate
-// the event to the current trace/span without span.AddEvent.
-//
-// attrs are log key-values (use log.String / log.Int / …). Severity defaults
-// to Info; use EmitEventSeverity for errors.
+// EmitEvent emits an OTel log record with EventName set (span-correlated).
+// Severity defaults to Info; use EmitEventSeverity for errors.
 func EmitEvent(ctx context.Context, name string, attrs ...log.KeyValue) {
 	EmitEventSeverity(ctx, name, log.SeverityInfo, attrs...)
 }
@@ -27,9 +23,6 @@ func EmitEvent(ctx context.Context, name string, attrs ...log.KeyValue) {
 func EmitEventSeverity(ctx context.Context, name string, severity log.Severity, attrs ...log.KeyValue) {
 	if name == "" {
 		return
-	}
-	if ctx == nil {
-		ctx = context.Background()
 	}
 	var rec log.Record
 	rec.SetTimestamp(time.Now())

@@ -34,12 +34,12 @@ func testPlanTools() planToolsFixture {
 func TestCreatePlanTool_rejectsWhenActivePlanExists(t *testing.T) {
 	pt := testPlanTools()
 	rt := session.NewRuntime(nil, nil, nil)
-	rt.EnsureInitialized()
+	session.EnsureInitialized(&rt)
 	pt.store.Set([]Todo{
 		{Title: "existing", Status: streaming.TodoStatusInProgress},
 	})
 
-	_, err := pt.create.Invoke(context.Background(), `{"plan":"draft","todos":[{"title":"new","status":"pending","description":""}]}`, rt)
+	_, err := pt.create.invoke(context.Background(), `{"plan":"draft","todos":[{"title":"new","status":"pending","description":""}]}`, rt)
 	if err == nil {
 		t.Fatal("expected error when create_plan is called with an active plan")
 	}
@@ -56,9 +56,10 @@ func TestCreatePlanTool_rejectsWhenActivePlanExists(t *testing.T) {
 func TestCreatePlanTool_createsWhenNoPlan(t *testing.T) {
 	pt := testPlanTools()
 	rt := session.NewRuntime(nil, nil, nil)
-	rt.EnsureInitialized()
+	session.EnsureInitialized(&rt)
 
-	got, err := pt.create.Invoke(context.Background(), `{"plan":"CoS: ship it","todos":[{"title":"a","status":"pending","description":"d"}]}`, rt)
+	res, err := pt.create.invoke(context.Background(), `{"plan":"CoS: ship it","todos":[{"title":"a","status":"pending","description":"d"}]}`, rt)
+	got := res.output
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,8 +78,8 @@ func TestCreatePlanTool_createsWhenNoPlan(t *testing.T) {
 func TestCreatePlanTool_rejectsEmptyPlanDocument(t *testing.T) {
 	pt := testPlanTools()
 	rt := session.NewRuntime(nil, nil, nil)
-	rt.EnsureInitialized()
-	_, err := pt.create.Invoke(context.Background(), `{"plan":"  ","todos":[{"title":"a","status":"pending","description":""}]}`, rt)
+	session.EnsureInitialized(&rt)
+	_, err := pt.create.invoke(context.Background(), `{"plan":"  ","todos":[{"title":"a","status":"pending","description":""}]}`, rt)
 	if err == nil || !strings.Contains(err.Error(), "plan document text is required") {
 		t.Fatalf("err = %v", err)
 	}
@@ -87,11 +88,11 @@ func TestCreatePlanTool_rejectsEmptyPlanDocument(t *testing.T) {
 func TestEditPlanTool_identicalPlanDocument_rejected(t *testing.T) {
 	pt := testPlanTools()
 	rt := session.NewRuntime(nil, nil, nil)
-	rt.EnsureInitialized()
+	session.EnsureInitialized(&rt)
 	pt.store.Set([]Todo{{Title: "a", Status: streaming.TodoStatusPending}})
 	pt.store.SetDocument("same plan")
 
-	_, err := pt.edit.Invoke(context.Background(), `{"plan":"same plan","toAdd":[],"toDelete":[]}`, rt)
+	_, err := pt.edit.invoke(context.Background(), `{"plan":"same plan","toAdd":[],"toDelete":[]}`, rt)
 	if err == nil || !strings.Contains(err.Error(), "unchanged") {
 		t.Fatalf("err = %v", err)
 	}
@@ -106,7 +107,7 @@ func TestEditPlanTool_identicalPlanDocument_rejected(t *testing.T) {
 func TestCreatePlanTool_returnsInstallEffect(t *testing.T) {
 	pt := testPlanTools()
 	rt := session.NewRuntime(nil, nil, nil)
-	rt.EnsureInitialized()
+	session.EnsureInitialized(&rt)
 	res, err := pt.create.invoke(context.Background(), `{"plan":"CoS: ship","todos":[{"title":"a","status":"pending","description":"d"}]}`, rt)
 	if err != nil {
 		t.Fatal(err)
@@ -125,7 +126,7 @@ func TestCreatePlanTool_returnsInstallEffect(t *testing.T) {
 func TestEditPlanTool_newPlanDocument_returnsHandoffEffect(t *testing.T) {
 	pt := testPlanTools()
 	rt := session.NewRuntime(nil, nil, nil)
-	rt.EnsureInitialized()
+	session.EnsureInitialized(&rt)
 	pt.store.Set([]Todo{{Title: "a", Status: streaming.TodoStatusPending}})
 	pt.store.SetDocument("old")
 
@@ -335,10 +336,11 @@ func TestEditPlanTool(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			pt := testPlanTools()
 			rt := HarnessRuntime{}
-			rt.EnsureInitialized()
+			session.EnsureInitialized(&rt)
 			pt.store.Set(tt.plan)
 
-			got, err := pt.edit.Invoke(context.Background(), tt.args, rt)
+			res, err := pt.edit.invoke(context.Background(), tt.args, rt)
+			got := res.output
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("error = %v, wantErr = %v", err, tt.wantErr)
 			}
@@ -356,7 +358,7 @@ func TestEditPlanTool(t *testing.T) {
 
 func TestAskUserChoiceTool_raiseAndResume(t *testing.T) {
 	rt := session.NewRuntime(make(chan streaming.StreamEvent, 4), nil, nil)
-	rt.EnsureInitialized()
+	session.EnsureInitialized(&rt)
 	rt.CurrentToolCallID = "tc_ask"
 
 	args, _ := json.Marshal(map[string]any{
@@ -367,7 +369,7 @@ func TestAskUserChoiceTool_raiseAndResume(t *testing.T) {
 		},
 	})
 
-	_, err := askUserChoiceTool.Invoke(context.Background(), string(args), rt)
+	_, err := askUserChoiceTool.invoke(context.Background(), string(args), rt)
 	if err == nil {
 		t.Fatal("first invoke should raise interrupt")
 	}
@@ -375,15 +377,16 @@ func TestAskUserChoiceTool_raiseAndResume(t *testing.T) {
 	if !errors.As(err, &intr) {
 		t.Fatalf("expected Interrupt, got %T %v", err, err)
 	}
-	if q := AskUserQuestionFromState(&rt, "tc_ask"); q != "Which approach?" {
+	if q := askUserQuestionFromState(&rt, "tc_ask"); q != "Which approach?" {
 		t.Errorf("question state = %q", q)
 	}
 
 	// Resolve and re-invoke (harness re-execution pattern).
-	if _, err := rt.ReturnInterrupt("tc_ask", []byte(`{"selectionIdx":1}`)); err != nil {
+	if _, err := session.ReturnInterrupt(&rt, "tc_ask", []byte(`{"selectionIdx":1}`)); err != nil {
 		t.Fatal(err)
 	}
-	got, err := askUserChoiceTool.Invoke(context.Background(), string(args), rt)
+	res, err := askUserChoiceTool.invoke(context.Background(), string(args), rt)
+	got := res.output
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -395,7 +398,7 @@ func TestAskUserChoiceTool_raiseAndResume(t *testing.T) {
 
 func TestAskUserChoiceTool_validation(t *testing.T) {
 	rt := session.NewRuntime(nil, nil, nil)
-	rt.EnsureInitialized()
+	session.EnsureInitialized(&rt)
 	rt.CurrentToolCallID = "tc"
 
 	cases := []struct {
@@ -408,7 +411,7 @@ func TestAskUserChoiceTool_validation(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := askUserChoiceTool.Invoke(context.Background(), tc.args, rt)
+			_, err := askUserChoiceTool.invoke(context.Background(), tc.args, rt)
 			if err == nil {
 				t.Fatal("expected validation error")
 			}
@@ -429,14 +432,15 @@ func TestAskUserChoiceTool_injectedAsBuiltin(t *testing.T) {
 func TestListPlanTool_exactListing(t *testing.T) {
 	pt := testPlanTools()
 	rt := session.NewRuntime(nil, nil, nil)
-	rt.EnsureInitialized()
+	session.EnsureInitialized(&rt)
 	pt.store.Set([]Todo{
 		{Title: "Exact Title One", Status: streaming.TodoStatusCompleted, Description: "done work"},
 		{Title: "Exact Title Two", Status: streaming.TodoStatusInProgress, Description: "now"},
 		{Title: "Exact Title Three", Status: streaming.TodoStatusPending},
 	})
 
-	got, err := pt.list.Invoke(context.Background(), `{}`, rt)
+	res, err := pt.list.invoke(context.Background(), `{}`, rt)
+	got := res.output
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -646,13 +650,13 @@ func TestRun_askUserChoice_withoutDescription_formatsSelection(t *testing.T) {
 		t.Fatal("expected interrupt")
 	}
 	// Question stashed for protocol elicitation.
-	if q := AskUserQuestionFromState(&h.runtime, "ask1"); q != "Pick?" {
+	if q := askUserQuestionFromState(&h.runtime, "ask1"); q != "Pick?" {
 		t.Fatalf("question = %q", q)
 	}
-	if AskUserQuestionFromState(&h.runtime, "") != "" {
+	if askUserQuestionFromState(&h.runtime, "") != "" {
 		t.Fatal("empty tool call id should yield empty question")
 	}
-	if AskUserQuestionFromState(&h.runtime, "missing") != "" {
+	if askUserQuestionFromState(&h.runtime, "missing") != "" {
 		t.Fatal("unknown tool call should yield empty question")
 	}
 
@@ -811,7 +815,7 @@ func TestRun_askUserChoice_emptyChoiceTitle_toolError(t *testing.T) {
 // completing the last open todo (sole or after already-done siblings) is EffectNone.
 func TestCompleteTodo_effectsByRemainingWork(t *testing.T) {
 	rt := session.NewRuntime(nil, nil, nil)
-	rt.EnsureInitialized()
+	session.EnsureInitialized(&rt)
 	cases := []struct {
 		name       string
 		plan       []Todo

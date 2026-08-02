@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/ryanaldo34/tacklr/internal/session"
+
 	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/streaming"
@@ -221,7 +223,7 @@ func TestSpawnWorker_streamError(t *testing.T) {
 		},
 	})
 	out := make(chan StreamEvent, 16)
-	h.runtime.SetOutputChannel(out)
+	session.SetOutputChannel(&h.runtime, out)
 
 	_, err := h.runWorker(context.Background(), "researcher", "do work", h.runtime)
 	if err == nil {
@@ -250,7 +252,7 @@ func TestSpawnWorker_noOutput(t *testing.T) {
 		},
 	})
 	out := make(chan StreamEvent, 16)
-	h.runtime.SetOutputChannel(out)
+	session.SetOutputChannel(&h.runtime, out)
 
 	_, err := h.runWorker(context.Background(), "researcher", "do work", h.runtime)
 	if !errors.Is(err, ErrWorkerNoOutput) {
@@ -272,7 +274,7 @@ func TestSpawnWorker_contextCancel(t *testing.T) {
 		},
 	})
 	out := make(chan StreamEvent, 16)
-	h.runtime.SetOutputChannel(out)
+	session.SetOutputChannel(&h.runtime, out)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -668,7 +670,7 @@ func TestSpawnWorker_toolsSliceIsolation(t *testing.T) {
 		},
 	})
 	out := make(chan StreamEvent, 16)
-	h.runtime.SetOutputChannel(out)
+	session.SetOutputChannel(&h.runtime, out)
 
 	result, err := h.runWorker(context.Background(), "researcher", "isolate tools", h.runtime)
 	if err != nil {

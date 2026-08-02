@@ -1,25 +1,17 @@
 package telemetry
 
-// Span names for the agent-turn lifecycle. Prefer these over free-form method
-// strings as attributes — backends index span name for search/filter.
+// Span names (use these; backends index span name).
 //
-// Intended trace shape (noise-free):
+// Trace shape:
 //
 //	tacklr.turn
-//	  log-event: prompt.received | resume.received   (OTel Logs API, span-correlated)
-//	  tacklr.model           (turn | handoff | compress Invoke)
-//	  tacklr.tool            (create_plan, work tools, complete_todo, …)
-//	  tacklr.plan.install    (plan document placed in context)
-//	  tacklr.context.handoff (after todo complete / plan revise)
-//	  log-event: turn.ended
+//	  log: prompt.received | resume.received
+//	  tacklr.model | tacklr.tool | tacklr.plan.install | tacklr.context.handoff
+//	  log: turn.ended
 //
-// Span attribute keys are package constants (static). Prefer setting known
-// dimensions at span start (WithAttributes). Outcome/error enums at end only.
-// High-cardinality values (prompts, call_ids, free-text errors) must not be
-// metric labels; prefer log events for free-text detail.
-//
-// Prefer OTel Logs API records with SetEventName for lifecycle milestones
-// (not span.AddEvent).
+// Set static attributes at span start. Outcome and error enums at end only.
+// Do not use high-cardinality values as metric labels; use log events for free text.
+// Lifecycle milestones use OTel Logs SetEventName, not span.AddEvent.
 const (
 	SpanTurn           = "tacklr.turn"
 	SpanTool           = "tacklr.tool"
@@ -28,7 +20,7 @@ const (
 	SpanModel          = "tacklr.model"
 )
 
-// Span / log attribute keys (static identifiers only).
+// Span and log attribute keys (static identifiers only).
 const (
 	AttrArea        = "tacklr.area"
 	AttrSessionID   = "tacklr.session_id"

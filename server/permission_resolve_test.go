@@ -166,12 +166,12 @@ func TestResolvePermissionViaRequest_outcomes(t *testing.T) {
 			},
 		}
 		h := tacklr.NewAgent(context.Background(), tacklr.AgentOptions{
-			Config: tacklr.Config{MaxWindowSize: 8192},
-			Model:  ms,
-			Store:  store,
-			Tools:  []*tacklr.Tool{sensitive},
+			Config:    tacklr.Config{MaxWindowSize: 8192},
+			SessionID: "sess-perm-resolve",
+			Model:     ms,
+			Store:     store,
+			Tools:     []*tacklr.Tool{sensitive},
 		})
-		h.BindSessionID("sess-perm-resolve")
 		events, err := h.Run(context.Background(), "go")
 		if err != nil {
 			t.Fatal(err)
