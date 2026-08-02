@@ -430,7 +430,7 @@ func (s *OpenAIInferenceStrategy) parseSSEResponse(ctx context.Context, body io.
 			}
 		case "error":
 			// Azure mid-stream errors often use type=error with HTTP 200.
-			classified, _ := classifyTerminalSSE("error", data)
+			_, classified := classifyTerminalSSE("error", data)
 			if classified == nil {
 				classified = &APIStatusError{Status: 200, Body: "stream error event"}
 			}
@@ -444,7 +444,7 @@ func (s *OpenAIInferenceStrategy) parseSSEResponse(ctx context.Context, body io.
 			return
 		case "response.incomplete", "response.failed", "response.completed":
 			// Terminal incomplete/failed, or completed-with-bad-status (some Azure builds).
-			if classified, terminal := classifyTerminalSSE(evt.Type, data); terminal {
+			if terminal, classified := classifyTerminalSSE(evt.Type, data); terminal {
 				emitProviderFailed(ctx, classified, 200, inputSummary, data)
 				events <- tacklr.LLMResponseChunk{
 					Type:       tacklr.StreamEventError,
@@ -514,7 +514,7 @@ func parseResponseUsage(data string) (responseUsage, bool) {
 
 // classifyTerminalSSE maps Responses SSE terminal events to a harness error.
 // Returns terminal=false for response.completed with a successful status.
-func classifyTerminalSSE(evtType, data string) (error, bool) {
+func classifyTerminalSSE(evtType, data string) (terminal bool, err error) {
 	var payload struct {
 		Response struct {
 			Status            string            `json:"status"`
@@ -535,10 +535,10 @@ func classifyTerminalSSE(evtType, data string) (error, bool) {
 	if evtType == "response.completed" {
 		// Successful completion — not an error path.
 		if status == "" || status == "completed" {
-			return nil, false
+			return false, nil
 		}
 		if status != "incomplete" && status != "failed" && status != "cancelled" {
-			return nil, false
+			return false, nil
 		}
 	}
 
@@ -556,7 +556,7 @@ func classifyTerminalSSE(evtType, data string) (error, bool) {
 
 	if reason != "" {
 		if classified := ClassifyIncompleteReason(reason); classified != nil {
-			return classified, true
+			return true, classified
 		}
 	}
 
@@ -596,14 +596,14 @@ func classifyTerminalSSE(evtType, data string) (error, bool) {
 			"error": map[string]string{"code": apiErr.Code, "message": apiErr.Body, "type": ""},
 		}))
 		if classified != nil {
-			return classified, true
+			return true, classified
 		}
 	}
 	// Always log raw snip — Zed ACP stderr is the host debug stream.
 	slog.Error("provider terminal SSE without classifiable reason",
 		"event", evtType, "status", status, "reason", reason, "code", apiErr.Code,
 		"body_snip", truncateForLog(data, 800))
-	return apiErr, true
+	return true, apiErr
 }
 
 func truncateForLog(s string, n int) string {

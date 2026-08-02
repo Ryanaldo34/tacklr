@@ -163,6 +163,71 @@ func TestClient_Contents_validation(t *testing.T) {
 	}); err == nil || !strings.Contains(err.Error(), "not both") {
 		t.Fatalf("want urls-or-ids: %v", err)
 	}
+	// Nil client / missing key.
+	var nilC *exa.Client
+	if _, err := nilC.Contents(context.Background(), exa.ContentsRequest{URLs: []string{"https://a.com"}}); err == nil {
+		t.Fatal("want nil client error")
+	}
+	if _, err := exa.NewClient("").Contents(context.Background(), exa.ContentsRequest{IDs: []string{"id1"}}); err == nil {
+		t.Fatal("want missing key")
+	}
+}
+
+// TestClient_Contents_byIDs posts ids-only request (no urls).
+func TestClient_Contents_byIDs(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(b, &gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"results":[{"title":"T","url":"https://x","text":"body"}]}`))
+	}))
+	t.Cleanup(srv.Close)
+	c := exa.NewClient("k")
+	c.BaseURL = srv.URL
+	c.HTTPClient = srv.Client()
+	resp, err := c.Contents(context.Background(), exa.ContentsRequest{
+		IDs:  []string{"doc-1"},
+		Text: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotBody["urls"] != nil {
+		t.Fatalf("urls should be omitted: %#v", gotBody)
+	}
+	ids, _ := gotBody["ids"].([]any)
+	if len(ids) != 1 {
+		t.Fatalf("ids = %#v", gotBody["ids"])
+	}
+	if len(resp.Results) != 1 || resp.Results[0].Text != "body" {
+		t.Fatalf("%+v", resp)
+	}
+}
+
+// TestClient_Contents_httpErrorAndBadJSON covers non-2xx and decode failure.
+func TestClient_Contents_httpErrorAndBadJSON(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"nope"}`))
+	}))
+	t.Cleanup(srv.Close)
+	c := exa.NewClient("k")
+	c.BaseURL = srv.URL
+	c.HTTPClient = srv.Client()
+	if _, err := c.Contents(context.Background(), exa.ContentsRequest{URLs: []string{"https://a.com"}}); err == nil || !strings.Contains(err.Error(), "400") {
+		t.Fatalf("err = %v", err)
+	}
+
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`not-json`))
+	}))
+	t.Cleanup(srv2.Close)
+	c.BaseURL = srv2.URL
+	c.HTTPClient = srv2.Client()
+	if _, err := c.Contents(context.Background(), exa.ContentsRequest{URLs: []string{"https://a.com"}}); err == nil || !strings.Contains(err.Error(), "decode") {
+		t.Fatalf("err = %v", err)
+	}
 }
 
 // TestClient_Search_contextCancel fails the in-flight request.

@@ -75,7 +75,7 @@ ended:
 	}
 	attrs := map[string]string{}
 	for _, a := range st.Attributes() {
-		attrs[string(a.Key)] = a.Value.Emit()
+		attrs[string(a.Key)] = a.Value.String()
 	}
 	if attrs[telemetry.AttrOutcome] != telemetry.OutcomeCancelled {
 		t.Fatalf("outcome = %q, want cancelled; attrs=%v", attrs[telemetry.AttrOutcome], attrs)
@@ -140,7 +140,7 @@ func TestWatchModelStream_streamErrorEndsSpanEvenIfConsumerStops(t *testing.T) {
 	st := sr.Ended()[0]
 	attrs := map[string]string{}
 	for _, a := range st.Attributes() {
-		attrs[string(a.Key)] = a.Value.Emit()
+		attrs[string(a.Key)] = a.Value.String()
 	}
 	if attrs[telemetry.AttrOutcome] != telemetry.OutcomeError {
 		t.Fatalf("outcome = %q, want error", attrs[telemetry.AttrOutcome])
@@ -168,7 +168,7 @@ func TestEndModelSpan_cancelledOutcome(t *testing.T) {
 	}
 	attrs := map[string]string{}
 	for _, a := range sr.Ended()[0].Attributes() {
-		attrs[string(a.Key)] = a.Value.Emit()
+		attrs[string(a.Key)] = a.Value.String()
 	}
 	if attrs[telemetry.AttrOutcome] != telemetry.OutcomeCancelled {
 		t.Fatalf("outcome=%q attrs=%v", attrs[telemetry.AttrOutcome], attrs)

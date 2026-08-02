@@ -15,6 +15,22 @@ import (
 	"github.com/ryanaldo34/tacklr/interrupt"
 )
 
+// scanStdioLines reads newline-delimited frames without blocking the test past
+// the process lifetime; callers select on the channel with a deadline so a
+// stuck peer cannot hang CI for the full package timeout.
+func scanStdioLines(r io.Reader) <-chan string {
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	ch := make(chan string, 64)
+	go func() {
+		defer close(ch)
+		for sc.Scan() {
+			ch <- sc.Text()
+		}
+	}()
+	return ch
+}
+
 // TestACP_elicitationForm_resolvesInterruptAndCompletes is the mid-turn
 // elicitation outcome: form-capable client is asked via elicitation/create,
 // accepts a choice, harness resumes, tool result + final message stream, and
@@ -710,39 +726,40 @@ func TestACP_elicitationForm_declineEndsPrompt(t *testing.T) {
 	}
 	write(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"elicitation":{"form":{}}}}}`)
 	write(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp"}}`)
-	sc := bufio.NewScanner(clientFromServer)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	lines := scanStdioLines(clientFromServer)
 	var sessionID string
 	var sawDeclinePath bool
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) && !sawDeclinePath {
-		if !sc.Scan() {
-			t.Fatal("scan ended")
-		}
-		var frame map[string]any
-		_ = json.Unmarshal([]byte(sc.Text()), &frame)
-		if res, ok := frame["result"].(map[string]any); ok {
-			if sid, _ := res["sessionId"].(string); sid != "" {
-				sessionID = sid
-				write(`{"jsonrpc":"2.0","id":10,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"q"}]}}`)
+	deadline := time.After(5 * time.Second)
+	for !sawDeclinePath {
+		select {
+		case <-deadline:
+			t.Fatal("expected prompt error after elicitation decline")
+		case line, ok := <-lines:
+			if !ok {
+				t.Fatal("stdio closed before elicitation decline completed")
+			}
+			var frame map[string]any
+			_ = json.Unmarshal([]byte(line), &frame)
+			if res, ok := frame["result"].(map[string]any); ok {
+				if sid, _ := res["sessionId"].(string); sid != "" {
+					sessionID = sid
+					write(`{"jsonrpc":"2.0","id":10,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"q"}]}}`)
+				}
+			}
+			if frame["method"] == "elicitation/create" {
+				resp, _ := json.Marshal(map[string]any{
+					"jsonrpc": "2.0", "id": frame["id"],
+					"result": map[string]any{"action": "decline"},
+				})
+				write(string(resp))
+			}
+			if errObj, ok := frame["error"].(map[string]any); ok && idMatch(frame["id"], 10) {
+				msg, _ := errObj["message"].(string)
+				if strings.Contains(strings.ToLower(msg), "declin") {
+					sawDeclinePath = true
+				}
 			}
 		}
-		if frame["method"] == "elicitation/create" {
-			resp, _ := json.Marshal(map[string]any{
-				"jsonrpc": "2.0", "id": frame["id"],
-				"result": map[string]any{"action": "decline"},
-			})
-			write(string(resp))
-		}
-		if errObj, ok := frame["error"].(map[string]any); ok && idMatch(frame["id"], 10) {
-			msg, _ := errObj["message"].(string)
-			if strings.Contains(strings.ToLower(msg), "declin") {
-				sawDeclinePath = true
-			}
-		}
-	}
-	if !sawDeclinePath {
-		t.Fatal("expected prompt error after elicitation decline")
 	}
 	if invokeCount != 1 {
 		t.Errorf("invokeCount = %d, want 1 (no resume)", invokeCount)
@@ -785,39 +802,40 @@ func TestACP_elicitationForm_cancelEndsPrompt(t *testing.T) {
 	}
 	write(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"elicitation":{"form":{}}}}}`)
 	write(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp"}}`)
-	sc := bufio.NewScanner(clientFromServer)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	lines := scanStdioLines(clientFromServer)
 	var sessionID string
 	var sawCancel bool
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) && !sawCancel {
-		if !sc.Scan() {
-			break
-		}
-		var frame map[string]any
-		_ = json.Unmarshal([]byte(sc.Text()), &frame)
-		if res, ok := frame["result"].(map[string]any); ok {
-			if sid, _ := res["sessionId"].(string); sid != "" {
-				sessionID = sid
-				write(`{"jsonrpc":"2.0","id":11,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"q"}]}}`)
+	deadline := time.After(5 * time.Second)
+	for !sawCancel {
+		select {
+		case <-deadline:
+			t.Fatal("expected prompt error after elicitation cancel")
+		case line, ok := <-lines:
+			if !ok {
+				t.Fatal("stdio closed before elicitation cancel completed")
+			}
+			var frame map[string]any
+			_ = json.Unmarshal([]byte(line), &frame)
+			if res, ok := frame["result"].(map[string]any); ok {
+				if sid, _ := res["sessionId"].(string); sid != "" {
+					sessionID = sid
+					write(`{"jsonrpc":"2.0","id":11,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"q"}]}}`)
+				}
+			}
+			if frame["method"] == "elicitation/create" {
+				resp, _ := json.Marshal(map[string]any{
+					"jsonrpc": "2.0", "id": frame["id"],
+					"result": map[string]any{"action": "cancel"},
+				})
+				write(string(resp))
+			}
+			if errObj, ok := frame["error"].(map[string]any); ok && idMatch(frame["id"], 11) {
+				msg, _ := errObj["message"].(string)
+				if strings.Contains(strings.ToLower(msg), "cancel") {
+					sawCancel = true
+				}
 			}
 		}
-		if frame["method"] == "elicitation/create" {
-			resp, _ := json.Marshal(map[string]any{
-				"jsonrpc": "2.0", "id": frame["id"],
-				"result": map[string]any{"action": "cancel"},
-			})
-			write(string(resp))
-		}
-		if errObj, ok := frame["error"].(map[string]any); ok && idMatch(frame["id"], 11) {
-			msg, _ := errObj["message"].(string)
-			if strings.Contains(strings.ToLower(msg), "cancel") {
-				sawCancel = true
-			}
-		}
-	}
-	if !sawCancel {
-		t.Fatal("expected prompt error after elicitation cancel")
 	}
 }
 
@@ -861,38 +879,34 @@ func TestACP_elicitation_malformedInterruptEndsTurn(t *testing.T) {
 	}
 	write(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"elicitation":{"form":{}}}}}`)
 	write(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp"}}`)
-	sc := bufio.NewScanner(clientFromServer)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	lines := scanStdioLines(clientFromServer)
 	var sessionID string
 	var sawErr bool
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) && !sawErr {
-		if !sc.Scan() {
-			break
-		}
-		var frame map[string]any
-		_ = json.Unmarshal([]byte(sc.Text()), &frame)
-		if res, ok := frame["result"].(map[string]any); ok {
-			if sid, _ := res["sessionId"].(string); sid != "" {
-				sessionID = sid
-				write(`{"jsonrpc":"2.0","id":12,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"q"}]}}`)
+	deadline := time.After(5 * time.Second)
+	for !sawErr {
+		select {
+		case <-deadline:
+			// Turn may finish via stream error without JSON-RPC error id 12.
+			t.Log("no JSON-RPC error id=12 within deadline; soft pass for malformed elicitation path")
+			return
+		case line, ok := <-lines:
+			if !ok {
+				return
+			}
+			var frame map[string]any
+			_ = json.Unmarshal([]byte(line), &frame)
+			if res, ok := frame["result"].(map[string]any); ok {
+				if sid, _ := res["sessionId"].(string); sid != "" {
+					sessionID = sid
+					write(`{"jsonrpc":"2.0","id":12,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"q"}]}}`)
+				}
+			}
+			// elicitation should not succeed with <2 options — error path instead
+			if errObj, ok := frame["error"].(map[string]any); ok && idMatch(frame["id"], 12) {
+				sawErr = true
+				_ = errObj
 			}
 		}
-		// elicitation should not succeed with <2 options — error path instead
-		if errObj, ok := frame["error"].(map[string]any); ok && idMatch(frame["id"], 12) {
-			sawErr = true
-			_ = errObj
-		}
-		// Also accept error-shaped complete frames without elicitation create
-		if frame["method"] == "session/update" {
-			// may stream error content
-		}
-	}
-	if !sawErr {
-		// Turn may finish via stream error frame without JSON-RPC error id 12
-		// depending on OnStreamEvent Finished path.
-		t.Log("no JSON-RPC error id=12; checking scan completed with elicitation failure path")
-		// Soft pass if we never got elicitation/create (failed before RPC)
 	}
 }
 
