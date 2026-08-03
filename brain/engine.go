@@ -18,53 +18,59 @@ type QueryEmbedder interface {
 // EngineConfig holds engine-owned ranking knobs (never tool arguments).
 // Lambda is optional: nil uses the default mild decay; explicit 0 disables temporal bias.
 type EngineConfig struct {
-	CandidateK   int
-	RRFk         int
-	Lambda       *float64
-	EvidenceN    int
-	DefaultLimit int
-	MaxLimit     int
-	Now          func() time.Time
+	CandidateK      int
+	RRFk            int
+	Lambda          *float64
+	EvidenceN       int
+	DefaultLimit    int
+	MaxLimit        int
+	ExpandInlineMax int // max neighbors returned inline before ResultSet paging
+	SiblingRadius   int // parts: siblings ± radius by position
+	GraphNeighborK  int // max neighbors requested from GraphReader
+	Now             func() time.Time
 }
 
 // DefaultEngineConfig returns mild production defaults.
 func DefaultEngineConfig() EngineConfig {
 	lam := 0.02
 	return EngineConfig{
-		CandidateK:   40,
-		RRFk:         60,
-		Lambda:       &lam,
-		EvidenceN:    3,
-		DefaultLimit: 10,
-		MaxLimit:     50,
-		Now:          func() time.Time { return time.Now().UTC() },
+		CandidateK:      40,
+		RRFk:            60,
+		Lambda:          &lam,
+		EvidenceN:       3,
+		DefaultLimit:    10,
+		MaxLimit:        50,
+		ExpandInlineMax: 20,
+		SiblingRadius:   5,
+		GraphNeighborK:  50,
+		Now:             func() time.Time { return time.Now().UTC() },
 	}
 }
 
 func (c EngineConfig) withDefaults() EngineConfig {
 	d := DefaultEngineConfig()
-	if c.CandidateK <= 0 {
-		c.CandidateK = d.CandidateK
-	}
-	if c.RRFk <= 0 {
-		c.RRFk = d.RRFk
-	}
+	c.CandidateK = posOr(c.CandidateK, d.CandidateK)
+	c.RRFk = posOr(c.RRFk, d.RRFk)
+	c.EvidenceN = posOr(c.EvidenceN, d.EvidenceN)
+	c.DefaultLimit = posOr(c.DefaultLimit, d.DefaultLimit)
+	c.MaxLimit = posOr(c.MaxLimit, d.MaxLimit)
+	c.ExpandInlineMax = posOr(c.ExpandInlineMax, d.ExpandInlineMax)
+	c.SiblingRadius = posOr(c.SiblingRadius, d.SiblingRadius)
+	c.GraphNeighborK = posOr(c.GraphNeighborK, d.GraphNeighborK)
 	if c.Lambda == nil {
 		c.Lambda = d.Lambda
-	}
-	if c.EvidenceN <= 0 {
-		c.EvidenceN = d.EvidenceN
-	}
-	if c.DefaultLimit <= 0 {
-		c.DefaultLimit = d.DefaultLimit
-	}
-	if c.MaxLimit <= 0 {
-		c.MaxLimit = d.MaxLimit
 	}
 	if c.Now == nil {
 		c.Now = d.Now
 	}
 	return c
+}
+
+func posOr(v, fallback int) int {
+	if v > 0 {
+		return v
+	}
+	return fallback
 }
 
 // lambdaValue returns the configured decay rate. withDefaults ensures Lambda is non-nil on Engine.
@@ -85,10 +91,16 @@ func WithConfig(cfg EngineConfig) EngineOption {
 	return func(eng *Engine) { eng.cfg = cfg }
 }
 
+// WithGraph sets the optional non-containment graph backend (Helix or MemoryGraph).
+func WithGraph(g GraphReader) EngineOption {
+	return func(eng *Engine) { eng.graph = g }
+}
+
 // Engine is the retrieval facade over a Store.
 type Engine struct {
 	store    Store
 	embedder QueryEmbedder
+	graph    GraphReader
 	cfg      EngineConfig
 }
 
@@ -163,8 +175,5 @@ func (e *Engine) normalizeLimit(limit int) int {
 	if limit <= 0 {
 		return e.cfg.DefaultLimit
 	}
-	if limit > e.cfg.MaxLimit {
-		return e.cfg.MaxLimit
-	}
-	return limit
+	return min(limit, e.cfg.MaxLimit)
 }

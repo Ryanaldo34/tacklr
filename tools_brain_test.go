@@ -197,6 +197,47 @@ func TestBrainTools_searchFindExactContinueAndCheckpoint(t *testing.T) {
 	}
 }
 
+func TestBrainTools_expandChildren(t *testing.T) {
+	ctx := context.Background()
+	store := brain.NewMemoryStore()
+	ns := uuid.New()
+	now := time.Now().UTC()
+	parent := uuid.New()
+	child := uuid.New()
+	pos := 1
+	_ = store.Put(brain.Object{ID: parent, Kind: "Document", Title: "P", NamespaceID: ns, UpdatedAt: now})
+	_ = store.Put(brain.Object{
+		ID: child, Kind: "Chunk", Title: "C", Content: "secret",
+		ParentID: &parent, Position: &pos, NamespaceID: ns, UpdatedAt: now,
+	})
+	eng, err := brain.NewEngine(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := NewAgent(ctx, AgentOptions{
+		Config: Config{MaxWindowSize: 1024}, Model: &mockStrategy{},
+		Brain: eng, SearchNamespace: &ns,
+	})
+	tool := h.findTool("expand", "")
+	if tool == nil {
+		t.Fatal("expand tool required")
+	}
+	out, err := tool.invoke(ctx, `{"object_id":"`+parent.String()+`"}`, h.runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var res brain.ExpandResult
+	if err := json.Unmarshal([]byte(out.output), &res); err != nil {
+		t.Fatal(err)
+	}
+	if res.Mode != "children" || len(res.Objects) != 1 || res.Objects[0].ID != child {
+		t.Fatalf("%+v", res)
+	}
+	if res.Objects[0].Content != "" {
+		t.Fatal("no content on expand")
+	}
+}
+
 func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()

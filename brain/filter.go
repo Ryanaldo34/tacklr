@@ -41,25 +41,33 @@ func ValidateFilters(f Filters) error {
 }
 
 func validateEqValue(key string, val any) error {
-	switch v := val.(type) {
-	case nil:
+	if val == nil {
 		return fmt.Errorf("brain: filter %q value is required", key)
-	case string, bool, float64, float32, int, int32, int64, json.Number:
+	}
+	if isFilterScalar(val) {
 		return nil
-	case []any:
-		if len(v) == 0 {
-			return fmt.Errorf("brain: filter %q list is empty", key)
-		}
-		for i, item := range v {
-			switch item.(type) {
-			case string, bool, float64, float32, int, int32, int64, json.Number:
-			default:
-				return fmt.Errorf("brain: filter %q list[%d] has unsupported type %T", key, i, item)
-			}
-		}
-		return nil
-	default:
+	}
+	items, ok := val.([]any)
+	if !ok {
 		return fmt.Errorf("brain: filter %q has unsupported type %T", key, val)
+	}
+	if len(items) == 0 {
+		return fmt.Errorf("brain: filter %q list is empty", key)
+	}
+	for i, item := range items {
+		if !isFilterScalar(item) {
+			return fmt.Errorf("brain: filter %q list[%d] has unsupported type %T", key, i, item)
+		}
+	}
+	return nil
+}
+
+func isFilterScalar(v any) bool {
+	switch v.(type) {
+	case string, bool, float64, float32, int, int32, int64, json.Number:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -91,11 +99,11 @@ func objectMatchesFilters(obj Object, f Filters) bool {
 		k := strings.TrimSpace(key)
 		switch k {
 		case filterKind:
-			if !scalarEqual(obj.Kind, val) && !listContains(val, obj.Kind) {
+			if !matchFilterValue(obj.Kind, val) {
 				return false
 			}
 		case filterTitle:
-			if !scalarEqual(obj.Title, val) && !listContains(val, obj.Title) {
+			if !matchFilterValue(obj.Title, val) {
 				return false
 			}
 		case filterCreatedAfter:
@@ -120,10 +128,7 @@ func objectMatchesFilters(obj Object, f Filters) bool {
 			}
 		default:
 			prop, ok := obj.Properties[k]
-			if !ok {
-				return false
-			}
-			if !scalarEqual(prop, val) && !listContains(val, prop) {
+			if !ok || !matchFilterValue(prop, val) {
 				return false
 			}
 		}
@@ -131,17 +136,17 @@ func objectMatchesFilters(obj Object, f Filters) bool {
 	return true
 }
 
-func listContains(want any, got any) bool {
-	items, ok := want.([]any)
-	if !ok {
+// matchFilterValue is equality, or membership when want is a list.
+func matchFilterValue(got, want any) bool {
+	if items, ok := want.([]any); ok {
+		for _, item := range items {
+			if scalarEqual(got, item) {
+				return true
+			}
+		}
 		return false
 	}
-	for _, item := range items {
-		if scalarEqual(got, item) {
-			return true
-		}
-	}
-	return false
+	return scalarEqual(got, want)
 }
 
 // scalarEqual is strict: numbers compare as float64; string/bool exact type match.

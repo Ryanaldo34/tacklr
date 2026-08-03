@@ -61,6 +61,9 @@ type AgentOptions struct {
 	// When both are empty, those tools are not registered.
 	ExaAPIKey string
 	// Brain enables knowledge builtins when non-nil. Workers inherit the same engine.
+	// Configure Store, optional QueryEmbedder, and optional GraphReader on the Engine
+	// before NewAgent (e.g. brain.WithGraph(helixgraph.New(...))). The harness does
+	// not construct graph backends.
 	Brain *brain.Engine
 	// SearchNamespace isolates brain retrieval when set (session-owned, checkpointed).
 	// Nil leaves a loaded session value unchanged. Workers get a copy at spawn.

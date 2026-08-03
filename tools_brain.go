@@ -14,8 +14,6 @@ import (
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
-const brainToolTimeout = 30 * time.Second
-
 // brainTools closes over the engine, session (namespace), and SearchContext.
 // Constructed only via newBrainTools with non-nil deps.
 type brainTools struct {
@@ -36,72 +34,60 @@ type readObjectArgs struct {
 	ObjectID string `json:"object_id" desc:"UUID of the object to read in full."`
 }
 
-const readObjectToolDescription = `Read the full contents of a knowledge-base object by id.
-
-Use after search, find_exact, or expand when you need the complete body (content) of a known object. Pass the object UUID from a prior rich result. Do not invent ids.`
-
 func (b brainTools) newReadObjectTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "read",
 		DisplayName: "Read Object",
-		Description: readObjectToolDescription,
-		Category:    streaming.ToolCategoryRead,
-		Access:      ToolReadAccess,
-		Timeout:     brainToolTimeout,
+		Description: `Read the full contents of a knowledge-base object by id.
+
+Use after search, find_exact, or expand when you need the complete body (content) of a known object. Pass the object UUID from a prior rich result. Do not invent ids.`,
+		Category: streaming.ToolCategoryRead,
+		Access:   ToolReadAccess,
+		Timeout:  30 * time.Second,
 		Handler: func(ctx context.Context, args readObjectArgs, runtime HarnessRuntime) (string, error) {
-			return b.runReadObject(ctx, args, runtime)
+			id, err := parseUUID(args.ObjectID, "object_id")
+			if err != nil {
+				return "", fmt.Errorf("read: %w", err)
+			}
+			runtime.EmitUpdate("Reading knowledge object…")
+			obj, err := b.engine.Read(ctx, b.scopeFromSession(), id)
+			if err != nil {
+				if errors.Is(err, brain.ErrNotFound) {
+					return "", fmt.Errorf("read: object %s not found", id)
+				}
+				return "", fmt.Errorf("read: %w", err)
+			}
+			return formatBrainJSON(obj)
 		},
 	})
-}
-
-func (b brainTools) runReadObject(ctx context.Context, args readObjectArgs, runtime HarnessRuntime) (string, error) {
-	id, err := parseUUID(args.ObjectID, "object_id")
-	if err != nil {
-		return "", fmt.Errorf("read: %w", err)
-	}
-	runtime.EmitUpdate("Reading knowledge object…")
-	obj, err := b.engine.Read(ctx, b.scopeFromSession(), id)
-	if err != nil {
-		if errors.Is(err, brain.ErrNotFound) {
-			return "", fmt.Errorf("read: object %s not found", id)
-		}
-		return "", fmt.Errorf("read: %w", err)
-	}
-	return formatBrainJSON(obj)
 }
 
 type schemaArgs struct {
 	Kind string `json:"kind,omitempty" desc:"Optional object kind to describe (e.g. Document, Chunk). Omit to list all registered kinds."`
 }
 
-const schemaToolDescription = `Discover structured filter fields and kind documentation for the knowledge base.
-
-Call with a kind to see filterable fields, types, and operators for that kind. Call with no kind to list registered kinds. Prefer this before inventing property names in filters.`
-
 func (b brainTools) newSchemaTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "schema",
 		DisplayName: "Knowledge Schema",
-		Description: schemaToolDescription,
-		Category:    streaming.ToolCategoryThink,
-		Access:      ToolReadAccess,
-		Timeout:     brainToolTimeout,
+		Description: `Discover structured filter fields and kind documentation for the knowledge base.
+
+Call with a kind to see filterable fields, types, and operators for that kind. Call with no kind to list registered kinds. Prefer this before inventing property names in filters.`,
+		Category: streaming.ToolCategoryThink,
+		Access:   ToolReadAccess,
+		Timeout:  30 * time.Second,
 		Handler: func(ctx context.Context, args schemaArgs, runtime HarnessRuntime) (string, error) {
-			return b.runSchema(ctx, args, runtime)
+			runtime.EmitUpdate("Loading knowledge schema…")
+			res, err := b.engine.Schema(ctx, args.Kind)
+			if err != nil {
+				if errors.Is(err, brain.ErrNotFound) {
+					return "", fmt.Errorf("schema: kind %q not found", strings.TrimSpace(args.Kind))
+				}
+				return "", fmt.Errorf("schema: %w", err)
+			}
+			return formatBrainJSON(res)
 		},
 	})
-}
-
-func (b brainTools) runSchema(ctx context.Context, args schemaArgs, runtime HarnessRuntime) (string, error) {
-	runtime.EmitUpdate("Loading knowledge schema…")
-	res, err := b.engine.Schema(ctx, args.Kind)
-	if err != nil {
-		if errors.Is(err, brain.ErrNotFound) {
-			return "", fmt.Errorf("schema: kind %q not found", strings.TrimSpace(args.Kind))
-		}
-		return "", fmt.Errorf("schema: %w", err)
-	}
-	return formatBrainJSON(res)
 }
 
 // queryArgs is shared by search and find_exact.
@@ -111,29 +97,23 @@ type queryArgs struct {
 	Limit   int            `json:"limit,omitempty" desc:"Max results for this page (default 10, max 50)."`
 }
 
-func (a queryArgs) request() brain.SearchRequest {
-	return brain.SearchRequest{
-		Query:   a.Query,
-		Filters: brain.Filters(a.Filters),
-		Limit:   a.Limit,
-	}
-}
-
-const searchToolDescription = `Search the knowledge base by concept. Returns ranked parent objects with evidence snippets.
-
-Use when you know what you want but not where it is. Prefer schema() before inventing filter keys. Use continue with the returned result_set_id for the next page. Use read for full content of a hit.`
-
 func (b brainTools) newSearchTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "search",
 		DisplayName: "Knowledge Search",
-		Description: searchToolDescription,
-		Category:    streaming.ToolCategorySearch,
-		Access:      ToolReadAccess,
-		Timeout:     brainToolTimeout,
+		Description: `Search the knowledge base by concept. Returns ranked parent objects with evidence snippets.
+
+Use when you know what you want but not where it is. Prefer schema() before inventing filter keys. Use continue with the returned result_set_id for the next page. Use read for full content of a hit.`,
+		Category: streaming.ToolCategorySearch,
+		Access:   ToolReadAccess,
+		Timeout:  30 * time.Second,
 		Handler: func(ctx context.Context, args queryArgs, runtime HarnessRuntime) (string, error) {
 			runtime.EmitUpdate("Searching knowledge base…")
-			page, err := b.engine.Search(ctx, b.scopeFromSession(), args.request(), b.sc)
+			page, err := b.engine.Search(ctx, b.scopeFromSession(), brain.SearchRequest{
+				Query:   args.Query,
+				Filters: brain.Filters(args.Filters),
+				Limit:   args.Limit,
+			}, b.sc)
 			if err != nil {
 				return "", fmt.Errorf("search: %w", err)
 			}
@@ -142,21 +122,23 @@ func (b brainTools) newSearchTool() *Tool {
 	})
 }
 
-const findExactToolDescription = `Find knowledge objects by exact or near-exact match (UUID, title, path-like phrases).
-
-Prefer this over search when you have a precise string. Returns ranked parents with evidence. Use continue for more pages; use read for full content.`
-
 func (b brainTools) newFindExactTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "find_exact",
 		DisplayName: "Find Exact",
-		Description: findExactToolDescription,
-		Category:    streaming.ToolCategorySearch,
-		Access:      ToolReadAccess,
-		Timeout:     brainToolTimeout,
+		Description: `Find knowledge objects by exact or near-exact match (UUID, title, path-like phrases).
+
+Prefer this over search when you have a precise string. Returns ranked parents with evidence. Use continue for more pages; use read for full content.`,
+		Category: streaming.ToolCategorySearch,
+		Access:   ToolReadAccess,
+		Timeout:  30 * time.Second,
 		Handler: func(ctx context.Context, args queryArgs, runtime HarnessRuntime) (string, error) {
 			runtime.EmitUpdate("Finding exact matches…")
-			page, err := b.engine.FindExact(ctx, b.scopeFromSession(), args.request(), b.sc)
+			page, err := b.engine.FindExact(ctx, b.scopeFromSession(), brain.SearchRequest{
+				Query:   args.Query,
+				Filters: brain.Filters(args.Filters),
+				Limit:   args.Limit,
+			}, b.sc)
 			if err != nil {
 				return "", fmt.Errorf("find_exact: %w", err)
 			}
@@ -166,22 +148,20 @@ func (b brainTools) newFindExactTool() *Tool {
 }
 
 type continueArgs struct {
-	ResultSetID string `json:"result_set_id" desc:"Result set id from a prior search or find_exact."`
+	ResultSetID string `json:"result_set_id" desc:"Result set id from a prior search, find_exact, or expand."`
 	Limit       int    `json:"limit,omitempty" desc:"Max results for this page (default 10, max 50)."`
 }
-
-const continueToolDescription = `Return the next page of a prior search or find_exact result set.
-
-Pass the result_set_id from the previous call. A new search or find_exact replaces the prior result set.`
 
 func (b brainTools) newContinueTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "continue",
 		DisplayName: "Continue Results",
-		Description: continueToolDescription,
-		Category:    streaming.ToolCategorySearch,
-		Access:      ToolReadAccess,
-		Timeout:     brainToolTimeout,
+		Description: `Return the next page of a prior ranked result set from search, find_exact, or expand.
+
+Pass the result_set_id from the previous call. Each new search, find_exact, or large expand replaces the active result set — older result_set_id values stop working.`,
+		Category: streaming.ToolCategorySearch,
+		Access:   ToolReadAccess,
+		Timeout:  30 * time.Second,
 		Handler: func(ctx context.Context, args continueArgs, runtime HarnessRuntime) (string, error) {
 			id, err := parseUUID(args.ResultSetID, "result_set_id")
 			if err != nil {
@@ -196,6 +176,41 @@ func (b brainTools) newContinueTool() *Tool {
 				return "", fmt.Errorf("continue: %w", err)
 			}
 			return formatBrainJSON(page)
+		},
+	})
+}
+
+type expandArgs struct {
+	ObjectID      string   `json:"object_id" desc:"UUID of the object to expand."`
+	RelationTypes []string `json:"relation_types,omitempty" desc:"Optional relation types. Omit for containment (children or parent+siblings). Named types use the graph backend (e.g. references)."`
+	Limit         int      `json:"limit,omitempty" desc:"Page size when results are paginated (default 10, max 50)."`
+}
+
+func (b brainTools) newExpandTool() *Tool {
+	return NewTool(ToolConfig{
+		Name:        "expand",
+		DisplayName: "Expand Object",
+		Description: `Show objects structurally connected to this one.
+
+From a parent: ordered children (containment). From a part: parent and nearby siblings. Omit relation_types for containment only; use contains/part_of explicitly if mixed with graph labels. Other relation_types need a graph backend (Helix). Large lists return result_set_id and replace any prior result set — use continue for more pages. Use read for full content.`,
+		Category: streaming.ToolCategoryFetch,
+		Access:   ToolReadAccess,
+		Timeout:  30 * time.Second,
+		Handler: func(ctx context.Context, args expandArgs, runtime HarnessRuntime) (string, error) {
+			id, err := parseUUID(args.ObjectID, "object_id")
+			if err != nil {
+				return "", fmt.Errorf("expand: %w", err)
+			}
+			runtime.EmitUpdate("Expanding knowledge object…")
+			res, err := b.engine.Expand(ctx, b.scopeFromSession(), brain.ExpandRequest{
+				ObjectID:      id,
+				RelationTypes: args.RelationTypes,
+				Limit:         args.Limit,
+			}, b.sc)
+			if err != nil {
+				return "", fmt.Errorf("expand: %w", err)
+			}
+			return formatBrainJSON(res)
 		},
 	})
 }
@@ -235,5 +250,6 @@ func newBrainTools(engine *brain.Engine, sm *session.SessionManager, sc *brain.S
 		b.newSearchTool(),
 		b.newFindExactTool(),
 		b.newContinueTool(),
+		b.newExpandTool(),
 	}
 }

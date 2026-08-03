@@ -38,14 +38,7 @@ func (e *Engine) Continue(ctx context.Context, scope Scope, resultSetID uuid.UUI
 	if err != nil {
 		return SearchPage{}, err
 	}
-	start := set.Offset
-	if start > len(set.ObjectIDs) {
-		start = len(set.ObjectIDs)
-	}
-	end := start + limit
-	if end > len(set.ObjectIDs) {
-		end = len(set.ObjectIDs)
-	}
+	start, end := sliceBounds(set.Offset, limit, len(set.ObjectIDs))
 	objs, err := e.hydrateParents(ctx, scope, set.ObjectIDs[start:end])
 	if err != nil {
 		return SearchPage{}, err
@@ -67,33 +60,24 @@ func (e *Engine) materialize(ctx context.Context, scope Scope, ranked []ScoredID
 	sortScored(ranked)
 	promoted := promoteParents(ranked, e.cfg.EvidenceN)
 
-	firstEnd := limit
-	if firstEnd > len(promoted) {
-		firstEnd = len(promoted)
+	ids := make([]uuid.UUID, len(promoted))
+	byID := make(map[uuid.UUID]promotedParent, len(promoted))
+	for i, p := range promoted {
+		ids[i] = p.ParentID
+		byID[p.ParentID] = p
 	}
-	pageObjs, err := e.hydratePromoted(ctx, scope, promoted[:firstEnd])
+	page, err := e.pageIDs(ctx, scope, ids, limit, results)
 	if err != nil {
 		return SearchPage{}, err
 	}
-
-	ids := make([]uuid.UUID, len(promoted))
-	for i, p := range promoted {
-		ids[i] = p.ParentID
+	for i := range page.Objects {
+		if p, ok := byID[page.Objects[i].ID]; ok {
+			sc := p.Score
+			page.Objects[i].Score = &sc
+			page.Objects[i].Evidence = p.Evidence
+		}
 	}
-	set := ResultSet{
-		ID:        uuid.New(),
-		ObjectIDs: ids,
-		Offset:    firstEnd,
-		CreatedAt: e.cfg.Now(),
-	}
-	if err := results.Put(ctx, set); err != nil {
-		return SearchPage{}, err
-	}
-	return SearchPage{
-		ResultSetID: set.ID,
-		HasMore:     firstEnd < len(ids),
-		Objects:     pageObjs,
-	}, nil
+	return page, nil
 }
 
 func (e *Engine) prepareSearch(req SearchRequest) (PartSearcher, error) {
@@ -202,22 +186,6 @@ func (e *Engine) exactCandidates(ctx context.Context, scope Scope, req SearchReq
 	return out, nil
 }
 
-func (e *Engine) hydratePromoted(ctx context.Context, scope Scope, page []promotedParent) ([]RichObject, error) {
-	out := make([]RichObject, 0, len(page))
-	for _, p := range page {
-		obj, err := e.store.Get(ctx, scope, p.ParentID)
-		if err != nil {
-			return nil, fmt.Errorf("brain: hydrate parent %s: %w", p.ParentID, err)
-		}
-		rich := RichFromObject(obj, false)
-		sc := p.Score
-		rich.Score = &sc
-		rich.Evidence = p.Evidence
-		out = append(out, rich)
-	}
-	return out, nil
-}
-
 func (e *Engine) hydrateParents(ctx context.Context, scope Scope, ids []uuid.UUID) ([]RichObject, error) {
 	out := make([]RichObject, 0, len(ids))
 	for _, id := range ids {
@@ -228,4 +196,35 @@ func (e *Engine) hydrateParents(ctx context.Context, scope Scope, ids []uuid.UUI
 		out = append(out, RichFromObject(obj, false))
 	}
 	return out, nil
+}
+
+// pageIDs materializes ordered ids into a ResultSet and returns the first page.
+func (e *Engine) pageIDs(ctx context.Context, scope Scope, ids []uuid.UUID, limit int, results ResultSetStore) (SearchPage, error) {
+	limit = e.normalizeLimit(limit)
+	_, end := sliceBounds(0, limit, len(ids))
+	pageObjs, err := e.hydrateParents(ctx, scope, ids[:end])
+	if err != nil {
+		return SearchPage{}, err
+	}
+	set := ResultSet{
+		ID:        uuid.New(),
+		ObjectIDs: append([]uuid.UUID(nil), ids...),
+		Offset:    end,
+		CreatedAt: e.cfg.Now(),
+	}
+	if err := results.Put(ctx, set); err != nil {
+		return SearchPage{}, err
+	}
+	return SearchPage{
+		ResultSetID: set.ID,
+		HasMore:     end < len(ids),
+		Objects:     pageObjs,
+	}, nil
+}
+
+// sliceBounds returns [start,end) for a page into a slice of length n.
+func sliceBounds(offset, limit, n int) (start, end int) {
+	start = min(max(offset, 0), n)
+	end = min(start+limit, n)
+	return start, end
 }

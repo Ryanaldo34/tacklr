@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"math"
 	"slices"
 	"strings"
@@ -384,10 +385,7 @@ func trigramOverlap(a, b map[string]struct{}) float64 {
 func cloneObject(o Object) Object {
 	cp := o
 	if o.Properties != nil {
-		cp.Properties = make(map[string]any, len(o.Properties))
-		for k, v := range o.Properties {
-			cp.Properties[k] = v
-		}
+		cp.Properties = maps.Clone(o.Properties)
 	}
 	if o.ParentID != nil {
 		p := *o.ParentID
@@ -402,7 +400,7 @@ func cloneObject(o Object) Object {
 		cp.DeletedAt = &d
 	}
 	if o.Embedding != nil {
-		cp.Embedding = append([]float32(nil), o.Embedding...)
+		cp.Embedding = slices.Clone(o.Embedding)
 	}
 	return cp
 }
