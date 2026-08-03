@@ -26,8 +26,8 @@ const (
 	MetricTokensInput     = "tacklr.tokens.input"
 	MetricTokensOutput    = "tacklr.tokens.output"
 	MetricTokensReasoning = "tacklr.tokens.reasoning"
-	MetricBrainTotal    = "tacklr.brain.total"
-	MetricBrainDuration = "tacklr.brain.duration"
+	MetricBrainTotal      = "tacklr.brain.total"
+	MetricBrainDuration   = "tacklr.brain.duration"
 )
 
 // Label keys (low cardinality only — closed enums / config ids, never free text).

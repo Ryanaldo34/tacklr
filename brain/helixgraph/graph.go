@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	helix "github.com/helixdb/helix-db/sdks/go"
+
 	"github.com/ryanaldo34/tacklr/brain"
 )
 

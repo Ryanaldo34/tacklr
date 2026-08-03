@@ -8,9 +8,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/ryanaldo34/tacklr/brain/helixgraph"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
+
+	"github.com/ryanaldo34/tacklr/brain/helixgraph"
 )
 
 // enterprise-dev in-memory mode (no PATH_TO_QUERIES / MinIO). Dynamic /v1/query.
@@ -31,7 +32,7 @@ func TestGraph_liveNeighborsBoth(t *testing.T) {
 		t.Skip("skipping helix integration test in -short mode")
 	}
 	ctx := context.Background()
-	g := liveGraph(t, ctx)
+	g := liveGraph(t)
 
 	a, b, c := uuid.New(), uuid.New(), uuid.New()
 	for _, id := range []uuid.UUID{a, b, c} {
@@ -110,7 +111,7 @@ func TestGraph_livePutObjectIdempotent(t *testing.T) {
 		t.Skip("skipping helix integration test in -short mode")
 	}
 	ctx := context.Background()
-	g := liveGraph(t, ctx)
+	g := liveGraph(t)
 	id := uuid.New()
 	if err := g.PutObject(ctx, id); err != nil {
 		t.Fatal(err)
@@ -132,9 +133,10 @@ func TestGraph_livePutObjectIdempotent(t *testing.T) {
 	}
 }
 
-func liveGraph(t *testing.T, ctx context.Context) *helixgraph.Graph {
+func liveGraph(t *testing.T) *helixgraph.Graph {
 	t.Helper()
-	base := sharedHelixURL(t, ctx)
+	ctx := context.Background()
+	base := sharedHelixURL(t)
 	g, err := helixgraph.New(base)
 	if err != nil {
 		t.Fatal(err)
@@ -145,8 +147,9 @@ func liveGraph(t *testing.T, ctx context.Context) *helixgraph.Graph {
 	return g
 }
 
-func sharedHelixURL(t *testing.T, ctx context.Context) string {
+func sharedHelixURL(t *testing.T) string {
 	t.Helper()
+	ctx := context.Background()
 	helixOnce.Do(func() {
 		ctr, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 			ContainerRequest: testcontainers.ContainerRequest{

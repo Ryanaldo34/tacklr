@@ -82,7 +82,7 @@ func parseFilterTime(val any) (time.Time, error) {
 	}
 	t, err := time.Parse(time.RFC3339, s)
 	if err != nil {
-		t, err = time.Parse("2006-01-02", s)
+		t, err = time.Parse(time.DateOnly, s)
 		if err != nil {
 			return time.Time{}, fmt.Errorf("want RFC3339 or YYYY-MM-DD: %w", err)
 		}

@@ -113,13 +113,7 @@ type ObjectKindInfo struct {
 
 // KindInfoFrom maps a registry row to the agent-facing shape.
 func KindInfoFrom(k ObjectKind) ObjectKindInfo {
-	return ObjectKindInfo{
-		Kind:             k.Kind,
-		Description:      k.Description,
-		IsPart:           k.IsPart,
-		IsParent:         k.IsParent,
-		FilterableFields: k.FilterableFields,
-	}
+	return ObjectKindInfo(k)
 }
 
 // Filters narrows retrieval. Keys are field names; values are equality targets

@@ -355,8 +355,7 @@ func TestSpans_fullLifecycle(t *testing.T) {
 	turn.End("", nil) // finished
 
 	// Resume-style turn with cancel outcome
-	ctx2, turn2 := StartTurnSpan(context.Background(), TurnAttrs{AgentID: "a", Kind: "resume"})
-	ctx2 = ContextWithInstruments(ctx2, inst)
+	_, turn2 := StartTurnSpan(ContextWithInstruments(context.Background(), inst), TurnAttrs{AgentID: "a", Kind: "resume"})
 	turn2.End(OutcomeCancelled, nil)
 
 	_, turn3 := StartTurnSpan(ContextWithInstruments(context.Background(), inst), TurnAttrs{})

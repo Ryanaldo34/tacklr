@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
 	"github.com/ryanaldo34/tacklr/brain"
 )
 

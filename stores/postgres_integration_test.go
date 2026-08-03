@@ -9,8 +9,9 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
+
+	"github.com/ryanaldo34/tacklr/streaming"
 )
 
 const sessionPgImage = "tacklr-pg-brain:test"
@@ -29,7 +30,7 @@ func TestPostgresStore_liveSaveLoad(t *testing.T) {
 		t.Skip("skipping postgres store integration in -short mode")
 	}
 	ctx := context.Background()
-	conn := sessionConn(t, ctx)
+	conn := sessionConn(t)
 	store := NewPostgresStore(conn)
 
 	cp, err := NewCheckpoint(
@@ -120,8 +121,9 @@ func TestPostgresStore_liveSaveLoad(t *testing.T) {
 	}
 }
 
-func sessionConn(t *testing.T, ctx context.Context) *pgx.Conn {
+func sessionConn(t *testing.T) *pgx.Conn {
 	t.Helper()
+	ctx := context.Background()
 	sessionOnce.Do(func() {
 		_, thisFile, _, ok := runtime.Caller(0)
 		if !ok {

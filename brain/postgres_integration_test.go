@@ -12,8 +12,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib"
-	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
+
+	"github.com/ryanaldo34/tacklr/brain"
 )
 
 // Pre-built via Makefile/CI: docker build -f brain/testdata/Dockerfile.postgres -t tacklr-pg-brain:test
@@ -34,8 +35,8 @@ func TestPostgresStore_liveRetrievalChannels(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	pool := sharedPostgresPool(t, ctx)
-	mustExec(t, ctx, pool, `TRUNCATE objects, object_kinds CASCADE`)
+	pool := sharedPostgresPool(t)
+	mustExec(t, pool, `TRUNCATE objects, object_kinds CASCADE`)
 	store, err := brain.NewPostgresStore(pool)
 	if err != nil {
 		t.Fatal(err)
@@ -49,13 +50,13 @@ func TestPostgresStore_liveRetrievalChannels(t *testing.T) {
 	chunkDeleted := uuid.New()
 	now := time.Now().UTC().Truncate(time.Microsecond)
 
-	mustExec(t, ctx, pool, `
+	mustExec(t, pool, `
 		INSERT INTO object_kinds (kind, description, is_part, is_parent, filterable_fields)
 		VALUES
 			('Document', 'parent docs', false, true, '[]'),
 			('Chunk', 'parts', true, false, '[{"name":"stage"}]')
 	`)
-	mustExec(t, ctx, pool, `
+	mustExec(t, pool, `
 		INSERT INTO objects (id, kind, title, summary, properties, content, parent_id, position, embedding, namespace_id, created_at, updated_at)
 		VALUES
 			($1, 'Document', 'OAuth Guide', 'parent', '{}', NULL, NULL, NULL, NULL, $2, $3, $3),
@@ -63,9 +64,9 @@ func TestPostgresStore_liveRetrievalChannels(t *testing.T) {
 			($5, 'Chunk', 'unrelated', '', '{}', 'cooking recipes and pasta', $1, 2, '[0,1,0]'::vector, $2, $3, $3),
 			($6, 'Chunk', 'gone', '', '{}', 'soft deleted oauth', $1, 3, '[1,0,0]'::vector, $2, $3, $3)
 	`, parentID, nsA, now, chunkOAuth, chunkOther, chunkDeleted)
-	mustExec(t, ctx, pool, `UPDATE objects SET deleted_at = $1 WHERE id = $2`, now, chunkDeleted)
+	mustExec(t, pool, `UPDATE objects SET deleted_at = $1 WHERE id = $2`, now, chunkDeleted)
 	docB := uuid.New()
-	mustExec(t, ctx, pool, `
+	mustExec(t, pool, `
 		INSERT INTO objects (id, kind, title, namespace_id, created_at, updated_at)
 		VALUES ($1, 'Document', 'other ns', $2, $3, $3)
 	`, docB, nsB, now)
@@ -218,7 +219,7 @@ func TestPostgresStore_liveEmptyChannels(t *testing.T) {
 		t.Skip("skipping postgres integration test in -short mode")
 	}
 	ctx := context.Background()
-	pool := sharedPostgresPool(t, ctx)
+	pool := sharedPostgresPool(t)
 	store, err := brain.NewPostgresStore(pool)
 	if err != nil {
 		t.Fatal(err)
@@ -241,8 +242,9 @@ func TestPostgresStore_liveEmptyChannels(t *testing.T) {
 // sharedPostgresPool starts one container for the package process.
 // Requires image tacklr-pg-brain:test (make brain-pg-image / CI prepare step).
 // Tests that need a clean slate TRUNCATE their tables.
-func sharedPostgresPool(t *testing.T, ctx context.Context) *pgxpool.Pool {
+func sharedPostgresPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
+	ctx := context.Background()
 	pgOnce.Do(func() {
 		_, thisFile, _, ok := runtime.Caller(0)
 		if !ok {
@@ -305,9 +307,9 @@ func sharedPostgresPool(t *testing.T, ctx context.Context) *pgxpool.Pool {
 	return pgPool
 }
 
-func mustExec(t *testing.T, ctx context.Context, pool *pgxpool.Pool, sql string, args ...any) {
+func mustExec(t *testing.T, pool *pgxpool.Pool, sql string, args ...any) {
 	t.Helper()
-	if _, err := pool.Exec(ctx, sql, args...); err != nil {
+	if _, err := pool.Exec(context.Background(), sql, args...); err != nil {
 		t.Fatalf("exec: %v\nsql: %s", err, sql)
 	}
 }
