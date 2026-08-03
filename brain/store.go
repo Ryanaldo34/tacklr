@@ -19,6 +19,14 @@ type KindReader interface {
 	ListKinds(ctx context.Context) ([]ObjectKind, error)
 }
 
+// PartSearcher is the candidate retrieval port for hybrid / exact search.
+// MemoryStore and PostgresStore implement this.
+type PartSearcher interface {
+	SearchLexical(ctx context.Context, scope Scope, query string, filters Filters, k int) ([]ScoredID, error)
+	SearchVector(ctx context.Context, scope Scope, embedding []float32, filters Filters, k int) ([]ScoredID, error)
+	SearchTrigram(ctx context.Context, scope Scope, query string, filters Filters, k int) ([]ScoredID, error)
+}
+
 // Store is the combined read surface for the engine.
 type Store interface {
 	ObjectReader

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -56,13 +57,21 @@ func (r *stubRows) Scan(dest ...any) error {
 }
 
 type stubDB struct {
-	row  stubRow
-	rows *stubRows
-	qErr error
+	row      stubRow
+	rows     *stubRows
+	qErr     error
+	lastSQL  string
+	lastArgs []any
 }
 
-func (d *stubDB) QueryRow(context.Context, string, ...any) brain.Row { return d.row }
-func (d *stubDB) Query(context.Context, string, ...any) (brain.Rows, error) {
+func (d *stubDB) QueryRow(_ context.Context, sql string, args ...any) brain.Row {
+	d.lastSQL = sql
+	d.lastArgs = args
+	return d.row
+}
+func (d *stubDB) Query(_ context.Context, sql string, args ...any) (brain.Rows, error) {
+	d.lastSQL = sql
+	d.lastArgs = args
 	if d.qErr != nil {
 		return nil, d.qErr
 	}
@@ -148,6 +157,17 @@ func assignScan(dest, src any) error {
 		}
 	case *bool:
 		*d = src.(bool)
+	case *float64:
+		switch v := src.(type) {
+		case float64:
+			*d = v
+		case float32:
+			*d = float64(v)
+		case int:
+			*d = float64(v)
+		default:
+			return errors.New("float64 type")
+		}
 	default:
 		return errors.New("unsupported scan dest")
 	}
@@ -312,5 +332,85 @@ func TestPostgresStore_queryFailures(t *testing.T) {
 	}
 	if _, err := store.ListKinds(ctx); err == nil {
 		t.Fatal("list kinds must surface query error")
+	}
+}
+
+// TestPostgresStore_searchChannels builds BM25/vector/trigram SQL with filters
+// and maps scored rows (stub DB; no real pg_textsearch required).
+func TestPostgresStore_searchChannels(t *testing.T) {
+	ctx := context.Background()
+	ns := uuid.New()
+	partID := uuid.New()
+	parentID := uuid.New()
+	title := "chunk"
+	content := "oauth body"
+	pos := int32(1)
+	updated := time.Now().UTC()
+	db := &stubDB{
+		rows: &stubRows{rows: []stubRow{{
+			vals: []any{partID, title, content, parentID, pos, updated, -1.5},
+		}}},
+	}
+	store, err := brain.NewPostgresStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	filters := brain.Filters{"kind": "Chunk", "stage": "open"}
+	scope := brain.Scope{Namespace: &ns}
+
+	lex, err := store.SearchLexical(ctx, scope, "oauth", filters, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lex) != 1 || lex[0].ID != partID || lex[0].Score != 1.5 {
+		t.Fatalf("lexical invert bm25: %+v", lex)
+	}
+	if !strings.Contains(db.lastSQL, "to_bm25query") || !strings.Contains(db.lastSQL, "namespace_id") {
+		t.Fatalf("lexical sql: %s", db.lastSQL)
+	}
+	if !strings.Contains(db.lastSQL, "properties->>'stage'") {
+		t.Fatalf("property filter missing: %s", db.lastSQL)
+	}
+
+	db.rows = &stubRows{rows: []stubRow{{
+		vals: []any{partID, title, content, parentID, pos, updated, 0.9},
+	}}}
+	vec, err := store.SearchVector(ctx, scope, []float32{0.1, 0.2}, filters, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(vec) != 1 || vec[0].Score != 0.9 {
+		t.Fatalf("vector: %+v", vec)
+	}
+	if !strings.Contains(db.lastSQL, "embedding") {
+		t.Fatalf("vector sql: %s", db.lastSQL)
+	}
+
+	db.rows = &stubRows{rows: []stubRow{{
+		vals: []any{partID, title, content, parentID, pos, updated, 0.5},
+	}}}
+	tri, err := store.SearchTrigram(ctx, scope, "oauth", nil, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tri) != 1 {
+		t.Fatalf("trigram: %+v", tri)
+	}
+	if !strings.Contains(db.lastSQL, "similarity") {
+		t.Fatalf("trigram sql: %s", db.lastSQL)
+	}
+
+	// Date filters expand WHERE.
+	db.rows = &stubRows{rows: []stubRow{}}
+	_, err = store.SearchLexical(ctx, scope, "q", brain.Filters{
+		"updated_after":  "2024-01-01T00:00:00Z",
+		"updated_before": "2025-01-01T00:00:00Z",
+		"title":          "T",
+	}, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(db.lastSQL, "updated_at >=") || !strings.Contains(db.lastSQL, "title =") {
+		t.Fatalf("date/title filters: %s", db.lastSQL)
 	}
 }

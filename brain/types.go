@@ -28,6 +28,8 @@ type Object struct {
 	ContentType string
 	ParentID    *uuid.UUID
 	Position    *int
+	// Embedding is optional dense vector for hybrid search fixtures / stores.
+	Embedding   []float32
 	NamespaceID uuid.UUID
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
@@ -118,4 +120,34 @@ func KindInfoFrom(k ObjectKind) ObjectKindInfo {
 		IsParent:         k.IsParent,
 		FilterableFields: k.FilterableFields,
 	}
+}
+
+// Filters narrows retrieval. Keys are field names; values are equality targets
+// (or a list for match-any). Special keys: kind, title, created_after,
+// created_before, updated_after, updated_before. Any other key matches properties.
+type Filters map[string]any
+
+// SearchRequest is the engine input for search and find_exact.
+type SearchRequest struct {
+	Query   string
+	Filters Filters
+	Limit   int
+}
+
+// SearchPage is one page of ranked rich objects plus ResultSet identity.
+type SearchPage struct {
+	ResultSetID uuid.UUID    `json:"result_set_id"`
+	HasMore     bool         `json:"has_more"`
+	Objects     []RichObject `json:"objects"`
+}
+
+// ScoredID is a candidate from a retrieval channel before fusion.
+type ScoredID struct {
+	ID        uuid.UUID
+	Score     float64
+	UpdatedAt time.Time
+	ParentID  *uuid.UUID
+	Title     string
+	Content   string
+	Position  *int
 }

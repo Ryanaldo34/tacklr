@@ -1,0 +1,189 @@
+package brain
+
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+	"time"
+)
+
+const (
+	filterKind          = "kind"
+	filterTitle         = "title"
+	filterCreatedAfter  = "created_after"
+	filterCreatedBefore = "created_before"
+	filterUpdatedAfter  = "updated_after"
+	filterUpdatedBefore = "updated_before"
+)
+
+// ValidateFilters checks filter keys and value shapes. Empty/nil is valid.
+func ValidateFilters(f Filters) error {
+	if len(f) == 0 {
+		return nil
+	}
+	for key, val := range f {
+		k := strings.TrimSpace(key)
+		if k == "" {
+			return fmt.Errorf("brain: filter key is required")
+		}
+		switch k {
+		case filterCreatedAfter, filterCreatedBefore, filterUpdatedAfter, filterUpdatedBefore:
+			if _, err := parseFilterTime(val); err != nil {
+				return fmt.Errorf("brain: filter %q: %w", k, err)
+			}
+		default:
+			if err := validateEqValue(k, val); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func validateEqValue(key string, val any) error {
+	switch v := val.(type) {
+	case nil:
+		return fmt.Errorf("brain: filter %q value is required", key)
+	case string, bool, float64, float32, int, int32, int64, json.Number:
+		return nil
+	case []any:
+		if len(v) == 0 {
+			return fmt.Errorf("brain: filter %q list is empty", key)
+		}
+		for i, item := range v {
+			switch item.(type) {
+			case string, bool, float64, float32, int, int32, int64, json.Number:
+			default:
+				return fmt.Errorf("brain: filter %q list[%d] has unsupported type %T", key, i, item)
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("brain: filter %q has unsupported type %T", key, val)
+	}
+}
+
+func parseFilterTime(val any) (time.Time, error) {
+	s, ok := val.(string)
+	if !ok {
+		return time.Time{}, fmt.Errorf("want RFC3339 string, got %T", val)
+	}
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}, fmt.Errorf("empty time")
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		t, err = time.Parse("2006-01-02", s)
+		if err != nil {
+			return time.Time{}, fmt.Errorf("want RFC3339 or YYYY-MM-DD: %w", err)
+		}
+	}
+	return t.UTC(), nil
+}
+
+// objectMatchesFilters reports whether obj satisfies all filters (AND).
+func objectMatchesFilters(obj Object, f Filters) bool {
+	if len(f) == 0 {
+		return true
+	}
+	for key, val := range f {
+		k := strings.TrimSpace(key)
+		switch k {
+		case filterKind:
+			if !scalarEqual(obj.Kind, val) && !listContains(val, obj.Kind) {
+				return false
+			}
+		case filterTitle:
+			if !scalarEqual(obj.Title, val) && !listContains(val, obj.Title) {
+				return false
+			}
+		case filterCreatedAfter:
+			bound, err := parseFilterTime(val)
+			if err != nil || obj.CreatedAt.Before(bound) {
+				return false
+			}
+		case filterCreatedBefore:
+			bound, err := parseFilterTime(val)
+			if err != nil || !obj.CreatedAt.Before(bound) {
+				return false
+			}
+		case filterUpdatedAfter:
+			bound, err := parseFilterTime(val)
+			if err != nil || obj.UpdatedAt.Before(bound) {
+				return false
+			}
+		case filterUpdatedBefore:
+			bound, err := parseFilterTime(val)
+			if err != nil || !obj.UpdatedAt.Before(bound) {
+				return false
+			}
+		default:
+			prop, ok := obj.Properties[k]
+			if !ok {
+				return false
+			}
+			if !scalarEqual(prop, val) && !listContains(val, prop) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func listContains(want any, got any) bool {
+	items, ok := want.([]any)
+	if !ok {
+		return false
+	}
+	for _, item := range items {
+		if scalarEqual(got, item) {
+			return true
+		}
+	}
+	return false
+}
+
+// scalarEqual is strict: numbers compare as float64; string/bool exact type match.
+// Unknown types do not match (no string formatting fallback).
+func scalarEqual(a, b any) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if af, aok := asFloat(a); aok {
+		if bf, bok := asFloat(b); bok {
+			return af == bf
+		}
+		return false
+	}
+	switch av := a.(type) {
+	case string:
+		bs, ok := b.(string)
+		return ok && av == bs
+	case bool:
+		bb, ok := b.(bool)
+		return ok && av == bb
+	default:
+		return false
+	}
+}
+
+func asFloat(v any) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case float32:
+		return float64(n), true
+	case int:
+		return float64(n), true
+	case int32:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	case json.Number:
+		f, err := n.Float64()
+		return f, err == nil
+	default:
+		return 0, false
+	}
+}

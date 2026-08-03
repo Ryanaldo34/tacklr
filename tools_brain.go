@@ -16,10 +16,12 @@ import (
 
 const brainToolTimeout = 30 * time.Second
 
-// brainTools closes over the engine and session for knowledge builtins.
+// brainTools closes over the engine, session (namespace), and SearchContext.
+// Constructed only via newBrainTools with non-nil deps.
 type brainTools struct {
 	engine *brain.Engine
 	sm     *session.SessionManager
+	sc     *brain.SearchContext
 }
 
 func (b brainTools) scopeFromSession() brain.Scope {
@@ -53,10 +55,7 @@ func (b brainTools) newReadObjectTool() *Tool {
 }
 
 func (b brainTools) runReadObject(ctx context.Context, args readObjectArgs, runtime HarnessRuntime) (string, error) {
-	if b.engine == nil {
-		return "", fmt.Errorf("read: brain engine is not configured")
-	}
-	id, err := parseObjectID(args.ObjectID)
+	id, err := parseUUID(args.ObjectID, "object_id")
 	if err != nil {
 		return "", fmt.Errorf("read: %w", err)
 	}
@@ -94,9 +93,6 @@ func (b brainTools) newSchemaTool() *Tool {
 }
 
 func (b brainTools) runSchema(ctx context.Context, args schemaArgs, runtime HarnessRuntime) (string, error) {
-	if b.engine == nil {
-		return "", fmt.Errorf("schema: brain engine is not configured")
-	}
 	runtime.EmitUpdate("Loading knowledge schema…")
 	res, err := b.engine.Schema(ctx, args.Kind)
 	if err != nil {
@@ -108,6 +104,102 @@ func (b brainTools) runSchema(ctx context.Context, args schemaArgs, runtime Harn
 	return formatBrainJSON(res)
 }
 
+// queryArgs is shared by search and find_exact.
+type queryArgs struct {
+	Query   string         `json:"query" desc:"Search query text."`
+	Filters map[string]any `json:"filters,omitempty" desc:"Optional field→value equality filters (e.g. kind, title, property keys, updated_after)."`
+	Limit   int            `json:"limit,omitempty" desc:"Max results for this page (default 10, max 50)."`
+}
+
+func (a queryArgs) request() brain.SearchRequest {
+	return brain.SearchRequest{
+		Query:   a.Query,
+		Filters: brain.Filters(a.Filters),
+		Limit:   a.Limit,
+	}
+}
+
+const searchToolDescription = `Search the knowledge base by concept. Returns ranked parent objects with evidence snippets.
+
+Use when you know what you want but not where it is. Prefer schema() before inventing filter keys. Use continue with the returned result_set_id for the next page. Use read for full content of a hit.`
+
+func (b brainTools) newSearchTool() *Tool {
+	return NewTool(ToolConfig{
+		Name:        "search",
+		DisplayName: "Knowledge Search",
+		Description: searchToolDescription,
+		Category:    streaming.ToolCategorySearch,
+		Access:      ToolReadAccess,
+		Timeout:     brainToolTimeout,
+		Handler: func(ctx context.Context, args queryArgs, runtime HarnessRuntime) (string, error) {
+			runtime.EmitUpdate("Searching knowledge base…")
+			page, err := b.engine.Search(ctx, b.scopeFromSession(), args.request(), b.sc)
+			if err != nil {
+				return "", fmt.Errorf("search: %w", err)
+			}
+			return formatBrainJSON(page)
+		},
+	})
+}
+
+const findExactToolDescription = `Find knowledge objects by exact or near-exact match (UUID, title, path-like phrases).
+
+Prefer this over search when you have a precise string. Returns ranked parents with evidence. Use continue for more pages; use read for full content.`
+
+func (b brainTools) newFindExactTool() *Tool {
+	return NewTool(ToolConfig{
+		Name:        "find_exact",
+		DisplayName: "Find Exact",
+		Description: findExactToolDescription,
+		Category:    streaming.ToolCategorySearch,
+		Access:      ToolReadAccess,
+		Timeout:     brainToolTimeout,
+		Handler: func(ctx context.Context, args queryArgs, runtime HarnessRuntime) (string, error) {
+			runtime.EmitUpdate("Finding exact matches…")
+			page, err := b.engine.FindExact(ctx, b.scopeFromSession(), args.request(), b.sc)
+			if err != nil {
+				return "", fmt.Errorf("find_exact: %w", err)
+			}
+			return formatBrainJSON(page)
+		},
+	})
+}
+
+type continueArgs struct {
+	ResultSetID string `json:"result_set_id" desc:"Result set id from a prior search or find_exact."`
+	Limit       int    `json:"limit,omitempty" desc:"Max results for this page (default 10, max 50)."`
+}
+
+const continueToolDescription = `Return the next page of a prior search or find_exact result set.
+
+Pass the result_set_id from the previous call. A new search or find_exact replaces the prior result set.`
+
+func (b brainTools) newContinueTool() *Tool {
+	return NewTool(ToolConfig{
+		Name:        "continue",
+		DisplayName: "Continue Results",
+		Description: continueToolDescription,
+		Category:    streaming.ToolCategorySearch,
+		Access:      ToolReadAccess,
+		Timeout:     brainToolTimeout,
+		Handler: func(ctx context.Context, args continueArgs, runtime HarnessRuntime) (string, error) {
+			id, err := parseUUID(args.ResultSetID, "result_set_id")
+			if err != nil {
+				return "", fmt.Errorf("continue: %w", err)
+			}
+			runtime.EmitUpdate("Loading more results…")
+			page, err := b.engine.Continue(ctx, b.scopeFromSession(), id, args.Limit, b.sc)
+			if err != nil {
+				if errors.Is(err, brain.ErrResultSetNotFound) {
+					return "", fmt.Errorf("continue: result set not found; run search or find_exact again")
+				}
+				return "", fmt.Errorf("continue: %w", err)
+			}
+			return formatBrainJSON(page)
+		},
+	})
+}
+
 func formatBrainJSON(v any) (string, error) {
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
@@ -116,28 +208,32 @@ func formatBrainJSON(v any) (string, error) {
 	return string(b), nil
 }
 
-func parseObjectID(raw string) (uuid.UUID, error) {
+func parseUUID(raw, field string) (uuid.UUID, error) {
 	s := strings.TrimSpace(raw)
 	if s == "" {
-		return uuid.Nil, fmt.Errorf("object_id is required")
+		return uuid.Nil, fmt.Errorf("%s is required", field)
 	}
 	id, err := uuid.Parse(s)
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("object_id must be a UUID: %w", err)
+		return uuid.Nil, fmt.Errorf("%s must be a UUID: %w", field, err)
 	}
 	if id == uuid.Nil {
-		return uuid.Nil, fmt.Errorf("object_id must not be the nil UUID")
+		return uuid.Nil, fmt.Errorf("%s must not be the nil UUID", field)
 	}
 	return id, nil
 }
 
-func newBrainTools(engine *brain.Engine, sm *session.SessionManager) []*Tool {
-	if engine == nil || sm == nil {
+// newBrainTools requires non-nil engine, session, and search context.
+func newBrainTools(engine *brain.Engine, sm *session.SessionManager, sc *brain.SearchContext) []*Tool {
+	if engine == nil || sm == nil || sc == nil {
 		return nil
 	}
-	b := brainTools{engine: engine, sm: sm}
+	b := brainTools{engine: engine, sm: sm, sc: sc}
 	return []*Tool{
 		b.newReadObjectTool(),
 		b.newSchemaTool(),
+		b.newSearchTool(),
+		b.newFindExactTool(),
+		b.newContinueTool(),
 	}
 }

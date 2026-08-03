@@ -51,15 +51,18 @@ type AgentHarness struct {
 	skillsInitialized bool
 	exaAPIKey         string
 	brain             *brain.Engine
-	mcpCleanup        func()
-	mcpInitialized    bool
-	builtinsInjected  bool
-	out               chan streaming.StreamEvent
-	context           ContextManager
-	tasks             ModelTasks
-	contextPolicy     ContextPolicy
-	toolRunner        *toolRunner
-	toolResultHooks   *toolResultHookRegistry
+	// searchCtx owns the current knowledge ResultSet for this agent thread.
+	// Checkpointed via checkpointSession / NewAgentFromSession; not SessionManager.
+	searchCtx        *brain.SearchContext
+	mcpCleanup       func()
+	mcpInitialized   bool
+	builtinsInjected bool
+	out              chan streaming.StreamEvent
+	context          ContextManager
+	tasks            ModelTasks
+	contextPolicy    ContextPolicy
+	toolRunner       *toolRunner
+	toolResultHooks  *toolResultHookRegistry
 }
 
 // SessionID returns the durable session id, or empty if unbound.
@@ -144,6 +147,14 @@ func (a *AgentHarness) checkpointSession(ctx context.Context) error {
 	if err != nil {
 		telemetry.InstrumentsFromContext(ctx).RecordCheckpointSave(ctx, telemetry.OutcomeError)
 		return err
+	}
+	if a.searchCtx != nil {
+		raw, err := a.searchCtx.Export()
+		if err != nil {
+			telemetry.InstrumentsFromContext(ctx).RecordCheckpointSave(ctx, telemetry.OutcomeError)
+			return err
+		}
+		cp.State.SearchContext = raw
 	}
 	if err := a.store.SaveSession(ctx, a.sessionId, *cp); err != nil {
 		telemetry.InstrumentsFromContext(ctx).RecordCheckpointSave(ctx, telemetry.OutcomeError)

@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/ryanaldo34/tacklr/brain"
+	"github.com/ryanaldo34/tacklr/stores"
 )
 
 func TestBrainTools_hostNamespaceScopedRead(t *testing.T) {
@@ -97,6 +99,104 @@ func TestBrainTools_hostNamespaceScopedRead(t *testing.T) {
 	}
 }
 
+func TestBrainTools_searchFindExactContinueAndCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	store := brain.NewMemoryStore()
+	ns := uuid.New()
+	now := time.Now().UTC()
+	var firstParent uuid.UUID
+	for i := 0; i < 4; i++ {
+		parent := uuid.New()
+		if i == 0 {
+			firstParent = parent
+		}
+		part := uuid.New()
+		pos := 1
+		if err := store.Put(brain.Object{
+			ID: parent, Kind: "Document", Title: "Doc", NamespaceID: ns, UpdatedAt: now,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Put(brain.Object{
+			ID: part, Kind: "Chunk", Title: "knowledge-chunk", Content: "shared knowledge base retrieval material item",
+			ParentID: &parent, Position: &pos, NamespaceID: ns, UpdatedAt: now,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	eng, err := brain.NewEngine(store, brain.WithConfig(brain.EngineConfig{
+		DefaultLimit: 2, MaxLimit: 50, Now: func() time.Time { return now },
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessStore := stores.NewInMemoryStore()
+	h := NewAgent(ctx, AgentOptions{
+		Config:          Config{MaxWindowSize: 1024},
+		Model:           &mockStrategy{},
+		Brain:           eng,
+		SearchNamespace: &ns,
+		Store:           sessStore,
+		SessionID:       "brain-sc-1",
+	})
+
+	searchTool := h.findTool("search", "")
+	findTool := h.findTool("find_exact", "")
+	contTool := h.findTool("continue", "")
+	if searchTool == nil || findTool == nil || contTool == nil {
+		t.Fatal("search, find_exact, continue required")
+	}
+
+	out, err := searchTool.invoke(ctx, `{"query":"knowledge base retrieval","limit":2}`, h.runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var page brain.SearchPage
+	if err := json.Unmarshal([]byte(out.output), &page); err != nil {
+		t.Fatal(err)
+	}
+	if page.ResultSetID == uuid.Nil || len(page.Objects) == 0 || !page.HasMore {
+		t.Fatalf("page: %+v", page)
+	}
+
+	if err := h.checkpointSession(ctx); err != nil {
+		t.Fatal(err)
+	}
+	h2, err := NewAgentFromSession(ctx, "brain-sc-1", AgentOptions{
+		Config:          Config{MaxWindowSize: 1024},
+		Model:           &mockStrategy{},
+		Brain:           eng,
+		SearchNamespace: &ns,
+		Store:           sessStore,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out2, err := h2.findTool("continue", "").invoke(ctx, `{"result_set_id":"`+page.ResultSetID.String()+`","limit":2}`, h2.runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var page2 brain.SearchPage
+	if err := json.Unmarshal([]byte(out2.output), &page2); err != nil {
+		t.Fatal(err)
+	}
+	if page2.ResultSetID != page.ResultSetID {
+		t.Fatalf("result set id changed after load")
+	}
+
+	fout, err := findTool.invoke(ctx, `{"query":"`+firstParent.String()+`"}`, h.runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fpage brain.SearchPage
+	if err := json.Unmarshal([]byte(fout.output), &fpage); err != nil {
+		t.Fatal(err)
+	}
+	if len(fpage.Objects) != 1 || fpage.Objects[0].ID != firstParent {
+		t.Fatalf("find_exact uuid: %+v", fpage.Objects)
+	}
+}
+
 func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
@@ -108,6 +208,16 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	// part for worker search isolation
+	parent := uuid.New()
+	part := uuid.New()
+	pos := 1
+	_ = store.Put(brain.Object{ID: parent, Kind: "Document", Title: "P", NamespaceID: ns})
+	_ = store.Put(brain.Object{
+		ID: part, Kind: "Chunk", Content: "worker search isolation token",
+		ParentID: &parent, Position: &pos, NamespaceID: ns,
+	})
+
 	eng, err := brain.NewEngine(store)
 	if err != nil {
 		t.Fatal(err)
@@ -118,7 +228,7 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "ok", IsComplete: true}
 		},
 	}
-	parent := NewAgent(ctx, AgentOptions{
+	parentH := NewAgent(ctx, AgentOptions{
 		Config:          Config{MaxWindowSize: 1024},
 		Model:           &mockStrategy{},
 		Brain:           eng,
@@ -128,11 +238,33 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 		},
 	})
 
-	worker := parent.newWorkerHarness(ctx, "researcher", "spawn_tc1", parent.subagents["researcher"])
+	// Parent search populates parent SearchContext only.
+	if _, err := parentH.findTool("search", "").invoke(ctx, `{"query":"worker search isolation"}`, parentH.runtime); err != nil {
+		t.Fatal(err)
+	}
+	parentRS, err := parentH.searchCtx.Export()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parentRS) == 0 {
+		t.Fatal("parent should have result set after search")
+	}
+
+	worker := parentH.newWorkerHarness(ctx, "researcher", "spawn_tc1", parentH.subagents["researcher"])
 
 	gotNS, ok := worker.SearchNamespace()
 	if !ok || gotNS != ns {
 		t.Fatalf("worker namespace %v %v, want %v", gotNS, ok, ns)
+	}
+	if worker.searchCtx == nil || worker.searchCtx == parentH.searchCtx {
+		t.Fatal("worker must own a distinct SearchContext")
+	}
+	wraw, err := worker.searchCtx.Export()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(wraw) != 0 {
+		t.Fatal("new worker SearchContext must start empty (not copy parent ResultSet)")
 	}
 
 	readTool := worker.findTool("read", "")
@@ -147,7 +279,7 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 		t.Fatalf("worker read: %s", out.output)
 	}
 
-	parent.ClearSearchNamespace()
+	parentH.ClearSearchNamespace()
 	gotNS, ok = worker.SearchNamespace()
 	if !ok || gotNS != ns {
 		t.Fatalf("worker namespace after parent clear: %v %v", gotNS, ok)

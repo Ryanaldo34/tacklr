@@ -116,6 +116,9 @@ func newHarnessBase(opts AgentOptions, runtime HarnessRuntime, sm *session.Sessi
 		tasks:                opts.ModelTasks,
 		contextPolicy:        opts.ContextPolicy,
 	}
+	if opts.Brain != nil {
+		h.searchCtx = brain.NewSearchContext()
+	}
 	if opts.SearchNamespace != nil {
 		sm.SetSearchNamespace(*opts.SearchNamespace)
 	}
@@ -171,8 +174,8 @@ func (a *AgentHarness) injectBuiltinTools() {
 		client := exa.NewClient(key)
 		a.tools = append(a.tools, newWebSearchTool(client), newWebFetchTool(client))
 	}
-	if a.brain != nil {
-		a.tools = append(a.tools, newBrainTools(a.brain, a.session)...)
+	if a.brain != nil && a.searchCtx != nil {
+		a.tools = append(a.tools, newBrainTools(a.brain, a.session, a.searchCtx)...)
 	}
 	if len(a.subagents) > 0 {
 		a.tools = append(a.tools, a.spawnTool())
@@ -274,6 +277,11 @@ func NewAgentFromSession(ctx context.Context, sessionId string, opts AgentOption
 	h.context.Restore(applied.Window)
 	h.interruptToRequester = applied.InterruptToRequester
 	h.pendingToolCalls = applied.PendingToolCalls
+	if h.searchCtx != nil && len(checkpoint.State.SearchContext) > 0 {
+		if err := h.searchCtx.Restore(checkpoint.State.SearchContext); err != nil {
+			return nil, fmt.Errorf("agent harness: restore search context: %w", err)
+		}
+	}
 	h.finishInit(ctx, opts.SubAgents)
 	return h, nil
 }

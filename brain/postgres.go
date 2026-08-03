@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -220,4 +221,189 @@ func (s *PostgresStore) scanObject(row scannable) (Object, error) {
 		}
 	}
 	return o, nil
+}
+
+// SearchLexical implements PartSearcher using pg_textsearch BM25.
+func (s *PostgresStore) SearchLexical(ctx context.Context, scope Scope, query string, filters Filters, k int) ([]ScoredID, error) {
+	if k <= 0 || strings.TrimSpace(query) == "" {
+		return nil, nil
+	}
+	where, fargs, err := filterSQL(scope, filters, 2)
+	if err != nil {
+		return nil, err
+	}
+	args := append([]any{query}, fargs...)
+	limitPos := len(args) + 1
+	args = append(args, k)
+	q := fmt.Sprintf(`
+		SELECT id, title, content, parent_id, position, updated_at,
+		       search_text <@> to_bm25query($1, 'idx_objects_bm25') AS score
+		FROM objects
+		WHERE deleted_at IS NULL AND parent_id IS NOT NULL%s
+		ORDER BY search_text <@> to_bm25query($1, 'idx_objects_bm25')
+		LIMIT $%d`, where, limitPos)
+	return s.queryScored(ctx, q, args, true)
+}
+
+// SearchVector implements PartSearcher using pgvector cosine distance.
+func (s *PostgresStore) SearchVector(ctx context.Context, scope Scope, embedding []float32, filters Filters, k int) ([]ScoredID, error) {
+	if k <= 0 || len(embedding) == 0 {
+		return nil, nil
+	}
+	where, fargs, err := filterSQL(scope, filters, 2)
+	if err != nil {
+		return nil, err
+	}
+	args := append([]any{formatVectorLiteral(embedding)}, fargs...)
+	limitPos := len(args) + 1
+	args = append(args, k)
+	q := fmt.Sprintf(`
+		SELECT id, title, content, parent_id, position, updated_at,
+		       1 - (embedding <=> $1::vector) AS score
+		FROM objects
+		WHERE deleted_at IS NULL AND parent_id IS NOT NULL
+		  AND embedding IS NOT NULL%s
+		ORDER BY embedding <=> $1::vector
+		LIMIT $%d`, where, limitPos)
+	return s.queryScored(ctx, q, args, false)
+}
+
+// SearchTrigram implements PartSearcher using pg_trgm similarity.
+func (s *PostgresStore) SearchTrigram(ctx context.Context, scope Scope, query string, filters Filters, k int) ([]ScoredID, error) {
+	if k <= 0 || strings.TrimSpace(query) == "" {
+		return nil, nil
+	}
+	where, fargs, err := filterSQL(scope, filters, 2)
+	if err != nil {
+		return nil, err
+	}
+	args := append([]any{query}, fargs...)
+	limitPos := len(args) + 1
+	args = append(args, k)
+	q := fmt.Sprintf(`
+		SELECT id, title, content, parent_id, position, updated_at,
+		       GREATEST(similarity(coalesce(title,''), $1), similarity(coalesce(content,''), $1)) AS score
+		FROM objects
+		WHERE deleted_at IS NULL AND parent_id IS NOT NULL
+		  AND (
+		    similarity(coalesce(title,''), $1) > 0.3
+		    OR similarity(coalesce(content,''), $1) > 0.3
+		  )%s
+		ORDER BY score DESC
+		LIMIT $%d`, where, limitPos)
+	return s.queryScored(ctx, q, args, false)
+}
+
+func (s *PostgresStore) queryScored(ctx context.Context, q string, args []any, invertBM25 bool) ([]ScoredID, error) {
+	rows, err := s.db.Query(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("brain: search query: %w", err)
+	}
+	defer rows.Close()
+	var out []ScoredID
+	for rows.Next() {
+		var (
+			id       uuid.UUID
+			title    *string
+			content  *string
+			parentID *uuid.UUID
+			position *int32
+			updated  time.Time
+			score    float64
+		)
+		if err := rows.Scan(&id, &title, &content, &parentID, &position, &updated, &score); err != nil {
+			return nil, fmt.Errorf("brain: search scan: %w", err)
+		}
+		if invertBM25 {
+			score = -score
+		}
+		item := ScoredID{ID: id, Score: score, UpdatedAt: updated, ParentID: parentID}
+		if title != nil {
+			item.Title = *title
+		}
+		if content != nil {
+			item.Content = *content
+		}
+		if position != nil {
+			p := int(*position)
+			item.Position = &p
+		}
+		out = append(out, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("brain: search rows: %w", err)
+	}
+	return out, nil
+}
+
+// filterSQL builds " AND ..." clauses with placeholders starting at startArg.
+func filterSQL(scope Scope, filters Filters, startArg int) (string, []any, error) {
+	var b strings.Builder
+	var args []any
+	n := startArg
+	add := func(frag string, v any) {
+		args = append(args, v)
+		b.WriteString(" AND ")
+		b.WriteString(fmt.Sprintf(frag, n))
+		n++
+	}
+	if scope.Namespace != nil {
+		add("namespace_id = $%d", *scope.Namespace)
+	}
+	for key, val := range filters {
+		switch strings.TrimSpace(key) {
+		case filterKind:
+			add("kind = $%d", fmt.Sprint(val))
+		case filterTitle:
+			add("title = $%d", fmt.Sprint(val))
+		case filterCreatedAfter:
+			t, err := parseFilterTime(val)
+			if err != nil {
+				return "", nil, fmt.Errorf("brain: filter %q: %w", key, err)
+			}
+			add("created_at >= $%d", t)
+		case filterCreatedBefore:
+			t, err := parseFilterTime(val)
+			if err != nil {
+				return "", nil, fmt.Errorf("brain: filter %q: %w", key, err)
+			}
+			add("created_at < $%d", t)
+		case filterUpdatedAfter:
+			t, err := parseFilterTime(val)
+			if err != nil {
+				return "", nil, fmt.Errorf("brain: filter %q: %w", key, err)
+			}
+			add("updated_at >= $%d", t)
+		case filterUpdatedBefore:
+			t, err := parseFilterTime(val)
+			if err != nil {
+				return "", nil, fmt.Errorf("brain: filter %q: %w", key, err)
+			}
+			add("updated_at < $%d", t)
+		default:
+			col := sanitizeJSONKey(strings.TrimSpace(key))
+			if col == "" {
+				return "", nil, fmt.Errorf("brain: filter %q is not a valid property key", key)
+			}
+			add("properties->>'"+col+"' = $%d", fmt.Sprint(val))
+		}
+	}
+	return b.String(), args, nil
+}
+
+func sanitizeJSONKey(k string) string {
+	return strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' {
+			return r
+		}
+		return -1
+	}, k)
+}
+
+func formatVectorLiteral(v []float32) string {
+	parts := make([]string, len(v))
+	for i, f := range v {
+		parts[i] = fmt.Sprintf("%g", f)
+	}
+	return "[" + strings.Join(parts, ",") + "]"
 }
