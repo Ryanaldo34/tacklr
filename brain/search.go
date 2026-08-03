@@ -6,13 +6,12 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
 // Search runs hybrid retrieval (BM25 + optional vector), RRF, temporal decay,
 // parent promotion, and materializes a ResultSet into results.
 func (e *Engine) Search(ctx context.Context, scope Scope, req SearchRequest, results ResultSetStore) (SearchPage, error) {
-	ctx, span := telemetry.StartBrainSpan(ctx, telemetry.BrainOpSearch)
+	ctx, span := e.observer.StartOp(ctx, OpSearch)
 	page, degrade, err := e.searchWithDegrade(ctx, scope, req, results, false)
 	span.End(len(page.Objects), degrade, err)
 	return page, err
@@ -21,17 +20,17 @@ func (e *Engine) Search(ctx context.Context, scope Scope, req SearchRequest, res
 // FindExact runs equality-first exact retrieval (no dense channel), then
 // lexical + trigram fusion, promotion, and ResultSet materialization.
 func (e *Engine) FindExact(ctx context.Context, scope Scope, req SearchRequest, results ResultSetStore) (SearchPage, error) {
-	ctx, span := telemetry.StartBrainSpan(ctx, telemetry.BrainOpFindExact)
+	ctx, span := e.observer.StartOp(ctx, OpFindExact)
 	page, degrade, err := e.searchWithDegrade(ctx, scope, req, results, true)
 	span.End(len(page.Objects), degrade, err)
 	return page, err
 }
 
-func (e *Engine) searchWithDegrade(ctx context.Context, scope Scope, req SearchRequest, results ResultSetStore, exact bool) (SearchPage, string, error) {
+func (e *Engine) searchWithDegrade(ctx context.Context, scope Scope, req SearchRequest, results ResultSetStore, exact bool) (SearchPage, DegradeMode, error) {
 	var (
 		ranked  []ScoredID
 		err     error
-		degrade = telemetry.BrainDegradeNone
+		degrade = DegradeNone
 	)
 	if exact {
 		ranked, err = e.exactCandidates(ctx, scope, req)
@@ -47,9 +46,9 @@ func (e *Engine) searchWithDegrade(ctx context.Context, scope Scope, req SearchR
 
 // Continue returns the next page of a prior ResultSet under scope.
 func (e *Engine) Continue(ctx context.Context, scope Scope, resultSetID uuid.UUID, limit int, results ResultSetStore) (SearchPage, error) {
-	ctx, span := telemetry.StartBrainSpan(ctx, telemetry.BrainOpContinue)
+	ctx, span := e.observer.StartOp(ctx, OpContinue)
 	page, err := e.continueInner(ctx, scope, resultSetID, limit, results)
-	span.End(len(page.Objects), telemetry.BrainDegradeNone, err)
+	span.End(len(page.Objects), DegradeNone, err)
 	return page, err
 }
 
@@ -104,48 +103,40 @@ func (e *Engine) materialize(ctx context.Context, scope Scope, ranked []ScoredID
 	return page, nil
 }
 
-func (e *Engine) prepareSearch(req SearchRequest) (PartSearcher, error) {
+func (e *Engine) prepareSearch(req SearchRequest) error {
 	if strings.TrimSpace(req.Query) == "" {
-		return nil, fmt.Errorf("brain: query is required")
+		return fmt.Errorf("brain: query is required")
 	}
-	if err := ValidateFilters(req.Filters); err != nil {
-		return nil, err
-	}
-	ps, ok := e.store.(PartSearcher)
-	if !ok {
-		return nil, fmt.Errorf("brain: store does not support search")
-	}
-	return ps, nil
+	return ValidateFilters(req.Filters)
 }
 
-func (e *Engine) hybridCandidates(ctx context.Context, scope Scope, req SearchRequest) ([]ScoredID, string, error) {
-	ps, err := e.prepareSearch(req)
-	if err != nil {
-		return nil, telemetry.BrainDegradeNone, err
+func (e *Engine) hybridCandidates(ctx context.Context, scope Scope, req SearchRequest) ([]ScoredID, DegradeMode, error) {
+	if err := e.prepareSearch(req); err != nil {
+		return nil, DegradeNone, err
 	}
 	query := strings.TrimSpace(req.Query)
 	k := e.cfg.CandidateK
-	lex, err := ps.SearchLexical(ctx, scope, query, req.Filters, k)
+	lex, err := e.store.SearchLexical(ctx, scope, query, req.Filters, k)
 	if err != nil {
-		return nil, telemetry.BrainDegradeNone, err
+		return nil, DegradeNone, err
 	}
 	lists := [][]ScoredID{lex}
-	degrade := telemetry.BrainDegradeNone
+	degrade := DegradeNone
 	if e.embedder != nil {
 		emb, embErr := e.embedder.Embed(ctx, query)
 		if embErr != nil {
-			if e.cfg.degradeEmbedder() {
-				degrade = telemetry.BrainDegradeLexicalOnly
+			if e.cfg.allowEmbedderDegrade() {
+				degrade = DegradeLexicalOnly
 			} else {
-				return nil, telemetry.BrainDegradeNone, fmt.Errorf("brain: embed query: %w", embErr)
+				return nil, DegradeNone, fmt.Errorf("brain: embed query: %w", embErr)
 			}
 		} else if len(emb) > 0 {
-			vec, err := ps.SearchVector(ctx, scope, emb, req.Filters, k)
+			vec, err := e.store.SearchVector(ctx, scope, emb, req.Filters, k)
 			if err != nil {
-				if e.cfg.degradeEmbedder() {
-					degrade = telemetry.BrainDegradeLexicalOnly
+				if e.cfg.allowEmbedderDegrade() {
+					degrade = DegradeLexicalOnly
 				} else {
-					return nil, telemetry.BrainDegradeNone, err
+					return nil, DegradeNone, err
 				}
 			} else if len(vec) > 0 {
 				lists = append(lists, vec)
@@ -156,8 +147,7 @@ func (e *Engine) hybridCandidates(ctx context.Context, scope Scope, req SearchRe
 }
 
 func (e *Engine) exactCandidates(ctx context.Context, scope Scope, req SearchRequest) ([]ScoredID, error) {
-	ps, err := e.prepareSearch(req)
-	if err != nil {
+	if err := e.prepareSearch(req); err != nil {
 		return nil, err
 	}
 	query := strings.TrimSpace(req.Query)
@@ -179,50 +169,52 @@ func (e *Engine) exactCandidates(ctx context.Context, scope Scope, req SearchReq
 	}
 
 	k := e.cfg.CandidateK
-	lex, err := ps.SearchLexical(ctx, scope, query, req.Filters, k)
+	lex, err := e.store.SearchLexical(ctx, scope, query, req.Filters, k)
 	if err != nil {
 		return nil, err
 	}
-	tri, err := ps.SearchTrigram(ctx, scope, query, req.Filters, k)
+	tri, err := e.store.SearchTrigram(ctx, scope, query, req.Filters, k)
 	if err != nil {
 		return nil, err
 	}
 
 	fused := rrfFuse([][]ScoredID{lex, tri}, e.cfg.RRFk)
 	q := strings.ToLower(query)
+	// Prefer exact title matches (boost), then remaining fused candidates.
+	var boosted, rest []ScoredID
 	seen := map[uuid.UUID]struct{}{}
-	var out []ScoredID
-	for _, list := range [][]ScoredID{lex, tri} {
-		for _, item := range list {
-			if strings.ToLower(strings.TrimSpace(item.Title)) != q {
-				continue
-			}
-			if _, ok := seen[item.ID]; ok {
-				continue
-			}
-			seen[item.ID] = struct{}{}
+	for _, item := range fused {
+		if strings.ToLower(strings.TrimSpace(item.Title)) == q {
 			item.Score += 10
-			out = append(out, item)
-		}
-	}
-	if len(out) == 0 {
-		return fused, nil
-	}
-	for _, p := range fused {
-		if _, ok := seen[p.ID]; ok {
+			boosted = append(boosted, item)
+			seen[item.ID] = struct{}{}
 			continue
 		}
-		out = append(out, p)
+		rest = append(rest, item)
 	}
-	return out, nil
+	if len(boosted) == 0 {
+		return fused, nil
+	}
+	return append(boosted, rest...), nil
 }
 
 func (e *Engine) hydrateParents(ctx context.Context, scope Scope, ids []uuid.UUID) ([]RichObject, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	objs, err := e.store.GetMany(ctx, scope, ids)
+	if err != nil {
+		return nil, fmt.Errorf("brain: hydrate parents: %w", err)
+	}
+	byID := make(map[uuid.UUID]Object, len(objs))
+	for _, o := range objs {
+		byID[o.ID] = o
+	}
 	out := make([]RichObject, 0, len(ids))
 	for _, id := range ids {
-		obj, err := e.store.Get(ctx, scope, id)
-		if err != nil {
-			return nil, fmt.Errorf("brain: hydrate parent %s: %w", id, err)
+		obj, ok := byID[id]
+		if !ok {
+			return nil, fmt.Errorf("brain: hydrate parent %s: %w", id, ErrNotFound)
 		}
 		out = append(out, RichFromObject(obj, false))
 	}

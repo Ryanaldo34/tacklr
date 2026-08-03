@@ -4,7 +4,6 @@ package helixgraph
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -37,9 +36,6 @@ func NewFromClient(client *helix.Client) (*Graph, error) {
 
 // Client returns the underlying SDK client (e.g. for host-side seeding).
 func (g *Graph) Client() *helix.Client {
-	if g == nil {
-		return nil
-	}
 	return g.client
 }
 
@@ -49,7 +45,7 @@ const NodeLabel = "Object"
 // EnsureObjectIndex creates an equality index on Object.object_id when missing.
 // Safe to call once at host startup or in tests before seeding.
 func (g *Graph) EnsureObjectIndex(ctx context.Context) error {
-	if g == nil || g.client == nil {
+	if g.client == nil {
 		return fmt.Errorf("helixgraph: not configured")
 	}
 	req := helix.WriteQuery("brain_ensure_object_id_index").
@@ -66,7 +62,7 @@ func (g *Graph) EnsureObjectIndex(ctx context.Context) error {
 // PutObject upserts a graph node with property object_id (objects.id).
 // Hosts call this when dual-writing knowledge objects into Helix.
 func (g *Graph) PutObject(ctx context.Context, objectID uuid.UUID) error {
-	if g == nil || g.client == nil {
+	if g.client == nil {
 		return fmt.Errorf("helixgraph: not configured")
 	}
 	if objectID == uuid.Nil {
@@ -93,7 +89,7 @@ func (g *Graph) PutObject(ctx context.Context, objectID uuid.UUID) error {
 // AddEdge creates a labeled edge from→to between nodes identified by object_id.
 // Both endpoints must already exist (see PutObject).
 func (g *Graph) AddEdge(ctx context.Context, from, to uuid.UUID, relationType string) error {
-	if g == nil || g.client == nil {
+	if g.client == nil {
 		return fmt.Errorf("helixgraph: not configured")
 	}
 	rel := strings.TrimSpace(relationType)
@@ -120,7 +116,7 @@ type neighborRow struct {
 
 // Neighbors implements brain.GraphReader via Helix Both(label) traversal.
 func (g *Graph) Neighbors(ctx context.Context, objectID uuid.UUID, relationTypes []string, limit int) ([]brain.GraphNeighbor, error) {
-	if g == nil || g.client == nil {
+	if g.client == nil {
 		return nil, fmt.Errorf("helixgraph: not configured")
 	}
 	if objectID == uuid.Nil {
@@ -175,20 +171,17 @@ func (g *Graph) neighborsForLabel(ctx context.Context, objectID uuid.UUID, label
 		Returning("neighbors")
 
 	// Helix ValueMap returns {"neighbors":{"properties":[{"object_id":"..."},...]}}.
-	// Older mocks may return a bare array under "neighbors".
 	var raw struct {
-		Neighbors json.RawMessage `json:"neighbors"`
+		Neighbors struct {
+			Properties []neighborRow `json:"properties"`
+		} `json:"neighbors"`
 	}
 	if err := g.client.Exec(ctx, req, &raw); err != nil {
 		return nil, fmt.Errorf("helixgraph: neighbors %q: %w", label, err)
 	}
-	rows, err := decodeNeighborRows(raw.Neighbors)
-	if err != nil {
-		return nil, fmt.Errorf("helixgraph: neighbors %q decode: %w", label, err)
-	}
 
 	var ids []uuid.UUID
-	for _, row := range rows {
+	for _, row := range raw.Neighbors.Properties {
 		s := strings.TrimSpace(row.ObjectID)
 		if s == "" {
 			continue
@@ -200,25 +193,6 @@ func (g *Graph) neighborsForLabel(ctx context.Context, objectID uuid.UUID, label
 		ids = append(ids, id)
 	}
 	return ids, nil
-}
-
-func decodeNeighborRows(raw json.RawMessage) ([]neighborRow, error) {
-	if len(raw) == 0 || string(raw) == "null" {
-		return nil, nil
-	}
-	// Shape A (enterprise-dev ValueMap): {"properties":[{"object_id":"..."}]}
-	var wrapped struct {
-		Properties []neighborRow `json:"properties"`
-	}
-	if err := json.Unmarshal(raw, &wrapped); err == nil && wrapped.Properties != nil {
-		return wrapped.Properties, nil
-	}
-	// Shape B (flat array mock): [{"object_id":"..."}]
-	var flat []neighborRow
-	if err := json.Unmarshal(raw, &flat); err == nil {
-		return flat, nil
-	}
-	return nil, fmt.Errorf("unexpected neighbors payload %s", string(raw))
 }
 
 func normalizeLabels(rels []string) []string {

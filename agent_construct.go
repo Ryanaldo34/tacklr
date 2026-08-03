@@ -121,9 +121,9 @@ func newHarnessBase(opts AgentOptions, runtime HarnessRuntime, sm *session.Sessi
 	}
 	if opts.Brain != nil {
 		h.searchCtx = brain.NewSearchContext()
-	}
-	if opts.SearchNamespace != nil {
-		sm.SetSearchNamespace(*opts.SearchNamespace)
+		if opts.SearchNamespace != nil {
+			h.searchCtx.SetNamespace(*opts.SearchNamespace)
+		}
 	}
 	if h.context == nil {
 		h.context = NewModelContextManager()
@@ -178,7 +178,7 @@ func (a *AgentHarness) injectBuiltinTools() {
 		a.tools = append(a.tools, newWebSearchTool(client), newWebFetchTool(client))
 	}
 	if a.brain != nil && a.searchCtx != nil {
-		a.tools = append(a.tools, newBrainTools(a.brain, a.session, a.searchCtx)...)
+		a.tools = append(a.tools, newBrainTools(a.brain, a.searchCtx)...)
 	}
 	if len(a.subagents) > 0 {
 		a.tools = append(a.tools, a.spawnTool())
@@ -186,28 +186,28 @@ func (a *AgentHarness) injectBuiltinTools() {
 	a.builtinsInjected = true
 }
 
-// SetSearchNamespace sets session retrieval isolation for knowledge tools.
+// SetSearchNamespace sets retrieval isolation for knowledge tools.
 func (a *AgentHarness) SetSearchNamespace(id uuid.UUID) {
-	if a.session == nil {
-		a.session = session.NewSessionManager()
+	if a.searchCtx == nil {
+		a.searchCtx = brain.NewSearchContext()
 	}
-	a.session.SetSearchNamespace(id)
+	a.searchCtx.SetNamespace(id)
 }
 
-// ClearSearchNamespace clears session retrieval isolation.
+// ClearSearchNamespace clears retrieval isolation for knowledge tools.
 func (a *AgentHarness) ClearSearchNamespace() {
-	if a.session == nil {
+	if a.searchCtx == nil {
 		return
 	}
-	a.session.ClearSearchNamespace()
+	a.searchCtx.ClearNamespace()
 }
 
 // SearchNamespace returns the host-set search namespace, if any.
 func (a *AgentHarness) SearchNamespace() (uuid.UUID, bool) {
-	if a.session == nil {
+	if a.searchCtx == nil {
 		return uuid.UUID{}, false
 	}
-	return a.session.SearchNamespace()
+	return a.searchCtx.Namespace()
 }
 
 // planningWriteLock blocks write tools until create_plan has set a plan.
@@ -280,9 +280,21 @@ func NewAgentFromSession(ctx context.Context, sessionId string, opts AgentOption
 	h.context.Restore(applied.Window)
 	h.interruptToRequester = applied.InterruptToRequester
 	h.pendingToolCalls = applied.PendingToolCalls
-	if h.searchCtx != nil && len(checkpoint.State.SearchContext) > 0 {
-		if err := h.searchCtx.Restore(checkpoint.State.SearchContext); err != nil {
-			return nil, fmt.Errorf("agent harness: restore search context: %w", err)
+	if h.searchCtx != nil {
+		if len(checkpoint.State.SearchContext) > 0 {
+			if err := h.searchCtx.Restore(checkpoint.State.SearchContext); err != nil {
+				return nil, fmt.Errorf("agent harness: restore search context: %w", err)
+			}
+		}
+		// Legacy checkpoints stored namespace only under runtime _search_namespace.
+		if _, ok := h.searchCtx.Namespace(); !ok {
+			if raw, ok := checkpoint.State.RuntimeState["_search_namespace"]; ok {
+				if s, ok := raw.(string); ok {
+					if id, err := uuid.Parse(s); err == nil {
+						h.searchCtx.SetNamespace(id)
+					}
+				}
+			}
 		}
 	}
 	h.finishInit(ctx, opts.SubAgents)

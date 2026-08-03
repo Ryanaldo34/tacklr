@@ -90,52 +90,6 @@ func parseFilterTime(val any) (time.Time, error) {
 	return t.UTC(), nil
 }
 
-// objectMatchesFilters reports whether obj satisfies all filters (AND).
-func objectMatchesFilters(obj Object, f Filters) bool {
-	if len(f) == 0 {
-		return true
-	}
-	for key, val := range f {
-		k := strings.TrimSpace(key)
-		switch k {
-		case filterKind:
-			if !matchFilterValue(obj.Kind, val) {
-				return false
-			}
-		case filterTitle:
-			if !matchFilterValue(obj.Title, val) {
-				return false
-			}
-		case filterCreatedAfter:
-			bound, err := parseFilterTime(val)
-			if err != nil || obj.CreatedAt.Before(bound) {
-				return false
-			}
-		case filterCreatedBefore:
-			bound, err := parseFilterTime(val)
-			if err != nil || !obj.CreatedAt.Before(bound) {
-				return false
-			}
-		case filterUpdatedAfter:
-			bound, err := parseFilterTime(val)
-			if err != nil || obj.UpdatedAt.Before(bound) {
-				return false
-			}
-		case filterUpdatedBefore:
-			bound, err := parseFilterTime(val)
-			if err != nil || !obj.UpdatedAt.Before(bound) {
-				return false
-			}
-		default:
-			prop, ok := obj.Properties[k]
-			if !ok || !matchFilterValue(prop, val) {
-				return false
-			}
-		}
-	}
-	return true
-}
-
 func matchFilterValue(got, want any) bool {
 	if items, ok := want.([]any); ok {
 		for _, item := range items {

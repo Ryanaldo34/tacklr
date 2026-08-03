@@ -2,6 +2,7 @@ package brain
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -65,5 +66,39 @@ func TestSearchContext_putGetExportRestore(t *testing.T) {
 	empty, err := NewSearchContext().Export()
 	if err != nil || empty != nil {
 		t.Fatalf("empty export: %v %v", empty, err)
+	}
+
+	// Namespace is part of the retrieval session surface.
+	ns := uuid.New()
+	sc.SetNamespace(ns)
+	gotNS, ok := sc.Namespace()
+	if !ok || gotNS != ns {
+		t.Fatal("namespace")
+	}
+	rawNS, err := sc.Export()
+	if err != nil || len(rawNS) == 0 {
+		t.Fatal(err)
+	}
+	sc3 := NewSearchContext()
+	if err := sc3.Restore(rawNS); err != nil {
+		t.Fatal(err)
+	}
+	gotNS, ok = sc3.Namespace()
+	if !ok || gotNS != ns {
+		t.Fatal("restore namespace")
+	}
+	sc3.ClearNamespace()
+	if _, ok := sc3.Namespace(); ok {
+		t.Fatal("clear")
+	}
+	// Legacy ResultSet-only JSON still restores.
+	legacy, _ := json.Marshal(ResultSet{ID: id, ObjectIDs: ids, Offset: 2})
+	sc4 := NewSearchContext()
+	if err := sc4.Restore(legacy); err != nil {
+		t.Fatal(err)
+	}
+	got4, err := sc4.Get(ctx, id)
+	if err != nil || got4.Offset != 2 {
+		t.Fatalf("%+v %v", got4, err)
 	}
 }

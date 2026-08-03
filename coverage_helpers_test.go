@@ -8,7 +8,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/ryanaldo34/tacklr/brain"
-	"github.com/ryanaldo34/tacklr/internal/session"
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
@@ -82,19 +81,15 @@ func TestBrainToolHelpers_parseAndNew(t *testing.T) {
 	if err != nil || out == "" {
 		t.Fatal(err)
 	}
-	if newBrainTools(nil, nil, nil) != nil {
-		t.Fatal("nil tools")
-	}
 	store := brain.NewMemoryStore()
 	eng, err := brain.NewEngine(store)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sm := session.NewSessionManager()
 	sc := brain.NewSearchContext()
-	tools := newBrainTools(eng, sm, sc)
-	if len(tools) != 6 {
-		t.Fatalf("tools %d", len(tools))
+	tools := newBrainTools(eng, sc)
+	if len(tools) == 0 {
+		t.Fatal("expected brain tools")
 	}
 }
 

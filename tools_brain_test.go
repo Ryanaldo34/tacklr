@@ -300,12 +300,21 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 	if worker.searchCtx == nil || worker.searchCtx == parentH.searchCtx {
 		t.Fatal("worker must own a distinct SearchContext")
 	}
+	// Worker inherits namespace but must not copy the parent's active ResultSet.
 	wraw, err := worker.searchCtx.Export()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(wraw) != 0 {
-		t.Fatal("new worker SearchContext must start empty (not copy parent ResultSet)")
+	var env struct {
+		ResultSet *brain.ResultSet `json:"result_set"`
+	}
+	if len(wraw) > 0 {
+		if err := json.Unmarshal(wraw, &env); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if env.ResultSet != nil {
+		t.Fatal("new worker must not copy parent ResultSet")
 	}
 
 	readTool := worker.findTool("read", "")

@@ -2,11 +2,9 @@ package brain
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
-	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
 // ExpandRequest is the engine input for expand.
@@ -26,31 +24,31 @@ type ExpandResult struct {
 
 // Expand returns the structural neighborhood of object_id under scope.
 func (e *Engine) Expand(ctx context.Context, scope Scope, req ExpandRequest, results ResultSetStore) (ExpandResult, error) {
-	ctx, span := telemetry.StartBrainSpan(ctx, telemetry.BrainOpExpand)
+	ctx, span := e.observer.StartOp(ctx, OpExpand)
 	res, degrade, err := e.expandInner(ctx, scope, req, results)
 	span.End(len(res.Objects), degrade, err)
 	return res, err
 }
 
-func (e *Engine) expandInner(ctx context.Context, scope Scope, req ExpandRequest, results ResultSetStore) (ExpandResult, string, error) {
+func (e *Engine) expandInner(ctx context.Context, scope Scope, req ExpandRequest, results ResultSetStore) (ExpandResult, DegradeMode, error) {
 	if req.ObjectID == uuid.Nil {
-		return ExpandResult{}, telemetry.BrainDegradeNone, fmt.Errorf("brain: object id is required")
+		return ExpandResult{}, DegradeNone, fmt.Errorf("brain: object id is required")
 	}
 	obj, err := e.store.Get(ctx, scope, req.ObjectID)
 	if err != nil {
-		return ExpandResult{}, telemetry.BrainDegradeNone, err
+		return ExpandResult{}, DegradeNone, err
 	}
 
 	wantContainment, graphLabels := SplitRelationTypes(req.RelationTypes)
 	if len(graphLabels) > 0 && e.graph == nil {
-		return ExpandResult{}, telemetry.BrainDegradeNone, fmt.Errorf("brain: graph backend is required for relation types %v", graphLabels)
+		return ExpandResult{}, DegradeNone, fmt.Errorf("brain: graph backend is required for relation types %v", graphLabels)
 	}
 
 	var (
 		ids             []uuid.UUID
 		usedContainment bool
 		usedGraph       bool
-		degrade         = telemetry.BrainDegradeNone
+		degrade         = DegradeNone
 	)
 
 	if wantContainment {
@@ -64,8 +62,8 @@ func (e *Engine) expandInner(ctx context.Context, scope Scope, req ExpandRequest
 	if len(graphLabels) > 0 {
 		gIDs, err := e.graphNeighborIDs(ctx, scope, obj.ID, graphLabels)
 		if err != nil {
-			if e.cfg.degradeGraph() && usedContainment {
-				degrade = telemetry.BrainDegradeContainmentOnly
+			if e.cfg.allowGraphDegrade() && usedContainment {
+				degrade = DegradeContainmentOnly
 			} else {
 				return ExpandResult{}, degrade, err
 			}
@@ -169,7 +167,7 @@ func (e *Engine) graphNeighborIDs(ctx context.Context, scope Scope, id uuid.UUID
 	if err != nil {
 		return nil, err
 	}
-	var ids []uuid.UUID
+	candidates := make([]uuid.UUID, 0, len(ns))
 	seen := map[uuid.UUID]struct{}{id: {}}
 	for _, n := range ns {
 		if n.ObjectID == uuid.Nil {
@@ -178,28 +176,28 @@ func (e *Engine) graphNeighborIDs(ctx context.Context, scope Scope, id uuid.UUID
 		if _, ok := seen[n.ObjectID]; ok {
 			continue
 		}
-		visible, err := e.visible(ctx, scope, n.ObjectID)
-		if err != nil {
-			return nil, err
-		}
-		if !visible {
-			continue
-		}
 		seen[n.ObjectID] = struct{}{}
-		ids = append(ids, n.ObjectID)
+		candidates = append(candidates, n.ObjectID)
+	}
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	// Batch visibility under scope (omitted ids are not visible).
+	objs, err := e.store.GetMany(ctx, scope, candidates)
+	if err != nil {
+		return nil, err
+	}
+	visible := make(map[uuid.UUID]struct{}, len(objs))
+	for _, o := range objs {
+		visible[o.ID] = struct{}{}
+	}
+	ids := make([]uuid.UUID, 0, len(objs))
+	for _, cid := range candidates {
+		if _, ok := visible[cid]; ok {
+			ids = append(ids, cid)
+		}
 	}
 	return ids, nil
-}
-
-func (e *Engine) visible(ctx context.Context, scope Scope, id uuid.UUID) (bool, error) {
-	_, err := e.store.Get(ctx, scope, id)
-	if err == nil {
-		return true, nil
-	}
-	if errors.Is(err, ErrNotFound) {
-		return false, nil
-	}
-	return false, err
 }
 
 func appendUnique(dst []uuid.UUID, extra ...uuid.UUID) []uuid.UUID {

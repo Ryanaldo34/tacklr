@@ -265,6 +265,29 @@ func (s *errAfterGetStore) GetKind(ctx context.Context, kind string) (brain.Obje
 func (s *errAfterGetStore) ListKinds(ctx context.Context) ([]brain.ObjectKind, error) {
 	return s.ok.ListKinds(ctx)
 }
+func (s *errAfterGetStore) SearchLexical(ctx context.Context, scope brain.Scope, query string, filters brain.Filters, k int) ([]brain.ScoredID, error) {
+	return s.ok.SearchLexical(ctx, scope, query, filters, k)
+}
+func (s *errAfterGetStore) SearchVector(ctx context.Context, scope brain.Scope, emb []float32, filters brain.Filters, k int) ([]brain.ScoredID, error) {
+	return s.ok.SearchVector(ctx, scope, emb, filters, k)
+}
+func (s *errAfterGetStore) SearchTrigram(ctx context.Context, scope brain.Scope, query string, filters brain.Filters, k int) ([]brain.ScoredID, error) {
+	return s.ok.SearchTrigram(ctx, scope, query, filters, k)
+}
+func (s *errAfterGetStore) GetMany(ctx context.Context, scope brain.Scope, ids []uuid.UUID) ([]brain.Object, error) {
+	var out []brain.Object
+	for _, id := range ids {
+		o, err := s.Get(ctx, scope, id)
+		if err != nil {
+			if errors.Is(err, brain.ErrNotFound) {
+				continue
+			}
+			return nil, err
+		}
+		out = append(out, o)
+	}
+	return out, nil
+}
 
 func TestExpand_graphRequiresBackend(t *testing.T) {
 	store := brain.NewMemoryStore()

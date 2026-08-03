@@ -3,7 +3,6 @@ package brain_test
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
 	"time"
 
@@ -419,28 +418,3 @@ func TestSearchContext_restoreInvalid(t *testing.T) {
 		t.Fatal(err)
 	}
 }
-
-func TestSearch_storeWithoutPartSearcher(t *testing.T) {
-	eng, err := brain.NewEngine(storeNoSearch{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = eng.Search(context.Background(), brain.Scope{}, brain.SearchRequest{Query: "x"}, brain.NewSearchContext())
-	if err == nil || !strings.Contains(err.Error(), "does not support search") {
-		t.Fatalf("got %v", err)
-	}
-}
-
-// storeNoSearch implements Store but not PartSearcher.
-type storeNoSearch struct{}
-
-func (storeNoSearch) Get(context.Context, brain.Scope, uuid.UUID) (brain.Object, error) {
-	return brain.Object{}, brain.ErrNotFound
-}
-func (storeNoSearch) ListChildren(context.Context, brain.Scope, uuid.UUID) ([]brain.Object, error) {
-	return nil, nil
-}
-func (storeNoSearch) GetKind(context.Context, string) (brain.ObjectKind, error) {
-	return brain.ObjectKind{}, brain.ErrNotFound
-}
-func (storeNoSearch) ListKinds(context.Context) ([]brain.ObjectKind, error) { return nil, nil }

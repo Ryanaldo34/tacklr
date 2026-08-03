@@ -3,6 +3,7 @@ package brain
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"math"
@@ -75,6 +76,28 @@ func (s *MemoryStore) PutKind(k ObjectKind) error {
 func (s *MemoryStore) Get(_ context.Context, scope Scope, id uuid.UUID) (Object, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.getLocked(scope, id)
+}
+
+// GetMany implements ObjectReader.
+func (s *MemoryStore) GetMany(_ context.Context, scope Scope, ids []uuid.UUID) ([]Object, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]Object, 0, len(ids))
+	for _, id := range ids {
+		obj, err := s.getLocked(scope, id)
+		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				continue
+			}
+			return nil, err
+		}
+		out = append(out, obj)
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) getLocked(scope Scope, id uuid.UUID) (Object, error) {
 	obj, ok := s.objects[id]
 	if !ok || obj.DeletedAt != nil {
 		return Object{}, fmt.Errorf("%w: %s", ErrNotFound, id)

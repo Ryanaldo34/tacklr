@@ -36,7 +36,7 @@ func TestPostgresStore_liveRetrievalChannels(t *testing.T) {
 	ctx := context.Background()
 	pool := sharedPostgresPool(t, ctx)
 	mustExec(t, ctx, pool, `TRUNCATE objects, object_kinds CASCADE`)
-	store, err := brain.NewPostgresStore(brain.AdaptPgx(pool))
+	store, err := brain.NewPostgresStore(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +184,7 @@ func TestPostgresStore_liveRetrievalChannels(t *testing.T) {
 		t.Fatalf("nsB must have no lexical parts: %+v", lexB)
 	}
 
-	// Date / title filters on live SQL.
+	// Date / title / list filters on live SQL (same FilterPlan as Memory).
 	after := now.Add(-time.Hour).Format(time.RFC3339)
 	before := now.Add(time.Hour).Format(time.RFC3339)
 	lexDate, err := store.SearchLexical(ctx, scopeA, "oauth", brain.Filters{
@@ -200,6 +200,15 @@ func TestPostgresStore_liveRetrievalChannels(t *testing.T) {
 	if len(lexDate) != 1 || lexDate[0].ID != chunkOAuth {
 		t.Fatalf("date/title filters: %+v", lexDate)
 	}
+	lexList, err := store.SearchLexical(ctx, scopeA, "oauth", brain.Filters{
+		"stage": []any{"open", "closed"},
+	}, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lexList) != 1 || lexList[0].ID != chunkOAuth {
+		t.Fatalf("list property filter: %+v", lexList)
+	}
 }
 
 // TestPostgresStore_liveEmptyChannels is the zero-candidate outcome for
@@ -210,7 +219,7 @@ func TestPostgresStore_liveEmptyChannels(t *testing.T) {
 	}
 	ctx := context.Background()
 	pool := sharedPostgresPool(t, ctx)
-	store, err := brain.NewPostgresStore(brain.AdaptPgx(pool))
+	store, err := brain.NewPostgresStore(pool)
 	if err != nil {
 		t.Fatal(err)
 	}

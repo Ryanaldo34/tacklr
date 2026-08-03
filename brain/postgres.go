@@ -13,32 +13,19 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// Row is satisfied by pgx.Row.
-type Row interface {
-	Scan(dest ...any) error
-}
-
-// Rows is a minimal subset of pgx.Rows for test fakes.
-type Rows interface {
-	Close()
-	Err() error
-	Next() bool
-	Scan(dest ...any) error
-}
-
-// DBTX is the subset of pgx pool/conn used by PostgresStore.
-type DBTX interface {
-	QueryRow(ctx context.Context, sql string, args ...any) Row
-	Query(ctx context.Context, sql string, args ...any) (Rows, error)
+// PgxDB is satisfied by *pgx.Conn and *pgxpool.Pool.
+type PgxDB interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
 // PostgresStore implements Store against the objects / object_kinds schema.
 type PostgresStore struct {
-	db DBTX
+	db PgxDB
 }
 
 // NewPostgresStore wraps a pgx pool or connection.
-func NewPostgresStore(db DBTX) (*PostgresStore, error) {
+func NewPostgresStore(db PgxDB) (*PostgresStore, error) {
 	if db == nil {
 		return nil, fmt.Errorf("brain: db is required")
 	}
@@ -59,6 +46,42 @@ func (s *PostgresStore) Get(ctx context.Context, scope Scope, id uuid.UUID) (Obj
 		args = append(args, *scope.Namespace)
 	}
 	return s.scanObject(s.db.QueryRow(ctx, q, args...))
+}
+
+// GetMany implements ObjectReader.
+func (s *PostgresStore) GetMany(ctx context.Context, scope Scope, ids []uuid.UUID) ([]Object, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	q := `SELECT ` + objectSelectCols + ` FROM objects WHERE id = ANY($1) AND deleted_at IS NULL`
+	args := []any{ids}
+	if scope.Namespace != nil {
+		q += ` AND namespace_id = $2`
+		args = append(args, *scope.Namespace)
+	}
+	rows, err := s.db.Query(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("brain: get many: %w", err)
+	}
+	defer rows.Close()
+	byID := make(map[uuid.UUID]Object, len(ids))
+	for rows.Next() {
+		obj, err := s.scanObject(rows)
+		if err != nil {
+			return nil, err
+		}
+		byID[obj.ID] = obj
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("brain: get many: %w", err)
+	}
+	out := make([]Object, 0, len(byID))
+	for _, id := range ids {
+		if o, ok := byID[id]; ok {
+			out = append(out, o)
+		}
+	}
+	return out, nil
 }
 
 // ListChildren implements ObjectReader.
@@ -189,7 +212,6 @@ func (s *PostgresStore) scanObject(row scannable) (Object, error) {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Object{}, ErrNotFound
 		}
-		// pgx may wrap; also handle empty
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) {
 			return Object{}, fmt.Errorf("brain: scan object: %w", err)
@@ -334,61 +356,6 @@ func (s *PostgresStore) queryScored(ctx context.Context, q string, args []any, i
 		return nil, fmt.Errorf("brain: search rows: %w", err)
 	}
 	return out, nil
-}
-
-// filterSQL builds " AND ..." clauses with placeholders starting at startArg.
-func filterSQL(scope Scope, filters Filters, startArg int) (string, []any, error) {
-	var b strings.Builder
-	var args []any
-	n := startArg
-	add := func(frag string, v any) {
-		args = append(args, v)
-		b.WriteString(" AND ")
-		b.WriteString(fmt.Sprintf(frag, n))
-		n++
-	}
-	if scope.Namespace != nil {
-		add("namespace_id = $%d", *scope.Namespace)
-	}
-	for key, val := range filters {
-		switch strings.TrimSpace(key) {
-		case filterKind:
-			add("kind = $%d", fmt.Sprint(val))
-		case filterTitle:
-			add("title = $%d", fmt.Sprint(val))
-		case filterCreatedAfter:
-			t, err := parseFilterTime(val)
-			if err != nil {
-				return "", nil, fmt.Errorf("brain: filter %q: %w", key, err)
-			}
-			add("created_at >= $%d", t)
-		case filterCreatedBefore:
-			t, err := parseFilterTime(val)
-			if err != nil {
-				return "", nil, fmt.Errorf("brain: filter %q: %w", key, err)
-			}
-			add("created_at < $%d", t)
-		case filterUpdatedAfter:
-			t, err := parseFilterTime(val)
-			if err != nil {
-				return "", nil, fmt.Errorf("brain: filter %q: %w", key, err)
-			}
-			add("updated_at >= $%d", t)
-		case filterUpdatedBefore:
-			t, err := parseFilterTime(val)
-			if err != nil {
-				return "", nil, fmt.Errorf("brain: filter %q: %w", key, err)
-			}
-			add("updated_at < $%d", t)
-		default:
-			col := sanitizeJSONKey(strings.TrimSpace(key))
-			if col == "" {
-				return "", nil, fmt.Errorf("brain: filter %q is not a valid property key", key)
-			}
-			add("properties->>'"+col+"' = $%d", fmt.Sprint(val))
-		}
-	}
-	return b.String(), args, nil
 }
 
 func sanitizeJSONKey(k string) string {
