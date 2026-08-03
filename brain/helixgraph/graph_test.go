@@ -56,15 +56,11 @@ func TestGraph_neighborsRequestAST(t *testing.T) {
 	if !strings.Contains(body, from.String()) {
 		t.Fatalf("request missing source id: %s", body)
 	}
-	// Both-direction traversal for free-form edge label.
-	if !strings.Contains(body, "Both") && !strings.Contains(body, `"Both"`) {
-		// SDK may encode as {"Both":"references"} or similar.
-		if !strings.Contains(body, "references") {
-			t.Fatalf("request missing relation label: %s", body)
-		}
-	}
 	if !strings.Contains(body, "references") {
 		t.Fatalf("request missing references label: %s", body)
+	}
+	if !strings.Contains(body, "Both") {
+		t.Fatalf("request missing Both traversal: %s", body)
 	}
 }
 

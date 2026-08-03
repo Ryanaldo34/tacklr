@@ -15,35 +15,44 @@ type QueryEmbedder interface {
 	Embed(ctx context.Context, text string) ([]float32, error)
 }
 
-// EngineConfig holds engine-owned ranking knobs (never tool arguments).
-// Lambda is optional: nil uses the default mild decay; explicit 0 disables temporal bias.
+// EngineConfig holds engine-owned ranking knobs (not tool arguments).
+// Lambda nil → default mild decay; explicit 0 disables temporal bias.
+// Degrade* nil → default true (embedder → lexical-only; graph → containment-only when mixed).
 type EngineConfig struct {
-	CandidateK      int
-	RRFk            int
-	Lambda          *float64
-	EvidenceN       int
-	DefaultLimit    int
-	MaxLimit        int
-	ExpandInlineMax int // max neighbors returned inline before ResultSet paging
-	SiblingRadius   int // parts: siblings ± radius by position
-	GraphNeighborK  int // max neighbors requested from GraphReader
-	Now             func() time.Time
+	CandidateK       int
+	RRFk             int
+	Lambda           *float64
+	EvidenceN        int
+	DefaultLimit     int
+	MaxLimit         int
+	ExpandInlineMax  int
+	SiblingRadius    int
+	GraphNeighborK   int
+	MaxResultSetSize int
+	DegradeEmbedder  *bool
+	DegradeGraph     *bool
+	Now              func() time.Time
 }
 
 // DefaultEngineConfig returns mild production defaults.
 func DefaultEngineConfig() EngineConfig {
 	lam := 0.02
+	de := true
+	dg := true
 	return EngineConfig{
-		CandidateK:      40,
-		RRFk:            60,
-		Lambda:          &lam,
-		EvidenceN:       3,
-		DefaultLimit:    10,
-		MaxLimit:        50,
-		ExpandInlineMax: 20,
-		SiblingRadius:   5,
-		GraphNeighborK:  50,
-		Now:             func() time.Time { return time.Now().UTC() },
+		CandidateK:       40,
+		RRFk:             60,
+		Lambda:           &lam,
+		EvidenceN:        3,
+		DefaultLimit:     10,
+		MaxLimit:         50,
+		ExpandInlineMax:  20,
+		SiblingRadius:    5,
+		GraphNeighborK:   50,
+		MaxResultSetSize: 1000,
+		DegradeEmbedder:  &de,
+		DegradeGraph:     &dg,
+		Now:              func() time.Time { return time.Now().UTC() },
 	}
 }
 
@@ -57,13 +66,28 @@ func (c EngineConfig) withDefaults() EngineConfig {
 	c.ExpandInlineMax = posOr(c.ExpandInlineMax, d.ExpandInlineMax)
 	c.SiblingRadius = posOr(c.SiblingRadius, d.SiblingRadius)
 	c.GraphNeighborK = posOr(c.GraphNeighborK, d.GraphNeighborK)
+	c.MaxResultSetSize = posOr(c.MaxResultSetSize, d.MaxResultSetSize)
 	if c.Lambda == nil {
 		c.Lambda = d.Lambda
+	}
+	if c.DegradeEmbedder == nil {
+		c.DegradeEmbedder = d.DegradeEmbedder
+	}
+	if c.DegradeGraph == nil {
+		c.DegradeGraph = d.DegradeGraph
 	}
 	if c.Now == nil {
 		c.Now = d.Now
 	}
 	return c
+}
+
+func (c EngineConfig) degradeEmbedder() bool {
+	return c.DegradeEmbedder != nil && *c.DegradeEmbedder
+}
+
+func (c EngineConfig) degradeGraph() bool {
+	return c.DegradeGraph != nil && *c.DegradeGraph
 }
 
 func posOr(v, fallback int) int {
@@ -73,7 +97,6 @@ func posOr(v, fallback int) int {
 	return fallback
 }
 
-// lambdaValue returns the configured decay rate. withDefaults ensures Lambda is non-nil on Engine.
 func (c EngineConfig) lambdaValue() float64 {
 	return *c.Lambda
 }

@@ -70,6 +70,16 @@ func TestInstruments_recordAllPaths(t *testing.T) {
 	inst.RecordModel(ctx, "agent-1", ModelPhaseTurn, OutcomeOK, ErrorClassOK, 5*time.Millisecond)
 	inst.RecordModel(ctx, "agent-1", ModelPhaseHandoff, OutcomeError, ErrorClassProvider4xx, time.Millisecond)
 	inst.RecordTokens(ctx, "agent-1", 10, 20, 3)
+	inst.RecordBrain(ctx, "agent-1", BrainOpSearch, OutcomeOK, BrainDegradeNone, false, 2*time.Millisecond)
+	inst.RecordBrain(ctx, "agent-1", BrainOpExpand, OutcomeOK, BrainDegradeContainmentOnly, true, time.Millisecond)
+	inst.RecordBrain(ctx, "agent-1", BrainOpFindExact, OutcomeError, BrainDegradeNone, false, time.Millisecond)
+	_, bspan := StartBrainSpan(ctx, BrainOpContinue)
+	bspan.End(0, BrainDegradeNone, nil)
+	_, bspan2 := StartBrainSpan(ctx, BrainOpSearch)
+	bspan2.End(3, BrainDegradeLexicalOnly, errors.New("x"))
+	// nil-safe
+	(*Instruments)(nil).RecordBrain(ctx, "", "", "", "", false, 0)
+	(*BrainSpan)(nil).End(0, "", nil)
 
 	ctxI := ContextWithInstruments(context.Background(), inst)
 	if InstrumentsFromContext(ctxI) != inst {

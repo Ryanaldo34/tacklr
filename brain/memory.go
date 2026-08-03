@@ -15,7 +15,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// MemoryStore is an in-process Store. Put/PutKind are seed helpers, not the product write API.
+// MemoryStore is an in-process Store for tests and fixtures (Put is not a product write API).
 type MemoryStore struct {
 	mu      sync.RWMutex
 	objects map[uuid.UUID]Object
@@ -168,7 +168,6 @@ func (s *MemoryStore) SearchLexical(_ context.Context, scope Scope, query string
 		return nil, nil
 	}
 	parts := s.candidateParts(scope, filters)
-	// Document frequency over candidate parts.
 	df := map[string]int{}
 	docs := make([]struct {
 		obj    Object
@@ -211,7 +210,6 @@ func (s *MemoryStore) SearchLexical(_ context.Context, scope Scope, query string
 			if tf == 0 {
 				continue
 			}
-			// Mild length norm + IDF.
 			idf := math.Log(1 + n/float64(1+df[qt]))
 			score += (tf / float64(dl)) * idf
 		}
@@ -374,7 +372,6 @@ func trigramOverlap(a, b map[string]struct{}) float64 {
 			inter++
 		}
 	}
-	// Jaccard-ish
 	union := len(a) + len(b) - inter
 	if union == 0 {
 		return 0

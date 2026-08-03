@@ -74,7 +74,6 @@ func TestExpand_partNeighborhoodWindow(t *testing.T) {
 	if res.Mode != "neighborhood" {
 		t.Fatalf("mode %s", res.Mode)
 	}
-	// parent + window of 3 siblings (pos 3,4,5)
 	if len(res.Objects) != 4 || res.Objects[0].ID != parent {
 		t.Fatalf("%+v", res.Objects)
 	}
@@ -96,7 +95,7 @@ func TestExpand_highCardinalityResultSetAndContinue(t *testing.T) {
 	now := time.Now().UTC()
 	parent := uuid.New()
 	_ = store.Put(brain.Object{ID: parent, Kind: "Document", NamespaceID: ns, UpdatedAt: now})
-	for i := 1; i <= 25; i++ {
+	for i := 1; i <= 30; i++ {
 		id := uuid.New()
 		pos := i
 		_ = store.Put(brain.Object{
@@ -105,7 +104,7 @@ func TestExpand_highCardinalityResultSetAndContinue(t *testing.T) {
 		})
 	}
 	eng, err := brain.NewEngine(store, brain.WithConfig(brain.EngineConfig{
-		ExpandInlineMax: 5, DefaultLimit: 3, MaxLimit: 50,
+		ExpandInlineMax: 5, MaxResultSetSize: 10, DefaultLimit: 3, MaxLimit: 50,
 		Now: func() time.Time { return now },
 	}))
 	if err != nil {
@@ -118,6 +117,13 @@ func TestExpand_highCardinalityResultSetAndContinue(t *testing.T) {
 	}
 	if res.ResultSetID == uuid.Nil || !res.HasMore || len(res.Objects) != 3 {
 		t.Fatalf("%+v", res)
+	}
+	set, err := sc.Get(ctx, res.ResultSetID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(set.ObjectIDs) > 10 {
+		t.Fatalf("MaxResultSetSize: %d", len(set.ObjectIDs))
 	}
 	page2, err := eng.Continue(ctx, brain.Scope{Namespace: &ns}, res.ResultSetID, 3, sc)
 	if err != nil {
@@ -210,14 +216,12 @@ func TestExpand_partMixedContainmentAndGraph(t *testing.T) {
 	if !got[parent] || !got[part] || !got[linked] {
 		t.Fatalf("want parent, part, linked: %+v", res.Objects)
 	}
-	// Containment ids first: parent then siblings, then graph.
 	if res.Objects[0].ID != parent {
 		t.Fatalf("parent first: %+v", res.Objects)
 	}
 }
 
 func TestExpand_graphStoreErrorSurfaces(t *testing.T) {
-	// Graph returns an id whose Get fails with a non-NotFound error.
 	store := &errAfterGetStore{
 		ok:     brain.NewMemoryStore(),
 		failID: uuid.New(),
@@ -241,7 +245,6 @@ func TestExpand_graphStoreErrorSurfaces(t *testing.T) {
 	}
 }
 
-// errAfterGetStore implements Store+PartSearcher by delegating, except Get(failID).
 type errAfterGetStore struct {
 	ok     *brain.MemoryStore
 	failID uuid.UUID
@@ -304,7 +307,6 @@ func TestSplitRelationTypes(t *testing.T) {
 	if c || len(g) != 1 {
 		t.Fatal(c, g)
 	}
-	// Free-form labels are graph, not containment aliases.
 	c, g = brain.SplitRelationTypes([]string{"children"})
 	if c || len(g) != 1 || g[0] != "children" {
 		t.Fatal(c, g)

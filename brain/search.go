@@ -6,30 +6,54 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
 // Search runs hybrid retrieval (BM25 + optional vector), RRF, temporal decay,
 // parent promotion, and materializes a ResultSet into results.
 func (e *Engine) Search(ctx context.Context, scope Scope, req SearchRequest, results ResultSetStore) (SearchPage, error) {
-	ranked, err := e.hybridCandidates(ctx, scope, req)
-	if err != nil {
-		return SearchPage{}, err
-	}
-	return e.materialize(ctx, scope, ranked, req.Limit, results)
+	ctx, span := telemetry.StartBrainSpan(ctx, telemetry.BrainOpSearch)
+	page, degrade, err := e.searchWithDegrade(ctx, scope, req, results, false)
+	span.End(len(page.Objects), degrade, err)
+	return page, err
 }
 
 // FindExact runs equality-first exact retrieval (no dense channel), then
 // lexical + trigram fusion, promotion, and ResultSet materialization.
 func (e *Engine) FindExact(ctx context.Context, scope Scope, req SearchRequest, results ResultSetStore) (SearchPage, error) {
-	ranked, err := e.exactCandidates(ctx, scope, req)
-	if err != nil {
-		return SearchPage{}, err
+	ctx, span := telemetry.StartBrainSpan(ctx, telemetry.BrainOpFindExact)
+	page, degrade, err := e.searchWithDegrade(ctx, scope, req, results, true)
+	span.End(len(page.Objects), degrade, err)
+	return page, err
+}
+
+func (e *Engine) searchWithDegrade(ctx context.Context, scope Scope, req SearchRequest, results ResultSetStore, exact bool) (SearchPage, string, error) {
+	var (
+		ranked  []ScoredID
+		err     error
+		degrade = telemetry.BrainDegradeNone
+	)
+	if exact {
+		ranked, err = e.exactCandidates(ctx, scope, req)
+	} else {
+		ranked, degrade, err = e.hybridCandidates(ctx, scope, req)
 	}
-	return e.materialize(ctx, scope, ranked, req.Limit, results)
+	if err != nil {
+		return SearchPage{}, degrade, err
+	}
+	page, err := e.materialize(ctx, scope, ranked, req.Limit, results)
+	return page, degrade, err
 }
 
 // Continue returns the next page of a prior ResultSet under scope.
 func (e *Engine) Continue(ctx context.Context, scope Scope, resultSetID uuid.UUID, limit int, results ResultSetStore) (SearchPage, error) {
+	ctx, span := telemetry.StartBrainSpan(ctx, telemetry.BrainOpContinue)
+	page, err := e.continueInner(ctx, scope, resultSetID, limit, results)
+	span.End(len(page.Objects), telemetry.BrainDegradeNone, err)
+	return page, err
+}
+
+func (e *Engine) continueInner(ctx context.Context, scope Scope, resultSetID uuid.UUID, limit int, results ResultSetStore) (SearchPage, error) {
 	if resultSetID == uuid.Nil {
 		return SearchPage{}, fmt.Errorf("brain: result_set_id is required")
 	}
@@ -94,34 +118,41 @@ func (e *Engine) prepareSearch(req SearchRequest) (PartSearcher, error) {
 	return ps, nil
 }
 
-func (e *Engine) hybridCandidates(ctx context.Context, scope Scope, req SearchRequest) ([]ScoredID, error) {
+func (e *Engine) hybridCandidates(ctx context.Context, scope Scope, req SearchRequest) ([]ScoredID, string, error) {
 	ps, err := e.prepareSearch(req)
 	if err != nil {
-		return nil, err
+		return nil, telemetry.BrainDegradeNone, err
 	}
 	query := strings.TrimSpace(req.Query)
 	k := e.cfg.CandidateK
 	lex, err := ps.SearchLexical(ctx, scope, query, req.Filters, k)
 	if err != nil {
-		return nil, err
+		return nil, telemetry.BrainDegradeNone, err
 	}
 	lists := [][]ScoredID{lex}
+	degrade := telemetry.BrainDegradeNone
 	if e.embedder != nil {
-		emb, err := e.embedder.Embed(ctx, query)
-		if err != nil {
-			return nil, fmt.Errorf("brain: embed query: %w", err)
-		}
-		if len(emb) > 0 {
+		emb, embErr := e.embedder.Embed(ctx, query)
+		if embErr != nil {
+			if e.cfg.degradeEmbedder() {
+				degrade = telemetry.BrainDegradeLexicalOnly
+			} else {
+				return nil, telemetry.BrainDegradeNone, fmt.Errorf("brain: embed query: %w", embErr)
+			}
+		} else if len(emb) > 0 {
 			vec, err := ps.SearchVector(ctx, scope, emb, req.Filters, k)
 			if err != nil {
-				return nil, err
-			}
-			if len(vec) > 0 {
+				if e.cfg.degradeEmbedder() {
+					degrade = telemetry.BrainDegradeLexicalOnly
+				} else {
+					return nil, telemetry.BrainDegradeNone, err
+				}
+			} else if len(vec) > 0 {
 				lists = append(lists, vec)
 			}
 		}
 	}
-	return rrfFuse(lists, e.cfg.RRFk), nil
+	return rrfFuse(lists, e.cfg.RRFk), degrade, nil
 }
 
 func (e *Engine) exactCandidates(ctx context.Context, scope Scope, req SearchRequest) ([]ScoredID, error) {
@@ -198,9 +229,11 @@ func (e *Engine) hydrateParents(ctx context.Context, scope Scope, ids []uuid.UUI
 	return out, nil
 }
 
-// pageIDs materializes ordered ids into a ResultSet and returns the first page.
 func (e *Engine) pageIDs(ctx context.Context, scope Scope, ids []uuid.UUID, limit int, results ResultSetStore) (SearchPage, error) {
 	limit = e.normalizeLimit(limit)
+	if maxN := e.cfg.MaxResultSetSize; maxN > 0 && len(ids) > maxN {
+		ids = ids[:maxN]
+	}
 	_, end := sliceBounds(0, limit, len(ids))
 	pageObjs, err := e.hydrateParents(ctx, scope, ids[:end])
 	if err != nil {
@@ -222,7 +255,6 @@ func (e *Engine) pageIDs(ctx context.Context, scope Scope, ids []uuid.UUID, limi
 	}, nil
 }
 
-// sliceBounds returns [start,end) for a page into a slice of length n.
 func sliceBounds(offset, limit, n int) (start, end int) {
 	start = min(max(offset, 0), n)
 	end = min(start+limit, n)

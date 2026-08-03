@@ -10,9 +10,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// SearchContext owns the current ResultSet for one agent thread.
-// Put replaces any prior set (continue on the old id fails).
-// Export/Restore support harness session checkpoints.
+// SearchContext holds the active ResultSet for continue (one per agent thread).
 type SearchContext struct {
 	mu      sync.Mutex
 	current *ResultSet

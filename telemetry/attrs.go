@@ -7,6 +7,7 @@ package telemetry
 //	tacklr.turn
 //	  log: prompt.received | resume.received
 //	  tacklr.model | tacklr.tool | tacklr.plan.install | tacklr.context.handoff
+//	    tacklr.brain   (under tool when knowledge builtins run)
 //	  log: turn.ended
 //
 // Set static attributes at span start. Outcome and error enums at end only.
@@ -18,6 +19,7 @@ const (
 	SpanPlanInstall    = "tacklr.plan.install"
 	SpanContextHandoff = "tacklr.context.handoff"
 	SpanModel          = "tacklr.model"
+	SpanBrain          = "tacklr.brain"
 )
 
 // Span and log attribute keys (static identifiers only).
@@ -43,6 +45,12 @@ const (
 	AttrErrorCode        = "tacklr.error.code"
 	AttrErrorClass       = "tacklr.error.class" // bucketed enum
 	AttrAfterTools       = "tacklr.model.after_tools"
+
+	// Brain retrieval (tacklr.brain) — span attrs for trace debug only.
+	// Metrics use LabelBrainOp / LabelDegrade / LabelEmpty (see RecordBrain).
+	AttrBrainOp      = "tacklr.brain.op"      // search | find_exact | continue | expand
+	AttrBrainDegrade = "tacklr.brain.degrade" // none | lexical_only | containment_only
+	AttrBrainHits    = "tacklr.brain.hits"    // page size; not a metric label (cardinality)
 
 	// OpenTelemetry GenAI semantic conventions (stable keys).
 	// https://opentelemetry.io/docs/specs/semconv/gen-ai/
@@ -79,6 +87,21 @@ const (
 	ErrorClassOther       = "other"
 )
 
+// Brain op values for AttrBrainOp / LabelBrainOp (closed enum).
+const (
+	BrainOpSearch    = "search"
+	BrainOpFindExact = "find_exact"
+	BrainOpContinue  = "continue"
+	BrainOpExpand    = "expand"
+)
+
+// Brain degrade modes (closed enum).
+const (
+	BrainDegradeNone            = "none"
+	BrainDegradeLexicalOnly     = "lexical_only"
+	BrainDegradeContainmentOnly = "containment_only"
+)
+
 // Handoff outcome values.
 const (
 	HandoffOutcomeOK       = "ok"
@@ -111,6 +134,7 @@ const (
 	AreaModelTasks = "model_tasks"
 	AreaContext    = "context"
 	AreaInference  = "inference"
+	AreaBrain      = "brain"
 )
 
 // Outcome values for AttrOutcome / EventAttrOutcome.

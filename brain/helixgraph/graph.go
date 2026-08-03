@@ -1,13 +1,5 @@
 // Package helixgraph adapts the HelixDB Go SDK to brain.GraphReader.
-//
-// Core package brain stays free of the Helix dependency; hosts that need
-// production graph expand import this package and pass the result to
-// brain.WithGraph.
-//
-// Node identity: Helix nodes must expose property object_id (UUID string)
-// matching objects.id in Postgres. Neighbors walk Both (in+out) per label.
-//
-// Local Helix: `helix start dev` defaults to in-memory storage on :6969.
+// Nodes use property object_id (UUID) matching objects.id. Neighbors use Both.
 package helixgraph
 
 import (
@@ -20,12 +12,12 @@ import (
 	"github.com/ryanaldo34/tacklr/brain"
 )
 
-// Graph implements brain.GraphReader using the official HelixDB Go SDK.
+// Graph implements brain.GraphReader via HelixDB.
 type Graph struct {
 	client *helix.Client
 }
 
-// New wraps a Helix client. baseURL empty defaults to http://localhost:6969.
+// New builds a client. Empty baseURL defaults to http://localhost:6969.
 func New(baseURL string, opts ...helix.ClientOption) (*Graph, error) {
 	c, err := helix.NewClient(baseURL, opts...)
 	if err != nil {
@@ -152,5 +144,4 @@ func normalizeLabels(rels []string) []string {
 	return out
 }
 
-// Ensure Graph implements brain.GraphReader.
 var _ brain.GraphReader = (*Graph)(nil)

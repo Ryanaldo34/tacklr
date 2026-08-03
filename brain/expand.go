@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
 // ExpandRequest is the engine input for expand.
@@ -24,31 +25,38 @@ type ExpandResult struct {
 }
 
 // Expand returns the structural neighborhood of object_id under scope.
-// Always selects an ordered id list (containment then graph), then one page path.
 func (e *Engine) Expand(ctx context.Context, scope Scope, req ExpandRequest, results ResultSetStore) (ExpandResult, error) {
+	ctx, span := telemetry.StartBrainSpan(ctx, telemetry.BrainOpExpand)
+	res, degrade, err := e.expandInner(ctx, scope, req, results)
+	span.End(len(res.Objects), degrade, err)
+	return res, err
+}
+
+func (e *Engine) expandInner(ctx context.Context, scope Scope, req ExpandRequest, results ResultSetStore) (ExpandResult, string, error) {
 	if req.ObjectID == uuid.Nil {
-		return ExpandResult{}, fmt.Errorf("brain: object id is required")
+		return ExpandResult{}, telemetry.BrainDegradeNone, fmt.Errorf("brain: object id is required")
 	}
 	obj, err := e.store.Get(ctx, scope, req.ObjectID)
 	if err != nil {
-		return ExpandResult{}, err
+		return ExpandResult{}, telemetry.BrainDegradeNone, err
 	}
 
 	wantContainment, graphLabels := SplitRelationTypes(req.RelationTypes)
 	if len(graphLabels) > 0 && e.graph == nil {
-		return ExpandResult{}, fmt.Errorf("brain: graph backend is required for relation types %v", graphLabels)
+		return ExpandResult{}, telemetry.BrainDegradeNone, fmt.Errorf("brain: graph backend is required for relation types %v", graphLabels)
 	}
 
 	var (
 		ids             []uuid.UUID
 		usedContainment bool
 		usedGraph       bool
+		degrade         = telemetry.BrainDegradeNone
 	)
 
 	if wantContainment {
 		cIDs, err := e.containmentIDs(ctx, scope, obj)
 		if err != nil {
-			return ExpandResult{}, err
+			return ExpandResult{}, degrade, err
 		}
 		ids = append(ids, cIDs...)
 		usedContainment = true
@@ -56,17 +64,21 @@ func (e *Engine) Expand(ctx context.Context, scope Scope, req ExpandRequest, res
 	if len(graphLabels) > 0 {
 		gIDs, err := e.graphNeighborIDs(ctx, scope, obj.ID, graphLabels)
 		if err != nil {
-			return ExpandResult{}, err
+			if e.cfg.degradeGraph() && usedContainment {
+				degrade = telemetry.BrainDegradeContainmentOnly
+			} else {
+				return ExpandResult{}, degrade, err
+			}
+		} else {
+			ids = appendUnique(ids, gIDs...)
+			usedGraph = true
 		}
-		ids = appendUnique(ids, gIDs...)
-		usedGraph = true
 	}
 
-	return e.expandMaybePage(ctx, scope, ids, expandMode(usedContainment, usedGraph, !obj.IsPart()), req.Limit, results)
+	res, err := e.expandMaybePage(ctx, scope, ids, expandMode(usedContainment, usedGraph, !obj.IsPart()), req.Limit, results)
+	return res, degrade, err
 }
 
-// containmentIDs returns ordered ids for Postgres hierarchy expand.
-// Parent → children; part → parent then sibling window (including self).
 func (e *Engine) containmentIDs(ctx context.Context, scope Scope, obj Object) ([]uuid.UUID, error) {
 	if !obj.IsPart() {
 		kids, err := e.store.ListChildren(ctx, scope, obj.ID)
@@ -179,7 +191,6 @@ func (e *Engine) graphNeighborIDs(ctx context.Context, scope Scope, id uuid.UUID
 	return ids, nil
 }
 
-// visible reports whether id is in scope. ErrNotFound → false; other store errors fail.
 func (e *Engine) visible(ctx context.Context, scope Scope, id uuid.UUID) (bool, error) {
 	_, err := e.store.Get(ctx, scope, id)
 	if err == nil {

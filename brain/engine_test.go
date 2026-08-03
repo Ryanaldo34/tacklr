@@ -67,7 +67,6 @@ func TestEngine_ReadRejectsOutsideScope(t *testing.T) {
 		t.Fatalf("wrong namespace: %v", err)
 	}
 
-	// Soft-delete is the same visibility contract (not found under any scope).
 	deleted := time.Now().UTC()
 	if err := store.Put(brain.Object{
 		ID: id, Kind: "Document", NamespaceID: nsA, DeletedAt: &deleted,
@@ -239,16 +238,5 @@ func TestMemoryStore_PutRequiresIdentity(t *testing.T) {
 		if err := tc.fn(); err == nil {
 			t.Fatalf("%s: want error", tc.name)
 		}
-	}
-}
-
-func TestObject_IsPart(t *testing.T) {
-	parent := uuid.New()
-	part := brain.Object{ParentID: &parent}
-	if !part.IsPart() {
-		t.Fatal("expected part")
-	}
-	if (brain.Object{}).IsPart() {
-		t.Fatal("root is not a part")
 	}
 }

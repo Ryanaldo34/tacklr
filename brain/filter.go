@@ -136,7 +136,6 @@ func objectMatchesFilters(obj Object, f Filters) bool {
 	return true
 }
 
-// matchFilterValue is equality, or membership when want is a list.
 func matchFilterValue(got, want any) bool {
 	if items, ok := want.([]any); ok {
 		for _, item := range items {
@@ -149,8 +148,6 @@ func matchFilterValue(got, want any) bool {
 	return scalarEqual(got, want)
 }
 
-// scalarEqual is strict: numbers compare as float64; string/bool exact type match.
-// Unknown types do not match (no string formatting fallback).
 func scalarEqual(a, b any) bool {
 	if a == nil || b == nil {
 		return a == b

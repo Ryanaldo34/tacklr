@@ -15,14 +15,12 @@ type GraphNeighbor struct {
 	Direction    string // "out" | "in"
 }
 
-// GraphReader traverses non-containment relations (Helix or MemoryGraph).
-// Namespace isolation is enforced by the Engine when hydrating via Store.Get.
+// GraphReader traverses non-containment relations. Engine hydrates ids under Scope.
 type GraphReader interface {
 	Neighbors(ctx context.Context, objectID uuid.UUID, relationTypes []string, limit int) ([]GraphNeighbor, error)
 }
 
-// MemoryGraph is an in-process GraphReader for tests and offline hosts.
-// AddEdge seeds undirected adjacency (both directions stored).
+// MemoryGraph is an in-process GraphReader (tests / offline hosts).
 type MemoryGraph struct {
 	mu  sync.RWMutex
 	out map[uuid.UUID]map[string][]uuid.UUID // from → type → tos
@@ -37,8 +35,7 @@ func NewMemoryGraph() *MemoryGraph {
 	}
 }
 
-// AddEdge records a directed edge from→to with relationType and mirrors reverse
-// lookup so Neighbors can walk Both (out+in).
+// AddEdge records from→to and indexes reverse for Both-direction Neighbors.
 func (g *MemoryGraph) AddEdge(from, to uuid.UUID, relationType string) {
 	rel := strings.TrimSpace(relationType)
 	if from == uuid.Nil || to == uuid.Nil || rel == "" {
@@ -103,8 +100,7 @@ func normalizeRelationList(rels []string) []string {
 	return out
 }
 
-// IsContainmentRelation reports whether rel is a Postgres containment alias.
-// Only the documented aliases: contains, part_of (and partof). Empty string is not a label.
+// IsContainmentRelation is true for contains / part_of (and partof).
 func IsContainmentRelation(rel string) bool {
 	switch strings.ToLower(strings.TrimSpace(rel)) {
 	case "contains", "part_of", "partof":
@@ -114,8 +110,8 @@ func IsContainmentRelation(rel string) bool {
 	}
 }
 
-// SplitRelationTypes separates containment aliases from graph edge labels.
-// Empty/omitted input means containment-only expand.
+// SplitRelationTypes returns whether containment apply and remaining graph labels.
+// Empty input means containment-only.
 func SplitRelationTypes(rels []string) (wantContainment bool, graphLabels []string) {
 	if len(rels) == 0 {
 		return true, nil
@@ -131,7 +127,6 @@ func SplitRelationTypes(rels []string) (wantContainment bool, graphLabels []stri
 		}
 		graphLabels = append(graphLabels, r)
 	}
-	// Explicit empty/whitespace-only list → containment default.
 	if !wantContainment && len(graphLabels) == 0 {
 		wantContainment = true
 	}
