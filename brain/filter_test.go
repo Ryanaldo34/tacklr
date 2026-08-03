@@ -64,4 +64,38 @@ func TestValidateFilters_andMatch(t *testing.T) {
 	if objectMatchesFilters(obj, Filters{"missing": "x"}) {
 		t.Fatal("missing property")
 	}
+
+	// Numeric / bool / string scalar equality (memory filter path).
+	obj.Properties["n"] = 3
+	obj.Properties["b"] = true
+	obj.Properties["s"] = "hi"
+	if !objectMatchesFilters(obj, Filters{"n": 3, "b": true, "s": "hi"}) {
+		t.Fatal("scalar eq")
+	}
+	if !objectMatchesFilters(obj, Filters{"n": int64(3)}) {
+		t.Fatal("int64 eq")
+	}
+	if !objectMatchesFilters(obj, Filters{"n": float32(3)}) {
+		t.Fatal("float32 eq")
+	}
+	if objectMatchesFilters(obj, Filters{"n": "nope"}) {
+		t.Fatal("type mismatch")
+	}
+	// Empty list filter is invalid at validate; empty list match is false at runtime.
+	if objectMatchesFilters(obj, Filters{"stage": []any{}}) {
+		t.Fatal("empty list")
+	}
+	// Bad date values fail match (not validate path).
+	if objectMatchesFilters(obj, Filters{"updated_after": "bogus"}) {
+		t.Fatal("bad date match")
+	}
+	if err := ValidateFilters(Filters{"kind": nil}); err == nil {
+		t.Fatal("nil value")
+	}
+	if err := ValidateFilters(Filters{"kind": []any{}}); err == nil {
+		t.Fatal("empty list validate")
+	}
+	if _, err := parseFilterTime(""); err == nil {
+		t.Fatal("empty time")
+	}
 }

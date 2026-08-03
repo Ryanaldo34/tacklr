@@ -7,4 +7,9 @@
 // Graph expand beyond containment uses GraphReader. Production Helix wiring is
 // in brain/helixgraph. SearchContext holds the active ResultSet for continue
 // (replaced on each search, find_exact, or large expand).
+//
+// Integration tests (skipped under -short / without Docker):
+//   - PostgresStore: Testcontainers + brain/testdata/Dockerfile.postgres
+//     (pgvector + pg_textsearch BM25)
+//   - helixgraph: Testcontainers + ghcr.io/helixdb/enterprise-dev (in-memory)
 package brain

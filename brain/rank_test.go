@@ -22,6 +22,27 @@ func TestRRF_fusesRanks(t *testing.T) {
 	if fused[0].ID != a {
 		t.Fatalf("want a first, got %v order=%v", fused[0].ID, idsOf(fused))
 	}
+
+	// Empty / nil lists and k<=0 defaults.
+	if got := rrfFuse(nil, 0); len(got) != 0 {
+		t.Fatalf("nil: %+v", got)
+	}
+	if got := rrfFuse([][]ScoredID{nil, {}}, -1); len(got) != 0 {
+		t.Fatalf("empty: %+v", got)
+	}
+	// Tie-break: equal RRF scores use UpdatedAt then ID.
+	t1 := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	t2 := t1.Add(time.Hour)
+	idLo, idHi := uuid.MustParse("00000000-0000-0000-0000-000000000001"), uuid.MustParse("00000000-0000-0000-0000-000000000002")
+	tied := []ScoredID{
+		{ID: idHi, Score: 1, UpdatedAt: t1},
+		{ID: idLo, Score: 1, UpdatedAt: t1},
+		{ID: uuid.New(), Score: 1, UpdatedAt: t2},
+	}
+	sortScored(tied)
+	if !tied[0].UpdatedAt.Equal(t2) {
+		t.Fatalf("fresher first: %+v", tied)
+	}
 }
 
 func TestTemporal_prefersFresherWhenSimilar(t *testing.T) {

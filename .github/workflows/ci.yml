@@ -85,6 +85,19 @@ jobs:
       - name: Build
         run: go build ./...
 
+      # brain integration tests use Testcontainers:
+      #   - Postgres (pgvector + pg_textsearch BM25)
+      #   - Helix enterprise-dev (in-memory graph, dynamic /v1/query)
+      - name: Prepare Testcontainers (Postgres + Helix)
+        run: |
+          docker version
+          docker pull pgvector/pgvector:pg17
+          docker build \
+            -f brain/testdata/Dockerfile.postgres \
+            -t tacklr-pg-brain:test \
+            brain/testdata
+          docker pull ghcr.io/helixdb/enterprise-dev:latest
+
       # Race detector and coverage profiles are separate: -race can flake under
       # heavy concurrency in integration-style harness tests; coverage still uses
       # atomic mode for correct multi-goroutine counts.

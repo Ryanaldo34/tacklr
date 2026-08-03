@@ -4,6 +4,7 @@ package helixgraph
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -42,12 +43,79 @@ func (g *Graph) Client() *helix.Client {
 	return g.client
 }
 
-type neighborRow struct {
-	ObjectID string `json:"object_id"`
+// NodeLabel is the Helix node label used for knowledge objects.
+const NodeLabel = "Object"
+
+// EnsureObjectIndex creates an equality index on Object.object_id when missing.
+// Safe to call once at host startup or in tests before seeding.
+func (g *Graph) EnsureObjectIndex(ctx context.Context) error {
+	if g == nil || g.client == nil {
+		return fmt.Errorf("helixgraph: not configured")
+	}
+	req := helix.WriteQuery("brain_ensure_object_id_index").
+		VarAs("idx", helix.G().CreateIndexIfNotExists(
+			helix.NodeEqualityIndex(NodeLabel, "object_id"),
+		)).
+		Returning()
+	if err := g.client.Exec(ctx, req, nil, helix.WriterOnly()); err != nil {
+		return fmt.Errorf("helixgraph: ensure object_id index: %w", err)
+	}
+	return nil
 }
 
-type neighborsResponse struct {
-	Neighbors []neighborRow `json:"neighbors"`
+// PutObject upserts a graph node with property object_id (objects.id).
+// Hosts call this when dual-writing knowledge objects into Helix.
+func (g *Graph) PutObject(ctx context.Context, objectID uuid.UUID) error {
+	if g == nil || g.client == nil {
+		return fmt.Errorf("helixgraph: not configured")
+	}
+	if objectID == uuid.Nil {
+		return fmt.Errorf("helixgraph: object id is required")
+	}
+	// Drop existing node(s) with this object_id, then insert one (idempotent enough for tests/hosts).
+	q := helix.WriteQuery("brain_put_object")
+	oid := q.ParamString("object_id", objectID.String())
+	req := q.
+		VarAs("dropped", helix.G().
+			NWhere(helix.SourceEq("object_id", oid)).
+			Drop().
+			Count()).
+		VarAs("n", helix.G().AddN(NodeLabel, helix.Props{
+			helix.Prop("object_id", oid),
+		})).
+		Returning("n")
+	if err := g.client.Exec(ctx, req, nil, helix.WriterOnly()); err != nil {
+		return fmt.Errorf("helixgraph: put object: %w", err)
+	}
+	return nil
+}
+
+// AddEdge creates a labeled edge from→to between nodes identified by object_id.
+// Both endpoints must already exist (see PutObject).
+func (g *Graph) AddEdge(ctx context.Context, from, to uuid.UUID, relationType string) error {
+	if g == nil || g.client == nil {
+		return fmt.Errorf("helixgraph: not configured")
+	}
+	rel := strings.TrimSpace(relationType)
+	if from == uuid.Nil || to == uuid.Nil || rel == "" {
+		return fmt.Errorf("helixgraph: from, to, and relation type are required")
+	}
+	q := helix.WriteQuery("brain_add_edge")
+	fromOID := q.ParamString("from_oid", from.String())
+	toOID := q.ParamString("to_oid", to.String())
+	req := q.
+		VarAs("from", helix.G().NWhere(helix.SourceEq("object_id", fromOID))).
+		VarAs("to", helix.G().NWhere(helix.SourceEq("object_id", toOID))).
+		VarAs("e", helix.G().N(helix.NodeVar("from")).AddE(rel, helix.NodeVar("to"), helix.Props{})).
+		Returning("e")
+	if err := g.client.Exec(ctx, req, nil, helix.WriterOnly()); err != nil {
+		return fmt.Errorf("helixgraph: add edge %q: %w", rel, err)
+	}
+	return nil
+}
+
+type neighborRow struct {
+	ObjectID string `json:"object_id"`
 }
 
 // Neighbors implements brain.GraphReader via Helix Both(label) traversal.
@@ -106,13 +174,21 @@ func (g *Graph) neighborsForLabel(ctx context.Context, objectID uuid.UUID, label
 		).
 		Returning("neighbors")
 
-	var resp neighborsResponse
-	if err := g.client.Exec(ctx, req, &resp); err != nil {
+	// Helix ValueMap returns {"neighbors":{"properties":[{"object_id":"..."},...]}}.
+	// Older mocks may return a bare array under "neighbors".
+	var raw struct {
+		Neighbors json.RawMessage `json:"neighbors"`
+	}
+	if err := g.client.Exec(ctx, req, &raw); err != nil {
 		return nil, fmt.Errorf("helixgraph: neighbors %q: %w", label, err)
+	}
+	rows, err := decodeNeighborRows(raw.Neighbors)
+	if err != nil {
+		return nil, fmt.Errorf("helixgraph: neighbors %q decode: %w", label, err)
 	}
 
 	var ids []uuid.UUID
-	for _, row := range resp.Neighbors {
+	for _, row := range rows {
 		s := strings.TrimSpace(row.ObjectID)
 		if s == "" {
 			continue
@@ -124,6 +200,25 @@ func (g *Graph) neighborsForLabel(ctx context.Context, objectID uuid.UUID, label
 		ids = append(ids, id)
 	}
 	return ids, nil
+}
+
+func decodeNeighborRows(raw json.RawMessage) ([]neighborRow, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	// Shape A (enterprise-dev ValueMap): {"properties":[{"object_id":"..."}]}
+	var wrapped struct {
+		Properties []neighborRow `json:"properties"`
+	}
+	if err := json.Unmarshal(raw, &wrapped); err == nil && wrapped.Properties != nil {
+		return wrapped.Properties, nil
+	}
+	// Shape B (flat array mock): [{"object_id":"..."}]
+	var flat []neighborRow
+	if err := json.Unmarshal(raw, &flat); err == nil {
+		return flat, nil
+	}
+	return nil, fmt.Errorf("unexpected neighbors payload %s", string(raw))
 }
 
 func normalizeLabels(rels []string) []string {
