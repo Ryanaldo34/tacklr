@@ -287,7 +287,7 @@ func (a *AgentHarness) runWorker(ctx context.Context, workerName, task string, r
 
 func (a *AgentHarness) newWorkerHarness(ctx context.Context, workerName, parentToolCallID string, spec *SubAgent) *AgentHarness {
 	sessionID := workerSessionID(a.sessionId, workerName, parentToolCallID)
-	worker := NewAgent(ctx, a.workerOptsFromSpec(spec))
+	worker := NewAgent(ctx, a.workerOptsForSpawn(spec))
 	worker.sessionId = sessionID
 	return worker
 }
@@ -299,9 +299,9 @@ func workerSessionID(parentSessionID, workerName, parentToolCallID string) strin
 	return fmt.Sprintf("%s/w/%s/%s", parentSessionID, workerName, parentToolCallID)
 }
 
+// workerOptsFromSpec builds shared worker options. Omits SearchNamespace so
+// resume keeps the checkpointed worker session value.
 func (a *AgentHarness) workerOptsFromSpec(spec *SubAgent) AgentOptions {
-	// Preserve parent Exa key so workers get web_search / web_fetch when the parent did
-	// (env still works if options key is empty).
 	return AgentOptions{
 		Config: Config{
 			MaxWindowSize: a.maxWindowSize,
@@ -313,7 +313,17 @@ func (a *AgentHarness) workerOptsFromSpec(spec *SubAgent) AgentOptions {
 		Store:      a.store,
 		SubAgents:  spec.SubAgents,
 		ExaAPIKey:  a.exaAPIKey,
+		Brain:      a.brain,
 	}
+}
+
+func (a *AgentHarness) workerOptsForSpawn(spec *SubAgent) AgentOptions {
+	opts := a.workerOptsFromSpec(spec)
+	if id, ok := a.SearchNamespace(); ok {
+		cp := id
+		opts.SearchNamespace = &cp
+	}
+	return opts
 }
 
 func (a *AgentHarness) attachParkedWorker(ctx context.Context, toolCallID string, meta parkedWorkerMeta, spec *SubAgent) (*AgentHarness, error) {

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ryanaldo34/tacklr/brain"
 	mcpruntime "github.com/ryanaldo34/tacklr/internal/mcp"
 	session "github.com/ryanaldo34/tacklr/internal/session"
 	"github.com/ryanaldo34/tacklr/mcp"
@@ -49,6 +50,7 @@ type AgentHarness struct {
 	skillsLoader      skills.Loader
 	skillsInitialized bool
 	exaAPIKey         string
+	brain             *brain.Engine
 	mcpCleanup        func()
 	mcpInitialized    bool
 	builtinsInjected  bool

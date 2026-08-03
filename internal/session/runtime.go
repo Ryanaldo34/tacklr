@@ -15,11 +15,9 @@ type runtimeOutput struct {
 	ch chan streaming.StreamEvent
 }
 
-// Runtime is the tool hook surface (re-exported as tacklr.HarnessRuntime).
-// Methods for tools: EmitUpdate, StateGet, StateSet, StateDelete, RaiseInterrupt.
-// Fields for tools: Store, CurrentToolCallID.
-//
-// Turn lifecycle is package-level functions below (module-only), not methods.
+// Runtime is the tool hook surface (re-exported as tacklr.HarnessRuntime):
+// EmitUpdate, StateGet/Set/Delete, RaiseInterrupt, Store, CurrentToolCallID.
+// Turn lifecycle helpers are package-level functions in this package, not methods.
 type Runtime struct {
 	Store             stores.BaseStore
 	CurrentToolCallID string

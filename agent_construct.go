@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/google/uuid"
+	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/internal/exa"
 	session "github.com/ryanaldo34/tacklr/internal/session"
 	"github.com/ryanaldo34/tacklr/mcp"
@@ -58,6 +60,11 @@ type AgentOptions struct {
 	// ExaAPIKey enables web_search and web_fetch. Empty falls back to EXA_API_KEY.
 	// When both are empty, those tools are not registered.
 	ExaAPIKey string
+	// Brain enables knowledge builtins when non-nil. Workers inherit the same engine.
+	Brain *brain.Engine
+	// SearchNamespace isolates brain retrieval when set (session-owned, checkpointed).
+	// Nil leaves a loaded session value unchanged. Workers get a copy at spawn.
+	SearchNamespace *uuid.UUID
 }
 
 // streamEventBuffer is the harness event channel size so EmitUpdate is not dropped
@@ -97,6 +104,7 @@ func newHarnessBase(opts AgentOptions, runtime HarnessRuntime, sm *session.Sessi
 		skillDirectories:     opts.Config.SkillDirectories,
 		skillsLoader:         opts.SkillsLoader,
 		exaAPIKey:            resolveExaAPIKey(opts.ExaAPIKey),
+		brain:                opts.Brain,
 		sessionId:            "",
 		subagents:            make(map[string]*SubAgent),
 		interruptToRequester: make(map[string]string),
@@ -107,6 +115,9 @@ func newHarnessBase(opts AgentOptions, runtime HarnessRuntime, sm *session.Sessi
 		context:              opts.ContextManager,
 		tasks:                opts.ModelTasks,
 		contextPolicy:        opts.ContextPolicy,
+	}
+	if opts.SearchNamespace != nil {
+		sm.SetSearchNamespace(*opts.SearchNamespace)
 	}
 	if h.context == nil {
 		h.context = NewModelContextManager()
@@ -135,7 +146,7 @@ func (h *AgentHarness) finishInit(ctx context.Context, subAgents []*SubAgent) {
 	h.injectBuiltinTools()
 }
 
-// injectBuiltinTools registers plan tools, optional web tools, and spawn_worker once.
+// injectBuiltinTools registers plan tools, optional web/brain tools, and spawn_worker once.
 func (a *AgentHarness) injectBuiltinTools() {
 	if a.builtinsInjected {
 		return
@@ -160,10 +171,37 @@ func (a *AgentHarness) injectBuiltinTools() {
 		client := exa.NewClient(key)
 		a.tools = append(a.tools, newWebSearchTool(client), newWebFetchTool(client))
 	}
+	if a.brain != nil {
+		a.tools = append(a.tools, newBrainTools(a.brain, a.session)...)
+	}
 	if len(a.subagents) > 0 {
 		a.tools = append(a.tools, a.spawnTool())
 	}
 	a.builtinsInjected = true
+}
+
+// SetSearchNamespace sets session retrieval isolation for knowledge tools.
+func (a *AgentHarness) SetSearchNamespace(id uuid.UUID) {
+	if a.session == nil {
+		a.session = session.NewSessionManager()
+	}
+	a.session.SetSearchNamespace(id)
+}
+
+// ClearSearchNamespace clears session retrieval isolation.
+func (a *AgentHarness) ClearSearchNamespace() {
+	if a.session == nil {
+		return
+	}
+	a.session.ClearSearchNamespace()
+}
+
+// SearchNamespace returns the host-set search namespace, if any.
+func (a *AgentHarness) SearchNamespace() (uuid.UUID, bool) {
+	if a.session == nil {
+		return uuid.UUID{}, false
+	}
+	return a.session.SearchNamespace()
 }
 
 // planningWriteLock blocks write tools until create_plan has set a plan.

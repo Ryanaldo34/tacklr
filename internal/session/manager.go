@@ -5,28 +5,20 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/google/uuid"
 	"github.com/ryanaldo34/tacklr/interrupt"
 )
 
-// SessionManager owns all durable and live session data for one agent harness
-// instance (checkpoint / thread), not an ACP client session id.
-//
-// Ownership:
-//   - Plan module (ACM todos + document)
-//   - User tool State bag (DI keys for custom tools)
-//   - Pending / resolved interrupts
-//
-// Built-in tools and the harness close over SessionManager. User-defined tools
-// never receive it; they use HarnessRuntime, a thin hook facade over this manager.
-//
-// Streaming (EmitUpdate / EmitPlanUpdate) is not session ownership — that stays
-// on Runtime as a turn output-channel utility.
+// SessionManager owns durable and live data for one agent harness thread
+// (checkpoint id), not an ACP client session id: plan, search namespace, user
+// tool state, and interrupts. Builtins close over it; user tools use Runtime.
 type SessionManager struct {
-	mu        sync.RWMutex
-	plan      *PlanStore
-	userState map[string]any
-	pending   interruptMap
-	resolved  interruptMap
+	mu              sync.RWMutex
+	plan            *PlanStore
+	searchNamespace *uuid.UUID // nil = no filter; host-set, checkpointed
+	userState       map[string]any
+	pending         interruptMap
+	resolved        interruptMap
 }
 
 // NewSessionManager returns an empty manager ready for use.
@@ -76,6 +68,40 @@ func (s *SessionManager) HasActivePlan() bool {
 		return false
 	}
 	return s.Plan().HasActive()
+}
+
+// SearchNamespace returns the host-set search namespace, if any.
+func (s *SessionManager) SearchNamespace() (id uuid.UUID, ok bool) {
+	if s == nil {
+		return uuid.UUID{}, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.searchNamespace == nil {
+		return uuid.UUID{}, false
+	}
+	return *s.searchNamespace, true
+}
+
+// SetSearchNamespace sets host retrieval isolation for this session.
+func (s *SessionManager) SetSearchNamespace(id uuid.UUID) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cp := id
+	s.searchNamespace = &cp
+}
+
+// ClearSearchNamespace clears retrieval isolation for this session.
+func (s *SessionManager) ClearSearchNamespace() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.searchNamespace = nil
 }
 
 // --- user State bag (facade target for Runtime.StateGet/Set) ---
@@ -229,16 +255,25 @@ func (s *SessionManager) SnapshotDurable() (runtimeState map[string]any, pending
 		}
 	}
 	plan := s.plan
+	var ns *uuid.UUID
+	if s.searchNamespace != nil {
+		cp := *s.searchNamespace
+		ns = &cp
+	}
 	s.mu.RUnlock()
 
 	if plan != nil {
 		plan.ExportInto(runtimeState)
 	}
+	if ns != nil {
+		runtimeState[searchNamespaceStateKey] = ns.String()
+	}
 	return runtimeState, pending, resolved
 }
 
-// LoadUserAndPlanState hydrates user State and plan modules from checkpoint
-// RuntimeState. Plan keys are consumed into PlanStore and not left as user keys.
+// LoadUserAndPlanState hydrates user State, plan, and search namespace from
+// checkpoint RuntimeState. Reserved keys are consumed into modules and not left
+// as user keys.
 func (s *SessionManager) LoadUserAndPlanState(state map[string]any) {
 	if s == nil {
 		return
@@ -247,6 +282,22 @@ func (s *SessionManager) LoadUserAndPlanState(state map[string]any) {
 	s.plan.LoadFromState(state)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.searchNamespace = nil
+	if raw, ok := state[searchNamespaceStateKey]; ok {
+		switch v := raw.(type) {
+		case string:
+			if id, err := uuid.Parse(v); err == nil {
+				cp := id
+				s.searchNamespace = &cp
+			}
+		case uuid.UUID:
+			cp := v
+			s.searchNamespace = &cp
+		case [16]byte:
+			cp := uuid.UUID(v)
+			s.searchNamespace = &cp
+		}
+	}
 	if s.userState == nil {
 		s.userState = map[string]any{}
 	}
