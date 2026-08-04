@@ -6,6 +6,9 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/google/uuid"
+
+	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/internal/exa"
 	session "github.com/ryanaldo34/tacklr/internal/session"
 	"github.com/ryanaldo34/tacklr/mcp"
@@ -58,6 +61,14 @@ type AgentOptions struct {
 	// ExaAPIKey enables web_search and web_fetch. Empty falls back to EXA_API_KEY.
 	// When both are empty, those tools are not registered.
 	ExaAPIKey string
+	// Brain enables knowledge builtins when non-nil. Workers inherit the same engine.
+	// Configure Store, optional QueryEmbedder, and optional GraphReader on the Engine
+	// before NewAgent (e.g. brain.WithGraph(helixgraph.New(...))). The harness does
+	// not construct graph backends.
+	Brain *brain.Engine
+	// SearchNamespace isolates brain retrieval when set (session-owned, checkpointed).
+	// Nil leaves a loaded session value unchanged. Workers get a copy at spawn.
+	SearchNamespace *uuid.UUID
 }
 
 // streamEventBuffer is the harness event channel size so EmitUpdate is not dropped
@@ -97,6 +108,7 @@ func newHarnessBase(opts AgentOptions, runtime HarnessRuntime, sm *session.Sessi
 		skillDirectories:     opts.Config.SkillDirectories,
 		skillsLoader:         opts.SkillsLoader,
 		exaAPIKey:            resolveExaAPIKey(opts.ExaAPIKey),
+		brain:                opts.Brain,
 		sessionId:            "",
 		subagents:            make(map[string]*SubAgent),
 		interruptToRequester: make(map[string]string),
@@ -107,6 +119,12 @@ func newHarnessBase(opts AgentOptions, runtime HarnessRuntime, sm *session.Sessi
 		context:              opts.ContextManager,
 		tasks:                opts.ModelTasks,
 		contextPolicy:        opts.ContextPolicy,
+	}
+	if opts.Brain != nil {
+		h.searchCtx = brain.NewSearchContext()
+		if opts.SearchNamespace != nil {
+			h.searchCtx.SetNamespace(*opts.SearchNamespace)
+		}
 	}
 	if h.context == nil {
 		h.context = NewModelContextManager()
@@ -135,7 +153,7 @@ func (h *AgentHarness) finishInit(ctx context.Context, subAgents []*SubAgent) {
 	h.injectBuiltinTools()
 }
 
-// injectBuiltinTools registers plan tools, optional web tools, and spawn_worker once.
+// injectBuiltinTools registers plan tools, optional web/brain tools, and spawn_worker once.
 func (a *AgentHarness) injectBuiltinTools() {
 	if a.builtinsInjected {
 		return
@@ -160,10 +178,37 @@ func (a *AgentHarness) injectBuiltinTools() {
 		client := exa.NewClient(key)
 		a.tools = append(a.tools, newWebSearchTool(client), newWebFetchTool(client))
 	}
+	if a.brain != nil && a.searchCtx != nil {
+		a.tools = append(a.tools, newBrainTools(a.brain, a.searchCtx)...)
+	}
 	if len(a.subagents) > 0 {
 		a.tools = append(a.tools, a.spawnTool())
 	}
 	a.builtinsInjected = true
+}
+
+// SetSearchNamespace sets retrieval isolation for knowledge tools.
+func (a *AgentHarness) SetSearchNamespace(id uuid.UUID) {
+	if a.searchCtx == nil {
+		a.searchCtx = brain.NewSearchContext()
+	}
+	a.searchCtx.SetNamespace(id)
+}
+
+// ClearSearchNamespace clears retrieval isolation for knowledge tools.
+func (a *AgentHarness) ClearSearchNamespace() {
+	if a.searchCtx == nil {
+		return
+	}
+	a.searchCtx.ClearNamespace()
+}
+
+// SearchNamespace returns the host-set search namespace, if any.
+func (a *AgentHarness) SearchNamespace() (uuid.UUID, bool) {
+	if a.searchCtx == nil {
+		return uuid.UUID{}, false
+	}
+	return a.searchCtx.Namespace()
 }
 
 // planningWriteLock blocks write tools until create_plan has set a plan.
@@ -236,6 +281,23 @@ func NewAgentFromSession(ctx context.Context, sessionId string, opts AgentOption
 	h.context.Restore(applied.Window)
 	h.interruptToRequester = applied.InterruptToRequester
 	h.pendingToolCalls = applied.PendingToolCalls
+	if h.searchCtx != nil {
+		if len(checkpoint.State.SearchContext) > 0 {
+			if err := h.searchCtx.Restore(checkpoint.State.SearchContext); err != nil {
+				return nil, fmt.Errorf("agent harness: restore search context: %w", err)
+			}
+		}
+		// Legacy checkpoints stored namespace only under runtime _search_namespace.
+		if _, ok := h.searchCtx.Namespace(); !ok {
+			if raw, ok := checkpoint.State.RuntimeState["_search_namespace"]; ok {
+				if s, ok := raw.(string); ok {
+					if id, err := uuid.Parse(s); err == nil {
+						h.searchCtx.SetNamespace(id)
+					}
+				}
+			}
+		}
+	}
 	h.finishInit(ctx, opts.SubAgents)
 	return h, nil
 }

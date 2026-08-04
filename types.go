@@ -114,10 +114,7 @@ type AgentWatchDog interface {
 
 // HarnessRuntime is the tool-facing API for handlers and interceptors:
 // EmitUpdate, StateGet, StateSet, StateDelete, RaiseInterrupt, Store,
-// and CurrentToolCallID.
-//
-// Turn lifecycle (output channel, interrupt return, plan stream) is not on
-// this type. Those functions live in internal/session (module-only).
+// and CurrentToolCallID. Turn lifecycle helpers live in internal/session.
 type HarnessRuntime = session.Runtime
 
 // Todo is one plan list item (also used in plan_update stream payloads).

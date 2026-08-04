@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel/log"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 
@@ -70,6 +71,16 @@ func TestInstruments_recordAllPaths(t *testing.T) {
 	inst.RecordModel(ctx, "agent-1", ModelPhaseTurn, OutcomeOK, ErrorClassOK, 5*time.Millisecond)
 	inst.RecordModel(ctx, "agent-1", ModelPhaseHandoff, OutcomeError, ErrorClassProvider4xx, time.Millisecond)
 	inst.RecordTokens(ctx, "agent-1", 10, 20, 3)
+	inst.RecordBrain(ctx, "agent-1", BrainOpSearch, OutcomeOK, BrainDegradeNone, false, 2*time.Millisecond)
+	inst.RecordBrain(ctx, "agent-1", BrainOpExpand, OutcomeOK, BrainDegradeContainmentOnly, true, time.Millisecond)
+	inst.RecordBrain(ctx, "agent-1", BrainOpFindExact, OutcomeError, BrainDegradeNone, false, time.Millisecond)
+	_, bspan := StartBrainSpan(ctx, BrainOpContinue)
+	bspan.End(0, BrainDegradeNone, nil)
+	_, bspan2 := StartBrainSpan(ctx, BrainOpSearch)
+	bspan2.End(3, BrainDegradeLexicalOnly, errors.New("x"))
+	// nil-safe
+	(*Instruments)(nil).RecordBrain(ctx, "", "", "", "", false, 0)
+	(*BrainSpan)(nil).End(0, "", nil)
 
 	ctxI := ContextWithInstruments(context.Background(), inst)
 	if InstrumentsFromContext(ctxI) != inst {
@@ -295,4 +306,81 @@ func TestSetTracerProvider_nil(t *testing.T) {
 	if !strings.Contains(InstrumentationName, "tacklr") {
 		t.Fatal(InstrumentationName)
 	}
+}
+
+// TestSpans_fullLifecycle covers turn/tool/plan/handoff/brain end paths used by harness.
+func TestSpans_fullLifecycle(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	mp, err := MeterProviderFromPrometheusRegisterer(reg, "span-cov", "v0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
+	SetMeterProvider(mp)
+	t.Cleanup(func() { SetMeterProvider(nil) })
+	inst := MustInstruments(MeterFromProvider(mp))
+	ctx := ContextWithInstruments(context.Background(), inst)
+
+	tp := sdktrace.NewTracerProvider()
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+	SetTracerProvider(tp)
+	t.Cleanup(func() { SetTracerProvider(nil) })
+	ctx = ContextWithTracer(ctx, TracerFromProvider(tp))
+
+	ctx, turn := StartTurnSpan(ctx, TurnAttrs{
+		AgentID: "a1", ThreadID: "t1", SessionID: "s1", Kind: "prompt", LoadSession: true,
+	})
+	ctx, tool := StartToolSpan(ctx, "search", "web")
+	tool.Finish("success", nil)
+	ctx, tool2 := StartToolSpan(ctx, "x", "")
+	tool2.Finish("", errors.New("fail"))
+	ctx, plan := StartPlanInstallSpan(ctx, "s1")
+	plan.End(nil)
+	ctx, plan2 := StartPlanInstallSpan(ctx, "s1")
+	plan2.End(errors.New("plan err"))
+	ctx, ho := StartHandoffSpan(ctx, 2)
+	ho.End(HandoffOutcomeOK, nil)
+	ctx, ho2 := StartHandoffSpan(ctx, 0)
+	ho2.End("", errors.New("ho"))
+	ctx, ho3 := StartHandoffSpan(ctx, 1)
+	ho3.End(HandoffOutcomeFallback, nil)
+	_, brain := StartBrainSpan(ctx, "")
+	brain.End(2, "", nil)
+	_, brain2 := StartBrainSpan(ctx, BrainOpExpand)
+	brain2.End(0, BrainDegradeContainmentOnly, nil)
+	// double-end is no-op
+	brain2.End(1, "", nil)
+	tool.Finish("success", nil)
+	turn.End(OutcomeOK, nil)
+	turn.End("", nil) // finished
+
+	// Resume-style turn with cancel outcome
+	_, turn2 := StartTurnSpan(ContextWithInstruments(context.Background(), inst), TurnAttrs{AgentID: "a", Kind: "resume"})
+	turn2.End(OutcomeCancelled, nil)
+
+	_, turn3 := StartTurnSpan(ContextWithInstruments(context.Background(), inst), TurnAttrs{})
+	turn3.End("", errors.New("boom"))
+
+	// EmitEvent path
+	EmitEvent(ctx, EventPromptReceived, log.String(EventAttrPromptLen, "1"))
+	EmitEvent(context.Background(), EventTurnEnded)
+
+	// Model record empty defaults + zero duration
+	inst.RecordModel(ctx, "a", "", "", "", 0)
+	inst.RecordTokens(ctx, "a", 0, 0, 0)
+	inst.RecordHandoff(ctx, "a", "")
+	(*Instruments)(nil).RecordTurnStart(ctx, "")
+	(*Instruments)(nil).RecordTurnEnd(ctx, "", "", "", 0)
+	(*Instruments)(nil).RecordTool(ctx, "", "", "", "", 0)
+	(*Instruments)(nil).RecordInterrupt(ctx, "", "")
+	(*Instruments)(nil).RecordHandoff(ctx, "", "")
+	(*Instruments)(nil).RecordModel(ctx, "", "", "", "", time.Millisecond)
+	(*Instruments)(nil).RecordTokens(ctx, "", 1, 1, 1)
+	(*Instruments)(nil).RecordCompress(ctx, "")
+	(*Instruments)(nil).RecordSessionCreated(ctx)
+	(*Instruments)(nil).RecordCheckpointSave(ctx, "")
+	(*TurnSpan)(nil).End("", nil)
+	(*ToolSpan)(nil).Finish("", nil)
+	(*PlanInstallSpan)(nil).End(nil)
+	(*HandoffSpan)(nil).End("", nil)
 }

@@ -1,8 +1,39 @@
-.PHONY: test vet lint fmt cover coverage check testserver
+.PHONY: test test-short brain-pg-image helix-image require-docker vet lint fmt cover coverage check testserver
 
-# Race-enabled tests (same as CI).
-test:
-	go test -race -count=1 ./...
+# Docker CLI is often missing from PATH when Docker Desktop is installed via the
+# app bundle only. Prefer PATH, then the standard macOS Desktop location.
+DOCKER ?= $(shell command -v docker 2>/dev/null || \
+	([ -x /Applications/Docker.app/Contents/Resources/bin/docker ] && \
+		echo /Applications/Docker.app/Contents/Resources/bin/docker) || \
+	([ -x "$$HOME/.docker/bin/docker" ] && echo "$$HOME/.docker/bin/docker") || \
+	true)
+
+# Race detector + per-package coverage in test output. Requires Docker for brain
+# Postgres + Helix integration tests. -covermode=atomic is required with -race.
+test: brain-pg-image helix-image
+	go test -race -count=1 -covermode=atomic ./...
+
+# Fast loop without Testcontainers / live backends (still race + coverage).
+test-short:
+	go test -short -race -count=1 -covermode=atomic ./...
+
+# pgvector + pg_textsearch image used by brain PostgresStore integration tests.
+brain-pg-image: require-docker
+	$(DOCKER) build -f brain/testdata/Dockerfile.postgres -t tacklr-pg-brain:test brain/testdata
+
+# Helix enterprise-dev (in-memory) for helixgraph integration tests.
+# https://docs.helix-db.com/database/local-development
+helix-image: require-docker
+	$(DOCKER) pull ghcr.io/helixdb/enterprise-dev:latest
+
+require-docker:
+	@if [ -z "$(DOCKER)" ]; then \
+		echo "docker CLI not found. Install Docker Desktop (or Colima) and either:"; \
+		echo "  - ensure 'docker' is on PATH, or"; \
+		echo "  - open Docker Desktop so /Applications/Docker.app/.../bin/docker exists"; \
+		echo "  - or: make DOCKER=/path/to/docker <target>"; \
+		exit 1; \
+	fi
 
 vet:
 	go vet ./...
@@ -16,21 +47,18 @@ fmt:
 lint:
 	golangci-lint run ./...
 
-# Generate coverage.out + HTML report (atomic mode; no -race — matches CI coverage step).
-cover:
-	go test -count=1 -covermode=atomic -coverprofile=coverage.out ./...
-	@go tool cover -func=coverage.out | tail -1
-	@go tool cover -html=coverage.out -o coverage.html
-	@echo "HTML report: coverage.html"
-
-# Enforce package/total thresholds from .testcoverage.yml (same gate as CI).
-coverage: cover
+# Profile + threshold gate (writes coverage.out for tools; no HTML).
+cover: brain-pg-image helix-image
+	go test -race -count=1 -covermode=atomic -coverprofile=coverage.out ./...
 	@go run github.com/vladopajic/go-test-coverage/v2@latest --config=./.testcoverage.yml
 	@./scripts/coverage-summary.sh coverage.out
 	@./scripts/update-coverage-badge.sh coverage.out docs/badges/coverage.json
 
-# Full local gate matching CI (format + lint + vet + race tests + coverage thresholds).
-check: vet lint test coverage
+# Alias for cover (CI-style thresholds).
+coverage: cover
+
+# Full local gate: format check + lint + vet + race tests + coverage thresholds.
+check: vet lint cover
 	@unformatted=$$(gofmt -l .); \
 	if [ -n "$$unformatted" ]; then \
 		echo "gofmt needed on:"; echo "$$unformatted"; exit 1; \

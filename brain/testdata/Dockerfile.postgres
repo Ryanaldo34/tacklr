@@ -1,0 +1,38 @@
+# Test image: pgvector + pg_textsearch (BM25) for brain PostgresStore integration tests.
+# Built by Testcontainers FromDockerfile or:
+#   docker build -f brain/testdata/Dockerfile.postgres -t tacklr-pg-brain:test brain/testdata
+FROM pgvector/pgvector:pg17
+
+ARG TARGETARCH
+ARG PG_TEXTSEARCH_VERSION=1.3.1
+
+USER root
+RUN set -eux; \
+	arch="${TARGETARCH}"; \
+	if [ -z "$arch" ]; then \
+		case "$(uname -m)" in \
+			x86_64|amd64) arch=amd64 ;; \
+			aarch64|arm64) arch=arm64 ;; \
+			*) echo "unsupported uname -m=$(uname -m)" >&2; exit 1 ;; \
+		esac; \
+	fi; \
+	case "$arch" in \
+		amd64) deb_arch=amd64 ;; \
+		arm64) deb_arch=arm64 ;; \
+		*) echo "unsupported arch=${arch}" >&2; exit 1 ;; \
+	esac; \
+	apt-get update; \
+	apt-get install -y --no-install-recommends ca-certificates curl unzip; \
+	curl -fsSL -o /tmp/pgts.zip \
+		"https://github.com/timescale/pg_textsearch/releases/download/v${PG_TEXTSEARCH_VERSION}/pg-textsearch-v${PG_TEXTSEARCH_VERSION}-pg17-${deb_arch}.zip"; \
+	mkdir -p /tmp/pgts; \
+	unzip -d /tmp/pgts /tmp/pgts.zip; \
+	dpkg -i /tmp/pgts/*.deb; \
+	rm -rf /tmp/pgts /tmp/pgts.zip; \
+	apt-get purge -y curl unzip; \
+	apt-get autoremove -y; \
+	rm -rf /var/lib/apt/lists/*
+
+# Default for clusters initialized from the image sample config.
+RUN printf "\n# tacklr brain tests\nshared_preload_libraries = 'pg_textsearch'\n" \
+	>> /usr/share/postgresql/postgresql.conf.sample

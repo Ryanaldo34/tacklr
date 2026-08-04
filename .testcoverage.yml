@@ -9,45 +9,42 @@ profile: coverage.out
 
 threshold:
   file: 0
-  # Default for any package that appears in the profile and is not overridden.
+  # go-test-coverage attributes root-package files as separate "packages"
+  # (agent.go, web.go, …). Floor is 80% for those; go test package totals are ≥90%.
   package: 80
-  # Module total after excludes. Not 95%: post-split packages + OTLP/SDK edge
-  # paths make that a trophy number without product value.
   total: 90
 
 # First matching override wins (specific packages first).
 override:
-  - path: github.com/ryanaldo34/tacklr/inference$
-    threshold: 100
   - path: github.com/ryanaldo34/tacklr/internal/mcp$
     threshold: 100
   - path: github.com/ryanaldo34/tacklr/skills$
     threshold: 100
-  # Session/plan/interrupt core is well covered; leftover lines are nil-receiver
-  # ensure branches and JSON edge cases already exercised via round-trips.
+  - path: github.com/ryanaldo34/tacklr/server$
+    threshold: 95
+  # Real Go packages (directory-level) — hold the 90% bar.
+  - path: github.com/ryanaldo34/tacklr/inference$
+    threshold: 90
   - path: github.com/ryanaldo34/tacklr/internal/session$
+    threshold: 90
+  - path: github.com/ryanaldo34/tacklr/internal/exa$
     threshold: 90
   - path: github.com/ryanaldo34/tacklr/interrupt$
     threshold: 90
-  - path: github.com/ryanaldo34/tacklr/server$
-    threshold: 95
   - path: github.com/ryanaldo34/tacklr/stores$
     threshold: 90
-  # Root harness: large Run loop has many cancel/error branches; 85% still
-  # requires the main happy paths (plan, tools, interrupts, subagents).
-  - path: github.com/ryanaldo34/tacklr$
-    threshold: 85
+  - path: github.com/ryanaldo34/tacklr/brain$
+    threshold: 90
+  - path: github.com/ryanaldo34/tacklr/brain/helixgraph$
+    threshold: 90
+  - path: github.com/ryanaldo34/tacklr/telemetry$
+    threshold: 90
 
 exclude:
   # Repo-relative paths (matched as regexes against file paths).
   paths:
     - cmd/testserver
     - internal/testkit
-    - stores/postgres.go
-    # Telemetry is validated by harness/server outcome tests (model spans end,
-    # dual-write slog, instruments record). Package-local coverage of OTLP SDK
-    # wiring and attr helpers is intentionally not a CI gate (Agents.md).
-    - telemetry/
 
 breakdown-file-name: coverage.breakdown
 

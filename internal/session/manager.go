@@ -8,19 +8,10 @@ import (
 	"github.com/ryanaldo34/tacklr/interrupt"
 )
 
-// SessionManager owns all durable and live session data for one agent harness
-// instance (checkpoint / thread), not an ACP client session id.
-//
-// Ownership:
-//   - Plan module (ACM todos + document)
-//   - User tool State bag (DI keys for custom tools)
-//   - Pending / resolved interrupts
-//
-// Built-in tools and the harness close over SessionManager. User-defined tools
-// never receive it; they use HarnessRuntime, a thin hook facade over this manager.
-//
-// Streaming (EmitUpdate / EmitPlanUpdate) is not session ownership — that stays
-// on Runtime as a turn output-channel utility.
+// SessionManager owns durable and live data for one agent harness thread
+// (checkpoint id), not an ACP client session id: plan, user tool state, and
+// interrupts. Knowledge namespace + ResultSet live on brain.SearchContext.
+// Builtins close over it; user tools use Runtime.
 type SessionManager struct {
 	mu        sync.RWMutex
 	plan      *PlanStore
@@ -237,8 +228,8 @@ func (s *SessionManager) SnapshotDurable() (runtimeState map[string]any, pending
 	return runtimeState, pending, resolved
 }
 
-// LoadUserAndPlanState hydrates user State and plan modules from checkpoint
-// RuntimeState. Plan keys are consumed into PlanStore and not left as user keys.
+// LoadUserAndPlanState hydrates user State and plan from checkpoint RuntimeState.
+// Reserved keys (including legacy _search_namespace) are not left as user keys.
 func (s *SessionManager) LoadUserAndPlanState(state map[string]any) {
 	if s == nil {
 		return

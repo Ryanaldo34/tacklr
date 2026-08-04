@@ -6,19 +6,18 @@ import (
 	"sync"
 )
 
-// Reserved keys in the checkpoint RuntimeState map for the plan module.
-// Live plan data is on PlanStore (via SessionManager); user StateGet/StateSet block these keys.
+// Reserved checkpoint keys for SessionManager modules (blocked on StateGet/Set).
 const (
-	planStateKey           = "_plan"
-	planDocumentStateKey   = "_plan_document"
-	planDocumentUpdatedKey = "_plan_document_updated"
+	planStateKey            = "_plan"
+	planDocumentStateKey    = "_plan_document"
+	planDocumentUpdatedKey  = "_plan_document_updated"
+	searchNamespaceStateKey = "_search_namespace"
 )
 
-// IsReservedRuntimeStateKey reports keys owned by SessionManager plan export.
-// User tools must not read or write these via StateGet/StateSet.
+// IsReservedRuntimeStateKey reports keys owned by SessionManager export.
 func IsReservedRuntimeStateKey(key string) bool {
 	switch key {
-	case planStateKey, planDocumentStateKey, planDocumentUpdatedKey:
+	case planStateKey, planDocumentStateKey, planDocumentUpdatedKey, searchNamespaceStateKey:
 		return true
 	default:
 		return false
@@ -201,4 +200,5 @@ func StripPlanKeys(state map[string]any) {
 	delete(state, planStateKey)
 	delete(state, planDocumentStateKey)
 	delete(state, planDocumentUpdatedKey)
+	delete(state, searchNamespaceStateKey)
 }

@@ -26,6 +26,8 @@ const (
 	MetricTokensInput     = "tacklr.tokens.input"
 	MetricTokensOutput    = "tacklr.tokens.output"
 	MetricTokensReasoning = "tacklr.tokens.reasoning"
+	MetricBrainTotal      = "tacklr.brain.total"
+	MetricBrainDuration   = "tacklr.brain.duration"
 )
 
 // Label keys (low cardinality only — closed enums / config ids, never free text).
@@ -39,6 +41,9 @@ const (
 	LabelKind       = "kind" // interrupt kind
 	LabelModelPhase = "model_phase"
 	LabelErrorClass = "error_class"
+	LabelBrainOp    = "brain_op"
+	LabelDegrade    = "degrade"
+	LabelEmpty      = "empty" // "true" | "false"
 )
 
 // Instruments holds cached metric instruments for one Meter.
@@ -58,6 +63,8 @@ type Instruments struct {
 	tokensInput     metric.Int64Counter
 	tokensOutput    metric.Int64Counter
 	tokensReasoning metric.Int64Counter
+	brainTotal      metric.Int64Counter
+	brainDuration   metric.Float64Histogram
 }
 
 // MustInstruments builds instruments from m. Panics only on programmer error
@@ -167,6 +174,19 @@ func NewInstruments(m metric.Meter) (*Instruments, error) {
 	}
 	i.tokensReasoning, err = m.Int64Counter(MetricTokensReasoning,
 		metric.WithDescription("Provider-reported reasoning tokens when present"),
+	)
+	if err != nil {
+		return nil, err
+	}
+	i.brainTotal, err = m.Int64Counter(MetricBrainTotal,
+		metric.WithDescription("Brain retrieval ops (labels: brain_op, outcome, degrade, empty)"),
+	)
+	if err != nil {
+		return nil, err
+	}
+	i.brainDuration, err = m.Float64Histogram(MetricBrainDuration,
+		metric.WithDescription("Brain retrieval latency (labels: brain_op, outcome, degrade)"),
+		metric.WithUnit("s"),
 	)
 	if err != nil {
 		return nil, err
@@ -297,6 +317,46 @@ func (i *Instruments) RecordCheckpointSave(ctx context.Context, outcome string) 
 		return
 	}
 	i.checkpointSave.Add(ctx, 1, metric.WithAttributes(attribute.String(LabelOutcome, outcome)))
+}
+
+// RecordBrain records one knowledge-retrieval op.
+//
+// Counter labels: agent_id, brain_op, outcome, degrade, empty ("true"|"false").
+// empty is only on the counter (empty-result rate); duration omits it to keep
+// histogram series smaller. Hits live on the span only (per-request debug).
+func (i *Instruments) RecordBrain(ctx context.Context, agentID, op, outcome, degrade string, empty bool, d time.Duration) {
+	if i == nil {
+		return
+	}
+	if op == "" {
+		op = BrainOpSearch
+	}
+	if outcome == "" {
+		outcome = OutcomeOK
+	}
+	if degrade == "" {
+		degrade = BrainDegradeNone
+	}
+	emptyLabel := "false"
+	if empty {
+		emptyLabel = "true"
+	}
+	latency := metric.WithAttributes(
+		attribute.String(LabelAgentID, agentID),
+		attribute.String(LabelBrainOp, op),
+		attribute.String(LabelOutcome, outcome),
+		attribute.String(LabelDegrade, degrade),
+	)
+	i.brainTotal.Add(ctx, 1, metric.WithAttributes(
+		attribute.String(LabelAgentID, agentID),
+		attribute.String(LabelBrainOp, op),
+		attribute.String(LabelOutcome, outcome),
+		attribute.String(LabelDegrade, degrade),
+		attribute.String(LabelEmpty, emptyLabel),
+	))
+	if d > 0 {
+		i.brainDuration.Record(ctx, d.Seconds(), latency)
+	}
 }
 
 // agentIDContextKey carries agent_id for child instrumentation without plumbing.

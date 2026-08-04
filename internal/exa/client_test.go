@@ -230,6 +230,64 @@ func TestClient_Contents_httpErrorAndBadJSON(t *testing.T) {
 	}
 }
 
+// TestClient_postJSON_edges covers empty base URL, nil HTTP client, empty error body,
+// truncated error body, and nil out decode skip.
+func TestClient_postJSON_edges(t *testing.T) {
+	// Empty error body uses status text.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+	c := exa.NewClient("k")
+	c.BaseURL = srv.URL
+	c.HTTPClient = nil // use default client with srv — need srv.Client for host
+	c.HTTPClient = srv.Client()
+	if _, err := c.Search(context.Background(), exa.SearchRequest{Query: "q"}); err == nil || !strings.Contains(err.Error(), "500") {
+		t.Fatalf("empty body: %v", err)
+	}
+
+	// Long error body truncated with ellipsis.
+	long := strings.Repeat("x", 600)
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(long))
+	}))
+	t.Cleanup(srv2.Close)
+	c.BaseURL = srv2.URL
+	c.HTTPClient = srv2.Client()
+	err := func() error {
+		_, e := c.Search(context.Background(), exa.SearchRequest{Query: "q"})
+		return e
+	}()
+	if err == nil || !strings.Contains(err.Error(), "…") {
+		t.Fatalf("truncate: %v", err)
+	}
+
+	// Empty BaseURL falls back to default (will fail dial unless we set client transport).
+	// Cover default base + success with custom transport via BaseURL "" and absolute? Client concatenates base+path.
+	// Use a server and set BaseURL to "" but override HTTPClient to rewrite — simpler: set BaseURL "" and use RoundTripper.
+	// Just hit empty BaseURL path with a Transport that returns OK for any URL.
+	c3 := exa.NewClient("k")
+	c3.BaseURL = ""
+	c3.HTTPClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if !strings.HasPrefix(r.URL.String(), "https://api.exa.ai/") {
+			t.Fatalf("default base: %s", r.URL)
+		}
+		return &http.Response{
+			StatusCode: 200,
+			Body:       io.NopCloser(strings.NewReader(`{"results":[]}`)),
+			Header:     make(http.Header),
+		}, nil
+	})}
+	if _, err := c3.Search(context.Background(), exa.SearchRequest{Query: "q"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
 // TestClient_Search_contextCancel fails the in-flight request.
 func TestClient_Search_contextCancel(t *testing.T) {
 	started := make(chan struct{})

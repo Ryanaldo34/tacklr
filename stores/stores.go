@@ -20,6 +20,9 @@ type sessionState struct {
 	RuntimeState         map[string]any             `json:"runtimeState"`
 	PendingInterrupts    []byte                     `json:"pendingInterrupts,omitempty"`
 	ResolvedInterrupts   []byte                     `json:"resolvedInterrupts,omitempty"`
+	// SearchContext is an opaque brain.SearchContext export (JSON bytes).
+	// Owned by the harness, not SessionManager.
+	SearchContext []byte `json:"searchContext,omitempty"`
 }
 
 type SessionCheckpoint struct {
