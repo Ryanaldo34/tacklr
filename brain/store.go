@@ -15,10 +15,16 @@ type ObjectReader interface {
 	ListChildren(ctx context.Context, scope Scope, parentID uuid.UUID) ([]Object, error)
 }
 
-// KindReader backs schema() discovery.
+// KindReader backs schema() discovery and catalog load.
 type KindReader interface {
 	GetKind(ctx context.Context, kind string) (ObjectKind, error)
 	ListKinds(ctx context.Context) ([]ObjectKind, error)
+}
+
+// KindWriter persists kind registry rows (host bootstrap / SyncKindsToStore).
+// Not required for open-mode engines with an empty catalog.
+type KindWriter interface {
+	PutKind(ctx context.Context, k ObjectKind) error
 }
 
 // PartSearcher is the candidate retrieval port for hybrid / exact search.

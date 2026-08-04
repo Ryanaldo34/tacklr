@@ -98,9 +98,6 @@ func TestACP_elicitationForm_resolvesInterruptAndCompletes(t *testing.T) {
 		}
 	}
 
-	writeLine(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"elicitation":{"form":{}}}}}`)
-	writeLine(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp"}}`)
-
 	scanner := bufio.NewScanner(clientFromServer)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
@@ -112,7 +109,13 @@ func TestACP_elicitationForm_resolvesInterruptAndCompletes(t *testing.T) {
 		endTurn         bool
 		promptDone      bool
 		promptSent      bool
+		initDone        bool
+		sessionReqSent  bool
 	)
+
+	// Initialize first so client Caps are on the bridge before session/prompt
+	// is dispatched (stdio handlers run concurrently per inbound line).
+	writeLine(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"elicitation":{"form":{}}}}}`)
 
 	readFrame := func() map[string]any {
 		t.Helper()
@@ -149,6 +152,9 @@ func TestACP_elicitationForm_resolvesInterruptAndCompletes(t *testing.T) {
 		frame := readFrame()
 
 		if res, ok := frame["result"].(map[string]any); ok {
+			if idMatch(frame["id"], 1) {
+				initDone = true
+			}
 			if sid, ok := res["sessionId"].(string); ok && sid != "" {
 				sessionID = sid
 			}
@@ -190,6 +196,10 @@ func TestACP_elicitationForm_resolvesInterruptAndCompletes(t *testing.T) {
 			}
 		}
 
+		if initDone && !sessionReqSent {
+			sessionReqSent = true
+			writeLine(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp"}}`)
+		}
 		if sessionID != "" && !promptSent {
 			promptSent = true
 			writeLine(`{"jsonrpc":"2.0","id":10,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"pick one"}]}}`)

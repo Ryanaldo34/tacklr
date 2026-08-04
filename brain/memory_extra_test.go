@@ -27,8 +27,8 @@ func TestMemoryStore_searchChannelsAndClone(t *testing.T) {
 		ParentID: &parent, Position: &pos2, NamespaceID: ns, UpdatedAt: now,
 		Embedding: []float32{0, 1, 0},
 	})
-	_ = s.PutKind(ObjectKind{Kind: "Chunk", IsPart: true})
-	_ = s.PutKind(ObjectKind{Kind: "Document", IsParent: true})
+	_ = s.PutKind(context.Background(), ObjectKind{Kind: "Chunk", IsPart: true})
+	_ = s.PutKind(context.Background(), ObjectKind{Kind: "Document", IsParent: true})
 
 	lex, err := s.SearchLexical(ctx, Scope{Namespace: &ns}, "oauth", nil, 5)
 	if err != nil || len(lex) == 0 || lex[0].ID != p1 {

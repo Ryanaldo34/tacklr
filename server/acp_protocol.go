@@ -230,13 +230,28 @@ func resolveInterruptViaACP(ctx context.Context, env ProtocolEnv, threadID strin
 	case "tool_permission":
 		return resolvePermissionViaRequest(ctx, env, threadID, stream, ev)
 	case "user_selection_choice":
-		if !env.Conn.Caps.ElicitationForm {
+		// Caps are snapshotted per inbound message at dispatch; initialize may
+		// finish SetCaps after session/prompt was already dispatched. Always
+		// prefer live bridge caps so mid-turn elicitation sees form support.
+		if !connElicitationForm(env.Conn) {
 			return nil, nil
 		}
 		return resolveSelectionViaElicitation(ctx, env, threadID, stream, ev)
 	default:
 		return nil, fmt.Errorf("unsupported interrupt type %q", kind)
 	}
+}
+
+// connElicitationForm reports form-mode elicitation support from the live RPC
+// bridge when present, else the Conn snapshot.
+func connElicitationForm(c *Conn) bool {
+	if c == nil {
+		return false
+	}
+	if c.RPC != nil {
+		return c.RPC.GetCaps().ElicitationForm
+	}
+	return c.Caps.ElicitationForm
 }
 
 func resolvePermissionViaRequest(ctx context.Context, env ProtocolEnv, threadID string, stream *EventStream, ev *streaming.StreamEvent) (<-chan streaming.StreamEvent, error) {

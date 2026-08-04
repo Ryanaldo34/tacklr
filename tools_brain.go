@@ -62,7 +62,7 @@ func (b brainTools) newSchemaTool() *Tool {
 		DisplayName: "Knowledge Schema",
 		Description: `Discover structured filter fields and kind documentation for the knowledge base.
 
-Call with a kind to see filterable fields, types, and operators for that kind. Call with no kind to list registered kinds. Prefer this before inventing property names in filters.`,
+Call with a kind to see filterable fields, types, and operators for that kind. Call with no kind to list registered kinds. Prefer this before inventing property names in filters. When kinds are registered by the host, only those kinds are searchable and property filters require a kind key.`,
 		Category: streaming.ToolCategoryThink,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
@@ -92,7 +92,7 @@ func (b brainTools) newSearchTool() *Tool {
 		DisplayName: "Knowledge Search",
 		Description: `Search the knowledge base by concept. Returns ranked parent objects with evidence snippets.
 
-Use when you know what you want but not where it is. Prefer schema() before inventing filter keys. Use continue with the returned result_set_id for the next page. Use read for full content of a hit.`,
+Use when you know what you want but not where it is. Prefer schema() before inventing filter keys. When kinds are registered, property filters require kind (e.g. kind + stage). Use continue with the returned result_set_id for the next page. Use read for full content of a hit.`,
 		Category: streaming.ToolCategorySearch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
@@ -105,7 +105,7 @@ func (b brainTools) newFindExactTool() *Tool {
 		DisplayName: "Find Exact",
 		Description: `Find knowledge objects by exact or near-exact match (UUID, title, path-like phrases).
 
-Prefer this over search when you have a precise string. Returns ranked parents with evidence. Use continue for more pages; use read for full content.`,
+Prefer this over search when you have a precise string. Returns ranked parents with evidence. When kinds are registered, property filters require kind. Use continue for more pages; use read for full content.`,
 		Category: streaming.ToolCategorySearch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,

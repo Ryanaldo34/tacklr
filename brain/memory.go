@@ -58,8 +58,8 @@ func (s *MemoryStore) Put(obj Object) error {
 	return nil
 }
 
-// PutKind upserts a kind registry row.
-func (s *MemoryStore) PutKind(k ObjectKind) error {
+// PutKind implements KindWriter.
+func (s *MemoryStore) PutKind(_ context.Context, k ObjectKind) error {
 	if k.Kind == "" {
 		return fmt.Errorf("brain: kind is required")
 	}

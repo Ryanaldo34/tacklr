@@ -57,6 +57,27 @@ func TestResolveInterruptViaACP_dispatchOutcomes(t *testing.T) {
 	if err != nil || ch != nil {
 		t.Fatalf("legacy type park: ch=%v err=%v", ch, err)
 	}
+
+	// Stale Conn.Caps snapshot (false) but bridge has form support after initialize.
+	// Mid-turn resolution must use live GetCaps, not the dispatch-time copy.
+	bridge := NewClientBridge(&recordingWriter{})
+	bridge.SetCaps(ClientCapabilities{ElicitationForm: true})
+	// Without a matching client response Call will block; just assert we do not
+	// park as "no form" — parse will proceed to elicitation Call. Cancel via ctx.
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, err = resolveInterruptViaACP(ctx, ProtocolEnv{Conn: &Conn{
+		RPC:  bridge,
+		Caps: ClientCapabilities{ElicitationForm: false}, // stale snapshot
+	}}, "s", &EventStream{}, &streaming.StreamEvent{Data: selData, MessageID: "tc"})
+	// Must not park (nil, nil): should attempt elicitation and fail via ctx/call.
+	if err == nil {
+		t.Fatal("expected error from elicitation call, not silent park")
+	}
+	if !strings.Contains(err.Error(), "elicitation") && !strings.Contains(err.Error(), "context") {
+		// Accept either elicitation/create failure or context deadline.
+		t.Logf("got err (ok if call attempted): %v", err)
+	}
 }
 
 // TestResolvePermissionViaRequest_outcomes exercises every return path of

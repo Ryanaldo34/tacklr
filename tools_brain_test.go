@@ -27,7 +27,7 @@ func TestBrainTools_hostNamespaceScopedRead(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.PutKind(brain.ObjectKind{
+	if err := store.PutKind(ctx, brain.ObjectKind{
 		Kind: "Document", Description: "docs", IsParent: true,
 		FilterableFields: json.RawMessage(`[]`),
 	}); err != nil {

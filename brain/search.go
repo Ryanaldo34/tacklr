@@ -103,20 +103,35 @@ func (e *Engine) materialize(ctx context.Context, scope Scope, ranked []ScoredID
 	return page, nil
 }
 
-func (e *Engine) prepareSearch(req SearchRequest) error {
+// prepareSearch validates the query/filters and returns effective filters for the store.
+// When the catalog is non-empty, property filters require kind, unregistered kinds are
+// rejected, and missing kind filters are expanded to all registered kinds.
+func (e *Engine) prepareSearch(req SearchRequest) (Filters, error) {
 	if strings.TrimSpace(req.Query) == "" {
-		return fmt.Errorf("brain: query is required")
+		return nil, fmt.Errorf("brain: query is required")
 	}
-	return ValidateFilters(req.Filters)
+	return e.effectiveFilters(req.Filters)
+}
+
+func (e *Engine) effectiveFilters(f Filters) (Filters, error) {
+	if err := ValidateFiltersAgainst(f, e.catalog); err != nil {
+		return nil, err
+	}
+	if e.catalog.Empty() {
+		return f, nil
+	}
+	e.catalog.Freeze()
+	return injectKindAllowList(f, e.catalog), nil
 }
 
 func (e *Engine) hybridCandidates(ctx context.Context, scope Scope, req SearchRequest) ([]ScoredID, DegradeMode, error) {
-	if err := e.prepareSearch(req); err != nil {
+	filters, err := e.prepareSearch(req)
+	if err != nil {
 		return nil, DegradeNone, err
 	}
 	query := strings.TrimSpace(req.Query)
 	k := e.cfg.CandidateK
-	lex, err := e.store.SearchLexical(ctx, scope, query, req.Filters, k)
+	lex, err := e.store.SearchLexical(ctx, scope, query, filters, k)
 	if err != nil {
 		return nil, DegradeNone, err
 	}
@@ -131,7 +146,7 @@ func (e *Engine) hybridCandidates(ctx context.Context, scope Scope, req SearchRe
 				return nil, DegradeNone, fmt.Errorf("brain: embed query: %w", embErr)
 			}
 		} else if len(emb) > 0 {
-			vec, err := e.store.SearchVector(ctx, scope, emb, req.Filters, k)
+			vec, err := e.store.SearchVector(ctx, scope, emb, filters, k)
 			if err != nil {
 				if e.cfg.allowEmbedderDegrade() {
 					degrade = DegradeLexicalOnly
@@ -147,7 +162,8 @@ func (e *Engine) hybridCandidates(ctx context.Context, scope Scope, req SearchRe
 }
 
 func (e *Engine) exactCandidates(ctx context.Context, scope Scope, req SearchRequest) ([]ScoredID, error) {
-	if err := e.prepareSearch(req); err != nil {
+	filters, err := e.prepareSearch(req)
+	if err != nil {
 		return nil, err
 	}
 	query := strings.TrimSpace(req.Query)
@@ -169,11 +185,11 @@ func (e *Engine) exactCandidates(ctx context.Context, scope Scope, req SearchReq
 	}
 
 	k := e.cfg.CandidateK
-	lex, err := e.store.SearchLexical(ctx, scope, query, req.Filters, k)
+	lex, err := e.store.SearchLexical(ctx, scope, query, filters, k)
 	if err != nil {
 		return nil, err
 	}
-	tri, err := e.store.SearchTrigram(ctx, scope, query, req.Filters, k)
+	tri, err := e.store.SearchTrigram(ctx, scope, query, filters, k)
 	if err != nil {
 		return nil, err
 	}

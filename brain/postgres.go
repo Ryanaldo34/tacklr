@@ -17,6 +17,7 @@ import (
 type PgxDB interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 }
 
 // PostgresStore implements Store against the objects / object_kinds schema.
@@ -114,6 +115,33 @@ func (s *PostgresStore) ListChildren(ctx context.Context, scope Scope, parentID 
 		return nil, fmt.Errorf("brain: list children: %w", err)
 	}
 	return out, nil
+}
+
+// PutKind implements KindWriter.
+func (s *PostgresStore) PutKind(ctx context.Context, k ObjectKind) error {
+	if strings.TrimSpace(k.Kind) == "" {
+		return fmt.Errorf("brain: kind is required")
+	}
+	fields := k.FilterableFields
+	if len(fields) == 0 {
+		fields = json.RawMessage("[]")
+	}
+	const q = `
+		INSERT INTO object_kinds (kind, description, is_part, is_parent, filterable_fields)
+		VALUES ($1, $2, $3, $4, $5::jsonb)
+		ON CONFLICT (kind) DO UPDATE SET
+			description = EXCLUDED.description,
+			is_part = EXCLUDED.is_part,
+			is_parent = EXCLUDED.is_parent,
+			filterable_fields = EXCLUDED.filterable_fields`
+	var desc any
+	if k.Description != "" {
+		desc = k.Description
+	}
+	if _, err := s.db.Exec(ctx, q, k.Kind, desc, k.IsPart, k.IsParent, []byte(fields)); err != nil {
+		return fmt.Errorf("brain: put kind: %w", err)
+	}
+	return nil
 }
 
 // GetKind implements KindReader.

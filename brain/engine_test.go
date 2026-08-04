@@ -93,12 +93,12 @@ func TestEngine_SchemaAndOrderedChildren(t *testing.T) {
 	c1, c2 := uuid.New(), uuid.New()
 	pos1, pos2 := 1, 2
 
-	if err := store.PutKind(brain.ObjectKind{
+	if err := store.PutKind(ctx, brain.ObjectKind{
 		Kind: "Chunk", IsPart: true,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.PutKind(brain.ObjectKind{
+	if err := store.PutKind(ctx, brain.ObjectKind{
 		Kind: "Document", Description: "A parent doc", IsParent: true,
 		FilterableFields: json.RawMessage(`[{"name":"status","type":"string","operators":["eq"]}]`),
 	}); err != nil {
@@ -233,7 +233,7 @@ func TestMemoryStore_PutRequiresIdentity(t *testing.T) {
 		{"missing namespace", func() error {
 			return s.Put(brain.Object{ID: uuid.New(), Kind: "X"})
 		}},
-		{"empty kind registry", func() error { return s.PutKind(brain.ObjectKind{}) }},
+		{"empty kind registry", func() error { return s.PutKind(context.Background(), brain.ObjectKind{}) }},
 	}
 	for _, tc := range cases {
 		if err := tc.fn(); err == nil {
