@@ -126,6 +126,9 @@ type SearchRequest struct {
 	Query   string
 	Filters Filters
 	Limit   int
+	// ScopeIDs, when non-empty, keeps only candidates whose id or parent_id is in the set.
+	// Use after expand/find_objects to restrict corpus search to a deal-local neighborhood.
+	ScopeIDs []uuid.UUID
 }
 
 // SearchPage is one page of ranked rich objects plus ResultSet identity.

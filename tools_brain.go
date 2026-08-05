@@ -30,7 +30,7 @@ func (b brainTools) newReadObjectTool() *Tool {
 		DisplayName: "Read Object",
 		Description: `Read the full contents of a knowledge-base object by id.
 
-Use after search, find_exact, or expand when you need the complete body (content) of a known object. Pass the object UUID from a prior rich result. Do not invent ids.`,
+Use after search, find_exact, find_objects, or expand when you need the complete body of a known object. Pass the object UUID from a prior rich result. Do not invent ids. Prefer reading only objects you will use or cite.`,
 		Category: streaming.ToolCategoryRead,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
@@ -81,18 +81,21 @@ Call with a kind to see filterable fields, types, and operators for that kind. C
 }
 
 type queryArgs struct {
-	Query   string         `json:"query" desc:"Search query text."`
-	Filters map[string]any `json:"filters,omitempty" desc:"Optional field→value equality filters (e.g. kind, title, property keys, updated_after)."`
-	Limit   int            `json:"limit,omitempty" desc:"Max results for this page (default 10, max 50)."`
+	Query    string         `json:"query" desc:"Search query text. Prefer a semantic rewrite of the user ask when helpful."`
+	Filters  map[string]any `json:"filters,omitempty" desc:"Optional field→value filters (kind, title, property keys, updated_after). Prefer schema() first. All content filters belong here."`
+	Limit    int            `json:"limit,omitempty" desc:"Max results for this page (default 10, max 50)."`
+	ScopeIDs []string       `json:"scope_ids,omitempty" desc:"Optional UUIDs of parents (or objects) to restrict hits to this neighborhood after expand/find_objects."`
 }
 
 func (b brainTools) newSearchTool() *Tool {
 	return b.newQueryTool(ToolConfig{
 		Name:        "search",
 		DisplayName: "Knowledge Search",
-		Description: `Search the knowledge base by concept. Returns ranked parent objects with evidence snippets.
+		Description: `Search stored content (documents, notes, chunks) in the knowledge corpus. Returns ranked parent objects with evidence snippets.
 
-Use when you know what you want but not where it is. Prefer schema() before inventing filter keys. When kinds are registered, property filters require kind (e.g. kind + stage). Use continue with the returned result_set_id for the next page. Use read for full content of a hit.`,
+Use for open questions and document-style evidence. Prefer schema() before inventing filter keys; property filters require kind when kinds are registered. All structured filters belong on this tool (there is no separate filtered-search tool). Rewrite the user ask into a good retrieval query when helpful.
+
+Do not use this only to discover relationships—use expand once you have an id. Prefer find_objects when you need a tracked entity (e.g. a deal, fact, or memory as an object), not a passage. Use continue for more pages; read for full body of a hit.`,
 		Category: streaming.ToolCategorySearch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
@@ -103,9 +106,9 @@ func (b brainTools) newFindExactTool() *Tool {
 	return b.newQueryTool(ToolConfig{
 		Name:        "find_exact",
 		DisplayName: "Find Exact",
-		Description: `Find knowledge objects by exact or near-exact match (UUID, title, path-like phrases).
+		Description: `Find knowledge objects by exact or near-exact match (UUID, title, path-like phrases) in the content store.
 
-Prefer this over search when you have a precise string. Returns ranked parents with evidence. When kinds are registered, property filters require kind. Use continue for more pages; use read for full content.`,
+Prefer this over search when you have a precise string or UUID. Returns ranked parents with evidence. When kinds are registered, property filters require kind. Use continue for more pages; use read for full content. For meaning-based entity lookup without an exact string, use find_objects when available.`,
 		Category: streaming.ToolCategorySearch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
@@ -120,10 +123,15 @@ func (b brainTools) newQueryTool(
 	name := cfg.Name
 	cfg.Handler = func(ctx context.Context, args queryArgs, runtime HarnessRuntime) (string, error) {
 		runtime.EmitUpdate(status)
+		scopeIDs, err := parseOptionalUUIDList(args.ScopeIDs, "scope_ids")
+		if err != nil {
+			return "", fmt.Errorf("%s: %w", name, err)
+		}
 		page, err := query(ctx, b.sc.Scope(), brain.SearchRequest{
-			Query:   args.Query,
-			Filters: brain.Filters(args.Filters),
-			Limit:   args.Limit,
+			Query:    args.Query,
+			Filters:  brain.Filters(args.Filters),
+			Limit:    args.Limit,
+			ScopeIDs: scopeIDs,
 		}, b.sc)
 		if err != nil {
 			return "", fmt.Errorf("%s: %w", name, err)
@@ -142,9 +150,9 @@ func (b brainTools) newContinueTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "continue",
 		DisplayName: "Continue Results",
-		Description: `Return the next page of a prior ranked result set from search, find_exact, or expand.
+		Description: `Return the next page of a prior ranked result set from search, find_exact, find_objects, or large expand.
 
-Pass the result_set_id from the previous call. Each new search, find_exact, or large expand replaces the active result set — older result_set_id values stop working.`,
+Pass the result_set_id from the previous call. Each new search, find_exact, find_objects, or large expand replaces the active result set — older result_set_id values stop working.`,
 		Category: streaming.ToolCategorySearch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
@@ -176,9 +184,9 @@ func (b brainTools) newExpandTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "expand",
 		DisplayName: "Expand Object",
-		Description: `Show objects structurally connected to this one.
+		Description: `Show objects structurally connected to a known object_id—not an open search.
 
-From a parent: ordered children (containment). From a part: parent and nearby siblings. Omit relation_types for containment only; use contains/part_of explicitly if mixed with graph labels. Other relation_types need a graph backend (Helix). Large lists return result_set_id and replace any prior result set — use continue for more pages. Use read for full content.`,
+From a parent: ordered children (containment). From a part: parent and nearby siblings. Omit relation_types for containment only; use contains/part_of if mixed with graph labels. Other relation_types need a graph backend (e.g. about, references, blocked_by). Prefer expand first when the active entity id is already known (e.g. "risks on this deal"). Large lists return result_set_id — use continue for more pages. Use read for full content.`,
 		Category: streaming.ToolCategoryFetch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
@@ -217,7 +225,7 @@ func (b brainTools) newSaveTool(name, display, kind, roleDesc string) *Tool {
 		DisplayName: display,
 		Description: `Save a ` + roleDesc + ` to the knowledge base as kind ` + kind + `.
 
-Prefer schema() for this kind before inventing property keys. Uses the host search namespace when set. Pass object_id to update an existing object. Returns the rich object reference.`,
+Prefer schema() for this kind before inventing property keys. Write a clear title and summary so search and find_objects can retrieve this later. Uses the host search namespace when set. Pass object_id to update an existing object. Returns the rich object reference.`,
 		Category: streaming.ToolCategoryEdit,
 		Access:   ToolWriteAccess,
 		Timeout:  30 * time.Second,
@@ -236,6 +244,37 @@ type linkArgs struct {
 	FromID       string `json:"from_id" desc:"UUID of the source object."`
 	ToID         string `json:"to_id" desc:"UUID of the target object."`
 	RelationType string `json:"relation_type" desc:"Non-containment relation label (e.g. references, about)."`
+}
+
+type findObjectsArgs struct {
+	Query string   `json:"query" desc:"Semantic or keyword query for whole knowledge objects (entities)."`
+	Kinds []string `json:"kinds,omitempty" desc:"Optional host kind names to restrict results (e.g. Deal, Fact). Prefer schema() for valid kinds."`
+	Limit int      `json:"limit,omitempty" desc:"Max results for this page (default 10, max 50)."`
+}
+
+func (b brainTools) newFindObjectsTool() *Tool {
+	return NewTool(ToolConfig{
+		Name:        "find_objects",
+		DisplayName: "Find Objects",
+		Description: `Find knowledge objects as entities (whole objects of given kinds), not long document ranking.
+
+Use to resolve which tracked object matches an ask, or to find similar saved objects (facts, discoveries, memories, deals as host kinds). Rewrite the user ask into a good semantic query (e.g. risk themes, blockers). Prefer expand first when the active entity id is already known. For bulk document/note evidence or property filters on content, use search instead. After an id, use expand for relationships and read only for bodies you need. Use continue when has_more.`,
+		Category: streaming.ToolCategorySearch,
+		Access:   ToolReadAccess,
+		Timeout:  30 * time.Second,
+		Handler: func(ctx context.Context, args findObjectsArgs, runtime HarnessRuntime) (string, error) {
+			runtime.EmitUpdate("Finding knowledge objects…")
+			page, err := b.engine.FindObjects(ctx, b.sc.Scope(), brain.FindObjectsRequest{
+				Query: args.Query,
+				Kinds: args.Kinds,
+				Limit: args.Limit,
+			}, b.sc)
+			if err != nil {
+				return "", fmt.Errorf("find_objects: %w", err)
+			}
+			return formatBrainJSON(page)
+		},
+	})
 }
 
 func (b brainTools) newLinkTool() *Tool {
@@ -334,9 +373,27 @@ func parseOptionalUUID(raw, field string) (*uuid.UUID, error) {
 	return &id, nil
 }
 
+func parseOptionalUUIDList(raw []string, field string) ([]uuid.UUID, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	out := make([]uuid.UUID, 0, len(raw))
+	for i, s := range raw {
+		if strings.TrimSpace(s) == "" {
+			continue
+		}
+		id, err := parseUUID(s, fmt.Sprintf("%s[%d]", field, i))
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, nil
+}
+
 // newBrainTools builds knowledge tools. Caller must pass a non-nil engine and SearchContext.
-// save_* tools are registered only for non-empty WriteKinds fields; link only when the
-// engine has a GraphWriter.
+// save_* tools are registered only for non-empty WriteKinds fields; link only with GraphWriter;
+// find_objects only when GraphObjectSearcher is available.
 func newBrainTools(engine *brain.Engine, sc *brain.SearchContext, kinds brain.WriteKinds) []*Tool {
 	b := brainTools{engine: engine, sc: sc}
 	tools := []*Tool{
@@ -346,6 +403,9 @@ func newBrainTools(engine *brain.Engine, sc *brain.SearchContext, kinds brain.Wr
 		b.newFindExactTool(),
 		b.newContinueTool(),
 		b.newExpandTool(),
+	}
+	if engine.HasObjectSearch() {
+		tools = append(tools, b.newFindObjectsTool())
 	}
 	for _, s := range []struct {
 		name, display, kind, role string

@@ -27,23 +27,26 @@ func (e *Engine) Put(ctx context.Context, scope Scope, obj Object) (Object, erro
 	if err := ValidateObject(obj, e.catalog); err != nil {
 		return Object{}, err
 	}
-	if e.embedder != nil {
-		if text := IndexText(obj); text != "" {
-			vec, err := e.embedder.Embed(ctx, text)
-			if err != nil {
-				return Object{}, fmt.Errorf("brain: embed object: %w", err)
-			}
-			// Own the slice so embedder buffer reuse cannot corrupt stored vectors.
-			obj.Embedding = slices.Clone(vec)
+	indexText := e.indexTextForEmbed(ctx, scope, obj)
+	if e.embedder != nil && indexText != "" {
+		vec, err := e.embedder.Embed(ctx, indexText)
+		if err != nil {
+			return Object{}, fmt.Errorf("brain: embed object: %w", err)
 		}
+		// Own the slice so embedder buffer reuse cannot corrupt stored vectors.
+		obj.Embedding = slices.Clone(vec)
 	}
 	if err := w.Put(ctx, obj); err != nil {
 		return Object{}, err
 	}
-	// Dual-write graph node after durable store succeeds (retryable if graph fails).
-	if gw, ok := e.graphWriter(); ok {
-		if err := gw.EnsureObject(ctx, obj); err != nil {
-			return Object{}, fmt.Errorf("brain: graph ensure object: %w", err)
+	// Dual-write graph nodes for non-parts only. Containment stays in Postgres;
+	// entity find (FindObjects) should not rank document chunks as first-class objects.
+	// Part embeds still use parent-prefixed IndexText for dense corpus search.
+	if obj.ParentID == nil {
+		if gw, ok := e.graphWriter(); ok {
+			if err := gw.EnsureObject(ctx, obj); err != nil {
+				return Object{}, fmt.Errorf("brain: graph ensure object: %w", err)
+			}
 		}
 	}
 	return obj, nil
@@ -113,13 +116,42 @@ func preparePut(scope Scope, obj Object, now time.Time) Object {
 
 // IndexText joins non-empty title, summary, and content for embeddings and graph props.
 func IndexText(obj Object) string {
-	parts := make([]string, 0, 3)
-	for _, p := range []string{obj.Title, obj.Summary, obj.Content} {
+	return joinNonEmpty("\n", obj.Title, obj.Summary, obj.Content)
+}
+
+// IndexTextWithParent prefixes parent context (bursting-style) when parentTitle is set.
+func IndexTextWithParent(obj Object, parentTitle string) string {
+	body := IndexText(obj)
+	parentTitle = strings.TrimSpace(parentTitle)
+	if parentTitle == "" {
+		return body
+	}
+	if body == "" {
+		return parentTitle
+	}
+	return parentTitle + "\n" + body
+}
+
+func joinNonEmpty(sep string, parts ...string) string {
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
 		if p = strings.TrimSpace(p); p != "" {
-			parts = append(parts, p)
+			out = append(out, p)
 		}
 	}
-	return strings.Join(parts, "\n")
+	return strings.Join(out, sep)
+}
+
+// indexTextForEmbed builds embed text; parts get parent title prefix when readable under scope.
+func (e *Engine) indexTextForEmbed(ctx context.Context, scope Scope, obj Object) string {
+	if obj.ParentID == nil {
+		return IndexText(obj)
+	}
+	parent, err := e.store.Get(ctx, scope, *obj.ParentID)
+	if err != nil {
+		return IndexText(obj)
+	}
+	return IndexTextWithParent(obj, parent.Title)
 }
 
 // ValidateObject checks an object against the kind catalog when non-empty.

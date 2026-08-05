@@ -3,8 +3,10 @@ package brain
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -31,27 +33,120 @@ type GraphWriter interface {
 	AddEdge(ctx context.Context, from, to uuid.UUID, relationType string) error
 }
 
-// MemoryGraph is an in-process GraphReader/GraphWriter (tests / offline hosts).
+// GraphObjectSearcher finds entity nodes by text and/or vector (Helix native indexes
+// or MemoryGraph in-process). Results are ranked best-first; Engine hydrates under Scope.
+// Optional namespace isolates multi-tenant graphs when the backend supports it.
+type GraphObjectSearcher interface {
+	SearchText(ctx context.Context, query string, limit int, namespace *uuid.UUID) ([]ScoredID, error)
+	SearchVector(ctx context.Context, embedding []float32, limit int, namespace *uuid.UUID) ([]ScoredID, error)
+}
+
+// MemoryGraph is an in-process GraphReader/GraphWriter/GraphObjectSearcher (tests / offline).
 type MemoryGraph struct {
-	mu  sync.RWMutex
-	out map[uuid.UUID]map[string][]uuid.UUID // from → type → tos
-	in  map[uuid.UUID]map[string][]uuid.UUID // to → type → froms
+	mu    sync.RWMutex
+	out   map[uuid.UUID]map[string][]uuid.UUID // from → type → tos
+	in    map[uuid.UUID]map[string][]uuid.UUID // to → type → froms
+	nodes map[uuid.UUID]memGraphNode
+}
+
+type memGraphNode struct {
+	kind      string
+	title     string
+	summary   string
+	content   string
+	namespace uuid.UUID
+	embedding []float32
+	updatedAt time.Time
 }
 
 // NewMemoryGraph returns an empty graph.
 func NewMemoryGraph() *MemoryGraph {
 	return &MemoryGraph{
-		out: make(map[uuid.UUID]map[string][]uuid.UUID),
-		in:  make(map[uuid.UUID]map[string][]uuid.UUID),
+		out:   make(map[uuid.UUID]map[string][]uuid.UUID),
+		in:    make(map[uuid.UUID]map[string][]uuid.UUID),
+		nodes: make(map[uuid.UUID]memGraphNode),
 	}
 }
 
-// EnsureObject implements GraphWriter. Nodes are implicit for MemoryGraph.
+// EnsureObject implements GraphWriter and stores searchable props for FindObjects.
 func (g *MemoryGraph) EnsureObject(_ context.Context, obj Object) error {
 	if obj.ID == uuid.Nil {
 		return fmt.Errorf("brain: object id is required")
 	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	n := memGraphNode{
+		kind:      obj.Kind,
+		title:     obj.Title,
+		summary:   obj.Summary,
+		content:   obj.Content,
+		namespace: obj.NamespaceID,
+		updatedAt: obj.UpdatedAt,
+	}
+	if len(obj.Embedding) > 0 {
+		n.embedding = slices.Clone(obj.Embedding)
+	}
+	g.nodes[obj.ID] = n
 	return nil
+}
+
+// SearchText implements GraphObjectSearcher (case-fold substring on index text).
+func (g *MemoryGraph) SearchText(_ context.Context, query string, limit int, namespace *uuid.UUID) ([]ScoredID, error) {
+	q := strings.ToLower(strings.TrimSpace(query))
+	if q == "" || limit <= 0 {
+		return nil, nil
+	}
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	var scored []ScoredID
+	for id, n := range g.nodes {
+		if namespace != nil && n.namespace != *namespace {
+			continue
+		}
+		text := strings.ToLower(strings.TrimSpace(n.title + " " + n.summary + " " + n.content))
+		if text == "" || !strings.Contains(text, q) {
+			continue
+		}
+		// Prefer title hits.
+		score := 1.0
+		if strings.Contains(strings.ToLower(n.title), q) {
+			score = 2.0
+		}
+		scored = append(scored, ScoredID{ID: id, Score: score, UpdatedAt: n.updatedAt, Title: n.title})
+	}
+	sortScored(scored)
+	if len(scored) > limit {
+		scored = scored[:limit]
+	}
+	return scored, nil
+}
+
+// SearchVector implements GraphObjectSearcher via cosine similarity on stored embeddings.
+func (g *MemoryGraph) SearchVector(_ context.Context, embedding []float32, limit int, namespace *uuid.UUID) ([]ScoredID, error) {
+	if len(embedding) == 0 || limit <= 0 {
+		return nil, nil
+	}
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	var scored []ScoredID
+	for id, n := range g.nodes {
+		if namespace != nil && n.namespace != *namespace {
+			continue
+		}
+		if len(n.embedding) != len(embedding) {
+			continue
+		}
+		sim := cosine(embedding, n.embedding)
+		if sim <= 0 {
+			continue
+		}
+		scored = append(scored, ScoredID{ID: id, Score: float64(sim), UpdatedAt: n.updatedAt, Title: n.title})
+	}
+	sortScored(scored)
+	if len(scored) > limit {
+		scored = scored[:limit]
+	}
+	return scored, nil
 }
 
 // AddEdge implements GraphWriter.
@@ -157,4 +252,7 @@ func SplitRelationTypes(rels []string) (wantContainment bool, graphLabels []stri
 	return wantContainment, normalizeRelationList(graphLabels)
 }
 
-var _ GraphWriter = (*MemoryGraph)(nil)
+var (
+	_ GraphWriter         = (*MemoryGraph)(nil)
+	_ GraphObjectSearcher = (*MemoryGraph)(nil)
+)

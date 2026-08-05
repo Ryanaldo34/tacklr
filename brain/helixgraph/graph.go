@@ -44,17 +44,108 @@ func (g *Graph) Client() *helix.Client {
 // NodeLabel is the Helix node label used for knowledge objects.
 const NodeLabel = "Object"
 
+// PropSearchText / PropEmbedding are dual-written node properties used for native search.
+const (
+	PropObjectID    = "object_id"
+	PropSearchText  = "search_text"
+	PropEmbedding   = "embedding"
+	PropNamespaceID = "namespace_id"
+)
+
 // EnsureObjectIndex creates an equality index on Object.object_id when missing.
 func (g *Graph) EnsureObjectIndex(ctx context.Context) error {
 	req := helix.WriteQuery("brain_ensure_object_id_index").
 		VarAs("idx", helix.G().CreateIndexIfNotExists(
-			helix.NodeEqualityIndex(NodeLabel, "object_id"),
+			helix.NodeEqualityIndex(NodeLabel, PropObjectID),
 		)).
 		Returning()
 	if err := g.client.Exec(ctx, req, nil, helix.WriterOnly()); err != nil {
 		return fmt.Errorf("helixgraph: ensure object_id index: %w", err)
 	}
 	return nil
+}
+
+// EnsureSearchIndexes creates equality + text + vector indexes for find_objects.
+// When withNamespaceTenant is true, text/vector indexes use namespace_id as tenant.
+func (g *Graph) EnsureSearchIndexes(ctx context.Context, withNamespaceTenant bool) error {
+	if err := g.EnsureObjectIndex(ctx); err != nil {
+		return err
+	}
+	var textIdx, vecIdx helix.IndexSpec
+	if withNamespaceTenant {
+		textIdx = helix.NodeTextIndex(NodeLabel, PropSearchText, PropNamespaceID)
+		vecIdx = helix.NodeVectorIndex(NodeLabel, PropEmbedding, PropNamespaceID)
+	} else {
+		textIdx = helix.NodeTextIndex(NodeLabel, PropSearchText)
+		vecIdx = helix.NodeVectorIndex(NodeLabel, PropEmbedding)
+	}
+	req := helix.WriteQuery("brain_ensure_search_indexes").
+		VarAs("text", helix.G().CreateIndexIfNotExists(textIdx)).
+		VarAs("vec", helix.G().CreateIndexIfNotExists(vecIdx)).
+		Returning()
+	if err := g.client.Exec(ctx, req, nil, helix.WriterOnly()); err != nil {
+		return fmt.Errorf("helixgraph: ensure search indexes: %w", err)
+	}
+	return nil
+}
+
+// SearchText implements brain.GraphObjectSearcher via TextSearchNodes on search_text.
+// Namespace is enforced on Engine hydrate (GetMany under Scope), not as a Helix tenant
+// parameter: tenant-scoped text indexes are optional and image-dependent.
+func (g *Graph) SearchText(ctx context.Context, query string, limit int, _ *uuid.UUID) ([]brain.ScoredID, error) {
+	query = strings.TrimSpace(query)
+	if query == "" || limit <= 0 {
+		return nil, nil
+	}
+	q := helix.ReadQuery("brain_text_search_nodes")
+	qt := q.ParamString("query", query)
+	lim := q.ParamI64("limit", int64(limit))
+	trav := helix.G().TextSearchNodes(NodeLabel, PropSearchText, qt, lim)
+	req := q.VarAs("hits", trav.ValueMap(PropObjectID, "$distance")).Returning("hits")
+	return g.execSearchHits(ctx, req, "text search")
+}
+
+// SearchVector implements brain.GraphObjectSearcher via VectorSearchNodes on embedding.
+// Namespace isolation is applied by Engine hydrate under Scope (same as SearchText).
+func (g *Graph) SearchVector(ctx context.Context, embedding []float32, limit int, _ *uuid.UUID) ([]brain.ScoredID, error) {
+	if len(embedding) == 0 || limit <= 0 {
+		return nil, nil
+	}
+	q := helix.ReadQuery("brain_vector_search_nodes")
+	lim := q.ParamI64("limit", int64(limit))
+	trav := helix.G().VectorSearchNodes(NodeLabel, PropEmbedding, embedding, lim)
+	req := q.VarAs("hits", trav.ValueMap(PropObjectID, "$distance")).Returning("hits")
+	return g.execSearchHits(ctx, req, "vector search")
+}
+
+type searchHitRow struct {
+	ObjectID string   `json:"object_id"`
+	Distance *float64 `json:"$distance"`
+}
+
+func (g *Graph) execSearchHits(ctx context.Context, req helix.Request, label string) ([]brain.ScoredID, error) {
+	var raw struct {
+		Hits struct {
+			Properties []searchHitRow `json:"properties"`
+		} `json:"hits"`
+	}
+	if err := g.client.Exec(ctx, req, &raw); err != nil {
+		return nil, fmt.Errorf("helixgraph: %s: %w", label, err)
+	}
+	out := make([]brain.ScoredID, 0, len(raw.Hits.Properties))
+	for i, row := range raw.Hits.Properties {
+		id, err := uuid.Parse(strings.TrimSpace(row.ObjectID))
+		if err != nil {
+			continue
+		}
+		score := float64(len(raw.Hits.Properties) - i) // preserve Helix order for RRF
+		if row.Distance != nil {
+			// Smaller distance is better; convert to a descending score.
+			score = 1.0 / (1.0 + *row.Distance)
+		}
+		out = append(out, brain.ScoredID{ID: id, Score: score})
+	}
+	return out, nil
 }
 
 // PutObject upserts a graph node with only object_id (legacy host helper).
@@ -231,6 +322,7 @@ func normalizeLabels(rels []string) []string {
 }
 
 var (
-	_ brain.GraphReader = (*Graph)(nil)
-	_ brain.GraphWriter = (*Graph)(nil)
+	_ brain.GraphReader         = (*Graph)(nil)
+	_ brain.GraphWriter         = (*Graph)(nil)
+	_ brain.GraphObjectSearcher = (*Graph)(nil)
 )

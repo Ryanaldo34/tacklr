@@ -57,8 +57,29 @@ func TestMemoryStore_searchChannelsAndClone(t *testing.T) {
 	if err != nil || len(kids) != 2 || kids[0].ID != p1 {
 		t.Fatalf("kids: %+v %v", kids, err)
 	}
+	// Position nil sorts as 0 without panicking.
+	p0 := uuid.New()
+	_ = s.Put(context.Background(), Object{
+		ID: p0, Kind: "Chunk", Title: "nil-pos", Content: "z",
+		ParentID: &parent, NamespaceID: ns, UpdatedAt: now,
+	})
+	kids, err = s.ListChildren(ctx, Scope{Namespace: &ns}, parent)
+	if err != nil || len(kids) != 3 {
+		t.Fatalf("kids with nil pos: %+v %v", kids, err)
+	}
 	kinds, err := s.ListKinds(ctx)
 	if err != nil || len(kinds) != 2 {
 		t.Fatalf("kinds: %+v", kinds)
+	}
+
+	// Invalid filters fail closed from search channels (compile once).
+	if _, err := s.SearchLexical(ctx, Scope{Namespace: &ns}, "oauth", Filters{"updated_after": "nope"}, 5); err == nil {
+		t.Fatal("want filter compile error")
+	}
+	if _, err := s.SearchVector(ctx, Scope{Namespace: &ns}, []float32{1, 0, 0}, Filters{"": "x"}, 5); err == nil {
+		t.Fatal("want empty key error")
+	}
+	if _, err := s.SearchTrigram(ctx, Scope{Namespace: &ns}, "oauth", Filters{"stage": []any{}}, 5); err == nil {
+		t.Fatal("want empty list error")
 	}
 }

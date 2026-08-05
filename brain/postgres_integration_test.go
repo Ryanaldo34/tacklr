@@ -390,6 +390,194 @@ func TestPut_livePostgresUpsertAndSoftDelete(t *testing.T) {
 	}
 }
 
+// TestEngine_livePostgresMultiTurnWriteSearch covers a multi-turn host path on
+// real Postgres: ApplyKinds → Put (parent+parts with vectors) → hybrid search →
+// continue → find_exact → expand children → soft-delete → revive Put → namespace isolation.
+func TestEngine_livePostgresMultiTurnWriteSearch(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping postgres integration test in -short mode")
+	}
+	ctx := context.Background()
+	pool := sharedPostgresPool(t)
+	mustExec(t, pool, `TRUNCATE objects, object_kinds CASCADE`)
+
+	store, err := brain.NewPostgresStore(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	eng, err := brain.NewEngine(store,
+		brain.WithEmbedder(liveStubEmbedder{v: []float32{1, 0, 0}}),
+		brain.WithConfig(brain.EngineConfig{
+			DefaultLimit: 1, MaxLimit: 50, CandidateK: 20,
+			Now: func() time.Time { return now },
+		}),
+		brain.WithKinds(
+			brain.KindSpec{
+				Kind: "Document", IsParent: true,
+				Fields: []brain.FieldSpec{
+					{Name: "stage", Type: brain.FieldTypeString, Required: true},
+				},
+			},
+			brain.KindSpec{Kind: "Chunk", IsPart: true},
+		),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Persist kinds so store.GetKind reflects host migration.
+	if err := eng.SyncKindsToStore(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	ns := uuid.New()
+	otherNS := uuid.New()
+	scope := brain.Scope{Namespace: &ns}
+	sc := brain.NewSearchContext()
+
+	// Turn 1: create parent + two searchable parts.
+	doc, err := eng.Put(ctx, scope, brain.Object{
+		Kind: "Document", Title: "OAuth guide",
+		Properties: map[string]any{"stage": "open"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pos1, pos2 := 1, 2
+	c1, err := eng.Put(ctx, scope, brain.Object{
+		Kind: "Chunk", Title: "pkce", Content: "oauth pkce authorization code flow",
+		ParentID: &doc.ID, Position: &pos1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c1.Embedding) != 3 || c1.Embedding[0] != 1 {
+		t.Fatalf("chunk embedding from put: %+v", c1.Embedding)
+	}
+	c2, err := eng.Put(ctx, scope, brain.Object{
+		Kind: "Chunk", Title: "pasta", Content: "cooking pasta recipes",
+		ParentID: &doc.ID, Position: &pos2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = c2
+
+	// Turn 2: hybrid search ranks parent; result set + continue.
+	page, err := eng.Search(ctx, scope, brain.SearchRequest{Query: "oauth pkce", Limit: 1}, sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Objects) != 1 || page.Objects[0].ID != doc.ID {
+		t.Fatalf("search page: %+v", page.Objects)
+	}
+	// Seed a second parent so continue has a next page of ranked parents.
+	doc2, err := eng.Put(ctx, scope, brain.Object{
+		Kind: "Document", Title: "Second guide",
+		Properties: map[string]any{"stage": "open"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pos3 := 1
+	if _, err := eng.Put(ctx, scope, brain.Object{
+		Kind: "Chunk", Title: "pkce-2", Content: "oauth pkce secondary material",
+		ParentID: &doc2.ID, Position: &pos3,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	page, err = eng.Search(ctx, scope, brain.SearchRequest{Query: "oauth pkce", Limit: 1}, sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.ResultSetID == uuid.Nil || !page.HasMore {
+		t.Fatalf("want has_more with limit 1: %+v", page)
+	}
+	page2, err := eng.Continue(ctx, scope, page.ResultSetID, 1, sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page2.ResultSetID != page.ResultSetID || len(page2.Objects) == 0 {
+		t.Fatalf("continue: %+v", page2)
+	}
+	if page2.Objects[0].ID == page.Objects[0].ID {
+		t.Fatalf("continue should advance: first=%s second=%s", page.Objects[0].ID, page2.Objects[0].ID)
+	}
+
+	// Turn 3: find_exact by parent UUID.
+	exact, err := eng.FindExact(ctx, scope, brain.SearchRequest{Query: doc.ID.String()}, sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(exact.Objects) != 1 || exact.Objects[0].ID != doc.ID {
+		t.Fatalf("find_exact: %+v", exact.Objects)
+	}
+
+	// Turn 4: expand containment children (ordered).
+	kids, err := eng.Expand(ctx, scope, brain.ExpandRequest{ObjectID: doc.ID}, sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kids.Mode != "children" || len(kids.Objects) != 2 {
+		t.Fatalf("expand children: %+v", kids)
+	}
+	if kids.Objects[0].ID != c1.ID {
+		t.Fatalf("child order: %+v", kids.Objects)
+	}
+
+	// Turn 5: soft-delete part → lexical no longer returns it; Get is ErrNotFound.
+	if err := eng.SoftDelete(ctx, scope, c1.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Get(ctx, scope, c1.ID); !errors.Is(err, brain.ErrNotFound) {
+		t.Fatalf("soft-deleted get: %v", err)
+	}
+	lex, err := store.SearchLexical(ctx, scope, "oauth", brain.Filters{"kind": "Chunk"}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, hit := range lex {
+		if hit.ID == c1.ID {
+			t.Fatalf("soft-deleted chunk still in lexical: %+v", lex)
+		}
+	}
+
+	// Turn 6: revive via Put (clears deleted_at); searchable again.
+	c1.Title = "pkce-revived"
+	c1.Content = "oauth pkce revived content"
+	c1.DeletedAt = nil
+	revived, err := eng.Put(ctx, scope, c1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Get(ctx, scope, revived.ID)
+	if err != nil || got.Title != "pkce-revived" {
+		t.Fatalf("revive get: %+v err=%v", got, err)
+	}
+
+	// Turn 7: catalog rejects bad put; namespace soft-delete isolation.
+	if _, err := eng.Put(ctx, scope, brain.Object{Kind: "Document", Title: "no stage"}); err == nil {
+		t.Fatal("want required property failure")
+	}
+	if err := eng.SoftDelete(ctx, brain.Scope{Namespace: &otherNS}, doc.ID); !errors.Is(err, brain.ErrNotFound) {
+		t.Fatalf("soft-delete other ns: %v", err)
+	}
+	if _, err := store.Get(ctx, scope, doc.ID); err != nil {
+		t.Fatalf("doc still visible in own ns: %v", err)
+	}
+
+	// GetMany preserves order and omits missing.
+	many, err := store.GetMany(ctx, scope, []uuid.UUID{doc.ID, uuid.New(), c1.ID})
+	if err != nil || len(many) != 2 || many[0].ID != doc.ID || many[1].ID != c1.ID {
+		t.Fatalf("get many: %+v err=%v", many, err)
+	}
+}
+
+// liveStubEmbedder is a deterministic dense embedder for live Postgres hybrid search.
+type liveStubEmbedder struct{ v []float32 }
+
+func (s liveStubEmbedder) Embed(context.Context, string) ([]float32, error) { return s.v, nil }
+
 // TestApplyKinds_livePostgresMigration is the durable KindRegistry outcome:
 // host ApplyKinds upserts object_kinds, a new Engine LoadKindsFromStore adopts
 // them, and schema() / filter validation use the catalog.

@@ -67,6 +67,15 @@ func TestBrainTools_saveDiscoveryAndLink(t *testing.T) {
 		t.Fatal("save_discovery still required")
 	}
 
+	// find_objects is registered when GraphObjectSearcher is available (MemoryGraph).
+	findObj := h.findTool("find_objects", "")
+	if findObj == nil {
+		t.Fatal("find_objects required with MemoryGraph")
+	}
+	if hNoGraph.findTool("find_objects", "") != nil {
+		t.Fatal("find_objects must be omitted without object searcher")
+	}
+
 	out, err := saveDisc.invoke(ctx, `{"title":"finding","content":"learned X"}`, h.runtime)
 	if err != nil {
 		t.Fatal(err)
@@ -77,6 +86,14 @@ func TestBrainTools_saveDiscoveryAndLink(t *testing.T) {
 	}
 	if a.Kind != "Discovery" || a.Title != "finding" || a.ID == uuid.Nil {
 		t.Fatalf("discovery: %+v", a)
+	}
+
+	fout, err := findObj.invoke(ctx, `{"query":"finding","kinds":["Discovery"],"limit":5}`, h.runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(fout.output, a.ID.String()) {
+		t.Fatalf("find_objects should return saved discovery: %s", fout.output)
 	}
 
 	out2, err := saveFact.invoke(ctx, `{"title":"fact-a","content":"true claim"}`, h.runtime)

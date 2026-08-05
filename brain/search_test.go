@@ -190,6 +190,42 @@ type stubEmbedder struct{ v []float32 }
 
 func (s stubEmbedder) Embed(context.Context, string) ([]float32, error) { return s.v, nil }
 
+// TestSearch_scopeIDsRestrictsHits: corpus search can be limited to a parent neighborhood.
+func TestSearch_scopeIDsRestrictsHits(t *testing.T) {
+	ctx := context.Background()
+	store := brain.NewMemoryStore()
+	ns := uuid.New()
+	now := time.Now().UTC()
+	p1, p2 := uuid.New(), uuid.New()
+	c1, c2 := uuid.New(), uuid.New()
+	pos := 1
+	_ = store.Put(ctx, brain.Object{ID: p1, Kind: "Document", Title: "Deal A", NamespaceID: ns, UpdatedAt: now})
+	_ = store.Put(ctx, brain.Object{ID: p2, Kind: "Document", Title: "Deal B", NamespaceID: ns, UpdatedAt: now})
+	_ = store.Put(ctx, brain.Object{
+		ID: c1, Kind: "Chunk", Title: "oauth risk", Content: "oauth risk material shared",
+		ParentID: &p1, Position: &pos, NamespaceID: ns, UpdatedAt: now,
+	})
+	_ = store.Put(ctx, brain.Object{
+		ID: c2, Kind: "Chunk", Title: "oauth other", Content: "oauth risk material shared",
+		ParentID: &p2, Position: &pos, NamespaceID: ns, UpdatedAt: now,
+	})
+	eng, err := brain.NewEngine(store, brain.WithConfig(brain.EngineConfig{Now: func() time.Time { return now }}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := brain.Scope{Namespace: &ns}
+	sc := brain.NewSearchContext()
+	page, err := eng.Search(ctx, scope, brain.SearchRequest{
+		Query: "oauth risk material", ScopeIDs: []uuid.UUID{p1},
+	}, sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Objects) != 1 || page.Objects[0].ID != p1 {
+		t.Fatalf("scoped search: %+v", page.Objects)
+	}
+}
+
 func TestFindExact_uuidParentAndPart(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()

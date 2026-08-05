@@ -166,6 +166,132 @@ func TestIndexText_skipsEmptyParts(t *testing.T) {
 	if brain.IndexText(brain.Object{}) != "" {
 		t.Fatal("empty object")
 	}
+	withParent := brain.IndexTextWithParent(brain.Object{Title: "chunk", Content: "body"}, "Parent Doc")
+	if withParent != "Parent Doc\nchunk\nbody" {
+		t.Fatalf("%q", withParent)
+	}
+}
+
+// TestPut_partEmbedIncludesParentTitle: part embeddings / graph index text get parent context.
+func TestPut_partEmbedIncludesParentTitle(t *testing.T) {
+	ctx := context.Background()
+	var gotEmbedText string
+	emb := captureEmbedder{fn: func(text string) []float32 {
+		gotEmbedText = text
+		return []float32{1, 0}
+	}}
+	store := brain.NewMemoryStore()
+	g := brain.NewMemoryGraph()
+	eng, err := brain.NewEngine(store, brain.WithEmbedder(emb), brain.WithGraph(g))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ns := uuid.New()
+	scope := brain.Scope{Namespace: &ns}
+	parent, err := eng.Put(ctx, scope, brain.Object{Kind: "Document", Title: "Acme Deal Memo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pos := 1
+	if _, err := eng.Put(ctx, scope, brain.Object{
+		Kind: "Chunk", Title: "risk note", Content: "penalty clause",
+		ParentID: &parent.ID, Position: &pos,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(gotEmbedText, "Acme Deal Memo") || !strings.Contains(gotEmbedText, "penalty clause") {
+		t.Fatalf("embed text missing parent context: %q", gotEmbedText)
+	}
+}
+
+type captureEmbedder struct {
+	fn func(string) []float32
+}
+
+func (c captureEmbedder) Embed(_ context.Context, text string) ([]float32, error) {
+	return c.fn(text), nil
+}
+
+// TestPut_multiTurnMemoryGraph spans put dual-write, link, expand, soft-delete hydrate
+// filtering, refuse soft-deleted Put, and SoftDelete not-found branches (MemoryStore).
+func TestPut_multiTurnMemoryGraph(t *testing.T) {
+	ctx := context.Background()
+	store := brain.NewMemoryStore()
+	g := brain.NewMemoryGraph()
+	eng, err := brain.NewEngine(store, brain.WithGraph(g), brain.WithKinds(
+		brain.KindSpec{Kind: "Document", IsParent: true},
+		brain.KindSpec{Kind: "Chunk", IsPart: true},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ns := uuid.New()
+	other := uuid.New()
+	scope := brain.Scope{Namespace: &ns}
+	sc := brain.NewSearchContext()
+
+	a, err := eng.Put(ctx, scope, brain.Object{Kind: "Document", Title: "A", Content: "alpha"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := eng.Put(ctx, scope, brain.Object{Kind: "Document", Title: "B", Content: "beta"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.Link(ctx, a.ID, b.ID, "about"); err != nil {
+		t.Fatal(err)
+	}
+	pos := 1
+	chunk, err := eng.Put(ctx, scope, brain.Object{
+		Kind: "Chunk", Title: "c", Content: "part body",
+		ParentID: &a.ID, Position: &pos,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Mixed expand: children + graph neighbor.
+	mixed, err := eng.Expand(ctx, scope, brain.ExpandRequest{
+		ObjectID: a.ID, RelationTypes: []string{"contains", "about"},
+	}, sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mixed.Mode != "mixed" {
+		t.Fatalf("mode: %s", mixed.Mode)
+	}
+	ids := map[uuid.UUID]bool{}
+	for _, o := range mixed.Objects {
+		ids[o.ID] = true
+	}
+	if !ids[chunk.ID] || !ids[b.ID] {
+		t.Fatalf("mixed expand: %+v", mixed.Objects)
+	}
+
+	if err := eng.SoftDelete(ctx, scope, b.ID); err != nil {
+		t.Fatal(err)
+	}
+	// Soft-deleted Put is refused.
+	now := time.Now().UTC()
+	b.DeletedAt = &now
+	if _, err := eng.Put(ctx, scope, b); err == nil || !strings.Contains(err.Error(), "SoftDelete") {
+		t.Fatalf("put soft-deleted: %v", err)
+	}
+	// SoftDelete wrong namespace / missing id.
+	if err := eng.SoftDelete(ctx, brain.Scope{Namespace: &other}, a.ID); !errors.Is(err, brain.ErrNotFound) {
+		t.Fatalf("wrong ns: %v", err)
+	}
+	if err := eng.SoftDelete(ctx, scope, uuid.New()); !errors.Is(err, brain.ErrNotFound) {
+		t.Fatalf("missing: %v", err)
+	}
+	if err := store.SoftDelete(ctx, scope, uuid.Nil); err == nil {
+		t.Fatal("nil id soft-delete")
+	}
+
+	// Graph EnsureObject rejects nil id.
+	if err := g.EnsureObject(ctx, brain.Object{}); err == nil {
+		t.Fatal("nil ensure")
+	}
 }
 
 // TestLink_expandFindsNeighbor: Put dual-writes graph nodes; Link + Expand returns the target.

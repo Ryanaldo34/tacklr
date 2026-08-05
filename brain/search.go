@@ -41,8 +41,38 @@ func (e *Engine) searchWithDegrade(ctx context.Context, scope Scope, req SearchR
 	if err != nil {
 		return SearchPage{}, degrade, err
 	}
+	ranked = filterScoredByScopeIDs(ranked, req.ScopeIDs)
 	page, err := e.materialize(ctx, scope, ranked, req.Limit, results)
 	return page, degrade, err
+}
+
+// filterScoredByScopeIDs keeps hits whose id or parent_id is in allow (empty allow = no-op).
+func filterScoredByScopeIDs(ranked []ScoredID, allow []uuid.UUID) []ScoredID {
+	if len(allow) == 0 || len(ranked) == 0 {
+		return ranked
+	}
+	set := make(map[uuid.UUID]struct{}, len(allow))
+	for _, id := range allow {
+		if id != uuid.Nil {
+			set[id] = struct{}{}
+		}
+	}
+	if len(set) == 0 {
+		return ranked
+	}
+	out := make([]ScoredID, 0, len(ranked))
+	for _, s := range ranked {
+		if _, ok := set[s.ID]; ok {
+			out = append(out, s)
+			continue
+		}
+		if s.ParentID != nil {
+			if _, ok := set[*s.ParentID]; ok {
+				out = append(out, s)
+			}
+		}
+	}
+	return out
 }
 
 // Continue returns the next page of a prior ResultSet under scope.

@@ -5,7 +5,7 @@
 // Optional Observer (telemetry.NewBrainObserver) records ops without domain coupling.
 //
 // SearchContext is the retrieval session surface: host namespace + active ResultSet
-// for continue (replaced on each search, find_exact, or large expand).
+// for continue (replaced on each search, find_exact, find_objects, or large expand).
 //
 // # Kind schemas (host migrations)
 //
@@ -28,31 +28,41 @@
 //
 // Hosts map tool roles to kind names via AgentOptions.BrainWriteKinds
 // (save_discovery / save_fact / save_memory); the package does not auto-register kinds.
+// Write objects for retrieval: good title and summary (and content) so corpus
+// search and find_objects have signal.
 //
 // # Postgres vs Helix (complementary)
 //
 // Postgres is the object source of truth and corpus hybrid search:
 // containment (parent_id), BM25, pgvector, trigram, property filters, soft delete.
+// Agent tools: search, find_exact, read; expand children/neighborhood.
+// All structured content filters belong on search (no separate filtered-search tool).
+// search may pass ScopeIDs to restrict hits to a parent neighborhood after expand/find_objects.
 //
-// Helix is the relationship graph and graph-contextual search:
-// non-containment edges, expand graph mode, node/edge text and vector indexes
-// for entity-centric recall (not a second copy of corpus BM25).
+// Helix is the relationship graph and entity-shaped object find:
+// non-containment edges, expand graph mode, dual-written node props, and
+// (when indexes are ensured) TextSearchNodes / VectorSearchNodes for FindObjects.
+// That is not a second copy of corpus BM25 over documents.
 //
 // On Put, when WithGraph provides a GraphWriter: dual-write a searchable graph
 // node (props + embedding + timestamps via IndexText). Engine.Link writes edges
-// for expand; HasGraphWriter gates the agent link tool.
+// for expand; HasGraphWriter gates the agent link tool. HasObjectSearch gates
+// find_objects when the graph implements GraphObjectSearcher.
 // Embeddings: when WithEmbedder is set, Put embeds IndexText and fails closed on
 // embed errors; the same vector feeds Postgres hybrid search and Helix node indexes.
-// Graph-contextual text/vector search on Helix is not yet a first-class Engine API
-// (expand + corpus search cover the current agent surface).
-//
+// Hosts should call helixgraph EnsureSearchIndexes so FindObjects uses native APIs.
 // Temporal ranking (λ decay) is owned by the Engine after candidate fusion;
 // updated_at/created_at are stored on objects (and Helix nodes) for filters/sort.
+//
+// Long-running workflows may issue many tool calls; each call should pick the
+// right path (search vs find_objects vs expand vs save/link).
 //
 // # Boot sketch
 //
 //	store, err := brain.NewPostgresStore(pool)
-//	eng, err := brain.NewEngine(store, brain.WithEmbedder(emb) /* optional */)
+//	g, err := helixgraph.New(helixURL)
+//	_ = g.EnsureSearchIndexes(ctx) // object_id + search_text + embedding indexes
+//	eng, err := brain.NewEngine(store, brain.WithEmbedder(emb), brain.WithGraph(g))
 //	if err := eng.ApplyKinds(ctx, specs...); err != nil { return err }
 //
 // Integration tests (skipped under -short / without Docker):

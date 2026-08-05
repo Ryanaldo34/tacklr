@@ -48,7 +48,7 @@ const (
 
 	// Brain retrieval (tacklr.brain) — span attrs for trace debug only.
 	// Metrics use LabelBrainOp / LabelDegrade / LabelEmpty (see RecordBrain).
-	AttrBrainOp      = "tacklr.brain.op"      // search | find_exact | continue | expand
+	AttrBrainOp      = "tacklr.brain.op"      // search | find_exact | find_objects | continue | expand
 	AttrBrainDegrade = "tacklr.brain.degrade" // none | lexical_only | containment_only
 	AttrBrainHits    = "tacklr.brain.hits"    // page size; not a metric label (cardinality)
 
@@ -89,10 +89,11 @@ const (
 
 // Brain op values for AttrBrainOp / LabelBrainOp (closed enum).
 const (
-	BrainOpSearch    = "search"
-	BrainOpFindExact = "find_exact"
-	BrainOpContinue  = "continue"
-	BrainOpExpand    = "expand"
+	BrainOpSearch      = "search"
+	BrainOpFindExact   = "find_exact"
+	BrainOpFindObjects = "find_objects"
+	BrainOpContinue    = "continue"
+	BrainOpExpand      = "expand"
 )
 
 // Brain degrade modes (closed enum).

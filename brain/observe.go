@@ -6,10 +6,11 @@ import "context"
 type Op string
 
 const (
-	OpSearch    Op = "search"
-	OpFindExact Op = "find_exact"
-	OpContinue  Op = "continue"
-	OpExpand    Op = "expand"
+	OpSearch      Op = "search"
+	OpFindExact   Op = "find_exact"
+	OpFindObjects Op = "find_objects"
+	OpContinue    Op = "continue"
+	OpExpand      Op = "expand"
 )
 
 // OpSpan ends one retrieval operation. Implementations must be safe for a single End call.
