@@ -13,6 +13,85 @@ import (
 	"github.com/ryanaldo34/tacklr/stores"
 )
 
+func TestBrainTools_saveDiscoveryAndLink(t *testing.T) {
+	ctx := context.Background()
+	store := brain.NewMemoryStore()
+	g := brain.NewMemoryGraph()
+	eng, err := brain.NewEngine(store, brain.WithGraph(g), brain.WithKinds(
+		brain.KindSpec{Kind: "Discovery", IsParent: true},
+		brain.KindSpec{Kind: "Fact", IsParent: true},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ns := uuid.New()
+	h := NewAgent(ctx, AgentOptions{
+		Config: Config{MaxWindowSize: 1024},
+		Model:  &mockStrategy{},
+		Brain:  eng,
+		BrainWriteKinds: brain.WriteKinds{
+			Discovery: "Discovery",
+			Fact:      "Fact",
+			// Memory empty → tool not registered
+		},
+		SearchNamespace: &ns,
+	})
+
+	saveDisc := h.findTool("save_discovery", "")
+	saveFact := h.findTool("save_fact", "")
+	saveMem := h.findTool("save_memory", "")
+	linkTool := h.findTool("link", "")
+	if saveDisc == nil || saveFact == nil || linkTool == nil {
+		t.Fatal("save_discovery, save_fact, link required")
+	}
+	if saveMem != nil {
+		t.Fatal("save_memory must be omitted when Memory kind is empty")
+	}
+
+	out, err := saveDisc.invoke(ctx, `{"title":"finding","content":"learned X"}`, h.runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var a brain.RichObject
+	if err := json.Unmarshal([]byte(out.output), &a); err != nil {
+		t.Fatal(err)
+	}
+	if a.Kind != "Discovery" || a.Title != "finding" || a.ID == uuid.Nil {
+		t.Fatalf("discovery: %+v", a)
+	}
+
+	out2, err := saveFact.invoke(ctx, `{"title":"fact-a","content":"true claim"}`, h.runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b brain.RichObject
+	if err := json.Unmarshal([]byte(out2.output), &b); err != nil {
+		t.Fatal(err)
+	}
+
+	// Update discovery
+	out3, err := saveDisc.invoke(ctx, `{"object_id":"`+a.ID.String()+`","title":"finding-v2","content":"updated"}`, h.runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var a2 brain.RichObject
+	if err := json.Unmarshal([]byte(out3.output), &a2); err != nil {
+		t.Fatal(err)
+	}
+	if a2.ID != a.ID || a2.Title != "finding-v2" {
+		t.Fatalf("update: %+v", a2)
+	}
+
+	if _, err := linkTool.invoke(ctx, `{"from_id":"`+a.ID.String()+`","to_id":"`+b.ID.String()+`","relation_type":"references"}`, h.runtime); err != nil {
+		t.Fatal(err)
+	}
+	readTool := h.findTool("read", "")
+	rout, err := readTool.invoke(ctx, `{"object_id":"`+a.ID.String()+`"}`, h.runtime)
+	if err != nil || !strings.Contains(rout.output, "updated") {
+		t.Fatalf("read after save: %v %v", err, rout)
+	}
+}
+
 func TestBrainTools_hostNamespaceScopedRead(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()

@@ -51,6 +51,7 @@ type AgentHarness struct {
 	skillsInitialized bool
 	exaAPIKey         string
 	brain             *brain.Engine
+	brainWriteKinds   brain.WriteKinds
 	// searchCtx owns the current knowledge ResultSet for this agent thread.
 	// Checkpointed via checkpointSession / NewAgentFromSession; not SessionManager.
 	searchCtx        *brain.SearchContext

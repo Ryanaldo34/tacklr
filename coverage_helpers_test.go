@@ -88,7 +88,7 @@ func TestBrainToolHelpers_parseAndNew(t *testing.T) {
 		t.Fatal(err)
 	}
 	sc := brain.NewSearchContext()
-	tools := newBrainTools(eng, sc)
+	tools := newBrainTools(eng, sc, brain.WriteKinds{})
 	if len(tools) == 0 {
 		t.Fatal("expected brain tools")
 	}

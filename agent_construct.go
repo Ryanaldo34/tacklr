@@ -62,10 +62,14 @@ type AgentOptions struct {
 	// When both are empty, those tools are not registered.
 	ExaAPIKey string
 	// Brain enables knowledge builtins when non-nil. Workers inherit the same engine.
-	// Configure Store, optional QueryEmbedder, and optional GraphReader on the Engine
+	// Configure Store, optional QueryEmbedder, and optional GraphReader/GraphWriter on the Engine
 	// before NewAgent (e.g. brain.WithGraph(helixgraph.New(...))). The harness does
 	// not construct graph backends.
 	Brain *brain.Engine
+	// BrainWriteKinds maps save_discovery / save_fact / save_memory to host kind names.
+	// Empty fields skip that tool. Kinds should be registered via brain.ApplyKinds / WithKinds.
+	// Ignored when Brain is nil.
+	BrainWriteKinds brain.WriteKinds
 	// SearchNamespace isolates brain retrieval when set (session-owned, checkpointed).
 	// Nil leaves a loaded session value unchanged. Workers get a copy at spawn.
 	SearchNamespace *uuid.UUID
@@ -109,6 +113,7 @@ func newHarnessBase(opts AgentOptions, runtime HarnessRuntime, sm *session.Sessi
 		skillsLoader:         opts.SkillsLoader,
 		exaAPIKey:            resolveExaAPIKey(opts.ExaAPIKey),
 		brain:                opts.Brain,
+		brainWriteKinds:      opts.BrainWriteKinds,
 		sessionId:            "",
 		subagents:            make(map[string]*SubAgent),
 		interruptToRequester: make(map[string]string),
@@ -179,7 +184,7 @@ func (a *AgentHarness) injectBuiltinTools() {
 		a.tools = append(a.tools, newWebSearchTool(client), newWebFetchTool(client))
 	}
 	if a.brain != nil && a.searchCtx != nil {
-		a.tools = append(a.tools, newBrainTools(a.brain, a.searchCtx)...)
+		a.tools = append(a.tools, newBrainTools(a.brain, a.searchCtx, a.brainWriteKinds)...)
 	}
 	if len(a.subagents) > 0 {
 		a.tools = append(a.tools, a.spawnTool())

@@ -205,6 +205,106 @@ From a parent: ordered children (containment). From a part: parent and nearby si
 	})
 }
 
+type saveObjectArgs struct {
+	Title       string         `json:"title" desc:"Short title for the object."`
+	Summary     string         `json:"summary,omitempty" desc:"Optional short abstract."`
+	Content     string         `json:"content,omitempty" desc:"Optional full body text."`
+	ContentType string         `json:"content_type,omitempty" desc:"Optional MIME type (e.g. text/plain, text/markdown)."`
+	Properties  map[string]any `json:"properties,omitempty" desc:"Kind-defined fields from schema(). Prefer schema() first."`
+	ParentID    string         `json:"parent_id,omitempty" desc:"Optional parent UUID when this is a part object."`
+	ObjectID    string         `json:"object_id,omitempty" desc:"Optional existing UUID to update; omit to create."`
+}
+
+func (b brainTools) newSaveTool(name, display, kind, roleDesc string) *Tool {
+	return NewTool(ToolConfig{
+		Name:        name,
+		DisplayName: display,
+		Description: `Save a ` + roleDesc + ` to the knowledge base as kind ` + kind + `.
+
+Prefer schema() for this kind before inventing property keys. Uses the host search namespace when set. Pass object_id to update an existing object. Returns the rich object reference.`,
+		Category: streaming.ToolCategoryEdit,
+		Access:   ToolWriteAccess,
+		Timeout:  30 * time.Second,
+		Handler: func(ctx context.Context, args saveObjectArgs, runtime HarnessRuntime) (string, error) {
+			runtime.EmitUpdate("Saving knowledge object…")
+			obj, err := b.putFromArgs(ctx, kind, args)
+			if err != nil {
+				return "", fmt.Errorf("%s: %w", name, err)
+			}
+			return formatBrainJSON(brain.RichFromObject(obj, true))
+		},
+	})
+}
+
+type linkArgs struct {
+	FromID       string `json:"from_id" desc:"UUID of the source object."`
+	ToID         string `json:"to_id" desc:"UUID of the target object."`
+	RelationType string `json:"relation_type" desc:"Non-containment relation label (e.g. references, about)."`
+}
+
+func (b brainTools) newLinkTool() *Tool {
+	return NewTool(ToolConfig{
+		Name:        "link",
+		DisplayName: "Link Objects",
+		Description: `Create a non-containment relationship between two knowledge objects (graph edge).
+
+Both objects should already exist (e.g. via save_* or host ingest). Use expand with the same relation_type to traverse. Containment (parent/child) uses parent_id on save, not this tool.`,
+		Category: streaming.ToolCategoryEdit,
+		Access:   ToolWriteAccess,
+		Timeout:  30 * time.Second,
+		Handler: func(ctx context.Context, args linkArgs, runtime HarnessRuntime) (string, error) {
+			from, err := parseUUID(args.FromID, "from_id")
+			if err != nil {
+				return "", fmt.Errorf("link: %w", err)
+			}
+			to, err := parseUUID(args.ToID, "to_id")
+			if err != nil {
+				return "", fmt.Errorf("link: %w", err)
+			}
+			runtime.EmitUpdate("Linking knowledge objects…")
+			if err := b.engine.Link(ctx, from, to, args.RelationType); err != nil {
+				return "", fmt.Errorf("link: %w", err)
+			}
+			return formatBrainJSON(map[string]string{
+				"from_id":       from.String(),
+				"to_id":         to.String(),
+				"relation_type": strings.TrimSpace(args.RelationType),
+				"status":        "linked",
+			})
+		},
+	})
+}
+
+func (b brainTools) putFromArgs(ctx context.Context, kind string, args saveObjectArgs) (brain.Object, error) {
+	kind = strings.TrimSpace(kind)
+	if kind == "" {
+		return brain.Object{}, fmt.Errorf("kind is not configured")
+	}
+	obj := brain.Object{
+		Kind:        kind,
+		Title:       strings.TrimSpace(args.Title),
+		Summary:     strings.TrimSpace(args.Summary),
+		Content:     args.Content,
+		ContentType: strings.TrimSpace(args.ContentType),
+		Properties:  args.Properties,
+	}
+	id, ok, err := optionalUUID(args.ObjectID, "object_id")
+	if err != nil {
+		return brain.Object{}, err
+	}
+	if ok {
+		obj.ID = id
+	}
+	parent, ok, err := optionalUUID(args.ParentID, "parent_id")
+	if err != nil {
+		return brain.Object{}, err
+	}
+	if ok {
+		obj.ParentID = &parent
+	}
+	return b.engine.Put(ctx, b.sc.Scope(), obj)
+}
+
 func formatBrainJSON(v any) (string, error) {
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
@@ -228,13 +328,39 @@ func parseUUID(raw, field string) (uuid.UUID, error) {
 	return id, nil
 }
 
-// newBrainTools requires non-nil engine and search context.
-func newBrainTools(engine *brain.Engine, sc *brain.SearchContext) []*Tool {
+// optionalUUID parses raw when non-empty. Empty input is (Nil, false, nil).
+func optionalUUID(raw, field string) (uuid.UUID, bool, error) {
+	if strings.TrimSpace(raw) == "" {
+		return uuid.Nil, false, nil
+	}
+	id, err := parseUUID(raw, field)
+	if err != nil {
+		return uuid.Nil, false, err
+	}
+	return id, true, nil
+}
+
+// saveToolSpec maps one host WriteKinds field to a save_* tool.
+type saveToolSpec struct {
+	name, display, kind, role string
+}
+
+func saveToolSpecs(kinds brain.WriteKinds) []saveToolSpec {
+	return []saveToolSpec{
+		{"save_discovery", "Save Discovery", kinds.Discovery, "working discovery or finding"},
+		{"save_fact", "Save Fact", kinds.Fact, "durable fact"},
+		{"save_memory", "Save Memory", kinds.Memory, "preference or durable memory"},
+	}
+}
+
+// newBrainTools builds read tools always, optional save_* from WriteKinds, then link.
+// link is always registered; Engine.Link fails at call time without a GraphWriter.
+func newBrainTools(engine *brain.Engine, sc *brain.SearchContext, kinds brain.WriteKinds) []*Tool {
 	if engine == nil || sc == nil {
 		return nil
 	}
 	b := brainTools{engine: engine, sc: sc}
-	return []*Tool{
+	tools := []*Tool{
 		b.newReadObjectTool(),
 		b.newSchemaTool(),
 		b.newSearchTool(),
@@ -242,4 +368,10 @@ func newBrainTools(engine *brain.Engine, sc *brain.SearchContext) []*Tool {
 		b.newContinueTool(),
 		b.newExpandTool(),
 	}
+	for _, s := range saveToolSpecs(kinds) {
+		if kind := strings.TrimSpace(s.kind); kind != "" {
+			tools = append(tools, b.newSaveTool(s.name, s.display, kind, s.role))
+		}
+	}
+	return append(tools, b.newLinkTool())
 }

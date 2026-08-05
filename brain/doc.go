@@ -26,8 +26,8 @@
 //
 //	eng.Put(ctx, scope, brain.Object{Kind: "Discovery", Title: "...", NamespaceID: ns, ...})
 //
-// Hosts map tool roles to kind names (e.g. Discovery / MemoryFact) when wiring
-// agent save tools; the package does not auto-register kinds.
+// Hosts map tool roles to kind names via AgentOptions.BrainWriteKinds
+// (save_discovery / save_fact / save_memory); the package does not auto-register kinds.
 //
 // # Postgres vs Helix (complementary)
 //
