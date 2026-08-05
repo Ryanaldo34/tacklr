@@ -3,6 +3,7 @@ package brain
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/google/uuid"
@@ -198,13 +199,12 @@ func (e *Engine) exactCandidates(ctx context.Context, scope Scope, req SearchReq
 	fused := rrfFuse([][]ScoredID{lex, tri}, e.cfg.RRFk)
 	q := strings.ToLower(query)
 	// Prefer exact title matches (boost), then remaining fused candidates.
-	var boosted, rest []ScoredID
-	seen := map[uuid.UUID]struct{}{}
+	boosted := make([]ScoredID, 0)
+	rest := make([]ScoredID, 0, len(fused))
 	for _, item := range fused {
 		if strings.ToLower(strings.TrimSpace(item.Title)) == q {
 			item.Score += 10
 			boosted = append(boosted, item)
-			seen[item.ID] = struct{}{}
 			continue
 		}
 		rest = append(rest, item)
@@ -250,7 +250,7 @@ func (e *Engine) pageIDs(ctx context.Context, scope Scope, ids []uuid.UUID, limi
 	}
 	set := ResultSet{
 		ID:        uuid.New(),
-		ObjectIDs: append([]uuid.UUID(nil), ids...),
+		ObjectIDs: slices.Clone(ids),
 		Offset:    end,
 		CreatedAt: e.cfg.Now(),
 	}

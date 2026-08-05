@@ -182,7 +182,7 @@ func (e *Engine) graphNeighborIDs(ctx context.Context, scope Scope, id uuid.UUID
 	if len(candidates) == 0 {
 		return nil, nil
 	}
-	// Batch visibility under scope (omitted ids are not visible).
+	// Keep graph order; drop ids not visible under scope.
 	objs, err := e.store.GetMany(ctx, scope, candidates)
 	if err != nil {
 		return nil, err
@@ -201,7 +201,7 @@ func (e *Engine) graphNeighborIDs(ctx context.Context, scope Scope, id uuid.UUID
 }
 
 func appendUnique(dst []uuid.UUID, extra ...uuid.UUID) []uuid.UUID {
-	seen := map[uuid.UUID]struct{}{}
+	seen := make(map[uuid.UUID]struct{}, len(dst)+len(extra))
 	for _, id := range dst {
 		seen[id] = struct{}{}
 	}

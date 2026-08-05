@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -71,9 +72,7 @@ func (c *SearchContext) Put(_ context.Context, set ResultSet) error {
 		return fmt.Errorf("brain: result set id is required")
 	}
 	cp := set
-	if set.ObjectIDs != nil {
-		cp.ObjectIDs = append([]uuid.UUID(nil), set.ObjectIDs...)
-	}
+	cp.ObjectIDs = slices.Clone(set.ObjectIDs)
 	if cp.CreatedAt.IsZero() {
 		cp.CreatedAt = time.Now().UTC()
 	}
@@ -91,9 +90,7 @@ func (c *SearchContext) Get(_ context.Context, id uuid.UUID) (ResultSet, error) 
 		return ResultSet{}, fmt.Errorf("%w: %s", ErrResultSetNotFound, id)
 	}
 	out := *c.current
-	if c.current.ObjectIDs != nil {
-		out.ObjectIDs = append([]uuid.UUID(nil), c.current.ObjectIDs...)
-	}
+	out.ObjectIDs = slices.Clone(c.current.ObjectIDs)
 	return out, nil
 }
 
@@ -111,9 +108,7 @@ func (c *SearchContext) Export() ([]byte, error) {
 	}
 	if c.current != nil {
 		rs := *c.current
-		if c.current.ObjectIDs != nil {
-			rs.ObjectIDs = append([]uuid.UUID(nil), c.current.ObjectIDs...)
-		}
+		rs.ObjectIDs = slices.Clone(c.current.ObjectIDs)
 		env.ResultSet = &rs
 	}
 	b, err := json.Marshal(env)
@@ -133,15 +128,12 @@ func (c *SearchContext) Restore(raw []byte) error {
 		c.current = nil
 		return nil
 	}
-	var probe map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &probe); err != nil {
+	// Envelope form is preferred. Fall back to bare ResultSet for older checkpoints.
+	var env searchContextExport
+	if err := json.Unmarshal(raw, &env); err != nil {
 		return fmt.Errorf("brain: restore search context: %w", err)
 	}
-	if _, hasRS := probe["result_set"]; hasRS || probe["namespace"] != nil {
-		var env searchContextExport
-		if err := json.Unmarshal(raw, &env); err != nil {
-			return fmt.Errorf("brain: restore search context: %w", err)
-		}
+	if env.Namespace != nil || env.ResultSet != nil {
 		c.namespace = env.Namespace
 		c.current = env.ResultSet
 		if c.current != nil && c.current.ID == uuid.Nil {
@@ -149,7 +141,6 @@ func (c *SearchContext) Restore(raw []byte) error {
 		}
 		return nil
 	}
-	// Legacy: bare ResultSet.
 	var set ResultSet
 	if err := json.Unmarshal(raw, &set); err != nil {
 		return fmt.Errorf("brain: restore search context: %w", err)

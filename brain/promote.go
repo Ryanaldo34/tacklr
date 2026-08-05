@@ -4,7 +4,6 @@ import (
 	"cmp"
 	"slices"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
@@ -29,35 +28,32 @@ func promoteParents(parts []ScoredID, evidenceN int) []promotedParent {
 		score    float64
 		evidence []Evidence
 	}
-	byParent := map[uuid.UUID]*bucket{}
-	order := make([]uuid.UUID, 0)
+	byParent := make(map[uuid.UUID]bucket, len(parts))
+	order := make([]uuid.UUID, 0, len(parts))
 
 	for _, p := range parts {
-		var pid uuid.UUID
+		pid := p.ID
 		isPart := p.ParentID != nil
 		if isPart {
 			pid = *p.ParentID
-		} else {
-			pid = p.ID
 		}
 		b, ok := byParent[pid]
 		if !ok {
-			b = &bucket{score: p.Score}
-			byParent[pid] = b
+			b = bucket{score: p.Score}
 			order = append(order, pid)
 		} else if p.Score > b.score {
 			b.score = p.Score
 		}
-		if !isPart {
-			continue
+		if isPart {
+			b.evidence = append(b.evidence, Evidence{
+				PartID:   p.ID,
+				Title:    p.Title,
+				Snippet:  snippet(p.Content, defaultSnippetCap),
+				Score:    p.Score,
+				Position: p.Position,
+			})
 		}
-		b.evidence = append(b.evidence, Evidence{
-			PartID:   p.ID,
-			Title:    p.Title,
-			Snippet:  snippet(p.Content, defaultSnippetCap),
-			Score:    p.Score,
-			Position: p.Position,
-		})
+		byParent[pid] = b
 	}
 
 	out := make([]promotedParent, 0, len(order))
@@ -67,7 +63,7 @@ func promoteParents(parts []ScoredID, evidenceN int) []promotedParent {
 			if c := cmp.Compare(b.Score, a.Score); c != 0 {
 				return c
 			}
-			return cmp.Compare(a.PartID.String(), b.PartID.String())
+			return cmpUUID(a.PartID, b.PartID)
 		})
 		if len(b.evidence) > evidenceN {
 			b.evidence = b.evidence[:evidenceN]
@@ -82,19 +78,23 @@ func promoteParents(parts []ScoredID, evidenceN int) []promotedParent {
 		if c := cmp.Compare(b.Score, a.Score); c != 0 {
 			return c
 		}
-		return cmp.Compare(a.ParentID.String(), b.ParentID.String())
+		return cmpUUID(a.ParentID, b.ParentID)
 	})
 	return out
 }
 
+// snippet trims s to at most maxRunes without allocating a full []rune.
 func snippet(s string, maxRunes int) string {
 	s = strings.TrimSpace(s)
 	if s == "" || maxRunes <= 0 {
 		return s
 	}
-	if utf8.RuneCountInString(s) <= maxRunes {
-		return s
+	n := 0
+	for i := range s {
+		if n == maxRunes {
+			return s[:i] + "…"
+		}
+		n++
 	}
-	runes := []rune(s)
-	return string(runes[:maxRunes]) + "…"
+	return s
 }

@@ -96,7 +96,7 @@ Use when you know what you want but not where it is. Prefer schema() before inve
 		Category: streaming.ToolCategorySearch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
-	}, "Searching knowledge base…", "search", false)
+	}, "Searching knowledge base…", b.engine.Search)
 }
 
 func (b brainTools) newFindExactTool() *Tool {
@@ -109,28 +109,24 @@ Prefer this over search when you have a precise string. Returns ranked parents w
 		Category: streaming.ToolCategorySearch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
-	}, "Finding exact matches…", "find_exact", true)
+	}, "Finding exact matches…", b.engine.FindExact)
 }
 
-func (b brainTools) newQueryTool(cfg ToolConfig, status, errLabel string, exact bool) *Tool {
+func (b brainTools) newQueryTool(
+	cfg ToolConfig,
+	status string,
+	query func(context.Context, brain.Scope, brain.SearchRequest, brain.ResultSetStore) (brain.SearchPage, error),
+) *Tool {
+	name := cfg.Name
 	cfg.Handler = func(ctx context.Context, args queryArgs, runtime HarnessRuntime) (string, error) {
 		runtime.EmitUpdate(status)
-		req := brain.SearchRequest{
+		page, err := query(ctx, b.sc.Scope(), brain.SearchRequest{
 			Query:   args.Query,
 			Filters: brain.Filters(args.Filters),
 			Limit:   args.Limit,
-		}
-		var (
-			page brain.SearchPage
-			err  error
-		)
-		if exact {
-			page, err = b.engine.FindExact(ctx, b.sc.Scope(), req, b.sc)
-		} else {
-			page, err = b.engine.Search(ctx, b.sc.Scope(), req, b.sc)
-		}
+		}, b.sc)
 		if err != nil {
-			return "", fmt.Errorf("%s: %w", errLabel, err)
+			return "", fmt.Errorf("%s: %w", name, err)
 		}
 		return formatBrainJSON(page)
 	}
@@ -288,20 +284,18 @@ func (b brainTools) putFromArgs(ctx context.Context, kind string, args saveObjec
 		ContentType: strings.TrimSpace(args.ContentType),
 		Properties:  args.Properties,
 	}
-	id, ok, err := optionalUUID(args.ObjectID, "object_id")
+	id, err := parseOptionalUUID(args.ObjectID, "object_id")
 	if err != nil {
 		return brain.Object{}, err
 	}
-	if ok {
-		obj.ID = id
+	if id != nil {
+		obj.ID = *id
 	}
-	parent, ok, err := optionalUUID(args.ParentID, "parent_id")
+	parent, err := parseOptionalUUID(args.ParentID, "parent_id")
 	if err != nil {
 		return brain.Object{}, err
 	}
-	if ok {
-		obj.ParentID = &parent
-	}
+	obj.ParentID = parent
 	return b.engine.Put(ctx, b.sc.Scope(), obj)
 }
 
@@ -328,37 +322,22 @@ func parseUUID(raw, field string) (uuid.UUID, error) {
 	return id, nil
 }
 
-// optionalUUID parses raw when non-empty. Empty input is (Nil, false, nil).
-func optionalUUID(raw, field string) (uuid.UUID, bool, error) {
+// parseOptionalUUID returns nil when raw is empty.
+func parseOptionalUUID(raw, field string) (*uuid.UUID, error) {
 	if strings.TrimSpace(raw) == "" {
-		return uuid.Nil, false, nil
+		return nil, nil
 	}
 	id, err := parseUUID(raw, field)
 	if err != nil {
-		return uuid.Nil, false, err
+		return nil, err
 	}
-	return id, true, nil
+	return &id, nil
 }
 
-// saveToolSpec maps one host WriteKinds field to a save_* tool.
-type saveToolSpec struct {
-	name, display, kind, role string
-}
-
-func saveToolSpecs(kinds brain.WriteKinds) []saveToolSpec {
-	return []saveToolSpec{
-		{"save_discovery", "Save Discovery", kinds.Discovery, "working discovery or finding"},
-		{"save_fact", "Save Fact", kinds.Fact, "durable fact"},
-		{"save_memory", "Save Memory", kinds.Memory, "preference or durable memory"},
-	}
-}
-
-// newBrainTools builds read tools always, optional save_* from WriteKinds, then link.
-// link is always registered; Engine.Link fails at call time without a GraphWriter.
+// newBrainTools builds knowledge tools. Caller must pass a non-nil engine and SearchContext.
+// save_* tools are registered only for non-empty WriteKinds fields; link only when the
+// engine has a GraphWriter.
 func newBrainTools(engine *brain.Engine, sc *brain.SearchContext, kinds brain.WriteKinds) []*Tool {
-	if engine == nil || sc == nil {
-		return nil
-	}
 	b := brainTools{engine: engine, sc: sc}
 	tools := []*Tool{
 		b.newReadObjectTool(),
@@ -368,10 +347,19 @@ func newBrainTools(engine *brain.Engine, sc *brain.SearchContext, kinds brain.Wr
 		b.newContinueTool(),
 		b.newExpandTool(),
 	}
-	for _, s := range saveToolSpecs(kinds) {
+	for _, s := range []struct {
+		name, display, kind, role string
+	}{
+		{"save_discovery", "Save Discovery", kinds.Discovery, "working discovery or finding"},
+		{"save_fact", "Save Fact", kinds.Fact, "durable fact"},
+		{"save_memory", "Save Memory", kinds.Memory, "preference or durable memory"},
+	} {
 		if kind := strings.TrimSpace(s.kind); kind != "" {
 			tools = append(tools, b.newSaveTool(s.name, s.display, kind, s.role))
 		}
 	}
-	return append(tools, b.newLinkTool())
+	if engine.HasGraphWriter() {
+		tools = append(tools, b.newLinkTool())
+	}
+	return tools
 }

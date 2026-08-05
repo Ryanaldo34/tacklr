@@ -193,6 +193,7 @@ func filterSQLValue(v any) any {
 }
 
 // objectMatchesFilters reports whether obj satisfies all filters (AND).
+// Compiles filters on each call; hot paths should compileFilters once and reuse plan.match.
 func objectMatchesFilters(obj Object, f Filters) bool {
 	plan, err := compileFilters(f)
 	if err != nil {

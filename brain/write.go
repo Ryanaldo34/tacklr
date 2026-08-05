@@ -16,9 +16,9 @@ import (
 // When WithEmbedder is set and title/summary/content is non-empty, embeds and
 // stores the vector; embed errors fail the Put (fail closed).
 func (e *Engine) Put(ctx context.Context, scope Scope, obj Object) (Object, error) {
-	w, ok := e.store.(ObjectWriter)
-	if !ok {
-		return Object{}, fmt.Errorf("brain: store does not support object writes")
+	w, err := e.objectWriter()
+	if err != nil {
+		return Object{}, err
 	}
 	if obj.DeletedAt != nil {
 		return Object{}, fmt.Errorf("brain: put refuses soft-deleted objects; use SoftDelete")
@@ -28,7 +28,7 @@ func (e *Engine) Put(ctx context.Context, scope Scope, obj Object) (Object, erro
 		return Object{}, err
 	}
 	if e.embedder != nil {
-		if text := objectIndexText(obj); text != "" {
+		if text := IndexText(obj); text != "" {
 			vec, err := e.embedder.Embed(ctx, text)
 			if err != nil {
 				return Object{}, fmt.Errorf("brain: embed object: %w", err)
@@ -41,7 +41,7 @@ func (e *Engine) Put(ctx context.Context, scope Scope, obj Object) (Object, erro
 		return Object{}, err
 	}
 	// Dual-write graph node after durable store succeeds (retryable if graph fails).
-	if gw, ok := e.graph.(GraphWriter); ok {
+	if gw, ok := e.graphWriter(); ok {
 		if err := gw.EnsureObject(ctx, obj); err != nil {
 			return Object{}, fmt.Errorf("brain: graph ensure object: %w", err)
 		}
@@ -52,9 +52,9 @@ func (e *Engine) Put(ctx context.Context, scope Scope, obj Object) (Object, erro
 // SoftDelete marks an object deleted under scope. Missing / out-of-scope → ErrNotFound.
 // Graph nodes/edges are left in place (v1); cleanup is a later concern.
 func (e *Engine) SoftDelete(ctx context.Context, scope Scope, id uuid.UUID) error {
-	w, ok := e.store.(ObjectWriter)
-	if !ok {
-		return fmt.Errorf("brain: store does not support object writes")
+	w, err := e.objectWriter()
+	if err != nil {
+		return err
 	}
 	return w.SoftDelete(ctx, scope, id)
 }
@@ -63,7 +63,7 @@ func (e *Engine) SoftDelete(ctx context.Context, scope Scope, id uuid.UUID) erro
 // Put endpoints first so Helix nodes exist with searchable props; MemoryGraph
 // accepts edges without a prior EnsureObject.
 func (e *Engine) Link(ctx context.Context, from, to uuid.UUID, relationType string) error {
-	gw, ok := e.graph.(GraphWriter)
+	gw, ok := e.graphWriter()
 	if !ok {
 		return fmt.Errorf("brain: graph writer is required for Link")
 	}
@@ -72,6 +72,25 @@ func (e *Engine) Link(ctx context.Context, from, to uuid.UUID, relationType stri
 		return fmt.Errorf("brain: from, to, and relation type are required")
 	}
 	return gw.AddEdge(ctx, from, to, rel)
+}
+
+// HasGraphWriter reports whether Put dual-write and Link are available.
+func (e *Engine) HasGraphWriter() bool {
+	_, ok := e.graphWriter()
+	return ok
+}
+
+func (e *Engine) objectWriter() (ObjectWriter, error) {
+	w, ok := e.store.(ObjectWriter)
+	if !ok {
+		return nil, fmt.Errorf("brain: store does not support object writes")
+	}
+	return w, nil
+}
+
+func (e *Engine) graphWriter() (GraphWriter, bool) {
+	gw, ok := e.graph.(GraphWriter)
+	return gw, ok
 }
 
 func preparePut(scope Scope, obj Object, now time.Time) Object {
@@ -92,8 +111,8 @@ func preparePut(scope Scope, obj Object, now time.Time) Object {
 	return obj
 }
 
-// objectIndexText joins non-empty title/summary/content for embeddings and Helix text props.
-func objectIndexText(obj Object) string {
+// IndexText joins non-empty title, summary, and content for embeddings and graph props.
+func IndexText(obj Object) string {
 	parts := make([]string, 0, 3)
 	for _, p := range []string{obj.Title, obj.Summary, obj.Content} {
 		if p = strings.TrimSpace(p); p != "" {
@@ -123,34 +142,30 @@ func ValidateObject(obj Object, cat *KindCatalog) error {
 		return fmt.Errorf("brain: kind %q is not registered", kind)
 	}
 	hasParent := obj.ParentID != nil
-	if spec.IsParent && !spec.IsPart && hasParent {
+	switch {
+	case spec.IsParent && !spec.IsPart && hasParent:
 		return fmt.Errorf("brain: kind %q is a parent kind and must not have parent_id", spec.Kind)
-	}
-	if spec.IsPart && !spec.IsParent && !hasParent {
+	case spec.IsPart && !spec.IsParent && !hasParent:
 		return fmt.Errorf("brain: kind %q is a part kind and requires parent_id", spec.Kind)
 	}
 	props := obj.Properties
 	if props == nil {
 		props = map[string]any{}
 	}
-	// Index fields once, then walk props (typical field count is small).
 	byName := make(map[string]FieldSpec, len(spec.Fields))
 	for _, f := range spec.Fields {
 		byName[f.Name] = f
-		if !f.Required {
-			continue
-		}
-		if props[f.Name] == nil {
+		if f.Required && props[f.Name] == nil {
 			return fmt.Errorf("brain: required property %q is missing", f.Name)
 		}
 	}
 	for name, v := range props {
+		if v == nil {
+			continue
+		}
 		f, ok := byName[name]
 		if !ok {
 			return fmt.Errorf("brain: property %q is not defined on kind %q", name, spec.Kind)
-		}
-		if v == nil {
-			continue
 		}
 		if err := checkFieldValue(v, f.Type); err != nil {
 			return fmt.Errorf("brain: property %q: %w", name, err)

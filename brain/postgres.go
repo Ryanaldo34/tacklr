@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -310,10 +311,6 @@ func (s *PostgresStore) scanObject(row scannable) (Object, error) {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Object{}, ErrNotFound
 		}
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) {
-			return Object{}, fmt.Errorf("brain: scan object: %w", err)
-		}
 		return Object{}, fmt.Errorf("brain: scan object: %w", err)
 	}
 	if title != nil {
@@ -466,9 +463,15 @@ func sanitizeJSONKey(k string) string {
 }
 
 func formatVectorLiteral(v []float32) string {
-	parts := make([]string, len(v))
+	var b strings.Builder
+	b.Grow(2 + len(v)*8)
+	b.WriteByte('[')
 	for i, f := range v {
-		parts[i] = fmt.Sprintf("%g", f)
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(strconv.FormatFloat(float64(f), 'g', -1, 32))
 	}
-	return "[" + strings.Join(parts, ",") + "]"
+	b.WriteByte(']')
+	return b.String()
 }

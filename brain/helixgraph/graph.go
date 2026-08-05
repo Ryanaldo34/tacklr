@@ -46,9 +46,6 @@ const NodeLabel = "Object"
 
 // EnsureObjectIndex creates an equality index on Object.object_id when missing.
 func (g *Graph) EnsureObjectIndex(ctx context.Context) error {
-	if g.client == nil {
-		return fmt.Errorf("helixgraph: not configured")
-	}
 	req := helix.WriteQuery("brain_ensure_object_id_index").
 		VarAs("idx", helix.G().CreateIndexIfNotExists(
 			helix.NodeEqualityIndex(NodeLabel, "object_id"),
@@ -67,14 +64,26 @@ func (g *Graph) PutObject(ctx context.Context, objectID uuid.UUID) error {
 
 // EnsureObject implements brain.GraphWriter: drop+insert node with searchable props.
 func (g *Graph) EnsureObject(ctx context.Context, obj brain.Object) error {
-	if g.client == nil {
-		return fmt.Errorf("helixgraph: not configured")
-	}
 	if obj.ID == uuid.Nil {
 		return fmt.Errorf("helixgraph: object id is required")
 	}
 	q := helix.WriteQuery("brain_ensure_object")
 	oid := q.ParamString("object_id", obj.ID.String())
+	props := objectProps(oid, obj)
+	req := q.
+		VarAs("dropped", helix.G().
+			NWhere(helix.SourceEq("object_id", oid)).
+			Drop().
+			Count()).
+		VarAs("n", helix.G().AddN(NodeLabel, props)).
+		Returning("n")
+	if err := g.client.Exec(ctx, req, nil, helix.WriterOnly()); err != nil {
+		return fmt.Errorf("helixgraph: ensure object: %w", err)
+	}
+	return nil
+}
+
+func objectProps(oid helix.ParamRef, obj brain.Object) helix.Props {
 	props := helix.Props{helix.Prop("object_id", oid)}
 	if obj.Kind != "" {
 		props = append(props, helix.Prop("kind", obj.Kind))
@@ -85,7 +94,7 @@ func (g *Graph) EnsureObject(ctx context.Context, obj brain.Object) error {
 	if obj.Summary != "" {
 		props = append(props, helix.Prop("summary", obj.Summary))
 	}
-	if st := objectSearchText(obj); st != "" {
+	if st := brain.IndexText(obj); st != "" {
 		props = append(props, helix.Prop("search_text", st))
 	}
 	if obj.NamespaceID != uuid.Nil {
@@ -103,48 +112,11 @@ func (g *Graph) EnsureObject(ctx context.Context, obj brain.Object) error {
 	if len(obj.Embedding) > 0 {
 		props = append(props, helix.Prop("embedding", obj.Embedding))
 	}
-	req := q.
-		VarAs("dropped", helix.G().
-			NWhere(helix.SourceEq("object_id", oid)).
-			Drop().
-			Count()).
-		VarAs("n", helix.G().AddN(NodeLabel, props)).
-		Returning("n")
-	if err := g.client.Exec(ctx, req, nil, helix.WriterOnly()); err != nil {
-		return fmt.Errorf("helixgraph: ensure object: %w", err)
-	}
-	return nil
-}
-
-func objectSearchText(obj brain.Object) string {
-	t := strings.TrimSpace(obj.Title)
-	s := strings.TrimSpace(obj.Summary)
-	c := strings.TrimSpace(obj.Content)
-	switch {
-	case t == "" && s == "" && c == "":
-		return ""
-	case s == "" && c == "":
-		return t
-	case t == "" && c == "":
-		return s
-	case t == "" && s == "":
-		return c
-	case c == "":
-		return t + "\n" + s
-	case s == "":
-		return t + "\n" + c
-	case t == "":
-		return s + "\n" + c
-	default:
-		return t + "\n" + s + "\n" + c
-	}
+	return props
 }
 
 // AddEdge implements brain.GraphWriter.
 func (g *Graph) AddEdge(ctx context.Context, from, to uuid.UUID, relationType string) error {
-	if g.client == nil {
-		return fmt.Errorf("helixgraph: not configured")
-	}
 	rel := strings.TrimSpace(relationType)
 	if from == uuid.Nil || to == uuid.Nil || rel == "" {
 		return fmt.Errorf("helixgraph: from, to, and relation type are required")
@@ -169,9 +141,6 @@ type neighborRow struct {
 
 // Neighbors implements brain.GraphReader via Helix Both(label) traversal.
 func (g *Graph) Neighbors(ctx context.Context, objectID uuid.UUID, relationTypes []string, limit int) ([]brain.GraphNeighbor, error) {
-	if g.client == nil {
-		return nil, fmt.Errorf("helixgraph: not configured")
-	}
 	if objectID == uuid.Nil {
 		return nil, nil
 	}
@@ -232,13 +201,9 @@ func (g *Graph) neighborsForLabel(ctx context.Context, objectID uuid.UUID, label
 		return nil, fmt.Errorf("helixgraph: neighbors %q: %w", label, err)
 	}
 
-	var ids []uuid.UUID
+	ids := make([]uuid.UUID, 0, len(raw.Neighbors.Properties))
 	for _, row := range raw.Neighbors.Properties {
-		s := strings.TrimSpace(row.ObjectID)
-		if s == "" {
-			continue
-		}
-		id, err := uuid.Parse(s)
+		id, err := uuid.Parse(strings.TrimSpace(row.ObjectID))
 		if err != nil {
 			continue
 		}

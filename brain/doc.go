@@ -39,9 +39,12 @@
 // for entity-centric recall (not a second copy of corpus BM25).
 //
 // On Put, when WithGraph provides a GraphWriter: dual-write a searchable graph
-// node (props + embedding + timestamps). Engine.Link writes edges for expand.
-// Embeddings: when WithEmbedder is set, Put embeds content and fails closed on
+// node (props + embedding + timestamps via IndexText). Engine.Link writes edges
+// for expand; HasGraphWriter gates the agent link tool.
+// Embeddings: when WithEmbedder is set, Put embeds IndexText and fails closed on
 // embed errors; the same vector feeds Postgres hybrid search and Helix node indexes.
+// Graph-contextual text/vector search on Helix is not yet a first-class Engine API
+// (expand + corpus search cover the current agent surface).
 //
 // Temporal ranking (λ decay) is owned by the Engine after candidate fusion;
 // updated_at/created_at are stored on objects (and Helix nodes) for filters/sort.

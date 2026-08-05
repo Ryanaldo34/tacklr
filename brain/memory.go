@@ -1,6 +1,7 @@
 package brain
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -143,28 +144,19 @@ func (s *MemoryStore) ListChildren(_ context.Context, scope Scope, parentID uuid
 		out = append(out, cloneObject(obj))
 	}
 	slices.SortFunc(out, func(a, b Object) int {
-		pa, pb := 0, 0
-		if a.Position != nil {
-			pa = *a.Position
+		if c := cmp.Compare(positionOf(a), positionOf(b)); c != 0 {
+			return c
 		}
-		if b.Position != nil {
-			pb = *b.Position
-		}
-		if pa < pb {
-			return -1
-		}
-		if pa > pb {
-			return 1
-		}
-		if a.ID.String() < b.ID.String() {
-			return -1
-		}
-		if a.ID.String() > b.ID.String() {
-			return 1
-		}
-		return 0
+		return cmpUUID(a.ID, b.ID)
 	})
 	return out, nil
+}
+
+func positionOf(o Object) int {
+	if o.Position == nil {
+		return 0
+	}
+	return *o.Position
 }
 
 // GetKind implements KindReader.
@@ -187,13 +179,7 @@ func (s *MemoryStore) ListKinds(_ context.Context) ([]ObjectKind, error) {
 		out = append(out, k)
 	}
 	slices.SortFunc(out, func(a, b ObjectKind) int {
-		if a.Kind < b.Kind {
-			return -1
-		}
-		if a.Kind > b.Kind {
-			return 1
-		}
-		return 0
+		return strings.Compare(a.Kind, b.Kind)
 	})
 	return out, nil
 }
@@ -207,51 +193,45 @@ func (s *MemoryStore) SearchLexical(_ context.Context, scope Scope, query string
 	if len(qTokens) == 0 || k <= 0 {
 		return nil, nil
 	}
-	parts := s.candidateParts(scope, filters)
-	df := map[string]int{}
-	docs := make([]struct {
+	parts, err := s.candidateParts(scope, filters)
+	if err != nil {
+		return nil, err
+	}
+	type doc struct {
 		obj    Object
 		tokens map[string]int
-	}, 0, len(parts))
+		len    int
+	}
+	df := make(map[string]int)
+	docs := make([]doc, 0, len(parts))
 	for _, obj := range parts {
 		toks := tokenize(searchText(obj))
-		tf := map[string]int{}
+		if len(toks) == 0 {
+			continue
+		}
+		tf := make(map[string]int, len(toks))
 		for _, t := range toks {
 			tf[t]++
 		}
-		seen := map[string]struct{}{}
 		for t := range tf {
-			if _, ok := seen[t]; !ok {
-				df[t]++
-				seen[t] = struct{}{}
-			}
+			df[t]++
 		}
-		docs = append(docs, struct {
-			obj    Object
-			tokens map[string]int
-		}{obj: obj, tokens: tf})
+		docs = append(docs, doc{obj: obj, tokens: tf, len: len(toks)})
 	}
 	n := float64(len(docs))
 	if n == 0 {
 		return nil, nil
 	}
-	var scored []ScoredID
+	scored := make([]ScoredID, 0, len(docs))
 	for _, d := range docs {
 		var score float64
-		dl := 0
-		for _, c := range d.tokens {
-			dl += c
-		}
-		if dl == 0 {
-			continue
-		}
 		for _, qt := range qTokens {
 			tf := float64(d.tokens[qt])
 			if tf == 0 {
 				continue
 			}
 			idf := math.Log(1 + n/float64(1+df[qt]))
-			score += (tf / float64(dl)) * idf
+			score += (tf / float64(d.len)) * idf
 		}
 		if score <= 0 {
 			continue
@@ -268,8 +248,12 @@ func (s *MemoryStore) SearchVector(_ context.Context, scope Scope, embedding []f
 	if len(embedding) == 0 || k <= 0 {
 		return nil, nil
 	}
-	var scored []ScoredID
-	for _, obj := range s.candidateParts(scope, filters) {
+	parts, err := s.candidateParts(scope, filters)
+	if err != nil {
+		return nil, err
+	}
+	scored := make([]ScoredID, 0, len(parts))
+	for _, obj := range parts {
 		if len(obj.Embedding) != len(embedding) {
 			continue
 		}
@@ -290,9 +274,13 @@ func (s *MemoryStore) SearchTrigram(_ context.Context, scope Scope, query string
 	if q == "" || k <= 0 {
 		return nil, nil
 	}
+	parts, err := s.candidateParts(scope, filters)
+	if err != nil {
+		return nil, err
+	}
 	qTri := trigrams(q)
-	var scored []ScoredID
-	for _, obj := range s.candidateParts(scope, filters) {
+	scored := make([]ScoredID, 0, len(parts))
+	for _, obj := range parts {
 		text := strings.ToLower(searchText(obj))
 		if text == "" {
 			continue
@@ -311,8 +299,13 @@ func (s *MemoryStore) SearchTrigram(_ context.Context, scope Scope, query string
 	return topKScored(scored, k), nil
 }
 
-func (s *MemoryStore) candidateParts(scope Scope, filters Filters) []Object {
-	var out []Object
+// candidateParts returns live store values under the caller's lock; do not retain across unlock.
+func (s *MemoryStore) candidateParts(scope Scope, filters Filters) ([]Object, error) {
+	plan, err := compileFilters(filters)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Object, 0)
 	for _, obj := range s.objects {
 		if obj.DeletedAt != nil || obj.ParentID == nil {
 			continue
@@ -320,12 +313,12 @@ func (s *MemoryStore) candidateParts(scope Scope, filters Filters) []Object {
 		if scope.Namespace != nil && obj.NamespaceID != *scope.Namespace {
 			continue
 		}
-		if !objectMatchesFilters(obj, filters) {
+		if !plan.match(obj) {
 			continue
 		}
 		out = append(out, obj)
 	}
-	return out
+	return out, nil
 }
 
 func scoredFromObject(obj Object, score float64) ScoredID {
@@ -353,25 +346,9 @@ func topKScored(in []ScoredID, k int) []ScoredID {
 }
 
 func tokenize(s string) []string {
-	s = strings.ToLower(s)
-	var b strings.Builder
-	var out []string
-	flush := func() {
-		if b.Len() == 0 {
-			return
-		}
-		out = append(out, b.String())
-		b.Reset()
-	}
-	for _, r := range s {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			b.WriteRune(r)
-			continue
-		}
-		flush()
-	}
-	flush()
-	return out
+	return strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
 }
 
 func cosine(a, b []float32) float32 {

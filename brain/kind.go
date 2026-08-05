@@ -221,11 +221,7 @@ func ObjectKindFromSpec(spec KindSpec) (ObjectKind, error) {
 }
 
 func objectKindFromNormalized(spec KindSpec) ObjectKind {
-	raw, err := json.Marshal(spec.Fields)
-	if err != nil {
-		// FieldSpec is a plain struct; encoding/json does not fail in practice.
-		raw = []byte("[]")
-	}
+	raw, _ := json.Marshal(spec.Fields) // FieldSpec is plain JSON; marshal cannot fail
 	return ObjectKind{
 		Kind:             spec.Kind,
 		Description:      spec.Description,

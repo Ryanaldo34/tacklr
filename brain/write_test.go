@@ -157,6 +157,17 @@ func TestPut_embedderError(t *testing.T) {
 	}
 }
 
+// TestIndexText_skipsEmptyParts: IndexText joins non-empty fields only.
+func TestIndexText_skipsEmptyParts(t *testing.T) {
+	got := brain.IndexText(brain.Object{Title: " t ", Summary: "", Content: "c"})
+	if got != "t\nc" {
+		t.Fatalf("%q", got)
+	}
+	if brain.IndexText(brain.Object{}) != "" {
+		t.Fatal("empty object")
+	}
+}
+
 // TestLink_expandFindsNeighbor: Put dual-writes graph nodes; Link + Expand returns the target.
 func TestLink_expandFindsNeighbor(t *testing.T) {
 	ctx := context.Background()
@@ -164,6 +175,9 @@ func TestLink_expandFindsNeighbor(t *testing.T) {
 	eng, err := brain.NewEngine(store, brain.WithGraph(brain.NewMemoryGraph()))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !eng.HasGraphWriter() {
+		t.Fatal("WithGraph(MemoryGraph) must report HasGraphWriter")
 	}
 	ns := uuid.New()
 	scope := brain.Scope{Namespace: &ns}
@@ -199,6 +213,9 @@ func TestLink_expandFindsNeighbor(t *testing.T) {
 	engNoGraph, err := brain.NewEngine(store)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if engNoGraph.HasGraphWriter() {
+		t.Fatal("engine without WithGraph must not report HasGraphWriter")
 	}
 	if err := engNoGraph.Link(ctx, a.ID, b.ID, "references"); err == nil {
 		t.Fatal("want graph writer required")

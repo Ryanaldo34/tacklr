@@ -237,26 +237,23 @@ func valuesEqual(a, b any) bool {
 
 // asFloat64 normalizes JSON/Go numeric literals for equality (int vs float64).
 func asFloat64(v any) (float64, bool) {
-	if n, ok := v.(float64); ok {
+	switch n := v.(type) {
+	case float64:
 		return n, true
-	}
-	if n, ok := v.(float32); ok {
+	case float32:
 		return float64(n), true
-	}
-	if n, ok := v.(int); ok {
+	case int:
 		return float64(n), true
-	}
-	if n, ok := v.(int32); ok {
+	case int32:
 		return float64(n), true
-	}
-	if n, ok := v.(int64); ok {
+	case int64:
 		return float64(n), true
-	}
-	if n, ok := v.(json.Number); ok {
+	case json.Number:
 		f, err := n.Float64()
 		return f, err == nil
+	default:
+		return 0, false
 	}
-	return 0, false
 }
 
 func checkFieldValue(val any, t FieldType) error {

@@ -73,7 +73,7 @@ func (g *MemoryGraph) AddEdge(_ context.Context, from, to uuid.UUID, relationTyp
 	return nil
 }
 
-// Neighbors implements GraphReader (Both directions, deduped by object id).
+// Neighbors implements GraphReader (both directions, deduped by object id).
 func (g *MemoryGraph) Neighbors(_ context.Context, objectID uuid.UUID, relationTypes []string, limit int) ([]GraphNeighbor, error) {
 	if objectID == uuid.Nil || limit <= 0 {
 		return nil, nil
@@ -83,28 +83,32 @@ func (g *MemoryGraph) Neighbors(_ context.Context, objectID uuid.UUID, relationT
 	defer g.mu.RUnlock()
 
 	seen := map[uuid.UUID]struct{}{objectID: {}}
-	var out []GraphNeighbor
-	add := func(id uuid.UUID, rel, dir string) {
-		if _, ok := seen[id]; ok || len(out) >= limit {
-			return
-		}
-		seen[id] = struct{}{}
-		out = append(out, GraphNeighbor{ObjectID: id, RelationType: rel, Direction: dir})
-	}
+	out := make([]GraphNeighbor, 0, limit)
 	for _, rel := range types {
 		for _, id := range g.out[objectID][rel] {
-			add(id, rel, "out")
+			if _, ok := seen[id]; ok || len(out) >= limit {
+				continue
+			}
+			seen[id] = struct{}{}
+			out = append(out, GraphNeighbor{ObjectID: id, RelationType: rel, Direction: "out"})
 		}
 		for _, id := range g.in[objectID][rel] {
-			add(id, rel, "in")
+			if _, ok := seen[id]; ok || len(out) >= limit {
+				continue
+			}
+			seen[id] = struct{}{}
+			out = append(out, GraphNeighbor{ObjectID: id, RelationType: rel, Direction: "in"})
+		}
+		if len(out) >= limit {
+			break
 		}
 	}
 	return out, nil
 }
 
 func normalizeRelationList(rels []string) []string {
-	var out []string
-	seen := map[string]struct{}{}
+	out := make([]string, 0, len(rels))
+	seen := make(map[string]struct{}, len(rels))
 	for _, r := range rels {
 		r = strings.TrimSpace(r)
 		if r == "" {

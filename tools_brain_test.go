@@ -48,6 +48,25 @@ func TestBrainTools_saveDiscoveryAndLink(t *testing.T) {
 		t.Fatal("save_memory must be omitted when Memory kind is empty")
 	}
 
+	// Without a GraphWriter the link tool is not registered.
+	engNoGraph, err := brain.NewEngine(store, brain.WithKinds(
+		brain.KindSpec{Kind: "Discovery", IsParent: true},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hNoGraph := NewAgent(ctx, AgentOptions{
+		Config: Config{MaxWindowSize: 1024}, Model: &mockStrategy{},
+		Brain: engNoGraph, BrainWriteKinds: brain.WriteKinds{Discovery: "Discovery"},
+		SearchNamespace: &ns,
+	})
+	if hNoGraph.findTool("link", "") != nil {
+		t.Fatal("link must be omitted without GraphWriter")
+	}
+	if hNoGraph.findTool("save_discovery", "") == nil {
+		t.Fatal("save_discovery still required")
+	}
+
 	out, err := saveDisc.invoke(ctx, `{"title":"finding","content":"learned X"}`, h.runtime)
 	if err != nil {
 		t.Fatal(err)
