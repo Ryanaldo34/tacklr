@@ -27,8 +27,8 @@ func TestEval_goldenSearchQueries(t *testing.T) {
 	} {
 		pid := uuid.New()
 		pos := 1
-		_ = store.Put(brain.Object{ID: pid, Kind: "Document", Title: d.title, NamespaceID: ns, UpdatedAt: now})
-		_ = store.Put(brain.Object{
+		_ = store.Put(context.Background(), brain.Object{ID: pid, Kind: "Document", Title: d.title, NamespaceID: ns, UpdatedAt: now})
+		_ = store.Put(context.Background(), brain.Object{
 			ID: uuid.New(), Kind: "Chunk", Content: d.body, ParentID: &pid, Position: &pos,
 			NamespaceID: ns, UpdatedAt: now,
 		})
@@ -72,8 +72,8 @@ func TestEval_degradeEmbedderKeepsLexical(t *testing.T) {
 	now := time.Now().UTC()
 	parent, part := uuid.New(), uuid.New()
 	pos := 1
-	_ = store.Put(brain.Object{ID: parent, Kind: "Document", Title: "Widgets", NamespaceID: ns, UpdatedAt: now})
-	_ = store.Put(brain.Object{
+	_ = store.Put(context.Background(), brain.Object{ID: parent, Kind: "Document", Title: "Widgets", NamespaceID: ns, UpdatedAt: now})
+	_ = store.Put(context.Background(), brain.Object{
 		ID: part, Kind: "Chunk", Content: "unique-widget-token alpha", ParentID: &parent, Position: &pos,
 		NamespaceID: ns, UpdatedAt: now, Embedding: []float32{1, 0},
 	})
@@ -102,8 +102,8 @@ func TestEval_degradeGraphKeepsContainment(t *testing.T) {
 	now := time.Now().UTC()
 	parent, child := uuid.New(), uuid.New()
 	pos := 1
-	_ = store.Put(brain.Object{ID: parent, Kind: "Document", NamespaceID: ns, UpdatedAt: now})
-	_ = store.Put(brain.Object{
+	_ = store.Put(context.Background(), brain.Object{ID: parent, Kind: "Document", NamespaceID: ns, UpdatedAt: now})
+	_ = store.Put(context.Background(), brain.Object{
 		ID: child, Kind: "Chunk", Content: "c", ParentID: &parent, Position: &pos,
 		NamespaceID: ns, UpdatedAt: now,
 	})
@@ -128,11 +128,11 @@ func TestConcurrent_searchAndExpand(t *testing.T) {
 	ns := uuid.New()
 	now := time.Now().UTC()
 	parent := uuid.New()
-	_ = store.Put(brain.Object{ID: parent, Kind: "Document", Title: "Doc", NamespaceID: ns, UpdatedAt: now})
+	_ = store.Put(context.Background(), brain.Object{ID: parent, Kind: "Document", Title: "Doc", NamespaceID: ns, UpdatedAt: now})
 	for i := 1; i <= 8; i++ {
 		id := uuid.New()
 		pos := i
-		_ = store.Put(brain.Object{
+		_ = store.Put(context.Background(), brain.Object{
 			ID: id, Kind: "Chunk", Content: "concurrent retrieval token",
 			ParentID: &parent, Position: &pos, NamespaceID: ns, UpdatedAt: now,
 		})

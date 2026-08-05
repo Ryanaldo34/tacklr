@@ -20,7 +20,7 @@ func TestBrainTools_hostNamespaceScopedRead(t *testing.T) {
 	other := uuid.New()
 	docID := uuid.New()
 
-	if err := store.Put(brain.Object{
+	if err := store.Put(context.Background(), brain.Object{
 		ID: docID, Kind: "Document", Title: "Deal memo",
 		Summary: "Q3", Content: "full body", ContentType: "text/plain",
 		NamespaceID: ns, Properties: map[string]any{"stage": "negotiation"},
@@ -113,12 +113,12 @@ func TestBrainTools_searchFindExactContinueAndCheckpoint(t *testing.T) {
 		}
 		part := uuid.New()
 		pos := 1
-		if err := store.Put(brain.Object{
+		if err := store.Put(context.Background(), brain.Object{
 			ID: parent, Kind: "Document", Title: "Doc", NamespaceID: ns, UpdatedAt: now,
 		}); err != nil {
 			t.Fatal(err)
 		}
-		if err := store.Put(brain.Object{
+		if err := store.Put(context.Background(), brain.Object{
 			ID: part, Kind: "Chunk", Title: "knowledge-chunk", Content: "shared knowledge base retrieval material item",
 			ParentID: &parent, Position: &pos, NamespaceID: ns, UpdatedAt: now,
 		}); err != nil {
@@ -206,8 +206,8 @@ func TestBrainTools_expandChildren(t *testing.T) {
 	parent := uuid.New()
 	child := uuid.New()
 	pos := 1
-	_ = store.Put(brain.Object{ID: parent, Kind: "Document", Title: "P", NamespaceID: ns, UpdatedAt: now})
-	_ = store.Put(brain.Object{
+	_ = store.Put(context.Background(), brain.Object{ID: parent, Kind: "Document", Title: "P", NamespaceID: ns, UpdatedAt: now})
+	_ = store.Put(context.Background(), brain.Object{
 		ID: child, Kind: "Chunk", Title: "C", Content: "secret",
 		ParentID: &parent, Position: &pos, NamespaceID: ns, UpdatedAt: now,
 	})
@@ -244,7 +244,7 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 	store := brain.NewMemoryStore()
 	ns := uuid.New()
 	docID := uuid.New()
-	if err := store.Put(brain.Object{
+	if err := store.Put(context.Background(), brain.Object{
 		ID: docID, Kind: "Document", Title: "Shared", Content: "worker-visible",
 		NamespaceID: ns,
 	}); err != nil {
@@ -254,8 +254,8 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 	parent := uuid.New()
 	part := uuid.New()
 	pos := 1
-	_ = store.Put(brain.Object{ID: parent, Kind: "Document", Title: "P", NamespaceID: ns})
-	_ = store.Put(brain.Object{
+	_ = store.Put(context.Background(), brain.Object{ID: parent, Kind: "Document", Title: "P", NamespaceID: ns})
+	_ = store.Put(context.Background(), brain.Object{
 		ID: part, Kind: "Chunk", Content: "worker search isolation token",
 		ParentID: &parent, Position: &pos, NamespaceID: ns,
 	})

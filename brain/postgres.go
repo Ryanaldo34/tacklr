@@ -117,6 +117,80 @@ func (s *PostgresStore) ListChildren(ctx context.Context, scope Scope, parentID 
 	return out, nil
 }
 
+// Put implements ObjectWriter (full-column upsert; clears soft-delete on revive).
+func (s *PostgresStore) Put(ctx context.Context, obj Object) error {
+	if err := requireObjectIdentity(obj); err != nil {
+		return err
+	}
+	if obj.Properties == nil {
+		obj.Properties = map[string]any{}
+	}
+	propsJSON, err := json.Marshal(obj.Properties)
+	if err != nil {
+		return fmt.Errorf("brain: marshal properties: %w", err)
+	}
+	var emb any
+	if len(obj.Embedding) > 0 {
+		emb = formatVectorLiteral(obj.Embedding)
+	}
+	now := time.Now().UTC()
+	if obj.CreatedAt.IsZero() {
+		obj.CreatedAt = now
+	}
+	if obj.UpdatedAt.IsZero() {
+		obj.UpdatedAt = now
+	}
+	const q = `
+		INSERT INTO objects (
+			id, kind, title, summary, properties, content, content_type,
+			parent_id, position, embedding, namespace_id, created_at, updated_at, deleted_at
+		) VALUES (
+			$1, $2, $3, $4, $5::jsonb, $6, $7,
+			$8, $9, $10::vector, $11, $12, $13, NULL
+		)
+		ON CONFLICT (id) DO UPDATE SET
+			kind = EXCLUDED.kind,
+			title = EXCLUDED.title,
+			summary = EXCLUDED.summary,
+			properties = EXCLUDED.properties,
+			content = EXCLUDED.content,
+			content_type = EXCLUDED.content_type,
+			parent_id = EXCLUDED.parent_id,
+			position = EXCLUDED.position,
+			embedding = EXCLUDED.embedding,
+			namespace_id = EXCLUDED.namespace_id,
+			updated_at = EXCLUDED.updated_at,
+			deleted_at = NULL`
+	if _, err := s.db.Exec(ctx, q,
+		obj.ID, obj.Kind, obj.Title, obj.Summary, propsJSON, obj.Content, obj.ContentType,
+		obj.ParentID, obj.Position, emb, obj.NamespaceID, obj.CreatedAt, obj.UpdatedAt,
+	); err != nil {
+		return fmt.Errorf("brain: put object: %w", err)
+	}
+	return nil
+}
+
+// SoftDelete implements ObjectWriter.
+func (s *PostgresStore) SoftDelete(ctx context.Context, scope Scope, id uuid.UUID) error {
+	if id == uuid.Nil {
+		return fmt.Errorf("brain: object id is required")
+	}
+	q := `UPDATE objects SET deleted_at = $1, updated_at = $1 WHERE id = $2 AND deleted_at IS NULL`
+	args := []any{time.Now().UTC(), id}
+	if scope.Namespace != nil {
+		q += ` AND namespace_id = $3`
+		args = append(args, *scope.Namespace)
+	}
+	tag, err := s.db.Exec(ctx, q, args...)
+	if err != nil {
+		return fmt.Errorf("brain: soft delete: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: %s", ErrNotFound, id)
+	}
+	return nil
+}
+
 // PutKind implements KindWriter.
 func (s *PostgresStore) PutKind(ctx context.Context, k ObjectKind) error {
 	if strings.TrimSpace(k.Kind) == "" {
@@ -134,11 +208,7 @@ func (s *PostgresStore) PutKind(ctx context.Context, k ObjectKind) error {
 			is_part = EXCLUDED.is_part,
 			is_parent = EXCLUDED.is_parent,
 			filterable_fields = EXCLUDED.filterable_fields`
-	var desc any
-	if k.Description != "" {
-		desc = k.Description
-	}
-	if _, err := s.db.Exec(ctx, q, k.Kind, desc, k.IsPart, k.IsParent, []byte(fields)); err != nil {
+	if _, err := s.db.Exec(ctx, q, k.Kind, k.Description, k.IsPart, k.IsParent, []byte(fields)); err != nil {
 		return fmt.Errorf("brain: put kind: %w", err)
 	}
 	return nil

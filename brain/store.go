@@ -15,16 +15,25 @@ type ObjectReader interface {
 	ListChildren(ctx context.Context, scope Scope, parentID uuid.UUID) ([]Object, error)
 }
 
-// KindReader backs schema() discovery and catalog load.
+// KindReader reads durable kind schema rows (schema fallback, LoadKindsFromStore).
 type KindReader interface {
 	GetKind(ctx context.Context, kind string) (ObjectKind, error)
 	ListKinds(ctx context.Context) ([]ObjectKind, error)
 }
 
-// KindWriter persists kind registry rows (host bootstrap / SyncKindsToStore).
-// Not required for open-mode engines with an empty catalog.
+// KindWriter upserts durable kind schema rows (ApplyKinds / PersistKinds).
+// Not required for open-mode or process-only catalogs. Together with KindReader
+// this is KindRegistry — implement both for a custom durable backend.
 type KindWriter interface {
 	PutKind(ctx context.Context, k ObjectKind) error
+}
+
+// ObjectWriter persists knowledge objects (Engine.Put / SoftDelete).
+// PostgresStore and MemoryStore implement it. Custom backends implement for
+// non-Postgres deployments. Not required for read-only engines.
+type ObjectWriter interface {
+	Put(ctx context.Context, obj Object) error
+	SoftDelete(ctx context.Context, scope Scope, id uuid.UUID) error
 }
 
 // PartSearcher is the candidate retrieval port for hybrid / exact search.

@@ -75,6 +75,15 @@ func (c *KindCatalog) Freeze() {
 	c.frozen = true
 }
 
+func (c *KindCatalog) ensureNotFrozen() error {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.frozen {
+		return errCatalogFrozen
+	}
+	return nil
+}
+
 // Get returns a copy of the kind spec when present.
 func (c *KindCatalog) Get(kind string) (KindSpec, bool) {
 	c.mu.RLock()
@@ -113,7 +122,7 @@ func (c *KindCatalog) register(specs ...KindSpec) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.frozen {
-		return fmt.Errorf("brain: kind catalog is frozen")
+		return errCatalogFrozen
 	}
 	maps.Copy(c.kinds, batch)
 	return nil
@@ -124,14 +133,23 @@ func (c *KindCatalog) replace(specs []KindSpec) error {
 	if err != nil {
 		return err
 	}
+	return c.replaceNormalized(batch)
+}
+
+func (c *KindCatalog) replaceNormalized(batch map[string]KindSpec) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.frozen {
-		return fmt.Errorf("brain: kind catalog is frozen")
+		return errCatalogFrozen
+	}
+	if batch == nil {
+		batch = map[string]KindSpec{}
 	}
 	c.kinds = batch
 	return nil
 }
+
+var errCatalogFrozen = fmt.Errorf("brain: kind catalog is frozen")
 
 func normalizeKindBatch(specs []KindSpec) (map[string]KindSpec, error) {
 	out := make(map[string]KindSpec, len(specs))
@@ -247,8 +265,8 @@ func ObjectKindFromSpec(spec KindSpec) (ObjectKind, error) {
 func objectKindFromNormalized(spec KindSpec) ObjectKind {
 	raw, err := json.Marshal(spec.Fields)
 	if err != nil {
-		// FieldSpec is a plain struct graph; marshal fails only on programmer error.
-		raw = json.RawMessage("[]")
+		// FieldSpec is a plain struct; encoding/json does not fail here in practice.
+		raw = []byte("[]")
 	}
 	return ObjectKind{
 		Kind:             spec.Kind,
@@ -261,9 +279,11 @@ func objectKindFromNormalized(spec KindSpec) ObjectKind {
 
 // KindSpecFromObjectKind parses a registry row into a KindSpec.
 func KindSpecFromObjectKind(k ObjectKind) (KindSpec, error) {
-	fields, err := parseFilterableFields(k.FilterableFields)
-	if err != nil {
-		return KindSpec{}, fmt.Errorf("brain: kind %q: %w", k.Kind, err)
+	var fields []FieldSpec
+	if len(k.FilterableFields) > 0 {
+		if err := json.Unmarshal(k.FilterableFields, &fields); err != nil {
+			return KindSpec{}, fmt.Errorf("brain: kind %q filterable_fields: %w", k.Kind, err)
+		}
 	}
 	return NormalizeKindSpec(KindSpec{
 		Kind:        k.Kind,
@@ -272,17 +292,6 @@ func KindSpecFromObjectKind(k ObjectKind) (KindSpec, error) {
 		IsPart:      k.IsPart,
 		Fields:      fields,
 	})
-}
-
-func parseFilterableFields(raw json.RawMessage) ([]FieldSpec, error) {
-	if len(raw) == 0 || string(raw) == "null" {
-		return nil, nil
-	}
-	var fields []FieldSpec
-	if err := json.Unmarshal(raw, &fields); err != nil {
-		return nil, fmt.Errorf("filterable_fields: %w", err)
-	}
-	return fields, nil
 }
 
 // KindInfoFromSpec builds the agent-facing schema payload for one kind.

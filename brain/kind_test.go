@@ -79,7 +79,7 @@ func TestValidateFiltersAgainst_catalogRules(t *testing.T) {
 		{"property requires kind", brain.Filters{"stage": "open"}, "require a kind"},
 		{"unregistered kind", brain.Filters{"kind": "Orphan"}, "not registered"},
 		{"unknown property", brain.Filters{"kind": "Document", "unknown": "x"}, "not filterable"},
-		{"wrong type", brain.Filters{"kind": "Document", "stage": 1}, "wants string"},
+		{"wrong type", brain.Filters{"kind": "Document", "stage": 1}, "want string"},
 		{"kind list intersection", brain.Filters{"kind": []any{"Document", "Deal"}, "stage": "open"}, "not filterable"},
 		{"valid single kind", brain.Filters{"kind": "Document", "stage": "open"}, ""},
 		{"valid shared field on one kind", brain.Filters{"kind": "Deal", "amount": 42}, ""},
@@ -177,23 +177,23 @@ func TestSearch_catalogRestrictsKindsAndAllowsFilteredHit(t *testing.T) {
 	orphanParent := uuid.New()
 	pos := 1
 
-	if err := store.Put(brain.Object{
+	if err := store.Put(context.Background(), brain.Object{
 		ID: docID, Kind: "Document", Title: "Deal memo", NamespaceID: ns, UpdatedAt: now,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Put(brain.Object{
+	if err := store.Put(context.Background(), brain.Object{
 		ID: uuid.New(), Kind: "Chunk", Title: "chunk", Content: "negotiation terms",
 		NamespaceID: ns, UpdatedAt: now, ParentID: &docID, Position: &pos,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Put(brain.Object{
+	if err := store.Put(context.Background(), brain.Object{
 		ID: orphanParent, Kind: "OrphanKind", Title: "orphan parent", NamespaceID: ns, UpdatedAt: now,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Put(brain.Object{
+	if err := store.Put(context.Background(), brain.Object{
 		ID: uuid.New(), Kind: "OrphanKind", Title: "orphan part", Content: "negotiation secret",
 		NamespaceID: ns, UpdatedAt: now, ParentID: &orphanParent, Position: &pos,
 	}); err != nil {
@@ -237,26 +237,65 @@ func TestSearch_catalogRestrictsKindsAndAllowsFilteredHit(t *testing.T) {
 	}
 }
 
-func TestSyncAndLoadKinds_memoryRoundTrip(t *testing.T) {
+func TestApplyKinds_migrationAddAndModify(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	eng, err := brain.NewEngine(store, brain.WithKinds(
-		brain.KindSpec{
-			Kind: "Deal", IsParent: true,
-			Fields: []brain.FieldSpec{{Name: "stage", Type: brain.FieldTypeString}},
-		},
-	))
+	eng, err := brain.NewEngine(store)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := eng.SyncKindsToStore(ctx); err != nil {
+
+	// V1 migration: Document + Chunk
+	if err := eng.ApplyKinds(ctx,
+		brain.KindSpec{
+			Kind: "Document", IsParent: true, Description: "docs v1",
+			Fields: []brain.FieldSpec{{Name: "stage", Type: brain.FieldTypeString}},
+		},
+		brain.KindSpec{Kind: "Chunk", IsPart: true},
+	); err != nil {
 		t.Fatal(err)
 	}
-	row, err := store.GetKind(ctx, "Deal")
-	if err != nil || row.Kind != "Deal" || !row.IsParent {
-		t.Fatalf("stored: %+v err=%v", row, err)
+	if eng.Catalog().Empty() || len(eng.Catalog().Names()) != 2 {
+		t.Fatalf("catalog after v1: %v", eng.Catalog().Names())
+	}
+	row, err := store.GetKind(ctx, "Document")
+	if err != nil || row.Description != "docs v1" {
+		t.Fatalf("durable v1: %+v err=%v", row, err)
 	}
 
+	// V2 migration: modify Document fields, add Deal (desired process set)
+	if err := eng.ApplyKinds(ctx,
+		brain.KindSpec{
+			Kind: "Document", IsParent: true, Description: "docs v2",
+			Fields: []brain.FieldSpec{
+				{Name: "stage", Type: brain.FieldTypeString},
+				{Name: "amount", Type: brain.FieldTypeNumber},
+			},
+		},
+		brain.KindSpec{Kind: "Chunk", IsPart: true},
+		brain.KindSpec{Kind: "Deal", IsParent: true, Fields: []brain.FieldSpec{
+			{Name: "stage", Type: brain.FieldTypeString},
+		}},
+	); err != nil {
+		t.Fatal(err)
+	}
+	doc, ok := eng.Catalog().Get("Document")
+	if !ok || doc.Description != "docs v2" || len(doc.Fields) != 2 {
+		t.Fatalf("catalog document v2: %+v", doc)
+	}
+	if _, ok := eng.Catalog().Get("Deal"); !ok {
+		t.Fatal("deal missing from catalog")
+	}
+	// Process catalog is exactly the apply set (not a merge of history).
+	if len(eng.Catalog().Names()) != 3 {
+		t.Fatalf("names: %v", eng.Catalog().Names())
+	}
+	row, err = store.GetKind(ctx, "Document")
+	if err != nil || row.Description != "docs v2" {
+		t.Fatalf("durable v2: %+v err=%v", row, err)
+	}
+
+	// New process adopts durable state via LoadKindsFromStore.
 	eng2, err := brain.NewEngine(store)
 	if err != nil {
 		t.Fatal(err)
@@ -264,13 +303,49 @@ func TestSyncAndLoadKinds_memoryRoundTrip(t *testing.T) {
 	if err := eng2.LoadKindsFromStore(ctx); err != nil {
 		t.Fatal(err)
 	}
-	spec, ok := eng2.Catalog().Get("Deal")
-	if !ok || len(spec.Fields) != 1 || spec.Fields[0].Name != "stage" {
+	spec, ok := eng2.Catalog().Get("Document")
+	if !ok || len(spec.Fields) != 2 || spec.Description != "docs v2" {
 		t.Fatalf("loaded: %+v ok=%v", spec, ok)
 	}
+
+	// PersistKinds works without Engine (custom bootstrap).
+	if err := brain.PersistKinds(ctx, store, brain.KindSpec{
+		Kind: "Note", IsParent: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.GetKind(ctx, "Note"); err != nil {
+		t.Fatal(err)
+	}
+
 	eng2.FreezeCatalog()
+	if err := eng2.ApplyKinds(ctx, brain.KindSpec{Kind: "X", IsParent: true}); err == nil {
+		t.Fatal("want frozen apply error")
+	}
 	if err := eng2.LoadKindsFromStore(ctx); err == nil {
 		t.Fatal("want frozen load error")
+	}
+}
+
+func TestApplyKinds_invalidBatchFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	store := brain.NewMemoryStore()
+	eng, err := brain.NewEngine(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = eng.ApplyKinds(ctx,
+		brain.KindSpec{Kind: "Document", IsParent: true},
+		brain.KindSpec{}, // invalid
+	)
+	if err == nil {
+		t.Fatal("want error")
+	}
+	if !eng.Catalog().Empty() {
+		t.Fatal("catalog must stay empty on failed migration")
+	}
+	if _, err := store.GetKind(ctx, "Document"); !errors.Is(err, brain.ErrNotFound) {
+		t.Fatalf("no partial durable write on batch validate fail: %v", err)
 	}
 }
 

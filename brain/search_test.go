@@ -14,7 +14,7 @@ import (
 func seedDocWithParts(t *testing.T, store *brain.MemoryStore, ns uuid.UUID, title string, partBodies []string, updated time.Time) (parentID uuid.UUID) {
 	t.Helper()
 	parentID = uuid.New()
-	if err := store.Put(brain.Object{
+	if err := store.Put(context.Background(), brain.Object{
 		ID: parentID, Kind: "Document", Title: title, Summary: title,
 		NamespaceID: ns, UpdatedAt: updated, CreatedAt: updated,
 	}); err != nil {
@@ -23,7 +23,7 @@ func seedDocWithParts(t *testing.T, store *brain.MemoryStore, ns uuid.UUID, titl
 	for i, body := range partBodies {
 		pid := uuid.New()
 		pos := i + 1
-		if err := store.Put(brain.Object{
+		if err := store.Put(context.Background(), brain.Object{
 			ID: pid, Kind: "Chunk", Title: title + " part", Content: body,
 			ParentID: &parentID, Position: &pos,
 			NamespaceID: ns, UpdatedAt: updated, CreatedAt: updated,
@@ -105,12 +105,12 @@ func TestSearch_filtersProperty(t *testing.T) {
 	p2 := uuid.New()
 	part := uuid.New()
 	pos := 1
-	if err := store.Put(brain.Object{
+	if err := store.Put(context.Background(), brain.Object{
 		ID: p2, Kind: "Document", Title: "Deal B", NamespaceID: ns, UpdatedAt: now,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Put(brain.Object{
+	if err := store.Put(context.Background(), brain.Object{
 		ID: part, Kind: "Chunk", Title: "chunk", Content: "pipeline revenue forecast",
 		ParentID: &p2, Position: &pos, NamespaceID: ns, UpdatedAt: now,
 		Properties: map[string]any{"stage": "negotiation"},
@@ -157,7 +157,7 @@ func TestSearch_hybridWithStubEmbedder(t *testing.T) {
 			Embedding: []float32{1, 0},
 		},
 	} {
-		if err := store.Put(o); err != nil {
+		if err := store.Put(context.Background(), o); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -198,12 +198,12 @@ func TestFindExact_uuidParentAndPart(t *testing.T) {
 	parent := uuid.New()
 	part := uuid.New()
 	pos := 1
-	if err := store.Put(brain.Object{
+	if err := store.Put(context.Background(), brain.Object{
 		ID: parent, Kind: "Document", Title: "Direct", NamespaceID: ns, UpdatedAt: now,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Put(brain.Object{
+	if err := store.Put(context.Background(), brain.Object{
 		ID: part, Kind: "Chunk", Title: "child", Content: "body",
 		ParentID: &parent, Position: &pos, NamespaceID: ns, UpdatedAt: now,
 	}); err != nil {
@@ -247,12 +247,12 @@ func TestFindExact_titleMatch(t *testing.T) {
 	parent := uuid.New()
 	part := uuid.New()
 	pos := 1
-	if err := store.Put(brain.Object{
+	if err := store.Put(context.Background(), brain.Object{
 		ID: parent, Kind: "Document", Title: "Parent", NamespaceID: ns, UpdatedAt: now,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Put(brain.Object{
+	if err := store.Put(context.Background(), brain.Object{
 		ID: part, Kind: "Chunk", Title: "exact-filename.go", Content: "package main",
 		ParentID: &parent, Position: &pos, NamespaceID: ns, UpdatedAt: now,
 	}); err != nil {
@@ -382,13 +382,13 @@ func TestFindExact_trigramFuzzy(t *testing.T) {
 	parent := uuid.New()
 	part := uuid.New()
 	pos := 1
-	if err := store.Put(brain.Object{
+	if err := store.Put(context.Background(), brain.Object{
 		ID: parent, Kind: "Document", Title: "P", NamespaceID: ns, UpdatedAt: now,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	// No exact title match and no full substring of the query — only trigram overlap.
-	if err := store.Put(brain.Object{
+	if err := store.Put(context.Background(), brain.Object{
 		ID: part, Kind: "Chunk", Title: "chunk-title",
 		Content:  "abcdefghijklmnopqrstuvwxyz",
 		ParentID: &parent, Position: &pos, NamespaceID: ns, UpdatedAt: now,

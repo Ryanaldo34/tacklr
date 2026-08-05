@@ -143,3 +143,37 @@ func asFloat(v any) (float64, bool) {
 		return 0, false
 	}
 }
+
+// checkFieldValue validates a scalar against FieldType (filters and object properties).
+func checkFieldValue(val any, t FieldType) error {
+	switch t {
+	case FieldTypeString:
+		if _, ok := val.(string); !ok {
+			return fmt.Errorf("want string, got %T", val)
+		}
+	case FieldTypeNumber:
+		if _, ok := asFloat(val); !ok {
+			return fmt.Errorf("want number, got %T", val)
+		}
+	case FieldTypeBoolean:
+		if _, ok := val.(bool); !ok {
+			return fmt.Errorf("want boolean, got %T", val)
+		}
+	case FieldTypeDateTime:
+		switch v := val.(type) {
+		case string:
+			if _, err := parseFilterTime(v); err != nil {
+				return err
+			}
+		case time.Time:
+			if v.IsZero() {
+				return fmt.Errorf("zero time")
+			}
+		default:
+			return fmt.Errorf("want datetime string or time.Time, got %T", val)
+		}
+	default:
+		return fmt.Errorf("unknown type %q", t)
+	}
+	return nil
+}

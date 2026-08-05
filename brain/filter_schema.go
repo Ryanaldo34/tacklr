@@ -51,7 +51,6 @@ func validateFiltersStrict(f Filters, cat *KindCatalog) error {
 	return nil
 }
 
-// kindFilterValues returns the kind names from f["kind"] when present.
 func kindFilterValues(f Filters) (names []string, present bool, err error) {
 	raw, ok := f[filterKind]
 	if !ok {
@@ -82,47 +81,24 @@ func kindFilterValues(f Filters) (names []string, present bool, err error) {
 }
 
 func validateFilterValueType(key string, val any, fs FieldSpec) error {
-	check := func(v any) error {
-		switch fs.Type {
-		case FieldTypeString:
-			if _, ok := v.(string); !ok {
-				return fmt.Errorf("brain: filter %q wants string, got %T", key, v)
+	if items, ok := val.([]any); ok {
+		if fs.Type == FieldTypeBoolean {
+			return fmt.Errorf("brain: filter %q does not support list values for boolean fields", key)
+		}
+		for i, item := range items {
+			if err := checkFieldValue(item, fs.Type); err != nil {
+				return fmt.Errorf("brain: filter %q: %w (list[%d])", key, err, i)
 			}
-		case FieldTypeNumber:
-			if _, ok := asFloat(v); !ok {
-				return fmt.Errorf("brain: filter %q wants number, got %T", key, v)
-			}
-		case FieldTypeBoolean:
-			if _, ok := v.(bool); !ok {
-				return fmt.Errorf("brain: filter %q wants boolean, got %T", key, v)
-			}
-		case FieldTypeDateTime:
-			if _, err := parseFilterTime(v); err != nil {
-				return fmt.Errorf("brain: filter %q: %w", key, err)
-			}
-		default:
-			return fmt.Errorf("brain: filter %q has unknown field type %q", key, fs.Type)
 		}
 		return nil
 	}
-
-	items, isList := val.([]any)
-	if !isList {
-		return check(val)
-	}
-	if fs.Type == FieldTypeBoolean {
-		return fmt.Errorf("brain: filter %q does not support list values for boolean fields", key)
-	}
-	for i, item := range items {
-		if err := check(item); err != nil {
-			return fmt.Errorf("%w (list[%d])", err, i)
-		}
+	if err := checkFieldValue(val, fs.Type); err != nil {
+		return fmt.Errorf("brain: filter %q: %w", key, err)
 	}
 	return nil
 }
 
 // injectKindAllowList copies f and sets kind to all catalog kinds when absent.
-// cat must be non-empty.
 func injectKindAllowList(f Filters, cat *KindCatalog) Filters {
 	out := Filters{}
 	if f != nil {

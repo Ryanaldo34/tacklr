@@ -16,7 +16,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// MemoryStore is an in-process Store for tests and fixtures (Put is not a product write API).
+// MemoryStore is an in-process Store (tests, fixtures, and ObjectWriter for Engine.Put).
 type MemoryStore struct {
 	mu      sync.RWMutex
 	objects map[uuid.UUID]Object
@@ -31,17 +31,12 @@ func NewMemoryStore() *MemoryStore {
 	}
 }
 
-// Put upserts an object. Soft-deleted rows may be stored; Get hides them.
-func (s *MemoryStore) Put(obj Object) error {
-	if obj.ID == uuid.Nil {
-		return fmt.Errorf("brain: object id is required")
+// Put implements ObjectWriter. Soft-deleted rows may be stored; Get hides them.
+func (s *MemoryStore) Put(_ context.Context, obj Object) error {
+	if err := requireObjectIdentity(obj); err != nil {
+		return err
 	}
-	if obj.Kind == "" {
-		return fmt.Errorf("brain: object kind is required")
-	}
-	if obj.NamespaceID == uuid.Nil {
-		return fmt.Errorf("brain: object namespace_id is required")
-	}
+	obj = cloneObject(obj)
 	if obj.Properties == nil {
 		obj.Properties = map[string]any{}
 	}
@@ -55,6 +50,27 @@ func (s *MemoryStore) Put(obj Object) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.objects[obj.ID] = obj
+	return nil
+}
+
+// SoftDelete implements ObjectWriter.
+func (s *MemoryStore) SoftDelete(_ context.Context, scope Scope, id uuid.UUID) error {
+	if id == uuid.Nil {
+		return fmt.Errorf("brain: object id is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	obj, ok := s.objects[id]
+	if !ok || obj.DeletedAt != nil {
+		return fmt.Errorf("%w: %s", ErrNotFound, id)
+	}
+	if scope.Namespace != nil && obj.NamespaceID != *scope.Namespace {
+		return fmt.Errorf("%w: %s", ErrNotFound, id)
+	}
+	now := time.Now().UTC()
+	obj.DeletedAt = &now
+	obj.UpdatedAt = now
+	s.objects[id] = obj
 	return nil
 }
 

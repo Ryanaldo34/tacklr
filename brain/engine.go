@@ -171,39 +171,6 @@ func (e *Engine) Catalog() *KindCatalog {
 	return e.catalog
 }
 
-// SyncKindsToStore upserts the process catalog into the store (when KindWriter is supported).
-// Registration itself does not require durability; the host decides how to handle sync errors.
-func (e *Engine) SyncKindsToStore(ctx context.Context) error {
-	w, ok := e.store.(KindWriter)
-	if !ok {
-		return fmt.Errorf("brain: store does not support kind writes")
-	}
-	for _, spec := range e.catalog.All() {
-		if err := w.PutKind(ctx, objectKindFromNormalized(spec)); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// LoadKindsFromStore replaces the process catalog with kinds from the store.
-// Fails if the catalog is frozen.
-func (e *Engine) LoadKindsFromStore(ctx context.Context) error {
-	rows, err := e.store.ListKinds(ctx)
-	if err != nil {
-		return err
-	}
-	specs := make([]KindSpec, 0, len(rows))
-	for _, row := range rows {
-		spec, err := KindSpecFromObjectKind(row)
-		if err != nil {
-			return err
-		}
-		specs = append(specs, spec)
-	}
-	return e.catalog.replace(specs)
-}
-
 // Read returns the full rich object for id under scope.
 func (e *Engine) Read(ctx context.Context, scope Scope, id uuid.UUID) (RichObject, error) {
 	if id == uuid.Nil {

@@ -313,3 +313,160 @@ func mustExec(t *testing.T, pool *pgxpool.Pool, sql string, args ...any) {
 		t.Fatalf("exec: %v\nsql: %s", err, sql)
 	}
 }
+
+// TestPut_livePostgresUpsertAndSoftDelete is the durable ObjectWriter outcome.
+func TestPut_livePostgresUpsertAndSoftDelete(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping postgres integration test in -short mode")
+	}
+	ctx := context.Background()
+	pool := sharedPostgresPool(t)
+	mustExec(t, pool, `TRUNCATE objects, object_kinds CASCADE`)
+
+	store, err := brain.NewPostgresStore(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var _ brain.ObjectWriter = store
+
+	eng, err := brain.NewEngine(store, brain.WithKinds(
+		brain.KindSpec{
+			Kind: "Document", IsParent: true,
+			Fields: []brain.FieldSpec{{Name: "stage", Type: brain.FieldTypeString}},
+		},
+		brain.KindSpec{Kind: "Chunk", IsPart: true},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ns := uuid.New()
+	scope := brain.Scope{Namespace: &ns}
+
+	doc, err := eng.Put(ctx, scope, brain.Object{
+		Kind: "Document", Title: "live memo",
+		Properties: map[string]any{"stage": "open"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Get(ctx, scope, doc.ID)
+	if err != nil || got.Title != "live memo" {
+		t.Fatalf("get after put: %+v err=%v", got, err)
+	}
+
+	// Upsert title
+	doc.Title = "live memo v2"
+	doc.Properties = map[string]any{"stage": "closed"}
+	if _, err := eng.Put(ctx, scope, doc); err != nil {
+		t.Fatal(err)
+	}
+	got, err = store.Get(ctx, scope, doc.ID)
+	if err != nil || got.Title != "live memo v2" {
+		t.Fatalf("upsert: %+v err=%v", got, err)
+	}
+
+	pos := 1
+	chunk, err := eng.Put(ctx, scope, brain.Object{
+		Kind: "Chunk", Title: "part", Content: "oauth details",
+		ParentID: &doc.ID, Position: &pos,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lex, err := store.SearchLexical(ctx, scope, "oauth", brain.Filters{"kind": "Chunk"}, 5)
+	if err != nil || len(lex) == 0 || lex[0].ID != chunk.ID {
+		t.Fatalf("lexical after put: %+v err=%v", lex, err)
+	}
+
+	if err := eng.SoftDelete(ctx, scope, chunk.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Get(ctx, scope, chunk.ID); !errors.Is(err, brain.ErrNotFound) {
+		t.Fatalf("soft-deleted chunk: %v", err)
+	}
+	lex, err = store.SearchLexical(ctx, scope, "oauth", brain.Filters{"kind": "Chunk"}, 5)
+	if err != nil || len(lex) != 0 {
+		t.Fatalf("search excludes soft-deleted: %+v err=%v", lex, err)
+	}
+}
+
+// TestApplyKinds_livePostgresMigration is the durable KindRegistry outcome:
+// host ApplyKinds upserts object_kinds, a new Engine LoadKindsFromStore adopts
+// them, and schema() / filter validation use the catalog.
+func TestApplyKinds_livePostgresMigration(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping postgres integration test in -short mode")
+	}
+	ctx := context.Background()
+	pool := sharedPostgresPool(t)
+	mustExec(t, pool, `TRUNCATE objects, object_kinds CASCADE`)
+
+	store, err := brain.NewPostgresStore(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Compile-time / runtime: PostgresStore is a KindRegistry.
+	var _ brain.KindRegistry = store
+
+	eng, err := brain.NewEngine(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.ApplyKinds(ctx,
+		brain.KindSpec{
+			Kind: "Document", IsParent: true, Description: "parent docs",
+			Fields: []brain.FieldSpec{
+				{Name: "stage", Type: brain.FieldTypeString},
+			},
+		},
+		brain.KindSpec{Kind: "Chunk", IsPart: true},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	// Modify Document and add Deal (migration v2).
+	if err := eng.ApplyKinds(ctx,
+		brain.KindSpec{
+			Kind: "Document", IsParent: true, Description: "parent docs v2",
+			Fields: []brain.FieldSpec{
+				{Name: "stage", Type: brain.FieldTypeString},
+				{Name: "amount", Type: brain.FieldTypeNumber},
+			},
+		},
+		brain.KindSpec{Kind: "Chunk", IsPart: true},
+		brain.KindSpec{Kind: "Deal", IsParent: true},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	row, err := store.GetKind(ctx, "Document")
+	if err != nil || row.Description != "parent docs v2" {
+		t.Fatalf("upserted document: %+v err=%v", row, err)
+	}
+	if _, err := store.GetKind(ctx, "Deal"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fresh process: load durable kinds (no hard-coded WithKinds).
+	eng2, err := brain.NewEngine(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng2.LoadKindsFromStore(ctx); err != nil {
+		t.Fatal(err)
+	}
+	schema, err := eng2.Schema(ctx, "Document")
+	if err != nil || len(schema.Kinds) != 1 || schema.Kinds[0].Description != "parent docs v2" {
+		t.Fatalf("schema after load: %+v err=%v", schema, err)
+	}
+	if err := brain.ValidateFiltersAgainst(brain.Filters{
+		"kind": "Document", "stage": "open",
+	}, eng2.Catalog()); err != nil {
+		t.Fatal(err)
+	}
+	if err := brain.ValidateFiltersAgainst(brain.Filters{
+		"kind": "Document", "unknown": "x",
+	}, eng2.Catalog()); err == nil {
+		t.Fatal("want unknown property rejected after load")
+	}
+}

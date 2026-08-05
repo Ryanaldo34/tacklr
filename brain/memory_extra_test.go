@@ -14,15 +14,15 @@ func TestMemoryStore_searchChannelsAndClone(t *testing.T) {
 	ns := uuid.New()
 	now := time.Now().UTC()
 	parent := uuid.New()
-	_ = s.Put(Object{ID: parent, Kind: "Document", Title: "Doc", NamespaceID: ns, UpdatedAt: now})
+	_ = s.Put(context.Background(), Object{ID: parent, Kind: "Document", Title: "Doc", NamespaceID: ns, UpdatedAt: now})
 	p1, p2 := uuid.New(), uuid.New()
 	pos1, pos2 := 1, 2
-	_ = s.Put(Object{
+	_ = s.Put(context.Background(), Object{
 		ID: p1, Kind: "Chunk", Title: "alpha", Content: "oauth pkce flow",
 		ParentID: &parent, Position: &pos1, NamespaceID: ns, UpdatedAt: now,
 		Embedding: []float32{1, 0, 0},
 	})
-	_ = s.Put(Object{
+	_ = s.Put(context.Background(), Object{
 		ID: p2, Kind: "Chunk", Title: "beta", Content: "pasta recipes",
 		ParentID: &parent, Position: &pos2, NamespaceID: ns, UpdatedAt: now,
 		Embedding: []float32{0, 1, 0},
