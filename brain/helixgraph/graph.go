@@ -1,4 +1,4 @@
-// Package helixgraph adapts the HelixDB Go SDK to brain.GraphReader.
+// Package helixgraph adapts the HelixDB Go SDK to brain.GraphReader / GraphWriter.
 // Nodes use property object_id (UUID) matching objects.id. Neighbors use Both.
 package helixgraph
 
@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	helix "github.com/helixdb/helix-db/sdks/go"
@@ -13,7 +14,7 @@ import (
 	"github.com/ryanaldo34/tacklr/brain"
 )
 
-// Graph implements brain.GraphReader via HelixDB.
+// Graph implements brain.GraphWriter via HelixDB.
 type Graph struct {
 	client *helix.Client
 }
@@ -44,7 +45,6 @@ func (g *Graph) Client() *helix.Client {
 const NodeLabel = "Object"
 
 // EnsureObjectIndex creates an equality index on Object.object_id when missing.
-// Safe to call once at host startup or in tests before seeding.
 func (g *Graph) EnsureObjectIndex(ctx context.Context) error {
 	if g.client == nil {
 		return fmt.Errorf("helixgraph: not configured")
@@ -60,35 +60,87 @@ func (g *Graph) EnsureObjectIndex(ctx context.Context) error {
 	return nil
 }
 
-// PutObject upserts a graph node with property object_id (objects.id).
-// Hosts call this when dual-writing knowledge objects into Helix.
+// PutObject upserts a graph node with only object_id (legacy host helper).
 func (g *Graph) PutObject(ctx context.Context, objectID uuid.UUID) error {
+	return g.EnsureObject(ctx, brain.Object{ID: objectID})
+}
+
+// EnsureObject implements brain.GraphWriter: drop+insert node with searchable props.
+func (g *Graph) EnsureObject(ctx context.Context, obj brain.Object) error {
 	if g.client == nil {
 		return fmt.Errorf("helixgraph: not configured")
 	}
-	if objectID == uuid.Nil {
+	if obj.ID == uuid.Nil {
 		return fmt.Errorf("helixgraph: object id is required")
 	}
-	// Drop existing node(s) with this object_id, then insert one (idempotent enough for tests/hosts).
-	q := helix.WriteQuery("brain_put_object")
-	oid := q.ParamString("object_id", objectID.String())
+	q := helix.WriteQuery("brain_ensure_object")
+	oid := q.ParamString("object_id", obj.ID.String())
+	props := helix.Props{helix.Prop("object_id", oid)}
+	if obj.Kind != "" {
+		props = append(props, helix.Prop("kind", obj.Kind))
+	}
+	if obj.Title != "" {
+		props = append(props, helix.Prop("title", obj.Title))
+	}
+	if obj.Summary != "" {
+		props = append(props, helix.Prop("summary", obj.Summary))
+	}
+	if st := objectSearchText(obj); st != "" {
+		props = append(props, helix.Prop("search_text", st))
+	}
+	if obj.NamespaceID != uuid.Nil {
+		props = append(props, helix.Prop("namespace_id", obj.NamespaceID.String()))
+	}
+	if !obj.CreatedAt.IsZero() {
+		props = append(props, helix.Prop("created_at", obj.CreatedAt.UTC().Format(time.RFC3339Nano)))
+	}
+	if !obj.UpdatedAt.IsZero() {
+		props = append(props, helix.Prop("updated_at", obj.UpdatedAt.UTC().Format(time.RFC3339Nano)))
+	}
+	if obj.ParentID != nil {
+		props = append(props, helix.Prop("parent_id", obj.ParentID.String()))
+	}
+	if len(obj.Embedding) > 0 {
+		props = append(props, helix.Prop("embedding", obj.Embedding))
+	}
 	req := q.
 		VarAs("dropped", helix.G().
 			NWhere(helix.SourceEq("object_id", oid)).
 			Drop().
 			Count()).
-		VarAs("n", helix.G().AddN(NodeLabel, helix.Props{
-			helix.Prop("object_id", oid),
-		})).
+		VarAs("n", helix.G().AddN(NodeLabel, props)).
 		Returning("n")
 	if err := g.client.Exec(ctx, req, nil, helix.WriterOnly()); err != nil {
-		return fmt.Errorf("helixgraph: put object: %w", err)
+		return fmt.Errorf("helixgraph: ensure object: %w", err)
 	}
 	return nil
 }
 
-// AddEdge creates a labeled edge from→to between nodes identified by object_id.
-// Both endpoints must already exist (see PutObject).
+func objectSearchText(obj brain.Object) string {
+	t := strings.TrimSpace(obj.Title)
+	s := strings.TrimSpace(obj.Summary)
+	c := strings.TrimSpace(obj.Content)
+	switch {
+	case t == "" && s == "" && c == "":
+		return ""
+	case s == "" && c == "":
+		return t
+	case t == "" && c == "":
+		return s
+	case t == "" && s == "":
+		return c
+	case c == "":
+		return t + "\n" + s
+	case s == "":
+		return t + "\n" + c
+	case t == "":
+		return s + "\n" + c
+	default:
+		return t + "\n" + s + "\n" + c
+	}
+}
+
+// AddEdge implements brain.GraphWriter.
 func (g *Graph) AddEdge(ctx context.Context, from, to uuid.UUID, relationType string) error {
 	if g.client == nil {
 		return fmt.Errorf("helixgraph: not configured")
@@ -171,7 +223,6 @@ func (g *Graph) neighborsForLabel(ctx context.Context, objectID uuid.UUID, label
 		).
 		Returning("neighbors")
 
-	// Helix ValueMap returns {"neighbors":{"properties":[{"object_id":"..."},...]}}.
 	var raw struct {
 		Neighbors struct {
 			Properties []neighborRow `json:"properties"`
@@ -214,4 +265,7 @@ func normalizeLabels(rels []string) []string {
 	return out
 }
 
-var _ brain.GraphReader = (*Graph)(nil)
+var (
+	_ brain.GraphReader = (*Graph)(nil)
+	_ brain.GraphWriter = (*Graph)(nil)
+)

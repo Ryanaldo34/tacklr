@@ -8,12 +8,21 @@ import (
 )
 
 func TestMemoryGraph_edgesAndSplit(t *testing.T) {
+	ctx := context.Background()
 	g := NewMemoryGraph()
 	a, b, c := uuid.New(), uuid.New(), uuid.New()
-	g.AddEdge(uuid.Nil, b, "r") // no-op
-	g.AddEdge(a, b, "")
-	g.AddEdge(a, b, "references")
-	g.AddEdge(c, a, "references")
+	if err := g.AddEdge(ctx, uuid.Nil, b, "r"); err == nil {
+		t.Fatal("nil from should error")
+	}
+	if err := g.AddEdge(ctx, a, b, ""); err == nil {
+		t.Fatal("empty relation should error")
+	}
+	if err := g.AddEdge(ctx, a, b, "references"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.AddEdge(ctx, c, a, "references"); err != nil {
+		t.Fatal(err)
+	}
 
 	ns, err := g.Neighbors(context.Background(), a, []string{"references"}, 10)
 	if err != nil || len(ns) != 2 {

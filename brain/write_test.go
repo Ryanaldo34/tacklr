@@ -12,7 +12,8 @@ import (
 	"github.com/ryanaldo34/tacklr/brain"
 )
 
-func TestPut_openCatalogAndSoftDelete(t *testing.T) {
+// TestPut_roundTripAndSoftDelete: open-catalog Put is readable, soft-delete hides the object.
+func TestPut_roundTripAndSoftDelete(t *testing.T) {
 	ctx := context.Background()
 	eng, err := brain.NewEngine(brain.NewMemoryStore())
 	if err != nil {
@@ -28,10 +29,9 @@ func TestPut_openCatalogAndSoftDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.ID == uuid.Nil || got.NamespaceID != ns {
-		t.Fatalf("prepared: %+v", got)
+	if got.ID == uuid.Nil || got.NamespaceID != ns || len(got.Embedding) != 0 {
+		t.Fatalf("put: %+v", got)
 	}
-
 	rich, err := eng.Read(ctx, scope, got.ID)
 	if err != nil || rich.Content != "body" {
 		t.Fatalf("read: %+v err=%v", rich, err)
@@ -44,7 +44,8 @@ func TestPut_openCatalogAndSoftDelete(t *testing.T) {
 	}
 }
 
-func TestPut_catalogValidation(t *testing.T) {
+// TestPut_catalogEnforced: each case is a distinct ValidateObject return path; success path writes parent+part.
+func TestPut_catalogEnforced(t *testing.T) {
 	ctx := context.Background()
 	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithKinds(
 		brain.KindSpec{
@@ -52,6 +53,7 @@ func TestPut_catalogValidation(t *testing.T) {
 			Fields: []brain.FieldSpec{
 				{Name: "stage", Type: brain.FieldTypeString, Required: true},
 				{Name: "amount", Type: brain.FieldTypeNumber},
+				{Name: "when", Type: brain.FieldTypeDateTime},
 			},
 		},
 		brain.KindSpec{Kind: "Chunk", IsPart: true},
@@ -74,6 +76,7 @@ func TestPut_catalogValidation(t *testing.T) {
 		{"wrong type", brain.Object{Kind: "Document", Properties: map[string]any{"stage": 3}}, "want string"},
 		{"parent with parent_id", brain.Object{Kind: "Document", ParentID: &pid, Properties: map[string]any{"stage": "open"}}, "must not have parent_id"},
 		{"part without parent", brain.Object{Kind: "Chunk"}, "requires parent_id"},
+		{"bad datetime", brain.Object{Kind: "Document", Properties: map[string]any{"stage": "open", "when": "nope"}}, "RFC3339"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -86,7 +89,11 @@ func TestPut_catalogValidation(t *testing.T) {
 
 	doc, err := eng.Put(ctx, scope, brain.Object{
 		Kind: "Document", Title: "memo",
-		Properties: map[string]any{"stage": "open", "amount": 10},
+		Properties: map[string]any{
+			"stage":  "open",
+			"amount": 10,
+			"when":   time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC),
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -100,43 +107,42 @@ func TestPut_catalogValidation(t *testing.T) {
 	}
 }
 
-func TestPut_embedsWhenConfigured(t *testing.T) {
+// TestPut_embedsAndSearchable: embedder on Put populates vectors; hybrid search finds the parent.
+func TestPut_embedsAndSearchable(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	vec := []float32{1, 0, 0}
-	eng, err := brain.NewEngine(store, brain.WithEmbedder(stubEmbedder{v: vec}))
+	eng, err := brain.NewEngine(store, brain.WithEmbedder(stubEmbedder{v: []float32{1, 0, 0}}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	ns := uuid.New()
 	scope := brain.Scope{Namespace: &ns}
-	parent := uuid.New()
-	// Need a part for vector search candidates (parts only).
-	if _, err := eng.Put(ctx, scope, brain.Object{ID: parent, Kind: "Document", Title: "Doc"}); err != nil {
+	parent, err := eng.Put(ctx, scope, brain.Object{Kind: "Document", Title: "Doc"})
+	if err != nil {
 		t.Fatal(err)
 	}
 	pos := 1
 	part, err := eng.Put(ctx, scope, brain.Object{
-		Kind: "Chunk", Title: "oauth", Content: "pkce flow",
-		ParentID: &parent, Position: &pos,
+		Kind: "Chunk", Title: "oauth", Summary: "auth", Content: "pkce flow",
+		ParentID: &parent.ID, Position: &pos,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(part.Embedding) != 3 || part.Embedding[0] != 1 {
-		t.Fatalf("embedding on put: %+v", part.Embedding)
+		t.Fatalf("embedding: %+v", part.Embedding)
 	}
-	// Hybrid search should hit via vector channel.
 	page, err := eng.Search(ctx, scope, brain.SearchRequest{Query: "anything"}, brain.NewSearchContext())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(page.Objects) == 0 || page.Objects[0].ID != parent {
+	if len(page.Objects) == 0 || page.Objects[0].ID != parent.ID {
 		t.Fatalf("search after embed put: %+v", page.Objects)
 	}
 }
 
-func TestPut_embedErrorFailsClosed(t *testing.T) {
+// TestPut_embedderError: configured embedder failure fails the Put.
+func TestPut_embedderError(t *testing.T) {
 	ctx := context.Background()
 	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithEmbedder(failEmbedder{}))
 	if err != nil {
@@ -151,43 +157,50 @@ func TestPut_embedErrorFailsClosed(t *testing.T) {
 	}
 }
 
-func TestPut_noEmbedderSkipsVector(t *testing.T) {
+// TestLink_expandFindsNeighbor: Put dual-writes graph nodes; Link + Expand returns the target.
+func TestLink_expandFindsNeighbor(t *testing.T) {
 	ctx := context.Background()
-	eng, err := brain.NewEngine(brain.NewMemoryStore())
+	store := brain.NewMemoryStore()
+	eng, err := brain.NewEngine(store, brain.WithGraph(brain.NewMemoryGraph()))
 	if err != nil {
 		t.Fatal(err)
 	}
 	ns := uuid.New()
-	got, err := eng.Put(ctx, brain.Scope{Namespace: &ns}, brain.Object{
-		Kind: "Note", Title: "x", Content: "body",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got.Embedding) != 0 {
-		t.Fatalf("want no embedding without embedder: %+v", got.Embedding)
-	}
-}
+	scope := brain.Scope{Namespace: &ns}
 
-func TestValidateObject_datetime(t *testing.T) {
-	ns := uuid.New()
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithKinds(brain.KindSpec{
-		Kind: "Event", IsParent: true,
-		Fields: []brain.FieldSpec{{Name: "when", Type: brain.FieldTypeDateTime}},
-	}))
+	a, err := eng.Put(ctx, scope, brain.Object{Kind: "Document", Title: "A"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	obj := brain.Object{Kind: "Event", NamespaceID: ns, Properties: map[string]any{"when": "2024-06-01T00:00:00Z"}}
-	if err := brain.ValidateObject(obj, eng.Catalog()); err != nil {
+	b, err := eng.Put(ctx, scope, brain.Object{Kind: "Document", Title: "B"})
+	if err != nil {
 		t.Fatal(err)
 	}
-	obj.Properties["when"] = time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC)
-	if err := brain.ValidateObject(obj, eng.Catalog()); err != nil {
+	if err := eng.Link(ctx, a.ID, b.ID, "references"); err != nil {
 		t.Fatal(err)
 	}
-	obj.Properties["when"] = "not-a-date"
-	if err := brain.ValidateObject(obj, eng.Catalog()); err == nil {
-		t.Fatal("want datetime error")
+
+	res, err := eng.Expand(ctx, scope, brain.ExpandRequest{
+		ObjectID: a.ID, RelationTypes: []string{"references"},
+	}, brain.NewSearchContext())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Mode != "graph" {
+		t.Fatalf("mode: %s", res.Mode)
+	}
+	if len(res.Objects) != 1 || res.Objects[0].ID != b.ID {
+		t.Fatalf("expand: %+v", res.Objects)
+	}
+
+	if err := eng.Link(ctx, a.ID, b.ID, ""); err == nil {
+		t.Fatal("want empty relation error")
+	}
+	engNoGraph, err := brain.NewEngine(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engNoGraph.Link(ctx, a.ID, b.ID, "references"); err == nil {
+		t.Fatal("want graph writer required")
 	}
 }

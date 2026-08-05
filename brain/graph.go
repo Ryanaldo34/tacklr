@@ -2,6 +2,7 @@ package brain
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 
@@ -12,7 +13,7 @@ import (
 type GraphNeighbor struct {
 	ObjectID     uuid.UUID
 	RelationType string
-	Direction    string // "out" | "in"
+	Direction    string // "out" | "in" | "both"
 }
 
 // GraphReader traverses non-containment relations. Engine hydrates ids under Scope.
@@ -20,7 +21,17 @@ type GraphReader interface {
 	Neighbors(ctx context.Context, objectID uuid.UUID, relationTypes []string, limit int) ([]GraphNeighbor, error)
 }
 
-// MemoryGraph is an in-process GraphReader (tests / offline hosts).
+// GraphWriter persists graph nodes and non-containment edges (Helix dual-write / MemoryGraph).
+// Embeds GraphReader so a single WithGraph value can satisfy both read and write.
+type GraphWriter interface {
+	GraphReader
+	// EnsureObject upserts a graph node for obj.ID (searchable props when available).
+	EnsureObject(ctx context.Context, obj Object) error
+	// AddEdge creates a directed edge from→to with the given relation type.
+	AddEdge(ctx context.Context, from, to uuid.UUID, relationType string) error
+}
+
+// MemoryGraph is an in-process GraphReader/GraphWriter (tests / offline hosts).
 type MemoryGraph struct {
 	mu  sync.RWMutex
 	out map[uuid.UUID]map[string][]uuid.UUID // from → type → tos
@@ -35,11 +46,19 @@ func NewMemoryGraph() *MemoryGraph {
 	}
 }
 
-// AddEdge records from→to and indexes reverse for Both-direction Neighbors.
-func (g *MemoryGraph) AddEdge(from, to uuid.UUID, relationType string) {
+// EnsureObject implements GraphWriter. Nodes are implicit for MemoryGraph.
+func (g *MemoryGraph) EnsureObject(_ context.Context, obj Object) error {
+	if obj.ID == uuid.Nil {
+		return fmt.Errorf("brain: object id is required")
+	}
+	return nil
+}
+
+// AddEdge implements GraphWriter.
+func (g *MemoryGraph) AddEdge(_ context.Context, from, to uuid.UUID, relationType string) error {
 	rel := strings.TrimSpace(relationType)
 	if from == uuid.Nil || to == uuid.Nil || rel == "" {
-		return
+		return fmt.Errorf("brain: from, to, and relation type are required")
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -51,6 +70,7 @@ func (g *MemoryGraph) AddEdge(from, to uuid.UUID, relationType string) {
 		g.in[to] = make(map[string][]uuid.UUID)
 	}
 	g.in[to][rel] = append(g.in[to][rel], from)
+	return nil
 }
 
 // Neighbors implements GraphReader (Both directions, deduped by object id).
@@ -132,3 +152,5 @@ func SplitRelationTypes(rels []string) (wantContainment bool, graphLabels []stri
 	}
 	return wantContainment, normalizeRelationList(graphLabels)
 }
+
+var _ GraphWriter = (*MemoryGraph)(nil)

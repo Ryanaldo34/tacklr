@@ -149,9 +149,9 @@ func TestExpand_graphNeighborsMemoryGraph(t *testing.T) {
 	_ = store.Put(context.Background(), brain.Object{ID: hidden, Kind: "Document", NamespaceID: otherNS, UpdatedAt: now})
 
 	g := brain.NewMemoryGraph()
-	g.AddEdge(a, b, "references")
-	g.AddEdge(c, a, "references")
-	g.AddEdge(a, hidden, "references")
+	_ = g.AddEdge(context.Background(), a, b, "references")
+	_ = g.AddEdge(context.Background(), c, a, "references")
+	_ = g.AddEdge(context.Background(), a, hidden, "references")
 
 	eng, err := brain.NewEngine(store, brain.WithGraph(g))
 	if err != nil {
@@ -195,7 +195,7 @@ func TestExpand_partMixedContainmentAndGraph(t *testing.T) {
 	_ = store.Put(context.Background(), brain.Object{ID: linked, Kind: "Document", Title: "ref", NamespaceID: ns, UpdatedAt: now})
 
 	g := brain.NewMemoryGraph()
-	g.AddEdge(part, linked, "references")
+	_ = g.AddEdge(context.Background(), part, linked, "references")
 
 	eng, err := brain.NewEngine(store, brain.WithGraph(g), brain.WithConfig(brain.EngineConfig{SiblingRadius: 1}))
 	if err != nil {
@@ -232,7 +232,7 @@ func TestExpand_graphStoreErrorSurfaces(t *testing.T) {
 	_ = store.ok.Put(context.Background(), brain.Object{ID: root, Kind: "Document", NamespaceID: ns})
 
 	g := brain.NewMemoryGraph()
-	g.AddEdge(root, store.failID, "references")
+	_ = g.AddEdge(context.Background(), root, store.failID, "references")
 
 	eng, err := brain.NewEngine(store, brain.WithGraph(g))
 	if err != nil {

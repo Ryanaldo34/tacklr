@@ -82,8 +82,11 @@ func TestValidateFiltersAgainst_catalogRules(t *testing.T) {
 		{"wrong type", brain.Filters{"kind": "Document", "stage": 1}, "want string"},
 		{"kind list intersection", brain.Filters{"kind": []any{"Document", "Deal"}, "stage": "open"}, "not filterable"},
 		{"valid single kind", brain.Filters{"kind": "Document", "stage": "open"}, ""},
+		{"valid list filter", brain.Filters{"kind": "Document", "stage": []any{"open", "closed"}}, ""},
 		{"valid shared field on one kind", brain.Filters{"kind": "Deal", "amount": 42}, ""},
 		{"valid multi-kind shared field", brain.Filters{"kind": []any{"Document", "Deal"}, "amount": 1.5}, ""},
+		{"kind list empty", brain.Filters{"kind": []any{}}, "list is empty"},
+		{"kind list non-string", brain.Filters{"kind": []any{1}}, "non-empty string"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -194,7 +197,7 @@ func TestSearch_catalogRestrictsKindsAndAllowsFilteredHit(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := store.Put(context.Background(), brain.Object{
-		ID: uuid.New(), Kind: "OrphanKind", Title: "orphan part", Content: "negotiation secret",
+		ID: uuid.New(), Kind: "OrphanKind", Title: "orphan part", Content: "zzzxorphanonlyphrase",
 		NamespaceID: ns, UpdatedAt: now, ParentID: &orphanParent, Position: &pos,
 	}); err != nil {
 		t.Fatal(err)
@@ -220,18 +223,16 @@ func TestSearch_catalogRestrictsKindsAndAllowsFilteredHit(t *testing.T) {
 		t.Fatalf("want Document parent via Chunk hit, got %+v", page.Objects)
 	}
 
-	// Implicit kind allow-list: free-text search must not surface unregistered kinds.
-	page, err = eng.Search(ctx, scope, brain.SearchRequest{Query: "negotiation secret"}, sc)
+	// Orphan-only phrase: catalog allow-list yields no hits (only registered kinds searched).
+	page, err = eng.Search(ctx, scope, brain.SearchRequest{Query: "zzzxorphanonlyphrase"}, sc)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, o := range page.Objects {
-		if o.Kind == "OrphanKind" || o.ID == orphanParent {
-			t.Fatalf("unregistered kind surfaced: %+v", o)
-		}
+	if len(page.Objects) != 0 {
+		t.Fatalf("want no hits for orphan-only content under catalog, got %+v", page.Objects)
 	}
 
-	// Successful search freezes the catalog.
+	// Successful search freezes the catalog; further RegisterKinds fails.
 	if err := eng.RegisterKinds(ctx, brain.KindSpec{Kind: "Deal", IsParent: true}); err == nil {
 		t.Fatal("want freeze after first successful search")
 	}
@@ -318,6 +319,22 @@ func TestApplyKinds_migrationAddAndModify(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// SyncKindsToStore flushes WithKinds catalog to a durable writer.
+	mem := brain.NewMemoryStore()
+	engSync, err := brain.NewEngine(mem, brain.WithKinds(
+		brain.KindSpec{Kind: "Synced", IsParent: true, Description: "via sync"},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engSync.SyncKindsToStore(ctx); err != nil {
+		t.Fatal(err)
+	}
+	row, err = mem.GetKind(ctx, "Synced")
+	if err != nil || row.Description != "via sync" {
+		t.Fatalf("sync: %+v err=%v", row, err)
+	}
+
 	eng2.FreezeCatalog()
 	if err := eng2.ApplyKinds(ctx, brain.KindSpec{Kind: "X", IsParent: true}); err == nil {
 		t.Fatal("want frozen apply error")
@@ -353,5 +370,19 @@ func TestWithKinds_invalidFailsNewEngine(t *testing.T) {
 	_, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithKinds(brain.KindSpec{}))
 	if err == nil {
 		t.Fatal("want error")
+	}
+}
+
+func TestObjectKindFromSpec_roundTrip(t *testing.T) {
+	row, err := brain.ObjectKindFromSpec(brain.KindSpec{
+		Kind: "Doc", IsParent: true, Description: "d",
+		Fields: []brain.FieldSpec{{Name: "stage", Type: brain.FieldTypeString}},
+	})
+	if err != nil || row.Kind != "Doc" || !row.IsParent {
+		t.Fatalf("%+v err=%v", row, err)
+	}
+	spec, err := brain.KindSpecFromObjectKind(row)
+	if err != nil || len(spec.Fields) != 1 || spec.Fields[0].Name != "stage" {
+		t.Fatalf("%+v err=%v", spec, err)
 	}
 }

@@ -38,8 +38,8 @@
 // non-containment edges, expand graph mode, node/edge text and vector indexes
 // for entity-centric recall (not a second copy of corpus BM25).
 //
-// On Put (when a GraphWriter is configured later): dual-write a searchable Helix
-// node (props + embedding + timestamps). Link writes edges for expand/graph search.
+// On Put, when WithGraph provides a GraphWriter: dual-write a searchable graph
+// node (props + embedding + timestamps). Engine.Link writes edges for expand.
 // Embeddings: when WithEmbedder is set, Put embeds content and fails closed on
 // embed errors; the same vector feeds Postgres hybrid search and Helix node indexes.
 //

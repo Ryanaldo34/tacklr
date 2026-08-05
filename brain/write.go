@@ -28,7 +28,7 @@ func (e *Engine) Put(ctx context.Context, scope Scope, obj Object) (Object, erro
 		return Object{}, err
 	}
 	if e.embedder != nil {
-		if text := embedText(obj); text != "" {
+		if text := objectIndexText(obj); text != "" {
 			vec, err := e.embedder.Embed(ctx, text)
 			if err != nil {
 				return Object{}, fmt.Errorf("brain: embed object: %w", err)
@@ -40,16 +40,38 @@ func (e *Engine) Put(ctx context.Context, scope Scope, obj Object) (Object, erro
 	if err := w.Put(ctx, obj); err != nil {
 		return Object{}, err
 	}
+	// Dual-write graph node after durable store succeeds (retryable if graph fails).
+	if gw, ok := e.graph.(GraphWriter); ok {
+		if err := gw.EnsureObject(ctx, obj); err != nil {
+			return Object{}, fmt.Errorf("brain: graph ensure object: %w", err)
+		}
+	}
 	return obj, nil
 }
 
 // SoftDelete marks an object deleted under scope. Missing / out-of-scope → ErrNotFound.
+// Graph nodes/edges are left in place (v1); cleanup is a later concern.
 func (e *Engine) SoftDelete(ctx context.Context, scope Scope, id uuid.UUID) error {
 	w, ok := e.store.(ObjectWriter)
 	if !ok {
 		return fmt.Errorf("brain: store does not support object writes")
 	}
 	return w.SoftDelete(ctx, scope, id)
+}
+
+// Link creates a non-containment edge from→to. Requires a GraphWriter (WithGraph).
+// Put endpoints first so Helix nodes exist with searchable props; MemoryGraph
+// accepts edges without a prior EnsureObject.
+func (e *Engine) Link(ctx context.Context, from, to uuid.UUID, relationType string) error {
+	gw, ok := e.graph.(GraphWriter)
+	if !ok {
+		return fmt.Errorf("brain: graph writer is required for Link")
+	}
+	rel := strings.TrimSpace(relationType)
+	if from == uuid.Nil || to == uuid.Nil || rel == "" {
+		return fmt.Errorf("brain: from, to, and relation type are required")
+	}
+	return gw.AddEdge(ctx, from, to, rel)
 }
 
 func preparePut(scope Scope, obj Object, now time.Time) Object {
@@ -70,29 +92,15 @@ func preparePut(scope Scope, obj Object, now time.Time) Object {
 	return obj
 }
 
-// embedText joins non-empty title/summary/content for dense indexing.
-func embedText(obj Object) string {
-	t := strings.TrimSpace(obj.Title)
-	s := strings.TrimSpace(obj.Summary)
-	c := strings.TrimSpace(obj.Content)
-	switch {
-	case t == "" && s == "" && c == "":
-		return ""
-	case s == "" && c == "":
-		return t
-	case t == "" && c == "":
-		return s
-	case t == "" && s == "":
-		return c
-	case c == "":
-		return t + "\n" + s
-	case s == "":
-		return t + "\n" + c
-	case t == "":
-		return s + "\n" + c
-	default:
-		return t + "\n" + s + "\n" + c
+// objectIndexText joins non-empty title/summary/content for embeddings and Helix text props.
+func objectIndexText(obj Object) string {
+	parts := make([]string, 0, 3)
+	for _, p := range []string{obj.Title, obj.Summary, obj.Content} {
+		if p = strings.TrimSpace(p); p != "" {
+			parts = append(parts, p)
+		}
 	}
+	return strings.Join(parts, "\n")
 }
 
 // ValidateObject checks an object against the kind catalog when non-empty.
