@@ -121,6 +121,7 @@ func (e *Engine) effectiveFilters(f Filters) (Filters, error) {
 		return f, nil
 	}
 	e.catalog.Freeze()
+	// injectKindAllowList returns f unchanged when kind is already set (no clone).
 	return injectKindAllowList(f, e.catalog), nil
 }
 

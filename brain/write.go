@@ -3,6 +3,7 @@ package brain
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -12,6 +13,8 @@ import (
 // Put upserts a knowledge object under scope.
 // Catalog non-empty → ValidateObject. Namespace filled from scope when missing.
 // ID generated when nil. Put refuses objects that already have DeletedAt set.
+// When WithEmbedder is set and title/summary/content is non-empty, embeds and
+// stores the vector; embed errors fail the Put (fail closed).
 func (e *Engine) Put(ctx context.Context, scope Scope, obj Object) (Object, error) {
 	w, ok := e.store.(ObjectWriter)
 	if !ok {
@@ -23,6 +26,16 @@ func (e *Engine) Put(ctx context.Context, scope Scope, obj Object) (Object, erro
 	obj = preparePut(scope, obj, e.cfg.Now())
 	if err := ValidateObject(obj, e.catalog); err != nil {
 		return Object{}, err
+	}
+	if e.embedder != nil {
+		if text := embedText(obj); text != "" {
+			vec, err := e.embedder.Embed(ctx, text)
+			if err != nil {
+				return Object{}, fmt.Errorf("brain: embed object: %w", err)
+			}
+			// Own the slice so embedder buffer reuse cannot corrupt stored vectors.
+			obj.Embedding = slices.Clone(vec)
+		}
 	}
 	if err := w.Put(ctx, obj); err != nil {
 		return Object{}, err
@@ -49,7 +62,6 @@ func preparePut(scope Scope, obj Object, now time.Time) Object {
 	if obj.Properties == nil {
 		obj.Properties = map[string]any{}
 	}
-	now = now.UTC()
 	if obj.CreatedAt.IsZero() {
 		obj.CreatedAt = now
 	}
@@ -58,8 +70,32 @@ func preparePut(scope Scope, obj Object, now time.Time) Object {
 	return obj
 }
 
+// embedText joins non-empty title/summary/content for dense indexing.
+func embedText(obj Object) string {
+	t := strings.TrimSpace(obj.Title)
+	s := strings.TrimSpace(obj.Summary)
+	c := strings.TrimSpace(obj.Content)
+	switch {
+	case t == "" && s == "" && c == "":
+		return ""
+	case s == "" && c == "":
+		return t
+	case t == "" && c == "":
+		return s
+	case t == "" && s == "":
+		return c
+	case c == "":
+		return t + "\n" + s
+	case s == "":
+		return t + "\n" + c
+	case t == "":
+		return s + "\n" + c
+	default:
+		return t + "\n" + s + "\n" + c
+	}
+}
+
 // ValidateObject checks an object against the kind catalog when non-empty.
-// Empty/nil catalog: kind and namespace required; parent_id must not be the zero UUID.
 func ValidateObject(obj Object, cat *KindCatalog) error {
 	kind := strings.TrimSpace(obj.Kind)
 	if kind == "" {
@@ -85,31 +121,23 @@ func ValidateObject(obj Object, cat *KindCatalog) error {
 	if spec.IsPart && !spec.IsParent && !hasParent {
 		return fmt.Errorf("brain: kind %q is a part kind and requires parent_id", spec.Kind)
 	}
-	return validateObjectProperties(obj.Properties, spec)
-}
-
-func validateObjectProperties(props map[string]any, spec KindSpec) error {
+	props := obj.Properties
 	if props == nil {
 		props = map[string]any{}
 	}
-	fields := make(map[string]FieldSpec, len(spec.Fields))
+	// Index fields once, then walk props (typical field count is small).
+	byName := make(map[string]FieldSpec, len(spec.Fields))
 	for _, f := range spec.Fields {
-		fields[f.Name] = f
-	}
-	for name, f := range fields {
+		byName[f.Name] = f
 		if !f.Required {
 			continue
 		}
-		v, ok := props[name]
-		if !ok || v == nil {
-			return fmt.Errorf("brain: required property %q is missing", name)
-		}
-		if s, ok := v.(string); ok && strings.TrimSpace(s) == "" {
-			return fmt.Errorf("brain: required property %q is empty", name)
+		if props[f.Name] == nil {
+			return fmt.Errorf("brain: required property %q is missing", f.Name)
 		}
 	}
 	for name, v := range props {
-		f, ok := fields[name]
+		f, ok := byName[name]
 		if !ok {
 			return fmt.Errorf("brain: property %q is not defined on kind %q", name, spec.Kind)
 		}

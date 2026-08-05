@@ -100,6 +100,75 @@ func TestPut_catalogValidation(t *testing.T) {
 	}
 }
 
+func TestPut_embedsWhenConfigured(t *testing.T) {
+	ctx := context.Background()
+	store := brain.NewMemoryStore()
+	vec := []float32{1, 0, 0}
+	eng, err := brain.NewEngine(store, brain.WithEmbedder(stubEmbedder{v: vec}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ns := uuid.New()
+	scope := brain.Scope{Namespace: &ns}
+	parent := uuid.New()
+	// Need a part for vector search candidates (parts only).
+	if _, err := eng.Put(ctx, scope, brain.Object{ID: parent, Kind: "Document", Title: "Doc"}); err != nil {
+		t.Fatal(err)
+	}
+	pos := 1
+	part, err := eng.Put(ctx, scope, brain.Object{
+		Kind: "Chunk", Title: "oauth", Content: "pkce flow",
+		ParentID: &parent, Position: &pos,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(part.Embedding) != 3 || part.Embedding[0] != 1 {
+		t.Fatalf("embedding on put: %+v", part.Embedding)
+	}
+	// Hybrid search should hit via vector channel.
+	page, err := eng.Search(ctx, scope, brain.SearchRequest{Query: "anything"}, brain.NewSearchContext())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Objects) == 0 || page.Objects[0].ID != parent {
+		t.Fatalf("search after embed put: %+v", page.Objects)
+	}
+}
+
+func TestPut_embedErrorFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithEmbedder(failEmbedder{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ns := uuid.New()
+	_, err = eng.Put(ctx, brain.Scope{Namespace: &ns}, brain.Object{
+		Kind: "Note", Title: "x", Content: "body",
+	})
+	if err == nil || !strings.Contains(err.Error(), "embed") {
+		t.Fatalf("want embed error, got %v", err)
+	}
+}
+
+func TestPut_noEmbedderSkipsVector(t *testing.T) {
+	ctx := context.Background()
+	eng, err := brain.NewEngine(brain.NewMemoryStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ns := uuid.New()
+	got, err := eng.Put(ctx, brain.Scope{Namespace: &ns}, brain.Object{
+		Kind: "Note", Title: "x", Content: "body",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Embedding) != 0 {
+		t.Fatalf("want no embedding without embedder: %+v", got.Embedding)
+	}
+}
+
 func TestValidateObject_datetime(t *testing.T) {
 	ns := uuid.New()
 	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithKinds(brain.KindSpec{

@@ -3,6 +3,7 @@ package brain
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 )
@@ -18,9 +19,6 @@ const (
 
 // ValidateFilters checks filter keys and value shapes. Empty/nil is valid.
 func ValidateFilters(f Filters) error {
-	if len(f) == 0 {
-		return nil
-	}
 	for key, val := range f {
 		k := strings.TrimSpace(key)
 		if k == "" {
@@ -38,6 +36,120 @@ func ValidateFilters(f Filters) error {
 		}
 	}
 	return nil
+}
+
+// ValidateFiltersAgainst runs structural validation, then catalog rules when non-empty.
+func ValidateFiltersAgainst(f Filters, cat *KindCatalog) error {
+	if err := ValidateFilters(f); err != nil {
+		return err
+	}
+	if cat == nil || cat.Empty() {
+		return nil
+	}
+
+	kinds, err := kindFilterValues(f)
+	if err != nil {
+		return err
+	}
+	// Resolve kinds once (avoid repeated catalog Get under property loops).
+	var specs []KindSpec
+	if len(kinds) > 0 {
+		specs = make([]KindSpec, len(kinds))
+		for i, name := range kinds {
+			spec, ok := cat.Get(name)
+			if !ok {
+				return fmt.Errorf("brain: kind %q is not registered", name)
+			}
+			specs[i] = spec
+		}
+	}
+
+	for key, val := range f {
+		if isCoreFilterKey(key) {
+			continue
+		}
+		if len(specs) == 0 {
+			return fmt.Errorf("brain: property filters require a kind filter when kinds are registered")
+		}
+		for _, spec := range specs {
+			fs, ok := spec.Field(key)
+			if !ok {
+				return fmt.Errorf("brain: property %q is not filterable on kind %q", key, spec.Kind)
+			}
+			if err := checkFilterField(key, val, fs); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func kindFilterValues(f Filters) ([]string, error) {
+	raw, ok := f[filterKind]
+	if !ok {
+		return nil, nil
+	}
+	switch v := raw.(type) {
+	case string:
+		if v == "" {
+			return nil, fmt.Errorf("brain: filter %q value is required", filterKind)
+		}
+		return []string{v}, nil
+	case []any:
+		if len(v) == 0 {
+			return nil, fmt.Errorf("brain: filter %q list is empty", filterKind)
+		}
+		out := make([]string, len(v))
+		for i, item := range v {
+			s, ok := item.(string)
+			if !ok || s == "" {
+				return nil, fmt.Errorf("brain: filter %q list[%d] must be a non-empty string", filterKind, i)
+			}
+			out[i] = s
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("brain: filter %q must be a string or list of strings", filterKind)
+	}
+}
+
+func checkFilterField(key string, val any, fs FieldSpec) error {
+	if items, ok := val.([]any); ok {
+		if fs.Type == FieldTypeBoolean {
+			return fmt.Errorf("brain: filter %q does not support list values for boolean fields", key)
+		}
+		for i, item := range items {
+			if err := checkFieldValue(item, fs.Type); err != nil {
+				return fmt.Errorf("brain: filter %q: %w (list[%d])", key, err, i)
+			}
+		}
+		return nil
+	}
+	if err := checkFieldValue(val, fs.Type); err != nil {
+		return fmt.Errorf("brain: filter %q: %w", key, err)
+	}
+	return nil
+}
+
+// injectKindAllowList returns filters restricted to registered kinds when kind is absent.
+// If kind is already set, f is returned as-is (no clone).
+func injectKindAllowList(f Filters, cat *KindCatalog) Filters {
+	if f != nil {
+		if _, ok := f[filterKind]; ok {
+			return f
+		}
+	}
+	out := maps.Clone(f)
+	if out == nil {
+		out = Filters{}
+	}
+	names := cat.Names()
+	list := make([]any, len(names))
+	for i, n := range names {
+		list[i] = n
+	}
+	out[filterKind] = list
+	return out
 }
 
 func validateEqValue(key string, val any) error {
@@ -90,61 +202,63 @@ func parseFilterTime(val any) (time.Time, error) {
 	return t.UTC(), nil
 }
 
+// matchFilterValue reports whether got equals want, or is any element when want is a list.
 func matchFilterValue(got, want any) bool {
 	if items, ok := want.([]any); ok {
 		for _, item := range items {
-			if scalarEqual(got, item) {
+			if valuesEqual(got, item) {
 				return true
 			}
 		}
 		return false
 	}
-	return scalarEqual(got, want)
+	return valuesEqual(got, want)
 }
 
-func scalarEqual(a, b any) bool {
+func valuesEqual(a, b any) bool {
 	if a == nil || b == nil {
 		return a == b
 	}
-	if af, aok := asFloat(a); aok {
-		if bf, bok := asFloat(b); bok {
-			return af == bf
-		}
-		return false
+	if sa, ok := a.(string); ok {
+		sb, ok := b.(string)
+		return ok && sa == sb
 	}
-	switch av := a.(type) {
-	case string:
-		bs, ok := b.(string)
-		return ok && av == bs
-	case bool:
+	if ba, ok := a.(bool); ok {
 		bb, ok := b.(bool)
-		return ok && av == bb
-	default:
+		return ok && ba == bb
+	}
+	fa, ok := asFloat64(a)
+	if !ok {
 		return false
 	}
+	fb, ok := asFloat64(b)
+	return ok && fa == fb
 }
 
-func asFloat(v any) (float64, bool) {
-	switch n := v.(type) {
-	case float64:
+// asFloat64 normalizes JSON/Go numeric literals for equality (int vs float64).
+func asFloat64(v any) (float64, bool) {
+	if n, ok := v.(float64); ok {
 		return n, true
-	case float32:
+	}
+	if n, ok := v.(float32); ok {
 		return float64(n), true
-	case int:
+	}
+	if n, ok := v.(int); ok {
 		return float64(n), true
-	case int32:
+	}
+	if n, ok := v.(int32); ok {
 		return float64(n), true
-	case int64:
+	}
+	if n, ok := v.(int64); ok {
 		return float64(n), true
-	case json.Number:
+	}
+	if n, ok := v.(json.Number); ok {
 		f, err := n.Float64()
 		return f, err == nil
-	default:
-		return 0, false
 	}
+	return 0, false
 }
 
-// checkFieldValue validates a scalar against FieldType (filters and object properties).
 func checkFieldValue(val any, t FieldType) error {
 	switch t {
 	case FieldTypeString:
@@ -152,7 +266,7 @@ func checkFieldValue(val any, t FieldType) error {
 			return fmt.Errorf("want string, got %T", val)
 		}
 	case FieldTypeNumber:
-		if _, ok := asFloat(val); !ok {
+		if _, ok := asFloat64(val); !ok {
 			return fmt.Errorf("want number, got %T", val)
 		}
 	case FieldTypeBoolean:
@@ -160,18 +274,17 @@ func checkFieldValue(val any, t FieldType) error {
 			return fmt.Errorf("want boolean, got %T", val)
 		}
 	case FieldTypeDateTime:
-		switch v := val.(type) {
-		case string:
-			if _, err := parseFilterTime(v); err != nil {
-				return err
-			}
-		case time.Time:
-			if v.IsZero() {
+		if s, ok := val.(string); ok {
+			_, err := parseFilterTime(s)
+			return err
+		}
+		if tm, ok := val.(time.Time); ok {
+			if tm.IsZero() {
 				return fmt.Errorf("zero time")
 			}
-		default:
-			return fmt.Errorf("want datetime string or time.Time, got %T", val)
+			return nil
 		}
+		return fmt.Errorf("want datetime string or time.Time, got %T", val)
 	default:
 		return fmt.Errorf("unknown type %q", t)
 	}
