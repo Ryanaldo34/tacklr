@@ -28,7 +28,10 @@ type GraphReader interface {
 type GraphWriter interface {
 	GraphReader
 	// EnsureObject upserts a graph node for obj.ID (searchable props when available).
+	// Call on every parent Put so nodes stay current (not a one-shot artifact).
 	EnsureObject(ctx context.Context, obj Object) error
+	// RemoveObject drops the node (and MemoryGraph edges) after Postgres soft-delete.
+	RemoveObject(ctx context.Context, id uuid.UUID) error
 	// AddEdge creates a directed edge from→to with the given relation type.
 	AddEdge(ctx context.Context, from, to uuid.UUID, relationType string) error
 }
@@ -50,13 +53,13 @@ type MemoryGraph struct {
 }
 
 type memGraphNode struct {
-	kind      string
-	title     string
-	summary   string
-	content   string
-	namespace uuid.UUID
-	embedding []float32
-	updatedAt time.Time
+	kind       string
+	title      string
+	summary    string
+	searchText string
+	namespace  uuid.UUID
+	embedding  []float32
+	updatedAt  time.Time
 }
 
 // NewMemoryGraph returns an empty graph.
@@ -69,6 +72,7 @@ func NewMemoryGraph() *MemoryGraph {
 }
 
 // EnsureObject implements GraphWriter and stores searchable props for FindObjects.
+// Replaces any prior node for the same id (live update, not a static snapshot).
 func (g *MemoryGraph) EnsureObject(_ context.Context, obj Object) error {
 	if obj.ID == uuid.Nil {
 		return fmt.Errorf("brain: object id is required")
@@ -76,12 +80,12 @@ func (g *MemoryGraph) EnsureObject(_ context.Context, obj Object) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	n := memGraphNode{
-		kind:      obj.Kind,
-		title:     obj.Title,
-		summary:   obj.Summary,
-		content:   obj.Content,
-		namespace: obj.NamespaceID,
-		updatedAt: obj.UpdatedAt,
+		kind:       obj.Kind,
+		title:      obj.Title,
+		summary:    obj.Summary,
+		searchText: EntityIndexText(obj),
+		namespace:  obj.NamespaceID,
+		updatedAt:  obj.UpdatedAt,
 	}
 	if len(obj.Embedding) > 0 {
 		n.embedding = slices.Clone(obj.Embedding)
@@ -90,7 +94,37 @@ func (g *MemoryGraph) EnsureObject(_ context.Context, obj Object) error {
 	return nil
 }
 
-// SearchText implements GraphObjectSearcher (case-fold substring on index text).
+// RemoveObject implements GraphWriter.
+func (g *MemoryGraph) RemoveObject(_ context.Context, id uuid.UUID) error {
+	if id == uuid.Nil {
+		return fmt.Errorf("brain: object id is required")
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.nodes, id)
+	// Drop edges involving id.
+	for from, byRel := range g.out {
+		for rel, tos := range byRel {
+			g.out[from][rel] = slices.DeleteFunc(tos, func(to uuid.UUID) bool { return to == id })
+		}
+		if from == id {
+			delete(g.out, from)
+		}
+	}
+	for to, byRel := range g.in {
+		for rel, froms := range byRel {
+			g.in[to][rel] = slices.DeleteFunc(froms, func(from uuid.UUID) bool { return from == id })
+		}
+		if to == id {
+			delete(g.in, to)
+		}
+	}
+	delete(g.out, id)
+	delete(g.in, id)
+	return nil
+}
+
+// SearchText implements GraphObjectSearcher (case-fold substring on entity index text).
 func (g *MemoryGraph) SearchText(_ context.Context, query string, limit int, namespace *uuid.UUID) ([]ScoredID, error) {
 	q := strings.ToLower(strings.TrimSpace(query))
 	if q == "" || limit <= 0 {
@@ -103,11 +137,10 @@ func (g *MemoryGraph) SearchText(_ context.Context, query string, limit int, nam
 		if namespace != nil && n.namespace != *namespace {
 			continue
 		}
-		text := strings.ToLower(strings.TrimSpace(n.title + " " + n.summary + " " + n.content))
+		text := strings.ToLower(n.searchText)
 		if text == "" || !strings.Contains(text, q) {
 			continue
 		}
-		// Prefer title hits.
 		score := 1.0
 		if strings.Contains(strings.ToLower(n.title), q) {
 			score = 2.0

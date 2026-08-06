@@ -172,6 +172,24 @@ func TestIndexText_skipsEmptyParts(t *testing.T) {
 	}
 }
 
+// TestEntityIndexText_includesSummaryAndProperties: entity find text packs attributes.
+func TestEntityIndexText_includesSummaryAndProperties(t *testing.T) {
+	got := brain.EntityIndexText(brain.Object{
+		Title: "Acme renewal", Summary: "enterprise opportunity",
+		Content: "long body",
+		Properties: map[string]any{
+			"stage":  "negotiation",
+			"amount": 120000.0,
+			"hot":    true,
+		},
+	})
+	for _, want := range []string{"Acme renewal", "enterprise opportunity", "stage: negotiation", "amount: 120000", "hot: true", "long body"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in %q", want, got)
+		}
+	}
+}
+
 // TestPut_partEmbedIncludesParentTitle: part embeddings / graph index text get parent context.
 func TestPut_partEmbedIncludesParentTitle(t *testing.T) {
 	ctx := context.Background()
@@ -238,7 +256,7 @@ func TestPut_multiTurnMemoryGraph(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := eng.Link(ctx, a.ID, b.ID, "about"); err != nil {
+	if err := eng.Link(ctx, scope, a.ID, b.ID, "about"); err != nil {
 		t.Fatal(err)
 	}
 	pos := 1
@@ -248,6 +266,10 @@ func TestPut_multiTurnMemoryGraph(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	// Parts cannot be link endpoints.
+	if err := eng.Link(ctx, scope, chunk.ID, b.ID, "about"); err == nil || !strings.Contains(err.Error(), "first-class") {
+		t.Fatalf("link part: %v", err)
 	}
 
 	// Mixed expand: children + graph neighbor.
@@ -268,8 +290,20 @@ func TestPut_multiTurnMemoryGraph(t *testing.T) {
 		t.Fatalf("mixed expand: %+v", mixed.Objects)
 	}
 
+	// SoftDelete removes store row visibility and graph node.
 	if err := eng.SoftDelete(ctx, scope, b.ID); err != nil {
 		t.Fatal(err)
+	}
+	resAfter, err := eng.Expand(ctx, scope, brain.ExpandRequest{
+		ObjectID: a.ID, RelationTypes: []string{"about"},
+	}, sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range resAfter.Objects {
+		if o.ID == b.ID {
+			t.Fatal("soft-deleted neighbor must not appear after graph remove")
+		}
 	}
 	// Soft-deleted Put is refused.
 	now := time.Now().UTC()
@@ -316,7 +350,7 @@ func TestLink_expandFindsNeighbor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := eng.Link(ctx, a.ID, b.ID, "references"); err != nil {
+	if err := eng.Link(ctx, scope, a.ID, b.ID, "references"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -333,7 +367,7 @@ func TestLink_expandFindsNeighbor(t *testing.T) {
 		t.Fatalf("expand: %+v", res.Objects)
 	}
 
-	if err := eng.Link(ctx, a.ID, b.ID, ""); err == nil {
+	if err := eng.Link(ctx, scope, a.ID, b.ID, ""); err == nil {
 		t.Fatal("want empty relation error")
 	}
 	engNoGraph, err := brain.NewEngine(store)
@@ -343,7 +377,79 @@ func TestLink_expandFindsNeighbor(t *testing.T) {
 	if engNoGraph.HasGraphWriter() {
 		t.Fatal("engine without WithGraph must not report HasGraphWriter")
 	}
-	if err := engNoGraph.Link(ctx, a.ID, b.ID, "references"); err == nil {
+	if err := engNoGraph.Link(ctx, scope, a.ID, b.ID, "references"); err == nil {
 		t.Fatal("want graph writer required")
+	}
+}
+
+// TestLink_crossObjectEmailDealBuyer: first-class cross-object graph (not chunks).
+func TestLink_crossObjectEmailDealBuyer(t *testing.T) {
+	ctx := context.Background()
+	store := brain.NewMemoryStore()
+	g := brain.NewMemoryGraph()
+	eng, err := brain.NewEngine(store, brain.WithGraph(g), brain.WithKinds(
+		brain.KindSpec{Kind: "Email", IsParent: true},
+		brain.KindSpec{Kind: "Deal", IsParent: true, Fields: []brain.FieldSpec{
+			{Name: "stage", Type: brain.FieldTypeString},
+		}},
+		brain.KindSpec{Kind: "Person", IsParent: true},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ns := uuid.New()
+	scope := brain.Scope{Namespace: &ns}
+	sc := brain.NewSearchContext()
+
+	email, err := eng.Put(ctx, scope, brain.Object{
+		Kind: "Email", Title: "RE: Acme pricing", Summary: "security review thread",
+		Content: "please confirm FedRAMP timeline",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deal, err := eng.Put(ctx, scope, brain.Object{
+		Kind: "Deal", Title: "Acme Enterprise Renewal", Summary: "renewal opportunity",
+		Properties: map[string]any{"stage": "negotiation"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	buyer, err := eng.Put(ctx, scope, brain.Object{
+		Kind: "Person", Title: "Jordan Lee", Summary: "procurement buyer",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.Link(ctx, scope, email.ID, deal.ID, "about"); err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.Link(ctx, scope, deal.ID, buyer.ID, "has_buyer"); err != nil {
+		t.Fatal(err)
+	}
+	// Property-aware entity find.
+	page, err := eng.FindObjects(ctx, scope, brain.FindObjectsRequest{
+		Query: "negotiation", Kinds: []string{"Deal"},
+	}, sc)
+	if err != nil || len(page.Objects) != 1 || page.Objects[0].ID != deal.ID {
+		t.Fatalf("find deal by stage prop: %+v err=%v", page.Objects, err)
+	}
+	exp, err := eng.Expand(ctx, scope, brain.ExpandRequest{
+		ObjectID: deal.ID, RelationTypes: []string{"about", "has_buyer"},
+	}, sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[uuid.UUID]bool{}
+	for _, o := range exp.Objects {
+		got[o.ID] = true
+	}
+	if !got[email.ID] || !got[buyer.ID] {
+		t.Fatalf("expand deal neighbors: %+v", exp.Objects)
+	}
+	// Drill-down: email has no chunks yet; containment expand is empty.
+	kids, err := eng.Expand(ctx, scope, brain.ExpandRequest{ObjectID: email.ID}, sc)
+	if err != nil || kids.Mode != "children" {
+		t.Fatalf("containment expand: %+v err=%v", kids, err)
 	}
 }

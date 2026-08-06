@@ -16,7 +16,8 @@ import (
 
 // Graph implements brain.GraphWriter via HelixDB.
 type Graph struct {
-	client *helix.Client
+	client      *helix.Client
+	searchReady bool // true after successful Bootstrap / EnsureSearchIndexes
 }
 
 // New builds a client. Empty baseURL defaults to http://localhost:6969.
@@ -65,8 +66,23 @@ func (g *Graph) EnsureObjectIndex(ctx context.Context) error {
 	return nil
 }
 
+// Bootstrap prepares Helix for entity search (indexes) and marks the graph ready for find_objects.
+// Call once at process start when using Helix. withNamespaceTenant is usually false
+// (namespace is enforced on Engine hydrate; some Helix images reject tenant text indexes).
+func (g *Graph) Bootstrap(ctx context.Context, withNamespaceTenant bool) error {
+	if err := g.EnsureSearchIndexes(ctx, withNamespaceTenant); err != nil {
+		g.searchReady = false
+		return err
+	}
+	g.searchReady = true
+	return nil
+}
+
+// ObjectSearchReady reports whether Bootstrap (or EnsureSearchIndexes) succeeded.
+func (g *Graph) ObjectSearchReady() bool { return g.searchReady }
+
 // EnsureSearchIndexes creates equality + text + vector indexes for find_objects.
-// When withNamespaceTenant is true, text/vector indexes use namespace_id as tenant.
+// Prefer Bootstrap, which also sets ObjectSearchReady.
 func (g *Graph) EnsureSearchIndexes(ctx context.Context, withNamespaceTenant bool) error {
 	if err := g.EnsureObjectIndex(ctx); err != nil {
 		return err
@@ -85,6 +101,26 @@ func (g *Graph) EnsureSearchIndexes(ctx context.Context, withNamespaceTenant boo
 		Returning()
 	if err := g.client.Exec(ctx, req, nil, helix.WriterOnly()); err != nil {
 		return fmt.Errorf("helixgraph: ensure search indexes: %w", err)
+	}
+	g.searchReady = true
+	return nil
+}
+
+// RemoveObject implements brain.GraphWriter: drop graph nodes for this object_id.
+func (g *Graph) RemoveObject(ctx context.Context, id uuid.UUID) error {
+	if id == uuid.Nil {
+		return fmt.Errorf("helixgraph: object id is required")
+	}
+	q := helix.WriteQuery("brain_remove_object")
+	oid := q.ParamString("object_id", id.String())
+	req := q.
+		VarAs("dropped", helix.G().
+			NWhere(helix.SourceEq(PropObjectID, oid)).
+			Drop().
+			Count()).
+		Returning()
+	if err := g.client.Exec(ctx, req, nil, helix.WriterOnly()); err != nil {
+		return fmt.Errorf("helixgraph: remove object: %w", err)
 	}
 	return nil
 }
@@ -185,8 +221,8 @@ func objectProps(oid helix.ParamRef, obj brain.Object) helix.Props {
 	if obj.Summary != "" {
 		props = append(props, helix.Prop("summary", obj.Summary))
 	}
-	if st := brain.IndexText(obj); st != "" {
-		props = append(props, helix.Prop("search_text", st))
+	if st := brain.EntityIndexText(obj); st != "" {
+		props = append(props, helix.Prop(PropSearchText, st))
 	}
 	if obj.NamespaceID != uuid.Nil {
 		props = append(props, helix.Prop("namespace_id", obj.NamespaceID.String()))

@@ -142,8 +142,8 @@ func TestEngine_liveFindObjectsTextSearch(t *testing.T) {
 	}
 	ctx := context.Background()
 	g := liveGraph(t)
-	if err := g.EnsureSearchIndexes(ctx, false); err != nil {
-		t.Fatalf("EnsureSearchIndexes: %v", err)
+	if err := g.Bootstrap(ctx, false); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
 	}
 	store := brain.NewMemoryStore()
 	eng, err := brain.NewEngine(store, brain.WithGraph(g), brain.WithKinds(
@@ -250,7 +250,7 @@ func TestEngine_liveDualWriteLinkExpand(t *testing.T) {
 	}
 
 	// Turn 2: link and expand graph mode.
-	if err := eng.Link(ctx, a.ID, b.ID, "references"); err != nil {
+	if err := eng.Link(ctx, scope, a.ID, b.ID, "references"); err != nil {
 		t.Fatal(err)
 	}
 	exp, err := eng.Expand(ctx, scope, brain.ExpandRequest{
@@ -275,7 +275,7 @@ func TestEngine_liveDualWriteLinkExpand(t *testing.T) {
 	if a.Title != "Source-v2" {
 		t.Fatalf("put update: %+v", a)
 	}
-	if err := eng.Link(ctx, a.ID, b.ID, "references"); err != nil {
+	if err := eng.Link(ctx, scope, a.ID, b.ID, "references"); err != nil {
 		t.Fatal(err)
 	}
 	exp, err = eng.Expand(ctx, scope, brain.ExpandRequest{

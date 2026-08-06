@@ -150,8 +150,19 @@ func kindSet(kinds []string) map[string]struct{} {
 	return out
 }
 
+// objectSearchReady is optional: Helix sets false until Bootstrap; MemoryGraph omits it (always ready).
+type objectSearchReady interface {
+	ObjectSearchReady() bool
+}
+
 // HasObjectSearch reports whether FindObjects / find_objects is available.
 func (e *Engine) HasObjectSearch() bool {
-	_, ok := e.graph.(GraphObjectSearcher)
-	return ok
+	gs, ok := e.graph.(GraphObjectSearcher)
+	if !ok {
+		return false
+	}
+	if r, ok := gs.(objectSearchReady); ok {
+		return r.ObjectSearchReady()
+	}
+	return true
 }

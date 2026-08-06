@@ -281,9 +281,9 @@ func (b brainTools) newLinkTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "link",
 		DisplayName: "Link Objects",
-		Description: `Create a non-containment relationship between two knowledge objects (graph edge).
+		Description: `Create a cross-object relationship (graph edge) between two first-class knowledge objects.
 
-Both objects should already exist (e.g. via save_* or host ingest). Use expand with the same relation_type to traverse. Containment (parent/child) uses parent_id on save, not this tool.`,
+Both ends must already exist under the current search namespace, must not be soft-deleted, and must not be part/chunk objects (no parent_id). Examples: email→deal (about), deal→buyer (has_buyer), fact→deal (about). Containment (parent/child) uses parent_id on save, not this tool. Use expand with the same relation_type to traverse.`,
 		Category: streaming.ToolCategoryEdit,
 		Access:   ToolWriteAccess,
 		Timeout:  30 * time.Second,
@@ -297,7 +297,7 @@ Both objects should already exist (e.g. via save_* or host ingest). Use expand w
 				return "", fmt.Errorf("link: %w", err)
 			}
 			runtime.EmitUpdate("Linking knowledge objects…")
-			if err := b.engine.Link(ctx, from, to, args.RelationType); err != nil {
+			if err := b.engine.Link(ctx, b.sc.Scope(), from, to, args.RelationType); err != nil {
 				return "", fmt.Errorf("link: %w", err)
 			}
 			return formatBrainJSON(map[string]string{

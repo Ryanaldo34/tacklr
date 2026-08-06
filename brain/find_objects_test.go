@@ -49,7 +49,7 @@ func TestFindObjects_multiTurnMemoryGraph(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := eng.Link(ctx, fact.ID, deal.ID, "about"); err != nil {
+	if err := eng.Link(ctx, scope, fact.ID, deal.ID, "about"); err != nil {
 		t.Fatal(err)
 	}
 
