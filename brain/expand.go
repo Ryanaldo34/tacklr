@@ -63,7 +63,8 @@ func (e *Engine) Expand(ctx context.Context, scope Scope, req ExpandRequest, res
 	degrade := DegradeNone
 	defer func() { span.End(len(res.Objects), degrade, err) }()
 
-	if err = ctx.Err(); err != nil {
+	if e := ctx.Err(); e != nil {
+		err = e
 		return res, err
 	}
 	if req.ObjectID == uuid.Nil {
@@ -153,7 +154,8 @@ func (e *Engine) ExpandMany(ctx context.Context, scope Scope, req ExpandManyRequ
 	ctx, span := e.observer.StartOp(ctx, OpExpandMany)
 	defer func() { span.End(len(res.Objects), DegradeNone, err) }()
 
-	if err = ctx.Err(); err != nil {
+	if e := ctx.Err(); e != nil {
+		err = e
 		return res, err
 	}
 	if len(req.ObjectIDs) == 0 {
@@ -179,7 +181,8 @@ func (e *Engine) ExpandMany(ctx context.Context, scope Scope, req ExpandManyRequ
 		if seed == uuid.Nil {
 			continue
 		}
-		if err = ctx.Err(); err != nil {
+		if e := ctx.Err(); e != nil {
+			err = e
 			return res, err
 		}
 		obj, gErr := e.store.Get(ctx, scope, seed)

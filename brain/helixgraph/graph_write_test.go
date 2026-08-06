@@ -38,7 +38,8 @@ func TestGraph_ensureObjectAndAddEdgeRequestShape(t *testing.T) {
 			if nodeExists {
 				n = 1
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"n": n})
+			// Match live Helix Count shape: {"n":{"count":N}}
+			_ = json.NewEncoder(w).Encode(map[string]any{"n": map[string]any{"count": n}})
 			return
 		}
 		if strings.Contains(body, "AddN") {

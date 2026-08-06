@@ -218,6 +218,9 @@ func (g *Graph) SearchVector(ctx context.Context, embedding []float32, limit int
 
 // SearchEdgesText implements brain.GraphEdgeSearcher via Helix TextSearchEdges on note.
 // Requires EnsureEdgeTextIndex(rel) for that label.
+//
+// Live Helix returns edge props with internal $from/$to node ids (ProjectFromEndpoint
+// on edges is not supported); we resolve those ids to object_id UUIDs.
 func (g *Graph) SearchEdgesText(ctx context.Context, relationLabel, query string, limit int) ([]brain.EdgeSearchHit, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -230,31 +233,53 @@ func (g *Graph) SearchEdgesText(ctx context.Context, relationLabel, query string
 	q := helix.ReadQuery("brain_text_search_edges")
 	qt := q.ParamString("query", query)
 	lim := q.ParamI64("limit", int64(limit))
-	trav := helix.G().TextSearchEdges(rel, propEdgeNote, qt, lim).Project(
-		helix.ProjectFromEndpoint(propObjectID, "from_id"),
-		helix.ProjectToEndpoint(propObjectID, "to_id"),
-		helix.ProjectProp(propEdgeNote),
-		helix.ProjectProp(propEdgeStatus),
-		helix.ProjectProp(propEdgeRole),
-		helix.ProjectProp(propEdgeConfidence),
-		helix.ProjectProp(propEdgeEvidenceID),
-		helix.ProjectProp("$distance"),
-	)
-	req := q.VarAs("hits", trav).Returning("hits")
+	// EdgeProperties: note/status/role + $from/$to internal ids + $score.
+	req := q.VarAs("hits", helix.G().TextSearchEdges(rel, propEdgeNote, qt, lim).EdgeProperties()).Returning("hits")
 	var raw struct {
 		Hits struct {
-			Properties []edgeHitRow `json:"properties"`
+			Properties []edgePropRow `json:"properties"`
 		} `json:"hits"`
 	}
 	if err := g.client.Exec(ctx, req, &raw); err != nil {
 		return nil, fmt.Errorf("helixgraph: edge text search %q: %w", rel, err)
 	}
-	out := make([]brain.EdgeSearchHit, 0, len(raw.Hits.Properties))
-	for i, row := range raw.Hits.Properties {
-		h, ok := parseEdgeHitRow(row, rel, i, len(raw.Hits.Properties))
-		if ok {
-			out = append(out, h)
+	rows := raw.Hits.Properties
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	ids := make([]uint64, 0, len(rows)*2)
+	for _, row := range rows {
+		if row.From != nil {
+			ids = append(ids, *row.From)
 		}
+		if row.To != nil {
+			ids = append(ids, *row.To)
+		}
+	}
+	oidByInternal, err := g.resolveNodeObjectIDs(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]brain.EdgeSearchHit, 0, len(rows))
+	for i, row := range rows {
+		if row.From == nil || row.To == nil {
+			continue
+		}
+		from, okF := oidByInternal[*row.From]
+		to, okT := oidByInternal[*row.To]
+		if !okF || !okT {
+			continue
+		}
+		score := float64(len(rows) - i)
+		if row.Score != nil {
+			score = *row.Score
+		} else if row.Distance != nil {
+			score = 1.0 / (1.0 + *row.Distance)
+		}
+		out = append(out, brain.EdgeSearchHit{
+			FromID: from, ToID: to, RelationType: rel,
+			Meta: edgeMetaFromPropRow(row), Score: score,
+		})
 	}
 	return out, nil
 }
@@ -278,14 +303,17 @@ type searchHitRow struct {
 	Distance *float64 `json:"$distance"`
 }
 
-type edgeHitRow struct {
-	FromID     string   `json:"from_id"`
-	ToID       string   `json:"to_id"`
+// edgePropRow is Helix EdgeProperties / TextSearchEdges payload.
+// $from/$to are internal node ids; resolve via resolveNodeObjectIDs.
+type edgePropRow struct {
+	From       *uint64  `json:"$from"`
+	To         *uint64  `json:"$to"`
 	Note       string   `json:"note,omitempty"`
 	Status     string   `json:"status,omitempty"`
 	Role       string   `json:"role,omitempty"`
 	Confidence *float64 `json:"confidence,omitempty"`
 	EvidenceID string   `json:"evidence_id,omitempty"`
+	Score      *float64 `json:"$score,omitempty"`
 	Distance   *float64 `json:"$distance,omitempty"`
 }
 
@@ -314,12 +342,7 @@ func (g *Graph) execSearchHits(ctx context.Context, req helix.Request, label str
 	return out, nil
 }
 
-func parseEdgeHitRow(row edgeHitRow, rel string, i, n int) (brain.EdgeSearchHit, bool) {
-	from, err1 := uuid.Parse(strings.TrimSpace(row.FromID))
-	to, err2 := uuid.Parse(strings.TrimSpace(row.ToID))
-	if err1 != nil || err2 != nil {
-		return brain.EdgeSearchHit{}, false
-	}
+func edgeMetaFromPropRow(row edgePropRow) brain.EdgeMeta {
 	meta := brain.EdgeMeta{
 		Note:   strings.TrimSpace(row.Note),
 		Status: strings.TrimSpace(row.Status),
@@ -333,11 +356,48 @@ func parseEdgeHitRow(row edgeHitRow, rel string, i, n int) (brain.EdgeSearchHit,
 			meta.EvidenceID = &u
 		}
 	}
-	score := float64(n - i)
-	if row.Distance != nil {
-		score = 1.0 / (1.0 + *row.Distance)
+	return meta
+}
+
+// resolveNodeObjectIDs maps Helix internal node ids → object_id UUIDs.
+// ValueMap order matches NodeIDs input order on current Helix.
+func (g *Graph) resolveNodeObjectIDs(ctx context.Context, internal []uint64) (map[uint64]uuid.UUID, error) {
+	if len(internal) == 0 {
+		return nil, nil
 	}
-	return brain.EdgeSearchHit{FromID: from, ToID: to, RelationType: rel, Meta: meta, Score: score}, true
+	seen := make(map[uint64]struct{}, len(internal))
+	ids := make([]uint64, 0, len(internal))
+	for _, id := range internal {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	q := helix.ReadQuery("brain_resolve_node_object_ids")
+	req := q.VarAs("nodes", helix.G().N(helix.NodeIDs(ids...)).ValueMap(propObjectID)).Returning("nodes")
+	var raw struct {
+		Nodes struct {
+			Properties []struct {
+				ObjectID string `json:"object_id"`
+			} `json:"properties"`
+		} `json:"nodes"`
+	}
+	if err := g.client.Exec(ctx, req, &raw); err != nil {
+		return nil, fmt.Errorf("helixgraph: resolve node object ids: %w", err)
+	}
+	out := make(map[uint64]uuid.UUID, len(ids))
+	for i, row := range raw.Nodes.Properties {
+		if i >= len(ids) {
+			break
+		}
+		oid, err := uuid.Parse(strings.TrimSpace(row.ObjectID))
+		if err != nil {
+			continue
+		}
+		out[ids[i]] = oid
+	}
+	return out, nil
 }
 
 // EnsureObject implements brain.GraphWriter: insert if missing, else update props in place.
@@ -363,16 +423,19 @@ func (g *Graph) objectExists(ctx context.Context, id uuid.UUID) (bool, error) {
 	q := helix.ReadQuery("brain_object_exists")
 	oid := q.ParamString("object_id", id.String())
 	// Helix Count over the equality index is the portable existence probe.
+	// Live Helix returns {"n":{"count":N}} (not a bare int).
 	req := q.
 		VarAs("n", helix.G().NWhere(helix.SourceEq(propObjectID, oid)).Count()).
 		Returning("n")
 	var raw struct {
-		N int64 `json:"n"`
+		N struct {
+			Count int64 `json:"count"`
+		} `json:"n"`
 	}
 	if err := g.client.Exec(ctx, req, &raw); err != nil {
 		return false, fmt.Errorf("helixgraph: object exists: %w", err)
 	}
-	return raw.N > 0, nil
+	return raw.N.Count > 0, nil
 }
 
 func (g *Graph) insertObject(ctx context.Context, obj brain.Object) error {
@@ -545,8 +608,9 @@ func edgeMetaProps(meta brain.EdgeMeta) helix.Props {
 	return props
 }
 
-// Neighbors uses Helix BothE (one RPC per relation label) for undirected hop discovery
-// with edge property projection — not separate OutE/InE walks managed in-process.
+// Neighbors walks OutE then InE per label via EdgeProperties (internal $from/$to),
+// then resolves peers to object_id. ProjectFromEndpoint on edges is unsupported on
+// current Helix images.
 func (g *Graph) Neighbors(ctx context.Context, objectID uuid.UUID, relationTypes []string, limit int) ([]brain.GraphNeighbor, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -568,103 +632,86 @@ func (g *Graph) Neighbors(ctx context.Context, objectID uuid.UUID, relationTypes
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		rows, err := g.neighborsBothE(ctx, objectID, label, limit)
-		if err != nil {
-			return nil, err
-		}
-		for _, row := range rows {
-			peer, dir, meta, ok := parseBothERow(row, objectID)
-			if !ok {
+		for _, dir := range []string{"out", "in"} {
+			if len(out) >= limit {
+				return out, nil
+			}
+			rows, err := g.neighborEdgeProps(ctx, objectID, label, dir, limit)
+			if err != nil {
+				return nil, err
+			}
+			if len(rows) == 0 {
 				continue
 			}
-			if _, exists := seen[peer]; exists || len(out) >= limit {
-				continue
+			peerInternals := make([]uint64, 0, len(rows))
+			for _, row := range rows {
+				var peer *uint64
+				if dir == "out" {
+					peer = row.To
+				} else {
+					peer = row.From
+				}
+				if peer != nil {
+					peerInternals = append(peerInternals, *peer)
+				}
 			}
-			seen[peer] = struct{}{}
-			out = append(out, brain.GraphNeighbor{
-				ObjectID:     peer,
-				RelationType: label,
-				Direction:    dir,
-				Meta:         meta,
-			})
-		}
-		if len(out) >= limit {
-			return out, nil
+			oidByInternal, err := g.resolveNodeObjectIDs(ctx, peerInternals)
+			if err != nil {
+				return nil, err
+			}
+			for _, row := range rows {
+				var peerInternal *uint64
+				if dir == "out" {
+					peerInternal = row.To
+				} else {
+					peerInternal = row.From
+				}
+				if peerInternal == nil {
+					continue
+				}
+				peer, ok := oidByInternal[*peerInternal]
+				if !ok || peer == uuid.Nil || peer == objectID {
+					continue
+				}
+				if _, exists := seen[peer]; exists || len(out) >= limit {
+					continue
+				}
+				seen[peer] = struct{}{}
+				out = append(out, brain.GraphNeighbor{
+					ObjectID: peer, RelationType: label, Direction: dir,
+					Meta: edgeMetaFromPropRow(row),
+				})
+			}
 		}
 	}
 	return out, nil
 }
 
-type bothERow struct {
-	FromID     string   `json:"from_id"`
-	ToID       string   `json:"to_id"`
-	Note       string   `json:"note,omitempty"`
-	Status     string   `json:"status,omitempty"`
-	Role       string   `json:"role,omitempty"`
-	Confidence *float64 `json:"confidence,omitempty"`
-	EvidenceID string   `json:"evidence_id,omitempty"`
-}
-
-func (g *Graph) neighborsBothE(ctx context.Context, objectID uuid.UUID, label string, limit int) ([]bothERow, error) {
-	q := helix.ReadQuery("brain_expand_neighbors_bothe")
+func (g *Graph) neighborEdgeProps(ctx context.Context, objectID uuid.UUID, label, dir string, limit int) ([]edgePropRow, error) {
+	name := "brain_expand_neighbors_oute"
+	if dir == "in" {
+		name = "brain_expand_neighbors_ine"
+	}
+	q := helix.ReadQuery(name)
 	oid := q.ParamString("object_id", objectID.String())
 	lim := q.ParamI64("limit", int64(limit))
-	trav := helix.G().
-		NWhere(helix.SourceEq(propObjectID, oid)).
-		BothE(label).
-		Limit(lim).
-		Project(
-			helix.ProjectFromEndpoint(propObjectID, "from_id"),
-			helix.ProjectToEndpoint(propObjectID, "to_id"),
-			helix.ProjectProp(propEdgeNote),
-			helix.ProjectProp(propEdgeStatus),
-			helix.ProjectProp(propEdgeRole),
-			helix.ProjectProp(propEdgeConfidence),
-			helix.ProjectProp(propEdgeEvidenceID),
-		)
+	base := helix.G().NWhere(helix.SourceEq(propObjectID, oid))
+	var trav *helix.Traversal
+	if dir == "in" {
+		trav = base.InE(label).Limit(lim).EdgeProperties()
+	} else {
+		trav = base.OutE(label).Limit(lim).EdgeProperties()
+	}
 	req := q.VarAs("neighbors", trav).Returning("neighbors")
 	var raw struct {
 		Neighbors struct {
-			Properties []bothERow `json:"properties"`
+			Properties []edgePropRow `json:"properties"`
 		} `json:"neighbors"`
 	}
 	if err := g.client.Exec(ctx, req, &raw); err != nil {
-		return nil, fmt.Errorf("helixgraph: neighbors BothE %q: %w", label, err)
+		return nil, fmt.Errorf("helixgraph: neighbors %s %q: %w", dir, label, err)
 	}
 	return raw.Neighbors.Properties, nil
-}
-
-func parseBothERow(row bothERow, self uuid.UUID) (peer uuid.UUID, dir string, meta brain.EdgeMeta, ok bool) {
-	from, err1 := uuid.Parse(strings.TrimSpace(row.FromID))
-	to, err2 := uuid.Parse(strings.TrimSpace(row.ToID))
-	if err1 != nil || err2 != nil {
-		return uuid.Nil, "", brain.EdgeMeta{}, false
-	}
-	switch {
-	case from == self:
-		peer, dir = to, "out"
-	case to == self:
-		peer, dir = from, "in"
-	default:
-		return uuid.Nil, "", brain.EdgeMeta{}, false
-	}
-	if peer == uuid.Nil || peer == self {
-		return uuid.Nil, "", brain.EdgeMeta{}, false
-	}
-	meta = brain.EdgeMeta{
-		Note:   strings.TrimSpace(row.Note),
-		Status: strings.TrimSpace(row.Status),
-		Role:   strings.TrimSpace(row.Role),
-	}
-	if row.Confidence != nil {
-		meta.Confidence = *row.Confidence
-	}
-	if eid := strings.TrimSpace(row.EvidenceID); eid != "" {
-		if u, err := uuid.Parse(eid); err == nil {
-			meta.EvidenceID = &u
-		}
-	}
-	return peer, dir, meta, true
 }
 
 var (

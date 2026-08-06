@@ -89,7 +89,8 @@ func (e *Engine) Continue(ctx context.Context, scope Scope, resultSetID uuid.UUI
 	}
 	attachRelations(objs, set.Relations)
 	set.Offset = end
-	if err = results.Put(ctx, set); err != nil {
+	if e := results.Put(ctx, set); e != nil {
+		err = e
 		return page, err
 	}
 	return SearchPage{

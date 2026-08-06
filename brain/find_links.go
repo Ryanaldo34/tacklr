@@ -34,7 +34,8 @@ func (e *Engine) FindLinks(ctx context.Context, scope Scope, req FindLinksReques
 	ctx, span := e.observer.StartOp(ctx, OpFindLinks)
 	defer func() { span.End(len(res.Links), DegradeNone, err) }()
 
-	if err = ctx.Err(); err != nil {
+	if e := ctx.Err(); e != nil {
+		err = e
 		return res, err
 	}
 	if e.graphE == nil {
