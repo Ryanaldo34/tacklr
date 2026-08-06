@@ -3,6 +3,7 @@ package helixgraph_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -20,12 +21,29 @@ import (
 func TestGraph_ensureObjectAndAddEdgeRequestShape(t *testing.T) {
 	ctx := context.Background()
 	var bodies []string
+	var nodeExists bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Fatal(err)
 		}
-		bodies = append(bodies, string(b))
+		body := string(b)
+		bodies = append(bodies, body)
+		// Exists probe: Count without AddN/SetProperty/AddE.
+		if strings.Contains(body, "brain_object_exists") ||
+			(strings.Contains(body, "Count") && !strings.Contains(body, "AddN") &&
+				!strings.Contains(body, "SetProperty") && !strings.Contains(body, "AddE") &&
+				!strings.Contains(body, "DropEdge") && !strings.Contains(body, "CreateIndex")) {
+			n := int64(0)
+			if nodeExists {
+				n = 1
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"n": n})
+			return
+		}
+		if strings.Contains(body, "AddN") {
+			nodeExists = true
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{})
 	}))
 	t.Cleanup(srv.Close)
@@ -53,38 +71,73 @@ func TestGraph_ensureObjectAndAddEdgeRequestShape(t *testing.T) {
 	if err := g.EnsureObject(ctx, obj); err != nil {
 		t.Fatal(err)
 	}
-	if len(bodies) != 1 {
-		t.Fatalf("bodies: %d", len(bodies))
+	// First EnsureObject: exists-check then insert (AddN, no node Drop).
+	if len(bodies) < 2 {
+		t.Fatalf("want exists+insert RPCs, got %d", len(bodies))
 	}
-	ensure := bodies[0]
+	joinedEnsure := strings.Join(bodies, "\n")
 	for _, want := range []string{
 		obj.ID.String(), "Document", "memo", "sum", "body text",
 		ns.String(), pid.String(), "search_text", "embedding",
-		"created_at", "updated_at", "AddN", "Drop",
+		"created_at", "updated_at", "AddN",
 	} {
-		if !strings.Contains(ensure, want) {
-			t.Fatalf("ensure body missing %q:\n%s", want, ensure)
+		if !strings.Contains(joinedEnsure, want) {
+			t.Fatalf("ensure body missing %q:\n%s", want, joinedEnsure)
+		}
+	}
+	insertBody := bodies[len(bodies)-1]
+	if strings.Contains(insertBody, "AddN") && strings.Contains(insertBody, `"Drop"`) {
+		t.Fatalf("insert must not Drop node:\n%s", insertBody)
+	}
+
+	// Second EnsureObject updates in place (SetProperty), no AddN / node Drop.
+	nBeforeUpdate := len(bodies)
+	obj.Title = "memo-v2"
+	if err := g.EnsureObject(ctx, obj); err != nil {
+		t.Fatal(err)
+	}
+	updateBodies := bodies[nBeforeUpdate:]
+	updateJoined := strings.Join(updateBodies, "\n")
+	if !strings.Contains(updateJoined, "memo-v2") {
+		t.Fatalf("update path missing memo-v2:\n%s", updateJoined)
+	}
+	if !strings.Contains(updateJoined, "SetProperty") {
+		t.Fatalf("update path missing SetProperty:\n%s", updateJoined)
+	}
+	for _, b := range updateBodies {
+		if strings.Contains(b, "AddN") {
+			t.Fatalf("re-ensure must not AddN:\n%s", b)
 		}
 	}
 
 	// Index ensure RPC.
+	nBeforeIdx := len(bodies)
 	if err := g.EnsureObjectIndex(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if len(bodies) != 2 || !strings.Contains(bodies[1], "object_id") {
-		t.Fatalf("index body: %v", bodies)
+	if len(bodies) != nBeforeIdx+1 || !strings.Contains(bodies[len(bodies)-1], "object_id") {
+		t.Fatalf("index body: %v", bodies[nBeforeIdx:])
 	}
 
-	// Edge RPC.
+	// Edge RPC with relationship metadata.
 	from, to := uuid.New(), uuid.New()
-	if err := g.AddEdge(ctx, from, to, "references"); err != nil {
+	evid := uuid.New()
+	meta := brain.EdgeMeta{
+		Note: "pricing risk", Status: "active", Role: "primary",
+		Confidence: 0.9, EvidenceID: &evid,
+	}
+	nBeforeEdge := len(bodies)
+	if err := g.AddEdge(ctx, from, to, "references", meta); err != nil {
 		t.Fatal(err)
 	}
-	if len(bodies) != 3 {
+	if len(bodies) != nBeforeEdge+1 {
 		t.Fatalf("bodies after edge: %d", len(bodies))
 	}
-	edge := bodies[2]
-	for _, want := range []string{from.String(), to.String(), "references", "AddE"} {
+	edge := bodies[len(bodies)-1]
+	for _, want := range []string{
+		from.String(), to.String(), "references", "AddE", "DropEdgeLabeled",
+		"pricing risk", "active", "primary", "0.9", evid.String(),
+	} {
 		if !strings.Contains(edge, want) {
 			t.Fatalf("edge body missing %q:\n%s", want, edge)
 		}
@@ -101,8 +154,96 @@ func TestGraph_writeValidation(t *testing.T) {
 	if err := g.EnsureObject(ctx, brain.Object{}); err == nil {
 		t.Fatal("nil object id")
 	}
-	if err := g.AddEdge(ctx, uuid.New(), uuid.Nil, "r"); err == nil {
+	if err := g.AddEdge(ctx, uuid.New(), uuid.Nil, "r", brain.EdgeMeta{}); err == nil {
 		t.Fatal("nil to")
+	}
+	if err := g.RemoveObject(ctx, uuid.Nil); err == nil {
+		t.Fatal("nil remove id")
+	}
+	cctx, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := g.AddEdge(cctx, uuid.New(), uuid.New(), "r", brain.EdgeMeta{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled AddEdge: %v", err)
+	}
+	if err := g.RemoveObject(cctx, uuid.New()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled RemoveObject: %v", err)
+	}
+	if err := g.EnsureObject(cctx, brain.Object{ID: uuid.New()}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled EnsureObject: %v", err)
+	}
+	if err := g.Bootstrap(cctx, false); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled Bootstrap: %v", err)
+	}
+	if g.ObjectSearchReady() {
+		t.Fatal("Bootstrap cancel must leave search not ready")
+	}
+}
+
+// TestGraph_removeObjectAndBootstrapRequestShape covers RemoveObject + Bootstrap under -short.
+func TestGraph_removeObjectAndBootstrapRequestShape(t *testing.T) {
+	ctx := context.Background()
+	var bodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bodies = append(bodies, string(b))
+		_ = json.NewEncoder(w).Encode(map[string]any{})
+	}))
+	t.Cleanup(srv.Close)
+
+	g, err := helixgraph.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.ObjectSearchReady() {
+		t.Fatal("ready before bootstrap")
+	}
+	if err := g.Bootstrap(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	if !g.ObjectSearchReady() {
+		t.Fatal("Bootstrap should mark ready")
+	}
+	// Bootstrap issues object_id index + text/vector indexes (via EnsureSearchIndexes).
+	if len(bodies) < 2 {
+		t.Fatalf("bootstrap RPCs: %d", len(bodies))
+	}
+	joined := strings.Join(bodies, "\n")
+	for _, want := range []string{"object_id", "search_text", "embedding", "CreateIndex", "if_not_exists"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("bootstrap missing %q:\n%s", want, joined)
+		}
+	}
+
+	id := uuid.New()
+	nBefore := len(bodies)
+	if err := g.RemoveObject(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if len(bodies) != nBefore+1 {
+		t.Fatalf("remove bodies: %d", len(bodies))
+	}
+	rm := bodies[len(bodies)-1]
+	if !strings.Contains(rm, id.String()) || !strings.Contains(rm, "Drop") {
+		t.Fatalf("remove body: %s", rm)
+	}
+
+	// Bootstrap failure path must not mark ready.
+	fail := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "down", http.StatusInternalServerError)
+	}))
+	t.Cleanup(fail.Close)
+	gFail, err := helixgraph.New(fail.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := gFail.Bootstrap(ctx, true); err == nil {
+		t.Fatal("want bootstrap error")
+	}
+	if gFail.ObjectSearchReady() {
+		t.Fatal("failed Bootstrap must not mark ready")
 	}
 }
 

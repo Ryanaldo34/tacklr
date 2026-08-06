@@ -118,8 +118,44 @@ func TestBrainTools_saveDiscoveryAndLink(t *testing.T) {
 		t.Fatalf("update: %+v", a2)
 	}
 
-	if _, err := linkTool.invoke(ctx, `{"from_id":"`+a.ID.String()+`","to_id":"`+b.ID.String()+`","relation_type":"references"}`, h.runtime); err != nil {
+	// Invalid evidence_id is a distinct link validation path.
+	if _, err := linkTool.invoke(ctx, `{
+		"from_id":"`+a.ID.String()+`",
+		"to_id":"`+b.ID.String()+`",
+		"relation_type":"references",
+		"evidence_id":"not-a-uuid"
+	}`, h.runtime); err == nil || !strings.Contains(err.Error(), "evidence_id") {
+		t.Fatalf("invalid evidence_id: %v", err)
+	}
+	lout, err := linkTool.invoke(ctx, `{
+		"from_id":"`+a.ID.String()+`",
+		"to_id":"`+b.ID.String()+`",
+		"relation_type":"references",
+		"note":"supports finding",
+		"status":"active",
+		"role":"source",
+		"confidence":0.8,
+		"evidence_id":"`+a.ID.String()+`"
+	}`, h.runtime)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if !strings.Contains(lout.output, "supports finding") || !strings.Contains(lout.output, "linked") {
+		t.Fatalf("link output: %s", lout.output)
+	}
+	if !strings.Contains(lout.output, "source") || !strings.Contains(lout.output, a.ID.String()) {
+		t.Fatalf("link meta fields: %s", lout.output)
+	}
+	expandTool := h.findTool("expand", "")
+	if expandTool == nil {
+		t.Fatal("expand required")
+	}
+	eout, err := expandTool.invoke(ctx, `{"object_id":"`+a.ID.String()+`","relation_types":["references"]}`, h.runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(eout.output, b.ID.String()) || !strings.Contains(eout.output, "supports finding") {
+		t.Fatalf("expand should return neighbor with note: %s", eout.output)
 	}
 	readTool := h.findTool("read", "")
 	rout, err := readTool.invoke(ctx, `{"object_id":"`+a.ID.String()+`"}`, h.runtime)

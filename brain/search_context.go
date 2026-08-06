@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"slices"
 	"sync"
 	"time"
@@ -69,10 +70,9 @@ func (c *SearchContext) Namespace() (uuid.UUID, bool) {
 // Put implements ResultSetStore: stores set as the sole active ResultSet.
 func (c *SearchContext) Put(_ context.Context, set ResultSet) error {
 	if set.ID == uuid.Nil {
-		return fmt.Errorf("brain: result set id is required")
+		return ErrResultSetIDRequired
 	}
-	cp := set
-	cp.ObjectIDs = slices.Clone(set.ObjectIDs)
+	cp := cloneResultSet(set)
 	if cp.CreatedAt.IsZero() {
 		cp.CreatedAt = time.Now().UTC()
 	}
@@ -89,9 +89,16 @@ func (c *SearchContext) Get(_ context.Context, id uuid.UUID) (ResultSet, error) 
 	if c.current == nil || c.current.ID != id {
 		return ResultSet{}, fmt.Errorf("%w: %s", ErrResultSetNotFound, id)
 	}
-	out := *c.current
-	out.ObjectIDs = slices.Clone(c.current.ObjectIDs)
-	return out, nil
+	return cloneResultSet(*c.current), nil
+}
+
+func cloneResultSet(set ResultSet) ResultSet {
+	cp := set
+	cp.ObjectIDs = slices.Clone(set.ObjectIDs)
+	if len(set.Relations) > 0 {
+		cp.Relations = maps.Clone(set.Relations)
+	}
+	return cp
 }
 
 // Export serializes namespace + active ResultSet for session checkpoints.
@@ -107,8 +114,7 @@ func (c *SearchContext) Export() ([]byte, error) {
 		env.Namespace = &cp
 	}
 	if c.current != nil {
-		rs := *c.current
-		rs.ObjectIDs = slices.Clone(c.current.ObjectIDs)
+		rs := cloneResultSet(*c.current)
 		env.ResultSet = &rs
 	}
 	b, err := json.Marshal(env)

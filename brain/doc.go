@@ -20,9 +20,9 @@
 // Hosts map save_* tools via AgentOptions.BrainWriteKinds. Write for retrieval:
 // fill title and summary (and useful properties) so search and find_objects work.
 //
-// Graph nodes are live, not static: every parent Put dual-writes again (updated
-// title, summary, properties, search_text, embedding). SoftDelete removes the
-// graph node. Revive via Put recreates it.
+// Graph nodes are live, not static: every parent Put dual-writes node props in place
+// (edges preserved). SoftDelete removes the graph node first, then soft-deletes the
+// store row. Revive via Put recreates the graph node.
 //
 // # Postgres vs Helix (complementary)
 //

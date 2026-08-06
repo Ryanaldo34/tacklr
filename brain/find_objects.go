@@ -3,7 +3,6 @@ package brain
 import (
 	"context"
 	"fmt"
-	"slices"
 	"strings"
 
 	"github.com/google/uuid"
@@ -27,16 +26,15 @@ func (e *Engine) FindObjects(ctx context.Context, scope Scope, req FindObjectsRe
 }
 
 func (e *Engine) findObjectsInner(ctx context.Context, scope Scope, req FindObjectsRequest, results ResultSetStore) (SearchPage, DegradeMode, error) {
-	gs, ok := e.graph.(GraphObjectSearcher)
-	if !ok {
-		return SearchPage{}, DegradeNone, fmt.Errorf("brain: graph object search is not available")
+	if e.graphS == nil {
+		return SearchPage{}, DegradeNone, ErrObjectSearchUnavailable
 	}
 	if results == nil {
-		return SearchPage{}, DegradeNone, fmt.Errorf("brain: result set store is required")
+		return SearchPage{}, DegradeNone, ErrResultSetRequired
 	}
 	query := strings.TrimSpace(req.Query)
 	if query == "" {
-		return SearchPage{}, DegradeNone, fmt.Errorf("brain: query is required")
+		return SearchPage{}, DegradeNone, ErrQueryRequired
 	}
 	limit := e.normalizeLimit(req.Limit)
 	k := max(limit*3, e.cfg.CandidateK)
@@ -44,7 +42,7 @@ func (e *Engine) findObjectsInner(ctx context.Context, scope Scope, req FindObje
 	degrade := DegradeNone
 
 	var lists [][]ScoredID
-	textHits, err := gs.SearchText(ctx, query, k, ns)
+	textHits, err := e.graphS.SearchText(ctx, query, k, ns)
 	if err != nil {
 		return SearchPage{}, DegradeNone, err
 	}
@@ -59,10 +57,10 @@ func (e *Engine) findObjectsInner(ctx context.Context, scope Scope, req FindObje
 			}
 			degrade = DegradeLexicalOnly
 		} else if len(emb) > 0 {
-			vecHits, vErr := gs.SearchVector(ctx, emb, k, ns)
+			vecHits, vErr := e.graphS.SearchVector(ctx, emb, k, ns)
 			if vErr != nil {
 				if !e.cfg.allowEmbedderDegrade() {
-					return SearchPage{}, DegradeNone, vErr
+					return SearchPage{}, DegradeNone, fmt.Errorf("brain: vector search: %w", vErr)
 				}
 				degrade = DegradeLexicalOnly
 			} else if len(vecHits) > 0 {
@@ -77,50 +75,45 @@ func (e *Engine) findObjectsInner(ctx context.Context, scope Scope, req FindObje
 	applyTemporal(ranked, e.cfg.lambdaValue(), e.cfg.Now())
 	sortScored(ranked)
 
-	// Hydrate once: drop missing/soft-deleted/out-of-scope (same as expand graph path).
 	ids := make([]uuid.UUID, len(ranked))
 	scoreByID := make(map[uuid.UUID]float64, len(ranked))
 	for i, s := range ranked {
 		ids[i] = s.ID
 		scoreByID[s.ID] = s.Score
 	}
-	if maxN := e.cfg.MaxResultSetSize; maxN > 0 && len(ids) > maxN {
-		ids = ids[:maxN]
-	}
-	objs, err := e.store.GetMany(ctx, scope, ids)
+	objs, err := e.hydrateIDs(ctx, scope, ids)
 	if err != nil {
-		return SearchPage{}, degrade, fmt.Errorf("brain: hydrate objects: %w", err)
-	}
-	byID := make(map[uuid.UUID]Object, len(objs))
-	for _, o := range objs {
-		byID[o.ID] = o
+		return SearchPage{}, degrade, err
 	}
 	kinds := kindSet(req.Kinds)
-	rich := make([]RichObject, 0, len(ids))
-	keptIDs := make([]uuid.UUID, 0, len(ids))
-	for _, id := range ids {
-		o, ok := byID[id]
-		if !ok || o.ParentID != nil {
-			// Skip invisible and part objects (entity find is parent-shaped).
+	rich := make([]RichObject, 0, len(objs))
+	for _, r := range objs {
+		if r.ParentID != nil {
 			continue
 		}
 		if kinds != nil {
-			if _, want := kinds[o.Kind]; !want {
+			if _, want := kinds[r.Kind]; !want {
 				continue
 			}
 		}
-		r := RichFromObject(o, false)
-		if sc, ok := scoreByID[id]; ok {
+		if sc, ok := scoreByID[r.ID]; ok {
 			sc := sc
 			r.Score = &sc
 		}
 		rich = append(rich, r)
-		keptIDs = append(keptIDs, id)
+	}
+	if maxN := e.cfg.MaxResultSetSize; maxN > 0 && len(rich) > maxN {
+		rich = rich[:maxN]
+	}
+	// Single ID list derived from filtered rich (no parallel keptIDs slice during filter).
+	keptIDs := make([]uuid.UUID, len(rich))
+	for i := range rich {
+		keptIDs[i] = rich[i].ID
 	}
 	end := min(limit, len(rich))
 	set := ResultSet{
 		ID:        uuid.New(),
-		ObjectIDs: slices.Clone(keptIDs),
+		ObjectIDs: keptIDs,
 		Offset:    end,
 		CreatedAt: e.cfg.Now(),
 	}
@@ -157,11 +150,10 @@ type objectSearchReady interface {
 
 // HasObjectSearch reports whether FindObjects / find_objects is available.
 func (e *Engine) HasObjectSearch() bool {
-	gs, ok := e.graph.(GraphObjectSearcher)
-	if !ok {
+	if e.graphS == nil {
 		return false
 	}
-	if r, ok := gs.(objectSearchReady); ok {
+	if r, ok := e.graphS.(objectSearchReady); ok {
 		return r.ObjectSearchReady()
 	}
 	return true

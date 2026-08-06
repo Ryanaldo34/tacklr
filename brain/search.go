@@ -85,7 +85,7 @@ func (e *Engine) Continue(ctx context.Context, scope Scope, resultSetID uuid.UUI
 
 func (e *Engine) continueInner(ctx context.Context, scope Scope, resultSetID uuid.UUID, limit int, results ResultSetStore) (SearchPage, error) {
 	if resultSetID == uuid.Nil {
-		return SearchPage{}, fmt.Errorf("brain: result_set_id is required")
+		return SearchPage{}, ErrResultSetIDRequired
 	}
 	limit = e.normalizeLimit(limit)
 	set, err := results.Get(ctx, resultSetID)
@@ -93,10 +93,11 @@ func (e *Engine) continueInner(ctx context.Context, scope Scope, resultSetID uui
 		return SearchPage{}, err
 	}
 	start, end := sliceBounds(set.Offset, limit, len(set.ObjectIDs))
-	objs, err := e.hydrateParents(ctx, scope, set.ObjectIDs[start:end])
+	objs, err := e.hydrateIDs(ctx, scope, set.ObjectIDs[start:end])
 	if err != nil {
 		return SearchPage{}, err
 	}
+	attachRelations(objs, set.Relations)
 	set.Offset = end
 	if err := results.Put(ctx, set); err != nil {
 		return SearchPage{}, err
@@ -120,7 +121,7 @@ func (e *Engine) materialize(ctx context.Context, scope Scope, ranked []ScoredID
 		ids[i] = p.ParentID
 		byID[p.ParentID] = p
 	}
-	page, err := e.pageIDs(ctx, scope, ids, limit, results)
+	page, err := e.pageIDs(ctx, scope, ids, limit, results, nil)
 	if err != nil {
 		return SearchPage{}, err
 	}
@@ -139,7 +140,7 @@ func (e *Engine) materialize(ctx context.Context, scope Scope, ranked []ScoredID
 // rejected, and missing kind filters are expanded to all registered kinds.
 func (e *Engine) prepareSearch(req SearchRequest) (Filters, error) {
 	if strings.TrimSpace(req.Query) == "" {
-		return nil, fmt.Errorf("brain: query is required")
+		return nil, ErrQueryRequired
 	}
 	return e.effectiveFilters(req.Filters)
 }
@@ -245,13 +246,14 @@ func (e *Engine) exactCandidates(ctx context.Context, scope Scope, req SearchReq
 	return append(boosted, rest...), nil
 }
 
-func (e *Engine) hydrateParents(ctx context.Context, scope Scope, ids []uuid.UUID) ([]RichObject, error) {
+// hydrateIDs loads objects for ids in request order, skipping missing/out-of-scope.
+func (e *Engine) hydrateIDs(ctx context.Context, scope Scope, ids []uuid.UUID) ([]RichObject, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
 	objs, err := e.store.GetMany(ctx, scope, ids)
 	if err != nil {
-		return nil, fmt.Errorf("brain: hydrate parents: %w", err)
+		return nil, fmt.Errorf("brain: hydrate: %w", err)
 	}
 	byID := make(map[uuid.UUID]Object, len(objs))
 	for _, o := range objs {
@@ -261,26 +263,32 @@ func (e *Engine) hydrateParents(ctx context.Context, scope Scope, ids []uuid.UUI
 	for _, id := range ids {
 		obj, ok := byID[id]
 		if !ok {
-			return nil, fmt.Errorf("brain: hydrate parent %s: %w", id, ErrNotFound)
+			continue
 		}
 		out = append(out, RichFromObject(obj, false))
 	}
 	return out, nil
 }
 
-func (e *Engine) pageIDs(ctx context.Context, scope Scope, ids []uuid.UUID, limit int, results ResultSetStore) (SearchPage, error) {
+// pageIDs materializes a ResultSet page. relations (optional) is stored for continue.
+func (e *Engine) pageIDs(ctx context.Context, scope Scope, ids []uuid.UUID, limit int, results ResultSetStore, relations map[uuid.UUID]Relation) (SearchPage, error) {
+	if results == nil {
+		return SearchPage{}, ErrResultSetRequired
+	}
 	limit = e.normalizeLimit(limit)
 	if maxN := e.cfg.MaxResultSetSize; maxN > 0 && len(ids) > maxN {
 		ids = ids[:maxN]
 	}
 	_, end := sliceBounds(0, limit, len(ids))
-	pageObjs, err := e.hydrateParents(ctx, scope, ids[:end])
+	pageObjs, err := e.hydrateIDs(ctx, scope, ids[:end])
 	if err != nil {
 		return SearchPage{}, err
 	}
+	attachRelations(pageObjs, relations)
 	set := ResultSet{
 		ID:        uuid.New(),
 		ObjectIDs: slices.Clone(ids),
+		Relations: relations,
 		Offset:    end,
 		CreatedAt: e.cfg.Now(),
 	}
@@ -292,6 +300,18 @@ func (e *Engine) pageIDs(ctx context.Context, scope Scope, ids []uuid.UUID, limi
 		HasMore:     end < len(ids),
 		Objects:     pageObjs,
 	}, nil
+}
+
+func attachRelations(objs []RichObject, relations map[uuid.UUID]Relation) {
+	if len(relations) == 0 {
+		return
+	}
+	for i := range objs {
+		if r, ok := relations[objs[i].ID]; ok {
+			r := r
+			objs[i].Relation = &r
+		}
+	}
 }
 
 func sliceBounds(offset, limit, n int) (start, end int) {

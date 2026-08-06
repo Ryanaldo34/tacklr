@@ -241,9 +241,14 @@ Prefer schema() for this kind before inventing property keys. Write a clear titl
 }
 
 type linkArgs struct {
-	FromID       string `json:"from_id" desc:"UUID of the source object."`
-	ToID         string `json:"to_id" desc:"UUID of the target object."`
-	RelationType string `json:"relation_type" desc:"Non-containment relation label (e.g. references, about)."`
+	FromID       string  `json:"from_id" desc:"UUID of the source object."`
+	ToID         string  `json:"to_id" desc:"UUID of the target object."`
+	RelationType string  `json:"relation_type" desc:"Non-containment relation label (e.g. references, about)."`
+	Note         string  `json:"note,omitempty" desc:"Short reason or rationale for the link (shown on expand)."`
+	Status       string  `json:"status,omitempty" desc:"Optional link status (e.g. active, resolved)."`
+	Role         string  `json:"role,omitempty" desc:"Optional role on the link (e.g. primary buyer)."`
+	Confidence   float64 `json:"confidence,omitempty" desc:"Optional confidence in (0,1]; omit when unknown."`
+	EvidenceID   string  `json:"evidence_id,omitempty" desc:"Optional UUID of a supporting object (email/chunk) for this link."`
 }
 
 type findObjectsArgs struct {
@@ -283,7 +288,7 @@ func (b brainTools) newLinkTool() *Tool {
 		DisplayName: "Link Objects",
 		Description: `Create a cross-object relationship (graph edge) between two first-class knowledge objects.
 
-Both ends must already exist under the current search namespace, must not be soft-deleted, and must not be part/chunk objects (no parent_id). Examples: email→deal (about), deal→buyer (has_buyer), fact→deal (about). Containment (parent/child) uses parent_id on save, not this tool. Use expand with the same relation_type to traverse.`,
+Both ends must already exist under the current search namespace, must not be soft-deleted, and must not be part/chunk objects (no parent_id). Examples: email→deal (about), deal→buyer (has_buyer), fact→deal (about). Optional note/status/role/confidence/evidence_id annotate why the link exists; expand returns that metadata on neighbors. Containment (parent/child) uses parent_id on save, not this tool. Re-linking the same pair updates metadata.`,
 		Category: streaming.ToolCategoryEdit,
 		Access:   ToolWriteAccess,
 		Timeout:  30 * time.Second,
@@ -296,18 +301,62 @@ Both ends must already exist under the current search namespace, must not be sof
 			if err != nil {
 				return "", fmt.Errorf("link: %w", err)
 			}
-			runtime.EmitUpdate("Linking knowledge objects…")
-			if err := b.engine.Link(ctx, b.sc.Scope(), from, to, args.RelationType); err != nil {
+			meta, err := edgeMetaFromLinkArgs(args)
+			if err != nil {
 				return "", fmt.Errorf("link: %w", err)
 			}
-			return formatBrainJSON(map[string]string{
-				"from_id":       from.String(),
-				"to_id":         to.String(),
-				"relation_type": strings.TrimSpace(args.RelationType),
-				"status":        "linked",
-			})
+			runtime.EmitUpdate("Linking knowledge objects…")
+			if err := b.engine.LinkWith(ctx, b.sc.Scope(), from, to, args.RelationType, meta); err != nil {
+				return "", fmt.Errorf("link: %w", err)
+			}
+			out := linkResult{
+				FromID:       from.String(),
+				ToID:         to.String(),
+				RelationType: strings.TrimSpace(args.RelationType),
+				Linked:       true,
+				Note:         meta.Note,
+				LinkStatus:   meta.Status,
+				Role:         meta.Role,
+				Confidence:   meta.Confidence,
+			}
+			if meta.EvidenceID != nil {
+				s := meta.EvidenceID.String()
+				out.EvidenceID = s
+			}
+			return formatBrainJSON(out)
 		},
 	})
+}
+
+// linkResult is the agent-facing payload for a successful link tool call.
+type linkResult struct {
+	FromID       string  `json:"from_id"`
+	ToID         string  `json:"to_id"`
+	RelationType string  `json:"relation_type"`
+	Linked       bool    `json:"linked"`
+	Note         string  `json:"note,omitempty"`
+	LinkStatus   string  `json:"link_status,omitempty"` // edge status; not HTTP status
+	Role         string  `json:"role,omitempty"`
+	Confidence   float64 `json:"confidence,omitempty"`
+	EvidenceID   string  `json:"evidence_id,omitempty"`
+}
+
+func edgeMetaFromLinkArgs(args linkArgs) (brain.EdgeMeta, error) {
+	meta := brain.EdgeMeta{
+		Note:       strings.TrimSpace(args.Note),
+		Status:     strings.TrimSpace(args.Status),
+		Role:       strings.TrimSpace(args.Role),
+		Confidence: args.Confidence,
+	}
+	if strings.TrimSpace(args.EvidenceID) == "" {
+		return meta, nil
+	}
+	id, err := parseUUID(args.EvidenceID, "evidence_id")
+	if err != nil {
+		return brain.EdgeMeta{}, err
+	}
+	meta.EvidenceID = &id
+	return meta, nil
 }
 
 func (b brainTools) putFromArgs(ctx context.Context, kind string, args saveObjectArgs) (brain.Object, error) {

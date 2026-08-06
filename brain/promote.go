@@ -83,18 +83,15 @@ func promoteParents(parts []ScoredID, evidenceN int) []promotedParent {
 	return out
 }
 
-// snippet trims s to at most maxRunes without allocating a full []rune.
+// snippet trims s to at most maxRunes and appends an ellipsis when truncated.
 func snippet(s string, maxRunes int) string {
 	s = strings.TrimSpace(s)
 	if s == "" || maxRunes <= 0 {
 		return s
 	}
-	n := 0
-	for i := range s {
-		if n == maxRunes {
-			return s[:i] + "…"
-		}
-		n++
+	cut := capRunes(s, maxRunes)
+	if cut == s {
+		return s
 	}
-	return s
+	return cut + "…"
 }

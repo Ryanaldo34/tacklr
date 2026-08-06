@@ -31,8 +31,11 @@ func (e *Engine) Expand(ctx context.Context, scope Scope, req ExpandRequest, res
 }
 
 func (e *Engine) expandInner(ctx context.Context, scope Scope, req ExpandRequest, results ResultSetStore) (ExpandResult, DegradeMode, error) {
+	if err := ctx.Err(); err != nil {
+		return ExpandResult{}, DegradeNone, err
+	}
 	if req.ObjectID == uuid.Nil {
-		return ExpandResult{}, DegradeNone, fmt.Errorf("brain: object id is required")
+		return ExpandResult{}, DegradeNone, ErrObjectIDRequired
 	}
 	obj, err := e.store.Get(ctx, scope, req.ObjectID)
 	if err != nil {
@@ -41,11 +44,12 @@ func (e *Engine) expandInner(ctx context.Context, scope Scope, req ExpandRequest
 
 	wantContainment, graphLabels := SplitRelationTypes(req.RelationTypes)
 	if len(graphLabels) > 0 && e.graph == nil {
-		return ExpandResult{}, DegradeNone, fmt.Errorf("brain: graph backend is required for relation types %v", graphLabels)
+		return ExpandResult{}, DegradeNone, fmt.Errorf("%w for relation types %v", ErrGraphRequired, graphLabels)
 	}
 
 	var (
 		ids             []uuid.UUID
+		relByID         map[uuid.UUID]Relation
 		usedContainment bool
 		usedGraph       bool
 		degrade         = DegradeNone
@@ -56,11 +60,11 @@ func (e *Engine) expandInner(ctx context.Context, scope Scope, req ExpandRequest
 		if err != nil {
 			return ExpandResult{}, degrade, err
 		}
-		ids = append(ids, cIDs...)
+		ids = cIDs
 		usedContainment = true
 	}
 	if len(graphLabels) > 0 {
-		gIDs, err := e.graphNeighborIDs(ctx, scope, obj.ID, graphLabels)
+		neighbors, err := e.graphNeighbors(ctx, scope, obj.ID, graphLabels)
 		if err != nil {
 			if e.cfg.allowGraphDegrade() && usedContainment {
 				degrade = DegradeContainmentOnly
@@ -68,13 +72,47 @@ func (e *Engine) expandInner(ctx context.Context, scope Scope, req ExpandRequest
 				return ExpandResult{}, degrade, err
 			}
 		} else {
-			ids = appendUnique(ids, gIDs...)
+			// One seen set for the whole expand — avoid rebuild-per-appendUnique.
+			seen := make(map[uuid.UUID]struct{}, len(ids)+len(neighbors))
+			for _, id := range ids {
+				seen[id] = struct{}{}
+			}
+			relByID = make(map[uuid.UUID]Relation, len(neighbors))
+			for _, n := range neighbors {
+				if n.ObjectID == uuid.Nil {
+					continue
+				}
+				if _, ok := seen[n.ObjectID]; ok {
+					continue
+				}
+				seen[n.ObjectID] = struct{}{}
+				ids = append(ids, n.ObjectID)
+				relByID[n.ObjectID] = RelationFromNeighbor(n)
+			}
 			usedGraph = true
 		}
 	}
 
-	res, err := e.expandMaybePage(ctx, scope, ids, expandMode(usedContainment, usedGraph, !obj.IsPart()), req.Limit, results)
-	return res, degrade, err
+	mode := expandMode(usedContainment, usedGraph, !obj.IsPart())
+
+	if len(ids) <= e.cfg.ExpandInlineMax {
+		objs, err := e.hydrateIDs(ctx, scope, ids)
+		if err != nil {
+			return ExpandResult{}, degrade, err
+		}
+		attachRelations(objs, relByID)
+		return ExpandResult{Objects: objs, Mode: mode}, degrade, nil
+	}
+	page, err := e.pageIDs(ctx, scope, ids, req.Limit, results, relByID)
+	if err != nil {
+		return ExpandResult{}, degrade, err
+	}
+	return ExpandResult{
+		Objects:     page.Objects,
+		ResultSetID: page.ResultSetID,
+		HasMore:     page.HasMore,
+		Mode:        mode,
+	}, degrade, nil
 }
 
 func (e *Engine) containmentIDs(ctx context.Context, scope Scope, obj Object) ([]uuid.UUID, error) {
@@ -94,12 +132,22 @@ func (e *Engine) containmentIDs(ctx context.Context, scope Scope, obj Object) ([
 	if _, err := e.store.Get(ctx, scope, parentID); err != nil {
 		return nil, err
 	}
-	ids := []uuid.UUID{parentID}
 	sibs, err := e.siblingWindowIDs(ctx, scope, parentID, obj.ID)
 	if err != nil {
 		return nil, err
 	}
-	return appendUnique(ids, sibs...), nil
+	// parent first, then siblings (window may include self).
+	ids := make([]uuid.UUID, 0, 1+len(sibs))
+	ids = append(ids, parentID)
+	seen := map[uuid.UUID]struct{}{parentID: {}}
+	for _, id := range sibs {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	return ids, nil
 }
 
 func expandMode(containment, graph, isParent bool) string {
@@ -113,29 +161,6 @@ func expandMode(containment, graph, isParent bool) string {
 	default:
 		return "neighborhood"
 	}
-}
-
-func (e *Engine) expandMaybePage(ctx context.Context, scope Scope, ids []uuid.UUID, mode string, limit int, results ResultSetStore) (ExpandResult, error) {
-	if len(ids) <= e.cfg.ExpandInlineMax {
-		objs, err := e.hydrateParents(ctx, scope, ids)
-		if err != nil {
-			return ExpandResult{}, err
-		}
-		return ExpandResult{Objects: objs, Mode: mode}, nil
-	}
-	if results == nil {
-		return ExpandResult{}, fmt.Errorf("brain: result set store is required for large expand")
-	}
-	page, err := e.pageIDs(ctx, scope, ids, limit, results)
-	if err != nil {
-		return ExpandResult{}, err
-	}
-	return ExpandResult{
-		Objects:     page.Objects,
-		ResultSetID: page.ResultSetID,
-		HasMore:     page.HasMore,
-		Mode:        mode,
-	}, nil
 }
 
 func (e *Engine) siblingWindowIDs(ctx context.Context, scope Scope, parentID, partID uuid.UUID) ([]uuid.UUID, error) {
@@ -162,12 +187,21 @@ func (e *Engine) siblingWindowIDs(ctx context.Context, scope Scope, parentID, pa
 	return ids, nil
 }
 
-func (e *Engine) graphNeighborIDs(ctx context.Context, scope Scope, id uuid.UUID, labels []string) ([]uuid.UUID, error) {
+// graphNeighbors returns scope-visible graph hops in graph order (with edge meta).
+func (e *Engine) graphNeighbors(ctx context.Context, scope Scope, id uuid.UUID, labels []string) ([]GraphNeighbor, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	ns, err := e.graph.Neighbors(ctx, id, labels, e.cfg.GraphNeighborK)
 	if err != nil {
 		return nil, err
 	}
+	if len(ns) == 0 {
+		return nil, nil
+	}
+	// Dedupe hops, preserve order; single candidate list for one GetMany.
 	candidates := make([]uuid.UUID, 0, len(ns))
+	byID := make(map[uuid.UUID]GraphNeighbor, len(ns))
 	seen := map[uuid.UUID]struct{}{id: {}}
 	for _, n := range ns {
 		if n.ObjectID == uuid.Nil {
@@ -178,42 +212,24 @@ func (e *Engine) graphNeighborIDs(ctx context.Context, scope Scope, id uuid.UUID
 		}
 		seen[n.ObjectID] = struct{}{}
 		candidates = append(candidates, n.ObjectID)
+		byID[n.ObjectID] = n
 	}
 	if len(candidates) == 0 {
 		return nil, nil
 	}
-	// Keep graph order; drop ids not visible under scope.
 	objs, err := e.store.GetMany(ctx, scope, candidates)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("brain: graph neighbors hydrate: %w", err)
 	}
 	visible := make(map[uuid.UUID]struct{}, len(objs))
 	for _, o := range objs {
 		visible[o.ID] = struct{}{}
 	}
-	ids := make([]uuid.UUID, 0, len(objs))
+	out := make([]GraphNeighbor, 0, len(objs))
 	for _, cid := range candidates {
 		if _, ok := visible[cid]; ok {
-			ids = append(ids, cid)
+			out = append(out, byID[cid])
 		}
 	}
-	return ids, nil
-}
-
-func appendUnique(dst []uuid.UUID, extra ...uuid.UUID) []uuid.UUID {
-	seen := make(map[uuid.UUID]struct{}, len(dst)+len(extra))
-	for _, id := range dst {
-		seen[id] = struct{}{}
-	}
-	for _, id := range extra {
-		if id == uuid.Nil {
-			continue
-		}
-		if _, ok := seen[id]; ok {
-			continue
-		}
-		seen[id] = struct{}{}
-		dst = append(dst, id)
-	}
-	return dst
+	return out, nil
 }

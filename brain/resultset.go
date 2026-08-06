@@ -15,8 +15,11 @@ var ErrResultSetNotFound = errors.New("brain: result set not found")
 type ResultSet struct {
 	ID        uuid.UUID   `json:"id"`
 	ObjectIDs []uuid.UUID `json:"object_ids"`
-	Offset    int         `json:"offset"`
-	CreatedAt time.Time   `json:"created_at"`
+	// Relations carries expand hop metadata keyed by object id so continue
+	// re-attaches relation fields on later pages (JSON keys are UUID strings).
+	Relations map[uuid.UUID]Relation `json:"relations,omitempty"`
+	Offset    int                    `json:"offset"`
+	CreatedAt time.Time              `json:"created_at"`
 }
 
 // ResultSetStore holds ResultSet snapshots for continue().

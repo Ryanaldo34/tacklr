@@ -100,8 +100,13 @@ func WithConfig(cfg EngineConfig) EngineOption {
 }
 
 // WithGraph sets the optional non-containment graph backend (Helix or MemoryGraph).
+// Writer and object-search capabilities are resolved once here (not re-asserted per call).
 func WithGraph(g GraphReader) EngineOption {
-	return func(eng *Engine) { eng.graph = g }
+	return func(eng *Engine) {
+		eng.graph = g
+		eng.graphW, _ = g.(GraphWriter)
+		eng.graphS, _ = g.(GraphObjectSearcher)
+	}
 }
 
 // WithObserver sets retrieval observability (default no-op).
@@ -124,7 +129,9 @@ func WithKinds(specs ...KindSpec) EngineOption {
 type Engine struct {
 	store    Store
 	embedder QueryEmbedder
-	graph    GraphReader
+	graph    GraphReader         // optional expand Neighbors
+	graphW   GraphWriter         // optional dual-write / Link (resolved in WithGraph)
+	graphS   GraphObjectSearcher // optional find_objects (resolved in WithGraph)
 	observer Observer
 	cfg      EngineConfig
 	catalog  *KindCatalog // always non-nil; empty ⇒ open mode
@@ -174,7 +181,7 @@ func (e *Engine) Catalog() *KindCatalog {
 // Read returns the full rich object for id under scope.
 func (e *Engine) Read(ctx context.Context, scope Scope, id uuid.UUID) (RichObject, error) {
 	if id == uuid.Nil {
-		return RichObject{}, fmt.Errorf("brain: object id is required")
+		return RichObject{}, ErrObjectIDRequired
 	}
 	obj, err := e.store.Get(ctx, scope, id)
 	if err != nil {

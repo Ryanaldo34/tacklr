@@ -8,8 +8,37 @@ import (
 	"github.com/google/uuid"
 )
 
-// ErrNotFound is returned when an object is missing, soft-deleted, or outside scope.
-var ErrNotFound = errors.New("brain: object not found")
+// Sentinel errors for Engine / store / graph call sites.
+// Callers should use errors.Is / errors.As — messages stay stable and wrap-friendly.
+var (
+	// ErrNotFound is returned when an object is missing, soft-deleted, or outside scope.
+	ErrNotFound = errors.New("brain: object not found")
+	// ErrObjectIDRequired is returned when a UUID argument is the nil UUID.
+	ErrObjectIDRequired = errors.New("brain: object id is required")
+	// ErrQueryRequired is returned when a search/find query string is empty.
+	ErrQueryRequired = errors.New("brain: query is required")
+	// ErrResultSetRequired is returned when paging needs a ResultSetStore and none was provided.
+	ErrResultSetRequired = errors.New("brain: result set store is required")
+	// ErrResultSetIDRequired is returned when continue is called with a nil result set id.
+	ErrResultSetIDRequired = errors.New("brain: result_set_id is required")
+	// ErrGraphWriterRequired is returned when Link is called without a GraphWriter.
+	ErrGraphWriterRequired = errors.New("brain: graph writer is required for Link")
+	// ErrObjectSearchUnavailable is returned when FindObjects lacks a GraphObjectSearcher.
+	ErrObjectSearchUnavailable = errors.New("brain: graph object search is not available")
+	// ErrGraphRequired is returned when expand needs graph labels but no GraphReader is set.
+	ErrGraphRequired = errors.New("brain: graph backend is required")
+	// ErrWritesUnsupported is returned when Put/SoftDelete is used on a read-only store.
+	ErrWritesUnsupported = errors.New("brain: store does not support object writes")
+	// ErrSoftDeletedPut is returned when Put is called with DeletedAt already set.
+	ErrSoftDeletedPut = errors.New("brain: put refuses soft-deleted objects; use SoftDelete")
+	// ErrLinkNotFirstClass is returned when a link endpoint is a part (has parent_id).
+	ErrLinkNotFirstClass = errors.New("brain: link endpoint must be a first-class object (not a part)")
+	// ErrLinkArgs is returned when from/to/relation are incomplete.
+	ErrLinkArgs = errors.New("brain: from, to, and relation type are required")
+	// ErrGraphEnsure and ErrGraphRemove wrap dual-write failures (cause via errors.Unwrap).
+	ErrGraphEnsure = errors.New("brain: graph ensure object")
+	ErrGraphRemove = errors.New("brain: graph remove object")
+)
 
 // Scope is optional retrieval isolation for Engine methods.
 // When Namespace is non-nil, results are limited to that namespace.
@@ -73,8 +102,27 @@ type RichObject struct {
 	ParentID    *uuid.UUID     `json:"parent_id,omitempty"`
 	Position    *int           `json:"position,omitempty"`
 	Evidence    []Evidence     `json:"evidence,omitempty"`
-	CreatedAt   time.Time      `json:"created_at,omitempty"`
-	UpdatedAt   time.Time      `json:"updated_at,omitempty"`
+	// Relation is set on expand graph neighbors (how this object was reached).
+	Relation  *Relation `json:"relation,omitempty"`
+	CreatedAt time.Time `json:"created_at,omitempty"`
+	UpdatedAt time.Time `json:"updated_at,omitempty"`
+}
+
+// Relation describes a non-containment hop used to reach a neighbor on expand.
+// EdgeMeta fields are embedded so agent JSON stays flat (note, status, role, …).
+type Relation struct {
+	Type      string `json:"type"`
+	Direction string `json:"direction,omitempty"` // out | in
+	EdgeMeta
+}
+
+// RelationFromNeighbor maps a graph hop to the agent-facing Relation payload.
+func RelationFromNeighbor(n GraphNeighbor) Relation {
+	return Relation{
+		Type:      n.RelationType,
+		Direction: n.Direction,
+		EdgeMeta:  n.Meta,
+	}
 }
 
 // RichFromObject maps a stored object to a rich reference.

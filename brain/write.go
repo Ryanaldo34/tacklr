@@ -22,14 +22,19 @@ const maxEntityContentRunes = 2000
 // ID generated when nil. Put refuses objects that already have DeletedAt set.
 // When WithEmbedder is set and index text is non-empty, embeds and stores the vector;
 // embed errors fail the Put (fail closed).
-// Parent Puts dual-write the graph node again so entity search stays current.
+// Parent Puts dual-write the graph node (in-place upsert; edges preserved).
+// If the graph Ensure fails after a successful store write, the store row remains
+// (source of truth); callers should re-Put after fixing the graph.
 func (e *Engine) Put(ctx context.Context, scope Scope, obj Object) (Object, error) {
+	if err := ctx.Err(); err != nil {
+		return Object{}, err
+	}
 	w, err := e.objectWriter()
 	if err != nil {
 		return Object{}, err
 	}
 	if obj.DeletedAt != nil {
-		return Object{}, fmt.Errorf("brain: put refuses soft-deleted objects; use SoftDelete")
+		return Object{}, ErrSoftDeletedPut
 	}
 	obj = preparePut(scope, obj, e.cfg.Now())
 	if err := ValidateObject(obj, e.catalog); err != nil {
@@ -46,44 +51,56 @@ func (e *Engine) Put(ctx context.Context, scope Scope, obj Object) (Object, erro
 	if err := w.Put(ctx, obj); err != nil {
 		return Object{}, err
 	}
-	// Dual-write first-class objects only (no parent_id). Each Put refreshes the node.
-	if obj.ParentID == nil {
-		if gw, ok := e.graphWriter(); ok {
-			if err := gw.EnsureObject(ctx, obj); err != nil {
-				return Object{}, fmt.Errorf("brain: graph ensure object: %w", err)
-			}
+	// Dual-write first-class objects only (no parent_id). Each Put refreshes node props.
+	if obj.ParentID == nil && e.graphW != nil {
+		if err := e.graphW.EnsureObject(ctx, obj); err != nil {
+			return Object{}, fmt.Errorf("%w: %w", ErrGraphEnsure, err)
 		}
 	}
 	return obj, nil
 }
 
-// SoftDelete marks an object deleted under scope, then removes its graph node when present.
+// SoftDelete removes the graph node first (when present), then marks the store row deleted.
+// Graph-first keeps store intact if graph removal fails. If store SoftDelete fails after a
+// successful graph remove, re-Put re-creates the graph node.
 func (e *Engine) SoftDelete(ctx context.Context, scope Scope, id uuid.UUID) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	w, err := e.objectWriter()
 	if err != nil {
 		return err
 	}
-	if err := w.SoftDelete(ctx, scope, id); err != nil {
+	// Validate visibility under scope before mutating graph (so wrong-ns cannot drop graph).
+	if _, err := e.store.Get(ctx, scope, id); err != nil {
 		return err
 	}
-	if gw, ok := e.graphWriter(); ok {
-		if err := gw.RemoveObject(ctx, id); err != nil {
-			return fmt.Errorf("brain: graph remove object: %w", err)
+	if e.graphW != nil {
+		if err := e.graphW.RemoveObject(ctx, id); err != nil {
+			return fmt.Errorf("%w: %w", ErrGraphRemove, err)
 		}
 	}
-	return nil
+	return w.SoftDelete(ctx, scope, id)
 }
 
 // Link creates a non-containment edge from→to between first-class, visible objects.
 // Both endpoints must exist under scope, must not be soft-deleted, and must not be parts.
+// Equivalent to LinkWith with zero EdgeMeta.
 func (e *Engine) Link(ctx context.Context, scope Scope, from, to uuid.UUID, relationType string) error {
-	gw, ok := e.graphWriter()
-	if !ok {
-		return fmt.Errorf("brain: graph writer is required for Link")
+	return e.LinkWith(ctx, scope, from, to, relationType, EdgeMeta{})
+}
+
+// LinkWith is Link plus optional relationship metadata (note, status, role, …).
+func (e *Engine) LinkWith(ctx context.Context, scope Scope, from, to uuid.UUID, relationType string, meta EdgeMeta) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if e.graphW == nil {
+		return ErrGraphWriterRequired
 	}
 	rel := strings.TrimSpace(relationType)
 	if from == uuid.Nil || to == uuid.Nil || rel == "" {
-		return fmt.Errorf("brain: from, to, and relation type are required")
+		return ErrLinkArgs
 	}
 	if err := e.requireLinkEndpoint(ctx, scope, from, "from"); err != nil {
 		return err
@@ -91,7 +108,7 @@ func (e *Engine) Link(ctx context.Context, scope Scope, from, to uuid.UUID, rela
 	if err := e.requireLinkEndpoint(ctx, scope, to, "to"); err != nil {
 		return err
 	}
-	return gw.AddEdge(ctx, from, to, rel)
+	return e.graphW.AddEdge(ctx, from, to, rel, meta)
 }
 
 func (e *Engine) requireLinkEndpoint(ctx context.Context, scope Scope, id uuid.UUID, label string) error {
@@ -100,28 +117,22 @@ func (e *Engine) requireLinkEndpoint(ctx context.Context, scope Scope, id uuid.U
 		return fmt.Errorf("brain: link %s: %w", label, err)
 	}
 	if obj.ParentID != nil {
-		return fmt.Errorf("brain: link %s must be a first-class object (not a part)", label)
+		return fmt.Errorf("brain: link %s: %w", label, ErrLinkNotFirstClass)
 	}
 	return nil
 }
 
 // HasGraphWriter reports whether Put dual-write and Link are available.
 func (e *Engine) HasGraphWriter() bool {
-	_, ok := e.graphWriter()
-	return ok
+	return e.graphW != nil
 }
 
 func (e *Engine) objectWriter() (ObjectWriter, error) {
 	w, ok := e.store.(ObjectWriter)
 	if !ok {
-		return nil, fmt.Errorf("brain: store does not support object writes")
+		return nil, ErrWritesUnsupported
 	}
 	return w, nil
-}
-
-func (e *Engine) graphWriter() (GraphWriter, bool) {
-	gw, ok := e.graph.(GraphWriter)
-	return gw, ok
 }
 
 func preparePut(scope Scope, obj Object, now time.Time) Object {
@@ -167,7 +178,7 @@ func EntityIndexText(obj Object) string {
 			}
 		}
 	}
-	if c := truncateRunes(strings.TrimSpace(obj.Content), maxEntityContentRunes); c != "" {
+	if c := capRunes(strings.TrimSpace(obj.Content), maxEntityContentRunes); c != "" {
 		parts = append(parts, c)
 	}
 	return strings.Join(parts, "\n")
@@ -228,7 +239,8 @@ func joinNonEmpty(sep string, parts ...string) string {
 	return strings.Join(out, sep)
 }
 
-func truncateRunes(s string, maxRunes int) string {
+// capRunes returns s truncated to at most maxRunes (no ellipsis).
+func capRunes(s string, maxRunes int) string {
 	if maxRunes <= 0 || s == "" {
 		return s
 	}

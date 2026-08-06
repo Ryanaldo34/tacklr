@@ -3,6 +3,7 @@ package helixgraph_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,13 +12,15 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/brain/helixgraph"
 )
 
 func TestGraph_neighborsRequestAST(t *testing.T) {
 	from := uuid.New()
 	to := uuid.New()
-	var gotBody []byte
+	fromPeer := uuid.New()
+	var bodies []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Fatalf("method %s", r.Method)
@@ -29,14 +32,24 @@ func TestGraph_neighborsRequestAST(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		gotBody = b
-		// Real Helix ValueMap shape.
+		bodies = append(bodies, string(b))
+		// OutE then InE: return one peer each (with edge meta on outbound).
+		props := []map[string]any{}
+		if strings.Contains(string(b), "OutE") {
+			conf := 0.75
+			props = append(props, map[string]any{
+				"object_id":   to.String(),
+				"note":        "cites memo",
+				"status":      "active",
+				"role":        "primary",
+				"confidence":  conf,
+				"evidence_id": from.String(),
+			})
+		} else {
+			props = append(props, map[string]any{"object_id": fromPeer.String(), "evidence_id": "not-a-uuid"})
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"neighbors": map[string]any{
-				"properties": []map[string]any{
-					{"object_id": to.String()},
-				},
-			},
+			"neighbors": map[string]any{"properties": props},
 		})
 	}))
 	t.Cleanup(server.Close)
@@ -49,28 +62,68 @@ func TestGraph_neighborsRequestAST(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(ns) != 1 || ns[0].ObjectID != to || ns[0].RelationType != "references" {
-		t.Fatalf("%+v", ns)
+	if len(ns) != 2 {
+		t.Fatalf("want out+in: %+v", ns)
 	}
-
-	body := string(gotBody)
-	if !strings.Contains(body, "object_id") {
-		t.Fatalf("request missing object_id: %s", body)
+	if ns[0].ObjectID != to || ns[0].Direction != "out" || ns[0].Meta.Note != "cites memo" {
+		t.Fatalf("out hop: %+v", ns[0])
 	}
-	if !strings.Contains(body, from.String()) {
-		t.Fatalf("request missing source id: %s", body)
+	if ns[0].Meta.Role != "primary" || ns[0].Meta.Confidence != 0.75 {
+		t.Fatalf("out meta: %+v", ns[0].Meta)
 	}
-	if !strings.Contains(body, "references") {
-		t.Fatalf("request missing references label: %s", body)
+	if ns[0].Meta.EvidenceID == nil || *ns[0].Meta.EvidenceID != from {
+		t.Fatalf("evidence: %+v", ns[0].Meta.EvidenceID)
 	}
-	if !strings.Contains(body, "Both") {
-		t.Fatalf("request missing Both traversal: %s", body)
+	if ns[1].ObjectID != fromPeer || ns[1].Direction != "in" {
+		t.Fatalf("in hop: %+v", ns[1])
+	}
+	if ns[1].Meta.EvidenceID != nil {
+		t.Fatalf("invalid evidence_id must be skipped: %+v", ns[1].Meta)
+	}
+	if len(bodies) != 2 {
+		t.Fatalf("want OutE + InE RPCs: %d", len(bodies))
+	}
+	joined := strings.Join(bodies, "\n")
+	for _, want := range []string{from.String(), "references", "OutE", "InE", "object_id", "note"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("requests missing %q:\n%s", want, joined)
+		}
 	}
 }
 
 func TestNewFromClient_requiresClient(t *testing.T) {
 	if _, err := helixgraph.NewFromClient(nil); err == nil {
 		t.Fatal("want error")
+	}
+}
+
+// TestGraph_neighborsCancelsBetweenRPCs: cancel after OutE aborts before InE.
+func TestGraph_neighborsCancelsBetweenRPCs(t *testing.T) {
+	from, to := uuid.New(), uuid.New()
+	ctx, cancel := context.WithCancel(context.Background())
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			cancel() // after first direction returns, next dir must see ctx.Canceled
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"neighbors": map[string]any{
+				"properties": []map[string]any{{"object_id": to.String()}},
+			},
+		})
+	}))
+	t.Cleanup(srv.Close)
+	g, err := helixgraph.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = g.Neighbors(ctx, from, []string{"references"}, 10)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("want canceled mid-walk: %v calls=%d", err, calls)
+	}
+	if calls != 1 {
+		t.Fatalf("want single OutE RPC before cancel: %d", calls)
 	}
 }
 
@@ -83,13 +136,13 @@ func TestGraph_validationAndClient(t *testing.T) {
 	if g.Client() == nil {
 		t.Fatal("Client()")
 	}
-	if err := g.PutObject(ctx, uuid.Nil); err == nil {
+	if err := g.EnsureObject(ctx, brain.Object{}); err == nil {
 		t.Fatal("nil object id")
 	}
-	if err := g.AddEdge(ctx, uuid.Nil, uuid.New(), "r"); err == nil {
+	if err := g.AddEdge(ctx, uuid.Nil, uuid.New(), "r", brain.EdgeMeta{}); err == nil {
 		t.Fatal("nil from")
 	}
-	if err := g.AddEdge(ctx, uuid.New(), uuid.New(), "  "); err == nil {
+	if err := g.AddEdge(ctx, uuid.New(), uuid.New(), "  ", brain.EdgeMeta{}); err == nil {
 		t.Fatal("empty rel")
 	}
 	// Empty relation list → empty neighbors (no RPC).
@@ -113,14 +166,15 @@ func TestGraph_validationAndClient(t *testing.T) {
 	if _, err := g2.Neighbors(ctx, uuid.New(), []string{"r"}, 5); err == nil {
 		t.Fatal("want decode error")
 	}
-	// Invalid object_id strings are skipped.
+	// Invalid object_id strings are skipped; OutE+InE share one valid peer id (deduped).
+	validPeer := uuid.New()
 	srv3 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"neighbors": map[string]any{
 				"properties": []map[string]any{
 					{"object_id": ""},
 					{"object_id": "not-a-uuid"},
-					{"object_id": uuid.New().String()},
+					{"object_id": validPeer.String()},
 				},
 			},
 		})
@@ -132,7 +186,7 @@ func TestGraph_validationAndClient(t *testing.T) {
 	}
 	from := uuid.New()
 	ns, err = g3.Neighbors(ctx, from, []string{"r", "r", "  "}, 0) // limit<=0 → default
-	if err != nil || len(ns) != 1 {
+	if err != nil || len(ns) != 1 || ns[0].ObjectID != validPeer {
 		t.Fatalf("skip bad ids: %+v err=%v", ns, err)
 	}
 }

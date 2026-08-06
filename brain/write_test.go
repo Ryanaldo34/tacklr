@@ -268,7 +268,7 @@ func TestPut_multiTurnMemoryGraph(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Parts cannot be link endpoints.
-	if err := eng.Link(ctx, scope, chunk.ID, b.ID, "about"); err == nil || !strings.Contains(err.Error(), "first-class") {
+	if err := eng.Link(ctx, scope, chunk.ID, b.ID, "about"); err == nil || !errors.Is(err, brain.ErrLinkNotFirstClass) {
 		t.Fatalf("link part: %v", err)
 	}
 
@@ -308,7 +308,7 @@ func TestPut_multiTurnMemoryGraph(t *testing.T) {
 	// Soft-deleted Put is refused.
 	now := time.Now().UTC()
 	b.DeletedAt = &now
-	if _, err := eng.Put(ctx, scope, b); err == nil || !strings.Contains(err.Error(), "SoftDelete") {
+	if _, err := eng.Put(ctx, scope, b); err == nil || !errors.Is(err, brain.ErrSoftDeletedPut) {
 		t.Fatalf("put soft-deleted: %v", err)
 	}
 	// SoftDelete wrong namespace / missing id.
@@ -366,9 +366,12 @@ func TestLink_expandFindsNeighbor(t *testing.T) {
 	if len(res.Objects) != 1 || res.Objects[0].ID != b.ID {
 		t.Fatalf("expand: %+v", res.Objects)
 	}
+	if res.Objects[0].Relation == nil || res.Objects[0].Relation.Type != "references" {
+		t.Fatalf("expand should attach relation type: %+v", res.Objects[0].Relation)
+	}
 
-	if err := eng.Link(ctx, scope, a.ID, b.ID, ""); err == nil {
-		t.Fatal("want empty relation error")
+	if err := eng.Link(ctx, scope, a.ID, b.ID, ""); !errors.Is(err, brain.ErrLinkArgs) {
+		t.Fatalf("want ErrLinkArgs: %v", err)
 	}
 	engNoGraph, err := brain.NewEngine(store)
 	if err != nil {
@@ -377,8 +380,151 @@ func TestLink_expandFindsNeighbor(t *testing.T) {
 	if engNoGraph.HasGraphWriter() {
 		t.Fatal("engine without WithGraph must not report HasGraphWriter")
 	}
-	if err := engNoGraph.Link(ctx, scope, a.ID, b.ID, "references"); err == nil {
-		t.Fatal("want graph writer required")
+	if err := engNoGraph.Link(ctx, scope, a.ID, b.ID, "references"); !errors.Is(err, brain.ErrGraphWriterRequired) {
+		t.Fatalf("want ErrGraphWriterRequired: %v", err)
+	}
+}
+
+// TestLinkWith_missingEndpointAndCancelled: distinct LinkWith failure return paths.
+func TestLinkWith_missingEndpointAndCancelled(t *testing.T) {
+	ctx := context.Background()
+	store := brain.NewMemoryStore()
+	eng, err := brain.NewEngine(store, brain.WithGraph(brain.NewMemoryGraph()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ns := uuid.New()
+	scope := brain.Scope{Namespace: &ns}
+	a, err := eng.Put(ctx, scope, brain.Object{Kind: "Document", Title: "A"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Missing "to" under scope.
+	if err := eng.LinkWith(ctx, scope, a.ID, uuid.New(), "about", brain.EdgeMeta{}); err == nil || !strings.Contains(err.Error(), "to") {
+		t.Fatalf("missing to: %v", err)
+	}
+	// Cancelled before work.
+	cctx, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := eng.LinkWith(cctx, scope, a.ID, a.ID, "about", brain.EdgeMeta{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled: %v", err)
+	}
+	if _, err := eng.Put(cctx, scope, brain.Object{Kind: "Document", Title: "x"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("put cancelled: %v", err)
+	}
+	if err := eng.SoftDelete(cctx, scope, a.ID); !errors.Is(err, context.Canceled) {
+		t.Fatalf("soft-delete cancelled: %v", err)
+	}
+}
+
+// TestSoftDelete_graphRemoveErrorSurfaces: graph-first remove failure leaves store intact.
+func TestSoftDelete_graphRemoveErrorSurfaces(t *testing.T) {
+	ctx := context.Background()
+	store := brain.NewMemoryStore()
+	g := &failRemoveGraph{MemoryGraph: brain.NewMemoryGraph()}
+	eng, err := brain.NewEngine(store, brain.WithGraph(g))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ns := uuid.New()
+	scope := brain.Scope{Namespace: &ns}
+	obj, err := eng.Put(ctx, scope, brain.Object{Kind: "Document", Title: "doomed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.SoftDelete(ctx, scope, obj.ID); err == nil || !errors.Is(err, brain.ErrGraphRemove) {
+		t.Fatalf("want ErrGraphRemove: %v", err)
+	}
+	// Store row must still be readable (graph failed before SoftDelete).
+	if _, err := eng.Read(ctx, scope, obj.ID); err != nil {
+		t.Fatalf("store must remain after graph remove failure: %v", err)
+	}
+}
+
+type failRemoveGraph struct {
+	*brain.MemoryGraph
+}
+
+func (f *failRemoveGraph) RemoveObject(context.Context, uuid.UUID) error {
+	return errors.New("remove down")
+}
+
+// TestLinkWith_expandAttachesMeta: edge note/role/status surface on expand neighbors.
+func TestLinkWith_expandAttachesMeta(t *testing.T) {
+	ctx := context.Background()
+	store := brain.NewMemoryStore()
+	g := brain.NewMemoryGraph()
+	eng, err := brain.NewEngine(store, brain.WithGraph(g))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ns := uuid.New()
+	scope := brain.Scope{Namespace: &ns}
+	sc := brain.NewSearchContext()
+
+	email, err := eng.Put(ctx, scope, brain.Object{Kind: "Email", Title: "RE: pricing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deal, err := eng.Put(ctx, scope, brain.Object{Kind: "Deal", Title: "Acme"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	evid := email.ID
+	meta := brain.EdgeMeta{
+		Note: "security review thread supports this deal", Status: "active",
+		Role: "source", Confidence: 0.85, EvidenceID: &evid,
+	}
+	if err := eng.LinkWith(ctx, scope, email.ID, deal.ID, "about", meta); err != nil {
+		t.Fatal(err)
+	}
+
+	exp, err := eng.Expand(ctx, scope, brain.ExpandRequest{
+		ObjectID: email.ID, RelationTypes: []string{"about"},
+	}, sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(exp.Objects) != 1 || exp.Objects[0].ID != deal.ID {
+		t.Fatalf("expand: %+v", exp.Objects)
+	}
+	r := exp.Objects[0].Relation
+	if r == nil || r.Type != "about" || r.Direction != "out" {
+		t.Fatalf("relation hop: %+v", r)
+	}
+	if r.Note != meta.Note || r.Status != "active" || r.Role != "source" || r.Confidence != 0.85 {
+		t.Fatalf("meta: %+v", r)
+	}
+	if r.EvidenceID == nil || *r.EvidenceID != evid {
+		t.Fatalf("evidence: %+v", r.EvidenceID)
+	}
+
+	// Re-link updates meta (upsert); soft-delete of neighbor hides the hop.
+	if err := eng.LinkWith(ctx, scope, email.ID, deal.ID, "about", brain.EdgeMeta{
+		Note: "updated rationale", Status: "resolved",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	exp2, err := eng.Expand(ctx, scope, brain.ExpandRequest{
+		ObjectID: email.ID, RelationTypes: []string{"about"},
+	}, sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(exp2.Objects) != 1 || exp2.Objects[0].Relation == nil || exp2.Objects[0].Relation.Note != "updated rationale" {
+		t.Fatalf("re-link meta: %+v", exp2.Objects)
+	}
+	if err := eng.SoftDelete(ctx, scope, deal.ID); err != nil {
+		t.Fatal(err)
+	}
+	exp3, err := eng.Expand(ctx, scope, brain.ExpandRequest{
+		ObjectID: email.ID, RelationTypes: []string{"about"},
+	}, sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(exp3.Objects) != 0 {
+		t.Fatalf("soft-deleted neighbor: %+v", exp3.Objects)
 	}
 }
 
@@ -421,10 +567,14 @@ func TestLink_crossObjectEmailDealBuyer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := eng.Link(ctx, scope, email.ID, deal.ID, "about"); err != nil {
+	if err := eng.LinkWith(ctx, scope, email.ID, deal.ID, "about", brain.EdgeMeta{
+		Note: "FedRAMP timeline discussion",
+	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := eng.Link(ctx, scope, deal.ID, buyer.ID, "has_buyer"); err != nil {
+	if err := eng.LinkWith(ctx, scope, deal.ID, buyer.ID, "has_buyer", brain.EdgeMeta{
+		Role: "primary", Status: "active",
+	}); err != nil {
 		t.Fatal(err)
 	}
 	// Property-aware entity find.
@@ -440,12 +590,15 @@ func TestLink_crossObjectEmailDealBuyer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := map[uuid.UUID]bool{}
+	got := map[uuid.UUID]*brain.Relation{}
 	for _, o := range exp.Objects {
-		got[o.ID] = true
+		got[o.ID] = o.Relation
 	}
-	if !got[email.ID] || !got[buyer.ID] {
-		t.Fatalf("expand deal neighbors: %+v", exp.Objects)
+	if got[email.ID] == nil || got[email.ID].Type != "about" || got[email.ID].Note != "FedRAMP timeline discussion" {
+		t.Fatalf("email hop: %+v", got[email.ID])
+	}
+	if got[buyer.ID] == nil || got[buyer.ID].Type != "has_buyer" || got[buyer.ID].Role != "primary" {
+		t.Fatalf("buyer hop: %+v", got[buyer.ID])
 	}
 	// Drill-down: email has no chunks yet; containment expand is empty.
 	kids, err := eng.Expand(ctx, scope, brain.ExpandRequest{ObjectID: email.ID}, sc)

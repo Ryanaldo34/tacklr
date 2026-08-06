@@ -37,19 +37,19 @@ func TestGraph_liveNeighborsBoth(t *testing.T) {
 
 	a, b, c := uuid.New(), uuid.New(), uuid.New()
 	for _, id := range []uuid.UUID{a, b, c} {
-		if err := g.PutObject(ctx, id); err != nil {
+		if err := g.EnsureObject(ctx, brain.Object{ID: id}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	// a --references--> b, c --references--> a (inbound to a)
-	if err := g.AddEdge(ctx, a, b, "references"); err != nil {
+	if err := g.AddEdge(ctx, a, b, "references", brain.EdgeMeta{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := g.AddEdge(ctx, c, a, "references"); err != nil {
+	if err := g.AddEdge(ctx, c, a, "references", brain.EdgeMeta{}); err != nil {
 		t.Fatal(err)
 	}
 	// a --depends_on--> b (second label)
-	if err := g.AddEdge(ctx, a, b, "depends_on"); err != nil {
+	if err := g.AddEdge(ctx, a, b, "depends_on", brain.EdgeMeta{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -106,31 +106,34 @@ func TestGraph_liveNeighborsBoth(t *testing.T) {
 	}
 }
 
-// TestGraph_livePutObjectIdempotent re-puts the same object_id without error.
-func TestGraph_livePutObjectIdempotent(t *testing.T) {
+// TestGraph_liveEnsureObjectIdempotent re-ensures the same object_id without wiping edges.
+func TestGraph_liveEnsureObjectIdempotent(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping helix integration test in -short mode")
 	}
 	ctx := context.Background()
 	g := liveGraph(t)
 	id := uuid.New()
-	if err := g.PutObject(ctx, id); err != nil {
-		t.Fatal(err)
-	}
-	if err := g.PutObject(ctx, id); err != nil {
-		t.Fatal(err)
-	}
-	// Edge still resolvable after re-put of both endpoints.
 	other := uuid.New()
-	if err := g.PutObject(ctx, other); err != nil {
+	if err := g.EnsureObject(ctx, brain.Object{ID: id, Title: "a"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := g.AddEdge(ctx, id, other, "references"); err != nil {
+	if err := g.EnsureObject(ctx, brain.Object{ID: other, Title: "b"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.AddEdge(ctx, id, other, "references", brain.EdgeMeta{Note: "keep"}); err != nil {
+		t.Fatal(err)
+	}
+	// Re-ensure without re-link: edges must survive.
+	if err := g.EnsureObject(ctx, brain.Object{ID: id, Title: "a-v2"}); err != nil {
 		t.Fatal(err)
 	}
 	ns, err := g.Neighbors(ctx, id, []string{"references"}, 5)
 	if err != nil || len(ns) != 1 || ns[0].ObjectID != other {
-		t.Fatalf("after re-put: %+v err=%v", ns, err)
+		t.Fatalf("after re-ensure: %+v err=%v", ns, err)
+	}
+	if ns[0].Meta.Note != "keep" {
+		t.Fatalf("edge meta after re-ensure: %+v", ns[0].Meta)
 	}
 }
 
@@ -266,7 +269,7 @@ func TestEngine_liveDualWriteLinkExpand(t *testing.T) {
 		t.Fatalf("hydrated title: %+v", exp.Objects[0])
 	}
 
-	// Turn 3: re-put A (graph EnsureObject drop+insert) and re-link.
+	// Turn 3: re-put A (graph EnsureObject in-place update) without re-link.
 	a.Title = "Source-v2"
 	a, err = eng.Put(ctx, scope, a)
 	if err != nil {
@@ -275,14 +278,11 @@ func TestEngine_liveDualWriteLinkExpand(t *testing.T) {
 	if a.Title != "Source-v2" {
 		t.Fatalf("put update: %+v", a)
 	}
-	if err := eng.Link(ctx, scope, a.ID, b.ID, "references"); err != nil {
-		t.Fatal(err)
-	}
 	exp, err = eng.Expand(ctx, scope, brain.ExpandRequest{
 		ObjectID: a.ID, RelationTypes: []string{"references"},
 	}, sc)
 	if err != nil || len(exp.Objects) != 1 || exp.Objects[0].ID != b.ID {
-		t.Fatalf("expand after re-put: %+v err=%v", exp, err)
+		t.Fatalf("expand after re-put (no re-link): %+v err=%v", exp, err)
 	}
 
 	// Turn 4: soft-delete target → graph still has edge but hydrate drops it.
@@ -343,19 +343,14 @@ func TestGraph_liveEnsureObjectRichProps(t *testing.T) {
 	if err := g.EnsureObject(ctx, b); err != nil {
 		t.Fatal(err)
 	}
-	if err := g.AddEdge(ctx, a.ID, b.ID, "references"); err != nil {
+	if err := g.AddEdge(ctx, a.ID, b.ID, "references", brain.EdgeMeta{}); err != nil {
 		t.Fatal(err)
 	}
 
-	// Turn 2: re-ensure A with new title (drop+insert); edge to B must remain usable
-	// only if Helix recreates endpoints without wiping edges — AddEdge after re-ensure.
+	// Turn 2: re-ensure A with new title (in-place); edge to B must remain without re-link.
 	a.Title = "Alpha-v2"
 	a.Content = "updated alpha"
 	if err := g.EnsureObject(ctx, a); err != nil {
-		t.Fatal(err)
-	}
-	// Drop+insert may detach edges; re-link is the host/engine pattern after Put.
-	if err := g.AddEdge(ctx, a.ID, b.ID, "references"); err != nil {
 		t.Fatal(err)
 	}
 	ns, err := g.Neighbors(ctx, a.ID, []string{"references"}, 10)
@@ -363,7 +358,7 @@ func TestGraph_liveEnsureObjectRichProps(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(ns) != 1 || ns[0].ObjectID != b.ID {
-		t.Fatalf("neighbors after re-ensure: %+v", ns)
+		t.Fatalf("neighbors after re-ensure without re-link: %+v", ns)
 	}
 }
 
