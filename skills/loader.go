@@ -2,7 +2,9 @@
 package skills
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -17,19 +19,27 @@ type Skill struct {
 	Instructions string
 }
 
-// Loader discovers skills for the harness. Hosts can inject a custom Loader via
-// AgentOptions.SkillsLoader (for example to load from object storage).
-type Loader interface {
-	Load(directories []string) ([]Skill, error)
+// SkillLoader discovers skills for the harness. A loader owns its source
+// configuration; callers only provide the lifetime context for the load.
+type SkillLoader interface {
+	Load(ctx context.Context) ([]Skill, error)
 }
 
-// DirectoryLoader loads one skill per immediate child directory under each root.
-// It is the default when AgentOptions.SkillsLoader is nil.
-type DirectoryLoader struct{}
+// Loader is kept as an alias for compatibility with earlier releases.
+type Loader = SkillLoader
+
+// DirectoryLoader loads one skill per immediate child directory under each
+// root. It is the default when AgentOptions.SkillsLoader is nil.
+type DirectoryLoader struct {
+	Directories []string
+}
 
 // Load implements Loader using LoadDirectories.
-func (DirectoryLoader) Load(directories []string) ([]Skill, error) {
-	return LoadDirectories(directories)
+func (l DirectoryLoader) Load(ctx context.Context) ([]Skill, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return LoadDirectories(l.Directories)
 }
 
 // LoadDirectories loads one skill per immediate child directory. Directories
@@ -71,6 +81,127 @@ func LoadDirectories(roots []string) ([]Skill, error) {
 	}
 	sort.Slice(loaded, func(i, j int) bool { return loaded[i].Name < loaded[j].Name })
 	return loaded, nil
+}
+
+// S3Client is the subset of an S3 client required by S3Loader. Implementations
+// can delegate to an SDK client and keep SDK-specific request types out of the
+// skills package.
+type S3Client interface {
+	ListObjects(ctx context.Context, bucket, prefix string) ([]string, error)
+	GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, error)
+}
+
+// S3Loader loads SKILL.md objects from an S3-compatible bucket.
+type S3Loader struct {
+	Client S3Client
+	Bucket string
+	Prefix string
+}
+
+// Load implements SkillLoader.
+func (l S3Loader) Load(ctx context.Context) ([]Skill, error) {
+	if l.Client == nil {
+		return nil, fmt.Errorf("skills: S3 client is required")
+	}
+	return loadObjects(ctx, l.Prefix, func(ctx context.Context, key string) (io.ReadCloser, error) {
+		return l.Client.GetObject(ctx, l.Bucket, key)
+	}, func(ctx context.Context) ([]string, error) {
+		return l.Client.ListObjects(ctx, l.Bucket, l.Prefix)
+	})
+}
+
+// BlobClient is the subset of an Azure Blob Storage client required by
+// BlobLoader. Implementations can delegate to an Azure SDK client.
+type BlobClient interface {
+	ListBlobs(ctx context.Context, container, prefix string) ([]string, error)
+	DownloadBlob(ctx context.Context, container, name string) (io.ReadCloser, error)
+}
+
+// BlobLoader loads SKILL.md blobs from an Azure Blob Storage container.
+type BlobLoader struct {
+	Client    BlobClient
+	Container string
+	Prefix    string
+}
+
+// Load implements SkillLoader.
+func (l BlobLoader) Load(ctx context.Context) ([]Skill, error) {
+	if l.Client == nil {
+		return nil, fmt.Errorf("skills: Blob client is required")
+	}
+	return loadObjects(ctx, l.Prefix, func(ctx context.Context, key string) (io.ReadCloser, error) {
+		return l.Client.DownloadBlob(ctx, l.Container, key)
+	}, func(ctx context.Context) ([]string, error) {
+		return l.Client.ListBlobs(ctx, l.Container, l.Prefix)
+	})
+}
+
+func loadObjects(
+	ctx context.Context,
+	prefix string,
+	read func(context.Context, string) (io.ReadCloser, error),
+	list func(context.Context) ([]string, error),
+) ([]Skill, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	keys, err := list(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list skills objects: %w", err)
+	}
+	sort.Strings(keys)
+	loaded := make([]Skill, 0, len(keys))
+	seen := make(map[string]bool, len(keys))
+	for _, key := range keys {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if !isSkillObject(prefix, key) {
+			continue
+		}
+		body, err := readSkillObject(ctx, key, read)
+		if err != nil {
+			return nil, err
+		}
+		skill, err := parse(string(body))
+		if err != nil {
+			return nil, fmt.Errorf("skill %q: %w", key, err)
+		}
+		if seen[skill.Name] {
+			return nil, fmt.Errorf("duplicate skill name %q", skill.Name)
+		}
+		seen[skill.Name] = true
+		loaded = append(loaded, skill)
+	}
+	sort.Slice(loaded, func(i, j int) bool { return loaded[i].Name < loaded[j].Name })
+	return loaded, nil
+}
+
+func isSkillObject(prefix, key string) bool {
+	relative := key
+	if prefix != "" {
+		if !strings.HasPrefix(key, prefix) {
+			return false
+		}
+		relative = strings.TrimPrefix(key, prefix)
+	}
+	return strings.Count(relative, "/") == 1 && strings.HasSuffix(relative, "/SKILL.md")
+}
+
+func readSkillObject(ctx context.Context, key string, read func(context.Context, string) (io.ReadCloser, error)) ([]byte, error) {
+	object, err := read(ctx, key)
+	if err != nil {
+		return nil, fmt.Errorf("skill %q: read SKILL.md: %w", key, err)
+	}
+	defer object.Close()
+	data, err := io.ReadAll(io.LimitReader(object, maxSkillFileSize+1))
+	if err != nil {
+		return nil, fmt.Errorf("skill %q: read SKILL.md: %w", key, err)
+	}
+	if len(data) > maxSkillFileSize {
+		return nil, fmt.Errorf("skill %q: SKILL.md exceeds %d bytes", key, maxSkillFileSize)
+	}
+	return data, nil
 }
 
 func parse(document string) (Skill, error) {
