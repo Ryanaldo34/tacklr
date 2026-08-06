@@ -78,8 +78,13 @@ func TestBlobLoader_azurite(t *testing.T) {
 	}
 	ctx := context.Background()
 	container := runObjectStore(t, testcontainers.ContainerRequest{
-		Image:        azuriteImage,
-		Cmd:          []string{"azurite", "--blobHost", "0.0.0.0", "--blobPort", "10000"},
+		Image: azuriteImage,
+		Cmd: []string{
+			"azurite",
+			"--blobHost", "0.0.0.0",
+			"--blobPort", "10000",
+			"--skipApiVersionCheck",
+		},
 		ExposedPorts: []string{"10000/tcp"},
 		WaitingFor:   wait.ForListeningPort("10000/tcp"),
 	})
