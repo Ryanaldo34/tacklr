@@ -60,8 +60,8 @@ func TestS3Loader_minio(t *testing.T) {
 	if _, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
 		t.Fatal(err)
 	}
-	putS3Skill(t, ctx, client, bucket, "skills/alpha/SKILL.md", "alpha", "Alpha", "Alpha instructions")
-	putS3Skill(t, ctx, client, bucket, "skills/beta/SKILL.md", "beta", "Beta", "Beta instructions")
+	putS3Skill(ctx, t, client, bucket, "skills/alpha/SKILL.md", "alpha", "Alpha", "Alpha instructions")
+	putS3Skill(ctx, t, client, bucket, "skills/beta/SKILL.md", "beta", "Beta", "Beta instructions")
 
 	loaded, err := S3Loader{Client: AWSS3Client{Client: client}, Bucket: bucket, Prefix: "skills/"}.Load(ctx)
 	if err != nil {
@@ -109,8 +109,8 @@ func TestBlobLoader_azurite(t *testing.T) {
 	if _, err := client.CreateContainer(ctx, containerName, nil); err != nil {
 		t.Fatal(err)
 	}
-	putBlobSkill(t, ctx, client, containerName, "skills/alpha/SKILL.md", "alpha", "Alpha", "Alpha instructions")
-	putBlobSkill(t, ctx, client, containerName, "skills/beta/SKILL.md", "beta", "Beta", "Beta instructions")
+	putBlobSkill(ctx, t, client, containerName, "skills/alpha/SKILL.md", "alpha", "Alpha", "Alpha instructions")
+	putBlobSkill(ctx, t, client, containerName, "skills/beta/SKILL.md", "beta", "Beta", "Beta instructions")
 
 	loaded, err := BlobLoader{Client: AzureBlobClient{Client: client}, Container: containerName, Prefix: "skills/"}.Load(ctx)
 	if err != nil {
@@ -134,7 +134,7 @@ func runObjectStore(t *testing.T, request testcontainers.ContainerRequest) testc
 	return container
 }
 
-func putS3Skill(t *testing.T, ctx context.Context, client *s3.Client, bucket, key, name, description, instructions string) {
+func putS3Skill(ctx context.Context, t *testing.T, client *s3.Client, bucket, key, name, description, instructions string) {
 	t.Helper()
 	_, err := client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(bucket),
@@ -146,7 +146,7 @@ func putS3Skill(t *testing.T, ctx context.Context, client *s3.Client, bucket, ke
 	}
 }
 
-func putBlobSkill(t *testing.T, ctx context.Context, client *azblob.Client, container, key, name, description, instructions string) {
+func putBlobSkill(ctx context.Context, t *testing.T, client *azblob.Client, container, key, name, description, instructions string) {
 	t.Helper()
 	_, err := client.UploadBuffer(ctx, container, key, skillDocument(name, description, instructions), nil)
 	if err != nil {
