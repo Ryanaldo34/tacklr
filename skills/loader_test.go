@@ -1,6 +1,8 @@
 package skills
 
 import (
+	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,17 +21,77 @@ func writeSkill(t *testing.T, root, dir, name, desc, body string) {
 	}
 }
 
-// TestDirectoryLoader_implementsLoader is the injectable skills.Loader path.
+// TestDirectoryLoader_implementsLoader verifies the injectable SkillLoader path.
 func TestDirectoryLoader_implementsLoader(t *testing.T) {
 	root := t.TempDir()
 	writeSkill(t, root, "alpha", "alpha", "Alpha skill", "Do alpha things.")
-	var loader Loader = DirectoryLoader{}
-	loaded, err := loader.Load([]string{root})
+	var loader Loader = DirectoryLoader{Directories: []string{root}}
+	loaded, err := loader.Load(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(loaded) != 1 || loaded[0].Name != "alpha" {
 		t.Fatalf("loaded = %#v", loaded)
+	}
+}
+
+type objectFixture struct {
+	objects map[string]string
+}
+
+func (f objectFixture) ListObjects(context.Context, string, string) ([]string, error) {
+	keys := make([]string, 0, len(f.objects))
+	for key := range f.objects {
+		keys = append(keys, key)
+	}
+	return keys, nil
+}
+
+func (f objectFixture) GetObject(_ context.Context, _, key string) (io.ReadCloser, error) {
+	return io.NopCloser(strings.NewReader(f.objects[key])), nil
+}
+
+func (f objectFixture) ListBlobs(context.Context, string, string) ([]string, error) {
+	return f.ListObjects(context.Background(), "", "")
+}
+
+func (f objectFixture) DownloadBlob(_ context.Context, _, key string) (io.ReadCloser, error) {
+	return f.GetObject(context.Background(), "", key)
+}
+
+func TestObjectLoaders_loadAndFilterSkillObjects(t *testing.T) {
+	objects := objectFixture{objects: map[string]string{
+		"skills/zeta/SKILL.md":  "---\nname: zeta\ndescription: Z\n---\n\nZ body",
+		"skills/alpha/SKILL.md": "---\nname: alpha\ndescription: A\n---\n\nA body",
+		"skills/alpha/readme":   "ignored",
+		"other/beta/SKILL.md":   "ignored",
+	}}
+
+	loaders := []Loader{
+		S3Loader{Client: objects, Bucket: "bucket", Prefix: "skills/"},
+		BlobLoader{Client: objects, Container: "container", Prefix: "skills/"},
+	}
+	for _, loader := range loaders {
+		loaded, err := loader.Load(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(loaded) != 2 || loaded[0].Name != "alpha" || loaded[1].Name != "zeta" {
+			t.Fatalf("loaded = %#v", loaded)
+		}
+	}
+}
+
+func TestS3Loader_rejectsOversizedObject(t *testing.T) {
+	loader := S3Loader{
+		Client: objectFixture{objects: map[string]string{
+			"skills/big/SKILL.md": strings.Repeat("x", maxSkillFileSize+1),
+		}},
+		Bucket: "bucket",
+		Prefix: "skills/",
+	}
+	if _, err := loader.Load(context.Background()); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("err = %v", err)
 	}
 }
 
