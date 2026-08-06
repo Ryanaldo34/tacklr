@@ -30,25 +30,28 @@ type FindLinksResult struct {
 }
 
 // FindLinks lands on relationships via GraphEdgeSearcher, then hydrates endpoints under Scope.
-func (e *Engine) FindLinks(ctx context.Context, scope Scope, req FindLinksRequest) (FindLinksResult, error) {
-	if err := ctx.Err(); err != nil {
-		return FindLinksResult{}, err
+func (e *Engine) FindLinks(ctx context.Context, scope Scope, req FindLinksRequest) (res FindLinksResult, err error) {
+	ctx, span := e.observer.StartOp(ctx, OpFindLinks)
+	defer func() { span.End(len(res.Links), DegradeNone, err) }()
+
+	if err = ctx.Err(); err != nil {
+		return res, err
 	}
 	if e.graphE == nil {
-		return FindLinksResult{}, ErrEdgeSearchUnavailable
+		return res, ErrEdgeSearchUnavailable
 	}
 	rel := strings.TrimSpace(req.RelationType)
 	query := strings.TrimSpace(req.Query)
 	if rel == "" || query == "" {
-		return FindLinksResult{}, ErrLinkQueryRequired
+		return res, ErrLinkQueryRequired
 	}
 	limit := e.normalizeLimit(req.Limit)
 	hits, err := e.graphE.SearchEdgesText(ctx, rel, query, max(limit*2, e.cfg.CandidateK))
 	if err != nil {
-		return FindLinksResult{}, err
+		return res, err
 	}
 	if len(hits) == 0 {
-		return FindLinksResult{}, nil
+		return res, nil
 	}
 	ids := make([]uuid.UUID, 0, len(hits)*2)
 	for _, h := range hits {
@@ -56,7 +59,7 @@ func (e *Engine) FindLinks(ctx context.Context, scope Scope, req FindLinksReques
 	}
 	objs, err := e.store.GetMany(ctx, scope, ids)
 	if err != nil {
-		return FindLinksResult{}, fmt.Errorf("brain: hydrate link endpoints: %w", err)
+		return res, fmt.Errorf("brain: hydrate link endpoints: %w", err)
 	}
 	byID := make(map[uuid.UUID]Object, len(objs))
 	for _, o := range objs {
@@ -80,7 +83,8 @@ func (e *Engine) FindLinks(ctx context.Context, scope Scope, req FindLinksReques
 			break
 		}
 	}
-	return FindLinksResult{Links: out}, nil
+	res.Links = out
+	return res, nil
 }
 
 // HasEdgeSearch reports whether FindLinks is available.

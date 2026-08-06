@@ -21,37 +21,33 @@ type FindObjectsRequest struct {
 // (Helix text/vector or MemoryGraph), then hydrates under Scope from the store.
 // Filters use the same catalog rules as search/find_exact (schema filterable_fields).
 // Not a substitute for corpus Search: no part promotion evidence path.
-func (e *Engine) FindObjects(ctx context.Context, scope Scope, req FindObjectsRequest, results ResultSetStore) (SearchPage, error) {
+func (e *Engine) FindObjects(ctx context.Context, scope Scope, req FindObjectsRequest, results ResultSetStore) (page SearchPage, err error) {
 	ctx, span := e.observer.StartOp(ctx, OpFindObjects)
-	page, degrade, err := e.findObjectsInner(ctx, scope, req, results)
-	span.End(len(page.Objects), degrade, err)
-	return page, err
-}
+	degrade := DegradeNone
+	defer func() { span.End(len(page.Objects), degrade, err) }()
 
-func (e *Engine) findObjectsInner(ctx context.Context, scope Scope, req FindObjectsRequest, results ResultSetStore) (SearchPage, DegradeMode, error) {
 	if e.graphS == nil {
-		return SearchPage{}, DegradeNone, ErrObjectSearchUnavailable
+		return page, ErrObjectSearchUnavailable
 	}
 	if results == nil {
-		return SearchPage{}, DegradeNone, ErrResultSetRequired
+		return page, ErrResultSetRequired
 	}
 	query := strings.TrimSpace(req.Query)
 	if query == "" {
-		return SearchPage{}, DegradeNone, ErrQueryRequired
+		return page, ErrQueryRequired
 	}
 	filters, err := e.prepareFindObjectFilters(req)
 	if err != nil {
-		return SearchPage{}, DegradeNone, err
+		return page, err
 	}
 	limit := e.normalizeLimit(req.Limit)
 	k := max(limit*3, e.cfg.CandidateK)
 	ns := scope.Namespace
-	degrade := DegradeNone
 
 	var lists [][]ScoredID
 	textHits, err := e.graphS.SearchText(ctx, query, k, ns)
 	if err != nil {
-		return SearchPage{}, DegradeNone, err
+		return page, err
 	}
 	if len(textHits) > 0 {
 		lists = append(lists, textHits)
@@ -60,14 +56,14 @@ func (e *Engine) findObjectsInner(ctx context.Context, scope Scope, req FindObje
 		emb, embErr := e.embedder.Embed(ctx, query)
 		if embErr != nil {
 			if !e.cfg.allowEmbedderDegrade() {
-				return SearchPage{}, DegradeNone, fmt.Errorf("brain: embed query: %w", embErr)
+				return page, fmt.Errorf("brain: embed query: %w", embErr)
 			}
 			degrade = DegradeLexicalOnly
 		} else if len(emb) > 0 {
 			vecHits, vErr := e.graphS.SearchVector(ctx, emb, k, ns)
 			if vErr != nil {
 				if !e.cfg.allowEmbedderDegrade() {
-					return SearchPage{}, DegradeNone, fmt.Errorf("brain: vector search: %w", vErr)
+					return page, fmt.Errorf("brain: vector search: %w", vErr)
 				}
 				degrade = DegradeLexicalOnly
 			} else if len(vecHits) > 0 {
@@ -76,7 +72,7 @@ func (e *Engine) findObjectsInner(ctx context.Context, scope Scope, req FindObje
 		}
 	}
 	if len(lists) == 0 {
-		return SearchPage{}, degrade, nil
+		return page, nil
 	}
 	ranked := rrfFuse(lists, e.cfg.RRFk)
 	applyTemporal(ranked, e.cfg.lambdaValue(), e.cfg.Now())
@@ -91,7 +87,7 @@ func (e *Engine) findObjectsInner(ctx context.Context, scope Scope, req FindObje
 	// Soft hydrate: load full objects, apply catalog filters on Postgres truth.
 	objs, err := e.store.GetMany(ctx, scope, ids)
 	if err != nil {
-		return SearchPage{}, degrade, fmt.Errorf("brain: hydrate objects: %w", err)
+		return page, fmt.Errorf("brain: hydrate objects: %w", err)
 	}
 	byID := make(map[uuid.UUID]Object, len(objs))
 	for _, o := range objs {
@@ -124,7 +120,7 @@ func (e *Engine) findObjectsInner(ctx context.Context, scope Scope, req FindObje
 	}
 	rich, err = e.applyRerank(ctx, rich)
 	if err != nil {
-		return SearchPage{}, degrade, err
+		return page, err
 	}
 	keptIDs := make([]uuid.UUID, len(rich))
 	for i := range rich {
@@ -137,14 +133,14 @@ func (e *Engine) findObjectsInner(ctx context.Context, scope Scope, req FindObje
 		Offset:    end,
 		CreatedAt: e.cfg.Now(),
 	}
-	if err := results.Put(ctx, set); err != nil {
-		return SearchPage{}, degrade, err
+	if err = results.Put(ctx, set); err != nil {
+		return page, err
 	}
 	return SearchPage{
 		ResultSetID: set.ID,
 		HasMore:     end < len(keptIDs),
 		Objects:     rich[:end],
-	}, degrade, nil
+	}, nil
 }
 
 func (e *Engine) applyRerank(ctx context.Context, objects []RichObject) ([]RichObject, error) {

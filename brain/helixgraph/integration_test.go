@@ -370,7 +370,7 @@ func liveGraph(t *testing.T) *helixgraph.Graph {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := g.EnsureObjectIndex(ctx); err != nil {
+	if err := g.Bootstrap(ctx, false); err != nil {
 		t.Fatal(err)
 	}
 	return g

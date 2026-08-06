@@ -207,7 +207,9 @@ func (e *Engine) FreezeCatalog() {
 	e.catalog.Freeze()
 }
 
-// Catalog returns the process kind catalog (empty = open mode).
+// Catalog returns the process kind catalog for inspection and host filter validation
+// (e.g. ValidateFiltersAgainst). Empty means open mode. Prefer ApplyKinds / Schema
+// for normal host setup; do not mutate catalog fields directly.
 func (e *Engine) Catalog() *KindCatalog {
 	return e.catalog
 }

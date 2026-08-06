@@ -1,6 +1,13 @@
 // Package helixgraph adapts HelixDB to brain.GraphReader / GraphWriter / searchers.
+//
+// Host surface: New / NewFromClient, Bootstrap (preferred boot), EnsureSearchIndexes,
+// EnsureEdgeTextIndex (required per relation label before find_links), Client
+// (escape hatch for host seeding), ObjectSearchReady / TenantEnabled, and the
+// GraphWriter / searcher methods used via brain.WithGraph.
+//
 // Helix owns topology, text/vector indexes, edge props, and $distance ranking;
 // this package dual-writes props and runs native Helix queries for Engine hydrate.
+// Node labels and property key strings are package-private.
 package helixgraph
 
 import (
@@ -45,36 +52,36 @@ func (g *Graph) Client() *helix.Client {
 	return g.client
 }
 
-// NodeLabel is the Helix node label used for knowledge objects.
-const NodeLabel = "Object"
+// nodeLabel is the Helix node label for knowledge objects (not part of the public API).
+const nodeLabel = "Object"
 
-// PropSearchText / PropEmbedding are dual-written node properties used for native search.
+// Dual-written Helix property keys (package-private schema; hosts use Engine + Bootstrap).
 const (
-	PropObjectID    = "object_id"
-	PropSearchText  = "search_text"
-	PropEmbedding   = "embedding"
-	PropNamespaceID = "namespace_id"
-	PropKind        = "kind"
-	PropTitle       = "title"
-	PropSummary     = "summary"
+	propObjectID    = "object_id"
+	propSearchText  = "search_text"
+	propEmbedding   = "embedding"
+	propNamespaceID = "namespace_id"
+	propKind        = "kind"
+	propTitle       = "title"
+	propSummary     = "summary"
 )
 
 // Edge property keys written on AddE (relationship metadata Helix stores natively).
 const (
-	PropEdgeNote       = "note"
-	PropEdgeStatus     = "status"
-	PropEdgeRole       = "role"
-	PropEdgeConfidence = "confidence"
-	PropEdgeEvidenceID = "evidence_id"
-	PropEdgeCreatedAt  = "created_at"
-	PropEdgeUpdatedAt  = "updated_at"
+	propEdgeNote       = "note"
+	propEdgeStatus     = "status"
+	propEdgeRole       = "role"
+	propEdgeConfidence = "confidence"
+	propEdgeEvidenceID = "evidence_id"
+	propEdgeCreatedAt  = "created_at"
+	propEdgeUpdatedAt  = "updated_at"
 )
 
-// EnsureObjectIndex creates an equality index on Object.object_id when missing.
-func (g *Graph) EnsureObjectIndex(ctx context.Context) error {
+// ensureObjectIndex creates an equality index on Object.object_id when missing.
+func (g *Graph) ensureObjectIndex(ctx context.Context) error {
 	req := helix.WriteQuery("brain_ensure_object_id_index").
 		VarAs("idx", helix.G().CreateIndexIfNotExists(
-			helix.NodeEqualityIndex(NodeLabel, PropObjectID),
+			helix.NodeEqualityIndex(nodeLabel, propObjectID),
 		)).
 		Returning()
 	if err := g.client.Exec(ctx, req, nil, helix.WriterOnly()); err != nil {
@@ -109,19 +116,19 @@ func (g *Graph) TenantEnabled() bool { return g.tenantEnabled }
 // EnsureSearchIndexes creates Helix native equality + text + vector indexes for find_objects.
 // Prefer Bootstrap, which also sets ObjectSearchReady.
 func (g *Graph) EnsureSearchIndexes(ctx context.Context, withNamespaceTenant bool) error {
-	if err := g.EnsureObjectIndex(ctx); err != nil {
+	if err := g.ensureObjectIndex(ctx); err != nil {
 		return err
 	}
 	var textIdx, vecIdx helix.IndexSpec
 	if withNamespaceTenant {
-		textIdx = helix.NodeTextIndex(NodeLabel, PropSearchText, PropNamespaceID)
-		vecIdx = helix.NodeVectorIndex(NodeLabel, PropEmbedding, PropNamespaceID)
+		textIdx = helix.NodeTextIndex(nodeLabel, propSearchText, propNamespaceID)
+		vecIdx = helix.NodeVectorIndex(nodeLabel, propEmbedding, propNamespaceID)
 	} else {
-		textIdx = helix.NodeTextIndex(NodeLabel, PropSearchText)
-		vecIdx = helix.NodeVectorIndex(NodeLabel, PropEmbedding)
+		textIdx = helix.NodeTextIndex(nodeLabel, propSearchText)
+		vecIdx = helix.NodeVectorIndex(nodeLabel, propEmbedding)
 	}
 	// Equality on kind supports Has/Where filters after search without app-side maps.
-	kindIdx := helix.NodeEqualityIndex(NodeLabel, PropKind)
+	kindIdx := helix.NodeEqualityIndex(nodeLabel, propKind)
 	req := helix.WriteQuery("brain_ensure_search_indexes").
 		VarAs("text", helix.G().CreateIndexIfNotExists(textIdx)).
 		VarAs("vec", helix.G().CreateIndexIfNotExists(vecIdx)).
@@ -144,7 +151,7 @@ func (g *Graph) EnsureEdgeTextIndex(ctx context.Context, relationLabel string) e
 	}
 	req := helix.WriteQuery("brain_ensure_edge_text_"+rel).
 		VarAs("idx", helix.G().CreateIndexIfNotExists(
-			helix.EdgeTextIndex(rel, PropEdgeNote),
+			helix.EdgeTextIndex(rel, propEdgeNote),
 		)).
 		Returning()
 	if err := g.client.Exec(ctx, req, nil, helix.WriterOnly()); err != nil {
@@ -166,7 +173,7 @@ func (g *Graph) RemoveObject(ctx context.Context, id uuid.UUID) error {
 	oid := q.ParamString("object_id", id.String())
 	req := q.
 		VarAs("dropped", helix.G().
-			NWhere(helix.SourceEq(PropObjectID, oid)).
+			NWhere(helix.SourceEq(propObjectID, oid)).
 			Drop().
 			Count()).
 		Returning()
@@ -190,7 +197,7 @@ func (g *Graph) SearchText(ctx context.Context, query string, limit int, namespa
 	qt := q.ParamString("query", query)
 	lim := q.ParamI64("limit", int64(limit))
 	trav := g.textSearchTrav(qt, lim, namespace)
-	req := q.VarAs("hits", trav.ValueMap(PropObjectID, "$distance")).Returning("hits")
+	req := q.VarAs("hits", trav.ValueMap(propObjectID, "$distance")).Returning("hits")
 	return g.execSearchHits(ctx, req, "text search")
 }
 
@@ -205,7 +212,7 @@ func (g *Graph) SearchVector(ctx context.Context, embedding []float32, limit int
 	q := helix.ReadQuery("brain_vector_search_nodes")
 	lim := q.ParamI64("limit", int64(limit))
 	trav := g.vectorSearchTrav(embedding, lim, namespace)
-	req := q.VarAs("hits", trav.ValueMap(PropObjectID, "$distance")).Returning("hits")
+	req := q.VarAs("hits", trav.ValueMap(propObjectID, "$distance")).Returning("hits")
 	return g.execSearchHits(ctx, req, "vector search")
 }
 
@@ -223,14 +230,14 @@ func (g *Graph) SearchEdgesText(ctx context.Context, relationLabel, query string
 	q := helix.ReadQuery("brain_text_search_edges")
 	qt := q.ParamString("query", query)
 	lim := q.ParamI64("limit", int64(limit))
-	trav := helix.G().TextSearchEdges(rel, PropEdgeNote, qt, lim).Project(
-		helix.ProjectFromEndpoint(PropObjectID, "from_id"),
-		helix.ProjectToEndpoint(PropObjectID, "to_id"),
-		helix.ProjectProp(PropEdgeNote),
-		helix.ProjectProp(PropEdgeStatus),
-		helix.ProjectProp(PropEdgeRole),
-		helix.ProjectProp(PropEdgeConfidence),
-		helix.ProjectProp(PropEdgeEvidenceID),
+	trav := helix.G().TextSearchEdges(rel, propEdgeNote, qt, lim).Project(
+		helix.ProjectFromEndpoint(propObjectID, "from_id"),
+		helix.ProjectToEndpoint(propObjectID, "to_id"),
+		helix.ProjectProp(propEdgeNote),
+		helix.ProjectProp(propEdgeStatus),
+		helix.ProjectProp(propEdgeRole),
+		helix.ProjectProp(propEdgeConfidence),
+		helix.ProjectProp(propEdgeEvidenceID),
 		helix.ProjectProp("$distance"),
 	)
 	req := q.VarAs("hits", trav).Returning("hits")
@@ -254,16 +261,16 @@ func (g *Graph) SearchEdgesText(ctx context.Context, relationLabel, query string
 
 func (g *Graph) textSearchTrav(query helix.ParamRef, lim helix.ParamRef, namespace *uuid.UUID) *helix.Traversal {
 	if g.tenantEnabled && namespace != nil && *namespace != uuid.Nil {
-		return helix.G().TextSearchNodes(NodeLabel, PropSearchText, query, lim, namespace.String())
+		return helix.G().TextSearchNodes(nodeLabel, propSearchText, query, lim, namespace.String())
 	}
-	return helix.G().TextSearchNodes(NodeLabel, PropSearchText, query, lim)
+	return helix.G().TextSearchNodes(nodeLabel, propSearchText, query, lim)
 }
 
 func (g *Graph) vectorSearchTrav(embedding []float32, lim helix.ParamRef, namespace *uuid.UUID) *helix.Traversal {
 	if g.tenantEnabled && namespace != nil && *namespace != uuid.Nil {
-		return helix.G().VectorSearchNodes(NodeLabel, PropEmbedding, embedding, lim, namespace.String())
+		return helix.G().VectorSearchNodes(nodeLabel, propEmbedding, embedding, lim, namespace.String())
 	}
-	return helix.G().VectorSearchNodes(NodeLabel, PropEmbedding, embedding, lim)
+	return helix.G().VectorSearchNodes(nodeLabel, propEmbedding, embedding, lim)
 }
 
 type searchHitRow struct {
@@ -357,7 +364,7 @@ func (g *Graph) objectExists(ctx context.Context, id uuid.UUID) (bool, error) {
 	oid := q.ParamString("object_id", id.String())
 	// Helix Count over the equality index is the portable existence probe.
 	req := q.
-		VarAs("n", helix.G().NWhere(helix.SourceEq(PropObjectID, oid)).Count()).
+		VarAs("n", helix.G().NWhere(helix.SourceEq(propObjectID, oid)).Count()).
 		Returning("n")
 	var raw struct {
 		N int64 `json:"n"`
@@ -373,7 +380,7 @@ func (g *Graph) insertObject(ctx context.Context, obj brain.Object) error {
 	oid := q.ParamString("object_id", obj.ID.String())
 	props := objectProps(oid, obj)
 	req := q.
-		VarAs("n", helix.G().AddN(NodeLabel, props)).
+		VarAs("n", helix.G().AddN(nodeLabel, props)).
 		Returning("n")
 	if err := g.client.Exec(ctx, req, nil, helix.WriterOnly()); err != nil {
 		return fmt.Errorf("helixgraph: insert object: %w", err)
@@ -388,7 +395,7 @@ func (g *Graph) updateObjectProps(ctx context.Context, obj brain.Object) error {
 	if len(pairs) == 0 {
 		return nil
 	}
-	trav := helix.G().NWhere(helix.SourceEq(PropObjectID, oid))
+	trav := helix.G().NWhere(helix.SourceEq(propObjectID, oid))
 	for _, p := range pairs {
 		trav = trav.SetProperty(p.name, p.value)
 	}
@@ -408,19 +415,19 @@ type namedProp struct {
 func objectPropPairs(obj brain.Object) []namedProp {
 	var props []namedProp
 	if obj.Kind != "" {
-		props = append(props, namedProp{PropKind, obj.Kind})
+		props = append(props, namedProp{propKind, obj.Kind})
 	}
 	if obj.Title != "" {
-		props = append(props, namedProp{PropTitle, obj.Title})
+		props = append(props, namedProp{propTitle, obj.Title})
 	}
 	if obj.Summary != "" {
-		props = append(props, namedProp{PropSummary, obj.Summary})
+		props = append(props, namedProp{propSummary, obj.Summary})
 	}
 	if st := brain.EntityIndexText(obj); st != "" {
-		props = append(props, namedProp{PropSearchText, st})
+		props = append(props, namedProp{propSearchText, st})
 	}
 	if obj.NamespaceID != uuid.Nil {
-		props = append(props, namedProp{PropNamespaceID, obj.NamespaceID.String()})
+		props = append(props, namedProp{propNamespaceID, obj.NamespaceID.String()})
 	}
 	if !obj.CreatedAt.IsZero() {
 		props = append(props, namedProp{"created_at", obj.CreatedAt.UTC().Format(time.RFC3339Nano)})
@@ -429,7 +436,7 @@ func objectPropPairs(obj brain.Object) []namedProp {
 		props = append(props, namedProp{"updated_at", obj.UpdatedAt.UTC().Format(time.RFC3339Nano)})
 	}
 	if len(obj.Embedding) > 0 {
-		props = append(props, namedProp{PropEmbedding, obj.Embedding})
+		props = append(props, namedProp{propEmbedding, obj.Embedding})
 	}
 	for _, k := range sortedPropKeys(obj.Properties) {
 		if v, ok := scalarPropValue(obj.Properties[k]); ok {
@@ -473,7 +480,7 @@ func scalarPropValue(v any) (any, bool) {
 func objectProps(oid helix.ParamRef, obj brain.Object) helix.Props {
 	pairs := objectPropPairs(obj)
 	props := make(helix.Props, 0, len(pairs)+1)
-	props = append(props, helix.Prop(PropObjectID, oid))
+	props = append(props, helix.Prop(propObjectID, oid))
 	for _, p := range pairs {
 		props = append(props, helix.Prop(p.name, p.value))
 	}
@@ -501,8 +508,8 @@ func (g *Graph) AddEdge(ctx context.Context, from, to uuid.UUID, relationType st
 	toOID := q.ParamString("to_oid", to.String())
 	props := edgeMetaProps(meta)
 	req := q.
-		VarAs("from", helix.G().NWhere(helix.SourceEq(PropObjectID, fromOID))).
-		VarAs("to", helix.G().NWhere(helix.SourceEq(PropObjectID, toOID))).
+		VarAs("from", helix.G().NWhere(helix.SourceEq(propObjectID, fromOID))).
+		VarAs("to", helix.G().NWhere(helix.SourceEq(propObjectID, toOID))).
 		VarAs("dropped", helix.G().N(helix.NodeVar("from")).DropEdgeLabeled(helix.NodeVar("to"), rel).Count()).
 		VarAs("e", helix.G().N(helix.NodeVar("from")).AddE(rel, helix.NodeVar("to"), props)).
 		Returning("e")
@@ -515,25 +522,25 @@ func (g *Graph) AddEdge(ctx context.Context, from, to uuid.UUID, relationType st
 func edgeMetaProps(meta brain.EdgeMeta) helix.Props {
 	props := helix.Props{}
 	if meta.Note != "" {
-		props = append(props, helix.Prop(PropEdgeNote, meta.Note))
+		props = append(props, helix.Prop(propEdgeNote, meta.Note))
 	}
 	if meta.Status != "" {
-		props = append(props, helix.Prop(PropEdgeStatus, meta.Status))
+		props = append(props, helix.Prop(propEdgeStatus, meta.Status))
 	}
 	if meta.Role != "" {
-		props = append(props, helix.Prop(PropEdgeRole, meta.Role))
+		props = append(props, helix.Prop(propEdgeRole, meta.Role))
 	}
 	if meta.Confidence != 0 {
-		props = append(props, helix.Prop(PropEdgeConfidence, meta.Confidence))
+		props = append(props, helix.Prop(propEdgeConfidence, meta.Confidence))
 	}
 	if meta.EvidenceID != nil && *meta.EvidenceID != uuid.Nil {
-		props = append(props, helix.Prop(PropEdgeEvidenceID, meta.EvidenceID.String()))
+		props = append(props, helix.Prop(propEdgeEvidenceID, meta.EvidenceID.String()))
 	}
 	if !meta.CreatedAt.IsZero() {
-		props = append(props, helix.Prop(PropEdgeCreatedAt, meta.CreatedAt.UTC().Format(time.RFC3339Nano)))
+		props = append(props, helix.Prop(propEdgeCreatedAt, meta.CreatedAt.UTC().Format(time.RFC3339Nano)))
 	}
 	if !meta.UpdatedAt.IsZero() {
-		props = append(props, helix.Prop(PropEdgeUpdatedAt, meta.UpdatedAt.UTC().Format(time.RFC3339Nano)))
+		props = append(props, helix.Prop(propEdgeUpdatedAt, meta.UpdatedAt.UTC().Format(time.RFC3339Nano)))
 	}
 	return props
 }
@@ -603,17 +610,17 @@ func (g *Graph) neighborsBothE(ctx context.Context, objectID uuid.UUID, label st
 	oid := q.ParamString("object_id", objectID.String())
 	lim := q.ParamI64("limit", int64(limit))
 	trav := helix.G().
-		NWhere(helix.SourceEq(PropObjectID, oid)).
+		NWhere(helix.SourceEq(propObjectID, oid)).
 		BothE(label).
 		Limit(lim).
 		Project(
-			helix.ProjectFromEndpoint(PropObjectID, "from_id"),
-			helix.ProjectToEndpoint(PropObjectID, "to_id"),
-			helix.ProjectProp(PropEdgeNote),
-			helix.ProjectProp(PropEdgeStatus),
-			helix.ProjectProp(PropEdgeRole),
-			helix.ProjectProp(PropEdgeConfidence),
-			helix.ProjectProp(PropEdgeEvidenceID),
+			helix.ProjectFromEndpoint(propObjectID, "from_id"),
+			helix.ProjectToEndpoint(propObjectID, "to_id"),
+			helix.ProjectProp(propEdgeNote),
+			helix.ProjectProp(propEdgeStatus),
+			helix.ProjectProp(propEdgeRole),
+			helix.ProjectProp(propEdgeConfidence),
+			helix.ProjectProp(propEdgeEvidenceID),
 		)
 	req := q.VarAs("neighbors", trav).Returning("neighbors")
 	var raw struct {

@@ -114,13 +114,17 @@ func TestGraph_ensureObjectAndAddEdgeRequestShape(t *testing.T) {
 		}
 	}
 
-	// Index ensure RPC.
+	// Bootstrap / search indexes include the object_id equality index RPC.
 	nBeforeIdx := len(bodies)
-	if err := g.EnsureObjectIndex(ctx); err != nil {
+	if err := g.Bootstrap(ctx, false); err != nil {
 		t.Fatal(err)
 	}
-	if len(bodies) != nBeforeIdx+1 || !strings.Contains(bodies[len(bodies)-1], "object_id") {
-		t.Fatalf("index body: %v", bodies[nBeforeIdx:])
+	if len(bodies) <= nBeforeIdx {
+		t.Fatal("Bootstrap issued no RPCs")
+	}
+	joined := strings.Join(bodies[nBeforeIdx:], "\n")
+	if !strings.Contains(joined, "object_id") {
+		t.Fatalf("index bodies missing object_id: %v", bodies[nBeforeIdx:])
 	}
 
 	// Edge RPC with relationship metadata.

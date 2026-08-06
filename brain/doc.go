@@ -1,8 +1,22 @@
 // Package brain is Tacklr's knowledge-base retrieval engine.
 //
+// # Public surface
+//
+// Hosts use Engine (NewEngine + options), Store implementations (MemoryStore /
+// PostgresStore), graph backends via WithGraph, kind registration (ApplyKinds /
+// WithKinds), and composition helpers (LandingIDs, ExpandMany, ExpandByRecipe,
+// SortRichObjects). Agent tools are registered by the harness when
+// AgentOptions.Brain is set — they call Engine methods only.
+//
+// Graph backend packages (e.g. helixgraph) implement GraphReader / GraphWriter /
+// GraphObjectSearcher / GraphEdgeSearcher. Dual-write property keys and Helix
+// schema details stay inside those packages.
+//
 // Hosts attach an Engine via AgentOptions.Brain. This package does not import
 // the harness, session, or telemetry packages; Scope is passed in by the caller.
-// Optional Observer (telemetry.NewBrainObserver) records ops without domain coupling.
+// Optional Observer (telemetry.NewBrainObserver) records retrieval ops without
+// domain coupling: search, find_exact, find_objects, find_links, continue,
+// expand, expand_many.
 //
 // SearchContext is the retrieval session surface: host namespace + active ResultSet
 // for continue (replaced on each search, find_exact, find_objects, or large expand).

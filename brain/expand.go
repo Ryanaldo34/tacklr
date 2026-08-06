@@ -58,21 +58,106 @@ type ExpandRecipe struct {
 }
 
 // Expand returns the structural neighborhood of object_id under scope.
-func (e *Engine) Expand(ctx context.Context, scope Scope, req ExpandRequest, results ResultSetStore) (ExpandResult, error) {
+func (e *Engine) Expand(ctx context.Context, scope Scope, req ExpandRequest, results ResultSetStore) (res ExpandResult, err error) {
 	ctx, span := e.observer.StartOp(ctx, OpExpand)
-	res, degrade, err := e.expandInner(ctx, scope, req, results)
-	span.End(len(res.Objects), degrade, err)
-	return res, err
+	degrade := DegradeNone
+	defer func() { span.End(len(res.Objects), degrade, err) }()
+
+	if err = ctx.Err(); err != nil {
+		return res, err
+	}
+	if req.ObjectID == uuid.Nil {
+		return res, ErrObjectIDRequired
+	}
+	obj, err := e.store.Get(ctx, scope, req.ObjectID)
+	if err != nil {
+		return res, err
+	}
+
+	wantContainment, graphLabels := resolveExpandRelations(req.RelationTypes, req.WantContainment)
+	if len(graphLabels) > 0 && e.graph == nil {
+		return res, fmt.Errorf("%w for relation types %v", ErrGraphRequired, graphLabels)
+	}
+
+	var (
+		ids             []uuid.UUID
+		relByID         map[uuid.UUID]Relation
+		usedContainment bool
+		usedGraph       bool
+	)
+
+	if wantContainment {
+		cIDs, cErr := e.containmentIDs(ctx, scope, obj)
+		if cErr != nil {
+			return res, cErr
+		}
+		ids = cIDs
+		usedContainment = true
+	}
+	if len(graphLabels) > 0 {
+		hits, gErr := e.graphNeighborsMulti(ctx, scope, obj.ID, graphLabels, req.MaxHops, req.Direction)
+		if gErr != nil {
+			if e.cfg.allowGraphDegrade() && usedContainment {
+				degrade = DegradeContainmentOnly
+			} else {
+				return res, gErr
+			}
+		} else {
+			seen := make(map[uuid.UUID]struct{}, len(ids)+len(hits))
+			for _, id := range ids {
+				seen[id] = struct{}{}
+			}
+			relByID = make(map[uuid.UUID]Relation, len(hits))
+			for _, h := range hits {
+				if h.n.ObjectID == uuid.Nil {
+					continue
+				}
+				if _, ok := seen[h.n.ObjectID]; ok {
+					continue
+				}
+				seen[h.n.ObjectID] = struct{}{}
+				ids = append(ids, h.n.ObjectID)
+				rel := RelationFromNeighbor(h.n)
+				rel.Depth = h.depth
+				relByID[h.n.ObjectID] = rel
+			}
+			usedGraph = true
+		}
+	}
+
+	mode := expandMode(usedContainment, usedGraph, !obj.IsPart())
+
+	if len(ids) <= e.cfg.ExpandInlineMax {
+		objs, hErr := e.hydrateIDs(ctx, scope, ids)
+		if hErr != nil {
+			return res, hErr
+		}
+		attachRelations(objs, relByID)
+		return ExpandResult{Objects: objs, Mode: mode}, nil
+	}
+	page, pErr := e.pageIDs(ctx, scope, ids, req.Limit, results, relByID)
+	if pErr != nil {
+		return res, pErr
+	}
+	return ExpandResult{
+		Objects:     page.Objects,
+		ResultSetID: page.ResultSetID,
+		HasMore:     page.HasMore,
+		Mode:        mode,
+	}, nil
 }
 
 // ExpandMany walks the graph from many landing ids without paging / SearchContext.
 // First seed to claim a neighbor wins Relation.SourceID. Out-of-scope seeds are skipped.
-func (e *Engine) ExpandMany(ctx context.Context, scope Scope, req ExpandManyRequest) (ExpandManyResult, error) {
-	if err := ctx.Err(); err != nil {
-		return ExpandManyResult{}, err
+func (e *Engine) ExpandMany(ctx context.Context, scope Scope, req ExpandManyRequest) (res ExpandManyResult, err error) {
+	ctx, span := e.observer.StartOp(ctx, OpExpandMany)
+	defer func() { span.End(len(res.Objects), DegradeNone, err) }()
+
+	if err = ctx.Err(); err != nil {
+		return res, err
 	}
 	if len(req.ObjectIDs) == 0 {
-		return ExpandManyResult{}, nil
+		return res, nil
 	}
 	budget := req.NeighborBudget
 	if budget <= 0 {
@@ -84,7 +169,7 @@ func (e *Engine) ExpandMany(ctx context.Context, scope Scope, req ExpandManyRequ
 
 	wantContainment, graphLabels := resolveExpandRelations(req.RelationTypes, req.WantContainment)
 	if len(graphLabels) > 0 && e.graph == nil {
-		return ExpandManyResult{}, fmt.Errorf("%w for relation types %v", ErrGraphRequired, graphLabels)
+		return res, fmt.Errorf("%w for relation types %v", ErrGraphRequired, graphLabels)
 	}
 
 	seen := make(map[uuid.UUID]struct{}, budget)
@@ -94,30 +179,30 @@ func (e *Engine) ExpandMany(ctx context.Context, scope Scope, req ExpandManyRequ
 		if seed == uuid.Nil {
 			continue
 		}
-		if err := ctx.Err(); err != nil {
-			return ExpandManyResult{}, err
+		if err = ctx.Err(); err != nil {
+			return res, err
 		}
-		obj, err := e.store.Get(ctx, scope, seed)
-		if err != nil {
-			if errors.Is(err, ErrNotFound) {
+		obj, gErr := e.store.Get(ctx, scope, seed)
+		if gErr != nil {
+			if errors.Is(gErr, ErrNotFound) {
 				continue
 			}
-			return ExpandManyResult{}, err
+			return res, gErr
 		}
 
 		var ids []uuid.UUID
 		relByID := make(map[uuid.UUID]Relation)
 		if wantContainment {
-			cIDs, err := e.containmentIDs(ctx, scope, obj)
-			if err != nil {
-				return ExpandManyResult{}, err
+			cIDs, cErr := e.containmentIDs(ctx, scope, obj)
+			if cErr != nil {
+				return res, cErr
 			}
 			ids = append(ids, cIDs...)
 		}
 		if len(graphLabels) > 0 {
-			hits, err := e.graphNeighborsMulti(ctx, scope, seed, graphLabels, req.MaxHops, req.Direction)
-			if err != nil {
-				return ExpandManyResult{}, err
+			hits, nErr := e.graphNeighborsMulti(ctx, scope, seed, graphLabels, req.MaxHops, req.Direction)
+			if nErr != nil {
+				return res, nErr
 			}
 			for _, h := range hits {
 				ids = append(ids, h.n.ObjectID)
@@ -129,11 +214,10 @@ func (e *Engine) ExpandMany(ctx context.Context, scope Scope, req ExpandManyRequ
 		if len(ids) == 0 {
 			continue
 		}
-		// Dedupe within this seed before hydrate.
 		ids = uniqueUUIDs(ids)
-		objs, err := e.hydrateIDs(ctx, scope, ids)
-		if err != nil {
-			return ExpandManyResult{}, err
+		objs, hErr := e.hydrateIDs(ctx, scope, ids)
+		if hErr != nil {
+			return res, hErr
 		}
 		attachRelations(objs, relByID)
 		sid := seed
@@ -197,92 +281,6 @@ func (e *Engine) recipe(name string) (ExpandRecipe, bool) {
 	}
 	r, ok := e.recipes[strings.TrimSpace(name)]
 	return r, ok
-}
-
-func (e *Engine) expandInner(ctx context.Context, scope Scope, req ExpandRequest, results ResultSetStore) (ExpandResult, DegradeMode, error) {
-	if err := ctx.Err(); err != nil {
-		return ExpandResult{}, DegradeNone, err
-	}
-	if req.ObjectID == uuid.Nil {
-		return ExpandResult{}, DegradeNone, ErrObjectIDRequired
-	}
-	obj, err := e.store.Get(ctx, scope, req.ObjectID)
-	if err != nil {
-		return ExpandResult{}, DegradeNone, err
-	}
-
-	wantContainment, graphLabels := resolveExpandRelations(req.RelationTypes, req.WantContainment)
-	if len(graphLabels) > 0 && e.graph == nil {
-		return ExpandResult{}, DegradeNone, fmt.Errorf("%w for relation types %v", ErrGraphRequired, graphLabels)
-	}
-
-	var (
-		ids             []uuid.UUID
-		relByID         map[uuid.UUID]Relation
-		usedContainment bool
-		usedGraph       bool
-		degrade         = DegradeNone
-	)
-
-	if wantContainment {
-		cIDs, err := e.containmentIDs(ctx, scope, obj)
-		if err != nil {
-			return ExpandResult{}, degrade, err
-		}
-		ids = cIDs
-		usedContainment = true
-	}
-	if len(graphLabels) > 0 {
-		hits, err := e.graphNeighborsMulti(ctx, scope, obj.ID, graphLabels, req.MaxHops, req.Direction)
-		if err != nil {
-			if e.cfg.allowGraphDegrade() && usedContainment {
-				degrade = DegradeContainmentOnly
-			} else {
-				return ExpandResult{}, degrade, err
-			}
-		} else {
-			seen := make(map[uuid.UUID]struct{}, len(ids)+len(hits))
-			for _, id := range ids {
-				seen[id] = struct{}{}
-			}
-			relByID = make(map[uuid.UUID]Relation, len(hits))
-			for _, h := range hits {
-				if h.n.ObjectID == uuid.Nil {
-					continue
-				}
-				if _, ok := seen[h.n.ObjectID]; ok {
-					continue
-				}
-				seen[h.n.ObjectID] = struct{}{}
-				ids = append(ids, h.n.ObjectID)
-				rel := RelationFromNeighbor(h.n)
-				rel.Depth = h.depth
-				relByID[h.n.ObjectID] = rel
-			}
-			usedGraph = true
-		}
-	}
-
-	mode := expandMode(usedContainment, usedGraph, !obj.IsPart())
-
-	if len(ids) <= e.cfg.ExpandInlineMax {
-		objs, err := e.hydrateIDs(ctx, scope, ids)
-		if err != nil {
-			return ExpandResult{}, degrade, err
-		}
-		attachRelations(objs, relByID)
-		return ExpandResult{Objects: objs, Mode: mode}, degrade, nil
-	}
-	page, err := e.pageIDs(ctx, scope, ids, req.Limit, results, relByID)
-	if err != nil {
-		return ExpandResult{}, degrade, err
-	}
-	return ExpandResult{
-		Objects:     page.Objects,
-		ResultSetID: page.ResultSetID,
-		HasMore:     page.HasMore,
-		Mode:        mode,
-	}, degrade, nil
 }
 
 // resolveExpandRelations combines RelationTypes with the explicit WantContainment flag.

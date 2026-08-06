@@ -11,39 +11,33 @@ import (
 
 // Search runs hybrid retrieval (BM25 + optional vector), RRF, temporal decay,
 // parent promotion, and materializes a ResultSet into results.
-func (e *Engine) Search(ctx context.Context, scope Scope, req SearchRequest, results ResultSetStore) (SearchPage, error) {
+func (e *Engine) Search(ctx context.Context, scope Scope, req SearchRequest, results ResultSetStore) (page SearchPage, err error) {
 	ctx, span := e.observer.StartOp(ctx, OpSearch)
-	page, degrade, err := e.searchWithDegrade(ctx, scope, req, results, false)
-	span.End(len(page.Objects), degrade, err)
+	degrade := DegradeNone
+	defer func() { span.End(len(page.Objects), degrade, err) }()
+
+	ranked, degrade, err := e.hybridCandidates(ctx, scope, req)
+	if err != nil {
+		return page, err
+	}
+	ranked = filterScoredByScopeIDs(ranked, req.ScopeIDs)
+	page, err = e.materialize(ctx, scope, ranked, req.Limit, results)
 	return page, err
 }
 
 // FindExact runs equality-first exact retrieval (no dense channel), then
 // lexical + trigram fusion, promotion, and ResultSet materialization.
-func (e *Engine) FindExact(ctx context.Context, scope Scope, req SearchRequest, results ResultSetStore) (SearchPage, error) {
+func (e *Engine) FindExact(ctx context.Context, scope Scope, req SearchRequest, results ResultSetStore) (page SearchPage, err error) {
 	ctx, span := e.observer.StartOp(ctx, OpFindExact)
-	page, degrade, err := e.searchWithDegrade(ctx, scope, req, results, true)
-	span.End(len(page.Objects), degrade, err)
-	return page, err
-}
+	defer func() { span.End(len(page.Objects), DegradeNone, err) }()
 
-func (e *Engine) searchWithDegrade(ctx context.Context, scope Scope, req SearchRequest, results ResultSetStore, exact bool) (SearchPage, DegradeMode, error) {
-	var (
-		ranked  []ScoredID
-		err     error
-		degrade = DegradeNone
-	)
-	if exact {
-		ranked, err = e.exactCandidates(ctx, scope, req)
-	} else {
-		ranked, degrade, err = e.hybridCandidates(ctx, scope, req)
-	}
+	ranked, err := e.exactCandidates(ctx, scope, req)
 	if err != nil {
-		return SearchPage{}, degrade, err
+		return page, err
 	}
 	ranked = filterScoredByScopeIDs(ranked, req.ScopeIDs)
-	page, err := e.materialize(ctx, scope, ranked, req.Limit, results)
-	return page, degrade, err
+	page, err = e.materialize(ctx, scope, ranked, req.Limit, results)
+	return page, err
 }
 
 // filterScoredByScopeIDs keeps hits whose id or parent_id is in allow (empty allow = no-op).
@@ -76,31 +70,27 @@ func filterScoredByScopeIDs(ranked []ScoredID, allow []uuid.UUID) []ScoredID {
 }
 
 // Continue returns the next page of a prior ResultSet under scope.
-func (e *Engine) Continue(ctx context.Context, scope Scope, resultSetID uuid.UUID, limit int, results ResultSetStore) (SearchPage, error) {
+func (e *Engine) Continue(ctx context.Context, scope Scope, resultSetID uuid.UUID, limit int, results ResultSetStore) (page SearchPage, err error) {
 	ctx, span := e.observer.StartOp(ctx, OpContinue)
-	page, err := e.continueInner(ctx, scope, resultSetID, limit, results)
-	span.End(len(page.Objects), DegradeNone, err)
-	return page, err
-}
+	defer func() { span.End(len(page.Objects), DegradeNone, err) }()
 
-func (e *Engine) continueInner(ctx context.Context, scope Scope, resultSetID uuid.UUID, limit int, results ResultSetStore) (SearchPage, error) {
 	if resultSetID == uuid.Nil {
-		return SearchPage{}, ErrResultSetIDRequired
+		return page, ErrResultSetIDRequired
 	}
 	limit = e.normalizeLimit(limit)
 	set, err := results.Get(ctx, resultSetID)
 	if err != nil {
-		return SearchPage{}, err
+		return page, err
 	}
 	start, end := sliceBounds(set.Offset, limit, len(set.ObjectIDs))
 	objs, err := e.hydrateIDs(ctx, scope, set.ObjectIDs[start:end])
 	if err != nil {
-		return SearchPage{}, err
+		return page, err
 	}
 	attachRelations(objs, set.Relations)
 	set.Offset = end
-	if err := results.Put(ctx, set); err != nil {
-		return SearchPage{}, err
+	if err = results.Put(ctx, set); err != nil {
+		return page, err
 	}
 	return SearchPage{
 		ResultSetID: resultSetID,

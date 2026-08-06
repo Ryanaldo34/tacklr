@@ -274,7 +274,7 @@ func (b brainTools) newFindLinksTool() *Tool {
 		DisplayName: "Find Links",
 		Description: `Find cross-object relationships by text on edge metadata (note), not document bodies.
 
-Use when the ask is about how objects are linked (e.g. notes on an about edge). Returns from/to rich objects plus relation meta. Prefer find_objects to land on entities first; use expand to walk from a known id. relation_type is required.`,
+Use when the ask is about how objects are linked (e.g. notes on an about edge). Returns from/to rich objects plus relation meta. Prefer find_objects to land on entities first; use expand to walk from a known id. relation_type is required. Hosts must ensure an edge text index for that relation label on Helix (EnsureEdgeTextIndex) before this tool is useful.`,
 		Category: streaming.ToolCategorySearch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
