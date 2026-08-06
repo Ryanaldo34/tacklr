@@ -132,6 +132,10 @@ func (e *Engine) materialize(ctx context.Context, scope Scope, ranked []ScoredID
 			page.Objects[i].Evidence = p.Evidence
 		}
 	}
+	page.Objects, err = e.applyRerank(ctx, page.Objects)
+	if err != nil {
+		return SearchPage{}, err
+	}
 	return page, nil
 }
 

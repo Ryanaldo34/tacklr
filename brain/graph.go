@@ -64,6 +64,20 @@ type GraphObjectSearcher interface {
 	SearchVector(ctx context.Context, embedding []float32, limit int, namespace *uuid.UUID) ([]ScoredID, error)
 }
 
+// EdgeSearchHit is one graph edge search result (endpoints + meta + score).
+type EdgeSearchHit struct {
+	FromID       uuid.UUID
+	ToID         uuid.UUID
+	RelationType string
+	Meta         EdgeMeta
+	Score        float64
+}
+
+// GraphEdgeSearcher finds edges by text (e.g. Helix TextSearchEdges on note).
+type GraphEdgeSearcher interface {
+	SearchEdgesText(ctx context.Context, relationType, query string, limit int) ([]EdgeSearchHit, error)
+}
+
 // edgeKey uniquely identifies a directed labeled edge.
 type edgeKey struct {
 	from, to uuid.UUID
@@ -172,6 +186,36 @@ func (g *MemoryGraph) SearchText(ctx context.Context, query string, limit int, n
 		scored = scored[:limit]
 	}
 	return scored, nil
+}
+
+// SearchEdgesText implements GraphEdgeSearcher (substring match on edge note).
+func (g *MemoryGraph) SearchEdgesText(ctx context.Context, relationType, query string, limit int) ([]EdgeSearchHit, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	rel := strings.TrimSpace(relationType)
+	q := strings.ToLower(strings.TrimSpace(query))
+	if rel == "" || q == "" || limit <= 0 {
+		return nil, nil
+	}
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	out := make([]EdgeSearchHit, 0, limit)
+	for k, meta := range g.edges {
+		if k.rel != rel {
+			continue
+		}
+		if !strings.Contains(strings.ToLower(meta.Note), q) {
+			continue
+		}
+		out = append(out, EdgeSearchHit{
+			FromID: k.from, ToID: k.to, RelationType: rel, Meta: meta, Score: 1,
+		})
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
 }
 
 // SearchVector implements GraphObjectSearcher via cosine similarity on stored embeddings.
@@ -364,4 +408,5 @@ func SplitRelationTypes(rels []string) (wantContainment bool, graphLabels []stri
 var (
 	_ GraphWriter         = (*MemoryGraph)(nil)
 	_ GraphObjectSearcher = (*MemoryGraph)(nil)
+	_ GraphEdgeSearcher   = (*MemoryGraph)(nil)
 )

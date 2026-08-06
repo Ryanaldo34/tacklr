@@ -159,6 +159,13 @@ func TestSchema_prefersCatalog(t *testing.T) {
 	if one.Kinds[0].Description != "catalog copy" {
 		t.Fatalf("catalog should win: %+v", one)
 	}
+	// Agents must see which tools share filterable_fields (incl. find_objects).
+	if len(one.FilterUsage.Tools) < 3 || !strings.Contains(strings.Join(one.FilterUsage.Tools, ","), "find_objects") {
+		t.Fatalf("filter_usage.tools: %+v", one.FilterUsage)
+	}
+	if !strings.Contains(one.FilterUsage.Note, "filterable_fields") {
+		t.Fatalf("filter_usage.note: %s", one.FilterUsage.Note)
+	}
 	var fields []brain.FieldSpec
 	if err := json.Unmarshal(one.Kinds[0].FilterableFields, &fields); err != nil {
 		t.Fatal(err)

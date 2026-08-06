@@ -33,23 +33,22 @@ func TestGraph_neighborsRequestAST(t *testing.T) {
 			t.Fatal(err)
 		}
 		bodies = append(bodies, string(b))
-		// OutE then InE: return one peer each (with edge meta on outbound).
-		props := []map[string]any{}
-		if strings.Contains(string(b), "OutE") {
-			conf := 0.75
-			props = append(props, map[string]any{
-				"object_id":   to.String(),
-				"note":        "cites memo",
-				"status":      "active",
-				"role":        "primary",
-				"confidence":  conf,
-				"evidence_id": from.String(),
-			})
-		} else {
-			props = append(props, map[string]any{"object_id": fromPeer.String(), "evidence_id": "not-a-uuid"})
-		}
+		// Helix BothE: one RPC returns both out and in edges with endpoint ids.
+		conf := 0.75
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"neighbors": map[string]any{"properties": props},
+			"neighbors": map[string]any{
+				"properties": []map[string]any{
+					{
+						"from_id": from.String(), "to_id": to.String(),
+						"note": "cites memo", "status": "active", "role": "primary",
+						"confidence": conf, "evidence_id": from.String(),
+					},
+					{
+						"from_id": fromPeer.String(), "to_id": from.String(),
+						"evidence_id": "not-a-uuid",
+					},
+				},
+			},
 		})
 	}))
 	t.Cleanup(server.Close)
@@ -80,13 +79,12 @@ func TestGraph_neighborsRequestAST(t *testing.T) {
 	if ns[1].Meta.EvidenceID != nil {
 		t.Fatalf("invalid evidence_id must be skipped: %+v", ns[1].Meta)
 	}
-	if len(bodies) != 2 {
-		t.Fatalf("want OutE + InE RPCs: %d", len(bodies))
+	if len(bodies) != 1 {
+		t.Fatalf("want single BothE RPC: %d", len(bodies))
 	}
-	joined := strings.Join(bodies, "\n")
-	for _, want := range []string{from.String(), "references", "OutE", "InE", "object_id", "note"} {
-		if !strings.Contains(joined, want) {
-			t.Fatalf("requests missing %q:\n%s", want, joined)
+	for _, want := range []string{from.String(), "references", "BothE", "from_id", "to_id", "note"} {
+		if !strings.Contains(bodies[0], want) {
+			t.Fatalf("request missing %q:\n%s", want, bodies[0])
 		}
 	}
 }
@@ -97,19 +95,21 @@ func TestNewFromClient_requiresClient(t *testing.T) {
 	}
 }
 
-// TestGraph_neighborsCancelsBetweenRPCs: cancel after OutE aborts before InE.
-func TestGraph_neighborsCancelsBetweenRPCs(t *testing.T) {
+// TestGraph_neighborsCancelsBetweenLabels: cancel after first label aborts before next.
+func TestGraph_neighborsCancelsBetweenLabels(t *testing.T) {
 	from, to := uuid.New(), uuid.New()
 	ctx, cancel := context.WithCancel(context.Background())
 	var calls int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
 		if calls == 1 {
-			cancel() // after first direction returns, next dir must see ctx.Canceled
+			cancel() // next relation label must see ctx.Canceled
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"neighbors": map[string]any{
-				"properties": []map[string]any{{"object_id": to.String()}},
+				"properties": []map[string]any{
+					{"from_id": from.String(), "to_id": to.String()},
+				},
 			},
 		})
 	}))
@@ -118,12 +118,12 @@ func TestGraph_neighborsCancelsBetweenRPCs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = g.Neighbors(ctx, from, []string{"references"}, 10)
+	_, err = g.Neighbors(ctx, from, []string{"references", "depends_on"}, 10)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("want canceled mid-walk: %v calls=%d", err, calls)
 	}
 	if calls != 1 {
-		t.Fatalf("want single OutE RPC before cancel: %d", calls)
+		t.Fatalf("want single BothE RPC before cancel: %d", calls)
 	}
 }
 
@@ -166,15 +166,15 @@ func TestGraph_validationAndClient(t *testing.T) {
 	if _, err := g2.Neighbors(ctx, uuid.New(), []string{"r"}, 5); err == nil {
 		t.Fatal("want decode error")
 	}
-	// Invalid object_id strings are skipped; OutE+InE share one valid peer id (deduped).
+	// Invalid endpoint ids are skipped; BothE returns one valid peer.
 	validPeer := uuid.New()
+	from := uuid.New()
 	srv3 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"neighbors": map[string]any{
 				"properties": []map[string]any{
-					{"object_id": ""},
-					{"object_id": "not-a-uuid"},
-					{"object_id": validPeer.String()},
+					{"from_id": "", "to_id": "not-a-uuid"},
+					{"from_id": from.String(), "to_id": validPeer.String()},
 				},
 			},
 		})
@@ -184,7 +184,6 @@ func TestGraph_validationAndClient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	from := uuid.New()
 	ns, err = g3.Neighbors(ctx, from, []string{"r", "r", "  "}, 0) // limit<=0 → default
 	if err != nil || len(ns) != 1 || ns[0].ObjectID != validPeer {
 		t.Fatalf("skip bad ids: %+v err=%v", ns, err)

@@ -38,6 +38,14 @@ var (
 	// ErrGraphEnsure and ErrGraphRemove wrap dual-write failures (cause via errors.Unwrap).
 	ErrGraphEnsure = errors.New("brain: graph ensure object")
 	ErrGraphRemove = errors.New("brain: graph remove object")
+	// ErrEdgeSearchUnavailable is returned when FindLinks lacks a GraphEdgeSearcher.
+	ErrEdgeSearchUnavailable = errors.New("brain: graph edge search is not available")
+	// ErrLinkQueryRequired is returned when FindLinks is missing relation type or query.
+	ErrLinkQueryRequired = errors.New("brain: relation type and query are required")
+	// ErrExpandRecipeNotFound is returned when ExpandByRecipe names an unknown recipe.
+	ErrExpandRecipeNotFound = errors.New("brain: expand recipe not found")
+	// ErrExpandRecipeNameRequired is returned when registering a recipe without a name.
+	ErrExpandRecipeNameRequired = errors.New("brain: expand recipe name is required")
 )
 
 // Scope is optional retrieval isolation for Engine methods.
@@ -111,8 +119,10 @@ type RichObject struct {
 // Relation describes a non-containment hop used to reach a neighbor on expand.
 // EdgeMeta fields are embedded so agent JSON stays flat (note, status, role, …).
 type Relation struct {
-	Type      string `json:"type"`
-	Direction string `json:"direction,omitempty"` // out | in
+	Type      string     `json:"type"`
+	Direction string     `json:"direction,omitempty"` // out | in
+	Depth     int        `json:"depth,omitempty"`     // hops from expand seed
+	SourceID  *uuid.UUID `json:"source_id,omitempty"` // ExpandMany landing id
 	EdgeMeta
 }
 
@@ -121,6 +131,7 @@ func RelationFromNeighbor(n GraphNeighbor) Relation {
 	return Relation{
 		Type:      n.RelationType,
 		Direction: n.Direction,
+		Depth:     1,
 		EdgeMeta:  n.Meta,
 	}
 }
@@ -148,6 +159,28 @@ func RichFromObject(o Object, includeContent bool) RichObject {
 // SchemaResult is the payload for the schema tool.
 type SchemaResult struct {
 	Kinds []ObjectKindInfo `json:"kinds"`
+	// FilterUsage tells agents which tools accept filterable_fields and how.
+	FilterUsage FilterUsage `json:"filter_usage"`
+}
+
+// FilterUsage is agent-facing guidance for structured filters (shared by corpus and entity find).
+type FilterUsage struct {
+	// Tools list knowledge tools that accept the same property filter keys as filterable_fields.
+	Tools []string `json:"tools"`
+	// Note is short instruction text for the agent.
+	Note string `json:"note"`
+}
+
+// DefaultFilterUsage is embedded in every SchemaResult.
+func DefaultFilterUsage() FilterUsage {
+	return FilterUsage{
+		Tools: []string{"search", "find_exact", "find_objects"},
+		Note: "Each kind's filterable_fields lists property keys, types, and operators allowed in filters. " +
+			"Use those keys on search, find_exact, and find_objects (not invented names). " +
+			"When kinds are registered, property filters require a kind filter (or find_objects.kinds). " +
+			"Core keys: kind, title, created_after, created_before, updated_after, updated_before. " +
+			"Call schema with a kind before filtering.",
+	}
 }
 
 // ObjectKindInfo is the JSON form of ObjectKind for agents.

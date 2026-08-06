@@ -72,18 +72,22 @@ func TestGraph_ensureObjectAndAddEdgeRequestShape(t *testing.T) {
 		t.Fatal(err)
 	}
 	// First EnsureObject: exists-check then insert (AddN, no node Drop).
+	// parent_id is not dual-written (parts stay in Postgres only).
 	if len(bodies) < 2 {
 		t.Fatalf("want exists+insert RPCs, got %d", len(bodies))
 	}
 	joinedEnsure := strings.Join(bodies, "\n")
 	for _, want := range []string{
 		obj.ID.String(), "Document", "memo", "sum", "body text",
-		ns.String(), pid.String(), "search_text", "embedding",
+		ns.String(), "search_text", "embedding",
 		"created_at", "updated_at", "AddN",
 	} {
 		if !strings.Contains(joinedEnsure, want) {
 			t.Fatalf("ensure body missing %q:\n%s", want, joinedEnsure)
 		}
+	}
+	if strings.Contains(joinedEnsure, pid.String()) {
+		t.Fatalf("parent_id must not be dual-written to Helix:\n%s", joinedEnsure)
 	}
 	insertBody := bodies[len(bodies)-1]
 	if strings.Contains(insertBody, "AddN") && strings.Contains(insertBody, `"Drop"`) {
@@ -299,5 +303,24 @@ func TestGraph_searchTextAndVectorRequestShape(t *testing.T) {
 	}
 	if len(bodies) < 3 {
 		t.Fatalf("index ensure RPCs: %d", len(bodies))
+	}
+	if !g.TenantEnabled() {
+		t.Fatal("tenant indexes should be enabled")
+	}
+	// With tenant enabled, SearchText must pass namespace into Helix.
+	ns := uuid.New()
+	nBefore := len(bodies)
+	if _, err := g.SearchText(ctx, "risk", 3, &ns); err != nil {
+		t.Fatal(err)
+	}
+	if len(bodies) != nBefore+1 || !strings.Contains(bodies[len(bodies)-1], ns.String()) {
+		t.Fatalf("tenant search body: %v", bodies[nBefore:])
+	}
+	if err := g.EnsureEdgeTextIndex(ctx, "about"); err != nil {
+		t.Fatal(err)
+	}
+	edgeIdx := bodies[len(bodies)-1]
+	if !strings.Contains(edgeIdx, "about") || !strings.Contains(edgeIdx, "note") {
+		t.Fatalf("edge text index: %s", edgeIdx)
 	}
 }

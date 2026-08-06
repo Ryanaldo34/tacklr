@@ -80,12 +80,16 @@ func rrfFuse(lists [][]ScoredID, k int) []ScoredID {
 
 // applyTemporal multiplies scores by exp(-λ * age_days) using updated_at.
 // lambda <= 0 leaves scores unchanged.
+// Zero UpdatedAt is left untouched (e.g. Helix search hits only carry $distance rank).
 func applyTemporal(parts []ScoredID, lambda float64, now time.Time) {
 	if lambda <= 0 {
 		return
 	}
 	now = now.UTC()
 	for i := range parts {
+		if parts[i].UpdatedAt.IsZero() {
+			continue
+		}
 		age := now.Sub(parts[i].UpdatedAt.UTC()).Hours() / 24.0
 		if age < 0 {
 			age = 0

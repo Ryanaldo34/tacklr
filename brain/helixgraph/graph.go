@@ -1,11 +1,12 @@
-// Package helixgraph adapts the HelixDB Go SDK to brain.GraphReader / GraphWriter.
-// Nodes use property object_id (UUID) matching objects.id.
-// Neighbors use OutE/InE projections so edge metadata is returned with each hop.
+// Package helixgraph adapts HelixDB to brain.GraphReader / GraphWriter / searchers.
+// Helix owns topology, text/vector indexes, edge props, and $distance ranking;
+// this package dual-writes props and runs native Helix queries for Engine hydrate.
 package helixgraph
 
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -17,8 +18,9 @@ import (
 
 // Graph implements brain.GraphWriter via HelixDB.
 type Graph struct {
-	client      *helix.Client
-	searchReady bool // true after successful Bootstrap / EnsureSearchIndexes
+	client        *helix.Client
+	searchReady   bool // true after successful Bootstrap / EnsureSearchIndexes
+	tenantEnabled bool // true when indexes were created with namespace_id tenant
 }
 
 // New builds a client. Empty baseURL defaults to http://localhost:6969.
@@ -52,6 +54,20 @@ const (
 	PropSearchText  = "search_text"
 	PropEmbedding   = "embedding"
 	PropNamespaceID = "namespace_id"
+	PropKind        = "kind"
+	PropTitle       = "title"
+	PropSummary     = "summary"
+)
+
+// Edge property keys written on AddE (relationship metadata Helix stores natively).
+const (
+	PropEdgeNote       = "note"
+	PropEdgeStatus     = "status"
+	PropEdgeRole       = "role"
+	PropEdgeConfidence = "confidence"
+	PropEdgeEvidenceID = "evidence_id"
+	PropEdgeCreatedAt  = "created_at"
+	PropEdgeUpdatedAt  = "updated_at"
 )
 
 // EnsureObjectIndex creates an equality index on Object.object_id when missing.
@@ -67,9 +83,10 @@ func (g *Graph) EnsureObjectIndex(ctx context.Context) error {
 	return nil
 }
 
-// Bootstrap prepares Helix for entity search (indexes) and marks the graph ready for find_objects.
-// Call once at process start when using Helix. withNamespaceTenant is usually false
-// (namespace is enforced on Engine hydrate; some Helix images reject tenant text indexes).
+// Bootstrap prepares Helix native indexes for entity search and marks the graph ready.
+// withNamespaceTenant enables Helix tenant-scoped text/vector indexes on namespace_id
+// (prefer this when the Helix image supports it so Search* filters in-engine).
+// Call once at process start when using Helix.
 func (g *Graph) Bootstrap(ctx context.Context, withNamespaceTenant bool) error {
 	if err := ctx.Err(); err != nil {
 		g.searchReady = false
@@ -86,7 +103,10 @@ func (g *Graph) Bootstrap(ctx context.Context, withNamespaceTenant bool) error {
 // ObjectSearchReady reports whether Bootstrap (or EnsureSearchIndexes) succeeded.
 func (g *Graph) ObjectSearchReady() bool { return g.searchReady }
 
-// EnsureSearchIndexes creates equality + text + vector indexes for find_objects.
+// TenantEnabled reports whether search indexes were created with a namespace tenant property.
+func (g *Graph) TenantEnabled() bool { return g.tenantEnabled }
+
+// EnsureSearchIndexes creates Helix native equality + text + vector indexes for find_objects.
 // Prefer Bootstrap, which also sets ObjectSearchReady.
 func (g *Graph) EnsureSearchIndexes(ctx context.Context, withNamespaceTenant bool) error {
 	if err := g.EnsureObjectIndex(ctx); err != nil {
@@ -100,18 +120,41 @@ func (g *Graph) EnsureSearchIndexes(ctx context.Context, withNamespaceTenant boo
 		textIdx = helix.NodeTextIndex(NodeLabel, PropSearchText)
 		vecIdx = helix.NodeVectorIndex(NodeLabel, PropEmbedding)
 	}
+	// Equality on kind supports Has/Where filters after search without app-side maps.
+	kindIdx := helix.NodeEqualityIndex(NodeLabel, PropKind)
 	req := helix.WriteQuery("brain_ensure_search_indexes").
 		VarAs("text", helix.G().CreateIndexIfNotExists(textIdx)).
 		VarAs("vec", helix.G().CreateIndexIfNotExists(vecIdx)).
+		VarAs("kind", helix.G().CreateIndexIfNotExists(kindIdx)).
 		Returning()
 	if err := g.client.Exec(ctx, req, nil, helix.WriterOnly()); err != nil {
 		return fmt.Errorf("helixgraph: ensure search indexes: %w", err)
 	}
+	g.tenantEnabled = withNamespaceTenant
 	g.searchReady = true
 	return nil
 }
 
+// EnsureEdgeTextIndex creates a Helix EdgeText index on note for a relation label.
+// Relation labels are dynamic (about, has_buyer, …); hosts call this for labels they search.
+func (g *Graph) EnsureEdgeTextIndex(ctx context.Context, relationLabel string) error {
+	rel := strings.TrimSpace(relationLabel)
+	if rel == "" {
+		return fmt.Errorf("helixgraph: relation label is required")
+	}
+	req := helix.WriteQuery("brain_ensure_edge_text_"+rel).
+		VarAs("idx", helix.G().CreateIndexIfNotExists(
+			helix.EdgeTextIndex(rel, PropEdgeNote),
+		)).
+		Returning()
+	if err := g.client.Exec(ctx, req, nil, helix.WriterOnly()); err != nil {
+		return fmt.Errorf("helixgraph: ensure edge text index %q: %w", rel, err)
+	}
+	return nil
+}
+
 // RemoveObject implements brain.GraphWriter: drop graph nodes for this object_id.
+// Helix drops incident edges with the node.
 func (g *Graph) RemoveObject(ctx context.Context, id uuid.UUID) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -133,10 +176,9 @@ func (g *Graph) RemoveObject(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
 
-// SearchText implements brain.GraphObjectSearcher via TextSearchNodes on search_text.
-// Namespace is enforced on Engine hydrate (GetMany under Scope), not as a Helix tenant
-// parameter: tenant-scoped text indexes are optional and image-dependent.
-func (g *Graph) SearchText(ctx context.Context, query string, limit int, _ *uuid.UUID) ([]brain.ScoredID, error) {
+// SearchText implements brain.GraphObjectSearcher via Helix TextSearchNodes.
+// When tenant indexes are enabled and namespace is set, Helix filters by tenant natively.
+func (g *Graph) SearchText(ctx context.Context, query string, limit int, namespace *uuid.UUID) ([]brain.ScoredID, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -147,14 +189,13 @@ func (g *Graph) SearchText(ctx context.Context, query string, limit int, _ *uuid
 	q := helix.ReadQuery("brain_text_search_nodes")
 	qt := q.ParamString("query", query)
 	lim := q.ParamI64("limit", int64(limit))
-	trav := helix.G().TextSearchNodes(NodeLabel, PropSearchText, qt, lim)
+	trav := g.textSearchTrav(qt, lim, namespace)
 	req := q.VarAs("hits", trav.ValueMap(PropObjectID, "$distance")).Returning("hits")
 	return g.execSearchHits(ctx, req, "text search")
 }
 
-// SearchVector implements brain.GraphObjectSearcher via VectorSearchNodes on embedding.
-// Namespace isolation is applied by Engine hydrate under Scope (same as SearchText).
-func (g *Graph) SearchVector(ctx context.Context, embedding []float32, limit int, _ *uuid.UUID) ([]brain.ScoredID, error) {
+// SearchVector implements brain.GraphObjectSearcher via Helix VectorSearchNodes.
+func (g *Graph) SearchVector(ctx context.Context, embedding []float32, limit int, namespace *uuid.UUID) ([]brain.ScoredID, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -163,14 +204,82 @@ func (g *Graph) SearchVector(ctx context.Context, embedding []float32, limit int
 	}
 	q := helix.ReadQuery("brain_vector_search_nodes")
 	lim := q.ParamI64("limit", int64(limit))
-	trav := helix.G().VectorSearchNodes(NodeLabel, PropEmbedding, embedding, lim)
+	trav := g.vectorSearchTrav(embedding, lim, namespace)
 	req := q.VarAs("hits", trav.ValueMap(PropObjectID, "$distance")).Returning("hits")
 	return g.execSearchHits(ctx, req, "vector search")
+}
+
+// SearchEdgesText implements brain.GraphEdgeSearcher via Helix TextSearchEdges on note.
+// Requires EnsureEdgeTextIndex(rel) for that label.
+func (g *Graph) SearchEdgesText(ctx context.Context, relationLabel, query string, limit int) ([]brain.EdgeSearchHit, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	rel := strings.TrimSpace(relationLabel)
+	query = strings.TrimSpace(query)
+	if rel == "" || query == "" || limit <= 0 {
+		return nil, nil
+	}
+	q := helix.ReadQuery("brain_text_search_edges")
+	qt := q.ParamString("query", query)
+	lim := q.ParamI64("limit", int64(limit))
+	trav := helix.G().TextSearchEdges(rel, PropEdgeNote, qt, lim).Project(
+		helix.ProjectFromEndpoint(PropObjectID, "from_id"),
+		helix.ProjectToEndpoint(PropObjectID, "to_id"),
+		helix.ProjectProp(PropEdgeNote),
+		helix.ProjectProp(PropEdgeStatus),
+		helix.ProjectProp(PropEdgeRole),
+		helix.ProjectProp(PropEdgeConfidence),
+		helix.ProjectProp(PropEdgeEvidenceID),
+		helix.ProjectProp("$distance"),
+	)
+	req := q.VarAs("hits", trav).Returning("hits")
+	var raw struct {
+		Hits struct {
+			Properties []edgeHitRow `json:"properties"`
+		} `json:"hits"`
+	}
+	if err := g.client.Exec(ctx, req, &raw); err != nil {
+		return nil, fmt.Errorf("helixgraph: edge text search %q: %w", rel, err)
+	}
+	out := make([]brain.EdgeSearchHit, 0, len(raw.Hits.Properties))
+	for i, row := range raw.Hits.Properties {
+		h, ok := parseEdgeHitRow(row, rel, i, len(raw.Hits.Properties))
+		if ok {
+			out = append(out, h)
+		}
+	}
+	return out, nil
+}
+
+func (g *Graph) textSearchTrav(query helix.ParamRef, lim helix.ParamRef, namespace *uuid.UUID) *helix.Traversal {
+	if g.tenantEnabled && namespace != nil && *namespace != uuid.Nil {
+		return helix.G().TextSearchNodes(NodeLabel, PropSearchText, query, lim, namespace.String())
+	}
+	return helix.G().TextSearchNodes(NodeLabel, PropSearchText, query, lim)
+}
+
+func (g *Graph) vectorSearchTrav(embedding []float32, lim helix.ParamRef, namespace *uuid.UUID) *helix.Traversal {
+	if g.tenantEnabled && namespace != nil && *namespace != uuid.Nil {
+		return helix.G().VectorSearchNodes(NodeLabel, PropEmbedding, embedding, lim, namespace.String())
+	}
+	return helix.G().VectorSearchNodes(NodeLabel, PropEmbedding, embedding, lim)
 }
 
 type searchHitRow struct {
 	ObjectID string   `json:"object_id"`
 	Distance *float64 `json:"$distance"`
+}
+
+type edgeHitRow struct {
+	FromID     string   `json:"from_id"`
+	ToID       string   `json:"to_id"`
+	Note       string   `json:"note,omitempty"`
+	Status     string   `json:"status,omitempty"`
+	Role       string   `json:"role,omitempty"`
+	Confidence *float64 `json:"confidence,omitempty"`
+	EvidenceID string   `json:"evidence_id,omitempty"`
+	Distance   *float64 `json:"$distance,omitempty"`
 }
 
 func (g *Graph) execSearchHits(ctx context.Context, req helix.Request, label string) ([]brain.ScoredID, error) {
@@ -188,14 +297,40 @@ func (g *Graph) execSearchHits(ctx context.Context, req helix.Request, label str
 		if err != nil {
 			continue
 		}
-		score := float64(len(raw.Hits.Properties) - i) // preserve Helix order for RRF
+		// Prefer Helix $distance; fall back to order-preserving rank score for fusion.
+		score := float64(len(raw.Hits.Properties) - i)
 		if row.Distance != nil {
-			// Smaller distance is better; convert to a descending score.
 			score = 1.0 / (1.0 + *row.Distance)
 		}
 		out = append(out, brain.ScoredID{ID: id, Score: score})
 	}
 	return out, nil
+}
+
+func parseEdgeHitRow(row edgeHitRow, rel string, i, n int) (brain.EdgeSearchHit, bool) {
+	from, err1 := uuid.Parse(strings.TrimSpace(row.FromID))
+	to, err2 := uuid.Parse(strings.TrimSpace(row.ToID))
+	if err1 != nil || err2 != nil {
+		return brain.EdgeSearchHit{}, false
+	}
+	meta := brain.EdgeMeta{
+		Note:   strings.TrimSpace(row.Note),
+		Status: strings.TrimSpace(row.Status),
+		Role:   strings.TrimSpace(row.Role),
+	}
+	if row.Confidence != nil {
+		meta.Confidence = *row.Confidence
+	}
+	if eid := strings.TrimSpace(row.EvidenceID); eid != "" {
+		if u, err := uuid.Parse(eid); err == nil {
+			meta.EvidenceID = &u
+		}
+	}
+	score := float64(n - i)
+	if row.Distance != nil {
+		score = 1.0 / (1.0 + *row.Distance)
+	}
+	return brain.EdgeSearchHit{FromID: from, ToID: to, RelationType: rel, Meta: meta, Score: score}, true
 }
 
 // EnsureObject implements brain.GraphWriter: insert if missing, else update props in place.
@@ -220,6 +355,7 @@ func (g *Graph) EnsureObject(ctx context.Context, obj brain.Object) error {
 func (g *Graph) objectExists(ctx context.Context, id uuid.UUID) (bool, error) {
 	q := helix.ReadQuery("brain_object_exists")
 	oid := q.ParamString("object_id", id.String())
+	// Helix Count over the equality index is the portable existence probe.
 	req := q.
 		VarAs("n", helix.G().NWhere(helix.SourceEq(PropObjectID, oid)).Count()).
 		Returning("n")
@@ -272,13 +408,13 @@ type namedProp struct {
 func objectPropPairs(obj brain.Object) []namedProp {
 	var props []namedProp
 	if obj.Kind != "" {
-		props = append(props, namedProp{"kind", obj.Kind})
+		props = append(props, namedProp{PropKind, obj.Kind})
 	}
 	if obj.Title != "" {
-		props = append(props, namedProp{"title", obj.Title})
+		props = append(props, namedProp{PropTitle, obj.Title})
 	}
 	if obj.Summary != "" {
-		props = append(props, namedProp{"summary", obj.Summary})
+		props = append(props, namedProp{PropSummary, obj.Summary})
 	}
 	if st := brain.EntityIndexText(obj); st != "" {
 		props = append(props, namedProp{PropSearchText, st})
@@ -292,13 +428,46 @@ func objectPropPairs(obj brain.Object) []namedProp {
 	if !obj.UpdatedAt.IsZero() {
 		props = append(props, namedProp{"updated_at", obj.UpdatedAt.UTC().Format(time.RFC3339Nano)})
 	}
-	if obj.ParentID != nil {
-		props = append(props, namedProp{"parent_id", obj.ParentID.String()})
-	}
 	if len(obj.Embedding) > 0 {
 		props = append(props, namedProp{PropEmbedding, obj.Embedding})
 	}
+	for _, k := range sortedPropKeys(obj.Properties) {
+		if v, ok := scalarPropValue(obj.Properties[k]); ok {
+			props = append(props, namedProp{k, v})
+		}
+	}
 	return props
+}
+
+func sortedPropKeys(props map[string]any) []string {
+	if len(props) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(props))
+	for k := range props {
+		if strings.TrimSpace(k) != "" {
+			keys = append(keys, k)
+		}
+	}
+	slices.Sort(keys)
+	return keys
+}
+
+func scalarPropValue(v any) (any, bool) {
+	switch x := v.(type) {
+	case string:
+		x = strings.TrimSpace(x)
+		if x == "" {
+			return nil, false
+		}
+		return x, true
+	case bool:
+		return x, true
+	case float64, float32, int, int32, int64:
+		return x, true
+	default:
+		return nil, false
+	}
 }
 
 func objectProps(oid helix.ParamRef, obj brain.Object) helix.Props {
@@ -311,18 +480,7 @@ func objectProps(oid helix.ParamRef, obj brain.Object) helix.Props {
 	return props
 }
 
-// Edge property keys written on AddE (Phase A relationship metadata).
-const (
-	PropEdgeNote       = "note"
-	PropEdgeStatus     = "status"
-	PropEdgeRole       = "role"
-	PropEdgeConfidence = "confidence"
-	PropEdgeEvidenceID = "evidence_id"
-	PropEdgeCreatedAt  = "created_at"
-	PropEdgeUpdatedAt  = "updated_at"
-)
-
-// AddEdge implements brain.GraphWriter. Drops any existing labeled edge from→to, then adds with meta props.
+// AddEdge implements brain.GraphWriter via Helix DropEdgeLabeled + AddE (native upsert).
 func (g *Graph) AddEdge(ctx context.Context, from, to uuid.UUID, relationType string, meta brain.EdgeMeta) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -343,9 +501,8 @@ func (g *Graph) AddEdge(ctx context.Context, from, to uuid.UUID, relationType st
 	toOID := q.ParamString("to_oid", to.String())
 	props := edgeMetaProps(meta)
 	req := q.
-		VarAs("from", helix.G().NWhere(helix.SourceEq("object_id", fromOID))).
-		VarAs("to", helix.G().NWhere(helix.SourceEq("object_id", toOID))).
-		// Upsert: remove prior edge of this label between the endpoints, then insert.
+		VarAs("from", helix.G().NWhere(helix.SourceEq(PropObjectID, fromOID))).
+		VarAs("to", helix.G().NWhere(helix.SourceEq(PropObjectID, toOID))).
 		VarAs("dropped", helix.G().N(helix.NodeVar("from")).DropEdgeLabeled(helix.NodeVar("to"), rel).Count()).
 		VarAs("e", helix.G().N(helix.NodeVar("from")).AddE(rel, helix.NodeVar("to"), props)).
 		Returning("e")
@@ -381,17 +538,8 @@ func edgeMetaProps(meta brain.EdgeMeta) helix.Props {
 	return props
 }
 
-type neighborRow struct {
-	ObjectID   string   `json:"object_id"`
-	Note       string   `json:"note,omitempty"`
-	Status     string   `json:"status,omitempty"`
-	Role       string   `json:"role,omitempty"`
-	Confidence *float64 `json:"confidence,omitempty"`
-	EvidenceID string   `json:"evidence_id,omitempty"`
-}
-
-// Neighbors implements brain.GraphReader via OutE/InE projections (neighbor id + edge meta).
-// Each direction RPC is gated on ctx so cancellation stops the multi-query walk early.
+// Neighbors uses Helix BothE (one RPC per relation label) for undirected hop discovery
+// with edge property projection — not separate OutE/InE walks managed in-process.
 func (g *Graph) Neighbors(ctx context.Context, objectID uuid.UUID, relationTypes []string, limit int) ([]brain.GraphNeighbor, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -410,44 +558,93 @@ func (g *Graph) Neighbors(ctx context.Context, objectID uuid.UUID, relationTypes
 	var out []brain.GraphNeighbor
 	seen := map[uuid.UUID]struct{}{objectID: {}}
 	for _, label := range labels {
-		for _, dir := range []string{"out", "in"} {
-			if err := ctx.Err(); err != nil {
-				return nil, err
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		rows, err := g.neighborsBothE(ctx, objectID, label, limit)
+		if err != nil {
+			return nil, err
+		}
+		for _, row := range rows {
+			peer, dir, meta, ok := parseBothERow(row, objectID)
+			if !ok {
+				continue
 			}
-			rows, err := g.neighborsForLabelDir(ctx, objectID, label, dir, limit)
-			if err != nil {
-				return nil, err
+			if _, exists := seen[peer]; exists || len(out) >= limit {
+				continue
 			}
-			for _, row := range rows {
-				id, meta, ok := parseNeighborRow(row)
-				if !ok {
-					continue
-				}
-				if _, exists := seen[id]; exists || len(out) >= limit {
-					continue
-				}
-				seen[id] = struct{}{}
-				out = append(out, brain.GraphNeighbor{
-					ObjectID:     id,
-					RelationType: label,
-					Direction:    dir,
-					Meta:         meta,
-				})
-			}
-			if len(out) >= limit {
-				return out, nil
-			}
+			seen[peer] = struct{}{}
+			out = append(out, brain.GraphNeighbor{
+				ObjectID:     peer,
+				RelationType: label,
+				Direction:    dir,
+				Meta:         meta,
+			})
+		}
+		if len(out) >= limit {
+			return out, nil
 		}
 	}
 	return out, nil
 }
 
-func parseNeighborRow(row neighborRow) (uuid.UUID, brain.EdgeMeta, bool) {
-	id, err := uuid.Parse(strings.TrimSpace(row.ObjectID))
-	if err != nil {
-		return uuid.Nil, brain.EdgeMeta{}, false
+type bothERow struct {
+	FromID     string   `json:"from_id"`
+	ToID       string   `json:"to_id"`
+	Note       string   `json:"note,omitempty"`
+	Status     string   `json:"status,omitempty"`
+	Role       string   `json:"role,omitempty"`
+	Confidence *float64 `json:"confidence,omitempty"`
+	EvidenceID string   `json:"evidence_id,omitempty"`
+}
+
+func (g *Graph) neighborsBothE(ctx context.Context, objectID uuid.UUID, label string, limit int) ([]bothERow, error) {
+	q := helix.ReadQuery("brain_expand_neighbors_bothe")
+	oid := q.ParamString("object_id", objectID.String())
+	lim := q.ParamI64("limit", int64(limit))
+	trav := helix.G().
+		NWhere(helix.SourceEq(PropObjectID, oid)).
+		BothE(label).
+		Limit(lim).
+		Project(
+			helix.ProjectFromEndpoint(PropObjectID, "from_id"),
+			helix.ProjectToEndpoint(PropObjectID, "to_id"),
+			helix.ProjectProp(PropEdgeNote),
+			helix.ProjectProp(PropEdgeStatus),
+			helix.ProjectProp(PropEdgeRole),
+			helix.ProjectProp(PropEdgeConfidence),
+			helix.ProjectProp(PropEdgeEvidenceID),
+		)
+	req := q.VarAs("neighbors", trav).Returning("neighbors")
+	var raw struct {
+		Neighbors struct {
+			Properties []bothERow `json:"properties"`
+		} `json:"neighbors"`
 	}
-	meta := brain.EdgeMeta{
+	if err := g.client.Exec(ctx, req, &raw); err != nil {
+		return nil, fmt.Errorf("helixgraph: neighbors BothE %q: %w", label, err)
+	}
+	return raw.Neighbors.Properties, nil
+}
+
+func parseBothERow(row bothERow, self uuid.UUID) (peer uuid.UUID, dir string, meta brain.EdgeMeta, ok bool) {
+	from, err1 := uuid.Parse(strings.TrimSpace(row.FromID))
+	to, err2 := uuid.Parse(strings.TrimSpace(row.ToID))
+	if err1 != nil || err2 != nil {
+		return uuid.Nil, "", brain.EdgeMeta{}, false
+	}
+	switch {
+	case from == self:
+		peer, dir = to, "out"
+	case to == self:
+		peer, dir = from, "in"
+	default:
+		return uuid.Nil, "", brain.EdgeMeta{}, false
+	}
+	if peer == uuid.Nil || peer == self {
+		return uuid.Nil, "", brain.EdgeMeta{}, false
+	}
+	meta = brain.EdgeMeta{
 		Note:   strings.TrimSpace(row.Note),
 		Status: strings.TrimSpace(row.Status),
 		Role:   strings.TrimSpace(row.Role),
@@ -460,60 +657,12 @@ func parseNeighborRow(row neighborRow) (uuid.UUID, brain.EdgeMeta, bool) {
 			meta.EvidenceID = &u
 		}
 	}
-	return id, meta, true
-}
-
-func (g *Graph) neighborsForLabelDir(ctx context.Context, objectID uuid.UUID, label, direction string, limit int) ([]neighborRow, error) {
-	q := helix.ReadQuery("brain_expand_neighbors_" + direction)
-	oid := q.ParamString("object_id", objectID.String())
-	lim := q.ParamI64("limit", int64(limit))
-
-	// Project edge props + endpoint object_id ($to for out, $from for in).
-	// Fixed-size stack array avoids the double-slice append used previously.
-	var endpoint helix.Projection
-	if direction == "out" {
-		endpoint = helix.ProjectToEndpoint(PropObjectID, PropObjectID)
-	} else {
-		endpoint = helix.ProjectFromEndpoint(PropObjectID, PropObjectID)
-	}
-	projections := []helix.Projection{
-		endpoint,
-		helix.ProjectProp(PropEdgeNote),
-		helix.ProjectProp(PropEdgeStatus),
-		helix.ProjectProp(PropEdgeRole),
-		helix.ProjectProp(PropEdgeConfidence),
-		helix.ProjectProp(PropEdgeEvidenceID),
-	}
-	var trav *helix.Traversal
-	if direction == "out" {
-		trav = helix.G().
-			NWhere(helix.SourceEq(PropObjectID, oid)).
-			OutE(label).
-			Limit(lim).
-			Project(projections...)
-	} else {
-		trav = helix.G().
-			NWhere(helix.SourceEq(PropObjectID, oid)).
-			InE(label).
-			Limit(lim).
-			Project(projections...)
-	}
-
-	req := q.VarAs("neighbors", trav).Returning("neighbors")
-
-	var raw struct {
-		Neighbors struct {
-			Properties []neighborRow `json:"properties"`
-		} `json:"neighbors"`
-	}
-	if err := g.client.Exec(ctx, req, &raw); err != nil {
-		return nil, fmt.Errorf("helixgraph: neighbors %s %q: %w", direction, label, err)
-	}
-	return raw.Neighbors.Properties, nil
+	return peer, dir, meta, true
 }
 
 var (
 	_ brain.GraphReader         = (*Graph)(nil)
 	_ brain.GraphWriter         = (*Graph)(nil)
 	_ brain.GraphObjectSearcher = (*Graph)(nil)
+	_ brain.GraphEdgeSearcher   = (*Graph)(nil)
 )

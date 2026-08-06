@@ -149,6 +149,58 @@ func TestExpand_highCardinalityResultSetAndContinue(t *testing.T) {
 	}
 }
 
+// TestExpand_multiHopWalksPaths: MaxHops=2 reaches two-edge neighborhood.
+func TestExpand_multiHopWalksPaths(t *testing.T) {
+	ctx := context.Background()
+	store := brain.NewMemoryStore()
+	g := brain.NewMemoryGraph()
+	ns := uuid.New()
+	now := time.Now().UTC()
+	a, b, c := uuid.New(), uuid.New(), uuid.New()
+	for _, id := range []uuid.UUID{a, b, c} {
+		_ = store.Put(ctx, brain.Object{ID: id, Kind: "Document", Title: id.String()[:8], NamespaceID: ns, UpdatedAt: now})
+	}
+	_ = g.AddEdge(ctx, a, b, "references", brain.EdgeMeta{Note: "hop1"})
+	_ = g.AddEdge(ctx, b, c, "references", brain.EdgeMeta{Note: "hop2"})
+	eng, err := brain.NewEngine(store, brain.WithGraph(g), brain.WithConfig(brain.EngineConfig{MaxExpandHops: 4}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// One hop: only b.
+	one, err := eng.Expand(ctx, brain.Scope{Namespace: &ns}, brain.ExpandRequest{
+		ObjectID: a, RelationTypes: []string{"references"}, MaxHops: 1,
+	}, brain.NewSearchContext())
+	if err != nil || len(one.Objects) != 1 || one.Objects[0].ID != b {
+		t.Fatalf("1 hop: %+v err=%v", one.Objects, err)
+	}
+	if one.Objects[0].Relation == nil || one.Objects[0].Relation.Depth != 1 {
+		t.Fatalf("depth1: %+v", one.Objects[0].Relation)
+	}
+	// Two hops: b and c.
+	two, err := eng.Expand(ctx, brain.Scope{Namespace: &ns}, brain.ExpandRequest{
+		ObjectID: a, RelationTypes: []string{"references"}, MaxHops: 2,
+	}, brain.NewSearchContext())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[uuid.UUID]int{}
+	for _, o := range two.Objects {
+		if o.Relation != nil {
+			got[o.ID] = o.Relation.Depth
+		}
+	}
+	if got[b] != 1 || got[c] != 2 {
+		t.Fatalf("want b@1 c@2: %+v", got)
+	}
+	// Direction out-only from b: only c.
+	outOnly, err := eng.Expand(ctx, brain.Scope{Namespace: &ns}, brain.ExpandRequest{
+		ObjectID: b, RelationTypes: []string{"references"}, Direction: "out",
+	}, brain.NewSearchContext())
+	if err != nil || len(outOnly.Objects) != 1 || outOnly.Objects[0].ID != c {
+		t.Fatalf("out only: %+v err=%v", outOnly.Objects, err)
+	}
+}
+
 // TestExpand_graphContinuePreservesRelation: large graph expand stores hop meta for continue.
 func TestExpand_graphContinuePreservesRelation(t *testing.T) {
 	ctx := context.Background()

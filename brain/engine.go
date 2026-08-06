@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -13,6 +14,12 @@ import (
 // When nil on the Engine, search runs lexical-only.
 type QueryEmbedder interface {
 	Embed(ctx context.Context, text string) ([]float32, error)
+}
+
+// Reranker optionally reorders/filters hydrated rich objects after search or find_objects.
+// Host-owned product scoring; default nil leaves engine ranking unchanged.
+type Reranker interface {
+	Rerank(ctx context.Context, objects []RichObject) ([]RichObject, error)
 }
 
 // EngineConfig holds engine-owned ranking knobs (not tool arguments).
@@ -28,6 +35,8 @@ type EngineConfig struct {
 	ExpandInlineMax     int
 	SiblingRadius       int
 	GraphNeighborK      int
+	MaxExpandHops       int // max MaxHops on expand (default 4)
+	MaxGraphExpandRPCs  int // cap Neighbors calls per multi-hop expand (default 64)
 	MaxResultSetSize    int
 	FailOnEmbedderError bool
 	FailOnGraphError    bool
@@ -38,17 +47,19 @@ type EngineConfig struct {
 func DefaultEngineConfig() EngineConfig {
 	lam := 0.02
 	return EngineConfig{
-		CandidateK:       40,
-		RRFk:             60,
-		Lambda:           &lam,
-		EvidenceN:        3,
-		DefaultLimit:     10,
-		MaxLimit:         50,
-		ExpandInlineMax:  20,
-		SiblingRadius:    5,
-		GraphNeighborK:   50,
-		MaxResultSetSize: 1000,
-		Now:              func() time.Time { return time.Now().UTC() },
+		CandidateK:         40,
+		RRFk:               60,
+		Lambda:             &lam,
+		EvidenceN:          3,
+		DefaultLimit:       10,
+		MaxLimit:           50,
+		ExpandInlineMax:    20,
+		SiblingRadius:      5,
+		GraphNeighborK:     50,
+		MaxExpandHops:      4,
+		MaxGraphExpandRPCs: 64,
+		MaxResultSetSize:   1000,
+		Now:                func() time.Time { return time.Now().UTC() },
 	}
 }
 
@@ -62,6 +73,8 @@ func (c EngineConfig) withDefaults() EngineConfig {
 	c.ExpandInlineMax = posOr(c.ExpandInlineMax, d.ExpandInlineMax)
 	c.SiblingRadius = posOr(c.SiblingRadius, d.SiblingRadius)
 	c.GraphNeighborK = posOr(c.GraphNeighborK, d.GraphNeighborK)
+	c.MaxExpandHops = posOr(c.MaxExpandHops, d.MaxExpandHops)
+	c.MaxGraphExpandRPCs = posOr(c.MaxGraphExpandRPCs, d.MaxGraphExpandRPCs)
 	c.MaxResultSetSize = posOr(c.MaxResultSetSize, d.MaxResultSetSize)
 	if c.Lambda == nil {
 		c.Lambda = d.Lambda
@@ -106,12 +119,29 @@ func WithGraph(g GraphReader) EngineOption {
 		eng.graph = g
 		eng.graphW, _ = g.(GraphWriter)
 		eng.graphS, _ = g.(GraphObjectSearcher)
+		eng.graphE, _ = g.(GraphEdgeSearcher)
 	}
 }
 
 // WithObserver sets retrieval observability (default no-op).
 func WithObserver(o Observer) EngineOption {
 	return func(eng *Engine) { eng.observer = o }
+}
+
+// WithReranker sets an optional post-hydrate reranker for search and find_objects.
+func WithReranker(r Reranker) EngineOption {
+	return func(eng *Engine) { eng.reranker = r }
+}
+
+// WithExpandRecipes registers host-named expand views at construct time.
+// Each recipe is a named ExpandRequest template (ObjectID filled at call time).
+// Invalid recipes (empty name) are ignored here; use RegisterExpandRecipe for errors.
+func WithExpandRecipes(recipes ...ExpandRecipe) EngineOption {
+	return func(eng *Engine) {
+		for _, r := range recipes {
+			_ = eng.RegisterExpandRecipe(r)
+		}
+	}
 }
 
 // WithKinds registers host-defined object kinds at construct time.
@@ -132,6 +162,10 @@ type Engine struct {
 	graph    GraphReader         // optional expand Neighbors
 	graphW   GraphWriter         // optional dual-write / Link (resolved in WithGraph)
 	graphS   GraphObjectSearcher // optional find_objects (resolved in WithGraph)
+	graphE   GraphEdgeSearcher   // optional edge text search (resolved in WithGraph)
+	reranker Reranker
+	recipeMu sync.RWMutex
+	recipes  map[string]ExpandRecipe // guarded by recipeMu
 	observer Observer
 	cfg      EngineConfig
 	catalog  *KindCatalog // always non-nil; empty ⇒ open mode
@@ -201,28 +235,30 @@ func (e *Engine) Schema(ctx context.Context, kind string) (SchemaResult, error) 
 }
 
 func schemaFromCatalog(cat *KindCatalog, kind string) (SchemaResult, error) {
+	fu := DefaultFilterUsage()
 	if kind != "" {
 		spec, ok := cat.Get(kind)
 		if !ok {
 			return SchemaResult{}, fmt.Errorf("%w: kind %q", ErrNotFound, kind)
 		}
-		return SchemaResult{Kinds: []ObjectKindInfo{KindInfoFromSpec(spec)}}, nil
+		return SchemaResult{Kinds: []ObjectKindInfo{KindInfoFromSpec(spec)}, FilterUsage: fu}, nil
 	}
 	all := cat.All()
 	out := make([]ObjectKindInfo, len(all))
 	for i, spec := range all {
 		out[i] = KindInfoFromSpec(spec)
 	}
-	return SchemaResult{Kinds: out}, nil
+	return SchemaResult{Kinds: out, FilterUsage: fu}, nil
 }
 
 func schemaFromStore(ctx context.Context, store KindReader, kind string) (SchemaResult, error) {
+	fu := DefaultFilterUsage()
 	if kind != "" {
 		k, err := store.GetKind(ctx, kind)
 		if err != nil {
 			return SchemaResult{}, err
 		}
-		return SchemaResult{Kinds: []ObjectKindInfo{KindInfoFrom(k)}}, nil
+		return SchemaResult{Kinds: []ObjectKindInfo{KindInfoFrom(k)}, FilterUsage: fu}, nil
 	}
 	kinds, err := store.ListKinds(ctx)
 	if err != nil {
@@ -232,7 +268,7 @@ func schemaFromStore(ctx context.Context, store KindReader, kind string) (Schema
 	for i, k := range kinds {
 		out[i] = KindInfoFrom(k)
 	}
-	return SchemaResult{Kinds: out}, nil
+	return SchemaResult{Kinds: out, FilterUsage: fu}, nil
 }
 
 // ListChildren returns ordered children for a parent visible under scope.

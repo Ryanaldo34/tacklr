@@ -62,7 +62,7 @@ func (b brainTools) newSchemaTool() *Tool {
 		DisplayName: "Knowledge Schema",
 		Description: `Discover structured filter fields and kind documentation for the knowledge base.
 
-Call with a kind to see filterable fields, types, and operators for that kind. Call with no kind to list registered kinds. Prefer this before inventing property names in filters. When kinds are registered by the host, only those kinds are searchable and property filters require a kind key.`,
+Call with a kind to see filterable_fields (name, type, operators) for that kind. Call with no kind to list registered kinds. filter_usage lists which tools accept those fields: search, find_exact, and find_objects share the same filter keys. Prefer schema() before inventing property names in filters. When kinds are registered, property filters require a kind key (or find_objects.kinds). Core keys: kind, title, created_after, created_before, updated_after, updated_before.`,
 		Category: streaming.ToolCategoryThink,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
@@ -177,6 +177,8 @@ Pass the result_set_id from the previous call. Each new search, find_exact, find
 type expandArgs struct {
 	ObjectID      string   `json:"object_id" desc:"UUID of the object to expand."`
 	RelationTypes []string `json:"relation_types,omitempty" desc:"Optional relation types. Omit for containment (children or parent+siblings). Named types use the graph backend (e.g. references)."`
+	MaxHops       int      `json:"max_hops,omitempty" desc:"Graph hop depth (default 1, capped by host). Use 2+ to walk paths like entity→related→aggregate."`
+	Direction     string   `json:"direction,omitempty" desc:"Graph edge direction: out, in, or both (default both)."`
 	Limit         int      `json:"limit,omitempty" desc:"Page size when results are paginated (default 10, max 50)."`
 }
 
@@ -199,6 +201,8 @@ From a parent: ordered children (containment). From a part: parent and nearby si
 			res, err := b.engine.Expand(ctx, b.sc.Scope(), brain.ExpandRequest{
 				ObjectID:      id,
 				RelationTypes: args.RelationTypes,
+				MaxHops:       args.MaxHops,
+				Direction:     args.Direction,
 				Limit:         args.Limit,
 			}, b.sc)
 			if err != nil {
@@ -252,9 +256,41 @@ type linkArgs struct {
 }
 
 type findObjectsArgs struct {
-	Query string   `json:"query" desc:"Semantic or keyword query for whole knowledge objects (entities)."`
-	Kinds []string `json:"kinds,omitempty" desc:"Optional host kind names to restrict results (e.g. Deal, Fact). Prefer schema() for valid kinds."`
-	Limit int      `json:"limit,omitempty" desc:"Max results for this page (default 10, max 50)."`
+	Query   string         `json:"query" desc:"Semantic or keyword query for whole knowledge objects (entities)."`
+	Kinds   []string       `json:"kinds,omitempty" desc:"Optional host kind names to restrict results (e.g. Deal, Fact). Prefer schema() for valid kinds."`
+	Filters map[string]any `json:"filters,omitempty" desc:"Optional field→value filters (same keys as search). Prefer schema() for filterable_fields. Property filters require kind when kinds are registered (or set kinds here)."`
+	Limit   int            `json:"limit,omitempty" desc:"Max results for this page (default 10, max 50)."`
+}
+
+type findLinksArgs struct {
+	RelationType string `json:"relation_type" desc:"Edge label to search (e.g. about, references). Host must ensure an edge text index for this label on Helix."`
+	Query        string `json:"query" desc:"Text query matched against edge note metadata."`
+	Limit        int    `json:"limit,omitempty" desc:"Max links for this page (default 10, max 50)."`
+}
+
+func (b brainTools) newFindLinksTool() *Tool {
+	return NewTool(ToolConfig{
+		Name:        "find_links",
+		DisplayName: "Find Links",
+		Description: `Find cross-object relationships by text on edge metadata (note), not document bodies.
+
+Use when the ask is about how objects are linked (e.g. notes on an about edge). Returns from/to rich objects plus relation meta. Prefer find_objects to land on entities first; use expand to walk from a known id. relation_type is required.`,
+		Category: streaming.ToolCategorySearch,
+		Access:   ToolReadAccess,
+		Timeout:  30 * time.Second,
+		Handler: func(ctx context.Context, args findLinksArgs, runtime HarnessRuntime) (string, error) {
+			runtime.EmitUpdate("Finding graph links…")
+			res, err := b.engine.FindLinks(ctx, b.sc.Scope(), brain.FindLinksRequest{
+				RelationType: args.RelationType,
+				Query:        args.Query,
+				Limit:        args.Limit,
+			})
+			if err != nil {
+				return "", fmt.Errorf("find_links: %w", err)
+			}
+			return formatBrainJSON(res)
+		},
+	})
 }
 
 func (b brainTools) newFindObjectsTool() *Tool {
@@ -263,16 +299,17 @@ func (b brainTools) newFindObjectsTool() *Tool {
 		DisplayName: "Find Objects",
 		Description: `Find knowledge objects as entities (whole objects of given kinds), not long document ranking.
 
-Use to resolve which tracked object matches an ask, or to find similar saved objects (facts, discoveries, memories, deals as host kinds). Rewrite the user ask into a good semantic query (e.g. risk themes, blockers). Prefer expand first when the active entity id is already known. For bulk document/note evidence or property filters on content, use search instead. After an id, use expand for relationships and read only for bodies you need. Use continue when has_more.`,
+Use to resolve which tracked object matches an ask, or to find similar saved objects (facts, discoveries, memories, deals as host kinds). Rewrite the user ask into a good semantic query. Optional filters use the same filterable_fields as search — call schema() first for valid keys/types. Prefer expand first when the active entity id is already known. For bulk document/note evidence, use search instead. After an id, use expand for relationships. Use continue when has_more.`,
 		Category: streaming.ToolCategorySearch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
 		Handler: func(ctx context.Context, args findObjectsArgs, runtime HarnessRuntime) (string, error) {
 			runtime.EmitUpdate("Finding knowledge objects…")
 			page, err := b.engine.FindObjects(ctx, b.sc.Scope(), brain.FindObjectsRequest{
-				Query: args.Query,
-				Kinds: args.Kinds,
-				Limit: args.Limit,
+				Query:   args.Query,
+				Kinds:   args.Kinds,
+				Filters: brain.Filters(args.Filters),
+				Limit:   args.Limit,
 			}, b.sc)
 			if err != nil {
 				return "", fmt.Errorf("find_objects: %w", err)
@@ -442,7 +479,7 @@ func parseOptionalUUIDList(raw []string, field string) ([]uuid.UUID, error) {
 
 // newBrainTools builds knowledge tools. Caller must pass a non-nil engine and SearchContext.
 // save_* tools are registered only for non-empty WriteKinds fields; link only with GraphWriter;
-// find_objects only when GraphObjectSearcher is available.
+// find_objects only when GraphObjectSearcher is available; find_links when GraphEdgeSearcher is available.
 func newBrainTools(engine *brain.Engine, sc *brain.SearchContext, kinds brain.WriteKinds) []*Tool {
 	b := brainTools{engine: engine, sc: sc}
 	tools := []*Tool{
@@ -455,6 +492,9 @@ func newBrainTools(engine *brain.Engine, sc *brain.SearchContext, kinds brain.Wr
 	}
 	if engine.HasObjectSearch() {
 		tools = append(tools, b.newFindObjectsTool())
+	}
+	if engine.HasEdgeSearch() {
+		tools = append(tools, b.newFindLinksTool())
 	}
 	for _, s := range []struct {
 		name, display, kind, role string

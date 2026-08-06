@@ -3,6 +3,7 @@ package brain
 import (
 	"context"
 	"fmt"
+	"maps"
 	"strings"
 
 	"github.com/google/uuid"
@@ -10,13 +11,15 @@ import (
 
 // FindObjectsRequest is the engine input for entity/object find (graph node search).
 type FindObjectsRequest struct {
-	Query string
-	Kinds []string // optional host kind names; empty = all kinds
-	Limit int
+	Query   string
+	Kinds   []string // optional host kind names; empty = all kinds
+	Filters Filters  // same property keys as search; see schema filterable_fields
+	Limit   int
 }
 
 // FindObjects ranks knowledge objects as entities via GraphObjectSearcher
-// (Helix text/vector or MemoryGraph), then hydrates under scope from the store.
+// (Helix text/vector or MemoryGraph), then hydrates under Scope from the store.
+// Filters use the same catalog rules as search/find_exact (schema filterable_fields).
 // Not a substitute for corpus Search: no part promotion evidence path.
 func (e *Engine) FindObjects(ctx context.Context, scope Scope, req FindObjectsRequest, results ResultSetStore) (SearchPage, error) {
 	ctx, span := e.observer.StartOp(ctx, OpFindObjects)
@@ -35,6 +38,10 @@ func (e *Engine) findObjectsInner(ctx context.Context, scope Scope, req FindObje
 	query := strings.TrimSpace(req.Query)
 	if query == "" {
 		return SearchPage{}, DegradeNone, ErrQueryRequired
+	}
+	filters, err := e.prepareFindObjectFilters(req)
+	if err != nil {
+		return SearchPage{}, DegradeNone, err
 	}
 	limit := e.normalizeLimit(req.Limit)
 	k := max(limit*3, e.cfg.CandidateK)
@@ -81,22 +88,32 @@ func (e *Engine) findObjectsInner(ctx context.Context, scope Scope, req FindObje
 		ids[i] = s.ID
 		scoreByID[s.ID] = s.Score
 	}
-	objs, err := e.hydrateIDs(ctx, scope, ids)
+	// Soft hydrate: load full objects, apply catalog filters on Postgres truth.
+	objs, err := e.store.GetMany(ctx, scope, ids)
 	if err != nil {
-		return SearchPage{}, degrade, err
+		return SearchPage{}, degrade, fmt.Errorf("brain: hydrate objects: %w", err)
+	}
+	byID := make(map[uuid.UUID]Object, len(objs))
+	for _, o := range objs {
+		byID[o.ID] = o
 	}
 	kinds := kindSet(req.Kinds)
-	rich := make([]RichObject, 0, len(objs))
-	for _, r := range objs {
-		if r.ParentID != nil {
+	rich := make([]RichObject, 0, len(ids))
+	for _, id := range ids {
+		o, ok := byID[id]
+		if !ok || o.ParentID != nil {
 			continue
 		}
 		if kinds != nil {
-			if _, want := kinds[r.Kind]; !want {
+			if _, want := kinds[o.Kind]; !want {
 				continue
 			}
 		}
-		if sc, ok := scoreByID[r.ID]; ok {
+		if len(filters) > 0 && !objectMatchesFilters(o, filters) {
+			continue
+		}
+		r := RichFromObject(o, false)
+		if sc, ok := scoreByID[id]; ok {
 			sc := sc
 			r.Score = &sc
 		}
@@ -105,7 +122,10 @@ func (e *Engine) findObjectsInner(ctx context.Context, scope Scope, req FindObje
 	if maxN := e.cfg.MaxResultSetSize; maxN > 0 && len(rich) > maxN {
 		rich = rich[:maxN]
 	}
-	// Single ID list derived from filtered rich (no parallel keptIDs slice during filter).
+	rich, err = e.applyRerank(ctx, rich)
+	if err != nil {
+		return SearchPage{}, degrade, err
+	}
 	keptIDs := make([]uuid.UUID, len(rich))
 	for i := range rich {
 		keptIDs[i] = rich[i].ID
@@ -125,6 +145,55 @@ func (e *Engine) findObjectsInner(ctx context.Context, scope Scope, req FindObje
 		HasMore:     end < len(keptIDs),
 		Objects:     rich[:end],
 	}, degrade, nil
+}
+
+func (e *Engine) applyRerank(ctx context.Context, objects []RichObject) ([]RichObject, error) {
+	if e.reranker == nil || len(objects) == 0 {
+		return objects, nil
+	}
+	out, err := e.reranker.Rerank(ctx, objects)
+	if err != nil {
+		return nil, fmt.Errorf("brain: rerank: %w", err)
+	}
+	if out == nil {
+		return objects, nil
+	}
+	return out, nil
+}
+
+// prepareFindObjectFilters merges request kinds into filters and validates against catalog.
+func (e *Engine) prepareFindObjectFilters(req FindObjectsRequest) (Filters, error) {
+	f := Filters(nil)
+	if len(req.Filters) > 0 {
+		f = maps.Clone(req.Filters)
+	}
+	if len(req.Kinds) > 0 {
+		if f == nil {
+			f = Filters{}
+		}
+		// Explicit kinds win over a conflicting kind key in Filters.
+		list := make([]any, 0, len(req.Kinds))
+		for _, k := range req.Kinds {
+			if k = strings.TrimSpace(k); k != "" {
+				list = append(list, k)
+			}
+		}
+		if len(list) == 1 {
+			f[filterKind] = list[0]
+		} else if len(list) > 1 {
+			f[filterKind] = list
+		}
+	}
+	if len(f) == 0 {
+		return nil, nil
+	}
+	if err := ValidateFiltersAgainst(f, e.catalog); err != nil {
+		return nil, err
+	}
+	if !e.catalog.Empty() {
+		e.catalog.Freeze()
+	}
+	return f, nil
 }
 
 func kindSet(kinds []string) map[string]struct{} {
