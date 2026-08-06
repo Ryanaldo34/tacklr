@@ -72,6 +72,13 @@ func TestTemporal_prefersFresherWhenSimilar(t *testing.T) {
 	if parts3[0].Score != 2 {
 		t.Fatalf("future updated_at: %v", parts3[0].Score)
 	}
+
+	// Helix-style hits with no UpdatedAt must keep native rank scores.
+	parts4 := []ScoredID{{ID: uuid.New(), Score: 0.9}}
+	applyTemporal(parts4, 0.02, now)
+	if parts4[0].Score != 0.9 {
+		t.Fatalf("zero UpdatedAt must not decay: %v", parts4[0].Score)
+	}
 }
 
 func TestEngineConfig_explicitZeroLambdaPreserved(t *testing.T) {

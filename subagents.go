@@ -307,13 +307,14 @@ func (a *AgentHarness) workerOptsFromSpec(spec *SubAgent) AgentOptions {
 			MaxWindowSize: a.maxWindowSize,
 			SystemPrompt:  spec.Instructions,
 		},
-		Model:      spec.Model,
-		Tools:      slices.Clone(spec.Tools),
-		MCPConfigs: slices.Clone(a.mcpConfigs),
-		Store:      a.store,
-		SubAgents:  spec.SubAgents,
-		ExaAPIKey:  a.exaAPIKey,
-		Brain:      a.brain,
+		Model:           spec.Model,
+		Tools:           slices.Clone(spec.Tools),
+		MCPConfigs:      slices.Clone(a.mcpConfigs),
+		Store:           a.store,
+		SubAgents:       spec.SubAgents,
+		ExaAPIKey:       a.exaAPIKey,
+		Brain:           a.brain,
+		BrainWriteKinds: a.brainWriteKinds,
 	}
 }
 

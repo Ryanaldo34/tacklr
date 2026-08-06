@@ -13,6 +13,157 @@ import (
 	"github.com/ryanaldo34/tacklr/stores"
 )
 
+func TestBrainTools_saveDiscoveryAndLink(t *testing.T) {
+	ctx := context.Background()
+	store := brain.NewMemoryStore()
+	g := brain.NewMemoryGraph()
+	eng, err := brain.NewEngine(store, brain.WithGraph(g), brain.WithKinds(
+		brain.KindSpec{Kind: "Discovery", IsParent: true},
+		brain.KindSpec{Kind: "Fact", IsParent: true},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ns := uuid.New()
+	h := NewAgent(ctx, AgentOptions{
+		Config: Config{MaxWindowSize: 1024},
+		Model:  &mockStrategy{},
+		Brain:  eng,
+		BrainWriteKinds: brain.WriteKinds{
+			Discovery: "Discovery",
+			Fact:      "Fact",
+			// Memory empty → tool not registered
+		},
+		SearchNamespace: &ns,
+	})
+
+	saveDisc := h.findTool("save_discovery", "")
+	saveFact := h.findTool("save_fact", "")
+	saveMem := h.findTool("save_memory", "")
+	linkTool := h.findTool("link", "")
+	if saveDisc == nil || saveFact == nil || linkTool == nil {
+		t.Fatal("save_discovery, save_fact, link required")
+	}
+	if saveMem != nil {
+		t.Fatal("save_memory must be omitted when Memory kind is empty")
+	}
+
+	// Without a GraphWriter the link tool is not registered.
+	engNoGraph, err := brain.NewEngine(store, brain.WithKinds(
+		brain.KindSpec{Kind: "Discovery", IsParent: true},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hNoGraph := NewAgent(ctx, AgentOptions{
+		Config: Config{MaxWindowSize: 1024}, Model: &mockStrategy{},
+		Brain: engNoGraph, BrainWriteKinds: brain.WriteKinds{Discovery: "Discovery"},
+		SearchNamespace: &ns,
+	})
+	if hNoGraph.findTool("link", "") != nil {
+		t.Fatal("link must be omitted without GraphWriter")
+	}
+	if hNoGraph.findTool("save_discovery", "") == nil {
+		t.Fatal("save_discovery still required")
+	}
+
+	// find_objects is registered when GraphObjectSearcher is available (MemoryGraph).
+	findObj := h.findTool("find_objects", "")
+	if findObj == nil {
+		t.Fatal("find_objects required with MemoryGraph")
+	}
+	if hNoGraph.findTool("find_objects", "") != nil {
+		t.Fatal("find_objects must be omitted without object searcher")
+	}
+
+	out, err := saveDisc.invoke(ctx, `{"title":"finding","content":"learned X"}`, h.runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var a brain.RichObject
+	if err := json.Unmarshal([]byte(out.output), &a); err != nil {
+		t.Fatal(err)
+	}
+	if a.Kind != "Discovery" || a.Title != "finding" || a.ID == uuid.Nil {
+		t.Fatalf("discovery: %+v", a)
+	}
+
+	fout, err := findObj.invoke(ctx, `{"query":"finding","kinds":["Discovery"],"limit":5}`, h.runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(fout.output, a.ID.String()) {
+		t.Fatalf("find_objects should return saved discovery: %s", fout.output)
+	}
+
+	out2, err := saveFact.invoke(ctx, `{"title":"fact-a","content":"true claim"}`, h.runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b brain.RichObject
+	if err := json.Unmarshal([]byte(out2.output), &b); err != nil {
+		t.Fatal(err)
+	}
+
+	// Update discovery
+	out3, err := saveDisc.invoke(ctx, `{"object_id":"`+a.ID.String()+`","title":"finding-v2","content":"updated"}`, h.runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var a2 brain.RichObject
+	if err := json.Unmarshal([]byte(out3.output), &a2); err != nil {
+		t.Fatal(err)
+	}
+	if a2.ID != a.ID || a2.Title != "finding-v2" {
+		t.Fatalf("update: %+v", a2)
+	}
+
+	// Invalid evidence_id is a distinct link validation path.
+	if _, err := linkTool.invoke(ctx, `{
+		"from_id":"`+a.ID.String()+`",
+		"to_id":"`+b.ID.String()+`",
+		"relation_type":"references",
+		"evidence_id":"not-a-uuid"
+	}`, h.runtime); err == nil || !strings.Contains(err.Error(), "evidence_id") {
+		t.Fatalf("invalid evidence_id: %v", err)
+	}
+	lout, err := linkTool.invoke(ctx, `{
+		"from_id":"`+a.ID.String()+`",
+		"to_id":"`+b.ID.String()+`",
+		"relation_type":"references",
+		"note":"supports finding",
+		"status":"active",
+		"role":"source",
+		"confidence":0.8,
+		"evidence_id":"`+a.ID.String()+`"
+	}`, h.runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(lout.output, "supports finding") || !strings.Contains(lout.output, "linked") {
+		t.Fatalf("link output: %s", lout.output)
+	}
+	if !strings.Contains(lout.output, "source") || !strings.Contains(lout.output, a.ID.String()) {
+		t.Fatalf("link meta fields: %s", lout.output)
+	}
+	expandTool := h.findTool("expand", "")
+	if expandTool == nil {
+		t.Fatal("expand required")
+	}
+	eout, err := expandTool.invoke(ctx, `{"object_id":"`+a.ID.String()+`","relation_types":["references"]}`, h.runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(eout.output, b.ID.String()) || !strings.Contains(eout.output, "supports finding") {
+		t.Fatalf("expand should return neighbor with note: %s", eout.output)
+	}
+	readTool := h.findTool("read", "")
+	rout, err := readTool.invoke(ctx, `{"object_id":"`+a.ID.String()+`"}`, h.runtime)
+	if err != nil || !strings.Contains(rout.output, "updated") {
+		t.Fatalf("read after save: %v %v", err, rout)
+	}
+}
+
 func TestBrainTools_hostNamespaceScopedRead(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
@@ -20,14 +171,14 @@ func TestBrainTools_hostNamespaceScopedRead(t *testing.T) {
 	other := uuid.New()
 	docID := uuid.New()
 
-	if err := store.Put(brain.Object{
+	if err := store.Put(context.Background(), brain.Object{
 		ID: docID, Kind: "Document", Title: "Deal memo",
 		Summary: "Q3", Content: "full body", ContentType: "text/plain",
 		NamespaceID: ns, Properties: map[string]any{"stage": "negotiation"},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.PutKind(brain.ObjectKind{
+	if err := store.PutKind(ctx, brain.ObjectKind{
 		Kind: "Document", Description: "docs", IsParent: true,
 		FilterableFields: json.RawMessage(`[]`),
 	}); err != nil {
@@ -113,12 +264,12 @@ func TestBrainTools_searchFindExactContinueAndCheckpoint(t *testing.T) {
 		}
 		part := uuid.New()
 		pos := 1
-		if err := store.Put(brain.Object{
+		if err := store.Put(context.Background(), brain.Object{
 			ID: parent, Kind: "Document", Title: "Doc", NamespaceID: ns, UpdatedAt: now,
 		}); err != nil {
 			t.Fatal(err)
 		}
-		if err := store.Put(brain.Object{
+		if err := store.Put(context.Background(), brain.Object{
 			ID: part, Kind: "Chunk", Title: "knowledge-chunk", Content: "shared knowledge base retrieval material item",
 			ParentID: &parent, Position: &pos, NamespaceID: ns, UpdatedAt: now,
 		}); err != nil {
@@ -206,8 +357,8 @@ func TestBrainTools_expandChildren(t *testing.T) {
 	parent := uuid.New()
 	child := uuid.New()
 	pos := 1
-	_ = store.Put(brain.Object{ID: parent, Kind: "Document", Title: "P", NamespaceID: ns, UpdatedAt: now})
-	_ = store.Put(brain.Object{
+	_ = store.Put(context.Background(), brain.Object{ID: parent, Kind: "Document", Title: "P", NamespaceID: ns, UpdatedAt: now})
+	_ = store.Put(context.Background(), brain.Object{
 		ID: child, Kind: "Chunk", Title: "C", Content: "secret",
 		ParentID: &parent, Position: &pos, NamespaceID: ns, UpdatedAt: now,
 	})
@@ -244,7 +395,7 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 	store := brain.NewMemoryStore()
 	ns := uuid.New()
 	docID := uuid.New()
-	if err := store.Put(brain.Object{
+	if err := store.Put(context.Background(), brain.Object{
 		ID: docID, Kind: "Document", Title: "Shared", Content: "worker-visible",
 		NamespaceID: ns,
 	}); err != nil {
@@ -254,8 +405,8 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 	parent := uuid.New()
 	part := uuid.New()
 	pos := 1
-	_ = store.Put(brain.Object{ID: parent, Kind: "Document", Title: "P", NamespaceID: ns})
-	_ = store.Put(brain.Object{
+	_ = store.Put(context.Background(), brain.Object{ID: parent, Kind: "Document", Title: "P", NamespaceID: ns})
+	_ = store.Put(context.Background(), brain.Object{
 		ID: part, Kind: "Chunk", Content: "worker search isolation token",
 		ParentID: &parent, Position: &pos, NamespaceID: ns,
 	})

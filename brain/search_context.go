@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
+	"slices"
 	"sync"
 	"time"
 
@@ -68,12 +70,9 @@ func (c *SearchContext) Namespace() (uuid.UUID, bool) {
 // Put implements ResultSetStore: stores set as the sole active ResultSet.
 func (c *SearchContext) Put(_ context.Context, set ResultSet) error {
 	if set.ID == uuid.Nil {
-		return fmt.Errorf("brain: result set id is required")
+		return ErrResultSetIDRequired
 	}
-	cp := set
-	if set.ObjectIDs != nil {
-		cp.ObjectIDs = append([]uuid.UUID(nil), set.ObjectIDs...)
-	}
+	cp := cloneResultSet(set)
 	if cp.CreatedAt.IsZero() {
 		cp.CreatedAt = time.Now().UTC()
 	}
@@ -90,11 +89,16 @@ func (c *SearchContext) Get(_ context.Context, id uuid.UUID) (ResultSet, error) 
 	if c.current == nil || c.current.ID != id {
 		return ResultSet{}, fmt.Errorf("%w: %s", ErrResultSetNotFound, id)
 	}
-	out := *c.current
-	if c.current.ObjectIDs != nil {
-		out.ObjectIDs = append([]uuid.UUID(nil), c.current.ObjectIDs...)
+	return cloneResultSet(*c.current), nil
+}
+
+func cloneResultSet(set ResultSet) ResultSet {
+	cp := set
+	cp.ObjectIDs = slices.Clone(set.ObjectIDs)
+	if len(set.Relations) > 0 {
+		cp.Relations = maps.Clone(set.Relations)
 	}
-	return out, nil
+	return cp
 }
 
 // Export serializes namespace + active ResultSet for session checkpoints.
@@ -110,10 +114,7 @@ func (c *SearchContext) Export() ([]byte, error) {
 		env.Namespace = &cp
 	}
 	if c.current != nil {
-		rs := *c.current
-		if c.current.ObjectIDs != nil {
-			rs.ObjectIDs = append([]uuid.UUID(nil), c.current.ObjectIDs...)
-		}
+		rs := cloneResultSet(*c.current)
 		env.ResultSet = &rs
 	}
 	b, err := json.Marshal(env)
@@ -133,15 +134,12 @@ func (c *SearchContext) Restore(raw []byte) error {
 		c.current = nil
 		return nil
 	}
-	var probe map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &probe); err != nil {
+	// Envelope form is preferred. Fall back to bare ResultSet for older checkpoints.
+	var env searchContextExport
+	if err := json.Unmarshal(raw, &env); err != nil {
 		return fmt.Errorf("brain: restore search context: %w", err)
 	}
-	if _, hasRS := probe["result_set"]; hasRS || probe["namespace"] != nil {
-		var env searchContextExport
-		if err := json.Unmarshal(raw, &env); err != nil {
-			return fmt.Errorf("brain: restore search context: %w", err)
-		}
+	if env.Namespace != nil || env.ResultSet != nil {
 		c.namespace = env.Namespace
 		c.current = env.ResultSet
 		if c.current != nil && c.current.ID == uuid.Nil {
@@ -149,7 +147,6 @@ func (c *SearchContext) Restore(raw []byte) error {
 		}
 		return nil
 	}
-	// Legacy: bare ResultSet.
 	var set ResultSet
 	if err := json.Unmarshal(raw, &set); err != nil {
 		return fmt.Errorf("brain: restore search context: %w", err)

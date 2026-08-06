@@ -1,6 +1,7 @@
 package brain
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,7 +17,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// MemoryStore is an in-process Store for tests and fixtures (Put is not a product write API).
+// MemoryStore is an in-process Store (tests, fixtures, and ObjectWriter for Engine.Put).
 type MemoryStore struct {
 	mu      sync.RWMutex
 	objects map[uuid.UUID]Object
@@ -31,17 +32,13 @@ func NewMemoryStore() *MemoryStore {
 	}
 }
 
-// Put upserts an object. Soft-deleted rows may be stored; Get hides them.
-func (s *MemoryStore) Put(obj Object) error {
-	if obj.ID == uuid.Nil {
-		return fmt.Errorf("brain: object id is required")
+// Put implements ObjectWriter. Soft-deleted rows may be stored; Get hides them.
+// Clones maps/slices so callers cannot mutate the store through shared references.
+func (s *MemoryStore) Put(_ context.Context, obj Object) error {
+	if err := requireObjectIdentity(obj); err != nil {
+		return err
 	}
-	if obj.Kind == "" {
-		return fmt.Errorf("brain: object kind is required")
-	}
-	if obj.NamespaceID == uuid.Nil {
-		return fmt.Errorf("brain: object namespace_id is required")
-	}
+	obj = cloneObject(obj)
 	if obj.Properties == nil {
 		obj.Properties = map[string]any{}
 	}
@@ -53,13 +50,34 @@ func (s *MemoryStore) Put(obj Object) error {
 		obj.UpdatedAt = now
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.objects[obj.ID] = obj
+	s.mu.Unlock()
 	return nil
 }
 
-// PutKind upserts a kind registry row.
-func (s *MemoryStore) PutKind(k ObjectKind) error {
+// SoftDelete implements ObjectWriter.
+func (s *MemoryStore) SoftDelete(_ context.Context, scope Scope, id uuid.UUID) error {
+	if id == uuid.Nil {
+		return fmt.Errorf("brain: object id is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	obj, ok := s.objects[id]
+	if !ok || obj.DeletedAt != nil {
+		return fmt.Errorf("%w: %s", ErrNotFound, id)
+	}
+	if scope.Namespace != nil && obj.NamespaceID != *scope.Namespace {
+		return fmt.Errorf("%w: %s", ErrNotFound, id)
+	}
+	now := time.Now().UTC()
+	obj.DeletedAt = &now
+	obj.UpdatedAt = now
+	s.objects[id] = obj
+	return nil
+}
+
+// PutKind implements KindWriter.
+func (s *MemoryStore) PutKind(_ context.Context, k ObjectKind) error {
 	if k.Kind == "" {
 		return fmt.Errorf("brain: kind is required")
 	}
@@ -126,28 +144,19 @@ func (s *MemoryStore) ListChildren(_ context.Context, scope Scope, parentID uuid
 		out = append(out, cloneObject(obj))
 	}
 	slices.SortFunc(out, func(a, b Object) int {
-		pa, pb := 0, 0
-		if a.Position != nil {
-			pa = *a.Position
+		if c := cmp.Compare(positionOf(a), positionOf(b)); c != 0 {
+			return c
 		}
-		if b.Position != nil {
-			pb = *b.Position
-		}
-		if pa < pb {
-			return -1
-		}
-		if pa > pb {
-			return 1
-		}
-		if a.ID.String() < b.ID.String() {
-			return -1
-		}
-		if a.ID.String() > b.ID.String() {
-			return 1
-		}
-		return 0
+		return cmpUUID(a.ID, b.ID)
 	})
 	return out, nil
+}
+
+func positionOf(o Object) int {
+	if o.Position == nil {
+		return 0
+	}
+	return *o.Position
 }
 
 // GetKind implements KindReader.
@@ -170,13 +179,7 @@ func (s *MemoryStore) ListKinds(_ context.Context) ([]ObjectKind, error) {
 		out = append(out, k)
 	}
 	slices.SortFunc(out, func(a, b ObjectKind) int {
-		if a.Kind < b.Kind {
-			return -1
-		}
-		if a.Kind > b.Kind {
-			return 1
-		}
-		return 0
+		return strings.Compare(a.Kind, b.Kind)
 	})
 	return out, nil
 }
@@ -190,51 +193,45 @@ func (s *MemoryStore) SearchLexical(_ context.Context, scope Scope, query string
 	if len(qTokens) == 0 || k <= 0 {
 		return nil, nil
 	}
-	parts := s.candidateParts(scope, filters)
-	df := map[string]int{}
-	docs := make([]struct {
+	parts, err := s.candidateParts(scope, filters)
+	if err != nil {
+		return nil, err
+	}
+	type doc struct {
 		obj    Object
 		tokens map[string]int
-	}, 0, len(parts))
+		len    int
+	}
+	df := make(map[string]int)
+	docs := make([]doc, 0, len(parts))
 	for _, obj := range parts {
 		toks := tokenize(searchText(obj))
-		tf := map[string]int{}
+		if len(toks) == 0 {
+			continue
+		}
+		tf := make(map[string]int, len(toks))
 		for _, t := range toks {
 			tf[t]++
 		}
-		seen := map[string]struct{}{}
 		for t := range tf {
-			if _, ok := seen[t]; !ok {
-				df[t]++
-				seen[t] = struct{}{}
-			}
+			df[t]++
 		}
-		docs = append(docs, struct {
-			obj    Object
-			tokens map[string]int
-		}{obj: obj, tokens: tf})
+		docs = append(docs, doc{obj: obj, tokens: tf, len: len(toks)})
 	}
 	n := float64(len(docs))
 	if n == 0 {
 		return nil, nil
 	}
-	var scored []ScoredID
+	scored := make([]ScoredID, 0, len(docs))
 	for _, d := range docs {
 		var score float64
-		dl := 0
-		for _, c := range d.tokens {
-			dl += c
-		}
-		if dl == 0 {
-			continue
-		}
 		for _, qt := range qTokens {
 			tf := float64(d.tokens[qt])
 			if tf == 0 {
 				continue
 			}
 			idf := math.Log(1 + n/float64(1+df[qt]))
-			score += (tf / float64(dl)) * idf
+			score += (tf / float64(d.len)) * idf
 		}
 		if score <= 0 {
 			continue
@@ -251,8 +248,12 @@ func (s *MemoryStore) SearchVector(_ context.Context, scope Scope, embedding []f
 	if len(embedding) == 0 || k <= 0 {
 		return nil, nil
 	}
-	var scored []ScoredID
-	for _, obj := range s.candidateParts(scope, filters) {
+	parts, err := s.candidateParts(scope, filters)
+	if err != nil {
+		return nil, err
+	}
+	scored := make([]ScoredID, 0, len(parts))
+	for _, obj := range parts {
 		if len(obj.Embedding) != len(embedding) {
 			continue
 		}
@@ -273,9 +274,13 @@ func (s *MemoryStore) SearchTrigram(_ context.Context, scope Scope, query string
 	if q == "" || k <= 0 {
 		return nil, nil
 	}
+	parts, err := s.candidateParts(scope, filters)
+	if err != nil {
+		return nil, err
+	}
 	qTri := trigrams(q)
-	var scored []ScoredID
-	for _, obj := range s.candidateParts(scope, filters) {
+	scored := make([]ScoredID, 0, len(parts))
+	for _, obj := range parts {
 		text := strings.ToLower(searchText(obj))
 		if text == "" {
 			continue
@@ -294,8 +299,13 @@ func (s *MemoryStore) SearchTrigram(_ context.Context, scope Scope, query string
 	return topKScored(scored, k), nil
 }
 
-func (s *MemoryStore) candidateParts(scope Scope, filters Filters) []Object {
-	var out []Object
+// candidateParts returns live store values under the caller's lock; do not retain across unlock.
+func (s *MemoryStore) candidateParts(scope Scope, filters Filters) ([]Object, error) {
+	plan, err := compileFilters(filters)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Object, 0)
 	for _, obj := range s.objects {
 		if obj.DeletedAt != nil || obj.ParentID == nil {
 			continue
@@ -303,12 +313,12 @@ func (s *MemoryStore) candidateParts(scope Scope, filters Filters) []Object {
 		if scope.Namespace != nil && obj.NamespaceID != *scope.Namespace {
 			continue
 		}
-		if !objectMatchesFilters(obj, filters) {
+		if !plan.match(obj) {
 			continue
 		}
 		out = append(out, obj)
 	}
-	return out
+	return out, nil
 }
 
 func scoredFromObject(obj Object, score float64) ScoredID {
@@ -336,25 +346,9 @@ func topKScored(in []ScoredID, k int) []ScoredID {
 }
 
 func tokenize(s string) []string {
-	s = strings.ToLower(s)
-	var b strings.Builder
-	var out []string
-	flush := func() {
-		if b.Len() == 0 {
-			return
-		}
-		out = append(out, b.String())
-		b.Reset()
-	}
-	for _, r := range s {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			b.WriteRune(r)
-			continue
-		}
-		flush()
-	}
-	flush()
-	return out
+	return strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
 }
 
 func cosine(a, b []float32) float32 {

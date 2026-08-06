@@ -12,6 +12,20 @@ import (
 	"github.com/ryanaldo34/tacklr/brain"
 )
 
+// TestExpand_cancelledContextFailsClosed before store work.
+func TestExpand_cancelledContextFailsClosed(t *testing.T) {
+	eng, err := brain.NewEngine(brain.NewMemoryStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = eng.Expand(ctx, brain.Scope{}, brain.ExpandRequest{ObjectID: uuid.New()}, brain.NewSearchContext())
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("got %v", err)
+	}
+}
+
 func TestExpand_parentChildrenOrdered(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
@@ -20,9 +34,9 @@ func TestExpand_parentChildrenOrdered(t *testing.T) {
 	parent := uuid.New()
 	c1, c2 := uuid.New(), uuid.New()
 	pos1, pos2 := 1, 2
-	_ = store.Put(brain.Object{ID: parent, Kind: "Document", Title: "Doc", NamespaceID: ns, UpdatedAt: now})
-	_ = store.Put(brain.Object{ID: c2, Kind: "Chunk", Title: "second", Content: "body2", ParentID: &parent, Position: &pos2, NamespaceID: ns, UpdatedAt: now})
-	_ = store.Put(brain.Object{ID: c1, Kind: "Chunk", Title: "first", Content: "body1", ParentID: &parent, Position: &pos1, NamespaceID: ns, UpdatedAt: now})
+	_ = store.Put(context.Background(), brain.Object{ID: parent, Kind: "Document", Title: "Doc", NamespaceID: ns, UpdatedAt: now})
+	_ = store.Put(context.Background(), brain.Object{ID: c2, Kind: "Chunk", Title: "second", Content: "body2", ParentID: &parent, Position: &pos2, NamespaceID: ns, UpdatedAt: now})
+	_ = store.Put(context.Background(), brain.Object{ID: c1, Kind: "Chunk", Title: "first", Content: "body1", ParentID: &parent, Position: &pos1, NamespaceID: ns, UpdatedAt: now})
 
 	eng, err := brain.NewEngine(store)
 	if err != nil {
@@ -52,13 +66,13 @@ func TestExpand_partNeighborhoodWindow(t *testing.T) {
 	ns := uuid.New()
 	now := time.Now().UTC()
 	parent := uuid.New()
-	_ = store.Put(brain.Object{ID: parent, Kind: "Document", Title: "Doc", NamespaceID: ns, UpdatedAt: now})
+	_ = store.Put(context.Background(), brain.Object{ID: parent, Kind: "Document", Title: "Doc", NamespaceID: ns, UpdatedAt: now})
 	var parts []uuid.UUID
 	for i := 1; i <= 7; i++ {
 		id := uuid.New()
 		parts = append(parts, id)
 		pos := i
-		_ = store.Put(brain.Object{
+		_ = store.Put(context.Background(), brain.Object{
 			ID: id, Kind: "Chunk", Title: "p", Content: "c",
 			ParentID: &parent, Position: &pos, NamespaceID: ns, UpdatedAt: now,
 		})
@@ -95,11 +109,11 @@ func TestExpand_highCardinalityResultSetAndContinue(t *testing.T) {
 	ns := uuid.New()
 	now := time.Now().UTC()
 	parent := uuid.New()
-	_ = store.Put(brain.Object{ID: parent, Kind: "Document", NamespaceID: ns, UpdatedAt: now})
+	_ = store.Put(context.Background(), brain.Object{ID: parent, Kind: "Document", NamespaceID: ns, UpdatedAt: now})
 	for i := 1; i <= 30; i++ {
 		id := uuid.New()
 		pos := i
-		_ = store.Put(brain.Object{
+		_ = store.Put(context.Background(), brain.Object{
 			ID: id, Kind: "Chunk", Content: "c", ParentID: &parent, Position: &pos,
 			NamespaceID: ns, UpdatedAt: now,
 		})
@@ -135,6 +149,88 @@ func TestExpand_highCardinalityResultSetAndContinue(t *testing.T) {
 	}
 }
 
+// TestExpand_directionFiltersEdges: Direction=out ignores inbound edges (multi-hop depths covered by eval golden).
+func TestExpand_directionFiltersEdges(t *testing.T) {
+	ctx := context.Background()
+	store := brain.NewMemoryStore()
+	g := brain.NewMemoryGraph()
+	ns := uuid.New()
+	now := time.Now().UTC()
+	a, b, c := uuid.New(), uuid.New(), uuid.New()
+	for _, id := range []uuid.UUID{a, b, c} {
+		_ = store.Put(ctx, brain.Object{ID: id, Kind: "Document", Title: id.String()[:8], NamespaceID: ns, UpdatedAt: now})
+	}
+	_ = g.AddEdge(ctx, a, b, "references", brain.EdgeMeta{})
+	_ = g.AddEdge(ctx, b, c, "references", brain.EdgeMeta{})
+	eng, err := brain.NewEngine(store, brain.WithGraph(g))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// From b: inbound a, outbound c. out → only c.
+	outOnly, err := eng.Expand(ctx, brain.Scope{Namespace: &ns}, brain.ExpandRequest{
+		ObjectID: b, RelationTypes: []string{"references"}, Direction: "out",
+	}, brain.NewSearchContext())
+	if err != nil || len(outOnly.Objects) != 1 || outOnly.Objects[0].ID != c {
+		t.Fatalf("out only: %+v err=%v", outOnly.Objects, err)
+	}
+	inOnly, err := eng.Expand(ctx, brain.Scope{Namespace: &ns}, brain.ExpandRequest{
+		ObjectID: b, RelationTypes: []string{"references"}, Direction: "in",
+	}, brain.NewSearchContext())
+	if err != nil || len(inOnly.Objects) != 1 || inOnly.Objects[0].ID != a {
+		t.Fatalf("in only: %+v err=%v", inOnly.Objects, err)
+	}
+}
+
+// TestExpand_graphContinuePreservesRelation: large graph expand stores hop meta for continue.
+func TestExpand_graphContinuePreservesRelation(t *testing.T) {
+	ctx := context.Background()
+	store := brain.NewMemoryStore()
+	g := brain.NewMemoryGraph()
+	ns := uuid.New()
+	now := time.Now().UTC()
+	root := uuid.New()
+	_ = store.Put(ctx, brain.Object{ID: root, Kind: "Document", Title: "root", NamespaceID: ns, UpdatedAt: now})
+	for i := 0; i < 8; i++ {
+		id := uuid.New()
+		_ = store.Put(ctx, brain.Object{ID: id, Kind: "Document", Title: id.String()[:8], NamespaceID: ns, UpdatedAt: now})
+		_ = g.AddEdge(ctx, root, id, "references", brain.EdgeMeta{Note: "hop-" + id.String()[:4]})
+	}
+	eng, err := brain.NewEngine(store, brain.WithGraph(g), brain.WithConfig(brain.EngineConfig{
+		ExpandInlineMax: 2, DefaultLimit: 2, MaxLimit: 50, GraphNeighborK: 50,
+		Now: func() time.Time { return now },
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc := brain.NewSearchContext()
+	page1, err := eng.Expand(ctx, brain.Scope{Namespace: &ns}, brain.ExpandRequest{
+		ObjectID: root, RelationTypes: []string{"references"}, Limit: 2,
+	}, sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !page1.HasMore || page1.ResultSetID == uuid.Nil || len(page1.Objects) != 2 {
+		t.Fatalf("page1: %+v", page1)
+	}
+	for _, o := range page1.Objects {
+		if o.Relation == nil || o.Relation.Type != "references" || !strings.HasPrefix(o.Relation.Note, "hop-") {
+			t.Fatalf("page1 relation: %+v", o.Relation)
+		}
+	}
+	page2, err := eng.Continue(ctx, brain.Scope{Namespace: &ns}, page1.ResultSetID, 2, sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page2.Objects) == 0 {
+		t.Fatal("continue empty")
+	}
+	for _, o := range page2.Objects {
+		if o.Relation == nil || o.Relation.Type != "references" || !strings.HasPrefix(o.Relation.Note, "hop-") {
+			t.Fatalf("continue must re-attach relation: %+v", o)
+		}
+	}
+}
+
 func TestExpand_graphNeighborsMemoryGraph(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
@@ -143,15 +239,15 @@ func TestExpand_graphNeighborsMemoryGraph(t *testing.T) {
 	a, b, c := uuid.New(), uuid.New(), uuid.New()
 	otherNS := uuid.New()
 	for _, id := range []uuid.UUID{a, b, c} {
-		_ = store.Put(brain.Object{ID: id, Kind: "Document", Title: id.String()[:8], NamespaceID: ns, UpdatedAt: now})
+		_ = store.Put(context.Background(), brain.Object{ID: id, Kind: "Document", Title: id.String()[:8], NamespaceID: ns, UpdatedAt: now})
 	}
 	hidden := uuid.New()
-	_ = store.Put(brain.Object{ID: hidden, Kind: "Document", NamespaceID: otherNS, UpdatedAt: now})
+	_ = store.Put(context.Background(), brain.Object{ID: hidden, Kind: "Document", NamespaceID: otherNS, UpdatedAt: now})
 
 	g := brain.NewMemoryGraph()
-	g.AddEdge(a, b, "references")
-	g.AddEdge(c, a, "references")
-	g.AddEdge(a, hidden, "references")
+	_ = g.AddEdge(context.Background(), a, b, "references", brain.EdgeMeta{})
+	_ = g.AddEdge(context.Background(), c, a, "references", brain.EdgeMeta{})
+	_ = g.AddEdge(context.Background(), a, hidden, "references", brain.EdgeMeta{})
 
 	eng, err := brain.NewEngine(store, brain.WithGraph(g))
 	if err != nil {
@@ -187,15 +283,15 @@ func TestExpand_partMixedContainmentAndGraph(t *testing.T) {
 	part := uuid.New()
 	linked := uuid.New()
 	pos := 1
-	_ = store.Put(brain.Object{ID: parent, Kind: "Document", NamespaceID: ns, UpdatedAt: now})
-	_ = store.Put(brain.Object{
+	_ = store.Put(context.Background(), brain.Object{ID: parent, Kind: "Document", NamespaceID: ns, UpdatedAt: now})
+	_ = store.Put(context.Background(), brain.Object{
 		ID: part, Kind: "Chunk", Content: "c", ParentID: &parent, Position: &pos,
 		NamespaceID: ns, UpdatedAt: now,
 	})
-	_ = store.Put(brain.Object{ID: linked, Kind: "Document", Title: "ref", NamespaceID: ns, UpdatedAt: now})
+	_ = store.Put(context.Background(), brain.Object{ID: linked, Kind: "Document", Title: "ref", NamespaceID: ns, UpdatedAt: now})
 
 	g := brain.NewMemoryGraph()
-	g.AddEdge(part, linked, "references")
+	_ = g.AddEdge(context.Background(), part, linked, "references", brain.EdgeMeta{})
 
 	eng, err := brain.NewEngine(store, brain.WithGraph(g), brain.WithConfig(brain.EngineConfig{SiblingRadius: 1}))
 	if err != nil {
@@ -229,10 +325,10 @@ func TestExpand_graphStoreErrorSurfaces(t *testing.T) {
 	}
 	ns := uuid.New()
 	root := uuid.New()
-	_ = store.ok.Put(brain.Object{ID: root, Kind: "Document", NamespaceID: ns})
+	_ = store.ok.Put(context.Background(), brain.Object{ID: root, Kind: "Document", NamespaceID: ns})
 
 	g := brain.NewMemoryGraph()
-	g.AddEdge(root, store.failID, "references")
+	_ = g.AddEdge(context.Background(), root, store.failID, "references", brain.EdgeMeta{})
 
 	eng, err := brain.NewEngine(store, brain.WithGraph(g))
 	if err != nil {
@@ -294,7 +390,7 @@ func TestExpand_graphRequiresBackend(t *testing.T) {
 	store := brain.NewMemoryStore()
 	ns := uuid.New()
 	id := uuid.New()
-	_ = store.Put(brain.Object{ID: id, Kind: "Document", NamespaceID: ns})
+	_ = store.Put(context.Background(), brain.Object{ID: id, Kind: "Document", NamespaceID: ns})
 	eng, err := brain.NewEngine(store)
 	if err != nil {
 		t.Fatal(err)

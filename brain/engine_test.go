@@ -17,7 +17,7 @@ func TestEngine_ReadRichObjectInScope(t *testing.T) {
 	store := brain.NewMemoryStore()
 	ns := uuid.New()
 	id := uuid.New()
-	if err := store.Put(brain.Object{
+	if err := store.Put(context.Background(), brain.Object{
 		ID: id, Kind: "Document", Title: "Deal memo", Summary: "Q3",
 		Content: "full body", ContentType: "text/plain",
 		NamespaceID: ns, Properties: map[string]any{"stage": "negotiation"},
@@ -53,7 +53,7 @@ func TestEngine_ReadRejectsOutsideScope(t *testing.T) {
 	store := brain.NewMemoryStore()
 	nsA, nsB := uuid.New(), uuid.New()
 	id := uuid.New()
-	if err := store.Put(brain.Object{
+	if err := store.Put(context.Background(), brain.Object{
 		ID: id, Kind: "Document", Content: "secret", NamespaceID: nsA,
 	}); err != nil {
 		t.Fatal(err)
@@ -69,7 +69,7 @@ func TestEngine_ReadRejectsOutsideScope(t *testing.T) {
 	}
 
 	deleted := time.Now().UTC()
-	if err := store.Put(brain.Object{
+	if err := store.Put(context.Background(), brain.Object{
 		ID: id, Kind: "Document", NamespaceID: nsA, DeletedAt: &deleted,
 	}); err != nil {
 		t.Fatal(err)
@@ -93,42 +93,42 @@ func TestEngine_SchemaAndOrderedChildren(t *testing.T) {
 	c1, c2 := uuid.New(), uuid.New()
 	pos1, pos2 := 1, 2
 
-	if err := store.PutKind(brain.ObjectKind{
+	if err := store.PutKind(ctx, brain.ObjectKind{
 		Kind: "Chunk", IsPart: true,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.PutKind(brain.ObjectKind{
+	if err := store.PutKind(ctx, brain.ObjectKind{
 		Kind: "Document", Description: "A parent doc", IsParent: true,
 		FilterableFields: json.RawMessage(`[{"name":"status","type":"string","operators":["eq"]}]`),
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Put(brain.Object{
+	if err := store.Put(context.Background(), brain.Object{
 		ID: parentID, Kind: "Document", Title: "Parent", NamespaceID: ns,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Put(brain.Object{
+	if err := store.Put(context.Background(), brain.Object{
 		ID: c2, Kind: "Chunk", Title: "second", NamespaceID: ns,
 		ParentID: &parentID, Position: &pos2, Content: "c2-body",
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Put(brain.Object{
+	if err := store.Put(context.Background(), brain.Object{
 		ID: c1, Kind: "Chunk", Title: "first", NamespaceID: ns,
 		ParentID: &parentID, Position: &pos1, Content: "c1-body",
 	}); err != nil {
 		t.Fatal(err)
 	}
 	deleted := time.Now().UTC()
-	if err := store.Put(brain.Object{
+	if err := store.Put(context.Background(), brain.Object{
 		ID: uuid.New(), Kind: "Chunk", Title: "gone", NamespaceID: ns,
 		ParentID: &parentID, Position: &pos1, DeletedAt: &deleted,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Put(brain.Object{
+	if err := store.Put(context.Background(), brain.Object{
 		ID: uuid.New(), Kind: "Chunk", Title: "other-ns", NamespaceID: uuid.New(),
 		ParentID: &parentID, Position: &pos1,
 	}); err != nil {
@@ -194,7 +194,7 @@ func TestEngine_ListChildrenRequiresVisibleParent(t *testing.T) {
 	store := brain.NewMemoryStore()
 	ns := uuid.New()
 	parentID := uuid.New()
-	if err := store.Put(brain.Object{
+	if err := store.Put(context.Background(), brain.Object{
 		ID: parentID, Kind: "Document", NamespaceID: ns,
 	}); err != nil {
 		t.Fatal(err)
@@ -228,12 +228,12 @@ func TestMemoryStore_PutRequiresIdentity(t *testing.T) {
 		name string
 		fn   func() error
 	}{
-		{"empty object", func() error { return s.Put(brain.Object{}) }},
-		{"missing kind", func() error { return s.Put(brain.Object{ID: uuid.New()}) }},
+		{"empty object", func() error { return s.Put(context.Background(), brain.Object{}) }},
+		{"missing kind", func() error { return s.Put(context.Background(), brain.Object{ID: uuid.New()}) }},
 		{"missing namespace", func() error {
-			return s.Put(brain.Object{ID: uuid.New(), Kind: "X"})
+			return s.Put(context.Background(), brain.Object{ID: uuid.New(), Kind: "X"})
 		}},
-		{"empty kind registry", func() error { return s.PutKind(brain.ObjectKind{}) }},
+		{"empty kind registry", func() error { return s.PutKind(context.Background(), brain.ObjectKind{}) }},
 	}
 	for _, tc := range cases {
 		if err := tc.fn(); err == nil {

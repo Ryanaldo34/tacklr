@@ -1,6 +1,7 @@
 package brain
 
 import (
+	"bytes"
 	"cmp"
 	"math"
 	"slices"
@@ -25,21 +26,20 @@ func rrfFuse(lists [][]ScoredID, k int) []ScoredID {
 		Content   string
 		Position  *int
 	}
-	byID := map[uuid.UUID]*acc{}
+	byID := make(map[uuid.UUID]acc)
 	order := make([]uuid.UUID, 0)
 
 	for _, list := range lists {
 		for rank, item := range list {
 			a, ok := byID[item.ID]
 			if !ok {
-				a = &acc{
+				a = acc{
 					UpdatedAt: item.UpdatedAt,
 					ParentID:  item.ParentID,
 					Title:     item.Title,
 					Content:   item.Content,
 					Position:  item.Position,
 				}
-				byID[item.ID] = a
 				order = append(order, item.ID)
 			}
 			a.rrf += 1.0 / float64(k+rank+1)
@@ -58,6 +58,7 @@ func rrfFuse(lists [][]ScoredID, k int) []ScoredID {
 			if a.Position == nil && item.Position != nil {
 				a.Position = item.Position
 			}
+			byID[item.ID] = a
 		}
 	}
 
@@ -79,12 +80,16 @@ func rrfFuse(lists [][]ScoredID, k int) []ScoredID {
 
 // applyTemporal multiplies scores by exp(-λ * age_days) using updated_at.
 // lambda <= 0 leaves scores unchanged.
+// Zero UpdatedAt is left untouched (e.g. Helix search hits only carry $distance rank).
 func applyTemporal(parts []ScoredID, lambda float64, now time.Time) {
 	if lambda <= 0 {
 		return
 	}
 	now = now.UTC()
 	for i := range parts {
+		if parts[i].UpdatedAt.IsZero() {
+			continue
+		}
 		age := now.Sub(parts[i].UpdatedAt.UTC()).Hours() / 24.0
 		if age < 0 {
 			age = 0
@@ -98,13 +103,14 @@ func cmpScored(a, b ScoredID) int {
 	if c := cmp.Compare(b.Score, a.Score); c != 0 {
 		return c
 	}
-	if a.UpdatedAt.After(b.UpdatedAt) {
-		return -1
+	if c := a.UpdatedAt.Compare(b.UpdatedAt); c != 0 {
+		return -c // newer first
 	}
-	if a.UpdatedAt.Before(b.UpdatedAt) {
-		return 1
-	}
-	return cmp.Compare(a.ID.String(), b.ID.String())
+	return cmpUUID(a.ID, b.ID)
+}
+
+func cmpUUID(a, b uuid.UUID) int {
+	return bytes.Compare(a[:], b[:])
 }
 
 func sortScored(parts []ScoredID) {

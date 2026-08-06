@@ -3,6 +3,7 @@ package brain
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/google/uuid"
@@ -10,65 +11,87 @@ import (
 
 // Search runs hybrid retrieval (BM25 + optional vector), RRF, temporal decay,
 // parent promotion, and materializes a ResultSet into results.
-func (e *Engine) Search(ctx context.Context, scope Scope, req SearchRequest, results ResultSetStore) (SearchPage, error) {
+func (e *Engine) Search(ctx context.Context, scope Scope, req SearchRequest, results ResultSetStore) (page SearchPage, err error) {
 	ctx, span := e.observer.StartOp(ctx, OpSearch)
-	page, degrade, err := e.searchWithDegrade(ctx, scope, req, results, false)
-	span.End(len(page.Objects), degrade, err)
+	degrade := DegradeNone
+	defer func() { span.End(len(page.Objects), degrade, err) }()
+
+	ranked, degrade, err := e.hybridCandidates(ctx, scope, req)
+	if err != nil {
+		return page, err
+	}
+	ranked = filterScoredByScopeIDs(ranked, req.ScopeIDs)
+	page, err = e.materialize(ctx, scope, ranked, req.Limit, results)
 	return page, err
 }
 
 // FindExact runs equality-first exact retrieval (no dense channel), then
 // lexical + trigram fusion, promotion, and ResultSet materialization.
-func (e *Engine) FindExact(ctx context.Context, scope Scope, req SearchRequest, results ResultSetStore) (SearchPage, error) {
+func (e *Engine) FindExact(ctx context.Context, scope Scope, req SearchRequest, results ResultSetStore) (page SearchPage, err error) {
 	ctx, span := e.observer.StartOp(ctx, OpFindExact)
-	page, degrade, err := e.searchWithDegrade(ctx, scope, req, results, true)
-	span.End(len(page.Objects), degrade, err)
+	defer func() { span.End(len(page.Objects), DegradeNone, err) }()
+
+	ranked, err := e.exactCandidates(ctx, scope, req)
+	if err != nil {
+		return page, err
+	}
+	ranked = filterScoredByScopeIDs(ranked, req.ScopeIDs)
+	page, err = e.materialize(ctx, scope, ranked, req.Limit, results)
 	return page, err
 }
 
-func (e *Engine) searchWithDegrade(ctx context.Context, scope Scope, req SearchRequest, results ResultSetStore, exact bool) (SearchPage, DegradeMode, error) {
-	var (
-		ranked  []ScoredID
-		err     error
-		degrade = DegradeNone
-	)
-	if exact {
-		ranked, err = e.exactCandidates(ctx, scope, req)
-	} else {
-		ranked, degrade, err = e.hybridCandidates(ctx, scope, req)
+// filterScoredByScopeIDs keeps hits whose id or parent_id is in allow (empty allow = no-op).
+func filterScoredByScopeIDs(ranked []ScoredID, allow []uuid.UUID) []ScoredID {
+	if len(allow) == 0 || len(ranked) == 0 {
+		return ranked
 	}
-	if err != nil {
-		return SearchPage{}, degrade, err
+	set := make(map[uuid.UUID]struct{}, len(allow))
+	for _, id := range allow {
+		if id != uuid.Nil {
+			set[id] = struct{}{}
+		}
 	}
-	page, err := e.materialize(ctx, scope, ranked, req.Limit, results)
-	return page, degrade, err
+	if len(set) == 0 {
+		return ranked
+	}
+	out := make([]ScoredID, 0, len(ranked))
+	for _, s := range ranked {
+		if _, ok := set[s.ID]; ok {
+			out = append(out, s)
+			continue
+		}
+		if s.ParentID != nil {
+			if _, ok := set[*s.ParentID]; ok {
+				out = append(out, s)
+			}
+		}
+	}
+	return out
 }
 
 // Continue returns the next page of a prior ResultSet under scope.
-func (e *Engine) Continue(ctx context.Context, scope Scope, resultSetID uuid.UUID, limit int, results ResultSetStore) (SearchPage, error) {
+func (e *Engine) Continue(ctx context.Context, scope Scope, resultSetID uuid.UUID, limit int, results ResultSetStore) (page SearchPage, err error) {
 	ctx, span := e.observer.StartOp(ctx, OpContinue)
-	page, err := e.continueInner(ctx, scope, resultSetID, limit, results)
-	span.End(len(page.Objects), DegradeNone, err)
-	return page, err
-}
+	defer func() { span.End(len(page.Objects), DegradeNone, err) }()
 
-func (e *Engine) continueInner(ctx context.Context, scope Scope, resultSetID uuid.UUID, limit int, results ResultSetStore) (SearchPage, error) {
 	if resultSetID == uuid.Nil {
-		return SearchPage{}, fmt.Errorf("brain: result_set_id is required")
+		return page, ErrResultSetIDRequired
 	}
 	limit = e.normalizeLimit(limit)
 	set, err := results.Get(ctx, resultSetID)
 	if err != nil {
-		return SearchPage{}, err
+		return page, err
 	}
 	start, end := sliceBounds(set.Offset, limit, len(set.ObjectIDs))
-	objs, err := e.hydrateParents(ctx, scope, set.ObjectIDs[start:end])
+	objs, err := e.hydrateIDs(ctx, scope, set.ObjectIDs[start:end])
 	if err != nil {
-		return SearchPage{}, err
+		return page, err
 	}
+	attachRelations(objs, set.Relations)
 	set.Offset = end
-	if err := results.Put(ctx, set); err != nil {
-		return SearchPage{}, err
+	if e := results.Put(ctx, set); e != nil {
+		err = e
+		return page, err
 	}
 	return SearchPage{
 		ResultSetID: resultSetID,
@@ -89,7 +112,7 @@ func (e *Engine) materialize(ctx context.Context, scope Scope, ranked []ScoredID
 		ids[i] = p.ParentID
 		byID[p.ParentID] = p
 	}
-	page, err := e.pageIDs(ctx, scope, ids, limit, results)
+	page, err := e.pageIDs(ctx, scope, ids, limit, results, nil)
 	if err != nil {
 		return SearchPage{}, err
 	}
@@ -100,23 +123,43 @@ func (e *Engine) materialize(ctx context.Context, scope Scope, ranked []ScoredID
 			page.Objects[i].Evidence = p.Evidence
 		}
 	}
+	page.Objects, err = e.applyRerank(ctx, page.Objects)
+	if err != nil {
+		return SearchPage{}, err
+	}
 	return page, nil
 }
 
-func (e *Engine) prepareSearch(req SearchRequest) error {
+// prepareSearch validates the query/filters and returns effective filters for the store.
+// When the catalog is non-empty, property filters require kind, unregistered kinds are
+// rejected, and missing kind filters are expanded to all registered kinds.
+func (e *Engine) prepareSearch(req SearchRequest) (Filters, error) {
 	if strings.TrimSpace(req.Query) == "" {
-		return fmt.Errorf("brain: query is required")
+		return nil, ErrQueryRequired
 	}
-	return ValidateFilters(req.Filters)
+	return e.effectiveFilters(req.Filters)
+}
+
+func (e *Engine) effectiveFilters(f Filters) (Filters, error) {
+	if err := ValidateFiltersAgainst(f, e.catalog); err != nil {
+		return nil, err
+	}
+	if e.catalog.Empty() {
+		return f, nil
+	}
+	e.catalog.Freeze()
+	// injectKindAllowList returns f unchanged when kind is already set (no clone).
+	return injectKindAllowList(f, e.catalog), nil
 }
 
 func (e *Engine) hybridCandidates(ctx context.Context, scope Scope, req SearchRequest) ([]ScoredID, DegradeMode, error) {
-	if err := e.prepareSearch(req); err != nil {
+	filters, err := e.prepareSearch(req)
+	if err != nil {
 		return nil, DegradeNone, err
 	}
 	query := strings.TrimSpace(req.Query)
 	k := e.cfg.CandidateK
-	lex, err := e.store.SearchLexical(ctx, scope, query, req.Filters, k)
+	lex, err := e.store.SearchLexical(ctx, scope, query, filters, k)
 	if err != nil {
 		return nil, DegradeNone, err
 	}
@@ -131,7 +174,7 @@ func (e *Engine) hybridCandidates(ctx context.Context, scope Scope, req SearchRe
 				return nil, DegradeNone, fmt.Errorf("brain: embed query: %w", embErr)
 			}
 		} else if len(emb) > 0 {
-			vec, err := e.store.SearchVector(ctx, scope, emb, req.Filters, k)
+			vec, err := e.store.SearchVector(ctx, scope, emb, filters, k)
 			if err != nil {
 				if e.cfg.allowEmbedderDegrade() {
 					degrade = DegradeLexicalOnly
@@ -147,7 +190,8 @@ func (e *Engine) hybridCandidates(ctx context.Context, scope Scope, req SearchRe
 }
 
 func (e *Engine) exactCandidates(ctx context.Context, scope Scope, req SearchRequest) ([]ScoredID, error) {
-	if err := e.prepareSearch(req); err != nil {
+	filters, err := e.prepareSearch(req)
+	if err != nil {
 		return nil, err
 	}
 	query := strings.TrimSpace(req.Query)
@@ -169,11 +213,11 @@ func (e *Engine) exactCandidates(ctx context.Context, scope Scope, req SearchReq
 	}
 
 	k := e.cfg.CandidateK
-	lex, err := e.store.SearchLexical(ctx, scope, query, req.Filters, k)
+	lex, err := e.store.SearchLexical(ctx, scope, query, filters, k)
 	if err != nil {
 		return nil, err
 	}
-	tri, err := e.store.SearchTrigram(ctx, scope, query, req.Filters, k)
+	tri, err := e.store.SearchTrigram(ctx, scope, query, filters, k)
 	if err != nil {
 		return nil, err
 	}
@@ -181,13 +225,12 @@ func (e *Engine) exactCandidates(ctx context.Context, scope Scope, req SearchReq
 	fused := rrfFuse([][]ScoredID{lex, tri}, e.cfg.RRFk)
 	q := strings.ToLower(query)
 	// Prefer exact title matches (boost), then remaining fused candidates.
-	var boosted, rest []ScoredID
-	seen := map[uuid.UUID]struct{}{}
+	boosted := make([]ScoredID, 0)
+	rest := make([]ScoredID, 0, len(fused))
 	for _, item := range fused {
 		if strings.ToLower(strings.TrimSpace(item.Title)) == q {
 			item.Score += 10
 			boosted = append(boosted, item)
-			seen[item.ID] = struct{}{}
 			continue
 		}
 		rest = append(rest, item)
@@ -198,13 +241,14 @@ func (e *Engine) exactCandidates(ctx context.Context, scope Scope, req SearchReq
 	return append(boosted, rest...), nil
 }
 
-func (e *Engine) hydrateParents(ctx context.Context, scope Scope, ids []uuid.UUID) ([]RichObject, error) {
+// hydrateIDs loads objects for ids in request order, skipping missing/out-of-scope.
+func (e *Engine) hydrateIDs(ctx context.Context, scope Scope, ids []uuid.UUID) ([]RichObject, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
 	objs, err := e.store.GetMany(ctx, scope, ids)
 	if err != nil {
-		return nil, fmt.Errorf("brain: hydrate parents: %w", err)
+		return nil, fmt.Errorf("brain: hydrate: %w", err)
 	}
 	byID := make(map[uuid.UUID]Object, len(objs))
 	for _, o := range objs {
@@ -214,26 +258,32 @@ func (e *Engine) hydrateParents(ctx context.Context, scope Scope, ids []uuid.UUI
 	for _, id := range ids {
 		obj, ok := byID[id]
 		if !ok {
-			return nil, fmt.Errorf("brain: hydrate parent %s: %w", id, ErrNotFound)
+			continue
 		}
 		out = append(out, RichFromObject(obj, false))
 	}
 	return out, nil
 }
 
-func (e *Engine) pageIDs(ctx context.Context, scope Scope, ids []uuid.UUID, limit int, results ResultSetStore) (SearchPage, error) {
+// pageIDs materializes a ResultSet page. relations (optional) is stored for continue.
+func (e *Engine) pageIDs(ctx context.Context, scope Scope, ids []uuid.UUID, limit int, results ResultSetStore, relations map[uuid.UUID]Relation) (SearchPage, error) {
+	if results == nil {
+		return SearchPage{}, ErrResultSetRequired
+	}
 	limit = e.normalizeLimit(limit)
 	if maxN := e.cfg.MaxResultSetSize; maxN > 0 && len(ids) > maxN {
 		ids = ids[:maxN]
 	}
 	_, end := sliceBounds(0, limit, len(ids))
-	pageObjs, err := e.hydrateParents(ctx, scope, ids[:end])
+	pageObjs, err := e.hydrateIDs(ctx, scope, ids[:end])
 	if err != nil {
 		return SearchPage{}, err
 	}
+	attachRelations(pageObjs, relations)
 	set := ResultSet{
 		ID:        uuid.New(),
-		ObjectIDs: append([]uuid.UUID(nil), ids...),
+		ObjectIDs: slices.Clone(ids),
+		Relations: relations,
 		Offset:    end,
 		CreatedAt: e.cfg.Now(),
 	}
@@ -245,6 +295,18 @@ func (e *Engine) pageIDs(ctx context.Context, scope Scope, ids []uuid.UUID, limi
 		HasMore:     end < len(ids),
 		Objects:     pageObjs,
 	}, nil
+}
+
+func attachRelations(objs []RichObject, relations map[uuid.UUID]Relation) {
+	if len(relations) == 0 {
+		return
+	}
+	for i := range objs {
+		if r, ok := relations[objs[i].ID]; ok {
+			r := r
+			objs[i].Relation = &r
+		}
+	}
 }
 
 func sliceBounds(offset, limit, n int) (start, end int) {

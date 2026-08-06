@@ -1,6 +1,8 @@
 package brain
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -31,6 +33,15 @@ func TestValidateFilters_andMatch(t *testing.T) {
 	}
 	if err := ValidateFilters(Filters{"x": map[string]any{"nested": 1}}); err == nil {
 		t.Fatal("nested map")
+	}
+	if err := ValidateFilters(Filters{"kind": nil}); err == nil {
+		t.Fatal("nil value")
+	}
+	if err := ValidateFilters(Filters{"kind": []any{}}); err == nil {
+		t.Fatal("empty list validate")
+	}
+	if _, err := parseFilterTime(""); err == nil {
+		t.Fatal("empty time")
 	}
 
 	ns := uuid.New()
@@ -65,7 +76,6 @@ func TestValidateFilters_andMatch(t *testing.T) {
 		t.Fatal("missing property")
 	}
 
-	// Numeric / bool / string scalar equality (memory filter path).
 	obj.Properties["n"] = 3
 	obj.Properties["b"] = true
 	obj.Properties["s"] = "hi"
@@ -81,21 +91,43 @@ func TestValidateFilters_andMatch(t *testing.T) {
 	if objectMatchesFilters(obj, Filters{"n": "nope"}) {
 		t.Fatal("type mismatch")
 	}
-	// Empty list filter is invalid at validate; empty list match is false at runtime.
 	if objectMatchesFilters(obj, Filters{"stage": []any{}}) {
 		t.Fatal("empty list")
 	}
-	// Bad date values fail match (not validate path).
 	if objectMatchesFilters(obj, Filters{"updated_after": "bogus"}) {
 		t.Fatal("bad date match")
 	}
-	if err := ValidateFilters(Filters{"kind": nil}); err == nil {
-		t.Fatal("nil value")
+}
+
+func TestCheckFieldValue_types(t *testing.T) {
+	if err := checkFieldValue("ok", FieldTypeString); err != nil {
+		t.Fatal(err)
 	}
-	if err := ValidateFilters(Filters{"kind": []any{}}); err == nil {
-		t.Fatal("empty list validate")
+	if err := checkFieldValue(true, FieldTypeBoolean); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := parseFilterTime(""); err == nil {
-		t.Fatal("empty time")
+	if err := checkFieldValue(json.Number("1.5"), FieldTypeNumber); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkFieldValue(int32(2), FieldTypeNumber); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkFieldValue(time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), FieldTypeDateTime); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkFieldValue(time.Time{}, FieldTypeDateTime); err == nil {
+		t.Fatal("zero time")
+	}
+	if err := checkFieldValue(3, FieldTypeString); err == nil || !strings.Contains(err.Error(), "string") {
+		t.Fatalf("%v", err)
+	}
+	if err := checkFieldValue("x", FieldTypeBoolean); err == nil {
+		t.Fatal("bool")
+	}
+	if err := checkFieldValue(struct{}{}, FieldTypeNumber); err == nil {
+		t.Fatal("number")
+	}
+	if err := checkFieldValue(1, FieldType("nope")); err == nil {
+		t.Fatal("unknown type")
 	}
 }
