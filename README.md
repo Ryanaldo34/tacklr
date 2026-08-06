@@ -34,6 +34,7 @@ That wastes tokens, confuses the model with old noise, and is hard to run in edi
 | Hard to cancel or ask the user a question | **Turns**, **cancel**, and **interrupts** (pause for input, then resume) |
 | State dies when the process exits | **Checkpoints** you can save and reload |
 | Wiring into IDEs / HTTP | Same registry over **ACP** (e.g. Zed) or **SSE** |
+| Naive RAG dumps stale chunks into the window | Optional **knowledge base (brain)**: temporal + graph retrieval, dual-store design, agent tools only when wired |
 
 It is a **framework** (it defines how agents *should* run), not a loose bag of helpers.
 
@@ -245,18 +246,107 @@ This keeps product tools from breaking the planning system by accident.
 - **MCP** — pass `MCPConfigs` on the agent (or via ACP session); tools are discovered and run for you.  
 - **Skills** — set `Config.SkillDirectories` to folders of `SKILL.md` (default `skills.DirectoryLoader`). Inject `AgentOptions.SkillsLoader` for non-filesystem sources. A short catalog lands in the system prompt; full text loads via `read_skill` when needed.
 - **Web search (Exa)** — when `EXA_API_KEY` is set in the environment (or `AgentOptions.ExaAPIKey`), the harness injects a built-in `web_search` tool (read access, token-efficient **highlights** by default). Hosts that use `.env` should load it before `NewAgent` (the test server already does). No Exa Go SDK; the harness calls Exa’s REST API.
+- **Knowledge base (brain)** — optional; see [Knowledge base (brain)](#knowledge-base-brain) below.
 
 ### Public harness surface
 
 `AgentHarness` fields are unexported. Hosts use:
 
-- `NewAgent` / `NewAgentFromSession` + `AgentOptions` (model, store, tools, MCP, skills, interceptors, hooks)
+- `NewAgent` / `NewAgentFromSession` + `AgentOptions` (model, store, tools, MCP, skills, interceptors, hooks, optional `Brain`)
 - `SessionID()` / `BindSessionID` (registry thread binding)
 - `ToolRuntime()` for interrupt helpers that need `*HarnessRuntime`
 - `Messages()` / `RestoreMessages` for the conversation window
 - `Run` / `ReturnFromInterrupt` / `Close`
 
 Plan builtins return typed `BuiltinResult` effects (install plan, handoff) instead of name-keyed hooks.
+
+### Knowledge base (brain)
+
+Tacklr’s knowledge package is **not** “stuff the last N chunks into context.” It is a host-owned retrieval engine with:
+
+- **Postgres** as the source of truth for full objects, parts/chunks, BM25 + dense hybrid search, filters, soft-delete, and containment (`parent_id`)
+- **Helix** (optional graph backend) for first-class **entity** nodes and cross-object edges (not chunks)—text/vector indexes, topology, edge metadata
+- **Dual-write** on parent `Put` / `SoftDelete` / `Link` so graph nodes stay live with the store
+- **Scope** (namespace) on every hydrate so multi-tenant isolation is engine-enforced
+
+Hosts build an `Engine`, then attach it on the agent. The harness registers knowledge tools only when the engine is set; capability-gated tools appear only when the graph backend supports them.
+
+#### Boot sketch
+
+```go
+import (
+	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/brain"
+	"github.com/ryanaldo34/tacklr/brain/helixgraph"
+	"github.com/ryanaldo34/tacklr/telemetry"
+)
+
+// store: brain.NewPostgresStore(pool) in production, or brain.NewMemoryStore() in tests.
+store, err := brain.NewPostgresStore(pool)
+if err != nil { /* … */ }
+
+g, err := helixgraph.New(helixURL) // optional graph backend
+if err != nil { /* … */ }
+// Required for find_objects on Helix. Prefer true when the image supports tenant indexes.
+if err := g.Bootstrap(ctx, false); err != nil { /* … */ }
+// Required per relation label before find_links can search edge notes on Helix.
+for _, rel := range []string{"about", "has_buyer", "references"} {
+	if err := g.EnsureEdgeTextIndex(ctx, rel); err != nil { /* … */ }
+}
+
+eng, err := brain.NewEngine(store,
+	brain.WithEmbedder(emb),                    // optional dense channel
+	brain.WithGraph(g),                         // MemoryGraph also implements searchers
+	brain.WithObserver(telemetry.NewBrainObserver()), // optional OTEL
+	// brain.WithExpandRecipes(...),            // optional named ExpandRequest templates
+	// brain.WithReranker(...),                 // optional post-hydrate host scoring
+)
+if err != nil { /* … */ }
+if err := eng.ApplyKinds(ctx, kindSpecs...); err != nil { /* … */ }
+
+agent := tacklr.NewAgent(ctx, tacklr.AgentOptions{
+	// … Model, Store, Config …
+	Brain: eng,
+	BrainWriteKinds: brain.WriteKinds{
+		Discovery: "Discovery", // non-empty → save_discovery tool
+		Fact:      "Fact",
+		Memory:    "Memory",
+	},
+	SearchNamespace: &tenantNS, // optional isolation (checkpointed)
+})
+```
+
+Offline / tests: `brain.NewMemoryStore()` + `brain.NewMemoryGraph()` need no Bootstrap; edge text search works in-process.
+
+#### Agent tools (capability matrix)
+
+| Tool | When registered |
+|------|-----------------|
+| `schema`, `read`, `search`, `find_exact`, `continue`, `expand` | `AgentOptions.Brain != nil` |
+| `find_objects` | graph implements object text/vector search **and** is ready (`Bootstrap` on Helix) |
+| `find_links` | graph implements edge text search (Helix after `EnsureEdgeTextIndex` for that label) |
+| `link` | graph implements `GraphWriter` |
+| `save_discovery` / `save_fact` / `save_memory` | corresponding `BrainWriteKinds` field is non-empty |
+
+`expand` supports multi-hop (`max_hops`), direction (`out` / `in` / `both`), and mixed containment + graph labels. Large result sets page via `continue`.
+
+#### Host GraphRAG composition (not agent tools)
+
+Hosts can orchestrate the same path product code uses:
+
+```text
+find_objects / search → LandingIDs / LandingIDsFromPage
+  → Expand / ExpandMany / ExpandByRecipe
+  → optional FindLinks
+  → search(scope_ids=…) for neighborhood corpus
+  → optional Reranker / SortRichObjects
+```
+
+`LandingIDs` promotes part hits to first-class parent ids so expand/link always target dual-written entities. See package docs: [`brain`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/brain).
+
+#### Observability
+
+With `brain.WithObserver(telemetry.NewBrainObserver())`, retrieval ops emit `tacklr.brain` spans/metrics: `search`, `find_exact`, `find_objects`, `find_links`, `continue`, `expand`, `expand_many` (closed enum; degrade modes include lexical-only and containment-only).
 
 ---
 
@@ -305,6 +395,8 @@ OTLP is the export path for traces, metrics, and logs. Point any collector (or v
 | Package | Role |
 |---------|------|
 | `tacklr` | Agent harness, tools, plan loop, subagents |
+| `brain` | Knowledge engine: store, expand, find_objects, kinds, dual-write |
+| `brain/helixgraph` | HelixDB adapter (`WithGraph`); Bootstrap + edge text indexes |
 | `inference` | OpenAI-compatible model client |
 | `server` | Registry + ACP / SSE |
 | `stores` | Session checkpoints |
@@ -312,7 +404,7 @@ OTLP is the export path for traces, metrics, and logs. Point any collector (or v
 | `streaming` | Shared message/event types |
 | `mcp` | MCP config types (public) |
 | `skills` | `SKILL.md` loading (`Loader` injectable) |
-| `telemetry` | OTEL init, metrics helpers, log correlation |
+| `telemetry` | OTEL init, metrics helpers, brain observer, log correlation |
 | `internal/session` | Session manager, plan store, checkpointer, tool runtime |
 
 ---
