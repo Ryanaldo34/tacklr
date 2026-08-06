@@ -21,7 +21,7 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 	if a.out == nil {
 		return nil, fmt.Errorf("agent harness: Run called on uninitialized harness")
 	}
-	if err := a.initSkills(); err != nil {
+	if err := a.initSkills(ctx); err != nil {
 		return nil, fmt.Errorf("load skills: %w", err)
 	}
 	a.initMCP(ctx)

@@ -47,7 +47,7 @@ type AgentHarness struct {
 	parkMu            sync.Mutex
 	skillByName       map[string]skills.Skill
 	skillDirectories  []string
-	skillsLoader      skills.Loader
+	skillsLoader      skills.SkillLoader
 	skillsInitialized bool
 	exaAPIKey         string
 	brain             *brain.Engine
@@ -167,7 +167,7 @@ func (a *AgentHarness) checkpointSession(ctx context.Context) error {
 
 func (a *AgentHarness) constructSystemPrompt() string {
 	if !a.skillsInitialized {
-		if err := a.initSkills(); err != nil {
+		if err := a.initSkills(context.Background()); err != nil {
 			slog.Error("failed to load skills", "area", "startup", "error", err)
 		}
 	}

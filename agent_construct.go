@@ -55,9 +55,8 @@ type AgentOptions struct {
 	// ToolResultHooks map tool name → post-success window effects for host tools.
 	// Plan builtins use BuiltinResult instead.
 	ToolResultHooks map[string]ToolResultHook
-	// SkillsLoader loads skills from Config.SkillDirectories.
-	// Nil uses skills.DirectoryLoader.
-	SkillsLoader skills.Loader
+	// SkillsLoader loads skills. Nil uses DirectoryLoader with Config.SkillDirectories.
+	SkillsLoader skills.SkillLoader
 	// ExaAPIKey enables web_search and web_fetch. Empty falls back to EXA_API_KEY.
 	// When both are empty, those tools are not registered.
 	ExaAPIKey string
@@ -151,7 +150,7 @@ func newHarnessBase(opts AgentOptions, runtime HarnessRuntime, sm *session.Sessi
 
 func (h *AgentHarness) finishInit(ctx context.Context, subAgents []*SubAgent) {
 	h.initMCP(ctx)
-	if err := h.initSkills(); err != nil {
+	if err := h.initSkills(ctx); err != nil {
 		slog.Error("failed to initialize skills", "error", err)
 	}
 	h.initSubAgentWorkers(subAgents)
@@ -225,15 +224,15 @@ func (a *AgentHarness) planningWriteLock(ctx context.Context, inv ToolInvocation
 	return next(ctx, inv)
 }
 
-func (a *AgentHarness) initSkills() error {
+func (a *AgentHarness) initSkills(ctx context.Context) error {
 	if a.skillsInitialized {
 		return nil
 	}
 	loader := a.skillsLoader
 	if loader == nil {
-		loader = skills.DirectoryLoader{}
+		loader = skills.DirectoryLoader{Directories: a.skillDirectories}
 	}
-	loaded, err := loader.Load(a.skillDirectories)
+	loaded, err := loader.Load(ctx)
 	if err != nil {
 		return err
 	}

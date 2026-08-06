@@ -244,7 +244,7 @@ This keeps product tools from breaking the planning system by accident.
 ### MCP, skills, and web search
 
 - **MCP** — pass `MCPConfigs` on the agent (or via ACP session); tools are discovered and run for you.  
-- **Skills** — set `Config.SkillDirectories` to folders of `SKILL.md` (default `skills.DirectoryLoader`). Inject `AgentOptions.SkillsLoader` for non-filesystem sources. A short catalog lands in the system prompt; full text loads via `read_skill` when needed.
+- **Skills** — set `Config.SkillDirectories` to folders of `SKILL.md` (default `skills.DirectoryLoader`). Inject a source-bound `AgentOptions.SkillsLoader` for object storage, including `skills.S3Loader` and `skills.BlobLoader`. A short catalog lands in the system prompt; full text loads via `read_skill` when needed.
 - **Web search (Exa)** — when `EXA_API_KEY` is set in the environment (or `AgentOptions.ExaAPIKey`), the harness injects a built-in `web_search` tool (read access, token-efficient **highlights** by default). Hosts that use `.env` should load it before `NewAgent` (the test server already does). No Exa Go SDK; the harness calls Exa’s REST API.
 - **Knowledge base (brain)** — optional; see [Knowledge base (brain)](#knowledge-base-brain) below.
 
@@ -403,7 +403,7 @@ OTLP is the export path for traces, metrics, and logs. Point any collector (or v
 | `interrupt` | Interrupt types and registry for tool pause/resume |
 | `streaming` | Shared message/event types |
 | `mcp` | MCP config types (public) |
-| `skills` | `SKILL.md` loading (`Loader` injectable) |
+| `skills` | `SKILL.md` loading (`SkillLoader` injectable; includes `S3Loader` / `BlobLoader`) |
 | `telemetry` | OTEL init, metrics helpers, brain observer, log correlation |
 | `internal/session` | Session manager, plan store, checkpointer, tool runtime |
 
