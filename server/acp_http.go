@@ -245,6 +245,8 @@ func (p acpProtocol) handleACPDelete(env ProtocolEnv, w http.ResponseWriter, r *
 		Path:     "/acp",
 		MaxAge:   -1,
 		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteLaxMode,
 	})
 	w.WriteHeader(http.StatusAccepted)
 }

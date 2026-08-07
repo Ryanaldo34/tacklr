@@ -374,6 +374,7 @@ func setAffinityCookie(w http.ResponseWriter, connectionID string) {
 		Value:    connectionID,
 		Path:     "/acp",
 		HttpOnly: true,
+		Secure:   true,
 		SameSite: http.SameSiteLaxMode,
 	})
 }

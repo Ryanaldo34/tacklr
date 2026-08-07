@@ -43,7 +43,7 @@ func startACPWSServer(t *testing.T, r *Registry) (*httptest.Server, *Server) {
 	return hs, srv
 }
 
-func wsWriteJSONRPC(t *testing.T, ctx context.Context, c *websocket.Conn, msg any) {
+func wsWriteJSONRPC(ctx context.Context, t *testing.T, c *websocket.Conn, msg any) {
 	t.Helper()
 	data, err := json.Marshal(msg)
 	if err != nil {
@@ -54,7 +54,7 @@ func wsWriteJSONRPC(t *testing.T, ctx context.Context, c *websocket.Conn, msg an
 	}
 }
 
-func wsReadFrame(t *testing.T, ctx context.Context, c *websocket.Conn) map[string]any {
+func wsReadFrame(ctx context.Context, t *testing.T, c *websocket.Conn) map[string]any {
 	t.Helper()
 	readCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
 	defer cancel()
@@ -109,11 +109,11 @@ func TestACP_WS_permissionMidTurn(t *testing.T) {
 		t.Fatal("connection should be registered while socket is open")
 	}
 
-	wsWriteJSONRPC(t, ctx, conn, map[string]any{
+	wsWriteJSONRPC(ctx, t, conn, map[string]any{
 		"jsonrpc": "2.0", "id": 1, "method": "initialize",
 		"params": map[string]any{"protocolVersion": 1},
 	})
-	wsWriteJSONRPC(t, ctx, conn, map[string]any{
+	wsWriteJSONRPC(ctx, t, conn, map[string]any{
 		"jsonrpc": "2.0", "id": 2, "method": "session/new",
 		"params": map[string]any{"cwd": "/tmp"},
 	})
@@ -123,7 +123,7 @@ func TestACP_WS_permissionMidTurn(t *testing.T) {
 
 	deadline := time.Now().Add(8 * time.Second)
 	for time.Now().Before(deadline) && !endTurn {
-		frame := wsReadFrame(t, ctx, conn)
+		frame := wsReadFrame(ctx, t, conn)
 
 		if res, ok := frame["result"].(map[string]any); ok {
 			if sid, ok := res["sessionId"].(string); ok && sid != "" {
@@ -135,7 +135,7 @@ func TestACP_WS_permissionMidTurn(t *testing.T) {
 		}
 		if frame["method"] == "session/request_permission" {
 			sawPermission = true
-			wsWriteJSONRPC(t, ctx, conn, map[string]any{
+			wsWriteJSONRPC(ctx, t, conn, map[string]any{
 				"jsonrpc": "2.0",
 				"id":      frame["id"],
 				"result": map[string]any{
@@ -148,7 +148,7 @@ func TestACP_WS_permissionMidTurn(t *testing.T) {
 		}
 		if sessionID != "" && !promptSent {
 			promptSent = true
-			wsWriteJSONRPC(t, ctx, conn, map[string]any{
+			wsWriteJSONRPC(ctx, t, conn, map[string]any{
 				"jsonrpc": "2.0", "id": 3, "method": "session/prompt",
 				"params": map[string]any{
 					"sessionId": sessionID,
