@@ -308,90 +308,36 @@ func TestToolsAsJsonWithNamespaces(t *testing.T) {
 }
 
 func TestNewTool_validation(t *testing.T) {
-	t.Run("valid tool", func(t *testing.T) {
-		tool := NewTool(ToolConfig{Name: "my_tool", Handler: zeroArgsStringHandler})
-		if tool == nil {
-			t.Fatal("expected non-nil tool")
-		}
-	})
-
-	t.Run("empty name", func(t *testing.T) {
-		defer func() {
-			if r := recover(); r == nil {
-				t.Fatal("expected panic")
-			}
-		}()
-		NewTool(ToolConfig{Handler: zeroArgsStringHandler})
-	})
-
-	t.Run("handler not a function", func(t *testing.T) {
-		defer func() {
-			r := recover()
-			if r == nil {
-				t.Fatal("expected panic")
-			}
-			if !strings.Contains(fmt.Sprint(r), "must be a function") {
-				t.Fatalf("got %v", r)
-			}
-		}()
-		NewTool(ToolConfig{Name: "t", Handler: "not a func"})
-	})
-
-	t.Run("handler wrong return count", func(t *testing.T) {
-		defer func() {
-			r := recover()
-			if r == nil {
-				t.Fatal("expected panic")
-			}
-			if !strings.Contains(fmt.Sprint(r), "must return") {
-				t.Fatalf("got %v", r)
-			}
-		}()
-		NewTool(ToolConfig{Name: "t", Handler: func() string { return "" }})
-	})
-
-	t.Run("handler wrong return type", func(t *testing.T) {
-		defer func() {
-			r := recover()
-			if r == nil {
-				t.Fatal("expected panic")
-			}
-			if !strings.Contains(fmt.Sprint(r), "must return") {
-				t.Fatalf("got %v", r)
-			}
-		}()
-		NewTool(ToolConfig{Name: "t", Handler: func() (string, string) { return "", "" }})
-	})
-
-	t.Run("handler arg not struct", func(t *testing.T) {
-		defer func() {
-			r := recover()
-			if r == nil {
-				t.Fatal("expected panic")
-			}
-			if !strings.Contains(fmt.Sprint(r), "must be a struct") {
-				t.Fatalf("got %v", r)
-			}
-		}()
-		NewTool(ToolConfig{Name: "t", Handler: func(ctx context.Context, s string) (string, error) { return s, nil }})
-	})
-
-	t.Run("handler too many args", func(t *testing.T) {
-		defer func() {
-			r := recover()
-			if r == nil {
-				t.Fatal("expected panic")
-			}
-			msg := fmt.Sprint(r)
-			if !strings.Contains(msg, "too many parameters") && !strings.Contains(msg, "unexpected parameter") {
-				t.Fatalf("got %v", r)
-			}
-		}()
-		// Four parameters exceeds (ctx, args, runtime).
-		NewTool(ToolConfig{Name: "t", Handler: func(ctx context.Context, a BasicArgs, b BasicArgs, c BasicArgs) (string, error) {
+	if NewTool(ToolConfig{Name: "my_tool", Handler: zeroArgsStringHandler}) == nil {
+		t.Fatal("valid tool")
+	}
+	for _, c := range []struct {
+		name    string
+		cfg     ToolConfig
+		wantSub string
+	}{
+		{"empty name", ToolConfig{Handler: zeroArgsStringHandler}, ""},
+		{"not a function", ToolConfig{Name: "t", Handler: "not a func"}, "must be a function"},
+		{"wrong return count", ToolConfig{Name: "t", Handler: func() string { return "" }}, "must return"},
+		{"wrong return type", ToolConfig{Name: "t", Handler: func() (string, string) { return "", "" }}, "must return"},
+		{"arg not struct", ToolConfig{Name: "t", Handler: func(ctx context.Context, s string) (string, error) { return s, nil }}, "must be a struct"},
+		{"too many args", ToolConfig{Name: "t", Handler: func(ctx context.Context, a BasicArgs, b BasicArgs, c BasicArgs) (string, error) {
 			return "", nil
-		}})
-	})
+		}}, ""}, // "too many parameters" or "unexpected parameter"
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			defer func() {
+				r := recover()
+				if r == nil {
+					t.Fatal("expected panic")
+				}
+				if c.wantSub != "" && !strings.Contains(fmt.Sprint(r), c.wantSub) {
+					t.Fatalf("got %v", r)
+				}
+			}()
+			NewTool(c.cfg)
+		})
+	}
 }
 
 func TestTypeToJSONSchema(t *testing.T) {
@@ -523,4 +469,115 @@ func contains(slice []string, val string) bool {
 func asParams(t *testing.T, tool *Tool) map[string]any {
 	t.Helper()
 	return tool.AsJson()["parameters"].(map[string]any)
+}
+
+// TestNewTool_pointerArgsAndNonStringResultAndBadArgs: tool definition/invoke outcomes.
+func TestNewTool_pointerArgsAndNonStringResultAndBadArgs(t *testing.T) {
+	type args struct {
+		Name string `json:"name"`
+	}
+	tool := NewTool(ToolConfig{
+		Name: "ptr_args",
+		Handler: func(ctx context.Context, a *args) (string, error) {
+			if a == nil || a.Name == "" {
+				return "empty", nil
+			}
+			return a.Name, nil
+		},
+	})
+	res, err := tool.invoke(context.Background(), `{"name":"x"}`, HarnessRuntime{})
+	got := res.output
+	if err != nil || got != "x" {
+		t.Fatalf("got %q %v", got, err)
+	}
+	// Type mismatch in JSON → invoke error.
+	_, err = tool.invoke(context.Background(), `{"name":123}`, HarnessRuntime{})
+	if err == nil {
+		t.Fatal("want unmarshal error")
+	}
+
+	// Non-string result marshaled to JSON.
+	tool2 := NewTool(ToolConfig{
+		Name: "struct_out",
+		Handler: func(ctx context.Context) (struct {
+			N int `json:"n"`
+		}, error) {
+			return struct {
+				N int `json:"n"`
+			}{N: 7}, nil
+		},
+	})
+	res, err = tool2.invoke(context.Background(), "", HarnessRuntime{})
+	got = res.output
+	if err != nil || !strings.Contains(got, "7") {
+		t.Fatalf("got %q %v", got, err)
+	}
+
+	// Unmarshallable result type → error.
+	tool3 := NewTool(ToolConfig{
+		Name: "bad_out",
+		Handler: func(ctx context.Context) (chan int, error) {
+			return make(chan int), nil
+		},
+	})
+	_, err = tool3.invoke(context.Background(), "", HarnessRuntime{})
+	if err == nil {
+		t.Fatal("want marshal result error")
+	}
+}
+
+// time.Time fields serialize as strings in the tool schema.
+func TestNewTool_depthLimitAndTimeFields(t *testing.T) {
+	type L12 struct {
+		X string `json:"x"`
+	}
+	type L11 struct {
+		N L12 `json:"n"`
+	}
+	type L10 struct {
+		N L11 `json:"n"`
+	}
+	type L9 struct {
+		N L10 `json:"n"`
+	}
+	type L8 struct {
+		N L9 `json:"n"`
+	}
+	type L7 struct {
+		N L8 `json:"n"`
+	}
+	type L6 struct {
+		N L7 `json:"n"`
+	}
+	type L5 struct {
+		N L6 `json:"n"`
+	}
+	type L4 struct {
+		N L5 `json:"n"`
+	}
+	type L3 struct {
+		N L4 `json:"n"`
+	}
+	type L2 struct {
+		N L3 `json:"n"`
+	}
+	type L1 struct {
+		N    L2        `json:"n"`
+		When time.Time `json:"when"`
+	}
+	tool := NewTool(ToolConfig{
+		Name: "deep",
+		Handler: func(ctx context.Context, a L1) (string, error) {
+			return "ok", nil
+		},
+	})
+	params := tool.AsJson()["parameters"].(map[string]any)
+	props := params["properties"].(map[string]any)
+	when, ok := props["when"].(map[string]any)
+	if !ok || when["type"] != "string" {
+		t.Fatalf("time.Time should be schema string, got %v", props["when"])
+	}
+	if _, ok := props["n"]; !ok {
+		t.Fatal("nested field missing")
+	}
 }

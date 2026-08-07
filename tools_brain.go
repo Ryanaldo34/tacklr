@@ -27,7 +27,7 @@ type readObjectArgs struct {
 func (b brainTools) newReadObjectTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "read",
-		DisplayName: "Read Object",
+		DisplayName: "Read {object_id}",
 		Description: `Read the full contents of a knowledge-base object by id.
 
 Use after search, find_exact, find_objects, or expand when you need the complete body of a known object. Pass the object UUID from a prior rich result. Do not invent ids. Prefer reading only objects you will use or cite.`,
@@ -59,11 +59,11 @@ type schemaArgs struct {
 func (b brainTools) newSchemaTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "schema",
-		DisplayName: "Knowledge Schema",
+		DisplayName: "Schema {kind}",
 		Description: `Discover structured filter fields and kind documentation for the knowledge base.
 
 Call with a kind to see filterable_fields (name, type, operators) for that kind. Call with no kind to list registered kinds. filter_usage lists which tools accept those fields: search, find_exact, and find_objects share the same filter keys. Prefer schema() before inventing property names in filters. When kinds are registered, property filters require a kind key (or find_objects.kinds). Core keys: kind, title, created_after, created_before, updated_after, updated_before.`,
-		Category: streaming.ToolCategoryThink,
+		Category: streaming.ToolCategoryRead,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
 		Handler: func(ctx context.Context, args schemaArgs, runtime HarnessRuntime) (string, error) {
@@ -90,7 +90,7 @@ type queryArgs struct {
 func (b brainTools) newSearchTool() *Tool {
 	return b.newQueryTool(ToolConfig{
 		Name:        "search",
-		DisplayName: "Knowledge Search",
+		DisplayName: "Search knowledge: {query}",
 		Description: `Search stored content (documents, notes, chunks) in the knowledge corpus. Returns ranked parent objects with evidence snippets.
 
 Use for open questions and document-style evidence. Prefer schema() before inventing filter keys; property filters require kind when kinds are registered. All structured filters belong on this tool (there is no separate filtered-search tool). Rewrite the user ask into a good retrieval query when helpful.
@@ -105,7 +105,7 @@ Do not use this only to discover relationships—use expand once you have an id.
 func (b brainTools) newFindExactTool() *Tool {
 	return b.newQueryTool(ToolConfig{
 		Name:        "find_exact",
-		DisplayName: "Find Exact",
+		DisplayName: "Find exact: {query}",
 		Description: `Find knowledge objects by exact or near-exact match (UUID, title, path-like phrases) in the content store.
 
 Prefer this over search when you have a precise string or UUID. Returns ranked parents with evidence. When kinds are registered, property filters require kind. Use continue for more pages; use read for full content. For meaning-based entity lookup without an exact string, use find_objects when available.`,
@@ -149,7 +149,7 @@ type continueArgs struct {
 func (b brainTools) newContinueTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "continue",
-		DisplayName: "Continue Results",
+		DisplayName: "Continue results",
 		Description: `Return the next page of a prior ranked result set from search, find_exact, find_objects, or large expand.
 
 Pass the result_set_id from the previous call. Each new search, find_exact, find_objects, or large expand replaces the active result set — older result_set_id values stop working.`,
@@ -185,7 +185,7 @@ type expandArgs struct {
 func (b brainTools) newExpandTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "expand",
-		DisplayName: "Expand Object",
+		DisplayName: "Expand {object_id}",
 		Description: `Show objects structurally connected to a known object_id—not an open search.
 
 From a parent: ordered children (containment). From a part: parent and nearby siblings. Omit relation_types for containment only; use contains/part_of if mixed with graph labels. Other relation_types need a graph backend (e.g. about, references, blocked_by). Prefer expand first when the active entity id is already known (e.g. "risks on this deal"). Large lists return result_set_id — use continue for more pages. Use read for full content.`,
@@ -271,7 +271,7 @@ type findLinksArgs struct {
 func (b brainTools) newFindLinksTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "find_links",
-		DisplayName: "Find Links",
+		DisplayName: "Find links: {query}",
 		Description: `Find cross-object relationships by text on edge metadata (note), not document bodies.
 
 Use when the ask is about how objects are linked (e.g. notes on an about edge). Returns from/to rich objects plus relation meta. Prefer find_objects to land on entities first; use expand to walk from a known id. relation_type is required. Hosts must ensure an edge text index for that relation label on Helix (EnsureEdgeTextIndex) before this tool is useful.`,
@@ -296,7 +296,7 @@ Use when the ask is about how objects are linked (e.g. notes on an about edge). 
 func (b brainTools) newFindObjectsTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "find_objects",
-		DisplayName: "Find Objects",
+		DisplayName: "Find objects: {query}",
 		Description: `Find knowledge objects as entities (whole objects of given kinds), not long document ranking.
 
 Use to resolve which tracked object matches an ask, or to find similar saved objects (facts, discoveries, memories, deals as host kinds). Rewrite the user ask into a good semantic query. Optional filters use the same filterable_fields as search — call schema() first for valid keys/types. Prefer expand first when the active entity id is already known. For bulk document/note evidence, use search instead. After an id, use expand for relationships. Use continue when has_more.`,
@@ -322,7 +322,7 @@ Use to resolve which tracked object matches an ask, or to find similar saved obj
 func (b brainTools) newLinkTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "link",
-		DisplayName: "Link Objects",
+		DisplayName: "Link {from_id} → {to_id}",
 		Description: `Create a cross-object relationship (graph edge) between two first-class knowledge objects.
 
 Both ends must already exist under the current search namespace, must not be soft-deleted, and must not be part/chunk objects (no parent_id). Examples: email→deal (about), deal→buyer (has_buyer), fact→deal (about). Optional note/status/role/confidence/evidence_id annotate why the link exists; expand returns that metadata on neighbors. Containment (parent/child) uses parent_id on save, not this tool. Re-linking the same pair updates metadata.`,
@@ -499,9 +499,9 @@ func newBrainTools(engine *brain.Engine, sc *brain.SearchContext, kinds brain.Wr
 	for _, s := range []struct {
 		name, display, kind, role string
 	}{
-		{"save_discovery", "Save Discovery", kinds.Discovery, "working discovery or finding"},
-		{"save_fact", "Save Fact", kinds.Fact, "durable fact"},
-		{"save_memory", "Save Memory", kinds.Memory, "preference or durable memory"},
+		{"save_discovery", "Save discovery: {title}", kinds.Discovery, "working discovery or finding"},
+		{"save_fact", "Save fact: {title}", kinds.Fact, "durable fact"},
+		{"save_memory", "Save memory: {title}", kinds.Memory, "preference or durable memory"},
 	} {
 		if kind := strings.TrimSpace(s.kind); kind != "" {
 			tools = append(tools, b.newSaveTool(s.name, s.display, kind, s.role))

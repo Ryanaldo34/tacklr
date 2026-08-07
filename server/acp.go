@@ -354,13 +354,7 @@ func eventToAcpJsonRpc(threadId string, event *streaming.StreamEvent) ([][]byte,
 				"method":  "session/update",
 				"params": map[string]any{
 					"sessionId": threadId,
-					"update": map[string]any{
-						"sessionUpdate": "tool_call",
-						"toolCallId":    acpToolCallID(toolCall),
-						"title":         toolCall.Name,
-						"status":        "in_progress",
-						"kind":          toolCall.Category,
-					},
+					"update":    acpToolCallUpdate(toolCall, "tool_call", "in_progress", ""),
 				},
 			}
 			bytes, _ := json.Marshal(data)
@@ -428,14 +422,8 @@ func eventToAcpJsonRpc(threadId string, event *streaming.StreamEvent) ([][]byte,
 			status = "completed"
 		}
 		// Terminal status uses tool_call_update with ACP ToolCallContent[] (not a bare string).
-		update := map[string]any{
-			"sessionUpdate": "tool_call_update",
-			"toolCallId":    acpToolCallID(tc),
-			"title":         tc.Name,
-			"status":        status,
-		}
+		update := acpToolCallUpdate(tc, "tool_call_update", status, event.Content)
 		if event.Content != "" {
-			update["content"] = acpToolCallContent(event.Content)
 			update["rawOutput"] = map[string]any{"output": event.Content}
 		}
 		data := map[string]any{
@@ -497,12 +485,32 @@ func eventToAcpJsonRpc(threadId string, event *streaming.StreamEvent) ([][]byte,
 	}
 }
 
-// acpToolCallID prefers ID, then CallID — providers like llama.cpp may only set one.
-func acpToolCallID(tc streaming.ToolCall) string {
-	if tc.ID != "" {
-		return tc.ID
+// acpToolCallID is the client lifecycle id (same as ToolCall.Key).
+func acpToolCallID(tc streaming.ToolCall) string { return tc.Key() }
+
+// acpToolCallUpdate builds the common tool_call / tool_call_update body.
+// Title is the human label; name is the programmatic tool id (ACP RFD-aligned).
+func acpToolCallUpdate(tc streaming.ToolCall, sessionUpdate, status, content string) map[string]any {
+	title := tc.Title
+	if title == "" {
+		title = tc.Name
 	}
-	return tc.CallID
+	update := map[string]any{
+		"sessionUpdate": sessionUpdate,
+		"toolCallId":    acpToolCallID(tc),
+		"title":         title,
+		"status":        status,
+	}
+	if tc.Name != "" {
+		update["name"] = tc.Name
+	}
+	if tc.Category != "" {
+		update["kind"] = tc.Category
+	}
+	if content != "" {
+		update["content"] = acpToolCallContent(content)
+	}
+	return update
 }
 
 // acpToolCallContent wraps plain text as ACP ToolCallContent[].

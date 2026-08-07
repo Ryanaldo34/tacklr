@@ -166,11 +166,7 @@ func (a *AgentHarness) checkpointSession(ctx context.Context) error {
 }
 
 func (a *AgentHarness) constructSystemPrompt() string {
-	if !a.skillsInitialized {
-		if err := a.initSkills(context.Background()); err != nil {
-			slog.Error("failed to load skills", "area", "startup", "error", err)
-		}
-	}
+	// Skills load once in finishInit / Run; do not re-init here (prompt caching).
 	var skillCatalog string
 	if len(a.skillByName) > 0 {
 		names := make([]string, 0, len(a.skillByName))
@@ -393,8 +389,9 @@ func emit(ctx context.Context, out chan<- StreamEvent, ev StreamEvent) bool {
 }
 
 // streamChunk maps a model chunk to a harness StreamEvent.
-// Function-call display name/category are set on a copy; execution still uses
-// the real tool Name. Ignores StreamEventComplete (usage only; Run ends the turn).
+// Function-call Category and Title are set on a copy; Name stays programmatic
+// so execution and model history keep using the real tool name.
+// Ignores StreamEventComplete (usage only; Run ends the turn).
 func (a *AgentHarness) streamChunk(ctx context.Context, chunk LLMResponseChunk, out chan<- StreamEvent) bool {
 	if chunk.Type == StreamEventComplete {
 		return true
@@ -403,14 +400,7 @@ func (a *AgentHarness) streamChunk(ctx context.Context, chunk LLMResponseChunk, 
 	if chunk.Type == streaming.StreamEventFunctionCall && len(chunk.ToolCalls) > 0 {
 		toolCalls = append([]ToolCall(nil), chunk.ToolCalls...)
 		for i := range toolCalls {
-			tool := a.findTool(toolCalls[i].Name, toolCalls[i].Namespace)
-			if tool == nil {
-				continue
-			}
-			toolCalls[i].Category = tool.Category
-			if tool.DisplayName != "" {
-				toolCalls[i].Name = tool.DisplayName
-			}
+			toolCalls[i] = a.withToolPresentation(toolCalls[i])
 		}
 	}
 	evErr := chunk.Error
@@ -427,21 +417,21 @@ func (a *AgentHarness) streamChunk(ctx context.Context, chunk LLMResponseChunk, 
 	})
 }
 
-// toolCallKey is the client/lifecycle id: provider item id, else call_id.
-func toolCallKey(tc ToolCall) string {
-	if tc.ID != "" {
-		return tc.ID
+// withToolPresentation fills Category and Title for client-facing tool events.
+// Name is never rewritten.
+func (a *AgentHarness) withToolPresentation(tc ToolCall) ToolCall {
+	tool := a.findTool(tc.Name, tc.Namespace)
+	if tool == nil {
+		return tc
 	}
-	return tc.CallID
+	tc.Category = tool.Category
+	tc.Title = ResolveToolTitle(tool.DisplayName, tool.Name, tc.Arguments)
+	return tc
 }
 
-// toolCallWireID is the Responses API call_id field: CallID, else ID.
-func toolCallWireID(tc ToolCall) string {
-	if tc.CallID != "" {
-		return tc.CallID
-	}
-	return tc.ID
-}
+// toolCallKey / toolCallWireID delegate to streaming.ToolCall methods.
+func toolCallKey(tc ToolCall) string    { return tc.Key() }
+func toolCallWireID(tc ToolCall) string { return tc.WireID() }
 
 // stripUnpairedToolCallsAfterInferenceError removes unpaired function_call /
 // tool-result messages so the next prompt has valid Responses pairing.
@@ -582,6 +572,7 @@ func (a *AgentHarness) emitToolResult(ctx context.Context, out chan<- StreamEven
 	if status != "" {
 		tc.Status = status
 	}
+	tc = a.withToolPresentation(tc)
 	msg := &Message{
 		Role:       RoleTool,
 		ToolCallID: toolCallWireID(tc),

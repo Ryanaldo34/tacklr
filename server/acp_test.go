@@ -443,7 +443,7 @@ func TestEventToAcpJsonRpc_functionCall(t *testing.T) {
 	ev := &streaming.StreamEvent{
 		Type: streaming.StreamEventFunctionCall,
 		ToolCalls: []tacklr.ToolCall{
-			{ID: "tc-1", Name: "read_file", Category: "read"},
+			{ID: "tc-1", Name: "complete_todo", Title: "Complete Ship", Category: "think"},
 		},
 	}
 	frames, err := eventToAcpJsonRpc("thread-1", ev)
@@ -462,6 +462,15 @@ func TestEventToAcpJsonRpc_functionCall(t *testing.T) {
 	}
 	if update["status"] != "in_progress" {
 		t.Errorf("status = %v, want in_progress", update["status"])
+	}
+	if update["title"] != "Complete Ship" {
+		t.Errorf("title = %v, want Complete Ship", update["title"])
+	}
+	if update["name"] != "complete_todo" {
+		t.Errorf("name = %v, want complete_todo", update["name"])
+	}
+	if update["kind"] != "think" {
+		t.Errorf("kind = %v, want think", update["kind"])
 	}
 }
 

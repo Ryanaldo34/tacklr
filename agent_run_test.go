@@ -14,7 +14,6 @@ import (
 	mcpruntime "github.com/ryanaldo34/tacklr/internal/mcp"
 	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/stores"
-	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
 // drainEvents collects all events until the channel closes.
@@ -51,6 +50,51 @@ func hasToolResultContent(events []StreamEvent, substr string) bool {
 		}
 	}
 	return false
+}
+
+// sequentialToolModel emits each tool-call batch on successive Invokes, then a final message.
+func sequentialToolModel(batches ...[]ToolCall) *mockStrategy {
+	var n int
+	return &mockStrategy{
+		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
+			n++
+			if n <= len(batches) {
+				ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: batches[n-1], IsComplete: true}
+				return
+			}
+			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
+		},
+	}
+}
+
+func toolCall(id, name, args string) ToolCall {
+	return ToolCall{ID: id, CallID: id, Name: name, Arguments: args}
+}
+
+// runPrompt builds a harness, runs one prompt, drains events. opts may be nil.
+func runPrompt(t *testing.T, model *mockStrategy, opts AgentOptions) (*AgentHarness, []StreamEvent) {
+	t.Helper()
+	if opts.Model == nil {
+		opts.Model = model
+	}
+	if opts.Config.MaxWindowSize == 0 {
+		opts.Config.MaxWindowSize = 8192
+	}
+	h := NewAgent(context.Background(), opts)
+	t.Cleanup(h.Close)
+	_ = h.SessionID() // exercise getter (empty when no store/session id set)
+	events, err := h.Run(context.Background(), "hi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return h, drainEvents(events)
+}
+
+func requireToolResult(t *testing.T, got []StreamEvent, substr string) {
+	t.Helper()
+	if !hasToolResultContent(got, substr) {
+		t.Fatalf("want tool result containing %q, got %+v", substr, summarizeEvents(got))
+	}
 }
 
 // TestRun_uninitializedHarnessFails: Run without constructor setup is rejected.
@@ -824,34 +868,6 @@ func TestNewAgentFromSession_loadError(t *testing.T) {
 	}
 }
 
-// TestRun_stdioWatchDog_turnCompletes: attaching telemetry.StdioWatchDog does not
-// fail a normal harness turn (optional watchdog is safe to wire).
-func TestRun_stdioWatchDog_turnCompletes(t *testing.T) {
-	strategy := &mockStrategy{
-		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
-			ch <- LLMResponseChunk{Type: StreamEventMessage, MessageId: "m1", Content: "ok", IsComplete: true}
-		},
-	}
-	h := NewAgent(context.Background(), AgentOptions{
-		Config:   Config{MaxWindowSize: 8192, SystemPrompt: "test"},
-		Model:    strategy,
-		WatchDog: telemetry.NewStdioWatchDog(),
-	})
-	t.Cleanup(h.Close)
-
-	events, err := h.Run(context.Background(), "hi")
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := drainEvents(events)
-	if !hasEventType(got, StreamEventComplete) {
-		t.Fatal("expected StreamEventComplete")
-	}
-	if hasEventType(got, StreamEventError) {
-		t.Fatal("unexpected turn error")
-	}
-}
-
 // TestRun_watchdogRecordsToolResults: successful tool calls are recorded on the watchdog.
 func TestRun_watchdogRecordsToolResults(t *testing.T) {
 	tool := NewTool(ToolConfig{
@@ -892,13 +908,17 @@ func TestRun_watchdogRecordsToolResults(t *testing.T) {
 	}
 }
 
-// TestRun_displayNameOnFunctionCall_stream: tools with DisplayName surface that
-// name on streamed function_call events without breaking execution.
+// TestRun_displayNameOnFunctionCall_stream: DisplayName templates fill Title;
+// Name stays programmatic so execution keeps working.
 func TestRun_displayNameOnFunctionCall_stream(t *testing.T) {
 	tool := NewTool(ToolConfig{
-		Name:        "internal_name",
-		DisplayName: "Friendly Name",
-		Handler:     func(ctx context.Context) (string, error) { return "ran", nil },
+		Name:        "mark_item",
+		DisplayName: "Complete {title}",
+		Handler: func(ctx context.Context, args struct {
+			Title string `json:"title"`
+		}) (string, error) {
+			return "ran:" + args.Title, nil
+		},
 	})
 	var n int
 	strategy := &mockStrategy{
@@ -908,7 +928,7 @@ func TestRun_displayNameOnFunctionCall_stream(t *testing.T) {
 				ch <- LLMResponseChunk{
 					Type: StreamEventFunctionCall,
 					ToolCalls: []ToolCall{
-						{ID: "d1", CallID: "d1", Name: "internal_name", Arguments: `{}`},
+						{ID: "d1", CallID: "d1", Name: "mark_item", Arguments: `{"title":"Ship"}`},
 					},
 					IsComplete: true,
 				}
@@ -927,21 +947,21 @@ func TestRun_displayNameOnFunctionCall_stream(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := drainEvents(events)
-	var sawDisplay bool
+	var saw bool
 	for _, ev := range got {
 		if ev.Type == StreamEventFunctionCall {
 			for _, tc := range ev.ToolCalls {
-				if tc.Name == "Friendly Name" {
-					sawDisplay = true
+				if tc.Name == "mark_item" && tc.Title == "Complete Ship" {
+					saw = true
 				}
 			}
 		}
 	}
-	if !sawDisplay {
-		t.Fatalf("want display name on function_call stream, got %+v", summarizeEvents(got))
+	if !saw {
+		t.Fatalf("want Name=mark_item Title=Complete Ship on function_call, got %+v", summarizeEvents(got))
 	}
-	if !hasToolResultContent(got, "ran") {
-		t.Fatalf("want tool executed under internal name, got %+v", summarizeEvents(got))
+	if !hasToolResultContent(got, "ran:Ship") {
+		t.Fatalf("want tool executed under programmatic name, got %+v", summarizeEvents(got))
 	}
 }
 

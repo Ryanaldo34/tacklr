@@ -77,7 +77,11 @@ func toolPermissionGate(ctx context.Context, inv ToolInvocation, next ToolCallFu
 		return next(ctx, inv)
 	}
 
-	initPayload, _ := json.Marshal(map[string]any{"toolName": name})
+	title := ResolveToolTitle(inv.Tool.DisplayName, name, inv.ArgsJSON)
+	initPayload, _ := json.Marshal(map[string]any{
+		"toolName": name,
+		"title":    title,
+	})
 	intr, err := inv.Runtime.RaiseInterrupt("tool_permission", initPayload)
 	if err != nil {
 		return "", err

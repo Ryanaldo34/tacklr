@@ -79,7 +79,7 @@ If a call fails because filters conflict, retry with a clearer query and omit ca
 func newWebSearchTool(client *exa.Client) *Tool {
 	return NewTool(ToolConfig{
 		Name:        "web_search",
-		DisplayName: "Web Search",
+		DisplayName: "Search: {query}",
 		Description: webSearchToolDescription,
 		Category:    streaming.ToolCategorySearch,
 		Access:      ToolReadAccess,
@@ -318,7 +318,7 @@ func newWebFetchTool(client *exa.Client) *Tool {
 		Name:        "web_fetch",
 		DisplayName: "Web Fetch",
 		Description: webFetchToolDescription,
-		Category:    streaming.ToolCategorySearch,
+		Category:    streaming.ToolCategoryFetch,
 		Access:      ToolReadAccess,
 		Timeout:     webFetchToolTimeout,
 		Handler: func(ctx context.Context, args webFetchArgs, runtime HarnessRuntime) (string, error) {

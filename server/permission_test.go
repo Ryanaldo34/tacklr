@@ -50,6 +50,21 @@ func TestPermissionToACPParams_emptyToolName(t *testing.T) {
 	}
 }
 
+func TestPermissionToACPParams_resolvedTitleAndName(t *testing.T) {
+	params := PermissionToACPParams("sess", "call_1", interrupt.ToolPermissionInterrupt{
+		ToolName: "complete_todo",
+		Title:    "Complete Ship",
+		Options:  interrupt.DefaultPermissionOptions(),
+	})
+	tc := params["toolCall"].(map[string]any)
+	if tc["title"] != "Complete Ship" {
+		t.Fatalf("title = %v", tc["title"])
+	}
+	if tc["name"] != "complete_todo" {
+		t.Fatalf("name = %v", tc["name"])
+	}
+}
+
 func TestParseToolPermissionFromInterruptData_defaultsOptions(t *testing.T) {
 	// Empty options in serialized data should fall back to defaults.
 	serialized, _ := json.Marshal(map[string]any{"toolName": "x", "options": []any{}})

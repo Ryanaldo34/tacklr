@@ -65,7 +65,10 @@ func PermissionToACPParams(sessionID, toolCallID string, perm interrupt.ToolPerm
 			"kind":     o.Kind,
 		})
 	}
-	title := perm.ToolName
+	title := perm.Title
+	if title == "" {
+		title = perm.ToolName
+	}
 	if title == "" {
 		title = "Tool call"
 	}
@@ -73,6 +76,9 @@ func PermissionToACPParams(sessionID, toolCallID string, perm interrupt.ToolPerm
 		"toolCallId": toolCallID,
 		"title":      title,
 		"status":     "pending",
+	}
+	if perm.ToolName != "" {
+		toolCall["name"] = perm.ToolName
 	}
 	return map[string]any{
 		"sessionId": sessionID,
