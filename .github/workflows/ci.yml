@@ -64,6 +64,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # PR badge commits must land on the PR head (not the merge ref).
+          # Skip token elevation for fork PRs (cannot push).
+          ref: ${{ github.head_ref || github.ref_name }}
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -160,18 +165,22 @@ jobs:
             ## Test coverage
             ${{ steps.cov_summary.outputs.body }}
 
-            Gates are defined in `.testcoverage.yml` (package floors + 95% total after excludes).
+            Gates are defined in `.testcoverage.yml` (library total after excludes).
             Download the **coverage.html** workflow artifact for a line-level report.
 
-      # Keep README coverage badge current on main (shields.io endpoint JSON).
+      # Update shields.io badge JSON on the PR branch only. Direct pushes to main
+      # are blocked by branch protection (PR-only + CodeQL); do not auto-commit on main.
       - name: Commit coverage badge
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: stefanzweifel/git-auto-commit-action@v5
+        if: >
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        uses: stefanzweifel/git-auto-commit-action@v6
         with:
           commit_message: "chore: update coverage badge [skip ci]"
           file_pattern: docs/badges/coverage.json
           commit_user_name: github-actions[bot]
           commit_user_email: 41898282+github-actions[bot]@users.noreply.github.com
+        continue-on-error: true
 
       # Optional: add repository secret CODECOV_TOKEN to publish to Codecov.
       - name: Upload to Codecov
