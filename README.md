@@ -182,13 +182,24 @@ reg.Register("my-agent", server.AgentSpec{
 srv := server.NewServer(reg, server.ACP)
 _ = srv.ServeStdio(ctx, os.Stdin, os.Stdout)
 
-// Or HTTP + SSE
+// ACP over HTTP (RFD Streamable HTTP + WebSocket on /acp):
+//   - WebSocket: GET /acp Upgrade → full-duplex JSON-RPC (best for clients/SDKs)
+//   - Streamable HTTP: POST /acp (initialize→200, else 202) + GET /acp SSE streams
+//   - DELETE /acp tears down Acp-Connection-Id
+// Legacy unary POST / remains for simple curl demos (no mid-turn client RPC).
+// _ = srv.ServeHTTP(ctx, ":8080")
+//
+// WebSocket:     ws://localhost:8080/acp
+// Streamable:    https://localhost:8080/acp  (HTTP/2 recommended for concurrent POST + GET)
+// Affinity cookie: acp_affinity (set on initialize) for sticky load balancers
+
+// Or native HTTP + SSE (non-ACP wire)
 // srv := server.NewServer(reg, server.SSE)
 // _ = srv.ServeHTTP(ctx, ":8080")
 ```
 
 ```bash
-# SSE prompt
+# SSE prompt (native SSE protocol, not ACP)
 curl -N -X POST http://localhost:8080/ \
   -H "Accept: text/event-stream" \
   -d '{"agent_id":"my-agent","prompt":"Hello"}'
@@ -204,8 +215,11 @@ By default it exports OTLP traces/metrics/logs to **`localhost:4317` (gRPC)** wi
 # .env: OPENAI_BASE_URL, OPENAI_API_KEY, OPENAI_MODEL
 # optional: EXA_API_KEY, SKILL_DIRECTORIES, MAX_WINDOW_SIZE, OTEL_*
 go build -o bin/testserver ./cmd/testserver
-./bin/testserver --stdio   # ACP (Zed, etc.)
-./bin/testserver           # HTTP ACP (PORT or :3000)
+./bin/testserver --stdio   # ACP stdio (Zed, etc.)
+./bin/testserver           # HTTP ACP on PORT or :3000
+#   WebSocket:        ws://localhost:3000/acp
+#   Streamable HTTP:  POST/GET/DELETE http://localhost:3000/acp
+#   Legacy unary:     POST http://localhost:3000/
 # or: make testserver
 ```
 

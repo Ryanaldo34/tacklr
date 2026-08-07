@@ -114,7 +114,8 @@ func (m *sseMessageWriter) WriteFrame(data []byte) error {
 	return writeSSEEvent(m.w, m.flusher, eventType, data)
 }
 
-// wsMessageWriter writes raw frames over a WebSocket.
+// wsMessageWriter writes SSE-protocol-shaped frames over a WebSocket.
+// Used by the native SSE protocol only — not ACP.
 type wsMessageWriter struct {
 	ctx context.Context
 	c   *websocket.Conn
@@ -129,6 +130,32 @@ func (m *wsMessageWriter) WriteError(id json.RawMessage, err error) error {
 }
 
 func (m *wsMessageWriter) WriteFrame(data []byte) error {
+	return m.c.Write(m.ctx, websocket.MessageText, data)
+}
+
+// jsonRPCWSMessageWriter writes full JSON-RPC 2.0 envelopes over a WebSocket.
+// Used by ACP WebSocket transport (and future Streamable HTTP demux writers).
+type jsonRPCWSMessageWriter struct {
+	ctx context.Context
+	c   *websocket.Conn
+	mu  sync.Mutex
+}
+
+func (m *jsonRPCWSMessageWriter) WriteResult(id json.RawMessage, result any) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return wsWriteJSON(m.ctx, m.c, map[string]any{"jsonrpc": "2.0", "id": id, "result": result})
+}
+
+func (m *jsonRPCWSMessageWriter) WriteError(id json.RawMessage, err error) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return wsWriteJSON(m.ctx, m.c, jsonRPCErrorBody(id, err))
+}
+
+func (m *jsonRPCWSMessageWriter) WriteFrame(data []byte) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return m.c.Write(m.ctx, websocket.MessageText, data)
 }
 

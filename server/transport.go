@@ -20,6 +20,8 @@ type Server struct {
 	// Client is set for the active stdio connection (outbound Agent→Client RPC).
 	// Prefer Conn.RPC inside protocol handlers; this field supports demux on stdio.
 	Client *ClientBridge
+	// Connections tracks ACP WebSocket (and future Streamable HTTP) connections.
+	Connections *ConnectionRegistry
 }
 
 // NewServer wraps a Registry and one or more protocols.
@@ -31,7 +33,11 @@ func NewServer(r *Registry, protocols ...Protocol) *Server {
 	if len(protocols) == 0 {
 		panic("server: at least one Protocol is required")
 	}
-	return &Server{Registry: r, Protocols: protocols}
+	return &Server{
+		Registry:    r,
+		Protocols:   protocols,
+		Connections: NewConnectionRegistry(),
+	}
 }
 
 type stdioReadResult struct {
@@ -138,7 +144,11 @@ func (s *Server) HTTPMux() *http.ServeMux {
 			r := route
 			pattern := r.Method + " " + r.Pattern
 			mux.HandleFunc(pattern, func(w http.ResponseWriter, req *http.Request) {
-				env := ProtocolEnv{Registry: s.Registry, Conn: &Conn{}}
+				env := ProtocolEnv{
+					Registry:    s.Registry,
+					Conn:        &Conn{},
+					Connections: s.Connections,
+				}
 				r.Handler(env, w, req)
 			})
 		}
