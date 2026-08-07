@@ -191,7 +191,7 @@ func (s *OpenAIInferenceStrategy) CountTokens(ctx context.Context, messages []*t
 
 	body, _ := json.Marshal(reqBody)
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, s.baseURL+"/responses/input_tokens", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(s.baseURL, "/")+"/responses/input_tokens", bytes.NewReader(body))
 	if err != nil {
 		return 0, fmt.Errorf("build token-count request: %w", err)
 	}
@@ -323,7 +323,7 @@ func (s *OpenAIInferenceStrategy) Invoke(ctx context.Context, messages []*tacklr
 	go func() {
 		defer close(events)
 
-		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, s.baseURL+"/responses", bytes.NewReader(body))
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(s.baseURL, "/")+"/responses", bytes.NewReader(body))
 		if err != nil {
 			err = fmt.Errorf("build provider request: %w", err)
 			slog.ErrorContext(ctx, "failed to build model provider request", "error", err)

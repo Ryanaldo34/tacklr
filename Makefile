@@ -67,3 +67,10 @@ check: vet lint cover
 # Local ACP harness (reads OTEL_* / .env; see cmd/testserver).
 testserver:
 	go run ./cmd/testserver
+
+# Multi-turn agent harness benchmarks (OPENAI_*; optional EXA_API_KEY). See cmd/agent-bench.
+agent-bench:
+	go run ./cmd/agent-bench -suite all
+
+agent-bench-dry:
+	go run ./cmd/agent-bench -dry-run -list

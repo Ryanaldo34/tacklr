@@ -416,6 +416,26 @@ make test
 make vet
 ```
 
+### Agent harness benchmarks
+
+Multi-turn scenarios (plan, memory/brain, multi-hop QA, domain end-state, optional web) live in `internal/agentbench` with **seed data in Go**. Runner:
+
+```bash
+# List cases (no model)
+go run ./cmd/agent-bench -list
+go run ./cmd/agent-bench -dry-run
+
+# Live run (same env as testserver)
+export OPENAI_BASE_URL OPENAI_API_KEY OPENAI_MODEL
+# hybrid dense channel (default text-embedding-3-small; same base URL/key)
+export OPENAI_EMBEDDING_MODEL=text-embedding-3-small
+# optional: EXA_API_KEY for web_augmented
+go run ./cmd/agent-bench -suite all -out /tmp/agent-bench.json
+# lexical-only ablation: go run ./cmd/agent-bench -lexical-only ...
+```
+
+Brain is seeded and agent saves with **hybrid search** (BM25-style lexical + dense embeddings via OpenAI-compatible `/embeddings`). Not run in default CI (model cost). Cases are industry-aligned (LoCoMo-style memory, multi-hop QA, τ-bench-style domain), not official leaderboard ports.
+
 Contribution rules and design ethos live in [`AGENTS.md`](AGENTS.md).
 
 ---
