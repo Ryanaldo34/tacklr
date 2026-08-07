@@ -1196,7 +1196,6 @@ func TestRun_cancelMidStream_endsTurn(t *testing.T) {
 	}
 }
 
-
 func TestRun_reasoningCapturedInContextWindow(t *testing.T) {
 	mock := &mockStrategy{
 		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
