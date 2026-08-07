@@ -101,7 +101,7 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 				announceOrder := make([]string, 0)
 				failAnnounced := func(reason string) {
 					for _, id := range announceOrder {
-						tc := announced[id]
+						tc := a.withToolPresentation(announced[id])
 						tc.Status = "error"
 						_ = emit(ctx, out, StreamEvent{
 							Type:      StreamEventToolResult,
@@ -182,7 +182,7 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 					if _, ok := executable[id]; ok {
 						continue
 					}
-					tc := announced[id]
+					tc := a.withToolPresentation(announced[id])
 					tc.Status = "error"
 					if !emit(ctx, out, StreamEvent{
 						Type:      StreamEventToolResult,

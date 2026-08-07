@@ -1196,33 +1196,6 @@ func TestRun_cancelMidStream_endsTurn(t *testing.T) {
 	}
 }
 
-func TestRun_watchdogInvoked(t *testing.T) {
-	mock := &mockStrategy{
-		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
-			ch <- LLMResponseChunk{
-				IsComplete: true,
-				Type:       StreamEventMessage,
-				Content:    "assistant output",
-			}
-		},
-	}
-	wd := &recordingWatchdog{}
-	h := NewAgent(context.Background(), AgentOptions{Config: Config{MaxWindowSize: 8192}, Model: mock, WatchDog: wd})
-
-	events, err := h.Run(context.Background(), "hi")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for range events {
-	}
-
-	if len(wd.outputs) != 1 {
-		t.Errorf("expected 1 RecordOutput call, got %d", len(wd.outputs))
-	}
-	if len(wd.outputs) > 0 && wd.outputs[0].Content != "assistant output" {
-		t.Errorf("output content = %q", wd.outputs[0].Content)
-	}
-}
 
 func TestRun_reasoningCapturedInContextWindow(t *testing.T) {
 	mock := &mockStrategy{

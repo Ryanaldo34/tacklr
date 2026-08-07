@@ -112,17 +112,6 @@ func TestSpawnWorker_viaParentTurn_unknownWorker(t *testing.T) {
 	}
 }
 
-func TestSpawnWorker_unknownWorker(t *testing.T) {
-	h := NewAgent(context.Background(), AgentOptions{
-		Config: Config{MaxWindowSize: 8192},
-		Model:  &mockStrategy{},
-	})
-	_, err := h.runWorker(context.Background(), "missing", "do something", h.runtime)
-	if !errors.Is(err, ErrWorkerNotFound) {
-		t.Fatalf("err = %v, want ErrWorkerNotFound", err)
-	}
-}
-
 func TestSpawnWorker_emptyTask(t *testing.T) {
 	workerModel := &mockStrategy{}
 	h := NewAgent(context.Background(), AgentOptions{

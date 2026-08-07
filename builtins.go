@@ -58,7 +58,7 @@ func (s internalSession) setTodos(todos []Todo) {
 
 var askUserChoiceTool = NewTool(ToolConfig{
 	Name:        "ask_user_choice",
-	DisplayName: "Ask User Choice",
+	DisplayName: "Ask: {question}",
 	Description: "Ask the user a multiple-choice clarification question and wait for their selection. Use when you need a discrete decision before continuing. Provide clear, mutually exclusive options.",
 	Category:    streaming.ToolCategoryThink,
 	Handler: func(ctx context.Context, args askUserChoiceArgs, runtime HarnessRuntime) (string, error) {
@@ -172,7 +172,7 @@ func newListPlanTool(s internalSession) *Tool {
 		Name:        "list_plan",
 		DisplayName: "List Plan",
 		Description: "Returns the active plan todo list exactly as stored (titles, statuses, descriptions, in order). Use before complete_todo or edit_plan so titles match exactly. Call after a handoff or whenever plan titles are unclear.",
-		Category:    streaming.ToolCategoryThink,
+		Category:    streaming.ToolCategoryRead,
 		Handler: func(ctx context.Context, _ HarnessRuntime) (string, error) {
 			plan := s.sm.Plan().Get()
 			if len(plan) == 0 {
@@ -194,9 +194,9 @@ func newListPlanTool(s internalSession) *Tool {
 func newCompleteTodoTool(s internalSession) *Tool {
 	return NewTool(ToolConfig{
 		Name:        "complete_todo",
-		DisplayName: "Complete Todo",
+		DisplayName: "Complete {title}",
 		Description: "Marks a todo as completed by exact title (must match list_plan / create_plan titles). Cannot complete a todo that is already completed or not found in the plan. When open work remains, advances the next todo and runs a context handoff. When the plan is fully done, returns success without a handoff so the agent can finish the user-facing answer.",
-		Category:    streaming.ToolCategoryThink,
+		Category:    streaming.ToolCategoryEdit,
 		Handler: func(ctx context.Context, args completeTodoArgs, _ HarnessRuntime) (BuiltinResult, error) {
 			plan := s.sm.Plan().Get()
 			if plan == nil {
@@ -248,7 +248,7 @@ func newEditPlanTool(s internalSession) *Tool {
 		Name:        "edit_plan",
 		DisplayName: "Edit Plan",
 		Description: "Edits an existing plan by removing and/or adding todos. Optionally replace the full plaintext plan document via plan (must differ from the current document). Omit plan when only changing todos. Cannot delete completed todos.",
-		Category:    streaming.ToolCategoryThink,
+		Category:    streaming.ToolCategoryEdit,
 		Handler: func(ctx context.Context, args editTodosArgs, _ HarnessRuntime) (BuiltinResult, error) {
 			plan := s.sm.Plan().Get()
 			if plan == nil {

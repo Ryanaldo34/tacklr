@@ -105,11 +105,28 @@ type ToolCall struct {
 	ID        string       `json:"id,omitempty"`
 	Type      string       `json:"type,omitempty"`
 	CallID    string       `json:"call_id"`
-	Name      string       `json:"name,omitempty"`
+	Name      string       `json:"name,omitempty"`  // programmatic tool id (model-facing)
+	Title     string       `json:"title,omitempty"` // human-readable invocation label for UIs/protocols
 	Category  ToolCategory `json:"category,omitempty"`
 	Namespace string       `json:"namespace,omitempty"`
 	Arguments string       `json:"arguments,omitempty"`
 	Status    string       `json:"status,omitempty"`
+}
+
+// Key is the client/lifecycle id: provider item id, else call_id.
+func (tc ToolCall) Key() string {
+	if tc.ID != "" {
+		return tc.ID
+	}
+	return tc.CallID
+}
+
+// WireID is the Responses API call_id field: CallID, else ID.
+func (tc ToolCall) WireID() string {
+	if tc.CallID != "" {
+		return tc.CallID
+	}
+	return tc.ID
 }
 
 // StreamEventType categorizes events sent to the caller.

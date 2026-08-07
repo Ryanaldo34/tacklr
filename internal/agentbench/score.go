@@ -133,45 +133,13 @@ func containsAll(text string, subs []string) bool {
 	return true
 }
 
-// normalizeToolName maps stream tool labels (often DisplayName) to canonical names.
-// e.g. "Create Plan" → "create_plan", "Knowledge Search" → "search".
+// normalizeToolName lowercases a programmatic tool name for scoring.
 func normalizeToolName(name string) string {
 	n := strings.ToLower(strings.TrimSpace(name))
 	if n == "" || n == "?" {
 		return ""
 	}
-	n = strings.ReplaceAll(n, " ", "_")
-	// DisplayName → tool Name (tools_brain / builtins).
-	switch n {
-	case "knowledge_search":
-		return "search"
-	case "knowledge_schema":
-		return "schema"
-	case "find_objects", "find_object":
-		return "find_objects"
-	case "find_exact":
-		return "find_exact"
-	case "find_links":
-		return "find_links"
-	case "expand_object", "expand":
-		return "expand"
-	case "read_object", "read":
-		return "read"
-	case "link_objects", "link":
-		return "link"
-	case "save_memory", "save_fact", "save_discovery":
-		return n
-	case "create_plan", "list_plan", "edit_plan", "complete_todo":
-		return n
-	case "ask_user_choice":
-		return "ask_user_choice"
-	case "web_search", "web_fetch":
-		return n
-	case "continue":
-		return "continue"
-	default:
-		return n
-	}
+	return n
 }
 
 func toolsSatisfy(used []string, groups [][]string) bool {

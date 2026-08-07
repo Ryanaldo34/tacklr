@@ -119,7 +119,7 @@ type spawnWorkerArgs struct {
 func (a *AgentHarness) spawnTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "spawn_worker",
-		DisplayName: "Spawn Worker",
+		DisplayName: "Spawn {worker_name}",
 		Description: "Use to spawn a sub-agent or \"worker\" to help parallelize a task or handle smaller subtasks and assist with research. Ensure the task is clearly outlined with a clear goal, acceptance criteria, and helpful context. Choose worker_name from the AVAILABLE SUB-AGENTS listed in the system prompt.",
 		Category:    streaming.ToolCategoryExecute,
 		Handler: func(ctx context.Context, args spawnWorkerArgs, runtime HarnessRuntime) (string, error) {

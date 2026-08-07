@@ -15,10 +15,9 @@ func TestToolsSatisfy_andContains(t *testing.T) {
 	if toolsSatisfy(used, [][]string{{"web_search"}}) {
 		t.Fatal("must fail")
 	}
-	// Stream uses DisplayName ("Create Plan", "Knowledge Search").
-	display := []string{"Create Plan", "Save Memory", "Knowledge Search", "Ask User Choice", "?"}
-	if !toolsSatisfy(display, [][]string{{"create_plan"}, {"save_memory"}, {"search"}, {"ask_user_choice"}}) {
-		t.Fatal("display names must normalize")
+	if !toolsSatisfy([]string{"create_plan", "save_memory", "search", "ask_user_choice", "?"},
+		[][]string{{"create_plan"}, {"save_memory"}, {"search"}, {"ask_user_choice"}}) {
+		t.Fatal("canonical names must satisfy")
 	}
 	if !containsAny("Hello Async World", []string{"async"}) {
 		t.Fatal("containsAny")

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -253,6 +254,27 @@ func newMCPTool(cfg mcpToolConfig) *Tool {
 			return toolCallResult{output: out}, err
 		},
 	}
+}
+
+// titleParamRE matches {param} placeholders (top-level JSON arg keys).
+var titleParamRE = regexp.MustCompile(`\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+
+// ResolveToolTitle fills {param} in DisplayName from top-level string args.
+// Empty displayName → toolName. Missing/non-string args → empty slot.
+func ResolveToolTitle(displayName, toolName, argsJSON string) string {
+	if displayName == "" {
+		return toolName
+	}
+	if !strings.Contains(displayName, "{") {
+		return displayName
+	}
+	var args map[string]any
+	_ = json.Unmarshal([]byte(argsJSON), &args)
+	return titleParamRE.ReplaceAllStringFunc(displayName, func(m string) string {
+		key := m[1 : len(m)-1]
+		s, _ := args[key].(string)
+		return s
+	})
 }
 
 // invoke runs the tool handler. Only the harness tool runner should call this

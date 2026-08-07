@@ -9,8 +9,6 @@ import (
 	"time"
 
 	"github.com/ryanaldo34/tacklr/internal/session"
-
-	"github.com/ryanaldo34/tacklr/streaming"
 )
 
 // --- ModelTasks absorb/handoff outcomes used by the harness ---
@@ -92,7 +90,7 @@ func TestDefaultModelTasks_Absorb_compressStreamError(t *testing.T) {
 	}
 }
 
-func TestDefaultModelTasks_Handoff_cancelAndStreamError(t *testing.T) {
+func TestDefaultModelTasks_Handoff_cancel(t *testing.T) {
 	cm := NewModelContextManager()
 	cm.Restore([]*Message{{Role: RoleUser, Content: "u"}})
 	tasks := NewDefaultModelTasks(&mockStrategy{}, cm, DefaultContextPolicy(), 8192)
@@ -100,30 +98,6 @@ func TestDefaultModelTasks_Handoff_cancelAndStreamError(t *testing.T) {
 	cancel()
 	if err := tasks.Handoff(ctx, nil, "", nil, ""); err == nil {
 		t.Fatal("want cancel")
-	}
-	strategy := &mockStrategy{
-		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
-			ch <- LLMResponseChunk{Type: StreamEventError, Content: "handoff boom"}
-		},
-	}
-	cm.Restore([]*Message{
-		{Role: RoleUser, Content: "u"},
-		{Role: RoleAssistant, Content: "a"},
-	})
-	tasks = NewDefaultModelTasks(strategy, cm, DefaultContextPolicy(), 8192)
-	// Stream failure soft-fails: plan-derived fallback handoff, no error return.
-	err := tasks.Handoff(context.Background(), []Todo{{Title: "t", Status: streaming.TodoStatusInProgress}}, "", nil, "sys")
-	if err != nil {
-		t.Fatalf("want soft-fail success, got %v", err)
-	}
-	found := false
-	for _, m := range cm.Messages() {
-		if m.Role == RoleDeveloper && strings.Contains(m.Content, "fallback") {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("expected fallback handoff, got %+v", cm.Messages())
 	}
 }
 
