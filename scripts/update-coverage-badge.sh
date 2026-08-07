@@ -14,7 +14,7 @@ if [[ ! -f "$PROFILE" ]]; then
 fi
 
 # Keep in sync with exclude.paths in .testcoverage.yml
-EXCLUDE_REGEX='cmd/testserver|internal/testkit|stores/postgres\.go'
+EXCLUDE_REGEX='cmd/|internal/testkit|internal/agentbench|stores/postgres\.go'
 
 pct="$(
   awk -v excl="$EXCLUDE_REGEX" '

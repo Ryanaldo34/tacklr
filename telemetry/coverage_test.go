@@ -15,11 +15,22 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
 // TestMultiHandler_forwardsToBase: dual-write helper used by testserver must
 // deliver records to the local handler (does not mutate process slog default).
+func TestBrainObserver_startEnd(t *testing.T) {
+	obs := NewBrainObserver()
+	ctx, span := obs.StartOp(context.Background(), brain.OpSearch)
+	if ctx == nil || span == nil {
+		t.Fatal("start")
+	}
+	span.End(2, brain.DegradeNone, nil)
+	span.End(0, brain.DegradeLexicalOnly, errors.New("x"))
+}
+
 func TestMultiHandler_forwardsToBase(t *testing.T) {
 	var buf bytes.Buffer
 	base := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})

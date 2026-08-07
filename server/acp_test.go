@@ -1139,6 +1139,70 @@ func TestHandleRPC_sessionPrompt_stringTurnID(t *testing.T) {
 	}
 }
 
+// TestHandleRPC_sessionPrompt_toolTitleAndName: ACP tool_call carries programmatic
+// name and a DisplayName template resolved from args (title), not Name-as-title only.
+func TestHandleRPC_sessionPrompt_toolTitleAndName(t *testing.T) {
+	store := testStore(t)
+	mark := tacklr.NewTool(tacklr.ToolConfig{
+		Name:        "mark_item",
+		DisplayName: "Complete {title}",
+		Category:    "think",
+		Handler: func(ctx context.Context, args struct {
+			Title string `json:"title"`
+		}) (string, error) {
+			return "ok:" + args.Title, nil
+		},
+	})
+	var strategy *mockInferenceStrategy
+	strategy = &mockInferenceStrategy{
+		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			if strategy.callNum.Load() > 1 {
+				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "done", IsComplete: true}
+				return
+			}
+			ch <- tacklr.LLMResponseChunk{
+				Type: tacklr.StreamEventFunctionCall,
+				ToolCalls: []tacklr.ToolCall{{
+					ID: "call_mark", CallID: "call_mark", Name: "mark_item",
+					Arguments: `{"title":"Ship release"}`,
+				}},
+				IsComplete: true,
+			}
+		},
+	}
+	r := newTestRegistry(store, strategy, []*tacklr.Tool{mark})
+	rec1 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
+	var resp1 map[string]any
+	_ = json.Unmarshal(rec1.Body.Bytes(), &resp1)
+	sessionID := resp1["result"].(map[string]any)["sessionId"].(string)
+	rec2 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":10,"method":"session/prompt","params":{"sessionId":"`+sessionID+`","prompt":[{"type":"text","text":"mark"}]}}`)
+	frames := parseACPFrames(t, rec2.Body)
+
+	var sawCall bool
+	for _, f := range frames {
+		if f["method"] != "session/update" {
+			continue
+		}
+		update := f["params"].(map[string]any)["update"].(map[string]any)
+		if update["sessionUpdate"] != "tool_call" {
+			continue
+		}
+		if update["name"] != "mark_item" {
+			t.Fatalf("name = %v, want mark_item", update["name"])
+		}
+		if update["title"] != "Complete Ship release" {
+			t.Fatalf("title = %v, want Complete Ship release", update["title"])
+		}
+		if update["kind"] != "think" {
+			t.Fatalf("kind = %v", update["kind"])
+		}
+		sawCall = true
+	}
+	if !sawCall {
+		t.Fatal("expected tool_call with title+name")
+	}
+}
+
 func TestHandleRPC_sessionPrompt_toolProgress(t *testing.T) {
 	store := testStore(t)
 

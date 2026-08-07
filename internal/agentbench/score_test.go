@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+
+	"github.com/ryanaldo34/tacklr/brain"
 )
 
 func TestToolsSatisfy_andContains(t *testing.T) {
@@ -34,6 +36,44 @@ func TestEvidenceHit(t *testing.T) {
 	}
 	if evidenceHit("nothing", []uuid.UUID{id}) {
 		t.Fatal("miss")
+	}
+}
+
+// Offline judge: no live model — pure rule outcomes.
+func TestJudgeCase_passAndFail(t *testing.T) {
+	eng, err := brain.NewEngine(brain.NewMemoryStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	gold := uuid.MustParse("11111111-1111-1111-1111-111111111101")
+	pass := judgeCase(Case{
+		ID: "t.pass", Suite: SuiteMemory,
+		Expect: Expect{
+			FinalContainsAny: []string{"async"},
+			FinalContainsAll: []string{"legal"},
+			MustTools:        [][]string{{"search", "find_objects"}},
+			MustNotTools:     []string{"web_search"},
+			GoldEvidenceIDs:  []uuid.UUID{gold},
+		},
+	}, eng, brain.Scope{}, []TurnTrace{{
+		Assistant: "legal async answer",
+		Tools:     []ToolCallRecord{{Name: "search", Arguments: gold.String(), Result: "ok"}},
+	}})
+	if !pass.Success {
+		t.Fatalf("want pass: %+v", pass.Notes)
+	}
+	fail := judgeCase(Case{
+		ID: "t.fail", Suite: SuiteMemory,
+		Expect: Expect{MustTools: [][]string{{"web_search"}}, MustInterrupt: true},
+	}, eng, brain.Scope{}, []TurnTrace{{
+		Assistant: "no tools",
+		Error:     "boom",
+	}})
+	if fail.Success {
+		t.Fatal("want fail")
+	}
+	if fail.Scores["no_error"] != 0 || fail.Scores["must_tools"] != 0 || fail.Scores["interrupt"] != 0 {
+		t.Fatalf("scores: %+v", fail.Scores)
 	}
 }
 

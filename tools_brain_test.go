@@ -390,6 +390,122 @@ func TestBrainTools_expandChildren(t *testing.T) {
 	}
 }
 
+// TestBrainTools_expandMultiHopAndFindLinks: graph multi-hop expand and find_links
+// tool outcomes when MemoryGraph provides edge search.
+func TestBrainTools_expandMultiHopAndFindLinks(t *testing.T) {
+	ctx := context.Background()
+	store := brain.NewMemoryStore()
+	g := brain.NewMemoryGraph()
+	ns := uuid.New()
+	now := time.Now().UTC()
+	factID, dealID, buyerID := uuid.New(), uuid.New(), uuid.New()
+	for _, o := range []brain.Object{
+		{ID: factID, Kind: "Fact", Title: "Risk note", NamespaceID: ns, UpdatedAt: now},
+		{ID: dealID, Kind: "Deal", Title: "Acme", NamespaceID: ns, UpdatedAt: now},
+		{ID: buyerID, Kind: "Person", Title: "Pat Buyer", NamespaceID: ns, UpdatedAt: now},
+	} {
+		if err := store.Put(ctx, o); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := g.AddEdge(ctx, factID, dealID, "about", brain.EdgeMeta{Note: "fact about deal"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.AddEdge(ctx, dealID, buyerID, "has_buyer", brain.EdgeMeta{Note: "economic buyer primary"}); err != nil {
+		t.Fatal(err)
+	}
+	eng, err := brain.NewEngine(store, brain.WithGraph(g))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !eng.HasEdgeSearch() {
+		t.Fatal("MemoryGraph must enable edge search")
+	}
+	h := NewAgent(ctx, AgentOptions{
+		Config: Config{MaxWindowSize: 1024}, Model: &mockStrategy{},
+		Brain: eng, SearchNamespace: &ns,
+	})
+	expand := h.findTool("expand", "")
+	findLinks := h.findTool("find_links", "")
+	if expand == nil || findLinks == nil {
+		t.Fatal("expand and find_links required with graph edge search")
+	}
+
+	// Multi-hop: fact --about--> deal --has_buyer--> buyer
+	out, err := expand.invoke(ctx, `{"object_id":"`+factID.String()+`","relation_types":["about","has_buyer"],"max_hops":2}`, h.runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var res brain.ExpandResult
+	if err := json.Unmarshal([]byte(out.output), &res); err != nil {
+		t.Fatal(err)
+	}
+	ids := map[uuid.UUID]bool{}
+	for _, o := range res.Objects {
+		ids[o.ID] = true
+	}
+	if !ids[dealID] {
+		t.Fatalf("multi-hop expand missing deal: %+v", res.Objects)
+	}
+	if !ids[buyerID] {
+		t.Fatalf("multi-hop expand missing buyer: %+v", res.Objects)
+	}
+
+	lout, err := findLinks.invoke(ctx, `{"relation_type":"has_buyer","query":"economic buyer","limit":10}`, h.runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var links brain.FindLinksResult
+	if err := json.Unmarshal([]byte(lout.output), &links); err != nil {
+		t.Fatal(err)
+	}
+	if len(links.Links) != 1 || links.Links[0].From.ID != dealID || links.Links[0].To.ID != buyerID {
+		t.Fatalf("find_links: %+v", links.Links)
+	}
+}
+
+// TestBrainTools_searchNamespaceIsolation: search under host namespace must not
+// surface objects stored only in another namespace.
+func TestBrainTools_searchNamespaceIsolation(t *testing.T) {
+	ctx := context.Background()
+	store := brain.NewMemoryStore()
+	nsA, nsB := uuid.New(), uuid.New()
+	now := time.Now().UTC()
+	secretParent := uuid.New()
+	secretPart := uuid.New()
+	pos := 1
+	_ = store.Put(ctx, brain.Object{ID: secretParent, Kind: "Document", Title: "Secret deal", NamespaceID: nsA, UpdatedAt: now})
+	_ = store.Put(ctx, brain.Object{
+		ID: secretPart, Kind: "Chunk", Title: "chunk", Content: "namespace isolation secret token xyzzy",
+		ParentID: &secretParent, Position: &pos, NamespaceID: nsA, UpdatedAt: now,
+	})
+	eng, err := brain.NewEngine(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Agent scoped to nsB only.
+	h := NewAgent(ctx, AgentOptions{
+		Config: Config{MaxWindowSize: 1024}, Model: &mockStrategy{},
+		Brain: eng, SearchNamespace: &nsB,
+	})
+	search := h.findTool("search", "")
+	read := h.findTool("read", "")
+	if search == nil || read == nil {
+		t.Fatal("search and read required")
+	}
+	out, err := search.invoke(ctx, `{"query":"namespace isolation secret token xyzzy","limit":10}`, h.runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.output, secretParent.String()) || strings.Contains(out.output, "xyzzy") {
+		t.Fatalf("search leaked nsA object into nsB: %s", out.output)
+	}
+	_, err = read.invoke(ctx, `{"object_id":"`+secretParent.String()+`"}`, h.runtime)
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("read foreign ns want not found, got %v", err)
+	}
+}
+
 func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
