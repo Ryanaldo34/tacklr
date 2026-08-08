@@ -19,6 +19,9 @@ type Conn struct {
 type ProtocolEnv struct {
 	Registry *Registry
 	Conn     *Conn
+	// Connections is the server-wide ACP connection registry (WebSocket / HTTP).
+	// Nil for pure stdio or tests that only use HandleInbound.
+	Connections *ConnectionRegistry
 }
 
 // StreamControl is the protocol's decision after observing one harness event.

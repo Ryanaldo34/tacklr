@@ -166,7 +166,12 @@ func main() {
 	}
 
 	addr := fmt.Sprintf(":%d", port)
-	slog.Info("starting acp test server", "addr", addr)
+	slog.Info("starting acp test server",
+		"addr", addr,
+		"websocket", fmt.Sprintf("ws://localhost:%d/acp", port),
+		"streamable_http", fmt.Sprintf("http://localhost:%d/acp", port),
+		"legacy_unary", "POST /",
+	)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

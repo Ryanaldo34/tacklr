@@ -7,6 +7,10 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
+	"sync"
+
+	"github.com/coder/websocket"
 
 	"github.com/ryanaldo34/tacklr/streaming"
 )
@@ -26,14 +30,23 @@ var (
 func (acpProtocol) Name() string { return "acp" }
 
 func (p acpProtocol) HTTPRoutes() []HTTPRoute {
-	return []HTTPRoute{{
-		Method:  http.MethodPost,
-		Pattern: "/",
-		Handler: p.handleHTTP,
-	}}
+	return []HTTPRoute{
+		// Legacy unary HTTP: one request owns the whole turn; no mid-turn client RPC.
+		// Prefer GET|POST|DELETE /acp (WebSocket or Streamable HTTP).
+		{Method: http.MethodPost, Pattern: "/", Handler: p.handleHTTP},
+		// ACP remote transport (RFD Streamable HTTP + WebSocket).
+		{Method: http.MethodPost, Pattern: "/acp", Handler: p.handleACPPost},
+		{Method: http.MethodGet, Pattern: "/acp", Handler: p.handleACPGet},
+		{Method: http.MethodDelete, Pattern: "/acp", Handler: p.handleACPDelete},
+	}
 }
 
 func (p acpProtocol) handleHTTP(env ProtocolEnv, w http.ResponseWriter, r *http.Request) {
+	// Legacy unary ACP: prefer GET|POST|DELETE /acp (WebSocket or Streamable HTTP).
+	w.Header().Set("Deprecation", "true")
+	w.Header().Set("Link", `</acp>; rel="successor-version"`)
+	w.Header().Set("Warning", `299 - "Unary POST / ACP is deprecated; use WebSocket or Streamable HTTP on /acp"`)
+
 	body, err := readHTTPBody(r)
 	if err != nil {
 		mw := &jsonRPCMessageWriter{w: w}
@@ -46,6 +59,80 @@ func (p acpProtocol) handleHTTP(env ProtocolEnv, w http.ResponseWriter, r *http.
 	if err := p.HandleInbound(r.Context(), env, body); err != nil {
 		slog.Debug("acp http handler", "error", err)
 	}
+}
+
+func isWebSocketUpgrade(r *http.Request) bool {
+	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket")
+}
+
+// handleACPWebSocket serves a full-duplex ACP JSON-RPC connection over WebSocket.
+// Same lifecycle and ClientBridge demux as ServeStdio.
+func (p acpProtocol) handleACPWebSocket(env ProtocolEnv, w http.ResponseWriter, r *http.Request) {
+	// Register before Accept so Acp-Connection-Id is on the 101 response (RFD).
+	// Bridge/writer are filled in after the socket is open.
+	var acpConn *Connection
+	if env.Connections != nil {
+		acpConn = env.Connections.Create(nil, nil)
+		w.Header().Set(HeaderAcpConnectionID, acpConn.ID)
+	}
+
+	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+	if err != nil {
+		if acpConn != nil {
+			env.Connections.Remove(acpConn.ID)
+		}
+		slog.Warn("acp websocket accept failed", "error", err)
+		return
+	}
+	defer c.Close(websocket.StatusNormalClosure, "")
+
+	ctx := r.Context()
+	mw := &jsonRPCWSMessageWriter{ctx: ctx, c: c}
+	bridge := NewClientBridge(mw)
+	if acpConn != nil {
+		acpConn.Bridge = bridge
+		acpConn.Writer = mw
+		defer env.Connections.Remove(acpConn.ID)
+	} else {
+		acpConn = &Connection{ID: "local", Bridge: bridge, Writer: mw}
+	}
+
+	var wg sync.WaitGroup
+	dispatch := func(body []byte) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			reqConn := &Conn{
+				Writer: mw,
+				RPC:    bridge,
+				Caps:   bridge.GetCaps(),
+			}
+			reqEnv := ProtocolEnv{
+				Registry:    env.Registry,
+				Conn:        reqConn,
+				Connections: env.Connections,
+			}
+			if err := p.HandleInbound(ctx, reqEnv, body); err != nil {
+				slog.Debug("acp websocket inbound", "error", err, "connection_id", acpConn.ID)
+			}
+		}()
+	}
+
+	// Read loop: demux client RPC responses vs agent method requests (stdio twin).
+	for {
+		_, data, err := c.Read(ctx)
+		if err != nil {
+			break
+		}
+		if len(data) == 0 {
+			continue
+		}
+		if bridge.TryCompleteResponse(data) {
+			continue
+		}
+		dispatch(data)
+	}
+	wg.Wait()
 }
 
 func (p acpProtocol) HandleInbound(ctx context.Context, env ProtocolEnv, body []byte) error {
@@ -330,6 +417,12 @@ func acpInitializeResult() map[string]any {
 			"version": "0.1.0",
 		},
 		"authMethods": []string{},
+		// Non-standard transport hint for operators (not part of ACP schema).
+		"_meta": map[string]any{
+			"tacklr": map[string]any{
+				"transports": []string{"stdio", "websocket", "streamable_http"},
+			},
+		},
 	}
 }
 
