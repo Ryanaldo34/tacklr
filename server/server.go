@@ -26,7 +26,7 @@ type ConfigOptionValue struct {
 }
 
 // parsedRequest is retained for ACP parse helpers and tests that assert on
-// validated request fields. New protocols map wire → TurnRequest inside handlers.
+// validated request fields. Session lifecycle uses Protocol methods with Params.
 type parsedRequest struct {
 	AgentID   string
 	ThreadID  string
@@ -37,8 +37,10 @@ type parsedRequest struct {
 	ID           json.RawMessage
 	Method       string
 	Notification bool
+	// Params is the raw JSON-RPC params object (passed to Protocol session methods).
+	Params json.RawMessage
 
-	// ACP session lifecycle
+	// ACP session lifecycle (validated view of Params)
 	CWD        string
 	MCPServers []mcp.MCPConfig
 

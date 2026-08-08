@@ -165,8 +165,19 @@ Handler shapes supported: with or without args, with or without `HarnessRuntime`
 
 ### Serve over ACP or SSE
 
+Two stores matter for ACP:
+
+| Store | Role |
+|-------|------|
+| `stores.BaseStore` on the **Registry** | Agent harness checkpoints (conversation, plan, tools) |
+| `server.ProtocolWireStore` on the **ACP protocol** | Wire session envelope (`session/new` / `session/load`: cwd, mcp, config) |
+
+You can implement either interface against your own DB (Redis, SQLite, `database/sql`, …). Built-in Postgres helpers use `*pgx.Conn`.
+
+**Short-hand (recommended):**
+
 ```go
-store := stores.NewInMemoryStore()
+store := stores.NewInMemoryStore() // or stores.NewPostgresStore(conn)
 reg := server.NewRegistry(store, "my-agent")
 reg.Register("my-agent", server.AgentSpec{
 	Name: "Demo",
@@ -178,24 +189,54 @@ reg.Register("my-agent", server.AgentSpec{
 	Tools: []*tacklr.Tool{tool},
 })
 
-// Editor / ACP (e.g. stdio)
-srv := server.NewServer(reg, server.ACP)
+// In-process ACP (memory wire store) — one line
+srv := server.NewACPServer(reg)
+
+// Editor / stdio (Zed, etc.)
 _ = srv.ServeStdio(ctx, os.Stdin, os.Stdout)
 
-// ACP over HTTP (RFD Streamable HTTP + WebSocket on /acp):
-//   - WebSocket: GET /acp Upgrade → full-duplex JSON-RPC (best for clients/SDKs)
-//   - Streamable HTTP: POST /acp (initialize→200, else 202) + GET /acp SSE streams
-//   - DELETE /acp tears down Acp-Connection-Id
-// Legacy unary POST / remains for simple curl demos (no mid-turn client RPC).
+// HTTP: WebSocket + Streamable HTTP on /acp
 // _ = srv.ServeHTTP(ctx, ":8080")
-//
-// WebSocket:     ws://localhost:8080/acp
-// Streamable:    https://localhost:8080/acp  (HTTP/2 recommended for concurrent POST + GET)
-// Affinity cookie: acp_affinity (set on initialize) for sticky load balancers
+//   ws://localhost:8080/acp
+//   POST/GET/DELETE https://localhost:8080/acp  (HTTP/2 recommended for Streamable)
+```
 
-// Or native HTTP + SSE (non-ACP wire)
-// srv := server.NewServer(reg, server.SSE)
-// _ = srv.ServeHTTP(ctx, ":8080")
+**Durable wire sessions (Postgres, same connection as harness is fine):**
+
+```go
+// harness + wire schemas are separate tables on the same *pgx.Conn
+harness := stores.NewPostgresStore(conn)
+reg := server.NewRegistry(harness, "my-agent")
+// reg.Register(...)
+srv := server.NewACPServerPostgres(reg, conn)
+```
+
+**Custom wire store or multi-protocol:**
+
+```go
+// Your ProtocolWireStore (Redis, etc.)
+srv := server.NewACPServerWithWire(reg, myWireStore)
+
+// ACP + SSE on one server
+srv = server.NewServer(reg, server.NewACPProtocolMemory(), server.SSE)
+
+// Explicit Postgres protocol only
+srv = server.NewServer(reg, server.NewACPProtocolPostgres(conn))
+```
+
+| Helper | Meaning |
+|--------|---------|
+| `NewACPServer(reg)` | ACP + memory wire store |
+| `NewACPServerWithWire(reg, wire)` | ACP + your `ProtocolWireStore` |
+| `NewACPServerPostgres(reg, conn)` | ACP + Postgres wire store (`*pgx.Conn`) |
+| `NewACPProtocolMemory()` | Protocol only (compose with `NewServer`) |
+| `NewACPProtocolPostgres(conn)` | Protocol only, Postgres wire |
+
+Or native HTTP + SSE (non-ACP wire):
+
+```go
+srv := server.NewServer(reg, server.SSE)
+_ = srv.ServeHTTP(ctx, ":8080")
 ```
 
 ```bash

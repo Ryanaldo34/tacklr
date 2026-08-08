@@ -65,7 +65,7 @@ func TestACP_elicitationForm_resolvesInterruptAndCompletes(t *testing.T) {
 	}
 
 	r := newTestRegistry(testStore(t), strategy, []*tacklr.Tool{interruptTool})
-	srv := NewServer(r, ACP)
+	srv := NewServer(r, NewACPProtocol(NewMemoryWireStore()))
 
 	// server reads serverIn; client writes clientToServer
 	serverIn, clientToServer := io.Pipe()
@@ -263,7 +263,7 @@ func TestACP_requestPermission_allowsToolAndCompletes(t *testing.T) {
 	}
 
 	r := newTestRegistry(testStore(t), strategy, []*tacklr.Tool{sensitive})
-	srv := NewServer(r, ACP)
+	srv := NewServer(r, NewACPProtocol(NewMemoryWireStore()))
 
 	serverIn, clientToServer := io.Pipe()
 	clientFromServer, serverOut := io.Pipe()
@@ -444,7 +444,7 @@ func TestACP_requestPermission_rejectFailsToolAndCompletes(t *testing.T) {
 	}
 
 	r := newTestRegistry(testStore(t), strategy, []*tacklr.Tool{sensitive})
-	srv := NewServer(r, ACP)
+	srv := NewServer(r, NewACPProtocol(NewMemoryWireStore()))
 
 	serverIn, clientToServer := io.Pipe()
 	clientFromServer, serverOut := io.Pipe()
@@ -612,7 +612,7 @@ func TestACP_requestPermission_cancelledEndsPrompt(t *testing.T) {
 		},
 	}
 	r := newTestRegistry(testStore(t), strategy, []*tacklr.Tool{sensitive})
-	srv := NewServer(r, ACP)
+	srv := NewServer(r, NewACPProtocol(NewMemoryWireStore()))
 
 	serverIn, clientToServer := io.Pipe()
 	clientFromServer, serverOut := io.Pipe()
@@ -717,7 +717,7 @@ func TestACP_elicitationForm_declineEndsPrompt(t *testing.T) {
 		},
 	}
 	r := newTestRegistry(testStore(t), strategy, []*tacklr.Tool{interruptTool})
-	srv := NewServer(r, ACP)
+	srv := NewServer(r, NewACPProtocol(NewMemoryWireStore()))
 	serverIn, clientToServer := io.Pipe()
 	clientFromServer, serverOut := io.Pipe()
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
@@ -796,7 +796,7 @@ func TestACP_elicitationForm_cancelEndsPrompt(t *testing.T) {
 		},
 	}
 	r := newTestRegistry(testStore(t), strategy, []*tacklr.Tool{interruptTool})
-	srv := NewServer(r, ACP)
+	srv := NewServer(r, NewACPProtocol(NewMemoryWireStore()))
 	serverIn, clientToServer := io.Pipe()
 	clientFromServer, serverOut := io.Pipe()
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
@@ -885,7 +885,7 @@ func TestACP_elicitation_malformedInterruptEndsTurn(t *testing.T) {
 		},
 	}
 	r := newTestRegistry(testStore(t), strategy, []*tacklr.Tool{interruptTool})
-	srv := NewServer(r, ACP)
+	srv := NewServer(r, NewACPProtocol(NewMemoryWireStore()))
 	serverIn, clientToServer := io.Pipe()
 	clientFromServer, serverOut := io.Pipe()
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
@@ -1023,7 +1023,7 @@ func TestACP_sessionCheckpoint_secondPromptContinuesPlan(t *testing.T) {
 	}
 
 	r := newTestRegistry(store, strategy, nil)
-	srv := NewServer(r, ACP)
+	srv := NewServer(r, NewACPProtocol(NewMemoryWireStore()))
 
 	recNew := &recordingMessageWriter{}
 	srv.HandleMessage(context.Background(), []byte(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`), recNew)

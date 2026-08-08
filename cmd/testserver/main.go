@@ -145,7 +145,9 @@ func main() {
 		"host_tools", 0,
 	)
 
-	srv := server.NewServer(reg, server.ACP)
+	// Process-local ACP (memory wire store). For durable session/load across
+	// restarts: server.NewACPServerPostgres(reg, conn).
+	srv := server.NewACPServer(reg)
 
 	if len(os.Args) > 1 && os.Args[1] == "--stdio" {
 		slog.Info("starting acp test server", "mode", "stdio")

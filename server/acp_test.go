@@ -45,597 +45,390 @@ func parseACPFrames(t *testing.T, body io.Reader) []map[string]any {
 	return frames
 }
 
+// acpTestServer is an isolated ACP server (own ProtocolWireStore) for multi-step RPC tests.
+type acpTestServer struct {
+	t     *testing.T
+	r     *Registry
+	proto Protocol
+	wire  ProtocolWireStore
+}
+
+func newACPTestServer(t *testing.T, r *Registry) *acpTestServer {
+	t.Helper()
+	wire := NewMemoryWireStore()
+	return &acpTestServer{t: t, r: r, proto: NewACPProtocol(wire), wire: wire}
+}
+
+func newACPTestServerWithWire(t *testing.T, r *Registry, wire ProtocolWireStore) *acpTestServer {
+	t.Helper()
+	return &acpTestServer{t: t, r: r, proto: NewACPProtocol(wire), wire: wire}
+}
+
+func (s *acpTestServer) rpc(body string) *httptest.ResponseRecorder {
+	s.t.Helper()
+	req := newACPRequest(s.t, body)
+	rec := httptest.NewRecorder()
+	NewServer(s.r, s.proto).serveHTTPRPC(rec, req)
+	return rec
+}
+
+// protocolForRegistry returns a stable ACP protocol per *Registry so multi-step
+// serveACPRaw calls share wire state without using the package-level ACP singleton.
+var protocolForRegistry sync.Map // *Registry → Protocol
+
+func acpProtocolFor(r *Registry) Protocol {
+	if r == nil {
+		return NewACPProtocol(NewMemoryWireStore())
+	}
+	if v, ok := protocolForRegistry.Load(r); ok {
+		return v.(Protocol)
+	}
+	p := NewACPProtocol(NewMemoryWireStore())
+	actual, _ := protocolForRegistry.LoadOrStore(r, p)
+	return actual.(Protocol)
+}
+
+// serveACPRaw runs one RPC against a per-Registry isolated ACP protocol (not package ACP).
 func serveACPRaw(t *testing.T, r *Registry, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := newACPRequest(t, body)
 	rec := httptest.NewRecorder()
-	NewServer(r, ACP).serveHTTPRPC(rec, req)
+	NewServer(r, acpProtocolFor(r)).serveHTTPRPC(rec, req)
 	return rec
+}
+
+func acpRPCResult(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
+	t.Helper()
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v body=%s", err, rec.Body.String())
+	}
+	if errObj, ok := resp["error"]; ok && errObj != nil {
+		t.Fatalf("unexpected error: %v", errObj)
+	}
+	res, _ := resp["result"].(map[string]any)
+	return res
+}
+
+func acpRPCError(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
+	t.Helper()
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	errObj, _ := resp["error"].(map[string]any)
+	if errObj == nil {
+		t.Fatalf("expected error, got %v", resp)
+	}
+	return errObj
 }
 
 // ---------------------------------------------------------------------------
 // validateACPRequest
 // ---------------------------------------------------------------------------
 
-func TestValidateACPRequest_initialize(t *testing.T) {
-	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}`)
-	pr, err := validateACPRequest(body)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+// TestValidateACPRequest_outcomes covers each distinct validateACPRequest return
+// path once (success shapes + error strings). Integration HandleRPC tests exercise
+// the same code via the wire; this keeps parse-edge coverage without N micro-tests.
+func TestValidateACPRequest_outcomes(t *testing.T) {
+	type wantOK struct {
+		method       string
+		threadID     string
+		prompt       string
+		cwd          string
+		notification bool
+		configID     string
+		configValue  string
+		mcpLen       int
 	}
-	if pr.Method != "initialize" {
-		t.Errorf("method = %q, want %q", pr.Method, "initialize")
+	okCases := []struct {
+		name string
+		body string
+		want wantOK
+	}{
+		{"initialize", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}`,
+			wantOK{method: "initialize"}},
+		{"initialize higher version", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":99}}`,
+			wantOK{method: "initialize"}},
+		{"authenticate", `{"jsonrpc":"2.0","id":1,"method":"authenticate"}`,
+			wantOK{method: "authenticate"}},
+		{"session/new", `{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/home/user"}}`,
+			wantOK{method: "session/new", cwd: "/home/user"}},
+		{"session/new mcp", `{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[
+			{"name":"fs","command":"npx","args":["-y","pkg"],"env":[{"name":"API_KEY","value":"secret"}]},
+			{"type":"http","name":"api","url":"https://api.example.com/mcp","headers":[{"name":"Authorization","value":"Bearer tok"}]},
+			{"type":"sse","name":"events","url":"https://events.example.com/mcp","headers":[]}
+		]}}`, wantOK{method: "session/new", cwd: "/tmp", mcpLen: 3}},
+		{"session/prompt", `{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"sess-1","prompt":[{"type":"text","text":"hello"}]}}`,
+			wantOK{method: "session/prompt", threadID: "sess-1", prompt: "hello"}},
+		{"session/resume", `{"jsonrpc":"2.0","id":4,"method":"session/resume","params":{"sessionId":"sess-2","cwd":"/tmp","mcpServers":[{"name":"fs","command":"npx","args":[]}]}}`,
+			wantOK{method: "session/resume", threadID: "sess-2", mcpLen: 1}},
+		{"session/close", `{"jsonrpc":"2.0","id":5,"method":"session/close","params":{"sessionId":"sess-3"}}`,
+			wantOK{method: "session/close", threadID: "sess-3"}},
+		{"session/cancel notification", `{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"s1"}}`,
+			wantOK{method: "session/cancel", threadID: "s1", notification: true}},
+		{"session/load", `{"jsonrpc":"2.0","id":7,"method":"session/load","params":{"sessionId":"sess-load","cwd":"/proj","mcpServers":[{"type":"http","name":"api","url":"https://api.example.com/mcp","headers":[]}]}}`,
+			wantOK{method: "session/load", threadID: "sess-load", cwd: "/proj", mcpLen: 1}},
+		{"config set", `{"jsonrpc":"2.0","id":8,"method":"session/set_config_option","params":{"sessionId":"sess-1","configId":"model","value":"custom"}}`,
+			wantOK{method: "session/set_config_option", threadID: "sess-1", configID: "model", configValue: "custom"}},
+		{"unknown method admitted", `{"jsonrpc":"2.0","id":1,"method":"session/foo","params":{"sessionId":"s1"}}`,
+			wantOK{method: "session/foo"}},
 	}
-	if string(pr.ID) != "1" {
-		t.Errorf("id = %s, want 1", pr.ID)
+	for _, tc := range okCases {
+		t.Run("ok/"+tc.name, func(t *testing.T) {
+			pr, err := validateACPRequest([]byte(tc.body))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if pr.Method != tc.want.method {
+				t.Errorf("method = %q, want %q", pr.Method, tc.want.method)
+			}
+			if tc.want.threadID != "" && pr.ThreadID != tc.want.threadID {
+				t.Errorf("threadID = %q, want %q", pr.ThreadID, tc.want.threadID)
+			}
+			if tc.want.prompt != "" && pr.Prompt != tc.want.prompt {
+				t.Errorf("prompt = %q, want %q", pr.Prompt, tc.want.prompt)
+			}
+			if tc.want.cwd != "" && pr.CWD != tc.want.cwd {
+				t.Errorf("cwd = %q, want %q", pr.CWD, tc.want.cwd)
+			}
+			if pr.Notification != tc.want.notification {
+				t.Errorf("notification = %v, want %v", pr.Notification, tc.want.notification)
+			}
+			if tc.want.configID != "" && pr.ConfigID != tc.want.configID {
+				t.Errorf("configId = %q", pr.ConfigID)
+			}
+			if tc.want.configValue != "" && pr.ConfigValue != tc.want.configValue {
+				t.Errorf("configValue = %q", pr.ConfigValue)
+			}
+			if tc.want.mcpLen > 0 && len(pr.MCPServers) != tc.want.mcpLen {
+				t.Errorf("mcpServers len = %d, want %d", len(pr.MCPServers), tc.want.mcpLen)
+			}
+		})
+	}
+
+	errCases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"invalid json", `not json`, "invalid"},
+		{"wrong version", `{"jsonrpc":"1.0","id":1,"method":"initialize","params":{"protocolVersion":1}}`, "jsonrpc version must be"},
+		{"missing method", `{"jsonrpc":"2.0","id":1}`, "method"},
+		{"init no params", `{"jsonrpc":"2.0","id":1,"method":"initialize"}`, "params is required"},
+		{"init version 0", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":0}}`, "unsupported protocol version"},
+		{"init bad params", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":"bad"}`, "invalid initialize params"},
+		{"new no params", `{"jsonrpc":"2.0","id":1,"method":"session/new"}`, "params is required"},
+		{"new bad params", `{"jsonrpc":"2.0","id":1,"method":"session/new","params":"x"}`, "invalid session/new"},
+		{"load no params", `{"jsonrpc":"2.0","id":1,"method":"session/load"}`, "params is required"},
+		{"load bad params", `{"jsonrpc":"2.0","id":1,"method":"session/load","params":"bad"}`, "invalid session/load"},
+		{"load missing id", `{"jsonrpc":"2.0","id":1,"method":"session/load","params":{"cwd":"/t"}}`, "sessionId is required"},
+		{"resume no params", `{"jsonrpc":"2.0","id":1,"method":"session/resume"}`, "params is required"},
+		{"resume bad params", `{"jsonrpc":"2.0","id":1,"method":"session/resume","params":"bad"}`, "invalid session/resume"},
+		{"resume missing id", `{"jsonrpc":"2.0","id":1,"method":"session/resume","params":{"cwd":"/t"}}`, "sessionId is required"},
+		{"config no params", `{"jsonrpc":"2.0","id":1,"method":"session/set_config_option"}`, "params is required"},
+		{"config bad params", `{"jsonrpc":"2.0","id":1,"method":"session/set_config_option","params":"bad"}`, "invalid session/set_config_option"},
+		{"config missing id", `{"jsonrpc":"2.0","id":1,"method":"session/set_config_option","params":{"sessionId":"s"}}`, "configId is required"},
+		{"close no params", `{"jsonrpc":"2.0","id":1,"method":"session/close"}`, "params is required"},
+		{"close bad params", `{"jsonrpc":"2.0","id":1,"method":"session/close","params":"bad"}`, "invalid session/close"},
+		{"close missing id", `{"jsonrpc":"2.0","id":1,"method":"session/close","params":{}}`, "sessionId is required"},
+		{"prompt no params", `{"jsonrpc":"2.0","id":1,"method":"session/prompt"}`, "params is required"},
+		{"prompt bad params", `{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":"bad"}`, "invalid session/prompt"},
+		{"prompt missing session", `{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"hi"}]}}`, "sessionId is required"},
+		{"prompt empty", `{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{"sessionId":"s","prompt":[]}}`, "prompt must not be empty"},
+		{"prompt empty text", `{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{"sessionId":"s","prompt":[{"type":"text","text":""}]}}`, "non-empty text"},
+	}
+	for _, tc := range errCases {
+		t.Run("err/"+tc.name, func(t *testing.T) {
+			_, err := validateACPRequest([]byte(tc.body))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err=%v want containing %q", err, tc.want)
+			}
+		})
 	}
 }
 
-func TestValidateACPRequest_initialize_acceptsHigherVersion(t *testing.T) {
-	// Agent negotiates by responding with its supported version; request may ask higher.
-	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":99}}`)
-	pr, err := validateACPRequest(body)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if pr.Method != "initialize" {
-		t.Errorf("method = %q, want initialize", pr.Method)
-	}
-}
-
-func TestValidateACPRequest_notification_noID(t *testing.T) {
-	body := []byte(`{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"s1"}}`)
-	pr, err := validateACPRequest(body)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !pr.Notification {
-		t.Error("expected Notification=true")
-	}
-	if pr.ThreadID != "s1" {
-		t.Errorf("threadID = %q, want s1", pr.ThreadID)
-	}
-}
-
-func TestValidateACPRequest_sessionNew(t *testing.T) {
-	body := []byte(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/home/user"}}`)
-	pr, err := validateACPRequest(body)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if pr.Method != "session/new" {
-		t.Errorf("method = %q, want %q", pr.Method, "session/new")
-	}
-	if pr.CWD != "/home/user" {
-		t.Errorf("cwd = %q, want %q", pr.CWD, "/home/user")
-	}
-}
-
-func TestValidateACPRequest_sessionNew_withMCPServers(t *testing.T) {
-	body := []byte(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[
-		{"name":"fs","command":"npx","args":["-y","@modelcontextprotocol/server-filesystem"],"env":[{"name":"API_KEY","value":"secret"}]},
-		{"type":"http","name":"api","url":"https://api.example.com/mcp","headers":[{"name":"Authorization","value":"Bearer tok"}]},
-		{"type":"sse","name":"events","url":"https://events.example.com/mcp","headers":[]}
-	]}}`)
-	pr, err := validateACPRequest(body)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if pr.CWD != "/tmp" {
-		t.Errorf("cwd = %q, want /tmp", pr.CWD)
-	}
-	if len(pr.MCPServers) != 3 {
-		t.Fatalf("mcpServers len = %d, want 3", len(pr.MCPServers))
-	}
-
-	stdio := pr.MCPServers[0]
-	if stdio.Name != "fs" || stdio.Command != "npx" {
-		t.Errorf("stdio server = %+v, want name=fs command=npx", stdio)
-	}
-	if len(stdio.Args) != 2 || stdio.Args[0] != "-y" {
-		t.Errorf("stdio args = %v, want [-y @modelcontextprotocol/server-filesystem]", stdio.Args)
-	}
-	if len(stdio.Env) != 1 || stdio.Env[0].Name != "API_KEY" || stdio.Env[0].Value != "secret" {
-		t.Errorf("stdio env = %v, want [API_KEY=secret]", stdio.Env)
-	}
-
-	httpSrv := pr.MCPServers[1]
-	if httpSrv.Type != "http" || httpSrv.URL != "https://api.example.com/mcp" {
-		t.Errorf("http server = %+v, want type=http url=https://api.example.com/mcp", httpSrv)
-	}
-	if len(httpSrv.Headers) != 1 || httpSrv.Headers[0].Name != "Authorization" || httpSrv.Headers[0].Value != "Bearer tok" {
-		t.Errorf("http headers = %v, want [Authorization: Bearer tok]", httpSrv.Headers)
-	}
-
-	sseSrv := pr.MCPServers[2]
-	if sseSrv.Type != "sse" || sseSrv.URL != "https://events.example.com/mcp" {
-		t.Errorf("sse server = %+v, want type=sse url=https://events.example.com/mcp", sseSrv)
-	}
-}
-
-func TestValidateACPRequest_sessionPrompt(t *testing.T) {
-	body := []byte(`{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"sess-1","prompt":[{"type":"text","text":"hello"}]}}`)
-	pr, err := validateACPRequest(body)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if pr.ThreadID != "sess-1" {
-		t.Errorf("threadID = %q, want %q", pr.ThreadID, "sess-1")
-	}
-	if pr.Prompt != "hello" {
-		t.Errorf("prompt = %q, want %q", pr.Prompt, "hello")
-	}
-}
-
-func TestValidateACPRequest_sessionPrompt_missingSessionID(t *testing.T) {
-	body := []byte(`{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"hi"}]}}`)
-	_, err := validateACPRequest(body)
-	if err == nil {
-		t.Fatal("expected error for missing sessionId")
-	}
-	if !strings.Contains(err.Error(), "sessionId is required") {
-		t.Errorf("error = %q, want to contain %q", err.Error(), "sessionId is required")
-	}
-}
-
-func TestValidateACPRequest_sessionPrompt_emptyPrompt(t *testing.T) {
-	body := []byte(`{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"s1","prompt":[]}}`)
-	_, err := validateACPRequest(body)
-	if err == nil {
-		t.Fatal("expected error for empty prompt")
-	}
-	if !strings.Contains(err.Error(), "prompt must not be empty") {
-		t.Errorf("error = %q, want to contain %q", err.Error(), "prompt must not be empty")
-	}
-}
-
-func TestValidateACPRequest_sessionResume(t *testing.T) {
-	body := []byte(`{"jsonrpc":"2.0","id":4,"method":"session/resume","params":{"sessionId":"sess-2","cwd":"/tmp","mcpServers":[{"name":"fs","command":"npx","args":[]}]}}`)
-	pr, err := validateACPRequest(body)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if pr.ThreadID != "sess-2" {
-		t.Errorf("threadID = %q, want %q", pr.ThreadID, "sess-2")
-	}
-	if len(pr.MCPServers) != 1 || pr.MCPServers[0].Command != "npx" {
-		t.Errorf("mcpServers = %v, want one stdio server with command npx", pr.MCPServers)
-	}
-}
-
-func TestValidateACPRequest_sessionClose(t *testing.T) {
-	body := []byte(`{"jsonrpc":"2.0","id":5,"method":"session/close","params":{"sessionId":"sess-3"}}`)
-	pr, err := validateACPRequest(body)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if pr.ThreadID != "sess-3" {
-		t.Errorf("threadID = %q, want %q", pr.ThreadID, "sess-3")
-	}
-}
-
-func TestValidateACPRequest_sessionCancel(t *testing.T) {
-	body := []byte(`{"jsonrpc":"2.0","id":6,"method":"session/cancel","params":{"sessionId":"sess-4"}}`)
-	pr, err := validateACPRequest(body)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if pr.ThreadID != "sess-4" {
-		t.Errorf("threadID = %q, want %q", pr.ThreadID, "sess-4")
-	}
-}
-
-func TestValidateACPRequest_invalidJSON(t *testing.T) {
-	_, err := validateACPRequest([]byte(`not json`))
-	if err == nil {
-		t.Fatal("expected error for invalid JSON")
-	}
-}
-
-func TestValidateACPRequest_wrongJSONRPCVersion(t *testing.T) {
-	body := []byte(`{"jsonrpc":"1.0","id":1,"method":"initialize","params":{"protocolVersion":1}}`)
-	_, err := validateACPRequest(body)
-	if err == nil {
-		t.Fatal("expected error for wrong jsonrpc version")
-	}
-	if !strings.Contains(err.Error(), "jsonrpc version must be") {
-		t.Errorf("error = %q, want to contain %q", err.Error(), "jsonrpc version must be")
-	}
-}
-
-func TestValidateACPRequest_missingID_isNotification(t *testing.T) {
-	body := []byte(`{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"x"}}`)
-	pr, err := validateACPRequest(body)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !pr.Notification {
-		t.Error("expected notification when id is absent")
-	}
-}
-
-func TestValidateACPRequest_missingMethod(t *testing.T) {
-	body := []byte(`{"jsonrpc":"2.0","id":1}`)
-	_, err := validateACPRequest(body)
-	if err == nil {
-		t.Fatal("expected error for missing method")
-	}
-}
-
-func TestValidateACPRequest_unsupportedMethod(t *testing.T) {
-	// Unknown methods are admitted so HandleInbound can return MethodNotFound.
-	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"session/foo","params":{"sessionId":"s1"}}`)
-	pr, err := validateACPRequest(body)
-	if err != nil {
-		t.Fatalf("unexpected validate error: %v", err)
-	}
-	if pr.Method != "session/foo" {
-		t.Fatalf("method = %q", pr.Method)
-	}
-}
-
-func TestValidateACPRequest_sessionLoad(t *testing.T) {
-	body := []byte(`{"jsonrpc":"2.0","id":7,"method":"session/load","params":{"sessionId":"sess-load","cwd":"/proj","mcpServers":[{"type":"http","name":"api","url":"https://api.example.com/mcp","headers":[]}]}}`)
-	pr, err := validateACPRequest(body)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if pr.ThreadID != "sess-load" {
-		t.Errorf("threadID = %q, want %q", pr.ThreadID, "sess-load")
-	}
-	if pr.CWD != "/proj" {
-		t.Errorf("cwd = %q, want /proj", pr.CWD)
-	}
-	if len(pr.MCPServers) != 1 || pr.MCPServers[0].Type != "http" {
-		t.Errorf("mcpServers = %v, want one http server", pr.MCPServers)
-	}
-}
-
-func TestValidateACPRequest_sessionLoad_missingSessionID(t *testing.T) {
-	body := []byte(`{"jsonrpc":"2.0","id":7,"method":"session/load","params":{}}`)
-	_, err := validateACPRequest(body)
-	if err == nil {
-		t.Fatal("expected error for missing sessionId")
-	}
-	if !strings.Contains(err.Error(), "sessionId is required") {
-		t.Errorf("error = %q, want to contain %q", err.Error(), "sessionId is required")
-	}
-}
-
-func TestValidateACPRequest_configSet(t *testing.T) {
-	body := []byte(`{"jsonrpc":"2.0","id":8,"method":"session/set_config_option","params":{"sessionId":"sess-1","configId":"model","value":"custom"}}`)
-	pr, err := validateACPRequest(body)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if pr.ThreadID != "sess-1" {
-		t.Errorf("threadID = %q, want %q", pr.ThreadID, "sess-1")
-	}
-	if pr.ConfigID != "model" {
-		t.Errorf("configId = %q, want %q", pr.ConfigID, "model")
-	}
-	if pr.ConfigValue != "custom" {
-		t.Errorf("configValue = %q, want %q", pr.ConfigValue, "custom")
-	}
-}
-
-func TestValidateACPRequest_configSet_missingConfigID(t *testing.T) {
-	body := []byte(`{"jsonrpc":"2.0","id":8,"method":"session/set_config_option","params":{"sessionId":"sess-1","value":"custom"}}`)
-	_, err := validateACPRequest(body)
-	if err == nil {
-		t.Fatal("expected error for missing configId")
-	}
-	if !strings.Contains(err.Error(), "configId is required") {
-		t.Errorf("error = %q, want to contain %q", err.Error(), "configId is required")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// concatenateACPPrompt
-// ---------------------------------------------------------------------------
-
-func TestConcatenateACPPrompt_textOnly(t *testing.T) {
-	raw := json.RawMessage(`[{"type":"text","text":"hello"},{"type":"text","text":"world"}]`)
-	got, err := concatenateACPPrompt(raw)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got != "hello\n\nworld" {
-		t.Errorf("got %q, want %q", got, "hello\n\nworld")
-	}
-}
-
-func TestConcatenateACPPrompt_resourceOnly(t *testing.T) {
-	raw := json.RawMessage(`[{"type":"resource","resource":{"uri":"file:///a.txt","mimeType":"text/plain","text":"file content"}}]`)
-	got, err := concatenateACPPrompt(raw)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got != "file content" {
-		t.Errorf("got %q, want %q", got, "file content")
-	}
-}
-
-func TestConcatenateACPPrompt_mixed(t *testing.T) {
-	raw := json.RawMessage(`[{"type":"text","text":"prompt"},{"type":"resource","resource":{"uri":"file:///b.txt","mimeType":"text/plain","text":"ctx"}}]`)
-	got, err := concatenateACPPrompt(raw)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got != "prompt\n\nctx" {
-		t.Errorf("got %q, want %q", got, "prompt\n\nctx")
-	}
-}
-
-func TestConcatenateACPPrompt_emptyText(t *testing.T) {
-	raw := json.RawMessage(`[{"type":"text","text":""}]`)
-	_, err := concatenateACPPrompt(raw)
-	if err == nil {
-		t.Fatal("expected error for empty text block")
-	}
-}
-
-func TestConcatenateACPPrompt_unsupportedType(t *testing.T) {
-	raw := json.RawMessage(`[{"type":"image","data":"base64..."}]`)
-	_, err := concatenateACPPrompt(raw)
-	if err == nil {
-		t.Fatal("expected error for unsupported block type")
-	}
-	if !strings.Contains(err.Error(), "unsupported content block type") {
-		t.Errorf("error = %q, want to contain %q", err.Error(), "unsupported content block type")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// eventToAcpJsonRpc
-// ---------------------------------------------------------------------------
-
-func TestEventToAcpJsonRpc_message(t *testing.T) {
-	ev := &streaming.StreamEvent{
-		Type:      streaming.StreamEventMessage,
-		MessageID: "msg-1",
-		Content:   "hello",
-	}
-	frames, err := eventToAcpJsonRpc("thread-1", ev)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(frames) != 1 {
-		t.Fatalf("frames len = %d, want 1", len(frames))
-	}
-	var msg map[string]any
-	if err := json.Unmarshal(frames[0], &msg); err != nil {
-		t.Fatalf("unmarshal frame: %v", err)
-	}
-	if msg["method"] != "session/update" {
-		t.Errorf("method = %v, want session/update", msg["method"])
-	}
-	params := msg["params"].(map[string]any)
-	if params["sessionId"] != "thread-1" {
-		t.Errorf("sessionId = %v, want thread-1", params["sessionId"])
-	}
-	update := params["update"].(map[string]any)
-	if update["sessionUpdate"] != "agent_message_chunk" {
-		t.Errorf("sessionUpdate = %v, want agent_message_chunk", update["sessionUpdate"])
-	}
-}
-
-func TestEventToAcpJsonRpc_reasoning(t *testing.T) {
-	ev := &streaming.StreamEvent{
-		Type:      streaming.StreamEventReasoning,
-		MessageID: "msg-2",
-		Content:   "thinking...",
-	}
-	frames, err := eventToAcpJsonRpc("thread-1", ev)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	var msg map[string]any
-	_ = json.Unmarshal(frames[0], &msg)
-	params := msg["params"].(map[string]any)
-	update := params["update"].(map[string]any)
-	if update["sessionUpdate"] != "agent_thought_chunk" {
-		t.Errorf("sessionUpdate = %v, want agent_thought_chunk", update["sessionUpdate"])
-	}
-}
-
-func TestEventToAcpJsonRpc_functionCall(t *testing.T) {
-	ev := &streaming.StreamEvent{
-		Type: streaming.StreamEventFunctionCall,
-		ToolCalls: []tacklr.ToolCall{
-			{ID: "tc-1", Name: "complete_todo", Title: "Complete Ship", Category: "think"},
-		},
-	}
-	frames, err := eventToAcpJsonRpc("thread-1", ev)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(frames) != 1 {
-		t.Fatalf("frames len = %d, want 1", len(frames))
-	}
-	var msg map[string]any
-	_ = json.Unmarshal(frames[0], &msg)
-	params := msg["params"].(map[string]any)
-	update := params["update"].(map[string]any)
-	if update["sessionUpdate"] != "tool_call" {
-		t.Errorf("sessionUpdate = %v, want tool_call", update["sessionUpdate"])
-	}
-	if update["status"] != "in_progress" {
-		t.Errorf("status = %v, want in_progress", update["status"])
-	}
-	if update["title"] != "Complete Ship" {
-		t.Errorf("title = %v, want Complete Ship", update["title"])
-	}
-	if update["name"] != "complete_todo" {
-		t.Errorf("name = %v, want complete_todo", update["name"])
-	}
-	if update["kind"] != "think" {
-		t.Errorf("kind = %v, want think", update["kind"])
-	}
-}
-
-func TestEventToAcpJsonRpc_toolResult(t *testing.T) {
-	ev := &streaming.StreamEvent{
-		Type:    streaming.StreamEventToolResult,
-		Content: "file contents here",
-		ToolCalls: []tacklr.ToolCall{
-			{ID: "tc-1", Name: "read_file"},
-		},
-	}
-	frames, err := eventToAcpJsonRpc("thread-1", ev)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	var msg map[string]any
-	_ = json.Unmarshal(frames[0], &msg)
-	params := msg["params"].(map[string]any)
-	update := params["update"].(map[string]any)
-	if update["sessionUpdate"] != "tool_call_update" {
-		t.Errorf("sessionUpdate = %v, want tool_call_update", update["sessionUpdate"])
-	}
-	if update["status"] != "completed" {
-		t.Errorf("status = %v, want completed", update["status"])
-	}
-	if update["toolCallId"] != "tc-1" {
-		t.Errorf("toolCallId = %v, want tc-1", update["toolCallId"])
-	}
-	content, ok := update["content"].([]any)
-	if !ok || len(content) != 1 {
-		t.Fatalf("content = %v, want ACP ToolCallContent array of length 1", update["content"])
-	}
-	inner := content[0].(map[string]any)
-	if inner["type"] != "content" {
-		t.Errorf("inner type = %v, want content", inner["type"])
-	}
-	innerContent := inner["content"].(map[string]any)
-	if innerContent["text"] != "file contents here" {
-		t.Errorf("inner text = %v, want %q", innerContent["text"], "file contents here")
-	}
-}
-
-func TestEventToAcpJsonRpc_toolResult_callIDFallback(t *testing.T) {
-	// llama.cpp-style: only call_id set
-	ev := &streaming.StreamEvent{
-		Type:    streaming.StreamEventToolResult,
-		Content: "ok",
-		ToolCalls: []tacklr.ToolCall{
-			{CallID: "fc_only", Name: "echo", Status: "success"},
-		},
-	}
-	frames, err := eventToAcpJsonRpc("thread-1", ev)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	var msg map[string]any
-	_ = json.Unmarshal(frames[0], &msg)
-	update := msg["params"].(map[string]any)["update"].(map[string]any)
-	if update["toolCallId"] != "fc_only" {
-		t.Errorf("toolCallId = %v, want fc_only (CallID fallback)", update["toolCallId"])
-	}
-}
-
-func TestEventToAcpJsonRpc_functionCall_callIDFallback(t *testing.T) {
-	ev := &streaming.StreamEvent{
-		Type: streaming.StreamEventFunctionCall,
-		ToolCalls: []tacklr.ToolCall{
-			{CallID: "fc_only", Name: "echo"},
-		},
-	}
-	frames, err := eventToAcpJsonRpc("thread-1", ev)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	var msg map[string]any
-	_ = json.Unmarshal(frames[0], &msg)
-	update := msg["params"].(map[string]any)["update"].(map[string]any)
-	if update["toolCallId"] != "fc_only" {
-		t.Errorf("toolCallId = %v, want fc_only", update["toolCallId"])
-	}
-}
-
-func TestEventToAcpJsonRpc_toolUpdate(t *testing.T) {
-	ev := &streaming.StreamEvent{
-		Type:      streaming.StreamEventToolUpdate,
-		MessageID: "tc-1",
-		Content:   "processing step 1...",
-	}
-	frames, err := eventToAcpJsonRpc("thread-1", ev)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(frames) != 1 {
-		t.Fatalf("frames len = %d, want 1", len(frames))
-	}
-	var msg map[string]any
-	_ = json.Unmarshal(frames[0], &msg)
-	params := msg["params"].(map[string]any)
-	update := params["update"].(map[string]any)
-	if update["sessionUpdate"] != "tool_call_update" {
-		t.Errorf("sessionUpdate = %v, want tool_call_update", update["sessionUpdate"])
-	}
-	if update["status"] != "in_progress" {
-		t.Errorf("status = %v, want in_progress", update["status"])
-	}
-	if update["toolCallId"] != "tc-1" {
-		t.Errorf("toolCallId = %v, want tc-1", update["toolCallId"])
-	}
-	content := update["content"].([]any)
-	if len(content) != 1 {
-		t.Fatalf("content len = %d, want 1", len(content))
-	}
-	inner := content[0].(map[string]any)
-	if inner["type"] != "content" {
-		t.Errorf("inner type = %v, want content", inner["type"])
-	}
-	innerContent := inner["content"].(map[string]any)
-	if innerContent["type"] != "text" {
-		t.Errorf("inner content type = %v, want text", innerContent["type"])
-	}
-	if innerContent["text"] != "processing step 1..." {
-		t.Errorf("inner text = %v, want processing step 1...", innerContent["text"])
-	}
-}
-
-func TestEventToAcpJsonRpc_complete(t *testing.T) {
-	ev := &streaming.StreamEvent{
-		Type:   streaming.StreamEventComplete,
-		TurnID: "turn-abc",
-	}
-	frames, err := eventToAcpJsonRpc("thread-1", ev)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	var msg map[string]any
-	_ = json.Unmarshal(frames[0], &msg)
-	if msg["id"] != "turn-abc" {
-		t.Errorf("id = %v, want turn-abc", msg["id"])
-	}
-	result := msg["result"].(map[string]any)
-	if result["stopReason"] != "end_turn" {
-		t.Errorf("stopReason = %v, want end_turn", result["stopReason"])
-	}
-}
-
-func TestEventToAcpJsonRpc_error(t *testing.T) {
-	ev := &streaming.StreamEvent{
-		Type:   streaming.StreamEventError,
-		TurnID: "turn-err",
-		Error:  io.ErrUnexpectedEOF,
-	}
-	frames, err := eventToAcpJsonRpc("thread-1", ev)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	var msg map[string]any
-	_ = json.Unmarshal(frames[0], &msg)
-	errObj := msg["error"].(map[string]any)
-	if errObj["code"] != float64(-32603) {
-		t.Errorf("error code = %v, want -32603", errObj["code"])
-	}
-}
-
-func TestEventToAcpJsonRpc_error_stopReasons(t *testing.T) {
+// TestConcatenateACPPrompt_outcomes covers text/resource/mixed success and error paths once.
+func TestConcatenateACPPrompt_outcomes(t *testing.T) {
 	cases := []struct {
+		name    string
+		raw     string
+		want    string
+		wantErr string
+	}{
+		{"text only", `[{"type":"text","text":"hello"},{"type":"text","text":"world"}]`, "hello\n\nworld", ""},
+		{"resource only", `[{"type":"resource","resource":{"uri":"file:///a.txt","mimeType":"text/plain","text":"file content"}}]`, "file content", ""},
+		{"mixed", `[{"type":"text","text":"prompt"},{"type":"resource","resource":{"uri":"file:///b.txt","mimeType":"text/plain","text":"ctx"}}]`, "prompt\n\nctx", ""},
+		{"empty text", `[{"type":"text","text":""}]`, "", "empty"},
+		{"unsupported", `[{"type":"image","data":"base64..."}]`, "", "unsupported content block type"},
+		{"invalid array", `{}`, "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := concatenateACPPrompt(json.RawMessage(tc.raw))
+			if tc.wantErr != "" || tc.name == "invalid array" {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				if tc.wantErr != "" && !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err=%v want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Fatalf("got %q want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestEventToAcpJsonRpc_outcomes maps each stream event kind once (including skip paths).
+func TestEventToAcpJsonRpc_outcomes(t *testing.T) {
+	mustUpdate := func(t *testing.T, frames [][]byte, sessionUpdate string) map[string]any {
+		t.Helper()
+		if len(frames) == 0 {
+			t.Fatal("no frames")
+		}
+		var msg map[string]any
+		if err := json.Unmarshal(frames[0], &msg); err != nil {
+			t.Fatal(err)
+		}
+		update := msg["params"].(map[string]any)["update"].(map[string]any)
+		if sessionUpdate != "" && update["sessionUpdate"] != sessionUpdate {
+			t.Fatalf("sessionUpdate=%v want %s", update["sessionUpdate"], sessionUpdate)
+		}
+		return update
+	}
+
+	// message
+	frames, err := eventToAcpJsonRpc("thread-1", &streaming.StreamEvent{
+		Type: streaming.StreamEventMessage, MessageID: "msg-1", Content: "hello",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustUpdate(t, frames, "agent_message_chunk")
+
+	// reasoning with content
+	frames, err = eventToAcpJsonRpc("thread-1", &streaming.StreamEvent{
+		Type: streaming.StreamEventReasoning, Content: "thinking...",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustUpdate(t, frames, "agent_thought_chunk")
+	// empty reasoning skipped
+	frames, err = eventToAcpJsonRpc("s", &streaming.StreamEvent{Type: streaming.StreamEventReasoning})
+	if err != nil || frames != nil {
+		t.Fatalf("empty reasoning: %v %v", err, frames)
+	}
+
+	// function call + title/name/kind + CallID fallback
+	frames, err = eventToAcpJsonRpc("thread-1", &streaming.StreamEvent{
+		Type:      streaming.StreamEventFunctionCall,
+		ToolCalls: []tacklr.ToolCall{{ID: "tc-1", Name: "complete_todo", Title: "Complete Ship", Category: "think"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := mustUpdate(t, frames, "tool_call")
+	if u["title"] != "Complete Ship" || u["name"] != "complete_todo" || u["kind"] != "think" {
+		t.Fatalf("tool_call fields: %#v", u)
+	}
+	frames, err = eventToAcpJsonRpc("thread-1", &streaming.StreamEvent{
+		Type:      streaming.StreamEventFunctionCall,
+		ToolCalls: []tacklr.ToolCall{{CallID: "fc_only", Name: "echo"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mustUpdate(t, frames, "tool_call")["toolCallId"] != "fc_only" {
+		t.Fatal("call id fallback")
+	}
+	// function call with assistant content
+	frames, err = eventToAcpJsonRpc("s", &streaming.StreamEvent{
+		Type: streaming.StreamEventFunctionCall, Content: "thinking aloud",
+		ToolCalls: []tacklr.ToolCall{{ID: "c1", CallID: "c1", Name: "echo", Category: "other"}},
+	})
+	if err != nil || len(frames) < 2 {
+		t.Fatalf("function call multi: %v n=%d", err, len(frames))
+	}
+
+	// tool result success / failed / empty / CallID
+	frames, err = eventToAcpJsonRpc("thread-1", &streaming.StreamEvent{
+		Type: streaming.StreamEventToolResult, Content: "file contents here",
+		ToolCalls: []tacklr.ToolCall{{ID: "tc-1", Name: "read_file"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	u = mustUpdate(t, frames, "tool_call_update")
+	if u["status"] != "completed" {
+		t.Fatalf("status=%v", u["status"])
+	}
+	frames, err = eventToAcpJsonRpc("s", &streaming.StreamEvent{
+		Type: streaming.StreamEventToolResult, Content: "boom",
+		ToolCalls: []tacklr.ToolCall{{ID: "c1", CallID: "c1", Name: "echo", Status: "error"}},
+	})
+	if err != nil || !strings.Contains(string(frames[0]), "failed") {
+		t.Fatalf("tool failed: %v %s", err, frames)
+	}
+	frames, err = eventToAcpJsonRpc("s", &streaming.StreamEvent{Type: streaming.StreamEventToolResult})
+	if err != nil || frames != nil {
+		t.Fatalf("empty tool result: %v %v", err, frames)
+	}
+	frames, err = eventToAcpJsonRpc("thread-1", &streaming.StreamEvent{
+		Type: streaming.StreamEventToolResult, Content: "ok",
+		ToolCalls: []tacklr.ToolCall{{CallID: "fc_only", Name: "echo", Status: "success"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mustUpdate(t, frames, "tool_call_update")["toolCallId"] != "fc_only" {
+		t.Fatal("tool result call id")
+	}
+
+	// tool update progress
+	frames, err = eventToAcpJsonRpc("thread-1", &streaming.StreamEvent{
+		Type: streaming.StreamEventToolUpdate, MessageID: "tc-1", Content: "processing step 1...",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	u = mustUpdate(t, frames, "tool_call_update")
+	if u["status"] != "in_progress" || u["toolCallId"] != "tc-1" {
+		t.Fatalf("%#v", u)
+	}
+
+	// complete
+	frames, err = eventToAcpJsonRpc("thread-1", &streaming.StreamEvent{
+		Type: streaming.StreamEventComplete, TurnID: "turn-abc",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var complete map[string]any
+	_ = json.Unmarshal(frames[0], &complete)
+	if complete["result"].(map[string]any)["stopReason"] != "end_turn" {
+		t.Fatalf("%v", complete)
+	}
+
+	// error internal + stop-reason outcomes + plain error field
+	frames, err = eventToAcpJsonRpc("thread-1", &streaming.StreamEvent{
+		Type: streaming.StreamEventError, TurnID: "turn-err", Error: io.ErrUnexpectedEOF,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var errMsg map[string]any
+	_ = json.Unmarshal(frames[0], &errMsg)
+	if errMsg["error"].(map[string]any)["code"] != float64(-32603) {
+		t.Fatalf("%v", errMsg)
+	}
+	for _, tc := range []struct {
 		err  error
 		want string
 	}{
@@ -643,42 +436,42 @@ func TestEventToAcpJsonRpc_error_stopReasons(t *testing.T) {
 		{tacklr.ErrMaxTokens, "max_tokens"},
 		{tacklr.ErrMaxTurnRequests, "max_turn_requests"},
 		{fmt.Errorf("run: context cancelled: %w", context.Canceled), "cancelled"},
+	} {
+		frames, err = eventToAcpJsonRpc("t", &streaming.StreamEvent{Type: streaming.StreamEventError, Error: tc.err})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var msg map[string]any
+		_ = json.Unmarshal(frames[0], &msg)
+		if msg["result"].(map[string]any)["stopReason"] != tc.want {
+			t.Fatalf("stopReason want %s got %v", tc.want, msg)
+		}
 	}
-	for _, tc := range cases {
-		t.Run(tc.want, func(t *testing.T) {
-			frames, err := eventToAcpJsonRpc("t", &streaming.StreamEvent{
-				Type:  streaming.StreamEventError,
-				Error: tc.err,
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			var msg map[string]any
-			_ = json.Unmarshal(frames[0], &msg)
-			if msg["error"] != nil {
-				t.Fatalf("want result not error: %v", msg)
-			}
-			res := msg["result"].(map[string]any)
-			if res["stopReason"] != tc.want {
-				t.Fatalf("stopReason = %v, want %s", res["stopReason"], tc.want)
-			}
-		})
+	frames, err = eventToAcpJsonRpc("s1", &streaming.StreamEvent{
+		Type: streaming.StreamEventError, Error: errors.New("explode"),
+	})
+	if err != nil || !strings.Contains(string(frames[0]), "explode") {
+		t.Fatalf("%v %v", err, frames)
 	}
-}
 
-func TestEventToAcpJsonRpc_interrupt_skipped(t *testing.T) {
-	ev := &streaming.StreamEvent{Type: streaming.StreamEventInterrupt}
-	frames, err := eventToAcpJsonRpc("thread-1", ev)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	// plan update
+	frames, err = eventToAcpJsonRpc("s", &streaming.StreamEvent{
+		Type: streaming.StreamEventPlanUpdate,
+		Data: []byte(`[{"title":"A","status":"pending","description":""}]`),
+	})
+	if err != nil || !strings.Contains(string(frames[0]), `"plan"`) {
+		t.Fatalf("plan: %v %s", err, frames)
 	}
-	if len(frames) != 0 {
-		t.Errorf("frames = %d, want 0 (skipped)", len(frames))
+
+	// interrupt skipped
+	frames, err = eventToAcpJsonRpc("thread-1", &streaming.StreamEvent{Type: streaming.StreamEventInterrupt})
+	if err != nil || len(frames) != 0 {
+		t.Fatalf("interrupt skip: %v n=%d", err, len(frames))
 	}
 }
 
 func TestACP_OnStreamClosed_cancelledVsPark(t *testing.T) {
-	p := acpProtocol{}
+	p := NewACPProtocol(nil).(*acpProtocol)
 	w := &recordingMessageWriter{}
 	env := ProtocolEnv{Conn: &Conn{Writer: w}}
 	if err := p.OnStreamClosed(context.Background(), env, "t", json.RawMessage(`1`), true); err != nil {
@@ -698,16 +491,6 @@ func TestACP_OnStreamClosed_cancelledVsPark(t *testing.T) {
 	}
 }
 
-func TestEventToAcpJsonRpc_errorWithErrorField(t *testing.T) {
-	frames, err := eventToAcpJsonRpc("s1", &streaming.StreamEvent{
-		Type:  streaming.StreamEventError,
-		Error: errors.New("explode"),
-	})
-	if err != nil || len(frames) == 0 || !strings.Contains(string(frames[0]), "explode") {
-		t.Fatalf("%v %v", err, frames)
-	}
-}
-
 func TestInjectReqID_nonJSONFrame(t *testing.T) {
 	out := injectReqID([][]byte{[]byte("not-json"), []byte(`{"a":1}`)}, json.RawMessage(`7`), true)
 	if len(out) != 2 || string(out[0]) != "not-json" {
@@ -721,53 +504,9 @@ func TestACP_handleHTTP_initialize(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader([]byte(
 		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}`,
 	)))
-	acpProtocol{}.handleHTTP(ProtocolEnv{Registry: r, Conn: &Conn{}}, rec, req)
+	NewACPProtocol(nil).(*acpProtocol).handleHTTP(ProtocolEnv{Registry: r, Conn: &Conn{}}, rec, req)
 	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "protocolVersion") {
 		t.Fatalf("%d %s", rec.Code, rec.Body.String())
-	}
-}
-
-func TestValidateACPRequest_moreParamEdges(t *testing.T) {
-	cases := []struct {
-		body string
-		want string
-	}{
-		{`{"jsonrpc":"2.0","id":1,"method":"initialize"}`, "params is required"},
-		{`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":0}}`, "unsupported protocol version"},
-		{`{"jsonrpc":"2.0","id":1,"method":"initialize","params":"bad"}`, "invalid initialize params"},
-		{`{"jsonrpc":"2.0","id":1,"method":"session/new"}`, "params is required"},
-		{`{"jsonrpc":"2.0","id":1,"method":"session/new","params":"x"}`, "invalid session/new"},
-		{`{"jsonrpc":"2.0","id":1,"method":"session/load"}`, "params is required"},
-		{`{"jsonrpc":"2.0","id":1,"method":"session/load","params":"bad"}`, "invalid session/load"},
-		{`{"jsonrpc":"2.0","id":1,"method":"session/load","params":{"cwd":"/t"}}`, "sessionId is required"},
-		{`{"jsonrpc":"2.0","id":1,"method":"session/resume"}`, "params is required"},
-		{`{"jsonrpc":"2.0","id":1,"method":"session/resume","params":"bad"}`, "invalid session/resume"},
-		{`{"jsonrpc":"2.0","id":1,"method":"session/resume","params":{"cwd":"/t"}}`, "sessionId is required"},
-		{`{"jsonrpc":"2.0","id":1,"method":"session/set_config_option"}`, "params is required"},
-		{`{"jsonrpc":"2.0","id":1,"method":"session/set_config_option","params":"bad"}`, "invalid session/set_config_option"},
-		{`{"jsonrpc":"2.0","id":1,"method":"session/set_config_option","params":{"sessionId":"s"}}`, "configId is required"},
-		{`{"jsonrpc":"2.0","id":1,"method":"session/close"}`, "params is required"},
-		{`{"jsonrpc":"2.0","id":1,"method":"session/close","params":"bad"}`, "invalid session/close"},
-		{`{"jsonrpc":"2.0","id":1,"method":"session/close","params":{}}`, "sessionId is required"},
-		{`{"jsonrpc":"2.0","id":1,"method":"session/prompt"}`, "params is required"},
-		{`{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":"bad"}`, "invalid session/prompt"},
-		{`{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{"sessionId":"s","prompt":[]}}`, "prompt must not be empty"},
-		{`{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{"sessionId":"s","prompt":[{"type":"text","text":""}]}}`, "non-empty text"},
-		{`{"jsonrpc":"2.0","id":1,"method":"authenticate"}`, ""},
-		{`{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"s1"}}`, ""},
-	}
-	for _, tc := range cases {
-		pr, err := validateACPRequest([]byte(tc.body))
-		if tc.want == "" {
-			if err != nil {
-				t.Errorf("%s: unexpected err %v", tc.body, err)
-			}
-			_ = pr
-			continue
-		}
-		if err == nil || !strings.Contains(err.Error(), tc.want) {
-			t.Errorf("%s: err=%v want %q", tc.body, err, tc.want)
-		}
 	}
 }
 
@@ -799,8 +538,8 @@ func TestHandleRPC_initialize(t *testing.T) {
 		t.Errorf("protocolVersion = %v, want 1", result["protocolVersion"])
 	}
 	caps := result["agentCapabilities"].(map[string]any)
-	if caps["loadSession"] != false {
-		t.Errorf("loadSession = %v, want false", caps["loadSession"])
+	if caps["loadSession"] != true {
+		t.Errorf("loadSession = %v, want true", caps["loadSession"])
 	}
 	mcpCaps := caps["mcpCapabilities"].(map[string]any)
 	if mcpCaps["http"] != true {
@@ -837,49 +576,51 @@ func TestHandleRPC_sessionNew(t *testing.T) {
 	}
 }
 
-func TestHandleRPC_sessionNew_storesSessionState(t *testing.T) {
+func TestHandleRPC_sessionNew_persistsWireEnvelope(t *testing.T) {
+	// Outcome: durable wire store holds cwd/mcp after session/new (not private map peeks).
 	store := testStore(t)
 	r := newTestRegistry(store, &mockInferenceStrategy{}, []*tacklr.Tool{})
+	srv := newACPTestServer(t, r)
 
-	rec := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/home/user","mcpServers":[{"name":"fs","command":"npx"}]}}`)
-
-	var resp map[string]any
-	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
-	result := resp["result"].(map[string]any)
-	sessionID := result["sessionId"].(string)
-
-	state, ok := r.sessions.Load(sessionID)
-	if !ok {
-		t.Fatal("expected session state to be stored")
+	rec := srv.rpc(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/home/user","mcpServers":[{"name":"fs","command":"npx"}]}}`)
+	sessionID, _ := acpRPCResult(t, rec)["sessionId"].(string)
+	if sessionID == "" {
+		t.Fatal("missing sessionId")
 	}
-	s := state.(*sessionState)
-	if s.cwd != "/home/user" {
-		t.Errorf("cwd = %q, want %q", s.cwd, "/home/user")
+
+	raw, err := srv.wire.Get(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("wire store: %v", err)
 	}
-	if len(s.mcpServers) != 1 || s.mcpServers[0].Name != "fs" || s.mcpServers[0].Command != "npx" {
-		t.Errorf("mcpServers = %v, want one stdio server fs/npx", s.mcpServers)
+	var env acpWireEnvelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.CWD != "/home/user" {
+		t.Errorf("cwd = %q, want /home/user", env.CWD)
+	}
+	if len(env.MCPServers) != 1 || env.MCPServers[0].Name != "fs" {
+		t.Errorf("mcpServers = %+v", env.MCPServers)
 	}
 }
 
-func TestHandleRPC_sessionClose_deletesSessionState(t *testing.T) {
+func TestHandleRPC_sessionClose_thenLoadNotFound(t *testing.T) {
 	store := testStore(t)
 	r := newTestRegistry(store, &mockInferenceStrategy{}, []*tacklr.Tool{})
+	srv := newACPTestServer(t, r)
 
-	// Create session first
-	rec1 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
-	var resp1 map[string]any
-	_ = json.Unmarshal(rec1.Body.Bytes(), &resp1)
-	sessionID := resp1["result"].(map[string]any)["sessionId"].(string)
+	rec1 := srv.rpc(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
+	sessionID, _ := acpRPCResult(t, rec1)["sessionId"].(string)
 
-	// Close it
-	rec2 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/close","params":{"sessionId":"`+sessionID+`"}}`)
+	rec2 := srv.rpc(`{"jsonrpc":"2.0","id":2,"method":"session/close","params":{"sessionId":"` + sessionID + `"}}`)
 	if rec2.Code != http.StatusOK {
 		t.Fatalf("close status = %d, want 200", rec2.Code)
 	}
 
-	_, ok := r.sessions.Load(sessionID)
-	if ok {
-		t.Error("expected session state to be deleted after close")
+	rec3 := srv.rpc(`{"jsonrpc":"2.0","id":3,"method":"session/load","params":{"sessionId":"` + sessionID + `","cwd":"/tmp"}}`)
+	errObj := acpRPCError(t, rec3)
+	if msg, _ := errObj["message"].(string); !strings.Contains(msg, "session") {
+		t.Errorf("error = %v, want session not found", errObj)
 	}
 }
 
@@ -940,31 +681,30 @@ func TestHandleRPC_sessionLoad(t *testing.T) {
 }
 
 func TestHandleRPC_sessionLoad_updatesSessionMCPServers(t *testing.T) {
+	// Outcome: after load with new mcpServers, durable wire envelope reflects them.
 	store := testStore(t)
 	r := newTestRegistry(store, &mockInferenceStrategy{}, []*tacklr.Tool{})
+	srv := newACPTestServer(t, r)
 
-	rec1 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
-	var resp1 map[string]any
-	_ = json.Unmarshal(rec1.Body.Bytes(), &resp1)
-	sessionID := resp1["result"].(map[string]any)["sessionId"].(string)
+	rec1 := srv.rpc(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
+	sessionID, _ := acpRPCResult(t, rec1)["sessionId"].(string)
 
-	rec2 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"`+sessionID+`","cwd":"/tmp","mcpServers":[{"type":"http","name":"api","url":"https://api.example.com/mcp","headers":[{"name":"Authorization","value":"Bearer tok"}]}]}}`)
-	var resp2 map[string]any
-	_ = json.Unmarshal(rec2.Body.Bytes(), &resp2)
-	if resp2["error"] != nil {
-		t.Fatalf("unexpected error: %v", resp2["error"])
-	}
+	rec2 := srv.rpc(`{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"` + sessionID + `","cwd":"/tmp","mcpServers":[{"type":"http","name":"api","url":"https://api.example.com/mcp","headers":[{"name":"Authorization","value":"Bearer tok"}]}]}}`)
+	_ = acpRPCResult(t, rec2)
 
-	state, ok := r.sessions.Load(sessionID)
-	if !ok {
-		t.Fatal("expected session state to be stored")
+	raw, err := srv.wire.Get(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
 	}
-	s := state.(*sessionState)
-	if s.cwd != "/tmp" {
-		t.Errorf("cwd = %q, want /tmp (unchanged)", s.cwd)
+	var env acpWireEnvelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatal(err)
 	}
-	if len(s.mcpServers) != 1 || s.mcpServers[0].Type != "http" || s.mcpServers[0].URL != "https://api.example.com/mcp" {
-		t.Errorf("mcpServers = %v, want one http server", s.mcpServers)
+	if env.CWD != "/tmp" {
+		t.Errorf("cwd = %q, want /tmp", env.CWD)
+	}
+	if len(env.MCPServers) != 1 || env.MCPServers[0].Type != "http" || env.MCPServers[0].URL != "https://api.example.com/mcp" {
+		t.Errorf("mcpServers = %+v", env.MCPServers)
 	}
 }
 
@@ -998,6 +738,59 @@ func TestHandleRPC_sessionLoad_notFound(t *testing.T) {
 	errObj := resp["error"].(map[string]any)
 	if !strings.Contains(errObj["message"].(string), "session") {
 		t.Errorf("error message = %v, want to mention session", errObj["message"])
+	}
+}
+
+// TestHandleRPC_sessionLoad_fromStoreAfterRestart: new process (new Registry +
+// Protocol, same wire store) can session/load and complete a prompt.
+func TestHandleRPC_sessionLoad_fromStoreAfterRestart(t *testing.T) {
+	store := testStore(t)
+	wire := NewMemoryWireStore()
+
+	strategy := &mockInferenceStrategy{
+		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "after-restart", IsComplete: true}
+		},
+	}
+
+	// Process 1: create session
+	r1 := newTestRegistry(store, strategy, nil)
+	s1 := newACPTestServerWithWire(t, r1, wire)
+	rec1 := s1.rpc(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/proj","mcpServers":[{"type":"http","name":"api","url":"https://api.example.com/mcp","headers":[]}]}}`)
+	sessionID, _ := acpRPCResult(t, rec1)["sessionId"].(string)
+
+	// Process 2: load + prompt
+	r2 := newTestRegistry(store, strategy, nil)
+	s2 := newACPTestServerWithWire(t, r2, wire)
+	rec2 := s2.rpc(`{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"` + sessionID + `","cwd":"/proj"}}`)
+	if acpRPCResult(t, rec2)["sessionId"] != sessionID {
+		t.Fatalf("load result: %v", rec2.Body.String())
+	}
+
+	raw, err := wire.Get(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var env acpWireEnvelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.CWD != "/proj" || len(env.MCPServers) != 1 {
+		t.Fatalf("wire envelope: %+v", env)
+	}
+
+	rec3 := s2.rpc(`{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"hi"}]}}`)
+	var endTurn bool
+	for _, f := range parseACPFrames(t, rec3.Body) {
+		if res, ok := f["result"].(map[string]any); ok && res["stopReason"] == "end_turn" {
+			endTurn = true
+		}
+		if f["error"] != nil {
+			t.Fatalf("prompt after restart: %v", f["error"])
+		}
+	}
+	if !endTurn {
+		t.Fatalf("expected end_turn, body=%s", rec3.Body.String())
 	}
 }
 
@@ -1328,12 +1121,7 @@ func TestHandleRPC_configSet_agent(t *testing.T) {
 	if agentOpt["currentValue"] != "custom" {
 		t.Errorf("currentValue = %v, want custom", agentOpt["currentValue"])
 	}
-
-	state, _ := r.sessions.Load(sessionID)
-	sess := state.(*sessionState)
-	if sess.configValues["agent"] != "custom" {
-		t.Errorf("configValues[agent] = %q, want custom", sess.configValues["agent"])
-	}
+	// Outcome already asserted via configOptions.currentValue on the wire response.
 }
 
 func TestHandleRPC_configSet_unknownAgent(t *testing.T) {
@@ -1678,16 +1466,8 @@ func TestACP_sessionCancel_midPrompt(t *testing.T) {
 			sentAtDone, sentLater, messageChunkCount(recPrompt))
 	}
 
-	// Desired: session remains registered after cancel.
-	if _, ok := r.sessions.Load(sessionID); !ok {
-		t.Fatal("session should remain registered after cancel")
-	}
-	// Approach A: empty checkpoint exists from session/new so load is real, not only fallback.
-	if _, err := store.LoadSession(context.Background(), sessionID); err != nil {
-		t.Fatalf("empty checkpoint should exist after session/new: %v", err)
-	}
-
-	// Desired: a subsequent prompt on the same session completes normally.
+	// Desired: a subsequent prompt on the same session completes normally
+	// (wire session still live after cancel; harness may or may not have a row).
 	strategy.invokeFn = func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 		ch <- tacklr.LLMResponseChunk{
 			Type:       tacklr.StreamEventMessage,

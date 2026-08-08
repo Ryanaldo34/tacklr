@@ -137,7 +137,7 @@ func TestHandleHTTP_bodyReadError(t *testing.T) {
 	r := newTestRegistry(testStore(t), &mockInferenceStrategy{}, nil)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/", brokenBody{})
-	acpProtocol{}.handleHTTP(ProtocolEnv{Registry: r}, rec, req)
+	NewACPProtocol(nil).(*acpProtocol).handleHTTP(ProtocolEnv{Registry: r}, rec, req)
 	if rec.Body.Len() == 0 {
 		t.Fatal("expected error response body")
 	}
@@ -148,7 +148,7 @@ func TestHandleInbound_cancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	w := &recordingMessageWriter{}
-	err := acpProtocol{}.HandleInbound(ctx, ProtocolEnv{Registry: r, Conn: &Conn{Writer: w}}, []byte(`{}`))
+	err := NewACPProtocol(nil).(*acpProtocol).HandleInbound(ctx, ProtocolEnv{Registry: r, Conn: &Conn{Writer: w}}, []byte(`{}`))
 	if err == nil {
 		t.Fatal("want cancelled")
 	}
@@ -224,18 +224,28 @@ func (failFrameWriter) WriteFrame([]byte) error                 { return errors.
 
 func TestRunTurn_sessionCwdMismatchAndNoAgent(t *testing.T) {
 	r := newTestRegistry(testStore(t), &mockInferenceStrategy{}, nil)
-	view := r.CreateSession("/cwd-a", nil)
-	if _, err := r.RunTurn(context.Background(), TurnRequest{
-		SessionID: view.SessionID,
-		Prompt:    "x",
-		CWD:       "/cwd-b",
-	}); err == nil || !strings.Contains(err.Error(), "cwd") {
+	p := NewACPProtocol(nil).(*acpProtocol)
+	env := ProtocolEnv{Registry: r}
+	params, _ := json.Marshal(map[string]any{"cwd": "/cwd-a"})
+	sid, _, err := p.CreateSession(context.Background(), env, params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	turnParams, _ := json.Marshal(map[string]any{
+		"sessionId": sid,
+		"cwd":       "/cwd-b",
+		"prompt":    []map[string]string{{"type": "text", "text": "x"}},
+	})
+	if _, err := p.BindTurn(context.Background(), env, sid, turnParams); err == nil || !strings.Contains(err.Error(), "cwd") {
 		t.Fatalf("err = %v", err)
 	}
 
 	empty := NewRegistry(testStore(t), "")
 	if _, err := empty.RunTurn(context.Background(), TurnRequest{Prompt: "x"}); err == nil {
 		t.Fatal("want agent_id required")
+	}
+	if _, err := empty.RunTurn(context.Background(), TurnRequest{SessionID: "s1", Prompt: "x"}); err == nil {
+		t.Fatal("want no agent configured")
 	}
 }
 
@@ -259,13 +269,15 @@ func (f failSaveStore) SaveSession(ctx context.Context, id string, cp stores.Ses
 	return errors.New("save fail")
 }
 
-func TestCreateSession_storeSaveWarn(t *testing.T) {
-	// Exercises CreateSession checkpoint build/save warn paths (errors logged, session still created).
+func TestCreateSession_wireStoreIndependentOfHarnessStore(t *testing.T) {
+	// Wire session create does not require harness BaseStore.
 	r := NewRegistry(failSaveStore{InMemoryStore: stores.NewInMemoryStore()}, "default")
 	r.Register("default", AgentSpec{Model: &mockInferenceStrategy{}})
-	view := r.CreateSession("/tmp", nil)
-	if view.SessionID == "" {
-		t.Fatal("session should still be created")
+	p := NewACPProtocol(nil).(*acpProtocol)
+	params, _ := json.Marshal(map[string]any{"cwd": "/tmp"})
+	sid, _, err := p.CreateSession(context.Background(), ProtocolEnv{Registry: r}, params)
+	if err != nil || sid == "" {
+		t.Fatalf("wire session create: %v %q", err, sid)
 	}
 }
 
@@ -309,7 +321,7 @@ func TestHandleInbound_notificationUnknown(t *testing.T) {
 	r := newTestRegistry(testStore(t), &mockInferenceStrategy{}, nil)
 	w := &recordingMessageWriter{}
 	// Unknown notification is ignored (no id).
-	err := acpProtocol{}.HandleInbound(context.Background(), ProtocolEnv{Registry: r, Conn: &Conn{Writer: w}},
+	err := NewACPProtocol(nil).(*acpProtocol).HandleInbound(context.Background(), ProtocolEnv{Registry: r, Conn: &Conn{Writer: w}},
 		[]byte(`{"jsonrpc":"2.0","method":"session/foo","params":{}}`))
 	if err != nil {
 		t.Fatal(err)
@@ -325,7 +337,8 @@ func TestClientBridge_writeFrameError(t *testing.T) {
 
 func TestSetConfigOption_unknownSession(t *testing.T) {
 	r := newTestRegistry(testStore(t), &mockInferenceStrategy{}, nil)
-	if _, err := r.SetConfigOption("missing", "model", "default"); err == nil {
+	p := NewACPProtocol(nil).(*acpProtocol)
+	if _, err := p.setConfig(context.Background(), ProtocolEnv{Registry: r}, "missing", "model", "default"); err == nil {
 		t.Fatal("want session not found")
 	}
 }
@@ -480,11 +493,13 @@ func TestStopReasonFromError_contextMessage(t *testing.T) {
 func TestCreateSession_emptyAgentName(t *testing.T) {
 	r := NewRegistry(testStore(t), "a")
 	r.Register("a", AgentSpec{Name: "", Model: &mockInferenceStrategy{}})
-	view := r.CreateSession("/tmp", nil)
-	if view.SessionID == "" {
+	p := NewACPProtocol(nil).(*acpProtocol)
+	params, _ := json.Marshal(map[string]any{"cwd": "/tmp"})
+	sid, _, err := p.CreateSession(context.Background(), ProtocolEnv{Registry: r}, params)
+	if err != nil || sid == "" {
 		t.Fatal("no session")
 	}
-	if _, err := r.SetConfigOption(view.SessionID, "nope", "x"); err == nil {
+	if _, err := p.setConfig(context.Background(), ProtocolEnv{Registry: r}, sid, "nope", "x"); err == nil {
 		t.Fatal("want unknown config")
 	}
 }
@@ -543,14 +558,14 @@ func TestHandleInbound_sessionCancelRequestAndMethodNotFound(t *testing.T) {
 	w := &recordingMessageWriter{}
 	env := ProtocolEnv{Registry: r, Conn: &Conn{Writer: w}}
 	// session/cancel as a request (with id) → empty result
-	err := acpProtocol{}.HandleInbound(context.Background(), env, []byte(
+	err := NewACPProtocol(nil).(*acpProtocol).HandleInbound(context.Background(), env, []byte(
 		`{"jsonrpc":"2.0","id":9,"method":"session/cancel","params":{"sessionId":"s1"}}`,
 	))
 	if err != nil {
 		t.Fatal(err)
 	}
 	// MethodNotFound for unknown method (written as error frame; WriteError returns nil)
-	err = acpProtocol{}.HandleInbound(context.Background(), env, []byte(
+	err = NewACPProtocol(nil).(*acpProtocol).HandleInbound(context.Background(), env, []byte(
 		`{"jsonrpc":"2.0","id":10,"method":"session/foo","params":{}}`,
 	))
 	if err != nil {
@@ -568,7 +583,7 @@ func TestHandleInbound_sessionCancelRequestAndMethodNotFound(t *testing.T) {
 }
 
 func TestHandleSessionTurn_nonClientError(t *testing.T) {
-	// Second session prompt loads from store; non-client LoadSession error hits logTurnError.
+	// Second session prompt loads from harness store; non-client LoadSession error.
 	r := NewRegistry(&failLoadStore{InMemoryStore: stores.NewInMemoryStore(), err: errors.New("db down")}, "default")
 	r.Register("default", AgentSpec{
 		Config: tacklr.Config{MaxWindowSize: 1024},
@@ -578,18 +593,23 @@ func TestHandleSessionTurn_nonClientError(t *testing.T) {
 			},
 		},
 	})
-	view := r.CreateSession("/tmp", nil)
+	p := NewACPProtocol(nil).(*acpProtocol)
 	w := &recordingMessageWriter{}
 	env := ProtocolEnv{Registry: r, Conn: &Conn{Writer: w}}
-	// First prompt succeeds (no load).
-	if err := (acpProtocol{}).handleSessionTurn(context.Background(), env, &parsedRequest{
-		ID: json.RawMessage(`1`), ThreadID: view.SessionID, Prompt: "first",
+	params, _ := json.Marshal(map[string]any{"cwd": "/tmp"})
+	sid, _, err := p.CreateSession(context.Background(), env, params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// First prompt succeeds (Load=false).
+	if err := p.handleSessionTurn(context.Background(), env, &parsedRequest{
+		ID: json.RawMessage(`1`), ThreadID: sid, Prompt: "first",
 	}); err != nil {
 		t.Fatalf("first: %v", err)
 	}
-	// Second prompt loads and fails with non-client error.
-	err := (acpProtocol{}).handleSessionTurn(context.Background(), env, &parsedRequest{
-		ID: json.RawMessage(`2`), ThreadID: view.SessionID, Prompt: "second",
+	// Second prompt loads harness checkpoint and fails with non-client error.
+	err = p.handleSessionTurn(context.Background(), env, &parsedRequest{
+		ID: json.RawMessage(`2`), ThreadID: sid, Prompt: "second",
 	})
 	if err == nil {
 		t.Fatal("want non-client load error on second prompt")
@@ -619,14 +639,14 @@ func TestOnStreamEvent_cancelledCompleteAndEncodeError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	stream := &EventStream{runCtx: ctx, cancel: func() {}}
-	ctrl := acpProtocol{}.OnStreamEvent(context.Background(), env, "t", stream, streaming.StreamEvent{
+	ctrl := NewACPProtocol(nil).(*acpProtocol).OnStreamEvent(context.Background(), env, "t", stream, streaming.StreamEvent{
 		Type: streaming.StreamEventComplete,
 	}, json.RawMessage(`42`))
 	if !ctrl.Finished {
 		t.Fatal("want finished cancelled path")
 	}
 	// Encode error via bad plan update data
-	ctrl = acpProtocol{}.OnStreamEvent(context.Background(), env, "t", stream, streaming.StreamEvent{
+	ctrl = NewACPProtocol(nil).(*acpProtocol).OnStreamEvent(context.Background(), env, "t", stream, streaming.StreamEvent{
 		Type: streaming.StreamEventPlanUpdate,
 		Data: []byte(`{`),
 	}, json.RawMessage(`1`))
@@ -761,6 +781,19 @@ func (closedErrProtocol) OnStreamClosed(context.Context, ProtocolEnv, string, js
 	return errors.New("closed-err")
 }
 
+func (closedErrProtocol) CreateSession(context.Context, ProtocolEnv, json.RawMessage) (string, any, error) {
+	return "", nil, ErrWireSessionUnsupported
+}
+func (closedErrProtocol) LoadSession(context.Context, ProtocolEnv, string, json.RawMessage) (any, error) {
+	return nil, ErrWireSessionUnsupported
+}
+func (closedErrProtocol) BindTurn(context.Context, ProtocolEnv, string, json.RawMessage) (TurnRequest, error) {
+	return TurnRequest{}, ErrWireSessionUnsupported
+}
+func (closedErrProtocol) CloseSession(context.Context, ProtocolEnv, string) error {
+	return ErrWireSessionUnsupported
+}
+
 func TestSetConfigOption_nilConfigValuesAndSpecStore(t *testing.T) {
 	store := testStore(t)
 	perAgent := stores.NewInMemoryStore()
@@ -774,15 +807,17 @@ func TestSetConfigOption_nilConfigValuesAndSpecStore(t *testing.T) {
 		},
 		Store: perAgent, // exercises spec.Store override
 	})
-	// Manually insert session with nil configValues
+	// Manually insert wire session with empty configValues
 	sid := "sess-nil-cfg"
-	r.sessions.Store(sid, &sessionState{cwd: "/tmp", configValues: nil})
-	view, err := r.SetConfigOption(sid, "model", "default")
+	p := NewACPProtocol(nil).(*acpProtocol)
+	p.sessions[sid] = &acpWireSession{cwd: "/tmp", configValues: nil}
+	result, err := p.setConfig(context.Background(), ProtocolEnv{Registry: r}, sid, "model", "default")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if view.SessionID != sid {
-		t.Fatal(view.SessionID)
+	resMap, _ := result.(map[string]any)
+	if resMap["configOptions"] == nil {
+		t.Fatal("expected configOptions")
 	}
 	// Run turn uses per-agent store
 	stream, err := r.RunTurn(context.Background(), TurnRequest{AgentID: "default", Prompt: "hi"})
@@ -794,10 +829,9 @@ func TestSetConfigOption_nilConfigValuesAndSpecStore(t *testing.T) {
 	stream.Close()
 }
 
-func TestLoadAgent_sessionKnownNotFoundCreatesFresh(t *testing.T) {
-	// Session registered, store returns ErrSessionNotFound on load → fresh harness.
-	store := stores.NewInMemoryStore()
-	r := NewRegistry(store, "default")
+func TestLoadAgent_allowMissingCheckpointCreatesFresh(t *testing.T) {
+	// AllowMissingCheckpoint + Load + store not found → fresh harness.
+	r := NewRegistry(notFoundStore{}, "default")
 	r.Register("default", AgentSpec{
 		Config: tacklr.Config{MaxWindowSize: 1024},
 		Model: &mockInferenceStrategy{
@@ -806,30 +840,12 @@ func TestLoadAgent_sessionKnownNotFoundCreatesFresh(t *testing.T) {
 			},
 		},
 	})
-	view := r.CreateSession("/tmp", nil)
-	// Wipe checkpoint so load fails with not found, but session remains registered.
-	// InMemoryStore has no Delete — overwrite by using a store that only errors not found on Load.
-	r.store = notFoundStore{}
-	stream, err := r.RunTurn(context.Background(), TurnRequest{
-		SessionID: view.SessionID,
-		Prompt:    "again",
-	})
-	// First prompt sets prompted; second uses load. Force load=true via ThreadID path.
-	if err != nil {
-		// first turn may succeed without load
-		t.Log(err)
-	}
-	if stream != nil {
-		for range stream.Events {
-		}
-		stream.Close()
-	}
-	// Direct load path
 	stream2, err := r.RunTurn(context.Background(), TurnRequest{
-		AgentID:  "default",
-		ThreadID: view.SessionID,
-		Load:     true,
-		Prompt:   "x",
+		SessionID:              "wire-sess",
+		AgentID:                "default",
+		Load:                   true,
+		AllowMissingCheckpoint: true,
+		Prompt:                 "x",
 	})
 	if err != nil {
 		t.Fatal(err)

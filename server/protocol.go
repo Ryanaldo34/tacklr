@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/ryanaldo34/tacklr/streaming"
@@ -19,7 +20,7 @@ type Conn struct {
 type ProtocolEnv struct {
 	Registry *Registry
 	Conn     *Conn
-	// Connections is the server-wide ACP connection registry (WebSocket / HTTP).
+	// Connections is the server-wide connection registry (WebSocket / Streamable HTTP).
 	// Nil for pure stdio or tests that only use HandleInbound.
 	Connections *ConnectionRegistry
 }
@@ -39,13 +40,18 @@ type HTTPRoute struct {
 	Handler func(env ProtocolEnv, w http.ResponseWriter, r *http.Request)
 }
 
+// ErrWireSessionUnsupported is returned by Protocol session methods when the
+// protocol has no wire-session lifecycle (e.g. simple SSE).
+var ErrWireSessionUnsupported = errors.New("wire sessions not supported by this protocol")
+
 // Protocol is a complete wire façade over Registry.
-// Transports only provide Conn I/O; protocols own methods, routes, and stream policy.
+// Transports only provide Conn I/O; protocols own methods, routes, stream policy,
+// and wire-session lifecycle (create/load/bind/close).
 //
 // Multi-protocol model (ACP, SSE, future A2A):
 //   - Registry.RunTurn produces protocol-agnostic streaming.StreamEvent values.
 //   - runTurnStream pumps those events through OnStreamEvent / OnStreamClosed.
-//   - Each Protocol maps StreamEvent → its client wire (JSON-RPC, SSE, A2A tasks, …).
+//   - Each Protocol maps StreamEvent → its client wire and owns any wire session state.
 //
 // Adding a protocol should not require harness streaming changes.
 type Protocol interface {
@@ -59,12 +65,23 @@ type Protocol interface {
 	HTTPRoutes() []HTTPRoute
 
 	// OnStreamEvent encodes one harness StreamEvent for the client connection.
-	// This is the extension point for ACP, SSE, and future A2A framing.
 	OnStreamEvent(ctx context.Context, env ProtocolEnv, threadID string, stream *EventStream, ev streaming.StreamEvent, reqID json.RawMessage) StreamControl
 
 	// OnStreamClosed is called when the event channel closes without Finished.
-	// cancelled is true when the turn context was cancelled (session/cancel or parent ctx).
 	OnStreamClosed(ctx context.Context, env ProtocolEnv, threadID string, reqID json.RawMessage, cancelled bool) error
+
+	// CreateSession allocates a wire session. params is protocol-defined JSON.
+	// Stateless protocols return ErrWireSessionUnsupported.
+	CreateSession(ctx context.Context, env ProtocolEnv, params json.RawMessage) (sessionID string, result any, err error)
+
+	// LoadSession reattaches a wire session (memory or durable wire store).
+	LoadSession(ctx context.Context, env ProtocolEnv, sessionID string, params json.RawMessage) (result any, err error)
+
+	// BindTurn maps a wire session + turn body into a Registry TurnRequest.
+	BindTurn(ctx context.Context, env ProtocolEnv, sessionID string, turnParams json.RawMessage) (TurnRequest, error)
+
+	// CloseSession drops live wire binding and may cancel an in-flight turn.
+	CloseSession(ctx context.Context, env ProtocolEnv, sessionID string) error
 }
 
 // runTurnStream pumps a harness event stream through a protocol stream policy.

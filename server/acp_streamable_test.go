@@ -17,7 +17,8 @@ import (
 
 func startACPStreamServer(t *testing.T, r *Registry) (*httptest.Server, *Server) {
 	t.Helper()
-	srv := NewServer(r, ACP)
+	// Fresh ACP protocol per server — no package-level ACP singleton.
+	srv := NewServer(r, NewACPProtocol(NewMemoryWireStore()))
 	hs := httptest.NewServer(srv.HTTPMux())
 	t.Cleanup(hs.Close)
 	return hs, srv

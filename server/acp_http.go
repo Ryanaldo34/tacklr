@@ -13,7 +13,7 @@ import (
 //
 //	initialize → 200 + JSON body + Acp-Connection-Id (+ affinity cookie)
 //	other methods / client RPC replies → 202; results arrive on GET SSE streams
-func (p acpProtocol) handleACPPost(env ProtocolEnv, w http.ResponseWriter, r *http.Request) {
+func (p *acpProtocol) handleACPPost(env ProtocolEnv, w http.ResponseWriter, r *http.Request) {
 	if env.Connections == nil {
 		http.Error(w, "connection registry not configured", http.StatusInternalServerError)
 		return
@@ -111,7 +111,7 @@ func (p acpProtocol) handleACPPost(env ProtocolEnv, w http.ResponseWriter, r *ht
 	}()
 }
 
-func (p acpProtocol) handleStreamableInitialize(env ProtocolEnv, w http.ResponseWriter, r *http.Request, body []byte, peek jsonRPCPeek) {
+func (p *acpProtocol) handleStreamableInitialize(env ProtocolEnv, w http.ResponseWriter, r *http.Request, body []byte, peek jsonRPCPeek) {
 	// initialize must not carry an existing connection id.
 	if id := strings.TrimSpace(r.Header.Get(HeaderAcpConnectionID)); id != "" {
 		http.Error(w, "initialize must not include "+HeaderAcpConnectionID, http.StatusBadRequest)
@@ -151,7 +151,7 @@ func (p acpProtocol) handleStreamableInitialize(env ProtocolEnv, w http.Response
 }
 
 // handleACPGet dispatches WebSocket upgrade vs Streamable HTTP SSE.
-func (p acpProtocol) handleACPGet(env ProtocolEnv, w http.ResponseWriter, r *http.Request) {
+func (p *acpProtocol) handleACPGet(env ProtocolEnv, w http.ResponseWriter, r *http.Request) {
 	if isWebSocketUpgrade(r) {
 		p.handleACPWebSocket(env, w, r)
 		return
@@ -160,7 +160,7 @@ func (p acpProtocol) handleACPGet(env ProtocolEnv, w http.ResponseWriter, r *htt
 }
 
 // handleACPStreamSSE opens a connection- or session-scoped long-lived SSE stream.
-func (p acpProtocol) handleACPStreamSSE(env ProtocolEnv, w http.ResponseWriter, r *http.Request) {
+func (p *acpProtocol) handleACPStreamSSE(env ProtocolEnv, w http.ResponseWriter, r *http.Request) {
 	if env.Connections == nil {
 		http.Error(w, "connection registry not configured", http.StatusInternalServerError)
 		return
@@ -223,7 +223,7 @@ func (p acpProtocol) handleACPStreamSSE(env ProtocolEnv, w http.ResponseWriter, 
 }
 
 // handleACPDelete tears down a Streamable HTTP / logical connection.
-func (p acpProtocol) handleACPDelete(env ProtocolEnv, w http.ResponseWriter, r *http.Request) {
+func (p *acpProtocol) handleACPDelete(env ProtocolEnv, w http.ResponseWriter, r *http.Request) {
 	if env.Connections == nil {
 		http.Error(w, "connection registry not configured", http.StatusInternalServerError)
 		return
@@ -251,7 +251,7 @@ func (p acpProtocol) handleACPDelete(env ProtocolEnv, w http.ResponseWriter, r *
 	w.WriteHeader(http.StatusAccepted)
 }
 
-func (p acpProtocol) lookupConnection(env ProtocolEnv, w http.ResponseWriter, r *http.Request) (*Connection, bool) {
+func (p *acpProtocol) lookupConnection(env ProtocolEnv, w http.ResponseWriter, r *http.Request) (*Connection, bool) {
 	connID := strings.TrimSpace(r.Header.Get(HeaderAcpConnectionID))
 	if connID == "" {
 		http.Error(w, HeaderAcpConnectionID+" required", http.StatusBadRequest)

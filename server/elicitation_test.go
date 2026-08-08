@@ -1,25 +1,36 @@
 package server
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/ryanaldo34/tacklr/interrupt"
 )
 
+// TestElicitation_paramsAndResultOutcomes covers SelectionToElicitationParams and
+// ElicitationResultToSelectionPayload return paths once each.
 func TestElicitation_paramsAndResultOutcomes(t *testing.T) {
-	opts := []interrupt.UserChoice{{Title: "A"}, {Title: "B"}}
+	opts := []interrupt.UserChoice{{Title: "A", Description: "first", IsRecommended: true}, {Title: "B", Description: "second"}}
+
 	if _, err := SelectionToElicitationParams("s", "tc", "", []interrupt.UserChoice{{Title: "only"}}); err == nil {
 		t.Fatal("want error for <2 options")
 	}
 	if _, err := SelectionToElicitationParams("s", "tc", "Q", []interrupt.UserChoice{{Title: ""}, {Title: "B"}}); err == nil {
 		t.Fatal("want error for empty title")
 	}
-	params, err := SelectionToElicitationParams("s", "tc", "Pick", opts)
+	params, err := SelectionToElicitationParams("sess1", "tc1", "Pick one", opts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if params["message"] == nil || params["toolCallId"] != "tc" {
+	if params["mode"] != "form" || params["sessionId"] != "sess1" || params["toolCallId"] != "tc1" {
 		t.Fatalf("params = %#v", params)
+	}
+	msg, _ := params["message"].(string)
+	for _, part := range []string{"Pick one", "A", "recommended", "B"} {
+		if !strings.Contains(msg, part) {
+			t.Fatalf("message missing %q: %q", part, msg)
+		}
 	}
 
 	action, res, err := ElicitationResultToSelectionPayload([]byte(`{"action":"decline"}`), opts)
@@ -45,5 +56,18 @@ func TestElicitation_paramsAndResultOutcomes(t *testing.T) {
 	_, res, err = ElicitationResultToSelectionPayload([]byte(`{"action":"accept","content":{"choice":"A"}}`), opts)
 	if err != nil || res == nil {
 		t.Fatalf("accept A: %v %s", err, res)
+	}
+	rawB, _ := json.Marshal(map[string]any{
+		"action":  "accept",
+		"content": map[string]any{"choice": "B"},
+	})
+	action, res, err = ElicitationResultToSelectionPayload(rawB, opts)
+	if err != nil || action != "accept" {
+		t.Fatalf("accept B: action=%s err=%v", action, err)
+	}
+	var payload map[string]any
+	_ = json.Unmarshal(res, &payload)
+	if int(payload["selectionIdx"].(float64)) != 1 {
+		t.Fatalf("payload = %v", payload)
 	}
 }

@@ -199,55 +199,6 @@ func TestParseClientCapabilities(t *testing.T) {
 	}
 }
 
-func TestSelectionToElicitationParams(t *testing.T) {
-	params, err := SelectionToElicitationParams("sess1", "tc1", "Pick one", []interrupt.UserChoice{
-		{Title: "A", Description: "first", IsRecommended: true},
-		{Title: "B", Description: "second"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if params["mode"] != "form" || params["sessionId"] != "sess1" || params["toolCallId"] != "tc1" {
-		t.Fatalf("params = %#v", params)
-	}
-	msg, _ := params["message"].(string)
-	if !containsAll(msg, "Pick one", "A", "recommended", "B") {
-		t.Fatalf("message = %q", msg)
-	}
-}
-
-func TestElicitationResultToSelectionPayload(t *testing.T) {
-	opts := []interrupt.UserChoice{{Title: "A"}, {Title: "B"}}
-	raw, _ := json.Marshal(map[string]any{
-		"action":  "accept",
-		"content": map[string]any{"choice": "B"},
-	})
-	action, res, err := ElicitationResultToSelectionPayload(raw, opts)
-	if err != nil || action != "accept" {
-		t.Fatalf("action=%s err=%v", action, err)
-	}
-	var payload map[string]any
-	_ = json.Unmarshal(res, &payload)
-	if int(payload["selectionIdx"].(float64)) != 1 {
-		t.Fatalf("payload = %v", payload)
-	}
-
-	rawDec, _ := json.Marshal(map[string]any{"action": "decline"})
-	action, res, err = ElicitationResultToSelectionPayload(rawDec, opts)
-	if err != nil || action != "decline" || res != nil {
-		t.Fatalf("decline: action=%s res=%s err=%v", action, res, err)
-	}
-}
-
-func containsAll(s string, parts ...string) bool {
-	for _, p := range parts {
-		if !strings.Contains(s, p) {
-			return false
-		}
-	}
-	return true
-}
-
 func TestParseUserSelectionFromInterruptData(t *testing.T) {
 	usi := interrupt.UserSelectionInterrupt{
 		Options: []interrupt.UserChoice{{Title: "A"}, {Title: "B"}},

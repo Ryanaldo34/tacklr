@@ -14,6 +14,7 @@ type PendingToolCall struct {
 	InterruptActive bool
 }
 
+// sessionState is harness-owned durable agent state (not wire-protocol envelopes).
 type sessionState struct {
 	PendingToolCalls     map[string]PendingToolCall `json:"pendingToolCalls"`
 	InterruptToRequester map[string]string          `json:"interruptToRequester"`
@@ -25,6 +26,9 @@ type sessionState struct {
 	SearchContext []byte `json:"searchContext,omitempty"`
 }
 
+// SessionCheckpoint is the agent harness checkpoint blob.
+// Wire protocols (ACP, …) must not store protocol envelopes here — use a
+// ProtocolWireStore (or equivalent) owned by the protocol.
 type SessionCheckpoint struct {
 	ContextWindow []*streaming.Message `json:"contextWindow"`
 	State         sessionState         `json:"state"`
@@ -59,13 +63,14 @@ func NewCheckpoint(contextWindow []*streaming.Message, pendingToolCalls map[stri
 	}, nil
 }
 
-// BaseStore is the minimal persistence interface for agent session state.
+// BaseStore is the minimal persistence interface for agent harness session state.
 //
 // Implementations included in this package:
 //   - InMemoryStore — sessions live in memory, lost on restart.
 //   - PostgresStore — sessions persisted via PostgreSQL/pgx.
 //
 // Users may provide their own implementation (e.g. Redis, SQLite, custom DB).
+// Wire-protocol session envelopes are not part of this API.
 type BaseStore interface {
 	SaveSession(context.Context, string, SessionCheckpoint) error
 	LoadSession(context.Context, string) (SessionCheckpoint, error)

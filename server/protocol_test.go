@@ -78,3 +78,16 @@ func TestACPProtocol_initializeResultShape(t *testing.T) {
 		t.Fatalf("mcpCapabilities = %v", mcpCaps)
 	}
 }
+
+func (healthProtocol) CreateSession(context.Context, ProtocolEnv, json.RawMessage) (string, any, error) {
+	return "", nil, ErrWireSessionUnsupported
+}
+func (healthProtocol) LoadSession(context.Context, ProtocolEnv, string, json.RawMessage) (any, error) {
+	return nil, ErrWireSessionUnsupported
+}
+func (healthProtocol) BindTurn(context.Context, ProtocolEnv, string, json.RawMessage) (TurnRequest, error) {
+	return TurnRequest{}, ErrWireSessionUnsupported
+}
+func (healthProtocol) CloseSession(context.Context, ProtocolEnv, string) error {
+	return ErrWireSessionUnsupported
+}

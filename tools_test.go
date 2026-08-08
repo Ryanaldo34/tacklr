@@ -258,6 +258,62 @@ func TestAsJson(t *testing.T) {
 	if def["parameters"] == nil {
 		t.Error("parameters missing")
 	}
+	// Nil parameters map → default empty object schema (strict tool host shape).
+	empty := (&Tool{Name: "bare"}).AsJson()
+	params, _ := empty["parameters"].(map[string]any)
+	if params == nil || params["type"] != "object" {
+		t.Fatalf("nil params default = %#v", empty["parameters"])
+	}
+}
+
+// TestMakeSchemaNullable_outcomes covers each rewrite branch of makeSchemaNullable
+// (used for strict optional fields). Cheap pure paths that lift library total cover.
+func TestMakeSchemaNullable_outcomes(t *testing.T) {
+	nilSchema := makeSchemaNullable(nil)
+	if types, _ := nilSchema["type"].([]any); len(types) != 2 {
+		t.Fatalf("nil schema = %#v", nilSchema)
+	}
+	if got := makeSchemaNullable(map[string]any{"type": "null"}); got["type"] != "null" {
+		t.Fatalf("already-null = %#v", got)
+	}
+	str := makeSchemaNullable(map[string]any{"type": "string"})
+	if types, _ := str["type"].([]any); len(types) != 2 || types[0] != "string" || types[1] != "null" {
+		t.Fatalf("string = %#v", str)
+	}
+	// Multi-type without null → append null
+	multi := makeSchemaNullable(map[string]any{"type": []any{"string", "number"}})
+	if types, _ := multi["type"].([]any); len(types) != 3 || types[2] != "null" {
+		t.Fatalf("multi = %#v", multi)
+	}
+	// Multi-type already including null → unchanged length
+	withNull := makeSchemaNullable(map[string]any{"type": []any{"string", "null"}})
+	if types, _ := withNull["type"].([]any); len(types) != 2 {
+		t.Fatalf("withNull = %#v", withNull)
+	}
+	// Unknown type kind leaves schema as-is
+	other := makeSchemaNullable(map[string]any{"type": 42})
+	if other["type"] != 42 {
+		t.Fatalf("other = %#v", other)
+	}
+}
+
+// TestToolResultHookRegistry_outcomes covers nil registry, missing hook, and invoke.
+func TestToolResultHookRegistry_outcomes(t *testing.T) {
+	var nilReg *toolResultHookRegistry
+	if d := nilReg.observe(context.Background(), ToolResultObservation{Name: "x"}); d != (ToolResultDisposition{}) {
+		t.Fatalf("nil reg: %#v", d)
+	}
+	reg := newToolResultHookRegistry(map[string]ToolResultHook{
+		"done": func(ctx context.Context, obs ToolResultObservation) ToolResultDisposition {
+			return ToolResultDisposition{SuppressWindowMessage: true}
+		},
+	})
+	if d := reg.observe(context.Background(), ToolResultObservation{Name: "missing"}); d != (ToolResultDisposition{}) {
+		t.Fatalf("missing: %#v", d)
+	}
+	if d := reg.observe(context.Background(), ToolResultObservation{Name: "done"}); !d.SuppressWindowMessage {
+		t.Fatalf("hook: %#v", d)
+	}
 }
 
 func TestToolsAsJson(t *testing.T) {

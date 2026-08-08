@@ -37,7 +37,7 @@ func dialACPWebSocket(t *testing.T, hs *httptest.Server) (*websocket.Conn, strin
 
 func startACPWSServer(t *testing.T, r *Registry) (*httptest.Server, *Server) {
 	t.Helper()
-	srv := NewServer(r, ACP)
+	srv := NewServer(r, NewACPProtocol(NewMemoryWireStore()))
 	hs := httptest.NewServer(srv.HTTPMux())
 	t.Cleanup(hs.Close)
 	return hs, srv

@@ -116,6 +116,7 @@ func validateACPRequest(body []byte) (*parsedRequest, error) {
 		Method:       env.Method,
 		Meta:         env.Meta,
 		Notification: env.ID == nil,
+		Params:       env.Params,
 	}
 
 	// JSON-RPC notifications have no id and must not receive a response.

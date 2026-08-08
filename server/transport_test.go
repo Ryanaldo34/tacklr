@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/ryanaldo34/tacklr"
-	"github.com/ryanaldo34/tacklr/streaming"
 )
 
 func TestServeHTTP_listenCancelAndMountedHandlers(t *testing.T) {
@@ -170,7 +169,7 @@ func TestHandleMessage_lifecycleMethods(t *testing.T) {
 		}
 	}
 	if sessionID == "" {
-		sessionID = r.CreateSession("/tmp", nil).SessionID
+		t.Fatal("session/new did not return sessionId")
 	}
 
 	send(fmt.Sprintf(`{"jsonrpc":"2.0","id":4,"method":"session/set_config_option","params":{"sessionId":%q,"configId":"model","value":"default"}}`, sessionID))
@@ -218,76 +217,13 @@ func TestACP_handleHTTP_invalidJSON(t *testing.T) {
 	r := newTestRegistry(testStore(t), &mockInferenceStrategy{}, nil)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader([]byte(`{`)))
-	acpProtocol{}.handleHTTP(ProtocolEnv{Registry: r}, rec, req)
+	NewACPProtocol(nil).(*acpProtocol).handleHTTP(ProtocolEnv{Registry: r}, rec, req)
 	if !strings.Contains(rec.Body.String(), "error") && rec.Code == 0 {
 		// jsonRPC writer may not set status; body should still have error JSON
 	}
 	if rec.Body.Len() == 0 {
 		t.Fatal("expected error body")
 	}
-}
-
-func TestConcatenateACPPrompt_resourceAndUnsupported(t *testing.T) {
-	// resource block
-	raw := []byte(`[{"type":"resource","resource":{"uri":"file:///a","mimeType":"text/plain","text":"body"}}]`)
-	text, err := concatenateACPPrompt(raw)
-	if err != nil || !strings.Contains(text, "body") {
-		t.Fatalf("%q %v", text, err)
-	}
-	// unsupported type
-	if _, err := concatenateACPPrompt([]byte(`[{"type":"audio"}]`)); err == nil {
-		t.Fatal("want unsupported")
-	}
-	// invalid array
-	if _, err := concatenateACPPrompt([]byte(`{}`)); err == nil {
-		t.Fatal("want invalid array")
-	}
-}
-
-func TestEventToAcpJsonRpc_moreEventShapes(t *testing.T) {
-	// Empty reasoning is skipped.
-	frames, err := eventToAcpJsonRpc("s", &streaming.StreamEvent{Type: streaming.StreamEventReasoning})
-	if err != nil || frames != nil {
-		t.Fatalf("empty reasoning: %v %v", err, frames)
-	}
-	// Tool result without ToolCalls is skipped.
-	frames, err = eventToAcpJsonRpc("s", &streaming.StreamEvent{Type: streaming.StreamEventToolResult})
-	if err != nil || frames != nil {
-		t.Fatalf("empty tool result: %v %v", err, frames)
-	}
-	// Function call with assistant content + tool calls.
-	frames, err = eventToAcpJsonRpc("s", &streaming.StreamEvent{
-		Type:    streaming.StreamEventFunctionCall,
-		Content: "thinking aloud",
-		ToolCalls: []tacklr.ToolCall{
-			{ID: "c1", CallID: "c1", Name: "echo", Category: "other"},
-		},
-	})
-	if err != nil || len(frames) < 2 {
-		t.Fatalf("function call: %v n=%d", err, len(frames))
-	}
-	// Tool result error status → failed.
-	frames, err = eventToAcpJsonRpc("s", &streaming.StreamEvent{
-		Type:    streaming.StreamEventToolResult,
-		Content: "boom",
-		ToolCalls: []tacklr.ToolCall{
-			{ID: "c1", CallID: "c1", Name: "echo", Status: "error"},
-		},
-	})
-	if err != nil || len(frames) != 1 || !strings.Contains(string(frames[0]), "failed") {
-		t.Fatalf("tool failed: %v %s", err, frames)
-	}
-	// Plan update.
-	plan, _ := json.Marshal([]map[string]any{{"title": "A", "status": "pending", "description": ""}})
-	// Todo uses Title/Status — marshal from control shape
-	frames, err = eventToAcpJsonRpc("s", &streaming.StreamEvent{
-		Type: streaming.StreamEventPlanUpdate,
-		Data: []byte(`[{"title":"A","status":"pending","description":""}]`),
-	})
-	if err != nil || len(frames) != 1 || !strings.Contains(string(frames[0]), `"plan"`) {
-		t.Fatalf("plan: %v %s", err, frames)
-	}
-	_ = plan
 }
 
 func TestRunTurnStream_nilStreamAndCancel(t *testing.T) {

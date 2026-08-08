@@ -16,20 +16,43 @@ import (
 )
 
 // acpProtocol implements Protocol for the Agent Client Protocol.
-type acpProtocol struct{}
+// Wire session state (cwd, mcp, config) lives here — not on Registry or BaseStore.
+type acpProtocol struct {
+	mu       sync.Mutex
+	sessions map[string]*acpWireSession
+	wire     ProtocolWireStore
+}
 
-// ACPProtocol returns the ACP wire protocol module.
-func ACPProtocol() Protocol { return acpProtocol{} }
+// NewACPProtocol returns an ACP protocol with optional durable wire store.
+// Nil wire uses an in-memory ProtocolWireStore.
+func NewACPProtocol(wire ProtocolWireStore) Protocol {
+	if wire == nil {
+		wire = NewMemoryWireStore()
+	}
+	return &acpProtocol{
+		sessions: make(map[string]*acpWireSession),
+		wire:     wire,
+	}
+}
 
-// Built-in protocol aliases (backward compatible).
+// ACPProtocol returns a new ACP protocol with an in-memory wire store.
+// Each call is a fresh instance (own live map + wire store).
+func ACPProtocol() Protocol { return NewACPProtocol(nil) }
+
+// Built-in protocol aliases.
+//
+// ACP is a process-scoped default for simple apps (NewServer(reg, server.ACP)).
+// Prefer NewACPProtocol(wire) when you need durable/shared wire state or test isolation.
+// Tests that share a *Registry should use protocolForRegistry (via serveACPRaw) or
+// acpTestServer — not this package-level value for multi-step session flows.
 var (
-	ACP Protocol = ACPProtocol()
+	ACP Protocol = NewACPProtocol(NewMemoryWireStore())
 	SSE Protocol = SSEProtocol()
 )
 
-func (acpProtocol) Name() string { return "acp" }
+func (*acpProtocol) Name() string { return "acp" }
 
-func (p acpProtocol) HTTPRoutes() []HTTPRoute {
+func (p *acpProtocol) HTTPRoutes() []HTTPRoute {
 	return []HTTPRoute{
 		// Legacy unary HTTP: one request owns the whole turn; no mid-turn client RPC.
 		// Prefer GET|POST|DELETE /acp (WebSocket or Streamable HTTP).
@@ -41,7 +64,7 @@ func (p acpProtocol) HTTPRoutes() []HTTPRoute {
 	}
 }
 
-func (p acpProtocol) handleHTTP(env ProtocolEnv, w http.ResponseWriter, r *http.Request) {
+func (p *acpProtocol) handleHTTP(env ProtocolEnv, w http.ResponseWriter, r *http.Request) {
 	// Legacy unary ACP: prefer GET|POST|DELETE /acp (WebSocket or Streamable HTTP).
 	w.Header().Set("Deprecation", "true")
 	w.Header().Set("Link", `</acp>; rel="successor-version"`)
@@ -67,7 +90,7 @@ func isWebSocketUpgrade(r *http.Request) bool {
 
 // handleACPWebSocket serves a full-duplex ACP JSON-RPC connection over WebSocket.
 // Same lifecycle and ClientBridge demux as ServeStdio.
-func (p acpProtocol) handleACPWebSocket(env ProtocolEnv, w http.ResponseWriter, r *http.Request) {
+func (p *acpProtocol) handleACPWebSocket(env ProtocolEnv, w http.ResponseWriter, r *http.Request) {
 	// Register before Accept so Acp-Connection-Id is on the 101 response (RFD).
 	// Bridge/writer are filled in after the socket is open.
 	var acpConn *Connection
@@ -135,7 +158,7 @@ func (p acpProtocol) handleACPWebSocket(env ProtocolEnv, w http.ResponseWriter, 
 	wg.Wait()
 }
 
-func (p acpProtocol) HandleInbound(ctx context.Context, env ProtocolEnv, body []byte) error {
+func (p *acpProtocol) HandleInbound(ctx context.Context, env ProtocolEnv, body []byte) error {
 	if err := ctx.Err(); err != nil {
 		_ = env.Conn.Writer.WriteError(nil, err)
 		return err
@@ -175,30 +198,27 @@ func (p acpProtocol) HandleInbound(ctx context.Context, env ProtocolEnv, body []
 	case "authenticate":
 		return env.Conn.Writer.WriteResult(pr.ID, map[string]any{})
 	case "session/new":
-		view := env.Registry.CreateSession(pr.CWD, pr.MCPServers)
-		return env.Conn.Writer.WriteResult(pr.ID, map[string]any{
-			"sessionId":     view.SessionID,
-			"configOptions": view.ConfigOptions,
-		})
+		_, result, err := p.CreateSession(ctx, env, pr.Params)
+		if err != nil {
+			return env.Conn.Writer.WriteError(pr.ID, err)
+		}
+		return env.Conn.Writer.WriteResult(pr.ID, result)
 	case "session/load":
-		view, err := env.Registry.LoadSession(pr.ThreadID, pr.CWD, pr.MCPServers)
+		result, err := p.LoadSession(ctx, env, pr.ThreadID, pr.Params)
 		if err != nil {
 			return env.Conn.Writer.WriteError(pr.ID, err)
 		}
-		return env.Conn.Writer.WriteResult(pr.ID, map[string]any{
-			"sessionId":     view.SessionID,
-			"configOptions": view.ConfigOptions,
-		})
+		return env.Conn.Writer.WriteResult(pr.ID, result)
 	case "session/set_config_option":
-		view, err := env.Registry.SetConfigOption(pr.ThreadID, pr.ConfigID, pr.ConfigValue)
+		result, err := p.setConfig(ctx, env, pr.ThreadID, pr.ConfigID, pr.ConfigValue)
 		if err != nil {
 			return env.Conn.Writer.WriteError(pr.ID, err)
 		}
-		return env.Conn.Writer.WriteResult(pr.ID, map[string]any{
-			"configOptions": view.ConfigOptions,
-		})
+		return env.Conn.Writer.WriteResult(pr.ID, result)
 	case "session/close":
-		env.Registry.CloseSession(pr.ThreadID)
+		if err := p.CloseSession(ctx, env, pr.ThreadID); err != nil {
+			return env.Conn.Writer.WriteError(pr.ID, err)
+		}
 		return env.Conn.Writer.WriteResult(pr.ID, map[string]any{})
 	case "session/cancel":
 		env.Registry.CancelSession(pr.ThreadID)
@@ -208,18 +228,17 @@ func (p acpProtocol) HandleInbound(ctx context.Context, env ProtocolEnv, body []
 	}
 }
 
-func (p acpProtocol) handleSessionTurn(ctx context.Context, env ProtocolEnv, pr *parsedRequest) error {
-	req := TurnRequest{
-		SessionID:  pr.ThreadID,
-		Prompt:     pr.Prompt,
-		Responses:  pr.Responses,
-		CWD:        pr.CWD,
-		MCPServers: pr.MCPServers,
+func (p *acpProtocol) handleSessionTurn(ctx context.Context, env ProtocolEnv, pr *parsedRequest) error {
+	// Canonical path: Protocol.BindTurn → Registry.RunTurn.
+	req, err := p.BindTurn(ctx, env, pr.ThreadID, pr.Params)
+	if err != nil {
+		_ = env.Conn.Writer.WriteError(pr.ID, err)
+		return err
 	}
 	stream, err := env.Registry.RunTurn(ctx, req)
 	if err != nil {
 		if !IsClientError(err) {
-			logTurnError(err, pr.AgentID, pr.ThreadID)
+			logTurnError(err, req.AgentID, req.ThreadID)
 		}
 		_ = env.Conn.Writer.WriteError(pr.ID, err)
 		return err
@@ -228,7 +247,7 @@ func (p acpProtocol) handleSessionTurn(ctx context.Context, env ProtocolEnv, pr 
 		stream.Cancel()
 		stream.Close()
 	}()
-	threadID := pr.ThreadID
+	threadID := req.ThreadID
 	if stream.Harness != nil && stream.Harness.SessionID() != "" {
 		threadID = stream.Harness.SessionID()
 	}
@@ -239,7 +258,7 @@ func (p acpProtocol) handleSessionTurn(ctx context.Context, env ProtocolEnv, pr 
 	return err
 }
 
-func (p acpProtocol) OnStreamEvent(ctx context.Context, env ProtocolEnv, threadID string, stream *EventStream, ev streaming.StreamEvent, reqID json.RawMessage) StreamControl {
+func (p *acpProtocol) OnStreamEvent(ctx context.Context, env ProtocolEnv, threadID string, stream *EventStream, ev streaming.StreamEvent, reqID json.RawMessage) StreamControl {
 	if ev.Type == streaming.StreamEventInterrupt && env.Conn != nil && env.Conn.RPC != nil {
 		newEvents, err := resolveInterruptViaACP(ctx, env, threadID, stream, &ev)
 		if err != nil {
@@ -271,7 +290,7 @@ func (p acpProtocol) OnStreamEvent(ctx context.Context, env ProtocolEnv, threadI
 	return StreamControl{Frames: frames, Finished: terminal}
 }
 
-func (p acpProtocol) OnStreamClosed(ctx context.Context, env ProtocolEnv, threadID string, reqID json.RawMessage, cancelled bool) error {
+func (p *acpProtocol) OnStreamClosed(ctx context.Context, env ProtocolEnv, threadID string, reqID json.RawMessage, cancelled bool) error {
 	if len(reqID) == 0 || env.Conn == nil || env.Conn.Writer == nil {
 		return nil
 	}
@@ -397,7 +416,8 @@ func acpInitializeResult() map[string]any {
 	return map[string]any{
 		"protocolVersion": 1,
 		"agentCapabilities": map[string]any{
-			"loadSession": false,
+			// Durable session/load against the registry store (survives restarts).
+			"loadSession": true,
 			"promptCapabilities": map[string]any{
 				"image":           false,
 				"audio":           false,

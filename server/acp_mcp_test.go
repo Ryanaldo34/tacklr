@@ -266,15 +266,6 @@ func TestHandleRPC_sessionResume_overridesMCPServers(t *testing.T) {
 		}
 	}
 
-	state, ok := r.sessions.Load(sessionID)
-	if !ok {
-		t.Fatal("expected session state to be stored")
-	}
-	s := state.(*sessionState)
-	if len(s.mcpServers) != 1 || s.mcpServers[0].Name != "b" {
-		t.Errorf("stored mcpServers = %v, want single server b", s.mcpServers)
-	}
-
 	// The resume turn continues the session, so the model was invoked again
 	// with only server B's tools.
 	var sawB bool

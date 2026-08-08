@@ -34,18 +34,7 @@ type AgentSpec struct {
 	ExaAPIKey string
 }
 
-// sessionState holds per-session configuration provided by the client at
-// session creation time (session/new) and updated via session/set_config_option.
-type sessionState struct {
-	mu           sync.Mutex
-	cwd          string
-	mcpServers   []mcp.MCPConfig
-	prompted     bool // true after the first prompt turn has been initiated
-	configValues map[string]string
-}
-
-// SessionView is the domain view of a session returned by session lifecycle
-// methods. Transports serialize this into protocol-specific responses.
+// SessionView is the domain view of a wire session (returned by protocols).
 type SessionView struct {
 	SessionID     string
 	ConfigOptions []ConfigOption
@@ -53,12 +42,10 @@ type SessionView struct {
 
 // TurnRequest describes a prompt or resume turn.
 //
-// Session mode (ACP): set SessionID. Agent is resolved from session config.
-// For session/resume, set MCPServers to replace the stored list and set CWD
-// for validation against the stored working directory.
+// Session mode (ACP): protocol BindTurn fills SessionID, AgentID, MCPServers,
+// Load, and AllowMissingCheckpoint. Registry does not own wire envelopes.
 //
-// Direct mode (SSE/WS): set AgentID and ThreadID. Load indicates whether to
-// restore the thread from the session store.
+// Direct mode (SSE): set AgentID and ThreadID. Load restores from harness store.
 type TurnRequest struct {
 	SessionID string
 	AgentID   string
@@ -67,12 +54,15 @@ type TurnRequest struct {
 	Responses map[string]json.RawMessage
 	Load      bool
 
-	// CWD is the client-supplied working directory for session/resume.
-	// If non-empty it must match the session's stored cwd.
+	// AllowMissingCheckpoint: when Load is true and the harness store has no
+	// row, start a fresh agent instead of failing. Set by wire BindTurn for
+	// sessions that may never have been checkpointed yet.
+	AllowMissingCheckpoint bool
+
+	// CWD is optional turn context (protocol may set from wire session).
 	CWD string
 
-	// MCPServers carries the MCP server configs re-specified by the client
-	// on session/resume. When empty, the list stored at session/new is used.
+	// MCPServers are session-scoped MCP configs for this turn.
 	MCPServers []mcp.MCPConfig
 }
 
@@ -156,7 +146,6 @@ type Registry struct {
 	tracer       trace.Tracer           // turn and child spans; default global
 	instruments  *telemetry.Instruments // turn/tool metrics; default global
 	activeTurns  sync.Map               // thread id → cancel for in-flight turn
-	sessions     sync.Map               // session id → *sessionState
 }
 
 // RegistryOption configures NewRegistry.
@@ -219,95 +208,34 @@ func (r *Registry) Register(agentID string, spec AgentSpec) {
 	r.agents[agentID] = spec
 }
 
-// CreateSession registers a new session and returns its view.
-// When a store is configured, it also writes an empty checkpoint so subsequent
-// prompts can load without treating "registered but never checkpointed" as a
-// special case (session load approach A).
-func (r *Registry) CreateSession(cwd string, mcpServers []mcp.MCPConfig) *SessionView {
-	threadID := uuid.New().String()
-	configValues := map[string]string{}
-	if r.defaultAgent != "" {
-		configValues["agent"] = r.defaultAgent
+// DefaultAgent returns the registry default agent id.
+func (r *Registry) DefaultAgent() string {
+	if r == nil {
+		return ""
 	}
-	r.sessions.Store(threadID, &sessionState{
-		cwd:          cwd,
-		mcpServers:   mcpServers,
-		configValues: configValues,
-	})
-	r.instruments.RecordSessionCreated(context.Background())
-	if r.store != nil {
-		// Empty checkpoint (all nil inputs) never fails to build.
-		cp, _ := stores.NewCheckpoint(nil, nil, nil, nil, nil, nil)
-		if err := r.store.SaveSession(context.Background(), threadID, *cp); err != nil {
-			slog.Warn("failed to save empty session checkpoint", "session_id", threadID, "error", err)
-		}
-	}
-	return &SessionView{
-		SessionID:     threadID,
-		ConfigOptions: r.buildConfigOptions(r.defaultAgent),
-	}
+	return r.defaultAgent
 }
 
-// LoadSession refreshes the per-session MCP server list from the client's
-// session/load request. The cwd must match the session's stored cwd.
-func (r *Registry) LoadSession(sessionID, cwd string, mcpServers []mcp.MCPConfig) (*SessionView, error) {
-	state, ok := r.sessions.Load(sessionID)
-	if !ok {
-		return nil, clientErrorf(ErrSessionNotFound, "session %q not found", sessionID)
+// HasAgent reports whether agentID is registered.
+func (r *Registry) HasAgent(agentID string) bool {
+	if r == nil {
+		return false
 	}
-	sess, ok := state.(*sessionState)
-	if !ok {
-		return nil, clientErrorf(ErrSessionNotFound, "session %q not found", sessionID)
-	}
-	sess.mu.Lock()
-	if cwd != sess.cwd {
-		sess.mu.Unlock()
-		return nil, clientErrorf(ErrInvalidRequest, "cwd %q does not match session cwd %q", cwd, sess.cwd)
-	}
-	sess.mcpServers = mcpServers
-	sess.mu.Unlock()
-	return &SessionView{
-		SessionID:     sessionID,
-		ConfigOptions: r.buildConfigOptions(r.sessionAgentID(sess)),
-	}, nil
+	_, ok := r.agents[agentID]
+	return ok
 }
 
-// SetConfigOption updates a session configuration value.
-func (r *Registry) SetConfigOption(sessionID, configID, value string) (*SessionView, error) {
-	state, ok := r.sessions.Load(sessionID)
-	if !ok {
-		return nil, clientErrorf(ErrSessionNotFound, "session %q not found", sessionID)
+// RecordSessionCreated records a session-created metric (called by protocols).
+func (r *Registry) RecordSessionCreated(ctx context.Context) {
+	if r == nil || r.instruments == nil {
+		return
 	}
-	sess, ok := state.(*sessionState)
-	if !ok {
-		return nil, clientErrorf(ErrSessionNotFound, "session %q not found", sessionID)
-	}
-	sess.mu.Lock()
-	if sess.configValues == nil {
-		sess.configValues = map[string]string{}
-	}
-	switch configID {
-	case "model":
-		if _, exists := r.agents[value]; !exists {
-			sess.mu.Unlock()
-			return nil, clientErrorf(ErrAgentNotFound, "agent %q not found", value)
-		}
-		sess.configValues["agent"] = value
-	default:
-		sess.mu.Unlock()
-		return nil, clientErrorf(ErrInvalidRequest, "unknown configId %q", configID)
-	}
-	sess.mu.Unlock()
-	return &SessionView{
-		SessionID:     sessionID,
-		ConfigOptions: r.buildConfigOptions(r.sessionAgentID(sess)),
-	}, nil
+	r.instruments.RecordSessionCreated(ctx)
 }
 
-// CloseSession removes session state and cancels any active turn.
-func (r *Registry) CloseSession(sessionID string) {
-	r.sessions.Delete(sessionID)
-	r.CancelSession(sessionID)
+// ConfigOptions returns selectable agent config options for wire session responses.
+func (r *Registry) ConfigOptions(currentAgent string) []ConfigOption {
+	return r.buildConfigOptions(currentAgent)
 }
 
 // CancelSession cancels the in-flight turn context for the session (if any).
@@ -325,32 +253,20 @@ func (r *Registry) CancelSession(sessionID string) {
 // Setup errors (unknown session/agent, validation) are returned synchronously.
 // Runtime errors are delivered as StreamEventError on the channel.
 func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, error) {
-	var sess *sessionState
-	if req.SessionID != "" {
-		if state, ok := r.sessions.Load(req.SessionID); ok {
-			if s, ok := state.(*sessionState); ok {
-				sess = s
-			}
-		}
-	}
-
+	// Protocol fills AgentID, ThreadID/SessionID, MCPServers, Load, CWD on the request.
+	// Registry does not own wire-session envelopes.
 	agentID := req.AgentID
 	threadID := req.ThreadID
 	load := req.Load
+	mcpServers := req.MCPServers
 
 	if req.SessionID != "" {
 		threadID = req.SessionID
 		if agentID == "" {
-			agentID = r.sessionAgentID(sess)
+			agentID = r.defaultAgent
 		}
 		if agentID == "" {
 			return nil, clientErrorf(ErrInvalidRequest, "no agent configured for session and no default agent configured")
-		}
-		if sess != nil && !sess.prompted {
-			sess.prompted = true
-			load = false // first turn: no checkpoint yet
-		} else {
-			load = true // subsequent turns: restore from store
 		}
 	} else {
 		if agentID == "" {
@@ -365,28 +281,7 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 		}
 	}
 
-	// Validate cwd on session/resume: if provided it must match the stored
-	// working directory set at session/new.
-	if req.CWD != "" && sess != nil {
-		sess.mu.Lock()
-		if req.CWD != sess.cwd {
-			sess.mu.Unlock()
-			return nil, clientErrorf(ErrInvalidRequest, "cwd does not match session cwd")
-		}
-		sess.mu.Unlock()
-	}
-	mcpServers := req.MCPServers
-	if sess != nil {
-		sess.mu.Lock()
-		if len(mcpServers) > 0 {
-			sess.mcpServers = mcpServers
-		} else {
-			mcpServers = sess.mcpServers
-		}
-		sess.mu.Unlock()
-	}
-
-	h, _, err := r.loadAgent(ctx, agentID, threadID, load, mcpServers)
+	h, _, err := r.loadAgent(ctx, agentID, threadID, load, mcpServers, req.AllowMissingCheckpoint)
 	if err != nil {
 		return nil, fmt.Errorf("load agent %q: %w", agentID, err)
 	}
@@ -508,20 +403,7 @@ func (r *Registry) buildConfigOptions(currentAgent string) []ConfigOption {
 	}
 }
 
-func (r *Registry) sessionAgentID(sess *sessionState) string {
-	if sess != nil {
-		sess.mu.Lock()
-		defer sess.mu.Unlock()
-		if sess.configValues != nil {
-			if id := sess.configValues["agent"]; id != "" {
-				return id
-			}
-		}
-	}
-	return r.defaultAgent
-}
-
-func (r *Registry) loadAgent(ctx context.Context, agentID, threadID string, load bool, sessionMCP []mcp.MCPConfig) (*tacklr.AgentHarness, *AgentSpec, error) {
+func (r *Registry) loadAgent(ctx context.Context, agentID, threadID string, load bool, sessionMCP []mcp.MCPConfig, allowMissingCheckpoint bool) (*tacklr.AgentHarness, *AgentSpec, error) {
 	spec, ok := r.agents[agentID]
 	if !ok {
 		return nil, nil, clientErrorf(ErrAgentNotFound, "agent %q not found", agentID)
@@ -556,11 +438,9 @@ func (r *Registry) loadAgent(ctx context.Context, agentID, threadID string, load
 		}
 		h, err = tacklr.NewAgentFromSession(ctx, threadID, opts)
 		if err != nil {
-			// ACP session may still be registered after a cancelled first turn that
-			// never checkpointed. Only then start a fresh harness for re-prompt.
-			// Unknown thread IDs (SSE resume without a store row) still fail.
-			_, sessionKnown := r.sessions.Load(threadID)
-			if sessionKnown && errors.Is(err, stores.ErrSessionNotFound) {
+			// Wire BindTurn may set AllowMissingCheckpoint when the harness never
+			// wrote a row (e.g. cancelled first turn). Unknown store IDs still fail.
+			if allowMissingCheckpoint && errors.Is(err, stores.ErrSessionNotFound) {
 				h = tacklr.NewAgent(ctx, opts)
 			} else {
 				return nil, nil, err

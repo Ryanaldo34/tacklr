@@ -165,3 +165,19 @@ func (p sseProtocol) OnStreamEvent(ctx context.Context, env ProtocolEnv, threadI
 func (p sseProtocol) OnStreamClosed(ctx context.Context, env ProtocolEnv, threadID string, reqID json.RawMessage, cancelled bool) error {
 	return nil
 }
+
+func (sseProtocol) CreateSession(context.Context, ProtocolEnv, json.RawMessage) (string, any, error) {
+	return "", nil, ErrWireSessionUnsupported
+}
+
+func (sseProtocol) LoadSession(context.Context, ProtocolEnv, string, json.RawMessage) (any, error) {
+	return nil, ErrWireSessionUnsupported
+}
+
+func (sseProtocol) BindTurn(context.Context, ProtocolEnv, string, json.RawMessage) (TurnRequest, error) {
+	return TurnRequest{}, ErrWireSessionUnsupported
+}
+
+func (sseProtocol) CloseSession(context.Context, ProtocolEnv, string) error {
+	return ErrWireSessionUnsupported
+}
