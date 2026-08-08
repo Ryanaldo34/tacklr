@@ -33,9 +33,11 @@ type acpWireEnvelope struct {
 func (s *acpWireSession) envelope() acpWireEnvelope {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	cfg := s.configValues
-	if cfg == nil {
-		cfg = map[string]string{}
+	// Copy map/slice so concurrent setConfig/BindTurn cannot race json.Marshal
+	// after this lock is released.
+	cfg := make(map[string]string, len(s.configValues))
+	for k, v := range s.configValues {
+		cfg[k] = v
 	}
 	return acpWireEnvelope{
 		CWD:          s.cwd,
@@ -46,13 +48,13 @@ func (s *acpWireSession) envelope() acpWireEnvelope {
 }
 
 func wireSessionFromEnvelope(env acpWireEnvelope) *acpWireSession {
-	cfg := env.ConfigValues
-	if cfg == nil {
-		cfg = map[string]string{}
+	cfg := make(map[string]string, len(env.ConfigValues))
+	for k, v := range env.ConfigValues {
+		cfg[k] = v
 	}
 	return &acpWireSession{
 		cwd:          env.CWD,
-		mcpServers:   env.MCPServers,
+		mcpServers:   append([]mcp.MCPConfig(nil), env.MCPServers...),
 		configValues: cfg,
 		prompted:     env.Prompted,
 	}
@@ -96,6 +98,11 @@ func (p *acpProtocol) resolveWireSession(ctx context.Context, sessionID string) 
 	}
 	sess := wireSessionFromEnvelope(env)
 	p.mu.Lock()
+	// Another goroutine may have loaded the same id while we read the store.
+	if existing, ok := p.sessions[sessionID]; ok {
+		p.mu.Unlock()
+		return existing, nil
+	}
 	p.sessions[sessionID] = sess
 	p.mu.Unlock()
 	return sess, nil

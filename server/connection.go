@@ -51,6 +51,8 @@ type streamRoute struct {
 }
 
 // sseSink is one long-lived GET text/event-stream writer.
+// All body writes and flushes go through mu — http.ResponseWriter is not safe
+// for concurrent use (net/http race detector).
 type sseSink struct {
 	mu     sync.Mutex
 	w      http.ResponseWriter
@@ -66,6 +68,21 @@ func (s *sseSink) writeJSONRPC(data []byte) error {
 	}
 	// RFD: each SSE event body is one JSON-RPC message.
 	return writeSSEEvent(s.w, s.f, "message", data)
+}
+
+// writeOpen commits SSE headers with a comment so intermediaries see activity.
+// Must be used for every body write path on this ResponseWriter.
+func (s *sseSink) writeOpen() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return errSSESinkClosed
+	}
+	if _, err := s.w.Write([]byte(": acp-stream-open\n\n")); err != nil {
+		return err
+	}
+	s.f.Flush()
+	return nil
 }
 
 func (s *sseSink) close() {
@@ -196,20 +213,21 @@ func (c *Connection) noteSession(sessionID string) {
 	c.mu.Unlock()
 }
 
-// attachConnSSE registers the connection-scoped GET stream. Returns a detach func.
-func (c *Connection) attachConnSSE(w http.ResponseWriter, f http.Flusher) (detach func(), err error) {
+// attachConnSSE registers the connection-scoped GET stream. Returns a detach func
+// and the sink so the caller can write the open frame under sink serialization.
+func (c *Connection) attachConnSSE(w http.ResponseWriter, f http.Flusher) (detach func(), sink *sseSink, err error) {
 	if c == nil {
-		return nil, fmt.Errorf("nil connection")
+		return nil, nil, fmt.Errorf("nil connection")
 	}
-	sink := &sseSink{w: w, f: f}
+	sink = &sseSink{w: w, f: f}
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
-		return nil, errSSESinkClosed
+		return nil, nil, errSSESinkClosed
 	}
 	if c.connSink != nil {
 		c.mu.Unlock()
-		return nil, fmt.Errorf("connection-scoped SSE already open")
+		return nil, nil, fmt.Errorf("connection-scoped SSE already open")
 	}
 	c.connSink = sink
 	c.mu.Unlock()
@@ -220,23 +238,23 @@ func (c *Connection) attachConnSSE(w http.ResponseWriter, f http.Flusher) (detac
 		}
 		c.mu.Unlock()
 		sink.close()
-	}, nil
+	}, sink, nil
 }
 
 // attachSessionSSE registers a session-scoped GET stream.
-func (c *Connection) attachSessionSSE(sessionID string, w http.ResponseWriter, f http.Flusher) (detach func(), err error) {
+func (c *Connection) attachSessionSSE(sessionID string, w http.ResponseWriter, f http.Flusher) (detach func(), sink *sseSink, err error) {
 	if c == nil || sessionID == "" {
-		return nil, fmt.Errorf("session id required")
+		return nil, nil, fmt.Errorf("session id required")
 	}
-	sink := &sseSink{w: w, f: f}
+	sink = &sseSink{w: w, f: f}
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
-		return nil, errSSESinkClosed
+		return nil, nil, errSSESinkClosed
 	}
 	if _, ok := c.sessionSinks[sessionID]; ok {
 		c.mu.Unlock()
-		return nil, fmt.Errorf("session-scoped SSE already open for %s", sessionID)
+		return nil, nil, fmt.Errorf("session-scoped SSE already open for %s", sessionID)
 	}
 	c.sessions[sessionID] = struct{}{}
 	c.sessionSinks[sessionID] = sink
@@ -248,7 +266,7 @@ func (c *Connection) attachSessionSSE(sessionID string, w http.ResponseWriter, f
 		}
 		c.mu.Unlock()
 		sink.close()
-	}, nil
+	}, sink, nil
 }
 
 // deliver sends one JSON-RPC message to the appropriate SSE stream(s).
