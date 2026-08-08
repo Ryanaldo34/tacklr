@@ -10,10 +10,25 @@ import (
 )
 
 // runtimeOutput is the turn event channel shared across Runtime value copies.
+// ch is never nil: live turn bus, or IdleOutput between turns.
 type runtimeOutput struct {
 	mu sync.RWMutex
 	ch chan streaming.StreamEvent
 }
+
+// idleOutput is drained in the background so EmitUpdate never needs a nil check
+// between turns (after the live turn channel is closed).
+var idleOutput = func() chan streaming.StreamEvent {
+	ch := make(chan streaming.StreamEvent, 64)
+	go func() {
+		for range ch {
+		}
+	}()
+	return ch
+}()
+
+// IdleOutput is the between-turn sink. Use after a turn ends instead of nil.
+func IdleOutput() chan streaming.StreamEvent { return idleOutput }
 
 // Runtime is the tool hook surface (re-exported as tacklr.HarnessRuntime):
 // EmitUpdate, StateGet/Set/Delete, RaiseInterrupt, Store, CurrentToolCallID.
@@ -26,10 +41,13 @@ type Runtime struct {
 	out     *runtimeOutput
 }
 
-// NewRuntime builds a Runtime over sm.
+// NewRuntime builds a Runtime over sm. ch must be non-nil (use IdleOutput if idle).
 func NewRuntime(ch chan streaming.StreamEvent, store stores.BaseStore, sm *SessionManager) Runtime {
 	if sm == nil {
 		sm = NewSessionManager()
+	}
+	if ch == nil {
+		panic("session.NewRuntime: nil event channel; use IdleOutput()")
 	}
 	sm.ensure()
 	return Runtime{
@@ -45,31 +63,25 @@ func (rt *Runtime) ensureInitialized() {
 	}
 	rt.session.ensure()
 	if rt.out == nil {
-		rt.out = &runtimeOutput{}
+		rt.out = &runtimeOutput{ch: idleOutput}
 	}
 }
 
 // EmitUpdate sends a non-blocking tool progress update for the current call.
 func (rt *Runtime) EmitUpdate(message string) {
-	ch := rt.outputChannel()
-	if ch == nil {
-		return
-	}
 	event := streaming.StreamEvent{
 		Type:      streaming.StreamEventToolUpdate,
 		Content:   message,
 		MessageID: rt.CurrentToolCallID,
 	}
 	select {
-	case ch <- event:
+	case rt.outputChannel() <- event:
 	default:
 	}
 }
 
 func (rt *Runtime) outputChannel() chan streaming.StreamEvent {
-	if rt.out == nil {
-		return nil
-	}
+	rt.ensureInitialized()
 	rt.out.mu.RLock()
 	ch := rt.out.ch
 	rt.out.mu.RUnlock()
@@ -111,9 +123,13 @@ func EnsureInitialized(rt *Runtime) {
 }
 
 // SetOutputChannel binds the turn event channel for EmitUpdate and plan updates.
+// ch must be non-nil; use IdleOutput() when no turn is live.
 func SetOutputChannel(rt *Runtime, ch chan streaming.StreamEvent) {
 	if rt == nil {
 		return
+	}
+	if ch == nil {
+		panic("session.SetOutputChannel: nil event channel; use IdleOutput()")
 	}
 	rt.ensureInitialized()
 	rt.out.mu.Lock()
@@ -126,13 +142,9 @@ func EmitPlanUpdate(rt *Runtime, plan []Todo) {
 	if rt == nil {
 		return
 	}
-	ch := rt.outputChannel()
-	if ch == nil {
-		return
-	}
 	data, _ := json.Marshal(plan)
 	select {
-	case ch <- streaming.StreamEvent{
+	case rt.outputChannel() <- streaming.StreamEvent{
 		Type: streaming.StreamEventPlanUpdate,
 		Data: data,
 	}:
@@ -146,7 +158,7 @@ func HasPendingInterrupt(rt *Runtime) bool {
 		return false
 	}
 	rt.ensureInitialized()
-	return rt.session.hasPendingInterrupt()
+	return rt.session.HasPendingInterrupt()
 }
 
 // ReturnInterrupt resolves a parked interrupt with the host payload.

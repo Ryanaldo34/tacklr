@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/log"
@@ -20,6 +21,16 @@ import (
 	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
+
+// turnHandle tracks one in-flight Registry turn so a follow-on prompt (steer)
+// can cancel it and wait until the harness has finished and checkpointed.
+type turnHandle struct {
+	cancel context.CancelFunc
+	done   chan struct{} // closed when the forwarder exits (after harness channel drain)
+}
+
+// steerWaitTimeout is how long RunTurn waits for a cancelled prior turn to finish.
+const steerWaitTimeout = 30 * time.Second
 
 type AgentSpec struct {
 	Name       string
@@ -241,17 +252,55 @@ func (r *Registry) ConfigOptions(currentAgent string) []ConfigOption {
 // CancelSession cancels the in-flight turn context for the session (if any).
 // Session state is preserved. The turn context is the single cancel signal for
 // harness work, the registry forwarder, and runTurnStream.
+// This is abort-only (ACP session/cancel). It does not start a new turn.
 func (r *Registry) CancelSession(sessionID string) {
-	if c, ok := r.activeTurns.Load(sessionID); ok {
-		if cancel, ok := c.(context.CancelFunc); ok {
-			cancel()
+	if h, ok := r.activeTurns.Load(sessionID); ok {
+		if th, ok := h.(*turnHandle); ok && th.cancel != nil {
+			th.cancel()
 		}
+	}
+}
+
+// waitPriorTurnIfAny cancels any in-flight turn for threadID and waits for it
+// to finish (harness drain + checkpoint). Used so session/prompt while busy
+// steers without concurrent Run on the same session (ACP has no session/steer).
+// cancelled is true when a prior turn was found and waited on (caller should reload).
+func (r *Registry) waitPriorTurnIfAny(ctx context.Context, threadID string) (cancelled bool, err error) {
+	if threadID == "" {
+		return false, nil
+	}
+	h, ok := r.activeTurns.Load(threadID)
+	if !ok {
+		return false, nil
+	}
+	th, ok := h.(*turnHandle)
+	if !ok || th == nil {
+		return false, nil
+	}
+	if th.cancel != nil {
+		th.cancel()
+	}
+	if th.done == nil {
+		return true, nil
+	}
+	timer := time.NewTimer(steerWaitTimeout)
+	defer timer.Stop()
+	select {
+	case <-th.done:
+		return true, nil
+	case <-ctx.Done():
+		return true, ctx.Err()
+	case <-timer.C:
+		return true, fmt.Errorf("timed out waiting for prior turn on session %q to finish after cancel", threadID)
 	}
 }
 
 // RunTurn starts a prompt or resume turn and returns a stream of events.
 // Setup errors (unknown session/agent, validation) are returned synchronously.
 // Runtime errors are delivered as StreamEventError on the channel.
+//
+// If a turn is already in flight for the session, it is cancelled and allowed
+// to finalize before this turn starts (mid-turn steer via session/prompt).
 func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, error) {
 	// Protocol fills AgentID, ThreadID/SessionID, MCPServers, Load, CWD on the request.
 	// Registry does not own wire-session envelopes.
@@ -281,9 +330,25 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 		}
 	}
 
+	// Steer / single-flight: cancel prior turn and wait for checkpoint before load.
+	priorCancelled, err := r.waitPriorTurnIfAny(ctx, threadID)
+	if err != nil {
+		return nil, err
+	}
+	if priorCancelled {
+		// Must reload harness state written by the cancelled turn's run_exit save.
+		load = true
+	}
+
 	h, _, err := r.loadAgent(ctx, agentID, threadID, load, mcpServers, req.AllowMissingCheckpoint)
 	if err != nil {
 		return nil, fmt.Errorf("load agent %q: %w", agentID, err)
+	}
+
+	// Parked interrupt + new user prompt (ACP session/prompt): clear park and
+	// pair cancelled tools before the new turn. Resume (Responses) is unchanged.
+	if req.Prompt != "" && len(req.Responses) == 0 && h.HasOpenToolWork() {
+		h.FinalizeCancelledWork(ctx)
 	}
 
 	turnKind := "prompt"
@@ -309,7 +374,9 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 			log.Int(telemetry.EventAttrResumeInterruptCount, len(req.Responses)),
 		)
 	}
-	r.activeTurns.Store(threadID, cancel)
+
+	th := &turnHandle{cancel: cancel, done: make(chan struct{})}
+	r.activeTurns.Store(threadID, th)
 
 	pr := &parsedRequest{
 		AgentID:   agentID,
@@ -321,42 +388,45 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 	events, err := runHarness(turnCtx, h, pr)
 	if err != nil {
 		r.activeTurns.Delete(threadID)
+		close(th.done)
 		turnSpan.End(telemetry.OutcomeError, err)
 		cancel()
 		h.Close()
 		return nil, fmt.Errorf("run harness: %w", err)
 	}
 
-	// Forward events until cancel or harness end. Do not Close on park (resume needs it).
+	// Forward events until the harness channel closes. On turn cancel, keep
+	// draining so cancelled tool_results and the cancel error are not dropped
+	// and activeTurns is only cleared after checkpoint (run_exit defer).
 	out := make(chan streaming.StreamEvent)
 	go func() {
 		defer close(out)
+		defer close(th.done)
 		defer r.activeTurns.Delete(threadID)
 		var streamErr error
+		cancelled := false
 		for {
-			select {
-			case <-turnCtx.Done():
-				turnSpan.End(telemetry.OutcomeCancelled, turnCtx.Err())
-				return
-			case ev, ok := <-events:
-				if !ok {
-					turnSpan.End("", streamErr)
-					return
-				}
-				if ev.Type == streaming.StreamEventError {
-					if ev.Error != nil {
-						streamErr = ev.Error
-					} else if ev.Content != "" {
-						streamErr = fmt.Errorf("%s", ev.Content)
-					}
-				}
-				select {
-				case out <- ev:
-				case <-turnCtx.Done():
+			ev, ok := <-events
+			if !ok {
+				if cancelled {
 					turnSpan.End(telemetry.OutcomeCancelled, turnCtx.Err())
-					return
+				} else {
+					turnSpan.End("", streamErr)
+				}
+				return
+			}
+			if turnCtx.Err() != nil {
+				cancelled = true
+			}
+			if ev.Type == streaming.StreamEventError {
+				if ev.Error != nil {
+					streamErr = ev.Error
+				} else if ev.Content != "" {
+					streamErr = fmt.Errorf("%s", ev.Content)
 				}
 			}
+			// Blocking forward so cancel finalize tool_results are not dropped.
+			out <- ev
 		}
 	}()
 

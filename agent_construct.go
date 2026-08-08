@@ -78,13 +78,12 @@ type AgentOptions struct {
 // when the consumer lags briefly.
 const streamEventBuffer = 64
 
-// NewAgent builds a harness. out is a non-nil sentinel so Run can detect init;
-// the live event bus is installed on Run.
+// NewAgent builds a harness. The live turn event bus is installed on Run;
+// runtime starts on IdleOutput so EmitUpdate never sees a nil channel.
 func NewAgent(ctx context.Context, opts AgentOptions) *AgentHarness {
-	events := make(chan streaming.StreamEvent, streamEventBuffer)
 	sm := session.NewSessionManager()
-	runtime := session.NewRuntime(nil, opts.Store, sm)
-	h := newHarnessBase(opts, runtime, sm, events)
+	runtime := session.NewRuntime(session.IdleOutput(), opts.Store, sm)
+	h := newHarnessBase(opts, runtime, sm, session.IdleOutput())
 	if opts.SessionID != "" {
 		h.sessionId = opts.SessionID
 	}
@@ -269,7 +268,6 @@ func NewAgentFromSession(ctx context.Context, sessionId string, opts AgentOption
 	if opts.Store == nil {
 		return nil, fmt.Errorf("agent harness: store is required to load session %q", sessionId)
 	}
-	events := make(chan StreamEvent, streamEventBuffer)
 	checkpoint, err := opts.Store.LoadSession(ctx, sessionId)
 	if err != nil {
 		return nil, err
@@ -279,8 +277,8 @@ func NewAgentFromSession(ctx context.Context, sessionId string, opts AgentOption
 	if err != nil {
 		return nil, err
 	}
-	runtime := session.NewRuntime(nil, opts.Store, sm)
-	h := newHarnessBase(opts, runtime, sm, events)
+	runtime := session.NewRuntime(session.IdleOutput(), opts.Store, sm)
+	h := newHarnessBase(opts, runtime, sm, session.IdleOutput())
 	h.sessionId = sessionId
 	h.context.Restore(applied.Window)
 	h.interruptToRequester = applied.InterruptToRequester

@@ -17,7 +17,7 @@ func TestCheckpointer_roundTrip(t *testing.T) {
 	sm := session.NewSessionManager()
 	sm.Plan().SetDocument("plan")
 	sm.Plan().Set([]streaming.Todo{{Title: "A", Status: streaming.TodoStatusPending}})
-	rt := session.NewRuntime(nil, nil, sm)
+	rt := session.NewRuntime(session.IdleOutput(), nil, sm)
 	rt.StateSet("k", "v")
 
 	cp, err := session.NewCheckpointer().Capture(
@@ -40,7 +40,7 @@ func TestCheckpointer_roundTrip(t *testing.T) {
 	if sm2.Plan().Document() != "plan" {
 		t.Fatal("plan doc")
 	}
-	rt2 := session.NewRuntime(nil, nil, sm2)
+	rt2 := session.NewRuntime(session.IdleOutput(), nil, sm2)
 	if v, ok := rt2.StateGet("k"); !ok || v != "v" {
 		t.Fatalf("state %v %v", v, ok)
 	}
@@ -160,7 +160,7 @@ func TestSessionManager_stateAndPlan_guards(t *testing.T) {
 	}
 
 	sm := session.NewSessionManager()
-	rt := session.NewRuntime(nil, nil, sm)
+	rt := session.NewRuntime(session.IdleOutput(), nil, sm)
 	rt.StateSet("_plan", "blocked")
 	if _, ok := rt.StateGet("_plan"); ok {
 		t.Fatal("reserved key blocked on get")
@@ -289,7 +289,7 @@ func TestRuntime_interrupts_raiseReturnAdopt(t *testing.T) {
 // TestRuntime_emitAndState_channels covers EmitUpdate/PlanUpdate and ensure paths.
 func TestRuntime_emitAndState_channels(t *testing.T) {
 	// Nil session + nil channel constructors.
-	rt := session.NewRuntime(nil, nil, nil)
+	rt := session.NewRuntime(session.IdleOutput(), nil, nil)
 	session.EnsureInitialized(&rt)
 	rt.EmitUpdate("no channel") // no-op
 	session.EmitPlanUpdate(&rt, []session.Todo{{Title: "t"}})
@@ -328,7 +328,7 @@ func TestRuntime_emitAndState_channels(t *testing.T) {
 // into checkpoint JSON and reloads them.
 func TestSessionManager_snapshotLoadInterrupts_roundTrip(t *testing.T) {
 	sm := session.NewSessionManager()
-	rt := session.NewRuntime(nil, nil, sm)
+	rt := session.NewRuntime(session.IdleOutput(), nil, sm)
 	rt.CurrentToolCallID = "c1"
 	_, _ = rt.RaiseInterrupt("user_selection_choice", []byte(`[{"title":"A"}]`))
 	rt.StateSet("u", "v")
@@ -360,7 +360,7 @@ func TestSessionManager_snapshotLoadInterrupts_roundTrip(t *testing.T) {
 	if sm2.Plan().Document() != "doc" {
 		t.Fatal("plan doc reload")
 	}
-	rt2 := session.NewRuntime(nil, nil, sm2)
+	rt2 := session.NewRuntime(session.IdleOutput(), nil, sm2)
 	if v, ok := rt2.StateGet("u"); !ok || v != "v" {
 		t.Fatal("user state reload")
 	}
@@ -388,7 +388,7 @@ func TestSessionManager_snapshotLoadInterrupts_roundTrip(t *testing.T) {
 func TestInterruptMap_unknownType_errors(t *testing.T) {
 	// Capture with a real interrupt then corrupt type via raw JSON.
 	sm := session.NewSessionManager()
-	rt := session.NewRuntime(nil, nil, sm)
+	rt := session.NewRuntime(session.IdleOutput(), nil, sm)
 	rt.CurrentToolCallID = "x"
 	_, _ = rt.RaiseInterrupt("tool_permission", []byte(`{"toolName":"t"}`))
 	_, pending, _ := sm.SnapshotDurable()

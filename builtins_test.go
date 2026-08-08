@@ -32,7 +32,7 @@ func testPlanTools() planToolsFixture {
 }
 
 func planRT() HarnessRuntime {
-	rt := session.NewRuntime(nil, nil, nil)
+	rt := session.NewRuntime(session.IdleOutput(), nil, nil)
 	session.EnsureInitialized(&rt)
 	return rt
 }
@@ -348,7 +348,7 @@ func TestAskUserChoiceTool_raiseAndResume(t *testing.T) {
 }
 
 func TestAskUserChoiceTool_validation(t *testing.T) {
-	rt := session.NewRuntime(nil, nil, nil)
+	rt := session.NewRuntime(session.IdleOutput(), nil, nil)
 	session.EnsureInitialized(&rt)
 	rt.CurrentToolCallID = "tc"
 
@@ -372,7 +372,7 @@ func TestAskUserChoiceTool_validation(t *testing.T) {
 
 func TestListPlanTool_exactListing(t *testing.T) {
 	pt := testPlanTools()
-	rt := session.NewRuntime(nil, nil, nil)
+	rt := session.NewRuntime(session.IdleOutput(), nil, nil)
 	session.EnsureInitialized(&rt)
 	pt.store.Set([]Todo{
 		{Title: "Exact Title One", Status: streaming.TodoStatusCompleted, Description: "done work"},
@@ -524,7 +524,7 @@ func TestRun_askUserChoice_withoutDescription_formatsSelection(t *testing.T) {
 // TestCompleteTodo_effectsByRemainingWork: handoff only while open work remains;
 // completing the last open todo (sole or after already-done siblings) is EffectNone.
 func TestCompleteTodo_effectsByRemainingWork(t *testing.T) {
-	rt := session.NewRuntime(nil, nil, nil)
+	rt := session.NewRuntime(session.IdleOutput(), nil, nil)
 	session.EnsureInitialized(&rt)
 	cases := []struct {
 		name       string

@@ -104,13 +104,25 @@ func (s *SessionManager) stateDelete(key string) {
 
 // --- interrupts (facade target for Runtime Raise/Return/…) ---
 
-func (s *SessionManager) hasPendingInterrupt() bool {
+// HasPendingInterrupt reports whether any interrupt is still awaiting a client payload.
+func (s *SessionManager) HasPendingInterrupt() bool {
 	if s == nil {
 		return false
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.pending) > 0
+}
+
+// ClearInterrupts drops pending and resolved interrupt maps (steer / cancel finalize).
+func (s *SessionManager) ClearInterrupts() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pending = interruptMap{}
+	s.resolved = interruptMap{}
 }
 
 func (s *SessionManager) returnInterrupt(id string, result []byte) (interrupt.Interrupt, error) {
