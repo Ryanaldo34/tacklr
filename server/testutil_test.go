@@ -8,13 +8,15 @@ import (
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
 	"github.com/ryanaldo34/tacklr/stores"
+	"github.com/ryanaldo34/tacklr/streaming"
 )
 
 // mockInferenceStrategy is a controllable InferenceStrategy for tests.
 type mockInferenceStrategy struct {
-	invokeFn  func(context.Context, []*tacklr.Message, []*tacklr.Tool, chan<- tacklr.LLMResponseChunk)
-	invokeErr error
-	callNum   atomic.Int64
+	invokeFn       func(context.Context, []*tacklr.Message, []*tacklr.Tool, chan<- tacklr.LLMResponseChunk)
+	invokeErr      error
+	supportsMIMEFn func(string) bool
+	callNum        atomic.Int64
 }
 
 func (m *mockInferenceStrategy) WithApiKey(string) tacklr.InferenceStrategy         { return m }
@@ -26,6 +28,13 @@ func (m *mockInferenceStrategy) SetSystemPrompt(string)                         
 func (m *mockInferenceStrategy) Reset()                                             {}
 func (m *mockInferenceStrategy) CompressContextWindow() error                       { return nil }
 func (m *mockInferenceStrategy) MaxContextWindow() (int, error)                     { return 0, nil }
+func (m *mockInferenceStrategy) SupportsMIME(mimeType string) bool {
+	if m.supportsMIMEFn != nil {
+		return m.supportsMIMEFn(mimeType)
+	}
+	// Default: text-only. Multimodal tests opt in via supportsMIMEFn.
+	return streaming.IsTextMIME(mimeType)
+}
 func (m *mockInferenceStrategy) CountTokens(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool) (int, error) {
 	return 0, nil
 }

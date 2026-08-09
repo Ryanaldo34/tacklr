@@ -518,7 +518,7 @@ func TestValidateACP_emptyPromptAndConfigSessionID(t *testing.T) {
 		t.Fatalf("missing sessionId: %v", err)
 	}
 	// resource block without resource field
-	if _, err := concatenateACPPrompt([]byte(`[{"type":"resource"}]`)); err == nil {
+	if _, err := parseACPPrompt([]byte(`[{"type":"resource"}]`)); err == nil {
 		t.Fatal("want resource required")
 	}
 	// empty text blocks that join to empty after validation of non-empty texts is separate:

@@ -248,8 +248,8 @@ func TestValidateACPRequest_outcomes(t *testing.T) {
 	}
 }
 
-// TestConcatenateACPPrompt_outcomes covers text/resource/mixed success and error paths once.
-func TestConcatenateACPPrompt_outcomes(t *testing.T) {
+// TestParseACPPrompt_outcomes covers text/resource/image/pdf success and error paths once.
+func TestParseACPPrompt_outcomes(t *testing.T) {
 	cases := []struct {
 		name    string
 		raw     string
@@ -260,12 +260,14 @@ func TestConcatenateACPPrompt_outcomes(t *testing.T) {
 		{"resource only", `[{"type":"resource","resource":{"uri":"file:///a.txt","mimeType":"text/plain","text":"file content"}}]`, "file content", ""},
 		{"mixed", `[{"type":"text","text":"prompt"},{"type":"resource","resource":{"uri":"file:///b.txt","mimeType":"text/plain","text":"ctx"}}]`, "prompt\n\nctx", ""},
 		{"empty text", `[{"type":"text","text":""}]`, "", "empty"},
-		{"unsupported", `[{"type":"image","data":"base64..."}]`, "", "unsupported content block type"},
+		{"image needs mime", `[{"type":"image","data":"AAAA"}]`, "", "mimeType"},
+		{"resource_link needs name", `[{"type":"resource_link","uri":"file:///x"}]`, "", "name is required"},
+		{"resource_link ok", `[{"type":"resource_link","uri":"file:///x.pdf","name":"x.pdf","mimeType":"application/pdf"}]`, "[Resource link] name=x.pdf uri=file:///x.pdf mimeType=application/pdf", ""},
 		{"invalid array", `{}`, "", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := concatenateACPPrompt(json.RawMessage(tc.raw))
+			msg, err := parseACPPrompt(json.RawMessage(tc.raw))
 			if tc.wantErr != "" || tc.name == "invalid array" {
 				if err == nil {
 					t.Fatal("expected error")
@@ -278,11 +280,34 @@ func TestConcatenateACPPrompt_outcomes(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got != tc.want {
-				t.Fatalf("got %q want %q", got, tc.want)
+			if msg.Content != tc.want {
+				t.Fatalf("got %q want %q", msg.Content, tc.want)
 			}
 		})
 	}
+	t.Run("image+text", func(t *testing.T) {
+		msg, err := parseACPPrompt(json.RawMessage(`[{"type":"text","text":"see"},{"type":"image","mimeType":"image/png","data":"AAAA"}]`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Text stays on Content; only binary parts on ContentParts.
+		if msg.Content != "see" || len(msg.ContentParts) != 1 {
+			t.Fatalf("content=%q parts=%d", msg.Content, len(msg.ContentParts))
+		}
+		mimes := msg.MIMETypes()
+		if len(mimes) != 1 || mimes[0] != "image/png" {
+			t.Fatalf("mimes=%v", mimes)
+		}
+	})
+	t.Run("pdf blob", func(t *testing.T) {
+		msg, err := parseACPPrompt(json.RawMessage(`[{"type":"resource","resource":{"uri":"file:///a.pdf","mimeType":"application/pdf","blob":"JVBERg=="}}]`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(msg.ContentParts) != 1 || msg.ContentParts[0].Type != tacklr.ContentTypeInputFile {
+			t.Fatalf("parts=%+v", msg.ContentParts)
+		}
+	})
 }
 
 // TestEventToAcpJsonRpc_outcomes maps each stream event kind once (including skip paths).

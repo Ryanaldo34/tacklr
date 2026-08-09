@@ -62,8 +62,10 @@ type TurnRequest struct {
 	AgentID   string
 	ThreadID  string
 	Prompt    string
-	Responses map[string]json.RawMessage
-	Load      bool
+	// UserMessage is multimodal user content (ACP). When set, preferred over Prompt.
+	UserMessage *tacklr.Message
+	Responses   map[string]json.RawMessage
+	Load        bool
 
 	// AllowMissingCheckpoint: when Load is true and the harness store has no
 	// row, start a fresh agent instead of failing. Set by wire BindTurn for
@@ -224,6 +226,18 @@ func (r *Registry) HasAgent(agentID string) bool {
 	return ok
 }
 
+// AgentModel returns the inference strategy for a registered agent, or nil.
+func (r *Registry) AgentModel(agentID string) tacklr.InferenceStrategy {
+	if agentID == "" {
+		agentID = r.defaultAgent
+	}
+	spec, ok := r.agents[agentID]
+	if !ok {
+		return nil
+	}
+	return spec.Model
+}
+
 // RecordSessionCreated records a session-created metric (called by protocols).
 func (r *Registry) RecordSessionCreated(ctx context.Context) {
 	r.instruments.RecordSessionCreated(ctx)
@@ -366,10 +380,11 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 	r.activeTurns.Store(threadID, th)
 
 	pr := &parsedRequest{
-		AgentID:   agentID,
-		ThreadID:  threadID,
-		Prompt:    req.Prompt,
-		Responses: req.Responses,
+		AgentID:     agentID,
+		ThreadID:    threadID,
+		Prompt:      req.Prompt,
+		UserMessage: req.UserMessage,
+		Responses:   req.Responses,
 	}
 
 	events, err := runHarness(turnCtx, h, pr)

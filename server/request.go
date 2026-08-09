@@ -39,5 +39,8 @@ func runHarness(ctx context.Context, h *tacklr.AgentHarness, pr *parsedRequest) 
 		}
 		return h.ReturnFromInterrupt(ctx, responses)
 	}
+	if pr.UserMessage != nil {
+		return h.RunMessage(ctx, pr.UserMessage)
+	}
 	return h.Run(ctx, pr.Prompt)
 }

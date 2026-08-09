@@ -11,6 +11,8 @@
 // Client presentation belongs on server.Protocol.OnStreamEvent / OnStreamClosed.
 package streaming
 
+import "strings"
+
 // MessageRole indicates who sent the message.
 type MessageRole string
 
@@ -84,6 +86,8 @@ type FileData struct {
 	URL      string `json:"url,omitempty"`
 	Data     string `json:"data,omitempty"`
 	MIMEType string `json:"mime_type,omitempty"`
+	// Filename is preferred by providers for input_file (e.g. PDF data URLs).
+	Filename string `json:"filename,omitempty"`
 }
 
 // Annotation attaches file/URL citations to output_text content.
@@ -199,4 +203,85 @@ type Message struct {
 	ToolCalls        []ToolCall    `json:"tool_calls,omitempty"`
 	ToolCallID       string        `json:"tool_call_id,omitempty"`
 	StructuredOutput any           `json:"-"`
+}
+
+// MIMETypes returns unique binary MIME types from ContentParts (images/files).
+// Producers set FileData.MIMEType (and image parts via FileData or data URL).
+// Text and refusal parts are ignored. Order is first-seen.
+func (m *Message) MIMETypes() []string {
+	if m == nil || len(m.ContentParts) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var out []string
+	add := func(mime string) {
+		mime = NormalizeMIME(mime)
+		if mime == "" || IsTextMIME(mime) {
+			return
+		}
+		if _, ok := seen[mime]; ok {
+			return
+		}
+		seen[mime] = struct{}{}
+		out = append(out, mime)
+	}
+	for _, p := range m.ContentParts {
+		switch p.Type {
+		case ContentTypeInputImage:
+			if p.FileData != nil && p.FileData.MIMEType != "" {
+				add(p.FileData.MIMEType)
+				continue
+			}
+			if p.ImageURL != nil {
+				add(MIMEFromDataURL(p.ImageURL.URL))
+			}
+		case ContentTypeInputFile:
+			if p.FileData != nil {
+				add(p.FileData.MIMEType)
+			}
+		}
+	}
+	return out
+}
+
+// NormalizeMIME lowercases a MIME type and strips parameters (after ';').
+func NormalizeMIME(mime string) string {
+	mime = strings.TrimSpace(strings.ToLower(mime))
+	if i := strings.IndexByte(mime, ';'); i >= 0 {
+		mime = strings.TrimSpace(mime[:i])
+	}
+	return mime
+}
+
+// IsTextMIME is true for empty and text/* types (always model-safe as text).
+func IsTextMIME(mime string) bool {
+	mime = NormalizeMIME(mime)
+	return mime == "" || strings.HasPrefix(mime, "text/")
+}
+
+// MIMEFromDataURL extracts the MIME type from a data: URL, or empty.
+func MIMEFromDataURL(u string) string {
+	u = strings.TrimSpace(u)
+	if !strings.HasPrefix(u, "data:") {
+		return ""
+	}
+	rest := strings.TrimPrefix(u, "data:")
+	if i := strings.Index(rest, ","); i >= 0 {
+		rest = rest[:i]
+	}
+	rest = strings.TrimSuffix(rest, ";base64")
+	return NormalizeMIME(rest)
+}
+
+// DataURL builds a data:<mime>;base64,<data> URL. data may already be a data URL.
+func DataURL(mime, data string) string {
+	data = strings.TrimSpace(data)
+	if strings.HasPrefix(data, "data:") {
+		return data
+	}
+	mime = NormalizeMIME(mime)
+	if mime == "" {
+		mime = "application/octet-stream"
+	}
+	return "data:" + mime + ";base64," + strings.TrimSpace(data)
 }

@@ -194,7 +194,7 @@ func (p *acpProtocol) HandleInbound(ctx context.Context, env ProtocolEnv, body [
 				}
 			}
 		}
-		return env.Conn.Writer.WriteResult(pr.ID, acpInitializeResult())
+		return env.Conn.Writer.WriteResult(pr.ID, acpInitializeResult(env.Registry, pr.ProtocolVersion))
 	case "authenticate":
 		return env.Conn.Writer.WriteResult(pr.ID, map[string]any{})
 	case "session/new":
@@ -412,15 +412,28 @@ func resolveSelectionViaElicitation(ctx context.Context, env ProtocolEnv, thread
 }
 
 // acpInitializeResult is the ACP initialize advertisement (wire shape).
-func acpInitializeResult() map[string]any {
+//
+// Prompt baseline (no capability bits): Text + ResourceLink are always accepted.
+// Optional: image (model-gated), audio (off), embeddedContext (Resource text/blob).
+func acpInitializeResult(r *Registry, clientProtocolVersion int) map[string]any {
+	image := false
+	if r != nil {
+		if m := r.AgentModel(""); m != nil {
+			image = m.SupportsMIME("image/png")
+		}
+	}
 	return map[string]any{
-		"protocolVersion": 1,
+		"protocolVersion": negotiateACPProtocolVersion(clientProtocolVersion),
 		"agentCapabilities": map[string]any{
 			// Durable session/load against the registry store (survives restarts).
 			"loadSession": true,
 			"promptCapabilities": map[string]any{
-				"image":           false,
-				"audio":           false,
+				// image: ContentBlock::Image when the default agent model accepts vision.
+				"image": image,
+				// audio: not implemented.
+				"audio": false,
+				// embeddedContext: ContentBlock::Resource (text + PDF blob).
+				// Text and ResourceLink need no capability flags (ACP baseline).
 				"embeddedContext": true,
 			},
 			"mcpCapabilities": map[string]any{

@@ -23,6 +23,7 @@ type mockStrategy struct {
 	invokeErr       error
 	invokeErrFn     func(context.Context, []*Message, []*Tool) error
 	countTokensFn   func(context.Context, []*Message, []*Tool) (int, error)
+	supportsMIMEFn  func(string) bool
 	systemPrompts   []string
 	lastInvokeMsgs  []*Message
 	lastInvokeTools []*Tool
@@ -35,6 +36,13 @@ func (m *mockStrategy) WithModel(string) InferenceStrategy          { return m }
 func (m *mockStrategy) WithURL(string) InferenceStrategy            { return m }
 func (m *mockStrategy) WithReasoningLevel(string) InferenceStrategy { return m }
 func (m *mockStrategy) WithStructuredOutput(any) InferenceStrategy  { return m }
+func (m *mockStrategy) SupportsMIME(mimeType string) bool {
+	if m.supportsMIMEFn != nil {
+		return m.supportsMIMEFn(mimeType)
+	}
+	// Tests default to text-only models.
+	return streaming.IsTextMIME(mimeType)
+}
 func (m *mockStrategy) SetSystemPrompt(p string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

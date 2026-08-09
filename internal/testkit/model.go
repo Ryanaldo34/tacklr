@@ -30,6 +30,10 @@ func (m *ScriptedModel) WithModel(string) tacklr.InferenceStrategy          { re
 func (m *ScriptedModel) WithURL(string) tacklr.InferenceStrategy            { return m }
 func (m *ScriptedModel) WithReasoningLevel(string) tacklr.InferenceStrategy { return m }
 func (m *ScriptedModel) WithStructuredOutput(any) tacklr.InferenceStrategy  { return m }
+func (m *ScriptedModel) SupportsMIME(mimeType string) bool {
+	// Scripted models accept common binary types unless overridden later.
+	return true
+}
 func (m *ScriptedModel) SetSystemPrompt(p string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

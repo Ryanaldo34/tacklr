@@ -65,9 +65,13 @@ func TestServer_mountsArbitraryProtocolRoutes(t *testing.T) {
 }
 
 func TestACPProtocol_initializeResultShape(t *testing.T) {
-	result := acpInitializeResult()
+	result := acpInitializeResult(nil, 1)
 	if result["protocolVersion"] != 1 {
 		t.Fatalf("protocolVersion = %v", result["protocolVersion"])
+	}
+	// Client asks for a future major; we respond with the latest we support (1).
+	if v := acpInitializeResult(nil, 99)["protocolVersion"]; v != 1 {
+		t.Fatalf("negotiated version for client 99 = %v, want 1", v)
 	}
 	caps, ok := result["agentCapabilities"].(map[string]any)
 	if !ok {
@@ -76,6 +80,17 @@ func TestACPProtocol_initializeResultShape(t *testing.T) {
 	mcpCaps, ok := caps["mcpCapabilities"].(map[string]any)
 	if !ok || mcpCaps["http"] != true {
 		t.Fatalf("mcpCapabilities = %v", mcpCaps)
+	}
+	pc, ok := caps["promptCapabilities"].(map[string]any)
+	if !ok || pc["image"] != false {
+		t.Fatalf("nil registry should advertise image=false, got %v", pc)
+	}
+	if pc["embeddedContext"] != true || pc["audio"] != false {
+		t.Fatalf("promptCapabilities = %v", pc)
+	}
+	info, ok := result["agentInfo"].(map[string]string)
+	if !ok || info["name"] == "" {
+		t.Fatalf("agentInfo = %v", result["agentInfo"])
 	}
 }
 
