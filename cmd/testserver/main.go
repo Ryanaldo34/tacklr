@@ -1,6 +1,6 @@
 // Command testserver is a local ACP harness for exercising Tacklr’s built-in
 // agent tooling (plan/todos, ask_user_choice, web_search/web_fetch when EXA_API_KEY is set,
-// skills when configured) over HTTP or stdio — not a product demo with toy tools.
+// skills when configured). Default transport is stdio; pass --http for HTTP/WS.
 package main
 
 import (
@@ -149,36 +149,35 @@ func main() {
 	// restarts: server.NewACPServerPostgres(reg, conn).
 	srv := server.NewACPServer(reg)
 
-	if len(os.Args) > 1 && os.Args[1] == "--stdio" {
-		slog.Info("starting acp test server", "mode", "stdio")
-		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-		defer stop()
-		if err := srv.ServeStdio(ctx, os.Stdin, os.Stdout); err != nil && !errors.Is(err, context.Canceled) {
-			slog.Error("stdio mode error", "error", err)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// Default: stdio (Zed / CLI ACP). Opt in to HTTP with --http.
+	if len(os.Args) > 1 && os.Args[1] == "--http" {
+		port := 3000
+		if p := os.Getenv("PORT"); p != "" {
+			if v, err := strconv.Atoi(p); err == nil {
+				port = v
+			}
+		}
+		addr := fmt.Sprintf(":%d", port)
+		slog.Info("starting acp test server",
+			"mode", "http",
+			"addr", addr,
+			"websocket", fmt.Sprintf("ws://localhost:%d/acp", port),
+			"streamable_http", fmt.Sprintf("http://localhost:%d/acp", port),
+			"legacy_unary", "POST /",
+		)
+		if err := srv.ServeHTTP(ctx, addr); err != nil && !errors.Is(err, context.Canceled) {
+			slog.Error("server error", "error", err)
 			os.Exit(1)
 		}
 		return
 	}
 
-	port := 3000
-	if p := os.Getenv("PORT"); p != "" {
-		if v, err := strconv.Atoi(p); err == nil {
-			port = v
-		}
-	}
-
-	addr := fmt.Sprintf(":%d", port)
-	slog.Info("starting acp test server",
-		"addr", addr,
-		"websocket", fmt.Sprintf("ws://localhost:%d/acp", port),
-		"streamable_http", fmt.Sprintf("http://localhost:%d/acp", port),
-		"legacy_unary", "POST /",
-	)
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	if err := srv.ServeHTTP(ctx, addr); err != nil && !errors.Is(err, context.Canceled) {
-		slog.Error("server error", "error", err)
+	slog.Info("starting acp test server", "mode", "stdio")
+	if err := srv.ServeStdio(ctx, os.Stdin, os.Stdout); err != nil && !errors.Is(err, context.Canceled) {
+		slog.Error("stdio mode error", "error", err)
 		os.Exit(1)
 	}
 }
