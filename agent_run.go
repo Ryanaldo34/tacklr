@@ -17,9 +17,21 @@ import (
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
+// Run starts a turn with a plain-text user message (SSE and simple hosts).
 func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEvent, error) {
+	return a.RunMessage(ctx, &Message{Role: RoleUser, Content: prompt})
+}
+
+// RunMessage starts a turn with a full user Message (Content and optional ContentParts).
+func (a *AgentHarness) RunMessage(ctx context.Context, user *Message) (<-chan StreamEvent, error) {
 	if a.context == nil || a.tasks == nil {
 		return nil, fmt.Errorf("agent harness: Run called on uninitialized harness")
+	}
+	if user == nil {
+		return nil, fmt.Errorf("agent harness: RunMessage requires a user message")
+	}
+	if user.Role == "" {
+		user.Role = RoleUser
 	}
 	if err := a.initSkills(ctx); err != nil {
 		return nil, fmt.Errorf("load skills: %w", err)
@@ -47,7 +59,7 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 		defer a.runMu.Unlock()
 		defer close(out)
 		defer a.persistSession(ctx, "run_exit")
-		if err := a.addToContext(ctx, &Message{Role: RoleUser, Content: prompt}, out); err != nil {
+		if err := a.addToContext(ctx, user, out); err != nil {
 			if ctx.Err() != nil {
 				emitCancelled()
 				return

@@ -177,9 +177,36 @@ type reasoningDetail struct {
 	Summary string `json:"summary,omitempty"`
 }
 
+// easyInputRequest is a plain string content message (text-only turns).
 type easyInputRequest struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
+}
+
+// multiInputRequest is a user message with typed content parts (vision / files).
+type multiInputRequest struct {
+	Role    string `json:"role"`
+	Content []any  `json:"content"`
+}
+
+// Responses API content parts (array form of message content).
+type inputTextPart struct {
+	Type string `json:"type"` // input_text
+	Text string `json:"text"`
+}
+
+// inputImagePart: image_url is a string data/https URL (not a nested object).
+type inputImagePart struct {
+	Type     string `json:"type"` // input_image
+	ImageURL string `json:"image_url"`
+	Detail   string `json:"detail,omitempty"`
+}
+
+type inputFilePart struct {
+	Type     string `json:"type"` // input_file
+	Filename string `json:"filename,omitempty"`
+	FileData string `json:"file_data,omitempty"`
+	FileID   string `json:"file_id,omitempty"`
 }
 
 type functionCallInputRequest struct {

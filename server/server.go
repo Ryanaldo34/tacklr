@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 
+	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/mcp"
 )
 
@@ -28,10 +29,13 @@ type ConfigOptionValue struct {
 // parsedRequest is retained for ACP parse helpers and tests that assert on
 // validated request fields. Session lifecycle uses Protocol methods with Params.
 type parsedRequest struct {
-	AgentID   string
-	ThreadID  string
-	Prompt    string
-	Responses map[string]json.RawMessage
+	AgentID  string
+	ThreadID string
+	Prompt   string
+	// UserMessage is set for multimodal ACP prompts (Content + ContentParts).
+	// When non-nil, runHarness prefers RunMessage over Prompt string.
+	UserMessage *tacklr.Message
+	Responses   map[string]json.RawMessage
 
 	// ACP JSON-RPC envelope
 	ID           json.RawMessage
@@ -47,6 +51,9 @@ type parsedRequest struct {
 	// ACP session/set_config_option
 	ConfigID    string
 	ConfigValue string
+
+	// ProtocolVersion is the client's requested major version (initialize).
+	ProtocolVersion int
 
 	// ClientCapsRaw is the raw initialize params (for clientCapabilities).
 	ClientCapsRaw json.RawMessage

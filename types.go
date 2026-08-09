@@ -100,6 +100,33 @@ type InferenceStrategy interface {
 	CountTokens(context.Context, []*Message, []*Tool) (int, error)
 	CompressContextWindow() error
 	MaxContextWindow() (int, error)
+	// SupportsMIME reports whether the currently selected model accepts the
+	// given MIME type as user input. Empty and text/* are always true.
+	// Probe representatives for ads (e.g. image/png); do not enumerate all types.
+	SupportsMIME(mimeType string) bool
+}
+
+// UnsupportedMIMEs returns mimes for which s.SupportsMIME is false (first-seen order).
+func UnsupportedMIMEs(s InferenceStrategy, mimes []string) []string {
+	if s == nil || len(mimes) == 0 {
+		return nil
+	}
+	var bad []string
+	seen := make(map[string]struct{}, len(mimes))
+	for _, m := range mimes {
+		m = streaming.NormalizeMIME(m)
+		if m == "" {
+			continue
+		}
+		if _, ok := seen[m]; ok {
+			continue
+		}
+		seen[m] = struct{}{}
+		if !s.SupportsMIME(m) {
+			bad = append(bad, m)
+		}
+	}
+	return bad
 }
 
 // AgentWatchDog records optional turn telemetry (thinking, tools, tokens).

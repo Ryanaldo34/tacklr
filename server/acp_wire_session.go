@@ -5,12 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/google/uuid"
 
+	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/stores"
+	"github.com/ryanaldo34/tacklr/streaming"
 )
 
 // acpWireSession is live ACP wire state for one session id (not harness state).
@@ -206,6 +209,7 @@ func (p *acpProtocol) LoadSession(ctx context.Context, env ProtocolEnv, sessionI
 // into a Registry TurnRequest. This is the only turn-binding path for ACP.
 func (p *acpProtocol) BindTurn(ctx context.Context, env ProtocolEnv, sessionID string, turnParams json.RawMessage) (TurnRequest, error) {
 	var prompt string
+	var userMsg *tacklr.Message
 	var responses map[string]json.RawMessage
 	var cwd string
 	var mcpFromClient []mcp.MCPConfig
@@ -217,11 +221,12 @@ func (p *acpProtocol) BindTurn(ctx context.Context, env ProtocolEnv, sessionID s
 				sessionID = pp.SessionID
 			}
 			if len(pp.Prompt) > 0 {
-				text, err := concatenateACPPrompt(pp.Prompt)
+				msg, err := parseACPPrompt(pp.Prompt)
 				if err != nil {
 					return TurnRequest{}, clientErrorf(ErrInvalidRequest, "invalid prompt content: %v", err)
 				}
-				prompt = text
+				userMsg = msg
+				prompt = msg.Content
 			}
 		}
 		var sp acpSessionParams
@@ -275,6 +280,27 @@ func (p *acpProtocol) BindTurn(ctx context.Context, env ProtocolEnv, sessionID s
 	if agentID == "" {
 		return TurnRequest{}, clientErrorf(ErrInvalidRequest, "no agent configured for session and no default agent configured")
 	}
+	// Reject binary content the agent model cannot accept before the turn starts.
+	if userMsg != nil && env.Registry != nil {
+		if mimes := userMsg.MIMETypes(); len(mimes) > 0 {
+			if model := env.Registry.AgentModel(agentID); model != nil {
+				if bad := tacklr.UnsupportedMIMEs(model, mimes); len(bad) > 0 {
+					return TurnRequest{}, clientErrorf(ErrInvalidRequest, "unsupported content type(s): %s", strings.Join(bad, ", "))
+				}
+			} else {
+				// No model: reject all non-text.
+				var bad []string
+				for _, m := range mimes {
+					if !streaming.IsTextMIME(m) {
+						bad = append(bad, streaming.NormalizeMIME(m))
+					}
+				}
+				if len(bad) > 0 {
+					return TurnRequest{}, clientErrorf(ErrInvalidRequest, "unsupported content type(s): %s", strings.Join(bad, ", "))
+				}
+			}
+		}
+	}
 	if err := p.persistWire(ctx, sessionID, sess); err != nil {
 		return TurnRequest{}, err
 	}
@@ -284,6 +310,7 @@ func (p *acpProtocol) BindTurn(ctx context.Context, env ProtocolEnv, sessionID s
 		AgentID:                agentID,
 		ThreadID:               sessionID,
 		Prompt:                 prompt,
+		UserMessage:            userMsg,
 		Responses:              responses,
 		Load:                   load,
 		AllowMissingCheckpoint: true, // wire session may outlive harness rows

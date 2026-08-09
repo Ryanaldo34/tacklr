@@ -17,6 +17,7 @@ import (
 	"go.opentelemetry.io/otel/log"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
@@ -119,6 +120,14 @@ func (s *OpenAIInferenceStrategy) WithStructuredOutput(v any) tacklr.InferenceSt
 	s.structuredOutputName = t.Name()
 	s.structuredOutputType = t
 	return s
+}
+
+// SupportsMIME implements tacklr.InferenceStrategy for the selected model id.
+func (s *OpenAIInferenceStrategy) SupportsMIME(mimeType string) bool {
+	if s == nil {
+		return streaming.IsTextMIME(mimeType)
+	}
+	return modelSupportsMIME(s.model, mimeType)
 }
 
 func (s *OpenAIInferenceStrategy) CompressContextWindow() error {
@@ -915,19 +924,13 @@ func marshalMessagesToInput(messages []*tacklr.Message) []json.RawMessage {
 			paired[msg] = true
 
 		case tacklr.RoleUser, tacklr.RoleSystem:
-			appendJSON(easyInputRequest{
-				Role:    string(msg.Role),
-				Content: msg.Content,
-			})
+			appendJSON(marshalRoleContent(string(msg.Role), msg))
 
 		case tacklr.RoleDeveloper:
 			// Wire as system so models treat handoff/plan as instructions, not a
 			// conversational turn to answer (Foundry/DeepSeek was echoing
 			// developer-role handoff text into agent_message_chunk).
-			appendJSON(easyInputRequest{
-				Role:    string(tacklr.RoleSystem),
-				Content: msg.Content,
-			})
+			appendJSON(marshalRoleContent(string(tacklr.RoleSystem), msg))
 
 		case tacklr.RoleReasoning:
 			// Responses multi-turn: pass prior reasoning items back with the tool
@@ -948,11 +951,8 @@ func marshalMessagesToInput(messages []*tacklr.Message) []json.RawMessage {
 			appendJSON(item)
 
 		case tacklr.RoleAssistant:
-			if msg.Content != "" {
-				appendJSON(easyInputRequest{
-					Role:    string(msg.Role),
-					Content: msg.Content,
-				})
+			if msg.Content != "" || len(msg.ContentParts) > 0 {
+				appendJSON(marshalRoleContent(string(msg.Role), msg))
 			}
 			for _, tc := range msg.ToolCalls {
 				appendFunctionCall(tc)
@@ -961,6 +961,57 @@ func marshalMessagesToInput(messages []*tacklr.Message) []json.RawMessage {
 	}
 
 	return items
+}
+
+// marshalRoleContent uses string content when there are no multimodal parts;
+// otherwise Responses array content (input_text / input_image / input_file).
+func marshalRoleContent(role string, msg *tacklr.Message) any {
+	if msg == nil {
+		return easyInputRequest{Role: role, Content: ""}
+	}
+	if len(msg.ContentParts) == 0 {
+		return easyInputRequest{Role: role, Content: msg.Content}
+	}
+	parts := make([]any, 0, len(msg.ContentParts)+1)
+	if t := strings.TrimSpace(msg.Content); t != "" {
+		parts = append(parts, inputTextPart{Type: "input_text", Text: t})
+	}
+	for _, p := range msg.ContentParts {
+		switch p.Type {
+		case tacklr.ContentTypeInputImage:
+			if p.ImageURL == nil || p.ImageURL.URL == "" {
+				continue
+			}
+			parts = append(parts, inputImagePart{
+				Type:     "input_image",
+				ImageURL: p.ImageURL.URL,
+				Detail:   p.ImageURL.Detail,
+			})
+		case tacklr.ContentTypeInputFile:
+			if p.FileData == nil || p.FileData.Data == "" {
+				continue
+			}
+			fd := p.FileData
+			filename := fd.Filename
+			if filename == "" {
+				filename = "document.pdf"
+			}
+			fileData := fd.Data
+			if !strings.HasPrefix(fileData, "data:") {
+				fileData = streaming.DataURL(fd.MIMEType, fileData)
+			}
+			parts = append(parts, inputFilePart{
+				Type:     "input_file",
+				Filename: filename,
+				FileData: fileData,
+				FileID:   fd.FileID,
+			})
+		}
+	}
+	if len(parts) == 0 {
+		return easyInputRequest{Role: role, Content: msg.Content}
+	}
+	return multiInputRequest{Role: role, Content: parts}
 }
 
 // summarizeInputItems is a short, safe log line of request input shape (types,

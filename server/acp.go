@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path"
 	"strings"
 
 	"github.com/ryanaldo34/tacklr"
@@ -60,18 +61,30 @@ type acpRequest struct {
 	Meta    json.RawMessage `json:"_meta,omitempty"`
 }
 
+// acpProtocolVersion is the MAJOR ACP version this agent implements.
+const acpProtocolVersion = 1
+
 // acpContentBlock is a single block in an ACP prompt array.
 type acpContentBlock struct {
-	Type     string       `json:"type"`
-	Text     string       `json:"text,omitempty"`
-	Resource *acpResource `json:"resource,omitempty"`
+	Type        string       `json:"type"`
+	Text        string       `json:"text,omitempty"`
+	MimeType    string       `json:"mimeType,omitempty"`
+	Data        string       `json:"data,omitempty"` // base64 for type=image
+	URI         string       `json:"uri,omitempty"`  // image source or resource_link
+	Name        string       `json:"name,omitempty"` // resource_link
+	Title       string       `json:"title,omitempty"`
+	Description string       `json:"description,omitempty"`
+	Size        *int64       `json:"size,omitempty"`
+	Resource    *acpResource `json:"resource,omitempty"`
 }
 
 // acpResource holds inline content for a resource block in an ACP prompt.
+// Text is embedded context; Blob is base64 binary (application/pdf in this pass).
 type acpResource struct {
 	URI      string `json:"uri"`
-	MimeType string `json:"mimeType"`
-	Text     string `json:"text"`
+	MimeType string `json:"mimeType,omitempty"`
+	Text     string `json:"text,omitempty"`
+	Blob     string `json:"blob,omitempty"`
 }
 
 // acpSessionParams holds params for session/new, session/load, session/resume.
@@ -141,10 +154,11 @@ func validateACPRequest(body []byte) (*parsedRequest, error) {
 		if err := json.Unmarshal(env.Params, &p); err != nil {
 			return nil, clientErrorf(ErrInvalidRequest, "invalid initialize params: %v", err)
 		}
-		// Accept any positive protocol version; respond with the version we support.
+		// Client MUST send a positive major version; we negotiate in the result.
 		if p.ProtocolVersion < 1 {
 			return nil, clientErrorf(ErrInvalidRequest, "unsupported protocol version %d", p.ProtocolVersion)
 		}
+		pr.ProtocolVersion = p.ProtocolVersion
 		pr.ClientCapsRaw = env.Params
 		return pr, nil
 	case "session/new":
@@ -202,15 +216,13 @@ func validateACPRequest(body []byte) (*parsedRequest, error) {
 		if len(p.Prompt) == 0 {
 			return nil, clientErrorf(ErrInvalidRequest, "prompt must not be empty")
 		}
-		text, err := concatenateACPPrompt(p.Prompt)
+		msg, err := parseACPPrompt(p.Prompt)
 		if err != nil {
 			return nil, clientErrorf(ErrInvalidRequest, "invalid prompt content: %v", err)
 		}
-		if text == "" {
-			return nil, clientErrorf(ErrInvalidRequest, "prompt must not be empty")
-		}
 		pr.ThreadID = p.SessionID
-		pr.Prompt = text
+		pr.Prompt = msg.Content
+		pr.UserMessage = msg
 		return pr, nil
 	case "session/set_config_option":
 		if env.Params == nil {
@@ -252,31 +264,160 @@ func validateACPRequest(body []byte) (*parsedRequest, error) {
 	}
 }
 
-// concatenateACPPrompt joins text blocks and inline resource content into a
-// single prompt string.
-func concatenateACPPrompt(raw json.RawMessage) (string, error) {
+// parseACPPrompt maps an ACP content-block array into a user Message
+// (text Content + multimodal ContentParts). Does not check model MIME support.
+// Text-only prompts keep ContentParts empty so the OpenAI path stays string form.
+func parseACPPrompt(raw json.RawMessage) (*tacklr.Message, error) {
 	var blocks []acpContentBlock
 	if err := json.Unmarshal(raw, &blocks); err != nil {
-		return "", fmt.Errorf("invalid prompt array: %w", err)
+		return nil, fmt.Errorf("invalid prompt array: %w", err)
 	}
-	var parts []string
+	if len(blocks) == 0 {
+		return nil, fmt.Errorf("prompt must not be empty")
+	}
+	var textParts []string
+	var binary []tacklr.ContentPart
 	for i, b := range blocks {
 		switch b.Type {
 		case "text":
-			if b.Text == "" {
-				return "", fmt.Errorf("text block %d must have non-empty text", i)
+			if strings.TrimSpace(b.Text) == "" {
+				return nil, fmt.Errorf("text block %d must have non-empty text", i)
 			}
-			parts = append(parts, b.Text)
+			textParts = append(textParts, b.Text)
+		case "image":
+			mime := streaming.NormalizeMIME(b.MimeType)
+			if mime == "" {
+				return nil, fmt.Errorf("image block %d requires mimeType", i)
+			}
+			if !strings.HasPrefix(mime, "image/") {
+				return nil, fmt.Errorf("image block %d mimeType must be image/*, got %q", i, mime)
+			}
+			url, err := resolveImageURL(mime, b.Data, b.URI)
+			if err != nil {
+				return nil, fmt.Errorf("image block %d: %w", i, err)
+			}
+			binary = append(binary, tacklr.ContentPart{
+				Type:     tacklr.ContentTypeInputImage,
+				ImageURL: &tacklr.ImageURL{URL: url},
+				FileData: &tacklr.FileData{MIMEType: mime}, // MIME for capability checks
+			})
 		case "resource":
 			if b.Resource == nil {
-				return "", fmt.Errorf("resource block %d must have a resource field", i)
+				return nil, fmt.Errorf("resource block %d must have a resource field", i)
 			}
-			parts = append(parts, b.Resource.Text)
+			r := b.Resource
+			hasBlob := strings.TrimSpace(r.Blob) != ""
+			hasText := strings.TrimSpace(r.Text) != ""
+			if !hasBlob && !hasText {
+				return nil, fmt.Errorf("resource block %d requires text or blob", i)
+			}
+			if hasBlob {
+				mime := streaming.NormalizeMIME(r.MimeType)
+				if mime == "" {
+					return nil, fmt.Errorf("resource blob block %d requires mimeType", i)
+				}
+				if mime != "application/pdf" {
+					return nil, fmt.Errorf("resource blob block %d: only application/pdf is supported, got %q", i, mime)
+				}
+				filename := "document.pdf"
+				if base := path.Base(strings.TrimSpace(r.URI)); base != "" && base != "." && base != "/" {
+					filename = base
+				}
+				binary = append(binary, tacklr.ContentPart{
+					Type: tacklr.ContentTypeInputFile,
+					FileData: &tacklr.FileData{
+						Data:     streaming.DataURL(mime, r.Blob),
+						MIMEType: mime,
+						Filename: filename,
+					},
+				})
+			}
+			if hasText {
+				textParts = append(textParts, r.Text)
+			}
+		case "resource_link":
+			// Baseline MUST: accept resource links. We do not fetch; surface a
+			// stable text descriptor so the model sees the reference (no resource_link resolution).
+			link, err := formatResourceLink(b)
+			if err != nil {
+				return nil, fmt.Errorf("resource_link block %d: %w", i, err)
+			}
+			textParts = append(textParts, link)
+		case "audio":
+			// Optional prompt capability; we advertise audio:false.
+			return nil, fmt.Errorf("audio content blocks are not supported")
 		default:
-			return "", fmt.Errorf("unsupported content block type %q at index %d", b.Type, i)
+			return nil, fmt.Errorf("unsupported content block type %q at index %d", b.Type, i)
 		}
 	}
-	return strings.Join(parts, "\n\n"), nil
+	if len(textParts) == 0 && len(binary) == 0 {
+		return nil, fmt.Errorf("prompt must not be empty")
+	}
+	msg := &tacklr.Message{
+		Role:    tacklr.RoleUser,
+		Content: strings.Join(textParts, "\n\n"),
+	}
+	if len(binary) > 0 {
+		msg.ContentParts = binary
+	}
+	return msg, nil
+}
+
+func resolveImageURL(mime, data, uri string) (string, error) {
+	data = strings.TrimSpace(data)
+	uri = strings.TrimSpace(uri)
+	if data != "" {
+		return streaming.DataURL(mime, data), nil
+	}
+	if strings.HasPrefix(uri, "data:") || strings.HasPrefix(uri, "https://") || strings.HasPrefix(uri, "http://") {
+		return uri, nil
+	}
+	if uri == "" {
+		return "", fmt.Errorf("requires data or uri")
+	}
+	return "", fmt.Errorf("uri must be data: or http(s) URL when data is empty")
+}
+
+// formatResourceLink builds a text stand-in for ContentBlock::ResourceLink (ACP baseline).
+func formatResourceLink(b acpContentBlock) (string, error) {
+	uri := strings.TrimSpace(b.URI)
+	name := strings.TrimSpace(b.Name)
+	if uri == "" {
+		return "", fmt.Errorf("uri is required")
+	}
+	if name == "" {
+		return "", fmt.Errorf("name is required")
+	}
+	var bld strings.Builder
+	bld.WriteString("[Resource link] name=")
+	bld.WriteString(name)
+	bld.WriteString(" uri=")
+	bld.WriteString(uri)
+	if mt := strings.TrimSpace(b.MimeType); mt != "" {
+		bld.WriteString(" mimeType=")
+		bld.WriteString(mt)
+	}
+	if b.Size != nil {
+		fmt.Fprintf(&bld, " size=%d", *b.Size)
+	}
+	if t := strings.TrimSpace(b.Title); t != "" {
+		bld.WriteString(" title=")
+		bld.WriteString(t)
+	}
+	if d := strings.TrimSpace(b.Description); d != "" {
+		bld.WriteString("\n")
+		bld.WriteString(d)
+	}
+	return bld.String(), nil
+}
+
+// negotiateACPProtocolVersion implements init version negotiation:
+// same version if we support it, else the latest we support.
+func negotiateACPProtocolVersion(clientVersion int) int {
+	if clientVersion == acpProtocolVersion {
+		return acpProtocolVersion
+	}
+	return acpProtocolVersion
 }
 
 func eventToAcpJsonRpc(threadId string, event *streaming.StreamEvent) ([][]byte, error) {

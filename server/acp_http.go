@@ -146,7 +146,7 @@ func (p *acpProtocol) handleStreamableInitialize(env ProtocolEnv, w http.Respons
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"jsonrpc": "2.0",
 		"id":      peek.ID,
-		"result":  acpInitializeResult(),
+		"result":  acpInitializeResult(env.Registry, acpProtocolVersion),
 	})
 }
 
