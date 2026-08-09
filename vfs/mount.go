@@ -1,11 +1,25 @@
 package vfs
 
-// MountInfo is a host- and agent-safe description of a mount.
-// It never includes host roots, bucket names, credentials, backend type, or
-// other source config — only what the virtual namespace itself exposes.
+import "maps"
+
+// MountSpec is the durable, secret-free description of a mount.
+// Safe to JSON into session checkpoints. Never store credentials here —
+// Profile names a process-level factory that holds clients/pools.
+type MountSpec struct {
+	Point    string            `json:"point"`
+	Profile  string            `json:"profile"`
+	ReadOnly bool              `json:"readOnly,omitempty"`
+	Params   map[string]string `json:"params,omitempty"`
+}
+
+// MountInfo is agent-safe: point and read-only only.
 type MountInfo struct {
-	// Point is the absolute virtual mount path (e.g. "/data").
-	Point string
-	// ReadOnly is true when the mount was created read-only.
+	Point    string
 	ReadOnly bool
+}
+
+func cloneSpec(spec MountSpec) MountSpec {
+	out := spec
+	out.Params = maps.Clone(spec.Params)
+	return out
 }

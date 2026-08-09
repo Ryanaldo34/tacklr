@@ -2,6 +2,7 @@ package tacklr
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -18,6 +19,7 @@ import (
 	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/telemetry"
+	"github.com/ryanaldo34/tacklr/vfs"
 )
 
 // AgentHarness is the product agent. Create with NewAgent or NewAgentFromSession.
@@ -53,7 +55,11 @@ type AgentHarness struct {
 	brainWriteKinds   brain.WriteKinds
 	// searchCtx owns the current knowledge ResultSet for this agent thread.
 	// Checkpointed via checkpointSession / NewAgentFromSession; not SessionManager.
-	searchCtx        *brain.SearchContext
+	searchCtx *brain.SearchContext
+	// fsRegistry / fsBootstrap used only at construct to fill session.VFS.
+	// Mount attach/detach lives on vfs.MountSession (session-owned), not here.
+	fsRegistry       *vfs.BackendRegistry
+	fsBootstrap      []vfs.MountSpec
 	mcpCleanup       func()
 	mcpInitialized   bool
 	builtinsInjected bool
@@ -171,6 +177,17 @@ func (a *AgentHarness) checkpointSession(ctx context.Context) error {
 			return err
 		}
 		cp.State.SearchContext = raw
+	}
+	// Mount table is session-owned; harness only serializes Specs for durability.
+	if a.session != nil && a.session.VFS != nil {
+		if specs := a.session.VFS.Specs(); len(specs) > 0 {
+			raw, err := json.Marshal(specs)
+			if err != nil {
+				telemetry.InstrumentsFromContext(ctx).RecordCheckpointSave(ctx, telemetry.OutcomeError)
+				return err
+			}
+			cp.State.Mounts = raw
+		}
 	}
 	if err := a.store.SaveSession(ctx, a.sessionId, *cp); err != nil {
 		telemetry.InstrumentsFromContext(ctx).RecordCheckpointSave(ctx, telemetry.OutcomeError)

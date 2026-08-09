@@ -2,6 +2,7 @@ package tacklr
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/skills"
 	"github.com/ryanaldo34/tacklr/stores"
+	"github.com/ryanaldo34/tacklr/vfs"
 )
 
 // Config is harness limits and prompt settings.
@@ -71,6 +73,18 @@ type AgentOptions struct {
 	// SearchNamespace isolates brain retrieval when set (session-owned, checkpointed).
 	// Nil leaves a loaded session value unchanged. Workers get a copy at spawn.
 	SearchNamespace *uuid.UUID
+	// MountSession is the session-owned VFS mount table. Hosts attach and detach
+	// mounts on this object (vfs.MountSession.Mount / Unmount) — not on the harness.
+	// If nil and FSRegistry is set, the harness creates one and stores it on the
+	// session manager for checkpointing.
+	MountSession *vfs.MountSession
+	// FSRegistry resolves MountSpec.Profile to providers (process-scoped pools).
+	// Used when MountSession is nil and mounts must be materialized, or when
+	// creating a MountSession at construct. Prefer creating MountSession yourself.
+	FSRegistry *vfs.BackendRegistry
+	// FSBootstrap mounts applied when materializing a new or loaded session.
+	// Merged before durable checkpoint mounts; duplicate points error.
+	FSBootstrap []vfs.MountSpec
 }
 
 // streamEventBuffer is the harness event channel size so EmitUpdate is not dropped
@@ -83,6 +97,9 @@ func NewAgent(ctx context.Context, opts AgentOptions) *AgentHarness {
 	h := newHarnessBase(opts, sm)
 	if opts.SessionID != "" {
 		h.sessionId = opts.SessionID
+	}
+	if err := h.initSessionMounts(ctx, nil); err != nil {
+		slog.Error("failed to initialize virtual filesystem", "error", err)
 	}
 	h.finishInit(ctx, opts.SubAgents)
 	return h
@@ -115,6 +132,11 @@ func newHarnessBase(opts AgentOptions, sm *session.SessionManager) *AgentHarness
 		context:              opts.ContextManager,
 		tasks:                opts.ModelTasks,
 		contextPolicy:        opts.ContextPolicy,
+		fsRegistry:           opts.FSRegistry,
+		fsBootstrap:          opts.FSBootstrap,
+	}
+	if opts.MountSession != nil {
+		sm.VFS = opts.MountSession
 	}
 	if opts.Brain != nil {
 		h.searchCtx = brain.NewSearchContext()
@@ -283,6 +305,37 @@ func NewAgentFromSession(ctx context.Context, sessionId string, opts AgentOption
 			}
 		}
 	}
+	var durableMounts []vfs.MountSpec
+	if len(checkpoint.State.Mounts) > 0 {
+		if err := json.Unmarshal(checkpoint.State.Mounts, &durableMounts); err != nil {
+			return nil, fmt.Errorf("invalid session mounts: %w", err)
+		}
+	}
+	if err := h.initSessionMounts(ctx, durableMounts); err != nil {
+		return nil, err
+	}
 	h.finishInit(ctx, opts.SubAgents)
 	return h, nil
+}
+
+// initSessionMounts materializes bootstrap+durable specs onto session.VFS.
+// Attach/detach after construct uses MountSession, not the harness.
+func (a *AgentHarness) initSessionMounts(ctx context.Context, durable []vfs.MountSpec) error {
+	if a.session == nil {
+		return fmt.Errorf("vfs: no session")
+	}
+	specs, err := vfs.MergeSpecs(a.fsBootstrap, durable)
+	if err != nil {
+		return err
+	}
+	if len(specs) == 0 {
+		return nil
+	}
+	if a.session.VFS == nil {
+		if a.fsRegistry == nil {
+			return fmt.Errorf("vfs: registry required to restore mounts")
+		}
+		a.session.VFS = vfs.NewMountSession(a.sessionId, a.fsRegistry)
+	}
+	return a.session.VFS.Materialize(ctx, specs)
 }

@@ -3,7 +3,6 @@ package vfs
 import (
 	"cmp"
 	"context"
-	"fmt"
 	"path"
 	"slices"
 	"strings"
@@ -11,7 +10,7 @@ import (
 )
 
 // FS is an isolated virtual filesystem mount namespace.
-// Create one with New. There is no process-global mount table.
+// Mount/Unmount update the live table; Specs() is the durable checkpoint view.
 type FS struct {
 	mu     sync.RWMutex
 	mounts map[string]mountEntry // key: cleaned virtual mount point
@@ -19,48 +18,50 @@ type FS struct {
 
 type mountEntry struct {
 	provider Provider
-	readOnly bool
+	spec     MountSpec
 }
 
-// New returns an empty mount namespace with no mounts.
+// New returns an empty mount namespace.
 func New() *FS {
 	return &FS{mounts: make(map[string]mountEntry)}
 }
 
-// Mount attaches provider at the absolute virtual path point.
-// readOnly is like mount -o ro (enforced when file ops land).
-func (fs *FS) Mount(ctx context.Context, point string, provider Provider, readOnly bool) error {
+// Mount attaches provider using the durable MountSpec.
+func (fs *FS) Mount(ctx context.Context, spec MountSpec, provider Provider) error {
 	if fs == nil {
-		return fmt.Errorf("vfs: nil FS")
-	}
-	if provider == nil {
 		return ErrInvalidProvider
 	}
-	cleaned, err := cleanVirtualPath(point)
+	if provider == nil || strings.TrimSpace(spec.Profile) == "" {
+		return ErrInvalidProvider
+	}
+	cleaned, err := cleanVirtualPath(spec.Point)
 	if err != nil {
 		return err
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	// Validate errors are already readable; do not wrap again.
 	if err := provider.Validate(ctx); err != nil {
-		return fmt.Errorf("%w: %w", ErrInvalidProvider, err)
+		return err
 	}
+
+	stored := cloneSpec(spec)
+	stored.Point = cleaned
 
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 	if _, exists := fs.mounts[cleaned]; exists {
 		return ErrAlreadyMounted
 	}
-	fs.mounts[cleaned] = mountEntry{provider: provider, readOnly: readOnly}
+	fs.mounts[cleaned] = mountEntry{provider: provider, spec: stored}
 	return nil
 }
 
-// Unmount detaches the mount at the exact virtual path point.
-// Nested mounts under point are not removed. Phase 1 has no open-handle busy check.
+// Unmount detaches the exact mount point. Nested mounts are not removed.
 func (fs *FS) Unmount(point string) error {
 	if fs == nil {
-		return fmt.Errorf("vfs: nil FS")
+		return ErrNotMounted
 	}
 	cleaned, err := cleanVirtualPath(point)
 	if err != nil {
@@ -75,7 +76,7 @@ func (fs *FS) Unmount(point string) error {
 	return nil
 }
 
-// Mounts returns a snapshot of current mounts sorted by point.
+// Mounts returns a snapshot sorted by point (agent-safe).
 func (fs *FS) Mounts() []MountInfo {
 	if fs == nil {
 		return nil
@@ -84,32 +85,46 @@ func (fs *FS) Mounts() []MountInfo {
 	defer fs.mu.RUnlock()
 	out := make([]MountInfo, 0, len(fs.mounts))
 	for point, e := range fs.mounts {
-		out = append(out, MountInfo{Point: point, ReadOnly: e.readOnly})
+		out = append(out, MountInfo{Point: point, ReadOnly: e.spec.ReadOnly})
 	}
-	slices.SortFunc(out, func(a, b MountInfo) int {
-		return cmp.Compare(a.Point, b.Point)
-	})
+	slices.SortFunc(out, func(a, b MountInfo) int { return cmp.Compare(a.Point, b.Point) })
 	return out
 }
 
-// Lookup finds the longest mount covering path and returns MountInfo plus the
-// path relative to that mount (no leading slash; empty when path is the mount point).
+// Specs returns a durable snapshot for checkpointing (params deep-copied).
+func (fs *FS) Specs() []MountSpec {
+	if fs == nil {
+		return nil
+	}
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+	out := make([]MountSpec, 0, len(fs.mounts))
+	for _, e := range fs.mounts {
+		out = append(out, cloneSpec(e.spec))
+	}
+	slices.SortFunc(out, func(a, b MountSpec) int { return cmp.Compare(a.Point, b.Point) })
+	return out
+}
+
+// Lookup finds the longest covering mount and the path relative to it.
 func (fs *FS) Lookup(virtualPath string) (MountInfo, string, error) {
 	if fs == nil {
-		return MountInfo{}, "", fmt.Errorf("vfs: nil FS")
+		return MountInfo{}, "", ErrNotMounted
 	}
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+	return fs.lookup(virtualPath)
+}
+
+func (fs *FS) lookup(virtualPath string) (MountInfo, string, error) {
 	cleaned, err := cleanVirtualPath(virtualPath)
 	if err != nil {
 		return MountInfo{}, "", err
 	}
-	fs.mu.RLock()
-	defer fs.mu.RUnlock()
-
 	var bestPoint string
 	var best mountEntry
 	found := false
 	for point, e := range fs.mounts {
-		// Segment-boundary prefix: "/ab" must not cover "/a".
 		if point != "/" && cleaned != point && !strings.HasPrefix(cleaned, point+"/") {
 			continue
 		}
@@ -121,7 +136,7 @@ func (fs *FS) Lookup(virtualPath string) (MountInfo, string, error) {
 		return MountInfo{}, "", ErrNotMounted
 	}
 	rel := strings.TrimPrefix(strings.TrimPrefix(cleaned, bestPoint), "/")
-	return MountInfo{Point: bestPoint, ReadOnly: best.readOnly}, rel, nil
+	return MountInfo{Point: bestPoint, ReadOnly: best.spec.ReadOnly}, rel, nil
 }
 
 func cleanVirtualPath(s string) (string, error) {

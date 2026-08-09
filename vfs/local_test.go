@@ -15,12 +15,11 @@ func TestLocalProvider_validateAndMount(t *testing.T) {
 	dir := t.TempDir()
 	p := vfs.LocalProvider{Root: dir}
 	if err := p.Validate(ctx); err != nil {
-		t.Fatalf("Validate: %v", err)
+		t.Fatal(err)
 	}
-
 	fs := vfs.New()
-	if err := fs.Mount(ctx, "/workspace", p, false); err != nil {
-		t.Fatalf("Mount: %v", err)
+	if err := fs.Mount(ctx, vfs.MountSpec{Point: "/workspace", Profile: "local"}, p); err != nil {
+		t.Fatal(err)
 	}
 	info, rel, err := fs.Lookup("/workspace/src/main.go")
 	if err != nil || info.Point != "/workspace" || rel != "src/main.go" {
@@ -30,19 +29,16 @@ func TestLocalProvider_validateAndMount(t *testing.T) {
 
 func TestLocalProvider_validateFailures(t *testing.T) {
 	ctx := t.Context()
-
 	for _, root := range []string{"", "relative/path"} {
 		if err := (vfs.LocalProvider{Root: root}).Validate(ctx); err == nil {
 			t.Fatalf("root %q: want error", root)
 		}
 	}
-
-	missing := filepath.Join(t.TempDir(), "does-not-exist")
+	missing := filepath.Join(t.TempDir(), "gone")
 	if err := (vfs.LocalProvider{Root: missing}).Validate(ctx); err == nil {
-		t.Fatal("missing root: want error")
+		t.Fatal("missing: want error")
 	}
-
-	f, err := os.CreateTemp(t.TempDir(), "notdir")
+	f, err := os.CreateTemp(t.TempDir(), "file")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,15 +47,13 @@ func TestLocalProvider_validateFailures(t *testing.T) {
 	if err := (vfs.LocalProvider{Root: name}).Validate(ctx); err == nil {
 		t.Fatal("file root: want error")
 	}
-
 	fs := vfs.New()
-	if err := fs.Mount(ctx, "/x", vfs.LocalProvider{Root: missing}, false); !errors.Is(err, vfs.ErrInvalidProvider) {
-		t.Fatalf("Mount bad local: %v", err)
+	if err := fs.Mount(ctx, vfs.MountSpec{Point: "/x", Profile: "local"}, vfs.LocalProvider{Root: missing}); err == nil {
+		t.Fatal("Mount bad local: want error")
 	}
-
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
 	if err := (vfs.LocalProvider{Root: t.TempDir()}).Validate(canceled); !errors.Is(err, context.Canceled) {
-		t.Fatalf("Validate canceled: %v", err)
+		t.Fatalf("canceled: %v", err)
 	}
 }

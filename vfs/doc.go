@@ -1,34 +1,32 @@
 // Package vfs is Tacklr's virtual filesystem mount layer.
 //
-// # Phase 1 surface
+// # Surface
 //
-// This package currently provides a Unix-style mount table and provider
-// attachment only:
+//   - MountSession — session-owned mount table (attach/detach for the session life)
+//   - FS — underlying Unix-style mount namespace (usually behind MountSession)
+//   - MountSpec — durable, secret-free mount description (checkpoint-safe)
+//   - BackendRegistry + ProviderFactory — process-level profiles and pools
+//   - Materialize — rebuild a live FS from specs after restart
+//   - LocalFactory / S3Factory — common backends; S3 shares one client per profile
 //
-//   - FS holds an isolated mount namespace (one instance per scope you choose)
-//   - Mount / Unmount / Mounts manage attachments at absolute virtual paths
-//   - Lookup resolves a virtual path to the longest covering mount
-//   - LocalProvider and S3Provider are the first backends
+// Hosts manage mounts on MountSession for the whole session lifecycle. Specs()
+// is the durable view written into session checkpoints; restarts rehydrate via
+// Materialize with the same registry profiles (not credentials in JSON). The
+// agent harness does not own attach/detach — it only checkpoints Specs.
 //
-// File operations (Open, Read, Write, Stat, ReadDir, …), content intermediate
-// representations, and agent-facing tools are intentionally out of scope here.
-// They will use this mount table without changing how hosts attach sources.
+// File operations (Open, Read, Write, …), content IR, and agent tools are out of
+// scope here; they will use this mount table without changing how hosts attach
+// sources.
 //
-// # Security model
+// # Security
 //
-// Hosts configure providers with real roots and credentials. Agents must only
-// ever see virtual paths under the FS namespace. MountInfo never exposes host
-// paths, bucket names, credentials, or backend type. Providers stay opaque;
-// routing is by virtual path only. Scope is a property of what you mount and
-// (later) which paths ops allow — not a prompt instruction.
+// Hosts register factories with real roots and credentials. Agents only see
+// virtual paths. MountInfo never exposes host paths, buckets, or profiles.
+// MountSpec stores profile ids and non-secret params only.
 //
-// # Mount rules (core)
+// # Mount rules
 //
-// Virtual paths are absolute POSIX paths (slash-separated, always start with
-// "/"). Exact mount points are unique. Nested mounts are allowed; Lookup uses
-// longest-prefix match with path segment boundaries. Mounts may be read-only
-// (Mount's readOnly flag); enforcement lands with file ops. Unmount is by exact
-// point. Phase 1 has no open-handle busy check yet.
-//
-// Providers must be treated as immutable after a successful Mount.
+// Absolute POSIX virtual paths; unique exact points; nested mounts allowed;
+// Lookup uses longest-prefix with segment boundaries; ReadOnly is recorded on
+// the spec (enforced with file ops).
 package vfs
