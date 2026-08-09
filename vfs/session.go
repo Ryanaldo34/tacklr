@@ -1,15 +1,24 @@
 package vfs
 
 import (
+	"bytes"
 	"context"
-	"fmt"
 	"io"
 	"os"
 	"sync"
 )
 
-// MaxReadFileBytes caps ReadFile to avoid unbounded memory use.
+// MaxReadFileBytes caps full-file reads and writes.
 const MaxReadFileBytes = 32 << 20 // 32 MiB
+
+// MaxLineBytes caps a single line when streaming (ReadLines) or scanning.
+const MaxLineBytes = 1 << 20 // 1 MiB
+
+// filePutter is implemented by providers that can write a full object in one shot
+// (avoids S3 Open→buffer→Put double buffering).
+type filePutter interface {
+	PutFile(ctx context.Context, name string, r io.Reader, size int64) error
+}
 
 // MountSession is the session-owned virtual filesystem: mount table + path I/O.
 //
@@ -143,35 +152,75 @@ func (m *MountSession) Open(ctx context.Context, virtualPath string) (File, erro
 }
 
 // ReadFile reads an entire file (capped at MaxReadFileBytes).
+//
+// When File.Stat reports a size, the buffer is allocated once and oversize files
+// are rejected without reading the body. Unknown sizes fall back to a limited
+// streaming read.
 func (m *MountSession) ReadFile(ctx context.Context, virtualPath string) ([]byte, error) {
 	f, err := m.Open(ctx, virtualPath)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
+
+	if fi, stErr := f.Stat(); stErr == nil && fi.Size >= 0 {
+		if fi.Size > int64(MaxReadFileBytes) {
+			return nil, errFileExceeds(MaxReadFileBytes)
+		}
+		if fi.Size == 0 {
+			return []byte{}, nil
+		}
+		data := make([]byte, fi.Size)
+		if _, err := io.ReadFull(f, data); err != nil {
+			return nil, err
+		}
+		return data, nil
+	}
+
 	data, err := io.ReadAll(io.LimitReader(f, int64(MaxReadFileBytes)+1))
 	if err != nil {
 		return nil, err
 	}
 	if len(data) > MaxReadFileBytes {
-		return nil, fmt.Errorf("vfs: file exceeds %d bytes", MaxReadFileBytes)
+		return nil, errFileExceeds(MaxReadFileBytes)
 	}
 	return data, nil
 }
 
 // WriteFile creates or truncates a file (fails on read-only mounts).
+// Prefer provider PutFile (single Put / write) when available.
 func (m *MountSession) WriteFile(ctx context.Context, virtualPath string, data []byte) error {
+	return m.writeContents(ctx, virtualPath, bytes.NewReader(data), int64(len(data)))
+}
+
+// writeContents writes exactly size bytes from r to virtualPath.
+func (m *MountSession) writeContents(ctx context.Context, virtualPath string, r io.Reader, size int64) error {
+	if size < 0 || size > int64(MaxReadFileBytes) {
+		return errFileExceeds(MaxReadFileBytes)
+	}
 	p, rel, err := m.at(ctx, virtualPath, true)
 	if err != nil {
 		return err
+	}
+	if putter, ok := p.(filePutter); ok {
+		return putter.PutFile(ctx, rel, r, size)
 	}
 	f, err := p.OpenFile(ctx, rel, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	_, err = f.Write(data)
-	return err
+	if size == 0 {
+		return nil
+	}
+	n, err := io.Copy(f, io.LimitReader(r, size))
+	if err != nil {
+		return err
+	}
+	if n != size {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
 }
 
 // ReadDir lists a directory.

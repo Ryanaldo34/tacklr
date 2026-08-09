@@ -34,6 +34,8 @@ Context should serve the **current task**, not archive every token the model has
 
 Unscoped tools and unbounded environments are how agents cause damage. Security is not a host afterthought. Tacklr’s direction is a **virtual execution environment and filesystem**: one controlled interface over the resources an agent may touch—object storage, local paths, and external drives—without the agent needing to know or escape that boundary. Scope is a property of the platform, not a line in the system prompt.
 
+Hosts wire mounts on a session-owned VFS; content is also available as a line-addressable **document IR** (read, edit lines, write back). See [Virtual filesystem (`vfs`)](docs/vfs.md).
+
 ### Cloud-native performance and operability
 
 Agents belong in infrastructure: durable state, horizontal scale, inspectable runs. Tacklr is built in Go with **checkpointed sessions**, pluggable stores, and a harness that does not assume a single process or a single client. The same core backs interactive products or fleets of workers without rewriting the loop—and without the ad-hoc process sprawl that tanks performance in looser stacks.
@@ -218,6 +220,7 @@ Optional OpenTelemetry on turns, tools, and retrieval. Bring your own collector 
 | Package | Role |
 |---------|------|
 | `tacklr` | Harness, tools, plan loop, subagents |
+| `vfs` | Virtual filesystem, mounts, content IR ([docs](docs/vfs.md)) |
 | `brain` | Knowledge engine |
 | `brain/helixgraph` | Optional graph adapter |
 | `inference` | OpenAI-compatible model client |

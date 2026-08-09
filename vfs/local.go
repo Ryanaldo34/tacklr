@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path"
@@ -85,6 +86,34 @@ func (p localProvider) OpenFile(ctx context.Context, name string, flag int, perm
 		return nil, mapOSError(err)
 	}
 	return &localFile{f: f}, nil
+}
+
+// PutFile writes a full file in one shot (used by MountSession.WriteFile).
+func (p localProvider) PutFile(ctx context.Context, name string, r io.Reader, size int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	host, err := p.hostPath(name)
+	if err != nil {
+		return err
+	}
+	// 0o644 matches prior WriteFile/OpenFile create mode for workspace files.
+	f, err := os.OpenFile(host, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644) //nolint:gosec // G302: agent workspace files are group/world-readable by design
+	if err != nil {
+		return mapOSError(err)
+	}
+	defer f.Close()
+	if size == 0 {
+		return nil
+	}
+	n, err := io.Copy(f, io.LimitReader(r, size))
+	if err != nil {
+		return mapOSError(err)
+	}
+	if n != size {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
 }
 
 // ReadDir implements Provider.

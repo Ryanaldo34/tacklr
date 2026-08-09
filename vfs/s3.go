@@ -140,6 +140,21 @@ func (p s3Provider) Stat(ctx context.Context, name string) (FileInfo, error) {
 	return FileInfo{Name: base, Mode: fs.ModeDir | 0o755, IsDir: true, ModTime: time.Now().UTC()}, nil
 }
 
+// PutFile writes a full object with one Put (no intermediate Open buffer).
+func (p s3Provider) PutFile(ctx context.Context, name string, r io.Reader, size int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	key, err := p.objectKey(name)
+	if err != nil {
+		return err
+	}
+	if key == "" {
+		return fmt.Errorf("vfs: cannot write mount root as file")
+	}
+	return p.api.Put(ctx, p.bucket, key, r, size)
+}
+
 // OpenFile implements Provider.
 func (p s3Provider) OpenFile(ctx context.Context, name string, flag int, perm fs.FileMode) (File, error) {
 	if err := ctx.Err(); err != nil {

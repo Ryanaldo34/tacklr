@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 
@@ -290,5 +291,165 @@ func TestMountSession_configErrors(t *testing.T) {
 	}
 	if err := reg.Register(nil); err == nil {
 		t.Fatal("register nil factory")
+	}
+}
+
+// bareDocument is a non-textual Document for write-back / AsTextual outcomes.
+type bareDocument struct{ path, mt string }
+
+func (b bareDocument) Path() string      { return b.path }
+func (b bareDocument) MediaType() string { return b.mt }
+
+// TestTextDocument_lines is pure IR: index, edit, join (no mount).
+func TestTextDocument_lines(t *testing.T) {
+	doc := vfs.NewTextDocument("/p", "text/plain", "utf-8", "a\nb\nc")
+	if doc.LineCount() != 3 {
+		t.Fatalf("count = %d", doc.LineCount())
+	}
+	line, err := doc.Line(2)
+	if err != nil || line != "b" {
+		t.Fatalf("Line(2) = %q err=%v", line, err)
+	}
+	part, err := doc.Lines(1, 3)
+	if err != nil || len(part) != 2 || part[0] != "a" || part[1] != "b" {
+		t.Fatalf("Lines(1,3) = %#v err=%v", part, err)
+	}
+	if _, err := doc.Line(0); !errors.Is(err, vfs.ErrLineOutOfRange) {
+		t.Fatalf("Line(0): %v", err)
+	}
+	if vfs.NewTextDocument("/e", "text/plain", "", "").LineCount() != 0 {
+		t.Fatal("empty LineCount")
+	}
+	if n := vfs.NewTextDocument("/t", "text/plain", "utf-8", "a\n").LineCount(); n != 2 {
+		t.Fatalf("trailing count = %d", n)
+	}
+	cr, _ := vfs.NewTextDocument("/c", "text/plain", "utf-8", "a\r\nb").Line(1)
+	if cr != "a\r" {
+		t.Fatalf("crlf = %q", cr)
+	}
+	if err := doc.SetLine(2, "B"); err != nil {
+		t.Fatal(err)
+	}
+	if err := doc.ReplaceLines(3, 4, []string{"C", "D"}); err != nil {
+		t.Fatal(err)
+	}
+	if doc.Text() != "a\nB\nC\nD" {
+		t.Fatalf("after edit = %q", doc.Text())
+	}
+	if err := doc.SetLine(1, "x\ny"); !errors.Is(err, vfs.ErrInvalidLine) {
+		t.Fatalf("newline in line: %v", err)
+	}
+	if s, err := vfs.FormatLines(doc, 1, 3); err != nil || s != "a\nB" {
+		t.Fatalf("FormatLines = %q err=%v", s, err)
+	}
+	if _, err := vfs.AsTextual(bareDocument{}); !errors.Is(err, vfs.ErrNotTextual) {
+		t.Fatalf("AsTextual: %v", err)
+	}
+}
+
+// TestDocument_session is the IR + I/O outcome test: mount, stream window, edit
+// write-back, codec reject, read-only (one session, no mocks).
+func TestDocument_session(t *testing.T) {
+	ctx := t.Context()
+	base := t.TempDir()
+	reg := vfs.NewBackendRegistry()
+	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
+		t.Fatal(err)
+	}
+	ms := vfs.NewMountSession("doc-sess", reg)
+	if err := ms.Materialize(ctx, []vfs.MountSpec{
+		{Point: "/work", Profile: "scratch"},
+		{Point: "/ro", Profile: "scratch", ReadOnly: true, Params: map[string]string{"subpath": "ro"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Stream window (no full IR)
+	var b strings.Builder
+	for i := 1; i <= 100; i++ {
+		b.WriteString("L")
+		b.WriteString(strconv.Itoa(i))
+		b.WriteByte('\n')
+	}
+	if err := ms.WriteFile(ctx, "/work/big.txt", []byte(b.String())); err != nil {
+		t.Fatal(err)
+	}
+	part, err := ms.ReadLines(ctx, "/work/big.txt", 10, 13)
+	if err != nil || len(part) != 3 || part[0] != "L10" || part[2] != "L12" {
+		t.Fatalf("ReadLines = %#v err=%v", part, err)
+	}
+	if empty, err := ms.ReadLines(ctx, "/work/big.txt", 1, 1); err != nil || len(empty) != 0 {
+		t.Fatalf("ReadLines empty = %#v err=%v", empty, err)
+	}
+	if _, err := ms.ReadLines(ctx, "/work/big.txt", 200, 201); !errors.Is(err, vfs.ErrLineOutOfRange) {
+		t.Fatalf("ReadLines OOR: %v", err)
+	}
+
+	// Full IR edit + write-back
+	if err := ms.WriteFile(ctx, "/work/note.txt", []byte("a\nb\nc\n")); err != nil {
+		t.Fatal(err)
+	}
+	text, err := ms.ReadText(ctx, "/work/note.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text.MediaType() != "text/plain" || text.LineCount() != 4 {
+		t.Fatalf("open: mt=%q count=%d", text.MediaType(), text.LineCount())
+	}
+	if err := text.SetLine(2, "B"); err != nil {
+		t.Fatal(err)
+	}
+	if err := text.ReplaceLines(3, 4, []string{"C", "D"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.WriteDocument(ctx, text); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := ms.ReadFile(ctx, "/work/note.txt")
+	if err != nil || string(raw) != "a\nB\nC\nD\n" {
+		t.Fatalf("after write = %q err=%v", raw, err)
+	}
+	if again, err := ms.ReadText(ctx, "/work/note.txt"); err != nil || again.Text() != "a\nB\nC\nD\n" {
+		t.Fatalf("reopen err=%v", err)
+	}
+
+	// Extension routing + rejects
+	if err := ms.WriteFile(ctx, "/work/main.go", []byte("package main\n")); err != nil {
+		t.Fatal(err)
+	}
+	if goDoc, err := ms.ReadText(ctx, "/work/main.go"); err != nil || goDoc.MediaType() != "text/x-go" {
+		t.Fatalf("go: %v", err)
+	}
+	png := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0, 0, 0, 0}
+	if err := ms.WriteFile(ctx, "/work/pic.bin", png); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ms.OpenDocument(ctx, "/work/pic.bin", nil); !errors.Is(err, vfs.ErrNoCodec) {
+		t.Fatalf("binary: %v", err)
+	}
+	if err := ms.WriteFile(ctx, "/work/bad.txt", []byte{0xff, 0xfe, 0xfd}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ms.OpenDocument(ctx, "/work/bad.txt", nil); !errors.Is(err, vfs.ErrInvalidUTF8) {
+		t.Fatalf("utf8: %v", err)
+	}
+
+	// Read-only + non-textual write-back
+	if err := os.MkdirAll(filepath.Join(base, "ro"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(base, "ro", "f.txt"), []byte("seed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ro, err := ms.ReadText(ctx, "/ro/f.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = ro.SetLine(1, "changed")
+	if err := ms.WriteDocument(ctx, ro); !errors.Is(err, vfs.ErrReadOnly) {
+		t.Fatalf("ro write: %v", err)
+	}
+	if err := ms.WriteDocument(ctx, bareDocument{path: "/work/x", mt: "x"}); !errors.Is(err, vfs.ErrNotTextual) {
+		t.Fatalf("bare write: %v", err)
 	}
 }

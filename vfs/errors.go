@@ -15,6 +15,15 @@ var (
 	ErrNotExist        = errors.New("vfs: not found")
 	ErrExist           = errors.New("vfs: already exists")
 
+	// Content IR
+	ErrNoCodec        = errors.New("vfs: no codec for media type")
+	ErrNotTextual     = errors.New("vfs: not a textual document")
+	ErrLineOutOfRange = errors.New("vfs: line out of range")
+	ErrInvalidUTF8    = errors.New("vfs: invalid utf-8")
+	ErrInvalidLine    = errors.New("vfs: line contains newline")
+	ErrLineTooLong    = errors.New("vfs: line too long")
+	ErrTooLarge       = errors.New("vfs: file too large")
+
 	errRegistryRequired = errors.New("vfs: registry required")
 	errNilMountSession  = errors.New("vfs: nil mount session")
 )
