@@ -6,7 +6,7 @@
 [![Go Version](https://img.shields.io/github/go-mod/go-version/Ryanaldo34/tacklr)](https://github.com/Ryanaldo34/tacklr/blob/main/go.mod)
 [![License](https://img.shields.io/github/license/Ryanaldo34/tacklr)](https://github.com/Ryanaldo34/tacklr/blob/main/LICENSE)
 
-**A Go framework for running AI agents in real products** — not a one-off chat demo.
+**Open-source agent harness for Go.** Tacklr is a framework, not a toolbox of optional helpers. It defines how agents should run—how work is planned, how context is structured, how tools execute under scope, and how state survives—so agents stay efficient, secure, and operable.
 
 ```bash
 go get github.com/ryanaldo34/tacklr
@@ -14,80 +14,88 @@ go get github.com/ryanaldo34/tacklr
 
 ---
 
-## What problem does it solve?
+## Why Tacklr exists
 
-Most agent demos look like this:
+Most agent harnesses share the same weaknesses.
 
-1. Send the whole chat history to the model  
-2. Call tools  
-3. Append more messages  
-4. Repeat until the context window is full, then “summarize everything”
+They **struggle to structure context**. History piles up; when the window fills, the answer is usually a blunt summarize-or-trim pass that loses the thread of the task. They are **not token-efficient**: every turn re-pays for noise that no longer matters. They are **not secure by construction**—access control is left to prompts, host glue, or hope. They often **perform poorly** under real load because the loop, state, and I/O were never designed as infrastructure. And they are **sloppily architected**: model code, tool code, and product code tangled together, hard to test and harder to operate.
 
-That wastes tokens, confuses the model with old noise, and is hard to run in editors, APIs, or long-lived services.
-
-**Tacklr is opinionated about the agent loop:**
-
-| Problem | What Tacklr does |
-|---------|------------------|
-| Context fills with junk | Keeps a **plan** and **todos**; when a step finishes, it builds a **handoff** (clean context for the next step) |
-| Tools and models mixed into one blob | **Clear layers**: model I/O, agent loop, client protocol |
-| Hard to cancel or ask the user a question | **Turns**, **cancel**, and **interrupts** (pause for input, then resume) |
-| State dies when the process exits | **Checkpoints** you can save and reload |
-| Wiring into IDEs / HTTP | Same registry over **ACP** (e.g. Zed) or **SSE** |
-| Naive RAG dumps stale chunks into the window | Optional **knowledge base (brain)**: temporal + graph retrieval, dual-store design, agent tools only when wired |
-
-It is a **framework** (it defines how agents *should* run), not a loose bag of helpers.
+Tacklr exists to fix that class of problem. An agent is a **system** you run—with explicit planning, deliberate context handoffs, security as a platform concern, and a clean separation between model I/O, the turn loop, storage, and knowledge—not a chat transcript you hope finishes well.
 
 ---
 
-## How it works (big picture)
+## Ethos
 
-Think of three layers:
+### Structured context and token efficiency
+
+Context should serve the **current task**, not archive every token the model has ever seen. Tacklr drives work through **plans and todos**. When a step completes, the harness performs a **handoff**: it rebuilds a focused context for what comes next. Irrelevant history does not keep a permanent seat in the window. That is how you preserve quality and keep spend predictable.
+
+### Security baked in
+
+Unscoped tools and unbounded environments are how agents cause damage. Security is not a host afterthought. Tacklr’s direction is a **virtual execution environment and filesystem**: one controlled interface over the resources an agent may touch—object storage, local paths, and external drives—without the agent needing to know or escape that boundary. Scope is a property of the platform, not a line in the system prompt.
+
+### Cloud-native performance and operability
+
+Agents belong in infrastructure: durable state, horizontal scale, inspectable runs. Tacklr is built in Go with **checkpointed sessions**, pluggable stores, and a harness that does not assume a single process or a single client. The same core backs interactive products or fleets of workers without rewriting the loop—and without the ad-hoc process sprawl that tanks performance in looser stacks.
+
+### Determinism where it matters
+
+Language models are probabilistic; the harness around them does not have to be. Tacklr separates model I/O from the turn loop, uses explicit tool results and plan effects, and persists **checkpoints** (conversation, plan, interrupts, knowledge scope) so runs resume instead of improvising after a crash. Clear architecture makes behavior testable, observable, and operable.
+
+### Knowledge that stays alive
+
+Static RAG dumps age in the window. Tacklr’s optional **brain** is a host-owned knowledge engine: hybrid and graph-aware retrieval, dual-store design, and tools that appear only when an engine is wired. Memory is queried when needed—not frozen forever as transcript sludge.
+
+---
+
+## What you can build
+
+With the harness as the center of gravity:
+
+- **Operators** that plan multi-step work, complete todos, and hand off cleanly between stages  
+- **Product agents** with typed tools, user interrupts (ask and wait), cancel, and resume  
+- **Long-lived sessions** restored from checkpoints after restart or redeploy  
+- **Multi-agent systems** via a registry of agent specs sharing infrastructure  
+- **Knowledge-backed agents** when you attach a brain engine (search, expand, save structured memory)  
+- **Observable systems** with optional OpenTelemetry on turns, tools, and retrieval  
+
+You bring the model endpoint, business tools, and hosting. Tacklr owns the loop structure.
+
+---
+
+## How the framework is shaped
 
 ```text
-  Your model API (OpenAI-compatible, Azure, …)
+  Model (OpenAI-compatible inference strategy)
             │
-            ▼  tokens / tool calls from the model
+            ▼
      ┌──────────────┐
-     │   harness    │  the agent loop: tools, plan, handoff, cancel
+     │   harness    │  turns · tools · plan · handoff · checkpoints
      │   (tacklr)   │
      └──────┬───────┘
-            ▼  StreamEvent (shared event types)
+            ▼  stream events
      ┌──────────────┐
-     │    server    │  Registry + protocol (ACP, SSE, …)
+     │  host layer  │  your product, workers, or protocol adapters
      └──────────────┘
-            │
-            ▼  editor / HTTP client
 ```
 
-1. **Inference** — talks to the model only (parse the stream into chunks).  
-2. **Harness** — owns the turn: tools, plan builtins, context, save/load.  
-3. **Server** — maps that to a client protocol (stdio ACP, SSE, …).
+| Piece | Role |
+|-------|------|
+| **Inference strategy** | Talks to the model only; parses the stream |
+| **Harness** | Owns a turn: tools, plan builtins, context, save/load |
+| **Store** | Persists checkpoints across process boundaries |
+| **Brain (optional)** | Knowledge engine and related tools |
+| **Registry (optional)** | Multi-agent hosting and protocol-facing wiring |
 
-You can use the **harness alone** in a Go program, or put a **registry** in front for multi-agent HTTP/ACP.
-
-### One turn
-
-A **turn** is one user prompt (or one resume after an interrupt) until the agent finishes, errors, or waits for the user:
-
-```text
-User prompt
-    → model may call tools (search, create_plan, complete_todo, …)
-    → results go back into context
-    → model continues until done / interrupt / cancel
-```
-
-Built-in plan tools drive a simple lifecycle:
+A **turn** is one prompt (or resume after interrupt) until completion, error, cancel, or a deliberate wait for the user. Planning follows a simple lifecycle:
 
 ```text
-create_plan  →  do work with tools  →  complete_todo  →  handoff  →  next work
+create_plan → execute with tools → complete_todo → handoff → next work
 ```
 
 ---
 
 ## Quick start
-
-### Minimal agent
 
 ```go
 package main
@@ -108,7 +116,7 @@ func main() {
 	ctx := context.Background()
 
 	model := inference.NewOpenAIInferenceStrategy(&http.Client{Timeout: 2 * time.Minute})
-	model.WithURL(os.Getenv("OPENAI_BASE_URL")). // e.g. https://api.openai.com/v1
+	model.WithURL(os.Getenv("OPENAI_BASE_URL")).
 		WithApiKey(os.Getenv("OPENAI_API_KEY")).
 		WithModel(os.Getenv("OPENAI_MODEL"))
 
@@ -122,7 +130,7 @@ func main() {
 	})
 	defer agent.Close()
 
-	events, err := agent.Run(ctx, "Say hello in one short sentence.")
+	events, err := agent.Run(ctx, "Outline three steps to organize a weekly operations review.")
 	if err != nil {
 		panic(err)
 	}
@@ -139,9 +147,9 @@ func main() {
 }
 ```
 
-### Your own tool
+### Tools
 
-Tools are normal Go functions. Optional `HarnessRuntime` is for **your** state, progress pings, and interrupts — not for changing the framework plan.
+Tools are ordinary Go functions. Optional `HarnessRuntime` supports host state, progress updates, and interrupts—not direct mutation of the plan store.
 
 ```go
 type SearchArgs struct {
@@ -150,298 +158,58 @@ type SearchArgs struct {
 }
 
 tool := tacklr.NewTool(tacklr.ToolConfig{
-	Name:        "search_web",
-	Description: "Search the web for information.",
+	Name:        "search_records",
+	Description: "Search operational records.",
 	Handler: func(ctx context.Context, args SearchArgs, rt tacklr.HarnessRuntime) (string, error) {
-		// rt.StateGet / StateSet  — small DI bag for your tool
-		// rt.EmitUpdate(...)      — progress to the client
-		// rt.RaiseInterrupt(...)  — ask the user and wait
 		return doSearch(ctx, args.Query, args.Limit)
 	},
 })
 ```
 
-Handler shapes supported: with or without args, with or without `HarnessRuntime`. JSON schema comes from struct tags (`json`, `desc`, `enum`).
-
-### Serve over ACP or SSE
-
-Two stores matter for ACP:
-
-| Store | Role |
-|-------|------|
-| `stores.BaseStore` on the **Registry** | Agent harness checkpoints (conversation, plan, tools) |
-| `server.ProtocolWireStore` on the **ACP protocol** | Wire session envelope (`session/new` / `session/load`: cwd, mcp, config) |
-
-You can implement either interface against your own DB (Redis, SQLite, `database/sql`, …). Built-in Postgres helpers use `*pgx.Conn`.
-
-**Short-hand (recommended):**
+### Sessions
 
 ```go
-store := stores.NewInMemoryStore() // or stores.NewPostgresStore(conn)
-reg := server.NewRegistry(store, "my-agent")
-reg.Register("my-agent", server.AgentSpec{
-	Name: "Demo",
-	Config: tacklr.Config{
-		MaxWindowSize: 8192,
-		SystemPrompt:  "You are a helpful assistant.",
-	},
-	Model: model,
-	Tools: []*tacklr.Tool{tool},
-})
-
-// In-process ACP (memory wire store) — one line
-srv := server.NewACPServer(reg)
-
-// Editor / stdio (Zed, etc.)
-_ = srv.ServeStdio(ctx, os.Stdin, os.Stdout)
-
-// HTTP: WebSocket + Streamable HTTP on /acp
-// _ = srv.ServeHTTP(ctx, ":8080")
-//   ws://localhost:8080/acp
-//   POST/GET/DELETE https://localhost:8080/acp  (HTTP/2 recommended for Streamable)
+agent := tacklr.NewAgent(ctx, opts)
+agent, err := tacklr.NewAgentFromSession(ctx, sessionID, opts)
 ```
 
-**Durable wire sessions (Postgres, same connection as harness is fine):**
+Checkpoints include the conversation window, plan, tool and user state, and pending interrupts. Use an in-memory store for ephemeral runs or Postgres for durable ones.
 
-```go
-// harness + wire schemas are separate tables on the same *pgx.Conn
-harness := stores.NewPostgresStore(conn)
-reg := server.NewRegistry(harness, "my-agent")
-// reg.Register(...)
-srv := server.NewACPServerPostgres(reg, conn)
-```
+### Host tools vs plan system
 
-**Custom wire store or multi-protocol:**
+| | Your tools | Plan builtins |
+|--|------------|----------------|
+| API | `HarnessRuntime` | Internal session (not exposed on host tools) |
+| May | State, interrupts, progress | Plan document and todos |
+| May not | Rewrite the plan store | — |
 
-```go
-// Your ProtocolWireStore (Redis, etc.)
-srv := server.NewACPServerWithWire(reg, myWireStore)
-
-// ACP + SSE on one server
-srv = server.NewServer(reg, server.NewACPProtocolMemory(), server.SSE)
-
-// Explicit Postgres protocol only
-srv = server.NewServer(reg, server.NewACPProtocolPostgres(conn))
-```
-
-| Helper | Meaning |
-|--------|---------|
-| `NewACPServer(reg)` | ACP + memory wire store |
-| `NewACPServerWithWire(reg, wire)` | ACP + your `ProtocolWireStore` |
-| `NewACPServerPostgres(reg, conn)` | ACP + Postgres wire store (`*pgx.Conn`) |
-| `NewACPProtocolMemory()` | Protocol only (compose with `NewServer`) |
-| `NewACPProtocolPostgres(conn)` | Protocol only, Postgres wire |
-
-Or native HTTP + SSE (non-ACP wire):
-
-```go
-srv := server.NewServer(reg, server.SSE)
-_ = srv.ServeHTTP(ctx, ":8080")
-```
-
-```bash
-# SSE prompt (native SSE protocol, not ACP)
-curl -N -X POST http://localhost:8080/ \
-  -H "Accept: text/event-stream" \
-  -d '{"agent_id":"my-agent","prompt":"Hello"}'
-```
-
-### Try the test server
-
-`cmd/testserver` is a harness **showcase**: no toy host tools. The agent only gets Tacklr builtins (`create_plan`, `list_plan`, `edit_plan`, `complete_todo`, `ask_user_choice`, and `web_search` when `EXA_API_KEY` is set), plus optional skills via `SKILL_DIRECTORIES`.
-
-By default it exports OTLP traces/metrics/logs to **`localhost:4317` (gRPC)** with `service.name=tacklr-testserver` when a collector is listening. Override with `OTEL_*` env vars, or set `OTEL_SDK_DISABLED=true` to turn exporters off.
-
-```bash
-# .env: OPENAI_BASE_URL, OPENAI_API_KEY, OPENAI_MODEL
-# optional: EXA_API_KEY, SKILL_DIRECTORIES, MAX_WINDOW_SIZE, OTEL_*
-go build -o bin/testserver ./cmd/testserver
-./bin/testserver --stdio   # ACP stdio (Zed, etc.)
-./bin/testserver           # HTTP ACP on PORT or :3000
-#   WebSocket:        ws://localhost:3000/acp
-#   Streamable HTTP:  POST/GET/DELETE http://localhost:3000/acp
-#   Legacy unary:     POST http://localhost:3000/
-# or: make testserver
-```
+That boundary keeps product logic from accidentally breaking planning.
 
 ---
 
-## Core ideas (a bit more detail)
+## Capabilities you can wire in
 
-### Plans and handoffs
+- **Planning** — `create_plan`, `list_plan`, `edit_plan`, `complete_todo` with install and handoff effects  
+- **Interrupts** — pause a tool for structured user input, then resume the turn  
+- **MCP** — attach external tool servers via config  
+- **Skills** — load `SKILL.md` catalogs (directories or object storage loaders)  
+- **Web** — optional search/fetch when an Exa API key is configured  
+- **Brain** — knowledge tools when `AgentOptions.Brain` is set  
 
-The agent is pushed to work from a **plan document** and a **todo list** (built-in tools: `create_plan`, `list_plan`, `edit_plan`, `complete_todo`).
+### Knowledge (brain)
 
-- After **create_plan**, context is tightened around the user goal + plan.  
-- After **complete_todo** (or a real plan-text edit), Tacklr runs a **handoff**: a short, structured carry-over for the next step instead of dumping the entire chat again.
+Not “paste the last N chunks into context.” The brain is a host-owned engine:
 
-That is the main “better context” idea in the project.
+- **Postgres** as source of truth for objects, hybrid search, filters, soft-delete  
+- **Optional graph backend** for entities and links  
+- **Namespaces** for isolation  
+- Tools such as `search`, `read`, `expand`, `find_objects`, and `find_links` when capabilities allow  
 
-### Sessions and checkpoints
+See package docs: [`brain`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/brain).
 
-```go
-agent := tacklr.NewAgent(ctx, opts)                      // new
-agent, err := tacklr.NewAgentFromSession(ctx, id, opts) // restore
-```
+### Observability
 
-On save, a **Checkpointer** packages conversation window, plan, tool/user state, and pending interrupts. A **store** (in-memory or Postgres) persists it.
-
-### Tools vs framework state
-
-| | **Your tools** | **Built-in plan tools** |
-|--|----------------|-------------------------|
-| API | `HarnessRuntime` | Internal session manager (not passed to you) |
-| Can | State, interrupts, progress, store | Create/edit plan, complete todos |
-| Cannot | Rewrite the plan store directly | — |
-
-This keeps product tools from breaking the planning system by accident.
-
-### MCP, skills, and web search
-
-- **MCP** — pass `MCPConfigs` on the agent (or via ACP session); tools are discovered and run for you.  
-- **Skills** — set `Config.SkillDirectories` to folders of `SKILL.md` (default `skills.DirectoryLoader`). Inject a source-bound `AgentOptions.SkillsLoader` for object storage, including `skills.S3Loader` and `skills.BlobLoader`. A short catalog lands in the system prompt; full text loads via `read_skill` when needed.
-- **Web search (Exa)** — when `EXA_API_KEY` is set in the environment (or `AgentOptions.ExaAPIKey`), the harness injects a built-in `web_search` tool (read access, token-efficient **highlights** by default). Hosts that use `.env` should load it before `NewAgent` (the test server already does). No Exa Go SDK; the harness calls Exa’s REST API.
-- **Knowledge base (brain)** — optional; see [Knowledge base (brain)](#knowledge-base-brain) below.
-
-### Public harness surface
-
-`AgentHarness` fields are unexported. Hosts use:
-
-- `NewAgent` / `NewAgentFromSession` + `AgentOptions` (model, store, tools, MCP, skills, interceptors, hooks, optional `Brain`)
-- `SessionID()` / `BindSessionID` (registry thread binding)
-- `ToolRuntime()` for interrupt helpers that need `*HarnessRuntime`
-- `Messages()` / `RestoreMessages` for the conversation window
-- `Run` / `ReturnFromInterrupt` / `Close`
-
-Plan builtins return typed `BuiltinResult` effects (install plan, handoff) instead of name-keyed hooks.
-
-### Knowledge base (brain)
-
-Tacklr’s knowledge package is **not** “stuff the last N chunks into context.” It is a host-owned retrieval engine with:
-
-- **Postgres** as the source of truth for full objects, parts/chunks, BM25 + dense hybrid search, filters, soft-delete, and containment (`parent_id`)
-- **Helix** (optional graph backend) for first-class **entity** nodes and cross-object edges (not chunks)—text/vector indexes, topology, edge metadata
-- **Dual-write** on parent `Put` / `SoftDelete` / `Link` so graph nodes stay live with the store
-- **Scope** (namespace) on every hydrate so multi-tenant isolation is engine-enforced
-
-Hosts build an `Engine`, then attach it on the agent. The harness registers knowledge tools only when the engine is set; capability-gated tools appear only when the graph backend supports them.
-
-#### Boot sketch
-
-```go
-import (
-	"github.com/ryanaldo34/tacklr"
-	"github.com/ryanaldo34/tacklr/brain"
-	"github.com/ryanaldo34/tacklr/brain/helixgraph"
-	"github.com/ryanaldo34/tacklr/telemetry"
-)
-
-// store: brain.NewPostgresStore(pool) in production, or brain.NewMemoryStore() in tests.
-store, err := brain.NewPostgresStore(pool)
-if err != nil { /* … */ }
-
-g, err := helixgraph.New(helixURL) // optional graph backend
-if err != nil { /* … */ }
-// Required for find_objects on Helix. Prefer true when the image supports tenant indexes.
-if err := g.Bootstrap(ctx, false); err != nil { /* … */ }
-// Required per relation label before find_links can search edge notes on Helix.
-for _, rel := range []string{"about", "has_buyer", "references"} {
-	if err := g.EnsureEdgeTextIndex(ctx, rel); err != nil { /* … */ }
-}
-
-eng, err := brain.NewEngine(store,
-	brain.WithEmbedder(emb),                    // optional dense channel
-	brain.WithGraph(g),                         // MemoryGraph also implements searchers
-	brain.WithObserver(telemetry.NewBrainObserver()), // optional OTEL
-	// brain.WithExpandRecipes(...),            // optional named ExpandRequest templates
-	// brain.WithReranker(...),                 // optional post-hydrate host scoring
-)
-if err != nil { /* … */ }
-if err := eng.ApplyKinds(ctx, kindSpecs...); err != nil { /* … */ }
-
-agent := tacklr.NewAgent(ctx, tacklr.AgentOptions{
-	// … Model, Store, Config …
-	Brain: eng,
-	BrainWriteKinds: brain.WriteKinds{
-		Discovery: "Discovery", // non-empty → save_discovery tool
-		Fact:      "Fact",
-		Memory:    "Memory",
-	},
-	SearchNamespace: &tenantNS, // optional isolation (checkpointed)
-})
-```
-
-Offline / tests: `brain.NewMemoryStore()` + `brain.NewMemoryGraph()` need no Bootstrap; edge text search works in-process.
-
-#### Agent tools (capability matrix)
-
-| Tool | When registered |
-|------|-----------------|
-| `schema`, `read`, `search`, `find_exact`, `continue`, `expand` | `AgentOptions.Brain != nil` |
-| `find_objects` | graph implements object text/vector search **and** is ready (`Bootstrap` on Helix) |
-| `find_links` | graph implements edge text search (Helix after `EnsureEdgeTextIndex` for that label) |
-| `link` | graph implements `GraphWriter` |
-| `save_discovery` / `save_fact` / `save_memory` | corresponding `BrainWriteKinds` field is non-empty |
-
-`expand` supports multi-hop (`max_hops`), direction (`out` / `in` / `both`), and mixed containment + graph labels. Large result sets page via `continue`.
-
-#### Host GraphRAG composition (not agent tools)
-
-Hosts can orchestrate the same path product code uses:
-
-```text
-find_objects / search → LandingIDs / LandingIDsFromPage
-  → Expand / ExpandMany / ExpandByRecipe
-  → optional FindLinks
-  → search(scope_ids=…) for neighborhood corpus
-  → optional Reranker / SortRichObjects
-```
-
-`LandingIDs` promotes part hits to first-class parent ids so expand/link always target dual-written entities. See package docs: [`brain`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/brain).
-
-#### Observability
-
-With `brain.WithObserver(telemetry.NewBrainObserver())`, retrieval ops emit `tacklr.brain` spans/metrics: `search`, `find_exact`, `find_objects`, `find_links`, `continue`, `expand`, `expand_many` (closed enum; degrade modes include lexical-only and containment-only).
-
----
-
-## Observability (optional)
-
-Tacklr can emit **traces** and **metrics** with OpenTelemetry. You bring the backend (Grafana Alloy/Collector, Tempo, Prometheus/Mimir, etc.). Logs are normal **slog**; use `telemetry.NewLogger` if you want `trace_id` / `span_id` on log lines for Grafana/Loki.
-
-**Simple process** (one OTLP endpoint for traces + metrics):
-
-```go
-shutdown, err := telemetry.Init(ctx, telemetry.Config{
-	ServiceName:  "my-agent",
-	OTLPEndpoint: "localhost:4317", // Alloy / collector
-	Insecure:     true,
-})
-defer shutdown(ctx)
-// then NewRegistry / NewAgent — globals are used by default
-```
-
-**Library host** (you already own OTEL):
-
-```go
-reg := server.NewRegistry(store, "my-agent",
-	server.WithTracerProvider(myTP),
-	server.WithMeterProvider(myMP),
-)
-```
-
-**Prometheus scrape** (you own `/metrics`):
-
-```go
-promReg := prometheus.NewRegistry()
-mp, _ := telemetry.MeterProviderFromPrometheusRegisterer(promReg, "my-agent", "")
-reg := server.NewRegistry(store, "my-agent", server.WithMeterProvider(mp))
-// http.Handle("/metrics", promhttp.HandlerFor(promReg, ...))
-```
-
-With no endpoint and no injection, traces and metrics are no-ops. Prompt/tool **content** is not attached by default.
-
-OTLP is the export path for traces, metrics, and logs. Point any collector (or vendor backend) at `OTEL_EXPORTER_OTLP_ENDPOINT`. slog can dual-write to stderr and OTLP via `telemetry.InstallDefaultWithOTLP`.
+Optional OpenTelemetry on turns, tools, and retrieval. Bring your own collector or inject tracer/meter providers. With nothing configured, telemetry is a no-op.
 
 ---
 
@@ -449,18 +217,17 @@ OTLP is the export path for traces, metrics, and logs. Point any collector (or v
 
 | Package | Role |
 |---------|------|
-| `tacklr` | Agent harness, tools, plan loop, subagents |
-| `brain` | Knowledge engine: store, expand, find_objects, kinds, dual-write |
-| `brain/helixgraph` | HelixDB adapter (`WithGraph`); Bootstrap + edge text indexes |
+| `tacklr` | Harness, tools, plan loop, subagents |
+| `brain` | Knowledge engine |
+| `brain/helixgraph` | Optional graph adapter |
 | `inference` | OpenAI-compatible model client |
-| `server` | Registry + ACP / SSE |
+| `server` | Multi-agent registry and protocol adapters |
 | `stores` | Session checkpoints |
-| `interrupt` | Interrupt types and registry for tool pause/resume |
-| `streaming` | Shared message/event types |
-| `mcp` | MCP config types (public) |
-| `skills` | `SKILL.md` loading (`SkillLoader` injectable; includes `S3Loader` / `BlobLoader`) |
-| `telemetry` | OTEL init, metrics helpers, brain observer, log correlation |
-| `internal/session` | Session manager, plan store, checkpointer, tool runtime |
+| `interrupt` | Pause/resume types |
+| `streaming` | Shared messages and events |
+| `mcp` | MCP config types |
+| `skills` | Skill loading |
+| `telemetry` | OTEL helpers |
 
 ---
 
@@ -471,27 +238,7 @@ make test
 make vet
 ```
 
-### Agent harness benchmarks
-
-Multi-turn scenarios (plan, memory/brain, multi-hop QA, domain end-state, optional web) live in `internal/agentbench` with **seed data in Go**. Runner:
-
-```bash
-# List cases (no model)
-go run ./cmd/agent-bench -list
-go run ./cmd/agent-bench -dry-run
-
-# Live run (same env as testserver)
-export OPENAI_BASE_URL OPENAI_API_KEY OPENAI_MODEL
-# hybrid dense channel (default text-embedding-3-small; same base URL/key)
-export OPENAI_EMBEDDING_MODEL=text-embedding-3-small
-# optional: EXA_API_KEY for web_augmented
-go run ./cmd/agent-bench -suite all -out /tmp/agent-bench.json
-# lexical-only ablation: go run ./cmd/agent-bench -lexical-only ...
-```
-
-Brain is seeded and agent saves with **hybrid search** (BM25-style lexical + dense embeddings via OpenAI-compatible `/embeddings`). Not run in default CI (model cost). Cases are industry-aligned (LoCoMo-style memory, multi-hop QA, τ-bench-style domain), not official leaderboard ports.
-
-Contribution rules and design ethos live in [`AGENTS.md`](AGENTS.md).
+Contribution rules: [`AGENTS.md`](AGENTS.md).
 
 ---
 
