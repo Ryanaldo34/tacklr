@@ -9,8 +9,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/ryanaldo34/tacklr/internal/session"
-
 	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/streaming"
@@ -121,7 +119,7 @@ func TestSpawnWorker_emptyTask(t *testing.T) {
 			{WorkerName: "researcher", Model: workerModel},
 		},
 	})
-	_, err := h.runWorker(context.Background(), "researcher", "   ", h.runtime)
+	_, err := h.runWorker(context.Background(), "researcher", "   ", turnRuntime(h))
 	if !errors.Is(err, ErrEmptyWorkerTask) {
 		t.Fatalf("err = %v, want ErrEmptyWorkerTask", err)
 	}
@@ -212,9 +210,9 @@ func TestSpawnWorker_streamError(t *testing.T) {
 		},
 	})
 	out := make(chan StreamEvent, 16)
-	session.SetOutputChannel(&h.runtime, out)
+	rt := turnRuntimeWithOut(h, out)
 
-	_, err := h.runWorker(context.Background(), "researcher", "do work", h.runtime)
+	_, err := h.runWorker(context.Background(), "researcher", "do work", rt)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -241,9 +239,9 @@ func TestSpawnWorker_noOutput(t *testing.T) {
 		},
 	})
 	out := make(chan StreamEvent, 16)
-	session.SetOutputChannel(&h.runtime, out)
+	rt := turnRuntimeWithOut(h, out)
 
-	_, err := h.runWorker(context.Background(), "researcher", "do work", h.runtime)
+	_, err := h.runWorker(context.Background(), "researcher", "do work", rt)
 	if !errors.Is(err, ErrWorkerNoOutput) {
 		t.Fatalf("err = %v, want ErrWorkerNoOutput", err)
 	}
@@ -263,12 +261,12 @@ func TestSpawnWorker_contextCancel(t *testing.T) {
 		},
 	})
 	out := make(chan StreamEvent, 16)
-	session.SetOutputChannel(&h.runtime, out)
+	rt := turnRuntimeWithOut(h, out)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err := h.runWorker(ctx, "researcher", "do work", h.runtime)
+	_, err := h.runWorker(ctx, "researcher", "do work", rt)
 	if err == nil {
 		t.Fatal("expected error on cancel")
 	}
@@ -659,9 +657,9 @@ func TestSpawnWorker_toolsSliceIsolation(t *testing.T) {
 		},
 	})
 	out := make(chan StreamEvent, 16)
-	session.SetOutputChannel(&h.runtime, out)
+	rt := turnRuntimeWithOut(h, out)
 
-	result, err := h.runWorker(context.Background(), "researcher", "isolate tools", h.runtime)
+	result, err := h.runWorker(context.Background(), "researcher", "isolate tools", rt)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -76,7 +76,7 @@ func TestBrainTools_saveDiscoveryAndLink(t *testing.T) {
 		t.Fatal("find_objects must be omitted without object searcher")
 	}
 
-	out, err := saveDisc.invoke(ctx, `{"title":"finding","content":"learned X"}`, h.runtime)
+	out, err := saveDisc.invoke(ctx, `{"title":"finding","content":"learned X"}`, turnRuntime(h))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +88,7 @@ func TestBrainTools_saveDiscoveryAndLink(t *testing.T) {
 		t.Fatalf("discovery: %+v", a)
 	}
 
-	fout, err := findObj.invoke(ctx, `{"query":"finding","kinds":["Discovery"],"limit":5}`, h.runtime)
+	fout, err := findObj.invoke(ctx, `{"query":"finding","kinds":["Discovery"],"limit":5}`, turnRuntime(h))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestBrainTools_saveDiscoveryAndLink(t *testing.T) {
 		t.Fatalf("find_objects should return saved discovery: %s", fout.output)
 	}
 
-	out2, err := saveFact.invoke(ctx, `{"title":"fact-a","content":"true claim"}`, h.runtime)
+	out2, err := saveFact.invoke(ctx, `{"title":"fact-a","content":"true claim"}`, turnRuntime(h))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestBrainTools_saveDiscoveryAndLink(t *testing.T) {
 	}
 
 	// Update discovery
-	out3, err := saveDisc.invoke(ctx, `{"object_id":"`+a.ID.String()+`","title":"finding-v2","content":"updated"}`, h.runtime)
+	out3, err := saveDisc.invoke(ctx, `{"object_id":"`+a.ID.String()+`","title":"finding-v2","content":"updated"}`, turnRuntime(h))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestBrainTools_saveDiscoveryAndLink(t *testing.T) {
 		"to_id":"`+b.ID.String()+`",
 		"relation_type":"references",
 		"evidence_id":"not-a-uuid"
-	}`, h.runtime); err == nil || !strings.Contains(err.Error(), "evidence_id") {
+	}`, turnRuntime(h)); err == nil || !strings.Contains(err.Error(), "evidence_id") {
 		t.Fatalf("invalid evidence_id: %v", err)
 	}
 	lout, err := linkTool.invoke(ctx, `{
@@ -136,7 +136,7 @@ func TestBrainTools_saveDiscoveryAndLink(t *testing.T) {
 		"role":"source",
 		"confidence":0.8,
 		"evidence_id":"`+a.ID.String()+`"
-	}`, h.runtime)
+	}`, turnRuntime(h))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +150,7 @@ func TestBrainTools_saveDiscoveryAndLink(t *testing.T) {
 	if expandTool == nil {
 		t.Fatal("expand required")
 	}
-	eout, err := expandTool.invoke(ctx, `{"object_id":"`+a.ID.String()+`","relation_types":["references"]}`, h.runtime)
+	eout, err := expandTool.invoke(ctx, `{"object_id":"`+a.ID.String()+`","relation_types":["references"]}`, turnRuntime(h))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +158,7 @@ func TestBrainTools_saveDiscoveryAndLink(t *testing.T) {
 		t.Fatalf("expand should return neighbor with note: %s", eout.output)
 	}
 	readTool := h.findTool("read", "")
-	rout, err := readTool.invoke(ctx, `{"object_id":"`+a.ID.String()+`"}`, h.runtime)
+	rout, err := readTool.invoke(ctx, `{"object_id":"`+a.ID.String()+`"}`, turnRuntime(h))
 	if err != nil || !strings.Contains(rout.output, "updated") {
 		t.Fatalf("read after save: %v %v", err, rout)
 	}
@@ -206,7 +206,7 @@ func TestBrainTools_hostNamespaceScopedRead(t *testing.T) {
 		t.Fatal("brain tools must be injected when Brain is configured")
 	}
 
-	out, err := readTool.invoke(ctx, `{"object_id":"`+docID.String()+`"}`, h.runtime)
+	out, err := readTool.invoke(ctx, `{"object_id":"`+docID.String()+`"}`, turnRuntime(h))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,13 +219,13 @@ func TestBrainTools_hostNamespaceScopedRead(t *testing.T) {
 	}
 
 	h.SetSearchNamespace(other)
-	_, err = readTool.invoke(ctx, `{"object_id":"`+docID.String()+`"}`, h.runtime)
+	_, err = readTool.invoke(ctx, `{"object_id":"`+docID.String()+`"}`, turnRuntime(h))
 	if err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("want not found under other namespace, got %v", err)
 	}
 
 	h.ClearSearchNamespace()
-	out, err = readTool.invoke(ctx, `{"object_id":"`+docID.String()+`"}`, h.runtime)
+	out, err = readTool.invoke(ctx, `{"object_id":"`+docID.String()+`"}`, turnRuntime(h))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,7 +233,7 @@ func TestBrainTools_hostNamespaceScopedRead(t *testing.T) {
 		t.Fatalf("cleared namespace read: %s", out.output)
 	}
 
-	sout, err := schemaTool.invoke(ctx, `{"kind":"Document"}`, h.runtime)
+	sout, err := schemaTool.invoke(ctx, `{"kind":"Document"}`, turnRuntime(h))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +245,7 @@ func TestBrainTools_hostNamespaceScopedRead(t *testing.T) {
 		t.Fatalf("schema: %+v", schema)
 	}
 
-	_, err = readTool.invoke(ctx, `{"object_id":"not-a-uuid"}`, h.runtime)
+	_, err = readTool.invoke(ctx, `{"object_id":"not-a-uuid"}`, turnRuntime(h))
 	if err == nil {
 		t.Fatal("invalid object_id must fail")
 	}
@@ -299,7 +299,7 @@ func TestBrainTools_searchFindExactContinueAndCheckpoint(t *testing.T) {
 		t.Fatal("search, find_exact, continue required")
 	}
 
-	out, err := searchTool.invoke(ctx, `{"query":"knowledge base retrieval","limit":2}`, h.runtime)
+	out, err := searchTool.invoke(ctx, `{"query":"knowledge base retrieval","limit":2}`, turnRuntime(h))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -324,7 +324,7 @@ func TestBrainTools_searchFindExactContinueAndCheckpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out2, err := h2.findTool("continue", "").invoke(ctx, `{"result_set_id":"`+page.ResultSetID.String()+`","limit":2}`, h2.runtime)
+	out2, err := h2.findTool("continue", "").invoke(ctx, `{"result_set_id":"`+page.ResultSetID.String()+`","limit":2}`, turnRuntime(h2))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,7 +336,7 @@ func TestBrainTools_searchFindExactContinueAndCheckpoint(t *testing.T) {
 		t.Fatalf("result set id changed after load")
 	}
 
-	fout, err := findTool.invoke(ctx, `{"query":"`+firstParent.String()+`"}`, h.runtime)
+	fout, err := findTool.invoke(ctx, `{"query":"`+firstParent.String()+`"}`, turnRuntime(h))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -374,7 +374,7 @@ func TestBrainTools_expandChildren(t *testing.T) {
 	if tool == nil {
 		t.Fatal("expand tool required")
 	}
-	out, err := tool.invoke(ctx, `{"object_id":"`+parent.String()+`"}`, h.runtime)
+	out, err := tool.invoke(ctx, `{"object_id":"`+parent.String()+`"}`, turnRuntime(h))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -432,7 +432,7 @@ func TestBrainTools_expandMultiHopAndFindLinks(t *testing.T) {
 	}
 
 	// Multi-hop: fact --about--> deal --has_buyer--> buyer
-	out, err := expand.invoke(ctx, `{"object_id":"`+factID.String()+`","relation_types":["about","has_buyer"],"max_hops":2}`, h.runtime)
+	out, err := expand.invoke(ctx, `{"object_id":"`+factID.String()+`","relation_types":["about","has_buyer"],"max_hops":2}`, turnRuntime(h))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -451,7 +451,7 @@ func TestBrainTools_expandMultiHopAndFindLinks(t *testing.T) {
 		t.Fatalf("multi-hop expand missing buyer: %+v", res.Objects)
 	}
 
-	lout, err := findLinks.invoke(ctx, `{"relation_type":"has_buyer","query":"economic buyer","limit":10}`, h.runtime)
+	lout, err := findLinks.invoke(ctx, `{"relation_type":"has_buyer","query":"economic buyer","limit":10}`, turnRuntime(h))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -493,14 +493,14 @@ func TestBrainTools_searchNamespaceIsolation(t *testing.T) {
 	if search == nil || read == nil {
 		t.Fatal("search and read required")
 	}
-	out, err := search.invoke(ctx, `{"query":"namespace isolation secret token xyzzy","limit":10}`, h.runtime)
+	out, err := search.invoke(ctx, `{"query":"namespace isolation secret token xyzzy","limit":10}`, turnRuntime(h))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(out.output, secretParent.String()) || strings.Contains(out.output, "xyzzy") {
 		t.Fatalf("search leaked nsA object into nsB: %s", out.output)
 	}
-	_, err = read.invoke(ctx, `{"object_id":"`+secretParent.String()+`"}`, h.runtime)
+	_, err = read.invoke(ctx, `{"object_id":"`+secretParent.String()+`"}`, turnRuntime(h))
 	if err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("read foreign ns want not found, got %v", err)
 	}
@@ -548,7 +548,7 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 	})
 
 	// Parent search populates parent SearchContext only.
-	if _, err := parentH.findTool("search", "").invoke(ctx, `{"query":"worker search isolation"}`, parentH.runtime); err != nil {
+	if _, err := parentH.findTool("search", "").invoke(ctx, `{"query":"worker search isolation"}`, turnRuntime(parentH)); err != nil {
 		t.Fatal(err)
 	}
 	parentRS, err := parentH.searchCtx.Export()
@@ -589,7 +589,7 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 	if readTool == nil {
 		t.Fatal("worker must inherit brain read tool")
 	}
-	out, err := readTool.invoke(ctx, `{"object_id":"`+docID.String()+`"}`, worker.runtime)
+	out, err := readTool.invoke(ctx, `{"object_id":"`+docID.String()+`"}`, turnRuntime(worker))
 	if err != nil {
 		t.Fatal(err)
 	}

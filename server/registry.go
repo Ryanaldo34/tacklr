@@ -156,7 +156,10 @@ type Registry struct {
 	store        stores.BaseStore
 	tracer       trace.Tracer           // turn and child spans; default global
 	instruments  *telemetry.Instruments // turn/tool metrics; default global
-	activeTurns  sync.Map               // thread id → cancel for in-flight turn
+	activeTurns  sync.Map               // thread id → *turnHandle
+	// liveHarnesses caches session-scoped harnesses so consecutive turns reuse
+	// in-memory state (window, plan, pending tools) without store reload.
+	liveHarnesses sync.Map // session/thread id → *tacklr.AgentHarness
 }
 
 // RegistryOption configures NewRegistry.
@@ -261,6 +264,18 @@ func (r *Registry) CancelSession(sessionID string) {
 	}
 }
 
+// DropLiveHarness removes a cached harness (e.g. session/close). Next prompt reloads from store.
+func (r *Registry) DropLiveHarness(sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	if v, ok := r.liveHarnesses.LoadAndDelete(sessionID); ok {
+		if h, ok := v.(*tacklr.AgentHarness); ok && h != nil {
+			h.Close()
+		}
+	}
+}
+
 // waitPriorTurnIfAny cancels any in-flight turn for threadID and waits for it
 // to finish (harness drain + checkpoint). Used so session/prompt while busy
 // steers without concurrent Run on the same session (ACP has no session/steer).
@@ -330,16 +345,12 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 		}
 	}
 
-	// Steer / single-flight: cancel prior turn and wait for checkpoint before load.
-	priorCancelled, err := r.waitPriorTurnIfAny(ctx, threadID)
-	if err != nil {
+	// Steer / single-flight: cancel prior turn and wait for it to finish.
+	if _, err := r.waitPriorTurnIfAny(ctx, threadID); err != nil {
 		return nil, err
 	}
-	if priorCancelled {
-		// Must reload harness state written by the cancelled turn's run_exit save.
-		load = true
-	}
 
+	// Prefer warm harness (in-memory window/plan already updated by prior turn).
 	h, _, err := r.loadAgent(ctx, agentID, threadID, load, mcpServers, req.AllowMissingCheckpoint)
 	if err != nil {
 		return nil, fmt.Errorf("load agent %q: %w", agentID, err)
@@ -479,6 +490,19 @@ func (r *Registry) loadAgent(ctx context.Context, agentID, threadID string, load
 		return nil, nil, clientErrorf(ErrAgentNotFound, "agent %q not found", agentID)
 	}
 
+	// Warm path: reuse in-memory harness when session MCP is not being
+	// re-bound (resume with a new server list needs a fresh tool catalog).
+	if threadID != "" && len(sessionMCP) == 0 {
+		if v, ok := r.liveHarnesses.Load(threadID); ok {
+			if h, ok := v.(*tacklr.AgentHarness); ok && h != nil {
+				return h, &spec, nil
+			}
+		}
+	}
+	if threadID != "" && len(sessionMCP) > 0 {
+		r.DropLiveHarness(threadID)
+	}
+
 	store := r.store
 	if spec.Store != nil {
 		store = spec.Store
@@ -520,6 +544,9 @@ func (r *Registry) loadAgent(ctx context.Context, agentID, threadID string, load
 		h = tacklr.NewAgent(ctx, opts)
 	}
 
+	if threadID != "" {
+		r.liveHarnesses.Store(threadID, h)
+	}
 	return h, &spec, nil
 }
 

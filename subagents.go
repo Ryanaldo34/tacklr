@@ -398,7 +398,7 @@ func collectChildInterrupts(worker *AgentHarness, drainedIDs []string) (ids []st
 		if !ok {
 			continue
 		}
-		if intr, ok := session.PendingInterrupt(&worker.runtime, tcID); ok {
+		if intr, ok := worker.session.PendingInterrupt(tcID); ok {
 			primary = intr
 			break
 		}
@@ -409,7 +409,7 @@ func collectChildInterrupts(worker *AgentHarness, drainedIDs []string) (ids []st
 			if !ptc.InterruptActive {
 				continue
 			}
-			if intr, ok := session.PendingInterrupt(&worker.runtime, tcID); ok {
+			if intr, ok := worker.session.PendingInterrupt(tcID); ok {
 				primary = intr
 				// Ensure we have at least one interrupt id for resume forwarding.
 				if len(ids) == 0 {
@@ -497,7 +497,7 @@ func (p parkStore) clear(toolCallID string) {
 }
 
 func (p parkStore) load() map[string]parkedWorkerMeta {
-	raw, ok := p.h.runtime.StateGet(parkedWorkersStateKey)
+	raw, ok := p.h.session.StateGet(parkedWorkersStateKey)
 	if !ok || raw == nil {
 		return map[string]parkedWorkerMeta{}
 	}
@@ -532,7 +532,7 @@ func (p parkStore) load() map[string]parkedWorkerMeta {
 
 func (p parkStore) store(parks map[string]parkedWorkerMeta) {
 	if len(parks) == 0 {
-		p.h.runtime.StateDelete(parkedWorkersStateKey)
+		p.h.session.StateDelete(parkedWorkersStateKey)
 		return
 	}
 	b, err := json.Marshal(parks)
@@ -541,7 +541,7 @@ func (p parkStore) store(parks map[string]parkedWorkerMeta) {
 		return
 	}
 	// Store as string so checkpoint JSON round-trips cleanly.
-	p.h.runtime.StateSet(parkedWorkersStateKey, string(b))
+	p.h.session.StateSet(parkedWorkersStateKey, string(b))
 }
 
 // workerDrainResult is the outcome of draining a child event stream.

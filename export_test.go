@@ -3,10 +3,9 @@ package tacklr
 import (
 	"testing"
 
+	"github.com/ryanaldo34/tacklr/internal/session"
 	"github.com/ryanaldo34/tacklr/interrupt"
 )
-
-// keep
 
 // customInterrupt is only for RegisterInterrupt coverage.
 type customInterrupt struct{}
@@ -27,4 +26,19 @@ func TestRegisterInterrupt_customType(t *testing.T) {
 	if intr.TypeName() != "test_custom_interrupt_cov" {
 		t.Fatal(intr.TypeName())
 	}
+}
+
+// turnRuntime builds a turn-scoped Runtime for tests (events drained).
+func turnRuntime(h *AgentHarness) HarnessRuntime {
+	ch := make(chan StreamEvent, 64)
+	go func() {
+		for range ch {
+		}
+	}()
+	return session.NewRuntime(ch, h.store, h.session)
+}
+
+// turnRuntimeWithOut uses the caller's channel (caller drains).
+func turnRuntimeWithOut(h *AgentHarness, out chan StreamEvent) HarnessRuntime {
+	return session.NewRuntime(out, h.store, h.session)
 }

@@ -568,7 +568,7 @@ func TestAgentHarness_Run(t *testing.T) {
 		if len(ah.pendingToolCalls) != 0 {
 			t.Errorf("pendingToolCalls after resume = %d, want 0", len(ah.pendingToolCalls))
 		}
-		if session.HasPendingInterrupt(&ah.runtime) {
+		if func() bool { rtx := turnRuntime(ah); return session.HasPendingInterrupt(&rtx) }() {
 			t.Error("runtime should have no pending interrupts after resume")
 		}
 	})
@@ -1673,7 +1673,7 @@ func TestNewAgentFromSession_resumesPendingToolInterrupt(t *testing.T) {
 	if !restored.pendingToolCalls["call_park"].InterruptActive {
 		t.Fatal("restored pending tool should still be InterruptActive")
 	}
-	if !session.HasPendingInterrupt(&restored.runtime) {
+	if !func() bool { rtx := turnRuntime(restored); return session.HasPendingInterrupt(&rtx) }() {
 		t.Fatal("restored runtime should have pending interrupt")
 	}
 

@@ -27,7 +27,9 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 	a.initMCP(ctx)
 	a.injectBuiltinTools()
 	out := make(chan StreamEvent, streamEventBuffer)
-	session.SetOutputChannel(&a.runtime, out)
+	// Turn-scoped Runtime: event bus for this Run only; durable state is on a.session.
+	// Tools receive a value copy via invoke; plan tools emit plan_update through it.
+	turnRT := session.NewRuntime(out, a.store, a.session)
 
 	emitCancelled := func() {
 		// Pair open tools into the window before the cancel error event so the
@@ -44,7 +46,6 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 		a.runMu.Lock()
 		defer a.runMu.Unlock()
 		defer close(out)
-		defer session.SetOutputChannel(&a.runtime, session.IdleOutput())
 		defer a.persistSession(ctx, "run_exit")
 		if err := a.addToContext(ctx, &Message{Role: RoleUser, Content: prompt}, out); err != nil {
 			if ctx.Err() != nil {
@@ -55,7 +56,6 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 			out <- StreamEvent{Type: StreamEventError, Error: fmt.Errorf("run: %w", err)}
 			return
 		}
-		session.EnsureInitialized(&a.runtime)
 		turnModelRequests := 0
 		// hadToolRound: true after a tool batch so model errors are not treated as tool failures.
 		hadToolRound := false
@@ -253,7 +253,7 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 						toolResults[i] = a.emitToolResult(out, tc, toolErr.Error(), "error")
 						return
 					}
-					runtimeCopy := a.runtime
+					runtimeCopy := turnRT
 					runtimeCopy.CurrentToolCallID = tcKey
 					output, toolDisp, err := a.toolRunner.Run(toolCtx, ToolInvocation{
 						Tool:     tool,
@@ -384,7 +384,7 @@ func (a *AgentHarness) ReturnFromInterrupt(ctx context.Context, finishedInterrup
 			return nil, fmt.Errorf("no tool call id found for interrupt %s: %w", interruptId, interrupt.ErrInterruptNotFound)
 		}
 		a.interruptPayloads[toolCallId] = payload
-		if _, err := session.ReturnInterrupt(&a.runtime, toolCallId, payload); err != nil {
+		if _, err := a.session.ReturnInterrupt(toolCallId, payload); err != nil {
 			a.pendingMu.Unlock()
 			return nil, fmt.Errorf("return from interrupt %q: %w", interruptId, err)
 		}

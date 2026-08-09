@@ -29,7 +29,6 @@ type AgentHarness struct {
 	mcpConfigs      []mcp.MCPConfig
 	instructions    string
 	store           stores.BaseStore
-	runtime         HarnessRuntime
 	watchDog        AgentWatchDog
 	maxWindowSize   int
 	maxTurnRequests int // 0 = unlimited; from Config.MaxTurnRequests
@@ -42,7 +41,7 @@ type AgentHarness struct {
 	// interruptPayloads maps parent tool call id → resume payload for workers.
 	interruptPayloads map[string][]byte
 	// parkedWorkersLive maps spawn_worker tool call id → live child harness.
-	// Durable park metadata is in Runtime state; this map is not checkpointed.
+	// Durable park metadata is in SessionManager state; this map is not checkpointed.
 	parkedWorkersLive map[string]*AgentHarness
 	parkMu            sync.Mutex
 	skillByName       map[string]skills.Skill
@@ -58,7 +57,6 @@ type AgentHarness struct {
 	mcpCleanup       func()
 	mcpInitialized   bool
 	builtinsInjected bool
-	out              chan streaming.StreamEvent
 	context          ContextManager
 	tasks            ModelTasks
 	contextPolicy    ContextPolicy
@@ -80,9 +78,26 @@ func (a *AgentHarness) Messages() []*Message {
 }
 
 // AskUserQuestion returns the ask_user_choice question for toolCallID, or empty.
-// Used by ACP elicitation.
+// Used by ACP elicitation. Reads session state (survives the turn).
 func (a *AgentHarness) AskUserQuestion(toolCallID string) string {
-	return askUserQuestionFromState(&a.runtime, toolCallID)
+	if toolCallID == "" {
+		return ""
+	}
+	v, ok := a.session.StateGet(askUserQuestionStateKey(toolCallID))
+	if !ok {
+		return ""
+	}
+	s, ok := v.(string)
+	if !ok {
+		// Wrong type means a bug in ask_user_choice stash; surface empty, not a silent cast.
+		slog.Error("ask_user_question state is not a string",
+			"session_id", a.sessionId,
+			"tool_call_id", toolCallID,
+			"type", fmt.Sprintf("%T", v),
+		)
+		return ""
+	}
+	return s
 }
 
 func (a *AgentHarness) restoreMessages(window []*Message) {
@@ -131,9 +146,6 @@ func (a *AgentHarness) checkpointSession(ctx context.Context) error {
 	slog.Debug("checkpointing session", "session_id", a.sessionId, "context_window_size", len(msgs))
 	if a.store == nil {
 		return nil
-	}
-	if a.session == nil {
-		a.session = session.NewSessionManager()
 	}
 
 	a.pendingMu.Lock()
@@ -345,10 +357,7 @@ func (a *AgentHarness) addToContext(ctx context.Context, newMsg *Message, out ch
 func (a *AgentHarness) applyBatchToolResultEffect(ctx context.Context, effect ToolResultEffect) error {
 	switch effect {
 	case EffectInstallPlanDocument:
-		doc := ""
-		if a.session != nil {
-			doc = a.session.Plan().Document()
-		}
+		doc := a.session.Plan().Document()
 		ctx, span := telemetry.StartPlanInstallSpan(ctx, a.sessionId)
 		slog.InfoContext(ctx, "installing plan document into context", "session_id", a.sessionId, "area", telemetry.AreaContext)
 		err := a.context.InstallPlanDocument(doc)
@@ -356,12 +365,8 @@ func (a *AgentHarness) applyBatchToolResultEffect(ctx context.Context, effect To
 		return err
 	case EffectHandoff:
 		slog.InfoContext(ctx, "todos completed or plan revised; running handoff", "session_id", a.sessionId, "area", telemetry.AreaContext)
-		var todos []Todo
-		var doc string
-		if a.session != nil {
-			todos = a.session.Plan().Get()
-			doc = a.session.Plan().Document()
-		}
+		todos := a.session.Plan().Get()
+		doc := a.session.Plan().Document()
 		return a.tasks.Handoff(ctx, todos, doc, a.tools, a.constructSystemPrompt())
 	default:
 		return nil
@@ -603,7 +608,7 @@ func (a *AgentHarness) HasOpenToolWork() bool {
 	if nPending > 0 {
 		return true
 	}
-	if a.session != nil && a.session.HasPendingInterrupt() {
+	if a.session.HasPendingInterrupt() {
 		return true
 	}
 	return len(a.openToolCalls()) > 0
@@ -687,9 +692,7 @@ func (a *AgentHarness) clearInterruptParkState() {
 	a.interruptToRequester = make(map[string]string)
 	a.interruptPayloads = make(map[string][]byte)
 	a.pendingMu.Unlock()
-	if a.session != nil {
-		a.session.ClearInterrupts()
-	}
+	a.session.ClearInterrupts()
 }
 
 // discoverAllTools is the MCP discovery entry. Tests may replace it.

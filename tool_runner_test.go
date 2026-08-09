@@ -190,13 +190,13 @@ func TestHarness_toolPermission_allowAlwaysRemembers(t *testing.T) {
 	}
 
 	// Session reload rehydrates maps as map[string]any — still honors allow-always.
-	if v, ok := ah.runtime.StateGet("_permission_always_allow"); ok {
+	if v, ok := turnRuntime(ah).StateGet("_permission_always_allow"); ok {
 		b, _ := json.Marshal(v)
 		var rehydrated map[string]any
 		if err := json.Unmarshal(b, &rehydrated); err != nil {
 			t.Fatal(err)
 		}
-		ah.runtime.StateSet("_permission_always_allow", rehydrated)
+		turnRuntime(ah).StateSet("_permission_always_allow", rehydrated)
 	}
 
 	ch3, err := ah.Run(context.Background(), "again")

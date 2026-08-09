@@ -306,6 +306,7 @@ func (p *acpProtocol) CloseSession(ctx context.Context, env ProtocolEnv, session
 	}
 	if env.Registry != nil {
 		env.Registry.CancelSession(sessionID)
+		env.Registry.DropLiveHarness(sessionID)
 	}
 	return nil
 }

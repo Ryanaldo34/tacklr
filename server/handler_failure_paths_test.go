@@ -607,6 +607,8 @@ func TestHandleSessionTurn_nonClientError(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("first: %v", err)
 	}
+	// Drop warm harness so the next turn must LoadSession from the store.
+	r.DropLiveHarness(sid)
 	// Second prompt loads harness checkpoint and fails with non-client error.
 	err = p.handleSessionTurn(context.Background(), env, &parsedRequest{
 		ID: json.RawMessage(`2`), ThreadID: sid, Prompt: "second",
