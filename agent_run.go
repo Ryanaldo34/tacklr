@@ -285,11 +285,13 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 							toolCtx, telemetry.AgentIDFromContext(ctx), interrupt.TypeName(),
 						)
 						toolSpan.Finish("interrupt", nil)
-						out <- StreamEvent{Type: StreamEventInterrupt, MessageID: tcKey, Data: data}
+						// Register resume maps before yielding the interrupt event so a
+						// synchronous consumer (ACP mid-turn resolve) never races an empty map.
 						a.pendingMu.Lock()
 						a.pendingToolCalls[tcKey] = stores.PendingToolCall{ToolCall: &tc, InterruptActive: true}
 						a.interruptToRequester[intrId] = tcKey
 						a.pendingMu.Unlock()
+						out <- StreamEvent{Type: StreamEventInterrupt, MessageID: tcKey, Data: data}
 						a.persistSession(toolCtx, "interrupt")
 						return
 					}
