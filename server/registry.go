@@ -240,7 +240,9 @@ func (r *Registry) ConfigOptions(currentAgent string) []ConfigOption {
 // This is abort-only (ACP session/cancel). It does not start a new turn.
 func (r *Registry) CancelSession(sessionID string) {
 	if h, ok := r.activeTurns.Load(sessionID); ok {
-		h.(*turnHandle).cancel()
+		if th, ok := h.(*turnHandle); ok {
+			th.cancel()
+		}
 	}
 }
 
@@ -250,7 +252,9 @@ func (r *Registry) DropLiveHarness(sessionID string) {
 		return
 	}
 	if v, ok := r.liveHarnesses.LoadAndDelete(sessionID); ok {
-		v.(*tacklr.AgentHarness).Close()
+		if h, ok := v.(*tacklr.AgentHarness); ok {
+			h.Close()
+		}
 	}
 }
 
@@ -265,7 +269,10 @@ func (r *Registry) waitPriorTurnIfAny(ctx context.Context, threadID string) erro
 	if !ok {
 		return nil
 	}
-	th := h.(*turnHandle)
+	th, ok := h.(*turnHandle)
+	if !ok {
+		return nil
+	}
 	th.cancel()
 	timer := time.NewTimer(steerWaitTimeout)
 	defer timer.Stop()
@@ -463,7 +470,9 @@ func (r *Registry) loadAgent(ctx context.Context, agentID, threadID string, load
 	// re-bound (resume with a new server list needs a fresh tool catalog).
 	if threadID != "" && len(sessionMCP) == 0 {
 		if v, ok := r.liveHarnesses.Load(threadID); ok {
-			return v.(*tacklr.AgentHarness), &spec, nil
+			if h, ok := v.(*tacklr.AgentHarness); ok {
+				return h, &spec, nil
+			}
 		}
 	}
 	if threadID != "" && len(sessionMCP) > 0 {
