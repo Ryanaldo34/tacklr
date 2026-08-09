@@ -8,6 +8,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -49,11 +50,11 @@ func TestACP_elicitationForm_resolvesInterruptAndCompletes(t *testing.T) {
 		},
 	})
 
-	var invokeCount int
+	var invokeCount atomic.Int32
 	strategy := &mockInferenceStrategy{
 		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-			invokeCount++
-			if invokeCount == 1 {
+			n := invokeCount.Add(1)
+			if n == 1 {
 				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventFunctionCall, ToolCalls: []tacklr.ToolCall{
 					{ID: "call_ask", CallID: "call_ask", Name: "ask_user", Arguments: `{}`},
 				}, IsComplete: true}
@@ -218,8 +219,8 @@ func TestACP_elicitationForm_resolvesInterruptAndCompletes(t *testing.T) {
 	if !endTurn {
 		t.Error("expected prompt stopReason end_turn")
 	}
-	if invokeCount != 2 {
-		t.Errorf("invokeCount = %d, want 2 (raise + continue after accept)", invokeCount)
+	if got := invokeCount.Load(); got != 2 {
+		t.Errorf("invokeCount = %d, want 2 (raise + continue after accept)", got)
 	}
 }
 

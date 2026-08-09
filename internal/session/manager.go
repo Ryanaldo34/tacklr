@@ -31,9 +31,6 @@ func NewSessionManager() *SessionManager {
 }
 
 func (s *SessionManager) ensure() {
-	if s == nil {
-		return
-	}
 	if s.plan == nil {
 		s.plan = NewPlanStore()
 	}
@@ -50,9 +47,6 @@ func (s *SessionManager) ensure() {
 
 // Plan returns the plan module. Never nil after NewSessionManager.
 func (s *SessionManager) Plan() *PlanStore {
-	if s == nil {
-		return nil
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.plan == nil {
@@ -63,16 +57,33 @@ func (s *SessionManager) Plan() *PlanStore {
 
 // HasActivePlan reports whether a non-empty todo list is present.
 func (s *SessionManager) HasActivePlan() bool {
-	if s == nil {
-		return false
-	}
 	return s.Plan().HasActive()
 }
 
 // --- user State bag (facade target for Runtime.StateGet/Set) ---
 
+// StateGet returns a host/tool state value without a turn Runtime.
+func (s *SessionManager) StateGet(key string) (any, bool) {
+	return s.stateGet(key)
+}
+
+// StateSet stores a host/tool state value without a turn Runtime.
+func (s *SessionManager) StateSet(key string, value any) {
+	s.stateSet(key, value)
+}
+
+// StateDelete removes a host/tool state value without a turn Runtime.
+func (s *SessionManager) StateDelete(key string) {
+	s.stateDelete(key)
+}
+
+// PendingInterrupt returns an open interrupt for id if any.
+func (s *SessionManager) PendingInterrupt(id string) (interrupt.Interrupt, bool) {
+	return s.pendingInterrupt(id)
+}
+
 func (s *SessionManager) stateGet(key string) (any, bool) {
-	if s == nil || IsReservedRuntimeStateKey(key) {
+	if IsReservedRuntimeStateKey(key) {
 		return nil, false
 	}
 	s.mu.RLock()
@@ -82,7 +93,7 @@ func (s *SessionManager) stateGet(key string) (any, bool) {
 }
 
 func (s *SessionManager) stateSet(key string, value any) {
-	if s == nil || IsReservedRuntimeStateKey(key) {
+	if IsReservedRuntimeStateKey(key) {
 		return
 	}
 	s.mu.Lock()
@@ -94,7 +105,7 @@ func (s *SessionManager) stateSet(key string, value any) {
 }
 
 func (s *SessionManager) stateDelete(key string) {
-	if s == nil || IsReservedRuntimeStateKey(key) {
+	if IsReservedRuntimeStateKey(key) {
 		return
 	}
 	s.mu.Lock()
@@ -104,13 +115,24 @@ func (s *SessionManager) stateDelete(key string) {
 
 // --- interrupts (facade target for Runtime Raise/Return/…) ---
 
-func (s *SessionManager) hasPendingInterrupt() bool {
-	if s == nil {
-		return false
-	}
+// HasPendingInterrupt reports whether any interrupt is still awaiting a client payload.
+func (s *SessionManager) HasPendingInterrupt() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.pending) > 0
+}
+
+// ClearInterrupts drops pending and resolved interrupt maps (steer / cancel finalize).
+func (s *SessionManager) ClearInterrupts() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pending = interruptMap{}
+	s.resolved = interruptMap{}
+}
+
+// ReturnInterrupt resolves a parked interrupt (session-scoped; no turn bus needed).
+func (s *SessionManager) ReturnInterrupt(id string, result []byte) (interrupt.Interrupt, error) {
+	return s.returnInterrupt(id, result)
 }
 
 func (s *SessionManager) returnInterrupt(id string, result []byte) (interrupt.Interrupt, error) {
@@ -196,9 +218,6 @@ func (s *SessionManager) raiseInterrupt(toolCallID string, kind string, payload 
 // Reserved plan keys in userState are never exported as user keys; plan is
 // written via PlanStore.ExportInto.
 func (s *SessionManager) SnapshotDurable() (runtimeState map[string]any, pending, resolved interruptMap) {
-	if s == nil {
-		return map[string]any{}, interruptMap{}, interruptMap{}
-	}
 	s.mu.RLock()
 	runtimeState = make(map[string]any, len(s.userState))
 	for k, v := range s.userState {
@@ -231,9 +250,6 @@ func (s *SessionManager) SnapshotDurable() (runtimeState map[string]any, pending
 // LoadUserAndPlanState hydrates user State and plan from checkpoint RuntimeState.
 // Reserved keys (including legacy _search_namespace) are not left as user keys.
 func (s *SessionManager) LoadUserAndPlanState(state map[string]any) {
-	if s == nil {
-		return
-	}
 	s.ensure()
 	s.plan.LoadFromState(state)
 	s.mu.Lock()
@@ -251,9 +267,6 @@ func (s *SessionManager) LoadUserAndPlanState(state map[string]any) {
 
 // LoadInterruptsJSON restores interrupt maps from checkpoint JSON blobs.
 func (s *SessionManager) LoadInterruptsJSON(pendingJSON, resolvedJSON []byte) error {
-	if s == nil {
-		return nil
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.ensure()

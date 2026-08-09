@@ -21,20 +21,27 @@ type planToolsFixture struct {
 
 func testPlanTools() planToolsFixture {
 	sm := session.NewSessionManager()
-	s := internalSession{sm: sm}
 	return planToolsFixture{
-		create:   newCreatePlanTool(s),
-		edit:     newEditPlanTool(s),
-		complete: newCompleteTodoTool(s),
-		list:     newListPlanTool(s),
+		create:   newCreatePlanTool(sm),
+		edit:     newEditPlanTool(sm),
+		complete: newCompleteTodoTool(sm),
+		list:     newListPlanTool(sm),
 		store:    sm.Plan(),
 	}
 }
 
+func drainEventCh() chan streaming.StreamEvent {
+	c := make(chan streaming.StreamEvent, 8)
+	go func() {
+		for range c {
+		}
+	}()
+	return c
+}
+
+// planRT is a turn Runtime for plan/ask tool unit tests (events drained).
 func planRT() HarnessRuntime {
-	rt := session.NewRuntime(nil, nil, nil)
-	session.EnsureInitialized(&rt)
-	return rt
+	return session.NewRuntime(drainEventCh(), nil, session.NewSessionManager())
 }
 
 // TestCreatePlanTool covers create_plan success and rejection return paths.
@@ -286,8 +293,7 @@ func TestEditPlanTool(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			pt := testPlanTools()
-			rt := HarnessRuntime{}
-			session.EnsureInitialized(&rt)
+			rt := planRT()
 			pt.store.Set(tt.plan)
 
 			res, err := pt.edit.invoke(context.Background(), tt.args, rt)
@@ -308,8 +314,7 @@ func TestEditPlanTool(t *testing.T) {
 }
 
 func TestAskUserChoiceTool_raiseAndResume(t *testing.T) {
-	rt := session.NewRuntime(make(chan streaming.StreamEvent, 4), nil, nil)
-	session.EnsureInitialized(&rt)
+	rt := session.NewRuntime(make(chan streaming.StreamEvent, 4), nil, session.NewSessionManager())
 	rt.CurrentToolCallID = "tc_ask"
 
 	args, _ := json.Marshal(map[string]any{
@@ -328,12 +333,12 @@ func TestAskUserChoiceTool_raiseAndResume(t *testing.T) {
 	if !errors.As(err, &intr) {
 		t.Fatalf("expected Interrupt, got %T %v", err, err)
 	}
-	if q := askUserQuestionFromState(&rt, "tc_ask"); q != "Which approach?" {
-		t.Errorf("question state = %q", q)
+	if v, ok := rt.StateGet(askUserQuestionStateKey("tc_ask")); !ok || v != "Which approach?" {
+		t.Errorf("question state = %v ok=%v", v, ok)
 	}
 
 	// Resolve and re-invoke (harness re-execution pattern).
-	if _, err := session.ReturnInterrupt(&rt, "tc_ask", []byte(`{"selectionIdx":1}`)); err != nil {
+	if _, err := rt.ReturnInterrupt("tc_ask", []byte(`{"selectionIdx":1}`)); err != nil {
 		t.Fatal(err)
 	}
 	res, err := askUserChoiceTool.invoke(context.Background(), string(args), rt)
@@ -348,8 +353,7 @@ func TestAskUserChoiceTool_raiseAndResume(t *testing.T) {
 }
 
 func TestAskUserChoiceTool_validation(t *testing.T) {
-	rt := session.NewRuntime(nil, nil, nil)
-	session.EnsureInitialized(&rt)
+	rt := planRT()
 	rt.CurrentToolCallID = "tc"
 
 	cases := []struct {
@@ -372,8 +376,7 @@ func TestAskUserChoiceTool_validation(t *testing.T) {
 
 func TestListPlanTool_exactListing(t *testing.T) {
 	pt := testPlanTools()
-	rt := session.NewRuntime(nil, nil, nil)
-	session.EnsureInitialized(&rt)
+	rt := planRT()
 	pt.store.Set([]Todo{
 		{Title: "Exact Title One", Status: streaming.TodoStatusCompleted, Description: "done work"},
 		{Title: "Exact Title Two", Status: streaming.TodoStatusInProgress, Description: "now"},
@@ -524,8 +527,7 @@ func TestRun_askUserChoice_withoutDescription_formatsSelection(t *testing.T) {
 // TestCompleteTodo_effectsByRemainingWork: handoff only while open work remains;
 // completing the last open todo (sole or after already-done siblings) is EffectNone.
 func TestCompleteTodo_effectsByRemainingWork(t *testing.T) {
-	rt := session.NewRuntime(nil, nil, nil)
-	session.EnsureInitialized(&rt)
+	rt := planRT()
 	cases := []struct {
 		name       string
 		plan       []Todo

@@ -190,20 +190,8 @@ func (p *acpProtocol) handleACPStreamSSE(env ProtocolEnv, w http.ResponseWriter,
 
 	sessionID := strings.TrimSpace(r.Header.Get(HeaderAcpSessionID))
 
-	// Attach before flushing so concurrent POSTs cannot deliver into a missing sink.
-	var detach func()
-	var err error
-	if sessionID == "" {
-		detach, err = conn.attachConnSSE(w, flusher)
-	} else {
-		detach, err = conn.attachSessionSSE(sessionID, w, flusher)
-	}
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusConflict)
-		return
-	}
-	defer detach()
-
+	// Headers before attach: once the sink is registered, concurrent POSTs may
+	// deliver events; http.ResponseWriter body access must stay on the sink mutex.
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -211,9 +199,27 @@ func (p *acpProtocol) handleACPStreamSSE(env ProtocolEnv, w http.ResponseWriter,
 	if sessionID != "" {
 		w.Header().Set(HeaderAcpSessionID, sessionID)
 	}
-	// Optional comment so intermediaries see activity; also commits headers.
-	_, _ = w.Write([]byte(": acp-stream-open\n\n"))
-	flusher.Flush()
+
+	var (
+		detach func()
+		sink   *sseSink
+		err    error
+	)
+	if sessionID == "" {
+		detach, sink, err = conn.attachConnSSE(w, flusher)
+	} else {
+		detach, sink, err = conn.attachSessionSSE(sessionID, w, flusher)
+	}
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	defer detach()
+
+	// Open comment + flush under sink.mu so it cannot race deliver/writeJSONRPC.
+	if err := sink.writeOpen(); err != nil {
+		return
+	}
 
 	// Block until client disconnects or connection is torn down.
 	select {

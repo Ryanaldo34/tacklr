@@ -7,8 +7,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/ryanaldo34/tacklr/internal/session"
 )
 
 // --- ModelTasks absorb/handoff outcomes used by the harness ---
@@ -200,8 +198,8 @@ func TestSpawnWorker_incompleteStream_errors(t *testing.T) {
 		},
 	})
 	out := make(chan StreamEvent, 16)
-	session.SetOutputChannel(&h.runtime, out)
-	_, err := h.runWorker(context.Background(), "w", "task", h.runtime)
+	rt := turnRuntimeWithOut(h, out)
+	_, err := h.runWorker(context.Background(), "w", "task", rt)
 	if err == nil {
 		t.Fatal("want worker error")
 	}
@@ -218,7 +216,7 @@ func TestSpawnWorker_emptyTask_errors(t *testing.T) {
 			{WorkerName: "w", Model: &mockStrategy{}},
 		},
 	})
-	_, err := h.runWorker(context.Background(), "w", "   ", h.runtime)
+	_, err := h.runWorker(context.Background(), "w", "   ", turnRuntime(h))
 	if !errors.Is(err, ErrEmptyWorkerTask) {
 		t.Fatalf("err = %v", err)
 	}
@@ -239,8 +237,8 @@ func TestSpawnWorker_reasoningUpdatesForwarded(t *testing.T) {
 		},
 	})
 	updates := make(chan StreamEvent, 32)
-	session.SetOutputChannel(&h.runtime, updates)
-	got, err := h.runWorker(context.Background(), "thinker", "reason", h.runtime)
+	rt := turnRuntimeWithOut(h, updates)
+	got, err := h.runWorker(context.Background(), "thinker", "reason", rt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -319,7 +317,7 @@ func TestRun_permissionAllowAlways_survivesAnyMapRehydrate(t *testing.T) {
 	})
 	h.sessionId = "perm-sess"
 	// Seed allow list in the rehydrated any-map shape.
-	h.runtime.StateSet(permissionAlwaysAllowKey, map[string]any{"secret": true})
+	turnRuntime(h).StateSet(permissionAlwaysAllowKey, map[string]any{"secret": true})
 	events, err := h.Run(context.Background(), "go")
 	if err != nil {
 		t.Fatal(err)

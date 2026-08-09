@@ -965,6 +965,80 @@ func TestRun_displayNameOnFunctionCall_stream(t *testing.T) {
 	}
 }
 
+// TestRun_cancelMidTool_pairsCancelledResultsInWindow: cancel while a tool is
+// running appends cancelled tool results so the checkpoint has valid pairing.
+func TestRun_cancelMidTool_pairsCancelledResultsInWindow(t *testing.T) {
+	started := make(chan struct{})
+	var once sync.Once
+	slow := NewTool(ToolConfig{
+		Name: "slow",
+		Handler: func(ctx context.Context) (string, error) {
+			once.Do(func() { close(started) })
+			<-ctx.Done()
+			return "", ctx.Err()
+		},
+	})
+	strategy := &mockStrategy{
+		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
+			ch <- LLMResponseChunk{
+				Type: StreamEventFunctionCall,
+				ToolCalls: []ToolCall{
+					{ID: "c_slow", CallID: "c_slow", Name: "slow", Arguments: `{}`},
+				},
+				IsComplete: true,
+			}
+		},
+	}
+	store := stores.NewInMemoryStore()
+	h := NewAgent(context.Background(), AgentOptions{
+		Config:    Config{MaxWindowSize: 8192},
+		Model:     strategy,
+		Tools:     []*Tool{slow},
+		Store:     store,
+		SessionID: "steer-cancel-mid-tool",
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	events, err := h.Run(ctx, "run slow tool")
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("tool did not start")
+	}
+	cancel()
+	_ = drainEvents(events)
+
+	// Reload from checkpoint — every tool_call must have a tool result.
+	loaded, err := NewAgentFromSession(context.Background(), "steer-cancel-mid-tool", AgentOptions{
+		Config:    Config{MaxWindowSize: 8192},
+		Model:     strategy,
+		Tools:     []*Tool{slow},
+		Store:     store,
+		SessionID: "steer-cancel-mid-tool",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawToolCancel bool
+	hasCall := false
+	for _, m := range loaded.Messages() {
+		if m.Role == RoleAssistant && len(m.ToolCalls) > 0 {
+			hasCall = true
+		}
+		if m.Role == RoleTool && m.ToolCallID == "c_slow" && strings.Contains(m.Content, "cancelled") {
+			sawToolCancel = true
+		}
+	}
+	if !hasCall {
+		t.Fatalf("want assistant tool_calls in window, got %+v", loaded.Messages())
+	}
+	if !sawToolCancel {
+		t.Fatalf("want cancelled tool result in checkpoint, got %+v", loaded.Messages())
+	}
+}
+
 // TestRun_cancelAfterToolAnnounce_closesAnnouncedTools: cancel while the model
 // is still streaming closes announced tool calls as cancelled.
 func TestRun_cancelAfterToolAnnounce_closesAnnouncedTools(t *testing.T) {

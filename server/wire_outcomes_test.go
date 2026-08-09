@@ -120,17 +120,16 @@ func TestWireAndConstruct_outcomes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// --- Registry nil / WithTracer / DefaultAgent ---
-	var nr *Registry
-	if nr.DefaultAgent() != "" || nr.HasAgent("x") {
-		t.Fatal("nil registry")
-	}
-	nr.RecordSessionCreated(context.Background())
+	// --- Registry DefaultAgent / options ---
 	_ = NewRegistry(testStore(t), "d", WithTracer(nil), nil)
 	r2 := NewRegistry(testStore(t), "d", WithTracer(nil))
 	if r2.DefaultAgent() != "d" {
 		t.Fatal(r2.DefaultAgent())
 	}
+	if r2.HasAgent("x") {
+		t.Fatal("unknown agent")
+	}
+	r2.RecordSessionCreated(context.Background())
 
 	// --- ClientBridge nil caps ---
 	var bridge *ClientBridge
@@ -327,10 +326,10 @@ func TestWireAndConstruct_outcomes(t *testing.T) {
 	cnil.rememberRoute(nil, "x", "")
 	_ = cnil.takeRoute(nil)
 	cnil.noteSession("")
-	if _, err := cnil.attachConnSSE(nil, nil); err == nil {
+	if _, _, err := cnil.attachConnSSE(nil, nil); err == nil {
 		t.Fatal("nil attachConn")
 	}
-	if _, err := cnil.attachSessionSSE("s", nil, nil); err == nil {
+	if _, _, err := cnil.attachSessionSSE("s", nil, nil); err == nil {
 		t.Fatal("nil attachSession")
 	}
 	if err := cnil.deliver("s", []byte(`{}`), false); err == nil {
@@ -348,10 +347,10 @@ func TestWireAndConstruct_outcomes(t *testing.T) {
 	}
 	local.shutdown()
 	local.shutdown() // already closed
-	if _, err := local.attachConnSSE(httptest.NewRecorder(), httptest.NewRecorder()); !errors.Is(err, errSSESinkClosed) {
+	if _, _, err := local.attachConnSSE(httptest.NewRecorder(), httptest.NewRecorder()); !errors.Is(err, errSSESinkClosed) {
 		t.Fatalf("attach closed: %v", err)
 	}
-	if _, err := local.attachSessionSSE("s1", httptest.NewRecorder(), httptest.NewRecorder()); !errors.Is(err, errSSESinkClosed) {
+	if _, _, err := local.attachSessionSSE("s1", httptest.NewRecorder(), httptest.NewRecorder()); !errors.Is(err, errSSESinkClosed) {
 		t.Fatalf("attach session closed: %v", err)
 	}
 	if err := local.deliver("s1", []byte(`{}`), false); !errors.Is(err, errSSESinkClosed) {
@@ -361,8 +360,11 @@ func TestWireAndConstruct_outcomes(t *testing.T) {
 	// Live connection: attach session, deliver with fallback, double session conflict
 	live := NewConnectionRegistry().Create(NewClientBridge(&httpBufferWriter{}), &httpBufferWriter{})
 	recW := httptest.NewRecorder()
-	detach, err := live.attachConnSSE(recW, recW)
+	detach, sink, err := live.attachConnSSE(recW, recW)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.writeOpen(); err != nil {
 		t.Fatal(err)
 	}
 	// deliver session-scoped with no session sink → falls back to conn sink
@@ -383,16 +385,19 @@ func TestWireAndConstruct_outcomes(t *testing.T) {
 		t.Fatal("empty content type")
 	}
 	// closed sink write
-	sink := &sseSink{w: recW, f: recW, closed: true}
-	if err := sink.writeJSONRPC([]byte(`{}`)); !errors.Is(err, errSSESinkClosed) {
+	closedSink := &sseSink{w: recW, f: recW, closed: true}
+	if err := closedSink.writeJSONRPC([]byte(`{}`)); !errors.Is(err, errSSESinkClosed) {
 		t.Fatalf("closed sink: %v", err)
 	}
 	// session double-attach
-	detachSess, err := live.attachSessionSSE("s2", httptest.NewRecorder(), httptest.NewRecorder())
+	detachSess, sessSink, err := live.attachSessionSSE("s2", httptest.NewRecorder(), httptest.NewRecorder())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := live.attachSessionSSE("s2", httptest.NewRecorder(), httptest.NewRecorder()); err == nil {
+	if err := sessSink.writeOpen(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := live.attachSessionSSE("s2", httptest.NewRecorder(), httptest.NewRecorder()); err == nil {
 		t.Fatal("want session SSE conflict")
 	}
 	// acpStreamWriter WriteResult / WriteError with routes

@@ -13,8 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ryanaldo34/tacklr/internal/session"
-
 	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/streaming"
@@ -568,8 +566,8 @@ func TestAgentHarness_Run(t *testing.T) {
 		if len(ah.pendingToolCalls) != 0 {
 			t.Errorf("pendingToolCalls after resume = %d, want 0", len(ah.pendingToolCalls))
 		}
-		if session.HasPendingInterrupt(&ah.runtime) {
-			t.Error("runtime should have no pending interrupts after resume")
+		if ah.session.HasPendingInterrupt() {
+			t.Error("session should have no pending interrupts after resume")
 		}
 	})
 
@@ -1673,8 +1671,8 @@ func TestNewAgentFromSession_resumesPendingToolInterrupt(t *testing.T) {
 	if !restored.pendingToolCalls["call_park"].InterruptActive {
 		t.Fatal("restored pending tool should still be InterruptActive")
 	}
-	if !session.HasPendingInterrupt(&restored.runtime) {
-		t.Fatal("restored runtime should have pending interrupt")
+	if !restored.session.HasPendingInterrupt() {
+		t.Fatal("restored session should have pending interrupt")
 	}
 
 	resolution := fmt.Sprintf(`{"interruptId":%q,"selectionIdx":0}`, interruptId)

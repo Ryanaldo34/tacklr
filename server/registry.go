@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/log"
@@ -20,6 +21,16 @@ import (
 	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
+
+// turnHandle tracks one in-flight Registry turn so a follow-on prompt (steer)
+// can cancel it and wait until the harness has finished and checkpointed.
+type turnHandle struct {
+	cancel context.CancelFunc
+	done   chan struct{} // closed when the forwarder exits (after harness channel drain)
+}
+
+// steerWaitTimeout is how long RunTurn waits for a cancelled prior turn to finish.
+const steerWaitTimeout = 30 * time.Second
 
 type AgentSpec struct {
 	Name       string
@@ -88,31 +99,22 @@ type EventStream struct {
 
 // TurnContext is the context for this turn (cancelled by session/cancel or parent).
 func (s *EventStream) TurnContext() context.Context {
-	if s == nil {
-		return nil
-	}
 	return s.runCtx
 }
 
 // Cancelled reports whether the turn context has been cancelled.
 func (s *EventStream) Cancelled() bool {
-	return s != nil && s.runCtx != nil && s.runCtx.Err() != nil
+	return s.runCtx.Err() != nil
 }
 
 // Cancel cancels the turn context so producers stop. Safe to call multiple times.
 // Does not release the harness; call Close after the event pump finishes.
 func (s *EventStream) Cancel() {
-	if s == nil || s.cancel == nil {
-		return
-	}
 	s.cancel()
 }
 
 // Close releases harness resources (idempotent). Call after Cancel or stream end.
 func (s *EventStream) Close() {
-	if s == nil {
-		return
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
@@ -128,11 +130,11 @@ func (s *EventStream) Close() {
 // ResumeInterrupts resolves pending interrupts and returns a new event stream
 // from the same harness (ACP mid-turn elicitation resume).
 func (s *EventStream) ResumeInterrupts(ctx context.Context, responses map[string][]byte) (<-chan streaming.StreamEvent, error) {
-	if s == nil || s.Harness == nil {
+	if s.Harness == nil {
 		return nil, fmt.Errorf("event stream: no harness for resume")
 	}
 	c := s.runCtx
-	if c == nil || c.Err() != nil {
+	if c.Err() != nil {
 		c = ctx
 	}
 	return s.Harness.ReturnFromInterrupt(c, responses)
@@ -145,7 +147,10 @@ type Registry struct {
 	store        stores.BaseStore
 	tracer       trace.Tracer           // turn and child spans; default global
 	instruments  *telemetry.Instruments // turn/tool metrics; default global
-	activeTurns  sync.Map               // thread id → cancel for in-flight turn
+	activeTurns  sync.Map               // thread id → *turnHandle
+	// liveHarnesses caches session-scoped harnesses so consecutive turns reuse
+	// in-memory state (window, plan, pending tools) without store reload.
+	liveHarnesses sync.Map // session/thread id → *tacklr.AgentHarness
 }
 
 // RegistryOption configures NewRegistry.
@@ -210,26 +215,17 @@ func (r *Registry) Register(agentID string, spec AgentSpec) {
 
 // DefaultAgent returns the registry default agent id.
 func (r *Registry) DefaultAgent() string {
-	if r == nil {
-		return ""
-	}
 	return r.defaultAgent
 }
 
 // HasAgent reports whether agentID is registered.
 func (r *Registry) HasAgent(agentID string) bool {
-	if r == nil {
-		return false
-	}
 	_, ok := r.agents[agentID]
 	return ok
 }
 
 // RecordSessionCreated records a session-created metric (called by protocols).
 func (r *Registry) RecordSessionCreated(ctx context.Context) {
-	if r == nil || r.instruments == nil {
-		return
-	}
 	r.instruments.RecordSessionCreated(ctx)
 }
 
@@ -241,17 +237,61 @@ func (r *Registry) ConfigOptions(currentAgent string) []ConfigOption {
 // CancelSession cancels the in-flight turn context for the session (if any).
 // Session state is preserved. The turn context is the single cancel signal for
 // harness work, the registry forwarder, and runTurnStream.
+// This is abort-only (ACP session/cancel). It does not start a new turn.
 func (r *Registry) CancelSession(sessionID string) {
-	if c, ok := r.activeTurns.Load(sessionID); ok {
-		if cancel, ok := c.(context.CancelFunc); ok {
-			cancel()
+	if h, ok := r.activeTurns.Load(sessionID); ok {
+		if th, ok := h.(*turnHandle); ok {
+			th.cancel()
 		}
+	}
+}
+
+// DropLiveHarness removes a cached harness (e.g. session/close). Next prompt reloads from store.
+func (r *Registry) DropLiveHarness(sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	if v, ok := r.liveHarnesses.LoadAndDelete(sessionID); ok {
+		if h, ok := v.(*tacklr.AgentHarness); ok {
+			h.Close()
+		}
+	}
+}
+
+// waitPriorTurnIfAny cancels any in-flight turn for threadID and waits for it
+// to finish (harness drain + checkpoint). Used so session/prompt while busy
+// steers without concurrent Run on the same session (ACP has no session/steer).
+func (r *Registry) waitPriorTurnIfAny(ctx context.Context, threadID string) error {
+	if threadID == "" {
+		return nil
+	}
+	h, ok := r.activeTurns.Load(threadID)
+	if !ok {
+		return nil
+	}
+	th, ok := h.(*turnHandle)
+	if !ok {
+		return nil
+	}
+	th.cancel()
+	timer := time.NewTimer(steerWaitTimeout)
+	defer timer.Stop()
+	select {
+	case <-th.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return fmt.Errorf("timed out waiting for prior turn on session %q to finish after cancel", threadID)
 	}
 }
 
 // RunTurn starts a prompt or resume turn and returns a stream of events.
 // Setup errors (unknown session/agent, validation) are returned synchronously.
 // Runtime errors are delivered as StreamEventError on the channel.
+//
+// If a turn is already in flight for the session, it is cancelled and allowed
+// to finalize before this turn starts (mid-turn steer via session/prompt).
 func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, error) {
 	// Protocol fills AgentID, ThreadID/SessionID, MCPServers, Load, CWD on the request.
 	// Registry does not own wire-session envelopes.
@@ -281,9 +321,21 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 		}
 	}
 
+	// Steer / single-flight: cancel prior turn and wait for it to finish.
+	if err := r.waitPriorTurnIfAny(ctx, threadID); err != nil {
+		return nil, err
+	}
+
+	// Prefer warm harness (in-memory window/plan already updated by prior turn).
 	h, _, err := r.loadAgent(ctx, agentID, threadID, load, mcpServers, req.AllowMissingCheckpoint)
 	if err != nil {
 		return nil, fmt.Errorf("load agent %q: %w", agentID, err)
+	}
+
+	// Parked interrupt + new user prompt (ACP session/prompt): clear park and
+	// pair cancelled tools before the new turn. Resume (Responses) is unchanged.
+	if req.Prompt != "" && len(req.Responses) == 0 && h.HasOpenToolWork() {
+		h.FinalizeCancelledWork(ctx)
 	}
 
 	turnKind := "prompt"
@@ -309,7 +361,9 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 			log.Int(telemetry.EventAttrResumeInterruptCount, len(req.Responses)),
 		)
 	}
-	r.activeTurns.Store(threadID, cancel)
+
+	th := &turnHandle{cancel: cancel, done: make(chan struct{})}
+	r.activeTurns.Store(threadID, th)
 
 	pr := &parsedRequest{
 		AgentID:   agentID,
@@ -321,42 +375,45 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 	events, err := runHarness(turnCtx, h, pr)
 	if err != nil {
 		r.activeTurns.Delete(threadID)
+		close(th.done)
 		turnSpan.End(telemetry.OutcomeError, err)
 		cancel()
 		h.Close()
 		return nil, fmt.Errorf("run harness: %w", err)
 	}
 
-	// Forward events until cancel or harness end. Do not Close on park (resume needs it).
+	// Forward events until the harness channel closes. On turn cancel, keep
+	// draining so cancelled tool_results and the cancel error are not dropped
+	// and activeTurns is only cleared after checkpoint (run_exit defer).
 	out := make(chan streaming.StreamEvent)
 	go func() {
 		defer close(out)
+		defer close(th.done)
 		defer r.activeTurns.Delete(threadID)
 		var streamErr error
+		cancelled := false
 		for {
-			select {
-			case <-turnCtx.Done():
-				turnSpan.End(telemetry.OutcomeCancelled, turnCtx.Err())
-				return
-			case ev, ok := <-events:
-				if !ok {
-					turnSpan.End("", streamErr)
-					return
-				}
-				if ev.Type == streaming.StreamEventError {
-					if ev.Error != nil {
-						streamErr = ev.Error
-					} else if ev.Content != "" {
-						streamErr = fmt.Errorf("%s", ev.Content)
-					}
-				}
-				select {
-				case out <- ev:
-				case <-turnCtx.Done():
+			ev, ok := <-events
+			if !ok {
+				if cancelled {
 					turnSpan.End(telemetry.OutcomeCancelled, turnCtx.Err())
-					return
+				} else {
+					turnSpan.End("", streamErr)
+				}
+				return
+			}
+			if turnCtx.Err() != nil {
+				cancelled = true
+			}
+			if ev.Type == streaming.StreamEventError {
+				if ev.Error != nil {
+					streamErr = ev.Error
+				} else if ev.Content != "" {
+					streamErr = fmt.Errorf("%s", ev.Content)
 				}
 			}
+			// Blocking forward so cancel finalize tool_results are not dropped.
+			out <- ev
 		}
 	}()
 
@@ -409,6 +466,19 @@ func (r *Registry) loadAgent(ctx context.Context, agentID, threadID string, load
 		return nil, nil, clientErrorf(ErrAgentNotFound, "agent %q not found", agentID)
 	}
 
+	// Warm path: reuse in-memory harness when session MCP is not being
+	// re-bound (resume with a new server list needs a fresh tool catalog).
+	if threadID != "" && len(sessionMCP) == 0 {
+		if v, ok := r.liveHarnesses.Load(threadID); ok {
+			if h, ok := v.(*tacklr.AgentHarness); ok {
+				return h, &spec, nil
+			}
+		}
+	}
+	if threadID != "" && len(sessionMCP) > 0 {
+		r.DropLiveHarness(threadID)
+	}
+
 	store := r.store
 	if spec.Store != nil {
 		store = spec.Store
@@ -450,6 +520,9 @@ func (r *Registry) loadAgent(ctx context.Context, agentID, threadID string, load
 		h = tacklr.NewAgent(ctx, opts)
 	}
 
+	if threadID != "" {
+		r.liveHarnesses.Store(threadID, h)
+	}
 	return h, &spec, nil
 }
 

@@ -14,7 +14,6 @@ import (
 	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/skills"
 	"github.com/ryanaldo34/tacklr/stores"
-	"github.com/ryanaldo34/tacklr/streaming"
 )
 
 // Config is harness limits and prompt settings.
@@ -78,13 +77,10 @@ type AgentOptions struct {
 // when the consumer lags briefly.
 const streamEventBuffer = 64
 
-// NewAgent builds a harness. out is a non-nil sentinel so Run can detect init;
-// the live event bus is installed on Run.
+// NewAgent builds a session-scoped harness. Turn-scoped Runtime is created in Run.
 func NewAgent(ctx context.Context, opts AgentOptions) *AgentHarness {
-	events := make(chan streaming.StreamEvent, streamEventBuffer)
 	sm := session.NewSessionManager()
-	runtime := session.NewRuntime(nil, opts.Store, sm)
-	h := newHarnessBase(opts, runtime, sm, events)
+	h := newHarnessBase(opts, sm)
 	if opts.SessionID != "" {
 		h.sessionId = opts.SessionID
 	}
@@ -92,18 +88,15 @@ func NewAgent(ctx context.Context, opts AgentOptions) *AgentHarness {
 	return h
 }
 
-// newHarnessBase fills shared fields. sm and runtime must share one SessionManager.
-func newHarnessBase(opts AgentOptions, runtime HarnessRuntime, sm *session.SessionManager, out chan streaming.StreamEvent) *AgentHarness {
-	if sm == nil {
-		sm = session.NewSessionManager()
-	}
+// newHarnessBase fills shared fields. Session state lives on sm across turns.
+// sm must be non-nil.
+func newHarnessBase(opts AgentOptions, sm *session.SessionManager) *AgentHarness {
 	h := &AgentHarness{
 		model:                opts.Model,
 		maxWindowSize:        opts.Config.MaxWindowSize,
 		maxTurnRequests:      opts.Config.MaxTurnRequests,
 		instructions:         opts.Config.SystemPrompt,
 		store:                opts.Store,
-		runtime:              runtime,
 		session:              sm,
 		watchDog:             opts.WatchDog,
 		tools:                opts.Tools,
@@ -119,7 +112,6 @@ func newHarnessBase(opts AgentOptions, runtime HarnessRuntime, sm *session.Sessi
 		pendingToolCalls:     make(map[string]stores.PendingToolCall),
 		interruptPayloads:    make(map[string][]byte),
 		parkedWorkersLive:    make(map[string]*AgentHarness),
-		out:                  out,
 		context:              opts.ContextManager,
 		tasks:                opts.ModelTasks,
 		contextPolicy:        opts.ContextPolicy,
@@ -162,20 +154,11 @@ func (a *AgentHarness) injectBuiltinTools() {
 	if a.builtinsInjected {
 		return
 	}
-	if a.session == nil {
-		a.session = session.NewSessionManager()
-	}
-	s := internalSession{
-		sm: a.session,
-		emitPlanTodos: func(plan []streaming.Todo) {
-			session.EmitPlanUpdate(&a.runtime, plan)
-		},
-	}
 	a.tools = append(a.tools,
-		newCreatePlanTool(s),
-		newEditPlanTool(s),
-		newCompleteTodoTool(s),
-		newListPlanTool(s),
+		newCreatePlanTool(a.session),
+		newEditPlanTool(a.session),
+		newCompleteTodoTool(a.session),
+		newListPlanTool(a.session),
 		askUserChoiceTool,
 	)
 	if key := strings.TrimSpace(a.exaAPIKey); key != "" {
@@ -218,7 +201,7 @@ func (a *AgentHarness) SearchNamespace() (uuid.UUID, bool) {
 // planningWriteLock blocks write tools until create_plan has set a plan.
 func (a *AgentHarness) planningWriteLock(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error) {
 	if inv.Tool != nil && inv.Tool.Access != nil && inv.Tool.Access.Contains(WritePermission) &&
-		(a.session == nil || !a.session.HasActivePlan()) {
+		!a.session.HasActivePlan() {
 		return "", fmt.Errorf("%w: write tools are locked until create_plan establishes a todo list", ErrToolPermissionDenied)
 	}
 	return next(ctx, inv)
@@ -269,7 +252,6 @@ func NewAgentFromSession(ctx context.Context, sessionId string, opts AgentOption
 	if opts.Store == nil {
 		return nil, fmt.Errorf("agent harness: store is required to load session %q", sessionId)
 	}
-	events := make(chan StreamEvent, streamEventBuffer)
 	checkpoint, err := opts.Store.LoadSession(ctx, sessionId)
 	if err != nil {
 		return nil, err
@@ -279,8 +261,7 @@ func NewAgentFromSession(ctx context.Context, sessionId string, opts AgentOption
 	if err != nil {
 		return nil, err
 	}
-	runtime := session.NewRuntime(nil, opts.Store, sm)
-	h := newHarnessBase(opts, runtime, sm, events)
+	h := newHarnessBase(opts, sm)
 	h.sessionId = sessionId
 	h.context.Restore(applied.Window)
 	h.interruptToRequester = applied.InterruptToRequester

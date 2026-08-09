@@ -29,7 +29,6 @@ type AgentHarness struct {
 	mcpConfigs      []mcp.MCPConfig
 	instructions    string
 	store           stores.BaseStore
-	runtime         HarnessRuntime
 	watchDog        AgentWatchDog
 	maxWindowSize   int
 	maxTurnRequests int // 0 = unlimited; from Config.MaxTurnRequests
@@ -42,7 +41,7 @@ type AgentHarness struct {
 	// interruptPayloads maps parent tool call id → resume payload for workers.
 	interruptPayloads map[string][]byte
 	// parkedWorkersLive maps spawn_worker tool call id → live child harness.
-	// Durable park metadata is in Runtime state; this map is not checkpointed.
+	// Durable park metadata is in SessionManager state; this map is not checkpointed.
 	parkedWorkersLive map[string]*AgentHarness
 	parkMu            sync.Mutex
 	skillByName       map[string]skills.Skill
@@ -58,12 +57,14 @@ type AgentHarness struct {
 	mcpCleanup       func()
 	mcpInitialized   bool
 	builtinsInjected bool
-	out              chan streaming.StreamEvent
 	context          ContextManager
 	tasks            ModelTasks
 	contextPolicy    ContextPolicy
 	toolRunner       *toolRunner
 	toolResultHooks  *toolResultHookRegistry
+	// runMu serializes Run bodies so mid-turn ReturnFromInterrupt cannot
+	// overlap the prior Run's park/exit path (two concurrent Run loops).
+	runMu sync.Mutex
 }
 
 // SessionID returns the durable session id, or empty if unbound.
@@ -77,9 +78,26 @@ func (a *AgentHarness) Messages() []*Message {
 }
 
 // AskUserQuestion returns the ask_user_choice question for toolCallID, or empty.
-// Used by ACP elicitation.
+// Used by ACP elicitation. Reads session state (survives the turn).
 func (a *AgentHarness) AskUserQuestion(toolCallID string) string {
-	return askUserQuestionFromState(&a.runtime, toolCallID)
+	if toolCallID == "" {
+		return ""
+	}
+	v, ok := a.session.StateGet(askUserQuestionStateKey(toolCallID))
+	if !ok {
+		return ""
+	}
+	s, ok := v.(string)
+	if !ok {
+		// Wrong type means a bug in ask_user_choice stash; surface empty, not a silent cast.
+		slog.Error("ask_user_question state is not a string",
+			"session_id", a.sessionId,
+			"tool_call_id", toolCallID,
+			"type", fmt.Sprintf("%T", v),
+		)
+		return ""
+	}
+	return s
 }
 
 func (a *AgentHarness) restoreMessages(window []*Message) {
@@ -93,7 +111,7 @@ const checkpointSaveTimeout = 10 * time.Second
 // Failures are logged only; the turn still ends. Skips when store or session id
 // is missing. Uses a timeout that outlives turn cancel so abort still checkpoints.
 func (a *AgentHarness) persistSession(ctx context.Context, reason string) {
-	if a == nil || a.store == nil || strings.TrimSpace(a.sessionId) == "" {
+	if a.store == nil || strings.TrimSpace(a.sessionId) == "" {
 		return
 	}
 	// Keep trace context; drop cancel so save can finish after abort.
@@ -128,9 +146,6 @@ func (a *AgentHarness) checkpointSession(ctx context.Context) error {
 	slog.Debug("checkpointing session", "session_id", a.sessionId, "context_window_size", len(msgs))
 	if a.store == nil {
 		return nil
-	}
-	if a.session == nil {
-		a.session = session.NewSessionManager()
 	}
 
 	a.pendingMu.Lock()
@@ -342,10 +357,7 @@ func (a *AgentHarness) addToContext(ctx context.Context, newMsg *Message, out ch
 func (a *AgentHarness) applyBatchToolResultEffect(ctx context.Context, effect ToolResultEffect) error {
 	switch effect {
 	case EffectInstallPlanDocument:
-		doc := ""
-		if a.session != nil {
-			doc = a.session.Plan().Document()
-		}
+		doc := a.session.Plan().Document()
 		ctx, span := telemetry.StartPlanInstallSpan(ctx, a.sessionId)
 		slog.InfoContext(ctx, "installing plan document into context", "session_id", a.sessionId, "area", telemetry.AreaContext)
 		err := a.context.InstallPlanDocument(doc)
@@ -353,12 +365,8 @@ func (a *AgentHarness) applyBatchToolResultEffect(ctx context.Context, effect To
 		return err
 	case EffectHandoff:
 		slog.InfoContext(ctx, "todos completed or plan revised; running handoff", "session_id", a.sessionId, "area", telemetry.AreaContext)
-		var todos []Todo
-		var doc string
-		if a.session != nil {
-			todos = a.session.Plan().Get()
-			doc = a.session.Plan().Document()
-		}
+		todos := a.session.Plan().Get()
+		doc := a.session.Plan().Document()
 		return a.tasks.Handoff(ctx, todos, doc, a.tools, a.constructSystemPrompt())
 	default:
 		return nil
@@ -375,26 +383,18 @@ func (a *AgentHarness) findTool(name, namespace string) *Tool {
 	return a.tools[idx]
 }
 
-// emit sends ev or returns false when ctx is done.
-func emit(ctx context.Context, out chan<- StreamEvent, ev StreamEvent) bool {
-	if out == nil || ctx.Err() != nil {
-		return false
-	}
-	select {
-	case <-ctx.Done():
-		return false
-	case out <- ev:
-		return true
-	}
-}
+// CancelledToolResultContent is written into the context window for tool calls
+// aborted by session cancel or mid-turn steer (user interrupt).
+const CancelledToolResultContent = "cancelled: user interrupted the agent"
 
 // streamChunk maps a model chunk to a harness StreamEvent.
 // Function-call Category and Title are set on a copy; Name stays programmatic
 // so execution and model history keep using the real tool name.
 // Ignores StreamEventComplete (usage only; Run ends the turn).
+// Returns false when the turn context is already cancelled (caller should stop).
 func (a *AgentHarness) streamChunk(ctx context.Context, chunk LLMResponseChunk, out chan<- StreamEvent) bool {
 	if chunk.Type == StreamEventComplete {
-		return true
+		return ctx.Err() == nil
 	}
 	toolCalls := chunk.ToolCalls
 	if chunk.Type == streaming.StreamEventFunctionCall && len(chunk.ToolCalls) > 0 {
@@ -407,14 +407,15 @@ func (a *AgentHarness) streamChunk(ctx context.Context, chunk LLMResponseChunk, 
 	if chunk.Type == StreamEventError && evErr == nil && chunk.Content != "" {
 		evErr = errors.New(chunk.Content)
 	}
-	return emit(ctx, out, StreamEvent{
+	out <- StreamEvent{
 		Type:      chunk.Type,
 		TurnID:    chunk.TurnId,
 		MessageID: chunk.MessageId,
 		Error:     evErr,
 		ToolCalls: toolCalls,
 		Content:   chunk.Content,
-	})
+	}
+	return ctx.Err() == nil
 }
 
 // withToolPresentation fills Category and Title for client-facing tool events.
@@ -429,27 +430,20 @@ func (a *AgentHarness) withToolPresentation(tc ToolCall) ToolCall {
 	return tc
 }
 
-// toolCallKey / toolCallWireID delegate to streaming.ToolCall methods.
-func toolCallKey(tc ToolCall) string    { return tc.Key() }
-func toolCallWireID(tc ToolCall) string { return tc.WireID() }
-
 // stripUnpairedToolCallsAfterInferenceError removes unpaired function_call /
 // tool-result messages so the next prompt has valid Responses pairing.
 // Keeps pending interrupt tool calls. Call only on inference-error exits.
 func (a *AgentHarness) stripUnpairedToolCallsAfterInferenceError() {
-	if a.context == nil {
-		return
-	}
 	a.pendingMu.Lock()
 	keep := make(map[string]struct{}, len(a.pendingToolCalls))
 	for _, p := range a.pendingToolCalls {
 		if p.ToolCall == nil {
 			continue
 		}
-		if id := toolCallWireID(*p.ToolCall); id != "" {
+		if id := p.ToolCall.WireID(); id != "" {
 			keep[id] = struct{}{}
 		}
-		if id := toolCallKey(*p.ToolCall); id != "" {
+		if id := p.ToolCall.Key(); id != "" {
 			keep[id] = struct{}{}
 		}
 	}
@@ -494,7 +488,7 @@ func stripUnpairedToolTurns(window []*Message, keepCallIDs map[string]struct{}) 
 		}
 		if m.Role == RoleAssistant {
 			for _, tc := range m.ToolCalls {
-				if id := toolCallWireID(tc); id != "" {
+				if id := tc.WireID(); id != "" {
 					hasCall[id] = struct{}{}
 				}
 			}
@@ -529,7 +523,7 @@ func stripUnpairedToolTurns(window []*Message, keepCallIDs map[string]struct{}) 
 			}
 			kept := make([]ToolCall, 0, len(m.ToolCalls))
 			for _, tc := range m.ToolCalls {
-				if keepID(toolCallWireID(tc)) {
+				if keepID(tc.WireID()) {
 					kept = append(kept, tc)
 				}
 			}
@@ -567,25 +561,116 @@ func (a *AgentHarness) recordWatchdog(msg *Message) {
 	}
 }
 
-// emitToolResult emits StreamEventToolResult and returns the tool Message for the window.
-func (a *AgentHarness) emitToolResult(ctx context.Context, out chan<- StreamEvent, tc ToolCall, content, status string) *Message {
+// toolResultMessage builds a tool Message (presented tc for wire/stream).
+func (a *AgentHarness) toolResultMessage(tc ToolCall, content, status string) (msg *Message, presented ToolCall) {
 	if status != "" {
 		tc.Status = status
 	}
-	tc = a.withToolPresentation(tc)
-	msg := &Message{
+	presented = a.withToolPresentation(tc)
+	msg = &Message{
 		Role:       RoleTool,
-		ToolCallID: toolCallWireID(tc),
+		ToolCallID: presented.WireID(),
 		Content:    content,
 	}
-	_ = emit(ctx, out, StreamEvent{
-		Type:      StreamEventToolResult,
-		MessageID: toolCallKey(tc),
-		Content:   content,
-		ToolCalls: []ToolCall{tc},
-	})
 	a.recordWatchdog(msg)
+	return msg, presented
+}
+
+// emitToolResult streams a tool result and returns the window Message.
+// Caller decides whether to append to the context window. out is never nil.
+func (a *AgentHarness) emitToolResult(out chan<- StreamEvent, tc ToolCall, content, status string) *Message {
+	msg, presented := a.toolResultMessage(tc, content, status)
+	out <- StreamEvent{
+		Type:      StreamEventToolResult,
+		MessageID: presented.Key(),
+		Content:   content,
+		ToolCalls: []ToolCall{presented},
+	}
 	return msg
+}
+
+// HasOpenToolWork reports pending tool calls, session interrupts, or unpaired
+// assistant tool_calls in the window (parked / mid-cancel state).
+func (a *AgentHarness) HasOpenToolWork() bool {
+	a.pendingMu.Lock()
+	nPending := len(a.pendingToolCalls)
+	a.pendingMu.Unlock()
+	if nPending > 0 || a.session.HasPendingInterrupt() {
+		return true
+	}
+	return len(a.openToolCalls()) > 0
+}
+
+// FinalizeCancelledWork pairs open tools as cancelled into the window only,
+// clears interrupt park, checkpoints. Parked/steer path (no live turn stream).
+func (a *AgentHarness) FinalizeCancelledWork(ctx context.Context) {
+	a.pairCancelledToolResults(nil)
+	a.clearInterruptParkState()
+	a.persistSession(ctx, "steer_finalize")
+}
+
+// openToolCalls returns assistant/pending tool_calls that have no RoleTool result yet.
+func (a *AgentHarness) openToolCalls() []ToolCall {
+	hasOutput := make(map[string]struct{})
+	for _, m := range a.Messages() {
+		if m != nil && m.Role == RoleTool && m.ToolCallID != "" {
+			hasOutput[m.ToolCallID] = struct{}{}
+		}
+	}
+	seen := make(map[string]struct{})
+	var open []ToolCall
+	add := func(tc ToolCall) {
+		id := tc.WireID()
+		if id == "" {
+			return
+		}
+		if _, ok := hasOutput[id]; ok {
+			return
+		}
+		if _, ok := seen[id]; ok {
+			return
+		}
+		seen[id] = struct{}{}
+		open = append(open, tc)
+	}
+	for _, m := range a.Messages() {
+		if m == nil || m.Role != RoleAssistant {
+			continue
+		}
+		for _, tc := range m.ToolCalls {
+			add(tc)
+		}
+	}
+	a.pendingMu.Lock()
+	for _, p := range a.pendingToolCalls {
+		if p.ToolCall != nil {
+			add(*p.ToolCall)
+		}
+	}
+	a.pendingMu.Unlock()
+	return open
+}
+
+// pairCancelledToolResults pairs cancelled results for open tools into the window.
+// When out is non-nil, also streams tool_result events (live turn cancel path).
+func (a *AgentHarness) pairCancelledToolResults(out chan<- StreamEvent) {
+	for _, tc := range a.openToolCalls() {
+		if out != nil {
+			a.context.Add(a.emitToolResult(out, tc, CancelledToolResultContent, "error"))
+			continue
+		}
+		msg, _ := a.toolResultMessage(tc, CancelledToolResultContent, "error")
+		a.context.Add(msg)
+	}
+}
+
+func (a *AgentHarness) clearInterruptParkState() {
+	a.pendingMu.Lock()
+	a.pendingToolCalls = make(map[string]stores.PendingToolCall)
+	a.interruptToRequester = make(map[string]string)
+	a.interruptPayloads = make(map[string][]byte)
+	a.pendingMu.Unlock()
+	a.session.ClearInterrupts()
 }
 
 // discoverAllTools is the MCP discovery entry. Tests may replace it.

@@ -103,12 +103,8 @@ func runTurnStream(
 		return nil
 	}
 
-	// Prefer the turn context: it is cancelled by session/cancel and by parent ctx.
+	// Turn context is cancelled by session/cancel and by parent ctx.
 	turnCtx := stream.TurnContext()
-	if turnCtx == nil {
-		turnCtx = ctx
-	}
-
 	events := stream.Events
 
 	writeFrames := func(frames [][]byte) error {

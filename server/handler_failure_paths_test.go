@@ -43,17 +43,12 @@ type brokenBody struct{}
 func (brokenBody) Read([]byte) (int, error) { return 0, errors.New("body read fail") }
 func (brokenBody) Close() error             { return nil }
 
-func TestEventStream_nilGuards(t *testing.T) {
-	var es *EventStream
-	if es.TurnContext() != nil {
-		t.Fatal("nil TurnContext")
-	}
-	es.Cancel() // no panic
-	es.Close()
-	es = &EventStream{}
+func TestEventStream_closeAndResume(t *testing.T) {
+	// Resume without harness fails; Close is idempotent.
+	es := &EventStream{cancel: func() {}, runCtx: context.Background()}
 	es.Cancel()
 	es.Close()
-	es.Close() // idempotent
+	es.Close()
 	if _, err := es.ResumeInterrupts(context.Background(), nil); err == nil {
 		t.Fatal("want no harness")
 	}
@@ -70,7 +65,7 @@ func TestEventStream_nilGuards(t *testing.T) {
 	done := context.Background()
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
-	es = &EventStream{Harness: h, runCtx: cancelled}
+	es = &EventStream{Harness: h, runCtx: cancelled, cancel: func() {}}
 	ch, err := es.ResumeInterrupts(done, map[string][]byte{})
 	if err != nil {
 		// empty responses may still succeed starting Run with ""
@@ -607,6 +602,8 @@ func TestHandleSessionTurn_nonClientError(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("first: %v", err)
 	}
+	// Drop warm harness so the next turn must LoadSession from the store.
+	r.DropLiveHarness(sid)
 	// Second prompt loads harness checkpoint and fails with non-client error.
 	err = p.handleSessionTurn(context.Background(), env, &parsedRequest{
 		ID: json.RawMessage(`2`), ThreadID: sid, Prompt: "second",
@@ -733,10 +730,14 @@ func TestClientBridge_nilAndFullChannel(t *testing.T) {
 }
 
 func TestRunTurnStream_nilTurnCtxAndOnStreamClosedError(t *testing.T) {
-	// nil turnCtx falls back to parent ctx
+	// Natural stream end: Events closed, turn ctx still live → OnStreamClosed error path.
 	events := make(chan streaming.StreamEvent)
 	close(events)
-	stream := &EventStream{Events: events} // runCtx nil
+	stream := &EventStream{
+		Events: events,
+		runCtx: context.Background(),
+		cancel: func() {},
+	}
 	proto := closedErrProtocol{}
 	err := runTurnStream(context.Background(), ProtocolEnv{}, proto, "t", stream, json.RawMessage(`1`))
 	if err == nil || !strings.Contains(err.Error(), "closed-err") {
