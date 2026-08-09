@@ -2,29 +2,40 @@ package vfs
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 )
 
-// LocalProvider mounts a host directory as the source root of a virtual path.
-type LocalProvider struct {
-	Root string
+// localProvider is a host directory as a mount source (unexported host root).
+type localProvider struct {
+	root string
+}
+
+// NewLocalProvider returns a Provider rooted at a canonical absolute directory.
+func NewLocalProvider(dir string) (Provider, error) {
+	root, err := canonicalizeDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	return localProvider{root: root}, nil
 }
 
 // Validate implements Provider.
-func (p LocalProvider) Validate(ctx context.Context) error {
+func (p localProvider) Validate(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if !filepath.IsAbs(p.Root) {
+	if p.root == "" || !filepath.IsAbs(p.root) {
 		return fmt.Errorf("vfs: local root must be absolute")
 	}
-	root := filepath.Clean(p.Root)
-	info, err := os.Stat(root)
+	info, err := os.Stat(p.root)
 	if err != nil {
-		return fmt.Errorf("vfs: local root %q: %w", root, err)
+		return fmt.Errorf("vfs: local root %q: %w", p.root, err)
 	}
 	if !info.IsDir() {
 		return fmt.Errorf("vfs: local root is not a directory")
@@ -32,8 +43,203 @@ func (p LocalProvider) Validate(ctx context.Context) error {
 	return nil
 }
 
+// Stat implements Provider.
+func (p localProvider) Stat(ctx context.Context, name string) (FileInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return FileInfo{}, err
+	}
+	host, err := p.hostPath(name)
+	if err != nil {
+		return FileInfo{}, err
+	}
+	info, err := os.Lstat(host)
+	if err != nil {
+		return FileInfo{}, mapOSError(err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		if _, err := p.follow(host); err != nil {
+			return FileInfo{}, err
+		}
+	}
+	return fileInfoFromOS(info), nil
+}
+
+// OpenFile implements Provider.
+func (p localProvider) OpenFile(ctx context.Context, name string, flag int, perm fs.FileMode) (File, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	host, err := p.hostPath(name)
+	if err != nil {
+		return nil, err
+	}
+	if flag&os.O_CREATE == 0 {
+		if resolved, err := p.follow(host); err == nil {
+			host = resolved
+		} else if !errors.Is(err, ErrNotExist) {
+			return nil, err
+		}
+	}
+	f, err := os.OpenFile(host, flag, perm)
+	if err != nil {
+		return nil, mapOSError(err)
+	}
+	return &localFile{f: f}, nil
+}
+
+// ReadDir implements Provider.
+func (p localProvider) ReadDir(ctx context.Context, name string) ([]DirEntry, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	host, err := p.hostPath(name)
+	if err != nil {
+		return nil, err
+	}
+	host, err = p.follow(host)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(host)
+	if err != nil {
+		return nil, mapOSError(err)
+	}
+	out := make([]DirEntry, len(entries))
+	for i, e := range entries {
+		out[i] = DirEntry{Name: e.Name(), IsDir: e.IsDir(), Type: e.Type()}
+	}
+	return out, nil
+}
+
+// Remove implements Provider.
+func (p localProvider) Remove(ctx context.Context, name string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	host, err := p.hostPath(name)
+	if err != nil {
+		return err
+	}
+	return mapOSError(os.Remove(host))
+}
+
+// MkdirAll implements Provider.
+func (p localProvider) MkdirAll(ctx context.Context, name string, perm fs.FileMode) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	host, err := p.hostPath(name)
+	if err != nil {
+		return err
+	}
+	return mapOSError(os.MkdirAll(host, perm))
+}
+
+func (p localProvider) hostPath(name string) (string, error) {
+	rel, err := cleanRel(name)
+	if err != nil {
+		return "", err
+	}
+	if rel == "" {
+		return p.root, nil
+	}
+	full := filepath.Join(p.root, filepath.FromSlash(rel))
+	if !within(p.root, full) {
+		return "", ErrInvalidPath
+	}
+	return full, nil
+}
+
+func (p localProvider) follow(host string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(host)
+	if err != nil {
+		return "", mapOSError(err)
+	}
+	if !within(p.root, resolved) {
+		return "", ErrInvalidPath
+	}
+	return resolved, nil
+}
+
+func cleanRel(name string) (string, error) {
+	name = strings.Trim(name, "/")
+	if name == "" || name == "." {
+		return "", nil
+	}
+	cleaned := path.Clean(name)
+	if cleaned == ".." || strings.HasPrefix(cleaned, "../") || path.IsAbs(cleaned) {
+		return "", ErrInvalidPath
+	}
+	for _, seg := range strings.Split(cleaned, "/") {
+		if seg == "" || seg == "." || seg == ".." {
+			return "", ErrInvalidPath
+		}
+	}
+	return cleaned, nil
+}
+
+func within(root, full string) bool {
+	rel, err := filepath.Rel(root, filepath.Clean(full))
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+func canonicalizeDir(dir string) (string, error) {
+	if !filepath.IsAbs(dir) {
+		return "", fmt.Errorf("vfs: local root must be absolute")
+	}
+	dir = filepath.Clean(dir)
+	info, err := os.Stat(dir)
+	if err != nil {
+		return "", fmt.Errorf("vfs: local root %q: %w", dir, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("vfs: local root is not a directory")
+	}
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
+	}
+	return dir, nil
+}
+
+func fileInfoFromOS(info os.FileInfo) FileInfo {
+	return FileInfo{
+		Name:    info.Name(),
+		Size:    info.Size(),
+		Mode:    info.Mode(),
+		ModTime: info.ModTime(),
+		IsDir:   info.IsDir(),
+	}
+}
+
+func mapOSError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if os.IsNotExist(err) {
+		return ErrNotExist
+	}
+	if os.IsExist(err) {
+		return ErrExist
+	}
+	return err
+}
+
+type localFile struct{ f *os.File }
+
+func (f *localFile) Read(p []byte) (int, error)  { return f.f.Read(p) }
+func (f *localFile) Write(p []byte) (int, error) { return f.f.Write(p) }
+func (f *localFile) Close() error                { return f.f.Close() }
+func (f *localFile) Stat() (FileInfo, error) {
+	info, err := f.f.Stat()
+	if err != nil {
+		return FileInfo{}, mapOSError(err)
+	}
+	return fileInfoFromOS(info), nil
+}
+
 // LocalFactory opens LocalProviders under a fixed Base directory.
-// Params: "subpath" (optional, jailed), "session_scoped=true" (optional).
+// Params: "subpath" (optional), "session_scoped=true" (optional).
+// Base stays on the factory (process config); providers never expose host roots.
 type LocalFactory struct {
 	ID   string
 	Base string
@@ -47,17 +253,26 @@ func (f LocalFactory) Open(ctx context.Context, sessionID string, spec MountSpec
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if f.ID == "" || !filepath.IsAbs(f.Base) {
+	if f.ID == "" {
 		return nil, fmt.Errorf("vfs: local factory needs id and absolute base")
 	}
-	base := filepath.Clean(f.Base)
-	root := base
+	root, err := canonicalizeDir(f.Base)
+	if err != nil {
+		return nil, err
+	}
 	if sub := spec.Params["subpath"]; sub != "" {
-		jailed, err := jailSubpath(base, sub)
-		if err != nil {
-			return nil, err
+		if filepath.IsAbs(sub) {
+			return nil, fmt.Errorf("vfs: subpath must be relative")
 		}
-		root = jailed
+		cleaned := filepath.Clean(sub)
+		if cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+			return nil, fmt.Errorf("vfs: subpath escapes base")
+		}
+		joined := filepath.Join(root, cleaned)
+		if !within(root, joined) {
+			return nil, fmt.Errorf("vfs: subpath escapes base")
+		}
+		root = joined
 	}
 	if spec.Params["session_scoped"] == "true" && sessionID != "" {
 		if strings.ContainsAny(sessionID, `/\`) || sessionID == ".." || sessionID == "." {
@@ -68,16 +283,5 @@ func (f LocalFactory) Open(ctx context.Context, sessionID string, spec MountSpec
 	if err := os.MkdirAll(root, 0o750); err != nil {
 		return nil, fmt.Errorf("vfs: mkdir %q: %w", root, err)
 	}
-	return LocalProvider{Root: root}, nil
-}
-
-func jailSubpath(base, sub string) (string, error) {
-	if filepath.IsAbs(sub) {
-		return "", fmt.Errorf("vfs: subpath must be relative")
-	}
-	cleaned := filepath.Clean(sub)
-	if cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("vfs: subpath escapes base")
-	}
-	return filepath.Join(base, cleaned), nil
+	return NewLocalProvider(root)
 }

@@ -3,29 +3,48 @@ package vfs
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"strings"
 )
 
-// S3Provider mounts an S3-compatible bucket (optional key prefix).
-// Client is typically a long-lived shared client from S3Factory.
-type S3Provider struct {
-	Client any
-	Bucket string
-	Prefix string
+// noIO embeds ErrNotSupported for Provider methods not yet implemented.
+type noIO struct{}
+
+func (noIO) Stat(context.Context, string) (FileInfo, error) {
+	return FileInfo{}, ErrNotSupported
+}
+func (noIO) OpenFile(context.Context, string, int, fs.FileMode) (File, error) {
+	return nil, ErrNotSupported
+}
+func (noIO) ReadDir(context.Context, string) ([]DirEntry, error) {
+	return nil, ErrNotSupported
+}
+func (noIO) Remove(context.Context, string) error { return ErrNotSupported }
+func (noIO) MkdirAll(context.Context, string, fs.FileMode) error {
+	return ErrNotSupported
+}
+
+// s3Provider is unexported so hosts cannot read bucket/client fields.
+// Obtain only via S3Factory (as Provider).
+type s3Provider struct {
+	noIO
+	client any
+	bucket string
+	prefix string
 }
 
 // Validate implements Provider.
-func (p S3Provider) Validate(ctx context.Context) error {
+func (p s3Provider) Validate(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if p.Client == nil {
+	if p.client == nil {
 		return fmt.Errorf("vfs: s3 client required")
 	}
-	if strings.TrimSpace(p.Bucket) == "" {
+	if strings.TrimSpace(p.bucket) == "" {
 		return fmt.Errorf("vfs: s3 bucket required")
 	}
-	return validateS3Prefix(p.Prefix)
+	return validateS3Prefix(p.prefix)
 }
 
 func validateS3Prefix(prefix string) error {
@@ -40,8 +59,8 @@ func validateS3Prefix(prefix string) error {
 	return nil
 }
 
-// S3Factory opens S3Providers that share one Client (HTTP pool).
-// Params: "bucket" (or DefaultBucket), "prefix" (optional).
+// S3Factory opens S3 providers that share one Client (HTTP pool).
+// Client/DefaultBucket stay on the factory (process secrets/config), not on mounts.
 type S3Factory struct {
 	ID            string
 	Client        any
@@ -70,5 +89,5 @@ func (f S3Factory) Open(ctx context.Context, _ string, spec MountSpec) (Provider
 	if err := validateS3Prefix(prefix); err != nil {
 		return nil, err
 	}
-	return S3Provider{Client: f.Client, Bucket: bucket, Prefix: prefix}, nil
+	return s3Provider{client: f.Client, bucket: bucket, prefix: prefix}, nil
 }

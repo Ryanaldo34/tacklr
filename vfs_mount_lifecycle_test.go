@@ -8,69 +8,52 @@ import (
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
-// TestVFS_mountLifecycle_sessionOwnedMountsPersistsAcrossReload: mounts are managed
-// on vfs.MountSession (session-level), not AgentHarness. Changes persist via checkpoint.
-func TestVFS_mountLifecycle_sessionOwnedMountsPersistsAcrossReload(t *testing.T) {
+// TestVFS_sessionMountsSurviveCheckpointReload is the harness integration:
+// bootstrap + mid-session mount changes persist through NewAgentFromSession.
+func TestVFS_sessionMountsSurviveCheckpointReload(t *testing.T) {
 	ctx := context.Background()
 	store := stores.NewInMemoryStore()
-	base := t.TempDir()
 	reg := vfs.NewBackendRegistry()
-	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
+	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: t.TempDir()}); err != nil {
 		t.Fatal(err)
 	}
 
 	const sessionID = "sess-vfs-lifecycle"
-	// Host owns the mount session — attach/detach without harness APIs.
 	ms := vfs.NewMountSession(sessionID, reg)
 
 	h := NewAgent(ctx, AgentOptions{
 		SessionID:    sessionID,
 		Store:        store,
 		MountSession: ms,
+		FSRegistry:   reg,
 		FSBootstrap: []vfs.MountSpec{
 			{Point: "/scratch", Profile: "scratch", Params: map[string]string{"subpath": "boot"}},
 		},
-		FSRegistry: reg,
-		Model:      &mockStrategy{},
+		Model: &mockStrategy{},
 	})
-	// Bootstrap applied onto the same MountSession held by the session manager.
-	if len(ms.Specs()) != 1 {
-		// init materializes bootstrap onto session.VFS which is ms
-		if h.session.VFS == nil || len(h.session.VFS.Specs()) != 1 {
-			t.Fatalf("bootstrap mounts = %+v session=%+v", ms.Specs(), h.session.VFS)
-		}
+	if h.session.VFS == nil {
+		t.Fatal("session VFS not bound")
 	}
-
-	// Mid-session attach / detach on the session object (not the harness).
-	mounts := h.session.VFS
-	if err := mounts.Mount(ctx, vfs.MountSpec{
-		Point:    "/work",
-		Profile:  "scratch",
-		ReadOnly: true,
-		Params:   map[string]string{"subpath": "work"},
+	if err := h.session.VFS.Mount(ctx, vfs.MountSpec{
+		Point: "/work", Profile: "scratch", ReadOnly: true,
+		Params: map[string]string{"subpath": "work"},
 	}); err != nil {
-		t.Fatalf("Mount: %v", err)
+		t.Fatal(err)
 	}
-	if err := mounts.Unmount("/scratch"); err != nil {
-		t.Fatalf("Unmount: %v", err)
+	if err := h.session.VFS.Unmount("/scratch"); err != nil {
+		t.Fatal(err)
 	}
-	if len(mounts.Specs()) != 1 || mounts.Specs()[0].Point != "/work" {
-		t.Fatalf("after lifecycle Specs = %+v", mounts.Specs())
-	}
-
-	// Persist without a full Run.
 	if err := h.checkpointSession(ctx); err != nil {
-		t.Fatalf("checkpoint: %v", err)
+		t.Fatal(err)
 	}
 
-	// Restart: new MountSession materializes durable specs from checkpoint.
 	loaded, err := NewAgentFromSession(ctx, sessionID, AgentOptions{
 		Store:      store,
 		FSRegistry: reg,
 		Model:      &mockStrategy{},
 	})
 	if err != nil {
-		t.Fatalf("NewAgentFromSession: %v", err)
+		t.Fatal(err)
 	}
 	specs := loaded.session.VFS.Specs()
 	if len(specs) != 1 || specs[0].Point != "/work" || !specs[0].ReadOnly || specs[0].Params["subpath"] != "work" {

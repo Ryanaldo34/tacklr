@@ -14,6 +14,8 @@ type ProviderFactory interface {
 }
 
 // BackendRegistry maps profile ids to factories (and thus to pooled clients).
+// Hosts Register factories; MountSession opens them. Open is not part of the
+// host-facing API.
 type BackendRegistry struct {
 	mu        sync.RWMutex
 	factories map[string]ProviderFactory
@@ -39,10 +41,9 @@ func (r *BackendRegistry) Register(factory ProviderFactory) error {
 	return nil
 }
 
-// Open resolves spec.Profile and opens a Provider.
-func (r *BackendRegistry) Open(ctx context.Context, sessionID string, spec MountSpec) (Provider, error) {
+func (r *BackendRegistry) open(ctx context.Context, sessionID string, spec MountSpec) (Provider, error) {
 	if r == nil {
-		return nil, fmt.Errorf("vfs: registry required")
+		return nil, errRegistryRequired
 	}
 	if spec.Profile == "" {
 		return nil, ErrInvalidProvider
@@ -56,26 +57,7 @@ func (r *BackendRegistry) Open(ctx context.Context, sessionID string, spec Mount
 	return f.Open(ctx, sessionID, spec)
 }
 
-// Materialize builds a new FS by opening each spec through the registry.
-// Fail-closed: any error aborts (discard the returned FS).
-func Materialize(ctx context.Context, reg *BackendRegistry, sessionID string, specs []MountSpec) (*FS, error) {
-	if reg == nil {
-		return nil, fmt.Errorf("vfs: registry required")
-	}
-	fs := New()
-	for _, spec := range specs {
-		p, err := reg.Open(ctx, sessionID, spec)
-		if err != nil {
-			return nil, err
-		}
-		if err := fs.Mount(ctx, spec, p); err != nil {
-			return nil, err
-		}
-	}
-	return fs, nil
-}
-
-// MergeSpecs concatenates bootstrap then durable specs.
+// MergeSpecs concatenates bootstrap then durable specs (host/harness helper).
 // Duplicate points return ErrAlreadyMounted.
 func MergeSpecs(bootstrap, durable []MountSpec) ([]MountSpec, error) {
 	seen := make(map[string]struct{}, len(bootstrap)+len(durable))

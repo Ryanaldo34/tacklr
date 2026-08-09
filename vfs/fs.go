@@ -9,9 +9,8 @@ import (
 	"sync"
 )
 
-// FS is an isolated virtual filesystem mount namespace.
-// Mount/Unmount update the live table; Specs() is the durable checkpoint view.
-type FS struct {
+// mountTable is the internal mount namespace. Hosts use MountSession only.
+type mountTable struct {
 	mu     sync.RWMutex
 	mounts map[string]mountEntry // key: cleaned virtual mount point
 }
@@ -21,14 +20,12 @@ type mountEntry struct {
 	spec     MountSpec
 }
 
-// New returns an empty mount namespace.
-func New() *FS {
-	return &FS{mounts: make(map[string]mountEntry)}
+func newMountTable() *mountTable {
+	return &mountTable{mounts: make(map[string]mountEntry)}
 }
 
-// Mount attaches provider using the durable MountSpec.
-func (fs *FS) Mount(ctx context.Context, spec MountSpec, provider Provider) error {
-	if fs == nil {
+func (t *mountTable) mount(ctx context.Context, spec MountSpec, provider Provider) error {
+	if t == nil {
 		return ErrInvalidProvider
 	}
 	if provider == nil || strings.TrimSpace(spec.Profile) == "" {
@@ -41,7 +38,6 @@ func (fs *FS) Mount(ctx context.Context, spec MountSpec, provider Provider) erro
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	// Validate errors are already readable; do not wrap again.
 	if err := provider.Validate(ctx); err != nil {
 		return err
 	}
@@ -49,94 +45,95 @@ func (fs *FS) Mount(ctx context.Context, spec MountSpec, provider Provider) erro
 	stored := cloneSpec(spec)
 	stored.Point = cleaned
 
-	fs.mu.Lock()
-	defer fs.mu.Unlock()
-	if _, exists := fs.mounts[cleaned]; exists {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if _, exists := t.mounts[cleaned]; exists {
 		return ErrAlreadyMounted
 	}
-	fs.mounts[cleaned] = mountEntry{provider: provider, spec: stored}
+	t.mounts[cleaned] = mountEntry{provider: provider, spec: stored}
 	return nil
 }
 
-// Unmount detaches the exact mount point. Nested mounts are not removed.
-func (fs *FS) Unmount(point string) error {
-	if fs == nil {
+func (t *mountTable) unmount(point string) error {
+	if t == nil {
 		return ErrNotMounted
 	}
 	cleaned, err := cleanVirtualPath(point)
 	if err != nil {
 		return err
 	}
-	fs.mu.Lock()
-	defer fs.mu.Unlock()
-	if _, exists := fs.mounts[cleaned]; !exists {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if _, exists := t.mounts[cleaned]; !exists {
 		return ErrNotMounted
 	}
-	delete(fs.mounts, cleaned)
+	delete(t.mounts, cleaned)
 	return nil
 }
 
-// Mounts returns a snapshot sorted by point (agent-safe).
-func (fs *FS) Mounts() []MountInfo {
-	if fs == nil {
+func (t *mountTable) infos() []MountInfo {
+	if t == nil {
 		return nil
 	}
-	fs.mu.RLock()
-	defer fs.mu.RUnlock()
-	out := make([]MountInfo, 0, len(fs.mounts))
-	for point, e := range fs.mounts {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	out := make([]MountInfo, 0, len(t.mounts))
+	for point, e := range t.mounts {
 		out = append(out, MountInfo{Point: point, ReadOnly: e.spec.ReadOnly})
 	}
 	slices.SortFunc(out, func(a, b MountInfo) int { return cmp.Compare(a.Point, b.Point) })
 	return out
 }
 
-// Specs returns a durable snapshot for checkpointing (params deep-copied).
-func (fs *FS) Specs() []MountSpec {
-	if fs == nil {
+func (t *mountTable) specs() []MountSpec {
+	if t == nil {
 		return nil
 	}
-	fs.mu.RLock()
-	defer fs.mu.RUnlock()
-	out := make([]MountSpec, 0, len(fs.mounts))
-	for _, e := range fs.mounts {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	out := make([]MountSpec, 0, len(t.mounts))
+	for _, e := range t.mounts {
 		out = append(out, cloneSpec(e.spec))
 	}
 	slices.SortFunc(out, func(a, b MountSpec) int { return cmp.Compare(a.Point, b.Point) })
 	return out
 }
 
-// Lookup finds the longest covering mount and the path relative to it.
-func (fs *FS) Lookup(virtualPath string) (MountInfo, string, error) {
-	if fs == nil {
-		return MountInfo{}, "", ErrNotMounted
-	}
-	fs.mu.RLock()
-	defer fs.mu.RUnlock()
-	return fs.lookup(virtualPath)
-}
-
-func (fs *FS) lookup(virtualPath string) (MountInfo, string, error) {
-	cleaned, err := cleanVirtualPath(virtualPath)
+func (t *mountTable) lookup(virtualPath string) (MountInfo, string, error) {
+	_, point, rel, ro, err := t.resolve(virtualPath)
 	if err != nil {
 		return MountInfo{}, "", err
 	}
+	return MountInfo{Point: point, ReadOnly: ro}, rel, nil
+}
+
+func (t *mountTable) resolve(virtualPath string) (p Provider, point, rel string, readOnly bool, err error) {
+	if t == nil {
+		return nil, "", "", false, ErrNotMounted
+	}
+	cleaned, err := cleanVirtualPath(virtualPath)
+	if err != nil {
+		return nil, "", "", false, err
+	}
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
 	var bestPoint string
 	var best mountEntry
 	found := false
-	for point, e := range fs.mounts {
-		if point != "/" && cleaned != point && !strings.HasPrefix(cleaned, point+"/") {
+	for mp, e := range t.mounts {
+		if mp != "/" && cleaned != mp && !strings.HasPrefix(cleaned, mp+"/") {
 			continue
 		}
-		if !found || len(point) > len(bestPoint) {
-			bestPoint, best, found = point, e, true
+		if !found || len(mp) > len(bestPoint) {
+			bestPoint, best, found = mp, e, true
 		}
 	}
 	if !found {
-		return MountInfo{}, "", ErrNotMounted
+		return nil, "", "", false, ErrNotMounted
 	}
-	rel := strings.TrimPrefix(strings.TrimPrefix(cleaned, bestPoint), "/")
-	return MountInfo{Point: bestPoint, ReadOnly: best.spec.ReadOnly}, rel, nil
+	rel = strings.TrimPrefix(strings.TrimPrefix(cleaned, bestPoint), "/")
+	return best.provider, bestPoint, rel, best.spec.ReadOnly, nil
 }
 
 func cleanVirtualPath(s string) (string, error) {
@@ -144,4 +141,21 @@ func cleanVirtualPath(s string) (string, error) {
 		return "", ErrInvalidPath
 	}
 	return path.Clean(s), nil
+}
+
+func materialize(ctx context.Context, reg *BackendRegistry, sessionID string, specs []MountSpec) (*mountTable, error) {
+	if reg == nil {
+		return nil, errRegistryRequired
+	}
+	t := newMountTable()
+	for _, spec := range specs {
+		p, err := reg.open(ctx, sessionID, spec)
+		if err != nil {
+			return nil, err
+		}
+		if err := t.mount(ctx, spec, p); err != nil {
+			return nil, err
+		}
+	}
+	return t, nil
 }

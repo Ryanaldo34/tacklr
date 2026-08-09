@@ -1,32 +1,29 @@
-// Package vfs is Tacklr's virtual filesystem mount layer.
+// Package vfs is Tacklr's virtual filesystem: session mounts and path I/O.
 //
-// # Surface
+// # Public surface (hosts)
 //
-//   - MountSession — session-owned mount table (attach/detach for the session life)
-//   - FS — underlying Unix-style mount namespace (usually behind MountSession)
-//   - MountSpec — durable, secret-free mount description (checkpoint-safe)
-//   - BackendRegistry + ProviderFactory — process-level profiles and pools
-//   - Materialize — rebuild a live FS from specs after restart
-//   - LocalFactory / S3Factory — common backends; S3 shares one client per profile
+//   - MountSession — session-owned mount table + virtual-path I/O
+//   - BackendRegistry + LocalFactory / S3Factory — process profiles and pools
+//   - MountSpec / MountInfo — durable and agent-safe mount descriptions
+//   - Provider / ProviderFactory — implement custom backends
+//   - File, FileInfo, DirEntry — I/O result types
+//   - DetectMediaType — media-type hint for future content IR
+//   - Sentinel errors (ErrNotMounted, ErrReadOnly, …)
 //
-// Hosts manage mounts on MountSession for the whole session lifecycle. Specs()
-// is the durable view written into session checkpoints; restarts rehydrate via
-// Materialize with the same registry profiles (not credentials in JSON). The
-// agent harness does not own attach/detach — it only checkpoints Specs.
+// Hosts should not need anything else. Mount tables, host roots, and bucket
+// details stay inside providers and the unexported mount table.
 //
-// File operations (Open, Read, Write, …), content IR, and agent tools are out of
-// scope here; they will use this mount table without changing how hosts attach
-// sources.
+// # Path I/O
 //
-// # Security
+// Absolute virtual paths only, via MountSession:
 //
-// Hosts register factories with real roots and credentials. Agents only see
-// virtual paths. MountInfo never exposes host paths, buckets, or profiles.
-// MountSpec stores profile ids and non-secret params only.
+//	Stat, Open, ReadFile, WriteFile, ReadDir, Remove, MkdirAll
 //
-// # Mount rules
+// Read-only mounts reject mutating ops with ErrReadOnly. Local paths are jailed
+// under the provider root (including symlink evaluation).
 //
-// Absolute POSIX virtual paths; unique exact points; nested mounts allowed;
-// Lookup uses longest-prefix with segment boundaries; ReadOnly is recorded on
-// the spec (enforced with file ops).
+// # Content IR (future)
+//
+// Ops return raw bytes/streams. DetectMediaType(path, sample) is the hook for
+// codecs; TextDocument IR is not wired into ReadFile yet.
 package vfs
