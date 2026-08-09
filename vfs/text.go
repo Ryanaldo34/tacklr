@@ -9,10 +9,10 @@ import (
 // TextCodec decodes UTF-8 text and text-like media types into *TextDocument.
 type TextCodec struct{}
 
-// MediaTypes lists types this codec registers (derived from the extension map).
-// Lookup also falls back to TextCodec for any unregistered text-like type.
+// MediaTypes is the set of extension-map types this codec claims at registration.
+// Unregistered text-like types still fall back to TextCodec in ContentRegistry.Decode.
 func (TextCodec) MediaTypes() []string {
-	return mediaTypesFromExtMap()
+	return textMediaTypes
 }
 
 // Decode builds a TextDocument from data. mediaType is the caller's detection result.
@@ -29,14 +29,5 @@ func (TextCodec) Decode(ctx context.Context, path, mediaType string, data []byte
 	if mediaType == "" || mediaType == "application/octet-stream" {
 		mediaType = "text/plain"
 	}
-	return NewTextDocument(path, mediaType, "utf-8", bytesToStringOwned(data)), nil
-}
-
-// bytesToStringOwned reinterprets b as a string without copying. The Document
-// becomes the sole owner; b must not be written again.
-func bytesToStringOwned(b []byte) string {
-	if len(b) == 0 {
-		return ""
-	}
-	return unsafe.String(unsafe.SliceData(b), len(b))
+	return NewTextDocument(path, mediaType, "utf-8", unsafe.String(unsafe.SliceData(data), len(data))), nil
 }

@@ -35,7 +35,27 @@ Package: [`github.com/ryanaldo34/tacklr/vfs`](https://pkg.go.dev/github.com/ryan
 | **Document IR** | Structured view of a file (lines today; blocks/styles later) |
 | **Codec** | Bytes ↔ Document by media type |
 
-Mental model: **mounts are the filesystem**; **IR is a checkout of one file**. Edit the checkout, then write it back as bytes. The IR itself is not stored on disk.
+Mental model: **mounts are the filesystem**; **IR is a checkout of one file**. The session holds an optional **page cache** of textual IR with write-back; the **backend** is source of truth after `Sync`.
+
+### Session cache and durability
+
+| Layer | Role |
+|-------|------|
+| Content cache | Internal session map of textual IR (clean/dirty); not part of the public API |
+| `WriteDocument` | Stages dirty IR (**no** backend Put yet) |
+| `Sync` / `SyncAll` | Flushes dirty paths to the backend (only flush knobs hosts need) |
+| Harness checkpoint | `SyncAll`, then saves **mount Specs only** |
+| Crash before Sync | Dirty edits lost; last successful Sync wins |
+
+```text
+ReadText → miss → Get → cache clean → clone
+WriteDocument → dirty (backend unchanged)
+ReadText → dirty hit → clone (no Get)
+SyncAll → Put → clean
+checkpoint → SyncAll → save Specs
+```
+
+`WriteFile` is write-through and drops any cached IR for that path.
 
 ---
 
@@ -136,15 +156,17 @@ Raw `ReadFile` / `WriteFile` stay byte-only and do not build IR.
 | Max line size | 1 MiB (`MaxLineBytes`) when streaming lines |
 | Full read buffer | When `File.Stat` reports size: one allocation + `ReadFull`; oversize rejected before body |
 | IR footprint | ~1× content + line-offset index; decode reuses the read buffer as the string body |
-| **ReadLines** | Streams; keeps only `[start,end)`; stops after last needed line |
-| **WriteFile / WriteDocument** | Provider `PutFile` when available (one S3 `Put`, direct local write); no Open→buffer→Put for full writes |
+| **ReadLines** | Uses cache if present; else streams window only |
+| **WriteDocument** | Write-back cache; flush with `Sync` / `SyncAll` |
+| **WriteFile** | Write-through backend; drop IR cache for path |
 
 Tool guidance:
 
 | Need | API |
 |------|-----|
-| Show / cite a line window | `ReadLines(ctx, path, start, end)` |
-| Edit then save | `ReadText` → mutate → `WriteDocument` |
+| Line window | `ReadLines` |
+| Edit | `ReadText` → mutate → `WriteDocument` → checkpoint/`SyncAll` |
+| Flush now | `Sync` / `SyncAll` |
 | Raw bytes | `ReadFile` / `WriteFile` |
 
 ### Codec routing

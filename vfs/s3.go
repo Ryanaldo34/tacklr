@@ -370,13 +370,8 @@ type s3ReadFile struct {
 
 func (f *s3ReadFile) Read(p []byte) (int, error) { return f.body.Read(p) }
 func (f *s3ReadFile) Write([]byte) (int, error)  { return 0, fmt.Errorf("vfs: read-only file") }
-func (f *s3ReadFile) Close() error {
-	if f.body == nil {
-		return nil
-	}
-	return f.body.Close()
-}
-func (f *s3ReadFile) Stat() (FileInfo, error) { return f.info, nil }
+func (f *s3ReadFile) Close() error               { return f.body.Close() }
+func (f *s3ReadFile) Stat() (FileInfo, error)    { return f.info, nil }
 
 type s3WriteFile struct {
 	ctx context.Context

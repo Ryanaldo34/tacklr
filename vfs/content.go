@@ -31,8 +31,8 @@ func NewContentRegistry() *ContentRegistry {
 
 // Register adds or replaces codec bindings for each of c.MediaTypes().
 func (r *ContentRegistry) Register(c Codec) error {
-	if r == nil || c == nil {
-		return fmt.Errorf("vfs: register requires registry and codec")
+	if c == nil {
+		return fmt.Errorf("vfs: codec required")
 	}
 	types := c.MediaTypes()
 	if len(types) == 0 {
@@ -51,46 +51,30 @@ func (r *ContentRegistry) Register(c Codec) error {
 	return nil
 }
 
-// Lookup returns the codec for mediaType, or TextCodec for text-like types, or ErrNoCodec.
-func (r *ContentRegistry) Lookup(mediaType string) (Codec, error) {
-	if r == nil {
-		return nil, fmt.Errorf("vfs: content registry required")
-	}
+// Decode looks up a codec for mediaType and decodes data.
+func (r *ContentRegistry) Decode(ctx context.Context, path, mediaType string, data []byte) (Document, error) {
 	r.mu.RLock()
 	c, ok := r.codecs[mediaType]
 	r.mu.RUnlock()
-	if ok {
-		return c, nil
-	}
-	if isTextLike(mediaType) {
-		return TextCodec{}, nil
-	}
-	return nil, ErrNoCodec
-}
-
-// Decode looks up a codec for mediaType and decodes data.
-func (r *ContentRegistry) Decode(ctx context.Context, path, mediaType string, data []byte) (Document, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	c, err := r.Lookup(mediaType)
-	if err != nil {
-		return nil, err
+	if !ok {
+		if !isTextLike(mediaType) {
+			return nil, ErrNoCodec
+		}
+		c = TextCodec{}
 	}
 	return c.Decode(ctx, path, mediaType, data)
 }
 
 // DefaultContentRegistry returns the process-wide registry with TextCodec registered.
-// Safe for concurrent use; do not mutate after first use unless the host owns that policy.
 func DefaultContentRegistry() *ContentRegistry {
-	return defaultContentRegistry()
+	return defaultContentRegistry
 }
 
-var defaultContentRegistry = sync.OnceValue(func() *ContentRegistry {
+var defaultContentRegistry = func() *ContentRegistry {
 	r := NewContentRegistry()
 	_ = r.Register(TextCodec{})
 	return r
-})
+}()
 
 // DetectMediaType returns a best-effort media type for IR codec routing.
 //
@@ -141,17 +125,12 @@ func sniffBytes(sample []byte) string {
 		return mt
 	}
 	// DetectContentType often returns octet-stream for plain source without BOM.
-	if utf8.Valid(sample) && !bytesContainNUL(sample) {
+	if utf8.Valid(sample) && bytes.IndexByte(sample, 0) < 0 {
 		return "text/plain"
 	}
 	return "application/octet-stream"
 }
 
-func bytesContainNUL(b []byte) bool {
-	return bytes.IndexByte(b, 0) >= 0
-}
-
-// isTextLike reports whether an unregistered media type may still use TextCodec.
 func isTextLike(mediaType string) bool {
 	if strings.HasPrefix(mediaType, "text/") {
 		return true
@@ -165,23 +144,20 @@ func isTextLike(mediaType string) bool {
 	}
 }
 
-// mediaTypesFromExtMap returns unique media types from the extension map (cached).
-func mediaTypesFromExtMap() []string {
-	return textCodecMediaTypes()
-}
+// textMediaTypes is the unique set of extension-map media types for TextCodec registration.
+var textMediaTypes []string
 
-var textCodecMediaTypes = sync.OnceValue(func() []string {
+func init() {
 	seen := make(map[string]struct{}, len(extMediaTypes))
-	out := make([]string, 0, len(extMediaTypes))
+	textMediaTypes = make([]string, 0, len(extMediaTypes))
 	for _, mt := range extMediaTypes {
 		if _, ok := seen[mt]; ok {
 			continue
 		}
 		seen[mt] = struct{}{}
-		out = append(out, mt)
+		textMediaTypes = append(textMediaTypes, mt)
 	}
-	return out
-})
+}
 
 func errFileExceeds(limit int) error {
 	return fmt.Errorf("%w (max %d bytes)", ErrTooLarge, limit)

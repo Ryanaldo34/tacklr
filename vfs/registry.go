@@ -28,8 +28,8 @@ func NewBackendRegistry() *BackendRegistry {
 
 // Register adds or replaces a factory under factory.Profile().
 func (r *BackendRegistry) Register(factory ProviderFactory) error {
-	if r == nil || factory == nil {
-		return fmt.Errorf("vfs: register requires registry and factory")
+	if factory == nil {
+		return fmt.Errorf("vfs: factory required")
 	}
 	id := factory.Profile()
 	if id == "" {
@@ -42,9 +42,6 @@ func (r *BackendRegistry) Register(factory ProviderFactory) error {
 }
 
 func (r *BackendRegistry) open(ctx context.Context, sessionID string, spec MountSpec) (Provider, error) {
-	if r == nil {
-		return nil, errRegistryRequired
-	}
 	if spec.Profile == "" {
 		return nil, ErrInvalidProvider
 	}

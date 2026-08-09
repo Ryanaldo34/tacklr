@@ -25,5 +25,4 @@ var (
 	ErrTooLarge       = errors.New("vfs: file too large")
 
 	errRegistryRequired = errors.New("vfs: registry required")
-	errNilMountSession  = errors.New("vfs: nil mount session")
 )

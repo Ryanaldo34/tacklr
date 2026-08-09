@@ -347,8 +347,8 @@ func TestTextDocument_lines(t *testing.T) {
 	}
 }
 
-// TestDocument_session is the IR + I/O outcome test: mount, stream window, edit
-// write-back, codec reject, read-only (one session, no mocks).
+// TestDocument_session is the IR + I/O outcome test: mount, stream window, cache
+// write-back, Sync, revalidation, codec reject, read-only (one session, no mocks).
 func TestDocument_session(t *testing.T) {
 	ctx := t.Context()
 	base := t.TempDir()
@@ -385,7 +385,7 @@ func TestDocument_session(t *testing.T) {
 		t.Fatalf("ReadLines OOR: %v", err)
 	}
 
-	// Full IR edit + write-back
+	// Write-back: WriteDocument does not touch backend until Sync
 	if err := ms.WriteFile(ctx, "/work/note.txt", []byte("a\nb\nc\n")); err != nil {
 		t.Fatal(err)
 	}
@@ -405,12 +405,40 @@ func TestDocument_session(t *testing.T) {
 	if err := ms.WriteDocument(ctx, text); err != nil {
 		t.Fatal(err)
 	}
+	// Backend still original until Sync
 	raw, err := ms.ReadFile(ctx, "/work/note.txt")
-	if err != nil || string(raw) != "a\nB\nC\nD\n" {
-		t.Fatalf("after write = %q err=%v", raw, err)
+	if err != nil || string(raw) != "a\nb\nc\n" {
+		t.Fatalf("before Sync backend = %q err=%v", raw, err)
 	}
-	if again, err := ms.ReadText(ctx, "/work/note.txt"); err != nil || again.Text() != "a\nB\nC\nD\n" {
-		t.Fatalf("reopen err=%v", err)
+	// Second edit from cache (no need to re-read backend)
+	text2, err := ms.ReadText(ctx, "/work/note.txt")
+	if err != nil || text2.Text() != "a\nB\nC\nD\n" {
+		t.Fatalf("cached read = %q err=%v", text2.Text(), err)
+	}
+	_ = text2.SetLine(1, "A")
+	if err := ms.WriteDocument(ctx, text2); err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.SyncAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = ms.ReadFile(ctx, "/work/note.txt")
+	if err != nil || string(raw) != "A\nB\nC\nD\n" {
+		t.Fatalf("after Sync = %q err=%v", raw, err)
+	}
+
+	// Revalidation: external change (different size) invalidates clean cache
+	if err := ms.WriteFile(ctx, "/work/ext.txt", []byte("one\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ms.ReadText(ctx, "/work/ext.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(base, "ext.txt"), []byte("two-lines\nlonger\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if again, err := ms.ReadText(ctx, "/work/ext.txt"); err != nil || again.Text() != "two-lines\nlonger\n" {
+		t.Fatalf("revalidate = %q err=%v", again.Text(), err)
 	}
 
 	// Extension routing + rejects

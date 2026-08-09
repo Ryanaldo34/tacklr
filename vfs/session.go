@@ -20,23 +20,26 @@ type filePutter interface {
 	PutFile(ctx context.Context, name string, r io.Reader, size int64) error
 }
 
-// MountSession is the session-owned virtual filesystem: mount table + path I/O.
+// MountSession is the session-owned virtual filesystem: mount table + path I/O
+// plus a session-local textual IR cache (write-back until Sync).
 //
 // Hosts attach/detach mounts here (not on the agent harness). BackendRegistry is
 // process-scoped; this type holds the live per-session tree. Specs() is what the
-// harness checkpoints.
+// harness checkpoints (mount table only — not file content).
 //
-// The underlying mount table is unexported — callers only see Specs, Infos, and path ops.
+// Dirty document edits flush via Sync / SyncAll (harness checkpoint calls SyncAll).
+// Backend remains source of truth after a successful flush.
 type MountSession struct {
-	mu  sync.Mutex
-	id  string
-	reg *BackendRegistry
-	tab *mountTable
+	mu    sync.Mutex
+	id    string
+	reg   *BackendRegistry
+	tab   *mountTable
+	cache *contentCache
 }
 
 // NewMountSession binds a session id to a process registry.
 func NewMountSession(sessionID string, reg *BackendRegistry) *MountSession {
-	return &MountSession{id: sessionID, reg: reg, tab: newMountTable()}
+	return &MountSession{id: sessionID, reg: reg, tab: newMountTable(), cache: newContentCache()}
 }
 
 func (m *MountSession) table() *mountTable {
@@ -46,14 +49,13 @@ func (m *MountSession) table() *mountTable {
 }
 
 // Materialize replaces the live tree from specs. On error the previous tree is kept.
+// Clears the content cache (entries were bound to the previous mount set).
 func (m *MountSession) Materialize(ctx context.Context, specs []MountSpec) error {
-	if m == nil {
-		return errNilMountSession
-	}
 	if len(specs) == 0 {
 		m.mu.Lock()
 		m.tab = newMountTable()
 		m.mu.Unlock()
+		m.cache.clear()
 		return nil
 	}
 	if m.reg == nil {
@@ -66,14 +68,12 @@ func (m *MountSession) Materialize(ctx context.Context, specs []MountSpec) error
 	m.mu.Lock()
 	m.tab = next
 	m.mu.Unlock()
+	m.cache.clear()
 	return nil
 }
 
 // Mount attaches a backend at spec.Point for the rest of the session life.
 func (m *MountSession) Mount(ctx context.Context, spec MountSpec) error {
-	if m == nil {
-		return errNilMountSession
-	}
 	if m.reg == nil {
 		return errRegistryRequired
 	}
@@ -84,44 +84,33 @@ func (m *MountSession) Mount(ctx context.Context, spec MountSpec) error {
 	return m.table().mount(ctx, spec, p)
 }
 
-// Unmount detaches the mount at point.
+// Unmount detaches the mount at point and drops cache entries under that point.
 func (m *MountSession) Unmount(point string) error {
-	if m == nil {
-		return errNilMountSession
+	if err := m.table().unmount(point); err != nil {
+		return err
 	}
-	return m.table().unmount(point)
+	m.cache.removePrefix(point)
+	return nil
 }
 
 // Specs returns the durable mount table (checkpoint-safe; no host paths or secrets).
 func (m *MountSession) Specs() []MountSpec {
-	if m == nil {
-		return nil
-	}
 	return m.table().specs()
 }
 
 // Infos returns agent-safe mount points (point + read-only only).
 func (m *MountSession) Infos() []MountInfo {
-	if m == nil {
-		return nil
-	}
 	return m.table().infos()
 }
 
 // Lookup resolves a virtual path (no provider or host path exposure).
 func (m *MountSession) Lookup(virtualPath string) (MountInfo, string, error) {
-	if m == nil {
-		return MountInfo{}, "", errNilMountSession
-	}
 	return m.table().lookup(virtualPath)
 }
 
 func (m *MountSession) at(ctx context.Context, virtualPath string, write bool) (Provider, string, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, "", err
-	}
-	if m == nil {
-		return nil, "", errNilMountSession
 	}
 	p, _, rel, ro, err := m.table().resolve(virtualPath)
 	if err != nil {
@@ -188,14 +177,18 @@ func (m *MountSession) ReadFile(ctx context.Context, virtualPath string) ([]byte
 }
 
 // WriteFile creates or truncates a file (fails on read-only mounts).
-// Prefer provider PutFile (single Put / write) when available.
+// Write-through to the backend, then drops any cached IR for the path.
 func (m *MountSession) WriteFile(ctx context.Context, virtualPath string, data []byte) error {
-	return m.writeContents(ctx, virtualPath, bytes.NewReader(data), int64(len(data)))
+	if err := m.writeContents(ctx, virtualPath, bytes.NewReader(data), int64(len(data))); err != nil {
+		return err
+	}
+	m.cache.remove(virtualPath)
+	return nil
 }
 
 // writeContents writes exactly size bytes from r to virtualPath.
 func (m *MountSession) writeContents(ctx context.Context, virtualPath string, r io.Reader, size int64) error {
-	if size < 0 || size > int64(MaxReadFileBytes) {
+	if size > int64(MaxReadFileBytes) {
 		return errFileExceeds(MaxReadFileBytes)
 	}
 	p, rel, err := m.at(ctx, virtualPath, true)
@@ -232,13 +225,17 @@ func (m *MountSession) ReadDir(ctx context.Context, virtualPath string) ([]DirEn
 	return p.ReadDir(ctx, rel)
 }
 
-// Remove removes a file or empty directory.
+// Remove removes a file or empty directory and drops any cache entry.
 func (m *MountSession) Remove(ctx context.Context, virtualPath string) error {
 	p, rel, err := m.at(ctx, virtualPath, true)
 	if err != nil {
 		return err
 	}
-	return p.Remove(ctx, rel)
+	if err := p.Remove(ctx, rel); err != nil {
+		return err
+	}
+	m.cache.remove(virtualPath)
+	return nil
 }
 
 // MkdirAll creates a directory and parents.

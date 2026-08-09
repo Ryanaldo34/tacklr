@@ -25,9 +25,6 @@ func newMountTable() *mountTable {
 }
 
 func (t *mountTable) mount(ctx context.Context, spec MountSpec, provider Provider) error {
-	if t == nil {
-		return ErrInvalidProvider
-	}
 	if provider == nil || strings.TrimSpace(spec.Profile) == "" {
 		return ErrInvalidProvider
 	}
@@ -55,9 +52,6 @@ func (t *mountTable) mount(ctx context.Context, spec MountSpec, provider Provide
 }
 
 func (t *mountTable) unmount(point string) error {
-	if t == nil {
-		return ErrNotMounted
-	}
 	cleaned, err := cleanVirtualPath(point)
 	if err != nil {
 		return err
@@ -72,9 +66,6 @@ func (t *mountTable) unmount(point string) error {
 }
 
 func (t *mountTable) infos() []MountInfo {
-	if t == nil {
-		return nil
-	}
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	out := make([]MountInfo, 0, len(t.mounts))
@@ -86,9 +77,6 @@ func (t *mountTable) infos() []MountInfo {
 }
 
 func (t *mountTable) specs() []MountSpec {
-	if t == nil {
-		return nil
-	}
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	out := make([]MountSpec, 0, len(t.mounts))
@@ -108,9 +96,6 @@ func (t *mountTable) lookup(virtualPath string) (MountInfo, string, error) {
 }
 
 func (t *mountTable) resolve(virtualPath string) (p Provider, point, rel string, readOnly bool, err error) {
-	if t == nil {
-		return nil, "", "", false, ErrNotMounted
-	}
 	cleaned, err := cleanVirtualPath(virtualPath)
 	if err != nil {
 		return nil, "", "", false, err
@@ -144,9 +129,6 @@ func cleanVirtualPath(s string) (string, error) {
 }
 
 func materialize(ctx context.Context, reg *BackendRegistry, sessionID string, specs []MountSpec) (*mountTable, error) {
-	if reg == nil {
-		return nil, errRegistryRequired
-	}
 	t := newMountTable()
 	for _, spec := range specs {
 		p, err := reg.open(ctx, sessionID, spec)

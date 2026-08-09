@@ -2,16 +2,17 @@
 //
 // # Public surface (hosts)
 //
-//   - MountSession — mounts + path I/O + OpenDocument / ReadLines / WriteDocument
+//   - MountSession — mounts, path I/O, ReadText / WriteDocument / Sync, ReadLines
 //   - BackendRegistry + LocalFactory / S3Factory + AWSS3 — process profiles and pools
 //   - MountSpec / MountInfo — durable and agent-safe mount descriptions
-//   - Provider / ProviderFactory / S3API — implement custom backends
-//   - File, FileInfo, DirEntry — I/O result types
-//   - Document / Textual / TextDocument — content IR (LLVM of filesystems)
-//   - ContentRegistry + Codec + TextCodec — media-type decode
-//   - DetectMediaType — media-type hint for codec routing
-//   - MaxReadFileBytes / MaxLineBytes — size caps
-//   - Sentinel errors (ErrNotMounted, ErrReadOnly, ErrNoCodec, ErrLineTooLong, …)
+//   - Provider / ProviderFactory / S3API — custom backends
+//   - File, FileInfo, DirEntry — I/O types
+//   - Document / Textual / TextDocument — content IR
+//   - ContentRegistry + Codec + TextCodec — optional custom decode
+//   - DetectMediaType, size-cap constants, sentinel errors
+//
+// Cache, invalidation, and dirty tracking are internal. Hosts use Sync / SyncAll
+// to flush; harness checkpoint calls SyncAll before saving mount Specs.
 //
 // Hosts should not need anything else. Mount tables, host roots, and bucket
 // details stay inside providers and the unexported mount table.
@@ -33,14 +34,14 @@
 //	// Window only (stream; keep returned lines) — prefer for tool read_file
 //	part, err := ms.ReadLines(ctx, "/work/main.go", 1, 51)
 //
-//	// Full IR for edit + write-back
+//	// Full IR for edit; WriteDocument stages dirty cache until Sync
 //	text, err := ms.ReadText(ctx, "/work/main.go")
 //	_ = text.SetLine(2, "changed")
 //	_ = ms.WriteDocument(ctx, text)
+//	_ = ms.SyncAll(ctx) // or harness checkpoint
 //
-// OpenDocument is ReadFile + DetectMediaType + Codec.Decode (single read).
-// WriteFile/WriteDocument use provider PutFile when available (one S3 Put).
-// StyleMeta / Structured are reserved for rich docs and unused by plaintext.
+// Session content cache: clone-on-read, write-back IR, Sync flushes to backend.
+// Checkpoint stores mount Specs only (not file bytes).
 //
 // Longer guide: docs/vfs.md in the repo root.
 package vfs

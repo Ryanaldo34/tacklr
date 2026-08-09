@@ -178,8 +178,13 @@ func (a *AgentHarness) checkpointSession(ctx context.Context) error {
 		}
 		cp.State.SearchContext = raw
 	}
-	// Mount table is session-owned; harness only serializes Specs for durability.
+	// Flush dirty VFS documents to backends, then serialize mount Specs only
+	// (file content is never stored in the checkpoint).
 	if a.session != nil && a.session.VFS != nil {
+		if err := a.session.VFS.SyncAll(ctx); err != nil {
+			telemetry.InstrumentsFromContext(ctx).RecordCheckpointSave(ctx, telemetry.OutcomeError)
+			return err
+		}
 		if specs := a.session.VFS.Specs(); len(specs) > 0 {
 			raw, err := json.Marshal(specs)
 			if err != nil {
