@@ -42,13 +42,24 @@ func NewRuntime(ch chan streaming.StreamEvent, store stores.BaseStore, sm *Sessi
 
 // EmitUpdate sends a non-blocking tool progress update for the current call.
 func (rt Runtime) EmitUpdate(message string) {
-	event := streaming.StreamEvent{
+	select {
+	case rt.out <- streaming.StreamEvent{
 		Type:      streaming.StreamEventToolUpdate,
 		Content:   message,
 		MessageID: rt.CurrentToolCallID,
+	}:
+	default:
 	}
+}
+
+// EmitPlanUpdate sends a non-blocking plan_update stream event.
+func (rt Runtime) EmitPlanUpdate(plan []Todo) {
+	data, _ := json.Marshal(plan)
 	select {
-	case rt.out <- event:
+	case rt.out <- streaming.StreamEvent{
+		Type: streaming.StreamEventPlanUpdate,
+		Data: data,
+	}:
 	default:
 	}
 }
@@ -73,40 +84,29 @@ func (rt Runtime) RaiseInterrupt(kind string, payload []byte) (interrupt.Interru
 	return rt.session.raiseInterrupt(rt.CurrentToolCallID, kind, payload)
 }
 
-// EmitPlanUpdate sends a plan_update stream event (plan tools).
-// rt is the active turn Runtime passed into the tool handler.
-func EmitPlanUpdate(rt *Runtime, plan []Todo) {
-	data, _ := json.Marshal(plan)
-	select {
-	case rt.out <- streaming.StreamEvent{
-		Type: streaming.StreamEventPlanUpdate,
-		Data: data,
-	}:
-	default:
-	}
-}
-
-// HasPendingInterrupt is true when any interrupt is still open.
-func HasPendingInterrupt(rt *Runtime) bool {
-	return rt.session.HasPendingInterrupt()
-}
-
-// ReturnInterrupt resolves a parked interrupt with the host payload.
-func ReturnInterrupt(rt *Runtime, id string, result []byte) (interrupt.Interrupt, error) {
-	return rt.session.returnInterrupt(id, result)
-}
-
 // AdoptInterrupt attaches a child interrupt to the current tool call.
-func AdoptInterrupt(rt *Runtime, intr interrupt.Interrupt) (interrupt.Interrupt, error) {
+func (rt Runtime) AdoptInterrupt(intr interrupt.Interrupt) (interrupt.Interrupt, error) {
 	return rt.session.adoptInterrupt(rt.CurrentToolCallID, intr)
 }
 
 // TakeResolvedInterrupt removes and returns a resolved interrupt if present.
-func TakeResolvedInterrupt(rt *Runtime, id string) (interrupt.Interrupt, bool) {
+func (rt Runtime) TakeResolvedInterrupt(id string) (interrupt.Interrupt, bool) {
 	return rt.session.takeResolvedInterrupt(id)
 }
 
 // PendingInterrupt returns an open interrupt for tool-call id if any.
-func PendingInterrupt(rt *Runtime, id string) (interrupt.Interrupt, bool) {
+func (rt Runtime) PendingInterrupt(id string) (interrupt.Interrupt, bool) {
 	return rt.session.pendingInterrupt(id)
+}
+
+// ReturnInterrupt resolves a parked interrupt with the host payload.
+// Prefer SessionManager.ReturnInterrupt when no turn Runtime is in hand.
+func (rt Runtime) ReturnInterrupt(id string, result []byte) (interrupt.Interrupt, error) {
+	return rt.session.returnInterrupt(id, result)
+}
+
+// HasPendingInterrupt is true when any interrupt is still open.
+// Prefer SessionManager.HasPendingInterrupt when no turn Runtime is in hand.
+func (rt Runtime) HasPendingInterrupt() bool {
+	return rt.session.HasPendingInterrupt()
 }

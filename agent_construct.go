@@ -89,10 +89,8 @@ func NewAgent(ctx context.Context, opts AgentOptions) *AgentHarness {
 }
 
 // newHarnessBase fills shared fields. Session state lives on sm across turns.
+// sm must be non-nil.
 func newHarnessBase(opts AgentOptions, sm *session.SessionManager) *AgentHarness {
-	if sm == nil {
-		sm = session.NewSessionManager()
-	}
 	h := &AgentHarness{
 		model:                opts.Model,
 		maxWindowSize:        opts.Config.MaxWindowSize,
@@ -156,12 +154,11 @@ func (a *AgentHarness) injectBuiltinTools() {
 	if a.builtinsInjected {
 		return
 	}
-	s := internalSession{sm: a.session}
 	a.tools = append(a.tools,
-		newCreatePlanTool(s),
-		newEditPlanTool(s),
-		newCompleteTodoTool(s),
-		newListPlanTool(s),
+		newCreatePlanTool(a.session),
+		newEditPlanTool(a.session),
+		newCompleteTodoTool(a.session),
+		newListPlanTool(a.session),
 		askUserChoiceTool,
 	)
 	if key := strings.TrimSpace(a.exaAPIKey); key != "" {

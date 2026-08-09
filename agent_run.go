@@ -106,7 +106,7 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 						tc.Status = "error"
 						out <- StreamEvent{
 							Type:      StreamEventToolResult,
-							MessageID: toolCallKey(tc),
+							MessageID: tc.Key(),
 							Content:   reason,
 							ToolCalls: []ToolCall{tc},
 						}
@@ -151,7 +151,7 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 					}
 					if chunk.Type == StreamEventFunctionCall {
 						for _, tc := range chunk.ToolCalls {
-							key := toolCallKey(tc)
+							key := tc.Key()
 							if key == "" {
 								continue
 							}
@@ -182,7 +182,7 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 				}
 				executable := make(map[string]struct{}, len(toolCalls))
 				for _, tc := range toolCalls {
-					if key := toolCallKey(tc); key != "" {
+					if key := tc.Key(); key != "" {
 						executable[key] = struct{}{}
 					}
 				}
@@ -194,7 +194,7 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 					tc.Status = "error"
 					out <- StreamEvent{
 						Type:      StreamEventToolResult,
-						MessageID: toolCallKey(tc),
+						MessageID: tc.Key(),
 						Content:   "tool call incomplete",
 						ToolCalls: []ToolCall{tc},
 					}
@@ -243,7 +243,7 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 					if ctx.Err() != nil {
 						return
 					}
-					tcKey := toolCallKey(tc)
+					tcKey := tc.Key()
 					toolCtx, toolSpan := telemetry.StartToolSpan(ctx, tc.Name, tc.Namespace)
 
 					tool := a.findTool(tc.Name, tc.Namespace)

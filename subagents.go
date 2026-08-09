@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ryanaldo34/tacklr/internal/session"
 	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/streaming"
 )
@@ -158,7 +157,7 @@ func (a *AgentHarness) runWorker(ctx context.Context, workerName, task string, r
 
 	// Drop any residual resolved interrupt for this spawn call — resume is
 	// driven by park metadata + stashed resolution payloads, not RaiseInterrupt.
-	_, _ = session.TakeResolvedInterrupt(&runtime, toolCallID)
+	_, _ = runtime.TakeResolvedInterrupt(toolCallID)
 
 	var worker *AgentHarness
 	var closeOnExit bool
@@ -277,7 +276,7 @@ func (a *AgentHarness) runWorker(ctx context.Context, workerName, task string, r
 	// Adopt the same interrupt object onto the parent Runtime under this
 	// spawn_worker tool call id, then return it as an error so the parent
 	// harness parks spawn_worker like any other tool interrupt.
-	_, adoptErr := session.AdoptInterrupt(&runtime, childIntr)
+	_, adoptErr := runtime.AdoptInterrupt(childIntr)
 	if adoptErr == nil {
 		// Resume signal from AdoptInterrupt — unexpected during bubble.
 		return "", fmt.Errorf("worker %q: unexpected resolved interrupt during bubble", workerName)

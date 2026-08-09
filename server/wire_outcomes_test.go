@@ -120,17 +120,16 @@ func TestWireAndConstruct_outcomes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// --- Registry nil / WithTracer / DefaultAgent ---
-	var nr *Registry
-	if nr.DefaultAgent() != "" || nr.HasAgent("x") {
-		t.Fatal("nil registry")
-	}
-	nr.RecordSessionCreated(context.Background())
+	// --- Registry DefaultAgent / options ---
 	_ = NewRegistry(testStore(t), "d", WithTracer(nil), nil)
 	r2 := NewRegistry(testStore(t), "d", WithTracer(nil))
 	if r2.DefaultAgent() != "d" {
 		t.Fatal(r2.DefaultAgent())
 	}
+	if r2.HasAgent("x") {
+		t.Fatal("unknown agent")
+	}
+	r2.RecordSessionCreated(context.Background())
 
 	// --- ClientBridge nil caps ---
 	var bridge *ClientBridge

@@ -111,7 +111,7 @@ const checkpointSaveTimeout = 10 * time.Second
 // Failures are logged only; the turn still ends. Skips when store or session id
 // is missing. Uses a timeout that outlives turn cancel so abort still checkpoints.
 func (a *AgentHarness) persistSession(ctx context.Context, reason string) {
-	if a == nil || a.store == nil || strings.TrimSpace(a.sessionId) == "" {
+	if a.store == nil || strings.TrimSpace(a.sessionId) == "" {
 		return
 	}
 	// Keep trace context; drop cancel so save can finish after abort.
@@ -430,27 +430,20 @@ func (a *AgentHarness) withToolPresentation(tc ToolCall) ToolCall {
 	return tc
 }
 
-// toolCallKey / toolCallWireID delegate to streaming.ToolCall methods.
-func toolCallKey(tc ToolCall) string    { return tc.Key() }
-func toolCallWireID(tc ToolCall) string { return tc.WireID() }
-
 // stripUnpairedToolCallsAfterInferenceError removes unpaired function_call /
 // tool-result messages so the next prompt has valid Responses pairing.
 // Keeps pending interrupt tool calls. Call only on inference-error exits.
 func (a *AgentHarness) stripUnpairedToolCallsAfterInferenceError() {
-	if a.context == nil {
-		return
-	}
 	a.pendingMu.Lock()
 	keep := make(map[string]struct{}, len(a.pendingToolCalls))
 	for _, p := range a.pendingToolCalls {
 		if p.ToolCall == nil {
 			continue
 		}
-		if id := toolCallWireID(*p.ToolCall); id != "" {
+		if id := p.ToolCall.WireID(); id != "" {
 			keep[id] = struct{}{}
 		}
-		if id := toolCallKey(*p.ToolCall); id != "" {
+		if id := p.ToolCall.Key(); id != "" {
 			keep[id] = struct{}{}
 		}
 	}
@@ -495,7 +488,7 @@ func stripUnpairedToolTurns(window []*Message, keepCallIDs map[string]struct{}) 
 		}
 		if m.Role == RoleAssistant {
 			for _, tc := range m.ToolCalls {
-				if id := toolCallWireID(tc); id != "" {
+				if id := tc.WireID(); id != "" {
 					hasCall[id] = struct{}{}
 				}
 			}
@@ -530,7 +523,7 @@ func stripUnpairedToolTurns(window []*Message, keepCallIDs map[string]struct{}) 
 			}
 			kept := make([]ToolCall, 0, len(m.ToolCalls))
 			for _, tc := range m.ToolCalls {
-				if keepID(toolCallWireID(tc)) {
+				if keepID(tc.WireID()) {
 					kept = append(kept, tc)
 				}
 			}
@@ -576,7 +569,7 @@ func (a *AgentHarness) toolResultMessage(tc ToolCall, content, status string) (m
 	presented = a.withToolPresentation(tc)
 	msg = &Message{
 		Role:       RoleTool,
-		ToolCallID: toolCallWireID(presented),
+		ToolCallID: presented.WireID(),
 		Content:    content,
 	}
 	a.recordWatchdog(msg)
@@ -589,7 +582,7 @@ func (a *AgentHarness) emitToolResult(out chan<- StreamEvent, tc ToolCall, conte
 	msg, presented := a.toolResultMessage(tc, content, status)
 	out <- StreamEvent{
 		Type:      StreamEventToolResult,
-		MessageID: toolCallKey(presented),
+		MessageID: presented.Key(),
 		Content:   content,
 		ToolCalls: []ToolCall{presented},
 	}
@@ -599,16 +592,10 @@ func (a *AgentHarness) emitToolResult(out chan<- StreamEvent, tc ToolCall, conte
 // HasOpenToolWork reports pending tool calls, session interrupts, or unpaired
 // assistant tool_calls in the window (parked / mid-cancel state).
 func (a *AgentHarness) HasOpenToolWork() bool {
-	if a == nil {
-		return false
-	}
 	a.pendingMu.Lock()
 	nPending := len(a.pendingToolCalls)
 	a.pendingMu.Unlock()
-	if nPending > 0 {
-		return true
-	}
-	if a.session.HasPendingInterrupt() {
+	if nPending > 0 || a.session.HasPendingInterrupt() {
 		return true
 	}
 	return len(a.openToolCalls()) > 0
@@ -617,24 +604,13 @@ func (a *AgentHarness) HasOpenToolWork() bool {
 // FinalizeCancelledWork pairs open tools as cancelled into the window only,
 // clears interrupt park, checkpoints. Parked/steer path (no live turn stream).
 func (a *AgentHarness) FinalizeCancelledWork(ctx context.Context) {
-	if a == nil {
-		return
-	}
-	if a.context != nil {
-		for _, tc := range a.openToolCalls() {
-			msg, _ := a.toolResultMessage(tc, CancelledToolResultContent, "error")
-			a.context.Add(msg)
-		}
-	}
+	a.pairCancelledToolResults(nil)
 	a.clearInterruptParkState()
 	a.persistSession(ctx, "steer_finalize")
 }
 
 // openToolCalls returns assistant/pending tool_calls that have no RoleTool result yet.
 func (a *AgentHarness) openToolCalls() []ToolCall {
-	if a == nil || a.context == nil {
-		return nil
-	}
 	hasOutput := make(map[string]struct{})
 	for _, m := range a.Messages() {
 		if m != nil && m.Role == RoleTool && m.ToolCallID != "" {
@@ -644,7 +620,7 @@ func (a *AgentHarness) openToolCalls() []ToolCall {
 	seen := make(map[string]struct{})
 	var open []ToolCall
 	add := func(tc ToolCall) {
-		id := toolCallWireID(tc)
+		id := tc.WireID()
 		if id == "" {
 			return
 		}
@@ -675,14 +651,16 @@ func (a *AgentHarness) openToolCalls() []ToolCall {
 	return open
 }
 
-// pairCancelledToolResults streams + window-pairs cancelled results for open tools.
-// out is the live turn stream (never nil).
+// pairCancelledToolResults pairs cancelled results for open tools into the window.
+// When out is non-nil, also streams tool_result events (live turn cancel path).
 func (a *AgentHarness) pairCancelledToolResults(out chan<- StreamEvent) {
-	if a == nil || a.context == nil {
-		return
-	}
 	for _, tc := range a.openToolCalls() {
-		a.context.Add(a.emitToolResult(out, tc, CancelledToolResultContent, "error"))
+		if out != nil {
+			a.context.Add(a.emitToolResult(out, tc, CancelledToolResultContent, "error"))
+			continue
+		}
+		msg, _ := a.toolResultMessage(tc, CancelledToolResultContent, "error")
+		a.context.Add(msg)
 	}
 }
 

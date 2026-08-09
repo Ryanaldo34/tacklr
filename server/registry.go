@@ -99,31 +99,22 @@ type EventStream struct {
 
 // TurnContext is the context for this turn (cancelled by session/cancel or parent).
 func (s *EventStream) TurnContext() context.Context {
-	if s == nil {
-		return nil
-	}
 	return s.runCtx
 }
 
 // Cancelled reports whether the turn context has been cancelled.
 func (s *EventStream) Cancelled() bool {
-	return s != nil && s.runCtx != nil && s.runCtx.Err() != nil
+	return s.runCtx.Err() != nil
 }
 
 // Cancel cancels the turn context so producers stop. Safe to call multiple times.
 // Does not release the harness; call Close after the event pump finishes.
 func (s *EventStream) Cancel() {
-	if s == nil || s.cancel == nil {
-		return
-	}
 	s.cancel()
 }
 
 // Close releases harness resources (idempotent). Call after Cancel or stream end.
 func (s *EventStream) Close() {
-	if s == nil {
-		return
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
@@ -139,11 +130,11 @@ func (s *EventStream) Close() {
 // ResumeInterrupts resolves pending interrupts and returns a new event stream
 // from the same harness (ACP mid-turn elicitation resume).
 func (s *EventStream) ResumeInterrupts(ctx context.Context, responses map[string][]byte) (<-chan streaming.StreamEvent, error) {
-	if s == nil || s.Harness == nil {
+	if s.Harness == nil {
 		return nil, fmt.Errorf("event stream: no harness for resume")
 	}
 	c := s.runCtx
-	if c == nil || c.Err() != nil {
+	if c.Err() != nil {
 		c = ctx
 	}
 	return s.Harness.ReturnFromInterrupt(c, responses)
@@ -224,26 +215,17 @@ func (r *Registry) Register(agentID string, spec AgentSpec) {
 
 // DefaultAgent returns the registry default agent id.
 func (r *Registry) DefaultAgent() string {
-	if r == nil {
-		return ""
-	}
 	return r.defaultAgent
 }
 
 // HasAgent reports whether agentID is registered.
 func (r *Registry) HasAgent(agentID string) bool {
-	if r == nil {
-		return false
-	}
 	_, ok := r.agents[agentID]
 	return ok
 }
 
 // RecordSessionCreated records a session-created metric (called by protocols).
 func (r *Registry) RecordSessionCreated(ctx context.Context) {
-	if r == nil || r.instruments == nil {
-		return
-	}
 	r.instruments.RecordSessionCreated(ctx)
 }
 
@@ -258,9 +240,7 @@ func (r *Registry) ConfigOptions(currentAgent string) []ConfigOption {
 // This is abort-only (ACP session/cancel). It does not start a new turn.
 func (r *Registry) CancelSession(sessionID string) {
 	if h, ok := r.activeTurns.Load(sessionID); ok {
-		if th, ok := h.(*turnHandle); ok && th.cancel != nil {
-			th.cancel()
-		}
+		h.(*turnHandle).cancel()
 	}
 }
 
@@ -270,43 +250,32 @@ func (r *Registry) DropLiveHarness(sessionID string) {
 		return
 	}
 	if v, ok := r.liveHarnesses.LoadAndDelete(sessionID); ok {
-		if h, ok := v.(*tacklr.AgentHarness); ok && h != nil {
-			h.Close()
-		}
+		v.(*tacklr.AgentHarness).Close()
 	}
 }
 
 // waitPriorTurnIfAny cancels any in-flight turn for threadID and waits for it
 // to finish (harness drain + checkpoint). Used so session/prompt while busy
 // steers without concurrent Run on the same session (ACP has no session/steer).
-// cancelled is true when a prior turn was found and waited on (caller should reload).
-func (r *Registry) waitPriorTurnIfAny(ctx context.Context, threadID string) (cancelled bool, err error) {
+func (r *Registry) waitPriorTurnIfAny(ctx context.Context, threadID string) error {
 	if threadID == "" {
-		return false, nil
+		return nil
 	}
 	h, ok := r.activeTurns.Load(threadID)
 	if !ok {
-		return false, nil
+		return nil
 	}
-	th, ok := h.(*turnHandle)
-	if !ok || th == nil {
-		return false, nil
-	}
-	if th.cancel != nil {
-		th.cancel()
-	}
-	if th.done == nil {
-		return true, nil
-	}
+	th := h.(*turnHandle)
+	th.cancel()
 	timer := time.NewTimer(steerWaitTimeout)
 	defer timer.Stop()
 	select {
 	case <-th.done:
-		return true, nil
+		return nil
 	case <-ctx.Done():
-		return true, ctx.Err()
+		return ctx.Err()
 	case <-timer.C:
-		return true, fmt.Errorf("timed out waiting for prior turn on session %q to finish after cancel", threadID)
+		return fmt.Errorf("timed out waiting for prior turn on session %q to finish after cancel", threadID)
 	}
 }
 
@@ -346,7 +315,7 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 	}
 
 	// Steer / single-flight: cancel prior turn and wait for it to finish.
-	if _, err := r.waitPriorTurnIfAny(ctx, threadID); err != nil {
+	if err := r.waitPriorTurnIfAny(ctx, threadID); err != nil {
 		return nil, err
 	}
 
@@ -494,9 +463,7 @@ func (r *Registry) loadAgent(ctx context.Context, agentID, threadID string, load
 	// re-bound (resume with a new server list needs a fresh tool catalog).
 	if threadID != "" && len(sessionMCP) == 0 {
 		if v, ok := r.liveHarnesses.Load(threadID); ok {
-			if h, ok := v.(*tacklr.AgentHarness); ok && h != nil {
-				return h, &spec, nil
-			}
+			return v.(*tacklr.AgentHarness), &spec, nil
 		}
 	}
 	if threadID != "" && len(sessionMCP) > 0 {

@@ -21,12 +21,11 @@ type planToolsFixture struct {
 
 func testPlanTools() planToolsFixture {
 	sm := session.NewSessionManager()
-	s := internalSession{sm: sm}
 	return planToolsFixture{
-		create:   newCreatePlanTool(s),
-		edit:     newEditPlanTool(s),
-		complete: newCompleteTodoTool(s),
-		list:     newListPlanTool(s),
+		create:   newCreatePlanTool(sm),
+		edit:     newEditPlanTool(sm),
+		complete: newCompleteTodoTool(sm),
+		list:     newListPlanTool(sm),
 		store:    sm.Plan(),
 	}
 }
@@ -334,12 +333,12 @@ func TestAskUserChoiceTool_raiseAndResume(t *testing.T) {
 	if !errors.As(err, &intr) {
 		t.Fatalf("expected Interrupt, got %T %v", err, err)
 	}
-	if q := askUserQuestionFromState(&rt, "tc_ask"); q != "Which approach?" {
-		t.Errorf("question state = %q", q)
+	if v, ok := rt.StateGet(askUserQuestionStateKey("tc_ask")); !ok || v != "Which approach?" {
+		t.Errorf("question state = %v ok=%v", v, ok)
 	}
 
 	// Resolve and re-invoke (harness re-execution pattern).
-	if _, err := session.ReturnInterrupt(&rt, "tc_ask", []byte(`{"selectionIdx":1}`)); err != nil {
+	if _, err := rt.ReturnInterrupt("tc_ask", []byte(`{"selectionIdx":1}`)); err != nil {
 		t.Fatal(err)
 	}
 	res, err := askUserChoiceTool.invoke(context.Background(), string(args), rt)
