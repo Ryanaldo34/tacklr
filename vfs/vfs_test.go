@@ -173,24 +173,20 @@ func TestMountSession_localSession(t *testing.T) {
 	}
 }
 
-// TestMountSession_s3NotSupported: S3 mounts succeed; path I/O is not supported yet.
-func TestMountSession_s3NotSupported(t *testing.T) {
+// TestS3Factory_rejectsBadConfig covers factory validation without a live store.
+func TestS3Factory_rejectsBadConfig(t *testing.T) {
 	ctx := t.Context()
-	reg := vfs.NewBackendRegistry()
-	if err := reg.Register(vfs.S3Factory{ID: "s3", Client: struct{}{}, DefaultBucket: "b"}); err != nil {
-		t.Fatal(err)
+	if _, err := (vfs.S3Factory{ID: "s3"}).Open(ctx, "s", vfs.MountSpec{}); err == nil {
+		t.Fatal("nil client")
 	}
-	ms := vfs.NewMountSession("s", reg)
-	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/s3", Profile: "s3", Params: map[string]string{"prefix": "p/"}}); err != nil {
-		t.Fatal(err)
+	// Client is non-nil but bucket/prefix still validated before any API call.
+	if _, err := (vfs.S3Factory{ID: "s3", Client: vfs.AWSS3{}}).Open(ctx, "s", vfs.MountSpec{}); err == nil {
+		t.Fatal("missing bucket")
 	}
-	info, rel, err := ms.Lookup("/s3/key")
-	if err != nil || info.Point != "/s3" || rel != "key" {
-		t.Fatalf("Lookup = %+v rel=%q err=%v", info, rel, err)
-	}
-	// One I/O path is enough — all methods share ErrNotSupported.
-	if _, err := ms.Stat(ctx, "/s3/key"); !errors.Is(err, vfs.ErrNotSupported) {
-		t.Fatalf("Stat: %v", err)
+	if _, err := (vfs.S3Factory{ID: "s3", Client: vfs.AWSS3{}, DefaultBucket: "b"}).Open(ctx, "s", vfs.MountSpec{
+		Params: map[string]string{"prefix": "a/../b"},
+	}); err == nil {
+		t.Fatal("bad prefix")
 	}
 }
 

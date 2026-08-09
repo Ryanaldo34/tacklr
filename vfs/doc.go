@@ -3,9 +3,9 @@
 // # Public surface (hosts)
 //
 //   - MountSession — session-owned mount table + virtual-path I/O
-//   - BackendRegistry + LocalFactory / S3Factory — process profiles and pools
+//   - BackendRegistry + LocalFactory / S3Factory + AWSS3 — process profiles and pools
 //   - MountSpec / MountInfo — durable and agent-safe mount descriptions
-//   - Provider / ProviderFactory — implement custom backends
+//   - Provider / ProviderFactory / S3API — implement custom backends
 //   - File, FileInfo, DirEntry — I/O result types
 //   - DetectMediaType — media-type hint for future content IR
 //   - Sentinel errors (ErrNotMounted, ErrReadOnly, …)
@@ -20,7 +20,8 @@
 //	Stat, Open, ReadFile, WriteFile, ReadDir, Remove, MkdirAll
 //
 // Read-only mounts reject mutating ops with ErrReadOnly. Local paths are jailed
-// under the provider root (including symlink evaluation).
+// under the provider root (including symlink evaluation). S3 uses key prefixes
+// and delimiter listing for virtual directories (MinIO/AWS compatible).
 //
 // # Content IR (future)
 //
