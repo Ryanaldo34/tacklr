@@ -20,6 +20,7 @@ import (
 	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/telemetry"
+	"github.com/ryanaldo34/tacklr/vfs"
 )
 
 // turnHandle tracks one in-flight Registry turn so a follow-on prompt (steer)
@@ -43,6 +44,10 @@ type AgentSpec struct {
 	Store      stores.BaseStore
 	// ExaAPIKey enables built-in web_search and web_fetch (or use process EXA_API_KEY).
 	ExaAPIKey string
+	// FSRegistry resolves MountSpec.Profile (process-scoped). Required when FSBootstrap is set.
+	FSRegistry *vfs.BackendRegistry
+	// FSBootstrap mounts applied on each new/loaded session (merged with checkpoint mounts).
+	FSBootstrap []vfs.MountSpec
 }
 
 // SessionView is the domain view of a wire session (returned by protocols).
@@ -504,15 +509,17 @@ func (r *Registry) loadAgent(ctx context.Context, agentID, threadID string, load
 	mcpConfigs = append(mcpConfigs, sessionMCP...)
 
 	opts := tacklr.AgentOptions{
-		Config:     spec.Config,
-		SessionID:  threadID,
-		Model:      spec.Model,
-		Store:      store,
-		WatchDog:   spec.WatchDog,
-		Tools:      spec.Tools,
-		MCPConfigs: mcpConfigs,
-		SubAgents:  spec.SubAgents,
-		ExaAPIKey:  spec.ExaAPIKey,
+		Config:      spec.Config,
+		SessionID:   threadID,
+		Model:       spec.Model,
+		Store:       store,
+		WatchDog:    spec.WatchDog,
+		Tools:       spec.Tools,
+		MCPConfigs:  mcpConfigs,
+		SubAgents:   spec.SubAgents,
+		ExaAPIKey:   spec.ExaAPIKey,
+		FSRegistry:  spec.FSRegistry,
+		FSBootstrap: spec.FSBootstrap,
 	}
 
 	var h *tacklr.AgentHarness

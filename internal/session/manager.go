@@ -6,11 +6,13 @@ import (
 	"sync"
 
 	"github.com/ryanaldo34/tacklr/interrupt"
+	"github.com/ryanaldo34/tacklr/vfs"
 )
 
 // SessionManager owns durable and live data for one agent harness thread
-// (checkpoint id), not an ACP client session id: plan, user tool state, and
-// interrupts. Knowledge namespace + ResultSet live on brain.SearchContext.
+// (checkpoint id), not an ACP client session id: plan, user tool state,
+// interrupts, and the optional virtual filesystem mount table.
+// Knowledge namespace + ResultSet live on brain.SearchContext.
 // Builtins close over it; user tools use Runtime.
 type SessionManager struct {
 	mu        sync.RWMutex
@@ -18,6 +20,10 @@ type SessionManager struct {
 	userState map[string]any
 	pending   interruptMap
 	resolved  interruptMap
+	// VFS is the session-owned mount table. Hosts attach/detach mounts on this
+	// object (or the same pointer via AgentOptions.MountSession). Nil when unused.
+	// Not a harness concern — the agent only checkpoints Specs() at save time.
+	VFS *vfs.MountSession
 }
 
 // NewSessionManager returns an empty manager ready for use.

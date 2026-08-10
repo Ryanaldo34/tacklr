@@ -1,6 +1,6 @@
 // Command testserver is a local ACP harness for exercising Tacklr’s built-in
 // agent tooling (plan/todos, ask_user_choice, web_search/web_fetch when EXA_API_KEY is set,
-// skills when configured). Default transport is stdio; pass --http for HTTP/WS.
+// skills when configured, VFS at /tmp/tacklr). Default transport is stdio; pass --http for HTTP/WS.
 package main
 
 import (
@@ -23,6 +23,7 @@ import (
 	"github.com/ryanaldo34/tacklr/server"
 	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/telemetry"
+	"github.com/ryanaldo34/tacklr/vfs"
 )
 
 func main() {
@@ -120,8 +121,21 @@ func main() {
 	}
 
 	// Host tools intentionally empty: the harness injects plan builtins,
-	// ask_user_choice, and web_search/web_fetch (when EXA_API_KEY / ExaAPIKey is set).
+	// ask_user_choice, web_search/web_fetch (when EXA_API_KEY is set), and
+	// VFS tools when FSRegistry + FSBootstrap are set.
 	exaKey := strings.TrimSpace(os.Getenv("EXA_API_KEY"))
+
+	// Local VFS: virtual path /tmp/tacklr → host /tmp/tacklr.
+	const vfsRoot = "/tmp/tacklr"
+	if err := os.MkdirAll(vfsRoot, 0o750); err != nil {
+		slog.Error("vfs mkdir failed", "path", vfsRoot, "error", err)
+		os.Exit(1)
+	}
+	fsReg := vfs.NewBackendRegistry()
+	if err := fsReg.Register(vfs.LocalFactory{ID: "local", Base: vfsRoot}); err != nil {
+		slog.Error("vfs register failed", "error", err)
+		os.Exit(1)
+	}
 
 	defaultAgent := "test-agent"
 	reg := server.NewRegistry(store, defaultAgent)
@@ -133,9 +147,11 @@ func main() {
 			SystemPrompt:     "",
 			SkillDirectories: skillDirs,
 		},
-		Model:     model,
-		Tools:     nil,
-		ExaAPIKey: exaKey,
+		Model:       model,
+		Tools:       nil,
+		ExaAPIKey:   exaKey,
+		FSRegistry:  fsReg,
+		FSBootstrap: []vfs.MountSpec{{Point: vfsRoot, Profile: "local"}},
 	})
 
 	slog.Info("harness showcase",
@@ -143,6 +159,7 @@ func main() {
 		"skill_dirs", len(skillDirs),
 		"web_tools", exaKey != "",
 		"host_tools", 0,
+		"vfs_mount", vfsRoot,
 	)
 
 	// Process-local ACP (memory wire store). For durable session/load across
