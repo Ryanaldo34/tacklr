@@ -221,6 +221,7 @@ Optional OpenTelemetry on turns, tools, and retrieval. Bring your own collector 
 |---------|------|
 | `tacklr` | Harness, tools, plan loop, subagents |
 | `vfs` | Virtual filesystem, mounts, content IR ([docs](docs/vfs.md)) |
+| `vfsindex` | Optional mount → brain ingest bridge (VFS and brain stay independent) |
 | `brain` | Knowledge engine |
 | `brain/helixgraph` | Optional graph adapter |
 | `inference` | OpenAI-compatible model client |
@@ -231,6 +232,152 @@ Optional OpenTelemetry on turns, tools, and retrieval. Bring your own collector 
 | `mcp` | MCP config types |
 | `skills` | Skill loading |
 | `telemetry` | OTEL helpers |
+
+---
+
+## Roadmap: agent operating system
+
+Tacklr’s long-term direction is an **agent OS**: a closed virtual world (filesystem + execution + policy) so agents stay efficient, scoped, and operable. Determinism here means **the world the agent can touch is explicit, mediated, and replayable**—not that the model always samples the same tokens.
+
+**Principles we bake in:**
+
+| Principle | Meaning |
+|-----------|---------|
+| **Closed world** | Only mounted virtual paths exist; backends stay opaque |
+| **Single content truth** | Document IR is the agent-facing file; codecs own storage format on flush |
+| **Mediated ops** | Shell, scripts, and tools act through policy—not ambient host authority |
+| **Stable edits** | Content `rev` (hash) for optimistic concurrency on writes |
+| **Few doors** | One edit surface across file types and mounts; discovery can use path tools or a restricted shell |
+| **Checkpointed truth** | Sync IR, then persist session state—not mystery process memory |
+| **Observe then enforce** | Gates on operations *during* a tool call, not only the tool name at the start |
+
+### Feature status
+
+| Area | Status | Notes |
+|------|--------|--------|
+| Planning + handoffs (ACM) | **Shipped** | Plans, todos, context rebuild on complete |
+| Checkpoints / stores | **Shipped** | Conversation, plan, interrupts; Postgres or in-memory |
+| Inference strategy | **Shipped** | OpenAI-compatible stream client |
+| Brain (hybrid + graph hooks) | **Shipped** | Optional; tools only when wired |
+| VFS mounts (local, S3) | **Shipped** | Session `MountSession`, host-owned factories |
+| Content IR (text) | **Shipped** | `TextDocument`, line IR, write-back cache |
+| Dirty session overlay | **Shipped** | `Stat` / `ReadDir` / `Open` / `ReadFile` / `Remove` see write-back before Sync |
+| Content `rev` + edit tools | **Shipped** | `read_lines`, `replace_lines`, `replace_text`, `write`, tree tools when VFS is set |
+| Progressive line windows | **Shipped** | `ReadLines` / `LineWindow` for large text without full IR when needed |
+| Mount → brain index (`vfsindex`) | **Shipped** | Optional; SyncScheduler; async scheduler later |
+| Unified `read` / `replace` for all media | **Planned** | One tool family; codecs for plain + rich docs |
+| Rich document IR (WYSIWYG) | **Planned** | Blocks/runs + style metadata; Word and similar via codecs |
+| FUSE projection of `MountSession` | **Planned** | Host `rg` / `fd` / `ls` on session-visible tree; macOS FSKit/macFUSE, Linux FUSE |
+| Custom agent shell | **Planned** | Real shell process attached to runtime; VFS-backed builtins; no raw host bash as the main path |
+| Sandboxed Python / JS | **Planned** | Guests with `tacklr.fs` / `tacklr.http` only—scraping and mini-programs under policy |
+| Capability broker | **Planned** | Mid-flight allow / deny / ask on `fs` · `net` · `proc` · runtime ops |
+| Linux eBPF / cgroup backstop | **Eventually** | Observe + enforce outside the runtime; correlate to tool sessions |
+| Materialize tree (non-FUSE) | **Eventually** | Export session view for tools without FUSE where useful |
+
+Local **testserver** mounts a local jail at `/tmp/tacklr` when VFS is enabled so agents can exercise mounts and file tools end-to-end.
+
+### Target architecture
+
+How the pieces fit when the agent OS is fully formed. Today’s harness already covers the top of the diagram (turns, plan, tools, VFS IR); lower layers are the roadmap above.
+
+```mermaid
+flowchart TB
+  subgraph harness [Agent harness]
+    Plan[Plan / todos / handoff]
+    Tools[Hard tools: read · replace · write]
+    Ctx[Structured context]
+    CP[Checkpoint + SyncAll]
+  end
+
+  subgraph runtime [Agent runtime]
+    Shell[Custom agent shell]
+    Py[Python guest]
+    JS[JS guest]
+    Broker[Capability broker<br/>allow · deny · ask · limit]
+  end
+
+  subgraph vfs_layer [Virtual filesystem]
+    MS[MountSession]
+    IR[Content IR<br/>text lines · rich blocks + styles]
+    Overlay[Dirty write-back overlay]
+    Codec[Codecs bytes ↔ IR]
+  end
+
+  subgraph project [Host projection optional]
+    FUSE[FUSE / FSKit mount]
+    HostCLIs[rg · fd · ls · find]
+  end
+
+  subgraph backends [Opaque backends]
+    Local[Local jail]
+    S3[S3 / object]
+    Other[Drive / Docs / …]
+  end
+
+  subgraph kernel [Linux backstop eventually]
+    eBPF[eBPF / cgroup / seccomp]
+  end
+
+  Plan --> Tools
+  Plan --> Ctx
+  Tools --> Broker
+  Shell --> Broker
+  Py --> Broker
+  JS --> Broker
+  Broker --> MS
+  MS --> Overlay
+  Overlay --> IR
+  IR --> Codec
+  Codec --> Local
+  Codec --> S3
+  Codec --> Other
+  MS --> FUSE
+  FUSE --> HostCLIs
+  HostCLIs -.->|allowlisted exec| Broker
+  CP --> MS
+  eBPF -.->|observe / enforce| Broker
+  eBPF -.->|jail| backends
+```
+
+### Deterministic control loop (during a tool call)
+
+```mermaid
+sequenceDiagram
+  participant Agent
+  participant Harness
+  participant Broker as Capability broker
+  participant VFS as MountSession + IR
+  participant Backend
+
+  Agent->>Harness: tool / shell / python session
+  Harness->>Broker: session open
+  loop Each privileged op
+    Agent->>Broker: fs.read / net.http / proc.exec / …
+    Broker->>Broker: policy allow · deny · ask
+    alt allowed
+      Broker->>VFS: session-visible I/O
+      VFS->>Backend: on Sync / write-through only
+      Broker-->>Agent: result
+    else deny or human gate
+      Broker-->>Harness: block / interrupt
+    end
+  end
+  Harness->>VFS: SyncAll on checkpoint
+  VFS->>Backend: codecs encode durable bytes
+```
+
+### Intended agent-facing surface (target)
+
+| Role | Mechanism |
+|------|-----------|
+| Discover paths / search text | Restricted shell and/or `rg`·`fd` on FUSE; optional `list` / `stat` |
+| Read IR (+ `rev`) | Single **`read`** (lines or rich document JSON) |
+| Edit IR | **`replace`** / **`write`** with `rev` (plain + WYSIWYG) |
+| Tree mutate | Shell under policy, or thin tools if no shell |
+| Scripts / scrape | Sandboxed **python** / **js** with runtime APIs only |
+| Knowledge | Brain tools when an engine is attached |
+
+Deep VFS detail: [docs/vfs.md](docs/vfs.md).
 
 ---
 
