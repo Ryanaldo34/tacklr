@@ -156,18 +156,27 @@ Raw `ReadFile` / `WriteFile` stay byte-only and do not build IR.
 | Max line size | 1 MiB (`MaxLineBytes`) when streaming lines |
 | Full read buffer | When `File.Stat` reports size: one allocation + `ReadFull`; oversize rejected before body |
 | IR footprint | ~1× content + line-offset index; decode reuses the read buffer as the string body |
-| **ReadLines** | Uses cache if present; else streams window only |
+| **ReadLines** | Returns `LineWindow` (lines + EOF + NextStart); streams large files; no full-object 32 MiB reject |
+| **MaxLineScanBytes** | Per-call stream scan budget (64 MiB), separate from full IR cap |
+| **MaxLinesPerWindow** | Max lines returned per `ReadLines` call (500) |
 | **WriteDocument** | Write-back cache; flush with `Sync` / `SyncAll` |
 | **WriteFile** | Write-through backend; drop IR cache for path |
+| **AfterPersist** | Optional host hook after successful backend write (`WriteFile` / `Sync`) |
+| **ContentRev** | Session-visible content identity (`Path` + SHA-256 hex of body); `LineWindow.Rev` when known |
 
 Tool guidance:
 
 | Need | API |
 |------|-----|
-| Line window | `ReadLines` |
-| Edit | `ReadText` → mutate → `WriteDocument` → checkpoint/`SyncAll` |
+| Line window / page large file | `ReadLines` → page with `NextStart` until `EOF` (see `Rev`) |
+| Stable edit token | `ContentRev` / `ContentHash` — tools compare expected rev before write |
+| Find in mounts (indexed) | Optional `vfsindex` → brain `search` / `find_exact` on Chunks; then `ReadLines` around hit |
+| Edit (SDK) | `ReadText` → mutate → `WriteDocument` → checkpoint/`SyncAll` |
+| Edit (agent) | Harness tools (`read_lines`, `replace_lines`, `replace_text`, `write`, …) wrap the above with rev checks |
 | Flush now | `Sync` / `SyncAll` |
 | Raw bytes | `ReadFile` / `WriteFile` |
+
+`vfs` does not implement content grep. Live OS-tool search (real `rg`/`grep`) is planned via a future FUSE (or materialize) host projection. Indexed recall of mount content is the optional `vfsindex` bridge when a brain engine is wired.
 
 ### Codec routing
 
@@ -253,7 +262,7 @@ _ = ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"})
 _ = ms.WriteFile(ctx, "/work/note.txt", []byte("a\nb\nc\n"))
 
 // --- Read a window only (tools) ---
-window, _ := ms.ReadLines(ctx, "/work/note.txt", 1, 3) // ["a","b"]
+win, _ := ms.ReadLines(ctx, "/work/note.txt", 1, 3) // win.Lines == ["a","b"]; check win.EOF
 
 // --- Full IR for edit ---
 text, err := ms.ReadText(ctx, "/work/note.txt")
@@ -301,6 +310,50 @@ Write:  WriteDocument              // PutObject with Text() bytes
 ```
 
 The agent always uses `/data/app.go`. It never sees the bucket name.
+
+---
+
+## Optional brain index (`vfsindex`)
+
+`vfs` never imports `brain`. When both are enabled, package
+[`vfsindex`](../vfsindex) streams text-like mount files into brain
+`Document` + `Chunk` objects (`vfs_path`, line/byte anchors, content hash).
+
+```go
+idx, _ := vfsindex.NewMountIndexer(ms, eng, scope)
+_ = eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...) // if using a kind catalog
+_ = idx.IndexPrefix(ctx, "/work", vfsindex.IndexOpts{})
+
+// Re-index after backend writes (Sync / WriteFile)
+sched := vfsindex.NewSyncScheduler(idx)
+ms.SetAfterPersist(func(ctx context.Context, path string) error {
+    return sched.Notify(ctx, path, vfsindex.ReasonSync)
+})
+```
+
+Indexed content is queried with normal brain tools (`search` / `find_exact`).
+Live OS-tool search over mounts is deferred to a future FUSE (or materialize)
+projection — not an in-process reimplementation of grep.
+
+---
+
+## Stable content refs (agent tools, no bash)
+
+`vfs` exposes a **small** identity helper; **edit policy lives in harness tools**.
+
+| Layer | Responsibility |
+|-------|----------------|
+| `vfs.ContentHash` / `ContentRev` / `LineWindow.Rev` | Identity of session-visible body |
+| `ReadText`, `ReplaceLines`, `WriteDocument` | Low-level IR mutate + write-back |
+| Harness `read_lines`, `replace_lines`, `replace_text`, `write`, `list`, `stat`, `mkdir`, `remove` | Require `rev` on edits, reject stale, format numbered lines |
+
+```text
+read_lines   → path + rev + numbered window
+replace_*    → must pass rev; on mismatch ErrStaleContent → re-read
+checkpoint   → SyncAll flushes dirty IR (existing)
+```
+
+No FUSE and no shell are required for this path.
 
 ---
 

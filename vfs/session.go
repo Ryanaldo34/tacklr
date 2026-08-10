@@ -14,11 +14,19 @@ const MaxReadFileBytes = 32 << 20 // 32 MiB
 // MaxLineBytes caps a single line when streaming (ReadLines) or scanning.
 const MaxLineBytes = 1 << 20 // 1 MiB
 
+// See also MaxLineScanBytes and MaxLinesPerWindow in lines.go (streaming budgets,
+// distinct from MaxReadFileBytes full-materialize cap).
+
 // filePutter is implemented by providers that can write a full object in one shot
 // (avoids S3 Open→buffer→Put double buffering).
 type filePutter interface {
 	PutFile(ctx context.Context, name string, r io.Reader, size int64) error
 }
+
+// AfterPersistFunc is called after content is successfully written to a backend
+// (WriteFile or Sync). Used by optional bridges (e.g. vfsindex) without importing
+// them. Errors from the hook are ignored so persist never rolls back.
+type AfterPersistFunc func(ctx context.Context, virtualPath string) error
 
 // MountSession is the session-owned virtual filesystem: mount table + path I/O
 // plus a session-local textual IR cache (write-back until Sync).
@@ -30,11 +38,29 @@ type filePutter interface {
 // Dirty document edits flush via Sync / SyncAll (harness checkpoint calls SyncAll).
 // Backend remains source of truth after a successful flush.
 type MountSession struct {
-	mu    sync.Mutex
-	id    string
-	reg   *BackendRegistry
-	tab   *mountTable
-	cache *contentCache
+	mu           sync.Mutex
+	id           string
+	reg          *BackendRegistry
+	tab          *mountTable
+	cache        *contentCache
+	afterPersist AfterPersistFunc
+}
+
+// SetAfterPersist registers a hook after successful backend writes.
+// Pass nil to clear. Safe to call at any time; concurrent with I/O.
+func (m *MountSession) SetAfterPersist(fn AfterPersistFunc) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.afterPersist = fn
+}
+
+func (m *MountSession) fireAfterPersist(ctx context.Context, virtualPath string) {
+	m.mu.Lock()
+	fn := m.afterPersist
+	m.mu.Unlock()
+	if fn != nil {
+		_ = fn(ctx, virtualPath)
+	}
 }
 
 // NewMountSession binds a session id to a process registry.
@@ -183,6 +209,7 @@ func (m *MountSession) WriteFile(ctx context.Context, virtualPath string, data [
 		return err
 	}
 	m.cache.remove(virtualPath)
+	m.fireAfterPersist(ctx, virtualPath)
 	return nil
 }
 

@@ -57,7 +57,7 @@ func (r *ContentRegistry) Decode(ctx context.Context, path, mediaType string, da
 	c, ok := r.codecs[mediaType]
 	r.mu.RUnlock()
 	if !ok {
-		if !isTextLike(mediaType) {
+		if !IsTextLike(mediaType) {
 			return nil, ErrNoCodec
 		}
 		c = TextCodec{}
@@ -131,7 +131,8 @@ func sniffBytes(sample []byte) string {
 	return "application/octet-stream"
 }
 
-func isTextLike(mediaType string) bool {
+// IsTextLike reports whether mediaType is treated as text for IR/index routing.
+func IsTextLike(mediaType string) bool {
 	if strings.HasPrefix(mediaType, "text/") {
 		return true
 	}

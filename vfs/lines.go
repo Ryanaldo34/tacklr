@@ -8,35 +8,88 @@ import (
 	"unicode/utf8"
 )
 
-// ReadLines streams virtualPath and returns lines in the half-open 1-based range
-// [start, end), matching TextDocument line rules (\n separator; \r kept).
+// MaxLineScanBytes caps how many bytes a single streaming ReadLines call may
+// read from the start of a file (or from a seek point later). Distinct from
+// MaxReadFileBytes (full IR materialize).
+const MaxLineScanBytes = 64 << 20 // 64 MiB
+
+// MaxLinesPerWindow caps how many lines one ReadLines call may return.
+const MaxLinesPerWindow = 500
+
+// LineWindow is one progressive page of lines from a virtual path.
 //
-// Only the returned window is retained. Stops after the last needed line when
-// possible. Enforces MaxReadFileBytes scanned and MaxLineBytes per line.
-func (m *MountSession) ReadLines(ctx context.Context, virtualPath string, start, end int) ([]string, error) {
+// Start/End are the half-open 1-based range requested (End may be clamped by
+// MaxLinesPerWindow). EOF is true when the file ended at or before the last
+// returned line. NextStart is Start+Returned (useful when !EOF for paging).
+//
+// Rev is set when the window is served from session IR cache (cheap full-body
+// hash). Stream reads leave Rev empty; callers use ContentRev when needed.
+type LineWindow struct {
+	Path      string
+	Start     int
+	End       int
+	Lines     []string
+	Returned  int
+	EOF       bool
+	NextStart int
+	Rev       ContentRev
+}
+
+// ReadLines streams virtualPath and returns a line window for the half-open
+// 1-based range [start, end).
+//
+// Large files are allowed: unlike ReadFile/ReadText there is no full-object
+// size reject. Only MaxLineScanBytes (bytes read this call), MaxLineBytes
+// (per line), and MaxLinesPerWindow apply.
+//
+// If the file ends before end, the available lines are returned with EOF=true
+// (not ErrLineOutOfRange). ErrLineOutOfRange only when start is past EOF.
+func (m *MountSession) ReadLines(ctx context.Context, virtualPath string, start, end int) (LineWindow, error) {
 	if start < 1 || end < start {
-		return nil, ErrLineOutOfRange
+		return LineWindow{}, ErrLineOutOfRange
 	}
+	if end-start > MaxLinesPerWindow {
+		end = start + MaxLinesPerWindow
+	}
+
 	if doc, _, _, _, ok := m.cache.get(virtualPath); ok {
-		return doc.Lines(start, end)
+		return lineWindowFromDoc(virtualPath, doc, start, end)
 	}
 
 	f, err := m.Open(ctx, virtualPath)
 	if err != nil {
-		return nil, err
+		return LineWindow{}, err
 	}
 	defer f.Close()
 
 	if start == 1 && end == 1 {
-		return []string{}, nil
+		return LineWindow{Path: virtualPath, Start: 1, End: 1, NextStart: 1}, nil
 	}
-	if fi, err := f.Stat(); err == nil && fi.Size > int64(MaxReadFileBytes) {
-		return nil, errFileExceeds(MaxReadFileBytes)
-	}
-	return readLineRange(f, start, end)
+	return readLineRange(f, virtualPath, start, end)
 }
 
-func readLineRange(r io.Reader, start, end int) ([]string, error) {
+func lineWindowFromDoc(path string, doc *TextDocument, start, end int) (LineWindow, error) {
+	n := doc.LineCount()
+	if start > n+1 {
+		return LineWindow{}, ErrLineOutOfRange
+	}
+	eof := false
+	if end > n+1 {
+		end = n + 1
+		eof = true
+	}
+	lines, err := doc.Lines(start, end)
+	if err != nil {
+		return LineWindow{}, err
+	}
+	return LineWindow{
+		Path: path, Start: start, End: end, Lines: lines,
+		Returned: len(lines), EOF: eof, NextStart: start + len(lines),
+		Rev: ContentRev{Path: path, Hash: ContentHash(doc.Text())},
+	}, nil
+}
+
+func readLineRange(r io.Reader, path string, start, end int) (LineWindow, error) {
 	br := bufio.NewReaderSize(r, 64*1024)
 	lineNo, scanned := 0, 0
 	out := make([]string, 0, min(end-start, 64))
@@ -47,34 +100,43 @@ func readLineRange(r io.Reader, start, end int) ([]string, error) {
 			break
 		}
 		scanned += len(s)
-		if scanned > MaxReadFileBytes {
-			return nil, errFileExceeds(MaxReadFileBytes)
+		if scanned > MaxLineScanBytes {
+			return LineWindow{}, errFileExceeds(MaxLineScanBytes)
 		}
 		if len(s) > 0 && s[len(s)-1] == '\n' {
 			s = s[:len(s)-1]
 		}
 		if len(s) > MaxLineBytes {
-			return nil, ErrLineTooLong
+			return LineWindow{}, ErrLineTooLong
 		}
 		if !utf8.ValidString(s) {
-			return nil, ErrInvalidUTF8
+			return LineWindow{}, ErrInvalidUTF8
 		}
 		lineNo++
 		if lineNo >= start && lineNo < end {
 			out = append(out, s)
 		}
+		// Full requested window collected; more file may remain.
 		if end > start && lineNo >= end-1 {
-			return out, nil
+			return LineWindow{
+				Path: path, Start: start, End: end, Lines: out,
+				Returned: len(out), EOF: false, NextStart: start + len(out),
+			}, nil
 		}
 		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
-			return nil, err
+			return LineWindow{}, err
 		}
 	}
-	if end > lineNo+1 {
-		return nil, ErrLineOutOfRange
+
+	// Hit EOF.
+	if start > lineNo+1 {
+		return LineWindow{}, ErrLineOutOfRange
 	}
-	return out, nil
+	return LineWindow{
+		Path: path, Start: start, End: end, Lines: out,
+		Returned: len(out), EOF: true, NextStart: start + len(out),
+	}, nil
 }

@@ -3,6 +3,7 @@
 // # Public surface (hosts)
 //
 //   - MountSession — mounts, path I/O, ReadText / WriteDocument / Sync, ReadLines
+//   - ContentRev / ContentHash — session-visible content identity (for tools)
 //   - BackendRegistry + LocalFactory / S3Factory + AWSS3 — process profiles and pools
 //   - MountSpec / MountInfo — durable and agent-safe mount descriptions
 //   - Provider / ProviderFactory / S3API — custom backends
@@ -13,6 +14,14 @@
 //
 // Cache, invalidation, and dirty tracking are internal. Hosts use Sync / SyncAll
 // to flush; harness checkpoint calls SyncAll before saving mount Specs.
+//
+// Optimistic edit policy lives in harness tools (read_lines, replace_lines,
+// replace_text, write) that wrap ReadText / TextDocument / WriteDocument.
+// ContentRev is the stable token those tools pass — not a large MountSession surface.
+//
+// This package never imports brain. Optional mount→knowledge indexing lives in
+// package vfsindex (imports both). Host-visible OS projection (FUSE + real rg)
+// is planned later; content search over mounts is not part of vfs itself.
 //
 // Hosts should not need anything else. Mount tables, host roots, and bucket
 // details stay inside providers and the unexported mount table.
@@ -31,14 +40,17 @@
 //
 // Raw ops stay byte-oriented. Content access:
 //
-//	// Window only (stream; keep returned lines) — prefer for tool read_file
-//	part, err := ms.ReadLines(ctx, "/work/main.go", 1, 51)
+//	// Progressive page (large files OK; EOF/NextStart for paging)
+//	win, err := ms.ReadLines(ctx, "/work/main.go", 1, 51)
+//	// win.Rev.Hash is the session-visible content identity when available
 //
 //	// Full IR for edit; WriteDocument stages dirty cache until Sync
 //	text, err := ms.ReadText(ctx, "/work/main.go")
+//	rev := vfs.ContentRev{Path: text.Path(), Hash: vfs.ContentHash(text.Text())}
 //	_ = text.SetLine(2, "changed")
 //	_ = ms.WriteDocument(ctx, text)
 //	_ = ms.SyncAll(ctx) // or harness checkpoint
+//	_ = rev // tools compare expected rev before WriteDocument
 //
 // Session content cache: clone-on-read, write-back IR, Sync flushes to backend.
 // Checkpoint stores mount Specs only (not file bytes).

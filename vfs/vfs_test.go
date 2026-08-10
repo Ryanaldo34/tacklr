@@ -184,15 +184,39 @@ func TestDocument_session(t *testing.T) {
 	if err := ms.WriteFile(ctx, "/work/big.txt", []byte(b.String())); err != nil {
 		t.Fatal(err)
 	}
-	part, err := ms.ReadLines(ctx, "/work/big.txt", 10, 13)
-	if err != nil || len(part) != 3 || part[0] != "L10" || part[2] != "L12" {
-		t.Fatalf("ReadLines = %#v err=%v", part, err)
+	win, err := ms.ReadLines(ctx, "/work/big.txt", 10, 13)
+	if err != nil || win.Returned != 3 || win.Lines[0] != "L10" || win.Lines[2] != "L12" || win.EOF || win.NextStart != 13 {
+		t.Fatalf("ReadLines = %+v err=%v", win, err)
 	}
-	if empty, err := ms.ReadLines(ctx, "/work/big.txt", 1, 1); err != nil || len(empty) != 0 {
-		t.Fatalf("ReadLines empty = %#v err=%v", empty, err)
+	// Soft EOF: request past last line ("L1\n"…"L100\n" → 101 segments with trailing empty)
+	win, err = ms.ReadLines(ctx, "/work/big.txt", 100, 200)
+	if err != nil || win.Returned < 1 || !win.EOF {
+		t.Fatalf("soft EOF = %+v err=%v", win, err)
 	}
-	if _, err := ms.ReadLines(ctx, "/work/big.txt", 200, 201); !errors.Is(err, vfs.ErrLineOutOfRange) {
+	// empty requested range
+	empty, err := ms.ReadLines(ctx, "/work/big.txt", 5, 5)
+	if err != nil || empty.Returned != 0 {
+		t.Fatalf("empty range = %+v err=%v", empty, err)
+	}
+	if _, err := ms.ReadLines(ctx, "/work/big.txt", 500, 501); !errors.Is(err, vfs.ErrLineOutOfRange) {
 		t.Fatalf("ReadLines OOR: %v", err)
+	}
+	// page until EOF
+	start := 1
+	pages := 0
+	for {
+		w, err := ms.ReadLines(ctx, "/work/big.txt", start, start+20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pages++
+		if w.EOF {
+			break
+		}
+		start = w.NextStart
+		if pages > 20 {
+			t.Fatal("paging did not reach EOF")
+		}
 	}
 
 	if err := ms.WriteFile(ctx, "/work/note.txt", []byte("a\nb\nc\n")); err != nil {
@@ -219,8 +243,8 @@ func TestDocument_session(t *testing.T) {
 		t.Fatalf("before Sync backend = %q err=%v", raw, err)
 	}
 	// ReadLines sees dirty cache
-	if lines, err := ms.ReadLines(ctx, "/work/note.txt", 1, 3); err != nil || len(lines) != 2 || lines[1] != "B" {
-		t.Fatalf("dirty ReadLines = %#v err=%v", lines, err)
+	if w, err := ms.ReadLines(ctx, "/work/note.txt", 1, 3); err != nil || w.Returned != 2 || w.Lines[1] != "B" {
+		t.Fatalf("dirty ReadLines = %+v err=%v", w, err)
 	}
 	text2, err := ms.ReadText(ctx, "/work/note.txt")
 	if err != nil || text2.Text() != "a\nB\nC\nD\n" {
@@ -809,4 +833,41 @@ func (f *memFile) Stat() (vfs.FileInfo, error) {
 		return vfs.FileInfo{Name: f.name, Size: int64(f.buf.Len()), Mode: 0o644}, nil
 	}
 	return vfs.FileInfo{Name: f.name, Size: f.size, Mode: 0o644}, nil
+}
+
+// TestContentRev_sessionVisible hashes dirty IR preferred over backend.
+func TestContentRev_sessionVisible(t *testing.T) {
+	ctx := t.Context()
+	base := t.TempDir()
+	reg := vfs.NewBackendRegistry()
+	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
+		t.Fatal(err)
+	}
+	ms := vfs.NewMountSession("rev", reg)
+	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.WriteFile(ctx, "/work/f.txt", []byte("one\n")); err != nil {
+		t.Fatal(err)
+	}
+	disk, err := ms.ContentRev(ctx, "/work/f.txt")
+	if err != nil || disk.Hash != vfs.ContentHash("one\n") {
+		t.Fatalf("disk rev: %+v err=%v", disk, err)
+	}
+	doc, err := ms.ReadText(ctx, "/work/f.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = doc.SetLine(1, "two")
+	if err := ms.WriteDocument(ctx, doc); err != nil {
+		t.Fatal(err)
+	}
+	dirty, err := ms.ContentRev(ctx, "/work/f.txt")
+	if err != nil || dirty.Hash != vfs.ContentHash("two\n") {
+		t.Fatalf("dirty rev: %+v err=%v", dirty, err)
+	}
+	w, err := ms.ReadLines(ctx, "/work/f.txt", 1, 2)
+	if err != nil || w.Rev.Hash != dirty.Hash {
+		t.Fatalf("window rev: %+v err=%v", w, err)
+	}
 }

@@ -88,6 +88,7 @@ func (m *MountSession) Sync(ctx context.Context, virtualPath string) error {
 		mod = fi.ModTime
 	}
 	m.cache.markClean(virtualPath, int64(len(body)), mod)
+	m.fireAfterPersist(ctx, virtualPath)
 	return nil
 }
 

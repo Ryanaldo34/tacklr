@@ -190,6 +190,9 @@ func (a *AgentHarness) injectBuiltinTools() {
 	if a.brain != nil && a.searchCtx != nil {
 		a.tools = append(a.tools, newBrainTools(a.brain, a.searchCtx, a.brainWriteKinds)...)
 	}
+	if a.session != nil && a.session.VFS != nil {
+		a.tools = append(a.tools, newVFSTools(a.session.VFS)...)
+	}
 	if len(a.subagents) > 0 {
 		a.tools = append(a.tools, a.spawnTool())
 	}
