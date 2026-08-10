@@ -779,6 +779,8 @@ func TestACP_elicitationForm_declineEndsPrompt(t *testing.T) {
 }
 
 // TestACP_elicitationForm_cancelEndsPrompt: client cancels form → turn ends with error.
+// Initialize must complete before session/prompt so form caps are on the bridge
+// (stdio handlers run concurrently; racing prompt without caps parks the interrupt).
 func TestACP_elicitationForm_cancelEndsPrompt(t *testing.T) {
 	optionsJSON := `[{"title":"A","description":"","isRecommended":true},{"title":"B","description":"","isRecommended":false}]`
 	interruptTool := tacklr.NewTool(tacklr.ToolConfig{
@@ -800,65 +802,95 @@ func TestACP_elicitationForm_cancelEndsPrompt(t *testing.T) {
 	srv := NewServer(r, NewACPProtocol(NewMemoryWireStore()))
 	serverIn, clientToServer := io.Pipe()
 	clientFromServer, serverOut := io.Pipe()
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()
-	go func() { _ = srv.ServeStdio(ctx, serverIn, serverOut) }()
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.ServeStdio(ctx, serverIn, serverOut) }()
 	t.Cleanup(func() {
 		_ = clientToServer.Close()
+		_ = serverIn.Close()
+		_ = clientFromServer.Close()
+		_ = serverOut.Close()
 		cancel()
-	})
-	// Async writes so a full outbound pipe cannot block the test while we
-	// still need to drain session/update frames.
-	writeCh := make(chan string, 16)
-	go func() {
-		for s := range writeCh {
-			_, _ = io.WriteString(clientToServer, s+"\n")
-		}
-	}()
-	t.Cleanup(func() { close(writeCh) })
-	write := func(s string) {
 		select {
-		case writeCh <- s:
-		case <-time.After(2 * time.Second):
-			t.Fatal("write backlog")
+		case <-errCh:
+		case <-time.After(time.Second):
+		}
+	})
+
+	writeLine := func(s string) {
+		t.Helper()
+		if _, err := io.WriteString(clientToServer, s+"\n"); err != nil {
+			t.Fatalf("write: %v", err)
 		}
 	}
-	write(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"elicitation":{"form":{}}}}}`)
-	write(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp"}}`)
-	lines := scanStdioLines(clientFromServer)
-	var sessionID string
-	var promptSent, sawCancel bool
-	deadline := time.After(8 * time.Second)
-	for !sawCancel {
+	scanner := bufio.NewScanner(clientFromServer)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	readFrame := func() map[string]any {
+		t.Helper()
+		lineCh := make(chan string, 1)
+		go func() {
+			if scanner.Scan() {
+				lineCh <- scanner.Text()
+			}
+		}()
 		select {
-		case <-deadline:
-			t.Fatal("expected prompt error after elicitation cancel")
-		case line, ok := <-lines:
-			if !ok {
-				t.Fatal("stdio closed before elicitation cancel completed")
-			}
+		case <-ctx.Done():
+			t.Fatal("context done before elicitation cancel completed")
+		case line := <-lineCh:
 			var frame map[string]any
-			_ = json.Unmarshal([]byte(line), &frame)
-			if res, ok := frame["result"].(map[string]any); ok {
-				if sid, _ := res["sessionId"].(string); sid != "" && !promptSent {
-					sessionID = sid
-					promptSent = true
-					write(`{"jsonrpc":"2.0","id":11,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"q"}]}}`)
-				}
+			if err := json.Unmarshal([]byte(line), &frame); err != nil {
+				t.Fatalf("bad frame %q: %v", line, err)
 			}
-			if frame["method"] == "elicitation/create" {
-				resp, _ := json.Marshal(map[string]any{
-					"jsonrpc": "2.0", "id": frame["id"],
-					"result": map[string]any{"action": "cancel"},
-				})
-				write(string(resp))
+			return frame
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for server frame")
+		}
+		return nil
+	}
+
+	// Caps on bridge before prompt (same ordering as successful elicitation test).
+	writeLine(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"elicitation":{"form":{}}}}}`)
+	var initDone, sessionReqSent, promptSent, sawCancel bool
+	var sessionID string
+	for !sawCancel {
+		frame := readFrame()
+		if res, ok := frame["result"].(map[string]any); ok {
+			if idMatch(frame["id"], 1) {
+				initDone = true
 			}
-			if errObj, ok := frame["error"].(map[string]any); ok && idMatch(frame["id"], 11) {
-				msg, _ := errObj["message"].(string)
-				if strings.Contains(strings.ToLower(msg), "cancel") {
+			if sid, ok := res["sessionId"].(string); ok && sid != "" {
+				sessionID = sid
+			}
+			// Cancel is a semantic JSON-RPC error (not stopReason) for "user cancelled the prompt".
+			if idMatch(frame["id"], 11) {
+				if sr, _ := res["stopReason"].(string); sr == "cancelled" {
 					sawCancel = true
 				}
 			}
+		}
+		if errObj, ok := frame["error"].(map[string]any); ok && idMatch(frame["id"], 11) {
+			msg, _ := errObj["message"].(string)
+			if strings.Contains(strings.ToLower(msg), "cancel") {
+				sawCancel = true
+			} else {
+				t.Fatalf("prompt error without cancel: %v", errObj)
+			}
+		}
+		if frame["method"] == "elicitation/create" {
+			resp, _ := json.Marshal(map[string]any{
+				"jsonrpc": "2.0", "id": frame["id"],
+				"result": map[string]any{"action": "cancel"},
+			})
+			writeLine(string(resp))
+		}
+		if initDone && !sessionReqSent {
+			sessionReqSent = true
+			writeLine(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp"}}`)
+		}
+		if sessionID != "" && !promptSent {
+			promptSent = true
+			writeLine(`{"jsonrpc":"2.0","id":11,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"q"}]}}`)
 		}
 	}
 }
