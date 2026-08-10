@@ -6,8 +6,11 @@
 [![Go Version](https://img.shields.io/github/go-mod/go-version/Ryanaldo34/tacklr)](https://github.com/Ryanaldo34/tacklr/blob/main/go.mod)
 [![License](https://img.shields.io/github/license/Ryanaldo34/tacklr)](https://github.com/Ryanaldo34/tacklr/blob/main/LICENSE)
 
-**Open-source agent harness for Go.** Tacklr is a framework, not a toolbox of optional helpers. It defines how agents should run—how work is planned, how context is structured, how tools execute under scope, and how state survives—so agents stay efficient, secure, and operable.
+**The Enterprise Agent Operating System** - Tacklr is a feature-complete agent operating system built for long-running research workflows. Tacklr will ship dually as a CLI/TUI application (planned) which runs all of our default built-ins and as an extensible SDK for building your own agents. Tacklr is more than just an *everyday agent harness*, it is a secure execution environment, company brain, and efficient orchestrator combined into a single, deterministic system.
 
+## Getting Started
+
+Install the SDK
 ```bash
 go get github.com/ryanaldo34/tacklr
 ```
@@ -16,52 +19,13 @@ go get github.com/ryanaldo34/tacklr
 
 ## Why Tacklr exists
 
-Most agent harnesses share the same weaknesses.
+AI agents are quite possibly the most revolutionary technology in human history, but between their non-determinism and general naiveness, they are a security nightmare. Letting AI agents run wild off the leash has proven to not be a great idea! Tacklr aims to solve these severe reliability & security risks with a few solutions:
 
-They **struggle to structure context**. History piles up; when the window fills, the answer is usually a blunt summarize-or-trim pass that loses the thread of the task. They are **not token-efficient**: every turn re-pays for noise that no longer matters. They are **not secure by construction**—access control is left to prompts, host glue, or hope. They often **perform poorly** under real load because the loop, state, and I/O were never designed as infrastructure. And they are **sloppily architected**: model code, tool code, and product code tangled together, hard to test and harder to operate.
-
-Tacklr exists to fix that class of problem. An agent is a **system** you run—with explicit planning, deliberate context handoffs, security as a platform concern, and a clean separation between model I/O, the turn loop, storage, and knowledge—not a chat transcript you hope finishes well.
-
----
-
-## Ethos
-
-### Structured context and token efficiency
-
-Context should serve the **current task**, not archive every token the model has ever seen. Tacklr drives work through **plans and todos**. When a step completes, the harness performs a **handoff**: it rebuilds a focused context for what comes next. Irrelevant history does not keep a permanent seat in the window. That is how you preserve quality and keep spend predictable.
-
-### Security baked in
-
-Unscoped tools and unbounded environments are how agents cause damage. Security is not a host afterthought. Tacklr’s direction is a **virtual execution environment and filesystem**: one controlled interface over the resources an agent may touch—object storage, local paths, and external drives—without the agent needing to know or escape that boundary. Scope is a property of the platform, not a line in the system prompt.
-
-Hosts wire mounts on a session-owned VFS; content is also available as a line-addressable **document IR** (read, edit lines, write back). See [Virtual filesystem (`vfs`)](docs/vfs.md).
-
-### Cloud-native performance and operability
-
-Agents belong in infrastructure: durable state, horizontal scale, inspectable runs. Tacklr is built in Go with **checkpointed sessions**, pluggable stores, and a harness that does not assume a single process or a single client. The same core backs interactive products or fleets of workers without rewriting the loop—and without the ad-hoc process sprawl that tanks performance in looser stacks.
-
-### Determinism where it matters
-
-Language models are probabilistic; the harness around them does not have to be. Tacklr separates model I/O from the turn loop, uses explicit tool results and plan effects, and persists **checkpoints** (conversation, plan, interrupts, knowledge scope) so runs resume instead of improvising after a crash. Clear architecture makes behavior testable, observable, and operable.
-
-### Knowledge that stays alive
-
-Static RAG dumps age in the window. Tacklr’s optional **brain** is a host-owned knowledge engine: hybrid and graph-aware retrieval, dual-store design, and tools that appear only when an engine is wired. Memory is queried when needed—not frozen forever as transcript sludge.
-
----
-
-## What you can build
-
-With the harness as the center of gravity:
-
-- **Operators** that plan multi-step work, complete todos, and hand off cleanly between stages  
-- **Product agents** with typed tools, user interrupts (ask and wait), cancel, and resume  
-- **Long-lived sessions** restored from checkpoints after restart or redeploy  
-- **Multi-agent systems** via a registry of agent specs sharing infrastructure  
-- **Knowledge-backed agents** when you attach a brain engine (search, expand, save structured memory)  
-- **Observable systems** with optional OpenTelemetry on turns, tools, and retrieval  
-
-You bring the model endpoint, business tools, and hosting. Tacklr owns the loop structure.
+1. Virtualization: Thanks to our virtual filesystem and execution environment, the agent only sees what it is given access to and nothing else on the host. If you are familiar with operating systems, this is much like memory virtualization and each process having their own memory space with no knowledge of other running programs
+2. System Monitoring: Gating a tool just based on the call of the tool is an insanely naive model for gating tool calls. Its what happens within the tool that actually matters. We monitor what the agent is doing through tools at a system level and will send configurable alerts and approvals as needed.
+3. Observability: Our watchdog and observability layer gives you full access to what the agent is doing in their turns. Our eventual reproducible state will allow you to step back and reassemble context at any given point before the agent took wrong turn in its workflow, allowing you to debug prompts, tools, etc and determine where things were going wrong
+4. Efficient Context Management: Tacklr will structure work around the *Adaptive Case Methodology*, encouraging the agent to work through advanced planning cycles and adapting its workflow as needed. When the agent completes a subtask or milestone, it will produce a "handoff" of compressed context to carry over only relevant pieces needed to complete remaining subtasks and reach its overarching goal. This effectively reduces token usage and guards against agents getting dumber over time with a bunch of irrelevant garbage in the context window.
+5. Cloud Nativeness: Tacklr is built for the cloud and is compatible with your existing cloud infrastructure & security tools out of the box
 
 ---
 
