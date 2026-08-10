@@ -52,20 +52,31 @@ func (m *MountSession) ReadLines(ctx context.Context, virtualPath string, start,
 		end = start + MaxLinesPerWindow
 	}
 
-	if doc, _, _, _, ok := m.cache.get(virtualPath); ok {
-		return lineWindowFromDoc(virtualPath, doc, start, end)
+	cleaned, err := cleanVirtualPath(virtualPath)
+	if err != nil {
+		return LineWindow{}, err
+	}
+	if doc, _, _, _, ok := m.cache.get(cleaned); ok {
+		return lineWindowFromDoc(cleaned, doc, start, end)
 	}
 
-	f, err := m.Open(ctx, virtualPath)
+	// Prefer full IR when the object is within the materialize cap (session-visible).
+	if fi, stErr := m.Stat(ctx, cleaned); stErr == nil && !fi.IsDir && fi.Size >= 0 && fi.Size <= int64(MaxReadFileBytes) {
+		if doc, rerr := m.ReadText(ctx, cleaned); rerr == nil {
+			return lineWindowFromDoc(cleaned, doc, start, end)
+		}
+	}
+
+	f, err := m.Open(ctx, cleaned)
 	if err != nil {
 		return LineWindow{}, err
 	}
 	defer f.Close()
 
 	if start == 1 && end == 1 {
-		return LineWindow{Path: virtualPath, Start: 1, End: 1, NextStart: 1}, nil
+		return LineWindow{Path: cleaned, Start: 1, End: 1, NextStart: 1}, nil
 	}
-	return readLineRange(f, virtualPath, start, end)
+	return readLineRange(f, cleaned, start, end)
 }
 
 func lineWindowFromDoc(path string, doc *TextDocument, start, end int) (LineWindow, error) {
@@ -81,6 +92,11 @@ func lineWindowFromDoc(path string, doc *TextDocument, start, end int) (LineWind
 	lines, err := doc.Lines(start, end)
 	if err != nil {
 		return LineWindow{}, err
+	}
+	for _, line := range lines {
+		if len(line) > MaxLineBytes {
+			return LineWindow{}, ErrLineTooLong
+		}
 	}
 	return LineWindow{
 		Path: path, Start: start, End: end, Lines: lines,

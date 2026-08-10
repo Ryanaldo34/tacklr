@@ -238,11 +238,11 @@ func TestDocument_session(t *testing.T) {
 	if err := ms.WriteDocument(ctx, text); err != nil {
 		t.Fatal(err)
 	}
+	// Session-visible ReadFile prefers dirty IR (backend still old until Sync).
 	raw, err := ms.ReadFile(ctx, "/work/note.txt")
-	if err != nil || string(raw) != "a\nb\nc\n" {
-		t.Fatalf("before Sync backend = %q err=%v", raw, err)
+	if err != nil || string(raw) != "a\nB\nC\nD\n" {
+		t.Fatalf("dirty ReadFile = %q err=%v", raw, err)
 	}
-	// ReadLines sees dirty cache
 	if w, err := ms.ReadLines(ctx, "/work/note.txt", 1, 3); err != nil || w.Returned != 2 || w.Lines[1] != "B" {
 		t.Fatalf("dirty ReadLines = %+v err=%v", w, err)
 	}
@@ -869,5 +869,70 @@ func TestContentRev_sessionVisible(t *testing.T) {
 	w, err := ms.ReadLines(ctx, "/work/f.txt", 1, 2)
 	if err != nil || w.Rev.Hash != dirty.Hash {
 		t.Fatalf("window rev: %+v err=%v", w, err)
+	}
+}
+
+// TestSessionOverlay_dirtyVisible: write-back creates appear in Stat/ReadDir/Remove before Sync.
+func TestSessionOverlay_dirtyVisible(t *testing.T) {
+	ctx := t.Context()
+	base := t.TempDir()
+	reg := vfs.NewBackendRegistry()
+	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
+		t.Fatal(err)
+	}
+	ms := vfs.NewMountSession("overlay", reg)
+	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
+		t.Fatal(err)
+	}
+	doc := vfs.NewTextDocument("/work/new.go", "text/x-go", "utf-8", "package new\n")
+	if err := ms.WriteDocument(ctx, doc); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := ms.Stat(ctx, "/work/new.go")
+	if err != nil || fi.IsDir || fi.Size != int64(len("package new\n")) {
+		t.Fatalf("stat dirty: %+v err=%v", fi, err)
+	}
+	ents, err := ms.ReadDir(ctx, "/work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saw bool
+	for _, e := range ents {
+		if e.Name == "new.go" && !e.IsDir {
+			saw = true
+		}
+	}
+	if !saw {
+		t.Fatalf("readdir missing new.go: %+v", ents)
+	}
+	// nested dirty path synthesizes intermediate dir
+	nested := vfs.NewTextDocument("/work/pkg/x.go", "text/x-go", "utf-8", "package pkg\n")
+	if err := ms.WriteDocument(ctx, nested); err != nil {
+		t.Fatal(err)
+	}
+	fi, err = ms.Stat(ctx, "/work/pkg")
+	if err != nil || !fi.IsDir {
+		t.Fatalf("stat virtual dir: %+v err=%v", fi, err)
+	}
+	ents, err = ms.ReadDir(ctx, "/work/pkg")
+	if err != nil || len(ents) != 1 || ents[0].Name != "x.go" {
+		t.Fatalf("readdir pkg: %+v err=%v", ents, err)
+	}
+	if err := ms.Remove(ctx, "/work/new.go"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ms.Stat(ctx, "/work/new.go"); !errors.Is(err, vfs.ErrNotExist) {
+		t.Fatalf("after remove dirty: %v", err)
+	}
+	// Sync nested still works
+	if err := ms.MkdirAll(ctx, "/work/pkg"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.Sync(ctx, "/work/pkg/x.go"); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(base, "pkg", "x.go"))
+	if err != nil || string(raw) != "package pkg\n" {
+		t.Fatalf("synced = %q err=%v", raw, err)
 	}
 }

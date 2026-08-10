@@ -161,6 +161,7 @@ Raw `ReadFile` / `WriteFile` stay byte-only and do not build IR.
 | **MaxLinesPerWindow** | Max lines returned per `ReadLines` call (500) |
 | **WriteDocument** | Write-back cache; flush with `Sync` / `SyncAll` |
 | **WriteFile** | Write-through backend; drop IR cache for path |
+| **Dirty overlay** | `Stat` / `ReadDir` / `Open` / `ReadFile` / `Remove` see write-back creates before Sync |
 | **AfterPersist** | Optional host hook after successful backend write (`WriteFile` / `Sync`) |
 | **ContentRev** | Session-visible content identity (`Path` + SHA-256 hex of body); `LineWindow.Rev` when known |
 

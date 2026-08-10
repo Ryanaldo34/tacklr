@@ -1,6 +1,9 @@
 package vfs
 
 import (
+	"maps"
+	"path"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -38,6 +41,13 @@ func (c *contentCache) get(path string) (doc *TextDocument, size int64, mod time
 		return nil, 0, time.Time{}, false, false
 	}
 	return e.doc, e.size, e.modTime, e.dirty, true
+}
+
+func (c *contentCache) has(path string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, ok := c.entries[path]
+	return ok
 }
 
 func (c *contentCache) getDirty(path string) (*TextDocument, bool) {
@@ -129,6 +139,67 @@ func (c *contentCache) dirtyDocs() []*TextDocument {
 		if e.dirty {
 			out = append(out, e.doc.clone())
 		}
+	}
+	return out
+}
+
+// overlayChildren returns basenames under dir from dirty write-back paths only.
+// Clean cache entries mirror the backend and must not ghost listings.
+// Exact dirty file → file; dirty path prefix only → dir.
+func (c *contentCache) overlayChildren(dir string) []DirEntry {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	dir = path.Clean(dir)
+	prefix := dir + "/"
+	if dir == "/" {
+		prefix = "/"
+	}
+	type kind struct{ file, dir bool }
+	byName := make(map[string]*kind)
+	for p, e := range c.entries {
+		if !e.dirty {
+			continue
+		}
+		var rest string
+		switch {
+		case dir == "/":
+			if p == "/" || !strings.HasPrefix(p, "/") {
+				continue
+			}
+			rest = p[1:]
+		case p == dir:
+			continue
+		case strings.HasPrefix(p, prefix):
+			rest = p[len(prefix):]
+		default:
+			continue
+		}
+		if rest == "" {
+			continue
+		}
+		name, _, cut := strings.Cut(rest, "/")
+		if name == "" {
+			continue
+		}
+		k := byName[name]
+		if k == nil {
+			k = &kind{}
+			byName[name] = k
+		}
+		if cut {
+			k.dir = true
+		} else {
+			k.file = true
+		}
+	}
+	if len(byName) == 0 {
+		return nil
+	}
+	names := slices.Sorted(maps.Keys(byName))
+	out := make([]DirEntry, 0, len(names))
+	for _, name := range names {
+		k := byName[name]
+		out = append(out, DirEntry{Name: name, IsDir: k.dir && !k.file})
 	}
 	return out
 }

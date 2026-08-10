@@ -3,9 +3,12 @@ package vfs
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
+	"path"
 	"sync"
+	"time"
 )
 
 // MaxReadFileBytes caps full-file reads and writes.
@@ -148,18 +151,59 @@ func (m *MountSession) at(ctx context.Context, virtualPath string, write bool) (
 	return p, rel, nil
 }
 
-// Stat returns info for a virtual path.
+// Stat returns info for a virtual path. Dirty IR is session-visible even when
+// the backend has not been Sync'd yet.
 func (m *MountSession) Stat(ctx context.Context, virtualPath string) (FileInfo, error) {
-	p, rel, err := m.at(ctx, virtualPath, false)
+	cleaned, err := cleanVirtualPath(virtualPath)
 	if err != nil {
 		return FileInfo{}, err
 	}
-	return p.Stat(ctx, rel)
+	if fi, ok := m.statDirty(cleaned); ok {
+		return fi, nil
+	}
+	p, rel, err := m.at(ctx, cleaned, false)
+	if err != nil {
+		return FileInfo{}, err
+	}
+	fi, err := p.Stat(ctx, rel)
+	if err != nil && errors.Is(err, ErrNotExist) {
+		// Intermediate dir only present via dirty descendants.
+		if kids := m.cache.overlayChildren(cleaned); len(kids) > 0 {
+			return FileInfo{Name: path.Base(cleaned), IsDir: true, ModTime: time.Now().UTC()}, nil
+		}
+	}
+	return fi, err
+}
+
+func (m *MountSession) statDirty(cleaned string) (FileInfo, bool) {
+	doc, size, mod, dirty, ok := m.cache.get(cleaned)
+	if !ok || !dirty {
+		return FileInfo{}, false
+	}
+	if size < 0 {
+		size = int64(len(doc.Text()))
+	}
+	if mod.IsZero() {
+		mod = time.Now().UTC()
+	}
+	return FileInfo{
+		Name:    path.Base(cleaned),
+		Size:    size,
+		ModTime: mod,
+		IsDir:   false,
+	}, true
 }
 
 // Open opens a virtual path for reading.
 func (m *MountSession) Open(ctx context.Context, virtualPath string) (File, error) {
-	p, rel, err := m.at(ctx, virtualPath, false)
+	cleaned, err := cleanVirtualPath(virtualPath)
+	if err != nil {
+		return nil, err
+	}
+	if doc, _, _, dirty, ok := m.cache.get(cleaned); ok && dirty {
+		return &bytesFile{name: path.Base(cleaned), r: bytes.NewReader([]byte(doc.Text()))}, nil
+	}
+	p, rel, err := m.at(ctx, cleaned, false)
 	if err != nil {
 		return nil, err
 	}
@@ -167,12 +211,25 @@ func (m *MountSession) Open(ctx context.Context, virtualPath string) (File, erro
 }
 
 // ReadFile reads an entire file (capped at MaxReadFileBytes).
+// Dirty IR is returned without hitting the backend.
 //
 // When File.Stat reports a size, the buffer is allocated once and oversize files
 // are rejected without reading the body. Unknown sizes fall back to a limited
 // streaming read.
 func (m *MountSession) ReadFile(ctx context.Context, virtualPath string) ([]byte, error) {
-	f, err := m.Open(ctx, virtualPath)
+	cleaned, err := cleanVirtualPath(virtualPath)
+	if err != nil {
+		return nil, err
+	}
+	if doc, _, _, dirty, ok := m.cache.get(cleaned); ok && dirty {
+		body := doc.Text()
+		if len(body) > MaxReadFileBytes {
+			return nil, errFileExceeds(MaxReadFileBytes)
+		}
+		return []byte(body), nil
+	}
+
+	f, err := m.Open(ctx, cleaned)
 	if err != nil {
 		return nil, err
 	}
@@ -202,18 +259,35 @@ func (m *MountSession) ReadFile(ctx context.Context, virtualPath string) ([]byte
 	return data, nil
 }
 
+// bytesFile is an in-memory File for dirty IR Open/ReadFile.
+type bytesFile struct {
+	name string
+	r    *bytes.Reader
+}
+
+func (f *bytesFile) Read(p []byte) (int, error) { return f.r.Read(p) }
+func (f *bytesFile) Write([]byte) (int, error)  { return 0, ErrReadOnly }
+func (f *bytesFile) Close() error               { return nil }
+func (f *bytesFile) Stat() (FileInfo, error) {
+	return FileInfo{Name: f.name, Size: f.r.Size(), ModTime: time.Now().UTC()}, nil
+}
+
 // WriteFile creates or truncates a file (fails on read-only mounts).
 // Write-through to the backend, then drops any cached IR for the path.
 func (m *MountSession) WriteFile(ctx context.Context, virtualPath string, data []byte) error {
-	if err := m.writeContents(ctx, virtualPath, bytes.NewReader(data), int64(len(data))); err != nil {
+	cleaned, err := cleanVirtualPath(virtualPath)
+	if err != nil {
 		return err
 	}
-	m.cache.remove(virtualPath)
-	m.fireAfterPersist(ctx, virtualPath)
+	if err := m.writeContents(ctx, cleaned, bytes.NewReader(data), int64(len(data))); err != nil {
+		return err
+	}
+	m.cache.remove(cleaned)
+	m.fireAfterPersist(ctx, cleaned)
 	return nil
 }
 
-// writeContents writes exactly size bytes from r to virtualPath.
+// writeContents writes exactly size bytes from r to virtualPath (must be cleaned).
 func (m *MountSession) writeContents(ctx context.Context, virtualPath string, r io.Reader, size int64) error {
 	if size > int64(MaxReadFileBytes) {
 		return errFileExceeds(MaxReadFileBytes)
@@ -243,26 +317,66 @@ func (m *MountSession) writeContents(ctx context.Context, virtualPath string, r 
 	return nil
 }
 
-// ReadDir lists a directory.
+// ReadDir lists a directory, merging dirty IR paths so write-back creates appear
+// before Sync.
 func (m *MountSession) ReadDir(ctx context.Context, virtualPath string) ([]DirEntry, error) {
-	p, rel, err := m.at(ctx, virtualPath, false)
+	cleaned, err := cleanVirtualPath(virtualPath)
 	if err != nil {
 		return nil, err
 	}
-	return p.ReadDir(ctx, rel)
+	p, rel, err := m.at(ctx, cleaned, false)
+	if err != nil {
+		return nil, err
+	}
+	ents, err := p.ReadDir(ctx, rel)
+	if err != nil && !errors.Is(err, ErrNotExist) {
+		return nil, err
+	}
+	if ents == nil {
+		ents = []DirEntry{}
+	}
+	overlay := m.cache.overlayChildren(cleaned)
+	if len(overlay) == 0 {
+		if err != nil {
+			return nil, err
+		}
+		return ents, nil
+	}
+	seen := make(map[string]int, len(ents))
+	for i, e := range ents {
+		seen[e.Name] = i
+	}
+	for _, e := range overlay {
+		if i, ok := seen[e.Name]; ok {
+			// Dirty file wins IsDir=false over a backend dir of the same name.
+			if !e.IsDir {
+				ents[i] = e
+			}
+			continue
+		}
+		ents = append(ents, e)
+	}
+	return ents, nil
 }
 
 // Remove removes a file or empty directory and drops any cache entry.
+// Dirty-only paths (write-back create, not yet Sync'd) succeed without backend.
 func (m *MountSession) Remove(ctx context.Context, virtualPath string) error {
-	p, rel, err := m.at(ctx, virtualPath, true)
+	cleaned, err := cleanVirtualPath(virtualPath)
 	if err != nil {
 		return err
 	}
-	if err := p.Remove(ctx, rel); err != nil {
+	cached := m.cache.has(cleaned)
+	p, rel, err := m.at(ctx, cleaned, true)
+	if err != nil {
 		return err
 	}
-	m.cache.remove(virtualPath)
-	return nil
+	err = p.Remove(ctx, rel)
+	if err == nil || (errors.Is(err, ErrNotExist) && cached) {
+		m.cache.remove(cleaned)
+		return nil
+	}
+	return err
 }
 
 // MkdirAll creates a directory and parents.

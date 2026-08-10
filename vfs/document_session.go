@@ -63,32 +63,45 @@ func (m *MountSession) WriteDocument(ctx context.Context, doc Document) error {
 	if !ok {
 		return ErrNotTextual
 	}
-	if _, _, err := m.at(ctx, td.Path(), true); err != nil {
+	cleaned, err := cleanVirtualPath(td.Path())
+	if err != nil {
+		return err
+	}
+	if _, _, err := m.at(ctx, cleaned, true); err != nil {
 		return err
 	}
 	if len(td.Text()) > MaxReadFileBytes {
 		return errFileExceeds(MaxReadFileBytes)
 	}
-	m.cache.put(td.Path(), td, int64(len(td.Text())), time.Time{}, true)
+	// Keep cache key aligned with cleaned path (td.Path may already be clean).
+	if cleaned != td.Path() {
+		td = td.clone()
+		td.path = cleaned
+	}
+	m.cache.put(cleaned, td, int64(len(td.Text())), time.Now().UTC(), true)
 	return nil
 }
 
 // Sync flushes one dirty path to the backend (no-op if clean or uncached).
 func (m *MountSession) Sync(ctx context.Context, virtualPath string) error {
-	doc, dirty := m.cache.getDirty(virtualPath)
+	cleaned, err := cleanVirtualPath(virtualPath)
+	if err != nil {
+		return err
+	}
+	doc, dirty := m.cache.getDirty(cleaned)
 	if !dirty {
 		return nil
 	}
 	body := doc.Text()
-	if err := m.writeContents(ctx, virtualPath, strings.NewReader(body), int64(len(body))); err != nil {
+	if err := m.writeContents(ctx, cleaned, strings.NewReader(body), int64(len(body))); err != nil {
 		return err
 	}
-	mod := time.Time{}
-	if fi, err := m.Stat(ctx, virtualPath); err == nil {
-		mod = fi.ModTime
+	// Mark clean before Stat so overlay no longer masks backend mtime.
+	m.cache.markClean(cleaned, int64(len(body)), time.Time{})
+	if fi, err := m.Stat(ctx, cleaned); err == nil {
+		m.cache.markClean(cleaned, int64(len(body)), fi.ModTime)
 	}
-	m.cache.markClean(virtualPath, int64(len(body)), mod)
-	m.fireAfterPersist(ctx, virtualPath)
+	m.fireAfterPersist(ctx, cleaned)
 	return nil
 }
 

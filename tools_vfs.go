@@ -140,7 +140,7 @@ func (v vfsTools) newReadLines() *Tool {
 		DisplayName: "Read lines {path}",
 		Description: `Read a half-open line window [start, end) from a virtual path (1-based).
 
-Returns numbered lines and a content rev hash. Pass rev to replace_lines, replace_text, or write. Page with next_start until eof=true. Prefer small windows. No host shell.`,
+Uses IR when the file is within the session materialize cap (and always for dirty/write-back content). Returns numbered lines and a content rev. Pass rev to replace_lines, replace_text, or write. Page with next_start until eof. No host shell.`,
 		Category: streaming.ToolCategoryRead,
 		Access:   ToolReadAccess,
 		Timeout:  60 * time.Second,
@@ -257,9 +257,9 @@ func (v vfsTools) newWrite() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "write",
 		DisplayName: "Write {path}",
-		Description: `Write a full file body (create or replace), write-through to the mount.
+		Description: `Write a full file body (create or replace) via write-back IR.
 
-When the path exists, rev is required and must match. Prefer replace_lines / replace_text for partial edits (those stage write-back IR).`,
+When the path exists, rev is required and must match. Visible to list/stat/read before Sync; checkpoint flushes. Prefer replace_lines / replace_text for partial edits.`,
 		Category: streaming.ToolCategoryEdit,
 		Access:   ToolWriteAccess,
 		Timeout:  60 * time.Second,
@@ -286,12 +286,8 @@ When the path exists, rev is required and must match. Prefer replace_lines / rep
 			if len(args.Content) > vfs.MaxReadFileBytes {
 				return "", vfs.ErrTooLarge
 			}
-			// Write-through so create/replace is visible without Sync.
-			if err := v.ms.WriteFile(ctx, p, []byte(args.Content)); err != nil {
-				return "", err
-			}
-			doc := vfs.NewTextDocument(p, "text/plain", "utf-8", args.Content)
-			return fmt.Sprintf("path=%s rev=%s line_count=%d", p, vfs.ContentHash(args.Content), doc.LineCount()), nil
+			mt := vfs.DetectMediaType(p, []byte(args.Content))
+			return v.stage(ctx, vfs.NewTextDocument(p, mt, "utf-8", args.Content))
 		},
 	})
 }
