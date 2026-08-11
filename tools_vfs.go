@@ -86,17 +86,22 @@ type pathArgs struct {
 }
 
 type readLinesArgs struct {
-	Path  string `json:"path" desc:"Absolute virtual path to read."`
-	Start int    `json:"start" desc:"1-based start line (inclusive)."`
-	End   int    `json:"end" desc:"1-based end line (exclusive). Half-open [start, end)."`
+	Path    string `json:"path" desc:"Absolute virtual path to read."`
+	Start   int    `json:"start,omitempty" desc:"1-based start line (inclusive). Ignored when block_id is set."`
+	End     int    `json:"end,omitempty" desc:"1-based end line (exclusive). Ignored when block_id is set."`
+	BlockID string `json:"block_id,omitempty" desc:"Structured block id (e.g. heading path installation or api/errors). Media-agnostic."`
+	Outline bool   `json:"outline,omitempty" desc:"If true, include structured block outline when available."`
 }
 
 type replaceLinesArgs struct {
-	Path  string   `json:"path" desc:"Absolute virtual path to edit."`
-	Rev   string   `json:"rev" desc:"Content hash from the latest read_lines or successful write for this path."`
-	Start int      `json:"start" desc:"1-based start line (inclusive)."`
-	End   int      `json:"end" desc:"1-based end line (exclusive). Half-open [start, end)."`
-	Lines []string `json:"lines" desc:"Replacement lines (no embedded newlines). Empty deletes the span."`
+	Path           string   `json:"path" desc:"Absolute virtual path to edit."`
+	Rev            string   `json:"rev" desc:"Content hash from the latest read or successful write for this path."`
+	Start          int      `json:"start,omitempty" desc:"1-based start line (inclusive). Ignored when block_id is set."`
+	End            int      `json:"end,omitempty" desc:"1-based end line (exclusive). Ignored when block_id is set."`
+	Lines          []string `json:"lines,omitempty" desc:"Replacement lines (no embedded newlines). Empty deletes the span. Or use body."`
+	Body           string   `json:"body,omitempty" desc:"Replacement body as one string (split on newlines). Used if lines is empty."`
+	BlockID        string   `json:"block_id,omitempty" desc:"Replace this structured block's body (or full span if include_heading)."`
+	IncludeHeading bool     `json:"include_heading,omitempty" desc:"When block_id is a heading, replace the heading line too."`
 }
 
 type replaceTextArgs struct {
@@ -137,10 +142,10 @@ func (v vfsTools) pathOp(
 func (v vfsTools) newReadLines() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "read_lines",
-		DisplayName: "Read lines {path}",
-		Description: `Read a half-open line window [start, end) from a virtual path (1-based).
+		DisplayName: "Read {path}",
+		Description: `Read a virtual path via IR: line window and/or structured block.
 
-Uses IR when the file is within the session materialize cap (and always for dirty/write-back content). Returns numbered lines and a content rev. Pass rev to replace_lines, replace_text, or write. Page with next_start until eof. No host shell.`,
+Use start/end for half-open 1-based lines, or block_id for a structured region (e.g. Markdown heading path). Set outline=true to list blocks when the document has structure. Returns rev — pass it to replace_lines / replace_text / write. Prefer block_id for large doc edits; lines for small patches.`,
 		Category: streaming.ToolCategoryRead,
 		Access:   ToolReadAccess,
 		Timeout:  60 * time.Second,
@@ -149,10 +154,57 @@ Uses IR when the file is within the session materialize cap (and always for dirt
 			if err != nil {
 				return "", err
 			}
-			if args.Start < 1 || args.End < args.Start {
-				return "", fmt.Errorf("invalid range start=%d end=%d", args.Start, args.End)
+			rt.EmitUpdate("Reading " + p)
+
+			// Structured path: need full IR for blocks.
+			if args.BlockID != "" || args.Outline {
+				doc, err := v.ms.ReadText(ctx, p)
+				if err != nil {
+					return "", err
+				}
+				rev := vfs.ContentHash(doc.Text())
+				blocks := doc.Blocks()
+				var b strings.Builder
+				fmt.Fprintf(&b, "path=%s rev=%s media_type=%s line_count=%d\n",
+					p, rev, doc.MediaType(), doc.LineCount())
+				if args.Outline {
+					if len(blocks) > 0 {
+						b.WriteString("outline:\n")
+						for _, bl := range blocks {
+							fmt.Fprintf(&b, "  %s kind=%s level=%d L%d-L%d %q\n",
+								bl.ID, bl.Kind, bl.Style.Level, bl.Style.Span.StartLine, bl.Style.Span.EndLine, bl.Text)
+						}
+					}
+				}
+				start, end := args.Start, args.End
+				if args.BlockID != "" {
+					if len(blocks) == 0 {
+						return "", fmt.Errorf("no structured blocks on this document")
+					}
+					bl, ok := vfs.FindBlock(blocks, args.BlockID)
+					if !ok {
+						return "", fmt.Errorf("unknown block_id %q", args.BlockID)
+					}
+					start, end = bl.Style.Span.StartLine, bl.Style.Span.EndLine
+					fmt.Fprintf(&b, "block_id=%s\n", bl.ID)
+				}
+				if start > 0 && end >= start {
+					win, err := lineWindowFromTextDoc(doc, start, end)
+					if err != nil {
+						return "", err
+					}
+					fmt.Fprintf(&b, "start=%d end=%d returned=%d eof=%v next_start=%d\n",
+						win.start, win.end, len(win.lines), win.eof, win.next)
+					for i, line := range win.lines {
+						fmt.Fprintf(&b, "%6d|%s\n", win.start+i, line)
+					}
+				}
+				return b.String(), nil
 			}
-			rt.EmitUpdate(fmt.Sprintf("Reading %s [%d,%d)", p, args.Start, args.End))
+
+			if args.Start < 1 || args.End < args.Start {
+				return "", fmt.Errorf("invalid range start=%d end=%d (or set block_id / outline)", args.Start, args.End)
+			}
 			win, err := v.ms.ReadLines(ctx, p, args.Start, args.End)
 			if err != nil {
 				return "", err
@@ -177,10 +229,10 @@ Uses IR when the file is within the session materialize cap (and always for dirt
 func (v vfsTools) newReplaceLines() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "replace_lines",
-		DisplayName: "Replace lines {path}",
-		Description: `Replace half-open line span [start, end) using rev from read_lines.
+		DisplayName: "Replace {path}",
+		Description: `Replace content in a virtual file using a content rev.
 
-rev must match the current session-visible body. Stages write-back IR (checkpoint/Sync flushes). On stale rev, re-read and retry.`,
+Provide either start/end + lines, or block_id + lines/body (structured region; works for Markdown headings and later Docs/Word blocks). rev must match session-visible body. On stale rev, re-read and retry.`,
 		Category: streaming.ToolCategoryEdit,
 		Access:   ToolWriteAccess,
 		Timeout:  60 * time.Second,
@@ -192,17 +244,65 @@ rev must match the current session-visible body. Stages write-back IR (checkpoin
 			if strings.TrimSpace(args.Rev) == "" {
 				return "", fmt.Errorf("rev is required")
 			}
+			lines := args.Lines
+			if len(lines) == 0 && args.Body != "" {
+				lines = strings.Split(args.Body, "\n")
+				// Trailing newline in body → trailing empty element; OK (matches TextDocument).
+				if strings.HasSuffix(args.Body, "\n") && len(lines) > 0 && lines[len(lines)-1] == "" {
+					lines = lines[:len(lines)-1]
+				}
+			}
 			rt.EmitUpdate("Editing " + p)
 			doc, err := v.loadMatching(ctx, p, args.Rev)
 			if err != nil {
 				return "", err
 			}
-			if err := doc.ReplaceLines(args.Start, args.End, args.Lines); err != nil {
+			start, end := args.Start, args.End
+			if args.BlockID != "" {
+				bl, ok := vfs.FindBlock(doc.Blocks(), args.BlockID)
+				if !ok {
+					return "", fmt.Errorf("unknown block_id %q", args.BlockID)
+				}
+				start, end, err = vfs.BlockReplaceSpan(bl, args.IncludeHeading)
+				if err != nil {
+					return "", err
+				}
+			}
+			if start < 1 || end < start {
+				return "", fmt.Errorf("invalid range start=%d end=%d (or set block_id)", start, end)
+			}
+			if err := doc.ReplaceLines(start, end, lines); err != nil {
 				return "", err
 			}
 			return v.stage(ctx, doc)
 		},
 	})
+}
+
+type lineWin struct {
+	start, end, next int
+	lines            []string
+	eof              bool
+}
+
+func lineWindowFromTextDoc(doc *vfs.TextDocument, start, end int) (lineWin, error) {
+	n := doc.LineCount()
+	if start < 1 || end < start {
+		return lineWin{}, fmt.Errorf("invalid range")
+	}
+	eof := false
+	if end > n+1 {
+		end = n + 1
+		eof = true
+	}
+	if start > n+1 {
+		return lineWin{}, vfs.ErrLineOutOfRange
+	}
+	lines, err := doc.Lines(start, end)
+	if err != nil {
+		return lineWin{}, err
+	}
+	return lineWin{start: start, end: end, lines: lines, eof: eof, next: start + len(lines)}, nil
 }
 
 func (v vfsTools) newReplaceText() *Tool {

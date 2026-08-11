@@ -185,13 +185,7 @@ func (x *MountIndexer) indexFile(ctx context.Context, vpath string, st vfs.FileI
 		return outcomeSkipped, nil
 	}
 
-	f, err := x.VFS.Open(ctx, vpath)
-	if err != nil {
-		return 0, err
-	}
-	defer f.Close()
-
-	chunks, hash, mediaType, nBytes, err := streamChunks(ctx, f, vpath, linesPer, maxBytes)
+	chunks, hash, mediaType, nBytes, err := x.loadChunks(ctx, vpath, mt, linesPer, maxBytes)
 	if err != nil {
 		return 0, err
 	}
@@ -238,26 +232,30 @@ func (x *MountIndexer) indexFile(ctx context.Context, vpath string, st vfs.FileI
 		return 0, err
 	}
 
-	// Soft-delete obsolete trailing chunks, then upsert current set.
 	old, err := x.Brain.ListChildren(ctx, x.Scope, parentID)
 	if err != nil {
 		return 0, err
 	}
 	for _, c := range old {
-		if c.Position == nil || *c.Position > len(chunks) {
-			if err := x.Brain.SoftDelete(ctx, x.Scope, c.ID); err != nil && !errors.Is(err, brain.ErrNotFound) {
-				return 0, err
-			}
+		if err := x.Brain.SoftDelete(ctx, x.Scope, c.ID); err != nil && !errors.Is(err, brain.ErrNotFound) {
+			return 0, err
 		}
 	}
 
 	for i, ch := range chunks {
 		pos := i + 1
-		id := chunkID(parentID, pos)
+		id := ch.ID
+		if id == uuid.Nil {
+			id = chunkID(parentID, pos)
+		}
+		title := ch.Title
+		if title == "" {
+			title = fmt.Sprintf("%s:%d-%d", path.Base(vpath), ch.StartLine, ch.EndLine)
+		}
 		obj := brain.Object{
 			ID:       id,
 			Kind:     chunkKind,
-			Title:    fmt.Sprintf("%s:%d-%d", path.Base(vpath), ch.StartLine, ch.EndLine),
+			Title:    title,
 			Content:  ch.Text,
 			ParentID: &parentID,
 			Position: &pos,
@@ -268,11 +266,129 @@ func (x *MountIndexer) indexFile(ctx context.Context, vpath string, st vfs.FileI
 				PropByteEnd:   float64(ch.ByteEnd),
 			},
 		}
+		if ch.BlockID != "" {
+			obj.Properties[PropBlockID] = ch.BlockID
+			obj.Properties[PropHeadingPath] = ch.BlockID
+		}
 		if _, err := x.Brain.Put(ctx, x.Scope, obj); err != nil {
 			return 0, err
 		}
 	}
 	return outcomeWrote, nil
+}
+
+func (x *MountIndexer) loadChunks(ctx context.Context, vpath, detectedMT string, linesPer int, maxBytes int64) ([]chunkDraft, string, string, int64, error) {
+	if detectedMT == "text/markdown" {
+		doc, err := x.VFS.ReadText(ctx, vpath)
+		// ReadText may fail (size cap / non-text decode); fall through to streamChunks.
+		if err == nil {
+			body := doc.Text()
+			hash := vfs.ContentHash(body)
+			if blocks := doc.Blocks(); len(blocks) > 0 {
+				return chunksFromBlocks(path.Base(vpath), body, blocks, x.DocumentID(vpath)), hash, doc.MediaType(), int64(len(body)), nil
+			}
+			return lineChunksFromText(body, linesPer), hash, doc.MediaType(), int64(len(body)), nil
+		}
+	}
+	f, err := x.VFS.Open(ctx, vpath)
+	if err != nil {
+		return nil, "", "", 0, err
+	}
+	defer f.Close()
+	return streamChunks(ctx, f, vpath, linesPer, maxBytes)
+}
+
+func chunksFromBlocks(fileTitle, body string, blocks []vfs.Block, parentID uuid.UUID) []chunkDraft {
+	// One line-start scan; span text is a body substring (no Split/Join copies).
+	starts := lineStarts(body)
+	nLines := len(starts)
+	out := make([]chunkDraft, 0, len(blocks))
+	for _, b := range blocks {
+		start, end := b.Style.Span.StartLine, b.Style.Span.EndLine
+		if start < 1 {
+			continue
+		}
+		if end > nLines+1 {
+			end = nLines + 1
+		}
+		if start > end {
+			continue
+		}
+		seg := lineSpan(body, starts, start, end)
+		title := b.Text
+		if title == "" {
+			title = b.ID
+		}
+		out = append(out, chunkDraft{
+			ID:        chunkIDByKey(parentID, b.ID),
+			Title:     fmt.Sprintf("%s#%s", fileTitle, b.ID),
+			Text:      fileTitle + "\n" + title + "\n" + seg,
+			StartLine: start,
+			EndLine:   end,
+			BlockID:   b.ID,
+		})
+	}
+	return out
+}
+
+func lineChunksFromText(body string, linesPer int) []chunkDraft {
+	if linesPer <= 0 {
+		linesPer = DefaultLinesPerChunk
+	}
+	starts := lineStarts(body)
+	n := len(starts)
+	out := make([]chunkDraft, 0, (n+linesPer-1)/linesPer)
+	var byteOff int64
+	for i := 0; i < n; {
+		end := i + linesPer
+		if end > n {
+			end = n
+		}
+		seg := lineSpan(body, starts, i+1, end+1)
+		out = append(out, chunkDraft{
+			Text:      seg,
+			StartLine: i + 1,
+			EndLine:   end + 1,
+			ByteStart: byteOff,
+			ByteEnd:   byteOff + int64(len(seg)),
+		})
+		byteOff += int64(len(seg)) + 1
+		i = end
+	}
+	return out
+}
+
+// lineStarts returns byte offsets of each line start (matches strings.Split count).
+func lineStarts(text string) []int {
+	starts := make([]int, 1, strings.Count(text, "\n")+1)
+	starts[0] = 0
+	for i := 0; i < len(text); i++ {
+		if text[i] == '\n' {
+			starts = append(starts, i+1)
+		}
+	}
+	return starts
+}
+
+// lineSpan returns body lines [start, end) as a substring of body (1-based half-open).
+func lineSpan(body string, starts []int, start, end int) string {
+	if start < 1 || end <= start {
+		return ""
+	}
+	lo := start - 1
+	if lo >= len(starts) {
+		return ""
+	}
+	startByte := starts[lo]
+	hi := end - 1
+	if hi >= len(starts) {
+		return body[startByte:]
+	}
+	endByte := starts[hi] - 1 // drop the '\n' that ends the last included line
+	if endByte < startByte {
+		return ""
+	}
+	return body[startByte:endByte]
 }
 
 func (x *MountIndexer) removeIndex(ctx context.Context, vpath string) error {
@@ -297,11 +413,18 @@ func (x *MountIndexer) removeIndex(ctx context.Context, vpath string) error {
 }
 
 type chunkDraft struct {
+	ID        uuid.UUID
+	Title     string
 	Text      string
 	StartLine int
 	EndLine   int
 	ByteStart int64
 	ByteEnd   int64
+	BlockID   string
+}
+
+func chunkIDByKey(parent uuid.UUID, key string) uuid.UUID {
+	return uuid.NewSHA1(parent, []byte("block:"+key))
 }
 
 func streamChunks(ctx context.Context, r io.Reader, vpath string, linesPerChunk int, maxBytes int64) ([]chunkDraft, string, string, int64, error) {

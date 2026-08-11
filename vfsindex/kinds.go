@@ -13,6 +13,8 @@ const (
 	PropEndLine     = "end_line"
 	PropByteStart   = "byte_start"
 	PropByteEnd     = "byte_end"
+	PropBlockID     = "block_id"
+	PropHeadingPath = "heading_path"
 )
 
 // Default kind names (host may override on MountIndexer).
@@ -46,6 +48,8 @@ func MountIndexKinds() []brain.KindSpec {
 				{Name: PropEndLine, Type: brain.FieldTypeNumber},
 				{Name: PropByteStart, Type: brain.FieldTypeNumber},
 				{Name: PropByteEnd, Type: brain.FieldTypeNumber},
+				{Name: PropBlockID, Type: brain.FieldTypeString, Description: "Structured block id when indexed from IR"},
+				{Name: PropHeadingPath, Type: brain.FieldTypeString},
 			},
 		},
 	}

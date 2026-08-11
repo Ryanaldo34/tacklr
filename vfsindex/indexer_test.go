@@ -173,3 +173,196 @@ func TestMountIndexer_indexSearchAndNotify(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestMountIndexer_markdownBlocksChunks: Markdown is chunked by structured
+// heading/preamble blocks with stable block_id props.
+func TestMountIndexer_markdownBlocksChunks(t *testing.T) {
+	ctx := context.Background()
+	base := t.TempDir()
+	reg := vfs.NewBackendRegistry()
+	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
+		t.Fatal(err)
+	}
+	ms := vfs.NewMountSession("idx-md", reg)
+	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
+		t.Fatal(err)
+	}
+
+	store := brain.NewMemoryStore()
+	eng, err := brain.NewEngine(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...); err != nil {
+		t.Fatal(err)
+	}
+	ns := uuid.New()
+	scope := brain.Scope{Namespace: &ns}
+	idx, err := vfsindex.NewMountIndexer(ms, eng, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	md := "intro line\n\n# Title\n\n## Install\n\npip install x\n\n## API\n\ncall me\n"
+	if err := ms.WriteFile(ctx, "/work/guide.md", []byte(md)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := idx.IndexPrefix(ctx, "/work", vfsindex.IndexOpts{}); err != nil {
+		t.Fatal(err)
+	}
+
+	parentID := idx.DocumentID("/work/guide.md")
+	children, err := eng.ListChildren(ctx, scope, parentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// preamble + title + title/install + title/api
+	if len(children) != 4 {
+		t.Fatalf("expected 4 block chunks, got %d", len(children))
+	}
+
+	byBlock := map[string]brain.RichObject{}
+	for _, ch := range children {
+		obj, err := eng.Read(ctx, scope, ch.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bid, _ := obj.Properties[vfsindex.PropBlockID].(string)
+		if bid == "" {
+			t.Fatalf("chunk missing block_id: title=%q props=%+v", obj.Title, obj.Properties)
+		}
+		if obj.Properties[vfsindex.PropHeadingPath] != bid {
+			t.Fatalf("heading_path should match block_id: %+v", obj.Properties)
+		}
+		startL, _ := obj.Properties[vfsindex.PropStartLine].(float64)
+		endL, _ := obj.Properties[vfsindex.PropEndLine].(float64)
+		if startL < 1 || endL < startL {
+			t.Fatalf("block %q start/end lines: start=%v end=%v", bid, startL, endL)
+		}
+		byBlock[bid] = obj
+	}
+	install, ok := byBlock["title/install"]
+	if !ok {
+		t.Fatalf("missing title/install; blocks=%v", keys(byBlock))
+	}
+	if !strings.Contains(install.Content, "pip install") {
+		t.Fatalf("install chunk content: %q", install.Content)
+	}
+	instStart, _ := install.Properties[vfsindex.PropStartLine].(float64)
+	instEnd, _ := install.Properties[vfsindex.PropEndLine].(float64)
+	if instStart < 1 || instEnd <= instStart {
+		t.Fatalf("install span lines: start=%v end=%v", instStart, instEnd)
+	}
+	// Stable id: re-index same content keeps same chunk UUIDs for block keys
+	installID := install.ID
+	if err := idx.IndexPath(ctx, "/work/guide.md"); err != nil {
+		t.Fatal(err)
+	}
+	again, err := eng.Read(ctx, scope, installID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Properties[vfsindex.PropBlockID] != "title/install" {
+		t.Fatalf("stable block chunk lost: %+v", again.Properties)
+	}
+
+	// Content change: same block_id props / chunk UUID; content + parent hash update
+	parent, err := eng.Read(ctx, scope, parentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldHash, _ := parent.Properties[vfsindex.PropContentHash].(string)
+	md2 := "intro line\n\n# Title\n\n## Install\n\npip install y\n\n## API\n\ncall me\n"
+	if err := ms.WriteFile(ctx, "/work/guide.md", []byte(md2)); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.IndexPath(ctx, "/work/guide.md"); err != nil {
+		t.Fatal(err)
+	}
+	parent, err = eng.Read(ctx, scope, parentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newHash, _ := parent.Properties[vfsindex.PropContentHash].(string)
+	if newHash == "" || newHash == oldHash {
+		t.Fatalf("content_hash should change after edit: old=%q new=%q", oldHash, newHash)
+	}
+	updated, err := eng.Read(ctx, scope, installID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Properties[vfsindex.PropBlockID] != "title/install" {
+		t.Fatalf("block_id after reindex: %+v", updated.Properties)
+	}
+	if !strings.Contains(updated.Content, "pip install y") {
+		t.Fatalf("chunk content should update: %q", updated.Content)
+	}
+}
+
+// TestMountIndexer_markdownLineChunksWhenNoBlocks: structureless markdown
+// falls back to line-window chunks (Blocks() empty).
+func TestMountIndexer_markdownLineChunksWhenNoBlocks(t *testing.T) {
+	ctx := context.Background()
+	base := t.TempDir()
+	reg := vfs.NewBackendRegistry()
+	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
+		t.Fatal(err)
+	}
+	ms := vfs.NewMountSession("idx-md-lines", reg)
+	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
+		t.Fatal(err)
+	}
+
+	store := brain.NewMemoryStore()
+	eng, err := brain.NewEngine(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...); err != nil {
+		t.Fatal(err)
+	}
+	ns := uuid.New()
+	scope := brain.Scope{Namespace: &ns}
+	idx, err := vfsindex.NewMountIndexer(ms, eng, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// No ATX headings → Blocks() empty → lineChunksFromText path
+	body := "line one\nline two\nline three\n"
+	if err := ms.WriteFile(ctx, "/work/notes.md", []byte(body)); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.IndexPath(ctx, "/work/notes.md"); err != nil {
+		t.Fatal(err)
+	}
+
+	parentID := idx.DocumentID("/work/notes.md")
+	children, err := eng.ListChildren(ctx, scope, parentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(children) < 1 {
+		t.Fatalf("expected line-window chunks, got %d", len(children))
+	}
+	obj, err := eng.Read(ctx, scope, children[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(obj.Content, "line one") {
+		t.Fatalf("line chunk content: %q", obj.Content)
+	}
+	startL, _ := obj.Properties[vfsindex.PropStartLine].(float64)
+	endL, _ := obj.Properties[vfsindex.PropEndLine].(float64)
+	if startL < 1 || endL < startL {
+		t.Fatalf("line chunk span: start=%v end=%v", startL, endL)
+	}
+}
+
+func keys(m map[string]brain.RichObject) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}

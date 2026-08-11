@@ -36,12 +36,7 @@ func TestVFSTools_readWriteRev(t *testing.T) {
 	})
 	tools := map[string]*Tool{}
 	for _, tool := range h.tools {
-		switch tool.Name {
-		case "list", "stat", "read_lines", "replace_lines", "replace_text", "write", "mkdir", "remove":
-			tools[tool.Name] = tool
-		case "vfs_list", "vfs_read_lines", "vfs_write":
-			t.Fatalf("legacy vfs_ tool still registered: %s", tool.Name)
-		}
+		tools[tool.Name] = tool
 	}
 	for _, name := range []string{"list", "stat", "read_lines", "replace_lines", "replace_text", "write", "mkdir", "remove"} {
 		if tools[name] == nil {
@@ -154,6 +149,52 @@ func TestVFSTools_readWriteRev(t *testing.T) {
 	doc, err := ms.ReadText(ctx, "/work/a.go")
 	if err != nil || doc.Text() != "package a\n" {
 		t.Fatalf("body=%q err=%v", doc.Text(), err)
+	}
+
+	// Structured markdown: outline, read by block_id, replace by block_id
+	md := "# Hello\n\n## Install\n\nold\n"
+	if err := ms.WriteFile(ctx, "/work/README.md", []byte(md)); err != nil {
+		t.Fatal(err)
+	}
+	res, err = tools["read_lines"].invoke(ctx, `{"path":"/work/README.md","outline":true}`, rt)
+	if err != nil || !strings.Contains(res.output, "outline:") ||
+		!strings.Contains(res.output, "hello/install") || !strings.Contains(res.output, "kind=heading") {
+		t.Fatalf("outline: %q err=%v", res.output, err)
+	}
+	revMD := fieldKV(res.output, "rev")
+	if revMD == "" {
+		t.Fatalf("outline rev empty: %s", res.output)
+	}
+
+	// read_lines by block_id: dump span lines without full outline
+	res, err = tools["read_lines"].invoke(ctx, `{"path":"/work/README.md","block_id":"hello/install"}`, rt)
+	if err != nil {
+		t.Fatalf("read block_id: %v", err)
+	}
+	if !strings.Contains(res.output, "block_id=hello/install") {
+		t.Fatalf("read block_id header: %q", res.output)
+	}
+	if !strings.Contains(res.output, "## Install") || !strings.Contains(res.output, "old") {
+		t.Fatalf("read block_id body lines: %q", res.output)
+	}
+	if fieldKV(res.output, "rev") == "" {
+		t.Fatalf("read block_id rev empty: %s", res.output)
+	}
+	// Span dump includes numbered lines from the block window
+	if !strings.Contains(res.output, "returned=") || !strings.Contains(res.output, "|") {
+		t.Fatalf("read block_id window lines: %q", res.output)
+	}
+
+	body, _ = json.Marshal(map[string]any{
+		"path": "/work/README.md", "rev": revMD, "block_id": "hello/install", "body": "new body\n",
+	})
+	res, err = tools["replace_lines"].invoke(ctx, string(body), rt)
+	if err != nil {
+		t.Fatalf("replace block: %v out=%s", err, res.output)
+	}
+	got, err := ms.ReadText(ctx, "/work/README.md")
+	if err != nil || !strings.Contains(got.Text(), "new body") || !strings.Contains(got.Text(), "## Install") {
+		t.Fatalf("after block replace: %q err=%v", got.Text(), err)
 	}
 }
 

@@ -10,7 +10,8 @@
 //	Document.properties.vfs_path  = virtual path
 //	Document.properties.content_hash, size, mtime, media_type
 //	Chunk.properties.start_line, end_line, byte_start, byte_end
-//	Chunk.Content                 = chunk body (line-oriented windows)
+//	Chunk.properties.block_id, heading_path  = when chunked from Structured IR
+//	Chunk.Content                 = chunk body (heading blocks for Markdown; line windows otherwise)
 //
 // Live VFS bytes remain source of truth. The index is derived and may lag until
 // re-index (IndexPath / IndexScheduler.Notify). Hosts wire Notify after writes
