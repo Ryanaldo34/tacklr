@@ -349,17 +349,55 @@ Agent tools use the same ideas with generic names: `block_id`, optional `outline
 [`vfsindex`](../vfsindex) streams text-like mount files into brain
 `Document` + `Chunk` objects (`vfs_path`, line/byte anchors, content hash).
 
+### Decoupling
+
+| Package | May know |
+|---------|----------|
+| `vfs` | `AfterPersist` hook only; no brain/vfsindex types beyond the callback |
+| `brain` | Objects/props only; no VFS |
+| `vfsindex` | Both; owns `IndexPath` / `IndexPrefix` / schedulers |
+| harness (`tacklr`) | Optional glue: indexer + tools when Brain + VFS + search namespace are all set |
+
+### Host wiring
+
 ```go
 idx, _ := vfsindex.NewMountIndexer(ms, eng, scope)
-_ = eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...) // if using a kind catalog
+_ = eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...) // non-empty kind catalogs only
 _ = idx.IndexPrefix(ctx, "/work", vfsindex.IndexOpts{})
 
-// Re-index after backend writes (Sync / WriteFile)
-sched := vfsindex.NewSyncScheduler(idx)
+// Prefer AsyncScheduler so writes are not blocked on re-chunk
+sched := vfsindex.NewAsyncScheduler(idx)
+prev := ms.GetAfterPersist()
 ms.SetAfterPersist(func(ctx context.Context, path string) error {
+    if prev != nil {
+        _ = prev(ctx, path)
+    }
     return sched.Notify(ctx, path, vfsindex.ReasonSync)
 })
+defer sched.Close()
+// SyncScheduler remains for hosts/tests that want inline reindex.
 ```
+
+### Agent tools (default on when prerequisites hold)
+
+When the harness has **Brain + MountSession + search namespace**, it owns a
+`MountIndexer` + `AsyncScheduler`, composes `AfterPersist` (preserving any host
+hook), and registers:
+
+| Tool | Role |
+|------|------|
+| `index_file` | Selective ingest of key virtual **files** (max 8 paths); plan-gated write |
+| `unindex` | Soft-delete the brain mirror for a path; does **not** delete the VFS file |
+
+Omit Brain, VFS, or namespace to opt out (no tools, no harness indexer, no async hook).
+
+### Session-visible body vs AfterPersist
+
+`IndexPath` uses `MountSession.ReadText` / `Open`, which honor the **dirty IR cache**.
+So `index_file` after `write` / `replace_*` indexes the session-visible body **before
+Sync**. `AfterPersist` (fired by `WriteFile` / `Sync`) still drives background
+reindex of **persist-only** paths so search stays warm after durable writes.
+Write success is never blocked by reindex failures (hook errors are ignored).
 
 Markdown files are chunked by **heading/preamble blocks** (`block_id` and `heading_path` properties) when `Blocks()` is non-empty; other text still uses line windows. Parent section chunks may overlap child text (same span model as the IR).
 

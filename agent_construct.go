@@ -16,6 +16,7 @@ import (
 	"github.com/ryanaldo34/tacklr/skills"
 	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/vfs"
+	"github.com/ryanaldo34/tacklr/vfsindex"
 )
 
 // Config is harness limits and prompt settings.
@@ -171,7 +172,7 @@ func (h *AgentHarness) finishInit(ctx context.Context, subAgents []*SubAgent) {
 	h.injectBuiltinTools()
 }
 
-// injectBuiltinTools registers plan tools, optional web/brain tools, and spawn_worker once.
+// injectBuiltinTools registers plan tools, optional web/brain/VFS/index tools, and spawn_worker once.
 func (a *AgentHarness) injectBuiltinTools() {
 	if a.builtinsInjected {
 		return
@@ -193,10 +194,42 @@ func (a *AgentHarness) injectBuiltinTools() {
 	if a.session != nil && a.session.VFS != nil {
 		a.tools = append(a.tools, newVFSTools(a.session.VFS)...)
 	}
+	a.initVFSIndexBridge()
 	if len(a.subagents) > 0 {
 		a.tools = append(a.tools, a.spawnTool())
 	}
 	a.builtinsInjected = true
+}
+
+// initVFSIndexBridge optionally owns a MountIndexer + AsyncScheduler and
+// registers index_file / unindex when Brain + VFS + search namespace are all set.
+// Hosts with a non-empty kind catalog should register vfsindex.MountIndexKinds()
+// (ApplyKinds replaces the catalog; open-catalog engines need no kinds).
+func (a *AgentHarness) initVFSIndexBridge() {
+	if a.brain == nil || a.searchCtx == nil || a.session == nil || a.session.VFS == nil {
+		return
+	}
+	ns, ok := a.searchCtx.Namespace()
+	if !ok {
+		return
+	}
+	nsCopy := ns
+	idx, err := vfsindex.NewMountIndexer(a.session.VFS, a.brain, brain.Scope{Namespace: &nsCopy})
+	if err != nil {
+		slog.Error("vfsindex: failed to create mount indexer", "error", err)
+		return
+	}
+	sched := vfsindex.NewAsyncScheduler(idx)
+	ms := a.session.VFS
+	prev := ms.GetAfterPersist()
+	ms.SetAfterPersist(func(ctx context.Context, path string) error {
+		if prev != nil {
+			_ = prev(ctx, path)
+		}
+		return sched.Notify(ctx, path, vfsindex.ReasonSync)
+	})
+	a.vfsIndexSched = sched
+	a.tools = append(a.tools, newVFSIndexTools(idx)...)
 }
 
 // SetSearchNamespace sets retrieval isolation for knowledge tools.

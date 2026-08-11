@@ -20,6 +20,7 @@ import (
 	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/telemetry"
 	"github.com/ryanaldo34/tacklr/vfs"
+	"github.com/ryanaldo34/tacklr/vfsindex"
 )
 
 // AgentHarness is the product agent. Create with NewAgent or NewAgentFromSession.
@@ -58,8 +59,11 @@ type AgentHarness struct {
 	searchCtx *brain.SearchContext
 	// fsRegistry / fsBootstrap used only at construct to fill session.VFS.
 	// Mount attach/detach lives on vfs.MountSession (session-owned), not here.
-	fsRegistry       *vfs.BackendRegistry
-	fsBootstrap      []vfs.MountSpec
+	fsRegistry  *vfs.BackendRegistry
+	fsBootstrap []vfs.MountSpec
+	// vfsIndexSched: optional mount→brain bridge when Brain + VFS + search
+	// namespace are all present. Owns the MountIndexer (Indexer field); closed on Close.
+	vfsIndexSched    *vfsindex.AsyncScheduler
 	mcpCleanup       func()
 	mcpInitialized   bool
 	builtinsInjected bool
@@ -723,11 +727,15 @@ func (a *AgentHarness) initMCP(ctx context.Context) {
 	})
 }
 
-// Close releases harness resources (for example MCP clients).
-// Call after the Run events channel is drained.
+// Close releases harness resources (for example MCP clients and the optional
+// VFS index scheduler). Call after the Run events channel is drained.
 func (a *AgentHarness) Close() {
 	if a.mcpCleanup != nil {
 		a.mcpCleanup()
 		a.mcpCleanup = nil
+	}
+	if a.vfsIndexSched != nil {
+		_ = a.vfsIndexSched.Close()
+		a.vfsIndexSched = nil
 	}
 }

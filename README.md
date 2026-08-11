@@ -213,7 +213,7 @@ That boundary exists so product code cannot accidentally trash planning.
 
 ### VFS
 
-Register backends, bootstrap mounts—[docs/vfs.md](docs/vfs.md). When VFS is wired, the harness injects file tools (`read_lines`, `replace_*`, `write`, …) over **virtual paths only**. The agent never gets a host path or a bucket key.
+Register backends, bootstrap mounts—[docs/vfs.md](docs/vfs.md). When VFS is wired, the harness injects file tools (`read_lines`, `replace_*`, `write`, …) over **virtual paths only**. The agent never gets a host path or a bucket key. With Brain + VFS + search namespace, the harness also registers **`index_file` / `unindex`** (selective mount → brain) and reindexes on persist via [`vfsindex`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfsindex) `AsyncScheduler`.
 
 ---
 
@@ -224,7 +224,7 @@ Register backends, bootstrap mounts—[docs/vfs.md](docs/vfs.md). When VFS is wi
 - **MCP** — external tool servers ([`mcp`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/mcp))  
 - **Skills** — `SKILL.md` catalogs ([`skills`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/skills))  
 - **Web** — search/fetch when Exa is configured  
-- **VFS** — mounts + IR ([docs/vfs.md](docs/vfs.md)); optional mount index via [`vfsindex`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfsindex)  
+- **VFS** — mounts + IR ([docs/vfs.md](docs/vfs.md)); optional mount index via [`vfsindex`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfsindex) (`index_file` / `unindex` when Brain + namespace too)  
 - **Brain** — knowledge tools when you set `AgentOptions.Brain`  
 
 ### Knowledge (brain)
