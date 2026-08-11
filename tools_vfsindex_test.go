@@ -234,6 +234,38 @@ func TestVFSIndexTools_batchPathsAndGuards(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "directory") {
 		t.Fatalf("want directory error, got %v", err)
 	}
+
+	// Empty args / missing path
+	_, err = runWriteTool(t, h, indexTool, `{}`)
+	if err == nil || !strings.Contains(err.Error(), "path or paths is required") {
+		t.Fatalf("want required path error, got %v", err)
+	}
+	// Relative path rejected
+	_, err = runWriteTool(t, h, indexTool, `{"path":"work/a.txt"}`)
+	if err == nil {
+		t.Fatal("want relative path error")
+	}
+	// Missing file
+	_, err = runWriteTool(t, h, indexTool, `{"path":"/work/missing.txt"}`)
+	if err == nil {
+		t.Fatal("want missing file error")
+	}
+	// path + paths combined (still under max)
+	if err := ms.WriteFile(ctx, "/work/c.txt", []byte("token-gamma-batch\n")); err != nil {
+		t.Fatal(err)
+	}
+	argsCombo, _ := json.Marshal(map[string]any{
+		"path":  "/work/c.txt",
+		"paths": []string{"/work/a.txt"},
+	})
+	out, err = runWriteTool(t, h, indexTool, string(argsCombo))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "path=/work/c.txt") || !strings.Contains(out, "path=/work/a.txt") {
+		t.Fatalf("path+paths: %q", out)
+	}
+	_ = waitSearchHit(t, eng, scope, "token-gamma-batch", 3*time.Second)
 }
 
 // TestVFSIndexTools_planGate: write tools locked until create_plan.

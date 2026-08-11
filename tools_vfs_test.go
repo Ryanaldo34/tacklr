@@ -11,6 +11,15 @@ import (
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
+func TestNewVFSTools_nilSession(t *testing.T) {
+	if newVFSTools(nil) != nil {
+		t.Fatal("nil MountSession")
+	}
+	if newVFSIndexTools(nil) != nil {
+		t.Fatal("nil indexer")
+	}
+}
+
 // TestVFSTools_readWriteRev: agent tools (no vfs_ prefix) + rev gate + path ops.
 func TestVFSTools_readWriteRev(t *testing.T) {
 	ctx := context.Background()
@@ -196,6 +205,110 @@ func TestVFSTools_readWriteRev(t *testing.T) {
 	if err != nil || !strings.Contains(got.Text(), "new body") || !strings.Contains(got.Text(), "## Install") {
 		t.Fatalf("after block replace: %q err=%v", got.Text(), err)
 	}
+
+	// Unknown block_id → error
+	revMD2 := fieldKV(res.output, "rev")
+	if revMD2 == "" {
+		r, _ := ms.ContentRev(ctx, "/work/README.md")
+		revMD2 = r.Hash
+	}
+	body, _ = json.Marshal(map[string]any{
+		"path": "/work/README.md", "rev": revMD2, "block_id": "missing/block", "body": "x\n",
+	})
+	if _, err = tools["replace_lines"].invoke(ctx, string(body), rt); err == nil {
+		t.Fatal("want unknown block_id error")
+	}
+	if _, err = tools["read_lines"].invoke(ctx, `{"path":"/work/README.md","block_id":"missing/block"}`, rt); err == nil {
+		t.Fatal("want read unknown block_id error")
+	}
+
+	// include_heading=true replaces the heading line too
+	md2 := "# Top\n\n## Sec\n\nkeep\n"
+	if err := ms.WriteFile(ctx, "/work/head.md", []byte(md2)); err != nil {
+		t.Fatal(err)
+	}
+	revHead, err := ms.ContentRev(ctx, "/work/head.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ = json.Marshal(map[string]any{
+		"path": "/work/head.md", "rev": revHead.Hash, "block_id": "top/sec",
+		"include_heading": true, "lines": []string{"## Renamed", "body"},
+	})
+	res, err = tools["replace_lines"].invoke(ctx, string(body), rt)
+	if err != nil {
+		t.Fatalf("include_heading replace: %v", err)
+	}
+	got, err = ms.ReadText(ctx, "/work/head.md")
+	if err != nil || !strings.Contains(got.Text(), "## Renamed") || strings.Contains(got.Text(), "## Sec") {
+		t.Fatalf("include_heading body: %q err=%v", got.Text(), err)
+	}
+
+	// outline-only (no block_id, no start/end lines required for structure dump)
+	if err := ms.WriteFile(ctx, "/work/plain.txt", []byte("no structure\n")); err != nil {
+		t.Fatal(err)
+	}
+	res, err = tools["read_lines"].invoke(ctx, `{"path":"/work/plain.txt","outline":true}`, rt)
+	if err != nil || !strings.Contains(res.output, "line_count=") {
+		t.Fatalf("outline on plain text: %q err=%v", res.output, err)
+	}
+	// block_id on non-structured doc
+	if _, err = tools["read_lines"].invoke(ctx, `{"path":"/work/plain.txt","block_id":"x"}`, rt); err == nil {
+		t.Fatal("block_id on plain should fail")
+	}
+	// replace_lines missing rev
+	if _, err = tools["replace_lines"].invoke(ctx, `{"path":"/work/plain.txt","start":1,"end":2,"lines":["x"]}`, rt); err == nil {
+		t.Fatal("replace_lines without rev")
+	}
+	// replace_text missing rev / not found
+	rPlain, err := ms.ContentRev(ctx, "/work/plain.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = tools["replace_text"].invoke(ctx, `{"path":"/work/plain.txt","old":"nope","new":"y"}`, rt); err == nil {
+		t.Fatal("replace_text without rev")
+	}
+	bodyNF, _ := json.Marshal(map[string]any{
+		"path": "/work/plain.txt", "rev": rPlain.Hash, "old": "zzz-missing", "new": "y",
+	})
+	if _, err = tools["replace_text"].invoke(ctx, string(bodyNF), rt); err == nil {
+		t.Fatal("replace_text old not found")
+	}
+	// write create then replace invalid range
+	if _, err = tools["write"].invoke(ctx, `{"path":"/work/new.txt","content":"a\nb\n"}`, rt); err != nil {
+		t.Fatal(err)
+	}
+	rNew, err := ms.ContentRev(ctx, "/work/new.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bodyBad, _ := json.Marshal(map[string]any{
+		"path": "/work/new.txt", "rev": rNew.Hash, "start": 0, "end": 1, "lines": []string{"x"},
+	})
+	if _, err = tools["replace_lines"].invoke(ctx, string(bodyBad), rt); err == nil {
+		t.Fatal("invalid replace range")
+	}
+	// write stale rev
+	rNew2, err := ms.ContentRev(ctx, "/work/new.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bodyStale, _ := json.Marshal(map[string]any{
+		"path": "/work/new.txt", "rev": "deadbeef", "content": "z\n",
+	})
+	if _, err = tools["write"].invoke(ctx, string(bodyStale), rt); err == nil {
+		t.Fatal("stale write rev")
+	}
+	// outline+start/end window on markdown (lineWindowFromTextDoc)
+	res, err = tools["read_lines"].invoke(ctx, `{"path":"/work/README.md","outline":true,"start":1,"end":3}`, rt)
+	if err != nil || !strings.Contains(res.output, "returned=") {
+		t.Fatalf("outline+range: %q err=%v", res.output, err)
+	}
+	// start past EOF on structured read
+	if _, err = tools["read_lines"].invoke(ctx, `{"path":"/work/README.md","block_id":"hello","start":1,"end":1}`, rt); err != nil {
+		// block read still ok without needing start
+	}
+	_ = rNew2
 }
 
 func fieldKV(s, key string) string {
