@@ -49,7 +49,7 @@ The model proposes. **Our runtime decides what is real, allowed, and durable.**
 |---------|------------|
 | Process address space | **Session mounts** — only the virtual paths you attach |
 | Filesystem | **[`vfs`](docs/vfs.md)** — local, S3, later Drive/Docs behind one path API |
-| File contents | **Content IR** — what the agent edits (lines today; rich blocks + styles later). Codecs turn that into storage bytes on Sync |
+| File contents | **Content IR** — what the agent edits (lines + Markdown block outline when applicable; rich WYSIWYG later). Codecs turn that into storage bytes on Sync |
 | Syscalls | **Tools**, and later a **custom agent shell** and script guests, all through a **capability broker** |
 | Kernel | **Eventually** Linux eBPF / cgroup / seccomp as the backstop when something tries to cheat |
 | Save process image | **Checkpoints** — conversation, plan, interrupts, mounts; we Sync IR first so disk matches the session |
@@ -213,7 +213,7 @@ That boundary exists so product code cannot accidentally trash planning.
 
 ### VFS
 
-Register backends, bootstrap mounts—[docs/vfs.md](docs/vfs.md). When VFS is wired, the harness injects file tools (`read_lines`, `replace_*`, `write`, …) over **virtual paths only**. The agent never gets a host path or a bucket key.
+Register backends, bootstrap mounts—[docs/vfs.md](docs/vfs.md). When VFS is wired, the harness injects file tools (`read_lines`, `replace_*`, `write`, …) over **virtual paths only**. The agent never gets a host path or a bucket key. With Brain + VFS + search namespace, the harness also registers **`index_file` / `unindex`** (selective mount → brain) and reindexes on persist via [`vfsindex`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfsindex) `AsyncScheduler`.
 
 ---
 
@@ -224,7 +224,7 @@ Register backends, bootstrap mounts—[docs/vfs.md](docs/vfs.md). When VFS is wi
 - **MCP** — external tool servers ([`mcp`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/mcp))  
 - **Skills** — `SKILL.md` catalogs ([`skills`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/skills))  
 - **Web** — search/fetch when Exa is configured  
-- **VFS** — mounts + IR ([docs/vfs.md](docs/vfs.md)); optional mount index via [`vfsindex`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfsindex)  
+- **VFS** — mounts + IR ([docs/vfs.md](docs/vfs.md)); optional mount index via [`vfsindex`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfsindex) (`index_file` / `unindex` when Brain + namespace too)  
 - **Brain** — knowledge tools when you set `AgentOptions.Brain`  
 
 ### Knowledge (brain)
@@ -280,9 +280,10 @@ We already have the harness, VFS, IR, brain hooks, and checkpoints. Next we clos
 | Content IR (text) + write-back | **Shipped** | Dirty overlay so the session sees edits before Sync |
 | Content `rev` + file tools | **Shipped** | When VFS is set |
 | Progressive line windows | **Shipped** | Large text without always full materialize |
-| Mount → brain (`vfsindex`) | **Shipped** | Optional bridge; async reindex later |
+| Structured Markdown / `block_id` | **Shipped** | Projected heading blocks; outline + block replace; index props |
+| Mount → brain (`vfsindex`) | **Shipped** | Optional bridge; MD by blocks, other text by lines; async reindex later |
 | Unified `read` / `replace` for all media | **Planned** | One edit surface; codecs do the rest |
-| Rich document IR (WYSIWYG) | **Planned** | Blocks/runs + style metadata |
+| Rich document IR (WYSIWYG) | **Planned** | Word/Docs codecs → same Block schema + style metadata |
 | FUSE projection | **Planned** | Real `rg` / `fd` / `ls` on the session tree |
 | Custom agent shell | **Planned** | Our shell, VFS-backed—not raw host bash as the main path |
 | Sandboxed Python / JS | **Planned** | Guests with our APIs only |

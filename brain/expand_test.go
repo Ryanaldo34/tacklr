@@ -231,6 +231,120 @@ func TestExpand_graphContinuePreservesRelation(t *testing.T) {
 	}
 }
 
+// TestExpandMany_landingsAndBudget: multi-seed expand with containment + budget.
+func TestExpandMany_landingsAndBudget(t *testing.T) {
+	ctx := context.Background()
+	store := brain.NewMemoryStore()
+	g := brain.NewMemoryGraph()
+	ns := uuid.New()
+	now := time.Now().UTC()
+	p1, p2 := uuid.New(), uuid.New()
+	c1, c2, n1 := uuid.New(), uuid.New(), uuid.New()
+	for _, o := range []brain.Object{
+		{ID: p1, Kind: "Document", Title: "p1", NamespaceID: ns, UpdatedAt: now},
+		{ID: p2, Kind: "Document", Title: "p2", NamespaceID: ns, UpdatedAt: now},
+		{ID: c1, Kind: "Chunk", Title: "c1", ParentID: &p1, NamespaceID: ns, UpdatedAt: now},
+		{ID: c2, Kind: "Chunk", Title: "c2", ParentID: &p2, NamespaceID: ns, UpdatedAt: now},
+		{ID: n1, Kind: "Document", Title: "neighbor", NamespaceID: ns, UpdatedAt: now},
+	} {
+		if err := store.Put(ctx, o); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = g.AddEdge(ctx, p1, n1, "references", brain.EdgeMeta{Note: "edge"})
+	eng, err := brain.NewEngine(store, brain.WithGraph(g), brain.WithConfig(brain.EngineConfig{
+		MaxResultSetSize: 2, Now: func() time.Time { return now },
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// empty ids
+	empty, err := eng.ExpandMany(ctx, brain.Scope{Namespace: &ns}, brain.ExpandManyRequest{})
+	if err != nil || len(empty.Objects) != 0 {
+		t.Fatalf("empty: %+v err=%v", empty, err)
+	}
+	// graph required without graph engine
+	engNoG, err := brain.NewEngine(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engNoG.ExpandMany(ctx, brain.Scope{Namespace: &ns}, brain.ExpandManyRequest{
+		ObjectIDs: []uuid.UUID{p1}, RelationTypes: []string{"references"},
+	}); err == nil {
+		t.Fatal("graph required")
+	}
+	// containment + graph with budget 2
+	res, err := eng.ExpandMany(ctx, brain.Scope{Namespace: &ns}, brain.ExpandManyRequest{
+		ObjectIDs:       []uuid.UUID{uuid.Nil, p1, p2},
+		WantContainment: true,
+		RelationTypes:   []string{"references"},
+		NeighborBudget:  2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Objects) == 0 || len(res.Objects) > 2 {
+		t.Fatalf("budget/content: n=%d", len(res.Objects))
+	}
+	// missing seed skipped
+	res, err = eng.ExpandMany(ctx, brain.Scope{Namespace: &ns}, brain.ExpandManyRequest{
+		ObjectIDs:       []uuid.UUID{uuid.New()},
+		WantContainment: true,
+	})
+	if err != nil || len(res.Objects) != 0 {
+		t.Fatalf("missing seed: %+v err=%v", res, err)
+	}
+	// canceled
+	cctx, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := eng.ExpandMany(cctx, brain.Scope{Namespace: &ns}, brain.ExpandManyRequest{
+		ObjectIDs: []uuid.UUID{p1}, WantContainment: true,
+	}); err == nil {
+		t.Fatal("canceled")
+	}
+}
+
+// TestSearch_withReranker exercises applyRerank path.
+func TestSearch_withReranker(t *testing.T) {
+	ctx := context.Background()
+	store := brain.NewMemoryStore()
+	ns := uuid.New()
+	now := time.Now().UTC()
+	parent, part := uuid.New(), uuid.New()
+	pos := 1
+	_ = store.Put(ctx, brain.Object{
+		ID: parent, Kind: "Document", Title: "rerank-doc", NamespaceID: ns, UpdatedAt: now,
+	})
+	_ = store.Put(ctx, brain.Object{
+		ID: part, Kind: "Chunk", Title: "chunk", Content: "unique rerank phrase alpha",
+		ParentID: &parent, Position: &pos, NamespaceID: ns, UpdatedAt: now,
+	})
+	eng, err := brain.NewEngine(store,
+		brain.WithReranker(reverseRerank{}),
+		brain.WithConfig(brain.EngineConfig{Now: func() time.Time { return now }}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := eng.Search(ctx, brain.Scope{Namespace: &ns}, brain.SearchRequest{Query: "unique rerank phrase"}, brain.NewSearchContext())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Objects) == 0 {
+		t.Fatal("expected hits")
+	}
+}
+
+type reverseRerank struct{}
+
+func (reverseRerank) Rerank(_ context.Context, objects []brain.RichObject) ([]brain.RichObject, error) {
+	out := append([]brain.RichObject(nil), objects...)
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out, nil
+}
+
 func TestExpand_graphNeighborsMemoryGraph(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()

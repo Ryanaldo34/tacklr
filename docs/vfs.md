@@ -32,7 +32,7 @@ Package: [`github.com/ryanaldo34/tacklr/vfs`](https://pkg.go.dev/github.com/ryan
 |-------|------|
 | **MountSession** | Session-owned tree of virtual mount points + path ops |
 | **Provider** | Bytes for one backend (local jail, S3 prefix, …) |
-| **Document IR** | Structured view of a file (lines today; blocks/styles later) |
+| **Document IR** | Agent-facing view of a file (lines + optional structured blocks) |
 | **Codec** | Bytes ↔ Document by media type |
 
 Mental model: **mounts are the filesystem**; **IR is a checkout of one file**. The session holds an optional **page cache** of textual IR with write-back; the **backend** is source of truth after `Sync`.
@@ -106,17 +106,18 @@ virtual path → Provider (bytes) → Codec → Document IR
 |------|------------------|
 | `Document` | `Path()`, `MediaType()` |
 | `Textual` | + `Encoding()`, `Text()`, `LineCount()`, `Line(n)`, `Lines(start, end)` |
-| `Structured` | + `Blocks()` *(reserved; plaintext does not implement this)* |
+| `Structured` | + `Blocks()` — projected outline; empty when the media type has no projector |
 
-**Concrete text (what ships today)** — `*TextDocument`:
+**Concrete text (what ships today)** — `*TextDocument` implements `Document`, `Textual`, and `Structured`:
 
-| Field | Meaning |
-|-------|---------|
+| Field / method | Meaning |
+|----------------|---------|
 | `path` | Virtual path only (`/work/main.go`) |
-| `mediaType` | e.g. `text/x-go`, `text/plain`, `application/json` |
+| `mediaType` | e.g. `text/x-go`, `text/plain`, `text/markdown`, `application/json` |
 | `encoding` | `utf-8` |
 | `text` | Full body string |
-| `lines` | Split of `text` on `\n` (no `\n` in elements; `\r` kept) |
+| line index | Line-start offsets into `text` (not a second stored body) |
+| `Blocks()` | Structure projected by media type (Markdown headings today; nil/empty otherwise) |
 
 In memory:
 
@@ -126,16 +127,17 @@ In memory:
 ├── mediaType:  "text/plain"
 ├── encoding:   "utf-8"
 ├── text:       "a\nB\nc\n"
-└── lines:      ["a", "B", "c", ""]
+└── starts:     [0, 2, 4, 6]   // byte offsets of each line
 ```
 
-**Reserved for Word / Google Docs later**
+**Block schema** (shared for Markdown now; Word / Google Docs later):
 
 | Type | Fields |
 |------|--------|
 | `StyleMeta` | `Kind`, `Level`, `Span`, `Attributes` |
 | `Span` | `StartLine`, `EndLine` (1-based half-open) |
 | `Block` | `ID`, `Kind`, `Text`, `Style` |
+| Helpers | `FindBlock`, `BlockReplaceSpan` (media-agnostic) |
 
 ### How IR is “stored”
 
@@ -314,23 +316,90 @@ The agent always uses `/data/app.go`. It never sees the bucket name.
 
 ---
 
+## Structured view (blocks)
+
+Some media types project a **block outline** over the same textual body (shared schema for Markdown now; Word/Docs later).
+
+| Type | Role |
+|------|------|
+| `Structured` | `Blocks() []Block` |
+| `Block` | `ID`, `Kind`, `Text`, `Style` (`Level`, `Span`, attributes) |
+| `Span` | 1-based half-open line range into the text body |
+
+**Markdown** (`text/markdown`): ATX headings (`#`…`######`) become `heading` blocks; content before the first heading is `preamble`. Headings inside fenced code are ignored. Block ids are hierarchical slugs (e.g. `api/errors`). Structure is **recomputed** from the current text on each `Blocks()` call—not a second stored body.
+
+Parent heading spans **contain** child sections (section replace includes nested content). Default replace under a heading is **body only** (skips the heading line) unless tools pass `include_heading`.
+
+Hosts:
+
+```go
+doc, _ := ms.ReadText(ctx, "/work/README.md")
+for _, b := range doc.Blocks() {
+    // b.ID, b.Style.Span, b.Text
+}
+start, end, _ := vfs.BlockReplaceSpan(b, false) // body only under a heading
+_ = doc.ReplaceLines(start, end, []string{"new body"})
+```
+
+Agent tools use the same ideas with generic names: `block_id`, optional `outline` on read, `block_id` + `body` on replace. Citations: `path#block_id`. Projectors stay internal to `vfs` by media type — hosts do not call Markdown outline helpers.
+
 ## Optional brain index (`vfsindex`)
 
 `vfs` never imports `brain`. When both are enabled, package
 [`vfsindex`](../vfsindex) streams text-like mount files into brain
 `Document` + `Chunk` objects (`vfs_path`, line/byte anchors, content hash).
 
+### Decoupling
+
+| Package | May know |
+|---------|----------|
+| `vfs` | `AfterPersist` hook only; no brain/vfsindex types beyond the callback |
+| `brain` | Objects/props only; no VFS |
+| `vfsindex` | Both; owns `IndexPath` / `IndexPrefix` / schedulers |
+| harness (`tacklr`) | Optional glue: indexer + tools when Brain + VFS + search namespace are all set |
+
+### Host wiring
+
 ```go
 idx, _ := vfsindex.NewMountIndexer(ms, eng, scope)
-_ = eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...) // if using a kind catalog
+_ = eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...) // non-empty kind catalogs only
 _ = idx.IndexPrefix(ctx, "/work", vfsindex.IndexOpts{})
 
-// Re-index after backend writes (Sync / WriteFile)
-sched := vfsindex.NewSyncScheduler(idx)
+// Prefer AsyncScheduler so writes are not blocked on re-chunk
+sched := vfsindex.NewAsyncScheduler(idx)
+prev := ms.GetAfterPersist()
 ms.SetAfterPersist(func(ctx context.Context, path string) error {
+    if prev != nil {
+        _ = prev(ctx, path)
+    }
     return sched.Notify(ctx, path, vfsindex.ReasonSync)
 })
+defer sched.Close()
+// SyncScheduler remains for hosts/tests that want inline reindex.
 ```
+
+### Agent tools (default on when prerequisites hold)
+
+When the harness has **Brain + MountSession + search namespace**, it owns a
+`MountIndexer` + `AsyncScheduler`, composes `AfterPersist` (preserving any host
+hook), and registers:
+
+| Tool | Role |
+|------|------|
+| `index_file` | Selective ingest of key virtual **files** (max 8 paths); plan-gated write |
+| `unindex` | Soft-delete the brain mirror for a path; does **not** delete the VFS file |
+
+Omit Brain, VFS, or namespace to opt out (no tools, no harness indexer, no async hook).
+
+### Session-visible body vs AfterPersist
+
+`IndexPath` uses `MountSession.ReadText` / `Open`, which honor the **dirty IR cache**.
+So `index_file` after `write` / `replace_*` indexes the session-visible body **before
+Sync**. `AfterPersist` (fired by `WriteFile` / `Sync`) still drives background
+reindex of **persist-only** paths so search stays warm after durable writes.
+Write success is never blocked by reindex failures (hook errors are ignored).
+
+Markdown files are chunked by **heading/preamble blocks** (`block_id` and `heading_path` properties) when `Blocks()` is non-empty; other text still uses line windows. Parent section chunks may overlap child text (same span model as the IR).
 
 Indexed content is queried with normal brain tools (`search` / `find_exact`).
 Live OS-tool search over mounts is deferred to a future FUSE (or materialize)
@@ -377,10 +446,10 @@ No FUSE and no shell are required for this path.
 
 ## Not in this package (yet)
 
-- Agent builtins (`read_file` with `start_line` / `end_line`) — close over `session.VFS` later
-- Markdown / Word / Google Docs codecs and filled `StyleMeta` / `Block` trees
-- Structured or style-preserving write-back for rich docs
+- Word / Google Docs codecs that fill the same `Block` / `StyleMeta` schema from native formats
+- Structured or style-preserving write-back for rich (non-text) docs
 - Streaming multi-GB line indexes
+- Setext headings / full CommonMark AST (Markdown projector is ATX + fence-aware only)
 
 ---
 

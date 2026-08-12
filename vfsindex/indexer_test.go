@@ -173,3 +173,364 @@ func TestMountIndexer_indexSearchAndNotify(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestMountIndexer_markdownBlocksChunks: Markdown is chunked by structured
+// heading/preamble blocks with stable block_id props.
+func TestMountIndexer_markdownBlocksChunks(t *testing.T) {
+	ctx := context.Background()
+	base := t.TempDir()
+	reg := vfs.NewBackendRegistry()
+	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
+		t.Fatal(err)
+	}
+	ms := vfs.NewMountSession("idx-md", reg)
+	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
+		t.Fatal(err)
+	}
+
+	store := brain.NewMemoryStore()
+	eng, err := brain.NewEngine(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...); err != nil {
+		t.Fatal(err)
+	}
+	ns := uuid.New()
+	scope := brain.Scope{Namespace: &ns}
+	idx, err := vfsindex.NewMountIndexer(ms, eng, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	md := "intro line\n\n# Title\n\n## Install\n\npip install x\n\n## API\n\ncall me\n"
+	if err := ms.WriteFile(ctx, "/work/guide.md", []byte(md)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := idx.IndexPrefix(ctx, "/work", vfsindex.IndexOpts{}); err != nil {
+		t.Fatal(err)
+	}
+
+	parentID := idx.DocumentID("/work/guide.md")
+	children, err := eng.ListChildren(ctx, scope, parentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// preamble + title + title/install + title/api
+	if len(children) != 4 {
+		t.Fatalf("expected 4 block chunks, got %d", len(children))
+	}
+
+	byBlock := map[string]brain.RichObject{}
+	for _, ch := range children {
+		obj, err := eng.Read(ctx, scope, ch.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bid, _ := obj.Properties[vfsindex.PropBlockID].(string)
+		if bid == "" {
+			t.Fatalf("chunk missing block_id: title=%q props=%+v", obj.Title, obj.Properties)
+		}
+		if obj.Properties[vfsindex.PropHeadingPath] != bid {
+			t.Fatalf("heading_path should match block_id: %+v", obj.Properties)
+		}
+		startL, _ := obj.Properties[vfsindex.PropStartLine].(float64)
+		endL, _ := obj.Properties[vfsindex.PropEndLine].(float64)
+		if startL < 1 || endL < startL {
+			t.Fatalf("block %q start/end lines: start=%v end=%v", bid, startL, endL)
+		}
+		byBlock[bid] = obj
+	}
+	install, ok := byBlock["title/install"]
+	if !ok {
+		t.Fatalf("missing title/install; blocks=%v", keys(byBlock))
+	}
+	if !strings.Contains(install.Content, "pip install") {
+		t.Fatalf("install chunk content: %q", install.Content)
+	}
+	instStart, _ := install.Properties[vfsindex.PropStartLine].(float64)
+	instEnd, _ := install.Properties[vfsindex.PropEndLine].(float64)
+	if instStart < 1 || instEnd <= instStart {
+		t.Fatalf("install span lines: start=%v end=%v", instStart, instEnd)
+	}
+	// Stable id: re-index same content keeps same chunk UUIDs for block keys
+	installID := install.ID
+	if err := idx.IndexPath(ctx, "/work/guide.md"); err != nil {
+		t.Fatal(err)
+	}
+	again, err := eng.Read(ctx, scope, installID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Properties[vfsindex.PropBlockID] != "title/install" {
+		t.Fatalf("stable block chunk lost: %+v", again.Properties)
+	}
+
+	// Content change: same block_id props / chunk UUID; content + parent hash update
+	parent, err := eng.Read(ctx, scope, parentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldHash, _ := parent.Properties[vfsindex.PropContentHash].(string)
+	md2 := "intro line\n\n# Title\n\n## Install\n\npip install y\n\n## API\n\ncall me\n"
+	if err := ms.WriteFile(ctx, "/work/guide.md", []byte(md2)); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.IndexPath(ctx, "/work/guide.md"); err != nil {
+		t.Fatal(err)
+	}
+	parent, err = eng.Read(ctx, scope, parentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newHash, _ := parent.Properties[vfsindex.PropContentHash].(string)
+	if newHash == "" || newHash == oldHash {
+		t.Fatalf("content_hash should change after edit: old=%q new=%q", oldHash, newHash)
+	}
+	updated, err := eng.Read(ctx, scope, installID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Properties[vfsindex.PropBlockID] != "title/install" {
+		t.Fatalf("block_id after reindex: %+v", updated.Properties)
+	}
+	if !strings.Contains(updated.Content, "pip install y") {
+		t.Fatalf("chunk content should update: %q", updated.Content)
+	}
+}
+
+// TestMountIndexer_emptyMarkdownLineChunks: empty .md has Blocks() nil, so
+// index uses lineChunksFromText (not preamble-only structure).
+func TestMountIndexer_emptyMarkdownLineChunks(t *testing.T) {
+	ctx := context.Background()
+	base := t.TempDir()
+	reg := vfs.NewBackendRegistry()
+	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
+		t.Fatal(err)
+	}
+	ms := vfs.NewMountSession("idx-md-empty", reg)
+	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
+		t.Fatal(err)
+	}
+
+	store := brain.NewMemoryStore()
+	eng, err := brain.NewEngine(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...); err != nil {
+		t.Fatal(err)
+	}
+	ns := uuid.New()
+	scope := brain.Scope{Namespace: &ns}
+	idx, err := vfsindex.NewMountIndexer(ms, eng, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx.LinesPerChunk = 2
+
+	// Empty body → Blocks() nil → line-window path (no preamble block).
+	if err := ms.WriteFile(ctx, "/work/empty.md", nil); err != nil {
+		t.Fatal(err)
+	}
+	res, err := idx.IndexPathResult(ctx, "/work/empty.md")
+	if err != nil || res != vfsindex.PathIndexed {
+		t.Fatalf("empty md index: res=%q err=%v", res, err)
+	}
+	parentID := idx.DocumentID("/work/empty.md")
+	children, err := eng.ListChildren(ctx, scope, parentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// lineStarts("") still yields one empty window; no block_id on line chunks.
+	if len(children) != 1 {
+		t.Fatalf("empty md chunks=%d want 1", len(children))
+	}
+	ch0, err := eng.Read(ctx, scope, children[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, has := ch0.Properties[vfsindex.PropBlockID]; has {
+		t.Fatalf("line-window chunk should not set block_id: %+v", ch0.Properties)
+	}
+	if _, err := eng.Read(ctx, scope, parentID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Non-empty, no headings → single preamble block (structure path, not lineChunks).
+	if err := ms.WriteFile(ctx, "/work/plain.md", []byte("line one\nline two\nline three\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.IndexPath(ctx, "/work/plain.md"); err != nil {
+		t.Fatal(err)
+	}
+	plainID := idx.DocumentID("/work/plain.md")
+	children, err = eng.ListChildren(ctx, scope, plainID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(children) != 1 {
+		t.Fatalf("preamble-only md chunks=%d want 1", len(children))
+	}
+	obj, err := eng.Read(ctx, scope, children[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obj.Properties[vfsindex.PropBlockID] != "preamble" {
+		t.Fatalf("want preamble block_id, props=%+v", obj.Properties)
+	}
+	if !strings.Contains(obj.Content, "line one") {
+		t.Fatalf("preamble content: %q", obj.Content)
+	}
+}
+
+// TestMountIndexer_IndexFileResultAndDefaults: Stat-reuse API, binary skip,
+// defaults for lines/bytes/kinds, and canceled context.
+func TestMountIndexer_IndexFileResultAndDefaults(t *testing.T) {
+	ctx := context.Background()
+	base := t.TempDir()
+	reg := vfs.NewBackendRegistry()
+	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
+		t.Fatal(err)
+	}
+	ms := vfs.NewMountSession("idx-file-result", reg)
+	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
+		t.Fatal(err)
+	}
+	store := brain.NewMemoryStore()
+	eng, err := brain.NewEngine(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...); err != nil {
+		t.Fatal(err)
+	}
+	ns := uuid.New()
+	scope := brain.Scope{Namespace: &ns}
+	idx, err := vfsindex.NewMountIndexer(ms, eng, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Zero fields → defaults in indexFile
+	idx.LinesPerChunk = 0
+	idx.MaxIndexBytes = 0
+	idx.DocumentKind = ""
+	idx.ChunkKind = ""
+
+	if err := ms.WriteFile(ctx, "/work/a.txt", []byte("hello searchable-phrase\n")); err != nil {
+		t.Fatal(err)
+	}
+	st, err := ms.Stat(ctx, "/work/a.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := idx.IndexFileResult(ctx, "/work/a.txt", st)
+	if err != nil || res != vfsindex.PathIndexed {
+		t.Fatalf("IndexFileResult: res=%q err=%v", res, err)
+	}
+	res, err = idx.IndexFileResult(ctx, "/work/a.txt", st)
+	if err != nil || res != vfsindex.PathSkipped {
+		t.Fatalf("hash skip via IndexFileResult: res=%q err=%v", res, err)
+	}
+
+	// Directory FileInfo
+	dst, err := ms.Stat(ctx, "/work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err = idx.IndexFileResult(ctx, "/work", dst)
+	if err != nil || res != vfsindex.PathDirectory {
+		t.Fatalf("dir IndexFileResult: res=%q err=%v", res, err)
+	}
+
+	if err := ms.WriteFile(ctx, "/work/pic.bin", []byte{0x00, 0x01, 0xff}); err != nil {
+		t.Fatal(err)
+	}
+	// .bin may still be text-like via detect; use .png extension gate
+	if err := ms.WriteFile(ctx, "/work/x.png", []byte{0x89, 'P', 'N', 'G'}); err != nil {
+		t.Fatal(err)
+	}
+	pst, err := ms.Stat(ctx, "/work/x.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err = idx.IndexFileResult(ctx, "/work/x.png", pst)
+	if err != nil || res != vfsindex.PathSkipped {
+		t.Fatalf("png skip: res=%q err=%v", res, err)
+	}
+
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := idx.IndexFileResult(canceled, "/work/a.txt", st); err == nil {
+		t.Fatal("want ctx canceled error")
+	}
+	if _, err := idx.UnindexPath(canceled, "/work/a.txt"); err == nil {
+		t.Fatal("unindex want ctx canceled")
+	}
+	if _, err := idx.IndexPathResult(canceled, "/work/a.txt"); err == nil {
+		t.Fatal("IndexPathResult want ctx canceled")
+	}
+
+	// Bad virtual path
+	if _, err := idx.IndexPathResult(ctx, "relative"); err == nil {
+		t.Fatal("relative path")
+	}
+	if _, err := idx.IndexFileResult(ctx, "relative", st); err == nil {
+		t.Fatal("IndexFileResult relative")
+	}
+	if _, err := idx.UnindexPath(ctx, "relative"); err == nil {
+		t.Fatal("UnindexPath relative")
+	}
+	if _, err := idx.IndexPrefix(ctx, "relative", vfsindex.IndexOpts{}); err == nil {
+		t.Fatal("IndexPrefix relative")
+	}
+
+	// Nested walk under prefix
+	if err := ms.MkdirAll(ctx, "/work/sub"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.WriteFile(ctx, "/work/sub/nested.txt", []byte("nested-unique-token\n")); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := idx.IndexPrefix(ctx, "/work/sub", vfsindex.IndexOpts{})
+	if err != nil || stats.Indexed < 1 {
+		t.Fatalf("nested prefix: %+v err=%v", stats, err)
+	}
+	page, err := eng.Search(ctx, scope, brain.SearchRequest{Query: "nested-unique-token"}, brain.NewSearchContext())
+	if err != nil || len(page.Objects) == 0 {
+		t.Fatalf("nested search: %+v err=%v", page.Objects, err)
+	}
+
+	// Null byte in a .txt file → stream binary skip (not indexed as text)
+	if err := ms.WriteFile(ctx, "/work/binlike.txt", []byte("ok\x00null")); err != nil {
+		t.Fatal(err)
+	}
+	res, err = idx.IndexPathResult(ctx, "/work/binlike.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// skipped or indexed empty — either way no crash; prefer skipped
+	if res != vfsindex.PathSkipped && res != vfsindex.PathIndexed {
+		t.Fatalf("binary-ish: %q", res)
+	}
+
+	// MaxIndexBytes truncates stream chunking
+	idx.MaxIndexBytes = 32
+	idx.LinesPerChunk = 2
+	long := strings.Repeat("wordline\n", 40)
+	if err := ms.WriteFile(ctx, "/work/long.txt", []byte(long)); err != nil {
+		t.Fatal(err)
+	}
+	res, err = idx.IndexPathResult(ctx, "/work/long.txt")
+	if err != nil || (res != vfsindex.PathIndexed && res != vfsindex.PathSkipped) {
+		t.Fatalf("long file: res=%q err=%v", res, err)
+	}
+}
+
+func keys(m map[string]brain.RichObject) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}

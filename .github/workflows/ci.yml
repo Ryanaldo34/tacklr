@@ -90,9 +90,11 @@ jobs:
       - name: Build
         run: go build ./...
 
-      # brain integration tests use Testcontainers:
+      # Integration tests use Testcontainers (no mocks for graph/DB):
       #   - Postgres (pgvector + pg_textsearch BM25)
       #   - Helix enterprise-dev (in-memory graph, dynamic /v1/query)
+      # Never pass -short here: helixgraph live tests skip under -short and would
+      # drop package/total coverage under the 90% gates in .testcoverage.yml.
       - name: Prepare Testcontainers (Postgres + Helix)
         run: |
           docker version
@@ -108,12 +110,17 @@ jobs:
       # atomic mode for correct multi-goroutine counts.
       - name: Test (race)
         run: go test -race -count=1 ./...
+        env:
+          TESTCONTAINERS_RYUK_DISABLED: "false"
 
       - name: Test with coverage
         run: |
           go test -count=1 -covermode=atomic -coverprofile=coverage.out ./...
           go tool cover -func=coverage.out | tail -1
+          go tool cover -func=coverage.out | grep helixgraph || true
           go tool cover -html=coverage.out -o coverage.html
+        env:
+          TESTCONTAINERS_RYUK_DISABLED: "false"
 
       - name: Coverage summary (markdown)
         id: cov_summary

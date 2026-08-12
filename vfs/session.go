@@ -51,10 +51,18 @@ type MountSession struct {
 
 // SetAfterPersist registers a hook after successful backend writes.
 // Pass nil to clear. Safe to call at any time; concurrent with I/O.
+// Compose with GetAfterPersist when layering (e.g. host hook + vfsindex).
 func (m *MountSession) SetAfterPersist(fn AfterPersistFunc) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.afterPersist = fn
+}
+
+// GetAfterPersist returns the current AfterPersist hook, or nil.
+func (m *MountSession) GetAfterPersist() AfterPersistFunc {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.afterPersist
 }
 
 func (m *MountSession) fireAfterPersist(ctx context.Context, virtualPath string) {

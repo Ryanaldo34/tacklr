@@ -8,7 +8,8 @@
 //   - MountSpec / MountInfo — durable and agent-safe mount descriptions
 //   - Provider / ProviderFactory / S3API — custom backends
 //   - File, FileInfo, DirEntry — I/O types
-//   - Document / Textual / TextDocument — content IR
+//   - Document / Textual / Structured / TextDocument — content IR
+//   - Block / StyleMeta / Span / FindBlock / BlockReplaceSpan — structured view
 //   - ContentRegistry + Codec + TextCodec — optional custom decode
 //   - DetectMediaType, size-cap constants, sentinel errors
 //

@@ -25,12 +25,18 @@ type Textual interface {
 	Lines(start, end int) ([]string, error)
 }
 
-// Structured is optional for documents with a block tree (Word, Google Docs, …).
-// Plaintext TextDocument does not implement Structured.
+// Structured is optional for documents with a block tree (Markdown headings,
+// Word, Google Docs, …). Callers use Blocks(); empty means no structure.
 type Structured interface {
 	Document
 	Blocks() []Block
 }
+
+// Block kind vocabulary (stable for tools and brain props). Grow carefully.
+const (
+	BlockKindPreamble = "preamble"
+	BlockKindHeading  = "heading"
+)
 
 // StyleMeta is optional presentation/structure for rich documents.
 type StyleMeta struct {
@@ -46,12 +52,46 @@ type Span struct {
 	EndLine   int
 }
 
-// Block is a top-level structural unit for Structured documents.
+// Block is a structural unit (heading region, paragraph, …).
+// For Markdown, blocks are a projected view over the textual body (not a second body).
 type Block struct {
 	ID    string
 	Kind  string
 	Text  string
 	Style StyleMeta
+}
+
+// FindBlock looks up by ID or Style.Attributes["heading_path"] (exact).
+func FindBlock(blocks []Block, idOrPath string) (Block, bool) {
+	idOrPath = strings.TrimSpace(idOrPath)
+	if idOrPath == "" {
+		return Block{}, false
+	}
+	for _, b := range blocks {
+		if b.ID == idOrPath {
+			return b, true
+		}
+		if b.Style.Attributes != nil && b.Style.Attributes["heading_path"] == idOrPath {
+			return b, true
+		}
+	}
+	return Block{}, false
+}
+
+// BlockReplaceSpan returns half-open 1-based lines to replace for a block.
+// For headings, includeHeading false skips the heading line (body only).
+func BlockReplaceSpan(b Block, includeHeading bool) (start, end int, err error) {
+	start, end = b.Style.Span.StartLine, b.Style.Span.EndLine
+	if start < 1 || end < start {
+		return 0, 0, ErrLineOutOfRange
+	}
+	if b.Kind == BlockKindHeading && !includeHeading {
+		start++
+		if start > end {
+			return start, end, nil // empty body
+		}
+	}
+	return start, end, nil
 }
 
 // TextDocument is the concrete plaintext/source IR (Document + Textual).
@@ -91,6 +131,13 @@ func (d *TextDocument) MediaType() string { return d.mediaType }
 func (d *TextDocument) Encoding() string  { return d.encoding }
 func (d *TextDocument) Text() string      { return d.text }
 func (d *TextDocument) LineCount() int    { return len(d.starts) }
+
+// Blocks implements Structured. Structure is projected from the body by media
+// type (e.g. Markdown headings). Always recomputed from Text() so edits cannot
+// leave a stale outline. Empty means no structure for this type.
+func (d *TextDocument) Blocks() []Block {
+	return structureFor(d)
+}
 
 func (d *TextDocument) Line(n int) (string, error) {
 	if n < 1 || n > len(d.starts) {

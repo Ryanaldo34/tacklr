@@ -12,8 +12,9 @@ threshold:
   # Root-package files (agent.go, tools_brain.go, …) are each a "package" to the
   # coverage tool. Floor 70% covers tools_brain/web without live backends.
   package: 70
-  # Library total after excludes (cmd/, testkit, agentbench). Not raw go tool cover.
-  total: 89
+  # Library total after excludes (cmd/, testkit, agentbench only).
+  # Helixgraph is included: CI runs Testcontainers Helix (enterprise-dev) without -short.
+  total: 90
 
 # First matching override wins (specific packages first).
 override:
@@ -37,11 +38,16 @@ override:
     threshold: 90
   - path: github.com/ryanaldo34/tacklr/brain$
     threshold: 85
-  # Helix needs Docker integration tests for the high bar; short runs sit ~74%.
+  # Live Testcontainers Helix (CI pulls enterprise-dev; never -short in CI).
   - path: github.com/ryanaldo34/tacklr/brain/helixgraph$
-    threshold: 70
+    threshold: 90
   - path: github.com/ryanaldo34/tacklr/telemetry$
     threshold: 90
+  # VFS/S3 unit surface + fake API; integration (MinIO) is separate.
+  - path: github.com/ryanaldo34/tacklr/vfs$
+    threshold: 85
+  - path: github.com/ryanaldo34/tacklr/vfsindex$
+    threshold: 80
 
 exclude:
   # Repo-relative paths (matched as regexes against file paths).

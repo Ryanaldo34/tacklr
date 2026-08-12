@@ -347,6 +347,36 @@ func TestBrainTools_searchFindExactContinueAndCheckpoint(t *testing.T) {
 	if len(fpage.Objects) != 1 || fpage.Objects[0].ID != firstParent {
 		t.Fatalf("find_exact uuid: %+v", fpage.Objects)
 	}
+
+	// scope_ids bad UUID
+	if _, err := searchTool.invoke(ctx, `{"query":"x","scope_ids":["not-a-uuid"]}`, turnRuntime(h)); err == nil {
+		t.Fatal("bad scope_ids")
+	}
+	// valid scope_ids restrict neighborhood
+	scopeArgs, _ := json.Marshal(map[string]any{
+		"query": "knowledge", "scope_ids": []string{firstParent.String()}, "limit": 5,
+	})
+	if _, err := searchTool.invoke(ctx, string(scopeArgs), turnRuntime(h)); err != nil {
+		t.Fatalf("scope_ids search: %v", err)
+	}
+	// schema unknown kind
+	schemaTool := h.findTool("schema", "")
+	if schemaTool != nil {
+		if _, err := schemaTool.invoke(ctx, `{"kind":"NoSuchKindXYZ"}`, turnRuntime(h)); err == nil {
+			t.Fatal("schema unknown kind")
+		}
+		// list all kinds
+		if _, err := schemaTool.invoke(ctx, `{}`, turnRuntime(h)); err != nil {
+			t.Fatalf("schema all: %v", err)
+		}
+	}
+	// continue with bad result set
+	if _, err := contTool.invoke(ctx, `{"result_set_id":"`+uuid.New().String()+`"}`, turnRuntime(h)); err == nil {
+		t.Fatal("continue unknown set")
+	}
+	if _, err := contTool.invoke(ctx, `{"result_set_id":"bad"}`, turnRuntime(h)); err == nil {
+		t.Fatal("continue bad uuid")
+	}
 }
 
 func TestBrainTools_expandChildren(t *testing.T) {
