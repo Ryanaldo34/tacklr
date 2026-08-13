@@ -204,21 +204,25 @@ func TestMountSession_s3MemAPI(t *testing.T) {
 		t.Fatalf("Stat dir=%+v err=%v", dst, err)
 	}
 
-	// Open read path + Write on read file errors
+	// Open read path — readable, not writable
 	f, err := ms.Open(ctx, "/data/hello.go")
 	if err != nil {
 		t.Fatal(err)
 	}
+	r, ok := f.(io.Reader)
+	if !ok {
+		t.Fatal("read file should be io.Reader")
+	}
 	buf := make([]byte, 64)
-	n, err := f.Read(buf)
+	n, err := r.Read(buf)
 	if err != nil && !errors.Is(err, io.EOF) {
 		t.Fatal(err)
 	}
 	if n == 0 {
 		t.Fatal("expected read bytes")
 	}
-	if _, err := f.Write([]byte("x")); err == nil {
-		t.Fatal("read file Write should fail")
+	if _, ok := f.(io.Writer); ok {
+		t.Fatal("read file should not be io.Writer")
 	}
 	if _, err := f.Stat(); err != nil {
 		t.Fatal(err)
@@ -282,8 +286,8 @@ func TestMountSession_s3MemAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := df.Write([]byte("x")); err == nil {
-		t.Fatal("dirty bytesFile write-only reject")
+	if _, ok := df.(io.Writer); ok {
+		t.Fatal("dirty Open should not be io.Writer")
 	}
 	if fi, err := df.Stat(); err != nil || fi.Size == 0 {
 		t.Fatalf("dirty Stat: %+v err=%v", fi, err)
@@ -366,10 +370,14 @@ func TestS3Provider_openWriteClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := wf.Read(make([]byte, 1)); err == nil {
-		t.Fatal("write-only Read should fail")
+	if _, ok := wf.(io.Reader); ok {
+		t.Fatal("write file should not be io.Reader")
 	}
-	if _, err := wf.Write([]byte("hello")); err != nil {
+	w, ok := wf.(io.Writer)
+	if !ok {
+		t.Fatal("write file should be io.Writer")
+	}
+	if _, err := w.Write([]byte("hello")); err != nil {
 		t.Fatal(err)
 	}
 	if fi, err := wf.Stat(); err != nil || fi.Size != 5 {
@@ -387,7 +395,11 @@ func TestS3Provider_openWriteClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := af.Write([]byte("!")); err != nil {
+	aw, ok := af.(io.Writer)
+	if !ok {
+		t.Fatal("append file should be io.Writer")
+	}
+	if _, err := aw.Write([]byte("!")); err != nil {
 		t.Fatal(err)
 	}
 	if err := af.Close(); err != nil {
@@ -397,7 +409,11 @@ func TestS3Provider_openWriteClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data, _ := io.ReadAll(rf)
+	rr, ok := rf.(io.Reader)
+	if !ok {
+		t.Fatal("s3 read file should be io.Reader")
+	}
+	data, _ := io.ReadAll(rr)
 	_ = rf.Close()
 	if string(data) != "hello!" {
 		t.Fatalf("append result %q", data)
@@ -453,7 +469,9 @@ func TestS3Provider_openWriteClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _ = wf2.Write([]byte("x"))
+	if w2, ok := wf2.(io.Writer); ok {
+		_, _ = w2.Write([]byte("x"))
+	}
 	if err := wf2.Close(); err == nil {
 		t.Fatal("Put failure on Close")
 	}

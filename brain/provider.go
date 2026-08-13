@@ -179,9 +179,9 @@ func (p *engramProvider) OpenFile(ctx context.Context, name string, flag int, _ 
 				buf.Write(raw)
 			}
 		}
-		return &engramFile{
+		return &engramWriteFile{
+			buf:    buf,
 			name:   slug + ".md",
-			w:      &buf,
 			commit: func(b []byte) error { return p.commit(ctx, name, b) },
 		}, nil
 	}
@@ -193,7 +193,7 @@ func (p *engramProvider) OpenFile(ctx context.Context, name string, flag int, _ 
 	if err != nil {
 		return nil, err
 	}
-	return &engramFile{name: slug + ".md", r: bytes.NewReader(raw)}, nil
+	return &engramReadFile{Reader: bytes.NewReader(raw), name: slug + ".md"}, nil
 }
 
 // PutFile implements the session filePutter hook (write-through).
@@ -524,50 +524,44 @@ func (p *engramProvider) commit(ctx context.Context, rel string, data []byte) er
 	return err
 }
 
-type engramFile struct {
+type engramReadFile struct {
+	*bytes.Reader
+	name string
+}
+
+func (f *engramReadFile) Close() error { return nil }
+
+func (f *engramReadFile) Stat() (vfs.FileInfo, error) {
+	return vfs.FileInfo{Name: f.name, Size: f.Size(), ModTime: time.Now().UTC()}, nil
+}
+
+type engramWriteFile struct {
+	buf    bytes.Buffer
 	name   string
-	r      *bytes.Reader
-	w      *bytes.Buffer
 	commit func([]byte) error
 	closed bool
 }
 
-func (f *engramFile) Read(p []byte) (int, error) {
-	if f.r == nil {
-		return 0, io.EOF
-	}
-	return f.r.Read(p)
-}
+func (f *engramWriteFile) Write(p []byte) (int, error) { return f.buf.Write(p) }
 
-func (f *engramFile) Write(p []byte) (int, error) {
-	if f.w == nil {
-		return 0, vfs.ErrReadOnly
-	}
-	return f.w.Write(p)
-}
-
-func (f *engramFile) Close() error {
+func (f *engramWriteFile) Close() error {
 	if f.closed {
 		return nil
 	}
 	f.closed = true
-	if f.commit != nil && f.w != nil {
-		return f.commit(f.w.Bytes())
+	if f.commit != nil {
+		return f.commit(f.buf.Bytes())
 	}
 	return nil
 }
 
-func (f *engramFile) Stat() (vfs.FileInfo, error) {
-	var size int64
-	if f.r != nil {
-		size = f.r.Size()
-	} else if f.w != nil {
-		size = int64(f.w.Len())
-	}
-	return vfs.FileInfo{Name: f.name, Size: size, ModTime: time.Now().UTC()}, nil
+func (f *engramWriteFile) Stat() (vfs.FileInfo, error) {
+	return vfs.FileInfo{Name: f.name, Size: int64(f.buf.Len()), ModTime: time.Now().UTC()}, nil
 }
 
 var (
 	_ vfs.Provider        = (*engramProvider)(nil)
 	_ vfs.ProviderFactory = BrainFactory{}
+	_ vfs.File            = (*engramReadFile)(nil)
+	_ vfs.File            = (*engramWriteFile)(nil)
 )

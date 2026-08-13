@@ -737,4 +737,7 @@ func (a *AgentHarness) Close() {
 		_ = a.vfsBridge.Close()
 		a.vfsBridge = nil
 	}
+	if a.session != nil && a.session.VFS != nil {
+		_ = a.session.VFS.Close()
+	}
 }

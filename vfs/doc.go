@@ -2,12 +2,12 @@
 //
 // # Public surface (hosts)
 //
-//   - MountSession — mounts, path I/O, ReadText / WriteDocument / Sync, ReadLines, SearchText
+//   - MountSession — mounts, path I/O, ReadText / WriteDocument / Sync, ReadLines, FuseMount / Close
 //   - ContentRev / ContentHash — session-visible content identity (for tools)
 //   - BackendRegistry + LocalFactory / S3Factory + AWSS3 — process profiles and pools
 //   - MountSpec / MountInfo — durable and agent-safe mount descriptions
 //   - Provider / ProviderFactory / S3API — custom backends
-//   - File, FileInfo, DirEntry — I/O types (FileInfo.MediaType is the provider's type)
+//   - File, FileInfo, DirEntry — I/O types (File is Close+Stat; io.Reader / io.ReaderAt / io.Writer via comma-ok)
 //   - Document / Textual / Structured / TextDocument — content IR
 //   - Block / StyleMeta / Span / FindBlock / BlockReplaceSpan — structured view
 //   - ContentRegistry + Codec + TextCodec — optional custom decode
@@ -22,8 +22,8 @@
 //
 // This package never imports brain. Brain implements Provider in package brain
 // (Engrams as Markdown files). Optional artifact IndexPath lives in package
-// vfsindex (imports both; skips Profile=="brain"). SearchText is session-visible
-// plaintext (dirty IR) for a future FUSE / host rg. This package does not ship a grep tool.
+// vfsindex (imports both; skips Profile=="brain"). FUSE / host rg read
+// ReadText (dirty IR plaintext). This package does not ship a grep tool.
 //
 // Hosts should not need anything else. Mount tables, host roots, and bucket
 // details stay inside providers and the unexported mount table.
@@ -32,7 +32,10 @@
 //
 // Absolute virtual paths only, via MountSession:
 //
-//	Stat, Open, ReadFile, WriteFile, ReadDir, Remove, MkdirAll
+//	Stat, Open, ReadFile, WriteFile, ReadDir, Remove, MkdirAll, FuseMount, Close
+//	File is Close + Stat. Read / ReadAt / Write are optional (comma-ok).
+//	FuseMount is explicit (host kernel tree). Textual files appear as ReadText;
+//	binaries use Stat + io.ReaderAt. Close unmounts.
 //
 // Read-only mounts reject mutating ops with ErrReadOnly. Local paths are jailed
 // under the provider root (including symlink evaluation). S3 uses key prefixes

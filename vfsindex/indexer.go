@@ -305,7 +305,11 @@ func (x *MountIndexer) indexFile(ctx context.Context, vpath string, st vfs.FileI
 		return "", err
 	}
 	defer f.Close()
-	chunks, hash, nBytes, err := streamChunks(ctx, f, linesPer, maxBytes)
+	r, ok := f.(io.Reader)
+	if !ok {
+		return "", fmt.Errorf("vfsindex: file is not readable")
+	}
+	chunks, hash, nBytes, err := streamChunks(ctx, r, linesPer, maxBytes)
 	if err != nil {
 		return "", err
 	}

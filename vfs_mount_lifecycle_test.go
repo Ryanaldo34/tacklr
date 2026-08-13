@@ -31,6 +31,7 @@ func TestVFS_sessionMountsSurviveCheckpointReload(t *testing.T) {
 		},
 		Model: &mockStrategy{},
 	})
+	t.Cleanup(h.Close)
 	if h.session.VFS == nil {
 		t.Fatal("session VFS not bound")
 	}
@@ -46,6 +47,7 @@ func TestVFS_sessionMountsSurviveCheckpointReload(t *testing.T) {
 	if err := h.checkpointSession(ctx); err != nil {
 		t.Fatal(err)
 	}
+	h.Close()
 
 	loaded, err := NewAgentFromSession(ctx, sessionID, AgentOptions{
 		Store:      store,
@@ -55,6 +57,7 @@ func TestVFS_sessionMountsSurviveCheckpointReload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(loaded.Close)
 	specs := loaded.session.VFS.Specs()
 	if len(specs) != 1 || specs[0].Point != "/work" || !specs[0].ReadOnly || specs[0].Params["subpath"] != "work" {
 		t.Fatalf("restored Specs = %+v", specs)

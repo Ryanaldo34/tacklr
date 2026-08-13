@@ -17,7 +17,7 @@ type Document interface {
 // Engrams, later Word/Docs/PDF extracts). Images and other binaries do not
 // implement it — callers use a comma-ok assert.
 //
-// Text() is that plaintext (FUSE / SearchText / encode). Line numbers are
+// Text() is that plaintext (FUSE / encode). Line numbers are
 // 1-based. Lines(start, end) is half-open [start, end).
 // SetText / SetLine / ReplaceLines mutate the session IR (write-back).
 type Textual interface {
@@ -236,21 +236,4 @@ func (d *TextDocument) lineList() []string {
 		out[i] = d.lineSlice(i)
 	}
 	return out
-}
-
-// AsTextual returns d as Textual, or ErrNotTextual.
-func AsTextual(d Document) (Textual, error) {
-	if t, ok := d.(Textual); ok {
-		return t, nil
-	}
-	return nil, ErrNotTextual
-}
-
-// FormatLines joins Lines(start, end) with \n for tool-style output.
-func FormatLines(t Textual, start, end int) (string, error) {
-	lines, err := t.Lines(start, end)
-	if err != nil {
-		return "", err
-	}
-	return strings.Join(lines, "\n"), nil
 }

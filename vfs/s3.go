@@ -202,11 +202,11 @@ func (p s3Provider) OpenFile(ctx context.Context, name string, flag int, perm fs
 			_, _ = io.Copy(&buf, body)
 			_ = body.Close()
 		}
-		return &s3WriteFile{ctx: ctx, p: p, key: key, buf: buf}, nil
+		return &s3WriteFile{buf: buf, ctx: ctx, p: p, key: key}, nil
 	}
 
 	if write {
-		return &s3WriteFile{ctx: ctx, p: p, key: key, buf: bytes.Buffer{}}, nil
+		return &s3WriteFile{ctx: ctx, p: p, key: key}, nil
 	}
 
 	if !read {
@@ -216,9 +216,17 @@ func (p s3Provider) OpenFile(ctx context.Context, name string, flag int, perm fs
 	if err != nil {
 		return nil, err
 	}
+	data, err := io.ReadAll(body)
+	_ = body.Close()
+	if err != nil {
+		return nil, err
+	}
+	if size < 0 {
+		size = int64(len(data))
+	}
 	return &s3ReadFile{
-		body: body,
-		info: FileInfo{Name: path.Base(key), Size: size, Mode: 0o644, ModTime: mod},
+		Reader: bytes.NewReader(data),
+		info:   FileInfo{Name: path.Base(key), Size: size, Mode: 0o644, ModTime: mod},
 	}, nil
 }
 
@@ -375,26 +383,21 @@ func validateS3Prefix(prefix string) error {
 }
 
 type s3ReadFile struct {
-	body io.ReadCloser
+	*bytes.Reader
 	info FileInfo
 }
 
-func (f *s3ReadFile) Read(p []byte) (int, error) { return f.body.Read(p) }
-func (f *s3ReadFile) Write([]byte) (int, error)  { return 0, fmt.Errorf("vfs: read-only file") }
-func (f *s3ReadFile) Close() error               { return f.body.Close() }
-func (f *s3ReadFile) Stat() (FileInfo, error)    { return f.info, nil }
+func (f *s3ReadFile) Close() error            { return nil }
+func (f *s3ReadFile) Stat() (FileInfo, error) { return f.info, nil }
 
 type s3WriteFile struct {
+	buf bytes.Buffer
 	ctx context.Context
 	p   s3Provider
 	key string
-	buf bytes.Buffer
 }
 
-func (f *s3WriteFile) Read([]byte) (int, error) { return 0, fmt.Errorf("vfs: write-only file") }
-func (f *s3WriteFile) Write(p []byte) (int, error) {
-	return f.buf.Write(p)
-}
+func (f *s3WriteFile) Write(p []byte) (int, error) { return f.buf.Write(p) }
 func (f *s3WriteFile) Close() error {
 	data := f.buf.Bytes()
 	return f.p.api.Put(f.ctx, f.p.bucket, f.key, bytes.NewReader(data), int64(len(data)))
@@ -434,11 +437,6 @@ func (f S3Factory) Open(ctx context.Context, _ string, spec MountSpec) (Provider
 		return nil, err
 	}
 	return s3Provider{api: f.Client, bucket: bucket, prefix: prefix}, nil
-}
-
-// Classify implements Classifier (key extension + optional sample).
-func (p s3Provider) Classify(name string, sample []byte) string {
-	return DetectMediaType(path.Base(name), sample)
 }
 
 // s3KnownType keeps Head Content-Type only when S3 actually declared a type.

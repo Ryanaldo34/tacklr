@@ -94,11 +94,11 @@ func (b *Bridge) PolicyAt(virtualPath string) string {
 	if b == nil || b.ms == nil {
 		return PolicySelective
 	}
-	raw, err := b.ms.IndexPolicyAt(virtualPath)
+	spec, err := b.ms.SpecAt(virtualPath)
 	if err != nil {
 		return PolicySelective
 	}
-	return NormalizePolicy(raw)
+	return NormalizePolicy(spec.IndexPolicy)
 }
 
 // ShouldIndex reports whether AfterPersist should enqueue path.
@@ -157,7 +157,7 @@ func attachMemoryMount(ms *vfs.MountSession) {
 	if ms == nil {
 		return
 	}
-	for _, s := range ms.Infos() {
+	for _, s := range ms.Specs() {
 		if s.Point == MemoryPoint {
 			return
 		}

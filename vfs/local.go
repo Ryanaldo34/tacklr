@@ -65,15 +65,6 @@ func (p localProvider) Stat(ctx context.Context, name string) (FileInfo, error) 
 	return localFileInfo(host, info), nil
 }
 
-// Classify implements Classifier.
-func (p localProvider) Classify(name string, sample []byte) string {
-	base := path.Base(name)
-	if len(sample) > 0 {
-		return DetectMediaType(base, sample)
-	}
-	return DetectMediaType(base, nil)
-}
-
 // OpenFile implements Provider.
 func (p localProvider) OpenFile(ctx context.Context, name string, flag int, perm fs.FileMode) (File, error) {
 	if err := ctx.Err(); err != nil {
@@ -94,7 +85,7 @@ func (p localProvider) OpenFile(ctx context.Context, name string, flag int, perm
 	if err != nil {
 		return nil, mapOSError(err)
 	}
-	return &localFile{f: f}, nil
+	return &localFile{File: f}, nil
 }
 
 // PutFile writes a full file in one shot (used by MountSession.WriteFile).
@@ -285,17 +276,14 @@ func mapOSError(err error) error {
 	return err
 }
 
-type localFile struct{ f *os.File }
+type localFile struct{ *os.File }
 
-func (f *localFile) Read(p []byte) (int, error)  { return f.f.Read(p) }
-func (f *localFile) Write(p []byte) (int, error) { return f.f.Write(p) }
-func (f *localFile) Close() error                { return f.f.Close() }
 func (f *localFile) Stat() (FileInfo, error) {
-	info, err := f.f.Stat()
+	info, err := f.File.Stat()
 	if err != nil {
 		return FileInfo{}, mapOSError(err)
 	}
-	return localFileInfo(f.f.Name(), info), nil
+	return localFileInfo(f.Name(), info), nil
 }
 
 // LocalFactory opens LocalProviders under a fixed Base directory.

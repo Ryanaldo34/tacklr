@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"unicode/utf8"
 )
@@ -76,7 +77,11 @@ func (m *MountSession) ReadLines(ctx context.Context, virtualPath string, start,
 	if start == 1 && end == 1 {
 		return LineWindow{Path: cleaned, Start: 1, End: 1, NextStart: 1}, nil
 	}
-	return readLineRange(f, cleaned, start, end)
+	r, ok := f.(io.Reader)
+	if !ok {
+		return LineWindow{}, fmt.Errorf("vfs: file is not readable")
+	}
+	return readLineRange(r, cleaned, start, end)
 }
 
 func lineWindowFromDoc(path string, doc Textual, start, end int) (LineWindow, error) {

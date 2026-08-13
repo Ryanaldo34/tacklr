@@ -199,6 +199,8 @@ Tool guidance:
 
 `DetectMediaType` is a helper **providers** call when filling `MediaType`. Empty / missing type is treated as `application/octet-stream` (no IR).
 
+FUSE: hosts call `MountSession.FuseMount(dir)` for a read-only kernel tree. File `Read`/`getattr` use `ReadText` (dirty plaintext). Binary files use `Stat.Size` and `io.ReaderAt` when the handle supports it. `session.Mount` attaches a provider; `FuseMount` is the host kernel mount. `Close` unmounts.
+
 `TextCodec` requires valid UTF-8 and builds a `TextDocument` labeled with the caller’s media type.
 
 ### Line rules

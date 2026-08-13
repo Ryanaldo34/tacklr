@@ -65,17 +65,6 @@ func (t *mountTable) unmount(point string) error {
 	return nil
 }
 
-func (t *mountTable) infos() []MountInfo {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	out := make([]MountInfo, 0, len(t.mounts))
-	for point, e := range t.mounts {
-		out = append(out, MountInfo{Point: point, ReadOnly: e.spec.ReadOnly})
-	}
-	slices.SortFunc(out, func(a, b MountInfo) int { return cmp.Compare(a.Point, b.Point) })
-	return out
-}
-
 func (t *mountTable) specs() []MountSpec {
 	t.mu.RLock()
 	defer t.mu.RUnlock()

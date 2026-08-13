@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path"
 	"sync"
 	"time"
+
+	gofuse "github.com/hanwen/go-fuse/v2/fuse"
 )
 
 // MaxReadFileBytes caps full-file reads and writes.
@@ -47,6 +50,8 @@ type MountSession struct {
 	tab          *mountTable
 	cache        *contentCache
 	afterPersist AfterPersistFunc
+	fuse         *gofuse.Server
+	hostDir      string
 }
 
 // SetAfterPersist registers a hook after successful backend writes.
@@ -75,6 +80,7 @@ func (m *MountSession) fireAfterPersist(ctx context.Context, virtualPath string)
 }
 
 // NewMountSession binds a session id to a process registry.
+// Hosts that want a kernel tree call FuseMount.
 func NewMountSession(sessionID string, reg *BackendRegistry) *MountSession {
 	return &MountSession{id: sessionID, reg: reg, tab: newMountTable(), cache: newContentCache()}
 }
@@ -135,11 +141,6 @@ func (m *MountSession) Specs() []MountSpec {
 	return m.table().specs()
 }
 
-// Infos returns agent-safe mount points (point + read-only only).
-func (m *MountSession) Infos() []MountInfo {
-	return m.table().infos()
-}
-
 // Lookup resolves a virtual path (no provider or host path exposure).
 func (m *MountSession) Lookup(virtualPath string) (MountInfo, string, error) {
 	return m.table().lookup(virtualPath)
@@ -155,19 +156,8 @@ func (m *MountSession) SpecAt(virtualPath string) (MountSpec, error) {
 	return cloneSpec(e.spec), nil
 }
 
-// IndexPolicyAt returns MountSpec.IndexPolicy for the mount that owns virtualPath
-// (empty if unset). Avoids cloning Params — preferred on AfterPersist / policy gates.
-func (m *MountSession) IndexPolicyAt(virtualPath string) (string, error) {
-	e, _, _, err := m.table().resolveEntry(virtualPath)
-	if err != nil {
-		return "", err
-	}
-	return e.spec.IndexPolicy, nil
-}
-
-// Classify returns the provider's media type for virtualPath.
-// Existing files use Stat.MediaType. New names use Classifier when the
-// provider implements it; otherwise application/octet-stream.
+// Classify returns the media type for virtualPath.
+// Existing files use Stat.MediaType. New names use DetectMediaType.
 func (m *MountSession) Classify(ctx context.Context, virtualPath string, sample []byte) (string, error) {
 	cleaned, err := cleanVirtualPath(virtualPath)
 	if err != nil {
@@ -178,14 +168,10 @@ func (m *MountSession) Classify(ctx context.Context, virtualPath string, sample 
 	} else if err != nil && !errors.Is(err, ErrNotExist) {
 		return "", err
 	}
-	p, rel, err := m.at(ctx, cleaned, false)
-	if err != nil {
+	if _, _, err := m.at(ctx, cleaned, false); err != nil {
 		return "", err
 	}
-	if c, ok := p.(Classifier); ok {
-		return c.Classify(rel, sample), nil
-	}
-	return "application/octet-stream", nil
+	return DetectMediaType(path.Base(cleaned), sample), nil
 }
 
 func (m *MountSession) at(ctx context.Context, virtualPath string, write bool) (Provider, string, error) {
@@ -253,7 +239,7 @@ func (m *MountSession) Open(ctx context.Context, virtualPath string) (File, erro
 		return nil, err
 	}
 	if doc, _, _, dirty, ok := m.cache.get(cleaned); ok && dirty {
-		return &bytesFile{name: path.Base(cleaned), r: bytes.NewReader([]byte(doc.Text()))}, nil
+		return &bytesFile{name: path.Base(cleaned), Reader: bytes.NewReader([]byte(doc.Text()))}, nil
 	}
 	p, rel, err := m.at(ctx, cleaned, false)
 	if err != nil {
@@ -294,14 +280,22 @@ func (m *MountSession) ReadFile(ctx context.Context, virtualPath string) ([]byte
 		if fi.Size == 0 {
 			return []byte{}, nil
 		}
+		r, ok := f.(io.Reader)
+		if !ok {
+			return nil, fmt.Errorf("vfs: file is not readable")
+		}
 		data := make([]byte, fi.Size)
-		if _, err := io.ReadFull(f, data); err != nil {
+		if _, err := io.ReadFull(r, data); err != nil {
 			return nil, err
 		}
 		return data, nil
 	}
 
-	data, err := io.ReadAll(io.LimitReader(f, int64(MaxReadFileBytes)+1))
+	r, ok := f.(io.Reader)
+	if !ok {
+		return nil, fmt.Errorf("vfs: file is not readable")
+	}
+	data, err := io.ReadAll(io.LimitReader(r, int64(MaxReadFileBytes)+1))
 	if err != nil {
 		return nil, err
 	}
@@ -311,17 +305,16 @@ func (m *MountSession) ReadFile(ctx context.Context, virtualPath string) ([]byte
 	return data, nil
 }
 
-// bytesFile is an in-memory File for dirty IR Open/ReadFile.
+// bytesFile is dirty IR as a readable File (io.Reader + io.ReaderAt via embed).
 type bytesFile struct {
+	*bytes.Reader
 	name string
-	r    *bytes.Reader
 }
 
-func (f *bytesFile) Read(p []byte) (int, error) { return f.r.Read(p) }
-func (f *bytesFile) Write([]byte) (int, error)  { return 0, ErrReadOnly }
-func (f *bytesFile) Close() error               { return nil }
+func (f *bytesFile) Close() error { return nil }
+
 func (f *bytesFile) Stat() (FileInfo, error) {
-	return FileInfo{Name: f.name, Size: f.r.Size(), ModTime: time.Now().UTC()}, nil
+	return FileInfo{Name: f.name, Size: f.Size(), ModTime: time.Now().UTC()}, nil
 }
 
 // WriteFile creates or truncates a file (fails on read-only mounts).
@@ -359,7 +352,11 @@ func (m *MountSession) writeContents(ctx context.Context, virtualPath string, r 
 	if size == 0 {
 		return nil
 	}
-	n, err := io.Copy(f, io.LimitReader(r, size))
+	w, ok := f.(io.Writer)
+	if !ok {
+		return ErrReadOnly
+	}
+	n, err := io.Copy(w, io.LimitReader(r, size))
 	if err != nil {
 		return err
 	}

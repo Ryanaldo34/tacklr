@@ -24,15 +24,15 @@ type Provider interface {
 	MkdirAll(ctx context.Context, name string, perm fs.FileMode) error
 }
 
-// Classifier types a provider-relative name (including files that do not exist
-// yet). Stat.MediaType is the source of truth for existing files.
-type Classifier interface {
-	Classify(name string, sample []byte) string
-}
-
-// File is an open file handle for a provider-relative path.
+// File is an open handle. Close and Stat always work.
+//
+// Extra capabilities are optional interfaces — comma-ok, not dummy methods:
+//
+//	r, ok := f.(io.Reader)   // sequential read
+//	ra, ok := f.(io.ReaderAt) // offset read (FUSE)
+//	w, ok := f.(io.Writer)    // sequential write
 type File interface {
-	io.ReadWriteCloser
+	io.Closer
 	Stat() (FileInfo, error)
 }
 

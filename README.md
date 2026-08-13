@@ -287,7 +287,7 @@ We already have the harness, VFS, IR, brain hooks, and checkpoints. Next we clos
 | Mount → brain (`vfsindex`) | **Shipped** | Optional bridge; MD by blocks, other text by lines; async reindex later |
 | Unified `read` / `replace` for all media | **Planned** | One edit surface; codecs do the rest |
 | Rich document IR (WYSIWYG) | **Planned** | Word/Docs codecs → same Block schema + style metadata |
-| FUSE projection | **Planned** | Real `rg` / `fd` / `ls` on the session tree |
+| FUSE projection | **Shipped** | `MountSession.FuseMount` — `rg` / `fd` / `ls` on the session tree |
 | Custom agent shell | **Planned** | Our shell, VFS-backed—not raw host bash as the main path |
 | Sandboxed Python / JS | **Planned** | Guests with our APIs only |
 | Capability broker | **Planned** | Mid-flight allow / deny / ask |

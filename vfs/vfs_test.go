@@ -35,8 +35,8 @@ func TestMountSession_localSession(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if n := len(ms.Infos()); n != 3 {
-		t.Fatalf("Infos len = %d", n)
+	if n := len(ms.Specs()); n != 3 {
+		t.Fatalf("Specs len = %d", n)
 	}
 
 	if err := ms.WriteFile(ctx, "/work/hello.go", []byte("package main\n")); err != nil {
@@ -414,18 +414,6 @@ func TestTextDocument_lines(t *testing.T) {
 	if err := doc.ReplaceLines(1, 1, []string{"z"}); err != nil || doc.Text() != "z" {
 		t.Fatalf("insert empty: %q err=%v", doc.Text(), err)
 	}
-	if s, err := vfs.FormatLines(doc, 1, 2); err != nil || s != "z" {
-		t.Fatalf("FormatLines = %q err=%v", s, err)
-	}
-	if _, err := vfs.FormatLines(doc, 0, 1); !errors.Is(err, vfs.ErrLineOutOfRange) {
-		t.Fatalf("FormatLines OOR: %v", err)
-	}
-	if _, err := vfs.AsTextual(doc); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := vfs.AsTextual(bareDocument{}); !errors.Is(err, vfs.ErrNotTextual) {
-		t.Fatalf("AsTextual: %v", err)
-	}
 	// defaults
 	d2 := vfs.NewTextDocument("/x", "", "", "hi")
 	if d2.MediaType() != "text/plain" || d2.Encoding() != "utf-8" {
@@ -634,7 +622,11 @@ func TestMemProvider_limits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := wf.Write([]byte("via-write")); err != nil {
+	w, ok := wf.(io.Writer)
+	if !ok {
+		t.Fatal("local write file should be io.Writer")
+	}
+	if _, err := w.Write([]byte("via-write")); err != nil {
 		t.Fatal(err)
 	}
 	_ = wf.Close()
@@ -642,7 +634,11 @@ func TestMemProvider_limits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, _ := io.ReadAll(rf)
+	r, ok := rf.(io.Reader)
+	if !ok {
+		t.Fatal("local read file should be io.Reader")
+	}
+	got, _ := io.ReadAll(r)
 	_ = rf.Close()
 	if string(got) != "via-write" {
 		t.Fatalf("local Write = %q", got)
@@ -784,16 +780,16 @@ func (p memProvider) OpenFile(_ context.Context, name string, flag int, _ fs.Fil
 		if flag&os.O_TRUNC != 0 || flag&os.O_CREATE != 0 {
 			p.store.files[name] = memObj{data: nil}
 		}
-		return &memFile{store: p.store, name: name, write: true}, nil
+		return &memWriteFile{store: p.store, name: name}, nil
 	}
 	o, ok := p.store.files[name]
 	if !ok {
 		return nil, vfs.ErrNotExist
 	}
 	if o.huge {
-		return &memFile{store: p.store, name: name, huge: true, size: o.size}, nil
+		return &memStatFile{name: name, size: o.size}, nil
 	}
-	return &memFile{store: p.store, name: name, r: bytes.NewReader(o.data), size: int64(len(o.data))}, nil
+	return &memReadFile{Reader: bytes.NewReader(o.data), name: name, size: int64(len(o.data))}, nil
 }
 
 func (p memProvider) ReadDir(context.Context, string) ([]vfs.DirEntry, error) {
@@ -807,40 +803,41 @@ func (p memProvider) Remove(_ context.Context, name string) error {
 }
 func (p memProvider) MkdirAll(context.Context, string, fs.FileMode) error { return nil }
 
-type memFile struct {
-	store *memStore
-	name  string
-	r     *bytes.Reader
-	buf   bytes.Buffer
-	write bool
-	huge  bool
-	size  int64
+type memReadFile struct {
+	*bytes.Reader
+	name string
+	size int64
 }
 
-func (f *memFile) Read(p []byte) (int, error) {
-	if f.huge {
-		return 0, io.EOF // never needed if ReadFile rejects by Stat
-	}
-	return f.r.Read(p)
+func (f *memReadFile) Close() error { return nil }
+func (f *memReadFile) Stat() (vfs.FileInfo, error) {
+	return vfs.FileInfo{Name: f.name, Size: f.size, Mode: 0o644}, nil
 }
-func (f *memFile) Write(p []byte) (int, error) {
-	return f.buf.Write(p)
+
+type memWriteFile struct {
+	buf   bytes.Buffer
+	store *memStore
+	name  string
 }
-func (f *memFile) Close() error {
-	if f.write {
-		f.store.mu.Lock()
-		f.store.files[f.name] = memObj{data: append([]byte(nil), f.buf.Bytes()...)}
-		f.store.mu.Unlock()
-	}
+
+func (f *memWriteFile) Write(p []byte) (int, error) { return f.buf.Write(p) }
+func (f *memWriteFile) Close() error {
+	f.store.mu.Lock()
+	f.store.files[f.name] = memObj{data: append([]byte(nil), f.buf.Bytes()...)}
+	f.store.mu.Unlock()
 	return nil
 }
-func (f *memFile) Stat() (vfs.FileInfo, error) {
-	if f.huge {
-		return vfs.FileInfo{Name: f.name, Size: f.size, Mode: 0o644}, nil
-	}
-	if f.write {
-		return vfs.FileInfo{Name: f.name, Size: int64(f.buf.Len()), Mode: 0o644}, nil
-	}
+func (f *memWriteFile) Stat() (vfs.FileInfo, error) {
+	return vfs.FileInfo{Name: f.name, Size: int64(f.buf.Len()), Mode: 0o644}, nil
+}
+
+type memStatFile struct {
+	name string
+	size int64
+}
+
+func (f *memStatFile) Close() error { return nil }
+func (f *memStatFile) Stat() (vfs.FileInfo, error) {
 	return vfs.FileInfo{Name: f.name, Size: f.size, Mode: 0o644}, nil
 }
 

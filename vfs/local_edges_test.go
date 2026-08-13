@@ -3,6 +3,7 @@ package vfs_test
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -49,7 +50,11 @@ func TestLocalProvider_edges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := wf.Write([]byte("hi\n")); err != nil {
+	w, ok := wf.(io.Writer)
+	if !ok {
+		t.Fatal("local write file should be io.Writer")
+	}
+	if _, err := w.Write([]byte("hi\n")); err != nil {
 		t.Fatal(err)
 	}
 	if err := wf.Close(); err != nil {
@@ -67,8 +72,12 @@ func TestLocalProvider_edges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	r, ok := rf.(io.Reader)
+	if !ok {
+		t.Fatal("local read file should be io.Reader")
+	}
 	buf := make([]byte, 8)
-	n, _ := rf.Read(buf)
+	n, _ := r.Read(buf)
 	_ = rf.Close()
 	if string(buf[:n]) != "hi\n" {
 		t.Fatalf("read %q", buf[:n])
