@@ -2,7 +2,7 @@
 //
 // # Public surface (hosts)
 //
-//   - MountSession — mounts, path I/O, ReadText / WriteDocument / Sync, ReadLines
+//   - MountSession — mounts, path I/O, ReadText / WriteDocument / Sync, ReadLines, SearchText
 //   - ContentRev / ContentHash — session-visible content identity (for tools)
 //   - BackendRegistry + LocalFactory / S3Factory + AWSS3 — process profiles and pools
 //   - MountSpec / MountInfo — durable and agent-safe mount descriptions
@@ -22,8 +22,8 @@
 //
 // This package never imports brain. Brain implements Provider in package brain
 // (Engrams as Markdown files). Optional artifact IndexPath lives in package
-// vfsindex (imports both; skips Profile=="brain"). Host-visible OS projection
-// (FUSE + real rg) is planned later; content search over mounts is not part of vfs.
+// vfsindex (imports both; skips Profile=="brain"). SearchText is session-visible
+// plaintext (dirty IR) for a future FUSE / host rg. This package does not ship a grep tool.
 //
 // Hosts should not need anything else. Mount tables, host roots, and bucket
 // details stay inside providers and the unexported mount table.

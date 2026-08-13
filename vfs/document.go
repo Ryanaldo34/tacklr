@@ -13,9 +13,12 @@ type Document interface {
 	MediaType() string
 }
 
-// Textual is line-addressable document content (plaintext, source, JSON-as-text, …).
+// Textual is document content that has a plaintext form (source, Markdown,
+// Engrams, later Word/Docs/PDF extracts). Images and other binaries do not
+// implement it — callers use a comma-ok assert.
 //
-// Line numbers are 1-based. Lines(start, end) is half-open [start, end).
+// Text() is that plaintext (FUSE / SearchText / encode). Line numbers are
+// 1-based. Lines(start, end) is half-open [start, end).
 type Textual interface {
 	Document
 	Encoding() string
