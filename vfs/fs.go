@@ -95,10 +95,11 @@ func (t *mountTable) lookup(virtualPath string) (MountInfo, string, error) {
 	return MountInfo{Point: point, ReadOnly: ro}, rel, nil
 }
 
-func (t *mountTable) resolve(virtualPath string) (p Provider, point, rel string, readOnly bool, err error) {
+// resolveEntry returns the full mount entry for the longest matching point.
+func (t *mountTable) resolveEntry(virtualPath string) (e mountEntry, point, rel string, err error) {
 	cleaned, err := cleanVirtualPath(virtualPath)
 	if err != nil {
-		return nil, "", "", false, err
+		return mountEntry{}, "", "", err
 	}
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -106,19 +107,27 @@ func (t *mountTable) resolve(virtualPath string) (p Provider, point, rel string,
 	var bestPoint string
 	var best mountEntry
 	found := false
-	for mp, e := range t.mounts {
+	for mp, ent := range t.mounts {
 		if mp != "/" && cleaned != mp && !strings.HasPrefix(cleaned, mp+"/") {
 			continue
 		}
 		if !found || len(mp) > len(bestPoint) {
-			bestPoint, best, found = mp, e, true
+			bestPoint, best, found = mp, ent, true
 		}
 	}
 	if !found {
-		return nil, "", "", false, ErrNotMounted
+		return mountEntry{}, "", "", ErrNotMounted
 	}
 	rel = strings.TrimPrefix(strings.TrimPrefix(cleaned, bestPoint), "/")
-	return best.provider, bestPoint, rel, best.spec.ReadOnly, nil
+	return best, bestPoint, rel, nil
+}
+
+func (t *mountTable) resolve(virtualPath string) (p Provider, point, rel string, readOnly bool, err error) {
+	e, point, rel, err := t.resolveEntry(virtualPath)
+	if err != nil {
+		return nil, "", "", false, err
+	}
+	return e.provider, point, rel, e.spec.ReadOnly, nil
 }
 
 func cleanVirtualPath(s string) (string, error) {

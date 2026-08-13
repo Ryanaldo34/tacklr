@@ -19,12 +19,13 @@ func rrfFuse(lists [][]ScoredID, k int) []ScoredID {
 		k = defaultRRFk
 	}
 	type acc struct {
-		rrf       float64
-		UpdatedAt time.Time
-		ParentID  *uuid.UUID
-		Title     string
-		Content   string
-		Position  *int
+		rrf        float64
+		UpdatedAt  time.Time
+		ParentID   *uuid.UUID
+		Title      string
+		Content    string
+		Position   *int
+		Properties map[string]any
 	}
 	byID := make(map[uuid.UUID]acc)
 	order := make([]uuid.UUID, 0)
@@ -34,11 +35,12 @@ func rrfFuse(lists [][]ScoredID, k int) []ScoredID {
 			a, ok := byID[item.ID]
 			if !ok {
 				a = acc{
-					UpdatedAt: item.UpdatedAt,
-					ParentID:  item.ParentID,
-					Title:     item.Title,
-					Content:   item.Content,
-					Position:  item.Position,
+					UpdatedAt:  item.UpdatedAt,
+					ParentID:   item.ParentID,
+					Title:      item.Title,
+					Content:    item.Content,
+					Position:   item.Position,
+					Properties: item.Properties,
 				}
 				order = append(order, item.ID)
 			}
@@ -58,6 +60,9 @@ func rrfFuse(lists [][]ScoredID, k int) []ScoredID {
 			if a.Position == nil && item.Position != nil {
 				a.Position = item.Position
 			}
+			if a.Properties == nil && item.Properties != nil {
+				a.Properties = item.Properties
+			}
 			byID[item.ID] = a
 		}
 	}
@@ -66,13 +71,14 @@ func rrfFuse(lists [][]ScoredID, k int) []ScoredID {
 	for _, id := range order {
 		a := byID[id]
 		out = append(out, ScoredID{
-			ID:        id,
-			Score:     a.rrf,
-			UpdatedAt: a.UpdatedAt,
-			ParentID:  a.ParentID,
-			Title:     a.Title,
-			Content:   a.Content,
-			Position:  a.Position,
+			ID:         id,
+			Score:      a.rrf,
+			UpdatedAt:  a.UpdatedAt,
+			ParentID:   a.ParentID,
+			Title:      a.Title,
+			Content:    a.Content,
+			Position:   a.Position,
+			Properties: a.Properties,
 		})
 	}
 	return out

@@ -1,5 +1,8 @@
 // Package vfsindex bridges a vfs.MountSession into brain knowledge objects.
 //
+// Canonical architecture: docs/knowledge.md. This package is only the artifact
+// ingest path (IndexPath / policy / schedulers).
+//
 // VFS and brain work alone or together. This package is the optional
 // composition layer: it imports both, while vfs and brain never import each other.
 //
@@ -14,20 +17,39 @@
 //	Chunk.Content                 = chunk body (heading blocks for Markdown; line windows otherwise)
 //
 // Live VFS bytes remain source of truth. The index is derived and may lag until
-// re-index (IndexPath / IndexScheduler.Notify).
+// re-index (IndexPath / IndexScheduler.Notify). Parent Documents keep metadata and
+// content_hash — not a second agent-editable full-file body.
+//
+// # Index policy (MountSpec.IndexPolicy)
+//
+//	none       — no auto jobs; index_file errors
+//	selective  — only index_file / host IndexPath (optional track set after index_file)
+//	prefix     — IndexPrefix at bridge start + AfterPersist under the mount
+//	watch      — same auto triggers as prefix (host-facing name)
+//
+// Empty policy normalizes to selective (NormalizePolicy / AutoIndex helpers).
+//
+// # Single pipeline
+//
+// All file→brain content updates go through IndexPath (or UnindexPath). Triggers
+// fan in via IndexScheduler.Notify (AfterPersist), index_file, IndexPrefix, or
+// host IndexPath API. content_hash skip returns PathSkipped without re-chunking.
 //
 // # Session-visible body
 //
 // IndexPath uses MountSession.ReadText (markdown) and MountSession.Open (other
 // text). Both honor the session dirty IR cache, so index_file / IndexPath see the
 // same body the agent sees after write/replace_* — even before Sync. AfterPersist
-// (WriteFile / Sync) still drives background reindex of persist-only paths so
-// search stays warm after durable writes.
+// (WriteFile / Sync) still drives background reindex when policy allows.
 //
 // # Schedulers
 //
-// Hosts wire Notify after writes via vfs.MountSession.SetAfterPersist:
+// Hosts wire Notify after writes via vfs.MountSession.SetAfterPersist, gated by
+// policy:
 //
+//	br, err := vfsindex.Start(ms, eng, scope, false) // harness: attachMemory when scratch exists
+//	defer br.Close()
+//	// Or wire by hand:
 //	idx, err := vfsindex.NewMountIndexer(ms, eng, scope)
 //	sched := vfsindex.NewAsyncScheduler(idx) // or NewSyncScheduler for inline
 //	prev := ms.GetAfterPersist()
@@ -35,6 +57,7 @@
 //	    if prev != nil {
 //	        _ = prev(ctx, path)
 //	    }
+//	    // harness: only Notify when AutoIndex(spec) or selective track set
 //	    return sched.Notify(ctx, path, vfsindex.ReasonSync)
 //	})
 //	defer sched.Close()
@@ -45,13 +68,16 @@
 // and a background worker; Notify never blocks on re-chunk.
 //
 // The tacklr harness creates MountIndexer + AsyncScheduler and registers
-// index_file / unindex when Brain + VFS + search namespace are all set.
+// index_file / unindex / find_content when Brain + VFS + search namespace are set.
+// It skips mounts whose Profile is the brain factory id ("brain") and never
+// creates Document+Chunk artifacts for those paths. Scratch /memory is attached
+// only when a scratch profile exists and no brain Provider mount is present.
 //
 // # Kinds
 //
 // Hosts that use a non-empty kind catalog should register MountIndexKinds()
 // (or equivalent fields) before indexing. Open-catalog engines accept any props.
 //
-// Content search over mounts is brain search/find_exact on Chunks (and later
-// host OS tools via FUSE). This package does not implement grep.
+// Content search over mounts is brain search/find_exact / find_content on Chunks
+// with vfs_path (and later host OS tools via FUSE). This package does not implement grep.
 package vfsindex

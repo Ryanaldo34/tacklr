@@ -20,9 +20,10 @@
 // replace_text, write) that wrap ReadText / TextDocument / WriteDocument.
 // ContentRev is the stable token those tools pass — not a large MountSession surface.
 //
-// This package never imports brain. Optional mount→knowledge indexing lives in
-// package vfsindex (imports both). Host-visible OS projection (FUSE + real rg)
-// is planned later; content search over mounts is not part of vfs itself.
+// This package never imports brain. Brain implements Provider in package brain
+// (Engrams as Markdown files). Optional artifact IndexPath lives in package
+// vfsindex (imports both; skips Profile=="brain"). Host-visible OS projection
+// (FUSE + real rg) is planned later; content search over mounts is not part of vfs.
 //
 // Hosts should not need anything else. Mount tables, host roots, and bucket
 // details stay inside providers and the unexported mount table.

@@ -29,6 +29,9 @@ var (
 	ErrGraphRequired = errors.New("brain: graph backend is required")
 	// ErrWritesUnsupported is returned when Put/SoftDelete is used on a read-only store.
 	ErrWritesUnsupported = errors.New("brain: store does not support object writes")
+	// ErrListingUnsupported is returned when ListByKind/GetByProperty/KindsWithObjects
+	// is used on a store that does not implement ObjectLister.
+	ErrListingUnsupported = errors.New("brain: store does not support object listing")
 	// ErrSoftDeletedPut is returned when Put is called with DeletedAt already set.
 	ErrSoftDeletedPut = errors.New("brain: put refuses soft-deleted objects; use SoftDelete")
 	// ErrLinkNotFirstClass is returned when a link endpoint is a part (has parent_id).
@@ -221,11 +224,12 @@ type SearchPage struct {
 
 // ScoredID is a candidate from a retrieval channel before fusion.
 type ScoredID struct {
-	ID        uuid.UUID
-	Score     float64
-	UpdatedAt time.Time
-	ParentID  *uuid.UUID
-	Title     string
-	Content   string
-	Position  *int
+	ID         uuid.UUID
+	Score      float64
+	UpdatedAt  time.Time
+	ParentID   *uuid.UUID
+	Title      string
+	Content    string
+	Position   *int
+	Properties map[string]any // part props (e.g. start_line) when the channel provides them
 }

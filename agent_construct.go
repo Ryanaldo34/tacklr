@@ -3,6 +3,7 @@ package tacklr
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -188,48 +189,54 @@ func (a *AgentHarness) injectBuiltinTools() {
 		client := exa.NewClient(key)
 		a.tools = append(a.tools, newWebSearchTool(client), newWebFetchTool(client))
 	}
-	if a.brain != nil && a.searchCtx != nil {
-		a.tools = append(a.tools, newBrainTools(a.brain, a.searchCtx, a.brainWriteKinds)...)
-	}
+	// Index bridge after brain factory/mounts so save_* can write Engram files.
+	br := a.initVFSIndexBridge()
 	if a.session != nil && a.session.VFS != nil {
 		a.tools = append(a.tools, newVFSTools(a.session.VFS)...)
 	}
-	a.initVFSIndexBridge()
+	if a.brain != nil && a.searchCtx != nil {
+		var ms *vfs.MountSession
+		var idx *vfsindex.MountIndexer
+		if a.session != nil {
+			ms = a.session.VFS
+		}
+		if br != nil {
+			idx = br.Indexer
+		}
+		a.tools = append(a.tools, newBrainTools(a.brain, a.searchCtx, a.brainWriteKinds, brainToolDeps{
+			VFS:     ms,
+			Indexer: idx,
+		})...)
+	}
+	if br != nil {
+		a.tools = append(a.tools, newVFSIndexTools(br)...)
+	}
 	if len(a.subagents) > 0 {
 		a.tools = append(a.tools, a.spawnTool())
 	}
 	a.builtinsInjected = true
 }
 
-// initVFSIndexBridge optionally owns a MountIndexer + AsyncScheduler and
-// registers index_file / unindex when Brain + VFS + search namespace are all set.
-// Hosts with a non-empty kind catalog should register vfsindex.MountIndexKinds()
-// (ApplyKinds replaces the catalog; open-catalog engines need no kinds).
-func (a *AgentHarness) initVFSIndexBridge() {
+// initVFSIndexBridge starts vfsindex.Bridge when Brain + VFS + namespace are set.
+// Hosts with a non-empty kind catalog should register vfsindex.MountIndexKinds().
+func (a *AgentHarness) initVFSIndexBridge() *vfsindex.Bridge {
 	if a.brain == nil || a.searchCtx == nil || a.session == nil || a.session.VFS == nil {
-		return
+		return nil
 	}
 	ns, ok := a.searchCtx.Namespace()
 	if !ok {
-		return
+		return nil
 	}
 	nsCopy := ns
-	idx, err := vfsindex.NewMountIndexer(a.session.VFS, a.brain, brain.Scope{Namespace: &nsCopy})
+	scratch := a.fsRegistry != nil && a.fsRegistry.HasProfile("scratch") &&
+		!sessionHasProfile(a.session.VFS, brain.DefaultProfile)
+	br, err := vfsindex.Start(a.session.VFS, a.brain, brain.Scope{Namespace: &nsCopy}, scratch)
 	if err != nil {
-		slog.Error("vfsindex: failed to create mount indexer", "error", err)
-		return
+		slog.Error("vfsindex: failed to start bridge", "error", err)
+		return nil
 	}
-	sched := vfsindex.NewAsyncScheduler(idx)
-	ms := a.session.VFS
-	prev := ms.GetAfterPersist()
-	ms.SetAfterPersist(func(ctx context.Context, path string) error {
-		if prev != nil {
-			_ = prev(ctx, path)
-		}
-		return sched.Notify(ctx, path, vfsindex.ReasonSync)
-	})
-	a.vfsIndexSched = sched
-	a.tools = append(a.tools, newVFSIndexTools(idx)...)
+	a.vfsBridge = br
+	return br
 }
 
 // SetSearchNamespace sets retrieval isolation for knowledge tools.
@@ -360,11 +367,21 @@ func (a *AgentHarness) initSessionMounts(ctx context.Context, durable []vfs.Moun
 	if a.session == nil {
 		return fmt.Errorf("vfs: no session")
 	}
+	a.registerBrainFactory()
 	specs, err := vfs.MergeSpecs(a.fsBootstrap, durable)
 	if err != nil {
 		return err
 	}
-	if len(specs) == 0 {
+	for i := range specs {
+		if specs[i].Profile == brain.DefaultProfile {
+			specs[i].IndexPolicy = vfsindex.PolicyNone
+		}
+	}
+	hasBrain := specsHaveProfile(specs, brain.DefaultProfile) ||
+		sessionHasProfile(a.session.VFS, brain.DefaultProfile)
+	auto := a.shouldAutoEngram() && !hasBrain
+
+	if len(specs) == 0 && !auto {
 		return nil
 	}
 	if a.session.VFS == nil {
@@ -373,5 +390,83 @@ func (a *AgentHarness) initSessionMounts(ctx context.Context, durable []vfs.Moun
 		}
 		a.session.VFS = vfs.NewMountSession(a.sessionId, a.fsRegistry)
 	}
-	return a.session.VFS.Materialize(ctx, specs)
+	if len(specs) > 0 {
+		if err := a.session.VFS.Materialize(ctx, specs); err != nil {
+			return err
+		}
+	}
+	if auto {
+		if err := a.session.VFS.Mount(ctx, a.defaultEngramSpec()); err != nil && !errors.Is(err, vfs.ErrAlreadyMounted) {
+			return err
+		}
+	}
+	return nil
+}
+
+func (a *AgentHarness) registerBrainFactory() {
+	if a.brain == nil || a.fsRegistry == nil || a.searchCtx == nil {
+		return
+	}
+	ns, ok := a.searchCtx.Namespace()
+	if !ok {
+		return
+	}
+	nsCopy := ns
+	_ = a.fsRegistry.Register(brain.BrainFactory{
+		ID:     brain.DefaultProfile,
+		Engine: a.brain,
+		Scope:  brain.Scope{Namespace: &nsCopy},
+	})
+}
+
+func (a *AgentHarness) shouldAutoEngram() bool {
+	if a.brain == nil || a.searchCtx == nil || a.fsRegistry == nil {
+		return false
+	}
+	if _, ok := a.searchCtx.Namespace(); !ok {
+		return false
+	}
+	return a.fsRegistry.HasProfile(brain.DefaultProfile)
+}
+
+func (a *AgentHarness) defaultEngramSpec() vfs.MountSpec {
+	params := map[string]string{"mode": brain.ModePrefix}
+	if a.brain != nil && a.brain.Catalog() != nil && !a.brain.Catalog().Empty() {
+		var names []string
+		for _, spec := range a.brain.Catalog().All() {
+			if brain.IsParentKind(spec) {
+				names = append(names, spec.Kind)
+			}
+		}
+		if len(names) > 0 {
+			params["kinds"] = strings.Join(names, ",")
+		}
+	}
+	return vfs.MountSpec{
+		Point:       brain.DefaultMountPoint,
+		Profile:     brain.DefaultProfile,
+		IndexPolicy: vfsindex.PolicyNone,
+		Params:      params,
+	}
+}
+
+func specsHaveProfile(specs []vfs.MountSpec, profile string) bool {
+	for _, s := range specs {
+		if s.Profile == profile {
+			return true
+		}
+	}
+	return false
+}
+
+func sessionHasProfile(ms *vfs.MountSession, profile string) bool {
+	if ms == nil {
+		return false
+	}
+	for _, s := range ms.Specs() {
+		if s.Profile == profile {
+			return true
+		}
+	}
+	return false
 }

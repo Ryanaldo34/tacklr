@@ -1,8 +1,10 @@
 # Virtual filesystem (`vfs`)
 
-Tacklr’s virtual filesystem gives agents one path-based interface over storage backends (local disk, S3, and later Drive/Docs). Hosts own mounts and credentials; agents only see virtual paths like `/work/main.go`.
+Tacklr’s virtual filesystem gives agents one path-based interface over storage backends (local disk, S3, **brain Engrams**, and later Drive/Docs). Hosts own mounts and credentials; agents only see virtual paths like `/work/main.go` or `/engram/deal/acme.md`.
 
 Package: [`github.com/ryanaldo34/tacklr/vfs`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfs).
+
+Knowledge objects, search, and the graph are documented in **[docs/knowledge.md](knowledge.md)** (canonical). This file is the VFS surface: mounts, IR, write-back, and index *policy*.
 
 ## Big picture
 
@@ -25,7 +27,7 @@ Package: [`github.com/ryanaldo34/tacklr/vfs`](https://pkg.go.dev/github.com/ryan
      └───────────┘
            │
            ▼
-     Provider (local disk / S3 / …)
+     Provider (local disk / S3 / brain Engrams)
 ```
 
 | Layer | Role |
@@ -74,9 +76,12 @@ _ = ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"})
 
 | Type | Meaning |
 |------|---------|
-| `MountSpec` | Durable mount description (point, profile, read-only, params). Checkpoint-safe; no secrets. |
+| `MountSpec` | Durable mount description (point, profile, read-only, params, **indexPolicy**). Checkpoint-safe; no secrets. |
 | `MountInfo` | Agent-safe view: point + read-only only |
 | `Params` | Backend options (`subpath`, `bucket`, `prefix`, …) |
+| `IndexPolicy` | Optional string: `none` \| `selective` \| `prefix` \| `watch` (empty → selective when the index bridge is on) |
+
+`MountSession.SpecAt` returns the full durable `MountSpec` for a virtual path (for policy and host tooling).
 
 Auth and host roots live on factories, not on mounts or checkpoints.
 
@@ -343,20 +348,88 @@ _ = doc.ReplaceLines(start, end, []string{"new body"})
 
 Agent tools use the same ideas with generic names: `block_id`, optional `outline` on read, `block_id` + `body` on replace. Citations: `path#block_id`. Projectors stay internal to `vfs` by media type — hosts do not call Markdown outline helpers.
 
-## Optional brain index (`vfsindex`)
+## Two jobs (do not mix)
 
-`vfs` never imports `brain`. When both are enabled, package
-[`vfsindex`](../vfsindex) streams text-like mount files into brain
-`Document` + `Chunk` objects (`vfs_path`, line/byte anchors, content hash).
+Full model, search, and graph: **[docs/knowledge.md](knowledge.md)**.
+
+| Job | Store | Sync |
+|-----|--------|------|
+| **Artifact file** (`/work`, S3, …) | Local/S3 bytes | **IndexPath** (hash, Document+Chunk) |
+| **Engram** | Engine object | **brain.Provider** read/write (Markdown + YAML) |
+
+`vfs` never imports `brain`. Brain implements `vfs.Provider`. Package
+[`vfsindex`](../vfsindex) indexes **non-brain** mounts only.
+
+### Engrams as files (`brain.Provider`)
+
+Host-defined `KindSpec`s are domains (Deal, Person are examples, not product types).
+Kind names must be path-safe: no `/` or `..`. Only **parent** kinds become directories;
+parts/chunks are never files. See [knowledge.md](knowledge.md) for the file format,
+write-through sequence, and `save_*` behavior.
+
+**Factory params** (`MountSpec.Profile == "brain"`):
+
+| Param | Meaning |
+|-------|---------|
+| `mode` | `prefix` (default) or `roots` |
+| `kind` | Required for `roots` — one kind per mount (`/deal/acme.md`) |
+| `kinds` | Comma allow-list. Empty catalog: pass `kinds=` or list kinds that already have objects |
+
+```text
+# default harness mount when Brain + VFS + namespace and no host brain mount
+Mount { Point: "/engram", Profile: "brain", IndexPolicy: none, Params: { mode: prefix } }
+→ /engram/deal/acme.md
+
+# host roots layout
+Mount { Point: "/deal", Profile: "brain", Params: { mode: roots, kind: Deal } }
+→ /deal/acme.md
+```
+
+File format is **Markdown + YAML front matter** (`id`, `domain`/`kind`, `slug`, `title`,
+then kind fields). Body → `Object.Content`. A `---` line inside the YAML block ends
+front matter (standard limitation). `vfs_path` is stored on the object, not in the file.
+
+First save without `id` allocates a UUID and rewrites front matter on the next read.
+**Rename** is not a move: delete + create + re-link.
+
+`save_*` writes the Engram file on the Provider when one is mounted; otherwise it
+falls back to `Engine.Put`. Scratch `/memory` is **not** attached when a brain
+Provider mount exists (deprecated for discoveries).
+
+**Shape A graph tools:** `link` / `unlink` / `expand` / `find_links` speak **paths**.
+There are no `.links` directories; `list`/`ls` never lists edges. Artifact paths
+must be indexed (`index_file` / prefix policy) before they can be linked.
+
+### Index policy
+
+| Policy | Pipeline triggers |
+|--------|-------------------|
+| `none` | No auto jobs; `index_file` **errors** |
+| `selective` | Only `index_file` / host IndexPath; after a successful `index_file`, AfterPersist reindexes that path (track set) |
+| `prefix` | IndexPrefix at bridge start + AfterPersist under the mount |
+| `watch` | Same auto triggers as `prefix` |
+
+Empty → **selective**.
+
+### Single fan-in
+
+```text
+  index_file ──┐
+  IndexPrefix ─┼──► IndexPath ──► brain Document+Chunks (hash skip)
+  AfterPersist ┘       │  (never walks Profile=="brain")
+```
+
+Brain-profile mounts set `IndexPolicy=none` automatically and are never re-indexed
+as Document/Chunk artifacts. Engram writes go through the Provider (`Put`), not IndexPath.
 
 ### Decoupling
 
 | Package | May know |
 |---------|----------|
-| `vfs` | `AfterPersist` hook only; no brain/vfsindex types beyond the callback |
+| `vfs` | Specs (incl. IndexPolicy string), `AfterPersist` hook only |
 | `brain` | Objects/props only; no VFS |
-| `vfsindex` | Both; owns `IndexPath` / `IndexPrefix` / schedulers |
-| harness (`tacklr`) | Optional glue: indexer + tools when Brain + VFS + search namespace are all set |
+| `vfsindex` | Both; owns `IndexPath` / `IndexPrefix` / schedulers / policy helpers |
+| harness (`tacklr`) | BrainFactory + `/engram` default, skip-index on brain profile, tools |
 
 ### Host wiring
 
@@ -372,22 +445,25 @@ ms.SetAfterPersist(func(ctx context.Context, path string) error {
     if prev != nil {
         _ = prev(ctx, path)
     }
+    // Gate with vfsindex.AutoIndex(spec.IndexPolicy) or selective track
     return sched.Notify(ctx, path, vfsindex.ReasonSync)
 })
 defer sched.Close()
-// SyncScheduler remains for hosts/tests that want inline reindex.
 ```
 
 ### Agent tools (default on when prerequisites hold)
 
 When the harness has **Brain + MountSession + search namespace**, it owns a
-`MountIndexer` + `AsyncScheduler`, composes `AfterPersist` (preserving any host
-hook), and registers:
+`MountIndexer` + `AsyncScheduler`, composes policy-gated `AfterPersist`, and registers:
 
 | Tool | Role |
 |------|------|
-| `index_file` | Selective ingest of key virtual **files** (max 8 paths); plan-gated write |
-| `unindex` | Soft-delete the brain mirror for a path; does **not** delete the VFS file |
+| `index_file` | Selective ingest of key virtual **files** (max 8); errors under `none` |
+| `unindex` | Soft-delete the brain mirror; drops selective track |
+| `find_content` | Index-backed search requiring `vfs_path` (temporary until `run_command`) |
+| `find_files` | Bounded live VFS walk by name/glob (VFS-only; temporary) |
+| `save_*` | Write the Engram file on the brain Provider (or `Engine.Put` if no brain mount) |
+| `link` / `expand` / `find_links` | Path-native graph (G1): prefer virtual paths; surface neighbor `vfs_path` |
 
 Omit Brain, VFS, or namespace to opt out (no tools, no harness indexer, no async hook).
 
@@ -395,15 +471,13 @@ Omit Brain, VFS, or namespace to opt out (no tools, no harness indexer, no async
 
 `IndexPath` uses `MountSession.ReadText` / `Open`, which honor the **dirty IR cache**.
 So `index_file` after `write` / `replace_*` indexes the session-visible body **before
-Sync**. `AfterPersist` (fired by `WriteFile` / `Sync`) still drives background
-reindex of **persist-only** paths so search stays warm after durable writes.
-Write success is never blocked by reindex failures (hook errors are ignored).
+Sync**. `AfterPersist` (fired by `WriteFile` / `Sync`) drives background reindex when
+policy (or selective track) allows. Write success is never blocked by reindex failures.
 
-Markdown files are chunked by **heading/preamble blocks** (`block_id` and `heading_path` properties) when `Blocks()` is non-empty; other text still uses line windows. Parent section chunks may overlap child text (same span model as the IR).
+Markdown files are chunked by **heading/preamble blocks** (`block_id` and `heading_path` properties) when `Blocks()` is non-empty; other text still uses line windows.
 
-Indexed content is queried with normal brain tools (`search` / `find_exact`).
-Live OS-tool search over mounts is deferred to a future FUSE (or materialize)
-projection — not an in-process reimplementation of grep.
+Indexed content is queried with `find_content`, `search` / `find_exact` (prefer hits with `vfs_path`).
+Live OS-tool search over mounts is deferred to a future FUSE + `run_command` path.
 
 ---
 

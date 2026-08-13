@@ -11,6 +11,8 @@ import (
 
 	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/stores"
+	"github.com/ryanaldo34/tacklr/vfs"
+	"github.com/ryanaldo34/tacklr/vfsindex"
 )
 
 func TestBrainTools_saveDiscoveryAndLink(t *testing.T) {
@@ -39,41 +41,14 @@ func TestBrainTools_saveDiscoveryAndLink(t *testing.T) {
 
 	saveDisc := h.findTool("save_discovery", "")
 	saveFact := h.findTool("save_fact", "")
-	saveMem := h.findTool("save_memory", "")
 	linkTool := h.findTool("link", "")
 	if saveDisc == nil || saveFact == nil || linkTool == nil {
 		t.Fatal("save_discovery, save_fact, link required")
 	}
-	if saveMem != nil {
-		t.Fatal("save_memory must be omitted when Memory kind is empty")
-	}
 
-	// Without a GraphWriter the link tool is not registered.
-	engNoGraph, err := brain.NewEngine(store, brain.WithKinds(
-		brain.KindSpec{Kind: "Discovery", IsParent: true},
-	))
-	if err != nil {
-		t.Fatal(err)
-	}
-	hNoGraph := NewAgent(ctx, AgentOptions{
-		Config: Config{MaxWindowSize: 1024}, Model: &mockStrategy{},
-		Brain: engNoGraph, BrainWriteKinds: brain.WriteKinds{Discovery: "Discovery"},
-		SearchNamespace: &ns,
-	})
-	if hNoGraph.findTool("link", "") != nil {
-		t.Fatal("link must be omitted without GraphWriter")
-	}
-	if hNoGraph.findTool("save_discovery", "") == nil {
-		t.Fatal("save_discovery still required")
-	}
-
-	// find_objects is registered when GraphObjectSearcher is available (MemoryGraph).
 	findObj := h.findTool("find_objects", "")
 	if findObj == nil {
 		t.Fatal("find_objects required with MemoryGraph")
-	}
-	if hNoGraph.findTool("find_objects", "") != nil {
-		t.Fatal("find_objects must be omitted without object searcher")
 	}
 
 	out, err := saveDisc.invoke(ctx, `{"title":"finding","content":"learned X"}`, turnRuntime(h))
@@ -631,5 +606,114 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 	gotNS, ok = worker.SearchNamespace()
 	if !ok || gotNS != ns {
 		t.Fatalf("worker namespace after parent clear: %v %v", gotNS, ok)
+	}
+}
+
+// TestBrainTools_engramPathGraph: write two Engrams, link by path, expand/find_links
+// return neighbor paths; unindexed /work artifact fails until index_file.
+func TestBrainTools_engramPathGraph(t *testing.T) {
+	ctx := context.Background()
+	reg := vfs.NewBackendRegistry()
+	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+	ms := vfs.NewMountSession("engram-graph", reg)
+	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
+		t.Fatal(err)
+	}
+	g := brain.NewMemoryGraph()
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithGraph(g), brain.WithKinds(
+		brain.KindSpec{Kind: "Deal", IsParent: true},
+		brain.KindSpec{Kind: "Person", IsParent: true},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.ApplyKinds(ctx, append(vfsindex.MountIndexKinds(),
+		brain.KindSpec{Kind: "Deal", IsParent: true},
+		brain.KindSpec{Kind: "Person", IsParent: true},
+	)...); err != nil {
+		t.Fatal(err)
+	}
+	ns := uuid.New()
+	h := NewAgent(ctx, AgentOptions{
+		SessionID: "engram-graph", Store: stores.NewInMemoryStore(),
+		MountSession: ms, FSRegistry: reg, Model: &mockStrategy{},
+		Brain: eng, SearchNamespace: &ns,
+	})
+	t.Cleanup(h.Close)
+	activatePlan(t, h)
+
+	if err := ms.WriteFile(ctx, "/engram/deal/acme.md", []byte("---\ndomain: Deal\nslug: acme\n---\n\nDeal body.\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.WriteFile(ctx, "/engram/person/sam.md", []byte("---\ndomain: Person\nslug: sam\n---\n\nBuyer.\n")); err != nil {
+		t.Fatal(err)
+	}
+
+	link := h.findTool("link", "")
+	expand := h.findTool("expand", "")
+	findLinks := h.findTool("find_links", "")
+	if link == nil || expand == nil || findLinks == nil {
+		t.Fatal("link/expand/find_links required")
+	}
+	lout, err := link.invoke(ctx, `{
+		"from":"/engram/deal/acme.md","to":"/engram/person/sam.md",
+		"relation_type":"has_contact","role":"buyer","note":"primary buyer"
+	}`, turnRuntime(h))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(lout.output, "/engram/deal/acme.md") || !strings.Contains(lout.output, "/engram/person/sam.md") {
+		t.Fatalf("link paths: %s", lout.output)
+	}
+
+	eout, err := expand.invoke(ctx, `{"path":"/engram/deal/acme.md","relation_types":["has_contact"]}`, turnRuntime(h))
+	if err != nil || !strings.Contains(eout.output, "/engram/person/sam.md") {
+		t.Fatalf("expand neighbor path: %v %s", err, eout.output)
+	}
+
+	fout, err := findLinks.invoke(ctx, `{"relation_type":"has_contact","query":"primary"}`, turnRuntime(h))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(fout.output, "from_path") || !strings.Contains(fout.output, "to_path") {
+		t.Fatalf("find_links path fields: %s", fout.output)
+	}
+	if !strings.Contains(fout.output, "/engram/deal/acme.md") || !strings.Contains(fout.output, "/engram/person/sam.md") {
+		t.Fatalf("find_links endpoints: %s", fout.output)
+	}
+
+	if err := ms.WriteFile(ctx, "/work/doc.md", []byte("# Doc\n\nartifact\n")); err != nil {
+		t.Fatal(err)
+	}
+	_, err = link.invoke(ctx, `{
+		"from":"/work/doc.md","to":"/engram/deal/acme.md","relation_type":"about"
+	}`, turnRuntime(h))
+	if err == nil || !strings.Contains(err.Error(), "not indexed") {
+		t.Fatalf("unindexed artifact: %v", err)
+	}
+	idx := h.findTool("index_file", "")
+	if _, err := runWriteTool(t, h, idx, `{"path":"/work/doc.md"}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := link.invoke(ctx, `{
+		"from":"/work/doc.md","to":"/engram/deal/acme.md","relation_type":"about"
+	}`, turnRuntime(h)); err != nil {
+		t.Fatal(err)
+	}
+
+	unlink := h.findTool("unlink", "")
+	if unlink == nil {
+		t.Fatal("unlink required")
+	}
+	if _, err := unlink.invoke(ctx, `{
+		"from":"/engram/deal/acme.md","to":"/engram/person/sam.md","relation_type":"has_contact"
+	}`, turnRuntime(h)); err != nil {
+		t.Fatal(err)
+	}
+	eout2, err := expand.invoke(ctx, `{"path":"/engram/deal/acme.md","relation_types":["has_contact"]}`, turnRuntime(h))
+	if err != nil || strings.Contains(eout2.output, "/engram/person/sam.md") {
+		t.Fatalf("after unlink: %v %s", err, eout2.output)
 	}
 }

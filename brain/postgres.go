@@ -276,6 +276,95 @@ func (s *PostgresStore) ListKinds(ctx context.Context) ([]ObjectKind, error) {
 	return out, nil
 }
 
+// ListByKind implements ObjectLister (first-class objects only).
+func (s *PostgresStore) ListByKind(ctx context.Context, scope Scope, kind string, limit int) ([]Object, error) {
+	kind = strings.TrimSpace(kind)
+	if kind == "" || limit <= 0 {
+		return nil, nil
+	}
+	q := `SELECT ` + objectSelectCols + `
+		FROM objects
+		WHERE kind = $1 AND deleted_at IS NULL AND parent_id IS NULL`
+	args := []any{kind}
+	n := 2
+	if scope.Namespace != nil {
+		q += fmt.Sprintf(` AND namespace_id = $%d`, n)
+		args = append(args, *scope.Namespace)
+		n++
+	}
+	q += fmt.Sprintf(` ORDER BY title ASC NULLS LAST, id ASC LIMIT $%d`, n)
+	args = append(args, limit)
+	return s.scanObjectRows(ctx, q, args, "list by kind", limit)
+}
+
+// GetByProperty implements ObjectLister.
+func (s *PostgresStore) GetByProperty(ctx context.Context, scope Scope, key, value string) (Object, error) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return Object{}, fmt.Errorf("brain: property key is required")
+	}
+	q := `SELECT ` + objectSelectCols + `
+		FROM objects
+		WHERE deleted_at IS NULL AND properties->>$1 = $2`
+	args := []any{key, value}
+	if scope.Namespace != nil {
+		q += ` AND namespace_id = $3`
+		args = append(args, *scope.Namespace)
+	}
+	q += ` LIMIT 1`
+	return s.scanObject(s.db.QueryRow(ctx, q, args...))
+}
+
+// KindsWithObjects implements ObjectLister.
+func (s *PostgresStore) KindsWithObjects(ctx context.Context, scope Scope) ([]string, error) {
+	q := `SELECT DISTINCT kind FROM objects WHERE deleted_at IS NULL AND parent_id IS NULL`
+	var args []any
+	if scope.Namespace != nil {
+		q += ` AND namespace_id = $1`
+		args = append(args, *scope.Namespace)
+	}
+	q += ` ORDER BY kind ASC`
+	rows, err := s.db.Query(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("brain: kinds with objects: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			return nil, fmt.Errorf("brain: kinds with objects: %w", err)
+		}
+		if k != "" {
+			out = append(out, k)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("brain: kinds with objects: %w", err)
+	}
+	return out, nil
+}
+
+func (s *PostgresStore) scanObjectRows(ctx context.Context, q string, args []any, label string, capHint int) ([]Object, error) {
+	rows, err := s.db.Query(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("brain: %s: %w", label, err)
+	}
+	defer rows.Close()
+	out := make([]Object, 0, capHint)
+	for rows.Next() {
+		obj, err := s.scanObject(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, obj)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("brain: %s: %w", label, err)
+	}
+	return out, nil
+}
+
 type scannable interface {
 	Scan(dest ...any) error
 }

@@ -145,6 +145,26 @@ func (m *MountSession) Lookup(virtualPath string) (MountInfo, string, error) {
 	return m.table().lookup(virtualPath)
 }
 
+// SpecAt returns the durable MountSpec for the mount that owns virtualPath
+// (longest matching point). Clone is safe to retain; no secrets.
+func (m *MountSession) SpecAt(virtualPath string) (MountSpec, error) {
+	e, _, _, err := m.table().resolveEntry(virtualPath)
+	if err != nil {
+		return MountSpec{}, err
+	}
+	return cloneSpec(e.spec), nil
+}
+
+// IndexPolicyAt returns MountSpec.IndexPolicy for the mount that owns virtualPath
+// (empty if unset). Avoids cloning Params — preferred on AfterPersist / policy gates.
+func (m *MountSession) IndexPolicyAt(virtualPath string) (string, error) {
+	e, _, _, err := m.table().resolveEntry(virtualPath)
+	if err != nil {
+		return "", err
+	}
+	return e.spec.IndexPolicy, nil
+}
+
 func (m *MountSession) at(ctx context.Context, virtualPath string, write bool) (Provider, string, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, "", err

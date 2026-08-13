@@ -91,7 +91,7 @@ func blocksFromMarkdown(d *TextDocument) []Block {
 		for len(stack) > 0 && stack[len(stack)-1].level >= h.level {
 			stack = stack[:len(stack)-1]
 		}
-		seg := slugify(h.title)
+		seg := Slugify(h.title)
 		if seg == "" {
 			seg = "section"
 		}
@@ -183,7 +183,8 @@ func fenceClose(trim, mark string) bool {
 	return mark != "" && strings.HasPrefix(trim, mark)
 }
 
-func slugify(s string) string {
+// Slugify lowers, keeps alnum, collapses other runs to '-', and trims dashes.
+func Slugify(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
 	var b strings.Builder
 	b.Grow(len(s))

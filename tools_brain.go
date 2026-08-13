@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path"
 	"strings"
 	"time"
 
@@ -12,12 +13,53 @@ import (
 
 	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/streaming"
+	"github.com/ryanaldo34/tacklr/vfs"
+	"github.com/ryanaldo34/tacklr/vfsindex"
 )
+
+// brainToolDeps optional VFS+index wiring so save_* / path-native graph can use files.
+type brainToolDeps struct {
+	VFS     *vfs.MountSession
+	Indexer *vfsindex.MountIndexer
+}
 
 // brainTools closes over the engine and SearchContext (namespace + result set).
 type brainTools struct {
 	engine *brain.Engine
 	sc     *brain.SearchContext
+	deps   brainToolDeps
+}
+
+func (b brainTools) brainMountForKind(kind string) (vfs.MountSpec, bool) {
+	if b.deps.VFS == nil {
+		return vfs.MountSpec{}, false
+	}
+	var prefix vfs.MountSpec
+	var hasPrefix bool
+	for _, s := range b.deps.VFS.Specs() {
+		if s.Profile != brain.DefaultProfile {
+			continue
+		}
+		mode := ""
+		if s.Params != nil {
+			mode = s.Params["mode"]
+		}
+		if mode == brain.ModeRoots && kind != "" && s.Params["kind"] == kind {
+			return s, true
+		}
+		if mode != brain.ModeRoots && !hasPrefix {
+			prefix, hasPrefix = s, true
+		}
+	}
+	if hasPrefix {
+		return prefix, true
+	}
+	for _, s := range b.deps.VFS.Specs() {
+		if s.Profile == brain.DefaultProfile {
+			return s, true
+		}
+	}
+	return vfs.MountSpec{}, false
 }
 
 type readObjectArgs struct {
@@ -93,9 +135,9 @@ func (b brainTools) newSearchTool() *Tool {
 		DisplayName: "Search knowledge: {query}",
 		Description: `Search stored content (documents, notes, chunks) in the knowledge corpus. Returns ranked parent objects with evidence snippets.
 
-Use for open questions and document-style evidence. Prefer schema() before inventing filter keys; property filters require kind when kinds are registered. All structured filters belong on this tool (there is no separate filtered-search tool). Rewrite the user ask into a good retrieval query when helpful.
+Prefer hits that include properties.vfs_path — open those with read_lines on the virtual path (and start_line / block_id from evidence). Prefer schema() before inventing filter keys; property filters require kind when kinds are registered. Rewrite the user ask into a good retrieval query when helpful.
 
-Do not use this only to discover relationships—use expand once you have an id. Prefer find_objects when you need a tracked entity (e.g. a deal, fact, or memory as an object), not a passage. Use continue for more pages; read for full body of a hit.`,
+Do not use this only to discover relationships—use expand once you have a path or id. Prefer find_content for indexed file grep. Use continue for more pages; read only for non-file objects without vfs_path.`,
 		Category: streaming.ToolCategorySearch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
@@ -175,7 +217,8 @@ Pass the result_set_id from the previous call. Each new search, find_exact, find
 }
 
 type expandArgs struct {
-	ObjectID      string   `json:"object_id" desc:"UUID of the object to expand."`
+	Path          string   `json:"path,omitempty" desc:"Absolute virtual path of an indexed file to expand. Prefer path when the node is a file."`
+	ObjectID      string   `json:"object_id,omitempty" desc:"UUID of the object to expand when path is not used."`
 	RelationTypes []string `json:"relation_types,omitempty" desc:"Optional relation types. Omit for containment (children or parent+siblings). Named types use the graph backend (e.g. references)."`
 	MaxHops       int      `json:"max_hops,omitempty" desc:"Graph hop depth (default 1, capped by host). Use 2+ to walk paths like entity→related→aggregate."`
 	Direction     string   `json:"direction,omitempty" desc:"Graph edge direction: out, in, or both (default both)."`
@@ -185,17 +228,17 @@ type expandArgs struct {
 func (b brainTools) newExpandTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "expand",
-		DisplayName: "Expand {object_id}",
-		Description: `Show objects structurally connected to a known object_id—not an open search.
+		DisplayName: "Expand {path}",
+		Description: `Show files/objects connected to a known path or object_id—not an open search.
 
-From a parent: ordered children (containment). From a part: parent and nearby siblings. Omit relation_types for containment only; use contains/part_of if mixed with graph labels. Other relation_types need a graph backend (e.g. about, references, blocked_by). Prefer expand first when the active entity id is already known (e.g. "risks on this deal"). Large lists return result_set_id — use continue for more pages. Use read for full content.`,
+Prefer a virtual path (Engram file or indexed artifact). Neighbors are returned as paths when vfs_path is set. list/ls and later rg never list graph edges — use this tool. Omit relation_types for containment only; named types need a graph backend. Large lists return result_set_id — use continue. Open file neighbors with read_lines.`,
 		Category: streaming.ToolCategoryFetch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
 		Handler: func(ctx context.Context, args expandArgs, runtime HarnessRuntime) (string, error) {
-			id, err := parseUUID(args.ObjectID, "object_id")
+			id, _, err := b.resolveFileRef(ctx, args.Path, args.ObjectID, "expand", false)
 			if err != nil {
-				return "", fmt.Errorf("expand: %w", err)
+				return "", err
 			}
 			runtime.EmitUpdate("Expanding knowledge object…")
 			res, err := b.engine.Expand(ctx, b.sc.Scope(), brain.ExpandRequest{
@@ -224,17 +267,32 @@ type saveObjectArgs struct {
 }
 
 func (b brainTools) newSaveTool(name, display, kind, roleDesc string) *Tool {
+	desc := `Save a ` + roleDesc + ` as kind ` + kind + `.`
+	if _, ok := b.brainMountForKind(""); ok {
+		desc = `Write the Engram file for a ` + roleDesc + ` (kind ` + kind + `) on the brain Provider mount.
+
+Prefer write/replace_lines on the Markdown path. This tool is a thin write: YAML front matter + body under /engram/{kind}/ (or a roots mount). Returns path and object id. Open later with read_lines. Pass object_id to update an existing Engram.`
+	} else {
+		desc += `
+
+Prefer schema() for this kind before inventing property keys. Write a clear title and summary so search and find_objects can retrieve this later. Uses the host search namespace when set. Pass object_id to update an existing object. Returns the rich object reference.`
+	}
 	return NewTool(ToolConfig{
 		Name:        name,
 		DisplayName: display,
-		Description: `Save a ` + roleDesc + ` to the knowledge base as kind ` + kind + `.
-
-Prefer schema() for this kind before inventing property keys. Write a clear title and summary so search and find_objects can retrieve this later. Uses the host search namespace when set. Pass object_id to update an existing object. Returns the rich object reference.`,
-		Category: streaming.ToolCategoryEdit,
-		Access:   ToolWriteAccess,
-		Timeout:  30 * time.Second,
+		Description: desc,
+		Category:    streaming.ToolCategoryEdit,
+		Access:      ToolWriteAccess,
+		Timeout:     30 * time.Second,
 		Handler: func(ctx context.Context, args saveObjectArgs, runtime HarnessRuntime) (string, error) {
-			runtime.EmitUpdate("Saving knowledge object…")
+			runtime.EmitUpdate("Saving knowledge…")
+			if _, ok := b.brainMountForKind(""); ok {
+				out, err := b.saveAsFile(ctx, kind, args)
+				if err != nil {
+					return "", fmt.Errorf("%s: %w", name, err)
+				}
+				return formatBrainJSON(out)
+			}
 			obj, err := b.putFromArgs(ctx, kind, args)
 			if err != nil {
 				return "", fmt.Errorf("%s: %w", name, err)
@@ -245,8 +303,10 @@ Prefer schema() for this kind before inventing property keys. Write a clear titl
 }
 
 type linkArgs struct {
-	FromID       string  `json:"from_id" desc:"UUID of the source object."`
-	ToID         string  `json:"to_id" desc:"UUID of the target object."`
+	From         string  `json:"from,omitempty" desc:"Absolute virtual path of the source file (preferred when both ends are indexed files)."`
+	To           string  `json:"to,omitempty" desc:"Absolute virtual path of the target file."`
+	FromID       string  `json:"from_id,omitempty" desc:"UUID of the source object when path is not used."`
+	ToID         string  `json:"to_id,omitempty" desc:"UUID of the target object when path is not used."`
 	RelationType string  `json:"relation_type" desc:"Non-containment relation label (e.g. references, about)."`
 	Note         string  `json:"note,omitempty" desc:"Short reason or rationale for the link (shown on expand)."`
 	Status       string  `json:"status,omitempty" desc:"Optional link status (e.g. active, resolved)."`
@@ -272,9 +332,9 @@ func (b brainTools) newFindLinksTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "find_links",
 		DisplayName: "Find links: {query}",
-		Description: `Find cross-object relationships by text on edge metadata (note), not document bodies.
+		Description: `Find relationships by text on edge metadata (note), not document bodies.
 
-Use when the ask is about how objects are linked (e.g. notes on an about edge). Returns from/to rich objects plus relation meta. Prefer find_objects to land on entities first; use expand to walk from a known id. relation_type is required. Hosts must ensure an edge text index for that relation label on Helix (EnsureEdgeTextIndex) before this tool is useful.`,
+Returns from_path/to_path (and ids) for matching edges. list/ls never lists edges. Prefer expand from a known path; use relation_type (required). Hosts must ensure an edge text index for that relation label on Helix before this tool is useful.`,
 		Category: streaming.ToolCategorySearch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
@@ -288,7 +348,7 @@ Use when the ask is about how objects are linked (e.g. notes on an about edge). 
 			if err != nil {
 				return "", fmt.Errorf("find_links: %w", err)
 			}
-			return formatBrainJSON(res)
+			return formatBrainJSON(annotateFindLinksPaths(res))
 		},
 	})
 }
@@ -322,19 +382,19 @@ Use to resolve which tracked object matches an ask, or to find similar saved obj
 func (b brainTools) newLinkTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "link",
-		DisplayName: "Link {from_id} → {to_id}",
-		Description: `Create a cross-object relationship (graph edge) between two first-class knowledge objects.
+		DisplayName: "Link {from} → {to}",
+		Description: `Create a relationship between two first-class knowledge objects (graph edge). Prefer virtual paths. Engram paths resolve via vfs_path; artifact paths must already be indexed (index_file or mount policy). UUID from_id/to_id remain for non-file objects.
 
-Both ends must already exist under the current search namespace, must not be soft-deleted, and must not be part/chunk objects (no parent_id). Examples: email→deal (about), deal→buyer (has_buyer), fact→deal (about). Optional note/status/role/confidence/evidence_id annotate why the link exists; expand returns that metadata on neighbors. Containment (parent/child) uses parent_id on save, not this tool. Re-linking the same pair updates metadata.`,
+Both ends must exist under the current search namespace, must not be soft-deleted, and must not be part/chunk objects. list/ls never lists edges. Optional note/status/role/confidence/evidence_id annotate why the link exists; expand returns that metadata. Re-linking the same pair updates metadata.`,
 		Category: streaming.ToolCategoryEdit,
 		Access:   ToolWriteAccess,
 		Timeout:  30 * time.Second,
 		Handler: func(ctx context.Context, args linkArgs, runtime HarnessRuntime) (string, error) {
-			from, err := parseUUID(args.FromID, "from_id")
+			from, fromPath, err := b.resolveFileRef(ctx, args.From, args.FromID, "from", true)
 			if err != nil {
 				return "", fmt.Errorf("link: %w", err)
 			}
-			to, err := parseUUID(args.ToID, "to_id")
+			to, toPath, err := b.resolveFileRef(ctx, args.To, args.ToID, "to", true)
 			if err != nil {
 				return "", fmt.Errorf("link: %w", err)
 			}
@@ -349,6 +409,8 @@ Both ends must already exist under the current search namespace, must not be sof
 			out := linkResult{
 				FromID:       from.String(),
 				ToID:         to.String(),
+				FromPath:     fromPath,
+				ToPath:       toPath,
 				RelationType: strings.TrimSpace(args.RelationType),
 				Linked:       true,
 				Note:         meta.Note,
@@ -365,10 +427,47 @@ Both ends must already exist under the current search namespace, must not be sof
 	})
 }
 
+func (b brainTools) newUnlinkTool() *Tool {
+	return NewTool(ToolConfig{
+		Name:        "unlink",
+		DisplayName: "Unlink {from} → {to}",
+		Description: `Remove a relationship between two first-class knowledge objects. Prefer virtual paths (same resolution as link). list/ls never lists edges.
+
+Both ends must exist under the current search namespace and must not be parts. Idempotent if the edge is already gone.`,
+		Category: streaming.ToolCategoryEdit,
+		Access:   ToolWriteAccess,
+		Timeout:  30 * time.Second,
+		Handler: func(ctx context.Context, args linkArgs, runtime HarnessRuntime) (string, error) {
+			from, fromPath, err := b.resolveFileRef(ctx, args.From, args.FromID, "from", true)
+			if err != nil {
+				return "", fmt.Errorf("unlink: %w", err)
+			}
+			to, toPath, err := b.resolveFileRef(ctx, args.To, args.ToID, "to", true)
+			if err != nil {
+				return "", fmt.Errorf("unlink: %w", err)
+			}
+			runtime.EmitUpdate("Unlinking knowledge objects…")
+			if err := b.engine.Unlink(ctx, b.sc.Scope(), from, to, args.RelationType); err != nil {
+				return "", fmt.Errorf("unlink: %w", err)
+			}
+			return formatBrainJSON(linkResult{
+				FromID:       from.String(),
+				ToID:         to.String(),
+				FromPath:     fromPath,
+				ToPath:       toPath,
+				RelationType: strings.TrimSpace(args.RelationType),
+				Linked:       false,
+			})
+		},
+	})
+}
+
 // linkResult is the agent-facing payload for a successful link tool call.
 type linkResult struct {
 	FromID       string  `json:"from_id"`
 	ToID         string  `json:"to_id"`
+	FromPath     string  `json:"from_path,omitempty"`
+	ToPath       string  `json:"to_path,omitempty"`
 	RelationType string  `json:"relation_type"`
 	Linked       bool    `json:"linked"`
 	Note         string  `json:"note,omitempty"`
@@ -376,6 +475,30 @@ type linkResult struct {
 	Role         string  `json:"role,omitempty"`
 	Confidence   float64 `json:"confidence,omitempty"`
 	EvidenceID   string  `json:"evidence_id,omitempty"`
+}
+
+// saveFileResult is returned by file-backed save_* tools.
+type saveFileResult struct {
+	Path     string    `json:"path"`
+	Rev      string    `json:"rev"`
+	ObjectID uuid.UUID `json:"object_id"`
+	Kind     string    `json:"kind"`
+	Title    string    `json:"title"`
+}
+
+// findLinksResultView adds path fields for agent-facing find_links output.
+type findLinksResultView struct {
+	Links []findLinkHitView `json:"links"`
+}
+
+type findLinkHitView struct {
+	From         brain.RichObject `json:"from"`
+	To           brain.RichObject `json:"to"`
+	FromPath     string           `json:"from_path,omitempty"`
+	ToPath       string           `json:"to_path,omitempty"`
+	RelationType string           `json:"relation_type"`
+	Meta         brain.EdgeMeta   `json:"meta,omitempty"`
+	Score        float64          `json:"score,omitempty"`
 }
 
 func edgeMetaFromLinkArgs(args linkArgs) (brain.EdgeMeta, error) {
@@ -422,6 +545,177 @@ func (b brainTools) putFromArgs(ctx context.Context, kind string, args saveObjec
 	}
 	obj.ParentID = parent
 	return b.engine.Put(ctx, b.sc.Scope(), obj)
+}
+
+// saveAsFile writes an Engram Markdown file on the brain Provider mount.
+func (b brainTools) saveAsFile(ctx context.Context, kind string, args saveObjectArgs) (saveFileResult, error) {
+	kind = strings.TrimSpace(kind)
+	if kind == "" {
+		return saveFileResult{}, fmt.Errorf("kind is not configured")
+	}
+	title := strings.TrimSpace(args.Title)
+	if title == "" {
+		return saveFileResult{}, fmt.Errorf("title is required")
+	}
+	body := args.Content
+	if body == "" {
+		body = args.Summary
+	}
+	vpath, err := b.resolveEngramSavePath(ctx, kind, title, args.ObjectID)
+	if err != nil {
+		return saveFileResult{}, err
+	}
+	if err := b.deps.VFS.MkdirAll(ctx, path.Dir(vpath)); err != nil {
+		return saveFileResult{}, err
+	}
+	f := brain.EngramFile{
+		Kind:       kind,
+		Slug:       brain.Slugify(title),
+		Title:      title,
+		Properties: args.Properties,
+		Body:       body,
+	}
+	if id, err := parseOptionalUUID(args.ObjectID, "object_id"); err != nil {
+		return saveFileResult{}, err
+	} else if id != nil {
+		f.ID = *id
+	} else {
+		// Allocate before write so commit skips vfs_path lookup and we skip a post-write Get.
+		f.ID = uuid.New()
+	}
+	raw, err := brain.FormatEngram(f)
+	if err != nil {
+		return saveFileResult{}, err
+	}
+	if err := b.deps.VFS.WriteFile(ctx, vpath, raw); err != nil {
+		return saveFileResult{}, err
+	}
+	return saveFileResult{
+		Path:     vpath,
+		Rev:      vfs.ContentHash(string(raw)),
+		ObjectID: f.ID,
+		Kind:     kind,
+		Title:    title,
+	}, nil
+}
+
+func (b brainTools) resolveEngramSavePath(ctx context.Context, kind, title, objectID string) (string, error) {
+	spec, ok := b.brainMountForKind(kind)
+	if !ok {
+		return "", fmt.Errorf("brain provider is not mounted")
+	}
+	if id, err := parseOptionalUUID(objectID, "object_id"); err != nil {
+		return "", err
+	} else if id != nil {
+		obj, err := b.engine.Read(ctx, b.sc.Scope(), *id)
+		if err != nil {
+			return "", err
+		}
+		if p := vfsPathFromProps(obj.Properties); p != "" {
+			return absVirtual(p)
+		}
+		return "", fmt.Errorf("object_id %s has no vfs_path; cannot update as file", id)
+	}
+	slug := brain.Slugify(title)
+	if slug == "" {
+		slug = "note"
+	}
+	mode := brain.ModePrefix
+	if spec.Params != nil && spec.Params["mode"] != "" {
+		mode = spec.Params["mode"]
+	}
+	var base string
+	if mode == brain.ModeRoots {
+		base = path.Join(spec.Point, slug+".md")
+	} else {
+		base = path.Join(spec.Point, brain.KindSlug(kind), slug+".md")
+	}
+	if _, err := b.deps.VFS.Stat(ctx, base); err == nil {
+		base = strings.TrimSuffix(base, ".md") + "-" + uuid.New().String()[:8] + ".md"
+	} else if !errors.Is(err, vfs.ErrNotExist) {
+		return "", err
+	}
+	return base, nil
+}
+
+// resolveFileRef resolves path (preferred) or object_id to a first-class UUID.
+// Engram paths resolve via object vfs_path; artifact paths need an indexed Document.
+func (b brainTools) resolveFileRef(ctx context.Context, pathStr, idStr, field string, requireFirstClass bool) (uuid.UUID, string, error) {
+	p := strings.TrimSpace(pathStr)
+	if p != "" {
+		abs, err := absVirtual(p)
+		if err != nil {
+			return uuid.Nil, "", err
+		}
+		obj, err := b.engine.GetByProperty(ctx, b.sc.Scope(), brain.PropVFSPath, abs)
+		if err == nil {
+			if requireFirstClass && obj.ParentID != nil {
+				return uuid.Nil, "", fmt.Errorf("%s must be a first-class object (not a chunk)", field)
+			}
+			return obj.ID, abs, nil
+		}
+		if !errors.Is(err, brain.ErrNotFound) {
+			return uuid.Nil, "", fmt.Errorf("brain: lookup %s: %w", abs, err)
+		}
+		if b.deps.Indexer != nil {
+			id := b.deps.Indexer.DocumentID(abs)
+			obj, err := b.engine.Read(ctx, b.sc.Scope(), id)
+			if err != nil {
+				if errors.Is(err, brain.ErrNotFound) {
+					return uuid.Nil, "", fmt.Errorf("%s path %s is not indexed (index_file first)", field, abs)
+				}
+				return uuid.Nil, "", err
+			}
+			if requireFirstClass && obj.ParentID != nil {
+				return uuid.Nil, "", fmt.Errorf("%s must be a first-class object (not a chunk)", field)
+			}
+			return id, abs, nil
+		}
+		return uuid.Nil, "", fmt.Errorf("%s path %s is not an Engram and is not indexed (index_file first)", field, abs)
+	}
+	idLabel := "object_id"
+	if field != "expand" {
+		idLabel = field + "_id"
+	}
+	if strings.TrimSpace(idStr) == "" {
+		if field == "expand" {
+			return uuid.Nil, "", fmt.Errorf("expand: path or object_id is required")
+		}
+		return uuid.Nil, "", fmt.Errorf("%s or %s_id is required", field, field)
+	}
+	id, err := parseUUID(idStr, idLabel)
+	if err != nil {
+		return uuid.Nil, "", err
+	}
+	var vpath string
+	if obj, err := b.engine.Read(ctx, b.sc.Scope(), id); err == nil {
+		vpath, _ = obj.Properties[brain.PropVFSPath].(string)
+	}
+	return id, vpath, nil
+}
+
+func vfsPathFromProps(props map[string]any) string {
+	if props == nil {
+		return ""
+	}
+	s, _ := props[brain.PropVFSPath].(string)
+	return strings.TrimSpace(s)
+}
+
+func annotateFindLinksPaths(res brain.FindLinksResult) findLinksResultView {
+	out := findLinksResultView{Links: make([]findLinkHitView, 0, len(res.Links))}
+	for _, h := range res.Links {
+		out.Links = append(out.Links, findLinkHitView{
+			From:         h.From,
+			To:           h.To,
+			FromPath:     vfsPathFromProps(h.From.Properties),
+			ToPath:       vfsPathFromProps(h.To.Properties),
+			RelationType: h.RelationType,
+			Meta:         h.Meta,
+			Score:        h.Score,
+		})
+	}
+	return out
 }
 
 func formatBrainJSON(v any) (string, error) {
@@ -480,8 +774,9 @@ func parseOptionalUUIDList(raw []string, field string) ([]uuid.UUID, error) {
 // newBrainTools builds knowledge tools. Caller must pass a non-nil engine and SearchContext.
 // save_* tools are registered only for non-empty WriteKinds fields; link only with GraphWriter;
 // find_objects only when GraphObjectSearcher is available; find_links when GraphEdgeSearcher is available.
-func newBrainTools(engine *brain.Engine, sc *brain.SearchContext, kinds brain.WriteKinds) []*Tool {
-	b := brainTools{engine: engine, sc: sc}
+// When a brain Provider is mounted, save_* write Engram Markdown; link/expand accept paths.
+func newBrainTools(engine *brain.Engine, sc *brain.SearchContext, kinds brain.WriteKinds, deps brainToolDeps) []*Tool {
+	b := brainTools{engine: engine, sc: sc, deps: deps}
 	tools := []*Tool{
 		b.newReadObjectTool(),
 		b.newSchemaTool(),
@@ -508,7 +803,7 @@ func newBrainTools(engine *brain.Engine, sc *brain.SearchContext, kinds brain.Wr
 		}
 	}
 	if engine.HasGraphWriter() {
-		tools = append(tools, b.newLinkTool())
+		tools = append(tools, b.newLinkTool(), b.newUnlinkTool())
 	}
 	return tools
 }

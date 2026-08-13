@@ -61,9 +61,8 @@ type AgentHarness struct {
 	// Mount attach/detach lives on vfs.MountSession (session-owned), not here.
 	fsRegistry  *vfs.BackendRegistry
 	fsBootstrap []vfs.MountSpec
-	// vfsIndexSched: optional mount→brain bridge when Brain + VFS + search
-	// namespace are all present. Owns the MountIndexer (Indexer field); closed on Close.
-	vfsIndexSched    *vfsindex.AsyncScheduler
+	// vfsBridge: optional mount→brain index lifecycle (not the agent turn loop).
+	vfsBridge        *vfsindex.Bridge
 	mcpCleanup       func()
 	mcpInitialized   bool
 	builtinsInjected bool
@@ -734,8 +733,8 @@ func (a *AgentHarness) Close() {
 		a.mcpCleanup()
 		a.mcpCleanup = nil
 	}
-	if a.vfsIndexSched != nil {
-		_ = a.vfsIndexSched.Close()
-		a.vfsIndexSched = nil
+	if a.vfsBridge != nil {
+		_ = a.vfsBridge.Close()
+		a.vfsBridge = nil
 	}
 }

@@ -54,6 +54,8 @@ type GraphWriter interface {
 	RemoveObject(ctx context.Context, id uuid.UUID) error
 	// AddEdge creates a directed edge from→to with optional relationship metadata.
 	AddEdge(ctx context.Context, from, to uuid.UUID, relationType string, meta EdgeMeta) error
+	// RemoveEdge drops the directed labeled edge from→to (idempotent if missing).
+	RemoveEdge(ctx context.Context, from, to uuid.UUID, relationType string) error
 }
 
 // GraphObjectSearcher finds entity nodes by text and/or vector (Helix native indexes
@@ -280,6 +282,21 @@ func (g *MemoryGraph) AddEdge(ctx context.Context, from, to uuid.UUID, relationT
 		meta.UpdatedAt = meta.CreatedAt
 	}
 	g.edges[key] = meta
+	return nil
+}
+
+// RemoveEdge implements GraphWriter. Missing edges succeed (idempotent).
+func (g *MemoryGraph) RemoveEdge(ctx context.Context, from, to uuid.UUID, relationType string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	rel := strings.TrimSpace(relationType)
+	if from == uuid.Nil || to == uuid.Nil || rel == "" {
+		return fmt.Errorf("brain: from, to, and relation type are required")
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.edges, edgeKey{from: from, to: to, rel: rel})
 	return nil
 }
 

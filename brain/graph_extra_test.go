@@ -28,6 +28,12 @@ func TestMemoryGraph_edgesAndSplit(t *testing.T) {
 	if err := g.AddEdge(ctx, c, a, "references", EdgeMeta{}); err != nil {
 		t.Fatal(err)
 	}
+	if err := g.RemoveEdge(ctx, c, a, "references"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.AddEdge(ctx, c, a, "references", EdgeMeta{}); err != nil {
+		t.Fatal(err)
+	}
 
 	ns, err := g.Neighbors(context.Background(), a, []string{"references"}, 10)
 	if err != nil || len(ns) != 2 {

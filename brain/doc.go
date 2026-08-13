@@ -1,5 +1,7 @@
 // Package brain is Tacklr's knowledge-base retrieval engine.
 //
+// Canonical architecture (Engrams, two jobs, search, graph, tools): docs/knowledge.md.
+//
 // # Public surface
 //
 // Hosts use Engine (NewEngine + options), Store implementations (MemoryStore /
@@ -14,6 +16,16 @@
 //
 // Hosts attach an Engine via AgentOptions.Brain. This package does not import
 // the harness, session, or telemetry packages; Scope is passed in by the caller.
+//
+// # Engrams as files (vfs.Provider)
+//
+// BrainFactory opens a Provider so first-class objects appear as Markdown + YAML
+// files (vfs imports stay one-way: this package imports vfs). Layout is host-chosen:
+// mode=prefix (default /engram/<kind-slug>/<slug>.md) or mode=roots (/deal/acme.md).
+// Kind names are host KindSpecs and must be path-safe (no '/' or '..'). Only parent
+// kinds are directories; parts/chunks are not files. Write/Close/PutFile parse,
+// validate, and Put (fail closed). Rename is delete+create. Graph edges stay in
+// Helix and show up through path-native link/expand/find_links — not sidecar files.
 // Optional Observer (telemetry.NewBrainObserver) records retrieval ops without
 // domain coupling: search, find_exact, find_objects, find_links, continue,
 // expand, expand_many.

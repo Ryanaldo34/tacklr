@@ -151,6 +151,20 @@ func TestGraph_ensureObjectAndAddEdgeRequestShape(t *testing.T) {
 			t.Fatalf("edge body missing %q:\n%s", want, edge)
 		}
 	}
+
+	nBeforeRemove := len(bodies)
+	if err := g.RemoveEdge(ctx, from, to, "references"); err != nil {
+		t.Fatal(err)
+	}
+	if len(bodies) != nBeforeRemove+1 {
+		t.Fatalf("bodies after remove edge: %d", len(bodies))
+	}
+	removed := bodies[len(bodies)-1]
+	for _, want := range []string{from.String(), to.String(), "references", "DropEdgeLabeled"} {
+		if !strings.Contains(removed, want) {
+			t.Fatalf("remove edge missing %q:\n%s", want, removed)
+		}
+	}
 }
 
 // TestGraph_writeValidation covers EnsureObject / AddEdge argument failures without RPC.
@@ -166,6 +180,9 @@ func TestGraph_writeValidation(t *testing.T) {
 	if err := g.AddEdge(ctx, uuid.New(), uuid.Nil, "r", brain.EdgeMeta{}); err == nil {
 		t.Fatal("nil to")
 	}
+	if err := g.RemoveEdge(ctx, uuid.New(), uuid.Nil, "r"); err == nil {
+		t.Fatal("nil to remove")
+	}
 	if err := g.RemoveObject(ctx, uuid.Nil); err == nil {
 		t.Fatal("nil remove id")
 	}
@@ -173,6 +190,9 @@ func TestGraph_writeValidation(t *testing.T) {
 	cancel()
 	if err := g.AddEdge(cctx, uuid.New(), uuid.New(), "r", brain.EdgeMeta{}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled AddEdge: %v", err)
+	}
+	if err := g.RemoveEdge(cctx, uuid.New(), uuid.New(), "r"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled RemoveEdge: %v", err)
 	}
 	if err := g.RemoveObject(cctx, uuid.New()); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled RemoveObject: %v", err)

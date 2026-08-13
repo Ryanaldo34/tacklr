@@ -41,6 +41,17 @@ func (r *BackendRegistry) Register(factory ProviderFactory) error {
 	return nil
 }
 
+// HasProfile reports whether a factory is registered under id.
+func (r *BackendRegistry) HasProfile(id string) bool {
+	if r == nil || id == "" {
+		return false
+	}
+	r.mu.RLock()
+	_, ok := r.factories[id]
+	r.mu.RUnlock()
+	return ok
+}
+
 func (r *BackendRegistry) open(ctx context.Context, sessionID string, spec MountSpec) (Provider, error) {
 	if spec.Profile == "" {
 		return nil, ErrInvalidProvider

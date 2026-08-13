@@ -582,6 +582,29 @@ func (g *Graph) AddEdge(ctx context.Context, from, to uuid.UUID, relationType st
 	return nil
 }
 
+// RemoveEdge implements brain.GraphWriter via Helix DropEdgeLabeled.
+func (g *Graph) RemoveEdge(ctx context.Context, from, to uuid.UUID, relationType string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	rel := strings.TrimSpace(relationType)
+	if from == uuid.Nil || to == uuid.Nil || rel == "" {
+		return fmt.Errorf("helixgraph: from, to, and relation type are required")
+	}
+	q := helix.WriteQuery("brain_remove_edge")
+	fromOID := q.ParamString("from_oid", from.String())
+	toOID := q.ParamString("to_oid", to.String())
+	req := q.
+		VarAs("from", helix.G().NWhere(helix.SourceEq(propObjectID, fromOID))).
+		VarAs("to", helix.G().NWhere(helix.SourceEq(propObjectID, toOID))).
+		VarAs("dropped", helix.G().N(helix.NodeVar("from")).DropEdgeLabeled(helix.NodeVar("to"), rel).Count()).
+		Returning()
+	if err := g.client.Exec(ctx, req, nil, helix.WriterOnly()); err != nil {
+		return fmt.Errorf("helixgraph: remove edge %q: %w", rel, err)
+	}
+	return nil
+}
+
 func edgeMetaProps(meta brain.EdgeMeta) helix.Props {
 	props := helix.Props{}
 	if meta.Note != "" {

@@ -40,6 +40,9 @@ type MountIndexer struct {
 	ChunkKind     string // default Chunk
 	LinesPerChunk int    // default DefaultLinesPerChunk
 	MaxIndexBytes int64  // default DefaultMaxIndexBytes
+
+	// nsKey is Scope.Namespace.String() cached for DocumentID (avoids per-call alloc).
+	nsKey string
 }
 
 // IndexOpts configures a tree walk.
@@ -75,15 +78,19 @@ func NewMountIndexer(ms *vfs.MountSession, eng *brain.Engine, scope brain.Scope)
 		ChunkKind:     DefaultChunkKind,
 		LinesPerChunk: DefaultLinesPerChunk,
 		MaxIndexBytes: DefaultMaxIndexBytes,
+		nsKey:         scope.Namespace.String(),
 	}, nil
 }
 
 // DocumentID returns the stable brain id for a virtual path under this scope.
 func (x *MountIndexer) DocumentID(virtualPath string) uuid.UUID {
-	ns := *x.Scope.Namespace
-	// Single buffer: avoid ns.String()+"\x00"+path intermediate concat.
-	buf := make([]byte, 0, 36+1+len(virtualPath))
-	buf = append(buf, ns.String()...)
+	nsKey := x.nsKey
+	if nsKey == "" && x.Scope.Namespace != nil {
+		nsKey = x.Scope.Namespace.String()
+	}
+	// Single buffer: nsKey is usually precomputed in NewMountIndexer.
+	buf := make([]byte, 0, len(nsKey)+1+len(virtualPath))
+	buf = append(buf, nsKey...)
 	buf = append(buf, 0)
 	buf = append(buf, virtualPath...)
 	return uuid.NewSHA1(documentIDNS, buf)
@@ -126,6 +133,9 @@ func (x *MountIndexer) IndexFileResult(ctx context.Context, virtualPath string, 
 	if err != nil {
 		return "", err
 	}
+	if x.isBrainPath(cleaned) {
+		return PathSkipped, nil
+	}
 	if st.IsDir {
 		return PathDirectory, nil
 	}
@@ -156,6 +166,14 @@ func (x *MountIndexer) UnindexPath(ctx context.Context, virtualPath string) (boo
 	return true, nil
 }
 
+func (x *MountIndexer) isBrainPath(virtualPath string) bool {
+	if x == nil || x.VFS == nil {
+		return false
+	}
+	spec, err := x.VFS.SpecAt(virtualPath)
+	return err == nil && spec.Profile == brain.DefaultProfile
+}
+
 func (x *MountIndexer) indexPath(ctx context.Context, virtualPath string) (PathIndexResult, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
@@ -163,6 +181,9 @@ func (x *MountIndexer) indexPath(ctx context.Context, virtualPath string) (PathI
 	cleaned, err := cleanPath(virtualPath)
 	if err != nil {
 		return "", err
+	}
+	if x.isBrainPath(cleaned) {
+		return PathSkipped, nil
 	}
 	st, err := x.VFS.Stat(ctx, cleaned)
 	if err != nil {
@@ -186,6 +207,9 @@ func (x *MountIndexer) IndexPrefix(ctx context.Context, prefix string, opts Inde
 	cleaned, err := cleanPath(prefix)
 	if err != nil {
 		return stats, err
+	}
+	if x.isBrainPath(cleaned) {
+		return stats, nil
 	}
 	files := 0
 	err = walk(ctx, x.VFS, cleaned, func(vpath string, isDir bool) error {
@@ -578,10 +602,11 @@ func streamChunks(ctx context.Context, r io.Reader, vpath string, linesPerChunk 
 		}
 		if !checkedBinary {
 			checkedBinary = true
-			sample := []byte(s)
-			if len(sample) > 512 {
-				sample = sample[:512]
+			n := len(s)
+			if n > 512 {
+				n = 512
 			}
+			sample := []byte(s[:n])
 			if bytes.IndexByte(sample, 0) >= 0 || !utf8.Valid(sample) {
 				return nil, "", "", 0, nil // binary skip
 			}
@@ -630,7 +655,8 @@ func streamChunks(ctx context.Context, r io.Reader, vpath string, linesPerChunk 
 }
 
 func chunkID(parent uuid.UUID, pos int) uuid.UUID {
-	buf := make([]byte, 0, 16)
+	// "chunk:" + decimal pos; 24 bytes covers typical positions without growth.
+	buf := make([]byte, 0, 24)
 	buf = append(buf, "chunk:"...)
 	buf = strconv.AppendInt(buf, int64(pos), 10)
 	return uuid.NewSHA1(parent, buf)
@@ -647,11 +673,19 @@ func walk(ctx context.Context, ms *vfs.MountSession, vpath string, fn func(vpath
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	// Root only: one Stat. Descendants reuse DirEntry.IsDir (no re-Stat per dir).
 	st, err := ms.Stat(ctx, vpath)
 	if err != nil {
 		return err
 	}
-	if !st.IsDir {
+	return walkKnown(ctx, ms, vpath, st.IsDir, fn)
+}
+
+func walkKnown(ctx context.Context, ms *vfs.MountSession, vpath string, isDir bool, fn func(vpath string, isDir bool) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !isDir {
 		return fn(vpath, false)
 	}
 	if err := fn(vpath, true); err != nil {
@@ -666,13 +700,7 @@ func walk(ctx context.Context, ms *vfs.MountSession, vpath string, fn func(vpath
 			return err
 		}
 		child := path.Join(vpath, e.Name)
-		if e.IsDir {
-			if err := walk(ctx, ms, child, fn); err != nil {
-				return err
-			}
-			continue
-		}
-		if err := fn(child, false); err != nil {
+		if err := walkKnown(ctx, ms, child, e.IsDir, fn); err != nil {
 			return err
 		}
 	}

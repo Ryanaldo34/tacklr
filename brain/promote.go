@@ -46,11 +46,12 @@ func promoteParents(parts []ScoredID, evidenceN int) []promotedParent {
 		}
 		if isPart {
 			b.evidence = append(b.evidence, Evidence{
-				PartID:   p.ID,
-				Title:    p.Title,
-				Snippet:  snippet(p.Content, defaultSnippetCap),
-				Score:    p.Score,
-				Position: p.Position,
+				PartID:     p.ID,
+				Title:      p.Title,
+				Snippet:    snippet(p.Content, defaultSnippetCap),
+				Score:      p.Score,
+				Position:   p.Position,
+				Properties: p.Properties,
 			})
 		}
 		byParent[pid] = b

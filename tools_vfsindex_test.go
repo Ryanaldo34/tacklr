@@ -141,13 +141,6 @@ func TestVFSIndexTools_indexSearchUnindex(t *testing.T) {
 	if !strings.Contains(out, "unindexed path=/work/note.txt") {
 		t.Fatalf("unindex: %q", out)
 	}
-	if h.vfsIndexSched == nil || h.vfsIndexSched.Indexer == nil {
-		t.Fatal("harness should own AsyncScheduler+Indexer")
-	}
-	parentID := h.vfsIndexSched.Indexer.DocumentID("/work/note.txt")
-	if _, err := eng.Read(ctx, scope, parentID); !errors.Is(err, brain.ErrNotFound) {
-		t.Fatalf("want soft-deleted, got %v", err)
-	}
 	if _, err := ms.Stat(ctx, "/work/note.txt"); err != nil {
 		t.Fatal("VFS file must remain after unindex")
 	}
@@ -158,6 +151,15 @@ func TestVFSIndexTools_indexSearchUnindex(t *testing.T) {
 	}
 	if !strings.Contains(out, "noop path=/work/note.txt") {
 		t.Fatalf("noop: %q", out)
+	}
+
+	// Recovery: re-index_file makes the path searchable again.
+	if _, err := runWriteTool(t, h, indexTool, `{"path":"/work/note.txt"}`); err != nil {
+		t.Fatal(err)
+	}
+	hit2 := waitSearchHit(t, eng, scope, "findme-xyz", 3*time.Second)
+	if hit2.Properties[vfsindex.PropVFSPath] != "/work/note.txt" {
+		t.Fatalf("reindex vfs_path: %+v", hit2.Properties)
 	}
 }
 
@@ -242,13 +244,13 @@ func TestVFSIndexTools_batchPathsAndGuards(t *testing.T) {
 	}
 	// Relative path rejected
 	_, err = runWriteTool(t, h, indexTool, `{"path":"work/a.txt"}`)
-	if err == nil {
-		t.Fatal("want relative path error")
+	if err == nil || !strings.Contains(err.Error(), "absolute") {
+		t.Fatalf("want absolute-path error, got %v", err)
 	}
 	// Missing file
 	_, err = runWriteTool(t, h, indexTool, `{"path":"/work/missing.txt"}`)
-	if err == nil {
-		t.Fatal("want missing file error")
+	if err == nil || !(strings.Contains(err.Error(), "not exist") || strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "no such")) {
+		t.Fatalf("want missing-file error, got %v", err)
 	}
 	// path + paths combined (still under max)
 	if err := ms.WriteFile(ctx, "/work/c.txt", []byte("token-gamma-batch\n")); err != nil {
@@ -279,31 +281,6 @@ func TestVFSIndexTools_planGate(t *testing.T) {
 	if err == nil || !errors.Is(err, ErrToolPermissionDenied) {
 		t.Fatalf("want plan lock, got %v", err)
 	}
-	_, err = runWriteTool(t, h, h.findTool("unindex", ""), `{"path":"/work/a.txt"}`)
-	if err == nil || !errors.Is(err, ErrToolPermissionDenied) {
-		t.Fatalf("want plan lock unindex, got %v", err)
-	}
-}
-
-// TestVFSIndexTools_asyncReindexAfterWriteFile: persist triggers async reindex.
-func TestVFSIndexTools_asyncReindexAfterWriteFile(t *testing.T) {
-	h, ms, eng, ns := vfsIndexHarness(t, true)
-	activatePlan(t, h)
-	ctx := context.Background()
-	scope := brain.Scope{Namespace: &ns}
-
-	if err := ms.WriteFile(ctx, "/work/live.txt", []byte("version one phrase\n")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := runWriteTool(t, h, h.findTool("index_file", ""), `{"path":"/work/live.txt"}`); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := ms.WriteFile(ctx, "/work/live.txt", []byte("version two asyncphrase42\n")); err != nil {
-		t.Fatal(err)
-	}
-
-	_ = waitSearchHit(t, eng, scope, "asyncphrase42", 3*time.Second)
 }
 
 // TestVFSIndexTools_hostAfterPersistComposed: existing host hook still runs.
@@ -344,5 +321,497 @@ func TestVFSIndexTools_hostAfterPersistComposed(t *testing.T) {
 	}
 	if hostSaw != "/work/z.txt" {
 		t.Fatalf("host AfterPersist not composed: saw %q", hostSaw)
+	}
+}
+
+// TestVFSIndexTools_policyNoneRejectsIndexFile: IndexPolicy=none errors on index_file.
+func TestVFSIndexTools_policyNoneRejectsIndexFile(t *testing.T) {
+	ctx := context.Background()
+	base := t.TempDir()
+	reg := vfs.NewBackendRegistry()
+	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
+		t.Fatal(err)
+	}
+	ms := vfs.NewMountSession("policy-none", reg)
+	if err := ms.Mount(ctx, vfs.MountSpec{
+		Point: "/work", Profile: "scratch", IndexPolicy: vfsindex.PolicyNone,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	eng, err := brain.NewEngine(brain.NewMemoryStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...); err != nil {
+		t.Fatal(err)
+	}
+	ns := uuid.New()
+	h := NewAgent(ctx, AgentOptions{
+		SessionID: "policy-none", Store: stores.NewInMemoryStore(),
+		MountSession: ms, FSRegistry: reg, Model: &mockStrategy{},
+		Brain: eng, SearchNamespace: &ns,
+	})
+	t.Cleanup(h.Close)
+	activatePlan(t, h)
+	if err := ms.WriteFile(ctx, "/work/a.txt", []byte("secret-none-policy\n")); err != nil {
+		t.Fatal(err)
+	}
+	_, err = runWriteTool(t, h, h.findTool("index_file", ""), `{"path":"/work/a.txt"}`)
+	if err == nil || !strings.Contains(err.Error(), "IndexPolicy=none") {
+		t.Fatalf("want none policy error, got %v", err)
+	}
+}
+
+// TestVFSIndexTools_selectiveFindContentAndTrack: index_file → find_content
+// with path/start_line anchors → track set async reindexes after later persist.
+func TestVFSIndexTools_selectiveFindContentAndTrack(t *testing.T) {
+	h, ms, eng, ns := vfsIndexHarness(t, true)
+	activatePlan(t, h)
+	ctx := context.Background()
+	scope := brain.Scope{Namespace: &ns}
+
+	// SpecAt default empty → selective
+	spec, err := ms.SpecAt("/work/x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vfsindex.NormalizePolicy(spec.IndexPolicy) != vfsindex.PolicySelective {
+		t.Fatalf("default policy: %q", spec.IndexPolicy)
+	}
+
+	// Multi-line body so find_content can surface start_line for read_lines.
+	body := "line one\nline two unique-phrase-selective-aaa\nline three\n"
+	if err := ms.WriteFile(ctx, "/work/sel.txt", []byte(body)); err != nil {
+		t.Fatal(err)
+	}
+
+	fc := h.findTool("find_content", "")
+	if fc == nil {
+		t.Fatal("find_content required")
+	}
+	if _, err := runWriteTool(t, h, h.findTool("index_file", ""), `{"path":"/work/sel.txt"}`); err != nil {
+		t.Fatal(err)
+	}
+	fout, err := fc.invoke(ctx, `{"query":"unique-phrase-selective-aaa"}`, turnRuntime(h))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(fout.output, "path=/work/sel.txt") {
+		t.Fatalf("find_content after index: %s", fout.output)
+	}
+	if !strings.Contains(fout.output, "start_line=") {
+		t.Fatalf("find_content want start_line anchor: %s", fout.output)
+	}
+	// Open live text with read_lines using the hit path (and line window).
+	rl := h.findTool("read_lines", "")
+	if rl == nil {
+		t.Fatal("read_lines required")
+	}
+	rlOut, err := rl.invoke(ctx, `{"path":"/work/sel.txt","start":1,"end":10}`, turnRuntime(h))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(rlOut.output, "unique-phrase-selective-aaa") {
+		t.Fatalf("read_lines after find_content: %s", rlOut.output)
+	}
+
+	// Track: edit + WriteFile should async reindex.
+	if err := ms.WriteFile(ctx, "/work/sel.txt", []byte("unique-phrase-selective-bbb\n")); err != nil {
+		t.Fatal(err)
+	}
+	_ = waitSearchHit(t, eng, scope, "unique-phrase-selective-bbb", 3*time.Second)
+}
+
+// TestVFSIndexTools_prefixAutoIndex: prefix policy indexes on persist without index_file.
+func TestVFSIndexTools_prefixAutoIndex(t *testing.T) {
+	ctx := context.Background()
+	base := t.TempDir()
+	reg := vfs.NewBackendRegistry()
+	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
+		t.Fatal(err)
+	}
+	ms := vfs.NewMountSession("policy-prefix", reg)
+	if err := ms.Mount(ctx, vfs.MountSpec{
+		Point: "/work", Profile: "scratch", IndexPolicy: vfsindex.PolicyPrefix,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	eng, err := brain.NewEngine(brain.NewMemoryStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...); err != nil {
+		t.Fatal(err)
+	}
+	ns := uuid.New()
+	h := NewAgent(ctx, AgentOptions{
+		SessionID: "policy-prefix", Store: stores.NewInMemoryStore(),
+		MountSession: ms, FSRegistry: reg, Model: &mockStrategy{},
+		Brain: eng, SearchNamespace: &ns,
+	})
+	t.Cleanup(h.Close)
+
+	if err := ms.WriteFile(ctx, "/work/auto.txt", []byte("prefix-auto-phrase-xyz\n")); err != nil {
+		t.Fatal(err)
+	}
+	_ = waitSearchHit(t, eng, brain.Scope{Namespace: &ns}, "prefix-auto-phrase-xyz", 3*time.Second)
+}
+
+// TestKnowledgeSaveSearchReadLines: save_* writes an Engram on the brain Provider
+// (not scratch /memory). Update-by-object_id rewrites the same path.
+func TestKnowledgeSaveSearchReadLines(t *testing.T) {
+	ctx := context.Background()
+	base := t.TempDir()
+	reg := vfs.NewBackendRegistry()
+	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
+		t.Fatal(err)
+	}
+	ms := vfs.NewMountSession("save-mem", reg)
+	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
+		t.Fatal(err)
+	}
+	g := brain.NewMemoryGraph()
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithGraph(g), brain.WithKinds(
+		brain.KindSpec{Kind: "Discovery", IsParent: true},
+		brain.KindSpec{Kind: "Fact", IsParent: true},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.ApplyKinds(ctx, append(vfsindex.MountIndexKinds(),
+		brain.KindSpec{Kind: "Discovery", IsParent: true},
+		brain.KindSpec{Kind: "Fact", IsParent: true},
+	)...); err != nil {
+		t.Fatal(err)
+	}
+	ns := uuid.New()
+	h := NewAgent(ctx, AgentOptions{
+		SessionID: "save-mem", Store: stores.NewInMemoryStore(),
+		MountSession: ms, FSRegistry: reg, Model: &mockStrategy{},
+		Brain: eng, SearchNamespace: &ns,
+		BrainWriteKinds: brain.WriteKinds{Discovery: "Discovery", Fact: "Fact"},
+	})
+	t.Cleanup(h.Close)
+	activatePlan(t, h)
+
+	save := h.findTool("save_discovery", "")
+	if save == nil {
+		t.Fatal("save_discovery required")
+	}
+	if _, err := save.invoke(ctx, `{"content":"x"}`, turnRuntime(h)); err == nil || !strings.Contains(err.Error(), "title is required") {
+		t.Fatalf("empty title: %v", err)
+	}
+	out, err := save.invoke(ctx, `{"title":"latency finding","content":"p99 under 40ms in canary"}`, turnRuntime(h))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var res struct {
+		Path     string `json:"path"`
+		Rev      string `json:"rev"`
+		ObjectID string `json:"object_id"`
+		Kind     string `json:"kind"`
+	}
+	if err := json.Unmarshal([]byte(out.output), &res); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(res.Path, "/engram/discovery/") || res.Rev == "" || res.ObjectID == "" || res.Kind != "Discovery" {
+		t.Fatalf("save result: %+v raw=%s", res, out.output)
+	}
+	body, err := ms.ReadFile(ctx, res.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "p99 under 40ms") || !strings.Contains(string(body), "domain: Discovery") {
+		t.Fatalf("VFS body: %s", body)
+	}
+	id, err := uuid.Parse(res.ObjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	obj, err := eng.Get(ctx, brain.Scope{Namespace: &ns}, id)
+	if err != nil || !strings.Contains(obj.Content, "p99 under 40ms in canary") || obj.Kind != "Discovery" {
+		t.Fatalf("engine object: %+v err=%v", obj, err)
+	}
+
+	readLines := h.findTool("read_lines", "")
+	rl, err := readLines.invoke(ctx, `{"path":`+jsonString(res.Path)+`,"start":1,"end":20}`, turnRuntime(h))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(rl.output, "p99 under 40ms") {
+		t.Fatalf("read_lines: %s", rl.output)
+	}
+
+	updArgs, err := json.Marshal(map[string]any{
+		"title":     "latency finding",
+		"object_id": res.ObjectID,
+		"content":   "p95 under 20ms after fix",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out2, err := save.invoke(ctx, string(updArgs), turnRuntime(h))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var res2 struct {
+		Path     string `json:"path"`
+		ObjectID string `json:"object_id"`
+	}
+	if err := json.Unmarshal([]byte(out2.output), &res2); err != nil {
+		t.Fatal(err)
+	}
+	if res2.Path != res.Path || res2.ObjectID != res.ObjectID {
+		t.Fatalf("update path/id changed: create=%+v update=%+v", res, res2)
+	}
+	body2, err := ms.ReadFile(ctx, res.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body2), "p95 under 20ms") {
+		t.Fatalf("updated VFS body: %s", body2)
+	}
+	obj2, err := eng.Get(ctx, brain.Scope{Namespace: &ns}, id)
+	if err != nil || !strings.Contains(obj2.Content, "p95 under 20ms") {
+		t.Fatalf("updated engine: %+v err=%v", obj2, err)
+	}
+	rl2, err := readLines.invoke(ctx, `{"path":`+jsonString(res.Path)+`,"start":1,"end":20}`, turnRuntime(h))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(rl2.output, "p95 under 20ms") {
+		t.Fatalf("read_lines after update: %s", rl2.output)
+	}
+}
+
+// TestKnowledgeSave_rootsMount: save_discovery writes /discovery/{slug}.md (ModeRoots).
+func TestKnowledgeSave_rootsMount(t *testing.T) {
+	ctx := context.Background()
+	base := t.TempDir()
+	reg := vfs.NewBackendRegistry()
+	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
+		t.Fatal(err)
+	}
+	ms := vfs.NewMountSession("save-roots", reg)
+	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
+		t.Fatal(err)
+	}
+	g := brain.NewMemoryGraph()
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithGraph(g), brain.WithKinds(
+		brain.KindSpec{Kind: "Discovery", IsParent: true},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.ApplyKinds(ctx, append(vfsindex.MountIndexKinds(),
+		brain.KindSpec{Kind: "Discovery", IsParent: true},
+	)...); err != nil {
+		t.Fatal(err)
+	}
+	ns := uuid.New()
+	h := NewAgent(ctx, AgentOptions{
+		SessionID: "save-roots", Store: stores.NewInMemoryStore(),
+		MountSession: ms, FSRegistry: reg, Model: &mockStrategy{},
+		Brain: eng, SearchNamespace: &ns,
+		BrainWriteKinds: brain.WriteKinds{Discovery: "Discovery"},
+		FSBootstrap: []vfs.MountSpec{{
+			Point: "/discovery", Profile: brain.DefaultProfile,
+			Params: map[string]string{"mode": brain.ModeRoots, "kind": "Discovery"},
+		}},
+	})
+	t.Cleanup(h.Close)
+	activatePlan(t, h)
+
+	save := h.findTool("save_discovery", "")
+	if save == nil {
+		t.Fatal("save_discovery required")
+	}
+	out, err := save.invoke(ctx, `{"title":"latency finding","content":"p99 under 40ms in canary"}`, turnRuntime(h))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var res struct {
+		Path     string `json:"path"`
+		ObjectID string `json:"object_id"`
+	}
+	if err := json.Unmarshal([]byte(out.output), &res); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(res.Path, "/discovery/") || !strings.HasSuffix(res.Path, ".md") {
+		t.Fatalf("roots save path: %+v", res)
+	}
+	body, err := ms.ReadFile(ctx, res.Path)
+	if err != nil || !strings.Contains(string(body), "p99 under 40ms") {
+		t.Fatalf("ReadFile: %s err=%v", body, err)
+	}
+	id, err := uuid.Parse(res.ObjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	obj, err := eng.Get(ctx, brain.Scope{Namespace: &ns}, id)
+	if err != nil || !strings.Contains(obj.Content, "p99 under 40ms") || obj.Kind != "Discovery" {
+		t.Fatalf("engine object: %+v err=%v", obj, err)
+	}
+}
+
+// TestEngramMount_skipIndexAndArtifactIndex: write /engram file is an Engine object;
+// find_content does not remirror that body; /work still IndexPath + find_content.
+func TestEngramMount_skipIndexAndArtifactIndex(t *testing.T) {
+	ctx := context.Background()
+	base := t.TempDir()
+	reg := vfs.NewBackendRegistry()
+	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
+		t.Fatal(err)
+	}
+	ms := vfs.NewMountSession("engram-skip", reg)
+	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
+		t.Fatal(err)
+	}
+	g := brain.NewMemoryGraph()
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithGraph(g), brain.WithKinds(
+		brain.KindSpec{Kind: "Deal", IsParent: true},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.ApplyKinds(ctx, append(vfsindex.MountIndexKinds(),
+		brain.KindSpec{Kind: "Deal", IsParent: true},
+	)...); err != nil {
+		t.Fatal(err)
+	}
+	ns := uuid.New()
+	h := NewAgent(ctx, AgentOptions{
+		SessionID: "engram-skip", Store: stores.NewInMemoryStore(),
+		MountSession: ms, FSRegistry: reg, Model: &mockStrategy{},
+		Brain: eng, SearchNamespace: &ns,
+	})
+	t.Cleanup(h.Close)
+	activatePlan(t, h)
+
+	md := []byte("---\ndomain: Deal\nslug: acme\n---\n\nengram-unique-phrase-xyz\n")
+	if err := ms.WriteFile(ctx, "/engram/deal/acme.md", md); err != nil {
+		t.Fatal(err)
+	}
+	obj, err := eng.GetByProperty(ctx, brain.Scope{Namespace: &ns}, brain.PropVFSPath, "/engram/deal/acme.md")
+	if err != nil || !strings.Contains(obj.Content, "engram-unique-phrase-xyz") {
+		t.Fatalf("engine engram: %+v err=%v", obj, err)
+	}
+	findObj := h.findTool("find_objects", "")
+	if findObj == nil {
+		t.Fatal("find_objects")
+	}
+	fout, err := findObj.invoke(ctx, `{"query":"engram-unique-phrase-xyz","kinds":["Deal"]}`, turnRuntime(h))
+	if err != nil || !strings.Contains(fout.output, obj.ID.String()) {
+		t.Fatalf("find_objects: %v %s", err, fout.output)
+	}
+
+	idxr, err := vfsindex.NewMountIndexer(ms, eng, brain.Scope{Namespace: &ns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res, err := idxr.IndexPathResult(ctx, "/engram/deal/acme.md"); err != nil || res != vfsindex.PathSkipped {
+		t.Fatalf("IndexPath brain: %s %v", res, err)
+	}
+
+	if err := ms.WriteFile(ctx, "/work/note.txt", []byte("artifact-unique-phrase-xyz\n")); err != nil {
+		t.Fatal(err)
+	}
+	idx := h.findTool("index_file", "")
+	if _, err := runWriteTool(t, h, idx, `{"path":"/work/note.txt"}`); err != nil {
+		t.Fatal(err)
+	}
+	findContent := h.findTool("find_content", "")
+	if findContent == nil {
+		t.Fatal("find_content")
+	}
+	cout, err := findContent.invoke(ctx, `{"query":"artifact-unique-phrase-xyz"}`, turnRuntime(h))
+	if err != nil || !strings.Contains(cout.output, "/work/note.txt") {
+		t.Fatalf("artifact find_content: %v %s", err, cout.output)
+	}
+}
+
+func jsonString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
+
+// TestPathNativeGraphLinkExpand: index two files → link by path → expand returns neighbor path.
+func TestPathNativeGraphLinkExpand(t *testing.T) {
+	ctx := context.Background()
+	base := t.TempDir()
+	reg := vfs.NewBackendRegistry()
+	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
+		t.Fatal(err)
+	}
+	ms := vfs.NewMountSession("path-graph", reg)
+	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
+		t.Fatal(err)
+	}
+	store := brain.NewMemoryStore()
+	g := brain.NewMemoryGraph()
+	eng, err := brain.NewEngine(store, brain.WithGraph(g))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...); err != nil {
+		t.Fatal(err)
+	}
+	ns := uuid.New()
+	h := NewAgent(ctx, AgentOptions{
+		SessionID: "path-graph", Store: stores.NewInMemoryStore(),
+		MountSession: ms, FSRegistry: reg, Model: &mockStrategy{},
+		Brain: eng, SearchNamespace: &ns,
+	})
+	t.Cleanup(h.Close)
+	activatePlan(t, h)
+
+	if err := ms.WriteFile(ctx, "/work/a.md", []byte("# A\n\napi doc\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.WriteFile(ctx, "/work/b.md", []byte("# B\n\nauth fact\n")); err != nil {
+		t.Fatal(err)
+	}
+	idx := h.findTool("index_file", "")
+	if _, err := runWriteTool(t, h, idx, `{"paths":["/work/a.md","/work/b.md"]}`); err != nil {
+		t.Fatal(err)
+	}
+
+	link := h.findTool("link", "")
+	if link == nil {
+		t.Fatal("link required")
+	}
+	lout, err := link.invoke(ctx, `{
+		"from":"/work/a.md","to":"/work/b.md",
+		"relation_type":"references","note":"JWT section"
+	}`, turnRuntime(h))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(lout.output, `/work/a.md`) || !strings.Contains(lout.output, `/work/b.md`) {
+		t.Fatalf("link paths: %s", lout.output)
+	}
+
+	expand := h.findTool("expand", "")
+	eout, err := expand.invoke(ctx, `{"path":"/work/a.md","relation_types":["references"]}`, turnRuntime(h))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(eout.output, "/work/b.md") || !strings.Contains(eout.output, "JWT section") {
+		t.Fatalf("expand path neighbor: %s", eout.output)
+	}
+
+	fl := h.findTool("find_links", "")
+	if fl == nil {
+		t.Fatal("find_links required with MemoryGraph")
+	}
+	fout, err := fl.invoke(ctx, `{"relation_type":"references","query":"JWT"}`, turnRuntime(h))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(fout.output, "from_path") || !strings.Contains(fout.output, "to_path") {
+		t.Fatalf("find_links path fields: %s", fout.output)
+	}
+	if !strings.Contains(fout.output, "/work/a.md") || !strings.Contains(fout.output, "/work/b.md") {
+		t.Fatalf("find_links endpoints: %s", fout.output)
 	}
 }

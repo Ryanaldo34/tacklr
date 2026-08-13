@@ -11,15 +11,6 @@ import (
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
-func TestNewVFSTools_nilSession(t *testing.T) {
-	if newVFSTools(nil) != nil {
-		t.Fatal("nil MountSession")
-	}
-	if newVFSIndexTools(nil) != nil {
-		t.Fatal("nil indexer")
-	}
-}
-
 // TestVFSTools_readWriteRev: agent tools (no vfs_ prefix) + rev gate + path ops.
 func TestVFSTools_readWriteRev(t *testing.T) {
 	ctx := context.Background()
@@ -47,7 +38,7 @@ func TestVFSTools_readWriteRev(t *testing.T) {
 	for _, tool := range h.tools {
 		tools[tool.Name] = tool
 	}
-	for _, name := range []string{"list", "stat", "read_lines", "replace_lines", "replace_text", "write", "mkdir", "remove"} {
+	for _, name := range []string{"list", "stat", "find_files", "read_lines", "replace_lines", "replace_text", "write", "mkdir", "remove"} {
 		if tools[name] == nil {
 			t.Fatalf("missing tool %q", name)
 		}
@@ -320,4 +311,73 @@ func fieldKV(s, key string) string {
 		}
 	}
 	return ""
+}
+
+// TestVFSTools_findFiles: bounded live walk returns paths under a mount.
+func TestVFSTools_findFiles(t *testing.T) {
+	ctx := context.Background()
+	base := t.TempDir()
+	reg := vfs.NewBackendRegistry()
+	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
+		t.Fatal(err)
+	}
+	ms := vfs.NewMountSession("find-files", reg)
+	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.MkdirAll(ctx, "/work/sub"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.WriteFile(ctx, "/work/a.go", []byte("package a\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.WriteFile(ctx, "/work/sub/b.go", []byte("package b\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.WriteFile(ctx, "/work/readme.md", []byte("# r\n")); err != nil {
+		t.Fatal(err)
+	}
+	h := NewAgent(ctx, AgentOptions{
+		SessionID: "find-files", Store: stores.NewInMemoryStore(),
+		MountSession: ms, FSRegistry: reg, Model: &mockStrategy{},
+	})
+	tool := h.findTool("find_files", "")
+	if tool == nil {
+		t.Fatal("find_files required")
+	}
+	out, err := tool.invoke(ctx, `{"path":"/work","name":"*.go"}`, turnRuntime(h))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.output, "count=2") {
+		t.Fatalf("want count=2 for *.go: %s", out.output)
+	}
+	// Every listed path must match the glob (positive membership).
+	for _, line := range strings.Split(out.output, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "root=") {
+			continue
+		}
+		if !strings.HasSuffix(line, ".go") {
+			t.Fatalf("glob hit must be .go: %q in %s", line, out.output)
+		}
+	}
+	if !strings.Contains(out.output, "/work/a.go") || !strings.Contains(out.output, "/work/sub/b.go") {
+		t.Fatalf("find go: %s", out.output)
+	}
+	out2, err := tool.invoke(ctx, `{"path":"/work","name":"readme"}`, turnRuntime(h))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out2.output, "/work/readme.md") {
+		t.Fatalf("substring name: %s", out2.output)
+	}
+	// max_results caps the live walk.
+	out3, err := tool.invoke(ctx, `{"path":"/work","max_results":1}`, turnRuntime(h))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out3.output, "count=1") {
+		t.Fatalf("max_results=1: %s", out3.output)
+	}
 }

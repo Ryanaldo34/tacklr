@@ -20,6 +20,8 @@ func TestNormalizeKindSpec_rejectsInvalidFields(t *testing.T) {
 		want string
 	}{
 		{"empty kind", brain.KindSpec{}, "kind is required"},
+		{"slash in kind", brain.KindSpec{Kind: "Deal/Person"}, "'/' or '..'"},
+		{"dotdot in kind", brain.KindSpec{Kind: "Deal..x"}, "'/' or '..'"},
 		{"core key collision", brain.KindSpec{
 			Kind:   "Document",
 			Fields: []brain.FieldSpec{{Name: "created_after", Type: brain.FieldTypeString}},

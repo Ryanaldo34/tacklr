@@ -202,13 +202,14 @@ func (e *Engine) exactCandidates(ctx context.Context, scope Scope, req SearchReq
 			return nil, err
 		}
 		return []ScoredID{{
-			ID:        obj.ID,
-			Score:     1,
-			UpdatedAt: obj.UpdatedAt,
-			ParentID:  obj.ParentID,
-			Title:     obj.Title,
-			Content:   obj.Content,
-			Position:  obj.Position,
+			ID:         obj.ID,
+			Score:      1,
+			UpdatedAt:  obj.UpdatedAt,
+			ParentID:   obj.ParentID,
+			Title:      obj.Title,
+			Content:    obj.Content,
+			Position:   obj.Position,
+			Properties: obj.Properties,
 		}}, nil
 	}
 

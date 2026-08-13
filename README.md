@@ -18,10 +18,11 @@ go get github.com/ryanaldo34/tacklr
 
 | Doc | What it covers |
 |-----|----------------|
+| [docs/knowledge.md](docs/knowledge.md) | **Canonical** knowledge system: Engrams, search, graph, tools |
 | [docs/vfs.md](docs/vfs.md) | Mounts, content IR, write-back, dirty overlay, lifecycle |
 | [pkg.go.dev/tacklr](https://pkg.go.dev/github.com/ryanaldo34/tacklr) | Harness, tools, types |
 | [pkg.go.dev/vfs](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfs) | Virtual filesystem API |
-| [pkg.go.dev/brain](https://pkg.go.dev/github.com/ryanaldo34/tacklr/brain) | Knowledge engine |
+| [pkg.go.dev/brain](https://pkg.go.dev/github.com/ryanaldo34/tacklr/brain) | Knowledge engine API |
 | [AGENTS.md](AGENTS.md) | Project goals and coding standards |
 | This README | Why we exist, how the OS fits, quick start, roadmap |
 
@@ -48,7 +49,7 @@ The model proposes. **Our runtime decides what is real, allowed, and durable.**
 | OS idea | What we do |
 |---------|------------|
 | Process address space | **Session mounts** — only the virtual paths you attach |
-| Filesystem | **[`vfs`](docs/vfs.md)** — local, S3, later Drive/Docs behind one path API |
+| Filesystem | **[`vfs`](docs/vfs.md)** — local, S3, brain Engrams, later Drive/Docs behind one path API |
 | File contents | **Content IR** — what the agent edits (lines + Markdown block outline when applicable; rich WYSIWYG later). Codecs turn that into storage bytes on Sync |
 | Syscalls | **Tools**, and later a **custom agent shell** and script guests, all through a **capability broker** |
 | Kernel | **Eventually** Linux eBPF / cgroup / seccomp as the backstop when something tries to cheat |
@@ -213,7 +214,7 @@ That boundary exists so product code cannot accidentally trash planning.
 
 ### VFS
 
-Register backends, bootstrap mounts—[docs/vfs.md](docs/vfs.md). When VFS is wired, the harness injects file tools (`read_lines`, `replace_*`, `write`, …) over **virtual paths only**. The agent never gets a host path or a bucket key. With Brain + VFS + search namespace, the harness also registers **`index_file` / `unindex`** (selective mount → brain) and reindexes on persist via [`vfsindex`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfsindex) `AsyncScheduler`.
+Register backends, bootstrap mounts—[docs/vfs.md](docs/vfs.md). When VFS is wired, the harness injects file tools (`read_lines`, `replace_*`, `write`, `find_files`, …) over **virtual paths only**. The agent never gets a host path or a bucket key. With Brain + VFS + search namespace, the harness registers **`brain.BrainFactory`**, mounts **`/engram`** (prefix, `IndexPolicy=none`) unless the host already provided a brain-profile mount, and injects **`index_file` / `unindex` / `find_content`** for **artifact** mounts only. Engrams are Markdown files on the brain Provider; `save_*` writes those paths (or `Engine.Put` if no brain mount). Path-native **link / unlink / expand / find_links**. Artifact → brain still uses one **IndexPath** pipeline (hash skip). Brain-profile mounts are never remirrored as Document/Chunk artifacts.
 
 ---
 
@@ -224,19 +225,21 @@ Register backends, bootstrap mounts—[docs/vfs.md](docs/vfs.md). When VFS is wi
 - **MCP** — external tool servers ([`mcp`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/mcp))  
 - **Skills** — `SKILL.md` catalogs ([`skills`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/skills))  
 - **Web** — search/fetch when Exa is configured  
-- **VFS** — mounts + IR ([docs/vfs.md](docs/vfs.md)); optional mount index via [`vfsindex`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfsindex) (`index_file` / `unindex` when Brain + namespace too)  
-- **Brain** — knowledge tools when you set `AgentOptions.Brain`  
+- **VFS** — mounts + IR ([docs/vfs.md](docs/vfs.md)); optional artifact index via [`vfsindex`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfsindex) (`index_file` / `find_content` / IndexPolicy when Brain + namespace too)  
+- **Brain** — knowledge system when you set `AgentOptions.Brain`; host `KindSpec`s appear as Engram Markdown files (`/engram/…` or host roots) via `brain.Provider`. Full guide: [docs/knowledge.md](docs/knowledge.md)  
+
 
 ### Knowledge (brain)
 
 This is not “stuff the last N chunks into the prompt and pray.” The brain is a host-owned engine:
 
-- **Postgres** as source of truth—objects, hybrid search, filters, soft-delete  
-- **Optional graph** for entities and links  
-- **Namespaces** for isolation  
-- Tools like `search`, `read`, `expand`, `find_objects`, `find_links` when the wiring allows  
+- **Engrams** — first-class objects as Markdown files on a brain VFS mount  
+- **Artifacts** — live files on local/S3, optionally indexed as Document + Chunks  
+- **Postgres** (or memory) as source of truth — objects, hybrid search, filters, soft-delete  
+- **Optional graph** (Helix or in-memory) for entities and links — `ls` never lists edges  
+- **Namespaces** for isolation; path-native `link` / `expand` / `find_links`  
 
-More: [`brain`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/brain).
+Canonical write-up: [docs/knowledge.md](docs/knowledge.md). API: [`brain`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/brain).
 
 ### Observability
 
@@ -251,7 +254,7 @@ Optional OpenTelemetry on turns, tools, and retrieval ([`telemetry`](https://pkg
 | `tacklr` | Harness, tools, plan loop, subagents | [pkg](https://pkg.go.dev/github.com/ryanaldo34/tacklr) |
 | `vfs` | Virtual filesystem, mounts, content IR | [docs](docs/vfs.md) · [pkg](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfs) |
 | `vfsindex` | Optional mount → brain ingest (VFS and brain stay independent) | [pkg](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfsindex) |
-| `brain` | Knowledge engine | [pkg](https://pkg.go.dev/github.com/ryanaldo34/tacklr/brain) |
+| `brain` | Knowledge engine | [docs](docs/knowledge.md) · [pkg](https://pkg.go.dev/github.com/ryanaldo34/tacklr/brain) |
 | `brain/helixgraph` | Optional graph adapter | [pkg](https://pkg.go.dev/github.com/ryanaldo34/tacklr/brain/helixgraph) |
 | `inference` | OpenAI-compatible model client | [pkg](https://pkg.go.dev/github.com/ryanaldo34/tacklr/inference) |
 | `server` | Multi-agent registry and protocol adapters | [pkg](https://pkg.go.dev/github.com/ryanaldo34/tacklr/server) |

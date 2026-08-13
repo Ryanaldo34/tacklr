@@ -298,3 +298,58 @@ func (e *Engine) normalizeLimit(limit int) int {
 	}
 	return min(limit, e.cfg.MaxLimit)
 }
+
+// ListByKind returns first-class objects of kind (parent_id unset), newest-title order left to the store.
+func (e *Engine) ListByKind(ctx context.Context, scope Scope, kind string, limit int) ([]Object, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	l, err := e.objectLister()
+	if err != nil {
+		return nil, err
+	}
+	if limit <= 0 || limit > MaxEngramReadDir {
+		limit = MaxEngramReadDir
+	}
+	return l.ListByKind(ctx, scope, kind, limit)
+}
+
+// GetByProperty returns the first live object whose properties[key] equals value.
+func (e *Engine) GetByProperty(ctx context.Context, scope Scope, key, value string) (Object, error) {
+	if err := ctx.Err(); err != nil {
+		return Object{}, err
+	}
+	l, err := e.objectLister()
+	if err != nil {
+		return Object{}, err
+	}
+	return l.GetByProperty(ctx, scope, key, value)
+}
+
+// KindsWithObjects lists distinct parent-kind names that already have objects under scope.
+func (e *Engine) KindsWithObjects(ctx context.Context, scope Scope) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	l, err := e.objectLister()
+	if err != nil {
+		return nil, err
+	}
+	return l.KindsWithObjects(ctx, scope)
+}
+
+func (e *Engine) objectLister() (ObjectLister, error) {
+	l, ok := e.store.(ObjectLister)
+	if !ok {
+		return nil, ErrListingUnsupported
+	}
+	return l, nil
+}
+
+// Get returns the stored object (including Content) under scope.
+func (e *Engine) Get(ctx context.Context, scope Scope, id uuid.UUID) (Object, error) {
+	if id == uuid.Nil {
+		return Object{}, ErrObjectIDRequired
+	}
+	return e.store.Get(ctx, scope, id)
+}

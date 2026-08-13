@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
@@ -109,6 +108,27 @@ func (e *Engine) LinkWith(ctx context.Context, scope Scope, from, to uuid.UUID, 
 		return err
 	}
 	return e.graphW.AddEdge(ctx, from, to, rel, meta)
+}
+
+// Unlink removes a non-containment edge from→to. Endpoints must be visible first-class objects.
+func (e *Engine) Unlink(ctx context.Context, scope Scope, from, to uuid.UUID, relationType string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if e.graphW == nil {
+		return ErrGraphWriterRequired
+	}
+	rel := strings.TrimSpace(relationType)
+	if from == uuid.Nil || to == uuid.Nil || rel == "" {
+		return ErrLinkArgs
+	}
+	if err := e.requireLinkEndpoint(ctx, scope, from, "from"); err != nil {
+		return err
+	}
+	if err := e.requireLinkEndpoint(ctx, scope, to, "to"); err != nil {
+		return err
+	}
+	return e.graphW.RemoveEdge(ctx, from, to, rel)
 }
 
 func (e *Engine) requireLinkEndpoint(ctx context.Context, scope Scope, id uuid.UUID, label string) error {
@@ -244,9 +264,6 @@ func capRunes(s string, maxRunes int) string {
 	if maxRunes <= 0 || s == "" {
 		return s
 	}
-	if utf8.RuneCountInString(s) <= maxRunes {
-		return s
-	}
 	n := 0
 	for i := range s {
 		if n == maxRunes {
@@ -312,6 +329,11 @@ func ValidateObject(obj Object, cat *KindCatalog) error {
 		}
 		f, ok := byName[name]
 		if !ok {
+			// slug / vfs_path are store-owned (Engram filename + Provider lookup).
+			// They are not required on every KindSpec and are not front-matter-only.
+			if isReservedStoreProp(name) {
+				continue
+			}
 			return fmt.Errorf("brain: property %q is not defined on kind %q", name, spec.Kind)
 		}
 		if err := checkFieldValue(v, f.Type); err != nil {
@@ -319,6 +341,23 @@ func ValidateObject(obj Object, cat *KindCatalog) error {
 		}
 	}
 	return nil
+}
+
+// Reserved store properties persisted on objects without a KindSpec field.
+// slug is the Engram filename stem. vfs_path is Provider-internal (full virtual
+// path); it is not a Markdown front-matter key.
+const (
+	PropSlug    = "slug"
+	PropVFSPath = "vfs_path"
+)
+
+func isReservedStoreProp(name string) bool {
+	switch name {
+	case PropSlug, PropVFSPath:
+		return true
+	default:
+		return false
+	}
 }
 
 func requireObjectIdentity(obj Object) error {

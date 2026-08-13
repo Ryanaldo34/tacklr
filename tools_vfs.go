@@ -20,6 +20,14 @@ type vfsTools struct {
 	ms *vfs.MountSession
 }
 
+// find_files walk budgets (temporary thin tool until run_command).
+const (
+	defaultFindFilesMaxResults = 50
+	maxFindFilesMaxResults     = 200
+	defaultFindFilesMaxDepth   = 8
+	maxFindFilesMaxDepth       = 32
+)
+
 func newVFSTools(ms *vfs.MountSession) []*Tool {
 	if ms == nil {
 		return nil
@@ -74,11 +82,127 @@ func newVFSTools(ms *vfs.MountSession) []*Tool {
 				}
 				return "ok path=" + p, nil
 			}),
+		v.newFindFiles(),
 		v.newReadLines(),
 		v.newReplaceLines(),
 		v.newReplaceText(),
 		v.newWrite(),
 	}
+}
+
+type findFilesArgs struct {
+	Path       string `json:"path" desc:"Absolute virtual directory (or file) to walk from."`
+	Name       string `json:"name,omitempty" desc:"Optional substring or simple glob (* ?) matched against base names only."`
+	MaxResults int    `json:"max_results,omitempty" desc:"Max paths to return (default 50, max 200)."`
+	MaxDepth   int    `json:"max_depth,omitempty" desc:"Max directory depth from path (default 8 when omitted or 0, max 32)."`
+}
+
+func (v vfsTools) newFindFiles() *Tool {
+	return NewTool(ToolConfig{
+		Name:        "find_files",
+		DisplayName: "Find files {path}",
+		Description: `Bounded live walk of the virtual filesystem for path names (temporary thin tool until run_command + host find).
+
+Matches base names against an optional name filter (substring or simple * ? glob). Returns absolute virtual paths only — no host paths. Does not search file contents (use find_content for indexed text).`,
+		Category: streaming.ToolCategorySearch,
+		Access:   ToolReadAccess,
+		Timeout:  30 * time.Second,
+		Handler: func(ctx context.Context, args findFilesArgs, rt HarnessRuntime) (string, error) {
+			root, err := absVirtual(args.Path)
+			if err != nil {
+				return "", err
+			}
+			maxRes := args.MaxResults
+			if maxRes <= 0 {
+				maxRes = defaultFindFilesMaxResults
+			}
+			if maxRes > maxFindFilesMaxResults {
+				maxRes = maxFindFilesMaxResults
+			}
+			// JSON omit and 0 both mean default depth.
+			maxDepth := args.MaxDepth
+			if maxDepth <= 0 {
+				maxDepth = defaultFindFilesMaxDepth
+			}
+			if maxDepth > maxFindFilesMaxDepth {
+				maxDepth = maxFindFilesMaxDepth
+			}
+			pat := strings.TrimSpace(args.Name)
+			rt.EmitUpdate("Finding files under " + root)
+			var hits []string
+			if err := walkFind(ctx, v.ms, root, 0, maxDepth, pat, maxRes, &hits); err != nil {
+				return "", err
+			}
+			var b strings.Builder
+			fmt.Fprintf(&b, "root=%s count=%d\n", root, len(hits))
+			for _, p := range hits {
+				b.WriteString(p)
+				b.WriteByte('\n')
+			}
+			return b.String(), nil
+		},
+	})
+}
+
+func walkFind(ctx context.Context, ms *vfs.MountSession, cur string, depth, maxDepth int, namePat string, maxRes int, hits *[]string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(*hits) >= maxRes {
+		return nil
+	}
+	// Root only: one Stat. Nested dirs use DirEntry.IsDir (no re-Stat).
+	st, err := ms.Stat(ctx, cur)
+	if err != nil {
+		return err
+	}
+	if !st.IsDir {
+		if matchFindName(path.Base(cur), namePat) {
+			*hits = append(*hits, cur)
+		}
+		return nil
+	}
+	return walkFindDir(ctx, ms, cur, depth, maxDepth, namePat, maxRes, hits)
+}
+
+func walkFindDir(ctx context.Context, ms *vfs.MountSession, cur string, depth, maxDepth int, namePat string, maxRes int, hits *[]string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(*hits) >= maxRes || depth >= maxDepth {
+		return nil
+	}
+	ents, err := ms.ReadDir(ctx, cur)
+	if err != nil {
+		return err
+	}
+	for _, e := range ents {
+		if len(*hits) >= maxRes {
+			return nil
+		}
+		child := path.Join(cur, e.Name)
+		if e.IsDir {
+			if err := walkFindDir(ctx, ms, child, depth+1, maxDepth, namePat, maxRes, hits); err != nil {
+				return err
+			}
+			continue
+		}
+		if matchFindName(e.Name, namePat) {
+			*hits = append(*hits, child)
+		}
+	}
+	return nil
+}
+
+func matchFindName(base, pat string) bool {
+	if pat == "" {
+		return true
+	}
+	if strings.ContainsAny(pat, "*?") {
+		ok, err := path.Match(pat, base)
+		return err == nil && ok
+	}
+	return strings.Contains(base, pat)
 }
 
 type pathArgs struct {

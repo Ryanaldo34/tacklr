@@ -90,9 +90,11 @@ func TestPut_catalogEnforced(t *testing.T) {
 	doc, err := eng.Put(ctx, scope, brain.Object{
 		Kind: "Document", Title: "memo",
 		Properties: map[string]any{
-			"stage":  "open",
-			"amount": 10,
-			"when":   time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC),
+			"stage":    "open",
+			"amount":   10,
+			"when":     time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC),
+			"slug":     "memo",
+			"vfs_path": "/engram/document/memo.md",
 		},
 	})
 	if err != nil {
@@ -370,6 +372,19 @@ func TestLink_expandFindsNeighbor(t *testing.T) {
 		t.Fatalf("expand should attach relation type: %+v", res.Objects[0].Relation)
 	}
 
+	if err := eng.Unlink(ctx, scope, a.ID, b.ID, "references"); err != nil {
+		t.Fatal(err)
+	}
+	res2, err := eng.Expand(ctx, scope, brain.ExpandRequest{
+		ObjectID: a.ID, RelationTypes: []string{"references"},
+	}, brain.NewSearchContext())
+	if err != nil || len(res2.Objects) != 0 {
+		t.Fatalf("after unlink: %+v err=%v", res2.Objects, err)
+	}
+	if err := eng.Link(ctx, scope, a.ID, b.ID, "references"); err != nil {
+		t.Fatal(err)
+	}
+
 	if err := eng.Link(ctx, scope, a.ID, b.ID, ""); !errors.Is(err, brain.ErrLinkArgs) {
 		t.Fatalf("want ErrLinkArgs: %v", err)
 	}
@@ -382,6 +397,9 @@ func TestLink_expandFindsNeighbor(t *testing.T) {
 	}
 	if err := engNoGraph.Link(ctx, scope, a.ID, b.ID, "references"); !errors.Is(err, brain.ErrGraphWriterRequired) {
 		t.Fatalf("want ErrGraphWriterRequired: %v", err)
+	}
+	if err := engNoGraph.Unlink(ctx, scope, a.ID, b.ID, "references"); !errors.Is(err, brain.ErrGraphWriterRequired) {
+		t.Fatalf("unlink want ErrGraphWriterRequired: %v", err)
 	}
 }
 
@@ -408,6 +426,9 @@ func TestLinkWith_missingEndpointAndCancelled(t *testing.T) {
 	cancel()
 	if err := eng.LinkWith(cctx, scope, a.ID, a.ID, "about", brain.EdgeMeta{}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled: %v", err)
+	}
+	if err := eng.Unlink(cctx, scope, a.ID, a.ID, "about"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("unlink cancelled: %v", err)
 	}
 	if _, err := eng.Put(cctx, scope, brain.Object{Kind: "Document", Title: "x"}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("put cancelled: %v", err)

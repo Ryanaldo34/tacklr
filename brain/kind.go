@@ -164,6 +164,9 @@ func NormalizeKindSpec(spec KindSpec) (KindSpec, error) {
 	if spec.Kind == "" {
 		return KindSpec{}, fmt.Errorf("brain: kind is required")
 	}
+	if strings.Contains(spec.Kind, "/") || strings.Contains(spec.Kind, "..") {
+		return KindSpec{}, fmt.Errorf("brain: kind %q must not contain '/' or '..'", spec.Kind)
+	}
 	spec.Description = strings.TrimSpace(spec.Description)
 
 	seen := make(map[string]struct{}, len(spec.Fields))

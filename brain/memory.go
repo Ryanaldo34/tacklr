@@ -126,6 +126,94 @@ func (s *MemoryStore) getLocked(scope Scope, id uuid.UUID) (Object, error) {
 	return cloneObject(obj), nil
 }
 
+// ListByKind implements ObjectLister (first-class objects only).
+func (s *MemoryStore) ListByKind(_ context.Context, scope Scope, kind string, limit int) ([]Object, error) {
+	kind = strings.TrimSpace(kind)
+	if kind == "" || limit <= 0 {
+		return nil, nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var matches []Object
+	for _, obj := range s.objects {
+		if obj.DeletedAt != nil || obj.ParentID != nil {
+			continue
+		}
+		if scope.Namespace != nil && obj.NamespaceID != *scope.Namespace {
+			continue
+		}
+		if obj.Kind != kind {
+			continue
+		}
+		matches = append(matches, obj)
+	}
+	slices.SortFunc(matches, func(a, b Object) int {
+		if c := strings.Compare(a.Title, b.Title); c != 0 {
+			return c
+		}
+		return cmpUUID(a.ID, b.ID)
+	})
+	if len(matches) > limit {
+		matches = matches[:limit]
+	}
+	out := make([]Object, len(matches))
+	for i, obj := range matches {
+		out[i] = cloneObject(obj)
+	}
+	return out, nil
+}
+
+// GetByProperty implements ObjectLister.
+func (s *MemoryStore) GetByProperty(_ context.Context, scope Scope, key, value string) (Object, error) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return Object{}, fmt.Errorf("brain: property key is required")
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, obj := range s.objects {
+		if obj.DeletedAt != nil {
+			continue
+		}
+		if scope.Namespace != nil && obj.NamespaceID != *scope.Namespace {
+			continue
+		}
+		if obj.Properties == nil {
+			continue
+		}
+		got, ok := obj.Properties[key]
+		if !ok {
+			continue
+		}
+		sval, ok := got.(string)
+		if !ok || sval != value {
+			continue
+		}
+		return cloneObject(obj), nil
+	}
+	return Object{}, fmt.Errorf("%w: %s=%s", ErrNotFound, key, value)
+}
+
+// KindsWithObjects implements ObjectLister.
+func (s *MemoryStore) KindsWithObjects(_ context.Context, scope Scope) ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	seen := map[string]struct{}{}
+	for _, obj := range s.objects {
+		if obj.DeletedAt != nil || obj.ParentID != nil {
+			continue
+		}
+		if scope.Namespace != nil && obj.NamespaceID != *scope.Namespace {
+			continue
+		}
+		if obj.Kind == "" {
+			continue
+		}
+		seen[obj.Kind] = struct{}{}
+	}
+	return slices.Sorted(maps.Keys(seen)), nil
+}
+
 // ListChildren implements ObjectReader.
 func (s *MemoryStore) ListChildren(_ context.Context, scope Scope, parentID uuid.UUID) ([]Object, error) {
 	s.mu.RLock()
@@ -322,14 +410,19 @@ func (s *MemoryStore) candidateParts(scope Scope, filters Filters) ([]Object, er
 }
 
 func scoredFromObject(obj Object, score float64) ScoredID {
+	var props map[string]any
+	if obj.Properties != nil {
+		props = maps.Clone(obj.Properties)
+	}
 	return ScoredID{
-		ID:        obj.ID,
-		Score:     score,
-		UpdatedAt: obj.UpdatedAt,
-		ParentID:  obj.ParentID,
-		Title:     obj.Title,
-		Content:   obj.Content,
-		Position:  obj.Position,
+		ID:         obj.ID,
+		Score:      score,
+		UpdatedAt:  obj.UpdatedAt,
+		ParentID:   obj.ParentID,
+		Title:      obj.Title,
+		Content:    obj.Content,
+		Position:   obj.Position,
+		Properties: props,
 	}
 }
 

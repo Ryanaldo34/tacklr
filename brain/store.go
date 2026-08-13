@@ -36,6 +36,14 @@ type ObjectWriter interface {
 	SoftDelete(ctx context.Context, scope Scope, id uuid.UUID) error
 }
 
+// ObjectLister lists first-class objects by kind and looks up a property value
+// (used by the Engram Provider for ReadDir / path → id). Parts are omitted.
+type ObjectLister interface {
+	ListByKind(ctx context.Context, scope Scope, kind string, limit int) ([]Object, error)
+	GetByProperty(ctx context.Context, scope Scope, key, value string) (Object, error)
+	KindsWithObjects(ctx context.Context, scope Scope) ([]string, error)
+}
+
 // PartSearcher is the candidate retrieval port for hybrid / exact search.
 type PartSearcher interface {
 	SearchLexical(ctx context.Context, scope Scope, query string, filters Filters, k int) ([]ScoredID, error)
