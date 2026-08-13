@@ -305,6 +305,15 @@ func TestDocument_session(t *testing.T) {
 	if _, err := ms.OpenDocument(ctx, "/work/pic.bin", nil); !errors.Is(err, vfs.ErrNoCodec) {
 		t.Fatalf("binary: %v", err)
 	}
+	if err := ms.WriteFile(ctx, "/work/README", []byte("hello from readme\n")); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := ms.Stat(ctx, "/work/README"); err != nil || st.MediaType != "text/plain" {
+		t.Fatalf("local no-ext Stat: %+v err=%v", st, err)
+	}
+	if doc, err := ms.ReadText(ctx, "/work/README"); err != nil || doc.MediaType() != "text/plain" {
+		t.Fatalf("local no-ext IR: %v", err)
+	}
 	if err := ms.WriteFile(ctx, "/work/bad.txt", []byte{0xff, 0xfe, 0xfd}); err != nil {
 		t.Fatal(err)
 	}

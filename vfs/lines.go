@@ -79,7 +79,7 @@ func (m *MountSession) ReadLines(ctx context.Context, virtualPath string, start,
 	return readLineRange(f, cleaned, start, end)
 }
 
-func lineWindowFromDoc(path string, doc *TextDocument, start, end int) (LineWindow, error) {
+func lineWindowFromDoc(path string, doc Textual, start, end int) (LineWindow, error) {
 	n := doc.LineCount()
 	if start > n+1 {
 		return LineWindow{}, ErrLineOutOfRange

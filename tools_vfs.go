@@ -287,7 +287,10 @@ Use start/end for half-open 1-based lines, or block_id for a structured region (
 					return "", err
 				}
 				rev := vfs.ContentHash(doc.Text())
-				blocks := doc.Blocks()
+				var blocks []vfs.Block
+				if s, ok := doc.(vfs.Structured); ok {
+					blocks = s.Blocks()
+				}
 				var b strings.Builder
 				fmt.Fprintf(&b, "path=%s rev=%s media_type=%s line_count=%d\n",
 					p, rev, doc.MediaType(), doc.LineCount())
@@ -383,7 +386,11 @@ Provide either start/end + lines, or block_id + lines/body (structured region; w
 			}
 			start, end := args.Start, args.End
 			if args.BlockID != "" {
-				bl, ok := vfs.FindBlock(doc.Blocks(), args.BlockID)
+				var blocks []vfs.Block
+				if s, ok := doc.(vfs.Structured); ok {
+					blocks = s.Blocks()
+				}
+				bl, ok := vfs.FindBlock(blocks, args.BlockID)
 				if !ok {
 					return "", fmt.Errorf("unknown block_id %q", args.BlockID)
 				}
@@ -409,7 +416,7 @@ type lineWin struct {
 	eof              bool
 }
 
-func lineWindowFromTextDoc(doc *vfs.TextDocument, start, end int) (lineWin, error) {
+func lineWindowFromTextDoc(doc vfs.Textual, start, end int) (lineWin, error) {
 	n := doc.LineCount()
 	if start < 1 || end < start {
 		return lineWin{}, fmt.Errorf("invalid range")
@@ -510,13 +517,16 @@ When the path exists, rev is required and must match. Visible to list/stat/read 
 			if len(args.Content) > vfs.MaxReadFileBytes {
 				return "", vfs.ErrTooLarge
 			}
-			mt := vfs.DetectMediaType(p, []byte(args.Content))
+			mt, err := v.ms.Classify(ctx, p, []byte(args.Content))
+			if err != nil {
+				return "", err
+			}
 			return v.stage(ctx, vfs.NewTextDocument(p, mt, "utf-8", args.Content))
 		},
 	})
 }
 
-func (v vfsTools) loadMatching(ctx context.Context, p, expected string) (*vfs.TextDocument, error) {
+func (v vfsTools) loadMatching(ctx context.Context, p, expected string) (vfs.Textual, error) {
 	doc, err := v.ms.ReadText(ctx, p)
 	if err != nil {
 		return nil, err
@@ -527,7 +537,7 @@ func (v vfsTools) loadMatching(ctx context.Context, p, expected string) (*vfs.Te
 	return doc, nil
 }
 
-func (v vfsTools) stage(ctx context.Context, doc *vfs.TextDocument) (string, error) {
+func (v vfsTools) stage(ctx context.Context, doc vfs.Textual) (string, error) {
 	if err := v.ms.WriteDocument(ctx, doc); err != nil {
 		return "", err
 	}

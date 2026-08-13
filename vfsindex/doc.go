@@ -69,8 +69,8 @@
 //
 // The tacklr harness creates MountIndexer + AsyncScheduler and registers
 // index_file / unindex / find_content when Brain + VFS + search namespace are set.
-// It skips mounts whose Profile is the brain factory id ("brain") and never
-// creates Document+Chunk artifacts for those paths. Scratch /memory is attached
+// It skips mounts with IndexPolicy=none (harness sets this on brain Engram
+// mounts) and never remirrors those paths. Scratch /memory is attached
 // only when a scratch profile exists and no brain Provider mount is present.
 //
 // # Kinds

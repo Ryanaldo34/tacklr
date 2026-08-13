@@ -7,7 +7,7 @@
 //   - BackendRegistry + LocalFactory / S3Factory + AWSS3 — process profiles and pools
 //   - MountSpec / MountInfo — durable and agent-safe mount descriptions
 //   - Provider / ProviderFactory / S3API — custom backends
-//   - File, FileInfo, DirEntry — I/O types
+//   - File, FileInfo, DirEntry — I/O types (FileInfo.MediaType is the provider's type)
 //   - Document / Textual / Structured / TextDocument — content IR
 //   - Block / StyleMeta / Span / FindBlock / BlockReplaceSpan — structured view
 //   - ContentRegistry + Codec + TextCodec — optional custom decode
@@ -47,7 +47,7 @@
 //	// win.Rev.Hash is the session-visible content identity when available
 //
 //	// Full IR for edit; WriteDocument stages dirty cache until Sync
-//	text, err := ms.ReadText(ctx, "/work/main.go")
+//	text, err := ms.ReadText(ctx, "/work/main.go") // Textual
 //	rev := vfs.ContentRev{Path: text.Path(), Hash: vfs.ContentHash(text.Text())}
 //	_ = text.SetLine(2, "changed")
 //	_ = ms.WriteDocument(ctx, text)

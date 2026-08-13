@@ -165,6 +165,29 @@ func (m *MountSession) IndexPolicyAt(virtualPath string) (string, error) {
 	return e.spec.IndexPolicy, nil
 }
 
+// Classify returns the provider's media type for virtualPath.
+// Existing files use Stat.MediaType. New names use Classifier when the
+// provider implements it; otherwise application/octet-stream.
+func (m *MountSession) Classify(ctx context.Context, virtualPath string, sample []byte) (string, error) {
+	cleaned, err := cleanVirtualPath(virtualPath)
+	if err != nil {
+		return "", err
+	}
+	if fi, err := m.Stat(ctx, cleaned); err == nil && !fi.IsDir && fi.MediaType != "" {
+		return fi.MediaType, nil
+	} else if err != nil && !errors.Is(err, ErrNotExist) {
+		return "", err
+	}
+	p, rel, err := m.at(ctx, cleaned, false)
+	if err != nil {
+		return "", err
+	}
+	if c, ok := p.(Classifier); ok {
+		return c.Classify(rel, sample), nil
+	}
+	return "application/octet-stream", nil
+}
+
 func (m *MountSession) at(ctx context.Context, virtualPath string, write bool) (Provider, string, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, "", err
@@ -215,10 +238,11 @@ func (m *MountSession) statDirty(cleaned string) (FileInfo, bool) {
 		mod = time.Now().UTC()
 	}
 	return FileInfo{
-		Name:    path.Base(cleaned),
-		Size:    size,
-		ModTime: mod,
-		IsDir:   false,
+		Name:      path.Base(cleaned),
+		Size:      size,
+		ModTime:   mod,
+		IsDir:     false,
+		MediaType: doc.MediaType(),
 	}, true
 }
 

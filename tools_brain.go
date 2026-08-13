@@ -624,12 +624,7 @@ func (b brainTools) resolveEngramSavePath(ctx context.Context, kind, title, obje
 	if spec.Params != nil && spec.Params["mode"] != "" {
 		mode = spec.Params["mode"]
 	}
-	var base string
-	if mode == brain.ModeRoots {
-		base = path.Join(spec.Point, slug+".md")
-	} else {
-		base = path.Join(spec.Point, brain.KindSlug(kind), slug+".md")
-	}
+	base := brain.EngramPath(spec.Point, mode, kind, slug)
 	if _, err := b.deps.VFS.Stat(ctx, base); err == nil {
 		base = strings.TrimSuffix(base, ".md") + "-" + uuid.New().String()[:8] + ".md"
 	} else if !errors.Is(err, vfs.ErrNotExist) {

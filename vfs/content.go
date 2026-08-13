@@ -76,14 +76,13 @@ var defaultContentRegistry = func() *ContentRegistry {
 	return r
 }()
 
-// DetectMediaType returns a best-effort media type for IR codec routing.
+// DetectMediaType is a helper for providers filling FileInfo.MediaType.
+// OpenDocument does not call this — it trusts the provider.
 //
 // Order:
 //  1. Well-known extension map (source code and text formats)
 //  2. If sample is non-empty: http.DetectContentType (+ UTF-8 text fallback)
 //  3. application/octet-stream
-//
-// OpenDocument calls this after reading bytes; raw ReadFile does not.
 func DetectMediaType(virtualPath string, sample []byte) string {
 	if ext := path.Ext(virtualPath); ext != "" {
 		if mt, ok := extMediaTypes[strings.ToLower(ext)]; ok {

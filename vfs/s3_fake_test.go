@@ -19,27 +19,28 @@ type memS3 struct {
 	mu sync.Mutex
 	// objects: full key → data (directory markers are keys ending in /)
 	objects map[string][]byte
-	fail    map[string]error // optional method→error injection
+	types   map[string]string // optional Content-Type per key
+	fail    map[string]error  // optional method→error injection
 }
 
 func newMemS3() *memS3 {
-	return &memS3{objects: make(map[string][]byte), fail: make(map[string]error)}
+	return &memS3{objects: make(map[string][]byte), types: make(map[string]string), fail: make(map[string]error)}
 }
 
-func (m *memS3) Head(ctx context.Context, bucket, key string) (int64, time.Time, error) {
+func (m *memS3) Head(ctx context.Context, bucket, key string) (int64, time.Time, string, error) {
 	if err := ctx.Err(); err != nil {
-		return 0, time.Time{}, err
+		return 0, time.Time{}, "", err
 	}
 	if err := m.fail["Head"]; err != nil {
-		return 0, time.Time{}, err
+		return 0, time.Time{}, "", err
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	data, ok := m.objects[key]
 	if !ok {
-		return 0, time.Time{}, vfs.ErrNotExist
+		return 0, time.Time{}, "", vfs.ErrNotExist
 	}
-	return int64(len(data)), time.Now().UTC(), nil
+	return int64(len(data)), time.Now().UTC(), m.types[key], nil
 }
 
 func (m *memS3) Get(ctx context.Context, bucket, key string) (io.ReadCloser, int64, time.Time, error) {
@@ -468,4 +469,52 @@ func TestS3Provider_openWriteClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = p2
+}
+
+// TestOpenDocument_providerMediaType: specific S3 Content-Type wins; octet-stream does not.
+func TestOpenDocument_providerMediaType(t *testing.T) {
+	ctx := context.Background()
+	api := newMemS3()
+	api.objects["notes"] = []byte("# title\n\nbody\n")
+	api.types["notes"] = "text/markdown; charset=utf-8"
+	api.objects["blob"] = []byte("looks like utf8 text")
+	api.types["blob"] = "image/png"
+	api.objects["main.go"] = []byte("package main\n")
+	api.types["main.go"] = "application/octet-stream"
+
+	reg := vfs.NewBackendRegistry()
+	if err := reg.Register(vfs.S3Factory{ID: "s3", Client: api, DefaultBucket: "bkt"}); err != nil {
+		t.Fatal(err)
+	}
+	ms := vfs.NewMountSession("s3-ctype", reg)
+	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/data", Profile: "s3"}); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := ms.Stat(ctx, "/data/notes")
+	if err != nil || st.MediaType != "text/markdown" {
+		t.Fatalf("Stat MediaType=%q err=%v", st.MediaType, err)
+	}
+	doc, err := ms.ReadText(ctx, "/data/notes")
+	if err != nil || doc.MediaType() != "text/markdown" {
+		t.Fatalf("hinted markdown: mt=%q err=%v", mediaOf(doc), err)
+	}
+	if _, err := ms.OpenDocument(ctx, "/data/blob", nil); !errors.Is(err, vfs.ErrNoCodec) {
+		t.Fatalf("image/png hint should skip sniff: %v", err)
+	}
+	st, err = ms.Stat(ctx, "/data/main.go")
+	if err != nil || st.MediaType != "text/x-go" {
+		t.Fatalf("octet-stream + .go key: Stat MediaType=%q err=%v", st.MediaType, err)
+	}
+	goDoc, err := ms.ReadText(ctx, "/data/main.go")
+	if err != nil || goDoc.MediaType() != "text/x-go" {
+		t.Fatalf("provider-classified go: mt=%q err=%v", mediaOf(goDoc), err)
+	}
+}
+
+func mediaOf(d vfs.Textual) string {
+	if d == nil {
+		return ""
+	}
+	return d.MediaType()
 }

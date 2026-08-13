@@ -56,7 +56,7 @@ func Start(ms *vfs.MountSession, eng *brain.Engine, scope brain.Scope, attachMem
 	warmCtx, cancel := context.WithCancel(context.Background())
 	b.cancel = cancel
 	for _, spec := range ms.Specs() {
-		if spec.Profile == brain.DefaultProfile || !AutoIndex(spec.IndexPolicy) {
+		if !AutoIndex(spec.IndexPolicy) {
 			continue
 		}
 		point := spec.Point
@@ -110,7 +110,7 @@ func (b *Bridge) ShouldIndex(virtualPath string) bool {
 	if err != nil {
 		return b.tracked(virtualPath)
 	}
-	if spec.Profile == brain.DefaultProfile {
+	if NormalizePolicy(spec.IndexPolicy) == PolicyNone {
 		return false
 	}
 	switch NormalizePolicy(spec.IndexPolicy) {

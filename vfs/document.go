@@ -19,6 +19,7 @@ type Document interface {
 //
 // Text() is that plaintext (FUSE / SearchText / encode). Line numbers are
 // 1-based. Lines(start, end) is half-open [start, end).
+// SetText / SetLine / ReplaceLines mutate the session IR (write-back).
 type Textual interface {
 	Document
 	Encoding() string
@@ -26,6 +27,9 @@ type Textual interface {
 	LineCount() int
 	Line(n int) (string, error)
 	Lines(start, end int) ([]string, error)
+	SetText(text string)
+	SetLine(n int, line string) error
+	ReplaceLines(start, end int, replacement []string) error
 }
 
 // Structured is optional for documents with a block tree (Markdown headings,

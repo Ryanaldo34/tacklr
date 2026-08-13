@@ -70,8 +70,8 @@ func TestMountIndexer_indexSearchAndNotify(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 4 lines, 2 per chunk → 2 chunks
-	if len(children) != 2 {
+	// IR line index: trailing \n is an empty last line (5 lines, 2 per chunk → 3).
+	if len(children) != 3 {
 		t.Fatalf("chunks=%d %#v", len(children), children)
 	}
 	// line anchors on first chunk

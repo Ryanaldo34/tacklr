@@ -62,7 +62,16 @@ func (p localProvider) Stat(ctx context.Context, name string) (FileInfo, error) 
 			return FileInfo{}, err
 		}
 	}
-	return fileInfoFromOS(info), nil
+	return localFileInfo(host, info), nil
+}
+
+// Classify implements Classifier.
+func (p localProvider) Classify(name string, sample []byte) string {
+	base := path.Base(name)
+	if len(sample) > 0 {
+		return DetectMediaType(base, sample)
+	}
+	return DetectMediaType(base, nil)
 }
 
 // OpenFile implements Provider.
@@ -240,6 +249,29 @@ func fileInfoFromOS(info os.FileInfo) FileInfo {
 	}
 }
 
+func localFileInfo(host string, info os.FileInfo) FileInfo {
+	fi := fileInfoFromOS(info)
+	if fi.IsDir {
+		return fi
+	}
+	fi.MediaType = DetectMediaType(info.Name(), nil)
+	if fi.MediaType != "application/octet-stream" {
+		return fi
+	}
+	// No known extension: peek so README (no suffix) can still be text.
+	f, err := os.Open(host)
+	if err != nil {
+		return fi
+	}
+	defer f.Close()
+	var buf [512]byte
+	n, _ := f.Read(buf[:])
+	if n > 0 {
+		fi.MediaType = DetectMediaType(info.Name(), buf[:n])
+	}
+	return fi
+}
+
 func mapOSError(err error) error {
 	if err == nil {
 		return nil
@@ -263,7 +295,7 @@ func (f *localFile) Stat() (FileInfo, error) {
 	if err != nil {
 		return FileInfo{}, mapOSError(err)
 	}
-	return fileInfoFromOS(info), nil
+	return localFileInfo(f.f.Name(), info), nil
 }
 
 // LocalFactory opens LocalProviders under a fixed Base directory.

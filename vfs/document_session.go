@@ -2,6 +2,7 @@ package vfs
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -19,15 +20,23 @@ func (m *MountSession) OpenDocument(ctx context.Context, virtualPath string, reg
 		return doc, nil
 	}
 
+	var mt string
+	size, mod := int64(-1), time.Time{}
+	if fi, err := m.Stat(ctx, virtualPath); err == nil {
+		if fi.IsDir {
+			return nil, fmt.Errorf("vfs: %s is a directory", virtualPath)
+		}
+		mt, size, mod = fi.MediaType, fi.Size, fi.ModTime
+	}
+
 	raw, err := m.ReadFile(ctx, virtualPath)
 	if err != nil {
 		return nil, err
 	}
-	sample := raw
-	if len(sample) > 512 {
-		sample = sample[:512]
+	if mt == "" {
+		mt = "application/octet-stream"
 	}
-	decoded, err := reg.Decode(ctx, virtualPath, DetectMediaType(virtualPath, sample), raw)
+	decoded, err := reg.Decode(ctx, virtualPath, mt, raw)
 	if err != nil {
 		return nil, err
 	}
@@ -35,33 +44,36 @@ func (m *MountSession) OpenDocument(ctx context.Context, virtualPath string, reg
 	if !ok {
 		return decoded, nil
 	}
-	size, mod := int64(-1), time.Time{}
-	if fi, err := m.Stat(ctx, virtualPath); err == nil {
-		size, mod = fi.Size, fi.ModTime
+	if size < 0 {
+		size = int64(len(td.Text()))
 	}
 	m.cache.put(virtualPath, td, size, mod, false)
 	return td.clone(), nil
 }
 
-// ReadText opens a virtual path as a *TextDocument (clone; safe to edit).
-func (m *MountSession) ReadText(ctx context.Context, virtualPath string) (*TextDocument, error) {
+// ReadText opens a virtual path as Textual IR (clone; safe to edit).
+func (m *MountSession) ReadText(ctx context.Context, virtualPath string) (Textual, error) {
 	doc, err := m.OpenDocument(ctx, virtualPath, nil)
 	if err != nil {
 		return nil, err
 	}
-	td, ok := doc.(*TextDocument)
+	t, ok := doc.(Textual)
 	if !ok {
 		return nil, ErrNotTextual
 	}
-	return td, nil
+	return t, nil
 }
 
-// WriteDocument stages *TextDocument in the session cache as dirty.
+// WriteDocument stages Textual IR in the session cache as dirty.
 // Backend updates happen on Sync / SyncAll (checkpoint calls SyncAll).
 func (m *MountSession) WriteDocument(ctx context.Context, doc Document) error {
-	td, ok := doc.(*TextDocument)
+	t, ok := doc.(Textual)
 	if !ok {
 		return ErrNotTextual
+	}
+	td, ok := t.(*TextDocument)
+	if !ok {
+		td = NewTextDocument(t.Path(), t.MediaType(), t.Encoding(), t.Text())
 	}
 	cleaned, err := cleanVirtualPath(td.Path())
 	if err != nil {

@@ -133,7 +133,7 @@ func (x *MountIndexer) IndexFileResult(ctx context.Context, virtualPath string, 
 	if err != nil {
 		return "", err
 	}
-	if x.isBrainPath(cleaned) {
+	if x.skipIndex(cleaned) {
 		return PathSkipped, nil
 	}
 	if st.IsDir {
@@ -166,12 +166,12 @@ func (x *MountIndexer) UnindexPath(ctx context.Context, virtualPath string) (boo
 	return true, nil
 }
 
-func (x *MountIndexer) isBrainPath(virtualPath string) bool {
+func (x *MountIndexer) skipIndex(virtualPath string) bool {
 	if x == nil || x.VFS == nil {
 		return false
 	}
 	spec, err := x.VFS.SpecAt(virtualPath)
-	return err == nil && spec.Profile == brain.DefaultProfile
+	return err == nil && NormalizePolicy(spec.IndexPolicy) == PolicyNone
 }
 
 func (x *MountIndexer) indexPath(ctx context.Context, virtualPath string) (PathIndexResult, error) {
@@ -182,7 +182,7 @@ func (x *MountIndexer) indexPath(ctx context.Context, virtualPath string) (PathI
 	if err != nil {
 		return "", err
 	}
-	if x.isBrainPath(cleaned) {
+	if x.skipIndex(cleaned) {
 		return PathSkipped, nil
 	}
 	st, err := x.VFS.Stat(ctx, cleaned)
@@ -208,7 +208,7 @@ func (x *MountIndexer) IndexPrefix(ctx context.Context, prefix string, opts Inde
 	if err != nil {
 		return stats, err
 	}
-	if x.isBrainPath(cleaned) {
+	if x.skipIndex(cleaned) {
 		return stats, nil
 	}
 	files := 0
@@ -260,42 +260,42 @@ func (x *MountIndexer) indexFile(ctx context.Context, vpath string, st vfs.FileI
 		chunkKind = DefaultChunkKind
 	}
 
-	// Extension gate before open when known binary.
-	mt := vfs.DetectMediaType(vpath, nil)
-	if mt != "application/octet-stream" && !vfs.IsTextLike(mt) {
+	mt := st.MediaType
+	if mt == "" {
+		mt = "application/octet-stream"
+	}
+	if !vfs.IsTextLike(mt) {
 		return PathSkipped, nil
 	}
 
 	parentID := x.DocumentID(vpath)
 	base := path.Base(vpath)
 
-	// Markdown (and any successful ReadText): body already in memory — hash-check
-	// before building chunk drafts so unchanged re-index skips chunk work.
-	if mt == "text/markdown" {
-		doc, err := x.VFS.ReadText(ctx, vpath)
-		if err == nil {
-			body := doc.Text()
-			hash := vfs.ContentHash(body)
-			mediaType := doc.MediaType()
-			if mediaType == "" {
-				return PathSkipped, nil
-			}
-			unchanged, err := x.contentHashUnchanged(ctx, parentID, hash)
-			if err != nil {
-				return "", err
-			}
-			if unchanged {
-				return PathSkipped, nil
-			}
-			var chunks []chunkDraft
-			if blocks := doc.Blocks(); len(blocks) > 0 {
-				chunks = chunksFromBlocks(base, body, blocks, parentID)
-			} else {
-				chunks = lineChunksFromText(body, linesPer)
-			}
-			return x.putFileIndex(ctx, vpath, base, st, parentID, docKind, chunkKind, mediaType, hash, int64(len(body)), chunks)
+	// Session IR when available: hash-check before chunking; Structured → block chunks.
+	if doc, err := x.VFS.ReadText(ctx, vpath); err == nil {
+		body := doc.Text()
+		hash := vfs.ContentHash(body)
+		mediaType := doc.MediaType()
+		if mediaType == "" {
+			mediaType = mt
 		}
-		// ReadText failed (size cap / decode); fall through to stream.
+		unchanged, err := x.contentHashUnchanged(ctx, parentID, hash)
+		if err != nil {
+			return "", err
+		}
+		if unchanged {
+			return PathSkipped, nil
+		}
+		var chunks []chunkDraft
+		if s, ok := doc.(vfs.Structured); ok {
+			if blocks := s.Blocks(); len(blocks) > 0 {
+				chunks = chunksFromBlocks(base, body, blocks, parentID)
+			}
+		}
+		if len(chunks) == 0 {
+			chunks = lineChunksFromText(body, linesPer)
+		}
+		return x.putFileIndex(ctx, vpath, base, st, parentID, docKind, chunkKind, mediaType, hash, int64(len(body)), chunks)
 	}
 
 	// One-pass stream: hash while chunking (re-open for hash-only would double IO
@@ -305,11 +305,11 @@ func (x *MountIndexer) indexFile(ctx context.Context, vpath string, st vfs.FileI
 		return "", err
 	}
 	defer f.Close()
-	chunks, hash, mediaType, nBytes, err := streamChunks(ctx, f, vpath, linesPer, maxBytes)
+	chunks, hash, nBytes, err := streamChunks(ctx, f, linesPer, maxBytes)
 	if err != nil {
 		return "", err
 	}
-	if mediaType == "" {
+	if chunks == nil && hash == "" {
 		return PathSkipped, nil // binary skip
 	}
 	unchanged, err := x.contentHashUnchanged(ctx, parentID, hash)
@@ -319,7 +319,7 @@ func (x *MountIndexer) indexFile(ctx context.Context, vpath string, st vfs.FileI
 	if unchanged {
 		return PathSkipped, nil
 	}
-	return x.putFileIndex(ctx, vpath, base, st, parentID, docKind, chunkKind, mediaType, hash, nBytes, chunks)
+	return x.putFileIndex(ctx, vpath, base, st, parentID, docKind, chunkKind, mt, hash, nBytes, chunks)
 }
 
 // contentHashUnchanged reports whether the parent Document already has hash.
@@ -477,7 +477,7 @@ func lineChunksFromText(body string, linesPer int) []chunkDraft {
 		out = append(out, chunkDraft{
 			Text:      seg,
 			StartLine: i + 1,
-			EndLine:   end + 1,
+			EndLine:   end, // inclusive, same as streamChunks
 			ByteStart: byteOff,
 			ByteEnd:   byteOff + int64(len(seg)),
 		})
@@ -556,7 +556,7 @@ func chunkIDByKey(parent uuid.UUID, key string) uuid.UUID {
 	return uuid.NewSHA1(parent, []byte("block:"+key))
 }
 
-func streamChunks(ctx context.Context, r io.Reader, vpath string, linesPerChunk int, maxBytes int64) ([]chunkDraft, string, string, int64, error) {
+func streamChunks(ctx context.Context, r io.Reader, linesPerChunk int, maxBytes int64) ([]chunkDraft, string, int64, error) {
 	h := sha256.New()
 	br := bufio.NewReaderSize(io.TeeReader(r, h), 64*1024)
 	var (
@@ -568,7 +568,6 @@ func streamChunks(ctx context.Context, r io.Reader, vpath string, linesPerChunk 
 		byteOff        int64
 		scanned        int64
 		checkedBinary  bool
-		mediaType      string
 	)
 	if linesPerChunk > 0 {
 		buf.Grow(linesPerChunk * 64)
@@ -594,7 +593,7 @@ func streamChunks(ctx context.Context, r io.Reader, vpath string, linesPerChunk 
 
 	for {
 		if err := ctx.Err(); err != nil {
-			return nil, "", "", 0, err
+			return nil, "", 0, err
 		}
 		s, err := br.ReadString('\n')
 		if len(s) == 0 && errors.Is(err, io.EOF) {
@@ -608,14 +607,7 @@ func streamChunks(ctx context.Context, r io.Reader, vpath string, linesPerChunk 
 			}
 			sample := []byte(s[:n])
 			if bytes.IndexByte(sample, 0) >= 0 || !utf8.Valid(sample) {
-				return nil, "", "", 0, nil // binary skip
-			}
-			mediaType = vfs.DetectMediaType(vpath, sample)
-			if !vfs.IsTextLike(mediaType) && mediaType != "application/octet-stream" {
-				return nil, "", "", 0, nil
-			}
-			if mediaType == "application/octet-stream" {
-				mediaType = "text/plain"
+				return nil, "", 0, nil // binary skip
 			}
 		}
 		scanned += int64(len(s))
@@ -646,12 +638,12 @@ func streamChunks(ctx context.Context, r io.Reader, vpath string, linesPerChunk 
 			break
 		}
 		if err != nil {
-			return nil, "", "", 0, err
+			return nil, "", 0, err
 		}
 	}
 	flush()
 	sum := hex.EncodeToString(h.Sum(nil))
-	return out, sum, mediaType, scanned, nil
+	return out, sum, scanned, nil
 }
 
 func chunkID(parent uuid.UUID, pos int) uuid.UUID {

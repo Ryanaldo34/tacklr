@@ -191,11 +191,13 @@ Tool guidance:
 | Step | What |
 |------|------|
 | Read | `ReadFile` once (32 MiB cap) |
-| Detect | Extension map, else byte sniff → media type |
+| Detect | **Provider** sets `FileInfo.MediaType` on Stat (S3 Content-Type or key/name; local extension + peek). Session does not sniff. |
 | Lookup | `ContentRegistry` media type → `Codec` |
 | Fallback | Unregistered but text-like (`text/*`, JSON, YAML, …) → `TextCodec` |
 | Decode | `Codec.Decode(path, mediaType, data)` — no second read or re-sniff |
 | Else | `ErrNoCodec` (e.g. PNG) |
+
+`DetectMediaType` is a helper **providers** call when filling `MediaType`. Empty / missing type is treated as `application/octet-stream` (no IR).
 
 `TextCodec` requires valid UTF-8 and builds a `TextDocument` labeled with the caller’s media type.
 

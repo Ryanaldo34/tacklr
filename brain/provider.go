@@ -152,7 +152,7 @@ func (p *engramProvider) Stat(ctx context.Context, name string) (vfs.FileInfo, e
 	if err != nil {
 		return vfs.FileInfo{}, err
 	}
-	return vfs.FileInfo{Name: slug + ".md", Size: int64(len(raw)), ModTime: obj.UpdatedAt}, nil
+	return vfs.FileInfo{Name: slug + ".md", Size: int64(len(raw)), ModTime: obj.UpdatedAt, MediaType: engramContentType}, nil
 }
 
 // OpenFile implements vfs.Provider.
@@ -386,16 +386,17 @@ func (p *engramProvider) dirExists(ctx context.Context, kind, name string) bool 
 	return p.kindAllowed(kind)
 }
 
-func (p *engramProvider) virtualPath(kind, slug string) string {
+// EngramPath is the virtual path for an Engram file (prefix or roots).
+func EngramPath(point, mode, kind, slug string) string {
 	file := slug + ".md"
-	if p.mode == ModeRoots {
-		return path.Join(p.point, file)
+	if mode == ModeRoots {
+		return path.Join(point, file)
 	}
-	return path.Join(p.point, KindSlug(kind), file)
+	return path.Join(point, KindSlug(kind), file)
 }
 
 func (p *engramProvider) lookupFile(ctx context.Context, kind, slug string) (Object, error) {
-	vpath := p.virtualPath(kind, slug)
+	vpath := EngramPath(p.point, p.mode, kind, slug)
 	obj, err := p.eng.GetByProperty(ctx, p.scope, PropVFSPath, vpath)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
@@ -504,7 +505,7 @@ func (p *engramProvider) commit(ctx context.Context, rel string, data []byte) er
 	}
 	obj := ObjectFromEngram(f)
 	obj.NamespaceID = *p.scope.Namespace
-	vpath := p.virtualPath(obj.Kind, f.Slug)
+	vpath := EngramPath(p.point, p.mode, obj.Kind, f.Slug)
 	if obj.Properties == nil {
 		obj.Properties = map[string]any{}
 	}

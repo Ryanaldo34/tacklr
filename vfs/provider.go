@@ -24,6 +24,12 @@ type Provider interface {
 	MkdirAll(ctx context.Context, name string, perm fs.FileMode) error
 }
 
+// Classifier types a provider-relative name (including files that do not exist
+// yet). Stat.MediaType is the source of truth for existing files.
+type Classifier interface {
+	Classify(name string, sample []byte) string
+}
+
 // File is an open file handle for a provider-relative path.
 type File interface {
 	io.ReadWriteCloser
@@ -31,12 +37,18 @@ type File interface {
 }
 
 // FileInfo describes a file or directory (agent-safe: no host paths).
+//
+// MediaType is the provider's classification of a file (never a host path).
+// Empty on directories. On files, providers must set it: a concrete type
+// (text/markdown, image/png, …) or application/octet-stream when unknown.
+// OpenDocument does not sniff; it only looks up a codec for this value.
 type FileInfo struct {
-	Name    string
-	Size    int64
-	Mode    fs.FileMode
-	ModTime time.Time
-	IsDir   bool
+	Name      string
+	Size      int64
+	Mode      fs.FileMode
+	ModTime   time.Time
+	IsDir     bool
+	MediaType string
 }
 
 // DirEntry is a single directory entry.
