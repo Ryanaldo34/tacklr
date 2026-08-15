@@ -1398,44 +1398,6 @@ func TestRun_readSkill_returnsInstructions(t *testing.T) {
 	}
 }
 
-// stubModelTasks records Absorb/Handoff/Turn for AgentOptions.ModelTasks injection.
-type stubModelTasks struct {
-	cm           ContextManager
-	absorbCalls  atomic.Int64
-	handoffCalls atomic.Int64
-	turnCalls    atomic.Int64
-	turnFn       func(ctx context.Context, tools []*Tool, systemPrompt string) (<-chan LLMResponseChunk, error)
-}
-
-func (s *stubModelTasks) Turn(ctx context.Context, tools []*Tool, systemPrompt string) (<-chan LLMResponseChunk, error) {
-	s.turnCalls.Add(1)
-	if s.turnFn != nil {
-		return s.turnFn(ctx, tools, systemPrompt)
-	}
-	ch := make(chan LLMResponseChunk, 1)
-	ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "ok", IsComplete: true}
-	close(ch)
-	return ch, nil
-}
-
-func (s *stubModelTasks) Absorb(ctx context.Context, msg *Message, tools []*Tool, systemPrompt string) (AbsorbResult, error) {
-	s.absorbCalls.Add(1)
-	if msg != nil {
-		s.cm.Add(msg)
-	}
-	return AbsorbResult{}, nil
-}
-
-func (s *stubModelTasks) Handoff(ctx context.Context, plan []Todo, planDoc string, tools []*Tool, systemPrompt string) error {
-	s.handoffCalls.Add(1)
-	s.cm.Replace([]*Message{
-		{Role: RoleUser, Content: "goal"},
-		{Role: RoleDeveloper, Content: "stub handoff"},
-	})
-	return nil
-}
-
-// TestNewAgent_injectsModelTasks: Run uses injected Absorb/Turn; complete_todo uses Handoff.
 func TestNewAgentFromSession_resumesPendingToolInterrupt(t *testing.T) {
 	store := testStore(t)
 	interruptTool := NewTool(ToolConfig{

@@ -38,9 +38,8 @@
 // # Session-visible body
 //
 // IndexPath uses MountSession.ReadText (markdown) and MountSession.Open (other
-// text). Both honor the session dirty IR cache, so index_file / IndexPath see the
-// same body the agent sees after write/replace_* — even before Sync. AfterPersist
-// (WriteFile / Sync) still drives background reindex when policy allows.
+// text). Writes are write-through, so index_file / IndexPath see the last
+// persist. AfterPersist still drives background reindex when policy allows.
 //
 // # Schedulers
 //
@@ -68,7 +67,7 @@
 // and a background worker; Notify never blocks on re-chunk.
 //
 // The tacklr harness creates MountIndexer + AsyncScheduler and registers
-// index_file / unindex / find_content when Brain + VFS + search namespace are set.
+// index_file / unindex when Brain + VFS + search namespace are set.
 // It skips mounts with IndexPolicy=none (harness sets this on brain Engram
 // mounts) and never remirrors those paths. Scratch /memory is attached
 // only when a scratch profile exists and no brain Provider mount is present.
@@ -78,6 +77,6 @@
 // Hosts that use a non-empty kind catalog should register MountIndexKinds()
 // (or equivalent fields) before indexing. Open-catalog engines accept any props.
 //
-// Content search over mounts is brain search/find_exact / find_content on Chunks
-// with vfs_path (and later host OS tools via FUSE). This package does not implement grep.
+// Content search over mounts is brain search/find_exact on Chunks with vfs_path.
+// Live grep is run_command → rg on the FUSE tree. This package does not implement grep.
 package vfsindex

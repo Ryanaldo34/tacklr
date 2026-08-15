@@ -1,7 +1,6 @@
 package vfs
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -148,7 +147,7 @@ func (p localProvider) WriteDocument(ctx context.Context, name string, doc Docum
 	if !ok {
 		return ErrNotTextual
 	}
-	raw, err := EncodeTextual(t)
+	body, err := textualPayload(t)
 	if err != nil {
 		return err
 	}
@@ -157,7 +156,7 @@ func (p localProvider) WriteDocument(ctx context.Context, name string, doc Docum
 			return err
 		}
 	}
-	return p.PutFile(ctx, name, bytes.NewReader(raw), int64(len(raw)))
+	return p.PutFile(ctx, name, strings.NewReader(body), int64(len(body)))
 }
 
 // ReadDir implements Provider.

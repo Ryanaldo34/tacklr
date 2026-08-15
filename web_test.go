@@ -30,12 +30,12 @@ func TestWebSearchTool_invokeAgainstServer(t *testing.T) {
 		_ = json.Unmarshal(b, &body)
 		w.Header().Set("Content-Type", "application/json")
 		q, _ := body["query"].(string)
-		switch {
-		case q == "capital of France":
+		switch q {
+		case "capital of France":
 			_, _ = w.Write([]byte(`{"results":[{"title":"Paris","url":"https://example.com/paris","highlights":["Paris is the capital",""],"text":"Paris is the capital of France.","summary":"Capital city","author":"Ed","publishedDate":"2024-01-01"}],"output":{"content":"Paris is the capital."}}`))
-		case q == "empty-results":
+		case "empty-results":
 			_, _ = w.Write([]byte(`{"results":[]}`))
-		case q == "untitled":
+		case "untitled":
 			_, _ = w.Write([]byte(`{"results":[{"url":"https://example.com/x","highlights":["hit"]}],"output":{"content":{"answer":"ok"}}}`))
 		default:
 			_, _ = w.Write([]byte(`{"results":[{"title":"Hit","url":"https://example.com"}]}`))

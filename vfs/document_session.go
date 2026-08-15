@@ -16,11 +16,19 @@ type documentBackend interface {
 // Backend providers call this when their native form is a file or object.
 // MountSession does not encode.
 func EncodeTextual(t Textual) ([]byte, error) {
-	body := t.Text()
-	if len(body) > MaxReadFileBytes {
-		return nil, errFileExceeds(MaxReadFileBytes)
+	body, err := textualPayload(t)
+	if err != nil {
+		return nil, err
 	}
 	return []byte(body), nil
+}
+
+func textualPayload(t Textual) (string, error) {
+	body := t.Text()
+	if len(body) > MaxReadFileBytes {
+		return "", errFileExceeds(MaxReadFileBytes)
+	}
+	return body, nil
 }
 
 func decodeProviderDocument(ctx context.Context, name string, fi FileInfo, data []byte, reg *ContentRegistry) (Document, error) {
@@ -43,7 +51,7 @@ func decodeProviderDocument(ctx context.Context, name string, fi FileInfo, data 
 }
 
 // OpenDocument loads a virtual path into a Document IR via the mount's provider.
-// The returned Textual is a clone (safe to edit). reg nil uses DefaultContentRegistry().
+// The returned Textual is a fresh decode (safe to edit). reg nil uses DefaultContentRegistry().
 func (m *MountSession) OpenDocument(ctx context.Context, virtualPath string, reg *ContentRegistry) (Document, error) {
 	cleaned, err := cleanVirtualPath(virtualPath)
 	if err != nil {
@@ -106,11 +114,8 @@ func (m *MountSession) WriteDocument(ctx context.Context, doc Document) error {
 }
 
 func bindVirtualPath(doc Document, virtual string) Document {
-	td, ok := doc.(*TextDocument)
-	if !ok {
-		return doc
+	if td, ok := doc.(*TextDocument); ok {
+		td.path = virtual
 	}
-	out := td.clone()
-	out.path = virtual
-	return out
+	return doc
 }

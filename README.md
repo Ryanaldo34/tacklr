@@ -50,10 +50,10 @@ The model proposes. **Our runtime decides what is real, allowed, and durable.**
 |---------|------------|
 | Process address space | **Session mounts** — only the virtual paths you attach |
 | Filesystem | **[`vfs`](docs/vfs.md)** — local, S3, brain Engrams, later Drive/Docs behind one path API |
-| File contents | **Content IR** — what the agent edits (lines + Markdown block outline when applicable; rich WYSIWYG later). Codecs turn that into storage bytes on Sync |
+| File contents | **Content IR** — what the agent edits (lines + Markdown block outline when applicable; rich WYSIWYG later). Codecs turn that into storage bytes on persist |
 | Syscalls | **Tools**, and later a **custom agent shell** and script guests, all through a **capability broker** |
 | Kernel | **Eventually** Linux eBPF / cgroup / seccomp as the backstop when something tries to cheat |
-| Save process image | **Checkpoints** — conversation, plan, interrupts, mounts; we Sync IR first so disk matches the session |
+| Save process image | **Checkpoints** — conversation, plan, interrupts, mounts |
 | Shared knowledge | **Optional [brain](https://pkg.go.dev/github.com/ryanaldo34/tacklr/brain)** — query when you need it, not a static RAG dump rotting in context |
 
 ```text
@@ -200,7 +200,7 @@ agent := tacklr.NewAgent(ctx, opts)
 agent, err := tacklr.NewAgentFromSession(ctx, sessionID, opts)
 ```
 
-Checkpoints cover conversation, plan, tool/user state, and pending interrupts. In-memory for throwaway runs; Postgres when you need durability. With a [VFS](docs/vfs.md) attached, we **Sync** dirty IR before we save mount specs—so you do not checkpoint a lie.
+Checkpoints cover conversation, plan, tool/user state, and pending interrupts. In-memory for throwaway runs; Postgres when you need durability. VFS writes persist immediately (write-through IR); checkpoints store mount specs, not a dirty document cache.
 
 ### Host tools vs plan system
 
@@ -214,7 +214,7 @@ That boundary exists so product code cannot accidentally trash planning.
 
 ### VFS
 
-Register backends, bootstrap mounts—[docs/vfs.md](docs/vfs.md). When VFS is wired, the harness injects file tools (`read_lines`, `replace_*`, `write`, `find_files`, …) over **virtual paths only**. The agent never gets a host path or a bucket key. With Brain + VFS + search namespace, the harness registers **`brain.BrainFactory`**, mounts **`/engram`** (prefix, `IndexPolicy=none`) unless the host already provided a brain-profile mount, and injects **`index_file` / `unindex` / `find_content`** for **artifact** mounts only. Engrams are Markdown files on the brain Provider; `save_*` writes those paths (or `Engine.Put` if no brain mount). Path-native **link / unlink / expand / find_links**. Artifact → brain still uses one **IndexPath** pipeline (hash skip). Brain-profile mounts are never remirrored as Document/Chunk artifacts.
+Register backends, bootstrap mounts—[docs/vfs.md](docs/vfs.md). When VFS is wired, the harness injects file tools (`list`, `stat`, `read`, `write`, `mkdir`, `remove`, `run_command`) over **virtual paths only**. The agent never gets a host path or a bucket key. Live names/grep go through `run_command` (`fd` / `find` / `rg`). With Brain + VFS + search namespace, the harness registers **`brain.BrainFactory`**, mounts **`/engram`** (prefix, `IndexPolicy=none`) unless the host already provided a brain-profile mount, and injects **`index_file` / `unindex`** for **artifact** mounts only. Indexed recall is brain `search`. Engrams are Markdown files on the brain Provider; `save_*` writes those paths (or `Engine.Put` if no brain mount). Path-native **link / unlink / expand / find_links**. Artifact → brain still uses one **IndexPath** pipeline (hash skip). Brain-profile mounts are never remirrored as Document/Chunk artifacts.
 
 ---
 
@@ -225,7 +225,7 @@ Register backends, bootstrap mounts—[docs/vfs.md](docs/vfs.md). When VFS is wi
 - **MCP** — external tool servers ([`mcp`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/mcp))  
 - **Skills** — `SKILL.md` catalogs ([`skills`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/skills))  
 - **Web** — search/fetch when Exa is configured  
-- **VFS** — mounts + IR ([docs/vfs.md](docs/vfs.md)); optional artifact index via [`vfsindex`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfsindex) (`index_file` / `find_content` / IndexPolicy when Brain + namespace too)  
+- **VFS** — mounts + IR ([docs/vfs.md](docs/vfs.md)); optional artifact index via [`vfsindex`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfsindex) (`index_file` / `unindex` / IndexPolicy when Brain + namespace too); live names/grep via `run_command`  
 - **Brain** — knowledge system when you set `AgentOptions.Brain`; host `KindSpec`s appear as Engram Markdown files (`/engram/…` or host roots) via `brain.Provider`. Full guide: [docs/knowledge.md](docs/knowledge.md)  
 
 
@@ -294,7 +294,7 @@ We already have the harness, VFS, IR, brain hooks, and checkpoints. Next we clos
 | Linux eBPF / cgroup | **Eventually** | Backstop when something tries to leave the box |
 | Materialize tree (no FUSE) | **Eventually** | Same idea without kernel FS glue |
 
-**testserver** can mount a local jail at `/tmp/tacklr` so you can poke mounts and file tools end-to-end.
+**testserver** bootstraps virtual `Point: /work` with `LocalFactory.Base` as the host jail so you can poke mounts and file tools end-to-end.
 
 ### Target architecture
 
@@ -302,7 +302,7 @@ We already have the harness, VFS, IR, brain hooks, and checkpoints. Next we clos
 flowchart TB
   subgraph harness [Agent harness]
     Plan[Plan / todos / handoff]
-    Tools[Hard tools: read · replace · write]
+    Tools[Hard tools: read · write]
     Ctx[Structured context]
     CP[Checkpoint]
   end

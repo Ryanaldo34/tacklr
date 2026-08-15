@@ -52,7 +52,7 @@ func vfsIndexHarness(t *testing.T, withNS bool) (*AgentHarness, *vfs.MountSessio
 	return h, ms, eng, ns
 }
 
-func mustMountBrain(t *testing.T, ctx context.Context, reg *vfs.BackendRegistry, ms *vfs.MountSession, eng *brain.Engine, ns uuid.UUID, spec vfs.MountSpec) {
+func mustMountBrain(ctx context.Context, t *testing.T, reg *vfs.BackendRegistry, ms *vfs.MountSession, eng *brain.Engine, ns uuid.UUID, spec vfs.MountSpec) {
 	t.Helper()
 	if spec.Profile == "" {
 		spec.Profile = brain.DefaultProfile
@@ -172,38 +172,44 @@ func TestVFSIndexTools_indexSearchUnindex(t *testing.T) {
 		t.Fatalf("noop: %q", out)
 	}
 
-	// Recovery: re-index_file makes the path searchable again.
-	if _, err := runWriteTool(t, h, indexTool, `{"path":"/work/note.txt"}`); err != nil {
+	// Recovery: unindex resets hash-skip so the next index_file writes again.
+	out, err = runWriteTool(t, h, indexTool, `{"path":"/work/note.txt"}`)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if !strings.Contains(out, "indexed path=/work/note.txt") {
+		t.Fatalf("reindex: %q", out)
 	}
 	hit2 := waitSearchHit(t, eng, scope, "findme-xyz", 3*time.Second)
 	if hit2.Properties[vfsindex.PropVFSPath] != "/work/note.txt" {
 		t.Fatalf("reindex vfs_path: %+v", hit2.Properties)
 	}
-	if _, err := runWriteTool(t, h, indexTool, `{}`); err == nil {
-		t.Fatal("index_file requires path")
+
+	// Directory in a batch rejects before any IndexPath (no partial index).
+	if err := ms.WriteFile(ctx, "/work/batch-only.txt", []byte("batch-unique-phrase-zzz\n")); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := runWriteTool(t, h, indexTool, `{"path":"rel"}`); err == nil {
-		t.Fatal("index_file relative")
+	_, err = runWriteTool(t, h, indexTool, `{"paths":["/work/batch-only.txt","/work"]}`)
+	if err == nil || !strings.Contains(err.Error(), "directory") {
+		t.Fatalf("index_file directory in batch: %v", err)
 	}
-	if _, err := runWriteTool(t, h, indexTool, `{"path":"/work/missing.txt"}`); err == nil {
-		t.Fatal("index_file missing")
+	page, err := eng.Search(ctx, scope, brain.SearchRequest{Query: "batch-unique-phrase-zzz"}, brain.NewSearchContext())
+	if err != nil {
+		t.Fatal(err)
 	}
-	tooMany := `{"paths":["/a","/b","/c","/d","/e","/f","/g","/h","/i"]}`
-	if _, err := runWriteTool(t, h, indexTool, tooMany); err == nil {
-		t.Fatal("index_file max paths")
+	if len(page.Objects) > 0 {
+		t.Fatalf("partial batch index: %+v", page.Objects[0].Properties)
 	}
 }
 
-// TestVFSIndexTools_batchPathsAndGuards: multi-path success (≤8), max-8 no-partial,
-// directory rejected before any IndexPath.
-func TestVFSIndexTools_selectiveFindContentAndTrack(t *testing.T) {
+// TestVFSIndexTools_selectiveIndexSearchReadAndTrack: index_file → search vfs_path
+// → read live text; WriteFile after track reindexes the new phrase.
+func TestVFSIndexTools_selectiveIndexSearchReadAndTrack(t *testing.T) {
 	h, ms, eng, ns := vfsIndexHarness(t, true)
 	activatePlan(t, h)
 	ctx := context.Background()
 	scope := brain.Scope{Namespace: &ns}
 
-	// SpecAt default empty → selective
 	spec, err := ms.SpecAt("/work/x")
 	if err != nil {
 		t.Fatal(err)
@@ -212,43 +218,38 @@ func TestVFSIndexTools_selectiveFindContentAndTrack(t *testing.T) {
 		t.Fatalf("default policy: %q", spec.IndexPolicy)
 	}
 
-	// Multi-line body so find_content can surface start_line for read_lines.
 	body := "line one\nline two unique-phrase-selective-aaa\nline three\n"
 	if err := ms.WriteFile(ctx, "/work/sel.txt", []byte(body)); err != nil {
 		t.Fatal(err)
 	}
 
-	fc := h.findTool("find_content", "")
-	if fc == nil {
-		t.Fatal("find_content required")
-	}
 	if _, err := runWriteTool(t, h, h.findTool("index_file", ""), `{"path":"/work/sel.txt"}`); err != nil {
 		t.Fatal(err)
 	}
-	fout, err := fc.invoke(ctx, `{"query":"unique-phrase-selective-aaa"}`, turnRuntime(h))
+	hit := waitSearchHit(t, eng, scope, "unique-phrase-selective-aaa", 3*time.Second)
+	if hit.Properties[vfsindex.PropVFSPath] != "/work/sel.txt" {
+		t.Fatalf("search vfs_path: %+v", hit.Properties)
+	}
+	search := h.findTool("search", "")
+	if search == nil {
+		t.Fatal("search required")
+	}
+	sout, err := search.invoke(ctx, `{"query":"unique-phrase-selective-aaa"}`, turnRuntime(h))
+	if err != nil || !strings.Contains(sout.output, "/work/sel.txt") {
+		t.Fatalf("search after index: %q err=%v", sout.output, err)
+	}
+	readTool := h.findTool("read", "")
+	if readTool == nil {
+		t.Fatal("read required")
+	}
+	readOut, err := readTool.invoke(ctx, `{"path":"/work/sel.txt","start":1,"end":10}`, turnRuntime(h))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(fout.output, "path=/work/sel.txt") {
-		t.Fatalf("find_content after index: %s", fout.output)
-	}
-	if !strings.Contains(fout.output, "start_line=") {
-		t.Fatalf("find_content want start_line anchor: %s", fout.output)
-	}
-	// Open live text with read_lines using the hit path (and line window).
-	rl := h.findTool("read_lines", "")
-	if rl == nil {
-		t.Fatal("read_lines required")
-	}
-	rlOut, err := rl.invoke(ctx, `{"path":"/work/sel.txt","start":1,"end":10}`, turnRuntime(h))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(rlOut.output, "unique-phrase-selective-aaa") {
-		t.Fatalf("read_lines after find_content: %s", rlOut.output)
+	if !strings.Contains(readOut.output, "unique-phrase-selective-aaa") {
+		t.Fatalf("read after search: %s", readOut.output)
 	}
 
-	// Track: edit + WriteFile should async reindex.
 	if err := ms.WriteFile(ctx, "/work/sel.txt", []byte("unique-phrase-selective-bbb\n")); err != nil {
 		t.Fatal(err)
 	}
@@ -290,9 +291,9 @@ func TestVFSIndexTools_prefixAutoIndex(t *testing.T) {
 	_ = waitSearchHit(t, eng, brain.Scope{Namespace: &ns}, "prefix-auto-phrase-xyz", 3*time.Second)
 }
 
-// TestKnowledgeSaveSearchReadLines: save_* writes an Engram on the brain Provider
+// TestKnowledgeSaveSearchRead: save_* writes an Engram on the brain Provider
 // (not scratch /memory). Update-by-object_id rewrites the same path.
-func TestKnowledgeSaveSearchReadLines(t *testing.T) {
+func TestKnowledgeSaveSearchRead(t *testing.T) {
 	ctx := context.Background()
 	base := t.TempDir()
 	reg := vfs.NewBackendRegistry()
@@ -318,7 +319,7 @@ func TestKnowledgeSaveSearchReadLines(t *testing.T) {
 		t.Fatal(err)
 	}
 	ns := uuid.New()
-	mustMountBrain(t, ctx, reg, ms, eng, ns, vfs.MountSpec{})
+	mustMountBrain(ctx, t, reg, ms, eng, ns, vfs.MountSpec{})
 	h := NewAgent(ctx, AgentOptions{
 		SessionID: "save-mem", Store: stores.NewInMemoryStore(),
 		MountSession: ms, Model: &mockStrategy{},
@@ -367,13 +368,13 @@ func TestKnowledgeSaveSearchReadLines(t *testing.T) {
 		t.Fatalf("engine object: %+v err=%v", obj, err)
 	}
 
-	readLines := h.findTool("read_lines", "")
-	rl, err := readLines.invoke(ctx, `{"path":`+jsonString(res.Path)+`,"start":1,"end":20}`, turnRuntime(h))
+	readTool := h.findTool("read", "")
+	rl, err := readTool.invoke(ctx, `{"path":`+jsonString(res.Path)+`,"start":1,"end":20}`, turnRuntime(h))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(rl.output, "p99 under 40ms") {
-		t.Fatalf("read_lines: %s", rl.output)
+		t.Fatalf("read: %s", rl.output)
 	}
 
 	updArgs, err := json.Marshal(map[string]any{
@@ -409,12 +410,12 @@ func TestKnowledgeSaveSearchReadLines(t *testing.T) {
 	if err != nil || !strings.Contains(obj2.Content, "p95 under 20ms") {
 		t.Fatalf("updated engine: %+v err=%v", obj2, err)
 	}
-	rl2, err := readLines.invoke(ctx, `{"path":`+jsonString(res.Path)+`,"start":1,"end":20}`, turnRuntime(h))
+	rl2, err := readTool.invoke(ctx, `{"path":`+jsonString(res.Path)+`,"start":1,"end":20}`, turnRuntime(h))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(rl2.output, "p95 under 20ms") {
-		t.Fatalf("read_lines after update: %s", rl2.output)
+		t.Fatalf("read after update: %s", rl2.output)
 	}
 }
 
@@ -443,7 +444,7 @@ func TestKnowledgeSave_rootsMount(t *testing.T) {
 		t.Fatal(err)
 	}
 	ns := uuid.New()
-	mustMountBrain(t, ctx, reg, ms, eng, ns, vfs.MountSpec{
+	mustMountBrain(ctx, t, reg, ms, eng, ns, vfs.MountSpec{
 		Point: "/discovery", Profile: brain.DefaultProfile,
 		Params: map[string]string{"mode": brain.ModeRoots, "kind": "Discovery"},
 	})
@@ -514,7 +515,7 @@ func TestRun_workspaceResearchTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 	ns := uuid.New()
-	mustMountBrain(t, ctx, reg, ms, eng, ns, vfs.MountSpec{})
+	mustMountBrain(ctx, t, reg, ms, eng, ns, vfs.MountSpec{})
 
 	wd := &recordingWatchdog{}
 	strategy := &mockStrategy{
@@ -552,8 +553,7 @@ func TestRun_workspaceResearchTurn(t *testing.T) {
 		case 3:
 			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
 				toolCall("l1", "list", `{"path":"/work"}`),
-				toolCall("f1", "find_files", `{"path":"/work","name":"*.md"}`),
-				toolCall("r1", "read_lines", `{"path":"/work/research.md","start":1,"end":10}`),
+				toolCall("r1", "read", `{"path":"/work/research.md","start":1,"end":10}`),
 			}, IsComplete: true}
 		case 4:
 			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
@@ -565,7 +565,7 @@ func TestRun_workspaceResearchTurn(t *testing.T) {
 			}, IsComplete: true}
 		case 6:
 			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-				toolCall("c1", "find_content", `{"query":"unique-research-token"}`),
+				toolCall("c1", "search", `{"query":"unique-research-token"}`),
 			}, IsComplete: true}
 		case 7:
 			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{

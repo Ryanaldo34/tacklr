@@ -82,7 +82,10 @@ func toolPermissionGate(ctx context.Context, inv ToolInvocation, next ToolCallFu
 	if err != nil {
 		return "", err
 	}
-	perm := intr.(*interrupt.ToolPermissionInterrupt)
+	perm, ok := intr.(*interrupt.ToolPermissionInterrupt)
+	if !ok {
+		return "", fmt.Errorf("%w: unexpected permission interrupt type %T", ErrFailed, intr)
+	}
 
 	switch perm.SelectedKind {
 	case interrupt.PermissionAllowAlways:

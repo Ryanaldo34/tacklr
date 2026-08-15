@@ -577,7 +577,7 @@ type streamFactory struct{ files map[string][]byte }
 func (streamFactory) Profile() string { return "bytes" }
 
 func (f streamFactory) Open(context.Context, string, vfs.MountSpec) (vfs.Provider, error) {
-	return streamProvider{files: f.files}, nil
+	return streamProvider(f), nil
 }
 
 type streamProvider struct{ files map[string][]byte }

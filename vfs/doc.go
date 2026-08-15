@@ -17,9 +17,9 @@
 // Providers own IR translation and persist immediately on WriteDocument.
 // MountSession routes; it does not encode or hold a dirty document cache.
 //
-// Optimistic edit policy lives in harness tools (read_lines, replace_lines,
-// replace_text, write) that wrap ReadText / TextDocument / WriteDocument.
-// ContentRev is the stable token those tools pass — not a large MountSession surface.
+// Optimistic edit policy lives in harness tools (read, write) that wrap
+// ReadText / TextDocument / WriteDocument. ContentRev is the stable token
+// those tools pass — not a large MountSession surface.
 //
 // This package never imports brain. Brain implements Provider in package brain
 // (Engrams as Markdown files). Optional artifact IndexPath lives in package

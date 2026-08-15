@@ -206,11 +206,11 @@ func (p s3Provider) WriteDocument(ctx context.Context, name string, doc Document
 	if !ok {
 		return ErrNotTextual
 	}
-	raw, err := EncodeTextual(t)
+	body, err := textualPayload(t)
 	if err != nil {
 		return err
 	}
-	return p.PutFile(ctx, name, bytes.NewReader(raw), int64(len(raw)))
+	return p.PutFile(ctx, name, strings.NewReader(body), int64(len(body)))
 }
 
 // OpenFile implements Provider.

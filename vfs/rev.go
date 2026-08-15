@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"unsafe"
 )
 
 // ContentRev identifies session-visible file content for optimistic concurrency.
@@ -16,7 +17,11 @@ type ContentRev struct {
 
 // ContentHash returns hex SHA-256 of body.
 func ContentHash(body string) string {
-	sum := sha256.Sum256([]byte(body))
+	return hashSHA256(unsafe.Slice(unsafe.StringData(body), len(body)))
+}
+
+func hashSHA256(b []byte) string {
+	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
 }
 
@@ -30,5 +35,5 @@ func (m *MountSession) ContentRev(ctx context.Context, virtualPath string) (Cont
 	if err != nil {
 		return ContentRev{}, err
 	}
-	return ContentRev{Path: cleaned, Hash: ContentHash(string(raw))}, nil
+	return ContentRev{Path: cleaned, Hash: hashSHA256(raw)}, nil
 }

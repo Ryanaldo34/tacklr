@@ -122,17 +122,6 @@ func NewTextDocument(path, mediaType, encoding, text string) *TextDocument {
 	return d
 }
 
-func (d *TextDocument) clone() *TextDocument {
-	out := &TextDocument{
-		path: d.path, mediaType: d.mediaType, encoding: d.encoding, text: d.text,
-	}
-	if n := len(d.starts); n > 0 {
-		out.starts = make([]int, n)
-		copy(out.starts, d.starts)
-	}
-	return out
-}
-
 func (d *TextDocument) Path() string      { return d.path }
 func (d *TextDocument) MediaType() string { return d.mediaType }
 func (d *TextDocument) Encoding() string  { return d.encoding }
@@ -187,19 +176,11 @@ func (d *TextDocument) SetText(text string) {
 
 // SetLine replaces line n (1-based). line must not contain '\n'.
 func (d *TextDocument) SetLine(n int, line string) error {
-	if n < 1 || n > len(d.starts) {
-		return ErrLineOutOfRange
-	}
-	if strings.Contains(line, "\n") {
-		return ErrInvalidLine
-	}
-	lines := d.lineList()
-	lines[n-1] = line
-	d.SetText(strings.Join(lines, "\n"))
-	return nil
+	return d.ReplaceLines(n, n+1, []string{line})
 }
 
 // ReplaceLines replaces half-open [start, end) with replacement lines (no '\n' in elements).
+// Splices the UTF-8 body; it does not allocate a []string of every line.
 func (d *TextDocument) ReplaceLines(start, end int, replacement []string) error {
 	n := len(d.starts)
 	if start < 1 || end < start || end > n+1 {
@@ -210,12 +191,47 @@ func (d *TextDocument) ReplaceLines(start, end int, replacement []string) error 
 			return ErrInvalidLine
 		}
 	}
-	old := d.lineList()
-	next := make([]string, 0, (start-1)+len(replacement)+(n-(end-1)))
-	next = append(next, old[:start-1]...)
-	next = append(next, replacement...)
-	next = append(next, old[end-1:]...)
-	d.SetText(strings.Join(next, "\n"))
+	if n == 0 {
+		d.SetText(strings.Join(replacement, "\n"))
+		return nil
+	}
+
+	prefixLines := start - 1
+	suffixLines := n - (end - 1)
+	moreAfterPrefix := len(replacement) > 0 || suffixLines > 0
+
+	need := len(d.text) + 1
+	for _, line := range replacement {
+		need += len(line) + 1
+	}
+	var b strings.Builder
+	b.Grow(need)
+
+	if prefixLines > 0 {
+		if prefixLines == n {
+			b.WriteString(d.text)
+			if moreAfterPrefix {
+				b.WriteByte('\n')
+			}
+		} else if moreAfterPrefix {
+			b.WriteString(d.text[:d.starts[prefixLines]])
+		} else {
+			b.WriteString(d.text[:d.starts[prefixLines]-1])
+		}
+	}
+	for i, line := range replacement {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(line)
+	}
+	if suffixLines > 0 {
+		if len(replacement) > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(d.text[d.starts[end-1]:])
+	}
+	d.SetText(b.String())
 	return nil
 }
 
@@ -225,15 +241,4 @@ func (d *TextDocument) lineSlice(i int) string {
 		return d.text[start : d.starts[i+1]-1]
 	}
 	return d.text[start:]
-}
-
-func (d *TextDocument) lineList() []string {
-	if len(d.starts) == 0 {
-		return nil
-	}
-	out := make([]string, len(d.starts))
-	for i := range out {
-		out[i] = d.lineSlice(i)
-	}
-	return out
 }

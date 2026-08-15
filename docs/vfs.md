@@ -171,12 +171,12 @@ Tool guidance:
 |------|-----|
 | Line window / page large file | `ReadLines` → page with `NextStart` until `EOF` (see `Rev`) |
 | Stable edit token | `ContentRev` / `ContentHash` — tools compare expected rev before write |
-| Find in mounts (indexed) | Optional `vfsindex` → brain `search` / `find_exact` on Chunks; then `ReadLines` around hit |
+| Find in mounts (indexed) | Optional `vfsindex` → brain `search` / `find_exact` on Chunks; then `read` around hit |
 | Edit (SDK) | `ReadText` → mutate → `WriteDocument` |
-| Edit (agent) | Harness tools (`read_lines`, `replace_lines`, `replace_text`, `write`, …) wrap the above with rev checks |
+| Edit (agent) | Harness tools (`read`, `write`, …) wrap the above with rev checks |
 | Raw bytes | `ReadFile` / `WriteFile` |
 
-`vfs` does not implement content grep. Live host search is `run_command` → `rg` over the FUSE tree (dirty IR plaintext). Indexed recall of mount content is the optional `vfsindex` bridge when a brain engine is wired.
+`vfs` does not implement content grep. Live host search is `run_command` → `rg` over the FUSE tree (provider plaintext). Indexed recall of mount content is the optional `vfsindex` bridge when a brain engine is wired. Indexed hits are not a behavior-preserving stand-in for live `rg`.
 
 ### Codec routing
 
@@ -191,9 +191,9 @@ Tool guidance:
 
 `DetectMediaType` is a helper **providers** call when filling `MediaType`. Empty / missing type is treated as `application/octet-stream` (no IR).
 
-FUSE: hosts call `MountSession.FuseMount(dir)` for a read-only kernel tree. **Every mount point must be a single path segment** (`/work`, `/engram`). Multi-segment points (`/tmp/tacklr`) fail `FuseMount`. File `Read`/`getattr` use `ReadText` (dirty plaintext). Binary files use `Stat.Size` and `io.ReaderAt` when the handle supports it. `session.Mount` attaches a provider; `FuseMount` is the host kernel mount. `HostDir()` is the last mount directory (host-facing only). `FuseAvailable()` probes `/dev/fuse` and `/dev/macfuse*`. `Close` unmounts.
+FUSE: hosts call `MountSession.FuseMount(dir)` for a read-only kernel tree. **Every mount point must be a single path segment** (`/work`, `/engram`). Multi-segment points (`/tmp/tacklr`) fail `FuseMount`. File `Read`/`getattr` use `ReadText` (provider plaintext). Binary files use `Stat.Size` and `io.ReaderAt` when the handle supports it. `session.Mount` attaches a provider; `FuseMount` is the host kernel mount. `HostDir()` is the last mount directory (host-facing only). `FuseAvailable()` probes `/dev/fuse` and `/dev/macfuse*`. `Close` unmounts.
 
-`server.Registry` starts FUSE after construct when the session has a VFS: `$TMP/tacklr-fuse/<session>` mode `0700`. No device → degrade and Store (`list`/`stat` still work; `run_command` returns `ErrFuseNotMounted`). Device present and mount fails after one suffix retry → fail-hard (Close, do not Store). `cmd/testserver` bootstraps `Point: /work` (LocalFactory.Base stays the host jail dir). The harness does not call `FuseMount`.
+`server.Registry` starts FUSE after construct when the session has a VFS: `$TMP/tacklr-fuse/<session>` mode `0700`. Production without a device has **no** `MountSession` (no VFS tools, no `run_command`). Tests inject `DirectProjection` so `list`/`stat` still work and `run_command` returns `ErrFuseNotMounted` until `HostDir` is set. Device present and mount fails after one suffix retry → fail-hard (Close, do not Store). `cmd/testserver` bootstraps `Point: /work` (`LocalFactory.Base` is the host jail). The harness does not call `FuseMount` and `Close` does not unmount.
 
 `TextCodec` requires valid UTF-8 and builds a `TextDocument` labeled with the caller’s media type.
 
@@ -342,7 +342,7 @@ start, end, _ := vfs.BlockReplaceSpan(b, false) // body only under a heading
 _ = doc.ReplaceLines(start, end, []string{"new body"})
 ```
 
-Agent tools use the same ideas with generic names: `block_id`, optional `outline` on read, `block_id` + `body` on replace. Citations: `path#block_id`. Projectors stay internal to `vfs` by media type — hosts do not call Markdown outline helpers.
+Agent tools use the same ideas with generic names: `block_id`, optional `outline` on `read`, `block_id` + `body` on `write`. Citations: `path#block_id`. Projectors stay internal to `vfs` by media type — hosts do not call Markdown outline helpers.
 
 ## Two jobs (do not mix)
 
@@ -457,8 +457,9 @@ When the harness has **Brain + MountSession + search namespace**, it owns a
 | `index_file` | Selective ingest of key virtual **files** (max 8); errors under `none` |
 | `unindex` | Soft-delete the brain mirror; drops selective track |
 | `run_command` | `/bin/sh -c` with cwd = FUSE root; relative paths (`work/foo`); `PermissionRequired` unless `RunCommandUnattended` |
-| `find_content` | Index-backed search requiring `vfs_path` (prefer `run_command` → `rg` for live text) |
-| `find_files` | Bounded live VFS walk by name/glob (prefer `run_command` → `fd`/`find`) |
+| `read` / `write` | Line window / first page / block read; one mutation mode (full, span, old/new, block) |
+| `list` / `stat` | Stay when a `MountSession` exists. Prefer `run_command` → `ls` / `stat` on FUSE. |
+| `mkdir` / `remove` | Stay until writable FUSE |
 | `save_*` | Write the Engram file on the brain Provider (or `Engine.Put` if no brain mount) |
 | `link` / `expand` / `find_links` | Path-native graph (G1): prefer virtual paths; surface neighbor `vfs_path` |
 
@@ -466,15 +467,16 @@ Omit Brain, VFS, or namespace to opt out (no tools, no harness indexer, no async
 
 ### Session-visible body vs AfterPersist
 
-`IndexPath` uses `MountSession.ReadText` / `Open`, which honor the **dirty IR cache**.
-So `index_file` after `write` / `replace_*` indexes the session-visible body **before
-Sync**. `AfterPersist` (fired by `WriteFile` / `Sync`) drives background reindex when
-policy (or selective track) allows. Write success is never blocked by reindex failures.
+`IndexPath` uses `MountSession.ReadText` / `Open`. Writes are write-through, so
+`index_file` after `write` indexes the last persist. `AfterPersist` (fired by
+`WriteFile` / `WriteDocument`) drives background reindex when policy (or selective
+track) allows. Write success is never blocked by reindex failures.
 
 Markdown files are chunked by **heading/preamble blocks** (`block_id` and `heading_path` properties) when `Blocks()` is non-empty; other text still uses line windows.
 
-Indexed content is queried with `find_content`, `search` / `find_exact` (prefer hits with `vfs_path`).
-Live grep is `run_command` + `rg` through the FUSE tree.
+Indexed content is queried with `search` / `find_exact` (prefer hits with `vfs_path`).
+Live names/grep are `run_command` → `fd` / `find` / `rg` through the FUSE tree.
+Indexed `search` hits are not a behavior-preserving stand-in for live `rg`.
 
 ---
 
@@ -486,11 +488,11 @@ Live grep is `run_command` + `rg` through the FUSE tree.
 |-------|----------------|
 | `vfs.ContentHash` / `ContentRev` / `LineWindow.Rev` | Identity of session-visible body |
 | `ReadText`, `ReplaceLines`, `WriteDocument` | Low-level IR mutate + provider persist |
-| Harness `read_lines`, `replace_lines`, `replace_text`, `write`, `list`, `stat`, `mkdir`, `remove` | Require `rev` on edits, reject stale, format numbered lines |
+| Harness `read`, `write`, `list`, `stat`, `mkdir`, `remove` | Require `rev` on edits, reject stale, format numbered lines |
 
 ```text
-read_lines   → path + rev + numbered window
-replace_*    → must pass rev; on mismatch ErrStaleContent → re-read
+read   → path + rev + numbered window (first page when start/end omitted)
+write  → exactly one mode; pass rev from read; mismatch → ErrStaleContent
 WriteDocument → provider translates IR and persists now
 ```
 

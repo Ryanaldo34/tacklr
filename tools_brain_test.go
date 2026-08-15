@@ -639,7 +639,7 @@ func TestBrainTools_engramPathGraph(t *testing.T) {
 		t.Fatal(err)
 	}
 	ns := uuid.New()
-	mustMountBrain(t, ctx, reg, ms, eng, ns, vfs.MountSpec{})
+	mustMountBrain(ctx, t, reg, ms, eng, ns, vfs.MountSpec{})
 	h := NewAgent(ctx, AgentOptions{
 		SessionID: "engram-graph", Store: stores.NewInMemoryStore(),
 		MountSession: ms, Model: &mockStrategy{},
