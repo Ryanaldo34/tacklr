@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/streaming"
@@ -1435,6 +1437,15 @@ func TestNewAgentFromSession_resumesPendingToolInterrupt(t *testing.T) {
 		Store:  store,
 		Tools:  []*Tool{interruptTool},
 	})
+	ns := uuid.New()
+	ah.SetSearchNamespace(ns)
+	if got, ok := ah.SearchNamespace(); !ok || got != ns {
+		t.Fatalf("SetSearchNamespace: %v ok=%v", got, ok)
+	}
+	ah.ClearSearchNamespace()
+	if _, ok := ah.SearchNamespace(); ok {
+		t.Fatal("ClearSearchNamespace left a namespace")
+	}
 	ah.sessionId = "sess-pending-resume"
 
 	ch, err := ah.Run(context.Background(), "need a choice")
@@ -1458,6 +1469,10 @@ func TestNewAgentFromSession_resumesPendingToolInterrupt(t *testing.T) {
 	}
 	if len(ah.pendingToolCalls) != 1 {
 		t.Fatalf("pending tools = %d, want 1", len(ah.pendingToolCalls))
+	}
+
+	if _, err := NewAgentFromSession(context.Background(), "sess-pending-resume", AgentOptions{}); err == nil {
+		t.Fatal("NewAgentFromSession requires store")
 	}
 
 	// Process boundary: drop live harness, reload checkpoint.

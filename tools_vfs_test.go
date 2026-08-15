@@ -363,6 +363,29 @@ func TestVFSTools_readWriteRev(t *testing.T) {
 		!strings.Contains(res.output, "text=") {
 		t.Fatalf("read ir: %q err=%v", res.output, err)
 	}
+
+	_, err = tools["read"].invoke(ctx, `{"path":"/work/plain.txt","start":5,"end":3}`, rt)
+	if err == nil || !strings.Contains(err.Error(), "invalid range") {
+		t.Fatalf("inverted range: %v", err)
+	}
+	_, err = tools["read"].invoke(ctx, `{"path":"work/plain.txt"}`, rt)
+	if err == nil || !strings.Contains(err.Error(), "absolute virtual path") {
+		t.Fatalf("relative path: %v", err)
+	}
+	_, err = tools["read"].invoke(ctx, `{"path":"/work/plain.txt","block_id":"nope"}`, rt)
+	if err == nil || !strings.Contains(err.Error(), "no structured blocks") {
+		t.Fatalf("block on plain: %v", err)
+	}
+	if _, err := ms.ContentRev(ctx, "/work/pic.bin"); err == nil {
+		// pic may not exist in this mount; seed and hash raw bytes
+	}
+	if err := ms.WriteFile(ctx, "/work/pic.bin", []byte{0x89, 'P', 'N', 'G'}); err != nil {
+		t.Fatal(err)
+	}
+	revBin, err := ms.ContentRev(ctx, "/work/pic.bin")
+	if err != nil || revBin.Hash == "" {
+		t.Fatalf("binary ContentRev: %+v err=%v", revBin, err)
+	}
 }
 
 func gotText(t *testing.T, ms *vfs.MountSession, path string) string {

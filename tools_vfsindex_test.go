@@ -131,6 +131,10 @@ func TestVFSIndexTools_indexSearchUnindex(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	if _, err := runWriteTool(t, h, indexTool, `{}`); err == nil || !strings.Contains(err.Error(), "path or paths") {
+		t.Fatalf("index without path: %v", err)
+	}
+
 	out, err := runWriteTool(t, h, indexTool, `{"path":"/work/note.txt"}`)
 	if err != nil {
 		t.Fatal(err)

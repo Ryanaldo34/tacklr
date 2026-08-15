@@ -53,6 +53,23 @@ func TestRunCommand_catDirtyAndFalseExit(t *testing.T) {
 		t.Fatalf("false: %s", res.output)
 	}
 
+	if _, err := tool.invoke(ctx, `{"command":"   "}`, rt); err == nil {
+		t.Fatal("empty command")
+	}
+
+	res, err = tool.invoke(ctx, `{"command":"mkdir -p work/fromsh && printf 'from-sh\n' > work/fromsh/x.txt"}`, rt)
+	if err != nil || !strings.Contains(res.output, "exit=0") {
+		t.Fatalf("host write: %s err=%v", res.output, err)
+	}
+	got, err := ms.ReadText(ctx, "/work/fromsh/x.txt")
+	if err != nil || got.Text() != "from-sh\n" {
+		body := ""
+		if got != nil {
+			body = got.Text()
+		}
+		t.Fatalf("session after run_command write: %q err=%v", body, err)
+	}
+
 	if _, err := exec.LookPath("rg"); err == nil {
 		res, err = tool.invoke(ctx, `{"command":"rg -F xyzzy-tacklr work"}`, rt)
 		if err != nil {

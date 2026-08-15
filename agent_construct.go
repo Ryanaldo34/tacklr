@@ -359,9 +359,6 @@ func NewAgentFromSession(ctx context.Context, sessionId string, opts AgentOption
 // rehydrateHarnessState turns JSON-round-tripped RuntimeState values back into
 // the typed bags StateSet writes. Call at the checkpoint boundary only.
 func rehydrateHarnessState(sm *session.SessionManager) {
-	if sm == nil {
-		return
-	}
 	if raw, ok := sm.StateGet(parkedWorkersStateKey); ok {
 		sm.StateSet(parkedWorkersStateKey, decodeParkedWorkers(raw))
 	}
@@ -389,13 +386,6 @@ func decodeBoolSet(raw any) map[string]bool {
 
 func decodeParkedWorkers(raw any) map[string]parkedWorkerMeta {
 	if m, ok := raw.(map[string]parkedWorkerMeta); ok {
-		return m
-	}
-	if s, ok := raw.(string); ok {
-		var m map[string]parkedWorkerMeta
-		if json.Unmarshal([]byte(s), &m) != nil || m == nil {
-			return map[string]parkedWorkerMeta{}
-		}
 		return m
 	}
 	b, err := json.Marshal(raw)

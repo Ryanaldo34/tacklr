@@ -164,18 +164,90 @@ func TestFuseMount_plaintextWritableProjectedEROFS(t *testing.T) {
 		t.Fatalf("binary write err = %v", err)
 	}
 
+	if _, err := exec.LookPath("rg"); err == nil {
+		out, err := exec.Command("rg", "-F", "appended", dir).CombinedOutput()
+		if err != nil || !strings.Contains(string(out), "appended") {
+			t.Fatalf("rg after host append: %v out=%s", err, out)
+		}
+	}
+
 	if err := os.Remove(filepath.Join(work, "d", "a.txt")); err != nil {
 		t.Fatalf("rm: %v", err)
 	}
 	if _, err := ms.Stat(ctx, "/work/d/a.txt"); !errors.Is(err, ErrNotExist) {
 		t.Fatalf("stat after rm: %v", err)
 	}
+	if err := os.Remove(filepath.Join(work, "d")); err != nil {
+		t.Fatalf("rmdir: %v", err)
+	}
+	if _, err := ms.Stat(ctx, "/work/d"); !errors.Is(err, ErrNotExist) {
+		t.Fatalf("stat after rmdir: %v", err)
+	}
 
-	if _, err := exec.LookPath("rg"); err == nil {
-		out, err := exec.Command("rg", "-F", "appended", dir).CombinedOutput()
-		if err != nil || !strings.Contains(string(out), "appended") {
-			t.Fatalf("rg after host append: %v out=%s", err, out)
-		}
+	if err := os.Rename(filepath.Join(work, "note.txt"), filepath.Join(work, "renamed.txt")); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	got, err = ms.ReadText(ctx, "/work/renamed.txt")
+	if err != nil || !strings.Contains(got.Text(), "appended") {
+		t.Fatalf("rename visible: %q err=%v", textOr(got), err)
+	}
+	if _, err := ms.Stat(ctx, "/work/note.txt"); !errors.Is(err, ErrNotExist) {
+		t.Fatalf("old name after rename: %v", err)
+	}
+
+	tf, err := os.OpenFile(filepath.Join(work, "renamed.txt"), os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tf.Truncate(4); err != nil {
+		t.Fatalf("handle truncate: %v", err)
+	}
+	if err := tf.Close(); err != nil {
+		t.Fatal(err)
+	}
+	got, err = ms.ReadText(ctx, "/work/renamed.txt")
+	if err != nil || got.Text() != "old\n" {
+		t.Fatalf("truncate body: %q err=%v", textOr(got), err)
+	}
+
+	if _, err := os.OpenFile(work, os.O_WRONLY, 0); err == nil {
+		t.Fatal("open dir for write")
+	}
+
+	wf, err := os.OpenFile(filepath.Join(work, "renamed.txt"), os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wf.Write([]byte("sync")); err != nil {
+		t.Fatal(err)
+	}
+	if err := wf.Sync(); err != nil {
+		t.Fatalf("fsync: %v", err)
+	}
+	if err := wf.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Create(filepath.Join(dir, "root.txt")); err == nil {
+		t.Fatal("create at fuse root: want EPERM")
+	}
+	if err := os.Mkdir(filepath.Join(dir, "rootdir"), 0o755); err == nil {
+		t.Fatal("mkdir at fuse root: want EPERM")
+	}
+
+	if err := ms.FuseMount(dir); err != nil {
+		t.Fatalf("remount same dir: %v", err)
+	}
+	dir2 := t.TempDir()
+	if err := ms.FuseMount(dir2); err != nil {
+		t.Fatalf("remount other dir: %v", err)
+	}
+	if got := ms.HostDir(); got != dir2 {
+		t.Fatalf("HostDir after remount = %q want %q", got, dir2)
+	}
+	moved, err := os.ReadFile(filepath.Join(dir2, "work", "renamed.txt"))
+	if err != nil || !strings.Contains(string(moved), "sync") {
+		t.Fatalf("remount read: %q err=%v", moved, err)
 	}
 }
 
@@ -199,5 +271,16 @@ func TestFuseMount_rejectsMultiSegmentPoint(t *testing.T) {
 	err := ms.FuseMount(t.TempDir())
 	if err == nil || !strings.Contains(err.Error(), "/tmp/tacklr") {
 		t.Fatalf("want multi-segment error naming the point, got %v", err)
+	}
+	if err := ms.FuseMount(""); err == nil {
+		t.Fatal("empty FuseMount dir")
+	}
+	if FuseAvailable() {
+		empty := NewMountSession("empty-tree", reg)
+		dir := t.TempDir()
+		if err := empty.FuseMount(dir); err != nil {
+			t.Fatalf("empty specs FuseMount: %v", err)
+		}
+		_ = empty.Close()
 	}
 }
