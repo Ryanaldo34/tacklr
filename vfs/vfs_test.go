@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -35,12 +34,18 @@ func TestMountSession_localSession(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if n := len(ms.Infos()); n != 3 {
-		t.Fatalf("Infos len = %d", n)
+	if n := len(ms.Specs()); n != 3 {
+		t.Fatalf("Specs len = %d", n)
 	}
 
 	if err := ms.WriteFile(ctx, "/work/hello.go", []byte("package main\n")); err != nil {
 		t.Fatal(err)
+	}
+	if mt, err := ms.Classify(ctx, "/work/hello.go", nil); err != nil || mt != "text/x-go" {
+		t.Fatalf("Classify: %q err=%v", mt, err)
+	}
+	if spec, err := ms.SpecAt("/work/hello.go"); err != nil || spec.Point != "/work" {
+		t.Fatalf("SpecAt: %+v err=%v", spec, err)
 	}
 	// empty write-through
 	if err := ms.WriteFile(ctx, "/work/empty.txt", nil); err != nil {
@@ -92,14 +97,12 @@ func TestMountSession_localSession(t *testing.T) {
 	}
 
 	// Segment boundary: /ab must not claim /a
-	if _, _, err := ms.Lookup("/a/file"); err != nil && !errors.Is(err, vfs.ErrNotMounted) {
-		t.Fatalf("lookup /a: %v", err)
-	} else if err == nil {
-		// longest prefix might still resolve to something — only fail if /ab claimed
+	if spec, err := ms.SpecAt("/a/file"); err == nil && spec.Point == "/ab" {
+		t.Fatalf("SpecAt /a claimed by /ab: %+v", spec)
 	}
-	mi, rel, err := ms.Lookup("/ab/x")
-	if err != nil || mi.Point != "/ab" || rel != "x" {
-		t.Fatalf("lookup /ab: %+v rel=%q err=%v", mi, rel, err)
+	spec, err := ms.SpecAt("/ab/x")
+	if err != nil || spec.Point != "/ab" {
+		t.Fatalf("SpecAt /ab: %+v err=%v", spec, err)
 	}
 
 	if err := ms.WriteFile(ctx, "/work/foo/../../etc/passwd", []byte("x")); err == nil {
@@ -159,7 +162,111 @@ func TestMountSession_localSession(t *testing.T) {
 	}
 }
 
-// TestDocument_session: IR, cache write-back, Sync, revalidation, codec rejects, RO.
+// TestMountSession_byteProviderWriteAndLimits: providers without PutFile still
+// persist through OpenFile; oversize Stat is rejected; unknown size streams.
+func TestMountSession_byteProviderWriteAndLimits(t *testing.T) {
+	ctx := t.Context()
+	store := &memStore{files: make(map[string]memObj)}
+	reg := vfs.NewBackendRegistry()
+	if err := reg.Register(memFactory{id: "mem", store: store}); err != nil {
+		t.Fatal(err)
+	}
+	ms := vfs.NewMountSession("mem-sess", reg)
+	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/mem", Profile: "mem"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.WriteFile(ctx, "/mem/a.txt", []byte("hello-mem\n")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ms.ReadFile(ctx, "/mem/a.txt")
+	if err != nil || string(got) != "hello-mem\n" {
+		t.Fatalf("ReadFile=%q err=%v", got, err)
+	}
+	if rev, err := ms.ContentRev(ctx, "/mem/a.txt"); err != nil || rev.Hash != vfs.ContentHash("hello-mem\n") {
+		t.Fatalf("ContentRev: %+v err=%v", rev, err)
+	}
+	if err := ms.WriteFile(ctx, "/mem/empty.txt", nil); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := ms.ReadFile(ctx, "/mem/empty.txt"); err != nil || len(b) != 0 {
+		t.Fatalf("empty: %q err=%v", b, err)
+	}
+	store.mu.Lock()
+	store.files["huge.bin"] = memObj{huge: true, size: int64(vfs.MaxReadFileBytes) + 1}
+	store.files["stream.txt"] = memObj{data: []byte("stream-body\n"), size: -1}
+	store.files["statonly.txt"] = memObj{data: []byte("x"), size: 1, statOnly: true}
+	store.files["short.bin"] = memObj{data: []byte("ab"), size: 10, short: true}
+	store.mu.Unlock()
+	if _, err := ms.ReadFile(ctx, "/mem/huge.bin"); !errors.Is(err, vfs.ErrTooLarge) {
+		t.Fatalf("huge: %v", err)
+	}
+	if b, err := ms.ReadFile(ctx, "/mem/stream.txt"); err != nil || string(b) != "stream-body\n" {
+		t.Fatalf("stream: %q err=%v", b, err)
+	}
+	if _, err := ms.ReadFile(ctx, "/mem/statonly.txt"); err == nil || !strings.Contains(err.Error(), "not readable") {
+		t.Fatalf("stat-only ReadFile: %v", err)
+	}
+	if _, err := ms.ReadFile(ctx, "/mem/short.bin"); err == nil {
+		t.Fatal("short ReadFull")
+	}
+	if err := ms.WriteFile(ctx, "/mem/too-big", bytes.Repeat([]byte("x"), vfs.MaxReadFileBytes+1)); err == nil {
+		t.Fatal("oversize write")
+	}
+	store.failOpen = true
+	if err := ms.WriteFile(ctx, "/mem/nope.txt", []byte("x")); err == nil {
+		t.Fatal("OpenFile write fail")
+	}
+	store.failOpen = false
+	store.noWriter = true
+	if err := ms.WriteFile(ctx, "/mem/ro-handle.txt", []byte("x")); !errors.Is(err, vfs.ErrReadOnly) {
+		t.Fatalf("not writer: %v", err)
+	}
+	store.noWriter = false
+	store.shortWrite = true
+	if err := ms.WriteFile(ctx, "/mem/short-write.txt", []byte("hello")); err == nil {
+		t.Fatal("short write")
+	}
+	store.shortWrite = false
+	store.writeErr = true
+	if err := ms.WriteFile(ctx, "/mem/err-write.txt", []byte("hello")); err == nil {
+		t.Fatal("write error")
+	}
+	store.writeErr = false
+	if _, err := ms.ContentRev(ctx, "rel"); err == nil {
+		t.Fatal("ContentRev relative")
+	}
+	if _, err := ms.Classify(ctx, "/nomount/x.txt", nil); err == nil {
+		t.Fatal("Classify unmounted")
+	}
+	for _, p := range []string{"", "rel", "/has\x00x"} {
+		if _, err := ms.Stat(ctx, p); !errors.Is(err, vfs.ErrInvalidPath) {
+			t.Fatalf("Stat %q: %v", p, err)
+		}
+		if _, err := ms.Open(ctx, p); !errors.Is(err, vfs.ErrInvalidPath) {
+			t.Fatalf("Open %q: %v", p, err)
+		}
+		if _, err := ms.ReadFile(ctx, p); !errors.Is(err, vfs.ErrInvalidPath) {
+			t.Fatalf("ReadFile %q: %v", p, err)
+		}
+		if err := ms.WriteFile(ctx, p, []byte("x")); !errors.Is(err, vfs.ErrInvalidPath) {
+			t.Fatalf("WriteFile %q: %v", p, err)
+		}
+		if _, err := ms.ReadDir(ctx, p); !errors.Is(err, vfs.ErrInvalidPath) {
+			t.Fatalf("ReadDir %q: %v", p, err)
+		}
+		if err := ms.Remove(ctx, p); !errors.Is(err, vfs.ErrInvalidPath) {
+			t.Fatalf("Remove %q: %v", p, err)
+		}
+	}
+	if err := ms.MkdirAll(ctx, "/nomount/dir"); !errors.Is(err, vfs.ErrNotMounted) {
+		t.Fatalf("MkdirAll unmounted: %v", err)
+	}
+	if err := ms.Remove(ctx, "/nomount/x"); !errors.Is(err, vfs.ErrNotMounted) {
+		t.Fatalf("Remove unmounted: %v", err)
+	}
+}
+
+// TestDocument_session: IR persist, revalidation, codec rejects, RO.
 func TestDocument_session(t *testing.T) {
 	ctx := t.Context()
 	base := t.TempDir()
@@ -226,8 +333,8 @@ func TestDocument_session(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if text.MediaType() != "text/plain" || text.Encoding() != "utf-8" || text.LineCount() != 4 {
-		t.Fatalf("open: mt=%q enc=%q count=%d", text.MediaType(), text.Encoding(), text.LineCount())
+	if text.Path() != "/work/note.txt" || text.MediaType() != "text/plain" || text.Encoding() != "utf-8" || text.LineCount() != 4 {
+		t.Fatalf("open: path=%q mt=%q enc=%q count=%d", text.Path(), text.MediaType(), text.Encoding(), text.LineCount())
 	}
 	if err := text.SetLine(2, "B"); err != nil {
 		t.Fatal(err)
@@ -238,36 +345,55 @@ func TestDocument_session(t *testing.T) {
 	if err := ms.WriteDocument(ctx, text); err != nil {
 		t.Fatal(err)
 	}
-	// Session-visible ReadFile prefers dirty IR (backend still old until Sync).
 	raw, err := ms.ReadFile(ctx, "/work/note.txt")
 	if err != nil || string(raw) != "a\nB\nC\nD\n" {
-		t.Fatalf("dirty ReadFile = %q err=%v", raw, err)
+		t.Fatalf("ReadFile after WriteDocument = %q err=%v", raw, err)
 	}
 	if w, err := ms.ReadLines(ctx, "/work/note.txt", 1, 3); err != nil || w.Returned != 2 || w.Lines[1] != "B" {
-		t.Fatalf("dirty ReadLines = %+v err=%v", w, err)
+		t.Fatalf("ReadLines = %+v err=%v", w, err)
 	}
 	text2, err := ms.ReadText(ctx, "/work/note.txt")
 	if err != nil || text2.Text() != "a\nB\nC\nD\n" {
-		t.Fatalf("cached read = %q err=%v", text2.Text(), err)
+		t.Fatalf("reread = %q err=%v", text2.Text(), err)
 	}
 	_ = text2.SetLine(1, "A")
 	if err := ms.WriteDocument(ctx, text2); err != nil {
 		t.Fatal(err)
 	}
-	// Sync no-op on clean path
-	if err := ms.Sync(ctx, "/work/big.txt"); err != nil {
-		t.Fatal(err)
-	}
-	if err := ms.SyncAll(ctx); err != nil {
-		t.Fatal(err)
-	}
 	raw, err = ms.ReadFile(ctx, "/work/note.txt")
 	if err != nil || string(raw) != "A\nB\nC\nD\n" {
-		t.Fatalf("after Sync = %q err=%v", raw, err)
+		t.Fatalf("after second write = %q err=%v", raw, err)
 	}
-	// second SyncAll is no-op
-	if err := ms.SyncAll(ctx); err != nil {
+	if disk, err := os.ReadFile(filepath.Join(base, "note.txt")); err != nil || string(disk) != "A\nB\nC\nD\n" {
+		t.Fatalf("disk = %q err=%v", disk, err)
+	}
+	if rev, err := ms.ContentRev(ctx, "/work/note.txt"); err != nil || rev.Hash != vfs.ContentHash("A\nB\nC\nD\n") {
+		t.Fatalf("rev: %+v err=%v", rev, err)
+	}
+
+	nested := vfs.NewTextDocument("/work/pkg/x.go", "text/x-go", "utf-8", "package pkg\n")
+	if err := ms.WriteDocument(ctx, nested); err != nil {
 		t.Fatal(err)
+	}
+	if raw, err := os.ReadFile(filepath.Join(base, "pkg", "x.go")); err != nil || string(raw) != "package pkg\n" {
+		t.Fatalf("nested disk = %q err=%v", raw, err)
+	}
+
+	if _, err := ms.ReadText(ctx, "/work"); err == nil {
+		t.Fatal("ReadText on directory")
+	}
+	if _, err := ms.ReadLines(ctx, "/work/big.txt", 0, 1); !errors.Is(err, vfs.ErrLineOutOfRange) {
+		t.Fatalf("ReadLines start 0: %v", err)
+	}
+	if w, err := ms.ReadLines(ctx, "/work/big.txt", 1, 10000); err != nil || w.Returned > 500 {
+		t.Fatalf("clamp: returned=%d err=%v", w.Returned, err)
+	}
+	long := strings.Repeat("y", vfs.MaxLineBytes+2) + "\n"
+	if err := ms.WriteFile(ctx, "/work/long.txt", []byte(long)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ms.ReadLines(ctx, "/work/long.txt", 1, 2); !errors.Is(err, vfs.ErrLineTooLong) {
+		t.Fatalf("long line: %v", err)
 	}
 
 	// Revalidation
@@ -290,7 +416,6 @@ func TestDocument_session(t *testing.T) {
 	if goDoc, err := ms.ReadText(ctx, "/work/main.go"); err != nil || goDoc.MediaType() != "text/x-go" {
 		t.Fatalf("go: %v", err)
 	}
-	// Remove drops cache
 	if err := ms.Remove(ctx, "/work/main.go"); err != nil {
 		t.Fatal(err)
 	}
@@ -304,6 +429,40 @@ func TestDocument_session(t *testing.T) {
 	}
 	if _, err := ms.OpenDocument(ctx, "/work/pic.bin", nil); !errors.Is(err, vfs.ErrNoCodec) {
 		t.Fatalf("binary: %v", err)
+	}
+	if err := ms.WriteFile(ctx, "/work/blob.bin", []byte("hello\nworld\x00\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ms.ReadText(ctx, "/work/blob.bin"); !errors.Is(err, vfs.ErrNoCodec) {
+		t.Fatalf("blob IR: %v", err)
+	}
+	// No IR codec; ReadLines still pages the UTF-8 body.
+	if w, err := ms.ReadLines(ctx, "/work/blob.bin", 1, 4); err != nil || w.Returned != 2 || w.Lines[0] != "hello" {
+		t.Fatalf("ReadLines blob: %+v err=%v", w, err)
+	}
+	if w, err := ms.ReadLines(ctx, "/work/blob.bin", 1, 1); err != nil || w.Returned != 0 {
+		t.Fatalf("empty stream window: %+v err=%v", w, err)
+	}
+	if _, err := ms.ReadLines(ctx, "rel", 1, 2); err == nil {
+		t.Fatal("ReadLines relative")
+	}
+	if _, err := ms.ReadLines(ctx, "/work/missing.txt", 1, 2); !errors.Is(err, vfs.ErrNotExist) {
+		t.Fatalf("ReadLines missing: %v", err)
+	}
+	if err := ms.WriteFile(ctx, "/work/bad.bin", []byte("ok\n\xff\xfe\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ms.ReadLines(ctx, "/work/bad.bin", 1, 3); !errors.Is(err, vfs.ErrInvalidUTF8) {
+		t.Fatalf("stream utf8: %v", err)
+	}
+	if err := ms.WriteFile(ctx, "/work/README", []byte("hello from readme\n")); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := ms.Stat(ctx, "/work/README"); err != nil || st.MediaType != "text/plain" {
+		t.Fatalf("local no-ext Stat: %+v err=%v", st, err)
+	}
+	if doc, err := ms.ReadText(ctx, "/work/README"); err != nil || doc.MediaType() != "text/plain" {
+		t.Fatalf("local no-ext IR: %v", err)
 	}
 	if err := ms.WriteFile(ctx, "/work/bad.txt", []byte{0xff, 0xfe, 0xfd}); err != nil {
 		t.Fatal(err)
@@ -330,17 +489,30 @@ func TestDocument_session(t *testing.T) {
 		t.Fatalf("bare write: %v", err)
 	}
 
-	// Cache eviction under entry cap (clean entries only)
-	for i := 0; i < 40; i++ {
-		p := "/work/ev" + strconv.Itoa(i) + ".txt"
-		if err := ms.WriteFile(ctx, p, []byte("x\n")); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := ms.ReadText(ctx, p); err != nil {
-			t.Fatal(err)
-		}
+	huge := vfs.NewTextDocument("/work/huge.txt", "text/plain", "utf-8", strings.Repeat("x", vfs.MaxReadFileBytes+1))
+	if err := ms.WriteDocument(ctx, huge); !errors.Is(err, vfs.ErrTooLarge) {
+		t.Fatalf("oversize write: %v", err)
 	}
-	// still functional after eviction pressure
+
+	if mt, err := ms.Classify(ctx, "/work/note.txt", nil); err != nil || mt != "text/plain" {
+		t.Fatalf("Classify: %q err=%v", mt, err)
+	}
+	if mt, err := ms.Classify(ctx, "/work/new.json", []byte(`{"a":1}`)); err != nil || mt != "application/json" {
+		t.Fatalf("Classify new json: %q err=%v", mt, err)
+	}
+	if mt, err := ms.Classify(ctx, "/work/sniff", []byte("a\x00b")); err != nil || mt != "application/octet-stream" {
+		t.Fatalf("Classify nul: %q err=%v", mt, err)
+	}
+	if spec, err := ms.SpecAt("/work/note.txt"); err != nil || spec.Point != "/work" {
+		t.Fatalf("SpecAt: %+v err=%v", spec, err)
+	}
+	if _, err := ms.SpecAt("/nope/x"); err == nil {
+		t.Fatal("SpecAt unmounted")
+	}
+	if _, err := ms.Classify(ctx, "rel", nil); err == nil {
+		t.Fatal("Classify relative")
+	}
+
 	if _, err := ms.ReadText(ctx, "/work/note.txt"); err != nil {
 		t.Fatal(err)
 	}
@@ -405,18 +577,6 @@ func TestTextDocument_lines(t *testing.T) {
 	if err := doc.ReplaceLines(1, 1, []string{"z"}); err != nil || doc.Text() != "z" {
 		t.Fatalf("insert empty: %q err=%v", doc.Text(), err)
 	}
-	if s, err := vfs.FormatLines(doc, 1, 2); err != nil || s != "z" {
-		t.Fatalf("FormatLines = %q err=%v", s, err)
-	}
-	if _, err := vfs.FormatLines(doc, 0, 1); !errors.Is(err, vfs.ErrLineOutOfRange) {
-		t.Fatalf("FormatLines OOR: %v", err)
-	}
-	if _, err := vfs.AsTextual(doc); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := vfs.AsTextual(bareDocument{}); !errors.Is(err, vfs.ErrNotTextual) {
-		t.Fatalf("AsTextual: %v", err)
-	}
 	// defaults
 	d2 := vfs.NewTextDocument("/x", "", "", "hi")
 	if d2.MediaType() != "text/plain" || d2.Encoding() != "utf-8" {
@@ -425,58 +585,14 @@ func TestTextDocument_lines(t *testing.T) {
 }
 
 // TestDetectMediaType covers extension map, sniff, and binary rejection.
-func TestDetectMediaType(t *testing.T) {
-	if mt := vfs.DetectMediaType("/a/main.go", nil); mt != "text/x-go" {
-		t.Fatalf("extension: %s", mt)
-	}
-	if mt := vfs.DetectMediaType("/a/unknown", []byte("hello world\n")); mt != "text/plain" {
-		t.Fatalf("utf8 sniff: %s", mt)
-	}
-	if mt := vfs.DetectMediaType("/a/x", []byte("a\x00b")); mt != "application/octet-stream" {
-		t.Fatalf("nul: %s", mt)
-	}
-	png := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}
-	if mt := vfs.DetectMediaType("/a/x", png); mt != "image/png" {
-		t.Fatalf("png sniff: %s", mt)
-	}
-	if mt := vfs.DetectMediaType("/a/x", []byte{0xff, 0xfe, 0xfd}); mt == "text/plain" {
-		t.Fatalf("invalid utf8 as text: %s", mt)
-	}
-	// long sample still sniffs
-	long := bytes.Repeat([]byte("a"), 600)
-	if mt := vfs.DetectMediaType("/a/x", long); mt != "text/plain" {
-		t.Fatalf("long utf8: %s", mt)
-	}
-	if mt := vfs.DetectMediaType("/a/noext", nil); mt != "application/octet-stream" {
-		t.Fatalf("no sample: %s", mt)
-	}
-}
-
-// TestMergeSpecs covers host/harness merge helper.
-func TestMergeSpecs(t *testing.T) {
-	merged, err := vfs.MergeSpecs(
-		[]vfs.MountSpec{{Point: "/a", Profile: "p"}},
-		[]vfs.MountSpec{{Point: "/b", Profile: "p"}},
-	)
-	if err != nil || len(merged) != 2 {
-		t.Fatalf("merge: %v %v", merged, err)
-	}
-	if _, err := vfs.MergeSpecs(
-		[]vfs.MountSpec{{Point: "/a", Profile: "p"}},
-		[]vfs.MountSpec{{Point: "/a", Profile: "p"}},
-	); !errors.Is(err, vfs.ErrAlreadyMounted) {
-		t.Fatalf("duplicate: %v", err)
-	}
-	if _, err := vfs.MergeSpecs([]vfs.MountSpec{{Point: "rel", Profile: "p"}}, nil); !errors.Is(err, vfs.ErrInvalidPath) {
-		t.Fatalf("invalid: %v", err)
-	}
-}
-
 // TestMountSession_configErrors covers unknown profile, bad paths, registry register.
 func TestMountSession_configErrors(t *testing.T) {
 	ctx := t.Context()
 	reg := vfs.NewBackendRegistry()
 	_ = reg.Register(vfs.LocalFactory{ID: "scratch", Base: t.TempDir()})
+	if !reg.HasProfile("scratch") || reg.HasProfile("nope") {
+		t.Fatal("HasProfile")
+	}
 	ms := vfs.NewMountSession("s", reg)
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/x", Profile: "nope"}); !errors.Is(err, vfs.ErrUnknownProfile) {
 		t.Fatalf("unknown profile: %v", err)
@@ -484,10 +600,10 @@ func TestMountSession_configErrors(t *testing.T) {
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/x", Profile: ""}); !errors.Is(err, vfs.ErrInvalidProvider) {
 		t.Fatalf("empty profile: %v", err)
 	}
-	if _, _, err := ms.Lookup(""); !errors.Is(err, vfs.ErrInvalidPath) {
+	if _, err := ms.SpecAt(""); !errors.Is(err, vfs.ErrInvalidPath) {
 		t.Fatalf("empty path: %v", err)
 	}
-	if _, _, err := ms.Lookup("/has\x00x"); !errors.Is(err, vfs.ErrInvalidPath) {
+	if _, err := ms.SpecAt("/has\x00x"); !errors.Is(err, vfs.ErrInvalidPath) {
 		t.Fatalf("nul path: %v", err)
 	}
 	if err := reg.Register(nil); err == nil {
@@ -510,6 +626,9 @@ func TestMountSession_configErrors(t *testing.T) {
 	ms2 := vfs.NewMountSession("s2", nil)
 	if err := ms2.Mount(ctx, vfs.MountSpec{Point: "/x", Profile: "scratch"}); err == nil {
 		t.Fatal("nil registry mount")
+	}
+	if err := ms2.Materialize(ctx, []vfs.MountSpec{{Point: "/x", Profile: "scratch"}}); err == nil {
+		t.Fatal("nil registry materialize")
 	}
 	creg := vfs.NewContentRegistry()
 	if err := creg.Register(nil); err == nil {
@@ -547,6 +666,50 @@ func TestMountSession_configErrors(t *testing.T) {
 	}
 }
 
+// TestKernelWritable: plaintext IdentityCodec is FUSE-writable; office/cloud
+// types and a registered non-identity codec are not.
+func TestKernelWritable(t *testing.T) {
+	for _, mt := range []string{
+		"text/plain", "text/markdown", "text/x-go", "application/json",
+		"application/yaml", "text/plain; charset=utf-8",
+	} {
+		if !vfs.KernelWritable(mt) {
+			t.Fatalf("KernelWritable(%q) = false, want plaintext writable", mt)
+		}
+	}
+	for _, mt := range []string{
+		"", "application/octet-stream", "image/png",
+		"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+		"application/vnd.google-apps.document", "application/vnd.notion.page",
+	} {
+		if vfs.KernelWritable(mt) {
+			t.Fatalf("KernelWritable(%q) = true, want EROFS", mt)
+		}
+	}
+	if err := vfs.DefaultContentRegistry().Register(projectedCodec{}); err != nil {
+		t.Fatal(err)
+	}
+	if vfs.KernelWritable("application/x-test-projected") {
+		t.Fatal("registered non-identity codec must not be kernel-writable")
+	}
+	if !vfs.KernelWritableFile(vfs.FileInfo{Name: "a.go", MediaType: "text/x-go"}) {
+		t.Fatal("KernelWritableFile go")
+	}
+	if vfs.KernelWritableFile(vfs.FileInfo{Name: "pic.png", MediaType: "image/png"}) {
+		t.Fatal("KernelWritableFile png")
+	}
+	if !vfs.KernelCreateOK("README") || !vfs.KernelCreateOK("note.txt") {
+		t.Fatal("KernelCreateOK plaintext")
+	}
+}
+
+type projectedCodec struct{}
+
+func (projectedCodec) MediaTypes() []string { return []string{"application/x-test-projected"} }
+func (projectedCodec) Decode(_ context.Context, p, mt string, data []byte) (vfs.Document, error) {
+	return vfs.NewTextDocument(p, mt, "utf-8", string(data)), nil
+}
+
 type emptyTypesCodec struct{}
 
 func (emptyTypesCodec) MediaTypes() []string { return nil }
@@ -562,85 +725,6 @@ func (blankTypeCodec) Decode(context.Context, string, string, []byte) (vfs.Docum
 }
 
 // TestMemProvider_limits covers size/line caps and write path without PutFile.
-func TestMemProvider_limits(t *testing.T) {
-	ctx := t.Context()
-	store := globalMemStore()
-	store.mu.Lock()
-	store.files = make(map[string]memObj)
-	store.mu.Unlock()
-
-	reg := vfs.NewBackendRegistry()
-	if err := reg.Register(memFactory{id: "mem"}); err != nil {
-		t.Fatal(err)
-	}
-	ms := vfs.NewMountSession("mem", reg)
-	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/m", Profile: "mem"}); err != nil {
-		t.Fatal(err)
-	}
-
-	// Oversized Stat → ErrTooLarge without reading body
-	store.mu.Lock()
-	store.files["huge"] = memObj{size: int64(vfs.MaxReadFileBytes) + 1, data: nil, huge: true}
-	store.mu.Unlock()
-	if _, err := ms.ReadFile(ctx, "/m/huge"); !errors.Is(err, vfs.ErrTooLarge) {
-		t.Fatalf("huge: %v", err)
-	}
-
-	// Line too long
-	longLine := strings.Repeat("x", vfs.MaxLineBytes+2) + "\n"
-	if err := ms.WriteFile(ctx, "/m/long.txt", []byte(longLine)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := ms.ReadLines(ctx, "/m/long.txt", 1, 2); !errors.Is(err, vfs.ErrLineTooLong) {
-		t.Fatalf("long line: %v", err)
-	}
-
-	// Write path without PutFile (Copy fallback) still works
-	if err := ms.WriteFile(ctx, "/m/w.txt", []byte("hi\n")); err != nil {
-		t.Fatal(err)
-	}
-	if b, err := ms.ReadFile(ctx, "/m/w.txt"); err != nil || string(b) != "hi\n" {
-		t.Fatalf("roundtrip = %q err=%v", b, err)
-	}
-	// empty write
-	if err := ms.WriteFile(ctx, "/m/e.txt", nil); err != nil {
-		t.Fatal(err)
-	}
-
-	// invalid utf-8 line while streaming
-	if err := ms.WriteFile(ctx, "/m/badline.txt", []byte("ok\n\xff\xfe\n")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := ms.ReadLines(ctx, "/m/badline.txt", 1, 3); !errors.Is(err, vfs.ErrInvalidUTF8) {
-		t.Fatalf("bad utf8 line: %v", err)
-	}
-
-	// provider write without PutFile already exercised; local File.Write via provider API
-	root := t.TempDir()
-	lp, err := vfs.NewLocalProvider(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	wf, err := lp.OpenFile(ctx, "direct.txt", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := wf.Write([]byte("via-write")); err != nil {
-		t.Fatal(err)
-	}
-	_ = wf.Close()
-	rf, err := lp.OpenFile(ctx, "direct.txt", os.O_RDONLY, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, _ := io.ReadAll(rf)
-	_ = rf.Close()
-	if string(got) != "via-write" {
-		t.Fatalf("local Write = %q", got)
-	}
-}
-
-// TestS3Factory_rejectsBadConfig covers factory validation without a live store.
 func TestS3Factory_rejectsBadConfig(t *testing.T) {
 	ctx := t.Context()
 	if _, err := (vfs.S3Factory{ID: "s3"}).Open(ctx, "s", vfs.MountSpec{}); err == nil {
@@ -653,6 +737,22 @@ func TestS3Factory_rejectsBadConfig(t *testing.T) {
 		Params: map[string]string{"prefix": "a/../b"},
 	}); err == nil {
 		t.Fatal("bad prefix")
+	}
+	var aws vfs.AWSS3
+	if _, _, _, err := aws.Head(ctx, "b", "k"); err == nil {
+		t.Fatal("nil AWS Head")
+	}
+	if _, _, _, err := aws.Get(ctx, "b", "k"); err == nil {
+		t.Fatal("nil AWS Get")
+	}
+	if err := aws.Put(ctx, "b", "k", bytes.NewReader(nil), 0); err == nil {
+		t.Fatal("nil AWS Put")
+	}
+	if err := aws.Delete(ctx, "b", "k"); err == nil {
+		t.Fatal("nil AWS Delete")
+	}
+	if _, _, err := aws.List(ctx, "b", ""); err == nil {
+		t.Fatal("nil AWS List")
 	}
 }
 
@@ -710,6 +810,26 @@ func TestLocalFactory_rejectsUnsafeConfig(t *testing.T) {
 	if _, err := p.OpenFile(ctx, "e", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644); !errors.Is(err, vfs.ErrExist) {
 		t.Fatalf("excl: %v", err)
 	}
+	cctx, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := p.Validate(cctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Validate cancel: %v", err)
+	}
+	if _, err := p.Stat(cctx, "e"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Stat cancel: %v", err)
+	}
+	if _, err := p.OpenFile(cctx, "e", os.O_RDONLY, 0); !errors.Is(err, context.Canceled) {
+		t.Fatalf("OpenFile cancel: %v", err)
+	}
+	if _, err := p.ReadDir(cctx, ""); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ReadDir cancel: %v", err)
+	}
+	if err := p.Remove(cctx, "e"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Remove cancel: %v", err)
+	}
+	if err := p.MkdirAll(cctx, "d", 0o755); !errors.Is(err, context.Canceled) {
+		t.Fatalf("MkdirAll cancel: %v", err)
+	}
 }
 
 type bareDocument struct{ path, mt string }
@@ -720,33 +840,30 @@ func (b bareDocument) MediaType() string { return b.mt }
 // --- in-memory provider (no PutFile → exercises writeContents Copy path) ---
 
 type memStore struct {
-	mu    sync.Mutex
-	files map[string]memObj
+	mu         sync.Mutex
+	files      map[string]memObj
+	failOpen   bool
+	noWriter   bool
+	shortWrite bool
+	writeErr   bool
 }
 
 type memObj struct {
-	data []byte
-	size int64
-	huge bool
+	data     []byte
+	size     int64
+	huge     bool
+	statOnly bool
+	short    bool
 }
 
-var (
-	memStoreOnce sync.Once
-	memStoreInst *memStore
-)
-
-func globalMemStore() *memStore {
-	memStoreOnce.Do(func() {
-		memStoreInst = &memStore{files: make(map[string]memObj)}
-	})
-	return memStoreInst
+type memFactory struct {
+	id    string
+	store *memStore
 }
-
-type memFactory struct{ id string }
 
 func (f memFactory) Profile() string { return f.id }
 func (f memFactory) Open(context.Context, string, vfs.MountSpec) (vfs.Provider, error) {
-	return memProvider{store: globalMemStore()}, nil
+	return memProvider{store: f.store}, nil
 }
 
 type memProvider struct{ store *memStore }
@@ -760,11 +877,11 @@ func (p memProvider) Stat(_ context.Context, name string) (vfs.FileInfo, error) 
 	if !ok {
 		return vfs.FileInfo{}, vfs.ErrNotExist
 	}
-	sz := o.size
-	if !o.huge {
-		sz = int64(len(o.data))
+	sz := int64(len(o.data))
+	if o.huge || o.size < 0 || o.short {
+		sz = o.size
 	}
-	return vfs.FileInfo{Name: name, Size: sz, Mode: 0o644, ModTime: time.Now()}, nil
+	return vfs.FileInfo{Name: name, Size: sz, Mode: 0o644, ModTime: time.Now(), MediaType: "text/plain"}, nil
 }
 
 func (p memProvider) OpenFile(_ context.Context, name string, flag int, _ fs.FileMode) (vfs.File, error) {
@@ -772,19 +889,35 @@ func (p memProvider) OpenFile(_ context.Context, name string, flag int, _ fs.Fil
 	defer p.store.mu.Unlock()
 	write := flag&(os.O_WRONLY|os.O_RDWR|os.O_CREATE|os.O_TRUNC) != 0
 	if write {
+		if p.store.failOpen {
+			return nil, errors.New("open failed")
+		}
+		if p.store.noWriter {
+			return &memStatFile{name: name, size: 0}, nil
+		}
+		if p.store.shortWrite {
+			return &shortWriteFile{name: name}, nil
+		}
+		if p.store.writeErr {
+			return &errWriteFile{name: name}, nil
+		}
 		if flag&os.O_TRUNC != 0 || flag&os.O_CREATE != 0 {
 			p.store.files[name] = memObj{data: nil}
 		}
-		return &memFile{store: p.store, name: name, write: true}, nil
+		return &memWriteFile{store: p.store, name: name}, nil
 	}
 	o, ok := p.store.files[name]
 	if !ok {
 		return nil, vfs.ErrNotExist
 	}
-	if o.huge {
-		return &memFile{store: p.store, name: name, huge: true, size: o.size}, nil
+	if o.huge || o.statOnly {
+		return &memStatFile{name: name, size: o.size}, nil
 	}
-	return &memFile{store: p.store, name: name, r: bytes.NewReader(o.data), size: int64(len(o.data))}, nil
+	sz := int64(len(o.data))
+	if o.size < 0 || o.short {
+		sz = o.size
+	}
+	return &memReadFile{Reader: bytes.NewReader(o.data), name: name, size: sz}, nil
 }
 
 func (p memProvider) ReadDir(context.Context, string) ([]vfs.DirEntry, error) {
@@ -798,141 +931,56 @@ func (p memProvider) Remove(_ context.Context, name string) error {
 }
 func (p memProvider) MkdirAll(context.Context, string, fs.FileMode) error { return nil }
 
-type memFile struct {
-	store *memStore
-	name  string
-	r     *bytes.Reader
-	buf   bytes.Buffer
-	write bool
-	huge  bool
-	size  int64
+type memReadFile struct {
+	*bytes.Reader
+	name string
+	size int64
 }
 
-func (f *memFile) Read(p []byte) (int, error) {
-	if f.huge {
-		return 0, io.EOF // never needed if ReadFile rejects by Stat
-	}
-	return f.r.Read(p)
-}
-func (f *memFile) Write(p []byte) (int, error) {
-	return f.buf.Write(p)
-}
-func (f *memFile) Close() error {
-	if f.write {
-		f.store.mu.Lock()
-		f.store.files[f.name] = memObj{data: append([]byte(nil), f.buf.Bytes()...)}
-		f.store.mu.Unlock()
-	}
-	return nil
-}
-func (f *memFile) Stat() (vfs.FileInfo, error) {
-	if f.huge {
-		return vfs.FileInfo{Name: f.name, Size: f.size, Mode: 0o644}, nil
-	}
-	if f.write {
-		return vfs.FileInfo{Name: f.name, Size: int64(f.buf.Len()), Mode: 0o644}, nil
-	}
+func (f *memReadFile) Close() error { return nil }
+func (f *memReadFile) Stat() (vfs.FileInfo, error) {
 	return vfs.FileInfo{Name: f.name, Size: f.size, Mode: 0o644}, nil
 }
 
-// TestContentRev_sessionVisible hashes dirty IR preferred over backend.
-func TestContentRev_sessionVisible(t *testing.T) {
-	ctx := t.Context()
-	base := t.TempDir()
-	reg := vfs.NewBackendRegistry()
-	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
-		t.Fatal(err)
-	}
-	ms := vfs.NewMountSession("rev", reg)
-	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := ms.WriteFile(ctx, "/work/f.txt", []byte("one\n")); err != nil {
-		t.Fatal(err)
-	}
-	disk, err := ms.ContentRev(ctx, "/work/f.txt")
-	if err != nil || disk.Hash != vfs.ContentHash("one\n") {
-		t.Fatalf("disk rev: %+v err=%v", disk, err)
-	}
-	doc, err := ms.ReadText(ctx, "/work/f.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = doc.SetLine(1, "two")
-	if err := ms.WriteDocument(ctx, doc); err != nil {
-		t.Fatal(err)
-	}
-	dirty, err := ms.ContentRev(ctx, "/work/f.txt")
-	if err != nil || dirty.Hash != vfs.ContentHash("two\n") {
-		t.Fatalf("dirty rev: %+v err=%v", dirty, err)
-	}
-	w, err := ms.ReadLines(ctx, "/work/f.txt", 1, 2)
-	if err != nil || w.Rev.Hash != dirty.Hash {
-		t.Fatalf("window rev: %+v err=%v", w, err)
-	}
+type memWriteFile struct {
+	buf   bytes.Buffer
+	store *memStore
+	name  string
 }
 
-// TestSessionOverlay_dirtyVisible: write-back creates appear in Stat/ReadDir/Remove before Sync.
-func TestSessionOverlay_dirtyVisible(t *testing.T) {
-	ctx := t.Context()
-	base := t.TempDir()
-	reg := vfs.NewBackendRegistry()
-	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
-		t.Fatal(err)
-	}
-	ms := vfs.NewMountSession("overlay", reg)
-	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
-		t.Fatal(err)
-	}
-	doc := vfs.NewTextDocument("/work/new.go", "text/x-go", "utf-8", "package new\n")
-	if err := ms.WriteDocument(ctx, doc); err != nil {
-		t.Fatal(err)
-	}
-	fi, err := ms.Stat(ctx, "/work/new.go")
-	if err != nil || fi.IsDir || fi.Size != int64(len("package new\n")) {
-		t.Fatalf("stat dirty: %+v err=%v", fi, err)
-	}
-	ents, err := ms.ReadDir(ctx, "/work")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var saw bool
-	for _, e := range ents {
-		if e.Name == "new.go" && !e.IsDir {
-			saw = true
-		}
-	}
-	if !saw {
-		t.Fatalf("readdir missing new.go: %+v", ents)
-	}
-	// nested dirty path synthesizes intermediate dir
-	nested := vfs.NewTextDocument("/work/pkg/x.go", "text/x-go", "utf-8", "package pkg\n")
-	if err := ms.WriteDocument(ctx, nested); err != nil {
-		t.Fatal(err)
-	}
-	fi, err = ms.Stat(ctx, "/work/pkg")
-	if err != nil || !fi.IsDir {
-		t.Fatalf("stat virtual dir: %+v err=%v", fi, err)
-	}
-	ents, err = ms.ReadDir(ctx, "/work/pkg")
-	if err != nil || len(ents) != 1 || ents[0].Name != "x.go" {
-		t.Fatalf("readdir pkg: %+v err=%v", ents, err)
-	}
-	if err := ms.Remove(ctx, "/work/new.go"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := ms.Stat(ctx, "/work/new.go"); !errors.Is(err, vfs.ErrNotExist) {
-		t.Fatalf("after remove dirty: %v", err)
-	}
-	// Sync nested still works
-	if err := ms.MkdirAll(ctx, "/work/pkg"); err != nil {
-		t.Fatal(err)
-	}
-	if err := ms.Sync(ctx, "/work/pkg/x.go"); err != nil {
-		t.Fatal(err)
-	}
-	raw, err := os.ReadFile(filepath.Join(base, "pkg", "x.go"))
-	if err != nil || string(raw) != "package pkg\n" {
-		t.Fatalf("synced = %q err=%v", raw, err)
-	}
+func (f *memWriteFile) Write(p []byte) (int, error) { return f.buf.Write(p) }
+func (f *memWriteFile) Close() error {
+	f.store.mu.Lock()
+	f.store.files[f.name] = memObj{data: append([]byte(nil), f.buf.Bytes()...)}
+	f.store.mu.Unlock()
+	return nil
+}
+func (f *memWriteFile) Stat() (vfs.FileInfo, error) {
+	return vfs.FileInfo{Name: f.name, Size: int64(f.buf.Len()), Mode: 0o644}, nil
+}
+
+type shortWriteFile struct{ name string }
+
+func (f *shortWriteFile) Write([]byte) (int, error) { return 0, nil }
+func (f *shortWriteFile) Close() error              { return nil }
+func (f *shortWriteFile) Stat() (vfs.FileInfo, error) {
+	return vfs.FileInfo{Name: f.name, Size: 0, Mode: 0o644}, nil
+}
+
+type errWriteFile struct{ name string }
+
+func (f *errWriteFile) Write([]byte) (int, error) { return 0, errors.New("write broken") }
+func (f *errWriteFile) Close() error              { return nil }
+func (f *errWriteFile) Stat() (vfs.FileInfo, error) {
+	return vfs.FileInfo{Name: f.name, Size: 0, Mode: 0o644}, nil
+}
+
+type memStatFile struct {
+	name string
+	size int64
+}
+
+func (f *memStatFile) Close() error { return nil }
+func (f *memStatFile) Stat() (vfs.FileInfo, error) {
+	return vfs.FileInfo{Name: f.name, Size: f.size, Mode: 0o644}, nil
 }

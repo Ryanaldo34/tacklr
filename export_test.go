@@ -37,8 +37,3 @@ func turnRuntime(h *AgentHarness) HarnessRuntime {
 	}()
 	return session.NewRuntime(ch, h.store, h.session)
 }
-
-// turnRuntimeWithOut uses the caller's channel (caller drains).
-func turnRuntimeWithOut(h *AgentHarness, out chan StreamEvent) HarnessRuntime {
-	return session.NewRuntime(out, h.store, h.session)
-}

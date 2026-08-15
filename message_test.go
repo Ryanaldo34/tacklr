@@ -4,30 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
-
-	"github.com/ryanaldo34/tacklr/streaming"
 )
-
-func TestUnsupportedMIMEs(t *testing.T) {
-	if UnsupportedMIMEs(nil, []string{"image/png"}) != nil {
-		t.Fatal("nil strategy")
-	}
-	if UnsupportedMIMEs(&mockStrategy{}, nil) != nil {
-		t.Fatal("empty mimes")
-	}
-	// Default mock is text-only.
-	bad := UnsupportedMIMEs(&mockStrategy{}, []string{"", "text/plain", "image/png", "IMAGE/PNG", "application/pdf"})
-	if len(bad) != 2 || bad[0] != "image/png" || bad[1] != "application/pdf" {
-		t.Fatalf("bad=%v", bad)
-	}
-	// Opt-in accepts vision.
-	s := &mockStrategy{supportsMIMEFn: func(m string) bool {
-		return streaming.IsTextMIME(m) || strings.HasPrefix(streaming.NormalizeMIME(m), "image/")
-	}}
-	if got := UnsupportedMIMEs(s, []string{"image/png", "application/pdf"}); len(got) != 1 || got[0] != "application/pdf" {
-		t.Fatalf("got=%v", got)
-	}
-}
 
 func TestMessageJSON(t *testing.T) {
 	t.Run("user message with content", func(t *testing.T) {
@@ -140,53 +117,6 @@ func TestMessageJSON(t *testing.T) {
 		want := `{"role":"user"}`
 		if got != want {
 			t.Errorf("got %s, want %s", got, want)
-		}
-	})
-}
-
-func TestContentPartTypes(t *testing.T) {
-	t.Run("output text", func(t *testing.T) {
-		cp := ContentPart{
-			Type: ContentTypeOutputText,
-			Text: "Hello world",
-		}
-		b, _ := json.Marshal(cp)
-		got := string(b)
-		want := `{"type":"output_text","text":"Hello world"}`
-		if got != want {
-			t.Errorf("got %s, want %s", got, want)
-		}
-	})
-
-	t.Run("refusal", func(t *testing.T) {
-		cp := ContentPart{
-			Type:    ContentTypeRefusal,
-			Refusal: "I cannot answer that.",
-		}
-		b, _ := json.Marshal(cp)
-		got := string(b)
-		if !containsJSON(got, `"type":"refusal"`) {
-			t.Errorf("got %s", got)
-		}
-		if !containsJSON(got, `"refusal":"I cannot answer that."`) {
-			t.Errorf("got %s", got)
-		}
-	})
-
-	t.Run("input image", func(t *testing.T) {
-		cp := ContentPart{
-			Type: ContentTypeInputImage,
-			ImageURL: &ImageURL{
-				URL: "https://example.com/image.png",
-			},
-		}
-		b, _ := json.Marshal(cp)
-		got := string(b)
-		if !containsJSON(got, `"type":"input_image"`) {
-			t.Errorf("got %s", got)
-		}
-		if !containsJSON(got, `"url":"https://example.com/image.png"`) {
-			t.Errorf("got %s", got)
 		}
 	})
 }

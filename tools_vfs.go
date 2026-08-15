@@ -8,8 +8,6 @@ import (
 	"strings"
 	"time"
 
-	mapset "github.com/deckarep/golang-set/v2"
-
 	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
@@ -20,310 +18,63 @@ type vfsTools struct {
 	ms *vfs.MountSession
 }
 
-// find_files walk budgets (temporary thin tool until run_command).
-const (
-	defaultFindFilesMaxResults = 50
-	maxFindFilesMaxResults     = 200
-	defaultFindFilesMaxDepth   = 8
-	maxFindFilesMaxDepth       = 32
-)
-
 func newVFSTools(ms *vfs.MountSession) []*Tool {
-	if ms == nil {
-		return nil
-	}
 	v := vfsTools{ms: ms}
-	return []*Tool{
-		v.pathOp("list", "List {path}", streaming.ToolCategoryRead, ToolReadAccess, 30*time.Second,
-			`List a virtual directory (absolute paths like /work). No host shell.`,
-			func(ctx context.Context, p string, rt HarnessRuntime) (string, error) {
-				rt.EmitUpdate("Listing " + p)
-				ents, err := v.ms.ReadDir(ctx, p)
-				if err != nil {
-					return "", err
-				}
-				var b strings.Builder
-				fmt.Fprintf(&b, "path=%s count=%d\n", p, len(ents))
-				for _, e := range ents {
-					kind := "file"
-					if e.IsDir {
-						kind = "dir"
-					}
-					fmt.Fprintf(&b, "%s\t%s\n", kind, e.Name)
-				}
-				return b.String(), nil
-			}),
-		v.pathOp("stat", "Stat {path}", streaming.ToolCategoryRead, ToolReadAccess, 15*time.Second,
-			`Stat a virtual path (size, mtime, is_dir). No host paths.`,
-			func(ctx context.Context, p string, rt HarnessRuntime) (string, error) {
-				rt.EmitUpdate("Stat " + p)
-				fi, err := v.ms.Stat(ctx, p)
-				if err != nil {
-					return "", err
-				}
-				return fmt.Sprintf("path=%s name=%s size=%d is_dir=%v mtime=%s",
-					p, fi.Name, fi.Size, fi.IsDir, fi.ModTime.UTC().Format(time.RFC3339)), nil
-			}),
-		v.pathOp("mkdir", "Mkdir {path}", streaming.ToolCategoryEdit, ToolWriteAccess, 30*time.Second,
-			`Create a directory and parents on the virtual filesystem.`,
-			func(ctx context.Context, p string, rt HarnessRuntime) (string, error) {
-				rt.EmitUpdate("Mkdir " + p)
-				if err := v.ms.MkdirAll(ctx, p); err != nil {
-					return "", err
-				}
-				return "ok path=" + p, nil
-			}),
-		v.pathOp("remove", "Remove {path}", streaming.ToolCategoryDelete, ToolWriteAccess, 30*time.Second,
-			`Remove a file or empty directory on the virtual filesystem.`,
-			func(ctx context.Context, p string, rt HarnessRuntime) (string, error) {
-				rt.EmitUpdate("Remove " + p)
-				if err := v.ms.Remove(ctx, p); err != nil {
-					return "", err
-				}
-				return "ok path=" + p, nil
-			}),
-		v.newFindFiles(),
-		v.newReadLines(),
-		v.newReplaceLines(),
-		v.newReplaceText(),
-		v.newWrite(),
-	}
+	return []*Tool{v.newRead(), v.newWrite()}
 }
 
-type findFilesArgs struct {
-	Path       string `json:"path" desc:"Absolute virtual directory (or file) to walk from."`
-	Name       string `json:"name,omitempty" desc:"Optional substring or simple glob (* ?) matched against base names only."`
-	MaxResults int    `json:"max_results,omitempty" desc:"Max paths to return (default 50, max 200)."`
-	MaxDepth   int    `json:"max_depth,omitempty" desc:"Max directory depth from path (default 8 when omitted or 0, max 32)."`
-}
-
-func (v vfsTools) newFindFiles() *Tool {
-	return NewTool(ToolConfig{
-		Name:        "find_files",
-		DisplayName: "Find files {path}",
-		Description: `Bounded live walk of the virtual filesystem for path names (temporary thin tool until run_command + host find).
-
-Matches base names against an optional name filter (substring or simple * ? glob). Returns absolute virtual paths only — no host paths. Does not search file contents (use find_content for indexed text).`,
-		Category: streaming.ToolCategorySearch,
-		Access:   ToolReadAccess,
-		Timeout:  30 * time.Second,
-		Handler: func(ctx context.Context, args findFilesArgs, rt HarnessRuntime) (string, error) {
-			root, err := absVirtual(args.Path)
-			if err != nil {
-				return "", err
-			}
-			maxRes := args.MaxResults
-			if maxRes <= 0 {
-				maxRes = defaultFindFilesMaxResults
-			}
-			if maxRes > maxFindFilesMaxResults {
-				maxRes = maxFindFilesMaxResults
-			}
-			// JSON omit and 0 both mean default depth.
-			maxDepth := args.MaxDepth
-			if maxDepth <= 0 {
-				maxDepth = defaultFindFilesMaxDepth
-			}
-			if maxDepth > maxFindFilesMaxDepth {
-				maxDepth = maxFindFilesMaxDepth
-			}
-			pat := strings.TrimSpace(args.Name)
-			rt.EmitUpdate("Finding files under " + root)
-			var hits []string
-			if err := walkFind(ctx, v.ms, root, 0, maxDepth, pat, maxRes, &hits); err != nil {
-				return "", err
-			}
-			var b strings.Builder
-			fmt.Fprintf(&b, "root=%s count=%d\n", root, len(hits))
-			for _, p := range hits {
-				b.WriteString(p)
-				b.WriteByte('\n')
-			}
-			return b.String(), nil
-		},
-	})
-}
-
-func walkFind(ctx context.Context, ms *vfs.MountSession, cur string, depth, maxDepth int, namePat string, maxRes int, hits *[]string) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if len(*hits) >= maxRes {
-		return nil
-	}
-	// Root only: one Stat. Nested dirs use DirEntry.IsDir (no re-Stat).
-	st, err := ms.Stat(ctx, cur)
-	if err != nil {
-		return err
-	}
-	if !st.IsDir {
-		if matchFindName(path.Base(cur), namePat) {
-			*hits = append(*hits, cur)
-		}
-		return nil
-	}
-	return walkFindDir(ctx, ms, cur, depth, maxDepth, namePat, maxRes, hits)
-}
-
-func walkFindDir(ctx context.Context, ms *vfs.MountSession, cur string, depth, maxDepth int, namePat string, maxRes int, hits *[]string) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if len(*hits) >= maxRes || depth >= maxDepth {
-		return nil
-	}
-	ents, err := ms.ReadDir(ctx, cur)
-	if err != nil {
-		return err
-	}
-	for _, e := range ents {
-		if len(*hits) >= maxRes {
-			return nil
-		}
-		child := path.Join(cur, e.Name)
-		if e.IsDir {
-			if err := walkFindDir(ctx, ms, child, depth+1, maxDepth, namePat, maxRes, hits); err != nil {
-				return err
-			}
-			continue
-		}
-		if matchFindName(e.Name, namePat) {
-			*hits = append(*hits, child)
-		}
-	}
-	return nil
-}
-
-func matchFindName(base, pat string) bool {
-	if pat == "" {
-		return true
-	}
-	if strings.ContainsAny(pat, "*?") {
-		ok, err := path.Match(pat, base)
-		return err == nil && ok
-	}
-	return strings.Contains(base, pat)
-}
-
-type pathArgs struct {
-	Path string `json:"path" desc:"Absolute virtual path (e.g. /work/main.go). Never a host path."`
-}
-
-type readLinesArgs struct {
+type readArgs struct {
 	Path    string `json:"path" desc:"Absolute virtual path to read."`
+	Rev     string `json:"rev,omitempty" desc:"Optional expected content hash from a prior read or write. Mismatch returns stale content."`
 	Start   int    `json:"start,omitempty" desc:"1-based start line (inclusive). Ignored when block_id is set."`
 	End     int    `json:"end,omitempty" desc:"1-based end line (exclusive). Ignored when block_id is set."`
 	BlockID string `json:"block_id,omitempty" desc:"Structured block id (e.g. heading path installation or api/errors). Media-agnostic."`
 	Outline bool   `json:"outline,omitempty" desc:"If true, include structured block outline when available."`
+	IR      bool   `json:"ir,omitempty" desc:"If true, include media_type/encoding/line_count. Full text= only when no window or block."`
 }
 
-type replaceLinesArgs struct {
-	Path           string   `json:"path" desc:"Absolute virtual path to edit."`
-	Rev            string   `json:"rev" desc:"Content hash from the latest read or successful write for this path."`
-	Start          int      `json:"start,omitempty" desc:"1-based start line (inclusive). Ignored when block_id is set."`
-	End            int      `json:"end,omitempty" desc:"1-based end line (exclusive). Ignored when block_id is set."`
+type writeArgs struct {
+	Path           string   `json:"path" desc:"Absolute virtual path to write."`
+	Rev            string   `json:"rev,omitempty" desc:"Required when path exists: hash from the latest read. Omit only to create (full mode)."`
+	Content        *string  `json:"content,omitempty" desc:"Full new file body (UTF-8). Creates or replaces the whole file. Empty creates or truncates."`
+	IRText         *string  `json:"ir_text,omitempty" desc:"Full IR body. Same as content; if both are set they must match."`
+	Start          *int     `json:"start,omitempty" desc:"1-based start line (inclusive). Lines mode."`
+	End            *int     `json:"end,omitempty" desc:"1-based end line (exclusive). Required in lines mode."`
 	Lines          []string `json:"lines,omitempty" desc:"Replacement lines (no embedded newlines). Empty deletes the span. Or use body."`
-	Body           string   `json:"body,omitempty" desc:"Replacement body as one string (split on newlines). Used if lines is empty."`
+	Body           *string  `json:"body,omitempty" desc:"Replacement body as one string (split on newlines). Used if lines is empty."`
+	Old            *string  `json:"old,omitempty" desc:"Exact substring to find. Must be unique unless replace_all."`
+	New            *string  `json:"new,omitempty" desc:"Replacement text. Omitted treated as empty."`
+	ReplaceAll     bool     `json:"replace_all,omitempty" desc:"Replace every occurrence of old."`
 	BlockID        string   `json:"block_id,omitempty" desc:"Replace this structured block's body (or full span if include_heading)."`
 	IncludeHeading bool     `json:"include_heading,omitempty" desc:"When block_id is a heading, replace the heading line too."`
 }
 
-type replaceTextArgs struct {
-	Path       string `json:"path" desc:"Absolute virtual path to edit."`
-	Rev        string `json:"rev" desc:"Content hash from the latest read/write for this path."`
-	Old        string `json:"old" desc:"Exact substring to find. Must be unique unless replace_all."`
-	New        string `json:"new" desc:"Replacement text."`
-	ReplaceAll bool   `json:"replace_all,omitempty" desc:"Replace every occurrence of old."`
-}
-
-type writeArgs struct {
-	Path    string `json:"path" desc:"Absolute virtual path to write."`
-	Content string `json:"content" desc:"Full new file body (UTF-8)."`
-	Rev     string `json:"rev,omitempty" desc:"Required when path exists: hash from latest read/write. Omit only to create."`
-}
-
-func (v vfsTools) pathOp(
-	name, display string,
-	cat streaming.ToolCategory,
-	access mapset.Set[ToolPermission],
-	timeout time.Duration,
-	desc string,
-	fn func(context.Context, string, HarnessRuntime) (string, error),
-) *Tool {
+func (v vfsTools) newRead() *Tool {
 	return NewTool(ToolConfig{
-		Name: name, DisplayName: display, Description: desc,
-		Category: cat, Access: access, Timeout: timeout,
-		Handler: func(ctx context.Context, args pathArgs, rt HarnessRuntime) (string, error) {
-			p, err := absVirtual(args.Path)
-			if err != nil {
-				return "", err
-			}
-			return fn(ctx, p, rt)
-		},
-	})
-}
-
-func (v vfsTools) newReadLines() *Tool {
-	return NewTool(ToolConfig{
-		Name:        "read_lines",
+		Name:        "read",
 		DisplayName: "Read {path}",
-		Description: `Read a virtual path via IR: line window and/or structured block.
+		Description: `Read a virtual path: first page by default, or a line window / structured block.
 
-Use start/end for half-open 1-based lines, or block_id for a structured region (e.g. Markdown heading path). Set outline=true to list blocks when the document has structure. Returns rev — pass it to replace_lines / replace_text / write. Prefer block_id for large doc edits; lines for small patches.`,
+Path only returns start=1 through 1+MaxLinesPerWindow plus rev. Use start/end for a half-open 1-based window, or block_id for a structured region. Set outline=true to list blocks. Optional rev must match or the tool returns stale content. ir=true adds media_type/encoding/line_count (and text= when there is no window or block). Pass rev to write. Live names/grep: run_command → ls / rg. Tree ops: run_command → mkdir / rm.`,
 		Category: streaming.ToolCategoryRead,
 		Access:   ToolReadAccess,
 		Timeout:  60 * time.Second,
-		Handler: func(ctx context.Context, args readLinesArgs, rt HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, args readArgs, rt HarnessRuntime) (string, error) {
 			p, err := absVirtual(args.Path)
 			if err != nil {
 				return "", err
 			}
 			rt.EmitUpdate("Reading " + p)
 
-			// Structured path: need full IR for blocks.
-			if args.BlockID != "" || args.Outline {
-				doc, err := v.ms.ReadText(ctx, p)
-				if err != nil {
-					return "", err
-				}
-				rev := vfs.ContentHash(doc.Text())
-				blocks := doc.Blocks()
-				var b strings.Builder
-				fmt.Fprintf(&b, "path=%s rev=%s media_type=%s line_count=%d\n",
-					p, rev, doc.MediaType(), doc.LineCount())
-				if args.Outline {
-					if len(blocks) > 0 {
-						b.WriteString("outline:\n")
-						for _, bl := range blocks {
-							fmt.Fprintf(&b, "  %s kind=%s level=%d L%d-L%d %q\n",
-								bl.ID, bl.Kind, bl.Style.Level, bl.Style.Span.StartLine, bl.Style.Span.EndLine, bl.Text)
-						}
-					}
-				}
-				start, end := args.Start, args.End
-				if args.BlockID != "" {
-					if len(blocks) == 0 {
-						return "", fmt.Errorf("no structured blocks on this document")
-					}
-					bl, ok := vfs.FindBlock(blocks, args.BlockID)
-					if !ok {
-						return "", fmt.Errorf("unknown block_id %q", args.BlockID)
-					}
-					start, end = bl.Style.Span.StartLine, bl.Style.Span.EndLine
-					fmt.Fprintf(&b, "block_id=%s\n", bl.ID)
-				}
-				if start > 0 && end >= start {
-					win, err := lineWindowFromTextDoc(doc, start, end)
-					if err != nil {
-						return "", err
-					}
-					fmt.Fprintf(&b, "start=%d end=%d returned=%d eof=%v next_start=%d\n",
-						win.start, win.end, len(win.lines), win.eof, win.next)
-					for i, line := range win.lines {
-						fmt.Fprintf(&b, "%6d|%s\n", win.start+i, line)
-					}
-				}
-				return b.String(), nil
+			explicitWindow := args.Start > 0 || args.End > 0
+			if !explicitWindow && args.BlockID == "" && !args.Outline {
+				args.Start = 1
+				args.End = 1 + vfs.MaxLinesPerWindow
+				explicitWindow = true
+			}
+
+			if args.BlockID != "" || args.Outline || args.IR {
+				return v.readStructured(ctx, p, args, explicitWindow)
 			}
 
 			if args.Start < 1 || args.End < args.Start {
@@ -335,11 +86,20 @@ Use start/end for half-open 1-based lines, or block_id for a structured region (
 			}
 			rev := win.Rev
 			if rev.Hash == "" {
-				if r, rerr := v.ms.ContentRev(ctx, p); rerr == nil {
+				r, rerr := v.ms.ContentRev(ctx, p)
+				if rerr != nil {
+					if args.Rev != "" {
+						return "", fmt.Errorf("read: %w", rerr)
+					}
+				} else {
 					rev = r
 				}
 			}
+			if args.Rev != "" && args.Rev != rev.Hash {
+				return "", vfs.ErrStaleContent
+			}
 			var b strings.Builder
+			growLineWindow(&b, 96+len(win.Path)+len(rev.Hash), win.Lines)
 			fmt.Fprintf(&b, "path=%s rev=%s start=%d end=%d returned=%d eof=%v next_start=%d\n",
 				win.Path, rev.Hash, win.Start, win.End, win.Returned, win.EOF, win.NextStart)
 			for i, line := range win.Lines {
@@ -350,140 +110,72 @@ Use start/end for half-open 1-based lines, or block_id for a structured region (
 	})
 }
 
-func (v vfsTools) newReplaceLines() *Tool {
-	return NewTool(ToolConfig{
-		Name:        "replace_lines",
-		DisplayName: "Replace {path}",
-		Description: `Replace content in a virtual file using a content rev.
-
-Provide either start/end + lines, or block_id + lines/body (structured region; works for Markdown headings and later Docs/Word blocks). rev must match session-visible body. On stale rev, re-read and retry.`,
-		Category: streaming.ToolCategoryEdit,
-		Access:   ToolWriteAccess,
-		Timeout:  60 * time.Second,
-		Handler: func(ctx context.Context, args replaceLinesArgs, rt HarnessRuntime) (string, error) {
-			p, err := absVirtual(args.Path)
-			if err != nil {
-				return "", err
-			}
-			if strings.TrimSpace(args.Rev) == "" {
-				return "", fmt.Errorf("rev is required")
-			}
-			lines := args.Lines
-			if len(lines) == 0 && args.Body != "" {
-				lines = strings.Split(args.Body, "\n")
-				// Trailing newline in body → trailing empty element; OK (matches TextDocument).
-				if strings.HasSuffix(args.Body, "\n") && len(lines) > 0 && lines[len(lines)-1] == "" {
-					lines = lines[:len(lines)-1]
-				}
-			}
-			rt.EmitUpdate("Editing " + p)
-			doc, err := v.loadMatching(ctx, p, args.Rev)
-			if err != nil {
-				return "", err
-			}
-			start, end := args.Start, args.End
-			if args.BlockID != "" {
-				bl, ok := vfs.FindBlock(doc.Blocks(), args.BlockID)
-				if !ok {
-					return "", fmt.Errorf("unknown block_id %q", args.BlockID)
-				}
-				start, end, err = vfs.BlockReplaceSpan(bl, args.IncludeHeading)
-				if err != nil {
-					return "", err
-				}
-			}
-			if start < 1 || end < start {
-				return "", fmt.Errorf("invalid range start=%d end=%d (or set block_id)", start, end)
-			}
-			if err := doc.ReplaceLines(start, end, lines); err != nil {
-				return "", err
-			}
-			return v.stage(ctx, doc)
-		},
-	})
-}
-
-type lineWin struct {
-	start, end, next int
-	lines            []string
-	eof              bool
-}
-
-func lineWindowFromTextDoc(doc *vfs.TextDocument, start, end int) (lineWin, error) {
-	n := doc.LineCount()
-	if start < 1 || end < start {
-		return lineWin{}, fmt.Errorf("invalid range")
-	}
-	eof := false
-	if end > n+1 {
-		end = n + 1
-		eof = true
-	}
-	if start > n+1 {
-		return lineWin{}, vfs.ErrLineOutOfRange
-	}
-	lines, err := doc.Lines(start, end)
+func (v vfsTools) readStructured(ctx context.Context, p string, args readArgs, explicitWindow bool) (string, error) {
+	doc, err := v.ms.ReadText(ctx, p)
 	if err != nil {
-		return lineWin{}, err
+		return "", err
 	}
-	return lineWin{start: start, end: end, lines: lines, eof: eof, next: start + len(lines)}, nil
-}
-
-func (v vfsTools) newReplaceText() *Tool {
-	return NewTool(ToolConfig{
-		Name:        "replace_text",
-		DisplayName: "Replace text {path}",
-		Description: `Replace an exact substring, gated by content rev.
-
-When replace_all is false, old must occur exactly once. Prefer for small unique patches; use replace_lines for spans. Stages write-back IR.`,
-		Category: streaming.ToolCategoryEdit,
-		Access:   ToolWriteAccess,
-		Timeout:  60 * time.Second,
-		Handler: func(ctx context.Context, args replaceTextArgs, rt HarnessRuntime) (string, error) {
-			p, err := absVirtual(args.Path)
-			if err != nil {
-				return "", err
-			}
-			if strings.TrimSpace(args.Rev) == "" {
-				return "", fmt.Errorf("rev is required")
-			}
-			if args.Old == "" {
-				return "", fmt.Errorf("old is required")
-			}
-			rt.EmitUpdate("Editing " + p)
-			doc, err := v.loadMatching(ctx, p, args.Rev)
-			if err != nil {
-				return "", err
-			}
-			body := doc.Text()
-			n := strings.Count(body, args.Old)
-			switch {
-			case n == 0:
-				return "", fmt.Errorf("old text not found")
-			case !args.ReplaceAll && n != 1:
-				return "", fmt.Errorf("old text occurs %d times (need unique match or replace_all)", n)
-			}
-			if args.ReplaceAll {
-				doc.SetText(strings.ReplaceAll(body, args.Old, args.New))
-			} else {
-				doc.SetText(strings.Replace(body, args.Old, args.New, 1))
-			}
-			out, err := v.stage(ctx, doc)
-			if err != nil {
-				return "", err
-			}
-			return fmt.Sprintf("%s replacements=%d", out, n), nil
-		},
-	})
+	rev := vfs.ContentHash(doc.Text())
+	if args.Rev != "" && args.Rev != rev {
+		return "", vfs.ErrStaleContent
+	}
+	var blocks []vfs.Block
+	if s, ok := doc.(vfs.Structured); ok {
+		blocks = s.Blocks()
+	}
+	var b strings.Builder
+	b.Grow(128 + len(p) + len(rev) + len(doc.MediaType()))
+	if args.IR {
+		fmt.Fprintf(&b, "path=%s rev=%s media_type=%s encoding=%s line_count=%d\n",
+			p, rev, doc.MediaType(), doc.Encoding(), doc.LineCount())
+	} else {
+		fmt.Fprintf(&b, "path=%s rev=%s media_type=%s line_count=%d\n",
+			p, rev, doc.MediaType(), doc.LineCount())
+	}
+	if args.Outline && len(blocks) > 0 {
+		b.WriteString("outline:\n")
+		for _, bl := range blocks {
+			fmt.Fprintf(&b, "  %s kind=%s level=%d L%d-L%d %q\n",
+				bl.ID, bl.Kind, bl.Style.Level, bl.Style.Span.StartLine, bl.Style.Span.EndLine, bl.Text)
+		}
+	}
+	start, end := args.Start, args.End
+	if args.BlockID != "" {
+		if len(blocks) == 0 {
+			return "", fmt.Errorf("no structured blocks on this document")
+		}
+		bl, ok := vfs.FindBlock(blocks, args.BlockID)
+		if !ok {
+			return "", fmt.Errorf("unknown block_id %q", args.BlockID)
+		}
+		start, end = bl.Style.Span.StartLine, bl.Style.Span.EndLine
+		fmt.Fprintf(&b, "block_id=%s\n", bl.ID)
+	}
+	if start > 0 && end >= start {
+		win, err := lineWindowFromTextDoc(doc, start, end)
+		if err != nil {
+			return "", err
+		}
+		growLineWindow(&b, 64, win.Lines)
+		fmt.Fprintf(&b, "start=%d end=%d returned=%d eof=%v next_start=%d\n",
+			win.Start, win.End, win.Returned, win.EOF, win.NextStart)
+		for i, line := range win.Lines {
+			fmt.Fprintf(&b, "%6d|%s\n", win.Start+i, line)
+		}
+	}
+	if args.IR && args.BlockID == "" && !explicitWindow {
+		fmt.Fprintf(&b, "text=%s\n", doc.Text())
+	}
+	return b.String(), nil
 }
 
 func (v vfsTools) newWrite() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "write",
 		DisplayName: "Write {path}",
-		Description: `Write a full file body (create or replace) via write-back IR.
+		Description: `Write a virtual file: full body, line span, substring, or structured block. Exactly one mode per call.
 
-When the path exists, rev is required and must match. Visible to list/stat/read before Sync; checkpoint flushes. Prefer replace_lines / replace_text for partial edits.`,
+Pass rev from read when the path exists. Create only via content or ir_text (empty content creates or truncates). Modes are selected by which field is set: content|ir_text, old, block_id, or start. Persists immediately.`,
 		Category: streaming.ToolCategoryEdit,
 		Access:   ToolWriteAccess,
 		Timeout:  60 * time.Second,
@@ -492,31 +184,208 @@ When the path exists, rev is required and must match. Visible to list/stat/read 
 			if err != nil {
 				return "", err
 			}
-			rt.EmitUpdate("Writing " + p)
-			if _, err := v.ms.Stat(ctx, p); err == nil {
-				if strings.TrimSpace(args.Rev) == "" {
-					return "", fmt.Errorf("rev required when path exists")
-				}
-				cur, err := v.ms.ContentRev(ctx, p)
+			n, full := writeModeCount(args)
+			switch {
+			case n == 0:
+				return "", fmt.Errorf("write: no mutation")
+			case n > 1:
+				return "", fmt.Errorf("write: exactly one of content|ir_text, old, block_id, start")
+			}
+			var fullBody string
+			if full {
+				fullBody, err = fullWriteBody(args)
 				if err != nil {
 					return "", err
 				}
-				if cur.Hash != args.Rev {
-					return "", vfs.ErrStaleContent
-				}
-			} else if !errors.Is(err, vfs.ErrNotExist) {
+			}
+			rt.EmitUpdate("Writing " + p)
+
+			fi, err := v.ms.Stat(ctx, p)
+			exists := err == nil
+			if err != nil && !errors.Is(err, vfs.ErrNotExist) {
 				return "", err
 			}
-			if len(args.Content) > vfs.MaxReadFileBytes {
-				return "", vfs.ErrTooLarge
+			if exists {
+				if strings.TrimSpace(args.Rev) == "" {
+					return "", fmt.Errorf("write: rev required when path exists")
+				}
+			} else if !full {
+				return "", vfs.ErrNotExist
 			}
-			mt := vfs.DetectMediaType(p, []byte(args.Content))
-			return v.stage(ctx, vfs.NewTextDocument(p, mt, "utf-8", args.Content))
+
+			switch {
+			case full:
+				return v.writeFull(ctx, p, exists, fi, args.Rev, fullBody)
+			case args.Old != nil:
+				return v.writeSubstring(ctx, p, args)
+			case args.BlockID != "":
+				return v.writeBlock(ctx, p, args)
+			default:
+				return v.writeLines(ctx, p, args)
+			}
 		},
 	})
 }
 
-func (v vfsTools) loadMatching(ctx context.Context, p, expected string) (*vfs.TextDocument, error) {
+func writeModeCount(args writeArgs) (n int, full bool) {
+	full = args.Content != nil || args.IRText != nil
+	if full {
+		n++
+	}
+	if args.Old != nil {
+		n++
+	}
+	if args.BlockID != "" {
+		n++
+	}
+	if args.Start != nil {
+		n++
+	}
+	return n, full
+}
+
+func (v vfsTools) writeFull(ctx context.Context, p string, exists bool, fi vfs.FileInfo, rev, body string) (string, error) {
+	if exists {
+		cur, err := v.ms.ContentRev(ctx, p)
+		if err != nil {
+			return "", err
+		}
+		if cur.Hash != rev {
+			return "", vfs.ErrStaleContent
+		}
+	}
+	if len(body) > vfs.MaxReadFileBytes {
+		return "", vfs.ErrTooLarge
+	}
+	mt := ""
+	if exists {
+		mt = fi.MediaType
+	}
+	if mt == "" {
+		n := min(len(body), 512)
+		mt = vfs.DetectMediaType(path.Base(p), []byte(body[:n]))
+	}
+	return v.stage(ctx, vfs.NewTextDocument(p, mt, "utf-8", body))
+}
+
+func fullWriteBody(args writeArgs) (string, error) {
+	switch {
+	case args.Content != nil && args.IRText != nil:
+		if *args.Content != *args.IRText {
+			return "", fmt.Errorf("write: content and ir_text disagree")
+		}
+		return *args.Content, nil
+	case args.IRText != nil:
+		return *args.IRText, nil
+	default:
+		return *args.Content, nil
+	}
+}
+
+func (v vfsTools) writeSubstring(ctx context.Context, p string, args writeArgs) (string, error) {
+	if *args.Old == "" {
+		return "", fmt.Errorf("write: old is required")
+	}
+	doc, err := v.loadMatching(ctx, p, args.Rev)
+	if err != nil {
+		return "", err
+	}
+	repl := ""
+	if args.New != nil {
+		repl = *args.New
+	}
+	body := doc.Text()
+	n := strings.Count(body, *args.Old)
+	switch {
+	case n == 0:
+		return "", fmt.Errorf("write: old text not found")
+	case !args.ReplaceAll && n != 1:
+		return "", fmt.Errorf("write: old text occurs %d times (need unique match or replace_all)", n)
+	}
+	if args.ReplaceAll {
+		doc.SetText(strings.ReplaceAll(body, *args.Old, repl))
+	} else {
+		doc.SetText(strings.Replace(body, *args.Old, repl, 1))
+	}
+	out, err := v.stage(ctx, doc)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s replacements=%d", out, n), nil
+}
+
+func (v vfsTools) writeBlock(ctx context.Context, p string, args writeArgs) (string, error) {
+	doc, err := v.loadMatching(ctx, p, args.Rev)
+	if err != nil {
+		return "", err
+	}
+	var blocks []vfs.Block
+	if s, ok := doc.(vfs.Structured); ok {
+		blocks = s.Blocks()
+	}
+	bl, ok := vfs.FindBlock(blocks, args.BlockID)
+	if !ok {
+		return "", fmt.Errorf("write: unknown block_id %q", args.BlockID)
+	}
+	start, end, err := vfs.BlockReplaceSpan(bl, args.IncludeHeading)
+	if err != nil {
+		return "", err
+	}
+	if err := doc.ReplaceLines(start, end, replacementLines(args.Lines, args.Body)); err != nil {
+		return "", err
+	}
+	return v.stage(ctx, doc)
+}
+
+func (v vfsTools) writeLines(ctx context.Context, p string, args writeArgs) (string, error) {
+	if args.End == nil || *args.Start < 1 || *args.End < *args.Start {
+		return "", fmt.Errorf("write: invalid range start=%d end=%v", *args.Start, args.End)
+	}
+	doc, err := v.loadMatching(ctx, p, args.Rev)
+	if err != nil {
+		return "", err
+	}
+	if err := doc.ReplaceLines(*args.Start, *args.End, replacementLines(args.Lines, args.Body)); err != nil {
+		return "", err
+	}
+	return v.stage(ctx, doc)
+}
+
+func replacementLines(lines []string, body *string) []string {
+	if len(lines) > 0 || body == nil || *body == "" {
+		return lines
+	}
+	out := strings.Split(*body, "\n")
+	if strings.HasSuffix(*body, "\n") && len(out) > 0 && out[len(out)-1] == "" {
+		out = out[:len(out)-1]
+	}
+	return out
+}
+
+func lineWindowFromTextDoc(doc vfs.Textual, start, end int) (vfs.LineWindow, error) {
+	n := doc.LineCount()
+	if start < 1 || end < start {
+		return vfs.LineWindow{}, fmt.Errorf("invalid range")
+	}
+	eof := false
+	if end > n+1 {
+		end = n + 1
+		eof = true
+	}
+	if start > n+1 {
+		return vfs.LineWindow{}, vfs.ErrLineOutOfRange
+	}
+	lines, err := doc.Lines(start, end)
+	if err != nil {
+		return vfs.LineWindow{}, err
+	}
+	return vfs.LineWindow{
+		Start: start, End: end, Lines: lines,
+		Returned: len(lines), EOF: eof, NextStart: start + len(lines),
+	}, nil
+}
+
+func (v vfsTools) loadMatching(ctx context.Context, p, expected string) (vfs.Textual, error) {
 	doc, err := v.ms.ReadText(ctx, p)
 	if err != nil {
 		return nil, err
@@ -527,11 +396,19 @@ func (v vfsTools) loadMatching(ctx context.Context, p, expected string) (*vfs.Te
 	return doc, nil
 }
 
-func (v vfsTools) stage(ctx context.Context, doc *vfs.TextDocument) (string, error) {
+func (v vfsTools) stage(ctx context.Context, doc vfs.Textual) (string, error) {
 	if err := v.ms.WriteDocument(ctx, doc); err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("path=%s rev=%s line_count=%d", doc.Path(), vfs.ContentHash(doc.Text()), doc.LineCount()), nil
+}
+
+func growLineWindow(b *strings.Builder, extra int, lines []string) {
+	n := extra
+	for _, line := range lines {
+		n += 8 + len(line)
+	}
+	b.Grow(n)
 }
 
 func absVirtual(p string) (string, error) {

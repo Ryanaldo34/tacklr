@@ -113,16 +113,7 @@ func paramOr(params map[string]string, key, fallback string) string {
 
 // Validate implements vfs.Provider.
 func (p *engramProvider) Validate(ctx context.Context) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if p == nil || p.eng == nil {
-		return fmt.Errorf("brain: engine is required")
-	}
-	if p.scope.Namespace == nil || *p.scope.Namespace == uuid.Nil {
-		return fmt.Errorf("brain: namespace is required")
-	}
-	return nil
+	return ctx.Err()
 }
 
 // Stat implements vfs.Provider.
@@ -152,7 +143,7 @@ func (p *engramProvider) Stat(ctx context.Context, name string) (vfs.FileInfo, e
 	if err != nil {
 		return vfs.FileInfo{}, err
 	}
-	return vfs.FileInfo{Name: slug + ".md", Size: int64(len(raw)), ModTime: obj.UpdatedAt}, nil
+	return vfs.FileInfo{Name: slug + ".md", Size: int64(len(raw)), ModTime: obj.UpdatedAt, MediaType: engramContentType}, nil
 }
 
 // OpenFile implements vfs.Provider.
@@ -179,9 +170,9 @@ func (p *engramProvider) OpenFile(ctx context.Context, name string, flag int, _ 
 				buf.Write(raw)
 			}
 		}
-		return &engramFile{
+		return &engramWriteFile{
+			buf:    buf,
 			name:   slug + ".md",
-			w:      &buf,
 			commit: func(b []byte) error { return p.commit(ctx, name, b) },
 		}, nil
 	}
@@ -193,7 +184,7 @@ func (p *engramProvider) OpenFile(ctx context.Context, name string, flag int, _ 
 	if err != nil {
 		return nil, err
 	}
-	return &engramFile{name: slug + ".md", r: bytes.NewReader(raw)}, nil
+	return &engramReadFile{Reader: bytes.NewReader(raw), name: slug + ".md"}, nil
 }
 
 // PutFile implements the session filePutter hook (write-through).
@@ -202,20 +193,52 @@ func (p *engramProvider) PutFile(ctx context.Context, name string, r io.Reader, 
 		return err
 	}
 	var data []byte
-	switch {
-	case size > 0:
+	if size > 0 {
 		data = make([]byte, size)
 		if _, err := io.ReadFull(r, data); err != nil {
 			return err
 		}
-	case size < 0:
-		var err error
-		data, err = io.ReadAll(r)
-		if err != nil {
-			return err
-		}
 	}
 	return p.commit(ctx, name, data)
+}
+
+// OpenDocument translates a brain Object into Textual IR.
+func (p *engramProvider) OpenDocument(ctx context.Context, name string, _ *vfs.ContentRegistry) (vfs.Document, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	kind, slug, isDir, err := p.parseRel(name)
+	if err != nil {
+		return nil, err
+	}
+	if isDir {
+		return nil, fmt.Errorf("brain: %s is a directory", name)
+	}
+	obj, err := p.lookupFile(ctx, kind, slug)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := FormatEngram(EngramFromObject(obj))
+	if err != nil {
+		return nil, err
+	}
+	return vfs.NewTextDocument(name, engramContentType, "utf-8", string(raw)), nil
+}
+
+// WriteDocument translates Textual IR into a brain Object and Puts immediately.
+func (p *engramProvider) WriteDocument(ctx context.Context, name string, doc vfs.Document) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	t, ok := doc.(vfs.Textual)
+	if !ok {
+		return vfs.ErrNotTextual
+	}
+	raw, err := vfs.EncodeTextual(t)
+	if err != nil {
+		return err
+	}
+	return p.commit(ctx, name, raw)
 }
 
 // ReadDir implements vfs.Provider.
@@ -386,16 +409,17 @@ func (p *engramProvider) dirExists(ctx context.Context, kind, name string) bool 
 	return p.kindAllowed(kind)
 }
 
-func (p *engramProvider) virtualPath(kind, slug string) string {
+// EngramPath is the virtual path for an Engram file (prefix or roots).
+func EngramPath(point, mode, kind, slug string) string {
 	file := slug + ".md"
-	if p.mode == ModeRoots {
-		return path.Join(p.point, file)
+	if mode == ModeRoots {
+		return path.Join(point, file)
 	}
-	return path.Join(p.point, KindSlug(kind), file)
+	return path.Join(point, KindSlug(kind), file)
 }
 
 func (p *engramProvider) lookupFile(ctx context.Context, kind, slug string) (Object, error) {
-	vpath := p.virtualPath(kind, slug)
+	vpath := EngramPath(p.point, p.mode, kind, slug)
 	obj, err := p.eng.GetByProperty(ctx, p.scope, PropVFSPath, vpath)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
@@ -504,7 +528,7 @@ func (p *engramProvider) commit(ctx context.Context, rel string, data []byte) er
 	}
 	obj := ObjectFromEngram(f)
 	obj.NamespaceID = *p.scope.Namespace
-	vpath := p.virtualPath(obj.Kind, f.Slug)
+	vpath := EngramPath(p.point, p.mode, obj.Kind, f.Slug)
 	if obj.Properties == nil {
 		obj.Properties = map[string]any{}
 	}
@@ -523,50 +547,44 @@ func (p *engramProvider) commit(ctx context.Context, rel string, data []byte) er
 	return err
 }
 
-type engramFile struct {
+type engramReadFile struct {
+	*bytes.Reader
+	name string
+}
+
+func (f *engramReadFile) Close() error { return nil }
+
+func (f *engramReadFile) Stat() (vfs.FileInfo, error) {
+	return vfs.FileInfo{Name: f.name, Size: f.Size(), ModTime: time.Now().UTC()}, nil
+}
+
+type engramWriteFile struct {
+	buf    bytes.Buffer
 	name   string
-	r      *bytes.Reader
-	w      *bytes.Buffer
 	commit func([]byte) error
 	closed bool
 }
 
-func (f *engramFile) Read(p []byte) (int, error) {
-	if f.r == nil {
-		return 0, io.EOF
-	}
-	return f.r.Read(p)
-}
+func (f *engramWriteFile) Write(p []byte) (int, error) { return f.buf.Write(p) }
 
-func (f *engramFile) Write(p []byte) (int, error) {
-	if f.w == nil {
-		return 0, vfs.ErrReadOnly
-	}
-	return f.w.Write(p)
-}
-
-func (f *engramFile) Close() error {
+func (f *engramWriteFile) Close() error {
 	if f.closed {
 		return nil
 	}
 	f.closed = true
-	if f.commit != nil && f.w != nil {
-		return f.commit(f.w.Bytes())
+	if f.commit != nil {
+		return f.commit(f.buf.Bytes())
 	}
 	return nil
 }
 
-func (f *engramFile) Stat() (vfs.FileInfo, error) {
-	var size int64
-	if f.r != nil {
-		size = f.r.Size()
-	} else if f.w != nil {
-		size = int64(f.w.Len())
-	}
-	return vfs.FileInfo{Name: f.name, Size: size, ModTime: time.Now().UTC()}, nil
+func (f *engramWriteFile) Stat() (vfs.FileInfo, error) {
+	return vfs.FileInfo{Name: f.name, Size: int64(f.buf.Len()), ModTime: time.Now().UTC()}, nil
 }
 
 var (
 	_ vfs.Provider        = (*engramProvider)(nil)
 	_ vfs.ProviderFactory = BrainFactory{}
+	_ vfs.File            = (*engramReadFile)(nil)
+	_ vfs.File            = (*engramWriteFile)(nil)
 )

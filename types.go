@@ -54,27 +54,44 @@ type (
 	Message          = streaming.Message
 )
 
+// Coarse categories for errors.Is. Wrap with a specific message at the
+// call site (fmt.Errorf("…: %w", ErrNotFound)) instead of adding a new sentinel
+// per situation.
+var (
+	ErrNotFound = errors.New("not found")
+	ErrInvalid  = errors.New("invalid")
+	ErrFailed   = errors.New("failed")
+)
+
+// classified keeps a stable Error() string while unwrapping to a category.
+type classified struct {
+	cat error
+	msg string
+}
+
+func (e classified) Error() string { return e.msg }
+func (e classified) Unwrap() error { return e.cat }
+
+func classify(cat error, msg string) error { return classified{cat: cat, msg: msg} }
+
 var (
 	ErrModelRefused         = errors.New("model refused")
 	ErrMaxTokens            = errors.New("max tokens reached")
 	ErrMaxTurnRequests      = errors.New("max turn model requests exceeded")
-	ErrApiKeyNotSet         = errors.New("api key not set")
-	ErrModelNotSet          = errors.New("model not set")
-	ErrUnknownModel         = errors.New("unknown model")
-	ErrToolNotFound         = errors.New("tool not found")
-	ErrToolTimeout          = errors.New("tool timed out")
-	ErrToolPermissionDenied = errors.New("tool permission denied")
+	ErrApiKeyNotSet         = classify(ErrInvalid, "api key not set")
+	ErrModelNotSet          = classify(ErrInvalid, "model not set")
+	ErrUnknownModel         = classify(ErrNotFound, "unknown model")
+	ErrToolNotFound         = classify(ErrNotFound, "tool not found")
+	ErrToolTimeout          = classify(ErrFailed, "tool timed out")
+	ErrToolPermissionDenied = classify(ErrFailed, "tool permission denied")
 	// ErrModelAfterTools is a model failure after a successful tool batch.
 	// Tools completed; the next model request failed.
-	ErrModelAfterTools = errors.New("model request failed after tools completed")
+	ErrModelAfterTools = classify(ErrFailed, "model request failed after tools completed")
 )
 
 // WrapStopReason attaches cause under a stop-reason sentinel for errors.Is.
-// Returns kind when cause is nil, or cause when kind is nil.
+// Returns kind when cause is nil.
 func WrapStopReason(kind, cause error) error {
-	if kind == nil {
-		return cause
-	}
 	if cause == nil {
 		return kind
 	}
@@ -115,9 +132,6 @@ func UnsupportedMIMEs(s InferenceStrategy, mimes []string) []string {
 	seen := make(map[string]struct{}, len(mimes))
 	for _, m := range mimes {
 		m = streaming.NormalizeMIME(m)
-		if m == "" {
-			continue
-		}
 		if _, ok := seen[m]; ok {
 			continue
 		}

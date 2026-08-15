@@ -11,6 +11,7 @@ require (
 	github.com/coder/websocket v1.8.15
 	github.com/deckarep/golang-set/v2 v2.9.0
 	github.com/google/uuid v1.6.0
+	github.com/hanwen/go-fuse/v2 v2.11.0
 	github.com/helixdb/helix-db/sdks/go v0.1.3
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/modelcontextprotocol/go-sdk v1.6.1

@@ -120,6 +120,10 @@ const (
 	EventTurnEnded       = "turn.ended"
 	EventProviderFailed  = "provider.failed"
 	EventModelAfterTools = "model.after_tools"
+	EventFuseMount       = "vfs.fuse.mount"
+	EventFuseMountError  = "vfs.fuse.mount_error"
+	EventFuseUnmount     = "vfs.fuse.unmount"
+	EventFuseUnavailable = "vfs.fuse.unavailable"
 )
 
 // Event attribute keys on log-based events.

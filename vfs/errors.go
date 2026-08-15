@@ -14,6 +14,7 @@ var (
 	ErrReadOnly        = errors.New("vfs: read-only mount")
 	ErrNotExist        = errors.New("vfs: not found")
 	ErrExist           = errors.New("vfs: already exists")
+	ErrFuseNotMounted  = errors.New("vfs: fuse not mounted")
 
 	// Content IR
 	ErrNoCodec        = errors.New("vfs: no codec for media type")

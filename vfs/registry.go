@@ -64,25 +64,3 @@ func (r *BackendRegistry) open(ctx context.Context, sessionID string, spec Mount
 	}
 	return f.Open(ctx, sessionID, spec)
 }
-
-// MergeSpecs concatenates bootstrap then durable specs (host/harness helper).
-// Duplicate points return ErrAlreadyMounted.
-func MergeSpecs(bootstrap, durable []MountSpec) ([]MountSpec, error) {
-	seen := make(map[string]struct{}, len(bootstrap)+len(durable))
-	out := make([]MountSpec, 0, len(bootstrap)+len(durable))
-	for _, list := range [][]MountSpec{bootstrap, durable} {
-		for _, s := range list {
-			cleaned, err := cleanVirtualPath(s.Point)
-			if err != nil {
-				return nil, err
-			}
-			if _, ok := seen[cleaned]; ok {
-				return nil, ErrAlreadyMounted
-			}
-			seen[cleaned] = struct{}{}
-			s.Point = cleaned
-			out = append(out, s)
-		}
-	}
-	return out, nil
-}

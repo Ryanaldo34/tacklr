@@ -30,12 +30,12 @@ type Bridge struct {
 // and warms prefix/watch mounts. If attachMemory, mounts /memory (watch) when
 // a scratch profile can serve it (caller already checked).
 func Start(ms *vfs.MountSession, eng *brain.Engine, scope brain.Scope, attachMemory bool) (*Bridge, error) {
-	if attachMemory {
-		attachMemoryMount(ms)
-	}
 	idx, err := NewMountIndexer(ms, eng, scope)
 	if err != nil {
 		return nil, err
+	}
+	if attachMemory {
+		attachMemoryMount(ms)
 	}
 	b := &Bridge{
 		Indexer: idx,
@@ -56,7 +56,7 @@ func Start(ms *vfs.MountSession, eng *brain.Engine, scope brain.Scope, attachMem
 	warmCtx, cancel := context.WithCancel(context.Background())
 	b.cancel = cancel
 	for _, spec := range ms.Specs() {
-		if spec.Profile == brain.DefaultProfile || !AutoIndex(spec.IndexPolicy) {
+		if !AutoIndex(spec.IndexPolicy) {
 			continue
 		}
 		point := spec.Point
@@ -91,35 +91,26 @@ func (b *Bridge) Close() error {
 
 // PolicyAt is the normalized IndexPolicy for a virtual path (selective if unknown).
 func (b *Bridge) PolicyAt(virtualPath string) string {
-	if b == nil || b.ms == nil {
-		return PolicySelective
-	}
-	raw, err := b.ms.IndexPolicyAt(virtualPath)
+	spec, err := b.ms.SpecAt(virtualPath)
 	if err != nil {
 		return PolicySelective
 	}
-	return NormalizePolicy(raw)
+	return NormalizePolicy(spec.IndexPolicy)
 }
 
 // ShouldIndex reports whether AfterPersist should enqueue path.
 func (b *Bridge) ShouldIndex(virtualPath string) bool {
-	if b == nil || b.ms == nil {
-		return false
-	}
 	spec, err := b.ms.SpecAt(virtualPath)
 	if err != nil {
 		return b.tracked(virtualPath)
 	}
-	if spec.Profile == brain.DefaultProfile {
-		return false
-	}
 	switch NormalizePolicy(spec.IndexPolicy) {
+	case PolicyNone:
+		return false
 	case PolicyPrefix, PolicyWatch:
 		return true
-	case PolicySelective:
-		return b.tracked(virtualPath)
 	default:
-		return false
+		return b.tracked(virtualPath)
 	}
 }
 
@@ -132,32 +123,23 @@ func (b *Bridge) tracked(virtualPath string) bool {
 
 // Track records a selective path so later persists reindex it.
 func (b *Bridge) Track(virtualPath string) {
-	if b == nil || virtualPath == "" {
+	if virtualPath == "" {
 		return
 	}
 	b.mu.Lock()
-	if b.track == nil {
-		b.track = make(map[string]struct{})
-	}
 	b.track[virtualPath] = struct{}{}
 	b.mu.Unlock()
 }
 
 // Untrack drops a path from the selective set.
 func (b *Bridge) Untrack(virtualPath string) {
-	if b == nil {
-		return
-	}
 	b.mu.Lock()
 	delete(b.track, virtualPath)
 	b.mu.Unlock()
 }
 
 func attachMemoryMount(ms *vfs.MountSession) {
-	if ms == nil {
-		return
-	}
-	for _, s := range ms.Infos() {
+	for _, s := range ms.Specs() {
 		if s.Point == MemoryPoint {
 			return
 		}

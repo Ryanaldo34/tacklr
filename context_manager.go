@@ -87,9 +87,6 @@ func (m *ModelContextManager) Replace(window []*Message) {
 }
 
 func (m *ModelContextManager) Add(msg *Message) {
-	if msg == nil {
-		return
-	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.window = append(m.window, msg)
@@ -110,9 +107,6 @@ func (m *ModelContextManager) InstallPlanDocument(planRaw string) error {
 
 // protectedPrefixLen is the Absorb keep-prefix: [0] user; [1] plan document if present.
 func protectedPrefixLen(window []*Message) int {
-	if len(window) == 0 {
-		return 0
-	}
 	if len(window) > 1 && isPlanDocument(window[1]) {
 		return 2
 	}

@@ -34,9 +34,10 @@ func (b brainTools) brainMountForKind(kind string) (vfs.MountSpec, bool) {
 	if b.deps.VFS == nil {
 		return vfs.MountSpec{}, false
 	}
+	specs := b.deps.VFS.Specs()
 	var prefix vfs.MountSpec
 	var hasPrefix bool
-	for _, s := range b.deps.VFS.Specs() {
+	for _, s := range specs {
 		if s.Profile != brain.DefaultProfile {
 			continue
 		}
@@ -54,7 +55,7 @@ func (b brainTools) brainMountForKind(kind string) (vfs.MountSpec, bool) {
 	if hasPrefix {
 		return prefix, true
 	}
-	for _, s := range b.deps.VFS.Specs() {
+	for _, s := range specs {
 		if s.Profile == brain.DefaultProfile {
 			return s, true
 		}
@@ -135,9 +136,9 @@ func (b brainTools) newSearchTool() *Tool {
 		DisplayName: "Search knowledge: {query}",
 		Description: `Search stored content (documents, notes, chunks) in the knowledge corpus. Returns ranked parent objects with evidence snippets.
 
-Prefer hits that include properties.vfs_path — open those with read_lines on the virtual path (and start_line / block_id from evidence). Prefer schema() before inventing filter keys; property filters require kind when kinds are registered. Rewrite the user ask into a good retrieval query when helpful.
+Prefer hits that include properties.vfs_path — open those with read on the virtual path (and start_line / block_id from evidence). Prefer schema() before inventing filter keys; property filters require kind when kinds are registered. Rewrite the user ask into a good retrieval query when helpful.
 
-Do not use this only to discover relationships—use expand once you have a path or id. Prefer find_content for indexed file grep. Use continue for more pages; read only for non-file objects without vfs_path.`,
+Do not use this only to discover relationships—use expand once you have a path or id. Live grep is run_command → rg. This tool is indexed recall after index_file (hits are not a live-tree stand-in). Use continue for more pages; use read with object_id only for non-file objects without vfs_path.`,
 		Category: streaming.ToolCategorySearch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
@@ -231,7 +232,7 @@ func (b brainTools) newExpandTool() *Tool {
 		DisplayName: "Expand {path}",
 		Description: `Show files/objects connected to a known path or object_id—not an open search.
 
-Prefer a virtual path (Engram file or indexed artifact). Neighbors are returned as paths when vfs_path is set. list/ls and later rg never list graph edges — use this tool. Omit relation_types for containment only; named types need a graph backend. Large lists return result_set_id — use continue. Open file neighbors with read_lines.`,
+Prefer a virtual path (Engram file or indexed artifact). Neighbors are returned as paths when vfs_path is set. list/ls and later rg never list graph edges — use this tool. Omit relation_types for containment only; named types need a graph backend. Large lists return result_set_id — use continue. Open file neighbors with read.`,
 		Category: streaming.ToolCategoryFetch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
@@ -271,7 +272,7 @@ func (b brainTools) newSaveTool(name, display, kind, roleDesc string) *Tool {
 	if _, ok := b.brainMountForKind(""); ok {
 		desc = `Write the Engram file for a ` + roleDesc + ` (kind ` + kind + `) on the brain Provider mount.
 
-Prefer write/replace_lines on the Markdown path. This tool is a thin write: YAML front matter + body under /engram/{kind}/ (or a roots mount). Returns path and object id. Open later with read_lines. Pass object_id to update an existing Engram.`
+Prefer write on the Markdown path. This tool is a thin write: YAML front matter + body under /engram/{kind}/ (or a roots mount). Returns path and object id. Open later with read. Pass object_id to update an existing Engram.`
 	} else {
 		desc += `
 
@@ -624,12 +625,7 @@ func (b brainTools) resolveEngramSavePath(ctx context.Context, kind, title, obje
 	if spec.Params != nil && spec.Params["mode"] != "" {
 		mode = spec.Params["mode"]
 	}
-	var base string
-	if mode == brain.ModeRoots {
-		base = path.Join(spec.Point, slug+".md")
-	} else {
-		base = path.Join(spec.Point, brain.KindSlug(kind), slug+".md")
-	}
+	base := brain.EngramPath(spec.Point, mode, kind, slug)
 	if _, err := b.deps.VFS.Stat(ctx, base); err == nil {
 		base = strings.TrimSuffix(base, ".md") + "-" + uuid.New().String()[:8] + ".md"
 	} else if !errors.Is(err, vfs.ErrNotExist) {

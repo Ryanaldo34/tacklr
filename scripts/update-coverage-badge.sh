@@ -16,21 +16,30 @@ fi
 # Keep in sync with exclude.paths in .testcoverage.yml
 EXCLUDE_REGEX='cmd/|internal/testkit|internal/agentbench|stores/postgres\.go'
 
+# -coverpkg=./... writes each block once per tested package. Merge by taking
+# the max hit count per block so the badge matches go-test-coverage.
 pct="$(
   awk -v excl="$EXCLUDE_REGEX" '
-    BEGIN { covered = 0; total = 0 }
     NR == 1 { next }
     {
-      # file:line.col,line.col numStmt count
-      n = split($1, a, ":")
+      loc = $1
+      n = split(loc, a, ":")
       file = a[1]
       if (file ~ excl) next
       stmts = $(NF-1) + 0
       count = $NF + 0
-      total += stmts
-      if (count > 0) covered += stmts
+      if (!(loc in seen) || count > cnt[loc]) {
+        seen[loc] = 1
+        cnt[loc] = count
+        st[loc] = stmts
+      }
     }
     END {
+      covered = 0; total = 0
+      for (k in st) {
+        total += st[k]
+        if (cnt[k] > 0) covered += st[k]
+      }
       if (total == 0) { print "0.0"; exit }
       printf "%.1f", 100.0 * covered / total
     }

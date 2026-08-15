@@ -17,12 +17,6 @@ type MountSpec struct {
 	IndexPolicy string `json:"indexPolicy,omitempty"`
 }
 
-// MountInfo is agent-safe: point and read-only only.
-type MountInfo struct {
-	Point    string
-	ReadOnly bool
-}
-
 func cloneSpec(spec MountSpec) MountSpec {
 	out := spec
 	out.Params = maps.Clone(spec.Params)

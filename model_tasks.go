@@ -92,9 +92,7 @@ type DefaultModelTasks struct {
 
 // NewDefaultModelTasks builds DefaultModelTasks for model, context, and policy.
 func NewDefaultModelTasks(model InferenceStrategy, ctx ContextManager, policy ContextPolicy, maxSize int) *DefaultModelTasks {
-	if policy.PressureRatio <= 0 && policy.CompressFraction <= 0 {
-		policy = DefaultContextPolicy()
-	}
+	// newHarnessBase fills missing policy fields before this is called.
 	return &DefaultModelTasks{
 		model:   model,
 		context: ctx,
@@ -106,9 +104,6 @@ func NewDefaultModelTasks(model InferenceStrategy, ctx ContextManager, policy Co
 func (t *DefaultModelTasks) Turn(ctx context.Context, tools []*Tool, systemPrompt string) (<-chan LLMResponseChunk, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
-	}
-	if t.model == nil {
-		return nil, fmt.Errorf("turn: model is required")
 	}
 	// Context is only reshaped on Absorb pressure (token threshold) or Handoff
 	// after complete_todo / plan revision — never by dropping tool history here.
@@ -132,9 +127,6 @@ func (t *DefaultModelTasks) Turn(ctx context.Context, tools []*Tool, systemPromp
 func (t *DefaultModelTasks) Absorb(ctx context.Context, msg *Message, tools []*Tool, systemPrompt string) (AbsorbResult, error) {
 	if err := ctx.Err(); err != nil {
 		return AbsorbResult{}, err
-	}
-	if msg == nil {
-		return AbsorbResult{}, nil
 	}
 	window, chunks, _, err := t.absorbFit(ctx, t.context.Messages(), msg, tools, systemPrompt)
 	if err != nil {
@@ -180,22 +172,12 @@ func (t *DefaultModelTasks) absorbFit(
 	model := t.model
 	policy := t.policy
 	maxSize := t.maxSize
-	if policy.PressureRatio <= 0 {
-		policy.PressureRatio = DefaultContextPolicy().PressureRatio
-	}
-	if policy.CompressFraction <= 0 {
-		policy.CompressFraction = DefaultContextPolicy().CompressFraction
-	}
 
 	// countView = window + newMsg in reusable scratch (not retained as the stored window).
 	fullN := len(window) + 1
 	countView := t.stageMessages(fullN)
 	copy(countView, window)
 	countView[len(window)] = newMsg
-
-	if model == nil {
-		return slices.Clone(countView), nil, false, nil
-	}
 
 	currSize, err := model.CountTokens(ctx, countView, tools)
 	if err != nil {
@@ -217,12 +199,6 @@ func (t *DefaultModelTasks) absorbFit(
 	model.SetSystemPrompt(sumPrompt.String())
 
 	anchorLen := protectedPrefixLen(window)
-	if anchorLen < 1 {
-		anchorLen = 1
-	}
-	if anchorLen > len(window) {
-		anchorLen = len(window)
-	}
 	anchors := window[:anchorLen]
 	unprotected := window[anchorLen:]
 	if len(unprotected) == 0 {
@@ -346,9 +322,6 @@ func handoffGenerate(
 ) ([]*Message, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, false, err
-	}
-	if model == nil {
-		return nil, false, fmt.Errorf("handoff: model is required")
 	}
 	if len(window) == 0 || window[0] == nil {
 		return nil, false, fmt.Errorf("handoff: empty window")

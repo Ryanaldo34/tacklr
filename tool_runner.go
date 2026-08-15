@@ -36,10 +36,6 @@ func newToolRunner(interceptors ...ToolInterceptor) *toolRunner {
 // Run runs the interceptor chain and the tool.
 // Disposition comes from the final invoke (BuiltinResult); short-circuits have none.
 func (r *toolRunner) Run(ctx context.Context, inv ToolInvocation) (string, ToolResultDisposition, error) {
-	if inv.Tool == nil {
-		return "", ToolResultDisposition{}, fmt.Errorf("%w", ErrToolNotFound)
-	}
-
 	var toolDisp ToolResultDisposition
 	next := ToolCallFunc(func(ctx context.Context, inv ToolInvocation) (string, error) {
 		res, err := inv.Tool.invoke(ctx, inv.ArgsJSON, inv.Runtime)
@@ -87,9 +83,8 @@ func toolPermissionGate(ctx context.Context, inv ToolInvocation, next ToolCallFu
 		return "", err
 	}
 	perm, ok := intr.(*interrupt.ToolPermissionInterrupt)
-	if !ok || perm == nil {
-		// Registered tool_permission factory always returns *ToolPermissionInterrupt.
-		return "", fmt.Errorf("tool permission: unexpected interrupt type %T", intr)
+	if !ok {
+		return "", fmt.Errorf("%w: unexpected permission interrupt type %T", ErrFailed, intr)
 	}
 
 	switch perm.SelectedKind {
@@ -110,37 +105,28 @@ const (
 	permissionAlwaysDenyKey  = "_permission_always_deny"
 )
 
-func permissionSetHas(rt HarnessRuntime, key, toolName string) bool {
+func permissionSet(rt HarnessRuntime, key string) map[string]bool {
 	v, ok := rt.StateGet(key)
 	if !ok || v == nil {
-		return false
+		return map[string]bool{}
 	}
-	switch s := v.(type) {
-	case map[string]bool:
-		return s[toolName]
-	case map[string]any:
-		b, _ := s[toolName].(bool)
-		return b
-	default:
-		return false
+	m, ok := v.(map[string]bool)
+	if !ok {
+		return map[string]bool{}
 	}
+	out := make(map[string]bool, len(m))
+	for k, b := range m {
+		out[k] = b
+	}
+	return out
+}
+
+func permissionSetHas(rt HarnessRuntime, key, toolName string) bool {
+	return permissionSet(rt, key)[toolName]
 }
 
 func permissionRemember(rt HarnessRuntime, key, toolName string) {
-	set := make(map[string]bool)
-	if v, ok := rt.StateGet(key); ok && v != nil {
-		switch m := v.(type) {
-		case map[string]bool:
-			for k, b := range m {
-				set[k] = b
-			}
-		case map[string]any:
-			for k, raw := range m {
-				b, _ := raw.(bool)
-				set[k] = b
-			}
-		}
-	}
+	set := permissionSet(rt, key)
 	set[toolName] = true
 	rt.StateSet(key, set)
 }

@@ -2,7 +2,6 @@ package tacklr
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -56,11 +55,8 @@ type AgentHarness struct {
 	brainWriteKinds   brain.WriteKinds
 	// searchCtx owns the current knowledge ResultSet for this agent thread.
 	// Checkpointed via checkpointSession / NewAgentFromSession; not SessionManager.
-	searchCtx *brain.SearchContext
-	// fsRegistry / fsBootstrap used only at construct to fill session.VFS.
-	// Mount attach/detach lives on vfs.MountSession (session-owned), not here.
-	fsRegistry  *vfs.BackendRegistry
-	fsBootstrap []vfs.MountSpec
+	searchCtx            *brain.SearchContext
+	runCommandUnattended bool
 	// vfsBridge: optional mount→brain index lifecycle (not the agent turn loop).
 	vfsBridge        *vfsindex.Bridge
 	mcpCleanup       func()
@@ -74,6 +70,12 @@ type AgentHarness struct {
 	// runMu serializes Run bodies so mid-turn ReturnFromInterrupt cannot
 	// overlap the prior Run's park/exit path (two concurrent Run loops).
 	runMu sync.Mutex
+}
+
+// VFS is the session mount table, or nil. Hosts call FuseMount on this.
+// The harness does not start or own the kernel mount.
+func (a *AgentHarness) VFS() *vfs.MountSession {
+	return a.session.VFS
 }
 
 // SessionID returns the durable session id, or empty if unbound.
@@ -116,10 +118,12 @@ func (a *AgentHarness) restoreMessages(window []*Message) {
 // checkpointSaveTimeout is the max save duration when the turn context is cancelled.
 const checkpointSaveTimeout = 10 * time.Second
 
-// persistSession saves harness state on every Run exit path.
-// Failures are logged only; the turn still ends. Skips when store or session id
-// is missing. Uses a timeout that outlives turn cancel so abort still checkpoints.
-func (a *AgentHarness) persistSession(ctx context.Context, reason string) {
+// persistSession writes a checkpoint. Failures are logged only.
+// Skips when store or session id is missing. Uses a timeout that outlives
+// turn cancel so abort still dumps. Close always calls this, then releases
+// process resources. Interrupt paths also call it because the harness stays
+// live for ResumeInterrupts.
+func (a *AgentHarness) persistSession(ctx context.Context) {
 	if a.store == nil || strings.TrimSpace(a.sessionId) == "" {
 		return
 	}
@@ -135,7 +139,6 @@ func (a *AgentHarness) persistSession(ctx context.Context, reason string) {
 		slog.ErrorContext(saveCtx, "session checkpoint failed",
 			"area", "session_management",
 			"session_id", a.sessionId,
-			"reason", reason,
 			"error", err,
 		)
 		return
@@ -143,7 +146,6 @@ func (a *AgentHarness) persistSession(ctx context.Context, reason string) {
 	slog.DebugContext(saveCtx, "session checkpointed",
 		"area", "session_management",
 		"session_id", a.sessionId,
-		"reason", reason,
 		"context_window_size", len(a.Messages()),
 	)
 }
@@ -180,22 +182,6 @@ func (a *AgentHarness) checkpointSession(ctx context.Context) error {
 			return err
 		}
 		cp.State.SearchContext = raw
-	}
-	// Flush dirty VFS documents to backends, then serialize mount Specs only
-	// (file content is never stored in the checkpoint).
-	if a.session != nil && a.session.VFS != nil {
-		if err := a.session.VFS.SyncAll(ctx); err != nil {
-			telemetry.InstrumentsFromContext(ctx).RecordCheckpointSave(ctx, telemetry.OutcomeError)
-			return err
-		}
-		if specs := a.session.VFS.Specs(); len(specs) > 0 {
-			raw, err := json.Marshal(specs)
-			if err != nil {
-				telemetry.InstrumentsFromContext(ctx).RecordCheckpointSave(ctx, telemetry.OutcomeError)
-				return err
-			}
-			cp.State.Mounts = raw
-		}
 	}
 	if err := a.store.SaveSession(ctx, a.sessionId, *cp); err != nil {
 		telemetry.InstrumentsFromContext(ctx).RecordCheckpointSave(ctx, telemetry.OutcomeError)
@@ -631,7 +617,6 @@ func (a *AgentHarness) HasOpenToolWork() bool {
 func (a *AgentHarness) FinalizeCancelledWork(ctx context.Context) {
 	a.pairCancelledToolResults(nil)
 	a.clearInterruptParkState()
-	a.persistSession(ctx, "steer_finalize")
 }
 
 // openToolCalls returns assistant/pending tool_calls that have no RoleTool result yet.
@@ -726,9 +711,19 @@ func (a *AgentHarness) initMCP(ctx context.Context) {
 	})
 }
 
-// Close releases harness resources (for example MCP clients and the optional
-// VFS index scheduler). Call after the Run events channel is drained.
+// Close dumps session state then releases turn resources (MCP, vfsindex).
+// The host owns MountSession (including FUSE); this does not close it.
+// Call after the Run events channel is drained, or when construct/runHarness fails.
 func (a *AgentHarness) Close() {
+	a.persistSession(context.Background())
+	a.parkMu.Lock()
+	for id, w := range a.parkedWorkersLive {
+		if w != nil {
+			w.Close()
+		}
+		delete(a.parkedWorkersLive, id)
+	}
+	a.parkMu.Unlock()
 	if a.mcpCleanup != nil {
 		a.mcpCleanup()
 		a.mcpCleanup = nil

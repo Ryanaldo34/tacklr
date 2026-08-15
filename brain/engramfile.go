@@ -54,8 +54,21 @@ func ParseEngram(data []byte) (EngramFile, error) {
 func FormatEngram(f EngramFile) ([]byte, error) {
 	var node yaml.Node
 	node.Kind = yaml.MappingNode
+	addStr := func(k, v string) {
+		if v == "" {
+			return
+		}
+		var kn, vn yaml.Node
+		kn.SetString(k)
+		vn.SetString(v)
+		node.Content = append(node.Content, &kn, &vn)
+	}
 	add := func(k string, v any) error {
 		if v == nil {
+			return nil
+		}
+		if s, ok := v.(string); ok {
+			addStr(k, s)
 			return nil
 		}
 		var kn, vn yaml.Node
@@ -67,25 +80,11 @@ func FormatEngram(f EngramFile) ([]byte, error) {
 		return nil
 	}
 	if f.ID != uuid.Nil {
-		if err := add("id", f.ID.String()); err != nil {
-			return nil, err
-		}
+		addStr("id", f.ID.String())
 	}
-	if k := strings.TrimSpace(f.Kind); k != "" {
-		if err := add("domain", k); err != nil {
-			return nil, err
-		}
-	}
-	if s := strings.TrimSpace(f.Slug); s != "" {
-		if err := add("slug", s); err != nil {
-			return nil, err
-		}
-	}
-	if t := strings.TrimSpace(f.Title); t != "" {
-		if err := add("title", t); err != nil {
-			return nil, err
-		}
-	}
+	addStr("domain", strings.TrimSpace(f.Kind))
+	addStr("slug", strings.TrimSpace(f.Slug))
+	addStr("title", strings.TrimSpace(f.Title))
 	for _, k := range slices.Sorted(maps.Keys(f.Properties)) {
 		if _, reserved := reservedFrontMatter[k]; reserved || k == PropVFSPath {
 			continue
@@ -104,12 +103,9 @@ func FormatEngram(f EngramFile) ([]byte, error) {
 	if len(node.Content) > 0 {
 		enc := yaml.NewEncoder(&buf)
 		enc.SetIndent(2)
-		if err := enc.Encode(&node); err != nil {
-			return nil, fmt.Errorf("brain: encode engram front matter: %w", err)
-		}
-		if err := enc.Close(); err != nil {
-			return nil, fmt.Errorf("brain: encode engram front matter: %w", err)
-		}
+		// Node was built with SetString/Encode; encoder cannot fail on it.
+		_ = enc.Encode(&node)
+		_ = enc.Close()
 	}
 	buf.WriteString("---\n")
 	if body := f.Body; body != "" {

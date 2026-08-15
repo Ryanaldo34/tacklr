@@ -885,6 +885,15 @@ func TestHandleRPC_sessionPrompt_streamsEvents(t *testing.T) {
 	if !hasResult {
 		t.Error("expected a result frame")
 	}
+
+	// Text-only model rejects an image part before the turn starts.
+	imgBody := `{"jsonrpc":"2.0","id":11,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"see"},{"type":"image","mimeType":"image/png","data":"AAAA"}]}}`
+	rec3 := serveACPRaw(t, r, imgBody)
+	errObj := acpRPCError(t, rec3)
+	msg, _ := errObj["message"].(string)
+	if !strings.Contains(msg, "unsupported content type") {
+		t.Fatalf("image reject: %#v", errObj)
+	}
 }
 
 func TestHandleRPC_sessionPrompt_clientTurnID(t *testing.T) {

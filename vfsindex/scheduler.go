@@ -30,14 +30,14 @@ type SyncScheduler struct {
 
 // NewSyncScheduler returns an IndexScheduler that calls IndexPath inline.
 func NewSyncScheduler(idx *MountIndexer) *SyncScheduler {
+	if idx == nil {
+		panic("vfsindex: NewSyncScheduler requires MountIndexer")
+	}
 	return &SyncScheduler{Indexer: idx}
 }
 
 // Notify implements IndexScheduler.
 func (s *SyncScheduler) Notify(ctx context.Context, virtualPath string, reason IndexReason) error {
-	if s == nil || s.Indexer == nil {
-		return nil
-	}
 	_ = reason
 	return s.Indexer.IndexPath(ctx, virtualPath)
 }
@@ -67,6 +67,9 @@ type AsyncScheduler struct {
 
 // NewAsyncScheduler starts a single background worker. Call Close on teardown.
 func NewAsyncScheduler(idx *MountIndexer) *AsyncScheduler {
+	if idx == nil {
+		panic("vfsindex: NewAsyncScheduler requires MountIndexer")
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &AsyncScheduler{
 		Indexer:  idx,
@@ -86,14 +89,11 @@ func NewAsyncScheduler(idx *MountIndexer) *AsyncScheduler {
 // contexts must not cancel pending work. IndexPath runs under the scheduler's
 // own cancel + Timeout context.
 func (s *AsyncScheduler) Notify(ctx context.Context, virtualPath string, reason IndexReason) error {
-	if s == nil {
-		return nil
-	}
 	_ = ctx
 	_ = reason
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed || s.Indexer == nil {
+	if s.closed {
 		return nil
 	}
 	if _, ok := s.pending[virtualPath]; ok {
@@ -174,9 +174,6 @@ func (s *AsyncScheduler) takeOne() (string, bool) {
 }
 
 func (s *AsyncScheduler) runIndex(parent context.Context, path string) {
-	if s.Indexer == nil {
-		return
-	}
 	timeout := s.Timeout
 	if timeout <= 0 {
 		timeout = DefaultAsyncTimeout

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"unicode/utf8"
 )
@@ -22,8 +23,8 @@ const MaxLinesPerWindow = 500
 // MaxLinesPerWindow). EOF is true when the file ended at or before the last
 // returned line. NextStart is Start+Returned (useful when !EOF for paging).
 //
-// Rev is set when the window is served from session IR cache (cheap full-body
-// hash). Stream reads leave Rev empty; callers use ContentRev when needed.
+// Rev is set when the window is served from a full textual body (cheap hash).
+// Stream reads leave Rev empty; callers use ContentRev when needed.
 type LineWindow struct {
 	Path      string
 	Start     int
@@ -56,11 +57,7 @@ func (m *MountSession) ReadLines(ctx context.Context, virtualPath string, start,
 	if err != nil {
 		return LineWindow{}, err
 	}
-	if doc, _, _, _, ok := m.cache.get(cleaned); ok {
-		return lineWindowFromDoc(cleaned, doc, start, end)
-	}
-
-	// Prefer full IR when the object is within the materialize cap (session-visible).
+	// Prefer full IR when the object is within the materialize cap.
 	if fi, stErr := m.Stat(ctx, cleaned); stErr == nil && !fi.IsDir && fi.Size >= 0 && fi.Size <= int64(MaxReadFileBytes) {
 		if doc, rerr := m.ReadText(ctx, cleaned); rerr == nil {
 			return lineWindowFromDoc(cleaned, doc, start, end)
@@ -76,10 +73,14 @@ func (m *MountSession) ReadLines(ctx context.Context, virtualPath string, start,
 	if start == 1 && end == 1 {
 		return LineWindow{Path: cleaned, Start: 1, End: 1, NextStart: 1}, nil
 	}
-	return readLineRange(f, cleaned, start, end)
+	r, ok := f.(io.Reader)
+	if !ok {
+		return LineWindow{}, fmt.Errorf("vfs: file is not readable")
+	}
+	return readLineRange(r, cleaned, start, end)
 }
 
-func lineWindowFromDoc(path string, doc *TextDocument, start, end int) (LineWindow, error) {
+func lineWindowFromDoc(path string, doc Textual, start, end int) (LineWindow, error) {
 	n := doc.LineCount()
 	if start > n+1 {
 		return LineWindow{}, ErrLineOutOfRange

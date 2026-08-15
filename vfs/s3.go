@@ -11,12 +11,17 @@ import (
 	"path"
 	"strings"
 	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
 // S3API is the subset of an S3-compatible API used by the S3 provider.
 // Hosts typically pass *s3.Client via AWSS3 (or any adapter).
 type S3API interface {
-	Head(ctx context.Context, bucket, key string) (size int64, mod time.Time, err error)
+	// Head returns size, mtime, and optional Content-Type (empty if unknown).
+	Head(ctx context.Context, bucket, key string) (size int64, mod time.Time, contentType string, err error)
 	Get(ctx context.Context, bucket, key string) (body io.ReadCloser, size int64, mod time.Time, err error)
 	Put(ctx context.Context, bucket, key string, body io.Reader, size int64) error
 	Delete(ctx context.Context, bucket, key string) error
@@ -33,17 +38,14 @@ type s3Provider struct {
 	prefix string // no leading slash; may be empty; trailing slash normalized off
 }
 
+var _ documentBackend = s3Provider{}
+
 // Validate implements Provider.
 func (p s3Provider) Validate(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if p.api == nil {
-		return fmt.Errorf("vfs: s3 client required")
-	}
-	if strings.TrimSpace(p.bucket) == "" {
-		return fmt.Errorf("vfs: s3 bucket required")
-	}
+	// Factory Open rejects a missing client or bucket before this runs.
 	return validateS3Prefix(p.prefix)
 }
 
@@ -93,14 +95,20 @@ func (p s3Provider) Stat(ctx context.Context, name string) (FileInfo, error) {
 
 	// Try object first.
 	if key != "" {
-		size, mod, err := p.api.Head(ctx, p.bucket, key)
+		size, mod, ct, err := p.api.Head(ctx, p.bucket, key)
 		if err == nil {
+			base := path.Base(key)
+			mt := s3KnownType(ct)
+			if mt == "" {
+				mt = DetectMediaType(base, nil)
+			}
 			return FileInfo{
-				Name:    path.Base(key),
-				Size:    size,
-				Mode:    0o644,
-				ModTime: mod,
-				IsDir:   false,
+				Name:      base,
+				Size:      size,
+				Mode:      0o644,
+				ModTime:   mod,
+				IsDir:     false,
+				MediaType: mt,
 			}, nil
 		}
 		if !errors.Is(err, ErrNotExist) {
@@ -114,7 +122,7 @@ func (p s3Provider) Stat(ctx context.Context, name string) (FileInfo, error) {
 		dirKey += "/"
 	}
 	if dirKey != "" {
-		if size, mod, err := p.api.Head(ctx, p.bucket, dirKey); err == nil {
+		if size, mod, _, err := p.api.Head(ctx, p.bucket, dirKey); err == nil {
 			return FileInfo{
 				Name:    path.Base(strings.TrimSuffix(dirKey, "/")),
 				Size:    size,
@@ -155,6 +163,56 @@ func (p s3Provider) PutFile(ctx context.Context, name string, r io.Reader, size 
 	return p.api.Put(ctx, p.bucket, key, r, size)
 }
 
+// OpenDocument translates an S3 object into Document IR.
+func (p s3Provider) OpenDocument(ctx context.Context, name string, reg *ContentRegistry) (Document, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	fi, err := p.Stat(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	if fi.IsDir {
+		return nil, fmt.Errorf("vfs: %s is a directory", name)
+	}
+	if fi.Size > int64(MaxReadFileBytes) {
+		return nil, errFileExceeds(MaxReadFileBytes)
+	}
+	key, err := p.objectKey(name)
+	if err != nil {
+		return nil, err
+	}
+	if key == "" {
+		return nil, fmt.Errorf("vfs: cannot open mount root as file")
+	}
+	body, _, _, err := p.api.Get(ctx, p.bucket, key)
+	if err != nil {
+		return nil, err
+	}
+	data, err := io.ReadAll(io.LimitReader(body, int64(MaxReadFileBytes)+1))
+	_ = body.Close()
+	if err != nil {
+		return nil, err
+	}
+	return decodeProviderDocument(ctx, name, fi, data, reg)
+}
+
+// WriteDocument encodes IR and Puts the object immediately.
+func (p s3Provider) WriteDocument(ctx context.Context, name string, doc Document) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	t, ok := doc.(Textual)
+	if !ok {
+		return ErrNotTextual
+	}
+	body, err := textualPayload(t)
+	if err != nil {
+		return err
+	}
+	return p.PutFile(ctx, name, strings.NewReader(body), int64(len(body)))
+}
+
 // OpenFile implements Provider.
 func (p s3Provider) OpenFile(ctx context.Context, name string, flag int, perm fs.FileMode) (File, error) {
 	if err := ctx.Err(); err != nil {
@@ -173,7 +231,7 @@ func (p s3Provider) OpenFile(ctx context.Context, name string, flag int, perm fs
 	read := flag&os.O_WRONLY == 0 // not write-only
 
 	if flag&os.O_CREATE != 0 && flag&os.O_EXCL != 0 {
-		if _, _, err := p.api.Head(ctx, p.bucket, key); err == nil {
+		if _, _, _, err := p.api.Head(ctx, p.bucket, key); err == nil {
 			return nil, ErrExist
 		} else if !errors.Is(err, ErrNotExist) {
 			return nil, err
@@ -191,11 +249,11 @@ func (p s3Provider) OpenFile(ctx context.Context, name string, flag int, perm fs
 			_, _ = io.Copy(&buf, body)
 			_ = body.Close()
 		}
-		return &s3WriteFile{ctx: ctx, p: p, key: key, buf: buf}, nil
+		return &s3WriteFile{buf: buf, ctx: ctx, p: p, key: key}, nil
 	}
 
 	if write {
-		return &s3WriteFile{ctx: ctx, p: p, key: key, buf: bytes.Buffer{}}, nil
+		return &s3WriteFile{ctx: ctx, p: p, key: key}, nil
 	}
 
 	if !read {
@@ -205,9 +263,17 @@ func (p s3Provider) OpenFile(ctx context.Context, name string, flag int, perm fs
 	if err != nil {
 		return nil, err
 	}
+	data, err := io.ReadAll(body)
+	_ = body.Close()
+	if err != nil {
+		return nil, err
+	}
+	if size < 0 {
+		size = int64(len(data))
+	}
 	return &s3ReadFile{
-		body: body,
-		info: FileInfo{Name: path.Base(key), Size: size, Mode: 0o644, ModTime: mod},
+		Reader: bytes.NewReader(data),
+		info:   FileInfo{Name: path.Base(key), Size: size, Mode: 0o644, ModTime: mod},
 	}, nil
 }
 
@@ -333,12 +399,12 @@ func (p s3Provider) MkdirAll(ctx context.Context, name string, perm fs.FileMode)
 		}
 		marker := key + "/"
 		// Skip if already exists as object or marker.
-		if _, _, err := p.api.Head(ctx, p.bucket, marker); err == nil {
+		if _, _, _, err := p.api.Head(ctx, p.bucket, marker); err == nil {
 			continue
 		} else if !errors.Is(err, ErrNotExist) {
 			return err
 		}
-		if _, _, err := p.api.Head(ctx, p.bucket, key); err == nil {
+		if _, _, _, err := p.api.Head(ctx, p.bucket, key); err == nil {
 			// Exists as file — cannot mkdir through a file.
 			return fmt.Errorf("vfs: not a directory")
 		} else if !errors.Is(err, ErrNotExist) {
@@ -364,26 +430,21 @@ func validateS3Prefix(prefix string) error {
 }
 
 type s3ReadFile struct {
-	body io.ReadCloser
+	*bytes.Reader
 	info FileInfo
 }
 
-func (f *s3ReadFile) Read(p []byte) (int, error) { return f.body.Read(p) }
-func (f *s3ReadFile) Write([]byte) (int, error)  { return 0, fmt.Errorf("vfs: read-only file") }
-func (f *s3ReadFile) Close() error               { return f.body.Close() }
-func (f *s3ReadFile) Stat() (FileInfo, error)    { return f.info, nil }
+func (f *s3ReadFile) Close() error            { return nil }
+func (f *s3ReadFile) Stat() (FileInfo, error) { return f.info, nil }
 
 type s3WriteFile struct {
+	buf bytes.Buffer
 	ctx context.Context
 	p   s3Provider
 	key string
-	buf bytes.Buffer
 }
 
-func (f *s3WriteFile) Read([]byte) (int, error) { return 0, fmt.Errorf("vfs: write-only file") }
-func (f *s3WriteFile) Write(p []byte) (int, error) {
-	return f.buf.Write(p)
-}
+func (f *s3WriteFile) Write(p []byte) (int, error) { return f.buf.Write(p) }
 func (f *s3WriteFile) Close() error {
 	data := f.buf.Bytes()
 	return f.p.api.Put(f.ctx, f.p.bucket, f.key, bytes.NewReader(data), int64(len(data)))
@@ -423,4 +484,156 @@ func (f S3Factory) Open(ctx context.Context, _ string, spec MountSpec) (Provider
 		return nil, err
 	}
 	return s3Provider{api: f.Client, bucket: bucket, prefix: prefix}, nil
+}
+
+// s3KnownType keeps Head Content-Type only when S3 actually declared a type.
+// "application/octet-stream" is S3's default for "I don't know" — Stat then
+// classifies from the object key (DetectMediaType) instead.
+func s3KnownType(contentType string) string {
+	t, _, _ := strings.Cut(strings.ToLower(strings.TrimSpace(contentType)), ";")
+	t = strings.TrimSpace(t)
+	if t == "" || t == "application/octet-stream" || t == "binary/octet-stream" {
+		return ""
+	}
+	return t
+}
+
+// AWSS3 implements S3API with the AWS SDK v2 client (MinIO, R2, and real S3).
+type AWSS3 struct {
+	Client *s3.Client
+}
+
+func (a AWSS3) require() error {
+	if a.Client == nil {
+		return fmt.Errorf("vfs: AWS S3 client required")
+	}
+	return nil
+}
+
+// Head implements S3API.
+func (a AWSS3) Head(ctx context.Context, bucket, key string) (int64, time.Time, string, error) {
+	if err := a.require(); err != nil {
+		return 0, time.Time{}, "", err
+	}
+	out, err := a.Client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return 0, time.Time{}, "", mapS3Error(err)
+	}
+	var size int64
+	if out.ContentLength != nil {
+		size = *out.ContentLength
+	}
+	var mod time.Time
+	if out.LastModified != nil {
+		mod = *out.LastModified
+	}
+	ct := ""
+	if out.ContentType != nil {
+		ct = *out.ContentType
+	}
+	return size, mod, ct, nil
+}
+
+// Get implements S3API.
+func (a AWSS3) Get(ctx context.Context, bucket, key string) (io.ReadCloser, int64, time.Time, error) {
+	if err := a.require(); err != nil {
+		return nil, 0, time.Time{}, err
+	}
+	out, err := a.Client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return nil, 0, time.Time{}, mapS3Error(err)
+	}
+	var size int64
+	if out.ContentLength != nil {
+		size = *out.ContentLength
+	}
+	var mod time.Time
+	if out.LastModified != nil {
+		mod = *out.LastModified
+	}
+	return out.Body, size, mod, nil
+}
+
+// Put implements S3API.
+func (a AWSS3) Put(ctx context.Context, bucket, key string, body io.Reader, size int64) error {
+	if err := a.require(); err != nil {
+		return err
+	}
+	in := &s3.PutObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+		Body:   body,
+	}
+	if size >= 0 {
+		in.ContentLength = aws.Int64(size)
+	}
+	_, err := a.Client.PutObject(ctx, in)
+	return mapS3Error(err)
+}
+
+// Delete implements S3API.
+func (a AWSS3) Delete(ctx context.Context, bucket, key string) error {
+	if err := a.require(); err != nil {
+		return err
+	}
+	_, err := a.Client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+	})
+	return mapS3Error(err)
+}
+
+// List implements S3API with delimiter "/" for virtual directories.
+func (a AWSS3) List(ctx context.Context, bucket, prefix string) (keys []string, dirs []string, err error) {
+	if err := a.require(); err != nil {
+		return nil, nil, err
+	}
+	pager := s3.NewListObjectsV2Paginator(a.Client, &s3.ListObjectsV2Input{
+		Bucket:    aws.String(bucket),
+		Prefix:    aws.String(prefix),
+		Delimiter: aws.String("/"),
+	})
+	for pager.HasMorePages() {
+		page, err := pager.NextPage(ctx)
+		if err != nil {
+			return nil, nil, mapS3Error(err)
+		}
+		for _, obj := range page.Contents {
+			if obj.Key != nil {
+				keys = append(keys, *obj.Key)
+			}
+		}
+		for _, p := range page.CommonPrefixes {
+			if p.Prefix != nil {
+				dirs = append(dirs, *p.Prefix)
+			}
+		}
+	}
+	return keys, dirs, nil
+}
+
+func mapS3Error(err error) error {
+	if err == nil {
+		return nil
+	}
+	var nsk *types.NoSuchKey
+	if errors.As(err, &nsk) {
+		return ErrNotExist
+	}
+	var nsb *types.NotFound
+	if errors.As(err, &nsb) {
+		return ErrNotExist
+	}
+	// HeadObject 404 / NoSuchKey often wrap as generic API errors.
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "notfound") || strings.Contains(msg, "no such key") || strings.Contains(msg, "status code: 404") {
+		return ErrNotExist
+	}
+	return err
 }

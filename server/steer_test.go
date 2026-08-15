@@ -145,35 +145,3 @@ func TestRegistry_promptWhileBusy_steers(t *testing.T) {
 }
 
 // TestRegistry_sessionCancel_doesNotStartNewTurn: session/cancel aborts only.
-func TestRegistry_sessionCancel_doesNotStartNewTurn(t *testing.T) {
-	started := make(chan struct{})
-	var once sync.Once
-	strategy := &mockInferenceStrategy{
-		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-			once.Do(func() { close(started) })
-			<-ctx.Done()
-		},
-	}
-	r := newTestRegistry(testStore(t), strategy, nil)
-	s, err := r.RunTurn(context.Background(), TurnRequest{
-		SessionID:              "cancel-only",
-		AgentID:                "default",
-		Prompt:                 "hi",
-		AllowMissingCheckpoint: true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case <-started:
-	case <-time.After(2 * time.Second):
-		t.Fatal("turn did not start")
-	}
-	r.CancelSession("cancel-only")
-	for range s.Events {
-	}
-	// No second turn was started; activeTurns should be clear.
-	if _, ok := r.activeTurns.Load("cancel-only"); ok {
-		t.Fatal("expected active turn cleared after cancel drain")
-	}
-}

@@ -24,9 +24,6 @@ type sessionState struct {
 	// SearchContext is an opaque brain.SearchContext export (JSON bytes).
 	// Owned by the harness, not SessionManager.
 	SearchContext []byte `json:"searchContext,omitempty"`
-	// Mounts is an opaque []vfs.MountSpec export (JSON bytes).
-	// Owned by the harness, not SessionManager. Secret-free mount table only.
-	Mounts []byte `json:"mounts,omitempty"`
 }
 
 // SessionCheckpoint is the agent harness checkpoint blob.
