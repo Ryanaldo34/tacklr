@@ -106,7 +106,8 @@ It sees:
 
 A **virtual filesystem (VFS)** is one tree of paths whose backends the host chose.
 Local disk, S3, and the brain all look the same at the tool layer. Details:
-[docs/vfs.md](vfs.md).
+[docs/vfs.md](vfs.md). Workers share the host `MountSession` and brain engine;
+they do not get a second FUSE.
 
 Default Engram layout (the harness mounts this when Brain + VFS + a search
 namespace are set, unless the host already mounted a brain profile):
@@ -380,7 +381,7 @@ flowchart TB
 | | Store | Graph |
 |-|-------|-------|
 | **Holds** | Full rows, chunks, embeddings, filters | Parent nodes + edges |
-| **Answers** | `search`, `find_exact`, `read`, expand-children | `find_objects`, `link`, expand-relations, `find_links` |
+| **Answers** | `search`, `find_exact`, `read_object`, expand-children | `find_objects`, `link`, expand-relations, `find_links` |
 | **Required?** | Yes | Optional. Without it: no `link` / `find_objects` / named-relation expand |
 
 **Write rules**
@@ -574,7 +575,7 @@ VFS + a search namespace). Isolated VFS with no Brain: file tools only.
 | `search` | You need evidence in notes or indexed files | Store hybrid + parent promotion |
 | `find_exact` | You have an id or a precise phrase | Equality / trigram + promotion |
 | `find_objects` | You need the entity, not a passage | Graph nodes → store hydrate |
-| `read` (object_id) | You have an id and need the full stored body | `Engine.Read` (prefer file `read` when `vfs_path` is set) |
+| `read_object` | You have an id and the hit has no `vfs_path` | `Engine.Read` |
 | `read` / `write` | You are editing or citing a path | VFS (any mount, including `/engram`) |
 | `save_*` | You want a one-shot create/update | Provider write, or `Put` if no brain mount |
 | `index_file` / `unindex` | You must (un)mirror an artifact | `IndexPath` |

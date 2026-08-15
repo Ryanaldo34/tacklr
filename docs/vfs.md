@@ -192,7 +192,7 @@ Tool guidance:
 
 FUSE: hosts call `MountSession.FuseMount(dir)` for a kernel tree. **Every mount point must be a single path segment** (`/work`, `/engram`). Multi-segment points (`/tmp/tacklr`) fail `FuseMount`. File `Read`/`getattr` use `ReadText` (provider plaintext). Binary files use `Stat.Size` and `io.ReaderAt` when the handle supports it. Kernel writes (`echo >`, `mkdir`, `rm`) persist through `WriteFile` only when `KernelWritable` is true — `IdentityCodec` types (`TextCodec` / unregistered text-like). Word, Notion, Google Docs, and other projected types are `EROFS`; the agent `write` tool still uses `WriteDocument`. `session.Mount` attaches a provider; `FuseMount` is the host kernel mount. `HostDir()` is the last mount directory (host-facing only). `FuseAvailable()` probes `/dev/fuse` and `/dev/macfuse*`. `Close` unmounts.
 
-`server.Registry` starts FUSE after construct when the session has a VFS: `$TMP/tacklr-fuse/<session>` mode `0700`. Production without a device has **no** `MountSession` (no VFS tools, no `run_command`). Tests inject `DirectProjection` so `read`/`write` still work and `run_command` returns `ErrFuseNotMounted` until `HostDir` is set. Device present and mount fails after one suffix retry → fail-hard (Close, do not Store). `cmd/testserver` bootstraps `Point: /work` (`LocalFactory.Base` is the host jail). The harness does not call `FuseMount` and `Close` does not unmount.
+`server.Registry` starts FUSE after construct when the session has a VFS: `$TMP/tacklr-fuse/<session>` mode `0700`. Production without a device has **no** `MountSession` (no VFS tools, no `run_command`). Tests inject `DirectProjection` so `read`/`write` still work and `run_command` returns `ErrFuseNotMounted` until `HostDir` is set. Device present and mount fails after one suffix retry → fail-hard (Close, do not Store). `cmd/testserver` bootstraps `Point: /work` (`LocalFactory.Base` is the host jail). The harness does not call `FuseMount` and `Close` does not unmount. Workers share the host `MountSession` and brain engine; they do not get a second FUSE.
 
 `TextCodec` requires valid UTF-8 and builds a `TextDocument` labeled with the caller’s media type.
 
@@ -456,7 +456,7 @@ When the harness has **Brain + MountSession + search namespace**, it owns a
 | `index_file` | Selective ingest of key virtual **files** (max 8); errors under `none` |
 | `unindex` | Soft-delete the brain mirror; drops selective track |
 | `run_command` | `/bin/sh -c` with cwd = FUSE root; relative paths (`work/foo`); `PermissionRequired` unless `RunCommandUnattended` |
-| `read` / `write` | Line window / first page / block read; one mutation mode (full, span, old/new, block) |
+| `read` / `write` | File window / first page / block read; one mutation mode. Knowledge objects: `read_object`. |
 | `save_*` | Write the Engram file on the brain Provider (or `Engine.Put` if no brain mount) |
 | `link` / `expand` / `find_links` | Path-native graph (G1): prefer virtual paths; surface neighbor `vfs_path` |
 

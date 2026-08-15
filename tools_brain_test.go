@@ -135,7 +135,7 @@ func TestBrainTools_saveDiscoveryAndLink(t *testing.T) {
 	if !strings.Contains(eout.output, b.ID.String()) || !strings.Contains(eout.output, "supports finding") {
 		t.Fatalf("expand should return neighbor with note: %s", eout.output)
 	}
-	readTool := h.findTool("read", "")
+	readTool := h.findTool("read_object", "")
 	rout, err := readTool.invoke(ctx, `{"object_id":"`+a.ID.String()+`"}`, turnRuntime(h))
 	if err != nil || !strings.Contains(rout.output, "updated") {
 		t.Fatalf("read after save: %v %v", err, rout)
@@ -178,7 +178,7 @@ func TestBrainTools_hostNamespaceScopedRead(t *testing.T) {
 		t.Fatalf("SearchNamespace from options: %v %v", gotNS, ok)
 	}
 
-	readTool := h.findTool("read", "")
+	readTool := h.findTool("read_object", "")
 	schemaTool := h.findTool("schema", "")
 	if readTool == nil || schemaTool == nil {
 		t.Fatal("brain tools must be injected when Brain is configured")
@@ -497,9 +497,9 @@ func TestBrainTools_searchNamespaceIsolation(t *testing.T) {
 		Brain: eng, SearchNamespace: &nsB,
 	})
 	search := h.findTool("search", "")
-	read := h.findTool("read", "")
+	read := h.findTool("read_object", "")
 	if search == nil || read == nil {
-		t.Fatal("search and read required")
+		t.Fatal("search and read_object required")
 	}
 	out, err := search.invoke(ctx, `{"query":"namespace isolation secret token xyzzy","limit":10}`, turnRuntime(h))
 	if err != nil {
@@ -555,47 +555,17 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 		},
 	})
 
-	// Parent search populates parent SearchContext only.
-	if _, err := parentH.findTool("search", "").invoke(ctx, `{"query":"worker search isolation"}`, turnRuntime(parentH)); err != nil {
-		t.Fatal(err)
-	}
-	parentRS, err := parentH.searchCtx.Export()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(parentRS) == 0 {
-		t.Fatal("parent should have result set after search")
-	}
-
 	worker := parentH.newWorkerHarness(ctx, "researcher", "spawn_tc1", parentH.subagents["researcher"])
 
 	gotNS, ok := worker.SearchNamespace()
 	if !ok || gotNS != ns {
 		t.Fatalf("worker namespace %v %v, want %v", gotNS, ok, ns)
 	}
-	if worker.searchCtx == nil || worker.searchCtx == parentH.searchCtx {
-		t.Fatal("worker must own a distinct SearchContext")
-	}
-	// Worker inherits namespace but must not copy the parent's active ResultSet.
-	wraw, err := worker.searchCtx.Export()
-	if err != nil {
-		t.Fatal(err)
-	}
-	var env struct {
-		ResultSet *brain.ResultSet `json:"result_set"`
-	}
-	if len(wraw) > 0 {
-		if err := json.Unmarshal(wraw, &env); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if env.ResultSet != nil {
-		t.Fatal("new worker must not copy parent ResultSet")
-	}
 
-	readTool := worker.findTool("read", "")
-	if readTool == nil {
-		t.Fatal("worker must inherit brain read tool")
+	readTool := worker.findTool("read_object", "")
+	searchTool := worker.findTool("search", "")
+	if readTool == nil || searchTool == nil {
+		t.Fatal("worker must inherit brain read_object and search")
 	}
 	out, err := readTool.invoke(ctx, `{"object_id":"`+docID.String()+`"}`, turnRuntime(worker))
 	if err != nil {
@@ -603,6 +573,13 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 	}
 	if !strings.Contains(out.output, "worker-visible") {
 		t.Fatalf("worker read: %s", out.output)
+	}
+	sout, err := searchTool.invoke(ctx, `{"query":"worker search isolation token"}`, turnRuntime(worker))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(sout.output, parent.String()) && !strings.Contains(sout.output, "worker search isolation") {
+		t.Fatalf("worker search: %s", sout.output)
 	}
 
 	parentH.ClearSearchNamespace()

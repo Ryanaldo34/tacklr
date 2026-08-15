@@ -7,10 +7,16 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/google/uuid"
+
+	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/streaming"
+	"github.com/ryanaldo34/tacklr/vfs"
+	"github.com/ryanaldo34/tacklr/vfsindex"
 )
 
 // TestSystemPrompt_listsSubAgentsSorted: registered workers appear in the
@@ -634,4 +640,243 @@ type failSaveStore struct {
 
 func (failSaveStore) SaveSession(context.Context, string, stores.SessionCheckpoint) error {
 	return errors.New("checkpoint disk full")
+}
+
+// newWorkerHost builds a parent with VFS+Brain+namespace and a spawn-shaped
+// worker that shares the mount, engine, and index bridge.
+func newWorkerHost(t *testing.T) (*AgentHarness, *AgentHarness, *vfs.MountSession, *brain.Engine, uuid.UUID) {
+	t.Helper()
+	parent, ms, eng, ns := vfsIndexHarness(t, true)
+	worker := NewAgent(context.Background(), parent.workerOptsForSpawn(&SubAgent{WorkerName: "researcher", Model: &mockStrategy{}}))
+	t.Cleanup(worker.Close)
+	return parent, worker, ms, eng, ns
+}
+
+func TestSpawnWorker_sharesHostMountWriteAndCatalog(t *testing.T) {
+	_, worker, ms, eng, ns := newWorkerHost(t)
+	ctx := context.Background()
+	scope := brain.Scope{Namespace: &ns}
+
+	for _, name := range []string{"read", "write", "run_command", "read_object", "search", "index_file"} {
+		if worker.findTool(name, "") == nil {
+			t.Fatalf("worker catalog missing %s", name)
+		}
+	}
+
+	const body = "from-worker-body\n"
+	if _, err := runWriteTool(t, worker, worker.findTool("write", ""), `{"path":"/work/from-worker.txt","content":`+jsonString(body)+`}`); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ms.ReadText(ctx, "/work/from-worker.txt")
+	if err != nil || got.Text() != body {
+		text := ""
+		if got != nil {
+			text = got.Text()
+		}
+		t.Fatalf("parent ReadText after worker write: %q err=%v", text, err)
+	}
+	rout, err := worker.findTool("read", "").invoke(ctx, `{"path":"/work/from-worker.txt"}`, turnRuntime(worker))
+	if err != nil || !strings.Contains(rout.output, "from-worker-body") {
+		t.Fatalf("worker read after write: %v %s", err, rout.output)
+	}
+
+	if _, err := worker.findTool("run_command", "").invoke(ctx, `{"command":"ls work"}`, turnRuntime(worker)); !errors.Is(err, vfs.ErrFuseNotMounted) {
+		t.Fatalf("run_command without HostDir: %v", err)
+	}
+
+	const phraseA = "worker-index-share-aaa"
+	if err := ms.WriteFile(ctx, "/work/tracked.txt", []byte(phraseA+"\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runWriteTool(t, worker, worker.findTool("index_file", ""), `{"path":"/work/tracked.txt"}`); err != nil {
+		t.Fatal(err)
+	}
+	if hit := waitSearchHit(t, eng, scope, phraseA, 3*time.Second); hit.Properties[vfsindex.PropVFSPath] != "/work/tracked.txt" {
+		t.Fatalf("index vfs_path: %+v", hit.Properties)
+	}
+
+	if vfs.FuseAvailable() {
+		if err := ms.FuseMount(t.TempDir()); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = ms.Close() })
+		echo := "from-worker-echo\n"
+		cmdOut, err := worker.findTool("run_command", "").invoke(ctx, `{"command":"printf 'from-worker-echo\n' > work/from-cmd.txt"}`, turnRuntime(worker))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(cmdOut.output, "exit=0") {
+			t.Fatalf("worker run_command: %s", cmdOut.output)
+		}
+		got, err := ms.ReadText(ctx, "/work/from-cmd.txt")
+		if err != nil || got.Text() != echo {
+			text := ""
+			if got != nil {
+				text = got.Text()
+			}
+			t.Fatalf("parent ReadText after worker echo: %q err=%v", text, err)
+		}
+	}
+
+	worker.Close()
+
+	const phraseB = "worker-index-share-bbb"
+	if err := ms.WriteFile(ctx, "/work/tracked.txt", []byte(phraseB+"\n")); err != nil {
+		t.Fatal(err)
+	}
+	if hit := waitSearchHit(t, eng, scope, phraseB, 3*time.Second); hit.Properties[vfsindex.PropVFSPath] != "/work/tracked.txt" {
+		t.Fatalf("reindex after worker Close: %+v", hit.Properties)
+	}
+}
+
+func TestSpawnWorker_resumeKeepsParentVFS(t *testing.T) {
+	optionsJSON := `[{"title":"A","description":"a","isRecommended":true}]`
+	interruptTool := NewTool(ToolConfig{
+		Name: "ask_user",
+		Handler: func(ctx context.Context, _ struct{}, runtime *HarnessRuntime) (string, error) {
+			intr, err := runtime.RaiseInterrupt("user_selection_choice", []byte(optionsJSON))
+			if err != nil {
+				return "", err
+			}
+			return "selected:" + intr.(*interrupt.UserSelectionInterrupt).ConfirmedChoice.Title, nil
+		},
+	})
+
+	workerModel := &mockStrategy{}
+	workerModel.invokeFn = func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
+		if workerModel.callNum.Load() == 1 {
+			ch <- LLMResponseChunk{
+				Type: StreamEventFunctionCall,
+				ToolCalls: []ToolCall{{
+					ID: "tc_intr", CallID: "call_intr", Name: "ask_user", Arguments: `{}`,
+				}},
+				IsComplete: true,
+			}
+			return
+		}
+		ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "worker done", IsComplete: true}
+	}
+
+	parentModel := &mockStrategy{}
+	parentModel.invokeFn = func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
+		if parentModel.callNum.Load() == 1 {
+			args, _ := json.Marshal(map[string]string{
+				"worker_name":                  "researcher",
+				"task_description_and_context": "ask",
+			})
+			ch <- LLMResponseChunk{
+				Type: StreamEventFunctionCall,
+				ToolCalls: []ToolCall{{
+					ID: "spawn_1", CallID: "spawn_call_1", Name: "spawn_worker", Arguments: string(args),
+				}},
+				IsComplete: true,
+			}
+			return
+		}
+		ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "parent done", IsComplete: true}
+	}
+
+	ctx := context.Background()
+	bstore := brain.NewMemoryStore()
+	ns := uuid.New()
+	docID := uuid.New()
+	if err := bstore.Put(ctx, brain.Object{
+		ID: docID, Kind: "Document", Title: "ResumeDoc", Content: "resume-ns-token",
+		NamespaceID: ns,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	chunkID := uuid.New()
+	pos := 1
+	if err := bstore.Put(ctx, brain.Object{
+		ID: chunkID, Kind: "Chunk", Content: "resume-ns-token",
+		ParentID: &docID, Position: &pos, NamespaceID: ns,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reg := vfs.NewBackendRegistry()
+	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+	ms := vfs.NewMountSession(t.Name(), reg)
+	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
+		t.Fatal(err)
+	}
+	eng, err := brain.NewEngine(bstore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := AgentOptions{
+		SessionID:       "sess-resume-vfs",
+		Config:          Config{MaxWindowSize: 8192},
+		Model:           parentModel,
+		Store:           stores.NewInMemoryStore(),
+		MountSession:    ms,
+		Brain:           eng,
+		SearchNamespace: &ns,
+		SubAgents: []*SubAgent{
+			{WorkerName: "researcher", Model: workerModel, Tools: []*Tool{interruptTool}},
+		},
+	}
+	parent := NewAgent(ctx, opts)
+
+	events, err := parent.Run(ctx, "park worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var interruptID string
+	for ev := range events {
+		if ev.Type == StreamEventInterrupt {
+			var payload struct {
+				InterruptId string `json:"interruptId"`
+			}
+			_ = json.Unmarshal(ev.Data, &payload)
+			interruptID = payload.InterruptId
+		}
+	}
+	if interruptID == "" {
+		t.Fatal("expected worker interrupt")
+	}
+
+	parent.Close()
+	reloadOpts := opts
+	reloadOpts.SearchNamespace = nil
+	reloaded, err := NewAgentFromSession(ctx, "sess-resume-vfs", reloadOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(reloaded.Close)
+
+	const spawnID = "spawn_1"
+	meta := reloaded.getParkMeta(spawnID)
+	if meta == nil {
+		t.Fatal("expected park metadata after session reload")
+	}
+	worker, err := reloaded.attachParkedWorker(ctx, spawnID, *meta, reloaded.subagents["researcher"])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const afterBody = "after-resume-body\n"
+	if _, err := runWriteTool(t, worker, worker.findTool("write", ""), `{"path":"/work/after-resume.txt","content":`+jsonString(afterBody)+`}`); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ms.ReadText(ctx, "/work/after-resume.txt")
+	if err != nil || got.Text() != afterBody {
+		text := ""
+		if got != nil {
+			text = got.Text()
+		}
+		t.Fatalf("parent ReadText after resume write: %q err=%v", text, err)
+	}
+
+	reloaded.SetSearchNamespace(uuid.New())
+	rout, err := worker.findTool("read_object", "").invoke(ctx, `{"object_id":"`+docID.String()+`"}`, turnRuntime(worker))
+	if err != nil || !strings.Contains(rout.output, "resume-ns-token") {
+		t.Fatalf("worker read_object after parent namespace change: %v %s", err, rout.output)
+	}
+	sout, err := worker.findTool("search", "").invoke(ctx, `{"query":"resume-ns-token"}`, turnRuntime(worker))
+	if err != nil || (!strings.Contains(sout.output, "resume-ns-token") && !strings.Contains(sout.output, docID.String())) {
+		t.Fatalf("worker search after parent namespace change: %v %s", err, sout.output)
+	}
 }

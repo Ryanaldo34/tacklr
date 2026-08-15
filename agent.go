@@ -57,8 +57,11 @@ type AgentHarness struct {
 	// Checkpointed via checkpointSession / NewAgentFromSession; not SessionManager.
 	searchCtx            *brain.SearchContext
 	runCommandUnattended bool
-	// vfsBridge: optional mount→brain index lifecycle (not the agent turn loop).
+	// vfsBridge is the mount→brain index lifecycle (not the agent turn loop).
+	// Workers receive the parent pointer at construct; ownsVFSBridge is set
+	// only when this harness called vfsindex.Start.
 	vfsBridge        *vfsindex.Bridge
+	ownsVFSBridge    bool
 	mcpCleanup       func()
 	mcpInitialized   bool
 	builtinsInjected bool
@@ -711,8 +714,9 @@ func (a *AgentHarness) initMCP(ctx context.Context) {
 	})
 }
 
-// Close dumps session state then releases turn resources (MCP, vfsindex).
-// The host owns MountSession (including FUSE); this does not close it.
+// Close dumps session state then releases turn resources (MCP, owned vfsindex).
+// Shared worker bridges are not closed. The host owns MountSession (including
+// FUSE); this does not close it.
 // Call after the Run events channel is drained, or when construct/runHarness fails.
 func (a *AgentHarness) Close() {
 	a.persistSession(context.Background())
@@ -728,7 +732,7 @@ func (a *AgentHarness) Close() {
 		a.mcpCleanup()
 		a.mcpCleanup = nil
 	}
-	if a.vfsBridge != nil {
+	if a.ownsVFSBridge && a.vfsBridge != nil {
 		_ = a.vfsBridge.Close()
 		a.vfsBridge = nil
 	}

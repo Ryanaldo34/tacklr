@@ -81,6 +81,10 @@ type AgentOptions struct {
 	// RunCommandUnattended injects run_command with PermissionRequired=false.
 	// Zero value (Registry, testserver) keeps PermissionRequired=true.
 	RunCommandUnattended bool
+	// shareIndexBridge is the parent index bridge. Nil means Start a new bridge.
+	shareIndexBridge *vfsindex.Bridge
+	// skipPlanningLock false keeps planningWriteLock on the built-in interceptor chain.
+	skipPlanningLock bool
 }
 
 // streamEventBuffer is the harness event channel size so EmitUpdate is not dropped
@@ -129,6 +133,7 @@ func newHarnessBase(opts AgentOptions, sm *session.SessionManager) *AgentHarness
 		tasks:                opts.ModelTasks,
 		contextPolicy:        opts.ContextPolicy,
 		runCommandUnattended: opts.RunCommandUnattended,
+		vfsBridge:            opts.shareIndexBridge,
 	}
 	if opts.MountSession != nil {
 		sm.VFS = opts.MountSession
@@ -154,6 +159,8 @@ func newHarnessBase(opts AgentOptions, sm *session.SessionManager) *AgentHarness
 	}
 	if opts.ToolInterceptors != nil {
 		h.toolRunner = newToolRunner(opts.ToolInterceptors...)
+	} else if opts.skipPlanningLock {
+		h.toolRunner = newToolRunner(toolPermissionGate)
 	} else {
 		h.toolRunner = newToolRunner(h.planningWriteLock, toolPermissionGate)
 	}
@@ -167,6 +174,9 @@ func (h *AgentHarness) finishInit(ctx context.Context, subAgents []*SubAgent) {
 		slog.Error("failed to initialize skills", "error", err)
 	}
 	h.initSubAgentWorkers(subAgents)
+	if h.vfsBridge == nil {
+		h.initVFSIndexBridge()
+	}
 	h.injectBuiltinTools()
 }
 
@@ -186,8 +196,7 @@ func (a *AgentHarness) injectBuiltinTools() {
 		client := exa.NewClient(key)
 		a.tools = append(a.tools, newWebSearchTool(client), newWebFetchTool(client))
 	}
-	// Index bridge after brain factory/mounts so save_* can write Engram files.
-	br := a.initVFSIndexBridge()
+	br := a.vfsBridge
 	if a.session != nil && a.session.VFS != nil {
 		a.tools = append(a.tools, newVFSTools(a.session.VFS)...)
 		a.tools = append(a.tools, newRunCommand(a.session.VFS, !a.runCommandUnattended))
@@ -215,15 +224,16 @@ func (a *AgentHarness) injectBuiltinTools() {
 	a.builtinsInjected = true
 }
 
-// initVFSIndexBridge starts vfsindex.Bridge when Brain + VFS + namespace are set.
+// initVFSIndexBridge starts a new vfsindex.Bridge when Brain + VFS + namespace
+// are set. Call only when vfsBridge is nil (this harness owns the lifecycle).
 // Hosts with a non-empty kind catalog should register vfsindex.MountIndexKinds().
-func (a *AgentHarness) initVFSIndexBridge() *vfsindex.Bridge {
+func (a *AgentHarness) initVFSIndexBridge() {
 	if a.brain == nil || a.searchCtx == nil || a.session == nil || a.session.VFS == nil {
-		return nil
+		return
 	}
 	ns, ok := a.searchCtx.Namespace()
 	if !ok {
-		return nil
+		return
 	}
 	nsCopy := ns
 	attachMemory := true
@@ -236,10 +246,10 @@ func (a *AgentHarness) initVFSIndexBridge() *vfsindex.Bridge {
 	br, err := vfsindex.Start(a.session.VFS, a.brain, brain.Scope{Namespace: &nsCopy}, attachMemory)
 	if err != nil {
 		slog.Error("vfsindex: failed to start bridge", "error", err)
-		return nil
+		return
 	}
 	a.vfsBridge = br
-	return br
+	a.ownsVFSBridge = true
 }
 
 // SetSearchNamespace sets retrieval isolation for knowledge tools.
