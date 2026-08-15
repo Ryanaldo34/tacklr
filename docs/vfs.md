@@ -456,7 +456,7 @@ When the harness has **Brain + MountSession + search namespace**, it owns a
 | `index_file` | Selective ingest of key virtual **files** (max 8); errors under `none` |
 | `unindex` | Soft-delete the brain mirror; drops selective track |
 | `run_command` | `/bin/sh -c` with cwd = FUSE root; relative paths (`work/foo`); `PermissionRequired` unless `RunCommandUnattended` |
-| `read` / `write` | Line window / first page / block read; one mutation mode (full, span, old/new, block) |
+| `read` / `write` | File window / first page / block read; one mutation mode. Knowledge objects: `read_object`. |
 | `save_*` | Write the Engram file on the brain Provider (or `Engine.Put` if no brain mount) |
 | `link` / `expand` / `find_links` | Path-native graph (G1): prefer virtual paths; surface neighbor `vfs_path` |
 

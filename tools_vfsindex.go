@@ -57,7 +57,7 @@ WHEN NOT TO USE
 HOW TO USE
 1) read (or outline) to confirm the right file. Live names/grep: run_command → fd / find / rg.
 2) index_file with path or a short paths list.
-3) Later: brain search for indexed recall; open live content with read using vfs_path and start_line / block_id from hits.
+3) Later: search for recall; open the live file with read (vfs_path + start_line / block_id). Not read_object.
 
 Requires an active plan (writes unlock after create_plan). Returns compact status only — not file contents. Under selective policy, a successful index tracks the path so later persists reindex it. Under prefix/watch, AfterPersist already reindexes.`,
 		Category: streaming.ToolCategoryExecute,

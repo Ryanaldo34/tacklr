@@ -135,7 +135,7 @@ func TestBrainTools_saveDiscoveryAndLink(t *testing.T) {
 	if !strings.Contains(eout.output, b.ID.String()) || !strings.Contains(eout.output, "supports finding") {
 		t.Fatalf("expand should return neighbor with note: %s", eout.output)
 	}
-	readTool := h.findTool("read", "")
+	readTool := h.findTool("read_object", "")
 	rout, err := readTool.invoke(ctx, `{"object_id":"`+a.ID.String()+`"}`, turnRuntime(h))
 	if err != nil || !strings.Contains(rout.output, "updated") {
 		t.Fatalf("read after save: %v %v", err, rout)
@@ -178,7 +178,7 @@ func TestBrainTools_hostNamespaceScopedRead(t *testing.T) {
 		t.Fatalf("SearchNamespace from options: %v %v", gotNS, ok)
 	}
 
-	readTool := h.findTool("read", "")
+	readTool := h.findTool("read_object", "")
 	schemaTool := h.findTool("schema", "")
 	if readTool == nil || schemaTool == nil {
 		t.Fatal("brain tools must be injected when Brain is configured")
@@ -497,9 +497,9 @@ func TestBrainTools_searchNamespaceIsolation(t *testing.T) {
 		Brain: eng, SearchNamespace: &nsB,
 	})
 	search := h.findTool("search", "")
-	read := h.findTool("read", "")
+	read := h.findTool("read_object", "")
 	if search == nil || read == nil {
-		t.Fatal("search and read required")
+		t.Fatal("search and read_object required")
 	}
 	out, err := search.invoke(ctx, `{"query":"namespace isolation secret token xyzzy","limit":10}`, turnRuntime(h))
 	if err != nil {
@@ -593,9 +593,9 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 		t.Fatal("new worker must not copy parent ResultSet")
 	}
 
-	readTool := worker.findTool("read", "")
+	readTool := worker.findTool("read_object", "")
 	if readTool == nil {
-		t.Fatal("worker must inherit brain read tool")
+		t.Fatal("worker must inherit brain read_object tool")
 	}
 	out, err := readTool.invoke(ctx, `{"object_id":"`+docID.String()+`"}`, turnRuntime(worker))
 	if err != nil {

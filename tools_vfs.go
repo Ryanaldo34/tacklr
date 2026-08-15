@@ -53,9 +53,11 @@ func (v vfsTools) newRead() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "read",
 		DisplayName: "Read {path}",
-		Description: `Read a virtual path: first page by default, or a line window / structured block.
+		Description: `Read a virtual file (not a knowledge object). First page by default, or a line window / block.
 
-Path only returns start=1 through 1+MaxLinesPerWindow plus rev. Use start/end for a half-open 1-based window, or block_id for a structured region. Set outline=true to list blocks. Optional rev must match or the tool returns stale content. ir=true adds media_type/encoding/line_count (and text= when there is no window or block). Pass rev to write. Live names/grep: run_command → ls / rg. Tree ops: run_command → mkdir / rm.`,
+Path only → start=1 through 1+MaxLinesPerWindow plus rev (pass rev to write).
+start/end → half-open 1-based window. block_id → that region. outline=true → block list. ir=true → media_type/encoding.
+Knowledge objects with no file: read_object. Live names/grep: run_command → ls / rg.`,
 		Category: streaming.ToolCategoryRead,
 		Access:   ToolReadAccess,
 		Timeout:  60 * time.Second,

@@ -246,6 +246,9 @@ func TestVFSIndexTools_selectiveIndexSearchReadAndTrack(t *testing.T) {
 	if readTool == nil {
 		t.Fatal("read required")
 	}
+	if h.findTool("read_object", "") == nil {
+		t.Fatal("read_object required when Brain is on")
+	}
 	readOut, err := readTool.invoke(ctx, `{"path":"/work/sel.txt","start":1,"end":10}`, turnRuntime(h))
 	if err != nil {
 		t.Fatal(err)
