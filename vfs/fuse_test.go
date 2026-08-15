@@ -245,9 +245,23 @@ func TestFuseMount_plaintextWritableProjectedEROFS(t *testing.T) {
 	if got := ms.HostDir(); got != dir2 {
 		t.Fatalf("HostDir after remount = %q want %q", got, dir2)
 	}
-	moved, err := os.ReadFile(filepath.Join(dir2, "work", "renamed.txt"))
-	if err != nil || !strings.Contains(string(moved), "sync") {
-		t.Fatalf("remount read: %q err=%v", moved, err)
+	got, err = ms.ReadText(ctx, "/work/renamed.txt")
+	if err != nil || !strings.Contains(got.Text(), "sync") {
+		t.Fatalf("session after remount: %q err=%v", textOr(got), err)
+	}
+	ents, err := os.ReadDir(filepath.Join(dir2, "work"))
+	if err != nil {
+		t.Fatalf("host readdir after remount: %v", err)
+	}
+	var sawRenamed bool
+	for _, e := range ents {
+		if e.Name() == "renamed.txt" {
+			sawRenamed = true
+			break
+		}
+	}
+	if !sawRenamed {
+		t.Fatalf("host remount missing renamed.txt: %v", ents)
 	}
 }
 
