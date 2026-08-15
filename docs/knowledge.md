@@ -106,7 +106,8 @@ It sees:
 
 A **virtual filesystem (VFS)** is one tree of paths whose backends the host chose.
 Local disk, S3, and the brain all look the same at the tool layer. Details:
-[docs/vfs.md](vfs.md).
+[docs/vfs.md](vfs.md). Workers share the host `MountSession` and brain engine;
+they do not get a second FUSE.
 
 Default Engram layout (the harness mounts this when Brain + VFS + a search
 namespace are set, unless the host already mounted a brain profile):

@@ -555,47 +555,17 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 		},
 	})
 
-	// Parent search populates parent SearchContext only.
-	if _, err := parentH.findTool("search", "").invoke(ctx, `{"query":"worker search isolation"}`, turnRuntime(parentH)); err != nil {
-		t.Fatal(err)
-	}
-	parentRS, err := parentH.searchCtx.Export()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(parentRS) == 0 {
-		t.Fatal("parent should have result set after search")
-	}
-
 	worker := parentH.newWorkerHarness(ctx, "researcher", "spawn_tc1", parentH.subagents["researcher"])
 
 	gotNS, ok := worker.SearchNamespace()
 	if !ok || gotNS != ns {
 		t.Fatalf("worker namespace %v %v, want %v", gotNS, ok, ns)
 	}
-	if worker.searchCtx == nil || worker.searchCtx == parentH.searchCtx {
-		t.Fatal("worker must own a distinct SearchContext")
-	}
-	// Worker inherits namespace but must not copy the parent's active ResultSet.
-	wraw, err := worker.searchCtx.Export()
-	if err != nil {
-		t.Fatal(err)
-	}
-	var env struct {
-		ResultSet *brain.ResultSet `json:"result_set"`
-	}
-	if len(wraw) > 0 {
-		if err := json.Unmarshal(wraw, &env); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if env.ResultSet != nil {
-		t.Fatal("new worker must not copy parent ResultSet")
-	}
 
 	readTool := worker.findTool("read_object", "")
-	if readTool == nil {
-		t.Fatal("worker must inherit brain read_object tool")
+	searchTool := worker.findTool("search", "")
+	if readTool == nil || searchTool == nil {
+		t.Fatal("worker must inherit brain read_object and search")
 	}
 	out, err := readTool.invoke(ctx, `{"object_id":"`+docID.String()+`"}`, turnRuntime(worker))
 	if err != nil {
@@ -603,6 +573,13 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 	}
 	if !strings.Contains(out.output, "worker-visible") {
 		t.Fatalf("worker read: %s", out.output)
+	}
+	sout, err := searchTool.invoke(ctx, `{"query":"worker search isolation token"}`, turnRuntime(worker))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(sout.output, parent.String()) && !strings.Contains(sout.output, "worker search isolation") {
+		t.Fatalf("worker search: %s", sout.output)
 	}
 
 	parentH.ClearSearchNamespace()

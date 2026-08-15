@@ -21,6 +21,9 @@ const parkedWorkersStateKey = "_parked_workers"
 // SubAgent describes a specialized worker that a harness can spawn via the
 // spawn_worker tool. Specs may nest via SubAgents so interrupt propagation
 // and orchestration stay self-similar at any depth.
+//
+// Workers inherit the host MountSession, brain engine, and shared index
+// bridge. They skip planningWriteLock. They do not get a second FUSE.
 type SubAgent struct {
 	Tools        []*Tool
 	Instructions string
@@ -270,7 +273,8 @@ func workerSessionID(parentSessionID, workerName, parentToolCallID string) strin
 	return fmt.Sprintf("%s/w/%s/%s", parentSessionID, workerName, parentToolCallID)
 }
 
-// workerOptsFromSpec builds shared worker options. Omits SearchNamespace so
+// workerOptsFromSpec builds shared worker options: host mount, brain,
+// shared index bridge, and skipPlanningLock. Omits SearchNamespace so
 // resume keeps the checkpointed worker session value.
 func (a *AgentHarness) workerOptsFromSpec(spec *SubAgent) AgentOptions {
 	return AgentOptions{
@@ -278,14 +282,18 @@ func (a *AgentHarness) workerOptsFromSpec(spec *SubAgent) AgentOptions {
 			MaxWindowSize: a.maxWindowSize,
 			SystemPrompt:  spec.Instructions,
 		},
-		Model:           spec.Model,
-		Tools:           slices.Clone(spec.Tools),
-		MCPConfigs:      slices.Clone(a.mcpConfigs),
-		Store:           a.store,
-		SubAgents:       spec.SubAgents,
-		ExaAPIKey:       a.exaAPIKey,
-		Brain:           a.brain,
-		BrainWriteKinds: a.brainWriteKinds,
+		Model:                spec.Model,
+		Tools:                slices.Clone(spec.Tools),
+		MCPConfigs:           slices.Clone(a.mcpConfigs),
+		Store:                a.store,
+		SubAgents:            spec.SubAgents,
+		ExaAPIKey:            a.exaAPIKey,
+		Brain:                a.brain,
+		BrainWriteKinds:      a.brainWriteKinds,
+		MountSession:         a.VFS(),
+		RunCommandUnattended: a.runCommandUnattended,
+		shareIndexBridge:     a.vfsBridge,
+		skipPlanningLock:     true,
 	}
 }
 
