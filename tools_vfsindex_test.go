@@ -552,7 +552,6 @@ func TestRun_workspaceResearchTurn(t *testing.T) {
 			}, IsComplete: true}
 		case 3:
 			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-				toolCall("l1", "list", `{"path":"/work"}`),
 				toolCall("r1", "read", `{"path":"/work/research.md","start":1,"end":10}`),
 			}, IsComplete: true}
 		case 4:

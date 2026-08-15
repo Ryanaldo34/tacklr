@@ -7,7 +7,11 @@ import (
 )
 
 // TextCodec decodes UTF-8 text and text-like media types into *TextDocument.
+// Identity: persist form is the UTF-8 payload (no container).
 type TextCodec struct{}
+
+// Identity marks TextCodec as an IdentityCodec. FUSE may accept kernel writes.
+func (TextCodec) Identity() {}
 
 // MediaTypes is the set of extension-map types this codec claims at registration.
 // Unregistered text-like types still fall back to TextCodec in ContentRegistry.Decode.

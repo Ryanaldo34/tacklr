@@ -97,14 +97,12 @@ func TestMountSession_localSession(t *testing.T) {
 	}
 
 	// Segment boundary: /ab must not claim /a
-	if _, _, err := ms.Lookup("/a/file"); err != nil && !errors.Is(err, vfs.ErrNotMounted) {
-		t.Fatalf("lookup /a: %v", err)
-	} else if err == nil {
-		// longest prefix might still resolve to something — only fail if /ab claimed
+	if spec, err := ms.SpecAt("/a/file"); err == nil && spec.Point == "/ab" {
+		t.Fatalf("SpecAt /a claimed by /ab: %+v", spec)
 	}
-	mi, rel, err := ms.Lookup("/ab/x")
-	if err != nil || mi.Point != "/ab" || rel != "x" {
-		t.Fatalf("lookup /ab: %+v rel=%q err=%v", mi, rel, err)
+	spec, err := ms.SpecAt("/ab/x")
+	if err != nil || spec.Point != "/ab" {
+		t.Fatalf("SpecAt /ab: %+v err=%v", spec, err)
 	}
 
 	if err := ms.WriteFile(ctx, "/work/foo/../../etc/passwd", []byte("x")); err == nil {
@@ -602,10 +600,10 @@ func TestMountSession_configErrors(t *testing.T) {
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/x", Profile: ""}); !errors.Is(err, vfs.ErrInvalidProvider) {
 		t.Fatalf("empty profile: %v", err)
 	}
-	if _, _, err := ms.Lookup(""); !errors.Is(err, vfs.ErrInvalidPath) {
+	if _, err := ms.SpecAt(""); !errors.Is(err, vfs.ErrInvalidPath) {
 		t.Fatalf("empty path: %v", err)
 	}
-	if _, _, err := ms.Lookup("/has\x00x"); !errors.Is(err, vfs.ErrInvalidPath) {
+	if _, err := ms.SpecAt("/has\x00x"); !errors.Is(err, vfs.ErrInvalidPath) {
 		t.Fatalf("nul path: %v", err)
 	}
 	if err := reg.Register(nil); err == nil {
@@ -666,6 +664,50 @@ func TestMountSession_configErrors(t *testing.T) {
 	if err := ms.Mount(cctx2, vfs.MountSpec{Point: "/z", Profile: "scratch"}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("mount cancel: %v", err)
 	}
+}
+
+// TestKernelWritable: plaintext IdentityCodec is FUSE-writable; office/cloud
+// types and a registered non-identity codec are not.
+func TestKernelWritable(t *testing.T) {
+	for _, mt := range []string{
+		"text/plain", "text/markdown", "text/x-go", "application/json",
+		"application/yaml", "text/plain; charset=utf-8",
+	} {
+		if !vfs.KernelWritable(mt) {
+			t.Fatalf("KernelWritable(%q) = false, want plaintext writable", mt)
+		}
+	}
+	for _, mt := range []string{
+		"", "application/octet-stream", "image/png",
+		"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+		"application/vnd.google-apps.document", "application/vnd.notion.page",
+	} {
+		if vfs.KernelWritable(mt) {
+			t.Fatalf("KernelWritable(%q) = true, want EROFS", mt)
+		}
+	}
+	if err := vfs.DefaultContentRegistry().Register(projectedCodec{}); err != nil {
+		t.Fatal(err)
+	}
+	if vfs.KernelWritable("application/x-test-projected") {
+		t.Fatal("registered non-identity codec must not be kernel-writable")
+	}
+	if !vfs.KernelWritableFile(vfs.FileInfo{Name: "a.go", MediaType: "text/x-go"}) {
+		t.Fatal("KernelWritableFile go")
+	}
+	if vfs.KernelWritableFile(vfs.FileInfo{Name: "pic.png", MediaType: "image/png"}) {
+		t.Fatal("KernelWritableFile png")
+	}
+	if !vfs.KernelCreateOK("README") || !vfs.KernelCreateOK("note.txt") {
+		t.Fatal("KernelCreateOK plaintext")
+	}
+}
+
+type projectedCodec struct{}
+
+func (projectedCodec) MediaTypes() []string { return []string{"application/x-test-projected"} }
+func (projectedCodec) Decode(_ context.Context, p, mt string, data []byte) (vfs.Document, error) {
+	return vfs.NewTextDocument(p, mt, "utf-8", string(data)), nil
 }
 
 type emptyTypesCodec struct{}

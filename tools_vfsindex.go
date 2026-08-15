@@ -55,7 +55,7 @@ WHEN NOT TO USE
 - Under mount IndexPolicy=none, this tool errors (indexing disabled).
 
 HOW TO USE
-1) list / read (or outline) to confirm the right file. Live names/grep: run_command → fd / find / rg.
+1) read (or outline) to confirm the right file. Live names/grep: run_command → fd / find / rg.
 2) index_file with path or a short paths list.
 3) Later: brain search for indexed recall; open live content with read using vfs_path and start_line / block_id from hits.
 

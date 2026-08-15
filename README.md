@@ -214,7 +214,7 @@ That boundary exists so product code cannot accidentally trash planning.
 
 ### VFS
 
-Register backends, bootstrap mounts—[docs/vfs.md](docs/vfs.md). When VFS is wired, the harness injects file tools (`list`, `stat`, `read`, `write`, `mkdir`, `remove`, `run_command`) over **virtual paths only**. The agent never gets a host path or a bucket key. Live names/grep go through `run_command` (`fd` / `find` / `rg`). With Brain + VFS + search namespace, the harness registers **`brain.BrainFactory`**, mounts **`/engram`** (prefix, `IndexPolicy=none`) unless the host already provided a brain-profile mount, and injects **`index_file` / `unindex`** for **artifact** mounts only. Indexed recall is brain `search`. Engrams are Markdown files on the brain Provider; `save_*` writes those paths (or `Engine.Put` if no brain mount). Path-native **link / unlink / expand / find_links**. Artifact → brain still uses one **IndexPath** pipeline (hash skip). Brain-profile mounts are never remirrored as Document/Chunk artifacts.
+Register backends, bootstrap mounts—[docs/vfs.md](docs/vfs.md). When VFS is wired, the harness injects file tools (`read`, `write`, `run_command`) over **virtual paths only**. The agent never gets a host path or a bucket key. Live names/grep/tree ops go through `run_command` (`ls` / `fd` / `rg` / `mkdir` / `rm`). With Brain + VFS + search namespace, the harness registers **`brain.BrainFactory`**, mounts **`/engram`** (prefix, `IndexPolicy=none`) unless the host already provided a brain-profile mount, and injects **`index_file` / `unindex`** for **artifact** mounts only. Indexed recall is brain `search`. Engrams are Markdown files on the brain Provider; `save_*` writes those paths (or `Engine.Put` if no brain mount). Path-native **link / unlink / expand / find_links**. Artifact → brain still uses one **IndexPath** pipeline (hash skip). Brain-profile mounts are never remirrored as Document/Chunk artifacts.
 
 ---
 
@@ -387,7 +387,7 @@ sequenceDiagram
 
 | Job | How |
 |-----|-----|
-| Discover / search | Restricted shell and/or `rg`·`fd` on FUSE; optional `list` / `stat` |
+| Discover / search | Restricted shell and/or `rg`·`fd` on FUSE |
 | Read (+ `rev`) | One **`read`**—lines or rich doc IR |
 | Edit | **`replace`** / **`write`** with `rev` (plain and WYSIWYG) |
 | Tree ops | Shell under policy, or thin tools if you refuse shell |

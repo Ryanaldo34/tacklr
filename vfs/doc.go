@@ -6,13 +6,13 @@
 //   - FuseAvailable — process can mount a kernel tree (/dev/fuse or /dev/macfuse*)
 //   - ContentRev / ContentHash — session-visible content identity (for tools)
 //   - BackendRegistry + LocalFactory / S3Factory + AWSS3 — process profiles and pools
-//   - MountSpec / MountInfo — durable and agent-safe mount descriptions
+//   - MountSpec — durable mount description (checkpoint-safe)
 //   - Provider / ProviderFactory / S3API — custom backends
 //   - File, FileInfo, DirEntry — I/O types (File is Close+Stat; io.Reader / io.ReaderAt / io.Writer via comma-ok)
 //   - Document / Textual / Structured / TextDocument — content IR
 //   - Block / StyleMeta / Span / FindBlock / BlockReplaceSpan — structured view
-//   - ContentRegistry + Codec + TextCodec — optional custom decode
-//   - DetectMediaType, size-cap constants, sentinel errors (including ErrFuseNotMounted)
+//   - ContentRegistry + Codec + TextCodec + IdentityCodec — optional custom decode
+//   - DetectMediaType, KernelWritable, KernelWritableFile, KernelCreateOK, size-cap constants, sentinel errors (including ErrFuseNotMounted)
 //
 // Providers own IR translation and persist immediately on WriteDocument.
 // MountSession routes; it does not encode or hold a dirty document cache.
@@ -37,7 +37,9 @@
 //	File is Close + Stat. Read / ReadAt / Write are optional (comma-ok).
 //	FuseMount is explicit (host kernel tree). Mount points must be one segment
 //	(/work, /engram). Textual files appear as ReadText; binaries use Stat +
-//	io.ReaderAt. Close unmounts. HostDir is the last FuseMount directory.
+//	io.ReaderAt. Kernel writes are allowed only for IdentityCodec (plaintext);
+//	projected documents are EROFS. Close unmounts. HostDir is the last FuseMount
+//	directory.
 //
 // Read-only mounts reject mutating ops with ErrReadOnly. Local paths are jailed
 // under the provider root (including symlink evaluation). S3 uses key prefixes

@@ -8,8 +8,6 @@ import (
 	"strings"
 	"time"
 
-	mapset "github.com/deckarep/golang-set/v2"
-
 	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
@@ -22,63 +20,7 @@ type vfsTools struct {
 
 func newVFSTools(ms *vfs.MountSession) []*Tool {
 	v := vfsTools{ms: ms}
-	return []*Tool{
-		v.pathOp("list", "List {path}", streaming.ToolCategoryRead, ToolReadAccess, 30*time.Second,
-			`List a virtual directory (absolute paths like /work). Prefer run_command → ls when the session has a FUSE projection. No host shell.`,
-			func(ctx context.Context, p string, rt HarnessRuntime) (string, error) {
-				rt.EmitUpdate("Listing " + p)
-				ents, err := v.ms.ReadDir(ctx, p)
-				if err != nil {
-					return "", err
-				}
-				var b strings.Builder
-				b.Grow(32 + len(p) + len(ents)*24)
-				fmt.Fprintf(&b, "path=%s count=%d\n", p, len(ents))
-				for _, e := range ents {
-					kind := "file"
-					if e.IsDir {
-						kind = "dir"
-					}
-					fmt.Fprintf(&b, "%s\t%s\n", kind, e.Name)
-				}
-				return b.String(), nil
-			}),
-		v.pathOp("stat", "Stat {path}", streaming.ToolCategoryRead, ToolReadAccess, 15*time.Second,
-			`Stat a virtual path (size, mtime, is_dir). Prefer run_command → stat / ls -l when the session has a FUSE projection. No host paths.`,
-			func(ctx context.Context, p string, rt HarnessRuntime) (string, error) {
-				rt.EmitUpdate("Stat " + p)
-				fi, err := v.ms.Stat(ctx, p)
-				if err != nil {
-					return "", err
-				}
-				return fmt.Sprintf("path=%s name=%s size=%d is_dir=%v mtime=%s",
-					p, fi.Name, fi.Size, fi.IsDir, fi.ModTime.UTC().Format(time.RFC3339)), nil
-			}),
-		v.pathOp("mkdir", "Mkdir {path}", streaming.ToolCategoryEdit, ToolWriteAccess, 30*time.Second,
-			`Create a directory and parents on the virtual filesystem.`,
-			func(ctx context.Context, p string, rt HarnessRuntime) (string, error) {
-				rt.EmitUpdate("Mkdir " + p)
-				if err := v.ms.MkdirAll(ctx, p); err != nil {
-					return "", err
-				}
-				return "ok path=" + p, nil
-			}),
-		v.pathOp("remove", "Remove {path}", streaming.ToolCategoryDelete, ToolWriteAccess, 30*time.Second,
-			`Remove a file or empty directory on the virtual filesystem.`,
-			func(ctx context.Context, p string, rt HarnessRuntime) (string, error) {
-				rt.EmitUpdate("Remove " + p)
-				if err := v.ms.Remove(ctx, p); err != nil {
-					return "", err
-				}
-				return "ok path=" + p, nil
-			}),
-		v.newRead(),
-		v.newWrite(),
-	}
-}
-
-type pathArgs struct {
-	Path string `json:"path" desc:"Absolute virtual path (e.g. /work/main.go). Never a host path."`
+	return []*Tool{v.newRead(), v.newWrite()}
 }
 
 type readArgs struct {
@@ -107,34 +49,13 @@ type writeArgs struct {
 	IncludeHeading bool     `json:"include_heading,omitempty" desc:"When block_id is a heading, replace the heading line too."`
 }
 
-func (v vfsTools) pathOp(
-	name, display string,
-	cat streaming.ToolCategory,
-	access mapset.Set[ToolPermission],
-	timeout time.Duration,
-	desc string,
-	fn func(context.Context, string, HarnessRuntime) (string, error),
-) *Tool {
-	return NewTool(ToolConfig{
-		Name: name, DisplayName: display, Description: desc,
-		Category: cat, Access: access, Timeout: timeout,
-		Handler: func(ctx context.Context, args pathArgs, rt HarnessRuntime) (string, error) {
-			p, err := absVirtual(args.Path)
-			if err != nil {
-				return "", err
-			}
-			return fn(ctx, p, rt)
-		},
-	})
-}
-
 func (v vfsTools) newRead() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "read",
 		DisplayName: "Read {path}",
 		Description: `Read a virtual path: first page by default, or a line window / structured block.
 
-Path only returns start=1 through 1+MaxLinesPerWindow plus rev. Use start/end for a half-open 1-based window, or block_id for a structured region. Set outline=true to list blocks. Optional rev must match or the tool returns stale content. ir=true adds media_type/encoding/line_count (and text= when there is no window or block). Pass rev to write.`,
+Path only returns start=1 through 1+MaxLinesPerWindow plus rev. Use start/end for a half-open 1-based window, or block_id for a structured region. Set outline=true to list blocks. Optional rev must match or the tool returns stale content. ir=true adds media_type/encoding/line_count (and text= when there is no window or block). Pass rev to write. Live names/grep: run_command → ls / rg. Tree ops: run_command → mkdir / rm.`,
 		Category: streaming.ToolCategoryRead,
 		Access:   ToolReadAccess,
 		Timeout:  60 * time.Second,

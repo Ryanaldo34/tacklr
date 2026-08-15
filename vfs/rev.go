@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"unsafe"
 )
 
@@ -25,10 +26,18 @@ func hashSHA256(b []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// ContentRev hashes the current backend body (ReadFile).
+// ContentRev hashes the session-visible body: ReadText when textual (same
+// bytes FUSE and the read tool show), otherwise ReadFile.
 func (m *MountSession) ContentRev(ctx context.Context, virtualPath string) (ContentRev, error) {
 	cleaned, err := cleanVirtualPath(virtualPath)
 	if err != nil {
+		return ContentRev{}, err
+	}
+	t, err := m.ReadText(ctx, cleaned)
+	if err == nil {
+		return ContentRev{Path: cleaned, Hash: ContentHash(t.Text())}, nil
+	}
+	if !errors.Is(err, ErrNoCodec) && !errors.Is(err, ErrNotTextual) && !errors.Is(err, ErrNotSupported) {
 		return ContentRev{}, err
 	}
 	raw, err := m.ReadFile(ctx, cleaned)

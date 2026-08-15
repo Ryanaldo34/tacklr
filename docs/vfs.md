@@ -71,7 +71,6 @@ _ = ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"})
 | Type | Meaning |
 |------|---------|
 | `MountSpec` | Durable mount description (point, profile, read-only, params, **indexPolicy**). Checkpoint-safe; no secrets. |
-| `MountInfo` | Agent-safe view: point + read-only only |
 | `Params` | Backend options (`subpath`, `bucket`, `prefix`, …) |
 | `IndexPolicy` | Optional string: `none` \| `selective` \| `prefix` \| `watch` (empty → selective when the index bridge is on) |
 
@@ -191,9 +190,9 @@ Tool guidance:
 
 `DetectMediaType` is a helper **providers** call when filling `MediaType`. Empty / missing type is treated as `application/octet-stream` (no IR).
 
-FUSE: hosts call `MountSession.FuseMount(dir)` for a read-only kernel tree. **Every mount point must be a single path segment** (`/work`, `/engram`). Multi-segment points (`/tmp/tacklr`) fail `FuseMount`. File `Read`/`getattr` use `ReadText` (provider plaintext). Binary files use `Stat.Size` and `io.ReaderAt` when the handle supports it. `session.Mount` attaches a provider; `FuseMount` is the host kernel mount. `HostDir()` is the last mount directory (host-facing only). `FuseAvailable()` probes `/dev/fuse` and `/dev/macfuse*`. `Close` unmounts.
+FUSE: hosts call `MountSession.FuseMount(dir)` for a kernel tree. **Every mount point must be a single path segment** (`/work`, `/engram`). Multi-segment points (`/tmp/tacklr`) fail `FuseMount`. File `Read`/`getattr` use `ReadText` (provider plaintext). Binary files use `Stat.Size` and `io.ReaderAt` when the handle supports it. Kernel writes (`echo >`, `mkdir`, `rm`) persist through `WriteFile` only when `KernelWritable` is true — `IdentityCodec` types (`TextCodec` / unregistered text-like). Word, Notion, Google Docs, and other projected types are `EROFS`; the agent `write` tool still uses `WriteDocument`. `session.Mount` attaches a provider; `FuseMount` is the host kernel mount. `HostDir()` is the last mount directory (host-facing only). `FuseAvailable()` probes `/dev/fuse` and `/dev/macfuse*`. `Close` unmounts.
 
-`server.Registry` starts FUSE after construct when the session has a VFS: `$TMP/tacklr-fuse/<session>` mode `0700`. Production without a device has **no** `MountSession` (no VFS tools, no `run_command`). Tests inject `DirectProjection` so `list`/`stat` still work and `run_command` returns `ErrFuseNotMounted` until `HostDir` is set. Device present and mount fails after one suffix retry → fail-hard (Close, do not Store). `cmd/testserver` bootstraps `Point: /work` (`LocalFactory.Base` is the host jail). The harness does not call `FuseMount` and `Close` does not unmount.
+`server.Registry` starts FUSE after construct when the session has a VFS: `$TMP/tacklr-fuse/<session>` mode `0700`. Production without a device has **no** `MountSession` (no VFS tools, no `run_command`). Tests inject `DirectProjection` so `read`/`write` still work and `run_command` returns `ErrFuseNotMounted` until `HostDir` is set. Device present and mount fails after one suffix retry → fail-hard (Close, do not Store). `cmd/testserver` bootstraps `Point: /work` (`LocalFactory.Base` is the host jail). The harness does not call `FuseMount` and `Close` does not unmount.
 
 `TextCodec` requires valid UTF-8 and builds a `TextDocument` labeled with the caller’s media type.
 
@@ -393,7 +392,7 @@ falls back to `Engine.Put`. Scratch `/memory` is **not** attached when a brain
 Provider mount exists (deprecated for discoveries).
 
 **Shape A graph tools:** `link` / `unlink` / `expand` / `find_links` speak **paths**.
-There are no `.links` directories; `list`/`ls` never lists edges. Artifact paths
+There are no `.links` directories; `ls` never lists edges. Artifact paths
 must be indexed (`index_file` / prefix policy) before they can be linked.
 
 ### Index policy
@@ -458,8 +457,6 @@ When the harness has **Brain + MountSession + search namespace**, it owns a
 | `unindex` | Soft-delete the brain mirror; drops selective track |
 | `run_command` | `/bin/sh -c` with cwd = FUSE root; relative paths (`work/foo`); `PermissionRequired` unless `RunCommandUnattended` |
 | `read` / `write` | Line window / first page / block read; one mutation mode (full, span, old/new, block) |
-| `list` / `stat` | Stay when a `MountSession` exists. Prefer `run_command` → `ls` / `stat` on FUSE. |
-| `mkdir` / `remove` | Stay until writable FUSE |
 | `save_*` | Write the Engram file on the brain Provider (or `Engine.Put` if no brain mount) |
 | `link` / `expand` / `find_links` | Path-native graph (G1): prefer virtual paths; surface neighbor `vfs_path` |
 
@@ -488,7 +485,7 @@ Indexed `search` hits are not a behavior-preserving stand-in for live `rg`.
 |-------|----------------|
 | `vfs.ContentHash` / `ContentRev` / `LineWindow.Rev` | Identity of session-visible body |
 | `ReadText`, `ReplaceLines`, `WriteDocument` | Low-level IR mutate + provider persist |
-| Harness `read`, `write`, `list`, `stat`, `mkdir`, `remove` | Require `rev` on edits, reject stale, format numbered lines |
+| Harness `read`, `write` | Require `rev` on edits, reject stale, format numbered lines |
 
 ```text
 read   → path + rev + numbered window (first page when start/end omitted)

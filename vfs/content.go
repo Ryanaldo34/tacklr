@@ -18,6 +18,55 @@ type Codec interface {
 	Decode(ctx context.Context, path, mediaType string, data []byte) (Document, error)
 }
 
+// IdentityCodec is a Codec whose persist form is the UTF-8 payload itself
+// (no container). TextCodec implements it. Office/cloud codecs (Word, Notion,
+// Google Docs) must not — FUSE then returns EROFS and the write tool uses
+// WriteDocument. Register those codecs under their native media types; do not
+// steal text/markdown.
+type IdentityCodec interface {
+	Codec
+	Identity()
+}
+
+// KernelWritable reports whether FUSE/host writes may persist raw bytes for
+// mediaType. True only when Decode would use an IdentityCodec (TextCodec, or
+// the unregistered text-like fallback). Projected documents stay EROFS.
+func KernelWritable(mediaType string) bool {
+	if i := strings.IndexByte(mediaType, ';'); i >= 0 {
+		mediaType = strings.TrimSpace(mediaType[:i])
+	}
+	if mediaType == "" || mediaType == "application/octet-stream" {
+		return false
+	}
+	c, ok := defaultContentRegistry.codec(mediaType)
+	if !ok {
+		return IsTextLike(mediaType)
+	}
+	_, ok = c.(IdentityCodec)
+	return ok
+}
+
+// KernelWritableFile reports whether an existing file may take kernel writes.
+func KernelWritableFile(st FileInfo) bool {
+	mt := st.MediaType
+	if mt == "" {
+		mt = DetectMediaType(st.Name, nil)
+	}
+	return KernelWritable(mt)
+}
+
+// KernelCreateOK reports whether a new name may be created via FUSE.
+// Unknown types (temps, README) are allowed; a registered non-identity codec is not.
+func KernelCreateOK(name string) bool {
+	mt := DetectMediaType(name, nil)
+	c, ok := defaultContentRegistry.codec(mt)
+	if !ok {
+		return true
+	}
+	_, id := c.(IdentityCodec)
+	return id
+}
+
 // ContentRegistry maps media type → Codec (process-scoped, like BackendRegistry).
 type ContentRegistry struct {
 	mu     sync.RWMutex

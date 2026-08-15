@@ -12,7 +12,7 @@ import (
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
-// TestVFSTools_readWriteRev: list/stat/read/write outcomes over a DirectProjection mount.
+// TestVFSTools_readWriteRev: read/write outcomes over a DirectProjection mount.
 func TestVFSTools_readWriteRev(t *testing.T) {
 	ctx := context.Background()
 	base := t.TempDir()
@@ -38,22 +38,14 @@ func TestVFSTools_readWriteRev(t *testing.T) {
 	for _, tool := range h.tools {
 		tools[tool.Name] = tool
 	}
-	for _, name := range []string{"list", "stat", "read", "write", "mkdir", "remove", "run_command"} {
+	for _, name := range []string{"read", "write", "run_command"} {
 		if tools[name] == nil {
 			t.Fatalf("missing tool %q", name)
 		}
 	}
 	rt := turnRuntime(h)
 
-	res, err := tools["list"].invoke(ctx, `{"path":"/work"}`, rt)
-	if err != nil || !strings.Contains(res.output, "file\ta.go") {
-		t.Fatalf("list: %q err=%v", res.output, err)
-	}
-	res, err = tools["stat"].invoke(ctx, `{"path":"/work/a.go"}`, rt)
-	if err != nil || !strings.Contains(res.output, "is_dir=false") {
-		t.Fatalf("stat: %q err=%v", res.output, err)
-	}
-	if _, err = tools["run_command"].invoke(ctx, `{"command":"ls work"}`, rt); !errors.Is(err, vfs.ErrFuseNotMounted) {
+	if _, err := tools["run_command"].invoke(ctx, `{"command":"ls work"}`, rt); !errors.Is(err, vfs.ErrFuseNotMounted) {
 		t.Fatalf("run_command without HostDir: %v", err)
 	}
 
@@ -64,7 +56,7 @@ func TestVFSTools_readWriteRev(t *testing.T) {
 	if err := ms.WriteFile(ctx, "/work/page.txt", []byte(page.String())); err != nil {
 		t.Fatal(err)
 	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/work/page.txt"}`, rt)
+	res, err := tools["read"].invoke(ctx, `{"path":"/work/page.txt"}`, rt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,18 +158,11 @@ func TestVFSTools_readWriteRev(t *testing.T) {
 	if _, err = tools["write"].invoke(ctx, `{"path":"/work/b.go","content":"package b\n"}`, rt); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tools["mkdir"].invoke(ctx, `{"path":"/work/sub"}`, rt); err != nil {
-		t.Fatal(err)
-	}
-	res, err = tools["list"].invoke(ctx, `{"path":"/work"}`, rt)
-	if err != nil || !strings.Contains(res.output, "dir\tsub") {
-		t.Fatalf("list dir: %q err=%v", res.output, err)
-	}
-	if _, err := tools["remove"].invoke(ctx, `{"path":"/work/b.go"}`, rt); err != nil {
-		t.Fatal(err)
+	if gotText(t, ms, "/work/b.go") != "package b\n" {
+		t.Fatalf("create b.go: %q", gotText(t, ms, "/work/b.go"))
 	}
 
-	_, err = tools["list"].invoke(ctx, "{\"path\":\"/work/has\\u0000x\"}", rt)
+	_, err = tools["read"].invoke(ctx, "{\"path\":\"/work/has\\u0000x\"}", rt)
 	if !errors.Is(err, vfs.ErrInvalidPath) {
 		t.Fatalf("nul path: %v", err)
 	}

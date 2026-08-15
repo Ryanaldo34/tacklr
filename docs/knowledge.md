@@ -119,7 +119,7 @@ namespace are set, unless the host already mounted a brain profile):
 Hosts can instead mount **roots** (`/deal/acme.md`). Same objects, different tree.
 
 Relationships do **not** appear as files. There is no `.links` directory.
-`list` / `run_command` → `ls` show file names only. To see neighbors, the agent calls
+`run_command` → `ls` shows file names only. To see neighbors, the agent calls
 `expand`.
 
 ---
@@ -548,7 +548,7 @@ flowchart TD
 - Named types need a graph backend. Default depth is 1 hop (capped at 4).
 - If the graph fails and containment was also requested, expand can degrade to
   containment-only.
-- `list` never lists edges. Tool descriptions say this on purpose.
+- `ls` never lists edges. Tool descriptions say this on purpose.
 
 `link` / `unlink` require both ends to exist in the namespace, not be
 soft-deleted, and **not** be chunks. Paths resolve through `vfs_path`. An

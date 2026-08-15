@@ -1,10 +1,12 @@
 package vfs
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -100,6 +102,88 @@ func TestFuseMount_hostSeesDirtyText(t *testing.T) {
 			t.Fatalf("rg missed dirty phrase: %s", out)
 		}
 	}
+}
+
+func TestFuseMount_plaintextWritableProjectedEROFS(t *testing.T) {
+	if !FuseAvailable() {
+		t.Skip("no /dev/fuse or /dev/macfuse*")
+	}
+	ctx := t.Context()
+	reg := NewBackendRegistry()
+	if err := reg.Register(LocalFactory{ID: "scratch", Base: t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+	ms := NewMountSession(t.Name(), reg)
+	if err := ms.Mount(ctx, MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.WriteFile(ctx, "/work/note.txt", []byte("old\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.WriteFile(ctx, "/work/pic.bin", []byte{0x89, 'P', 'N', 'G', 1, 2, 3, 4}); err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	if err := ms.FuseMount(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ms.Close() })
+
+	work := filepath.Join(dir, "work")
+	if err := os.MkdirAll(filepath.Join(work, "d"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(work, "d", "a.txt"), []byte("hi from host\n"), 0o644); err != nil {
+		t.Fatalf("write plaintext: %v", err)
+	}
+	got, err := ms.ReadText(ctx, "/work/d/a.txt")
+	if err != nil || got.Text() != "hi from host\n" {
+		t.Fatalf("session after host write: %q err=%v", textOr(got), err)
+	}
+
+	f, err := os.OpenFile(filepath.Join(work, "note.txt"), os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("open plaintext: %v", err)
+	}
+	if _, err := f.Write([]byte("appended\n")); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	got, err = ms.ReadText(ctx, "/work/note.txt")
+	if err != nil || !strings.Contains(got.Text(), "appended") {
+		t.Fatalf("append visible: %q err=%v", textOr(got), err)
+	}
+
+	if err := os.WriteFile(filepath.Join(work, "pic.bin"), []byte("nope"), 0o644); err == nil {
+		t.Fatal("binary write: want EROFS")
+	} else if !errors.Is(err, syscall.EROFS) && !errors.Is(err, os.ErrPermission) &&
+		!strings.Contains(err.Error(), "read-only") && !strings.Contains(err.Error(), "EROFS") {
+		t.Fatalf("binary write err = %v", err)
+	}
+
+	if err := os.Remove(filepath.Join(work, "d", "a.txt")); err != nil {
+		t.Fatalf("rm: %v", err)
+	}
+	if _, err := ms.Stat(ctx, "/work/d/a.txt"); !errors.Is(err, ErrNotExist) {
+		t.Fatalf("stat after rm: %v", err)
+	}
+
+	if _, err := exec.LookPath("rg"); err == nil {
+		out, err := exec.Command("rg", "-F", "appended", dir).CombinedOutput()
+		if err != nil || !strings.Contains(string(out), "appended") {
+			t.Fatalf("rg after host append: %v out=%s", err, out)
+		}
+	}
+}
+
+func textOr(t Textual) string {
+	if t == nil {
+		return ""
+	}
+	return t.Text()
 }
 
 func TestFuseMount_rejectsMultiSegmentPoint(t *testing.T) {
