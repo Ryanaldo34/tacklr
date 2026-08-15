@@ -19,7 +19,7 @@ go get github.com/ryanaldo34/tacklr
 | Doc | What it covers |
 |-----|----------------|
 | [docs/knowledge.md](docs/knowledge.md) | **Canonical** knowledge system: Engrams, search, graph, tools |
-| [docs/vfs.md](docs/vfs.md) | Mounts, content IR, write-back, dirty overlay, lifecycle |
+| [docs/vfs.md](docs/vfs.md) | Mounts, content IR, provider persist, lifecycle |
 | [pkg.go.dev/tacklr](https://pkg.go.dev/github.com/ryanaldo34/tacklr) | Harness, tools, types |
 | [pkg.go.dev/vfs](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfs) | Virtual filesystem API |
 | [pkg.go.dev/brain](https://pkg.go.dev/github.com/ryanaldo34/tacklr/brain) | Knowledge engine API |
@@ -80,7 +80,7 @@ Models will always be probabilistic. **The harness does not have to be.** We are
 | What goes wrong elsewhere | What we do |
 |---------------------------|------------|
 | Context turns into sludge | Plans, todos, **handoffs**—only carry what the next work needs ([AGENTS.md](AGENTS.md)) |
-| Disk and “open buffer” disagree | Session-visible **IR** and write-back; backend updates on **Sync** ([docs/vfs.md](docs/vfs.md)) |
+| Disk and “open buffer” disagree | Session-visible **IR**; the provider persists on **WriteDocument** ([docs/vfs.md](docs/vfs.md)) |
 | Edits clobber each other silently | Content **`rev`** (hash)—stale write fails closed, re-read and retry |
 | Crash mid-run, state evaporates | **Checkpoints** + [stores](https://pkg.go.dev/github.com/ryanaldo34/tacklr/stores) (memory or Postgres) |
 | Tools side-effect into the void | Structured results, plan effects, stream events—you can see what happened |
@@ -109,7 +109,7 @@ Security is a **platform property**. If it only lives in the system prompt, you 
 |-------|-----|------|
 | **Inference** | Talk to the model, nothing else | [`inference`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/inference) |
 | **Harness** | Turn loop, tools, plan, context, save/load | [`tacklr`](https://pkg.go.dev/github.com/ryanaldo34/tacklr) |
-| **VFS** | Mounts, IR, write-back | [docs/vfs.md](docs/vfs.md) · [`vfs`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfs) |
+| **VFS** | Mounts, IR, provider persist | [docs/vfs.md](docs/vfs.md) · [`vfs`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfs) |
 | **Store** | Checkpoints | [`stores`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/stores) |
 | **Brain** | Knowledge (optional) | [`brain`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/brain) |
 | **Server** | Multi-agent / protocols (optional) | [`server`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/server) |
@@ -280,7 +280,7 @@ We already have the harness, VFS, IR, brain hooks, and checkpoints. Next we clos
 | Inference strategy | **Shipped** | OpenAI-compatible streams |
 | Brain | **Shipped** | Optional; tools only when wired |
 | VFS mounts (local, S3) | **Shipped** | [docs/vfs.md](docs/vfs.md) |
-| Content IR (text) + write-back | **Shipped** | Dirty overlay so the session sees edits before Sync |
+| Content IR (text) | **Shipped** | Provider translates IR and persists immediately |
 | Content `rev` + file tools | **Shipped** | When VFS is set |
 | Progressive line windows | **Shipped** | Large text without always full materialize |
 | Structured Markdown / `block_id` | **Shipped** | Projected heading blocks; outline + block replace; index props |
@@ -304,7 +304,7 @@ flowchart TB
     Plan[Plan / todos / handoff]
     Tools[Hard tools: read · replace · write]
     Ctx[Structured context]
-    CP[Checkpoint + SyncAll]
+    CP[Checkpoint]
   end
 
   subgraph runtime [Agent runtime]
@@ -317,7 +317,7 @@ flowchart TB
   subgraph vfs_layer [Virtual filesystem]
     MS[MountSession]
     IR[Content IR<br/>text lines · rich blocks + styles]
-    Overlay[Dirty write-back overlay]
+    Overlay[Provider IR + persist]
     Codec[Codecs bytes ↔ IR]
   end
 
@@ -374,14 +374,13 @@ sequenceDiagram
     Broker->>Broker: policy allow · deny · ask
     alt allowed
       Broker->>VFS: session-visible I/O
-      VFS->>Backend: on Sync / write-through only
+      VFS->>Backend: provider translates IR and persists now
       Broker-->>Agent: result
     else deny or human gate
       Broker-->>Harness: block / interrupt
     end
   end
-  Harness->>VFS: SyncAll on checkpoint
-  VFS->>Backend: codecs encode durable bytes
+  Note over Harness,Backend: Harness does not flush VFS
 ```
 
 ### Agent-facing surface (where we are going)

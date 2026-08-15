@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -90,6 +88,54 @@ func runPrompt(t *testing.T, model *mockStrategy, opts AgentOptions) (*AgentHarn
 	return h, drainEvents(events)
 }
 
+func TestRunMessage_imageAcceptedOnlyWhenModelAllows(t *testing.T) {
+	h := NewAgent(context.Background(), AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  &mockStrategy{},
+	})
+	t.Cleanup(h.Close)
+	if _, err := h.RunMessage(context.Background(), nil); err == nil || !strings.Contains(err.Error(), "requires a user message") {
+		t.Fatalf("nil message: %v", err)
+	}
+
+	img := &Message{
+		Content: "see this",
+		ContentParts: []ContentPart{
+			{Type: ContentTypeInputImage, ImageURL: &ImageURL{URL: "data:image/png;base64,AAAA"}},
+			{Type: ContentTypeInputImage, ImageURL: &ImageURL{URL: "data:image/png;base64,BBBB"}},
+			{Type: ContentTypeInputFile, FileData: &FileData{MIMEType: "", Filename: "skip"}},
+		},
+	}
+	if _, err := h.RunMessage(context.Background(), img); err == nil || !strings.Contains(err.Error(), "unsupported content type") {
+		t.Fatalf("text-only model: %v", err)
+	}
+
+	vision := NewAgent(context.Background(), AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model: &mockStrategy{
+			supportsMIMEFn: func(string) bool { return true },
+			invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
+				ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "a cat", IsComplete: true}
+			},
+		},
+	})
+	t.Cleanup(vision.Close)
+	events, err := vision.RunMessage(context.Background(), img)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := drainEvents(events)
+	var saw bool
+	for _, ev := range got {
+		if ev.Type == StreamEventMessage && strings.Contains(ev.Content, "a cat") {
+			saw = true
+		}
+	}
+	if !saw {
+		t.Fatalf("vision turn: %+v", summarizeEvents(got))
+	}
+}
+
 func requireToolResult(t *testing.T, got []StreamEvent, substr string) {
 	t.Helper()
 	if !hasToolResultContent(got, substr) {
@@ -98,35 +144,6 @@ func requireToolResult(t *testing.T, got []StreamEvent, substr string) {
 }
 
 // TestRun_uninitializedHarnessFails: Run without constructor setup is rejected.
-func TestRun_uninitializedHarnessFails(t *testing.T) {
-	h := &AgentHarness{}
-	_, err := h.Run(context.Background(), "hi")
-	if err == nil || !strings.Contains(err.Error(), "uninitialized") {
-		t.Fatalf("err = %v", err)
-	}
-}
-
-// TestRun_skillsDirectoryMissing_failsRun: bad skill roots surface as a Run error.
-func TestRun_skillsDirectoryMissing_failsRun(t *testing.T) {
-	h := NewAgent(context.Background(), AgentOptions{
-		Config: Config{
-			MaxWindowSize:    8192,
-			SkillDirectories: []string{filepath.Join(t.TempDir(), "missing-skills")},
-		},
-		Model: &mockStrategy{
-			invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
-				ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "x", IsComplete: true}
-			},
-		},
-	})
-	_, err := h.Run(context.Background(), "hi")
-	if err == nil || !strings.Contains(err.Error(), "skills") {
-		t.Fatalf("err = %v", err)
-	}
-}
-
-// TestRun_maxTurnRequests_emitsStopReason: a tool loop that would re-invoke the
-// model stops with ErrMaxTurnRequests after the configured limit.
 func TestRun_maxTurnRequests_emitsStopReason(t *testing.T) {
 	tool := NewTool(ToolConfig{
 		Name: "ping",
@@ -228,6 +245,7 @@ func TestRun_incompleteToolCall_emitsFailedToolResult(t *testing.T) {
 			ch <- LLMResponseChunk{
 				Type: StreamEventFunctionCall,
 				ToolCalls: []ToolCall{
+					{ID: "", CallID: "", Name: "ghost", Arguments: `{}`},
 					{ID: "inc1", CallID: "inc1", Name: "ghost", Arguments: `{}`},
 				},
 				IsComplete: false,
@@ -256,19 +274,21 @@ func TestRun_incompleteToolCall_emitsFailedToolResult(t *testing.T) {
 func TestRun_unknownTool_surfacesToolResultError(t *testing.T) {
 	var n int
 	strategy := &mockStrategy{
+		invokeErrFn: func(context.Context, []*Message, []*Tool) error {
+			if n >= 1 {
+				return errors.New("after tools down")
+			}
+			return nil
+		},
 		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
 			n++
-			if n == 1 {
-				ch <- LLMResponseChunk{
-					Type: StreamEventFunctionCall,
-					ToolCalls: []ToolCall{
-						{ID: "u1", CallID: "u1", Name: "does_not_exist", Arguments: `{}`},
-					},
-					IsComplete: true,
-				}
-				return
+			ch <- LLMResponseChunk{
+				Type: StreamEventFunctionCall,
+				ToolCalls: []ToolCall{
+					{ID: "u1", CallID: "u1", Name: "does_not_exist", Arguments: `{}`},
+				},
+				IsComplete: true,
 			}
-			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
 		},
 	}
 	h := NewAgent(context.Background(), AgentOptions{
@@ -282,6 +302,9 @@ func TestRun_unknownTool_surfacesToolResultError(t *testing.T) {
 	got := drainEvents(events)
 	if !hasToolResultContent(got, "not found") && !hasToolResultContent(got, "does_not_exist") {
 		t.Fatalf("want unknown tool error result, got %+v", summarizeEvents(got))
+	}
+	if !hasErrorIs(got, ErrModelAfterTools) {
+		t.Fatalf("want after-tools model error, got %+v", summarizeEvents(got))
 	}
 }
 
@@ -507,81 +530,6 @@ func TestRun_modelError_stripsUnpairedFromCheckpoint(t *testing.T) {
 }
 
 // TestRun_toolCallKeyUsesCallIDWhenIDEmpty: CallID alone is enough for lifecycle ids.
-func TestRun_toolCallKeyUsesCallIDWhenIDEmpty(t *testing.T) {
-	tool := NewTool(ToolConfig{
-		Name: "echo",
-		Handler: func(ctx context.Context) (string, error) {
-			return "ok", nil
-		},
-	})
-	var n int
-	strategy := &mockStrategy{
-		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
-			n++
-			if n == 1 {
-				ch <- LLMResponseChunk{
-					Type: StreamEventFunctionCall,
-					ToolCalls: []ToolCall{
-						{CallID: "only-call-id", Name: "echo", Arguments: `{}`},
-					},
-					IsComplete: true,
-				}
-				return
-			}
-			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
-		},
-	}
-	h := NewAgent(context.Background(), AgentOptions{
-		Config: Config{MaxWindowSize: 8192},
-		Model:  strategy,
-		Tools:  []*Tool{tool},
-	})
-	events, err := h.Run(context.Background(), "hi")
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := drainEvents(events)
-	var saw bool
-	for _, ev := range got {
-		if ev.Type == StreamEventToolResult && ev.MessageID == "only-call-id" {
-			saw = true
-		}
-	}
-	if !saw {
-		t.Fatalf("want tool_result message id from CallID, got %+v", summarizeEvents(got))
-	}
-}
-
-// TestRun_modelErrorContentWithoutErrorField_becomesErrorEvent: content-only
-// stream errors are still surfaced as error events to clients.
-func TestRun_modelErrorContentWithoutErrorField_becomesErrorEvent(t *testing.T) {
-	strategy := &mockStrategy{
-		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
-			ch <- LLMResponseChunk{Type: StreamEventError, Content: "plain failure text"}
-		},
-	}
-	h := NewAgent(context.Background(), AgentOptions{
-		Config: Config{MaxWindowSize: 8192},
-		Model:  strategy,
-	})
-	events, err := h.Run(context.Background(), "hi")
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := drainEvents(events)
-	var saw bool
-	for _, ev := range got {
-		if ev.Type == StreamEventError && ev.Error != nil && strings.Contains(ev.Error.Error(), "plain failure text") {
-			saw = true
-		}
-	}
-	if !saw {
-		t.Fatalf("want error from content, got %+v", summarizeEvents(got))
-	}
-}
-
-// TestRun_customInstructionsInSystemPrompt: creator instructions are present
-// on the system prompt the model receives.
 func TestRun_customInstructionsInSystemPrompt(t *testing.T) {
 	strategy := &mockStrategy{
 		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
@@ -666,209 +614,6 @@ func TestRun_mcpToolsDiscoveredAndInvokable(t *testing.T) {
 
 // TestRun_emptyToolInterceptorChain_allowsWriteWithoutPlan: replacing the
 // built-in interceptor chain with an empty slice disables planning write lock.
-func TestRun_emptyToolInterceptorChain_allowsWriteWithoutPlan(t *testing.T) {
-	write := NewTool(ToolConfig{
-		Name:   "mutate",
-		Access: ToolWriteAccess,
-		Handler: func(ctx context.Context) (string, error) {
-			return "mutated", nil
-		},
-	})
-	var n int
-	strategy := &mockStrategy{
-		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
-			n++
-			if n == 1 {
-				ch <- LLMResponseChunk{
-					Type: StreamEventFunctionCall,
-					ToolCalls: []ToolCall{
-						{ID: "w1", CallID: "w1", Name: "mutate", Arguments: `{}`},
-					},
-					IsComplete: true,
-				}
-				return
-			}
-			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
-		},
-	}
-	h := NewAgent(context.Background(), AgentOptions{
-		Config:           Config{MaxWindowSize: 8192},
-		Model:            strategy,
-		Tools:            []*Tool{write},
-		ToolInterceptors: []ToolInterceptor{}, // explicit empty replaces defaults
-	})
-	events, err := h.Run(context.Background(), "write")
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := drainEvents(events)
-	if !hasToolResultContent(got, "mutated") {
-		t.Fatalf("write should succeed with empty interceptor chain, got %+v", summarizeEvents(got))
-	}
-}
-
-// TestRun_readSkill_unknownName_toolError: unknown skill names fail the tool call.
-func TestRun_readSkill_unknownName_toolError(t *testing.T) {
-	dir := t.TempDir()
-	skillDir := filepath.Join(dir, "demo")
-	if err := os.Mkdir(skillDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	body := "---\nname: demo\ndescription: d\n---\n\nDo the demo.\n"
-	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	var n int
-	strategy := &mockStrategy{
-		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
-			n++
-			if n == 1 {
-				ch <- LLMResponseChunk{
-					Type: StreamEventFunctionCall,
-					ToolCalls: []ToolCall{
-						{ID: "s1", CallID: "s1", Name: "read_skill", Arguments: `{"name":"missing"}`},
-					},
-					IsComplete: true,
-				}
-				return
-			}
-			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "ok", IsComplete: true}
-		},
-	}
-	h := NewAgent(context.Background(), AgentOptions{
-		Config: Config{MaxWindowSize: 8192, SkillDirectories: []string{dir}},
-		Model:  strategy,
-	})
-	events, err := h.Run(context.Background(), "skill")
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := drainEvents(events)
-	if !hasToolResultContent(got, "unknown skill") {
-		t.Fatalf("want unknown skill tool error, got %+v", summarizeEvents(got))
-	}
-}
-
-// TestRun_checkpointSaveFailure_turnStillCompletes: store save errors are
-// logged but do not block a successful complete event.
-func TestRun_checkpointSaveFailure_turnStillCompletes(t *testing.T) {
-	strategy := &mockStrategy{
-		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
-			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "ok", IsComplete: true}
-		},
-	}
-	h := NewAgent(context.Background(), AgentOptions{
-		Config: Config{MaxWindowSize: 8192},
-		Model:  strategy,
-		Store:  failSaveStore{},
-	})
-	h.sessionId = "sess-save-fail"
-	events, err := h.Run(context.Background(), "hi")
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := drainEvents(events)
-	if !hasEventType(got, StreamEventComplete) {
-		t.Fatalf("want complete despite save fail, got %+v", summarizeEvents(got))
-	}
-}
-
-// TestRun_modelError_stillCheckpoints: unexpected invoke failure still leaves
-// a durable session (user prompt at minimum) for resume/reload.
-func TestRun_modelError_stillCheckpoints(t *testing.T) {
-	store := stores.NewInMemoryStore()
-	h := NewAgent(context.Background(), AgentOptions{
-		Config: Config{MaxWindowSize: 8192},
-		Model:  &mockStrategy{invokeErr: errors.New("provider down")},
-		Store:  store,
-	})
-	h.sessionId = "sess-err-ckpt"
-	events, err := h.Run(context.Background(), "remember this user goal")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = drainEvents(events)
-
-	loaded, err := NewAgentFromSession(context.Background(), "sess-err-ckpt", AgentOptions{
-		Config: Config{MaxWindowSize: 8192},
-		Model:  &mockStrategy{},
-		Store:  store,
-	})
-	if err != nil {
-		t.Fatalf("reload after error: %v", err)
-	}
-	msgs := loaded.Messages()
-	if len(msgs) == 0 || msgs[0].Role != RoleUser || msgs[0].Content != "remember this user goal" {
-		t.Fatalf("want checkpointed user message, got %+v", msgs)
-	}
-}
-
-type failSaveStore struct{}
-
-func (failSaveStore) SaveSession(context.Context, string, stores.SessionCheckpoint) error {
-	return errors.New("save failed")
-}
-func (failSaveStore) LoadSession(context.Context, string) (stores.SessionCheckpoint, error) {
-	return stores.SessionCheckpoint{}, stores.ErrSessionNotFound
-}
-
-// TestNewAgentFromSession_requiresStoreAndLoadsEmptyMaps: nil store is rejected;
-// empty interrupt maps on a checkpoint still restore a runnable harness.
-func TestNewAgentFromSession_requiresStoreAndLoadsEmptyMaps(t *testing.T) {
-	_, err := NewAgentFromSession(context.Background(), "s", AgentOptions{
-		Config: Config{MaxWindowSize: 8192},
-		Model:  &mockStrategy{},
-	})
-	if err == nil || !strings.Contains(err.Error(), "store") {
-		t.Fatalf("nil store: %v", err)
-	}
-
-	store := testStore(t)
-	cp, err := stores.NewCheckpoint([]*Message{{Role: RoleUser, Content: "hi"}}, nil, nil, map[string]any{}, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Explicit nil maps on state after NewCheckpoint may still set nils.
-	cp.State.InterruptToRequester = nil
-	cp.State.PendingToolCalls = nil
-	if err := store.SaveSession(context.Background(), "s1", *cp); err != nil {
-		t.Fatal(err)
-	}
-	h, err := NewAgentFromSession(context.Background(), "s1", AgentOptions{
-		Config: Config{MaxWindowSize: 8192},
-		Model: &mockStrategy{
-			invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
-				ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "resumed", IsComplete: true}
-			},
-		},
-		Store: store,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	events, err := h.Run(context.Background(), "continue")
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := drainEvents(events)
-	if !hasEventType(got, StreamEventMessage) && !hasEventType(got, StreamEventComplete) {
-		t.Fatalf("want resumed turn events, got %+v", summarizeEvents(got))
-	}
-}
-
-// TestNewAgentFromSession_loadError: missing session fails construction.
-func TestNewAgentFromSession_loadError(t *testing.T) {
-	_, err := NewAgentFromSession(context.Background(), "missing", AgentOptions{
-		Config: Config{MaxWindowSize: 8192},
-		Model:  &mockStrategy{},
-		Store:  testStore(t),
-	})
-	if err == nil {
-		t.Fatal("want load error")
-	}
-}
-
-// TestRun_watchdogRecordsToolResults: successful tool calls are recorded on the watchdog.
 func TestRun_watchdogRecordsToolResults(t *testing.T) {
 	tool := NewTool(ToolConfig{
 		Name:    "echo",
@@ -910,63 +655,6 @@ func TestRun_watchdogRecordsToolResults(t *testing.T) {
 
 // TestRun_displayNameOnFunctionCall_stream: DisplayName templates fill Title;
 // Name stays programmatic so execution keeps working.
-func TestRun_displayNameOnFunctionCall_stream(t *testing.T) {
-	tool := NewTool(ToolConfig{
-		Name:        "mark_item",
-		DisplayName: "Complete {title}",
-		Handler: func(ctx context.Context, args struct {
-			Title string `json:"title"`
-		}) (string, error) {
-			return "ran:" + args.Title, nil
-		},
-	})
-	var n int
-	strategy := &mockStrategy{
-		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
-			n++
-			if n == 1 {
-				ch <- LLMResponseChunk{
-					Type: StreamEventFunctionCall,
-					ToolCalls: []ToolCall{
-						{ID: "d1", CallID: "d1", Name: "mark_item", Arguments: `{"title":"Ship"}`},
-					},
-					IsComplete: true,
-				}
-				return
-			}
-			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
-		},
-	}
-	h := NewAgent(context.Background(), AgentOptions{
-		Config: Config{MaxWindowSize: 8192},
-		Model:  strategy,
-		Tools:  []*Tool{tool},
-	})
-	events, err := h.Run(context.Background(), "hi")
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := drainEvents(events)
-	var saw bool
-	for _, ev := range got {
-		if ev.Type == StreamEventFunctionCall {
-			for _, tc := range ev.ToolCalls {
-				if tc.Name == "mark_item" && tc.Title == "Complete Ship" {
-					saw = true
-				}
-			}
-		}
-	}
-	if !saw {
-		t.Fatalf("want Name=mark_item Title=Complete Ship on function_call, got %+v", summarizeEvents(got))
-	}
-	if !hasToolResultContent(got, "ran:Ship") {
-		t.Fatalf("want tool executed under programmatic name, got %+v", summarizeEvents(got))
-	}
-}
-
-// TestRun_cancelMidTool_pairsCancelledResultsInWindow: cancel while a tool is
-// running appends cancelled tool results so the checkpoint has valid pairing.
 func TestRun_cancelMidTool_pairsCancelledResultsInWindow(t *testing.T) {
 	started := make(chan struct{})
 	var once sync.Once

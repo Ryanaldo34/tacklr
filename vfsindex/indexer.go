@@ -84,13 +84,8 @@ func NewMountIndexer(ms *vfs.MountSession, eng *brain.Engine, scope brain.Scope)
 
 // DocumentID returns the stable brain id for a virtual path under this scope.
 func (x *MountIndexer) DocumentID(virtualPath string) uuid.UUID {
-	nsKey := x.nsKey
-	if nsKey == "" && x.Scope.Namespace != nil {
-		nsKey = x.Scope.Namespace.String()
-	}
-	// Single buffer: nsKey is usually precomputed in NewMountIndexer.
-	buf := make([]byte, 0, len(nsKey)+1+len(virtualPath))
-	buf = append(buf, nsKey...)
+	buf := make([]byte, 0, len(x.nsKey)+1+len(virtualPath))
+	buf = append(buf, x.nsKey...)
 	buf = append(buf, 0)
 	buf = append(buf, virtualPath...)
 	return uuid.NewSHA1(documentIDNS, buf)
@@ -167,9 +162,6 @@ func (x *MountIndexer) UnindexPath(ctx context.Context, virtualPath string) (boo
 }
 
 func (x *MountIndexer) skipIndex(virtualPath string) bool {
-	if x == nil || x.VFS == nil {
-		return false
-	}
 	spec, err := x.VFS.SpecAt(virtualPath)
 	return err == nil && NormalizePolicy(spec.IndexPolicy) == PolicyNone
 }
@@ -465,9 +457,6 @@ func chunksFromBlocks(fileTitle, body string, blocks []vfs.Block, parentID uuid.
 }
 
 func lineChunksFromText(body string, linesPer int) []chunkDraft {
-	if linesPer <= 0 {
-		linesPer = DefaultLinesPerChunk
-	}
 	starts := lineStarts(body)
 	n := len(starts)
 	out := make([]chunkDraft, 0, (n+linesPer-1)/linesPer)

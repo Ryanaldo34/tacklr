@@ -9,7 +9,6 @@ import (
 	"os"
 	"path"
 	"sync"
-	"time"
 
 	gofuse "github.com/hanwen/go-fuse/v2/fuse"
 )
@@ -30,25 +29,19 @@ type filePutter interface {
 }
 
 // AfterPersistFunc is called after content is successfully written to a backend
-// (WriteFile or Sync). Used by optional bridges (e.g. vfsindex) without importing
-// them. Errors from the hook are ignored so persist never rolls back.
+// (WriteFile or WriteDocument). Used by optional bridges (e.g. vfsindex) without
+// importing them. Errors from the hook are ignored so persist never rolls back.
 type AfterPersistFunc func(ctx context.Context, virtualPath string) error
 
-// MountSession is the session-owned virtual filesystem: mount table + path I/O
-// plus a session-local textual IR cache (write-back until Sync).
-//
-// Hosts attach/detach mounts here (not on the agent harness). BackendRegistry is
-// process-scoped; this type holds the live per-session tree. Specs() is what the
-// harness checkpoints (mount table only — not file content).
-//
-// Dirty document edits flush via Sync / SyncAll (harness checkpoint calls SyncAll).
-// Backend remains source of truth after a successful flush.
+// MountSession is the session-owned virtual filesystem: mount table + path I/O.
+// It routes document I/O to the provider; it does not encode IR or cache dirty
+// documents. Hosts attach/detach mounts here (not on the agent harness).
+// BackendRegistry is process-scoped; this type holds the live per-session tree.
 type MountSession struct {
 	mu           sync.Mutex
 	id           string
 	reg          *BackendRegistry
 	tab          *mountTable
-	cache        *contentCache
 	afterPersist AfterPersistFunc
 	fuse         *gofuse.Server
 	hostDir      string
@@ -82,7 +75,17 @@ func (m *MountSession) fireAfterPersist(ctx context.Context, virtualPath string)
 // NewMountSession binds a session id to a process registry.
 // Hosts that want a kernel tree call FuseMount.
 func NewMountSession(sessionID string, reg *BackendRegistry) *MountSession {
-	return &MountSession{id: sessionID, reg: reg, tab: newMountTable(), cache: newContentCache()}
+	return &MountSession{id: sessionID, reg: reg, tab: newMountTable()}
+}
+
+// HostDir is the directory last passed to FuseMount, or "".
+// Hosts and run_command use this as cwd. Harness tool results, errors,
+// MountInfo, Specs, and checkpoints must never print it. The child
+// process can still observe it via pwd until a later jail.
+func (m *MountSession) HostDir() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.hostDir
 }
 
 func (m *MountSession) table() *mountTable {
@@ -92,13 +95,11 @@ func (m *MountSession) table() *mountTable {
 }
 
 // Materialize replaces the live tree from specs. On error the previous tree is kept.
-// Clears the content cache (entries were bound to the previous mount set).
 func (m *MountSession) Materialize(ctx context.Context, specs []MountSpec) error {
 	if len(specs) == 0 {
 		m.mu.Lock()
 		m.tab = newMountTable()
 		m.mu.Unlock()
-		m.cache.clear()
 		return nil
 	}
 	if m.reg == nil {
@@ -111,7 +112,6 @@ func (m *MountSession) Materialize(ctx context.Context, specs []MountSpec) error
 	m.mu.Lock()
 	m.tab = next
 	m.mu.Unlock()
-	m.cache.clear()
 	return nil
 }
 
@@ -127,13 +127,9 @@ func (m *MountSession) Mount(ctx context.Context, spec MountSpec) error {
 	return m.table().mount(ctx, spec, p)
 }
 
-// Unmount detaches the mount at point and drops cache entries under that point.
+// Unmount detaches the mount at point.
 func (m *MountSession) Unmount(point string) error {
-	if err := m.table().unmount(point); err != nil {
-		return err
-	}
-	m.cache.removePrefix(point)
-	return nil
+	return m.table().unmount(point)
 }
 
 // Specs returns the durable mount table (checkpoint-safe; no host paths or secrets).
@@ -168,9 +164,7 @@ func (m *MountSession) Classify(ctx context.Context, virtualPath string, sample 
 	} else if err != nil && !errors.Is(err, ErrNotExist) {
 		return "", err
 	}
-	if _, _, err := m.at(ctx, cleaned, false); err != nil {
-		return "", err
-	}
+	// Stat NotExist already resolved a mount; classify the new name from bytes.
 	return DetectMediaType(path.Base(cleaned), sample), nil
 }
 
@@ -188,48 +182,17 @@ func (m *MountSession) at(ctx context.Context, virtualPath string, write bool) (
 	return p, rel, nil
 }
 
-// Stat returns info for a virtual path. Dirty IR is session-visible even when
-// the backend has not been Sync'd yet.
+// Stat returns info for a virtual path.
 func (m *MountSession) Stat(ctx context.Context, virtualPath string) (FileInfo, error) {
 	cleaned, err := cleanVirtualPath(virtualPath)
 	if err != nil {
 		return FileInfo{}, err
 	}
-	if fi, ok := m.statDirty(cleaned); ok {
-		return fi, nil
-	}
 	p, rel, err := m.at(ctx, cleaned, false)
 	if err != nil {
 		return FileInfo{}, err
 	}
-	fi, err := p.Stat(ctx, rel)
-	if err != nil && errors.Is(err, ErrNotExist) {
-		// Intermediate dir only present via dirty descendants.
-		if kids := m.cache.overlayChildren(cleaned); len(kids) > 0 {
-			return FileInfo{Name: path.Base(cleaned), IsDir: true, ModTime: time.Now().UTC()}, nil
-		}
-	}
-	return fi, err
-}
-
-func (m *MountSession) statDirty(cleaned string) (FileInfo, bool) {
-	doc, size, mod, dirty, ok := m.cache.get(cleaned)
-	if !ok || !dirty {
-		return FileInfo{}, false
-	}
-	if size < 0 {
-		size = int64(len(doc.Text()))
-	}
-	if mod.IsZero() {
-		mod = time.Now().UTC()
-	}
-	return FileInfo{
-		Name:      path.Base(cleaned),
-		Size:      size,
-		ModTime:   mod,
-		IsDir:     false,
-		MediaType: doc.MediaType(),
-	}, true
+	return p.Stat(ctx, rel)
 }
 
 // Open opens a virtual path for reading.
@@ -237,9 +200,6 @@ func (m *MountSession) Open(ctx context.Context, virtualPath string) (File, erro
 	cleaned, err := cleanVirtualPath(virtualPath)
 	if err != nil {
 		return nil, err
-	}
-	if doc, _, _, dirty, ok := m.cache.get(cleaned); ok && dirty {
-		return &bytesFile{name: path.Base(cleaned), Reader: bytes.NewReader([]byte(doc.Text()))}, nil
 	}
 	p, rel, err := m.at(ctx, cleaned, false)
 	if err != nil {
@@ -249,7 +209,6 @@ func (m *MountSession) Open(ctx context.Context, virtualPath string) (File, erro
 }
 
 // ReadFile reads an entire file (capped at MaxReadFileBytes).
-// Dirty IR is returned without hitting the backend.
 //
 // When File.Stat reports a size, the buffer is allocated once and oversize files
 // are rejected without reading the body. Unknown sizes fall back to a limited
@@ -258,13 +217,6 @@ func (m *MountSession) ReadFile(ctx context.Context, virtualPath string) ([]byte
 	cleaned, err := cleanVirtualPath(virtualPath)
 	if err != nil {
 		return nil, err
-	}
-	if doc, _, _, dirty, ok := m.cache.get(cleaned); ok && dirty {
-		body := doc.Text()
-		if len(body) > MaxReadFileBytes {
-			return nil, errFileExceeds(MaxReadFileBytes)
-		}
-		return []byte(body), nil
 	}
 
 	f, err := m.Open(ctx, cleaned)
@@ -305,20 +257,8 @@ func (m *MountSession) ReadFile(ctx context.Context, virtualPath string) ([]byte
 	return data, nil
 }
 
-// bytesFile is dirty IR as a readable File (io.Reader + io.ReaderAt via embed).
-type bytesFile struct {
-	*bytes.Reader
-	name string
-}
-
-func (f *bytesFile) Close() error { return nil }
-
-func (f *bytesFile) Stat() (FileInfo, error) {
-	return FileInfo{Name: f.name, Size: f.Size(), ModTime: time.Now().UTC()}, nil
-}
-
 // WriteFile creates or truncates a file (fails on read-only mounts).
-// Write-through to the backend, then drops any cached IR for the path.
+// Write-through to the backend.
 func (m *MountSession) WriteFile(ctx context.Context, virtualPath string, data []byte) error {
 	cleaned, err := cleanVirtualPath(virtualPath)
 	if err != nil {
@@ -327,7 +267,6 @@ func (m *MountSession) WriteFile(ctx context.Context, virtualPath string, data [
 	if err := m.writeContents(ctx, cleaned, bytes.NewReader(data), int64(len(data))); err != nil {
 		return err
 	}
-	m.cache.remove(cleaned)
 	m.fireAfterPersist(ctx, cleaned)
 	return nil
 }
@@ -356,18 +295,13 @@ func (m *MountSession) writeContents(ctx context.Context, virtualPath string, r 
 	if !ok {
 		return ErrReadOnly
 	}
-	n, err := io.Copy(w, io.LimitReader(r, size))
-	if err != nil {
+	if _, err := io.Copy(w, io.LimitReader(r, size)); err != nil {
 		return err
-	}
-	if n != size {
-		return io.ErrUnexpectedEOF
 	}
 	return nil
 }
 
-// ReadDir lists a directory, merging dirty IR paths so write-back creates appear
-// before Sync.
+// ReadDir lists a directory.
 func (m *MountSession) ReadDir(ctx context.Context, virtualPath string) ([]DirEntry, error) {
 	cleaned, err := cleanVirtualPath(virtualPath)
 	if err != nil {
@@ -377,55 +311,20 @@ func (m *MountSession) ReadDir(ctx context.Context, virtualPath string) ([]DirEn
 	if err != nil {
 		return nil, err
 	}
-	ents, err := p.ReadDir(ctx, rel)
-	if err != nil && !errors.Is(err, ErrNotExist) {
-		return nil, err
-	}
-	if ents == nil {
-		ents = []DirEntry{}
-	}
-	overlay := m.cache.overlayChildren(cleaned)
-	if len(overlay) == 0 {
-		if err != nil {
-			return nil, err
-		}
-		return ents, nil
-	}
-	seen := make(map[string]int, len(ents))
-	for i, e := range ents {
-		seen[e.Name] = i
-	}
-	for _, e := range overlay {
-		if i, ok := seen[e.Name]; ok {
-			// Dirty file wins IsDir=false over a backend dir of the same name.
-			if !e.IsDir {
-				ents[i] = e
-			}
-			continue
-		}
-		ents = append(ents, e)
-	}
-	return ents, nil
+	return p.ReadDir(ctx, rel)
 }
 
-// Remove removes a file or empty directory and drops any cache entry.
-// Dirty-only paths (write-back create, not yet Sync'd) succeed without backend.
+// Remove removes a file or empty directory.
 func (m *MountSession) Remove(ctx context.Context, virtualPath string) error {
 	cleaned, err := cleanVirtualPath(virtualPath)
 	if err != nil {
 		return err
 	}
-	cached := m.cache.has(cleaned)
 	p, rel, err := m.at(ctx, cleaned, true)
 	if err != nil {
 		return err
 	}
-	err = p.Remove(ctx, rel)
-	if err == nil || (errors.Is(err, ErrNotExist) && cached) {
-		m.cache.remove(cleaned)
-		return nil
-	}
-	return err
+	return p.Remove(ctx, rel)
 }
 
 // MkdirAll creates a directory and parents.

@@ -3,21 +3,42 @@ package vfs
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"os"
 	"path"
+	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	fusefs "github.com/hanwen/go-fuse/v2/fs"
 	gofuse "github.com/hanwen/go-fuse/v2/fuse"
 )
 
+// FuseAvailable reports whether this process can mount a FUSE tree.
+// Probes /dev/fuse and /dev/macfuse* only (not /dev/osxfuse*).
+func FuseAvailable() bool {
+	if _, err := os.Stat("/dev/fuse"); err == nil {
+		return true
+	}
+	matches, err := filepath.Glob("/dev/macfuse*")
+	return err == nil && len(matches) > 0
+}
+
 // FuseMount projects the session as a read-only host tree at dir.
-// Textual files appear as ReadText (dirty IR plaintext). Binaries use Stat + ReadAt.
+// Textual files appear as ReadText (provider IR plaintext). Binaries use Stat + ReadAt.
 // session.Mount attaches a provider; FuseMount is the host kernel mount.
+// Every live Specs() point must be a single path segment (/work, /engram).
 func (m *MountSession) FuseMount(dir string) error {
 	if dir == "" {
 		return errors.New("vfs: fuse mountpoint required")
+	}
+	for _, spec := range m.Specs() {
+		name := strings.TrimPrefix(spec.Point, "/")
+		if name == "" || strings.Contains(name, "/") {
+			return fmt.Errorf("vfs: fuse requires single-segment mount points (got %q); use /work and /engram", spec.Point)
+		}
 	}
 	m.mu.Lock()
 	if m.fuse != nil && m.hostDir == dir {
@@ -31,8 +52,12 @@ func (m *MountSession) FuseMount(dir string) error {
 	if old != nil {
 		_ = old.Unmount()
 	}
+	zero := time.Duration(0)
 	srv, err := fusefs.Mount(dir, &fuseNode{sess: m, path: "/"}, &fusefs.Options{
-		MountOptions: gofuse.MountOptions{FsName: "tacklr", Name: "tacklr"},
+		MountOptions:    gofuse.MountOptions{FsName: "tacklr", Name: "tacklr"},
+		EntryTimeout:    &zero,
+		AttrTimeout:     &zero,
+		NegativeTimeout: &zero,
 	})
 	if err != nil {
 		return err
@@ -87,7 +112,9 @@ func (n *fuseNode) Readdir(ctx context.Context) (fusefs.DirStream, syscall.Errno
 	var ents []DirEntry
 	var err error
 	if n.path == "/" {
-		for _, spec := range n.sess.Specs() {
+		specs := n.sess.Specs()
+		ents = make([]DirEntry, 0, len(specs))
+		for _, spec := range specs {
 			name := strings.TrimPrefix(spec.Point, "/")
 			if name == "" || strings.Contains(name, "/") {
 				continue
@@ -120,11 +147,15 @@ func (n *fuseNode) Getattr(ctx context.Context, _ fusefs.FileHandle, out *gofuse
 	return 0
 }
 
-func (n *fuseNode) Open(_ context.Context, flags uint32) (fusefs.FileHandle, uint32, syscall.Errno) {
+func (n *fuseNode) Open(ctx context.Context, flags uint32) (fusefs.FileHandle, uint32, syscall.Errno) {
 	if flags&(syscall.O_WRONLY|syscall.O_RDWR|syscall.O_APPEND|syscall.O_CREAT|syscall.O_TRUNC) != 0 {
 		return nil, 0, syscall.EROFS
 	}
-	return &fuseFile{sess: n.sess, path: n.path}, 0, 0
+	f, errno := openFuseFile(ctx, n.sess, n.path)
+	if errno != 0 {
+		return nil, 0, errno
+	}
+	return f, 0, 0
 }
 
 func (n *fuseNode) stat(ctx context.Context, virtualPath string) (FileInfo, error) {
@@ -138,6 +169,10 @@ func (n *fuseNode) stat(ctx context.Context, virtualPath string) (FileInfo, erro
 	if st.IsDir {
 		return st, nil
 	}
+	// Binaries: Stat size is the FUSE size. Do not ReadText (that would ReadFile the body).
+	if st.MediaType != "" && !IsTextLike(st.MediaType) {
+		return st, nil
+	}
 	t, err := n.sess.ReadText(ctx, virtualPath)
 	if err == nil {
 		st.Size = int64(len(t.Text()))
@@ -149,39 +184,75 @@ func (n *fuseNode) stat(ctx context.Context, virtualPath string) (FileInfo, erro
 	return FileInfo{}, err
 }
 
+// fuseFile is one kernel open. Text is a plaintext snapshot; binaries keep ReaderAt.
 type fuseFile struct {
-	sess *MountSession
-	path string
+	body string
+	bin  File
+	ra   io.ReaderAt
 }
 
-func (f *fuseFile) Read(ctx context.Context, dest []byte, off int64) (gofuse.ReadResult, syscall.Errno) {
-	if off < 0 {
-		return nil, syscall.EINVAL
-	}
-	if t, err := f.sess.ReadText(ctx, f.path); err == nil {
-		body := t.Text()
-		if off >= int64(len(body)) {
-			return gofuse.ReadResultData(nil), 0
-		}
-		n := copy(dest, body[off:])
-		return gofuse.ReadResultData(dest[:n]), 0
-	} else if !errors.Is(err, ErrNoCodec) && !errors.Is(err, ErrNotTextual) {
-		return nil, fuseErrno(err)
-	}
-	h, err := f.sess.Open(ctx, f.path)
+func openFuseFile(ctx context.Context, sess *MountSession, virtualPath string) (*fuseFile, syscall.Errno) {
+	st, err := sess.Stat(ctx, virtualPath)
 	if err != nil {
 		return nil, fuseErrno(err)
 	}
-	defer h.Close()
-	ra, ok := h.(io.ReaderAt)
-	if !ok {
-		return nil, syscall.EIO
+	if st.IsDir {
+		return nil, syscall.EISDIR
 	}
-	n, err := ra.ReadAt(dest, off)
-	if err != nil && err != io.EOF {
+	if st.MediaType == "" || IsTextLike(st.MediaType) {
+		body, err := fusePlaintext(ctx, sess, virtualPath)
+		if err == nil {
+			return &fuseFile{body: body}, 0
+		}
+		if !errors.Is(err, ErrNoCodec) && !errors.Is(err, ErrNotTextual) {
+			return nil, fuseErrno(err)
+		}
+	}
+	h, err := sess.Open(ctx, virtualPath)
+	if err != nil {
 		return nil, fuseErrno(err)
 	}
+	ra, ok := h.(io.ReaderAt)
+	if !ok {
+		_ = h.Close()
+		return nil, syscall.EIO
+	}
+	return &fuseFile{bin: h, ra: ra}, 0
+}
+
+func fusePlaintext(ctx context.Context, sess *MountSession, virtualPath string) (string, error) {
+	t, err := sess.ReadText(ctx, virtualPath)
+	if err != nil {
+		return "", err
+	}
+	return t.Text(), nil
+}
+
+func (f *fuseFile) Read(_ context.Context, dest []byte, off int64) (gofuse.ReadResult, syscall.Errno) {
+	if off < 0 {
+		return nil, syscall.EINVAL
+	}
+	if f.ra != nil {
+		n, err := f.ra.ReadAt(dest, off)
+		if err != nil && err != io.EOF {
+			return nil, fuseErrno(err)
+		}
+		return gofuse.ReadResultData(dest[:n]), 0
+	}
+	if off >= int64(len(f.body)) {
+		return gofuse.ReadResultData(nil), 0
+	}
+	n := copy(dest, f.body[off:])
 	return gofuse.ReadResultData(dest[:n]), 0
+}
+
+func (f *fuseFile) Release(_ context.Context) syscall.Errno {
+	if f.bin != nil {
+		_ = f.bin.Close()
+		f.bin = nil
+		f.ra = nil
+	}
+	return 0
 }
 
 func fuseErrno(err error) syscall.Errno {
@@ -196,10 +267,12 @@ func fillFuseAttr(out *gofuse.Attr, st FileInfo) {
 		out.Mode = gofuse.S_IFDIR | 0555
 	} else {
 		out.Mode = gofuse.S_IFREG | 0444
-		out.Size = uint64(st.Size)
+		if st.Size > 0 {
+			out.Size = uint64(st.Size)
+		}
 	}
-	if !st.ModTime.IsZero() {
-		out.Mtime = uint64(st.ModTime.Unix())
+	if u := st.ModTime.Unix(); u > 0 {
+		out.Mtime = uint64(u)
 	}
 }
 
@@ -209,4 +282,5 @@ var (
 	_ fusefs.NodeGetattrer = (*fuseNode)(nil)
 	_ fusefs.NodeOpener    = (*fuseNode)(nil)
 	_ fusefs.FileReader    = (*fuseFile)(nil)
+	_ fusefs.FileReleaser  = (*fuseFile)(nil)
 )

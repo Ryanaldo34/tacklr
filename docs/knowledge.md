@@ -11,7 +11,7 @@ defined as they appear, and again in the [glossary](#glossary).
 
 | Doc | When to open it |
 |-----|-----------------|
-| [docs/vfs.md](vfs.md) | Mounts, file IR, write-back, index *policy* on a mount |
+| [docs/vfs.md](vfs.md) | Mounts, file IR, provider persist, index *policy* on a mount |
 | [`brain` package](https://pkg.go.dev/github.com/ryanaldo34/tacklr/brain) | Go API reference |
 | [`vfsindex` package](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfsindex) | Artifact → Document/Chunk ingest API |
 | [README](../README.md) | How Brain fits the rest of the harness |

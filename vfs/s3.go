@@ -38,17 +38,14 @@ type s3Provider struct {
 	prefix string // no leading slash; may be empty; trailing slash normalized off
 }
 
+var _ documentBackend = s3Provider{}
+
 // Validate implements Provider.
 func (p s3Provider) Validate(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if p.api == nil {
-		return fmt.Errorf("vfs: s3 client required")
-	}
-	if strings.TrimSpace(p.bucket) == "" {
-		return fmt.Errorf("vfs: s3 bucket required")
-	}
+	// Factory Open rejects a missing client or bucket before this runs.
 	return validateS3Prefix(p.prefix)
 }
 
@@ -164,6 +161,56 @@ func (p s3Provider) PutFile(ctx context.Context, name string, r io.Reader, size 
 		return fmt.Errorf("vfs: cannot write mount root as file")
 	}
 	return p.api.Put(ctx, p.bucket, key, r, size)
+}
+
+// OpenDocument translates an S3 object into Document IR.
+func (p s3Provider) OpenDocument(ctx context.Context, name string, reg *ContentRegistry) (Document, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	fi, err := p.Stat(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	if fi.IsDir {
+		return nil, fmt.Errorf("vfs: %s is a directory", name)
+	}
+	if fi.Size > int64(MaxReadFileBytes) {
+		return nil, errFileExceeds(MaxReadFileBytes)
+	}
+	key, err := p.objectKey(name)
+	if err != nil {
+		return nil, err
+	}
+	if key == "" {
+		return nil, fmt.Errorf("vfs: cannot open mount root as file")
+	}
+	body, _, _, err := p.api.Get(ctx, p.bucket, key)
+	if err != nil {
+		return nil, err
+	}
+	data, err := io.ReadAll(io.LimitReader(body, int64(MaxReadFileBytes)+1))
+	_ = body.Close()
+	if err != nil {
+		return nil, err
+	}
+	return decodeProviderDocument(ctx, name, fi, data, reg)
+}
+
+// WriteDocument encodes IR and Puts the object immediately.
+func (p s3Provider) WriteDocument(ctx context.Context, name string, doc Document) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	t, ok := doc.(Textual)
+	if !ok {
+		return ErrNotTextual
+	}
+	raw, err := EncodeTextual(t)
+	if err != nil {
+		return err
+	}
+	return p.PutFile(ctx, name, bytes.NewReader(raw), int64(len(raw)))
 }
 
 // OpenFile implements Provider.

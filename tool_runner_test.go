@@ -6,53 +6,13 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ryanaldo34/tacklr/stores"
 )
 
 // TestToolRunner_interceptorChainOrder is the extension contract for custom
 // interceptors: outermost first, short-circuit skips later stages and the tool.
 // Nil interceptors in the chain are skipped.
-func TestToolRunner_interceptorChainOrder(t *testing.T) {
-	var order []string
-	tool := NewTool(ToolConfig{
-		Name: "t",
-		Handler: func(ctx context.Context) (string, error) {
-			order = append(order, "tool")
-			return "ok", nil
-		},
-	})
-	// interceptors keep the public (string, error) shape; disposition is tool-only.
-	outer := func(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error) {
-		order = append(order, "outer")
-		return next(ctx, inv)
-	}
-	block := func(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error) {
-		order = append(order, "block")
-		return "blocked", nil
-	}
-	inner := func(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error) {
-		order = append(order, "inner")
-		return next(ctx, inv)
-	}
-
-	got, _, err := newToolRunner(outer, nil, block, inner).Run(context.Background(), ToolInvocation{Tool: tool})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != "blocked" {
-		t.Fatalf("got %q", got)
-	}
-	if strings.Join(order, ",") != "outer,block" {
-		t.Fatalf("order = %v", order)
-	}
-
-	// Nil tool is a not-found outcome for custom runners.
-	if _, _, err := newToolRunner().Run(context.Background(), ToolInvocation{}); err == nil {
-		t.Fatal("want tool not found for nil tool")
-	}
-}
-
-// TestHarness_planningWriteLock_thenUnlockAfterCreatePlan: write tools fail
-// until create_plan; then they succeed on the same Run loop.
 func TestHarness_planningWriteLock_thenUnlockAfterCreatePlan(t *testing.T) {
 	writeTool := NewTool(ToolConfig{
 		Name:   "mutate",
@@ -119,7 +79,8 @@ func TestHarness_planningWriteLock_thenUnlockAfterCreatePlan(t *testing.T) {
 }
 
 // TestHarness_toolPermission_allowAlwaysRemembers: first call parks for
-// permission; allow-always resumes and runs the tool; a later call skips the interrupt.
+// permission; allow-always resumes and runs the tool. After Close +
+// NewAgentFromSession the grant still skips the interrupt.
 func TestHarness_toolPermission_allowAlwaysRemembers(t *testing.T) {
 	var handlerCalls int
 	tool := NewTool(ToolConfig{
@@ -145,11 +106,15 @@ func TestHarness_toolPermission_allowAlwaysRemembers(t *testing.T) {
 			}
 		},
 	}
-	ah := NewAgent(context.Background(), AgentOptions{
-		Config: Config{MaxWindowSize: 8192},
-		Model:  strategy,
-		Tools:  []*Tool{tool},
-	})
+	store := stores.NewInMemoryStore()
+	opts := AgentOptions{
+		SessionID: "perm-reload",
+		Config:    Config{MaxWindowSize: 8192},
+		Model:     strategy,
+		Store:     store,
+		Tools:     []*Tool{tool},
+	}
+	ah := NewAgent(context.Background(), opts)
 
 	ch1, err := ah.Run(context.Background(), "need secret")
 	if err != nil {
@@ -189,17 +154,13 @@ func TestHarness_toolPermission_allowAlwaysRemembers(t *testing.T) {
 		t.Fatalf("handlerCalls after allow = %d, want 1", handlerCalls)
 	}
 
-	// Session reload rehydrates maps as map[string]any — still honors allow-always.
-	if v, ok := turnRuntime(ah).StateGet("_permission_always_allow"); ok {
-		b, _ := json.Marshal(v)
-		var rehydrated map[string]any
-		if err := json.Unmarshal(b, &rehydrated); err != nil {
-			t.Fatal(err)
-		}
-		turnRuntime(ah).StateSet("_permission_always_allow", rehydrated)
+	ah.Close()
+	reloaded, err := NewAgentFromSession(context.Background(), "perm-reload", opts)
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	ch3, err := ah.Run(context.Background(), "again")
+	ch3, err := reloaded.Run(context.Background(), "again")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -19,7 +19,7 @@ type Document interface {
 //
 // Text() is that plaintext (FUSE / encode). Line numbers are
 // 1-based. Lines(start, end) is half-open [start, end).
-// SetText / SetLine / ReplaceLines mutate the session IR (write-back).
+// SetText / SetLine / ReplaceLines mutate this value; persist with WriteDocument.
 type Textual interface {
 	Document
 	Encoding() string

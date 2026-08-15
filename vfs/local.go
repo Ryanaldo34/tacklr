@@ -1,6 +1,7 @@
 package vfs
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -106,14 +107,57 @@ func (p localProvider) PutFile(ctx context.Context, name string, r io.Reader, si
 	if size == 0 {
 		return nil
 	}
-	n, err := io.Copy(f, io.LimitReader(r, size))
-	if err != nil {
+	if _, err := io.Copy(f, io.LimitReader(r, size)); err != nil {
 		return mapOSError(err)
 	}
-	if n != size {
-		return io.ErrUnexpectedEOF
-	}
 	return nil
+}
+
+// OpenDocument translates local file bytes into Document IR.
+func (p localProvider) OpenDocument(ctx context.Context, name string, reg *ContentRegistry) (Document, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	fi, err := p.Stat(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	if fi.IsDir {
+		return nil, fmt.Errorf("vfs: %s is a directory", name)
+	}
+	if fi.Size > int64(MaxReadFileBytes) {
+		return nil, errFileExceeds(MaxReadFileBytes)
+	}
+	host, err := p.hostPath(name)
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(host) //nolint:gosec // G304: host is jailed by hostPath
+	if err != nil {
+		return nil, mapOSError(err)
+	}
+	return decodeProviderDocument(ctx, name, fi, data, reg)
+}
+
+// WriteDocument encodes IR and writes the file immediately.
+func (p localProvider) WriteDocument(ctx context.Context, name string, doc Document) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	t, ok := doc.(Textual)
+	if !ok {
+		return ErrNotTextual
+	}
+	raw, err := EncodeTextual(t)
+	if err != nil {
+		return err
+	}
+	if dir := path.Dir(name); dir != "" && dir != "." {
+		if err := p.MkdirAll(ctx, dir, 0o755); err != nil {
+			return err
+		}
+	}
+	return p.PutFile(ctx, name, bytes.NewReader(raw), int64(len(raw)))
 }
 
 // ReadDir implements Provider.
@@ -296,6 +340,8 @@ type LocalFactory struct {
 
 // Profile implements ProviderFactory.
 func (f LocalFactory) Profile() string { return f.ID }
+
+var _ documentBackend = localProvider{}
 
 // Open implements ProviderFactory.
 func (f LocalFactory) Open(ctx context.Context, sessionID string, spec MountSpec) (Provider, error) {

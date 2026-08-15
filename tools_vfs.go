@@ -29,13 +29,10 @@ const (
 )
 
 func newVFSTools(ms *vfs.MountSession) []*Tool {
-	if ms == nil {
-		return nil
-	}
 	v := vfsTools{ms: ms}
 	return []*Tool{
 		v.pathOp("list", "List {path}", streaming.ToolCategoryRead, ToolReadAccess, 30*time.Second,
-			`List a virtual directory (absolute paths like /work). No host shell.`,
+			`List a virtual directory (absolute paths like /work). Prefer run_command → ls when the session has a FUSE projection. No host shell.`,
 			func(ctx context.Context, p string, rt HarnessRuntime) (string, error) {
 				rt.EmitUpdate("Listing " + p)
 				ents, err := v.ms.ReadDir(ctx, p)
@@ -54,7 +51,7 @@ func newVFSTools(ms *vfs.MountSession) []*Tool {
 				return b.String(), nil
 			}),
 		v.pathOp("stat", "Stat {path}", streaming.ToolCategoryRead, ToolReadAccess, 15*time.Second,
-			`Stat a virtual path (size, mtime, is_dir). No host paths.`,
+			`Stat a virtual path (size, mtime, is_dir). Prefer run_command → stat / ls -l when the session has a FUSE projection. No host paths.`,
 			func(ctx context.Context, p string, rt HarnessRuntime) (string, error) {
 				rt.EmitUpdate("Stat " + p)
 				fi, err := v.ms.Stat(ctx, p)
@@ -101,9 +98,9 @@ func (v vfsTools) newFindFiles() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "find_files",
 		DisplayName: "Find files {path}",
-		Description: `Bounded live walk of the virtual filesystem for path names (temporary thin tool until run_command + host find).
+		Description: `Bounded live walk of the virtual filesystem for path names. Prefer run_command → fd / find when the session has a FUSE projection.
 
-Matches base names against an optional name filter (substring or simple * ? glob). Returns absolute virtual paths only — no host paths. Does not search file contents (use find_content for indexed text).`,
+Matches base names against an optional name filter (substring or simple * ? glob). Returns absolute virtual paths only — no host paths. Does not search file contents (use run_command → rg, or find_content for indexed text).`,
 		Category: streaming.ToolCategorySearch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
@@ -442,7 +439,7 @@ func (v vfsTools) newReplaceText() *Tool {
 		DisplayName: "Replace text {path}",
 		Description: `Replace an exact substring, gated by content rev.
 
-When replace_all is false, old must occur exactly once. Prefer for small unique patches; use replace_lines for spans. Stages write-back IR.`,
+When replace_all is false, old must occur exactly once. Prefer for small unique patches; use replace_lines for spans. Persists immediately.`,
 		Category: streaming.ToolCategoryEdit,
 		Access:   ToolWriteAccess,
 		Timeout:  60 * time.Second,
@@ -488,9 +485,9 @@ func (v vfsTools) newWrite() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "write",
 		DisplayName: "Write {path}",
-		Description: `Write a full file body (create or replace) via write-back IR.
+		Description: `Write a full file body (create or replace). Persists immediately.
 
-When the path exists, rev is required and must match. Visible to list/stat/read before Sync; checkpoint flushes. Prefer replace_lines / replace_text for partial edits.`,
+When the path exists, rev is required and must match. Prefer replace_lines / replace_text for partial edits.`,
 		Category: streaming.ToolCategoryEdit,
 		Access:   ToolWriteAccess,
 		Timeout:  60 * time.Second,

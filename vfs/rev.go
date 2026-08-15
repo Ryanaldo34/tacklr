@@ -20,14 +20,11 @@ func ContentHash(body string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// ContentRev hashes the session-visible body (any IR cache hit, else ReadFile).
+// ContentRev hashes the current backend body (ReadFile).
 func (m *MountSession) ContentRev(ctx context.Context, virtualPath string) (ContentRev, error) {
 	cleaned, err := cleanVirtualPath(virtualPath)
 	if err != nil {
 		return ContentRev{}, err
-	}
-	if doc, _, _, _, ok := m.cache.get(cleaned); ok {
-		return ContentRev{Path: cleaned, Hash: ContentHash(doc.Text())}, nil
 	}
 	raw, err := m.ReadFile(ctx, cleaned)
 	if err != nil {

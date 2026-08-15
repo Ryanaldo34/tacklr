@@ -138,7 +138,7 @@ func TestIndexPathResult_andUnindex(t *testing.T) {
 		t.Fatalf("removed missing: res=%q err=%v", res, err)
 	}
 
-	// Session-visible dirty body: WriteDocument without Sync, IndexPath sees it.
+	// WriteDocument persists immediately; IndexPath sees the new body.
 	doc := vfs.NewTextDocument("/work/dirty.txt", "text/plain", "utf-8", "dirtyphrase-only-in-cache\n")
 	if err := ms.WriteDocument(ctx, doc); err != nil {
 		t.Fatal(err)

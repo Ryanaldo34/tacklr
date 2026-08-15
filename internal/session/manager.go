@@ -20,9 +20,8 @@ type SessionManager struct {
 	userState map[string]any
 	pending   interruptMap
 	resolved  interruptMap
-	// VFS is the session-owned mount table. Hosts attach/detach mounts on this
-	// object (or the same pointer via AgentOptions.MountSession). Nil when unused.
-	// Not a harness concern — the agent only checkpoints Specs() at save time.
+	// VFS is a borrowed host-owned mount table (AgentOptions.MountSession).
+	// Nil when unused. The harness does not create, persist, or close it.
 	VFS *vfs.MountSession
 }
 

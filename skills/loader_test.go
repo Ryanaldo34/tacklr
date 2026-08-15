@@ -82,6 +82,22 @@ func TestObjectLoaders_loadAndFilterSkillObjects(t *testing.T) {
 	}
 }
 
+func TestCloudAdapters_requireSDKClients(t *testing.T) {
+	ctx := context.Background()
+	if _, err := (AWSS3Client{}).ListObjects(ctx, "b", ""); err == nil {
+		t.Fatal("nil AWS list")
+	}
+	if _, err := (AWSS3Client{}).GetObject(ctx, "b", "k"); err == nil {
+		t.Fatal("nil AWS get")
+	}
+	if _, err := (AzureBlobClient{}).ListBlobs(ctx, "c", ""); err == nil {
+		t.Fatal("nil Azure list")
+	}
+	if _, err := (AzureBlobClient{}).DownloadBlob(ctx, "c", "n"); err == nil {
+		t.Fatal("nil Azure download")
+	}
+}
+
 func TestS3Loader_rejectsOversizedObject(t *testing.T) {
 	loader := S3Loader{
 		Client: objectFixture{objects: map[string]string{

@@ -70,6 +70,9 @@ func TestBrainTools_saveDiscoveryAndLink(t *testing.T) {
 	if !strings.Contains(fout.output, a.ID.String()) {
 		t.Fatalf("find_objects should return saved discovery: %s", fout.output)
 	}
+	if _, err := findObj.invoke(ctx, `{"query":"  "}`, turnRuntime(h)); err == nil {
+		t.Fatal("find_objects requires query")
+	}
 
 	out2, err := saveFact.invoke(ctx, `{"title":"fact-a","content":"true claim"}`, turnRuntime(h))
 	if err != nil {
@@ -636,9 +639,10 @@ func TestBrainTools_engramPathGraph(t *testing.T) {
 		t.Fatal(err)
 	}
 	ns := uuid.New()
+	mustMountBrain(t, ctx, reg, ms, eng, ns, vfs.MountSpec{})
 	h := NewAgent(ctx, AgentOptions{
 		SessionID: "engram-graph", Store: stores.NewInMemoryStore(),
-		MountSession: ms, FSRegistry: reg, Model: &mockStrategy{},
+		MountSession: ms, Model: &mockStrategy{},
 		Brain: eng, SearchNamespace: &ns,
 	})
 	t.Cleanup(h.Close)

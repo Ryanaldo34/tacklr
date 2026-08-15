@@ -2,7 +2,8 @@
 //
 // # Public surface (hosts)
 //
-//   - MountSession — mounts, path I/O, ReadText / WriteDocument / Sync, ReadLines, FuseMount / Close
+//   - MountSession — mounts, path I/O, ReadText / WriteDocument, ReadLines, FuseMount / Close, HostDir
+//   - FuseAvailable — process can mount a kernel tree (/dev/fuse or /dev/macfuse*)
 //   - ContentRev / ContentHash — session-visible content identity (for tools)
 //   - BackendRegistry + LocalFactory / S3Factory + AWSS3 — process profiles and pools
 //   - MountSpec / MountInfo — durable and agent-safe mount descriptions
@@ -11,10 +12,10 @@
 //   - Document / Textual / Structured / TextDocument — content IR
 //   - Block / StyleMeta / Span / FindBlock / BlockReplaceSpan — structured view
 //   - ContentRegistry + Codec + TextCodec — optional custom decode
-//   - DetectMediaType, size-cap constants, sentinel errors
+//   - DetectMediaType, size-cap constants, sentinel errors (including ErrFuseNotMounted)
 //
-// Cache, invalidation, and dirty tracking are internal. Hosts use Sync / SyncAll
-// to flush; harness checkpoint calls SyncAll before saving mount Specs.
+// Providers own IR translation and persist immediately on WriteDocument.
+// MountSession routes; it does not encode or hold a dirty document cache.
 //
 // Optimistic edit policy lives in harness tools (read_lines, replace_lines,
 // replace_text, write) that wrap ReadText / TextDocument / WriteDocument.
@@ -23,7 +24,7 @@
 // This package never imports brain. Brain implements Provider in package brain
 // (Engrams as Markdown files). Optional artifact IndexPath lives in package
 // vfsindex (imports both; skips Profile=="brain"). FUSE / host rg read
-// ReadText (dirty IR plaintext). This package does not ship a grep tool.
+// ReadText (provider IR plaintext). This package does not ship a grep tool.
 //
 // Hosts should not need anything else. Mount tables, host roots, and bucket
 // details stay inside providers and the unexported mount table.
@@ -34,8 +35,9 @@
 //
 //	Stat, Open, ReadFile, WriteFile, ReadDir, Remove, MkdirAll, FuseMount, Close
 //	File is Close + Stat. Read / ReadAt / Write are optional (comma-ok).
-//	FuseMount is explicit (host kernel tree). Textual files appear as ReadText;
-//	binaries use Stat + io.ReaderAt. Close unmounts.
+//	FuseMount is explicit (host kernel tree). Mount points must be one segment
+//	(/work, /engram). Textual files appear as ReadText; binaries use Stat +
+//	io.ReaderAt. Close unmounts. HostDir is the last FuseMount directory.
 //
 // Read-only mounts reject mutating ops with ErrReadOnly. Local paths are jailed
 // under the provider root (including symlink evaluation). S3 uses key prefixes
@@ -49,16 +51,12 @@
 //	win, err := ms.ReadLines(ctx, "/work/main.go", 1, 51)
 //	// win.Rev.Hash is the session-visible content identity when available
 //
-//	// Full IR for edit; WriteDocument stages dirty cache until Sync
+//	// Full IR for edit; WriteDocument persists through the provider now
 //	text, err := ms.ReadText(ctx, "/work/main.go") // Textual
 //	rev := vfs.ContentRev{Path: text.Path(), Hash: vfs.ContentHash(text.Text())}
 //	_ = text.SetLine(2, "changed")
 //	_ = ms.WriteDocument(ctx, text)
-//	_ = ms.SyncAll(ctx) // or harness checkpoint
 //	_ = rev // tools compare expected rev before WriteDocument
-//
-// Session content cache: clone-on-read, write-back IR, Sync flushes to backend.
-// Checkpoint stores mount Specs only (not file bytes).
 //
 // Longer guide: docs/vfs.md in the repo root.
 package vfs

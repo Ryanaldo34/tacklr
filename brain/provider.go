@@ -113,16 +113,7 @@ func paramOr(params map[string]string, key, fallback string) string {
 
 // Validate implements vfs.Provider.
 func (p *engramProvider) Validate(ctx context.Context) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if p == nil || p.eng == nil {
-		return fmt.Errorf("brain: engine is required")
-	}
-	if p.scope.Namespace == nil || *p.scope.Namespace == uuid.Nil {
-		return fmt.Errorf("brain: namespace is required")
-	}
-	return nil
+	return ctx.Err()
 }
 
 // Stat implements vfs.Provider.
@@ -202,20 +193,52 @@ func (p *engramProvider) PutFile(ctx context.Context, name string, r io.Reader, 
 		return err
 	}
 	var data []byte
-	switch {
-	case size > 0:
+	if size > 0 {
 		data = make([]byte, size)
 		if _, err := io.ReadFull(r, data); err != nil {
 			return err
 		}
-	case size < 0:
-		var err error
-		data, err = io.ReadAll(r)
-		if err != nil {
-			return err
-		}
 	}
 	return p.commit(ctx, name, data)
+}
+
+// OpenDocument translates a brain Object into Textual IR.
+func (p *engramProvider) OpenDocument(ctx context.Context, name string, _ *vfs.ContentRegistry) (vfs.Document, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	kind, slug, isDir, err := p.parseRel(name)
+	if err != nil {
+		return nil, err
+	}
+	if isDir {
+		return nil, fmt.Errorf("brain: %s is a directory", name)
+	}
+	obj, err := p.lookupFile(ctx, kind, slug)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := FormatEngram(EngramFromObject(obj))
+	if err != nil {
+		return nil, err
+	}
+	return vfs.NewTextDocument(name, engramContentType, "utf-8", string(raw)), nil
+}
+
+// WriteDocument translates Textual IR into a brain Object and Puts immediately.
+func (p *engramProvider) WriteDocument(ctx context.Context, name string, doc vfs.Document) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	t, ok := doc.(vfs.Textual)
+	if !ok {
+		return vfs.ErrNotTextual
+	}
+	raw, err := vfs.EncodeTextual(t)
+	if err != nil {
+		return err
+	}
+	return p.commit(ctx, name, raw)
 }
 
 // ReadDir implements vfs.Provider.

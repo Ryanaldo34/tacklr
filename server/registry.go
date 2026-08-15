@@ -6,9 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"sort"
+	"strings"
 	"sync"
-	"time"
 
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/log"
@@ -30,9 +31,6 @@ type turnHandle struct {
 	done   chan struct{} // closed when the forwarder exits (after harness channel drain)
 }
 
-// steerWaitTimeout is how long RunTurn waits for a cancelled prior turn to finish.
-const steerWaitTimeout = 30 * time.Second
-
 type AgentSpec struct {
 	Name       string
 	Config     tacklr.Config
@@ -46,7 +44,9 @@ type AgentSpec struct {
 	ExaAPIKey string
 	// FSRegistry resolves MountSpec.Profile (process-scoped). Required when FSBootstrap is set.
 	FSRegistry *vfs.BackendRegistry
-	// FSBootstrap mounts applied on each new/loaded session (merged with checkpoint mounts).
+	// FSBootstrap mounts applied once when the host creates the session MountSession.
+	// Requires a live VFSProjection (FUSE in production). If the projection
+	// is not Available, the session has no MountSession and no VFS tools.
 	FSBootstrap []vfs.MountSpec
 }
 
@@ -88,13 +88,13 @@ type TurnRequest struct {
 // harness run finishes (complete, error, interrupt park) or the turn context
 // is cancelled and the registry forwarder exits.
 //
-// Cancel cancels the turn context (session/cancel). Close releases harness
-// resources after the turn has ended. Callers typically:
+// Cancel cancels the turn context (session/cancel). Close ends the turn:
+// cancel, Harness.Close (MCP/index), then nil the pointer.
+// The next RunTurn reconstructs from the store checkpoint. Callers typically:
 //
 //	defer func() { stream.Cancel(); stream.Close() }()
 //
-// Harness remains usable after an interrupt park so ResumeInterrupts can run
-// before Close.
+// ResumeInterrupts must run before Close (same turn, same harness).
 type EventStream struct {
 	Events  <-chan streaming.StreamEvent
 	Harness *tacklr.AgentHarness
@@ -120,7 +120,7 @@ func (s *EventStream) Cancel() {
 	s.cancel()
 }
 
-// Close releases harness resources (idempotent). Call after Cancel or stream end.
+// Close ends the turn (idempotent): cancel, release the harness, nil the pointer.
 func (s *EventStream) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -128,10 +128,18 @@ func (s *EventStream) Close() {
 		return
 	}
 	s.closed = true
-	if s.Harness != nil {
-		s.Harness.Close()
-		s.Harness = nil
+	if s.cancel != nil {
+		s.cancel()
 	}
+	closeTurnHarness(s.Harness)
+	s.Harness = nil
+}
+
+func closeTurnHarness(h *tacklr.AgentHarness) {
+	if h == nil {
+		return
+	}
+	h.Close()
 }
 
 // ResumeInterrupts resolves pending interrupts and returns a new event stream
@@ -155,9 +163,9 @@ type Registry struct {
 	tracer       trace.Tracer           // turn and child spans; default global
 	instruments  *telemetry.Instruments // turn/tool metrics; default global
 	activeTurns  sync.Map               // thread id → *turnHandle
-	// liveHarnesses caches session-scoped harnesses so consecutive turns reuse
-	// in-memory state (window, plan, pending tools) without store reload.
-	liveHarnesses sync.Map // session/thread id → *tacklr.AgentHarness
+	mountsMu     sync.Mutex
+	mounts       map[string]*vfs.MountSession // thread id → host-owned session tree
+	projection   VFSProjection                // nil → FuseProjection
 }
 
 // RegistryOption configures NewRegistry.
@@ -193,6 +201,15 @@ func WithMeterProvider(mp metric.MeterProvider) RegistryOption {
 	}
 }
 
+// WithVFSProjection sets how a session tree is published to the host.
+// Nil or omitted uses FuseProjection. Tests that need VFS tools without a
+// kernel mount pass DirectProjection{}.
+func WithVFSProjection(p VFSProjection) RegistryOption {
+	return func(r *Registry) {
+		r.projection = p
+	}
+}
+
 // NewRegistry builds a registry. opts may set telemetry providers.
 func NewRegistry(store stores.BaseStore, defaultAgent string, opts ...RegistryOption) *Registry {
 	r := &Registry{
@@ -201,6 +218,7 @@ func NewRegistry(store stores.BaseStore, defaultAgent string, opts ...RegistryOp
 		store:        store,
 		tracer:       telemetry.Tracer(),
 		instruments:  telemetry.MustInstruments(telemetry.Meter()),
+		mounts:       make(map[string]*vfs.MountSession),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -265,21 +283,57 @@ func (r *Registry) CancelSession(sessionID string) {
 	}
 }
 
-// DropLiveHarness removes a cached harness (e.g. session/close). Next prompt reloads from store.
+// DropLiveHarness is kept for session/close callers. The harness is turn-scoped
+// and already released by EventStream.Close; this cancels an in-flight turn and
+// closes the host-owned MountSession (FUSE included).
 func (r *Registry) DropLiveHarness(sessionID string) {
-	if sessionID == "" {
+	r.CancelSession(sessionID)
+	r.closeSessionVFS(sessionID)
+}
+
+func (r *Registry) closeSessionVFS(sessionID string) {
+	r.mountsMu.Lock()
+	ms := r.mounts[sessionID]
+	delete(r.mounts, sessionID)
+	r.mountsMu.Unlock()
+	if ms == nil {
 		return
 	}
-	if v, ok := r.liveHarnesses.LoadAndDelete(sessionID); ok {
-		if h, ok := v.(*tacklr.AgentHarness); ok {
-			h.Close()
-		}
+	dir := ms.HostDir()
+	if dir != "" {
+		telemetry.EmitEvent(context.Background(), telemetry.EventFuseUnmount)
+	}
+	_ = ms.Close()
+	if dir != "" {
+		_ = os.Remove(dir)
 	}
 }
 
-// waitPriorTurnIfAny cancels any in-flight turn for threadID and waits for it
-// to finish (harness drain + checkpoint). Used so session/prompt while busy
-// steers without concurrent Run on the same session (ACP has no session/steer).
+func (r *Registry) sessionVFS(ctx context.Context, threadID string, spec *AgentSpec) (*vfs.MountSession, error) {
+	if spec.FSRegistry == nil || len(spec.FSBootstrap) == 0 {
+		return nil, nil
+	}
+	// Production: FUSE is the VFS. No device → no tree, no VFS tools.
+	// Tests may still attach a MountSession without a kernel mount.
+	if !r.vfsProjection().Available() {
+		return nil, nil
+	}
+	r.mountsMu.Lock()
+	defer r.mountsMu.Unlock()
+	if ms, ok := r.mounts[threadID]; ok {
+		return ms, nil
+	}
+	ms := vfs.NewMountSession(threadID, spec.FSRegistry)
+	if err := ms.Materialize(ctx, spec.FSBootstrap); err != nil {
+		return nil, err
+	}
+	r.mounts[threadID] = ms
+	return ms, nil
+}
+
+// waitPriorTurnIfAny cancels any in-flight turn for threadID and waits until
+// the harness finishes (drain + checkpoint). No Registry deadline — the
+// harness owns tool/turn timeouts. Parent ctx cancel still aborts the wait.
 func (r *Registry) waitPriorTurnIfAny(ctx context.Context, threadID string) error {
 	if threadID == "" {
 		return nil
@@ -293,15 +347,11 @@ func (r *Registry) waitPriorTurnIfAny(ctx context.Context, threadID string) erro
 		return nil
 	}
 	th.cancel()
-	timer := time.NewTimer(steerWaitTimeout)
-	defer timer.Stop()
 	select {
 	case <-th.done:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
-	case <-timer.C:
-		return fmt.Errorf("timed out waiting for prior turn on session %q to finish after cancel", threadID)
 	}
 }
 
@@ -309,8 +359,8 @@ func (r *Registry) waitPriorTurnIfAny(ctx context.Context, threadID string) erro
 // Setup errors (unknown session/agent, validation) are returned synchronously.
 // Runtime errors are delivered as StreamEventError on the channel.
 //
-// If a turn is already in flight for the session, it is cancelled and allowed
-// to finalize before this turn starts (mid-turn steer via session/prompt).
+// If a turn is already in flight, it is cancelled and this call waits until
+// that harness exits before starting the new turn (session/prompt steer).
 func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, error) {
 	// Protocol fills AgentID, ThreadID/SessionID, MCPServers, Load, CWD on the request.
 	// Registry does not own wire-session envelopes.
@@ -345,7 +395,6 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 		return nil, err
 	}
 
-	// Prefer warm harness (in-memory window/plan already updated by prior turn).
 	h, _, err := r.loadAgent(ctx, agentID, threadID, load, mcpServers, req.AllowMissingCheckpoint)
 	if err != nil {
 		return nil, fmt.Errorf("load agent %q: %w", agentID, err)
@@ -398,7 +447,7 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 		close(th.done)
 		turnSpan.End(telemetry.OutcomeError, err)
 		cancel()
-		h.Close()
+		closeTurnHarness(h)
 		return nil, fmt.Errorf("run harness: %w", err)
 	}
 
@@ -486,19 +535,6 @@ func (r *Registry) loadAgent(ctx context.Context, agentID, threadID string, load
 		return nil, nil, clientErrorf(ErrAgentNotFound, "agent %q not found", agentID)
 	}
 
-	// Warm path: reuse in-memory harness when session MCP is not being
-	// re-bound (resume with a new server list needs a fresh tool catalog).
-	if threadID != "" && len(sessionMCP) == 0 {
-		if v, ok := r.liveHarnesses.Load(threadID); ok {
-			if h, ok := v.(*tacklr.AgentHarness); ok {
-				return h, &spec, nil
-			}
-		}
-	}
-	if threadID != "" && len(sessionMCP) > 0 {
-		r.DropLiveHarness(threadID)
-	}
-
 	store := r.store
 	if spec.Store != nil {
 		store = spec.Store
@@ -508,44 +544,94 @@ func (r *Registry) loadAgent(ctx context.Context, agentID, threadID string, load
 	mcpConfigs = append(mcpConfigs, spec.MCPConfigs...)
 	mcpConfigs = append(mcpConfigs, sessionMCP...)
 
+	wantVFS := spec.FSRegistry != nil && len(spec.FSBootstrap) > 0
+	ms, err := r.sessionVFS(ctx, threadID, &spec)
+	if err != nil {
+		return nil, nil, err
+	}
+	if wantVFS && ms == nil && !r.vfsProjection().Available() {
+		telemetry.EmitEvent(ctx, telemetry.EventFuseUnavailable,
+			log.String(telemetry.AttrSessionID, threadID),
+		)
+		r.instruments.RecordFuseMount(ctx, telemetry.FuseMountOutcomeUnavailable)
+	}
 	opts := tacklr.AgentOptions{
-		Config:      spec.Config,
-		SessionID:   threadID,
-		Model:       spec.Model,
-		Store:       store,
-		WatchDog:    spec.WatchDog,
-		Tools:       spec.Tools,
-		MCPConfigs:  mcpConfigs,
-		SubAgents:   spec.SubAgents,
-		ExaAPIKey:   spec.ExaAPIKey,
-		FSRegistry:  spec.FSRegistry,
-		FSBootstrap: spec.FSBootstrap,
+		Config:       spec.Config,
+		SessionID:    threadID,
+		Model:        spec.Model,
+		Store:        store,
+		WatchDog:     spec.WatchDog,
+		Tools:        spec.Tools,
+		MCPConfigs:   mcpConfigs,
+		SubAgents:    spec.SubAgents,
+		ExaAPIKey:    spec.ExaAPIKey,
+		MountSession: ms,
 	}
 
 	var h *tacklr.AgentHarness
-	var err error
 	if load {
 		if store == nil {
 			return nil, nil, clientErrorf(ErrSessionStoreNotConfigured, "session store is not configured")
 		}
-		h, err = tacklr.NewAgentFromSession(ctx, threadID, opts)
-		if err != nil {
-			// Wire BindTurn may set AllowMissingCheckpoint when the harness never
-			// wrote a row (e.g. cancelled first turn). Unknown store IDs still fail.
-			if allowMissingCheckpoint && errors.Is(err, stores.ErrSessionNotFound) {
-				h = tacklr.NewAgent(ctx, opts)
-			} else {
-				return nil, nil, err
-			}
+		loaded, err := tacklr.NewAgentFromSession(ctx, threadID, opts)
+		switch {
+		case err == nil:
+			h = loaded
+		case errors.Is(err, stores.ErrSessionNotFound) && allowMissingCheckpoint:
+			h = tacklr.NewAgent(ctx, opts)
+		default:
+			return nil, nil, err
 		}
 	} else {
 		h = tacklr.NewAgent(ctx, opts)
 	}
 
-	if threadID != "" {
-		r.liveHarnesses.Store(threadID, h)
+	if err := r.ensureSessionFuse(ctx, h, threadID); err != nil {
+		return nil, nil, err
 	}
 	return h, &spec, nil
+}
+
+func (r *Registry) ensureSessionFuse(ctx context.Context, h *tacklr.AgentHarness, threadID string) error {
+	ms := h.VFS()
+	if ms == nil {
+		return nil
+	}
+	for _, spec := range ms.Specs() {
+		name := strings.TrimPrefix(spec.Point, "/")
+		if name == "" || strings.Contains(name, "/") {
+			err := fmt.Errorf("vfs: fuse requires single-segment mount points (got %q); use /work and /engram", spec.Point)
+			h.Close()
+			r.closeSessionVFS(threadID)
+			return err
+		}
+	}
+	if ms.HostDir() != "" {
+		return nil
+	}
+	proj := r.vfsProjection()
+	if !proj.Available() {
+		telemetry.EmitEvent(ctx, telemetry.EventFuseUnavailable,
+			log.String(telemetry.AttrSessionID, threadID),
+		)
+		r.instruments.RecordFuseMount(ctx, telemetry.FuseMountOutcomeUnavailable)
+		return nil
+	}
+	if err := proj.Attach(ms, threadID); err != nil {
+		r.instruments.RecordFuseMount(ctx, telemetry.FuseMountOutcomeError)
+		telemetry.EmitEventSeverity(ctx, telemetry.EventFuseMountError, log.SeverityError,
+			log.String(telemetry.AttrSessionID, threadID),
+			log.String(telemetry.AttrErrorClass, "mount_failed"),
+		)
+		h.Close()
+		r.closeSessionVFS(threadID)
+		return err
+	}
+	r.instruments.RecordFuseMount(ctx, telemetry.FuseMountOutcomeOK)
+	telemetry.EmitEvent(ctx, telemetry.EventFuseMount,
+		log.String(telemetry.AttrSessionID, threadID),
+	)
+	return nil
 }
 
 // logTurnError logs non-client errors from turn setup.

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -24,14 +25,14 @@ func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEve
 
 // RunMessage starts a turn with a full user Message (Content and optional ContentParts).
 func (a *AgentHarness) RunMessage(ctx context.Context, user *Message) (<-chan StreamEvent, error) {
-	if a.context == nil || a.tasks == nil {
-		return nil, fmt.Errorf("agent harness: Run called on uninitialized harness")
-	}
 	if user == nil {
 		return nil, fmt.Errorf("agent harness: RunMessage requires a user message")
 	}
 	if user.Role == "" {
 		user.Role = RoleUser
+	}
+	if bad := UnsupportedMIMEs(a.model, user.MIMETypes()); len(bad) > 0 {
+		return nil, fmt.Errorf("unsupported content type(s): %s", strings.Join(bad, ", "))
 	}
 	if err := a.initSkills(ctx); err != nil {
 		return nil, fmt.Errorf("load skills: %w", err)
@@ -51,14 +52,15 @@ func (a *AgentHarness) RunMessage(ctx context.Context, user *Message) (<-chan St
 		out <- StreamEvent{Type: StreamEventError, Error: fmt.Errorf("run: context cancelled: %w", ctx.Err())}
 	}
 
-	// Run work is async so the caller can drain out. Every exit path checkpoints;
-	// interrupt park also saves mid-turn for resume after restart. runMu ensures
+	// Run work is async so the caller can drain out. Dump on every exit so
+	// callers that never Close (tests, mid-turn interrupt) still persist.
+	// Close dumps again, then releases FUSE/MCP. runMu ensures
 	// ReturnFromInterrupt's follow-on Run cannot overlap this loop.
 	go func() {
 		a.runMu.Lock()
 		defer a.runMu.Unlock()
 		defer close(out)
-		defer a.persistSession(ctx, "run_exit")
+		defer a.persistSession(ctx)
 		if err := a.addToContext(ctx, user, out); err != nil {
 			if ctx.Err() != nil {
 				emitCancelled()
@@ -147,11 +149,6 @@ func (a *AgentHarness) RunMessage(ctx context.Context, user *Message) (<-chan St
 						chunk = tagModelAfterToolsError(chunk)
 					}
 					if !a.streamChunk(ctx, chunk, out) {
-						if ctx.Err() != nil {
-							failAnnounced("tool call cancelled")
-							emitCancelled()
-							return
-						}
 						failAnnounced("tool call cancelled")
 						emitCancelled()
 						return
@@ -221,7 +218,6 @@ func (a *AgentHarness) RunMessage(ctx context.Context, user *Message) (<-chan St
 						emitCancelled()
 						return
 					}
-					a.persistSession(ctx, "turn_complete")
 					return
 				}
 				// Record the assistant tool-call turn before tool results (Responses pairing).
@@ -304,7 +300,7 @@ func (a *AgentHarness) RunMessage(ctx context.Context, user *Message) (<-chan St
 						a.interruptToRequester[intrId] = tcKey
 						a.pendingMu.Unlock()
 						out <- StreamEvent{Type: StreamEventInterrupt, MessageID: tcKey, Data: data}
-						a.persistSession(toolCtx, "interrupt")
+						a.persistSession(toolCtx)
 						return
 					}
 					a.pendingMu.Lock()
@@ -370,16 +366,15 @@ func (a *AgentHarness) RunMessage(ctx context.Context, user *Message) (<-chan St
 			hasPending := len(a.pendingToolCalls) > 0
 			a.pendingMu.Unlock()
 			if hasPending {
-				a.persistSession(ctx, "interrupt_park")
+				a.persistSession(ctx)
 				return
 			}
 			if effect := batchEffects.resolved(); effect != EffectNone {
 				if err := a.applyBatchToolResultEffect(ctx, effect); err != nil {
 					slog.ErrorContext(ctx, "failed to apply tool result context effect", "session_id", a.sessionId, "effect", effect, "error", err)
-					out <- StreamEvent{Type: StreamEventError, Content: err.Error()}
+					out <- StreamEvent{Type: StreamEventError, Error: err, Content: err.Error()}
 					return
 				}
-				a.persistSession(ctx, "effect_applied")
 			}
 		}
 	}()

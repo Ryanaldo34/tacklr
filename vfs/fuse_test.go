@@ -2,29 +2,14 @@ package vfs
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-func fuseAvailable() bool {
-	if _, err := os.Stat("/dev/fuse"); err == nil {
-		return true
-	}
-	ents, err := os.ReadDir("/dev")
-	if err != nil {
-		return false
-	}
-	for _, e := range ents {
-		if strings.HasPrefix(e.Name(), "macfuse") {
-			return true
-		}
-	}
-	return false
-}
-
 func TestFuseMount_hostSeesDirtyText(t *testing.T) {
-	if !fuseAvailable() {
+	if !FuseAvailable() {
 		t.Skip("no /dev/fuse or /dev/macfuse*")
 	}
 	ctx := t.Context()
@@ -37,6 +22,9 @@ func TestFuseMount_hostSeesDirtyText(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := ms.WriteFile(ctx, "/work/note.md", []byte("old secret\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.MkdirAll(ctx, "/work/subdir"); err != nil {
 		t.Fatal(err)
 	}
 	doc, err := ms.ReadText(ctx, "/work/note.md")
@@ -57,17 +45,75 @@ func TestFuseMount_hostSeesDirtyText(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ms.Close() })
-
-	ents, err := os.ReadDir(dir)
-	if err != nil || len(ents) != 1 || ents[0].Name() != "work" || !ents[0].IsDir() {
-		t.Fatalf("host readdir: %+v err=%v", ents, err)
+	if got := ms.HostDir(); got != dir {
+		t.Fatalf("HostDir = %q want %q", got, dir)
 	}
+
+	sessEnts, err := ms.ReadDir(ctx, "/work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostEnts, err := os.ReadDir(filepath.Join(dir, "work"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantNames := map[string]bool{}
+	for _, e := range sessEnts {
+		wantNames[e.Name] = e.IsDir
+	}
+	if len(hostEnts) != len(sessEnts) {
+		t.Fatalf("host readdir len=%d session=%d host=%+v sess=%+v", len(hostEnts), len(sessEnts), hostEnts, sessEnts)
+	}
+	for _, e := range hostEnts {
+		isDir, ok := wantNames[e.Name()]
+		if !ok || isDir != e.IsDir() {
+			t.Fatalf("host entry %q IsDir=%v match=%v session=%+v", e.Name(), e.IsDir(), ok, sessEnts)
+		}
+	}
+
 	got, err := os.ReadFile(filepath.Join(dir, "work", "note.md"))
 	if err != nil || string(got) != want {
 		t.Fatalf("host read dirty IR: %q err=%v", got, err)
 	}
+	st, err := os.Stat(filepath.Join(dir, "work", "note.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dirty, err := ms.ReadText(ctx, "/work/note.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Size() != int64(len(dirty.Text())) {
+		t.Fatalf("host stat size=%d want %d", st.Size(), len(dirty.Text()))
+	}
 	raw, err := os.ReadFile(filepath.Join(dir, "work", "pic.bin"))
 	if err != nil || len(raw) != 8 || raw[1] != 'P' {
 		t.Fatalf("host binary: %x err=%v", raw, err)
+	}
+
+	if _, err := exec.LookPath("rg"); err == nil {
+		out, err := exec.Command("rg", "-F", "new phrase lives here", dir).CombinedOutput()
+		if err != nil {
+			t.Fatalf("rg dirty phrase: %v out=%s", err, out)
+		}
+		if !strings.Contains(string(out), "new phrase lives here") {
+			t.Fatalf("rg missed dirty phrase: %s", out)
+		}
+	}
+}
+
+func TestFuseMount_rejectsMultiSegmentPoint(t *testing.T) {
+	ctx := t.Context()
+	reg := NewBackendRegistry()
+	if err := reg.Register(LocalFactory{ID: "scratch", Base: t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+	ms := NewMountSession(t.Name(), reg)
+	if err := ms.Mount(ctx, MountSpec{Point: "/tmp/tacklr", Profile: "scratch"}); err != nil {
+		t.Fatal(err)
+	}
+	err := ms.FuseMount(t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "/tmp/tacklr") {
+		t.Fatalf("want multi-segment error naming the point, got %v", err)
 	}
 }

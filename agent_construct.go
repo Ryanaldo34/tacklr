@@ -3,7 +3,6 @@ package tacklr
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -75,18 +74,13 @@ type AgentOptions struct {
 	// SearchNamespace isolates brain retrieval when set (session-owned, checkpointed).
 	// Nil leaves a loaded session value unchanged. Workers get a copy at spawn.
 	SearchNamespace *uuid.UUID
-	// MountSession is the session-owned VFS mount table. Hosts attach and detach
-	// mounts on this object (vfs.MountSession.Mount / Unmount) — not on the harness.
-	// If nil and FSRegistry is set, the harness creates one and stores it on the
-	// session manager for checkpointing.
+	// MountSession is the host-owned VFS mount table. The harness borrows it
+	// for this turn (tool dispatch only). Hosts create, mount, FuseMount, and
+	// Close it. Nil means no VFS tools.
 	MountSession *vfs.MountSession
-	// FSRegistry resolves MountSpec.Profile to providers (process-scoped pools).
-	// Used when MountSession is nil and mounts must be materialized, or when
-	// creating a MountSession at construct. Prefer creating MountSession yourself.
-	FSRegistry *vfs.BackendRegistry
-	// FSBootstrap mounts applied when materializing a new or loaded session.
-	// Merged before durable checkpoint mounts; duplicate points error.
-	FSBootstrap []vfs.MountSpec
+	// RunCommandUnattended injects run_command with PermissionRequired=false.
+	// Zero value (Registry, testserver) keeps PermissionRequired=true.
+	RunCommandUnattended bool
 }
 
 // streamEventBuffer is the harness event channel size so EmitUpdate is not dropped
@@ -100,9 +94,6 @@ func NewAgent(ctx context.Context, opts AgentOptions) *AgentHarness {
 	if opts.SessionID != "" {
 		h.sessionId = opts.SessionID
 	}
-	if err := h.initSessionMounts(ctx, nil); err != nil {
-		slog.Error("failed to initialize virtual filesystem", "error", err)
-	}
 	h.finishInit(ctx, opts.SubAgents)
 	return h
 }
@@ -110,6 +101,9 @@ func NewAgent(ctx context.Context, opts AgentOptions) *AgentHarness {
 // newHarnessBase fills shared fields. Session state lives on sm across turns.
 // sm must be non-nil.
 func newHarnessBase(opts AgentOptions, sm *session.SessionManager) *AgentHarness {
+	if opts.Model == nil {
+		panic("tacklr: AgentOptions.Model is required")
+	}
 	h := &AgentHarness{
 		model:                opts.Model,
 		maxWindowSize:        opts.Config.MaxWindowSize,
@@ -134,8 +128,7 @@ func newHarnessBase(opts AgentOptions, sm *session.SessionManager) *AgentHarness
 		context:              opts.ContextManager,
 		tasks:                opts.ModelTasks,
 		contextPolicy:        opts.ContextPolicy,
-		fsRegistry:           opts.FSRegistry,
-		fsBootstrap:          opts.FSBootstrap,
+		runCommandUnattended: opts.RunCommandUnattended,
 	}
 	if opts.MountSession != nil {
 		sm.VFS = opts.MountSession
@@ -149,8 +142,12 @@ func newHarnessBase(opts AgentOptions, sm *session.SessionManager) *AgentHarness
 	if h.context == nil {
 		h.context = NewModelContextManager()
 	}
-	if h.contextPolicy.PressureRatio <= 0 && h.contextPolicy.CompressFraction <= 0 {
-		h.contextPolicy = DefaultContextPolicy()
+	def := DefaultContextPolicy()
+	if h.contextPolicy.PressureRatio <= 0 {
+		h.contextPolicy.PressureRatio = def.PressureRatio
+	}
+	if h.contextPolicy.CompressFraction <= 0 {
+		h.contextPolicy.CompressFraction = def.CompressFraction
 	}
 	if h.tasks == nil {
 		h.tasks = NewDefaultModelTasks(h.model, h.context, h.contextPolicy, h.maxWindowSize)
@@ -193,6 +190,7 @@ func (a *AgentHarness) injectBuiltinTools() {
 	br := a.initVFSIndexBridge()
 	if a.session != nil && a.session.VFS != nil {
 		a.tools = append(a.tools, newVFSTools(a.session.VFS)...)
+		a.tools = append(a.tools, newRunCommand(a.session.VFS, !a.runCommandUnattended))
 	}
 	if a.brain != nil && a.searchCtx != nil {
 		var ms *vfs.MountSession
@@ -228,9 +226,14 @@ func (a *AgentHarness) initVFSIndexBridge() *vfsindex.Bridge {
 		return nil
 	}
 	nsCopy := ns
-	scratch := a.fsRegistry != nil && a.fsRegistry.HasProfile("scratch") &&
-		!sessionHasProfile(a.session.VFS, brain.DefaultProfile)
-	br, err := vfsindex.Start(a.session.VFS, a.brain, brain.Scope{Namespace: &nsCopy}, scratch)
+	attachMemory := true
+	for _, s := range a.session.VFS.Specs() {
+		if s.Profile == brain.DefaultProfile {
+			attachMemory = false
+			break
+		}
+	}
+	br, err := vfsindex.Start(a.session.VFS, a.brain, brain.Scope{Namespace: &nsCopy}, attachMemory)
 	if err != nil {
 		slog.Error("vfsindex: failed to start bridge", "error", err)
 		return nil
@@ -326,6 +329,7 @@ func NewAgentFromSession(ctx context.Context, sessionId string, opts AgentOption
 	if err != nil {
 		return nil, err
 	}
+	rehydrateHarnessState(sm)
 	h := newHarnessBase(opts, sm)
 	h.sessionId = sessionId
 	h.context.Restore(applied.Window)
@@ -348,125 +352,59 @@ func NewAgentFromSession(ctx context.Context, sessionId string, opts AgentOption
 			}
 		}
 	}
-	var durableMounts []vfs.MountSpec
-	if len(checkpoint.State.Mounts) > 0 {
-		if err := json.Unmarshal(checkpoint.State.Mounts, &durableMounts); err != nil {
-			return nil, fmt.Errorf("invalid session mounts: %w", err)
-		}
-	}
-	if err := h.initSessionMounts(ctx, durableMounts); err != nil {
-		return nil, err
-	}
 	h.finishInit(ctx, opts.SubAgents)
 	return h, nil
 }
 
-// initSessionMounts materializes bootstrap+durable specs onto session.VFS.
-// Attach/detach after construct uses MountSession, not the harness.
-func (a *AgentHarness) initSessionMounts(ctx context.Context, durable []vfs.MountSpec) error {
-	if a.session == nil {
-		return fmt.Errorf("vfs: no session")
+// rehydrateHarnessState turns JSON-round-tripped RuntimeState values back into
+// the typed bags StateSet writes. Call at the checkpoint boundary only.
+func rehydrateHarnessState(sm *session.SessionManager) {
+	if sm == nil {
+		return
 	}
-	a.registerBrainFactory()
-	specs, err := vfs.MergeSpecs(a.fsBootstrap, durable)
+	if raw, ok := sm.StateGet(parkedWorkersStateKey); ok {
+		sm.StateSet(parkedWorkersStateKey, decodeParkedWorkers(raw))
+	}
+	for _, key := range []string{permissionAlwaysAllowKey, permissionAlwaysDenyKey} {
+		if raw, ok := sm.StateGet(key); ok {
+			sm.StateSet(key, decodeBoolSet(raw))
+		}
+	}
+}
+
+func decodeBoolSet(raw any) map[string]bool {
+	if m, ok := raw.(map[string]bool); ok {
+		return m
+	}
+	b, err := json.Marshal(raw)
 	if err != nil {
-		return err
+		return map[string]bool{}
 	}
-	for i := range specs {
-		if specs[i].Profile == brain.DefaultProfile {
-			specs[i].IndexPolicy = vfsindex.PolicyNone
-		}
+	var m map[string]bool
+	if err := json.Unmarshal(b, &m); err != nil || m == nil {
+		return map[string]bool{}
 	}
-	hasBrain := specsHaveProfile(specs, brain.DefaultProfile) ||
-		sessionHasProfile(a.session.VFS, brain.DefaultProfile)
-	auto := a.shouldAutoEngram() && !hasBrain
-
-	if len(specs) == 0 && !auto {
-		return nil
-	}
-	if a.session.VFS == nil {
-		if a.fsRegistry == nil {
-			return fmt.Errorf("vfs: registry required to restore mounts")
-		}
-		a.session.VFS = vfs.NewMountSession(a.sessionId, a.fsRegistry)
-	}
-	if len(specs) > 0 {
-		if err := a.session.VFS.Materialize(ctx, specs); err != nil {
-			return err
-		}
-	}
-	if auto {
-		if err := a.session.VFS.Mount(ctx, a.defaultEngramSpec()); err != nil && !errors.Is(err, vfs.ErrAlreadyMounted) {
-			return err
-		}
-	}
-	return nil
+	return m
 }
 
-func (a *AgentHarness) registerBrainFactory() {
-	if a.brain == nil || a.fsRegistry == nil || a.searchCtx == nil {
-		return
+func decodeParkedWorkers(raw any) map[string]parkedWorkerMeta {
+	if m, ok := raw.(map[string]parkedWorkerMeta); ok {
+		return m
 	}
-	ns, ok := a.searchCtx.Namespace()
-	if !ok {
-		return
-	}
-	nsCopy := ns
-	_ = a.fsRegistry.Register(brain.BrainFactory{
-		ID:     brain.DefaultProfile,
-		Engine: a.brain,
-		Scope:  brain.Scope{Namespace: &nsCopy},
-	})
-}
-
-func (a *AgentHarness) shouldAutoEngram() bool {
-	if a.brain == nil || a.searchCtx == nil || a.fsRegistry == nil {
-		return false
-	}
-	if _, ok := a.searchCtx.Namespace(); !ok {
-		return false
-	}
-	return a.fsRegistry.HasProfile(brain.DefaultProfile)
-}
-
-func (a *AgentHarness) defaultEngramSpec() vfs.MountSpec {
-	params := map[string]string{"mode": brain.ModePrefix}
-	if a.brain != nil && a.brain.Catalog() != nil && !a.brain.Catalog().Empty() {
-		var names []string
-		for _, spec := range a.brain.Catalog().All() {
-			if brain.IsParentKind(spec) {
-				names = append(names, spec.Kind)
-			}
+	if s, ok := raw.(string); ok {
+		var m map[string]parkedWorkerMeta
+		if json.Unmarshal([]byte(s), &m) != nil || m == nil {
+			return map[string]parkedWorkerMeta{}
 		}
-		if len(names) > 0 {
-			params["kinds"] = strings.Join(names, ",")
-		}
+		return m
 	}
-	return vfs.MountSpec{
-		Point:       brain.DefaultMountPoint,
-		Profile:     brain.DefaultProfile,
-		IndexPolicy: vfsindex.PolicyNone,
-		Params:      params,
+	b, err := json.Marshal(raw)
+	if err != nil {
+		return map[string]parkedWorkerMeta{}
 	}
-}
-
-func specsHaveProfile(specs []vfs.MountSpec, profile string) bool {
-	for _, s := range specs {
-		if s.Profile == profile {
-			return true
-		}
+	var m map[string]parkedWorkerMeta
+	if json.Unmarshal(b, &m) != nil || m == nil {
+		return map[string]parkedWorkerMeta{}
 	}
-	return false
-}
-
-func sessionHasProfile(ms *vfs.MountSession, profile string) bool {
-	if ms == nil {
-		return false
-	}
-	for _, s := range ms.Specs() {
-		if s.Profile == profile {
-			return true
-		}
-	}
-	return false
+	return m
 }

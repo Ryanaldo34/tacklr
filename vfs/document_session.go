@@ -2,53 +2,69 @@ package vfs
 
 import (
 	"context"
-	"fmt"
-	"strings"
-	"time"
 )
 
-// OpenDocument loads a virtual path into a Document IR.
-//
-// Textual results use the session write-back cache; the returned value is always
-// a clone (safe to edit). Binary / unregistered types are uncached.
-// reg nil uses DefaultContentRegistry().
-func (m *MountSession) OpenDocument(ctx context.Context, virtualPath string, reg *ContentRegistry) (Document, error) {
+// documentBackend is optional: providers that can translate Document IR.
+// MountSession routes OpenDocument / WriteDocument here. A backend that
+// does not implement it returns ErrNotSupported — the session never encodes.
+type documentBackend interface {
+	OpenDocument(ctx context.Context, name string, reg *ContentRegistry) (Document, error)
+	WriteDocument(ctx context.Context, name string, doc Document) error
+}
+
+// EncodeTextual returns UTF-8 bytes for a Textual document.
+// Backend providers call this when their native form is a file or object.
+// MountSession does not encode.
+func EncodeTextual(t Textual) ([]byte, error) {
+	body := t.Text()
+	if len(body) > MaxReadFileBytes {
+		return nil, errFileExceeds(MaxReadFileBytes)
+	}
+	return []byte(body), nil
+}
+
+func decodeProviderDocument(ctx context.Context, name string, fi FileInfo, data []byte, reg *ContentRegistry) (Document, error) {
+	if len(data) > MaxReadFileBytes {
+		return nil, errFileExceeds(MaxReadFileBytes)
+	}
 	if reg == nil {
 		reg = DefaultContentRegistry()
 	}
-	if doc, ok := m.cachedText(ctx, virtualPath); ok {
-		return doc, nil
-	}
-
-	var mt string
-	size, mod := int64(-1), time.Time{}
-	if fi, err := m.Stat(ctx, virtualPath); err == nil {
-		if fi.IsDir {
-			return nil, fmt.Errorf("vfs: %s is a directory", virtualPath)
-		}
-		mt, size, mod = fi.MediaType, fi.Size, fi.ModTime
-	}
-
-	raw, err := m.ReadFile(ctx, virtualPath)
-	if err != nil {
-		return nil, err
-	}
+	mt := fi.MediaType
 	if mt == "" {
 		mt = "application/octet-stream"
 	}
-	decoded, err := reg.Decode(ctx, virtualPath, mt, raw)
+	if !IsTextLike(mt) {
+		if _, ok := reg.codec(mt); !ok {
+			return nil, ErrNoCodec
+		}
+	}
+	return reg.Decode(ctx, name, mt, data)
+}
+
+// OpenDocument loads a virtual path into a Document IR via the mount's provider.
+// The returned Textual is a clone (safe to edit). reg nil uses DefaultContentRegistry().
+func (m *MountSession) OpenDocument(ctx context.Context, virtualPath string, reg *ContentRegistry) (Document, error) {
+	cleaned, err := cleanVirtualPath(virtualPath)
 	if err != nil {
 		return nil, err
 	}
-	td, ok := decoded.(*TextDocument)
+	p, rel, err := m.at(ctx, cleaned, false)
+	if err != nil {
+		return nil, err
+	}
+	db, ok := p.(documentBackend)
 	if !ok {
-		return decoded, nil
+		return nil, ErrNotSupported
 	}
-	if size < 0 {
-		size = int64(len(td.Text()))
+	if reg == nil {
+		reg = DefaultContentRegistry()
 	}
-	m.cache.put(virtualPath, td, size, mod, false)
-	return td.clone(), nil
+	doc, err := db.OpenDocument(ctx, rel, reg)
+	if err != nil {
+		return nil, err
+	}
+	return bindVirtualPath(doc, cleaned), nil
 }
 
 // ReadText opens a virtual path as Textual IR (clone; safe to edit).
@@ -64,82 +80,37 @@ func (m *MountSession) ReadText(ctx context.Context, virtualPath string) (Textua
 	return t, nil
 }
 
-// WriteDocument stages Textual IR in the session cache as dirty.
-// Backend updates happen on Sync / SyncAll (checkpoint calls SyncAll).
+// WriteDocument asks the mount's provider to translate IR and persist now.
 func (m *MountSession) WriteDocument(ctx context.Context, doc Document) error {
 	t, ok := doc.(Textual)
 	if !ok {
 		return ErrNotTextual
 	}
-	td, ok := t.(*TextDocument)
+	cleaned, err := cleanVirtualPath(t.Path())
+	if err != nil {
+		return err
+	}
+	p, rel, err := m.at(ctx, cleaned, true)
+	if err != nil {
+		return err
+	}
+	db, ok := p.(documentBackend)
 	if !ok {
-		td = NewTextDocument(t.Path(), t.MediaType(), t.Encoding(), t.Text())
+		return ErrNotSupported
 	}
-	cleaned, err := cleanVirtualPath(td.Path())
-	if err != nil {
+	if err := db.WriteDocument(ctx, rel, doc); err != nil {
 		return err
-	}
-	if _, _, err := m.at(ctx, cleaned, true); err != nil {
-		return err
-	}
-	if len(td.Text()) > MaxReadFileBytes {
-		return errFileExceeds(MaxReadFileBytes)
-	}
-	// Keep cache key aligned with cleaned path (td.Path may already be clean).
-	if cleaned != td.Path() {
-		td = td.clone()
-		td.path = cleaned
-	}
-	m.cache.put(cleaned, td, int64(len(td.Text())), time.Now().UTC(), true)
-	return nil
-}
-
-// Sync flushes one dirty path to the backend (no-op if clean or uncached).
-func (m *MountSession) Sync(ctx context.Context, virtualPath string) error {
-	cleaned, err := cleanVirtualPath(virtualPath)
-	if err != nil {
-		return err
-	}
-	doc, dirty := m.cache.getDirty(cleaned)
-	if !dirty {
-		return nil
-	}
-	body := doc.Text()
-	if err := m.writeContents(ctx, cleaned, strings.NewReader(body), int64(len(body))); err != nil {
-		return err
-	}
-	// Mark clean before Stat so overlay no longer masks backend mtime.
-	m.cache.markClean(cleaned, int64(len(body)), time.Time{})
-	if fi, err := m.Stat(ctx, cleaned); err == nil {
-		m.cache.markClean(cleaned, int64(len(body)), fi.ModTime)
 	}
 	m.fireAfterPersist(ctx, cleaned)
 	return nil
 }
 
-// SyncAll flushes every dirty path. Harness checkpoint calls this before saving Specs.
-func (m *MountSession) SyncAll(ctx context.Context) error {
-	for _, doc := range m.cache.dirtyDocs() {
-		if err := m.Sync(ctx, doc.Path()); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (m *MountSession) cachedText(ctx context.Context, virtualPath string) (*TextDocument, bool) {
-	doc, size, mod, dirty, ok := m.cache.get(virtualPath)
+func bindVirtualPath(doc Document, virtual string) Document {
+	td, ok := doc.(*TextDocument)
 	if !ok {
-		return nil, false
+		return doc
 	}
-	if !dirty {
-		if fi, err := m.Stat(ctx, virtualPath); err == nil {
-			stale := (size >= 0 && fi.Size != size) || (!mod.IsZero() && !fi.ModTime.Equal(mod))
-			if stale {
-				m.cache.remove(virtualPath)
-				return nil, false
-			}
-		}
-	}
-	return doc.clone(), true
+	out := td.clone()
+	out.path = virtual
+	return out
 }

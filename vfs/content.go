@@ -51,11 +51,19 @@ func (r *ContentRegistry) Register(c Codec) error {
 	return nil
 }
 
-// Decode looks up a codec for mediaType and decodes data.
-func (r *ContentRegistry) Decode(ctx context.Context, path, mediaType string, data []byte) (Document, error) {
+func (r *ContentRegistry) codec(mediaType string) (Codec, bool) {
+	if r == nil {
+		return nil, false
+	}
 	r.mu.RLock()
 	c, ok := r.codecs[mediaType]
 	r.mu.RUnlock()
+	return c, ok
+}
+
+// Decode looks up a codec for mediaType and decodes data.
+func (r *ContentRegistry) Decode(ctx context.Context, path, mediaType string, data []byte) (Document, error) {
+	c, ok := r.codec(mediaType)
 	if !ok {
 		if !IsTextLike(mediaType) {
 			return nil, ErrNoCodec

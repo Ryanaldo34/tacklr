@@ -24,9 +24,6 @@ type vfsIndexTools struct {
 }
 
 func newVFSIndexTools(br *vfsindex.Bridge) []*Tool {
-	if br == nil || br.Indexer == nil {
-		return nil
-	}
 	v := vfsIndexTools{br: br}
 	return []*Tool{
 		v.newIndexFile(),
@@ -160,7 +157,7 @@ func (v vfsIndexTools) newFindContent() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "find_content",
 		DisplayName: "Find content: {query}",
-		Description: `Search indexed virtual files for a query (temporary thin tool until run_command + host rg).
+		Description: `Search indexed virtual files for a query. Prefer run_command → rg for live FUSE plaintext; this tool searches indexed chunks only.
 
 Hits must have properties.vfs_path — non-file brain objects are omitted. Returns path, start_line/end_line/block_id, and a short snippet. Open live text with read_lines (not brain read) using those anchors.
 
@@ -266,9 +263,6 @@ func numProp(v any) (int, bool) {
 
 func truncateSnippet(s string, maxLen int) string {
 	s = strings.Join(strings.Fields(s), " ")
-	if maxLen <= 0 {
-		return s
-	}
 	n := 0
 	for i := range s {
 		if n == maxLen {

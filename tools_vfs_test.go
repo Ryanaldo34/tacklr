@@ -31,7 +31,6 @@ func TestVFSTools_readWriteRev(t *testing.T) {
 		SessionID:    "tools-vfs",
 		Store:        stores.NewInMemoryStore(),
 		MountSession: ms,
-		FSRegistry:   reg,
 		Model:        &mockStrategy{},
 	})
 	tools := map[string]*Tool{}
@@ -135,9 +134,27 @@ func TestVFSTools_readWriteRev(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// bad path
+	// bad path / missing / unmounted
 	if _, err := tools["list"].invoke(ctx, `{"path":"rel"}`, rt); err == nil {
 		t.Fatal("relative path")
+	}
+	if _, err := tools["list"].invoke(ctx, `{"path":"/nomount"}`, rt); err == nil {
+		t.Fatal("list unmounted")
+	}
+	if _, err := tools["stat"].invoke(ctx, `{"path":"/work/missing.go"}`, rt); err == nil {
+		t.Fatal("stat missing")
+	}
+	if _, err := tools["mkdir"].invoke(ctx, `{"path":"/nomount/x"}`, rt); err == nil {
+		t.Fatal("mkdir unmounted")
+	}
+	if _, err := tools["remove"].invoke(ctx, `{"path":"/work/missing.go"}`, rt); err == nil {
+		t.Fatal("remove missing")
+	}
+	if _, err := tools["read_lines"].invoke(ctx, `{"path":"/work/missing.go","start":1,"end":2}`, rt); err == nil {
+		t.Fatal("read missing")
+	}
+	if _, err := tools["list"].invoke(ctx, "{\"path\":\"/work/has\\u0000x\"}", rt); err == nil {
+		t.Fatal("nul path")
 	}
 	if _, err := tools["read_lines"].invoke(ctx, `{"path":"/work/a.go","start":0,"end":1}`, rt); err == nil {
 		t.Fatal("bad range")
@@ -265,6 +282,12 @@ func TestVFSTools_readWriteRev(t *testing.T) {
 	if _, err = tools["replace_text"].invoke(ctx, string(bodyNF), rt); err == nil {
 		t.Fatal("replace_text old not found")
 	}
+	bodyDup, _ := json.Marshal(map[string]any{
+		"path": "/work/plain.txt", "rev": rPlain.Hash, "old": "t", "new": "y",
+	})
+	if _, err = tools["replace_text"].invoke(ctx, string(bodyDup), rt); err == nil {
+		t.Fatal("replace_text not unique")
+	}
 	// write create then replace invalid range
 	if _, err = tools["write"].invoke(ctx, `{"path":"/work/new.txt","content":"a\nb\n"}`, rt); err != nil {
 		t.Fatal(err)
@@ -339,7 +362,7 @@ func TestVFSTools_findFiles(t *testing.T) {
 	}
 	h := NewAgent(ctx, AgentOptions{
 		SessionID: "find-files", Store: stores.NewInMemoryStore(),
-		MountSession: ms, FSRegistry: reg, Model: &mockStrategy{},
+		MountSession: ms, Model: &mockStrategy{},
 	})
 	tool := h.findTool("find_files", "")
 	if tool == nil {
@@ -379,5 +402,22 @@ func TestVFSTools_findFiles(t *testing.T) {
 	}
 	if !strings.Contains(out3.output, "count=1") {
 		t.Fatalf("max_results=1: %s", out3.output)
+	}
+	out4, err := tool.invoke(ctx, `{"path":"/work","max_depth":1,"max_results":300}`, turnRuntime(h))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out4.output, "/work/a.go") || strings.Contains(out4.output, "/work/sub/b.go") {
+		t.Fatalf("max_depth=1: %s", out4.output)
+	}
+	out5, err := tool.invoke(ctx, `{"path":"/work/a.go"}`, turnRuntime(h))
+	if err != nil || !strings.Contains(out5.output, "/work/a.go") {
+		t.Fatalf("find file root: %q err=%v", out5.output, err)
+	}
+	if _, err := tool.invoke(ctx, `{"path":"/work/missing"}`, turnRuntime(h)); err == nil {
+		t.Fatal("find missing")
+	}
+	if _, err := tool.invoke(ctx, `{"path":"rel"}`, turnRuntime(h)); err == nil {
+		t.Fatal("find relative")
 	}
 }

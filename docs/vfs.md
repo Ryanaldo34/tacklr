@@ -4,7 +4,7 @@ Tacklr’s virtual filesystem gives agents one path-based interface over storage
 
 Package: [`github.com/ryanaldo34/tacklr/vfs`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfs).
 
-Knowledge objects, search, and the graph are documented in **[docs/knowledge.md](knowledge.md)** (canonical). This file is the VFS surface: mounts, IR, write-back, and index *policy*.
+Knowledge objects, search, and the graph are documented in **[docs/knowledge.md](knowledge.md)** (canonical). This file is the VFS surface: mounts, IR, and index *policy*.
 
 ## Big picture
 
@@ -37,27 +37,21 @@ Knowledge objects, search, and the graph are documented in **[docs/knowledge.md]
 | **Document IR** | Agent-facing view of a file (lines + optional structured blocks) |
 | **Codec** | Bytes ↔ Document by media type |
 
-Mental model: **mounts are the filesystem**; **IR is a checkout of one file**. The session holds an optional **page cache** of textual IR with write-back; the **backend** is source of truth after `Sync`.
+Mental model: **mounts are the filesystem**; **IR is a checkout of one file**. The **provider** translates IR and persists immediately. `MountSession` routes; it does not encode or hold a dirty document cache.
 
-### Session cache and durability
+### Durability
 
 | Layer | Role |
 |-------|------|
-| Content cache | Internal session map of textual IR (clean/dirty); not part of the public API |
-| `WriteDocument` | Stages dirty IR (**no** backend Put yet) |
-| `Sync` / `SyncAll` | Flushes dirty paths to the backend (only flush knobs hosts need) |
-| Harness checkpoint | `SyncAll`, then saves **mount Specs only** |
-| Crash before Sync | Dirty edits lost; last successful Sync wins |
+| `WriteDocument` | Provider translates IR and writes to its service now |
+| `WriteFile` | Byte write-through to the provider |
+| Harness | Dispatches tools; does not flush or checkpoint mounts |
 
 ```text
-ReadText → miss → Get → cache clean → clone
-WriteDocument → dirty (backend unchanged)
-ReadText → dirty hit → clone (no Get)
-SyncAll → Put → clean
-checkpoint → SyncAll → save Specs
+ReadText → provider OpenDocument → clone
+WriteDocument → provider translates + persists
+ReadText → provider OpenDocument (service is source of truth)
 ```
-
-`WriteFile` is write-through and drops any cached IR for that path.
 
 ---
 
@@ -166,10 +160,9 @@ Raw `ReadFile` / `WriteFile` stay byte-only and do not build IR.
 | **ReadLines** | Returns `LineWindow` (lines + EOF + NextStart); streams large files; no full-object 32 MiB reject |
 | **MaxLineScanBytes** | Per-call stream scan budget (64 MiB), separate from full IR cap |
 | **MaxLinesPerWindow** | Max lines returned per `ReadLines` call (500) |
-| **WriteDocument** | Write-back cache; flush with `Sync` / `SyncAll` |
-| **WriteFile** | Write-through backend; drop IR cache for path |
-| **Dirty overlay** | `Stat` / `ReadDir` / `Open` / `ReadFile` / `Remove` see write-back creates before Sync |
-| **AfterPersist** | Optional host hook after successful backend write (`WriteFile` / `Sync`) |
+| **WriteDocument** | Provider translates IR and persists now |
+| **WriteFile** | Byte write-through to the provider |
+| **AfterPersist** | Optional host hook after successful backend write (`WriteFile` / `WriteDocument`) |
 | **ContentRev** | Session-visible content identity (`Path` + SHA-256 hex of body); `LineWindow.Rev` when known |
 
 Tool guidance:
@@ -179,12 +172,11 @@ Tool guidance:
 | Line window / page large file | `ReadLines` → page with `NextStart` until `EOF` (see `Rev`) |
 | Stable edit token | `ContentRev` / `ContentHash` — tools compare expected rev before write |
 | Find in mounts (indexed) | Optional `vfsindex` → brain `search` / `find_exact` on Chunks; then `ReadLines` around hit |
-| Edit (SDK) | `ReadText` → mutate → `WriteDocument` → checkpoint/`SyncAll` |
+| Edit (SDK) | `ReadText` → mutate → `WriteDocument` |
 | Edit (agent) | Harness tools (`read_lines`, `replace_lines`, `replace_text`, `write`, …) wrap the above with rev checks |
-| Flush now | `Sync` / `SyncAll` |
 | Raw bytes | `ReadFile` / `WriteFile` |
 
-`vfs` does not implement content grep. Live OS-tool search (real `rg`/`grep`) is planned via a future FUSE (or materialize) host projection. Indexed recall of mount content is the optional `vfsindex` bridge when a brain engine is wired.
+`vfs` does not implement content grep. Live host search is `run_command` → `rg` over the FUSE tree (dirty IR plaintext). Indexed recall of mount content is the optional `vfsindex` bridge when a brain engine is wired.
 
 ### Codec routing
 
@@ -199,7 +191,9 @@ Tool guidance:
 
 `DetectMediaType` is a helper **providers** call when filling `MediaType`. Empty / missing type is treated as `application/octet-stream` (no IR).
 
-FUSE: hosts call `MountSession.FuseMount(dir)` for a read-only kernel tree. File `Read`/`getattr` use `ReadText` (dirty plaintext). Binary files use `Stat.Size` and `io.ReaderAt` when the handle supports it. `session.Mount` attaches a provider; `FuseMount` is the host kernel mount. `Close` unmounts.
+FUSE: hosts call `MountSession.FuseMount(dir)` for a read-only kernel tree. **Every mount point must be a single path segment** (`/work`, `/engram`). Multi-segment points (`/tmp/tacklr`) fail `FuseMount`. File `Read`/`getattr` use `ReadText` (dirty plaintext). Binary files use `Stat.Size` and `io.ReaderAt` when the handle supports it. `session.Mount` attaches a provider; `FuseMount` is the host kernel mount. `HostDir()` is the last mount directory (host-facing only). `FuseAvailable()` probes `/dev/fuse` and `/dev/macfuse*`. `Close` unmounts.
+
+`server.Registry` starts FUSE after construct when the session has a VFS: `$TMP/tacklr-fuse/<session>` mode `0700`. No device → degrade and Store (`list`/`stat` still work; `run_command` returns `ErrFuseNotMounted`). Device present and mount fails after one suffix retry → fail-hard (Close, do not Store). `cmd/testserver` bootstraps `Point: /work` (LocalFactory.Base stays the host jail dir). The harness does not call `FuseMount`.
 
 `TextCodec` requires valid UTF-8 and builds a `TextDocument` labeled with the caller’s media type.
 
@@ -249,13 +243,11 @@ _ = text.ReplaceLines(3, 4, []string{"C", "D"})
 _ = ms.WriteDocument(ctx, text)
 ```
 
-- Writes to `doc.Path()` via `WriteFile`
 - Textual documents only (`ErrNotTextual` otherwise)
 - Respects read-only mounts (`ErrReadOnly`)
 - Same 32 MiB size cap as reads
 - A “line” string that contains `\n` → `ErrInvalidLine`
-
-Plaintext write-back is UTF-8 of `Text()` — no separate encode step.
+- The mount's provider encodes and persists immediately
 
 ---
 
@@ -464,8 +456,9 @@ When the harness has **Brain + MountSession + search namespace**, it owns a
 |------|------|
 | `index_file` | Selective ingest of key virtual **files** (max 8); errors under `none` |
 | `unindex` | Soft-delete the brain mirror; drops selective track |
-| `find_content` | Index-backed search requiring `vfs_path` (temporary until `run_command`) |
-| `find_files` | Bounded live VFS walk by name/glob (VFS-only; temporary) |
+| `run_command` | `/bin/sh -c` with cwd = FUSE root; relative paths (`work/foo`); `PermissionRequired` unless `RunCommandUnattended` |
+| `find_content` | Index-backed search requiring `vfs_path` (prefer `run_command` → `rg` for live text) |
+| `find_files` | Bounded live VFS walk by name/glob (prefer `run_command` → `fd`/`find`) |
 | `save_*` | Write the Engram file on the brain Provider (or `Engine.Put` if no brain mount) |
 | `link` / `expand` / `find_links` | Path-native graph (G1): prefer virtual paths; surface neighbor `vfs_path` |
 
@@ -481,7 +474,7 @@ policy (or selective track) allows. Write success is never blocked by reindex fa
 Markdown files are chunked by **heading/preamble blocks** (`block_id` and `heading_path` properties) when `Blocks()` is non-empty; other text still uses line windows.
 
 Indexed content is queried with `find_content`, `search` / `find_exact` (prefer hits with `vfs_path`).
-Live OS-tool search over mounts is deferred to a future FUSE + `run_command` path.
+Live grep is `run_command` + `rg` through the FUSE tree.
 
 ---
 
@@ -492,16 +485,16 @@ Live OS-tool search over mounts is deferred to a future FUSE + `run_command` pat
 | Layer | Responsibility |
 |-------|----------------|
 | `vfs.ContentHash` / `ContentRev` / `LineWindow.Rev` | Identity of session-visible body |
-| `ReadText`, `ReplaceLines`, `WriteDocument` | Low-level IR mutate + write-back |
+| `ReadText`, `ReplaceLines`, `WriteDocument` | Low-level IR mutate + provider persist |
 | Harness `read_lines`, `replace_lines`, `replace_text`, `write`, `list`, `stat`, `mkdir`, `remove` | Require `rev` on edits, reject stale, format numbered lines |
 
 ```text
 read_lines   → path + rev + numbered window
 replace_*    → must pass rev; on mismatch ErrStaleContent → re-read
-checkpoint   → SyncAll flushes dirty IR (existing)
+WriteDocument → provider translates IR and persists now
 ```
 
-No FUSE and no shell are required for this path.
+No FUSE and no shell are required for this IR edit path. `run_command` needs a live `FuseMount` (`HostDir` set).
 
 ---
 
@@ -510,6 +503,7 @@ No FUSE and no shell are required for this path.
 | Situation | Sentinel |
 |-----------|----------|
 | Path not under a mount | `ErrNotMounted` |
+| `run_command` with no FUSE mount | `ErrFuseNotMounted` |
 | Write on read-only mount | `ErrReadOnly` |
 | Missing file | `ErrNotExist` |
 | No codec for media type | `ErrNoCodec` |

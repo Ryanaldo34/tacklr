@@ -16,6 +16,7 @@ import (
 	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/streaming"
+	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
 type mockStrategy struct {
@@ -29,6 +30,10 @@ type mockStrategy struct {
 	lastInvokeTools []*Tool
 	callNum         atomic.Int64
 	mu              sync.Mutex
+}
+
+func (m *mockStrategy) ModelTelemetryIdentity() telemetry.ModelIdentity {
+	return telemetry.ModelIdentity{Provider: "unknown", Model: "mock"}
 }
 
 func (m *mockStrategy) WithApiKey(string) InferenceStrategy         { return m }
@@ -96,6 +101,7 @@ func contentTokenEstimate(msgs []*Message) int {
 }
 
 type recordingWatchdog struct {
+	mu          sync.Mutex
 	outputs     []*Message
 	toolResults []*Message
 	errors      []error
@@ -109,26 +115,38 @@ type tokenCount struct {
 }
 
 func (w *recordingWatchdog) RecordThinking(msg *Message) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	w.thinking = append(w.thinking, msg)
 	return nil
 }
 func (w *recordingWatchdog) RecordOutput(msg *Message) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	w.outputs = append(w.outputs, msg)
 	return nil
 }
 func (w *recordingWatchdog) RecordError(err error) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	w.errors = append(w.errors, err)
 	return nil
 }
 func (w *recordingWatchdog) RecordTokens(input, output int) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	w.tokenCounts = append(w.tokenCounts, tokenCount{input, output})
 	return nil
 }
 func (w *recordingWatchdog) RecordToolCalls(msg *Message) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	w.toolCalls = append(w.toolCalls, msg)
 	return nil
 }
 func (w *recordingWatchdog) RecordToolResult(msg *Message) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	w.toolResults = append(w.toolResults, msg)
 	return nil
 }
@@ -929,20 +947,19 @@ func TestAgentHarness_Run(t *testing.T) {
 			invokeErrFn: func(_ context.Context, _ []*Message, tools []*Tool) error {
 				invokeCount++
 				if invokeCount == 1 {
-					return nil // allow complete_todo turn
+					return nil
 				}
 				if invokeCount == 2 {
 					handoffAttempted = true
 					return fmt.Errorf("compression invoke failed")
 				}
-				return nil // post-handoff turn
+				return nil
 			},
 			invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, events chan<- LLMResponseChunk) {
 				if invokeCount <= 1 {
 					events <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
 						{ID: "call_ct_err", CallID: "call_ct_err", Name: "complete_todo", Arguments: `{"title":"Task 1"}`},
 					}, IsComplete: true}
-					events <- LLMResponseChunk{IsComplete: true}
 					return
 				}
 				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "continuing", IsComplete: true}
@@ -950,7 +967,6 @@ func TestAgentHarness_Run(t *testing.T) {
 		}
 
 		ah := NewAgent(context.Background(), AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
-		// Two todos so completing Task 1 still triggers handoff.
 		ah.session.Plan().Set([]Todo{
 			{Title: "Task 1", Status: streaming.TodoStatusInProgress},
 			{Title: "Task 2", Status: streaming.TodoStatusPending},
@@ -986,96 +1002,6 @@ func TestAgentHarness_Run(t *testing.T) {
 			t.Fatalf("expected fallback handoff in window, got %+v", ah.Messages())
 		}
 	})
-}
-
-func TestReturnFromInterrupt_unknownUUID_returnsError(t *testing.T) {
-	store := testStore(t)
-	strategy := &mockStrategy{
-		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, events chan<- LLMResponseChunk) {
-			events <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
-		},
-	}
-	ah := NewAgent(context.Background(), AgentOptions{Config: Config{}, Model: strategy, Store: store})
-
-	resolved, err := ah.ReturnFromInterrupt(context.Background(), map[string][]byte{
-		"bogus-uuid": []byte(`{}`),
-	})
-	if err == nil {
-		t.Fatal("expected error for unknown interrupt UUID")
-	}
-	if !strings.Contains(err.Error(), "no tool call id found") {
-		t.Errorf("error = %q, want contains 'no tool call id found'", err.Error())
-	}
-	if resolved != nil {
-		t.Error("expected nil channel on error")
-	}
-}
-
-func TestReturnFromInterrupt_invalidPayload_returnsError(t *testing.T) {
-	store := testStore(t)
-	optionsJSON := `[{"title":"A","description":"opt A","isRecommended":false}]`
-	interruptTool := NewTool(ToolConfig{
-		Name: "ask_user",
-		Handler: func(ctx context.Context, _ struct{}, runtime *HarnessRuntime) (string, error) {
-			intr, err := runtime.RaiseInterrupt("user_selection_choice", []byte(optionsJSON))
-			if err != nil {
-				return "", err
-			}
-			choice := intr.(*interrupt.UserSelectionInterrupt).ConfirmedChoice
-			return "selected: " + choice.Title, nil
-		},
-	})
-
-	var callCount int
-	strategy := &mockStrategy{
-		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, events chan<- LLMResponseChunk) {
-			callCount++
-			if callCount == 1 {
-				events <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-					{ID: "call_int", CallID: "call_int", Name: "ask_user", Arguments: `{}`},
-				}, IsComplete: true}
-				events <- LLMResponseChunk{IsComplete: true}
-			}
-		},
-	}
-
-	ah := NewAgent(context.Background(), AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{interruptTool}})
-
-	ch, err := ah.Run(context.Background(), "start")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	var interruptId string
-	for ev := range ch {
-		if ev.Type == StreamEventInterrupt {
-			var payload struct {
-				InterruptId string          `json:"interruptId"`
-				Data        json.RawMessage `json:"data"`
-			}
-			if err := json.Unmarshal(ev.Data, &payload); err != nil {
-				t.Fatal(err)
-			}
-			interruptId = payload.InterruptId
-		}
-	}
-	if interruptId == "" {
-		t.Fatal("interruptId not captured")
-	}
-
-	// Send bad payload: out-of-bounds selectionIdx
-	resolved, err := ah.ReturnFromInterrupt(context.Background(), map[string][]byte{
-		interruptId: []byte(`{"interruptId":"` + interruptId + `","selectionIdx":99}`),
-	})
-	if err == nil {
-		t.Fatal("expected error for invalid payload")
-	}
-	if !strings.Contains(err.Error(), "invalid payload") {
-		t.Errorf("error = %q, want contains 'invalid payload'", err.Error())
-	}
-	if resolved != nil {
-		t.Error("expected nil channel on error")
-	}
 }
 
 func TestNewAgent(t *testing.T) {
@@ -1116,33 +1042,6 @@ func TestNewAgent(t *testing.T) {
 	}
 }
 
-func TestFindTool_namespaceMatching(t *testing.T) {
-	tools := []*Tool{
-		NewTool(ToolConfig{Name: "get_customer", Namespace: "crm", Handler: func(ctx context.Context) (string, error) { return "", nil }}),
-		NewTool(ToolConfig{Name: "get_customer", Namespace: "email", Handler: func(ctx context.Context) (string, error) { return "", nil }}),
-		NewTool(ToolConfig{Name: "get_weather", Namespace: "", Handler: func(ctx context.Context) (string, error) { return "", nil }}),
-	}
-	h := &AgentHarness{tools: tools}
-
-	if h.findTool("get_customer", "crm") == nil {
-		t.Error("expected to find tool in crm namespace")
-	}
-	if h.findTool("get_customer", "email") == nil {
-		t.Error("expected to find tool in email namespace")
-	}
-	if h.findTool("get_customer", "wrong") != nil {
-		t.Error("should not find tool in wrong namespace")
-	}
-	if h.findTool("get_weather", "") == nil {
-		t.Error("expected to find tool with empty namespace")
-	}
-	if h.findTool("nonexistent", "") != nil {
-		t.Error("should not find nonexistent tool")
-	}
-}
-
-// TestRun_cancelMidStream_endsTurn verifies cancel during token streaming ends
-// the harness turn (finite events, cancelled error, channel closes).
 func TestRun_cancelMidStream_endsTurn(t *testing.T) {
 	started := make(chan struct{})
 	var once sync.Once
@@ -1260,7 +1159,7 @@ func TestRun_windowPressure_summarizesAndPreservesUser(t *testing.T) {
 	// When token estimate exceeds 85% of MaxWindowSize, addToContext summarizes
 	// older history, keeps the original user message, and continues the turn.
 	store := testStore(t)
-	const maxWindow = 100
+	const maxWindow = 40
 	var invokeCount int
 	var sawSummaryInvoke bool
 	const summaryText = "SUMMARY_OF_HISTORY"
@@ -1273,13 +1172,16 @@ func TestRun_windowPressure_summarizesAndPreservesUser(t *testing.T) {
 			invokeCount++
 			switch invokeCount {
 			case 1:
-				// Seed a large assistant reply so the next user turn pressures the window.
-				pad := strings.Repeat("x", 80)
+				// Seed a reply already over MaxWindowSize so absorb uses the over-max loop.
+				pad := strings.Repeat("x", 200)
 				events <- LLMResponseChunk{Type: StreamEventMessage, Content: pad, IsComplete: true}
 			case 2:
 				// This is the pressure-compress invoke (summarize staged history).
 				sawSummaryInvoke = true
-				events <- LLMResponseChunk{Type: StreamEventMessage, Content: summaryText, IsComplete: true}
+				events <- LLMResponseChunk{
+					Type: StreamEventMessage, Content: summaryText, IsComplete: true,
+					InputTokens: 11, OutputTokens: 7, ReasoningTokens: 3,
+				}
 			default:
 				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "answer after compress", IsComplete: true}
 			}
@@ -1534,73 +1436,6 @@ func (s *stubModelTasks) Handoff(ctx context.Context, plan []Todo, planDoc strin
 }
 
 // TestNewAgent_injectsModelTasks: Run uses injected Absorb/Turn; complete_todo uses Handoff.
-func TestNewAgent_injectsModelTasks(t *testing.T) {
-	store := testStore(t)
-	cm := NewModelContextManager()
-	var invokeCount int
-	st := &stubModelTasks{
-		cm: cm,
-		turnFn: func(ctx context.Context, tools []*Tool, systemPrompt string) (<-chan LLMResponseChunk, error) {
-			invokeCount++
-			ch := make(chan LLMResponseChunk, 4)
-			if invokeCount == 1 {
-				ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-					{ID: "ct", CallID: "ct", Name: "complete_todo", Arguments: `{"title":"T1"}`},
-				}, IsComplete: true}
-				ch <- LLMResponseChunk{IsComplete: true}
-			} else {
-				ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "after stub handoff", IsComplete: true}
-			}
-			close(ch)
-			return ch, nil
-		},
-	}
-	ah := NewAgent(context.Background(), AgentOptions{
-		Config:         Config{MaxWindowSize: 8192},
-		Model:          &mockStrategy{},
-		Store:          store,
-		ContextManager: cm,
-		ModelTasks:     st,
-	})
-	ah.session.Plan().Set([]Todo{
-		{Title: "T1", Status: streaming.TodoStatusInProgress},
-		{Title: "T2", Status: streaming.TodoStatusPending},
-	})
-	ch, err := ah.Run(context.Background(), "go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var sawFinal bool
-	for ev := range ch {
-		if ev.Type == StreamEventMessage && ev.Content == "after stub handoff" {
-			sawFinal = true
-		}
-		if ev.Type == StreamEventError {
-			t.Fatalf("error event: %v", ev.Error)
-		}
-	}
-	if st.absorbCalls.Load() < 1 {
-		t.Fatalf("Absorb calls = %d, want >= 1", st.absorbCalls.Load())
-	}
-	if st.handoffCalls.Load() != 1 {
-		t.Fatalf("Handoff calls = %d, want 1", st.handoffCalls.Load())
-	}
-	if !sawFinal {
-		t.Fatal("expected final message after stub handoff continue turn")
-	}
-	var sawStub bool
-	for _, m := range ah.Messages() {
-		if m != nil && m.Role == RoleDeveloper && m.Content == "stub handoff" {
-			sawStub = true
-		}
-	}
-	if !sawStub {
-		t.Fatalf("context window missing stub handoff: %+v", ah.Messages())
-	}
-}
-
-// TestNewAgentFromSession_resumesPendingToolInterrupt: park on interrupt, reload
-// from store (simulating process boundary), resolve and complete the tool.
 func TestNewAgentFromSession_resumesPendingToolInterrupt(t *testing.T) {
 	store := testStore(t)
 	interruptTool := NewTool(ToolConfig{

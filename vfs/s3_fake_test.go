@@ -281,33 +281,89 @@ func TestMountSession_s3MemAPI(t *testing.T) {
 	if err := ms.WriteDocument(ctx, doc); err != nil {
 		t.Fatal(err)
 	}
-	// Dirty Open/ReadFile
 	df, err := ms.Open(ctx, "/data/hello.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := df.(io.Writer); ok {
-		t.Fatal("dirty Open should not be io.Writer")
-	}
 	if fi, err := df.Stat(); err != nil || fi.Size == 0 {
-		t.Fatalf("dirty Stat: %+v err=%v", fi, err)
+		t.Fatalf("Stat after write: %+v err=%v", fi, err)
 	}
 	_ = df.Close()
 	body, err := ms.ReadFile(ctx, "/data/hello.go")
 	if err != nil || !strings.Contains(string(body), "edited") {
-		t.Fatalf("dirty ReadFile: %q err=%v", body, err)
+		t.Fatalf("ReadFile after WriteDocument: %q err=%v", body, err)
 	}
-	if err := ms.Sync(ctx, "/data/hello.go"); err != nil {
-		t.Fatal(err)
+	if mt, err := ms.Classify(ctx, "/data/hello.go", nil); err != nil || mt == "" {
+		t.Fatalf("Classify: %q err=%v", mt, err)
 	}
-	body, err = ms.ReadFile(ctx, "/data/hello.go")
-	if err != nil || !strings.Contains(string(body), "edited") {
-		t.Fatalf("after Sync: %q err=%v", body, err)
+	if spec, err := ms.SpecAt("/data/hello.go"); err != nil || spec.Point != "/data" {
+		t.Fatalf("SpecAt: %+v err=%v", spec, err)
 	}
 
 	// Unmount drops cache under point
 	if err := ms.Unmount("/ro"); err != nil {
 		t.Fatal(err)
+	}
+
+	// Backend API failures surface as session I/O errors (not silent success).
+	api.fail["Head"] = errors.New("s3 head down")
+	if _, err := ms.Stat(ctx, "/data/hello.go"); err == nil || !strings.Contains(err.Error(), "head down") {
+		t.Fatalf("Head fail: %v", err)
+	}
+	api.fail["Head"] = nil
+	api.mu.Lock()
+	api.objects["runs/1/onlykids/file.txt"] = []byte("x")
+	api.mu.Unlock()
+	api.fail["List"] = errors.New("s3 list down")
+	if _, err := ms.Stat(ctx, "/data/onlykids"); err == nil || !strings.Contains(err.Error(), "list down") {
+		t.Fatalf("List fail Stat dir: %v", err)
+	}
+	if _, err := ms.ReadDir(ctx, "/data/sub"); err == nil || !strings.Contains(err.Error(), "list down") {
+		t.Fatalf("List fail ReadDir: %v", err)
+	}
+	api.fail["List"] = nil
+	if _, err := ms.ReadDir(ctx, "/data/hello.go"); err == nil {
+		t.Fatal("ReadDir file")
+	}
+	if err := ms.MkdirAll(ctx, "/data/hello.go/nested"); err == nil {
+		t.Fatal("MkdirAll through file")
+	}
+	if _, err := ms.ReadText(ctx, "/data/sub"); err == nil {
+		t.Fatal("OpenDocument dir")
+	}
+	api.fail["Get"] = errors.New("s3 get down")
+	if _, err := ms.Open(ctx, "/data/hello.go"); err == nil || !strings.Contains(err.Error(), "get down") {
+		t.Fatalf("Get fail: %v", err)
+	}
+	if _, err := ms.ReadText(ctx, "/data/hello.go"); err == nil || !strings.Contains(err.Error(), "get down") {
+		t.Fatalf("OpenDocument Get fail: %v", err)
+	}
+	api.fail["Get"] = nil
+	api.fail["Put"] = errors.New("s3 put down")
+	if err := ms.WriteFile(ctx, "/data/fail.txt", []byte("x")); err == nil || !strings.Contains(err.Error(), "put down") {
+		t.Fatalf("Put fail: %v", err)
+	}
+	api.fail["Put"] = nil
+
+	cctx, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := ms.Stat(cctx, "/data/hello.go"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Stat cancel: %v", err)
+	}
+	if _, err := ms.Open(cctx, "/data/hello.go"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Open cancel: %v", err)
+	}
+	if _, err := ms.ReadDir(cctx, "/data/sub"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ReadDir cancel: %v", err)
+	}
+	if err := ms.Remove(cctx, "/data/hook.txt"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Remove cancel: %v", err)
+	}
+	if err := ms.MkdirAll(cctx, "/data/newdir"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("MkdirAll cancel: %v", err)
+	}
+	if _, err := ms.ReadText(cctx, "/data/hello.go"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("OpenDocument cancel: %v", err)
 	}
 }
 

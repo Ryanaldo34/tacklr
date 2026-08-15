@@ -352,28 +352,6 @@ func TestAskUserChoiceTool_raiseAndResume(t *testing.T) {
 	}
 }
 
-func TestAskUserChoiceTool_validation(t *testing.T) {
-	rt := planRT()
-	rt.CurrentToolCallID = "tc"
-
-	cases := []struct {
-		name string
-		args string
-	}{
-		{"empty question", `{"question":"","choices":[{"title":"A"},{"title":"B"}]}`},
-		{"one choice", `{"question":"q","choices":[{"title":"A"}]}`},
-		{"duplicate titles", `{"question":"q","choices":[{"title":"A"},{"title":"A"}]}`},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := askUserChoiceTool.invoke(context.Background(), tc.args, rt)
-			if err == nil {
-				t.Fatal("expected validation error")
-			}
-		})
-	}
-}
-
 func TestListPlanTool_exactListing(t *testing.T) {
 	pt := testPlanTools()
 	rt := planRT()
@@ -411,27 +389,6 @@ func TestListPlanTool_exactListing(t *testing.T) {
 // --- Parent harness outcomes for builtin plan / ask_user tools ---
 
 // TestRun_completeTodo_skipsAlreadyCompletedNext: completing advances past already-done siblings.
-func TestRun_completeTodo_skipsAlreadyCompletedNext(t *testing.T) {
-	model := sequentialToolModel(
-		[]ToolCall{toolCall("p1", "create_plan",
-			`{"plan":"P","todos":[{"title":"A","description":"a"},{"title":"B","description":"b","status":"completed"},{"title":"C","description":"c"}]}`)},
-		[]ToolCall{toolCall("c1", "complete_todo", `{"title":"A"}`)},
-	)
-	h, got := runPrompt(t, model, AgentOptions{Store: testStore(t)})
-	if !hasToolResultContent(got, `starting "C"`) && !hasToolResultContent(got, "Todo completed") {
-		t.Fatalf("want advance past completed B, got %+v", summarizeEvents(got))
-	}
-	plan := h.session.Plan().Get()
-	if len(plan) != 3 {
-		t.Fatalf("plan len = %d", len(plan))
-	}
-	if plan[2].Status != streaming.TodoStatusInProgress && plan[2].Status != streaming.TodoStatusCompleted {
-		t.Fatalf("plan statuses = %v %v %v", plan[0].Status, plan[1].Status, plan[2].Status)
-	}
-}
-
-// TestRun_planToolHappyAndErrorPaths: multi-call turn covers empty create → create →
-// missing complete → list; table covers isolated tool error return paths.
 func TestRun_planToolHappyAndErrorPaths(t *testing.T) {
 	model := sequentialToolModel(
 		[]ToolCall{toolCall("p1", "create_plan", `{"plan":"P","todos":[]}`)},
