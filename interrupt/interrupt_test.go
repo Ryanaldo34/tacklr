@@ -70,8 +70,8 @@ func TestUserSelection_fullLifecycle(t *testing.T) {
 // TestToolPermission_allKinds covers init, validate, allow/reject, and unknown option.
 func TestToolPermission_allKinds(t *testing.T) {
 	p := &interrupt.ToolPermissionInterrupt{}
-	if p.Predecided() {
-		t.Fatal("zero value is not predecided")
+	if p.SelectedKind != "" {
+		t.Fatal("zero value has no selected kind")
 	}
 	if p.TypeName() != "tool_permission" {
 		t.Fatal(p.TypeName())
@@ -151,9 +151,6 @@ func TestToolPermission_allKinds(t *testing.T) {
 		}
 		if p2.Allowed != tc.allowed || p2.SelectedKind != tc.kind || p2.SelectedOptionID != tc.id {
 			t.Fatalf("%s: allowed=%v kind=%s id=%s", tc.id, p2.Allowed, p2.SelectedKind, p2.SelectedOptionID)
-		}
-		if p2.CallDenied() == tc.allowed || !p2.Predecided() {
-			t.Fatalf("%s: CallDenied=%v predecided=%v", tc.id, p2.CallDenied(), p2.Predecided())
 		}
 	}
 

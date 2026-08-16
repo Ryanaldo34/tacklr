@@ -158,7 +158,7 @@ func newHarnessBase(opts AgentOptions, sm *session.SessionManager) (*AgentHarnes
 	if !opts.DisablePlanningLock {
 		chain = append(chain, h.planningWriteLock)
 	}
-	chain = append(chain, onCallMiddleware())
+	chain = append(chain, onCallMiddleware(sm.OnCall()))
 	h.toolRunner = newToolRunner(chain...)
 	h.toolResultHooks = newToolResultHookRegistry(opts.ToolResultHooks)
 	return h, nil

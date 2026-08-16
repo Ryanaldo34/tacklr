@@ -137,13 +137,3 @@ func (rt Runtime) RememberPermissionAllow(toolName string) {
 func (rt Runtime) RememberPermissionDeny(toolName string) {
 	rt.session.RememberPermissionDeny(toolName)
 }
-
-// OnCallStage returns the completed OnCall layer for toolCallID and typeName.
-func (rt Runtime) OnCallStage(toolCallID, typeName string) (args string, denied bool, ok bool) {
-	return rt.session.OnCallStage(toolCallID, typeName)
-}
-
-// RecordOnCallStage stores a completed OnCall layer for re-entry.
-func (rt Runtime) RecordOnCallStage(toolCallID, typeName, args string, denied bool) {
-	rt.session.RecordOnCallStage(toolCallID, typeName, args, denied)
-}

@@ -33,13 +33,6 @@ type PayloadValidator interface {
 	ValidatePayload([]byte) error
 }
 
-// CallEffect is an optional capability for interrupts raised from Tool.OnCall.
-// After Return, the harness applies the effect before the handler runs.
-type CallEffect interface {
-	// CallDenied is true when the handler must not run.
-	CallDenied() bool
-}
-
 type UserChoice struct {
 	Title         string `json:"title"`
 	Description   string `json:"description"`
@@ -223,16 +216,6 @@ func (p *ToolPermissionInterrupt) Return(payload []byte) error {
 func (p *ToolPermissionInterrupt) Error() string {
 	b, _ := json.Marshal(p) // value type always marshals
 	return string(b)
-}
-
-func (p *ToolPermissionInterrupt) CallDenied() bool {
-	return p.SelectedKind != "" && !p.Allowed
-}
-
-// Predecided is true when the constructor already resolved this interrupt
-// (session allow-always / reject-always) and the harness must not park.
-func (p *ToolPermissionInterrupt) Predecided() bool {
-	return p.SelectedKind != ""
 }
 
 // --- Interrupt registry ---

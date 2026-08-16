@@ -14,16 +14,13 @@ const (
 	searchNamespaceStateKey = "_search_namespace"
 )
 
-// IsReservedRuntimeStateKey reports keys owned by SessionManager modules.
-func IsReservedRuntimeStateKey(key string) bool {
-	switch key {
-	case planStateKey, planDocumentStateKey, planDocumentUpdatedKey,
-		searchNamespaceStateKey, parkedWorkersStateKey,
-		permissionAllowKey, permissionDenyKey, onCallStagesKey:
-		return true
-	default:
-		return false
-	}
+func init() {
+	reserveStateKeys(
+		planStateKey,
+		planDocumentStateKey,
+		planDocumentUpdatedKey,
+		searchNamespaceStateKey,
+	)
 }
 
 // PlanStore holds the plan document and todo list for Adaptive Case Management.
@@ -167,20 +164,4 @@ func (p *PlanStore) LoadFromState(state map[string]any) {
 	if b, ok := state[planDocumentUpdatedKey].(bool); ok {
 		p.documentUpdated = b
 	}
-}
-
-// StripPlanKeys removes reserved module keys from a runtime state map so they
-// are not exposed via user-facing StateGet after load.
-func StripPlanKeys(state map[string]any) {
-	if state == nil {
-		return
-	}
-	delete(state, planStateKey)
-	delete(state, planDocumentStateKey)
-	delete(state, planDocumentUpdatedKey)
-	delete(state, searchNamespaceStateKey)
-	delete(state, parkedWorkersStateKey)
-	delete(state, permissionAllowKey)
-	delete(state, permissionDenyKey)
-	delete(state, onCallStagesKey)
 }

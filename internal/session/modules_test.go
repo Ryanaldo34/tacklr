@@ -44,10 +44,10 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 
 	rt.RememberPermissionAllow("allow_tool")
 	rt.RememberPermissionDeny("deny_tool")
-	if _, _, ok := sm.OnCallStage("w1", "tool_permission"); ok {
+	if _, ok := sm.OnCall().Get("w1", "tool_permission"); ok {
 		t.Fatal("malformed stages must not decode")
 	}
-	sm.RecordOnCallStage("w1", "tool_permission", `{"path":"/a"}`, false)
+	sm.OnCall().Record("w1", "tool_permission", session.OnCallLayer{Args: `{"path":"/a"}`})
 	if !rt.PermissionAlwaysAllowed("allow_tool") || !sm.PermissionAlwaysAllowed("allow_tool") {
 		t.Fatal("allow-always not visible on Runtime and SessionManager")
 	}
@@ -147,9 +147,9 @@ func assertModules(t *testing.T, sm *session.SessionManager, ns uuid.UUID, parkI
 	if !rt.PermissionAlwaysAllowed("allow_tool") || !rt.PermissionAlwaysDenied("deny_tool") {
 		t.Fatal("permission memory must reload")
 	}
-	args, denied, ok := sm.OnCallStage("w1", "tool_permission")
-	if !ok || denied || args != `{"path":"/a"}` {
-		t.Fatalf("on-call stage reload args=%q denied=%v ok=%v", args, denied, ok)
+	layer, ok := sm.OnCall().Get("w1", "tool_permission")
+	if !ok || layer.Denied || layer.Args != `{"path":"/a"}` {
+		t.Fatalf("on-call stage reload args=%q denied=%v ok=%v", layer.Args, layer.Denied, ok)
 	}
 	got, ok := sm.ParkedWorker(parkID)
 	if !ok || got.WorkerName != worker || got.WorkerSessionID != "sess/w/researcher/spawn_1" {

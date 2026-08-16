@@ -7,6 +7,10 @@ import (
 
 const parkedWorkersStateKey = "_parked_workers"
 
+func init() {
+	reserveStateKeys(parkedWorkersStateKey)
+}
+
 // ParkedWorkerMeta is durable park metadata for a spawn_worker tool call.
 // Live harness pointers are not stored here.
 type ParkedWorkerMeta struct {

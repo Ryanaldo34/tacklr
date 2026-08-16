@@ -14,7 +14,7 @@ import (
 
 // SessionManager owns durable and live data for one agent harness thread
 // (checkpoint id), not an ACP client session id: plan, user tool state,
-// permission memory, parked workers,
+// permission memory, on-call stages, parked workers,
 // search context, interrupts, and the optional virtual filesystem mount table.
 //
 // VFS is host-owned and attached with SetVFS. Knowledge namespace + ResultSet
@@ -27,6 +27,7 @@ type SessionManager struct {
 	resolved  interruptMap
 	perms     *permissionBag
 	parks     *parkBag
+	onCall    *OnCallStore
 	search    *brain.SearchContext
 	vfs       *vfs.MountSession
 }
@@ -40,6 +41,7 @@ func NewSessionManager() *SessionManager {
 		resolved:  interruptMap{},
 		perms:     newPermissionBag(),
 		parks:     newParkBag(),
+		onCall:    NewOnCallStore(),
 		search:    brain.NewSearchContext(),
 	}
 }
@@ -257,11 +259,13 @@ func (s *SessionManager) SnapshotDurable() (runtimeState map[string]any, pending
 	plan := s.plan
 	perms := s.perms
 	parks := s.parks
+	onCall := s.onCall
 	s.mu.RUnlock()
 
 	plan.ExportInto(runtimeState)
 	perms.exportInto(runtimeState)
 	parks.exportInto(runtimeState)
+	onCall.exportInto(runtimeState)
 	return runtimeState, pending, resolved
 }
 
@@ -272,6 +276,7 @@ func (s *SessionManager) LoadUserAndPlanState(state map[string]any) {
 	s.plan.LoadFromState(state)
 	s.perms.loadFromState(state)
 	s.parks.loadFromState(state)
+	s.onCall.loadFromState(state)
 	if raw, ok := state[searchNamespaceStateKey]; ok {
 		if ns, ok := raw.(string); ok && ns != "" {
 			if id, err := uuid.Parse(ns); err == nil {

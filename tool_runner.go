@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/ryanaldo34/tacklr/internal/session"
 	"github.com/ryanaldo34/tacklr/interrupt"
 )
 
@@ -89,19 +90,8 @@ func ToolPermissionOnCall(inv ToolInvocation) Interrupt {
 	}
 }
 
-// onCallStore is the session-backed OnCall stage store.
-// session.Runtime implements it; it is not part of HarnessRuntime.
-type onCallStore interface {
-	OnCallStage(toolCallID, typeName string) (args string, denied bool, ok bool)
-	RecordOnCallStage(toolCallID, typeName, args string, denied bool)
-}
-
-type predecidedCall interface {
-	Predecided() bool
-}
-
 // onCallMiddleware runs Tool.OnCall constructors in order (FastAPI-style layers).
-func onCallMiddleware() ToolInterceptor {
+func onCallMiddleware(stages *session.OnCallStore) ToolInterceptor {
 	return func(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error) {
 		if inv.Tool == nil || len(inv.Tool.OnCall) == 0 {
 			return next(ctx, inv)
@@ -109,9 +99,8 @@ func onCallMiddleware() ToolInterceptor {
 		if inv.Runtime == nil {
 			return "", fmt.Errorf("%w: on-call interrupt requires a runtime", ErrFailed)
 		}
-		store, _ := inv.Runtime.(onCallStore)
 		for _, ctor := range inv.Tool.OnCall {
-			if err := applyOnCallLayer(&inv, ctor, store); err != nil {
+			if err := applyOnCallLayer(&inv, ctor, stages); err != nil {
 				return "", err
 			}
 		}
@@ -119,39 +108,42 @@ func onCallMiddleware() ToolInterceptor {
 	}
 }
 
-func applyOnCallLayer(inv *ToolInvocation, ctor OnCallFunc, store onCallStore) error {
+func applyOnCallLayer(inv *ToolInvocation, ctor OnCallFunc, stages *session.OnCallStore) error {
 	intr := ctor(*inv)
 	if intr == nil {
 		return nil
 	}
 	callID := inv.Runtime.CurrentToolCallID()
-	if store != nil {
-		if args, denied, ok := store.OnCallStage(callID, intr.TypeName()); ok {
-			if denied {
+	if stages != nil {
+		if layer, ok := stages.Get(callID, intr.TypeName()); ok {
+			if layer.Denied {
 				return rejectedOnCall(toolNameOf(*inv))
 			}
-			inv.ArgsJSON = args
+			inv.ArgsJSON = layer.Args
 			return nil
 		}
 	}
-	if p, ok := intr.(predecidedCall); ok && p.Predecided() {
-		return finishOnCallLayer(inv, intr, store)
+	if perm, ok := intr.(*interrupt.ToolPermissionInterrupt); ok && perm.SelectedKind != "" {
+		return finishOnCallLayer(inv, perm, stages)
 	}
 	resolved, err := inv.Runtime.AdoptInterrupt(intr)
 	if err != nil {
 		return err
 	}
-	return finishOnCallLayer(inv, resolved, store)
+	return finishOnCallLayer(inv, resolved, stages)
 }
 
-func finishOnCallLayer(inv *ToolInvocation, resolved Interrupt, store onCallStore) error {
+func finishOnCallLayer(inv *ToolInvocation, resolved Interrupt, stages *session.OnCallStore) error {
 	denied := false
-	if eff, ok := resolved.(interrupt.CallEffect); ok {
-		denied = eff.CallDenied()
+	if perm, ok := resolved.(*interrupt.ToolPermissionInterrupt); ok {
+		denied = perm.SelectedKind != "" && !perm.Allowed
+		rememberOnCallSession(inv.Runtime, perm)
 	}
-	rememberOnCallSession(inv.Runtime, resolved)
-	if store != nil {
-		store.RecordOnCallStage(inv.Runtime.CurrentToolCallID(), resolved.TypeName(), inv.ArgsJSON, denied)
+	if stages != nil {
+		stages.Record(inv.Runtime.CurrentToolCallID(), resolved.TypeName(), session.OnCallLayer{
+			Args:   inv.ArgsJSON,
+			Denied: denied,
+		})
 	}
 	if denied {
 		return rejectedOnCall(toolNameOf(*inv))
@@ -159,11 +151,7 @@ func finishOnCallLayer(inv *ToolInvocation, resolved Interrupt, store onCallStor
 	return nil
 }
 
-func rememberOnCallSession(rt HarnessRuntime, resolved Interrupt) {
-	perm, ok := resolved.(*interrupt.ToolPermissionInterrupt)
-	if !ok {
-		return
-	}
+func rememberOnCallSession(rt HarnessRuntime, perm *interrupt.ToolPermissionInterrupt) {
 	switch perm.SelectedKind {
 	case interrupt.PermissionAllowAlways:
 		rt.RememberPermissionAllow(perm.ToolName)

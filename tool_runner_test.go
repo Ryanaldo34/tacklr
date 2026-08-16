@@ -481,13 +481,14 @@ func drainYield(t *testing.T, ch <-chan StreamEvent) (id, kind string) {
 	return "", ""
 }
 
-func onCallRuntime() session.Runtime {
+func onCallRuntime() (session.Runtime, *session.OnCallStore) {
+	sm := session.NewSessionManager()
 	ch := make(chan streaming.StreamEvent, 8)
 	go func() {
 		for range ch {
 		}
 	}()
-	return session.NewRuntime(ch, session.NewSessionManager()).WithToolCallID("c1")
+	return session.NewRuntime(ch, sm).WithToolCallID("c1"), sm.OnCall()
 }
 
 func requireParked(t *testing.T, err error, kind string) {
@@ -514,8 +515,8 @@ func TestOnCallMiddleware_permissionThenInvoke(t *testing.T) {
 			return "ok", nil
 		},
 	})
-	rt := onCallRuntime()
-	runner := newToolRunner(onCallMiddleware())
+	rt, stages := onCallRuntime()
+	runner := newToolRunner(onCallMiddleware(stages))
 	inv := ToolInvocation{Tool: tool, ArgsJSON: `{"path":"/a"}`, Runtime: rt}
 
 	_, _, err := runner.Run(t.Context(), inv)
@@ -545,17 +546,18 @@ func TestOnCallMiddleware_permissionMemory(t *testing.T) {
 			return "secret", nil
 		},
 	})
-	rt := onCallRuntime()
+	rt, stages := onCallRuntime()
 	rt.RememberPermissionAllow("sensitive")
-	runner := newToolRunner(onCallMiddleware())
+	runner := newToolRunner(onCallMiddleware(stages))
 	inv := ToolInvocation{Tool: tool, ArgsJSON: `{}`, Runtime: rt}
 	out, _, err := runner.Run(t.Context(), inv)
 	if err != nil || calls != 1 || out != "secret" {
 		t.Fatalf("allow-always: calls=%d out=%q err=%v", calls, out, err)
 	}
 
-	denyRT := onCallRuntime()
+	denyRT, denyStages := onCallRuntime()
 	denyRT.RememberPermissionDeny("sensitive")
+	runner = newToolRunner(onCallMiddleware(denyStages))
 	denyInv := ToolInvocation{Tool: tool, ArgsJSON: `{}`, Runtime: denyRT}
 	_, _, err = runner.Run(t.Context(), denyInv)
 	if !errors.Is(err, ErrToolPermissionDenied) || calls != 1 {
@@ -574,7 +576,7 @@ func TestOnCallMiddleware_requiresRuntime(t *testing.T) {
 		OnCall:  OnCalls(ToolPermissionOnCall),
 		Handler: func(ctx context.Context) (string, error) { return "x", nil },
 	})
-	_, _, err := newToolRunner(onCallMiddleware()).Run(t.Context(), ToolInvocation{
+	_, _, err := newToolRunner(onCallMiddleware(nil)).Run(t.Context(), ToolInvocation{
 		Tool: tool, ArgsJSON: `{}`,
 	})
 	if !errors.Is(err, ErrFailed) {
@@ -628,8 +630,8 @@ func TestOnCallMiddleware_emptyStackInvokes(t *testing.T) {
 		Name:    "echo",
 		Handler: func(ctx context.Context) (string, error) { return "hi", nil },
 	})
-	rt := onCallRuntime()
-	out, _, err := newToolRunner(onCallMiddleware()).Run(t.Context(), ToolInvocation{
+	rt, stages := onCallRuntime()
+	out, _, err := newToolRunner(onCallMiddleware(stages)).Run(t.Context(), ToolInvocation{
 		Tool: tool, ArgsJSON: `{}`, Runtime: rt,
 	})
 	if err != nil || out != "hi" {

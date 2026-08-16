@@ -176,7 +176,6 @@ type Todo = streaming.Todo
 type (
 	Interrupt               = interrupt.Interrupt
 	PayloadValidator        = interrupt.PayloadValidator
-	CallEffect              = interrupt.CallEffect
 	UserChoice              = interrupt.UserChoice
 	UserSelectionInterrupt  = interrupt.UserSelectionInterrupt
 	ToolPermissionInterrupt = interrupt.ToolPermissionInterrupt
