@@ -40,7 +40,7 @@ func TestACP_elicitationForm_resolvesInterruptAndCompletes(t *testing.T) {
 	optionsJSON := `[{"title":"Option A","description":"First","isRecommended":true},{"title":"Option B","description":"Second","isRecommended":false}]`
 	interruptTool := tacklr.NewTool(tacklr.ToolConfig{
 		Name: "ask_user",
-		Handler: func(ctx context.Context, _ struct{}, runtime *tacklr.HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, _ struct{}, runtime tacklr.HarnessRuntime) (string, error) {
 			intr, err := runtime.RaiseInterrupt("user_selection_choice", []byte(optionsJSON))
 			if err != nil {
 				return "", err
@@ -704,7 +704,7 @@ func TestACP_elicitationForm_declineEndsPrompt(t *testing.T) {
 	optionsJSON := `[{"title":"A","description":"","isRecommended":true},{"title":"B","description":"","isRecommended":false}]`
 	interruptTool := tacklr.NewTool(tacklr.ToolConfig{
 		Name: "ask_user",
-		Handler: func(ctx context.Context, _ struct{}, runtime *tacklr.HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, _ struct{}, runtime tacklr.HarnessRuntime) (string, error) {
 			_, err := runtime.RaiseInterrupt("user_selection_choice", []byte(optionsJSON))
 			return "", err
 		},
@@ -820,7 +820,7 @@ func TestACP_elicitationForm_cancelEndsPrompt(t *testing.T) {
 	optionsJSON := `[{"title":"A","description":"","isRecommended":true},{"title":"B","description":"","isRecommended":false}]`
 	interruptTool := tacklr.NewTool(tacklr.ToolConfig{
 		Name: "ask_user",
-		Handler: func(ctx context.Context, _ struct{}, runtime *tacklr.HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, _ struct{}, runtime tacklr.HarnessRuntime) (string, error) {
 			_, err := runtime.RaiseInterrupt("user_selection_choice", []byte(optionsJSON))
 			return "", err
 		},
@@ -939,7 +939,7 @@ func TestACP_elicitation_malformedInterruptEndsTurn(t *testing.T) {
 	optionsJSON := `[{"title":"only-one"}]` // < 2 options
 	interruptTool := tacklr.NewTool(tacklr.ToolConfig{
 		Name: "ask_user",
-		Handler: func(ctx context.Context, _ struct{}, runtime *tacklr.HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, _ struct{}, runtime tacklr.HarnessRuntime) (string, error) {
 			_, err := runtime.RaiseInterrupt("user_selection_choice", []byte(optionsJSON))
 			return "", err
 		},

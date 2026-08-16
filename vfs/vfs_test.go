@@ -26,7 +26,7 @@ func TestMountSession_localSession(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ms := vfs.NewMountSession("sess-1", reg)
+	ms := vfs.MustNewMountSession("sess-1", reg)
 	if err := ms.Materialize(ctx, []vfs.MountSpec{
 		{Point: "/work", Profile: "scratch"},
 		{Point: "/work/nested", Profile: "scratch", ReadOnly: true, Params: map[string]string{"subpath": "nested"}},
@@ -139,7 +139,7 @@ func TestMountSession_localSession(t *testing.T) {
 
 	// Rematerialize from Specs (restart shape)
 	specs := ms.Specs()
-	ms2 := vfs.NewMountSession("sess-2", reg)
+	ms2 := vfs.MustNewMountSession("sess-2", reg)
 	if err := ms2.Materialize(ctx, specs); err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +171,7 @@ func TestMountSession_byteProviderWriteAndLimits(t *testing.T) {
 	if err := reg.Register(memFactory{id: "mem", store: store}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.NewMountSession("mem-sess", reg)
+	ms := vfs.MustNewMountSession("mem-sess", reg)
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/mem", Profile: "mem"}); err != nil {
 		t.Fatal(err)
 	}
@@ -274,7 +274,7 @@ func TestDocument_session(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.NewMountSession("doc-sess", reg)
+	ms := vfs.MustNewMountSession("doc-sess", reg)
 	if err := ms.Materialize(ctx, []vfs.MountSpec{
 		{Point: "/work", Profile: "scratch"},
 		{Point: "/ro", Profile: "scratch", ReadOnly: true, Params: map[string]string{"subpath": "ro"}},
@@ -493,6 +493,16 @@ func TestDocument_session(t *testing.T) {
 	if err := ms.WriteDocument(ctx, huge); !errors.Is(err, vfs.ErrTooLarge) {
 		t.Fatalf("oversize write: %v", err)
 	}
+	note, err := ms.ReadText(ctx, "/work/note.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, err := vfs.EncodeTextual(note); err != nil || string(b) != "A\nB\nC\nD\n" {
+		t.Fatalf("EncodeTextual = %q err=%v", b, err)
+	}
+	if _, err := vfs.EncodeTextual(huge); !errors.Is(err, vfs.ErrTooLarge) {
+		t.Fatalf("oversize encode: %v", err)
+	}
 
 	if mt, err := ms.Classify(ctx, "/work/note.txt", nil); err != nil || mt != "text/plain" {
 		t.Fatalf("Classify: %q err=%v", mt, err)
@@ -593,7 +603,7 @@ func TestMountSession_configErrors(t *testing.T) {
 	if !reg.HasProfile("scratch") || reg.HasProfile("nope") {
 		t.Fatal("HasProfile")
 	}
-	ms := vfs.NewMountSession("s", reg)
+	ms := vfs.MustNewMountSession("s", reg)
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/x", Profile: "nope"}); !errors.Is(err, vfs.ErrUnknownProfile) {
 		t.Fatalf("unknown profile: %v", err)
 	}
@@ -622,13 +632,12 @@ func TestMountSession_configErrors(t *testing.T) {
 	if err := ms.Unmount("/missing"); !errors.Is(err, vfs.ErrNotMounted) {
 		t.Fatalf("unmount missing: %v", err)
 	}
-	// nil registry session
-	ms2 := vfs.NewMountSession("s2", nil)
-	if err := ms2.Mount(ctx, vfs.MountSpec{Point: "/x", Profile: "scratch"}); err == nil {
-		t.Fatal("nil registry mount")
+	// nil registry session is rejected at construct
+	if _, err := vfs.NewMountSession("s2", nil); err == nil {
+		t.Fatal("nil registry construct")
 	}
-	if err := ms2.Materialize(ctx, []vfs.MountSpec{{Point: "/x", Profile: "scratch"}}); err == nil {
-		t.Fatal("nil registry materialize")
+	if _, err := vfs.NewMountSession("", reg); err == nil {
+		t.Fatal("empty session id construct")
 	}
 	creg := vfs.NewContentRegistry()
 	if err := creg.Register(nil); err == nil {
@@ -651,7 +660,7 @@ func TestMountSession_configErrors(t *testing.T) {
 		t.Fatalf("codec cancel: %v", err)
 	}
 	// materialize duplicate points
-	ms3 := vfs.NewMountSession("s3", reg)
+	ms3 := vfs.MustNewMountSession("s3", reg)
 	if err := ms3.Materialize(ctx, []vfs.MountSpec{
 		{Point: "/d", Profile: "scratch"},
 		{Point: "/d", Profile: "scratch"},

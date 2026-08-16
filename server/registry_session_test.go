@@ -99,18 +99,30 @@ func TestRunTurn_twoTurnsKeepHostDirOrList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h1 := s1.Harness
+	if s1.SessionID() != thread {
+		t.Fatalf("SessionID = %q, want %q", s1.SessionID(), thread)
+	}
+	if s1.VFS() == nil {
+		t.Fatal("want VFS on first turn")
+	}
+	h1 := s1.harness
 	drainTurn(t, s1)
+	if s1.SessionID() != "" || s1.VFS() != nil {
+		t.Fatal("Close must release SessionID and VFS")
+	}
 
 	s2, err := r.RunTurn(ctx, TurnRequest{AgentID: "default", ThreadID: thread, Prompt: "two"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	h2 := s2.Harness
+	h2 := s2.harness
 	if h2 == h1 {
 		t.Fatal("want a new harness each turn")
 	}
-	ms := h2.VFS()
+	if s2.SessionID() != thread {
+		t.Fatalf("SessionID = %q, want %q", s2.SessionID(), thread)
+	}
+	ms := s2.VFS()
 	if ms == nil {
 		t.Fatal("want VFS")
 	}
@@ -183,7 +195,7 @@ func TestRunTurn_unavailableProjectionStillCompletes(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { r.DropLiveHarness("sess-noproj") })
-	if s.Harness.VFS() != nil {
+	if s.VFS() != nil {
 		t.Fatal("want no VFS when projection is unavailable")
 	}
 	var saw bool
@@ -218,7 +230,7 @@ func TestRunTurn_failedResumeThenFreshPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h1 := s1.Harness
+	h1 := s1.harness
 	drainTurn(t, s1)
 
 	_, err = r.RunTurn(ctx, TurnRequest{
@@ -235,14 +247,17 @@ func TestRunTurn_failedResumeThenFreshPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s3.Harness == h1 {
+	if s3.harness == h1 {
 		t.Fatal("want a new harness after dump")
 	}
-	if vfs.FuseAvailable() && s3.Harness.VFS().HostDir() == "" {
+	if s3.SessionID() != thread {
+		t.Fatalf("SessionID = %q, want %q", s3.SessionID(), thread)
+	}
+	if vfs.FuseAvailable() && s3.VFS().HostDir() == "" {
 		t.Fatal("HostDir empty on third prompt")
 	}
 	if !vfs.FuseAvailable() {
-		if _, err := s3.Harness.VFS().ReadDir(ctx, "/work"); err != nil {
+		if _, err := s3.VFS().ReadDir(ctx, "/work"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -269,14 +284,17 @@ func TestRunTurn_coldRunHarnessFailureThenFreshPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s3.Harness == nil {
+	if s3.harness == nil {
 		t.Fatal("want constructed harness")
 	}
+	if s3.SessionID() != thread {
+		t.Fatalf("SessionID = %q, want %q", s3.SessionID(), thread)
+	}
 	if vfs.FuseAvailable() {
-		if s3.Harness.VFS() == nil || s3.Harness.VFS().HostDir() == "" {
+		if s3.VFS() == nil || s3.VFS().HostDir() == "" {
 			t.Fatal("want live HostDir on reconstructed harness")
 		}
-	} else if _, err := s3.Harness.VFS().ReadDir(ctx, "/work"); err != nil {
+	} else if _, err := s3.VFS().ReadDir(ctx, "/work"); err != nil {
 		t.Fatal(err)
 	}
 	drainTurn(t, s3)
@@ -324,8 +342,117 @@ func TestRunTurn_fuseMountFailHard(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { r.DropLiveHarness(thread) })
-	if s.Harness.VFS().HostDir() == "" {
+	if s.SessionID() != thread {
+		t.Fatalf("SessionID = %q, want %q", s.SessionID(), thread)
+	}
+	if s.VFS().HostDir() == "" {
 		t.Fatal("want HostDir after unblocked remount")
 	}
 	drainTurn(t, s)
+}
+
+type flipProjection struct{ calls int }
+
+func (p *flipProjection) Available() bool {
+	p.calls++
+	return p.calls == 1
+}
+func (p *flipProjection) Attach(*vfs.MountSession, string) error { return nil }
+
+// TestRunTurn_vfsProjection_inProcessAndFlip covers the two host projection
+// outcomes that are not already hit by the FUSE two-turn test: DirectProjection
+// write/read across turns, and a projection that refuses Attach after construct.
+func TestRunTurn_vfsProjection_inProcessAndFlip(t *testing.T) {
+	ctx := context.Background()
+	r := NewRegistry(testStore(t), "default",
+		WithVFSProjection(DirectProjection{}),
+		WithTracer(telemetry.Tracer()),
+	)
+	r.Register("default", vfsSpec(t, okModel(), "/work"))
+	thread := "sess-direct"
+	s, err := r.RunTurn(ctx, TurnRequest{AgentID: "default", ThreadID: thread, Prompt: "hi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { r.DropLiveHarness(thread) })
+	if err := s.VFS().WriteFile(ctx, "/work/note.md", []byte("direct\n")); err != nil {
+		t.Fatal(err)
+	}
+	drainTurn(t, s)
+	s2, err := r.RunTurn(ctx, TurnRequest{AgentID: "default", ThreadID: thread, Prompt: "again"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s2.VFS().ReadFile(ctx, "/work/note.md")
+	if err != nil || string(got) != "direct\n" {
+		t.Fatalf("second turn VFS = %q err=%v", got, err)
+	}
+	drainTurn(t, s2)
+
+	flip := NewRegistry(testStore(t), "default", WithVFSProjection(&flipProjection{}))
+	flip.Register("default", vfsSpec(t, okModel(), "/work"))
+	sf, err := flip.RunTurn(ctx, TurnRequest{AgentID: "default", ThreadID: "sess-flip", Prompt: "hi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { flip.DropLiveHarness("sess-flip") })
+	if err := sf.VFS().WriteFile(ctx, "/work/ok.md", []byte("ok\n")); err != nil {
+		t.Fatal(err)
+	}
+	drainTurn(t, sf)
+}
+
+// TestRunTurn_constructFailures is fail-closed construct: blank thread id,
+// unknown VFS profile, missing skill dir, and FuseProjection session-id sanitize.
+func TestRunTurn_constructFailures(t *testing.T) {
+	ctx := context.Background()
+	r := NewRegistry(testStore(t), "default", WithVFSProjection(DirectProjection{}))
+	r.Register("default", vfsSpec(t, okModel(), "/work"))
+	_, err := r.RunTurn(ctx, TurnRequest{AgentID: "default", ThreadID: "   ", Prompt: "hi"})
+	if err == nil || !strings.Contains(err.Error(), "session id") {
+		t.Fatalf("want session id construct error, got %v", err)
+	}
+
+	bad := vfsSpec(t, okModel(), "/work")
+	bad.FSBootstrap = []vfs.MountSpec{{Point: "/work", Profile: "nope"}}
+	r.Register("default", bad)
+	_, err = r.RunTurn(ctx, TurnRequest{AgentID: "default", ThreadID: "sess-bad-profile", Prompt: "hi"})
+	if err == nil || !strings.Contains(err.Error(), "nope") {
+		t.Fatalf("want unknown profile error, got %v", err)
+	}
+
+	r.Register("default", AgentSpec{
+		Config: tacklr.Config{
+			MaxWindowSize:    8192,
+			SkillDirectories: []string{filepath.Join(t.TempDir(), "does-not-exist")},
+		},
+		Model: okModel(),
+	})
+	_, err = r.RunTurn(ctx, TurnRequest{AgentID: "default", ThreadID: "sess-skills", Prompt: "hi"})
+	if err == nil || !strings.Contains(err.Error(), "initialize skills") {
+		t.Fatalf("want skills construct error, got %v", err)
+	}
+
+	reg := vfs.NewBackendRegistry()
+	if err := reg.Register(vfs.LocalFactory{ID: "local", Base: t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+	ms := vfs.MustNewMountSession("dot-sess", reg)
+	if err := ms.Materialize(ctx, []vfs.MountSpec{{Point: "/work", Profile: "local"}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ms.Close() })
+	err = FuseProjection{}.Attach(ms, ".")
+	if vfs.FuseAvailable() {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(ms.HostDir(), "session") {
+			t.Fatalf("HostDir = %q, want sanitized session path", ms.HostDir())
+		}
+		return
+	}
+	if err == nil {
+		t.Fatal("want Attach error when FUSE is unavailable")
+	}
 }

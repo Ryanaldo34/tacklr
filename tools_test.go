@@ -59,7 +59,7 @@ func errHandler(ctx context.Context, args BasicArgs) (string, error) {
 func TestInvoke(t *testing.T) {
 	t.Run("returns raw string", func(t *testing.T) {
 		tool := NewTool(ToolConfig{Name: "zero", Handler: zeroArgsStringHandler})
-		res, err := tool.invoke(context.Background(), "", HarnessRuntime{})
+		res, err := tool.invoke(context.Background(), "", nil)
 		got := res.output
 		if err != nil {
 			t.Fatal(err)
@@ -71,7 +71,7 @@ func TestInvoke(t *testing.T) {
 
 	t.Run("marshals non-string return", func(t *testing.T) {
 		tool := NewTool(ToolConfig{Name: "zero_int", Handler: zeroArgsIntHandler})
-		res, err := tool.invoke(context.Background(), "", HarnessRuntime{})
+		res, err := tool.invoke(context.Background(), "", nil)
 		got := res.output
 		if err != nil {
 			t.Fatal(err)
@@ -89,7 +89,7 @@ func TestInvoke(t *testing.T) {
 			return "result", nil
 		}
 		tool := NewTool(ToolConfig{Name: "handler", Handler: h})
-		res, err := tool.invoke(context.Background(), `{"name":"test","age":10}`, HarnessRuntime{})
+		res, err := tool.invoke(context.Background(), `{"name":"test","age":10}`, nil)
 		got := res.output
 		if err != nil {
 			t.Fatal(err)
@@ -101,7 +101,7 @@ func TestInvoke(t *testing.T) {
 
 	t.Run("propagates handler error", func(t *testing.T) {
 		tool := NewTool(ToolConfig{Name: "err", Handler: errHandler})
-		_, err := tool.invoke(context.Background(), `{"name":"x","age":1}`, HarnessRuntime{})
+		_, err := tool.invoke(context.Background(), `{"name":"x","age":1}`, nil)
 		if err == nil || err.Error() != "boom" {
 			t.Fatalf("got %v, want boom", err)
 		}
@@ -109,7 +109,7 @@ func TestInvoke(t *testing.T) {
 
 	t.Run("bad json args errors", func(t *testing.T) {
 		tool := NewTool(ToolConfig{Name: "basic", Handler: basicHandler})
-		_, err := tool.invoke(context.Background(), `{bad`, HarnessRuntime{})
+		_, err := tool.invoke(context.Background(), `{bad`, nil)
 		if err == nil {
 			t.Fatal("expected error")
 		}
@@ -128,7 +128,7 @@ func TestInvoke(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 
-		_, err := tool.invoke(ctx, "", HarnessRuntime{})
+		_, err := tool.invoke(ctx, "", nil)
 		if err == nil {
 			t.Fatal("expected error")
 		}
@@ -268,6 +268,40 @@ func TestAsJson(t *testing.T) {
 
 // TestMakeSchemaNullable_outcomes covers each rewrite branch of makeSchemaNullable
 // (used for strict optional fields). Cheap pure paths that lift library total cover.
+// TestTypeToJSONSchema_structuredOutput is the public structured-output
+// helper: omitempty fields stay optional (non-strict).
+func TestTypeToJSONSchema_structuredOutput(t *testing.T) {
+	type hostOut struct {
+		Title string  `json:"title" desc:"Headline"`
+		Note  *string `json:"note,omitempty" desc:"Optional note"`
+		Count int     `json:"count"`
+	}
+	schema, err := TypeToJSONSchema(hostOut{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if schema["type"] != "object" {
+		t.Fatalf("type = %v", schema["type"])
+	}
+	props, _ := schema["properties"].(map[string]any)
+	title, _ := props["title"].(map[string]any)
+	if title["type"] != "string" || title["description"] != "Headline" {
+		t.Fatalf("title = %#v", title)
+	}
+	note, _ := props["note"].(map[string]any)
+	if note["type"] != "string" || note["description"] != "Optional note" {
+		t.Fatalf("note must stay a plain string (non-strict), got %#v", note)
+	}
+	req, _ := schema["required"].([]string)
+	if len(req) != 2 || req[0] != "title" || req[1] != "count" {
+		t.Fatalf("required = %v, want title and count only", req)
+	}
+	_, err = TypeToJSONSchema(nil)
+	if err == nil || !strings.Contains(err.Error(), "nil value") {
+		t.Fatalf("want nil-value error, got %v", err)
+	}
+}
+
 func TestToolsAsJson(t *testing.T) {
 	tools := []*Tool{
 		NewTool(ToolConfig{Name: "a", Handler: zeroArgsStringHandler}),
@@ -361,13 +395,13 @@ func TestNewTool_pointerArgsAndNonStringResultAndBadArgs(t *testing.T) {
 			return a.Name, nil
 		},
 	})
-	res, err := tool.invoke(context.Background(), `{"name":"x"}`, HarnessRuntime{})
+	res, err := tool.invoke(context.Background(), `{"name":"x"}`, nil)
 	got := res.output
 	if err != nil || got != "x" {
 		t.Fatalf("got %q %v", got, err)
 	}
 	// Type mismatch in JSON → invoke error.
-	_, err = tool.invoke(context.Background(), `{"name":123}`, HarnessRuntime{})
+	_, err = tool.invoke(context.Background(), `{"name":123}`, nil)
 	if err == nil {
 		t.Fatal("want unmarshal error")
 	}
@@ -383,7 +417,7 @@ func TestNewTool_pointerArgsAndNonStringResultAndBadArgs(t *testing.T) {
 			}{N: 7}, nil
 		},
 	})
-	res, err = tool2.invoke(context.Background(), "", HarnessRuntime{})
+	res, err = tool2.invoke(context.Background(), "", nil)
 	got = res.output
 	if err != nil || !strings.Contains(got, "7") {
 		t.Fatalf("got %q %v", got, err)
@@ -396,7 +430,7 @@ func TestNewTool_pointerArgsAndNonStringResultAndBadArgs(t *testing.T) {
 			return make(chan int), nil
 		},
 	})
-	_, err = tool3.invoke(context.Background(), "", HarnessRuntime{})
+	_, err = tool3.invoke(context.Background(), "", nil)
 	if err == nil {
 		t.Fatal("want marshal result error")
 	}

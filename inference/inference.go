@@ -51,12 +51,12 @@ func NewOpenAIInferenceStrategy(client *http.Client) *OpenAIInferenceStrategy {
 	}
 }
 
-func (s *OpenAIInferenceStrategy) WithApiKey(key string) tacklr.InferenceStrategy {
+func (s *OpenAIInferenceStrategy) WithApiKey(key string) *OpenAIInferenceStrategy {
 	s.apiKey = key
 	return s
 }
 
-func (s *OpenAIInferenceStrategy) WithModel(model string) tacklr.InferenceStrategy {
+func (s *OpenAIInferenceStrategy) WithModel(model string) *OpenAIInferenceStrategy {
 	s.model = model
 	return s
 }
@@ -70,12 +70,12 @@ func (s *OpenAIInferenceStrategy) ModelTelemetryIdentity() telemetry.ModelIdenti
 	return telemetry.NewModelIdentity(s.model, s.baseURL)
 }
 
-func (s *OpenAIInferenceStrategy) WithURL(url string) tacklr.InferenceStrategy {
+func (s *OpenAIInferenceStrategy) WithURL(url string) *OpenAIInferenceStrategy {
 	s.baseURL = url
 	return s
 }
 
-func (s *OpenAIInferenceStrategy) WithReasoningLevel(level string) tacklr.InferenceStrategy {
+func (s *OpenAIInferenceStrategy) WithReasoningLevel(level string) *OpenAIInferenceStrategy {
 	s.reasoning = level
 	// Default summary so Azure OpenAI / OpenAI stream thought deltas as
 	// response.reasoning_summary_text.delta (mapped to StreamEventReasoning).
@@ -103,7 +103,7 @@ func (s *OpenAIInferenceStrategy) WithMaxOutputTokens(n int) *OpenAIInferenceStr
 	return s
 }
 
-func (s *OpenAIInferenceStrategy) WithStructuredOutput(v any) tacklr.InferenceStrategy {
+func (s *OpenAIInferenceStrategy) WithStructuredOutput(v any) *OpenAIInferenceStrategy {
 	if v == nil {
 		s.structuredOutputSchema = nil
 		s.structuredOutputName = ""
@@ -128,10 +128,6 @@ func (s *OpenAIInferenceStrategy) SupportsMIME(mimeType string) bool {
 		return streaming.IsTextMIME(mimeType)
 	}
 	return modelSupportsMIME(s.model, mimeType)
-}
-
-func (s *OpenAIInferenceStrategy) CompressContextWindow() error {
-	return nil
 }
 
 func (s *OpenAIInferenceStrategy) MaxContextWindow() (int, error) {
@@ -245,7 +241,7 @@ func (s *OpenAIInferenceStrategy) CountTokens(ctx context.Context, messages []*t
 	return countResp.InputTokens, nil
 }
 
-func (s *OpenAIInferenceStrategy) Invoke(ctx context.Context, messages []*tacklr.Message, tools []*tacklr.Tool) (chan tacklr.LLMResponseChunk, error) {
+func (s *OpenAIInferenceStrategy) Invoke(ctx context.Context, messages []*tacklr.Message, tools []*tacklr.Tool, systemPrompt string) (chan tacklr.LLMResponseChunk, error) {
 	if s.apiKey == "" {
 		return nil, fmt.Errorf("invoke: %w", tacklr.ErrApiKeyNotSet)
 	}
@@ -276,8 +272,12 @@ func (s *OpenAIInferenceStrategy) Invoke(ctx context.Context, messages []*tacklr
 		reqBody.MaxOutputTokens = s.maxOutputTokens
 	}
 
-	if s.instructions != "" {
-		reqBody.Instructions = &s.instructions
+	prompt := systemPrompt
+	if prompt == "" {
+		prompt = s.instructions
+	}
+	if prompt != "" {
+		reqBody.Instructions = &prompt
 	}
 
 	if s.reasoning != "" || s.reasoningSummary != "" {

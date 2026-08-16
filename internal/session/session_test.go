@@ -24,7 +24,7 @@ func TestCheckpointer_roundTrip(t *testing.T) {
 			}
 		}()
 		return c
-	}(), nil, sm)
+	}(), sm)
 	rt.StateSet("k", "v")
 
 	cp, err := session.NewCheckpointer().Capture(
@@ -54,7 +54,7 @@ func TestCheckpointer_roundTrip(t *testing.T) {
 			}
 		}()
 		return c
-	}(), nil, sm2)
+	}(), sm2)
 	if v, ok := rt2.StateGet("k"); !ok || v != "v" {
 		t.Fatalf("state %v %v", v, ok)
 	}
@@ -87,18 +87,6 @@ func TestCheckpointer_applyNilMaps_defaults(t *testing.T) {
 
 // TestPlanStore_lifecycle covers set/get/document/updated/export/load outcomes.
 func TestPlanStore_lifecycle(t *testing.T) {
-	var nilStore *session.PlanStore
-	if nilStore.HasActive() || nilStore.Get() != nil || nilStore.Document() != "" {
-		t.Fatal("nil plan store should be empty-safe")
-	}
-	nilStore.Set(nil)
-	nilStore.SetDocument("x")
-	if nilStore.ConsumeDocumentUpdated() {
-		t.Fatal("nil consume")
-	}
-	nilStore.ExportInto(nil)
-	nilStore.LoadFromState(nil)
-
 	p := session.NewPlanStore()
 	if p.HasActive() {
 		t.Fatal("empty has active")
@@ -168,12 +156,16 @@ func TestSessionManager_stateAndPlan_guards(t *testing.T) {
 			}
 		}()
 		return c
-	}(), nil, sm)
-	rt.StateSet("_plan", "blocked")
+	}(), sm)
+	if err := rt.StateSet("_plan", "blocked"); err == nil {
+		t.Fatal("reserved key should error on set")
+	}
 	if _, ok := rt.StateGet("_plan"); ok {
 		t.Fatal("reserved key blocked on get")
 	}
-	rt.StateSet("ok", 1)
+	if err := rt.StateSet("ok", 1); err != nil {
+		t.Fatal(err)
+	}
 	if v, ok := rt.StateGet("ok"); !ok || v != 1 {
 		t.Fatal("user state")
 	}
@@ -196,8 +188,8 @@ func TestSessionManager_stateAndPlan_guards(t *testing.T) {
 func TestRuntime_interrupts_raiseReturnAdopt(t *testing.T) {
 	sm := session.NewSessionManager()
 	ch := make(chan streaming.StreamEvent, 4)
-	rt := session.NewRuntime(ch, nil, sm)
-	rt.CurrentToolCallID = "tc1"
+	rt := session.NewRuntime(ch, sm)
+	rt = rt.WithToolCallID("tc1")
 
 	// Unknown type.
 	if _, err := rt.RaiseInterrupt("nope", nil); err == nil {
@@ -246,7 +238,7 @@ func TestRuntime_interrupts_raiseReturnAdopt(t *testing.T) {
 	}
 
 	// Raise after resolve short-circuits with resolved value (second raise path).
-	rt.CurrentToolCallID = "tc2"
+	rt = rt.WithToolCallID("tc2")
 	_, err = rt.RaiseInterrupt("user_selection_choice", []byte(`[{"title":"X"}]`))
 	if err == nil {
 		t.Fatal("park")
@@ -261,7 +253,7 @@ func TestRuntime_interrupts_raiseReturnAdopt(t *testing.T) {
 	}
 
 	// Adopt: first parks, second after resolve returns resolved.
-	rt.CurrentToolCallID = "tc3"
+	rt = rt.WithToolCallID("tc3")
 	parked := &interrupt.UserSelectionInterrupt{Options: []interrupt.UserChoice{{Title: "Z"}}}
 	_, err = rt.AdoptInterrupt(parked)
 	if err == nil {
@@ -270,11 +262,11 @@ func TestRuntime_interrupts_raiseReturnAdopt(t *testing.T) {
 	if _, err := rt.AdoptInterrupt(nil); err == nil {
 		t.Fatal("nil adopt")
 	}
-	rt.CurrentToolCallID = ""
+	rt = rt.WithToolCallID("")
 	if _, err := rt.AdoptInterrupt(parked); err == nil {
 		t.Fatal("empty tool call id")
 	}
-	rt.CurrentToolCallID = "tc3"
+	rt = rt.WithToolCallID("tc3")
 	if _, err := rt.ReturnInterrupt("tc3", []byte(`{"selectionIdx":0}`)); err != nil {
 		t.Fatal(err)
 	}
@@ -284,12 +276,26 @@ func TestRuntime_interrupts_raiseReturnAdopt(t *testing.T) {
 	}
 
 	// Tool permission raise + resolve.
-	rt.CurrentToolCallID = "perm"
+	rt = rt.WithToolCallID("perm")
 	_, err = rt.RaiseInterrupt("tool_permission", []byte(`{"toolName":"rm"}`))
 	if err == nil {
 		t.Fatal("park permission")
 	}
 	if _, err := rt.ReturnInterrupt("perm", []byte(`{"optionId":"allow-once"}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	// SessionManager facade: clear, then pending → return without a turn bus.
+	sm.ClearInterrupts()
+	rt = rt.WithToolCallID("sm1")
+	_, err = rt.RaiseInterrupt("tool_permission", []byte(`{"toolName":"ls"}`))
+	if err == nil {
+		t.Fatal("park after ClearInterrupts")
+	}
+	if _, ok := sm.PendingInterrupt("sm1"); !ok {
+		t.Fatal("PendingInterrupt after raise")
+	}
+	if _, err := sm.ReturnInterrupt("sm1", []byte(`{"optionId":"allow-once"}`)); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -298,8 +304,8 @@ func TestRuntime_interrupts_raiseReturnAdopt(t *testing.T) {
 func TestRuntime_emitAndState_channels(t *testing.T) {
 	ch := make(chan streaming.StreamEvent, 2)
 	sm := session.NewSessionManager()
-	rt := session.NewRuntime(ch, nil, sm)
-	rt.CurrentToolCallID = "id1"
+	rt := session.NewRuntime(ch, sm)
+	rt = rt.WithToolCallID("id1")
 	rt.EmitUpdate("hello")
 	ev := <-ch
 	if ev.Type != streaming.StreamEventToolUpdate || ev.Content != "hello" || ev.MessageID != "id1" {
@@ -313,12 +319,14 @@ func TestRuntime_emitAndState_channels(t *testing.T) {
 
 	// Full channel drops non-blocking.
 	full := make(chan streaming.StreamEvent)
-	rtFull := session.NewRuntime(full, nil, sm)
+	rtFull := session.NewRuntime(full, sm)
 	rtFull.EmitUpdate("drop")
 	rtFull.EmitPlanUpdate(nil)
 
 	// SessionManager state without a turn bus.
-	sm.StateSet("z", true)
+	if err := sm.StateSet("z", true); err != nil {
+		t.Fatal(err)
+	}
 	if v, ok := sm.StateGet("z"); !ok || v != true {
 		t.Fatal("session state")
 	}
@@ -336,8 +344,8 @@ func TestSessionManager_snapshotLoadInterrupts_roundTrip(t *testing.T) {
 			}
 		}()
 		return c
-	}(), nil, sm)
-	rt.CurrentToolCallID = "c1"
+	}(), sm)
+	rt = rt.WithToolCallID("c1")
 	_, _ = rt.RaiseInterrupt("user_selection_choice", []byte(`[{"title":"A"}]`))
 	rt.StateSet("u", "v")
 	// reserved key should not appear as user state in snapshot
@@ -375,7 +383,7 @@ func TestSessionManager_snapshotLoadInterrupts_roundTrip(t *testing.T) {
 			}
 		}()
 		return c
-	}(), nil, sm2)
+	}(), sm2)
 	if v, ok := rt2.StateGet("u"); !ok || v != "v" {
 		t.Fatal("user state reload")
 	}
@@ -410,8 +418,8 @@ func TestInterruptMap_unknownType_errors(t *testing.T) {
 			}
 		}()
 		return c
-	}(), nil, sm)
-	rt.CurrentToolCallID = "x"
+	}(), sm)
+	rt = rt.WithToolCallID("x")
 	_, _ = rt.RaiseInterrupt("tool_permission", []byte(`{"toolName":"t"}`))
 	_, pending, _ := sm.SnapshotDurable()
 	b, err := json.Marshal(pending)

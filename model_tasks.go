@@ -69,18 +69,15 @@ type AbsorbResult struct {
 	SummaryChunks []LLMResponseChunk
 }
 
-// ModelTasks is Turn, Absorb, and Handoff against InferenceStrategy and ContextManager.
-type ModelTasks interface {
-	// Turn streams the next model step for the current window and tools.
+// modelTasks is Turn, Absorb, and Handoff against InferenceStrategy and ContextManager.
+type modelTasks interface {
 	Turn(ctx context.Context, tools []*Tool, systemPrompt string) (<-chan LLMResponseChunk, error)
-	// Absorb adds msg under window pressure (may summarize).
 	Absorb(ctx context.Context, msg *Message, tools []*Tool, systemPrompt string) (AbsorbResult, error)
-	// Handoff rebuilds context after complete_todo or plan edit.
 	Handoff(ctx context.Context, plan []Todo, planDoc string, tools []*Tool, systemPrompt string) error
 }
 
-// DefaultModelTasks is the product ModelTasks implementation.
-type DefaultModelTasks struct {
+// defaultModelTasks is the product modelTasks implementation.
+type defaultModelTasks struct {
 	model    InferenceStrategy
 	context  ContextManager
 	policy   ContextPolicy
@@ -90,10 +87,8 @@ type DefaultModelTasks struct {
 	countScratch []*Message // reused for progressive token counts
 }
 
-// NewDefaultModelTasks builds DefaultModelTasks for model, context, and policy.
-func NewDefaultModelTasks(model InferenceStrategy, ctx ContextManager, policy ContextPolicy, maxSize int) *DefaultModelTasks {
-	// newHarnessBase fills missing policy fields before this is called.
-	return &DefaultModelTasks{
+func newDefaultModelTasks(model InferenceStrategy, ctx ContextManager, policy ContextPolicy, maxSize int) *defaultModelTasks {
+	return &defaultModelTasks{
 		model:   model,
 		context: ctx,
 		policy:  policy,
@@ -101,22 +96,19 @@ func NewDefaultModelTasks(model InferenceStrategy, ctx ContextManager, policy Co
 	}
 }
 
-func (t *DefaultModelTasks) Turn(ctx context.Context, tools []*Tool, systemPrompt string) (<-chan LLMResponseChunk, error) {
+func (t *defaultModelTasks) Turn(ctx context.Context, tools []*Tool, systemPrompt string) (<-chan LLMResponseChunk, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	// Context is only reshaped on Absorb pressure (token threshold) or Handoff
 	// after complete_todo / plan revision — never by dropping tool history here.
-	if systemPrompt != "" {
-		t.model.SetSystemPrompt(systemPrompt)
-	}
 	msgs := t.context.Messages()
 	t.modelSeq++
 	if src, ok := t.model.(modelIdentityProvider); ok {
 		ctx = telemetry.ContextWithModelIdentity(ctx, src.ModelTelemetryIdentity())
 	}
 	ctx, span := telemetry.StartModelSpan(ctx, telemetry.ModelPhaseTurn, t.modelSeq, windowShape(msgs))
-	ch, err := t.model.Invoke(ctx, msgs, tools)
+	ch, err := t.model.Invoke(ctx, msgs, tools, systemPrompt)
 	if err != nil {
 		span.End(err, telemetry.TokenUsage{})
 		return nil, err
@@ -124,11 +116,11 @@ func (t *DefaultModelTasks) Turn(ctx context.Context, tools []*Tool, systemPromp
 	return watchModelStream(ctx, span, ch), nil
 }
 
-func (t *DefaultModelTasks) Absorb(ctx context.Context, msg *Message, tools []*Tool, systemPrompt string) (AbsorbResult, error) {
+func (t *defaultModelTasks) Absorb(ctx context.Context, msg *Message, tools []*Tool, systemPrompt string) (AbsorbResult, error) {
 	if err := ctx.Err(); err != nil {
 		return AbsorbResult{}, err
 	}
-	window, chunks, _, err := t.absorbFit(ctx, t.context.Messages(), msg, tools, systemPrompt)
+	window, chunks, _, err := t.absorbFit(ctx, t.context.Messages(), msg, tools)
 	if err != nil {
 		return AbsorbResult{}, err
 	}
@@ -136,7 +128,7 @@ func (t *DefaultModelTasks) Absorb(ctx context.Context, msg *Message, tools []*T
 	return AbsorbResult{SummaryChunks: chunks}, nil
 }
 
-func (t *DefaultModelTasks) Handoff(ctx context.Context, plan []Todo, planDoc string, tools []*Tool, systemPrompt string) error {
+func (t *defaultModelTasks) Handoff(ctx context.Context, plan []Todo, planDoc string, tools []*Tool, systemPrompt string) error {
 	open := 0
 	for i := range plan {
 		if plan[i].Status != streaming.TodoStatusCompleted {
@@ -146,7 +138,7 @@ func (t *DefaultModelTasks) Handoff(ctx context.Context, plan []Todo, planDoc st
 	ctx, span := telemetry.StartHandoffSpan(ctx, open)
 	slog.InfoContext(ctx, "running context handoff", "area", telemetry.AreaModelTasks, "open_todos", open)
 
-	window, usedFallback, err := handoffGenerate(ctx, t.context.Messages(), plan, planDoc, t.model, tools, systemPrompt)
+	window, usedFallback, err := handoffGenerate(ctx, t.context.Messages(), plan, planDoc, t.model, tools)
 	if err != nil {
 		span.End(telemetry.HandoffOutcomeError, err)
 		return err
@@ -162,12 +154,11 @@ func (t *DefaultModelTasks) Handoff(ctx context.Context, plan []Todo, planDoc st
 
 // absorbFit collapses under pressure then appends newMsg.
 // Uses InferenceStrategy.CountTokens (provider-specific) and Invoke for summary.
-func (t *DefaultModelTasks) absorbFit(
+func (t *defaultModelTasks) absorbFit(
 	ctx context.Context,
 	window []*Message,
 	newMsg *Message,
 	tools []*Tool,
-	restoreSystemPrompt string,
 ) (out []*Message, chunks []LLMResponseChunk, compressed bool, err error) {
 	model := t.model
 	policy := t.policy
@@ -196,15 +187,10 @@ func (t *DefaultModelTasks) absorbFit(
 	sumPrompt.Grow(280 + len(newMsg.Content))
 	sumPrompt.WriteString("Please summarize the entire message history into a single, concise summary including key items for your current and past tasks with a primary focus on your current task. Current task or follow-up question to answer: ")
 	sumPrompt.WriteString(newMsg.Content)
-	model.SetSystemPrompt(sumPrompt.String())
-
 	anchorLen := protectedPrefixLen(window)
 	anchors := window[:anchorLen]
 	unprotected := window[anchorLen:]
 	if len(unprotected) == 0 {
-		if restoreSystemPrompt != "" {
-			model.SetSystemPrompt(restoreSystemPrompt)
-		}
 		return slices.Clone(countView), nil, false, nil
 	}
 
@@ -255,7 +241,7 @@ func (t *DefaultModelTasks) absorbFit(
 		mctx = telemetry.ContextWithModelIdentity(ctx, src.ModelTelemetryIdentity())
 	}
 	mctx, mspan := telemetry.StartModelSpan(mctx, telemetry.ModelPhaseCompress, t.modelSeq, windowShape(compressSrc))
-	events, err := model.Invoke(mctx, compressSrc, nil)
+	events, err := model.Invoke(mctx, compressSrc, nil, sumPrompt.String())
 	if err != nil {
 		mspan.End(err, telemetry.TokenUsage{})
 		return nil, nil, true, fmt.Errorf("context compress invoke failed: %w", err)
@@ -295,14 +281,11 @@ func (t *DefaultModelTasks) absorbFit(
 	out = append(out, rest...)
 	out = append(out, newMsg)
 
-	if restoreSystemPrompt != "" {
-		model.SetSystemPrompt(restoreSystemPrompt)
-	}
 	return out, outChunks, true, nil
 }
 
 // stageMessages returns t.countScratch resized to n (grows capacity when needed).
-func (t *DefaultModelTasks) stageMessages(n int) []*Message {
+func (t *defaultModelTasks) stageMessages(n int) []*Message {
 	if cap(t.countScratch) < n {
 		t.countScratch = make([]*Message, n)
 	} else {
@@ -318,7 +301,6 @@ func handoffGenerate(
 	planDoc string,
 	model InferenceStrategy,
 	tools []*Tool,
-	restoreSystemPrompt string,
 ) ([]*Message, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, false, err
@@ -352,7 +334,6 @@ Current plan todos:
 	prompt.WriteString(handoffPreamble)
 	prompt.WriteString(planB.String())
 
-	model.SetSystemPrompt(prompt.String())
 	// Handoff is a pure writing task — no tools. On model failure, install a
 	// plan-derived handoff so ACM still rebuilds context.
 	mctx := ctx
@@ -360,7 +341,7 @@ Current plan todos:
 		mctx = telemetry.ContextWithModelIdentity(ctx, src.ModelTelemetryIdentity())
 	}
 	mctx, mspan := telemetry.StartModelSpan(mctx, telemetry.ModelPhaseHandoff, 0, windowShape(window))
-	events, err := model.Invoke(mctx, window, nil)
+	events, err := model.Invoke(mctx, window, nil, prompt.String())
 	var lastCompletedMessage string
 	usedFallback := false
 	if err != nil {
@@ -414,9 +395,6 @@ Current plan todos:
 			Role:    RoleDeveloper,
 			Content: continuePlanNudge,
 		})
-	}
-	if restoreSystemPrompt != "" {
-		model.SetSystemPrompt(restoreSystemPrompt)
 	}
 	return out, usedFallback, nil
 }

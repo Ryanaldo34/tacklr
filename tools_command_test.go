@@ -130,11 +130,11 @@ func newRunCommandSession(t *testing.T) (*vfs.MountSession, HarnessRuntime) {
 	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: t.TempDir()}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.NewMountSession(t.Name(), reg)
+	ms := vfs.MustNewMountSession(t.Name(), reg)
 	if err := ms.Mount(t.Context(), vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
 		t.Fatal(err)
 	}
-	h := NewAgent(t.Context(), AgentOptions{
+	h := mustNewAgent(t, AgentOptions{
 		SessionID:    t.Name(),
 		Store:        stores.NewInMemoryStore(),
 		MountSession: ms,

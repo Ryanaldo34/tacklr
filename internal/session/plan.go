@@ -14,10 +14,12 @@ const (
 	searchNamespaceStateKey = "_search_namespace"
 )
 
-// IsReservedRuntimeStateKey reports keys owned by SessionManager export.
+// IsReservedRuntimeStateKey reports keys owned by SessionManager modules.
 func IsReservedRuntimeStateKey(key string) bool {
 	switch key {
-	case planStateKey, planDocumentStateKey, planDocumentUpdatedKey, searchNamespaceStateKey:
+	case planStateKey, planDocumentStateKey, planDocumentUpdatedKey,
+		searchNamespaceStateKey, parkedWorkersStateKey,
+		permissionAllowKey, permissionDenyKey:
 		return true
 	default:
 		return false
@@ -26,6 +28,7 @@ func IsReservedRuntimeStateKey(key string) bool {
 
 // PlanStore holds the plan document and todo list for Adaptive Case Management.
 // It is a SessionManager module — not exposed on HarnessRuntime.
+// After NewPlanStore / NewSessionManager the receiver is never nil.
 type PlanStore struct {
 	mu              sync.RWMutex
 	todos           []Todo
@@ -40,9 +43,6 @@ func NewPlanStore() *PlanStore {
 
 // HasActive reports whether a todo list is present (write-lock unlock condition).
 func (p *PlanStore) HasActive() bool {
-	if p == nil {
-		return false
-	}
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return len(p.todos) > 0
@@ -51,9 +51,6 @@ func (p *PlanStore) HasActive() bool {
 // Get returns a shallow copy of the current todos, or nil if no plan was ever set.
 // An empty non-nil slice means an explicit empty plan (e.g. after deleting all todos).
 func (p *PlanStore) Get() []Todo {
-	if p == nil {
-		return nil
-	}
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	if p.todos == nil {
@@ -67,9 +64,6 @@ func (p *PlanStore) Get() []Todo {
 // Set replaces the todo list (caller should emit StreamEventPlanUpdate separately).
 // Pass nil to clear the plan entirely; pass a non-nil empty slice for an empty plan.
 func (p *PlanStore) Set(todos []Todo) {
-	if p == nil {
-		return
-	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if todos == nil {
@@ -83,9 +77,6 @@ func (p *PlanStore) Set(todos []Todo) {
 
 // Document returns the plaintext project plan draft.
 func (p *PlanStore) Document() string {
-	if p == nil {
-		return ""
-	}
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.document
@@ -95,9 +86,6 @@ func (p *PlanStore) Document() string {
 // Marks the document updated only when replacing an existing draft with different
 // text (edits), not on the initial install from create_plan.
 func (p *PlanStore) SetDocument(plan string) {
-	if p == nil {
-		return
-	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	prev := p.document
@@ -110,9 +98,6 @@ func (p *PlanStore) SetDocument(plan string) {
 // ConsumeDocumentUpdated returns whether the plan document was updated since the
 // last consume, and clears the flag.
 func (p *PlanStore) ConsumeDocumentUpdated() bool {
-	if p == nil {
-		return false
-	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if !p.documentUpdated {
@@ -126,12 +111,6 @@ func (p *PlanStore) ConsumeDocumentUpdated() bool {
 // Overwrites reserved keys with the current PlanStore contents.
 func (p *PlanStore) ExportInto(state map[string]any) {
 	if state == nil {
-		return
-	}
-	if p == nil {
-		delete(state, planStateKey)
-		delete(state, planDocumentStateKey)
-		delete(state, planDocumentUpdatedKey)
 		return
 	}
 	p.mu.RLock()
@@ -158,7 +137,7 @@ func (p *PlanStore) ExportInto(state map[string]any) {
 // LoadFromState hydrates the store from checkpoint RuntimeState (including
 // JSON-rehydrated []any / map shapes). Safe to call with nil state.
 func (p *PlanStore) LoadFromState(state map[string]any) {
-	if p == nil || state == nil {
+	if state == nil {
 		return
 	}
 	p.mu.Lock()
@@ -173,7 +152,6 @@ func (p *PlanStore) LoadFromState(state map[string]any) {
 			copy(cp, plan)
 			p.todos = cp
 		} else {
-			// Checkpoint reload: rehydrate from JSON-compatible types.
 			b, err := json.Marshal(v)
 			if err == nil {
 				var plan []Todo
@@ -191,8 +169,8 @@ func (p *PlanStore) LoadFromState(state map[string]any) {
 	}
 }
 
-// StripPlanKeys removes reserved plan keys from a runtime state map so they are
-// not exposed via user-facing StateGet after load.
+// StripPlanKeys removes reserved module keys from a runtime state map so they
+// are not exposed via user-facing StateGet after load.
 func StripPlanKeys(state map[string]any) {
 	if state == nil {
 		return
@@ -201,4 +179,7 @@ func StripPlanKeys(state map[string]any) {
 	delete(state, planDocumentStateKey)
 	delete(state, planDocumentUpdatedKey)
 	delete(state, searchNamespaceStateKey)
+	delete(state, parkedWorkersStateKey)
+	delete(state, permissionAllowKey)
+	delete(state, permissionDenyKey)
 }

@@ -59,7 +59,7 @@ func TestInvoke_streamsMessageAndMapsDeveloperToSystem(t *testing.T) {
 		}),
 	}
 
-	ch, err := s.Invoke(context.Background(), msgs, tools)
+	ch, err := s.Invoke(context.Background(), msgs, tools, "")
 	if err != nil {
 		t.Fatalf("Invoke: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestInvoke_contextCancel_stopsStream(t *testing.T) {
 		WithURL(srv.URL)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	ch, err := s.Invoke(ctx, []*tacklr.Message{{Role: tacklr.RoleUser, Content: "hi"}}, nil)
+	ch, err := s.Invoke(ctx, []*tacklr.Message{{Role: tacklr.RoleUser, Content: "hi"}}, nil, "")
 	if err != nil {
 		t.Fatalf("Invoke: %v", err)
 	}
@@ -234,7 +234,7 @@ func TestInvoke_apiError_emitsErrorChunk(t *testing.T) {
 
 	ch, err := s.Invoke(context.Background(), []*tacklr.Message{
 		{Role: tacklr.RoleUser, Content: "hi"},
-	}, nil)
+	}, nil, "")
 	if err != nil {
 		t.Fatalf("Invoke sync err: %v", err)
 	}

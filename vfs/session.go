@@ -77,8 +77,23 @@ func (m *MountSession) fireAfterPersist(ctx context.Context, virtualPath string)
 
 // NewMountSession binds a session id to a process registry.
 // Hosts that want a kernel tree call FuseMount.
-func NewMountSession(sessionID string, reg *BackendRegistry) *MountSession {
-	return &MountSession{id: sessionID, reg: reg, tab: newMountTable()}
+func NewMountSession(sessionID string, reg *BackendRegistry) (*MountSession, error) {
+	if strings.TrimSpace(sessionID) == "" {
+		return nil, fmt.Errorf("%w: session id is required", ErrInvalidPath)
+	}
+	if reg == nil {
+		return nil, errRegistryRequired
+	}
+	return &MountSession{id: sessionID, reg: reg, tab: newMountTable()}, nil
+}
+
+// MustNewMountSession is for tests. It panics if NewMountSession fails.
+func MustNewMountSession(sessionID string, reg *BackendRegistry) *MountSession {
+	ms, err := NewMountSession(sessionID, reg)
+	if err != nil {
+		panic(err)
+	}
+	return ms
 }
 
 // HostDir is the directory last passed to FuseMount, or "".

@@ -8,7 +8,7 @@ import (
 )
 
 func TestSupportsMIME_visionAndPDF(t *testing.T) {
-	s := NewOpenAIInferenceStrategy(nil).WithModel("gpt-4o").(*OpenAIInferenceStrategy)
+	s := NewOpenAIInferenceStrategy(nil).WithModel("gpt-4o")
 	if !s.SupportsMIME("text/plain") || !s.SupportsMIME("") {
 		t.Fatal("text always supported")
 	}
@@ -21,7 +21,7 @@ func TestSupportsMIME_visionAndPDF(t *testing.T) {
 	if s.SupportsMIME("application/zip") {
 		t.Fatal("unknown binary rejected")
 	}
-	s2 := NewOpenAIInferenceStrategy(nil).WithModel("unknown-local-llm").(*OpenAIInferenceStrategy)
+	s2 := NewOpenAIInferenceStrategy(nil).WithModel("unknown-local-llm")
 	if s2.SupportsMIME("image/png") || s2.SupportsMIME("application/pdf") {
 		t.Fatal("unknown model rejects binary")
 	}
@@ -72,7 +72,7 @@ func TestMarshalMessagesToInput_multimodal(t *testing.T) {
 }
 
 func TestUnsupportedMIMEs(t *testing.T) {
-	s := NewOpenAIInferenceStrategy(nil).WithModel("unknown").(*OpenAIInferenceStrategy)
+	s := NewOpenAIInferenceStrategy(nil).WithModel("unknown")
 	bad := tacklr.UnsupportedMIMEs(s, []string{"text/plain", "image/png", "image/png", "application/pdf"})
 	if len(bad) != 2 {
 		t.Fatalf("bad=%v", bad)

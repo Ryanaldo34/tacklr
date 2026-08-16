@@ -52,7 +52,7 @@ func TestOpenAIStrategy_telemetryAndMaxTokens(t *testing.T) {
 	if id := nilS.ModelTelemetryIdentity(); id != (telemetry.ModelIdentity{}) {
 		t.Fatalf("%+v", id)
 	}
-	s := NewOpenAIInferenceStrategy(nil).WithApiKey("k").WithModel("gpt-test").(*OpenAIInferenceStrategy)
+	s := NewOpenAIInferenceStrategy(nil).WithApiKey("k").WithModel("gpt-test")
 	s.WithURL("https://api.openai.com/v1")
 	id := s.ModelTelemetryIdentity()
 	if id.Model != "gpt-test" || id.Provider != telemetry.GenAIProviderOpenAI {

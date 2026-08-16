@@ -2,9 +2,7 @@ package tacklr
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"log/slog"
 	"strings"
 
 	"github.com/google/uuid"
@@ -32,8 +30,12 @@ type Config struct {
 // AgentOptions configures NewAgent and NewAgentFromSession.
 //
 // Usual fields: Config, Model, Store, Tools, MCPConfigs, SubAgents, SessionID.
-// ContextManager, ModelTasks, and ContextPolicy override the built-in ACM path;
-// leave them nil unless you replace that path.
+// ContextPolicy knobs (ratios, stream-summary) stay host-settable. Adaptive
+// Case Management itself is harness-owned and cannot be replaced.
+//
+// Store is the harness thread checkpoint (stores.BaseStore). Wire session
+// envelopes (server.ProtocolWireStore) are a separate protocol contract and
+// are not merged with this store.
 type AgentOptions struct {
 	Config Config
 	// SessionID is the durable thread id. Set at construction; do not change mid-turn.
@@ -44,16 +46,14 @@ type AgentOptions struct {
 	Tools      []*Tool
 	MCPConfigs []mcp.MCPConfig
 	SubAgents  []*SubAgent
-	// ContextManager is the conversation window. Nil uses NewModelContextManager.
-	ContextManager ContextManager
-	// ModelTasks runs Turn, Absorb, and Handoff. Nil uses DefaultModelTasks.
-	ModelTasks ModelTasks
 	// ContextPolicy sets pressure/compress ratios when non-zero fields are set.
 	ContextPolicy ContextPolicy
-	// ToolInterceptors wrap each tool call (outermost first).
-	// Nil: built-in planning lock and permission gate.
-	// Non-nil: replaces that chain (empty slice disables interceptors).
+	// ToolInterceptors wrap each tool call (outermost first). Built-in
+	// planning lock and permission gate are always installed after these.
 	ToolInterceptors []ToolInterceptor
+	// DisablePlanningLock omits planningWriteLock (workers and tests).
+	// The permission gate is still always installed.
+	DisablePlanningLock bool
 	// ToolResultHooks map tool name → post-success window effects for host tools.
 	// Plan builtins use BuiltinResult instead.
 	ToolResultHooks map[string]ToolResultHook
@@ -83,8 +83,6 @@ type AgentOptions struct {
 	RunCommandUnattended bool
 	// shareIndexBridge is the parent index bridge. Nil means Start a new bridge.
 	shareIndexBridge *vfsindex.Bridge
-	// skipPlanningLock false keeps planningWriteLock on the built-in interceptor chain.
-	skipPlanningLock bool
 }
 
 // streamEventBuffer is the harness event channel size so EmitUpdate is not dropped
@@ -92,21 +90,25 @@ type AgentOptions struct {
 const streamEventBuffer = 64
 
 // NewAgent builds a session-scoped harness. Turn-scoped Runtime is created in Run.
-func NewAgent(ctx context.Context, opts AgentOptions) *AgentHarness {
-	sm := session.NewSessionManager()
-	h := newHarnessBase(opts, sm)
+func NewAgent(ctx context.Context, opts AgentOptions) (*AgentHarness, error) {
+	h, err := newHarnessBase(opts, session.NewSessionManager())
+	if err != nil {
+		return nil, err
+	}
 	if opts.SessionID != "" {
 		h.sessionId = opts.SessionID
 	}
-	h.finishInit(ctx, opts.SubAgents)
-	return h
+	if err := h.finishInit(ctx, opts.SubAgents); err != nil {
+		return nil, err
+	}
+	return h, nil
 }
 
 // newHarnessBase fills shared fields. Session state lives on sm across turns.
 // sm must be non-nil.
-func newHarnessBase(opts AgentOptions, sm *session.SessionManager) *AgentHarness {
+func newHarnessBase(opts AgentOptions, sm *session.SessionManager) (*AgentHarness, error) {
 	if opts.Model == nil {
-		panic("tacklr: AgentOptions.Model is required")
+		return nil, fmt.Errorf("tacklr: AgentOptions.Model is required")
 	}
 	h := &AgentHarness{
 		model:                opts.Model,
@@ -129,23 +131,16 @@ func newHarnessBase(opts AgentOptions, sm *session.SessionManager) *AgentHarness
 		pendingToolCalls:     make(map[string]stores.PendingToolCall),
 		interruptPayloads:    make(map[string][]byte),
 		parkedWorkersLive:    make(map[string]*AgentHarness),
-		context:              opts.ContextManager,
-		tasks:                opts.ModelTasks,
+		context:              NewModelContextManager(),
 		contextPolicy:        opts.ContextPolicy,
 		runCommandUnattended: opts.RunCommandUnattended,
 		vfsBridge:            opts.shareIndexBridge,
 	}
 	if opts.MountSession != nil {
-		sm.VFS = opts.MountSession
+		sm.SetVFS(opts.MountSession)
 	}
-	if opts.Brain != nil {
-		h.searchCtx = brain.NewSearchContext()
-		if opts.SearchNamespace != nil {
-			h.searchCtx.SetNamespace(*opts.SearchNamespace)
-		}
-	}
-	if h.context == nil {
-		h.context = NewModelContextManager()
+	if opts.SearchNamespace != nil {
+		sm.Search().SetNamespace(*opts.SearchNamespace)
 	}
 	def := DefaultContextPolicy()
 	if h.contextPolicy.PressureRatio <= 0 {
@@ -154,30 +149,32 @@ func newHarnessBase(opts AgentOptions, sm *session.SessionManager) *AgentHarness
 	if h.contextPolicy.CompressFraction <= 0 {
 		h.contextPolicy.CompressFraction = def.CompressFraction
 	}
-	if h.tasks == nil {
-		h.tasks = NewDefaultModelTasks(h.model, h.context, h.contextPolicy, h.maxWindowSize)
+	h.tasks = newDefaultModelTasks(h.model, h.context, h.contextPolicy, h.maxWindowSize)
+	chain := append([]ToolInterceptor{}, opts.ToolInterceptors...)
+	if !opts.DisablePlanningLock {
+		chain = append(chain, h.planningWriteLock)
 	}
-	if opts.ToolInterceptors != nil {
-		h.toolRunner = newToolRunner(opts.ToolInterceptors...)
-	} else if opts.skipPlanningLock {
-		h.toolRunner = newToolRunner(toolPermissionGate)
-	} else {
-		h.toolRunner = newToolRunner(h.planningWriteLock, toolPermissionGate)
-	}
+	chain = append(chain, toolPermissionGate)
+	h.toolRunner = newToolRunner(chain...)
 	h.toolResultHooks = newToolResultHookRegistry(opts.ToolResultHooks)
-	return h
+	return h, nil
 }
 
-func (h *AgentHarness) finishInit(ctx context.Context, subAgents []*SubAgent) {
+func (h *AgentHarness) finishInit(ctx context.Context, subAgents []*SubAgent) error {
 	h.initMCP(ctx)
 	if err := h.initSkills(ctx); err != nil {
-		slog.Error("failed to initialize skills", "error", err)
+		return fmt.Errorf("initialize skills: %w", err)
 	}
-	h.initSubAgentWorkers(subAgents)
+	if err := h.initSubAgentWorkers(subAgents); err != nil {
+		return err
+	}
 	if h.vfsBridge == nil {
-		h.initVFSIndexBridge()
+		if err := h.initVFSIndexBridge(); err != nil {
+			return err
+		}
 	}
 	h.injectBuiltinTools()
+	return nil
 }
 
 // injectBuiltinTools registers plan tools, optional web/brain/VFS/index tools, and spawn_worker once.
@@ -197,21 +194,17 @@ func (a *AgentHarness) injectBuiltinTools() {
 		a.tools = append(a.tools, newWebSearchTool(client), newWebFetchTool(client))
 	}
 	br := a.vfsBridge
-	if a.session != nil && a.session.VFS != nil {
-		a.tools = append(a.tools, newVFSTools(a.session.VFS)...)
-		a.tools = append(a.tools, newRunCommand(a.session.VFS, !a.runCommandUnattended))
+	if ms := a.VFS(); ms != nil {
+		a.tools = append(a.tools, newVFSTools(ms)...)
+		a.tools = append(a.tools, newRunCommand(ms, !a.runCommandUnattended))
 	}
-	if a.brain != nil && a.searchCtx != nil {
-		var ms *vfs.MountSession
+	if a.brain != nil {
 		var idx *vfsindex.MountIndexer
-		if a.session != nil {
-			ms = a.session.VFS
-		}
 		if br != nil {
 			idx = br.Indexer
 		}
-		a.tools = append(a.tools, newBrainTools(a.brain, a.searchCtx, a.brainWriteKinds, brainToolDeps{
-			VFS:     ms,
+		a.tools = append(a.tools, newBrainTools(a.brain, a.session.Search(), a.brainWriteKinds, brainToolDeps{
+			VFS:     a.VFS(),
 			Indexer: idx,
 		})...)
 	}
@@ -227,53 +220,44 @@ func (a *AgentHarness) injectBuiltinTools() {
 // initVFSIndexBridge starts a new vfsindex.Bridge when Brain + VFS + namespace
 // are set. Call only when vfsBridge is nil (this harness owns the lifecycle).
 // Hosts with a non-empty kind catalog should register vfsindex.MountIndexKinds().
-func (a *AgentHarness) initVFSIndexBridge() {
-	if a.brain == nil || a.searchCtx == nil || a.session == nil || a.session.VFS == nil {
-		return
+func (a *AgentHarness) initVFSIndexBridge() error {
+	if a.brain == nil || a.VFS() == nil {
+		return nil
 	}
-	ns, ok := a.searchCtx.Namespace()
+	ns, ok := a.session.Search().Namespace()
 	if !ok {
-		return
+		return nil
 	}
 	nsCopy := ns
 	attachMemory := true
-	for _, s := range a.session.VFS.Specs() {
+	for _, s := range a.VFS().Specs() {
 		if s.Profile == brain.DefaultProfile {
 			attachMemory = false
 			break
 		}
 	}
-	br, err := vfsindex.Start(a.session.VFS, a.brain, brain.Scope{Namespace: &nsCopy}, attachMemory)
+	br, err := vfsindex.Start(a.VFS(), a.brain, brain.Scope{Namespace: &nsCopy}, attachMemory)
 	if err != nil {
-		slog.Error("vfsindex: failed to start bridge", "error", err)
-		return
+		return fmt.Errorf("vfsindex: start bridge: %w", err)
 	}
 	a.vfsBridge = br
 	a.ownsVFSBridge = true
+	return nil
 }
 
 // SetSearchNamespace sets retrieval isolation for knowledge tools.
 func (a *AgentHarness) SetSearchNamespace(id uuid.UUID) {
-	if a.searchCtx == nil {
-		a.searchCtx = brain.NewSearchContext()
-	}
-	a.searchCtx.SetNamespace(id)
+	a.session.Search().SetNamespace(id)
 }
 
 // ClearSearchNamespace clears retrieval isolation for knowledge tools.
 func (a *AgentHarness) ClearSearchNamespace() {
-	if a.searchCtx == nil {
-		return
-	}
-	a.searchCtx.ClearNamespace()
+	a.session.Search().ClearNamespace()
 }
 
 // SearchNamespace returns the host-set search namespace, if any.
 func (a *AgentHarness) SearchNamespace() (uuid.UUID, bool) {
-	if a.searchCtx == nil {
-		return uuid.UUID{}, false
-	}
-	return a.searchCtx.Namespace()
+	return a.session.Search().Namespace()
 }
 
 // planningWriteLock blocks write tools until create_plan has set a plan.
@@ -339,72 +323,16 @@ func NewAgentFromSession(ctx context.Context, sessionId string, opts AgentOption
 	if err != nil {
 		return nil, err
 	}
-	rehydrateHarnessState(sm)
-	h := newHarnessBase(opts, sm)
+	h, err := newHarnessBase(opts, sm)
+	if err != nil {
+		return nil, err
+	}
 	h.sessionId = sessionId
 	h.context.Restore(applied.Window)
 	h.interruptToRequester = applied.InterruptToRequester
 	h.pendingToolCalls = applied.PendingToolCalls
-	if h.searchCtx != nil {
-		if len(checkpoint.State.SearchContext) > 0 {
-			if err := h.searchCtx.Restore(checkpoint.State.SearchContext); err != nil {
-				return nil, fmt.Errorf("agent harness: restore search context: %w", err)
-			}
-		}
-		// Legacy checkpoints stored namespace only under runtime _search_namespace.
-		if _, ok := h.searchCtx.Namespace(); !ok {
-			if raw, ok := checkpoint.State.RuntimeState["_search_namespace"]; ok {
-				if s, ok := raw.(string); ok {
-					if id, err := uuid.Parse(s); err == nil {
-						h.searchCtx.SetNamespace(id)
-					}
-				}
-			}
-		}
+	if err := h.finishInit(ctx, opts.SubAgents); err != nil {
+		return nil, err
 	}
-	h.finishInit(ctx, opts.SubAgents)
 	return h, nil
-}
-
-// rehydrateHarnessState turns JSON-round-tripped RuntimeState values back into
-// the typed bags StateSet writes. Call at the checkpoint boundary only.
-func rehydrateHarnessState(sm *session.SessionManager) {
-	if raw, ok := sm.StateGet(parkedWorkersStateKey); ok {
-		sm.StateSet(parkedWorkersStateKey, decodeParkedWorkers(raw))
-	}
-	for _, key := range []string{permissionAlwaysAllowKey, permissionAlwaysDenyKey} {
-		if raw, ok := sm.StateGet(key); ok {
-			sm.StateSet(key, decodeBoolSet(raw))
-		}
-	}
-}
-
-func decodeBoolSet(raw any) map[string]bool {
-	if m, ok := raw.(map[string]bool); ok {
-		return m
-	}
-	b, err := json.Marshal(raw)
-	if err != nil {
-		return map[string]bool{}
-	}
-	var m map[string]bool
-	if err := json.Unmarshal(b, &m); err != nil || m == nil {
-		return map[string]bool{}
-	}
-	return m
-}
-
-func decodeParkedWorkers(raw any) map[string]parkedWorkerMeta {
-	if m, ok := raw.(map[string]parkedWorkerMeta); ok {
-		return m
-	}
-	b, err := json.Marshal(raw)
-	if err != nil {
-		return map[string]parkedWorkerMeta{}
-	}
-	var m map[string]parkedWorkerMeta
-	if json.Unmarshal(b, &m) != nil || m == nil {
-		return map[string]parkedWorkerMeta{}
-	}
-	return m
 }

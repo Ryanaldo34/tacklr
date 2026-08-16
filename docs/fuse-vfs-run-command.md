@@ -6,7 +6,7 @@
 | **Date** | 2026-08-15 |
 | **Product** | Tacklr — opinionated Go agent harness SDK |
 | **Repo** | `/Users/ryan/development/tacklr` |
-| **Status** | In progress — Phases 0–2 shipped; this file is the remaining train |
+| **Status** | Complete — Phases 0–5 shipped. Agent catalog is `read`, `write`, `run_command` (plus index tools when Brain is wired). |
 | **Depends on** | host-owned `vfs.MountSession`, `VFSProjection`, `run_command`, write-through IR |
 
 ---
@@ -15,7 +15,7 @@
 
 Phases 0–2 of this train are in the tree. A live Registry session with a VFS and a FUSE device gets a kernel projection. `run_command` runs `/bin/sh -c` with cwd at that root. Providers persist on write. The harness is turn-scoped; the host owns the mount table and the FUSE tree.
 
-What is still open is the **agent file catalog**. The model still sees `find_files`, `find_content`, `read_lines`, `replace_lines`, `replace_text`, and a full-body `write` next to `run_command`. Those extra tools were the stand-in while host `ls` / `rg` / `fd` could not see the tree. They can see it now. This document is the plan to finish that collapse, then stop. Writable FUSE, jail, broker, and a custom shell stay out.
+The **agent file catalog** is collapsed. Discovery (`find_files`, `find_content`), line editors (`read_lines`, `replace_lines`, `replace_text`), and directory tools (`list`, `stat`, `mkdir`, `remove`) are gone. The model sees `read`, `write`, and `run_command`. Live names and grep go through `run_command` → `ls` / `rg` / `fd` on the FUSE tree. Writable FUSE, jail, broker, and a custom shell stay out.
 
 ---
 
@@ -69,15 +69,15 @@ What is still open is the **agent file catalog**. The model still sees `find_fil
 
 ---
 
-## Remaining work
+## Remaining work (shipped)
 
 ```text
-Phase 3   Drop find_files and find_content. Keep list / stat / index_file / unindex.
+Phase 3   Drop find_files and find_content. (Also dropped list/stat/mkdir/remove; live names via run_command.)
 Phase 4a  Rename read_lines → read. Path-only read returns the first page.
 Phase 4b  Fold replace_lines + replace_text + write into one write (mode count).
 Phase 5   Docs pass (vfs.md, knowledge.md, README, vfs/doc.go).
 Next      Writable FUSE (separate plan) so run_command can mkdir / rm / echo >.
-Later     Jail / broker / eBPF; custom shell; drop list/stat.
+Later     Jail / broker / eBPF; custom shell.
 ```
 
 Do not start Phase 3 until a FUSE-capable host shows `run_command` → `ls` / `rg` matches `ReadDir` / `ReadText`. Kernel tests already skip without a device. Do not skip that gate by rewriting tests to avoid `run_command`.

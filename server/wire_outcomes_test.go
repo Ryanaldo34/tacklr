@@ -122,7 +122,10 @@ func TestWireAndConstruct_outcomes(t *testing.T) {
 
 	// --- Registry DefaultAgent / options ---
 	_ = NewRegistry(testStore(t), "d", WithTracer(nil), nil)
-	r2 := NewRegistry(testStore(t), "d", WithTracer(nil))
+	r2 := NewRegistry(testStore(t), "d", WithTracer(nil), func(reg *Registry) {
+		reg.tracer = nil
+		reg.instruments = nil
+	})
 	if r2.DefaultAgent() != "d" {
 		t.Fatal(r2.DefaultAgent())
 	}

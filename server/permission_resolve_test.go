@@ -186,7 +186,7 @@ func TestResolvePermissionViaRequest_outcomes(t *testing.T) {
 				ch <- tacklr.LLMResponseChunk{IsComplete: true}
 			},
 		}
-		h := tacklr.NewAgent(context.Background(), tacklr.AgentOptions{
+		h := mustAgent(t, tacklr.AgentOptions{
 			Config:    tacklr.Config{MaxWindowSize: 8192},
 			SessionID: "sess-perm-resolve",
 			Model:     ms,
@@ -215,7 +215,7 @@ func TestResolvePermissionViaRequest_outcomes(t *testing.T) {
 		w := &recordingWriter{}
 		bridge := NewClientBridge(w)
 		env := ProtocolEnv{Conn: &Conn{RPC: bridge}}
-		stream := &EventStream{Harness: h, runCtx: context.Background()}
+		stream := &EventStream{harness: h, runCtx: context.Background()}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()

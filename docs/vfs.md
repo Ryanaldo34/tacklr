@@ -64,7 +64,10 @@ reg := vfs.NewBackendRegistry()
 _ = reg.Register(vfs.LocalFactory{ID: "scratch", Base: "/var/agent/scratch"})
 // S3: reg.Register(vfs.S3Factory{ID: "docs", Client: vfs.AWSS3{Client: s3c}, DefaultBucket: "my-bucket"})
 
-ms := vfs.NewMountSession("sess-1", reg)
+ms, err := vfs.NewMountSession("sess-1", reg)
+if err != nil {
+	return err
+}
 _ = ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"})
 ```
 
@@ -258,7 +261,7 @@ ctx := context.Background()
 // --- Mount ---
 reg := vfs.NewBackendRegistry()
 _ = reg.Register(vfs.LocalFactory{ID: "scratch", Base: "/var/agent/scratch"})
-ms := vfs.NewMountSession("sess-1", reg)
+ms, _ := vfs.NewMountSession("sess-1", reg)
 _ = ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"})
 
 // Optional seed via raw bytes

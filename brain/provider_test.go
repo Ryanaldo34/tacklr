@@ -34,7 +34,7 @@ func TestBrainProvider_prefixWriteReadDirRemoveAndIR(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.NewMountSession("engram", reg)
+	ms := vfs.MustNewMountSession("engram", reg)
 	if err := ms.Mount(ctx, vfs.MountSpec{
 		Point: "/engram", Profile: "brain",
 		Params: map[string]string{"mode": "prefix"},
@@ -261,7 +261,7 @@ func TestBrainProvider_rootsLayout(t *testing.T) {
 	if reg.HasProfile("brain") == false {
 		t.Fatal("default profile")
 	}
-	ms := vfs.NewMountSession("roots", reg)
+	ms := vfs.MustNewMountSession("roots", reg)
 	if err := ms.Mount(ctx, vfs.MountSpec{
 		Point: "/person", Profile: "brain",
 		Params: map[string]string{"mode": "roots", "kind": "Person"},
@@ -308,7 +308,7 @@ func TestBrainProvider_openCatalogListsKindsInUseAndMkdir(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.NewMountSession("open", reg)
+	ms := vfs.MustNewMountSession("open", reg)
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/engram", Profile: "brain"}); err != nil {
 		t.Fatal(err)
 	}
@@ -392,7 +392,7 @@ func TestBrainFactory_openRejectsInvalidConfig(t *testing.T) {
 	if err := reg.Register(valid); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.NewMountSession("factory", reg)
+	ms := vfs.MustNewMountSession("factory", reg)
 	if err := ms.Mount(ctx, vfs.MountSpec{
 		Point: "/person", Profile: "brain",
 		Params: map[string]string{"mode": "roots", "kinds": "Note"},
@@ -453,7 +453,7 @@ func TestBrainFactory_openRejectsInvalidConfig(t *testing.T) {
 	}
 
 	// prefix kinds= allow-list: ReadDir lists only the allowed kind after a write.
-	ms2 := vfs.NewMountSession("kinds-allow", reg)
+	ms2 := vfs.MustNewMountSession("kinds-allow", reg)
 	if err := ms2.Mount(ctx, vfs.MountSpec{
 		Point: "/engram", Profile: "brain",
 		Params: map[string]string{"mode": "prefix", "kinds": "Note"},

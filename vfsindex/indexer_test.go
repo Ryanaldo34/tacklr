@@ -24,7 +24,7 @@ func TestMountIndexer_indexSearchAndNotify(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.NewMountSession("idx", reg)
+	ms := vfs.MustNewMountSession("idx", reg)
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +182,7 @@ func TestMountIndexer_markdownBlocksChunks(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.NewMountSession("idx-md", reg)
+	ms := vfs.MustNewMountSession("idx-md", reg)
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
 		t.Fatal(err)
 	}
@@ -307,7 +307,7 @@ func TestMountIndexer_emptyMarkdownLineChunks(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.NewMountSession("idx-md-empty", reg)
+	ms := vfs.MustNewMountSession("idx-md-empty", reg)
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
 		t.Fatal(err)
 	}
@@ -392,7 +392,7 @@ func TestMountIndexer_IndexFileResultAndDefaults(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.NewMountSession("idx-file-result", reg)
+	ms := vfs.MustNewMountSession("idx-file-result", reg)
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
 		t.Fatal(err)
 	}
@@ -551,7 +551,7 @@ func TestMountIndexer_IndexFileResultAndDefaults(t *testing.T) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	ms2 := vfs.NewMountSession("idx-stream", bytesReg)
+	ms2 := vfs.MustNewMountSession("idx-stream", bytesReg)
 	if err := ms2.Mount(ctx, vfs.MountSpec{Point: "/raw", Profile: "bytes"}); err != nil {
 		t.Fatal(err)
 	}
