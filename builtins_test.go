@@ -422,7 +422,7 @@ func TestRun_planToolHappyAndErrorPaths(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			model := sequentialToolModel([]ToolCall{c.call})
 			opts := AgentOptions{Model: model, Config: Config{MaxWindowSize: 8192}}
-			h := mustNewAgent(t, context.Background(), opts)
+			h := mustNewAgent(t, opts)
 			t.Cleanup(h.Close)
 			if c.seed != nil {
 				c.seed(h)
@@ -442,7 +442,7 @@ func TestRun_planToolHappyAndErrorPaths(t *testing.T) {
 func TestRun_askUserChoice_withoutDescription_formatsSelection(t *testing.T) {
 	model := sequentialToolModel([]ToolCall{toolCall("ask1", "ask_user_choice",
 		`{"question":"Pick?","choices":[{"title":"A"},{"title":"B"}]}`)})
-	h := mustNewAgent(t, context.Background(), AgentOptions{
+	h := mustNewAgent(t, AgentOptions{
 		Model: model, Config: Config{MaxWindowSize: 8192}, Store: testStore(t),
 	})
 	t.Cleanup(h.Close)
@@ -588,7 +588,7 @@ func TestRun_completeTodo_withPlanDocument_preservesFullPlan(t *testing.T) {
 			}
 		},
 	}
-	h := mustNewAgent(t, context.Background(), AgentOptions{
+	h := mustNewAgent(t, AgentOptions{
 		Model: strategy, Config: Config{MaxWindowSize: 8192}, Store: testStore(t),
 	})
 	t.Cleanup(h.Close)
@@ -640,7 +640,7 @@ func TestRun_editPlan_planChange_triggersHandoff(t *testing.T) {
 			}
 		},
 	}
-	h := mustNewAgent(t, context.Background(), AgentOptions{
+	h := mustNewAgent(t, AgentOptions{
 		Model: strategy, Config: Config{MaxWindowSize: 8192}, Store: testStore(t),
 	})
 	t.Cleanup(h.Close)
@@ -685,7 +685,7 @@ func TestRun_completeTodo_persistsPlanInStore(t *testing.T) {
 		},
 	}
 
-	ah := mustNewAgent(t, context.Background(), AgentOptions{
+	ah := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  strategy,
 		Store:  store,

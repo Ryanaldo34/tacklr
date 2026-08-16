@@ -28,7 +28,7 @@ func TestVFSTools_readWriteRev(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := mustNewAgent(t, ctx, AgentOptions{
+	h := mustNewAgent(t, AgentOptions{
 		SessionID:    "tools-vfs",
 		Store:        stores.NewInMemoryStore(),
 		MountSession: ms,
@@ -452,7 +452,7 @@ func TestVFSTools_runCommandLiveNames(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = ms.Close() })
 
-	h := mustNewAgent(t, ctx, AgentOptions{
+	h := mustNewAgent(t, AgentOptions{
 		SessionID: "live-names", Store: stores.NewInMemoryStore(),
 		MountSession: ms, Model: &mockStrategy{},
 	})

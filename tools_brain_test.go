@@ -27,7 +27,7 @@ func TestBrainTools_saveDiscoveryAndLink(t *testing.T) {
 		t.Fatal(err)
 	}
 	ns := uuid.New()
-	h := mustNewAgent(t, ctx, AgentOptions{
+	h := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 1024},
 		Model:  &mockStrategy{},
 		Brain:  eng,
@@ -167,7 +167,7 @@ func TestBrainTools_hostNamespaceScopedRead(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := mustNewAgent(t, ctx, AgentOptions{
+	h := mustNewAgent(t, AgentOptions{
 		Config:          Config{MaxWindowSize: 1024},
 		Model:           &mockStrategy{},
 		Brain:           eng,
@@ -261,7 +261,7 @@ func TestBrainTools_searchFindExactContinueAndCheckpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	sessStore := stores.NewInMemoryStore()
-	h := mustNewAgent(t, ctx, AgentOptions{
+	h := mustNewAgent(t, AgentOptions{
 		Config:          Config{MaxWindowSize: 1024},
 		Model:           &mockStrategy{},
 		Brain:           eng,
@@ -374,7 +374,7 @@ func TestBrainTools_expandChildren(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := mustNewAgent(t, ctx, AgentOptions{
+	h := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 1024}, Model: &mockStrategy{},
 		Brain: eng, SearchNamespace: &ns,
 	})
@@ -429,7 +429,7 @@ func TestBrainTools_expandMultiHopAndFindLinks(t *testing.T) {
 	if !eng.HasEdgeSearch() {
 		t.Fatal("MemoryGraph must enable edge search")
 	}
-	h := mustNewAgent(t, ctx, AgentOptions{
+	h := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 1024}, Model: &mockStrategy{},
 		Brain: eng, SearchNamespace: &ns,
 	})
@@ -492,7 +492,7 @@ func TestBrainTools_searchNamespaceIsolation(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Agent scoped to nsB only.
-	h := mustNewAgent(t, ctx, AgentOptions{
+	h := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 1024}, Model: &mockStrategy{},
 		Brain: eng, SearchNamespace: &nsB,
 	})
@@ -545,7 +545,7 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "ok", IsComplete: true}
 		},
 	}
-	parentH := mustNewAgent(t, ctx, AgentOptions{
+	parentH := mustNewAgent(t, AgentOptions{
 		Config:          Config{MaxWindowSize: 1024},
 		Model:           &mockStrategy{},
 		Brain:           eng,
@@ -620,7 +620,7 @@ func TestBrainTools_engramPathGraph(t *testing.T) {
 	}
 	ns := uuid.New()
 	mustMountBrain(ctx, t, reg, ms, eng, ns, vfs.MountSpec{})
-	h := mustNewAgent(t, ctx, AgentOptions{
+	h := mustNewAgent(t, AgentOptions{
 		SessionID: "engram-graph", Store: stores.NewInMemoryStore(),
 		MountSession: ms, Model: &mockStrategy{},
 		Brain: eng, SearchNamespace: &ns,

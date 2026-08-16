@@ -47,7 +47,7 @@ func TestHarness_planningWriteLock_thenUnlockAfterCreatePlan(t *testing.T) {
 			}
 		},
 	}
-	ah := mustNewAgent(t, context.Background(), AgentOptions{
+	ah := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  strategy,
 		Tools:  []*Tool{writeTool},
@@ -114,7 +114,7 @@ func TestHarness_toolPermission_allowAlwaysRemembers(t *testing.T) {
 		Store:     store,
 		Tools:     []*Tool{tool},
 	}
-	ah := mustNewAgent(t, context.Background(), opts)
+	ah := mustNewAgent(t, opts)
 
 	ch1, err := ah.Run(context.Background(), "need secret")
 	if err != nil {
@@ -201,7 +201,7 @@ func TestHarness_toolPermission_rejectAlwaysRemembers(t *testing.T) {
 			}
 		},
 	}
-	ah := mustNewAgent(t, context.Background(), AgentOptions{
+	ah := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  strategy,
 		Tools:  []*Tool{tool},
@@ -298,7 +298,7 @@ func TestHarness_toolTimeout_surfacesAsToolResult(t *testing.T) {
 			events <- LLMResponseChunk{Type: StreamEventMessage, Content: "after timeout", IsComplete: true}
 		},
 	}
-	ah := mustNewAgent(t, context.Background(), AgentOptions{
+	ah := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  strategy,
 		Tools:  []*Tool{tool},
@@ -357,7 +357,7 @@ func TestHarness_hostInterceptor_keepsPermissionGate(t *testing.T) {
 			events <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
 		},
 	}
-	ah := mustNewAgent(t, context.Background(), AgentOptions{
+	ah := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  strategy,
 		Tools:  []*Tool{tool},

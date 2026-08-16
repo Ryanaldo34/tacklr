@@ -139,7 +139,7 @@ func TestSpawnWorker_success(t *testing.T) {
 		}
 	}
 
-	h := mustNewAgent(t, context.Background(), AgentOptions{
+	h := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 8192, MaxTurnRequests: 16},
 		Model:  parent,
 		Store:  stores.NewInMemoryStore(),
@@ -218,7 +218,7 @@ func TestSpawnWorker_contextCancel(t *testing.T) {
 			toolCall("c1", "spawn_worker", `{"worker_name":"researcher","task_description_and_context":"do work"}`),
 		}, IsComplete: true}
 	}
-	h := mustNewAgent(t, context.Background(), AgentOptions{
+	h := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  parent,
 		SubAgents: []*SubAgent{
@@ -288,7 +288,7 @@ func TestSpawnWorker_interruptPropagatesAndResumes(t *testing.T) {
 
 	// Store save failures must not drop a live interrupt — park stays in-process.
 	store := failSaveStore{InMemoryStore: stores.NewInMemoryStore()}
-	h := mustNewAgent(t, context.Background(), AgentOptions{
+	h := mustNewAgent(t, AgentOptions{
 		SessionID: "sess-root",
 		Config:    Config{MaxWindowSize: 8192},
 		Model:     parentModel,
@@ -348,7 +348,7 @@ func TestSpawnWorker_interruptPropagatesAndResumes(t *testing.T) {
 	}
 
 	// No store: dropping the live park must fail resume (nothing durable to attach).
-	volatile := mustNewAgent(t, context.Background(), AgentOptions{
+	volatile := mustNewAgent(t, AgentOptions{
 		SessionID: "sess-volatile",
 		Config:    Config{MaxWindowSize: 8192},
 		Model:     parentModel,
@@ -462,7 +462,7 @@ func TestSpawnWorker_nestedInterruptPropagates(t *testing.T) {
 	}
 
 	store := stores.NewInMemoryStore()
-	h := mustNewAgent(t, context.Background(), AgentOptions{
+	h := mustNewAgent(t, AgentOptions{
 		SessionID: "sess-nested",
 		Config:    Config{MaxWindowSize: 8192},
 		Model:     rootModel,
@@ -576,7 +576,7 @@ func TestSpawnWorker_interruptSurvivesSessionReload(t *testing.T) {
 			{WorkerName: "researcher", Model: workerModel, Tools: []*Tool{interruptTool}},
 		},
 	}
-	h := mustNewAgent(t, context.Background(), opts)
+	h := mustNewAgent(t, opts)
 
 	events, err := h.Run(context.Background(), "start")
 	if err != nil {
@@ -641,7 +641,7 @@ func (failSaveStore) SaveSession(context.Context, string, stores.SessionCheckpoi
 func newWorkerHost(t *testing.T) (*AgentHarness, *AgentHarness, *vfs.MountSession, *brain.Engine, uuid.UUID) {
 	t.Helper()
 	parent, ms, eng, ns := vfsIndexHarness(t, true)
-	worker := mustNewAgent(t, context.Background(), parent.workerOptsForSpawn(&SubAgent{WorkerName: "researcher", Model: &mockStrategy{}}))
+	worker := mustNewAgent(t, parent.workerOptsForSpawn(&SubAgent{WorkerName: "researcher", Model: &mockStrategy{}}))
 	t.Cleanup(worker.Close)
 	return parent, worker, ms, eng, ns
 }
@@ -812,7 +812,7 @@ func TestSpawnWorker_resumeKeepsParentVFS(t *testing.T) {
 			{WorkerName: "researcher", Model: workerModel, Tools: []*Tool{interruptTool}},
 		},
 	}
-	parent := mustNewAgent(t, ctx, opts)
+	parent := mustNewAgent(t, opts)
 
 	events, err := parent.Run(ctx, "park worker")
 	if err != nil {

@@ -183,7 +183,7 @@ func TestAgentHarness_Run(t *testing.T) {
 				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "Hello!", IsComplete: true}
 			},
 		}
-		ah := mustNewAgent(t, context.Background(), AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
+		ah := mustNewAgent(t, AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
 		ch, err := ah.Run(context.Background(), "Hi")
 		if err != nil {
 			t.Fatal(err)
@@ -232,7 +232,7 @@ func TestAgentHarness_Run(t *testing.T) {
 				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "after progress", IsComplete: true}
 			},
 		}
-		ah := mustNewAgent(t, context.Background(), AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{progress}})
+		ah := mustNewAgent(t, AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{progress}})
 		ch, err := ah.Run(context.Background(), "progress")
 		if err != nil {
 			t.Fatal(err)
@@ -274,7 +274,7 @@ func TestAgentHarness_Run(t *testing.T) {
 				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "Done!", IsComplete: true}
 			},
 		}
-		ah := mustNewAgent(t, context.Background(), AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
+		ah := mustNewAgent(t, AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
 		ch, err := ah.Run(context.Background(), "Say hello")
 		if err != nil {
 			t.Fatal(err)
@@ -350,7 +350,7 @@ func TestAgentHarness_Run(t *testing.T) {
 				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
 			},
 		}
-		ah := mustNewAgent(t, context.Background(), AgentOptions{Config: Config{}, Model: strategy, Store: store})
+		ah := mustNewAgent(t, AgentOptions{Config: Config{}, Model: strategy, Store: store})
 		ch, err := ah.Run(context.Background(), "test")
 		if err != nil {
 			t.Fatal(err)
@@ -383,7 +383,7 @@ func TestAgentHarness_Run(t *testing.T) {
 				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "gave up", IsComplete: true}
 			},
 		}
-		ah := mustNewAgent(t, context.Background(), AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
+		ah := mustNewAgent(t, AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
 		ch, err := ah.Run(context.Background(), "test")
 		if err != nil {
 			t.Fatal(err)
@@ -437,7 +437,7 @@ func TestAgentHarness_Run(t *testing.T) {
 				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
 			},
 		}
-		ah := mustNewAgent(t, context.Background(), AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{brokenTool}})
+		ah := mustNewAgent(t, AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{brokenTool}})
 		ch, err := ah.Run(context.Background(), "test")
 		if err != nil {
 			t.Fatal(err)
@@ -459,7 +459,7 @@ func TestAgentHarness_Run(t *testing.T) {
 		strategy := &mockStrategy{
 			invokeErr: fmt.Errorf("network error"),
 		}
-		ah := mustNewAgent(t, context.Background(), AgentOptions{Config: Config{}, Model: strategy, Store: store})
+		ah := mustNewAgent(t, AgentOptions{Config: Config{}, Model: strategy, Store: store})
 		ch, err := ah.Run(context.Background(), "test")
 		if err != nil {
 			t.Fatal(err)
@@ -493,7 +493,7 @@ func TestAgentHarness_Run(t *testing.T) {
 			},
 		}
 
-		ah := mustNewAgent(t, context.Background(), AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{interruptTool}})
+		ah := mustNewAgent(t, AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{interruptTool}})
 
 		ch, err := ah.Run(context.Background(), "start")
 		if err != nil {
@@ -630,7 +630,7 @@ func TestAgentHarness_Run(t *testing.T) {
 			},
 		}
 
-		ah := mustNewAgent(t, context.Background(), AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
+		ah := mustNewAgent(t, AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
 		ah.session.Plan().Set([]Todo{
 			{Title: "Task 1", Status: streaming.TodoStatusInProgress},
 			{Title: "Task 2", Status: streaming.TodoStatusPending},
@@ -730,7 +730,7 @@ func TestAgentHarness_Run(t *testing.T) {
 			},
 		}
 
-		ah := mustNewAgent(t, context.Background(), AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{interruptTool}})
+		ah := mustNewAgent(t, AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{interruptTool}})
 		ah.session.Plan().Set([]Todo{
 			{Title: "Task 1", Status: streaming.TodoStatusInProgress},
 		})
@@ -811,7 +811,7 @@ func TestAgentHarness_Run(t *testing.T) {
 			},
 		}
 
-		ah := mustNewAgent(t, context.Background(), AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
+		ah := mustNewAgent(t, AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
 
 		ch, err := ah.Run(context.Background(), "Greet the world")
 		if err != nil {
@@ -896,7 +896,7 @@ func TestAgentHarness_Run(t *testing.T) {
 			},
 		}
 
-		ah := mustNewAgent(t, context.Background(), AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
+		ah := mustNewAgent(t, AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
 		ah.session.Plan().Set([]Todo{
 			{Title: "Only", Status: streaming.TodoStatusInProgress},
 		})
@@ -959,7 +959,7 @@ func TestAgentHarness_Run(t *testing.T) {
 			},
 		}
 
-		ah := mustNewAgent(t, context.Background(), AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
+		ah := mustNewAgent(t, AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
 		ah.session.Plan().Set([]Todo{
 			{Title: "Task 1", Status: streaming.TodoStatusInProgress},
 			{Title: "Task 2", Status: streaming.TodoStatusPending},
@@ -1008,7 +1008,7 @@ func TestNewAgent(t *testing.T) {
 	mockModel := &mockStrategy{}
 	wd := &recordingWatchdog{}
 
-	h := mustNewAgent(t, context.Background(), AgentOptions{
+	h := mustNewAgent(t, AgentOptions{
 		Config: Config{
 			MaxWindowSize: 4096,
 			SystemPrompt:  "test prompt",
@@ -1061,7 +1061,7 @@ func TestRun_cancelMidStream_endsTurn(t *testing.T) {
 			}
 		},
 	}
-	h := mustNewAgent(t, context.Background(), AgentOptions{Config: Config{MaxWindowSize: 8192}, Model: strategy})
+	h := mustNewAgent(t, AgentOptions{Config: Config{MaxWindowSize: 8192}, Model: strategy})
 	ctx, cancel := context.WithCancel(context.Background())
 	events, err := h.Run(ctx, "stream please")
 	if err != nil {
@@ -1118,7 +1118,7 @@ func TestRun_reasoningCapturedInContextWindow(t *testing.T) {
 			ch <- LLMResponseChunk{IsComplete: true}
 		},
 	}
-	h := mustNewAgent(t, context.Background(), AgentOptions{Config: Config{MaxWindowSize: 8192}, Model: mock})
+	h := mustNewAgent(t, AgentOptions{Config: Config{MaxWindowSize: 8192}, Model: mock})
 
 	events, err := h.Run(context.Background(), "what is the answer?")
 	if err != nil {
@@ -1187,7 +1187,7 @@ func TestRun_windowPressure_summarizesAndPreservesUser(t *testing.T) {
 		},
 	}
 
-	ah := mustNewAgent(t, context.Background(), AgentOptions{
+	ah := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: maxWindow},
 		Model:  strategy,
 		Store:  store,
@@ -1276,7 +1276,7 @@ func TestRun_windowPressure_onToolResult_summarizes(t *testing.T) {
 	}
 
 	// Seed a near-full window so the large tool result tips pressure.
-	ah := mustNewAgent(t, context.Background(), AgentOptions{
+	ah := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: maxWindow},
 		Model:  strategy,
 		Store:  store,
@@ -1320,7 +1320,7 @@ func TestRun_countTokensError_emitsErrorEvent(t *testing.T) {
 			events <- LLMResponseChunk{Type: StreamEventMessage, Content: "should not run", IsComplete: true}
 		},
 	}
-	ah := mustNewAgent(t, context.Background(), AgentOptions{
+	ah := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  strategy,
 		Store:  testStore(t),
@@ -1370,7 +1370,7 @@ func TestRun_readSkill_returnsInstructions(t *testing.T) {
 		},
 	}
 
-	ah := mustNewAgent(t, context.Background(), AgentOptions{
+	ah := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 8192, SkillDirectories: []string{skillsRoot}},
 		Model:  strategy,
 		Store:  testStore(t),
@@ -1428,7 +1428,7 @@ func TestNewAgentFromSession_resumesPendingToolInterrupt(t *testing.T) {
 		},
 	}
 
-	ah := mustNewAgent(t, context.Background(), AgentOptions{
+	ah := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  strategy,
 		Store:  store,

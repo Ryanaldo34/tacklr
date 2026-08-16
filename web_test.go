@@ -96,7 +96,7 @@ func TestWebSearchTool_invokeAgainstServer(t *testing.T) {
 		t.Fatalf("text mode: %q err=%v", res.output, err)
 	}
 
-	h := mustNewAgent(t, ctx, AgentOptions{
+	h := mustNewAgent(t, AgentOptions{
 		Store: stores.NewInMemoryStore(), Model: &mockStrategy{}, ExaAPIKey: "from-opts",
 	})
 	t.Cleanup(h.Close)

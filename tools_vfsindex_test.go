@@ -47,7 +47,7 @@ func vfsIndexHarness(t *testing.T, withNS bool) (*AgentHarness, *vfs.MountSessio
 	if withNS {
 		opts.SearchNamespace = &ns
 	}
-	h := mustNewAgent(t, ctx, opts)
+	h := mustNewAgent(t, opts)
 	t.Cleanup(h.Close)
 	return h, ms, eng, ns
 }
@@ -285,7 +285,7 @@ func TestVFSIndexTools_prefixAutoIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 	ns := uuid.New()
-	h := mustNewAgent(t, ctx, AgentOptions{
+	h := mustNewAgent(t, AgentOptions{
 		SessionID: "policy-prefix", Store: stores.NewInMemoryStore(),
 		MountSession: ms, Model: &mockStrategy{},
 		Brain: eng, SearchNamespace: &ns,
@@ -327,7 +327,7 @@ func TestKnowledgeSaveSearchRead(t *testing.T) {
 	}
 	ns := uuid.New()
 	mustMountBrain(ctx, t, reg, ms, eng, ns, vfs.MountSpec{})
-	h := mustNewAgent(t, ctx, AgentOptions{
+	h := mustNewAgent(t, AgentOptions{
 		SessionID: "save-mem", Store: stores.NewInMemoryStore(),
 		MountSession: ms, Model: &mockStrategy{},
 		Brain: eng, SearchNamespace: &ns,
@@ -455,7 +455,7 @@ func TestKnowledgeSave_rootsMount(t *testing.T) {
 		Point: "/discovery", Profile: brain.DefaultProfile,
 		Params: map[string]string{"mode": brain.ModeRoots, "kind": "Discovery"},
 	})
-	h := mustNewAgent(t, ctx, AgentOptions{
+	h := mustNewAgent(t, AgentOptions{
 		SessionID: "save-roots", Store: stores.NewInMemoryStore(),
 		MountSession: ms, Model: &mockStrategy{},
 		Brain: eng, SearchNamespace: &ns,
@@ -594,7 +594,7 @@ func TestRun_workspaceResearchTurn(t *testing.T) {
 		}
 	}
 
-	h := mustNewAgent(t, ctx, AgentOptions{
+	h := mustNewAgent(t, AgentOptions{
 		SessionID: "research-turn",
 		Store:     stores.NewInMemoryStore(),
 		Config: Config{
@@ -691,7 +691,7 @@ func TestPathNativeGraphLinkExpand(t *testing.T) {
 		t.Fatal(err)
 	}
 	ns := uuid.New()
-	h := mustNewAgent(t, ctx, AgentOptions{
+	h := mustNewAgent(t, AgentOptions{
 		SessionID: "path-graph", Store: stores.NewInMemoryStore(),
 		MountSession: ms, Model: &mockStrategy{},
 		Brain: eng, SearchNamespace: &ns,

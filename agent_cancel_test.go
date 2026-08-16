@@ -12,7 +12,7 @@ import (
 // FinalizeCancelledWork pairs cancelled results and clears park state.
 func TestAgent_HasOpenToolWorkAndFinalizeCancelled(t *testing.T) {
 	ctx := context.Background()
-	h := mustNewAgent(t, ctx, AgentOptions{
+	h := mustNewAgent(t, AgentOptions{
 		SessionID: "cancel-open-tools",
 		Store:     stores.NewInMemoryStore(),
 		Model:     &mockStrategy{},

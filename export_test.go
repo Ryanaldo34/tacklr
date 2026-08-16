@@ -1,7 +1,6 @@
 package tacklr
 
 import (
-	"context"
 	"testing"
 
 	"github.com/ryanaldo34/tacklr/internal/session"
@@ -48,9 +47,9 @@ func nopRuntime() HarnessRuntime {
 	return session.NewRuntime(ch, session.NewSessionManager())
 }
 
-func mustNewAgent(t testing.TB, ctx context.Context, opts AgentOptions) *AgentHarness {
+func mustNewAgent(t testing.TB, opts AgentOptions) *AgentHarness {
 	t.Helper()
-	h, err := NewAgent(ctx, opts)
+	h, err := NewAgent(t.Context(), opts)
 	if err != nil {
 		t.Fatal(err)
 	}
