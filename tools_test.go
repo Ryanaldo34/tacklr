@@ -268,6 +268,43 @@ func TestAsJson(t *testing.T) {
 
 // TestMakeSchemaNullable_outcomes covers each rewrite branch of makeSchemaNullable
 // (used for strict optional fields). Cheap pure paths that lift library total cover.
+// TestTypeToJSONSchema_structuredOutput is the public structured-output
+// helper: omitempty fields stay optional (non-strict).
+func TestTypeToJSONSchema_structuredOutput(t *testing.T) {
+	type hostOut struct {
+		Title string  `json:"title" desc:"Headline"`
+		Note  *string `json:"note,omitempty" desc:"Optional note"`
+		Count int     `json:"count"`
+	}
+	schema, err := TypeToJSONSchema(hostOut{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if schema["type"] != "object" {
+		t.Fatalf("type = %v", schema["type"])
+	}
+	props, _ := schema["properties"].(map[string]any)
+	title, _ := props["title"].(map[string]any)
+	if title["type"] != "string" || title["description"] != "Headline" {
+		t.Fatalf("title = %#v", title)
+	}
+	note, _ := props["note"].(map[string]any)
+	if note["type"] != "string" || note["description"] != "Optional note" {
+		t.Fatalf("note must stay a plain string (non-strict), got %#v", note)
+	}
+	req, _ := schema["required"].([]string)
+	if len(req) != 2 || req[0] != "title" || req[1] != "count" {
+		t.Fatalf("required = %v, want title and count only", req)
+	}
+}
+
+func TestTypeToJSONSchema_nilValue(t *testing.T) {
+	_, err := TypeToJSONSchema(nil)
+	if err == nil || !strings.Contains(err.Error(), "nil value") {
+		t.Fatalf("want nil-value error, got %v", err)
+	}
+}
+
 func TestToolsAsJson(t *testing.T) {
 	tools := []*Tool{
 		NewTool(ToolConfig{Name: "a", Handler: zeroArgsStringHandler}),

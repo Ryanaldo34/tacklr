@@ -11,10 +11,15 @@ import (
 // Legacy _search_namespace is reserved and never re-exported as user state.
 func TestSession_legacySearchNamespaceKey_strippedOnLoad(t *testing.T) {
 	sm := session.NewSessionManager()
+	id := uuid.New()
 	sm.LoadUserAndPlanState(map[string]any{
-		"_search_namespace": uuid.New().String(),
+		"_search_namespace": id.String(),
 		"user_key":          "v",
 	})
+	got, ok := sm.Search().Namespace()
+	if !ok || got != id {
+		t.Fatalf("legacy key must restore Search namespace, got %v ok=%v", got, ok)
+	}
 	cp, err := session.NewCheckpointer().Capture(nil, sm, nil, nil)
 	if err != nil {
 		t.Fatal(err)

@@ -99,8 +99,17 @@ func TestRunTurn_twoTurnsKeepHostDirOrList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if s1.SessionID() != thread {
+		t.Fatalf("SessionID = %q, want %q", s1.SessionID(), thread)
+	}
+	if s1.VFS() == nil {
+		t.Fatal("want VFS on first turn")
+	}
 	h1 := s1.harness
 	drainTurn(t, s1)
+	if s1.SessionID() != "" || s1.VFS() != nil {
+		t.Fatal("Close must release SessionID and VFS")
+	}
 
 	s2, err := r.RunTurn(ctx, TurnRequest{AgentID: "default", ThreadID: thread, Prompt: "two"})
 	if err != nil {
@@ -110,7 +119,10 @@ func TestRunTurn_twoTurnsKeepHostDirOrList(t *testing.T) {
 	if h2 == h1 {
 		t.Fatal("want a new harness each turn")
 	}
-	ms := h2.VFS()
+	if s2.SessionID() != thread {
+		t.Fatalf("SessionID = %q, want %q", s2.SessionID(), thread)
+	}
+	ms := s2.VFS()
 	if ms == nil {
 		t.Fatal("want VFS")
 	}
@@ -183,7 +195,7 @@ func TestRunTurn_unavailableProjectionStillCompletes(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { r.DropLiveHarness("sess-noproj") })
-	if s.harness.VFS() != nil {
+	if s.VFS() != nil {
 		t.Fatal("want no VFS when projection is unavailable")
 	}
 	var saw bool
@@ -238,11 +250,14 @@ func TestRunTurn_failedResumeThenFreshPrompt(t *testing.T) {
 	if s3.harness == h1 {
 		t.Fatal("want a new harness after dump")
 	}
-	if vfs.FuseAvailable() && s3.harness.VFS().HostDir() == "" {
+	if s3.SessionID() != thread {
+		t.Fatalf("SessionID = %q, want %q", s3.SessionID(), thread)
+	}
+	if vfs.FuseAvailable() && s3.VFS().HostDir() == "" {
 		t.Fatal("HostDir empty on third prompt")
 	}
 	if !vfs.FuseAvailable() {
-		if _, err := s3.harness.VFS().ReadDir(ctx, "/work"); err != nil {
+		if _, err := s3.VFS().ReadDir(ctx, "/work"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -272,11 +287,14 @@ func TestRunTurn_coldRunHarnessFailureThenFreshPrompt(t *testing.T) {
 	if s3.harness == nil {
 		t.Fatal("want constructed harness")
 	}
+	if s3.SessionID() != thread {
+		t.Fatalf("SessionID = %q, want %q", s3.SessionID(), thread)
+	}
 	if vfs.FuseAvailable() {
-		if s3.harness.VFS() == nil || s3.harness.VFS().HostDir() == "" {
+		if s3.VFS() == nil || s3.VFS().HostDir() == "" {
 			t.Fatal("want live HostDir on reconstructed harness")
 		}
-	} else if _, err := s3.harness.VFS().ReadDir(ctx, "/work"); err != nil {
+	} else if _, err := s3.VFS().ReadDir(ctx, "/work"); err != nil {
 		t.Fatal(err)
 	}
 	drainTurn(t, s3)
@@ -324,8 +342,57 @@ func TestRunTurn_fuseMountFailHard(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { r.DropLiveHarness(thread) })
-	if s.harness.VFS().HostDir() == "" {
+	if s.SessionID() != thread {
+		t.Fatalf("SessionID = %q, want %q", s.SessionID(), thread)
+	}
+	if s.VFS().HostDir() == "" {
 		t.Fatal("want HostDir after unblocked remount")
 	}
 	drainTurn(t, s)
+}
+
+// TestRunTurn_askUserQuestion_visibleOnStream is the host EventStream
+// outcome: ask_user_choice parks the turn and AskUserQuestion returns the
+// question until Close releases the harness.
+func TestRunTurn_askUserQuestion_visibleOnStream(t *testing.T) {
+	ctx := context.Background()
+	model := &mockInferenceStrategy{
+		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventFunctionCall, ToolCalls: []tacklr.ToolCall{
+				{ID: "ask1", CallID: "ask1", Name: "ask_user_choice",
+					Arguments: `{"question":"Pick?","choices":[{"title":"A"},{"title":"B"}]}`},
+			}, IsComplete: true}
+			ch <- tacklr.LLMResponseChunk{IsComplete: true}
+		},
+	}
+	r := NewRegistry(testStore(t), "default")
+	r.Register("default", AgentSpec{
+		Config: tacklr.Config{MaxWindowSize: 8192},
+		Model:  model,
+	})
+	thread := "sess-ask"
+	s, err := r.RunTurn(ctx, TurnRequest{AgentID: "default", ThreadID: thread, Prompt: "ask"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { r.DropLiveHarness(thread) })
+	var sawInterrupt bool
+	for ev := range s.Events {
+		if ev.Type == streaming.StreamEventInterrupt {
+			sawInterrupt = true
+		}
+	}
+	if !sawInterrupt {
+		t.Fatal("expected ask_user_choice interrupt")
+	}
+	if s.SessionID() != thread {
+		t.Fatalf("SessionID = %q", s.SessionID())
+	}
+	if q := s.AskUserQuestion("ask1"); q != "Pick?" {
+		t.Fatalf("AskUserQuestion = %q", q)
+	}
+	s.Close()
+	if s.AskUserQuestion("ask1") != "" || s.SessionID() != "" {
+		t.Fatal("Close must release host accessors")
+	}
 }
