@@ -14,10 +14,12 @@ import (
 // interceptors: outermost first, short-circuit skips later stages and the tool.
 // Nil interceptors in the chain are skipped.
 func TestHarness_planningWriteLock_thenUnlockAfterCreatePlan(t *testing.T) {
+	var calls int
 	writeTool := NewTool(ToolConfig{
 		Name:   "mutate",
 		Access: ToolWriteAccess,
 		Handler: func(ctx context.Context) (string, error) {
+			calls++
 			return "mutated", nil
 		},
 	})
@@ -47,35 +49,69 @@ func TestHarness_planningWriteLock_thenUnlockAfterCreatePlan(t *testing.T) {
 			}
 		},
 	}
-	ah := mustNewAgent(t, AgentOptions{
-		Config:               Config{MaxWindowSize: 8192},
-		Model:                strategy,
-		Tools:                []*Tool{writeTool},
-		DisableWriteApproval: true,
-	})
+	store := stores.NewInMemoryStore()
+	opts := AgentOptions{
+		SessionID: "plan-then-write",
+		Config:    Config{MaxWindowSize: 8192},
+		Model:     strategy,
+		Store:     store,
+		Tools:     []*Tool{writeTool},
+	}
+	ah := mustNewAgent(t, opts)
 
 	ch, err := ah.Run(context.Background(), "plan then write")
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Pre-plan denial is only on the stream; create_plan prunes the window.
-	var locked, unlocked bool
+	// Pre-plan denial is a tool result; after create_plan the write parks.
+	var locked bool
+	var interruptID, kind string
 	for ev := range ch {
-		if ev.Type != StreamEventToolResult {
-			continue
-		}
-		if strings.Contains(ev.Content, "locked") || strings.Contains(ev.Content, "permission denied") {
+		if ev.Type == StreamEventToolResult &&
+			(strings.Contains(ev.Content, "locked") || strings.Contains(ev.Content, "permission denied")) {
 			locked = true
 		}
-		if ev.Content == "mutated" {
-			unlocked = true
+		if ev.Type == StreamEventInterrupt {
+			var payload struct {
+				InterruptId string `json:"interruptId"`
+				Type        string `json:"type"`
+			}
+			if err := json.Unmarshal(ev.Data, &payload); err != nil {
+				t.Fatal(err)
+			}
+			interruptID, kind = payload.InterruptId, payload.Type
 		}
 	}
 	if !locked {
 		t.Fatal("expected write denial while planning (no plan yet)")
 	}
-	if !unlocked {
-		t.Fatal("expected mutate success after create_plan")
+	if calls != 0 || kind != WriteApprovalType || interruptID == "" {
+		t.Fatalf("park: calls=%d kind=%q id=%q", calls, kind, interruptID)
+	}
+
+	ah.Close()
+	reloaded, err := NewAgentFromSession(context.Background(), "plan-then-write", opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch2, err := reloaded.ReturnFromInterrupt(context.Background(), map[string][]byte{
+		interruptID: []byte(`{"action":"approve"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var unlocked bool
+	for ev := range ch2 {
+		if ev.Type == StreamEventToolResult && ev.Content == "mutated" {
+			unlocked = true
+		}
+	}
+	if !unlocked || calls != 1 {
+		t.Fatalf("approve after reload: unlocked=%v calls=%d", unlocked, calls)
+	}
+	recs := reloaded.WriteApprovals()
+	if len(recs) != 1 || recs[0].Action != WriteApprovalApprove || recs[0].ToolName != "mutate" {
+		t.Fatalf("audit = %+v", recs)
 	}
 }
 
@@ -339,6 +375,7 @@ func TestHarness_hostInterceptor_keepsPermissionGate(t *testing.T) {
 	var hostSaw string
 	tool := NewTool(ToolConfig{
 		Name:               "crm_write",
+		Access:             ToolWriteAccess,
 		PermissionRequired: true,
 		Handler: func(ctx context.Context) (string, error) {
 			return "should-not-run", nil
@@ -359,9 +396,10 @@ func TestHarness_hostInterceptor_keepsPermissionGate(t *testing.T) {
 		},
 	}
 	ah := mustNewAgent(t, AgentOptions{
-		Config: Config{MaxWindowSize: 8192},
-		Model:  strategy,
-		Tools:  []*Tool{tool},
+		Config:              Config{MaxWindowSize: 8192},
+		Model:               strategy,
+		Tools:               []*Tool{tool},
+		DisablePlanningLock: true,
 		ToolInterceptors: []ToolInterceptor{
 			func(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error) {
 				hostSaw = inv.Tool.Name
@@ -373,20 +411,114 @@ func TestHarness_hostInterceptor_keepsPermissionGate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var interruptType string
-	for ev := range ch {
-		if ev.Type == StreamEventInterrupt {
-			var payload struct {
-				Type string `json:"type"`
-			}
-			_ = json.Unmarshal(ev.Data, &payload)
-			interruptType = payload.Type
-		}
-	}
+	id, kind := drainYield(t, ch)
 	if hostSaw != "crm_write" {
 		t.Fatalf("host interceptor saw %q", hostSaw)
 	}
-	if interruptType != "tool_permission" {
-		t.Fatalf("permission gate type = %q", interruptType)
+	if kind != WriteApprovalType {
+		t.Fatalf("write approval type = %q", kind)
 	}
+	ch2, err := ah.ReturnFromInterrupt(context.Background(), map[string][]byte{
+		id: []byte(`{"action":"approve"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, kind2 := drainYield(t, ch2)
+	if kind2 != "tool_permission" {
+		t.Fatalf("permission gate type = %q", kind2)
+	}
+}
+
+// TestHarness_writeApproval_rejectThenEdit: reject denies the write; a later
+// edit runs the handler with replacement args.
+func TestHarness_writeApproval_rejectThenEdit(t *testing.T) {
+	var seen string
+	var calls int
+	tool := NewTool(ToolConfig{
+		Name:   "mutate",
+		Access: ToolWriteAccess,
+		Handler: func(ctx context.Context, args struct {
+			Path string `json:"path"`
+		}) (string, error) {
+			calls++
+			seen = args.Path
+			return "wrote:" + args.Path, nil
+		},
+	})
+	var n int
+	strategy := &mockStrategy{
+		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, events chan<- LLMResponseChunk) {
+			n++
+			switch n {
+			case 1:
+				events <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
+					{ID: "w1", CallID: "w1", Name: "mutate", Arguments: `{"path":"/a"}`},
+				}, IsComplete: true}
+				events <- LLMResponseChunk{IsComplete: true}
+			case 2:
+				events <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
+					{ID: "w2", CallID: "w2", Name: "mutate", Arguments: `{"path":"/b"}`},
+				}, IsComplete: true}
+				events <- LLMResponseChunk{IsComplete: true}
+			default:
+				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
+			}
+		},
+	}
+	ah := mustNewAgent(t, AgentOptions{
+		Config:              Config{MaxWindowSize: 8192},
+		Model:               strategy,
+		Tools:               []*Tool{tool},
+		DisablePlanningLock: true,
+	})
+	ch, err := ah.Run(context.Background(), "write")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := drainYield(t, ch)
+	ch2, err := ah.ReturnFromInterrupt(context.Background(), map[string][]byte{
+		id: []byte(`{"action":"reject"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id2, _ := drainYield(t, ch2)
+	if calls != 0 {
+		t.Fatalf("handler ran on reject: %d", calls)
+	}
+	ch3, err := ah.ReturnFromInterrupt(context.Background(), map[string][]byte{
+		id2: []byte(`{"action":"edit","args":"{\"path\":\"/edited\"}"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wrote string
+	for ev := range ch3 {
+		if ev.Type == StreamEventToolResult {
+			wrote = ev.Content
+		}
+	}
+	if calls != 1 || seen != "/edited" || wrote != "wrote:/edited" {
+		t.Fatalf("edit: calls=%d seen=%q wrote=%q", calls, seen, wrote)
+	}
+}
+
+func drainYield(t *testing.T, ch <-chan StreamEvent) (id, kind string) {
+	t.Helper()
+	for ev := range ch {
+		if ev.Type != StreamEventInterrupt {
+			continue
+		}
+		var payload struct {
+			InterruptId string `json:"interruptId"`
+			Type        string `json:"type"`
+		}
+		if err := json.Unmarshal(ev.Data, &payload); err != nil {
+			t.Fatal(err)
+		}
+		return payload.InterruptId, payload.Type
+	}
+	t.Fatal("expected interrupt yield")
+	return "", ""
 }

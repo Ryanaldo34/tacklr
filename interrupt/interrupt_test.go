@@ -212,18 +212,10 @@ func (f fakeInterrupt) Serialize() ([]byte, error) { return []byte(`{}`), nil }
 func (f fakeInterrupt) Return([]byte) error        { return nil }
 func (f fakeInterrupt) Error() string              { return f.name }
 
-// TestWriteApproval_fullLifecycle covers init, validate, approve/edit/reject, and errors.
-func TestWriteApproval_fullLifecycle(t *testing.T) {
+// TestWriteApproval_initAndValidate covers Init/Validate/Return error paths
+// that the harness does not send.
+func TestWriteApproval_initAndValidate(t *testing.T) {
 	w := &interrupt.WriteApprovalInterrupt{}
-	if w.TypeName() != interrupt.WriteApprovalType {
-		t.Fatal(w.TypeName())
-	}
-	if _, err := w.Serialize(); err != nil {
-		t.Fatal(err)
-	}
-	if w.Error() == "" {
-		t.Fatal("error string")
-	}
 	if err := w.InitFromPayload(nil); err != nil {
 		t.Fatal(err)
 	}
@@ -233,13 +225,15 @@ func TestWriteApproval_fullLifecycle(t *testing.T) {
 	if err := w.InitFromPayload([]byte(`{`)); err == nil {
 		t.Fatal("bad init json")
 	}
-	if err := w.InitFromPayload([]byte(`{"toolName":"write","title":"Write: /a","args":"{\"path\":\"/a\"}"}`)); err != nil {
+	if err := w.InitFromPayload([]byte(`{"toolName":"write","title":"T","args":"{}"}`)); err != nil {
 		t.Fatal(err)
 	}
-	if w.ToolName != "write" || w.Title != "Write: /a" || w.Args == "" {
-		t.Fatalf("%+v", w)
+	if w.Error() == "" {
+		t.Fatal("error string")
 	}
-
+	if _, err := w.Serialize(); err != nil {
+		t.Fatal(err)
+	}
 	if err := w.ValidatePayload([]byte(`x`)); err == nil {
 		t.Fatal("bad json")
 	}
@@ -252,13 +246,6 @@ func TestWriteApproval_fullLifecycle(t *testing.T) {
 	if err := w.ValidatePayload([]byte(`{"action":"edit"}`)); err == nil {
 		t.Fatal("edit without args")
 	}
-	if err := w.ValidatePayload([]byte(`{"action":"approve"}`)); err != nil {
-		t.Fatal(err)
-	}
-	if err := w.ValidatePayload([]byte(`{"action":"edit","args":"{}"}`)); err != nil {
-		t.Fatal(err)
-	}
-
 	if err := w.Return([]byte(`not-json`)); err == nil {
 		t.Fatal("return bad json")
 	}
@@ -267,26 +254,6 @@ func TestWriteApproval_fullLifecycle(t *testing.T) {
 	}
 	if err := w.Return([]byte(`{"action":"edit"}`)); err == nil {
 		t.Fatal("edit without args return")
-	}
-	if err := w.Return([]byte(`{"action":"approve"}`)); err != nil {
-		t.Fatal(err)
-	}
-	if w.Action != interrupt.WriteApprovalApprove {
-		t.Fatalf("action=%q", w.Action)
-	}
-	edit := &interrupt.WriteApprovalInterrupt{Args: `{"old":true}`}
-	if err := edit.Return([]byte(`{"action":"edit","args":"{\"path\":\"/b\"}"}`)); err != nil {
-		t.Fatal(err)
-	}
-	if edit.Action != interrupt.WriteApprovalEdit || edit.Args != `{"path":"/b"}` {
-		t.Fatalf("%+v", edit)
-	}
-	rej := &interrupt.WriteApprovalInterrupt{}
-	if err := rej.Return([]byte(`{"action":"reject"}`)); err != nil {
-		t.Fatal(err)
-	}
-	if rej.Action != interrupt.WriteApprovalReject {
-		t.Fatalf("reject action=%q", rej.Action)
 	}
 }
 
