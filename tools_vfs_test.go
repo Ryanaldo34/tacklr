@@ -20,7 +20,7 @@ func TestVFSTools_readWriteRev(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.NewMountSession("tools-vfs", reg)
+	ms := vfs.MustNewMountSession("tools-vfs", reg)
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
 		t.Fatal(err)
 	}
@@ -28,7 +28,7 @@ func TestVFSTools_readWriteRev(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := NewAgent(ctx, AgentOptions{
+	h := mustNewAgent(t, ctx, AgentOptions{
 		SessionID:    "tools-vfs",
 		Store:        stores.NewInMemoryStore(),
 		MountSession: ms,
@@ -431,7 +431,7 @@ func TestVFSTools_runCommandLiveNames(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.NewMountSession("live-names", reg)
+	ms := vfs.MustNewMountSession("live-names", reg)
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
 		t.Fatal(err)
 	}
@@ -452,7 +452,7 @@ func TestVFSTools_runCommandLiveNames(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = ms.Close() })
 
-	h := NewAgent(ctx, AgentOptions{
+	h := mustNewAgent(t, ctx, AgentOptions{
 		SessionID: "live-names", Store: stores.NewInMemoryStore(),
 		MountSession: ms, Model: &mockStrategy{},
 	})

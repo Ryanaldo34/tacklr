@@ -22,7 +22,7 @@ func TestAsyncScheduler_notifyCoalesceAndEventualIndex(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.NewMountSession("async-sched", reg)
+	ms := vfs.MustNewMountSession("async-sched", reg)
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +82,7 @@ func TestIndexPathResult_andUnindex(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.NewMountSession("result-unindex", reg)
+	ms := vfs.MustNewMountSession("result-unindex", reg)
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
 		t.Fatal(err)
 	}

@@ -143,7 +143,7 @@ func TestMountSession_s3MemAPI(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.NewMountSession("s3-mem", reg)
+	ms := vfs.MustNewMountSession("s3-mem", reg)
 	if err := ms.Mount(ctx, vfs.MountSpec{
 		Point: "/data", Profile: "s3",
 		Params: map[string]string{"prefix": "runs/1"},
@@ -377,7 +377,7 @@ func TestS3Provider_openWriteClose(t *testing.T) {
 	if err := reg.Register(factory); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.NewMountSession("s3w", reg)
+	ms := vfs.MustNewMountSession("s3w", reg)
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/w", Profile: "s3w"}); err != nil {
 		t.Fatal(err)
 	}
@@ -560,7 +560,7 @@ func TestOpenDocument_providerMediaType(t *testing.T) {
 	if err := reg.Register(vfs.S3Factory{ID: "s3", Client: api, DefaultBucket: "bkt"}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.NewMountSession("s3-ctype", reg)
+	ms := vfs.MustNewMountSession("s3-ctype", reg)
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/data", Profile: "s3"}); err != nil {
 		t.Fatal(err)
 	}

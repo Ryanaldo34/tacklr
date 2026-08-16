@@ -53,7 +53,7 @@ func TestWebSearchTool_invokeAgainstServer(t *testing.T) {
 		"user_location":"US",
 		"system_prompt":"prefer primary sources",
 		"max_age_hours":24
-	}`, HarnessRuntime{})
+	}`, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,42 +61,42 @@ func TestWebSearchTool_invokeAgainstServer(t *testing.T) {
 		t.Fatal(res.output)
 	}
 
-	res, err = tool.invoke(ctx, `{"query":"empty-results"}`, HarnessRuntime{})
+	res, err = tool.invoke(ctx, `{"query":"empty-results"}`, nil)
 	if err != nil || !strings.Contains(res.output, "No results found") {
 		t.Fatalf("empty: %q err=%v", res.output, err)
 	}
-	res, err = tool.invoke(ctx, `{"query":"untitled","content_mode":"highlights"}`, HarnessRuntime{})
+	res, err = tool.invoke(ctx, `{"query":"untitled","content_mode":"highlights"}`, nil)
 	if err != nil || !strings.Contains(res.output, "(untitled)") || !strings.Contains(res.output, `"answer"`) {
 		t.Fatalf("untitled/synth: %q err=%v", res.output, err)
 	}
-	if _, err := tool.invoke(ctx, `{"query":"  "}`, HarnessRuntime{}); err == nil || !strings.Contains(err.Error(), "query is required") {
+	if _, err := tool.invoke(ctx, `{"query":"  "}`, nil); err == nil || !strings.Contains(err.Error(), "query is required") {
 		t.Fatalf("empty query: %v", err)
 	}
-	if _, err := tool.invoke(ctx, `{"query":"q","type":"nope"}`, HarnessRuntime{}); err == nil {
+	if _, err := tool.invoke(ctx, `{"query":"q","type":"nope"}`, nil); err == nil {
 		t.Fatal("invalid type")
 	}
-	if _, err := tool.invoke(ctx, `{"query":"q","category":"nope"}`, HarnessRuntime{}); err == nil {
+	if _, err := tool.invoke(ctx, `{"query":"q","category":"nope"}`, nil); err == nil {
 		t.Fatal("invalid category")
 	}
-	if _, err := tool.invoke(ctx, `{"query":"q","category":"company","exclude_domains":["x.com"]}`, HarnessRuntime{}); err == nil {
+	if _, err := tool.invoke(ctx, `{"query":"q","category":"company","exclude_domains":["x.com"]}`, nil); err == nil {
 		t.Fatal("company exclude")
 	}
-	if _, err := tool.invoke(ctx, `{"query":"q","category":"people","start_published_date":"2024-01-01T00:00:00Z"}`, HarnessRuntime{}); err == nil {
+	if _, err := tool.invoke(ctx, `{"query":"q","category":"people","start_published_date":"2024-01-01T00:00:00Z"}`, nil); err == nil {
 		t.Fatal("people dates")
 	}
-	if _, err := tool.invoke(ctx, `{"query":"q","content_mode":"raw"}`, HarnessRuntime{}); err == nil {
+	if _, err := tool.invoke(ctx, `{"query":"q","content_mode":"raw"}`, nil); err == nil {
 		t.Fatal("invalid mode")
 	}
-	res, err = tool.invoke(ctx, `{"query":"q","type":"text","content_mode":"text","category":"news"}`, HarnessRuntime{})
+	res, err = tool.invoke(ctx, `{"query":"q","type":"text","content_mode":"text","category":"news"}`, nil)
 	if err == nil && !strings.Contains(res.output, "Hit") {
 		// type "text" is invalid — already covered; news+text mode
 	}
-	res, err = tool.invoke(ctx, `{"query":"news-q","type":"auto","content_mode":"text","category":"news"}`, HarnessRuntime{})
+	res, err = tool.invoke(ctx, `{"query":"news-q","type":"auto","content_mode":"text","category":"news"}`, nil)
 	if err != nil || !strings.Contains(res.output, "Hit") {
 		t.Fatalf("text mode: %q err=%v", res.output, err)
 	}
 
-	h := NewAgent(ctx, AgentOptions{
+	h := mustNewAgent(t, ctx, AgentOptions{
 		Store: stores.NewInMemoryStore(), Model: &mockStrategy{}, ExaAPIKey: "from-opts",
 	})
 	t.Cleanup(h.Close)
@@ -128,7 +128,7 @@ func TestRunWebFetch_endToEnd(t *testing.T) {
 	})
 	ctx := context.Background()
 
-	got, err := runWebFetch(ctx, client, webFetchArgs{URLs: []string{"https://example.gov/code"}}, HarnessRuntime{})
+	got, err := runWebFetch(ctx, client, webFetchArgs{URLs: []string{"https://example.gov/code"}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,34 +138,34 @@ func TestRunWebFetch_endToEnd(t *testing.T) {
 
 	got, err = runWebFetch(ctx, client, webFetchArgs{
 		URLs: []string{"  ", "ftp://x", "example.gov/code", "https://example.gov/code", "not a host"},
-	}, HarnessRuntime{})
+	}, nil)
 	if err != nil || !strings.Contains(got, "City Code") {
 		t.Fatalf("normalize: %q err=%v", got, err)
 	}
 
 	got, err = runWebFetch(ctx, client, webFetchArgs{
 		URLs: []string{"https://example.gov/missing"}, ContentMode: "highlights", HighlightQuery: "setbacks",
-	}, HarnessRuntime{})
+	}, nil)
 	if err != nil || !strings.Contains(got, "error") || !strings.Contains(got, "not_found") {
 		t.Fatalf("status: %q err=%v", got, err)
 	}
 
-	if _, err := runWebFetch(ctx, client, webFetchArgs{}, HarnessRuntime{}); err == nil {
+	if _, err := runWebFetch(ctx, client, webFetchArgs{}, nil); err == nil {
 		t.Fatal("no urls")
 	}
 	if _, err := runWebFetch(ctx, client, webFetchArgs{
 		URLs: []string{"https://a", "https://b", "https://c", "https://d", "https://e", "https://f"},
-	}, HarnessRuntime{}); err == nil {
+	}, nil); err == nil {
 		t.Fatal("too many urls")
 	}
 	if _, err := runWebFetch(ctx, client, webFetchArgs{
 		URLs: []string{"https://example.gov/code"}, ContentMode: "raw",
-	}, HarnessRuntime{}); err == nil {
+	}, nil); err == nil {
 		t.Fatal("invalid mode")
 	}
 	got, err = runWebFetch(ctx, client, webFetchArgs{
 		URLs: []string{"https://example.gov/code"}, ContentMode: "both", MaxTextCharacters: 20000,
-	}, HarnessRuntime{})
+	}, nil)
 	if err != nil || !strings.Contains(got, "City Code") {
 		t.Fatalf("both: %q err=%v", got, err)
 	}

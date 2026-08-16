@@ -97,11 +97,35 @@ type TurnRequest struct {
 // ResumeInterrupts must run before Close (same turn, same harness).
 type EventStream struct {
 	Events  <-chan streaming.StreamEvent
-	Harness *tacklr.AgentHarness
+	harness *tacklr.AgentHarness
 	runCtx  context.Context
 	cancel  context.CancelFunc
 	closed  bool
 	mu      sync.Mutex
+}
+
+// SessionID is the durable harness thread id, or empty.
+func (s *EventStream) SessionID() string {
+	if s == nil || s.harness == nil {
+		return ""
+	}
+	return s.harness.SessionID()
+}
+
+// AskUserQuestion returns the ask_user_choice question for toolCallID, or empty.
+func (s *EventStream) AskUserQuestion(toolCallID string) string {
+	if s == nil || s.harness == nil {
+		return ""
+	}
+	return s.harness.AskUserQuestion(toolCallID)
+}
+
+// VFS is the session mount table, or nil.
+func (s *EventStream) VFS() *vfs.MountSession {
+	if s == nil || s.harness == nil {
+		return nil
+	}
+	return s.harness.VFS()
 }
 
 // TurnContext is the context for this turn (cancelled by session/cancel or parent).
@@ -131,8 +155,8 @@ func (s *EventStream) Close() {
 	if s.cancel != nil {
 		s.cancel()
 	}
-	closeTurnHarness(s.Harness)
-	s.Harness = nil
+	closeTurnHarness(s.harness)
+	s.harness = nil
 }
 
 func closeTurnHarness(h *tacklr.AgentHarness) {
@@ -145,14 +169,14 @@ func closeTurnHarness(h *tacklr.AgentHarness) {
 // ResumeInterrupts resolves pending interrupts and returns a new event stream
 // from the same harness (ACP mid-turn elicitation resume).
 func (s *EventStream) ResumeInterrupts(ctx context.Context, responses map[string][]byte) (<-chan streaming.StreamEvent, error) {
-	if s.Harness == nil {
+	if s.harness == nil {
 		return nil, fmt.Errorf("event stream: no harness for resume")
 	}
 	c := s.runCtx
 	if c.Err() != nil {
 		c = ctx
 	}
-	return s.Harness.ReturnFromInterrupt(c, responses)
+	return s.harness.ReturnFromInterrupt(c, responses)
 }
 
 // Registry serves agents over wire protocols (ACP, SSE, and others).
@@ -323,7 +347,10 @@ func (r *Registry) sessionVFS(ctx context.Context, threadID string, spec *AgentS
 	if ms, ok := r.mounts[threadID]; ok {
 		return ms, nil
 	}
-	ms := vfs.NewMountSession(threadID, spec.FSRegistry)
+	ms, err := vfs.NewMountSession(threadID, spec.FSRegistry)
+	if err != nil {
+		return nil, err
+	}
 	if err := ms.Materialize(ctx, spec.FSBootstrap); err != nil {
 		return nil, err
 	}
@@ -488,7 +515,7 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 
 	return &EventStream{
 		Events:  out,
-		Harness: h,
+		harness: h,
 		runCtx:  turnCtx,
 		cancel:  cancel,
 	}, nil
@@ -578,12 +605,20 @@ func (r *Registry) loadAgent(ctx context.Context, agentID, threadID string, load
 		case err == nil:
 			h = loaded
 		case errors.Is(err, stores.ErrSessionNotFound) && allowMissingCheckpoint:
-			h = tacklr.NewAgent(ctx, opts)
+			created, err := tacklr.NewAgent(ctx, opts)
+			if err != nil {
+				return nil, nil, err
+			}
+			h = created
 		default:
 			return nil, nil, err
 		}
 	} else {
-		h = tacklr.NewAgent(ctx, opts)
+		created, err := tacklr.NewAgent(ctx, opts)
+		if err != nil {
+			return nil, nil, err
+		}
+		h = created
 	}
 
 	if err := r.ensureSessionFuse(ctx, h, threadID); err != nil {

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/ryanaldo34/tacklr/internal/session"
 	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/streaming"
 )
@@ -106,16 +105,11 @@ type ProviderStatus interface {
 }
 
 // InferenceStrategy is the model provider interface used by the harness.
+// Fluent With* builders and SetSystemPrompt live on concrete providers
+// (for example *inference.OpenAIInferenceStrategy), not this interface.
 type InferenceStrategy interface {
-	WithApiKey(string) InferenceStrategy
-	WithModel(string) InferenceStrategy
-	WithURL(string) InferenceStrategy
-	WithReasoningLevel(string) InferenceStrategy
-	WithStructuredOutput(any) InferenceStrategy
-	SetSystemPrompt(string)
-	Invoke(context.Context, []*Message, []*Tool) (chan LLMResponseChunk, error)
+	Invoke(ctx context.Context, messages []*Message, tools []*Tool, systemPrompt string) (chan LLMResponseChunk, error)
 	CountTokens(context.Context, []*Message, []*Tool) (int, error)
-	CompressContextWindow() error
 	MaxContextWindow() (int, error)
 	// SupportsMIME reports whether the currently selected model accepts the
 	// given MIME type as user input. Empty and text/* are always true.
@@ -153,10 +147,27 @@ type AgentWatchDog interface {
 	RecordToolResult(*Message) error
 }
 
-// HarnessRuntime is the tool-facing API for handlers and interceptors:
-// EmitUpdate, StateGet, StateSet, StateDelete, RaiseInterrupt, Store,
-// and CurrentToolCallID. Turn lifecycle helpers live in internal/session.
-type HarnessRuntime = session.Runtime
+// HarnessRuntime is the tool-facing API for handlers and interceptors.
+// Hosts implement CRM write and approval tools against this interface only.
+// Store and SessionManager are not part of the contract.
+type HarnessRuntime interface {
+	EmitUpdate(message string)
+	EmitPlanUpdate(plan []Todo)
+	StateGet(key string) (any, bool)
+	StateSet(key string, value any) error
+	StateDelete(key string)
+	RaiseInterrupt(kind string, payload []byte) (Interrupt, error)
+	AdoptInterrupt(intr Interrupt) (Interrupt, error)
+	TakeResolvedInterrupt(id string) (Interrupt, bool)
+	PendingInterrupt(id string) (Interrupt, bool)
+	ReturnInterrupt(id string, result []byte) (Interrupt, error)
+	HasPendingInterrupt() bool
+	CurrentToolCallID() string
+	PermissionAlwaysAllowed(toolName string) bool
+	PermissionAlwaysDenied(toolName string) bool
+	RememberPermissionAllow(toolName string)
+	RememberPermissionDeny(toolName string)
+}
 
 // Todo is one plan list item (also used in plan_update stream payloads).
 type Todo = streaming.Todo

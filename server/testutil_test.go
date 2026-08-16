@@ -19,15 +19,7 @@ type mockInferenceStrategy struct {
 	callNum        atomic.Int64
 }
 
-func (m *mockInferenceStrategy) WithApiKey(string) tacklr.InferenceStrategy         { return m }
-func (m *mockInferenceStrategy) WithModel(string) tacklr.InferenceStrategy          { return m }
-func (m *mockInferenceStrategy) WithURL(string) tacklr.InferenceStrategy            { return m }
-func (m *mockInferenceStrategy) WithReasoningLevel(string) tacklr.InferenceStrategy { return m }
-func (m *mockInferenceStrategy) WithStructuredOutput(any) tacklr.InferenceStrategy  { return m }
-func (m *mockInferenceStrategy) SetSystemPrompt(string)                             {}
-func (m *mockInferenceStrategy) Reset()                                             {}
-func (m *mockInferenceStrategy) CompressContextWindow() error                       { return nil }
-func (m *mockInferenceStrategy) MaxContextWindow() (int, error)                     { return 0, nil }
+func (m *mockInferenceStrategy) MaxContextWindow() (int, error) { return 0, nil }
 func (m *mockInferenceStrategy) SupportsMIME(mimeType string) bool {
 	if m.supportsMIMEFn != nil {
 		return m.supportsMIMEFn(mimeType)
@@ -38,7 +30,7 @@ func (m *mockInferenceStrategy) SupportsMIME(mimeType string) bool {
 func (m *mockInferenceStrategy) CountTokens(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool) (int, error) {
 	return 0, nil
 }
-func (m *mockInferenceStrategy) Invoke(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool) (chan tacklr.LLMResponseChunk, error) {
+func (m *mockInferenceStrategy) Invoke(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, _ string) (chan tacklr.LLMResponseChunk, error) {
 	if m.invokeErr != nil {
 		return nil, m.invokeErr
 	}
@@ -51,6 +43,15 @@ func (m *mockInferenceStrategy) Invoke(ctx context.Context, msgs []*tacklr.Messa
 		}
 	}()
 	return ch, nil
+}
+
+func mustAgent(t *testing.T, opts tacklr.AgentOptions) *tacklr.AgentHarness {
+	t.Helper()
+	h, err := tacklr.NewAgent(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return h
 }
 
 func testStore(t *testing.T) *stores.InMemoryStore {

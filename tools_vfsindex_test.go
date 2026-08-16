@@ -24,7 +24,7 @@ func vfsIndexHarness(t *testing.T, withNS bool) (*AgentHarness, *vfs.MountSessio
 	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.NewMountSession("vfs-idx-tools", reg)
+	ms := vfs.MustNewMountSession("vfs-idx-tools", reg)
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func vfsIndexHarness(t *testing.T, withNS bool) (*AgentHarness, *vfs.MountSessio
 	if withNS {
 		opts.SearchNamespace = &ns
 	}
-	h := NewAgent(ctx, opts)
+	h := mustNewAgent(t, ctx, opts)
 	t.Cleanup(h.Close)
 	return h, ms, eng, ns
 }
@@ -271,7 +271,7 @@ func TestVFSIndexTools_prefixAutoIndex(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.NewMountSession("policy-prefix", reg)
+	ms := vfs.MustNewMountSession("policy-prefix", reg)
 	if err := ms.Mount(ctx, vfs.MountSpec{
 		Point: "/work", Profile: "scratch", IndexPolicy: "  Prefix  ",
 	}); err != nil {
@@ -285,7 +285,7 @@ func TestVFSIndexTools_prefixAutoIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 	ns := uuid.New()
-	h := NewAgent(ctx, AgentOptions{
+	h := mustNewAgent(t, ctx, AgentOptions{
 		SessionID: "policy-prefix", Store: stores.NewInMemoryStore(),
 		MountSession: ms, Model: &mockStrategy{},
 		Brain: eng, SearchNamespace: &ns,
@@ -307,7 +307,7 @@ func TestKnowledgeSaveSearchRead(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.NewMountSession("save-mem", reg)
+	ms := vfs.MustNewMountSession("save-mem", reg)
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
 		t.Fatal(err)
 	}
@@ -327,7 +327,7 @@ func TestKnowledgeSaveSearchRead(t *testing.T) {
 	}
 	ns := uuid.New()
 	mustMountBrain(ctx, t, reg, ms, eng, ns, vfs.MountSpec{})
-	h := NewAgent(ctx, AgentOptions{
+	h := mustNewAgent(t, ctx, AgentOptions{
 		SessionID: "save-mem", Store: stores.NewInMemoryStore(),
 		MountSession: ms, Model: &mockStrategy{},
 		Brain: eng, SearchNamespace: &ns,
@@ -434,7 +434,7 @@ func TestKnowledgeSave_rootsMount(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.NewMountSession("save-roots", reg)
+	ms := vfs.MustNewMountSession("save-roots", reg)
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
 		t.Fatal(err)
 	}
@@ -455,7 +455,7 @@ func TestKnowledgeSave_rootsMount(t *testing.T) {
 		Point: "/discovery", Profile: brain.DefaultProfile,
 		Params: map[string]string{"mode": brain.ModeRoots, "kind": "Discovery"},
 	})
-	h := NewAgent(ctx, AgentOptions{
+	h := mustNewAgent(t, ctx, AgentOptions{
 		SessionID: "save-roots", Store: stores.NewInMemoryStore(),
 		MountSession: ms, Model: &mockStrategy{},
 		Brain: eng, SearchNamespace: &ns,
@@ -505,7 +505,7 @@ func TestRun_workspaceResearchTurn(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.NewMountSession("research-turn", reg)
+	ms := vfs.MustNewMountSession("research-turn", reg)
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
 		t.Fatal(err)
 	}
@@ -594,7 +594,7 @@ func TestRun_workspaceResearchTurn(t *testing.T) {
 		}
 	}
 
-	h := NewAgent(ctx, AgentOptions{
+	h := mustNewAgent(t, ctx, AgentOptions{
 		SessionID: "research-turn",
 		Store:     stores.NewInMemoryStore(),
 		Config: Config{
@@ -677,7 +677,7 @@ func TestPathNativeGraphLinkExpand(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.NewMountSession("path-graph", reg)
+	ms := vfs.MustNewMountSession("path-graph", reg)
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
 		t.Fatal(err)
 	}
@@ -691,7 +691,7 @@ func TestPathNativeGraphLinkExpand(t *testing.T) {
 		t.Fatal(err)
 	}
 	ns := uuid.New()
-	h := NewAgent(ctx, AgentOptions{
+	h := mustNewAgent(t, ctx, AgentOptions{
 		SessionID: "path-graph", Store: stores.NewInMemoryStore(),
 		MountSession: ms, Model: &mockStrategy{},
 		Brain: eng, SearchNamespace: &ns,

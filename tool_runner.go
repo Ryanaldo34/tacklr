@@ -19,8 +19,8 @@ type ToolInvocation struct {
 type ToolCallFunc func(ctx context.Context, inv ToolInvocation) (string, error)
 
 // ToolInterceptor wraps a tool call. Call next to continue, or return early to
-// short-circuit. Nil ToolInterceptors uses the built-in planning lock and
-// permission gate; a non-nil slice replaces that chain.
+// short-circuit. Host interceptors on AgentOptions wrap outside the built-in
+// planning lock and permission gate; they never replace that chain.
 type ToolInterceptor func(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error)
 
 type toolRunner struct {
@@ -66,10 +66,10 @@ func toolPermissionGate(ctx context.Context, inv ToolInvocation, next ToolCallFu
 	}
 
 	name := inv.Tool.Name
-	if permissionSetHas(inv.Runtime, permissionAlwaysDenyKey, name) {
+	if inv.Runtime != nil && inv.Runtime.PermissionAlwaysDenied(name) {
 		return "", fmt.Errorf("%w: tool %q is always rejected for this session", ErrToolPermissionDenied, name)
 	}
-	if permissionSetHas(inv.Runtime, permissionAlwaysAllowKey, name) {
+	if inv.Runtime != nil && inv.Runtime.PermissionAlwaysAllowed(name) {
 		return next(ctx, inv)
 	}
 
@@ -89,44 +89,17 @@ func toolPermissionGate(ctx context.Context, inv ToolInvocation, next ToolCallFu
 
 	switch perm.SelectedKind {
 	case interrupt.PermissionAllowAlways:
-		permissionRemember(inv.Runtime, permissionAlwaysAllowKey, name)
+		if inv.Runtime != nil {
+			inv.Runtime.RememberPermissionAllow(name)
+		}
 	case interrupt.PermissionRejectAlways:
-		permissionRemember(inv.Runtime, permissionAlwaysDenyKey, name)
+		if inv.Runtime != nil {
+			inv.Runtime.RememberPermissionDeny(name)
+		}
 	}
 
 	if !perm.Allowed {
 		return "", fmt.Errorf("%w: user rejected tool %q", ErrToolPermissionDenied, name)
 	}
 	return next(ctx, inv)
-}
-
-const (
-	permissionAlwaysAllowKey = "_permission_always_allow"
-	permissionAlwaysDenyKey  = "_permission_always_deny"
-)
-
-func permissionSet(rt HarnessRuntime, key string) map[string]bool {
-	v, ok := rt.StateGet(key)
-	if !ok || v == nil {
-		return map[string]bool{}
-	}
-	m, ok := v.(map[string]bool)
-	if !ok {
-		return map[string]bool{}
-	}
-	out := make(map[string]bool, len(m))
-	for k, b := range m {
-		out[k] = b
-	}
-	return out
-}
-
-func permissionSetHas(rt HarnessRuntime, key, toolName string) bool {
-	return permissionSet(rt, key)[toolName]
-}
-
-func permissionRemember(rt HarnessRuntime, key, toolName string) {
-	set := permissionSet(rt, key)
-	set[toolName] = true
-	rt.StateSet(key, set)
 }

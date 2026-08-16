@@ -99,14 +99,14 @@ func TestRunTurn_twoTurnsKeepHostDirOrList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h1 := s1.Harness
+	h1 := s1.harness
 	drainTurn(t, s1)
 
 	s2, err := r.RunTurn(ctx, TurnRequest{AgentID: "default", ThreadID: thread, Prompt: "two"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	h2 := s2.Harness
+	h2 := s2.harness
 	if h2 == h1 {
 		t.Fatal("want a new harness each turn")
 	}
@@ -183,7 +183,7 @@ func TestRunTurn_unavailableProjectionStillCompletes(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { r.DropLiveHarness("sess-noproj") })
-	if s.Harness.VFS() != nil {
+	if s.harness.VFS() != nil {
 		t.Fatal("want no VFS when projection is unavailable")
 	}
 	var saw bool
@@ -218,7 +218,7 @@ func TestRunTurn_failedResumeThenFreshPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h1 := s1.Harness
+	h1 := s1.harness
 	drainTurn(t, s1)
 
 	_, err = r.RunTurn(ctx, TurnRequest{
@@ -235,14 +235,14 @@ func TestRunTurn_failedResumeThenFreshPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s3.Harness == h1 {
+	if s3.harness == h1 {
 		t.Fatal("want a new harness after dump")
 	}
-	if vfs.FuseAvailable() && s3.Harness.VFS().HostDir() == "" {
+	if vfs.FuseAvailable() && s3.harness.VFS().HostDir() == "" {
 		t.Fatal("HostDir empty on third prompt")
 	}
 	if !vfs.FuseAvailable() {
-		if _, err := s3.Harness.VFS().ReadDir(ctx, "/work"); err != nil {
+		if _, err := s3.harness.VFS().ReadDir(ctx, "/work"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -269,14 +269,14 @@ func TestRunTurn_coldRunHarnessFailureThenFreshPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s3.Harness == nil {
+	if s3.harness == nil {
 		t.Fatal("want constructed harness")
 	}
 	if vfs.FuseAvailable() {
-		if s3.Harness.VFS() == nil || s3.Harness.VFS().HostDir() == "" {
+		if s3.harness.VFS() == nil || s3.harness.VFS().HostDir() == "" {
 			t.Fatal("want live HostDir on reconstructed harness")
 		}
-	} else if _, err := s3.Harness.VFS().ReadDir(ctx, "/work"); err != nil {
+	} else if _, err := s3.harness.VFS().ReadDir(ctx, "/work"); err != nil {
 		t.Fatal(err)
 	}
 	drainTurn(t, s3)
@@ -324,7 +324,7 @@ func TestRunTurn_fuseMountFailHard(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { r.DropLiveHarness(thread) })
-	if s.Harness.VFS().HostDir() == "" {
+	if s.harness.VFS().HostDir() == "" {
 		t.Fatal("want HostDir after unblocked remount")
 	}
 	drainTurn(t, s)

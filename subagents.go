@@ -10,13 +10,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ryanaldo34/tacklr/internal/session"
 	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
 // Worker failures wrap the package categories (ErrNotFound, ErrInvalid, ErrFailed).
-
-const parkedWorkersStateKey = "_parked_workers"
 
 // SubAgent describes a specialized worker that a harness can spawn via the
 // spawn_worker tool. Specs may nest via SubAgents so interrupt propagation
@@ -34,35 +33,30 @@ type SubAgent struct {
 	SubAgents []*SubAgent
 }
 
-// parkedWorkerMeta is durable park metadata stored in user State (SessionManager bag).
-// Live harness pointers are not stored here; they live in parkedWorkersLive.
-type parkedWorkerMeta struct {
-	WorkerName        string   `json:"workerName"`
-	WorkerSessionID   string   `json:"workerSessionId"`
-	Task              string   `json:"task"`
-	ChildInterruptIDs []string `json:"childInterruptIds"`
-}
+// parkedWorkerMeta is durable park metadata. Live harness pointers live in parkedWorkersLive.
+type parkedWorkerMeta = session.ParkedWorkerMeta
 
 // initSubAgentWorkers registers worker specs. Invalid or duplicate specs are
 // constructor errors (panic): a misconfigured host must not start a harness
 // that silently drops workers.
-func (h *AgentHarness) initSubAgentWorkers(specs []*SubAgent) {
+func (h *AgentHarness) initSubAgentWorkers(specs []*SubAgent) error {
 	for _, spec := range specs {
 		if spec == nil {
-			panic("tacklr: SubAgent must not be nil")
+			return fmt.Errorf("tacklr: SubAgent must not be nil")
 		}
 		if spec.WorkerName == "" {
-			panic("tacklr: SubAgent.WorkerName is required")
+			return fmt.Errorf("tacklr: SubAgent.WorkerName is required")
 		}
 		if spec.Model == nil {
-			panic("tacklr: SubAgent.Model is required")
+			return fmt.Errorf("tacklr: SubAgent.Model is required")
 		}
 		if _, exists := h.subagents[spec.WorkerName]; exists {
-			panic("tacklr: duplicate SubAgent worker name " + spec.WorkerName)
+			return fmt.Errorf("tacklr: duplicate SubAgent worker name %s", spec.WorkerName)
 		}
 		cp := *spec
 		h.subagents[spec.WorkerName] = &cp
 	}
+	return nil
 }
 
 // workerNames returns registered worker names in sorted order.
@@ -121,11 +115,11 @@ func (a *AgentHarness) runWorker(ctx context.Context, workerName, task string, r
 	if !ok {
 		return "", fmt.Errorf("worker %q: %w", workerName, ErrNotFound)
 	}
-	if strings.TrimSpace(task) == "" && a.getParkMeta(runtime.CurrentToolCallID) == nil {
+	if strings.TrimSpace(task) == "" && a.getParkMeta(runtime.CurrentToolCallID()) == nil {
 		return "", fmt.Errorf("worker %q: empty task: %w", workerName, ErrInvalid)
 	}
 
-	toolCallID := runtime.CurrentToolCallID
+	toolCallID := runtime.CurrentToolCallID()
 	logAttrs := []any{
 		"area", "subagent",
 		"session_id", a.sessionId,
@@ -165,7 +159,11 @@ func (a *AgentHarness) runWorker(ctx context.Context, workerName, task string, r
 		closeOnExit = !live
 	} else {
 		slog.Info("spawning worker", logAttrs...)
-		worker = a.newWorkerHarness(workerCtx, workerName, toolCallID, spec)
+		var err error
+		worker, err = a.newWorkerHarness(workerCtx, workerName, toolCallID, spec)
+		if err != nil {
+			return "", fmt.Errorf("worker %q: %w", workerName, err)
+		}
 		closeOnExit = true
 	}
 
@@ -259,11 +257,14 @@ func (a *AgentHarness) runWorker(ctx context.Context, workerName, task string, r
 	return "", err
 }
 
-func (a *AgentHarness) newWorkerHarness(ctx context.Context, workerName, parentToolCallID string, spec *SubAgent) *AgentHarness {
+func (a *AgentHarness) newWorkerHarness(ctx context.Context, workerName, parentToolCallID string, spec *SubAgent) (*AgentHarness, error) {
 	sessionID := workerSessionID(a.sessionId, workerName, parentToolCallID)
-	worker := NewAgent(ctx, a.workerOptsForSpawn(spec))
+	worker, err := NewAgent(ctx, a.workerOptsForSpawn(spec))
+	if err != nil {
+		return nil, err
+	}
 	worker.sessionId = sessionID
-	return worker
+	return worker, nil
 }
 
 func workerSessionID(parentSessionID, workerName, parentToolCallID string) string {
@@ -274,7 +275,7 @@ func workerSessionID(parentSessionID, workerName, parentToolCallID string) strin
 }
 
 // workerOptsFromSpec builds shared worker options: host mount, brain,
-// shared index bridge, and skipPlanningLock. Omits SearchNamespace so
+// shared index bridge, and DisablePlanningLock. Omits SearchNamespace so
 // resume keeps the checkpointed worker session value.
 func (a *AgentHarness) workerOptsFromSpec(spec *SubAgent) AgentOptions {
 	return AgentOptions{
@@ -293,7 +294,7 @@ func (a *AgentHarness) workerOptsFromSpec(spec *SubAgent) AgentOptions {
 		MountSession:         a.VFS(),
 		RunCommandUnattended: a.runCommandUnattended,
 		shareIndexBridge:     a.vfsBridge,
-		skipPlanningLock:     true,
+		DisablePlanningLock:  true,
 	}
 }
 
@@ -382,19 +383,16 @@ func (p parkStore) get(toolCallID string) *parkedWorkerMeta {
 	if toolCallID == "" {
 		return nil
 	}
-	parks := p.load()
-	if meta, ok := parks[toolCallID]; ok {
-		cp := meta
-		return &cp
+	meta, ok := p.h.session.ParkedWorker(toolCallID)
+	if !ok {
+		return nil
 	}
-	return nil
+	cp := meta
+	return &cp
 }
 
 func (p parkStore) set(toolCallID string, meta parkedWorkerMeta, worker *AgentHarness) {
-	parks := p.load()
-	parks[toolCallID] = meta
-	p.store(parks)
-
+	p.h.session.SetParkedWorker(toolCallID, meta)
 	p.h.parkMu.Lock()
 	if worker != nil {
 		p.h.parkedWorkersLive[toolCallID] = worker
@@ -406,11 +404,7 @@ func (p parkStore) clear(toolCallID string) {
 	if toolCallID == "" {
 		return
 	}
-	parks := p.load()
-	if _, ok := parks[toolCallID]; ok {
-		delete(parks, toolCallID)
-		p.store(parks)
-	}
+	p.h.session.DeleteParkedWorker(toolCallID)
 	p.h.parkMu.Lock()
 	live := p.h.parkedWorkersLive[toolCallID]
 	delete(p.h.parkedWorkersLive, toolCallID)
@@ -421,30 +415,6 @@ func (p parkStore) clear(toolCallID string) {
 	if p.h.interruptPayloads != nil {
 		delete(p.h.interruptPayloads, toolCallID)
 	}
-}
-
-func (p parkStore) load() map[string]parkedWorkerMeta {
-	raw, ok := p.h.session.StateGet(parkedWorkersStateKey)
-	if !ok || raw == nil {
-		return map[string]parkedWorkerMeta{}
-	}
-	m, ok := raw.(map[string]parkedWorkerMeta)
-	if !ok || m == nil {
-		return map[string]parkedWorkerMeta{}
-	}
-	out := make(map[string]parkedWorkerMeta, len(m))
-	for k, v := range m {
-		out[k] = v
-	}
-	return out
-}
-
-func (p parkStore) store(parks map[string]parkedWorkerMeta) {
-	if len(parks) == 0 {
-		p.h.session.StateDelete(parkedWorkersStateKey)
-		return
-	}
-	p.h.session.StateSet(parkedWorkersStateKey, parks)
 }
 
 // workerDrainResult is the outcome of draining a child event stream.

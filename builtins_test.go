@@ -41,7 +41,7 @@ func drainEventCh() chan streaming.StreamEvent {
 
 // planRT is a turn Runtime for plan/ask tool unit tests (events drained).
 func planRT() HarnessRuntime {
-	return session.NewRuntime(drainEventCh(), nil, session.NewSessionManager())
+	return session.NewRuntime(drainEventCh(), session.NewSessionManager())
 }
 
 // TestCreatePlanTool covers create_plan success and rejection return paths.
@@ -314,8 +314,8 @@ func TestEditPlanTool(t *testing.T) {
 }
 
 func TestAskUserChoiceTool_raiseAndResume(t *testing.T) {
-	rt := session.NewRuntime(make(chan streaming.StreamEvent, 4), nil, session.NewSessionManager())
-	rt.CurrentToolCallID = "tc_ask"
+	rt := session.NewRuntime(make(chan streaming.StreamEvent, 4), session.NewSessionManager())
+	rt = rt.WithToolCallID("tc_ask")
 
 	args, _ := json.Marshal(map[string]any{
 		"question": "Which approach?",
@@ -422,7 +422,7 @@ func TestRun_planToolHappyAndErrorPaths(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			model := sequentialToolModel([]ToolCall{c.call})
 			opts := AgentOptions{Model: model, Config: Config{MaxWindowSize: 8192}}
-			h := NewAgent(context.Background(), opts)
+			h := mustNewAgent(t, context.Background(), opts)
 			t.Cleanup(h.Close)
 			if c.seed != nil {
 				c.seed(h)
@@ -442,7 +442,7 @@ func TestRun_planToolHappyAndErrorPaths(t *testing.T) {
 func TestRun_askUserChoice_withoutDescription_formatsSelection(t *testing.T) {
 	model := sequentialToolModel([]ToolCall{toolCall("ask1", "ask_user_choice",
 		`{"question":"Pick?","choices":[{"title":"A"},{"title":"B"}]}`)})
-	h := NewAgent(context.Background(), AgentOptions{
+	h := mustNewAgent(t, context.Background(), AgentOptions{
 		Model: model, Config: Config{MaxWindowSize: 8192}, Store: testStore(t),
 	})
 	t.Cleanup(h.Close)
@@ -588,7 +588,7 @@ func TestRun_completeTodo_withPlanDocument_preservesFullPlan(t *testing.T) {
 			}
 		},
 	}
-	h := NewAgent(context.Background(), AgentOptions{
+	h := mustNewAgent(t, context.Background(), AgentOptions{
 		Model: strategy, Config: Config{MaxWindowSize: 8192}, Store: testStore(t),
 	})
 	t.Cleanup(h.Close)
@@ -640,7 +640,7 @@ func TestRun_editPlan_planChange_triggersHandoff(t *testing.T) {
 			}
 		},
 	}
-	h := NewAgent(context.Background(), AgentOptions{
+	h := mustNewAgent(t, context.Background(), AgentOptions{
 		Model: strategy, Config: Config{MaxWindowSize: 8192}, Store: testStore(t),
 	})
 	t.Cleanup(h.Close)
@@ -685,7 +685,7 @@ func TestRun_completeTodo_persistsPlanInStore(t *testing.T) {
 		},
 	}
 
-	ah := NewAgent(context.Background(), AgentOptions{
+	ah := mustNewAgent(t, context.Background(), AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  strategy,
 		Store:  store,

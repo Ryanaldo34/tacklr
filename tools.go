@@ -83,7 +83,7 @@ type mcpToolConfig struct {
 }
 
 var timeType = reflect.TypeOf(time.Time{})
-var harnessRuntimeType = reflect.TypeOf(HarnessRuntime{})
+var harnessRuntimeType = reflect.TypeOf((*HarnessRuntime)(nil)).Elem()
 var ctxType = reflect.TypeOf((*context.Context)(nil)).Elem()
 
 func NewTool(cfg ToolConfig) *Tool {
@@ -117,37 +117,30 @@ func NewTool(cfg ToolConfig) *Tool {
 	var argsType reflect.Type
 	var argsIsPtr bool
 	var hasRuntime bool
-	var runtimeIsPtr bool
 
 	if idx < numIn {
 		pType := fnType.In(idx)
-		baseType := pType
-		if baseType.Kind() == reflect.Ptr {
-			baseType = baseType.Elem()
-		}
-
-		if baseType == harnessRuntimeType {
+		if pType == harnessRuntimeType {
 			hasRuntime = true
-			runtimeIsPtr = pType.Kind() == reflect.Ptr
-		} else if baseType.Kind() == reflect.Struct {
-			argsType = baseType
-			argsIsPtr = pType.Kind() == reflect.Ptr
-			idx++
-			if idx < numIn {
-				rType := fnType.In(idx)
-				rBase := rType
-				if rBase.Kind() == reflect.Ptr {
-					rBase = rBase.Elem()
-				}
-				if rBase == harnessRuntimeType {
-					hasRuntime = true
-					runtimeIsPtr = rType.Kind() == reflect.Ptr
-				} else {
-					panic(fmt.Sprintf("tool %q: unexpected parameter type %v", cfg.Name, rType))
-				}
-			}
 		} else {
-			panic(fmt.Sprintf("tool %q: handler parameter must be a struct or HarnessRuntime, got %v", cfg.Name, pType))
+			baseType := pType
+			if baseType.Kind() == reflect.Ptr {
+				baseType = baseType.Elem()
+			}
+			if baseType.Kind() == reflect.Struct {
+				argsType = baseType
+				argsIsPtr = pType.Kind() == reflect.Ptr
+				idx++
+				if idx < numIn {
+					rType := fnType.In(idx)
+					if rType != harnessRuntimeType {
+						panic(fmt.Sprintf("tool %q: unexpected parameter type %v (want HarnessRuntime)", cfg.Name, rType))
+					}
+					hasRuntime = true
+				}
+			} else {
+				panic(fmt.Sprintf("tool %q: handler parameter must be a struct or HarnessRuntime, got %v", cfg.Name, pType))
+			}
 		}
 	}
 
@@ -199,8 +192,8 @@ func NewTool(cfg ToolConfig) *Tool {
 		}
 
 		if hasRuntime {
-			if runtimeIsPtr {
-				callArgs = append(callArgs, reflect.ValueOf(&runtime))
+			if runtime == nil {
+				callArgs = append(callArgs, reflect.Zero(harnessRuntimeType))
 			} else {
 				callArgs = append(callArgs, reflect.ValueOf(runtime))
 			}

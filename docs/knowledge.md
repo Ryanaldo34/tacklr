@@ -63,7 +63,7 @@ Almost every design mistake in this area comes from treating these as the same t
 
 ```text
   Agent
-    ├─ file tools     list, stat, read, write, mkdir, remove, run_command
+    ├─ file tools     read, write, run_command
     └─ knowledge tools schema, search, find_exact, find_objects,
                        link, expand, find_links, save_*, continue
               │

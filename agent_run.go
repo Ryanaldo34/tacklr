@@ -42,7 +42,7 @@ func (a *AgentHarness) RunMessage(ctx context.Context, user *Message) (<-chan St
 	out := make(chan StreamEvent, streamEventBuffer)
 	// Turn-scoped Runtime: event bus for this Run only; durable state is on a.session.
 	// Tools receive a value copy via invoke; plan tools emit plan_update through it.
-	turnRT := session.NewRuntime(out, a.store, a.session)
+	turnRT := session.NewRuntime(out, a.session)
 
 	emitCancelled := func() {
 		// Pair open tools into the window before the cancel error event so the
@@ -261,8 +261,7 @@ func (a *AgentHarness) RunMessage(ctx context.Context, user *Message) (<-chan St
 						toolResults[i] = a.emitToolResult(out, tc, toolErr.Error(), "error")
 						return
 					}
-					runtimeCopy := turnRT
-					runtimeCopy.CurrentToolCallID = tcKey
+					runtimeCopy := turnRT.WithToolCallID(tcKey)
 					output, toolDisp, err := a.toolRunner.Run(toolCtx, ToolInvocation{
 						Tool:     tool,
 						ArgsJSON: tc.Arguments,

@@ -20,7 +20,7 @@ func TestFuseMount_hostSeesDirtyText(t *testing.T) {
 	if err := reg.Register(LocalFactory{ID: "scratch", Base: t.TempDir()}); err != nil {
 		t.Fatal(err)
 	}
-	ms := NewMountSession(t.Name(), reg)
+	ms := MustNewMountSession(t.Name(), reg)
 	if err := ms.Mount(ctx, MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +114,7 @@ func TestFuseMount_plaintextWritableProjectedEROFS(t *testing.T) {
 	if err := reg.Register(LocalFactory{ID: "scratch", Base: t.TempDir()}); err != nil {
 		t.Fatal(err)
 	}
-	ms := NewMountSession(t.Name(), reg)
+	ms := MustNewMountSession(t.Name(), reg)
 	if err := ms.Mount(ctx, MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
 		t.Fatal(err)
 	}
@@ -284,7 +284,7 @@ func TestFuseMount_projectedTextualReadOnly(t *testing.T) {
 	if err := reg.Register(LocalFactory{ID: "scratch", Base: t.TempDir()}); err != nil {
 		t.Fatal(err)
 	}
-	ms := NewMountSession(t.Name(), reg)
+	ms := MustNewMountSession(t.Name(), reg)
 	if err := ms.Mount(ctx, MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
 		t.Fatal(err)
 	}
@@ -354,7 +354,7 @@ func TestFuseMount_rejectsMultiSegmentPoint(t *testing.T) {
 	if err := reg.Register(LocalFactory{ID: "scratch", Base: t.TempDir()}); err != nil {
 		t.Fatal(err)
 	}
-	ms := NewMountSession(t.Name(), reg)
+	ms := MustNewMountSession(t.Name(), reg)
 	if err := ms.Mount(ctx, MountSpec{Point: "/tmp/tacklr", Profile: "scratch"}); err != nil {
 		t.Fatal(err)
 	}
@@ -366,7 +366,7 @@ func TestFuseMount_rejectsMultiSegmentPoint(t *testing.T) {
 		t.Fatal("empty FuseMount dir")
 	}
 	if FuseAvailable() {
-		empty := NewMountSession("empty-tree", reg)
+		empty := MustNewMountSession("empty-tree", reg)
 		dir := t.TempDir()
 		if err := empty.FuseMount(dir); err != nil {
 			t.Fatalf("empty specs FuseMount: %v", err)

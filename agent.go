@@ -44,18 +44,15 @@ type AgentHarness struct {
 	interruptPayloads map[string][]byte
 	// parkedWorkersLive maps spawn_worker tool call id → live child harness.
 	// Durable park metadata is in SessionManager state; this map is not checkpointed.
-	parkedWorkersLive map[string]*AgentHarness
-	parkMu            sync.Mutex
-	skillByName       map[string]skills.Skill
-	skillDirectories  []string
-	skillsLoader      skills.SkillLoader
-	skillsInitialized bool
-	exaAPIKey         string
-	brain             *brain.Engine
-	brainWriteKinds   brain.WriteKinds
-	// searchCtx owns the current knowledge ResultSet for this agent thread.
-	// Checkpointed via checkpointSession / NewAgentFromSession; not SessionManager.
-	searchCtx            *brain.SearchContext
+	parkedWorkersLive    map[string]*AgentHarness
+	parkMu               sync.Mutex
+	skillByName          map[string]skills.Skill
+	skillDirectories     []string
+	skillsLoader         skills.SkillLoader
+	skillsInitialized    bool
+	exaAPIKey            string
+	brain                *brain.Engine
+	brainWriteKinds      brain.WriteKinds
 	runCommandUnattended bool
 	// vfsBridge is the mount→brain index lifecycle (not the agent turn loop).
 	// Workers receive the parent pointer at construct; ownsVFSBridge is set
@@ -66,7 +63,7 @@ type AgentHarness struct {
 	mcpInitialized   bool
 	builtinsInjected bool
 	context          ContextManager
-	tasks            ModelTasks
+	tasks            modelTasks
 	contextPolicy    ContextPolicy
 	toolRunner       *toolRunner
 	toolResultHooks  *toolResultHookRegistry
@@ -78,7 +75,7 @@ type AgentHarness struct {
 // VFS is the session mount table, or nil. Hosts call FuseMount on this.
 // The harness does not start or own the kernel mount.
 func (a *AgentHarness) VFS() *vfs.MountSession {
-	return a.session.VFS
+	return a.session.VFS()
 }
 
 // SessionID returns the durable session id, or empty if unbound.
@@ -173,18 +170,10 @@ func (a *AgentHarness) checkpointSession(ctx context.Context) error {
 	}
 	a.pendingMu.Unlock()
 
-	cp, err := session.NewCheckpointer().Capture(a.context.Snapshot(), a.session, ptc, itr)
+	cp, err := session.NewCheckpointer().Capture(a.context.Messages(), a.session, ptc, itr)
 	if err != nil {
 		telemetry.InstrumentsFromContext(ctx).RecordCheckpointSave(ctx, telemetry.OutcomeError)
 		return err
-	}
-	if a.searchCtx != nil {
-		raw, err := a.searchCtx.Export()
-		if err != nil {
-			telemetry.InstrumentsFromContext(ctx).RecordCheckpointSave(ctx, telemetry.OutcomeError)
-			return err
-		}
-		cp.State.SearchContext = raw
 	}
 	if err := a.store.SaveSession(ctx, a.sessionId, *cp); err != nil {
 		telemetry.InstrumentsFromContext(ctx).RecordCheckpointSave(ctx, telemetry.OutcomeError)

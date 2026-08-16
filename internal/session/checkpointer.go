@@ -36,6 +36,13 @@ func (Checkpointer) Capture(
 	if err != nil {
 		return nil, err
 	}
+	if sm.Search() != nil {
+		raw, err := sm.Search().Export()
+		if err != nil {
+			return nil, fmt.Errorf("checkpointer: export search context: %w", err)
+		}
+		cp.State.SearchContext = raw
+	}
 	return cp, nil
 }
 
@@ -54,6 +61,11 @@ func (Checkpointer) Apply(cp stores.SessionCheckpoint, sm *SessionManager) (Appl
 		return AppliedCheckpoint{}, fmt.Errorf("checkpointer: session manager is nil")
 	}
 	sm.LoadUserAndPlanState(cp.State.RuntimeState)
+	if len(cp.State.SearchContext) > 0 {
+		if err := sm.Search().Restore(cp.State.SearchContext); err != nil {
+			return AppliedCheckpoint{}, fmt.Errorf("checkpointer: restore search context: %w", err)
+		}
+	}
 	if err := sm.LoadInterruptsJSON(cp.State.PendingInterrupts, cp.State.ResolvedInterrupts); err != nil {
 		return AppliedCheckpoint{}, err
 	}

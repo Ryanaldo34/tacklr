@@ -82,8 +82,8 @@ var askUserChoiceTool = NewTool(ToolConfig{
 		if err != nil {
 			return "", fmt.Errorf("marshal choices: %w", err)
 		}
-		if runtime.CurrentToolCallID != "" {
-			runtime.StateSet(askUserQuestionStateKey(runtime.CurrentToolCallID), args.Question)
+		if runtime.CurrentToolCallID() != "" {
+			_ = runtime.StateSet(askUserQuestionStateKey(runtime.CurrentToolCallID()), args.Question)
 		}
 
 		intr, err := runtime.RaiseInterrupt("user_selection_choice", optionsJSON)

@@ -29,13 +29,11 @@ func DefaultContextPolicy() ContextPolicy {
 }
 
 // ContextManager owns the conversation window structure only (no inference).
-// ModelTasks does model work and applies results with Replace or InstallPlanDocument.
-// Snapshot must be safe while another path Absorbs or Replaces after resume.
+// modelTasks does model work and applies results with Replace or InstallPlanDocument.
+// Messages must be safe while another path Absorbs or Replaces after resume.
 type ContextManager interface {
-	// Messages returns a retainable snapshot of the live window.
+	// Messages returns a retainable snapshot of the live window (also used for checkpoints).
 	Messages() []*Message
-	// Snapshot is for checkpointing (shallow copy of message pointers).
-	Snapshot() []*Message
 	// Restore copies window into storage (caller keeps its slice).
 	Restore(window []*Message)
 	// Replace takes ownership of window; do not reuse the slice after.
@@ -64,10 +62,6 @@ func (m *ModelContextManager) Messages() []*Message {
 		return nil
 	}
 	return slices.Clone(m.window)
-}
-
-func (m *ModelContextManager) Snapshot() []*Message {
-	return m.Messages()
 }
 
 func (m *ModelContextManager) Restore(window []*Message) {

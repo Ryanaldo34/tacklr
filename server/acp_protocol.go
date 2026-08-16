@@ -248,8 +248,8 @@ func (p *acpProtocol) handleSessionTurn(ctx context.Context, env ProtocolEnv, pr
 		stream.Close()
 	}()
 	threadID := req.ThreadID
-	if stream.Harness != nil && stream.Harness.SessionID() != "" {
-		threadID = stream.Harness.SessionID()
+	if stream.SessionID() != "" {
+		threadID = stream.SessionID()
 	}
 	err = runTurnStream(ctx, env, p, threadID, stream, pr.ID)
 	if err != nil && !IsClientError(err) {
@@ -385,10 +385,7 @@ func resolveSelectionViaElicitation(ctx context.Context, env ProtocolEnv, thread
 	if err != nil {
 		return nil, fmt.Errorf("parse selection interrupt: %w", err)
 	}
-	question := ""
-	if stream.Harness != nil {
-		question = stream.Harness.AskUserQuestion(ev.MessageID)
-	}
+	question := stream.AskUserQuestion(ev.MessageID)
 	params, err := SelectionToElicitationParams(threadID, ev.MessageID, question, opts)
 	if err != nil {
 		return nil, err

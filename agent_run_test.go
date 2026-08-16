@@ -78,7 +78,7 @@ func runPrompt(t *testing.T, model *mockStrategy, opts AgentOptions) (*AgentHarn
 	if opts.Config.MaxWindowSize == 0 {
 		opts.Config.MaxWindowSize = 8192
 	}
-	h := NewAgent(context.Background(), opts)
+	h := mustNewAgent(t, context.Background(), opts)
 	t.Cleanup(h.Close)
 	_ = h.SessionID() // exercise getter (empty when no store/session id set)
 	events, err := h.Run(context.Background(), "hi")
@@ -89,7 +89,7 @@ func runPrompt(t *testing.T, model *mockStrategy, opts AgentOptions) (*AgentHarn
 }
 
 func TestRunMessage_imageAcceptedOnlyWhenModelAllows(t *testing.T) {
-	h := NewAgent(context.Background(), AgentOptions{
+	h := mustNewAgent(t, context.Background(), AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  &mockStrategy{},
 	})
@@ -110,7 +110,7 @@ func TestRunMessage_imageAcceptedOnlyWhenModelAllows(t *testing.T) {
 		t.Fatalf("text-only model: %v", err)
 	}
 
-	vision := NewAgent(context.Background(), AgentOptions{
+	vision := mustNewAgent(t, context.Background(), AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model: &mockStrategy{
 			supportsMIMEFn: func(string) bool { return true },
@@ -165,7 +165,7 @@ func TestRun_maxTurnRequests_emitsStopReason(t *testing.T) {
 			}
 		},
 	}
-	h := NewAgent(context.Background(), AgentOptions{
+	h := mustNewAgent(t, context.Background(), AgentOptions{
 		Config: Config{MaxWindowSize: 8192, MaxTurnRequests: 1},
 		Model:  strategy,
 		Tools:  []*Tool{tool},
@@ -182,7 +182,7 @@ func TestRun_maxTurnRequests_emitsStopReason(t *testing.T) {
 
 // TestRun_invokeError_emitsErrorEvent: model Invoke failures end the turn with an error event.
 func TestRun_invokeError_emitsErrorEvent(t *testing.T) {
-	h := NewAgent(context.Background(), AgentOptions{
+	h := mustNewAgent(t, context.Background(), AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  &mockStrategy{invokeErr: errors.New("provider down")},
 	})
@@ -223,7 +223,7 @@ func TestRun_modelStreamError_afterToolAnnounce_emitsFailedToolResults(t *testin
 			}
 		},
 	}
-	h := NewAgent(context.Background(), AgentOptions{
+	h := mustNewAgent(t, context.Background(), AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  strategy,
 	})
@@ -253,7 +253,7 @@ func TestRun_incompleteToolCall_emitsFailedToolResult(t *testing.T) {
 			// Stream ends without a complete executable function_call.
 		},
 	}
-	h := NewAgent(context.Background(), AgentOptions{
+	h := mustNewAgent(t, context.Background(), AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  strategy,
 	})
@@ -291,7 +291,7 @@ func TestRun_unknownTool_surfacesToolResultError(t *testing.T) {
 			}
 		},
 	}
-	h := NewAgent(context.Background(), AgentOptions{
+	h := mustNewAgent(t, context.Background(), AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  strategy,
 	})
@@ -334,7 +334,7 @@ func TestRun_functionCallRecordedBeforeToolResult(t *testing.T) {
 			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
 		},
 	}
-	h := NewAgent(context.Background(), AgentOptions{
+	h := mustNewAgent(t, context.Background(), AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  strategy,
 		Tools:  []*Tool{tool},
@@ -394,7 +394,7 @@ func TestRun_modelErrorAfterTools_tagsAndCheckpointsPairs(t *testing.T) {
 			}
 		},
 	}
-	h := NewAgent(context.Background(), AgentOptions{
+	h := mustNewAgent(t, context.Background(), AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  strategy,
 		Tools:  []*Tool{tool},
@@ -467,7 +467,7 @@ func TestRun_modelError_stripsUnpairedFromCheckpoint(t *testing.T) {
 			}
 		},
 	}
-	h := NewAgent(context.Background(), AgentOptions{
+	h := mustNewAgent(t, context.Background(), AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  strategy,
 		Store:  store,
@@ -536,7 +536,7 @@ func TestRun_customInstructionsInSystemPrompt(t *testing.T) {
 			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "ok", IsComplete: true}
 		},
 	}
-	h := NewAgent(context.Background(), AgentOptions{
+	h := mustNewAgent(t, context.Background(), AgentOptions{
 		Config: Config{MaxWindowSize: 8192, SystemPrompt: "Always greet formally."},
 		Model:  strategy,
 	})
@@ -589,7 +589,7 @@ func TestRun_mcpToolsDiscoveredAndInvokable(t *testing.T) {
 			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
 		},
 	}
-	h := NewAgent(context.Background(), AgentOptions{
+	h := mustNewAgent(t, context.Background(), AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  strategy,
 		MCPConfigs: []mcp.MCPConfig{
@@ -637,7 +637,7 @@ func TestRun_watchdogRecordsToolResults(t *testing.T) {
 		},
 	}
 	wd := &recordingWatchdog{}
-	h := NewAgent(context.Background(), AgentOptions{
+	h := mustNewAgent(t, context.Background(), AgentOptions{
 		Config:   Config{MaxWindowSize: 8192},
 		Model:    strategy,
 		Tools:    []*Tool{tool},
@@ -678,7 +678,7 @@ func TestRun_cancelMidTool_pairsCancelledResultsInWindow(t *testing.T) {
 		},
 	}
 	store := stores.NewInMemoryStore()
-	h := NewAgent(context.Background(), AgentOptions{
+	h := mustNewAgent(t, context.Background(), AgentOptions{
 		Config:    Config{MaxWindowSize: 8192},
 		Model:     strategy,
 		Tools:     []*Tool{slow},
@@ -745,7 +745,7 @@ func TestRun_cancelAfterToolAnnounce_closesAnnouncedTools(t *testing.T) {
 			<-ctx.Done()
 		},
 	}
-	h := NewAgent(context.Background(), AgentOptions{
+	h := mustNewAgent(t, context.Background(), AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  strategy,
 	})

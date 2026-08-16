@@ -53,7 +53,7 @@ func TestEventStream_closeAndResume(t *testing.T) {
 		t.Fatal("want no harness")
 	}
 	// Resume with cancelled runCtx falls back to parent.
-	h := tacklr.NewAgent(context.Background(), tacklr.AgentOptions{
+	h := mustAgent(t, tacklr.AgentOptions{
 		Config: tacklr.Config{},
 		Model: &mockInferenceStrategy{
 			invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
@@ -65,7 +65,7 @@ func TestEventStream_closeAndResume(t *testing.T) {
 	done := context.Background()
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
-	es = &EventStream{Harness: h, runCtx: cancelled, cancel: func() {}}
+	es = &EventStream{harness: h, runCtx: cancelled, cancel: func() {}}
 	ch, err := es.ResumeInterrupts(done, map[string][]byte{})
 	if err != nil {
 		// empty responses may still succeed starting Run with ""
@@ -343,8 +343,8 @@ func TestResolveSelectionViaElicitation_withQuestion(t *testing.T) {
 	optionsJSON := `[{"title":"A","description":"","isRecommended":true},{"title":"B","description":"","isRecommended":false}]`
 	tool := tacklr.NewTool(tacklr.ToolConfig{
 		Name: "ask_user",
-		Handler: func(ctx context.Context, _ struct{}, runtime *tacklr.HarnessRuntime) (string, error) {
-			runtime.StateSet("_ask_user_question:"+runtime.CurrentToolCallID, "Which?")
+		Handler: func(ctx context.Context, _ struct{}, runtime tacklr.HarnessRuntime) (string, error) {
+			_ = runtime.StateSet("_ask_user_question:"+runtime.CurrentToolCallID(), "Which?")
 			intr, err := runtime.RaiseInterrupt("user_selection_choice", []byte(optionsJSON))
 			if err != nil {
 				return "", err
@@ -366,7 +366,7 @@ func TestResolveSelectionViaElicitation_withQuestion(t *testing.T) {
 			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "done", IsComplete: true}
 		},
 	}
-	h := tacklr.NewAgent(context.Background(), tacklr.AgentOptions{
+	h := mustAgent(t, tacklr.AgentOptions{
 		Config: tacklr.Config{MaxWindowSize: 8192},
 		Model:  strategy,
 		Store:  testStore(t),
@@ -389,7 +389,7 @@ func TestResolveSelectionViaElicitation_withQuestion(t *testing.T) {
 	w := &recordingWriter{}
 	bridge := NewClientBridge(w)
 	env := ProtocolEnv{Conn: &Conn{RPC: bridge, Caps: ClientCapabilities{ElicitationForm: true}}}
-	stream := &EventStream{Harness: h, runCtx: context.Background()}
+	stream := &EventStream{harness: h, runCtx: context.Background()}
 
 	type res struct {
 		ch  <-chan streaming.StreamEvent

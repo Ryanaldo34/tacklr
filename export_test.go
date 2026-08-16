@@ -1,6 +1,7 @@
 package tacklr
 
 import (
+	"context"
 	"testing"
 
 	"github.com/ryanaldo34/tacklr/internal/session"
@@ -35,5 +36,14 @@ func turnRuntime(h *AgentHarness) HarnessRuntime {
 		for range ch {
 		}
 	}()
-	return session.NewRuntime(ch, h.store, h.session)
+	return session.NewRuntime(ch, h.session)
+}
+
+func mustNewAgent(t testing.TB, ctx context.Context, opts AgentOptions) *AgentHarness {
+	t.Helper()
+	h, err := NewAgent(ctx, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return h
 }

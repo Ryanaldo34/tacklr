@@ -47,7 +47,7 @@ func TestHarness_planningWriteLock_thenUnlockAfterCreatePlan(t *testing.T) {
 			}
 		},
 	}
-	ah := NewAgent(context.Background(), AgentOptions{
+	ah := mustNewAgent(t, context.Background(), AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  strategy,
 		Tools:  []*Tool{writeTool},
@@ -114,7 +114,7 @@ func TestHarness_toolPermission_allowAlwaysRemembers(t *testing.T) {
 		Store:     store,
 		Tools:     []*Tool{tool},
 	}
-	ah := NewAgent(context.Background(), opts)
+	ah := mustNewAgent(t, context.Background(), opts)
 
 	ch1, err := ah.Run(context.Background(), "need secret")
 	if err != nil {
@@ -201,7 +201,7 @@ func TestHarness_toolPermission_rejectAlwaysRemembers(t *testing.T) {
 			}
 		},
 	}
-	ah := NewAgent(context.Background(), AgentOptions{
+	ah := mustNewAgent(t, context.Background(), AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  strategy,
 		Tools:  []*Tool{tool},
@@ -298,7 +298,7 @@ func TestHarness_toolTimeout_surfacesAsToolResult(t *testing.T) {
 			events <- LLMResponseChunk{Type: StreamEventMessage, Content: "after timeout", IsComplete: true}
 		},
 	}
-	ah := NewAgent(context.Background(), AgentOptions{
+	ah := mustNewAgent(t, context.Background(), AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  strategy,
 		Tools:  []*Tool{tool},
@@ -329,5 +329,63 @@ func TestHarness_toolTimeout_surfacesAsToolResult(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("timeout tool result missing from context window")
+	}
+}
+
+// TestHarness_hostInterceptor_keepsPermissionGate: a host interceptor wraps
+// outside the built-in gates and cannot disable the permission interrupt.
+func TestHarness_hostInterceptor_keepsPermissionGate(t *testing.T) {
+	var hostSaw string
+	tool := NewTool(ToolConfig{
+		Name:               "crm_write",
+		PermissionRequired: true,
+		Handler: func(ctx context.Context) (string, error) {
+			return "should-not-run", nil
+		},
+	})
+	var invokeCount int
+	strategy := &mockStrategy{
+		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, events chan<- LLMResponseChunk) {
+			invokeCount++
+			if invokeCount == 1 {
+				events <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
+					{ID: "c1", CallID: "c1", Name: "crm_write", Arguments: `{}`},
+				}, IsComplete: true}
+				events <- LLMResponseChunk{IsComplete: true}
+				return
+			}
+			events <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
+		},
+	}
+	ah := mustNewAgent(t, context.Background(), AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  strategy,
+		Tools:  []*Tool{tool},
+		ToolInterceptors: []ToolInterceptor{
+			func(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error) {
+				hostSaw = inv.Tool.Name
+				return next(ctx, inv)
+			},
+		},
+	})
+	ch, err := ah.Run(context.Background(), "write crm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var interruptType string
+	for ev := range ch {
+		if ev.Type == StreamEventInterrupt {
+			var payload struct {
+				Type string `json:"type"`
+			}
+			_ = json.Unmarshal(ev.Data, &payload)
+			interruptType = payload.Type
+		}
+	}
+	if hostSaw != "crm_write" {
+		t.Fatalf("host interceptor saw %q", hostSaw)
+	}
+	if interruptType != "tool_permission" {
+		t.Fatalf("permission gate type = %q", interruptType)
 	}
 }

@@ -5,24 +5,30 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/google/uuid"
+
+	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
 // SessionManager owns durable and live data for one agent harness thread
 // (checkpoint id), not an ACP client session id: plan, user tool state,
-// interrupts, and the optional virtual filesystem mount table.
-// Knowledge namespace + ResultSet live on brain.SearchContext.
-// Builtins close over it; user tools use Runtime.
+// permission memory, parked workers, search context, interrupts, and the
+// optional virtual filesystem mount table.
+//
+// VFS is host-owned and attached with SetVFS. Knowledge namespace + ResultSet
+// live on Search(). Builtins close over the manager; user tools use Runtime.
 type SessionManager struct {
 	mu        sync.RWMutex
 	plan      *PlanStore
 	userState map[string]any
 	pending   interruptMap
 	resolved  interruptMap
-	// VFS is a borrowed host-owned mount table (AgentOptions.MountSession).
-	// Nil when unused. The harness does not create, persist, or close it.
-	VFS *vfs.MountSession
+	perms     *permissionBag
+	parks     *parkBag
+	search    *brain.SearchContext
+	vfs       *vfs.MountSession
 }
 
 // NewSessionManager returns an empty manager ready for use.
@@ -32,31 +38,14 @@ func NewSessionManager() *SessionManager {
 		userState: map[string]any{},
 		pending:   interruptMap{},
 		resolved:  interruptMap{},
-	}
-}
-
-func (s *SessionManager) ensure() {
-	if s.plan == nil {
-		s.plan = NewPlanStore()
-	}
-	if s.userState == nil {
-		s.userState = map[string]any{}
-	}
-	if s.pending == nil {
-		s.pending = interruptMap{}
-	}
-	if s.resolved == nil {
-		s.resolved = interruptMap{}
+		perms:     newPermissionBag(),
+		parks:     newParkBag(),
+		search:    brain.NewSearchContext(),
 	}
 }
 
 // Plan returns the plan module. Never nil after NewSessionManager.
 func (s *SessionManager) Plan() *PlanStore {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.plan == nil {
-		s.plan = NewPlanStore()
-	}
 	return s.plan
 }
 
@@ -65,7 +54,35 @@ func (s *SessionManager) HasActivePlan() bool {
 	return s.Plan().HasActive()
 }
 
-// --- user State bag (facade target for Runtime.StateGet/Set) ---
+// Search returns the knowledge retrieval session (namespace + ResultSet).
+func (s *SessionManager) Search() *brain.SearchContext {
+	return s.search
+}
+
+// SetSearch replaces the search context. Nil resets to an empty context.
+func (s *SessionManager) SetSearch(sc *brain.SearchContext) {
+	if sc == nil {
+		sc = brain.NewSearchContext()
+	}
+	s.search = sc
+}
+
+// VFS returns the host-owned mount table, or nil.
+func (s *SessionManager) VFS() *vfs.MountSession {
+	if s == nil {
+		return nil
+	}
+	return s.vfs
+}
+
+// SetVFS attaches a host-owned mount table. The harness does not create,
+// persist, or close it.
+func (s *SessionManager) SetVFS(ms *vfs.MountSession) {
+	if s == nil {
+		return
+	}
+	s.vfs = ms
+}
 
 // StateGet returns a host/tool state value without a turn Runtime.
 func (s *SessionManager) StateGet(key string) (any, bool) {
@@ -73,8 +90,9 @@ func (s *SessionManager) StateGet(key string) (any, bool) {
 }
 
 // StateSet stores a host/tool state value without a turn Runtime.
-func (s *SessionManager) StateSet(key string, value any) {
-	s.stateSet(key, value)
+// Reserved module keys return an error.
+func (s *SessionManager) StateSet(key string, value any) error {
+	return s.stateSet(key, value)
 }
 
 // StateDelete removes a host/tool state value without a turn Runtime.
@@ -97,16 +115,14 @@ func (s *SessionManager) stateGet(key string) (any, bool) {
 	return v, ok
 }
 
-func (s *SessionManager) stateSet(key string, value any) {
+func (s *SessionManager) stateSet(key string, value any) error {
 	if IsReservedRuntimeStateKey(key) {
-		return
+		return fmt.Errorf("session: reserved state key %q cannot be set", key)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.userState == nil {
-		s.userState = map[string]any{}
-	}
 	s.userState[key] = value
+	return nil
 }
 
 func (s *SessionManager) stateDelete(key string) {
@@ -117,8 +133,6 @@ func (s *SessionManager) stateDelete(key string) {
 	defer s.mu.Unlock()
 	delete(s.userState, key)
 }
-
-// --- interrupts (facade target for Runtime Raise/Return/…) ---
 
 // HasPendingInterrupt reports whether any interrupt is still awaiting a client payload.
 func (s *SessionManager) HasPendingInterrupt() bool {
@@ -143,7 +157,6 @@ func (s *SessionManager) ReturnInterrupt(id string, result []byte) (interrupt.In
 func (s *SessionManager) returnInterrupt(id string, result []byte) (interrupt.Interrupt, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.ensure()
 	intr, ok := s.pending[id]
 	if !ok {
 		return nil, fmt.Errorf("interrupt %q: %w", id, interrupt.ErrInterruptNotFound)
@@ -170,7 +183,6 @@ func (s *SessionManager) adoptInterrupt(toolCallID string, intr interrupt.Interr
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.ensure()
 	if resolved, ok := s.resolved[toolCallID]; ok {
 		delete(s.resolved, toolCallID)
 		return resolved, nil
@@ -200,7 +212,6 @@ func (s *SessionManager) pendingInterrupt(id string) (interrupt.Interrupt, bool)
 func (s *SessionManager) raiseInterrupt(toolCallID string, kind string, payload []byte) (interrupt.Interrupt, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.ensure()
 	if resolved, ok := s.resolved[toolCallID]; ok {
 		delete(s.resolved, toolCallID)
 		return resolved, nil
@@ -218,10 +229,10 @@ func (s *SessionManager) raiseInterrupt(toolCallID string, kind string, payload 
 	return nil, intr
 }
 
-// SnapshotDurable copies user state, plan modules, and interrupt maps for
+// SnapshotDurable copies user state, session modules, and interrupt maps for
 // checkpointing. Interrupts are deep-cloned so marshal does not race live maps.
-// Reserved plan keys in userState are never exported as user keys; plan is
-// written via PlanStore.ExportInto.
+// Reserved keys in userState are never exported as user keys; modules write
+// their own reserved keys via ExportInto.
 func (s *SessionManager) SnapshotDurable() (runtimeState map[string]any, pending, resolved interruptMap) {
 	s.mu.RLock()
 	runtimeState = make(map[string]any, len(s.userState))
@@ -244,24 +255,32 @@ func (s *SessionManager) SnapshotDurable() (runtimeState map[string]any, pending
 		}
 	}
 	plan := s.plan
+	perms := s.perms
+	parks := s.parks
 	s.mu.RUnlock()
 
-	if plan != nil {
-		plan.ExportInto(runtimeState)
-	}
+	plan.ExportInto(runtimeState)
+	perms.exportInto(runtimeState)
+	parks.exportInto(runtimeState)
 	return runtimeState, pending, resolved
 }
 
-// LoadUserAndPlanState hydrates user State and plan from checkpoint RuntimeState.
-// Reserved keys (including legacy _search_namespace) are not left as user keys.
+// LoadUserAndPlanState hydrates user State and session modules from checkpoint
+// RuntimeState. Reserved keys (including legacy _search_namespace) are not
+// left as user keys. A string _search_namespace restores Search().
 func (s *SessionManager) LoadUserAndPlanState(state map[string]any) {
-	s.ensure()
 	s.plan.LoadFromState(state)
+	s.perms.loadFromState(state)
+	s.parks.loadFromState(state)
+	if raw, ok := state[searchNamespaceStateKey]; ok {
+		if ns, ok := raw.(string); ok && ns != "" {
+			if id, err := uuid.Parse(ns); err == nil {
+				s.search.SetNamespace(id)
+			}
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.userState == nil {
-		s.userState = map[string]any{}
-	}
 	for k, v := range state {
 		if IsReservedRuntimeStateKey(k) {
 			continue
@@ -274,7 +293,6 @@ func (s *SessionManager) LoadUserAndPlanState(state map[string]any) {
 func (s *SessionManager) LoadInterruptsJSON(pendingJSON, resolvedJSON []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.ensure()
 	if len(pendingJSON) > 0 {
 		if err := json.Unmarshal(pendingJSON, &s.pending); err != nil {
 			return fmt.Errorf("unmarshal pending interrupts: %w", err)
