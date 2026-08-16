@@ -60,8 +60,6 @@ func (a *AgentHarness) RunMessage(ctx context.Context, user *Message) (<-chan St
 		defer a.runMu.Unlock()
 		defer close(out)
 		defer a.persistSession(ctx)
-		a.session.BindTurnEvents(out)
-		defer a.session.BindTurnEvents(nil)
 		if err := a.addToContext(ctx, user, out); err != nil {
 			if ctx.Err() != nil {
 				emitCancelled()
@@ -330,6 +328,7 @@ func (a *AgentHarness) RunMessage(ctx context.Context, user *Message) (<-chan St
 						suppressWindow[i].Store(true)
 					}
 					toolSpan.Finish("success", nil)
+					a.emitPlanUpdate(out)
 					toolResults[i] = a.emitToolResult(out, tc, output, "success")
 				}(i, tc)
 			}

@@ -2,6 +2,7 @@ package tacklr
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -591,6 +592,17 @@ func (a *AgentHarness) emitToolResult(out chan<- StreamEvent, tc ToolCall, conte
 		ToolCalls: []ToolCall{presented},
 	}
 	return msg
+}
+
+// emitPlanUpdate streams plan_update when create_plan / complete_todo / edit_plan
+// called Plan().Set during this tool.
+func (a *AgentHarness) emitPlanUpdate(out chan<- StreamEvent) {
+	todos, ok := a.session.Plan().ConsumeTodosUpdated()
+	if !ok {
+		return
+	}
+	data, _ := json.Marshal(todos)
+	out <- StreamEvent{Type: streaming.StreamEventPlanUpdate, Data: data}
 }
 
 // HasOpenToolWork reports pending tool calls, session interrupts, or unpaired

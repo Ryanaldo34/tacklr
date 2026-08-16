@@ -3,6 +3,8 @@ package session
 import (
 	"maps"
 	"sync"
+
+	"github.com/ryanaldo34/tacklr/internal/codec"
 )
 
 const (
@@ -32,8 +34,8 @@ type Permissions struct {
 }
 
 // NewPermissions returns an empty permission store.
-func NewPermissions() *Permissions {
-	return &Permissions{
+func NewPermissions() Permissions {
+	return Permissions{
 		allow: map[string]bool{},
 		deny:  map[string]bool{},
 	}
@@ -68,7 +70,7 @@ func (p *Permissions) Remember(toolName string, d PermissionDecision) {
 }
 
 func decodeBoolSet(raw any) map[string]bool {
-	m, ok := decodeAs[map[string]bool](raw)
+	m, ok := codec.As[map[string]bool](raw)
 	if !ok || m == nil {
 		return map[string]bool{}
 	}
@@ -110,5 +112,5 @@ func (p *Permissions) loadFromState(state map[string]any) {
 
 // Permissions returns the permission-memory module. Never nil after NewSessionManager.
 func (s *SessionManager) Permissions() *Permissions {
-	return s.perms
+	return &s.perms
 }

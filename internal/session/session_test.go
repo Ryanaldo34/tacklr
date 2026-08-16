@@ -95,6 +95,13 @@ func TestPlanStore_lifecycle(t *testing.T) {
 	if !p.HasActive() || len(p.Get()) != 1 {
 		t.Fatal("set/get")
 	}
+	todos, ok := p.ConsumeTodosUpdated()
+	if !ok || len(todos) != 1 || todos[0].Title != "t1" {
+		t.Fatalf("todos updated = %#v ok=%v", todos, ok)
+	}
+	if _, ok := p.ConsumeTodosUpdated(); ok {
+		t.Fatal("consume clears todos flag")
+	}
 	p.SetDocument("first")
 	if p.ConsumeDocumentUpdated() {
 		t.Fatal("initial document should not mark updated")
@@ -129,6 +136,9 @@ func TestPlanStore_lifecycle(t *testing.T) {
 	p.Set(nil)
 	if p.Get() != nil {
 		t.Fatal("clear plan")
+	}
+	if cleared, ok := p.ConsumeTodosUpdated(); !ok || cleared != nil {
+		t.Fatalf("clear should notify, got %#v ok=%v", cleared, ok)
 	}
 	empty := map[string]any{}
 	p.ExportInto(empty)
@@ -304,7 +314,7 @@ func TestSession_interrupts_raiseReturnAdopt(t *testing.T) {
 	}
 }
 
-// TestRuntime_emitAndState_channels covers EmitUpdate and session plan_update.
+// TestRuntime_emitAndState_channels covers EmitUpdate and session State.
 func TestRuntime_emitAndState_channels(t *testing.T) {
 	ch := make(chan streaming.StreamEvent, 2)
 	sm := session.NewSessionManager()
@@ -315,21 +325,11 @@ func TestRuntime_emitAndState_channels(t *testing.T) {
 	if ev.Type != streaming.StreamEventToolUpdate || ev.Content != "hello" || ev.MessageID != "id1" {
 		t.Fatalf("update = %+v", ev)
 	}
-	sm.EmitPlanUpdate([]session.Todo{{Title: "a", Status: streaming.TodoStatusPending}})
-	sm.BindTurnEvents(ch)
-	sm.EmitPlanUpdate([]session.Todo{{Title: "a", Status: streaming.TodoStatusPending}})
-	ev = <-ch
-	if ev.Type != streaming.StreamEventPlanUpdate || len(ev.Data) == 0 {
-		t.Fatalf("plan = %+v", ev)
-	}
 
 	// Full channel drops non-blocking.
 	full := make(chan streaming.StreamEvent)
 	rtFull := session.NewRuntime(full, sm)
 	rtFull.EmitUpdate("drop")
-	sm.BindTurnEvents(full)
-	sm.EmitPlanUpdate(nil)
-	sm.BindTurnEvents(nil)
 
 	// SessionManager state without a turn bus.
 	if err := sm.StateSet("z", true); err != nil {

@@ -9,7 +9,6 @@ import (
 
 	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/interrupt"
-	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -21,17 +20,16 @@ import (
 // VFS is host-owned and attached with SetVFS. Knowledge namespace + ResultSet
 // live on Search(). Builtins close over the manager; user tools use Runtime.
 type SessionManager struct {
-	mu         sync.RWMutex
-	plan       *PlanStore
-	userState  map[string]any
-	pending    interruptMap
-	resolved   interruptMap
-	perms      *Permissions
-	parks      *parkBag
-	onCall     *OnCallStore
-	search     *brain.SearchContext
-	vfs        *vfs.MountSession
-	turnEvents chan streaming.StreamEvent
+	mu        sync.RWMutex
+	plan      *PlanStore
+	userState map[string]any
+	pending   interruptMap
+	resolved  interruptMap
+	perms     Permissions
+	parks     parkBag
+	onCall    OnCallStore
+	search    *brain.SearchContext
+	vfs       *vfs.MountSession
 }
 
 // NewSessionManager returns an empty manager ready for use.
@@ -43,7 +41,6 @@ func NewSessionManager() *SessionManager {
 		resolved:  interruptMap{},
 		perms:     NewPermissions(),
 		parks:     newParkBag(),
-		onCall:    NewOnCallStore(),
 		search:    brain.NewSearchContext(),
 	}
 }
@@ -86,28 +83,6 @@ func (s *SessionManager) SetVFS(ms *vfs.MountSession) {
 		return
 	}
 	s.vfs = ms
-}
-
-// BindTurnEvents attaches the turn event bus for plan_update. Pass nil to clear.
-func (s *SessionManager) BindTurnEvents(ch chan streaming.StreamEvent) {
-	s.mu.Lock()
-	s.turnEvents = ch
-	s.mu.Unlock()
-}
-
-// EmitPlanUpdate sends a non-blocking plan_update on the bound turn bus.
-func (s *SessionManager) EmitPlanUpdate(plan []Todo) {
-	s.mu.RLock()
-	ch := s.turnEvents
-	s.mu.RUnlock()
-	if ch == nil {
-		return
-	}
-	data, _ := json.Marshal(plan)
-	select {
-	case ch <- streaming.StreamEvent{Type: streaming.StreamEventPlanUpdate, Data: data}:
-	default:
-	}
 }
 
 // StateGet returns a host/tool state value without a turn Runtime.
@@ -284,15 +259,12 @@ func (s *SessionManager) SnapshotDurable() (runtimeState map[string]any, pending
 		}
 	}
 	plan := s.plan
-	perms := s.perms
-	parks := s.parks
-	onCall := s.onCall
 	s.mu.RUnlock()
 
 	plan.ExportInto(runtimeState)
-	perms.exportInto(runtimeState)
-	parks.exportInto(runtimeState)
-	onCall.exportInto(runtimeState)
+	s.perms.exportInto(runtimeState)
+	s.parks.exportInto(runtimeState)
+	s.onCall.exportInto(runtimeState)
 	return runtimeState, pending, resolved
 }
 

@@ -3,6 +3,8 @@ package session
 import (
 	"slices"
 	"sync"
+
+	"github.com/ryanaldo34/tacklr/internal/codec"
 )
 
 const onCallStagesKey = "_on_call_stages"
@@ -30,11 +32,6 @@ type onCallStage struct {
 type OnCallStore struct {
 	mu     sync.RWMutex
 	stages []onCallStage
-}
-
-// NewOnCallStore returns an empty on-call stage store.
-func NewOnCallStore() *OnCallStore {
-	return &OnCallStore{}
 }
 
 // Get returns the completed layer for toolCallID and typeName.
@@ -89,11 +86,11 @@ func (s *OnCallStore) loadFromState(state map[string]any) {
 
 // OnCall returns the on-call stage module. Never nil after NewSessionManager.
 func (s *SessionManager) OnCall() *OnCallStore {
-	return s.onCall
+	return &s.onCall
 }
 
 func decodeOnCallStages(raw any) []onCallStage {
-	recs, ok := decodeAs[[]onCallStage](raw)
+	recs, ok := codec.As[[]onCallStage](raw)
 	if !ok || len(recs) == 0 {
 		return nil
 	}

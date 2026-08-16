@@ -1,8 +1,10 @@
-package session
+package codec
 
 import "encoding/json"
 
-func decodeAs[T any](raw any) (T, bool) {
+// As converts a checkpoint or wire value into T.
+// A value already of type T is returned as-is; other shapes go through JSON.
+func As[T any](raw any) (T, bool) {
 	var zero T
 	if v, ok := raw.(T); ok {
 		return v, true

@@ -43,10 +43,9 @@ type askUserChoiceArgs struct {
 	Choices  []askUserChoiceOption `json:"choices" desc:"2 or more mutually exclusive options"`
 }
 
-// setPlanTodos persists the plan and emits plan_update on the turn bus.
+// setPlanTodos persists the plan. The harness streams plan_update after Set.
 func setPlanTodos(sm *session.SessionManager, todos []Todo) {
 	sm.Plan().Set(todos)
-	sm.EmitPlanUpdate(todos)
 }
 
 var askUserChoiceTool = NewTool(ToolConfig{
