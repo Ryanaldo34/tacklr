@@ -41,6 +41,8 @@ type Connection struct {
 	routes   map[string]streamRoute
 	sessions map[string]struct{}
 	closed   bool
+	// lateSessionSSEFallback copies ConnectionRegistry.LateSessionSSEFallback.
+	lateSessionSSEFallback bool
 }
 
 type streamRoute struct {
@@ -95,6 +97,9 @@ func (s *sseSink) close() {
 type ConnectionRegistry struct {
 	mu   sync.Mutex
 	byID map[string]*Connection
+	// LateSessionSSEFallback delivers session traffic on the connection SSE
+	// when the session sink is not open yet. Off by default.
+	LateSessionSSEFallback bool
 }
 
 // NewConnectionRegistry returns an empty registry.
@@ -107,14 +112,15 @@ func NewConnectionRegistry() *ConnectionRegistry {
 func (r *ConnectionRegistry) Create(bridge *ClientBridge, writer MessageWriter) *Connection {
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &Connection{
-		ID:           uuid.NewString(),
-		Bridge:       bridge,
-		Writer:       writer,
-		ctx:          ctx,
-		cancel:       cancel,
-		sessionSinks: make(map[string]*sseSink),
-		routes:       make(map[string]streamRoute),
-		sessions:     make(map[string]struct{}),
+		ID:                     uuid.NewString(),
+		Bridge:                 bridge,
+		Writer:                 writer,
+		ctx:                    ctx,
+		cancel:                 cancel,
+		sessionSinks:           make(map[string]*sseSink),
+		routes:                 make(map[string]streamRoute),
+		sessions:               make(map[string]struct{}),
+		lateSessionSSEFallback: r != nil && r.LateSessionSSEFallback,
 	}
 	if r == nil {
 		return c
@@ -289,7 +295,7 @@ func (c *Connection) deliver(sessionID string, data []byte, connLevel bool) erro
 	} else {
 		if s := c.sessionSinks[sessionID]; s != nil {
 			targets = append(targets, s)
-		} else if c.connSink != nil {
+		} else if c.lateSessionSSEFallback && c.connSink != nil {
 			targets = append(targets, c.connSink)
 		}
 	}

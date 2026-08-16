@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -177,6 +178,23 @@ func TestClientBridge_errorResponseAndConcurrent(t *testing.T) {
 		}
 	}
 	wg.Wait()
+}
+
+func TestClientBridge_WaitInitialized(t *testing.T) {
+	b := NewClientBridge(&recordingWriter{})
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := b.WaitInitialized(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("before initialize: %v", err)
+	}
+	b.MarkInitialized()
+	if err := b.WaitInitialized(context.Background()); err != nil {
+		t.Fatalf("after initialize: %v", err)
+	}
+	var nilB *ClientBridge
+	if err := nilB.WaitInitialized(context.Background()); err != nil {
+		t.Fatalf("nil bridge: %v", err)
+	}
 }
 
 func TestParseClientCapabilities(t *testing.T) {

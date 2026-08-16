@@ -85,7 +85,7 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 
 	cp, err := session.NewCheckpointer().Capture(
 		[]*streaming.Message{{Role: streaming.RoleUser, Content: "go"}},
-		sm, nil, nil,
+		sm, nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -120,7 +120,7 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 
 	sm2.DeleteParkedWorker("spawn_1")
 	sm2.SetParkedWorker("spawn_2", session.ParkedWorkerMeta{WorkerName: "writer", Task: "draft"})
-	cp2, err := session.NewCheckpointer().Capture(nil, sm2, nil, nil)
+	cp2, err := session.NewCheckpointer().Capture(nil, sm2, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

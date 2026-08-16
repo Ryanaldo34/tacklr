@@ -649,9 +649,9 @@ func TestMountSession_configErrors(t *testing.T) {
 	if err := creg.Register(blankTypeCodec{}); err == nil {
 		t.Fatal("blank media type")
 	}
-	// text-like fallback on empty registry
-	if _, err := creg.Decode(ctx, "/x.json", "application/json", []byte(`{}`)); err != nil {
-		t.Fatal(err)
+	// empty registry has no codec — Decode fails closed
+	if _, err := creg.Decode(ctx, "/x.json", "application/json", []byte(`{}`)); !errors.Is(err, vfs.ErrNoCodec) {
+		t.Fatalf("empty registry decode: %v", err)
 	}
 	// canceled decode
 	cctx, cancel := context.WithCancel(ctx)
@@ -706,6 +706,16 @@ func TestKernelWritable(t *testing.T) {
 	}
 	if vfs.KernelWritableFile(vfs.FileInfo{Name: "pic.png", MediaType: "image/png"}) {
 		t.Fatal("KernelWritableFile png")
+	}
+	if vfs.KernelWritableFile(vfs.FileInfo{Name: "a.go"}) {
+		t.Fatal("KernelWritableFile empty media type")
+	}
+	doc, err := vfs.DefaultContentRegistry().Decode(context.Background(), "/x.go", "text/x-go; charset=utf-8", []byte("package x\n"))
+	if err != nil {
+		t.Fatalf("default registry must own extension-map types: %v", err)
+	}
+	if doc.MediaType() != "text/x-go" {
+		t.Fatalf("decoded media type %q", doc.MediaType())
 	}
 	if !vfs.KernelCreateOK("README") || !vfs.KernelCreateOK("note.txt") {
 		t.Fatal("KernelCreateOK plaintext")

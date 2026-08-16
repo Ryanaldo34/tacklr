@@ -95,7 +95,6 @@ func (p *acpProtocol) handleACPPost(env ProtocolEnv, w http.ResponseWriter, r *h
 	reqConn := &Conn{
 		Writer: conn.Writer,
 		RPC:    conn.Bridge,
-		Caps:   conn.Bridge.GetCaps(),
 	}
 	reqEnv := ProtocolEnv{
 		Registry:    env.Registry,
@@ -127,27 +126,21 @@ func (p *acpProtocol) handleStreamableInitialize(env ProtocolEnv, w http.Respons
 
 	// Initialize result goes on the HTTP response body (200), not SSE.
 	hw := &httpBufferWriter{}
-	reqConn := &Conn{Writer: hw, RPC: bridge, Caps: ClientCapabilities{}}
+	reqConn := &Conn{Writer: hw, RPC: bridge}
 	reqEnv := ProtocolEnv{Registry: env.Registry, Conn: reqConn, Connections: env.Connections}
 	if err := p.HandleInbound(r.Context(), reqEnv, body); err != nil {
 		slog.Debug("acp streamable initialize", "error", err)
 	}
 
-	// If handler wrote an error, map to HTTP error shape still as JSON-RPC 200 body.
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set(HeaderAcpConnectionID, conn.ID)
 	setAffinityCookie(w, conn.ID)
-	w.WriteHeader(http.StatusOK)
-	if len(hw.buf) > 0 {
-		_, _ = w.Write(hw.buf)
+	if len(hw.buf) == 0 {
+		http.Error(w, "initialize produced no response", http.StatusInternalServerError)
 		return
 	}
-	// Fallback if nothing was written.
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"jsonrpc": "2.0",
-		"id":      peek.ID,
-		"result":  acpInitializeResult(env.Registry, acpProtocolVersion),
-	})
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(hw.buf)
 }
 
 // handleACPGet dispatches WebSocket upgrade vs Streamable HTTP SSE.

@@ -20,7 +20,7 @@ func TestSession_legacySearchNamespaceKey_strippedOnLoad(t *testing.T) {
 	if !ok || got != id {
 		t.Fatalf("legacy key must restore Search namespace, got %v ok=%v", got, ok)
 	}
-	cp, err := session.NewCheckpointer().Capture(nil, sm, nil, nil)
+	cp, err := session.NewCheckpointer().Capture(nil, sm, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -52,13 +52,38 @@ type ClientBridge struct {
 	wait map[string]*rpcWaiter
 	// Caps is protected by mu; use GetCaps/SetCaps from concurrent stdio handlers.
 	Caps ClientCapabilities
+	// initialized is closed once initialize has run on this connection.
+	initialized     chan struct{}
+	initializedOnce sync.Once
 }
 
 // NewClientBridge creates a bridge that writes requests through w.
 func NewClientBridge(w MessageWriter) *ClientBridge {
 	return &ClientBridge{
-		w:    w,
-		wait: make(map[string]*rpcWaiter),
+		w:           w,
+		wait:        make(map[string]*rpcWaiter),
+		initialized: make(chan struct{}),
+	}
+}
+
+// MarkInitialized records that initialize completed on this connection.
+func (b *ClientBridge) MarkInitialized() {
+	if b == nil {
+		return
+	}
+	b.initializedOnce.Do(func() { close(b.initialized) })
+}
+
+// WaitInitialized blocks until initialize has run or ctx is done.
+func (b *ClientBridge) WaitInitialized(ctx context.Context) error {
+	if b == nil {
+		return nil
+	}
+	select {
+	case <-b.initialized:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 

@@ -93,7 +93,7 @@ func TestWireAndConstruct_outcomes(t *testing.T) {
 	if _, err := SSE.LoadSession(context.Background(), ProtocolEnv{}, "x", nil); !errors.Is(err, ErrWireSessionUnsupported) {
 		t.Fatalf("LoadSession: %v", err)
 	}
-	if _, err := SSE.BindTurn(context.Background(), ProtocolEnv{}, "x", nil); !errors.Is(err, ErrWireSessionUnsupported) {
+	if _, err := SSE.BindTurn(context.Background(), ProtocolEnv{}, "x", "", nil); !errors.Is(err, ErrWireSessionUnsupported) {
 		t.Fatalf("BindTurn: %v", err)
 	}
 	if err := SSE.CloseSession(context.Background(), ProtocolEnv{}, "x"); !errors.Is(err, ErrWireSessionUnsupported) {
@@ -143,8 +143,13 @@ func TestWireAndConstruct_outcomes(t *testing.T) {
 	if connElicitationForm(nil) {
 		t.Fatal("nil conn elicitation")
 	}
-	if connElicitationForm(&Conn{Caps: ClientCapabilities{ElicitationForm: true}}) != true {
-		t.Fatal("snapshot caps")
+	if connElicitationForm(&Conn{}) {
+		t.Fatal("no rpc means no elicitation")
+	}
+	live := NewClientBridge(&recordingWriter{})
+	live.SetCaps(ClientCapabilities{ElicitationForm: true})
+	if !connElicitationForm(&Conn{RPC: live}) {
+		t.Fatal("live bridge caps")
 	}
 
 	// --- Streamable HTTP protocol error matrix (one server, many outcomes) ---
@@ -449,7 +454,7 @@ func TestWireAndConstruct_outcomes(t *testing.T) {
 	if _, err := p2.LoadSession(context.Background(), env, "x", json.RawMessage(`{`)); err == nil {
 		t.Fatal("want invalid load params")
 	}
-	if _, err := p2.BindTurn(context.Background(), env, "", nil); err == nil {
+	if _, err := p2.BindTurn(context.Background(), env, "", "session/prompt", nil); err == nil {
 		t.Fatal("empty sessionId bind")
 	}
 	// persist failure on create
@@ -501,7 +506,7 @@ func TestWireAndConstruct_outcomes(t *testing.T) {
 		"sessionId": sidEmpty,
 		"prompt":    []map[string]any{{"type": "text", "text": "hi"}},
 	})
-	if _, err := pEmpty.BindTurn(context.Background(), ProtocolEnv{Registry: emptyReg}, sidEmpty, prompt); err == nil {
+	if _, err := pEmpty.BindTurn(context.Background(), ProtocolEnv{Registry: emptyReg}, sidEmpty, "session/prompt", prompt); err == nil {
 		t.Fatal("want no agent")
 	}
 	// empty text prompt
@@ -514,7 +519,7 @@ func TestWireAndConstruct_outcomes(t *testing.T) {
 		"sessionId": sidOk,
 		"prompt":    []map[string]any{{"type": "text", "text": ""}},
 	})
-	if _, err := pOk.BindTurn(context.Background(), env, sidOk, badPrompt); err == nil {
+	if _, err := pOk.BindTurn(context.Background(), env, sidOk, "session/prompt", badPrompt); err == nil {
 		t.Fatal("want invalid prompt")
 	}
 	// cwd mismatch on bind
@@ -523,7 +528,7 @@ func TestWireAndConstruct_outcomes(t *testing.T) {
 		"cwd":       "/other",
 		"prompt":    []map[string]any{{"type": "text", "text": "hi"}},
 	})
-	if _, err := pOk.BindTurn(context.Background(), env, sidOk, cwdPrompt); err == nil {
+	if _, err := pOk.BindTurn(context.Background(), env, sidOk, "session/prompt", cwdPrompt); err == nil {
 		t.Fatal("want cwd mismatch")
 	}
 	// Load cwd mismatch + empty configValues envelope path

@@ -128,13 +128,12 @@ func (f *failAfter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func TestHandleHTTP_bodyReadError(t *testing.T) {
+func TestHandleInbound_invalidJSON(t *testing.T) {
 	r := newTestRegistry(testStore(t), &mockInferenceStrategy{}, nil)
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/", brokenBody{})
-	NewACPProtocol(nil).(*acpProtocol).handleHTTP(ProtocolEnv{Registry: r}, rec, req)
-	if rec.Body.Len() == 0 {
-		t.Fatal("expected error response body")
+	w := &recordingMessageWriter{}
+	err := NewACPProtocol(nil).(*acpProtocol).HandleInbound(context.Background(), ProtocolEnv{Registry: r, Conn: &Conn{Writer: w}}, []byte(`{`))
+	if err == nil && w.FrameCount() == 0 {
+		t.Fatal("expected inbound error for invalid JSON")
 	}
 }
 
@@ -231,7 +230,7 @@ func TestRunTurn_sessionCwdMismatchAndNoAgent(t *testing.T) {
 		"cwd":       "/cwd-b",
 		"prompt":    []map[string]string{{"type": "text", "text": "x"}},
 	})
-	if _, err := p.BindTurn(context.Background(), env, sid, turnParams); err == nil || !strings.Contains(err.Error(), "cwd") {
+	if _, err := p.BindTurn(context.Background(), env, sid, "session/prompt", turnParams); err == nil || !strings.Contains(err.Error(), "cwd") {
 		t.Fatalf("err = %v", err)
 	}
 
@@ -388,7 +387,7 @@ func TestResolveSelectionViaElicitation_withQuestion(t *testing.T) {
 
 	w := &recordingWriter{}
 	bridge := NewClientBridge(w)
-	env := ProtocolEnv{Conn: &Conn{RPC: bridge, Caps: ClientCapabilities{ElicitationForm: true}}}
+	env := ProtocolEnv{Conn: &Conn{RPC: bridge}}
 	stream := &EventStream{harness: h, runCtx: context.Background()}
 
 	type res struct {
@@ -460,7 +459,7 @@ func TestClientBridge_TryCompleteUnknownID(t *testing.T) {
 }
 
 func TestServeHTTPSSE_resumePath(t *testing.T) {
-	// Hit /resume pattern registration via serveHTTPSSE path matching.
+	// Hit /resume pattern registration via serveSSEHTTP path matching.
 	store := testStore(t)
 	strategy := &mockInferenceStrategy{
 		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
@@ -470,11 +469,11 @@ func TestServeHTTPSSE_resumePath(t *testing.T) {
 	srv := NewServer(newTestRegistry(store, strategy, nil), SSE)
 	// First create a session via normal prompt to get thread
 	rec := httptest.NewRecorder()
-	srv.serveHTTPSSE(rec, newSSERequest(t, "/", bytes.NewReader([]byte(`{"agent_id":"default","prompt":"hi"}`))))
+	serveSSEHTTP(srv, rec, newSSERequest(t, "/", bytes.NewReader([]byte(`{"agent_id":"default","prompt":"hi"}`))))
 	// Resume with empty responses still exercises /resume route (may error)
 	rec2 := httptest.NewRecorder()
 	req := newSSERequest(t, "/resume", bytes.NewReader([]byte(`{"agent_id":"default","thread_id":"missing","responses":{"x":{}}}`)))
-	srv.serveHTTPSSE(rec2, req)
+	serveSSEHTTP(srv, rec2, req)
 }
 
 func TestStopReasonFromError_contextMessage(t *testing.T) {
@@ -663,7 +662,7 @@ func TestResolveSelectionViaElicitation_errorPaths(t *testing.T) {
 	}
 	// Call fail — bridge write fails
 	failBridge := NewClientBridge(&failFrameWriter{})
-	env := ProtocolEnv{Conn: &Conn{RPC: failBridge, Caps: ClientCapabilities{ElicitationForm: true}}}
+	env := ProtocolEnv{Conn: &Conn{RPC: failBridge}}
 	if _, err := resolveSelectionViaElicitation(context.Background(), env, "s", &EventStream{}, &streaming.StreamEvent{
 		Data: optsOK, MessageID: "m1",
 	}); err == nil {
@@ -672,7 +671,7 @@ func TestResolveSelectionViaElicitation_errorPaths(t *testing.T) {
 	// Bad elicitation result payload
 	w := &recordingWriter{}
 	bridge := NewClientBridge(w)
-	env2 := ProtocolEnv{Conn: &Conn{RPC: bridge, Caps: ClientCapabilities{ElicitationForm: true}}}
+	env2 := ProtocolEnv{Conn: &Conn{RPC: bridge}}
 	type res struct {
 		err error
 	}
@@ -788,7 +787,7 @@ func (closedErrProtocol) CreateSession(context.Context, ProtocolEnv, json.RawMes
 func (closedErrProtocol) LoadSession(context.Context, ProtocolEnv, string, json.RawMessage) (any, error) {
 	return nil, ErrWireSessionUnsupported
 }
-func (closedErrProtocol) BindTurn(context.Context, ProtocolEnv, string, json.RawMessage) (TurnRequest, error) {
+func (closedErrProtocol) BindTurn(context.Context, ProtocolEnv, string, string, json.RawMessage) (TurnRequest, error) {
 	return TurnRequest{}, ErrWireSessionUnsupported
 }
 func (closedErrProtocol) CloseSession(context.Context, ProtocolEnv, string) error {
@@ -1086,7 +1085,7 @@ func TestServeHTTPSSE_fallbackPath(t *testing.T) {
 	srv := NewServer(newTestRegistry(testStore(t), strategy, nil), SSE)
 	rec := httptest.NewRecorder()
 	req := newSSERequest(t, "/nope", bytes.NewReader([]byte(`{"agent_id":"default","prompt":"x"}`)))
-	srv.serveHTTPSSE(rec, req)
+	serveSSEHTTP(srv, rec, req)
 	if !strings.Contains(rec.Body.String(), "fb2") {
 		t.Fatalf("fallback = %s", rec.Body.String())
 	}

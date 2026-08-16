@@ -54,33 +54,10 @@ func (*acpProtocol) Name() string { return "acp" }
 
 func (p *acpProtocol) HTTPRoutes() []HTTPRoute {
 	return []HTTPRoute{
-		// Legacy unary HTTP: one request owns the whole turn; no mid-turn client RPC.
-		// Prefer GET|POST|DELETE /acp (WebSocket or Streamable HTTP).
-		{Method: http.MethodPost, Pattern: "/", Handler: p.handleHTTP},
 		// ACP remote transport (RFD Streamable HTTP + WebSocket).
 		{Method: http.MethodPost, Pattern: "/acp", Handler: p.handleACPPost},
 		{Method: http.MethodGet, Pattern: "/acp", Handler: p.handleACPGet},
 		{Method: http.MethodDelete, Pattern: "/acp", Handler: p.handleACPDelete},
-	}
-}
-
-func (p *acpProtocol) handleHTTP(env ProtocolEnv, w http.ResponseWriter, r *http.Request) {
-	// Legacy unary ACP: prefer GET|POST|DELETE /acp (WebSocket or Streamable HTTP).
-	w.Header().Set("Deprecation", "true")
-	w.Header().Set("Link", `</acp>; rel="successor-version"`)
-	w.Header().Set("Warning", `299 - "Unary POST / ACP is deprecated; use WebSocket or Streamable HTTP on /acp"`)
-
-	body, err := readHTTPBody(r)
-	if err != nil {
-		mw := &jsonRPCMessageWriter{w: w}
-		_ = mw.WriteError(nil, fmt.Errorf("read body: %w", err))
-		return
-	}
-	conn := &Conn{Writer: &jsonRPCMessageWriter{w: w}}
-	// Unary HTTP has no outbound RPC bridge (no mid-turn elicitation).
-	env.Conn = conn
-	if err := p.HandleInbound(r.Context(), env, body); err != nil {
-		slog.Debug("acp http handler", "error", err)
 	}
 }
 
@@ -128,7 +105,6 @@ func (p *acpProtocol) handleACPWebSocket(env ProtocolEnv, w http.ResponseWriter,
 			reqConn := &Conn{
 				Writer: mw,
 				RPC:    bridge,
-				Caps:   bridge.GetCaps(),
 			}
 			reqEnv := ProtocolEnv{
 				Registry:    env.Registry,
@@ -185,14 +161,11 @@ func (p *acpProtocol) HandleInbound(ctx context.Context, env ProtocolEnv, body [
 	case "session/prompt", "session/resume":
 		return p.handleSessionTurn(ctx, env, pr)
 	case "initialize":
-		if len(pr.ClientCapsRaw) > 0 {
-			caps := ParseClientCapabilities(pr.ClientCapsRaw)
-			if env.Conn != nil {
-				env.Conn.Caps = caps
-				if env.Conn.RPC != nil {
-					env.Conn.RPC.SetCaps(caps)
-				}
+		if env.Conn != nil && env.Conn.RPC != nil {
+			if len(pr.ClientCapsRaw) > 0 {
+				env.Conn.RPC.SetCaps(ParseClientCapabilities(pr.ClientCapsRaw))
 			}
+			env.Conn.RPC.MarkInitialized()
 		}
 		return env.Conn.Writer.WriteResult(pr.ID, acpInitializeResult(env.Registry, pr.ProtocolVersion))
 	case "authenticate":
@@ -229,8 +202,13 @@ func (p *acpProtocol) HandleInbound(ctx context.Context, env ProtocolEnv, body [
 }
 
 func (p *acpProtocol) handleSessionTurn(ctx context.Context, env ProtocolEnv, pr *parsedRequest) error {
-	// Canonical path: Protocol.BindTurn → Registry.RunTurn.
-	req, err := p.BindTurn(ctx, env, pr.ThreadID, pr.Params)
+	if env.Conn != nil && env.Conn.RPC != nil {
+		if err := env.Conn.RPC.WaitInitialized(ctx); err != nil {
+			_ = env.Conn.Writer.WriteError(pr.ID, err)
+			return err
+		}
+	}
+	req, err := p.BindTurn(ctx, env, pr.ThreadID, pr.Method, pr.Params)
 	if err != nil {
 		_ = env.Conn.Writer.WriteError(pr.ID, err)
 		return err
@@ -329,16 +307,12 @@ func resolveInterruptViaACP(ctx context.Context, env ProtocolEnv, threadID strin
 	}
 	kind := envl.Type
 	if kind == "" {
-		// Backward compat: older yields without type are user selections.
-		kind = "user_selection_choice"
+		return nil, fmt.Errorf("interrupt envelope missing type")
 	}
 	switch kind {
 	case "tool_permission":
 		return resolvePermissionViaRequest(ctx, env, threadID, stream, ev)
 	case "user_selection_choice":
-		// Caps are snapshotted per inbound message at dispatch; initialize may
-		// finish SetCaps after session/prompt was already dispatched. Always
-		// prefer live bridge caps so mid-turn elicitation sees form support.
 		if !connElicitationForm(env.Conn) {
 			return nil, nil
 		}
@@ -349,15 +323,12 @@ func resolveInterruptViaACP(ctx context.Context, env ProtocolEnv, threadID strin
 }
 
 // connElicitationForm reports form-mode elicitation support from the live RPC
-// bridge when present, else the Conn snapshot.
+// bridge. No snapshot: initialize writes caps on the bridge.
 func connElicitationForm(c *Conn) bool {
-	if c == nil {
+	if c == nil || c.RPC == nil {
 		return false
 	}
-	if c.RPC != nil {
-		return c.RPC.GetCaps().ElicitationForm
-	}
-	return c.Caps.ElicitationForm
+	return c.RPC.GetCaps().ElicitationForm
 }
 
 func resolvePermissionViaRequest(ctx context.Context, env ProtocolEnv, threadID string, stream *EventStream, ev *streaming.StreamEvent) (<-chan streaming.StreamEvent, error) {
@@ -426,8 +397,9 @@ func acpInitializeResult(r *Registry, clientProtocolVersion int) map[string]any 
 			image = m.SupportsMIME("image/png")
 		}
 	}
+	_ = clientProtocolVersion
 	return map[string]any{
-		"protocolVersion": negotiateACPProtocolVersion(clientProtocolVersion),
+		"protocolVersion": acpProtocolVersion,
 		"agentCapabilities": map[string]any{
 			// Durable session/load against the registry store (survives restarts).
 			"loadSession": true,

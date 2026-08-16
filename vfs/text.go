@@ -14,7 +14,6 @@ type TextCodec struct{}
 func (TextCodec) Identity() {}
 
 // MediaTypes is the set of extension-map types this codec claims at registration.
-// Unregistered text-like types still fall back to TextCodec in ContentRegistry.Decode.
 func (TextCodec) MediaTypes() []string {
 	return textMediaTypes
 }

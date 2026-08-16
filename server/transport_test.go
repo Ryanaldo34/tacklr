@@ -27,16 +27,12 @@ func TestServeHTTP_listenCancelAndMountedHandlers(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	req := newSSERequest(t, "/", bytes.NewReader([]byte(`{"agent_id":"default","prompt":"hi"}`)))
-	srvSSE.serveHTTPSSE(rec, req)
+	serveSSEHTTP(srvSSE, rec, req)
 	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "http-ok") {
 		t.Fatalf("sse: %d %s", rec.Code, rec.Body.String())
 	}
 
-	rec2 := httptest.NewRecorder()
-	req2 := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader([]byte(
-		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}`,
-	)))
-	srvACP.serveHTTPRPC(rec2, req2)
+	rec2 := serveACPInbound(t, r, srvACP.Protocols[0], `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}`)
 	if rec2.Code != 200 || !strings.Contains(rec2.Body.String(), "protocolVersion") {
 		t.Fatalf("acp: %d %s", rec2.Code, rec2.Body.String())
 	}
@@ -60,18 +56,18 @@ func TestServeHTTP_listenCancelAndMountedHandlers(t *testing.T) {
 	_ = NewServer(r, SSE).ServeHTTP
 }
 
-func TestServeHelpers_protocolNotRegisteredAndFallback(t *testing.T) {
+func TestHTTPMux_unregisteredProtocolPaths(t *testing.T) {
 	r := newTestRegistry(testStore(t), &mockInferenceStrategy{}, nil)
 	acpOnly := NewServer(r, ACP)
 	rec := httptest.NewRecorder()
-	acpOnly.serveHTTPSSE(rec, httptest.NewRequest(http.MethodPost, "/", bytes.NewReader([]byte(`{}`))))
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("sse without protocol status = %d", rec.Code)
+	serveSSEHTTP(acpOnly, rec, httptest.NewRequest(http.MethodPost, "/", bytes.NewReader([]byte(`{}`))))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("sse path on acp-only mux status = %d", rec.Code)
 	}
 	rec2 := httptest.NewRecorder()
-	NewServer(r, SSE).serveHTTPRPC(rec2, httptest.NewRequest(http.MethodPost, "/", bytes.NewReader([]byte(`{}`))))
-	if rec2.Code != http.StatusInternalServerError {
-		t.Fatalf("acp without protocol status = %d", rec2.Code)
+	NewServer(r, SSE).HTTPMux().ServeHTTP(rec2, httptest.NewRequest(http.MethodPost, "/acp", bytes.NewReader([]byte(`{}`))))
+	if rec2.Code != http.StatusNotFound {
+		t.Fatalf("acp path on sse-only mux status = %d", rec2.Code)
 	}
 
 	strategy := &mockInferenceStrategy{
@@ -82,10 +78,9 @@ func TestServeHelpers_protocolNotRegisteredAndFallback(t *testing.T) {
 	srv := NewServer(newTestRegistry(testStore(t), strategy, nil), SSE)
 	rec3 := httptest.NewRecorder()
 	req := newSSERequest(t, "/", bytes.NewReader([]byte(`{"agent_id":"default","prompt":"x"}`)))
-	req.URL.Path = ""
-	srv.serveHTTPSSE(rec3, req)
+	serveSSEHTTP(srv, rec3, req)
 	if !strings.Contains(rec3.Body.String(), "fb") {
-		t.Fatalf("fallback body = %s", rec3.Body.String())
+		t.Fatalf("sse body = %s", rec3.Body.String())
 	}
 }
 
@@ -190,7 +185,7 @@ func TestHandleSSE_invalidAgentAndMissingAccept(t *testing.T) {
 	// Missing Accept → 406 (handleSSE early path).
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader([]byte(`{"agent_id":"default","prompt":"x"}`)))
-	srv.serveHTTPSSE(rec, req)
+	serveSSEHTTP(srv, rec, req)
 	if rec.Code != http.StatusNotAcceptable {
 		t.Fatalf("status = %d", rec.Code)
 	}
@@ -198,7 +193,7 @@ func TestHandleSSE_invalidAgentAndMissingAccept(t *testing.T) {
 	// Valid Accept but unknown agent → SSE error event after headers.
 	rec2 := httptest.NewRecorder()
 	req2 := newSSERequest(t, "/", bytes.NewReader([]byte(`{"agent_id":"nope","prompt":"x"}`)))
-	srv.serveHTTPSSE(rec2, req2)
+	serveSSEHTTP(srv, rec2, req2)
 	if !strings.Contains(rec2.Body.String(), "error") && !strings.Contains(rec2.Body.String(), "not found") {
 		t.Fatalf("body = %s", rec2.Body.String())
 	}
@@ -213,14 +208,9 @@ func TestServeHTTP_listenError(t *testing.T) {
 	}
 }
 
-func TestACP_handleHTTP_invalidJSON(t *testing.T) {
+func TestACP_handleInbound_invalidJSON(t *testing.T) {
 	r := newTestRegistry(testStore(t), &mockInferenceStrategy{}, nil)
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader([]byte(`{`)))
-	NewACPProtocol(nil).(*acpProtocol).handleHTTP(ProtocolEnv{Registry: r}, rec, req)
-	if !strings.Contains(rec.Body.String(), "error") && rec.Code == 0 {
-		// jsonRPC writer may not set status; body should still have error JSON
-	}
+	rec := serveACPRaw(t, r, `{`)
 	if rec.Body.Len() == 0 {
 		t.Fatal("expected error body")
 	}

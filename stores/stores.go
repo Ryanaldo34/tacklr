@@ -16,11 +16,13 @@ type PendingToolCall struct {
 
 // sessionState is harness-owned durable agent state (not wire-protocol envelopes).
 type sessionState struct {
-	PendingToolCalls     map[string]PendingToolCall `json:"pendingToolCalls"`
-	InterruptToRequester map[string]string          `json:"interruptToRequester"`
-	RuntimeState         map[string]any             `json:"runtimeState"`
-	PendingInterrupts    []byte                     `json:"pendingInterrupts,omitempty"`
-	ResolvedInterrupts   []byte                     `json:"resolvedInterrupts,omitempty"`
+	PendingToolCalls map[string]PendingToolCall `json:"pendingToolCalls"`
+	// InterruptToRequester is read-only legacy (old checkpoints keyed wire
+	// interrupt ids separately from tool call ids). New saves omit it.
+	InterruptToRequester map[string]string `json:"interruptToRequester,omitempty"`
+	RuntimeState         map[string]any    `json:"runtimeState"`
+	PendingInterrupts    []byte            `json:"pendingInterrupts,omitempty"`
+	ResolvedInterrupts   []byte            `json:"resolvedInterrupts,omitempty"`
 	// SearchContext is an opaque brain.SearchContext export (JSON bytes).
 	// Owned by the harness, not SessionManager.
 	SearchContext []byte `json:"searchContext,omitempty"`
@@ -34,7 +36,7 @@ type SessionCheckpoint struct {
 	State         sessionState         `json:"state"`
 }
 
-func NewCheckpoint(contextWindow []*streaming.Message, pendingToolCalls map[string]PendingToolCall, interruptToRequester map[string]string, runtimeState map[string]any, pendingInterrupts, resolvedInterrupts any) (*SessionCheckpoint, error) {
+func NewCheckpoint(contextWindow []*streaming.Message, pendingToolCalls map[string]PendingToolCall, runtimeState map[string]any, pendingInterrupts, resolvedInterrupts any) (*SessionCheckpoint, error) {
 	var pendingJSON, resolvedJSON []byte
 	var err error
 
@@ -54,11 +56,10 @@ func NewCheckpoint(contextWindow []*streaming.Message, pendingToolCalls map[stri
 	return &SessionCheckpoint{
 		ContextWindow: contextWindow,
 		State: sessionState{
-			PendingToolCalls:     pendingToolCalls,
-			InterruptToRequester: interruptToRequester,
-			RuntimeState:         runtimeState,
-			PendingInterrupts:    pendingJSON,
-			ResolvedInterrupts:   resolvedJSON,
+			PendingToolCalls:   pendingToolCalls,
+			RuntimeState:       runtimeState,
+			PendingInterrupts:  pendingJSON,
+			ResolvedInterrupts: resolvedJSON,
 		},
 	}, nil
 }

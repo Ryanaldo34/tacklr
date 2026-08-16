@@ -23,11 +23,6 @@ import (
 // helpers
 // ---------------------------------------------------------------------------
 
-func newACPRequest(t *testing.T, body string) *http.Request {
-	t.Helper()
-	return httptest.NewRequest(http.MethodPost, "/", bytes.NewReader([]byte(body)))
-}
-
 func parseACPFrames(t *testing.T, body io.Reader) []map[string]any {
 	t.Helper()
 	var frames []map[string]any
@@ -66,10 +61,7 @@ func newACPTestServerWithWire(t *testing.T, r *Registry, wire ProtocolWireStore)
 
 func (s *acpTestServer) rpc(body string) *httptest.ResponseRecorder {
 	s.t.Helper()
-	req := newACPRequest(s.t, body)
-	rec := httptest.NewRecorder()
-	NewServer(s.r, s.proto).serveHTTPRPC(rec, req)
-	return rec
+	return serveACPInbound(s.t, s.r, s.proto, body)
 }
 
 // protocolForRegistry returns a stable ACP protocol per *Registry so multi-step
@@ -88,13 +80,19 @@ func acpProtocolFor(r *Registry) Protocol {
 	return actual.(Protocol)
 }
 
+func serveACPInbound(t *testing.T, r *Registry, proto Protocol, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	mw := &jsonRPCMessageWriter{w: rec}
+	env := ProtocolEnv{Registry: r, Conn: &Conn{Writer: mw}}
+	_ = proto.HandleInbound(t.Context(), env, []byte(body))
+	return rec
+}
+
 // serveACPRaw runs one RPC against a per-Registry isolated ACP protocol (not package ACP).
 func serveACPRaw(t *testing.T, r *Registry, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := newACPRequest(t, body)
-	rec := httptest.NewRecorder()
-	NewServer(r, acpProtocolFor(r)).serveHTTPRPC(rec, req)
-	return rec
+	return serveACPInbound(t, r, acpProtocolFor(r), body)
 }
 
 func acpRPCResult(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
@@ -523,13 +521,9 @@ func TestInjectReqID_nonJSONFrame(t *testing.T) {
 	}
 }
 
-func TestACP_handleHTTP_initialize(t *testing.T) {
+func TestACP_handleInbound_initialize(t *testing.T) {
 	r := newTestRegistry(testStore(t), &mockInferenceStrategy{}, nil)
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader([]byte(
-		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}`,
-	)))
-	NewACPProtocol(nil).(*acpProtocol).handleHTTP(ProtocolEnv{Registry: r, Conn: &Conn{}}, rec, req)
+	rec := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}`)
 	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "protocolVersion") {
 		t.Fatalf("%d %s", rec.Code, rec.Body.String())
 	}
