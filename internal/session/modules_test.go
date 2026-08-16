@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/internal/session"
 	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/vfs"
@@ -42,19 +43,19 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 		t.Fatalf("CurrentToolCallID=%q", rt.CurrentToolCallID())
 	}
 
-	if sm.Permissions().Decision("allow_tool") != session.PermissionNone {
+	if sm.Permissions.Decision("allow_tool") != session.PermissionNone {
 		t.Fatal("malformed bags must not grant memory")
 	}
-	sm.Permissions().Remember("allow_tool", session.PermissionAllowAlways)
-	sm.Permissions().Remember("deny_tool", session.PermissionDenyAlways)
-	if _, ok := sm.OnCall().Get("w1", "tool_permission"); ok {
+	sm.Permissions.Remember("allow_tool", session.PermissionAllowAlways)
+	sm.Permissions.Remember("deny_tool", session.PermissionDenyAlways)
+	if _, ok := sm.OnCall.Get("w1", "tool_permission"); ok {
 		t.Fatal("malformed stages must not decode")
 	}
-	sm.OnCall().Record("w1", "tool_permission", session.OnCallLayer{Args: `{"path":"/a"}`})
-	if sm.Permissions().Decision("allow_tool") != session.PermissionAllowAlways {
+	sm.OnCall.Record("w1", "tool_permission", session.OnCallLayer{Args: `{"path":"/a"}`})
+	if sm.Permissions.Decision("allow_tool") != session.PermissionAllowAlways {
 		t.Fatal("allow-always not stored")
 	}
-	if sm.Permissions().Decision("deny_tool") != session.PermissionDenyAlways {
+	if sm.Permissions.Decision("deny_tool") != session.PermissionDenyAlways {
 		t.Fatal("deny-always not stored")
 	}
 
@@ -70,16 +71,16 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 	}
 
 	ns := uuid.New()
-	sm.Search().SetNamespace(ns)
+	sm.Search.SetNamespace(ns)
 
 	reg := vfs.NewBackendRegistry()
 	ms, err := vfs.NewMountSession("sess-modules", reg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sm.SetVFS(ms)
-	if sm.VFS() != ms {
-		t.Fatal("SetVFS/VFS must return the host mount table")
+	sm.VFS = ms
+	if sm.VFS != ms {
+		t.Fatal("VFS field must hold the host mount table")
 	}
 
 	cp, err := session.NewCheckpointer().Capture(
@@ -136,21 +137,21 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 	}
 
 	fresh := uuid.New()
-	sm2.SetSearch(nil)
-	sm2.Search().SetNamespace(fresh)
-	gotFresh, ok := sm2.Search().Namespace()
+	sm2.Search = brain.NewSearchContext()
+	sm2.Search.SetNamespace(fresh)
+	gotFresh, ok := sm2.Search.Namespace()
 	if !ok || gotFresh != fresh {
-		t.Fatalf("SetSearch(nil) must yield a usable empty context, got %v ok=%v", gotFresh, ok)
+		t.Fatalf("replacement Search must be usable, got %v ok=%v", gotFresh, ok)
 	}
 }
 
 func assertModules(t *testing.T, sm *session.SessionManager, ns uuid.UUID, parkID, worker string) {
 	t.Helper()
-	if sm.Permissions().Decision("allow_tool") != session.PermissionAllowAlways ||
-		sm.Permissions().Decision("deny_tool") != session.PermissionDenyAlways {
+	if sm.Permissions.Decision("allow_tool") != session.PermissionAllowAlways ||
+		sm.Permissions.Decision("deny_tool") != session.PermissionDenyAlways {
 		t.Fatal("permission memory must reload")
 	}
-	layer, ok := sm.OnCall().Get("w1", "tool_permission")
+	layer, ok := sm.OnCall.Get("w1", "tool_permission")
 	if !ok || layer.Denied || layer.Args != `{"path":"/a"}` {
 		t.Fatalf("on-call stage reload args=%q denied=%v ok=%v", layer.Args, layer.Denied, ok)
 	}
@@ -158,7 +159,7 @@ func assertModules(t *testing.T, sm *session.SessionManager, ns uuid.UUID, parkI
 	if !ok || got.WorkerName != worker || got.WorkerSessionID != "sess/w/researcher/spawn_1" {
 		t.Fatalf("park reload = %+v ok=%v", got, ok)
 	}
-	gotNS, ok := sm.Search().Namespace()
+	gotNS, ok := sm.Search.Namespace()
 	if !ok || gotNS != ns {
 		t.Fatalf("search namespace %v ok=%v want %v", gotNS, ok, ns)
 	}

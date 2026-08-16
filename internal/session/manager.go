@@ -17,72 +17,33 @@ import (
 // permission memory, on-call stages, parked workers,
 // search context, interrupts, and the optional virtual filesystem mount table.
 //
-// VFS is host-owned and attached with SetVFS. Knowledge namespace + ResultSet
-// live on Search(). Builtins close over the manager; user tools use Runtime.
+// VFS is host-owned and attached by assigning SessionManager.VFS. Knowledge
+// namespace + ResultSet live on Search. Builtins close over the manager; user
+// tools use Runtime.
 type SessionManager struct {
-	mu        sync.RWMutex
-	plan      *PlanStore
-	userState map[string]any
-	pending   interruptMap
-	resolved  interruptMap
-	perms     Permissions
-	parks     parkBag
-	onCall    OnCallStore
-	search    *brain.SearchContext
-	vfs       *vfs.MountSession
+	mu          sync.RWMutex
+	Plan        *PlanStore
+	userState   map[string]any
+	pending     interruptMap
+	resolved    interruptMap
+	Permissions Permissions
+	parks       parkBag
+	OnCall      OnCallStore
+	Search      *brain.SearchContext
+	VFS         *vfs.MountSession
 }
 
 // NewSessionManager returns an empty manager ready for use.
 func NewSessionManager() *SessionManager {
 	return &SessionManager{
-		plan:      NewPlanStore(),
-		userState: map[string]any{},
-		pending:   interruptMap{},
-		resolved:  interruptMap{},
-		perms:     NewPermissions(),
-		parks:     newParkBag(),
-		search:    brain.NewSearchContext(),
+		Plan:        NewPlanStore(),
+		userState:   map[string]any{},
+		pending:     interruptMap{},
+		resolved:    interruptMap{},
+		Permissions: NewPermissions(),
+		parks:       newParkBag(),
+		Search:      brain.NewSearchContext(),
 	}
-}
-
-// Plan returns the plan module. Never nil after NewSessionManager.
-func (s *SessionManager) Plan() *PlanStore {
-	return s.plan
-}
-
-// HasActivePlan reports whether a non-empty todo list is present.
-func (s *SessionManager) HasActivePlan() bool {
-	return s.Plan().HasActive()
-}
-
-// Search returns the knowledge retrieval session (namespace + ResultSet).
-func (s *SessionManager) Search() *brain.SearchContext {
-	return s.search
-}
-
-// SetSearch replaces the search context. Nil resets to an empty context.
-func (s *SessionManager) SetSearch(sc *brain.SearchContext) {
-	if sc == nil {
-		sc = brain.NewSearchContext()
-	}
-	s.search = sc
-}
-
-// VFS returns the host-owned mount table, or nil.
-func (s *SessionManager) VFS() *vfs.MountSession {
-	if s == nil {
-		return nil
-	}
-	return s.vfs
-}
-
-// SetVFS attaches a host-owned mount table. The harness does not create,
-// persist, or close it.
-func (s *SessionManager) SetVFS(ms *vfs.MountSession) {
-	if s == nil {
-		return
-	}
-	s.vfs = ms
 }
 
 // StateGet returns a host/tool state value without a turn Runtime.
@@ -258,28 +219,28 @@ func (s *SessionManager) SnapshotDurable() (runtimeState map[string]any, pending
 			resolved[k] = cp
 		}
 	}
-	plan := s.plan
+	plan := s.Plan
 	s.mu.RUnlock()
 
 	plan.ExportInto(runtimeState)
-	s.perms.exportInto(runtimeState)
+	s.Permissions.exportInto(runtimeState)
 	s.parks.exportInto(runtimeState)
-	s.onCall.exportInto(runtimeState)
+	s.OnCall.exportInto(runtimeState)
 	return runtimeState, pending, resolved
 }
 
 // LoadUserAndPlanState hydrates user State and session modules from checkpoint
 // RuntimeState. Reserved keys (including legacy _search_namespace) are not
-// left as user keys. A string _search_namespace restores Search().
+// left as user keys. A string _search_namespace restores Search.
 func (s *SessionManager) LoadUserAndPlanState(state map[string]any) {
-	s.plan.LoadFromState(state)
-	s.perms.loadFromState(state)
+	s.Plan.LoadFromState(state)
+	s.Permissions.loadFromState(state)
 	s.parks.loadFromState(state)
-	s.onCall.loadFromState(state)
+	s.OnCall.loadFromState(state)
 	if raw, ok := state[searchNamespaceStateKey]; ok {
 		if ns, ok := raw.(string); ok && ns != "" {
 			if id, err := uuid.Parse(ns); err == nil {
-				s.search.SetNamespace(id)
+				s.Search.SetNamespace(id)
 			}
 		}
 	}

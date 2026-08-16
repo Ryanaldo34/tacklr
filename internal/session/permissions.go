@@ -109,8 +109,3 @@ func (p *Permissions) loadFromState(state map[string]any) {
 		p.deny = decodeBoolSet(raw)
 	}
 }
-
-// Permissions returns the permission-memory module. Never nil after NewSessionManager.
-func (s *SessionManager) Permissions() *Permissions {
-	return &s.perms
-}

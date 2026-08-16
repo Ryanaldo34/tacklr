@@ -15,8 +15,8 @@ import (
 // and window survive Capture → Apply on a fresh manager.
 func TestCheckpointer_roundTrip(t *testing.T) {
 	sm := session.NewSessionManager()
-	sm.Plan().SetDocument("plan")
-	sm.Plan().Set([]streaming.Todo{{Title: "A", Status: streaming.TodoStatusPending}})
+	sm.Plan.SetDocument("plan")
+	sm.Plan.Set([]streaming.Todo{{Title: "A", Status: streaming.TodoStatusPending}})
 	rt := session.NewRuntime(func() chan streaming.StreamEvent {
 		c := make(chan streaming.StreamEvent, 8)
 		go func() {
@@ -44,7 +44,7 @@ func TestCheckpointer_roundTrip(t *testing.T) {
 	if len(applied.Window) != 1 {
 		t.Fatalf("window=%d", len(applied.Window))
 	}
-	if sm2.Plan().Document() != "plan" {
+	if sm2.Plan.Document() != "plan" {
 		t.Fatal("plan doc")
 	}
 	rt2 := session.NewRuntime(func() chan streaming.StreamEvent {
@@ -191,11 +191,11 @@ func TestSessionManager_stateAndPlan_guards(t *testing.T) {
 		t.Fatal("deleted")
 	}
 	rt.StateDelete("_plan") // no-op on reserved
-	if sm.HasActivePlan() {
+	if sm.Plan.HasActive() {
 		t.Fatal("no plan yet")
 	}
-	sm.Plan().Set([]streaming.Todo{{Title: "x", Status: streaming.TodoStatusPending}})
-	if !sm.HasActivePlan() {
+	sm.Plan.Set([]streaming.Todo{{Title: "x", Status: streaming.TodoStatusPending}})
+	if !sm.Plan.HasActive() {
 		t.Fatal("active plan")
 	}
 }
@@ -357,8 +357,8 @@ func TestSessionManager_snapshotLoadInterrupts_roundTrip(t *testing.T) {
 	_, _ = rt.RaiseInterrupt("user_selection_choice", []byte(`[{"title":"A"}]`))
 	rt.StateSet("u", "v")
 	// reserved key should not appear as user state in snapshot
-	sm.Plan().SetDocument("doc")
-	sm.Plan().Set([]streaming.Todo{{Title: "T", Status: streaming.TodoStatusPending}})
+	sm.Plan.SetDocument("doc")
+	sm.Plan.Set([]streaming.Todo{{Title: "T", Status: streaming.TodoStatusPending}})
 
 	state, pending, resolved := sm.SnapshotDurable()
 	if state["u"] != "v" || state["_plan_document"] != "doc" {
@@ -381,7 +381,7 @@ func TestSessionManager_snapshotLoadInterrupts_roundTrip(t *testing.T) {
 	if err := sm2.LoadInterruptsJSON(pendJSON, resJSON); err != nil {
 		t.Fatal(err)
 	}
-	if sm2.Plan().Document() != "doc" {
+	if sm2.Plan.Document() != "doc" {
 		t.Fatal("plan doc reload")
 	}
 	rt2 := session.NewRuntime(func() chan streaming.StreamEvent {

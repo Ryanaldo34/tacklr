@@ -19,9 +19,6 @@ func IsReservedRuntimeStateKey(key string) bool {
 // StripPlanKeys removes reserved module keys from a runtime state map so they
 // are not exposed via user-facing StateGet after load.
 func StripPlanKeys(state map[string]any) {
-	if state == nil {
-		return
-	}
 	for key := range reservedRuntimeStateKeys {
 		delete(state, key)
 	}

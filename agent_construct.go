@@ -141,10 +141,10 @@ func newHarnessBase(opts AgentOptions, sm *session.SessionManager) (*AgentHarnes
 		vfsBridge:            opts.shareIndexBridge,
 	}
 	if opts.MountSession != nil {
-		sm.SetVFS(opts.MountSession)
+		sm.VFS = opts.MountSession
 	}
 	if opts.SearchNamespace != nil {
-		sm.Search().SetNamespace(*opts.SearchNamespace)
+		sm.Search.SetNamespace(*opts.SearchNamespace)
 	}
 	def := DefaultContextPolicy()
 	if h.contextPolicy.PressureRatio <= 0 {
@@ -207,7 +207,7 @@ func (a *AgentHarness) injectBuiltinTools() {
 		if br != nil {
 			idx = br.Indexer
 		}
-		a.tools = append(a.tools, newBrainTools(a.brain, a.session.Search(), a.brainWriteKinds, brainToolDeps{
+		a.tools = append(a.tools, newBrainTools(a.brain, a.session.Search, a.brainWriteKinds, brainToolDeps{
 			VFS:     a.VFS(),
 			Indexer: idx,
 		})...)
@@ -228,7 +228,7 @@ func (a *AgentHarness) initVFSIndexBridge() error {
 	if a.brain == nil || a.VFS() == nil {
 		return nil
 	}
-	ns, ok := a.session.Search().Namespace()
+	ns, ok := a.session.Search.Namespace()
 	if !ok {
 		return nil
 	}
@@ -251,23 +251,23 @@ func (a *AgentHarness) initVFSIndexBridge() error {
 
 // SetSearchNamespace sets retrieval isolation for knowledge tools.
 func (a *AgentHarness) SetSearchNamespace(id uuid.UUID) {
-	a.session.Search().SetNamespace(id)
+	a.session.Search.SetNamespace(id)
 }
 
 // ClearSearchNamespace clears retrieval isolation for knowledge tools.
 func (a *AgentHarness) ClearSearchNamespace() {
-	a.session.Search().ClearNamespace()
+	a.session.Search.ClearNamespace()
 }
 
 // SearchNamespace returns the host-set search namespace, if any.
 func (a *AgentHarness) SearchNamespace() (uuid.UUID, bool) {
-	return a.session.Search().Namespace()
+	return a.session.Search.Namespace()
 }
 
 // planningWriteLock blocks write tools until create_plan has set a plan.
 func (a *AgentHarness) planningWriteLock(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error) {
 	if inv.Tool != nil && inv.Tool.Access != nil && inv.Tool.Access.Contains(WritePermission) &&
-		!a.session.HasActivePlan() {
+		!a.session.Plan.HasActive() {
 		return "", fmt.Errorf("%w: write tools are locked until create_plan establishes a todo list", ErrToolPermissionDenied)
 	}
 	return next(ctx, inv)

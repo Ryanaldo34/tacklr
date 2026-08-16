@@ -103,7 +103,7 @@ func applyOnCallLayer(inv *ToolInvocation, ctor OnCallFunc, sm *session.SessionM
 		return nil
 	}
 	callID := inv.Runtime.CurrentToolCallID()
-	if layer, ok := sm.OnCall().Get(callID, intr.TypeName()); ok {
+	if layer, ok := sm.OnCall.Get(callID, intr.TypeName()); ok {
 		if layer.Denied {
 			return rejectedOnCall(toolNameOf(*inv))
 		}
@@ -111,7 +111,7 @@ func applyOnCallLayer(inv *ToolInvocation, ctor OnCallFunc, sm *session.SessionM
 		return nil
 	}
 	if perm, ok := intr.(*interrupt.ToolPermissionInterrupt); ok {
-		switch sm.Permissions().Decision(perm.ToolName) {
+		switch sm.Permissions.Decision(perm.ToolName) {
 		case session.PermissionDenyAlways:
 			return finishOnCallLayer(inv, perm.TypeName(), true, sm)
 		case session.PermissionAllowAlways:
@@ -124,14 +124,14 @@ func applyOnCallLayer(inv *ToolInvocation, ctor OnCallFunc, sm *session.SessionM
 	}
 	denied := false
 	if perm, ok := resolved.(*interrupt.ToolPermissionInterrupt); ok {
-		rememberPermission(sm.Permissions(), perm)
+		rememberPermission(&sm.Permissions, perm)
 		denied = !perm.Allowed
 	}
 	return finishOnCallLayer(inv, resolved.TypeName(), denied, sm)
 }
 
 func finishOnCallLayer(inv *ToolInvocation, typeName string, denied bool, sm *session.SessionManager) error {
-	sm.OnCall().Record(inv.Runtime.CurrentToolCallID(), typeName, session.OnCallLayer{
+	sm.OnCall.Record(inv.Runtime.CurrentToolCallID(), typeName, session.OnCallLayer{
 		Args:   inv.ArgsJSON,
 		Denied: denied,
 	})

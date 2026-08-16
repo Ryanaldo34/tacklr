@@ -84,11 +84,6 @@ func (s *OnCallStore) loadFromState(state map[string]any) {
 	s.stages = decodeOnCallStages(raw)
 }
 
-// OnCall returns the on-call stage module. Never nil after NewSessionManager.
-func (s *SessionManager) OnCall() *OnCallStore {
-	return &s.onCall
-}
-
 func decodeOnCallStages(raw any) []onCallStage {
 	recs, ok := codec.As[[]onCallStage](raw)
 	if !ok || len(recs) == 0 {

@@ -547,7 +547,7 @@ func TestOnCallMiddleware_permissionMemory(t *testing.T) {
 		},
 	})
 	rt, sm := onCallRuntime()
-	sm.Permissions().Remember("sensitive", session.PermissionAllowAlways)
+	sm.Permissions.Remember("sensitive", session.PermissionAllowAlways)
 	runner := newToolRunner(onCallMiddleware(sm))
 	inv := ToolInvocation{Tool: tool, ArgsJSON: `{}`, Runtime: rt}
 	out, _, err := runner.Run(t.Context(), inv)
@@ -556,7 +556,7 @@ func TestOnCallMiddleware_permissionMemory(t *testing.T) {
 	}
 
 	denyRT, denySM := onCallRuntime()
-	denySM.Permissions().Remember("sensitive", session.PermissionDenyAlways)
+	denySM.Permissions.Remember("sensitive", session.PermissionDenyAlways)
 	runner = newToolRunner(onCallMiddleware(denySM))
 	denyInv := ToolInvocation{Tool: tool, ArgsJSON: `{}`, Runtime: denyRT}
 	_, _, err = runner.Run(t.Context(), denyInv)

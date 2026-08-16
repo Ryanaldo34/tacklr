@@ -74,8 +74,8 @@ func mustMountBrain(ctx context.Context, t *testing.T, reg *vfs.BackendRegistry,
 
 func activatePlan(t *testing.T, h *AgentHarness) {
 	t.Helper()
-	h.session.Plan().Set([]Todo{{Title: "t", Description: "d", Status: streaming.TodoStatusPending}})
-	if !h.session.HasActivePlan() {
+	h.session.Plan.Set([]Todo{{Title: "t", Description: "d", Status: streaming.TodoStatusPending}})
+	if !h.session.Plan.HasActive() {
 		t.Fatal("plan not active")
 	}
 }
@@ -662,8 +662,8 @@ func TestRun_workspaceResearchTurn(t *testing.T) {
 	if nTools == 0 || nOut == 0 {
 		t.Fatalf("watchdog: tools=%d outputs=%d", nTools, nOut)
 	}
-	if h.session.Plan().Document() != "index then wrap up" {
-		t.Fatalf("plan doc: %q", h.session.Plan().Document())
+	if h.session.Plan.Document() != "index then wrap up" {
+		t.Fatalf("plan doc: %q", h.session.Plan.Document())
 	}
 }
 

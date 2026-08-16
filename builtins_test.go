@@ -26,7 +26,7 @@ func testPlanTools() planToolsFixture {
 		edit:     newEditPlanTool(sm),
 		complete: newCompleteTodoTool(sm),
 		list:     newListPlanTool(sm),
-		store:    sm.Plan(),
+		store:    sm.Plan,
 	}
 }
 
@@ -412,7 +412,7 @@ func TestRun_planToolHappyAndErrorPaths(t *testing.T) {
 		{"edit no plan", toolCall("e1", "edit_plan", `{"toDelete":["x"]}`), nil, "no plan"},
 		{"complete no plan", toolCall("c1", "complete_todo", `{"title":"A"}`), nil, "no plan"},
 		{"complete already done", toolCall("c1", "complete_todo", `{"title":"A"}`), func(h *AgentHarness) {
-			h.session.Plan().Set([]Todo{
+			h.session.Plan.Set([]Todo{
 				{Title: "A", Status: streaming.TodoStatusCompleted},
 				{Title: "B", Status: streaming.TodoStatusInProgress},
 			})
@@ -567,8 +567,8 @@ func TestRun_createPlan_installsPlanDocumentAndPrunesWindow(t *testing.T) {
 	if hasEventType(got, StreamEventError) {
 		t.Fatalf("events=%+v", summarizeEvents(got))
 	}
-	if h.session.Plan().Document() != "CoS: ship quality" || !isPlanDocument(h.Messages()[1]) {
-		t.Fatalf("doc=%q window=%+v", h.session.Plan().Document(), h.Messages())
+	if h.session.Plan.Document() != "CoS: ship quality" || !isPlanDocument(h.Messages()[1]) {
+		t.Fatalf("doc=%q window=%+v", h.session.Plan.Document(), h.Messages())
 	}
 }
 
@@ -593,11 +593,11 @@ func TestRun_completeTodo_withPlanDocument_preservesFullPlan(t *testing.T) {
 		Model: strategy, Config: Config{MaxWindowSize: 8192}, Store: testStore(t),
 	})
 	t.Cleanup(h.Close)
-	h.session.Plan().Set([]Todo{
+	h.session.Plan.Set([]Todo{
 		{Title: "A", Status: streaming.TodoStatusInProgress},
 		{Title: "B", Status: streaming.TodoStatusPending},
 	})
-	h.session.Plan().SetDocument("FULL PLAN DRAFT")
+	h.session.Plan.SetDocument("FULL PLAN DRAFT")
 	events, err := h.Run(context.Background(), "go")
 	if err != nil {
 		t.Fatal(err)
@@ -645,18 +645,18 @@ func TestRun_editPlan_planChange_triggersHandoff(t *testing.T) {
 		Model: strategy, Config: Config{MaxWindowSize: 8192}, Store: testStore(t),
 	})
 	t.Cleanup(h.Close)
-	h.session.Plan().Set([]Todo{
+	h.session.Plan.Set([]Todo{
 		{Title: "A", Status: streaming.TodoStatusInProgress},
 		{Title: "B", Status: streaming.TodoStatusPending},
 	})
-	h.session.Plan().SetDocument("old blueprint")
+	h.session.Plan.SetDocument("old blueprint")
 	events, err := h.Run(context.Background(), "revise")
 	if err != nil {
 		t.Fatal(err)
 	}
 	_ = drainEvents(events)
-	if h.session.Plan().Document() != "revised blueprint" {
-		t.Fatalf("document = %q", h.session.Plan().Document())
+	if h.session.Plan.Document() != "revised blueprint" {
+		t.Fatalf("document = %q", h.session.Plan.Document())
 	}
 	if rawPlanFromDocumentMessage(h.Messages()[1]) != "revised blueprint" {
 		t.Fatalf("plan msg = %+v", h.Messages()[1])
@@ -692,7 +692,7 @@ func TestRun_completeTodo_persistsPlanInStore(t *testing.T) {
 		Store:  store,
 	})
 	ah.sessionId = "sess-plan-persist"
-	ah.session.Plan().Set([]Todo{
+	ah.session.Plan.Set([]Todo{
 		{Title: "Ship", Status: streaming.TodoStatusInProgress},
 	})
 
@@ -712,7 +712,7 @@ func TestRun_completeTodo_persistsPlanInStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAgentFromSession: %v", err)
 	}
-	plan := restored.session.Plan().Get()
+	plan := restored.session.Plan.Get()
 	if len(plan) != 1 {
 		t.Fatalf("restored plan len = %d, want 1", len(plan))
 	}
