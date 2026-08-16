@@ -116,7 +116,7 @@ func WriteApprovalToElicitationParams(sessionID, toolCallID string, wa interrupt
 		msg.WriteString(wa.Title)
 		msg.WriteString("\n\n")
 	}
-	msg.WriteString("Approve, edit, or reject this write.")
+	msg.WriteString("Approve or reject this write.")
 	if wa.Args != "" {
 		msg.WriteString("\n\nProposed arguments:\n")
 		msg.WriteString(wa.Args)
@@ -125,11 +125,7 @@ func WriteApprovalToElicitationParams(sessionID, toolCallID string, wa interrupt
 		"action": map[string]any{
 			"type":  "string",
 			"title": "Decision",
-			"enum":  []string{interrupt.WriteApprovalApprove, interrupt.WriteApprovalEdit, interrupt.WriteApprovalReject},
-		},
-		"args": map[string]any{
-			"type":  "string",
-			"title": "Replacement arguments (required for edit)",
+			"enum":  []string{interrupt.WriteApprovalApprove, interrupt.WriteApprovalReject},
 		},
 	}, []string{"action"})
 }
@@ -150,9 +146,6 @@ func ElicitationResultToWriteApprovalPayload(raw json.RawMessage) (action string
 		return action, nil, fmt.Errorf("accept missing content.action")
 	}
 	payload := interrupt.WriteApprovalPayload{Action: decision}
-	if args, ok := res.Content["args"].(string); ok {
-		payload.Args = args
-	}
 	resolution, err = json.Marshal(payload)
 	return action, resolution, err
 }

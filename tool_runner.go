@@ -177,18 +177,13 @@ func applyOnCallLayer(inv *ToolInvocation, ctor OnCallFunc, store onCallStore, s
 }
 
 func finishOnCallLayer(inv *ToolInvocation, resolved Interrupt, store onCallStore) error {
-	args := inv.ArgsJSON
 	denied := false
 	if eff, ok := resolved.(interrupt.CallEffect); ok {
-		if repl := eff.ReplacementArgs(); repl != "" {
-			args = repl
-			inv.ArgsJSON = repl
-		}
 		denied = eff.CallDenied()
 	}
 	rememberOnCallSession(inv.Runtime, resolved)
 	if store != nil && resolved != nil {
-		store.RecordOnCallStage(inv.Runtime.CurrentToolCallID(), resolved.TypeName(), args, denied)
+		store.RecordOnCallStage(inv.Runtime.CurrentToolCallID(), resolved.TypeName(), inv.ArgsJSON, denied)
 	}
 	recordWriteApprovalIfNeeded(*inv, resolved)
 	if denied {
@@ -219,15 +214,11 @@ func recordWriteApprovalIfNeeded(inv ToolInvocation, resolved Interrupt) {
 	if !ok {
 		return
 	}
-	args := inv.ArgsJSON
-	if wa.Action == WriteApprovalEdit {
-		args = wa.Args
-	}
 	store.RecordWriteApproval(WriteApprovalRecord{
 		ToolName:   toolNameOf(inv),
 		ToolCallID: inv.Runtime.CurrentToolCallID(),
 		Action:     wa.Action,
-		Args:       args,
+		Args:       inv.ArgsJSON,
 		UnixTime:   time.Now().Unix(),
 	})
 }

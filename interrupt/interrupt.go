@@ -36,8 +36,6 @@ type PayloadValidator interface {
 // CallEffect is an optional capability for interrupts raised from Tool.OnCall.
 // After Return, the harness applies the effect before the handler runs.
 type CallEffect interface {
-	// ReplacementArgs is the args JSON to use for the call. Empty keeps the original.
-	ReplacementArgs() string
 	// CallDenied is true when the handler must not run.
 	CallDenied() bool
 }
@@ -227,8 +225,6 @@ func (p *ToolPermissionInterrupt) Error() string {
 	return string(b)
 }
 
-func (p *ToolPermissionInterrupt) ReplacementArgs() string { return "" }
-
 func (p *ToolPermissionInterrupt) CallDenied() bool {
 	return p.SelectedKind != "" && !p.Allowed
 }
@@ -242,7 +238,6 @@ func (p *ToolPermissionInterrupt) Predecided() bool {
 // Write-approval actions returned by the host.
 const (
 	WriteApprovalApprove = "approve"
-	WriteApprovalEdit    = "edit"
 	WriteApprovalReject  = "reject"
 	WriteApprovalType    = "write_approval"
 )
@@ -251,10 +246,9 @@ const (
 type WriteApprovalPayload struct {
 	InterruptId string `json:"interruptId,omitempty"`
 	Action      string `json:"action"`
-	Args        string `json:"args,omitempty"`
 }
 
-// WriteApprovalInterrupt parks a write tool until the host approves, edits, or rejects.
+// WriteApprovalInterrupt parks a write tool until the host approves or rejects.
 type WriteApprovalInterrupt struct {
 	ToolName string `json:"toolName,omitempty"`
 	Title    string `json:"title,omitempty"`
@@ -280,11 +274,6 @@ func (w *WriteApprovalInterrupt) InitFromPayload(payload []byte) error {
 func (p WriteApprovalPayload) valid() error {
 	switch p.Action {
 	case WriteApprovalApprove, WriteApprovalReject:
-		return nil
-	case WriteApprovalEdit:
-		if p.Args == "" {
-			return errors.New("edit requires args")
-		}
 		return nil
 	default:
 		return fmt.Errorf("unknown action %q", p.Action)
@@ -315,22 +304,12 @@ func (w *WriteApprovalInterrupt) Return(payload []byte) error {
 		return err
 	}
 	w.Action = res.Action
-	if res.Action == WriteApprovalEdit {
-		w.Args = res.Args
-	}
 	return nil
 }
 
 func (w *WriteApprovalInterrupt) Error() string {
 	b, _ := json.Marshal(w)
 	return string(b)
-}
-
-func (w *WriteApprovalInterrupt) ReplacementArgs() string {
-	if w.Action == WriteApprovalEdit {
-		return w.Args
-	}
-	return ""
 }
 
 func (w *WriteApprovalInterrupt) CallDenied() bool {

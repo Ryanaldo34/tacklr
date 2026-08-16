@@ -97,11 +97,8 @@ func TestElicitation_paramsAndResultOutcomes(t *testing.T) {
 	if err := json.Unmarshal(res, &wpayload); err != nil || wpayload.Action != interrupt.WriteApprovalApprove {
 		t.Fatalf("write approval approve = %+v err=%v", wpayload, err)
 	}
-	_, res, err = ElicitationResultToWriteApprovalPayload([]byte(`{"action":"accept","content":{"action":"edit","args":"{\"path\":\"/b\"}"}}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal(res, &wpayload); err != nil || wpayload.Action != interrupt.WriteApprovalEdit || wpayload.Args != `{"path":"/b"}` {
-		t.Fatalf("write approval edit = %+v err=%v", wpayload, err)
+	msg, _ = wparams["message"].(string)
+	if !strings.Contains(msg, "Approve or reject") || !strings.Contains(msg, `{"path":"/a"}`) {
+		t.Fatalf("write approval message = %q", msg)
 	}
 }

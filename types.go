@@ -198,7 +198,6 @@ const (
 	PermissionRejectOnce   = interrupt.PermissionRejectOnce
 	PermissionRejectAlways = interrupt.PermissionRejectAlways
 	WriteApprovalApprove   = interrupt.WriteApprovalApprove
-	WriteApprovalEdit      = interrupt.WriteApprovalEdit
 	WriteApprovalReject    = interrupt.WriteApprovalReject
 	WriteApprovalType      = interrupt.WriteApprovalType
 )

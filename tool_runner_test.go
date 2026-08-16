@@ -434,41 +434,31 @@ func TestHarness_hostInterceptor_keepsPermissionGate(t *testing.T) {
 	}
 }
 
-// TestHarness_writeApproval_rejectThenEdit: reject denies the write; a later
-// edit runs the handler with replacement args.
-func TestHarness_writeApproval_rejectThenEdit(t *testing.T) {
-	var seen string
+// TestHarness_writeApproval_rejectDeniesWrite: reject fails the tool; the
+// handler does not run; the audit records reject.
+func TestHarness_writeApproval_rejectDeniesWrite(t *testing.T) {
 	var calls int
 	tool := NewTool(ToolConfig{
 		Name:   "mutate",
 		Access: ToolWriteAccess,
 		OnCall: OnCalls(WriteApprovalOnCall),
-		Handler: func(ctx context.Context, args struct {
-			Path string `json:"path"`
-		}) (string, error) {
+		Handler: func(ctx context.Context) (string, error) {
 			calls++
-			seen = args.Path
-			return "wrote:" + args.Path, nil
+			return "mutated", nil
 		},
 	})
 	var n int
 	strategy := &mockStrategy{
 		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, events chan<- LLMResponseChunk) {
 			n++
-			switch n {
-			case 1:
+			if n == 1 {
 				events <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
 					{ID: "w1", CallID: "w1", Name: "mutate", Arguments: `{"path":"/a"}`},
 				}, IsComplete: true}
 				events <- LLMResponseChunk{IsComplete: true}
-			case 2:
-				events <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-					{ID: "w2", CallID: "w2", Name: "mutate", Arguments: `{"path":"/b"}`},
-				}, IsComplete: true}
-				events <- LLMResponseChunk{IsComplete: true}
-			default:
-				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
+				return
 			}
+			events <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
 		},
 	}
 	ah := mustNewAgent(t, AgentOptions{
@@ -488,24 +478,18 @@ func TestHarness_writeApproval_rejectThenEdit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id2, _ := drainYield(t, ch2)
-	if calls != 0 {
-		t.Fatalf("handler ran on reject: %d", calls)
-	}
-	ch3, err := ah.ReturnFromInterrupt(context.Background(), map[string][]byte{
-		id2: []byte(`{"action":"edit","args":"{\"path\":\"/edited\"}"}`),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var wrote string
-	for ev := range ch3 {
-		if ev.Type == StreamEventToolResult {
-			wrote = ev.Content
+	var denied bool
+	for ev := range ch2 {
+		if ev.Type == StreamEventToolResult && strings.Contains(ev.Content, "rejected") {
+			denied = true
 		}
 	}
-	if calls != 1 || seen != "/edited" || wrote != "wrote:/edited" {
-		t.Fatalf("edit: calls=%d seen=%q wrote=%q", calls, seen, wrote)
+	if calls != 0 || !denied {
+		t.Fatalf("reject: calls=%d denied=%v", calls, denied)
+	}
+	recs := ah.WriteApprovals()
+	if len(recs) != 1 || recs[0].Action != WriteApprovalReject || recs[0].ToolName != "mutate" {
+		t.Fatalf("audit = %+v", recs)
 	}
 }
 
@@ -546,7 +530,7 @@ func requireParked(t *testing.T, err error, kind string) {
 }
 
 // TestOnCallMiddleware_writeThenPermission is the isolated middleware stack:
-// write_approval then tool_permission, then the handler sees edited args.
+// write_approval then tool_permission, then the handler runs with the original args.
 func TestOnCallMiddleware_writeThenPermission(t *testing.T) {
 	var calls int
 	var seen string
@@ -567,7 +551,7 @@ func TestOnCallMiddleware_writeThenPermission(t *testing.T) {
 
 	_, _, err := runner.Run(t.Context(), inv)
 	requireParked(t, err, WriteApprovalType)
-	if _, err := rt.ReturnInterrupt("c1", []byte(`{"action":"edit","args":"{\"path\":\"/b\"}"}`)); err != nil {
+	if _, err := rt.ReturnInterrupt("c1", []byte(`{"action":"approve"}`)); err != nil {
 		t.Fatal(err)
 	}
 	_, _, err = runner.Run(t.Context(), inv)
@@ -576,7 +560,7 @@ func TestOnCallMiddleware_writeThenPermission(t *testing.T) {
 		t.Fatal(err)
 	}
 	out, _, err := runner.Run(t.Context(), inv)
-	if err != nil || calls != 1 || seen != "/b" || out != "ok" {
+	if err != nil || calls != 1 || seen != "/a" || out != "ok" {
 		t.Fatalf("invoke: calls=%d seen=%q out=%q err=%v", calls, seen, out, err)
 	}
 }

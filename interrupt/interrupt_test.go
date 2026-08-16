@@ -143,8 +143,8 @@ func TestToolPermission_allKinds(t *testing.T) {
 		if p2.Allowed != tc.allowed || p2.SelectedKind != tc.kind || p2.SelectedOptionID != tc.id {
 			t.Fatalf("%s: allowed=%v kind=%s id=%s", tc.id, p2.Allowed, p2.SelectedKind, p2.SelectedOptionID)
 		}
-		if p2.CallDenied() == tc.allowed || p2.ReplacementArgs() != "" {
-			t.Fatalf("%s: CallDenied=%v args=%q", tc.id, p2.CallDenied(), p2.ReplacementArgs())
+		if p2.CallDenied() == tc.allowed {
+			t.Fatalf("%s: CallDenied=%v", tc.id, p2.CallDenied())
 		}
 	}
 
@@ -246,25 +246,15 @@ func TestWriteApproval_initAndValidate(t *testing.T) {
 	if err := w.ValidatePayload([]byte(`{"action":"nope"}`)); err == nil {
 		t.Fatal("unknown action")
 	}
-	if err := w.ValidatePayload([]byte(`{"action":"edit"}`)); err == nil {
-		t.Fatal("edit without args")
-	}
 	if err := w.Return([]byte(`not-json`)); err == nil {
 		t.Fatal("return bad json")
 	}
 	if err := w.Return([]byte(`{"action":"nope"}`)); err == nil {
 		t.Fatal("unknown action return")
 	}
-	if err := w.Return([]byte(`{"action":"edit"}`)); err == nil {
-		t.Fatal("edit without args return")
-	}
 	ok := &interrupt.WriteApprovalInterrupt{}
-	if err := ok.Return([]byte(`{"action":"approve"}`)); err != nil || ok.CallDenied() || ok.ReplacementArgs() != "" {
-		t.Fatalf("approve effect: denied=%v args=%q err=%v", ok.CallDenied(), ok.ReplacementArgs(), err)
-	}
-	ed := &interrupt.WriteApprovalInterrupt{}
-	if err := ed.Return([]byte(`{"action":"edit","args":"{}"}`)); err != nil || ed.CallDenied() || ed.ReplacementArgs() != "{}" {
-		t.Fatalf("edit effect: denied=%v args=%q err=%v", ed.CallDenied(), ed.ReplacementArgs(), err)
+	if err := ok.Return([]byte(`{"action":"approve"}`)); err != nil || ok.CallDenied() {
+		t.Fatalf("approve effect: denied=%v err=%v", ok.CallDenied(), err)
 	}
 	rej := &interrupt.WriteApprovalInterrupt{}
 	if err := rej.Return([]byte(`{"action":"reject"}`)); err != nil || !rej.CallDenied() {
