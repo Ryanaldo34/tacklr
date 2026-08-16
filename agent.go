@@ -54,6 +54,7 @@ type AgentHarness struct {
 	brain                *brain.Engine
 	brainWriteKinds      brain.WriteKinds
 	runCommandUnattended bool
+	disableWriteApproval bool
 	// vfsBridge is the mount→brain index lifecycle (not the agent turn loop).
 	// Workers receive the parent pointer at construct; ownsVFSBridge is set
 	// only when this harness called vfsindex.Start.
@@ -90,6 +91,11 @@ func (a *AgentHarness) Messages() []*Message {
 
 // AskUserQuestion returns the ask_user_choice question for toolCallID, or empty.
 // Used by ACP elicitation. Reads session state (survives the turn).
+// WriteApprovals returns checkpointed write-approval decisions for this session.
+func (a *AgentHarness) WriteApprovals() []WriteApprovalRecord {
+	return a.session.WriteApprovals()
+}
+
 func (a *AgentHarness) AskUserQuestion(toolCallID string) string {
 	if toolCallID == "" {
 		return ""

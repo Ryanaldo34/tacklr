@@ -97,3 +97,69 @@ func ElicitationResultToSelectionPayload(raw json.RawMessage, opts []interrupt.U
 		return action, nil, fmt.Errorf("unknown elicitation action %q", action)
 	}
 }
+
+// WriteApprovalToElicitationParams builds form-mode elicitation/create params
+// for a write-approval interrupt.
+func WriteApprovalToElicitationParams(sessionID, toolCallID string, wa interrupt.WriteApprovalInterrupt) map[string]any {
+	var msg strings.Builder
+	if wa.Title != "" {
+		msg.WriteString(wa.Title)
+		msg.WriteString("\n\n")
+	}
+	msg.WriteString("Approve, edit, or reject this write.")
+	if wa.Args != "" {
+		msg.WriteString("\n\nProposed arguments:\n")
+		msg.WriteString(wa.Args)
+	}
+	params := map[string]any{
+		"sessionId": sessionID,
+		"mode":      "form",
+		"message":   strings.TrimSpace(msg.String()),
+		"requestedSchema": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"action": map[string]any{
+					"type":  "string",
+					"title": "Decision",
+					"enum":  []string{interrupt.WriteApprovalApprove, interrupt.WriteApprovalEdit, interrupt.WriteApprovalReject},
+				},
+				"args": map[string]any{
+					"type":  "string",
+					"title": "Replacement arguments (required for edit)",
+				},
+			},
+			"required": []string{"action"},
+		},
+	}
+	if toolCallID != "" {
+		params["toolCallId"] = toolCallID
+	}
+	return params
+}
+
+// ElicitationResultToWriteApprovalPayload maps an accept response to the
+// harness write-approval resolution payload.
+func ElicitationResultToWriteApprovalPayload(raw json.RawMessage) (action string, resolution []byte, err error) {
+	var res ElicitationResult
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return "", nil, fmt.Errorf("unmarshal elicitation result: %w", err)
+	}
+	action = res.Action
+	switch action {
+	case "accept":
+		decision, _ := res.Content["action"].(string)
+		if decision == "" {
+			return action, nil, fmt.Errorf("accept missing content.action")
+		}
+		payload := interrupt.WriteApprovalPayload{Action: decision}
+		if args, ok := res.Content["args"].(string); ok {
+			payload.Args = args
+		}
+		resolution, err = json.Marshal(payload)
+		return action, resolution, err
+	case "decline", "cancel":
+		return action, nil, nil
+	default:
+		return action, nil, fmt.Errorf("unknown elicitation action %q", action)
+	}
+}

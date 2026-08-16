@@ -137,3 +137,13 @@ func (rt Runtime) RememberPermissionAllow(toolName string) {
 func (rt Runtime) RememberPermissionDeny(toolName string) {
 	rt.session.RememberPermissionDeny(toolName)
 }
+
+// WriteApprovals returns checkpointed write-approval decisions.
+func (rt Runtime) WriteApprovals() []WriteApprovalRecord {
+	return rt.session.WriteApprovals()
+}
+
+// RecordWriteApproval appends a resolved write-approval decision.
+func (rt Runtime) RecordWriteApproval(rec WriteApprovalRecord) {
+	rt.session.RecordWriteApproval(rec)
+}

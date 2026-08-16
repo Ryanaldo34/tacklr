@@ -801,13 +801,14 @@ func TestSpawnWorker_resumeKeepsParentVFS(t *testing.T) {
 		t.Fatal(err)
 	}
 	opts := AgentOptions{
-		SessionID:       "sess-resume-vfs",
-		Config:          Config{MaxWindowSize: 8192},
-		Model:           parentModel,
-		Store:           stores.NewInMemoryStore(),
-		MountSession:    ms,
-		Brain:           eng,
-		SearchNamespace: &ns,
+		SessionID:            "sess-resume-vfs",
+		Config:               Config{MaxWindowSize: 8192},
+		Model:                parentModel,
+		Store:                stores.NewInMemoryStore(),
+		MountSession:         ms,
+		Brain:                eng,
+		SearchNamespace:      &ns,
+		DisableWriteApproval: true,
 		SubAgents: []*SubAgent{
 			{WorkerName: "researcher", Model: workerModel, Tools: []*Tool{interruptTool}},
 		},

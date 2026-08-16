@@ -26,6 +26,7 @@ type SessionManager struct {
 	pending   interruptMap
 	resolved  interruptMap
 	perms     *permissionBag
+	approvals *approvalBag
 	parks     *parkBag
 	search    *brain.SearchContext
 	vfs       *vfs.MountSession
@@ -39,6 +40,7 @@ func NewSessionManager() *SessionManager {
 		pending:   interruptMap{},
 		resolved:  interruptMap{},
 		perms:     newPermissionBag(),
+		approvals: newApprovalBag(),
 		parks:     newParkBag(),
 		search:    brain.NewSearchContext(),
 	}
@@ -256,11 +258,13 @@ func (s *SessionManager) SnapshotDurable() (runtimeState map[string]any, pending
 	}
 	plan := s.plan
 	perms := s.perms
+	approvals := s.approvals
 	parks := s.parks
 	s.mu.RUnlock()
 
 	plan.ExportInto(runtimeState)
 	perms.exportInto(runtimeState)
+	approvals.exportInto(runtimeState)
 	parks.exportInto(runtimeState)
 	return runtimeState, pending, resolved
 }
@@ -271,6 +275,7 @@ func (s *SessionManager) SnapshotDurable() (runtimeState map[string]any, pending
 func (s *SessionManager) LoadUserAndPlanState(state map[string]any) {
 	s.plan.LoadFromState(state)
 	s.perms.loadFromState(state)
+	s.approvals.loadFromState(state)
 	s.parks.loadFromState(state)
 	if raw, ok := state[searchNamespaceStateKey]; ok {
 		if ns, ok := raw.(string); ok && ns != "" {

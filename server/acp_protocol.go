@@ -335,6 +335,11 @@ func resolveInterruptViaACP(ctx context.Context, env ProtocolEnv, threadID strin
 	switch kind {
 	case "tool_permission":
 		return resolvePermissionViaRequest(ctx, env, threadID, stream, ev)
+	case "write_approval":
+		if !connElicitationForm(env.Conn) {
+			return nil, nil
+		}
+		return resolveWriteApprovalViaElicitation(ctx, env, threadID, stream, ev)
 	case "user_selection_choice":
 		// Caps are snapshotted per inbound message at dispatch; initialize may
 		// finish SetCaps after session/prompt was already dispatched. Always
@@ -405,6 +410,30 @@ func resolveSelectionViaElicitation(ctx context.Context, env ProtocolEnv, thread
 		return nil, fmt.Errorf("user declined to answer")
 	default: // "cancel" — ElicitationResultToSelectionPayload rejects any other action.
 		return nil, fmt.Errorf("user cancelled the prompt")
+	}
+}
+
+func resolveWriteApprovalViaElicitation(ctx context.Context, env ProtocolEnv, threadID string, stream *EventStream, ev *streaming.StreamEvent) (<-chan streaming.StreamEvent, error) {
+	interruptID, wa, err := ParseWriteApprovalFromInterruptData(ev.Data)
+	if err != nil {
+		return nil, fmt.Errorf("parse write approval interrupt: %w", err)
+	}
+	params := WriteApprovalToElicitationParams(threadID, ev.MessageID, wa)
+	raw, err := env.Conn.RPC.Call(ctx, "elicitation/create", params)
+	if err != nil {
+		return nil, fmt.Errorf("elicitation/create: %w", err)
+	}
+	action, resolution, err := ElicitationResultToWriteApprovalPayload(raw)
+	if err != nil {
+		return nil, err
+	}
+	switch action {
+	case "accept":
+		return stream.ResumeInterrupts(ctx, map[string][]byte{interruptID: resolution})
+	case "decline":
+		return nil, fmt.Errorf("user declined write approval")
+	default:
+		return nil, fmt.Errorf("user cancelled write approval")
 	}
 }
 

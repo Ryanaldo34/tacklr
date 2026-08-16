@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/ryanaldo34/tacklr/internal/session"
 	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/streaming"
 )
@@ -148,7 +149,7 @@ type AgentWatchDog interface {
 }
 
 // HarnessRuntime is the tool-facing API for handlers and interceptors.
-// Hosts implement CRM write and approval tools against this interface only.
+// Hosts implement write and approval tools against this interface only.
 // Store and SessionManager are not part of the contract.
 type HarnessRuntime interface {
 	EmitUpdate(message string)
@@ -167,6 +168,8 @@ type HarnessRuntime interface {
 	PermissionAlwaysDenied(toolName string) bool
 	RememberPermissionAllow(toolName string)
 	RememberPermissionDeny(toolName string)
+	WriteApprovals() []WriteApprovalRecord
+	RecordWriteApproval(rec WriteApprovalRecord)
 }
 
 // Todo is one plan list item (also used in plan_update stream payloads).
@@ -179,7 +182,9 @@ type (
 	UserChoice              = interrupt.UserChoice
 	UserSelectionInterrupt  = interrupt.UserSelectionInterrupt
 	ToolPermissionInterrupt = interrupt.ToolPermissionInterrupt
+	WriteApprovalInterrupt  = interrupt.WriteApprovalInterrupt
 	PermissionOption        = interrupt.PermissionOption
+	WriteApprovalRecord     = session.WriteApprovalRecord
 )
 
 var (
@@ -193,6 +198,10 @@ const (
 	PermissionAllowAlways  = interrupt.PermissionAllowAlways
 	PermissionRejectOnce   = interrupt.PermissionRejectOnce
 	PermissionRejectAlways = interrupt.PermissionRejectAlways
+	WriteApprovalApprove   = interrupt.WriteApprovalApprove
+	WriteApprovalEdit      = interrupt.WriteApprovalEdit
+	WriteApprovalReject    = interrupt.WriteApprovalReject
+	WriteApprovalType      = interrupt.WriteApprovalType
 )
 
 // RegisterInterrupt registers a custom interrupt factory for session rehydrate.

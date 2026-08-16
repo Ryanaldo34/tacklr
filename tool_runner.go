@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/ryanaldo34/tacklr/interrupt"
 )
@@ -100,6 +101,65 @@ func toolPermissionGate(ctx context.Context, inv ToolInvocation, next ToolCallFu
 
 	if !perm.Allowed {
 		return "", fmt.Errorf("%w: user rejected tool %q", ErrToolPermissionDenied, name)
+	}
+	return next(ctx, inv)
+}
+
+// writeApprovalGate parks WritePermission tools until the host approves, edits, or rejects.
+func writeApprovalGate(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error) {
+	if inv.Tool == nil || inv.Tool.Access == nil || !inv.Tool.Access.Contains(WritePermission) {
+		return next(ctx, inv)
+	}
+	if inv.Runtime == nil {
+		return "", fmt.Errorf("%w: write approval requires a runtime", ErrFailed)
+	}
+
+	callID := inv.Runtime.CurrentToolCallID()
+	for _, rec := range inv.Runtime.WriteApprovals() {
+		if rec.ToolCallID != callID {
+			continue
+		}
+		if rec.Action == WriteApprovalReject {
+			return "", fmt.Errorf("%w: user rejected write %q", ErrToolPermissionDenied, inv.Tool.Name)
+		}
+		if rec.Action == WriteApprovalEdit {
+			inv.ArgsJSON = rec.Args
+		}
+		return next(ctx, inv)
+	}
+
+	title := ResolveToolTitle(inv.Tool.DisplayName, inv.Tool.Name, inv.ArgsJSON)
+	initPayload, err := json.Marshal(map[string]any{
+		"toolName": inv.Tool.Name,
+		"title":    title,
+		"args":     inv.ArgsJSON,
+	})
+	if err != nil {
+		return "", fmt.Errorf("marshal write approval payload: %w", err)
+	}
+	intr, err := inv.Runtime.RaiseInterrupt(WriteApprovalType, initPayload)
+	if err != nil {
+		return "", err
+	}
+	wa, ok := intr.(*interrupt.WriteApprovalInterrupt)
+	if !ok {
+		return "", fmt.Errorf("%w: unexpected write approval interrupt type %T", ErrFailed, intr)
+	}
+
+	args := inv.ArgsJSON
+	if wa.Action == WriteApprovalEdit {
+		args = wa.Args
+		inv.ArgsJSON = args
+	}
+	inv.Runtime.RecordWriteApproval(WriteApprovalRecord{
+		ToolName:   inv.Tool.Name,
+		ToolCallID: inv.Runtime.CurrentToolCallID(),
+		Action:     wa.Action,
+		Args:       args,
+		UnixTime:   time.Now().Unix(),
+	})
+	if wa.Action == WriteApprovalReject {
+		return "", fmt.Errorf("%w: user rejected write %q", ErrToolPermissionDenied, inv.Tool.Name)
 	}
 	return next(ctx, inv)
 }

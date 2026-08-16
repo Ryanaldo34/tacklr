@@ -48,9 +48,10 @@ func TestHarness_planningWriteLock_thenUnlockAfterCreatePlan(t *testing.T) {
 		},
 	}
 	ah := mustNewAgent(t, AgentOptions{
-		Config: Config{MaxWindowSize: 8192},
-		Model:  strategy,
-		Tools:  []*Tool{writeTool},
+		Config:               Config{MaxWindowSize: 8192},
+		Model:                strategy,
+		Tools:                []*Tool{writeTool},
+		DisableWriteApproval: true,
 	})
 
 	ch, err := ah.Run(context.Background(), "plan then write")

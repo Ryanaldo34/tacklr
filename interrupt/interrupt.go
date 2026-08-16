@@ -218,6 +218,106 @@ func (p *ToolPermissionInterrupt) Error() string {
 	return string(b)
 }
 
+// Write-approval actions returned by the host.
+const (
+	WriteApprovalApprove = "approve"
+	WriteApprovalEdit    = "edit"
+	WriteApprovalReject  = "reject"
+	WriteApprovalType    = "write_approval"
+)
+
+// WriteApprovalPayload is the host resolution for a write-approval interrupt.
+type WriteApprovalPayload struct {
+	InterruptId string `json:"interruptId,omitempty"`
+	Action      string `json:"action"`
+	Args        string `json:"args,omitempty"`
+}
+
+// WriteApprovalInterrupt parks a write tool until the host approves, edits, or rejects.
+type WriteApprovalInterrupt struct {
+	ToolName string `json:"toolName,omitempty"`
+	Title    string `json:"title,omitempty"`
+	Args     string `json:"args,omitempty"`
+
+	// Set by Return after the host chooses an action.
+	Action string `json:"-"`
+}
+
+func (w *WriteApprovalInterrupt) TypeName() string { return WriteApprovalType }
+
+func (w *WriteApprovalInterrupt) Serialize() ([]byte, error) {
+	return json.Marshal(w)
+}
+
+func (w *WriteApprovalInterrupt) InitFromPayload(payload []byte) error {
+	if len(payload) == 0 || string(payload) == "null" {
+		return nil
+	}
+	var init struct {
+		ToolName string `json:"toolName"`
+		Title    string `json:"title"`
+		Args     string `json:"args"`
+	}
+	if err := json.Unmarshal(payload, &init); err != nil {
+		return err
+	}
+	w.ToolName = init.ToolName
+	w.Title = init.Title
+	w.Args = init.Args
+	return nil
+}
+
+func (w *WriteApprovalInterrupt) ValidatePayload(payload []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		return fmt.Errorf("invalid JSON: %w", err)
+	}
+	if _, ok := raw["action"]; !ok {
+		return errors.New("missing required field: action")
+	}
+	var res WriteApprovalPayload
+	if err := json.Unmarshal(payload, &res); err != nil {
+		return fmt.Errorf("invalid payload shape: %w", err)
+	}
+	switch res.Action {
+	case WriteApprovalApprove, WriteApprovalReject:
+		return nil
+	case WriteApprovalEdit:
+		if res.Args == "" {
+			return errors.New("edit requires args")
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown action %q", res.Action)
+	}
+}
+
+func (w *WriteApprovalInterrupt) Return(payload []byte) error {
+	var res WriteApprovalPayload
+	if err := json.Unmarshal(payload, &res); err != nil {
+		return err
+	}
+	switch res.Action {
+	case WriteApprovalApprove, WriteApprovalReject:
+		w.Action = res.Action
+		return nil
+	case WriteApprovalEdit:
+		if res.Args == "" {
+			return errors.New("edit requires args")
+		}
+		w.Action = res.Action
+		w.Args = res.Args
+		return nil
+	default:
+		return fmt.Errorf("unknown action %q", res.Action)
+	}
+}
+
+func (w *WriteApprovalInterrupt) Error() string {
+	b, _ := json.Marshal(w)
+	return string(b)
+}
+
 // --- Interrupt registry ---
 
 var interruptFactories = map[string]func() Interrupt{}
@@ -265,6 +365,7 @@ func Clone(intr Interrupt) Interrupt {
 func init() {
 	Register(func() Interrupt { return &UserSelectionInterrupt{} })
 	Register(func() Interrupt { return &ToolPermissionInterrupt{} })
+	Register(func() Interrupt { return &WriteApprovalInterrupt{} })
 }
 
 // PayloadInitializer is an optional capability Interrupt types implement

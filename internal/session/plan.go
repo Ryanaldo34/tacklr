@@ -19,7 +19,7 @@ func IsReservedRuntimeStateKey(key string) bool {
 	switch key {
 	case planStateKey, planDocumentStateKey, planDocumentUpdatedKey,
 		searchNamespaceStateKey, parkedWorkersStateKey,
-		permissionAllowKey, permissionDenyKey:
+		permissionAllowKey, permissionDenyKey, writeApprovalAuditKey:
 		return true
 	default:
 		return false

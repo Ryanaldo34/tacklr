@@ -624,6 +624,7 @@ func TestBrainTools_engramPathGraph(t *testing.T) {
 		SessionID: "engram-graph", Store: stores.NewInMemoryStore(),
 		MountSession: ms, Model: &mockStrategy{},
 		Brain: eng, SearchNamespace: &ns,
+		DisableWriteApproval: true,
 	})
 	t.Cleanup(h.Close)
 	activatePlan(t, h)

@@ -71,3 +71,46 @@ func TestElicitation_paramsAndResultOutcomes(t *testing.T) {
 		t.Fatalf("payload = %v", payload)
 	}
 }
+
+// TestElicitation_writeApprovalOutcomes covers write-approval form params and
+// accept/decline/edit mapping.
+func TestElicitation_writeApprovalOutcomes(t *testing.T) {
+	wa := interrupt.WriteApprovalInterrupt{Title: "Write: /a", Args: `{"path":"/a"}`}
+	params := WriteApprovalToElicitationParams("sess", "tc1", wa)
+	if params["mode"] != "form" || params["sessionId"] != "sess" || params["toolCallId"] != "tc1" {
+		t.Fatalf("params = %#v", params)
+	}
+	msg, _ := params["message"].(string)
+	if !strings.Contains(msg, "Write: /a") || !strings.Contains(msg, `{"path":"/a"}`) {
+		t.Fatalf("message = %q", msg)
+	}
+
+	action, res, err := ElicitationResultToWriteApprovalPayload([]byte(`{"action":"decline"}`))
+	if err != nil || action != "decline" || res != nil {
+		t.Fatalf("decline: action=%s res=%s err=%v", action, res, err)
+	}
+	if _, _, err := ElicitationResultToWriteApprovalPayload([]byte(`{"action":"accept","content":{}}`)); err == nil {
+		t.Fatal("accept without action")
+	}
+	if _, _, err := ElicitationResultToWriteApprovalPayload([]byte(`{"action":"wat"}`)); err == nil {
+		t.Fatal("unknown action")
+	}
+	if _, _, err := ElicitationResultToWriteApprovalPayload([]byte(`{`)); err == nil {
+		t.Fatal("bad json")
+	}
+	_, res, err = ElicitationResultToWriteApprovalPayload([]byte(`{"action":"accept","content":{"action":"approve"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload interrupt.WriteApprovalPayload
+	if err := json.Unmarshal(res, &payload); err != nil || payload.Action != interrupt.WriteApprovalApprove {
+		t.Fatalf("approve payload = %+v err=%v", payload, err)
+	}
+	_, res, err = ElicitationResultToWriteApprovalPayload([]byte(`{"action":"accept","content":{"action":"edit","args":"{\"path\":\"/b\"}"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(res, &payload); err != nil || payload.Action != interrupt.WriteApprovalEdit || payload.Args != `{"path":"/b"}` {
+		t.Fatalf("edit payload = %+v err=%v", payload, err)
+	}
+}
