@@ -78,12 +78,6 @@ func (p *permissionBag) stageFor(toolCallID, typeName string) (onCallStage, bool
 func (p *permissionBag) recordStage(st onCallStage) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	for i := range p.stages {
-		if p.stages[i].ToolCallID == st.ToolCallID && p.stages[i].TypeName == st.TypeName {
-			p.stages[i] = st
-			return
-		}
-	}
 	p.stages = append(p.stages, st)
 }
 

@@ -29,6 +29,7 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 		"_parked_workers":          "not-a-map",
 		"_permission_always_allow": 42,
 		"_permission_always_deny":  []any{"x"},
+		"_on_call_stages":          make(chan int),
 		"_search_namespace":        "not-a-uuid",
 		"keep":                     "user",
 	})
@@ -43,6 +44,9 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 
 	rt.RememberPermissionAllow("allow_tool")
 	rt.RememberPermissionDeny("deny_tool")
+	if _, _, ok := sm.OnCallStage("w1", "tool_permission"); ok {
+		t.Fatal("malformed stages must not decode")
+	}
 	sm.RecordOnCallStage("w1", "tool_permission", `{"path":"/a"}`, false)
 	if !rt.PermissionAlwaysAllowed("allow_tool") || !sm.PermissionAlwaysAllowed("allow_tool") {
 		t.Fatal("allow-always not visible on Runtime and SessionManager")

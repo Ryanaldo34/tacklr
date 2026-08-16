@@ -44,9 +44,6 @@ func (r *toolRunner) Run(ctx context.Context, inv ToolInvocation) (string, ToolR
 
 	for i := len(r.interceptors) - 1; i >= 0; i-- {
 		interceptor := r.interceptors[i]
-		if interceptor == nil {
-			continue
-		}
 		inner := next
 		next = func(ctx context.Context, inv ToolInvocation) (string, error) {
 			return interceptor(ctx, inv, inner)
@@ -62,16 +59,10 @@ func rejectedOnCall(name string) error {
 }
 
 func toolNameOf(inv ToolInvocation) string {
-	if inv.Tool == nil {
-		return ""
-	}
 	return inv.Tool.Name
 }
 
 func toolDisplayOf(inv ToolInvocation) string {
-	if inv.Tool == nil {
-		return ""
-	}
 	return inv.Tool.DisplayName
 }
 
@@ -79,15 +70,17 @@ func toolDisplayOf(inv ToolInvocation) string {
 // Session allow-always skips the park; reject-always denies without a yield.
 func ToolPermissionOnCall(inv ToolInvocation) Interrupt {
 	name := toolNameOf(inv)
-	if inv.Runtime != nil && inv.Runtime.PermissionAlwaysDenied(name) {
-		return &interrupt.ToolPermissionInterrupt{
-			ToolName:     name,
-			SelectedKind: interrupt.PermissionRejectAlways,
-			Allowed:      false,
+	if rt := inv.Runtime; rt != nil {
+		if rt.PermissionAlwaysDenied(name) {
+			return &interrupt.ToolPermissionInterrupt{
+				ToolName:     name,
+				SelectedKind: interrupt.PermissionRejectAlways,
+				Allowed:      false,
+			}
 		}
-	}
-	if inv.Runtime != nil && inv.Runtime.PermissionAlwaysAllowed(name) {
-		return nil
+		if rt.PermissionAlwaysAllowed(name) {
+			return nil
+		}
 	}
 	return &interrupt.ToolPermissionInterrupt{
 		ToolName: name,
@@ -118,9 +111,6 @@ func onCallMiddleware() ToolInterceptor {
 		}
 		store, _ := inv.Runtime.(onCallStore)
 		for _, ctor := range inv.Tool.OnCall {
-			if ctor == nil {
-				continue
-			}
 			if err := applyOnCallLayer(&inv, ctor, store); err != nil {
 				return "", err
 			}
@@ -140,9 +130,7 @@ func applyOnCallLayer(inv *ToolInvocation, ctor OnCallFunc, store onCallStore) e
 			if denied {
 				return rejectedOnCall(toolNameOf(*inv))
 			}
-			if args != "" {
-				inv.ArgsJSON = args
-			}
+			inv.ArgsJSON = args
 			return nil
 		}
 	}
@@ -162,7 +150,7 @@ func finishOnCallLayer(inv *ToolInvocation, resolved Interrupt, store onCallStor
 		denied = eff.CallDenied()
 	}
 	rememberOnCallSession(inv.Runtime, resolved)
-	if store != nil && resolved != nil {
+	if store != nil {
 		store.RecordOnCallStage(inv.Runtime.CurrentToolCallID(), resolved.TypeName(), inv.ArgsJSON, denied)
 	}
 	if denied {
@@ -173,7 +161,7 @@ func finishOnCallLayer(inv *ToolInvocation, resolved Interrupt, store onCallStor
 
 func rememberOnCallSession(rt HarnessRuntime, resolved Interrupt) {
 	perm, ok := resolved.(*interrupt.ToolPermissionInterrupt)
-	if !ok || rt == nil {
+	if !ok {
 		return
 	}
 	switch perm.SelectedKind {
