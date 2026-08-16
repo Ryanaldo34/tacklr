@@ -506,7 +506,7 @@ func TestOnCallMiddleware_permissionThenInvoke(t *testing.T) {
 	var seen string
 	tool := NewTool(ToolConfig{
 		Name:   "mutate",
-		OnCall: OnCalls(ToolPermissionOnCall),
+		OnCall: OnCalls(func(ToolInvocation) Interrupt { return nil }, ToolPermissionOnCall),
 		Handler: func(ctx context.Context, args struct {
 			Path string `json:"path"`
 		}) (string, error) {
@@ -581,6 +581,14 @@ func TestOnCallMiddleware_requiresRuntime(t *testing.T) {
 	})
 	if !errors.Is(err, ErrFailed) {
 		t.Fatalf("err=%v", err)
+	}
+	rt, sm := onCallRuntime()
+	rt = rt.WithToolCallID("")
+	_, _, err = newToolRunner(onCallMiddleware(sm)).Run(t.Context(), ToolInvocation{
+		Tool: tool, ArgsJSON: `{}`, Runtime: rt,
+	})
+	if err == nil {
+		t.Fatal("empty tool call id must fail adopt")
 	}
 }
 

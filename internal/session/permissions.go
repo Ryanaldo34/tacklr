@@ -53,11 +53,8 @@ func (p *Permissions) Decision(toolName string) PermissionDecision {
 	return PermissionNone
 }
 
-// Remember stores an always-allow or always-deny decision. Other values are a no-op.
+// Remember stores an always-allow or always-deny decision.
 func (p *Permissions) Remember(toolName string, d PermissionDecision) {
-	if d != PermissionAllowAlways && d != PermissionDenyAlways {
-		return
-	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	switch d {
