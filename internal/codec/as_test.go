@@ -20,4 +20,7 @@ func TestAs_typedJSONAndReject(t *testing.T) {
 	if _, ok = codec.As[map[string]bool](make(chan int)); ok {
 		t.Fatal("unmarshalable value")
 	}
+	if _, ok = codec.As[map[string]bool]("nope"); ok {
+		t.Fatal("wrong json shape")
+	}
 }
