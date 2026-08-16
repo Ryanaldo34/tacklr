@@ -78,28 +78,6 @@ func TestResolveInterruptViaACP_dispatchOutcomes(t *testing.T) {
 		// Accept either elicitation/create failure or context deadline.
 		t.Logf("got err (ok if call attempted): %v", err)
 	}
-
-	wa := interrupt.WriteApprovalInterrupt{ToolName: "mutate", Title: "Write: /a", Args: `{"path":"/a"}`}
-	waSer, _ := wa.Serialize()
-	waData, _ := json.Marshal(map[string]any{
-		"interruptId": "i4",
-		"type":        interrupt.WriteApprovalType,
-		"data":        json.RawMessage(waSer),
-	})
-	ch, err = resolveInterruptViaACP(context.Background(), ProtocolEnv{Conn: &Conn{
-		RPC:  NewClientBridge(&recordingWriter{}),
-		Caps: ClientCapabilities{ElicitationForm: false},
-	}}, "s", &EventStream{}, &streaming.StreamEvent{Data: waData, MessageID: "tc"})
-	if err != nil || ch != nil {
-		t.Fatalf("write approval no-form park: ch=%v err=%v", ch, err)
-	}
-	id, parsed, err := ParseWriteApprovalFromInterruptData(waData)
-	if err != nil || id != "i4" || parsed.ToolName != "mutate" {
-		t.Fatalf("parse write approval: id=%s parsed=%+v err=%v", id, parsed, err)
-	}
-	if _, _, err := ParseWriteApprovalFromInterruptData([]byte(`{`)); err == nil {
-		t.Fatal("parse write approval bad envelope")
-	}
 }
 
 // TestResolvePermissionViaRequest_outcomes exercises every return path of

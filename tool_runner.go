@@ -3,7 +3,6 @@ package tacklr
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/ryanaldo34/tacklr/interrupt"
 )
@@ -76,16 +75,6 @@ func toolDisplayOf(inv ToolInvocation) string {
 	return inv.Tool.DisplayName
 }
 
-// WriteApprovalOnCall parks a write_approval interrupt before the handler.
-func WriteApprovalOnCall(inv ToolInvocation) Interrupt {
-	name := toolNameOf(inv)
-	return &interrupt.WriteApprovalInterrupt{
-		ToolName: name,
-		Title:    ResolveToolTitle(toolDisplayOf(inv), name, inv.ArgsJSON),
-		Args:     inv.ArgsJSON,
-	}
-}
-
 // ToolPermissionOnCall parks a tool_permission interrupt before the handler.
 // Session allow-always skips the park; reject-always denies without a yield.
 func ToolPermissionOnCall(inv ToolInvocation) Interrupt {
@@ -107,12 +96,11 @@ func ToolPermissionOnCall(inv ToolInvocation) Interrupt {
 	}
 }
 
-// onCallStore is the session-backed OnCall stage + write-approval audit.
+// onCallStore is the session-backed OnCall stage store.
 // session.Runtime implements it; it is not part of HarnessRuntime.
 type onCallStore interface {
 	OnCallStage(toolCallID, typeName string) (args string, denied bool, ok bool)
 	RecordOnCallStage(toolCallID, typeName, args string, denied bool)
-	RecordWriteApproval(WriteApprovalRecord)
 }
 
 type predecidedCall interface {
@@ -120,12 +108,7 @@ type predecidedCall interface {
 }
 
 // onCallMiddleware runs Tool.OnCall constructors in order (FastAPI-style layers).
-// skipTypes omits those interrupt kinds (DisableWriteApproval uses write_approval).
-func onCallMiddleware(skipTypes ...string) ToolInterceptor {
-	skip := make(map[string]struct{}, len(skipTypes))
-	for _, t := range skipTypes {
-		skip[t] = struct{}{}
-	}
+func onCallMiddleware() ToolInterceptor {
 	return func(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error) {
 		if inv.Tool == nil || len(inv.Tool.OnCall) == 0 {
 			return next(ctx, inv)
@@ -138,7 +121,7 @@ func onCallMiddleware(skipTypes ...string) ToolInterceptor {
 			if ctor == nil {
 				continue
 			}
-			if err := applyOnCallLayer(&inv, ctor, store, skip); err != nil {
+			if err := applyOnCallLayer(&inv, ctor, store); err != nil {
 				return "", err
 			}
 		}
@@ -146,12 +129,9 @@ func onCallMiddleware(skipTypes ...string) ToolInterceptor {
 	}
 }
 
-func applyOnCallLayer(inv *ToolInvocation, ctor OnCallFunc, store onCallStore, skip map[string]struct{}) error {
+func applyOnCallLayer(inv *ToolInvocation, ctor OnCallFunc, store onCallStore) error {
 	intr := ctor(*inv)
 	if intr == nil {
-		return nil
-	}
-	if _, ok := skip[intr.TypeName()]; ok {
 		return nil
 	}
 	callID := inv.Runtime.CurrentToolCallID()
@@ -185,7 +165,6 @@ func finishOnCallLayer(inv *ToolInvocation, resolved Interrupt, store onCallStor
 	if store != nil && resolved != nil {
 		store.RecordOnCallStage(inv.Runtime.CurrentToolCallID(), resolved.TypeName(), inv.ArgsJSON, denied)
 	}
-	recordWriteApprovalIfNeeded(*inv, resolved)
 	if denied {
 		return rejectedOnCall(toolNameOf(*inv))
 	}
@@ -203,22 +182,4 @@ func rememberOnCallSession(rt HarnessRuntime, resolved Interrupt) {
 	case interrupt.PermissionRejectAlways:
 		rt.RememberPermissionDeny(perm.ToolName)
 	}
-}
-
-func recordWriteApprovalIfNeeded(inv ToolInvocation, resolved Interrupt) {
-	wa, ok := resolved.(*interrupt.WriteApprovalInterrupt)
-	if !ok {
-		return
-	}
-	store, ok := inv.Runtime.(onCallStore)
-	if !ok {
-		return
-	}
-	store.RecordWriteApproval(WriteApprovalRecord{
-		ToolName:   toolNameOf(inv),
-		ToolCallID: inv.Runtime.CurrentToolCallID(),
-		Action:     wa.Action,
-		Args:       inv.ArgsJSON,
-		UnixTime:   time.Now().Unix(),
-	})
 }

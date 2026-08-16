@@ -54,9 +54,9 @@ type AgentOptions struct {
 	// DisablePlanningLock omits planningWriteLock (workers and tests).
 	// The permission gate is still always installed.
 	DisablePlanningLock bool
-	// DisableWriteApproval skips write_approval OnCall layers (write-mechanic
-	// tests). Other OnCall layers, including tool_permission, still run.
-	DisableWriteApproval bool
+	// WriteUnattended injects write without ToolPermissionOnCall.
+	// Write-mechanic tests use this so persist/index paths do not park.
+	WriteUnattended bool
 	// ToolResultHooks map tool name → post-success window effects for host tools.
 	// Plan builtins use BuiltinResult instead.
 	ToolResultHooks map[string]ToolResultHook
@@ -137,7 +137,7 @@ func newHarnessBase(opts AgentOptions, sm *session.SessionManager) (*AgentHarnes
 		context:              NewModelContextManager(),
 		contextPolicy:        opts.ContextPolicy,
 		runCommandUnattended: opts.RunCommandUnattended,
-		disableWriteApproval: opts.DisableWriteApproval,
+		writeUnattended:      opts.WriteUnattended,
 		vfsBridge:            opts.shareIndexBridge,
 	}
 	if opts.MountSession != nil {
@@ -158,11 +158,7 @@ func newHarnessBase(opts AgentOptions, sm *session.SessionManager) (*AgentHarnes
 	if !opts.DisablePlanningLock {
 		chain = append(chain, h.planningWriteLock)
 	}
-	if opts.DisableWriteApproval {
-		chain = append(chain, onCallMiddleware(WriteApprovalType))
-	} else {
-		chain = append(chain, onCallMiddleware())
-	}
+	chain = append(chain, onCallMiddleware())
 	h.toolRunner = newToolRunner(chain...)
 	h.toolResultHooks = newToolResultHookRegistry(opts.ToolResultHooks)
 	return h, nil
@@ -203,7 +199,7 @@ func (a *AgentHarness) injectBuiltinTools() {
 	}
 	br := a.vfsBridge
 	if ms := a.VFS(); ms != nil {
-		a.tools = append(a.tools, newVFSTools(ms)...)
+		a.tools = append(a.tools, newVFSTools(ms, !a.writeUnattended)...)
 		a.tools = append(a.tools, newRunCommand(ms, !a.runCommandUnattended))
 	}
 	if a.brain != nil {

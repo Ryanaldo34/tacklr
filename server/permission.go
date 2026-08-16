@@ -59,11 +59,6 @@ func ParseToolPermissionFromInterruptData(data []byte) (interruptID string, perm
 	return id, perm, nil
 }
 
-// ParseWriteApprovalFromInterruptData extracts a write-approval interrupt from yield data.
-func ParseWriteApprovalFromInterruptData(data []byte) (interruptID string, wa interrupt.WriteApprovalInterrupt, err error) {
-	return unmarshalInterruptData[interrupt.WriteApprovalInterrupt](data)
-}
-
 // PermissionToACPParams builds session/request_permission params.
 func PermissionToACPParams(sessionID, toolCallID string, perm interrupt.ToolPermissionInterrupt) map[string]any {
 	options := make([]map[string]any, 0, len(perm.Options))

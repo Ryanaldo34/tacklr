@@ -120,14 +120,6 @@ func (s *EventStream) AskUserQuestion(toolCallID string) string {
 	return s.harness.AskUserQuestion(toolCallID)
 }
 
-// WriteApprovals returns checkpointed write-approval decisions, or nil.
-func (s *EventStream) WriteApprovals() []tacklr.WriteApprovalRecord {
-	if s == nil || s.harness == nil {
-		return nil
-	}
-	return s.harness.WriteApprovals()
-}
-
 // VFS is the session mount table, or nil.
 func (s *EventStream) VFS() *vfs.MountSession {
 	if s == nil || s.harness == nil {

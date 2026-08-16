@@ -8,8 +8,8 @@ import (
 	"github.com/ryanaldo34/tacklr/interrupt"
 )
 
-// TestElicitation_paramsAndResultOutcomes covers selection and write-approval
-// elicitation param/result return paths once each.
+// TestElicitation_paramsAndResultOutcomes covers selection elicitation
+// param/result return paths once each.
 func TestElicitation_paramsAndResultOutcomes(t *testing.T) {
 	opts := []interrupt.UserChoice{{Title: "A", Description: "first", IsRecommended: true}, {Title: "B", Description: "second"}}
 
@@ -69,36 +69,5 @@ func TestElicitation_paramsAndResultOutcomes(t *testing.T) {
 	_ = json.Unmarshal(res, &payload)
 	if int(payload["selectionIdx"].(float64)) != 1 {
 		t.Fatalf("payload = %v", payload)
-	}
-
-	wa := interrupt.WriteApprovalInterrupt{Title: "Write: /a", Args: `{"path":"/a"}`}
-	wparams := WriteApprovalToElicitationParams("sess", "tc1", wa)
-	if wparams["mode"] != "form" || wparams["toolCallId"] != "tc1" {
-		t.Fatalf("write approval params = %#v", wparams)
-	}
-	action, res, err = ElicitationResultToWriteApprovalPayload([]byte(`{"action":"decline"}`))
-	if err != nil || action != "decline" || res != nil {
-		t.Fatalf("write approval decline: action=%s res=%s err=%v", action, res, err)
-	}
-	if _, _, err := ElicitationResultToWriteApprovalPayload([]byte(`{"action":"wat"}`)); err == nil {
-		t.Fatal("write approval unknown action")
-	}
-	if _, _, err := ElicitationResultToWriteApprovalPayload([]byte(`{`)); err == nil {
-		t.Fatal("write approval bad json")
-	}
-	if _, _, err := ElicitationResultToWriteApprovalPayload([]byte(`{"action":"accept","content":{}}`)); err == nil {
-		t.Fatal("write approval accept without action")
-	}
-	_, res, err = ElicitationResultToWriteApprovalPayload([]byte(`{"action":"accept","content":{"action":"approve"}}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var wpayload interrupt.WriteApprovalPayload
-	if err := json.Unmarshal(res, &wpayload); err != nil || wpayload.Action != interrupt.WriteApprovalApprove {
-		t.Fatalf("write approval approve = %+v err=%v", wpayload, err)
-	}
-	msg, _ = wparams["message"].(string)
-	if !strings.Contains(msg, "Approve or reject") || !strings.Contains(msg, `{"path":"/a"}`) {
-		t.Fatalf("write approval message = %q", msg)
 	}
 }

@@ -15,11 +15,12 @@ import (
 // vfsTools closes over session mounts. Rev checks live here so MountSession
 // stays a thin path/IR API (no high-level ReplaceLinesAt surface).
 type vfsTools struct {
-	ms *vfs.MountSession
+	ms                 *vfs.MountSession
+	permissionRequired bool
 }
 
-func newVFSTools(ms *vfs.MountSession) []*Tool {
-	v := vfsTools{ms: ms}
+func newVFSTools(ms *vfs.MountSession, permissionRequired bool) []*Tool {
+	v := vfsTools{ms: ms, permissionRequired: permissionRequired}
 	return []*Tool{v.newRead(), v.newWrite()}
 }
 
@@ -172,7 +173,7 @@ func (v vfsTools) readStructured(ctx context.Context, p string, args readArgs, e
 }
 
 func (v vfsTools) newWrite() *Tool {
-	return NewTool(ToolConfig{
+	cfg := ToolConfig{
 		Name:        "write",
 		DisplayName: "Write {path}",
 		Description: `Write a virtual file: full body, line span, substring, or structured block. Exactly one mode per call.
@@ -180,7 +181,6 @@ func (v vfsTools) newWrite() *Tool {
 Pass rev from read when the path exists. Create only via content or ir_text (empty content creates or truncates). Modes are selected by which field is set: content|ir_text, old, block_id, or start. Persists immediately.`,
 		Category: streaming.ToolCategoryEdit,
 		Access:   ToolWriteAccess,
-		OnCall:   OnCalls(WriteApprovalOnCall),
 		Timeout:  60 * time.Second,
 		Handler: func(ctx context.Context, args writeArgs, rt HarnessRuntime) (string, error) {
 			p, err := absVirtual(args.Path)
@@ -227,7 +227,11 @@ Pass rev from read when the path exists. Create only via content or ir_text (emp
 				return v.writeLines(ctx, p, args)
 			}
 		},
-	})
+	}
+	if v.permissionRequired {
+		cfg.OnCall = OnCalls(ToolPermissionOnCall)
+	}
+	return NewTool(cfg)
 }
 
 func writeModeCount(args writeArgs) (n int, full bool) {

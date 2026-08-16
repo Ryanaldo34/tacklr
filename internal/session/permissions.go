@@ -8,10 +8,9 @@ import (
 )
 
 const (
-	permissionAllowKey    = "_permission_always_allow"
-	permissionDenyKey     = "_permission_always_deny"
-	writeApprovalAuditKey = "_write_approval_audit"
-	onCallStagesKey       = "_on_call_stages"
+	permissionAllowKey = "_permission_always_allow"
+	permissionDenyKey  = "_permission_always_deny"
+	onCallStagesKey    = "_on_call_stages"
 )
 
 // onCallStage is one completed OnCall middleware layer for a tool call.
@@ -22,21 +21,11 @@ type onCallStage struct {
 	Args       string `json:"args"`
 }
 
-// WriteApprovalRecord is one resolved write-approval decision.
-type WriteApprovalRecord struct {
-	ToolName   string `json:"toolName"`
-	ToolCallID string `json:"toolCallID"`
-	Action     string `json:"action"`
-	Args       string `json:"args"`
-	UnixTime   int64  `json:"unixTime"`
-}
-
 type permissionBag struct {
-	mu        sync.RWMutex
-	allow     map[string]bool
-	deny      map[string]bool
-	approvals []WriteApprovalRecord
-	stages    []onCallStage
+	mu     sync.RWMutex
+	allow  map[string]bool
+	deny   map[string]bool
+	stages []onCallStage
 }
 
 func newPermissionBag() *permissionBag {
@@ -74,18 +63,6 @@ func (p *permissionBag) rememberDeny(name string) {
 	p.remember(p.deny, name)
 }
 
-func (p *permissionBag) appendApproval(rec WriteApprovalRecord) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.approvals = append(p.approvals, rec)
-}
-
-func (p *permissionBag) approvalList() []WriteApprovalRecord {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	return slices.Clone(p.approvals)
-}
-
 func (p *permissionBag) stageFor(toolCallID, typeName string) (onCallStage, bool) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -108,18 +85,6 @@ func (p *permissionBag) recordStage(st onCallStage) {
 		}
 	}
 	p.stages = append(p.stages, st)
-}
-
-func (p *permissionBag) approvalFor(toolCallID string) (WriteApprovalRecord, bool) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	i := slices.IndexFunc(p.approvals, func(rec WriteApprovalRecord) bool {
-		return rec.ToolCallID == toolCallID
-	})
-	if i < 0 {
-		return WriteApprovalRecord{}, false
-	}
-	return p.approvals[i], true
 }
 
 func decodeAs[T any](raw any) (T, bool) {
@@ -146,19 +111,10 @@ func decodeBoolSet(raw any) map[string]bool {
 	return maps.Clone(m)
 }
 
-func decodeApprovalRecords(raw any) []WriteApprovalRecord {
-	recs, ok := decodeAs[[]WriteApprovalRecord](raw)
-	if !ok || len(recs) == 0 {
-		return nil
-	}
-	return slices.Clone(recs)
-}
-
 func (p *permissionBag) exportInto(state map[string]any) {
 	p.mu.RLock()
 	allow := maps.Clone(p.allow)
 	deny := maps.Clone(p.deny)
-	recs := slices.Clone(p.approvals)
 	stages := slices.Clone(p.stages)
 	p.mu.RUnlock()
 	if len(allow) == 0 {
@@ -170,11 +126,6 @@ func (p *permissionBag) exportInto(state map[string]any) {
 		delete(state, permissionDenyKey)
 	} else {
 		state[permissionDenyKey] = deny
-	}
-	if len(recs) == 0 {
-		delete(state, writeApprovalAuditKey)
-	} else {
-		state[writeApprovalAuditKey] = recs
 	}
 	if len(stages) == 0 {
 		delete(state, onCallStagesKey)
@@ -188,7 +139,6 @@ func (p *permissionBag) loadFromState(state map[string]any) {
 	defer p.mu.Unlock()
 	p.allow = map[string]bool{}
 	p.deny = map[string]bool{}
-	p.approvals = nil
 	p.stages = nil
 	if state == nil {
 		return
@@ -198,9 +148,6 @@ func (p *permissionBag) loadFromState(state map[string]any) {
 	}
 	if raw, ok := state[permissionDenyKey]; ok && raw != nil {
 		p.deny = decodeBoolSet(raw)
-	}
-	if raw, ok := state[writeApprovalAuditKey]; ok && raw != nil {
-		p.approvals = decodeApprovalRecords(raw)
 	}
 	if raw, ok := state[onCallStagesKey]; ok && raw != nil {
 		p.stages = decodeOnCallStages(raw)
@@ -233,21 +180,6 @@ func (s *SessionManager) RememberPermissionAllow(toolName string) {
 // RememberPermissionDeny records reject-always for toolName.
 func (s *SessionManager) RememberPermissionDeny(toolName string) {
 	s.perms.rememberDeny(toolName)
-}
-
-// WriteApprovals returns a copy of checkpointed write-approval decisions.
-func (s *SessionManager) WriteApprovals() []WriteApprovalRecord {
-	return s.perms.approvalList()
-}
-
-// WriteApprovalFor returns the decision recorded for toolCallID, if any.
-func (s *SessionManager) WriteApprovalFor(toolCallID string) (WriteApprovalRecord, bool) {
-	return s.perms.approvalFor(toolCallID)
-}
-
-// RecordWriteApproval appends a resolved write-approval decision.
-func (s *SessionManager) RecordWriteApproval(rec WriteApprovalRecord) {
-	s.perms.appendApproval(rec)
 }
 
 // OnCallStage returns the completed OnCall layer for toolCallID and typeName.

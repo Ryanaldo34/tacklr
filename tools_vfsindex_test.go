@@ -38,12 +38,12 @@ func vfsIndexHarness(t *testing.T, withNS bool) (*AgentHarness, *vfs.MountSessio
 	}
 	ns := uuid.New()
 	opts := AgentOptions{
-		SessionID:            "vfs-idx-tools",
-		Store:                stores.NewInMemoryStore(),
-		MountSession:         ms,
-		Model:                &mockStrategy{},
-		Brain:                eng,
-		DisableWriteApproval: true,
+		SessionID:       "vfs-idx-tools",
+		Store:           stores.NewInMemoryStore(),
+		MountSession:    ms,
+		Model:           &mockStrategy{},
+		Brain:           eng,
+		WriteUnattended: true,
 	}
 	if withNS {
 		opts.SearchNamespace = &ns
@@ -603,14 +603,14 @@ func TestRun_workspaceResearchTurn(t *testing.T) {
 			SystemPrompt:    "You are a research agent. Prefer tools over guessing.",
 			MaxTurnRequests: 20,
 		},
-		ContextPolicy:        ContextPolicy{PressureRatio: 0.6, CompressFraction: 0.5},
-		WatchDog:             wd,
-		MountSession:         ms,
-		Brain:                eng,
-		SearchNamespace:      &ns,
-		BrainWriteKinds:      brain.WriteKinds{Discovery: "Discovery"},
-		DisableWriteApproval: true,
-		Model:                strategy,
+		ContextPolicy:   ContextPolicy{PressureRatio: 0.6, CompressFraction: 0.5},
+		WatchDog:        wd,
+		MountSession:    ms,
+		Brain:           eng,
+		SearchNamespace: &ns,
+		BrainWriteKinds: brain.WriteKinds{Discovery: "Discovery"},
+		WriteUnattended: true,
+		Model:           strategy,
 		SubAgents: []*SubAgent{{
 			WorkerName:  "researcher",
 			Description: "summarize findings",

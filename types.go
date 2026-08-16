@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/ryanaldo34/tacklr/internal/session"
 	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/streaming"
 )
@@ -181,9 +180,7 @@ type (
 	UserChoice              = interrupt.UserChoice
 	UserSelectionInterrupt  = interrupt.UserSelectionInterrupt
 	ToolPermissionInterrupt = interrupt.ToolPermissionInterrupt
-	WriteApprovalInterrupt  = interrupt.WriteApprovalInterrupt
 	PermissionOption        = interrupt.PermissionOption
-	WriteApprovalRecord     = session.WriteApprovalRecord
 )
 
 var (
@@ -197,9 +194,6 @@ const (
 	PermissionAllowAlways  = interrupt.PermissionAllowAlways
 	PermissionRejectOnce   = interrupt.PermissionRejectOnce
 	PermissionRejectAlways = interrupt.PermissionRejectAlways
-	WriteApprovalApprove   = interrupt.WriteApprovalApprove
-	WriteApprovalReject    = interrupt.WriteApprovalReject
-	WriteApprovalType      = interrupt.WriteApprovalType
 )
 
 // RegisterInterrupt registers a custom interrupt factory for session rehydrate.

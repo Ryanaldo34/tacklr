@@ -295,7 +295,7 @@ func (a *AgentHarness) workerOptsFromSpec(spec *SubAgent) AgentOptions {
 		RunCommandUnattended: a.runCommandUnattended,
 		shareIndexBridge:     a.vfsBridge,
 		DisablePlanningLock:  true,
-		DisableWriteApproval: a.disableWriteApproval,
+		WriteUnattended:      a.writeUnattended,
 	}
 }
 

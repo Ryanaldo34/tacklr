@@ -21,8 +21,7 @@ func drainRuntime(sm *session.SessionManager) session.Runtime {
 }
 
 // TestSessionModules_surviveCheckpoint is the durable-module outcome: permission
-// memory (allow/deny and write-approval audit), parked workers, search
-// namespace, and a host VFS pointer survive
+// memory, parked workers, search namespace, and a host VFS pointer survive
 // Capture → JSON wire → Apply on a fresh manager.
 func TestSessionModules_surviveCheckpoint(t *testing.T) {
 	sm := session.NewSessionManager()
@@ -44,14 +43,7 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 
 	rt.RememberPermissionAllow("allow_tool")
 	rt.RememberPermissionDeny("deny_tool")
-	sm.RecordWriteApproval(session.WriteApprovalRecord{
-		ToolName:   "mutate",
-		ToolCallID: "w1",
-		Action:     "approve",
-		Args:       `{"path":"/a"}`,
-		UnixTime:   1,
-	})
-	sm.RecordOnCallStage("w1", "write_approval", `{"path":"/a"}`, false)
+	sm.RecordOnCallStage("w1", "tool_permission", `{"path":"/a"}`, false)
 	if !rt.PermissionAlwaysAllowed("allow_tool") || !sm.PermissionAlwaysAllowed("allow_tool") {
 		t.Fatal("allow-always not visible on Runtime and SessionManager")
 	}
@@ -151,11 +143,7 @@ func assertModules(t *testing.T, sm *session.SessionManager, ns uuid.UUID, parkI
 	if !rt.PermissionAlwaysAllowed("allow_tool") || !rt.PermissionAlwaysDenied("deny_tool") {
 		t.Fatal("permission memory must reload")
 	}
-	recs := sm.WriteApprovals()
-	if len(recs) != 1 || recs[0].Action != "approve" || recs[0].ToolName != "mutate" || recs[0].Args != `{"path":"/a"}` {
-		t.Fatalf("write approval audit reload = %+v", recs)
-	}
-	args, denied, ok := sm.OnCallStage("w1", "write_approval")
+	args, denied, ok := sm.OnCallStage("w1", "tool_permission")
 	if !ok || denied || args != `{"path":"/a"}` {
 		t.Fatalf("on-call stage reload args=%q denied=%v ok=%v", args, denied, ok)
 	}

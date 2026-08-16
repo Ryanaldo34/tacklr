@@ -14,7 +14,7 @@ import (
 
 // SessionManager owns durable and live data for one agent harness thread
 // (checkpoint id), not an ACP client session id: plan, user tool state,
-// permission memory (including write-approval audit), parked workers,
+// permission memory, parked workers,
 // search context, interrupts, and the optional virtual filesystem mount table.
 //
 // VFS is host-owned and attached with SetVFS. Knowledge namespace + ResultSet

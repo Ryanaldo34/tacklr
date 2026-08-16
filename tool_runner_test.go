@@ -21,7 +21,7 @@ func TestHarness_planningWriteLock_thenUnlockAfterCreatePlan(t *testing.T) {
 	writeTool := NewTool(ToolConfig{
 		Name:   "mutate",
 		Access: ToolWriteAccess,
-		OnCall: OnCalls(WriteApprovalOnCall),
+		OnCall: OnCalls(ToolPermissionOnCall),
 		Handler: func(ctx context.Context) (string, error) {
 			calls++
 			return "mutated", nil
@@ -89,7 +89,7 @@ func TestHarness_planningWriteLock_thenUnlockAfterCreatePlan(t *testing.T) {
 	if !locked {
 		t.Fatal("expected write denial while planning (no plan yet)")
 	}
-	if calls != 0 || kind != WriteApprovalType || interruptID == "" {
+	if calls != 0 || kind != "tool_permission" || interruptID == "" {
 		t.Fatalf("park: calls=%d kind=%q id=%q", calls, kind, interruptID)
 	}
 
@@ -99,7 +99,7 @@ func TestHarness_planningWriteLock_thenUnlockAfterCreatePlan(t *testing.T) {
 		t.Fatal(err)
 	}
 	ch2, err := reloaded.ReturnFromInterrupt(context.Background(), map[string][]byte{
-		interruptID: []byte(`{"action":"approve"}`),
+		interruptID: []byte(`{"optionId":"allow-once"}`),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -111,11 +111,7 @@ func TestHarness_planningWriteLock_thenUnlockAfterCreatePlan(t *testing.T) {
 		}
 	}
 	if !unlocked || calls != 1 {
-		t.Fatalf("approve after reload: unlocked=%v calls=%d", unlocked, calls)
-	}
-	recs := reloaded.WriteApprovals()
-	if len(recs) != 1 || recs[0].Action != WriteApprovalApprove || recs[0].ToolName != "mutate" {
-		t.Fatalf("audit = %+v", recs)
+		t.Fatalf("allow after reload: unlocked=%v calls=%d", unlocked, calls)
 	}
 }
 
@@ -380,7 +376,7 @@ func TestHarness_hostInterceptor_keepsPermissionGate(t *testing.T) {
 	tool := NewTool(ToolConfig{
 		Name:   "gated",
 		Access: ToolWriteAccess,
-		OnCall: OnCalls(WriteApprovalOnCall, ToolPermissionOnCall),
+		OnCall: OnCalls(ToolPermissionOnCall),
 		Handler: func(ctx context.Context) (string, error) {
 			return "should-not-run", nil
 		},
@@ -415,33 +411,23 @@ func TestHarness_hostInterceptor_keepsPermissionGate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, kind := drainYield(t, ch)
+	_, kind := drainYield(t, ch)
 	if hostSaw != "gated" {
 		t.Fatalf("host interceptor saw %q", hostSaw)
 	}
-	if kind != WriteApprovalType {
-		t.Fatalf("write approval type = %q", kind)
-	}
-	ch2, err := ah.ReturnFromInterrupt(context.Background(), map[string][]byte{
-		id: []byte(`{"action":"approve"}`),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, kind2 := drainYield(t, ch2)
-	if kind2 != "tool_permission" {
-		t.Fatalf("permission gate type = %q", kind2)
+	if kind != "tool_permission" {
+		t.Fatalf("permission gate type = %q", kind)
 	}
 }
 
-// TestHarness_writeApproval_rejectDeniesWrite: reject fails the tool; the
-// handler does not run; the audit records reject.
-func TestHarness_writeApproval_rejectDeniesWrite(t *testing.T) {
+// TestHarness_toolPermission_rejectOnceDeniesWrite: reject-once fails the
+// tool; the handler does not run.
+func TestHarness_toolPermission_rejectOnceDeniesWrite(t *testing.T) {
 	var calls int
 	tool := NewTool(ToolConfig{
 		Name:   "mutate",
 		Access: ToolWriteAccess,
-		OnCall: OnCalls(WriteApprovalOnCall),
+		OnCall: OnCalls(ToolPermissionOnCall),
 		Handler: func(ctx context.Context) (string, error) {
 			calls++
 			return "mutated", nil
@@ -473,7 +459,7 @@ func TestHarness_writeApproval_rejectDeniesWrite(t *testing.T) {
 	}
 	id, _ := drainYield(t, ch)
 	ch2, err := ah.ReturnFromInterrupt(context.Background(), map[string][]byte{
-		id: []byte(`{"action":"reject"}`),
+		id: []byte(`{"optionId":"reject-once"}`),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -486,10 +472,6 @@ func TestHarness_writeApproval_rejectDeniesWrite(t *testing.T) {
 	}
 	if calls != 0 || !denied {
 		t.Fatalf("reject: calls=%d denied=%v", calls, denied)
-	}
-	recs := ah.WriteApprovals()
-	if len(recs) != 1 || recs[0].Action != WriteApprovalReject || recs[0].ToolName != "mutate" {
-		t.Fatalf("audit = %+v", recs)
 	}
 }
 
@@ -529,14 +511,14 @@ func requireParked(t *testing.T, err error, kind string) {
 	}
 }
 
-// TestOnCallMiddleware_writeThenPermission is the isolated middleware stack:
-// write_approval then tool_permission, then the handler runs with the original args.
-func TestOnCallMiddleware_writeThenPermission(t *testing.T) {
+// TestOnCallMiddleware_permissionThenInvoke: park, allow-once, then the
+// handler runs with the original args.
+func TestOnCallMiddleware_permissionThenInvoke(t *testing.T) {
 	var calls int
 	var seen string
 	tool := NewTool(ToolConfig{
 		Name:   "mutate",
-		OnCall: OnCalls(WriteApprovalOnCall, ToolPermissionOnCall),
+		OnCall: OnCalls(ToolPermissionOnCall),
 		Handler: func(ctx context.Context, args struct {
 			Path string `json:"path"`
 		}) (string, error) {
@@ -550,11 +532,6 @@ func TestOnCallMiddleware_writeThenPermission(t *testing.T) {
 	inv := ToolInvocation{Tool: tool, ArgsJSON: `{"path":"/a"}`, Runtime: rt}
 
 	_, _, err := runner.Run(t.Context(), inv)
-	requireParked(t, err, WriteApprovalType)
-	if _, err := rt.ReturnInterrupt("c1", []byte(`{"action":"approve"}`)); err != nil {
-		t.Fatal(err)
-	}
-	_, _, err = runner.Run(t.Context(), inv)
 	requireParked(t, err, "tool_permission")
 	if _, err := rt.ReturnInterrupt("c1", []byte(`{"optionId":"allow-once"}`)); err != nil {
 		t.Fatal(err)
@@ -592,20 +569,6 @@ func TestOnCallMiddleware_permissionMemory(t *testing.T) {
 	if !errors.Is(err, ErrToolPermissionDenied) || calls != 1 {
 		t.Fatalf("reject-always: calls=%d err=%v", calls, err)
 	}
-}
-
-// TestOnCallMiddleware_skipWriteStillParksPermission: DisableWriteApproval
-// omits write_approval and still runs the permission layer.
-func TestOnCallMiddleware_skipWriteStillParksPermission(t *testing.T) {
-	tool := NewTool(ToolConfig{
-		Name:    "gated",
-		OnCall:  OnCalls(WriteApprovalOnCall, ToolPermissionOnCall),
-		Handler: func(ctx context.Context) (string, error) { return "nope", nil },
-	})
-	rt := onCallRuntime()
-	runner := newToolRunner(onCallMiddleware(WriteApprovalType))
-	_, _, err := runner.Run(t.Context(), ToolInvocation{Tool: tool, ArgsJSON: `{}`, Runtime: rt})
-	requireParked(t, err, "tool_permission")
 }
 
 // TestOnCallMiddleware_emptyStackInvokes: no OnCall layers means the handler runs.

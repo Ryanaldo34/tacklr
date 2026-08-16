@@ -138,16 +138,6 @@ func (rt Runtime) RememberPermissionDeny(toolName string) {
 	rt.session.RememberPermissionDeny(toolName)
 }
 
-// WriteApprovalFor returns the decision recorded for toolCallID, if any.
-func (rt Runtime) WriteApprovalFor(toolCallID string) (WriteApprovalRecord, bool) {
-	return rt.session.WriteApprovalFor(toolCallID)
-}
-
-// RecordWriteApproval appends a resolved write-approval decision.
-func (rt Runtime) RecordWriteApproval(rec WriteApprovalRecord) {
-	rt.session.RecordWriteApproval(rec)
-}
-
 // OnCallStage returns the completed OnCall layer for toolCallID and typeName.
 func (rt Runtime) OnCallStage(toolCallID, typeName string) (args string, denied bool, ok bool) {
 	return rt.session.OnCallStage(toolCallID, typeName)

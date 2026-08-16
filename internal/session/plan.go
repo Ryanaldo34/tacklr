@@ -19,7 +19,7 @@ func IsReservedRuntimeStateKey(key string) bool {
 	switch key {
 	case planStateKey, planDocumentStateKey, planDocumentUpdatedKey,
 		searchNamespaceStateKey, parkedWorkersStateKey,
-		permissionAllowKey, permissionDenyKey, writeApprovalAuditKey, onCallStagesKey:
+		permissionAllowKey, permissionDenyKey, onCallStagesKey:
 		return true
 	default:
 		return false
@@ -182,6 +182,5 @@ func StripPlanKeys(state map[string]any) {
 	delete(state, parkedWorkersStateKey)
 	delete(state, permissionAllowKey)
 	delete(state, permissionDenyKey)
-	delete(state, writeApprovalAuditKey)
 	delete(state, onCallStagesKey)
 }
