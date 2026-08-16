@@ -88,6 +88,7 @@ func (a *AgentHarness) startTurn(ctx context.Context, user *Message) (<-chan Str
 			out <- StreamEvent{Type: StreamEventError, Error: fmt.Errorf("run: context cancelled: %w", ctx.Err())}
 		}
 
+		a.pairOpenToolCalls("unpaired tool call")
 		if user != nil {
 			if err := a.addToContext(ctx, user, out); err != nil {
 				if ctx.Err() != nil {
@@ -397,6 +398,38 @@ func (a *AgentHarness) runTurnLoop(ctx context.Context, out chan StreamEvent, tu
 }
 
 // tagModelAfterToolsError wraps a stream error with ErrModelAfterTools.
+// pairOpenToolCalls appends error tool results for assistant tool_calls that
+// have no matching tool message. Restored dirty windows become valid before
+// the next model turn; new turns never commit unpaired calls.
+func (a *AgentHarness) pairOpenToolCalls(reason string) {
+	if a.context == nil {
+		return
+	}
+	msgs := a.context.Messages()
+	haveResult := make(map[string]struct{})
+	for _, m := range msgs {
+		if m != nil && m.Role == RoleTool && m.ToolCallID != "" {
+			haveResult[m.ToolCallID] = struct{}{}
+		}
+	}
+	for _, m := range msgs {
+		if m == nil || m.Role != RoleAssistant {
+			continue
+		}
+		for _, tc := range m.ToolCalls {
+			key := tc.Key()
+			if key == "" {
+				continue
+			}
+			if _, ok := haveResult[key]; ok {
+				continue
+			}
+			a.context.Add(&Message{Role: RoleTool, ToolCallID: key, Content: reason})
+			haveResult[key] = struct{}{}
+		}
+	}
+}
+
 func tagModelAfterToolsError(chunk LLMResponseChunk) LLMResponseChunk {
 	if chunk.Error != nil {
 		if !errors.Is(chunk.Error, ErrModelAfterTools) {

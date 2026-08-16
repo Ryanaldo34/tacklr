@@ -75,10 +75,9 @@ func (s *Server) ServeStdio(ctx context.Context, in io.Reader, out io.Writer) er
 	var wg sync.WaitGroup
 	// Each inbound line gets its own Conn so concurrent handlers do not race on
 	// Caps. Capabilities are loaded from / stored on the bridge under its mutex.
+	// initialize runs synchronously so later methods on the same input see it.
 	dispatch := func(body []byte) {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		run := func() {
 			reqConn := &Conn{
 				Writer: w,
 				RPC:    bridge,
@@ -87,10 +86,19 @@ func (s *Server) ServeStdio(ctx context.Context, in io.Reader, out io.Writer) er
 			if err := proto.HandleInbound(ctx, reqEnv, body); err != nil {
 				slog.Debug("inbound handler", "error", err, "protocol", proto.Name())
 			}
+		}
+		if peek, err := peekJSONRPC(body); err == nil && peek.Method == "initialize" {
+			run()
+			return
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			run()
 		}()
 	}
 
-	return runStdioLoop(ctx, readCh, bridge, dispatch, &wg)
+	return runStdioLoop(ctx, readCh, bridge, dispatch, &wg, bridge.Close)
 }
 
 // runStdioLoop is the ServeStdio select loop. Extracted so the readCh-closed
@@ -101,14 +109,20 @@ func runStdioLoop(
 	bridge *ClientBridge,
 	dispatch func([]byte),
 	wg *sync.WaitGroup,
+	onClose context.CancelFunc,
 ) error {
+	if onClose == nil {
+		onClose = func() {}
+	}
 	for {
 		select {
 		case <-ctx.Done():
+			onClose()
 			return ctx.Err()
 		case rr, ok := <-readCh:
 			if !ok {
 				// Reader exited without a final result (typically parent cancel).
+				onClose()
 				return ctx.Err()
 			}
 			if rr.err != nil {
@@ -118,9 +132,11 @@ func runStdioLoop(
 							dispatch(trimmed)
 						}
 					}
+					onClose()
 					wg.Wait()
 					return nil
 				}
+				onClose()
 				return fmt.Errorf("stdio read: %w", rr.err)
 			}
 			line := bytes.TrimRight(rr.line, "\n\r")

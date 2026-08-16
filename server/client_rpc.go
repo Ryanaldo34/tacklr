@@ -3,10 +3,13 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
 )
+
+var errConnectionNotInitialized = errors.New("connection closed before initialize")
 
 // ClientCapabilities captures client features from initialize.
 type ClientCapabilities struct {
@@ -55,6 +58,9 @@ type ClientBridge struct {
 	// initialized is closed once initialize has run on this connection.
 	initialized     chan struct{}
 	initializedOnce sync.Once
+	// closed is closed when the connection is torn down (stdio EOF, etc.).
+	closed     chan struct{}
+	closedOnce sync.Once
 }
 
 // NewClientBridge creates a bridge that writes requests through w.
@@ -63,6 +69,7 @@ func NewClientBridge(w MessageWriter) *ClientBridge {
 		w:           w,
 		wait:        make(map[string]*rpcWaiter),
 		initialized: make(chan struct{}),
+		closed:      make(chan struct{}),
 	}
 }
 
@@ -74,7 +81,15 @@ func (b *ClientBridge) MarkInitialized() {
 	b.initializedOnce.Do(func() { close(b.initialized) })
 }
 
-// WaitInitialized blocks until initialize has run or ctx is done.
+// Close unblocks WaitInitialized when the connection ends without initialize.
+func (b *ClientBridge) Close() {
+	if b == nil {
+		return
+	}
+	b.closedOnce.Do(func() { close(b.closed) })
+}
+
+// WaitInitialized blocks until initialize has run, the connection closes, or ctx is done.
 func (b *ClientBridge) WaitInitialized(ctx context.Context) error {
 	if b == nil {
 		return nil
@@ -82,6 +97,8 @@ func (b *ClientBridge) WaitInitialized(ctx context.Context) error {
 	select {
 	case <-b.initialized:
 		return nil
+	case <-b.closed:
+		return errConnectionNotInitialized
 	case <-ctx.Done():
 		return ctx.Err()
 	}

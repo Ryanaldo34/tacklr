@@ -146,9 +146,9 @@ func TestWireAndConstruct_outcomes(t *testing.T) {
 	if connElicitationForm(&Conn{}) {
 		t.Fatal("no rpc means no elicitation")
 	}
-	live := NewClientBridge(&recordingWriter{})
-	live.SetCaps(ClientCapabilities{ElicitationForm: true})
-	if !connElicitationForm(&Conn{RPC: live}) {
+	formBridge := NewClientBridge(&recordingWriter{})
+	formBridge.SetCaps(ClientCapabilities{ElicitationForm: true})
+	if !connElicitationForm(&Conn{RPC: formBridge}) {
 		t.Fatal("live bridge caps")
 	}
 
@@ -365,7 +365,7 @@ func TestWireAndConstruct_outcomes(t *testing.T) {
 		t.Fatalf("deliver closed: %v", err)
 	}
 
-	// Live connection: attach session, deliver with fallback, double session conflict
+	// Live connection: attach session, default drop when session SSE is late
 	live := NewConnectionRegistry().Create(NewClientBridge(&httpBufferWriter{}), &httpBufferWriter{})
 	recW := httptest.NewRecorder()
 	detach, sink, err := live.attachConnSSE(recW, recW)
@@ -375,10 +375,30 @@ func TestWireAndConstruct_outcomes(t *testing.T) {
 	if err := sink.writeOpen(); err != nil {
 		t.Fatal(err)
 	}
-	// deliver session-scoped with no session sink → falls back to conn sink
 	if err := live.deliver("sess-x", []byte(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-x"}}`), false); err != nil {
 		t.Fatal(err)
 	}
+	if strings.Contains(recW.Body.String(), "sess-x") {
+		t.Fatal("default must not fall back to connection SSE")
+	}
+	fbReg := NewConnectionRegistry()
+	fbReg.LateSessionSSEFallback = true
+	fb := fbReg.Create(NewClientBridge(&httpBufferWriter{}), &httpBufferWriter{})
+	fbRec := httptest.NewRecorder()
+	fbDetach, fbSink, err := fb.attachConnSSE(fbRec, fbRec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fbSink.writeOpen(); err != nil {
+		t.Fatal(err)
+	}
+	if err := fb.deliver("sess-x", []byte(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-x"}}`), false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(fbRec.Body.String(), "sess-x") {
+		t.Fatal("opt-in fallback should deliver on connection SSE")
+	}
+	fbDetach()
 	// extractSessionID helpers
 	if extractSessionIDFromJSONRPC([]byte(`not-json`)) != "" {
 		t.Fatal("bad json extract")

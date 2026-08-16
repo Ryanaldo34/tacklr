@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -477,10 +478,12 @@ func TestServeHTTPSSE_resumePath(t *testing.T) {
 }
 
 func TestStopReasonFromError_contextMessage(t *testing.T) {
-	// String-based cancel detection
-	reason, ok := stopReasonFromError(errors.New("run: context cancelled: wrap"))
+	reason, ok := stopReasonFromError(fmt.Errorf("run: %w", context.Canceled))
 	if !ok || reason != stopReasonCancelled {
 		t.Fatalf("%v %v", reason, ok)
+	}
+	if reason, ok := stopReasonFromError(errors.New("run: context cancelled: wrap")); ok {
+		t.Fatalf("string match must not classify cancel: %v", reason)
 	}
 }
 
@@ -930,7 +933,7 @@ func TestRunStdioLoop_channelClosed(t *testing.T) {
 	close(ch)
 	var wg sync.WaitGroup
 	bridge := NewClientBridge(&recordingWriter{})
-	err := runStdioLoop(context.Background(), ch, bridge, func([]byte) {}, &wg)
+	err := runStdioLoop(context.Background(), ch, bridge, func([]byte) {}, &wg, nil)
 	if err != nil {
 		// ctx not cancelled → nil from ctx.Err()
 		t.Fatalf("want nil on closed channel without cancel, got %v", err)
@@ -939,7 +942,7 @@ func TestRunStdioLoop_channelClosed(t *testing.T) {
 	cancel()
 	ch2 := make(chan stdioReadResult)
 	close(ch2)
-	err = runStdioLoop(ctx, ch2, bridge, func([]byte) {}, &wg)
+	err = runStdioLoop(ctx, ch2, bridge, func([]byte) {}, &wg, nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("want canceled, got %v", err)
 	}
@@ -986,7 +989,7 @@ func TestHandleWS_acceptFailAndReadFail(t *testing.T) {
 	mux := http.NewServeMux()
 	env := ProtocolEnv{Registry: r, Conn: &Conn{}}
 	for _, route := range SSE.HTTPRoutes() {
-		if route.Method == http.MethodGet && route.Pattern == "/" {
+		if route.Method == http.MethodGet && route.Pattern == "/{$}" {
 			mux.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
 				route.Handler(env, w, req)
 			})
@@ -1012,7 +1015,7 @@ func TestHandleWS_nonClientRunErrorAndWriteThreadFail(t *testing.T) {
 	mux := http.NewServeMux()
 	env := ProtocolEnv{Registry: r, Conn: &Conn{}}
 	for _, route := range SSE.HTTPRoutes() {
-		if route.Method == http.MethodGet && route.Pattern == "/" {
+		if route.Method == http.MethodGet && route.Pattern == "/{$}" {
 			mux.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
 				route.Handler(env, w, req)
 			})
@@ -1056,7 +1059,7 @@ func TestHandleWS_nonClientRunErrorAndWriteThreadFail(t *testing.T) {
 	mux2 := http.NewServeMux()
 	env2 := ProtocolEnv{Registry: r2, Conn: &Conn{}}
 	for _, route := range SSE.HTTPRoutes() {
-		if route.Method == http.MethodGet && route.Pattern == "/" {
+		if route.Method == http.MethodGet && route.Pattern == "/{$}" {
 			mux2.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
 				route.Handler(env2, w, req)
 			})
@@ -1086,8 +1089,8 @@ func TestServeHTTPSSE_fallbackPath(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := newSSERequest(t, "/nope", bytes.NewReader([]byte(`{"agent_id":"default","prompt":"x"}`)))
 	serveSSEHTTP(srv, rec, req)
-	if !strings.Contains(rec.Body.String(), "fb2") {
-		t.Fatalf("fallback = %s", rec.Body.String())
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown SSE path status = %d body=%s", rec.Code, rec.Body.String())
 	}
 }
 

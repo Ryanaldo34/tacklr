@@ -128,9 +128,12 @@ func DefaultContentRegistry() *ContentRegistry {
 	return defaultContentRegistry
 }
 
-var defaultContentRegistry = mustDefaultContentRegistry()
+var defaultContentRegistry = mustDefaultContentRegistry(textMediaTypes)
 
-func mustDefaultContentRegistry() *ContentRegistry {
+func mustDefaultContentRegistry(types []string) *ContentRegistry {
+	if len(types) == 0 {
+		panic("vfs: text media types required before default registry init")
+	}
 	r := NewContentRegistry()
 	if err := r.Register(TextCodec{}); err != nil {
 		panic(err)

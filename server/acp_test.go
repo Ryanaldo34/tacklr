@@ -1307,8 +1307,9 @@ func TestServeStdio_lifecycleAndPrompt(t *testing.T) {
 		t.Fatalf("session/new missing configOptions: %v", newResult)
 	}
 
-	// Second IO pass: set agent + prompt against the live session state.
+	// Second IO pass is a new connection: initialize, then set agent + prompt.
 	in2 := strings.Join([]string{
+		`{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":1}}`,
 		`{"jsonrpc":"2.0","id":3,"method":"session/set_config_option","params":{"sessionId":"` + sessionID + `","configId":"model","value":"default"}}`,
 		`{"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"hi"}]}}`,
 	}, "\n") + "\n"
@@ -1334,6 +1335,28 @@ func TestServeStdio_lifecycleAndPrompt(t *testing.T) {
 	}
 	if !hasResult {
 		t.Error("expected prompt result frame with id 4")
+	}
+}
+
+func TestServeStdio_promptBeforeInitialize_unblocksOnEOF(t *testing.T) {
+	r := newTestRegistry(testStore(t), &mockInferenceStrategy{}, nil)
+	in := `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}` + "\n" +
+		`{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"x","prompt":[{"type":"text","text":"hi"}]}}` + "\n"
+	var out bytes.Buffer
+	done := make(chan error, 1)
+	go func() {
+		done <- NewServer(r, ACP).ServeStdio(context.Background(), strings.NewReader(in), &out)
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("ServeStdio: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("prompt before initialize must not hang after stdin EOF")
+	}
+	if !strings.Contains(out.String(), "error") {
+		t.Fatalf("expected initialize-required error, got %s", out.String())
 	}
 }
 

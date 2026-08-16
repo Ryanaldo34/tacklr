@@ -276,8 +276,8 @@ func (c *Connection) attachSessionSSE(sessionID string, w http.ResponseWriter, f
 }
 
 // deliver sends one JSON-RPC message to the appropriate SSE stream(s).
-// connLevel or empty sessionID → connection stream; else session stream with
-// fallback to connection stream so messages are not dropped if session SSE is late.
+// connLevel or empty sessionID → connection stream; else the session stream.
+// Late session traffic is dropped unless LateSessionSSEFallback is set.
 func (c *Connection) deliver(sessionID string, data []byte, connLevel bool) error {
 	if c == nil {
 		return fmt.Errorf("nil connection")
