@@ -15,8 +15,8 @@ import (
 // and window survive Capture → Apply on a fresh manager.
 func TestCheckpointer_roundTrip(t *testing.T) {
 	sm := session.NewSessionManager()
-	sm.Plan().SetDocument("plan")
-	sm.Plan().Set([]streaming.Todo{{Title: "A", Status: streaming.TodoStatusPending}})
+	sm.Plan.SetDocument("plan")
+	sm.Plan.Set([]streaming.Todo{{Title: "A", Status: streaming.TodoStatusPending}})
 	rt := session.NewRuntime(func() chan streaming.StreamEvent {
 		c := make(chan streaming.StreamEvent, 8)
 		go func() {
@@ -44,7 +44,7 @@ func TestCheckpointer_roundTrip(t *testing.T) {
 	if len(applied.Window) != 1 {
 		t.Fatalf("window=%d", len(applied.Window))
 	}
-	if sm2.Plan().Document() != "plan" {
+	if sm2.Plan.Document() != "plan" {
 		t.Fatal("plan doc")
 	}
 	rt2 := session.NewRuntime(func() chan streaming.StreamEvent {
@@ -95,6 +95,13 @@ func TestPlanStore_lifecycle(t *testing.T) {
 	if !p.HasActive() || len(p.Get()) != 1 {
 		t.Fatal("set/get")
 	}
+	todos, ok := p.ConsumeTodosUpdated()
+	if !ok || len(todos) != 1 || todos[0].Title != "t1" {
+		t.Fatalf("todos updated = %#v ok=%v", todos, ok)
+	}
+	if _, ok := p.ConsumeTodosUpdated(); ok {
+		t.Fatal("consume clears todos flag")
+	}
 	p.SetDocument("first")
 	if p.ConsumeDocumentUpdated() {
 		t.Fatal("initial document should not mark updated")
@@ -130,15 +137,25 @@ func TestPlanStore_lifecycle(t *testing.T) {
 	if p.Get() != nil {
 		t.Fatal("clear plan")
 	}
+	if cleared, ok := p.ConsumeTodosUpdated(); !ok || cleared != nil {
+		t.Fatalf("clear should notify, got %#v ok=%v", cleared, ok)
+	}
 	empty := map[string]any{}
 	p.ExportInto(empty)
 	if _, ok := empty["_plan"]; ok {
 		t.Fatal("cleared plan should not export todos")
 	}
 
+	state["_on_call_stages"] = []any{}
 	session.StripPlanKeys(state)
+	if _, ok := state["_on_call_stages"]; ok {
+		t.Fatal("on-call stages key should be stripped")
+	}
 	if session.IsReservedRuntimeStateKey("_plan") != true {
 		t.Fatal("reserved key")
+	}
+	if !session.IsReservedRuntimeStateKey("_on_call_stages") {
+		t.Fatal("on-call stages key")
 	}
 	if session.IsReservedRuntimeStateKey("user") {
 		t.Fatal("user key not reserved")
@@ -174,18 +191,18 @@ func TestSessionManager_stateAndPlan_guards(t *testing.T) {
 		t.Fatal("deleted")
 	}
 	rt.StateDelete("_plan") // no-op on reserved
-	if sm.HasActivePlan() {
+	if sm.Plan.HasActive() {
 		t.Fatal("no plan yet")
 	}
-	sm.Plan().Set([]streaming.Todo{{Title: "x", Status: streaming.TodoStatusPending}})
-	if !sm.HasActivePlan() {
+	sm.Plan.Set([]streaming.Todo{{Title: "x", Status: streaming.TodoStatusPending}})
+	if !sm.Plan.HasActive() {
 		t.Fatal("active plan")
 	}
 }
 
-// TestRuntime_interrupts_raiseReturnAdopt is the interrupt lifecycle outcome
-// through the public Runtime facade (raise → pending → return → take resolved).
-func TestRuntime_interrupts_raiseReturnAdopt(t *testing.T) {
+// TestSession_interrupts_raiseReturnAdopt is the interrupt lifecycle:
+// tool RaiseInterrupt, then SessionManager pending → return → take / adopt.
+func TestSession_interrupts_raiseReturnAdopt(t *testing.T) {
 	sm := session.NewSessionManager()
 	ch := make(chan streaming.StreamEvent, 4)
 	rt := session.NewRuntime(ch, sm)
@@ -205,23 +222,23 @@ func TestRuntime_interrupts_raiseReturnAdopt(t *testing.T) {
 	if !errors.As(err, &asIntr) {
 		t.Fatalf("want interrupt error, got %v", err)
 	}
-	if !rt.HasPendingInterrupt() {
+	if !sm.HasPendingInterrupt() {
 		t.Fatal("pending")
 	}
-	if _, ok := rt.PendingInterrupt("tc1"); !ok {
+	if _, ok := sm.PendingInterrupt("tc1"); !ok {
 		t.Fatal("pending by id")
 	}
 
 	// Invalid payload validation.
-	if _, err := rt.ReturnInterrupt("tc1", []byte(`{}`)); err == nil {
+	if _, err := sm.ReturnInterrupt("tc1", []byte(`{}`)); err == nil {
 		t.Fatal("want invalid payload")
 	}
-	if _, err := rt.ReturnInterrupt("missing", []byte(`{"selectionIdx":0}`)); err == nil {
+	if _, err := sm.ReturnInterrupt("missing", []byte(`{"selectionIdx":0}`)); err == nil {
 		t.Fatal("want not found")
 	}
 
 	// Valid return → resolved.
-	got, err := rt.ReturnInterrupt("tc1", []byte(`{"selectionIdx":1}`))
+	got, err := sm.ReturnInterrupt("tc1", []byte(`{"selectionIdx":1}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,11 +246,11 @@ func TestRuntime_interrupts_raiseReturnAdopt(t *testing.T) {
 	if !ok || usi.ConfirmedChoice == nil || usi.ConfirmedChoice.Title != "B" {
 		t.Fatalf("choice = %+v", got)
 	}
-	resolved, ok := rt.TakeResolvedInterrupt("tc1")
+	resolved, ok := sm.TakeResolvedInterrupt("tc1")
 	if !ok || resolved == nil {
 		t.Fatal("take resolved")
 	}
-	if _, ok := rt.TakeResolvedInterrupt("tc1"); ok {
+	if _, ok := sm.TakeResolvedInterrupt("tc1"); ok {
 		t.Fatal("already taken")
 	}
 
@@ -243,7 +260,7 @@ func TestRuntime_interrupts_raiseReturnAdopt(t *testing.T) {
 	if err == nil {
 		t.Fatal("park")
 	}
-	if _, err := rt.ReturnInterrupt("tc2", []byte(`{"selectionIdx":0}`)); err != nil {
+	if _, err := sm.ReturnInterrupt("tc2", []byte(`{"selectionIdx":0}`)); err != nil {
 		t.Fatal(err)
 	}
 	// Second raise with same tool call id returns resolved without re-parking.
@@ -253,24 +270,21 @@ func TestRuntime_interrupts_raiseReturnAdopt(t *testing.T) {
 	}
 
 	// Adopt: first parks, second after resolve returns resolved.
-	rt = rt.WithToolCallID("tc3")
 	parked := &interrupt.UserSelectionInterrupt{Options: []interrupt.UserChoice{{Title: "Z"}}}
-	_, err = rt.AdoptInterrupt(parked)
+	_, err = sm.AdoptInterrupt("tc3", parked)
 	if err == nil {
 		t.Fatal("adopt parks as error")
 	}
-	if _, err := rt.AdoptInterrupt(nil); err == nil {
+	if _, err := sm.AdoptInterrupt("tc3", nil); err == nil {
 		t.Fatal("nil adopt")
 	}
-	rt = rt.WithToolCallID("")
-	if _, err := rt.AdoptInterrupt(parked); err == nil {
+	if _, err := sm.AdoptInterrupt("", parked); err == nil {
 		t.Fatal("empty tool call id")
 	}
-	rt = rt.WithToolCallID("tc3")
-	if _, err := rt.ReturnInterrupt("tc3", []byte(`{"selectionIdx":0}`)); err != nil {
+	if _, err := sm.ReturnInterrupt("tc3", []byte(`{"selectionIdx":0}`)); err != nil {
 		t.Fatal(err)
 	}
-	got, err = rt.AdoptInterrupt(&interrupt.UserSelectionInterrupt{Options: []interrupt.UserChoice{{Title: "again"}}})
+	got, err = sm.AdoptInterrupt("tc3", &interrupt.UserSelectionInterrupt{Options: []interrupt.UserChoice{{Title: "again"}}})
 	if err != nil || got == nil {
 		t.Fatalf("adopt resolved path err=%v got=%v", err, got)
 	}
@@ -281,7 +295,7 @@ func TestRuntime_interrupts_raiseReturnAdopt(t *testing.T) {
 	if err == nil {
 		t.Fatal("park permission")
 	}
-	if _, err := rt.ReturnInterrupt("perm", []byte(`{"optionId":"allow-once"}`)); err != nil {
+	if _, err := sm.ReturnInterrupt("perm", []byte(`{"optionId":"allow-once"}`)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -300,7 +314,7 @@ func TestRuntime_interrupts_raiseReturnAdopt(t *testing.T) {
 	}
 }
 
-// TestRuntime_emitAndState_channels covers EmitUpdate/PlanUpdate non-blocking paths.
+// TestRuntime_emitAndState_channels covers EmitUpdate and session State.
 func TestRuntime_emitAndState_channels(t *testing.T) {
 	ch := make(chan streaming.StreamEvent, 2)
 	sm := session.NewSessionManager()
@@ -311,17 +325,11 @@ func TestRuntime_emitAndState_channels(t *testing.T) {
 	if ev.Type != streaming.StreamEventToolUpdate || ev.Content != "hello" || ev.MessageID != "id1" {
 		t.Fatalf("update = %+v", ev)
 	}
-	rt.EmitPlanUpdate([]session.Todo{{Title: "a", Status: streaming.TodoStatusPending}})
-	ev = <-ch
-	if ev.Type != streaming.StreamEventPlanUpdate || len(ev.Data) == 0 {
-		t.Fatalf("plan = %+v", ev)
-	}
 
 	// Full channel drops non-blocking.
 	full := make(chan streaming.StreamEvent)
 	rtFull := session.NewRuntime(full, sm)
 	rtFull.EmitUpdate("drop")
-	rtFull.EmitPlanUpdate(nil)
 
 	// SessionManager state without a turn bus.
 	if err := sm.StateSet("z", true); err != nil {
@@ -349,8 +357,8 @@ func TestSessionManager_snapshotLoadInterrupts_roundTrip(t *testing.T) {
 	_, _ = rt.RaiseInterrupt("user_selection_choice", []byte(`[{"title":"A"}]`))
 	rt.StateSet("u", "v")
 	// reserved key should not appear as user state in snapshot
-	sm.Plan().SetDocument("doc")
-	sm.Plan().Set([]streaming.Todo{{Title: "T", Status: streaming.TodoStatusPending}})
+	sm.Plan.SetDocument("doc")
+	sm.Plan.Set([]streaming.Todo{{Title: "T", Status: streaming.TodoStatusPending}})
 
 	state, pending, resolved := sm.SnapshotDurable()
 	if state["u"] != "v" || state["_plan_document"] != "doc" {
@@ -373,7 +381,7 @@ func TestSessionManager_snapshotLoadInterrupts_roundTrip(t *testing.T) {
 	if err := sm2.LoadInterruptsJSON(pendJSON, resJSON); err != nil {
 		t.Fatal(err)
 	}
-	if sm2.Plan().Document() != "doc" {
+	if sm2.Plan.Document() != "doc" {
 		t.Fatal("plan doc reload")
 	}
 	rt2 := session.NewRuntime(func() chan streaming.StreamEvent {

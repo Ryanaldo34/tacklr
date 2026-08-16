@@ -37,6 +37,9 @@ func TestUserSelection_fullLifecycle(t *testing.T) {
 	if err := usi.ValidatePayload([]byte(`{"selectionIdx":99}`)); err == nil {
 		t.Fatal("out of range validate")
 	}
+	if err := usi.ValidatePayload([]byte(`{"selectionIdx":"x"}`)); err == nil {
+		t.Fatal("selectionIdx wrong type")
+	}
 	if err := usi.ValidatePayload([]byte(`{"selectionIdx":0}`)); err != nil {
 		t.Fatal(err)
 	}
@@ -67,6 +70,9 @@ func TestUserSelection_fullLifecycle(t *testing.T) {
 // TestToolPermission_allKinds covers init, validate, allow/reject, and unknown option.
 func TestToolPermission_allKinds(t *testing.T) {
 	p := &interrupt.ToolPermissionInterrupt{}
+	if p.SelectedKind != "" {
+		t.Fatal("zero value has no selected kind")
+	}
 	if p.TypeName() != "tool_permission" {
 		t.Fatal(p.TypeName())
 	}
@@ -112,6 +118,9 @@ func TestToolPermission_allKinds(t *testing.T) {
 	}
 	if err := p.ValidatePayload([]byte(`{"optionId":"nope"}`)); err == nil {
 		t.Fatal("unknown option validate")
+	}
+	if err := p.ValidatePayload([]byte(`{"optionId":1}`)); err == nil {
+		t.Fatal("optionId wrong type")
 	}
 	if err := p.ValidatePayload([]byte(`{"optionId":"allow-once"}`)); err != nil {
 		t.Fatal(err)

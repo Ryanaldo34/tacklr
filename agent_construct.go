@@ -49,11 +49,14 @@ type AgentOptions struct {
 	// ContextPolicy sets pressure/compress ratios when non-zero fields are set.
 	ContextPolicy ContextPolicy
 	// ToolInterceptors wrap each tool call (outermost first). Built-in
-	// planning lock and permission gate are always installed after these.
+	// planning lock and OnCall middleware are installed after these.
 	ToolInterceptors []ToolInterceptor
 	// DisablePlanningLock omits planningWriteLock (workers and tests).
 	// The permission gate is still always installed.
 	DisablePlanningLock bool
+	// WriteUnattended injects write without ToolPermissionOnCall.
+	// Write-mechanic tests use this so persist/index paths do not park.
+	WriteUnattended bool
 	// ToolResultHooks map tool name → post-success window effects for host tools.
 	// Plan builtins use BuiltinResult instead.
 	ToolResultHooks map[string]ToolResultHook
@@ -78,8 +81,8 @@ type AgentOptions struct {
 	// for this turn (tool dispatch only). Hosts create, mount, FuseMount, and
 	// Close it. Nil means no VFS tools.
 	MountSession *vfs.MountSession
-	// RunCommandUnattended injects run_command with PermissionRequired=false.
-	// Zero value (Registry, testserver) keeps PermissionRequired=true.
+	// RunCommandUnattended injects run_command without ToolPermissionOnCall.
+	// Zero value (Registry, testserver) parks run_command for permission.
 	RunCommandUnattended bool
 	// shareIndexBridge is the parent index bridge. Nil means Start a new bridge.
 	shareIndexBridge *vfsindex.Bridge
@@ -134,13 +137,14 @@ func newHarnessBase(opts AgentOptions, sm *session.SessionManager) (*AgentHarnes
 		context:              NewModelContextManager(),
 		contextPolicy:        opts.ContextPolicy,
 		runCommandUnattended: opts.RunCommandUnattended,
+		writeUnattended:      opts.WriteUnattended,
 		vfsBridge:            opts.shareIndexBridge,
 	}
 	if opts.MountSession != nil {
-		sm.SetVFS(opts.MountSession)
+		sm.VFS = opts.MountSession
 	}
 	if opts.SearchNamespace != nil {
-		sm.Search().SetNamespace(*opts.SearchNamespace)
+		sm.Search.SetNamespace(*opts.SearchNamespace)
 	}
 	def := DefaultContextPolicy()
 	if h.contextPolicy.PressureRatio <= 0 {
@@ -154,7 +158,7 @@ func newHarnessBase(opts AgentOptions, sm *session.SessionManager) (*AgentHarnes
 	if !opts.DisablePlanningLock {
 		chain = append(chain, h.planningWriteLock)
 	}
-	chain = append(chain, toolPermissionGate)
+	chain = append(chain, onCallMiddleware(sm))
 	h.toolRunner = newToolRunner(chain...)
 	h.toolResultHooks = newToolResultHookRegistry(opts.ToolResultHooks)
 	return h, nil
@@ -195,7 +199,7 @@ func (a *AgentHarness) injectBuiltinTools() {
 	}
 	br := a.vfsBridge
 	if ms := a.VFS(); ms != nil {
-		a.tools = append(a.tools, newVFSTools(ms)...)
+		a.tools = append(a.tools, newVFSTools(ms, !a.writeUnattended)...)
 		a.tools = append(a.tools, newRunCommand(ms, !a.runCommandUnattended))
 	}
 	if a.brain != nil {
@@ -203,7 +207,7 @@ func (a *AgentHarness) injectBuiltinTools() {
 		if br != nil {
 			idx = br.Indexer
 		}
-		a.tools = append(a.tools, newBrainTools(a.brain, a.session.Search(), a.brainWriteKinds, brainToolDeps{
+		a.tools = append(a.tools, newBrainTools(a.brain, a.session.Search, a.brainWriteKinds, brainToolDeps{
 			VFS:     a.VFS(),
 			Indexer: idx,
 		})...)
@@ -224,7 +228,7 @@ func (a *AgentHarness) initVFSIndexBridge() error {
 	if a.brain == nil || a.VFS() == nil {
 		return nil
 	}
-	ns, ok := a.session.Search().Namespace()
+	ns, ok := a.session.Search.Namespace()
 	if !ok {
 		return nil
 	}
@@ -247,23 +251,23 @@ func (a *AgentHarness) initVFSIndexBridge() error {
 
 // SetSearchNamespace sets retrieval isolation for knowledge tools.
 func (a *AgentHarness) SetSearchNamespace(id uuid.UUID) {
-	a.session.Search().SetNamespace(id)
+	a.session.Search.SetNamespace(id)
 }
 
 // ClearSearchNamespace clears retrieval isolation for knowledge tools.
 func (a *AgentHarness) ClearSearchNamespace() {
-	a.session.Search().ClearNamespace()
+	a.session.Search.ClearNamespace()
 }
 
 // SearchNamespace returns the host-set search namespace, if any.
 func (a *AgentHarness) SearchNamespace() (uuid.UUID, bool) {
-	return a.session.Search().Namespace()
+	return a.session.Search.Namespace()
 }
 
 // planningWriteLock blocks write tools until create_plan has set a plan.
 func (a *AgentHarness) planningWriteLock(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error) {
 	if inv.Tool != nil && inv.Tool.Access != nil && inv.Tool.Access.Contains(WritePermission) &&
-		!a.session.HasActivePlan() {
+		!a.session.Plan.HasActive() {
 		return "", fmt.Errorf("%w: write tools are locked until create_plan establishes a todo list", ErrToolPermissionDenied)
 	}
 	return next(ctx, inv)

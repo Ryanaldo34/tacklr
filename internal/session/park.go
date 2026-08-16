@@ -1,11 +1,16 @@
 package session
 
 import (
-	"encoding/json"
 	"sync"
+
+	"github.com/ryanaldo34/tacklr/internal/codec"
 )
 
 const parkedWorkersStateKey = "_parked_workers"
+
+func init() {
+	reserveStateKeys(parkedWorkersStateKey)
+}
 
 // ParkedWorkerMeta is durable park metadata for a spawn_worker tool call.
 // Live harness pointers are not stored here.
@@ -21,8 +26,8 @@ type parkBag struct {
 	byID map[string]ParkedWorkerMeta
 }
 
-func newParkBag() *parkBag {
-	return &parkBag{byID: map[string]ParkedWorkerMeta{}}
+func newParkBag() parkBag {
+	return parkBag{byID: map[string]ParkedWorkerMeta{}}
 }
 
 func (p *parkBag) get(id string) (ParkedWorkerMeta, bool) {
@@ -78,21 +83,11 @@ func (p *parkBag) loadFromState(state map[string]any) {
 		p.replace(nil)
 		return
 	}
-	if m, ok := raw.(map[string]ParkedWorkerMeta); ok {
+	if m, ok := codec.As[map[string]ParkedWorkerMeta](raw); ok && m != nil {
 		p.replace(m)
 		return
 	}
-	b, err := json.Marshal(raw)
-	if err != nil {
-		p.replace(nil)
-		return
-	}
-	var m map[string]ParkedWorkerMeta
-	if json.Unmarshal(b, &m) != nil || m == nil {
-		p.replace(nil)
-		return
-	}
-	p.replace(m)
+	p.replace(nil)
 }
 
 // ParkedWorker returns durable park metadata for a spawn_worker tool call.

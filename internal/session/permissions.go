@@ -1,8 +1,10 @@
 package session
 
 import (
-	"encoding/json"
+	"maps"
 	"sync"
+
+	"github.com/ryanaldo34/tacklr/internal/codec"
 )
 
 const (
@@ -10,74 +12,75 @@ const (
 	permissionDenyKey  = "_permission_always_deny"
 )
 
-type permissionBag struct {
+func init() {
+	reserveStateKeys(permissionAllowKey, permissionDenyKey)
+}
+
+// PermissionDecision is session memory for a tool's allow-always / deny-always.
+type PermissionDecision int
+
+const (
+	PermissionNone PermissionDecision = iota
+	PermissionAllowAlways
+	PermissionDenyAlways
+)
+
+// Permissions is the session module for durable tool-permission memory.
+// It is not exposed on HarnessRuntime.
+type Permissions struct {
 	mu    sync.RWMutex
 	allow map[string]bool
 	deny  map[string]bool
 }
 
-func newPermissionBag() *permissionBag {
-	return &permissionBag{
+// NewPermissions returns an empty permission store.
+func NewPermissions() Permissions {
+	return Permissions{
 		allow: map[string]bool{},
 		deny:  map[string]bool{},
 	}
 }
 
-func (p *permissionBag) has(set map[string]bool, name string) bool {
+// Decision returns remembered allow-always or deny-always for toolName.
+// Deny wins if both are set.
+func (p *Permissions) Decision(toolName string) PermissionDecision {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return set[name]
+	if p.deny[toolName] {
+		return PermissionDenyAlways
+	}
+	if p.allow[toolName] {
+		return PermissionAllowAlways
+	}
+	return PermissionNone
 }
 
-func (p *permissionBag) remember(set map[string]bool, name string) {
+// Remember stores an always-allow or always-deny decision.
+func (p *Permissions) Remember(toolName string, d PermissionDecision) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	set[name] = true
-}
-
-func (p *permissionBag) alwaysAllowed(name string) bool {
-	return p.has(p.allow, name)
-}
-
-func (p *permissionBag) alwaysDenied(name string) bool {
-	return p.has(p.deny, name)
-}
-
-func (p *permissionBag) rememberAllow(name string) {
-	p.remember(p.allow, name)
-}
-
-func (p *permissionBag) rememberDeny(name string) {
-	p.remember(p.deny, name)
-}
-
-func cloneBoolSet(m map[string]bool) map[string]bool {
-	out := make(map[string]bool, len(m))
-	for k, v := range m {
-		out[k] = v
+	switch d {
+	case PermissionAllowAlways:
+		p.allow[toolName] = true
+		delete(p.deny, toolName)
+	case PermissionDenyAlways:
+		p.deny[toolName] = true
+		delete(p.allow, toolName)
 	}
-	return out
 }
 
 func decodeBoolSet(raw any) map[string]bool {
-	if m, ok := raw.(map[string]bool); ok && m != nil {
-		return cloneBoolSet(m)
-	}
-	b, err := json.Marshal(raw)
-	if err != nil {
+	m, ok := codec.As[map[string]bool](raw)
+	if !ok || m == nil {
 		return map[string]bool{}
 	}
-	var m map[string]bool
-	if json.Unmarshal(b, &m) != nil || m == nil {
-		return map[string]bool{}
-	}
-	return m
+	return maps.Clone(m)
 }
 
-func (p *permissionBag) exportInto(state map[string]any) {
+func (p *Permissions) exportInto(state map[string]any) {
 	p.mu.RLock()
-	allow := cloneBoolSet(p.allow)
-	deny := cloneBoolSet(p.deny)
+	allow := maps.Clone(p.allow)
+	deny := maps.Clone(p.deny)
 	p.mu.RUnlock()
 	if len(allow) == 0 {
 		delete(state, permissionAllowKey)
@@ -91,7 +94,7 @@ func (p *permissionBag) exportInto(state map[string]any) {
 	}
 }
 
-func (p *permissionBag) loadFromState(state map[string]any) {
+func (p *Permissions) loadFromState(state map[string]any) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.allow = map[string]bool{}
@@ -105,24 +108,4 @@ func (p *permissionBag) loadFromState(state map[string]any) {
 	if raw, ok := state[permissionDenyKey]; ok && raw != nil {
 		p.deny = decodeBoolSet(raw)
 	}
-}
-
-// PermissionAlwaysAllowed reports whether toolName was granted allow-always.
-func (s *SessionManager) PermissionAlwaysAllowed(toolName string) bool {
-	return s.perms.alwaysAllowed(toolName)
-}
-
-// PermissionAlwaysDenied reports whether toolName was granted reject-always.
-func (s *SessionManager) PermissionAlwaysDenied(toolName string) bool {
-	return s.perms.alwaysDenied(toolName)
-}
-
-// RememberPermissionAllow records allow-always for toolName.
-func (s *SessionManager) RememberPermissionAllow(toolName string) {
-	s.perms.rememberAllow(toolName)
-}
-
-// RememberPermissionDeny records reject-always for toolName.
-func (s *SessionManager) RememberPermissionDeny(toolName string) {
-	s.perms.rememberDeny(toolName)
 }

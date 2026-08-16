@@ -808,6 +808,7 @@ func TestSpawnWorker_resumeKeepsParentVFS(t *testing.T) {
 		MountSession:    ms,
 		Brain:           eng,
 		SearchNamespace: &ns,
+		WriteUnattended: true,
 		SubAgents: []*SubAgent{
 			{WorkerName: "researcher", Model: workerModel, Tools: []*Tool{interruptTool}},
 		},

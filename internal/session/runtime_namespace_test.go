@@ -16,7 +16,7 @@ func TestSession_legacySearchNamespaceKey_strippedOnLoad(t *testing.T) {
 		"_search_namespace": id.String(),
 		"user_key":          "v",
 	})
-	got, ok := sm.Search().Namespace()
+	got, ok := sm.Search.Namespace()
 	if !ok || got != id {
 		t.Fatalf("legacy key must restore Search namespace, got %v ok=%v", got, ok)
 	}

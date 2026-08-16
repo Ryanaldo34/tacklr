@@ -3,21 +3,28 @@ package tacklr
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/ryanaldo34/tacklr/internal/session"
 	"github.com/ryanaldo34/tacklr/stores"
+	"github.com/ryanaldo34/tacklr/streaming"
+	"github.com/ryanaldo34/tacklr/vfs"
 )
 
-// TestToolRunner_interceptorChainOrder is the extension contract for custom
-// interceptors: outermost first, short-circuit skips later stages and the tool.
-// Nil interceptors in the chain are skipped.
+// TestHarness_planningWriteLock_thenUnlockAfterCreatePlan: a WritePermission
+// tool is denied until create_plan; the next call parks tool_permission and
+// allow-once after reload runs the handler.
 func TestHarness_planningWriteLock_thenUnlockAfterCreatePlan(t *testing.T) {
+	var calls int
 	writeTool := NewTool(ToolConfig{
 		Name:   "mutate",
 		Access: ToolWriteAccess,
+		OnCall: OnCalls(ToolPermissionOnCall),
 		Handler: func(ctx context.Context) (string, error) {
+			calls++
 			return "mutated", nil
 		},
 	})
@@ -47,34 +54,65 @@ func TestHarness_planningWriteLock_thenUnlockAfterCreatePlan(t *testing.T) {
 			}
 		},
 	}
-	ah := mustNewAgent(t, AgentOptions{
-		Config: Config{MaxWindowSize: 8192},
-		Model:  strategy,
-		Tools:  []*Tool{writeTool},
-	})
+	store := stores.NewInMemoryStore()
+	opts := AgentOptions{
+		SessionID: "plan-then-write",
+		Config:    Config{MaxWindowSize: 8192},
+		Model:     strategy,
+		Store:     store,
+		Tools:     []*Tool{writeTool},
+	}
+	ah := mustNewAgent(t, opts)
 
 	ch, err := ah.Run(context.Background(), "plan then write")
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Pre-plan denial is only on the stream; create_plan prunes the window.
-	var locked, unlocked bool
+	// Pre-plan denial is a tool result; after create_plan the write parks.
+	var locked bool
+	var interruptID, kind string
 	for ev := range ch {
-		if ev.Type != StreamEventToolResult {
-			continue
-		}
-		if strings.Contains(ev.Content, "locked") || strings.Contains(ev.Content, "permission denied") {
+		if ev.Type == StreamEventToolResult &&
+			(strings.Contains(ev.Content, "locked") || strings.Contains(ev.Content, "permission denied")) {
 			locked = true
 		}
-		if ev.Content == "mutated" {
-			unlocked = true
+		if ev.Type == StreamEventInterrupt {
+			var payload struct {
+				InterruptId string `json:"interruptId"`
+				Type        string `json:"type"`
+			}
+			if err := json.Unmarshal(ev.Data, &payload); err != nil {
+				t.Fatal(err)
+			}
+			interruptID, kind = payload.InterruptId, payload.Type
 		}
 	}
 	if !locked {
 		t.Fatal("expected write denial while planning (no plan yet)")
 	}
-	if !unlocked {
-		t.Fatal("expected mutate success after create_plan")
+	if calls != 0 || kind != "tool_permission" || interruptID == "" {
+		t.Fatalf("park: calls=%d kind=%q id=%q", calls, kind, interruptID)
+	}
+
+	ah.Close()
+	reloaded, err := NewAgentFromSession(context.Background(), "plan-then-write", opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch2, err := reloaded.ReturnFromInterrupt(context.Background(), map[string][]byte{
+		interruptID: []byte(`{"optionId":"allow-once"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var unlocked bool
+	for ev := range ch2 {
+		if ev.Type == StreamEventToolResult && ev.Content == "mutated" {
+			unlocked = true
+		}
+	}
+	if !unlocked || calls != 1 {
+		t.Fatalf("allow after reload: unlocked=%v calls=%d", unlocked, calls)
 	}
 }
 
@@ -84,8 +122,8 @@ func TestHarness_planningWriteLock_thenUnlockAfterCreatePlan(t *testing.T) {
 func TestHarness_toolPermission_allowAlwaysRemembers(t *testing.T) {
 	var handlerCalls int
 	tool := NewTool(ToolConfig{
-		Name:               "sensitive",
-		PermissionRequired: true,
+		Name:   "sensitive",
+		OnCall: OnCalls(ToolPermissionOnCall),
 		Handler: func(ctx context.Context) (string, error) {
 			handlerCalls++
 			return "secret-ok", nil
@@ -164,14 +202,7 @@ func TestHarness_toolPermission_allowAlwaysRemembers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var sawInterrupt bool
-	for ev := range ch3 {
-		if ev.Type == StreamEventInterrupt {
-			sawInterrupt = true
-		}
-	}
-	if sawInterrupt {
-		t.Fatal("allow-always should not re-raise permission interrupt")
+	for range ch3 {
 	}
 	if handlerCalls != 2 {
 		t.Fatalf("handlerCalls after second run = %d, want 2", handlerCalls)
@@ -182,9 +213,9 @@ func TestHarness_toolPermission_allowAlwaysRemembers(t *testing.T) {
 // and subsequent calls fail without another yield.
 func TestHarness_toolPermission_rejectAlwaysRemembers(t *testing.T) {
 	tool := NewTool(ToolConfig{
-		Name:               "sensitive",
-		PermissionRequired: true,
-		Handler:            func(ctx context.Context) (string, error) { return "nope", nil },
+		Name:    "sensitive",
+		OnCall:  OnCalls(ToolPermissionOnCall),
+		Handler: func(ctx context.Context) (string, error) { return "nope", nil },
 	})
 	var invokeCount int
 	strategy := &mockStrategy{
@@ -249,14 +280,7 @@ func TestHarness_toolPermission_rejectAlwaysRemembers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var sawInterrupt bool
-	for ev := range ch3 {
-		if ev.Type == StreamEventInterrupt {
-			sawInterrupt = true
-		}
-	}
-	if sawInterrupt {
-		t.Fatal("reject-always should not re-raise permission interrupt")
+	for range ch3 {
 	}
 	denied = 0
 	for _, m := range ah.Messages() {
@@ -337,8 +361,9 @@ func TestHarness_toolTimeout_surfacesAsToolResult(t *testing.T) {
 func TestHarness_hostInterceptor_keepsPermissionGate(t *testing.T) {
 	var hostSaw string
 	tool := NewTool(ToolConfig{
-		Name:               "crm_write",
-		PermissionRequired: true,
+		Name:   "gated",
+		Access: ToolWriteAccess,
+		OnCall: OnCalls(ToolPermissionOnCall),
 		Handler: func(ctx context.Context) (string, error) {
 			return "should-not-run", nil
 		},
@@ -349,7 +374,7 @@ func TestHarness_hostInterceptor_keepsPermissionGate(t *testing.T) {
 			invokeCount++
 			if invokeCount == 1 {
 				events <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-					{ID: "c1", CallID: "c1", Name: "crm_write", Arguments: `{}`},
+					{ID: "c1", CallID: "c1", Name: "gated", Arguments: `{}`},
 				}, IsComplete: true}
 				events <- LLMResponseChunk{IsComplete: true}
 				return
@@ -358,9 +383,10 @@ func TestHarness_hostInterceptor_keepsPermissionGate(t *testing.T) {
 		},
 	}
 	ah := mustNewAgent(t, AgentOptions{
-		Config: Config{MaxWindowSize: 8192},
-		Model:  strategy,
-		Tools:  []*Tool{tool},
+		Config:              Config{MaxWindowSize: 8192},
+		Model:               strategy,
+		Tools:               []*Tool{tool},
+		DisablePlanningLock: true,
 		ToolInterceptors: []ToolInterceptor{
 			func(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error) {
 				hostSaw = inv.Tool.Name
@@ -368,24 +394,255 @@ func TestHarness_hostInterceptor_keepsPermissionGate(t *testing.T) {
 			},
 		},
 	})
-	ch, err := ah.Run(context.Background(), "write crm")
+	ch, err := ah.Run(context.Background(), "write")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var interruptType string
-	for ev := range ch {
-		if ev.Type == StreamEventInterrupt {
-			var payload struct {
-				Type string `json:"type"`
-			}
-			_ = json.Unmarshal(ev.Data, &payload)
-			interruptType = payload.Type
-		}
-	}
-	if hostSaw != "crm_write" {
+	_, kind := drainYield(t, ch)
+	if hostSaw != "gated" {
 		t.Fatalf("host interceptor saw %q", hostSaw)
 	}
-	if interruptType != "tool_permission" {
-		t.Fatalf("permission gate type = %q", interruptType)
+	if kind != "tool_permission" {
+		t.Fatalf("permission gate type = %q", kind)
+	}
+}
+
+// TestHarness_toolPermission_rejectOnceDeniesWrite: reject-once fails the
+// tool; the handler does not run.
+func TestHarness_toolPermission_rejectOnceDeniesWrite(t *testing.T) {
+	var calls int
+	tool := NewTool(ToolConfig{
+		Name:   "mutate",
+		Access: ToolWriteAccess,
+		OnCall: OnCalls(ToolPermissionOnCall),
+		Handler: func(ctx context.Context) (string, error) {
+			calls++
+			return "mutated", nil
+		},
+	})
+	var n int
+	strategy := &mockStrategy{
+		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, events chan<- LLMResponseChunk) {
+			n++
+			if n == 1 {
+				events <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
+					{ID: "w1", CallID: "w1", Name: "mutate", Arguments: `{"path":"/a"}`},
+				}, IsComplete: true}
+				events <- LLMResponseChunk{IsComplete: true}
+				return
+			}
+			events <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
+		},
+	}
+	ah := mustNewAgent(t, AgentOptions{
+		Config:              Config{MaxWindowSize: 8192},
+		Model:               strategy,
+		Tools:               []*Tool{tool},
+		DisablePlanningLock: true,
+	})
+	ch, err := ah.Run(context.Background(), "write")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := drainYield(t, ch)
+	ch2, err := ah.ReturnFromInterrupt(context.Background(), map[string][]byte{
+		id: []byte(`{"optionId":"reject-once"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var denied bool
+	for ev := range ch2 {
+		if ev.Type == StreamEventToolResult && strings.Contains(ev.Content, "rejected") {
+			denied = true
+		}
+	}
+	if calls != 0 || !denied {
+		t.Fatalf("reject: calls=%d denied=%v", calls, denied)
+	}
+}
+
+func drainYield(t *testing.T, ch <-chan StreamEvent) (id, kind string) {
+	t.Helper()
+	for ev := range ch {
+		if ev.Type != StreamEventInterrupt {
+			continue
+		}
+		var payload struct {
+			InterruptId string `json:"interruptId"`
+			Type        string `json:"type"`
+		}
+		if err := json.Unmarshal(ev.Data, &payload); err != nil {
+			t.Fatal(err)
+		}
+		return payload.InterruptId, payload.Type
+	}
+	t.Fatal("expected interrupt yield")
+	return "", ""
+}
+
+func onCallRuntime() (session.Runtime, *session.SessionManager) {
+	sm := session.NewSessionManager()
+	ch := make(chan streaming.StreamEvent, 8)
+	go func() {
+		for range ch {
+		}
+	}()
+	return session.NewRuntime(ch, sm).WithToolCallID("c1"), sm
+}
+
+func requireParked(t *testing.T, err error, kind string) {
+	t.Helper()
+	var parked Interrupt
+	if !errors.As(err, &parked) || parked.TypeName() != kind {
+		t.Fatalf("park type=%v err=%v", parked, err)
+	}
+}
+
+// TestOnCallMiddleware_permissionThenInvoke: park, allow-once, then the
+// handler runs with the original args.
+func TestOnCallMiddleware_permissionThenInvoke(t *testing.T) {
+	var calls int
+	var seen string
+	tool := NewTool(ToolConfig{
+		Name:   "mutate",
+		OnCall: OnCalls(func(ToolInvocation) Interrupt { return nil }, ToolPermissionOnCall),
+		Handler: func(ctx context.Context, args struct {
+			Path string `json:"path"`
+		}) (string, error) {
+			calls++
+			seen = args.Path
+			return "ok", nil
+		},
+	})
+	rt, sm := onCallRuntime()
+	runner := newToolRunner(onCallMiddleware(sm))
+	inv := ToolInvocation{Tool: tool, ArgsJSON: `{"path":"/a"}`, Runtime: rt}
+
+	_, _, err := runner.Run(t.Context(), inv)
+	requireParked(t, err, "tool_permission")
+	if _, err := sm.ReturnInterrupt("c1", []byte(`{"optionId":"allow-once"}`)); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := runner.Run(t.Context(), inv)
+	if err != nil || calls != 1 || seen != "/a" || out != "ok" {
+		t.Fatalf("invoke: calls=%d seen=%q out=%q err=%v", calls, seen, out, err)
+	}
+	out, _, err = runner.Run(t.Context(), inv)
+	if err != nil || calls != 2 || seen != "/a" || out != "ok" {
+		t.Fatalf("re-entry: calls=%d seen=%q out=%q err=%v", calls, seen, out, err)
+	}
+}
+
+// TestOnCallMiddleware_permissionMemory: allow-always skips the next park;
+// reject-always denies without a yield.
+func TestOnCallMiddleware_permissionMemory(t *testing.T) {
+	var calls int
+	tool := NewTool(ToolConfig{
+		Name:   "sensitive",
+		OnCall: OnCalls(ToolPermissionOnCall),
+		Handler: func(ctx context.Context) (string, error) {
+			calls++
+			return "secret", nil
+		},
+	})
+	rt, sm := onCallRuntime()
+	sm.Permissions.Remember("sensitive", session.PermissionAllowAlways)
+	runner := newToolRunner(onCallMiddleware(sm))
+	inv := ToolInvocation{Tool: tool, ArgsJSON: `{}`, Runtime: rt}
+	out, _, err := runner.Run(t.Context(), inv)
+	if err != nil || calls != 1 || out != "secret" {
+		t.Fatalf("allow-always: calls=%d out=%q err=%v", calls, out, err)
+	}
+
+	denyRT, denySM := onCallRuntime()
+	denySM.Permissions.Remember("sensitive", session.PermissionDenyAlways)
+	runner = newToolRunner(onCallMiddleware(denySM))
+	denyInv := ToolInvocation{Tool: tool, ArgsJSON: `{}`, Runtime: denyRT}
+	_, _, err = runner.Run(t.Context(), denyInv)
+	if !errors.Is(err, ErrToolPermissionDenied) || calls != 1 {
+		t.Fatalf("reject-always: calls=%d err=%v", calls, err)
+	}
+	_, _, err = runner.Run(t.Context(), denyInv)
+	if !errors.Is(err, ErrToolPermissionDenied) || calls != 1 {
+		t.Fatalf("denied re-entry: calls=%d err=%v", calls, err)
+	}
+}
+
+// TestOnCallMiddleware_requiresRuntime: OnCall constructors need a runtime.
+func TestOnCallMiddleware_requiresRuntime(t *testing.T) {
+	tool := NewTool(ToolConfig{
+		Name:    "gated",
+		OnCall:  OnCalls(ToolPermissionOnCall),
+		Handler: func(ctx context.Context) (string, error) { return "x", nil },
+	})
+	_, _, err := newToolRunner(onCallMiddleware(nil)).Run(t.Context(), ToolInvocation{
+		Tool: tool, ArgsJSON: `{}`,
+	})
+	if !errors.Is(err, ErrFailed) {
+		t.Fatalf("err=%v", err)
+	}
+	rt, sm := onCallRuntime()
+	rt = rt.WithToolCallID("")
+	_, _, err = newToolRunner(onCallMiddleware(sm)).Run(t.Context(), ToolInvocation{
+		Tool: tool, ArgsJSON: `{}`, Runtime: rt,
+	})
+	if err == nil {
+		t.Fatal("empty tool call id must fail adopt")
+	}
+}
+
+// TestHarness_writeTool_parksPermission: injected write parks tool_permission.
+func TestHarness_writeTool_parksPermission(t *testing.T) {
+	ctx := context.Background()
+	reg := vfs.NewBackendRegistry()
+	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+	ms := vfs.MustNewMountSession("write-perm", reg)
+	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	ah := mustNewAgent(t, AgentOptions{
+		Config:              Config{MaxWindowSize: 8192},
+		DisablePlanningLock: true,
+		MountSession:        ms,
+		Model: &mockStrategy{
+			invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, events chan<- LLMResponseChunk) {
+				n++
+				if n == 1 {
+					events <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
+						{ID: "w1", CallID: "w1", Name: "write", Arguments: `{"path":"/work/a.txt","content":"hi"}`},
+					}, IsComplete: true}
+					events <- LLMResponseChunk{IsComplete: true}
+					return
+				}
+				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
+			},
+		},
+	})
+	ch, err := ah.Run(ctx, "write a file")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, kind := drainYield(t, ch)
+	if kind != "tool_permission" {
+		t.Fatalf("kind=%q", kind)
+	}
+}
+
+// TestOnCallMiddleware_emptyStackInvokes: no OnCall layers means the handler runs.
+func TestOnCallMiddleware_emptyStackInvokes(t *testing.T) {
+	tool := NewTool(ToolConfig{
+		Name:    "echo",
+		Handler: func(ctx context.Context) (string, error) { return "hi", nil },
+	})
+	rt, sm := onCallRuntime()
+	out, _, err := newToolRunner(onCallMiddleware(sm)).Run(t.Context(), ToolInvocation{
+		Tool: tool, ArgsJSON: `{}`, Runtime: rt,
+	})
+	if err != nil || out != "hi" {
+		t.Fatalf("out=%q err=%v", out, err)
 	}
 }

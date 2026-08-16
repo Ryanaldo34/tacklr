@@ -631,7 +631,7 @@ func TestAgentHarness_Run(t *testing.T) {
 		}
 
 		ah := mustNewAgent(t, AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
-		ah.session.Plan().Set([]Todo{
+		ah.session.Plan.Set([]Todo{
 			{Title: "Task 1", Status: streaming.TodoStatusInProgress},
 			{Title: "Task 2", Status: streaming.TodoStatusPending},
 		})
@@ -656,7 +656,7 @@ func TestAgentHarness_Run(t *testing.T) {
 			t.Error("continue Invoke after compress should include continuePlanNudge (open todos remain)")
 		}
 
-		plan := ah.session.Plan().Get()
+		plan := ah.session.Plan.Get()
 		if plan == nil {
 			t.Fatal("plan should not be nil")
 		}
@@ -731,7 +731,7 @@ func TestAgentHarness_Run(t *testing.T) {
 		}
 
 		ah := mustNewAgent(t, AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{interruptTool}})
-		ah.session.Plan().Set([]Todo{
+		ah.session.Plan.Set([]Todo{
 			{Title: "Task 1", Status: streaming.TodoStatusInProgress},
 		})
 
@@ -784,7 +784,7 @@ func TestAgentHarness_Run(t *testing.T) {
 			t.Error("parked interrupt turn should not replace history with a developer handoff")
 		}
 
-		plan := ah.session.Plan().Get()
+		plan := ah.session.Plan.Get()
 		if plan == nil || len(plan) == 0 {
 			t.Fatal("plan should not be nil or empty")
 		}
@@ -897,7 +897,7 @@ func TestAgentHarness_Run(t *testing.T) {
 		}
 
 		ah := mustNewAgent(t, AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
-		ah.session.Plan().Set([]Todo{
+		ah.session.Plan.Set([]Todo{
 			{Title: "Only", Status: streaming.TodoStatusInProgress},
 		})
 
@@ -960,7 +960,7 @@ func TestAgentHarness_Run(t *testing.T) {
 		}
 
 		ah := mustNewAgent(t, AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
-		ah.session.Plan().Set([]Todo{
+		ah.session.Plan.Set([]Todo{
 			{Title: "Task 1", Status: streaming.TodoStatusInProgress},
 			{Title: "Task 2", Status: streaming.TodoStatusPending},
 		})

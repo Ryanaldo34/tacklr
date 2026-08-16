@@ -1,9 +1,10 @@
 package session
 
 import (
-	"encoding/json"
 	"strings"
 	"sync"
+
+	"github.com/ryanaldo34/tacklr/internal/codec"
 )
 
 // Reserved checkpoint keys for SessionManager modules (blocked on StateGet/Set).
@@ -14,16 +15,13 @@ const (
 	searchNamespaceStateKey = "_search_namespace"
 )
 
-// IsReservedRuntimeStateKey reports keys owned by SessionManager modules.
-func IsReservedRuntimeStateKey(key string) bool {
-	switch key {
-	case planStateKey, planDocumentStateKey, planDocumentUpdatedKey,
-		searchNamespaceStateKey, parkedWorkersStateKey,
-		permissionAllowKey, permissionDenyKey:
-		return true
-	default:
-		return false
-	}
+func init() {
+	reserveStateKeys(
+		planStateKey,
+		planDocumentStateKey,
+		planDocumentUpdatedKey,
+		searchNamespaceStateKey,
+	)
 }
 
 // PlanStore holds the plan document and todo list for Adaptive Case Management.
@@ -34,6 +32,7 @@ type PlanStore struct {
 	todos           []Todo
 	document        string
 	documentUpdated bool
+	todosUpdated    bool
 }
 
 // NewPlanStore returns an empty plan store.
@@ -61,11 +60,12 @@ func (p *PlanStore) Get() []Todo {
 	return cp
 }
 
-// Set replaces the todo list (caller should emit StreamEventPlanUpdate separately).
+// Set replaces the todo list. The harness emits plan_update after ConsumeTodosUpdated.
 // Pass nil to clear the plan entirely; pass a non-nil empty slice for an empty plan.
 func (p *PlanStore) Set(todos []Todo) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.todosUpdated = true
 	if todos == nil {
 		p.todos = nil
 		return
@@ -73,6 +73,23 @@ func (p *PlanStore) Set(todos []Todo) {
 	cp := make([]Todo, len(todos))
 	copy(cp, todos)
 	p.todos = cp
+}
+
+// ConsumeTodosUpdated returns the current todos when Set ran since the last
+// consume, and clears the flag. The harness streams plan_update from this.
+func (p *PlanStore) ConsumeTodosUpdated() ([]Todo, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.todosUpdated {
+		return nil, false
+	}
+	p.todosUpdated = false
+	if p.todos == nil {
+		return nil, true
+	}
+	cp := make([]Todo, len(p.todos))
+	copy(cp, p.todos)
+	return cp, true
 }
 
 // Document returns the plaintext project plan draft.
@@ -145,20 +162,13 @@ func (p *PlanStore) LoadFromState(state map[string]any) {
 	p.todos = nil
 	p.document = ""
 	p.documentUpdated = false
+	p.todosUpdated = false
 
 	if v, ok := state[planStateKey]; ok && v != nil {
-		if plan, ok := v.([]Todo); ok {
+		if plan, ok := codec.As[[]Todo](v); ok {
 			cp := make([]Todo, len(plan))
 			copy(cp, plan)
 			p.todos = cp
-		} else {
-			b, err := json.Marshal(v)
-			if err == nil {
-				var plan []Todo
-				if err := json.Unmarshal(b, &plan); err == nil {
-					p.todos = plan
-				}
-			}
 		}
 	}
 	if s, ok := state[planDocumentStateKey].(string); ok {
@@ -167,19 +177,4 @@ func (p *PlanStore) LoadFromState(state map[string]any) {
 	if b, ok := state[planDocumentUpdatedKey].(bool); ok {
 		p.documentUpdated = b
 	}
-}
-
-// StripPlanKeys removes reserved module keys from a runtime state map so they
-// are not exposed via user-facing StateGet after load.
-func StripPlanKeys(state map[string]any) {
-	if state == nil {
-		return
-	}
-	delete(state, planStateKey)
-	delete(state, planDocumentStateKey)
-	delete(state, planDocumentUpdatedKey)
-	delete(state, searchNamespaceStateKey)
-	delete(state, parkedWorkersStateKey)
-	delete(state, permissionAllowKey)
-	delete(state, permissionDenyKey)
 }

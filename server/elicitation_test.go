@@ -8,8 +8,8 @@ import (
 	"github.com/ryanaldo34/tacklr/interrupt"
 )
 
-// TestElicitation_paramsAndResultOutcomes covers SelectionToElicitationParams and
-// ElicitationResultToSelectionPayload return paths once each.
+// TestElicitation_paramsAndResultOutcomes covers selection elicitation
+// param/result return paths once each.
 func TestElicitation_paramsAndResultOutcomes(t *testing.T) {
 	opts := []interrupt.UserChoice{{Title: "A", Description: "first", IsRecommended: true}, {Title: "B", Description: "second"}}
 

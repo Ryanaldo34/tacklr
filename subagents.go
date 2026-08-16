@@ -109,7 +109,7 @@ func (a *AgentHarness) spawnTool() *Tool {
 
 // runWorker creates or resumes an isolated worker harness, drains events into
 // parent tool updates, and either returns final output or bubbles a child
-// interrupt onto the parent Runtime (self-similar at any nesting depth).
+// interrupt onto the parent session (self-similar at any nesting depth).
 func (a *AgentHarness) runWorker(ctx context.Context, workerName, task string, runtime HarnessRuntime) (string, error) {
 	spec, ok := a.subagents[workerName]
 	if !ok {
@@ -134,7 +134,7 @@ func (a *AgentHarness) runWorker(ctx context.Context, workerName, task string, r
 
 	// Drop any residual resolved interrupt for this spawn call — resume is
 	// driven by park metadata + stashed resolution payloads, not RaiseInterrupt.
-	_, _ = runtime.TakeResolvedInterrupt(toolCallID)
+	_, _ = a.session.TakeResolvedInterrupt(toolCallID)
 
 	var worker *AgentHarness
 	var closeOnExit bool
@@ -250,10 +250,10 @@ func (a *AgentHarness) runWorker(ctx context.Context, workerName, task string, r
 		"worker_session_id", worker.sessionId,
 	)...)
 
-	// Adopt the same interrupt object onto the parent Runtime under this
+	// Adopt the same interrupt object onto the parent session under this
 	// spawn_worker tool call id, then return it as an error so the parent
 	// harness parks spawn_worker like any other tool interrupt.
-	_, err = runtime.AdoptInterrupt(childIntr)
+	_, err = a.session.AdoptInterrupt(toolCallID, childIntr)
 	return "", err
 }
 
@@ -295,6 +295,7 @@ func (a *AgentHarness) workerOptsFromSpec(spec *SubAgent) AgentOptions {
 		RunCommandUnattended: a.runCommandUnattended,
 		shareIndexBridge:     a.vfsBridge,
 		DisablePlanningLock:  true,
+		WriteUnattended:      a.writeUnattended,
 	}
 }
 

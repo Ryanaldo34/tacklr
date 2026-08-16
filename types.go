@@ -147,26 +147,16 @@ type AgentWatchDog interface {
 	RecordToolResult(*Message) error
 }
 
-// HarnessRuntime is the tool-facing API for handlers and interceptors.
-// Hosts implement CRM write and approval tools against this interface only.
-// Store and SessionManager are not part of the contract.
+// HarnessRuntime is the tool-facing hook for one harness turn.
+// Tools emit progress, read/write user session state, and raise interrupts.
+// Session modules (plan, permissions, on-call, parks) are not on this interface.
 type HarnessRuntime interface {
 	EmitUpdate(message string)
-	EmitPlanUpdate(plan []Todo)
 	StateGet(key string) (any, bool)
 	StateSet(key string, value any) error
 	StateDelete(key string)
 	RaiseInterrupt(kind string, payload []byte) (Interrupt, error)
-	AdoptInterrupt(intr Interrupt) (Interrupt, error)
-	TakeResolvedInterrupt(id string) (Interrupt, bool)
-	PendingInterrupt(id string) (Interrupt, bool)
-	ReturnInterrupt(id string, result []byte) (Interrupt, error)
-	HasPendingInterrupt() bool
 	CurrentToolCallID() string
-	PermissionAlwaysAllowed(toolName string) bool
-	PermissionAlwaysDenied(toolName string) bool
-	RememberPermissionAllow(toolName string)
-	RememberPermissionDeny(toolName string)
 }
 
 // Todo is one plan list item (also used in plan_update stream payloads).

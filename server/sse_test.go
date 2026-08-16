@@ -265,8 +265,8 @@ func TestHandleResume_toolPermission_allowAndReject(t *testing.T) {
 			store := testStore(t)
 			var ran bool
 			sensitive := tacklr.NewTool(tacklr.ToolConfig{
-				Name:               "sensitive",
-				PermissionRequired: true,
+				Name:   "sensitive",
+				OnCall: tacklr.OnCalls(tacklr.ToolPermissionOnCall),
 				Handler: func(ctx context.Context) (string, error) {
 					ran = true
 					return "secret-ok", nil

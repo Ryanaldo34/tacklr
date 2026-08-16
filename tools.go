@@ -13,6 +13,7 @@ import (
 
 	mapset "github.com/deckarep/golang-set/v2"
 
+	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
@@ -50,8 +51,8 @@ type Tool struct {
 	Access      mapset.Set[ToolPermission]
 	// Timeout is an optional per-invocation deadline. Zero means none.
 	Timeout time.Duration
-	// PermissionRequired asks the user to approve the tool before it runs.
-	PermissionRequired bool
+	// OnCall is the pre-invoke middleware stack. Each constructor may park.
+	OnCall []OnCallFunc
 
 	handlerFunc func(ctx context.Context, args map[string]any, runtime HarnessRuntime) (toolCallResult, error)
 	parameters  map[string]any
@@ -66,10 +67,19 @@ type ToolConfig struct {
 	Category    streaming.ToolCategory
 	Access      mapset.Set[ToolPermission]
 	Timeout     time.Duration
-	// PermissionRequired asks the user to approve the tool before it runs.
-	PermissionRequired bool
+	// OnCall is the pre-invoke middleware stack. Each constructor may park.
+	// Return nil from a constructor to skip that layer. Types must be registered.
+	OnCall []OnCallFunc
 
 	Handler any
+}
+
+// OnCallFunc builds a pre-invoke interrupt. Return nil to skip that layer.
+type OnCallFunc func(ToolInvocation) Interrupt
+
+// OnCalls builds an OnCall stack from constructors (middleware order).
+func OnCalls(ctors ...OnCallFunc) []OnCallFunc {
+	return ctors
 }
 
 type mcpToolConfig struct {
@@ -145,15 +155,25 @@ func NewTool(cfg ToolConfig) *Tool {
 	}
 
 	t := &Tool{
-		Name:               cfg.Name,
-		DisplayName:        cfg.DisplayName,
-		Description:        cfg.Description,
-		Namespace:          cfg.Namespace,
-		Category:           cfg.Category,
-		Access:             cfg.Access,
-		Timeout:            cfg.Timeout,
-		PermissionRequired: cfg.PermissionRequired,
-		strict:             true,
+		Name:        cfg.Name,
+		DisplayName: cfg.DisplayName,
+		Description: cfg.Description,
+		Namespace:   cfg.Namespace,
+		Category:    cfg.Category,
+		Access:      cfg.Access,
+		Timeout:     cfg.Timeout,
+		OnCall:      cfg.OnCall,
+		strict:      true,
+	}
+	for _, ctor := range cfg.OnCall {
+		if ctor == nil {
+			continue
+		}
+		if sample := ctor(ToolInvocation{Tool: t}); sample != nil {
+			if _, ok := interrupt.New(sample.TypeName()); !ok {
+				panic(fmt.Sprintf("tool %q: OnCall type %q is not registered", cfg.Name, sample.TypeName()))
+			}
+		}
 	}
 	if argsType != nil {
 		// strict:true tools require every properties key in required (OpenAI / DeepSeek).

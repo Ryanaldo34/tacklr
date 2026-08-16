@@ -41,7 +41,6 @@ func (a *AgentHarness) RunMessage(ctx context.Context, user *Message) (<-chan St
 	a.injectBuiltinTools()
 	out := make(chan StreamEvent, streamEventBuffer)
 	// Turn-scoped Runtime: event bus for this Run only; durable state is on a.session.
-	// Tools receive a value copy via invoke; plan tools emit plan_update through it.
 	turnRT := session.NewRuntime(out, a.session)
 
 	emitCancelled := func() {
@@ -329,6 +328,7 @@ func (a *AgentHarness) RunMessage(ctx context.Context, user *Message) (<-chan St
 						suppressWindow[i].Store(true)
 					}
 					toolSpan.Finish("success", nil)
+					a.emitPlanUpdate(out)
 					toolResults[i] = a.emitToolResult(out, tc, output, "success")
 				}(i, tc)
 			}

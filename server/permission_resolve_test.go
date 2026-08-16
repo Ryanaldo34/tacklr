@@ -174,9 +174,9 @@ func TestResolvePermissionViaRequest_outcomes(t *testing.T) {
 	t.Run("selected resumes interrupts", func(t *testing.T) {
 		store := testStore(t)
 		sensitive := tacklr.NewTool(tacklr.ToolConfig{
-			Name:               "sensitive",
-			PermissionRequired: true,
-			Handler:            func(ctx context.Context) (string, error) { return "ok", nil },
+			Name:    "sensitive",
+			OnCall:  tacklr.OnCalls(tacklr.ToolPermissionOnCall),
+			Handler: func(ctx context.Context) (string, error) { return "ok", nil },
 		})
 		ms := &mockInferenceStrategy{
 			invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {

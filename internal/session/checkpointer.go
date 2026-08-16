@@ -36,8 +36,8 @@ func (Checkpointer) Capture(
 	if err != nil {
 		return nil, err
 	}
-	if sm.Search() != nil {
-		raw, err := sm.Search().Export()
+	if sm.Search != nil {
+		raw, err := sm.Search.Export()
 		if err != nil {
 			return nil, fmt.Errorf("checkpointer: export search context: %w", err)
 		}
@@ -62,7 +62,7 @@ func (Checkpointer) Apply(cp stores.SessionCheckpoint, sm *SessionManager) (Appl
 	}
 	sm.LoadUserAndPlanState(cp.State.RuntimeState)
 	if len(cp.State.SearchContext) > 0 {
-		if err := sm.Search().Restore(cp.State.SearchContext); err != nil {
+		if err := sm.Search.Restore(cp.State.SearchContext); err != nil {
 			return AppliedCheckpoint{}, fmt.Errorf("checkpointer: restore search context: %w", err)
 		}
 	}

@@ -2,6 +2,7 @@ package tacklr
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -54,6 +55,7 @@ type AgentHarness struct {
 	brain                *brain.Engine
 	brainWriteKinds      brain.WriteKinds
 	runCommandUnattended bool
+	writeUnattended      bool
 	// vfsBridge is the mount→brain index lifecycle (not the agent turn loop).
 	// Workers receive the parent pointer at construct; ownsVFSBridge is set
 	// only when this harness called vfsindex.Start.
@@ -75,7 +77,7 @@ type AgentHarness struct {
 // VFS is the session mount table, or nil. Hosts call FuseMount on this.
 // The harness does not start or own the kernel mount.
 func (a *AgentHarness) VFS() *vfs.MountSession {
-	return a.session.VFS()
+	return a.session.VFS
 }
 
 // SessionID returns the durable session id, or empty if unbound.
@@ -360,7 +362,7 @@ func (a *AgentHarness) addToContext(ctx context.Context, newMsg *Message, out ch
 func (a *AgentHarness) applyBatchToolResultEffect(ctx context.Context, effect ToolResultEffect) error {
 	switch effect {
 	case EffectInstallPlanDocument:
-		doc := a.session.Plan().Document()
+		doc := a.session.Plan.Document()
 		ctx, span := telemetry.StartPlanInstallSpan(ctx, a.sessionId)
 		slog.InfoContext(ctx, "installing plan document into context", "session_id", a.sessionId, "area", telemetry.AreaContext)
 		err := a.context.InstallPlanDocument(doc)
@@ -368,8 +370,8 @@ func (a *AgentHarness) applyBatchToolResultEffect(ctx context.Context, effect To
 		return err
 	case EffectHandoff:
 		slog.InfoContext(ctx, "todos completed or plan revised; running handoff", "session_id", a.sessionId, "area", telemetry.AreaContext)
-		todos := a.session.Plan().Get()
-		doc := a.session.Plan().Document()
+		todos := a.session.Plan.Get()
+		doc := a.session.Plan.Document()
 		return a.tasks.Handoff(ctx, todos, doc, a.tools, a.constructSystemPrompt())
 	default:
 		return nil
@@ -590,6 +592,17 @@ func (a *AgentHarness) emitToolResult(out chan<- StreamEvent, tc ToolCall, conte
 		ToolCalls: []ToolCall{presented},
 	}
 	return msg
+}
+
+// emitPlanUpdate streams plan_update when create_plan / complete_todo / edit_plan
+// called Plan.Set during this tool.
+func (a *AgentHarness) emitPlanUpdate(out chan<- StreamEvent) {
+	todos, ok := a.session.Plan.ConsumeTodosUpdated()
+	if !ok {
+		return
+	}
+	data, _ := json.Marshal(todos)
+	out <- StreamEvent{Type: streaming.StreamEventPlanUpdate, Data: data}
 }
 
 // HasOpenToolWork reports pending tool calls, session interrupts, or unpaired
