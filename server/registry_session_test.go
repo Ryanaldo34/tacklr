@@ -396,3 +396,162 @@ func TestRunTurn_askUserQuestion_visibleOnStream(t *testing.T) {
 		t.Fatal("Close must release host accessors")
 	}
 }
+
+// TestRunTurn_directProjection_inProcessVFS is the host opt-in: DirectProjection
+// publishes an in-process mount table (write/read) without a kernel HostDir.
+func TestRunTurn_directProjection_inProcessVFS(t *testing.T) {
+	ctx := context.Background()
+	r := NewRegistry(testStore(t), "default",
+		WithVFSProjection(DirectProjection{}),
+		WithTracer(telemetry.Tracer()),
+	)
+	r.Register("default", vfsSpec(t, okModel(), "/work"))
+	thread := "sess-direct"
+	s, err := r.RunTurn(ctx, TurnRequest{AgentID: "default", ThreadID: thread, Prompt: "hi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { r.DropLiveHarness(thread) })
+	ms := s.VFS()
+	if ms == nil {
+		t.Fatal("want in-process VFS")
+	}
+	if err := ms.WriteFile(ctx, "/work/note.md", []byte("direct\n")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ms.ReadFile(ctx, "/work/note.md")
+	if err != nil || string(got) != "direct\n" {
+		t.Fatalf("ReadFile = %q err=%v", got, err)
+	}
+	drainTurn(t, s)
+
+	s2, err := r.RunTurn(ctx, TurnRequest{AgentID: "default", ThreadID: thread, Prompt: "again"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err = s2.VFS().ReadFile(ctx, "/work/note.md")
+	if err != nil || string(got) != "direct\n" {
+		t.Fatalf("second turn VFS = %q err=%v", got, err)
+	}
+	drainTurn(t, s2)
+}
+
+// TestRegistry_AgentModel_defaultID is the host lookup outcome: empty agent
+// id resolves to the registry default model's strategy.
+func TestRegistry_AgentModel_defaultID(t *testing.T) {
+	model := okModel()
+	r := NewRegistry(testStore(t), "default")
+	r.Register("default", AgentSpec{Config: tacklr.Config{MaxWindowSize: 8192}, Model: model})
+	if r.AgentModel("") != model || r.AgentModel("default") != model {
+		t.Fatal("empty and default ids must return the registered model")
+	}
+	opts := r.ConfigOptions("default")
+	if len(opts) == 0 || opts[0].CurrentValue != "default" || len(opts[0].Options) == 0 || opts[0].Options[0].Value != "default" {
+		t.Fatalf("ConfigOptions = %+v", opts)
+	}
+}
+
+// TestRunTurn_whitespaceThreadID_vfsConstructError is fail-closed VFS
+// construct: a blank thread id cannot open a mount session.
+func TestRunTurn_whitespaceThreadID_vfsConstructError(t *testing.T) {
+	r := NewRegistry(testStore(t), "default", WithVFSProjection(DirectProjection{}))
+	r.Register("default", vfsSpec(t, okModel(), "/work"))
+	_, err := r.RunTurn(context.Background(), TurnRequest{
+		AgentID: "default", ThreadID: "   ", Prompt: "hi",
+	})
+	if err == nil || !strings.Contains(err.Error(), "session id") {
+		t.Fatalf("want session id construct error, got %v", err)
+	}
+}
+
+// TestFuseProjection_attach_sanitizesDotSessionID is the host mount-path
+// outcome: "." / ".." / empty session ids are rewritten before Attach.
+func TestFuseProjection_attach_sanitizesDotSessionID(t *testing.T) {
+	ctx := context.Background()
+	reg := vfs.NewBackendRegistry()
+	if err := reg.Register(vfs.LocalFactory{ID: "local", Base: t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+	ms := vfs.MustNewMountSession("dot-sess", reg)
+	if err := ms.Materialize(ctx, []vfs.MountSpec{{Point: "/work", Profile: "local"}}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ms.Close() })
+	err := FuseProjection{}.Attach(ms, ".")
+	if vfs.FuseAvailable() {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(ms.HostDir(), "session") {
+			t.Fatalf("HostDir = %q, want sanitized session path", ms.HostDir())
+		}
+		return
+	}
+	if err == nil {
+		t.Fatal("want Attach error when FUSE is unavailable")
+	}
+}
+
+// TestRunTurn_missingSkillDirectory_constructError is fail-closed construct
+// through the registry: a missing SkillDirectories path surfaces from RunTurn.
+func TestRunTurn_missingSkillDirectory_constructError(t *testing.T) {
+	r := NewRegistry(testStore(t), "default")
+	r.Register("default", AgentSpec{
+		Config: tacklr.Config{
+			MaxWindowSize:    8192,
+			SkillDirectories: []string{filepath.Join(t.TempDir(), "does-not-exist")},
+		},
+		Model: okModel(),
+	})
+	_, err := r.RunTurn(context.Background(), TurnRequest{
+		AgentID: "default", ThreadID: "sess-skills", Prompt: "hi",
+	})
+	if err == nil || !strings.Contains(err.Error(), "initialize skills") {
+		t.Fatalf("want skills construct error, got %v", err)
+	}
+}
+
+type flipProjection struct{ calls int }
+
+func (p *flipProjection) Available() bool {
+	p.calls++
+	return p.calls == 1
+}
+func (p *flipProjection) Attach(*vfs.MountSession, string) error { return nil }
+
+// TestRunTurn_projectionUnavailableAfterConstruct_stillCompletes: the host
+// projection can refuse Attach after the mount table is built; the turn still
+// answers and VFS tools stay in-process.
+func TestRunTurn_projectionUnavailableAfterConstruct_stillCompletes(t *testing.T) {
+	ctx := context.Background()
+	r := NewRegistry(testStore(t), "default", WithVFSProjection(&flipProjection{}))
+	r.Register("default", vfsSpec(t, okModel(), "/work"))
+	thread := "sess-flip"
+	s, err := r.RunTurn(ctx, TurnRequest{AgentID: "default", ThreadID: thread, Prompt: "hi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { r.DropLiveHarness(thread) })
+	if s.VFS() == nil {
+		t.Fatal("want in-process VFS after construct")
+	}
+	if err := s.VFS().WriteFile(ctx, "/work/ok.md", []byte("ok\n")); err != nil {
+		t.Fatal(err)
+	}
+	drainTurn(t, s)
+}
+
+// TestRunTurn_unknownVFSProfile_constructError is fail-closed materialize:
+// an unknown bootstrap profile surfaces from RunTurn.
+func TestRunTurn_unknownVFSProfile_constructError(t *testing.T) {
+	r := NewRegistry(testStore(t), "default", WithVFSProjection(DirectProjection{}))
+	spec := vfsSpec(t, okModel(), "/work")
+	spec.FSBootstrap = []vfs.MountSpec{{Point: "/work", Profile: "nope"}}
+	r.Register("default", spec)
+	_, err := r.RunTurn(context.Background(), TurnRequest{
+		AgentID: "default", ThreadID: "sess-bad-profile", Prompt: "hi",
+	})
+	if err == nil || !strings.Contains(err.Error(), "nope") {
+		t.Fatalf("want unknown profile error, got %v", err)
+	}
+}
