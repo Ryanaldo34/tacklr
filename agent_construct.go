@@ -54,8 +54,8 @@ type AgentOptions struct {
 	// DisablePlanningLock omits planningWriteLock (workers and tests).
 	// The permission gate is still always installed.
 	DisablePlanningLock bool
-	// DisableWriteApproval omits onCallGate (tests that exercise write
-	// mechanics without a human resume). The permission gate is still installed.
+	// DisableWriteApproval skips write_approval OnCall layers (write-mechanic
+	// tests). Other OnCall layers, including tool_permission, still run.
 	DisableWriteApproval bool
 	// ToolResultHooks map tool name → post-success window effects for host tools.
 	// Plan builtins use BuiltinResult instead.

@@ -378,7 +378,7 @@ func TestHarness_toolTimeout_surfacesAsToolResult(t *testing.T) {
 func TestHarness_hostInterceptor_keepsPermissionGate(t *testing.T) {
 	var hostSaw string
 	tool := NewTool(ToolConfig{
-		Name:   "crm_write",
+		Name:   "gated",
 		Access: ToolWriteAccess,
 		OnCall: OnCalls(WriteApprovalOnCall, ToolPermissionOnCall),
 		Handler: func(ctx context.Context) (string, error) {
@@ -391,7 +391,7 @@ func TestHarness_hostInterceptor_keepsPermissionGate(t *testing.T) {
 			invokeCount++
 			if invokeCount == 1 {
 				events <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-					{ID: "c1", CallID: "c1", Name: "crm_write", Arguments: `{}`},
+					{ID: "c1", CallID: "c1", Name: "gated", Arguments: `{}`},
 				}, IsComplete: true}
 				events <- LLMResponseChunk{IsComplete: true}
 				return
@@ -411,12 +411,12 @@ func TestHarness_hostInterceptor_keepsPermissionGate(t *testing.T) {
 			},
 		},
 	})
-	ch, err := ah.Run(context.Background(), "write crm")
+	ch, err := ah.Run(context.Background(), "write")
 	if err != nil {
 		t.Fatal(err)
 	}
 	id, kind := drainYield(t, ch)
-	if hostSaw != "crm_write" {
+	if hostSaw != "gated" {
 		t.Fatalf("host interceptor saw %q", hostSaw)
 	}
 	if kind != WriteApprovalType {
@@ -614,7 +614,7 @@ func TestOnCallMiddleware_permissionMemory(t *testing.T) {
 // omits write_approval and still runs the permission layer.
 func TestOnCallMiddleware_skipWriteStillParksPermission(t *testing.T) {
 	tool := NewTool(ToolConfig{
-		Name:    "crm_write",
+		Name:    "gated",
 		OnCall:  OnCalls(WriteApprovalOnCall, ToolPermissionOnCall),
 		Handler: func(ctx context.Context) (string, error) { return "nope", nil },
 	})

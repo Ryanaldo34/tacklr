@@ -42,8 +42,8 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 		t.Fatalf("CurrentToolCallID=%q", rt.CurrentToolCallID())
 	}
 
-	rt.RememberPermissionAllow("crm_write")
-	rt.RememberPermissionDeny("crm_delete")
+	rt.RememberPermissionAllow("allow_tool")
+	rt.RememberPermissionDeny("deny_tool")
 	sm.RecordWriteApproval(session.WriteApprovalRecord{
 		ToolName:   "mutate",
 		ToolCallID: "w1",
@@ -52,10 +52,10 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 		UnixTime:   1,
 	})
 	sm.RecordOnCallStage("w1", "write_approval", `{"path":"/a"}`, false)
-	if !rt.PermissionAlwaysAllowed("crm_write") || !sm.PermissionAlwaysAllowed("crm_write") {
+	if !rt.PermissionAlwaysAllowed("allow_tool") || !sm.PermissionAlwaysAllowed("allow_tool") {
 		t.Fatal("allow-always not visible on Runtime and SessionManager")
 	}
-	if !rt.PermissionAlwaysDenied("crm_delete") || !sm.PermissionAlwaysDenied("crm_delete") {
+	if !rt.PermissionAlwaysDenied("deny_tool") || !sm.PermissionAlwaysDenied("deny_tool") {
 		t.Fatal("deny-always not visible on Runtime and SessionManager")
 	}
 
@@ -148,7 +148,7 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 func assertModules(t *testing.T, sm *session.SessionManager, ns uuid.UUID, parkID, worker string) {
 	t.Helper()
 	rt := drainRuntime(sm)
-	if !rt.PermissionAlwaysAllowed("crm_write") || !rt.PermissionAlwaysDenied("crm_delete") {
+	if !rt.PermissionAlwaysAllowed("allow_tool") || !rt.PermissionAlwaysDenied("deny_tool") {
 		t.Fatal("permission memory must reload")
 	}
 	recs := sm.WriteApprovals()
