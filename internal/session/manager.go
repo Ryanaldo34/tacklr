@@ -9,6 +9,7 @@ import (
 
 	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/interrupt"
+	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -20,16 +21,17 @@ import (
 // VFS is host-owned and attached with SetVFS. Knowledge namespace + ResultSet
 // live on Search(). Builtins close over the manager; user tools use Runtime.
 type SessionManager struct {
-	mu        sync.RWMutex
-	plan      *PlanStore
-	userState map[string]any
-	pending   interruptMap
-	resolved  interruptMap
-	perms     *permissionBag
-	parks     *parkBag
-	onCall    *OnCallStore
-	search    *brain.SearchContext
-	vfs       *vfs.MountSession
+	mu         sync.RWMutex
+	plan       *PlanStore
+	userState  map[string]any
+	pending    interruptMap
+	resolved   interruptMap
+	perms      *Permissions
+	parks      *parkBag
+	onCall     *OnCallStore
+	search     *brain.SearchContext
+	vfs        *vfs.MountSession
+	turnEvents chan streaming.StreamEvent
 }
 
 // NewSessionManager returns an empty manager ready for use.
@@ -39,7 +41,7 @@ func NewSessionManager() *SessionManager {
 		userState: map[string]any{},
 		pending:   interruptMap{},
 		resolved:  interruptMap{},
-		perms:     newPermissionBag(),
+		perms:     NewPermissions(),
 		parks:     newParkBag(),
 		onCall:    NewOnCallStore(),
 		search:    brain.NewSearchContext(),
@@ -84,6 +86,28 @@ func (s *SessionManager) SetVFS(ms *vfs.MountSession) {
 		return
 	}
 	s.vfs = ms
+}
+
+// BindTurnEvents attaches the turn event bus for plan_update. Pass nil to clear.
+func (s *SessionManager) BindTurnEvents(ch chan streaming.StreamEvent) {
+	s.mu.Lock()
+	s.turnEvents = ch
+	s.mu.Unlock()
+}
+
+// EmitPlanUpdate sends a non-blocking plan_update on the bound turn bus.
+func (s *SessionManager) EmitPlanUpdate(plan []Todo) {
+	s.mu.RLock()
+	ch := s.turnEvents
+	s.mu.RUnlock()
+	if ch == nil {
+		return
+	}
+	data, _ := json.Marshal(plan)
+	select {
+	case ch <- streaming.StreamEvent{Type: streaming.StreamEventPlanUpdate, Data: data}:
+	default:
+	}
 }
 
 // StateGet returns a host/tool state value without a turn Runtime.
@@ -176,7 +200,9 @@ func (s *SessionManager) returnInterrupt(id string, result []byte) (interrupt.In
 	return intr, nil
 }
 
-func (s *SessionManager) adoptInterrupt(toolCallID string, intr interrupt.Interrupt) (interrupt.Interrupt, error) {
+// AdoptInterrupt attaches an interrupt to toolCallID. Parks when none is
+// resolved yet; returns the resolved interrupt on re-entry.
+func (s *SessionManager) AdoptInterrupt(toolCallID string, intr interrupt.Interrupt) (interrupt.Interrupt, error) {
 	if intr == nil {
 		return nil, fmt.Errorf("adopt interrupt: interrupt is nil")
 	}
@@ -193,7 +219,8 @@ func (s *SessionManager) adoptInterrupt(toolCallID string, intr interrupt.Interr
 	return nil, intr
 }
 
-func (s *SessionManager) takeResolvedInterrupt(id string) (interrupt.Interrupt, bool) {
+// TakeResolvedInterrupt removes and returns a resolved interrupt if present.
+func (s *SessionManager) TakeResolvedInterrupt(id string) (interrupt.Interrupt, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	intr, ok := s.resolved[id]

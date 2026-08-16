@@ -314,7 +314,8 @@ func TestEditPlanTool(t *testing.T) {
 }
 
 func TestAskUserChoiceTool_raiseAndResume(t *testing.T) {
-	rt := session.NewRuntime(make(chan streaming.StreamEvent, 4), session.NewSessionManager())
+	sm := session.NewSessionManager()
+	rt := session.NewRuntime(make(chan streaming.StreamEvent, 4), sm)
 	rt = rt.WithToolCallID("tc_ask")
 
 	args, _ := json.Marshal(map[string]any{
@@ -338,7 +339,7 @@ func TestAskUserChoiceTool_raiseAndResume(t *testing.T) {
 	}
 
 	// Resolve and re-invoke (harness re-execution pattern).
-	if _, err := rt.ReturnInterrupt("tc_ask", []byte(`{"selectionIdx":1}`)); err != nil {
+	if _, err := sm.ReturnInterrupt("tc_ask", []byte(`{"selectionIdx":1}`)); err != nil {
 		t.Fatal(err)
 	}
 	res, err := askUserChoiceTool.invoke(context.Background(), string(args), rt)

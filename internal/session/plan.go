@@ -58,7 +58,7 @@ func (p *PlanStore) Get() []Todo {
 	return cp
 }
 
-// Set replaces the todo list (caller should emit StreamEventPlanUpdate separately).
+// Set replaces the todo list. Call SessionManager.EmitPlanUpdate to notify the host.
 // Pass nil to clear the plan entirely; pass a non-nil empty slice for an empty plan.
 func (p *PlanStore) Set(todos []Todo) {
 	p.mu.Lock()

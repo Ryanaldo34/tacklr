@@ -481,14 +481,14 @@ func drainYield(t *testing.T, ch <-chan StreamEvent) (id, kind string) {
 	return "", ""
 }
 
-func onCallRuntime() (session.Runtime, *session.OnCallStore) {
+func onCallRuntime() (session.Runtime, *session.SessionManager) {
 	sm := session.NewSessionManager()
 	ch := make(chan streaming.StreamEvent, 8)
 	go func() {
 		for range ch {
 		}
 	}()
-	return session.NewRuntime(ch, sm).WithToolCallID("c1"), sm.OnCall()
+	return session.NewRuntime(ch, sm).WithToolCallID("c1"), sm
 }
 
 func requireParked(t *testing.T, err error, kind string) {
@@ -515,13 +515,13 @@ func TestOnCallMiddleware_permissionThenInvoke(t *testing.T) {
 			return "ok", nil
 		},
 	})
-	rt, stages := onCallRuntime()
-	runner := newToolRunner(onCallMiddleware(stages))
+	rt, sm := onCallRuntime()
+	runner := newToolRunner(onCallMiddleware(sm))
 	inv := ToolInvocation{Tool: tool, ArgsJSON: `{"path":"/a"}`, Runtime: rt}
 
 	_, _, err := runner.Run(t.Context(), inv)
 	requireParked(t, err, "tool_permission")
-	if _, err := rt.ReturnInterrupt("c1", []byte(`{"optionId":"allow-once"}`)); err != nil {
+	if _, err := sm.ReturnInterrupt("c1", []byte(`{"optionId":"allow-once"}`)); err != nil {
 		t.Fatal(err)
 	}
 	out, _, err := runner.Run(t.Context(), inv)
@@ -546,18 +546,18 @@ func TestOnCallMiddleware_permissionMemory(t *testing.T) {
 			return "secret", nil
 		},
 	})
-	rt, stages := onCallRuntime()
-	rt.RememberPermissionAllow("sensitive")
-	runner := newToolRunner(onCallMiddleware(stages))
+	rt, sm := onCallRuntime()
+	sm.Permissions().Remember("sensitive", session.PermissionAllowAlways)
+	runner := newToolRunner(onCallMiddleware(sm))
 	inv := ToolInvocation{Tool: tool, ArgsJSON: `{}`, Runtime: rt}
 	out, _, err := runner.Run(t.Context(), inv)
 	if err != nil || calls != 1 || out != "secret" {
 		t.Fatalf("allow-always: calls=%d out=%q err=%v", calls, out, err)
 	}
 
-	denyRT, denyStages := onCallRuntime()
-	denyRT.RememberPermissionDeny("sensitive")
-	runner = newToolRunner(onCallMiddleware(denyStages))
+	denyRT, denySM := onCallRuntime()
+	denySM.Permissions().Remember("sensitive", session.PermissionDenyAlways)
+	runner = newToolRunner(onCallMiddleware(denySM))
 	denyInv := ToolInvocation{Tool: tool, ArgsJSON: `{}`, Runtime: denyRT}
 	_, _, err = runner.Run(t.Context(), denyInv)
 	if !errors.Is(err, ErrToolPermissionDenied) || calls != 1 {
@@ -630,8 +630,8 @@ func TestOnCallMiddleware_emptyStackInvokes(t *testing.T) {
 		Name:    "echo",
 		Handler: func(ctx context.Context) (string, error) { return "hi", nil },
 	})
-	rt, stages := onCallRuntime()
-	out, _, err := newToolRunner(onCallMiddleware(stages)).Run(t.Context(), ToolInvocation{
+	rt, sm := onCallRuntime()
+	out, _, err := newToolRunner(onCallMiddleware(sm)).Run(t.Context(), ToolInvocation{
 		Tool: tool, ArgsJSON: `{}`, Runtime: rt,
 	})
 	if err != nil || out != "hi" {

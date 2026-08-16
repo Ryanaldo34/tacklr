@@ -41,7 +41,6 @@ func (a *AgentHarness) RunMessage(ctx context.Context, user *Message) (<-chan St
 	a.injectBuiltinTools()
 	out := make(chan StreamEvent, streamEventBuffer)
 	// Turn-scoped Runtime: event bus for this Run only; durable state is on a.session.
-	// Tools receive a value copy via invoke; plan tools emit plan_update through it.
 	turnRT := session.NewRuntime(out, a.session)
 
 	emitCancelled := func() {
@@ -61,6 +60,8 @@ func (a *AgentHarness) RunMessage(ctx context.Context, user *Message) (<-chan St
 		defer a.runMu.Unlock()
 		defer close(out)
 		defer a.persistSession(ctx)
+		a.session.BindTurnEvents(out)
+		defer a.session.BindTurnEvents(nil)
 		if err := a.addToContext(ctx, user, out); err != nil {
 			if ctx.Err() != nil {
 				emitCancelled()

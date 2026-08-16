@@ -43,10 +43,10 @@ type askUserChoiceArgs struct {
 	Choices  []askUserChoiceOption `json:"choices" desc:"2 or more mutually exclusive options"`
 }
 
-// setPlanTodos persists the plan and emits plan_update on the turn Runtime.
-func setPlanTodos(sm *session.SessionManager, rt HarnessRuntime, todos []Todo) {
+// setPlanTodos persists the plan and emits plan_update on the turn bus.
+func setPlanTodos(sm *session.SessionManager, todos []Todo) {
 	sm.Plan().Set(todos)
-	rt.EmitPlanUpdate(todos)
+	sm.EmitPlanUpdate(todos)
 }
 
 var askUserChoiceTool = NewTool(ToolConfig{
@@ -112,7 +112,7 @@ func newCreatePlanTool(sm *session.SessionManager) *Tool {
 		DisplayName: "Create Plan",
 		Description: "Creates a project plan document and a linear todo list derived from it. Pass the full plaintext plan in plan and the derived todos in todos. Call only when no active plan exists. If a plan is already active, use edit_plan or complete_todo instead of create_plan.",
 		Category:    streaming.ToolCategoryThink,
-		Handler: func(ctx context.Context, args createTodosArgs, rt HarnessRuntime) (BuiltinResult, error) {
+		Handler: func(ctx context.Context, args createTodosArgs) (BuiltinResult, error) {
 			if existing := sm.Plan().Get(); len(existing) > 0 {
 				return BuiltinResult{}, fmt.Errorf("an active plan already exists (%d todos); use edit_plan to modify it or complete_todo to progress — do not call create_plan again", len(existing))
 			}
@@ -137,7 +137,7 @@ func newCreatePlanTool(sm *session.SessionManager) *Tool {
 				}
 			}
 			sm.Plan().SetDocument(args.Plan)
-			setPlanTodos(sm, rt, todos)
+			setPlanTodos(sm, todos)
 			return BuiltinResult{
 				Output:                "Plan created successfully",
 				Effect:                EffectInstallPlanDocument,
@@ -177,7 +177,7 @@ func newCompleteTodoTool(sm *session.SessionManager) *Tool {
 		DisplayName: "Complete {title}",
 		Description: "Marks a todo as completed by exact title (must match list_plan / create_plan titles). Cannot complete a todo that is already completed or not found in the plan. When open work remains, advances the next todo and runs a context handoff. When the plan is fully done, returns success without a handoff so the agent can finish the user-facing answer.",
 		Category:    streaming.ToolCategoryEdit,
-		Handler: func(ctx context.Context, args completeTodoArgs, rt HarnessRuntime) (BuiltinResult, error) {
+		Handler: func(ctx context.Context, args completeTodoArgs) (BuiltinResult, error) {
 			plan := sm.Plan().Get()
 			if plan == nil {
 				return BuiltinResult{}, fmt.Errorf("no plan exists")
@@ -202,19 +202,19 @@ func newCompleteTodoTool(sm *session.SessionManager) *Tool {
 							for j < len(plan) {
 								if plan[j].Status != streaming.TodoStatusCompleted {
 									plan[j].Status = streaming.TodoStatusInProgress
-									setPlanTodos(sm, rt, plan)
+									setPlanTodos(sm, plan)
 									return handoff(fmt.Sprintf("Todo completed successfully, now starting %q with description: %q", plan[j].Title, plan[j].Description))
 								}
 								j++
 							}
-							setPlanTodos(sm, rt, plan)
+							setPlanTodos(sm, plan)
 							return allDone("All todos completed successfully")
 						}
 						plan[i+1].Status = streaming.TodoStatusInProgress
-						setPlanTodos(sm, rt, plan)
+						setPlanTodos(sm, plan)
 						return handoff(fmt.Sprintf("Todo completed successfully, now starting %q with description: %q", plan[i+1].Title, plan[i+1].Description))
 					}
-					setPlanTodos(sm, rt, plan)
+					setPlanTodos(sm, plan)
 					return allDone("All todos completed successfully")
 				}
 			}
@@ -229,7 +229,7 @@ func newEditPlanTool(sm *session.SessionManager) *Tool {
 		DisplayName: "Edit Plan",
 		Description: "Edits an existing plan by removing and/or adding todos. Optionally replace the full plaintext plan document via plan (must differ from the current document). Omit plan when only changing todos. Cannot delete completed todos.",
 		Category:    streaming.ToolCategoryEdit,
-		Handler: func(ctx context.Context, args editTodosArgs, rt HarnessRuntime) (BuiltinResult, error) {
+		Handler: func(ctx context.Context, args editTodosArgs) (BuiltinResult, error) {
 			plan := sm.Plan().Get()
 			if plan == nil {
 				return BuiltinResult{}, fmt.Errorf("no plan exists")
@@ -266,7 +266,7 @@ func newEditPlanTool(sm *session.SessionManager) *Tool {
 					return BuiltinResult{}, fmt.Errorf("todo %q not found in plan", title)
 				}
 			}
-			setPlanTodos(sm, rt, plan)
+			setPlanTodos(sm, plan)
 			if trimmedPlan != "" {
 				sm.Plan().SetDocument(args.Plan)
 			}

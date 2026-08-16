@@ -42,17 +42,20 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 		t.Fatalf("CurrentToolCallID=%q", rt.CurrentToolCallID())
 	}
 
-	rt.RememberPermissionAllow("allow_tool")
-	rt.RememberPermissionDeny("deny_tool")
+	if sm.Permissions().Decision("allow_tool") != session.PermissionNone {
+		t.Fatal("malformed bags must not grant memory")
+	}
+	sm.Permissions().Remember("allow_tool", session.PermissionAllowAlways)
+	sm.Permissions().Remember("deny_tool", session.PermissionDenyAlways)
 	if _, ok := sm.OnCall().Get("w1", "tool_permission"); ok {
 		t.Fatal("malformed stages must not decode")
 	}
 	sm.OnCall().Record("w1", "tool_permission", session.OnCallLayer{Args: `{"path":"/a"}`})
-	if !rt.PermissionAlwaysAllowed("allow_tool") || !sm.PermissionAlwaysAllowed("allow_tool") {
-		t.Fatal("allow-always not visible on Runtime and SessionManager")
+	if sm.Permissions().Decision("allow_tool") != session.PermissionAllowAlways {
+		t.Fatal("allow-always not stored")
 	}
-	if !rt.PermissionAlwaysDenied("deny_tool") || !sm.PermissionAlwaysDenied("deny_tool") {
-		t.Fatal("deny-always not visible on Runtime and SessionManager")
+	if sm.Permissions().Decision("deny_tool") != session.PermissionDenyAlways {
+		t.Fatal("deny-always not stored")
 	}
 
 	sm.SetParkedWorker("spawn_1", session.ParkedWorkerMeta{
@@ -143,8 +146,8 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 
 func assertModules(t *testing.T, sm *session.SessionManager, ns uuid.UUID, parkID, worker string) {
 	t.Helper()
-	rt := drainRuntime(sm)
-	if !rt.PermissionAlwaysAllowed("allow_tool") || !rt.PermissionAlwaysDenied("deny_tool") {
+	if sm.Permissions().Decision("allow_tool") != session.PermissionAllowAlways ||
+		sm.Permissions().Decision("deny_tool") != session.PermissionDenyAlways {
 		t.Fatal("permission memory must reload")
 	}
 	layer, ok := sm.OnCall().Get("w1", "tool_permission")
