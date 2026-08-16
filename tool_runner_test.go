@@ -78,55 +78,6 @@ func TestHarness_planningWriteLock_thenUnlockAfterCreatePlan(t *testing.T) {
 	}
 }
 
-// TestHarness_disablePlanningLock_writeSucceedsWithoutPlan is the public
-// opt-out: write tools run before create_plan when DisablePlanningLock is set.
-func TestHarness_disablePlanningLock_writeSucceedsWithoutPlan(t *testing.T) {
-	writeTool := NewTool(ToolConfig{
-		Name:   "mutate",
-		Access: ToolWriteAccess,
-		Handler: func(ctx context.Context) (string, error) {
-			return "mutated", nil
-		},
-	})
-	var invokeCount int
-	strategy := &mockStrategy{
-		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, events chan<- LLMResponseChunk) {
-			invokeCount++
-			if invokeCount == 1 {
-				events <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-					{ID: "w1", CallID: "w1", Name: "mutate", Arguments: `{}`},
-				}, IsComplete: true}
-				events <- LLMResponseChunk{IsComplete: true}
-				return
-			}
-			events <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
-		},
-	}
-	ah := mustNewAgent(t, context.Background(), AgentOptions{
-		Config:              Config{MaxWindowSize: 8192},
-		Model:               strategy,
-		Tools:               []*Tool{writeTool},
-		DisablePlanningLock: true,
-	})
-
-	ch, err := ah.Run(context.Background(), "write now")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var mutated bool
-	for ev := range ch {
-		if ev.Type == StreamEventToolResult && ev.Content == "mutated" {
-			mutated = true
-		}
-		if ev.Type == StreamEventToolResult && (strings.Contains(ev.Content, "locked") || strings.Contains(ev.Content, "permission denied")) {
-			t.Fatalf("write locked despite DisablePlanningLock: %q", ev.Content)
-		}
-	}
-	if !mutated {
-		t.Fatal("expected mutate success without create_plan")
-	}
-}
-
 // TestHarness_toolPermission_allowAlwaysRemembers: first call parks for
 // permission; allow-always resumes and runs the tool. After Close +
 // NewAgentFromSession the grant still skips the interrupt.

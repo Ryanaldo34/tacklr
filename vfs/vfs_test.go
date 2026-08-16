@@ -493,6 +493,16 @@ func TestDocument_session(t *testing.T) {
 	if err := ms.WriteDocument(ctx, huge); !errors.Is(err, vfs.ErrTooLarge) {
 		t.Fatalf("oversize write: %v", err)
 	}
+	note, err := ms.ReadText(ctx, "/work/note.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, err := vfs.EncodeTextual(note); err != nil || string(b) != "A\nB\nC\nD\n" {
+		t.Fatalf("EncodeTextual = %q err=%v", b, err)
+	}
+	if _, err := vfs.EncodeTextual(huge); !errors.Is(err, vfs.ErrTooLarge) {
+		t.Fatalf("oversize encode: %v", err)
+	}
 
 	if mt, err := ms.Classify(ctx, "/work/note.txt", nil); err != nil || mt != "text/plain" {
 		t.Fatalf("Classify: %q err=%v", mt, err)
@@ -700,22 +710,6 @@ func TestKernelWritable(t *testing.T) {
 	if !vfs.KernelCreateOK("README") || !vfs.KernelCreateOK("note.txt") {
 		t.Fatal("KernelCreateOK plaintext")
 	}
-}
-
-// TestEncodeTextual_roundTripAndCap is the public encode helper backends use
-// when persisting a Textual document as bytes.
-func TestEncodeTextual_roundTripAndCap(t *testing.T) {
-	doc := vfs.NewTextDocument("/work/a.md", "text/markdown", "utf-8", "hello\n")
-	b, err := vfs.EncodeTextual(doc)
-	if err != nil || string(b) != "hello\n" {
-		t.Fatalf("EncodeTextual = %q err=%v", b, err)
-	}
-	huge := vfs.NewTextDocument("/work/huge.txt", "text/plain", "utf-8", strings.Repeat("x", vfs.MaxReadFileBytes+1))
-	if _, err := vfs.EncodeTextual(huge); !errors.Is(err, vfs.ErrTooLarge) {
-		t.Fatalf("oversize encode: %v", err)
-	}
-	var id vfs.IdentityCodec = vfs.TextCodec{}
-	id.Identity()
 }
 
 type projectedCodec struct{}

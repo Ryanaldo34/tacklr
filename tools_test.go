@@ -296,10 +296,7 @@ func TestTypeToJSONSchema_structuredOutput(t *testing.T) {
 	if len(req) != 2 || req[0] != "title" || req[1] != "count" {
 		t.Fatalf("required = %v, want title and count only", req)
 	}
-}
-
-func TestTypeToJSONSchema_nilValue(t *testing.T) {
-	_, err := TypeToJSONSchema(nil)
+	_, err = TypeToJSONSchema(nil)
 	if err == nil || !strings.Contains(err.Error(), "nil value") {
 		t.Fatalf("want nil-value error, got %v", err)
 	}

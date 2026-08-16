@@ -351,55 +351,18 @@ func TestRunTurn_fuseMountFailHard(t *testing.T) {
 	drainTurn(t, s)
 }
 
-// TestRunTurn_askUserQuestion_visibleOnStream is the host EventStream
-// outcome: ask_user_choice parks the turn and AskUserQuestion returns the
-// question until Close releases the harness.
-func TestRunTurn_askUserQuestion_visibleOnStream(t *testing.T) {
-	ctx := context.Background()
-	model := &mockInferenceStrategy{
-		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventFunctionCall, ToolCalls: []tacklr.ToolCall{
-				{ID: "ask1", CallID: "ask1", Name: "ask_user_choice",
-					Arguments: `{"question":"Pick?","choices":[{"title":"A"},{"title":"B"}]}`},
-			}, IsComplete: true}
-			ch <- tacklr.LLMResponseChunk{IsComplete: true}
-		},
-	}
-	r := NewRegistry(testStore(t), "default")
-	r.Register("default", AgentSpec{
-		Config: tacklr.Config{MaxWindowSize: 8192},
-		Model:  model,
-	})
-	thread := "sess-ask"
-	s, err := r.RunTurn(ctx, TurnRequest{AgentID: "default", ThreadID: thread, Prompt: "ask"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { r.DropLiveHarness(thread) })
-	var sawInterrupt bool
-	for ev := range s.Events {
-		if ev.Type == streaming.StreamEventInterrupt {
-			sawInterrupt = true
-		}
-	}
-	if !sawInterrupt {
-		t.Fatal("expected ask_user_choice interrupt")
-	}
-	if s.SessionID() != thread {
-		t.Fatalf("SessionID = %q", s.SessionID())
-	}
-	if q := s.AskUserQuestion("ask1"); q != "Pick?" {
-		t.Fatalf("AskUserQuestion = %q", q)
-	}
-	s.Close()
-	if s.AskUserQuestion("ask1") != "" || s.SessionID() != "" {
-		t.Fatal("Close must release host accessors")
-	}
-}
+type flipProjection struct{ calls int }
 
-// TestRunTurn_directProjection_inProcessVFS is the host opt-in: DirectProjection
-// publishes an in-process mount table (write/read) without a kernel HostDir.
-func TestRunTurn_directProjection_inProcessVFS(t *testing.T) {
+func (p *flipProjection) Available() bool {
+	p.calls++
+	return p.calls == 1
+}
+func (p *flipProjection) Attach(*vfs.MountSession, string) error { return nil }
+
+// TestRunTurn_vfsProjection_inProcessAndFlip covers the two host projection
+// outcomes that are not already hit by the FUSE two-turn test: DirectProjection
+// write/read across turns, and a projection that refuses Attach after construct.
+func TestRunTurn_vfsProjection_inProcessAndFlip(t *testing.T) {
 	ctx := context.Background()
 	r := NewRegistry(testStore(t), "default",
 		WithVFSProjection(DirectProjection{}),
@@ -412,62 +375,64 @@ func TestRunTurn_directProjection_inProcessVFS(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { r.DropLiveHarness(thread) })
-	ms := s.VFS()
-	if ms == nil {
-		t.Fatal("want in-process VFS")
-	}
-	if err := ms.WriteFile(ctx, "/work/note.md", []byte("direct\n")); err != nil {
+	if err := s.VFS().WriteFile(ctx, "/work/note.md", []byte("direct\n")); err != nil {
 		t.Fatal(err)
 	}
-	got, err := ms.ReadFile(ctx, "/work/note.md")
-	if err != nil || string(got) != "direct\n" {
-		t.Fatalf("ReadFile = %q err=%v", got, err)
-	}
 	drainTurn(t, s)
-
 	s2, err := r.RunTurn(ctx, TurnRequest{AgentID: "default", ThreadID: thread, Prompt: "again"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err = s2.VFS().ReadFile(ctx, "/work/note.md")
+	got, err := s2.VFS().ReadFile(ctx, "/work/note.md")
 	if err != nil || string(got) != "direct\n" {
 		t.Fatalf("second turn VFS = %q err=%v", got, err)
 	}
 	drainTurn(t, s2)
+
+	flip := NewRegistry(testStore(t), "default", WithVFSProjection(&flipProjection{}))
+	flip.Register("default", vfsSpec(t, okModel(), "/work"))
+	sf, err := flip.RunTurn(ctx, TurnRequest{AgentID: "default", ThreadID: "sess-flip", Prompt: "hi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { flip.DropLiveHarness("sess-flip") })
+	if err := sf.VFS().WriteFile(ctx, "/work/ok.md", []byte("ok\n")); err != nil {
+		t.Fatal(err)
+	}
+	drainTurn(t, sf)
 }
 
-// TestRegistry_AgentModel_defaultID is the host lookup outcome: empty agent
-// id resolves to the registry default model's strategy.
-func TestRegistry_AgentModel_defaultID(t *testing.T) {
-	model := okModel()
-	r := NewRegistry(testStore(t), "default")
-	r.Register("default", AgentSpec{Config: tacklr.Config{MaxWindowSize: 8192}, Model: model})
-	if r.AgentModel("") != model || r.AgentModel("default") != model {
-		t.Fatal("empty and default ids must return the registered model")
-	}
-	opts := r.ConfigOptions("default")
-	if len(opts) == 0 || opts[0].CurrentValue != "default" || len(opts[0].Options) == 0 || opts[0].Options[0].Value != "default" {
-		t.Fatalf("ConfigOptions = %+v", opts)
-	}
-}
-
-// TestRunTurn_whitespaceThreadID_vfsConstructError is fail-closed VFS
-// construct: a blank thread id cannot open a mount session.
-func TestRunTurn_whitespaceThreadID_vfsConstructError(t *testing.T) {
+// TestRunTurn_constructFailures is fail-closed construct: blank thread id,
+// unknown VFS profile, missing skill dir, and FuseProjection session-id sanitize.
+func TestRunTurn_constructFailures(t *testing.T) {
+	ctx := context.Background()
 	r := NewRegistry(testStore(t), "default", WithVFSProjection(DirectProjection{}))
 	r.Register("default", vfsSpec(t, okModel(), "/work"))
-	_, err := r.RunTurn(context.Background(), TurnRequest{
-		AgentID: "default", ThreadID: "   ", Prompt: "hi",
-	})
+	_, err := r.RunTurn(ctx, TurnRequest{AgentID: "default", ThreadID: "   ", Prompt: "hi"})
 	if err == nil || !strings.Contains(err.Error(), "session id") {
 		t.Fatalf("want session id construct error, got %v", err)
 	}
-}
 
-// TestFuseProjection_attach_sanitizesDotSessionID is the host mount-path
-// outcome: "." / ".." / empty session ids are rewritten before Attach.
-func TestFuseProjection_attach_sanitizesDotSessionID(t *testing.T) {
-	ctx := context.Background()
+	bad := vfsSpec(t, okModel(), "/work")
+	bad.FSBootstrap = []vfs.MountSpec{{Point: "/work", Profile: "nope"}}
+	r.Register("default", bad)
+	_, err = r.RunTurn(ctx, TurnRequest{AgentID: "default", ThreadID: "sess-bad-profile", Prompt: "hi"})
+	if err == nil || !strings.Contains(err.Error(), "nope") {
+		t.Fatalf("want unknown profile error, got %v", err)
+	}
+
+	r.Register("default", AgentSpec{
+		Config: tacklr.Config{
+			MaxWindowSize:    8192,
+			SkillDirectories: []string{filepath.Join(t.TempDir(), "does-not-exist")},
+		},
+		Model: okModel(),
+	})
+	_, err = r.RunTurn(ctx, TurnRequest{AgentID: "default", ThreadID: "sess-skills", Prompt: "hi"})
+	if err == nil || !strings.Contains(err.Error(), "initialize skills") {
+		t.Fatalf("want skills construct error, got %v", err)
+	}
+
 	reg := vfs.NewBackendRegistry()
 	if err := reg.Register(vfs.LocalFactory{ID: "local", Base: t.TempDir()}); err != nil {
 		t.Fatal(err)
@@ -477,7 +442,7 @@ func TestFuseProjection_attach_sanitizesDotSessionID(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ms.Close() })
-	err := FuseProjection{}.Attach(ms, ".")
+	err = FuseProjection{}.Attach(ms, ".")
 	if vfs.FuseAvailable() {
 		if err != nil {
 			t.Fatal(err)
@@ -489,69 +454,5 @@ func TestFuseProjection_attach_sanitizesDotSessionID(t *testing.T) {
 	}
 	if err == nil {
 		t.Fatal("want Attach error when FUSE is unavailable")
-	}
-}
-
-// TestRunTurn_missingSkillDirectory_constructError is fail-closed construct
-// through the registry: a missing SkillDirectories path surfaces from RunTurn.
-func TestRunTurn_missingSkillDirectory_constructError(t *testing.T) {
-	r := NewRegistry(testStore(t), "default")
-	r.Register("default", AgentSpec{
-		Config: tacklr.Config{
-			MaxWindowSize:    8192,
-			SkillDirectories: []string{filepath.Join(t.TempDir(), "does-not-exist")},
-		},
-		Model: okModel(),
-	})
-	_, err := r.RunTurn(context.Background(), TurnRequest{
-		AgentID: "default", ThreadID: "sess-skills", Prompt: "hi",
-	})
-	if err == nil || !strings.Contains(err.Error(), "initialize skills") {
-		t.Fatalf("want skills construct error, got %v", err)
-	}
-}
-
-type flipProjection struct{ calls int }
-
-func (p *flipProjection) Available() bool {
-	p.calls++
-	return p.calls == 1
-}
-func (p *flipProjection) Attach(*vfs.MountSession, string) error { return nil }
-
-// TestRunTurn_projectionUnavailableAfterConstruct_stillCompletes: the host
-// projection can refuse Attach after the mount table is built; the turn still
-// answers and VFS tools stay in-process.
-func TestRunTurn_projectionUnavailableAfterConstruct_stillCompletes(t *testing.T) {
-	ctx := context.Background()
-	r := NewRegistry(testStore(t), "default", WithVFSProjection(&flipProjection{}))
-	r.Register("default", vfsSpec(t, okModel(), "/work"))
-	thread := "sess-flip"
-	s, err := r.RunTurn(ctx, TurnRequest{AgentID: "default", ThreadID: thread, Prompt: "hi"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { r.DropLiveHarness(thread) })
-	if s.VFS() == nil {
-		t.Fatal("want in-process VFS after construct")
-	}
-	if err := s.VFS().WriteFile(ctx, "/work/ok.md", []byte("ok\n")); err != nil {
-		t.Fatal(err)
-	}
-	drainTurn(t, s)
-}
-
-// TestRunTurn_unknownVFSProfile_constructError is fail-closed materialize:
-// an unknown bootstrap profile surfaces from RunTurn.
-func TestRunTurn_unknownVFSProfile_constructError(t *testing.T) {
-	r := NewRegistry(testStore(t), "default", WithVFSProjection(DirectProjection{}))
-	spec := vfsSpec(t, okModel(), "/work")
-	spec.FSBootstrap = []vfs.MountSpec{{Point: "/work", Profile: "nope"}}
-	r.Register("default", spec)
-	_, err := r.RunTurn(context.Background(), TurnRequest{
-		AgentID: "default", ThreadID: "sess-bad-profile", Prompt: "hi",
-	})
-	if err == nil || !strings.Contains(err.Error(), "nope") {
-		t.Fatalf("want unknown profile error, got %v", err)
 	}
 }

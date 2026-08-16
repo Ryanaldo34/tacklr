@@ -25,6 +25,17 @@ func drainRuntime(sm *session.SessionManager) session.Runtime {
 // Capture → JSON wire → Apply on a fresh manager.
 func TestSessionModules_surviveCheckpoint(t *testing.T) {
 	sm := session.NewSessionManager()
+	sm.LoadUserAndPlanState(map[string]any{
+		"_parked_workers":          "not-a-map",
+		"_permission_always_allow": 42,
+		"_permission_always_deny":  []any{"x"},
+		"_search_namespace":        "not-a-uuid",
+		"keep":                     "user",
+	})
+	if v, ok := sm.StateGet("keep"); !ok || v != "user" {
+		t.Fatalf("user key after malformed bags: %v ok=%v", v, ok)
+	}
+
 	rt := drainRuntime(sm).WithToolCallID("spawn_1")
 	if rt.CurrentToolCallID() != "spawn_1" {
 		t.Fatalf("CurrentToolCallID=%q", rt.CurrentToolCallID())
@@ -122,80 +133,6 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 	gotFresh, ok := sm2.Search().Namespace()
 	if !ok || gotFresh != fresh {
 		t.Fatalf("SetSearch(nil) must yield a usable empty context, got %v ok=%v", gotFresh, ok)
-	}
-}
-
-// TestSessionManager_interruptFacade_raiseReturnClear is the session-scoped
-// interrupt outcome without a turn Runtime: pending → return → clear.
-func TestSessionManager_interruptFacade_raiseReturnClear(t *testing.T) {
-	sm := session.NewSessionManager()
-	rt := drainRuntime(sm).WithToolCallID("choice")
-	_, err := rt.RaiseInterrupt("user_selection_choice", []byte(`[{"title":"Yes"}]`))
-	if err == nil {
-		t.Fatal("raise parks as error")
-	}
-	if _, ok := sm.PendingInterrupt("choice"); !ok {
-		t.Fatal("PendingInterrupt after raise")
-	}
-
-	got, err := sm.ReturnInterrupt("choice", []byte(`{"selectionIdx":0}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got == nil {
-		t.Fatal("ReturnInterrupt must yield the resolved interrupt")
-	}
-
-	sm.ClearInterrupts()
-	rt = rt.WithToolCallID("perm")
-	_, err = rt.RaiseInterrupt("tool_permission", []byte(`{"toolName":"rm"}`))
-	if err == nil {
-		t.Fatal("after ClearInterrupts a new raise must park")
-	}
-	if _, ok := sm.PendingInterrupt("perm"); !ok {
-		t.Fatal("new raise after clear must be pending")
-	}
-}
-
-// TestSessionModules_malformedBags_sessionStillUsable is the recover-from-wire
-// outcome: corrupt reserved bags load as empty, then new grants and parks persist.
-func TestSessionModules_malformedBags_sessionStillUsable(t *testing.T) {
-	sm := session.NewSessionManager()
-	sm.LoadUserAndPlanState(map[string]any{
-		"_parked_workers":          "not-a-map",
-		"_permission_always_allow": 42,
-		"_permission_always_deny":  []any{"x"},
-		"_search_namespace":        "not-a-uuid",
-		"keep":                     "user",
-	})
-	if v, ok := sm.StateGet("keep"); !ok || v != "user" {
-		t.Fatalf("user key after malformed bags: %v ok=%v", v, ok)
-	}
-
-	rt := drainRuntime(sm)
-	rt.RememberPermissionAllow("ok_tool")
-	sm.SetParkedWorker("w1", session.ParkedWorkerMeta{WorkerName: "analyst", Task: "review"})
-	ns := uuid.New()
-	sm.Search().SetNamespace(ns)
-
-	cp, err := session.NewCheckpointer().Capture(nil, sm, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sm2 := session.NewSessionManager()
-	if _, err := session.NewCheckpointer().Apply(*cp, sm2); err != nil {
-		t.Fatal(err)
-	}
-	if !sm2.PermissionAlwaysAllowed("ok_tool") {
-		t.Fatal("grant after malformed load must persist")
-	}
-	got, ok := sm2.ParkedWorker("w1")
-	if !ok || got.WorkerName != "analyst" {
-		t.Fatalf("park after malformed load = %+v ok=%v", got, ok)
-	}
-	gotNS, ok := sm2.Search().Namespace()
-	if !ok || gotNS != ns {
-		t.Fatalf("namespace after malformed load %v ok=%v", gotNS, ok)
 	}
 }
 

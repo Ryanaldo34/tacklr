@@ -284,6 +284,20 @@ func TestRuntime_interrupts_raiseReturnAdopt(t *testing.T) {
 	if _, err := rt.ReturnInterrupt("perm", []byte(`{"optionId":"allow-once"}`)); err != nil {
 		t.Fatal(err)
 	}
+
+	// SessionManager facade: clear, then pending → return without a turn bus.
+	sm.ClearInterrupts()
+	rt = rt.WithToolCallID("sm1")
+	_, err = rt.RaiseInterrupt("tool_permission", []byte(`{"toolName":"ls"}`))
+	if err == nil {
+		t.Fatal("park after ClearInterrupts")
+	}
+	if _, ok := sm.PendingInterrupt("sm1"); !ok {
+		t.Fatal("PendingInterrupt after raise")
+	}
+	if _, err := sm.ReturnInterrupt("sm1", []byte(`{"optionId":"allow-once"}`)); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // TestRuntime_emitAndState_channels covers EmitUpdate/PlanUpdate non-blocking paths.
