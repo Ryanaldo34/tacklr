@@ -53,7 +53,7 @@ func TestWebSearchTool_invokeAgainstServer(t *testing.T) {
 		"user_location":"US",
 		"system_prompt":"prefer primary sources",
 		"max_age_hours":24
-	}`, nil)
+	}`, nopRuntime())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,11 +61,11 @@ func TestWebSearchTool_invokeAgainstServer(t *testing.T) {
 		t.Fatal(res.output)
 	}
 
-	res, err = tool.invoke(ctx, `{"query":"empty-results"}`, nil)
+	res, err = tool.invoke(ctx, `{"query":"empty-results"}`, nopRuntime())
 	if err != nil || !strings.Contains(res.output, "No results found") {
 		t.Fatalf("empty: %q err=%v", res.output, err)
 	}
-	res, err = tool.invoke(ctx, `{"query":"untitled","content_mode":"highlights"}`, nil)
+	res, err = tool.invoke(ctx, `{"query":"untitled","content_mode":"highlights"}`, nopRuntime())
 	if err != nil || !strings.Contains(res.output, "(untitled)") || !strings.Contains(res.output, `"answer"`) {
 		t.Fatalf("untitled/synth: %q err=%v", res.output, err)
 	}
@@ -87,11 +87,11 @@ func TestWebSearchTool_invokeAgainstServer(t *testing.T) {
 	if _, err := tool.invoke(ctx, `{"query":"q","content_mode":"raw"}`, nil); err == nil {
 		t.Fatal("invalid mode")
 	}
-	res, err = tool.invoke(ctx, `{"query":"q","type":"text","content_mode":"text","category":"news"}`, nil)
+	res, err = tool.invoke(ctx, `{"query":"q","type":"text","content_mode":"text","category":"news"}`, nopRuntime())
 	if err == nil && !strings.Contains(res.output, "Hit") {
 		// type "text" is invalid — already covered; news+text mode
 	}
-	res, err = tool.invoke(ctx, `{"query":"news-q","type":"auto","content_mode":"text","category":"news"}`, nil)
+	res, err = tool.invoke(ctx, `{"query":"news-q","type":"auto","content_mode":"text","category":"news"}`, nopRuntime())
 	if err != nil || !strings.Contains(res.output, "Hit") {
 		t.Fatalf("text mode: %q err=%v", res.output, err)
 	}
@@ -128,7 +128,7 @@ func TestRunWebFetch_endToEnd(t *testing.T) {
 	})
 	ctx := context.Background()
 
-	got, err := runWebFetch(ctx, client, webFetchArgs{URLs: []string{"https://example.gov/code"}}, nil)
+	got, err := runWebFetch(ctx, client, webFetchArgs{URLs: []string{"https://example.gov/code"}}, nopRuntime())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,14 +138,14 @@ func TestRunWebFetch_endToEnd(t *testing.T) {
 
 	got, err = runWebFetch(ctx, client, webFetchArgs{
 		URLs: []string{"  ", "ftp://x", "example.gov/code", "https://example.gov/code", "not a host"},
-	}, nil)
+	}, nopRuntime())
 	if err != nil || !strings.Contains(got, "City Code") {
 		t.Fatalf("normalize: %q err=%v", got, err)
 	}
 
 	got, err = runWebFetch(ctx, client, webFetchArgs{
 		URLs: []string{"https://example.gov/missing"}, ContentMode: "highlights", HighlightQuery: "setbacks",
-	}, nil)
+	}, nopRuntime())
 	if err != nil || !strings.Contains(got, "error") || !strings.Contains(got, "not_found") {
 		t.Fatalf("status: %q err=%v", got, err)
 	}
@@ -155,17 +155,17 @@ func TestRunWebFetch_endToEnd(t *testing.T) {
 	}
 	if _, err := runWebFetch(ctx, client, webFetchArgs{
 		URLs: []string{"https://a", "https://b", "https://c", "https://d", "https://e", "https://f"},
-	}, nil); err == nil {
+	}, nopRuntime()); err == nil {
 		t.Fatal("too many urls")
 	}
 	if _, err := runWebFetch(ctx, client, webFetchArgs{
 		URLs: []string{"https://example.gov/code"}, ContentMode: "raw",
-	}, nil); err == nil {
+	}, nopRuntime()); err == nil {
 		t.Fatal("invalid mode")
 	}
 	got, err = runWebFetch(ctx, client, webFetchArgs{
 		URLs: []string{"https://example.gov/code"}, ContentMode: "both", MaxTextCharacters: 20000,
-	}, nil)
+	}, nopRuntime())
 	if err != nil || !strings.Contains(got, "City Code") {
 		t.Fatalf("both: %q err=%v", got, err)
 	}

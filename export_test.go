@@ -39,6 +39,15 @@ func turnRuntime(h *AgentHarness) HarnessRuntime {
 	return session.NewRuntime(ch, h.session)
 }
 
+func nopRuntime() HarnessRuntime {
+	ch := make(chan StreamEvent, 8)
+	go func() {
+		for range ch {
+		}
+	}()
+	return session.NewRuntime(ch, session.NewSessionManager())
+}
+
 func mustNewAgent(t testing.TB, ctx context.Context, opts AgentOptions) *AgentHarness {
 	t.Helper()
 	h, err := NewAgent(ctx, opts)
