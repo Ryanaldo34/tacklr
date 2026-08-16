@@ -1,6 +1,7 @@
 package vfs
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -263,6 +264,81 @@ func TestFuseMount_plaintextWritableProjectedEROFS(t *testing.T) {
 	if !sawRenamed {
 		t.Fatalf("host remount missing renamed.txt: %v", ents)
 	}
+}
+
+// TestFuseMount_projectedTextualReadOnly: a non-identity codec still projects
+// ReadText to the kernel (cat/rg); kernel writes stay EROFS.
+func TestFuseMount_projectedTextualReadOnly(t *testing.T) {
+	if !FuseAvailable() {
+		t.Skip("no /dev/fuse or /dev/macfuse*")
+	}
+	const media = "application/x-fuse-projected"
+	extMediaTypes[".proj"] = media
+	t.Cleanup(func() { delete(extMediaTypes, ".proj") })
+	if err := defaultContentRegistry.Register(fuseProjectedCodec{}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := t.Context()
+	reg := NewBackendRegistry()
+	if err := reg.Register(LocalFactory{ID: "scratch", Base: t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+	ms := NewMountSession(t.Name(), reg)
+	if err := ms.Mount(ctx, MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.WriteFile(ctx, "/work/doc.proj", []byte("container-bytes")); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := ms.ReadText(ctx, "/work/doc.proj")
+	if err != nil || doc.Text() != "EXTRACTED:container-bytes" {
+		t.Fatalf("ReadText projection: %q err=%v", textOr(doc), err)
+	}
+
+	dir := t.TempDir()
+	if err := ms.FuseMount(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ms.Close() })
+
+	host := filepath.Join(dir, "work", "doc.proj")
+	st, err := os.Stat(host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Size() != int64(len("EXTRACTED:container-bytes")) {
+		t.Fatalf("host size=%d want extracted plaintext", st.Size())
+	}
+	if st.Mode().Perm()&0200 != 0 {
+		t.Fatalf("projected file should be read-only, mode=%v", st.Mode())
+	}
+	got, err := os.ReadFile(host)
+	if err != nil || string(got) != "EXTRACTED:container-bytes" {
+		t.Fatalf("host cat projection: %q err=%v", got, err)
+	}
+	if err := os.WriteFile(host, []byte("nope"), 0o644); err == nil {
+		t.Fatal("projected write: want EROFS")
+	} else if !errors.Is(err, syscall.EROFS) && !errors.Is(err, os.ErrPermission) &&
+		!strings.Contains(err.Error(), "read-only") && !strings.Contains(err.Error(), "EROFS") {
+		t.Fatalf("projected write err = %v", err)
+	}
+	if _, err := exec.LookPath("rg"); err == nil {
+		out, err := exec.Command("rg", "-F", "EXTRACTED:container-bytes", dir).CombinedOutput()
+		if err != nil || !strings.Contains(string(out), "EXTRACTED:container-bytes") {
+			t.Fatalf("rg projection: %v out=%s", err, out)
+		}
+	}
+}
+
+type fuseProjectedCodec struct{}
+
+func (fuseProjectedCodec) MediaTypes() []string {
+	return []string{"application/x-fuse-projected"}
+}
+
+func (fuseProjectedCodec) Decode(_ context.Context, p, mt string, data []byte) (Document, error) {
+	return NewTextDocument(p, mt, "utf-8", "EXTRACTED:"+string(data)), nil
 }
 
 func textOr(t Textual) string {

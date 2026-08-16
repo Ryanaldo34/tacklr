@@ -36,10 +36,9 @@
 //	Stat, Open, ReadFile, WriteFile, ReadDir, Remove, MkdirAll, FuseMount, Close
 //	File is Close + Stat. Read / ReadAt / Write are optional (comma-ok).
 //	FuseMount is explicit (host kernel tree). Mount points must be one segment
-//	(/work, /engram). Textual files appear as ReadText; binaries use Stat +
-//	io.ReaderAt. Kernel writes are allowed only for IdentityCodec (plaintext);
-//	projected documents are EROFS. Close unmounts. HostDir is the last FuseMount
-//	directory.
+//	(/work, /engram). If ReadText succeeds, the kernel sees that plaintext
+//	(read-only unless IdentityCodec). Otherwise Stat + io.ReaderAt. Close
+//	unmounts. HostDir is the last FuseMount directory.
 //
 // Read-only mounts reject mutating ops with ErrReadOnly. Local paths are jailed
 // under the provider root (including symlink evaluation). S3 uses key prefixes

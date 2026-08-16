@@ -28,9 +28,9 @@ func FuseAvailable() bool {
 }
 
 // FuseMount projects the session as a host tree at dir.
-// Textual files appear as ReadText (provider IR plaintext). Binaries use Stat + ReadAt.
-// Kernel writes are allowed only for IdentityCodec types (plaintext). Projected
-// documents (Word, Notion, Docs) are EROFS; the write tool uses WriteDocument.
+// If ReadText succeeds (Textual), the kernel sees that plaintext: size and
+// Read use the projection. Kernel writes stay EROFS unless KernelWritable
+// (IdentityCodec). Otherwise Open uses Stat + ReaderAt (binaries).
 // session.Mount attaches a provider; FuseMount is the host kernel mount.
 // Every live Specs() point must be a single path segment (/work, /engram).
 func (m *MountSession) FuseMount(dir string) error {
@@ -291,10 +291,6 @@ func (n *fuseNode) stat(ctx context.Context, virtualPath string) (FileInfo, erro
 	if st.IsDir {
 		return st, nil
 	}
-	// Projected/binary: Stat size is the FUSE size. Do not ReadText the body.
-	if st.MediaType != "" && !IsTextLike(st.MediaType) && !KernelWritable(st.MediaType) {
-		return st, nil
-	}
 	t, err := n.sess.ReadText(ctx, virtualPath)
 	if err == nil {
 		st.Size = int64(len(t.Text()))
@@ -323,17 +319,16 @@ func openFuseFile(ctx context.Context, sess *MountSession, virtualPath string, s
 	if st.IsDir {
 		return nil, syscall.EISDIR
 	}
-	if writable || st.MediaType == "" || IsTextLike(st.MediaType) || KernelWritable(st.MediaType) {
-		var body []byte
-		if !trunc {
-			plain, err := fusePlaintext(ctx, sess, virtualPath)
-			if err == nil {
-				body = []byte(plain)
-			} else if !errors.Is(err, ErrNoCodec) && !errors.Is(err, ErrNotTextual) && !errors.Is(err, ErrNotExist) {
-				return nil, fuseErrno(err)
-			}
+	if !trunc {
+		plain, err := fusePlaintext(ctx, sess, virtualPath)
+		if err == nil {
+			return &fuseFile{sess: sess, path: virtualPath, body: []byte(plain), writable: writable, oappend: oappend}, 0
 		}
-		return &fuseFile{sess: sess, path: virtualPath, body: body, writable: writable, oappend: oappend}, 0
+		if !errors.Is(err, ErrNoCodec) && !errors.Is(err, ErrNotTextual) && !errors.Is(err, ErrNotExist) {
+			return nil, fuseErrno(err)
+		}
+	} else if writable {
+		return &fuseFile{sess: sess, path: virtualPath, writable: true, oappend: oappend}, 0
 	}
 	h, err := sess.Open(ctx, virtualPath)
 	if err != nil {
