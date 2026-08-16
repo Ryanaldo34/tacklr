@@ -18,6 +18,7 @@ func TestHarness_planningWriteLock_thenUnlockAfterCreatePlan(t *testing.T) {
 	writeTool := NewTool(ToolConfig{
 		Name:   "mutate",
 		Access: ToolWriteAccess,
+		OnCall: WriteApprovalOnCall,
 		Handler: func(ctx context.Context) (string, error) {
 			calls++
 			return "mutated", nil
@@ -377,6 +378,7 @@ func TestHarness_hostInterceptor_keepsPermissionGate(t *testing.T) {
 		Name:               "crm_write",
 		Access:             ToolWriteAccess,
 		PermissionRequired: true,
+		OnCall:             WriteApprovalOnCall,
 		Handler: func(ctx context.Context) (string, error) {
 			return "should-not-run", nil
 		},
@@ -438,6 +440,7 @@ func TestHarness_writeApproval_rejectThenEdit(t *testing.T) {
 	tool := NewTool(ToolConfig{
 		Name:   "mutate",
 		Access: ToolWriteAccess,
+		OnCall: WriteApprovalOnCall,
 		Handler: func(ctx context.Context, args struct {
 			Path string `json:"path"`
 		}) (string, error) {

@@ -13,6 +13,7 @@ import (
 
 	mapset "github.com/deckarep/golang-set/v2"
 
+	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
@@ -52,6 +53,8 @@ type Tool struct {
 	Timeout time.Duration
 	// PermissionRequired asks the user to approve the tool before it runs.
 	PermissionRequired bool
+	// OnCall, if set, builds an interrupt that parks before the handler.
+	OnCall func(ToolInvocation) Interrupt
 
 	handlerFunc func(ctx context.Context, args map[string]any, runtime HarnessRuntime) (toolCallResult, error)
 	parameters  map[string]any
@@ -68,6 +71,9 @@ type ToolConfig struct {
 	Timeout     time.Duration
 	// PermissionRequired asks the user to approve the tool before it runs.
 	PermissionRequired bool
+	// OnCall, if set, is the interrupt constructor invoked before the handler.
+	// Return nil to skip the park. The type must be registered (see RegisterInterrupt).
+	OnCall func(ToolInvocation) Interrupt
 
 	Handler any
 }
@@ -153,7 +159,15 @@ func NewTool(cfg ToolConfig) *Tool {
 		Access:             cfg.Access,
 		Timeout:            cfg.Timeout,
 		PermissionRequired: cfg.PermissionRequired,
+		OnCall:             cfg.OnCall,
 		strict:             true,
+	}
+	if cfg.OnCall != nil {
+		if sample := cfg.OnCall(ToolInvocation{Tool: t}); sample != nil {
+			if _, ok := interrupt.New(sample.TypeName()); !ok {
+				panic(fmt.Sprintf("tool %q: OnCall type %q is not registered", cfg.Name, sample.TypeName()))
+			}
+		}
 	}
 	if argsType != nil {
 		// strict:true tools require every properties key in required (OpenAI / DeepSeek).

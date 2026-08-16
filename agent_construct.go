@@ -49,14 +49,14 @@ type AgentOptions struct {
 	// ContextPolicy sets pressure/compress ratios when non-zero fields are set.
 	ContextPolicy ContextPolicy
 	// ToolInterceptors wrap each tool call (outermost first). Built-in
-	// planning lock, write-approval gate, and permission gate are installed
+	// planning lock, OnCall interrupt gate, and permission gate are installed
 	// after these.
 	ToolInterceptors []ToolInterceptor
 	// DisablePlanningLock omits planningWriteLock (workers and tests).
 	// The permission gate is still always installed.
 	DisablePlanningLock bool
-	// DisableWriteApproval omits writeApprovalGate (tests that exercise write
-	// mechanics). The permission gate is still always installed.
+	// DisableWriteApproval omits onCallGate (tests that exercise write
+	// mechanics without a human resume). The permission gate is still installed.
 	DisableWriteApproval bool
 	// ToolResultHooks map tool name → post-success window effects for host tools.
 	// Plan builtins use BuiltinResult instead.
@@ -160,7 +160,7 @@ func newHarnessBase(opts AgentOptions, sm *session.SessionManager) (*AgentHarnes
 		chain = append(chain, h.planningWriteLock)
 	}
 	if !opts.DisableWriteApproval {
-		chain = append(chain, writeApprovalGate)
+		chain = append(chain, onCallGate)
 	}
 	chain = append(chain, toolPermissionGate)
 	h.toolRunner = newToolRunner(chain...)

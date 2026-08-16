@@ -33,6 +33,15 @@ type PayloadValidator interface {
 	ValidatePayload([]byte) error
 }
 
+// CallEffect is an optional capability for interrupts raised from Tool.OnCall.
+// After Return, the harness applies the effect before the handler runs.
+type CallEffect interface {
+	// ReplacementArgs is the args JSON to use for the call. Empty keeps the original.
+	ReplacementArgs() string
+	// CallDenied is true when the handler must not run.
+	CallDenied() bool
+}
+
 type UserChoice struct {
 	Title         string `json:"title"`
 	Description   string `json:"description"`
@@ -303,6 +312,17 @@ func (w *WriteApprovalInterrupt) Return(payload []byte) error {
 func (w *WriteApprovalInterrupt) Error() string {
 	b, _ := json.Marshal(w)
 	return string(b)
+}
+
+func (w *WriteApprovalInterrupt) ReplacementArgs() string {
+	if w.Action == WriteApprovalEdit {
+		return w.Args
+	}
+	return ""
+}
+
+func (w *WriteApprovalInterrupt) CallDenied() bool {
+	return w.Action == WriteApprovalReject
 }
 
 // --- Interrupt registry ---

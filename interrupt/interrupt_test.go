@@ -255,6 +255,18 @@ func TestWriteApproval_initAndValidate(t *testing.T) {
 	if err := w.Return([]byte(`{"action":"edit"}`)); err == nil {
 		t.Fatal("edit without args return")
 	}
+	ok := &interrupt.WriteApprovalInterrupt{}
+	if err := ok.Return([]byte(`{"action":"approve"}`)); err != nil || ok.CallDenied() || ok.ReplacementArgs() != "" {
+		t.Fatalf("approve effect: denied=%v args=%q err=%v", ok.CallDenied(), ok.ReplacementArgs(), err)
+	}
+	ed := &interrupt.WriteApprovalInterrupt{}
+	if err := ed.Return([]byte(`{"action":"edit","args":"{}"}`)); err != nil || ed.CallDenied() || ed.ReplacementArgs() != "{}" {
+		t.Fatalf("edit effect: denied=%v args=%q err=%v", ed.CallDenied(), ed.ReplacementArgs(), err)
+	}
+	rej := &interrupt.WriteApprovalInterrupt{}
+	if err := rej.Return([]byte(`{"action":"reject"}`)); err != nil || !rej.CallDenied() {
+		t.Fatalf("reject effect: denied=%v err=%v", rej.CallDenied(), err)
+	}
 }
 
 // TestInterrupt_asError confirms errors.As works for tool return paths.

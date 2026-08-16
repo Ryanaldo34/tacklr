@@ -349,6 +349,13 @@ func TestToolsAsJsonWithNamespaces(t *testing.T) {
 	}
 }
 
+type unregisteredOnCall struct{}
+
+func (unregisteredOnCall) TypeName() string           { return "not_registered_on_call" }
+func (unregisteredOnCall) Serialize() ([]byte, error) { return []byte(`{}`), nil }
+func (unregisteredOnCall) Return([]byte) error        { return nil }
+func (unregisteredOnCall) Error() string              { return "unregistered" }
+
 func TestNewTool_validation(t *testing.T) {
 	if NewTool(ToolConfig{Name: "my_tool", Handler: zeroArgsStringHandler}) == nil {
 		t.Fatal("valid tool")
@@ -366,6 +373,9 @@ func TestNewTool_validation(t *testing.T) {
 		{"too many args", ToolConfig{Name: "t", Handler: func(ctx context.Context, a BasicArgs, b BasicArgs, c BasicArgs) (string, error) {
 			return "", nil
 		}}, ""}, // "too many parameters" or "unexpected parameter"
+		{"unregistered on-call", ToolConfig{Name: "t", Handler: zeroArgsStringHandler, OnCall: func(ToolInvocation) Interrupt {
+			return unregisteredOnCall{}
+		}}, "not registered"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			defer func() {

@@ -697,7 +697,6 @@ func TestPathNativeGraphLinkExpand(t *testing.T) {
 		SessionID: "path-graph", Store: stores.NewInMemoryStore(),
 		MountSession: ms, Model: &mockStrategy{},
 		Brain: eng, SearchNamespace: &ns,
-		DisableWriteApproval: true,
 	})
 	t.Cleanup(h.Close)
 	activatePlan(t, h)

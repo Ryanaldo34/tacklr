@@ -105,67 +105,93 @@ func toolPermissionGate(ctx context.Context, inv ToolInvocation, next ToolCallFu
 	return next(ctx, inv)
 }
 
-// writeApprovalLog is the session-backed audit used by writeApprovalGate.
+// writeApprovalLog is the session-backed audit for write_approval OnCall.
 // session.Runtime implements it; it is not part of HarnessRuntime.
 type writeApprovalLog interface {
 	WriteApprovalFor(toolCallID string) (WriteApprovalRecord, bool)
 	RecordWriteApproval(WriteApprovalRecord)
 }
 
-func rejectedWrite(name string) error {
-	return fmt.Errorf("%w: user rejected write %q", ErrToolPermissionDenied, name)
+func rejectedOnCall(name string) error {
+	return fmt.Errorf("%w: user rejected tool %q", ErrToolPermissionDenied, name)
 }
 
-// writeApprovalGate parks WritePermission tools until the host approves, edits, or rejects.
-func writeApprovalGate(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error) {
-	if inv.Tool == nil || inv.Tool.Access == nil || !inv.Tool.Access.Contains(WritePermission) {
+// WriteApprovalOnCall is the OnCall constructor that parks a write_approval interrupt.
+func WriteApprovalOnCall(inv ToolInvocation) Interrupt {
+	name, display := "", ""
+	if inv.Tool != nil {
+		name = inv.Tool.Name
+		display = inv.Tool.DisplayName
+	}
+	return &interrupt.WriteApprovalInterrupt{
+		ToolName: name,
+		Title:    ResolveToolTitle(display, name, inv.ArgsJSON),
+		Args:     inv.ArgsJSON,
+	}
+}
+
+// onCallGate parks when Tool.OnCall returns an interrupt, then applies CallEffect.
+func onCallGate(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error) {
+	if inv.Tool == nil || inv.Tool.OnCall == nil {
 		return next(ctx, inv)
 	}
-	log, ok := inv.Runtime.(writeApprovalLog)
-	if !ok {
-		return "", fmt.Errorf("%w: write approval requires a runtime", ErrFailed)
+	if inv.Runtime == nil {
+		return "", fmt.Errorf("%w: on-call interrupt requires a runtime", ErrFailed)
 	}
 
 	name := inv.Tool.Name
-	if rec, found := log.WriteApprovalFor(inv.Runtime.CurrentToolCallID()); found {
-		if rec.Action == WriteApprovalReject {
-			return "", rejectedWrite(name)
+	if log, ok := inv.Runtime.(writeApprovalLog); ok {
+		if rec, found := log.WriteApprovalFor(inv.Runtime.CurrentToolCallID()); found {
+			if rec.Action == WriteApprovalReject {
+				return "", rejectedOnCall(name)
+			}
+			if rec.Action == WriteApprovalEdit {
+				inv.ArgsJSON = rec.Args
+			}
+			return next(ctx, inv)
 		}
-		if rec.Action == WriteApprovalEdit {
-			inv.ArgsJSON = rec.Args
-		}
-		return next(ctx, inv)
 	}
 
-	title := ResolveToolTitle(inv.Tool.DisplayName, name, inv.ArgsJSON)
-	initPayload, _ := json.Marshal(map[string]any{
-		"toolName": name,
-		"title":    title,
-		"args":     inv.ArgsJSON,
-	})
-	intr, err := inv.Runtime.RaiseInterrupt(WriteApprovalType, initPayload)
+	intr := inv.Tool.OnCall(inv)
+	if intr == nil {
+		return next(ctx, inv)
+	}
+	resolved, err := inv.Runtime.AdoptInterrupt(intr)
 	if err != nil {
 		return "", err
 	}
-	wa, ok := intr.(*interrupt.WriteApprovalInterrupt)
-	if !ok {
-		return "", fmt.Errorf("%w: unexpected write approval interrupt type %T", ErrFailed, intr)
-	}
 
+	if eff, ok := resolved.(interrupt.CallEffect); ok {
+		if args := eff.ReplacementArgs(); args != "" {
+			inv.ArgsJSON = args
+		}
+		if eff.CallDenied() {
+			recordWriteApprovalIfNeeded(inv, resolved)
+			return "", rejectedOnCall(name)
+		}
+	}
+	recordWriteApprovalIfNeeded(inv, resolved)
+	return next(ctx, inv)
+}
+
+func recordWriteApprovalIfNeeded(inv ToolInvocation, resolved Interrupt) {
+	wa, ok := resolved.(*interrupt.WriteApprovalInterrupt)
+	if !ok {
+		return
+	}
+	log, ok := inv.Runtime.(writeApprovalLog)
+	if !ok {
+		return
+	}
 	args := inv.ArgsJSON
 	if wa.Action == WriteApprovalEdit {
 		args = wa.Args
-		inv.ArgsJSON = args
 	}
 	log.RecordWriteApproval(WriteApprovalRecord{
-		ToolName:   name,
+		ToolName:   inv.Tool.Name,
 		ToolCallID: inv.Runtime.CurrentToolCallID(),
 		Action:     wa.Action,
 		Args:       args,
 		UnixTime:   time.Now().Unix(),
 	})
-	if wa.Action == WriteApprovalReject {
-		return "", rejectedWrite(name)
-	}
-	return next(ctx, inv)
 }
