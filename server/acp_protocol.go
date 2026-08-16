@@ -403,13 +403,20 @@ func resolveSelectionViaElicitation(ctx context.Context, env ProtocolEnv, thread
 	if err != nil {
 		return nil, err
 	}
+	return resumeElicitation(ctx, stream, interruptID, action, resolution,
+		fmt.Errorf("user declined to answer"),
+		fmt.Errorf("user cancelled the prompt"),
+	)
+}
+
+func resumeElicitation(ctx context.Context, stream *EventStream, interruptID, action string, resolution []byte, declined, cancelled error) (<-chan streaming.StreamEvent, error) {
 	switch action {
 	case "accept":
 		return stream.ResumeInterrupts(ctx, map[string][]byte{interruptID: resolution})
 	case "decline":
-		return nil, fmt.Errorf("user declined to answer")
-	default: // "cancel" — ElicitationResultToSelectionPayload rejects any other action.
-		return nil, fmt.Errorf("user cancelled the prompt")
+		return nil, declined
+	default:
+		return nil, cancelled
 	}
 }
 
@@ -427,14 +434,10 @@ func resolveWriteApprovalViaElicitation(ctx context.Context, env ProtocolEnv, th
 	if err != nil {
 		return nil, err
 	}
-	switch action {
-	case "accept":
-		return stream.ResumeInterrupts(ctx, map[string][]byte{interruptID: resolution})
-	case "decline":
-		return nil, fmt.Errorf("user declined write approval")
-	default:
-		return nil, fmt.Errorf("user cancelled write approval")
-	}
+	return resumeElicitation(ctx, stream, interruptID, action, resolution,
+		fmt.Errorf("user declined write approval"),
+		fmt.Errorf("user cancelled write approval"),
+	)
 }
 
 // acpInitializeResult is the ACP initialize advertisement (wire shape).

@@ -26,45 +26,42 @@ func ParseInterruptEnvelope(data []byte) (InterruptEventEnvelope, error) {
 	return env, nil
 }
 
+func unmarshalInterruptData[T any](data []byte) (interruptID string, v T, err error) {
+	env, err := ParseInterruptEnvelope(data)
+	if err != nil {
+		return "", v, err
+	}
+	if err := json.Unmarshal(env.Data, &v); err != nil {
+		return "", v, fmt.Errorf("unmarshal interrupt data: %w", err)
+	}
+	return env.InterruptId, v, nil
+}
+
 // ParseUserSelectionFromInterruptData extracts options from StreamEventInterrupt Data
 // payload shape {"interruptId":"...","data":<serialized UserSelectionInterrupt>}.
 func ParseUserSelectionFromInterruptData(data []byte) (interruptID string, opts []interrupt.UserChoice, err error) {
-	env, err := ParseInterruptEnvelope(data)
+	id, usi, err := unmarshalInterruptData[interrupt.UserSelectionInterrupt](data)
 	if err != nil {
 		return "", nil, err
 	}
-	var usi interrupt.UserSelectionInterrupt
-	if err := json.Unmarshal(env.Data, &usi); err != nil {
-		return "", nil, fmt.Errorf("unmarshal selection interrupt: %w", err)
-	}
-	return env.InterruptId, usi.Options, nil
+	return id, usi.Options, nil
 }
 
 // ParseToolPermissionFromInterruptData extracts a tool permission interrupt from yield data.
 func ParseToolPermissionFromInterruptData(data []byte) (interruptID string, perm interrupt.ToolPermissionInterrupt, err error) {
-	env, err := ParseInterruptEnvelope(data)
+	id, perm, err := unmarshalInterruptData[interrupt.ToolPermissionInterrupt](data)
 	if err != nil {
 		return "", perm, err
-	}
-	if err := json.Unmarshal(env.Data, &perm); err != nil {
-		return "", perm, fmt.Errorf("unmarshal permission interrupt: %w", err)
 	}
 	if len(perm.Options) == 0 {
 		perm.Options = interrupt.DefaultPermissionOptions()
 	}
-	return env.InterruptId, perm, nil
+	return id, perm, nil
 }
 
 // ParseWriteApprovalFromInterruptData extracts a write-approval interrupt from yield data.
 func ParseWriteApprovalFromInterruptData(data []byte) (interruptID string, wa interrupt.WriteApprovalInterrupt, err error) {
-	env, err := ParseInterruptEnvelope(data)
-	if err != nil {
-		return "", wa, err
-	}
-	if err := json.Unmarshal(env.Data, &wa); err != nil {
-		return "", wa, fmt.Errorf("unmarshal write approval interrupt: %w", err)
-	}
-	return env.InterruptId, wa, nil
+	return unmarshalInterruptData[interrupt.WriteApprovalInterrupt](data)
 }
 
 // PermissionToACPParams builds session/request_permission params.

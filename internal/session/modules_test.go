@@ -21,7 +21,8 @@ func drainRuntime(sm *session.SessionManager) session.Runtime {
 }
 
 // TestSessionModules_surviveCheckpoint is the durable-module outcome: permission
-// memory, parked workers, search namespace, and a host VFS pointer survive
+// memory (allow/deny and write-approval audit), parked workers, search
+// namespace, and a host VFS pointer survive
 // Capture → JSON wire → Apply on a fresh manager.
 func TestSessionModules_surviveCheckpoint(t *testing.T) {
 	sm := session.NewSessionManager()
@@ -43,7 +44,7 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 
 	rt.RememberPermissionAllow("crm_write")
 	rt.RememberPermissionDeny("crm_delete")
-	rt.RecordWriteApproval(session.WriteApprovalRecord{
+	sm.RecordWriteApproval(session.WriteApprovalRecord{
 		ToolName:   "mutate",
 		ToolCallID: "w1",
 		Action:     "approve",

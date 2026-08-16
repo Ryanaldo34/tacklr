@@ -168,8 +168,6 @@ type HarnessRuntime interface {
 	PermissionAlwaysDenied(toolName string) bool
 	RememberPermissionAllow(toolName string)
 	RememberPermissionDeny(toolName string)
-	WriteApprovals() []WriteApprovalRecord
-	RecordWriteApproval(rec WriteApprovalRecord)
 }
 
 // Todo is one plan list item (also used in plan_update stream payloads).

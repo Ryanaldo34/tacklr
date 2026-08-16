@@ -136,7 +136,11 @@ func TestPlanStore_lifecycle(t *testing.T) {
 		t.Fatal("cleared plan should not export todos")
 	}
 
+	state["_write_approval_audit"] = []any{}
 	session.StripPlanKeys(state)
+	if _, ok := state["_write_approval_audit"]; ok {
+		t.Fatal("audit key should be stripped")
+	}
 	if session.IsReservedRuntimeStateKey("_plan") != true {
 		t.Fatal("reserved key")
 	}

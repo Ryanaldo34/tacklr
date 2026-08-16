@@ -182,4 +182,5 @@ func StripPlanKeys(state map[string]any) {
 	delete(state, parkedWorkersStateKey)
 	delete(state, permissionAllowKey)
 	delete(state, permissionDenyKey)
+	delete(state, writeApprovalAuditKey)
 }

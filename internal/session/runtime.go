@@ -138,9 +138,9 @@ func (rt Runtime) RememberPermissionDeny(toolName string) {
 	rt.session.RememberPermissionDeny(toolName)
 }
 
-// WriteApprovals returns checkpointed write-approval decisions.
-func (rt Runtime) WriteApprovals() []WriteApprovalRecord {
-	return rt.session.WriteApprovals()
+// WriteApprovalFor returns the decision recorded for toolCallID, if any.
+func (rt Runtime) WriteApprovalFor(toolCallID string) (WriteApprovalRecord, bool) {
+	return rt.session.WriteApprovalFor(toolCallID)
 }
 
 // RecordWriteApproval appends a resolved write-approval decision.

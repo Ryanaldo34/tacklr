@@ -89,13 +89,13 @@ func (a *AgentHarness) Messages() []*Message {
 	return a.context.Messages()
 }
 
-// AskUserQuestion returns the ask_user_choice question for toolCallID, or empty.
-// Used by ACP elicitation. Reads session state (survives the turn).
 // WriteApprovals returns checkpointed write-approval decisions for this session.
 func (a *AgentHarness) WriteApprovals() []WriteApprovalRecord {
 	return a.session.WriteApprovals()
 }
 
+// AskUserQuestion returns the ask_user_choice question for toolCallID, or empty.
+// Used by ACP elicitation. Reads session state (survives the turn).
 func (a *AgentHarness) AskUserQuestion(toolCallID string) string {
 	if toolCallID == "" {
 		return ""

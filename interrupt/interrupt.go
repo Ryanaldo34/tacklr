@@ -253,18 +253,21 @@ func (w *WriteApprovalInterrupt) InitFromPayload(payload []byte) error {
 	if len(payload) == 0 || string(payload) == "null" {
 		return nil
 	}
-	var init struct {
-		ToolName string `json:"toolName"`
-		Title    string `json:"title"`
-		Args     string `json:"args"`
+	return json.Unmarshal(payload, w)
+}
+
+func (p WriteApprovalPayload) valid() error {
+	switch p.Action {
+	case WriteApprovalApprove, WriteApprovalReject:
+		return nil
+	case WriteApprovalEdit:
+		if p.Args == "" {
+			return errors.New("edit requires args")
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown action %q", p.Action)
 	}
-	if err := json.Unmarshal(payload, &init); err != nil {
-		return err
-	}
-	w.ToolName = init.ToolName
-	w.Title = init.Title
-	w.Args = init.Args
-	return nil
 }
 
 func (w *WriteApprovalInterrupt) ValidatePayload(payload []byte) error {
@@ -279,17 +282,7 @@ func (w *WriteApprovalInterrupt) ValidatePayload(payload []byte) error {
 	if err := json.Unmarshal(payload, &res); err != nil {
 		return fmt.Errorf("invalid payload shape: %w", err)
 	}
-	switch res.Action {
-	case WriteApprovalApprove, WriteApprovalReject:
-		return nil
-	case WriteApprovalEdit:
-		if res.Args == "" {
-			return errors.New("edit requires args")
-		}
-		return nil
-	default:
-		return fmt.Errorf("unknown action %q", res.Action)
-	}
+	return res.valid()
 }
 
 func (w *WriteApprovalInterrupt) Return(payload []byte) error {
@@ -297,20 +290,14 @@ func (w *WriteApprovalInterrupt) Return(payload []byte) error {
 	if err := json.Unmarshal(payload, &res); err != nil {
 		return err
 	}
-	switch res.Action {
-	case WriteApprovalApprove, WriteApprovalReject:
-		w.Action = res.Action
-		return nil
-	case WriteApprovalEdit:
-		if res.Args == "" {
-			return errors.New("edit requires args")
-		}
-		w.Action = res.Action
-		w.Args = res.Args
-		return nil
-	default:
-		return fmt.Errorf("unknown action %q", res.Action)
+	if err := res.valid(); err != nil {
+		return err
 	}
+	w.Action = res.Action
+	if res.Action == WriteApprovalEdit {
+		w.Args = res.Args
+	}
+	return nil
 }
 
 func (w *WriteApprovalInterrupt) Error() string {

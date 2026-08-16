@@ -105,22 +105,31 @@ func toolPermissionGate(ctx context.Context, inv ToolInvocation, next ToolCallFu
 	return next(ctx, inv)
 }
 
+// writeApprovalLog is the session-backed audit used by writeApprovalGate.
+// session.Runtime implements it; it is not part of HarnessRuntime.
+type writeApprovalLog interface {
+	WriteApprovalFor(toolCallID string) (WriteApprovalRecord, bool)
+	RecordWriteApproval(WriteApprovalRecord)
+}
+
+func rejectedWrite(name string) error {
+	return fmt.Errorf("%w: user rejected write %q", ErrToolPermissionDenied, name)
+}
+
 // writeApprovalGate parks WritePermission tools until the host approves, edits, or rejects.
 func writeApprovalGate(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error) {
 	if inv.Tool == nil || inv.Tool.Access == nil || !inv.Tool.Access.Contains(WritePermission) {
 		return next(ctx, inv)
 	}
-	if inv.Runtime == nil {
+	log, ok := inv.Runtime.(writeApprovalLog)
+	if !ok {
 		return "", fmt.Errorf("%w: write approval requires a runtime", ErrFailed)
 	}
 
-	callID := inv.Runtime.CurrentToolCallID()
-	for _, rec := range inv.Runtime.WriteApprovals() {
-		if rec.ToolCallID != callID {
-			continue
-		}
+	name := inv.Tool.Name
+	if rec, found := log.WriteApprovalFor(inv.Runtime.CurrentToolCallID()); found {
 		if rec.Action == WriteApprovalReject {
-			return "", fmt.Errorf("%w: user rejected write %q", ErrToolPermissionDenied, inv.Tool.Name)
+			return "", rejectedWrite(name)
 		}
 		if rec.Action == WriteApprovalEdit {
 			inv.ArgsJSON = rec.Args
@@ -128,15 +137,12 @@ func writeApprovalGate(ctx context.Context, inv ToolInvocation, next ToolCallFun
 		return next(ctx, inv)
 	}
 
-	title := ResolveToolTitle(inv.Tool.DisplayName, inv.Tool.Name, inv.ArgsJSON)
-	initPayload, err := json.Marshal(map[string]any{
-		"toolName": inv.Tool.Name,
+	title := ResolveToolTitle(inv.Tool.DisplayName, name, inv.ArgsJSON)
+	initPayload, _ := json.Marshal(map[string]any{
+		"toolName": name,
 		"title":    title,
 		"args":     inv.ArgsJSON,
 	})
-	if err != nil {
-		return "", fmt.Errorf("marshal write approval payload: %w", err)
-	}
 	intr, err := inv.Runtime.RaiseInterrupt(WriteApprovalType, initPayload)
 	if err != nil {
 		return "", err
@@ -151,15 +157,15 @@ func writeApprovalGate(ctx context.Context, inv ToolInvocation, next ToolCallFun
 		args = wa.Args
 		inv.ArgsJSON = args
 	}
-	inv.Runtime.RecordWriteApproval(WriteApprovalRecord{
-		ToolName:   inv.Tool.Name,
+	log.RecordWriteApproval(WriteApprovalRecord{
+		ToolName:   name,
 		ToolCallID: inv.Runtime.CurrentToolCallID(),
 		Action:     wa.Action,
 		Args:       args,
 		UnixTime:   time.Now().Unix(),
 	})
 	if wa.Action == WriteApprovalReject {
-		return "", fmt.Errorf("%w: user rejected write %q", ErrToolPermissionDenied, inv.Tool.Name)
+		return "", rejectedWrite(name)
 	}
 	return next(ctx, inv)
 }
