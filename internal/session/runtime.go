@@ -147,3 +147,13 @@ func (rt Runtime) WriteApprovalFor(toolCallID string) (WriteApprovalRecord, bool
 func (rt Runtime) RecordWriteApproval(rec WriteApprovalRecord) {
 	rt.session.RecordWriteApproval(rec)
 }
+
+// OnCallStage returns the completed OnCall layer for toolCallID and typeName.
+func (rt Runtime) OnCallStage(toolCallID, typeName string) (args string, denied bool, ok bool) {
+	return rt.session.OnCallStage(toolCallID, typeName)
+}
+
+// RecordOnCallStage stores a completed OnCall layer for re-entry.
+func (rt Runtime) RecordOnCallStage(toolCallID, typeName, args string, denied bool) {
+	rt.session.RecordOnCallStage(toolCallID, typeName, args, denied)
+}

@@ -51,10 +51,8 @@ type Tool struct {
 	Access      mapset.Set[ToolPermission]
 	// Timeout is an optional per-invocation deadline. Zero means none.
 	Timeout time.Duration
-	// PermissionRequired asks the user to approve the tool before it runs.
-	PermissionRequired bool
-	// OnCall, if set, builds an interrupt that parks before the handler.
-	OnCall func(ToolInvocation) Interrupt
+	// OnCall is the pre-invoke middleware stack. Each constructor may park.
+	OnCall []OnCallFunc
 
 	handlerFunc func(ctx context.Context, args map[string]any, runtime HarnessRuntime) (toolCallResult, error)
 	parameters  map[string]any
@@ -69,13 +67,19 @@ type ToolConfig struct {
 	Category    streaming.ToolCategory
 	Access      mapset.Set[ToolPermission]
 	Timeout     time.Duration
-	// PermissionRequired asks the user to approve the tool before it runs.
-	PermissionRequired bool
-	// OnCall, if set, is the interrupt constructor invoked before the handler.
-	// Return nil to skip the park. The type must be registered (see RegisterInterrupt).
-	OnCall func(ToolInvocation) Interrupt
+	// OnCall is the pre-invoke middleware stack. Each constructor may park.
+	// Return nil from a constructor to skip that layer. Types must be registered.
+	OnCall []OnCallFunc
 
 	Handler any
+}
+
+// OnCallFunc builds a pre-invoke interrupt. Return nil to skip that layer.
+type OnCallFunc func(ToolInvocation) Interrupt
+
+// OnCalls builds an OnCall stack from constructors (middleware order).
+func OnCalls(ctors ...OnCallFunc) []OnCallFunc {
+	return ctors
 }
 
 type mcpToolConfig struct {
@@ -151,19 +155,21 @@ func NewTool(cfg ToolConfig) *Tool {
 	}
 
 	t := &Tool{
-		Name:               cfg.Name,
-		DisplayName:        cfg.DisplayName,
-		Description:        cfg.Description,
-		Namespace:          cfg.Namespace,
-		Category:           cfg.Category,
-		Access:             cfg.Access,
-		Timeout:            cfg.Timeout,
-		PermissionRequired: cfg.PermissionRequired,
-		OnCall:             cfg.OnCall,
-		strict:             true,
+		Name:        cfg.Name,
+		DisplayName: cfg.DisplayName,
+		Description: cfg.Description,
+		Namespace:   cfg.Namespace,
+		Category:    cfg.Category,
+		Access:      cfg.Access,
+		Timeout:     cfg.Timeout,
+		OnCall:      cfg.OnCall,
+		strict:      true,
 	}
-	if cfg.OnCall != nil {
-		if sample := cfg.OnCall(ToolInvocation{Tool: t}); sample != nil {
+	for _, ctor := range cfg.OnCall {
+		if ctor == nil {
+			continue
+		}
+		if sample := ctor(ToolInvocation{Tool: t}); sample != nil {
 			if _, ok := interrupt.New(sample.TypeName()); !ok {
 				panic(fmt.Sprintf("tool %q: OnCall type %q is not registered", cfg.Name, sample.TypeName()))
 			}

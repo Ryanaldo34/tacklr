@@ -180,7 +180,7 @@ func (v vfsTools) newWrite() *Tool {
 Pass rev from read when the path exists. Create only via content or ir_text (empty content creates or truncates). Modes are selected by which field is set: content|ir_text, old, block_id, or start. Persists immediately.`,
 		Category: streaming.ToolCategoryEdit,
 		Access:   ToolWriteAccess,
-		OnCall:   WriteApprovalOnCall,
+		OnCall:   OnCalls(WriteApprovalOnCall),
 		Timeout:  60 * time.Second,
 		Handler: func(ctx context.Context, args writeArgs, rt HarnessRuntime) (string, error) {
 			p, err := absVirtual(args.Path)

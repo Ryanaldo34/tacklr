@@ -238,12 +238,12 @@ func idMatch(id any, want int) bool {
 	}
 }
 
-// TestACP_requestPermission_allowsToolAndCompletes: PermissionRequired tool raises
+// TestACP_requestPermission_allowsToolAndCompletes: OnCall permission tool raises
 // tool_permission; client approves via session/request_permission; tool runs.
 func TestACP_requestPermission_allowsToolAndCompletes(t *testing.T) {
 	sensitive := tacklr.NewTool(tacklr.ToolConfig{
-		Name:               "sensitive",
-		PermissionRequired: true,
+		Name:   "sensitive",
+		OnCall: tacklr.OnCalls(tacklr.ToolPermissionOnCall),
 		Handler: func(ctx context.Context) (string, error) {
 			return "secret-ok", nil
 		},
@@ -422,8 +422,8 @@ func TestACP_requestPermission_allowsToolAndCompletes(t *testing.T) {
 func TestACP_requestPermission_rejectFailsToolAndCompletes(t *testing.T) {
 	var ran bool
 	sensitive := tacklr.NewTool(tacklr.ToolConfig{
-		Name:               "sensitive",
-		PermissionRequired: true,
+		Name:   "sensitive",
+		OnCall: tacklr.OnCalls(tacklr.ToolPermissionOnCall),
 		Handler: func(ctx context.Context) (string, error) {
 			ran = true
 			return "secret-ok", nil
@@ -600,9 +600,9 @@ func TestACP_requestPermission_rejectFailsToolAndCompletes(t *testing.T) {
 // TestACP_requestPermission_cancelledEndsPrompt: cancelled outcome ends the turn.
 func TestACP_requestPermission_cancelledEndsPrompt(t *testing.T) {
 	sensitive := tacklr.NewTool(tacklr.ToolConfig{
-		Name:               "sensitive",
-		PermissionRequired: true,
-		Handler:            func(ctx context.Context) (string, error) { return "nope", nil },
+		Name:    "sensitive",
+		OnCall:  tacklr.OnCalls(tacklr.ToolPermissionOnCall),
+		Handler: func(ctx context.Context) (string, error) { return "nope", nil },
 	})
 	strategy := &mockInferenceStrategy{
 		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {

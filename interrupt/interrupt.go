@@ -227,6 +227,18 @@ func (p *ToolPermissionInterrupt) Error() string {
 	return string(b)
 }
 
+func (p *ToolPermissionInterrupt) ReplacementArgs() string { return "" }
+
+func (p *ToolPermissionInterrupt) CallDenied() bool {
+	return p.SelectedKind != "" && !p.Allowed
+}
+
+// Predecided is true when the constructor already resolved this interrupt
+// (session allow-always / reject-always) and the harness must not park.
+func (p *ToolPermissionInterrupt) Predecided() bool {
+	return p.SelectedKind != ""
+}
+
 // Write-approval actions returned by the host.
 const (
 	WriteApprovalApprove = "approve"

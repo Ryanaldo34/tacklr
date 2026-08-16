@@ -2,7 +2,6 @@ package tacklr
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"time"
 
@@ -21,7 +20,7 @@ type ToolCallFunc func(ctx context.Context, inv ToolInvocation) (string, error)
 
 // ToolInterceptor wraps a tool call. Call next to continue, or return early to
 // short-circuit. Host interceptors on AgentOptions wrap outside the built-in
-// planning lock and permission gate; they never replace that chain.
+// planning lock and OnCall middleware; they never replace that chain.
 type ToolInterceptor func(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error)
 
 type toolRunner struct {
@@ -59,119 +58,156 @@ func (r *toolRunner) Run(ctx context.Context, inv ToolInvocation) (string, ToolR
 	return out, toolDisp, err
 }
 
-// toolPermissionGate raises tool_permission when PermissionRequired is set.
-// allow_always and reject_always are stored for the session.
-func toolPermissionGate(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error) {
-	if inv.Tool == nil || !inv.Tool.PermissionRequired {
-		return next(ctx, inv)
-	}
-
-	name := inv.Tool.Name
-	if inv.Runtime != nil && inv.Runtime.PermissionAlwaysDenied(name) {
-		return "", fmt.Errorf("%w: tool %q is always rejected for this session", ErrToolPermissionDenied, name)
-	}
-	if inv.Runtime != nil && inv.Runtime.PermissionAlwaysAllowed(name) {
-		return next(ctx, inv)
-	}
-
-	title := ResolveToolTitle(inv.Tool.DisplayName, name, inv.ArgsJSON)
-	initPayload, _ := json.Marshal(map[string]any{
-		"toolName": name,
-		"title":    title,
-	})
-	intr, err := inv.Runtime.RaiseInterrupt("tool_permission", initPayload)
-	if err != nil {
-		return "", err
-	}
-	perm, ok := intr.(*interrupt.ToolPermissionInterrupt)
-	if !ok {
-		return "", fmt.Errorf("%w: unexpected permission interrupt type %T", ErrFailed, intr)
-	}
-
-	switch perm.SelectedKind {
-	case interrupt.PermissionAllowAlways:
-		if inv.Runtime != nil {
-			inv.Runtime.RememberPermissionAllow(name)
-		}
-	case interrupt.PermissionRejectAlways:
-		if inv.Runtime != nil {
-			inv.Runtime.RememberPermissionDeny(name)
-		}
-	}
-
-	if !perm.Allowed {
-		return "", fmt.Errorf("%w: user rejected tool %q", ErrToolPermissionDenied, name)
-	}
-	return next(ctx, inv)
-}
-
-// writeApprovalLog is the session-backed audit for write_approval OnCall.
-// session.Runtime implements it; it is not part of HarnessRuntime.
-type writeApprovalLog interface {
-	WriteApprovalFor(toolCallID string) (WriteApprovalRecord, bool)
-	RecordWriteApproval(WriteApprovalRecord)
-}
-
 func rejectedOnCall(name string) error {
 	return fmt.Errorf("%w: user rejected tool %q", ErrToolPermissionDenied, name)
 }
 
-// WriteApprovalOnCall is the OnCall constructor that parks a write_approval interrupt.
-func WriteApprovalOnCall(inv ToolInvocation) Interrupt {
-	name, display := "", ""
-	if inv.Tool != nil {
-		name = inv.Tool.Name
-		display = inv.Tool.DisplayName
+func toolNameOf(inv ToolInvocation) string {
+	if inv.Tool == nil {
+		return ""
 	}
+	return inv.Tool.Name
+}
+
+func toolDisplayOf(inv ToolInvocation) string {
+	if inv.Tool == nil {
+		return ""
+	}
+	return inv.Tool.DisplayName
+}
+
+// WriteApprovalOnCall parks a write_approval interrupt before the handler.
+func WriteApprovalOnCall(inv ToolInvocation) Interrupt {
+	name := toolNameOf(inv)
 	return &interrupt.WriteApprovalInterrupt{
 		ToolName: name,
-		Title:    ResolveToolTitle(display, name, inv.ArgsJSON),
+		Title:    ResolveToolTitle(toolDisplayOf(inv), name, inv.ArgsJSON),
 		Args:     inv.ArgsJSON,
 	}
 }
 
-// onCallGate parks when Tool.OnCall returns an interrupt, then applies CallEffect.
-func onCallGate(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error) {
-	if inv.Tool == nil || inv.Tool.OnCall == nil {
-		return next(ctx, inv)
-	}
-	if inv.Runtime == nil {
-		return "", fmt.Errorf("%w: on-call interrupt requires a runtime", ErrFailed)
-	}
-
-	name := inv.Tool.Name
-	if log, ok := inv.Runtime.(writeApprovalLog); ok {
-		if rec, found := log.WriteApprovalFor(inv.Runtime.CurrentToolCallID()); found {
-			if rec.Action == WriteApprovalReject {
-				return "", rejectedOnCall(name)
-			}
-			if rec.Action == WriteApprovalEdit {
-				inv.ArgsJSON = rec.Args
-			}
-			return next(ctx, inv)
+// ToolPermissionOnCall parks a tool_permission interrupt before the handler.
+// Session allow-always skips the park; reject-always denies without a yield.
+func ToolPermissionOnCall(inv ToolInvocation) Interrupt {
+	name := toolNameOf(inv)
+	if inv.Runtime != nil && inv.Runtime.PermissionAlwaysDenied(name) {
+		return &interrupt.ToolPermissionInterrupt{
+			ToolName:     name,
+			SelectedKind: interrupt.PermissionRejectAlways,
+			Allowed:      false,
 		}
 	}
+	if inv.Runtime != nil && inv.Runtime.PermissionAlwaysAllowed(name) {
+		return nil
+	}
+	return &interrupt.ToolPermissionInterrupt{
+		ToolName: name,
+		Title:    ResolveToolTitle(toolDisplayOf(inv), name, inv.ArgsJSON),
+		Options:  interrupt.DefaultPermissionOptions(),
+	}
+}
 
-	intr := inv.Tool.OnCall(inv)
-	if intr == nil {
+// onCallStore is the session-backed OnCall stage + write-approval audit.
+// session.Runtime implements it; it is not part of HarnessRuntime.
+type onCallStore interface {
+	OnCallStage(toolCallID, typeName string) (args string, denied bool, ok bool)
+	RecordOnCallStage(toolCallID, typeName, args string, denied bool)
+	RecordWriteApproval(WriteApprovalRecord)
+}
+
+type predecidedCall interface {
+	Predecided() bool
+}
+
+// onCallMiddleware runs Tool.OnCall constructors in order (FastAPI-style layers).
+// skipTypes omits those interrupt kinds (DisableWriteApproval uses write_approval).
+func onCallMiddleware(skipTypes ...string) ToolInterceptor {
+	skip := make(map[string]struct{}, len(skipTypes))
+	for _, t := range skipTypes {
+		skip[t] = struct{}{}
+	}
+	return func(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error) {
+		if inv.Tool == nil || len(inv.Tool.OnCall) == 0 {
+			return next(ctx, inv)
+		}
+		if inv.Runtime == nil {
+			return "", fmt.Errorf("%w: on-call interrupt requires a runtime", ErrFailed)
+		}
+		store, _ := inv.Runtime.(onCallStore)
+		for _, ctor := range inv.Tool.OnCall {
+			if ctor == nil {
+				continue
+			}
+			if err := applyOnCallLayer(&inv, ctor, store, skip); err != nil {
+				return "", err
+			}
+		}
 		return next(ctx, inv)
+	}
+}
+
+func applyOnCallLayer(inv *ToolInvocation, ctor OnCallFunc, store onCallStore, skip map[string]struct{}) error {
+	intr := ctor(*inv)
+	if intr == nil {
+		return nil
+	}
+	if _, ok := skip[intr.TypeName()]; ok {
+		return nil
+	}
+	callID := inv.Runtime.CurrentToolCallID()
+	if store != nil {
+		if args, denied, ok := store.OnCallStage(callID, intr.TypeName()); ok {
+			if denied {
+				return rejectedOnCall(toolNameOf(*inv))
+			}
+			if args != "" {
+				inv.ArgsJSON = args
+			}
+			return nil
+		}
+	}
+	if p, ok := intr.(predecidedCall); ok && p.Predecided() {
+		return finishOnCallLayer(inv, intr, store)
 	}
 	resolved, err := inv.Runtime.AdoptInterrupt(intr)
 	if err != nil {
-		return "", err
+		return err
 	}
+	return finishOnCallLayer(inv, resolved, store)
+}
 
+func finishOnCallLayer(inv *ToolInvocation, resolved Interrupt, store onCallStore) error {
+	args := inv.ArgsJSON
+	denied := false
 	if eff, ok := resolved.(interrupt.CallEffect); ok {
-		if args := eff.ReplacementArgs(); args != "" {
-			inv.ArgsJSON = args
+		if repl := eff.ReplacementArgs(); repl != "" {
+			args = repl
+			inv.ArgsJSON = repl
 		}
-		if eff.CallDenied() {
-			recordWriteApprovalIfNeeded(inv, resolved)
-			return "", rejectedOnCall(name)
-		}
+		denied = eff.CallDenied()
 	}
-	recordWriteApprovalIfNeeded(inv, resolved)
-	return next(ctx, inv)
+	rememberOnCallSession(inv.Runtime, resolved)
+	if store != nil && resolved != nil {
+		store.RecordOnCallStage(inv.Runtime.CurrentToolCallID(), resolved.TypeName(), args, denied)
+	}
+	recordWriteApprovalIfNeeded(*inv, resolved)
+	if denied {
+		return rejectedOnCall(toolNameOf(*inv))
+	}
+	return nil
+}
+
+func rememberOnCallSession(rt HarnessRuntime, resolved Interrupt) {
+	perm, ok := resolved.(*interrupt.ToolPermissionInterrupt)
+	if !ok || rt == nil {
+		return
+	}
+	switch perm.SelectedKind {
+	case interrupt.PermissionAllowAlways:
+		rt.RememberPermissionAllow(perm.ToolName)
+	case interrupt.PermissionRejectAlways:
+		rt.RememberPermissionDeny(perm.ToolName)
+	}
 }
 
 func recordWriteApprovalIfNeeded(inv ToolInvocation, resolved Interrupt) {
@@ -179,7 +215,7 @@ func recordWriteApprovalIfNeeded(inv ToolInvocation, resolved Interrupt) {
 	if !ok {
 		return
 	}
-	log, ok := inv.Runtime.(writeApprovalLog)
+	store, ok := inv.Runtime.(onCallStore)
 	if !ok {
 		return
 	}
@@ -187,8 +223,8 @@ func recordWriteApprovalIfNeeded(inv ToolInvocation, resolved Interrupt) {
 	if wa.Action == WriteApprovalEdit {
 		args = wa.Args
 	}
-	log.RecordWriteApproval(WriteApprovalRecord{
-		ToolName:   inv.Tool.Name,
+	store.RecordWriteApproval(WriteApprovalRecord{
+		ToolName:   toolNameOf(inv),
 		ToolCallID: inv.Runtime.CurrentToolCallID(),
 		Action:     wa.Action,
 		Args:       args,

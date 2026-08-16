@@ -49,8 +49,7 @@ type AgentOptions struct {
 	// ContextPolicy sets pressure/compress ratios when non-zero fields are set.
 	ContextPolicy ContextPolicy
 	// ToolInterceptors wrap each tool call (outermost first). Built-in
-	// planning lock, OnCall interrupt gate, and permission gate are installed
-	// after these.
+	// planning lock and OnCall middleware are installed after these.
 	ToolInterceptors []ToolInterceptor
 	// DisablePlanningLock omits planningWriteLock (workers and tests).
 	// The permission gate is still always installed.
@@ -82,8 +81,8 @@ type AgentOptions struct {
 	// for this turn (tool dispatch only). Hosts create, mount, FuseMount, and
 	// Close it. Nil means no VFS tools.
 	MountSession *vfs.MountSession
-	// RunCommandUnattended injects run_command with PermissionRequired=false.
-	// Zero value (Registry, testserver) keeps PermissionRequired=true.
+	// RunCommandUnattended injects run_command without ToolPermissionOnCall.
+	// Zero value (Registry, testserver) parks run_command for permission.
 	RunCommandUnattended bool
 	// shareIndexBridge is the parent index bridge. Nil means Start a new bridge.
 	shareIndexBridge *vfsindex.Bridge
@@ -159,10 +158,11 @@ func newHarnessBase(opts AgentOptions, sm *session.SessionManager) (*AgentHarnes
 	if !opts.DisablePlanningLock {
 		chain = append(chain, h.planningWriteLock)
 	}
-	if !opts.DisableWriteApproval {
-		chain = append(chain, onCallGate)
+	if opts.DisableWriteApproval {
+		chain = append(chain, onCallMiddleware(WriteApprovalType))
+	} else {
+		chain = append(chain, onCallMiddleware())
 	}
-	chain = append(chain, toolPermissionGate)
 	h.toolRunner = newToolRunner(chain...)
 	h.toolResultHooks = newToolResultHookRegistry(opts.ToolResultHooks)
 	return h, nil

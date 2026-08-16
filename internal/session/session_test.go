@@ -147,6 +147,9 @@ func TestPlanStore_lifecycle(t *testing.T) {
 	if !session.IsReservedRuntimeStateKey("_write_approval_audit") {
 		t.Fatal("write approval audit key")
 	}
+	if !session.IsReservedRuntimeStateKey("_on_call_stages") {
+		t.Fatal("on-call stages key")
+	}
 	if session.IsReservedRuntimeStateKey("user") {
 		t.Fatal("user key not reserved")
 	}

@@ -3,11 +3,14 @@ package tacklr
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/ryanaldo34/tacklr/internal/session"
 	"github.com/ryanaldo34/tacklr/stores"
+	"github.com/ryanaldo34/tacklr/streaming"
 )
 
 // TestToolRunner_interceptorChainOrder is the extension contract for custom
@@ -18,7 +21,7 @@ func TestHarness_planningWriteLock_thenUnlockAfterCreatePlan(t *testing.T) {
 	writeTool := NewTool(ToolConfig{
 		Name:   "mutate",
 		Access: ToolWriteAccess,
-		OnCall: WriteApprovalOnCall,
+		OnCall: OnCalls(WriteApprovalOnCall),
 		Handler: func(ctx context.Context) (string, error) {
 			calls++
 			return "mutated", nil
@@ -122,8 +125,8 @@ func TestHarness_planningWriteLock_thenUnlockAfterCreatePlan(t *testing.T) {
 func TestHarness_toolPermission_allowAlwaysRemembers(t *testing.T) {
 	var handlerCalls int
 	tool := NewTool(ToolConfig{
-		Name:               "sensitive",
-		PermissionRequired: true,
+		Name:   "sensitive",
+		OnCall: OnCalls(ToolPermissionOnCall),
 		Handler: func(ctx context.Context) (string, error) {
 			handlerCalls++
 			return "secret-ok", nil
@@ -220,9 +223,9 @@ func TestHarness_toolPermission_allowAlwaysRemembers(t *testing.T) {
 // and subsequent calls fail without another yield.
 func TestHarness_toolPermission_rejectAlwaysRemembers(t *testing.T) {
 	tool := NewTool(ToolConfig{
-		Name:               "sensitive",
-		PermissionRequired: true,
-		Handler:            func(ctx context.Context) (string, error) { return "nope", nil },
+		Name:    "sensitive",
+		OnCall:  OnCalls(ToolPermissionOnCall),
+		Handler: func(ctx context.Context) (string, error) { return "nope", nil },
 	})
 	var invokeCount int
 	strategy := &mockStrategy{
@@ -375,10 +378,9 @@ func TestHarness_toolTimeout_surfacesAsToolResult(t *testing.T) {
 func TestHarness_hostInterceptor_keepsPermissionGate(t *testing.T) {
 	var hostSaw string
 	tool := NewTool(ToolConfig{
-		Name:               "crm_write",
-		Access:             ToolWriteAccess,
-		PermissionRequired: true,
-		OnCall:             WriteApprovalOnCall,
+		Name:   "crm_write",
+		Access: ToolWriteAccess,
+		OnCall: OnCalls(WriteApprovalOnCall, ToolPermissionOnCall),
 		Handler: func(ctx context.Context) (string, error) {
 			return "should-not-run", nil
 		},
@@ -440,7 +442,7 @@ func TestHarness_writeApproval_rejectThenEdit(t *testing.T) {
 	tool := NewTool(ToolConfig{
 		Name:   "mutate",
 		Access: ToolWriteAccess,
-		OnCall: WriteApprovalOnCall,
+		OnCall: OnCalls(WriteApprovalOnCall),
 		Handler: func(ctx context.Context, args struct {
 			Path string `json:"path"`
 		}) (string, error) {
@@ -524,4 +526,115 @@ func drainYield(t *testing.T, ch <-chan StreamEvent) (id, kind string) {
 	}
 	t.Fatal("expected interrupt yield")
 	return "", ""
+}
+
+func onCallRuntime() session.Runtime {
+	ch := make(chan streaming.StreamEvent, 8)
+	go func() {
+		for range ch {
+		}
+	}()
+	return session.NewRuntime(ch, session.NewSessionManager()).WithToolCallID("c1")
+}
+
+func requireParked(t *testing.T, err error, kind string) {
+	t.Helper()
+	var parked Interrupt
+	if !errors.As(err, &parked) || parked.TypeName() != kind {
+		t.Fatalf("park type=%v err=%v", parked, err)
+	}
+}
+
+// TestOnCallMiddleware_writeThenPermission is the isolated middleware stack:
+// write_approval then tool_permission, then the handler sees edited args.
+func TestOnCallMiddleware_writeThenPermission(t *testing.T) {
+	var calls int
+	var seen string
+	tool := NewTool(ToolConfig{
+		Name:   "mutate",
+		OnCall: OnCalls(WriteApprovalOnCall, ToolPermissionOnCall),
+		Handler: func(ctx context.Context, args struct {
+			Path string `json:"path"`
+		}) (string, error) {
+			calls++
+			seen = args.Path
+			return "ok", nil
+		},
+	})
+	rt := onCallRuntime()
+	runner := newToolRunner(onCallMiddleware())
+	inv := ToolInvocation{Tool: tool, ArgsJSON: `{"path":"/a"}`, Runtime: rt}
+
+	_, _, err := runner.Run(t.Context(), inv)
+	requireParked(t, err, WriteApprovalType)
+	if _, err := rt.ReturnInterrupt("c1", []byte(`{"action":"edit","args":"{\"path\":\"/b\"}"}`)); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = runner.Run(t.Context(), inv)
+	requireParked(t, err, "tool_permission")
+	if _, err := rt.ReturnInterrupt("c1", []byte(`{"optionId":"allow-once"}`)); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := runner.Run(t.Context(), inv)
+	if err != nil || calls != 1 || seen != "/b" || out != "ok" {
+		t.Fatalf("invoke: calls=%d seen=%q out=%q err=%v", calls, seen, out, err)
+	}
+}
+
+// TestOnCallMiddleware_permissionMemory: allow-always skips the next park;
+// reject-always denies without a yield.
+func TestOnCallMiddleware_permissionMemory(t *testing.T) {
+	var calls int
+	tool := NewTool(ToolConfig{
+		Name:   "sensitive",
+		OnCall: OnCalls(ToolPermissionOnCall),
+		Handler: func(ctx context.Context) (string, error) {
+			calls++
+			return "secret", nil
+		},
+	})
+	rt := onCallRuntime()
+	rt.RememberPermissionAllow("sensitive")
+	runner := newToolRunner(onCallMiddleware())
+	inv := ToolInvocation{Tool: tool, ArgsJSON: `{}`, Runtime: rt}
+	out, _, err := runner.Run(t.Context(), inv)
+	if err != nil || calls != 1 || out != "secret" {
+		t.Fatalf("allow-always: calls=%d out=%q err=%v", calls, out, err)
+	}
+
+	denyRT := onCallRuntime()
+	denyRT.RememberPermissionDeny("sensitive")
+	_, _, err = runner.Run(t.Context(), ToolInvocation{Tool: tool, ArgsJSON: `{}`, Runtime: denyRT})
+	if !errors.Is(err, ErrToolPermissionDenied) || calls != 1 {
+		t.Fatalf("reject-always: calls=%d err=%v", calls, err)
+	}
+}
+
+// TestOnCallMiddleware_skipWriteStillParksPermission: DisableWriteApproval
+// omits write_approval and still runs the permission layer.
+func TestOnCallMiddleware_skipWriteStillParksPermission(t *testing.T) {
+	tool := NewTool(ToolConfig{
+		Name:    "crm_write",
+		OnCall:  OnCalls(WriteApprovalOnCall, ToolPermissionOnCall),
+		Handler: func(ctx context.Context) (string, error) { return "nope", nil },
+	})
+	rt := onCallRuntime()
+	runner := newToolRunner(onCallMiddleware(WriteApprovalType))
+	_, _, err := runner.Run(t.Context(), ToolInvocation{Tool: tool, ArgsJSON: `{}`, Runtime: rt})
+	requireParked(t, err, "tool_permission")
+}
+
+// TestOnCallMiddleware_emptyStackInvokes: no OnCall layers means the handler runs.
+func TestOnCallMiddleware_emptyStackInvokes(t *testing.T) {
+	tool := NewTool(ToolConfig{
+		Name:    "echo",
+		Handler: func(ctx context.Context) (string, error) { return "hi", nil },
+	})
+	rt := onCallRuntime()
+	out, _, err := newToolRunner(onCallMiddleware()).Run(t.Context(), ToolInvocation{
+		Tool: tool, ArgsJSON: `{}`, Runtime: rt,
+	})
+	if err != nil || out != "hi" {
+		t.Fatalf("out=%q err=%v", out, err)
+	}
 }

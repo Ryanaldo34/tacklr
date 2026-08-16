@@ -51,6 +51,7 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 		Args:       `{"path":"/a"}`,
 		UnixTime:   1,
 	})
+	sm.RecordOnCallStage("w1", "write_approval", `{"path":"/a"}`, false)
 	if !rt.PermissionAlwaysAllowed("crm_write") || !sm.PermissionAlwaysAllowed("crm_write") {
 		t.Fatal("allow-always not visible on Runtime and SessionManager")
 	}
@@ -153,6 +154,10 @@ func assertModules(t *testing.T, sm *session.SessionManager, ns uuid.UUID, parkI
 	recs := sm.WriteApprovals()
 	if len(recs) != 1 || recs[0].Action != "approve" || recs[0].ToolName != "mutate" || recs[0].Args != `{"path":"/a"}` {
 		t.Fatalf("write approval audit reload = %+v", recs)
+	}
+	args, denied, ok := sm.OnCallStage("w1", "write_approval")
+	if !ok || denied || args != `{"path":"/a"}` {
+		t.Fatalf("on-call stage reload args=%q denied=%v ok=%v", args, denied, ok)
 	}
 	got, ok := sm.ParkedWorker(parkID)
 	if !ok || got.WorkerName != worker || got.WorkerSessionID != "sess/w/researcher/spawn_1" {

@@ -25,14 +25,13 @@ type runCommandArgs struct {
 }
 
 func newRunCommand(ms *vfs.MountSession, permissionRequired bool) *Tool {
-	return NewTool(ToolConfig{
-		Name:               "run_command",
-		DisplayName:        "Run {command}",
-		Description:        `Run a host shell command as /bin/sh -c. cwd is the VFS root (FUSE mount). Use relative paths (work/foo, ./work/foo). Absolute /work is the host /work until a later jail. Non-zero exit is a successful tool result (exit=N).`,
-		Category:           streaming.ToolCategoryExecute,
-		Access:             ToolExecuteAccess,
-		Timeout:            runCommandTimeout,
-		PermissionRequired: permissionRequired,
+	cfg := ToolConfig{
+		Name:        "run_command",
+		DisplayName: "Run {command}",
+		Description: `Run a host shell command as /bin/sh -c. cwd is the VFS root (FUSE mount). Use relative paths (work/foo, ./work/foo). Absolute /work is the host /work until a later jail. Non-zero exit is a successful tool result (exit=N).`,
+		Category:    streaming.ToolCategoryExecute,
+		Access:      ToolExecuteAccess,
+		Timeout:     runCommandTimeout,
 		Handler: func(ctx context.Context, args runCommandArgs, rt HarnessRuntime) (string, error) {
 			dir := ms.HostDir()
 			if dir == "" {
@@ -75,7 +74,11 @@ func newRunCommand(ms *vfs.MountSession, permissionRequired bool) *Tool {
 			}
 			return formatRunCommandResult(exit, budget.truncated, stdout, stderr), nil
 		},
-	})
+	}
+	if permissionRequired {
+		cfg.OnCall = OnCalls(ToolPermissionOnCall)
+	}
+	return NewTool(cfg)
 }
 
 func formatRunCommandResult(exit int, truncated bool, stdout, stderr *budgetWriter) string {

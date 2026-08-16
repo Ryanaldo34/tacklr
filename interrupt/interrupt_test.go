@@ -143,6 +143,9 @@ func TestToolPermission_allKinds(t *testing.T) {
 		if p2.Allowed != tc.allowed || p2.SelectedKind != tc.kind || p2.SelectedOptionID != tc.id {
 			t.Fatalf("%s: allowed=%v kind=%s id=%s", tc.id, p2.Allowed, p2.SelectedKind, p2.SelectedOptionID)
 		}
+		if p2.CallDenied() == tc.allowed || p2.ReplacementArgs() != "" {
+			t.Fatalf("%s: CallDenied=%v args=%q", tc.id, p2.CallDenied(), p2.ReplacementArgs())
+		}
 	}
 
 	// Unknown kind on a custom option.
