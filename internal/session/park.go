@@ -1,10 +1,6 @@
 package session
 
-import (
-	"sync"
-
-	"github.com/ryanaldo34/tacklr/internal/codec"
-)
+import "sync"
 
 const parkedWorkersStateKey = "_parked_workers"
 
@@ -75,19 +71,6 @@ func (p *parkBag) exportInto(state map[string]any) {
 		return
 	}
 	state[parkedWorkersStateKey] = cp
-}
-
-func (p *parkBag) loadFromState(state map[string]any) {
-	raw, ok := state[parkedWorkersStateKey]
-	if !ok || raw == nil {
-		p.replace(nil)
-		return
-	}
-	if m, ok := codec.As[map[string]ParkedWorkerMeta](raw); ok && m != nil {
-		p.replace(m)
-		return
-	}
-	p.replace(nil)
 }
 
 // ParkedWorker returns durable park metadata for a spawn_worker tool call.

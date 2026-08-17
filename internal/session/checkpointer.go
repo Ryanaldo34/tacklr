@@ -33,17 +33,13 @@ func (Checkpointer) Capture(
 	if err := streaming.ValidateMessages(window); err != nil {
 		return nil, fmt.Errorf("checkpointer: invalid context window: %w", err)
 	}
-	runtimeState, pending, resolved := sm.SnapshotDurable()
-	cp, err := stores.NewCheckpoint(window, pendingToolCalls, runtimeState, pending, resolved)
+	userState, modules, pending, resolved, err := sm.snapshotCheckpoint()
 	if err != nil {
 		return nil, err
 	}
-	if sm.Search != nil {
-		raw, err := sm.Search.Export()
-		if err != nil {
-			return nil, fmt.Errorf("checkpointer: export search context: %w", err)
-		}
-		cp.State.SearchContext = raw
+	cp, err := stores.NewTypedCheckpoint(window, pendingToolCalls, userState, modules, pending, resolved)
+	if err != nil {
+		return nil, err
 	}
 	return cp, nil
 }
@@ -67,15 +63,26 @@ func (Checkpointer) Apply(cp stores.SessionCheckpoint, sm *SessionManager) (Appl
 	if err := streaming.ValidateMessages(cp.ContextWindow); err != nil {
 		return AppliedCheckpoint{}, fmt.Errorf("checkpointer: invalid context window: %w", err)
 	}
-	sm.LoadUserAndPlanState(cp.State.RuntimeState)
-	if len(cp.State.SearchContext) > 0 {
-		if err := sm.Search.Restore(cp.State.SearchContext); err != nil {
-			return AppliedCheckpoint{}, fmt.Errorf("checkpointer: restore search context: %w", err)
-		}
-	}
-	if err := sm.LoadInterruptsJSON(cp.State.PendingInterrupts, cp.State.ResolvedInterrupts); err != nil {
+	pendingInterrupts, resolvedInterrupts, err := decodeInterruptMaps(cp.State.PendingInterrupts, cp.State.ResolvedInterrupts)
+	if err != nil {
 		return AppliedCheckpoint{}, err
 	}
+	if cp.State.Version > stores.CheckpointVersion {
+		return AppliedCheckpoint{}, fmt.Errorf("checkpointer: unsupported checkpoint version %d", cp.State.Version)
+	}
+	if cp.State.Version == stores.CheckpointVersion {
+		if err := sm.applyCheckpoint(cp.State.UserState, cp.State.Modules); err != nil {
+			return AppliedCheckpoint{}, err
+		}
+	} else {
+		sm.LoadUserAndPlanState(cp.State.RuntimeState)
+		if len(cp.State.SearchContext) > 0 {
+			if err := sm.Search.Restore(cp.State.SearchContext); err != nil {
+				return AppliedCheckpoint{}, fmt.Errorf("checkpointer: restore legacy search context: %w", err)
+			}
+		}
+	}
+	sm.replaceInterrupts(pendingInterrupts, resolvedInterrupts)
 	ptc := cp.State.PendingToolCalls
 	if ptc == nil {
 		ptc = make(map[string]stores.PendingToolCall)

@@ -3,8 +3,6 @@ package session
 import (
 	"strings"
 	"sync"
-
-	"github.com/ryanaldo34/tacklr/internal/codec"
 )
 
 // Reserved checkpoint keys for SessionManager modules (blocked on StateGet/Set).
@@ -148,33 +146,5 @@ func (p *PlanStore) ExportInto(state map[string]any) {
 		state[planDocumentUpdatedKey] = true
 	} else {
 		delete(state, planDocumentUpdatedKey)
-	}
-}
-
-// LoadFromState hydrates the store from checkpoint RuntimeState (including
-// JSON-rehydrated []any / map shapes). Safe to call with nil state.
-func (p *PlanStore) LoadFromState(state map[string]any) {
-	if state == nil {
-		return
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.todos = nil
-	p.document = ""
-	p.documentUpdated = false
-	p.todosUpdated = false
-
-	if v, ok := state[planStateKey]; ok && v != nil {
-		if plan, ok := codec.As[[]Todo](v); ok {
-			cp := make([]Todo, len(plan))
-			copy(cp, plan)
-			p.todos = cp
-		}
-	}
-	if s, ok := state[planDocumentStateKey].(string); ok {
-		p.document = s
-	}
-	if b, ok := state[planDocumentUpdatedKey].(bool); ok {
-		p.documentUpdated = b
 	}
 }

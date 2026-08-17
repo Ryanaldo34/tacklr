@@ -1,6 +1,7 @@
 package session_test
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/google/uuid"
@@ -24,10 +25,11 @@ func TestSession_legacySearchNamespaceKey_strippedOnLoad(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := cp.State.RuntimeState["_search_namespace"]; ok {
+	if _, ok := cp.State.UserState["_search_namespace"]; ok {
 		t.Fatal("legacy key must not re-export")
 	}
-	if cp.State.RuntimeState["user_key"] != "v" {
-		t.Fatalf("%+v", cp.State.RuntimeState)
+	var userValue string
+	if err := json.Unmarshal(cp.State.UserState["user_key"], &userValue); err != nil || userValue != "v" {
+		t.Fatalf("%+v err=%v", cp.State.UserState, err)
 	}
 }

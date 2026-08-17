@@ -8,6 +8,7 @@ import (
 
 	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/internal/session"
+	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
@@ -90,8 +91,11 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cp.State.SearchContext) == 0 {
+	if len(cp.State.Modules["search"]) == 0 {
 		t.Fatal("checkpoint must include search context")
+	}
+	if cp.State.Version != stores.CheckpointVersion || cp.State.RuntimeState != nil {
+		t.Fatalf("checkpoint schema = version %d legacy=%#v", cp.State.Version, cp.State.RuntimeState)
 	}
 
 	// In-process Apply: typed park/permission maps + SearchContext blob.
@@ -101,19 +105,18 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 	}
 	assertModules(t, smTyped, ns, "spawn_1", "researcher")
 
-	// JSON wire: typed bags become map[string]any / []any.
-	rawState, err := json.Marshal(cp.State.RuntimeState)
+	// JSON wire preserves typed module sections.
+	rawState, err := json.Marshal(cp)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var wire map[string]any
+	var wire stores.SessionCheckpoint
 	if err := json.Unmarshal(rawState, &wire); err != nil {
 		t.Fatal(err)
 	}
-	cp.State.RuntimeState = wire
 
 	sm2 := session.NewSessionManager()
-	if _, err := session.NewCheckpointer().Apply(*cp, sm2); err != nil {
+	if _, err := session.NewCheckpointer().Apply(wire, sm2); err != nil {
 		t.Fatal(err)
 	}
 	assertModules(t, sm2, ns, "spawn_1", "researcher")
@@ -142,6 +145,67 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 	gotFresh, ok := sm2.Search.Namespace()
 	if !ok || gotFresh != fresh {
 		t.Fatalf("replacement Search must be usable, got %v ok=%v", gotFresh, ok)
+	}
+}
+
+func TestTypedCheckpoint_rejectsNamedModuleWithoutPartialApply(t *testing.T) {
+	// Arrange
+	source := session.NewSessionManager()
+	source.Plan.SetDocument("source")
+	checkpoint, err := session.NewCheckpointer().Capture(
+		[]*streaming.Message{{Role: streaming.RoleUser, Content: "go"}},
+		source,
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint.State.Modules["permissions"] = json.RawMessage(`{"allow":`)
+	target := session.NewSessionManager()
+	target.Plan.SetDocument("target")
+
+	// Act
+	_, err = session.NewCheckpointer().Apply(*checkpoint, target)
+
+	// Assert
+	if err == nil || target.Plan.Document() != "target" {
+		t.Fatalf("Apply error = %v plan = %q", err, target.Plan.Document())
+	}
+}
+
+func TestLegacyCheckpoint_migratesToTypedModules(t *testing.T) {
+	// Arrange
+	legacy, err := stores.NewCheckpoint(
+		[]*streaming.Message{{Role: streaming.RoleUser, Content: "go"}},
+		nil,
+		map[string]any{
+			"_plan":          []any{map[string]any{"title": "legacy", "status": "pending"}},
+			"_plan_document": "legacy document",
+			"host":           "value",
+		},
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := session.NewSessionManager()
+
+	// Act
+	if _, err := session.NewCheckpointer().Apply(*legacy, manager); err != nil {
+		t.Fatal(err)
+	}
+	migrated, err := session.NewCheckpointer().Capture(legacy.ContextWindow, manager, nil)
+
+	// Assert
+	if err != nil {
+		t.Fatal(err)
+	}
+	if migrated.State.Version != stores.CheckpointVersion || len(migrated.State.Modules["plan"]) == 0 {
+		t.Fatalf("migrated checkpoint = %#v", migrated.State)
+	}
+	if got := manager.Plan.Get(); len(got) != 1 || got[0].Title != "legacy" {
+		t.Fatalf("migrated plan = %#v", got)
 	}
 }
 

@@ -3,8 +3,6 @@ package session
 import (
 	"maps"
 	"sync"
-
-	"github.com/ryanaldo34/tacklr/internal/codec"
 )
 
 const (
@@ -69,14 +67,6 @@ func (p *Permissions) Remember(toolName string, d PermissionDecision) {
 	}
 }
 
-func decodeBoolSet(raw any) map[string]bool {
-	m, ok := codec.As[map[string]bool](raw)
-	if !ok || m == nil {
-		return map[string]bool{}
-	}
-	return maps.Clone(m)
-}
-
 func (p *Permissions) exportInto(state map[string]any) {
 	p.mu.RLock()
 	allow := maps.Clone(p.allow)
@@ -91,21 +81,5 @@ func (p *Permissions) exportInto(state map[string]any) {
 		delete(state, permissionDenyKey)
 	} else {
 		state[permissionDenyKey] = deny
-	}
-}
-
-func (p *Permissions) loadFromState(state map[string]any) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.allow = map[string]bool{}
-	p.deny = map[string]bool{}
-	if state == nil {
-		return
-	}
-	if raw, ok := state[permissionAllowKey]; ok && raw != nil {
-		p.allow = decodeBoolSet(raw)
-	}
-	if raw, ok := state[permissionDenyKey]; ok && raw != nil {
-		p.deny = decodeBoolSet(raw)
 	}
 }

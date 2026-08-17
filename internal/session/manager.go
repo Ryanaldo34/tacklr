@@ -268,17 +268,33 @@ func (s *SessionManager) LoadUserAndPlanState(state map[string]any) {
 
 // LoadInterruptsJSON restores interrupt maps from checkpoint JSON blobs.
 func (s *SessionManager) LoadInterruptsJSON(pendingJSON, resolvedJSON []byte) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	pending, resolved, err := decodeInterruptMaps(pendingJSON, resolvedJSON)
+	if err != nil {
+		return err
+	}
+	s.replaceInterrupts(pending, resolved)
+	return nil
+}
+
+func decodeInterruptMaps(pendingJSON, resolvedJSON []byte) (interruptMap, interruptMap, error) {
+	pending := interruptMap{}
+	resolved := interruptMap{}
 	if len(pendingJSON) > 0 {
-		if err := json.Unmarshal(pendingJSON, &s.pending); err != nil {
-			return fmt.Errorf("unmarshal pending interrupts: %w", err)
+		if err := json.Unmarshal(pendingJSON, &pending); err != nil {
+			return nil, nil, fmt.Errorf("unmarshal pending interrupts: %w", err)
 		}
 	}
 	if len(resolvedJSON) > 0 {
-		if err := json.Unmarshal(resolvedJSON, &s.resolved); err != nil {
-			return fmt.Errorf("unmarshal resolved interrupts: %w", err)
+		if err := json.Unmarshal(resolvedJSON, &resolved); err != nil {
+			return nil, nil, fmt.Errorf("unmarshal resolved interrupts: %w", err)
 		}
 	}
-	return nil
+	return pending, resolved, nil
+}
+
+func (s *SessionManager) replaceInterrupts(pending, resolved interruptMap) {
+	s.mu.Lock()
+	s.pending = pending
+	s.resolved = resolved
+	s.mu.Unlock()
 }
