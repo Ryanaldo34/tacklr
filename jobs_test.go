@@ -3,6 +3,7 @@ package tacklr
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -737,6 +738,121 @@ func TestBackgroundJobs_closeCancelsRunning(t *testing.T) {
 	case <-stopped:
 	case <-time.After(2 * time.Second):
 		t.Fatal("background worker was not cancelled by Close")
+	}
+}
+
+func TestBackgroundJobs_scheduleValidatesInputAndDuplicateIDs(t *testing.T) {
+	// Arrange
+	h := mustNewAgent(t, AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  &mockStrategy{},
+		SubAgents: []*SubAgent{
+			{WorkerName: "researcher", Model: &mockStrategy{}},
+		},
+	})
+	t.Cleanup(h.Close)
+	rt := turnRuntime(h)
+
+	// Act
+	_, missingErr := h.scheduleBackgroundWorker("missing", "task", "job1", rt)
+	_, emptyTaskErr := h.scheduleBackgroundWorker("researcher", "  ", "job1", rt)
+	_, emptyJobErr := h.scheduleBackgroundWorker("researcher", "task", "", rt)
+	_, firstScheduleErr := h.scheduleBackgroundWorker("researcher", "task", "job1", rt)
+	_, duplicateErr := h.scheduleBackgroundWorker("researcher", "task", "job1", rt)
+
+	// Assert
+	if !errors.Is(missingErr, ErrNotFound) {
+		t.Fatalf("missing worker error = %v", missingErr)
+	}
+	if !errors.Is(emptyTaskErr, ErrInvalid) || !errors.Is(emptyJobErr, ErrInvalid) {
+		t.Fatalf("empty input errors = %v %v", emptyTaskErr, emptyJobErr)
+	}
+	if firstScheduleErr != nil {
+		t.Fatal(firstScheduleErr)
+	}
+	if !errors.Is(duplicateErr, ErrInvalid) {
+		t.Fatalf("duplicate job error = %v", duplicateErr)
+	}
+	_, _ = h.cancelJob(t.Context(), "job1")
+}
+
+func TestBackgroundJobs_nonBlockingGetReportsRunningStatus(t *testing.T) {
+	// Arrange
+	workerModel := &mockStrategy{
+		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
+			time.Sleep(400 * time.Millisecond)
+			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
+		},
+	}
+	var h *AgentHarness
+	var step int
+	parent := &mockStrategy{}
+	parent.invokeFn = func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
+		step++
+		switch step {
+		case 1:
+			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
+				toolCall("running_job", "spawn_worker", `{"worker_name":"researcher","task_description_and_context":"work","block":false}`),
+			}, IsComplete: true}
+		case 2:
+			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
+				toolCall("poll", "get_job", `{"job_id":"running_job"}`),
+			}, IsComplete: true}
+		case 3:
+			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
+				toolCall("collect", "get_job", `{"job_id":"running_job","block":true}`),
+			}, IsComplete: true}
+		default:
+			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "finished", IsComplete: true}
+		}
+	}
+	h = mustNewAgent(t, AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  parent,
+		SubAgents: []*SubAgent{
+			{WorkerName: "researcher", Model: workerModel},
+		},
+	})
+	t.Cleanup(h.Close)
+
+	// Act
+	got := drainEvents(mustRun(t, h, "poll running job"))
+	runningOut := toolResultByName(got, "get_job")
+
+	// Assert
+	if !strings.Contains(runningOut, "Still running") {
+		t.Fatalf("running status = %q events=%v", runningOut, summarizeEvents(got))
+	}
+}
+
+func TestBackgroundJobs_listJobsIncludesRunningWorker(t *testing.T) {
+	// Arrange
+	workerModel := &mockStrategy{
+		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
+			time.Sleep(500 * time.Millisecond)
+			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
+		},
+	}
+	h := mustNewAgent(t, AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  &mockStrategy{},
+		SubAgents: []*SubAgent{
+			{WorkerName: "researcher", Model: workerModel},
+		},
+	})
+	t.Cleanup(h.Close)
+	rt := turnRuntime(h)
+
+	// Act
+	if _, err := h.scheduleBackgroundWorker("researcher", "task", "listed", rt); err != nil {
+		t.Fatal(err)
+	}
+	listOut := h.formatJobList()
+	_, _ = h.cancelJob(t.Context(), "listed")
+
+	// Assert
+	if !strings.Contains(listOut, "id=listed") || !strings.Contains(listOut, "status=running") {
+		t.Fatalf("list output = %q", listOut)
 	}
 }
 
