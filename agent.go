@@ -442,7 +442,7 @@ const CancelledToolResultContent = "cancelled: user interrupted the agent"
 // Ignores StreamEventComplete (usage only; Run ends the turn).
 // Returns false when the turn context is already cancelled (caller should stop).
 func (a *AgentHarness) streamChunk(ctx context.Context, chunk LLMResponseChunk, out chan<- StreamEvent) bool {
-	if chunk.Type == StreamEventComplete {
+	if chunk.Type == "" || chunk.Type == StreamEventComplete {
 		return ctx.Err() == nil
 	}
 	toolCalls := chunk.ToolCalls
