@@ -146,15 +146,16 @@ func main() {
 	reg := server.NewRegistry(store, defaultAgent, server.WithVFSAuth(vfsAuth))
 	reg.Register(defaultAgent, server.AgentSpec{
 		Name: "Tacklr",
-		Config: tacklr.Config{
-			MaxWindowSize: maxWindow,
-			// Empty: rely on harness Adaptive Case Management system prompt only.
-			SystemPrompt:     "",
-			SkillDirectories: skillDirs,
+		Options: tacklr.AgentOptions{
+			Config: tacklr.Config{
+				MaxWindowSize: maxWindow,
+				// Empty: rely on harness Adaptive Case Management system prompt only.
+				SystemPrompt:     "",
+				SkillDirectories: skillDirs,
+			},
+			Model:     model,
+			ExaAPIKey: exaKey,
 		},
-		Model:       model,
-		Tools:       nil,
-		ExaAPIKey:   exaKey,
 		FSRegistry:  fsReg,
 		FSBootstrap: []vfs.MountSpec{{Point: "/work", Profile: "local"}},
 	})
@@ -177,6 +178,7 @@ func main() {
 
 	// Default: stdio (Zed / CLI ACP). Opt in to HTTP with --http.
 	if len(os.Args) > 1 && os.Args[1] == "--http" {
+		srv.AllowAnonymousNetwork()
 		port := 3000
 		if p := os.Getenv("PORT"); p != "" {
 			if v, err := strconv.Atoi(p); err == nil {

@@ -135,7 +135,7 @@ func TestRegistry_vfsAuthRejects(t *testing.T) {
 	}
 
 	bare := NewRegistry(testStore(t), "default")
-	bare.Register("default", AgentSpec{Config: spec.Config, Model: spec.Model})
+	bare.Register("default", AgentSpec{Options: spec.Options})
 	if err := bare.BindVFS(ctx, "s", "default", vfs.Binding{
 		Provider: "gdrive", Point: "/a", Auth: vfs.Credential{Token: "t"},
 	}); err == nil || !strings.Contains(err.Error(), "no vfs registry") {

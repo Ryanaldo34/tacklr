@@ -85,8 +85,10 @@ func driveAgent(t *testing.T, auth *vfs.SessionAuth, api vfs.DriveAPI) (AgentSpe
 		t.Fatal(err)
 	}
 	return AgentSpec{
-		Config:     tacklr.Config{MaxWindowSize: 8192},
-		Model:      okModel(),
+		Options: tacklr.AgentOptions{
+			Config: tacklr.Config{MaxWindowSize: 8192},
+			Model:  okModel(),
+		},
 		FSRegistry: fsReg,
 	}, fsReg
 }

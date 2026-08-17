@@ -1133,12 +1133,16 @@ func TestHandleRPC_configSet_agent(t *testing.T) {
 	}
 	r := NewRegistry(store, "default")
 	r.Register("default", AgentSpec{
-		Config: tacklr.Config{MaxWindowSize: 8192, SystemPrompt: "default"},
-		Model:  strategy,
+		Options: tacklr.AgentOptions{
+			Config: tacklr.Config{MaxWindowSize: 8192, SystemPrompt: "default"},
+			Model:  strategy,
+		},
 	})
 	r.Register("custom", AgentSpec{
-		Config: tacklr.Config{MaxWindowSize: 8192, SystemPrompt: "custom"},
-		Model:  strategy,
+		Options: tacklr.AgentOptions{
+			Config: tacklr.Config{MaxWindowSize: 8192, SystemPrompt: "custom"},
+			Model:  strategy,
+		},
 	})
 
 	rec1 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
@@ -1202,19 +1206,23 @@ func TestHandleRPC_sessionPrompt_usesConfigAgent(t *testing.T) {
 	var customInvoked bool
 	r := NewRegistry(store, "default")
 	r.Register("default", AgentSpec{
-		Config: tacklr.Config{MaxWindowSize: 8192, SystemPrompt: "default-prompt"},
-		Model: &mockInferenceStrategy{
-			invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "from-default", IsComplete: true}
+		Options: tacklr.AgentOptions{
+			Config: tacklr.Config{MaxWindowSize: 8192, SystemPrompt: "default-prompt"},
+			Model: &mockInferenceStrategy{
+				invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+					ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "from-default", IsComplete: true}
+				},
 			},
 		},
 	})
 	r.Register("custom", AgentSpec{
-		Config: tacklr.Config{MaxWindowSize: 8192, SystemPrompt: "custom-prompt"},
-		Model: &mockInferenceStrategy{
-			invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-				customInvoked = true
-				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "from-custom", IsComplete: true}
+		Options: tacklr.AgentOptions{
+			Config: tacklr.Config{MaxWindowSize: 8192, SystemPrompt: "custom-prompt"},
+			Model: &mockInferenceStrategy{
+				invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+					customInvoked = true
+					ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "from-custom", IsComplete: true}
+				},
 			},
 		},
 	})

@@ -424,6 +424,14 @@ func formatResourceLink(b acpContentBlock) (string, error) {
 }
 
 func eventToAcpJsonRpc(threadId string, event *streaming.StreamEvent) ([][]byte, error) {
+	presented, err := presentStreamEvent(*event)
+	if err != nil {
+		return nil, err
+	}
+	return presentationToACP(threadId, &presented)
+}
+
+func presentationToACP(threadId string, event *presentationEvent) ([][]byte, error) {
 	switch event.Type {
 	case streaming.StreamEventMessage:
 		if event.Content == "" {
@@ -472,7 +480,6 @@ func eventToAcpJsonRpc(threadId string, event *streaming.StreamEvent) ([][]byte,
 		toStream = append(toStream, bytes)
 		return toStream, nil
 	case streaming.StreamEventFunctionCall:
-		// TODO: pass channel to harness runtime state hook for tools to allow tools to stream progressive updates
 		var toStream [][]byte
 		if event.Content != "" {
 			data := map[string]any{

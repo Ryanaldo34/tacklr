@@ -32,18 +32,10 @@ type turnHandle struct {
 }
 
 type AgentSpec struct {
-	Name       string
-	Config     tacklr.Config
-	Model      tacklr.InferenceStrategy
-	Tools      []*tacklr.Tool
-	MCPConfigs []mcp.MCPConfig
-	// MCPCredentialResolver resolves durable MCP credential references.
-	MCPCredentialResolver mcp.CredentialResolver
-	SubAgents             []*tacklr.SubAgent
-	WatchDog              tacklr.AgentWatchDog
-	Store                 stores.BaseStore
-	// ExaAPIKey enables built-in web_search and web_fetch (or use process EXA_API_KEY).
-	ExaAPIKey string
+	Name string
+	// Options is the canonical immutable agent definition. Registry overrides
+	// only SessionID, Store fallback, MCP session overlays, and MountSession.
+	Options tacklr.AgentOptions
 	// FSRegistry resolves MountSpec.Profile (process-scoped). Required when FSBootstrap is set.
 	FSRegistry *vfs.BackendRegistry
 	// FSBootstrap mounts applied once when the host creates the session MountSession.
@@ -276,6 +268,18 @@ func NewRegistry(store stores.BaseStore, defaultAgent string, opts ...RegistryOp
 }
 
 func (r *Registry) Register(agentID string, spec AgentSpec) {
+	if r == nil {
+		panic("server: nil Registry")
+	}
+	if strings.TrimSpace(agentID) == "" {
+		panic("server: agent id is required")
+	}
+	if spec.Options.SessionID != "" || spec.Options.MountSession != nil {
+		panic("server: AgentSpec.Options cannot contain session-owned fields")
+	}
+	if err := spec.Options.Validate(); err != nil {
+		panic(fmt.Sprintf("server: register agent %q: %v", agentID, err))
+	}
 	r.agents[agentID] = spec
 }
 
@@ -299,7 +303,7 @@ func (r *Registry) AgentModel(agentID string) tacklr.InferenceStrategy {
 	if !ok {
 		return nil
 	}
-	return spec.Model
+	return spec.Options.Model
 }
 
 // RecordSessionCreated records a session-created metric (called by protocols).
@@ -592,12 +596,12 @@ func (r *Registry) loadAgent(ctx context.Context, agentID, threadID string, load
 	}
 
 	store := r.store
-	if spec.Store != nil {
-		store = spec.Store
+	if spec.Options.Store != nil {
+		store = spec.Options.Store
 	}
 
-	mcpConfigs := make([]mcp.MCPConfig, 0, len(spec.MCPConfigs)+len(sessionMCP))
-	mcpConfigs = append(mcpConfigs, spec.MCPConfigs...)
+	mcpConfigs := make([]mcp.MCPConfig, 0, len(spec.Options.MCPConfigs)+len(sessionMCP))
+	mcpConfigs = append(mcpConfigs, spec.Options.MCPConfigs...)
 	mcpConfigs = append(mcpConfigs, sessionMCP...)
 
 	wantVFS := spec.FSRegistry != nil && (len(spec.FSBootstrap) > 0 || (r.vfsAuth != nil && r.vfsAuth.HasBindings(threadID)))
@@ -611,19 +615,11 @@ func (r *Registry) loadAgent(ctx context.Context, agentID, threadID string, load
 		)
 		r.instruments.RecordFuseMount(ctx, telemetry.FuseMountOutcomeUnavailable)
 	}
-	opts := tacklr.AgentOptions{
-		Config:                spec.Config,
-		SessionID:             threadID,
-		Model:                 spec.Model,
-		Store:                 store,
-		WatchDog:              spec.WatchDog,
-		Tools:                 spec.Tools,
-		MCPConfigs:            mcpConfigs,
-		MCPCredentialResolver: spec.MCPCredentialResolver,
-		SubAgents:             spec.SubAgents,
-		ExaAPIKey:             spec.ExaAPIKey,
-		MountSession:          ms,
-	}
+	opts := spec.Options
+	opts.SessionID = threadID
+	opts.Store = store
+	opts.MCPConfigs = mcpConfigs
+	opts.MountSession = ms
 
 	var h *tacklr.AgentHarness
 	if load {

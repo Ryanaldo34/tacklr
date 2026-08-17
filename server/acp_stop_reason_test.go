@@ -62,13 +62,15 @@ func TestACP_prompt_stopReason_maxTurnRequests(t *testing.T) {
 	store := testStore(t)
 	r := NewRegistry(store, "default")
 	r.Register("default", AgentSpec{
-		Config: tacklr.Config{
-			MaxWindowSize:   8192,
-			SystemPrompt:    "test",
-			MaxTurnRequests: 1,
+		Options: tacklr.AgentOptions{
+			Config: tacklr.Config{
+				MaxWindowSize:   8192,
+				SystemPrompt:    "test",
+				MaxTurnRequests: 1,
+			},
+			Model: strategy,
+			Tools: []*tacklr.Tool{ping},
 		},
-		Model: strategy,
-		Tools: []*tacklr.Tool{ping},
 	})
 	recNew := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
 	sessionID := acpSessionID(t, recNew)

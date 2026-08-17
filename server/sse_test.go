@@ -73,9 +73,9 @@ func makeInterruptTool(t *testing.T, optionsJSON string) *tacklr.Tool {
 	})
 }
 
-func parseSSEEvents(t *testing.T, body io.Reader) []sseEvent {
+func parseSSEEvents(t *testing.T, body io.Reader) []presentationEvent {
 	t.Helper()
-	var events []sseEvent
+	var events []presentationEvent
 	scanner := bufio.NewScanner(body)
 	var currentType string
 	var currentData strings.Builder
@@ -87,10 +87,10 @@ func parseSSEEvents(t *testing.T, body io.Reader) []sseEvent {
 		if currentType == "thread" {
 			var te threadEvent
 			if err := json.Unmarshal([]byte(currentData.String()), &te); err == nil {
-				events = append(events, sseEvent{Type: currentType, Content: te.ThreadID})
+				events = append(events, presentationEvent{Type: currentType, Content: te.ThreadID})
 			}
 		} else {
-			var ev sseEvent
+			var ev presentationEvent
 			if err := json.Unmarshal([]byte(currentData.String()), &ev); err == nil {
 				ev.Type = currentType
 				events = append(events, ev)
@@ -368,7 +368,7 @@ func TestHandleResume_unknownThread_returnsError(t *testing.T) {
 	events := parseSSEEvents(t, rec.Body)
 	var foundError bool
 	for _, ev := range events {
-		if ev.Type == "error" && strings.Contains(ev.Error, "load session") {
+		if ev.Type == "error" && strings.Contains(ev.ErrorText, "load session") {
 			foundError = true
 		}
 	}
@@ -427,7 +427,7 @@ func TestHandleResume_invalidPayload_returnsError(t *testing.T) {
 	resumeEvents := parseSSEEvents(t, resumeRec.Body)
 	var foundError bool
 	for _, ev := range resumeEvents {
-		if ev.Type == "error" && strings.Contains(ev.Error, "invalid payload") {
+		if ev.Type == "error" && strings.Contains(ev.ErrorText, "invalid payload") {
 			foundError = true
 		}
 	}

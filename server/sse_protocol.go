@@ -91,15 +91,15 @@ func (p sseProtocol) handleWS(env ProtocolEnv, w http.ResponseWriter, r *http.Re
 	}
 	pr, err := validateSSERequest(data)
 	if err != nil {
-		_ = wsWriteJSON(ctx, c, wsServerEvent{Type: "error", Content: PublicError(err).Error()})
+		_ = wsWriteJSON(ctx, c, presentationError(err))
 		return
 	}
 
 	_ = p.runSSEProtocolTurn(ctx, env, pr, func(threadID string) MessageWriter {
-		_ = wsWriteJSON(ctx, c, wsServerEvent{Type: "thread", Content: threadID})
+		_ = wsWriteJSON(ctx, c, presentationEvent{Type: "thread", Content: threadID})
 		return &wsMessageWriter{ctx: ctx, c: c}
 	}, func(err error) {
-		_ = wsWriteJSON(ctx, c, wsServerEvent{Type: "error", Content: PublicError(err).Error()})
+		_ = wsWriteJSON(ctx, c, presentationError(err))
 	})
 }
 
@@ -140,7 +140,10 @@ func (p sseProtocol) runSSEProtocolTurn(
 }
 
 func (p sseProtocol) OnStreamEvent(ctx context.Context, env ProtocolEnv, threadID string, stream *EventStream, ev streaming.StreamEvent, reqID json.RawMessage) StreamControl {
-	frames := eventToRawSSE(threadID, &ev)
+	frames, err := eventToRawSSE(threadID, &ev)
+	if err != nil {
+		return StreamControl{Err: err, Finished: true}
+	}
 	terminal := ev.Type == streaming.StreamEventComplete || ev.Type == streaming.StreamEventError
 	return StreamControl{Frames: frames, Finished: terminal}
 }
