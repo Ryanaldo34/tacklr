@@ -45,8 +45,13 @@ type AgentHarness struct {
 	interruptPayloads map[string][]byte
 	// parkedWorkersLive maps spawn_worker tool call id → live child harness.
 	// Durable park metadata is in SessionManager state; this map is not checkpointed.
-	parkedWorkersLive    map[string]*AgentHarness
-	parkMu               sync.Mutex
+	parkedWorkersLive map[string]*AgentHarness
+	parkMu            sync.Mutex
+	// Background worker jobs (spawn_worker run_in_background). Live only.
+	jobs                 map[string]*backgroundJob
+	jobsMu               sync.Mutex
+	jobsCtx              context.Context
+	jobsCancel           context.CancelFunc
 	skillByName          map[string]skills.Skill
 	skillDirectories     []string
 	skillsLoader         skills.SkillLoader
@@ -322,6 +327,12 @@ When solving a task:
 
 AVAILABLE SUB-AGENTS:
 You can delegate tasks to specialized sub-agents using the spawn_worker tool. Each sub-agent has its own instructions, tools, and model — choose the one best suited for the task. Only spawn a worker if you are confident it will provide value in running several subtasks in parallel or a task requires significant research or analysis and you only want access to the final output. You may spawn multiple workers to run subtasks in parallel. Always prefer structuring a plan into smaller, more manageable steps rather than a single, complex task requiring several subagents to complete.
+
+To keep working while a worker runs, set run_in_background true on spawn_worker. That returns a job id immediately (process scheduled). Tool roles:
+- list_jobs: non-blocking status overview of all background jobs.
+- get_job: non-blocking read of one job's status and, when completed/failed, its result or error — use this to collect output without blocking.
+- await_job: block until a job finishes (or resolve an interrupted worker), then return its result.
+Prefer get_job while you continue other work; use await_job only when you need to wait on a still-running job.
 
 %s`, builtIn, subList)
 	}
@@ -721,6 +732,7 @@ func (a *AgentHarness) initMCP(ctx context.Context) {
 // FUSE); this does not close it.
 // Call after the Run events channel is drained, or when construct/runHarness fails.
 func (a *AgentHarness) Close() {
+	a.cancelBackgroundJobs()
 	a.persistSession(context.Background())
 	a.parkMu.Lock()
 	for id, w := range a.parkedWorkersLive {

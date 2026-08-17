@@ -93,16 +93,17 @@ func (a *AgentHarness) formatSubAgentPromptList() string {
 type spawnWorkerArgs struct {
 	TaskDescriptionAndContext string `json:"task_description_and_context" desc:"Clear task goal, acceptance criteria, and helpful context for the worker"`
 	WorkerName                string `json:"worker_name" desc:"Name of a registered sub-agent worker to spawn"`
+	RunInBackground           bool   `json:"run_in_background" desc:"When true, schedule the worker as a background job and return immediately. Use list_jobs to poll and await_job to collect the result."`
 }
 
 func (a *AgentHarness) spawnTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "spawn_worker",
 		DisplayName: "Spawn {worker_name}",
-		Description: "Use to spawn a sub-agent or \"worker\" to help parallelize a task or handle smaller subtasks and assist with research. Ensure the task is clearly outlined with a clear goal, acceptance criteria, and helpful context. Choose worker_name from the AVAILABLE SUB-AGENTS listed in the system prompt.",
+		Description: "Use to spawn a sub-agent or \"worker\" to help parallelize a task or handle smaller subtasks and assist with research. Ensure the task is clearly outlined with a clear goal, acceptance criteria, and helpful context. Choose worker_name from the AVAILABLE SUB-AGENTS listed in the system prompt. Set run_in_background true to schedule the worker and continue other work; then list_jobs / await_job.",
 		Category:    streaming.ToolCategoryExecute,
 		Handler: func(ctx context.Context, args spawnWorkerArgs, runtime HarnessRuntime) (string, error) {
-			return a.runWorker(ctx, args.WorkerName, args.TaskDescriptionAndContext, runtime)
+			return a.runWorker(ctx, args.WorkerName, args.TaskDescriptionAndContext, args.RunInBackground, runtime)
 		},
 	})
 }
@@ -110,7 +111,9 @@ func (a *AgentHarness) spawnTool() *Tool {
 // runWorker creates or resumes an isolated worker harness, drains events into
 // parent tool updates, and either returns final output or bubbles a child
 // interrupt onto the parent session (self-similar at any nesting depth).
-func (a *AgentHarness) runWorker(ctx context.Context, workerName, task string, runtime HarnessRuntime) (string, error) {
+// When runInBackground is true (and not resuming a parked sync spawn), the
+// worker is scheduled as a job and this call returns immediately.
+func (a *AgentHarness) runWorker(ctx context.Context, workerName, task string, runInBackground bool, runtime HarnessRuntime) (string, error) {
 	spec, ok := a.subagents[workerName]
 	if !ok {
 		return "", fmt.Errorf("worker %q: %w", workerName, ErrNotFound)
@@ -136,9 +139,13 @@ func (a *AgentHarness) runWorker(ctx context.Context, workerName, task string, r
 	// driven by park metadata + stashed resolution payloads, not RaiseInterrupt.
 	_, _ = a.session.TakeResolvedInterrupt(toolCallID)
 
+	meta := a.getParkMeta(toolCallID)
+	if runInBackground && meta == nil {
+		return a.scheduleBackgroundWorker(workerName, task, toolCallID, runtime)
+	}
+
 	var worker *AgentHarness
 	var closeOnExit bool
-	meta := a.getParkMeta(toolCallID)
 	resuming := meta != nil
 
 	if resuming {
