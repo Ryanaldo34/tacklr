@@ -132,7 +132,7 @@ func TestPresentStreamEvent_withError(t *testing.T) {
 	}
 }
 
-func TestWriteSSEError_andEventToRawSSE(t *testing.T) {
+func TestWriteSSEError_andPresentStreamEventSSE(t *testing.T) {
 	rec := httptest.NewRecorder()
 	if err := writeSSEError(rec, rec, "boom"); err != nil {
 		t.Fatal(err)
@@ -140,11 +140,15 @@ func TestWriteSSEError_andEventToRawSSE(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "boom") {
 		t.Fatalf("%s", rec.Body.String())
 	}
-	frames, err := eventToRawSSE("t", &streaming.StreamEvent{Type: streaming.StreamEventMessage, Content: "x"})
+	presented, err := presentStreamEvent(streaming.StreamEvent{Type: streaming.StreamEventMessage, Content: "x"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(frames) != 1 {
-		t.Fatalf("frames = %d", len(frames))
+	data, err := json.Marshal(presented)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) == 0 {
+		t.Fatal("empty SSE payload")
 	}
 }

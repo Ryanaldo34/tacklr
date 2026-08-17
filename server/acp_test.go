@@ -308,8 +308,8 @@ func TestParseACPPrompt_outcomes(t *testing.T) {
 	})
 }
 
-// TestEventToAcpJsonRpc_outcomes maps each stream event kind once (including skip paths).
-func TestEventToAcpJsonRpc_outcomes(t *testing.T) {
+// TestPresentationToACP_outcomes maps each stream event kind once (including skip paths).
+func TestPresentationToACP_outcomes(t *testing.T) {
 	mustUpdate := func(t *testing.T, frames [][]byte, sessionUpdate string) map[string]any {
 		t.Helper()
 		if len(frames) == 0 {
@@ -327,7 +327,7 @@ func TestEventToAcpJsonRpc_outcomes(t *testing.T) {
 	}
 
 	// message
-	frames, err := eventToAcpJsonRpc("thread-1", &streaming.StreamEvent{
+	frames, err := presentationToACP("thread-1", streaming.StreamEvent{
 		Type: streaming.StreamEventMessage, MessageID: "msg-1", Content: "hello",
 	})
 	if err != nil {
@@ -336,7 +336,7 @@ func TestEventToAcpJsonRpc_outcomes(t *testing.T) {
 	mustUpdate(t, frames, "agent_message_chunk")
 
 	// reasoning with content
-	frames, err = eventToAcpJsonRpc("thread-1", &streaming.StreamEvent{
+	frames, err = presentationToACP("thread-1", streaming.StreamEvent{
 		Type: streaming.StreamEventReasoning, Content: "thinking...",
 	})
 	if err != nil {
@@ -344,13 +344,13 @@ func TestEventToAcpJsonRpc_outcomes(t *testing.T) {
 	}
 	mustUpdate(t, frames, "agent_thought_chunk")
 	// empty reasoning skipped
-	frames, err = eventToAcpJsonRpc("s", &streaming.StreamEvent{Type: streaming.StreamEventReasoning})
+	frames, err = presentationToACP("s", streaming.StreamEvent{Type: streaming.StreamEventReasoning})
 	if err != nil || frames != nil {
 		t.Fatalf("empty reasoning: %v %v", err, frames)
 	}
 
 	// function call + title/name/kind + CallID fallback
-	frames, err = eventToAcpJsonRpc("thread-1", &streaming.StreamEvent{
+	frames, err = presentationToACP("thread-1", streaming.StreamEvent{
 		Type:      streaming.StreamEventFunctionCall,
 		ToolCalls: []tacklr.ToolCall{{ID: "tc-1", Name: "complete_todo", Title: "Complete Ship", Category: "think"}},
 	})
@@ -361,7 +361,7 @@ func TestEventToAcpJsonRpc_outcomes(t *testing.T) {
 	if u["title"] != "Complete Ship" || u["name"] != "complete_todo" || u["kind"] != "think" {
 		t.Fatalf("tool_call fields: %#v", u)
 	}
-	frames, err = eventToAcpJsonRpc("thread-1", &streaming.StreamEvent{
+	frames, err = presentationToACP("thread-1", streaming.StreamEvent{
 		Type:      streaming.StreamEventFunctionCall,
 		ToolCalls: []tacklr.ToolCall{{CallID: "fc_only", Name: "echo"}},
 	})
@@ -372,7 +372,7 @@ func TestEventToAcpJsonRpc_outcomes(t *testing.T) {
 		t.Fatal("call id fallback")
 	}
 	// function call with assistant content
-	frames, err = eventToAcpJsonRpc("s", &streaming.StreamEvent{
+	frames, err = presentationToACP("s", streaming.StreamEvent{
 		Type: streaming.StreamEventFunctionCall, Content: "thinking aloud",
 		ToolCalls: []tacklr.ToolCall{{ID: "c1", CallID: "c1", Name: "echo", Category: "other"}},
 	})
@@ -381,7 +381,7 @@ func TestEventToAcpJsonRpc_outcomes(t *testing.T) {
 	}
 
 	// tool result success / failed / empty / CallID
-	frames, err = eventToAcpJsonRpc("thread-1", &streaming.StreamEvent{
+	frames, err = presentationToACP("thread-1", streaming.StreamEvent{
 		Type: streaming.StreamEventToolResult, Content: "file contents here",
 		ToolCalls: []tacklr.ToolCall{{ID: "tc-1", Name: "read_file"}},
 	})
@@ -392,18 +392,18 @@ func TestEventToAcpJsonRpc_outcomes(t *testing.T) {
 	if u["status"] != "completed" {
 		t.Fatalf("status=%v", u["status"])
 	}
-	frames, err = eventToAcpJsonRpc("s", &streaming.StreamEvent{
+	frames, err = presentationToACP("s", streaming.StreamEvent{
 		Type: streaming.StreamEventToolResult, Content: "boom",
 		ToolCalls: []tacklr.ToolCall{{ID: "c1", CallID: "c1", Name: "echo", Status: "error"}},
 	})
 	if err != nil || !strings.Contains(string(frames[0]), "failed") {
 		t.Fatalf("tool failed: %v %s", err, frames)
 	}
-	frames, err = eventToAcpJsonRpc("s", &streaming.StreamEvent{Type: streaming.StreamEventToolResult})
+	frames, err = presentationToACP("s", streaming.StreamEvent{Type: streaming.StreamEventToolResult})
 	if err != nil || frames != nil {
 		t.Fatalf("empty tool result: %v %v", err, frames)
 	}
-	frames, err = eventToAcpJsonRpc("thread-1", &streaming.StreamEvent{
+	frames, err = presentationToACP("thread-1", streaming.StreamEvent{
 		Type: streaming.StreamEventToolResult, Content: "ok",
 		ToolCalls: []tacklr.ToolCall{{CallID: "fc_only", Name: "echo", Status: "success"}},
 	})
@@ -415,7 +415,7 @@ func TestEventToAcpJsonRpc_outcomes(t *testing.T) {
 	}
 
 	// tool update progress
-	frames, err = eventToAcpJsonRpc("thread-1", &streaming.StreamEvent{
+	frames, err = presentationToACP("thread-1", streaming.StreamEvent{
 		Type: streaming.StreamEventToolUpdate, MessageID: "tc-1", Content: "processing step 1...",
 	})
 	if err != nil {
@@ -427,7 +427,7 @@ func TestEventToAcpJsonRpc_outcomes(t *testing.T) {
 	}
 
 	// complete
-	frames, err = eventToAcpJsonRpc("thread-1", &streaming.StreamEvent{
+	frames, err = presentationToACP("thread-1", streaming.StreamEvent{
 		Type: streaming.StreamEventComplete, TurnID: "turn-abc",
 	})
 	if err != nil {
@@ -440,7 +440,7 @@ func TestEventToAcpJsonRpc_outcomes(t *testing.T) {
 	}
 
 	// error internal + stop-reason outcomes + plain error field
-	frames, err = eventToAcpJsonRpc("thread-1", &streaming.StreamEvent{
+	frames, err = presentationToACP("thread-1", streaming.StreamEvent{
 		Type: streaming.StreamEventError, TurnID: "turn-err", Error: io.ErrUnexpectedEOF,
 	})
 	if err != nil {
@@ -460,7 +460,7 @@ func TestEventToAcpJsonRpc_outcomes(t *testing.T) {
 		{tacklr.ErrMaxTurnRequests, "max_turn_requests"},
 		{fmt.Errorf("run: context cancelled: %w", context.Canceled), "cancelled"},
 	} {
-		frames, err = eventToAcpJsonRpc("t", &streaming.StreamEvent{Type: streaming.StreamEventError, Error: tc.err})
+		frames, err = presentationToACP("t", streaming.StreamEvent{Type: streaming.StreamEventError, Error: tc.err})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -470,7 +470,7 @@ func TestEventToAcpJsonRpc_outcomes(t *testing.T) {
 			t.Fatalf("stopReason want %s got %v", tc.want, msg)
 		}
 	}
-	frames, err = eventToAcpJsonRpc("s1", &streaming.StreamEvent{
+	frames, err = presentationToACP("s1", streaming.StreamEvent{
 		Type: streaming.StreamEventError, Error: errors.New("explode"),
 	})
 	if err != nil || !strings.Contains(string(frames[0]), "explode") {
@@ -478,7 +478,7 @@ func TestEventToAcpJsonRpc_outcomes(t *testing.T) {
 	}
 
 	// plan update
-	frames, err = eventToAcpJsonRpc("s", &streaming.StreamEvent{
+	frames, err = presentationToACP("s", streaming.StreamEvent{
 		Type: streaming.StreamEventPlanUpdate,
 		Data: []byte(`[{"title":"A","status":"pending","description":""}]`),
 	})
@@ -487,7 +487,7 @@ func TestEventToAcpJsonRpc_outcomes(t *testing.T) {
 	}
 
 	// interrupt skipped
-	frames, err = eventToAcpJsonRpc("thread-1", &streaming.StreamEvent{Type: streaming.StreamEventInterrupt})
+	frames, err = presentationToACP("thread-1", streaming.StreamEvent{Type: streaming.StreamEventInterrupt})
 	if err != nil || len(frames) != 0 {
 		t.Fatalf("interrupt skip: %v n=%d", err, len(frames))
 	}

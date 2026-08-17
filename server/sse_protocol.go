@@ -140,10 +140,15 @@ func (p sseProtocol) runSSEProtocolTurn(
 }
 
 func (p sseProtocol) OnStreamEvent(ctx context.Context, env ProtocolEnv, threadID string, stream *EventStream, ev streaming.StreamEvent, reqID json.RawMessage) StreamControl {
-	frames, err := eventToRawSSE(threadID, &ev)
+	presented, err := presentStreamEvent(ev)
 	if err != nil {
 		return StreamControl{Err: err, Finished: true}
 	}
+	data, err := json.Marshal(presented)
+	if err != nil {
+		return StreamControl{Err: err, Finished: true}
+	}
+	frames := [][]byte{data}
 	terminal := ev.Type == streaming.StreamEventComplete || ev.Type == streaming.StreamEventError
 	return StreamControl{Frames: frames, Finished: terminal}
 }

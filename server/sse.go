@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-
-	"github.com/ryanaldo34/tacklr/streaming"
 )
 
 type threadEvent struct {
@@ -24,19 +22,6 @@ func writeSSEEvent(w io.Writer, flusher http.Flusher, evType string, data []byte
 func writeSSEError(w http.ResponseWriter, flusher http.Flusher, msg string) error {
 	data, _ := json.Marshal(presentationEvent{Type: "error", ErrorText: msg})
 	return writeSSEEvent(w, flusher, "error", data)
-}
-
-func eventToRawSSE(threadID string, ev *streaming.StreamEvent) ([][]byte, error) {
-	_ = threadID
-	presented, err := presentStreamEvent(*ev)
-	if err != nil {
-		return nil, err
-	}
-	data, err := json.Marshal(presented)
-	if err != nil {
-		return nil, err
-	}
-	return [][]byte{data}, nil
 }
 
 func validateSSERequest(body []byte) (*parsedRequest, error) {

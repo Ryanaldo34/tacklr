@@ -350,7 +350,7 @@ func (p *acpProtocol) OnStreamEvent(ctx context.Context, env ProtocolEnv, thread
 		newEvents, err := resolveInterruptViaACP(ctx, env, threadID, stream, &ev)
 		if err != nil {
 			slog.Warn("acp interrupt resolution failed", "error", err, "thread_id", threadID)
-			frames, _ := eventToAcpJsonRpc(threadID, &streaming.StreamEvent{
+			frames, _ := presentationToACP(threadID, streaming.StreamEvent{
 				Type:  streaming.StreamEventError,
 				Error: err,
 			})
@@ -368,7 +368,7 @@ func (p *acpProtocol) OnStreamEvent(ctx context.Context, env ProtocolEnv, thread
 		return StreamControl{Finished: true}
 	}
 
-	frames, err := eventToAcpJsonRpc(threadID, &ev)
+	frames, err := presentationToACP(threadID, ev)
 	if err != nil {
 		return StreamControl{Err: fmt.Errorf("protocol encode: %w", err)}
 	}

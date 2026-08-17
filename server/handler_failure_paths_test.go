@@ -527,19 +527,19 @@ func TestValidateACP_emptyPromptAndConfigSessionID(t *testing.T) {
 	}
 	// empty text blocks that join to empty after validation of non-empty texts is separate:
 	// message event with empty content short-circuits
-	frames, err := eventToAcpJsonRpc("t", &streaming.StreamEvent{Type: streaming.StreamEventMessage, Content: ""})
+	frames, err := presentationToACP("t", streaming.StreamEvent{Type: streaming.StreamEventMessage, Content: ""})
 	if err != nil || frames != nil {
 		t.Fatalf("empty message: %v %v", frames, err)
 	}
 	// plan update bad JSON
-	if _, err := eventToAcpJsonRpc("t", &streaming.StreamEvent{
+	if _, err := presentationToACP("t", streaming.StreamEvent{
 		Type: streaming.StreamEventPlanUpdate,
 		Data: []byte(`not-json`),
 	}); err == nil {
 		t.Fatal("want plan unmarshal error")
 	}
 	// error event with Content only (no Error)
-	frames, err = eventToAcpJsonRpc("t", &streaming.StreamEvent{
+	frames, err = presentationToACP("t", streaming.StreamEvent{
 		Type:    streaming.StreamEventError,
 		Content: "from-content",
 		TurnID:  "1",

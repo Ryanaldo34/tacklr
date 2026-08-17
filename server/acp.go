@@ -423,18 +423,14 @@ func formatResourceLink(b acpContentBlock) (string, error) {
 	return bld.String(), nil
 }
 
-func eventToAcpJsonRpc(threadId string, event *streaming.StreamEvent) ([][]byte, error) {
-	presented, err := presentStreamEvent(*event)
+func presentationToACP(threadID string, ev streaming.StreamEvent) ([][]byte, error) {
+	presented, err := presentStreamEvent(ev)
 	if err != nil {
 		return nil, err
 	}
-	return presentationToACP(threadId, &presented)
-}
-
-func presentationToACP(threadId string, event *presentationEvent) ([][]byte, error) {
-	switch event.Type {
+	switch presented.Type {
 	case string(streaming.StreamEventMessage):
-		if event.Content == "" {
+		if presented.Content == "" {
 			return nil, nil
 		}
 		var toStream [][]byte
@@ -442,13 +438,13 @@ func presentationToACP(threadId string, event *presentationEvent) ([][]byte, err
 			"jsonrpc": "2.0",
 			"method":  "session/update",
 			"params": map[string]any{
-				"sessionId": threadId,
+				"sessionId": threadID,
 				"update": map[string]any{
-					"messageId":     event.MessageID,
+					"messageId":     presented.MessageID,
 					"sessionUpdate": "agent_message_chunk",
 					"content": map[string]string{
 						"type": "text",
-						"text": event.Content,
+						"text": presented.Content,
 					},
 				},
 			},
@@ -457,7 +453,7 @@ func presentationToACP(threadId string, event *presentationEvent) ([][]byte, err
 		toStream = append(toStream, bytes)
 		return toStream, nil
 	case string(streaming.StreamEventReasoning):
-		if event.Content == "" {
+		if presented.Content == "" {
 			return nil, nil
 		}
 		var toStream [][]byte
@@ -465,13 +461,13 @@ func presentationToACP(threadId string, event *presentationEvent) ([][]byte, err
 			"jsonrpc": "2.0",
 			"method":  "session/update",
 			"params": map[string]any{
-				"sessionId": threadId,
+				"sessionId": threadID,
 				"update": map[string]any{
-					"messageId":     event.MessageID,
+					"messageId":     presented.MessageID,
 					"sessionUpdate": "agent_thought_chunk",
 					"content": map[string]string{
 						"type": "text",
-						"text": event.Content,
+						"text": presented.Content,
 					},
 				},
 			},
@@ -481,18 +477,18 @@ func presentationToACP(threadId string, event *presentationEvent) ([][]byte, err
 		return toStream, nil
 	case string(streaming.StreamEventFunctionCall):
 		var toStream [][]byte
-		if event.Content != "" {
+		if presented.Content != "" {
 			data := map[string]any{
 				"jsonrpc": "2.0",
 				"method":  "session/update",
 				"params": map[string]any{
-					"sessionId": threadId,
+					"sessionId": threadID,
 					"update": map[string]any{
-						"messageId":     event.MessageID,
+						"messageId":     presented.MessageID,
 						"sessionUpdate": "agent_message_chunk",
 						"content": map[string]string{
 							"type": "text",
-							"text": event.Content,
+							"text": presented.Content,
 						},
 					},
 				},
@@ -500,12 +496,12 @@ func presentationToACP(threadId string, event *presentationEvent) ([][]byte, err
 			bytes, _ := json.Marshal(data)
 			toStream = append(toStream, bytes)
 		}
-		for _, toolCall := range event.ToolCalls {
+		for _, toolCall := range presented.ToolCalls {
 			data := map[string]any{
 				"jsonrpc": "2.0",
 				"method":  "session/update",
 				"params": map[string]any{
-					"sessionId": threadId,
+					"sessionId": threadID,
 					"update":    acpToolCallUpdate(toolCall, "tool_call", "in_progress", ""),
 				},
 			}
@@ -519,12 +515,12 @@ func presentationToACP(threadId string, event *presentationEvent) ([][]byte, err
 			"jsonrpc": "2.0",
 			"method":  "session/update",
 			"params": map[string]any{
-				"sessionId": threadId,
+				"sessionId": threadID,
 				"update": map[string]any{
 					"sessionUpdate": "tool_call_update",
-					"toolCallId":    event.MessageID,
+					"toolCallId":    presented.MessageID,
 					"status":        "in_progress",
-					"content":       acpToolCallContent(event.Content),
+					"content":       acpToolCallContent(presented.Content),
 				},
 			},
 		}
@@ -534,7 +530,7 @@ func presentationToACP(threadId string, event *presentationEvent) ([][]byte, err
 	case string(streaming.StreamEventPlanUpdate):
 		var toStream [][]byte
 		var todos []streaming.Todo
-		err := json.Unmarshal(event.Data, &todos)
+		err := json.Unmarshal(presented.Data, &todos)
 		if err != nil {
 			return nil, err
 		}
@@ -550,7 +546,7 @@ func presentationToACP(threadId string, event *presentationEvent) ([][]byte, err
 			"jsonrpc": "2.0",
 			"method":  "session/update",
 			"params": map[string]any{
-				"sessionId": threadId,
+				"sessionId": threadID,
 				"update": map[string]any{
 					"sessionUpdate": "plan",
 					"entries":       entries,
@@ -561,12 +557,12 @@ func presentationToACP(threadId string, event *presentationEvent) ([][]byte, err
 		toStream = append(toStream, bytes)
 		return toStream, nil
 	case string(streaming.StreamEventToolResult):
-		if len(event.ToolCalls) == 0 {
+		if len(presented.ToolCalls) == 0 {
 			slog.Warn("tool_result event missing ToolCalls")
 			return nil, nil
 		}
 		var toStream [][]byte
-		tc := event.ToolCalls[0]
+		tc := presented.ToolCalls[0]
 		var status string
 		if tc.Status == "error" {
 			status = "failed"
@@ -574,15 +570,15 @@ func presentationToACP(threadId string, event *presentationEvent) ([][]byte, err
 			status = "completed"
 		}
 		// Terminal status uses tool_call_update with ACP ToolCallContent[] (not a bare string).
-		update := acpToolCallUpdate(tc, "tool_call_update", status, event.Content)
-		if event.Content != "" {
-			update["rawOutput"] = map[string]any{"output": event.Content}
+		update := acpToolCallUpdate(tc, "tool_call_update", status, presented.Content)
+		if presented.Content != "" {
+			update["rawOutput"] = map[string]any{"output": presented.Content}
 		}
 		data := map[string]any{
 			"jsonrpc": "2.0",
 			"method":  "session/update",
 			"params": map[string]any{
-				"sessionId": threadId,
+				"sessionId": threadID,
 				"update":    update,
 			},
 		}
@@ -593,7 +589,7 @@ func presentationToACP(threadId string, event *presentationEvent) ([][]byte, err
 		var toStream [][]byte
 		data := map[string]any{
 			"jsonrpc": "2.0",
-			"id":      event.TurnID,
+			"id":      presented.TurnID,
 			"result":  acpPromptResult(stopReasonEndTurn),
 		}
 		bytes, _ := json.Marshal(data)
@@ -602,10 +598,10 @@ func presentationToACP(threadId string, event *presentationEvent) ([][]byte, err
 	case string(streaming.StreamEventError):
 		var toStream [][]byte
 		// Semantic stop reasons are successful PromptResponse results, not RPC errors.
-		if reason, ok := stopReasonFromError(event.Error); ok {
+		if reason, ok := stopReasonFromError(presented.Error); ok {
 			data := map[string]any{
 				"jsonrpc": "2.0",
-				"id":      event.TurnID,
+				"id":      presented.TurnID,
 				"result":  acpPromptResult(reason),
 			}
 			bytes, _ := json.Marshal(data)
@@ -613,14 +609,14 @@ func presentationToACP(threadId string, event *presentationEvent) ([][]byte, err
 			return toStream, nil
 		}
 		msg := "internal error"
-		if event.Error != nil {
-			msg = event.Error.Error()
-		} else if event.Content != "" {
-			msg = event.Content
+		if presented.Error != nil {
+			msg = presented.Error.Error()
+		} else if presented.Content != "" {
+			msg = presented.Content
 		}
 		data := map[string]any{
 			"jsonrpc": "2.0",
-			"id":      event.TurnID,
+			"id":      presented.TurnID,
 			"error": map[string]any{
 				"code":    jsonRPCCodeInternal,
 				"message": msg,
@@ -632,7 +628,7 @@ func presentationToACP(threadId string, event *presentationEvent) ([][]byte, err
 	case string(streaming.StreamEventInterrupt):
 		return nil, nil // interrupt events are handled in the harness, never encoded over ACP
 	default:
-		slog.Warn("unhandled event type", "type", event.Type)
+		slog.Warn("unhandled event type", "type", presented.Type)
 		return nil, nil
 	}
 }
