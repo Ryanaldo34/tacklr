@@ -2,7 +2,6 @@ package brain
 
 import (
 	"context"
-	"encoding/json"
 	"testing"
 	"time"
 

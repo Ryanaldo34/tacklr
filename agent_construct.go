@@ -396,6 +396,9 @@ func NewAgentFromSession(ctx context.Context, sessionId string, opts AgentOption
 	if opts.Store == nil {
 		return nil, fmt.Errorf("agent harness: store is required to load session %q", sessionId)
 	}
+	if err := opts.validateAndNormalize(); err != nil {
+		return nil, err
+	}
 	checkpoint, err := opts.Store.LoadSession(ctx, sessionId)
 	if err != nil {
 		return nil, err
