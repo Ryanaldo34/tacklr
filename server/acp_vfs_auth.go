@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"github.com/ryanaldo34/tacklr/vfs"
 )
@@ -15,11 +16,16 @@ const (
 )
 
 type vfsAuthWire struct {
-	Token string `json:"token"`
+	Token     string     `json:"token"`
+	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
 }
 
 func (a vfsAuthWire) credential() vfs.Credential {
-	return vfs.Credential{Token: a.Token}
+	credential := vfs.Credential{Token: a.Token}
+	if a.ExpiresAt != nil {
+		credential.ExpiresAt = a.ExpiresAt.UTC()
+	}
+	return credential
 }
 
 type vfsBindItem struct {

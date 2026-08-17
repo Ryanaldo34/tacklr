@@ -219,13 +219,20 @@ type driveProvider struct {
 var _ documentBackend = (*driveProvider)(nil)
 
 func (p *driveProvider) call(ctx context.Context, fn func() error) error {
+	staleToken := ""
+	if p.holder != nil {
+		if err := p.holder.EnsureValid(ctx); err != nil {
+			return err
+		}
+		staleToken = p.holder.Current().Token
+	}
 	if err := fn(); err == nil || !errors.Is(err, ErrAuthExpired) {
 		return err
 	}
 	if p.holder == nil {
 		return ErrAuthExpired
 	}
-	if err := p.holder.RefreshOnce(ctx); err != nil {
+	if err := p.holder.RefreshIfCurrent(ctx, staleToken); err != nil {
 		return err
 	}
 	return fn()

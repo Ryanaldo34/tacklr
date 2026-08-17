@@ -120,13 +120,14 @@ func TestACP_vfsBindRefreshUnbind(t *testing.T) {
 	}
 
 	secret := "never-persist-this-token"
+	expiresAt := time.Now().UTC().Add(30 * time.Minute).Truncate(time.Second)
 	bindBody, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0", "id": 3, "method": methodVFSBind,
 		"params": map[string]any{
 			"sessionId": sessionID,
 			"backends": []map[string]any{
-				{"provider": "gdrive", "point": "/contracts", "auth": map[string]string{"scheme": "bearer", "token": secret}, "params": map[string]string{"folderId": "root-a"}},
-				{"provider": "gdrive", "point": "/notes", "auth": map[string]string{"token": secret}, "params": map[string]string{"folderId": "root-b"}},
+				{"provider": "gdrive", "point": "/contracts", "auth": map[string]any{"scheme": "bearer", "token": secret, "expiresAt": expiresAt}, "params": map[string]string{"folderId": "root-a"}},
+				{"provider": "gdrive", "point": "/notes", "auth": map[string]any{"token": secret, "expiresAt": expiresAt}, "params": map[string]string{"folderId": "root-b"}},
 			},
 		},
 	})
@@ -145,6 +146,9 @@ func TestACP_vfsBindRefreshUnbind(t *testing.T) {
 	}
 	if strings.Contains(string(raw), secret) {
 		t.Fatalf("wire envelope stored token: %s", raw)
+	}
+	if credential, ok := auth.Credential(sessionID, "gdrive"); !ok || !credential.ExpiresAt.Equal(expiresAt) {
+		t.Fatalf("credential expiry = %v ok=%v", credential.ExpiresAt, ok)
 	}
 
 	stream, err := r.RunTurn(t.Context(), TurnRequest{
@@ -234,6 +238,7 @@ func TestACP_vfsTokenRefreshCall(t *testing.T) {
 	bridge := NewClientBridge(w)
 	bridge.SetCaps(ClientCapabilities{VFSTokenRefresh: true})
 	fn := vfsTokenRefresh(bridge, "sess", "gdrive")
+	expiresAt := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
 
 	done := make(chan error, 1)
 	go func() {
@@ -242,7 +247,7 @@ func TestACP_vfsTokenRefreshCall(t *testing.T) {
 			done <- err
 			return
 		}
-		if cred.Token != "from-client" {
+		if cred.Token != "from-client" || !cred.ExpiresAt.Equal(expiresAt) {
 			done <- errors.New("unexpected token")
 			return
 		}
@@ -259,7 +264,7 @@ func TestACP_vfsTokenRefreshCall(t *testing.T) {
 			}
 			reply, _ := json.Marshal(map[string]any{
 				"jsonrpc": "2.0", "id": msg["id"],
-				"result": map[string]string{"token": "from-client"},
+				"result": map[string]any{"token": "from-client", "expiresAt": expiresAt},
 			})
 			if !bridge.TryCompleteResponse(reply) {
 				t.Fatal("did not complete token response")

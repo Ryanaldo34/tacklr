@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	tacklrsecurity "github.com/ryanaldo34/tacklr/security"
+	"github.com/ryanaldo34/tacklr/vfs"
 )
 
 type testAuthenticator func(context.Context, tacklrsecurity.Attempt) (tacklrsecurity.Principal, error)
@@ -97,5 +98,29 @@ func TestServer_networkPolicyMustBeExplicit(t *testing.T) {
 	// Assert
 	if !errors.Is(err, ErrNetworkSecurityPolicyRequired) {
 		t.Fatalf("ServeHTTP error = %v", err)
+	}
+}
+
+func TestConnectionRemoval_clearsEphemeralVFSCredentials(t *testing.T) {
+	// Arrange
+	auth := vfs.NewSessionAuth()
+	if err := auth.Bind("session", vfs.Binding{
+		Provider: "gdrive",
+		Point:    "/drive",
+		Auth:     vfs.Credential{Token: "secret"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	registry := NewRegistry(testStore(t), "", WithVFSAuth(auth))
+	server := NewServer(registry, ACP)
+	connection := server.Connections.Create(nil, nil)
+	connection.noteSession("session")
+
+	// Act
+	server.Connections.Remove(connection.ID)
+
+	// Assert
+	if auth.HasBindings("session") {
+		t.Fatal("connection removal retained VFS credentials")
 	}
 }

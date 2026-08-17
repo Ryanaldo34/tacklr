@@ -582,6 +582,7 @@ func acpVFSCapability(r *Registry) map[string]any {
 		"credentials":  true,
 		"providers":    providers,
 		"tokenRefresh": true,
+		"tokenExpiry":  true,
 	}
 }
 

@@ -42,10 +42,19 @@ func NewServer(r *Registry, protocols ...Protocol) *Server {
 	if len(protocols) == 0 {
 		panic("server: at least one Protocol is required")
 	}
+	connections := NewConnectionRegistry()
+	connections.onRemove = func(connection *Connection) {
+		if r.vfsAuth == nil {
+			return
+		}
+		for _, sessionID := range connection.sessionIDs() {
+			r.vfsAuth.Clear(sessionID)
+		}
+	}
 	return &Server{
 		Registry:    r,
 		Protocols:   protocols,
-		Connections: NewConnectionRegistry(),
+		Connections: connections,
 	}
 }
 

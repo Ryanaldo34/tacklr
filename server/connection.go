@@ -121,6 +121,7 @@ type ConnectionRegistry struct {
 	// LateSessionSSEFallback delivers session traffic on the connection SSE
 	// when the session sink is not open yet. Off by default.
 	LateSessionSSEFallback bool
+	onRemove               func(*Connection)
 }
 
 // NewConnectionRegistry returns an empty registry.
@@ -172,6 +173,9 @@ func (r *ConnectionRegistry) Remove(id string) {
 	delete(r.byID, id)
 	r.mu.Unlock()
 	if c != nil {
+		if r.onRemove != nil {
+			r.onRemove(c)
+		}
 		c.shutdown()
 	}
 }
@@ -248,6 +252,19 @@ func (c *Connection) hasSession(sessionID string) bool {
 	defer c.mu.Unlock()
 	_, ok := c.sessions[sessionID]
 	return ok
+}
+
+func (c *Connection) sessionIDs() []string {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	ids := make([]string, 0, len(c.sessions))
+	for id := range c.sessions {
+		ids = append(ids, id)
+	}
+	return ids
 }
 
 // attachConnSSE registers the connection-scoped GET stream. Returns a detach func

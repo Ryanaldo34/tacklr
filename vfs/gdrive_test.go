@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/oauth2"
 	"google.golang.org/api/drive/v3"
@@ -147,9 +148,21 @@ func TestMountSession_gdriveReadOnlySession(t *testing.T) {
 		t.Fatalf("canceled: %v", err)
 	}
 
-	// 401 + one refresh succeeds.
-	api.once["GetMedia"] = vfs.ErrAuthExpired
+	// Near-expiry token refreshes before the provider request.
 	h := auth.Holder("sess-gd", vfs.ProviderGoogleDrive)
+	h.Set(vfs.Credential{Token: "expiring", ExpiresAt: time.Now().Add(10 * time.Second)})
+	proactiveRefreshes := 0
+	h.SetRefresh(func(context.Context) (vfs.Credential, error) {
+		proactiveRefreshes++
+		return vfs.Credential{Token: "proactive", ExpiresAt: time.Now().Add(time.Hour)}, nil
+	})
+	raw, err = ms.ReadFile(ctx, "/notes/readme.txt")
+	if err != nil || string(raw) != "hello" || proactiveRefreshes != 1 {
+		t.Fatalf("proactive refresh read = %q refreshes=%d err=%v", raw, proactiveRefreshes, err)
+	}
+
+	// 401 + one reactive refresh succeeds.
+	api.once["GetMedia"] = vfs.ErrAuthExpired
 	h.SetRefresh(func(context.Context) (vfs.Credential, error) {
 		return vfs.Credential{Token: "fresh"}, nil
 	})
