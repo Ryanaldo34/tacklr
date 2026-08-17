@@ -26,13 +26,12 @@ func (Checkpointer) Capture(
 	window []*streaming.Message,
 	sm *SessionManager,
 	pendingToolCalls map[string]stores.PendingToolCall,
-	interruptToRequester map[string]string,
 ) (*stores.SessionCheckpoint, error) {
 	if sm == nil {
 		return nil, fmt.Errorf("checkpointer: session manager is nil")
 	}
 	runtimeState, pending, resolved := sm.SnapshotDurable()
-	cp, err := stores.NewCheckpoint(window, pendingToolCalls, interruptToRequester, runtimeState, pending, resolved)
+	cp, err := stores.NewCheckpoint(window, pendingToolCalls, runtimeState, pending, resolved)
 	if err != nil {
 		return nil, err
 	}
@@ -49,9 +48,11 @@ func (Checkpointer) Capture(
 // AppliedCheckpoint is harness-side state restored from a store blob
 // (everything not owned by SessionManager).
 type AppliedCheckpoint struct {
-	Window               []*streaming.Message
-	PendingToolCalls     map[string]stores.PendingToolCall
-	InterruptToRequester map[string]string
+	Window           []*streaming.Message
+	PendingToolCalls map[string]stores.PendingToolCall
+	// LegacyInterruptIDs maps old wire interrupt ids → tool call ids.
+	// Empty for checkpoints written after interrupt identity unification.
+	LegacyInterruptIDs map[string]string
 }
 
 // Apply loads SessionManager state from the checkpoint and returns maps the
@@ -73,13 +74,13 @@ func (Checkpointer) Apply(cp stores.SessionCheckpoint, sm *SessionManager) (Appl
 	if ptc == nil {
 		ptc = make(map[string]stores.PendingToolCall)
 	}
-	itr := cp.State.InterruptToRequester
-	if itr == nil {
-		itr = make(map[string]string)
+	legacy := cp.State.InterruptToRequester
+	if legacy == nil {
+		legacy = make(map[string]string)
 	}
 	return AppliedCheckpoint{
-		Window:               cp.ContextWindow,
-		PendingToolCalls:     ptc,
-		InterruptToRequester: itr,
+		Window:             cp.ContextWindow,
+		PendingToolCalls:   ptc,
+		LegacyInterruptIDs: legacy,
 	}, nil
 }

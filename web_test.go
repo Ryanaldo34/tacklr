@@ -69,22 +69,22 @@ func TestWebSearchTool_invokeAgainstServer(t *testing.T) {
 	if err != nil || !strings.Contains(res.output, "(untitled)") || !strings.Contains(res.output, `"answer"`) {
 		t.Fatalf("untitled/synth: %q err=%v", res.output, err)
 	}
-	if _, err := tool.invoke(ctx, `{"query":"  "}`, nil); err == nil || !strings.Contains(err.Error(), "query is required") {
+	if _, err := tool.invoke(ctx, `{"query":"  "}`, nopRuntime()); err == nil || !strings.Contains(err.Error(), "query is required") {
 		t.Fatalf("empty query: %v", err)
 	}
-	if _, err := tool.invoke(ctx, `{"query":"q","type":"nope"}`, nil); err == nil {
+	if _, err := tool.invoke(ctx, `{"query":"q","type":"nope"}`, nopRuntime()); err == nil {
 		t.Fatal("invalid type")
 	}
-	if _, err := tool.invoke(ctx, `{"query":"q","category":"nope"}`, nil); err == nil {
+	if _, err := tool.invoke(ctx, `{"query":"q","category":"nope"}`, nopRuntime()); err == nil {
 		t.Fatal("invalid category")
 	}
-	if _, err := tool.invoke(ctx, `{"query":"q","category":"company","exclude_domains":["x.com"]}`, nil); err == nil {
+	if _, err := tool.invoke(ctx, `{"query":"q","category":"company","exclude_domains":["x.com"]}`, nopRuntime()); err == nil {
 		t.Fatal("company exclude")
 	}
-	if _, err := tool.invoke(ctx, `{"query":"q","category":"people","start_published_date":"2024-01-01T00:00:00Z"}`, nil); err == nil {
+	if _, err := tool.invoke(ctx, `{"query":"q","category":"people","start_published_date":"2024-01-01T00:00:00Z"}`, nopRuntime()); err == nil {
 		t.Fatal("people dates")
 	}
-	if _, err := tool.invoke(ctx, `{"query":"q","content_mode":"raw"}`, nil); err == nil {
+	if _, err := tool.invoke(ctx, `{"query":"q","content_mode":"raw"}`, nopRuntime()); err == nil {
 		t.Fatal("invalid mode")
 	}
 	res, err = tool.invoke(ctx, `{"query":"q","type":"text","content_mode":"text","category":"news"}`, nopRuntime())

@@ -184,7 +184,7 @@ func main() {
 			"addr", addr,
 			"websocket", fmt.Sprintf("ws://localhost:%d/acp", port),
 			"streamable_http", fmt.Sprintf("http://localhost:%d/acp", port),
-			"legacy_unary", "POST /",
+			"sse", "POST /",
 		)
 		if err := srv.ServeHTTP(ctx, addr); err != nil && !errors.Is(err, context.Canceled) {
 			slog.Error("server error", "error", err)

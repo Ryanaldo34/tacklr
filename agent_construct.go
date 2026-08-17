@@ -113,6 +113,9 @@ func newHarnessBase(opts AgentOptions, sm *session.SessionManager) (*AgentHarnes
 	if opts.Model == nil {
 		return nil, fmt.Errorf("tacklr: AgentOptions.Model is required")
 	}
+	if sm == nil {
+		return nil, fmt.Errorf("tacklr: session manager is required")
+	}
 	h := &AgentHarness{
 		model:                opts.Model,
 		maxWindowSize:        opts.Config.MaxWindowSize,
@@ -130,8 +133,8 @@ func newHarnessBase(opts AgentOptions, sm *session.SessionManager) (*AgentHarnes
 		brainWriteKinds:      opts.BrainWriteKinds,
 		sessionId:            "",
 		subagents:            make(map[string]*SubAgent),
-		interruptToRequester: make(map[string]string),
 		pendingToolCalls:     make(map[string]stores.PendingToolCall),
+		legacyInterruptIDs:   make(map[string]string),
 		interruptPayloads:    make(map[string][]byte),
 		parkedWorkersLive:    make(map[string]*AgentHarness),
 		jobs:                 make(map[string]*backgroundJob),
@@ -167,10 +170,10 @@ func newHarnessBase(opts AgentOptions, sm *session.SessionManager) (*AgentHarnes
 }
 
 func (h *AgentHarness) finishInit(ctx context.Context, subAgents []*SubAgent) error {
-	h.initMCP(ctx)
 	if err := h.initSkills(ctx); err != nil {
 		return fmt.Errorf("initialize skills: %w", err)
 	}
+	h.initMCP(ctx)
 	if err := h.initSubAgentWorkers(subAgents); err != nil {
 		return err
 	}
@@ -180,6 +183,15 @@ func (h *AgentHarness) finishInit(ctx context.Context, subAgents []*SubAgent) er
 		}
 	}
 	h.injectBuiltinTools()
+	return nil
+}
+
+func (a *AgentHarness) ensureReady(ctx context.Context) error {
+	if err := a.initSkills(ctx); err != nil {
+		return fmt.Errorf("load skills: %w", err)
+	}
+	a.initMCP(ctx)
+	a.injectBuiltinTools()
 	return nil
 }
 
@@ -335,7 +347,7 @@ func NewAgentFromSession(ctx context.Context, sessionId string, opts AgentOption
 	}
 	h.sessionId = sessionId
 	h.context.Restore(applied.Window)
-	h.interruptToRequester = applied.InterruptToRequester
+	h.legacyInterruptIDs = applied.LegacyInterruptIDs
 	h.pendingToolCalls = applied.PendingToolCalls
 	if err := h.finishInit(ctx, opts.SubAgents); err != nil {
 		return nil, err

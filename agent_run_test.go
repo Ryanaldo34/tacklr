@@ -454,9 +454,9 @@ func TestRun_modelErrorAfterTools_tagsAndCheckpointsPairs(t *testing.T) {
 	}
 }
 
-// TestRun_modelError_stripsUnpairedFromCheckpoint: on inference failure, unpaired
-// function_calls/results are dropped while complete tool pairs remain.
-func TestRun_modelError_stripsUnpairedFromCheckpoint(t *testing.T) {
+// TestRun_pairsOpenToolCallsBeforeTurn: a restored open function_call is paired
+// with an error tool result so the next model turn sees a valid window.
+func TestRun_pairsOpenToolCallsBeforeTurn(t *testing.T) {
 	store := stores.NewInMemoryStore()
 	strategy := &mockStrategy{
 		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
@@ -472,8 +472,7 @@ func TestRun_modelError_stripsUnpairedFromCheckpoint(t *testing.T) {
 		Model:  strategy,
 		Store:  store,
 	})
-	h.sessionId = "sess-strip-orphan"
-	// Leave pendingToolCalls empty so Run takes the model-turn path (not resume).
+	h.sessionId = "sess-pair-open"
 	h.restoreMessages([]*Message{
 		{Role: RoleUser, Content: "goal"},
 		{Role: RoleAssistant, ToolCalls: []ToolCall{
@@ -483,7 +482,6 @@ func TestRun_modelError_stripsUnpairedFromCheckpoint(t *testing.T) {
 			{CallID: "good", Name: "echo", Arguments: `{}`},
 		}},
 		{Role: RoleTool, ToolCallID: "good", Content: "done"},
-		{Role: RoleTool, ToolCallID: "orphan_out", Content: "no-call"},
 	})
 
 	events, err := h.Run(context.Background(), "continue")
@@ -492,7 +490,7 @@ func TestRun_modelError_stripsUnpairedFromCheckpoint(t *testing.T) {
 	}
 	_ = drainEvents(events)
 
-	loaded, err := NewAgentFromSession(context.Background(), "sess-strip-orphan", AgentOptions{
+	loaded, err := NewAgentFromSession(context.Background(), "sess-pair-open", AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  &mockStrategy{},
 		Store:  store,
@@ -500,7 +498,7 @@ func TestRun_modelError_stripsUnpairedFromCheckpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var sawGood, sawOrphan bool
+	var sawGood, sawOrphanCall, sawOrphanResult bool
 	for _, m := range loaded.Messages() {
 		if m == nil {
 			continue
@@ -508,7 +506,7 @@ func TestRun_modelError_stripsUnpairedFromCheckpoint(t *testing.T) {
 		if m.Role == RoleAssistant {
 			for _, tc := range m.ToolCalls {
 				if tc.CallID == "orphan" {
-					sawOrphan = true
+					sawOrphanCall = true
 				}
 			}
 		}
@@ -516,13 +514,14 @@ func TestRun_modelError_stripsUnpairedFromCheckpoint(t *testing.T) {
 			if m.ToolCallID == "good" && m.Content == "done" {
 				sawGood = true
 			}
-			if m.ToolCallID == "orphan_out" {
-				t.Fatalf("orphan tool output survived: %+v", loaded.Messages())
+			if m.ToolCallID == "orphan" {
+				sawOrphanResult = true
 			}
 		}
 	}
-	if sawOrphan {
-		t.Fatalf("orphan function_call survived: %+v", loaded.Messages())
+	if !sawOrphanCall || !sawOrphanResult {
+		t.Fatalf("open tool call must be paired: call=%v result=%v window=%+v",
+			sawOrphanCall, sawOrphanResult, loaded.Messages())
 	}
 	if !sawGood {
 		t.Fatalf("paired tool result missing: %+v", loaded.Messages())

@@ -3,6 +3,7 @@ package inference
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -138,7 +139,7 @@ func TestCountTokens_usesAPIWhenAvailable(t *testing.T) {
 	}
 }
 
-func TestCountTokens_fallsBackToTiktokenOn404(t *testing.T) {
+func TestCountTokens_404WithoutLocalFallback_returnsAPIError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = io.WriteString(w, `{"error":"nope"}`)
@@ -149,6 +150,28 @@ func TestCountTokens_fallsBackToTiktokenOn404(t *testing.T) {
 		WithApiKey("k").
 		WithModel("m").
 		WithURL(srv.URL)
+
+	_, err := s.CountTokens(context.Background(), []*tacklr.Message{
+		{Role: tacklr.RoleUser, Content: "count these tokens please"},
+	}, nil)
+	var apiErr *APIStatusError
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusNotFound {
+		t.Fatalf("want 404 API error, got %v", err)
+	}
+}
+
+func TestCountTokens_fallsBackToTiktokenOn404(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"error":"nope"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	s := NewOpenAIInferenceStrategy(srv.Client()).
+		WithApiKey("k").
+		WithModel("m").
+		WithURL(srv.URL).
+		WithLocalTokenFallback()
 
 	n, err := s.CountTokens(context.Background(), []*tacklr.Message{
 		{Role: tacklr.RoleUser, Content: "count these tokens please"},

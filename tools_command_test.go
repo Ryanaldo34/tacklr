@@ -3,6 +3,7 @@ package tacklr
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -37,7 +38,15 @@ func TestRunCommand_catDirtyAndFalseExit(t *testing.T) {
 	t.Cleanup(func() { _ = ms.Close() })
 
 	tool := newRunCommand(ms, false)
-	res, err := tool.invoke(ctx, `{"command":"cat work/note.md"}`, rt)
+	res, err := tool.invoke(ctx, `{"command":"pwd"}`, rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.output, ms.HostDir()) {
+		t.Fatalf("pwd cwd: %s want %s", res.output, ms.HostDir())
+	}
+
+	res, err = tool.invoke(ctx, `{"command":"cat work/note.md"}`, rt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,6 +130,22 @@ func TestRunCommand_truncatesOver1MiB(t *testing.T) {
 			head = head[:240]
 		}
 		t.Fatalf("truncate: %s", head)
+	}
+}
+
+func TestRunCommand_cdIntoQuotedPath(t *testing.T) {
+	dir := t.TempDir() + "/it's a dir"
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("/bin/sh", "-c", `cd "$1" && pwd`, "run_command", dir)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.TrimSpace(string(out))
+	if got != dir {
+		t.Fatalf("pwd = %q want %q", got, dir)
 	}
 }
 

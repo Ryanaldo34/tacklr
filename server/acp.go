@@ -39,11 +39,6 @@ func stopReasonFromError(err error) (reason string, ok bool) {
 	case errors.Is(err, tacklr.ErrMaxTurnRequests):
 		return stopReasonMaxTurnRequests, true
 	default:
-		// Harness cancel notices wrap context.Canceled under fmt.Errorf.
-		if strings.Contains(strings.ToLower(err.Error()), "context cancelled") ||
-			strings.Contains(strings.ToLower(err.Error()), "context canceled") {
-			return stopReasonCancelled, true
-		}
 		return "", false
 	}
 }
@@ -409,15 +404,6 @@ func formatResourceLink(b acpContentBlock) (string, error) {
 		bld.WriteString(d)
 	}
 	return bld.String(), nil
-}
-
-// negotiateACPProtocolVersion implements init version negotiation:
-// same version if we support it, else the latest we support.
-func negotiateACPProtocolVersion(clientVersion int) int {
-	if clientVersion == acpProtocolVersion {
-		return acpProtocolVersion
-	}
-	return acpProtocolVersion
 }
 
 func eventToAcpJsonRpc(threadId string, event *streaming.StreamEvent) ([][]byte, error) {

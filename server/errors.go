@@ -63,7 +63,8 @@ func IsClientError(err error) bool {
 		errors.Is(err, ErrMethodNotFound) ||
 		errors.Is(err, ErrAgentNotFound) ||
 		errors.Is(err, ErrSessionNotFound) ||
-		errors.Is(err, ErrSessionStoreNotConfigured)
+		errors.Is(err, ErrSessionStoreNotConfigured) ||
+		errors.Is(err, errConnectionNotInitialized)
 }
 
 // PublicError returns a wire-safe error: client errors pass through unchanged;
