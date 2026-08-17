@@ -2,12 +2,6 @@ package session
 
 import "sync"
 
-const parkedWorkersStateKey = "_parked_workers"
-
-func init() {
-	reserveStateKeys(parkedWorkersStateKey)
-}
-
 // ParkedWorkerMeta is durable park metadata for a spawn_worker tool call.
 // Live harness pointers are not stored here.
 type ParkedWorkerMeta struct {
@@ -62,15 +56,6 @@ func (p *parkBag) replace(m map[string]ParkedWorkerMeta) {
 	if p.byID == nil {
 		p.byID = map[string]ParkedWorkerMeta{}
 	}
-}
-
-func (p *parkBag) exportInto(state map[string]any) {
-	cp := p.clone()
-	if len(cp) == 0 {
-		delete(state, parkedWorkersStateKey)
-		return
-	}
-	state[parkedWorkersStateKey] = cp
 }
 
 // ParkedWorker returns durable park metadata for a spawn_worker tool call.

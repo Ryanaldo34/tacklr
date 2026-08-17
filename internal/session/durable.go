@@ -52,9 +52,6 @@ func (s *SessionManager) snapshotCheckpoint() (
 
 	userState = make(map[string]json.RawMessage, len(userValues))
 	for key, value := range userValues {
-		if IsReservedRuntimeStateKey(key) {
-			continue
-		}
 		raw, marshalErr := json.Marshal(value)
 		if marshalErr != nil {
 			return nil, nil, nil, nil, fmt.Errorf("checkpoint user state %q: %w", key, marshalErr)
@@ -131,9 +128,6 @@ func (s *SessionManager) applyCheckpoint(userState, modules map[string]json.RawM
 
 	decodedUser := make(map[string]any, len(userState))
 	for key, raw := range userState {
-		if IsReservedRuntimeStateKey(key) {
-			return fmt.Errorf("checkpoint user state %q uses a reserved module key", key)
-		}
 		var value any
 		if err := json.Unmarshal(raw, &value); err != nil {
 			return fmt.Errorf("checkpoint user state %q: %w", key, err)

@@ -132,8 +132,7 @@ func (h *TokenHolder) RefreshOnce(ctx context.Context) error {
 }
 
 // EnsureValid proactively refreshes a token that is expired or near expiry.
-// A zero ExpiresAt preserves compatibility with clients that only support
-// reactive refresh after a provider 401.
+// A zero ExpiresAt selects reactive refresh after a provider 401.
 func (h *TokenHolder) EnsureValid(ctx context.Context) error {
 	if h == nil {
 		return ErrAuthExpired

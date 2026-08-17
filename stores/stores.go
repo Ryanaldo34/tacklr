@@ -16,22 +16,14 @@ type PendingToolCall struct {
 
 // sessionState is harness-owned durable agent state (not wire-protocol envelopes).
 type sessionState struct {
-	// Version 2 stores framework modules as typed JSON sections and isolates
-	// arbitrary host state. Zero/one denotes the legacy RuntimeState shape.
+	// Version identifies the typed module schema.
 	Version   int                        `json:"version,omitempty"`
 	UserState map[string]json.RawMessage `json:"userState,omitempty"`
 	Modules   map[string]json.RawMessage `json:"modules,omitempty"`
 
-	PendingToolCalls map[string]PendingToolCall `json:"pendingToolCalls"`
-	// InterruptToRequester is read-only legacy (old checkpoints keyed wire
-	// interrupt ids separately from tool call ids). New saves omit it.
-	InterruptToRequester map[string]string `json:"interruptToRequester,omitempty"`
-	RuntimeState         map[string]any    `json:"runtimeState,omitempty"`
-	PendingInterrupts    []byte            `json:"pendingInterrupts,omitempty"`
-	ResolvedInterrupts   []byte            `json:"resolvedInterrupts,omitempty"`
-	// SearchContext is an opaque brain.SearchContext export (JSON bytes).
-	// Owned by the harness, not SessionManager.
-	SearchContext []byte `json:"searchContext,omitempty"`
+	PendingToolCalls   map[string]PendingToolCall `json:"pendingToolCalls"`
+	PendingInterrupts  []byte                     `json:"pendingInterrupts,omitempty"`
+	ResolvedInterrupts []byte                     `json:"resolvedInterrupts,omitempty"`
 }
 
 // CheckpointVersion is the current typed session checkpoint schema.
@@ -45,40 +37,9 @@ type SessionCheckpoint struct {
 	State         sessionState         `json:"state"`
 }
 
-func NewCheckpoint(contextWindow []*streaming.Message, pendingToolCalls map[string]PendingToolCall, runtimeState map[string]any, pendingInterrupts, resolvedInterrupts any) (*SessionCheckpoint, error) {
-	if err := streaming.ValidateMessages(contextWindow); err != nil {
-		return nil, fmt.Errorf("invalid context window: %w", err)
-	}
-	var pendingJSON, resolvedJSON []byte
-	var err error
-
-	if pendingInterrupts != nil {
-		pendingJSON, err = json.Marshal(pendingInterrupts)
-		if err != nil {
-			return nil, fmt.Errorf("marshal pending interrupts: %w", err)
-		}
-	}
-	if resolvedInterrupts != nil {
-		resolvedJSON, err = json.Marshal(resolvedInterrupts)
-		if err != nil {
-			return nil, fmt.Errorf("marshal resolved interrupts: %w", err)
-		}
-	}
-
-	return &SessionCheckpoint{
-		ContextWindow: contextWindow,
-		State: sessionState{
-			PendingToolCalls:   pendingToolCalls,
-			RuntimeState:       runtimeState,
-			PendingInterrupts:  pendingJSON,
-			ResolvedInterrupts: resolvedJSON,
-		},
-	}, nil
-}
-
-// NewTypedCheckpoint builds the current checkpoint schema. modules contain
+// NewCheckpoint builds the current checkpoint schema. modules contain
 // framework-owned typed JSON; userState contains host-owned arbitrary JSON.
-func NewTypedCheckpoint(
+func NewCheckpoint(
 	contextWindow []*streaming.Message,
 	pendingToolCalls map[string]PendingToolCall,
 	userState, modules map[string]json.RawMessage,

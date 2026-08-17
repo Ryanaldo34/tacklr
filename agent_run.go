@@ -36,8 +36,7 @@ func (a *AgentHarness) RunMessage(ctx context.Context, user *Message) (<-chan St
 }
 
 // ReturnFromInterrupt applies host resolutions and resumes the parked tool batch.
-// Keys are tool call ids (also the wire interrupt ids). Old checkpoints that
-// stored a separate wire id are resolved through legacyInterruptIDs.
+// Keys are tool call ids, which are also the wire interrupt ids.
 func (a *AgentHarness) ReturnFromInterrupt(ctx context.Context, finishedInterrupts map[string][]byte) (<-chan StreamEvent, error) {
 	if err := a.applyInterruptResolutions(finishedInterrupts); err != nil {
 		return nil, err
@@ -60,7 +59,6 @@ func (a *AgentHarness) applyInterruptResolutions(finishedInterrupts map[string][
 		if _, err := a.session.ReturnInterrupt(toolCallID, payload); err != nil {
 			return fmt.Errorf("return from interrupt %q: %w", id, err)
 		}
-		delete(a.legacyInterruptIDs, id)
 		tc, ok := a.pendingToolCalls[toolCallID]
 		if !ok {
 			return fmt.Errorf("no pending tool call found for tool call id %s", toolCallID)

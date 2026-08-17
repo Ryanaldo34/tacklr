@@ -91,14 +91,4 @@ func TestSearchContext_putGetExportRestore(t *testing.T) {
 	if _, ok := sc3.Namespace(); ok {
 		t.Fatal("clear")
 	}
-	// Legacy ResultSet-only JSON still restores.
-	legacy, _ := json.Marshal(ResultSet{ID: id, ObjectIDs: ids, Offset: 2})
-	sc4 := NewSearchContext()
-	if err := sc4.Restore(legacy); err != nil {
-		t.Fatal(err)
-	}
-	got4, err := sc4.Get(ctx, id)
-	if err != nil || got4.Offset != 2 {
-		t.Fatalf("%+v %v", got4, err)
-	}
 }

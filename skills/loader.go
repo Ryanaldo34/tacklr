@@ -25,16 +25,13 @@ type SkillLoader interface {
 	Load(ctx context.Context) ([]Skill, error)
 }
 
-// Loader is kept as an alias for compatibility with earlier releases.
-type Loader = SkillLoader
-
 // DirectoryLoader loads one skill per immediate child directory under each
 // root. It is the default when AgentOptions.SkillsLoader is nil.
 type DirectoryLoader struct {
 	Directories []string
 }
 
-// Load implements Loader using LoadDirectories.
+// Load implements SkillLoader using LoadDirectories.
 func (l DirectoryLoader) Load(ctx context.Context) ([]Skill, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err

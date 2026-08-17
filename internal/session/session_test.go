@@ -95,46 +95,15 @@ func TestCheckpointer_nilManager_errors(t *testing.T) {
 // TestCheckpointer_applyNilMaps_defaults empty pending/interrupt maps.
 func TestCheckpointer_applyNilMaps_defaults(t *testing.T) {
 	sm := session.NewSessionManager()
-	// Zero checkpoint has nil maps; Apply must normalize them.
-	applied, err := session.NewCheckpointer().Apply(stores.SessionCheckpoint{
-		ContextWindow: []*streaming.Message{{Role: streaming.RoleUser, Content: "x"}},
-	}, sm)
+	var checkpoint stores.SessionCheckpoint
+	checkpoint.ContextWindow = []*streaming.Message{{Role: streaming.RoleUser, Content: "x"}}
+	checkpoint.State.Version = stores.CheckpointVersion
+	applied, err := session.NewCheckpointer().Apply(checkpoint, sm)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if applied.PendingToolCalls == nil || applied.LegacyInterruptIDs == nil {
-		t.Fatal("expected non-nil default maps")
-	}
-}
-
-// TestCheckpointer_applyLegacyInterruptIDs restores old wire-id maps without
-// writing them back on Capture.
-func TestCheckpointer_applyLegacyInterruptIDs(t *testing.T) {
-	sm := session.NewSessionManager()
-	var cp stores.SessionCheckpoint
-	if err := json.Unmarshal([]byte(`{
-		"contextWindow":[],
-		"state":{"interruptToRequester":{"old-wire":"call_1"},"pendingToolCalls":{"call_1":{"interruptActive":true}}}
-	}`), &cp); err != nil {
-		t.Fatal(err)
-	}
-	applied, err := session.NewCheckpointer().Apply(cp, sm)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if applied.LegacyInterruptIDs["old-wire"] != "call_1" {
-		t.Fatalf("legacy map = %#v", applied.LegacyInterruptIDs)
-	}
-	out, err := session.NewCheckpointer().Capture(applied.Window, sm, applied.PendingToolCalls)
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw, err := json.Marshal(out)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(raw), "interruptToRequester") {
-		t.Fatalf("new checkpoint must omit legacy map: %s", raw)
+	if applied.PendingToolCalls == nil {
+		t.Fatal("expected non-nil pending map")
 	}
 }
 
@@ -167,25 +136,6 @@ func TestPlanStore_lifecycle(t *testing.T) {
 		t.Fatal("consume clears flag")
 	}
 
-	state := map[string]any{}
-	p.ExportInto(state)
-	if state["_plan"] == nil || state["_plan_document"] != "second" {
-		t.Fatalf("export = %#v", state)
-	}
-
-	p2 := session.NewPlanStore()
-	// JSON-shaped todos (checkpoint reload path).
-	state["_plan"] = []any{map[string]any{"title": "fromJSON", "status": "pending"}}
-	state["_plan_document"] = "reloaded"
-	state["_plan_document_updated"] = true
-	p2.LoadFromState(state)
-	if p2.Document() != "reloaded" || len(p2.Get()) != 1 || p2.Get()[0].Title != "fromJSON" {
-		t.Fatalf("load = doc %q plan %#v", p2.Document(), p2.Get())
-	}
-	if !p2.ConsumeDocumentUpdated() {
-		t.Fatal("want reloaded updated flag")
-	}
-
 	p.Set(nil)
 	if p.Get() != nil {
 		t.Fatal("clear plan")
@@ -193,31 +143,9 @@ func TestPlanStore_lifecycle(t *testing.T) {
 	if cleared, ok := p.ConsumeTodosUpdated(); !ok || cleared != nil {
 		t.Fatalf("clear should notify, got %#v ok=%v", cleared, ok)
 	}
-	empty := map[string]any{}
-	p.ExportInto(empty)
-	if _, ok := empty["_plan"]; ok {
-		t.Fatal("cleared plan should not export todos")
-	}
-
-	state["_on_call_stages"] = []any{}
-	session.StripPlanKeys(state)
-	if _, ok := state["_on_call_stages"]; ok {
-		t.Fatal("on-call stages key should be stripped")
-	}
-	if session.IsReservedRuntimeStateKey("_plan") != true {
-		t.Fatal("reserved key")
-	}
-	if !session.IsReservedRuntimeStateKey("_on_call_stages") {
-		t.Fatal("on-call stages key")
-	}
-	if session.IsReservedRuntimeStateKey("user") {
-		t.Fatal("user key not reserved")
-	}
-	session.StripPlanKeys(nil)
 }
 
-// TestSessionManager_stateAndPlan_guards reserved keys on a live manager.
-func TestSessionManager_stateAndPlan_guards(t *testing.T) {
+func TestSessionManager_stateAndPlanAreIsolated(t *testing.T) {
 	sm := session.NewSessionManager()
 	rt := session.NewRuntime(func() chan streaming.StreamEvent {
 		c := make(chan streaming.StreamEvent, 8)
@@ -227,11 +155,11 @@ func TestSessionManager_stateAndPlan_guards(t *testing.T) {
 		}()
 		return c
 	}(), sm)
-	if err := rt.StateSet("_plan", "blocked"); err == nil {
-		t.Fatal("reserved key should error on set")
+	if err := rt.StateSet("_plan", "host value"); err != nil {
+		t.Fatal(err)
 	}
-	if _, ok := rt.StateGet("_plan"); ok {
-		t.Fatal("reserved key blocked on get")
+	if value, ok := rt.StateGet("_plan"); !ok || value != "host value" {
+		t.Fatal("host state was not stored independently")
 	}
 	if err := rt.StateSet("ok", 1); err != nil {
 		t.Fatal(err)
@@ -243,7 +171,7 @@ func TestSessionManager_stateAndPlan_guards(t *testing.T) {
 	if _, ok := rt.StateGet("ok"); ok {
 		t.Fatal("deleted")
 	}
-	rt.StateDelete("_plan") // no-op on reserved
+	rt.StateDelete("_plan")
 	if sm.Plan.HasActive() {
 		t.Fatal("no plan yet")
 	}
@@ -394,9 +322,7 @@ func TestRuntime_emitAndState_channels(t *testing.T) {
 	sm.StateDelete("z")
 }
 
-// TestSessionManager_snapshotLoadInterrupts_roundTrip clones pending interrupts
-// into checkpoint JSON and reloads them.
-func TestSessionManager_snapshotLoadInterrupts_roundTrip(t *testing.T) {
+func TestSessionManager_checkpointInterruptsRoundTrip(t *testing.T) {
 	sm := session.NewSessionManager()
 	rt := session.NewRuntime(func() chan streaming.StreamEvent {
 		c := make(chan streaming.StreamEvent, 8)
@@ -409,29 +335,20 @@ func TestSessionManager_snapshotLoadInterrupts_roundTrip(t *testing.T) {
 	rt = rt.WithToolCallID("c1")
 	_, _ = rt.RaiseInterrupt("user_selection_choice", []byte(`[{"title":"A"}]`))
 	rt.StateSet("u", "v")
-	// reserved key should not appear as user state in snapshot
 	sm.Plan.SetDocument("doc")
 	sm.Plan.Set([]streaming.Todo{{Title: "T", Status: streaming.TodoStatusPending}})
 
-	state, pending, resolved := sm.SnapshotDurable()
-	if state["u"] != "v" || state["_plan_document"] != "doc" {
-		t.Fatalf("state=%#v", state)
-	}
-	if len(pending) != 1 || len(resolved) != 0 {
-		t.Fatalf("pending=%d resolved=%d", len(pending), len(resolved))
-	}
-	pendJSON, err := json.Marshal(pending)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resJSON, err := json.Marshal(resolved)
+	checkpoint, err := session.NewCheckpointer().Capture(
+		[]*streaming.Message{{Role: streaming.RoleUser, Content: "go"}},
+		sm,
+		nil,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	sm2 := session.NewSessionManager()
-	sm2.LoadUserAndPlanState(state)
-	if err := sm2.LoadInterruptsJSON(pendJSON, resJSON); err != nil {
+	if _, err := session.NewCheckpointer().Apply(*checkpoint, sm2); err != nil {
 		t.Fatal(err)
 	}
 	if sm2.Plan.Document() != "doc" {
@@ -462,10 +379,6 @@ func TestSessionManager_snapshotLoadInterrupts_roundTrip(t *testing.T) {
 	if err := sm2.LoadInterruptsJSON(nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	// null interrupt map
-	if err := sm2.LoadInterruptsJSON([]byte(`null`), []byte(`null`)); err != nil {
-		t.Fatal(err)
-	}
 }
 
 // TestInterruptMap_unknownType_errors on polymorphic unmarshal.
@@ -482,16 +395,6 @@ func TestInterruptMap_unknownType_errors(t *testing.T) {
 	}(), sm)
 	rt = rt.WithToolCallID("x")
 	_, _ = rt.RaiseInterrupt("tool_permission", []byte(`{"toolName":"t"}`))
-	_, pending, _ := sm.SnapshotDurable()
-	b, err := json.Marshal(pending)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Replace type name.
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(b, &raw); err != nil {
-		t.Fatal(err)
-	}
 	// Build envelope with unknown type.
 	bad, _ := json.Marshal(map[string]any{
 		"x": map[string]any{"type": "not_registered", "data": map[string]any{}},

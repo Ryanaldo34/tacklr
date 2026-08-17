@@ -7,23 +7,6 @@ import (
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
-// Reserved checkpoint keys for SessionManager modules (blocked on StateGet/Set).
-const (
-	planStateKey            = "_plan"
-	planDocumentStateKey    = "_plan_document"
-	planDocumentUpdatedKey  = "_plan_document_updated"
-	searchNamespaceStateKey = "_search_namespace"
-)
-
-func init() {
-	reserveStateKeys(
-		planStateKey,
-		planDocumentStateKey,
-		planDocumentUpdatedKey,
-		searchNamespaceStateKey,
-	)
-}
-
 // PlanStore holds the plan document and todo list for Adaptive Case Management.
 // It is a SessionManager module — not exposed on HarnessRuntime.
 // After NewPlanStore / NewSessionManager the receiver is never nil.
@@ -122,31 +105,4 @@ func (p *PlanStore) ConsumeDocumentUpdated() bool {
 	}
 	p.documentUpdated = false
 	return true
-}
-
-// ExportInto writes plan fields into a runtime-state map for session checkpoints.
-// Overwrites reserved keys with the current PlanStore contents.
-func (p *PlanStore) ExportInto(state map[string]any) {
-	if state == nil {
-		return
-	}
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	if p.todos == nil {
-		delete(state, planStateKey)
-	} else {
-		cp := make([]streaming.Todo, len(p.todos))
-		copy(cp, p.todos)
-		state[planStateKey] = cp
-	}
-	if p.document == "" {
-		delete(state, planDocumentStateKey)
-	} else {
-		state[planDocumentStateKey] = p.document
-	}
-	if p.documentUpdated {
-		state[planDocumentUpdatedKey] = true
-	} else {
-		delete(state, planDocumentUpdatedKey)
-	}
 }

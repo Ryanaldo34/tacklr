@@ -1,18 +1,8 @@
 package session
 
 import (
-	"maps"
 	"sync"
 )
-
-const (
-	permissionAllowKey = "_permission_always_allow"
-	permissionDenyKey  = "_permission_always_deny"
-)
-
-func init() {
-	reserveStateKeys(permissionAllowKey, permissionDenyKey)
-}
 
 // PermissionDecision is session memory for a tool's allow-always / deny-always.
 type PermissionDecision int
@@ -64,22 +54,5 @@ func (p *Permissions) Remember(toolName string, d PermissionDecision) {
 	case PermissionDenyAlways:
 		p.deny[toolName] = true
 		delete(p.allow, toolName)
-	}
-}
-
-func (p *Permissions) exportInto(state map[string]any) {
-	p.mu.RLock()
-	allow := maps.Clone(p.allow)
-	deny := maps.Clone(p.deny)
-	p.mu.RUnlock()
-	if len(allow) == 0 {
-		delete(state, permissionAllowKey)
-	} else {
-		state[permissionAllowKey] = allow
-	}
-	if len(deny) == 0 {
-		delete(state, permissionDenyKey)
-	} else {
-		state[permissionDenyKey] = deny
 	}
 }

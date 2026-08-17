@@ -552,7 +552,7 @@ func TestWireAndConstruct_outcomes(t *testing.T) {
 		t.Fatal("want cwd mismatch")
 	}
 	// Load cwd mismatch + empty configValues envelope path
-	_ = pOk.persistWire(context.Background(), sidOk, &acpWireSession{cwd: "/ok", configValues: nil})
+	_ = pOk.persistWire(context.Background(), sidOk, &acpWireSession{cwd: "/ok", configValues: nil, owner: "local"})
 	// force reload from wire with empty config
 	pOk.mu.Lock()
 	delete(pOk.sessions, sidOk)

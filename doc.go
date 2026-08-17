@@ -7,7 +7,7 @@
 //   - vfs owns virtual filesystem providers and mount sessions.
 //   - mcp owns MCP connection configuration.
 //
-// Root aliases for streaming types remain for source compatibility. New APIs
-// should use the canonical domain packages and must not add server transport,
-// wire protocol, persistence backend, or provider-client details here.
+// New APIs should use the canonical domain packages and must not add server
+// transport, wire protocol, persistence backend, or provider-client details
+// here.
 package tacklr

@@ -2,12 +2,26 @@ package stores
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"testing"
 
 	"github.com/ryanaldo34/tacklr/streaming"
 )
+
+func rawState(t *testing.T, values map[string]any) map[string]json.RawMessage {
+	t.Helper()
+	out := make(map[string]json.RawMessage, len(values))
+	for key, value := range values {
+		raw, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out[key] = raw
+	}
+	return out
+}
 
 func TestInMemoryStore_saveLoadRoundTrip(t *testing.T) {
 	store := NewInMemoryStore()
@@ -21,7 +35,8 @@ func TestInMemoryStore_saveLoadRoundTrip(t *testing.T) {
 		map[string]PendingToolCall{
 			"call_1": {ToolCall: &streaming.ToolCall{ID: "call_1", Name: "greet"}, InterruptActive: true},
 		},
-		map[string]any{"plan": []any{map[string]any{"title": "Ship", "status": "completed"}}},
+		rawState(t, map[string]any{"plan": "Ship"}),
+		rawState(t, map[string]any{"module": map[string]any{"enabled": true}}),
 		map[string]any{"pending": true},
 		map[string]any{"resolved": "x"},
 	)
@@ -47,8 +62,8 @@ func TestInMemoryStore_saveLoadRoundTrip(t *testing.T) {
 	if !ok || ptc.ToolCall == nil || ptc.ToolCall.Name != "greet" || !ptc.InterruptActive {
 		t.Errorf("pending tool calls = %+v", loaded.State.PendingToolCalls)
 	}
-	if loaded.State.RuntimeState["plan"] == nil {
-		t.Errorf("runtime state missing plan: %+v", loaded.State.RuntimeState)
+	if len(loaded.State.UserState["plan"]) == 0 || len(loaded.State.Modules["module"]) == 0 {
+		t.Errorf("checkpoint state missing: user=%+v modules=%+v", loaded.State.UserState, loaded.State.Modules)
 	}
 	if len(loaded.State.PendingInterrupts) == 0 || len(loaded.State.ResolvedInterrupts) == 0 {
 		t.Errorf("interrupt blobs empty: pending=%d resolved=%d",
@@ -68,11 +83,11 @@ func TestInMemoryStore_saveOverwritesSession(t *testing.T) {
 	store := NewInMemoryStore()
 	ctx := context.Background()
 
-	first, err := NewCheckpoint([]*streaming.Message{{Role: streaming.RoleUser, Content: "v1"}}, nil, nil, nil, nil)
+	first, err := NewCheckpoint([]*streaming.Message{{Role: streaming.RoleUser, Content: "v1"}}, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := NewCheckpoint([]*streaming.Message{{Role: streaming.RoleUser, Content: "v2"}}, nil, nil, nil, nil)
+	second, err := NewCheckpoint([]*streaming.Message{{Role: streaming.RoleUser, Content: "v2"}}, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +107,7 @@ func TestInMemoryStore_saveOverwritesSession(t *testing.T) {
 }
 
 func TestNewCheckpoint_nilInterruptBlobsAndMarshalError(t *testing.T) {
-	cp, err := NewCheckpoint(nil, nil, map[string]any{"k": 1}, nil, nil)
+	cp, err := NewCheckpoint(nil, nil, rawState(t, map[string]any{"k": 1}), nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,10 +116,10 @@ func TestNewCheckpoint_nilInterruptBlobsAndMarshalError(t *testing.T) {
 			cp.State.PendingInterrupts, cp.State.ResolvedInterrupts)
 	}
 	// json.Marshal of a channel fails — exercise error return path.
-	if _, err := NewCheckpoint(nil, nil, nil, make(chan int), nil); err == nil {
+	if _, err := NewCheckpoint(nil, nil, nil, nil, make(chan int), nil); err == nil {
 		t.Fatal("expected marshal error for pending interrupts")
 	}
-	if _, err := NewCheckpoint(nil, nil, nil, nil, make(chan int)); err == nil {
+	if _, err := NewCheckpoint(nil, nil, nil, nil, nil, make(chan int)); err == nil {
 		t.Fatal("expected marshal error for resolved interrupts")
 	}
 }
@@ -119,7 +134,7 @@ func TestInMemoryStore_concurrentSaveLoad(t *testing.T) {
 			defer wg.Done()
 			cp, err := NewCheckpoint([]*streaming.Message{
 				{Role: streaming.RoleUser, Content: "n"},
-			}, nil, map[string]any{"i": i}, nil, nil)
+			}, nil, rawState(t, map[string]any{"i": i}), nil, nil, nil)
 			if err != nil {
 				t.Errorf("checkpoint: %v", err)
 				return

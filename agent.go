@@ -44,8 +44,6 @@ type AgentHarness struct {
 	// pendingToolCalls is keyed by tool call id, which is also the wire interrupt id.
 	pendingToolCalls map[string]stores.PendingToolCall
 	pendingMu        sync.Mutex
-	// legacyInterruptIDs maps old checkpoint wire ids → tool call ids. Not saved.
-	legacyInterruptIDs map[string]string
 	// interruptPayloads maps parent tool call id → resume payload for workers.
 	interruptPayloads map[string][]byte
 	// parkedWorkersLive maps spawn_worker tool call id → live child harness.
@@ -135,9 +133,6 @@ func (a *AgentHarness) pendingSnapshot() map[string]stores.PendingToolCall {
 func (a *AgentHarness) lookupToolCallID(id string) (string, bool) {
 	if _, ok := a.pendingToolCalls[id]; ok {
 		return id, true
-	}
-	if tc, ok := a.legacyInterruptIDs[id]; ok {
-		return tc, true
 	}
 	return "", false
 }
@@ -622,7 +617,6 @@ func (a *AgentHarness) pairCancelledToolResults(out chan<- StreamEvent) {
 func (a *AgentHarness) clearInterruptParkState() {
 	a.pendingMu.Lock()
 	a.pendingToolCalls = make(map[string]stores.PendingToolCall)
-	a.legacyInterruptIDs = make(map[string]string)
 	a.interruptPayloads = make(map[string][]byte)
 	a.pendingMu.Unlock()
 	a.session.ClearInterrupts()

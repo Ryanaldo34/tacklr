@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 
 	tacklrsecurity "github.com/ryanaldo34/tacklr/security"
 )
@@ -20,7 +21,7 @@ func securitySubject(env ProtocolEnv) string {
 		return env.Conn.Security.Principal.Subject
 	}
 	// Direct protocol use and stdio without a configured host security service
-	// remain process-local for backwards compatibility.
+	// use one process-local principal.
 	if env.Security == nil {
 		return "local"
 	}
@@ -54,25 +55,16 @@ func (p *acpProtocol) resolveOwnedWireSession(ctx context.Context, env ProtocolE
 	}
 
 	sess.mu.Lock()
-	claimed := false
-	if sess.owner == "" {
-		// Legacy envelopes did not include an owner. The first authenticated
-		// load upgrades the envelope; new sessions are always born owned.
-		sess.owner = subject
-		claimed = true
-	}
 	owner := sess.owner
 	sess.mu.Unlock()
+	if owner == "" {
+		return nil, fmt.Errorf("server: wire session %q has no owner", sessionID)
+	}
 	if owner != subject {
 		return nil, clientErrorf(ErrAuthorizationDenied, "session is owned by another principal")
 	}
 	if err := authorizeOperation(ctx, env, action, sessionID); err != nil {
 		return nil, err
-	}
-	if claimed {
-		if err := p.persistWire(ctx, sessionID, sess); err != nil {
-			return nil, err
-		}
 	}
 	return sess, nil
 }

@@ -157,7 +157,6 @@ func newHarnessBase(opts AgentOptions, sm *session.SessionManager) (*AgentHarnes
 		sessionId:             "",
 		subagents:             make(map[string]*SubAgent),
 		pendingToolCalls:      make(map[string]stores.PendingToolCall),
-		legacyInterruptIDs:    make(map[string]string),
 		interruptPayloads:     make(map[string][]byte),
 		parkedWorkersLive:     make(map[string]*AgentHarness),
 		jobs:                  make(map[string]*workerRun),
@@ -412,7 +411,6 @@ func NewAgentFromSession(ctx context.Context, sessionId string, opts AgentOption
 	}
 	h.sessionId = sessionId
 	h.context.Restore(applied.Window)
-	h.legacyInterruptIDs = applied.LegacyInterruptIDs
 	h.pendingToolCalls = applied.PendingToolCalls
 	if err := h.finishInit(ctx, opts.SubAgents); err != nil {
 		return nil, err

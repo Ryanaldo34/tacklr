@@ -819,7 +819,7 @@ func TestSetConfigOption_nilConfigValuesAndSpecStore(t *testing.T) {
 	// Manually insert wire session with empty configValues
 	sid := "sess-nil-cfg"
 	p := NewACPProtocol(nil).(*acpProtocol)
-	p.sessions[sid] = &acpWireSession{cwd: "/tmp", configValues: nil}
+	p.sessions[sid] = &acpWireSession{cwd: "/tmp", configValues: nil, owner: "local"}
 	result, err := p.setConfig(context.Background(), ProtocolEnv{Registry: r}, sid, "model", "default")
 	if err != nil {
 		t.Fatal(err)

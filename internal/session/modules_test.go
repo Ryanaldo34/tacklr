@@ -27,16 +27,11 @@ func drainRuntime(sm *session.SessionManager) session.Runtime {
 // Capture → JSON wire → Apply on a fresh manager.
 func TestSessionModules_surviveCheckpoint(t *testing.T) {
 	sm := session.NewSessionManager()
-	sm.LoadUserAndPlanState(map[string]any{
-		"_parked_workers":          "not-a-map",
-		"_permission_always_allow": 42,
-		"_permission_always_deny":  []any{"x"},
-		"_on_call_stages":          make(chan int),
-		"_search_namespace":        "not-a-uuid",
-		"keep":                     "user",
-	})
+	if err := sm.StateSet("keep", "user"); err != nil {
+		t.Fatal(err)
+	}
 	if v, ok := sm.StateGet("keep"); !ok || v != "user" {
-		t.Fatalf("user key after malformed bags: %v ok=%v", v, ok)
+		t.Fatalf("user key: %v ok=%v", v, ok)
 	}
 
 	rt := drainRuntime(sm).WithToolCallID("spawn_1")
@@ -44,14 +39,8 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 		t.Fatalf("CurrentToolCallID=%q", rt.CurrentToolCallID())
 	}
 
-	if sm.Permissions.Decision("allow_tool") != session.PermissionNone {
-		t.Fatal("malformed bags must not grant memory")
-	}
 	sm.Permissions.Remember("allow_tool", session.PermissionAllowAlways)
 	sm.Permissions.Remember("deny_tool", session.PermissionDenyAlways)
-	if _, ok := sm.OnCall.Get("w1", "tool_permission"); ok {
-		t.Fatal("malformed stages must not decode")
-	}
 	sm.OnCall.Record("w1", "tool_permission", session.OnCallLayer{Args: `{"path":"/a"}`})
 	if sm.Permissions.Decision("allow_tool") != session.PermissionAllowAlways {
 		t.Fatal("allow-always not stored")
@@ -94,8 +83,8 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 	if len(cp.State.Modules["search"]) == 0 {
 		t.Fatal("checkpoint must include search context")
 	}
-	if cp.State.Version != stores.CheckpointVersion || cp.State.RuntimeState != nil {
-		t.Fatalf("checkpoint schema = version %d legacy=%#v", cp.State.Version, cp.State.RuntimeState)
+	if cp.State.Version != stores.CheckpointVersion {
+		t.Fatalf("checkpoint schema version = %d", cp.State.Version)
 	}
 
 	// In-process Apply: typed park/permission maps + SearchContext blob.
@@ -170,42 +159,6 @@ func TestTypedCheckpoint_rejectsNamedModuleWithoutPartialApply(t *testing.T) {
 	// Assert
 	if err == nil || target.Plan.Document() != "target" {
 		t.Fatalf("Apply error = %v plan = %q", err, target.Plan.Document())
-	}
-}
-
-func TestLegacyCheckpoint_migratesToTypedModules(t *testing.T) {
-	// Arrange
-	legacy, err := stores.NewCheckpoint(
-		[]*streaming.Message{{Role: streaming.RoleUser, Content: "go"}},
-		nil,
-		map[string]any{
-			"_plan":          []any{map[string]any{"title": "legacy", "status": "pending"}},
-			"_plan_document": "legacy document",
-			"host":           "value",
-		},
-		nil,
-		nil,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	manager := session.NewSessionManager()
-
-	// Act
-	if _, err := session.NewCheckpointer().Apply(*legacy, manager); err != nil {
-		t.Fatal(err)
-	}
-	migrated, err := session.NewCheckpointer().Capture(legacy.ContextWindow, manager, nil)
-
-	// Assert
-	if err != nil {
-		t.Fatal(err)
-	}
-	if migrated.State.Version != stores.CheckpointVersion || len(migrated.State.Modules["plan"]) == 0 {
-		t.Fatalf("migrated checkpoint = %#v", migrated.State)
-	}
-	if got := manager.Plan.Get(); len(got) != 1 || got[0].Title != "legacy" {
-		t.Fatalf("migrated plan = %#v", got)
 	}
 }
 
