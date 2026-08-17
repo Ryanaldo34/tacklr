@@ -93,16 +93,18 @@ func (a *AgentHarness) formatSubAgentPromptList() string {
 type spawnWorkerArgs struct {
 	TaskDescriptionAndContext string `json:"task_description_and_context" desc:"Clear task goal, acceptance criteria, and helpful context for the worker"`
 	WorkerName                string `json:"worker_name" desc:"Name of a registered sub-agent worker to spawn"`
+	Block                     *bool  `json:"block" desc:"Wait for the worker and return its result. Defaults to true. Set false to schedule a background job and continue the turn."`
 }
 
 func (a *AgentHarness) spawnTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "spawn_worker",
 		DisplayName: "Spawn {worker_name}",
-		Description: "Use to spawn a sub-agent or \"worker\" to help parallelize a task or handle smaller subtasks and assist with research. Ensure the task is clearly outlined with a clear goal, acceptance criteria, and helpful context. Choose worker_name from the AVAILABLE SUB-AGENTS listed in the system prompt.",
+		Description: "Spawn a sub-agent worker. block defaults to true and returns the worker result before continuing. Set block=false to schedule a background job, continue other work, then use list_jobs, get_job, or cancel_job.",
 		Category:    streaming.ToolCategoryExecute,
 		Handler: func(ctx context.Context, args spawnWorkerArgs, runtime HarnessRuntime) (string, error) {
-			return a.runWorker(ctx, args.WorkerName, args.TaskDescriptionAndContext, runtime)
+			block := args.Block == nil || *args.Block
+			return a.runWorker(ctx, args.WorkerName, args.TaskDescriptionAndContext, block, runtime)
 		},
 	})
 }
@@ -110,7 +112,9 @@ func (a *AgentHarness) spawnTool() *Tool {
 // runWorker creates or resumes an isolated worker harness, drains events into
 // parent tool updates, and either returns final output or bubbles a child
 // interrupt onto the parent session (self-similar at any nesting depth).
-func (a *AgentHarness) runWorker(ctx context.Context, workerName, task string, runtime HarnessRuntime) (string, error) {
+// When block is false (and this is not a parked synchronous spawn), the worker
+// is scheduled as a job and this call returns immediately.
+func (a *AgentHarness) runWorker(ctx context.Context, workerName, task string, block bool, runtime HarnessRuntime) (string, error) {
 	spec, ok := a.subagents[workerName]
 	if !ok {
 		return "", fmt.Errorf("worker %q: %w", workerName, ErrNotFound)
@@ -136,9 +140,13 @@ func (a *AgentHarness) runWorker(ctx context.Context, workerName, task string, r
 	// driven by park metadata + stashed resolution payloads, not RaiseInterrupt.
 	_, _ = a.session.TakeResolvedInterrupt(toolCallID)
 
+	meta := a.getParkMeta(toolCallID)
+	if !block && meta == nil {
+		return a.scheduleBackgroundWorker(workerName, task, toolCallID, runtime)
+	}
+
 	var worker *AgentHarness
 	var closeOnExit bool
-	meta := a.getParkMeta(toolCallID)
 	resuming := meta != nil
 
 	if resuming {

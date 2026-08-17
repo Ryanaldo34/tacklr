@@ -137,12 +137,14 @@ func newHarnessBase(opts AgentOptions, sm *session.SessionManager) (*AgentHarnes
 		legacyInterruptIDs:   make(map[string]string),
 		interruptPayloads:    make(map[string][]byte),
 		parkedWorkersLive:    make(map[string]*AgentHarness),
+		jobs:                 make(map[string]*backgroundJob),
 		context:              NewModelContextManager(),
 		contextPolicy:        opts.ContextPolicy,
 		runCommandUnattended: opts.RunCommandUnattended,
 		writeUnattended:      opts.WriteUnattended,
 		vfsBridge:            opts.shareIndexBridge,
 	}
+	h.jobsCtx, h.jobsCancel = context.WithCancel(context.Background())
 	if opts.MountSession != nil {
 		sm.VFS = opts.MountSession
 	}
@@ -228,7 +230,7 @@ func (a *AgentHarness) injectBuiltinTools() {
 		a.tools = append(a.tools, newVFSIndexTools(br)...)
 	}
 	if len(a.subagents) > 0 {
-		a.tools = append(a.tools, a.spawnTool())
+		a.tools = append(a.tools, a.spawnTool(), a.listJobsTool(), a.getJobTool(), a.cancelJobTool())
 	}
 	a.builtinsInjected = true
 }
