@@ -282,4 +282,32 @@ func TestACP_vfsTokenRefreshCall(t *testing.T) {
 	if _, err := vfsTokenRefresh(bridge, "sess", "gdrive")(t.Context()); !errors.Is(err, vfs.ErrAuthExpired) {
 		t.Fatalf("no cap: %v", err)
 	}
+
+	bridge.SetCaps(ClientCapabilities{VFSTokenRefresh: true})
+	emptyDone := make(chan error, 1)
+	go func() {
+		_, err := vfsTokenRefresh(bridge, "sess", "gdrive")(t.Context())
+		emptyDone <- err
+	}()
+	replied = false
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && !replied {
+		for _, f := range w.SnapshotFrames() {
+			var msg map[string]any
+			if json.Unmarshal(f, &msg) != nil || msg["method"] != methodVFSToken {
+				continue
+			}
+			reply, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": msg["id"], "result": map[string]string{"token": ""}})
+			if bridge.TryCompleteResponse(reply) {
+				replied = true
+				break
+			}
+		}
+		if !replied {
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	if err := <-emptyDone; !errors.Is(err, vfs.ErrAuthExpired) {
+		t.Fatalf("empty token: %v", err)
+	}
 }

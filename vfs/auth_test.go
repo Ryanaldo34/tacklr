@@ -153,4 +153,89 @@ func TestTokenHolder_refreshOnce(t *testing.T) {
 	if err != nil || tok.AccessToken != "new" || tok.TokenType != "Bearer" || !tok.Expiry.IsZero() {
 		t.Fatalf("oauth token = %+v err=%v", tok, err)
 	}
+
+	h.SetRefresh(func(context.Context) (vfs.Credential, error) {
+		return vfs.Credential{}, errors.New("client down")
+	})
+	if err := h.RefreshOnce(t.Context()); !errors.Is(err, vfs.ErrAuthExpired) {
+		t.Fatalf("wrap client error: %v", err)
+	}
+	h.SetRefresh(func(context.Context) (vfs.Credential, error) {
+		return vfs.Credential{Token: "   "}, nil
+	})
+	if err := h.RefreshOnce(t.Context()); !errors.Is(err, vfs.ErrAuthExpired) {
+		t.Fatalf("empty token: %v", err)
+	}
+
+	var nilH *vfs.TokenHolder
+	nilH.Set(vfs.Credential{Token: "x"})
+	nilH.SetRefresh(nil)
+	if nilH.Current().Token != "" {
+		t.Fatal("nil holder Current")
+	}
+	if err := nilH.RefreshOnce(t.Context()); !errors.Is(err, vfs.ErrAuthExpired) {
+		t.Fatalf("nil holder refresh: %v", err)
+	}
+	if _, err := nilH.Token(); !errors.Is(err, vfs.ErrAuthExpired) {
+		t.Fatalf("nil holder Token: %v", err)
+	}
+}
+
+func TestSessionAuth_replaceAndUnbindProvider(t *testing.T) {
+	auth := vfs.NewSessionAuth()
+	first := vfs.Binding{
+		Provider: "gdrive", Point: "/contracts",
+		Auth: vfs.Credential{Token: "t1"}, Params: map[string]string{vfs.ParamFolderID: "a"},
+	}
+	if err := auth.Bind("s", first); err != nil {
+		t.Fatal(err)
+	}
+	if err := auth.Bind("s", vfs.Binding{
+		Provider: "gdrive", Point: "/contracts",
+		Auth: vfs.Credential{Token: "t2"}, Params: map[string]string{vfs.ParamFolderID: "b"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got := auth.Bindings("s")
+	if len(got) != 1 || got[0].Params[vfs.ParamFolderID] != "b" {
+		t.Fatalf("replace bind = %+v", got)
+	}
+	if tok, _ := auth.Credential("s", "gdrive"); tok.Token != "t2" {
+		t.Fatalf("shared holder after replace = %q", tok.Token)
+	}
+	if err := auth.Bind("s", vfs.Binding{
+		Provider: "gdrive", Point: "/notes", Auth: vfs.Credential{Token: "t2"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := auth.UnbindProvider("s", "gdrive"); err != nil {
+		t.Fatal(err)
+	}
+	if auth.HasBindings("s") {
+		t.Fatal("UnbindProvider must drop every gdrive point")
+	}
+	if err := auth.UnbindProvider("s", "gdrive"); !errors.Is(err, vfs.ErrNotMounted) {
+		t.Fatalf("second UnbindProvider: %v", err)
+	}
+	if err := auth.Refresh("s", "gdrive", vfs.Credential{Token: "x"}); err == nil {
+		t.Fatal("refresh after unbind")
+	}
+
+	var nilA *vfs.SessionAuth
+	if err := nilA.Bind("s", first); err == nil {
+		t.Fatal("nil Bind")
+	}
+	if err := nilA.Refresh("s", "gdrive", vfs.Credential{Token: "t"}); err == nil {
+		t.Fatal("nil Refresh")
+	}
+	if err := nilA.Unbind("s", "/contracts"); err == nil {
+		t.Fatal("nil Unbind")
+	}
+	if err := nilA.UnbindProvider("s", "gdrive"); err == nil {
+		t.Fatal("nil UnbindProvider")
+	}
+	nilA.Clear("s")
+	if nilA.HasBindings("s") || nilA.Bindings("s") != nil || nilA.Holder("s", "gdrive") != nil {
+		t.Fatal("nil SessionAuth accessors")
+	}
 }

@@ -270,6 +270,74 @@ func TestDriveFactory_openRequiresFolderAndToken(t *testing.T) {
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/d", Profile: "gdrive", Params: map[string]string{vfs.ParamFolderID: "x"}}); err == nil {
 		t.Fatal("want token error")
 	}
+	if _, err := (vfs.DriveFactory{}).Open(ctx, "s", vfs.MountSpec{Params: map[string]string{vfs.ParamFolderID: "x"}}); err == nil {
+		t.Fatal("want factory id error")
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := (vfs.DriveFactory{ID: "gdrive"}).Open(canceled, "s", vfs.MountSpec{Params: map[string]string{vfs.ParamFolderID: "x"}}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled open: %v", err)
+	}
+}
+
+func TestGoogleDrive_requiresServiceAndToken(t *testing.T) {
+	ctx := t.Context()
+	if _, err := vfs.NewGoogleDrive(ctx, nil); err == nil {
+		t.Fatal("nil holder")
+	}
+	empty := vfs.GoogleDrive{}
+	if _, err := empty.GetMeta(ctx, "id"); err == nil {
+		t.Fatal("GetMeta without service")
+	}
+	if _, _, err := empty.GetMedia(ctx, "id"); err == nil {
+		t.Fatal("GetMedia without service")
+	}
+	if _, err := empty.List(ctx, "id"); err == nil {
+		t.Fatal("List without service")
+	}
+	holder := vfs.NewTokenHolder(vfs.Credential{Token: "tok"})
+	gd, err := vfs.NewGoogleDrive(ctx, holder)
+	if err != nil || gd == nil || gd.Service == nil {
+		t.Fatalf("NewGoogleDrive = %+v err=%v", gd, err)
+	}
+}
+
+func TestMountSession_gdriveDirectoryAndWriteDocument(t *testing.T) {
+	ctx := t.Context()
+	api := driveTree()
+	auth := vfs.NewSessionAuth()
+	if err := auth.Bind("s", vfs.Binding{
+		Provider: "gdrive", Point: "/contracts",
+		Auth: vfs.Credential{Token: "t"}, Params: map[string]string{vfs.ParamFolderID: "root-a"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reg := vfs.NewBackendRegistry()
+	if err := reg.Register(vfs.DriveFactory{ID: "gdrive", Auth: auth, API: api}); err != nil {
+		t.Fatal(err)
+	}
+	ms := vfs.MustNewMountSession("s", reg)
+	if err := ms.Mount(ctx, vfs.BindingSpec(vfs.Binding{
+		Provider: "gdrive", Point: "/contracts", Params: map[string]string{vfs.ParamFolderID: "root-a"},
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ms.ReadFile(ctx, "/contracts/acme"); err == nil {
+		t.Fatal("ReadFile on directory")
+	}
+	if _, err := ms.ReadText(ctx, "/contracts/acme"); err == nil {
+		t.Fatal("ReadText on directory")
+	}
+	if _, err := ms.ReadDir(ctx, "/contracts/nda.pdf"); err == nil {
+		t.Fatal("ReadDir on file")
+	}
+	doc, err := ms.OpenDocument(ctx, "/contracts/acme/note.md", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.WriteDocument(ctx, doc); !errors.Is(err, vfs.ErrReadOnly) {
+		t.Fatalf("WriteDocument: %v", err)
+	}
 }
 
 func TestCheckMount_gdriveFolder(t *testing.T) {
