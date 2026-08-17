@@ -38,6 +38,8 @@ type OpenAIInferenceStrategy struct {
 	structuredOutputSchema map[string]any
 	structuredOutputName   string
 	structuredOutputType   reflect.Type
+	// localTokenFallback uses tiktoken when the provider has no input_tokens endpoint.
+	localTokenFallback bool
 }
 
 func (s *OpenAIInferenceStrategy) SetSystemPrompt(prompt string) {
@@ -72,6 +74,13 @@ func (s *OpenAIInferenceStrategy) ModelTelemetryIdentity() telemetry.ModelIdenti
 
 func (s *OpenAIInferenceStrategy) WithURL(url string) *OpenAIInferenceStrategy {
 	s.baseURL = url
+	return s
+}
+
+// WithLocalTokenFallback counts tokens with tiktoken when the provider returns
+// 404/400/422 for /responses/input_tokens. Off by default.
+func (s *OpenAIInferenceStrategy) WithLocalTokenFallback() *OpenAIInferenceStrategy {
+	s.localTokenFallback = true
 	return s
 }
 
@@ -215,8 +224,7 @@ func (s *OpenAIInferenceStrategy) CountTokens(ctx context.Context, messages []*t
 	}
 
 	if httpResp.StatusCode != http.StatusOK {
-		if httpResp.StatusCode == http.StatusNotFound || httpResp.StatusCode == http.StatusBadRequest || httpResp.StatusCode == http.StatusUnprocessableEntity {
-			// Local fallback when the provider has no input_tokens endpoint.
+		if s.localTokenFallback && (httpResp.StatusCode == http.StatusNotFound || httpResp.StatusCode == http.StatusBadRequest || httpResp.StatusCode == http.StatusUnprocessableEntity) {
 			tke, err := getEncoding("o200k_base")
 			if err != nil {
 				return 0, fmt.Errorf("tiktoken count tokens: %w", err)

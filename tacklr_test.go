@@ -533,8 +533,8 @@ func TestAgentHarness_Run(t *testing.T) {
 		if !foundInterrupt {
 			t.Fatal("expected interrupt event")
 		}
-		if interruptId == "" {
-			t.Fatal("interruptId was not captured")
+		if interruptId != "call_int" {
+			t.Fatalf("interruptId = %q, want tool call id call_int", interruptId)
 		}
 		if callCount != 1 {
 			t.Errorf("callCount after first run = %d, want 1", callCount)

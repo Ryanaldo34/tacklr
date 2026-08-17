@@ -41,7 +41,6 @@ func TestPostgresStore_liveSaveLoad(t *testing.T) {
 		map[string]PendingToolCall{
 			"c1": {ToolCall: &streaming.ToolCall{ID: "c1", Name: "search"}, InterruptActive: false},
 		},
-		map[string]string{"i1": "c1"},
 		map[string]any{"k": "v"},
 		map[string]any{"p": 1},
 		map[string]any{"r": 2},
@@ -70,7 +69,7 @@ func TestPostgresStore_liveSaveLoad(t *testing.T) {
 	// Overwrite
 	cp2, err := NewCheckpoint(
 		[]*streaming.Message{{Role: streaming.RoleUser, Content: "v2"}},
-		nil, nil, map[string]any{"n": float64(1)}, nil, nil,
+		nil, map[string]any{"n": float64(1)}, nil, nil,
 	)
 	if err != nil {
 		t.Fatal(err)

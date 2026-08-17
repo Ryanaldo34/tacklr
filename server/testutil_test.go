@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"net/http"
 	"sync/atomic"
 	"testing"
 
@@ -52,6 +53,10 @@ func mustAgent(t *testing.T, opts tacklr.AgentOptions) *tacklr.AgentHarness {
 		t.Fatal(err)
 	}
 	return h
+}
+
+func serveSSEHTTP(s *Server, w http.ResponseWriter, req *http.Request) {
+	s.HTTPMux().ServeHTTP(w, req)
 }
 
 func testStore(t *testing.T) *stores.InMemoryStore {

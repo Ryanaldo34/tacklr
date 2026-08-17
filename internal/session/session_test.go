@@ -3,6 +3,7 @@ package session_test
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/ryanaldo34/tacklr/internal/session"
@@ -31,7 +32,6 @@ func TestCheckpointer_roundTrip(t *testing.T) {
 		[]*streaming.Message{{Role: streaming.RoleUser, Content: "hi"}},
 		sm,
 		map[string]stores.PendingToolCall{},
-		map[string]string{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -62,7 +62,7 @@ func TestCheckpointer_roundTrip(t *testing.T) {
 
 // TestCheckpointer_nilManager_errors is the Capture/Apply guard outcome.
 func TestCheckpointer_nilManager_errors(t *testing.T) {
-	if _, err := session.NewCheckpointer().Capture(nil, nil, nil, nil); err == nil {
+	if _, err := session.NewCheckpointer().Capture(nil, nil, nil); err == nil {
 		t.Fatal("want capture error")
 	}
 	if _, err := session.NewCheckpointer().Apply(stores.SessionCheckpoint{}, nil); err == nil {
@@ -80,8 +80,39 @@ func TestCheckpointer_applyNilMaps_defaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if applied.PendingToolCalls == nil || applied.InterruptToRequester == nil {
+	if applied.PendingToolCalls == nil || applied.LegacyInterruptIDs == nil {
 		t.Fatal("expected non-nil default maps")
+	}
+}
+
+// TestCheckpointer_applyLegacyInterruptIDs restores old wire-id maps without
+// writing them back on Capture.
+func TestCheckpointer_applyLegacyInterruptIDs(t *testing.T) {
+	sm := session.NewSessionManager()
+	var cp stores.SessionCheckpoint
+	if err := json.Unmarshal([]byte(`{
+		"contextWindow":[],
+		"state":{"interruptToRequester":{"old-wire":"call_1"},"pendingToolCalls":{"call_1":{"interruptActive":true}}}
+	}`), &cp); err != nil {
+		t.Fatal(err)
+	}
+	applied, err := session.NewCheckpointer().Apply(cp, sm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied.LegacyInterruptIDs["old-wire"] != "call_1" {
+		t.Fatalf("legacy map = %#v", applied.LegacyInterruptIDs)
+	}
+	out, err := session.NewCheckpointer().Capture(applied.Window, sm, applied.PendingToolCalls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "interruptToRequester") {
+		t.Fatalf("new checkpoint must omit legacy map: %s", raw)
 	}
 }
 
@@ -462,8 +493,7 @@ func TestCheckpointer_withPendingToolMaps_roundTrip(t *testing.T) {
 	ptc := map[string]stores.PendingToolCall{
 		"t1": {ToolCall: &streaming.ToolCall{ID: "t1", Name: "x"}, InterruptActive: true},
 	}
-	itr := map[string]string{"intr1": "t1"}
-	cp, err := session.NewCheckpointer().Capture(nil, sm, ptc, itr)
+	cp, err := session.NewCheckpointer().Capture(nil, sm, ptc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -472,7 +502,7 @@ func TestCheckpointer_withPendingToolMaps_roundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !applied.PendingToolCalls["t1"].InterruptActive || applied.InterruptToRequester["intr1"] != "t1" {
+	if !applied.PendingToolCalls["t1"].InterruptActive {
 		t.Fatalf("%+v", applied)
 	}
 }

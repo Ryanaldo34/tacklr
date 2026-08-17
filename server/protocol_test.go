@@ -100,7 +100,7 @@ func (healthProtocol) CreateSession(context.Context, ProtocolEnv, json.RawMessag
 func (healthProtocol) LoadSession(context.Context, ProtocolEnv, string, json.RawMessage) (any, error) {
 	return nil, ErrWireSessionUnsupported
 }
-func (healthProtocol) BindTurn(context.Context, ProtocolEnv, string, json.RawMessage) (TurnRequest, error) {
+func (healthProtocol) BindTurn(context.Context, ProtocolEnv, string, string, json.RawMessage) (TurnRequest, error) {
 	return TurnRequest{}, ErrWireSessionUnsupported
 }
 func (healthProtocol) CloseSession(context.Context, ProtocolEnv, string) error {

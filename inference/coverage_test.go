@@ -496,7 +496,7 @@ func TestCountTokens_tiktokenEncodingError(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	s := NewOpenAIInferenceStrategy(srv.Client())
-	s.WithApiKey("k").WithModel("m").WithURL(srv.URL)
+	s.WithApiKey("k").WithModel("m").WithURL(srv.URL).WithLocalTokenFallback()
 	if _, err := s.CountTokens(context.Background(), []*tacklr.Message{{Role: tacklr.RoleUser, Content: "x"}}, nil); err == nil || !strings.Contains(err.Error(), "tiktoken") {
 		t.Fatalf("err = %v", err)
 	}

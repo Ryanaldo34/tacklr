@@ -38,14 +38,9 @@ func decodeProviderDocument(ctx context.Context, name string, fi FileInfo, data 
 	if reg == nil {
 		reg = DefaultContentRegistry()
 	}
-	mt := fi.MediaType
+	mt := normalizeMediaType(fi.MediaType)
 	if mt == "" {
-		mt = "application/octet-stream"
-	}
-	if !IsTextLike(mt) {
-		if _, ok := reg.codec(mt); !ok {
-			return nil, ErrNoCodec
-		}
+		return nil, ErrNoCodec
 	}
 	return reg.Decode(ctx, name, mt, data)
 }

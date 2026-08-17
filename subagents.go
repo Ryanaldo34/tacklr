@@ -347,11 +347,14 @@ func (a *AgentHarness) childResolutionPayloads(parentToolCallID string, meta *pa
 func collectChildInterrupts(worker *AgentHarness, drainedIDs []string) (ids []string, primary interrupt.Interrupt) {
 	ids = drainedIDs
 	for _, id := range ids {
-		tcID, ok := worker.interruptToRequester[id]
-		if !ok {
-			continue
+		tcID := id
+		if mapped, ok := worker.legacyInterruptIDs[id]; ok {
+			tcID = mapped
 		}
 		if intr, ok := worker.session.PendingInterrupt(tcID); ok {
+			return ids, intr
+		}
+		if intr, ok := worker.session.PendingInterrupt(id); ok {
 			return ids, intr
 		}
 	}

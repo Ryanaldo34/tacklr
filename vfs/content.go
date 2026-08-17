@@ -29,30 +29,25 @@ type IdentityCodec interface {
 }
 
 // KernelWritable reports whether FUSE/host writes may persist raw bytes for
-// mediaType. True only when Decode would use an IdentityCodec (TextCodec, or
-// the unregistered text-like fallback). Projected documents stay EROFS.
+// mediaType. True only when a registered IdentityCodec owns the type.
+// Providers must set FileInfo.MediaType; unregistered types are EROFS.
 func KernelWritable(mediaType string) bool {
-	if i := strings.IndexByte(mediaType, ';'); i >= 0 {
-		mediaType = strings.TrimSpace(mediaType[:i])
-	}
+	mediaType = normalizeMediaType(mediaType)
 	if mediaType == "" || mediaType == "application/octet-stream" {
 		return false
 	}
 	c, ok := defaultContentRegistry.codec(mediaType)
 	if !ok {
-		return IsTextLike(mediaType)
+		return false
 	}
 	_, ok = c.(IdentityCodec)
 	return ok
 }
 
 // KernelWritableFile reports whether an existing file may take kernel writes.
+// Empty MediaType is not writable — providers classify at Stat.
 func KernelWritableFile(st FileInfo) bool {
-	mt := st.MediaType
-	if mt == "" {
-		mt = DetectMediaType(st.Name, nil)
-	}
-	return KernelWritable(mt)
+	return KernelWritable(st.MediaType)
 }
 
 // KernelCreateOK reports whether a new name may be created via FUSE.
@@ -100,10 +95,18 @@ func (r *ContentRegistry) Register(c Codec) error {
 	return nil
 }
 
+func normalizeMediaType(mediaType string) string {
+	if i := strings.IndexByte(mediaType, ';'); i >= 0 {
+		mediaType = mediaType[:i]
+	}
+	return strings.ToLower(strings.TrimSpace(mediaType))
+}
+
 func (r *ContentRegistry) codec(mediaType string) (Codec, bool) {
 	if r == nil {
 		return nil, false
 	}
+	mediaType = normalizeMediaType(mediaType)
 	r.mu.RLock()
 	c, ok := r.codecs[mediaType]
 	r.mu.RUnlock()
@@ -112,12 +115,10 @@ func (r *ContentRegistry) codec(mediaType string) (Codec, bool) {
 
 // Decode looks up a codec for mediaType and decodes data.
 func (r *ContentRegistry) Decode(ctx context.Context, path, mediaType string, data []byte) (Document, error) {
+	mediaType = normalizeMediaType(mediaType)
 	c, ok := r.codec(mediaType)
 	if !ok {
-		if !IsTextLike(mediaType) {
-			return nil, ErrNoCodec
-		}
-		c = TextCodec{}
+		return nil, ErrNoCodec
 	}
 	return c.Decode(ctx, path, mediaType, data)
 }
@@ -127,11 +128,18 @@ func DefaultContentRegistry() *ContentRegistry {
 	return defaultContentRegistry
 }
 
-var defaultContentRegistry = func() *ContentRegistry {
+var defaultContentRegistry = mustDefaultContentRegistry(textMediaTypes)
+
+func mustDefaultContentRegistry(types []string) *ContentRegistry {
+	if len(types) == 0 {
+		panic("vfs: text media types required before default registry init")
+	}
 	r := NewContentRegistry()
-	_ = r.Register(TextCodec{})
+	if err := r.Register(TextCodec{}); err != nil {
+		panic(err)
+	}
 	return r
-}()
+}
 
 // DetectMediaType is a helper for providers filling FileInfo.MediaType.
 // OpenDocument does not call this — it trusts the provider.
@@ -201,19 +209,22 @@ func IsTextLike(mediaType string) bool {
 	}
 }
 
-// textMediaTypes is the unique set of extension-map media types for TextCodec registration.
-var textMediaTypes []string
+// textMediaTypes is the unique set of extension-map media types for TextCodec
+// registration. Computed as a package var (not init) so DefaultContentRegistry
+// can register TextCodec during variable initialization.
+var textMediaTypes = uniqueMediaTypes(extMediaTypes)
 
-func init() {
-	seen := make(map[string]struct{}, len(extMediaTypes))
-	textMediaTypes = make([]string, 0, len(extMediaTypes))
-	for _, mt := range extMediaTypes {
+func uniqueMediaTypes(m map[string]string) []string {
+	seen := make(map[string]struct{}, len(m))
+	out := make([]string, 0, len(m))
+	for _, mt := range m {
 		if _, ok := seen[mt]; ok {
 			continue
 		}
 		seen[mt] = struct{}{}
-		textMediaTypes = append(textMediaTypes, mt)
+		out = append(out, mt)
 	}
+	return out
 }
 
 func errFileExceeds(limit int) error {

@@ -213,10 +213,9 @@ func NewTool(cfg ToolConfig) *Tool {
 
 		if hasRuntime {
 			if runtime == nil {
-				callArgs = append(callArgs, reflect.Zero(harnessRuntimeType))
-			} else {
-				callArgs = append(callArgs, reflect.ValueOf(runtime))
+				return toolCallResult{}, fmt.Errorf("%w: tool %q requires a HarnessRuntime", ErrFailed, t.Name)
 			}
+			callArgs = append(callArgs, reflect.ValueOf(runtime))
 		}
 
 		results := handlerValue.Call(callArgs)
@@ -558,9 +557,10 @@ const (
 	EffectHandoff
 )
 
-// BuiltinResult is a tool success that can queue ACM window effects.
-// Output is the model-visible tool string. Plan tools use this type.
-type BuiltinResult struct {
+// ToolOutcome is the single post-tool result: model-visible output plus a
+// window effect. Plan builtins return this (as BuiltinResult). Host hooks
+// return the same type and leave Output empty.
+type ToolOutcome struct {
 	Output string
 	// Effect is merged for the batch and applied once at batch end.
 	Effect ToolResultEffect
@@ -568,6 +568,12 @@ type BuiltinResult struct {
 	// The client still receives StreamEventToolResult.
 	SuppressWindowMessage bool
 }
+
+// BuiltinResult is the tool-handler success type.
+type BuiltinResult = ToolOutcome
+
+// ToolResultDisposition is the window-effect view of ToolOutcome.
+type ToolResultDisposition = ToolOutcome
 
 // ToolResultObservation is a successful tool result seen by a ToolResultHook.
 type ToolResultObservation struct {
@@ -577,14 +583,8 @@ type ToolResultObservation struct {
 	Runtime  HarnessRuntime
 }
 
-// ToolResultDisposition is the window effect from a BuiltinResult or ToolResultHook.
-type ToolResultDisposition struct {
-	Effect                ToolResultEffect
-	SuppressWindowMessage bool
-}
-
 // ToolResultHook runs after a successful host tool and before the tool result is emitted.
-// Effects apply at batch end. Plan builtins use BuiltinResult instead.
+// Effects apply at batch end. Plan builtins return BuiltinResult instead.
 type ToolResultHook func(ctx context.Context, obs ToolResultObservation) ToolResultDisposition
 
 type toolResultHookRegistry struct {
