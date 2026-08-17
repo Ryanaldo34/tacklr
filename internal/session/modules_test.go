@@ -162,6 +162,67 @@ func TestTypedCheckpoint_rejectsNamedModuleWithoutPartialApply(t *testing.T) {
 	}
 }
 
+func TestTypedCheckpoint_rejectsCorruptModuleSections(t *testing.T) {
+	// Arrange
+	source := session.NewSessionManager()
+	checkpoint, err := session.NewCheckpointer().Capture(
+		[]*streaming.Message{{Role: streaming.RoleUser, Content: "go"}},
+		source,
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cases := map[string]json.RawMessage{
+		"plan":        json.RawMessage(`{"todos":`),
+		"permissions": json.RawMessage(`{"allow":`),
+		"parks":       json.RawMessage(`{"workers":`),
+		"onCall":      json.RawMessage(`{"stages":`),
+		"search":      json.RawMessage(`{`),
+	}
+	for module, raw := range cases {
+		t.Run(module, func(t *testing.T) {
+			wire := *checkpoint
+			wire.State.Modules[module] = raw
+			target := session.NewSessionManager()
+			target.Plan.SetDocument("target")
+			if _, err := session.NewCheckpointer().Apply(wire, target); err == nil {
+				t.Fatalf("module %q was accepted", module)
+			}
+			if target.Plan.Document() != "target" {
+				t.Fatalf("partial apply mutated plan for module %q", module)
+			}
+		})
+	}
+}
+
+func TestTypedCheckpoint_rejectsCorruptUserState(t *testing.T) {
+	// Arrange
+	source := session.NewSessionManager()
+	if err := source.StateSet("keep", "user"); err != nil {
+		t.Fatal(err)
+	}
+	checkpoint, err := session.NewCheckpointer().Capture(
+		[]*streaming.Message{{Role: streaming.RoleUser, Content: "go"}},
+		source,
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint.State.UserState["bad"] = json.RawMessage(`{`)
+	target := session.NewSessionManager()
+
+	// Act
+	_, err = session.NewCheckpointer().Apply(*checkpoint, target)
+
+	// Assert
+	if err == nil {
+		t.Fatal("corrupt user state was accepted")
+	}
+}
+
 func assertModules(t *testing.T, sm *session.SessionManager, ns uuid.UUID, parkID, worker string) {
 	t.Helper()
 	if sm.Permissions.Decision("allow_tool") != session.PermissionAllowAlways ||

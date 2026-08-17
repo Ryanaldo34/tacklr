@@ -2,13 +2,16 @@ package tacklr
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/ryanaldo34/tacklr/internal/session"
 	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/stores"
+	"github.com/ryanaldo34/tacklr/streaming"
 )
 
 type zeroWindowStrategy struct{ mockStrategy }
@@ -139,5 +142,52 @@ func TestAgentHarness_checkpointFailureIsHostVisibleAndClearsAfterRecovery(t *te
 	}
 	if recoveryErr != nil || h.CheckpointError() != nil {
 		t.Fatalf("recovery error = %v reported = %v", recoveryErr, h.CheckpointError())
+	}
+}
+
+func TestNewAgentFromSession_rejectsCorruptCheckpointModules(t *testing.T) {
+	// Arrange
+	store := testStore(t)
+	sm := session.NewSessionManager()
+	valid, err := session.NewCheckpointer().Capture(
+		[]*streaming.Message{{Role: streaming.RoleUser, Content: "go"}},
+		sm,
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatal(err)
+	}
+	state := wire["state"].(map[string]any)
+	modules := state["modules"].(map[string]any)
+	modules["plan"] = `{"todos":`
+	raw, err = json.Marshal(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var checkpoint stores.SessionCheckpoint
+	if err := json.Unmarshal(raw, &checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveSession(t.Context(), "sess-corrupt", checkpoint); err != nil {
+		t.Fatal(err)
+	}
+
+	// Act
+	_, err = NewAgentFromSession(t.Context(), "sess-corrupt", AgentOptions{
+		Model: &mockStrategy{},
+		Store: store,
+	})
+
+	// Assert
+	if err == nil {
+		t.Fatal("corrupt checkpoint was accepted")
 	}
 }
