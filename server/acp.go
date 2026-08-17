@@ -251,7 +251,24 @@ func validateACPRequest(body []byte) (*parsedRequest, error) {
 		pr.ThreadID = p.SessionID
 		return pr, nil
 	case "authenticate":
-		// No auth required; accept empty success.
+		if env.Params == nil {
+			return nil, clientErrorf(ErrInvalidRequest, "params is required for authenticate")
+		}
+		var p struct {
+			MethodID string `json:"methodId"`
+		}
+		if err := json.Unmarshal(env.Params, &p); err != nil {
+			return nil, clientErrorf(ErrInvalidRequest, "invalid authenticate params: %v", err)
+		}
+		if strings.TrimSpace(p.MethodID) == "" {
+			return nil, clientErrorf(ErrInvalidRequest, "methodId is required for authenticate")
+		}
+		pr.AuthMethodID = p.MethodID
+		return pr, nil
+	case "logout":
+		if env.Params == nil {
+			return nil, clientErrorf(ErrInvalidRequest, "params is required for logout")
+		}
 		return pr, nil
 	default:
 		// Admit unknown methods so HandleInbound can return JSON-RPC MethodNotFound.

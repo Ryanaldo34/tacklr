@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/ryanaldo34/tacklr/interrupt"
+	tacklrsecurity "github.com/ryanaldo34/tacklr/security"
 	"github.com/ryanaldo34/tacklr/stores"
 )
 
@@ -18,6 +19,8 @@ var (
 	ErrSessionStoreNotConfigured = errors.New("session store is not configured")
 	ErrStreamingNotSupported     = errors.New("streaming not supported")
 	ErrInternal                  = errors.New("internal server error")
+	ErrAuthenticationRequired    = tacklrsecurity.ErrAuthenticationRequired
+	ErrAuthorizationDenied       = tacklrsecurity.ErrAuthorizationDenied
 )
 
 // JSON-RPC 2.0 error codes.
@@ -64,6 +67,8 @@ func IsClientError(err error) bool {
 		errors.Is(err, ErrAgentNotFound) ||
 		errors.Is(err, ErrSessionNotFound) ||
 		errors.Is(err, ErrSessionStoreNotConfigured) ||
+		errors.Is(err, ErrAuthenticationRequired) ||
+		errors.Is(err, ErrAuthorizationDenied) ||
 		errors.Is(err, errConnectionNotInitialized)
 }
 

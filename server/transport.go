@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	tacklrsecurity "github.com/ryanaldo34/tacklr/security"
 )
 
 // Server serves a Registry over one or more wire Protocols.
@@ -22,6 +24,13 @@ type Server struct {
 	Client *ClientBridge
 	// Connections tracks ACP WebSocket (and future Streamable HTTP) connections.
 	Connections *ConnectionRegistry
+	// Security is protocol-neutral authentication and authorization supplied by the host.
+	Security *tacklrsecurity.Service
+	// HTTPAttempt translates request credentials at the HTTP transport edge.
+	HTTPAttempt HTTPAttemptExtractor
+
+	allowAnonymousNetwork   bool
+	networkPolicyConfigured bool
 }
 
 // NewServer wraps a Registry and one or more protocols.
@@ -54,6 +63,14 @@ func (s *Server) ServeStdio(ctx context.Context, in io.Reader, out io.Writer) er
 	defer func() { s.Client = nil }()
 
 	proto := s.Protocols[0]
+	localPrincipal, err := tacklrsecurity.NewPrincipal("stdio")
+	if err != nil {
+		panic(err)
+	}
+	localSecurity := tacklrsecurity.Context{
+		Principal: localPrincipal,
+		Binding:   tacklrsecurity.ChannelBinding{Kind: "stdio", ID: "process"},
+	}
 
 	readCh := make(chan stdioReadResult, 1)
 
@@ -79,10 +96,11 @@ func (s *Server) ServeStdio(ctx context.Context, in io.Reader, out io.Writer) er
 	dispatch := func(body []byte) {
 		run := func() {
 			reqConn := &Conn{
-				Writer: w,
-				RPC:    bridge,
+				Writer:   w,
+				RPC:      bridge,
+				Security: &localSecurity,
 			}
-			reqEnv := ProtocolEnv{Registry: s.Registry, Conn: reqConn}
+			reqEnv := ProtocolEnv{Registry: s.Registry, Conn: reqConn, Security: s.Security}
 			if err := proto.HandleInbound(ctx, reqEnv, body); err != nil {
 				slog.Debug("inbound handler", "error", err, "protocol", proto.Name())
 			}
@@ -159,9 +177,15 @@ func (s *Server) HTTPMux() *http.ServeMux {
 			r := route
 			pattern := r.Method + " " + r.Pattern
 			mux.HandleFunc(pattern, func(w http.ResponseWriter, req *http.Request) {
+				securityContext, status := s.networkContext(req.Context(), req, r.AllowUnauthenticated)
+				if status != 0 {
+					http.Error(w, http.StatusText(status), status)
+					return
+				}
 				env := ProtocolEnv{
 					Registry:    s.Registry,
-					Conn:        &Conn{},
+					Conn:        &Conn{Security: securityContext},
+					Security:    s.Security,
 					Connections: s.Connections,
 				}
 				r.Handler(env, w, req)
@@ -173,6 +197,9 @@ func (s *Server) HTTPMux() *http.ServeMux {
 
 // ServeHTTP starts an HTTP server mounting all protocol routes.
 func (s *Server) ServeHTTP(ctx context.Context, addr string) error {
+	if !s.networkPolicyConfigured {
+		return ErrNetworkSecurityPolicyRequired
+	}
 	hs := &http.Server{Addr: addr, Handler: s.HTTPMux(), ReadHeaderTimeout: 10 * time.Second}
 	errCh := make(chan error, 1)
 	go func() {

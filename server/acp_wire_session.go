@@ -22,6 +22,7 @@ type acpWireSession struct {
 	cwd          string
 	mcpServers   []mcp.MCPConfig
 	configValues map[string]string
+	owner        string
 	prompted     bool // true after the first prompt turn was bound
 }
 
@@ -30,6 +31,7 @@ type acpWireEnvelope struct {
 	CWD          string            `json:"cwd"`
 	ConfigValues map[string]string `json:"configValues"`
 	MCPServers   []mcp.MCPConfig   `json:"mcpServers"`
+	Owner        string            `json:"owner,omitempty"`
 	Prompted     bool              `json:"prompted"`
 }
 
@@ -46,6 +48,7 @@ func (s *acpWireSession) envelope() acpWireEnvelope {
 		CWD:          s.cwd,
 		ConfigValues: cfg,
 		MCPServers:   append([]mcp.MCPConfig(nil), s.mcpServers...),
+		Owner:        s.owner,
 		Prompted:     s.prompted,
 	}
 }
@@ -59,6 +62,7 @@ func wireSessionFromEnvelope(env acpWireEnvelope) *acpWireSession {
 		cwd:          env.CWD,
 		mcpServers:   append([]mcp.MCPConfig(nil), env.MCPServers...),
 		configValues: cfg,
+		owner:        env.Owner,
 		prompted:     env.Prompted,
 	}
 }
@@ -113,6 +117,9 @@ func (p *acpProtocol) resolveWireSession(ctx context.Context, sessionID string) 
 
 // CreateSession implements Protocol wire session create for ACP.
 func (p *acpProtocol) CreateSession(ctx context.Context, env ProtocolEnv, params json.RawMessage) (string, any, error) {
+	if err := authorizeOperation(ctx, env, actionSessionCreate, ""); err != nil {
+		return "", nil, err
+	}
 	var pr acpSessionParams
 	if len(params) > 0 {
 		if err := json.Unmarshal(params, &pr); err != nil {
@@ -132,6 +139,7 @@ func (p *acpProtocol) CreateSession(ctx context.Context, env ProtocolEnv, params
 		cwd:          pr.Cwd,
 		mcpServers:   pr.MCPServers,
 		configValues: cfg,
+		owner:        securitySubject(env),
 	}
 	p.mu.Lock()
 	if p.sessions == nil {
@@ -169,7 +177,7 @@ func (p *acpProtocol) LoadSession(ctx context.Context, env ProtocolEnv, sessionI
 			sessionID = pr.SessionID
 		}
 	}
-	sess, err := p.resolveWireSession(ctx, sessionID)
+	sess, err := p.resolveOwnedWireSession(ctx, env, sessionID, actionSessionLoad)
 	if err != nil {
 		return nil, err
 	}
@@ -261,7 +269,7 @@ func (p *acpProtocol) BindTurn(ctx context.Context, env ProtocolEnv, sessionID, 
 	if sessionID == "" {
 		return TurnRequest{}, clientErrorf(ErrInvalidRequest, "sessionId is required")
 	}
-	sess, err := p.resolveWireSession(ctx, sessionID)
+	sess, err := p.resolveOwnedWireSession(ctx, env, sessionID, actionSessionPrompt)
 	if err != nil {
 		return TurnRequest{}, err
 	}
@@ -338,6 +346,9 @@ func (p *acpProtocol) BindTurn(ctx context.Context, env ProtocolEnv, sessionID, 
 
 // CloseSession implements Protocol for ACP.
 func (p *acpProtocol) CloseSession(ctx context.Context, env ProtocolEnv, sessionID string) error {
+	if _, err := p.resolveOwnedWireSession(ctx, env, sessionID, actionSessionClose); err != nil {
+		return err
+	}
 	if p != nil {
 		p.mu.Lock()
 		delete(p.sessions, sessionID)
@@ -356,7 +367,7 @@ func (p *acpProtocol) CloseSession(ctx context.Context, env ProtocolEnv, session
 }
 
 func (p *acpProtocol) setConfig(ctx context.Context, env ProtocolEnv, sessionID, configID, value string) (any, error) {
-	sess, err := p.resolveWireSession(ctx, sessionID)
+	sess, err := p.resolveOwnedWireSession(ctx, env, sessionID, actionSessionConfig)
 	if err != nil {
 		return nil, err
 	}

@@ -81,8 +81,9 @@ func (p *acpProtocol) handleACPPost(env ProtocolEnv, w http.ResponseWriter, r *h
 	if sessionID == "" {
 		sessionID = peek.SessionID
 	}
-	if sessionID != "" {
-		conn.noteSession(sessionID)
+	if sessionID != "" && peek.Method != "session/load" && !conn.hasSession(sessionID) {
+		http.Error(w, "session is not attached to this connection", http.StatusForbidden)
+		return
 	}
 
 	if !peek.IsNotification && len(peek.ID) > 0 {
@@ -93,12 +94,16 @@ func (p *acpProtocol) handleACPPost(env ProtocolEnv, w http.ResponseWriter, r *h
 	w.WriteHeader(http.StatusAccepted)
 
 	reqConn := &Conn{
-		Writer: conn.Writer,
-		RPC:    conn.Bridge,
+		Writer:      conn.Writer,
+		RPC:         conn.Bridge,
+		setSecurity: conn.setSecurityContext,
 	}
+	securityContext := conn.securityContext()
+	reqConn.Security = &securityContext
 	reqEnv := ProtocolEnv{
 		Registry:    env.Registry,
 		Conn:        reqConn,
+		Security:    env.Security,
 		Connections: env.Connections,
 	}
 	// Use connection context — POST request context ends when the handler returns.
@@ -119,6 +124,9 @@ func (p *acpProtocol) handleStreamableInitialize(env ProtocolEnv, w http.Respons
 
 	sw := &acpStreamWriter{}
 	conn := env.Connections.Create(nil, nil)
+	if env.Conn != nil && env.Conn.Security != nil {
+		conn.setSecurityContext(*env.Conn.Security)
+	}
 	sw.conn = conn
 	bridge := NewClientBridge(sw)
 	conn.Bridge = bridge
@@ -126,8 +134,14 @@ func (p *acpProtocol) handleStreamableInitialize(env ProtocolEnv, w http.Respons
 
 	// Initialize result goes on the HTTP response body (200), not SSE.
 	hw := &httpBufferWriter{}
-	reqConn := &Conn{Writer: hw, RPC: bridge}
-	reqEnv := ProtocolEnv{Registry: env.Registry, Conn: reqConn, Connections: env.Connections}
+	securityContext := conn.securityContext()
+	reqConn := &Conn{
+		Writer:      hw,
+		RPC:         bridge,
+		Security:    &securityContext,
+		setSecurity: conn.setSecurityContext,
+	}
+	reqEnv := ProtocolEnv{Registry: env.Registry, Conn: reqConn, Security: env.Security, Connections: env.Connections}
 	if err := p.HandleInbound(r.Context(), reqEnv, body); err != nil {
 		slog.Debug("acp streamable initialize", "error", err)
 	}

@@ -10,6 +10,8 @@ import (
 	"sync"
 
 	"github.com/google/uuid"
+
+	tacklrsecurity "github.com/ryanaldo34/tacklr/security"
 )
 
 // Header names for the ACP Streamable HTTP / WebSocket transport (RFD).
@@ -40,9 +42,28 @@ type Connection struct {
 	// routes maps JSON-RPC request id → delivery target for the matching result.
 	routes   map[string]streamRoute
 	sessions map[string]struct{}
+	security tacklrsecurity.Context
 	closed   bool
 	// lateSessionSSEFallback copies ConnectionRegistry.LateSessionSSEFallback.
 	lateSessionSSEFallback bool
+}
+
+func (c *Connection) securityContext() tacklrsecurity.Context {
+	if c == nil {
+		return tacklrsecurity.Context{}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.security
+}
+
+func (c *Connection) setSecurityContext(securityContext tacklrsecurity.Context) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.security = securityContext
+	c.mu.Unlock()
 }
 
 type streamRoute struct {
@@ -217,6 +238,16 @@ func (c *Connection) noteSession(sessionID string) {
 	c.mu.Lock()
 	c.sessions[sessionID] = struct{}{}
 	c.mu.Unlock()
+}
+
+func (c *Connection) hasSession(sessionID string) bool {
+	if c == nil || sessionID == "" {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, ok := c.sessions[sessionID]
+	return ok
 }
 
 // attachConnSSE registers the connection-scoped GET stream. Returns a detach func
@@ -421,7 +452,8 @@ func acceptSSE(accept string) bool {
 func sessionScopedACPMethod(method string) bool {
 	switch method {
 	case "session/prompt", "session/resume", "session/cancel",
-		"session/set_config_option", "session/close":
+		"session/set_config_option", "session/close",
+		methodVFSBind, methodVFSRefresh, methodVFSUnbind:
 		return true
 	default:
 		return false

@@ -71,7 +71,7 @@ func (p *acpProtocol) handleVFSBind(ctx context.Context, env ProtocolEnv, pr *pa
 	if params.SessionID == "" {
 		return env.Conn.Writer.WriteError(pr.ID, clientErrorf(ErrInvalidRequest, "sessionId is required"))
 	}
-	if _, err := p.resolveWireSession(ctx, params.SessionID); err != nil {
+	if _, err := p.resolveOwnedWireSession(ctx, env, params.SessionID, actionVFSCredentials); err != nil {
 		return env.Conn.Writer.WriteError(pr.ID, err)
 	}
 	if len(params.Backends) == 0 {
@@ -126,7 +126,7 @@ func (p *acpProtocol) handleVFSRefresh(ctx context.Context, env ProtocolEnv, pr 
 	if params.SessionID == "" || params.Provider == "" {
 		return env.Conn.Writer.WriteError(pr.ID, clientErrorf(ErrInvalidRequest, "sessionId and provider are required"))
 	}
-	if _, err := p.resolveWireSession(ctx, params.SessionID); err != nil {
+	if _, err := p.resolveOwnedWireSession(ctx, env, params.SessionID, actionVFSCredentials); err != nil {
 		return env.Conn.Writer.WriteError(pr.ID, err)
 	}
 	if err := env.Registry.RefreshVFS(params.SessionID, params.Provider, params.Auth.credential()); err != nil {
@@ -143,7 +143,7 @@ func (p *acpProtocol) handleVFSUnbind(ctx context.Context, env ProtocolEnv, pr *
 	if params.SessionID == "" {
 		return env.Conn.Writer.WriteError(pr.ID, clientErrorf(ErrInvalidRequest, "sessionId is required"))
 	}
-	if _, err := p.resolveWireSession(ctx, params.SessionID); err != nil {
+	if _, err := p.resolveOwnedWireSession(ctx, env, params.SessionID, actionVFSCredentials); err != nil {
 		return env.Conn.Writer.WriteError(pr.ID, err)
 	}
 	if err := env.Registry.UnbindVFS(params.SessionID, params.Point, params.Provider); err != nil {
