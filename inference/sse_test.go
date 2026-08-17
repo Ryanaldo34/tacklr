@@ -3,14 +3,29 @@ package inference
 import (
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 
 	"github.com/ryanaldo34/tacklr"
 )
 
+type failingSSEReader struct{}
+
+func (failingSSEReader) Read([]byte) (int, error) {
+	return 0, errors.New("stream read failed")
+}
+
 func collectSSE(t *testing.T, body string) []tacklr.LLMResponseChunk {
 	t.Helper()
+	if strings.Contains(body, "data: [DONE]") &&
+		!strings.Contains(body, `"type":"response.completed"`) &&
+		!strings.Contains(body, `"type":"response.incomplete"`) &&
+		!strings.Contains(body, `"type":"response.failed"`) &&
+		!strings.Contains(body, `"type":"error"`) {
+		body = strings.Replace(body, "data: [DONE]",
+			`data: {"type":"response.completed","response":{"status":"completed"}}`+"\n"+`data: [DONE]`, 1)
+	}
 	s := NewOpenAIInferenceStrategy(nil)
 	ch := make(chan tacklr.LLMResponseChunk, 64)
 	go func() {
@@ -22,6 +37,45 @@ func collectSSE(t *testing.T, body string) []tacklr.LLMResponseChunk {
 		out = append(out, c)
 	}
 	return out
+}
+
+func collectRawSSE(t *testing.T, reader io.Reader) []tacklr.LLMResponseChunk {
+	t.Helper()
+	strategy := NewOpenAIInferenceStrategy(nil)
+	ch := make(chan tacklr.LLMResponseChunk, 16)
+	strategy.parseSSEResponse(t.Context(), reader, ch, "")
+	close(ch)
+	var chunks []tacklr.LLMResponseChunk
+	for chunk := range ch {
+		chunks = append(chunks, chunk)
+	}
+	return chunks
+}
+
+func TestParseSSE_requiresTerminalResponseEvent(t *testing.T) {
+	// Arrange
+	doneWithoutTerminal := strings.NewReader("data: [DONE]\n\n")
+	eofWithoutTerminal := strings.NewReader(`data: {"type":"response.output_text.delta","delta":"partial"}` + "\n")
+	scannerFailure := io.MultiReader(
+		strings.NewReader(`data: {"type":"response.output_text.delta","delta":"partial"}`+"\n"),
+		failingSSEReader{},
+	)
+
+	// Act
+	doneChunks := collectRawSSE(t, doneWithoutTerminal)
+	eofChunks := collectRawSSE(t, eofWithoutTerminal)
+	failureChunks := collectRawSSE(t, scannerFailure)
+
+	// Assert
+	for name, chunks := range map[string][]tacklr.LLMResponseChunk{
+		"done":    doneChunks,
+		"eof":     eofChunks,
+		"scanner": failureChunks,
+	} {
+		if len(chunks) == 0 || !errors.Is(chunks[len(chunks)-1].Error, ErrIncompleteStream) {
+			t.Fatalf("%s chunks = %#v", name, chunks)
+		}
+	}
 }
 
 func TestParseSSE_outputTextAlwaysMessage_likeMain(t *testing.T) {

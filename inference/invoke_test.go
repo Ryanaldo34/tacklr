@@ -35,6 +35,7 @@ func TestInvoke_streamsMessageAndMapsDeveloperToSystem(t *testing.T) {
 			`data: {"type":"response.output_item.added","item":{"id":"msg_1","type":"message"}}`,
 			`data: {"type":"response.output_text.delta","item_id":"msg_1","delta":"hello"}`,
 			`data: {"type":"response.output_item.done","item":{"id":"msg_1","type":"message"}}`,
+			`data: {"type":"response.completed","response":{"status":"completed"}}`,
 			`data: [DONE]`,
 			"",
 		}, "\n"))
@@ -109,6 +110,49 @@ func TestInvoke_streamsMessageAndMapsDeveloperToSystem(t *testing.T) {
 	toolsRaw, _ := json.Marshal(sawBody["tools"])
 	if !strings.Contains(string(toolsRaw), "echo") {
 		t.Errorf("tools JSON missing echo: %s", toolsRaw)
+	}
+}
+
+func TestInvoke_truncatedStreamDoesNotCommitPartialAssistant(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, `data: {"type":"response.output_text.delta","item_id":"msg","delta":"partial"}`+"\n")
+	}))
+	t.Cleanup(server.Close)
+	strategy := NewOpenAIInferenceStrategy(server.Client()).
+		WithApiKey("test-key").
+		WithModel("gpt-5.4").
+		WithURL(server.URL)
+	agent, err := tacklr.NewAgent(t.Context(), tacklr.AgentOptions{
+		Config: tacklr.Config{MaxWindowSize: 8192},
+		Model:  strategy,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(agent.Close)
+
+	// Act
+	events, err := agent.Run(t.Context(), "hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var streamErr error
+	for event := range events {
+		if event.Type == tacklr.StreamEventError {
+			streamErr = event.Error
+		}
+	}
+
+	// Assert
+	if !errors.Is(streamErr, ErrIncompleteStream) {
+		t.Fatalf("stream error = %v", streamErr)
+	}
+	for _, message := range agent.Messages() {
+		if message.Role == tacklr.RoleAssistant && strings.Contains(message.Content, "partial") {
+			t.Fatalf("partial assistant committed: %#v", agent.Messages())
+		}
 	}
 }
 
