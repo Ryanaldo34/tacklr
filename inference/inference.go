@@ -513,13 +513,14 @@ func (s *OpenAIInferenceStrategy) parseSSEResponse(ctx context.Context, body io.
 			// Successful response.completed: surface token usage for model spans/metrics.
 			if evt.Type == "response.completed" {
 				terminal = true
-				u, _ := parseResponseUsage(data)
-				events <- tacklr.LLMResponseChunk{
-					Type:            tacklr.StreamEventComplete,
-					IsComplete:      true,
-					InputTokens:     u.Input,
-					OutputTokens:    u.Output,
-					ReasoningTokens: u.Reasoning,
+				if u, ok := parseResponseUsage(data); ok {
+					events <- tacklr.LLMResponseChunk{
+						Type:            tacklr.StreamEventComplete,
+						IsComplete:      true,
+						InputTokens:     u.Input,
+						OutputTokens:    u.Output,
+						ReasoningTokens: u.Reasoning,
+					}
 				}
 			}
 		}
