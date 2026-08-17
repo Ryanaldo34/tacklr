@@ -99,6 +99,19 @@ func TestInvoke(t *testing.T) {
 		}
 	})
 
+	t.Run("handler that needs runtime fails closed without one", func(t *testing.T) {
+		tool := NewTool(ToolConfig{
+			Name: "needs_rt",
+			Handler: func(ctx context.Context, rt HarnessRuntime) (string, error) {
+				return "ok", nil
+			},
+		})
+		_, err := tool.invoke(context.Background(), "", nil)
+		if err == nil || !errors.Is(err, ErrFailed) {
+			t.Fatalf("nil runtime: %v", err)
+		}
+	})
+
 	t.Run("propagates handler error", func(t *testing.T) {
 		tool := NewTool(ToolConfig{Name: "err", Handler: errHandler})
 		_, err := tool.invoke(context.Background(), `{"name":"x","age":1}`, nil)

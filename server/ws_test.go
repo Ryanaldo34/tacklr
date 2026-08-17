@@ -26,7 +26,7 @@ func TestWebSocket_promptStreamsMessageAndComplete(t *testing.T) {
 	mux := http.NewServeMux()
 	env := ProtocolEnv{Registry: r, Conn: &Conn{}}
 	for _, route := range SSE.HTTPRoutes() {
-		if route.Method == http.MethodGet && route.Pattern == "/" {
+		if route.Method == http.MethodGet && route.Pattern == "/{$}" {
 			mux.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
 				route.Handler(env, w, req)
 			})
@@ -100,7 +100,7 @@ func TestWebSocket_invalidRequestAndTurnError(t *testing.T) {
 	mux := http.NewServeMux()
 	env := ProtocolEnv{Registry: r, Conn: &Conn{}}
 	for _, route := range SSE.HTTPRoutes() {
-		if route.Method == http.MethodGet && route.Pattern == "/" {
+		if route.Method == http.MethodGet && route.Pattern == "/{$}" {
 			mux.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
 				route.Handler(env, w, req)
 			})

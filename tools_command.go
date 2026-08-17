@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -43,8 +44,18 @@ func newRunCommand(ms *vfs.MountSession, permissionRequired bool) *Tool {
 			}
 			rt.EmitUpdate("Running " + cmdStr)
 
-			cmd := exec.CommandContext(ctx, "/bin/sh", "-c", cmdStr)
-			cmd.Dir = dir
+			// Never set cmd.Dir to the FUSE HostDir. Go's fork/exec chdirs in
+			// the child before exec returns; that chdir is a FUSE request this
+			// same process must serve. If the parent is blocked on the exec
+			// pipe (coverage, GC stop-the-world), the FUSE server cannot run
+			// and the start deadlocks. cd after exec so the kernel only walks
+			// the mount once we are in Wait.
+			//
+			// dir and cmdStr are argv ($1, $2), not concatenated into -c, so
+			// HostDir metacharacters cannot break cd and gosec G204 stays quiet.
+			cmd := exec.CommandContext(ctx, "/bin/sh", "-c", `cd "$1" && eval "$2"`, "run_command", dir, cmdStr)
+			cmd.Dir = os.TempDir()
+			cmd.Stdin = bytes.NewReader(nil)
 			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 			cmd.Cancel = func() error {
 				if cmd.Process == nil {

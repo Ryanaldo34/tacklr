@@ -37,16 +37,22 @@ type AgentHarness struct {
 	maxTurnRequests int // 0 = unlimited; from Config.MaxTurnRequests
 	session         *session.SessionManager
 	subagents       map[string]*SubAgent
-	// interruptToRequester maps interrupt id → tool call id for resume.
-	interruptToRequester map[string]string
-	pendingToolCalls     map[string]stores.PendingToolCall
-	pendingMu            sync.Mutex
+	// pendingToolCalls is keyed by tool call id, which is also the wire interrupt id.
+	pendingToolCalls map[string]stores.PendingToolCall
+	pendingMu        sync.Mutex
+	// legacyInterruptIDs maps old checkpoint wire ids → tool call ids. Not saved.
+	legacyInterruptIDs map[string]string
 	// interruptPayloads maps parent tool call id → resume payload for workers.
 	interruptPayloads map[string][]byte
 	// parkedWorkersLive maps spawn_worker tool call id → live child harness.
 	// Durable park metadata is in SessionManager state; this map is not checkpointed.
-	parkedWorkersLive    map[string]*AgentHarness
-	parkMu               sync.Mutex
+	parkedWorkersLive map[string]*AgentHarness
+	parkMu            sync.Mutex
+	// Background worker jobs (spawn_worker block=false). Live only.
+	jobs                 map[string]*backgroundJob
+	jobsMu               sync.Mutex
+	jobsCtx              context.Context
+	jobsCancel           context.CancelFunc
 	skillByName          map[string]skills.Skill
 	skillDirectories     []string
 	skillsLoader         skills.SkillLoader
@@ -102,7 +108,6 @@ func (a *AgentHarness) AskUserQuestion(toolCallID string) string {
 	}
 	s, ok := v.(string)
 	if !ok {
-		// Wrong type means a bug in ask_user_choice stash; surface empty, not a silent cast.
 		slog.Error("ask_user_question state is not a string",
 			"session_id", a.sessionId,
 			"tool_call_id", toolCallID,
@@ -111,6 +116,26 @@ func (a *AgentHarness) AskUserQuestion(toolCallID string) string {
 		return ""
 	}
 	return s
+}
+
+func (a *AgentHarness) pendingSnapshot() map[string]stores.PendingToolCall {
+	a.pendingMu.Lock()
+	defer a.pendingMu.Unlock()
+	ptc := make(map[string]stores.PendingToolCall, len(a.pendingToolCalls))
+	for k, v := range a.pendingToolCalls {
+		ptc[k] = v
+	}
+	return ptc
+}
+
+func (a *AgentHarness) lookupToolCallID(id string) (string, bool) {
+	if _, ok := a.pendingToolCalls[id]; ok {
+		return id, true
+	}
+	if tc, ok := a.legacyInterruptIDs[id]; ok {
+		return tc, true
+	}
+	return "", false
 }
 
 func (a *AgentHarness) restoreMessages(window []*Message) {
@@ -161,18 +186,9 @@ func (a *AgentHarness) checkpointSession(ctx context.Context) error {
 		return nil
 	}
 
-	a.pendingMu.Lock()
-	ptc := make(map[string]stores.PendingToolCall, len(a.pendingToolCalls))
-	for k, v := range a.pendingToolCalls {
-		ptc[k] = v
-	}
-	itr := make(map[string]string, len(a.interruptToRequester))
-	for k, v := range a.interruptToRequester {
-		itr[k] = v
-	}
-	a.pendingMu.Unlock()
+	ptc := a.pendingSnapshot()
 
-	cp, err := session.NewCheckpointer().Capture(a.context.Messages(), a.session, ptc, itr)
+	cp, err := session.NewCheckpointer().Capture(a.context.Messages(), a.session, ptc)
 	if err != nil {
 		telemetry.InstrumentsFromContext(ctx).RecordCheckpointSave(ctx, telemetry.OutcomeError)
 		return err
@@ -323,6 +339,12 @@ When solving a task:
 AVAILABLE SUB-AGENTS:
 You can delegate tasks to specialized sub-agents using the spawn_worker tool. Each sub-agent has its own instructions, tools, and model — choose the one best suited for the task. Only spawn a worker if you are confident it will provide value in running several subtasks in parallel or a task requires significant research or analysis and you only want access to the final output. You may spawn multiple workers to run subtasks in parallel. Always prefer structuring a plan into smaller, more manageable steps rather than a single, complex task requiring several subagents to complete.
 
+spawn_worker has a block parameter which defaults to true. Set block=false to schedule the worker as a background job and continue other work. Tool roles:
+- list_jobs: non-blocking status overview of all background jobs.
+- get_job: non-blocking status/result collection by default; set block=true to wait for a running job or resolve an interrupted worker.
+- cancel_job: stop and remove a background job that is no longer needed.
+The harness prevents the turn from completing while background jobs remain. Collect every needed result with get_job or explicitly cancel unneeded work before finishing.
+
 %s`, builtIn, subList)
 	}
 	if a.instructions != "" {
@@ -435,118 +457,15 @@ func (a *AgentHarness) withToolPresentation(tc ToolCall) ToolCall {
 	return tc
 }
 
-// stripUnpairedToolCallsAfterInferenceError removes unpaired function_call /
-// tool-result messages so the next prompt has valid Responses pairing.
-// Keeps pending interrupt tool calls. Call only on inference-error exits.
-func (a *AgentHarness) stripUnpairedToolCallsAfterInferenceError() {
-	a.pendingMu.Lock()
-	keep := make(map[string]struct{}, len(a.pendingToolCalls))
-	for _, p := range a.pendingToolCalls {
-		if p.ToolCall == nil {
-			continue
-		}
-		if id := p.ToolCall.WireID(); id != "" {
-			keep[id] = struct{}{}
-		}
-		if id := p.ToolCall.Key(); id != "" {
-			keep[id] = struct{}{}
-		}
-	}
-	a.pendingMu.Unlock()
-
-	before := a.Messages()
-	after := stripUnpairedToolTurns(before, keep)
-	if len(before) == len(after) {
-		same := true
-		for i := range before {
-			if before[i] != after[i] {
-				same = false
-				break
-			}
-		}
-		if same {
-			return
-		}
-	}
-	a.context.Replace(after)
-	slog.Info("stripped unpaired tool turns after inference error",
-		"session_id", a.sessionId,
-		"before", len(before),
-		"after", len(after),
-	)
-}
-
-// stripUnpairedToolTurns drops unpaired tool turns. keepCallIDs may lack results
-// (active interrupts).
-func stripUnpairedToolTurns(window []*Message, keepCallIDs map[string]struct{}) []*Message {
-	if len(window) == 0 {
-		return window
-	}
+// toolOutputIDs returns RoleTool call ids present in the window.
+func toolOutputIDs(window []*Message) map[string]struct{} {
 	hasOutput := make(map[string]struct{})
-	hasCall := make(map[string]struct{})
 	for _, m := range window {
-		if m == nil {
-			continue
-		}
-		if m.Role == RoleTool && m.ToolCallID != "" {
+		if m != nil && m.Role == RoleTool && m.ToolCallID != "" {
 			hasOutput[m.ToolCallID] = struct{}{}
 		}
-		if m.Role == RoleAssistant {
-			for _, tc := range m.ToolCalls {
-				if id := tc.WireID(); id != "" {
-					hasCall[id] = struct{}{}
-				}
-			}
-		}
 	}
-	keepID := func(id string) bool {
-		if id == "" {
-			return false
-		}
-		if _, ok := keepCallIDs[id]; ok {
-			return true
-		}
-		_, call := hasCall[id]
-		_, out := hasOutput[id]
-		return call && out
-	}
-
-	out := make([]*Message, 0, len(window))
-	for _, m := range window {
-		if m == nil {
-			continue
-		}
-		switch m.Role {
-		case RoleTool:
-			if keepID(m.ToolCallID) {
-				out = append(out, m)
-			}
-		case RoleAssistant:
-			if len(m.ToolCalls) == 0 {
-				out = append(out, m)
-				continue
-			}
-			kept := make([]ToolCall, 0, len(m.ToolCalls))
-			for _, tc := range m.ToolCalls {
-				if keepID(tc.WireID()) {
-					kept = append(kept, tc)
-				}
-			}
-			if len(kept) == 0 && strings.TrimSpace(m.Content) == "" {
-				continue
-			}
-			if len(kept) == len(m.ToolCalls) {
-				out = append(out, m)
-				continue
-			}
-			cp := *m
-			cp.ToolCalls = kept
-			out = append(out, &cp)
-		default:
-			out = append(out, m)
-		}
-	}
-	return out
+	return hasOutput
 }
 
 func (a *AgentHarness) recordWatchdog(msg *Message) {
@@ -620,18 +539,17 @@ func (a *AgentHarness) HasOpenToolWork() bool {
 // FinalizeCancelledWork pairs open tools as cancelled into the window only,
 // clears interrupt park, checkpoints. Parked/steer path (no live turn stream).
 func (a *AgentHarness) FinalizeCancelledWork(ctx context.Context) {
-	a.pairCancelledToolResults(nil)
+	a.finalizeCancelledWork(nil)
+}
+
+func (a *AgentHarness) finalizeCancelledWork(out chan<- StreamEvent) {
+	a.pairCancelledToolResults(out)
 	a.clearInterruptParkState()
 }
 
 // openToolCalls returns assistant/pending tool_calls that have no RoleTool result yet.
 func (a *AgentHarness) openToolCalls() []ToolCall {
-	hasOutput := make(map[string]struct{})
-	for _, m := range a.Messages() {
-		if m != nil && m.Role == RoleTool && m.ToolCallID != "" {
-			hasOutput[m.ToolCallID] = struct{}{}
-		}
-	}
+	hasOutput := toolOutputIDs(a.Messages())
 	seen := make(map[string]struct{})
 	var open []ToolCall
 	add := func(tc ToolCall) {
@@ -682,7 +600,7 @@ func (a *AgentHarness) pairCancelledToolResults(out chan<- StreamEvent) {
 func (a *AgentHarness) clearInterruptParkState() {
 	a.pendingMu.Lock()
 	a.pendingToolCalls = make(map[string]stores.PendingToolCall)
-	a.interruptToRequester = make(map[string]string)
+	a.legacyInterruptIDs = make(map[string]string)
 	a.interruptPayloads = make(map[string][]byte)
 	a.pendingMu.Unlock()
 	a.session.ClearInterrupts()
@@ -721,6 +639,7 @@ func (a *AgentHarness) initMCP(ctx context.Context) {
 // FUSE); this does not close it.
 // Call after the Run events channel is drained, or when construct/runHarness fails.
 func (a *AgentHarness) Close() {
+	a.cancelBackgroundJobs()
 	a.persistSession(context.Background())
 	a.parkMu.Lock()
 	for id, w := range a.parkedWorkersLive {

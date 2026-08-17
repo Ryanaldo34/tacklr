@@ -3,10 +3,13 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
 )
+
+var errConnectionNotInitialized = errors.New("connection closed before initialize")
 
 // ClientCapabilities captures client features from initialize.
 type ClientCapabilities struct {
@@ -66,13 +69,64 @@ type ClientBridge struct {
 	wait map[string]*rpcWaiter
 	// Caps is protected by mu; use GetCaps/SetCaps from concurrent stdio handlers.
 	Caps ClientCapabilities
+	// initialized is closed once initialize has run on this connection.
+	initialized     chan struct{}
+	initializedOnce sync.Once
+	// closed is closed when the connection is torn down (stdio EOF, etc.).
+	closed     chan struct{}
+	closedOnce sync.Once
 }
 
 // NewClientBridge creates a bridge that writes requests through w.
 func NewClientBridge(w MessageWriter) *ClientBridge {
 	return &ClientBridge{
-		w:    w,
-		wait: make(map[string]*rpcWaiter),
+		w:           w,
+		wait:        make(map[string]*rpcWaiter),
+		initialized: make(chan struct{}),
+		closed:      make(chan struct{}),
+	}
+}
+
+// MarkInitialized records that initialize completed on this connection.
+func (b *ClientBridge) MarkInitialized() {
+	if b == nil {
+		return
+	}
+	b.initializedOnce.Do(func() { close(b.initialized) })
+}
+
+// Close unblocks WaitInitialized when the connection ends without initialize.
+func (b *ClientBridge) Close() {
+	if b == nil {
+		return
+	}
+	b.closedOnce.Do(func() { close(b.closed) })
+}
+
+// WaitInitialized blocks until initialize has run, the connection closes, or ctx is done.
+// If initialize already completed, that wins even when closed/ctx are also ready
+// (stdio EOF closes the bridge while in-flight prompt handlers still wait).
+func (b *ClientBridge) WaitInitialized(ctx context.Context) error {
+	if b == nil {
+		return nil
+	}
+	select {
+	case <-b.initialized:
+		return nil
+	case <-b.closed:
+		select {
+		case <-b.initialized:
+			return nil
+		default:
+			return errConnectionNotInitialized
+		}
+	case <-ctx.Done():
+		select {
+		case <-b.initialized:
+			return nil
+		default:
+			return ctx.Err()
+		}
 	}
 }
 

@@ -43,11 +43,6 @@ type askUserChoiceArgs struct {
 	Choices  []askUserChoiceOption `json:"choices" desc:"2 or more mutually exclusive options"`
 }
 
-// setPlanTodos persists the plan. The harness streams plan_update after Set.
-func setPlanTodos(sm *session.SessionManager, todos []Todo) {
-	sm.Plan.Set(todos)
-}
-
 var askUserChoiceTool = NewTool(ToolConfig{
 	Name:        "ask_user_choice",
 	DisplayName: "Ask: {question}",
@@ -82,7 +77,9 @@ var askUserChoiceTool = NewTool(ToolConfig{
 			return "", fmt.Errorf("marshal choices: %w", err)
 		}
 		if runtime.CurrentToolCallID() != "" {
-			_ = runtime.StateSet(askUserQuestionStateKey(runtime.CurrentToolCallID()), args.Question)
+			if err := runtime.StateSet(askUserQuestionStateKey(runtime.CurrentToolCallID()), args.Question); err != nil {
+				return "", err
+			}
 		}
 
 		intr, err := runtime.RaiseInterrupt("user_selection_choice", optionsJSON)
@@ -136,7 +133,7 @@ func newCreatePlanTool(sm *session.SessionManager) *Tool {
 				}
 			}
 			sm.Plan.SetDocument(args.Plan)
-			setPlanTodos(sm, todos)
+			sm.Plan.Set(todos)
 			return BuiltinResult{
 				Output:                "Plan created successfully",
 				Effect:                EffectInstallPlanDocument,
@@ -201,19 +198,19 @@ func newCompleteTodoTool(sm *session.SessionManager) *Tool {
 							for j < len(plan) {
 								if plan[j].Status != streaming.TodoStatusCompleted {
 									plan[j].Status = streaming.TodoStatusInProgress
-									setPlanTodos(sm, plan)
+									sm.Plan.Set(plan)
 									return handoff(fmt.Sprintf("Todo completed successfully, now starting %q with description: %q", plan[j].Title, plan[j].Description))
 								}
 								j++
 							}
-							setPlanTodos(sm, plan)
+							sm.Plan.Set(plan)
 							return allDone("All todos completed successfully")
 						}
 						plan[i+1].Status = streaming.TodoStatusInProgress
-						setPlanTodos(sm, plan)
+						sm.Plan.Set(plan)
 						return handoff(fmt.Sprintf("Todo completed successfully, now starting %q with description: %q", plan[i+1].Title, plan[i+1].Description))
 					}
-					setPlanTodos(sm, plan)
+					sm.Plan.Set(plan)
 					return allDone("All todos completed successfully")
 				}
 			}
@@ -265,7 +262,7 @@ func newEditPlanTool(sm *session.SessionManager) *Tool {
 					return BuiltinResult{}, fmt.Errorf("todo %q not found in plan", title)
 				}
 			}
-			setPlanTodos(sm, plan)
+			sm.Plan.Set(plan)
 			if trimmedPlan != "" {
 				sm.Plan.SetDocument(args.Plan)
 			}

@@ -28,9 +28,9 @@ func (sseProtocol) HandleInbound(ctx context.Context, env ProtocolEnv, body []by
 
 func (p sseProtocol) HTTPRoutes() []HTTPRoute {
 	return []HTTPRoute{
-		{Method: http.MethodPost, Pattern: "/", Handler: p.handleSSE},
+		{Method: http.MethodPost, Pattern: "/{$}", Handler: p.handleSSE},
 		{Method: http.MethodPost, Pattern: "/resume", Handler: p.handleSSE},
-		{Method: http.MethodGet, Pattern: "/", Handler: p.handleWS},
+		{Method: http.MethodGet, Pattern: "/{$}", Handler: p.handleWS},
 		{Method: http.MethodGet, Pattern: "/resume", Handler: p.handleWS},
 	}
 }
@@ -57,50 +57,21 @@ func (p sseProtocol) handleSSE(env ProtocolEnv, w http.ResponseWriter, r *http.R
 		return
 	}
 
-	threadID, load := resolveThread(pr)
-	req := TurnRequest{
-		AgentID:   pr.AgentID,
-		ThreadID:  threadID,
-		Prompt:    pr.Prompt,
-		Responses: pr.Responses,
-		Load:      load,
-	}
-	stream, err := env.Registry.RunTurn(r.Context(), req)
-	if err != nil {
-		if !IsClientError(err) {
-			logTurnError(err, pr.AgentID, threadID)
-		}
-		// Headers not yet SSE; return JSON-RPC-ish error via SSE writer after headers.
-		w.Header().Set("Content-Type", "text/event-stream")
-		flusher.Flush()
-		mw := &sseMessageWriter{w: w, flusher: flusher}
-		_ = mw.WriteError(nil, err)
-		return
-	}
-	defer func() {
-		stream.Cancel()
-		stream.Close()
-	}()
-	if stream.SessionID() != "" {
-		threadID = stream.SessionID()
-	}
-
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Thread-ID", threadID)
-	flusher.Flush()
-
-	mw := &sseMessageWriter{w: w, flusher: flusher}
-	env.Conn = &Conn{Writer: mw}
-
-	threadData, _ := json.Marshal(threadEvent{ThreadID: threadID})
-	_ = writeSSEEvent(w, flusher, "thread", threadData)
-
-	if err := runTurnStream(r.Context(), env, p, threadID, stream, nil); err != nil {
-		if !IsClientError(err) {
-			slog.Debug("sse turn stream ended", "error", err)
-		}
+	if err := p.runSSEProtocolTurn(r.Context(), env, pr, func(threadID string) MessageWriter {
+		w.Header().Set("X-Thread-ID", threadID)
+		flusher.Flush()
+		threadData, _ := json.Marshal(threadEvent{ThreadID: threadID})
+		_ = writeSSEEvent(w, flusher, "thread", threadData)
+		return &sseMessageWriter{w: w, flusher: flusher}
+	}, func(err error) {
+		flusher.Flush()
+		mw := &sseMessageWriter{w: w, flusher: flusher}
+		_ = mw.WriteError(nil, err)
+	}); err != nil && !IsClientError(err) {
+		slog.Debug("sse turn stream ended", "error", err)
 	}
 }
 
@@ -124,6 +95,21 @@ func (p sseProtocol) handleWS(env ProtocolEnv, w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	_ = p.runSSEProtocolTurn(ctx, env, pr, func(threadID string) MessageWriter {
+		_ = wsWriteJSON(ctx, c, wsServerEvent{Type: "thread", Content: threadID})
+		return &wsMessageWriter{ctx: ctx, c: c}
+	}, func(err error) {
+		_ = wsWriteJSON(ctx, c, wsServerEvent{Type: "error", Content: PublicError(err).Error()})
+	})
+}
+
+func (p sseProtocol) runSSEProtocolTurn(
+	ctx context.Context,
+	env ProtocolEnv,
+	pr *parsedRequest,
+	ready func(threadID string) MessageWriter,
+	onStartError func(error),
+) error {
 	threadID, load := resolveThread(pr)
 	req := TurnRequest{
 		AgentID:   pr.AgentID,
@@ -137,8 +123,10 @@ func (p sseProtocol) handleWS(env ProtocolEnv, w http.ResponseWriter, r *http.Re
 		if !IsClientError(err) {
 			logTurnError(err, pr.AgentID, threadID)
 		}
-		_ = wsWriteJSON(ctx, c, wsServerEvent{Type: "error", Content: PublicError(err).Error()})
-		return
+		if onStartError != nil {
+			onStartError(err)
+		}
+		return err
 	}
 	defer func() {
 		stream.Cancel()
@@ -147,13 +135,8 @@ func (p sseProtocol) handleWS(env ProtocolEnv, w http.ResponseWriter, r *http.Re
 	if stream.SessionID() != "" {
 		threadID = stream.SessionID()
 	}
-	if err := wsWriteJSON(ctx, c, wsServerEvent{Type: "thread", Content: threadID}); err != nil {
-		return
-	}
-
-	mw := &wsMessageWriter{ctx: ctx, c: c}
-	env.Conn = &Conn{Writer: mw}
-	_ = runTurnStream(ctx, env, p, threadID, stream, nil)
+	env.Conn = &Conn{Writer: ready(threadID)}
+	return runTurnStream(ctx, env, p, threadID, stream, nil)
 }
 
 func (p sseProtocol) OnStreamEvent(ctx context.Context, env ProtocolEnv, threadID string, stream *EventStream, ev streaming.StreamEvent, reqID json.RawMessage) StreamControl {
@@ -174,7 +157,7 @@ func (sseProtocol) LoadSession(context.Context, ProtocolEnv, string, json.RawMes
 	return nil, ErrWireSessionUnsupported
 }
 
-func (sseProtocol) BindTurn(context.Context, ProtocolEnv, string, json.RawMessage) (TurnRequest, error) {
+func (sseProtocol) BindTurn(context.Context, ProtocolEnv, string, string, json.RawMessage) (TurnRequest, error) {
 	return TurnRequest{}, ErrWireSessionUnsupported
 }
 

@@ -207,7 +207,7 @@ func (p *acpProtocol) LoadSession(ctx context.Context, env ProtocolEnv, sessionI
 
 // BindTurn implements Protocol: maps ACP session/prompt or session/resume params
 // into a Registry TurnRequest. This is the only turn-binding path for ACP.
-func (p *acpProtocol) BindTurn(ctx context.Context, env ProtocolEnv, sessionID string, turnParams json.RawMessage) (TurnRequest, error) {
+func (p *acpProtocol) BindTurn(ctx context.Context, env ProtocolEnv, sessionID, method string, turnParams json.RawMessage) (TurnRequest, error) {
 	var prompt string
 	var userMsg *tacklr.Message
 	var responses map[string]json.RawMessage
@@ -215,8 +215,27 @@ func (p *acpProtocol) BindTurn(ctx context.Context, env ProtocolEnv, sessionID s
 	var mcpFromClient []mcp.MCPConfig
 
 	if len(turnParams) > 0 {
-		var pp acpPromptParams
-		if err := json.Unmarshal(turnParams, &pp); err == nil {
+		switch method {
+		case "session/resume":
+			var sp acpSessionParams
+			if err := json.Unmarshal(turnParams, &sp); err == nil {
+				if sp.SessionID != "" {
+					sessionID = sp.SessionID
+				}
+				cwd = sp.Cwd
+				mcpFromClient = sp.MCPServers
+			}
+			var withResp struct {
+				Responses map[string]json.RawMessage `json:"responses"`
+			}
+			if err := json.Unmarshal(turnParams, &withResp); err == nil {
+				responses = withResp.Responses
+			}
+		default:
+			var pp acpPromptParams
+			if err := json.Unmarshal(turnParams, &pp); err != nil {
+				return TurnRequest{}, clientErrorf(ErrInvalidRequest, "invalid prompt params: %v", err)
+			}
 			if pp.SessionID != "" {
 				sessionID = pp.SessionID
 			}
@@ -228,20 +247,15 @@ func (p *acpProtocol) BindTurn(ctx context.Context, env ProtocolEnv, sessionID s
 				userMsg = msg
 				prompt = msg.Content
 			}
-		}
-		var sp acpSessionParams
-		if err := json.Unmarshal(turnParams, &sp); err == nil {
-			if sp.SessionID != "" && sessionID == "" {
-				sessionID = sp.SessionID
+			var sp acpSessionParams
+			if err := json.Unmarshal(turnParams, &sp); err == nil {
+				if sp.SessionID != "" && sessionID == "" {
+					sessionID = sp.SessionID
+				}
+				cwd = sp.Cwd
+				mcpFromClient = sp.MCPServers
 			}
-			cwd = sp.Cwd
-			mcpFromClient = sp.MCPServers
 		}
-		var withResp struct {
-			Responses map[string]json.RawMessage `json:"responses"`
-		}
-		_ = json.Unmarshal(turnParams, &withResp)
-		responses = withResp.Responses
 	}
 
 	if sessionID == "" {
