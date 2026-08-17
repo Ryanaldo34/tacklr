@@ -36,8 +36,7 @@ func (a *AgentHarness) RunMessage(ctx context.Context, user *Message) (<-chan St
 }
 
 // ReturnFromInterrupt applies host resolutions and resumes the parked tool batch.
-// Keys are tool call ids (also the wire interrupt ids). Old checkpoints that
-// stored a separate wire id are resolved through legacyInterruptIDs.
+// Keys are tool call ids, which are also the wire interrupt ids.
 func (a *AgentHarness) ReturnFromInterrupt(ctx context.Context, finishedInterrupts map[string][]byte) (<-chan StreamEvent, error) {
 	if err := a.applyInterruptResolutions(finishedInterrupts); err != nil {
 		return nil, err
@@ -60,7 +59,6 @@ func (a *AgentHarness) applyInterruptResolutions(finishedInterrupts map[string][
 		if _, err := a.session.ReturnInterrupt(toolCallID, payload); err != nil {
 			return fmt.Errorf("return from interrupt %q: %w", id, err)
 		}
-		delete(a.legacyInterruptIDs, id)
 		tc, ok := a.pendingToolCalls[toolCallID]
 		if !ok {
 			return fmt.Errorf("no pending tool call found for tool call id %s", toolCallID)
@@ -81,7 +79,9 @@ func (a *AgentHarness) startTurn(ctx context.Context, user *Message) (<-chan Str
 		a.runMu.Lock()
 		defer a.runMu.Unlock()
 		defer close(out)
-		defer a.persistSession(ctx)
+		defer func() {
+			_ = a.persistSession(ctx)
+		}()
 
 		emitCancelled := func() {
 			a.finalizeCancelledWork(out)
@@ -333,8 +333,18 @@ func (a *AgentHarness) runTurnLoop(ctx context.Context, out chan StreamEvent, tu
 					a.pendingMu.Lock()
 					a.pendingToolCalls[tcKey] = stores.PendingToolCall{ToolCall: &tc, InterruptActive: true}
 					a.pendingMu.Unlock()
+					if err := a.persistSession(toolCtx); err != nil {
+						a.pendingMu.Lock()
+						delete(a.pendingToolCalls, tcKey)
+						a.pendingMu.Unlock()
+						a.session.DropInterrupt(tcKey)
+						out <- StreamEvent{
+							Type:  StreamEventError,
+							Error: fmt.Errorf("persist interrupt before delivery: %w", err),
+						}
+						return
+					}
 					out <- StreamEvent{Type: StreamEventInterrupt, MessageID: tcKey, Data: data}
-					a.persistSession(toolCtx)
 					return
 				}
 				a.pendingMu.Lock()
@@ -397,7 +407,9 @@ func (a *AgentHarness) runTurnLoop(ctx context.Context, out chan StreamEvent, tu
 			}
 		}
 		if len(a.pendingSnapshot()) > 0 {
-			a.persistSession(ctx)
+			if err := a.persistSession(ctx); err != nil {
+				out <- StreamEvent{Type: StreamEventError, Error: fmt.Errorf("persist interrupted turn: %w", err)}
+			}
 			return
 		}
 		if effect := batchEffects.resolved(); effect != EffectNone {
@@ -415,18 +427,15 @@ func (a *AgentHarness) runTurnLoop(ctx context.Context, out chan StreamEvent, tu
 // have no matching tool message. Restored dirty windows become valid before
 // the next model turn; new turns never commit unpaired calls.
 func (a *AgentHarness) pairOpenToolCalls(reason string) {
-	if a.context == nil {
-		return
-	}
 	msgs := a.context.Messages()
 	haveResult := make(map[string]struct{})
 	for _, m := range msgs {
-		if m != nil && m.Role == RoleTool && m.ToolCallID != "" {
+		if m.Role == RoleTool && m.ToolCallID != "" {
 			haveResult[m.ToolCallID] = struct{}{}
 		}
 	}
 	for _, m := range msgs {
-		if m == nil || m.Role != RoleAssistant {
+		if m.Role != RoleAssistant {
 			continue
 		}
 		for _, tc := range m.ToolCalls {

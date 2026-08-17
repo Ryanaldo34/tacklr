@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ryanaldo34/tacklr/vfs"
 )
@@ -104,6 +107,55 @@ func TestSessionAuth_bindRefreshUnbind(t *testing.T) {
 	auth.Clear("sess-2")
 	if auth.HasBindings("sess-2") {
 		t.Fatal("Clear must drop bindings")
+	}
+}
+
+func TestTokenHolder_proactiveRefreshCoalescesConcurrentCallers(t *testing.T) {
+	// Arrange
+	holder := vfs.NewTokenHolder(vfs.Credential{
+		Token:     "expiring",
+		ExpiresAt: time.Now().Add(10 * time.Second),
+	})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	holder.SetRefresh(func(context.Context) (vfs.Credential, error) {
+		calls.Add(1)
+		<-release
+		return vfs.Credential{
+			Token:     "fresh",
+			ExpiresAt: time.Now().Add(time.Hour),
+		}, nil
+	})
+
+	// Act
+	const readers = 8
+	var wg sync.WaitGroup
+	errs := make(chan error, readers)
+	for range readers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- holder.EnsureValid(t.Context())
+		}()
+	}
+	for calls.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	close(release)
+	wg.Wait()
+	close(errs)
+
+	// Assert
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("refresh calls = %d", got)
+	}
+	if got := holder.Current().Token; got != "fresh" {
+		t.Fatalf("token = %q", got)
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 
 	mcpjsonrpc "github.com/modelcontextprotocol/go-sdk/jsonrpc"
@@ -62,12 +63,7 @@ func (c *client) buildTransport() (mcpsdk.Transport, error) {
 			return nil, fmt.Errorf("mcp server %q: command is required for stdio transport", c.config.Name)
 		}
 		cmd := exec.Command(c.config.Command, c.config.Args...)
-		if len(c.config.Env) > 0 {
-			cmd.Env = os.Environ()
-			for _, env := range c.config.Env {
-				cmd.Env = append(cmd.Env, env.Name+"="+env.Value)
-			}
-		}
+		cmd.Env = commandEnvironment(c.config)
 		return &mcpsdk.CommandTransport{Command: cmd}, nil
 	case mcp.TransportHTTP:
 		if c.config.URL == "" {
@@ -88,6 +84,76 @@ func (c *client) buildTransport() (mcpsdk.Transport, error) {
 	default:
 		return nil, fmt.Errorf("mcp server %q: unsupported transport %q: %w", c.config.Name, c.config.Type, errTransportNotSupported)
 	}
+}
+
+var defaultMCPHostEnvironment = []string{
+	"HOME",
+	"LANG",
+	"LC_ALL",
+	"PATH",
+	"SystemRoot",
+	"TEMP",
+	"TMP",
+	"TMPDIR",
+}
+
+func commandEnvironment(config mcp.MCPConfig) []string {
+	if config.InheritHostEnv {
+		return appendExplicitEnvironment(os.Environ(), config.Env)
+	}
+
+	names := append([]string(nil), defaultMCPHostEnvironment...)
+	names = append(names, config.HostEnv...)
+	values := make(map[string]string, len(names)+len(config.Env))
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" || strings.Contains(name, "=") {
+			continue
+		}
+		if value, ok := os.LookupEnv(name); ok {
+			values[name] = value
+		}
+	}
+	for _, env := range config.Env {
+		if env.Name != "" && !strings.Contains(env.Name, "=") {
+			values[env.Name] = env.Value
+		}
+	}
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]string, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, key+"="+values[key])
+	}
+	return out
+}
+
+func appendExplicitEnvironment(base []string, explicit []mcp.EnvVariable) []string {
+	values := make(map[string]string, len(base)+len(explicit))
+	for _, entry := range base {
+		name, value, ok := strings.Cut(entry, "=")
+		if ok {
+			values[name] = value
+		}
+	}
+	for _, env := range explicit {
+		if env.Name != "" && !strings.Contains(env.Name, "=") {
+			values[env.Name] = env.Value
+		}
+	}
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]string, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, key+"="+values[key])
+	}
+	return out
 }
 
 func (c *client) listTools(ctx context.Context) ([]*mcpsdk.Tool, error) {

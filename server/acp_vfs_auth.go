@@ -3,23 +3,22 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
-const (
-	methodVFSBind    = "_tacklr/vfs/bind"
-	methodVFSRefresh = "_tacklr/vfs/refresh"
-	methodVFSUnbind  = "_tacklr/vfs/unbind"
-	methodVFSToken   = "_tacklr/vfs/token"
-)
-
 type vfsAuthWire struct {
-	Token string `json:"token"`
+	Token     string     `json:"token"`
+	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
 }
 
 func (a vfsAuthWire) credential() vfs.Credential {
-	return vfs.Credential{Token: a.Token}
+	credential := vfs.Credential{Token: a.Token}
+	if a.ExpiresAt != nil {
+		credential.ExpiresAt = a.ExpiresAt.UTC()
+	}
+	return credential
 }
 
 type vfsBindItem struct {
@@ -71,7 +70,7 @@ func (p *acpProtocol) handleVFSBind(ctx context.Context, env ProtocolEnv, pr *pa
 	if params.SessionID == "" {
 		return env.Conn.Writer.WriteError(pr.ID, clientErrorf(ErrInvalidRequest, "sessionId is required"))
 	}
-	if _, err := p.resolveWireSession(ctx, params.SessionID); err != nil {
+	if _, err := p.resolveOwnedWireSession(ctx, env, params.SessionID, actionVFSCredentials); err != nil {
 		return env.Conn.Writer.WriteError(pr.ID, err)
 	}
 	if len(params.Backends) == 0 {
@@ -126,7 +125,7 @@ func (p *acpProtocol) handleVFSRefresh(ctx context.Context, env ProtocolEnv, pr 
 	if params.SessionID == "" || params.Provider == "" {
 		return env.Conn.Writer.WriteError(pr.ID, clientErrorf(ErrInvalidRequest, "sessionId and provider are required"))
 	}
-	if _, err := p.resolveWireSession(ctx, params.SessionID); err != nil {
+	if _, err := p.resolveOwnedWireSession(ctx, env, params.SessionID, actionVFSCredentials); err != nil {
 		return env.Conn.Writer.WriteError(pr.ID, err)
 	}
 	if err := env.Registry.RefreshVFS(params.SessionID, params.Provider, params.Auth.credential()); err != nil {
@@ -143,7 +142,7 @@ func (p *acpProtocol) handleVFSUnbind(ctx context.Context, env ProtocolEnv, pr *
 	if params.SessionID == "" {
 		return env.Conn.Writer.WriteError(pr.ID, clientErrorf(ErrInvalidRequest, "sessionId is required"))
 	}
-	if _, err := p.resolveWireSession(ctx, params.SessionID); err != nil {
+	if _, err := p.resolveOwnedWireSession(ctx, env, params.SessionID, actionVFSCredentials); err != nil {
 		return env.Conn.Writer.WriteError(pr.ID, err)
 	}
 	if err := env.Registry.UnbindVFS(params.SessionID, params.Point, params.Provider); err != nil {

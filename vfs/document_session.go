@@ -104,8 +104,7 @@ func (m *MountSession) WriteDocument(ctx context.Context, doc Document) error {
 	if err := db.WriteDocument(ctx, rel, doc); err != nil {
 		return err
 	}
-	m.fireAfterPersist(ctx, cleaned)
-	return nil
+	return m.fireAfterPersist(ctx, cleaned)
 }
 
 func bindVirtualPath(doc Document, virtual string) Document {

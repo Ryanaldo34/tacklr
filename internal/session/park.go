@@ -1,16 +1,6 @@
 package session
 
-import (
-	"sync"
-
-	"github.com/ryanaldo34/tacklr/internal/codec"
-)
-
-const parkedWorkersStateKey = "_parked_workers"
-
-func init() {
-	reserveStateKeys(parkedWorkersStateKey)
-}
+import "sync"
 
 // ParkedWorkerMeta is durable park metadata for a spawn_worker tool call.
 // Live harness pointers are not stored here.
@@ -66,28 +56,6 @@ func (p *parkBag) replace(m map[string]ParkedWorkerMeta) {
 	if p.byID == nil {
 		p.byID = map[string]ParkedWorkerMeta{}
 	}
-}
-
-func (p *parkBag) exportInto(state map[string]any) {
-	cp := p.clone()
-	if len(cp) == 0 {
-		delete(state, parkedWorkersStateKey)
-		return
-	}
-	state[parkedWorkersStateKey] = cp
-}
-
-func (p *parkBag) loadFromState(state map[string]any) {
-	raw, ok := state[parkedWorkersStateKey]
-	if !ok || raw == nil {
-		p.replace(nil)
-		return
-	}
-	if m, ok := codec.As[map[string]ParkedWorkerMeta](raw); ok && m != nil {
-		p.replace(m)
-		return
-	}
-	p.replace(nil)
 }
 
 // ParkedWorker returns durable park metadata for a spawn_worker tool call.

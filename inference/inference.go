@@ -42,11 +42,21 @@ type OpenAIInferenceStrategy struct {
 	localTokenFallback bool
 }
 
+var (
+	// ErrIncompleteStream means a provider closed without a terminal response event.
+	ErrIncompleteStream = errors.New("incomplete provider stream")
+	// ErrMalformedStream means a provider emitted invalid SSE event JSON.
+	ErrMalformedStream = errors.New("malformed provider stream")
+)
+
 func (s *OpenAIInferenceStrategy) SetSystemPrompt(prompt string) {
 	s.instructions = prompt
 }
 
 func NewOpenAIInferenceStrategy(client *http.Client) *OpenAIInferenceStrategy {
+	if client == nil {
+		client = http.DefaultClient
+	}
 	return &OpenAIInferenceStrategy{
 		httpClient: client,
 		baseURL:    "https://api.openai.com/v1",
@@ -174,7 +184,10 @@ func (s *OpenAIInferenceStrategy) CountTokens(ctx context.Context, messages []*t
 	}
 
 	items := marshalMessagesToInput(messages)
-	inputJSON, _ := json.Marshal(items)
+	inputJSON, err := json.Marshal(items)
+	if err != nil {
+		return 0, fmt.Errorf("marshal token-count input: %w", err)
+	}
 
 	var toolsJSON json.RawMessage
 	if len(tools) > 0 {
@@ -203,7 +216,10 @@ func (s *OpenAIInferenceStrategy) CountTokens(ctx context.Context, messages []*t
 		}
 	}
 
-	body, _ := json.Marshal(reqBody)
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return 0, fmt.Errorf("marshal token-count request: %w", err)
+	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(s.baseURL, "/")+"/responses/input_tokens", bytes.NewReader(body))
 	if err != nil {
@@ -385,6 +401,16 @@ func (s *OpenAIInferenceStrategy) parseSSEResponse(ctx context.Context, body io.
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
 	var currentItemID string
+	terminal := false
+	emitFailure := func(err error, detail string) {
+		emitProviderFailed(ctx, err, http.StatusOK, inputSummary, detail)
+		events <- tacklr.LLMResponseChunk{
+			Type:       tacklr.StreamEventError,
+			Content:    err.Error(),
+			Error:      err,
+			IsComplete: true,
+		}
+	}
 	// item IDs that already streamed reasoning_*_text.delta — avoid replaying
 	// the full summary on output_item.done (would duplicate ACP thought chunks).
 	reasoningStreamed := make(map[string]struct{})
@@ -400,7 +426,10 @@ func (s *OpenAIInferenceStrategy) parseSSEResponse(ctx context.Context, body io.
 		}
 		data := line[len(prefix):]
 		if data == "[DONE]" {
-			break
+			if !terminal {
+				emitFailure(ErrIncompleteStream, "provider sent [DONE] before a terminal response event")
+			}
+			return
 		}
 
 		var evt struct {
@@ -411,7 +440,8 @@ func (s *OpenAIInferenceStrategy) parseSSEResponse(ctx context.Context, body io.
 			Error  *apiErrorDetail `json:"error"`
 		}
 		if err := json.Unmarshal([]byte(data), &evt); err != nil {
-			continue
+			emitFailure(fmt.Errorf("%w: %w", ErrMalformedStream, err), "")
+			return
 		}
 
 		msgID := currentItemID
@@ -482,6 +512,7 @@ func (s *OpenAIInferenceStrategy) parseSSEResponse(ctx context.Context, body io.
 			}
 			// Successful response.completed: surface token usage for model spans/metrics.
 			if evt.Type == "response.completed" {
+				terminal = true
 				if u, ok := parseResponseUsage(data); ok {
 					events <- tacklr.LLMResponseChunk{
 						Type:            tacklr.StreamEventComplete,
@@ -493,6 +524,16 @@ func (s *OpenAIInferenceStrategy) parseSSEResponse(ctx context.Context, body io.
 				}
 			}
 		}
+	}
+	if ctx != nil && ctx.Err() != nil {
+		return
+	}
+	if err := scanner.Err(); err != nil {
+		emitFailure(fmt.Errorf("%w: %w", ErrIncompleteStream, err), "")
+		return
+	}
+	if !terminal {
+		emitFailure(ErrIncompleteStream, "provider stream closed before a terminal response event")
 	}
 }
 
@@ -858,7 +899,10 @@ func marshalMessagesToInput(messages []*tacklr.Message) []json.RawMessage {
 	var items []json.RawMessage
 
 	appendJSON := func(v any) {
-		b, _ := json.Marshal(v)
+		b, err := json.Marshal(v)
+		if err != nil {
+			panic(fmt.Sprintf("inference: marshal internally constructed model input: %v", err))
+		}
 		items = append(items, b)
 	}
 

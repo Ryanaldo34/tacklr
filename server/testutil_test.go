@@ -20,7 +20,7 @@ type mockInferenceStrategy struct {
 	callNum        atomic.Int64
 }
 
-func (m *mockInferenceStrategy) MaxContextWindow() (int, error) { return 0, nil }
+func (m *mockInferenceStrategy) MaxContextWindow() (int, error) { return 8192, nil }
 func (m *mockInferenceStrategy) SupportsMIME(mimeType string) bool {
 	if m.supportsMIMEFn != nil {
 		return m.supportsMIMEFn(mimeType)
@@ -67,13 +67,14 @@ func testStore(t *testing.T) *stores.InMemoryStore {
 func newTestRegistry(store *stores.InMemoryStore, strategy tacklr.InferenceStrategy, tools []*tacklr.Tool, opts ...RegistryOption) *Registry {
 	r := NewRegistry(store, "default", append([]RegistryOption{WithVFSProjection(DirectProjection{})}, opts...)...)
 	r.Register("default", AgentSpec{
-		Config: tacklr.Config{
-			MaxWindowSize: 8192,
-			SystemPrompt:  "test prompt",
+		Options: tacklr.AgentOptions{
+			Config: tacklr.Config{
+				MaxWindowSize: 8192,
+				SystemPrompt:  "test prompt",
+			},
+			Model: strategy,
+			Tools: tools,
 		},
-		Model:    strategy,
-		Tools:    tools,
-		WatchDog: nil,
 	})
 	return r
 }

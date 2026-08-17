@@ -174,6 +174,22 @@ func (a *AgentHarness) runWorker(ctx context.Context, workerName, task string, b
 		}
 		closeOnExit = true
 	}
+	run := &workerRun{
+		id:         toolCallID,
+		workerName: workerName,
+		task:       task,
+		mode:       workerDeliverySync,
+		status:     jobStatusRunning,
+		worker:     worker,
+		cancel:     cancel,
+		done:       make(chan struct{}),
+	}
+	a.registerJob(run)
+	defer a.removeJob(toolCallID)
+	failRun := func(err error) error {
+		run.setTerminal(jobStatusFailed, "", err)
+		return err
+	}
 
 	// On success we close; on bubble we keep the worker (live park) and must
 	// not close. Track with a flag.
@@ -190,14 +206,14 @@ func (a *AgentHarness) runWorker(ctx context.Context, workerName, task string, b
 		events, err = worker.ReturnFromInterrupt(workerCtx, a.childResolutionPayloads(toolCallID, meta))
 		if err != nil {
 			a.clearPark(toolCallID)
-			return "", fmt.Errorf("resuming worker %q: %w: %w", workerName, ErrFailed, err)
+			return "", failRun(fmt.Errorf("resuming worker %q: %w: %w", workerName, ErrFailed, err))
 		}
 		runtime.EmitUpdate(fmt.Sprintf("Worker %q resumed", workerName))
 	} else {
 		events, err = worker.Run(workerCtx, task)
 		if err != nil {
 			slog.Error("failed to start worker", append(logAttrs, "error", err, "elapsed", time.Since(start).Round(time.Millisecond))...)
-			return "", fmt.Errorf("starting worker %q: %w: %w", workerName, ErrFailed, err)
+			return "", failRun(fmt.Errorf("starting worker %q: %w: %w", workerName, ErrFailed, err))
 		}
 		runtime.EmitUpdate(fmt.Sprintf("Worker %q started", workerName))
 	}
@@ -208,20 +224,21 @@ func (a *AgentHarness) runWorker(ctx context.Context, workerName, task string, b
 	if ctx.Err() != nil {
 		a.clearPark(toolCallID)
 		slog.Info("worker cancelled", append(logAttrs, "elapsed", elapsed, "error", ctx.Err())...)
-		return "", ctx.Err()
+		return "", failRun(ctx.Err())
 	}
 	if drainErr != nil {
 		a.clearPark(toolCallID)
 		slog.Warn("worker failed", append(logAttrs, "elapsed", elapsed, "error", drainErr)...)
-		return "", fmt.Errorf("worker %q failed: %w: %w", workerName, ErrFailed, drainErr)
+		return "", failRun(fmt.Errorf("worker %q failed: %w: %w", workerName, ErrFailed, drainErr))
 	}
 	if drained.completed {
 		a.clearPark(toolCallID)
 		result := finalWorkerOutput(worker.Messages(), drained.lastAssistant)
 		if result == "" {
 			slog.Warn("worker produced no output", append(logAttrs, "elapsed", elapsed)...)
-			return "", fmt.Errorf("worker %q: no output: %w", workerName, ErrFailed)
+			return "", failRun(fmt.Errorf("worker %q: no output: %w", workerName, ErrFailed))
 		}
+		run.setTerminal(jobStatusCompleted, result, nil)
 		slog.Info("worker completed", append(logAttrs, "elapsed", elapsed, "output_length", len(result))...)
 		return result, nil
 	}
@@ -231,14 +248,14 @@ func (a *AgentHarness) runWorker(ctx context.Context, workerName, task string, b
 	if childIntr == nil {
 		a.clearPark(toolCallID)
 		slog.Warn("worker incomplete", append(logAttrs, "elapsed", elapsed)...)
-		return "", fmt.Errorf("worker %q: incomplete: %w", workerName, ErrFailed)
+		return "", failRun(fmt.Errorf("worker %q: incomplete: %w", workerName, ErrFailed))
 	}
 
 	// Ensure child is durable when a store is available.
 	if worker.store != nil && worker.sessionId != "" {
-		if err := worker.checkpointSession(ctx); err != nil {
+		if err := worker.persistSession(ctx); err != nil {
 			slog.Error("failed to checkpoint worker", append(logAttrs, "error", err)...)
-			// Continue with live park; durability is best-effort here.
+			return "", failRun(fmt.Errorf("checkpoint interrupted worker %q: %w", workerName, err))
 		}
 	}
 
@@ -262,6 +279,9 @@ func (a *AgentHarness) runWorker(ctx context.Context, workerName, task string, b
 	// spawn_worker tool call id, then return it as an error so the parent
 	// harness parks spawn_worker like any other tool interrupt.
 	_, err = a.session.AdoptInterrupt(toolCallID, childIntr)
+	if err != nil {
+		run.setInterrupted(childIntr, childIntrIDs)
+	}
 	return "", err
 }
 
@@ -291,19 +311,20 @@ func (a *AgentHarness) workerOptsFromSpec(spec *SubAgent) AgentOptions {
 			MaxWindowSize: a.maxWindowSize,
 			SystemPrompt:  spec.Instructions,
 		},
-		Model:                spec.Model,
-		Tools:                slices.Clone(spec.Tools),
-		MCPConfigs:           slices.Clone(a.mcpConfigs),
-		Store:                a.store,
-		SubAgents:            spec.SubAgents,
-		ExaAPIKey:            a.exaAPIKey,
-		Brain:                a.brain,
-		BrainWriteKinds:      a.brainWriteKinds,
-		MountSession:         a.VFS(),
-		RunCommandUnattended: a.runCommandUnattended,
-		shareIndexBridge:     a.vfsBridge,
-		DisablePlanningLock:  true,
-		WriteUnattended:      a.writeUnattended,
+		Model:                 spec.Model,
+		Tools:                 slices.Clone(spec.Tools),
+		MCPConfigs:            slices.Clone(a.mcpConfigs),
+		MCPCredentialResolver: a.mcpCredentialResolver,
+		Store:                 a.store,
+		SubAgents:             spec.SubAgents,
+		ExaAPIKey:             a.exaAPIKey,
+		Brain:                 a.brain,
+		BrainWriteKinds:       a.brainWriteKinds,
+		MountSession:          a.VFS(),
+		RunCommandUnattended:  a.runCommandUnattended,
+		shareIndexBridge:      a.vfsBridge,
+		DisablePlanningLock:   true,
+		WriteUnattended:       a.writeUnattended,
 	}
 }
 
@@ -355,13 +376,6 @@ func (a *AgentHarness) childResolutionPayloads(parentToolCallID string, meta *pa
 func collectChildInterrupts(worker *AgentHarness, drainedIDs []string) (ids []string, primary interrupt.Interrupt) {
 	ids = drainedIDs
 	for _, id := range ids {
-		tcID := id
-		if mapped, ok := worker.legacyInterruptIDs[id]; ok {
-			tcID = mapped
-		}
-		if intr, ok := worker.session.PendingInterrupt(tcID); ok {
-			return ids, intr
-		}
 		if intr, ok := worker.session.PendingInterrupt(id); ok {
 			return ids, intr
 		}

@@ -46,7 +46,7 @@ func (m *mockStrategy) SupportsMIME(mimeType string) bool {
 	return streaming.IsTextMIME(mimeType)
 }
 func (m *mockStrategy) MaxContextWindow() (int, error) {
-	return 0, nil
+	return 8192, nil
 }
 func (m *mockStrategy) CountTokens(ctx context.Context, msgs []*Message, tools []*Tool) (int, error) {
 	if m.countTokensFn != nil {

@@ -21,12 +21,21 @@ const (
 	jobStatusInterrupted = "interrupted"
 )
 
-// backgroundJob is one detached spawn_worker. Live only; not checkpointed.
-// ponytail: in-memory registry — durable job bag when cross-process resume matters.
-type backgroundJob struct {
+type workerDeliveryMode string
+
+const (
+	workerDeliverySync  workerDeliveryMode = "sync"
+	workerDeliveryAsync workerDeliveryMode = "async"
+)
+
+// workerRun is the single live lifecycle record for synchronous and
+// asynchronous spawn_worker execution. Durable interrupt state lives in the
+// typed session parks module; process handles remain intentionally ephemeral.
+type workerRun struct {
 	id         string
 	workerName string
 	task       string
+	mode       workerDeliveryMode
 
 	mu           sync.Mutex
 	status       string
@@ -39,13 +48,13 @@ type backgroundJob struct {
 	done         chan struct{} // closed when status leaves running
 }
 
-func (j *backgroundJob) snapshot() (status, result string, err error) {
+func (j *workerRun) snapshot() (status, result string, err error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	return j.status, j.result, j.err
 }
 
-func (j *backgroundJob) setTerminal(status, result string, err error) {
+func (j *workerRun) setTerminal(status, result string, err error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if j.status != jobStatusRunning {
@@ -61,7 +70,7 @@ func (j *backgroundJob) setTerminal(status, result string, err error) {
 	}
 }
 
-func (j *backgroundJob) setInterrupted(intr interrupt.Interrupt, ids []string) {
+func (j *workerRun) setInterrupted(intr interrupt.Interrupt, ids []string) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if j.status != jobStatusRunning {
@@ -199,17 +208,17 @@ func (a *AgentHarness) formatJob(jobID string) (string, error) {
 	return strings.TrimSuffix(b.String(), "\n"), nil
 }
 
-func (a *AgentHarness) getJob(id string) *backgroundJob {
+func (a *AgentHarness) getJob(id string) *workerRun {
 	a.jobsMu.Lock()
 	defer a.jobsMu.Unlock()
 	return a.jobs[id]
 }
 
-func (a *AgentHarness) registerJob(j *backgroundJob) {
+func (a *AgentHarness) registerJob(j *workerRun) {
 	a.jobsMu.Lock()
 	defer a.jobsMu.Unlock()
 	if a.jobs == nil {
-		a.jobs = make(map[string]*backgroundJob)
+		a.jobs = make(map[string]*workerRun)
 	}
 	a.jobs[j.id] = j
 }
@@ -249,10 +258,11 @@ func (a *AgentHarness) scheduleBackgroundWorker(workerName, task, jobID string, 
 		return "", fmt.Errorf("worker %q: %w", workerName, err)
 	}
 
-	j := &backgroundJob{
+	j := &workerRun{
 		id:         jobID,
 		workerName: workerName,
 		task:       task,
+		mode:       workerDeliveryAsync,
 		status:     jobStatusRunning,
 		worker:     worker,
 		cancel:     cancel,
@@ -275,7 +285,7 @@ func (a *AgentHarness) scheduleBackgroundWorker(workerName, task, jobID string, 
 	return fmt.Sprintf("Job %s scheduled (worker=%s). Use list_jobs to poll, get_job to collect its result (block=true to wait), or cancel_job to stop it.", jobID, workerName), nil
 }
 
-func (a *AgentHarness) runBackgroundJob(ctx context.Context, j *backgroundJob) {
+func (a *AgentHarness) runBackgroundJob(ctx context.Context, j *workerRun) {
 	start := time.Now()
 	logAttrs := []any{
 		"area", "subagent",
@@ -340,7 +350,7 @@ func (a *AgentHarness) runBackgroundJob(ctx context.Context, j *backgroundJob) {
 	}
 
 	if j.worker.store != nil && j.worker.sessionId != "" {
-		if err := j.worker.checkpointSession(ctx); err != nil {
+		if err := j.worker.persistSession(ctx); err != nil {
 			slog.Error("failed to checkpoint background worker", append(logAttrs, "error", err)...)
 		}
 	}
@@ -401,7 +411,7 @@ func (a *AgentHarness) readJob(ctx context.Context, jobID string, block bool, ru
 	}
 }
 
-func (a *AgentHarness) resumeInterruptedJob(ctx context.Context, j *backgroundJob, runtime HarnessRuntime) (string, error) {
+func (a *AgentHarness) resumeInterruptedJob(ctx context.Context, j *workerRun, runtime HarnessRuntime) (string, error) {
 	getID := runtime.CurrentToolCallID()
 	j.mu.Lock()
 	intr := j.childIntr
@@ -476,7 +486,11 @@ func (a *AgentHarness) resumeInterruptedJob(ctx context.Context, j *backgroundJo
 		return "", fmt.Errorf("worker %q: incomplete: %w", workerName, ErrFailed)
 	}
 	if worker.store != nil && worker.sessionId != "" {
-		_ = worker.checkpointSession(ctx)
+		if err := worker.persistSession(ctx); err != nil {
+			a.clearPark(j.id)
+			a.removeJob(j.id)
+			return "", fmt.Errorf("checkpoint interrupted worker %q: %w", workerName, err)
+		}
 	}
 	parkMeta := parkedWorkerMeta{
 		WorkerName:        workerName,
@@ -532,7 +546,7 @@ func (a *AgentHarness) cancelBackgroundJobs() {
 		a.jobsCancel()
 	}
 	a.jobsMu.Lock()
-	jobs := make([]*backgroundJob, 0, len(a.jobs))
+	jobs := make([]*workerRun, 0, len(a.jobs))
 	for _, j := range a.jobs {
 		jobs = append(jobs, j)
 	}

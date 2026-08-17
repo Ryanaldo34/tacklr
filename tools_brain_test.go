@@ -701,3 +701,34 @@ func TestBrainTools_engramPathGraph(t *testing.T) {
 		t.Fatalf("after unlink: %v %s", err, eout2.output)
 	}
 }
+
+func TestBrainTools_expandAndUnlinkValidationErrors(t *testing.T) {
+	ctx := context.Background()
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithGraph(brain.NewMemoryGraph()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := mustNewAgent(t, AgentOptions{
+		Config: Config{MaxWindowSize: 1024},
+		Model:  &mockStrategy{},
+		Brain:  eng,
+	})
+	expand := h.findTool("expand", "")
+	unlink := h.findTool("unlink", "")
+	if expand == nil || unlink == nil {
+		t.Fatal("expand and unlink required with brain")
+	}
+	rt := turnRuntime(h)
+
+	if _, err := expand.invoke(ctx, `{}`, rt); err == nil || !strings.Contains(err.Error(), "expand") {
+		t.Fatalf("expand missing ref = %v", err)
+	}
+	if _, err := unlink.invoke(ctx, `{"relation_type":"about"}`, rt); err == nil || !strings.Contains(err.Error(), "unlink") {
+		t.Fatalf("unlink missing ref = %v", err)
+	}
+	if _, err := unlink.invoke(ctx, `{
+		"from_id":"not-a-uuid","to_id":"not-a-uuid","relation_type":"about"
+	}`, rt); err == nil || !strings.Contains(err.Error(), "from") {
+		t.Fatalf("unlink invalid uuid = %v", err)
+	}
+}

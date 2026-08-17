@@ -8,6 +8,7 @@ import (
 
 	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/internal/session"
+	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
@@ -26,16 +27,11 @@ func drainRuntime(sm *session.SessionManager) session.Runtime {
 // Capture → JSON wire → Apply on a fresh manager.
 func TestSessionModules_surviveCheckpoint(t *testing.T) {
 	sm := session.NewSessionManager()
-	sm.LoadUserAndPlanState(map[string]any{
-		"_parked_workers":          "not-a-map",
-		"_permission_always_allow": 42,
-		"_permission_always_deny":  []any{"x"},
-		"_on_call_stages":          make(chan int),
-		"_search_namespace":        "not-a-uuid",
-		"keep":                     "user",
-	})
+	if err := sm.StateSet("keep", "user"); err != nil {
+		t.Fatal(err)
+	}
 	if v, ok := sm.StateGet("keep"); !ok || v != "user" {
-		t.Fatalf("user key after malformed bags: %v ok=%v", v, ok)
+		t.Fatalf("user key: %v ok=%v", v, ok)
 	}
 
 	rt := drainRuntime(sm).WithToolCallID("spawn_1")
@@ -43,14 +39,8 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 		t.Fatalf("CurrentToolCallID=%q", rt.CurrentToolCallID())
 	}
 
-	if sm.Permissions.Decision("allow_tool") != session.PermissionNone {
-		t.Fatal("malformed bags must not grant memory")
-	}
 	sm.Permissions.Remember("allow_tool", session.PermissionAllowAlways)
 	sm.Permissions.Remember("deny_tool", session.PermissionDenyAlways)
-	if _, ok := sm.OnCall.Get("w1", "tool_permission"); ok {
-		t.Fatal("malformed stages must not decode")
-	}
 	sm.OnCall.Record("w1", "tool_permission", session.OnCallLayer{Args: `{"path":"/a"}`})
 	if sm.Permissions.Decision("allow_tool") != session.PermissionAllowAlways {
 		t.Fatal("allow-always not stored")
@@ -90,8 +80,11 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cp.State.SearchContext) == 0 {
+	if len(cp.State.Modules["search"]) == 0 {
 		t.Fatal("checkpoint must include search context")
+	}
+	if cp.State.Version != stores.CheckpointVersion {
+		t.Fatalf("checkpoint schema version = %d", cp.State.Version)
 	}
 
 	// In-process Apply: typed park/permission maps + SearchContext blob.
@@ -101,19 +94,18 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 	}
 	assertModules(t, smTyped, ns, "spawn_1", "researcher")
 
-	// JSON wire: typed bags become map[string]any / []any.
-	rawState, err := json.Marshal(cp.State.RuntimeState)
+	// JSON wire preserves typed module sections.
+	rawState, err := json.Marshal(cp)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var wire map[string]any
+	var wire stores.SessionCheckpoint
 	if err := json.Unmarshal(rawState, &wire); err != nil {
 		t.Fatal(err)
 	}
-	cp.State.RuntimeState = wire
 
 	sm2 := session.NewSessionManager()
-	if _, err := session.NewCheckpointer().Apply(*cp, sm2); err != nil {
+	if _, err := session.NewCheckpointer().Apply(wire, sm2); err != nil {
 		t.Fatal(err)
 	}
 	assertModules(t, sm2, ns, "spawn_1", "researcher")
@@ -142,6 +134,92 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 	gotFresh, ok := sm2.Search.Namespace()
 	if !ok || gotFresh != fresh {
 		t.Fatalf("replacement Search must be usable, got %v ok=%v", gotFresh, ok)
+	}
+}
+
+func TestTypedCheckpoint_rejectsNamedModuleWithoutPartialApply(t *testing.T) {
+	// Arrange
+	source := session.NewSessionManager()
+	source.Plan.SetDocument("source")
+	checkpoint, err := session.NewCheckpointer().Capture(
+		[]*streaming.Message{{Role: streaming.RoleUser, Content: "go"}},
+		source,
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint.State.Modules["permissions"] = json.RawMessage(`{"allow":`)
+	target := session.NewSessionManager()
+	target.Plan.SetDocument("target")
+
+	// Act
+	_, err = session.NewCheckpointer().Apply(*checkpoint, target)
+
+	// Assert
+	if err == nil || target.Plan.Document() != "target" {
+		t.Fatalf("Apply error = %v plan = %q", err, target.Plan.Document())
+	}
+}
+
+func TestTypedCheckpoint_rejectsCorruptModuleSections(t *testing.T) {
+	// Arrange
+	source := session.NewSessionManager()
+	checkpoint, err := session.NewCheckpointer().Capture(
+		[]*streaming.Message{{Role: streaming.RoleUser, Content: "go"}},
+		source,
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cases := map[string]json.RawMessage{
+		"plan":        json.RawMessage(`{"todos":`),
+		"permissions": json.RawMessage(`{"allow":`),
+		"parks":       json.RawMessage(`{"workers":`),
+		"onCall":      json.RawMessage(`{"stages":`),
+		"search":      json.RawMessage(`{`),
+	}
+	for module, raw := range cases {
+		t.Run(module, func(t *testing.T) {
+			wire := *checkpoint
+			wire.State.Modules[module] = raw
+			target := session.NewSessionManager()
+			target.Plan.SetDocument("target")
+			if _, err := session.NewCheckpointer().Apply(wire, target); err == nil {
+				t.Fatalf("module %q was accepted", module)
+			}
+			if target.Plan.Document() != "target" {
+				t.Fatalf("partial apply mutated plan for module %q", module)
+			}
+		})
+	}
+}
+
+func TestTypedCheckpoint_rejectsCorruptUserState(t *testing.T) {
+	// Arrange
+	source := session.NewSessionManager()
+	if err := source.StateSet("keep", "user"); err != nil {
+		t.Fatal(err)
+	}
+	checkpoint, err := session.NewCheckpointer().Capture(
+		[]*streaming.Message{{Role: streaming.RoleUser, Content: "go"}},
+		source,
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint.State.UserState["bad"] = json.RawMessage(`{`)
+	target := session.NewSessionManager()
+
+	// Act
+	_, err = session.NewCheckpointer().Apply(*checkpoint, target)
+
+	// Assert
+	if err == nil {
+		t.Fatal("corrupt user state was accepted")
 	}
 }
 

@@ -3,15 +3,7 @@ package session
 import (
 	"slices"
 	"sync"
-
-	"github.com/ryanaldo34/tacklr/internal/codec"
 )
-
-const onCallStagesKey = "_on_call_stages"
-
-func init() {
-	reserveStateKeys(onCallStagesKey)
-}
 
 // OnCallLayer is one completed OnCall middleware layer for a tool call.
 type OnCallLayer struct {
@@ -57,37 +49,4 @@ func (s *OnCallStore) Record(toolCallID, typeName string, layer OnCallLayer) {
 		Denied:     layer.Denied,
 		Args:       layer.Args,
 	})
-}
-
-func (s *OnCallStore) exportInto(state map[string]any) {
-	s.mu.RLock()
-	stages := slices.Clone(s.stages)
-	s.mu.RUnlock()
-	if len(stages) == 0 {
-		delete(state, onCallStagesKey)
-		return
-	}
-	state[onCallStagesKey] = stages
-}
-
-func (s *OnCallStore) loadFromState(state map[string]any) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.stages = nil
-	if state == nil {
-		return
-	}
-	raw, ok := state[onCallStagesKey]
-	if !ok || raw == nil {
-		return
-	}
-	s.stages = decodeOnCallStages(raw)
-}
-
-func decodeOnCallStages(raw any) []onCallStage {
-	recs, ok := codec.As[[]onCallStage](raw)
-	if !ok || len(recs) == 0 {
-		return nil
-	}
-	return slices.Clone(recs)
 }

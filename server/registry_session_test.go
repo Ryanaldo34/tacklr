@@ -11,6 +11,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/telemetry"
 	"github.com/ryanaldo34/tacklr/vfs"
@@ -67,8 +68,10 @@ func vfsSpec(t *testing.T, model tacklr.InferenceStrategy, point string) AgentSp
 		t.Fatal(err)
 	}
 	return AgentSpec{
-		Config:      tacklr.Config{MaxWindowSize: 8192},
-		Model:       model,
+		Options: tacklr.AgentOptions{
+			Config: tacklr.Config{MaxWindowSize: 8192},
+			Model:  model,
+		},
 		FSRegistry:  reg,
 		FSBootstrap: []vfs.MountSpec{{Point: point, Profile: "local"}},
 	}
@@ -79,6 +82,47 @@ func okModel() *mockInferenceStrategy {
 		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "ok", IsComplete: true}
 		},
+	}
+}
+
+func TestRegistry_usesCanonicalAgentOptions(t *testing.T) {
+	// Arrange
+	engine, err := brain.NewEngine(brain.NewMemoryStore())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sawBrainTools := false
+	model := &mockInferenceStrategy{
+		invokeFn: func(_ context.Context, _ []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			sawBrainTools = len(tools) > 5
+			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "ok", IsComplete: true}
+		},
+	}
+	registry := NewRegistry(testStore(t), "default")
+	registry.Register("default", AgentSpec{
+		Options: tacklr.AgentOptions{
+			Model:         model,
+			Brain:         engine,
+			ContextPolicy: tacklr.ContextPolicy{PressureRatio: 0.5, CompressFraction: 0.2},
+		},
+	})
+
+	// Act
+	stream, err := registry.RunTurn(t.Context(), TurnRequest{
+		AgentID:  "default",
+		ThreadID: "canonical-options",
+		Prompt:   "hello",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range stream.Events {
+	}
+	t.Cleanup(stream.Close)
+
+	// Assert
+	if !sawBrainTools {
+		t.Fatal("registry did not preserve canonical brain options")
 	}
 }
 
@@ -422,11 +466,13 @@ func TestRunTurn_constructFailures(t *testing.T) {
 	}
 
 	r.Register("default", AgentSpec{
-		Config: tacklr.Config{
-			MaxWindowSize:    8192,
-			SkillDirectories: []string{filepath.Join(t.TempDir(), "does-not-exist")},
+		Options: tacklr.AgentOptions{
+			Config: tacklr.Config{
+				MaxWindowSize:    8192,
+				SkillDirectories: []string{filepath.Join(t.TempDir(), "does-not-exist")},
+			},
+			Model: okModel(),
 		},
-		Model: okModel(),
 	})
 	_, err = r.RunTurn(ctx, TurnRequest{AgentID: "default", ThreadID: "sess-skills", Prompt: "hi"})
 	if err == nil || !strings.Contains(err.Error(), "initialize skills") {

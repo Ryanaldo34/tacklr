@@ -267,7 +267,7 @@ func (f failSaveStore) SaveSession(ctx context.Context, id string, cp stores.Ses
 func TestCreateSession_wireStoreIndependentOfHarnessStore(t *testing.T) {
 	// Wire session create does not require harness BaseStore.
 	r := NewRegistry(failSaveStore{InMemoryStore: stores.NewInMemoryStore()}, "default")
-	r.Register("default", AgentSpec{Model: &mockInferenceStrategy{}})
+	r.Register("default", AgentSpec{Options: tacklr.AgentOptions{Model: &mockInferenceStrategy{}}})
 	p := NewACPProtocol(nil).(*acpProtocol)
 	params, _ := json.Marshal(map[string]any{"cwd": "/tmp"})
 	sid, _, err := p.CreateSession(context.Background(), ProtocolEnv{Registry: r}, params)
@@ -279,8 +279,10 @@ func TestCreateSession_wireStoreIndependentOfHarnessStore(t *testing.T) {
 func TestLoadAgent_noStoreOnLoad(t *testing.T) {
 	r := NewRegistry(nil, "default")
 	r.Register("default", AgentSpec{
-		Config: tacklr.Config{MaxWindowSize: 1024},
-		Model:  &mockInferenceStrategy{},
+		Options: tacklr.AgentOptions{
+			Config: tacklr.Config{MaxWindowSize: 1024},
+			Model:  &mockInferenceStrategy{},
+		},
 	})
 	_, err := r.RunTurn(context.Background(), TurnRequest{
 		AgentID:  "default",
@@ -489,7 +491,7 @@ func TestStopReasonFromError_contextMessage(t *testing.T) {
 
 func TestCreateSession_emptyAgentName(t *testing.T) {
 	r := NewRegistry(testStore(t), "a")
-	r.Register("a", AgentSpec{Name: "", Model: &mockInferenceStrategy{}})
+	r.Register("a", AgentSpec{Name: "", Options: tacklr.AgentOptions{Model: &mockInferenceStrategy{}}})
 	p := NewACPProtocol(nil).(*acpProtocol)
 	params, _ := json.Marshal(map[string]any{"cwd": "/tmp"})
 	sid, _, err := p.CreateSession(context.Background(), ProtocolEnv{Registry: r}, params)
@@ -525,19 +527,19 @@ func TestValidateACP_emptyPromptAndConfigSessionID(t *testing.T) {
 	}
 	// empty text blocks that join to empty after validation of non-empty texts is separate:
 	// message event with empty content short-circuits
-	frames, err := eventToAcpJsonRpc("t", &streaming.StreamEvent{Type: streaming.StreamEventMessage, Content: ""})
+	frames, err := presentationToACP("t", streaming.StreamEvent{Type: streaming.StreamEventMessage, Content: ""})
 	if err != nil || frames != nil {
 		t.Fatalf("empty message: %v %v", frames, err)
 	}
 	// plan update bad JSON
-	if _, err := eventToAcpJsonRpc("t", &streaming.StreamEvent{
+	if _, err := presentationToACP("t", streaming.StreamEvent{
 		Type: streaming.StreamEventPlanUpdate,
 		Data: []byte(`not-json`),
 	}); err == nil {
 		t.Fatal("want plan unmarshal error")
 	}
 	// error event with Content only (no Error)
-	frames, err = eventToAcpJsonRpc("t", &streaming.StreamEvent{
+	frames, err = presentationToACP("t", streaming.StreamEvent{
 		Type:    streaming.StreamEventError,
 		Content: "from-content",
 		TurnID:  "1",
@@ -583,10 +585,12 @@ func TestHandleSessionTurn_nonClientError(t *testing.T) {
 	// Second session prompt loads from harness store; non-client LoadSession error.
 	r := NewRegistry(&failLoadStore{InMemoryStore: stores.NewInMemoryStore(), err: errors.New("db down")}, "default")
 	r.Register("default", AgentSpec{
-		Config: tacklr.Config{MaxWindowSize: 1024},
-		Model: &mockInferenceStrategy{
-			invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "1", IsComplete: true}
+		Options: tacklr.AgentOptions{
+			Config: tacklr.Config{MaxWindowSize: 1024},
+			Model: &mockInferenceStrategy{
+				invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+					ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "1", IsComplete: true}
+				},
 			},
 		},
 	})
@@ -802,18 +806,20 @@ func TestSetConfigOption_nilConfigValuesAndSpecStore(t *testing.T) {
 	perAgent := stores.NewInMemoryStore()
 	r := NewRegistry(store, "default")
 	r.Register("default", AgentSpec{
-		Config: tacklr.Config{MaxWindowSize: 1024},
-		Model: &mockInferenceStrategy{
-			invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "ok", IsComplete: true}
+		Options: tacklr.AgentOptions{
+			Config: tacklr.Config{MaxWindowSize: 1024},
+			Model: &mockInferenceStrategy{
+				invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+					ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "ok", IsComplete: true}
+				},
 			},
+			Store: perAgent,
 		},
-		Store: perAgent, // exercises spec.Store override
 	})
 	// Manually insert wire session with empty configValues
 	sid := "sess-nil-cfg"
 	p := NewACPProtocol(nil).(*acpProtocol)
-	p.sessions[sid] = &acpWireSession{cwd: "/tmp", configValues: nil}
+	p.sessions[sid] = &acpWireSession{cwd: "/tmp", configValues: nil, owner: "local"}
 	result, err := p.setConfig(context.Background(), ProtocolEnv{Registry: r}, sid, "model", "default")
 	if err != nil {
 		t.Fatal(err)
@@ -836,10 +842,12 @@ func TestLoadAgent_allowMissingCheckpointCreatesFresh(t *testing.T) {
 	// AllowMissingCheckpoint + Load + store not found → fresh harness.
 	r := NewRegistry(notFoundStore{}, "default")
 	r.Register("default", AgentSpec{
-		Config: tacklr.Config{MaxWindowSize: 1024},
-		Model: &mockInferenceStrategy{
-			invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "fresh", IsComplete: true}
+		Options: tacklr.AgentOptions{
+			Config: tacklr.Config{MaxWindowSize: 1024},
+			Model: &mockInferenceStrategy{
+				invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+					ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "fresh", IsComplete: true}
+				},
 			},
 		},
 	})
@@ -894,7 +902,7 @@ func TestServeStdio_edges(t *testing.T) {
 
 	// empty lines + EOF without trailing newline
 	var out bytes.Buffer
-	in := strings.NewReader("\n\n" + `{"jsonrpc":"2.0","id":1,"method":"authenticate","params":{}}`)
+	in := strings.NewReader("\n\n" + `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}`)
 	if err := srv.ServeStdio(context.Background(), in, &out); err != nil {
 		t.Fatalf("serve: %v", err)
 	}
@@ -965,7 +973,10 @@ func TestHandleSSE_bodyReadErrorAndInternalRunError(t *testing.T) {
 	// Internal: mock that returns error from Run is hard. Use agent not found is client error.
 	// logTurnError path for non-client: failLoadStore on load
 	r2 := NewRegistry(&failLoadStore{err: errors.New("disk fail")}, "default")
-	r2.Register("default", AgentSpec{Config: tacklr.Config{MaxWindowSize: 1024}, Model: &mockInferenceStrategy{}})
+	r2.Register("default", AgentSpec{Options: tacklr.AgentOptions{
+		Config: tacklr.Config{MaxWindowSize: 1024},
+		Model:  &mockInferenceStrategy{},
+	}})
 	rec2 := httptest.NewRecorder()
 	// Load true via resume responses path; store LoadSession fails non-client.
 	req3 := newSSERequest(t, "/resume", bytes.NewReader([]byte(
@@ -1011,7 +1022,10 @@ func TestHandleWS_acceptFailAndReadFail(t *testing.T) {
 func TestHandleWS_nonClientRunErrorAndWriteThreadFail(t *testing.T) {
 	// Non-client load error on WS resume path.
 	r := NewRegistry(&failLoadStore{err: errors.New("ws-db-down")}, "default")
-	r.Register("default", AgentSpec{Config: tacklr.Config{MaxWindowSize: 1024}, Model: &mockInferenceStrategy{}})
+	r.Register("default", AgentSpec{Options: tacklr.AgentOptions{
+		Config: tacklr.Config{MaxWindowSize: 1024},
+		Model:  &mockInferenceStrategy{},
+	}})
 	mux := http.NewServeMux()
 	env := ProtocolEnv{Registry: r, Conn: &Conn{}}
 	for _, route := range SSE.HTTPRoutes() {

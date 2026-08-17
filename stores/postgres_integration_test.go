@@ -41,7 +41,8 @@ func TestPostgresStore_liveSaveLoad(t *testing.T) {
 		map[string]PendingToolCall{
 			"c1": {ToolCall: &streaming.ToolCall{ID: "c1", Name: "search"}, InterruptActive: false},
 		},
-		map[string]any{"k": "v"},
+		rawState(t, map[string]any{"k": "v"}),
+		nil,
 		map[string]any{"p": 1},
 		map[string]any{"r": 2},
 	)
@@ -62,14 +63,14 @@ func TestPostgresStore_liveSaveLoad(t *testing.T) {
 	if loaded.State.PendingToolCalls["c1"].ToolCall == nil || loaded.State.PendingToolCalls["c1"].ToolCall.Name != "search" {
 		t.Fatalf("pending: %+v", loaded.State.PendingToolCalls)
 	}
-	if loaded.State.RuntimeState["k"] != "v" {
-		t.Fatalf("runtime: %+v", loaded.State.RuntimeState)
+	if len(loaded.State.UserState["k"]) == 0 {
+		t.Fatalf("user state: %+v", loaded.State.UserState)
 	}
 
 	// Overwrite
 	cp2, err := NewCheckpoint(
 		[]*streaming.Message{{Role: streaming.RoleUser, Content: "v2"}},
-		nil, map[string]any{"n": float64(1)}, nil, nil,
+		nil, rawState(t, map[string]any{"n": float64(1)}), nil, nil, nil,
 	)
 	if err != nil {
 		t.Fatal(err)

@@ -30,7 +30,7 @@ func (m *ScriptedModel) SupportsMIME(mimeType string) bool {
 	return true
 }
 func (m *ScriptedModel) MaxContextWindow() (int, error) {
-	return 0, nil
+	return 8192, nil
 }
 
 func (m *ScriptedModel) CountTokens(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool) (int, error) {

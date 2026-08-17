@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/google/uuid"
-
 	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/vfs"
@@ -68,9 +66,6 @@ func (s *SessionManager) PendingInterrupt(id string) (interrupt.Interrupt, bool)
 }
 
 func (s *SessionManager) stateGet(key string) (any, bool) {
-	if IsReservedRuntimeStateKey(key) {
-		return nil, false
-	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	v, ok := s.userState[key]
@@ -78,9 +73,6 @@ func (s *SessionManager) stateGet(key string) (any, bool) {
 }
 
 func (s *SessionManager) stateSet(key string, value any) error {
-	if IsReservedRuntimeStateKey(key) {
-		return fmt.Errorf("session: reserved state key %q cannot be set", key)
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.userState[key] = value
@@ -88,9 +80,6 @@ func (s *SessionManager) stateSet(key string, value any) error {
 }
 
 func (s *SessionManager) stateDelete(key string) {
-	if IsReservedRuntimeStateKey(key) {
-		return
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.userState, key)
@@ -109,6 +98,18 @@ func (s *SessionManager) ClearInterrupts() {
 	defer s.mu.Unlock()
 	s.pending = interruptMap{}
 	s.resolved = interruptMap{}
+}
+
+// DropInterrupt removes one interrupt after a durability failure prevents it
+// from being safely exposed to a client.
+func (s *SessionManager) DropInterrupt(id string) {
+	if s == nil || id == "" {
+		return
+	}
+	s.mu.Lock()
+	delete(s.pending, id)
+	delete(s.resolved, id)
+	s.mu.Unlock()
 }
 
 // ReturnInterrupt resolves a parked interrupt (session-scoped; no turn bus needed).
@@ -194,79 +195,35 @@ func (s *SessionManager) raiseInterrupt(toolCallID string, kind string, payload 
 	return nil, intr
 }
 
-// SnapshotDurable copies user state, session modules, and interrupt maps for
-// checkpointing. Interrupts are deep-cloned so marshal does not race live maps.
-// Reserved keys in userState are never exported as user keys; modules write
-// their own reserved keys via ExportInto.
-func (s *SessionManager) SnapshotDurable() (runtimeState map[string]any, pending, resolved interruptMap) {
-	s.mu.RLock()
-	runtimeState = make(map[string]any, len(s.userState))
-	for k, v := range s.userState {
-		if IsReservedRuntimeStateKey(k) {
-			continue
-		}
-		runtimeState[k] = v
-	}
-	pending = make(interruptMap, len(s.pending))
-	for k, v := range s.pending {
-		if cp := interrupt.Clone(v); cp != nil {
-			pending[k] = cp
-		}
-	}
-	resolved = make(interruptMap, len(s.resolved))
-	for k, v := range s.resolved {
-		if cp := interrupt.Clone(v); cp != nil {
-			resolved[k] = cp
-		}
-	}
-	plan := s.Plan
-	s.mu.RUnlock()
-
-	plan.ExportInto(runtimeState)
-	s.Permissions.exportInto(runtimeState)
-	s.parks.exportInto(runtimeState)
-	s.OnCall.exportInto(runtimeState)
-	return runtimeState, pending, resolved
-}
-
-// LoadUserAndPlanState hydrates user State and session modules from checkpoint
-// RuntimeState. Reserved keys (including legacy _search_namespace) are not
-// left as user keys. A string _search_namespace restores Search.
-func (s *SessionManager) LoadUserAndPlanState(state map[string]any) {
-	s.Plan.LoadFromState(state)
-	s.Permissions.loadFromState(state)
-	s.parks.loadFromState(state)
-	s.OnCall.loadFromState(state)
-	if raw, ok := state[searchNamespaceStateKey]; ok {
-		if ns, ok := raw.(string); ok && ns != "" {
-			if id, err := uuid.Parse(ns); err == nil {
-				s.Search.SetNamespace(id)
-			}
-		}
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for k, v := range state {
-		if IsReservedRuntimeStateKey(k) {
-			continue
-		}
-		s.userState[k] = v
-	}
-}
-
 // LoadInterruptsJSON restores interrupt maps from checkpoint JSON blobs.
 func (s *SessionManager) LoadInterruptsJSON(pendingJSON, resolvedJSON []byte) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	pending, resolved, err := decodeInterruptMaps(pendingJSON, resolvedJSON)
+	if err != nil {
+		return err
+	}
+	s.replaceInterrupts(pending, resolved)
+	return nil
+}
+
+func decodeInterruptMaps(pendingJSON, resolvedJSON []byte) (interruptMap, interruptMap, error) {
+	pending := interruptMap{}
+	resolved := interruptMap{}
 	if len(pendingJSON) > 0 {
-		if err := json.Unmarshal(pendingJSON, &s.pending); err != nil {
-			return fmt.Errorf("unmarshal pending interrupts: %w", err)
+		if err := json.Unmarshal(pendingJSON, &pending); err != nil {
+			return nil, nil, fmt.Errorf("unmarshal pending interrupts: %w", err)
 		}
 	}
 	if len(resolvedJSON) > 0 {
-		if err := json.Unmarshal(resolvedJSON, &s.resolved); err != nil {
-			return fmt.Errorf("unmarshal resolved interrupts: %w", err)
+		if err := json.Unmarshal(resolvedJSON, &resolved); err != nil {
+			return nil, nil, fmt.Errorf("unmarshal resolved interrupts: %w", err)
 		}
 	}
-	return nil
+	return pending, resolved, nil
+}
+
+func (s *SessionManager) replaceInterrupts(pending, resolved interruptMap) {
+	s.mu.Lock()
+	s.pending = pending
+	s.resolved = resolved
+	s.mu.Unlock()
 }

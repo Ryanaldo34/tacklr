@@ -18,6 +18,9 @@ import (
 
 func TestMaxContextWindow_knownAndPrefixAndUnknown(t *testing.T) {
 	s := NewOpenAIInferenceStrategy(nil)
+	if s.httpClient != http.DefaultClient {
+		t.Fatal("nil client did not default to http.DefaultClient")
+	}
 	s.WithModel("gpt-5.4")
 	n, err := s.MaxContextWindow()
 	if err != nil || n != 1000000 {
@@ -52,7 +55,7 @@ func TestWithReasoningAndStructuredOutput_onInvokeRequest(t *testing.T) {
 		raw, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(raw, &saw)
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\ndata: [DONE]\n\n")
 	}))
 	t.Cleanup(srv.Close)
 
@@ -530,7 +533,7 @@ func TestEmitOutputItemComplete_ignoresBadJSON(t *testing.T) {
 	}
 }
 
-func TestParseSSE_skipsNonDataAndBadJSON(t *testing.T) {
+func TestParseSSE_rejectsMalformedJSON(t *testing.T) {
 	body := strings.Join([]string{
 		`event: ping`,
 		`data: not-json`,
@@ -540,11 +543,7 @@ func TestParseSSE_skipsNonDataAndBadJSON(t *testing.T) {
 		"",
 	}, "\n")
 	chunks := collectSSE(t, body)
-	var text string
-	for _, c := range chunks {
-		text += c.Content
-	}
-	if text != "z" {
-		t.Fatalf("text = %q", text)
+	if len(chunks) != 1 || !errors.Is(chunks[0].Error, ErrMalformedStream) {
+		t.Fatalf("chunks = %#v", chunks)
 	}
 }

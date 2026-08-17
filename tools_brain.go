@@ -34,33 +34,7 @@ func (b brainTools) brainMountForKind(kind string) (vfs.MountSpec, bool) {
 	if b.deps.VFS == nil {
 		return vfs.MountSpec{}, false
 	}
-	specs := b.deps.VFS.Specs()
-	var prefix vfs.MountSpec
-	var hasPrefix bool
-	for _, s := range specs {
-		if s.Profile != brain.DefaultProfile {
-			continue
-		}
-		mode := ""
-		if s.Params != nil {
-			mode = s.Params["mode"]
-		}
-		if mode == brain.ModeRoots && kind != "" && s.Params["kind"] == kind {
-			return s, true
-		}
-		if mode != brain.ModeRoots && !hasPrefix {
-			prefix, hasPrefix = s, true
-		}
-	}
-	if hasPrefix {
-		return prefix, true
-	}
-	for _, s := range specs {
-		if s.Profile == brain.DefaultProfile {
-			return s, true
-		}
-	}
-	return vfs.MountSpec{}, false
+	return brain.MountForKind(b.deps.VFS.Specs(), kind)
 }
 
 type readObjectArgs struct {

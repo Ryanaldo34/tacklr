@@ -205,6 +205,88 @@ func TestRun_invokeError_emitsErrorEvent(t *testing.T) {
 	}
 }
 
+func TestRun_invokeErrorAfterTools_emitsWrappedError(t *testing.T) {
+	// Arrange
+	tool := NewTool(ToolConfig{
+		Name:    "echo",
+		Handler: func(ctx context.Context) (string, error) { return "ok", nil },
+	})
+	calls := 0
+	strategy := &mockStrategy{
+		invokeErrFn: func(context.Context, []*Message, []*Tool) error {
+			calls++
+			if calls > 1 {
+				return errors.New("after tools")
+			}
+			return nil
+		},
+		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
+			ch <- LLMResponseChunk{
+				Type: StreamEventFunctionCall,
+				ToolCalls: []ToolCall{
+					{ID: "t1", CallID: "t1", Name: "echo", Arguments: `{}`},
+				},
+				IsComplete: true,
+			}
+		},
+	}
+	h := mustNewAgent(t, AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  strategy,
+		Tools:  []*Tool{tool},
+	})
+	t.Cleanup(h.Close)
+
+	// Act
+	events, err := h.Run(context.Background(), "hi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := drainEvents(events)
+
+	// Assert
+	if !hasErrorIs(got, ErrModelAfterTools) {
+		t.Fatalf("events = %+v", summarizeEvents(got))
+	}
+}
+
+func TestReturnFromInterrupt_rejectsUnknownInterrupt(t *testing.T) {
+	// Arrange
+	model := sequentialToolModel([]ToolCall{toolCall("ask1", "ask_user_choice",
+		`{"question":"Pick?","choices":[{"title":"A"}]}`)})
+	h := mustNewAgent(t, AgentOptions{
+		Model: model, Config: Config{MaxWindowSize: 8192}, Store: testStore(t),
+	})
+	t.Cleanup(h.Close)
+	events, err := h.Run(context.Background(), "ask")
+	if err != nil {
+		t.Fatal(err)
+	}
+	drainEvents(events)
+
+	// Act
+	_, err = h.ReturnFromInterrupt(context.Background(), map[string][]byte{"missing": []byte(`{"selectionIdx":0}`)})
+
+	// Assert
+	if err == nil || !strings.Contains(err.Error(), "missing") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestAgentHarness_persistSessionSkipsWithoutStoreOrSessionID(t *testing.T) {
+	// Arrange
+	h := mustNewAgent(t, AgentOptions{Model: &mockStrategy{}})
+	t.Cleanup(h.Close)
+
+	// Act
+	err := h.persistSession(t.Context())
+
+	// Assert
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestRun_modelStreamError_afterToolAnnounce_emitsFailedToolResults: incomplete
 // tool announcements are closed with an error status when the model stream fails.
 func TestRun_modelStreamError_afterToolAnnounce_emitsFailedToolResults(t *testing.T) {
@@ -558,12 +640,21 @@ func TestRun_customInstructionsInSystemPrompt(t *testing.T) {
 	}
 }
 
+type testMCPCredentialResolver func(context.Context, string) (mcp.Credentials, error)
+
+func (f testMCPCredentialResolver) ResolveMCP(ctx context.Context, ref string) (mcp.Credentials, error) {
+	return f(ctx, ref)
+}
+
 // TestRun_mcpToolsDiscoveredAndInvokable: MCP configs inject callable tools
 // into the turn, and Close runs discovery cleanup.
 func TestRun_mcpToolsDiscoveredAndInvokable(t *testing.T) {
 	var cleaned bool
 	prev := discoverAllTools
 	discoverAllTools = func(ctx context.Context, configs []mcp.MCPConfig, register mcpruntime.RegisterTool) func() {
+		if len(configs) != 1 || len(configs[0].Headers) != 1 || configs[0].Headers[0].Value != "Bearer resolved" {
+			t.Fatalf("resolved MCP configs = %#v", configs)
+		}
 		register("mcp_echo", "echo", "fake", nil, func(ctx context.Context, args map[string]any) (string, error) {
 			return "from-mcp", nil
 		})
@@ -592,8 +683,14 @@ func TestRun_mcpToolsDiscoveredAndInvokable(t *testing.T) {
 		Config: Config{MaxWindowSize: 8192},
 		Model:  strategy,
 		MCPConfigs: []mcp.MCPConfig{
-			{Name: "fake", Type: "http", URL: "http://127.0.0.1:1"},
+			{Name: "fake", Type: "http", URL: "http://127.0.0.1:1", CredentialRef: "vault://fake"},
 		},
+		MCPCredentialResolver: testMCPCredentialResolver(func(_ context.Context, ref string) (mcp.Credentials, error) {
+			if ref != "vault://fake" {
+				t.Fatalf("credential ref = %q", ref)
+			}
+			return mcp.Credentials{Headers: []mcp.HTTPHeader{{Name: "Authorization", Value: "Bearer resolved"}}}, nil
+		}),
 	})
 	events, err := h.Run(context.Background(), "use mcp")
 	if err != nil {
@@ -609,6 +706,41 @@ func TestRun_mcpToolsDiscoveredAndInvokable(t *testing.T) {
 	}
 	// Second Close is a no-op.
 	h.Close()
+}
+
+func TestRun_mcpCredentialResolveFailureSkipsServer(t *testing.T) {
+	// Arrange
+	var discovered int
+	prev := discoverAllTools
+	discoverAllTools = func(_ context.Context, configs []mcp.MCPConfig, _ mcpruntime.RegisterTool) func() {
+		discovered = len(configs)
+		return func() {}
+	}
+	t.Cleanup(func() { discoverAllTools = prev })
+
+	h := mustNewAgent(t, AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  &mockStrategy{},
+		MCPConfigs: []mcp.MCPConfig{
+			{Name: "bad", Type: "http", URL: "http://127.0.0.1:1", CredentialRef: "vault://missing"},
+		},
+		MCPCredentialResolver: testMCPCredentialResolver(func(context.Context, string) (mcp.Credentials, error) {
+			return mcp.Credentials{}, errors.New("missing secret")
+		}),
+	})
+	t.Cleanup(h.Close)
+
+	// Act
+	events, err := h.Run(context.Background(), "hi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	drainEvents(events)
+
+	// Assert
+	if discovered != 0 {
+		t.Fatalf("discovered configs = %d", discovered)
+	}
 }
 
 // TestRun_emptyToolInterceptorChain_allowsWriteWithoutPlan: replacing the
@@ -780,4 +912,26 @@ func summarizeEvents(events []StreamEvent) []string {
 		out = append(out, s)
 	}
 	return out
+}
+
+func TestTagModelAfterToolsError_wrapsProviderFailures(t *testing.T) {
+	// Arrange
+	base := errors.New("upstream failed")
+	wrapped := fmt.Errorf("%w: already", ErrModelAfterTools)
+
+	// Act
+	fromError := tagModelAfterToolsError(LLMResponseChunk{Error: base})
+	fromWrapped := tagModelAfterToolsError(LLMResponseChunk{Error: wrapped})
+	fromContent := tagModelAfterToolsError(LLMResponseChunk{Content: "provider said no"})
+
+	// Assert
+	if !errors.Is(fromError.Error, ErrModelAfterTools) || fromError.Content == "" {
+		t.Fatalf("from error = %+v", fromError)
+	}
+	if !errors.Is(fromWrapped.Error, ErrModelAfterTools) || strings.Count(fromWrapped.Error.Error(), "model request failed") != 1 {
+		t.Fatalf("double wrap = %v", fromWrapped.Error)
+	}
+	if !errors.Is(fromContent.Error, ErrModelAfterTools) || !strings.Contains(fromContent.Content, "provider said no") {
+		t.Fatalf("from content = %+v", fromContent)
+	}
 }

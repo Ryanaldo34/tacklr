@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ryanaldo34/tacklr/brain"
+	"github.com/ryanaldo34/tacklr/internal/hostcontrol"
 	mcpruntime "github.com/ryanaldo34/tacklr/internal/mcp"
 	session "github.com/ryanaldo34/tacklr/internal/session"
 	"github.com/ryanaldo34/tacklr/mcp"
@@ -26,30 +27,31 @@ import (
 // AgentHarness is the product agent. Create with NewAgent or NewAgentFromSession.
 // Fields are unexported.
 type AgentHarness struct {
-	model           InferenceStrategy
-	sessionId       string
-	tools           []*Tool
-	mcpConfigs      []mcp.MCPConfig
-	instructions    string
-	store           stores.BaseStore
-	watchDog        AgentWatchDog
-	maxWindowSize   int
-	maxTurnRequests int // 0 = unlimited; from Config.MaxTurnRequests
-	session         *session.SessionManager
-	subagents       map[string]*SubAgent
+	model                 InferenceStrategy
+	sessionId             string
+	tools                 []*Tool
+	mcpConfigs            []mcp.MCPConfig
+	mcpCredentialResolver mcp.CredentialResolver
+	instructions          string
+	store                 stores.BaseStore
+	checkpointMu          sync.Mutex
+	checkpointErr         error
+	watchDog              AgentWatchDog
+	maxWindowSize         int
+	maxTurnRequests       int // 0 = unlimited; from Config.MaxTurnRequests
+	session               *session.SessionManager
+	subagents             map[string]*SubAgent
 	// pendingToolCalls is keyed by tool call id, which is also the wire interrupt id.
 	pendingToolCalls map[string]stores.PendingToolCall
 	pendingMu        sync.Mutex
-	// legacyInterruptIDs maps old checkpoint wire ids → tool call ids. Not saved.
-	legacyInterruptIDs map[string]string
 	// interruptPayloads maps parent tool call id → resume payload for workers.
 	interruptPayloads map[string][]byte
 	// parkedWorkersLive maps spawn_worker tool call id → live child harness.
 	// Durable park metadata is in SessionManager state; this map is not checkpointed.
 	parkedWorkersLive map[string]*AgentHarness
 	parkMu            sync.Mutex
-	// Background worker jobs (spawn_worker block=false). Live only.
-	jobs                 map[string]*backgroundJob
+	// Worker runs share one live lifecycle registry across sync and async delivery.
+	jobs                 map[string]*workerRun
 	jobsMu               sync.Mutex
 	jobsCtx              context.Context
 	jobsCancel           context.CancelFunc
@@ -132,9 +134,6 @@ func (a *AgentHarness) lookupToolCallID(id string) (string, bool) {
 	if _, ok := a.pendingToolCalls[id]; ok {
 		return id, true
 	}
-	if tc, ok := a.legacyInterruptIDs[id]; ok {
-		return tc, true
-	}
 	return "", false
 }
 
@@ -145,14 +144,14 @@ func (a *AgentHarness) restoreMessages(window []*Message) {
 // checkpointSaveTimeout is the max save duration when the turn context is cancelled.
 const checkpointSaveTimeout = 10 * time.Second
 
-// persistSession writes a checkpoint. Failures are logged only.
+// persistSession writes a checkpoint and records the latest durability error.
 // Skips when store or session id is missing. Uses a timeout that outlives
 // turn cancel so abort still dumps. Close always calls this, then releases
 // process resources. Interrupt paths also call it because the harness stays
 // live for ResumeInterrupts.
-func (a *AgentHarness) persistSession(ctx context.Context) {
+func (a *AgentHarness) persistSession(ctx context.Context) error {
 	if a.store == nil || strings.TrimSpace(a.sessionId) == "" {
-		return
+		return nil
 	}
 	// Keep trace context; drop cancel so save can finish after abort.
 	parent := context.Background()
@@ -163,18 +162,37 @@ func (a *AgentHarness) persistSession(ctx context.Context) {
 	defer cancel()
 
 	if err := a.checkpointSession(saveCtx); err != nil {
+		a.setCheckpointError(err)
 		slog.ErrorContext(saveCtx, "session checkpoint failed",
 			"area", "session_management",
 			"session_id", a.sessionId,
 			"error", err,
 		)
-		return
+		return err
 	}
+	a.setCheckpointError(nil)
 	slog.DebugContext(saveCtx, "session checkpointed",
 		"area", "session_management",
 		"session_id", a.sessionId,
 		"context_window_size", len(a.Messages()),
 	)
+	return nil
+}
+
+// CheckpointError returns the most recent checkpoint failure, if any.
+func (a *AgentHarness) CheckpointError() error {
+	if a == nil {
+		return nil
+	}
+	a.checkpointMu.Lock()
+	defer a.checkpointMu.Unlock()
+	return a.checkpointErr
+}
+
+func (a *AgentHarness) setCheckpointError(err error) {
+	a.checkpointMu.Lock()
+	a.checkpointErr = err
+	a.checkpointMu.Unlock()
 }
 
 // checkpointSession builds and stores a SessionCheckpoint. Call persistSession
@@ -420,7 +438,7 @@ const CancelledToolResultContent = "cancelled: user interrupted the agent"
 // Ignores StreamEventComplete (usage only; Run ends the turn).
 // Returns false when the turn context is already cancelled (caller should stop).
 func (a *AgentHarness) streamChunk(ctx context.Context, chunk LLMResponseChunk, out chan<- StreamEvent) bool {
-	if chunk.Type == StreamEventComplete {
+	if chunk.Type == "" || chunk.Type == StreamEventComplete {
 		return ctx.Err() == nil
 	}
 	toolCalls := chunk.ToolCalls
@@ -524,9 +542,9 @@ func (a *AgentHarness) emitPlanUpdate(out chan<- StreamEvent) {
 	out <- StreamEvent{Type: streaming.StreamEventPlanUpdate, Data: data}
 }
 
-// HasOpenToolWork reports pending tool calls, session interrupts, or unpaired
-// assistant tool_calls in the window (parked / mid-cancel state).
-func (a *AgentHarness) HasOpenToolWork() bool {
+// HostHasOpenToolWork reports pending tool work to trusted server adapters.
+// External SDK consumers cannot construct the internal hostcontrol token.
+func (a *AgentHarness) HostHasOpenToolWork(hostcontrol.Token) bool {
 	a.pendingMu.Lock()
 	nPending := len(a.pendingToolCalls)
 	a.pendingMu.Unlock()
@@ -536,9 +554,8 @@ func (a *AgentHarness) HasOpenToolWork() bool {
 	return len(a.openToolCalls()) > 0
 }
 
-// FinalizeCancelledWork pairs open tools as cancelled into the window only,
-// clears interrupt park, checkpoints. Parked/steer path (no live turn stream).
-func (a *AgentHarness) FinalizeCancelledWork(ctx context.Context) {
+// HostFinalizeCancelledWork pairs cancelled tools for a trusted server adapter.
+func (a *AgentHarness) HostFinalizeCancelledWork(ctx context.Context, _ hostcontrol.Token) {
 	a.finalizeCancelledWork(nil)
 }
 
@@ -600,7 +617,6 @@ func (a *AgentHarness) pairCancelledToolResults(out chan<- StreamEvent) {
 func (a *AgentHarness) clearInterruptParkState() {
 	a.pendingMu.Lock()
 	a.pendingToolCalls = make(map[string]stores.PendingToolCall)
-	a.legacyInterruptIDs = make(map[string]string)
 	a.interruptPayloads = make(map[string][]byte)
 	a.pendingMu.Unlock()
 	a.session.ClearInterrupts()
@@ -620,7 +636,20 @@ func (a *AgentHarness) initMCP(ctx context.Context) {
 	}
 	a.mcpInitialized = true
 
-	a.mcpCleanup = discoverAllTools(ctx, a.mcpConfigs, func(name, description, namespace string, schema map[string]any, handler mcpruntime.ToolHandler) {
+	configs := make([]mcp.MCPConfig, 0, len(a.mcpConfigs))
+	for _, config := range a.mcpConfigs {
+		resolved, err := config.Resolve(ctx, a.mcpCredentialResolver)
+		if err != nil {
+			slog.WarnContext(ctx, "failed to resolve MCP credentials, skipping",
+				"server", config.Name,
+				"credential_ref", config.CredentialRef,
+				"error", err,
+			)
+			continue
+		}
+		configs = append(configs, resolved)
+	}
+	a.mcpCleanup = discoverAllTools(ctx, configs, func(name, description, namespace string, schema map[string]any, handler mcpruntime.ToolHandler) {
 		tool := newMCPTool(mcpToolConfig{
 			Name:        name,
 			Description: description,
@@ -640,7 +669,7 @@ func (a *AgentHarness) initMCP(ctx context.Context) {
 // Call after the Run events channel is drained, or when construct/runHarness fails.
 func (a *AgentHarness) Close() {
 	a.cancelBackgroundJobs()
-	a.persistSession(context.Background())
+	_ = a.persistSession(context.Background())
 	a.parkMu.Lock()
 	for id, w := range a.parkedWorkersLive {
 		if w != nil {

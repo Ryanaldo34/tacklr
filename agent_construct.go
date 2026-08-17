@@ -27,6 +27,17 @@ type Config struct {
 	MaxTurnRequests int
 }
 
+// Validate checks host configuration that does not depend on a model.
+func (c Config) Validate() error {
+	if c.MaxWindowSize < 0 {
+		return fmt.Errorf("tacklr: Config.MaxWindowSize must be positive")
+	}
+	if c.MaxTurnRequests < 0 {
+		return fmt.Errorf("tacklr: Config.MaxTurnRequests must not be negative")
+	}
+	return nil
+}
+
 // AgentOptions configures NewAgent and NewAgentFromSession.
 //
 // Usual fields: Config, Model, Store, Tools, MCPConfigs, SubAgents, SessionID.
@@ -45,7 +56,10 @@ type AgentOptions struct {
 	WatchDog   AgentWatchDog
 	Tools      []*Tool
 	MCPConfigs []mcp.MCPConfig
-	SubAgents  []*SubAgent
+	// MCPCredentialResolver resolves durable references immediately before
+	// connection. Inline client credentials remain session-scoped.
+	MCPCredentialResolver mcp.CredentialResolver
+	SubAgents             []*SubAgent
 	// ContextPolicy sets pressure/compress ratios when non-zero fields are set.
 	ContextPolicy ContextPolicy
 	// ToolInterceptors wrap each tool call (outermost first). Built-in
@@ -88,6 +102,11 @@ type AgentOptions struct {
 	shareIndexBridge *vfsindex.Bridge
 }
 
+// Validate checks the complete public construction contract.
+func (opts AgentOptions) Validate() error {
+	return opts.validateAndNormalize()
+}
+
 // streamEventBuffer is the harness event channel size so EmitUpdate is not dropped
 // when the consumer lags briefly.
 const streamEventBuffer = 64
@@ -116,33 +135,36 @@ func newHarnessBase(opts AgentOptions, sm *session.SessionManager) (*AgentHarnes
 	if sm == nil {
 		return nil, fmt.Errorf("tacklr: session manager is required")
 	}
+	if err := opts.validateAndNormalize(); err != nil {
+		return nil, err
+	}
 	h := &AgentHarness{
-		model:                opts.Model,
-		maxWindowSize:        opts.Config.MaxWindowSize,
-		maxTurnRequests:      opts.Config.MaxTurnRequests,
-		instructions:         opts.Config.SystemPrompt,
-		store:                opts.Store,
-		session:              sm,
-		watchDog:             opts.WatchDog,
-		tools:                opts.Tools,
-		mcpConfigs:           opts.MCPConfigs,
-		skillDirectories:     opts.Config.SkillDirectories,
-		skillsLoader:         opts.SkillsLoader,
-		exaAPIKey:            resolveExaAPIKey(opts.ExaAPIKey),
-		brain:                opts.Brain,
-		brainWriteKinds:      opts.BrainWriteKinds,
-		sessionId:            "",
-		subagents:            make(map[string]*SubAgent),
-		pendingToolCalls:     make(map[string]stores.PendingToolCall),
-		legacyInterruptIDs:   make(map[string]string),
-		interruptPayloads:    make(map[string][]byte),
-		parkedWorkersLive:    make(map[string]*AgentHarness),
-		jobs:                 make(map[string]*backgroundJob),
-		context:              NewModelContextManager(),
-		contextPolicy:        opts.ContextPolicy,
-		runCommandUnattended: opts.RunCommandUnattended,
-		writeUnattended:      opts.WriteUnattended,
-		vfsBridge:            opts.shareIndexBridge,
+		model:                 opts.Model,
+		maxWindowSize:         opts.Config.MaxWindowSize,
+		maxTurnRequests:       opts.Config.MaxTurnRequests,
+		instructions:          opts.Config.SystemPrompt,
+		store:                 opts.Store,
+		session:               sm,
+		watchDog:              opts.WatchDog,
+		tools:                 opts.Tools,
+		mcpConfigs:            opts.MCPConfigs,
+		mcpCredentialResolver: opts.MCPCredentialResolver,
+		skillDirectories:      opts.Config.SkillDirectories,
+		skillsLoader:          opts.SkillsLoader,
+		exaAPIKey:             resolveExaAPIKey(opts.ExaAPIKey),
+		brain:                 opts.Brain,
+		brainWriteKinds:       opts.BrainWriteKinds,
+		sessionId:             "",
+		subagents:             make(map[string]*SubAgent),
+		pendingToolCalls:      make(map[string]stores.PendingToolCall),
+		interruptPayloads:     make(map[string][]byte),
+		parkedWorkersLive:     make(map[string]*AgentHarness),
+		jobs:                  make(map[string]*workerRun),
+		context:               NewModelContextManager(),
+		contextPolicy:         opts.ContextPolicy,
+		runCommandUnattended:  opts.RunCommandUnattended,
+		writeUnattended:       opts.WriteUnattended,
+		vfsBridge:             opts.shareIndexBridge,
 	}
 	h.jobsCtx, h.jobsCancel = context.WithCancel(context.Background())
 	if opts.MountSession != nil {
@@ -167,6 +189,48 @@ func newHarnessBase(opts AgentOptions, sm *session.SessionManager) (*AgentHarnes
 	h.toolRunner = newToolRunner(chain...)
 	h.toolResultHooks = newToolResultHookRegistry(opts.ToolResultHooks)
 	return h, nil
+}
+
+func (opts *AgentOptions) validateAndNormalize() error {
+	if opts.Model == nil {
+		return fmt.Errorf("tacklr: AgentOptions.Model is required")
+	}
+	if err := opts.Config.Validate(); err != nil {
+		return err
+	}
+	if opts.Config.MaxWindowSize == 0 {
+		size, err := opts.Model.MaxContextWindow()
+		if err != nil {
+			return fmt.Errorf("tacklr: resolve model context window: %w", err)
+		}
+		if size <= 0 {
+			return fmt.Errorf("tacklr: Config.MaxWindowSize is required when the model does not report a context window")
+		}
+		opts.Config.MaxWindowSize = size
+	}
+	if err := opts.ContextPolicy.Validate(); err != nil {
+		return err
+	}
+	for i, tool := range opts.Tools {
+		if tool == nil {
+			return fmt.Errorf("tacklr: AgentOptions.Tools[%d] is nil", i)
+		}
+	}
+	seenMCP := make(map[string]struct{}, len(opts.MCPConfigs))
+	for i := range opts.MCPConfigs {
+		config := opts.MCPConfigs[i]
+		if err := config.Validate(); err != nil {
+			return err
+		}
+		if _, ok := seenMCP[config.Name]; ok {
+			return fmt.Errorf("tacklr: duplicate MCP server name %q", config.Name)
+		}
+		seenMCP[config.Name] = struct{}{}
+		if config.CredentialRef != "" && opts.MCPCredentialResolver == nil {
+			return fmt.Errorf("tacklr: MCP credential resolver is required for server %q", config.Name)
+		}
+	}
+	return nil
 }
 
 func (h *AgentHarness) finishInit(ctx context.Context, subAgents []*SubAgent) error {
@@ -332,6 +396,9 @@ func NewAgentFromSession(ctx context.Context, sessionId string, opts AgentOption
 	if opts.Store == nil {
 		return nil, fmt.Errorf("agent harness: store is required to load session %q", sessionId)
 	}
+	if err := opts.validateAndNormalize(); err != nil {
+		return nil, err
+	}
 	checkpoint, err := opts.Store.LoadSession(ctx, sessionId)
 	if err != nil {
 		return nil, err
@@ -347,7 +414,6 @@ func NewAgentFromSession(ctx context.Context, sessionId string, opts AgentOption
 	}
 	h.sessionId = sessionId
 	h.context.Restore(applied.Window)
-	h.legacyInterruptIDs = applied.LegacyInterruptIDs
 	h.pendingToolCalls = applied.PendingToolCalls
 	if err := h.finishInit(ctx, opts.SubAgents); err != nil {
 		return nil, err

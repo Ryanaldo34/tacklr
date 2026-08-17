@@ -19,6 +19,17 @@ type ContextPolicy struct {
 	StreamFitSummary bool
 }
 
+// Validate checks non-zero context policy overrides.
+func (p ContextPolicy) Validate() error {
+	if p.PressureRatio < 0 || p.PressureRatio > 1 {
+		return fmt.Errorf("tacklr: ContextPolicy.PressureRatio must be zero or in (0, 1]")
+	}
+	if p.CompressFraction < 0 || p.CompressFraction > 1 {
+		return fmt.Errorf("tacklr: ContextPolicy.CompressFraction must be zero or in (0, 1]")
+	}
+	return nil
+}
+
 // DefaultContextPolicy is the product default pressure and compress settings.
 func DefaultContextPolicy() ContextPolicy {
 	return ContextPolicy{
@@ -65,6 +76,7 @@ func (m *ModelContextManager) Messages() []*Message {
 }
 
 func (m *ModelContextManager) Restore(window []*Message) {
+	assertValidContextWindow(window)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if len(window) == 0 {
@@ -75,15 +87,25 @@ func (m *ModelContextManager) Restore(window []*Message) {
 }
 
 func (m *ModelContextManager) Replace(window []*Message) {
+	assertValidContextWindow(window)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.window = window
 }
 
 func (m *ModelContextManager) Add(msg *Message) {
+	if err := streaming.ValidateMessages([]*Message{msg}); err != nil {
+		panic("tacklr: invalid context message: " + err.Error())
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.window = append(m.window, msg)
+}
+
+func assertValidContextWindow(window []*Message) {
+	if err := streaming.ValidateMessages(window); err != nil {
+		panic("tacklr: invalid context window: " + err.Error())
+	}
 }
 
 func (m *ModelContextManager) InstallPlanDocument(planRaw string) error {

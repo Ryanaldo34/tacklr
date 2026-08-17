@@ -126,7 +126,7 @@ func (m *wsMessageWriter) WriteResult(id json.RawMessage, result any) error {
 }
 
 func (m *wsMessageWriter) WriteError(id json.RawMessage, err error) error {
-	return wsWriteJSON(m.ctx, m.c, wsServerEvent{Type: "error", Content: PublicError(err).Error()})
+	return wsWriteJSON(m.ctx, m.c, presentationError(err))
 }
 
 func (m *wsMessageWriter) WriteFrame(data []byte) error {
