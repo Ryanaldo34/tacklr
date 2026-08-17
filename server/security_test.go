@@ -360,6 +360,28 @@ func TestACPProtocol_resolveOwnedWireSession_rejectsMissingOwner(t *testing.T) {
 	}
 }
 
+func TestServer_securityBuildersPanicOnInvalidReceiverOrService(t *testing.T) {
+	assertPanics := func(name string, fn func()) {
+		t.Helper()
+		defer func() {
+			if recover() == nil {
+				t.Fatalf("%s did not panic", name)
+			}
+		}()
+		fn()
+	}
+
+	assertPanics("WithSecurity nil server", func() {
+		(*Server)(nil).WithSecurity(&tacklrsecurity.Service{}, nil)
+	})
+	assertPanics("WithSecurity nil service", func() {
+		NewServer(NewRegistry(testStore(t), ""), SSE).WithSecurity(nil, nil)
+	})
+	assertPanics("AllowAnonymousNetwork nil server", func() {
+		(*Server)(nil).AllowAnonymousNetwork()
+	})
+}
+
 func TestConnectionRemoval_clearsEphemeralVFSCredentials(t *testing.T) {
 	// Arrange
 	auth := vfs.NewSessionAuth()

@@ -890,6 +890,88 @@ func TestBackgroundJobs_backgroundJobsNudgeAndFormatJobErrors(t *testing.T) {
 	}
 }
 
+func TestWorkerRun_terminalHelpersAreIdempotent(t *testing.T) {
+	completed := &workerRun{
+		id: "done", workerName: "researcher", status: jobStatusRunning,
+		done: make(chan struct{}),
+	}
+	completed.setTerminal(jobStatusCompleted, "finished", nil)
+	completed.setTerminal(jobStatusFailed, "", fmt.Errorf("ignored"))
+
+	interrupted := &workerRun{
+		id: "intr", workerName: "researcher", status: jobStatusCompleted,
+		done: make(chan struct{}),
+	}
+	close(interrupted.done)
+	interrupted.setInterrupted(nil, nil)
+
+	status, result, err := completed.snapshot()
+	if status != jobStatusCompleted || result != "finished" || err != nil {
+		t.Fatalf("completed snapshot = %q %q %v", status, result, err)
+	}
+	if status, _, _ := interrupted.snapshot(); status != jobStatusCompleted {
+		t.Fatal("setInterrupted should no-op on terminal job")
+	}
+}
+
+func TestBackgroundJobs_registerJobInitializesNilMap(t *testing.T) {
+	h := mustNewAgent(t, AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  &mockStrategy{},
+	})
+	t.Cleanup(h.Close)
+	h.jobs = nil
+	h.registerJob(&workerRun{
+		id: "listed", workerName: "researcher", status: jobStatusRunning,
+		done: make(chan struct{}),
+	})
+	if h.jobs == nil || h.jobs["listed"] == nil {
+		t.Fatal("registerJob should initialize jobs map")
+	}
+}
+
+func TestBackgroundJobs_readJobInterruptedAndCancelledPaths(t *testing.T) {
+	h := mustNewAgent(t, AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  &mockStrategy{},
+	})
+	t.Cleanup(h.Close)
+	rt := turnRuntime(h)
+
+	interruptedJob := &workerRun{
+		id: "paused", workerName: "researcher", status: jobStatusInterrupted,
+		done: make(chan struct{}),
+	}
+	close(interruptedJob.done)
+	h.registerJob(interruptedJob)
+
+	blockingJob := &workerRun{
+		id: "block", workerName: "researcher", status: jobStatusRunning,
+		done: make(chan struct{}),
+	}
+	h.registerJob(blockingJob)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+
+	intrOut, intrErr := h.readJob(t.Context(), "paused", false, rt)
+	_, blockErr := h.readJob(ctx, "block", true, rt)
+	_, resumeErr := h.readJob(t.Context(), "paused", true, rt)
+
+	if intrErr != nil || !strings.Contains(intrOut, "Interrupted awaiting") {
+		t.Fatalf("interrupted format = %q err = %v", intrOut, intrErr)
+	}
+	if !errors.Is(blockErr, context.Canceled) {
+		t.Fatalf("blocking cancel error = %v", blockErr)
+	}
+	if resumeErr == nil || !strings.Contains(resumeErr.Error(), "interrupted without interrupt object") {
+		t.Fatalf("resume error = %v", resumeErr)
+	}
+}
+
 func TestBackgroundJobs_blockingGetAwaitCompletion(t *testing.T) {
 	// Arrange
 	workerModel := &mockStrategy{

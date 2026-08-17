@@ -92,6 +92,40 @@ func TestCheckpointer_nilManager_errors(t *testing.T) {
 	}
 }
 
+func TestCheckpointer_rejectsInvalidWindowOnCapture(t *testing.T) {
+	// Arrange
+	sm := session.NewSessionManager()
+
+	// Act
+	_, err := session.NewCheckpointer().Capture(
+		[]*streaming.Message{nil},
+		sm,
+		nil,
+	)
+
+	// Assert
+	if err == nil || !strings.Contains(err.Error(), "invalid context window") {
+		t.Fatalf("Capture error = %v", err)
+	}
+}
+
+func TestCheckpointer_applyRejectsUnsupportedVersion(t *testing.T) {
+	// Arrange
+	sm := session.NewSessionManager()
+	checkpoint := stores.SessionCheckpoint{
+		ContextWindow: []*streaming.Message{{Role: streaming.RoleUser, Content: "x"}},
+	}
+	checkpoint.State.Version = stores.CheckpointVersion + 1
+
+	// Act
+	_, err := session.NewCheckpointer().Apply(checkpoint, sm)
+
+	// Assert
+	if err == nil || !strings.Contains(err.Error(), "unsupported checkpoint version") {
+		t.Fatalf("Apply error = %v", err)
+	}
+}
+
 // TestCheckpointer_applyNilMaps_defaults empty pending/interrupt maps.
 func TestCheckpointer_applyNilMaps_defaults(t *testing.T) {
 	sm := session.NewSessionManager()
