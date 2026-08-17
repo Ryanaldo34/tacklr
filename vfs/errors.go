@@ -15,6 +15,9 @@ var (
 	ErrNotExist        = errors.New("vfs: not found")
 	ErrExist           = errors.New("vfs: already exists")
 	ErrFuseNotMounted  = errors.New("vfs: fuse not mounted")
+	ErrAuthExpired     = errors.New("vfs: auth expired")
+	ErrAmbiguous       = errors.New("vfs: ambiguous path")
+	ErrPermission      = errors.New("vfs: permission denied")
 
 	// Content IR
 	ErrNoCodec        = errors.New("vfs: no codec for media type")

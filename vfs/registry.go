@@ -3,6 +3,7 @@ package vfs
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 )
 
@@ -50,6 +51,34 @@ func (r *BackendRegistry) HasProfile(id string) bool {
 	_, ok := r.factories[id]
 	r.mu.RUnlock()
 	return ok
+}
+
+// Profiles returns registered factory ids in sorted order.
+func (r *BackendRegistry) Profiles() []string {
+	if r == nil {
+		return nil
+	}
+	r.mu.RLock()
+	out := make([]string, 0, len(r.factories))
+	for id := range r.factories {
+		out = append(out, id)
+	}
+	r.mu.RUnlock()
+	slices.Sort(out)
+	return out
+}
+
+// CheckMount opens and validates a provider for spec without attaching it.
+// Used to fail client binds before the mount is visible.
+func CheckMount(ctx context.Context, reg *BackendRegistry, sessionID string, spec MountSpec) error {
+	if reg == nil {
+		return errRegistryRequired
+	}
+	p, err := reg.open(ctx, sessionID, spec)
+	if err != nil {
+		return err
+	}
+	return p.Validate(ctx)
 }
 
 func (r *BackendRegistry) open(ctx context.Context, sessionID string, spec MountSpec) (Provider, error) {

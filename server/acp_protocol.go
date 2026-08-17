@@ -223,6 +223,12 @@ func (p *acpProtocol) HandleInbound(ctx context.Context, env ProtocolEnv, body [
 	case "session/cancel":
 		env.Registry.CancelSession(pr.ThreadID)
 		return env.Conn.Writer.WriteResult(pr.ID, map[string]any{})
+	case methodVFSBind:
+		return p.handleVFSBind(ctx, env, pr)
+	case methodVFSRefresh:
+		return p.handleVFSRefresh(ctx, env, pr)
+	case methodVFSUnbind:
+		return p.handleVFSUnbind(ctx, env, pr)
 	default:
 		return env.Conn.Writer.WriteError(pr.ID, clientErrorf(ErrMethodNotFound, "method not found"))
 	}
@@ -447,6 +453,11 @@ func acpInitializeResult(r *Registry, clientProtocolVersion int) map[string]any 
 			"sessionCapabilities": map[string]any{
 				"close": struct{}{},
 			},
+			"_meta": map[string]any{
+				"tacklr": map[string]any{
+					"vfs": acpVFSCapability(r),
+				},
+			},
 		},
 		"agentInfo": map[string]string{
 			"name":    "tacklr",
@@ -458,8 +469,23 @@ func acpInitializeResult(r *Registry, clientProtocolVersion int) map[string]any 
 		"_meta": map[string]any{
 			"tacklr": map[string]any{
 				"transports": []string{"stdio", "websocket", "streamable_http"},
+				"vfs":        acpVFSCapability(r),
 			},
 		},
+	}
+}
+
+func acpVFSCapability(r *Registry) map[string]any {
+	providers := []string{}
+	if r != nil {
+		if spec, ok := r.agents[r.defaultAgent]; ok && spec.FSRegistry != nil {
+			providers = spec.FSRegistry.Profiles()
+		}
+	}
+	return map[string]any{
+		"credentials":  true,
+		"providers":    providers,
+		"tokenRefresh": true,
 	}
 }
 

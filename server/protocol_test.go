@@ -88,6 +88,12 @@ func TestACPProtocol_initializeResultShape(t *testing.T) {
 	if pc["embeddedContext"] != true || pc["audio"] != false {
 		t.Fatalf("promptCapabilities = %v", pc)
 	}
+	capMeta, _ := caps["_meta"].(map[string]any)
+	tacklrCap, _ := capMeta["tacklr"].(map[string]any)
+	vfsCap, _ := tacklrCap["vfs"].(map[string]any)
+	if vfsCap["credentials"] != true || vfsCap["tokenRefresh"] != true {
+		t.Fatalf("agentCapabilities._meta.tacklr.vfs = %#v", vfsCap)
+	}
 	info, ok := result["agentInfo"].(map[string]string)
 	if !ok || info["name"] == "" {
 		t.Fatalf("agentInfo = %v", result["agentInfo"])

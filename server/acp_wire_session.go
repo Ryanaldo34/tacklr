@@ -304,6 +304,9 @@ func (p *acpProtocol) BindTurn(ctx context.Context, env ProtocolEnv, sessionID s
 	if err := p.persistWire(ctx, sessionID, sess); err != nil {
 		return TurnRequest{}, err
 	}
+	if env.Registry != nil {
+		installVFSRefresh(env, sessionID, env.Registry.vfsAuth)
+	}
 
 	return TurnRequest{
 		SessionID:              sessionID,

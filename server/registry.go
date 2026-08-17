@@ -190,6 +190,7 @@ type Registry struct {
 	mountsMu     sync.Mutex
 	mounts       map[string]*vfs.MountSession // thread id → host-owned session tree
 	projection   VFSProjection                // nil → FuseProjection
+	vfsAuth      *vfs.SessionAuth             // user-owned backend tokens (Drive, …)
 }
 
 // RegistryOption configures NewRegistry.
@@ -234,6 +235,17 @@ func WithVFSProjection(p VFSProjection) RegistryOption {
 	}
 }
 
+// WithVFSAuth sets the session credential store used by user-owned VFS
+// backends. Hosts must pass the same *SessionAuth to DriveFactory (and later
+// Dropbox/SharePoint factories). Nil or omitted creates one on first use.
+func WithVFSAuth(a *vfs.SessionAuth) RegistryOption {
+	return func(r *Registry) {
+		if a != nil {
+			r.vfsAuth = a
+		}
+	}
+}
+
 // NewRegistry builds a registry. opts may set telemetry providers.
 func NewRegistry(store stores.BaseStore, defaultAgent string, opts ...RegistryOption) *Registry {
 	r := &Registry{
@@ -254,6 +266,9 @@ func NewRegistry(store stores.BaseStore, defaultAgent string, opts ...RegistryOp
 	}
 	if r.instruments == nil {
 		r.instruments = telemetry.MustInstruments(telemetry.Meter())
+	}
+	if r.vfsAuth == nil {
+		r.vfsAuth = vfs.NewSessionAuth()
 	}
 	return r
 }
@@ -316,6 +331,9 @@ func (r *Registry) DropLiveHarness(sessionID string) {
 }
 
 func (r *Registry) closeSessionVFS(sessionID string) {
+	if r.vfsAuth != nil {
+		r.vfsAuth.Clear(sessionID)
+	}
 	r.mountsMu.Lock()
 	ms := r.mounts[sessionID]
 	delete(r.mounts, sessionID)
@@ -334,7 +352,8 @@ func (r *Registry) closeSessionVFS(sessionID string) {
 }
 
 func (r *Registry) sessionVFS(ctx context.Context, threadID string, spec *AgentSpec) (*vfs.MountSession, error) {
-	if spec.FSRegistry == nil || len(spec.FSBootstrap) == 0 {
+	hasBindings := r.vfsAuth != nil && r.vfsAuth.HasBindings(threadID)
+	if spec.FSRegistry == nil || (len(spec.FSBootstrap) == 0 && !hasBindings) {
 		return nil, nil
 	}
 	// Production: FUSE is the VFS. No device → no tree, no VFS tools.
@@ -353,6 +372,14 @@ func (r *Registry) sessionVFS(ctx context.Context, threadID string, spec *AgentS
 	}
 	if err := ms.Materialize(ctx, spec.FSBootstrap); err != nil {
 		return nil, err
+	}
+	if hasBindings {
+		for _, b := range r.vfsAuth.Bindings(threadID) {
+			if err := ms.Mount(ctx, vfs.BindingSpec(b)); err != nil && !errors.Is(err, vfs.ErrAlreadyMounted) {
+				_ = ms.Close()
+				return nil, err
+			}
+		}
 	}
 	r.mounts[threadID] = ms
 	return ms, nil
@@ -571,7 +598,7 @@ func (r *Registry) loadAgent(ctx context.Context, agentID, threadID string, load
 	mcpConfigs = append(mcpConfigs, spec.MCPConfigs...)
 	mcpConfigs = append(mcpConfigs, sessionMCP...)
 
-	wantVFS := spec.FSRegistry != nil && len(spec.FSBootstrap) > 0
+	wantVFS := spec.FSRegistry != nil && (len(spec.FSBootstrap) > 0 || (r.vfsAuth != nil && r.vfsAuth.HasBindings(threadID)))
 	ms, err := r.sessionVFS(ctx, threadID, &spec)
 	if err != nil {
 		return nil, nil, err
