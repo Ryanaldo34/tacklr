@@ -86,6 +86,9 @@ func TestBackgroundJobs_schedulePollAwait(t *testing.T) {
 				toolCall("bg1", "spawn_worker", `{"worker_name":"researcher","task_description_and_context":"dig","block":false}`),
 			}, IsComplete: true}
 		case 2:
+			if run := h.getJob("bg1"); run == nil || run.mode != workerDeliveryAsync {
+				t.Errorf("background worker lifecycle = %#v", run)
+			}
 			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
 				toolCall("p1", "ping", `{}`),
 				toolCall("l1", "list_jobs", `{}`),
@@ -147,6 +150,52 @@ func TestBackgroundJobs_schedulePollAwait(t *testing.T) {
 	}
 	if hasEventType(got, StreamEventError) {
 		t.Fatalf("unexpected error: %+v", summarizeEvents(got))
+	}
+}
+
+func TestWorkerLifecycle_syncAndAsyncUseSharedRegistry(t *testing.T) {
+	// Arrange
+	var harness *AgentHarness
+	sawSync := false
+	worker := &mockStrategy{
+		invokeFn: func(_ context.Context, _ []*Message, _ []*Tool, ch chan<- LLMResponseChunk) {
+			if run := harness.getJob("sync-worker"); run != nil && run.mode == workerDeliverySync {
+				sawSync = true
+			}
+			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "worker complete", IsComplete: true}
+		},
+	}
+	step := 0
+	parent := &mockStrategy{
+		invokeFn: func(_ context.Context, _ []*Message, _ []*Tool, ch chan<- LLMResponseChunk) {
+			step++
+			if step == 1 {
+				ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
+					toolCall("sync-worker", "spawn_worker", `{"worker_name":"researcher","task_description_and_context":"work","block":true}`),
+				}, IsComplete: true}
+				return
+			}
+			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
+		},
+	}
+	harness = mustNewAgent(t, AgentOptions{
+		Model:     parent,
+		SubAgents: []*SubAgent{{WorkerName: "researcher", Model: worker}},
+	})
+	t.Cleanup(harness.Close)
+
+	// Act
+	events := drainEvents(mustRun(t, harness, "run worker"))
+
+	// Assert
+	if !sawSync {
+		t.Fatal("synchronous worker did not use the shared lifecycle registry")
+	}
+	if result := toolResultByName(events, "spawn_worker"); result != "worker complete" {
+		t.Fatalf("spawn result = %q", result)
+	}
+	if harness.getJob("sync-worker") != nil {
+		t.Fatal("completed synchronous worker remained registered")
 	}
 }
 

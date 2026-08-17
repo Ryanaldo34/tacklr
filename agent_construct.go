@@ -160,7 +160,7 @@ func newHarnessBase(opts AgentOptions, sm *session.SessionManager) (*AgentHarnes
 		legacyInterruptIDs:    make(map[string]string),
 		interruptPayloads:     make(map[string][]byte),
 		parkedWorkersLive:     make(map[string]*AgentHarness),
-		jobs:                  make(map[string]*backgroundJob),
+		jobs:                  make(map[string]*workerRun),
 		context:               NewModelContextManager(),
 		contextPolicy:         opts.ContextPolicy,
 		runCommandUnattended:  opts.RunCommandUnattended,

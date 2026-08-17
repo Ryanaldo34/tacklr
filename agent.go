@@ -51,8 +51,8 @@ type AgentHarness struct {
 	// Durable park metadata is in SessionManager state; this map is not checkpointed.
 	parkedWorkersLive map[string]*AgentHarness
 	parkMu            sync.Mutex
-	// Background worker jobs (spawn_worker block=false). Live only.
-	jobs                 map[string]*backgroundJob
+	// Worker runs share one live lifecycle registry across sync and async delivery.
+	jobs                 map[string]*workerRun
 	jobsMu               sync.Mutex
 	jobsCtx              context.Context
 	jobsCancel           context.CancelFunc
