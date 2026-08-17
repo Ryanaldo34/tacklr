@@ -48,8 +48,5 @@ var acpTransportRegistry = map[string]acpTransportFlags{
 }
 
 func acpTransportFlagsFor(method string) acpTransportFlags {
-	if flags, ok := acpTransportRegistry[method]; ok {
-		return flags
-	}
-	return acpTransportFlags{}
+	return acpTransportRegistry[method]
 }

@@ -256,6 +256,21 @@ func TestWireAndConstruct_outcomes(t *testing.T) {
 			"Content-Type":        "application/json",
 			HeaderAcpConnectionID: connID,
 		}, http.StatusBadRequest)
+	// session-scoped method with a session this connection does not own → 403
+	assertStatus("prompt unattached session", http.MethodPost, "/acp",
+		`{"jsonrpc":"2.0","id":11,"method":"session/prompt","params":{"sessionId":"ghost","prompt":[{"type":"text","text":"hi"}]}}`,
+		map[string]string{
+			"Content-Type":        "application/json",
+			HeaderAcpConnectionID: connID,
+			HeaderAcpSessionID:    "ghost",
+		}, http.StatusForbidden)
+	// session/load may name a session this connection has not seen yet → 202
+	assertStatus("load unattached session", http.MethodPost, "/acp",
+		`{"jsonrpc":"2.0","id":10,"method":"session/load","params":{"sessionId":"ghost","cwd":"/tmp"}}`,
+		map[string]string{
+			"Content-Type":        "application/json",
+			HeaderAcpConnectionID: connID,
+		}, http.StatusAccepted)
 	// client JSON-RPC response demux on unknown conn → 404
 	assertStatus("response unknown conn", http.MethodPost, "/acp",
 		`{"jsonrpc":"2.0","id":99,"result":{}}`,
