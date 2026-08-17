@@ -148,7 +148,7 @@ func TestValidateACPRequest_outcomes(t *testing.T) {
 			wantOK{method: "initialize"}},
 		{"initialize higher version", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":99}}`,
 			wantOK{method: "initialize"}},
-		{"authenticate", `{"jsonrpc":"2.0","id":1,"method":"authenticate"}`,
+		{"authenticate", `{"jsonrpc":"2.0","id":1,"method":"authenticate","params":{"methodId":"agent-login"}}`,
 			wantOK{method: "authenticate"}},
 		{"session/new", `{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/home/user"}}`,
 			wantOK{method: "session/new", cwd: "/home/user"}},

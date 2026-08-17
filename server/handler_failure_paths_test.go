@@ -894,7 +894,7 @@ func TestServeStdio_edges(t *testing.T) {
 
 	// empty lines + EOF without trailing newline
 	var out bytes.Buffer
-	in := strings.NewReader("\n\n" + `{"jsonrpc":"2.0","id":1,"method":"authenticate","params":{}}`)
+	in := strings.NewReader("\n\n" + `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}`)
 	if err := srv.ServeStdio(context.Background(), in, &out); err != nil {
 		t.Fatalf("serve: %v", err)
 	}
