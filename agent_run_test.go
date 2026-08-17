@@ -205,6 +205,88 @@ func TestRun_invokeError_emitsErrorEvent(t *testing.T) {
 	}
 }
 
+func TestRun_invokeErrorAfterTools_emitsWrappedError(t *testing.T) {
+	// Arrange
+	tool := NewTool(ToolConfig{
+		Name:    "echo",
+		Handler: func(ctx context.Context) (string, error) { return "ok", nil },
+	})
+	calls := 0
+	strategy := &mockStrategy{
+		invokeErrFn: func(context.Context, []*Message, []*Tool) error {
+			calls++
+			if calls > 1 {
+				return errors.New("after tools")
+			}
+			return nil
+		},
+		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
+			ch <- LLMResponseChunk{
+				Type: StreamEventFunctionCall,
+				ToolCalls: []ToolCall{
+					{ID: "t1", CallID: "t1", Name: "echo", Arguments: `{}`},
+				},
+				IsComplete: true,
+			}
+		},
+	}
+	h := mustNewAgent(t, AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  strategy,
+		Tools:  []*Tool{tool},
+	})
+	t.Cleanup(h.Close)
+
+	// Act
+	events, err := h.Run(context.Background(), "hi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := drainEvents(events)
+
+	// Assert
+	if !hasErrorIs(got, ErrModelAfterTools) {
+		t.Fatalf("events = %+v", summarizeEvents(got))
+	}
+}
+
+func TestReturnFromInterrupt_rejectsUnknownInterrupt(t *testing.T) {
+	// Arrange
+	model := sequentialToolModel([]ToolCall{toolCall("ask1", "ask_user_choice",
+		`{"question":"Pick?","choices":[{"title":"A"}]}`)})
+	h := mustNewAgent(t, AgentOptions{
+		Model: model, Config: Config{MaxWindowSize: 8192}, Store: testStore(t),
+	})
+	t.Cleanup(h.Close)
+	events, err := h.Run(context.Background(), "ask")
+	if err != nil {
+		t.Fatal(err)
+	}
+	drainEvents(events)
+
+	// Act
+	_, err = h.ReturnFromInterrupt(context.Background(), map[string][]byte{"missing": []byte(`{"selectionIdx":0}`)})
+
+	// Assert
+	if err == nil || !strings.Contains(err.Error(), "missing") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestAgentHarness_persistSessionSkipsWithoutStoreOrSessionID(t *testing.T) {
+	// Arrange
+	h := mustNewAgent(t, AgentOptions{Model: &mockStrategy{}})
+	t.Cleanup(h.Close)
+
+	// Act
+	err := h.persistSession(t.Context())
+
+	// Assert
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestRun_modelStreamError_afterToolAnnounce_emitsFailedToolResults: incomplete
 // tool announcements are closed with an error status when the model stream fails.
 func TestRun_modelStreamError_afterToolAnnounce_emitsFailedToolResults(t *testing.T) {

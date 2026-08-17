@@ -370,6 +370,23 @@ func TestParseSSE_incompleteFailedAndRefusal(t *testing.T) {
 		t.Fatalf("thought = %q", thought)
 	}
 
+	// Reasoning completion can arrive only on output_item.done summary payload.
+	bodyReasonSummary := strings.Join([]string{
+		`data: {"type":"response.output_item.done","item":{"id":"rs2","type":"reasoning","summary":[{"type":"summary_text","text":"final summary"}]}}`,
+		`data: [DONE]`,
+		"",
+	}, "\n")
+	chunks = collectSSE(t, bodyReasonSummary)
+	var summary string
+	for _, c := range chunks {
+		if c.Type == tacklr.StreamEventReasoning && c.Content != "" {
+			summary = c.Content
+		}
+	}
+	if summary != "final summary" {
+		t.Fatalf("summary = %q chunks = %+v", summary, chunks)
+	}
+
 	// Context cancel stops mid-parse.
 	s := NewOpenAIInferenceStrategy(nil)
 	ch := make(chan tacklr.LLMResponseChunk, 8)
