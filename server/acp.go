@@ -433,7 +433,7 @@ func eventToAcpJsonRpc(threadId string, event *streaming.StreamEvent) ([][]byte,
 
 func presentationToACP(threadId string, event *presentationEvent) ([][]byte, error) {
 	switch event.Type {
-	case streaming.StreamEventMessage:
+	case string(streaming.StreamEventMessage):
 		if event.Content == "" {
 			return nil, nil
 		}
@@ -456,7 +456,7 @@ func presentationToACP(threadId string, event *presentationEvent) ([][]byte, err
 		bytes, _ := json.Marshal(data)
 		toStream = append(toStream, bytes)
 		return toStream, nil
-	case streaming.StreamEventReasoning:
+	case string(streaming.StreamEventReasoning):
 		if event.Content == "" {
 			return nil, nil
 		}
@@ -479,7 +479,7 @@ func presentationToACP(threadId string, event *presentationEvent) ([][]byte, err
 		bytes, _ := json.Marshal(data)
 		toStream = append(toStream, bytes)
 		return toStream, nil
-	case streaming.StreamEventFunctionCall:
+	case string(streaming.StreamEventFunctionCall):
 		var toStream [][]byte
 		if event.Content != "" {
 			data := map[string]any{
@@ -513,7 +513,7 @@ func presentationToACP(threadId string, event *presentationEvent) ([][]byte, err
 			toStream = append(toStream, bytes)
 		}
 		return toStream, nil
-	case streaming.StreamEventToolUpdate:
+	case string(streaming.StreamEventToolUpdate):
 		var toStream [][]byte
 		data := map[string]any{
 			"jsonrpc": "2.0",
@@ -531,7 +531,7 @@ func presentationToACP(threadId string, event *presentationEvent) ([][]byte, err
 		bytes, _ := json.Marshal(data)
 		toStream = append(toStream, bytes)
 		return toStream, nil
-	case streaming.StreamEventPlanUpdate:
+	case string(streaming.StreamEventPlanUpdate):
 		var toStream [][]byte
 		var todos []streaming.Todo
 		err := json.Unmarshal(event.Data, &todos)
@@ -560,7 +560,7 @@ func presentationToACP(threadId string, event *presentationEvent) ([][]byte, err
 		bytes, _ := json.Marshal(data)
 		toStream = append(toStream, bytes)
 		return toStream, nil
-	case streaming.StreamEventToolResult:
+	case string(streaming.StreamEventToolResult):
 		if len(event.ToolCalls) == 0 {
 			slog.Warn("tool_result event missing ToolCalls")
 			return nil, nil
@@ -589,7 +589,7 @@ func presentationToACP(threadId string, event *presentationEvent) ([][]byte, err
 		bytes, _ := json.Marshal(data)
 		toStream = append(toStream, bytes)
 		return toStream, nil
-	case streaming.StreamEventComplete:
+	case string(streaming.StreamEventComplete):
 		var toStream [][]byte
 		data := map[string]any{
 			"jsonrpc": "2.0",
@@ -599,7 +599,7 @@ func presentationToACP(threadId string, event *presentationEvent) ([][]byte, err
 		bytes, _ := json.Marshal(data)
 		toStream = append(toStream, bytes)
 		return toStream, nil
-	case streaming.StreamEventError:
+	case string(streaming.StreamEventError):
 		var toStream [][]byte
 		// Semantic stop reasons are successful PromptResponse results, not RPC errors.
 		if reason, ok := stopReasonFromError(event.Error); ok {
@@ -629,7 +629,7 @@ func presentationToACP(threadId string, event *presentationEvent) ([][]byte, err
 		bytes, _ := json.Marshal(data)
 		toStream = append(toStream, bytes)
 		return toStream, nil
-	case streaming.StreamEventInterrupt:
+	case string(streaming.StreamEventInterrupt):
 		return nil, nil // interrupt events are handled in the harness, never encoded over ACP
 	default:
 		slog.Warn("unhandled event type", "type", event.Type)
