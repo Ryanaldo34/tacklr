@@ -82,6 +82,9 @@ func CheckMount(ctx context.Context, reg *BackendRegistry, sessionID string, spe
 }
 
 func (r *BackendRegistry) open(ctx context.Context, sessionID string, spec MountSpec) (Provider, error) {
+	if len(spec.Members) > 0 {
+		return r.openUnion(ctx, sessionID, spec)
+	}
 	if spec.Profile == "" {
 		return nil, ErrInvalidProvider
 	}

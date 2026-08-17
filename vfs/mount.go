@@ -15,10 +15,23 @@ type MountSpec struct {
 	// when the harness bridge is enabled. vfs stores the string only; interpretation
 	// lives in vfsindex/harness.
 	IndexPolicy string `json:"indexPolicy,omitempty"`
+	// Members, when non-empty, make this mount a read-only union of those
+	// backends. Profile is a label only (not opened as a factory). Member
+	// Point must be empty; members are not separate mount points. A first-level
+	// name that exists on more than one member is ErrAmbiguous.
+	Members []MountSpec `json:"members,omitempty"`
 }
 
 func cloneSpec(spec MountSpec) MountSpec {
 	out := spec
 	out.Params = maps.Clone(spec.Params)
+	if len(spec.Members) == 0 {
+		out.Members = nil
+		return out
+	}
+	out.Members = make([]MountSpec, len(spec.Members))
+	for i, m := range spec.Members {
+		out.Members[i] = cloneSpec(m)
+	}
 	return out
 }

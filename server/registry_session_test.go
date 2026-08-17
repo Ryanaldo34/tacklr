@@ -465,15 +465,9 @@ func TestRunTurn_constructFailures(t *testing.T) {
 		t.Fatalf("want unknown profile error, got %v", err)
 	}
 
-	r.Register("default", AgentSpec{
-		Options: tacklr.AgentOptions{
-			Config: tacklr.Config{
-				MaxWindowSize:    8192,
-				SkillDirectories: []string{filepath.Join(t.TempDir(), "does-not-exist")},
-			},
-			Model: okModel(),
-		},
-	})
+	skillsSpec := vfsSpec(t, okModel(), "/work")
+	skillsSpec.Options.Config.SkillDirectories = []string{"/skills"}
+	r.Register("default", skillsSpec)
 	_, err = r.RunTurn(ctx, TurnRequest{AgentID: "default", ThreadID: "sess-skills", Prompt: "hi"})
 	if err == nil || !strings.Contains(err.Error(), "initialize skills") {
 		t.Fatalf("want skills construct error, got %v", err)

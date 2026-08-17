@@ -19,6 +19,7 @@ import (
 	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/telemetry"
+	"github.com/ryanaldo34/tacklr/vfs"
 )
 
 type mockStrategy struct {
@@ -1370,10 +1371,23 @@ func TestRun_readSkill_returnsInstructions(t *testing.T) {
 		},
 	}
 
+	reg := vfs.NewBackendRegistry()
+	if err := reg.Register(vfs.LocalFactory{ID: "skills", Base: skillsRoot}); err != nil {
+		t.Fatal(err)
+	}
+	ms := vfs.MustNewMountSession(t.Name(), reg)
+	if err := ms.Mount(context.Background(), vfs.MountSpec{
+		Point: "/skills", Profile: "skills", ReadOnly: true, IndexPolicy: "none",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ms.Close() })
+
 	ah := mustNewAgent(t, AgentOptions{
-		Config: Config{MaxWindowSize: 8192, SkillDirectories: []string{skillsRoot}},
-		Model:  strategy,
-		Store:  testStore(t),
+		Config:       Config{MaxWindowSize: 8192, SkillDirectories: []string{"/skills"}},
+		Model:        strategy,
+		Store:        testStore(t),
+		MountSession: ms,
 	})
 
 	ch, err := ah.Run(context.Background(), "research something")

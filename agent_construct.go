@@ -19,8 +19,12 @@ import (
 
 // Config is harness limits and prompt settings.
 type Config struct {
-	MaxWindowSize    int
-	SystemPrompt     string
+	MaxWindowSize int
+	SystemPrompt  string
+	// SkillDirectories are absolute virtual paths of skill roots on
+	// MountSession (for example "/skills"). Each immediate child directory
+	// must contain SKILL.md. Empty means no skills. Non-empty requires a
+	// MountSession unless SkillsLoader is set.
 	SkillDirectories []string
 	// MaxTurnRequests limits Model.Invoke calls per Run. 0 = unlimited.
 	// Exceeding the limit ends the turn with ErrMaxTurnRequests.
@@ -74,7 +78,8 @@ type AgentOptions struct {
 	// ToolResultHooks map tool name → post-success window effects for host tools.
 	// Plan builtins use BuiltinResult instead.
 	ToolResultHooks map[string]ToolResultHook
-	// SkillsLoader loads skills. Nil uses DirectoryLoader with Config.SkillDirectories.
+	// SkillsLoader loads skills. Nil uses skills.Loader over MountSession
+	// and Config.SkillDirectories.
 	SkillsLoader skills.SkillLoader
 	// ExaAPIKey enables web_search and web_fetch. Empty falls back to EXA_API_KEY.
 	// When both are empty, those tools are not registered.
@@ -357,7 +362,7 @@ func (a *AgentHarness) initSkills(ctx context.Context) error {
 	}
 	loader := a.skillsLoader
 	if loader == nil {
-		loader = skills.DirectoryLoader{Directories: a.skillDirectories}
+		loader = skills.Loader{Session: a.VFS(), Roots: a.skillDirectories}
 	}
 	loaded, err := loader.Load(ctx)
 	if err != nil {

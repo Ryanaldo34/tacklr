@@ -381,6 +381,9 @@ func (t *mountTable) mount(ctx context.Context, spec MountSpec, provider Provide
 
 	stored := cloneSpec(spec)
 	stored.Point = cleaned
+	if len(stored.Members) > 0 {
+		stored.ReadOnly = true
+	}
 
 	t.mu.Lock()
 	defer t.mu.Unlock()

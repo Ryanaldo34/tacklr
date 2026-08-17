@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -21,9 +20,8 @@ func (*zeroWindowStrategy) MaxContextWindow() (int, error) { return 0, nil }
 // TestNewAgent_constructFailClosed is the fail-closed construct surface:
 // missing skill dir, missing session, and resume without a model.
 func TestNewAgent_constructFailClosed(t *testing.T) {
-	missing := filepath.Join(t.TempDir(), "does-not-exist")
 	_, err := NewAgent(context.Background(), AgentOptions{
-		Config: Config{MaxWindowSize: 8192, SkillDirectories: []string{missing}},
+		Config: Config{MaxWindowSize: 8192, SkillDirectories: []string{"/skills"}},
 		Model:  &mockStrategy{},
 	})
 	if err == nil || !strings.Contains(err.Error(), "initialize skills") {

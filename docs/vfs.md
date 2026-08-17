@@ -75,9 +75,30 @@ _ = ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"})
 |------|---------|
 | `MountSpec` | Durable mount description (point, profile, read-only, params, **indexPolicy**). Checkpoint-safe; no secrets. |
 | `Params` | Backend options (`subpath`, `bucket`, `prefix`, …) |
+| `Members` | Optional member `MountSpec`s. Non-empty → one read-only union at `Point`. Profile is a label. Member `Point` must be empty. Duplicate first-level names → `ErrAmbiguous`. |
 | `IndexPolicy` | Optional string: `none` \| `selective` \| `prefix` \| `watch` (empty → selective when the index bridge is on) |
 
 `MountSession.SpecAt` returns the full durable `MountSpec` for a virtual path (for policy and host tooling).
+
+### Skills
+
+Skills are ordinary files on a mount. The harness `skills.Loader` walks configured virtual roots (typically `/skills`) and loads one skill per immediate child `SKILL.md`. Several backends become one tree with a union mount (`Members`). Profile on the union spec is a label; members are not separate mount points. Overlapping first-level names are `ErrAmbiguous`. Unions are always read-only.
+
+```go
+_ = reg.Register(vfs.LocalFactory{ID: "team", Base: "/var/agent/skills"})
+_ = reg.Register(vfs.S3Factory{ID: "pack", Client: vfs.AWSS3{Client: s3c}, DefaultBucket: "skills"})
+_ = ms.Mount(ctx, vfs.MountSpec{
+    Point: "/skills", Profile: "skills", IndexPolicy: "none",
+    Members: []vfs.MountSpec{
+        {Profile: "team"},
+        {Profile: "pack", Params: map[string]string{"prefix": "org"}},
+    },
+})
+opts.Config.SkillDirectories = []string{"/skills"}
+opts.MountSession = ms
+```
+
+Set `IndexPolicy: none` so skill packs are not ingested as brain artifacts. The agent still uses `read_skill` for progressive disclosure; the files are also readable as virtual paths.
 
 Host-owned roots and secrets (local jail, S3 client) live on factories, not on mounts or checkpoints.
 

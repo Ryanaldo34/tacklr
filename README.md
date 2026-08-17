@@ -223,7 +223,7 @@ Register backends, bootstrap mounts—[docs/vfs.md](docs/vfs.md). When VFS is wi
 - **Planning** — `create_plan`, `list_plan`, `edit_plan`, `complete_todo` with install and handoff effects  
 - **Interrupts** — pause a tool, get structured user input, resume  
 - **MCP** — external tool servers ([`mcp`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/mcp))  
-- **Skills** — `SKILL.md` catalogs ([`skills`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/skills))  
+- **Skills** — `SKILL.md` catalogs loaded from VFS mounts ([`skills`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/skills))  
 - **Web** — search/fetch when Exa is configured  
 - **VFS** — mounts + IR ([docs/vfs.md](docs/vfs.md)); optional artifact index via [`vfsindex`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfsindex) (`index_file` / `unindex` / IndexPolicy when Brain + namespace too); live names/grep via `run_command`  
 - **Brain** — knowledge system when you set `AgentOptions.Brain`; host `KindSpec`s appear as Engram Markdown files (`/engram/…` or host roots) via `brain.Provider`. Full guide: [docs/knowledge.md](docs/knowledge.md)  
@@ -262,7 +262,7 @@ Optional OpenTelemetry on turns, tools, and retrieval ([`telemetry`](https://pkg
 | `interrupt` | Pause/resume types | [pkg](https://pkg.go.dev/github.com/ryanaldo34/tacklr/interrupt) |
 | `streaming` | Shared messages and events | [pkg](https://pkg.go.dev/github.com/ryanaldo34/tacklr/streaming) |
 | `mcp` | MCP config types | [pkg](https://pkg.go.dev/github.com/ryanaldo34/tacklr/mcp) |
-| `skills` | Skill loading | [pkg](https://pkg.go.dev/github.com/ryanaldo34/tacklr/skills) |
+| `skills` | Skill loading from VFS mounts | [pkg](https://pkg.go.dev/github.com/ryanaldo34/tacklr/skills) |
 | `telemetry` | OTEL helpers | [pkg](https://pkg.go.dev/github.com/ryanaldo34/tacklr/telemetry) |
 
 ---

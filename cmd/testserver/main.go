@@ -110,13 +110,14 @@ func main() {
 		}
 	}
 
-	// Optional skills directories (colon-separated, like PATH).
-	var skillDirs []string
+	// Optional host skill directories (colon-separated, like PATH). Each
+	// directory is a union member; the agent sees one /skills mount.
+	var skillHostDirs []string
 	if raw := strings.TrimSpace(os.Getenv("SKILL_DIRECTORIES")); raw != "" {
 		for _, p := range strings.Split(raw, string(os.PathListSeparator)) {
 			p = strings.TrimSpace(p)
 			if p != "" {
-				skillDirs = append(skillDirs, p)
+				skillHostDirs = append(skillHostDirs, p)
 			}
 		}
 	}
@@ -143,6 +144,30 @@ func main() {
 		os.Exit(1)
 	}
 
+	bootstrap := []vfs.MountSpec{{Point: "/work", Profile: "local"}}
+	var skillRoots []string
+	if len(skillHostDirs) > 0 {
+		var members []vfs.MountSpec
+		for i, hostDir := range skillHostDirs {
+			info, err := os.Stat(hostDir)
+			if err != nil || !info.IsDir() {
+				slog.Error("skill directory missing", "path", hostDir, "error", err)
+				os.Exit(1)
+			}
+			id := fmt.Sprintf("skills%d", i+1)
+			if err := fsReg.Register(vfs.LocalFactory{ID: id, Base: hostDir}); err != nil {
+				slog.Error("vfs skills register failed", "path", hostDir, "error", err)
+				os.Exit(1)
+			}
+			members = append(members, vfs.MountSpec{Profile: id})
+		}
+		bootstrap = append(bootstrap, vfs.MountSpec{
+			Point: "/skills", Profile: "skills", ReadOnly: true, IndexPolicy: "none",
+			Members: members,
+		})
+		skillRoots = []string{"/skills"}
+	}
+
 	defaultAgent := "test-agent"
 	var vfsOpts []server.RegistryOption
 	vfsOpts = append(vfsOpts, server.WithVFSAuth(vfsAuth))
@@ -158,18 +183,18 @@ func main() {
 				MaxWindowSize: maxWindow,
 				// Empty: rely on harness Adaptive Case Management system prompt only.
 				SystemPrompt:     "",
-				SkillDirectories: skillDirs,
+				SkillDirectories: skillRoots,
 			},
 			Model:     model,
 			ExaAPIKey: exaKey,
 		},
 		FSRegistry:  fsReg,
-		FSBootstrap: []vfs.MountSpec{{Point: "/work", Profile: "local"}},
+		FSBootstrap: bootstrap,
 	})
 
 	slog.Info("harness showcase",
 		"max_window_size", maxWindow,
-		"skill_dirs", len(skillDirs),
+		"skill_dirs", len(skillRoots),
 		"web_tools", exaKey != "",
 		"host_tools", 0,
 		"vfs_mount", "/work",
