@@ -191,6 +191,15 @@ func TestClientBridge_WaitInitialized(t *testing.T) {
 	if err := b.WaitInitialized(context.Background()); err != nil {
 		t.Fatalf("after initialize: %v", err)
 	}
+	b.Close()
+	if err := b.WaitInitialized(context.Background()); err != nil {
+		t.Fatalf("initialized then closed: %v", err)
+	}
+	canceled, cancelInit := context.WithCancel(context.Background())
+	cancelInit()
+	if err := b.WaitInitialized(canceled); err != nil {
+		t.Fatalf("initialized with canceled ctx: %v", err)
+	}
 	closed := NewClientBridge(&recordingWriter{})
 	closed.Close()
 	if err := closed.WaitInitialized(context.Background()); !errors.Is(err, errConnectionNotInitialized) {

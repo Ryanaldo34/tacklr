@@ -50,7 +50,10 @@ func newRunCommand(ms *vfs.MountSession, permissionRequired bool) *Tool {
 			// pipe (coverage, GC stop-the-world), the FUSE server cannot run
 			// and the start deadlocks. cd after exec so the kernel only walks
 			// the mount once we are in Wait.
-			cmd := exec.CommandContext(ctx, "/bin/sh", "-c", "cd "+posixShQuote(dir)+" && "+cmdStr)
+			//
+			// dir and cmdStr are argv ($1, $2), not concatenated into -c, so
+			// HostDir metacharacters cannot break cd and gosec G204 stays quiet.
+			cmd := exec.CommandContext(ctx, "/bin/sh", "-c", `cd "$1" && eval "$2"`, "run_command", dir, cmdStr)
 			cmd.Dir = os.TempDir()
 			cmd.Stdin = bytes.NewReader(nil)
 			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -87,11 +90,6 @@ func newRunCommand(ms *vfs.MountSession, permissionRequired bool) *Tool {
 		cfg.OnCall = OnCalls(ToolPermissionOnCall)
 	}
 	return NewTool(cfg)
-}
-
-// posixShQuote wraps s in single quotes for /bin/sh -c.
-func posixShQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
 }
 
 func formatRunCommandResult(exit int, truncated bool, stdout, stderr *budgetWriter) string {
