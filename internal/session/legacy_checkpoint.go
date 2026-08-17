@@ -5,6 +5,7 @@ import (
 	"slices"
 
 	"github.com/ryanaldo34/tacklr/internal/codec"
+	"github.com/ryanaldo34/tacklr/streaming"
 )
 
 // The functions in this file are the only generic-map coercion path. They read
@@ -22,7 +23,7 @@ func (p *PlanStore) LoadFromState(state map[string]any) {
 	p.documentUpdated = false
 	p.todosUpdated = false
 	if value, ok := state[planStateKey]; ok && value != nil {
-		if plan, decoded := codec.As[[]Todo](value); decoded {
+		if plan, decoded := codec.As[[]streaming.Todo](value); decoded {
 			p.todos = slices.Clone(plan)
 		}
 	}

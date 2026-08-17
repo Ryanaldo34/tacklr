@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ryanaldo34/tacklr/brain"
+	"github.com/ryanaldo34/tacklr/internal/hostcontrol"
 	mcpruntime "github.com/ryanaldo34/tacklr/internal/mcp"
 	session "github.com/ryanaldo34/tacklr/internal/session"
 	"github.com/ryanaldo34/tacklr/mcp"
@@ -546,9 +547,9 @@ func (a *AgentHarness) emitPlanUpdate(out chan<- StreamEvent) {
 	out <- StreamEvent{Type: streaming.StreamEventPlanUpdate, Data: data}
 }
 
-// HasOpenToolWork reports pending tool calls, session interrupts, or unpaired
-// assistant tool_calls in the window (parked / mid-cancel state).
-func (a *AgentHarness) HasOpenToolWork() bool {
+// HostHasOpenToolWork reports pending tool work to trusted server adapters.
+// External SDK consumers cannot construct the internal hostcontrol token.
+func (a *AgentHarness) HostHasOpenToolWork(hostcontrol.Token) bool {
 	a.pendingMu.Lock()
 	nPending := len(a.pendingToolCalls)
 	a.pendingMu.Unlock()
@@ -558,9 +559,8 @@ func (a *AgentHarness) HasOpenToolWork() bool {
 	return len(a.openToolCalls()) > 0
 }
 
-// FinalizeCancelledWork pairs open tools as cancelled into the window only,
-// clears interrupt park, checkpoints. Parked/steer path (no live turn stream).
-func (a *AgentHarness) FinalizeCancelledWork(ctx context.Context) {
+// HostFinalizeCancelledWork pairs cancelled tools for a trusted server adapter.
+func (a *AgentHarness) HostFinalizeCancelledWork(_ hostcontrol.Token, ctx context.Context) {
 	a.finalizeCancelledWork(nil)
 }
 

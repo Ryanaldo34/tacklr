@@ -3,6 +3,8 @@ package session
 import (
 	"strings"
 	"sync"
+
+	"github.com/ryanaldo34/tacklr/streaming"
 )
 
 // Reserved checkpoint keys for SessionManager modules (blocked on StateGet/Set).
@@ -27,7 +29,7 @@ func init() {
 // After NewPlanStore / NewSessionManager the receiver is never nil.
 type PlanStore struct {
 	mu              sync.RWMutex
-	todos           []Todo
+	todos           []streaming.Todo
 	document        string
 	documentUpdated bool
 	todosUpdated    bool
@@ -47,20 +49,20 @@ func (p *PlanStore) HasActive() bool {
 
 // Get returns a shallow copy of the current todos, or nil if no plan was ever set.
 // An empty non-nil slice means an explicit empty plan (e.g. after deleting all todos).
-func (p *PlanStore) Get() []Todo {
+func (p *PlanStore) Get() []streaming.Todo {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	if p.todos == nil {
 		return nil
 	}
-	cp := make([]Todo, len(p.todos))
+	cp := make([]streaming.Todo, len(p.todos))
 	copy(cp, p.todos)
 	return cp
 }
 
 // Set replaces the todo list. The harness emits plan_update after ConsumeTodosUpdated.
 // Pass nil to clear the plan entirely; pass a non-nil empty slice for an empty plan.
-func (p *PlanStore) Set(todos []Todo) {
+func (p *PlanStore) Set(todos []streaming.Todo) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.todosUpdated = true
@@ -68,14 +70,14 @@ func (p *PlanStore) Set(todos []Todo) {
 		p.todos = nil
 		return
 	}
-	cp := make([]Todo, len(todos))
+	cp := make([]streaming.Todo, len(todos))
 	copy(cp, todos)
 	p.todos = cp
 }
 
 // ConsumeTodosUpdated returns the current todos when Set ran since the last
 // consume, and clears the flag. The harness streams plan_update from this.
-func (p *PlanStore) ConsumeTodosUpdated() ([]Todo, bool) {
+func (p *PlanStore) ConsumeTodosUpdated() ([]streaming.Todo, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if !p.todosUpdated {
@@ -85,7 +87,7 @@ func (p *PlanStore) ConsumeTodosUpdated() ([]Todo, bool) {
 	if p.todos == nil {
 		return nil, true
 	}
-	cp := make([]Todo, len(p.todos))
+	cp := make([]streaming.Todo, len(p.todos))
 	copy(cp, p.todos)
 	return cp, true
 }
@@ -133,7 +135,7 @@ func (p *PlanStore) ExportInto(state map[string]any) {
 	if p.todos == nil {
 		delete(state, planStateKey)
 	} else {
-		cp := make([]Todo, len(p.todos))
+		cp := make([]streaming.Todo, len(p.todos))
 		copy(cp, p.todos)
 		state[planStateKey] = cp
 	}

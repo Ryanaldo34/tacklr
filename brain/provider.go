@@ -27,6 +27,34 @@ const (
 	MaxEngramReadDir = 500
 )
 
+// MountForKind selects the roots mount for kind, then a prefix mount, then any
+// brain mount. Harness tool adapters use this canonical layout resolver.
+func MountForKind(specs []vfs.MountSpec, kind string) (vfs.MountSpec, bool) {
+	var prefix vfs.MountSpec
+	var hasPrefix bool
+	for _, spec := range specs {
+		if spec.Profile != DefaultProfile {
+			continue
+		}
+		mode := spec.Params["mode"]
+		if mode == ModeRoots && kind != "" && spec.Params["kind"] == kind {
+			return spec, true
+		}
+		if mode != ModeRoots && !hasPrefix {
+			prefix, hasPrefix = spec, true
+		}
+	}
+	if hasPrefix {
+		return prefix, true
+	}
+	for _, spec := range specs {
+		if spec.Profile == DefaultProfile {
+			return spec, true
+		}
+	}
+	return vfs.MountSpec{}, false
+}
+
 // BrainFactory opens a vfs.Provider over Engine objects (Engrams as Markdown files).
 // Profile() is ID or DefaultProfile ("brain"). vfs stays brain-free.
 type BrainFactory struct {

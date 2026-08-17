@@ -8,6 +8,7 @@ import (
 
 	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/interrupt"
+	"github.com/ryanaldo34/tacklr/streaming"
 )
 
 const (
@@ -19,9 +20,9 @@ const (
 )
 
 type planCheckpoint struct {
-	Todos           []Todo `json:"todos"`
-	Document        string `json:"document,omitempty"`
-	DocumentUpdated bool   `json:"documentUpdated,omitempty"`
+	Todos           []streaming.Todo `json:"todos"`
+	Document        string           `json:"document,omitempty"`
+	DocumentUpdated bool             `json:"documentUpdated,omitempty"`
 }
 
 type permissionsCheckpoint struct {

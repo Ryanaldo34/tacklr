@@ -17,6 +17,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/internal/hostcontrol"
 	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/streaming"
@@ -462,8 +463,8 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 
 	// Parked interrupt + new user prompt (ACP session/prompt): clear park and
 	// pair cancelled tools before the new turn. Resume (Responses) is unchanged.
-	if req.Prompt != "" && len(req.Responses) == 0 && h.HasOpenToolWork() {
-		h.FinalizeCancelledWork(ctx)
+	if req.Prompt != "" && len(req.Responses) == 0 && h.HostHasOpenToolWork(hostcontrol.Token{}) {
+		h.HostFinalizeCancelledWork(hostcontrol.Token{}, ctx)
 	}
 
 	turnKind := "prompt"
