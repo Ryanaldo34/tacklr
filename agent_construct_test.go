@@ -2,6 +2,7 @@ package tacklr
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -92,5 +93,28 @@ func TestNewAgent_configurationInvariants(t *testing.T) {
 	t.Cleanup(h.Close)
 	if h.maxWindowSize != 8192 {
 		t.Fatalf("resolved max window = %d", h.maxWindowSize)
+	}
+}
+
+func TestAgentHarness_checkpointFailureIsHostVisibleAndClearsAfterRecovery(t *testing.T) {
+	// Arrange
+	h := mustNewAgent(t, AgentOptions{
+		SessionID: "checkpoint-health",
+		Model:     &mockStrategy{},
+		Store:     failSaveStore{InMemoryStore: stores.NewInMemoryStore()},
+	})
+
+	// Act
+	saveErr := h.persistSession(t.Context())
+	reported := h.CheckpointError()
+	h.store = stores.NewInMemoryStore()
+	recoveryErr := h.persistSession(t.Context())
+
+	// Assert
+	if saveErr == nil || !errors.Is(reported, saveErr) {
+		t.Fatalf("save error = %v reported = %v", saveErr, reported)
+	}
+	if recoveryErr != nil || h.CheckpointError() != nil {
+		t.Fatalf("recovery error = %v reported = %v", recoveryErr, h.CheckpointError())
 	}
 }

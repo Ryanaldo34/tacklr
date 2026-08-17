@@ -66,13 +66,14 @@ func (m *MountSession) GetAfterPersist() AfterPersistFunc {
 	return m.afterPersist
 }
 
-func (m *MountSession) fireAfterPersist(ctx context.Context, virtualPath string) {
+func (m *MountSession) fireAfterPersist(ctx context.Context, virtualPath string) error {
 	m.mu.Lock()
 	fn := m.afterPersist
 	m.mu.Unlock()
 	if fn != nil {
-		_ = fn(ctx, virtualPath)
+		return fn(ctx, virtualPath)
 	}
+	return nil
 }
 
 // NewMountSession binds a session id to a process registry.
@@ -280,8 +281,7 @@ func (m *MountSession) WriteFile(ctx context.Context, virtualPath string, data [
 	if err := m.writeContents(ctx, cleaned, bytes.NewReader(data), int64(len(data))); err != nil {
 		return err
 	}
-	m.fireAfterPersist(ctx, cleaned)
-	return nil
+	return m.fireAfterPersist(ctx, cleaned)
 }
 
 // writeContents writes exactly size bytes from r to virtualPath (must be cleaned).

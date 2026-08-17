@@ -340,7 +340,7 @@ func (a *AgentHarness) runBackgroundJob(ctx context.Context, j *backgroundJob) {
 	}
 
 	if j.worker.store != nil && j.worker.sessionId != "" {
-		if err := j.worker.checkpointSession(ctx); err != nil {
+		if err := j.worker.persistSession(ctx); err != nil {
 			slog.Error("failed to checkpoint background worker", append(logAttrs, "error", err)...)
 		}
 	}
@@ -476,7 +476,11 @@ func (a *AgentHarness) resumeInterruptedJob(ctx context.Context, j *backgroundJo
 		return "", fmt.Errorf("worker %q: incomplete: %w", workerName, ErrFailed)
 	}
 	if worker.store != nil && worker.sessionId != "" {
-		_ = worker.checkpointSession(ctx)
+		if err := worker.persistSession(ctx); err != nil {
+			a.clearPark(j.id)
+			a.removeJob(j.id)
+			return "", fmt.Errorf("checkpoint interrupted worker %q: %w", workerName, err)
+		}
 	}
 	parkMeta := parkedWorkerMeta{
 		WorkerName:        workerName,

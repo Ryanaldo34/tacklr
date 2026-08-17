@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 
 	"github.com/ryanaldo34/tacklr/brain"
@@ -43,15 +44,30 @@ func Start(ms *vfs.MountSession, eng *brain.Engine, scope brain.Scope, attachMem
 		ms:      ms,
 		track:   make(map[string]struct{}),
 	}
+	b.sched.SetObserver(func(event SchedulerEvent) {
+		slog.ErrorContext(context.Background(), "vfsindex: asynchronous index failed",
+			"path", event.Path,
+			"reason", event.Reason,
+			"error", event.Err,
+		)
+	})
 	prev := ms.GetAfterPersist()
 	ms.SetAfterPersist(func(ctx context.Context, path string) error {
 		if prev != nil {
-			_ = prev(ctx, path)
+			if err := prev(ctx, path); err != nil {
+				return err
+			}
 		}
 		if !b.ShouldIndex(path) {
 			return nil
 		}
-		return b.sched.Notify(ctx, path, ReasonSync)
+		if path == MemoryPoint || strings.HasPrefix(path, MemoryPoint+"/") {
+			return b.Indexer.IndexPath(ctx, path)
+		}
+		// Eventual-consistency mounts report queue failures through Observer;
+		// the backend write has already committed and is not rolled back.
+		_ = b.sched.Notify(ctx, path, ReasonSync)
+		return nil
 	})
 	warmCtx, cancel := context.WithCancel(context.Background())
 	b.cancel = cancel
@@ -64,11 +80,19 @@ func Start(ms *vfs.MountSession, eng *brain.Engine, scope brain.Scope, attachMem
 		go func() {
 			defer b.wg.Done()
 			if _, err := idx.IndexPrefix(warmCtx, point, IndexOpts{}); err != nil && !errors.Is(err, context.Canceled) {
-				slog.Debug("vfsindex: IndexPrefix warm-up", "point", point, "error", err)
+				b.sched.report(SchedulerEvent{Path: point, Reason: ReasonSync, Err: err})
 			}
 		}()
 	}
 	return b, nil
+}
+
+// SetObserver replaces the asynchronous indexing failure observer.
+func (b *Bridge) SetObserver(observer func(SchedulerEvent)) {
+	if b == nil || b.sched == nil {
+		return
+	}
+	b.sched.SetObserver(observer)
 }
 
 // Close stops warm-up and the async scheduler.

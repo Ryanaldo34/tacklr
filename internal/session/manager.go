@@ -111,6 +111,18 @@ func (s *SessionManager) ClearInterrupts() {
 	s.resolved = interruptMap{}
 }
 
+// DropInterrupt removes one interrupt after a durability failure prevents it
+// from being safely exposed to a client.
+func (s *SessionManager) DropInterrupt(id string) {
+	if s == nil || id == "" {
+		return
+	}
+	s.mu.Lock()
+	delete(s.pending, id)
+	delete(s.resolved, id)
+	s.mu.Unlock()
+}
+
 // ReturnInterrupt resolves a parked interrupt (session-scoped; no turn bus needed).
 func (s *SessionManager) ReturnInterrupt(id string, result []byte) (interrupt.Interrupt, error) {
 	return s.returnInterrupt(id, result)

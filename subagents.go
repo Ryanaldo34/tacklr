@@ -236,9 +236,9 @@ func (a *AgentHarness) runWorker(ctx context.Context, workerName, task string, b
 
 	// Ensure child is durable when a store is available.
 	if worker.store != nil && worker.sessionId != "" {
-		if err := worker.checkpointSession(ctx); err != nil {
+		if err := worker.persistSession(ctx); err != nil {
 			slog.Error("failed to checkpoint worker", append(logAttrs, "error", err)...)
-			// Continue with live park; durability is best-effort here.
+			return "", fmt.Errorf("checkpoint interrupted worker %q: %w", workerName, err)
 		}
 	}
 

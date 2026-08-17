@@ -33,6 +33,8 @@ type AgentHarness struct {
 	mcpCredentialResolver mcp.CredentialResolver
 	instructions          string
 	store                 stores.BaseStore
+	checkpointMu          sync.Mutex
+	checkpointErr         error
 	watchDog              AgentWatchDog
 	maxWindowSize         int
 	maxTurnRequests       int // 0 = unlimited; from Config.MaxTurnRequests
@@ -146,14 +148,14 @@ func (a *AgentHarness) restoreMessages(window []*Message) {
 // checkpointSaveTimeout is the max save duration when the turn context is cancelled.
 const checkpointSaveTimeout = 10 * time.Second
 
-// persistSession writes a checkpoint. Failures are logged only.
+// persistSession writes a checkpoint and records the latest durability error.
 // Skips when store or session id is missing. Uses a timeout that outlives
 // turn cancel so abort still dumps. Close always calls this, then releases
 // process resources. Interrupt paths also call it because the harness stays
 // live for ResumeInterrupts.
-func (a *AgentHarness) persistSession(ctx context.Context) {
+func (a *AgentHarness) persistSession(ctx context.Context) error {
 	if a.store == nil || strings.TrimSpace(a.sessionId) == "" {
-		return
+		return nil
 	}
 	// Keep trace context; drop cancel so save can finish after abort.
 	parent := context.Background()
@@ -164,18 +166,37 @@ func (a *AgentHarness) persistSession(ctx context.Context) {
 	defer cancel()
 
 	if err := a.checkpointSession(saveCtx); err != nil {
+		a.setCheckpointError(err)
 		slog.ErrorContext(saveCtx, "session checkpoint failed",
 			"area", "session_management",
 			"session_id", a.sessionId,
 			"error", err,
 		)
-		return
+		return err
 	}
+	a.setCheckpointError(nil)
 	slog.DebugContext(saveCtx, "session checkpointed",
 		"area", "session_management",
 		"session_id", a.sessionId,
 		"context_window_size", len(a.Messages()),
 	)
+	return nil
+}
+
+// CheckpointError returns the most recent checkpoint failure, if any.
+func (a *AgentHarness) CheckpointError() error {
+	if a == nil {
+		return nil
+	}
+	a.checkpointMu.Lock()
+	defer a.checkpointMu.Unlock()
+	return a.checkpointErr
+}
+
+func (a *AgentHarness) setCheckpointError(err error) {
+	a.checkpointMu.Lock()
+	a.checkpointErr = err
+	a.checkpointMu.Unlock()
 }
 
 // checkpointSession builds and stores a SessionCheckpoint. Call persistSession

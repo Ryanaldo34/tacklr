@@ -286,8 +286,8 @@ func TestSpawnWorker_interruptPropagatesAndResumes(t *testing.T) {
 		ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "parent done", IsComplete: true}
 	}
 
-	// Store save failures must not drop a live interrupt — park stays in-process.
-	store := failSaveStore{InMemoryStore: stores.NewInMemoryStore()}
+	// Durable store preserves the bubbled worker interrupt across the parent park.
+	store := stores.NewInMemoryStore()
 	h := mustNewAgent(t, AgentOptions{
 		SessionID: "sess-root",
 		Config:    Config{MaxWindowSize: 8192},

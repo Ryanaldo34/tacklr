@@ -333,8 +333,18 @@ func (a *AgentHarness) runTurnLoop(ctx context.Context, out chan StreamEvent, tu
 					a.pendingMu.Lock()
 					a.pendingToolCalls[tcKey] = stores.PendingToolCall{ToolCall: &tc, InterruptActive: true}
 					a.pendingMu.Unlock()
+					if err := a.persistSession(toolCtx); err != nil {
+						a.pendingMu.Lock()
+						delete(a.pendingToolCalls, tcKey)
+						a.pendingMu.Unlock()
+						a.session.DropInterrupt(tcKey)
+						out <- StreamEvent{
+							Type:  StreamEventError,
+							Error: fmt.Errorf("persist interrupt before delivery: %w", err),
+						}
+						return
+					}
 					out <- StreamEvent{Type: StreamEventInterrupt, MessageID: tcKey, Data: data}
-					a.persistSession(toolCtx)
 					return
 				}
 				a.pendingMu.Lock()

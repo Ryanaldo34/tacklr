@@ -84,6 +84,13 @@ func TestBridge_policyAndTrack(t *testing.T) {
 	if !br.ShouldIndex("/work/a.txt") {
 		t.Fatal("tracked path")
 	}
+	if err := ms.WriteFile(ctx, "/memory/strict.txt", []byte("strict-memory-phrase\n")); err != nil {
+		t.Fatal(err)
+	}
+	page, err := eng.Search(ctx, scope, brain.SearchRequest{Query: "strict-memory-phrase"}, brain.NewSearchContext())
+	if err != nil || len(page.Objects) == 0 {
+		t.Fatalf("strict memory index: page=%+v err=%v", page, err)
+	}
 
 	if err := ms.WriteFile(ctx, "/auto/live.txt", []byte("live-auto-phrase\n")); err != nil {
 		t.Fatal(err)

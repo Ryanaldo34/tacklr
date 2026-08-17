@@ -269,6 +269,12 @@ func TestMountSession_s3MemAPI(t *testing.T) {
 	if saw != "/data/hook.txt" {
 		t.Fatalf("AfterPersist saw %q", saw)
 	}
+	hookErr := errors.New("index unavailable")
+	ms.SetAfterPersist(func(context.Context, string) error { return hookErr })
+	if err := ms.WriteFile(ctx, "/data/hook-error.txt", []byte("h\n")); !errors.Is(err, hookErr) {
+		t.Fatalf("AfterPersist error = %v", err)
+	}
+	ms.SetAfterPersist(nil)
 
 	// Document IR over S3 + Sync
 	doc, err := ms.ReadText(ctx, "/data/hello.go")
