@@ -856,6 +856,73 @@ func TestBackgroundJobs_listJobsIncludesRunningWorker(t *testing.T) {
 	}
 }
 
+func TestBackgroundJobs_backgroundJobsNudgeAndFormatJobErrors(t *testing.T) {
+	// Arrange
+	h := mustNewAgent(t, AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  &mockStrategy{},
+		SubAgents: []*SubAgent{
+			{WorkerName: "researcher", Model: &mockStrategy{}},
+		},
+	})
+	t.Cleanup(h.Close)
+	rt := turnRuntime(h)
+	if _, err := h.scheduleBackgroundWorker("researcher", "task", "nudge-me", rt); err != nil {
+		t.Fatal(err)
+	}
+
+	// Act
+	nudge := h.backgroundJobsNudge()
+	_, emptyErr := h.formatJob("")
+	_, missingErr := h.formatJob("missing")
+	formatted, formatErr := h.formatJob("nudge-me")
+	_, _ = h.cancelJob(t.Context(), "nudge-me")
+
+	// Assert
+	if !strings.Contains(nudge, "Automated harness nudge") || !strings.Contains(nudge, "nudge-me") {
+		t.Fatalf("nudge = %q", nudge)
+	}
+	if !errors.Is(emptyErr, ErrInvalid) || !errors.Is(missingErr, ErrNotFound) {
+		t.Fatalf("format errors = %v %v", emptyErr, missingErr)
+	}
+	if formatErr != nil || !strings.Contains(formatted, "Still running") {
+		t.Fatalf("formatted = %q err = %v", formatted, formatErr)
+	}
+}
+
+func TestBackgroundJobs_blockingGetAwaitCompletion(t *testing.T) {
+	// Arrange
+	workerModel := &mockStrategy{
+		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
+			time.Sleep(200 * time.Millisecond)
+			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "blocked result", IsComplete: true}
+		},
+	}
+	h := mustNewAgent(t, AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  &mockStrategy{},
+		SubAgents: []*SubAgent{
+			{WorkerName: "researcher", Model: workerModel},
+		},
+	})
+	t.Cleanup(h.Close)
+	rt := turnRuntime(h)
+	if _, err := h.scheduleBackgroundWorker("researcher", "task", "blocked", rt); err != nil {
+		t.Fatal(err)
+	}
+
+	// Act
+	result, err := h.readJob(t.Context(), "blocked", true, rt)
+
+	// Assert
+	if err != nil || result != "blocked result" {
+		t.Fatalf("result = %q err = %v", result, err)
+	}
+	if h.getJob("blocked") != nil {
+		t.Fatal("completed job should be removed")
+	}
+}
+
 func mustRun(t *testing.T, h *AgentHarness, prompt string) <-chan StreamEvent {
 	t.Helper()
 	events, err := h.Run(context.Background(), prompt)
