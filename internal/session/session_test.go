@@ -109,6 +109,21 @@ func TestCheckpointer_rejectsInvalidWindowOnCapture(t *testing.T) {
 	}
 }
 
+func TestCheckpointer_captureRejectsUnmarshallableUserState(t *testing.T) {
+	sm := session.NewSessionManager()
+	if err := sm.StateSet("bad", make(chan int)); err != nil {
+		t.Fatal(err)
+	}
+	_, err := session.NewCheckpointer().Capture(
+		[]*streaming.Message{{Role: streaming.RoleUser, Content: "go"}},
+		sm,
+		nil,
+	)
+	if err == nil || !strings.Contains(err.Error(), "checkpoint user state") {
+		t.Fatalf("Capture error = %v", err)
+	}
+}
+
 func TestCheckpointer_applyRejectsUnsupportedVersion(t *testing.T) {
 	// Arrange
 	sm := session.NewSessionManager()

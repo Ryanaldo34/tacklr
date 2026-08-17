@@ -77,6 +77,23 @@ func TestCreatePlanTool(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "plan document text is required") {
 			t.Fatalf("err = %v", err)
 		}
+		_, err = pt2.create.invoke(context.Background(),
+			`{"plan":"valid","todos":[]}`, rt2)
+		if err == nil || !strings.Contains(err.Error(), "at least one todo") {
+			t.Fatalf("empty todos err = %v", err)
+		}
+	})
+	t.Run("starts first non-completed todo", func(t *testing.T) {
+		pt, rt := testPlanTools(), planRT()
+		_, err := pt.create.invoke(context.Background(),
+			`{"plan":"ship","todos":[{"title":"done","status":"completed","description":""},{"title":"next","status":"","description":"go"}]}`, rt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		plan := pt.store.Get()
+		if len(plan) != 2 || plan[0].Status != streaming.TodoStatusCompleted || plan[1].Status != streaming.TodoStatusInProgress {
+			t.Fatalf("plan = %+v", plan)
+		}
 	})
 }
 

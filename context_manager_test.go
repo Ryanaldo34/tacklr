@@ -1,6 +1,9 @@
 package tacklr
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestModelContextManager_enforcesMessageInvariantsAtMutation(t *testing.T) {
 	// Arrange
@@ -42,5 +45,25 @@ func TestContextPolicy_validateRejectsInvalidRatios(t *testing.T) {
 	}
 	if err := DefaultContextPolicy().Validate(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestModelContextManager_installPlanDocument(t *testing.T) {
+	manager := NewModelContextManager()
+
+	if err := manager.InstallPlanDocument(""); err == nil || !strings.Contains(err.Error(), "no plan document") {
+		t.Fatalf("empty plan error = %v", err)
+	}
+	if err := manager.InstallPlanDocument("PROJECT PLAN"); err == nil || !strings.Contains(err.Error(), "empty window") {
+		t.Fatalf("empty window error = %v", err)
+	}
+
+	manager.Restore([]*Message{{Role: RoleUser, Content: "goal"}})
+	if err := manager.InstallPlanDocument("Ship the release"); err != nil {
+		t.Fatal(err)
+	}
+	window := manager.Messages()
+	if len(window) != 2 || !isPlanDocument(window[1]) || rawPlanFromDocumentMessage(window[1]) != "Ship the release" {
+		t.Fatalf("window = %+v", window)
 	}
 }

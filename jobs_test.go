@@ -10,8 +10,33 @@ import (
 	"testing"
 	"time"
 
+	session "github.com/ryanaldo34/tacklr/internal/session"
 	"github.com/ryanaldo34/tacklr/interrupt"
 )
+
+func mustTestToolPermissionInterrupt() interrupt.Interrupt {
+	intr := &interrupt.ToolPermissionInterrupt{}
+	if err := intr.InitFromPayload([]byte(`{"toolName":"grep"}`)); err != nil {
+		panic(err)
+	}
+	return intr
+}
+
+func resolvedToolPermissionRuntime(h *AgentHarness, toolCallID string) HarnessRuntime {
+	ch := make(chan StreamEvent, 8)
+	go func() {
+		for range ch {
+		}
+	}()
+	rt := session.NewRuntime(ch, h.session).WithToolCallID(toolCallID)
+	if _, err := rt.RaiseInterrupt("tool_permission", []byte(`{"toolName":"grep"}`)); err == nil {
+		panic("expected interrupt park")
+	}
+	if _, err := h.session.ReturnInterrupt(toolCallID, []byte(`{"optionId":"allow-once"}`)); err != nil {
+		panic(err)
+	}
+	return rt
+}
 
 func toolResultByName(events []StreamEvent, name string) string {
 	for _, ev := range events {
@@ -1002,6 +1027,104 @@ func TestBackgroundJobs_blockingGetAwaitCompletion(t *testing.T) {
 	}
 	if h.getJob("blocked") != nil {
 		t.Fatal("completed job should be removed")
+	}
+}
+
+func TestBackgroundJobs_incompleteWorkerWithoutInterruptFails(t *testing.T) {
+	workerModel := &mockStrategy{
+		invokeFn: func(_ context.Context, _ []*Message, _ []*Tool, ch chan<- LLMResponseChunk) {
+			ch <- LLMResponseChunk{Type: StreamEventReasoning, Content: "thinking"}
+		},
+	}
+	h := mustNewAgent(t, AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  &mockStrategy{},
+		SubAgents: []*SubAgent{
+			{WorkerName: "researcher", Model: workerModel},
+		},
+	})
+	t.Cleanup(h.Close)
+	rt := turnRuntime(h)
+	if _, err := h.scheduleBackgroundWorker("researcher", "task", "incomplete", rt); err != nil {
+		t.Fatal(err)
+	}
+	waitJobStatus(t, h, "incomplete", jobStatusFailed)
+}
+
+func TestBackgroundJobs_workerStartFailureMarksJobFailed(t *testing.T) {
+	workerModel := &mockStrategy{invokeErr: errors.New("cannot start")}
+	h := mustNewAgent(t, AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  &mockStrategy{},
+		SubAgents: []*SubAgent{
+			{WorkerName: "researcher", Model: workerModel},
+		},
+	})
+	t.Cleanup(h.Close)
+	rt := turnRuntime(h)
+	if _, err := h.scheduleBackgroundWorker("researcher", "task", "start_fail", rt); err != nil {
+		t.Fatal(err)
+	}
+	waitJobStatus(t, h, "start_fail", jobStatusFailed)
+}
+
+func TestBackgroundJobs_resumeInterruptedJobReportsMissingParkState(t *testing.T) {
+	h := mustNewAgent(t, AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  &mockStrategy{},
+		SubAgents: []*SubAgent{
+			{WorkerName: "researcher", Model: &mockStrategy{}},
+		},
+	})
+	t.Cleanup(h.Close)
+	rt := resolvedToolPermissionRuntime(h, "collect_job")
+	j := &workerRun{
+		id:         "paused",
+		workerName: "researcher",
+		status:     jobStatusInterrupted,
+		childIntr:  mustTestToolPermissionInterrupt(),
+		done:       make(chan struct{}),
+	}
+	close(j.done)
+	h.registerJob(j)
+
+	_, err := h.readJob(t.Context(), "paused", true, rt)
+	if err == nil || !strings.Contains(err.Error(), "parked worker state is missing") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestBackgroundJobs_resumeInterruptedJobReportsMissingWorkerSpec(t *testing.T) {
+	store := testStore(t)
+	h := mustNewAgent(t, AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  &mockStrategy{},
+		Store:  store,
+		SubAgents: []*SubAgent{
+			{WorkerName: "researcher", Model: &mockStrategy{}},
+		},
+	})
+	t.Cleanup(h.Close)
+	rt := resolvedToolPermissionRuntime(h, "collect_job")
+	h.session.SetParkedWorker("paused", session.ParkedWorkerMeta{
+		WorkerName:      "researcher",
+		WorkerSessionID: "sess/w/researcher/paused",
+		Task:            "work",
+	})
+	j := &workerRun{
+		id:         "paused",
+		workerName: "researcher",
+		status:     jobStatusInterrupted,
+		childIntr:  mustTestToolPermissionInterrupt(),
+		done:       make(chan struct{}),
+	}
+	close(j.done)
+	h.registerJob(j)
+	delete(h.subagents, "researcher")
+
+	_, err := h.readJob(t.Context(), "paused", true, rt)
+	if err == nil || !errors.Is(err, ErrNotFound) {
+		t.Fatalf("error = %v", err)
 	}
 }
 

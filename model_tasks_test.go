@@ -281,6 +281,67 @@ func TestWatchModelStream_forwardBlockedByCancelledContext(t *testing.T) {
 	}
 }
 
+func TestDefaultModelTasks_handoffUsesFallbackOnStreamContentError(t *testing.T) {
+	// Arrange
+	model := &mockStrategy{
+		invokeFn: func(_ context.Context, _ []*Message, _ []*Tool, ch chan<- LLMResponseChunk) {
+			ch <- LLMResponseChunk{Type: StreamEventError, Content: "handoff stream failed"}
+		},
+	}
+	tasks := newDefaultModelTasks(model, NewModelContextManager(), DefaultContextPolicy(), 8192)
+	ctxMgr := NewModelContextManager()
+	ctxMgr.Restore([]*Message{{Role: RoleUser, Content: "goal"}})
+	tasks.context = ctxMgr
+
+	// Act
+	err := tasks.Handoff(context.Background(), []Todo{{Title: "T", Status: streaming.TodoStatusPending}}, "", nil, "")
+
+	// Assert
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(tasks.context.Messages()[1].Content, "fallback") {
+		t.Fatalf("window = %+v", tasks.context.Messages())
+	}
+}
+
+func TestDefaultModelTasks_absorbFitProgressiveCountFailure(t *testing.T) {
+	// Arrange
+	model := &mockStrategy{
+		countTokensFn: func(_ context.Context, msgs []*Message, _ []*Tool) (int, error) {
+			if len(msgs) > 3 {
+				return 0, fmt.Errorf("count failed")
+			}
+			total := 0
+			for _, msg := range msgs {
+				if msg != nil {
+					total += len(msg.Content)
+				}
+			}
+			return total, nil
+		},
+	}
+	tasks := newDefaultModelTasks(model, NewModelContextManager(), ContextPolicy{
+		PressureRatio:    0.5,
+		CompressFraction: 0.5,
+	}, 25)
+	ctxMgr := NewModelContextManager()
+	ctxMgr.Restore([]*Message{
+		{Role: RoleUser, Content: "goal"},
+		{Role: RoleAssistant, Content: strings.Repeat("x", 15)},
+		{Role: RoleAssistant, Content: strings.Repeat("y", 15)},
+	})
+	tasks.context = ctxMgr
+
+	// Act
+	_, err := tasks.Absorb(context.Background(), &Message{Role: RoleUser, Content: "more"}, nil, "")
+
+	// Assert
+	if err == nil || !strings.Contains(err.Error(), "count tokens") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestFallbackHandoffContent_listsRemainingTodos(t *testing.T) {
 	// Act
 	content := fallbackHandoffContent([]Todo{
