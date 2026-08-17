@@ -81,7 +81,9 @@ func (a *AgentHarness) startTurn(ctx context.Context, user *Message) (<-chan Str
 		a.runMu.Lock()
 		defer a.runMu.Unlock()
 		defer close(out)
-		defer a.persistSession(ctx)
+		defer func() {
+			_ = a.persistSession(ctx)
+		}()
 
 		emitCancelled := func() {
 			a.finalizeCancelledWork(out)
@@ -407,7 +409,9 @@ func (a *AgentHarness) runTurnLoop(ctx context.Context, out chan StreamEvent, tu
 			}
 		}
 		if len(a.pendingSnapshot()) > 0 {
-			a.persistSession(ctx)
+			if err := a.persistSession(ctx); err != nil {
+				out <- StreamEvent{Type: StreamEventError, Error: fmt.Errorf("persist interrupted turn: %w", err)}
+			}
 			return
 		}
 		if effect := batchEffects.resolved(); effect != EffectNone {

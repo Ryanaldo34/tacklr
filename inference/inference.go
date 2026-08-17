@@ -440,7 +440,7 @@ func (s *OpenAIInferenceStrategy) parseSSEResponse(ctx context.Context, body io.
 			Error  *apiErrorDetail `json:"error"`
 		}
 		if err := json.Unmarshal([]byte(data), &evt); err != nil {
-			emitFailure(fmt.Errorf("%w: %v", ErrMalformedStream, err), "")
+			emitFailure(fmt.Errorf("%w: %w", ErrMalformedStream, err), "")
 			return
 		}
 
@@ -529,7 +529,7 @@ func (s *OpenAIInferenceStrategy) parseSSEResponse(ctx context.Context, body io.
 		return
 	}
 	if err := scanner.Err(); err != nil {
-		emitFailure(fmt.Errorf("%w: %v", ErrIncompleteStream, err), "")
+		emitFailure(fmt.Errorf("%w: %w", ErrIncompleteStream, err), "")
 		return
 	}
 	if !terminal {

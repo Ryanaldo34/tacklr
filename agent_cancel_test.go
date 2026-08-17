@@ -46,7 +46,7 @@ func TestAgent_HasOpenToolWorkAndFinalizeCancelled(t *testing.T) {
 		t.Fatal("pending tool call should count")
 	}
 
-	h.HostFinalizeCancelledWork(token, ctx)
+	h.HostFinalizeCancelledWork(ctx, token)
 
 	if h.HostHasOpenToolWork(token) {
 		t.Fatal("after finalize, no open tool work")

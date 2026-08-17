@@ -464,7 +464,7 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 	// Parked interrupt + new user prompt (ACP session/prompt): clear park and
 	// pair cancelled tools before the new turn. Resume (Responses) is unchanged.
 	if req.Prompt != "" && len(req.Responses) == 0 && h.HostHasOpenToolWork(hostcontrol.Token{}) {
-		h.HostFinalizeCancelledWork(hostcontrol.Token{}, ctx)
+		h.HostFinalizeCancelledWork(ctx, hostcontrol.Token{})
 	}
 
 	turnKind := "prompt"

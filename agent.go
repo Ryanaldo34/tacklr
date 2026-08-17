@@ -560,7 +560,7 @@ func (a *AgentHarness) HostHasOpenToolWork(hostcontrol.Token) bool {
 }
 
 // HostFinalizeCancelledWork pairs cancelled tools for a trusted server adapter.
-func (a *AgentHarness) HostFinalizeCancelledWork(_ hostcontrol.Token, ctx context.Context) {
+func (a *AgentHarness) HostFinalizeCancelledWork(ctx context.Context, _ hostcontrol.Token) {
 	a.finalizeCancelledWork(nil)
 }
 
@@ -675,7 +675,7 @@ func (a *AgentHarness) initMCP(ctx context.Context) {
 // Call after the Run events channel is drained, or when construct/runHarness fails.
 func (a *AgentHarness) Close() {
 	a.cancelBackgroundJobs()
-	a.persistSession(context.Background())
+	_ = a.persistSession(context.Background())
 	a.parkMu.Lock()
 	for id, w := range a.parkedWorkersLive {
 		if w != nil {
