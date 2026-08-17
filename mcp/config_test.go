@@ -49,3 +49,24 @@ func TestMCPConfig_durableTopologyResolvesEphemeralCredentials(t *testing.T) {
 		t.Fatalf("resolved headers = %#v", resolved.Headers)
 	}
 }
+
+func TestMCPConfig_validateRejectsUnsafeOrIncompleteDefinitions(t *testing.T) {
+	// Arrange
+	cases := []mcp.MCPConfig{
+		{},
+		{Name: "stdio"},
+		{Name: "remote", Type: mcp.TransportHTTP, URL: "file:///tmp/socket"},
+		{Name: "remote", Type: mcp.TransportHTTP, URL: "https://example.test", Headers: []mcp.HTTPHeader{{Name: "X-Test\r\nInjected", Value: "x"}}},
+		{Name: "stdio", Command: "server", Env: []mcp.EnvVariable{{Name: "BAD=NAME", Value: "x"}}},
+	}
+
+	// Act and assert
+	for i, config := range cases {
+		if err := config.Validate(); err == nil {
+			t.Fatalf("case %d was accepted: %#v", i, config)
+		}
+	}
+	if err := (mcp.MCPConfig{Name: "remote", Type: mcp.TransportHTTP, URL: "https://example.test"}).Validate(); err != nil {
+		t.Fatal(err)
+	}
+}

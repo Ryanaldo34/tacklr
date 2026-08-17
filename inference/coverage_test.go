@@ -18,6 +18,9 @@ import (
 
 func TestMaxContextWindow_knownAndPrefixAndUnknown(t *testing.T) {
 	s := NewOpenAIInferenceStrategy(nil)
+	if s.httpClient != http.DefaultClient {
+		t.Fatal("nil client did not default to http.DefaultClient")
+	}
 	s.WithModel("gpt-5.4")
 	n, err := s.MaxContextWindow()
 	if err != nil || n != 1000000 {

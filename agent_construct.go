@@ -27,6 +27,17 @@ type Config struct {
 	MaxTurnRequests int
 }
 
+// Validate checks host configuration that does not depend on a model.
+func (c Config) Validate() error {
+	if c.MaxWindowSize < 0 {
+		return fmt.Errorf("tacklr: Config.MaxWindowSize must be positive")
+	}
+	if c.MaxTurnRequests < 0 {
+		return fmt.Errorf("tacklr: Config.MaxTurnRequests must not be negative")
+	}
+	return nil
+}
+
 // AgentOptions configures NewAgent and NewAgentFromSession.
 //
 // Usual fields: Config, Model, Store, Tools, MCPConfigs, SubAgents, SessionID.
@@ -91,6 +102,11 @@ type AgentOptions struct {
 	shareIndexBridge *vfsindex.Bridge
 }
 
+// Validate checks the complete public construction contract.
+func (opts AgentOptions) Validate() error {
+	return opts.validateAndNormalize()
+}
+
 // streamEventBuffer is the harness event channel size so EmitUpdate is not dropped
 // when the consumer lags briefly.
 const streamEventBuffer = 64
@@ -118,6 +134,9 @@ func newHarnessBase(opts AgentOptions, sm *session.SessionManager) (*AgentHarnes
 	}
 	if sm == nil {
 		return nil, fmt.Errorf("tacklr: session manager is required")
+	}
+	if err := opts.validateAndNormalize(); err != nil {
+		return nil, err
 	}
 	h := &AgentHarness{
 		model:                 opts.Model,
@@ -171,6 +190,48 @@ func newHarnessBase(opts AgentOptions, sm *session.SessionManager) (*AgentHarnes
 	h.toolRunner = newToolRunner(chain...)
 	h.toolResultHooks = newToolResultHookRegistry(opts.ToolResultHooks)
 	return h, nil
+}
+
+func (opts *AgentOptions) validateAndNormalize() error {
+	if opts.Model == nil {
+		return fmt.Errorf("tacklr: AgentOptions.Model is required")
+	}
+	if err := opts.Config.Validate(); err != nil {
+		return err
+	}
+	if opts.Config.MaxWindowSize == 0 {
+		size, err := opts.Model.MaxContextWindow()
+		if err != nil {
+			return fmt.Errorf("tacklr: resolve model context window: %w", err)
+		}
+		if size <= 0 {
+			return fmt.Errorf("tacklr: Config.MaxWindowSize is required when the model does not report a context window")
+		}
+		opts.Config.MaxWindowSize = size
+	}
+	if err := opts.ContextPolicy.Validate(); err != nil {
+		return err
+	}
+	for i, tool := range opts.Tools {
+		if tool == nil {
+			return fmt.Errorf("tacklr: AgentOptions.Tools[%d] is nil", i)
+		}
+	}
+	seenMCP := make(map[string]struct{}, len(opts.MCPConfigs))
+	for i := range opts.MCPConfigs {
+		config := opts.MCPConfigs[i]
+		if err := config.Validate(); err != nil {
+			return err
+		}
+		if _, ok := seenMCP[config.Name]; ok {
+			return fmt.Errorf("tacklr: duplicate MCP server name %q", config.Name)
+		}
+		seenMCP[config.Name] = struct{}{}
+		if config.CredentialRef != "" && opts.MCPCredentialResolver == nil {
+			return fmt.Errorf("tacklr: MCP credential resolver is required for server %q", config.Name)
+		}
+	}
+	return nil
 }
 
 func (h *AgentHarness) finishInit(ctx context.Context, subAgents []*SubAgent) error {

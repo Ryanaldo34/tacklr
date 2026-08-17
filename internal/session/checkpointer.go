@@ -30,6 +30,9 @@ func (Checkpointer) Capture(
 	if sm == nil {
 		return nil, fmt.Errorf("checkpointer: session manager is nil")
 	}
+	if err := streaming.ValidateMessages(window); err != nil {
+		return nil, fmt.Errorf("checkpointer: invalid context window: %w", err)
+	}
 	runtimeState, pending, resolved := sm.SnapshotDurable()
 	cp, err := stores.NewCheckpoint(window, pendingToolCalls, runtimeState, pending, resolved)
 	if err != nil {
@@ -60,6 +63,9 @@ type AppliedCheckpoint struct {
 func (Checkpointer) Apply(cp stores.SessionCheckpoint, sm *SessionManager) (AppliedCheckpoint, error) {
 	if sm == nil {
 		return AppliedCheckpoint{}, fmt.Errorf("checkpointer: session manager is nil")
+	}
+	if err := streaming.ValidateMessages(cp.ContextWindow); err != nil {
+		return AppliedCheckpoint{}, fmt.Errorf("checkpointer: invalid context window: %w", err)
 	}
 	sm.LoadUserAndPlanState(cp.State.RuntimeState)
 	if len(cp.State.SearchContext) > 0 {

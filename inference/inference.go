@@ -47,6 +47,9 @@ func (s *OpenAIInferenceStrategy) SetSystemPrompt(prompt string) {
 }
 
 func NewOpenAIInferenceStrategy(client *http.Client) *OpenAIInferenceStrategy {
+	if client == nil {
+		client = http.DefaultClient
+	}
 	return &OpenAIInferenceStrategy{
 		httpClient: client,
 		baseURL:    "https://api.openai.com/v1",

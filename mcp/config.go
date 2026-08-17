@@ -3,6 +3,8 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"strings"
 )
 
 // Transport types for MCP server connections. The set mirrors the transports
@@ -126,4 +128,36 @@ func (c MCPConfig) Resolve(ctx context.Context, resolver CredentialResolver) (MC
 	c.Env = append(append([]EnvVariable(nil), c.Env...), credentials.Env...)
 	c.Headers = append(append([]HTTPHeader(nil), c.Headers...), credentials.Headers...)
 	return c, nil
+}
+
+// Validate rejects incomplete transports and unsafe environment/header names.
+func (c MCPConfig) Validate() error {
+	if strings.TrimSpace(c.Name) == "" {
+		return fmt.Errorf("mcp: server name is required")
+	}
+	switch c.Type {
+	case "", TransportStdio:
+		if strings.TrimSpace(c.Command) == "" {
+			return fmt.Errorf("mcp server %q: command is required for stdio transport", c.Name)
+		}
+	case TransportHTTP, TransportSSE:
+		parsed, err := url.Parse(c.URL)
+		if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+			return fmt.Errorf("mcp server %q: valid http(s) URL is required", c.Name)
+		}
+	default:
+		return fmt.Errorf("mcp server %q: unsupported transport %q", c.Name, c.Type)
+	}
+	for _, env := range c.Env {
+		if strings.TrimSpace(env.Name) == "" || strings.ContainsAny(env.Name, "=\r\n") {
+			return fmt.Errorf("mcp server %q: invalid environment variable name", c.Name)
+		}
+	}
+	for _, header := range c.Headers {
+		if strings.TrimSpace(header.Name) == "" || strings.ContainsAny(header.Name, "\r\n") ||
+			strings.ContainsAny(header.Value, "\r\n") {
+			return fmt.Errorf("mcp server %q: invalid HTTP header", c.Name)
+		}
+	}
+	return nil
 }

@@ -20,7 +20,7 @@ type mockInferenceStrategy struct {
 	callNum        atomic.Int64
 }
 
-func (m *mockInferenceStrategy) MaxContextWindow() (int, error) { return 0, nil }
+func (m *mockInferenceStrategy) MaxContextWindow() (int, error) { return 8192, nil }
 func (m *mockInferenceStrategy) SupportsMIME(mimeType string) bool {
 	if m.supportsMIMEFn != nil {
 		return m.supportsMIMEFn(mimeType)

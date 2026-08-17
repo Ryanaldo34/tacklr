@@ -415,18 +415,15 @@ func (a *AgentHarness) runTurnLoop(ctx context.Context, out chan StreamEvent, tu
 // have no matching tool message. Restored dirty windows become valid before
 // the next model turn; new turns never commit unpaired calls.
 func (a *AgentHarness) pairOpenToolCalls(reason string) {
-	if a.context == nil {
-		return
-	}
 	msgs := a.context.Messages()
 	haveResult := make(map[string]struct{})
 	for _, m := range msgs {
-		if m != nil && m.Role == RoleTool && m.ToolCallID != "" {
+		if m.Role == RoleTool && m.ToolCallID != "" {
 			haveResult[m.ToolCallID] = struct{}{}
 		}
 	}
 	for _, m := range msgs {
-		if m == nil || m.Role != RoleAssistant {
+		if m.Role != RoleAssistant {
 			continue
 		}
 		for _, tc := range m.ToolCalls {

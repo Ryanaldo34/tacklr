@@ -60,6 +60,28 @@ func TestCheckpointer_roundTrip(t *testing.T) {
 	}
 }
 
+func TestCheckpointer_rejectsCorruptWindowBeforeApplyingState(t *testing.T) {
+	// Arrange
+	sm := session.NewSessionManager()
+	if err := sm.StateSet("existing", "kept"); err != nil {
+		t.Fatal(err)
+	}
+	checkpoint := stores.SessionCheckpoint{
+		ContextWindow: []*streaming.Message{nil},
+	}
+
+	// Act
+	_, err := session.NewCheckpointer().Apply(checkpoint, sm)
+
+	// Assert
+	if err == nil || !strings.Contains(err.Error(), "invalid context window") {
+		t.Fatalf("Apply error = %v", err)
+	}
+	if value, ok := sm.StateGet("existing"); !ok || value != "kept" {
+		t.Fatalf("state changed after rejected checkpoint: %v %v", value, ok)
+	}
+}
+
 // TestCheckpointer_nilManager_errors is the Capture/Apply guard outcome.
 func TestCheckpointer_nilManager_errors(t *testing.T) {
 	if _, err := session.NewCheckpointer().Capture(nil, nil, nil); err == nil {

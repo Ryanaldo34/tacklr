@@ -37,6 +37,9 @@ type SessionCheckpoint struct {
 }
 
 func NewCheckpoint(contextWindow []*streaming.Message, pendingToolCalls map[string]PendingToolCall, runtimeState map[string]any, pendingInterrupts, resolvedInterrupts any) (*SessionCheckpoint, error) {
+	if err := streaming.ValidateMessages(contextWindow); err != nil {
+		return nil, fmt.Errorf("invalid context window: %w", err)
+	}
 	var pendingJSON, resolvedJSON []byte
 	var err error
 
