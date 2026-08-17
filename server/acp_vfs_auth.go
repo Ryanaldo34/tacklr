@@ -8,13 +8,6 @@ import (
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
-const (
-	methodVFSBind    = "_tacklr/vfs/bind"
-	methodVFSRefresh = "_tacklr/vfs/refresh"
-	methodVFSUnbind  = "_tacklr/vfs/unbind"
-	methodVFSToken   = "_tacklr/vfs/token"
-)
-
 type vfsAuthWire struct {
 	Token     string     `json:"token"`
 	ExpiresAt *time.Time `json:"expiresAt,omitempty"`

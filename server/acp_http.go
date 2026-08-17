@@ -68,20 +68,17 @@ func (p *acpProtocol) handleACPPost(env ProtocolEnv, w http.ResponseWriter, r *h
 	setAffinityCookie(w, conn.ID)
 
 	sessionHdr := strings.TrimSpace(r.Header.Get(HeaderAcpSessionID))
-	if sessionScopedACPMethod(peek.Method) && sessionHdr == "" && !peek.IsNotification {
-		// Notifications like session/cancel may still omit header if body has sessionId;
-		// for requests we require the header per RFD.
-		if !peek.IsNotification {
-			http.Error(w, HeaderAcpSessionID+" required for "+peek.Method, http.StatusBadRequest)
-			return
-		}
+	transport := acpTransportFlagsFor(peek.Method)
+	if transport.requiresSessionHeader && sessionHdr == "" && !peek.IsNotification {
+		http.Error(w, HeaderAcpSessionID+" required for "+peek.Method, http.StatusBadRequest)
+		return
 	}
 	// Prefer header; fall back to body sessionId for routing.
 	sessionID := sessionHdr
 	if sessionID == "" {
 		sessionID = peek.SessionID
 	}
-	if sessionID != "" && peek.Method != "session/load" && !conn.hasSession(sessionID) {
+	if sessionID != "" && !transport.allowsUnattachedSession && !conn.hasSession(sessionID) {
 		http.Error(w, "session is not attached to this connection", http.StatusForbidden)
 		return
 	}

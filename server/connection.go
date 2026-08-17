@@ -215,10 +215,9 @@ func (c *Connection) rememberRoute(id json.RawMessage, method, sessionID string)
 	if c == nil || len(id) == 0 {
 		return
 	}
-	connLevel := method == "session/new" || method == "session/load" ||
-		method == "initialize" || method == "authenticate"
+	flags := acpTransportFlagsFor(method)
 	c.mu.Lock()
-	c.routes[string(id)] = streamRoute{method: method, sessionID: sessionID, connLevel: connLevel}
+	c.routes[string(id)] = streamRoute{method: method, sessionID: sessionID, connLevel: flags.connLevelResult}
 	c.mu.Unlock()
 }
 
@@ -380,7 +379,7 @@ func (w *acpStreamWriter) WriteResult(id json.RawMessage, result any) error {
 	if res, ok := result.(map[string]any); ok {
 		if sid, _ := res["sessionId"].(string); sid != "" {
 			w.conn.noteSession(sid)
-			if route.method == "session/new" || route.method == "session/load" {
+			if acpTransportFlagsFor(route.method).resultSessionConnLevel {
 				connLevel = true
 				sessionID = ""
 			}
@@ -463,16 +462,4 @@ func isJSONContentType(ct string) bool {
 // acceptSSE reports whether Accept includes text/event-stream.
 func acceptSSE(accept string) bool {
 	return strings.Contains(strings.ToLower(accept), "text/event-stream")
-}
-
-// sessionScopedACPMethod is true when the RFD requires Acp-Session-Id on POST.
-func sessionScopedACPMethod(method string) bool {
-	switch method {
-	case "session/prompt", "session/resume", "session/cancel",
-		"session/set_config_option", "session/close",
-		methodVFSBind, methodVFSRefresh, methodVFSUnbind:
-		return true
-	default:
-		return false
-	}
 }
