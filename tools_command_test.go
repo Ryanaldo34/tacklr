@@ -133,12 +133,12 @@ func TestRunCommand_truncatesOver1MiB(t *testing.T) {
 	}
 }
 
-func TestPosixShQuote_cdIntoQuotedPath(t *testing.T) {
+func TestRunCommand_cdIntoQuotedPath(t *testing.T) {
 	dir := t.TempDir() + "/it's a dir"
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("/bin/sh", "-c", "cd "+posixShQuote(dir)+" && pwd")
+	cmd := exec.Command("/bin/sh", "-c", `cd "$1" && pwd`, "run_command", dir)
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatal(err)
