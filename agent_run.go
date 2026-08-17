@@ -212,6 +212,19 @@ func (a *AgentHarness) RunMessage(ctx context.Context, user *Message) (<-chan St
 					}
 				}
 				if len(toolCalls) == 0 {
+					if nudge := a.backgroundJobsNudge(); nudge != "" {
+						if err := a.addToContext(ctx, &Message{Role: RoleUser, Content: nudge}, out); err != nil {
+							if ctx.Err() != nil {
+								emitCancelled()
+								return
+							}
+							a.stripUnpairedToolCallsAfterInferenceError()
+							out <- StreamEvent{Type: StreamEventError, Error: fmt.Errorf("apply background jobs nudge: %w", err)}
+							return
+						}
+						hadToolRound = true
+						continue
+					}
 					out <- StreamEvent{Type: StreamEventComplete}
 					if ctx.Err() != nil {
 						emitCancelled()

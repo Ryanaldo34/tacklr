@@ -218,7 +218,7 @@ func (a *AgentHarness) injectBuiltinTools() {
 		a.tools = append(a.tools, newVFSIndexTools(br)...)
 	}
 	if len(a.subagents) > 0 {
-		a.tools = append(a.tools, a.spawnTool(), a.listJobsTool(), a.getJobTool(), a.awaitJobTool())
+		a.tools = append(a.tools, a.spawnTool(), a.listJobsTool(), a.getJobTool(), a.cancelJobTool())
 	}
 	a.builtinsInjected = true
 }

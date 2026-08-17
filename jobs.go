@@ -13,7 +13,7 @@ import (
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
-// Background job statuses surfaced by list_jobs / await_job.
+// Background job statuses surfaced by the job tools.
 const (
 	jobStatusRunning     = "running"
 	jobStatusCompleted   = "completed"
@@ -80,18 +80,19 @@ func (j *backgroundJob) setInterrupted(intr interrupt.Interrupt, ids []string) {
 type listJobsArgs struct{}
 
 type getJobArgs struct {
-	JobID string `json:"job_id" desc:"Job id returned by spawn_worker when run_in_background is true"`
+	JobID string `json:"job_id" desc:"Job id returned by spawn_worker when block is false"`
+	Block bool   `json:"block" desc:"Wait for a running job before returning its result. Defaults to false."`
 }
 
-type awaitJobArgs struct {
-	JobID string `json:"job_id" desc:"Job id returned by spawn_worker when run_in_background is true"`
+type cancelJobArgs struct {
+	JobID string `json:"job_id" desc:"Job id returned by spawn_worker when block is false"`
 }
 
 func (a *AgentHarness) listJobsTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "list_jobs",
 		DisplayName: "List jobs",
-		Description: "Non-blocking overview of background worker jobs and their statuses (running, completed, failed, interrupted). Does not block and does not return full result payloads — use get_job to read a completed job's output without waiting, or await_job to block until a running job finishes.",
+		Description: "Non-blocking overview of background worker jobs and their statuses (running, completed, failed, interrupted). Use get_job to collect one result or wait for it, and cancel_job to stop work that is no longer needed.",
 		Category:    streaming.ToolCategoryExecute,
 		Handler: func(ctx context.Context, _ listJobsArgs, _ HarnessRuntime) (string, error) {
 			return a.formatJobList(), nil
@@ -103,22 +104,22 @@ func (a *AgentHarness) getJobTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "get_job",
 		DisplayName: "Get job {job_id}",
-		Description: "Non-blocking read of one background job: status plus result or error when already terminal. If the job is still running, returns status only (does not wait). Use await_job when you need to block until it finishes. Use list_jobs for a status overview of all jobs.",
+		Description: "Get one background job. By default this is non-blocking: a running job returns its current status, while a terminal job returns and consumes its result. Set block=true to wait until a running job finishes and then return its result. Interrupted jobs request the required user input only when block=true.",
 		Category:    streaming.ToolCategoryExecute,
-		Handler: func(ctx context.Context, args getJobArgs, _ HarnessRuntime) (string, error) {
-			return a.formatJob(strings.TrimSpace(args.JobID))
+		Handler: func(ctx context.Context, args getJobArgs, runtime HarnessRuntime) (string, error) {
+			return a.readJob(ctx, strings.TrimSpace(args.JobID), args.Block, runtime)
 		},
 	})
 }
 
-func (a *AgentHarness) awaitJobTool() *Tool {
+func (a *AgentHarness) cancelJobTool() *Tool {
 	return NewTool(ToolConfig{
-		Name:        "await_job",
-		DisplayName: "Await job {job_id}",
-		Description: "Block until a background job reaches a terminal state, then return its result (and clear it). Prefer get_job when you only need a non-blocking status/result check. If the job is interrupted awaiting user input, this tool parks until the host resolves it, then resumes the worker.",
+		Name:        "cancel_job",
+		DisplayName: "Cancel job {job_id}",
+		Description: "Cancel and remove a background worker job that is no longer needed. Completed and failed jobs are discarded without returning their result.",
 		Category:    streaming.ToolCategoryExecute,
-		Handler: func(ctx context.Context, args awaitJobArgs, runtime HarnessRuntime) (string, error) {
-			return a.awaitJob(ctx, strings.TrimSpace(args.JobID), runtime)
+		Handler: func(ctx context.Context, args cancelJobArgs, _ HarnessRuntime) (string, error) {
+			return a.cancelJob(ctx, strings.TrimSpace(args.JobID))
 		},
 	})
 }
@@ -147,7 +148,34 @@ func (a *AgentHarness) formatJobList() string {
 	for _, r := range rows {
 		fmt.Fprintf(&b, "- id=%s worker=%s status=%s\n", r.id, r.worker, r.status)
 	}
-	b.WriteString("Use get_job to read a completed job's result without blocking; use await_job to block until a running job finishes.")
+	b.WriteString("Use get_job to collect a result (block=true to wait), or cancel_job to stop a job.")
+	return b.String()
+}
+
+func (a *AgentHarness) backgroundJobsNudge() string {
+	a.jobsMu.Lock()
+	ids := make([]string, 0, len(a.jobs))
+	for id := range a.jobs {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	type row struct{ id, status string }
+	rows := make([]row, 0, len(ids))
+	for _, id := range ids {
+		status, _, _ := a.jobs[id].snapshot()
+		rows = append(rows, row{id: id, status: status})
+	}
+	a.jobsMu.Unlock()
+
+	if len(rows) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("Automated harness nudge: This turn still has background jobs whose results have not been collected:\n")
+	for _, r := range rows {
+		fmt.Fprintf(&b, "- id=%s status=%s\n", r.id, r.status)
+	}
+	b.WriteString("The turn cannot finish while jobs remain. Continue useful work if possible. Otherwise call get_job with block=true to wait for and collect each result. Use cancel_job only when a job is no longer needed.")
 	return b.String()
 }
 
@@ -159,24 +187,14 @@ func (a *AgentHarness) formatJob(jobID string) (string, error) {
 	if j == nil {
 		return "", fmt.Errorf("job %q: %w", jobID, ErrNotFound)
 	}
-	status, result, jobErr := j.snapshot()
+	status, _, _ := j.snapshot()
 	var b strings.Builder
 	fmt.Fprintf(&b, "id=%s worker=%s status=%s\n", j.id, j.workerName, status)
 	switch status {
-	case jobStatusCompleted:
-		b.WriteString("result:\n")
-		b.WriteString(result)
-	case jobStatusFailed:
-		b.WriteString("error:\n")
-		if jobErr != nil {
-			b.WriteString(jobErr.Error())
-		} else {
-			b.WriteString("failed")
-		}
 	case jobStatusInterrupted:
-		b.WriteString("Interrupted awaiting user input. Call await_job to resolve and continue.")
+		b.WriteString("Interrupted awaiting user input. Call get_job with block=true to resolve and continue.")
 	case jobStatusRunning:
-		b.WriteString("Still running. Call get_job again later, or await_job to block until finished.")
+		b.WriteString("Still running. Call get_job again later, or set block=true to wait until finished.")
 	}
 	return strings.TrimSuffix(b.String(), "\n"), nil
 }
@@ -254,7 +272,7 @@ func (a *AgentHarness) scheduleBackgroundWorker(workerName, task, jobID string, 
 
 	go a.runBackgroundJob(workerCtx, j)
 
-	return fmt.Sprintf("Job %s scheduled (worker=%s). Use list_jobs to poll status, get_job to read results without blocking, and await_job to block until finished.", jobID, workerName), nil
+	return fmt.Sprintf("Job %s scheduled (worker=%s). Use list_jobs to poll, get_job to collect its result (block=true to wait), or cancel_job to stop it.", jobID, workerName), nil
 }
 
 func (a *AgentHarness) runBackgroundJob(ctx context.Context, j *backgroundJob) {
@@ -340,7 +358,7 @@ func (a *AgentHarness) runBackgroundJob(ctx context.Context, j *backgroundJob) {
 	)...)
 }
 
-func (a *AgentHarness) awaitJob(ctx context.Context, jobID string, runtime HarnessRuntime) (string, error) {
+func (a *AgentHarness) readJob(ctx context.Context, jobID string, block bool, runtime HarnessRuntime) (string, error) {
 	if jobID == "" {
 		return "", fmt.Errorf("job_id is required: %w", ErrInvalid)
 	}
@@ -350,6 +368,12 @@ func (a *AgentHarness) awaitJob(ctx context.Context, jobID string, runtime Harne
 	}
 
 	status, _, _ := j.snapshot()
+	if status == jobStatusRunning && !block {
+		return a.formatJob(jobID)
+	}
+	if status == jobStatusInterrupted && !block {
+		return a.formatJob(jobID)
+	}
 	if status == jobStatusRunning {
 		runtime.EmitUpdate(fmt.Sprintf("Awaiting job %s", jobID))
 		select {
@@ -371,14 +395,14 @@ func (a *AgentHarness) awaitJob(ctx context.Context, jobID string, runtime Harne
 		}
 		return "", jobErr
 	case jobStatusInterrupted:
-		return a.awaitInterruptedJob(ctx, j, runtime)
+		return a.resumeInterruptedJob(ctx, j, runtime)
 	default:
 		return "", fmt.Errorf("job %q: unexpected status %q: %w", jobID, status, ErrFailed)
 	}
 }
 
-func (a *AgentHarness) awaitInterruptedJob(ctx context.Context, j *backgroundJob, runtime HarnessRuntime) (string, error) {
-	awaitID := runtime.CurrentToolCallID()
+func (a *AgentHarness) resumeInterruptedJob(ctx context.Context, j *backgroundJob, runtime HarnessRuntime) (string, error) {
+	getID := runtime.CurrentToolCallID()
 	j.mu.Lock()
 	intr := j.childIntr
 	workerName := j.workerName
@@ -388,7 +412,7 @@ func (a *AgentHarness) awaitInterruptedJob(ctx context.Context, j *backgroundJob
 		return "", fmt.Errorf("job %q: interrupted without interrupt object: %w", j.id, ErrFailed)
 	}
 
-	resolved, err := a.session.AdoptInterrupt(awaitID, intr)
+	resolved, err := a.session.AdoptInterrupt(getID, intr)
 	if err != nil {
 		return "", err
 	}
@@ -416,7 +440,7 @@ func (a *AgentHarness) awaitInterruptedJob(ctx context.Context, j *backgroundJob
 	}
 
 	runtime.EmitUpdate(fmt.Sprintf("Job %s resumed", j.id))
-	events, err := worker.ReturnFromInterrupt(ctx, a.childResolutionPayloads(awaitID, meta))
+	events, err := worker.ReturnFromInterrupt(ctx, a.childResolutionPayloads(getID, meta))
 	if err != nil {
 		a.clearPark(j.id)
 		a.removeJob(j.id)
@@ -444,7 +468,7 @@ func (a *AgentHarness) awaitInterruptedJob(ctx context.Context, j *backgroundJob
 		return result, nil
 	}
 
-	// Re-interrupt: re-park under job id and bubble onto await again.
+	// Re-interrupt: re-park under job id and bubble onto get_job again.
 	childIntrIDs, childIntr := collectChildInterrupts(worker, drained.interruptIDs)
 	if childIntr == nil {
 		a.clearPark(j.id)
@@ -469,8 +493,37 @@ func (a *AgentHarness) awaitInterruptedJob(ctx context.Context, j *backgroundJob
 	close(j.done)
 	j.mu.Unlock()
 
-	_, err = a.session.AdoptInterrupt(awaitID, childIntr)
+	_, err = a.session.AdoptInterrupt(getID, childIntr)
 	return "", err
+}
+
+func (a *AgentHarness) cancelJob(ctx context.Context, jobID string) (string, error) {
+	if jobID == "" {
+		return "", fmt.Errorf("job_id is required: %w", ErrInvalid)
+	}
+	j := a.getJob(jobID)
+	if j == nil {
+		return "", fmt.Errorf("job %q: %w", jobID, ErrNotFound)
+	}
+
+	status, _, _ := j.snapshot()
+	if j.cancel != nil {
+		j.cancel()
+	}
+	if status == jobStatusRunning {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-j.done:
+		}
+	}
+	if status == jobStatusInterrupted {
+		a.clearPark(jobID)
+	} else if j.worker != nil {
+		j.worker.Close()
+	}
+	a.removeJob(jobID)
+	return fmt.Sprintf("Job %s cancelled and removed.", jobID), nil
 }
 
 // cancelBackgroundJobs cancels detached workers. Called from Close.
