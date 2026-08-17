@@ -471,6 +471,12 @@ func TestRun_askUserChoice_withoutDescription_formatsSelection(t *testing.T) {
 	if h.AskUserQuestion("") != "" || h.AskUserQuestion("missing") != "" {
 		t.Fatal("empty/missing tool call ids should yield empty question")
 	}
+	if err := h.session.StateSet(askUserQuestionStateKey("bad"), 123); err != nil {
+		t.Fatal(err)
+	}
+	if h.AskUserQuestion("bad") != "" {
+		t.Fatal("non-string ask_user_question state should be ignored")
+	}
 	resumed, err := h.ReturnFromInterrupt(context.Background(), map[string][]byte{
 		interruptID: []byte(`{"selectionIdx":0}`),
 	})

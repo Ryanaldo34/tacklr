@@ -258,6 +258,35 @@ func TestParseSSE_incompleteFailedAndRefusal(t *testing.T) {
 		}
 	}
 
+	// Mid-stream error events fail closed with a terminal error chunk.
+	bodyStreamError := strings.Join([]string{
+		`data: {"type":"error","error":{"message":"provider failed mid stream"}}`,
+		`data: [DONE]`,
+		"",
+	}, "\n")
+	chunks = collectSSE(t, bodyStreamError)
+	if len(chunks) == 0 || chunks[len(chunks)-1].Type != tacklr.StreamEventError {
+		t.Fatalf("stream error chunks = %+v", chunks)
+	}
+
+	// Completed responses surface token usage for telemetry.
+	bodyUsage := strings.Join([]string{
+		`data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":10,"output_tokens":5,"output_tokens_details":{"reasoning_tokens":2}}}}`,
+		`data: [DONE]`,
+		"",
+	}, "\n")
+	chunks = collectSSE(t, bodyUsage)
+	var complete *tacklr.LLMResponseChunk
+	for i := range chunks {
+		if chunks[i].Type == tacklr.StreamEventComplete {
+			complete = &chunks[i]
+			break
+		}
+	}
+	if complete == nil || complete.InputTokens != 10 || complete.OutputTokens != 5 || complete.ReasoningTokens != 2 {
+		t.Fatalf("usage chunk = %+v all = %+v", complete, chunks)
+	}
+
 	// Failed with provider error object → classifyAPIStatus path.
 	bodyErrObj := strings.Join([]string{
 		`data: {"type":"response.failed","error":{"code":"content_filter","message":"blocked by filter","type":"invalid_request_error"}}`,

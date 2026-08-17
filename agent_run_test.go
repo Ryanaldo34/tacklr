@@ -626,6 +626,41 @@ func TestRun_mcpToolsDiscoveredAndInvokable(t *testing.T) {
 	h.Close()
 }
 
+func TestRun_mcpCredentialResolveFailureSkipsServer(t *testing.T) {
+	// Arrange
+	var discovered int
+	prev := discoverAllTools
+	discoverAllTools = func(_ context.Context, configs []mcp.MCPConfig, _ mcpruntime.RegisterTool) func() {
+		discovered = len(configs)
+		return func() {}
+	}
+	t.Cleanup(func() { discoverAllTools = prev })
+
+	h := mustNewAgent(t, AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  &mockStrategy{},
+		MCPConfigs: []mcp.MCPConfig{
+			{Name: "bad", Type: "http", URL: "http://127.0.0.1:1", CredentialRef: "vault://missing"},
+		},
+		MCPCredentialResolver: testMCPCredentialResolver(func(context.Context, string) (mcp.Credentials, error) {
+			return mcp.Credentials{}, errors.New("missing secret")
+		}),
+	})
+	t.Cleanup(h.Close)
+
+	// Act
+	events, err := h.Run(context.Background(), "hi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	drainEvents(events)
+
+	// Assert
+	if discovered != 0 {
+		t.Fatalf("discovered configs = %d", discovered)
+	}
+}
+
 // TestRun_emptyToolInterceptorChain_allowsWriteWithoutPlan: replacing the
 // built-in interceptor chain with an empty slice disables planning write lock.
 func TestRun_watchdogRecordsToolResults(t *testing.T) {
