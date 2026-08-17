@@ -90,6 +90,8 @@ func (b *ClientBridge) Close() {
 }
 
 // WaitInitialized blocks until initialize has run, the connection closes, or ctx is done.
+// If initialize already completed, that wins even when closed/ctx are also ready
+// (stdio EOF closes the bridge while in-flight prompt handlers still wait).
 func (b *ClientBridge) WaitInitialized(ctx context.Context) error {
 	if b == nil {
 		return nil
@@ -98,9 +100,19 @@ func (b *ClientBridge) WaitInitialized(ctx context.Context) error {
 	case <-b.initialized:
 		return nil
 	case <-b.closed:
-		return errConnectionNotInitialized
+		select {
+		case <-b.initialized:
+			return nil
+		default:
+			return errConnectionNotInitialized
+		}
 	case <-ctx.Done():
-		return ctx.Err()
+		select {
+		case <-b.initialized:
+			return nil
+		default:
+			return ctx.Err()
+		}
 	}
 }
 
