@@ -155,10 +155,25 @@ func TestTokenHolder_refreshOnce(t *testing.T) {
 	}
 
 	h.SetRefresh(func(context.Context) (vfs.Credential, error) {
+		return vfs.Credential{}, vfs.ErrAuthExpired
+	})
+	if err := h.RefreshOnce(t.Context()); !errors.Is(err, vfs.ErrAuthExpired) {
+		t.Fatalf("refresh expired: %v", err)
+	}
+	h.SetRefresh(func(context.Context) (vfs.Credential, error) {
 		return vfs.Credential{}, errors.New("client down")
 	})
 	if err := h.RefreshOnce(t.Context()); !errors.Is(err, vfs.ErrAuthExpired) {
 		t.Fatalf("wrap client error: %v", err)
+	}
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := h.RefreshOnce(canceled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled refresh: %v", err)
+	}
+	empty := vfs.NewTokenHolder(vfs.Credential{})
+	if _, err := empty.Token(); !errors.Is(err, vfs.ErrAuthExpired) {
+		t.Fatalf("empty token: %v", err)
 	}
 	h.SetRefresh(func(context.Context) (vfs.Credential, error) {
 		return vfs.Credential{Token: "   "}, nil
@@ -219,6 +234,21 @@ func TestSessionAuth_replaceAndUnbindProvider(t *testing.T) {
 	}
 	if err := auth.Refresh("s", "gdrive", vfs.Credential{Token: "x"}); err == nil {
 		t.Fatal("refresh after unbind")
+	}
+	if err := auth.Refresh("", "gdrive", vfs.Credential{Token: "x"}); err == nil {
+		t.Fatal("refresh empty session")
+	}
+	if err := auth.Refresh("s", "gdrive", vfs.Credential{}); err == nil {
+		t.Fatal("refresh empty token")
+	}
+	if err := auth.Unbind("", "/contracts"); err == nil {
+		t.Fatal("unbind empty session")
+	}
+	if err := auth.Unbind("s", "/a/b"); !errors.Is(err, vfs.ErrInvalidPath) {
+		t.Fatalf("unbind multi-segment: %v", err)
+	}
+	if err := auth.UnbindProvider("", "gdrive"); err == nil {
+		t.Fatal("UnbindProvider empty session")
 	}
 
 	var nilA *vfs.SessionAuth
