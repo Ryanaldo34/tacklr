@@ -45,7 +45,10 @@ type AgentOptions struct {
 	WatchDog   AgentWatchDog
 	Tools      []*Tool
 	MCPConfigs []mcp.MCPConfig
-	SubAgents  []*SubAgent
+	// MCPCredentialResolver resolves durable references immediately before
+	// connection. Inline client credentials remain session-scoped.
+	MCPCredentialResolver mcp.CredentialResolver
+	SubAgents             []*SubAgent
 	// ContextPolicy sets pressure/compress ratios when non-zero fields are set.
 	ContextPolicy ContextPolicy
 	// ToolInterceptors wrap each tool call (outermost first). Built-in
@@ -117,32 +120,33 @@ func newHarnessBase(opts AgentOptions, sm *session.SessionManager) (*AgentHarnes
 		return nil, fmt.Errorf("tacklr: session manager is required")
 	}
 	h := &AgentHarness{
-		model:                opts.Model,
-		maxWindowSize:        opts.Config.MaxWindowSize,
-		maxTurnRequests:      opts.Config.MaxTurnRequests,
-		instructions:         opts.Config.SystemPrompt,
-		store:                opts.Store,
-		session:              sm,
-		watchDog:             opts.WatchDog,
-		tools:                opts.Tools,
-		mcpConfigs:           opts.MCPConfigs,
-		skillDirectories:     opts.Config.SkillDirectories,
-		skillsLoader:         opts.SkillsLoader,
-		exaAPIKey:            resolveExaAPIKey(opts.ExaAPIKey),
-		brain:                opts.Brain,
-		brainWriteKinds:      opts.BrainWriteKinds,
-		sessionId:            "",
-		subagents:            make(map[string]*SubAgent),
-		pendingToolCalls:     make(map[string]stores.PendingToolCall),
-		legacyInterruptIDs:   make(map[string]string),
-		interruptPayloads:    make(map[string][]byte),
-		parkedWorkersLive:    make(map[string]*AgentHarness),
-		jobs:                 make(map[string]*backgroundJob),
-		context:              NewModelContextManager(),
-		contextPolicy:        opts.ContextPolicy,
-		runCommandUnattended: opts.RunCommandUnattended,
-		writeUnattended:      opts.WriteUnattended,
-		vfsBridge:            opts.shareIndexBridge,
+		model:                 opts.Model,
+		maxWindowSize:         opts.Config.MaxWindowSize,
+		maxTurnRequests:       opts.Config.MaxTurnRequests,
+		instructions:          opts.Config.SystemPrompt,
+		store:                 opts.Store,
+		session:               sm,
+		watchDog:              opts.WatchDog,
+		tools:                 opts.Tools,
+		mcpConfigs:            opts.MCPConfigs,
+		mcpCredentialResolver: opts.MCPCredentialResolver,
+		skillDirectories:      opts.Config.SkillDirectories,
+		skillsLoader:          opts.SkillsLoader,
+		exaAPIKey:             resolveExaAPIKey(opts.ExaAPIKey),
+		brain:                 opts.Brain,
+		brainWriteKinds:       opts.BrainWriteKinds,
+		sessionId:             "",
+		subagents:             make(map[string]*SubAgent),
+		pendingToolCalls:      make(map[string]stores.PendingToolCall),
+		legacyInterruptIDs:    make(map[string]string),
+		interruptPayloads:     make(map[string][]byte),
+		parkedWorkersLive:     make(map[string]*AgentHarness),
+		jobs:                  make(map[string]*backgroundJob),
+		context:               NewModelContextManager(),
+		contextPolicy:         opts.ContextPolicy,
+		runCommandUnattended:  opts.RunCommandUnattended,
+		writeUnattended:       opts.WriteUnattended,
+		vfsBridge:             opts.shareIndexBridge,
 	}
 	h.jobsCtx, h.jobsCancel = context.WithCancel(context.Background())
 	if opts.MountSession != nil {

@@ -558,12 +558,21 @@ func TestRun_customInstructionsInSystemPrompt(t *testing.T) {
 	}
 }
 
+type testMCPCredentialResolver func(context.Context, string) (mcp.Credentials, error)
+
+func (f testMCPCredentialResolver) ResolveMCP(ctx context.Context, ref string) (mcp.Credentials, error) {
+	return f(ctx, ref)
+}
+
 // TestRun_mcpToolsDiscoveredAndInvokable: MCP configs inject callable tools
 // into the turn, and Close runs discovery cleanup.
 func TestRun_mcpToolsDiscoveredAndInvokable(t *testing.T) {
 	var cleaned bool
 	prev := discoverAllTools
 	discoverAllTools = func(ctx context.Context, configs []mcp.MCPConfig, register mcpruntime.RegisterTool) func() {
+		if len(configs) != 1 || len(configs[0].Headers) != 1 || configs[0].Headers[0].Value != "Bearer resolved" {
+			t.Fatalf("resolved MCP configs = %#v", configs)
+		}
 		register("mcp_echo", "echo", "fake", nil, func(ctx context.Context, args map[string]any) (string, error) {
 			return "from-mcp", nil
 		})
@@ -592,8 +601,14 @@ func TestRun_mcpToolsDiscoveredAndInvokable(t *testing.T) {
 		Config: Config{MaxWindowSize: 8192},
 		Model:  strategy,
 		MCPConfigs: []mcp.MCPConfig{
-			{Name: "fake", Type: "http", URL: "http://127.0.0.1:1"},
+			{Name: "fake", Type: "http", URL: "http://127.0.0.1:1", CredentialRef: "vault://fake"},
 		},
+		MCPCredentialResolver: testMCPCredentialResolver(func(_ context.Context, ref string) (mcp.Credentials, error) {
+			if ref != "vault://fake" {
+				t.Fatalf("credential ref = %q", ref)
+			}
+			return mcp.Credentials{Headers: []mcp.HTTPHeader{{Name: "Authorization", Value: "Bearer resolved"}}}, nil
+		}),
 	})
 	events, err := h.Run(context.Background(), "use mcp")
 	if err != nil {

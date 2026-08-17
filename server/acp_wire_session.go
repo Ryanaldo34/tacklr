@@ -47,7 +47,7 @@ func (s *acpWireSession) envelope() acpWireEnvelope {
 	return acpWireEnvelope{
 		CWD:          s.cwd,
 		ConfigValues: cfg,
-		MCPServers:   append([]mcp.MCPConfig(nil), s.mcpServers...),
+		MCPServers:   mcp.DurableConfigs(s.mcpServers),
 		Owner:        s.owner,
 		Prompted:     s.prompted,
 	}

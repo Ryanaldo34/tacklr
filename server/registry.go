@@ -37,9 +37,11 @@ type AgentSpec struct {
 	Model      tacklr.InferenceStrategy
 	Tools      []*tacklr.Tool
 	MCPConfigs []mcp.MCPConfig
-	SubAgents  []*tacklr.SubAgent
-	WatchDog   tacklr.AgentWatchDog
-	Store      stores.BaseStore
+	// MCPCredentialResolver resolves durable MCP credential references.
+	MCPCredentialResolver mcp.CredentialResolver
+	SubAgents             []*tacklr.SubAgent
+	WatchDog              tacklr.AgentWatchDog
+	Store                 stores.BaseStore
 	// ExaAPIKey enables built-in web_search and web_fetch (or use process EXA_API_KEY).
 	ExaAPIKey string
 	// FSRegistry resolves MountSpec.Profile (process-scoped). Required when FSBootstrap is set.
@@ -610,16 +612,17 @@ func (r *Registry) loadAgent(ctx context.Context, agentID, threadID string, load
 		r.instruments.RecordFuseMount(ctx, telemetry.FuseMountOutcomeUnavailable)
 	}
 	opts := tacklr.AgentOptions{
-		Config:       spec.Config,
-		SessionID:    threadID,
-		Model:        spec.Model,
-		Store:        store,
-		WatchDog:     spec.WatchDog,
-		Tools:        spec.Tools,
-		MCPConfigs:   mcpConfigs,
-		SubAgents:    spec.SubAgents,
-		ExaAPIKey:    spec.ExaAPIKey,
-		MountSession: ms,
+		Config:                spec.Config,
+		SessionID:             threadID,
+		Model:                 spec.Model,
+		Store:                 store,
+		WatchDog:              spec.WatchDog,
+		Tools:                 spec.Tools,
+		MCPConfigs:            mcpConfigs,
+		MCPCredentialResolver: spec.MCPCredentialResolver,
+		SubAgents:             spec.SubAgents,
+		ExaAPIKey:             spec.ExaAPIKey,
+		MountSession:          ms,
 	}
 
 	var h *tacklr.AgentHarness

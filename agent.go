@@ -26,17 +26,18 @@ import (
 // AgentHarness is the product agent. Create with NewAgent or NewAgentFromSession.
 // Fields are unexported.
 type AgentHarness struct {
-	model           InferenceStrategy
-	sessionId       string
-	tools           []*Tool
-	mcpConfigs      []mcp.MCPConfig
-	instructions    string
-	store           stores.BaseStore
-	watchDog        AgentWatchDog
-	maxWindowSize   int
-	maxTurnRequests int // 0 = unlimited; from Config.MaxTurnRequests
-	session         *session.SessionManager
-	subagents       map[string]*SubAgent
+	model                 InferenceStrategy
+	sessionId             string
+	tools                 []*Tool
+	mcpConfigs            []mcp.MCPConfig
+	mcpCredentialResolver mcp.CredentialResolver
+	instructions          string
+	store                 stores.BaseStore
+	watchDog              AgentWatchDog
+	maxWindowSize         int
+	maxTurnRequests       int // 0 = unlimited; from Config.MaxTurnRequests
+	session               *session.SessionManager
+	subagents             map[string]*SubAgent
 	// pendingToolCalls is keyed by tool call id, which is also the wire interrupt id.
 	pendingToolCalls map[string]stores.PendingToolCall
 	pendingMu        sync.Mutex
@@ -620,7 +621,20 @@ func (a *AgentHarness) initMCP(ctx context.Context) {
 	}
 	a.mcpInitialized = true
 
-	a.mcpCleanup = discoverAllTools(ctx, a.mcpConfigs, func(name, description, namespace string, schema map[string]any, handler mcpruntime.ToolHandler) {
+	configs := make([]mcp.MCPConfig, 0, len(a.mcpConfigs))
+	for _, config := range a.mcpConfigs {
+		resolved, err := config.Resolve(ctx, a.mcpCredentialResolver)
+		if err != nil {
+			slog.WarnContext(ctx, "failed to resolve MCP credentials, skipping",
+				"server", config.Name,
+				"credential_ref", config.CredentialRef,
+				"error", err,
+			)
+			continue
+		}
+		configs = append(configs, resolved)
+	}
+	a.mcpCleanup = discoverAllTools(ctx, configs, func(name, description, namespace string, schema map[string]any, handler mcpruntime.ToolHandler) {
 		tool := newMCPTool(mcpToolConfig{
 			Name:        name,
 			Description: description,

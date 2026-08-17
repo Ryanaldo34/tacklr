@@ -601,7 +601,7 @@ func TestHandleRPC_sessionNew_persistsWireEnvelope(t *testing.T) {
 	r := newTestRegistry(store, &mockInferenceStrategy{}, []*tacklr.Tool{})
 	srv := newACPTestServer(t, r)
 
-	rec := srv.rpc(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/home/user","mcpServers":[{"name":"fs","command":"npx"}]}}`)
+	rec := srv.rpc(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/home/user","mcpServers":[{"name":"fs","command":"npx","env":[{"name":"API_KEY","value":"never-store"}]}]}}`)
 	sessionID, _ := acpRPCResult(t, rec)["sessionId"].(string)
 	if sessionID == "" {
 		t.Fatal("missing sessionId")
@@ -620,6 +620,9 @@ func TestHandleRPC_sessionNew_persistsWireEnvelope(t *testing.T) {
 	}
 	if len(env.MCPServers) != 1 || env.MCPServers[0].Name != "fs" {
 		t.Errorf("mcpServers = %+v", env.MCPServers)
+	}
+	if len(env.MCPServers[0].Env) != 0 || strings.Contains(string(raw), "never-store") {
+		t.Fatalf("wire envelope stored stdio MCP secret: %s", raw)
 	}
 }
 
@@ -699,8 +702,8 @@ func TestHandleRPC_sessionLoad(t *testing.T) {
 	}
 }
 
-func TestHandleRPC_sessionLoad_updatesSessionMCPServers(t *testing.T) {
-	// Outcome: after load with new mcpServers, durable wire envelope reflects them.
+func TestHandleRPC_sessionLoad_persistsOnlyMCPTopology(t *testing.T) {
+	// Outcome: durable wire state keeps topology/reference but not inline credentials.
 	store := testStore(t)
 	r := newTestRegistry(store, &mockInferenceStrategy{}, []*tacklr.Tool{})
 	srv := newACPTestServer(t, r)
@@ -708,7 +711,7 @@ func TestHandleRPC_sessionLoad_updatesSessionMCPServers(t *testing.T) {
 	rec1 := srv.rpc(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
 	sessionID, _ := acpRPCResult(t, rec1)["sessionId"].(string)
 
-	rec2 := srv.rpc(`{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"` + sessionID + `","cwd":"/tmp","mcpServers":[{"type":"http","name":"api","url":"https://api.example.com/mcp","headers":[{"name":"Authorization","value":"Bearer tok"}]}]}}`)
+	rec2 := srv.rpc(`{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"` + sessionID + `","cwd":"/tmp","mcpServers":[{"type":"http","name":"api","url":"https://api.example.com/mcp","credentialRef":"vault://api","headers":[{"name":"Authorization","value":"Bearer tok"}]}]}}`)
 	_ = acpRPCResult(t, rec2)
 
 	raw, err := srv.wire.Get(context.Background(), sessionID)
@@ -724,6 +727,12 @@ func TestHandleRPC_sessionLoad_updatesSessionMCPServers(t *testing.T) {
 	}
 	if len(env.MCPServers) != 1 || env.MCPServers[0].Type != "http" || env.MCPServers[0].URL != "https://api.example.com/mcp" {
 		t.Errorf("mcpServers = %+v", env.MCPServers)
+	}
+	if len(env.MCPServers[0].Headers) != 0 || env.MCPServers[0].CredentialRef != "vault://api" {
+		t.Errorf("durable MCP credentials = %+v", env.MCPServers[0])
+	}
+	if strings.Contains(string(raw), "Bearer tok") {
+		t.Fatalf("wire envelope stored MCP secret: %s", raw)
 	}
 }
 
