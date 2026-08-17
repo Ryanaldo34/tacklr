@@ -6,6 +6,20 @@ import (
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
+func TestValidateMessages_rejectsUnsupportedRolesAndInvalidToolFields(t *testing.T) {
+	// Act
+	userToolErr := streaming.ValidateMessages([]*streaming.Message{{Role: streaming.RoleUser, ToolCallID: "call"}})
+	unsupportedErr := streaming.ValidateMessages([]*streaming.Message{{Role: "invalid"}})
+
+	// Assert
+	if userToolErr == nil {
+		t.Fatal("user message with tool_call_id was accepted")
+	}
+	if unsupportedErr == nil {
+		t.Fatal("unsupported role was accepted")
+	}
+}
+
 func TestValidateMessages_acceptsInterruptedWindowAndRejectsCorruption(t *testing.T) {
 	// Arrange
 	valid := []*streaming.Message{

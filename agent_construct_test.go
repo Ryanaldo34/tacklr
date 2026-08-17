@@ -75,6 +75,29 @@ func TestNewAgent_configurationInvariants(t *testing.T) {
 				MCPConfigs: []mcp.MCPConfig{{Name: "stdio"}},
 			},
 		},
+		{
+			name: "duplicate MCP server",
+			opts: AgentOptions{
+				Model: validModel,
+				MCPConfigs: []mcp.MCPConfig{
+					{Name: "remote", Type: mcp.TransportHTTP, URL: "https://example.test/a"},
+					{Name: "remote", Type: mcp.TransportHTTP, URL: "https://example.test/b"},
+				},
+			},
+		},
+		{
+			name: "credential ref without resolver",
+			opts: AgentOptions{
+				Model: validModel,
+				MCPConfigs: []mcp.MCPConfig{
+					{Name: "remote", Type: mcp.TransportHTTP, URL: "https://example.test", CredentialRef: "vault://remote"},
+				},
+			},
+		},
+		{
+			name: "negative max turn requests",
+			opts: AgentOptions{Model: validModel, Config: Config{MaxTurnRequests: -1}},
+		},
 	}
 
 	// Act and assert
