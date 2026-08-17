@@ -136,9 +136,14 @@ func main() {
 		slog.Error("vfs register failed", "error", err)
 		os.Exit(1)
 	}
+	vfsAuth := vfs.NewSessionAuth()
+	if err := fsReg.Register(vfs.DriveFactory{ID: "gdrive", Auth: vfsAuth}); err != nil {
+		slog.Error("vfs gdrive register failed", "error", err)
+		os.Exit(1)
+	}
 
 	defaultAgent := "test-agent"
-	reg := server.NewRegistry(store, defaultAgent)
+	reg := server.NewRegistry(store, defaultAgent, server.WithVFSAuth(vfsAuth))
 	reg.Register(defaultAgent, server.AgentSpec{
 		Name: "Tacklr",
 		Config: tacklr.Config{

@@ -226,8 +226,17 @@ func TestParseClientCapabilities(t *testing.T) {
 	}
 
 	caps2 := ParseClientCapabilities([]byte(`{"protocolVersion":1}`))
-	if caps2.ElicitationForm || caps2.ElicitationURL {
+	if caps2.ElicitationForm || caps2.ElicitationURL || caps2.VFSTokenRefresh {
 		t.Error("missing elicitation should mean unsupported")
+	}
+
+	caps3 := ParseClientCapabilities([]byte(`{
+		"clientCapabilities": {
+			"_meta": { "tacklr": { "vfs": { "tokenRefresh": true } } }
+		}
+	}`))
+	if !caps3.VFSTokenRefresh {
+		t.Error("expected vfs tokenRefresh")
 	}
 }
 

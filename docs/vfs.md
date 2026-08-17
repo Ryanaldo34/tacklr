@@ -79,7 +79,30 @@ _ = ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"})
 
 `MountSession.SpecAt` returns the full durable `MountSpec` for a virtual path (for policy and host tooling).
 
-Auth and host roots live on factories, not on mounts or checkpoints.
+Host-owned roots and secrets (local jail, S3 client) live on factories, not on mounts or checkpoints.
+
+User-owned backends (Google Drive today) are different: the **client** does OAuth (PKCE). It sends only a short-lived access token over ACP extension methods. Tokens live in `vfs.SessionAuth` (process memory). They are never written to `MountSpec`, session checkpoints, or the ACP wire store. After `session/load` or process restart the client must bind again.
+
+```text
+initialize  →  agentCapabilities._meta.tacklr.vfs { credentials, providers, tokenRefresh }
+session/new
+_tacklr/vfs/bind     { sessionId, backends: [{ provider, point, auth.token, params.folderId }] }
+                     provider is the factory profile id (gdrive)
+session/prompt       → agent sees /contracts, /notes
+_tacklr/vfs/refresh  → new access token for a provider
+_tacklr/vfs/token    ← agent asks the client after a 401 (if the client advertised tokenRefresh)
+_tacklr/vfs/unbind
+session/close        → tokens zeroed
+```
+
+Drive in this delivery: read-only, many client-selected folders (one single-segment mount point each), ordinary files only. Native Google Docs/Sheets/Slides are listed; `read` returns `ErrNoCodec` until the Docs-export follow-up. Recommended client scope: `drive.readonly`. The server is not a Google OAuth client.
+
+```go
+auth := vfs.NewSessionAuth()
+reg := vfs.NewBackendRegistry()
+_ = reg.Register(vfs.DriveFactory{ID: "gdrive", Auth: auth})
+// Hosts pass the same auth to server.WithVFSAuth(auth).
+```
 
 Raw path I/O (absolute virtual paths only):
 
@@ -504,6 +527,9 @@ No FUSE and no shell are required for this IR edit path. `run_command` needs a l
 
 | Situation | Sentinel |
 |-----------|----------|
+| Access token expired / missing refresh | `ErrAuthExpired` |
+| Two Drive children share a name | `ErrAmbiguous` |
+| Drive 403 | `ErrPermission` |
 | Path not under a mount | `ErrNotMounted` |
 | `run_command` with no FUSE mount | `ErrFuseNotMounted` |
 | Write on read-only mount | `ErrReadOnly` |
