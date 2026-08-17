@@ -155,9 +155,50 @@ func TestRegistry_vfsAuthRejects(t *testing.T) {
 	if vfsTokenRefresh(nil, "s", "gdrive") != nil {
 		t.Fatal("nil rpc refresh")
 	}
-	fn := vfsTokenRefresh(NewClientBridge(&recordingMessageWriter{}), "s", "gdrive")
+	bridge := NewClientBridge(&recordingMessageWriter{})
+	fn := vfsTokenRefresh(bridge, "s", "gdrive")
 	if _, err := fn(ctx); !errors.Is(err, vfs.ErrAuthExpired) {
 		t.Fatalf("no tokenRefresh cap: %v", err)
+	}
+	bridge.SetCaps(ClientCapabilities{VFSTokenRefresh: true})
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := vfsTokenRefresh(bridge, "s", "gdrive")(canceled); !errors.Is(err, vfs.ErrAuthExpired) {
+		t.Fatalf("canceled token refresh: %v", err)
+	}
+
+	if err := r.BindVFS(ctx, "live", "default", vfs.Binding{
+		Provider: "gdrive", Point: "/ok", Auth: vfs.Credential{Token: "t"},
+		Params: map[string]string{vfs.ParamFolderID: "root-a"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stream, err := r.RunTurn(ctx, TurnRequest{
+		SessionID: "live", AgentID: "default", ThreadID: "live", Prompt: "hi",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { stream.Cancel(); stream.Close() })
+	if err := r.BindVFS(ctx, "live", "default", vfs.Binding{
+		Provider: "gdrive", Point: "/bad", Auth: vfs.Credential{Token: "t"},
+		Params: map[string]string{vfs.ParamFolderID: "nope"},
+	}); err == nil {
+		t.Fatal("live remount of missing folder")
+	}
+	if auth.HasBindings("live") && len(auth.Bindings("live")) != 1 {
+		t.Fatalf("failed remount must unbind the bad point: %+v", auth.Bindings("live"))
+	}
+
+	w := &recordingMessageWriter{}
+	refreshBridge := NewClientBridge(w)
+	installVFSRefresh(ProtocolEnv{Registry: r, Conn: &Conn{RPC: refreshBridge}}, "live", auth)
+	installVFSRefresh(ProtocolEnv{}, "", nil)
+	if acpRPCError(t, newACPTestServer(t, r).rpc(`{"jsonrpc":"2.0","id":1,"method":"_tacklr/vfs/refresh","params":{"sessionId":"nope","provider":"gdrive","auth":{"token":"x"}}}`)) == nil {
+		t.Fatal("refresh unknown session")
+	}
+	if acpRPCError(t, newACPTestServer(t, r).rpc(`{"jsonrpc":"2.0","id":2,"method":"_tacklr/vfs/unbind","params":{"sessionId":"nope","point":"/ok"}}`)) == nil {
+		t.Fatal("unbind unknown session")
 	}
 }
 
