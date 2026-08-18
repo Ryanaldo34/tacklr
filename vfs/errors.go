@@ -13,6 +13,8 @@ var (
 	ErrNotSupported    = errors.New("vfs: not supported")
 	ErrReadOnly        = errors.New("vfs: read-only mount")
 	ErrNotExist        = errors.New("vfs: not found")
+	ErrNotDir          = errors.New("vfs: not a directory")
+	ErrIsDir           = errors.New("vfs: is a directory")
 	ErrExist           = errors.New("vfs: already exists")
 
 	// Content IR

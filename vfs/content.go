@@ -18,6 +18,13 @@ type Codec interface {
 	Decode(ctx context.Context, path, mediaType string, data []byte) (Document, error)
 }
 
+// Encoder is the optional write side of a Codec. A codec that decodes a rich
+// document into the canonical text projection can implement Encoder so the
+// projection is encoded again during Sync.
+type Encoder interface {
+	Encode(ctx context.Context, doc Document) ([]byte, error)
+}
+
 // ContentRegistry maps media type → Codec (process-scoped, like BackendRegistry).
 type ContentRegistry struct {
 	mu     sync.RWMutex
@@ -65,7 +72,9 @@ func (r *ContentRegistry) Decode(ctx context.Context, path, mediaType string, da
 	return c.Decode(ctx, path, mediaType, data)
 }
 
-// DefaultContentRegistry returns the process-wide registry with TextCodec registered.
+// DefaultContentRegistry returns the process-wide registry with TextCodec
+// registered. The top-level Tacklr harness additionally registers common rich
+// text adapters during package initialization.
 func DefaultContentRegistry() *ContentRegistry {
 	return defaultContentRegistry
 }
@@ -98,7 +107,8 @@ func DetectMediaType(virtualPath string, sample []byte) string {
 
 var extMediaTypes = map[string]string{
 	".txt": "text/plain", ".md": "text/markdown", ".markdown": "text/markdown",
-	".go": "text/x-go", ".py": "text/x-python",
+	".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+	".go":   "text/x-go", ".py": "text/x-python",
 	".js": "text/javascript", ".mjs": "text/javascript", ".cjs": "text/javascript", ".jsx": "text/javascript",
 	".ts": "text/x.typescript", ".tsx": "text/x.typescript",
 	".json": "application/json", ".yaml": "application/yaml", ".yml": "application/yaml", ".toml": "application/toml",

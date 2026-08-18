@@ -197,6 +197,33 @@ Tool guidance:
 | Decode | `Codec.Decode(path, mediaType, data)` — no second read or re-sniff |
 | Else | `ErrNoCodec` (e.g. PNG) |
 
+### Rich text adapters
+
+Rich formats use the same VFS path and cache as text files. A format adapter
+implements `vfs.RichTextNormalizer`, and a host registers it through
+`vfs.RichTextCodec`:
+
+```go
+codec := vfs.RichTextCodec{
+    Types: []string{"application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
+    Normalizer: wordCodec,
+}
+registry.Register(codec)
+```
+
+The normalizer converts source bytes to the versioned JSON schema
+`https://tacklr.dev/schemas/richtext/v1`. The schema has document metadata,
+stable block IDs, block kinds and levels, plain text, inline runs with
+attributes, child blocks, and provider-specific attributes. The VFS exposes
+the canonical JSON as a UTF-8 `TextDocument`, so `read_lines`, `replace_text`,
+`replace_lines`, indexing, and future FUSE grep all operate on deterministic
+text. `Sync` validates the edited JSON and calls `EncodeRich` to write source
+format bytes. The canonical JSON is never written into the source file.
+
+This keeps format concerns outside `vfs`: DOCX, HTML, Google Docs, and other
+providers can be added as normalizers without changing mounts, tools, search,
+or the virtual filesystem contract.
+
 `TextCodec` requires valid UTF-8 and builds a `TextDocument` labeled with the caller’s media type.
 
 ### Line rules

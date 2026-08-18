@@ -1,8 +1,8 @@
 package vfs
 
 import (
+	"bytes"
 	"context"
-	"strings"
 	"time"
 )
 
@@ -92,8 +92,14 @@ func (m *MountSession) Sync(ctx context.Context, virtualPath string) error {
 	if !dirty {
 		return nil
 	}
-	body := doc.Text()
-	if err := m.writeContents(ctx, cleaned, strings.NewReader(body), int64(len(body))); err != nil {
+	body, err := doc.encode(ctx)
+	if err != nil {
+		return err
+	}
+	if len(body) > MaxReadFileBytes {
+		return errFileExceeds(MaxReadFileBytes)
+	}
+	if err := m.writeContents(ctx, cleaned, bytes.NewReader(body), int64(len(body))); err != nil {
 		return err
 	}
 	// Mark clean before Stat so overlay no longer masks backend mtime.

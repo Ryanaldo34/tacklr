@@ -59,8 +59,9 @@ type AgentHarness struct {
 	searchCtx *brain.SearchContext
 	// fsRegistry / fsBootstrap used only at construct to fill session.VFS.
 	// Mount attach/detach lives on vfs.MountSession (session-owned), not here.
-	fsRegistry  *vfs.BackendRegistry
-	fsBootstrap []vfs.MountSpec
+	fsRegistry   *vfs.BackendRegistry
+	fsBootstrap  []vfs.MountSpec
+	attachmentFS *vfs.MemoryFactory
 	// vfsBridge: optional mount→brain index lifecycle (not the agent turn loop).
 	vfsBridge        *vfsindex.Bridge
 	mcpCleanup       func()

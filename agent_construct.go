@@ -220,6 +220,9 @@ func (a *AgentHarness) injectBuiltinTools() {
 // initVFSIndexBridge starts vfsindex.Bridge when Brain + VFS + namespace are set.
 // Hosts with a non-empty kind catalog should register vfsindex.MountIndexKinds().
 func (a *AgentHarness) initVFSIndexBridge() *vfsindex.Bridge {
+	if a.vfsBridge != nil {
+		return a.vfsBridge
+	}
 	if a.brain == nil || a.searchCtx == nil || a.session == nil || a.session.VFS == nil {
 		return nil
 	}
