@@ -28,19 +28,22 @@ type Credential struct {
 
 // Binding attaches one user-owned backend folder to a virtual mount point.
 // Provider is the BackendRegistry profile id (and the SessionAuth key).
+// Writable is opt-in; the Go zero value stays read-only.
 type Binding struct {
 	Provider string
 	Point    string
 	Auth     Credential
 	Params   map[string]string // non-secret (folderId, …)
+	Writable bool
 }
 
-// BindingSpec is the secret-free MountSpec for a binding. Always read-only.
+// BindingSpec is the secret-free MountSpec for a binding.
+// ReadOnly is !Writable so current Go binds stay read-only.
 func BindingSpec(b Binding) MountSpec {
 	return MountSpec{
 		Point:    b.Point,
 		Profile:  b.Provider,
-		ReadOnly: true,
+		ReadOnly: !b.Writable,
 		Params:   maps.Clone(b.Params),
 	}
 }

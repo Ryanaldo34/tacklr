@@ -27,7 +27,9 @@ func TestRunCommand_catDirtyAndFalseExit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	doc.SetText(body)
+	if err := doc.SetText(body); err != nil {
+		t.Fatal(err)
+	}
 	if err := ms.WriteDocument(ctx, doc); err != nil {
 		t.Fatal(err)
 	}

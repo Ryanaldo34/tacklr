@@ -67,7 +67,7 @@ func (m *MountSession) OpenDocument(ctx context.Context, virtualPath string, reg
 	if err != nil {
 		return nil, err
 	}
-	return bindVirtualPath(doc, cleaned), nil
+	return bindDocument(doc, cleaned), nil
 }
 
 // ReadText opens a virtual path as Textual IR (clone; safe to edit).
@@ -107,9 +107,21 @@ func (m *MountSession) WriteDocument(ctx context.Context, doc Document) error {
 	return m.fireAfterPersist(ctx, cleaned)
 }
 
-func bindVirtualPath(doc Document, virtual string) Document {
-	if td, ok := doc.(*TextDocument); ok {
-		td.path = virtual
+func bindDocument(doc Document, virtual string) Document {
+	switch d := doc.(type) {
+	case *TextDocument:
+		d.path = virtual
+	case *RichDocument:
+		d.path = virtual
 	}
 	return doc
+}
+
+func encodeDocument(_ context.Context, doc Document, _ *ContentRegistry) (data []byte, persistType string, err error) {
+	t, ok := doc.(Textual)
+	if !ok {
+		return nil, "", ErrNotTextual
+	}
+	body, err := textualPayload(t)
+	return []byte(body), t.MediaType(), err
 }

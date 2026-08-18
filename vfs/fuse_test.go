@@ -35,7 +35,9 @@ func TestFuseMount_hostSeesDirtyText(t *testing.T) {
 		t.Fatal(err)
 	}
 	const want = "# Title\n\nnew phrase lives here\n"
-	doc.SetText(want)
+	if err := doc.SetText(want); err != nil {
+		t.Fatal(err)
+	}
 	if err := ms.WriteDocument(ctx, doc); err != nil {
 		t.Fatal(err)
 	}

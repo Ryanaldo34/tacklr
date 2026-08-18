@@ -256,7 +256,7 @@ func (x *MountIndexer) indexFile(ctx context.Context, vpath string, st vfs.FileI
 	if mt == "" {
 		mt = "application/octet-stream"
 	}
-	if !vfs.IsTextLike(mt) {
+	if !vfs.IsTextLike(mt) && !vfs.IsProjected(mt) {
 		return PathSkipped, nil
 	}
 
@@ -266,7 +266,7 @@ func (x *MountIndexer) indexFile(ctx context.Context, vpath string, st vfs.FileI
 	// Session IR when available: hash-check before chunking; Structured → block chunks.
 	if doc, err := x.VFS.ReadText(ctx, vpath); err == nil {
 		body := doc.Text()
-		hash := vfs.ContentHash(body)
+		hash := vfs.ContentToken(doc)
 		mediaType := doc.MediaType()
 		if mediaType == "" {
 			mediaType = mt
@@ -281,7 +281,11 @@ func (x *MountIndexer) indexFile(ctx context.Context, vpath string, st vfs.FileI
 		var chunks []chunkDraft
 		if s, ok := doc.(vfs.Structured); ok {
 			if blocks := s.Blocks(); len(blocks) > 0 {
-				chunks = chunksFromBlocks(base, body, blocks, parentID)
+				if vfs.IsProjected(mediaType) {
+					chunks = chunksFromBlockText(base, blocks, parentID)
+				} else {
+					chunks = chunksFromBlocks(base, body, blocks, parentID)
+				}
 			}
 		}
 		if len(chunks) == 0 {
@@ -413,6 +417,34 @@ func (x *MountIndexer) putFileIndex(
 		}
 	}
 	return PathIndexed, nil
+}
+
+func chunksFromBlockText(fileTitle string, blocks []vfs.Block, parentID uuid.UUID) []chunkDraft {
+	out := make([]chunkDraft, 0, len(blocks))
+	var textBuf strings.Builder
+	for _, b := range blocks {
+		title := b.Text
+		if title == "" {
+			title = b.ID
+		}
+		textBuf.Reset()
+		textBuf.Grow(len(fileTitle) + 1 + len(title) + 1 + len(b.Text))
+		textBuf.WriteString(fileTitle)
+		textBuf.WriteByte('\n')
+		textBuf.WriteString(title)
+		textBuf.WriteByte('\n')
+		textBuf.WriteString(b.Text)
+		start, end := b.Style.Span.StartLine, b.Style.Span.EndLine
+		out = append(out, chunkDraft{
+			ID:        chunkIDByKey(parentID, b.ID),
+			Title:     fileTitle + "#" + b.ID,
+			Text:      textBuf.String(),
+			StartLine: start,
+			EndLine:   end,
+			BlockID:   b.ID,
+		})
+	}
+	return out
 }
 
 func chunksFromBlocks(fileTitle, body string, blocks []vfs.Block, parentID uuid.UUID) []chunkDraft {

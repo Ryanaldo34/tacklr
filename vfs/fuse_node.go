@@ -291,6 +291,9 @@ func (n *fuseNode) stat(ctx context.Context, virtualPath string) (FileInfo, erro
 	if st.IsDir {
 		return st, nil
 	}
+	if st.Size == 0 && !KernelWritable(st.MediaType) {
+		return st, nil
+	}
 	t, err := n.sess.ReadText(ctx, virtualPath)
 	if err == nil {
 		st.Size = int64(len(t.Text()))
@@ -491,6 +494,8 @@ func fuseErrno(err error) syscall.Errno {
 		return syscall.ENOENT
 	case errors.Is(err, ErrReadOnly):
 		return syscall.EROFS
+	case errors.Is(err, ErrPermission):
+		return syscall.EACCES
 	case errors.Is(err, ErrExist):
 		return syscall.EEXIST
 	case errors.Is(err, ErrTooLarge):

@@ -34,20 +34,31 @@ type readArgs struct {
 	IR      bool   `json:"ir,omitempty" desc:"If true, include media_type/encoding/line_count. Full text= only when no window or block."`
 }
 
+type writeBlock struct {
+	ID         string            `json:"id,omitempty"`
+	Kind       string            `json:"kind"`
+	Text       string            `json:"text"`
+	Level      int               `json:"level,omitempty"`
+	Attributes map[string]string `json:"attributes,omitempty"`
+}
+
 type writeArgs struct {
-	Path           string   `json:"path" desc:"Absolute virtual path to write."`
-	Rev            string   `json:"rev,omitempty" desc:"Required when path exists: hash from the latest read. Omit only to create (full mode)."`
-	Content        *string  `json:"content,omitempty" desc:"Full new file body (UTF-8). Creates or replaces the whole file. Empty creates or truncates."`
-	IRText         *string  `json:"ir_text,omitempty" desc:"Full IR body. Same as content; if both are set they must match."`
-	Start          *int     `json:"start,omitempty" desc:"1-based start line (inclusive). Lines mode."`
-	End            *int     `json:"end,omitempty" desc:"1-based end line (exclusive). Required in lines mode."`
-	Lines          []string `json:"lines,omitempty" desc:"Replacement lines (no embedded newlines). Empty deletes the span. Or use body."`
-	Body           *string  `json:"body,omitempty" desc:"Replacement body as one string (split on newlines). Used if lines is empty."`
-	Old            *string  `json:"old,omitempty" desc:"Exact substring to find. Must be unique unless replace_all."`
-	New            *string  `json:"new,omitempty" desc:"Replacement text. Omitted treated as empty."`
-	ReplaceAll     bool     `json:"replace_all,omitempty" desc:"Replace every occurrence of old."`
-	BlockID        string   `json:"block_id,omitempty" desc:"Replace this structured block's body (or full span if include_heading)."`
-	IncludeHeading bool     `json:"include_heading,omitempty" desc:"When block_id is a heading, replace the heading line too."`
+	Path           string        `json:"path" desc:"Absolute virtual path to write."`
+	Rev            string        `json:"rev,omitempty" desc:"Required when path exists: hash from the latest read. Omit only to create (full mode)."`
+	Content        *string       `json:"content,omitempty" desc:"Full new file body (UTF-8). Creates or replaces the whole file. Empty creates or truncates. Create-only lift for Docs."`
+	IRText         *string       `json:"ir_text,omitempty" desc:"Full IR body. Same as content; if both are set they must match."`
+	Start          *int          `json:"start,omitempty" desc:"1-based start line (inclusive). Lines mode."`
+	End            *int          `json:"end,omitempty" desc:"1-based end line (exclusive). Required in lines mode."`
+	Lines          []string      `json:"lines,omitempty" desc:"Replacement lines (no embedded newlines). Empty deletes the span. Or use body."`
+	Body           *string       `json:"body,omitempty" desc:"Replacement body as one string (split on newlines). Used if lines is empty."`
+	Old            *string       `json:"old,omitempty" desc:"Exact substring to find. Must be unique unless replace_all."`
+	New            *string       `json:"new,omitempty" desc:"Replacement text. Omitted treated as empty."`
+	ReplaceAll     bool          `json:"replace_all,omitempty" desc:"Replace every occurrence of old."`
+	BlockID        string        `json:"block_id,omitempty" desc:"Replace this structured block's body (or full span if include_heading)."`
+	IncludeHeading bool          `json:"include_heading,omitempty" desc:"When block_id is a heading, replace the heading line too."`
+	MediaType      string        `json:"media_type,omitempty" desc:"Create-as-Doc: application/vnd.google-apps.document. Ignored when the path exists. Foo.md is never a Doc."`
+	Blocks         *[]writeBlock `json:"blocks,omitempty" desc:"Replace a tab body (SetBlocks) or create a Doc from IR."`
+	TabID          string        `json:"tab_id,omitempty" desc:"Required for blocks when the Doc has more than one tab."`
 }
 
 func (v vfsTools) newRead() *Tool {
@@ -56,8 +67,9 @@ func (v vfsTools) newRead() *Tool {
 		DisplayName: "Read {path}",
 		Description: `Read a virtual file (not a knowledge object). First page by default, or a line window / block.
 
-Path only → start=1 through 1+MaxLinesPerWindow plus rev (pass rev to write).
-start/end → half-open 1-based window. block_id → that region. outline=true → block list. ir=true → media_type/encoding.
+Path only on ordinary files → start=1 through 1+MaxLinesPerWindow plus rev (pass rev to write).
+Path only on Google Docs (projected) → outline. Use rg on the FUSE tree for HTML hits, then read({block_id}) for IR text.
+start/end → half-open 1-based window (HTML lines on Docs). block_id → that region's IR text on Docs. outline=true → block list. ir=true → media_type/encoding (no HTML dump on Docs).
 Knowledge objects with no file: read_object. Live names/grep: run_command → ls / rg.`,
 		Category: streaming.ToolCategoryRead,
 		Access:   ToolReadAccess,
@@ -69,8 +81,17 @@ Knowledge objects with no file: read_object. Live names/grep: run_command → ls
 			}
 			rt.EmitUpdate("Reading " + p)
 
+			fi, err := v.ms.Stat(ctx, p)
+			if err != nil {
+				return "", err
+			}
+			projected := vfs.IsProjected(fi.MediaType)
+
 			explicitWindow := args.Start > 0 || args.End > 0
-			if !explicitWindow && args.BlockID == "" && !args.Outline {
+			pathOnly := !explicitWindow && args.BlockID == "" && !args.Outline && !args.IR
+			if pathOnly && projected {
+				args.Outline = true
+			} else if !explicitWindow && args.BlockID == "" && !args.Outline {
 				args.Start = 1
 				args.End = 1 + vfs.MaxLinesPerWindow
 				explicitWindow = true
@@ -118,10 +139,11 @@ func (v vfsTools) readStructured(ctx context.Context, p string, args readArgs, e
 	if err != nil {
 		return "", err
 	}
-	rev := vfs.ContentHash(doc.Text())
+	rev := vfs.ContentToken(doc)
 	if args.Rev != "" && args.Rev != rev {
 		return "", vfs.ErrStaleContent
 	}
+	projected := vfs.IsProjected(doc.MediaType())
 	var blocks []vfs.Block
 	if s, ok := doc.(vfs.Structured); ok {
 		blocks = s.Blocks()
@@ -135,11 +157,28 @@ func (v vfsTools) readStructured(ctx context.Context, p string, args readArgs, e
 		fmt.Fprintf(&b, "path=%s rev=%s media_type=%s line_count=%d\n",
 			p, rev, doc.MediaType(), doc.LineCount())
 	}
+	if rd, ok := doc.(*vfs.RichDocument); ok && args.Outline {
+		if tabs := rd.Tabs(); len(tabs) > 0 {
+			b.WriteString("tabs:\n")
+			for _, tb := range tabs {
+				fmt.Fprintf(&b, "  %s title=%q index=%d\n", tb.ID, tb.Title, tb.Index)
+			}
+		}
+	}
 	if args.Outline && len(blocks) > 0 {
 		b.WriteString("outline:\n")
 		for _, bl := range blocks {
-			fmt.Fprintf(&b, "  %s kind=%s level=%d L%d-L%d %q\n",
-				bl.ID, bl.Kind, bl.Style.Level, bl.Style.Span.StartLine, bl.Style.Span.EndLine, bl.Text)
+			tab := ""
+			if bl.Style.Attributes != nil {
+				tab = bl.Style.Attributes["tab_id"]
+			}
+			if tab != "" {
+				fmt.Fprintf(&b, "  %s kind=%s level=%d tab=%s L%d-L%d %q\n",
+					bl.ID, bl.Kind, bl.Style.Level, tab, bl.Style.Span.StartLine, bl.Style.Span.EndLine, bl.Text)
+			} else {
+				fmt.Fprintf(&b, "  %s kind=%s level=%d L%d-L%d %q\n",
+					bl.ID, bl.Kind, bl.Style.Level, bl.Style.Span.StartLine, bl.Style.Span.EndLine, bl.Text)
+			}
 		}
 	}
 	start, end := args.Start, args.End
@@ -151,8 +190,12 @@ func (v vfsTools) readStructured(ctx context.Context, p string, args readArgs, e
 		if !ok {
 			return "", fmt.Errorf("unknown block_id %q", args.BlockID)
 		}
-		start, end = bl.Style.Span.StartLine, bl.Style.Span.EndLine
 		fmt.Fprintf(&b, "block_id=%s\n", bl.ID)
+		if projected {
+			fmt.Fprintf(&b, "text=%s\n", bl.Text)
+			return b.String(), nil
+		}
+		start, end = bl.Style.Span.StartLine, bl.Style.Span.EndLine
 	}
 	if start > 0 && end >= start {
 		win, err := lineWindowFromTextDoc(doc, start, end)
@@ -166,7 +209,7 @@ func (v vfsTools) readStructured(ctx context.Context, p string, args readArgs, e
 			fmt.Fprintf(&b, "%6d|%s\n", win.Start+i, line)
 		}
 	}
-	if args.IR && args.BlockID == "" && !explicitWindow {
+	if args.IR && args.BlockID == "" && !explicitWindow && !projected {
 		fmt.Fprintf(&b, "text=%s\n", doc.Text())
 	}
 	return b.String(), nil
@@ -176,9 +219,10 @@ func (v vfsTools) newWrite() *Tool {
 	cfg := ToolConfig{
 		Name:        "write",
 		DisplayName: "Write {path}",
-		Description: `Write a virtual file: full body, line span, substring, or structured block. Exactly one mode per call.
+		Description: `Write a virtual file: full body, line span, substring, structured block, or Docs blocks. Exactly one mode per call.
 
-Pass rev from read when the path exists. Create only via content or ir_text (empty content creates or truncates). Modes are selected by which field is set: content|ir_text, old, block_id, or start. Persists immediately.`,
+Pass rev from read when the path exists. Create only via content or ir_text (empty content creates or truncates), or media_type+blocks for a Google Doc. Foo.md is never a Doc. Extensionless Spec without media_type is plaintext.
+Projected Docs: use block_id or blocks. Line/HTML/SetText writes return an error. content lift is create-only. Persists immediately.`,
 		Category: streaming.ToolCategoryEdit,
 		Access:   ToolWriteAccess,
 		Timeout:  60 * time.Second,
@@ -192,7 +236,7 @@ Pass rev from read when the path exists. Create only via content or ir_text (emp
 			case n == 0:
 				return "", fmt.Errorf("write: no mutation")
 			case n > 1:
-				return "", fmt.Errorf("write: exactly one of content|ir_text, old, block_id, start")
+				return "", fmt.Errorf("write: exactly one of content|ir_text, old, block_id, start, blocks")
 			}
 			var fullBody string
 			if full {
@@ -212,13 +256,15 @@ Pass rev from read when the path exists. Create only via content or ir_text (emp
 				if strings.TrimSpace(args.Rev) == "" {
 					return "", fmt.Errorf("write: rev required when path exists")
 				}
-			} else if !full {
+			} else if !full && args.Blocks == nil {
 				return "", vfs.ErrNotExist
 			}
 
 			switch {
 			case full:
-				return v.writeFull(ctx, p, exists, fi, args.Rev, fullBody)
+				return v.writeFull(ctx, p, exists, fi, args, fullBody)
+			case args.Blocks != nil:
+				return v.writeBlocks(ctx, p, exists, fi, args)
 			case args.Old != nil:
 				return v.writeSubstring(ctx, p, args)
 			case args.BlockID != "":
@@ -248,16 +294,24 @@ func writeModeCount(args writeArgs) (n int, full bool) {
 	if args.Start != nil {
 		n++
 	}
+	if args.Blocks != nil {
+		n++
+	}
 	return n, full
 }
 
-func (v vfsTools) writeFull(ctx context.Context, p string, exists bool, fi vfs.FileInfo, rev, body string) (string, error) {
+const mediaGoogleDocument = "application/vnd.google-apps.document"
+
+func (v vfsTools) writeFull(ctx context.Context, p string, exists bool, fi vfs.FileInfo, args writeArgs, body string) (string, error) {
 	if exists {
+		if vfs.IsProjected(fi.MediaType) {
+			return "", vfs.ErrProjected
+		}
 		cur, err := v.ms.ContentRev(ctx, p)
 		if err != nil {
 			return "", err
 		}
-		if cur.Hash != rev {
+		if cur.Hash != args.Rev {
 			return "", vfs.ErrStaleContent
 		}
 	}
@@ -267,12 +321,41 @@ func (v vfsTools) writeFull(ctx context.Context, p string, exists bool, fi vfs.F
 	mt := ""
 	if exists {
 		mt = fi.MediaType
-	}
-	if mt == "" {
+	} else if args.MediaType == mediaGoogleDocument && path.Ext(p) == "" {
+		if looksLikeHTML(body) {
+			return "", fmt.Errorf("write: HTML content is not accepted; use blocks")
+		}
+		return v.stage(ctx, vfs.NewRichDocument(p, mediaGoogleDocument, liftPlaintext(body)))
+	} else {
 		n := min(len(body), 512)
 		mt = vfs.DetectMediaType(path.Base(p), []byte(body[:n]))
 	}
 	return v.stage(ctx, vfs.NewTextDocument(p, mt, "utf-8", body))
+}
+
+func looksLikeHTML(s string) bool {
+	t := strings.TrimSpace(s)
+	return strings.HasPrefix(t, "<") && strings.Contains(t, ">")
+}
+
+func liftPlaintext(s string) []vfs.Block {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.TrimRight(s, "\n")
+	if s == "" {
+		return nil
+	}
+	var out []vfs.Block
+	for _, para := range strings.Split(s, "\n\n") {
+		para = strings.TrimSpace(para)
+		if para == "" {
+			continue
+		}
+		out = append(out, vfs.Block{Kind: vfs.BlockKindParagraph, Text: para})
+	}
+	if len(out) == 0 {
+		out = append(out, vfs.Block{Kind: vfs.BlockKindParagraph, Text: s})
+	}
+	return out
 }
 
 func fullWriteBody(args writeArgs) (string, error) {
@@ -297,6 +380,9 @@ func (v vfsTools) writeSubstring(ctx context.Context, p string, args writeArgs) 
 	if err != nil {
 		return "", err
 	}
+	if vfs.IsProjected(doc.MediaType()) {
+		return "", vfs.ErrProjected
+	}
 	repl := ""
 	if args.New != nil {
 		repl = *args.New
@@ -310,9 +396,11 @@ func (v vfsTools) writeSubstring(ctx context.Context, p string, args writeArgs) 
 		return "", fmt.Errorf("write: old text occurs %d times (need unique match or replace_all)", n)
 	}
 	if args.ReplaceAll {
-		doc.SetText(strings.ReplaceAll(body, *args.Old, repl))
-	} else {
-		doc.SetText(strings.Replace(body, *args.Old, repl, 1))
+		if err := doc.SetText(strings.ReplaceAll(body, *args.Old, repl)); err != nil {
+			return "", err
+		}
+	} else if err := doc.SetText(strings.Replace(body, *args.Old, repl, 1)); err != nil {
+		return "", err
 	}
 	out, err := v.stage(ctx, doc)
 	if err != nil {
@@ -334,6 +422,18 @@ func (v vfsTools) writeBlock(ctx context.Context, p string, args writeArgs) (str
 	if !ok {
 		return "", fmt.Errorf("write: unknown block_id %q", args.BlockID)
 	}
+	if args.TabID != "" && bl.Style.Attributes != nil {
+		if got := bl.Style.Attributes["tab_id"]; got != "" && got != args.TabID {
+			return "", fmt.Errorf("write: tab_id %q does not match block %q", args.TabID, got)
+		}
+	}
+	if rd, ok := doc.(*vfs.RichDocument); ok {
+		text := strings.Join(replacementLines(args.Lines, args.Body), "\n")
+		if err := rd.ReplaceBlock(bl.ID, text, args.IncludeHeading); err != nil {
+			return "", err
+		}
+		return v.stage(ctx, doc)
+	}
 	start, end, err := vfs.BlockReplaceSpan(bl, args.IncludeHeading)
 	if err != nil {
 		return "", err
@@ -344,6 +444,62 @@ func (v vfsTools) writeBlock(ctx context.Context, p string, args writeArgs) (str
 	return v.stage(ctx, doc)
 }
 
+func (v vfsTools) writeBlocks(ctx context.Context, p string, exists bool, fi vfs.FileInfo, args writeArgs) (string, error) {
+	next := make([]vfs.Block, 0, len(*args.Blocks))
+	for _, wb := range *args.Blocks {
+		attrs := map[string]string{}
+		for k, v := range wb.Attributes {
+			attrs[k] = v
+		}
+		if args.TabID != "" {
+			attrs["tab_id"] = args.TabID
+		}
+		next = append(next, vfs.Block{
+			ID: wb.ID, Kind: wb.Kind, Text: wb.Text,
+			Style: vfs.StyleMeta{Level: wb.Level, Attributes: attrs},
+		})
+	}
+	if !exists {
+		if args.MediaType != mediaGoogleDocument || path.Ext(p) != "" {
+			return "", fmt.Errorf("write: blocks require media_type=%s on an extensionless path", mediaGoogleDocument)
+		}
+		return v.stage(ctx, vfs.NewRichDocument(p, mediaGoogleDocument, next))
+	}
+	if !vfs.IsProjected(fi.MediaType) {
+		return "", vfs.ErrProjected
+	}
+	if len(next) == 0 {
+		return "", fmt.Errorf("write: refusing empty IR replace")
+	}
+	doc, err := v.loadMatching(ctx, p, args.Rev)
+	if err != nil {
+		return "", err
+	}
+	rd, ok := doc.(*vfs.RichDocument)
+	if !ok {
+		return "", vfs.ErrProjected
+	}
+	tabs := rd.Tabs()
+	if len(tabs) > 1 && args.TabID == "" {
+		return "", fmt.Errorf("write: tab_id required")
+	}
+	if args.TabID != "" && len(tabs) > 0 {
+		var keep []vfs.Block
+		for _, b := range rd.Blocks() {
+			tab := ""
+			if b.Style.Attributes != nil {
+				tab = b.Style.Attributes["tab_id"]
+			}
+			if tab != args.TabID {
+				keep = append(keep, b)
+			}
+		}
+		next = append(next, keep...)
+	}
+	rd.SetBlocks(next)
+	return v.stage(ctx, doc)
+}
+
 func (v vfsTools) writeLines(ctx context.Context, p string, args writeArgs) (string, error) {
 	if args.End == nil || *args.Start < 1 || *args.End < *args.Start {
 		return "", fmt.Errorf("write: invalid range start=%d end=%v", *args.Start, args.End)
@@ -351,6 +507,9 @@ func (v vfsTools) writeLines(ctx context.Context, p string, args writeArgs) (str
 	doc, err := v.loadMatching(ctx, p, args.Rev)
 	if err != nil {
 		return "", err
+	}
+	if vfs.IsProjected(doc.MediaType()) {
+		return "", vfs.ErrProjected
 	}
 	if err := doc.ReplaceLines(*args.Start, *args.End, replacementLines(args.Lines, args.Body)); err != nil {
 		return "", err
@@ -397,7 +556,7 @@ func (v vfsTools) loadMatching(ctx context.Context, p, expected string) (vfs.Tex
 	if err != nil {
 		return nil, err
 	}
-	if vfs.ContentHash(doc.Text()) != expected {
+	if vfs.ContentToken(doc) != expected {
 		return nil, vfs.ErrStaleContent
 	}
 	return doc, nil
@@ -405,9 +564,12 @@ func (v vfsTools) loadMatching(ctx context.Context, p, expected string) (vfs.Tex
 
 func (v vfsTools) stage(ctx context.Context, doc vfs.Textual) (string, error) {
 	if err := v.ms.WriteDocument(ctx, doc); err != nil {
+		if errors.Is(err, vfs.ErrConflict) {
+			return "", vfs.ErrStaleContent
+		}
 		return "", err
 	}
-	return fmt.Sprintf("path=%s rev=%s line_count=%d", doc.Path(), vfs.ContentHash(doc.Text()), doc.LineCount()), nil
+	return fmt.Sprintf("path=%s rev=%s line_count=%d", doc.Path(), vfs.ContentToken(doc), doc.LineCount()), nil
 }
 
 func growLineWindow(b *strings.Builder, extra int, lines []string) {

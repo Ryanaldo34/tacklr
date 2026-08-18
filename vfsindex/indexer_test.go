@@ -637,3 +637,96 @@ func keys(m map[string]brain.RichObject) []string {
 	}
 	return out
 }
+
+func TestMountIndexer_docsBlockText(t *testing.T) {
+	ctx := context.Background()
+	reg := vfs.NewBackendRegistry()
+	doc := vfs.NewRichDocument("/docs/Spec", "application/vnd.google-apps.document", []vfs.Block{
+		{Kind: vfs.BlockKindHeading, Text: "Spec", Style: vfs.StyleMeta{Level: 1}},
+		{Kind: vfs.BlockKindParagraph, Text: "unique-doc-phrase"},
+	})
+	if err := reg.Register(richFactory{doc: doc}); err != nil {
+		t.Fatal(err)
+	}
+	ms := vfs.MustNewMountSession("idx-docs", reg)
+	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/docs", Profile: "rich"}); err != nil {
+		t.Fatal(err)
+	}
+	store := brain.NewMemoryStore()
+	eng, err := brain.NewEngine(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...); err != nil {
+		t.Fatal(err)
+	}
+	ns := uuid.New()
+	idx, err := vfsindex.NewMountIndexer(ms, eng, brain.Scope{Namespace: &ns})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := ms.Stat(ctx, "/docs/Spec")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := idx.IndexFileResult(ctx, "/docs/Spec", st)
+	if err != nil || res != vfsindex.PathIndexed {
+		t.Fatalf("index: %q err=%v", res, err)
+	}
+	parent := idx.DocumentID("/docs/Spec")
+	children, err := eng.ListChildren(ctx, brain.Scope{Namespace: &ns}, parent)
+	if err != nil || len(children) != 2 {
+		t.Fatalf("chunks=%d err=%v", len(children), err)
+	}
+	var sawPhrase bool
+	for _, c := range children {
+		obj, err := eng.Read(ctx, brain.Scope{Namespace: &ns}, c.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(obj.Content, "unique-doc-phrase") && !strings.Contains(obj.Content, "<html") {
+			sawPhrase = true
+		}
+	}
+	if !sawPhrase {
+		t.Fatal("expected Block.Text chunk, not projected HTML")
+	}
+	res, err = idx.IndexFileResult(ctx, "/docs/Spec", st)
+	if err != nil || res != vfsindex.PathSkipped {
+		t.Fatalf("hash skip: %q err=%v", res, err)
+	}
+}
+
+type richFactory struct{ doc vfs.Document }
+
+func (richFactory) Profile() string { return "rich" }
+func (f richFactory) Open(context.Context, string, vfs.MountSpec) (vfs.Provider, error) {
+	return richProvider(f), nil
+}
+
+type richProvider struct{ doc vfs.Document }
+
+func (richProvider) Validate(context.Context) error { return nil }
+func (p richProvider) Stat(_ context.Context, name string) (vfs.FileInfo, error) {
+	if name == "" {
+		return vfs.FileInfo{Name: ".", IsDir: true}, nil
+	}
+	return vfs.FileInfo{Name: "Spec", MediaType: "application/vnd.google-apps.document"}, nil
+}
+func (richProvider) OpenFile(context.Context, string, int, fs.FileMode) (vfs.File, error) {
+	return nil, vfs.ErrNotSupported
+}
+func (p richProvider) ReadDir(_ context.Context, name string) ([]vfs.DirEntry, error) {
+	if name != "" {
+		return nil, vfs.ErrNotExist
+	}
+	return []vfs.DirEntry{{Name: "Spec"}}, nil
+}
+func (richProvider) Remove(context.Context, string) error                { return vfs.ErrNotSupported }
+func (richProvider) MkdirAll(context.Context, string, fs.FileMode) error { return vfs.ErrNotSupported }
+func (p richProvider) OpenDocument(_ context.Context, _ string, _ *vfs.ContentRegistry) (vfs.Document, error) {
+	return p.doc, nil
+}
+func (richProvider) WriteDocument(context.Context, string, vfs.Document) error {
+	return vfs.ErrNotSupported
+}
