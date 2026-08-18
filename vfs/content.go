@@ -225,6 +225,9 @@ func uniqueMediaTypes(m map[string]string) []string {
 	seen := make(map[string]struct{}, len(m))
 	out := make([]string, 0, len(m))
 	for _, mt := range m {
+		if !IsTextLike(mt) {
+			continue
+		}
 		if _, ok := seen[mt]; ok {
 			continue
 		}
