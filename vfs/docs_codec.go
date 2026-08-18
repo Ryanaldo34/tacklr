@@ -144,11 +144,13 @@ func (d *htmlDecoder) walk(n *html.Node, listDepth int, listID string) {
 				return
 			}
 			level := int(n.Data[1] - '0')
-			text := strings.TrimSpace(innerText(n))
-			if text != "" {
+			runs := collectInline(n, nil)
+			text := FormatInline(runs)
+			if strings.TrimSpace(runsPlain(runs)) != "" {
 				d.blocks = append(d.blocks, Block{
 					Kind: BlockKindHeading,
 					Text: text,
+					Runs: runs,
 					Style: StyleMeta{
 						Level:      level,
 						Attributes: map[string]string{},
@@ -157,15 +159,17 @@ func (d *htmlDecoder) walk(n *html.Node, listDepth int, listID string) {
 			}
 			return
 		case "p", "div":
-			full, skipImgs, imgs := collectParagraph(n)
+			_, skipImgs, imgs := collectParagraph(n)
 			if len(imgs) > 0 && strings.TrimSpace(skipImgs) == "" {
 				d.blocks = append(d.blocks, imgs...)
 				return
 			}
-			if text := strings.TrimSpace(full); text != "" {
+			runs := collectInline(n, nil)
+			if text := FormatInline(runs); strings.TrimSpace(runsPlain(runs)) != "" {
 				d.blocks = append(d.blocks, Block{
 					Kind:  BlockKindParagraph,
 					Text:  text,
+					Runs:  runs,
 					Style: StyleMeta{Attributes: map[string]string{}},
 				})
 			}
@@ -184,10 +188,11 @@ func (d *htmlDecoder) walk(n *html.Node, listDepth int, listID string) {
 			if p := n.Parent; p != nil && strings.EqualFold(p.Data, "ol") {
 				listType = "ol"
 			}
-			text := strings.TrimSpace(directItemText(n))
+			runs := collectItemInline(n)
 			d.blocks = append(d.blocks, Block{
 				Kind: BlockKindListItem,
-				Text: text,
+				Text: FormatInline(runs),
+				Runs: runs,
 				Style: StyleMeta{
 					Level: level,
 					Attributes: map[string]string{
@@ -241,6 +246,67 @@ func (d *htmlDecoder) walk(n *html.Node, listDepth int, listID string) {
 	}
 }
 
+func collectInline(n *html.Node, marks map[string]string) []Run {
+	var out []Run
+	var walk func(*html.Node, map[string]string)
+	walk = func(n *html.Node, marks map[string]string) {
+		if n == nil {
+			return
+		}
+		if n.Type == html.TextNode {
+			if n.Data != "" {
+				out = append(out, Run{Text: n.Data, Marks: cloneMarks(marks)})
+			}
+			return
+		}
+		if n.Type != html.ElementNode {
+			for c := n.FirstChild; c != nil; c = c.NextSibling {
+				walk(c, marks)
+			}
+			return
+		}
+		switch strings.ToLower(n.Data) {
+		case "script", "style", "img", "figure":
+			return
+		case "br":
+			out = append(out, Run{Text: "\n", Marks: cloneMarks(marks)})
+			return
+		}
+		next := cloneMarks(marks)
+		switch strings.ToLower(n.Data) {
+		case "strong", "b":
+			next = withMark(next, MarkBold, "true")
+		case "em", "i":
+			next = withMark(next, MarkItalic, "true")
+		case "s", "strike", "del":
+			next = withMark(next, MarkStrike, "true")
+		case "a":
+			if href := attrVal(n, "href"); href != "" {
+				next = withMark(next, MarkHref, href)
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c, next)
+		}
+	}
+	walk(n, marks)
+	return mergeRuns(out)
+}
+
+func collectItemInline(n *html.Node) []Run {
+	var out []Run
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if c.Type == html.ElementNode {
+			switch strings.ToLower(c.Data) {
+			case "ul", "ol":
+				continue
+			}
+		}
+		out = append(out, collectInline(c, nil)...)
+	}
+	return mergeRuns(out)
+}
+
 func findHTMLBody(n *html.Node) *html.Node {
 	if n == nil {
 		return nil
@@ -276,30 +342,6 @@ func attrVal(n *html.Node, key string) string {
 		}
 	}
 	return ""
-}
-
-func innerText(n *html.Node) string {
-	var b strings.Builder
-	var walk func(*html.Node)
-	walk = func(n *html.Node) {
-		if n == nil {
-			return
-		}
-		if n.Type == html.ElementNode {
-			switch strings.ToLower(n.Data) {
-			case "script", "style":
-				return
-			}
-		}
-		if n.Type == html.TextNode {
-			b.WriteString(n.Data)
-		}
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			walk(c)
-		}
-	}
-	walk(n)
-	return b.String()
 }
 
 func collectParagraph(n *html.Node) (full, skipImgs string, imgs []Block) {
@@ -344,24 +386,6 @@ func collectParagraph(n *html.Node) (full, skipImgs string, imgs []Block) {
 	}
 	walk(n, false)
 	return fullB.String(), skipB.String(), imgs
-}
-
-func directItemText(n *html.Node) string {
-	var b strings.Builder
-	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		if c.Type == html.ElementNode {
-			switch strings.ToLower(c.Data) {
-			case "ul", "ol":
-				continue
-			}
-		}
-		if c.Type == html.TextNode {
-			b.WriteString(c.Data)
-			continue
-		}
-		b.WriteString(innerText(c))
-	}
-	return b.String()
 }
 
 func decodeHTMLImage(n *html.Node, seq *int) (Block, bool) {
@@ -412,7 +436,7 @@ func decodeHTMLTable(n *html.Node) (Block, bool) {
 			var cells []string
 			for c := n.FirstChild; c != nil; c = c.NextSibling {
 				if c.Type == html.ElementNode && (strings.EqualFold(c.Data, "td") || strings.EqualFold(c.Data, "th")) {
-					cells = append(cells, sanitizeCell(strings.TrimSpace(innerText(c))))
+					cells = append(cells, sanitizeCell(strings.TrimSpace(FormatInline(collectInline(c, nil)))))
 				}
 			}
 			if len(cells) > 0 {

@@ -70,6 +70,7 @@ type DocsRequest struct {
 	UpdateParagraphStyle   *docs.UpdateParagraphStyleRequest
 	CreateParagraphBullets *docs.CreateParagraphBulletsRequest
 	InsertTable            *docs.InsertTableRequest
+	UpdateTextStyle        *docs.UpdateTextStyleRequest
 }
 
 // DocsBatchResult is writeControl.requiredRevisionId after apply.
@@ -169,12 +170,16 @@ func docsRequestToAPI(r DocsRequest, tabID string) *docs.Request {
 	if r.InsertTable != nil {
 		applyTab(r.InsertTable.Location, nil)
 	}
+	if r.UpdateTextStyle != nil {
+		applyTab(nil, r.UpdateTextStyle.Range)
+	}
 	return &docs.Request{
 		DeleteContentRange:     r.DeleteContentRange,
 		InsertText:             r.InsertText,
 		UpdateParagraphStyle:   r.UpdateParagraphStyle,
 		CreateParagraphBullets: r.CreateParagraphBullets,
 		InsertTable:            r.InsertTable,
+		UpdateTextStyle:        r.UpdateTextStyle,
 	}
 }
 

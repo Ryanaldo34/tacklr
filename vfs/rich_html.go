@@ -112,13 +112,13 @@ func projectHTMLSpans(blocks []Block, tabs []DocTab) (string, []Span) {
 			write("<")
 			write(tag)
 			write(">")
-			writeEsc(bl.Text)
+			writeInlineHTML(write, writeEsc, bl)
 			write("</")
 			write(tag)
 			write(">\n")
 		case BlockKindParagraph:
 			write("<p>")
-			writeEsc(bl.Text)
+			writeInlineHTML(write, writeEsc, bl)
 			write("</p>\n")
 		case BlockKindListItem:
 			listType := blockAttr(bl, "list_type")
@@ -146,7 +146,7 @@ func projectHTMLSpans(blocks []Block, tabs []DocTab) (string, []Span) {
 				closeLists(level)
 			}
 			write("<li>")
-			writeEsc(bl.Text)
+			writeInlineHTML(write, writeEsc, bl)
 			nextNests := false
 			if i+1 < len(blocks) && blocks[i+1].Kind == BlockKindListItem {
 				nextID := blockAttr(blocks[i+1], "list_id")
@@ -171,7 +171,7 @@ func projectHTMLSpans(blocks []Block, tabs []DocTab) (string, []Span) {
 				write("<tr>")
 				for _, cell := range row {
 					write("<td>")
-					writeEsc(cell)
+					writeInlineHTML(write, writeEsc, Block{Text: cell, Runs: ParseInline(cell)})
 					write("</td>")
 				}
 				write("</tr>")
@@ -195,7 +195,7 @@ func projectHTMLSpans(blocks []Block, tabs []DocTab) (string, []Span) {
 		default:
 			if bl.Text != "" {
 				write("<p>")
-				writeEsc(bl.Text)
+				writeInlineHTML(write, writeEsc, bl)
 				write("</p>\n")
 			}
 		}
@@ -240,4 +240,41 @@ func writeHTMLEscaped(b *strings.Builder, s string) {
 		last = i + 1
 	}
 	b.WriteString(s[last:])
+}
+
+func writeInlineHTML(write, writeEsc func(string), bl Block) {
+	runs := bl.inlineRuns()
+	if len(runs) == 0 {
+		writeEsc(bl.Text)
+		return
+	}
+	for _, r := range runs {
+		if href := r.Marks[MarkHref]; href != "" {
+			write(`<a href="`)
+			writeEsc(href)
+			write(`">`)
+		}
+		if r.Marks[MarkStrike] == "true" {
+			write("<s>")
+		}
+		if r.Marks[MarkBold] == "true" {
+			write("<strong>")
+		}
+		if r.Marks[MarkItalic] == "true" {
+			write("<em>")
+		}
+		writeEsc(r.Text)
+		if r.Marks[MarkItalic] == "true" {
+			write("</em>")
+		}
+		if r.Marks[MarkBold] == "true" {
+			write("</strong>")
+		}
+		if r.Marks[MarkStrike] == "true" {
+			write("</s>")
+		}
+		if r.Marks[MarkHref] != "" {
+			write("</a>")
+		}
+	}
 }

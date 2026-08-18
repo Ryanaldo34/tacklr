@@ -37,7 +37,7 @@ type readArgs struct {
 type writeBlock struct {
 	ID         string            `json:"id,omitempty"`
 	Kind       string            `json:"kind"`
-	Text       string            `json:"text"`
+	Text       string            `json:"text" desc:"Block body. Docs/Word inline marks: **bold**, _italic_ (or *italic*), ~~strike~~, [label](url). Structure is kind/level — do not put # headings or - lists in text. No marks = plain text (old marks dropped)."`
 	Level      int               `json:"level,omitempty"`
 	Attributes map[string]string `json:"attributes,omitempty"`
 }
@@ -57,7 +57,7 @@ type writeArgs struct {
 	BlockID        string        `json:"block_id,omitempty" desc:"Replace this structured block's body (or full span if include_heading)."`
 	IncludeHeading bool          `json:"include_heading,omitempty" desc:"When block_id is a heading, replace the heading line too."`
 	MediaType      string        `json:"media_type,omitempty" desc:"Create-as-Doc: application/vnd.google-apps.document. Ignored when the path exists. Foo.md is never a Doc."`
-	Blocks         *[]writeBlock `json:"blocks,omitempty" desc:"Replace a tab body (SetBlocks) or create a Doc from IR."`
+	Blocks         *[]writeBlock `json:"blocks,omitempty" desc:"Replace a tab body (SetBlocks) or create a Doc/Word file from IR. text uses **bold** _italic_ ~~strike~~ [label](url)."`
 	TabID          string        `json:"tab_id,omitempty" desc:"Required for blocks when the Doc has more than one tab."`
 }
 
@@ -68,8 +68,8 @@ func (v vfsTools) newRead() *Tool {
 		Description: `Read a virtual file (not a knowledge object). First page by default, or a line window / block.
 
 Path only on ordinary files → start=1 through 1+MaxLinesPerWindow plus rev (pass rev to write).
-Path only on Google Docs (projected) → outline. Use rg on the FUSE tree for HTML hits, then read({block_id}) for IR text.
-start/end → half-open 1-based window (HTML lines on Docs). block_id → that region's IR text on Docs. outline=true → block list. ir=true → media_type/encoding (no HTML dump on Docs).
+Path only on Google Docs/Word (projected) → outline. Use rg on the FUSE tree for HTML hits, then read({block_id}) for IR text.
+start/end → half-open 1-based window (HTML lines on Docs). block_id → that region's IR text. outline=true → block list (text uses **bold** _italic_ ~~strike~~ [label](url); kind/level is structure). ir=true → media_type/encoding (no HTML dump on Docs).
 Knowledge objects with no file: read_object. Live names/grep: run_command → ls / rg.`,
 		Category: streaming.ToolCategoryRead,
 		Access:   ToolReadAccess,
@@ -222,7 +222,7 @@ func (v vfsTools) newWrite() *Tool {
 		Description: `Write a virtual file: full body, line span, substring, structured block, or Docs blocks. Exactly one mode per call.
 
 Pass rev from read when the path exists. Create only via content or ir_text (empty content creates or truncates), or media_type+blocks for a Google Doc. Foo.md is never a Doc. Extensionless Spec without media_type is plaintext.
-Projected Docs: use block_id or blocks. Line/HTML/SetText writes return an error. content lift is create-only. Persists immediately.`,
+Projected Docs/Word: use block_id or blocks. Inline marks in block text: **bold**, _italic_, ~~strike~~, [label](url). kind/level is structure (not # or -). No marks = plain replace (drops old marks). Line/HTML/SetText writes return an error. content lift is create-only. Persists immediately.`,
 		Category: streaming.ToolCategoryEdit,
 		Access:   ToolWriteAccess,
 		Timeout:  60 * time.Second,

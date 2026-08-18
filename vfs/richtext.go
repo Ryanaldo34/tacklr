@@ -87,25 +87,86 @@ func projectRichBlocks(blocks []RichTextBlock, line int) []Block {
 	}
 	out := make([]Block, 0, len(blocks))
 	for _, block := range blocks {
-		text := block.Text
-		if text == "" && len(block.Runs) > 0 {
-			var b strings.Builder
-			for _, run := range block.Runs {
-				b.WriteString(run.Text)
-			}
-			text = b.String()
+		runs := adapterRunsToIR(block)
+		text := FormatInline(runs)
+		if text == "" {
+			text = block.Text
 		}
 		kind := normalizeRichKind(block.Kind)
-		end := line + maxRichTextLines(text)
+		end := line + maxRichTextLines(runsPlain(runs))
+		if end == line {
+			end = line + maxRichTextLines(text)
+		}
 		attrs := map[string]string{"heading_path": block.ID}
 		for k, v := range block.Attributes {
 			attrs[k] = v
 		}
-		out = append(out, Block{ID: block.ID, Kind: kind, Text: text, Style: StyleMeta{
+		out = append(out, Block{ID: block.ID, Kind: kind, Text: text, Runs: runs, Style: StyleMeta{
 			Kind: kind, Level: block.Level, Span: Span{StartLine: line, EndLine: end}, Attributes: attrs,
 		}})
 		line = end
 		out = append(out, projectRichBlocks(block.Children, line)...)
+	}
+	return out
+}
+
+func adapterRunsToIR(block RichTextBlock) []Run {
+	if len(block.Runs) == 0 {
+		if block.Text == "" {
+			return nil
+		}
+		return []Run{{Text: block.Text}}
+	}
+	out := make([]Run, 0, len(block.Runs))
+	for _, r := range block.Runs {
+		marks := map[string]string{}
+		for k, v := range r.Attributes {
+			switch k {
+			case "b", "bold":
+				if v == "true" {
+					marks[MarkBold] = "true"
+				}
+			case "i", "italic":
+				if v == "true" {
+					marks[MarkItalic] = "true"
+				}
+			case "strike", "s":
+				if v == "true" {
+					marks[MarkStrike] = "true"
+				}
+			case "href":
+				if v != "" {
+					marks[MarkHref] = v
+				}
+			}
+		}
+		out = append(out, Run{Text: r.Text, Marks: marks})
+	}
+	return mergeRuns(out)
+}
+
+func irRunsToAdapter(runs []Run) []RichTextRun {
+	if len(runs) == 0 {
+		return nil
+	}
+	out := make([]RichTextRun, 0, len(runs))
+	for _, r := range runs {
+		attrs := map[string]string{}
+		if r.Marks[MarkBold] == "true" {
+			attrs["b"] = "true"
+			attrs["bold"] = "true"
+		}
+		if r.Marks[MarkItalic] == "true" {
+			attrs["i"] = "true"
+			attrs["italic"] = "true"
+		}
+		if r.Marks[MarkStrike] == "true" {
+			attrs["strike"] = "true"
+		}
+		if href := r.Marks[MarkHref]; href != "" {
+			attrs["href"] = href
+		}
+		out = append(out, RichTextRun{Text: strings.ReplaceAll(r.Text, "\n", " "), Attributes: attrs})
 	}
 	return out
 }
@@ -155,11 +216,9 @@ func richTextFromBlocks(blocks []Block) *RichTextDocument {
 			ID:         b.ID,
 			Kind:       adapterRichKind(b.Kind),
 			Level:      b.Style.Level,
-			Text:       b.Text,
+			Text:       b.PlainText(),
 			Attributes: attrs,
-		}
-		if t := strings.ReplaceAll(b.Text, "\n", " "); t != "" {
-			rb.Runs = []RichTextRun{{Text: t}}
+			Runs:       irRunsToAdapter(b.inlineRuns()),
 		}
 		out.Blocks = append(out.Blocks, rb)
 	}

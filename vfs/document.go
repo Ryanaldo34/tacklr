@@ -67,10 +67,16 @@ type Span struct {
 
 // Block is a structural unit (heading region, paragraph, …).
 // For Markdown, blocks are a projected view over the textual body (not a second body).
+//
+// Text is what tools show the agent. On RichDocument, inline marks in Text are
+// **bold**, _italic_ (also *italic* on input), ~~strike~~, and [label](url).
+// kind/level carry structure — do not put # or - lists in Text.
+// Runs is the decoded form; callers set Text and leave Runs empty.
 type Block struct {
 	ID    string
 	Kind  string
 	Text  string
+	Runs  []Run
 	Style StyleMeta
 }
 

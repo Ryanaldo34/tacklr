@@ -167,6 +167,7 @@ func (d *RichDocument) ReplaceBlock(id string, text string, includeHeading bool)
 			return fmt.Errorf("write: heading %q has no body; set include_heading or use the following block_id", id)
 		}
 		b.Text = text
+		b.Runs = nil
 	case BlockKindTable:
 		rows, cols, err := tableShape(b)
 		if err != nil {
@@ -180,9 +181,12 @@ func (d *RichDocument) ReplaceBlock(id string, text string, includeHeading bool)
 			return fmt.Errorf("%w: table shape must stay %dx%d", ErrNotSupported, rows, cols)
 		}
 		b.Text = encodeTSV(got)
+		b.Runs = nil
 	default:
 		b.Text = text
+		b.Runs = nil
 	}
+	normalizeInline(&b)
 	d.blocks[i] = b
 	d.mut = richReplace
 	d.reproject()
@@ -261,6 +265,8 @@ func cloneBlocks(in []Block) []Block {
 			}
 			out[i].Style.Attributes = attrs
 		}
+		out[i].Runs = cloneRuns(b.Runs)
+		normalizeInline(&out[i])
 	}
 	return out
 }
@@ -305,7 +311,7 @@ func assignBlockIDs(blocks []Block, tabs []DocTab) []Block {
 			for len(st.stack) > 0 && st.stack[len(st.stack)-1].level >= b.Style.Level {
 				st.stack = st.stack[:len(st.stack)-1]
 			}
-			seg := Slugify(b.Text)
+			seg := Slugify(b.PlainText())
 			if seg == "" {
 				seg = "section"
 			}

@@ -50,6 +50,50 @@ func reqBullets(start, end int, tabID, listType string) DocsRequest {
 	}}
 }
 
+func reqTextStyle(start, end int, tabID string, r Run) DocsRequest {
+	st := &docs.TextStyle{
+		Bold:          r.Marks[MarkBold] == "true",
+		Italic:        r.Marks[MarkItalic] == "true",
+		Strikethrough: r.Marks[MarkStrike] == "true",
+	}
+	st.ForceSendFields = []string{"Bold", "Italic", "Strikethrough"}
+	if href := r.Marks[MarkHref]; href != "" {
+		st.Link = &docs.Link{Url: href}
+	} else {
+		st.NullFields = []string{"Link"}
+	}
+	return DocsRequest{UpdateTextStyle: &docs.UpdateTextStyleRequest{
+		Range:     docsRange(start, end, tabID),
+		TextStyle: st,
+		Fields:    "bold,italic,strikethrough,link",
+	}}
+}
+
+func mapInlineStyles(start int, tabID string, runs []Run) []DocsRequest {
+	var reqs []DocsRequest
+	off := 0
+	for _, r := range runs {
+		n := utf16Count(r.Text)
+		if n > 0 {
+			reqs = append(reqs, reqTextStyle(start+off, start+off+n, tabID, r))
+		}
+		off += n
+	}
+	return reqs
+}
+
+func utf16Count(s string) int {
+	n := 0
+	for _, r := range s {
+		if r >= 0x10000 {
+			n += 2
+		} else {
+			n++
+		}
+	}
+	return n
+}
+
 func reqInsertTable(index int, tabID string, rows, cols int) DocsRequest {
 	return DocsRequest{InsertTable: &docs.InsertTableRequest{
 		Location: docsLocation(index, tabID),
@@ -68,17 +112,20 @@ func mapReplaceBlock(loc blockLocation, b Block) ([]DocsRequest, error) {
 	case BlockKindTable:
 		return mapReplaceTable(loc, b)
 	default:
-		// keep the paragraph newline
+		plain := b.PlainText()
+		var reqs []DocsRequest
 		if loc.endIndex-loc.startIndex <= 1 {
-			if b.Text == "" {
+			if plain == "" {
 				return nil, nil
 			}
-			return []DocsRequest{reqInsert(loc.startIndex, tab, b.Text)}, nil
+			reqs = append(reqs, reqInsert(loc.startIndex, tab, plain))
+		} else {
+			reqs = append(reqs, reqDelete(loc.startIndex, loc.endIndex-1, tab))
+			if plain != "" {
+				reqs = append(reqs, reqInsert(loc.startIndex, tab, plain))
+			}
 		}
-		return []DocsRequest{
-			reqDelete(loc.startIndex, loc.endIndex-1, tab),
-			reqInsert(loc.startIndex, tab, b.Text),
-		}, nil
+		return append(reqs, mapInlineStyles(loc.startIndex, tab, b.inlineRuns())...), nil
 	}
 }
 
@@ -119,8 +166,10 @@ func mapReplaceTable(loc blockLocation, b Block) ([]DocsRequest, error) {
 		if p.cell.endIndex-p.cell.startIndex > 1 {
 			reqs = append(reqs, reqDelete(p.cell.startIndex, p.cell.endIndex-1, loc.tabID))
 		}
-		if p.text != "" {
-			reqs = append(reqs, reqInsert(p.cell.startIndex, loc.tabID, p.text))
+		plain := PlainInline(p.text)
+		if plain != "" {
+			reqs = append(reqs, reqInsert(p.cell.startIndex, loc.tabID, plain))
+			reqs = append(reqs, mapInlineStyles(p.cell.startIndex, loc.tabID, ParseInline(p.text))...)
 		}
 	}
 	return reqs, nil
