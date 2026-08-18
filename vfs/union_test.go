@@ -245,3 +245,64 @@ func TestMountSession_unionMissingAndCanceled(t *testing.T) {
 		t.Fatal("Mount canceled")
 	}
 }
+
+func TestMountSession_attachesSkillsFromFactory(t *testing.T) {
+	ctx := t.Context()
+	work, pack := t.TempDir(), t.TempDir()
+	writeUnionTree(t, pack, map[string]string{"alpha/SKILL.md": "---\nname: alpha\ndescription: A\n---\n\nA"})
+	reg := vfs.NewBackendRegistry()
+	if err := reg.Register(vfs.LocalFactory{ID: "work", Base: work}); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Register(vfs.LocalFactory{ID: "pack", Base: pack, Skills: "."}); err != nil {
+		t.Fatal(err)
+	}
+	ms := vfs.MustNewMountSession(t.Name(), reg)
+	t.Cleanup(func() { _ = ms.Close() })
+	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "work"}); err != nil {
+		t.Fatal(err)
+	}
+	spec, err := ms.SpecAt("/skills/alpha/SKILL.md")
+	if err != nil || spec.Point != vfs.SkillsPoint || !spec.ReadOnly || spec.IndexPolicy != "none" {
+		t.Fatalf("SpecAt /skills: %+v err=%v", spec, err)
+	}
+	got, err := ms.ReadFile(ctx, "/skills/alpha/SKILL.md")
+	if err != nil || !strings.Contains(string(got), "name: alpha") {
+		t.Fatalf("ReadFile = %q err=%v", got, err)
+	}
+	other := t.TempDir()
+	if err := reg.Register(vfs.LocalFactory{ID: "other", Base: other}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/other", Profile: "other"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ms.ReadFile(ctx, "/skills/alpha/SKILL.md"); err != nil {
+		t.Fatalf("skills after remount: %v", err)
+	}
+}
+
+func TestSkillSource_memberSpecs(t *testing.T) {
+	if _, ok := (vfs.LocalFactory{ID: "x", Base: t.TempDir()}).SkillMember(); ok {
+		t.Fatal("empty Skills")
+	}
+	spec, ok := (vfs.LocalFactory{ID: "x", Skills: "."}).SkillMember()
+	if !ok || spec.Profile != "x" || spec.Params != nil {
+		t.Fatalf("local . = %+v ok=%v", spec, ok)
+	}
+	spec, ok = (vfs.LocalFactory{ID: "x", Skills: "pack"}).SkillMember()
+	if !ok || spec.Params["subpath"] != "pack" {
+		t.Fatalf("local pack = %+v", spec)
+	}
+	if _, ok := (vfs.S3Factory{ID: "s"}).SkillMember(); ok {
+		t.Fatal("empty S3 Skills")
+	}
+	spec, ok = (vfs.S3Factory{ID: "s", Skills: "org/"}).SkillMember()
+	if !ok || spec.Params["prefix"] != "org" {
+		t.Fatalf("s3 prefix = %+v", spec)
+	}
+	spec, ok = (vfs.S3Factory{ID: "s", Skills: "."}).SkillMember()
+	if !ok || spec.Params != nil {
+		t.Fatalf("s3 . = %+v", spec)
+	}
+}

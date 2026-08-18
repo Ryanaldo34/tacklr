@@ -387,6 +387,10 @@ func (r *Registry) sessionVFS(ctx context.Context, threadID string, spec *AgentS
 				return nil, err
 			}
 		}
+		if err := ms.AttachSkills(ctx); err != nil {
+			_ = ms.Close()
+			return nil, err
+		}
 	}
 	r.mounts[threadID] = ms
 	return ms, nil

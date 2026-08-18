@@ -51,14 +51,17 @@ type AgentHarness struct {
 	parkedWorkersLive map[string]*AgentHarness
 	parkMu            sync.Mutex
 	// Worker runs share one live lifecycle registry across sync and async delivery.
-	jobs                 map[string]*workerRun
-	jobsMu               sync.Mutex
-	jobsCtx              context.Context
-	jobsCancel           context.CancelFunc
-	skillByName          map[string]skills.Skill
-	skillDirectories     []string
-	skillsLoader         skills.SkillLoader
-	skillsInitialized    bool
+	jobs              map[string]*workerRun
+	jobsMu            sync.Mutex
+	jobsCtx           context.Context
+	jobsCancel        context.CancelFunc
+	skillByName       map[string]skills.Skill
+	skillsLoader      skills.SkillLoader
+	skillsInitialized bool
+	// hostInterceptors and hostResultHooks are the host-supplied session
+	// world copied to workers. Planning lock and OnCall are reinstalled.
+	hostInterceptors     []ToolInterceptor
+	hostResultHooks      map[string]ToolResultHook
 	exaAPIKey            string
 	brain                *brain.Engine
 	brainWriteKinds      brain.WriteKinds

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -11,6 +13,7 @@ import (
 	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/streaming"
+	"github.com/ryanaldo34/tacklr/vfs"
 )
 
 type zeroWindowStrategy struct{ mockStrategy }
@@ -18,11 +21,25 @@ type zeroWindowStrategy struct{ mockStrategy }
 func (*zeroWindowStrategy) MaxContextWindow() (int, error) { return 0, nil }
 
 // TestNewAgent_constructFailClosed is the fail-closed construct surface:
-// missing skill dir, missing session, and resume without a model.
+// broken /skills pack, missing session, and resume without a model.
 func TestNewAgent_constructFailClosed(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "empty"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	reg := vfs.NewBackendRegistry()
+	if err := reg.Register(vfs.LocalFactory{ID: "skills", Base: root, Skills: "."}); err != nil {
+		t.Fatal(err)
+	}
+	ms := vfs.MustNewMountSession(t.Name(), reg)
+	if err := ms.AttachSkills(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ms.Close() })
 	_, err := NewAgent(context.Background(), AgentOptions{
-		Config: Config{MaxWindowSize: 8192, SkillDirectories: []string{"/skills"}},
-		Model:  &mockStrategy{},
+		Config:       Config{MaxWindowSize: 8192},
+		Model:        &mockStrategy{},
+		MountSession: ms,
 	})
 	if err == nil || !strings.Contains(err.Error(), "initialize skills") {
 		t.Fatalf("want skills construct error, got %v", err)

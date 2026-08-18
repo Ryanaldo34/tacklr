@@ -134,7 +134,7 @@ func main() {
 		os.Exit(1)
 	}
 	fsReg := vfs.NewBackendRegistry()
-	if err := fsReg.Register(vfs.LocalFactory{ID: "local", Base: vfsJail}); err != nil {
+	if err := fsReg.Register(vfs.LocalFactory{ID: "local", Base: vfsJail, Skills: "skills"}); err != nil {
 		slog.Error("vfs register failed", "error", err)
 		os.Exit(1)
 	}
@@ -143,29 +143,17 @@ func main() {
 		slog.Error("vfs gdrive register failed", "error", err)
 		os.Exit(1)
 	}
-
-	bootstrap := []vfs.MountSpec{{Point: "/work", Profile: "local"}}
-	var skillRoots []string
-	if len(skillHostDirs) > 0 {
-		var members []vfs.MountSpec
-		for i, hostDir := range skillHostDirs {
-			info, err := os.Stat(hostDir)
-			if err != nil || !info.IsDir() {
-				slog.Error("skill directory missing", "path", hostDir, "error", err)
-				os.Exit(1)
-			}
-			id := fmt.Sprintf("skills%d", i+1)
-			if err := fsReg.Register(vfs.LocalFactory{ID: id, Base: hostDir}); err != nil {
-				slog.Error("vfs skills register failed", "path", hostDir, "error", err)
-				os.Exit(1)
-			}
-			members = append(members, vfs.MountSpec{Profile: id})
+	for i, hostDir := range skillHostDirs {
+		info, err := os.Stat(hostDir)
+		if err != nil || !info.IsDir() {
+			slog.Error("skill directory missing", "path", hostDir, "error", err)
+			os.Exit(1)
 		}
-		bootstrap = append(bootstrap, vfs.MountSpec{
-			Point: "/skills", Profile: "skills", ReadOnly: true, IndexPolicy: "none",
-			Members: members,
-		})
-		skillRoots = []string{"/skills"}
+		id := fmt.Sprintf("skills%d", i+1)
+		if err := fsReg.Register(vfs.LocalFactory{ID: id, Base: hostDir, Skills: "."}); err != nil {
+			slog.Error("vfs skills register failed", "path", hostDir, "error", err)
+			os.Exit(1)
+		}
 	}
 
 	defaultAgent := "test-agent"
@@ -182,19 +170,18 @@ func main() {
 			Config: tacklr.Config{
 				MaxWindowSize: maxWindow,
 				// Empty: rely on harness Adaptive Case Management system prompt only.
-				SystemPrompt:     "",
-				SkillDirectories: skillRoots,
+				SystemPrompt: "",
 			},
 			Model:     model,
 			ExaAPIKey: exaKey,
 		},
 		FSRegistry:  fsReg,
-		FSBootstrap: bootstrap,
+		FSBootstrap: []vfs.MountSpec{{Point: "/work", Profile: "local"}},
 	})
 
 	slog.Info("harness showcase",
 		"max_window_size", maxWindow,
-		"skill_dirs", len(skillRoots),
+		"skill_dirs", len(skillHostDirs),
 		"web_tools", exaKey != "",
 		"host_tools", 0,
 		"vfs_mount", "/work",

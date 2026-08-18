@@ -1,12 +1,13 @@
 // Package skills discovers and parses application-owned SKILL.md files.
 //
-// Discovery walks virtual paths on a vfs.MountSession. Hosts mount the
-// backends (local, S3, Drive, …) and pass those mount points as Roots.
+// Discovery walks /skills on a vfs.MountSession. Hosts mark backends with
+// LocalFactory.Skills / S3Factory.Skills; the session attaches the union.
 package skills
 
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"path"
@@ -34,14 +35,10 @@ type SkillLoader interface {
 
 var _ SkillLoader = Loader{}
 
-// Loader loads one skill per immediate child directory under each virtual
-// root. It is the default when AgentOptions.SkillsLoader is nil.
-//
-// Roots are absolute virtual paths (for example "/skills"). Session must be
-// non-nil when Roots is non-empty. Empty Roots loads nothing.
+// Loader loads one skill per immediate child of /skills.
+// A nil session or missing /skills mount loads nothing.
 type Loader struct {
 	Session *vfs.MountSession
-	Roots   []string
 }
 
 // Load implements SkillLoader.
@@ -49,35 +46,33 @@ func (l Loader) Load(ctx context.Context) ([]Skill, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if len(l.Roots) == 0 {
+	if l.Session == nil {
 		return nil, nil
 	}
-	if l.Session == nil {
-		return nil, fmt.Errorf("skills: MountSession is required")
+	entries, err := l.Session.ReadDir(ctx, vfs.SkillsPoint)
+	if err != nil {
+		if errors.Is(err, vfs.ErrNotMounted) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read skills directory %q: %w", vfs.SkillsPoint, err)
 	}
+	slices.SortFunc(entries, func(a, b vfs.DirEntry) int { return cmp.Compare(a.Name, b.Name) })
 	var loaded []Skill
 	seen := map[string]bool{}
-	for _, root := range l.Roots {
-		entries, err := l.Session.ReadDir(ctx, root)
+	for _, entry := range entries {
+		if !entry.IsDir || entry.Type&fs.ModeSymlink != 0 {
+			continue
+		}
+		skillPath := path.Join(vfs.SkillsPoint, entry.Name, "SKILL.md")
+		skill, err := readSkill(ctx, l.Session, skillPath, entry.Name)
 		if err != nil {
-			return nil, fmt.Errorf("read skills directory %q: %w", root, err)
+			return nil, err
 		}
-		slices.SortFunc(entries, func(a, b vfs.DirEntry) int { return cmp.Compare(a.Name, b.Name) })
-		for _, entry := range entries {
-			if !entry.IsDir || entry.Type&fs.ModeSymlink != 0 {
-				continue
-			}
-			skillPath := path.Join(root, entry.Name, "SKILL.md")
-			skill, err := readSkill(ctx, l.Session, skillPath, entry.Name)
-			if err != nil {
-				return nil, err
-			}
-			if seen[skill.Name] {
-				return nil, fmt.Errorf("duplicate skill name %q", skill.Name)
-			}
-			seen[skill.Name] = true
-			loaded = append(loaded, skill)
+		if seen[skill.Name] {
+			return nil, fmt.Errorf("duplicate skill name %q", skill.Name)
 		}
+		seen[skill.Name] = true
+		loaded = append(loaded, skill)
 	}
 	slices.SortFunc(loaded, func(a, b Skill) int { return cmp.Compare(a.Name, b.Name) })
 	return loaded, nil

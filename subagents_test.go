@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -720,6 +722,58 @@ func TestSpawnWorker_sharesHostMountWriteAndCatalog(t *testing.T) {
 	}
 	if hit := waitSearchHit(t, eng, scope, phraseB, 3*time.Second); hit.Properties[vfsindex.PropVFSPath] != "/work/tracked.txt" {
 		t.Fatalf("reindex after worker Close: %+v", hit.Properties)
+	}
+}
+
+func TestSpawnWorker_inheritsParentSkills(t *testing.T) {
+	ctx := context.Background()
+	pack := t.TempDir()
+	d := filepath.Join(pack, "research")
+	if err := os.MkdirAll(d, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "---\nname: research\ndescription: Research carefully\n---\n\nAlways verify claims.\n"
+	if err := os.WriteFile(filepath.Join(d, "SKILL.md"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	work := t.TempDir()
+	reg := vfs.NewBackendRegistry()
+	if err := reg.Register(vfs.LocalFactory{ID: "work", Base: work}); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Register(vfs.LocalFactory{ID: "pack", Base: pack, Skills: "."}); err != nil {
+		t.Fatal(err)
+	}
+	ms := vfs.MustNewMountSession(t.Name(), reg)
+	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "work"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ms.Close() })
+
+	parent := mustNewAgent(t, AgentOptions{
+		Config:       Config{MaxWindowSize: 8192, MaxTurnRequests: 4},
+		Model:        &mockStrategy{},
+		MountSession: ms,
+		Store:        testStore(t),
+	})
+	t.Cleanup(parent.Close)
+	if parent.findTool("read_skill", "") == nil {
+		t.Fatal("parent missing read_skill")
+	}
+	inherited := parent.inheritOptions()
+	if inherited.Config.MaxTurnRequests != 4 || inherited.MountSession != ms {
+		t.Fatalf("inheritOptions = %+v", inherited.Config)
+	}
+
+	worker := mustNewAgent(t, parent.workerOptsForSpawn(&SubAgent{WorkerName: "researcher", Model: &mockStrategy{}}))
+	t.Cleanup(worker.Close)
+	skill := worker.findTool("read_skill", "")
+	if skill == nil {
+		t.Fatal("worker missing read_skill")
+	}
+	res, err := skill.invoke(ctx, `{"name":"research"}`, turnRuntime(worker))
+	if err != nil || !strings.Contains(res.output, "Always verify claims") {
+		t.Fatalf("worker read_skill: %v %s", err, res.output)
 	}
 }
 

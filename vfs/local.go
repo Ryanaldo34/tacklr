@@ -329,13 +329,32 @@ func (f *localFile) Stat() (FileInfo, error) {
 // LocalFactory opens LocalProviders under a fixed Base directory.
 // Params: "subpath" (optional), "session_scoped=true" (optional).
 // Base stays on the factory (process config); providers never expose host roots.
+//
+// Skills is an optional path relative to Base (use "." for the whole tree).
+// When set, MountSession attaches that tree as a /skills union member.
 type LocalFactory struct {
-	ID   string
-	Base string
+	ID     string
+	Base   string
+	Skills string
 }
+
+var _ SkillSource = LocalFactory{}
 
 // Profile implements ProviderFactory.
 func (f LocalFactory) Profile() string { return f.ID }
+
+// SkillMember implements SkillSource.
+func (f LocalFactory) SkillMember() (MountSpec, bool) {
+	root := strings.TrimSpace(f.Skills)
+	if root == "" {
+		return MountSpec{}, false
+	}
+	spec := MountSpec{Profile: f.ID}
+	if root != "." {
+		spec.Params = map[string]string{"subpath": root}
+	}
+	return spec, true
+}
 
 var _ documentBackend = localProvider{}
 

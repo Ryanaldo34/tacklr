@@ -3,6 +3,7 @@ package skills
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -24,40 +25,36 @@ func TestLoader_s3Mount(t *testing.T) {
 	ctx := context.Background()
 	client, bucket := startMinIO(ctx, t)
 
+	put := func(key, body string) {
+		t.Helper()
+		if _, err := client.PutObject(ctx, &s3.PutObjectInput{
+			Bucket: aws.String(bucket),
+			Key:    aws.String(key),
+			Body:   strings.NewReader(body),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	put("pack/alpha/SKILL.md", "---\nname: alpha\ndescription: A\n---\n\nA body")
+	put("pack/zeta/SKILL.md", "---\nname: zeta\ndescription: Z\n---\n\nZ body")
+	put("pack/alpha/readme", "ignored")
+
 	reg := vfs.NewBackendRegistry()
 	if err := reg.Register(vfs.S3Factory{
 		ID:            "s3",
 		Client:        vfs.AWSS3{Client: client},
 		DefaultBucket: bucket,
+		Skills:        "pack",
 	}); err != nil {
 		t.Fatal(err)
 	}
 	ms := vfs.MustNewMountSession("skills-s3", reg)
-	if err := ms.Mount(ctx, vfs.MountSpec{
-		Point: "/skills", Profile: "s3", ReadOnly: false,
-		Params: map[string]string{"prefix": "pack"},
-	}); err != nil {
+	if err := ms.AttachSkills(ctx); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ms.Close() })
 
-	if err := ms.MkdirAll(ctx, "/skills/alpha"); err != nil {
-		t.Fatal(err)
-	}
-	if err := ms.MkdirAll(ctx, "/skills/zeta"); err != nil {
-		t.Fatal(err)
-	}
-	if err := ms.WriteFile(ctx, "/skills/alpha/SKILL.md", []byte("---\nname: alpha\ndescription: A\n---\n\nA body")); err != nil {
-		t.Fatal(err)
-	}
-	if err := ms.WriteFile(ctx, "/skills/zeta/SKILL.md", []byte("---\nname: zeta\ndescription: Z\n---\n\nZ body")); err != nil {
-		t.Fatal(err)
-	}
-	if err := ms.WriteFile(ctx, "/skills/alpha/readme", []byte("ignored")); err != nil {
-		t.Fatal(err)
-	}
-
-	loaded, err := Loader{Session: ms, Roots: []string{"/skills"}}.Load(ctx)
+	loaded, err := (Loader{Session: ms}).Load(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}

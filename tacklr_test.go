@@ -1372,19 +1372,17 @@ func TestRun_readSkill_returnsInstructions(t *testing.T) {
 	}
 
 	reg := vfs.NewBackendRegistry()
-	if err := reg.Register(vfs.LocalFactory{ID: "skills", Base: skillsRoot}); err != nil {
+	if err := reg.Register(vfs.LocalFactory{ID: "skills", Base: skillsRoot, Skills: "."}); err != nil {
 		t.Fatal(err)
 	}
 	ms := vfs.MustNewMountSession(t.Name(), reg)
-	if err := ms.Mount(context.Background(), vfs.MountSpec{
-		Point: "/skills", Profile: "skills", ReadOnly: true, IndexPolicy: "none",
-	}); err != nil {
+	if err := ms.AttachSkills(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ms.Close() })
 
 	ah := mustNewAgent(t, AgentOptions{
-		Config:       Config{MaxWindowSize: 8192, SkillDirectories: []string{"/skills"}},
+		Config:       Config{MaxWindowSize: 8192},
 		Model:        strategy,
 		Store:        testStore(t),
 		MountSession: ms,

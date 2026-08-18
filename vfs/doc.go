@@ -8,6 +8,7 @@
 //   - BackendRegistry + LocalFactory / S3Factory / DriveFactory + AWSS3 / GoogleDrive — process profiles
 //   - SessionAuth + TokenHolder + Binding — session-scoped user-owned credentials (never on MountSpec)
 //   - MountSpec — durable mount description (checkpoint-safe; Members = read-only union)
+//   - Skills / SkillsPoint — /skills union from SkillSource factories (LocalFactory.Skills, S3Factory.Skills)
 //   - Provider / ProviderFactory / S3API / DriveAPI — custom backends
 //   - File, FileInfo, DirEntry — I/O types (File is Close+Stat; io.Reader / io.ReaderAt / io.Writer via comma-ok)
 //   - Document / Textual / Structured / TextDocument — content IR

@@ -455,10 +455,28 @@ type S3Factory struct {
 	ID            string
 	Client        S3API
 	DefaultBucket string
+	// Skills is an optional key prefix (use "." for the bucket root).
+	// When set, MountSession attaches that prefix as a /skills union member.
+	Skills string
 }
+
+var _ SkillSource = S3Factory{}
 
 // Profile implements ProviderFactory.
 func (f S3Factory) Profile() string { return f.ID }
+
+// SkillMember implements SkillSource.
+func (f S3Factory) SkillMember() (MountSpec, bool) {
+	root := strings.TrimSpace(f.Skills)
+	if root == "" {
+		return MountSpec{}, false
+	}
+	spec := MountSpec{Profile: f.ID}
+	if root != "." {
+		spec.Params = map[string]string{"prefix": strings.Trim(root, "/")}
+	}
+	return spec, true
+}
 
 // Open implements ProviderFactory.
 func (f S3Factory) Open(ctx context.Context, _ string, spec MountSpec) (Provider, error) {

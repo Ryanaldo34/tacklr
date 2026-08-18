@@ -2,6 +2,29 @@ package vfs
 
 import "maps"
 
+// SkillsPoint is the conventional union mount for skill packs.
+const SkillsPoint = "/skills"
+
+const skillsProfile = "skills"
+
+// Skills builds the read-only /skills union. IndexPolicy is none so playbooks
+// are not ingested as brain artifacts. members are factory SkillMember specs.
+func Skills(members ...MountSpec) MountSpec {
+	out := make([]MountSpec, len(members))
+	for i, m := range members {
+		cp := cloneSpec(m)
+		cp.Point = ""
+		out[i] = cp
+	}
+	return MountSpec{
+		Point:       SkillsPoint,
+		Profile:     skillsProfile,
+		ReadOnly:    true,
+		IndexPolicy: "none",
+		Members:     out,
+	}
+}
+
 // MountSpec is the durable, secret-free description of a mount.
 // Safe to JSON into session checkpoints. Never store credentials here —
 // Profile names a process-level factory that holds clients/pools.
