@@ -3,6 +3,7 @@ package vfs
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 )
 
@@ -52,6 +53,34 @@ func (r *BackendRegistry) HasProfile(id string) bool {
 	return ok
 }
 
+// Profiles returns registered factory ids in sorted order.
+func (r *BackendRegistry) Profiles() []string {
+	if r == nil {
+		return nil
+	}
+	r.mu.RLock()
+	out := make([]string, 0, len(r.factories))
+	for id := range r.factories {
+		out = append(out, id)
+	}
+	r.mu.RUnlock()
+	slices.Sort(out)
+	return out
+}
+
+// CheckMount opens and validates a provider for spec without attaching it.
+// Used to fail client binds before the mount is visible.
+func CheckMount(ctx context.Context, reg *BackendRegistry, sessionID string, spec MountSpec) error {
+	if reg == nil {
+		return errRegistryRequired
+	}
+	p, err := reg.open(ctx, sessionID, spec)
+	if err != nil {
+		return err
+	}
+	return p.Validate(ctx)
+}
+
 func (r *BackendRegistry) open(ctx context.Context, sessionID string, spec MountSpec) (Provider, error) {
 	if spec.Profile == "" {
 		return nil, ErrInvalidProvider
@@ -63,26 +92,4 @@ func (r *BackendRegistry) open(ctx context.Context, sessionID string, spec Mount
 		return nil, fmt.Errorf("%w %q", ErrUnknownProfile, spec.Profile)
 	}
 	return f.Open(ctx, sessionID, spec)
-}
-
-// MergeSpecs concatenates bootstrap then durable specs (host/harness helper).
-// Duplicate points return ErrAlreadyMounted.
-func MergeSpecs(bootstrap, durable []MountSpec) ([]MountSpec, error) {
-	seen := make(map[string]struct{}, len(bootstrap)+len(durable))
-	out := make([]MountSpec, 0, len(bootstrap)+len(durable))
-	for _, list := range [][]MountSpec{bootstrap, durable} {
-		for _, s := range list {
-			cleaned, err := cleanVirtualPath(s.Point)
-			if err != nil {
-				return nil, err
-			}
-			if _, ok := seen[cleaned]; ok {
-				return nil, ErrAlreadyMounted
-			}
-			seen[cleaned] = struct{}{}
-			s.Point = cleaned
-			out = append(out, s)
-		}
-	}
-	return out, nil
 }

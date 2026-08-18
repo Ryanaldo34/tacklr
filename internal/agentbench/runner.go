@@ -214,8 +214,11 @@ func runCase(ctx context.Context, cfg Config, c Case, exa string) CaseResult {
 		}
 	}
 
-	agent := tacklr.NewAgent(caseCtx, agentOpts())
 	var turns []TurnTrace
+	agent, err := tacklr.NewAgent(caseCtx, agentOpts())
+	if err != nil {
+		return failResult(c, turns, "construct agent: "+err.Error())
+	}
 	for i, prompt := range c.Turns {
 		if c.RestoreSession && i == len(c.Turns)-1 && i > 0 {
 			loaded, err := tacklr.NewAgentFromSession(caseCtx, sessionID, agentOpts())

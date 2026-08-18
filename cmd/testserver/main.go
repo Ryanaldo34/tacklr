@@ -1,6 +1,6 @@
 // Command testserver is a local ACP harness for exercising Tacklr’s built-in
 // agent tooling (plan/todos, ask_user_choice, web_search/web_fetch when EXA_API_KEY is set,
-// skills when configured, VFS at /tmp/tacklr). Default transport is stdio; pass --http for HTTP/WS.
+// skills when configured, VFS at /work). Default transport is stdio; pass --http for HTTP/WS.
 package main
 
 import (
@@ -122,36 +122,42 @@ func main() {
 
 	// Host tools intentionally empty: the harness injects plan builtins,
 	// ask_user_choice, web_search/web_fetch (when EXA_API_KEY is set), and
-	// VFS tools when FSRegistry + FSBootstrap are set.
+	// VFS tools when FSRegistry + FSBootstrap are set (Registry owns the MountSession).
 	exaKey := strings.TrimSpace(os.Getenv("EXA_API_KEY"))
 
-	// Local VFS: virtual path /tmp/tacklr → host /tmp/tacklr.
-	const vfsRoot = "/tmp/tacklr"
-	if err := os.MkdirAll(vfsRoot, 0o750); err != nil {
-		slog.Error("vfs mkdir failed", "path", vfsRoot, "error", err)
+	// Local VFS: virtual /work → host jail /tmp/tacklr. Registry starts FUSE.
+	const vfsJail = "/tmp/tacklr"
+	if err := os.MkdirAll(vfsJail, 0o750); err != nil {
+		slog.Error("vfs mkdir failed", "path", vfsJail, "error", err)
 		os.Exit(1)
 	}
 	fsReg := vfs.NewBackendRegistry()
-	if err := fsReg.Register(vfs.LocalFactory{ID: "local", Base: vfsRoot}); err != nil {
+	if err := fsReg.Register(vfs.LocalFactory{ID: "local", Base: vfsJail}); err != nil {
 		slog.Error("vfs register failed", "error", err)
+		os.Exit(1)
+	}
+	vfsAuth := vfs.NewSessionAuth()
+	if err := fsReg.Register(vfs.DriveFactory{ID: "gdrive", Auth: vfsAuth}); err != nil {
+		slog.Error("vfs gdrive register failed", "error", err)
 		os.Exit(1)
 	}
 
 	defaultAgent := "test-agent"
-	reg := server.NewRegistry(store, defaultAgent)
+	reg := server.NewRegistry(store, defaultAgent, server.WithVFSAuth(vfsAuth))
 	reg.Register(defaultAgent, server.AgentSpec{
 		Name: "Tacklr",
-		Config: tacklr.Config{
-			MaxWindowSize: maxWindow,
-			// Empty: rely on harness Adaptive Case Management system prompt only.
-			SystemPrompt:     "",
-			SkillDirectories: skillDirs,
+		Options: tacklr.AgentOptions{
+			Config: tacklr.Config{
+				MaxWindowSize: maxWindow,
+				// Empty: rely on harness Adaptive Case Management system prompt only.
+				SystemPrompt:     "",
+				SkillDirectories: skillDirs,
+			},
+			Model:     model,
+			ExaAPIKey: exaKey,
 		},
-		Model:       model,
-		Tools:       nil,
-		ExaAPIKey:   exaKey,
 		FSRegistry:  fsReg,
-		FSBootstrap: []vfs.MountSpec{{Point: vfsRoot, Profile: "local"}},
+		FSBootstrap: []vfs.MountSpec{{Point: "/work", Profile: "local"}},
 	})
 
 	slog.Info("harness showcase",
@@ -159,7 +165,8 @@ func main() {
 		"skill_dirs", len(skillDirs),
 		"web_tools", exaKey != "",
 		"host_tools", 0,
-		"vfs_mount", vfsRoot,
+		"vfs_mount", "/work",
+		"vfs_jail", vfsJail,
 	)
 
 	// Process-local ACP (memory wire store). For durable session/load across
@@ -171,6 +178,7 @@ func main() {
 
 	// Default: stdio (Zed / CLI ACP). Opt in to HTTP with --http.
 	if len(os.Args) > 1 && os.Args[1] == "--http" {
+		srv.AllowAnonymousNetwork()
 		port := 3000
 		if p := os.Getenv("PORT"); p != "" {
 			if v, err := strconv.Atoi(p); err == nil {
@@ -183,7 +191,7 @@ func main() {
 			"addr", addr,
 			"websocket", fmt.Sprintf("ws://localhost:%d/acp", port),
 			"streamable_http", fmt.Sprintf("http://localhost:%d/acp", port),
-			"legacy_unary", "POST /",
+			"sse", "POST /",
 		)
 		if err := srv.ServeHTTP(ctx, addr); err != nil && !errors.Is(err, context.Canceled) {
 			slog.Error("server error", "error", err)

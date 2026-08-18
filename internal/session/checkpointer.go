@@ -26,13 +26,18 @@ func (Checkpointer) Capture(
 	window []*streaming.Message,
 	sm *SessionManager,
 	pendingToolCalls map[string]stores.PendingToolCall,
-	interruptToRequester map[string]string,
 ) (*stores.SessionCheckpoint, error) {
 	if sm == nil {
 		return nil, fmt.Errorf("checkpointer: session manager is nil")
 	}
-	runtimeState, pending, resolved := sm.SnapshotDurable()
-	cp, err := stores.NewCheckpoint(window, pendingToolCalls, interruptToRequester, runtimeState, pending, resolved)
+	if err := streaming.ValidateMessages(window); err != nil {
+		return nil, fmt.Errorf("checkpointer: invalid context window: %w", err)
+	}
+	userState, modules, pending, resolved, err := sm.snapshotCheckpoint()
+	if err != nil {
+		return nil, err
+	}
+	cp, err := stores.NewCheckpoint(window, pendingToolCalls, userState, modules, pending, resolved)
 	if err != nil {
 		return nil, err
 	}
@@ -42,9 +47,8 @@ func (Checkpointer) Capture(
 // AppliedCheckpoint is harness-side state restored from a store blob
 // (everything not owned by SessionManager).
 type AppliedCheckpoint struct {
-	Window               []*streaming.Message
-	PendingToolCalls     map[string]stores.PendingToolCall
-	InterruptToRequester map[string]string
+	Window           []*streaming.Message
+	PendingToolCalls map[string]stores.PendingToolCall
 }
 
 // Apply loads SessionManager state from the checkpoint and returns maps the
@@ -53,21 +57,26 @@ func (Checkpointer) Apply(cp stores.SessionCheckpoint, sm *SessionManager) (Appl
 	if sm == nil {
 		return AppliedCheckpoint{}, fmt.Errorf("checkpointer: session manager is nil")
 	}
-	sm.LoadUserAndPlanState(cp.State.RuntimeState)
-	if err := sm.LoadInterruptsJSON(cp.State.PendingInterrupts, cp.State.ResolvedInterrupts); err != nil {
+	if err := streaming.ValidateMessages(cp.ContextWindow); err != nil {
+		return AppliedCheckpoint{}, fmt.Errorf("checkpointer: invalid context window: %w", err)
+	}
+	pendingInterrupts, resolvedInterrupts, err := decodeInterruptMaps(cp.State.PendingInterrupts, cp.State.ResolvedInterrupts)
+	if err != nil {
 		return AppliedCheckpoint{}, err
 	}
+	if cp.State.Version != stores.CheckpointVersion {
+		return AppliedCheckpoint{}, fmt.Errorf("checkpointer: unsupported checkpoint version %d", cp.State.Version)
+	}
+	if err := sm.applyCheckpoint(cp.State.UserState, cp.State.Modules); err != nil {
+		return AppliedCheckpoint{}, err
+	}
+	sm.replaceInterrupts(pendingInterrupts, resolvedInterrupts)
 	ptc := cp.State.PendingToolCalls
 	if ptc == nil {
 		ptc = make(map[string]stores.PendingToolCall)
 	}
-	itr := cp.State.InterruptToRequester
-	if itr == nil {
-		itr = make(map[string]string)
-	}
 	return AppliedCheckpoint{
-		Window:               cp.ContextWindow,
-		PendingToolCalls:     ptc,
-		InterruptToRequester: itr,
+		Window:           cp.ContextWindow,
+		PendingToolCalls: ptc,
 	}, nil
 }

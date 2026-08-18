@@ -12,6 +12,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	tacklrsecurity "github.com/ryanaldo34/tacklr/security"
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
@@ -21,17 +22,53 @@ type acpProtocol struct {
 	mu       sync.Mutex
 	sessions map[string]*acpWireSession
 	wire     ProtocolWireStore
+
+	authMethods []ACPAuthMethod
+	logout      bool
+}
+
+// ACPAuthMethod presents one host security scheme through the ACP v1 agent
+// authentication flow. Scheme is the protocol-neutral Authenticator identifier.
+type ACPAuthMethod struct {
+	ID          string
+	Name        string
+	Description string
+	Scheme      string
 }
 
 // NewACPProtocol returns an ACP protocol with optional durable wire store.
 // Nil wire uses an in-memory ProtocolWireStore.
 func NewACPProtocol(wire ProtocolWireStore) Protocol {
+	return NewACPProtocolWithAuth(wire, nil, false)
+}
+
+// NewACPProtocolWithAuth configures the ACP v1 presentation for a generic host
+// security service. It does not implement credential verification itself.
+func NewACPProtocolWithAuth(wire ProtocolWireStore, methods []ACPAuthMethod, logout bool) Protocol {
 	if wire == nil {
 		wire = NewMemoryWireStore()
 	}
+	seen := make(map[string]struct{}, len(methods))
+	for i := range methods {
+		methods[i].ID = strings.TrimSpace(methods[i].ID)
+		methods[i].Name = strings.TrimSpace(methods[i].Name)
+		methods[i].Scheme = strings.TrimSpace(methods[i].Scheme)
+		if methods[i].ID == "" || methods[i].Name == "" {
+			panic("server: ACP auth method id and name are required")
+		}
+		if methods[i].Scheme == "" {
+			methods[i].Scheme = methods[i].ID
+		}
+		if _, ok := seen[methods[i].ID]; ok {
+			panic("server: duplicate ACP auth method " + methods[i].ID)
+		}
+		seen[methods[i].ID] = struct{}{}
+	}
 	return &acpProtocol{
-		sessions: make(map[string]*acpWireSession),
-		wire:     wire,
+		sessions:    make(map[string]*acpWireSession),
+		wire:        wire,
+		authMethods: append([]ACPAuthMethod(nil), methods...),
+		logout:      logout,
 	}
 }
 
@@ -54,33 +91,10 @@ func (*acpProtocol) Name() string { return "acp" }
 
 func (p *acpProtocol) HTTPRoutes() []HTTPRoute {
 	return []HTTPRoute{
-		// Legacy unary HTTP: one request owns the whole turn; no mid-turn client RPC.
-		// Prefer GET|POST|DELETE /acp (WebSocket or Streamable HTTP).
-		{Method: http.MethodPost, Pattern: "/", Handler: p.handleHTTP},
 		// ACP remote transport (RFD Streamable HTTP + WebSocket).
-		{Method: http.MethodPost, Pattern: "/acp", Handler: p.handleACPPost},
-		{Method: http.MethodGet, Pattern: "/acp", Handler: p.handleACPGet},
-		{Method: http.MethodDelete, Pattern: "/acp", Handler: p.handleACPDelete},
-	}
-}
-
-func (p *acpProtocol) handleHTTP(env ProtocolEnv, w http.ResponseWriter, r *http.Request) {
-	// Legacy unary ACP: prefer GET|POST|DELETE /acp (WebSocket or Streamable HTTP).
-	w.Header().Set("Deprecation", "true")
-	w.Header().Set("Link", `</acp>; rel="successor-version"`)
-	w.Header().Set("Warning", `299 - "Unary POST / ACP is deprecated; use WebSocket or Streamable HTTP on /acp"`)
-
-	body, err := readHTTPBody(r)
-	if err != nil {
-		mw := &jsonRPCMessageWriter{w: w}
-		_ = mw.WriteError(nil, fmt.Errorf("read body: %w", err))
-		return
-	}
-	conn := &Conn{Writer: &jsonRPCMessageWriter{w: w}}
-	// Unary HTTP has no outbound RPC bridge (no mid-turn elicitation).
-	env.Conn = conn
-	if err := p.HandleInbound(r.Context(), env, body); err != nil {
-		slog.Debug("acp http handler", "error", err)
+		{Method: http.MethodPost, Pattern: "/acp", AllowUnauthenticated: true, Handler: p.handleACPPost},
+		{Method: http.MethodGet, Pattern: "/acp", AllowUnauthenticated: true, Handler: p.handleACPGet},
+		{Method: http.MethodDelete, Pattern: "/acp", AllowUnauthenticated: true, Handler: p.handleACPDelete},
 	}
 }
 
@@ -96,10 +110,13 @@ func (p *acpProtocol) handleACPWebSocket(env ProtocolEnv, w http.ResponseWriter,
 	var acpConn *Connection
 	if env.Connections != nil {
 		acpConn = env.Connections.Create(nil, nil)
+		if env.Conn != nil && env.Conn.Security != nil {
+			acpConn.setSecurityContext(*env.Conn.Security)
+		}
 		w.Header().Set(HeaderAcpConnectionID, acpConn.ID)
 	}
 
-	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+	c, err := websocket.Accept(w, r, nil)
 	if err != nil {
 		if acpConn != nil {
 			env.Connections.Remove(acpConn.ID)
@@ -125,14 +142,17 @@ func (p *acpProtocol) handleACPWebSocket(env ProtocolEnv, w http.ResponseWriter,
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			securityContext := acpConn.securityContext()
 			reqConn := &Conn{
-				Writer: mw,
-				RPC:    bridge,
-				Caps:   bridge.GetCaps(),
+				Writer:      mw,
+				RPC:         bridge,
+				Security:    &securityContext,
+				setSecurity: acpConn.setSecurityContext,
 			}
 			reqEnv := ProtocolEnv{
 				Registry:    env.Registry,
 				Conn:        reqConn,
+				Security:    env.Security,
 				Connections: env.Connections,
 			}
 			if err := p.HandleInbound(ctx, reqEnv, body); err != nil {
@@ -174,7 +194,9 @@ func (p *acpProtocol) HandleInbound(ctx context.Context, env ProtocolEnv, body [
 
 	if pr.Notification {
 		if pr.Method == "session/cancel" && pr.ThreadID != "" {
-			env.Registry.CancelSession(pr.ThreadID)
+			if _, err := p.resolveOwnedWireSession(ctx, env, pr.ThreadID, actionSessionPrompt); err == nil {
+				env.Registry.CancelSession(pr.ThreadID)
+			}
 		} else {
 			slog.Debug("ignored notification", "method", pr.Method)
 		}
@@ -185,19 +207,28 @@ func (p *acpProtocol) HandleInbound(ctx context.Context, env ProtocolEnv, body [
 	case "session/prompt", "session/resume":
 		return p.handleSessionTurn(ctx, env, pr)
 	case "initialize":
-		if len(pr.ClientCapsRaw) > 0 {
-			caps := ParseClientCapabilities(pr.ClientCapsRaw)
-			if env.Conn != nil {
-				env.Conn.Caps = caps
-				if env.Conn.RPC != nil {
-					env.Conn.RPC.SetCaps(caps)
-				}
+		if env.Conn != nil && env.Conn.RPC != nil {
+			if len(pr.ClientCapsRaw) > 0 {
+				env.Conn.RPC.SetCaps(ParseClientCapabilities(pr.ClientCapsRaw))
 			}
+			env.Conn.RPC.MarkInitialized()
 		}
-		return env.Conn.Writer.WriteResult(pr.ID, acpInitializeResult(env.Registry, pr.ProtocolVersion))
+		return env.Conn.Writer.WriteResult(pr.ID, acpInitializeResultWithAuth(env.Registry, pr.ProtocolVersion, p.authMethods, p.logout))
 	case "authenticate":
+		if err := p.authenticate(ctx, env, pr.AuthMethodID); err != nil {
+			return env.Conn.Writer.WriteError(pr.ID, err)
+		}
+		return env.Conn.Writer.WriteResult(pr.ID, map[string]any{})
+	case "logout":
+		if !p.logout {
+			return env.Conn.Writer.WriteError(pr.ID, clientErrorf(ErrMethodNotFound, "method not found"))
+		}
+		env.Conn.establishSecurity(tacklrsecurity.Context{})
 		return env.Conn.Writer.WriteResult(pr.ID, map[string]any{})
 	case "session/new":
+		if err := p.requireAuthentication(env); err != nil {
+			return env.Conn.Writer.WriteError(pr.ID, err)
+		}
 		_, result, err := p.CreateSession(ctx, env, pr.Params)
 		if err != nil {
 			return env.Conn.Writer.WriteError(pr.ID, err)
@@ -221,16 +252,72 @@ func (p *acpProtocol) HandleInbound(ctx context.Context, env ProtocolEnv, body [
 		}
 		return env.Conn.Writer.WriteResult(pr.ID, map[string]any{})
 	case "session/cancel":
+		if _, err := p.resolveOwnedWireSession(ctx, env, pr.ThreadID, actionSessionPrompt); err != nil {
+			return env.Conn.Writer.WriteError(pr.ID, err)
+		}
 		env.Registry.CancelSession(pr.ThreadID)
 		return env.Conn.Writer.WriteResult(pr.ID, map[string]any{})
+	case methodVFSBind:
+		return p.handleVFSBind(ctx, env, pr)
+	case methodVFSRefresh:
+		return p.handleVFSRefresh(ctx, env, pr)
+	case methodVFSUnbind:
+		return p.handleVFSUnbind(ctx, env, pr)
 	default:
 		return env.Conn.Writer.WriteError(pr.ID, clientErrorf(ErrMethodNotFound, "method not found"))
 	}
 }
 
+func (p *acpProtocol) authenticate(ctx context.Context, env ProtocolEnv, methodID string) error {
+	var method *ACPAuthMethod
+	for i := range p.authMethods {
+		if p.authMethods[i].ID == methodID {
+			method = &p.authMethods[i]
+			break
+		}
+	}
+	if method == nil {
+		return clientErrorf(ErrInvalidRequest, "authentication method %q was not advertised", methodID)
+	}
+	if env.Security == nil {
+		return clientErrorf(ErrAuthenticationRequired, "authentication required")
+	}
+	binding := tacklrsecurity.ChannelBinding{Kind: "acp"}
+	if env.Conn != nil && env.Conn.Security != nil {
+		binding = env.Conn.Security.Binding
+		if binding.Kind == "" {
+			binding.Kind = "acp"
+		}
+	}
+	securityContext, err := env.Security.Authenticate(ctx, tacklrsecurity.Attempt{
+		Scheme:  method.Scheme,
+		Binding: binding,
+	})
+	if err != nil {
+		return clientErrorf(ErrAuthenticationRequired, "authentication required")
+	}
+	env.Conn.establishSecurity(securityContext)
+	return nil
+}
+
+func (p *acpProtocol) requireAuthentication(env ProtocolEnv) error {
+	if len(p.authMethods) == 0 {
+		return nil
+	}
+	if env.Conn != nil && env.Conn.Security != nil && env.Conn.Security.Authenticated() {
+		return nil
+	}
+	return clientErrorf(ErrAuthenticationRequired, "authentication required")
+}
+
 func (p *acpProtocol) handleSessionTurn(ctx context.Context, env ProtocolEnv, pr *parsedRequest) error {
-	// Canonical path: Protocol.BindTurn → Registry.RunTurn.
-	req, err := p.BindTurn(ctx, env, pr.ThreadID, pr.Params)
+	if env.Conn != nil && env.Conn.RPC != nil {
+		if err := env.Conn.RPC.WaitInitialized(ctx); err != nil {
+			_ = env.Conn.Writer.WriteError(pr.ID, err)
+			return err
+		}
+	}
+	req, err := p.BindTurn(ctx, env, pr.ThreadID, pr.Method, pr.Params)
 	if err != nil {
 		_ = env.Conn.Writer.WriteError(pr.ID, err)
 		return err
@@ -248,8 +335,8 @@ func (p *acpProtocol) handleSessionTurn(ctx context.Context, env ProtocolEnv, pr
 		stream.Close()
 	}()
 	threadID := req.ThreadID
-	if stream.Harness != nil && stream.Harness.SessionID() != "" {
-		threadID = stream.Harness.SessionID()
+	if stream.SessionID() != "" {
+		threadID = stream.SessionID()
 	}
 	err = runTurnStream(ctx, env, p, threadID, stream, pr.ID)
 	if err != nil && !IsClientError(err) {
@@ -263,7 +350,7 @@ func (p *acpProtocol) OnStreamEvent(ctx context.Context, env ProtocolEnv, thread
 		newEvents, err := resolveInterruptViaACP(ctx, env, threadID, stream, &ev)
 		if err != nil {
 			slog.Warn("acp interrupt resolution failed", "error", err, "thread_id", threadID)
-			frames, _ := eventToAcpJsonRpc(threadID, &streaming.StreamEvent{
+			frames, _ := presentationToACP(threadID, streaming.StreamEvent{
 				Type:  streaming.StreamEventError,
 				Error: err,
 			})
@@ -281,7 +368,7 @@ func (p *acpProtocol) OnStreamEvent(ctx context.Context, env ProtocolEnv, thread
 		return StreamControl{Finished: true}
 	}
 
-	frames, err := eventToAcpJsonRpc(threadID, &ev)
+	frames, err := presentationToACP(threadID, ev)
 	if err != nil {
 		return StreamControl{Err: fmt.Errorf("protocol encode: %w", err)}
 	}
@@ -329,16 +416,12 @@ func resolveInterruptViaACP(ctx context.Context, env ProtocolEnv, threadID strin
 	}
 	kind := envl.Type
 	if kind == "" {
-		// Backward compat: older yields without type are user selections.
-		kind = "user_selection_choice"
+		return nil, fmt.Errorf("interrupt envelope missing type")
 	}
 	switch kind {
 	case "tool_permission":
 		return resolvePermissionViaRequest(ctx, env, threadID, stream, ev)
 	case "user_selection_choice":
-		// Caps are snapshotted per inbound message at dispatch; initialize may
-		// finish SetCaps after session/prompt was already dispatched. Always
-		// prefer live bridge caps so mid-turn elicitation sees form support.
 		if !connElicitationForm(env.Conn) {
 			return nil, nil
 		}
@@ -349,15 +432,12 @@ func resolveInterruptViaACP(ctx context.Context, env ProtocolEnv, threadID strin
 }
 
 // connElicitationForm reports form-mode elicitation support from the live RPC
-// bridge when present, else the Conn snapshot.
+// bridge. No snapshot: initialize writes caps on the bridge.
 func connElicitationForm(c *Conn) bool {
-	if c == nil {
+	if c == nil || c.RPC == nil {
 		return false
 	}
-	if c.RPC != nil {
-		return c.RPC.GetCaps().ElicitationForm
-	}
-	return c.Caps.ElicitationForm
+	return c.RPC.GetCaps().ElicitationForm
 }
 
 func resolvePermissionViaRequest(ctx context.Context, env ProtocolEnv, threadID string, stream *EventStream, ev *streaming.StreamEvent) (<-chan streaming.StreamEvent, error) {
@@ -385,10 +465,7 @@ func resolveSelectionViaElicitation(ctx context.Context, env ProtocolEnv, thread
 	if err != nil {
 		return nil, fmt.Errorf("parse selection interrupt: %w", err)
 	}
-	question := ""
-	if stream.Harness != nil {
-		question = stream.Harness.AskUserQuestion(ev.MessageID)
-	}
+	question := stream.AskUserQuestion(ev.MessageID)
 	params, err := SelectionToElicitationParams(threadID, ev.MessageID, question, opts)
 	if err != nil {
 		return nil, err
@@ -401,13 +478,20 @@ func resolveSelectionViaElicitation(ctx context.Context, env ProtocolEnv, thread
 	if err != nil {
 		return nil, err
 	}
+	return resumeElicitation(ctx, stream, interruptID, action, resolution,
+		fmt.Errorf("user declined to answer"),
+		fmt.Errorf("user cancelled the prompt"),
+	)
+}
+
+func resumeElicitation(ctx context.Context, stream *EventStream, interruptID, action string, resolution []byte, declined, cancelled error) (<-chan streaming.StreamEvent, error) {
 	switch action {
 	case "accept":
 		return stream.ResumeInterrupts(ctx, map[string][]byte{interruptID: resolution})
 	case "decline":
-		return nil, fmt.Errorf("user declined to answer")
-	default: // "cancel" — ElicitationResultToSelectionPayload rejects any other action.
-		return nil, fmt.Errorf("user cancelled the prompt")
+		return nil, declined
+	default:
+		return nil, cancelled
 	}
 }
 
@@ -416,46 +500,89 @@ func resolveSelectionViaElicitation(ctx context.Context, env ProtocolEnv, thread
 // Prompt baseline (no capability bits): Text + ResourceLink are always accepted.
 // Optional: image (model-gated), audio (off), embeddedContext (Resource text/blob).
 func acpInitializeResult(r *Registry, clientProtocolVersion int) map[string]any {
+	return acpInitializeResultWithAuth(r, clientProtocolVersion, nil, false)
+}
+
+func acpInitializeResultWithAuth(r *Registry, clientProtocolVersion int, methods []ACPAuthMethod, logout bool) map[string]any {
 	image := false
 	if r != nil {
 		if m := r.AgentModel(""); m != nil {
 			image = m.SupportsMIME("image/png")
 		}
 	}
-	return map[string]any{
-		"protocolVersion": negotiateACPProtocolVersion(clientProtocolVersion),
-		"agentCapabilities": map[string]any{
-			// Durable session/load against the registry store (survives restarts).
-			"loadSession": true,
-			"promptCapabilities": map[string]any{
-				// image: ContentBlock::Image when the default agent model accepts vision.
-				"image": image,
-				// audio: not implemented.
-				"audio": false,
-				// embeddedContext: ContentBlock::Resource (text + PDF blob).
-				// Text and ResourceLink need no capability flags (ACP baseline).
-				"embeddedContext": true,
-			},
-			"mcpCapabilities": map[string]any{
-				"http": true,
-				"sse":  true,
-			},
-			"sessionCapabilities": map[string]any{
-				"close": struct{}{},
+	_ = clientProtocolVersion
+	authMethods := make([]map[string]any, 0, len(methods))
+	for _, method := range methods {
+		item := map[string]any{
+			"id":   method.ID,
+			"name": method.Name,
+		}
+		if method.Description != "" {
+			item["description"] = method.Description
+		}
+		authMethods = append(authMethods, item)
+	}
+	agentCapabilities := map[string]any{
+		// Durable session/load against the registry store (survives restarts).
+		"loadSession": true,
+		"promptCapabilities": map[string]any{
+			// image: ContentBlock::Image when the default agent model accepts vision.
+			"image": image,
+			// audio: not implemented.
+			"audio": false,
+			// embeddedContext: ContentBlock::Resource (text + PDF blob).
+			// Text and ResourceLink need no capability flags (ACP baseline).
+			"embeddedContext": true,
+		},
+		"mcpCapabilities": map[string]any{
+			"http": true,
+			"sse":  true,
+		},
+		"sessionCapabilities": map[string]any{
+			"close": struct{}{},
+		},
+		"_meta": map[string]any{
+			"tacklr": map[string]any{
+				"vfs": acpVFSCapability(r),
 			},
 		},
+	}
+	if logout {
+		agentCapabilities["auth"] = map[string]any{
+			"logout": struct{}{},
+		}
+	}
+	return map[string]any{
+		"protocolVersion":   acpProtocolVersion,
+		"agentCapabilities": agentCapabilities,
 		"agentInfo": map[string]string{
 			"name":    "tacklr",
 			"title":   "Tacklr ACP",
 			"version": "0.1.0",
 		},
-		"authMethods": []string{},
+		"authMethods": authMethods,
 		// Non-standard transport hint for operators (not part of ACP schema).
 		"_meta": map[string]any{
 			"tacklr": map[string]any{
 				"transports": []string{"stdio", "websocket", "streamable_http"},
+				"vfs":        acpVFSCapability(r),
 			},
 		},
+	}
+}
+
+func acpVFSCapability(r *Registry) map[string]any {
+	providers := []string{}
+	if r != nil {
+		if spec, ok := r.agents[r.defaultAgent]; ok && spec.FSRegistry != nil {
+			providers = spec.FSRegistry.Profiles()
+		}
+	}
+	return map[string]any{
+		"credentials":  true,
+		"providers":    providers,
+		"tokenRefresh": true,
+		"tokenExpiry":  true,
 	}
 }
 

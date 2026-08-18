@@ -2,6 +2,7 @@ package brain_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -75,6 +76,14 @@ func TestNewEngine_options(t *testing.T) {
 	}
 	if eng.HasEdgeSearch() {
 		t.Fatal("memory store has no edge search")
+	}
+	if _, err := eng.FindLinks(ctx, brain.Scope{}, brain.FindLinksRequest{
+		RelationType: "about", Query: "x",
+	}); !errors.Is(err, brain.ErrEdgeSearchUnavailable) {
+		t.Fatalf("FindLinks without graph: %v", err)
+	}
+	if _, err := eng.FindObjects(ctx, brain.Scope{}, brain.FindObjectsRequest{Query: "x"}, brain.NewSearchContext()); !errors.Is(err, brain.ErrObjectSearchUnavailable) {
+		t.Fatalf("FindObjects without graph: %v", err)
 	}
 	if eng.HasObjectSearch() {
 		// optional — only when graph object searcher is set

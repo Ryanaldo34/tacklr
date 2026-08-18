@@ -1,8 +1,10 @@
 package vfsindex_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io/fs"
 	"strings"
 	"testing"
 
@@ -22,7 +24,7 @@ func TestMountIndexer_indexSearchAndNotify(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.NewMountSession("idx", reg)
+	ms := vfs.MustNewMountSession("idx", reg)
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
 		t.Fatal(err)
 	}
@@ -70,8 +72,8 @@ func TestMountIndexer_indexSearchAndNotify(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 4 lines, 2 per chunk → 2 chunks
-	if len(children) != 2 {
+	// IR line index: trailing \n is an empty last line (5 lines, 2 per chunk → 3).
+	if len(children) != 3 {
 		t.Fatalf("chunks=%d %#v", len(children), children)
 	}
 	// line anchors on first chunk
@@ -169,9 +171,6 @@ func TestMountIndexer_indexSearchAndNotify(t *testing.T) {
 	if _, err := vfsindex.NewMountIndexer(ms, eng, brain.Scope{}); err == nil {
 		t.Fatal("nil ns")
 	}
-	if err := vfsindex.NewSyncScheduler(nil).Notify(ctx, "/work/x", vfsindex.ReasonExplicit); err != nil {
-		t.Fatal(err)
-	}
 }
 
 // TestMountIndexer_markdownBlocksChunks: Markdown is chunked by structured
@@ -183,7 +182,7 @@ func TestMountIndexer_markdownBlocksChunks(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.NewMountSession("idx-md", reg)
+	ms := vfs.MustNewMountSession("idx-md", reg)
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
 		t.Fatal(err)
 	}
@@ -308,7 +307,7 @@ func TestMountIndexer_emptyMarkdownLineChunks(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.NewMountSession("idx-md-empty", reg)
+	ms := vfs.MustNewMountSession("idx-md-empty", reg)
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
 		t.Fatal(err)
 	}
@@ -393,7 +392,7 @@ func TestMountIndexer_IndexFileResultAndDefaults(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.NewMountSession("idx-file-result", reg)
+	ms := vfs.MustNewMountSession("idx-file-result", reg)
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
 		t.Fatal(err)
 	}
@@ -525,7 +524,111 @@ func TestMountIndexer_IndexFileResultAndDefaults(t *testing.T) {
 	if err != nil || (res != vfsindex.PathIndexed && res != vfsindex.PathSkipped) {
 		t.Fatalf("long file: res=%q err=%v", res, err)
 	}
+
+	// PolicyNone mount: IndexPath / IndexPrefix report skipped (no Document written).
+	if err := ms.Mount(ctx, vfs.MountSpec{
+		Point: "/off", Profile: "scratch", IndexPolicy: vfsindex.PolicyNone,
+		Params: map[string]string{"subpath": "off"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.WriteFile(ctx, "/off/hidden.txt", []byte("hidden-none-token\n")); err != nil {
+		t.Fatal(err)
+	}
+	res, err = idx.IndexPathResult(ctx, "/off/hidden.txt")
+	if err != nil || res != vfsindex.PathSkipped {
+		t.Fatalf("policy none: res=%q err=%v", res, err)
+	}
+	stats, err = idx.IndexPrefix(ctx, "/off", vfsindex.IndexOpts{})
+	if err != nil || stats.Indexed != 0 {
+		t.Fatalf("prefix none: %+v err=%v", stats, err)
+	}
+
+	// Byte-only provider has no Document IR — indexer streams the UTF-8 body.
+	bytesReg := vfs.NewBackendRegistry()
+	if err := bytesReg.Register(streamFactory{files: map[string][]byte{
+		"crlf.txt": []byte("alpha stream-unique\r\nbeta line\n"),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	ms2 := vfs.MustNewMountSession("idx-stream", bytesReg)
+	if err := ms2.Mount(ctx, vfs.MountSpec{Point: "/raw", Profile: "bytes"}); err != nil {
+		t.Fatal(err)
+	}
+	idx2, err := vfsindex.NewMountIndexer(ms2, eng, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx2.LinesPerChunk = 1
+	res, err = idx2.IndexPathResult(ctx, "/raw/crlf.txt")
+	if err != nil || res != vfsindex.PathIndexed {
+		t.Fatalf("stream index: res=%q err=%v", res, err)
+	}
+	page, err = eng.Search(ctx, scope, brain.SearchRequest{Query: "stream-unique"}, brain.NewSearchContext())
+	if err != nil || len(page.Objects) == 0 {
+		t.Fatalf("stream search: %+v err=%v", page.Objects, err)
+	}
 }
+
+// streamFactory is a Provider with Open/Stat only — no documentBackend.
+// Indexer must hash+chunk via the byte stream.
+type streamFactory struct{ files map[string][]byte }
+
+func (streamFactory) Profile() string { return "bytes" }
+
+func (f streamFactory) Open(context.Context, string, vfs.MountSpec) (vfs.Provider, error) {
+	return streamProvider(f), nil
+}
+
+type streamProvider struct{ files map[string][]byte }
+
+func (streamProvider) Validate(context.Context) error { return nil }
+
+func (p streamProvider) Stat(_ context.Context, name string) (vfs.FileInfo, error) {
+	if name == "" {
+		return vfs.FileInfo{Name: ".", IsDir: true}, nil
+	}
+	data, ok := p.files[name]
+	if !ok {
+		return vfs.FileInfo{}, vfs.ErrNotExist
+	}
+	return vfs.FileInfo{Name: name, Size: int64(len(data)), MediaType: "text/plain"}, nil
+}
+
+func (p streamProvider) OpenFile(_ context.Context, name string, _ int, _ fs.FileMode) (vfs.File, error) {
+	data, ok := p.files[name]
+	if !ok {
+		return nil, vfs.ErrNotExist
+	}
+	return &streamFile{r: bytes.NewReader(data), fi: vfs.FileInfo{
+		Name: name, Size: int64(len(data)), MediaType: "text/plain",
+	}}, nil
+}
+
+func (p streamProvider) ReadDir(_ context.Context, name string) ([]vfs.DirEntry, error) {
+	if name != "" {
+		return nil, vfs.ErrNotExist
+	}
+	out := make([]vfs.DirEntry, 0, len(p.files))
+	for n := range p.files {
+		out = append(out, vfs.DirEntry{Name: n})
+	}
+	return out, nil
+}
+
+func (streamProvider) Remove(context.Context, string) error { return vfs.ErrNotSupported }
+func (streamProvider) MkdirAll(context.Context, string, fs.FileMode) error {
+	return vfs.ErrNotSupported
+}
+
+type streamFile struct {
+	r  *bytes.Reader
+	fi vfs.FileInfo
+}
+
+func (f *streamFile) Close() error                { return nil }
+func (f *streamFile) Stat() (vfs.FileInfo, error) { return f.fi, nil }
+func (f *streamFile) Read(p []byte) (int, error)  { return f.r.Read(p) }
 
 func keys(m map[string]brain.RichObject) []string {
 	out := make([]string, 0, len(m))

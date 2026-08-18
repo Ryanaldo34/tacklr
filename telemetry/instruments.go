@@ -28,6 +28,7 @@ const (
 	MetricTokensReasoning = "tacklr.tokens.reasoning"
 	MetricBrainTotal      = "tacklr.brain.total"
 	MetricBrainDuration   = "tacklr.brain.duration"
+	MetricFuseMount       = "tacklr.fuse.mount.total"
 )
 
 // Label keys (low cardinality only — closed enums / config ids, never free text).
@@ -65,6 +66,7 @@ type Instruments struct {
 	tokensReasoning metric.Int64Counter
 	brainTotal      metric.Int64Counter
 	brainDuration   metric.Float64Histogram
+	fuseMountTotal  metric.Int64Counter
 }
 
 // MustInstruments builds instruments from m. Panics only on programmer error
@@ -187,6 +189,12 @@ func NewInstruments(m metric.Meter) (*Instruments, error) {
 	i.brainDuration, err = m.Float64Histogram(MetricBrainDuration,
 		metric.WithDescription("Brain retrieval latency (labels: brain_op, outcome, degrade)"),
 		metric.WithUnit("s"),
+	)
+	if err != nil {
+		return nil, err
+	}
+	i.fuseMountTotal, err = m.Int64Counter(MetricFuseMount,
+		metric.WithDescription("FUSE mount attempts by outcome (ok, error, unavailable)"),
 	)
 	if err != nil {
 		return nil, err
@@ -357,6 +365,24 @@ func (i *Instruments) RecordBrain(ctx context.Context, agentID, op, outcome, deg
 	if d > 0 {
 		i.brainDuration.Record(ctx, d.Seconds(), latency)
 	}
+}
+
+// Fuse mount outcomes for RecordFuseMount (closed enum).
+const (
+	FuseMountOutcomeOK          = "ok"
+	FuseMountOutcomeError       = "error"
+	FuseMountOutcomeUnavailable = "unavailable"
+)
+
+// RecordFuseMount increments tacklr.fuse.mount.total{outcome=...}.
+func (i *Instruments) RecordFuseMount(ctx context.Context, outcome string) {
+	if i == nil {
+		return
+	}
+	if outcome == "" {
+		outcome = FuseMountOutcomeOK
+	}
+	i.fuseMountTotal.Add(ctx, 1, metric.WithAttributes(attribute.String(LabelOutcome, outcome)))
 }
 
 // agentIDContextKey carries agent_id for child instrumentation without plumbing.

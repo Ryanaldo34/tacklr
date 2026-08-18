@@ -18,6 +18,9 @@ import (
 
 func TestMaxContextWindow_knownAndPrefixAndUnknown(t *testing.T) {
 	s := NewOpenAIInferenceStrategy(nil)
+	if s.httpClient != http.DefaultClient {
+		t.Fatal("nil client did not default to http.DefaultClient")
+	}
 	s.WithModel("gpt-5.4")
 	n, err := s.MaxContextWindow()
 	if err != nil || n != 1000000 {
@@ -46,20 +49,13 @@ func TestMaxContextWindow_knownAndPrefixAndUnknown(t *testing.T) {
 	}
 }
 
-func TestCompressContextWindow_noop(t *testing.T) {
-	s := NewOpenAIInferenceStrategy(nil)
-	if err := s.CompressContextWindow(); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestWithReasoningAndStructuredOutput_onInvokeRequest(t *testing.T) {
 	var saw map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(raw, &saw)
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\ndata: [DONE]\n\n")
 	}))
 	t.Cleanup(srv.Close)
 
@@ -89,7 +85,7 @@ func TestWithReasoningAndStructuredOutput_onInvokeRequest(t *testing.T) {
 		{Role: tacklr.RoleDeveloper, Content: "dev handoff"},
 	}, []*tacklr.Tool{
 		tacklr.NewTool(tacklr.ToolConfig{Name: "lookup", Handler: func(ctx context.Context) (string, error) { return "", nil }}),
-	})
+	}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,11 +172,11 @@ func TestCountTokens_withToolsAndInstructions(t *testing.T) {
 
 func TestInvoke_missingConfig(t *testing.T) {
 	s := NewOpenAIInferenceStrategy(http.DefaultClient)
-	if _, err := s.Invoke(context.Background(), nil, nil); !errors.Is(err, tacklr.ErrApiKeyNotSet) {
+	if _, err := s.Invoke(context.Background(), nil, nil, ""); !errors.Is(err, tacklr.ErrApiKeyNotSet) {
 		t.Fatalf("%v", err)
 	}
 	s.WithApiKey("k")
-	if _, err := s.Invoke(context.Background(), nil, nil); !errors.Is(err, tacklr.ErrModelNotSet) {
+	if _, err := s.Invoke(context.Background(), nil, nil, ""); !errors.Is(err, tacklr.ErrModelNotSet) {
 		t.Fatalf("%v", err)
 	}
 }
@@ -196,7 +192,7 @@ func TestInvoke_httpDoError_closesChannel(t *testing.T) {
 	s.WithModel("m")
 	s.WithURL("http://example.invalid")
 
-	ch, err := s.Invoke(context.Background(), []*tacklr.Message{{Role: tacklr.RoleUser, Content: "x"}}, nil)
+	ch, err := s.Invoke(context.Background(), []*tacklr.Message{{Role: tacklr.RoleUser, Content: "x"}}, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -430,7 +426,7 @@ func TestCountTokens_structuredOutputAndDoError(t *testing.T) {
 func TestInvoke_createRequestErrorAndCancelledSend(t *testing.T) {
 	s := NewOpenAIInferenceStrategy(http.DefaultClient)
 	s.WithApiKey("k").WithModel("m").WithURL("http://\x00") // invalid URL
-	ch, err := s.Invoke(context.Background(), []*tacklr.Message{{Role: tacklr.RoleUser, Content: "x"}}, nil)
+	ch, err := s.Invoke(context.Background(), []*tacklr.Message{{Role: tacklr.RoleUser, Content: "x"}}, nil, "")
 	if err != nil {
 		// NewRequest may fail before goroutine
 		return
@@ -445,7 +441,7 @@ func TestInvoke_createRequestErrorAndCancelledSend(t *testing.T) {
 		return nil, errors.New("x")
 	})})
 	s2.WithApiKey("k").WithModel("m").WithURL("http://example.invalid")
-	ch2, err := s2.Invoke(ctx, []*tacklr.Message{{Role: tacklr.RoleUser, Content: "x"}}, nil)
+	ch2, err := s2.Invoke(ctx, []*tacklr.Message{{Role: tacklr.RoleUser, Content: "x"}}, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -503,7 +499,7 @@ func TestCountTokens_tiktokenEncodingError(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	s := NewOpenAIInferenceStrategy(srv.Client())
-	s.WithApiKey("k").WithModel("m").WithURL(srv.URL)
+	s.WithApiKey("k").WithModel("m").WithURL(srv.URL).WithLocalTokenFallback()
 	if _, err := s.CountTokens(context.Background(), []*tacklr.Message{{Role: tacklr.RoleUser, Content: "x"}}, nil); err == nil || !strings.Contains(err.Error(), "tiktoken") {
 		t.Fatalf("err = %v", err)
 	}
@@ -537,7 +533,7 @@ func TestEmitOutputItemComplete_ignoresBadJSON(t *testing.T) {
 	}
 }
 
-func TestParseSSE_skipsNonDataAndBadJSON(t *testing.T) {
+func TestParseSSE_rejectsMalformedJSON(t *testing.T) {
 	body := strings.Join([]string{
 		`event: ping`,
 		`data: not-json`,
@@ -547,11 +543,7 @@ func TestParseSSE_skipsNonDataAndBadJSON(t *testing.T) {
 		"",
 	}, "\n")
 	chunks := collectSSE(t, body)
-	var text string
-	for _, c := range chunks {
-		text += c.Content
-	}
-	if text != "z" {
-		t.Fatalf("text = %q", text)
+	if len(chunks) != 1 || !errors.Is(chunks[0].Error, ErrMalformedStream) {
+		t.Fatalf("chunks = %#v", chunks)
 	}
 }

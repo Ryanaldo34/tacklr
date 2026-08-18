@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 
@@ -138,6 +139,7 @@ func TestInterpretErrorConnect(t *testing.T) {
 }
 
 func TestBuildTransportStdio(t *testing.T) {
+	t.Setenv("TACKLR_HOST_SECRET", "must-not-leak")
 	c := &client{config: mcp.MCPConfig{
 		Name:    "fs",
 		Command: "npx",
@@ -159,13 +161,53 @@ func TestBuildTransportStdio(t *testing.T) {
 		t.Errorf("command args = %v, want [npx -y @modelcontextprotocol/server-filesystem]", ct.Command.Args)
 	}
 	found := false
+	leaked := false
 	for _, env := range ct.Command.Env {
 		if env == "API_KEY=secret" {
 			found = true
 		}
+		if env == "TACKLR_HOST_SECRET=must-not-leak" {
+			leaked = true
+		}
 	}
 	if !found {
 		t.Errorf("expected API_KEY=secret in command env, got %v", ct.Command.Env)
+	}
+	if leaked {
+		t.Fatalf("stdio MCP inherited host secret: %v", ct.Command.Env)
+	}
+}
+
+func TestBuildTransportStdio_hostEnvironmentRequiresExplicitPolicy(t *testing.T) {
+	t.Setenv("TACKLR_ALLOWED", "allowed")
+	t.Setenv("TACKLR_SECRET", "secret")
+
+	allowlisted := &client{config: mcp.MCPConfig{
+		Name:    "allowlisted",
+		Command: "server",
+		HostEnv: []string{"TACKLR_ALLOWED"},
+	}}
+	transport, err := allowlisted.buildTransport()
+	if err != nil {
+		t.Fatal(err)
+	}
+	allowlistedCommand := transport.(*mcpsdk.CommandTransport).Command
+	if !slices.Contains(allowlistedCommand.Env, "TACKLR_ALLOWED=allowed") ||
+		slices.Contains(allowlistedCommand.Env, "TACKLR_SECRET=secret") {
+		t.Fatalf("allowlisted environment = %v", allowlistedCommand.Env)
+	}
+
+	trusted := &client{config: mcp.MCPConfig{
+		Name:           "trusted",
+		Command:        "server",
+		InheritHostEnv: true,
+	}}
+	transport, err = trusted.buildTransport()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if env := transport.(*mcpsdk.CommandTransport).Command.Env; !slices.Contains(env, "TACKLR_SECRET=secret") {
+		t.Fatalf("trusted environment omitted host value: %v", env)
 	}
 }
 

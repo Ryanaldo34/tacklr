@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/ryanaldo34/tacklr/interrupt"
@@ -43,57 +44,66 @@ func SelectionToElicitationParams(sessionID, toolCallID, question string, opts [
 		msg.WriteByte('\n')
 	}
 
+	return elicitationFormParams(sessionID, toolCallID, strings.TrimSpace(msg.String()), map[string]any{
+		"choice": map[string]any{
+			"type":  "string",
+			"title": "Your choice",
+			"enum":  titles,
+		},
+	}, []string{"choice"}), nil
+}
+
+func elicitationFormParams(sessionID, toolCallID, message string, properties map[string]any, required []string) map[string]any {
 	params := map[string]any{
 		"sessionId": sessionID,
 		"mode":      "form",
-		"message":   strings.TrimSpace(msg.String()),
+		"message":   message,
 		"requestedSchema": map[string]any{
-			"type": "object",
-			"properties": map[string]any{
-				"choice": map[string]any{
-					"type":  "string",
-					"title": "Your choice",
-					"enum":  titles,
-				},
-			},
-			"required": []string{"choice"},
+			"type":       "object",
+			"properties": properties,
+			"required":   required,
 		},
 	}
 	if toolCallID != "" {
 		params["toolCallId"] = toolCallID
 	}
-	return params, nil
+	return params
+}
+
+func parseElicitationResult(raw json.RawMessage) (ElicitationResult, error) {
+	var res ElicitationResult
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return res, fmt.Errorf("unmarshal elicitation result: %w", err)
+	}
+	switch res.Action {
+	case "accept", "decline", "cancel":
+		return res, nil
+	default:
+		return res, fmt.Errorf("unknown elicitation action %q", res.Action)
+	}
 }
 
 // ElicitationResultToSelectionPayload maps an accept response to the harness
 // interrupt resolution payload. Returns action and optional selection JSON.
 func ElicitationResultToSelectionPayload(raw json.RawMessage, opts []interrupt.UserChoice) (action string, resolution []byte, err error) {
-	var res ElicitationResult
-	if err := json.Unmarshal(raw, &res); err != nil {
-		return "", nil, fmt.Errorf("unmarshal elicitation result: %w", err)
+	res, err := parseElicitationResult(raw)
+	if err != nil {
+		return "", nil, err
 	}
 	action = res.Action
-	switch action {
-	case "accept":
-		choice, _ := res.Content["choice"].(string)
-		if choice == "" {
-			return action, nil, fmt.Errorf("accept missing content.choice")
-		}
-		idx := -1
-		for i, o := range opts {
-			if o.Title == choice {
-				idx = i
-				break
-			}
-		}
-		if idx < 0 {
-			return action, nil, fmt.Errorf("unknown choice %q", choice)
-		}
-		resolution, err = json.Marshal(map[string]any{"selectionIdx": idx})
-		return action, resolution, err
-	case "decline", "cancel":
+	if action != "accept" {
 		return action, nil, nil
-	default:
-		return action, nil, fmt.Errorf("unknown elicitation action %q", action)
 	}
+	choice, _ := res.Content["choice"].(string)
+	if choice == "" {
+		return action, nil, fmt.Errorf("accept missing content.choice")
+	}
+	idx := slices.IndexFunc(opts, func(o interrupt.UserChoice) bool {
+		return o.Title == choice
+	})
+	if idx < 0 {
+		return action, nil, fmt.Errorf("unknown choice %q", choice)
+	}
+	resolution, err = json.Marshal(map[string]any{"selectionIdx": idx})
+	return action, resolution, err
 }

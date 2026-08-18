@@ -13,7 +13,6 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
@@ -120,14 +119,20 @@ func TestWSMessageWriter_resultErrorAndHelpers(t *testing.T) {
 	}
 }
 
-func TestToSSEEvent_withError(t *testing.T) {
-	ev := toSSEEvent(tacklr.StreamEvent{Type: streaming.StreamEventError, Error: errors.New("e")})
-	if ev.Error != "e" {
+func TestPresentStreamEvent_withError(t *testing.T) {
+	ev, err := presentStreamEvent(streaming.StreamEvent{Type: streaming.StreamEventError, Error: errors.New("e")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.ErrorText != "e" {
 		t.Fatalf("%+v", ev)
+	}
+	if _, err := presentStreamEvent(streaming.StreamEvent{}); err == nil {
+		t.Fatal("unknown stream event type was silently accepted")
 	}
 }
 
-func TestWriteSSEError_andEventToRawSSE(t *testing.T) {
+func TestWriteSSEError_andPresentStreamEventSSE(t *testing.T) {
 	rec := httptest.NewRecorder()
 	if err := writeSSEError(rec, rec, "boom"); err != nil {
 		t.Fatal(err)
@@ -135,8 +140,15 @@ func TestWriteSSEError_andEventToRawSSE(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "boom") {
 		t.Fatalf("%s", rec.Body.String())
 	}
-	frames := eventToRawSSE("t", &streaming.StreamEvent{Type: streaming.StreamEventMessage, Content: "x"})
-	if len(frames) != 1 {
-		t.Fatalf("frames = %d", len(frames))
+	presented, err := presentStreamEvent(streaming.StreamEvent{Type: streaming.StreamEventMessage, Content: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(presented)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) == 0 {
+		t.Fatal("empty SSE payload")
 	}
 }

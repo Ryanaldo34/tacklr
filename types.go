@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/ryanaldo34/tacklr/internal/session"
 	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/streaming"
 )
@@ -54,27 +53,44 @@ type (
 	Message          = streaming.Message
 )
 
+// Coarse categories for errors.Is. Wrap with a specific message at the
+// call site (fmt.Errorf("…: %w", ErrNotFound)) instead of adding a new sentinel
+// per situation.
+var (
+	ErrNotFound = errors.New("not found")
+	ErrInvalid  = errors.New("invalid")
+	ErrFailed   = errors.New("failed")
+)
+
+// classified keeps a stable Error() string while unwrapping to a category.
+type classified struct {
+	cat error
+	msg string
+}
+
+func (e classified) Error() string { return e.msg }
+func (e classified) Unwrap() error { return e.cat }
+
+func classify(cat error, msg string) error { return classified{cat: cat, msg: msg} }
+
 var (
 	ErrModelRefused         = errors.New("model refused")
 	ErrMaxTokens            = errors.New("max tokens reached")
 	ErrMaxTurnRequests      = errors.New("max turn model requests exceeded")
-	ErrApiKeyNotSet         = errors.New("api key not set")
-	ErrModelNotSet          = errors.New("model not set")
-	ErrUnknownModel         = errors.New("unknown model")
-	ErrToolNotFound         = errors.New("tool not found")
-	ErrToolTimeout          = errors.New("tool timed out")
-	ErrToolPermissionDenied = errors.New("tool permission denied")
+	ErrApiKeyNotSet         = classify(ErrInvalid, "api key not set")
+	ErrModelNotSet          = classify(ErrInvalid, "model not set")
+	ErrUnknownModel         = classify(ErrNotFound, "unknown model")
+	ErrToolNotFound         = classify(ErrNotFound, "tool not found")
+	ErrToolTimeout          = classify(ErrFailed, "tool timed out")
+	ErrToolPermissionDenied = classify(ErrFailed, "tool permission denied")
 	// ErrModelAfterTools is a model failure after a successful tool batch.
 	// Tools completed; the next model request failed.
-	ErrModelAfterTools = errors.New("model request failed after tools completed")
+	ErrModelAfterTools = classify(ErrFailed, "model request failed after tools completed")
 )
 
 // WrapStopReason attaches cause under a stop-reason sentinel for errors.Is.
-// Returns kind when cause is nil, or cause when kind is nil.
+// Returns kind when cause is nil.
 func WrapStopReason(kind, cause error) error {
-	if kind == nil {
-		return cause
-	}
 	if cause == nil {
 		return kind
 	}
@@ -89,16 +105,11 @@ type ProviderStatus interface {
 }
 
 // InferenceStrategy is the model provider interface used by the harness.
+// Fluent With* builders and SetSystemPrompt live on concrete providers
+// (for example *inference.OpenAIInferenceStrategy), not this interface.
 type InferenceStrategy interface {
-	WithApiKey(string) InferenceStrategy
-	WithModel(string) InferenceStrategy
-	WithURL(string) InferenceStrategy
-	WithReasoningLevel(string) InferenceStrategy
-	WithStructuredOutput(any) InferenceStrategy
-	SetSystemPrompt(string)
-	Invoke(context.Context, []*Message, []*Tool) (chan LLMResponseChunk, error)
+	Invoke(ctx context.Context, messages []*Message, tools []*Tool, systemPrompt string) (chan LLMResponseChunk, error)
 	CountTokens(context.Context, []*Message, []*Tool) (int, error)
-	CompressContextWindow() error
 	MaxContextWindow() (int, error)
 	// SupportsMIME reports whether the currently selected model accepts the
 	// given MIME type as user input. Empty and text/* are always true.
@@ -115,9 +126,6 @@ func UnsupportedMIMEs(s InferenceStrategy, mimes []string) []string {
 	seen := make(map[string]struct{}, len(mimes))
 	for _, m := range mimes {
 		m = streaming.NormalizeMIME(m)
-		if m == "" {
-			continue
-		}
 		if _, ok := seen[m]; ok {
 			continue
 		}
@@ -139,10 +147,17 @@ type AgentWatchDog interface {
 	RecordToolResult(*Message) error
 }
 
-// HarnessRuntime is the tool-facing API for handlers and interceptors:
-// EmitUpdate, StateGet, StateSet, StateDelete, RaiseInterrupt, Store,
-// and CurrentToolCallID. Turn lifecycle helpers live in internal/session.
-type HarnessRuntime = session.Runtime
+// HarnessRuntime is the tool-facing hook for one harness turn.
+// Tools emit progress, read/write user session state, and raise interrupts.
+// Session modules (plan, permissions, on-call, parks) are not on this interface.
+type HarnessRuntime interface {
+	EmitUpdate(message string)
+	StateGet(key string) (any, bool)
+	StateSet(key string, value any) error
+	StateDelete(key string)
+	RaiseInterrupt(kind string, payload []byte) (Interrupt, error)
+	CurrentToolCallID() string
+}
 
 // Todo is one plan list item (also used in plan_update stream payloads).
 type Todo = streaming.Todo

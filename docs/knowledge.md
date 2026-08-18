@@ -11,7 +11,7 @@ defined as they appear, and again in the [glossary](#glossary).
 
 | Doc | When to open it |
 |-----|-----------------|
-| [docs/vfs.md](vfs.md) | Mounts, file IR, write-back, index *policy* on a mount |
+| [docs/vfs.md](vfs.md) | Mounts, file IR, provider persist, index *policy* on a mount |
 | [`brain` package](https://pkg.go.dev/github.com/ryanaldo34/tacklr/brain) | Go API reference |
 | [`vfsindex` package](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfsindex) | Artifact → Document/Chunk ingest API |
 | [README](../README.md) | How Brain fits the rest of the harness |
@@ -63,7 +63,7 @@ Almost every design mistake in this area comes from treating these as the same t
 
 ```text
   Agent
-    ├─ file tools     list, read_lines, replace_*, write, find_files
+    ├─ file tools     read, write, run_command
     └─ knowledge tools schema, search, find_exact, find_objects,
                        link, expand, find_links, save_*, continue
               │
@@ -106,7 +106,8 @@ It sees:
 
 A **virtual filesystem (VFS)** is one tree of paths whose backends the host chose.
 Local disk, S3, and the brain all look the same at the tool layer. Details:
-[docs/vfs.md](vfs.md).
+[docs/vfs.md](vfs.md). Workers share the host `MountSession` and brain engine;
+they do not get a second FUSE.
 
 Default Engram layout (the harness mounts this when Brain + VFS + a search
 namespace are set, unless the host already mounted a brain profile):
@@ -119,7 +120,7 @@ namespace are set, unless the host already mounted a brain profile):
 Hosts can instead mount **roots** (`/deal/acme.md`). Same objects, different tree.
 
 Relationships do **not** appear as files. There is no `.links` directory.
-`list` / `find_files` show file names only. To see neighbors, the agent calls
+`run_command` → `ls` shows file names only. To see neighbors, the agent calls
 `expand`.
 
 ---
@@ -291,13 +292,13 @@ matter so the id is visible.
 mount exists they write the Engram path; otherwise they call `Engine.Put`.
 Scratch `/memory` is **not** attached when a brain mount exists.
 
-IR edits (`replace_lines` / `WriteDocument` + `Sync`) persist the same way:
+IR edits (`write` / `WriteDocument`) persist the same way:
 the serialized Markdown is parsed and `Put`.
 
 ### Artifacts — the file stays where it is
 
 A file on `/work` or S3 is **not** an Engram. Indexing makes a *mirror* in the
-store so `search` / `find_content` can find it.
+store so `search` can find it.
 
 ```text
 /work/contract.md     ← live bytes (source of truth)
@@ -316,7 +317,7 @@ other text uses fixed line windows (default 40 lines).
 flowchart TD
     A[index_file tool] --> IP[IndexPath]
     B[IndexPrefix at session start] --> IP
-    C[AfterPersist on write/Sync] --> IP
+    C[AfterPersist on write] --> IP
     IP --> Skip{brain profile<br/>or same content_hash<br/>or binary / empty?}
     Skip -->|yes| Out[PathSkipped]
     Skip -->|no| Doc[Put Document parent]
@@ -326,7 +327,7 @@ flowchart TD
 
 The parent Document holds metadata and a content hash — not a second
 agent-editable full-file body. After search, the agent opens the **live** path
-with `read_lines` using `vfs_path` + `start_line` / `block_id`.
+with `read` using `vfs_path` + `start_line` / `block_id`.
 
 **Index policies** (set on the mount; empty means `selective` when the index
 bridge is on):
@@ -380,7 +381,7 @@ flowchart TB
 | | Store | Graph |
 |-|-------|-------|
 | **Holds** | Full rows, chunks, embeddings, filters | Parent nodes + edges |
-| **Answers** | `search`, `find_exact`, `read`, expand-children | `find_objects`, `link`, expand-relations, `find_links` |
+| **Answers** | `search`, `find_exact`, `read_object`, expand-children | `find_objects`, `link`, expand-relations, `find_links` |
 | **Required?** | Yes | Optional. Without it: no `link` / `find_objects` / named-relation expand |
 
 **Write rules**
@@ -466,8 +467,9 @@ Production defaults (overridable on the engine, not per tool call): 40
 candidates per channel, RRF `k=60`, mild time decay `λ=0.02`, 3 evidence
 chunks, page size 10 (max 50).
 
-**`find_content`** is the same pipeline, then kept only if the hit has
-`vfs_path` — file grep, not generic objects.
+Indexed file recall is the same pipeline via `search` (prefer hits with
+`vfs_path`). That is not a behavior-preserving stand-in for live `rg`.
+Live grep is `run_command` → `rg`.
 
 **`scope_ids`** restricts candidates to those ids or their children. After you
 `expand` a Deal, search the neighborhood instead of the whole corpus.
@@ -547,7 +549,7 @@ flowchart TD
 - Named types need a graph backend. Default depth is 1 hop (capped at 4).
 - If the graph fails and containment was also requested, expand can degrade to
   containment-only.
-- `list` never lists edges. Tool descriptions say this on purpose.
+- `ls` never lists edges. Tool descriptions say this on purpose.
 
 `link` / `unlink` require both ends to exist in the namespace, not be
 soft-deleted, and **not** be chunks. Paths resolve through `vfs_path`. An
@@ -573,16 +575,15 @@ VFS + a search namespace). Isolated VFS with no Brain: file tools only.
 | `search` | You need evidence in notes or indexed files | Store hybrid + parent promotion |
 | `find_exact` | You have an id or a precise phrase | Equality / trigram + promotion |
 | `find_objects` | You need the entity, not a passage | Graph nodes → store hydrate |
-| `find_content` | You need a *file* hit with a path and line | `search`, kept only if `vfs_path` is set |
-| `read` | You have an id and need the full stored body | `Engine.Read` (prefer `read_lines` when `vfs_path` is set) |
-| `read_lines` / `write` / `replace_*` | You are editing or citing a path | VFS (any mount, including `/engram`) |
+| `read_object` | You have an id and the hit has no `vfs_path` | `Engine.Read` |
+| `read` / `write` | You are editing or citing a path | VFS (any mount, including `/engram`) |
 | `save_*` | You want a one-shot create/update | Provider write, or `Put` if no brain mount |
 | `index_file` / `unindex` | You must (un)mirror an artifact | `IndexPath` |
 | `link` / `unlink` | You are asserting a relationship | Graph edges |
 | `expand` | You already have a path or id | Containment and/or neighbors |
 | `find_links` | You are looking for a relationship by its note | Edge text search |
 | `continue` | The last page set `has_more` | Session result set |
-| `find_files` | You need a filename glob on the live tree | VFS walk (not search) |
+| `run_command` | You need live `ls` / `fd` / `find` / `rg` on the FUSE tree | Host shell, cwd = `HostDir` |
 
 ### Suggested loop
 
@@ -595,7 +596,7 @@ expand  /  find_links                     ← walk
     │
 search(scope_ids = those parents)         ← neighborhood corpus
     │
-read_lines on vfs_path                    ← live bytes, not the chunk snapshot
+read on vfs_path                          ← live bytes, not the chunk snapshot
 ```
 
 ---
@@ -620,7 +621,7 @@ and let the harness mount `/engram`.
 7. `search "indemnity"` with `scope_ids` of those parents runs BM25 + vector
    on **chunks**, promotes to the Deal and the NDA Document, and attaches
    line-range evidence.
-8. The agent calls `read_lines /work/nda.md` at `start_line` from evidence —
+8. The agent calls `read /work/nda.md` at `start_line` from evidence —
    the live file, not the chunk snapshot.
 
 ---
@@ -731,7 +732,6 @@ returns paths), not that a private helper was called.
 
 ## Out of scope for this version
 
-- FUSE and host `run_command` / `rg` over the mount tree
 - Sidecar link files or virtual neighbor directories (`ls` is never a graph query)
 - Hardcoded product types (Deal, Person, …) inside the SDK
 - Agent-defined kinds (hosts own the schema for determinism)

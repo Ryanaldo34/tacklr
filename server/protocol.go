@@ -6,20 +6,36 @@ import (
 	"errors"
 	"net/http"
 
+	tacklrsecurity "github.com/ryanaldo34/tacklr/security"
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
 // Conn is one client connection (stdio session, or a logical HTTP request scope).
 type Conn struct {
-	Writer MessageWriter
-	RPC    *ClientBridge
-	Caps   ClientCapabilities
+	Writer   MessageWriter
+	RPC      *ClientBridge
+	Security *tacklrsecurity.Context
+
+	setSecurity func(tacklrsecurity.Context)
+}
+
+func (c *Conn) establishSecurity(securityContext tacklrsecurity.Context) {
+	if c == nil {
+		return
+	}
+	c.Security = &securityContext
+	if c.setSecurity != nil {
+		c.setSecurity(securityContext)
+	}
 }
 
 // ProtocolEnv is the domain + connection context passed into protocol handlers.
 type ProtocolEnv struct {
 	Registry *Registry
 	Conn     *Conn
+	// Security is protocol-neutral. Protocol implementations translate their
+	// wire authentication into this service and store the resulting Context on Conn.
+	Security *tacklrsecurity.Service
 	// Connections is the server-wide connection registry (WebSocket / Streamable HTTP).
 	// Nil for pure stdio or tests that only use HandleInbound.
 	Connections *ConnectionRegistry
@@ -35,9 +51,10 @@ type StreamControl struct {
 
 // HTTPRoute is one HTTP endpoint owned by a protocol.
 type HTTPRoute struct {
-	Method  string // e.g. "POST"
-	Pattern string // e.g. "/" or "/resume"
-	Handler func(env ProtocolEnv, w http.ResponseWriter, r *http.Request)
+	Method               string // e.g. "POST"
+	Pattern              string // e.g. "/" or "/resume"
+	AllowUnauthenticated bool
+	Handler              func(env ProtocolEnv, w http.ResponseWriter, r *http.Request)
 }
 
 // ErrWireSessionUnsupported is returned by Protocol session methods when the
@@ -78,7 +95,8 @@ type Protocol interface {
 	LoadSession(ctx context.Context, env ProtocolEnv, sessionID string, params json.RawMessage) (result any, err error)
 
 	// BindTurn maps a wire session + turn body into a Registry TurnRequest.
-	BindTurn(ctx context.Context, env ProtocolEnv, sessionID string, turnParams json.RawMessage) (TurnRequest, error)
+	// method is the inbound RPC method (session/prompt, session/resume, …).
+	BindTurn(ctx context.Context, env ProtocolEnv, sessionID, method string, turnParams json.RawMessage) (TurnRequest, error)
 
 	// CloseSession drops live wire binding and may cancel an in-flight turn.
 	CloseSession(ctx context.Context, env ProtocolEnv, sessionID string) error

@@ -25,24 +25,12 @@ type ScriptedModel struct {
 	LastInvokeTools []*tacklr.Tool
 }
 
-func (m *ScriptedModel) WithApiKey(string) tacklr.InferenceStrategy         { return m }
-func (m *ScriptedModel) WithModel(string) tacklr.InferenceStrategy          { return m }
-func (m *ScriptedModel) WithURL(string) tacklr.InferenceStrategy            { return m }
-func (m *ScriptedModel) WithReasoningLevel(string) tacklr.InferenceStrategy { return m }
-func (m *ScriptedModel) WithStructuredOutput(any) tacklr.InferenceStrategy  { return m }
 func (m *ScriptedModel) SupportsMIME(mimeType string) bool {
 	// Scripted models accept common binary types unless overridden later.
 	return true
 }
-func (m *ScriptedModel) SetSystemPrompt(p string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.SystemPrompts = append(m.SystemPrompts, p)
-}
-func (m *ScriptedModel) Reset()                       {}
-func (m *ScriptedModel) CompressContextWindow() error { return nil }
 func (m *ScriptedModel) MaxContextWindow() (int, error) {
-	return 0, nil
+	return 8192, nil
 }
 
 func (m *ScriptedModel) CountTokens(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool) (int, error) {
@@ -58,7 +46,7 @@ func (m *ScriptedModel) CountTokens(ctx context.Context, msgs []*tacklr.Message,
 	return n, nil
 }
 
-func (m *ScriptedModel) Invoke(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool) (chan tacklr.LLMResponseChunk, error) {
+func (m *ScriptedModel) Invoke(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, systemPrompt string) (chan tacklr.LLMResponseChunk, error) {
 	if m.InvokeErr != nil {
 		return nil, m.InvokeErr
 	}
@@ -71,6 +59,9 @@ func (m *ScriptedModel) Invoke(ctx context.Context, msgs []*tacklr.Message, tool
 	m.mu.Lock()
 	m.LastInvokeMsgs = msgs
 	m.LastInvokeTools = tools
+	if systemPrompt != "" {
+		m.SystemPrompts = append(m.SystemPrompts, systemPrompt)
+	}
 	m.mu.Unlock()
 	ch := make(chan tacklr.LLMResponseChunk)
 	go func() {

@@ -10,6 +10,8 @@ import (
 	"sync"
 
 	"github.com/google/uuid"
+
+	tacklrsecurity "github.com/ryanaldo34/tacklr/security"
 )
 
 // Header names for the ACP Streamable HTTP / WebSocket transport (RFD).
@@ -40,7 +42,28 @@ type Connection struct {
 	// routes maps JSON-RPC request id → delivery target for the matching result.
 	routes   map[string]streamRoute
 	sessions map[string]struct{}
+	security tacklrsecurity.Context
 	closed   bool
+	// lateSessionSSEFallback copies ConnectionRegistry.LateSessionSSEFallback.
+	lateSessionSSEFallback bool
+}
+
+func (c *Connection) securityContext() tacklrsecurity.Context {
+	if c == nil {
+		return tacklrsecurity.Context{}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.security
+}
+
+func (c *Connection) setSecurityContext(securityContext tacklrsecurity.Context) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.security = securityContext
+	c.mu.Unlock()
 }
 
 type streamRoute struct {
@@ -95,6 +118,10 @@ func (s *sseSink) close() {
 type ConnectionRegistry struct {
 	mu   sync.Mutex
 	byID map[string]*Connection
+	// LateSessionSSEFallback delivers session traffic on the connection SSE
+	// when the session sink is not open yet. Off by default.
+	LateSessionSSEFallback bool
+	onRemove               func(*Connection)
 }
 
 // NewConnectionRegistry returns an empty registry.
@@ -107,14 +134,15 @@ func NewConnectionRegistry() *ConnectionRegistry {
 func (r *ConnectionRegistry) Create(bridge *ClientBridge, writer MessageWriter) *Connection {
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &Connection{
-		ID:           uuid.NewString(),
-		Bridge:       bridge,
-		Writer:       writer,
-		ctx:          ctx,
-		cancel:       cancel,
-		sessionSinks: make(map[string]*sseSink),
-		routes:       make(map[string]streamRoute),
-		sessions:     make(map[string]struct{}),
+		ID:                     uuid.NewString(),
+		Bridge:                 bridge,
+		Writer:                 writer,
+		ctx:                    ctx,
+		cancel:                 cancel,
+		sessionSinks:           make(map[string]*sseSink),
+		routes:                 make(map[string]streamRoute),
+		sessions:               make(map[string]struct{}),
+		lateSessionSSEFallback: r != nil && r.LateSessionSSEFallback,
 	}
 	if r == nil {
 		return c
@@ -145,6 +173,9 @@ func (r *ConnectionRegistry) Remove(id string) {
 	delete(r.byID, id)
 	r.mu.Unlock()
 	if c != nil {
+		if r.onRemove != nil {
+			r.onRemove(c)
+		}
 		c.shutdown()
 	}
 }
@@ -184,10 +215,9 @@ func (c *Connection) rememberRoute(id json.RawMessage, method, sessionID string)
 	if c == nil || len(id) == 0 {
 		return
 	}
-	connLevel := method == "session/new" || method == "session/load" ||
-		method == "initialize" || method == "authenticate"
+	flags := acpTransportFlagsFor(method)
 	c.mu.Lock()
-	c.routes[string(id)] = streamRoute{method: method, sessionID: sessionID, connLevel: connLevel}
+	c.routes[string(id)] = streamRoute{method: method, sessionID: sessionID, connLevel: flags.connLevelResult}
 	c.mu.Unlock()
 }
 
@@ -211,6 +241,29 @@ func (c *Connection) noteSession(sessionID string) {
 	c.mu.Lock()
 	c.sessions[sessionID] = struct{}{}
 	c.mu.Unlock()
+}
+
+func (c *Connection) hasSession(sessionID string) bool {
+	if c == nil || sessionID == "" {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, ok := c.sessions[sessionID]
+	return ok
+}
+
+func (c *Connection) sessionIDs() []string {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	ids := make([]string, 0, len(c.sessions))
+	for id := range c.sessions {
+		ids = append(ids, id)
+	}
+	return ids
 }
 
 // attachConnSSE registers the connection-scoped GET stream. Returns a detach func
@@ -270,8 +323,8 @@ func (c *Connection) attachSessionSSE(sessionID string, w http.ResponseWriter, f
 }
 
 // deliver sends one JSON-RPC message to the appropriate SSE stream(s).
-// connLevel or empty sessionID → connection stream; else session stream with
-// fallback to connection stream so messages are not dropped if session SSE is late.
+// connLevel or empty sessionID → connection stream; else the session stream.
+// Late session traffic is dropped unless LateSessionSSEFallback is set.
 func (c *Connection) deliver(sessionID string, data []byte, connLevel bool) error {
 	if c == nil {
 		return fmt.Errorf("nil connection")
@@ -289,7 +342,7 @@ func (c *Connection) deliver(sessionID string, data []byte, connLevel bool) erro
 	} else {
 		if s := c.sessionSinks[sessionID]; s != nil {
 			targets = append(targets, s)
-		} else if c.connSink != nil {
+		} else if c.lateSessionSSEFallback && c.connSink != nil {
 			targets = append(targets, c.connSink)
 		}
 	}
@@ -326,7 +379,7 @@ func (w *acpStreamWriter) WriteResult(id json.RawMessage, result any) error {
 	if res, ok := result.(map[string]any); ok {
 		if sid, _ := res["sessionId"].(string); sid != "" {
 			w.conn.noteSession(sid)
-			if route.method == "session/new" || route.method == "session/load" {
+			if acpTransportFlagsFor(route.method).resultSessionConnLevel {
 				connLevel = true
 				sessionID = ""
 			}
@@ -409,15 +462,4 @@ func isJSONContentType(ct string) bool {
 // acceptSSE reports whether Accept includes text/event-stream.
 func acceptSSE(accept string) bool {
 	return strings.Contains(strings.ToLower(accept), "text/event-stream")
-}
-
-// sessionScopedACPMethod is true when the RFD requires Acp-Session-Id on POST.
-func sessionScopedACPMethod(method string) bool {
-	switch method {
-	case "session/prompt", "session/resume", "session/cancel",
-		"session/set_config_option", "session/close":
-		return true
-	default:
-		return false
-	}
 }

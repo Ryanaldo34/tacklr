@@ -2,6 +2,8 @@ package brain_test
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -286,6 +288,36 @@ func TestEval_graphRAGComposition(t *testing.T) {
 	if links.Links[0].Meta.Role != "primary" {
 		t.Fatalf("link meta: %+v", links.Links[0].Meta)
 	}
+
+	if _, err := eng.FindLinks(ctx, scope, brain.FindLinksRequest{}); !errors.Is(err, brain.ErrLinkQueryRequired) {
+		t.Fatalf("find_links required: %v", err)
+	}
+
+	empty, err := eng.FindLinks(ctx, scope, brain.FindLinksRequest{
+		RelationType: "has_buyer", Query: "zzzz-no-such-note", Limit: 5,
+	})
+	if err != nil || len(empty.Links) != 0 {
+		t.Fatalf("empty find_links: %+v err=%v", empty.Links, err)
+	}
+
+	ghost := uuid.New()
+	if err := g.AddEdge(ctx, deal.ID, ghost, "has_buyer", brain.EdgeMeta{Note: "economic buyer ghost"}); err != nil {
+		t.Fatal(err)
+	}
+	limited, err := eng.FindLinks(ctx, scope, brain.FindLinksRequest{
+		RelationType: "has_buyer", Query: "economic buyer", Limit: 1,
+	})
+	if err != nil || len(limited.Links) != 1 {
+		t.Fatalf("limit+ghost skip: %+v err=%v", limited.Links, err)
+	}
+
+	cctx, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := eng.FindLinks(cctx, scope, brain.FindLinksRequest{
+		RelationType: "has_buyer", Query: "economic buyer",
+	}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("find_links cancel: %v", err)
+	}
 }
 
 // TestEval_graphRAGScopeSafeMultiHop: multi-hop must not walk through out-of-scope nodes.
@@ -396,6 +428,11 @@ func TestEval_degradeGraphKeepsContainment(t *testing.T) {
 	if res.Mode != "children" || len(res.Objects) != 1 || res.Objects[0].ID != child {
 		t.Fatalf("containment-only degrade: %+v", res)
 	}
+	if _, err := eng.FindLinks(ctx, brain.Scope{Namespace: &ns}, brain.FindLinksRequest{
+		RelationType: "about", Query: "anything",
+	}); err == nil || !strings.Contains(err.Error(), "edge search down") {
+		t.Fatalf("FindLinks graph error: %v", err)
+	}
 }
 
 func TestConcurrent_searchAndExpand(t *testing.T) {
@@ -486,6 +523,10 @@ type failGraph struct{}
 
 func (failGraph) Neighbors(context.Context, uuid.UUID, []string, int) ([]brain.GraphNeighbor, error) {
 	return nil, errString("graph down")
+}
+
+func (failGraph) SearchEdgesText(context.Context, string, string, int) ([]brain.EdgeSearchHit, error) {
+	return nil, errString("edge search down")
 }
 
 type errString string

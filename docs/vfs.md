@@ -4,7 +4,7 @@ Tacklr’s virtual filesystem gives agents one path-based interface over storage
 
 Package: [`github.com/ryanaldo34/tacklr/vfs`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfs).
 
-Knowledge objects, search, and the graph are documented in **[docs/knowledge.md](knowledge.md)** (canonical). This file is the VFS surface: mounts, IR, write-back, and index *policy*.
+Knowledge objects, search, and the graph are documented in **[docs/knowledge.md](knowledge.md)** (canonical). This file is the VFS surface: mounts, IR, and index *policy*.
 
 ## Big picture
 
@@ -37,27 +37,21 @@ Knowledge objects, search, and the graph are documented in **[docs/knowledge.md]
 | **Document IR** | Agent-facing view of a file (lines + optional structured blocks) |
 | **Codec** | Bytes ↔ Document by media type |
 
-Mental model: **mounts are the filesystem**; **IR is a checkout of one file**. The session holds an optional **page cache** of textual IR with write-back; the **backend** is source of truth after `Sync`.
+Mental model: **mounts are the filesystem**; **IR is a checkout of one file**. The **provider** translates IR and persists immediately. `MountSession` routes; it does not encode or hold a dirty document cache.
 
-### Session cache and durability
+### Durability
 
 | Layer | Role |
 |-------|------|
-| Content cache | Internal session map of textual IR (clean/dirty); not part of the public API |
-| `WriteDocument` | Stages dirty IR (**no** backend Put yet) |
-| `Sync` / `SyncAll` | Flushes dirty paths to the backend (only flush knobs hosts need) |
-| Harness checkpoint | `SyncAll`, then saves **mount Specs only** |
-| Crash before Sync | Dirty edits lost; last successful Sync wins |
+| `WriteDocument` | Provider translates IR and writes to its service now |
+| `WriteFile` | Byte write-through to the provider |
+| Harness | Dispatches tools; does not flush or checkpoint mounts |
 
 ```text
-ReadText → miss → Get → cache clean → clone
-WriteDocument → dirty (backend unchanged)
-ReadText → dirty hit → clone (no Get)
-SyncAll → Put → clean
-checkpoint → SyncAll → save Specs
+ReadText → provider OpenDocument → clone
+WriteDocument → provider translates + persists
+ReadText → provider OpenDocument (service is source of truth)
 ```
-
-`WriteFile` is write-through and drops any cached IR for that path.
 
 ---
 
@@ -70,20 +64,45 @@ reg := vfs.NewBackendRegistry()
 _ = reg.Register(vfs.LocalFactory{ID: "scratch", Base: "/var/agent/scratch"})
 // S3: reg.Register(vfs.S3Factory{ID: "docs", Client: vfs.AWSS3{Client: s3c}, DefaultBucket: "my-bucket"})
 
-ms := vfs.NewMountSession("sess-1", reg)
+ms, err := vfs.NewMountSession("sess-1", reg)
+if err != nil {
+	return err
+}
 _ = ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"})
 ```
 
 | Type | Meaning |
 |------|---------|
 | `MountSpec` | Durable mount description (point, profile, read-only, params, **indexPolicy**). Checkpoint-safe; no secrets. |
-| `MountInfo` | Agent-safe view: point + read-only only |
 | `Params` | Backend options (`subpath`, `bucket`, `prefix`, …) |
 | `IndexPolicy` | Optional string: `none` \| `selective` \| `prefix` \| `watch` (empty → selective when the index bridge is on) |
 
 `MountSession.SpecAt` returns the full durable `MountSpec` for a virtual path (for policy and host tooling).
 
-Auth and host roots live on factories, not on mounts or checkpoints.
+Host-owned roots and secrets (local jail, S3 client) live on factories, not on mounts or checkpoints.
+
+User-owned backends (Google Drive today) are different: the **client** does OAuth (PKCE). It sends only a short-lived access token over ACP extension methods. Tokens live in `vfs.SessionAuth` (process memory). They are never written to `MountSpec`, session checkpoints, or the ACP wire store. After `session/load` or process restart the client must bind again.
+
+```text
+initialize  →  agentCapabilities._meta.tacklr.vfs { credentials, providers, tokenRefresh }
+session/new
+_tacklr/vfs/bind     { sessionId, backends: [{ provider, point, auth.token, params.folderId }] }
+                     provider is the factory profile id (gdrive)
+session/prompt       → agent sees /contracts, /notes
+_tacklr/vfs/refresh  → new access token for a provider
+_tacklr/vfs/token    ← agent asks the client after a 401 (if the client advertised tokenRefresh)
+_tacklr/vfs/unbind
+session/close        → tokens zeroed
+```
+
+Drive in this delivery: read-only, many client-selected folders (one single-segment mount point each), ordinary files only. Native Google Docs/Sheets/Slides are listed; `read` returns `ErrNoCodec` until the Docs-export follow-up. Recommended client scope: `drive.readonly`. The server is not a Google OAuth client.
+
+```go
+auth := vfs.NewSessionAuth()
+reg := vfs.NewBackendRegistry()
+_ = reg.Register(vfs.DriveFactory{ID: "gdrive", Auth: auth})
+// Hosts pass the same auth to server.WithVFSAuth(auth).
+```
 
 Raw path I/O (absolute virtual paths only):
 
@@ -166,10 +185,9 @@ Raw `ReadFile` / `WriteFile` stay byte-only and do not build IR.
 | **ReadLines** | Returns `LineWindow` (lines + EOF + NextStart); streams large files; no full-object 32 MiB reject |
 | **MaxLineScanBytes** | Per-call stream scan budget (64 MiB), separate from full IR cap |
 | **MaxLinesPerWindow** | Max lines returned per `ReadLines` call (500) |
-| **WriteDocument** | Write-back cache; flush with `Sync` / `SyncAll` |
-| **WriteFile** | Write-through backend; drop IR cache for path |
-| **Dirty overlay** | `Stat` / `ReadDir` / `Open` / `ReadFile` / `Remove` see write-back creates before Sync |
-| **AfterPersist** | Optional host hook after successful backend write (`WriteFile` / `Sync`) |
+| **WriteDocument** | Provider translates IR and persists now |
+| **WriteFile** | Byte write-through to the provider |
+| **AfterPersist** | Optional host hook after successful backend write (`WriteFile` / `WriteDocument`) |
 | **ContentRev** | Session-visible content identity (`Path` + SHA-256 hex of body); `LineWindow.Rev` when known |
 
 Tool guidance:
@@ -178,51 +196,29 @@ Tool guidance:
 |------|-----|
 | Line window / page large file | `ReadLines` → page with `NextStart` until `EOF` (see `Rev`) |
 | Stable edit token | `ContentRev` / `ContentHash` — tools compare expected rev before write |
-| Find in mounts (indexed) | Optional `vfsindex` → brain `search` / `find_exact` on Chunks; then `ReadLines` around hit |
-| Edit (SDK) | `ReadText` → mutate → `WriteDocument` → checkpoint/`SyncAll` |
-| Edit (agent) | Harness tools (`read_lines`, `replace_lines`, `replace_text`, `write`, …) wrap the above with rev checks |
-| Flush now | `Sync` / `SyncAll` |
+| Find in mounts (indexed) | Optional `vfsindex` → brain `search` / `find_exact` on Chunks; then `read` around hit |
+| Edit (SDK) | `ReadText` → mutate → `WriteDocument` |
+| Edit (agent) | Harness tools (`read`, `write`, …) wrap the above with rev checks |
 | Raw bytes | `ReadFile` / `WriteFile` |
 
-`vfs` does not implement content grep. Live OS-tool search (real `rg`/`grep`) is planned via a future FUSE (or materialize) host projection. Indexed recall of mount content is the optional `vfsindex` bridge when a brain engine is wired.
+`vfs` does not implement content grep. Live host search is `run_command` → `rg` over the FUSE tree (provider plaintext). Indexed recall of mount content is the optional `vfsindex` bridge when a brain engine is wired. Indexed hits are not a behavior-preserving stand-in for live `rg`.
 
 ### Codec routing
 
 | Step | What |
 |------|------|
 | Read | `ReadFile` once (32 MiB cap) |
-| Detect | Extension map, else byte sniff → media type |
+| Detect | **Provider** sets `FileInfo.MediaType` on Stat (S3 Content-Type or key/name; local extension + peek). Session does not sniff. |
 | Lookup | `ContentRegistry` media type → `Codec` |
 | Fallback | Unregistered but text-like (`text/*`, JSON, YAML, …) → `TextCodec` |
 | Decode | `Codec.Decode(path, mediaType, data)` — no second read or re-sniff |
 | Else | `ErrNoCodec` (e.g. PNG) |
 
-### Rich text adapters
+`DetectMediaType` is a helper **providers** call when filling `MediaType`. Empty / missing type is treated as `application/octet-stream` (no IR).
 
-Rich formats use the same VFS path and cache as text files. A format adapter
-implements `vfs.RichTextNormalizer`, and a host registers it through
-`vfs.RichTextCodec`:
+FUSE: hosts call `MountSession.FuseMount(dir)` for a kernel tree. **Every mount point must be a single path segment** (`/work`, `/engram`). Multi-segment points (`/tmp/tacklr`) fail `FuseMount`. If `ReadText` succeeds (`Textual`), `getattr`/`Read` use that plaintext (so `cat`/`rg` see the projection). Otherwise `Stat.Size` + `io.ReaderAt`. Kernel writes persist through `WriteFile` only when `KernelWritable` (`IdentityCodec`). Projected textual types (Word, Notion, Docs) are **read-only** on the kernel (`EROFS`); the agent `write` tool still uses `WriteDocument`. `session.Mount` attaches a provider; `FuseMount` is the host kernel mount. `HostDir()` is the last mount directory (host-facing only). `FuseAvailable()` probes `/dev/fuse` and `/dev/macfuse*`. `Close` unmounts.
 
-```go
-codec := vfs.RichTextCodec{
-    Types: []string{"application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
-    Normalizer: wordCodec,
-}
-registry.Register(codec)
-```
-
-The normalizer converts source bytes to the versioned JSON schema
-`https://tacklr.dev/schemas/richtext/v1`. The schema has document metadata,
-stable block IDs, block kinds and levels, plain text, inline runs with
-attributes, child blocks, and provider-specific attributes. The VFS exposes
-the canonical JSON as a UTF-8 `TextDocument`, so `read_lines`, `replace_text`,
-`replace_lines`, indexing, and future FUSE grep all operate on deterministic
-text. `Sync` validates the edited JSON and calls `EncodeRich` to write source
-format bytes. The canonical JSON is never written into the source file.
-
-This keeps format concerns outside `vfs`: DOCX, HTML, Google Docs, and other
-providers can be added as normalizers without changing mounts, tools, search,
-or the virtual filesystem contract.
+`server.Registry` starts FUSE after construct when the session has a VFS: `$TMP/tacklr-fuse/<session>` mode `0700`. Production without a device has **no** `MountSession` (no VFS tools, no `run_command`). Tests inject `DirectProjection` so `read`/`write` still work and `run_command` returns `ErrFuseNotMounted` until `HostDir` is set. Device present and mount fails after one suffix retry → fail-hard (Close, do not Store). `cmd/testserver` bootstraps `Point: /work` (`LocalFactory.Base` is the host jail). The harness does not call `FuseMount` and `Close` does not unmount. Workers share the host `MountSession` and brain engine; they do not get a second FUSE.
 
 `TextCodec` requires valid UTF-8 and builds a `TextDocument` labeled with the caller’s media type.
 
@@ -272,13 +268,11 @@ _ = text.ReplaceLines(3, 4, []string{"C", "D"})
 _ = ms.WriteDocument(ctx, text)
 ```
 
-- Writes to `doc.Path()` via `WriteFile`
 - Textual documents only (`ErrNotTextual` otherwise)
 - Respects read-only mounts (`ErrReadOnly`)
 - Same 32 MiB size cap as reads
 - A “line” string that contains `\n` → `ErrInvalidLine`
-
-Plaintext write-back is UTF-8 of `Text()` — no separate encode step.
+- The mount's provider encodes and persists immediately
 
 ---
 
@@ -290,7 +284,7 @@ ctx := context.Background()
 // --- Mount ---
 reg := vfs.NewBackendRegistry()
 _ = reg.Register(vfs.LocalFactory{ID: "scratch", Base: "/var/agent/scratch"})
-ms := vfs.NewMountSession("sess-1", reg)
+ms, _ := vfs.NewMountSession("sess-1", reg)
 _ = ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"})
 
 // Optional seed via raw bytes
@@ -373,7 +367,7 @@ start, end, _ := vfs.BlockReplaceSpan(b, false) // body only under a heading
 _ = doc.ReplaceLines(start, end, []string{"new body"})
 ```
 
-Agent tools use the same ideas with generic names: `block_id`, optional `outline` on read, `block_id` + `body` on replace. Citations: `path#block_id`. Projectors stay internal to `vfs` by media type — hosts do not call Markdown outline helpers.
+Agent tools use the same ideas with generic names: `block_id`, optional `outline` on `read`, `block_id` + `body` on `write`. Citations: `path#block_id`. Projectors stay internal to `vfs` by media type — hosts do not call Markdown outline helpers.
 
 ## Two jobs (do not mix)
 
@@ -424,7 +418,7 @@ falls back to `Engine.Put`. Scratch `/memory` is **not** attached when a brain
 Provider mount exists (deprecated for discoveries).
 
 **Shape A graph tools:** `link` / `unlink` / `expand` / `find_links` speak **paths**.
-There are no `.links` directories; `list`/`ls` never lists edges. Artifact paths
+There are no `.links` directories; `ls` never lists edges. Artifact paths
 must be indexed (`index_file` / prefix policy) before they can be linked.
 
 ### Index policy
@@ -487,8 +481,8 @@ When the harness has **Brain + MountSession + search namespace**, it owns a
 |------|------|
 | `index_file` | Selective ingest of key virtual **files** (max 8); errors under `none` |
 | `unindex` | Soft-delete the brain mirror; drops selective track |
-| `find_content` | Index-backed search requiring `vfs_path` (temporary until `run_command`) |
-| `find_files` | Bounded live VFS walk by name/glob (VFS-only; temporary) |
+| `run_command` | `/bin/sh -c` with cwd = FUSE root; relative paths (`work/foo`); `PermissionRequired` unless `RunCommandUnattended` |
+| `read` / `write` | File window / first page / block read; one mutation mode. Knowledge objects: `read_object`. |
 | `save_*` | Write the Engram file on the brain Provider (or `Engine.Put` if no brain mount) |
 | `link` / `expand` / `find_links` | Path-native graph (G1): prefer virtual paths; surface neighbor `vfs_path` |
 
@@ -496,15 +490,16 @@ Omit Brain, VFS, or namespace to opt out (no tools, no harness indexer, no async
 
 ### Session-visible body vs AfterPersist
 
-`IndexPath` uses `MountSession.ReadText` / `Open`, which honor the **dirty IR cache**.
-So `index_file` after `write` / `replace_*` indexes the session-visible body **before
-Sync**. `AfterPersist` (fired by `WriteFile` / `Sync`) drives background reindex when
-policy (or selective track) allows. Write success is never blocked by reindex failures.
+`IndexPath` uses `MountSession.ReadText` / `Open`. Writes are write-through, so
+`index_file` after `write` indexes the last persist. `AfterPersist` (fired by
+`WriteFile` / `WriteDocument`) drives background reindex when policy (or selective
+track) allows. Write success is never blocked by reindex failures.
 
 Markdown files are chunked by **heading/preamble blocks** (`block_id` and `heading_path` properties) when `Blocks()` is non-empty; other text still uses line windows.
 
-Indexed content is queried with `find_content`, `search` / `find_exact` (prefer hits with `vfs_path`).
-Live OS-tool search over mounts is deferred to a future FUSE + `run_command` path.
+Indexed content is queried with `search` / `find_exact` (prefer hits with `vfs_path`).
+Live names/grep are `run_command` → `fd` / `find` / `rg` through the FUSE tree.
+Indexed `search` hits are not a behavior-preserving stand-in for live `rg`.
 
 ---
 
@@ -515,16 +510,16 @@ Live OS-tool search over mounts is deferred to a future FUSE + `run_command` pat
 | Layer | Responsibility |
 |-------|----------------|
 | `vfs.ContentHash` / `ContentRev` / `LineWindow.Rev` | Identity of session-visible body |
-| `ReadText`, `ReplaceLines`, `WriteDocument` | Low-level IR mutate + write-back |
-| Harness `read_lines`, `replace_lines`, `replace_text`, `write`, `list`, `stat`, `mkdir`, `remove` | Require `rev` on edits, reject stale, format numbered lines |
+| `ReadText`, `ReplaceLines`, `WriteDocument` | Low-level IR mutate + provider persist |
+| Harness `read`, `write` | Require `rev` on edits, reject stale, format numbered lines |
 
 ```text
-read_lines   → path + rev + numbered window
-replace_*    → must pass rev; on mismatch ErrStaleContent → re-read
-checkpoint   → SyncAll flushes dirty IR (existing)
+read   → path + rev + numbered window (first page when start/end omitted)
+write  → exactly one mode; pass rev from read; mismatch → ErrStaleContent
+WriteDocument → provider translates IR and persists now
 ```
 
-No FUSE and no shell are required for this path.
+No FUSE and no shell are required for this IR edit path. `run_command` needs a live `FuseMount` (`HostDir` set).
 
 ---
 
@@ -532,7 +527,11 @@ No FUSE and no shell are required for this path.
 
 | Situation | Sentinel |
 |-----------|----------|
+| Access token expired / missing refresh | `ErrAuthExpired` |
+| Two Drive children share a name | `ErrAmbiguous` |
+| Drive 403 | `ErrPermission` |
 | Path not under a mount | `ErrNotMounted` |
+| `run_command` with no FUSE mount | `ErrFuseNotMounted` |
 | Write on read-only mount | `ErrReadOnly` |
 | Missing file | `ErrNotExist` |
 | No codec for media type | `ErrNoCodec` |

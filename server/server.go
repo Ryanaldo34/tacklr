@@ -58,6 +58,9 @@ type parsedRequest struct {
 	// ClientCapsRaw is the raw initialize params (for clientCapabilities).
 	ClientCapsRaw json.RawMessage
 
+	// AuthMethodID is the ACP v1 method selected by authenticate.
+	AuthMethodID string
+
 	// Extensibility — raw _meta blob for custom fields
 	Meta json.RawMessage
 }

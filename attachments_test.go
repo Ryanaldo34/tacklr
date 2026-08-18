@@ -9,7 +9,10 @@ import (
 )
 
 func TestAttachDocumentMakesBytesAvailableThroughVFSAndContext(t *testing.T) {
-	h := NewAgent(context.Background(), AgentOptions{SessionID: "attach", Store: stores.NewInMemoryStore(), Model: &mockStrategy{}})
+	h, err := NewAgent(context.Background(), AgentOptions{SessionID: "attach", Store: stores.NewInMemoryStore(), Model: &mockStrategy{}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	path, err := h.AttachDocument(context.Background(), "report.txt", []byte("important text\n"))
 	if err != nil {
 		t.Fatal(err)

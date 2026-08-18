@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -179,6 +180,37 @@ func TestClientBridge_errorResponseAndConcurrent(t *testing.T) {
 	wg.Wait()
 }
 
+func TestClientBridge_WaitInitialized(t *testing.T) {
+	b := NewClientBridge(&recordingWriter{})
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := b.WaitInitialized(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("before initialize: %v", err)
+	}
+	b.MarkInitialized()
+	if err := b.WaitInitialized(context.Background()); err != nil {
+		t.Fatalf("after initialize: %v", err)
+	}
+	b.Close()
+	if err := b.WaitInitialized(context.Background()); err != nil {
+		t.Fatalf("initialized then closed: %v", err)
+	}
+	canceled, cancelInit := context.WithCancel(context.Background())
+	cancelInit()
+	if err := b.WaitInitialized(canceled); err != nil {
+		t.Fatalf("initialized with canceled ctx: %v", err)
+	}
+	closed := NewClientBridge(&recordingWriter{})
+	closed.Close()
+	if err := closed.WaitInitialized(context.Background()); !errors.Is(err, errConnectionNotInitialized) {
+		t.Fatalf("closed before initialize: %v", err)
+	}
+	var nilB *ClientBridge
+	if err := nilB.WaitInitialized(context.Background()); err != nil {
+		t.Fatalf("nil bridge: %v", err)
+	}
+}
+
 func TestParseClientCapabilities(t *testing.T) {
 	caps := ParseClientCapabilities([]byte(`{
 		"protocolVersion": 1,
@@ -194,8 +226,17 @@ func TestParseClientCapabilities(t *testing.T) {
 	}
 
 	caps2 := ParseClientCapabilities([]byte(`{"protocolVersion":1}`))
-	if caps2.ElicitationForm || caps2.ElicitationURL {
+	if caps2.ElicitationForm || caps2.ElicitationURL || caps2.VFSTokenRefresh {
 		t.Error("missing elicitation should mean unsupported")
+	}
+
+	caps3 := ParseClientCapabilities([]byte(`{
+		"clientCapabilities": {
+			"_meta": { "tacklr": { "vfs": { "tokenRefresh": true } } }
+		}
+	}`))
+	if !caps3.VFSTokenRefresh {
+		t.Error("expected vfs tokenRefresh")
 	}
 }
 

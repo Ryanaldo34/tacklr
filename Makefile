@@ -49,7 +49,7 @@ lint:
 
 # Profile + threshold gate (writes coverage.out for tools; no HTML).
 cover: brain-pg-image helix-image
-	go test -race -count=1 -covermode=atomic -coverprofile=coverage.out ./...
+	go test -race -count=1 -covermode=atomic -coverpkg=./... -coverprofile=coverage.out ./...
 	@go run github.com/vladopajic/go-test-coverage/v2@latest --config=./.testcoverage.yml
 	@./scripts/coverage-summary.sh coverage.out
 	@./scripts/update-coverage-badge.sh coverage.out docs/badges/coverage.json

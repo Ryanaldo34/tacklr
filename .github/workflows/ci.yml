@@ -99,10 +99,19 @@ jobs:
         run: |
           docker version
           docker pull pgvector/pgvector:pg17
-          docker build \
+          attempt=0
+          until docker build \
             -f brain/testdata/Dockerfile.postgres \
             -t tacklr-pg-brain:test \
-            brain/testdata
+            brain/testdata; do
+            attempt=$((attempt + 1))
+            if [ "$attempt" -ge 3 ]; then
+              echo "docker build of tacklr-pg-brain:test failed after ${attempt} attempts" >&2
+              exit 1
+            fi
+            echo "docker build failed (attempt ${attempt}), retrying..." >&2
+            sleep $((attempt * 5))
+          done
           docker pull ghcr.io/helixdb/enterprise-dev:latest
 
       # Race detector and coverage profiles are separate: -race can flake under
@@ -115,7 +124,7 @@ jobs:
 
       - name: Test with coverage
         run: |
-          go test -count=1 -covermode=atomic -coverprofile=coverage.out ./...
+          go test -count=1 -covermode=atomic -coverpkg=./... -coverprofile=coverage.out ./...
           go tool cover -func=coverage.out | tail -1
           go tool cover -func=coverage.out | grep helixgraph || true
           go tool cover -html=coverage.out -o coverage.html

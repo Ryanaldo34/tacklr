@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ryanaldo34/tacklr/internal/hostcontrol"
 	"github.com/ryanaldo34/tacklr/stores"
 )
 
@@ -12,14 +13,15 @@ import (
 // FinalizeCancelledWork pairs cancelled results and clears park state.
 func TestAgent_HasOpenToolWorkAndFinalizeCancelled(t *testing.T) {
 	ctx := context.Background()
-	h := NewAgent(ctx, AgentOptions{
+	h := mustNewAgent(t, AgentOptions{
 		SessionID: "cancel-open-tools",
 		Store:     stores.NewInMemoryStore(),
 		Model:     &mockStrategy{},
 	})
 	t.Cleanup(h.Close)
+	token := hostcontrol.Token{}
 
-	if h.HasOpenToolWork() {
+	if h.HostHasOpenToolWork(token) {
 		t.Fatal("fresh agent should have no open tool work")
 	}
 
@@ -30,7 +32,7 @@ func TestAgent_HasOpenToolWorkAndFinalizeCancelled(t *testing.T) {
 			{ID: "c1", CallID: "c1", Name: "list", Arguments: `{}`},
 		}},
 	})
-	if !h.HasOpenToolWork() {
+	if !h.HostHasOpenToolWork(token) {
 		t.Fatal("unpaired tool_call should count as open work")
 	}
 
@@ -40,13 +42,13 @@ func TestAgent_HasOpenToolWorkAndFinalizeCancelled(t *testing.T) {
 		ToolCall: &ToolCall{ID: "c1", CallID: "c1", Name: "list", Arguments: `{}`},
 	}
 	h.pendingMu.Unlock()
-	if !h.HasOpenToolWork() {
+	if !h.HostHasOpenToolWork(token) {
 		t.Fatal("pending tool call should count")
 	}
 
-	h.FinalizeCancelledWork(ctx)
+	h.HostFinalizeCancelledWork(ctx, token)
 
-	if h.HasOpenToolWork() {
+	if h.HostHasOpenToolWork(token) {
 		t.Fatal("after finalize, no open tool work")
 	}
 	// Window should include cancelled tool result
@@ -65,7 +67,7 @@ func TestAgent_HasOpenToolWorkAndFinalizeCancelled(t *testing.T) {
 	h.restoreMessages([]*Message{
 		{Role: RoleAssistant, ToolCalls: []ToolCall{{Name: "x"}}}, // no WireID
 	})
-	if h.HasOpenToolWork() {
+	if h.HostHasOpenToolWork(token) {
 		t.Fatal("tool call without id should not count")
 	}
 
@@ -74,7 +76,7 @@ func TestAgent_HasOpenToolWorkAndFinalizeCancelled(t *testing.T) {
 		{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "c2", CallID: "c2", Name: "list"}}},
 		{Role: RoleTool, ToolCallID: "c2", Content: "ok"},
 	})
-	if h.HasOpenToolWork() {
+	if h.HostHasOpenToolWork(token) {
 		t.Fatal("paired tool should not be open")
 	}
 

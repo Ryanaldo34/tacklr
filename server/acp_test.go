@@ -23,11 +23,6 @@ import (
 // helpers
 // ---------------------------------------------------------------------------
 
-func newACPRequest(t *testing.T, body string) *http.Request {
-	t.Helper()
-	return httptest.NewRequest(http.MethodPost, "/", bytes.NewReader([]byte(body)))
-}
-
 func parseACPFrames(t *testing.T, body io.Reader) []map[string]any {
 	t.Helper()
 	var frames []map[string]any
@@ -66,10 +61,7 @@ func newACPTestServerWithWire(t *testing.T, r *Registry, wire ProtocolWireStore)
 
 func (s *acpTestServer) rpc(body string) *httptest.ResponseRecorder {
 	s.t.Helper()
-	req := newACPRequest(s.t, body)
-	rec := httptest.NewRecorder()
-	NewServer(s.r, s.proto).serveHTTPRPC(rec, req)
-	return rec
+	return serveACPInbound(s.t, s.r, s.proto, body)
 }
 
 // protocolForRegistry returns a stable ACP protocol per *Registry so multi-step
@@ -88,13 +80,19 @@ func acpProtocolFor(r *Registry) Protocol {
 	return actual.(Protocol)
 }
 
+func serveACPInbound(t *testing.T, r *Registry, proto Protocol, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	mw := &jsonRPCMessageWriter{w: rec}
+	env := ProtocolEnv{Registry: r, Conn: &Conn{Writer: mw}}
+	_ = proto.HandleInbound(t.Context(), env, []byte(body))
+	return rec
+}
+
 // serveACPRaw runs one RPC against a per-Registry isolated ACP protocol (not package ACP).
 func serveACPRaw(t *testing.T, r *Registry, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := newACPRequest(t, body)
-	rec := httptest.NewRecorder()
-	NewServer(r, acpProtocolFor(r)).serveHTTPRPC(rec, req)
-	return rec
+	return serveACPInbound(t, r, acpProtocolFor(r), body)
 }
 
 func acpRPCResult(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
@@ -150,7 +148,7 @@ func TestValidateACPRequest_outcomes(t *testing.T) {
 			wantOK{method: "initialize"}},
 		{"initialize higher version", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":99}}`,
 			wantOK{method: "initialize"}},
-		{"authenticate", `{"jsonrpc":"2.0","id":1,"method":"authenticate"}`,
+		{"authenticate", `{"jsonrpc":"2.0","id":1,"method":"authenticate","params":{"methodId":"agent-login"}}`,
 			wantOK{method: "authenticate"}},
 		{"session/new", `{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/home/user"}}`,
 			wantOK{method: "session/new", cwd: "/home/user"}},
@@ -310,8 +308,8 @@ func TestParseACPPrompt_outcomes(t *testing.T) {
 	})
 }
 
-// TestEventToAcpJsonRpc_outcomes maps each stream event kind once (including skip paths).
-func TestEventToAcpJsonRpc_outcomes(t *testing.T) {
+// TestPresentationToACP_outcomes maps each stream event kind once (including skip paths).
+func TestPresentationToACP_outcomes(t *testing.T) {
 	mustUpdate := func(t *testing.T, frames [][]byte, sessionUpdate string) map[string]any {
 		t.Helper()
 		if len(frames) == 0 {
@@ -329,7 +327,7 @@ func TestEventToAcpJsonRpc_outcomes(t *testing.T) {
 	}
 
 	// message
-	frames, err := eventToAcpJsonRpc("thread-1", &streaming.StreamEvent{
+	frames, err := presentationToACP("thread-1", streaming.StreamEvent{
 		Type: streaming.StreamEventMessage, MessageID: "msg-1", Content: "hello",
 	})
 	if err != nil {
@@ -338,7 +336,7 @@ func TestEventToAcpJsonRpc_outcomes(t *testing.T) {
 	mustUpdate(t, frames, "agent_message_chunk")
 
 	// reasoning with content
-	frames, err = eventToAcpJsonRpc("thread-1", &streaming.StreamEvent{
+	frames, err = presentationToACP("thread-1", streaming.StreamEvent{
 		Type: streaming.StreamEventReasoning, Content: "thinking...",
 	})
 	if err != nil {
@@ -346,13 +344,13 @@ func TestEventToAcpJsonRpc_outcomes(t *testing.T) {
 	}
 	mustUpdate(t, frames, "agent_thought_chunk")
 	// empty reasoning skipped
-	frames, err = eventToAcpJsonRpc("s", &streaming.StreamEvent{Type: streaming.StreamEventReasoning})
+	frames, err = presentationToACP("s", streaming.StreamEvent{Type: streaming.StreamEventReasoning})
 	if err != nil || frames != nil {
 		t.Fatalf("empty reasoning: %v %v", err, frames)
 	}
 
 	// function call + title/name/kind + CallID fallback
-	frames, err = eventToAcpJsonRpc("thread-1", &streaming.StreamEvent{
+	frames, err = presentationToACP("thread-1", streaming.StreamEvent{
 		Type:      streaming.StreamEventFunctionCall,
 		ToolCalls: []tacklr.ToolCall{{ID: "tc-1", Name: "complete_todo", Title: "Complete Ship", Category: "think"}},
 	})
@@ -363,7 +361,7 @@ func TestEventToAcpJsonRpc_outcomes(t *testing.T) {
 	if u["title"] != "Complete Ship" || u["name"] != "complete_todo" || u["kind"] != "think" {
 		t.Fatalf("tool_call fields: %#v", u)
 	}
-	frames, err = eventToAcpJsonRpc("thread-1", &streaming.StreamEvent{
+	frames, err = presentationToACP("thread-1", streaming.StreamEvent{
 		Type:      streaming.StreamEventFunctionCall,
 		ToolCalls: []tacklr.ToolCall{{CallID: "fc_only", Name: "echo"}},
 	})
@@ -374,7 +372,7 @@ func TestEventToAcpJsonRpc_outcomes(t *testing.T) {
 		t.Fatal("call id fallback")
 	}
 	// function call with assistant content
-	frames, err = eventToAcpJsonRpc("s", &streaming.StreamEvent{
+	frames, err = presentationToACP("s", streaming.StreamEvent{
 		Type: streaming.StreamEventFunctionCall, Content: "thinking aloud",
 		ToolCalls: []tacklr.ToolCall{{ID: "c1", CallID: "c1", Name: "echo", Category: "other"}},
 	})
@@ -383,7 +381,7 @@ func TestEventToAcpJsonRpc_outcomes(t *testing.T) {
 	}
 
 	// tool result success / failed / empty / CallID
-	frames, err = eventToAcpJsonRpc("thread-1", &streaming.StreamEvent{
+	frames, err = presentationToACP("thread-1", streaming.StreamEvent{
 		Type: streaming.StreamEventToolResult, Content: "file contents here",
 		ToolCalls: []tacklr.ToolCall{{ID: "tc-1", Name: "read_file"}},
 	})
@@ -394,18 +392,18 @@ func TestEventToAcpJsonRpc_outcomes(t *testing.T) {
 	if u["status"] != "completed" {
 		t.Fatalf("status=%v", u["status"])
 	}
-	frames, err = eventToAcpJsonRpc("s", &streaming.StreamEvent{
+	frames, err = presentationToACP("s", streaming.StreamEvent{
 		Type: streaming.StreamEventToolResult, Content: "boom",
 		ToolCalls: []tacklr.ToolCall{{ID: "c1", CallID: "c1", Name: "echo", Status: "error"}},
 	})
 	if err != nil || !strings.Contains(string(frames[0]), "failed") {
 		t.Fatalf("tool failed: %v %s", err, frames)
 	}
-	frames, err = eventToAcpJsonRpc("s", &streaming.StreamEvent{Type: streaming.StreamEventToolResult})
+	frames, err = presentationToACP("s", streaming.StreamEvent{Type: streaming.StreamEventToolResult})
 	if err != nil || frames != nil {
 		t.Fatalf("empty tool result: %v %v", err, frames)
 	}
-	frames, err = eventToAcpJsonRpc("thread-1", &streaming.StreamEvent{
+	frames, err = presentationToACP("thread-1", streaming.StreamEvent{
 		Type: streaming.StreamEventToolResult, Content: "ok",
 		ToolCalls: []tacklr.ToolCall{{CallID: "fc_only", Name: "echo", Status: "success"}},
 	})
@@ -417,7 +415,7 @@ func TestEventToAcpJsonRpc_outcomes(t *testing.T) {
 	}
 
 	// tool update progress
-	frames, err = eventToAcpJsonRpc("thread-1", &streaming.StreamEvent{
+	frames, err = presentationToACP("thread-1", streaming.StreamEvent{
 		Type: streaming.StreamEventToolUpdate, MessageID: "tc-1", Content: "processing step 1...",
 	})
 	if err != nil {
@@ -429,7 +427,7 @@ func TestEventToAcpJsonRpc_outcomes(t *testing.T) {
 	}
 
 	// complete
-	frames, err = eventToAcpJsonRpc("thread-1", &streaming.StreamEvent{
+	frames, err = presentationToACP("thread-1", streaming.StreamEvent{
 		Type: streaming.StreamEventComplete, TurnID: "turn-abc",
 	})
 	if err != nil {
@@ -442,7 +440,7 @@ func TestEventToAcpJsonRpc_outcomes(t *testing.T) {
 	}
 
 	// error internal + stop-reason outcomes + plain error field
-	frames, err = eventToAcpJsonRpc("thread-1", &streaming.StreamEvent{
+	frames, err = presentationToACP("thread-1", streaming.StreamEvent{
 		Type: streaming.StreamEventError, TurnID: "turn-err", Error: io.ErrUnexpectedEOF,
 	})
 	if err != nil {
@@ -462,7 +460,7 @@ func TestEventToAcpJsonRpc_outcomes(t *testing.T) {
 		{tacklr.ErrMaxTurnRequests, "max_turn_requests"},
 		{fmt.Errorf("run: context cancelled: %w", context.Canceled), "cancelled"},
 	} {
-		frames, err = eventToAcpJsonRpc("t", &streaming.StreamEvent{Type: streaming.StreamEventError, Error: tc.err})
+		frames, err = presentationToACP("t", streaming.StreamEvent{Type: streaming.StreamEventError, Error: tc.err})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -472,7 +470,7 @@ func TestEventToAcpJsonRpc_outcomes(t *testing.T) {
 			t.Fatalf("stopReason want %s got %v", tc.want, msg)
 		}
 	}
-	frames, err = eventToAcpJsonRpc("s1", &streaming.StreamEvent{
+	frames, err = presentationToACP("s1", streaming.StreamEvent{
 		Type: streaming.StreamEventError, Error: errors.New("explode"),
 	})
 	if err != nil || !strings.Contains(string(frames[0]), "explode") {
@@ -480,7 +478,7 @@ func TestEventToAcpJsonRpc_outcomes(t *testing.T) {
 	}
 
 	// plan update
-	frames, err = eventToAcpJsonRpc("s", &streaming.StreamEvent{
+	frames, err = presentationToACP("s", streaming.StreamEvent{
 		Type: streaming.StreamEventPlanUpdate,
 		Data: []byte(`[{"title":"A","status":"pending","description":""}]`),
 	})
@@ -489,7 +487,7 @@ func TestEventToAcpJsonRpc_outcomes(t *testing.T) {
 	}
 
 	// interrupt skipped
-	frames, err = eventToAcpJsonRpc("thread-1", &streaming.StreamEvent{Type: streaming.StreamEventInterrupt})
+	frames, err = presentationToACP("thread-1", streaming.StreamEvent{Type: streaming.StreamEventInterrupt})
 	if err != nil || len(frames) != 0 {
 		t.Fatalf("interrupt skip: %v n=%d", err, len(frames))
 	}
@@ -523,13 +521,9 @@ func TestInjectReqID_nonJSONFrame(t *testing.T) {
 	}
 }
 
-func TestACP_handleHTTP_initialize(t *testing.T) {
+func TestACP_handleInbound_initialize(t *testing.T) {
 	r := newTestRegistry(testStore(t), &mockInferenceStrategy{}, nil)
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader([]byte(
-		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}`,
-	)))
-	NewACPProtocol(nil).(*acpProtocol).handleHTTP(ProtocolEnv{Registry: r, Conn: &Conn{}}, rec, req)
+	rec := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}`)
 	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "protocolVersion") {
 		t.Fatalf("%d %s", rec.Code, rec.Body.String())
 	}
@@ -607,7 +601,7 @@ func TestHandleRPC_sessionNew_persistsWireEnvelope(t *testing.T) {
 	r := newTestRegistry(store, &mockInferenceStrategy{}, []*tacklr.Tool{})
 	srv := newACPTestServer(t, r)
 
-	rec := srv.rpc(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/home/user","mcpServers":[{"name":"fs","command":"npx"}]}}`)
+	rec := srv.rpc(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/home/user","mcpServers":[{"name":"fs","command":"npx","env":[{"name":"API_KEY","value":"never-store"}]}]}}`)
 	sessionID, _ := acpRPCResult(t, rec)["sessionId"].(string)
 	if sessionID == "" {
 		t.Fatal("missing sessionId")
@@ -626,6 +620,9 @@ func TestHandleRPC_sessionNew_persistsWireEnvelope(t *testing.T) {
 	}
 	if len(env.MCPServers) != 1 || env.MCPServers[0].Name != "fs" {
 		t.Errorf("mcpServers = %+v", env.MCPServers)
+	}
+	if len(env.MCPServers[0].Env) != 0 || strings.Contains(string(raw), "never-store") {
+		t.Fatalf("wire envelope stored stdio MCP secret: %s", raw)
 	}
 }
 
@@ -705,8 +702,8 @@ func TestHandleRPC_sessionLoad(t *testing.T) {
 	}
 }
 
-func TestHandleRPC_sessionLoad_updatesSessionMCPServers(t *testing.T) {
-	// Outcome: after load with new mcpServers, durable wire envelope reflects them.
+func TestHandleRPC_sessionLoad_persistsOnlyMCPTopology(t *testing.T) {
+	// Outcome: durable wire state keeps topology/reference but not inline credentials.
 	store := testStore(t)
 	r := newTestRegistry(store, &mockInferenceStrategy{}, []*tacklr.Tool{})
 	srv := newACPTestServer(t, r)
@@ -714,7 +711,7 @@ func TestHandleRPC_sessionLoad_updatesSessionMCPServers(t *testing.T) {
 	rec1 := srv.rpc(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
 	sessionID, _ := acpRPCResult(t, rec1)["sessionId"].(string)
 
-	rec2 := srv.rpc(`{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"` + sessionID + `","cwd":"/tmp","mcpServers":[{"type":"http","name":"api","url":"https://api.example.com/mcp","headers":[{"name":"Authorization","value":"Bearer tok"}]}]}}`)
+	rec2 := srv.rpc(`{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"` + sessionID + `","cwd":"/tmp","mcpServers":[{"type":"http","name":"api","url":"https://api.example.com/mcp","credentialRef":"vault://api","headers":[{"name":"Authorization","value":"Bearer tok"}]}]}}`)
 	_ = acpRPCResult(t, rec2)
 
 	raw, err := srv.wire.Get(context.Background(), sessionID)
@@ -730,6 +727,12 @@ func TestHandleRPC_sessionLoad_updatesSessionMCPServers(t *testing.T) {
 	}
 	if len(env.MCPServers) != 1 || env.MCPServers[0].Type != "http" || env.MCPServers[0].URL != "https://api.example.com/mcp" {
 		t.Errorf("mcpServers = %+v", env.MCPServers)
+	}
+	if len(env.MCPServers[0].Headers) != 0 || env.MCPServers[0].CredentialRef != "vault://api" {
+		t.Errorf("durable MCP credentials = %+v", env.MCPServers[0])
+	}
+	if strings.Contains(string(raw), "Bearer tok") {
+		t.Fatalf("wire envelope stored MCP secret: %s", raw)
 	}
 }
 
@@ -885,6 +888,15 @@ func TestHandleRPC_sessionPrompt_streamsEvents(t *testing.T) {
 	if !hasResult {
 		t.Error("expected a result frame")
 	}
+
+	// Text-only model rejects an image part before the turn starts.
+	imgBody := `{"jsonrpc":"2.0","id":11,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"see"},{"type":"image","mimeType":"image/png","data":"AAAA"}]}}`
+	rec3 := serveACPRaw(t, r, imgBody)
+	errObj := acpRPCError(t, rec3)
+	msg, _ := errObj["message"].(string)
+	if !strings.Contains(msg, "unsupported content type") {
+		t.Fatalf("image reject: %#v", errObj)
+	}
 }
 
 func TestHandleRPC_sessionPrompt_clientTurnID(t *testing.T) {
@@ -1026,7 +1038,7 @@ func TestHandleRPC_sessionPrompt_toolProgress(t *testing.T) {
 
 	progressTool := tacklr.NewTool(tacklr.ToolConfig{
 		Name: "progress_demo",
-		Handler: func(ctx context.Context, _ struct{}, runtime *tacklr.HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, _ struct{}, runtime tacklr.HarnessRuntime) (string, error) {
 			runtime.EmitUpdate("starting work...")
 			runtime.EmitUpdate("50% complete")
 			runtime.EmitUpdate("almost done")
@@ -1121,12 +1133,16 @@ func TestHandleRPC_configSet_agent(t *testing.T) {
 	}
 	r := NewRegistry(store, "default")
 	r.Register("default", AgentSpec{
-		Config: tacklr.Config{MaxWindowSize: 8192, SystemPrompt: "default"},
-		Model:  strategy,
+		Options: tacklr.AgentOptions{
+			Config: tacklr.Config{MaxWindowSize: 8192, SystemPrompt: "default"},
+			Model:  strategy,
+		},
 	})
 	r.Register("custom", AgentSpec{
-		Config: tacklr.Config{MaxWindowSize: 8192, SystemPrompt: "custom"},
-		Model:  strategy,
+		Options: tacklr.AgentOptions{
+			Config: tacklr.Config{MaxWindowSize: 8192, SystemPrompt: "custom"},
+			Model:  strategy,
+		},
 	})
 
 	rec1 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
@@ -1190,19 +1206,23 @@ func TestHandleRPC_sessionPrompt_usesConfigAgent(t *testing.T) {
 	var customInvoked bool
 	r := NewRegistry(store, "default")
 	r.Register("default", AgentSpec{
-		Config: tacklr.Config{MaxWindowSize: 8192, SystemPrompt: "default-prompt"},
-		Model: &mockInferenceStrategy{
-			invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "from-default", IsComplete: true}
+		Options: tacklr.AgentOptions{
+			Config: tacklr.Config{MaxWindowSize: 8192, SystemPrompt: "default-prompt"},
+			Model: &mockInferenceStrategy{
+				invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+					ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "from-default", IsComplete: true}
+				},
 			},
 		},
 	})
 	r.Register("custom", AgentSpec{
-		Config: tacklr.Config{MaxWindowSize: 8192, SystemPrompt: "custom-prompt"},
-		Model: &mockInferenceStrategy{
-			invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-				customInvoked = true
-				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "from-custom", IsComplete: true}
+		Options: tacklr.AgentOptions{
+			Config: tacklr.Config{MaxWindowSize: 8192, SystemPrompt: "custom-prompt"},
+			Model: &mockInferenceStrategy{
+				invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+					customInvoked = true
+					ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "from-custom", IsComplete: true}
+				},
 			},
 		},
 	})
@@ -1304,8 +1324,9 @@ func TestServeStdio_lifecycleAndPrompt(t *testing.T) {
 		t.Fatalf("session/new missing configOptions: %v", newResult)
 	}
 
-	// Second IO pass: set agent + prompt against the live session state.
+	// Second IO pass is a new connection: initialize, then set agent + prompt.
 	in2 := strings.Join([]string{
+		`{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":1}}`,
 		`{"jsonrpc":"2.0","id":3,"method":"session/set_config_option","params":{"sessionId":"` + sessionID + `","configId":"model","value":"default"}}`,
 		`{"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"hi"}]}}`,
 	}, "\n") + "\n"
@@ -1331,6 +1352,28 @@ func TestServeStdio_lifecycleAndPrompt(t *testing.T) {
 	}
 	if !hasResult {
 		t.Error("expected prompt result frame with id 4")
+	}
+}
+
+func TestServeStdio_promptBeforeInitialize_unblocksOnEOF(t *testing.T) {
+	r := newTestRegistry(testStore(t), &mockInferenceStrategy{}, nil)
+	in := `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}` + "\n" +
+		`{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"x","prompt":[{"type":"text","text":"hi"}]}}` + "\n"
+	var out bytes.Buffer
+	done := make(chan error, 1)
+	go func() {
+		done <- NewServer(r, ACP).ServeStdio(context.Background(), strings.NewReader(in), &out)
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("ServeStdio: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("prompt before initialize must not hang after stdin EOF")
+	}
+	if !strings.Contains(out.String(), "error") {
+		t.Fatalf("expected initialize-required error, got %s", out.String())
 	}
 }
 

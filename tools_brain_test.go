@@ -27,7 +27,7 @@ func TestBrainTools_saveDiscoveryAndLink(t *testing.T) {
 		t.Fatal(err)
 	}
 	ns := uuid.New()
-	h := NewAgent(ctx, AgentOptions{
+	h := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 1024},
 		Model:  &mockStrategy{},
 		Brain:  eng,
@@ -69,6 +69,9 @@ func TestBrainTools_saveDiscoveryAndLink(t *testing.T) {
 	}
 	if !strings.Contains(fout.output, a.ID.String()) {
 		t.Fatalf("find_objects should return saved discovery: %s", fout.output)
+	}
+	if _, err := findObj.invoke(ctx, `{"query":"  "}`, turnRuntime(h)); err == nil {
+		t.Fatal("find_objects requires query")
 	}
 
 	out2, err := saveFact.invoke(ctx, `{"title":"fact-a","content":"true claim"}`, turnRuntime(h))
@@ -132,7 +135,7 @@ func TestBrainTools_saveDiscoveryAndLink(t *testing.T) {
 	if !strings.Contains(eout.output, b.ID.String()) || !strings.Contains(eout.output, "supports finding") {
 		t.Fatalf("expand should return neighbor with note: %s", eout.output)
 	}
-	readTool := h.findTool("read", "")
+	readTool := h.findTool("read_object", "")
 	rout, err := readTool.invoke(ctx, `{"object_id":"`+a.ID.String()+`"}`, turnRuntime(h))
 	if err != nil || !strings.Contains(rout.output, "updated") {
 		t.Fatalf("read after save: %v %v", err, rout)
@@ -164,7 +167,7 @@ func TestBrainTools_hostNamespaceScopedRead(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := NewAgent(ctx, AgentOptions{
+	h := mustNewAgent(t, AgentOptions{
 		Config:          Config{MaxWindowSize: 1024},
 		Model:           &mockStrategy{},
 		Brain:           eng,
@@ -175,7 +178,7 @@ func TestBrainTools_hostNamespaceScopedRead(t *testing.T) {
 		t.Fatalf("SearchNamespace from options: %v %v", gotNS, ok)
 	}
 
-	readTool := h.findTool("read", "")
+	readTool := h.findTool("read_object", "")
 	schemaTool := h.findTool("schema", "")
 	if readTool == nil || schemaTool == nil {
 		t.Fatal("brain tools must be injected when Brain is configured")
@@ -258,7 +261,7 @@ func TestBrainTools_searchFindExactContinueAndCheckpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	sessStore := stores.NewInMemoryStore()
-	h := NewAgent(ctx, AgentOptions{
+	h := mustNewAgent(t, AgentOptions{
 		Config:          Config{MaxWindowSize: 1024},
 		Model:           &mockStrategy{},
 		Brain:           eng,
@@ -371,7 +374,7 @@ func TestBrainTools_expandChildren(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := NewAgent(ctx, AgentOptions{
+	h := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 1024}, Model: &mockStrategy{},
 		Brain: eng, SearchNamespace: &ns,
 	})
@@ -426,7 +429,7 @@ func TestBrainTools_expandMultiHopAndFindLinks(t *testing.T) {
 	if !eng.HasEdgeSearch() {
 		t.Fatal("MemoryGraph must enable edge search")
 	}
-	h := NewAgent(ctx, AgentOptions{
+	h := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 1024}, Model: &mockStrategy{},
 		Brain: eng, SearchNamespace: &ns,
 	})
@@ -489,14 +492,14 @@ func TestBrainTools_searchNamespaceIsolation(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Agent scoped to nsB only.
-	h := NewAgent(ctx, AgentOptions{
+	h := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 1024}, Model: &mockStrategy{},
 		Brain: eng, SearchNamespace: &nsB,
 	})
 	search := h.findTool("search", "")
-	read := h.findTool("read", "")
+	read := h.findTool("read_object", "")
 	if search == nil || read == nil {
-		t.Fatal("search and read required")
+		t.Fatal("search and read_object required")
 	}
 	out, err := search.invoke(ctx, `{"query":"namespace isolation secret token xyzzy","limit":10}`, turnRuntime(h))
 	if err != nil {
@@ -542,7 +545,7 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "ok", IsComplete: true}
 		},
 	}
-	parentH := NewAgent(ctx, AgentOptions{
+	parentH := mustNewAgent(t, AgentOptions{
 		Config:          Config{MaxWindowSize: 1024},
 		Model:           &mockStrategy{},
 		Brain:           eng,
@@ -552,47 +555,20 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 		},
 	})
 
-	// Parent search populates parent SearchContext only.
-	if _, err := parentH.findTool("search", "").invoke(ctx, `{"query":"worker search isolation"}`, turnRuntime(parentH)); err != nil {
-		t.Fatal(err)
-	}
-	parentRS, err := parentH.searchCtx.Export()
+	worker, err := parentH.newWorkerHarness(ctx, "researcher", "spawn_tc1", parentH.subagents["researcher"])
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(parentRS) == 0 {
-		t.Fatal("parent should have result set after search")
-	}
-
-	worker := parentH.newWorkerHarness(ctx, "researcher", "spawn_tc1", parentH.subagents["researcher"])
 
 	gotNS, ok := worker.SearchNamespace()
 	if !ok || gotNS != ns {
 		t.Fatalf("worker namespace %v %v, want %v", gotNS, ok, ns)
 	}
-	if worker.searchCtx == nil || worker.searchCtx == parentH.searchCtx {
-		t.Fatal("worker must own a distinct SearchContext")
-	}
-	// Worker inherits namespace but must not copy the parent's active ResultSet.
-	wraw, err := worker.searchCtx.Export()
-	if err != nil {
-		t.Fatal(err)
-	}
-	var env struct {
-		ResultSet *brain.ResultSet `json:"result_set"`
-	}
-	if len(wraw) > 0 {
-		if err := json.Unmarshal(wraw, &env); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if env.ResultSet != nil {
-		t.Fatal("new worker must not copy parent ResultSet")
-	}
 
-	readTool := worker.findTool("read", "")
-	if readTool == nil {
-		t.Fatal("worker must inherit brain read tool")
+	readTool := worker.findTool("read_object", "")
+	searchTool := worker.findTool("search", "")
+	if readTool == nil || searchTool == nil {
+		t.Fatal("worker must inherit brain read_object and search")
 	}
 	out, err := readTool.invoke(ctx, `{"object_id":"`+docID.String()+`"}`, turnRuntime(worker))
 	if err != nil {
@@ -600,6 +576,13 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 	}
 	if !strings.Contains(out.output, "worker-visible") {
 		t.Fatalf("worker read: %s", out.output)
+	}
+	sout, err := searchTool.invoke(ctx, `{"query":"worker search isolation token"}`, turnRuntime(worker))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(sout.output, parent.String()) && !strings.Contains(sout.output, "worker search isolation") {
+		t.Fatalf("worker search: %s", sout.output)
 	}
 
 	parentH.ClearSearchNamespace()
@@ -617,7 +600,7 @@ func TestBrainTools_engramPathGraph(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: t.TempDir()}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.NewMountSession("engram-graph", reg)
+	ms := vfs.MustNewMountSession("engram-graph", reg)
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
 		t.Fatal(err)
 	}
@@ -636,9 +619,10 @@ func TestBrainTools_engramPathGraph(t *testing.T) {
 		t.Fatal(err)
 	}
 	ns := uuid.New()
-	h := NewAgent(ctx, AgentOptions{
+	mustMountBrain(ctx, t, reg, ms, eng, ns, vfs.MountSpec{})
+	h := mustNewAgent(t, AgentOptions{
 		SessionID: "engram-graph", Store: stores.NewInMemoryStore(),
-		MountSession: ms, FSRegistry: reg, Model: &mockStrategy{},
+		MountSession: ms, Model: &mockStrategy{},
 		Brain: eng, SearchNamespace: &ns,
 	})
 	t.Cleanup(h.Close)
@@ -715,5 +699,36 @@ func TestBrainTools_engramPathGraph(t *testing.T) {
 	eout2, err := expand.invoke(ctx, `{"path":"/engram/deal/acme.md","relation_types":["has_contact"]}`, turnRuntime(h))
 	if err != nil || strings.Contains(eout2.output, "/engram/person/sam.md") {
 		t.Fatalf("after unlink: %v %s", err, eout2.output)
+	}
+}
+
+func TestBrainTools_expandAndUnlinkValidationErrors(t *testing.T) {
+	ctx := context.Background()
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithGraph(brain.NewMemoryGraph()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := mustNewAgent(t, AgentOptions{
+		Config: Config{MaxWindowSize: 1024},
+		Model:  &mockStrategy{},
+		Brain:  eng,
+	})
+	expand := h.findTool("expand", "")
+	unlink := h.findTool("unlink", "")
+	if expand == nil || unlink == nil {
+		t.Fatal("expand and unlink required with brain")
+	}
+	rt := turnRuntime(h)
+
+	if _, err := expand.invoke(ctx, `{}`, rt); err == nil || !strings.Contains(err.Error(), "expand") {
+		t.Fatalf("expand missing ref = %v", err)
+	}
+	if _, err := unlink.invoke(ctx, `{"relation_type":"about"}`, rt); err == nil || !strings.Contains(err.Error(), "unlink") {
+		t.Fatalf("unlink missing ref = %v", err)
+	}
+	if _, err := unlink.invoke(ctx, `{
+		"from_id":"not-a-uuid","to_id":"not-a-uuid","relation_type":"about"
+	}`, rt); err == nil || !strings.Contains(err.Error(), "from") {
+		t.Fatalf("unlink invalid uuid = %v", err)
 	}
 }

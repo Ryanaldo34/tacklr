@@ -13,9 +13,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/streaming"
+	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
 type mockStrategy struct {
@@ -31,11 +34,10 @@ type mockStrategy struct {
 	mu              sync.Mutex
 }
 
-func (m *mockStrategy) WithApiKey(string) InferenceStrategy         { return m }
-func (m *mockStrategy) WithModel(string) InferenceStrategy          { return m }
-func (m *mockStrategy) WithURL(string) InferenceStrategy            { return m }
-func (m *mockStrategy) WithReasoningLevel(string) InferenceStrategy { return m }
-func (m *mockStrategy) WithStructuredOutput(any) InferenceStrategy  { return m }
+func (m *mockStrategy) ModelTelemetryIdentity() telemetry.ModelIdentity {
+	return telemetry.ModelIdentity{Provider: "unknown", Model: "mock"}
+}
+
 func (m *mockStrategy) SupportsMIME(mimeType string) bool {
 	if m.supportsMIMEFn != nil {
 		return m.supportsMIMEFn(mimeType)
@@ -43,15 +45,8 @@ func (m *mockStrategy) SupportsMIME(mimeType string) bool {
 	// Tests default to text-only models.
 	return streaming.IsTextMIME(mimeType)
 }
-func (m *mockStrategy) SetSystemPrompt(p string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.systemPrompts = append(m.systemPrompts, p)
-}
-func (m *mockStrategy) Reset()                       {}
-func (m *mockStrategy) CompressContextWindow() error { return nil }
 func (m *mockStrategy) MaxContextWindow() (int, error) {
-	return 0, nil
+	return 8192, nil
 }
 func (m *mockStrategy) CountTokens(ctx context.Context, msgs []*Message, tools []*Tool) (int, error) {
 	if m.countTokensFn != nil {
@@ -60,7 +55,7 @@ func (m *mockStrategy) CountTokens(ctx context.Context, msgs []*Message, tools [
 	// Default 0 keeps existing tests under the window-pressure threshold.
 	return 0, nil
 }
-func (m *mockStrategy) Invoke(ctx context.Context, msgs []*Message, tools []*Tool) (chan LLMResponseChunk, error) {
+func (m *mockStrategy) Invoke(ctx context.Context, msgs []*Message, tools []*Tool, systemPrompt string) (chan LLMResponseChunk, error) {
 	if m.invokeErr != nil {
 		return nil, m.invokeErr
 	}
@@ -73,6 +68,9 @@ func (m *mockStrategy) Invoke(ctx context.Context, msgs []*Message, tools []*Too
 	m.mu.Lock()
 	m.lastInvokeMsgs = msgs
 	m.lastInvokeTools = tools
+	if systemPrompt != "" {
+		m.systemPrompts = append(m.systemPrompts, systemPrompt)
+	}
 	m.mu.Unlock()
 	ch := make(chan LLMResponseChunk)
 	go func() {
@@ -96,6 +94,7 @@ func contentTokenEstimate(msgs []*Message) int {
 }
 
 type recordingWatchdog struct {
+	mu          sync.Mutex
 	outputs     []*Message
 	toolResults []*Message
 	errors      []error
@@ -109,26 +108,38 @@ type tokenCount struct {
 }
 
 func (w *recordingWatchdog) RecordThinking(msg *Message) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	w.thinking = append(w.thinking, msg)
 	return nil
 }
 func (w *recordingWatchdog) RecordOutput(msg *Message) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	w.outputs = append(w.outputs, msg)
 	return nil
 }
 func (w *recordingWatchdog) RecordError(err error) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	w.errors = append(w.errors, err)
 	return nil
 }
 func (w *recordingWatchdog) RecordTokens(input, output int) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	w.tokenCounts = append(w.tokenCounts, tokenCount{input, output})
 	return nil
 }
 func (w *recordingWatchdog) RecordToolCalls(msg *Message) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	w.toolCalls = append(w.toolCalls, msg)
 	return nil
 }
 func (w *recordingWatchdog) RecordToolResult(msg *Message) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	w.toolResults = append(w.toolResults, msg)
 	return nil
 }
@@ -155,7 +166,7 @@ func TestAgentHarness_Run(t *testing.T) {
 
 	interruptTool := NewTool(ToolConfig{
 		Name: "ask_user",
-		Handler: func(ctx context.Context, _ struct{}, runtime *HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, _ struct{}, runtime HarnessRuntime) (string, error) {
 			intr, err := runtime.RaiseInterrupt("user_selection_choice", []byte(optionsJSON))
 			if err != nil {
 				return "", err
@@ -172,7 +183,7 @@ func TestAgentHarness_Run(t *testing.T) {
 				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "Hello!", IsComplete: true}
 			},
 		}
-		ah := NewAgent(context.Background(), AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
+		ah := mustNewAgent(t, AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
 		ch, err := ah.Run(context.Background(), "Hi")
 		if err != nil {
 			t.Fatal(err)
@@ -201,7 +212,7 @@ func TestAgentHarness_Run(t *testing.T) {
 		store := testStore(t)
 		progress := NewTool(ToolConfig{
 			Name: "progress_demo",
-			Handler: func(ctx context.Context, _ struct{}, runtime *HarnessRuntime) (string, error) {
+			Handler: func(ctx context.Context, _ struct{}, runtime HarnessRuntime) (string, error) {
 				runtime.EmitUpdate("starting")
 				runtime.EmitUpdate("halfway")
 				return "done-progress", nil
@@ -221,7 +232,7 @@ func TestAgentHarness_Run(t *testing.T) {
 				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "after progress", IsComplete: true}
 			},
 		}
-		ah := NewAgent(context.Background(), AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{progress}})
+		ah := mustNewAgent(t, AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{progress}})
 		ch, err := ah.Run(context.Background(), "progress")
 		if err != nil {
 			t.Fatal(err)
@@ -263,7 +274,7 @@ func TestAgentHarness_Run(t *testing.T) {
 				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "Done!", IsComplete: true}
 			},
 		}
-		ah := NewAgent(context.Background(), AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
+		ah := mustNewAgent(t, AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
 		ch, err := ah.Run(context.Background(), "Say hello")
 		if err != nil {
 			t.Fatal(err)
@@ -339,7 +350,7 @@ func TestAgentHarness_Run(t *testing.T) {
 				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
 			},
 		}
-		ah := NewAgent(context.Background(), AgentOptions{Config: Config{}, Model: strategy, Store: store})
+		ah := mustNewAgent(t, AgentOptions{Config: Config{}, Model: strategy, Store: store})
 		ch, err := ah.Run(context.Background(), "test")
 		if err != nil {
 			t.Fatal(err)
@@ -372,7 +383,7 @@ func TestAgentHarness_Run(t *testing.T) {
 				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "gave up", IsComplete: true}
 			},
 		}
-		ah := NewAgent(context.Background(), AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
+		ah := mustNewAgent(t, AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
 		ch, err := ah.Run(context.Background(), "test")
 		if err != nil {
 			t.Fatal(err)
@@ -426,7 +437,7 @@ func TestAgentHarness_Run(t *testing.T) {
 				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
 			},
 		}
-		ah := NewAgent(context.Background(), AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{brokenTool}})
+		ah := mustNewAgent(t, AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{brokenTool}})
 		ch, err := ah.Run(context.Background(), "test")
 		if err != nil {
 			t.Fatal(err)
@@ -448,7 +459,7 @@ func TestAgentHarness_Run(t *testing.T) {
 		strategy := &mockStrategy{
 			invokeErr: fmt.Errorf("network error"),
 		}
-		ah := NewAgent(context.Background(), AgentOptions{Config: Config{}, Model: strategy, Store: store})
+		ah := mustNewAgent(t, AgentOptions{Config: Config{}, Model: strategy, Store: store})
 		ch, err := ah.Run(context.Background(), "test")
 		if err != nil {
 			t.Fatal(err)
@@ -482,7 +493,7 @@ func TestAgentHarness_Run(t *testing.T) {
 			},
 		}
 
-		ah := NewAgent(context.Background(), AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{interruptTool}})
+		ah := mustNewAgent(t, AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{interruptTool}})
 
 		ch, err := ah.Run(context.Background(), "start")
 		if err != nil {
@@ -522,8 +533,8 @@ func TestAgentHarness_Run(t *testing.T) {
 		if !foundInterrupt {
 			t.Fatal("expected interrupt event")
 		}
-		if interruptId == "" {
-			t.Fatal("interruptId was not captured")
+		if interruptId != "call_int" {
+			t.Fatalf("interruptId = %q, want tool call id call_int", interruptId)
 		}
 		if callCount != 1 {
 			t.Errorf("callCount after first run = %d, want 1", callCount)
@@ -619,8 +630,8 @@ func TestAgentHarness_Run(t *testing.T) {
 			},
 		}
 
-		ah := NewAgent(context.Background(), AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
-		ah.session.Plan().Set([]Todo{
+		ah := mustNewAgent(t, AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
+		ah.session.Plan.Set([]Todo{
 			{Title: "Task 1", Status: streaming.TodoStatusInProgress},
 			{Title: "Task 2", Status: streaming.TodoStatusPending},
 		})
@@ -645,7 +656,7 @@ func TestAgentHarness_Run(t *testing.T) {
 			t.Error("continue Invoke after compress should include continuePlanNudge (open todos remain)")
 		}
 
-		plan := ah.session.Plan().Get()
+		plan := ah.session.Plan.Get()
 		if plan == nil {
 			t.Fatal("plan should not be nil")
 		}
@@ -719,8 +730,8 @@ func TestAgentHarness_Run(t *testing.T) {
 			},
 		}
 
-		ah := NewAgent(context.Background(), AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{interruptTool}})
-		ah.session.Plan().Set([]Todo{
+		ah := mustNewAgent(t, AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{interruptTool}})
+		ah.session.Plan.Set([]Todo{
 			{Title: "Task 1", Status: streaming.TodoStatusInProgress},
 		})
 
@@ -773,7 +784,7 @@ func TestAgentHarness_Run(t *testing.T) {
 			t.Error("parked interrupt turn should not replace history with a developer handoff")
 		}
 
-		plan := ah.session.Plan().Get()
+		plan := ah.session.Plan.Get()
 		if plan == nil || len(plan) == 0 {
 			t.Fatal("plan should not be nil or empty")
 		}
@@ -800,7 +811,7 @@ func TestAgentHarness_Run(t *testing.T) {
 			},
 		}
 
-		ah := NewAgent(context.Background(), AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
+		ah := mustNewAgent(t, AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
 
 		ch, err := ah.Run(context.Background(), "Greet the world")
 		if err != nil {
@@ -885,8 +896,8 @@ func TestAgentHarness_Run(t *testing.T) {
 			},
 		}
 
-		ah := NewAgent(context.Background(), AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
-		ah.session.Plan().Set([]Todo{
+		ah := mustNewAgent(t, AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
+		ah.session.Plan.Set([]Todo{
 			{Title: "Only", Status: streaming.TodoStatusInProgress},
 		})
 
@@ -929,29 +940,27 @@ func TestAgentHarness_Run(t *testing.T) {
 			invokeErrFn: func(_ context.Context, _ []*Message, tools []*Tool) error {
 				invokeCount++
 				if invokeCount == 1 {
-					return nil // allow complete_todo turn
+					return nil
 				}
 				if invokeCount == 2 {
 					handoffAttempted = true
 					return fmt.Errorf("compression invoke failed")
 				}
-				return nil // post-handoff turn
+				return nil
 			},
 			invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, events chan<- LLMResponseChunk) {
 				if invokeCount <= 1 {
 					events <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
 						{ID: "call_ct_err", CallID: "call_ct_err", Name: "complete_todo", Arguments: `{"title":"Task 1"}`},
 					}, IsComplete: true}
-					events <- LLMResponseChunk{IsComplete: true}
 					return
 				}
 				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "continuing", IsComplete: true}
 			},
 		}
 
-		ah := NewAgent(context.Background(), AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
-		// Two todos so completing Task 1 still triggers handoff.
-		ah.session.Plan().Set([]Todo{
+		ah := mustNewAgent(t, AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
+		ah.session.Plan.Set([]Todo{
 			{Title: "Task 1", Status: streaming.TodoStatusInProgress},
 			{Title: "Task 2", Status: streaming.TodoStatusPending},
 		})
@@ -988,93 +997,9 @@ func TestAgentHarness_Run(t *testing.T) {
 	})
 }
 
-func TestReturnFromInterrupt_unknownUUID_returnsError(t *testing.T) {
-	store := testStore(t)
-	strategy := &mockStrategy{
-		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, events chan<- LLMResponseChunk) {
-			events <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
-		},
-	}
-	ah := NewAgent(context.Background(), AgentOptions{Config: Config{}, Model: strategy, Store: store})
-
-	resolved, err := ah.ReturnFromInterrupt(context.Background(), map[string][]byte{
-		"bogus-uuid": []byte(`{}`),
-	})
-	if err == nil {
-		t.Fatal("expected error for unknown interrupt UUID")
-	}
-	if !strings.Contains(err.Error(), "no tool call id found") {
-		t.Errorf("error = %q, want contains 'no tool call id found'", err.Error())
-	}
-	if resolved != nil {
-		t.Error("expected nil channel on error")
-	}
-}
-
-func TestReturnFromInterrupt_invalidPayload_returnsError(t *testing.T) {
-	store := testStore(t)
-	optionsJSON := `[{"title":"A","description":"opt A","isRecommended":false}]`
-	interruptTool := NewTool(ToolConfig{
-		Name: "ask_user",
-		Handler: func(ctx context.Context, _ struct{}, runtime *HarnessRuntime) (string, error) {
-			intr, err := runtime.RaiseInterrupt("user_selection_choice", []byte(optionsJSON))
-			if err != nil {
-				return "", err
-			}
-			choice := intr.(*interrupt.UserSelectionInterrupt).ConfirmedChoice
-			return "selected: " + choice.Title, nil
-		},
-	})
-
-	var callCount int
-	strategy := &mockStrategy{
-		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, events chan<- LLMResponseChunk) {
-			callCount++
-			if callCount == 1 {
-				events <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-					{ID: "call_int", CallID: "call_int", Name: "ask_user", Arguments: `{}`},
-				}, IsComplete: true}
-				events <- LLMResponseChunk{IsComplete: true}
-			}
-		},
-	}
-
-	ah := NewAgent(context.Background(), AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{interruptTool}})
-
-	ch, err := ah.Run(context.Background(), "start")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	var interruptId string
-	for ev := range ch {
-		if ev.Type == StreamEventInterrupt {
-			var payload struct {
-				InterruptId string          `json:"interruptId"`
-				Data        json.RawMessage `json:"data"`
-			}
-			if err := json.Unmarshal(ev.Data, &payload); err != nil {
-				t.Fatal(err)
-			}
-			interruptId = payload.InterruptId
-		}
-	}
-	if interruptId == "" {
-		t.Fatal("interruptId not captured")
-	}
-
-	// Send bad payload: out-of-bounds selectionIdx
-	resolved, err := ah.ReturnFromInterrupt(context.Background(), map[string][]byte{
-		interruptId: []byte(`{"interruptId":"` + interruptId + `","selectionIdx":99}`),
-	})
-	if err == nil {
-		t.Fatal("expected error for invalid payload")
-	}
-	if !strings.Contains(err.Error(), "invalid payload") {
-		t.Errorf("error = %q, want contains 'invalid payload'", err.Error())
-	}
-	if resolved != nil {
-		t.Error("expected nil channel on error")
+func TestNewAgent_nilModel_error(t *testing.T) {
+	if _, err := NewAgent(context.Background(), AgentOptions{}); err == nil {
+		t.Fatal("expected constructor error")
 	}
 }
 
@@ -1083,7 +1008,7 @@ func TestNewAgent(t *testing.T) {
 	mockModel := &mockStrategy{}
 	wd := &recordingWatchdog{}
 
-	h := NewAgent(context.Background(), AgentOptions{
+	h := mustNewAgent(t, AgentOptions{
 		Config: Config{
 			MaxWindowSize: 4096,
 			SystemPrompt:  "test prompt",
@@ -1116,33 +1041,6 @@ func TestNewAgent(t *testing.T) {
 	}
 }
 
-func TestFindTool_namespaceMatching(t *testing.T) {
-	tools := []*Tool{
-		NewTool(ToolConfig{Name: "get_customer", Namespace: "crm", Handler: func(ctx context.Context) (string, error) { return "", nil }}),
-		NewTool(ToolConfig{Name: "get_customer", Namespace: "email", Handler: func(ctx context.Context) (string, error) { return "", nil }}),
-		NewTool(ToolConfig{Name: "get_weather", Namespace: "", Handler: func(ctx context.Context) (string, error) { return "", nil }}),
-	}
-	h := &AgentHarness{tools: tools}
-
-	if h.findTool("get_customer", "crm") == nil {
-		t.Error("expected to find tool in crm namespace")
-	}
-	if h.findTool("get_customer", "email") == nil {
-		t.Error("expected to find tool in email namespace")
-	}
-	if h.findTool("get_customer", "wrong") != nil {
-		t.Error("should not find tool in wrong namespace")
-	}
-	if h.findTool("get_weather", "") == nil {
-		t.Error("expected to find tool with empty namespace")
-	}
-	if h.findTool("nonexistent", "") != nil {
-		t.Error("should not find nonexistent tool")
-	}
-}
-
-// TestRun_cancelMidStream_endsTurn verifies cancel during token streaming ends
-// the harness turn (finite events, cancelled error, channel closes).
 func TestRun_cancelMidStream_endsTurn(t *testing.T) {
 	started := make(chan struct{})
 	var once sync.Once
@@ -1163,7 +1061,7 @@ func TestRun_cancelMidStream_endsTurn(t *testing.T) {
 			}
 		},
 	}
-	h := NewAgent(context.Background(), AgentOptions{Config: Config{MaxWindowSize: 8192}, Model: strategy})
+	h := mustNewAgent(t, AgentOptions{Config: Config{MaxWindowSize: 8192}, Model: strategy})
 	ctx, cancel := context.WithCancel(context.Background())
 	events, err := h.Run(ctx, "stream please")
 	if err != nil {
@@ -1220,7 +1118,7 @@ func TestRun_reasoningCapturedInContextWindow(t *testing.T) {
 			ch <- LLMResponseChunk{IsComplete: true}
 		},
 	}
-	h := NewAgent(context.Background(), AgentOptions{Config: Config{MaxWindowSize: 8192}, Model: mock})
+	h := mustNewAgent(t, AgentOptions{Config: Config{MaxWindowSize: 8192}, Model: mock})
 
 	events, err := h.Run(context.Background(), "what is the answer?")
 	if err != nil {
@@ -1260,7 +1158,7 @@ func TestRun_windowPressure_summarizesAndPreservesUser(t *testing.T) {
 	// When token estimate exceeds 85% of MaxWindowSize, addToContext summarizes
 	// older history, keeps the original user message, and continues the turn.
 	store := testStore(t)
-	const maxWindow = 100
+	const maxWindow = 40
 	var invokeCount int
 	var sawSummaryInvoke bool
 	const summaryText = "SUMMARY_OF_HISTORY"
@@ -1273,20 +1171,23 @@ func TestRun_windowPressure_summarizesAndPreservesUser(t *testing.T) {
 			invokeCount++
 			switch invokeCount {
 			case 1:
-				// Seed a large assistant reply so the next user turn pressures the window.
-				pad := strings.Repeat("x", 80)
+				// Seed a reply already over MaxWindowSize so absorb uses the over-max loop.
+				pad := strings.Repeat("x", 200)
 				events <- LLMResponseChunk{Type: StreamEventMessage, Content: pad, IsComplete: true}
 			case 2:
 				// This is the pressure-compress invoke (summarize staged history).
 				sawSummaryInvoke = true
-				events <- LLMResponseChunk{Type: StreamEventMessage, Content: summaryText, IsComplete: true}
+				events <- LLMResponseChunk{
+					Type: StreamEventMessage, Content: summaryText, IsComplete: true,
+					InputTokens: 11, OutputTokens: 7, ReasoningTokens: 3,
+				}
 			default:
 				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "answer after compress", IsComplete: true}
 			}
 		},
 	}
 
-	ah := NewAgent(context.Background(), AgentOptions{
+	ah := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: maxWindow},
 		Model:  strategy,
 		Store:  store,
@@ -1375,7 +1276,7 @@ func TestRun_windowPressure_onToolResult_summarizes(t *testing.T) {
 	}
 
 	// Seed a near-full window so the large tool result tips pressure.
-	ah := NewAgent(context.Background(), AgentOptions{
+	ah := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: maxWindow},
 		Model:  strategy,
 		Store:  store,
@@ -1419,7 +1320,7 @@ func TestRun_countTokensError_emitsErrorEvent(t *testing.T) {
 			events <- LLMResponseChunk{Type: StreamEventMessage, Content: "should not run", IsComplete: true}
 		},
 	}
-	ah := NewAgent(context.Background(), AgentOptions{
+	ah := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  strategy,
 		Store:  testStore(t),
@@ -1469,7 +1370,7 @@ func TestRun_readSkill_returnsInstructions(t *testing.T) {
 		},
 	}
 
-	ah := NewAgent(context.Background(), AgentOptions{
+	ah := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 8192, SkillDirectories: []string{skillsRoot}},
 		Model:  strategy,
 		Store:  testStore(t),
@@ -1496,116 +1397,11 @@ func TestRun_readSkill_returnsInstructions(t *testing.T) {
 	}
 }
 
-// stubModelTasks records Absorb/Handoff/Turn for AgentOptions.ModelTasks injection.
-type stubModelTasks struct {
-	cm           ContextManager
-	absorbCalls  atomic.Int64
-	handoffCalls atomic.Int64
-	turnCalls    atomic.Int64
-	turnFn       func(ctx context.Context, tools []*Tool, systemPrompt string) (<-chan LLMResponseChunk, error)
-}
-
-func (s *stubModelTasks) Turn(ctx context.Context, tools []*Tool, systemPrompt string) (<-chan LLMResponseChunk, error) {
-	s.turnCalls.Add(1)
-	if s.turnFn != nil {
-		return s.turnFn(ctx, tools, systemPrompt)
-	}
-	ch := make(chan LLMResponseChunk, 1)
-	ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "ok", IsComplete: true}
-	close(ch)
-	return ch, nil
-}
-
-func (s *stubModelTasks) Absorb(ctx context.Context, msg *Message, tools []*Tool, systemPrompt string) (AbsorbResult, error) {
-	s.absorbCalls.Add(1)
-	if msg != nil {
-		s.cm.Add(msg)
-	}
-	return AbsorbResult{}, nil
-}
-
-func (s *stubModelTasks) Handoff(ctx context.Context, plan []Todo, planDoc string, tools []*Tool, systemPrompt string) error {
-	s.handoffCalls.Add(1)
-	s.cm.Replace([]*Message{
-		{Role: RoleUser, Content: "goal"},
-		{Role: RoleDeveloper, Content: "stub handoff"},
-	})
-	return nil
-}
-
-// TestNewAgent_injectsModelTasks: Run uses injected Absorb/Turn; complete_todo uses Handoff.
-func TestNewAgent_injectsModelTasks(t *testing.T) {
-	store := testStore(t)
-	cm := NewModelContextManager()
-	var invokeCount int
-	st := &stubModelTasks{
-		cm: cm,
-		turnFn: func(ctx context.Context, tools []*Tool, systemPrompt string) (<-chan LLMResponseChunk, error) {
-			invokeCount++
-			ch := make(chan LLMResponseChunk, 4)
-			if invokeCount == 1 {
-				ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-					{ID: "ct", CallID: "ct", Name: "complete_todo", Arguments: `{"title":"T1"}`},
-				}, IsComplete: true}
-				ch <- LLMResponseChunk{IsComplete: true}
-			} else {
-				ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "after stub handoff", IsComplete: true}
-			}
-			close(ch)
-			return ch, nil
-		},
-	}
-	ah := NewAgent(context.Background(), AgentOptions{
-		Config:         Config{MaxWindowSize: 8192},
-		Model:          &mockStrategy{},
-		Store:          store,
-		ContextManager: cm,
-		ModelTasks:     st,
-	})
-	ah.session.Plan().Set([]Todo{
-		{Title: "T1", Status: streaming.TodoStatusInProgress},
-		{Title: "T2", Status: streaming.TodoStatusPending},
-	})
-	ch, err := ah.Run(context.Background(), "go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var sawFinal bool
-	for ev := range ch {
-		if ev.Type == StreamEventMessage && ev.Content == "after stub handoff" {
-			sawFinal = true
-		}
-		if ev.Type == StreamEventError {
-			t.Fatalf("error event: %v", ev.Error)
-		}
-	}
-	if st.absorbCalls.Load() < 1 {
-		t.Fatalf("Absorb calls = %d, want >= 1", st.absorbCalls.Load())
-	}
-	if st.handoffCalls.Load() != 1 {
-		t.Fatalf("Handoff calls = %d, want 1", st.handoffCalls.Load())
-	}
-	if !sawFinal {
-		t.Fatal("expected final message after stub handoff continue turn")
-	}
-	var sawStub bool
-	for _, m := range ah.Messages() {
-		if m != nil && m.Role == RoleDeveloper && m.Content == "stub handoff" {
-			sawStub = true
-		}
-	}
-	if !sawStub {
-		t.Fatalf("context window missing stub handoff: %+v", ah.Messages())
-	}
-}
-
-// TestNewAgentFromSession_resumesPendingToolInterrupt: park on interrupt, reload
-// from store (simulating process boundary), resolve and complete the tool.
 func TestNewAgentFromSession_resumesPendingToolInterrupt(t *testing.T) {
 	store := testStore(t)
 	interruptTool := NewTool(ToolConfig{
 		Name: "ask_user",
-		Handler: func(ctx context.Context, _ struct{}, runtime *HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, _ struct{}, runtime HarnessRuntime) (string, error) {
 			intr, err := runtime.RaiseInterrupt("user_selection_choice", []byte(
 				`[{"title":"Yes","description":"","isRecommended":true},{"title":"No","description":"","isRecommended":false}]`,
 			))
@@ -1632,12 +1428,21 @@ func TestNewAgentFromSession_resumesPendingToolInterrupt(t *testing.T) {
 		},
 	}
 
-	ah := NewAgent(context.Background(), AgentOptions{
+	ah := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  strategy,
 		Store:  store,
 		Tools:  []*Tool{interruptTool},
 	})
+	ns := uuid.New()
+	ah.SetSearchNamespace(ns)
+	if got, ok := ah.SearchNamespace(); !ok || got != ns {
+		t.Fatalf("SetSearchNamespace: %v ok=%v", got, ok)
+	}
+	ah.ClearSearchNamespace()
+	if _, ok := ah.SearchNamespace(); ok {
+		t.Fatal("ClearSearchNamespace left a namespace")
+	}
 	ah.sessionId = "sess-pending-resume"
 
 	ch, err := ah.Run(context.Background(), "need a choice")
@@ -1661,6 +1466,10 @@ func TestNewAgentFromSession_resumesPendingToolInterrupt(t *testing.T) {
 	}
 	if len(ah.pendingToolCalls) != 1 {
 		t.Fatalf("pending tools = %d, want 1", len(ah.pendingToolCalls))
+	}
+
+	if _, err := NewAgentFromSession(context.Background(), "sess-pending-resume", AgentOptions{}); err == nil {
+		t.Fatal("NewAgentFromSession requires store")
 	}
 
 	// Process boundary: drop live harness, reload checkpoint.

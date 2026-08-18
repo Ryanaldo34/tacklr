@@ -162,8 +162,8 @@ func streamableSession(t *testing.T, hs *httptest.Server, connID string) (sessio
 func TestACP_Streamable_permissionMidTurn(t *testing.T) {
 	var ran bool
 	sensitive := tacklr.NewTool(tacklr.ToolConfig{
-		Name:               "sensitive",
-		PermissionRequired: true,
+		Name:   "sensitive",
+		OnCall: tacklr.OnCalls(tacklr.ToolPermissionOnCall),
 		Handler: func(ctx context.Context) (string, error) {
 			ran = true
 			return "ok", nil

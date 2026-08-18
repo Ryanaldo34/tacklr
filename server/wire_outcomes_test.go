@@ -93,7 +93,7 @@ func TestWireAndConstruct_outcomes(t *testing.T) {
 	if _, err := SSE.LoadSession(context.Background(), ProtocolEnv{}, "x", nil); !errors.Is(err, ErrWireSessionUnsupported) {
 		t.Fatalf("LoadSession: %v", err)
 	}
-	if _, err := SSE.BindTurn(context.Background(), ProtocolEnv{}, "x", nil); !errors.Is(err, ErrWireSessionUnsupported) {
+	if _, err := SSE.BindTurn(context.Background(), ProtocolEnv{}, "x", "", nil); !errors.Is(err, ErrWireSessionUnsupported) {
 		t.Fatalf("BindTurn: %v", err)
 	}
 	if err := SSE.CloseSession(context.Background(), ProtocolEnv{}, "x"); !errors.Is(err, ErrWireSessionUnsupported) {
@@ -122,7 +122,10 @@ func TestWireAndConstruct_outcomes(t *testing.T) {
 
 	// --- Registry DefaultAgent / options ---
 	_ = NewRegistry(testStore(t), "d", WithTracer(nil), nil)
-	r2 := NewRegistry(testStore(t), "d", WithTracer(nil))
+	r2 := NewRegistry(testStore(t), "d", WithTracer(nil), func(reg *Registry) {
+		reg.tracer = nil
+		reg.instruments = nil
+	})
 	if r2.DefaultAgent() != "d" {
 		t.Fatal(r2.DefaultAgent())
 	}
@@ -140,8 +143,13 @@ func TestWireAndConstruct_outcomes(t *testing.T) {
 	if connElicitationForm(nil) {
 		t.Fatal("nil conn elicitation")
 	}
-	if connElicitationForm(&Conn{Caps: ClientCapabilities{ElicitationForm: true}}) != true {
-		t.Fatal("snapshot caps")
+	if connElicitationForm(&Conn{}) {
+		t.Fatal("no rpc means no elicitation")
+	}
+	formBridge := NewClientBridge(&recordingWriter{})
+	formBridge.SetCaps(ClientCapabilities{ElicitationForm: true})
+	if !connElicitationForm(&Conn{RPC: formBridge}) {
+		t.Fatal("live bridge caps")
 	}
 
 	// --- Streamable HTTP protocol error matrix (one server, many outcomes) ---
@@ -248,6 +256,21 @@ func TestWireAndConstruct_outcomes(t *testing.T) {
 			"Content-Type":        "application/json",
 			HeaderAcpConnectionID: connID,
 		}, http.StatusBadRequest)
+	// session-scoped method with a session this connection does not own → 403
+	assertStatus("prompt unattached session", http.MethodPost, "/acp",
+		`{"jsonrpc":"2.0","id":11,"method":"session/prompt","params":{"sessionId":"ghost","prompt":[{"type":"text","text":"hi"}]}}`,
+		map[string]string{
+			"Content-Type":        "application/json",
+			HeaderAcpConnectionID: connID,
+			HeaderAcpSessionID:    "ghost",
+		}, http.StatusForbidden)
+	// session/load may name a session this connection has not seen yet → 202
+	assertStatus("load unattached session", http.MethodPost, "/acp",
+		`{"jsonrpc":"2.0","id":10,"method":"session/load","params":{"sessionId":"ghost","cwd":"/tmp"}}`,
+		map[string]string{
+			"Content-Type":        "application/json",
+			HeaderAcpConnectionID: connID,
+		}, http.StatusAccepted)
 	// client JSON-RPC response demux on unknown conn → 404
 	assertStatus("response unknown conn", http.MethodPost, "/acp",
 		`{"jsonrpc":"2.0","id":99,"result":{}}`,
@@ -357,7 +380,7 @@ func TestWireAndConstruct_outcomes(t *testing.T) {
 		t.Fatalf("deliver closed: %v", err)
 	}
 
-	// Live connection: attach session, deliver with fallback, double session conflict
+	// Live connection: attach session, default drop when session SSE is late
 	live := NewConnectionRegistry().Create(NewClientBridge(&httpBufferWriter{}), &httpBufferWriter{})
 	recW := httptest.NewRecorder()
 	detach, sink, err := live.attachConnSSE(recW, recW)
@@ -367,10 +390,30 @@ func TestWireAndConstruct_outcomes(t *testing.T) {
 	if err := sink.writeOpen(); err != nil {
 		t.Fatal(err)
 	}
-	// deliver session-scoped with no session sink → falls back to conn sink
 	if err := live.deliver("sess-x", []byte(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-x"}}`), false); err != nil {
 		t.Fatal(err)
 	}
+	if strings.Contains(recW.Body.String(), "sess-x") {
+		t.Fatal("default must not fall back to connection SSE")
+	}
+	fbReg := NewConnectionRegistry()
+	fbReg.LateSessionSSEFallback = true
+	fb := fbReg.Create(NewClientBridge(&httpBufferWriter{}), &httpBufferWriter{})
+	fbRec := httptest.NewRecorder()
+	fbDetach, fbSink, err := fb.attachConnSSE(fbRec, fbRec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fbSink.writeOpen(); err != nil {
+		t.Fatal(err)
+	}
+	if err := fb.deliver("sess-x", []byte(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-x"}}`), false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(fbRec.Body.String(), "sess-x") {
+		t.Fatal("opt-in fallback should deliver on connection SSE")
+	}
+	fbDetach()
 	// extractSessionID helpers
 	if extractSessionIDFromJSONRPC([]byte(`not-json`)) != "" {
 		t.Fatal("bad json extract")
@@ -446,7 +489,7 @@ func TestWireAndConstruct_outcomes(t *testing.T) {
 	if _, err := p2.LoadSession(context.Background(), env, "x", json.RawMessage(`{`)); err == nil {
 		t.Fatal("want invalid load params")
 	}
-	if _, err := p2.BindTurn(context.Background(), env, "", nil); err == nil {
+	if _, err := p2.BindTurn(context.Background(), env, "", "session/prompt", nil); err == nil {
 		t.Fatal("empty sessionId bind")
 	}
 	// persist failure on create
@@ -498,7 +541,7 @@ func TestWireAndConstruct_outcomes(t *testing.T) {
 		"sessionId": sidEmpty,
 		"prompt":    []map[string]any{{"type": "text", "text": "hi"}},
 	})
-	if _, err := pEmpty.BindTurn(context.Background(), ProtocolEnv{Registry: emptyReg}, sidEmpty, prompt); err == nil {
+	if _, err := pEmpty.BindTurn(context.Background(), ProtocolEnv{Registry: emptyReg}, sidEmpty, "session/prompt", prompt); err == nil {
 		t.Fatal("want no agent")
 	}
 	// empty text prompt
@@ -511,7 +554,7 @@ func TestWireAndConstruct_outcomes(t *testing.T) {
 		"sessionId": sidOk,
 		"prompt":    []map[string]any{{"type": "text", "text": ""}},
 	})
-	if _, err := pOk.BindTurn(context.Background(), env, sidOk, badPrompt); err == nil {
+	if _, err := pOk.BindTurn(context.Background(), env, sidOk, "session/prompt", badPrompt); err == nil {
 		t.Fatal("want invalid prompt")
 	}
 	// cwd mismatch on bind
@@ -520,11 +563,11 @@ func TestWireAndConstruct_outcomes(t *testing.T) {
 		"cwd":       "/other",
 		"prompt":    []map[string]any{{"type": "text", "text": "hi"}},
 	})
-	if _, err := pOk.BindTurn(context.Background(), env, sidOk, cwdPrompt); err == nil {
+	if _, err := pOk.BindTurn(context.Background(), env, sidOk, "session/prompt", cwdPrompt); err == nil {
 		t.Fatal("want cwd mismatch")
 	}
 	// Load cwd mismatch + empty configValues envelope path
-	_ = pOk.persistWire(context.Background(), sidOk, &acpWireSession{cwd: "/ok", configValues: nil})
+	_ = pOk.persistWire(context.Background(), sidOk, &acpWireSession{cwd: "/ok", configValues: nil, owner: "local"})
 	// force reload from wire with empty config
 	pOk.mu.Lock()
 	delete(pOk.sessions, sidOk)

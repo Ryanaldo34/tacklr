@@ -3,14 +3,29 @@ package inference
 import (
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 
 	"github.com/ryanaldo34/tacklr"
 )
 
+type failingSSEReader struct{}
+
+func (failingSSEReader) Read([]byte) (int, error) {
+	return 0, errors.New("stream read failed")
+}
+
 func collectSSE(t *testing.T, body string) []tacklr.LLMResponseChunk {
 	t.Helper()
+	if strings.Contains(body, "data: [DONE]") &&
+		!strings.Contains(body, `"type":"response.completed"`) &&
+		!strings.Contains(body, `"type":"response.incomplete"`) &&
+		!strings.Contains(body, `"type":"response.failed"`) &&
+		!strings.Contains(body, `"type":"error"`) {
+		body = strings.Replace(body, "data: [DONE]",
+			`data: {"type":"response.completed","response":{"status":"completed"}}`+"\n"+`data: [DONE]`, 1)
+	}
 	s := NewOpenAIInferenceStrategy(nil)
 	ch := make(chan tacklr.LLMResponseChunk, 64)
 	go func() {
@@ -22,6 +37,45 @@ func collectSSE(t *testing.T, body string) []tacklr.LLMResponseChunk {
 		out = append(out, c)
 	}
 	return out
+}
+
+func collectRawSSE(t *testing.T, reader io.Reader) []tacklr.LLMResponseChunk {
+	t.Helper()
+	strategy := NewOpenAIInferenceStrategy(nil)
+	ch := make(chan tacklr.LLMResponseChunk, 16)
+	strategy.parseSSEResponse(t.Context(), reader, ch, "")
+	close(ch)
+	var chunks []tacklr.LLMResponseChunk
+	for chunk := range ch {
+		chunks = append(chunks, chunk)
+	}
+	return chunks
+}
+
+func TestParseSSE_requiresTerminalResponseEvent(t *testing.T) {
+	// Arrange
+	doneWithoutTerminal := strings.NewReader("data: [DONE]\n\n")
+	eofWithoutTerminal := strings.NewReader(`data: {"type":"response.output_text.delta","delta":"partial"}` + "\n")
+	scannerFailure := io.MultiReader(
+		strings.NewReader(`data: {"type":"response.output_text.delta","delta":"partial"}`+"\n"),
+		failingSSEReader{},
+	)
+
+	// Act
+	doneChunks := collectRawSSE(t, doneWithoutTerminal)
+	eofChunks := collectRawSSE(t, eofWithoutTerminal)
+	failureChunks := collectRawSSE(t, scannerFailure)
+
+	// Assert
+	for name, chunks := range map[string][]tacklr.LLMResponseChunk{
+		"done":    doneChunks,
+		"eof":     eofChunks,
+		"scanner": failureChunks,
+	} {
+		if len(chunks) == 0 || !errors.Is(chunks[len(chunks)-1].Error, ErrIncompleteStream) {
+			t.Fatalf("%s chunks = %#v", name, chunks)
+		}
+	}
 }
 
 func TestParseSSE_outputTextAlwaysMessage_likeMain(t *testing.T) {
@@ -204,6 +258,35 @@ func TestParseSSE_incompleteFailedAndRefusal(t *testing.T) {
 		}
 	}
 
+	// Mid-stream error events fail closed with a terminal error chunk.
+	bodyStreamError := strings.Join([]string{
+		`data: {"type":"error","error":{"message":"provider failed mid stream"}}`,
+		`data: [DONE]`,
+		"",
+	}, "\n")
+	chunks = collectSSE(t, bodyStreamError)
+	if len(chunks) == 0 || chunks[len(chunks)-1].Type != tacklr.StreamEventError {
+		t.Fatalf("stream error chunks = %+v", chunks)
+	}
+
+	// Completed responses surface token usage for telemetry.
+	bodyUsage := strings.Join([]string{
+		`data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":10,"output_tokens":5,"output_tokens_details":{"reasoning_tokens":2}}}}`,
+		`data: [DONE]`,
+		"",
+	}, "\n")
+	chunks = collectSSE(t, bodyUsage)
+	var complete *tacklr.LLMResponseChunk
+	for i := range chunks {
+		if chunks[i].Type == tacklr.StreamEventComplete {
+			complete = &chunks[i]
+			break
+		}
+	}
+	if complete == nil || complete.InputTokens != 10 || complete.OutputTokens != 5 || complete.ReasoningTokens != 2 {
+		t.Fatalf("usage chunk = %+v all = %+v", complete, chunks)
+	}
+
 	// Failed with provider error object → classifyAPIStatus path.
 	bodyErrObj := strings.Join([]string{
 		`data: {"type":"response.failed","error":{"code":"content_filter","message":"blocked by filter","type":"invalid_request_error"}}`,
@@ -285,6 +368,23 @@ func TestParseSSE_incompleteFailedAndRefusal(t *testing.T) {
 	}
 	if thought != "thinksum" {
 		t.Fatalf("thought = %q", thought)
+	}
+
+	// Reasoning completion can arrive only on output_item.done summary payload.
+	bodyReasonSummary := strings.Join([]string{
+		`data: {"type":"response.output_item.done","item":{"id":"rs2","type":"reasoning","summary":[{"type":"summary_text","text":"final summary"}]}}`,
+		`data: [DONE]`,
+		"",
+	}, "\n")
+	chunks = collectSSE(t, bodyReasonSummary)
+	var summary string
+	for _, c := range chunks {
+		if c.Type == tacklr.StreamEventReasoning && c.Content != "" {
+			summary = c.Content
+		}
+	}
+	if summary != "final summary" {
+		t.Fatalf("summary = %q chunks = %+v", summary, chunks)
 	}
 
 	// Context cancel stops mid-parse.

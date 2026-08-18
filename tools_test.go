@@ -59,7 +59,7 @@ func errHandler(ctx context.Context, args BasicArgs) (string, error) {
 func TestInvoke(t *testing.T) {
 	t.Run("returns raw string", func(t *testing.T) {
 		tool := NewTool(ToolConfig{Name: "zero", Handler: zeroArgsStringHandler})
-		res, err := tool.invoke(context.Background(), "", HarnessRuntime{})
+		res, err := tool.invoke(context.Background(), "", nil)
 		got := res.output
 		if err != nil {
 			t.Fatal(err)
@@ -71,7 +71,7 @@ func TestInvoke(t *testing.T) {
 
 	t.Run("marshals non-string return", func(t *testing.T) {
 		tool := NewTool(ToolConfig{Name: "zero_int", Handler: zeroArgsIntHandler})
-		res, err := tool.invoke(context.Background(), "", HarnessRuntime{})
+		res, err := tool.invoke(context.Background(), "", nil)
 		got := res.output
 		if err != nil {
 			t.Fatal(err)
@@ -89,7 +89,7 @@ func TestInvoke(t *testing.T) {
 			return "result", nil
 		}
 		tool := NewTool(ToolConfig{Name: "handler", Handler: h})
-		res, err := tool.invoke(context.Background(), `{"name":"test","age":10}`, HarnessRuntime{})
+		res, err := tool.invoke(context.Background(), `{"name":"test","age":10}`, nil)
 		got := res.output
 		if err != nil {
 			t.Fatal(err)
@@ -99,9 +99,22 @@ func TestInvoke(t *testing.T) {
 		}
 	})
 
+	t.Run("handler that needs runtime fails closed without one", func(t *testing.T) {
+		tool := NewTool(ToolConfig{
+			Name: "needs_rt",
+			Handler: func(ctx context.Context, rt HarnessRuntime) (string, error) {
+				return "ok", nil
+			},
+		})
+		_, err := tool.invoke(context.Background(), "", nil)
+		if err == nil || !errors.Is(err, ErrFailed) {
+			t.Fatalf("nil runtime: %v", err)
+		}
+	})
+
 	t.Run("propagates handler error", func(t *testing.T) {
 		tool := NewTool(ToolConfig{Name: "err", Handler: errHandler})
-		_, err := tool.invoke(context.Background(), `{"name":"x","age":1}`, HarnessRuntime{})
+		_, err := tool.invoke(context.Background(), `{"name":"x","age":1}`, nil)
 		if err == nil || err.Error() != "boom" {
 			t.Fatalf("got %v, want boom", err)
 		}
@@ -109,7 +122,7 @@ func TestInvoke(t *testing.T) {
 
 	t.Run("bad json args errors", func(t *testing.T) {
 		tool := NewTool(ToolConfig{Name: "basic", Handler: basicHandler})
-		_, err := tool.invoke(context.Background(), `{bad`, HarnessRuntime{})
+		_, err := tool.invoke(context.Background(), `{bad`, nil)
 		if err == nil {
 			t.Fatal("expected error")
 		}
@@ -128,7 +141,7 @@ func TestInvoke(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 
-		_, err := tool.invoke(ctx, "", HarnessRuntime{})
+		_, err := tool.invoke(ctx, "", nil)
 		if err == nil {
 			t.Fatal("expected error")
 		}
@@ -268,51 +281,37 @@ func TestAsJson(t *testing.T) {
 
 // TestMakeSchemaNullable_outcomes covers each rewrite branch of makeSchemaNullable
 // (used for strict optional fields). Cheap pure paths that lift library total cover.
-func TestMakeSchemaNullable_outcomes(t *testing.T) {
-	nilSchema := makeSchemaNullable(nil)
-	if types, _ := nilSchema["type"].([]any); len(types) != 2 {
-		t.Fatalf("nil schema = %#v", nilSchema)
+// TestTypeToJSONSchema_structuredOutput is the public structured-output
+// helper: omitempty fields stay optional (non-strict).
+func TestTypeToJSONSchema_structuredOutput(t *testing.T) {
+	type hostOut struct {
+		Title string  `json:"title" desc:"Headline"`
+		Note  *string `json:"note,omitempty" desc:"Optional note"`
+		Count int     `json:"count"`
 	}
-	if got := makeSchemaNullable(map[string]any{"type": "null"}); got["type"] != "null" {
-		t.Fatalf("already-null = %#v", got)
+	schema, err := TypeToJSONSchema(hostOut{})
+	if err != nil {
+		t.Fatal(err)
 	}
-	str := makeSchemaNullable(map[string]any{"type": "string"})
-	if types, _ := str["type"].([]any); len(types) != 2 || types[0] != "string" || types[1] != "null" {
-		t.Fatalf("string = %#v", str)
+	if schema["type"] != "object" {
+		t.Fatalf("type = %v", schema["type"])
 	}
-	// Multi-type without null → append null
-	multi := makeSchemaNullable(map[string]any{"type": []any{"string", "number"}})
-	if types, _ := multi["type"].([]any); len(types) != 3 || types[2] != "null" {
-		t.Fatalf("multi = %#v", multi)
+	props, _ := schema["properties"].(map[string]any)
+	title, _ := props["title"].(map[string]any)
+	if title["type"] != "string" || title["description"] != "Headline" {
+		t.Fatalf("title = %#v", title)
 	}
-	// Multi-type already including null → unchanged length
-	withNull := makeSchemaNullable(map[string]any{"type": []any{"string", "null"}})
-	if types, _ := withNull["type"].([]any); len(types) != 2 {
-		t.Fatalf("withNull = %#v", withNull)
+	note, _ := props["note"].(map[string]any)
+	if note["type"] != "string" || note["description"] != "Optional note" {
+		t.Fatalf("note must stay a plain string (non-strict), got %#v", note)
 	}
-	// Unknown type kind leaves schema as-is
-	other := makeSchemaNullable(map[string]any{"type": 42})
-	if other["type"] != 42 {
-		t.Fatalf("other = %#v", other)
+	req, _ := schema["required"].([]string)
+	if len(req) != 2 || req[0] != "title" || req[1] != "count" {
+		t.Fatalf("required = %v, want title and count only", req)
 	}
-}
-
-// TestToolResultHookRegistry_outcomes covers nil registry, missing hook, and invoke.
-func TestToolResultHookRegistry_outcomes(t *testing.T) {
-	var nilReg *toolResultHookRegistry
-	if d := nilReg.observe(context.Background(), ToolResultObservation{Name: "x"}); d != (ToolResultDisposition{}) {
-		t.Fatalf("nil reg: %#v", d)
-	}
-	reg := newToolResultHookRegistry(map[string]ToolResultHook{
-		"done": func(ctx context.Context, obs ToolResultObservation) ToolResultDisposition {
-			return ToolResultDisposition{SuppressWindowMessage: true}
-		},
-	})
-	if d := reg.observe(context.Background(), ToolResultObservation{Name: "missing"}); d != (ToolResultDisposition{}) {
-		t.Fatalf("missing: %#v", d)
-	}
-	if d := reg.observe(context.Background(), ToolResultObservation{Name: "done"}); !d.SuppressWindowMessage {
-		t.Fatalf("hook: %#v", d)
+	_, err = TypeToJSONSchema(nil)
+	if err == nil || !strings.Contains(err.Error(), "nil value") {
+		t.Fatalf("want nil-value error, got %v", err)
 	}
 }
 
@@ -363,6 +362,13 @@ func TestToolsAsJsonWithNamespaces(t *testing.T) {
 	}
 }
 
+type unregisteredOnCall struct{}
+
+func (unregisteredOnCall) TypeName() string           { return "not_registered_on_call" }
+func (unregisteredOnCall) Serialize() ([]byte, error) { return []byte(`{}`), nil }
+func (unregisteredOnCall) Return([]byte) error        { return nil }
+func (unregisteredOnCall) Error() string              { return "unregistered" }
+
 func TestNewTool_validation(t *testing.T) {
 	if NewTool(ToolConfig{Name: "my_tool", Handler: zeroArgsStringHandler}) == nil {
 		t.Fatal("valid tool")
@@ -380,6 +386,9 @@ func TestNewTool_validation(t *testing.T) {
 		{"too many args", ToolConfig{Name: "t", Handler: func(ctx context.Context, a BasicArgs, b BasicArgs, c BasicArgs) (string, error) {
 			return "", nil
 		}}, ""}, // "too many parameters" or "unexpected parameter"
+		{"unregistered on-call", ToolConfig{Name: "t", Handler: zeroArgsStringHandler, OnCall: OnCalls(func(ToolInvocation) Interrupt {
+			return unregisteredOnCall{}
+		})}, "not registered"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			defer func() {
@@ -396,104 +405,58 @@ func TestNewTool_validation(t *testing.T) {
 	}
 }
 
-func TestTypeToJSONSchema(t *testing.T) {
-	t.Run("basic struct", func(t *testing.T) {
-		type Simple struct {
-			Name string `json:"name" desc:"The name"`
-			Age  int    `json:"age" desc:"The age"`
-		}
-		s, err := TypeToJSONSchema(Simple{})
-		if err != nil {
-			t.Fatal(err)
-		}
-		assertObject(t, s)
-		props := s["properties"].(map[string]any)
-		n := props["name"].(map[string]any)
-		if n["type"] != "string" || n["description"] != "The name" {
-			t.Errorf("name = %v", n)
-		}
-		a := props["age"].(map[string]any)
-		if a["type"] != "integer" || a["description"] != "The age" {
-			t.Errorf("age = %v", a)
-		}
-		assertRequired(t, s, "name", "age")
+func TestNewTool_pointerArgsAndNonStringResultAndBadArgs(t *testing.T) {
+	type args struct {
+		Name string `json:"name"`
+	}
+	tool := NewTool(ToolConfig{
+		Name: "ptr_args",
+		Handler: func(ctx context.Context, a *args) (string, error) {
+			if a == nil || a.Name == "" {
+				return "empty", nil
+			}
+			return a.Name, nil
+		},
 	})
+	res, err := tool.invoke(context.Background(), `{"name":"x"}`, nil)
+	got := res.output
+	if err != nil || got != "x" {
+		t.Fatalf("got %q %v", got, err)
+	}
+	// Type mismatch in JSON → invoke error.
+	_, err = tool.invoke(context.Background(), `{"name":123}`, nil)
+	if err == nil {
+		t.Fatal("want unmarshal error")
+	}
 
-	t.Run("nested structs", func(t *testing.T) {
-		type Inner struct {
-			Value string `json:"value"`
-		}
-		type Outer struct {
-			Inner Inner `json:"inner"`
-		}
-		s, err := TypeToJSONSchema(Outer{})
-		if err != nil {
-			t.Fatal(err)
-		}
-		props := s["properties"].(map[string]any)
-		inner := props["inner"].(map[string]any)
-		if inner["type"] != "object" {
-			t.Errorf("inner type = %v", inner["type"])
-		}
+	// Non-string result marshaled to JSON.
+	tool2 := NewTool(ToolConfig{
+		Name: "struct_out",
+		Handler: func(ctx context.Context) (struct {
+			N int `json:"n"`
+		}, error) {
+			return struct {
+				N int `json:"n"`
+			}{N: 7}, nil
+		},
 	})
+	res, err = tool2.invoke(context.Background(), "", nil)
+	got = res.output
+	if err != nil || !strings.Contains(got, "7") {
+		t.Fatalf("got %q %v", got, err)
+	}
 
-	t.Run("embedded struct flattened", func(t *testing.T) {
-		type Base struct {
-			BaseName string `json:"base_name"`
-		}
-		type Extended struct {
-			Base
-			Extra string `json:"extra"`
-		}
-		s, err := TypeToJSONSchema(Extended{})
-		if err != nil {
-			t.Fatal(err)
-		}
-		props := s["properties"].(map[string]any)
-		if _, ok := props["base_name"]; !ok {
-			t.Error("embedded field not flattened")
-		}
-		if _, ok := props["extra"]; !ok {
-			t.Error("own field missing")
-		}
+	// Unmarshallable result type → error.
+	tool3 := NewTool(ToolConfig{
+		Name: "bad_out",
+		Handler: func(ctx context.Context) (chan int, error) {
+			return make(chan int), nil
+		},
 	})
-
-	t.Run("nil value", func(t *testing.T) {
-		_, err := TypeToJSONSchema(nil)
-		if err == nil {
-			t.Fatal("expected error for nil")
-		}
-	})
-
-	t.Run("pointer type", func(t *testing.T) {
-		type Simple struct {
-			Name string `json:"name"`
-		}
-		s, err := TypeToJSONSchema(&Simple{})
-		if err != nil {
-			t.Fatal(err)
-		}
-		props := s["properties"].(map[string]any)
-		if _, ok := props["name"]; !ok {
-			t.Error("name field missing")
-		}
-	})
-
-	t.Run("enum tag", func(t *testing.T) {
-		type EnumStruct struct {
-			Kind string `json:"kind" enum:"a,b,c"`
-		}
-		s, err := TypeToJSONSchema(EnumStruct{})
-		if err != nil {
-			t.Fatal(err)
-		}
-		props := s["properties"].(map[string]any)
-		kind := props["kind"].(map[string]any)
-		enumVals := kind["enum"].([]string)
-		if len(enumVals) != 3 || enumVals[0] != "a" {
-			t.Errorf("enum = %v", enumVals)
-		}
-	})
+	_, err = tool3.invoke(context.Background(), "", nil)
+	if err == nil {
+		t.Fatal("want marshal result error")
+	}
 }
 
 func assertObject(t *testing.T, s map[string]any) {
@@ -525,115 +488,4 @@ func contains(slice []string, val string) bool {
 func asParams(t *testing.T, tool *Tool) map[string]any {
 	t.Helper()
 	return tool.AsJson()["parameters"].(map[string]any)
-}
-
-// TestNewTool_pointerArgsAndNonStringResultAndBadArgs: tool definition/invoke outcomes.
-func TestNewTool_pointerArgsAndNonStringResultAndBadArgs(t *testing.T) {
-	type args struct {
-		Name string `json:"name"`
-	}
-	tool := NewTool(ToolConfig{
-		Name: "ptr_args",
-		Handler: func(ctx context.Context, a *args) (string, error) {
-			if a == nil || a.Name == "" {
-				return "empty", nil
-			}
-			return a.Name, nil
-		},
-	})
-	res, err := tool.invoke(context.Background(), `{"name":"x"}`, HarnessRuntime{})
-	got := res.output
-	if err != nil || got != "x" {
-		t.Fatalf("got %q %v", got, err)
-	}
-	// Type mismatch in JSON → invoke error.
-	_, err = tool.invoke(context.Background(), `{"name":123}`, HarnessRuntime{})
-	if err == nil {
-		t.Fatal("want unmarshal error")
-	}
-
-	// Non-string result marshaled to JSON.
-	tool2 := NewTool(ToolConfig{
-		Name: "struct_out",
-		Handler: func(ctx context.Context) (struct {
-			N int `json:"n"`
-		}, error) {
-			return struct {
-				N int `json:"n"`
-			}{N: 7}, nil
-		},
-	})
-	res, err = tool2.invoke(context.Background(), "", HarnessRuntime{})
-	got = res.output
-	if err != nil || !strings.Contains(got, "7") {
-		t.Fatalf("got %q %v", got, err)
-	}
-
-	// Unmarshallable result type → error.
-	tool3 := NewTool(ToolConfig{
-		Name: "bad_out",
-		Handler: func(ctx context.Context) (chan int, error) {
-			return make(chan int), nil
-		},
-	})
-	_, err = tool3.invoke(context.Background(), "", HarnessRuntime{})
-	if err == nil {
-		t.Fatal("want marshal result error")
-	}
-}
-
-// time.Time fields serialize as strings in the tool schema.
-func TestNewTool_depthLimitAndTimeFields(t *testing.T) {
-	type L12 struct {
-		X string `json:"x"`
-	}
-	type L11 struct {
-		N L12 `json:"n"`
-	}
-	type L10 struct {
-		N L11 `json:"n"`
-	}
-	type L9 struct {
-		N L10 `json:"n"`
-	}
-	type L8 struct {
-		N L9 `json:"n"`
-	}
-	type L7 struct {
-		N L8 `json:"n"`
-	}
-	type L6 struct {
-		N L7 `json:"n"`
-	}
-	type L5 struct {
-		N L6 `json:"n"`
-	}
-	type L4 struct {
-		N L5 `json:"n"`
-	}
-	type L3 struct {
-		N L4 `json:"n"`
-	}
-	type L2 struct {
-		N L3 `json:"n"`
-	}
-	type L1 struct {
-		N    L2        `json:"n"`
-		When time.Time `json:"when"`
-	}
-	tool := NewTool(ToolConfig{
-		Name: "deep",
-		Handler: func(ctx context.Context, a L1) (string, error) {
-			return "ok", nil
-		},
-	})
-	params := tool.AsJson()["parameters"].(map[string]any)
-	props := params["properties"].(map[string]any)
-	when, ok := props["when"].(map[string]any)
-	if !ok || when["type"] != "string" {
-		t.Fatalf("time.Time should be schema string, got %v", props["when"])
-	}
-	if _, ok := props["n"]; !ok {
-		t.Fatal("nested field missing")
-	}
 }

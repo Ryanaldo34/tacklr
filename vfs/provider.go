@@ -24,19 +24,31 @@ type Provider interface {
 	MkdirAll(ctx context.Context, name string, perm fs.FileMode) error
 }
 
-// File is an open file handle for a provider-relative path.
+// File is an open handle. Close and Stat always work.
+//
+// Extra capabilities are optional interfaces — comma-ok, not dummy methods:
+//
+//	r, ok := f.(io.Reader)   // sequential read
+//	ra, ok := f.(io.ReaderAt) // offset read (FUSE)
+//	w, ok := f.(io.Writer)    // sequential write
 type File interface {
-	io.ReadWriteCloser
+	io.Closer
 	Stat() (FileInfo, error)
 }
 
 // FileInfo describes a file or directory (agent-safe: no host paths).
+//
+// MediaType is the provider's classification of a file (never a host path).
+// Empty on directories. On files, providers must set it: a concrete type
+// (text/markdown, image/png, …) or application/octet-stream when unknown.
+// OpenDocument does not sniff; it only looks up a codec for this value.
 type FileInfo struct {
-	Name    string
-	Size    int64
-	Mode    fs.FileMode
-	ModTime time.Time
-	IsDir   bool
+	Name      string
+	Size      int64
+	Mode      fs.FileMode
+	ModTime   time.Time
+	IsDir     bool
+	MediaType string
 }
 
 // DirEntry is a single directory entry.

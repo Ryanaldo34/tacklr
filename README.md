@@ -19,7 +19,7 @@ go get github.com/ryanaldo34/tacklr
 | Doc | What it covers |
 |-----|----------------|
 | [docs/knowledge.md](docs/knowledge.md) | **Canonical** knowledge system: Engrams, search, graph, tools |
-| [docs/vfs.md](docs/vfs.md) | Mounts, content IR, write-back, dirty overlay, lifecycle |
+| [docs/vfs.md](docs/vfs.md) | Mounts, content IR, provider persist, lifecycle |
 | [pkg.go.dev/tacklr](https://pkg.go.dev/github.com/ryanaldo34/tacklr) | Harness, tools, types |
 | [pkg.go.dev/vfs](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfs) | Virtual filesystem API |
 | [pkg.go.dev/brain](https://pkg.go.dev/github.com/ryanaldo34/tacklr/brain) | Knowledge engine API |
@@ -50,10 +50,10 @@ The model proposes. **Our runtime decides what is real, allowed, and durable.**
 |---------|------------|
 | Process address space | **Session mounts** — only the virtual paths you attach |
 | Filesystem | **[`vfs`](docs/vfs.md)** — local, S3, brain Engrams, later Drive/Docs behind one path API |
-| File contents | **Content IR** — what the agent edits (lines + Markdown block outline when applicable; rich WYSIWYG later). Codecs turn that into storage bytes on Sync |
+| File contents | **Content IR** — what the agent edits (lines + Markdown block outline when applicable; rich WYSIWYG later). Codecs turn that into storage bytes on persist |
 | Syscalls | **Tools**, and later a **custom agent shell** and script guests, all through a **capability broker** |
 | Kernel | **Eventually** Linux eBPF / cgroup / seccomp as the backstop when something tries to cheat |
-| Save process image | **Checkpoints** — conversation, plan, interrupts, mounts; we Sync IR first so disk matches the session |
+| Save process image | **Checkpoints** — conversation, plan, interrupts, mounts |
 | Shared knowledge | **Optional [brain](https://pkg.go.dev/github.com/ryanaldo34/tacklr/brain)** — query when you need it, not a static RAG dump rotting in context |
 
 ```text
@@ -80,7 +80,7 @@ Models will always be probabilistic. **The harness does not have to be.** We are
 | What goes wrong elsewhere | What we do |
 |---------------------------|------------|
 | Context turns into sludge | Plans, todos, **handoffs**—only carry what the next work needs ([AGENTS.md](AGENTS.md)) |
-| Disk and “open buffer” disagree | Session-visible **IR** and write-back; backend updates on **Sync** ([docs/vfs.md](docs/vfs.md)) |
+| Disk and “open buffer” disagree | Session-visible **IR**; the provider persists on **WriteDocument** ([docs/vfs.md](docs/vfs.md)) |
 | Edits clobber each other silently | Content **`rev`** (hash)—stale write fails closed, re-read and retry |
 | Crash mid-run, state evaporates | **Checkpoints** + [stores](https://pkg.go.dev/github.com/ryanaldo34/tacklr/stores) (memory or Postgres) |
 | Tools side-effect into the void | Structured results, plan effects, stream events—you can see what happened |
@@ -109,7 +109,7 @@ Security is a **platform property**. If it only lives in the system prompt, you 
 |-------|-----|------|
 | **Inference** | Talk to the model, nothing else | [`inference`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/inference) |
 | **Harness** | Turn loop, tools, plan, context, save/load | [`tacklr`](https://pkg.go.dev/github.com/ryanaldo34/tacklr) |
-| **VFS** | Mounts, IR, write-back | [docs/vfs.md](docs/vfs.md) · [`vfs`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfs) |
+| **VFS** | Mounts, IR, provider persist | [docs/vfs.md](docs/vfs.md) · [`vfs`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfs) |
 | **Store** | Checkpoints | [`stores`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/stores) |
 | **Brain** | Knowledge (optional) | [`brain`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/brain) |
 | **Server** | Multi-agent / protocols (optional) | [`server`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/server) |
@@ -200,7 +200,7 @@ agent := tacklr.NewAgent(ctx, opts)
 agent, err := tacklr.NewAgentFromSession(ctx, sessionID, opts)
 ```
 
-Checkpoints cover conversation, plan, tool/user state, and pending interrupts. In-memory for throwaway runs; Postgres when you need durability. With a [VFS](docs/vfs.md) attached, we **Sync** dirty IR before we save mount specs—so you do not checkpoint a lie.
+Checkpoints cover conversation, plan, tool/user state, and pending interrupts. In-memory for throwaway runs; Postgres when you need durability. VFS writes persist immediately (write-through IR); checkpoints store mount specs, not a dirty document cache.
 
 ### Host tools vs plan system
 
@@ -214,7 +214,7 @@ That boundary exists so product code cannot accidentally trash planning.
 
 ### VFS
 
-Register backends, bootstrap mounts—[docs/vfs.md](docs/vfs.md). When VFS is wired, the harness injects file tools (`read_lines`, `replace_*`, `write`, `find_files`, …) over **virtual paths only**. The agent never gets a host path or a bucket key. With Brain + VFS + search namespace, the harness registers **`brain.BrainFactory`**, mounts **`/engram`** (prefix, `IndexPolicy=none`) unless the host already provided a brain-profile mount, and injects **`index_file` / `unindex` / `find_content`** for **artifact** mounts only. Engrams are Markdown files on the brain Provider; `save_*` writes those paths (or `Engine.Put` if no brain mount). Path-native **link / unlink / expand / find_links**. Artifact → brain still uses one **IndexPath** pipeline (hash skip). Brain-profile mounts are never remirrored as Document/Chunk artifacts.
+Register backends, bootstrap mounts—[docs/vfs.md](docs/vfs.md). When VFS is wired, the harness injects file tools (`read`, `write`, `run_command`) over **virtual paths only**. The agent never gets a host path or a bucket key. Live names/grep/tree ops go through `run_command` (`ls` / `fd` / `rg` / `mkdir` / `rm`). With Brain + VFS + search namespace, the harness registers **`brain.BrainFactory`**, mounts **`/engram`** (prefix, `IndexPolicy=none`) unless the host already provided a brain-profile mount, and injects **`index_file` / `unindex`** for **artifact** mounts only. Indexed recall is brain `search`; objects without a file use `read_object`. Engrams are Markdown files on the brain Provider; `save_*` writes those paths (or `Engine.Put` if no brain mount). Path-native **link / unlink / expand / find_links**. Artifact → brain still uses one **IndexPath** pipeline (hash skip). Brain-profile mounts are never remirrored as Document/Chunk artifacts.
 
 ---
 
@@ -225,7 +225,7 @@ Register backends, bootstrap mounts—[docs/vfs.md](docs/vfs.md). When VFS is wi
 - **MCP** — external tool servers ([`mcp`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/mcp))  
 - **Skills** — `SKILL.md` catalogs ([`skills`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/skills))  
 - **Web** — search/fetch when Exa is configured  
-- **VFS** — mounts + IR ([docs/vfs.md](docs/vfs.md)); optional artifact index via [`vfsindex`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfsindex) (`index_file` / `find_content` / IndexPolicy when Brain + namespace too)  
+- **VFS** — mounts + IR ([docs/vfs.md](docs/vfs.md)); optional artifact index via [`vfsindex`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfsindex) (`index_file` / `unindex` / IndexPolicy when Brain + namespace too); live names/grep via `run_command`  
 - **Brain** — knowledge system when you set `AgentOptions.Brain`; host `KindSpec`s appear as Engram Markdown files (`/engram/…` or host roots) via `brain.Provider`. Full guide: [docs/knowledge.md](docs/knowledge.md)  
 
 
@@ -280,21 +280,21 @@ We already have the harness, VFS, IR, brain hooks, and checkpoints. Next we clos
 | Inference strategy | **Shipped** | OpenAI-compatible streams |
 | Brain | **Shipped** | Optional; tools only when wired |
 | VFS mounts (local, S3) | **Shipped** | [docs/vfs.md](docs/vfs.md) |
-| Content IR (text) + write-back | **Shipped** | Dirty overlay so the session sees edits before Sync |
+| Content IR (text) | **Shipped** | Provider translates IR and persists immediately |
 | Content `rev` + file tools | **Shipped** | When VFS is set |
 | Progressive line windows | **Shipped** | Large text without always full materialize |
 | Structured Markdown / `block_id` | **Shipped** | Projected heading blocks; outline + block replace; index props |
 | Mount → brain (`vfsindex`) | **Shipped** | Optional bridge; MD by blocks, other text by lines; async reindex later |
 | Unified `read` / `replace` for all media | **Planned** | One edit surface; codecs do the rest |
 | Rich document IR (WYSIWYG) | **Planned** | Word/Docs codecs → same Block schema + style metadata |
-| FUSE projection | **Planned** | Real `rg` / `fd` / `ls` on the session tree |
+| FUSE projection | **Shipped** | `MountSession.FuseMount` — `rg` / `fd` / `ls` on the session tree |
 | Custom agent shell | **Planned** | Our shell, VFS-backed—not raw host bash as the main path |
 | Sandboxed Python / JS | **Planned** | Guests with our APIs only |
 | Capability broker | **Planned** | Mid-flight allow / deny / ask |
 | Linux eBPF / cgroup | **Eventually** | Backstop when something tries to leave the box |
 | Materialize tree (no FUSE) | **Eventually** | Same idea without kernel FS glue |
 
-**testserver** can mount a local jail at `/tmp/tacklr` so you can poke mounts and file tools end-to-end.
+**testserver** bootstraps virtual `Point: /work` with `LocalFactory.Base` as the host jail so you can poke mounts and file tools end-to-end.
 
 ### Target architecture
 
@@ -302,9 +302,9 @@ We already have the harness, VFS, IR, brain hooks, and checkpoints. Next we clos
 flowchart TB
   subgraph harness [Agent harness]
     Plan[Plan / todos / handoff]
-    Tools[Hard tools: read · replace · write]
+    Tools[Hard tools: read · write]
     Ctx[Structured context]
-    CP[Checkpoint + SyncAll]
+    CP[Checkpoint]
   end
 
   subgraph runtime [Agent runtime]
@@ -317,7 +317,7 @@ flowchart TB
   subgraph vfs_layer [Virtual filesystem]
     MS[MountSession]
     IR[Content IR<br/>text lines · rich blocks + styles]
-    Overlay[Dirty write-back overlay]
+    Overlay[Provider IR + persist]
     Codec[Codecs bytes ↔ IR]
   end
 
@@ -374,21 +374,20 @@ sequenceDiagram
     Broker->>Broker: policy allow · deny · ask
     alt allowed
       Broker->>VFS: session-visible I/O
-      VFS->>Backend: on Sync / write-through only
+      VFS->>Backend: provider translates IR and persists now
       Broker-->>Agent: result
     else deny or human gate
       Broker-->>Harness: block / interrupt
     end
   end
-  Harness->>VFS: SyncAll on checkpoint
-  VFS->>Backend: codecs encode durable bytes
+  Note over Harness,Backend: Harness does not flush VFS
 ```
 
 ### Agent-facing surface (where we are going)
 
 | Job | How |
 |-----|-----|
-| Discover / search | Restricted shell and/or `rg`·`fd` on FUSE; optional `list` / `stat` |
+| Discover / search | Restricted shell and/or `rg`·`fd` on FUSE |
 | Read (+ `rev`) | One **`read`**—lines or rich doc IR |
 | Edit | **`replace`** / **`write`** with `rev` (plain and WYSIWYG) |
 | Tree ops | Shell under policy, or thin tools if you refuse shell |

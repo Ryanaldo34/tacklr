@@ -125,7 +125,6 @@ func (c *SearchContext) Export() ([]byte, error) {
 }
 
 // Restore loads a prior Export. Empty/nil clears the context.
-// Accepts the current envelope and the legacy ResultSet-only JSON.
 func (c *SearchContext) Restore(raw []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -134,28 +133,14 @@ func (c *SearchContext) Restore(raw []byte) error {
 		c.current = nil
 		return nil
 	}
-	// Envelope form is preferred. Fall back to bare ResultSet for older checkpoints.
 	var env searchContextExport
 	if err := json.Unmarshal(raw, &env); err != nil {
 		return fmt.Errorf("brain: restore search context: %w", err)
 	}
-	if env.Namespace != nil || env.ResultSet != nil {
-		c.namespace = env.Namespace
-		c.current = env.ResultSet
-		if c.current != nil && c.current.ID == uuid.Nil {
-			c.current = nil
-		}
-		return nil
-	}
-	var set ResultSet
-	if err := json.Unmarshal(raw, &set); err != nil {
-		return fmt.Errorf("brain: restore search context: %w", err)
-	}
-	c.namespace = nil
-	if set.ID == uuid.Nil {
+	c.namespace = env.Namespace
+	c.current = env.ResultSet
+	if c.current != nil && c.current.ID == uuid.Nil {
 		c.current = nil
-		return nil
 	}
-	c.current = &set
 	return nil
 }

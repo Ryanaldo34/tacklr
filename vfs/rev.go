@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"unsafe"
 )
 
 // ContentRev identifies session-visible file content for optimistic concurrency.
@@ -16,22 +18,31 @@ type ContentRev struct {
 
 // ContentHash returns hex SHA-256 of body.
 func ContentHash(body string) string {
-	sum := sha256.Sum256([]byte(body))
+	return hashSHA256(unsafe.Slice(unsafe.StringData(body), len(body)))
+}
+
+func hashSHA256(b []byte) string {
+	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
 }
 
-// ContentRev hashes the session-visible body (any IR cache hit, else ReadFile).
+// ContentRev hashes the session-visible body: ReadText when textual (same
+// bytes FUSE and the read tool show), otherwise ReadFile.
 func (m *MountSession) ContentRev(ctx context.Context, virtualPath string) (ContentRev, error) {
 	cleaned, err := cleanVirtualPath(virtualPath)
 	if err != nil {
 		return ContentRev{}, err
 	}
-	if doc, _, _, _, ok := m.cache.get(cleaned); ok {
-		return ContentRev{Path: cleaned, Hash: ContentHash(doc.Text())}, nil
+	t, err := m.ReadText(ctx, cleaned)
+	if err == nil {
+		return ContentRev{Path: cleaned, Hash: ContentHash(t.Text())}, nil
+	}
+	if !errors.Is(err, ErrNoCodec) && !errors.Is(err, ErrNotTextual) && !errors.Is(err, ErrNotSupported) {
+		return ContentRev{}, err
 	}
 	raw, err := m.ReadFile(ctx, cleaned)
 	if err != nil {
 		return ContentRev{}, err
 	}
-	return ContentRev{Path: cleaned, Hash: ContentHash(string(raw))}, nil
+	return ContentRev{Path: cleaned, Hash: hashSHA256(raw)}, nil
 }

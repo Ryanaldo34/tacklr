@@ -40,7 +40,7 @@ func TestACP_elicitationForm_resolvesInterruptAndCompletes(t *testing.T) {
 	optionsJSON := `[{"title":"Option A","description":"First","isRecommended":true},{"title":"Option B","description":"Second","isRecommended":false}]`
 	interruptTool := tacklr.NewTool(tacklr.ToolConfig{
 		Name: "ask_user",
-		Handler: func(ctx context.Context, _ struct{}, runtime *tacklr.HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, _ struct{}, runtime tacklr.HarnessRuntime) (string, error) {
 			intr, err := runtime.RaiseInterrupt("user_selection_choice", []byte(optionsJSON))
 			if err != nil {
 				return "", err
@@ -238,12 +238,12 @@ func idMatch(id any, want int) bool {
 	}
 }
 
-// TestACP_requestPermission_allowsToolAndCompletes: PermissionRequired tool raises
+// TestACP_requestPermission_allowsToolAndCompletes: OnCall permission tool raises
 // tool_permission; client approves via session/request_permission; tool runs.
 func TestACP_requestPermission_allowsToolAndCompletes(t *testing.T) {
 	sensitive := tacklr.NewTool(tacklr.ToolConfig{
-		Name:               "sensitive",
-		PermissionRequired: true,
+		Name:   "sensitive",
+		OnCall: tacklr.OnCalls(tacklr.ToolPermissionOnCall),
 		Handler: func(ctx context.Context) (string, error) {
 			return "secret-ok", nil
 		},
@@ -422,8 +422,8 @@ func TestACP_requestPermission_allowsToolAndCompletes(t *testing.T) {
 func TestACP_requestPermission_rejectFailsToolAndCompletes(t *testing.T) {
 	var ran bool
 	sensitive := tacklr.NewTool(tacklr.ToolConfig{
-		Name:               "sensitive",
-		PermissionRequired: true,
+		Name:   "sensitive",
+		OnCall: tacklr.OnCalls(tacklr.ToolPermissionOnCall),
 		Handler: func(ctx context.Context) (string, error) {
 			ran = true
 			return "secret-ok", nil
@@ -600,9 +600,9 @@ func TestACP_requestPermission_rejectFailsToolAndCompletes(t *testing.T) {
 // TestACP_requestPermission_cancelledEndsPrompt: cancelled outcome ends the turn.
 func TestACP_requestPermission_cancelledEndsPrompt(t *testing.T) {
 	sensitive := tacklr.NewTool(tacklr.ToolConfig{
-		Name:               "sensitive",
-		PermissionRequired: true,
-		Handler:            func(ctx context.Context) (string, error) { return "nope", nil },
+		Name:    "sensitive",
+		OnCall:  tacklr.OnCalls(tacklr.ToolPermissionOnCall),
+		Handler: func(ctx context.Context) (string, error) { return "nope", nil },
 	})
 	strategy := &mockInferenceStrategy{
 		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
@@ -704,7 +704,7 @@ func TestACP_elicitationForm_declineEndsPrompt(t *testing.T) {
 	optionsJSON := `[{"title":"A","description":"","isRecommended":true},{"title":"B","description":"","isRecommended":false}]`
 	interruptTool := tacklr.NewTool(tacklr.ToolConfig{
 		Name: "ask_user",
-		Handler: func(ctx context.Context, _ struct{}, runtime *tacklr.HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, _ struct{}, runtime tacklr.HarnessRuntime) (string, error) {
 			_, err := runtime.RaiseInterrupt("user_selection_choice", []byte(optionsJSON))
 			return "", err
 		},
@@ -820,7 +820,7 @@ func TestACP_elicitationForm_cancelEndsPrompt(t *testing.T) {
 	optionsJSON := `[{"title":"A","description":"","isRecommended":true},{"title":"B","description":"","isRecommended":false}]`
 	interruptTool := tacklr.NewTool(tacklr.ToolConfig{
 		Name: "ask_user",
-		Handler: func(ctx context.Context, _ struct{}, runtime *tacklr.HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, _ struct{}, runtime tacklr.HarnessRuntime) (string, error) {
 			_, err := runtime.RaiseInterrupt("user_selection_choice", []byte(optionsJSON))
 			return "", err
 		},
@@ -939,7 +939,7 @@ func TestACP_elicitation_malformedInterruptEndsTurn(t *testing.T) {
 	optionsJSON := `[{"title":"only-one"}]` // < 2 options
 	interruptTool := tacklr.NewTool(tacklr.ToolConfig{
 		Name: "ask_user",
-		Handler: func(ctx context.Context, _ struct{}, runtime *tacklr.HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, _ struct{}, runtime tacklr.HarnessRuntime) (string, error) {
 			_, err := runtime.RaiseInterrupt("user_selection_choice", []byte(optionsJSON))
 			return "", err
 		},

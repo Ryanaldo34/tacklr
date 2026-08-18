@@ -22,6 +22,7 @@ type acpWireSession struct {
 	cwd          string
 	mcpServers   []mcp.MCPConfig
 	configValues map[string]string
+	owner        string
 	prompted     bool // true after the first prompt turn was bound
 }
 
@@ -30,6 +31,7 @@ type acpWireEnvelope struct {
 	CWD          string            `json:"cwd"`
 	ConfigValues map[string]string `json:"configValues"`
 	MCPServers   []mcp.MCPConfig   `json:"mcpServers"`
+	Owner        string            `json:"owner,omitempty"`
 	Prompted     bool              `json:"prompted"`
 }
 
@@ -45,7 +47,8 @@ func (s *acpWireSession) envelope() acpWireEnvelope {
 	return acpWireEnvelope{
 		CWD:          s.cwd,
 		ConfigValues: cfg,
-		MCPServers:   append([]mcp.MCPConfig(nil), s.mcpServers...),
+		MCPServers:   mcp.DurableConfigs(s.mcpServers),
+		Owner:        s.owner,
 		Prompted:     s.prompted,
 	}
 }
@@ -59,6 +62,7 @@ func wireSessionFromEnvelope(env acpWireEnvelope) *acpWireSession {
 		cwd:          env.CWD,
 		mcpServers:   append([]mcp.MCPConfig(nil), env.MCPServers...),
 		configValues: cfg,
+		owner:        env.Owner,
 		prompted:     env.Prompted,
 	}
 }
@@ -113,6 +117,9 @@ func (p *acpProtocol) resolveWireSession(ctx context.Context, sessionID string) 
 
 // CreateSession implements Protocol wire session create for ACP.
 func (p *acpProtocol) CreateSession(ctx context.Context, env ProtocolEnv, params json.RawMessage) (string, any, error) {
+	if err := authorizeOperation(ctx, env, actionSessionCreate, ""); err != nil {
+		return "", nil, err
+	}
 	var pr acpSessionParams
 	if len(params) > 0 {
 		if err := json.Unmarshal(params, &pr); err != nil {
@@ -132,6 +139,7 @@ func (p *acpProtocol) CreateSession(ctx context.Context, env ProtocolEnv, params
 		cwd:          pr.Cwd,
 		mcpServers:   pr.MCPServers,
 		configValues: cfg,
+		owner:        securitySubject(env),
 	}
 	p.mu.Lock()
 	if p.sessions == nil {
@@ -169,7 +177,7 @@ func (p *acpProtocol) LoadSession(ctx context.Context, env ProtocolEnv, sessionI
 			sessionID = pr.SessionID
 		}
 	}
-	sess, err := p.resolveWireSession(ctx, sessionID)
+	sess, err := p.resolveOwnedWireSession(ctx, env, sessionID, actionSessionLoad)
 	if err != nil {
 		return nil, err
 	}
@@ -207,7 +215,7 @@ func (p *acpProtocol) LoadSession(ctx context.Context, env ProtocolEnv, sessionI
 
 // BindTurn implements Protocol: maps ACP session/prompt or session/resume params
 // into a Registry TurnRequest. This is the only turn-binding path for ACP.
-func (p *acpProtocol) BindTurn(ctx context.Context, env ProtocolEnv, sessionID string, turnParams json.RawMessage) (TurnRequest, error) {
+func (p *acpProtocol) BindTurn(ctx context.Context, env ProtocolEnv, sessionID, method string, turnParams json.RawMessage) (TurnRequest, error) {
 	var prompt string
 	var userMsg *tacklr.Message
 	var responses map[string]json.RawMessage
@@ -215,8 +223,27 @@ func (p *acpProtocol) BindTurn(ctx context.Context, env ProtocolEnv, sessionID s
 	var mcpFromClient []mcp.MCPConfig
 
 	if len(turnParams) > 0 {
-		var pp acpPromptParams
-		if err := json.Unmarshal(turnParams, &pp); err == nil {
+		switch method {
+		case "session/resume":
+			var sp acpSessionParams
+			if err := json.Unmarshal(turnParams, &sp); err == nil {
+				if sp.SessionID != "" {
+					sessionID = sp.SessionID
+				}
+				cwd = sp.Cwd
+				mcpFromClient = sp.MCPServers
+			}
+			var withResp struct {
+				Responses map[string]json.RawMessage `json:"responses"`
+			}
+			if err := json.Unmarshal(turnParams, &withResp); err == nil {
+				responses = withResp.Responses
+			}
+		default:
+			var pp acpPromptParams
+			if err := json.Unmarshal(turnParams, &pp); err != nil {
+				return TurnRequest{}, clientErrorf(ErrInvalidRequest, "invalid prompt params: %v", err)
+			}
 			if pp.SessionID != "" {
 				sessionID = pp.SessionID
 			}
@@ -228,26 +255,21 @@ func (p *acpProtocol) BindTurn(ctx context.Context, env ProtocolEnv, sessionID s
 				userMsg = msg
 				prompt = msg.Content
 			}
-		}
-		var sp acpSessionParams
-		if err := json.Unmarshal(turnParams, &sp); err == nil {
-			if sp.SessionID != "" && sessionID == "" {
-				sessionID = sp.SessionID
+			var sp acpSessionParams
+			if err := json.Unmarshal(turnParams, &sp); err == nil {
+				if sp.SessionID != "" && sessionID == "" {
+					sessionID = sp.SessionID
+				}
+				cwd = sp.Cwd
+				mcpFromClient = sp.MCPServers
 			}
-			cwd = sp.Cwd
-			mcpFromClient = sp.MCPServers
 		}
-		var withResp struct {
-			Responses map[string]json.RawMessage `json:"responses"`
-		}
-		_ = json.Unmarshal(turnParams, &withResp)
-		responses = withResp.Responses
 	}
 
 	if sessionID == "" {
 		return TurnRequest{}, clientErrorf(ErrInvalidRequest, "sessionId is required")
 	}
-	sess, err := p.resolveWireSession(ctx, sessionID)
+	sess, err := p.resolveOwnedWireSession(ctx, env, sessionID, actionSessionPrompt)
 	if err != nil {
 		return TurnRequest{}, err
 	}
@@ -304,6 +326,9 @@ func (p *acpProtocol) BindTurn(ctx context.Context, env ProtocolEnv, sessionID s
 	if err := p.persistWire(ctx, sessionID, sess); err != nil {
 		return TurnRequest{}, err
 	}
+	if env.Registry != nil {
+		installVFSRefresh(env, sessionID, env.Registry.vfsAuth)
+	}
 
 	return TurnRequest{
 		SessionID:              sessionID,
@@ -321,6 +346,9 @@ func (p *acpProtocol) BindTurn(ctx context.Context, env ProtocolEnv, sessionID s
 
 // CloseSession implements Protocol for ACP.
 func (p *acpProtocol) CloseSession(ctx context.Context, env ProtocolEnv, sessionID string) error {
+	if _, err := p.resolveOwnedWireSession(ctx, env, sessionID, actionSessionClose); err != nil {
+		return err
+	}
 	if p != nil {
 		p.mu.Lock()
 		delete(p.sessions, sessionID)
@@ -339,7 +367,7 @@ func (p *acpProtocol) CloseSession(ctx context.Context, env ProtocolEnv, session
 }
 
 func (p *acpProtocol) setConfig(ctx context.Context, env ProtocolEnv, sessionID, configID, value string) (any, error) {
-	sess, err := p.resolveWireSession(ctx, sessionID)
+	sess, err := p.resolveOwnedWireSession(ctx, env, sessionID, actionSessionConfig)
 	if err != nil {
 		return nil, err
 	}

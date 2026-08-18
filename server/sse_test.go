@@ -62,7 +62,7 @@ func makeInterruptTool(t *testing.T, optionsJSON string) *tacklr.Tool {
 	t.Helper()
 	return tacklr.NewTool(tacklr.ToolConfig{
 		Name: "ask_user",
-		Handler: func(ctx context.Context, _ struct{}, runtime *tacklr.HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, _ struct{}, runtime tacklr.HarnessRuntime) (string, error) {
 			intr, err := runtime.RaiseInterrupt("user_selection_choice", []byte(optionsJSON))
 			if err != nil {
 				return "", err
@@ -73,9 +73,9 @@ func makeInterruptTool(t *testing.T, optionsJSON string) *tacklr.Tool {
 	})
 }
 
-func parseSSEEvents(t *testing.T, body io.Reader) []sseEvent {
+func parseSSEEvents(t *testing.T, body io.Reader) []presentationEvent {
 	t.Helper()
-	var events []sseEvent
+	var events []presentationEvent
 	scanner := bufio.NewScanner(body)
 	var currentType string
 	var currentData strings.Builder
@@ -87,10 +87,10 @@ func parseSSEEvents(t *testing.T, body io.Reader) []sseEvent {
 		if currentType == "thread" {
 			var te threadEvent
 			if err := json.Unmarshal([]byte(currentData.String()), &te); err == nil {
-				events = append(events, sseEvent{Type: currentType, Content: te.ThreadID})
+				events = append(events, presentationEvent{Type: currentType, Content: te.ThreadID})
 			}
 		} else {
-			var ev sseEvent
+			var ev presentationEvent
 			if err := json.Unmarshal([]byte(currentData.String()), &ev); err == nil {
 				ev.Type = currentType
 				events = append(events, ev)
@@ -132,7 +132,7 @@ func TestHandlePrompt_generatesThreadID(t *testing.T) {
 	req := newSSERequest(t, "/", body)
 	rec := httptest.NewRecorder()
 
-	NewServer(r, SSE).serveHTTPSSE(rec, req)
+	NewServer(r, SSE).HTTPMux().ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -163,7 +163,7 @@ func TestHandlePrompt_missingAcceptHeader_returnsNotAcceptable(t *testing.T) {
 	req.Header.Set("Accept", "application/json")
 	rec := httptest.NewRecorder()
 
-	NewServer(r, SSE).serveHTTPSSE(rec, req)
+	NewServer(r, SSE).HTTPMux().ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotAcceptable {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotAcceptable)
@@ -196,7 +196,7 @@ func TestHandleResume_resolvesInterrupt(t *testing.T) {
 	promptBody := bytes.NewReader([]byte(`{"agent_id":"default","prompt":"start"}`))
 	promptReq := newSSERequest(t, "/", promptBody)
 	promptRec := httptest.NewRecorder()
-	NewServer(r, SSE).serveHTTPSSE(promptRec, promptReq)
+	NewServer(r, SSE).HTTPMux().ServeHTTP(promptRec, promptReq)
 
 	events := parseSSEEvents(t, promptRec.Body)
 	var threadID, interruptID string
@@ -225,7 +225,7 @@ func TestHandleResume_resolvesInterrupt(t *testing.T) {
 	resumeBody := fmt.Sprintf(`{"agent_id":"default","thread_id":%q,"responses":{%q:{"interruptId":%q,"selectionIdx":0}}}`, threadID, interruptID, interruptID)
 	resumeReq := newSSERequest(t, "/resume", bytes.NewReader([]byte(resumeBody)))
 	resumeRec := httptest.NewRecorder()
-	NewServer(r, SSE).serveHTTPSSE(resumeRec, resumeReq)
+	NewServer(r, SSE).HTTPMux().ServeHTTP(resumeRec, resumeReq)
 
 	if resumeRec.Code != http.StatusOK {
 		t.Fatalf("resume status = %d, want 200", resumeRec.Code)
@@ -265,8 +265,8 @@ func TestHandleResume_toolPermission_allowAndReject(t *testing.T) {
 			store := testStore(t)
 			var ran bool
 			sensitive := tacklr.NewTool(tacklr.ToolConfig{
-				Name:               "sensitive",
-				PermissionRequired: true,
+				Name:   "sensitive",
+				OnCall: tacklr.OnCalls(tacklr.ToolPermissionOnCall),
 				Handler: func(ctx context.Context) (string, error) {
 					ran = true
 					return "secret-ok", nil
@@ -289,7 +289,7 @@ func TestHandleResume_toolPermission_allowAndReject(t *testing.T) {
 			r := newTestRegistry(store, strategy, []*tacklr.Tool{sensitive})
 
 			promptRec := httptest.NewRecorder()
-			NewServer(r, SSE).serveHTTPSSE(promptRec, newSSERequest(t, "/", bytes.NewReader([]byte(`{"agent_id":"default","prompt":"start"}`))))
+			NewServer(r, SSE).HTTPMux().ServeHTTP(promptRec, newSSERequest(t, "/", bytes.NewReader([]byte(`{"agent_id":"default","prompt":"start"}`))))
 
 			events := parseSSEEvents(t, promptRec.Body)
 			var threadID, interruptID string
@@ -316,7 +316,7 @@ func TestHandleResume_toolPermission_allowAndReject(t *testing.T) {
 
 			resumeBody := fmt.Sprintf(`{"agent_id":"default","thread_id":%q,"responses":{%q:{"optionId":%q}}}`, threadID, interruptID, tc.optionID)
 			resumeRec := httptest.NewRecorder()
-			NewServer(r, SSE).serveHTTPSSE(resumeRec, newSSERequest(t, "/resume", bytes.NewReader([]byte(resumeBody))))
+			NewServer(r, SSE).HTTPMux().ServeHTTP(resumeRec, newSSERequest(t, "/resume", bytes.NewReader([]byte(resumeBody))))
 			if resumeRec.Code != http.StatusOK {
 				t.Fatalf("resume status = %d", resumeRec.Code)
 			}
@@ -360,7 +360,7 @@ func TestHandleResume_unknownThread_returnsError(t *testing.T) {
 	body := bytes.NewReader([]byte(`{"agent_id":"default","thread_id":"nonexistent","responses":{"x":{}}}`))
 	req := newSSERequest(t, "/resume", body)
 	rec := httptest.NewRecorder()
-	NewServer(r, SSE).serveHTTPSSE(rec, req)
+	NewServer(r, SSE).HTTPMux().ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -368,7 +368,7 @@ func TestHandleResume_unknownThread_returnsError(t *testing.T) {
 	events := parseSSEEvents(t, rec.Body)
 	var foundError bool
 	for _, ev := range events {
-		if ev.Type == "error" && strings.Contains(ev.Error, "load session") {
+		if ev.Type == "error" && strings.Contains(ev.ErrorText, "load session") {
 			foundError = true
 		}
 	}
@@ -399,7 +399,7 @@ func TestHandleResume_invalidPayload_returnsError(t *testing.T) {
 
 	// Raise an interrupt first
 	promptRec := httptest.NewRecorder()
-	NewServer(r, SSE).serveHTTPSSE(promptRec, newSSERequest(t, "/", bytes.NewReader([]byte(`{"agent_id":"default","prompt":"start"}`))))
+	NewServer(r, SSE).HTTPMux().ServeHTTP(promptRec, newSSERequest(t, "/", bytes.NewReader([]byte(`{"agent_id":"default","prompt":"start"}`))))
 
 	events := parseSSEEvents(t, promptRec.Body)
 	var threadID, interruptID string
@@ -422,12 +422,12 @@ func TestHandleResume_invalidPayload_returnsError(t *testing.T) {
 	// Resume with out-of-bounds selectionIdx
 	resumeBody := fmt.Sprintf(`{"agent_id":"default","thread_id":%q,"responses":{%q:{"interruptId":%q,"selectionIdx":99}}}`, threadID, interruptID, interruptID)
 	resumeRec := httptest.NewRecorder()
-	NewServer(r, SSE).serveHTTPSSE(resumeRec, newSSERequest(t, "/resume", bytes.NewReader([]byte(resumeBody))))
+	NewServer(r, SSE).HTTPMux().ServeHTTP(resumeRec, newSSERequest(t, "/resume", bytes.NewReader([]byte(resumeBody))))
 
 	resumeEvents := parseSSEEvents(t, resumeRec.Body)
 	var foundError bool
 	for _, ev := range resumeEvents {
-		if ev.Type == "error" && strings.Contains(ev.Error, "invalid payload") {
+		if ev.Type == "error" && strings.Contains(ev.ErrorText, "invalid payload") {
 			foundError = true
 		}
 	}

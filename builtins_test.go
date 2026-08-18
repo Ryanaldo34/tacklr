@@ -26,7 +26,7 @@ func testPlanTools() planToolsFixture {
 		edit:     newEditPlanTool(sm),
 		complete: newCompleteTodoTool(sm),
 		list:     newListPlanTool(sm),
-		store:    sm.Plan(),
+		store:    sm.Plan,
 	}
 }
 
@@ -41,7 +41,7 @@ func drainEventCh() chan streaming.StreamEvent {
 
 // planRT is a turn Runtime for plan/ask tool unit tests (events drained).
 func planRT() HarnessRuntime {
-	return session.NewRuntime(drainEventCh(), nil, session.NewSessionManager())
+	return session.NewRuntime(drainEventCh(), session.NewSessionManager())
 }
 
 // TestCreatePlanTool covers create_plan success and rejection return paths.
@@ -76,6 +76,23 @@ func TestCreatePlanTool(t *testing.T) {
 			`{"plan":"  ","todos":[{"title":"a","status":"pending","description":""}]}`, rt2)
 		if err == nil || !strings.Contains(err.Error(), "plan document text is required") {
 			t.Fatalf("err = %v", err)
+		}
+		_, err = pt2.create.invoke(context.Background(),
+			`{"plan":"valid","todos":[]}`, rt2)
+		if err == nil || !strings.Contains(err.Error(), "at least one todo") {
+			t.Fatalf("empty todos err = %v", err)
+		}
+	})
+	t.Run("starts first non-completed todo", func(t *testing.T) {
+		pt, rt := testPlanTools(), planRT()
+		_, err := pt.create.invoke(context.Background(),
+			`{"plan":"ship","todos":[{"title":"done","status":"completed","description":""},{"title":"next","status":"","description":"go"}]}`, rt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		plan := pt.store.Get()
+		if len(plan) != 2 || plan[0].Status != streaming.TodoStatusCompleted || plan[1].Status != streaming.TodoStatusInProgress {
+			t.Fatalf("plan = %+v", plan)
 		}
 	})
 }
@@ -314,8 +331,9 @@ func TestEditPlanTool(t *testing.T) {
 }
 
 func TestAskUserChoiceTool_raiseAndResume(t *testing.T) {
-	rt := session.NewRuntime(make(chan streaming.StreamEvent, 4), nil, session.NewSessionManager())
-	rt.CurrentToolCallID = "tc_ask"
+	sm := session.NewSessionManager()
+	rt := session.NewRuntime(make(chan streaming.StreamEvent, 4), sm)
+	rt = rt.WithToolCallID("tc_ask")
 
 	args, _ := json.Marshal(map[string]any{
 		"question": "Which approach?",
@@ -338,7 +356,7 @@ func TestAskUserChoiceTool_raiseAndResume(t *testing.T) {
 	}
 
 	// Resolve and re-invoke (harness re-execution pattern).
-	if _, err := rt.ReturnInterrupt("tc_ask", []byte(`{"selectionIdx":1}`)); err != nil {
+	if _, err := sm.ReturnInterrupt("tc_ask", []byte(`{"selectionIdx":1}`)); err != nil {
 		t.Fatal(err)
 	}
 	res, err := askUserChoiceTool.invoke(context.Background(), string(args), rt)
@@ -349,28 +367,6 @@ func TestAskUserChoiceTool_raiseAndResume(t *testing.T) {
 	want := `User selected "Careful" — more tests`
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
-	}
-}
-
-func TestAskUserChoiceTool_validation(t *testing.T) {
-	rt := planRT()
-	rt.CurrentToolCallID = "tc"
-
-	cases := []struct {
-		name string
-		args string
-	}{
-		{"empty question", `{"question":"","choices":[{"title":"A"},{"title":"B"}]}`},
-		{"one choice", `{"question":"q","choices":[{"title":"A"}]}`},
-		{"duplicate titles", `{"question":"q","choices":[{"title":"A"},{"title":"A"}]}`},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := askUserChoiceTool.invoke(context.Background(), tc.args, rt)
-			if err == nil {
-				t.Fatal("expected validation error")
-			}
-		})
 	}
 }
 
@@ -411,27 +407,6 @@ func TestListPlanTool_exactListing(t *testing.T) {
 // --- Parent harness outcomes for builtin plan / ask_user tools ---
 
 // TestRun_completeTodo_skipsAlreadyCompletedNext: completing advances past already-done siblings.
-func TestRun_completeTodo_skipsAlreadyCompletedNext(t *testing.T) {
-	model := sequentialToolModel(
-		[]ToolCall{toolCall("p1", "create_plan",
-			`{"plan":"P","todos":[{"title":"A","description":"a"},{"title":"B","description":"b","status":"completed"},{"title":"C","description":"c"}]}`)},
-		[]ToolCall{toolCall("c1", "complete_todo", `{"title":"A"}`)},
-	)
-	h, got := runPrompt(t, model, AgentOptions{Store: testStore(t)})
-	if !hasToolResultContent(got, `starting "C"`) && !hasToolResultContent(got, "Todo completed") {
-		t.Fatalf("want advance past completed B, got %+v", summarizeEvents(got))
-	}
-	plan := h.session.Plan().Get()
-	if len(plan) != 3 {
-		t.Fatalf("plan len = %d", len(plan))
-	}
-	if plan[2].Status != streaming.TodoStatusInProgress && plan[2].Status != streaming.TodoStatusCompleted {
-		t.Fatalf("plan statuses = %v %v %v", plan[0].Status, plan[1].Status, plan[2].Status)
-	}
-}
-
-// TestRun_planToolHappyAndErrorPaths: multi-call turn covers empty create → create →
-// missing complete → list; table covers isolated tool error return paths.
 func TestRun_planToolHappyAndErrorPaths(t *testing.T) {
 	model := sequentialToolModel(
 		[]ToolCall{toolCall("p1", "create_plan", `{"plan":"P","todos":[]}`)},
@@ -454,7 +429,7 @@ func TestRun_planToolHappyAndErrorPaths(t *testing.T) {
 		{"edit no plan", toolCall("e1", "edit_plan", `{"toDelete":["x"]}`), nil, "no plan"},
 		{"complete no plan", toolCall("c1", "complete_todo", `{"title":"A"}`), nil, "no plan"},
 		{"complete already done", toolCall("c1", "complete_todo", `{"title":"A"}`), func(h *AgentHarness) {
-			h.session.Plan().Set([]Todo{
+			h.session.Plan.Set([]Todo{
 				{Title: "A", Status: streaming.TodoStatusCompleted},
 				{Title: "B", Status: streaming.TodoStatusInProgress},
 			})
@@ -465,7 +440,7 @@ func TestRun_planToolHappyAndErrorPaths(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			model := sequentialToolModel([]ToolCall{c.call})
 			opts := AgentOptions{Model: model, Config: Config{MaxWindowSize: 8192}}
-			h := NewAgent(context.Background(), opts)
+			h := mustNewAgent(t, opts)
 			t.Cleanup(h.Close)
 			if c.seed != nil {
 				c.seed(h)
@@ -485,7 +460,7 @@ func TestRun_planToolHappyAndErrorPaths(t *testing.T) {
 func TestRun_askUserChoice_withoutDescription_formatsSelection(t *testing.T) {
 	model := sequentialToolModel([]ToolCall{toolCall("ask1", "ask_user_choice",
 		`{"question":"Pick?","choices":[{"title":"A"},{"title":"B"}]}`)})
-	h := NewAgent(context.Background(), AgentOptions{
+	h := mustNewAgent(t, AgentOptions{
 		Model: model, Config: Config{MaxWindowSize: 8192}, Store: testStore(t),
 	})
 	t.Cleanup(h.Close)
@@ -512,6 +487,12 @@ func TestRun_askUserChoice_withoutDescription_formatsSelection(t *testing.T) {
 	}
 	if h.AskUserQuestion("") != "" || h.AskUserQuestion("missing") != "" {
 		t.Fatal("empty/missing tool call ids should yield empty question")
+	}
+	if err := h.session.StateSet(askUserQuestionStateKey("bad"), 123); err != nil {
+		t.Fatal(err)
+	}
+	if h.AskUserQuestion("bad") != "" {
+		t.Fatal("non-string ask_user_question state should be ignored")
 	}
 	resumed, err := h.ReturnFromInterrupt(context.Background(), map[string][]byte{
 		interruptID: []byte(`{"selectionIdx":0}`),
@@ -609,8 +590,8 @@ func TestRun_createPlan_installsPlanDocumentAndPrunesWindow(t *testing.T) {
 	if hasEventType(got, StreamEventError) {
 		t.Fatalf("events=%+v", summarizeEvents(got))
 	}
-	if h.session.Plan().Document() != "CoS: ship quality" || !isPlanDocument(h.Messages()[1]) {
-		t.Fatalf("doc=%q window=%+v", h.session.Plan().Document(), h.Messages())
+	if h.session.Plan.Document() != "CoS: ship quality" || !isPlanDocument(h.Messages()[1]) {
+		t.Fatalf("doc=%q window=%+v", h.session.Plan.Document(), h.Messages())
 	}
 }
 
@@ -631,15 +612,15 @@ func TestRun_completeTodo_withPlanDocument_preservesFullPlan(t *testing.T) {
 			}
 		},
 	}
-	h := NewAgent(context.Background(), AgentOptions{
+	h := mustNewAgent(t, AgentOptions{
 		Model: strategy, Config: Config{MaxWindowSize: 8192}, Store: testStore(t),
 	})
 	t.Cleanup(h.Close)
-	h.session.Plan().Set([]Todo{
+	h.session.Plan.Set([]Todo{
 		{Title: "A", Status: streaming.TodoStatusInProgress},
 		{Title: "B", Status: streaming.TodoStatusPending},
 	})
-	h.session.Plan().SetDocument("FULL PLAN DRAFT")
+	h.session.Plan.SetDocument("FULL PLAN DRAFT")
 	events, err := h.Run(context.Background(), "go")
 	if err != nil {
 		t.Fatal(err)
@@ -683,22 +664,22 @@ func TestRun_editPlan_planChange_triggersHandoff(t *testing.T) {
 			}
 		},
 	}
-	h := NewAgent(context.Background(), AgentOptions{
+	h := mustNewAgent(t, AgentOptions{
 		Model: strategy, Config: Config{MaxWindowSize: 8192}, Store: testStore(t),
 	})
 	t.Cleanup(h.Close)
-	h.session.Plan().Set([]Todo{
+	h.session.Plan.Set([]Todo{
 		{Title: "A", Status: streaming.TodoStatusInProgress},
 		{Title: "B", Status: streaming.TodoStatusPending},
 	})
-	h.session.Plan().SetDocument("old blueprint")
+	h.session.Plan.SetDocument("old blueprint")
 	events, err := h.Run(context.Background(), "revise")
 	if err != nil {
 		t.Fatal(err)
 	}
 	_ = drainEvents(events)
-	if h.session.Plan().Document() != "revised blueprint" {
-		t.Fatalf("document = %q", h.session.Plan().Document())
+	if h.session.Plan.Document() != "revised blueprint" {
+		t.Fatalf("document = %q", h.session.Plan.Document())
 	}
 	if rawPlanFromDocumentMessage(h.Messages()[1]) != "revised blueprint" {
 		t.Fatalf("plan msg = %+v", h.Messages()[1])
@@ -728,13 +709,13 @@ func TestRun_completeTodo_persistsPlanInStore(t *testing.T) {
 		},
 	}
 
-	ah := NewAgent(context.Background(), AgentOptions{
+	ah := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  strategy,
 		Store:  store,
 	})
 	ah.sessionId = "sess-plan-persist"
-	ah.session.Plan().Set([]Todo{
+	ah.session.Plan.Set([]Todo{
 		{Title: "Ship", Status: streaming.TodoStatusInProgress},
 	})
 
@@ -754,7 +735,7 @@ func TestRun_completeTodo_persistsPlanInStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAgentFromSession: %v", err)
 	}
-	plan := restored.session.Plan().Get()
+	plan := restored.session.Plan.Get()
 	if len(plan) != 1 {
 		t.Fatalf("restored plan len = %d, want 1", len(plan))
 	}

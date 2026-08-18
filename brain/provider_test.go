@@ -3,6 +3,7 @@ package brain_test
 import (
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 
@@ -33,7 +34,7 @@ func TestBrainProvider_prefixWriteReadDirRemoveAndIR(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.NewMountSession("engram", reg)
+	ms := vfs.MustNewMountSession("engram", reg)
 	if err := ms.Mount(ctx, vfs.MountSpec{
 		Point: "/engram", Profile: "brain",
 		Params: map[string]string{"mode": "prefix"},
@@ -92,6 +93,53 @@ func TestBrainProvider_prefixWriteReadDirRemoveAndIR(t *testing.T) {
 	}
 	if _, err := ms.Stat(ctx, "/engram/nope"); !errors.Is(err, vfs.ErrNotExist) {
 		t.Fatalf("stat unknown kind: %v", err)
+	}
+	if err := ms.MkdirAll(ctx, "/engram/deal"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.MkdirAll(ctx, "/engram"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ms.Open(ctx, "/engram/deal"); err == nil {
+		t.Fatal("open kind dir")
+	}
+	if err := ms.Remove(ctx, "/engram/deal"); err == nil {
+		t.Fatal("remove kind dir")
+	}
+	if _, err := ms.ReadDir(ctx, "/engram/deal/acme.md"); err == nil {
+		t.Fatal("ReadDir file")
+	}
+	if _, err := ms.ReadText(ctx, "/engram"); err == nil {
+		t.Fatal("ReadText mount root")
+	}
+	if err := ms.WriteDocument(ctx, bareDoc{path: "/engram/deal/x.md"}); !errors.Is(err, vfs.ErrNotTextual) {
+		t.Fatalf("bare WriteDocument: %v", err)
+	}
+	cctx, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := ms.Stat(cctx, "/engram/deal/acme.md"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("stat cancel: %v", err)
+	}
+	if _, err := ms.ReadDir(cctx, "/engram"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ReadDir cancel: %v", err)
+	}
+	if _, err := ms.Open(cctx, "/engram/deal/acme.md"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Open cancel: %v", err)
+	}
+	if err := ms.Remove(cctx, "/engram/deal/acme.md"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Remove cancel: %v", err)
+	}
+	if err := ms.MkdirAll(cctx, "/engram/deal"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("MkdirAll cancel: %v", err)
+	}
+	if _, err := ms.ReadText(cctx, "/engram/deal/acme.md"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ReadText cancel: %v", err)
+	}
+	if err := ms.WriteFile(cctx, "/engram/deal/x.md", []byte("x")); !errors.Is(err, context.Canceled) {
+		t.Fatalf("WriteFile cancel: %v", err)
+	}
+	if err := ms.WriteDocument(cctx, vfs.NewTextDocument("/engram/deal/y.md", "text/markdown", "utf-8", "y")); !errors.Is(err, context.Canceled) {
+		t.Fatalf("WriteDocument cancel: %v", err)
 	}
 
 	// Second write of the same path without id keeps Object.ID.
@@ -174,9 +222,6 @@ func TestBrainProvider_prefixWriteReadDirRemoveAndIR(t *testing.T) {
 	if err := ms.WriteDocument(ctx, edited); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.Sync(ctx, "/engram/deal/acme.md"); err != nil {
-		t.Fatal(err)
-	}
 	obj2, err := eng.Get(ctx, brain.Scope{Namespace: &ns}, obj.ID)
 	if err != nil || !strings.Contains(obj2.Content, "Hello IR.") {
 		t.Fatalf("after IR sync: %+v err=%v", obj2, err)
@@ -192,6 +237,11 @@ func TestBrainProvider_prefixWriteReadDirRemoveAndIR(t *testing.T) {
 		t.Fatalf("read after remove: %v", err)
 	}
 }
+
+type bareDoc struct{ path string }
+
+func (b bareDoc) Path() string      { return b.path }
+func (b bareDoc) MediaType() string { return "text/markdown" }
 
 func TestBrainProvider_rootsLayout(t *testing.T) {
 	ctx := context.Background()
@@ -211,7 +261,7 @@ func TestBrainProvider_rootsLayout(t *testing.T) {
 	if reg.HasProfile("brain") == false {
 		t.Fatal("default profile")
 	}
-	ms := vfs.NewMountSession("roots", reg)
+	ms := vfs.MustNewMountSession("roots", reg)
 	if err := ms.Mount(ctx, vfs.MountSpec{
 		Point: "/person", Profile: "brain",
 		Params: map[string]string{"mode": "roots", "kind": "Person"},
@@ -230,6 +280,19 @@ func TestBrainProvider_rootsLayout(t *testing.T) {
 	if err != nil || obj.Kind != "Person" || obj.Content != "Buyer.\n" {
 		t.Fatalf("roots object: %+v err=%v", obj, err)
 	}
+	if _, err := ms.Stat(ctx, "/person/nested/sam.md"); !errors.Is(err, vfs.ErrNotExist) {
+		t.Fatalf("roots nested: %v", err)
+	}
+	if err := ms.MkdirAll(ctx, "/person/extra"); err == nil {
+		t.Fatal("roots mkdir")
+	}
+	if _, err := ms.ReadDir(ctx, "/person/sam.md"); err == nil {
+		t.Fatal("roots ReadDir file")
+	}
+	doc, err := ms.ReadText(ctx, "/person/sam.md")
+	if err != nil || !strings.Contains(doc.Text(), "Buyer.") {
+		t.Fatalf("roots IR: %v", err)
+	}
 }
 
 func TestBrainProvider_openCatalogListsKindsInUseAndMkdir(t *testing.T) {
@@ -245,7 +308,7 @@ func TestBrainProvider_openCatalogListsKindsInUseAndMkdir(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.NewMountSession("open", reg)
+	ms := vfs.MustNewMountSession("open", reg)
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/engram", Profile: "brain"}); err != nil {
 		t.Fatal(err)
 	}
@@ -329,7 +392,7 @@ func TestBrainFactory_openRejectsInvalidConfig(t *testing.T) {
 	if err := reg.Register(valid); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.NewMountSession("factory", reg)
+	ms := vfs.MustNewMountSession("factory", reg)
 	if err := ms.Mount(ctx, vfs.MountSpec{
 		Point: "/person", Profile: "brain",
 		Params: map[string]string{"mode": "roots", "kinds": "Note"},
@@ -343,9 +406,54 @@ func TestBrainFactory_openRejectsInvalidConfig(t *testing.T) {
 	if err != nil || obj.Kind != "Note" || !strings.Contains(obj.Content, "Note body.") {
 		t.Fatalf("roots kinds= inference: %+v err=%v", obj, err)
 	}
+	// Empty point defaults to /engram.
+	p, err := valid.Open(ctx, "", vfs.MountSpec{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Validate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	cctx, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := p.Validate(cctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Validate cancel: %v", err)
+	}
+	if _, err := p.Stat(cctx, ""); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Stat cancel: %v", err)
+	}
+	if _, err := p.OpenFile(cctx, "note/n.md", 0, 0); !errors.Is(err, context.Canceled) {
+		t.Fatalf("OpenFile cancel: %v", err)
+	}
+	if _, err := p.ReadDir(cctx, ""); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ReadDir cancel: %v", err)
+	}
+	if err := p.Remove(cctx, "note/n.md"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Remove cancel: %v", err)
+	}
+	if err := p.MkdirAll(cctx, "note", 0); !errors.Is(err, context.Canceled) {
+		t.Fatalf("MkdirAll cancel: %v", err)
+	}
+	d, ok := p.(interface {
+		PutFile(context.Context, string, io.Reader, int64) error
+		OpenDocument(context.Context, string, *vfs.ContentRegistry) (vfs.Document, error)
+		WriteDocument(context.Context, string, vfs.Document) error
+	})
+	if !ok {
+		t.Fatal("engram provider missing document I/O")
+	}
+	if err := d.PutFile(cctx, "note/n.md", strings.NewReader(""), 0); !errors.Is(err, context.Canceled) {
+		t.Fatalf("PutFile cancel: %v", err)
+	}
+	if _, err := d.OpenDocument(cctx, "note/n.md", nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("OpenDocument cancel: %v", err)
+	}
+	if err := d.WriteDocument(cctx, "note/n.md", vfs.NewTextDocument("note/n.md", "text/markdown", "utf-8", "x")); !errors.Is(err, context.Canceled) {
+		t.Fatalf("WriteDocument cancel: %v", err)
+	}
 
 	// prefix kinds= allow-list: ReadDir lists only the allowed kind after a write.
-	ms2 := vfs.NewMountSession("kinds-allow", reg)
+	ms2 := vfs.MustNewMountSession("kinds-allow", reg)
 	if err := ms2.Mount(ctx, vfs.MountSpec{
 		Point: "/engram", Profile: "brain",
 		Params: map[string]string{"mode": "prefix", "kinds": "Note"},

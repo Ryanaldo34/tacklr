@@ -77,6 +77,9 @@ category selects a specialized index, not a topic tag — omit it unless you spe
 If a call fails because filters conflict, retry with a clearer query and omit category (and/or domain filters) rather than stacking more constraints.`
 
 func newWebSearchTool(client *exa.Client) *Tool {
+	if client == nil {
+		panic("tacklr: web_search requires an Exa client")
+	}
 	return NewTool(ToolConfig{
 		Name:        "web_search",
 		DisplayName: "Search: {query}",
@@ -91,9 +94,6 @@ func newWebSearchTool(client *exa.Client) *Tool {
 }
 
 func runWebSearch(ctx context.Context, client *exa.Client, args webSearchArgs, runtime HarnessRuntime) (string, error) {
-	if client == nil {
-		return "", fmt.Errorf("web_search: Exa client is not configured")
-	}
 	req, err := buildExaSearchRequest(args)
 	if err != nil {
 		return "", err
@@ -218,9 +218,6 @@ func formatWebSearchResult(query, searchType string, resp *exa.SearchResponse) s
 
 // formatExaResults writes shared title/url/highlights/text blocks for search and fetch.
 func formatExaResults(results []exa.SearchResult, textCap int) string {
-	if textCap <= 0 {
-		textCap = 2000
-	}
 	var b strings.Builder
 	for i, r := range results {
 		title := strings.TrimSpace(r.Title)
@@ -279,9 +276,6 @@ func formatSynthesisContent(raw json.RawMessage) string {
 }
 
 func truncateRunes(s string, maxLen int) string {
-	if maxLen <= 0 || s == "" {
-		return s
-	}
 	r := []rune(s)
 	if len(r) <= maxLen {
 		return s
@@ -314,6 +308,9 @@ Use this when you already have specific URLs (from web_search results, the user,
 Default: content_mode text with a character cap for token efficiency. Prefer a small urls list (1-3) over fetching many pages at once.`
 
 func newWebFetchTool(client *exa.Client) *Tool {
+	if client == nil {
+		panic("tacklr: web_fetch requires an Exa client")
+	}
 	return NewTool(ToolConfig{
 		Name:        "web_fetch",
 		DisplayName: "Web Fetch",
@@ -328,9 +325,6 @@ func newWebFetchTool(client *exa.Client) *Tool {
 }
 
 func runWebFetch(ctx context.Context, client *exa.Client, args webFetchArgs, runtime HarnessRuntime) (string, error) {
-	if client == nil {
-		return "", fmt.Errorf("web_fetch: Exa client is not configured")
-	}
 	req, err := buildExaContentsRequest(args)
 	if err != nil {
 		return "", err

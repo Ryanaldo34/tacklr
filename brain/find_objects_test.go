@@ -30,6 +30,12 @@ func TestFindObjects_multiTurnMemoryGraph(t *testing.T) {
 	if !eng.HasObjectSearch() {
 		t.Fatal("MemoryGraph must support object search")
 	}
+	if _, err := eng.FindObjects(ctx, brain.Scope{}, brain.FindObjectsRequest{Query: "x"}, nil); err == nil {
+		t.Fatal("FindObjects requires result set")
+	}
+	if _, err := eng.FindObjects(ctx, brain.Scope{}, brain.FindObjectsRequest{}, brain.NewSearchContext()); err == nil {
+		t.Fatal("FindObjects requires query")
+	}
 	ns := uuid.New()
 	scope := brain.Scope{Namespace: &ns}
 	sc := brain.NewSearchContext()

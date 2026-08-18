@@ -25,7 +25,7 @@ func writeSkill(t *testing.T, root, dir, name, desc, body string) {
 func TestDirectoryLoader_implementsLoader(t *testing.T) {
 	root := t.TempDir()
 	writeSkill(t, root, "alpha", "alpha", "Alpha skill", "Do alpha things.")
-	var loader Loader = DirectoryLoader{Directories: []string{root}}
+	var loader SkillLoader = DirectoryLoader{Directories: []string{root}}
 	loaded, err := loader.Load(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -67,7 +67,7 @@ func TestObjectLoaders_loadAndFilterSkillObjects(t *testing.T) {
 		"other/beta/SKILL.md":   "ignored",
 	}}
 
-	loaders := []Loader{
+	loaders := []SkillLoader{
 		S3Loader{Client: objects, Bucket: "bucket", Prefix: "skills/"},
 		BlobLoader{Client: objects, Container: "container", Prefix: "skills/"},
 	}
@@ -79,6 +79,22 @@ func TestObjectLoaders_loadAndFilterSkillObjects(t *testing.T) {
 		if len(loaded) != 2 || loaded[0].Name != "alpha" || loaded[1].Name != "zeta" {
 			t.Fatalf("loaded = %#v", loaded)
 		}
+	}
+}
+
+func TestCloudAdapters_requireSDKClients(t *testing.T) {
+	ctx := context.Background()
+	if _, err := (AWSS3Client{}).ListObjects(ctx, "b", ""); err == nil {
+		t.Fatal("nil AWS list")
+	}
+	if _, err := (AWSS3Client{}).GetObject(ctx, "b", "k"); err == nil {
+		t.Fatal("nil AWS get")
+	}
+	if _, err := (AzureBlobClient{}).ListBlobs(ctx, "c", ""); err == nil {
+		t.Fatal("nil Azure list")
+	}
+	if _, err := (AzureBlobClient{}).DownloadBlob(ctx, "c", "n"); err == nil {
+		t.Fatal("nil Azure download")
 	}
 }
 

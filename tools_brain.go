@@ -34,32 +34,7 @@ func (b brainTools) brainMountForKind(kind string) (vfs.MountSpec, bool) {
 	if b.deps.VFS == nil {
 		return vfs.MountSpec{}, false
 	}
-	var prefix vfs.MountSpec
-	var hasPrefix bool
-	for _, s := range b.deps.VFS.Specs() {
-		if s.Profile != brain.DefaultProfile {
-			continue
-		}
-		mode := ""
-		if s.Params != nil {
-			mode = s.Params["mode"]
-		}
-		if mode == brain.ModeRoots && kind != "" && s.Params["kind"] == kind {
-			return s, true
-		}
-		if mode != brain.ModeRoots && !hasPrefix {
-			prefix, hasPrefix = s, true
-		}
-	}
-	if hasPrefix {
-		return prefix, true
-	}
-	for _, s := range b.deps.VFS.Specs() {
-		if s.Profile == brain.DefaultProfile {
-			return s, true
-		}
-	}
-	return vfs.MountSpec{}, false
+	return brain.MountForKind(b.deps.VFS.Specs(), kind)
 }
 
 type readObjectArgs struct {
@@ -68,26 +43,26 @@ type readObjectArgs struct {
 
 func (b brainTools) newReadObjectTool() *Tool {
 	return NewTool(ToolConfig{
-		Name:        "read",
-		DisplayName: "Read {object_id}",
-		Description: `Read the full contents of a knowledge-base object by id.
+		Name:        "read_object",
+		DisplayName: "Read object {object_id}",
+		Description: `Read a knowledge object by UUID (full stored body as JSON).
 
-Use after search, find_exact, find_objects, or expand when you need the complete body of a known object. Pass the object UUID from a prior rich result. Do not invent ids. Prefer reading only objects you will use or cite.`,
+Use after search, find_exact, find_objects, or expand when the hit has no vfs_path (Deal, Fact, Person, …). Pass object_id from that result. Do not invent ids. Files: use read on vfs_path instead.`,
 		Category: streaming.ToolCategoryRead,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
 		Handler: func(ctx context.Context, args readObjectArgs, runtime HarnessRuntime) (string, error) {
 			id, err := parseUUID(args.ObjectID, "object_id")
 			if err != nil {
-				return "", fmt.Errorf("read: %w", err)
+				return "", fmt.Errorf("read_object: %w", err)
 			}
 			runtime.EmitUpdate("Reading knowledge object…")
 			obj, err := b.engine.Read(ctx, b.sc.Scope(), id)
 			if err != nil {
 				if errors.Is(err, brain.ErrNotFound) {
-					return "", fmt.Errorf("read: object %s not found", id)
+					return "", fmt.Errorf("read_object: object %s not found", id)
 				}
-				return "", fmt.Errorf("read: %w", err)
+				return "", fmt.Errorf("read_object: %w", err)
 			}
 			return formatBrainJSON(obj)
 		},
@@ -133,11 +108,11 @@ func (b brainTools) newSearchTool() *Tool {
 	return b.newQueryTool(ToolConfig{
 		Name:        "search",
 		DisplayName: "Search knowledge: {query}",
-		Description: `Search stored content (documents, notes, chunks) in the knowledge corpus. Returns ranked parent objects with evidence snippets.
+		Description: `Search indexed knowledge (notes, Engrams, files you indexed). Returns ranked parents with evidence snippets.
 
-Prefer hits that include properties.vfs_path — open those with read_lines on the virtual path (and start_line / block_id from evidence). Prefer schema() before inventing filter keys; property filters require kind when kinds are registered. Rewrite the user ask into a good retrieval query when helpful.
-
-Do not use this only to discover relationships—use expand once you have a path or id. Prefer find_content for indexed file grep. Use continue for more pages; read only for non-file objects without vfs_path.`,
+Hit has vfs_path → open the live file with read (path + start_line / block_id from evidence).
+No vfs_path → read_object with the id.
+Live grep is run_command → rg (not this tool). Relationships: expand, not search. More pages: continue. Prefer schema() before inventing filter keys.`,
 		Category: streaming.ToolCategorySearch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
@@ -148,9 +123,9 @@ func (b brainTools) newFindExactTool() *Tool {
 	return b.newQueryTool(ToolConfig{
 		Name:        "find_exact",
 		DisplayName: "Find exact: {query}",
-		Description: `Find knowledge objects by exact or near-exact match (UUID, title, path-like phrases) in the content store.
+		Description: `Find an object by exact or near-exact string (UUID, title, path-like phrase).
 
-Prefer this over search when you have a precise string or UUID. Returns ranked parents with evidence. When kinds are registered, property filters require kind. Use continue for more pages; use read for full content. For meaning-based entity lookup without an exact string, use find_objects when available.`,
+Prefer over search when you already have the identifier. File hits: read the vfs_path. Other objects: read_object. Meaning-based entity lookup: find_objects. More pages: continue.`,
 		Category: streaming.ToolCategorySearch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
@@ -229,9 +204,9 @@ func (b brainTools) newExpandTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "expand",
 		DisplayName: "Expand {path}",
-		Description: `Show files/objects connected to a known path or object_id—not an open search.
+		Description: `Neighbors of a known path or object_id — not a search.
 
-Prefer a virtual path (Engram file or indexed artifact). Neighbors are returned as paths when vfs_path is set. list/ls and later rg never list graph edges — use this tool. Omit relation_types for containment only; named types need a graph backend. Large lists return result_set_id — use continue. Open file neighbors with read_lines.`,
+Prefer path for files. ls / rg do not list graph edges. Omit relation_types for containment only; named types need a graph backend. File neighbors: read. Other neighbors: read_object. Large pages: continue.`,
 		Category: streaming.ToolCategoryFetch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
@@ -269,13 +244,13 @@ type saveObjectArgs struct {
 func (b brainTools) newSaveTool(name, display, kind, roleDesc string) *Tool {
 	desc := `Save a ` + roleDesc + ` as kind ` + kind + `.`
 	if _, ok := b.brainMountForKind(""); ok {
-		desc = `Write the Engram file for a ` + roleDesc + ` (kind ` + kind + `) on the brain Provider mount.
+		desc = `Write the Engram Markdown for a ` + roleDesc + ` (kind ` + kind + `) on the brain mount.
 
-Prefer write/replace_lines on the Markdown path. This tool is a thin write: YAML front matter + body under /engram/{kind}/ (or a roots mount). Returns path and object id. Open later with read_lines. Pass object_id to update an existing Engram.`
+Prefer write on that path. Thin write: YAML front matter + body under /engram/{kind}/ (or a roots mount). Returns path + id. Re-open the file with read; pass object_id to update.`
 	} else {
 		desc += `
 
-Prefer schema() for this kind before inventing property keys. Write a clear title and summary so search and find_objects can retrieve this later. Uses the host search namespace when set. Pass object_id to update an existing object. Returns the rich object reference.`
+Call schema() for this kind before inventing property keys. Pass object_id to update. Re-open with read_object.`
 	}
 	return NewTool(ToolConfig{
 		Name:        name,
@@ -332,9 +307,9 @@ func (b brainTools) newFindLinksTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "find_links",
 		DisplayName: "Find links: {query}",
-		Description: `Find relationships by text on edge metadata (note), not document bodies.
+		Description: `Find relationships by text on the edge note, not document bodies.
 
-Returns from_path/to_path (and ids) for matching edges. list/ls never lists edges. Prefer expand from a known path; use relation_type (required). Hosts must ensure an edge text index for that relation label on Helix before this tool is useful.`,
+Returns from_path/to_path (and ids). ls never lists edges. Prefer expand from a known path. relation_type is required. Then read file ends with read, other ends with read_object.`,
 		Category: streaming.ToolCategorySearch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
@@ -357,9 +332,9 @@ func (b brainTools) newFindObjectsTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "find_objects",
 		DisplayName: "Find objects: {query}",
-		Description: `Find knowledge objects as entities (whole objects of given kinds), not long document ranking.
+		Description: `Find whole knowledge objects (Deal, Fact, …), not ranked passages.
 
-Use to resolve which tracked object matches an ask, or to find similar saved objects (facts, discoveries, memories, deals as host kinds). Rewrite the user ask into a good semantic query. Optional filters use the same filterable_fields as search — call schema() first for valid keys/types. Prefer expand first when the active entity id is already known. For bulk document/note evidence, use search instead. After an id, use expand for relationships. Use continue when has_more.`,
+Use to resolve which tracked entity matches the ask. Evidence in notes/files: search instead. Already have the id: expand or read_object. More pages: continue. Call schema() before inventing filter keys.`,
 		Category: streaming.ToolCategorySearch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
@@ -624,12 +599,7 @@ func (b brainTools) resolveEngramSavePath(ctx context.Context, kind, title, obje
 	if spec.Params != nil && spec.Params["mode"] != "" {
 		mode = spec.Params["mode"]
 	}
-	var base string
-	if mode == brain.ModeRoots {
-		base = path.Join(spec.Point, slug+".md")
-	} else {
-		base = path.Join(spec.Point, brain.KindSlug(kind), slug+".md")
-	}
+	base := brain.EngramPath(spec.Point, mode, kind, slug)
 	if _, err := b.deps.VFS.Stat(ctx, base); err == nil {
 		base = strings.TrimSuffix(base, ".md") + "-" + uuid.New().String()[:8] + ".md"
 	} else if !errors.Is(err, vfs.ErrNotExist) {

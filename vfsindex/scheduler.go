@@ -2,8 +2,16 @@ package vfsindex
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
+)
+
+var (
+	// ErrSchedulerClosed means Notify was called after shutdown.
+	ErrSchedulerClosed = errors.New("vfsindex: scheduler closed")
+	// ErrQueueFull means a distinct path could not be queued.
+	ErrQueueFull = errors.New("vfsindex: scheduler queue full")
 )
 
 // IndexReason explains why a path was scheduled for re-index.
@@ -23,6 +31,13 @@ type IndexScheduler interface {
 	Notify(ctx context.Context, virtualPath string, reason IndexReason) error
 }
 
+// SchedulerEvent reports an asynchronous indexing outcome to the host.
+type SchedulerEvent struct {
+	Path   string
+	Reason IndexReason
+	Err    error
+}
+
 // SyncScheduler re-indexes immediately on Notify (v1).
 type SyncScheduler struct {
 	Indexer *MountIndexer
@@ -30,14 +45,14 @@ type SyncScheduler struct {
 
 // NewSyncScheduler returns an IndexScheduler that calls IndexPath inline.
 func NewSyncScheduler(idx *MountIndexer) *SyncScheduler {
+	if idx == nil {
+		panic("vfsindex: NewSyncScheduler requires MountIndexer")
+	}
 	return &SyncScheduler{Indexer: idx}
 }
 
 // Notify implements IndexScheduler.
 func (s *SyncScheduler) Notify(ctx context.Context, virtualPath string, reason IndexReason) error {
-	if s == nil || s.Indexer == nil {
-		return nil
-	}
 	_ = reason
 	return s.Indexer.IndexPath(ctx, virtualPath)
 }
@@ -57,16 +72,30 @@ type AsyncScheduler struct {
 	QueueCap int           // max distinct pending paths; default DefaultAsyncQueueCap
 	Timeout  time.Duration // per-path IndexPath timeout; default DefaultAsyncTimeout
 
-	mu      sync.Mutex
-	pending map[string]struct{}
-	closed  bool
-	wake    chan struct{}
-	cancel  context.CancelFunc
-	wg      sync.WaitGroup
+	mu       sync.Mutex
+	pending  map[string]struct{}
+	closed   bool
+	observer func(SchedulerEvent)
+	wake     chan struct{}
+	cancel   context.CancelFunc
+	wg       sync.WaitGroup
+}
+
+// SetObserver installs a non-blocking host failure observer.
+func (s *AsyncScheduler) SetObserver(observer func(SchedulerEvent)) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.observer = observer
+	s.mu.Unlock()
 }
 
 // NewAsyncScheduler starts a single background worker. Call Close on teardown.
 func NewAsyncScheduler(idx *MountIndexer) *AsyncScheduler {
+	if idx == nil {
+		panic("vfsindex: NewAsyncScheduler requires MountIndexer")
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &AsyncScheduler{
 		Indexer:  idx,
@@ -86,18 +115,16 @@ func NewAsyncScheduler(idx *MountIndexer) *AsyncScheduler {
 // contexts must not cancel pending work. IndexPath runs under the scheduler's
 // own cancel + Timeout context.
 func (s *AsyncScheduler) Notify(ctx context.Context, virtualPath string, reason IndexReason) error {
-	if s == nil {
-		return nil
-	}
 	_ = ctx
-	_ = reason
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed || s.Indexer == nil {
-		return nil
+	if s.closed {
+		s.mu.Unlock()
+		s.report(SchedulerEvent{Path: virtualPath, Reason: reason, Err: ErrSchedulerClosed})
+		return ErrSchedulerClosed
 	}
 	if _, ok := s.pending[virtualPath]; ok {
 		// Already coalesced; worker will process without another wake.
+		s.mu.Unlock()
 		return nil
 	}
 	capN := s.QueueCap
@@ -106,9 +133,12 @@ func (s *AsyncScheduler) Notify(ctx context.Context, virtualPath string, reason 
 	}
 	if len(s.pending) >= capN {
 		// Drop under pressure (path not already coalesced).
-		return nil
+		s.mu.Unlock()
+		s.report(SchedulerEvent{Path: virtualPath, Reason: reason, Err: ErrQueueFull})
+		return ErrQueueFull
 	}
 	s.pending[virtualPath] = struct{}{}
+	s.mu.Unlock()
 	select {
 	case s.wake <- struct{}{}:
 	default:
@@ -174,14 +204,25 @@ func (s *AsyncScheduler) takeOne() (string, bool) {
 }
 
 func (s *AsyncScheduler) runIndex(parent context.Context, path string) {
-	if s.Indexer == nil {
-		return
-	}
 	timeout := s.Timeout
 	if timeout <= 0 {
 		timeout = DefaultAsyncTimeout
 	}
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
-	_ = s.Indexer.IndexPath(ctx, path)
+	if err := s.Indexer.IndexPath(ctx, path); err != nil {
+		s.report(SchedulerEvent{Path: path, Err: err})
+	}
+}
+
+func (s *AsyncScheduler) report(event SchedulerEvent) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	observer := s.observer
+	s.mu.Unlock()
+	if observer != nil {
+		observer(event)
+	}
 }

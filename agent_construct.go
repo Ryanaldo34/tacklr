@@ -2,10 +2,7 @@ package tacklr
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"log/slog"
 	"strings"
 
 	"github.com/google/uuid"
@@ -30,11 +27,26 @@ type Config struct {
 	MaxTurnRequests int
 }
 
+// Validate checks host configuration that does not depend on a model.
+func (c Config) Validate() error {
+	if c.MaxWindowSize < 0 {
+		return fmt.Errorf("tacklr: Config.MaxWindowSize must be positive")
+	}
+	if c.MaxTurnRequests < 0 {
+		return fmt.Errorf("tacklr: Config.MaxTurnRequests must not be negative")
+	}
+	return nil
+}
+
 // AgentOptions configures NewAgent and NewAgentFromSession.
 //
 // Usual fields: Config, Model, Store, Tools, MCPConfigs, SubAgents, SessionID.
-// ContextManager, ModelTasks, and ContextPolicy override the built-in ACM path;
-// leave them nil unless you replace that path.
+// ContextPolicy knobs (ratios, stream-summary) stay host-settable. Adaptive
+// Case Management itself is harness-owned and cannot be replaced.
+//
+// Store is the harness thread checkpoint (stores.BaseStore). Wire session
+// envelopes (server.ProtocolWireStore) are a separate protocol contract and
+// are not merged with this store.
 type AgentOptions struct {
 	Config Config
 	// SessionID is the durable thread id. Set at construction; do not change mid-turn.
@@ -44,17 +56,21 @@ type AgentOptions struct {
 	WatchDog   AgentWatchDog
 	Tools      []*Tool
 	MCPConfigs []mcp.MCPConfig
-	SubAgents  []*SubAgent
-	// ContextManager is the conversation window. Nil uses NewModelContextManager.
-	ContextManager ContextManager
-	// ModelTasks runs Turn, Absorb, and Handoff. Nil uses DefaultModelTasks.
-	ModelTasks ModelTasks
+	// MCPCredentialResolver resolves durable references immediately before
+	// connection. Inline client credentials remain session-scoped.
+	MCPCredentialResolver mcp.CredentialResolver
+	SubAgents             []*SubAgent
 	// ContextPolicy sets pressure/compress ratios when non-zero fields are set.
 	ContextPolicy ContextPolicy
-	// ToolInterceptors wrap each tool call (outermost first).
-	// Nil: built-in planning lock and permission gate.
-	// Non-nil: replaces that chain (empty slice disables interceptors).
+	// ToolInterceptors wrap each tool call (outermost first). Built-in
+	// planning lock and OnCall middleware are installed after these.
 	ToolInterceptors []ToolInterceptor
+	// DisablePlanningLock omits planningWriteLock (workers and tests).
+	// The permission gate is still always installed.
+	DisablePlanningLock bool
+	// WriteUnattended injects write without ToolPermissionOnCall.
+	// Write-mechanic tests use this so persist/index paths do not park.
+	WriteUnattended bool
 	// ToolResultHooks map tool name → post-success window effects for host tools.
 	// Plan builtins use BuiltinResult instead.
 	ToolResultHooks map[string]ToolResultHook
@@ -75,18 +91,20 @@ type AgentOptions struct {
 	// SearchNamespace isolates brain retrieval when set (session-owned, checkpointed).
 	// Nil leaves a loaded session value unchanged. Workers get a copy at spawn.
 	SearchNamespace *uuid.UUID
-	// MountSession is the session-owned VFS mount table. Hosts attach and detach
-	// mounts on this object (vfs.MountSession.Mount / Unmount) — not on the harness.
-	// If nil and FSRegistry is set, the harness creates one and stores it on the
-	// session manager for checkpointing.
+	// MountSession is the host-owned VFS mount table. The harness borrows it
+	// for this turn (tool dispatch only). Hosts create, mount, FuseMount, and
+	// Close it. Nil means no VFS tools.
 	MountSession *vfs.MountSession
-	// FSRegistry resolves MountSpec.Profile to providers (process-scoped pools).
-	// Used when MountSession is nil and mounts must be materialized, or when
-	// creating a MountSession at construct. Prefer creating MountSession yourself.
-	FSRegistry *vfs.BackendRegistry
-	// FSBootstrap mounts applied when materializing a new or loaded session.
-	// Merged before durable checkpoint mounts; duplicate points error.
-	FSBootstrap []vfs.MountSpec
+	// RunCommandUnattended injects run_command without ToolPermissionOnCall.
+	// Zero value (Registry, testserver) parks run_command for permission.
+	RunCommandUnattended bool
+	// shareIndexBridge is the parent index bridge. Nil means Start a new bridge.
+	shareIndexBridge *vfsindex.Bridge
+}
+
+// Validate checks the complete public construction contract.
+func (opts AgentOptions) Validate() error {
+	return opts.validateAndNormalize()
 }
 
 // streamEventBuffer is the harness event channel size so EmitUpdate is not dropped
@@ -94,83 +112,151 @@ type AgentOptions struct {
 const streamEventBuffer = 64
 
 // NewAgent builds a session-scoped harness. Turn-scoped Runtime is created in Run.
-func NewAgent(ctx context.Context, opts AgentOptions) *AgentHarness {
-	sm := session.NewSessionManager()
-	h := newHarnessBase(opts, sm)
+func NewAgent(ctx context.Context, opts AgentOptions) (*AgentHarness, error) {
+	h, err := newHarnessBase(opts, session.NewSessionManager())
+	if err != nil {
+		return nil, err
+	}
 	if opts.SessionID != "" {
 		h.sessionId = opts.SessionID
 	}
-	if err := h.initSessionMounts(ctx, nil); err != nil {
-		slog.Error("failed to initialize virtual filesystem", "error", err)
+	if err := h.finishInit(ctx, opts.SubAgents); err != nil {
+		return nil, err
 	}
-	h.finishInit(ctx, opts.SubAgents)
-	return h
+	return h, nil
 }
 
 // newHarnessBase fills shared fields. Session state lives on sm across turns.
 // sm must be non-nil.
-func newHarnessBase(opts AgentOptions, sm *session.SessionManager) *AgentHarness {
-	h := &AgentHarness{
-		model:                opts.Model,
-		maxWindowSize:        opts.Config.MaxWindowSize,
-		maxTurnRequests:      opts.Config.MaxTurnRequests,
-		instructions:         opts.Config.SystemPrompt,
-		store:                opts.Store,
-		session:              sm,
-		watchDog:             opts.WatchDog,
-		tools:                opts.Tools,
-		mcpConfigs:           opts.MCPConfigs,
-		skillDirectories:     opts.Config.SkillDirectories,
-		skillsLoader:         opts.SkillsLoader,
-		exaAPIKey:            resolveExaAPIKey(opts.ExaAPIKey),
-		brain:                opts.Brain,
-		brainWriteKinds:      opts.BrainWriteKinds,
-		sessionId:            "",
-		subagents:            make(map[string]*SubAgent),
-		interruptToRequester: make(map[string]string),
-		pendingToolCalls:     make(map[string]stores.PendingToolCall),
-		interruptPayloads:    make(map[string][]byte),
-		parkedWorkersLive:    make(map[string]*AgentHarness),
-		context:              opts.ContextManager,
-		tasks:                opts.ModelTasks,
-		contextPolicy:        opts.ContextPolicy,
-		fsRegistry:           opts.FSRegistry,
-		fsBootstrap:          opts.FSBootstrap,
+func newHarnessBase(opts AgentOptions, sm *session.SessionManager) (*AgentHarness, error) {
+	if opts.Model == nil {
+		return nil, fmt.Errorf("tacklr: AgentOptions.Model is required")
 	}
+	if sm == nil {
+		return nil, fmt.Errorf("tacklr: session manager is required")
+	}
+	if err := opts.validateAndNormalize(); err != nil {
+		return nil, err
+	}
+	h := &AgentHarness{
+		model:                 opts.Model,
+		maxWindowSize:         opts.Config.MaxWindowSize,
+		maxTurnRequests:       opts.Config.MaxTurnRequests,
+		instructions:          opts.Config.SystemPrompt,
+		store:                 opts.Store,
+		session:               sm,
+		watchDog:              opts.WatchDog,
+		tools:                 opts.Tools,
+		mcpConfigs:            opts.MCPConfigs,
+		mcpCredentialResolver: opts.MCPCredentialResolver,
+		skillDirectories:      opts.Config.SkillDirectories,
+		skillsLoader:          opts.SkillsLoader,
+		exaAPIKey:             resolveExaAPIKey(opts.ExaAPIKey),
+		brain:                 opts.Brain,
+		brainWriteKinds:       opts.BrainWriteKinds,
+		sessionId:             "",
+		subagents:             make(map[string]*SubAgent),
+		pendingToolCalls:      make(map[string]stores.PendingToolCall),
+		interruptPayloads:     make(map[string][]byte),
+		parkedWorkersLive:     make(map[string]*AgentHarness),
+		jobs:                  make(map[string]*workerRun),
+		context:               NewModelContextManager(),
+		contextPolicy:         opts.ContextPolicy,
+		runCommandUnattended:  opts.RunCommandUnattended,
+		writeUnattended:       opts.WriteUnattended,
+		vfsBridge:             opts.shareIndexBridge,
+	}
+	h.jobsCtx, h.jobsCancel = context.WithCancel(context.Background())
 	if opts.MountSession != nil {
 		sm.VFS = opts.MountSession
 	}
-	if opts.Brain != nil {
-		h.searchCtx = brain.NewSearchContext()
-		if opts.SearchNamespace != nil {
-			h.searchCtx.SetNamespace(*opts.SearchNamespace)
-		}
+	if opts.SearchNamespace != nil {
+		sm.Search.SetNamespace(*opts.SearchNamespace)
 	}
-	if h.context == nil {
-		h.context = NewModelContextManager()
+	def := DefaultContextPolicy()
+	if h.contextPolicy.PressureRatio <= 0 {
+		h.contextPolicy.PressureRatio = def.PressureRatio
 	}
-	if h.contextPolicy.PressureRatio <= 0 && h.contextPolicy.CompressFraction <= 0 {
-		h.contextPolicy = DefaultContextPolicy()
+	if h.contextPolicy.CompressFraction <= 0 {
+		h.contextPolicy.CompressFraction = def.CompressFraction
 	}
-	if h.tasks == nil {
-		h.tasks = NewDefaultModelTasks(h.model, h.context, h.contextPolicy, h.maxWindowSize)
+	h.tasks = newDefaultModelTasks(h.model, h.context, h.contextPolicy, h.maxWindowSize)
+	chain := append([]ToolInterceptor{}, opts.ToolInterceptors...)
+	if !opts.DisablePlanningLock {
+		chain = append(chain, h.planningWriteLock)
 	}
-	if opts.ToolInterceptors != nil {
-		h.toolRunner = newToolRunner(opts.ToolInterceptors...)
-	} else {
-		h.toolRunner = newToolRunner(h.planningWriteLock, toolPermissionGate)
-	}
+	chain = append(chain, onCallMiddleware(sm))
+	h.toolRunner = newToolRunner(chain...)
 	h.toolResultHooks = newToolResultHookRegistry(opts.ToolResultHooks)
-	return h
+	return h, nil
 }
 
-func (h *AgentHarness) finishInit(ctx context.Context, subAgents []*SubAgent) {
-	h.initMCP(ctx)
-	if err := h.initSkills(ctx); err != nil {
-		slog.Error("failed to initialize skills", "error", err)
+func (opts *AgentOptions) validateAndNormalize() error {
+	if opts.Model == nil {
+		return fmt.Errorf("tacklr: AgentOptions.Model is required")
 	}
-	h.initSubAgentWorkers(subAgents)
+	if err := opts.Config.Validate(); err != nil {
+		return err
+	}
+	if opts.Config.MaxWindowSize == 0 {
+		size, err := opts.Model.MaxContextWindow()
+		if err != nil {
+			return fmt.Errorf("tacklr: resolve model context window: %w", err)
+		}
+		if size <= 0 {
+			return fmt.Errorf("tacklr: Config.MaxWindowSize is required when the model does not report a context window")
+		}
+		opts.Config.MaxWindowSize = size
+	}
+	if err := opts.ContextPolicy.Validate(); err != nil {
+		return err
+	}
+	for i, tool := range opts.Tools {
+		if tool == nil {
+			return fmt.Errorf("tacklr: AgentOptions.Tools[%d] is nil", i)
+		}
+	}
+	seenMCP := make(map[string]struct{}, len(opts.MCPConfigs))
+	for i := range opts.MCPConfigs {
+		config := opts.MCPConfigs[i]
+		if err := config.Validate(); err != nil {
+			return err
+		}
+		if _, ok := seenMCP[config.Name]; ok {
+			return fmt.Errorf("tacklr: duplicate MCP server name %q", config.Name)
+		}
+		seenMCP[config.Name] = struct{}{}
+		if config.CredentialRef != "" && opts.MCPCredentialResolver == nil {
+			return fmt.Errorf("tacklr: MCP credential resolver is required for server %q", config.Name)
+		}
+	}
+	return nil
+}
+
+func (h *AgentHarness) finishInit(ctx context.Context, subAgents []*SubAgent) error {
+	if err := h.initSkills(ctx); err != nil {
+		return fmt.Errorf("initialize skills: %w", err)
+	}
+	h.initMCP(ctx)
+	if err := h.initSubAgentWorkers(subAgents); err != nil {
+		return err
+	}
+	if h.vfsBridge == nil {
+		if err := h.initVFSIndexBridge(); err != nil {
+			return err
+		}
+	}
 	h.injectBuiltinTools()
+	return nil
+}
+
+func (a *AgentHarness) ensureReady(ctx context.Context) error {
+	if err := a.initSkills(ctx); err != nil {
+		return fmt.Errorf("load skills: %w", err)
+	}
+	a.initMCP(ctx)
+	a.injectBuiltinTools()
+	return nil
 }
 
 // injectBuiltinTools registers plan tools, optional web/brain/VFS/index tools, and spawn_worker once.
@@ -189,22 +275,18 @@ func (a *AgentHarness) injectBuiltinTools() {
 		client := exa.NewClient(key)
 		a.tools = append(a.tools, newWebSearchTool(client), newWebFetchTool(client))
 	}
-	// Index bridge after brain factory/mounts so save_* can write Engram files.
-	br := a.initVFSIndexBridge()
-	if a.session != nil && a.session.VFS != nil {
-		a.tools = append(a.tools, newVFSTools(a.session.VFS)...)
+	br := a.vfsBridge
+	if ms := a.VFS(); ms != nil {
+		a.tools = append(a.tools, newVFSTools(ms, !a.writeUnattended)...)
+		a.tools = append(a.tools, newRunCommand(ms, !a.runCommandUnattended))
 	}
-	if a.brain != nil && a.searchCtx != nil {
-		var ms *vfs.MountSession
+	if a.brain != nil {
 		var idx *vfsindex.MountIndexer
-		if a.session != nil {
-			ms = a.session.VFS
-		}
 		if br != nil {
 			idx = br.Indexer
 		}
-		a.tools = append(a.tools, newBrainTools(a.brain, a.searchCtx, a.brainWriteKinds, brainToolDeps{
-			VFS:     ms,
+		a.tools = append(a.tools, newBrainTools(a.brain, a.session.Search, a.brainWriteKinds, brainToolDeps{
+			VFS:     a.VFS(),
 			Indexer: idx,
 		})...)
 	}
@@ -212,64 +294,58 @@ func (a *AgentHarness) injectBuiltinTools() {
 		a.tools = append(a.tools, newVFSIndexTools(br)...)
 	}
 	if len(a.subagents) > 0 {
-		a.tools = append(a.tools, a.spawnTool())
+		a.tools = append(a.tools, a.spawnTool(), a.listJobsTool(), a.getJobTool(), a.cancelJobTool())
 	}
 	a.builtinsInjected = true
 }
 
-// initVFSIndexBridge starts vfsindex.Bridge when Brain + VFS + namespace are set.
+// initVFSIndexBridge starts a new vfsindex.Bridge when Brain + VFS + namespace
+// are set. Call only when vfsBridge is nil (this harness owns the lifecycle).
 // Hosts with a non-empty kind catalog should register vfsindex.MountIndexKinds().
-func (a *AgentHarness) initVFSIndexBridge() *vfsindex.Bridge {
-	if a.vfsBridge != nil {
-		return a.vfsBridge
-	}
-	if a.brain == nil || a.searchCtx == nil || a.session == nil || a.session.VFS == nil {
+func (a *AgentHarness) initVFSIndexBridge() error {
+	if a.brain == nil || a.VFS() == nil {
 		return nil
 	}
-	ns, ok := a.searchCtx.Namespace()
+	ns, ok := a.session.Search.Namespace()
 	if !ok {
 		return nil
 	}
 	nsCopy := ns
-	scratch := a.fsRegistry != nil && a.fsRegistry.HasProfile("scratch") &&
-		!sessionHasProfile(a.session.VFS, brain.DefaultProfile)
-	br, err := vfsindex.Start(a.session.VFS, a.brain, brain.Scope{Namespace: &nsCopy}, scratch)
+	attachMemory := true
+	for _, s := range a.VFS().Specs() {
+		if s.Profile == brain.DefaultProfile {
+			attachMemory = false
+			break
+		}
+	}
+	br, err := vfsindex.Start(a.VFS(), a.brain, brain.Scope{Namespace: &nsCopy}, attachMemory)
 	if err != nil {
-		slog.Error("vfsindex: failed to start bridge", "error", err)
-		return nil
+		return fmt.Errorf("vfsindex: start bridge: %w", err)
 	}
 	a.vfsBridge = br
-	return br
+	a.ownsVFSBridge = true
+	return nil
 }
 
 // SetSearchNamespace sets retrieval isolation for knowledge tools.
 func (a *AgentHarness) SetSearchNamespace(id uuid.UUID) {
-	if a.searchCtx == nil {
-		a.searchCtx = brain.NewSearchContext()
-	}
-	a.searchCtx.SetNamespace(id)
+	a.session.Search.SetNamespace(id)
 }
 
 // ClearSearchNamespace clears retrieval isolation for knowledge tools.
 func (a *AgentHarness) ClearSearchNamespace() {
-	if a.searchCtx == nil {
-		return
-	}
-	a.searchCtx.ClearNamespace()
+	a.session.Search.ClearNamespace()
 }
 
 // SearchNamespace returns the host-set search namespace, if any.
 func (a *AgentHarness) SearchNamespace() (uuid.UUID, bool) {
-	if a.searchCtx == nil {
-		return uuid.UUID{}, false
-	}
-	return a.searchCtx.Namespace()
+	return a.session.Search.Namespace()
 }
 
 // planningWriteLock blocks write tools until create_plan has set a plan.
 func (a *AgentHarness) planningWriteLock(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error) {
 	if inv.Tool != nil && inv.Tool.Access != nil && inv.Tool.Access.Contains(WritePermission) &&
-		!a.session.HasActivePlan() {
+		!a.session.Plan.HasActive() {
 		return "", fmt.Errorf("%w: write tools are locked until create_plan establishes a todo list", ErrToolPermissionDenied)
 	}
 	return next(ctx, inv)
@@ -320,6 +396,9 @@ func NewAgentFromSession(ctx context.Context, sessionId string, opts AgentOption
 	if opts.Store == nil {
 		return nil, fmt.Errorf("agent harness: store is required to load session %q", sessionId)
 	}
+	if err := opts.validateAndNormalize(); err != nil {
+		return nil, err
+	}
 	checkpoint, err := opts.Store.LoadSession(ctx, sessionId)
 	if err != nil {
 		return nil, err
@@ -329,147 +408,15 @@ func NewAgentFromSession(ctx context.Context, sessionId string, opts AgentOption
 	if err != nil {
 		return nil, err
 	}
-	h := newHarnessBase(opts, sm)
-	h.sessionId = sessionId
-	h.context.Restore(applied.Window)
-	h.interruptToRequester = applied.InterruptToRequester
-	h.pendingToolCalls = applied.PendingToolCalls
-	if h.searchCtx != nil {
-		if len(checkpoint.State.SearchContext) > 0 {
-			if err := h.searchCtx.Restore(checkpoint.State.SearchContext); err != nil {
-				return nil, fmt.Errorf("agent harness: restore search context: %w", err)
-			}
-		}
-		// Legacy checkpoints stored namespace only under runtime _search_namespace.
-		if _, ok := h.searchCtx.Namespace(); !ok {
-			if raw, ok := checkpoint.State.RuntimeState["_search_namespace"]; ok {
-				if s, ok := raw.(string); ok {
-					if id, err := uuid.Parse(s); err == nil {
-						h.searchCtx.SetNamespace(id)
-					}
-				}
-			}
-		}
-	}
-	var durableMounts []vfs.MountSpec
-	if len(checkpoint.State.Mounts) > 0 {
-		if err := json.Unmarshal(checkpoint.State.Mounts, &durableMounts); err != nil {
-			return nil, fmt.Errorf("invalid session mounts: %w", err)
-		}
-	}
-	if err := h.initSessionMounts(ctx, durableMounts); err != nil {
+	h, err := newHarnessBase(opts, sm)
+	if err != nil {
 		return nil, err
 	}
-	h.finishInit(ctx, opts.SubAgents)
+	h.sessionId = sessionId
+	h.context.Restore(applied.Window)
+	h.pendingToolCalls = applied.PendingToolCalls
+	if err := h.finishInit(ctx, opts.SubAgents); err != nil {
+		return nil, err
+	}
 	return h, nil
-}
-
-// initSessionMounts materializes bootstrap+durable specs onto session.VFS.
-// Attach/detach after construct uses MountSession, not the harness.
-func (a *AgentHarness) initSessionMounts(ctx context.Context, durable []vfs.MountSpec) error {
-	if a.session == nil {
-		return fmt.Errorf("vfs: no session")
-	}
-	a.registerBrainFactory()
-	specs, err := vfs.MergeSpecs(a.fsBootstrap, durable)
-	if err != nil {
-		return err
-	}
-	for i := range specs {
-		if specs[i].Profile == brain.DefaultProfile {
-			specs[i].IndexPolicy = vfsindex.PolicyNone
-		}
-	}
-	hasBrain := specsHaveProfile(specs, brain.DefaultProfile) ||
-		sessionHasProfile(a.session.VFS, brain.DefaultProfile)
-	auto := a.shouldAutoEngram() && !hasBrain
-
-	if len(specs) == 0 && !auto {
-		return nil
-	}
-	if a.session.VFS == nil {
-		if a.fsRegistry == nil {
-			return fmt.Errorf("vfs: registry required to restore mounts")
-		}
-		a.session.VFS = vfs.NewMountSession(a.sessionId, a.fsRegistry)
-	}
-	if len(specs) > 0 {
-		if err := a.session.VFS.Materialize(ctx, specs); err != nil {
-			return err
-		}
-	}
-	if auto {
-		if err := a.session.VFS.Mount(ctx, a.defaultEngramSpec()); err != nil && !errors.Is(err, vfs.ErrAlreadyMounted) {
-			return err
-		}
-	}
-	return nil
-}
-
-func (a *AgentHarness) registerBrainFactory() {
-	if a.brain == nil || a.fsRegistry == nil || a.searchCtx == nil {
-		return
-	}
-	ns, ok := a.searchCtx.Namespace()
-	if !ok {
-		return
-	}
-	nsCopy := ns
-	_ = a.fsRegistry.Register(brain.BrainFactory{
-		ID:     brain.DefaultProfile,
-		Engine: a.brain,
-		Scope:  brain.Scope{Namespace: &nsCopy},
-	})
-}
-
-func (a *AgentHarness) shouldAutoEngram() bool {
-	if a.brain == nil || a.searchCtx == nil || a.fsRegistry == nil {
-		return false
-	}
-	if _, ok := a.searchCtx.Namespace(); !ok {
-		return false
-	}
-	return a.fsRegistry.HasProfile(brain.DefaultProfile)
-}
-
-func (a *AgentHarness) defaultEngramSpec() vfs.MountSpec {
-	params := map[string]string{"mode": brain.ModePrefix}
-	if a.brain != nil && a.brain.Catalog() != nil && !a.brain.Catalog().Empty() {
-		var names []string
-		for _, spec := range a.brain.Catalog().All() {
-			if brain.IsParentKind(spec) {
-				names = append(names, spec.Kind)
-			}
-		}
-		if len(names) > 0 {
-			params["kinds"] = strings.Join(names, ",")
-		}
-	}
-	return vfs.MountSpec{
-		Point:       brain.DefaultMountPoint,
-		Profile:     brain.DefaultProfile,
-		IndexPolicy: vfsindex.PolicyNone,
-		Params:      params,
-	}
-}
-
-func specsHaveProfile(specs []vfs.MountSpec, profile string) bool {
-	for _, s := range specs {
-		if s.Profile == profile {
-			return true
-		}
-	}
-	return false
-}
-
-func sessionHasProfile(ms *vfs.MountSession, profile string) bool {
-	if ms == nil {
-		return false
-	}
-	for _, s := range ms.Specs() {
-		if s.Profile == profile {
-			return true
-		}
-	}
-	return false
 }

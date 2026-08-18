@@ -68,21 +68,19 @@ func (p *acpProtocol) handleACPPost(env ProtocolEnv, w http.ResponseWriter, r *h
 	setAffinityCookie(w, conn.ID)
 
 	sessionHdr := strings.TrimSpace(r.Header.Get(HeaderAcpSessionID))
-	if sessionScopedACPMethod(peek.Method) && sessionHdr == "" && !peek.IsNotification {
-		// Notifications like session/cancel may still omit header if body has sessionId;
-		// for requests we require the header per RFD.
-		if !peek.IsNotification {
-			http.Error(w, HeaderAcpSessionID+" required for "+peek.Method, http.StatusBadRequest)
-			return
-		}
+	transport := acpTransportFlagsFor(peek.Method)
+	if transport.requiresSessionHeader && sessionHdr == "" && !peek.IsNotification {
+		http.Error(w, HeaderAcpSessionID+" required for "+peek.Method, http.StatusBadRequest)
+		return
 	}
 	// Prefer header; fall back to body sessionId for routing.
 	sessionID := sessionHdr
 	if sessionID == "" {
 		sessionID = peek.SessionID
 	}
-	if sessionID != "" {
-		conn.noteSession(sessionID)
+	if sessionID != "" && !transport.allowsUnattachedSession && !conn.hasSession(sessionID) {
+		http.Error(w, "session is not attached to this connection", http.StatusForbidden)
+		return
 	}
 
 	if !peek.IsNotification && len(peek.ID) > 0 {
@@ -93,13 +91,16 @@ func (p *acpProtocol) handleACPPost(env ProtocolEnv, w http.ResponseWriter, r *h
 	w.WriteHeader(http.StatusAccepted)
 
 	reqConn := &Conn{
-		Writer: conn.Writer,
-		RPC:    conn.Bridge,
-		Caps:   conn.Bridge.GetCaps(),
+		Writer:      conn.Writer,
+		RPC:         conn.Bridge,
+		setSecurity: conn.setSecurityContext,
 	}
+	securityContext := conn.securityContext()
+	reqConn.Security = &securityContext
 	reqEnv := ProtocolEnv{
 		Registry:    env.Registry,
 		Conn:        reqConn,
+		Security:    env.Security,
 		Connections: env.Connections,
 	}
 	// Use connection context — POST request context ends when the handler returns.
@@ -120,6 +121,9 @@ func (p *acpProtocol) handleStreamableInitialize(env ProtocolEnv, w http.Respons
 
 	sw := &acpStreamWriter{}
 	conn := env.Connections.Create(nil, nil)
+	if env.Conn != nil && env.Conn.Security != nil {
+		conn.setSecurityContext(*env.Conn.Security)
+	}
 	sw.conn = conn
 	bridge := NewClientBridge(sw)
 	conn.Bridge = bridge
@@ -127,27 +131,27 @@ func (p *acpProtocol) handleStreamableInitialize(env ProtocolEnv, w http.Respons
 
 	// Initialize result goes on the HTTP response body (200), not SSE.
 	hw := &httpBufferWriter{}
-	reqConn := &Conn{Writer: hw, RPC: bridge, Caps: ClientCapabilities{}}
-	reqEnv := ProtocolEnv{Registry: env.Registry, Conn: reqConn, Connections: env.Connections}
+	securityContext := conn.securityContext()
+	reqConn := &Conn{
+		Writer:      hw,
+		RPC:         bridge,
+		Security:    &securityContext,
+		setSecurity: conn.setSecurityContext,
+	}
+	reqEnv := ProtocolEnv{Registry: env.Registry, Conn: reqConn, Security: env.Security, Connections: env.Connections}
 	if err := p.HandleInbound(r.Context(), reqEnv, body); err != nil {
 		slog.Debug("acp streamable initialize", "error", err)
 	}
 
-	// If handler wrote an error, map to HTTP error shape still as JSON-RPC 200 body.
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set(HeaderAcpConnectionID, conn.ID)
 	setAffinityCookie(w, conn.ID)
-	w.WriteHeader(http.StatusOK)
-	if len(hw.buf) > 0 {
-		_, _ = w.Write(hw.buf)
+	if len(hw.buf) == 0 {
+		http.Error(w, "initialize produced no response", http.StatusInternalServerError)
 		return
 	}
-	// Fallback if nothing was written.
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"jsonrpc": "2.0",
-		"id":      peek.ID,
-		"result":  acpInitializeResult(env.Registry, acpProtocolVersion),
-	})
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(hw.buf)
 }
 
 // handleACPGet dispatches WebSocket upgrade vs Streamable HTTP SSE.

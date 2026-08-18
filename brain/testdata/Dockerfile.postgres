@@ -23,8 +23,16 @@ RUN set -eux; \
 	esac; \
 	apt-get update; \
 	apt-get install -y --no-install-recommends ca-certificates curl unzip; \
-	curl -fsSL -o /tmp/pgts.zip \
-		"https://github.com/timescale/pg_textsearch/releases/download/v${PG_TEXTSEARCH_VERSION}/pg-textsearch-v${PG_TEXTSEARCH_VERSION}-pg17-${deb_arch}.zip"; \
+	url="https://github.com/timescale/pg_textsearch/releases/download/v${PG_TEXTSEARCH_VERSION}/pg-textsearch-v${PG_TEXTSEARCH_VERSION}-pg17-${deb_arch}.zip"; \
+	i=0; \
+	until curl -fsSL --retry 8 --retry-delay 2 --retry-all-errors --retry-max-time 180 -o /tmp/pgts.zip "$url"; do \
+		i=$((i + 1)); \
+		if [ "$i" -ge 5 ]; then \
+			echo "failed to download pg_textsearch from ${url} after ${i} attempts" >&2; \
+			exit 1; \
+		fi; \
+		sleep $((i * 3)); \
+	done; \
 	mkdir -p /tmp/pgts; \
 	unzip -d /tmp/pgts /tmp/pgts.zip; \
 	dpkg -i /tmp/pgts/*.deb; \

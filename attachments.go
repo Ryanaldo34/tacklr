@@ -22,7 +22,9 @@ func (a *AgentHarness) AttachDocument(ctx context.Context, name string, data []b
 	if err := a.ensureAttachmentMount(ctx); err != nil {
 		return "", err
 	}
-	a.ensureAttachmentTools()
+	if err := a.ensureAttachmentTools(); err != nil {
+		return "", err
+	}
 	virtualPath := "/context/" + name
 	if err := a.session.VFS.WriteFile(ctx, virtualPath, data); err != nil {
 		return "", fmt.Errorf("attach document %s: %w", name, err)
@@ -31,24 +33,27 @@ func (a *AgentHarness) AttachDocument(ctx context.Context, name string, data []b
 	return virtualPath, nil
 }
 
-func (a *AgentHarness) ensureAttachmentTools() {
+func (a *AgentHarness) ensureAttachmentTools() error {
 	known := make(map[string]struct{}, len(a.tools))
 	for _, tool := range a.tools {
 		known[tool.Name] = struct{}{}
 	}
-	for _, tool := range newVFSTools(a.session.VFS) {
+	for _, tool := range newVFSTools(a.session.VFS, !a.writeUnattended) {
 		if _, ok := known[tool.Name]; !ok {
 			a.tools = append(a.tools, tool)
 		}
 	}
 	if a.vfsBridge == nil {
-		a.vfsBridge = a.initVFSIndexBridge()
+		if err := a.initVFSIndexBridge(); err != nil {
+			return err
+		}
 	}
 	for _, tool := range newVFSIndexTools(a.vfsBridge) {
 		if _, ok := known[tool.Name]; !ok {
 			a.tools = append(a.tools, tool)
 		}
 	}
+	return nil
 }
 
 func (a *AgentHarness) ensureAttachmentMount(ctx context.Context) error {
@@ -56,9 +61,13 @@ func (a *AgentHarness) ensureAttachmentMount(ctx context.Context) error {
 		if a.fsRegistry == nil {
 			a.fsRegistry = vfs.NewBackendRegistry()
 		}
-		a.session.VFS = vfs.NewMountSession(a.sessionId, a.fsRegistry)
+		ms, err := vfs.NewMountSession(a.sessionId, a.fsRegistry)
+		if err != nil {
+			return fmt.Errorf("attach document: create VFS: %w", err)
+		}
+		a.session.VFS = ms
 	}
-	if _, _, err := a.session.VFS.Lookup("/context"); err == nil {
+	if _, err := a.session.VFS.SpecAt("/context/attached"); err == nil {
 		return nil
 	}
 	if a.fsRegistry == nil {

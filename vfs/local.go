@@ -62,7 +62,7 @@ func (p localProvider) Stat(ctx context.Context, name string) (FileInfo, error) 
 			return FileInfo{}, err
 		}
 	}
-	return fileInfoFromOS(info), nil
+	return localFileInfo(host, info), nil
 }
 
 // OpenFile implements Provider.
@@ -85,7 +85,7 @@ func (p localProvider) OpenFile(ctx context.Context, name string, flag int, perm
 	if err != nil {
 		return nil, mapOSError(err)
 	}
-	return &localFile{f: f}, nil
+	return &localFile{File: f}, nil
 }
 
 // PutFile writes a full file in one shot (used by MountSession.WriteFile).
@@ -106,14 +106,57 @@ func (p localProvider) PutFile(ctx context.Context, name string, r io.Reader, si
 	if size == 0 {
 		return nil
 	}
-	n, err := io.Copy(f, io.LimitReader(r, size))
-	if err != nil {
+	if _, err := io.Copy(f, io.LimitReader(r, size)); err != nil {
 		return mapOSError(err)
 	}
-	if n != size {
-		return io.ErrUnexpectedEOF
-	}
 	return nil
+}
+
+// OpenDocument translates local file bytes into Document IR.
+func (p localProvider) OpenDocument(ctx context.Context, name string, reg *ContentRegistry) (Document, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	fi, err := p.Stat(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	if fi.IsDir {
+		return nil, fmt.Errorf("vfs: %s is a directory", name)
+	}
+	if fi.Size > int64(MaxReadFileBytes) {
+		return nil, errFileExceeds(MaxReadFileBytes)
+	}
+	host, err := p.hostPath(name)
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(host) //nolint:gosec // G304: host is jailed by hostPath
+	if err != nil {
+		return nil, mapOSError(err)
+	}
+	return decodeProviderDocument(ctx, name, fi, data, reg)
+}
+
+// WriteDocument encodes IR and writes the file immediately.
+func (p localProvider) WriteDocument(ctx context.Context, name string, doc Document) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	t, ok := doc.(Textual)
+	if !ok {
+		return ErrNotTextual
+	}
+	body, err := EncodeDocument(ctx, t)
+	if err != nil {
+		return err
+	}
+	if dir := path.Dir(name); dir != "" && dir != "." {
+		if err := p.MkdirAll(ctx, dir, 0o755); err != nil {
+			return err
+		}
+	}
+	return p.PutFile(ctx, name, strings.NewReader(string(body)), int64(len(body)))
 }
 
 // ReadDir implements Provider.
@@ -240,6 +283,29 @@ func fileInfoFromOS(info os.FileInfo) FileInfo {
 	}
 }
 
+func localFileInfo(host string, info os.FileInfo) FileInfo {
+	fi := fileInfoFromOS(info)
+	if fi.IsDir {
+		return fi
+	}
+	fi.MediaType = DetectMediaType(info.Name(), nil)
+	if fi.MediaType != "application/octet-stream" {
+		return fi
+	}
+	// No known extension: peek so README (no suffix) can still be text.
+	f, err := os.Open(host)
+	if err != nil {
+		return fi
+	}
+	defer f.Close()
+	var buf [512]byte
+	n, _ := f.Read(buf[:])
+	if n > 0 {
+		fi.MediaType = DetectMediaType(info.Name(), buf[:n])
+	}
+	return fi
+}
+
 func mapOSError(err error) error {
 	if err == nil {
 		return nil
@@ -253,17 +319,14 @@ func mapOSError(err error) error {
 	return err
 }
 
-type localFile struct{ f *os.File }
+type localFile struct{ *os.File }
 
-func (f *localFile) Read(p []byte) (int, error)  { return f.f.Read(p) }
-func (f *localFile) Write(p []byte) (int, error) { return f.f.Write(p) }
-func (f *localFile) Close() error                { return f.f.Close() }
 func (f *localFile) Stat() (FileInfo, error) {
-	info, err := f.f.Stat()
+	info, err := f.File.Stat()
 	if err != nil {
 		return FileInfo{}, mapOSError(err)
 	}
-	return fileInfoFromOS(info), nil
+	return localFileInfo(f.Name(), info), nil
 }
 
 // LocalFactory opens LocalProviders under a fixed Base directory.
@@ -276,6 +339,8 @@ type LocalFactory struct {
 
 // Profile implements ProviderFactory.
 func (f LocalFactory) Profile() string { return f.ID }
+
+var _ documentBackend = localProvider{}
 
 // Open implements ProviderFactory.
 func (f LocalFactory) Open(ctx context.Context, sessionID string, spec MountSpec) (Provider, error) {

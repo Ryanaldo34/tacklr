@@ -19,6 +19,17 @@ type ContextPolicy struct {
 	StreamFitSummary bool
 }
 
+// Validate checks non-zero context policy overrides.
+func (p ContextPolicy) Validate() error {
+	if p.PressureRatio < 0 || p.PressureRatio > 1 {
+		return fmt.Errorf("tacklr: ContextPolicy.PressureRatio must be zero or in (0, 1]")
+	}
+	if p.CompressFraction < 0 || p.CompressFraction > 1 {
+		return fmt.Errorf("tacklr: ContextPolicy.CompressFraction must be zero or in (0, 1]")
+	}
+	return nil
+}
+
 // DefaultContextPolicy is the product default pressure and compress settings.
 func DefaultContextPolicy() ContextPolicy {
 	return ContextPolicy{
@@ -29,13 +40,11 @@ func DefaultContextPolicy() ContextPolicy {
 }
 
 // ContextManager owns the conversation window structure only (no inference).
-// ModelTasks does model work and applies results with Replace or InstallPlanDocument.
-// Snapshot must be safe while another path Absorbs or Replaces after resume.
+// modelTasks does model work and applies results with Replace or InstallPlanDocument.
+// Messages must be safe while another path Absorbs or Replaces after resume.
 type ContextManager interface {
-	// Messages returns a retainable snapshot of the live window.
+	// Messages returns a retainable snapshot of the live window (also used for checkpoints).
 	Messages() []*Message
-	// Snapshot is for checkpointing (shallow copy of message pointers).
-	Snapshot() []*Message
 	// Restore copies window into storage (caller keeps its slice).
 	Restore(window []*Message)
 	// Replace takes ownership of window; do not reuse the slice after.
@@ -66,11 +75,8 @@ func (m *ModelContextManager) Messages() []*Message {
 	return slices.Clone(m.window)
 }
 
-func (m *ModelContextManager) Snapshot() []*Message {
-	return m.Messages()
-}
-
 func (m *ModelContextManager) Restore(window []*Message) {
+	assertValidContextWindow(window)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if len(window) == 0 {
@@ -81,18 +87,25 @@ func (m *ModelContextManager) Restore(window []*Message) {
 }
 
 func (m *ModelContextManager) Replace(window []*Message) {
+	assertValidContextWindow(window)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.window = window
 }
 
 func (m *ModelContextManager) Add(msg *Message) {
-	if msg == nil {
-		return
+	if err := streaming.ValidateMessages([]*Message{msg}); err != nil {
+		panic("tacklr: invalid context message: " + err.Error())
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.window = append(m.window, msg)
+}
+
+func assertValidContextWindow(window []*Message) {
+	if err := streaming.ValidateMessages(window); err != nil {
+		panic("tacklr: invalid context window: " + err.Error())
+	}
 }
 
 func (m *ModelContextManager) InstallPlanDocument(planRaw string) error {
@@ -110,9 +123,6 @@ func (m *ModelContextManager) InstallPlanDocument(planRaw string) error {
 
 // protectedPrefixLen is the Absorb keep-prefix: [0] user; [1] plan document if present.
 func protectedPrefixLen(window []*Message) int {
-	if len(window) == 0 {
-		return 0
-	}
 	if len(window) > 1 && isPlanDocument(window[1]) {
 		return 2
 	}

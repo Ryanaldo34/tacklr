@@ -39,27 +39,25 @@ func TestResolveInterruptViaACP_dispatchOutcomes(t *testing.T) {
 		"data":        json.RawMessage(ser),
 	})
 	ch, err := resolveInterruptViaACP(context.Background(), ProtocolEnv{Conn: &Conn{
-		RPC:  NewClientBridge(&recordingWriter{}),
-		Caps: ClientCapabilities{ElicitationForm: false},
+		RPC: NewClientBridge(&recordingWriter{}),
 	}}, "s", &EventStream{}, &streaming.StreamEvent{Data: selData, MessageID: "tc"})
 	if err != nil || ch != nil {
 		t.Fatalf("no-form park: ch=%v err=%v", ch, err)
 	}
 
-	// Empty type defaults to user_selection_choice (same park without form).
+	// Missing type is rejected — no default kind.
 	legacy, _ := json.Marshal(map[string]any{
 		"interruptId": "i3",
 		"data":        json.RawMessage(ser),
 	})
-	ch, err = resolveInterruptViaACP(context.Background(), ProtocolEnv{Conn: &Conn{
+	_, err = resolveInterruptViaACP(context.Background(), ProtocolEnv{Conn: &Conn{
 		RPC: NewClientBridge(&recordingWriter{}),
 	}}, "s", &EventStream{}, &streaming.StreamEvent{Data: legacy})
-	if err != nil || ch != nil {
-		t.Fatalf("legacy type park: ch=%v err=%v", ch, err)
+	if err == nil || !strings.Contains(err.Error(), "missing type") {
+		t.Fatalf("missing type: %v", err)
 	}
 
-	// Stale Conn.Caps snapshot (false) but bridge has form support after initialize.
-	// Mid-turn resolution must use live GetCaps, not the dispatch-time copy.
+	// Live bridge caps after initialize drive elicitation (no Conn snapshot).
 	bridge := NewClientBridge(&recordingWriter{})
 	bridge.SetCaps(ClientCapabilities{ElicitationForm: true})
 	// Without a matching client response Call will block; just assert we do not
@@ -67,8 +65,7 @@ func TestResolveInterruptViaACP_dispatchOutcomes(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	_, err = resolveInterruptViaACP(ctx, ProtocolEnv{Conn: &Conn{
-		RPC:  bridge,
-		Caps: ClientCapabilities{ElicitationForm: false}, // stale snapshot
+		RPC: bridge,
 	}}, "s", &EventStream{}, &streaming.StreamEvent{Data: selData, MessageID: "tc"})
 	// Must not park (nil, nil): should attempt elicitation and fail via ctx/call.
 	if err == nil {
@@ -174,9 +171,9 @@ func TestResolvePermissionViaRequest_outcomes(t *testing.T) {
 	t.Run("selected resumes interrupts", func(t *testing.T) {
 		store := testStore(t)
 		sensitive := tacklr.NewTool(tacklr.ToolConfig{
-			Name:               "sensitive",
-			PermissionRequired: true,
-			Handler:            func(ctx context.Context) (string, error) { return "ok", nil },
+			Name:    "sensitive",
+			OnCall:  tacklr.OnCalls(tacklr.ToolPermissionOnCall),
+			Handler: func(ctx context.Context) (string, error) { return "ok", nil },
 		})
 		ms := &mockInferenceStrategy{
 			invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
@@ -186,7 +183,7 @@ func TestResolvePermissionViaRequest_outcomes(t *testing.T) {
 				ch <- tacklr.LLMResponseChunk{IsComplete: true}
 			},
 		}
-		h := tacklr.NewAgent(context.Background(), tacklr.AgentOptions{
+		h := mustAgent(t, tacklr.AgentOptions{
 			Config:    tacklr.Config{MaxWindowSize: 8192},
 			SessionID: "sess-perm-resolve",
 			Model:     ms,
@@ -215,7 +212,7 @@ func TestResolvePermissionViaRequest_outcomes(t *testing.T) {
 		w := &recordingWriter{}
 		bridge := NewClientBridge(w)
 		env := ProtocolEnv{Conn: &Conn{RPC: bridge}}
-		stream := &EventStream{Harness: h, runCtx: context.Background()}
+		stream := &EventStream{harness: h, runCtx: context.Background()}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()

@@ -13,6 +13,7 @@ import (
 
 	mapset "github.com/deckarep/golang-set/v2"
 
+	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
@@ -50,8 +51,8 @@ type Tool struct {
 	Access      mapset.Set[ToolPermission]
 	// Timeout is an optional per-invocation deadline. Zero means none.
 	Timeout time.Duration
-	// PermissionRequired asks the user to approve the tool before it runs.
-	PermissionRequired bool
+	// OnCall is the pre-invoke middleware stack. Each constructor may park.
+	OnCall []OnCallFunc
 
 	handlerFunc func(ctx context.Context, args map[string]any, runtime HarnessRuntime) (toolCallResult, error)
 	parameters  map[string]any
@@ -66,10 +67,19 @@ type ToolConfig struct {
 	Category    streaming.ToolCategory
 	Access      mapset.Set[ToolPermission]
 	Timeout     time.Duration
-	// PermissionRequired asks the user to approve the tool before it runs.
-	PermissionRequired bool
+	// OnCall is the pre-invoke middleware stack. Each constructor may park.
+	// Return nil from a constructor to skip that layer. Types must be registered.
+	OnCall []OnCallFunc
 
 	Handler any
+}
+
+// OnCallFunc builds a pre-invoke interrupt. Return nil to skip that layer.
+type OnCallFunc func(ToolInvocation) Interrupt
+
+// OnCalls builds an OnCall stack from constructors (middleware order).
+func OnCalls(ctors ...OnCallFunc) []OnCallFunc {
+	return ctors
 }
 
 type mcpToolConfig struct {
@@ -83,7 +93,7 @@ type mcpToolConfig struct {
 }
 
 var timeType = reflect.TypeOf(time.Time{})
-var harnessRuntimeType = reflect.TypeOf(HarnessRuntime{})
+var harnessRuntimeType = reflect.TypeOf((*HarnessRuntime)(nil)).Elem()
 var ctxType = reflect.TypeOf((*context.Context)(nil)).Elem()
 
 func NewTool(cfg ToolConfig) *Tool {
@@ -117,50 +127,53 @@ func NewTool(cfg ToolConfig) *Tool {
 	var argsType reflect.Type
 	var argsIsPtr bool
 	var hasRuntime bool
-	var runtimeIsPtr bool
 
 	if idx < numIn {
 		pType := fnType.In(idx)
-		baseType := pType
-		if baseType.Kind() == reflect.Ptr {
-			baseType = baseType.Elem()
-		}
-
-		if baseType == harnessRuntimeType {
+		if pType == harnessRuntimeType {
 			hasRuntime = true
-			runtimeIsPtr = pType.Kind() == reflect.Ptr
-		} else if baseType.Kind() == reflect.Struct {
-			argsType = baseType
-			argsIsPtr = pType.Kind() == reflect.Ptr
-			idx++
-			if idx < numIn {
-				rType := fnType.In(idx)
-				rBase := rType
-				if rBase.Kind() == reflect.Ptr {
-					rBase = rBase.Elem()
-				}
-				if rBase == harnessRuntimeType {
-					hasRuntime = true
-					runtimeIsPtr = rType.Kind() == reflect.Ptr
-				} else {
-					panic(fmt.Sprintf("tool %q: unexpected parameter type %v", cfg.Name, rType))
-				}
-			}
 		} else {
-			panic(fmt.Sprintf("tool %q: handler parameter must be a struct or HarnessRuntime, got %v", cfg.Name, pType))
+			baseType := pType
+			if baseType.Kind() == reflect.Ptr {
+				baseType = baseType.Elem()
+			}
+			if baseType.Kind() == reflect.Struct {
+				argsType = baseType
+				argsIsPtr = pType.Kind() == reflect.Ptr
+				idx++
+				if idx < numIn {
+					rType := fnType.In(idx)
+					if rType != harnessRuntimeType {
+						panic(fmt.Sprintf("tool %q: unexpected parameter type %v (want HarnessRuntime)", cfg.Name, rType))
+					}
+					hasRuntime = true
+				}
+			} else {
+				panic(fmt.Sprintf("tool %q: handler parameter must be a struct or HarnessRuntime, got %v", cfg.Name, pType))
+			}
 		}
 	}
 
 	t := &Tool{
-		Name:               cfg.Name,
-		DisplayName:        cfg.DisplayName,
-		Description:        cfg.Description,
-		Namespace:          cfg.Namespace,
-		Category:           cfg.Category,
-		Access:             cfg.Access,
-		Timeout:            cfg.Timeout,
-		PermissionRequired: cfg.PermissionRequired,
-		strict:             true,
+		Name:        cfg.Name,
+		DisplayName: cfg.DisplayName,
+		Description: cfg.Description,
+		Namespace:   cfg.Namespace,
+		Category:    cfg.Category,
+		Access:      cfg.Access,
+		Timeout:     cfg.Timeout,
+		OnCall:      cfg.OnCall,
+		strict:      true,
+	}
+	for _, ctor := range cfg.OnCall {
+		if ctor == nil {
+			continue
+		}
+		if sample := ctor(ToolInvocation{Tool: t}); sample != nil {
+			if _, ok := interrupt.New(sample.TypeName()); !ok {
+				panic(fmt.Sprintf("tool %q: OnCall type %q is not registered", cfg.Name, sample.TypeName()))
+			}
+		}
 	}
 	if argsType != nil {
 		// strict:true tools require every properties key in required (OpenAI / DeepSeek).
@@ -199,11 +212,10 @@ func NewTool(cfg ToolConfig) *Tool {
 		}
 
 		if hasRuntime {
-			if runtimeIsPtr {
-				callArgs = append(callArgs, reflect.ValueOf(&runtime))
-			} else {
-				callArgs = append(callArgs, reflect.ValueOf(runtime))
+			if runtime == nil {
+				return toolCallResult{}, fmt.Errorf("%w: tool %q requires a HarnessRuntime", ErrFailed, t.Name)
 			}
+			callArgs = append(callArgs, reflect.ValueOf(runtime))
 		}
 
 		results := handlerValue.Call(callArgs)
@@ -545,9 +557,10 @@ const (
 	EffectHandoff
 )
 
-// BuiltinResult is a tool success that can queue ACM window effects.
-// Output is the model-visible tool string. Plan tools use this type.
-type BuiltinResult struct {
+// ToolOutcome is the single post-tool result: model-visible output plus a
+// window effect. Plan builtins return this (as BuiltinResult). Host hooks
+// return the same type and leave Output empty.
+type ToolOutcome struct {
 	Output string
 	// Effect is merged for the batch and applied once at batch end.
 	Effect ToolResultEffect
@@ -555,6 +568,12 @@ type BuiltinResult struct {
 	// The client still receives StreamEventToolResult.
 	SuppressWindowMessage bool
 }
+
+// BuiltinResult is the tool-handler success type.
+type BuiltinResult = ToolOutcome
+
+// ToolResultDisposition is the window-effect view of ToolOutcome.
+type ToolResultDisposition = ToolOutcome
 
 // ToolResultObservation is a successful tool result seen by a ToolResultHook.
 type ToolResultObservation struct {
@@ -564,14 +583,8 @@ type ToolResultObservation struct {
 	Runtime  HarnessRuntime
 }
 
-// ToolResultDisposition is the window effect from a BuiltinResult or ToolResultHook.
-type ToolResultDisposition struct {
-	Effect                ToolResultEffect
-	SuppressWindowMessage bool
-}
-
 // ToolResultHook runs after a successful host tool and before the tool result is emitted.
-// Effects apply at batch end. Plan builtins use BuiltinResult instead.
+// Effects apply at batch end. Plan builtins return BuiltinResult instead.
 type ToolResultHook func(ctx context.Context, obs ToolResultObservation) ToolResultDisposition
 
 type toolResultHookRegistry struct {
