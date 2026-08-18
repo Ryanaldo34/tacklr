@@ -6,8 +6,9 @@ import (
 	stdhtml "html"
 	"strings"
 
-	"github.com/ryanaldo34/tacklr/vfs"
 	"golang.org/x/net/html"
+
+	"github.com/ryanaldo34/tacklr/vfs"
 )
 
 const HTMLMediaType = "text/html"
@@ -142,11 +143,4 @@ func cloneAttrs(in map[string]string) map[string]string {
 		out[k] = v
 	}
 	return out
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

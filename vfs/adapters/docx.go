@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -70,8 +71,15 @@ func zipPart(data []byte, name string) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		defer r.Close()
-		return io.ReadAll(r)
+		part, readErr := io.ReadAll(r)
+		closeErr := r.Close()
+		if readErr != nil {
+			return nil, readErr
+		}
+		if closeErr != nil {
+			return nil, closeErr
+		}
+		return part, nil
 	}
 	return nil, fmt.Errorf("missing %s", name)
 }
@@ -89,7 +97,7 @@ func parseDOCX(data []byte) (*vfs.RichTextDocument, error) {
 	var run *vfs.RichTextRun
 	for {
 		tok, err := dec.Token()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
