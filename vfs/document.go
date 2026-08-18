@@ -1,6 +1,7 @@
 package vfs
 
 import (
+	"context"
 	"strings"
 )
 
@@ -107,6 +108,8 @@ type TextDocument struct {
 	path, mediaType, encoding string
 	text                      string
 	starts                    []int
+	encoder                   Encoder
+	richBlocks                []Block
 }
 
 // NewTextDocument builds a TextDocument from already-decoded UTF-8 text.
@@ -120,6 +123,29 @@ func NewTextDocument(path, mediaType, encoding, text string) *TextDocument {
 	d := &TextDocument{path: path, mediaType: mediaType, encoding: encoding}
 	d.SetText(text)
 	return d
+}
+
+// NewEncodedTextDocument creates a textual canonical projection whose source
+// bytes are produced by encoder when the document is written.
+func NewEncodedTextDocument(path, mediaType, encoding, text string, encoder Encoder) *TextDocument {
+	d := NewTextDocument(path, mediaType, encoding, text)
+	d.encoder = encoder
+	return d
+}
+
+func EncodeDocument(ctx context.Context, doc Document) ([]byte, error) {
+	t, ok := doc.(*TextDocument)
+	if !ok {
+		text, ok := doc.(Textual)
+		if !ok {
+			return nil, ErrNotTextual
+		}
+		return EncodeTextual(text)
+	}
+	if t.encoder != nil {
+		return t.encoder.Encode(ctx, t)
+	}
+	return EncodeTextual(t)
 }
 
 func (d *TextDocument) Path() string      { return d.path }

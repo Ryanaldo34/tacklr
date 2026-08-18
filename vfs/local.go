@@ -147,7 +147,7 @@ func (p localProvider) WriteDocument(ctx context.Context, name string, doc Docum
 	if !ok {
 		return ErrNotTextual
 	}
-	body, err := textualPayload(t)
+	body, err := EncodeDocument(ctx, t)
 	if err != nil {
 		return err
 	}
@@ -156,7 +156,7 @@ func (p localProvider) WriteDocument(ctx context.Context, name string, doc Docum
 			return err
 		}
 	}
-	return p.PutFile(ctx, name, strings.NewReader(body), int64(len(body)))
+	return p.PutFile(ctx, name, strings.NewReader(string(body)), int64(len(body)))
 }
 
 // ReadDir implements Provider.

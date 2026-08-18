@@ -1,6 +1,8 @@
 package vfs
 
 import (
+	"encoding/json"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode"
@@ -9,6 +11,24 @@ import (
 // structureFor attaches a block view for known media types (internal projectors).
 // Uses the document line index so large files are not re-split into []string.
 func structureFor(d *TextDocument) []Block {
+	if d.encoder != nil {
+		var rich RichTextDocument
+		if err := json.Unmarshal([]byte(d.text), &rich); err == nil && validateRichText(&rich) == nil {
+			return projectRichBlocks(rich.Blocks, 1)
+		}
+	}
+	if d.richBlocks != nil {
+		return slices.Clone(d.richBlocks)
+	}
+	if d.encoder != nil {
+		var rich RichTextDocument
+		if err := json.Unmarshal([]byte(d.text), &rich); err == nil && validateRichText(&rich) == nil {
+			return projectRichBlocks(rich.Blocks, 1)
+		}
+	}
+	if d.richBlocks != nil {
+		return slices.Clone(d.richBlocks)
+	}
 	switch d.mediaType {
 	case "text/markdown":
 		return blocksFromMarkdown(d)

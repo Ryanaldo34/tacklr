@@ -69,6 +69,8 @@ type AgentHarness struct {
 	// only when this harness called vfsindex.Start.
 	vfsBridge        *vfsindex.Bridge
 	ownsVFSBridge    bool
+	fsRegistry       *vfs.BackendRegistry
+	attachmentFS     *vfs.MemoryFactory
 	mcpCleanup       func()
 	mcpInitialized   bool
 	builtinsInjected bool

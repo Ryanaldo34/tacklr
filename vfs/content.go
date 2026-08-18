@@ -18,6 +18,12 @@ type Codec interface {
 	Decode(ctx context.Context, path, mediaType string, data []byte) (Document, error)
 }
 
+// Encoder is the optional write side of a Codec. Rich document codecs use it
+// to encode the edited canonical projection back to source bytes.
+type Encoder interface {
+	Encode(ctx context.Context, doc Document) ([]byte, error)
+}
+
 // IdentityCodec is a Codec whose persist form is the UTF-8 payload itself
 // (no container). TextCodec implements it. Office/cloud codecs (Word, Notion,
 // Google Docs) must not — FUSE then returns EROFS and the write tool uses
@@ -162,7 +168,8 @@ func DetectMediaType(virtualPath string, sample []byte) string {
 
 var extMediaTypes = map[string]string{
 	".txt": "text/plain", ".md": "text/markdown", ".markdown": "text/markdown",
-	".go": "text/x-go", ".py": "text/x-python",
+	".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+	".go":   "text/x-go", ".py": "text/x-python",
 	".js": "text/javascript", ".mjs": "text/javascript", ".cjs": "text/javascript", ".jsx": "text/javascript",
 	".ts": "text/x.typescript", ".tsx": "text/x.typescript",
 	".json": "application/json", ".yaml": "application/yaml", ".yml": "application/yaml", ".toml": "application/toml",
@@ -218,6 +225,9 @@ func uniqueMediaTypes(m map[string]string) []string {
 	seen := make(map[string]struct{}, len(m))
 	out := make([]string, 0, len(m))
 	for _, mt := range m {
+		if !IsTextLike(mt) {
+			continue
+		}
 		if _, ok := seen[mt]; ok {
 			continue
 		}
