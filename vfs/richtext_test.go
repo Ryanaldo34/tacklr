@@ -2,7 +2,6 @@ package vfs_test
 
 import (
 	"context"
-	"encoding/json"
 	"testing"
 
 	"github.com/ryanaldo34/tacklr/vfs"
@@ -34,25 +33,19 @@ func TestRichTextCodecProjectsAndEncodesEditedCanonicalDocument(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	text, ok := doc.(*vfs.TextDocument)
-	if !ok || text.Text() == "" {
-		t.Fatalf("decoded document = %#v", doc)
+	rd, ok := doc.(*vfs.RichDocument)
+	if !ok {
+		t.Fatalf("decoded document = %#v, want *RichDocument", doc)
 	}
-	if got := text.Blocks(); len(got) != 1 || got[0].ID != "intro" {
+	if err := rd.SetText("nope"); err != vfs.ErrProjected {
+		t.Fatalf("SetText = %v, want ErrProjected", err)
+	}
+	if got := rd.Blocks(); len(got) != 1 || got[0].Kind != vfs.BlockKindParagraph || got[0].Text != "original" {
 		t.Fatalf("blocks = %#v", got)
 	}
 
-	var canonical vfs.RichTextDocument
-	if err := json.Unmarshal([]byte(text.Text()), &canonical); err != nil {
-		t.Fatal(err)
-	}
-	canonical.Blocks[0].Text = "edited"
-	body, err := json.MarshalIndent(canonical, "", "  ")
-	if err != nil {
-		t.Fatal(err)
-	}
-	text.SetText(string(body))
-	encoded, err := codec.Encode(ctx, text)
+	rd.SetBlocks([]vfs.Block{{ID: "intro", Kind: vfs.BlockKindParagraph, Text: "edited"}})
+	encoded, err := codec.Encode(ctx, rd)
 	if err != nil {
 		t.Fatal(err)
 	}

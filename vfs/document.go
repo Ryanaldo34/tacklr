@@ -139,18 +139,22 @@ func NewEncodedTextDocument(path, mediaType, encoding, text string, encoder Enco
 }
 
 func EncodeDocument(ctx context.Context, doc Document) ([]byte, error) {
-	t, ok := doc.(*TextDocument)
-	if !ok {
-		text, ok := doc.(Textual)
-		if !ok {
-			return nil, ErrNotTextual
-		}
-		return EncodeTextual(text)
+	if doc == nil {
+		return nil, ErrNotTextual
 	}
-	if t.encoder != nil {
+	if t, ok := doc.(*TextDocument); ok && t.encoder != nil {
 		return t.encoder.Encode(ctx, t)
 	}
-	return EncodeTextual(t)
+	if c, ok := defaultContentRegistry.codec(normalizeMediaType(doc.MediaType())); ok {
+		if enc, ok := c.(Encoder); ok {
+			return enc.Encode(ctx, doc)
+		}
+	}
+	text, ok := doc.(Textual)
+	if !ok {
+		return nil, ErrNotTextual
+	}
+	return EncodeTextual(text)
 }
 
 func (d *TextDocument) Path() string      { return d.path }

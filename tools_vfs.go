@@ -329,6 +329,12 @@ func (v vfsTools) writeFull(ctx context.Context, p string, exists bool, fi vfs.F
 	} else {
 		n := min(len(body), 512)
 		mt = vfs.DetectMediaType(path.Base(p), []byte(body[:n]))
+		if args.MediaType != "" && vfs.IsProjected(args.MediaType) {
+			mt = args.MediaType
+		}
+		if vfs.IsProjected(mt) {
+			return v.stage(ctx, vfs.NewRichDocument(p, mt, liftPlaintext(body)))
+		}
 	}
 	return v.stage(ctx, vfs.NewTextDocument(p, mt, "utf-8", body))
 }
@@ -460,10 +466,20 @@ func (v vfsTools) writeBlocks(ctx context.Context, p string, exists bool, fi vfs
 		})
 	}
 	if !exists {
-		if args.MediaType != mediaGoogleDocument || path.Ext(p) != "" {
-			return "", fmt.Errorf("write: blocks require media_type=%s on an extensionless path", mediaGoogleDocument)
+		mt := args.MediaType
+		if mt == "" {
+			mt = vfs.DetectMediaType(path.Base(p), nil)
 		}
-		return v.stage(ctx, vfs.NewRichDocument(p, mediaGoogleDocument, next))
+		if mt == mediaGoogleDocument {
+			if path.Ext(p) != "" {
+				return "", fmt.Errorf("write: blocks require media_type=%s on an extensionless path", mediaGoogleDocument)
+			}
+			return v.stage(ctx, vfs.NewRichDocument(p, mediaGoogleDocument, next))
+		}
+		if vfs.IsProjected(mt) {
+			return v.stage(ctx, vfs.NewRichDocument(p, mt, next))
+		}
+		return "", fmt.Errorf("write: blocks require media_type=%s on an extensionless path", mediaGoogleDocument)
 	}
 	if !vfs.IsProjected(fi.MediaType) {
 		return "", vfs.ErrProjected

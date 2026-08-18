@@ -42,9 +42,10 @@ type RichTextNormalizer interface {
 	EncodeRich(ctx context.Context, doc *RichTextDocument) ([]byte, error)
 }
 
-// RichTextCodec adapts a RichTextNormalizer to the VFS codec registry. The VFS
-// exposes canonical JSON as TextDocument, allowing existing line tools and
-// indexing to work without knowing the source format.
+// RichTextCodec adapts a RichTextNormalizer to the VFS codec registry.
+// Decode yields a RichDocument (blocks are the source of truth; Text() is the
+// HTML projection). Encode writes native bytes (DOCX, editor HTML, …).
+// Not an IdentityCodec — FUSE is EROFS; persist via WriteDocument.
 type RichTextCodec struct {
 	Types      []string
 	Normalizer RichTextNormalizer
@@ -63,29 +64,21 @@ func (c RichTextCodec) Decode(ctx context.Context, path, mediaType string, data 
 	if err := validateRichText(doc); err != nil {
 		return nil, err
 	}
-	canonical, err := marshalRichText(doc)
-	if err != nil {
-		return nil, err
-	}
-	return NewEncodedRichTextDocument(path, mediaType, string(canonical), c), nil
+	return NewRichDocument(path, mediaType, projectRichBlocks(doc.Blocks, 1)), nil
 }
 
 func (c RichTextCodec) Encode(ctx context.Context, doc Document) ([]byte, error) {
 	if c.Normalizer == nil {
 		return nil, fmt.Errorf("vfs: rich text normalizer required")
 	}
-	td, ok := doc.(*TextDocument)
-	if !ok {
-		return nil, ErrNotTextual
-	}
-	var rich RichTextDocument
-	if err := json.Unmarshal([]byte(td.Text()), &rich); err != nil {
-		return nil, fmt.Errorf("vfs: invalid rich text JSON: %w", err)
-	}
-	if err := validateRichText(&rich); err != nil {
+	rich, err := richTextFromDocument(doc)
+	if err != nil {
 		return nil, err
 	}
-	return c.Normalizer.EncodeRich(ctx, &rich)
+	if err := validateRichText(rich); err != nil {
+		return nil, err
+	}
+	return c.Normalizer.EncodeRich(ctx, rich)
 }
 
 func NewEncodedRichTextDocument(path, mediaType, canonical string, encoder Encoder) *TextDocument {
@@ -111,16 +104,73 @@ func projectRichBlocks(blocks []RichTextBlock, line int) []Block {
 			}
 			text = b.String()
 		}
+		kind := normalizeRichKind(block.Kind)
 		end := line + maxRichTextLines(text)
 		attrs := map[string]string{"heading_path": block.ID}
 		for k, v := range block.Attributes {
 			attrs[k] = v
 		}
-		out = append(out, Block{ID: block.ID, Kind: block.Kind, Text: text, Style: StyleMeta{
-			Kind: block.Kind, Level: block.Level, Span: Span{StartLine: line, EndLine: end}, Attributes: attrs,
+		out = append(out, Block{ID: block.ID, Kind: kind, Text: text, Style: StyleMeta{
+			Kind: kind, Level: block.Level, Span: Span{StartLine: line, EndLine: end}, Attributes: attrs,
 		}})
 		line = end
 		out = append(out, projectRichBlocks(block.Children, line)...)
+	}
+	return out
+}
+
+func normalizeRichKind(kind string) string {
+	switch kind {
+	case "list-item":
+		return BlockKindListItem
+	default:
+		return kind
+	}
+}
+
+func adapterRichKind(kind string) string {
+	if kind == BlockKindListItem {
+		return "list-item"
+	}
+	return kind
+}
+
+func richTextFromDocument(doc Document) (*RichTextDocument, error) {
+	switch d := doc.(type) {
+	case *RichDocument:
+		return richTextFromBlocks(d.Blocks()), nil
+	case *TextDocument:
+		var rich RichTextDocument
+		if err := json.Unmarshal([]byte(d.Text()), &rich); err != nil {
+			return nil, fmt.Errorf("vfs: invalid rich text JSON: %w", err)
+		}
+		return &rich, nil
+	default:
+		return nil, ErrNotTextual
+	}
+}
+
+func richTextFromBlocks(blocks []Block) *RichTextDocument {
+	out := &RichTextDocument{Schema: RichTextSchema, Blocks: make([]RichTextBlock, 0, len(blocks))}
+	for _, b := range blocks {
+		attrs := map[string]string{}
+		for k, v := range b.Style.Attributes {
+			if k == "heading_path" || k == "tab_id" {
+				continue
+			}
+			attrs[k] = v
+		}
+		rb := RichTextBlock{
+			ID:         b.ID,
+			Kind:       adapterRichKind(b.Kind),
+			Level:      b.Style.Level,
+			Text:       b.Text,
+			Attributes: attrs,
+		}
+		if t := strings.ReplaceAll(b.Text, "\n", " "); t != "" {
+			rb.Runs = []RichTextRun{{Text: t}}
+		}
+		out.Blocks = append(out.Blocks, rb)
 	}
 	return out
 }
