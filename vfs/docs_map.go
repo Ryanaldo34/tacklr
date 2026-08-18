@@ -276,6 +276,7 @@ func mapInsertBlocks(blocks []Block, startIdx int, tabID string) (chunks []inser
 			runStart := idx
 			listID := blockAttr(b, "list_id")
 			listType := blockAttr(b, "list_type")
+			tabUnits := 0
 			for i < len(blocks) && blocks[i].Kind == BlockKindListItem && blockAttr(blocks[i], "list_id") == listID {
 				item := blocks[i]
 				level := item.Style.Level
@@ -290,9 +291,12 @@ func mapInsertBlocks(blocks []Block, startIdx int, tabID string) (chunks []inser
 					reqStyle(idx, idx+n, tabID, "NORMAL_TEXT"),
 				)
 				idx += n
+				tabUnits += docsIndexLen(tabs)
 				i++
 			}
 			cur.reqs = append(cur.reqs, reqBullets(runStart, idx, tabID, listType))
+			// createParagraphBullets strips the leading tabs used for nesting.
+			idx -= tabUnits
 		case BlockKindHeading:
 			named := "HEADING_" + strconv.Itoa(clampHeading(b.Style.Level))
 			payload := b.Text + "\n"
