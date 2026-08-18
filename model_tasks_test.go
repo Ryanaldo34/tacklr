@@ -23,6 +23,7 @@ func TestStreamAssembler_accumulatesDeltasAndBuildsMessages(t *testing.T) {
 	asm.AddDelta(LLMResponseChunk{Type: StreamEventFunctionCall, MessageId: "x", Content: "ignored"})
 	completed := asm.MessageFromComplete(LLMResponseChunk{
 		Type: StreamEventReasoning, MessageId: "r1", IsComplete: true,
+		EncryptedContent: "gAAAAABasm",
 	})
 
 	// Assert
@@ -34,6 +35,9 @@ func TestStreamAssembler_accumulatesDeltasAndBuildsMessages(t *testing.T) {
 	}
 	if completed.Role != RoleReasoning || completed.Content != "think" {
 		t.Fatalf("reasoning message = %+v", completed)
+	}
+	if completed.EncryptedContent != "gAAAAABasm" {
+		t.Fatalf("encrypted_content = %q", completed.EncryptedContent)
 	}
 }
 

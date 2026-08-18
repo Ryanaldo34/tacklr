@@ -116,13 +116,13 @@ func TestParseSSE_reasoningThoughtChunks(t *testing.T) {
 	body := strings.Join([]string{
 		`data: {"type":"response.reasoning_text.delta","item_id":"rs_live","delta":"raw cot"}`,
 		`data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_live","delta":" summary"}`,
-		`data: {"type":"response.output_item.done","item":{"type":"reasoning","id":"rs_live","summary":[{"type":"summary_text","text":"raw cot summary full"}]}}`,
-		`data: {"type":"response.output_item.done","item":{"type":"reasoning","id":"rs_sum","status":"completed","summary":[{"type":"summary_text","text":"Plan the tool call"}],"content":[]}}`,
+		`data: {"type":"response.output_item.done","item":{"type":"reasoning","id":"rs_live","encrypted_content":"gAAAAABlive","summary":[{"type":"summary_text","text":"raw cot summary full"}]}}`,
+		`data: {"type":"response.output_item.done","item":{"type":"reasoning","id":"rs_sum","status":"completed","encrypted_content":"gAAAAABsum","summary":[{"type":"summary_text","text":"Plan the tool call"}],"content":[]}}`,
 		`data: [DONE]`,
 		"",
 	}, "\n")
 	chunks := collectSSE(t, body)
-	var liveDelta, liveDone, sumDone string
+	var liveDelta, liveDone, sumDone, liveEnc, sumEnc string
 	for _, c := range chunks {
 		if c.Type != tacklr.StreamEventReasoning {
 			t.Fatalf("expected reasoning only, got %+v", c)
@@ -131,12 +131,14 @@ func TestParseSSE_reasoningThoughtChunks(t *testing.T) {
 		case "rs_live":
 			if c.IsComplete {
 				liveDone = c.Content
+				liveEnc = c.EncryptedContent
 			} else {
 				liveDelta += c.Content
 			}
 		case "rs_sum":
 			if c.IsComplete {
 				sumDone = c.Content
+				sumEnc = c.EncryptedContent
 			}
 		}
 	}
@@ -148,6 +150,9 @@ func TestParseSSE_reasoningThoughtChunks(t *testing.T) {
 	}
 	if sumDone != "Plan the tool call" {
 		t.Fatalf("done-only summary = %q", sumDone)
+	}
+	if liveEnc != "gAAAAABlive" || sumEnc != "gAAAAABsum" {
+		t.Fatalf("encrypted_content live=%q sum=%q", liveEnc, sumEnc)
 	}
 }
 

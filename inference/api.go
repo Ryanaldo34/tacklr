@@ -153,6 +153,9 @@ type responsesRequest struct {
 	Stream       bool             `json:"stream,omitempty"`
 	Reasoning    *reasoningDetail `json:"reasoning,omitempty"`
 	Text         *textFormat      `json:"text,omitempty"`
+	// Include asks the provider for extra output fields. reasoning.encrypted_content
+	// is required to replay reasoning items statelessly (OpenAI ZDR / Azure store=false).
+	Include []string `json:"include,omitempty"`
 	// MaxOutputTokens caps completion size (reasoning + visible text). Omit when 0.
 	// Azure often ends streams as response.incomplete with empty details when this is too low.
 	MaxOutputTokens int `json:"max_output_tokens,omitempty"`
@@ -231,9 +234,15 @@ type functionCallOutputRequest struct {
 // OpenAI / Azure Foundry require `summary` on input reasoning items (even when
 // empty). Omitting it yields missing_required_parameter on models like GPT Luna.
 // Do not send output-only fields such as status — unknown_parameter on input.
+//
+// `id` is a store lookup unless encrypted_content is present. Stateless clients
+// (Azure default store=false, OpenAI ZDR) must send encrypted_content with the
+// original item id; an id alone is "Item with id 'rs_…' not found".
 type reasoningInputRequest struct {
 	Type string `json:"type"`
 	ID   string `json:"id,omitempty"`
+	// EncryptedContent is the provider ciphertext from include=reasoning.encrypted_content.
+	EncryptedContent string `json:"encrypted_content,omitempty"`
 	// Summary is required on the wire; never omit (use empty slice, not null).
 	Summary []reasoningSummaryPart `json:"summary"`
 }

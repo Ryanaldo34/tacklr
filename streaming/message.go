@@ -179,6 +179,10 @@ type LLMResponseChunk struct {
 	InputTokens     int
 	OutputTokens    int
 	ReasoningTokens int
+
+	// EncryptedContent is Responses reasoning.encrypted_content. Provider parse
+	// only; copied onto Message so the next turn can replay the item statelessly.
+	EncryptedContent string
 }
 
 // Message is the primary conversation unit in the context window.
@@ -198,6 +202,11 @@ type Message struct {
 	// used when serializing prior assistant or reasoning turns as typed
 	// response items.
 	MessageID string `json:"message_id,omitempty"`
+
+	// EncryptedContent is the Responses API reasoning ciphertext
+	// (include=reasoning.encrypted_content). Required to replay a reasoning
+	// item by id without a provider store lookup.
+	EncryptedContent string `json:"encrypted_content,omitempty"`
 
 	ContentParts     []ContentPart `json:"content_parts,omitempty"`
 	ToolCalls        []ToolCall    `json:"tool_calls,omitempty"`

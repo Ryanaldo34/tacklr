@@ -73,7 +73,8 @@ func main() {
 	})
 	model.WithURL(os.Getenv("OPENAI_BASE_URL")).
 		WithApiKey(os.Getenv("OPENAI_API_KEY")).
-		WithModel(os.Getenv("OPENAI_MODEL"))
+		WithModel(os.Getenv("OPENAI_MODEL")).
+		WithLocalTokenFallback()
 
 	// Reasoning models (GPT Luna, o-series, …) only stream client-visible thought
 	// when the Responses request asks for a summary. Without this, Foundry may
@@ -143,7 +144,13 @@ func main() {
 	}
 
 	defaultAgent := "test-agent"
-	reg := server.NewRegistry(store, defaultAgent, server.WithVFSAuth(vfsAuth))
+	var vfsOpts []server.RegistryOption
+	vfsOpts = append(vfsOpts, server.WithVFSAuth(vfsAuth))
+	if v := strings.ToLower(strings.TrimSpace(os.Getenv("TACKLR_VFS_DIRECT"))); v == "1" || v == "true" {
+		vfsOpts = append(vfsOpts, server.WithVFSProjection(server.DirectProjection{}))
+		slog.Info("vfs projection", "mode", "direct")
+	}
+	reg := server.NewRegistry(store, defaultAgent, vfsOpts...)
 	reg.Register(defaultAgent, server.AgentSpec{
 		Name: "Tacklr",
 		Options: tacklr.AgentOptions{
