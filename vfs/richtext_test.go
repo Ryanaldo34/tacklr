@@ -2,6 +2,7 @@ package vfs_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/ryanaldo34/tacklr/vfs"
@@ -37,7 +38,7 @@ func TestRichTextCodecProjectsAndEncodesEditedCanonicalDocument(t *testing.T) {
 	if !ok {
 		t.Fatalf("decoded document = %#v, want *RichDocument", doc)
 	}
-	if err := rd.SetText("nope"); err != vfs.ErrProjected {
+	if err := rd.SetText("nope"); !errors.Is(err, vfs.ErrProjected) {
 		t.Fatalf("SetText = %v, want ErrProjected", err)
 	}
 	if got := rd.Blocks(); len(got) != 1 || got[0].Kind != vfs.BlockKindParagraph || got[0].Text != "original" {

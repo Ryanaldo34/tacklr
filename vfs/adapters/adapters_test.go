@@ -55,4 +55,7 @@ func TestRegisterCommon(t *testing.T) {
 	if err := RegisterCommon(reg); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := reg.Decode(context.Background(), "/x.html", HTMLMediaType, []byte("<p>x</p>")); err == nil {
+		t.Fatal("text/html must stay unregistered")
+	}
 }

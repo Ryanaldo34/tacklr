@@ -113,8 +113,6 @@ type TextDocument struct {
 	path, mediaType, encoding string
 	text                      string
 	starts                    []int
-	encoder                   Encoder
-	richBlocks                []Block
 }
 
 // NewTextDocument builds a TextDocument from already-decoded UTF-8 text.
@@ -130,20 +128,9 @@ func NewTextDocument(path, mediaType, encoding, text string) *TextDocument {
 	return d
 }
 
-// NewEncodedTextDocument creates a textual canonical projection whose source
-// bytes are produced by encoder when the document is written.
-func NewEncodedTextDocument(path, mediaType, encoding, text string, encoder Encoder) *TextDocument {
-	d := NewTextDocument(path, mediaType, encoding, text)
-	d.encoder = encoder
-	return d
-}
-
 func EncodeDocument(ctx context.Context, doc Document) ([]byte, error) {
 	if doc == nil {
 		return nil, ErrNotTextual
-	}
-	if t, ok := doc.(*TextDocument); ok && t.encoder != nil {
-		return t.encoder.Encode(ctx, t)
 	}
 	if c, ok := defaultContentRegistry.codec(normalizeMediaType(doc.MediaType())); ok {
 		if enc, ok := c.(Encoder); ok {

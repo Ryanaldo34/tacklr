@@ -81,15 +81,6 @@ func (c RichTextCodec) Encode(ctx context.Context, doc Document) ([]byte, error)
 	return c.Normalizer.EncodeRich(ctx, rich)
 }
 
-func NewEncodedRichTextDocument(path, mediaType, canonical string, encoder Encoder) *TextDocument {
-	d := NewEncodedTextDocument(path, mediaType, "utf-8", canonical, encoder)
-	var rich RichTextDocument
-	if json.Unmarshal([]byte(canonical), &rich) == nil {
-		d.richBlocks = projectRichBlocks(rich.Blocks, 1)
-	}
-	return d
-}
-
 func projectRichBlocks(blocks []RichTextBlock, line int) []Block {
 	if len(blocks) == 0 {
 		return nil
@@ -177,11 +168,6 @@ func richTextFromBlocks(blocks []Block) *RichTextDocument {
 
 func maxRichTextLines(text string) int {
 	return max(1, strings.Count(text, "\n")+1)
-}
-
-func marshalRichText(doc *RichTextDocument) ([]byte, error) {
-	doc.Schema = RichTextSchema
-	return json.MarshalIndent(doc, "", "  ")
 }
 
 func validateRichText(doc *RichTextDocument) error {
