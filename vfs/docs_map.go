@@ -199,7 +199,7 @@ func mapSetBlocksDeletes(hint persistHint, tabID string, keepObjectIDs map[strin
 		if s.kind == BlockKindParagraph || s.kind == "paragraph" ||
 			s.kind == BlockKindHeading || s.kind == "heading" ||
 			s.kind == BlockKindListItem || s.kind == "list_item" {
-			if lastPara == nil || s.start < lastPara.start {
+			if lastPara == nil || s.end > lastPara.end {
 				lastPara = s
 			}
 		}

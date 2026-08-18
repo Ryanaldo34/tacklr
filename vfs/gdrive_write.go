@@ -474,16 +474,33 @@ func (p *driveProvider) createGoogleDoc(ctx context.Context, name string, rd *Ri
 	if err != nil {
 		return err
 	}
-	snap, err := p.docsGet(ctx, created.ID)
-	if err != nil {
-		return err
+	var last error
+	for attempt := 0; attempt < 4; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Duration(attempt) * 200 * time.Millisecond):
+			}
+		}
+		snap, err := p.docsGet(ctx, created.ID)
+		if err != nil {
+			return err
+		}
+		tabID := ""
+		if len(snap.Tabs) > 0 {
+			tabID = snap.Tabs[0].ID
+		}
+		last = p.insertBlocks(ctx, created.ID, tabID, snap.RevisionID, rd.blocks)
+		if last == nil {
+			break
+		}
+		if !errors.Is(last, ErrConflict) {
+			return last
+		}
 	}
-	tabID := ""
-	if len(snap.Tabs) > 0 {
-		tabID = snap.Tabs[0].ID
-	}
-	if err := p.insertBlocks(ctx, created.ID, tabID, snap.RevisionID, rd.blocks); err != nil {
-		return err
+	if last != nil {
+		return last
 	}
 	p.invalidate(created.ID)
 	return p.refreshHint(ctx, created.ID, rd)
