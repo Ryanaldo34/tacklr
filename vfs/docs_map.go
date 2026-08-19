@@ -50,6 +50,11 @@ func reqBullets(start, end int, tabID, listType string) DocsRequest {
 	}}
 }
 
+func runHasMarks(r Run) bool {
+	return r.Marks[MarkBold] == "true" || r.Marks[MarkItalic] == "true" ||
+		r.Marks[MarkStrike] == "true" || r.Marks[MarkHref] != ""
+}
+
 func reqTextStyle(start, end int, tabID string, r Run) DocsRequest {
 	st := &docs.TextStyle{
 		Bold:          r.Marks[MarkBold] == "true",
@@ -73,8 +78,8 @@ func mapInlineStyles(start int, tabID string, runs []Run) []DocsRequest {
 	var reqs []DocsRequest
 	off := 0
 	for _, r := range runs {
-		n := utf16Count(r.Text)
-		if n > 0 {
+		n := docsIndexLen(r.Text)
+		if n > 0 && runHasMarks(r) {
 			reqs = append(reqs, reqTextStyle(start+off, start+off+n, tabID, r))
 		}
 		off += n
@@ -82,16 +87,24 @@ func mapInlineStyles(start int, tabID string, runs []Run) []DocsRequest {
 	return reqs
 }
 
-func utf16Count(s string) int {
-	n := 0
-	for _, r := range s {
-		if r >= 0x10000 {
-			n += 2
-		} else {
-			n++
+func splitTextStyles(reqs []DocsRequest) (body, styles []DocsRequest) {
+	for _, r := range reqs {
+		if r.UpdateTextStyle != nil {
+			styles = append(styles, r)
+			continue
 		}
+		body = append(body, r)
 	}
-	return n
+	return body, styles
+}
+
+func appendInsertStyled(reqs []DocsRequest, idx int, tabID, named, prefix string, b Block) ([]DocsRequest, int) {
+	payload := prefix + b.PlainText() + "\n"
+	n := docsIndexLen(payload)
+	reqs = append(reqs, reqInsert(idx, tabID, payload), reqStyle(idx, idx+n, tabID, named))
+	// Style start is the insert index. CreateParagraphBullets then strips
+	// leading tabs, so the plaintext sits at idx when styles run in the next batch.
+	return append(reqs, mapInlineStyles(idx, tabID, b.inlineRuns())...), idx + n
 }
 
 func reqInsertTable(index int, tabID string, rows, cols int) DocsRequest {
@@ -333,13 +346,7 @@ func mapInsertBlocks(blocks []Block, startIdx int, tabID string) (chunks []inser
 					level = 1
 				}
 				tabs := strings.Repeat("\t", level-1)
-				payload := tabs + item.Text + "\n"
-				n := docsIndexLen(payload)
-				cur.reqs = append(cur.reqs,
-					reqInsert(idx, tabID, payload),
-					reqStyle(idx, idx+n, tabID, "NORMAL_TEXT"),
-				)
-				idx += n
+				cur.reqs, idx = appendInsertStyled(cur.reqs, idx, tabID, "NORMAL_TEXT", tabs, item)
 				tabUnits += docsIndexLen(tabs)
 				i++
 			}
@@ -348,22 +355,10 @@ func mapInsertBlocks(blocks []Block, startIdx int, tabID string) (chunks []inser
 			idx -= tabUnits
 		case BlockKindHeading:
 			named := "HEADING_" + strconv.Itoa(clampHeading(b.Style.Level))
-			payload := b.Text + "\n"
-			n := docsIndexLen(payload)
-			cur.reqs = append(cur.reqs,
-				reqInsert(idx, tabID, payload),
-				reqStyle(idx, idx+n, tabID, named),
-			)
-			idx += n
+			cur.reqs, idx = appendInsertStyled(cur.reqs, idx, tabID, named, "", b)
 			i++
 		default:
-			payload := b.Text + "\n"
-			n := docsIndexLen(payload)
-			cur.reqs = append(cur.reqs,
-				reqInsert(idx, tabID, payload),
-				reqStyle(idx, idx+n, tabID, "NORMAL_TEXT"),
-			)
-			idx += n
+			cur.reqs, idx = appendInsertStyled(cur.reqs, idx, tabID, "NORMAL_TEXT", "", b)
 			i++
 		}
 	}

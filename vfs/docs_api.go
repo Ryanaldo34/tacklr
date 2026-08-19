@@ -473,17 +473,37 @@ func paragraphSpans(el *docs.StructuralElement, tb tabBody) []DocsSpan {
 }
 
 func paragraphText(p *docs.Paragraph) string {
-	var b strings.Builder
-	if n := len(p.Elements); n > 1 {
-		b.Grow(n * 16)
-	}
+	heading := p.ParagraphStyle != nil && strings.HasPrefix(p.ParagraphStyle.NamedStyleType, "HEADING_")
+	var runs []Run
 	for _, e := range p.Elements {
 		if e == nil || e.TextRun == nil {
 			continue
 		}
-		b.WriteString(e.TextRun.Content)
+		text := strings.TrimSuffix(e.TextRun.Content, "\n")
+		if text == "" {
+			continue
+		}
+		marks := map[string]string{}
+		if st := e.TextRun.TextStyle; st != nil {
+			if st.Bold && !heading {
+				marks[MarkBold] = "true"
+			}
+			if st.Italic {
+				marks[MarkItalic] = "true"
+			}
+			if st.Strikethrough {
+				marks[MarkStrike] = "true"
+			}
+			if st.Link != nil && st.Link.Url != "" {
+				marks[MarkHref] = st.Link.Url
+			}
+		}
+		runs = append(runs, Run{Text: text, Marks: marks})
 	}
-	return strings.TrimSuffix(b.String(), "\n")
+	if len(runs) == 0 {
+		return ""
+	}
+	return FormatInline(mergeRuns(runs))
 }
 
 func snapshotToRich(path string, snap DocsSnapshot) *RichDocument {

@@ -53,6 +53,25 @@ func TestMapDocsError(t *testing.T) {
 	}
 }
 
+func TestParagraphText_rebuildsInlineMarks(t *testing.T) {
+	got := paragraphText(&docs.Paragraph{Elements: []*docs.ParagraphElement{
+		{TextRun: &docs.TextRun{Content: "See "}},
+		{TextRun: &docs.TextRun{Content: "x", TextStyle: &docs.TextStyle{Bold: true}}},
+		{TextRun: &docs.TextRun{Content: " and "}},
+		{TextRun: &docs.TextRun{Content: "Maya\n", TextStyle: &docs.TextStyle{Link: &docs.Link{Url: "mailto:maya"}}}},
+	}})
+	if got != "See **x** and [Maya](mailto:maya)" {
+		t.Fatalf("got %q", got)
+	}
+	heading := paragraphText(&docs.Paragraph{
+		ParagraphStyle: &docs.ParagraphStyle{NamedStyleType: "HEADING_1"},
+		Elements:       []*docs.ParagraphElement{{TextRun: &docs.TextRun{Content: "Intro\n", TextStyle: &docs.TextStyle{Bold: true}}}},
+	})
+	if heading != "Intro" {
+		t.Fatalf("heading %q", heading)
+	}
+}
+
 func TestSnapshotFromDocument_tabsAndImages(t *testing.T) {
 	d := &docs.Document{
 		DocumentId: "doc1",

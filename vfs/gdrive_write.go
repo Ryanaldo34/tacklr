@@ -513,12 +513,24 @@ func (p *driveProvider) insertBlocks(ctx context.Context, id, tabID, cas string,
 	}
 	for _, ch := range chunks {
 		if len(ch.reqs) > 0 {
-			res, err := p.docsBatch(ctx, id, DocsBatch{RequiredRevisionID: cas, TabID: tabID, Requests: ch.reqs})
-			if err != nil {
-				return err
+			body, styles := splitTextStyles(ch.reqs)
+			if len(body) > 0 {
+				res, err := p.docsBatch(ctx, id, DocsBatch{RequiredRevisionID: cas, TabID: tabID, Requests: body})
+				if err != nil {
+					return err
+				}
+				if res.RevisionID != "" {
+					cas = res.RevisionID
+				}
 			}
-			if res.RevisionID != "" {
-				cas = res.RevisionID
+			if len(styles) > 0 {
+				res, err := p.docsBatch(ctx, id, DocsBatch{RequiredRevisionID: cas, TabID: tabID, Requests: styles})
+				if err != nil {
+					return err
+				}
+				if res.RevisionID != "" {
+					cas = res.RevisionID
+				}
 			}
 		}
 		if !ch.tableFill {

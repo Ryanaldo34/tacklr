@@ -524,6 +524,39 @@ func TestDrive_createAsDoc(t *testing.T) {
 	}
 }
 
+func TestDrive_createDocAppliesInlineMarksInFollowupBatch(t *testing.T) {
+	ctx := t.Context()
+	api := driveTree()
+	docs := &memDocs{snaps: map[string]vfs.DocsSnapshot{}, rev: map[string]string{}}
+	ms := mountDrive(t, api, docs, true)
+	doc := vfs.NewRichDocument("/contracts/Marks", "application/vnd.google-apps.document", []vfs.Block{
+		{Kind: vfs.BlockKindParagraph, Text: "See **x**"},
+	})
+	if err := ms.WriteDocument(ctx, doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(docs.batches) < 2 {
+		t.Fatalf("want insert then style batches, got %d", len(docs.batches))
+	}
+	var sawBold bool
+	for _, r := range docs.batches[len(docs.batches)-1].Requests {
+		if st := r.UpdateTextStyle; st != nil && st.TextStyle != nil && st.TextStyle.Bold {
+			sawBold = true
+		}
+	}
+	if !sawBold {
+		t.Fatalf("follow-up batch missing bold: %+v", docs.batches)
+	}
+	for _, r := range docs.batches[0].Requests {
+		if ins := r.InsertText; ins != nil && strings.Contains(ins.Text, "**") {
+			t.Fatalf("insert kept markdown: %q", ins.Text)
+		}
+		if r.UpdateTextStyle != nil {
+			t.Fatal("text style must not share the insert batch")
+		}
+	}
+}
+
 func TestDrive_writeSheetRejected(t *testing.T) {
 	ctx := t.Context()
 	api := driveTree()
