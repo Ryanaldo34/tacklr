@@ -1,6 +1,7 @@
 package vfs
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"errors"
@@ -32,6 +33,21 @@ func TestTextual_setTextReturnsError(t *testing.T) {
 	}
 	if rd.Text() == "<p>nope</p>" {
 		t.Fatal("SetText must not replace projection")
+	}
+	if _, err := rd.Line(0); !errors.Is(err, ErrLineOutOfRange) {
+		t.Fatalf("Line(0): %v", err)
+	}
+	if line, err := rd.Line(1); err != nil || line == "" {
+		t.Fatalf("Line(1)=%q err=%v", line, err)
+	}
+	if empty, err := rd.Lines(1, 1); err != nil || len(empty) != 0 {
+		t.Fatalf("Lines empty: %v %v", empty, err)
+	}
+	if _, err := rd.Lines(1, rd.LineCount()+2); !errors.Is(err, ErrLineOutOfRange) {
+		t.Fatalf("Lines range: %v", err)
+	}
+	if got := NewRichDocument("/x", "", []Block{{Kind: BlockKindParagraph, Text: "hi"}}); got.MediaType() == "" {
+		t.Fatal("default media type")
 	}
 }
 
@@ -90,6 +106,34 @@ func TestDocsCodec_realExportFixture(t *testing.T) {
 	}
 	if !IsProjected(mimeGoogleDocument) {
 		t.Fatal("DocsCodec must be projected")
+	}
+}
+
+func TestDocsCodec_decodeZipVariants(t *testing.T) {
+	mk := func(name, body string) []byte {
+		var buf bytes.Buffer
+		zw := zip.NewWriter(&buf)
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = w.Write([]byte(body))
+		if err := zw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return buf.Bytes()
+	}
+	if _, err := (DocsCodec{}).Decode(t.Context(), "/x", "", mk("index.html", "<p>Hi</p>")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (DocsCodec{}).Decode(t.Context(), "/x", mimeGoogleDocument, mk("nested/foo.html", "<p>Hi</p>")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (DocsCodec{}).Decode(t.Context(), "/x", mimeGoogleDocument, mk("readme.txt", "nope")); err == nil {
+		t.Fatal("zip without html")
+	}
+	if _, err := (DocsCodec{}).Decode(t.Context(), "/x", mimeGoogleDocument, []byte("PK")); err == nil {
+		t.Fatal("truncated zip")
 	}
 }
 

@@ -54,3 +54,40 @@ func TestRichTextCodecProjectsAndEncodesEditedCanonicalDocument(t *testing.T) {
 		t.Fatalf("encoded=%q doc=%#v", encoded, n.encoded)
 	}
 }
+
+func TestRichTextCodec_errorsAndEmpty(t *testing.T) {
+	ctx := context.Background()
+	empty := vfs.RichTextCodec{Types: []string{"application/x-test-rich"}}
+	if _, err := empty.Decode(ctx, "/x", "application/x-test-rich", nil); err == nil {
+		t.Fatal("nil normalizer decode")
+	}
+	if _, err := empty.Encode(ctx, &vfs.RichDocument{}); err == nil {
+		t.Fatal("nil normalizer encode")
+	}
+	bad := &richNormalizer{}
+	codec := vfs.RichTextCodec{Types: []string{"application/x-test-rich"}, Normalizer: failRich{}}
+	if _, err := codec.Decode(ctx, "/x", "application/x-test-rich", nil); err == nil {
+		t.Fatal("decode fail")
+	}
+	if _, err := codec.Encode(ctx, vfs.NewTextDocument("/t", "text/plain", "utf-8", "not-json")); err == nil {
+		t.Fatal("bad json encode")
+	}
+	if _, err := codec.Encode(ctx, onlyDoc{}); err == nil {
+		t.Fatal("non-textual encode")
+	}
+	_ = bad
+}
+
+type onlyDoc struct{}
+
+func (onlyDoc) Path() string      { return "/x" }
+func (onlyDoc) MediaType() string { return "x" }
+
+type failRich struct{}
+
+func (failRich) DecodeRich(context.Context, string, string, []byte) (*vfs.RichTextDocument, error) {
+	return nil, errors.New("nope")
+}
+func (failRich) EncodeRich(context.Context, *vfs.RichTextDocument) ([]byte, error) {
+	return nil, errors.New("nope")
+}

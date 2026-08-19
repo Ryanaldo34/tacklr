@@ -39,6 +39,18 @@ func TestMapDocsError(t *testing.T) {
 	if errors.Is(raw, ErrConflict) {
 		t.Fatal("structure 400 must not be conflict")
 	}
+	if mapDocsError(nil) != nil {
+		t.Fatal("nil")
+	}
+	if got := mapDocsError(errors.New("plain")); got == nil {
+		t.Fatal("plain")
+	}
+	if !errors.Is(mapDocsError(&googleapi.Error{Code: 403}), ErrPermission) {
+		t.Fatal("403 empty")
+	}
+	if mapDocsError(&googleapi.Error{Code: 500, Message: "boom"}) == nil {
+		t.Fatal("500")
+	}
 }
 
 func TestSnapshotFromDocument_tabsAndImages(t *testing.T) {
@@ -62,7 +74,32 @@ func TestSnapshotFromDocument_tabsAndImages(t *testing.T) {
 								InlineObjectElement: &docs.InlineObjectElement{InlineObjectId: "kix.pic"},
 							}},
 						}},
+						{StartIndex: 9, EndIndex: 10, TableOfContents: &docs.TableOfContents{}},
+						{StartIndex: 10, EndIndex: 16, Table: &docs.Table{TableRows: []*docs.TableRow{
+							nil,
+							{TableCells: []*docs.TableCell{
+								nil,
+								{StartIndex: 11, EndIndex: 14, Content: []*docs.StructuralElement{
+									nil,
+									{StartIndex: 11, EndIndex: 14, Paragraph: &docs.Paragraph{
+										Elements: []*docs.ParagraphElement{{TextRun: &docs.TextRun{Content: "Cell\n"}}},
+									}},
+								}},
+							}},
+						}}},
+						{StartIndex: 16, EndIndex: 17},
 					}},
+					Lists: map[string]docs.List{
+						"kix.l1": {ListProperties: &docs.ListProperties{
+							NestingLevels: []*docs.NestingLevel{
+								nil,
+								{GlyphType: "DECIMAL"},
+							},
+						}},
+						"kix.l2": {ListProperties: &docs.ListProperties{
+							NestingLevels: []*docs.NestingLevel{{GlyphType: "ALPHA"}},
+						}},
+					},
 					InlineObjects: map[string]docs.InlineObject{
 						"kix.pic": {InlineObjectProperties: &docs.InlineObjectProperties{
 							EmbeddedObject: &docs.EmbeddedObject{ImageProperties: &docs.ImageProperties{ContentUri: "https://img"}},
@@ -94,7 +131,7 @@ func TestSnapshotFromDocument_tabsAndImages(t *testing.T) {
 			t.Fatalf("image = %+v", b)
 		}
 	}
-	if strings.Join(kinds, ",") != "heading,image,paragraph" {
+	if strings.Join(kinds, ",") != "heading,image,table,paragraph" {
 		t.Fatalf("kinds = %s", kinds)
 	}
 
@@ -167,9 +204,23 @@ func TestGoogleDocs_httpGetBatchUpdate(t *testing.T) {
 	}
 	res, err := api.BatchUpdate(ctx, "doc1", DocsBatch{
 		RequiredRevisionID: "R0",
-		Requests:           []DocsRequest{reqInsert(1, "", "Hi")},
+		TabID:              "t.a",
+		Requests: []DocsRequest{
+			reqInsert(1, "", "Hi"),
+			reqDelete(2, 3, ""),
+			reqStyle(1, 2, "", "HEADING_1"),
+			reqBullets(1, 2, "", "ol"),
+			reqInsertTable(1, "", 1, 2),
+			reqTextStyle(1, 2, "", Run{Text: "x", Marks: map[string]string{MarkBold: "true", MarkHref: "https://e"}}),
+		},
 	})
 	if err != nil || res.RevisionID != "R1" || !sawWriteControl {
 		t.Fatalf("BatchUpdate = %+v saw=%v err=%v", res, sawWriteControl, err)
+	}
+	if _, err := NewGoogleDocs(ctx, nil); err == nil {
+		t.Fatal("nil holder")
+	}
+	if err := (GoogleDocs{}).require(); err == nil {
+		t.Fatal("empty service")
 	}
 }

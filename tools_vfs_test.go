@@ -764,6 +764,53 @@ func fieldKV(s, key string) string {
 	return ""
 }
 
+func TestVFSTools_writeDocxBlocksAndInlineMarks(t *testing.T) {
+	ctx := context.Background()
+	base := t.TempDir()
+	reg := vfs.NewBackendRegistry()
+	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
+		t.Fatal(err)
+	}
+	ms := vfs.MustNewMountSession("tools-docx", reg)
+	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
+		t.Fatal(err)
+	}
+	h := mustNewAgent(t, AgentOptions{
+		SessionID: "tools-docx", Store: stores.NewInMemoryStore(), MountSession: ms, Model: &mockStrategy{},
+	})
+	tools := map[string]*Tool{}
+	for _, tool := range h.tools {
+		tools[tool.Name] = tool
+	}
+	rt := turnRuntime(h)
+	mt := "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+	res, err := tools["write"].invoke(ctx, fmt.Sprintf(
+		`{"path":"/work/note.docx","media_type":%q,"blocks":[{"kind":"heading","level":1,"text":"**Title**"},{"kind":"paragraph","text":"See [x](https://e)"}]}`, mt), rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.output, "rev=") {
+		t.Fatalf("create: %s", res.output)
+	}
+	res, err = tools["read"].invoke(ctx, `{"path":"/work/note.docx"}`, rt)
+	if err != nil || !strings.Contains(res.output, "outline:") || !strings.Contains(res.output, "**Title**") {
+		t.Fatalf("read outline: %s err=%v", res.output, err)
+	}
+	rev := fieldKV(res.output, "rev")
+	// content lift on new projected file
+	_, err = tools["write"].invoke(ctx, fmt.Sprintf(
+		`{"path":"/work/lift.docx","media_type":%q,"content":"Hello **x**"}`, mt), rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err = tools["write"].invoke(ctx, fmt.Sprintf(
+		`{"path":"/work/note.docx","rev":%q,"block_id":"p-1","body":"_hi_"}`, rev), rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = res
+}
+
 // TestVFSTools_runCommandLiveNames: host ls/find on a FUSE tree match session ReadDir.
 func TestVFSTools_runCommandLiveNames(t *testing.T) {
 	if !vfs.FuseAvailable() {
