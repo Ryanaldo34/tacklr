@@ -102,6 +102,10 @@ func TestWithReasoningAndStructuredOutput_onInvokeRequest(t *testing.T) {
 	if saw["text"] == nil {
 		t.Error("expected structured output text.format")
 	}
+	include, _ := saw["include"].([]any)
+	if len(include) != 1 || include[0] != "reasoning.encrypted_content" {
+		t.Errorf("include = %#v, want [reasoning.encrypted_content]", saw["include"])
+	}
 	// Input should include function_call_output and system-wired developer.
 	inRaw, _ := json.Marshal(saw["input"])
 	inStr := string(inRaw)
@@ -329,8 +333,11 @@ func TestMarshalMessagesToInput_responsesToolAndReasoningWire(t *testing.T) {
 	if err := json.Unmarshal(items[1], &rs); err != nil {
 		t.Fatal(err)
 	}
-	if rs["type"] != "reasoning" || rs["id"] != "rs_1" {
+	if rs["type"] != "reasoning" {
 		t.Fatalf("reasoning = %#v", rs)
+	}
+	if _, hasID := rs["id"]; hasID {
+		t.Fatalf("id-only reasoning is a store lookup; omit id without ciphertext: %#v", rs)
 	}
 	if _, hasStatus := rs["status"]; hasStatus {
 		t.Fatalf("reasoning input must omit status: %#v", rs)
@@ -377,6 +384,96 @@ func TestMarshalMessagesToInput_responsesToolAndReasoningWire(t *testing.T) {
 	_ = json.Unmarshal(items[8], &dev)
 	if dev["role"] != "system" || dev["content"] != "dev" {
 		t.Fatalf("developer must wire as system: %#v", dev)
+	}
+}
+
+// TestMarshalMessagesToInput_dropsOrphanAndPrefersWireID: a leftover RoleTool
+// keyed by the provider item id (fc_…) must not become a function_call_output.
+// Prefer the call_id result; drop unmatched outputs (Azure 400 otherwise).
+func TestMarshalMessagesToInput_dropsOrphanAndPrefersWireID(t *testing.T) {
+	items := marshalMessagesToInput([]*tacklr.Message{
+		{Role: tacklr.RoleUser, Content: "write"},
+		{Role: tacklr.RoleAssistant, ToolCalls: []tacklr.ToolCall{
+			{ID: "fc_06f6item", CallID: "call_7Ge4wire", Name: "write", Arguments: `{}`},
+		}},
+		{Role: tacklr.RoleTool, ToolCallID: "fc_06f6item", Content: "unpaired tool call"},
+		{Role: tacklr.RoleTool, ToolCallID: "call_7Ge4wire", Content: "wrote"},
+		{Role: tacklr.RoleTool, ToolCallID: "fc_ghost", Content: "no matching call"},
+	})
+	if len(items) != 3 {
+		t.Fatalf("items = %d, want 3 (user, call, wire output): %v", len(items), items)
+	}
+	var fc, out map[string]any
+	_ = json.Unmarshal(items[1], &fc)
+	_ = json.Unmarshal(items[2], &out)
+	if fc["type"] != "function_call" || fc["call_id"] != "call_7Ge4wire" {
+		t.Fatalf("fc = %#v", fc)
+	}
+	if out["type"] != "function_call_output" || out["call_id"] != "call_7Ge4wire" || out["output"] != "wrote" {
+		t.Fatalf("out = %#v", out)
+	}
+	for _, raw := range items {
+		if strings.Contains(string(raw), "fc_06f6item") || strings.Contains(string(raw), "fc_ghost") ||
+			strings.Contains(string(raw), "unpaired tool call") || strings.Contains(string(raw), "no matching call") {
+			t.Fatalf("must not emit item-id or orphan output: %s", raw)
+		}
+	}
+
+	// Result stored under the item id still pairs to the function_call call_id.
+	byKey := marshalMessagesToInput([]*tacklr.Message{
+		{Role: tacklr.RoleAssistant, ToolCalls: []tacklr.ToolCall{
+			{ID: "fc_only", CallID: "call_only", Name: "echo", Arguments: `{}`},
+		}},
+		{Role: tacklr.RoleTool, ToolCallID: "fc_only", Content: "ok"},
+	})
+	if len(byKey) != 2 {
+		t.Fatalf("by-key items = %d, want 2: %v", len(byKey), byKey)
+	}
+	var keyOut map[string]any
+	_ = json.Unmarshal(byKey[1], &keyOut)
+	if keyOut["call_id"] != "call_only" || keyOut["output"] != "ok" {
+		t.Fatalf("item-id result must wire as call_id: %#v", keyOut)
+	}
+}
+
+// TestMarshalMessagesToInput_reasoningEncryptedContent: OpenAI/Azure stateless
+// replay — id is only valid with encrypted_content from include=.
+func TestMarshalMessagesToInput_reasoningEncryptedContent(t *testing.T) {
+	items := marshalMessagesToInput([]*tacklr.Message{
+		{Role: tacklr.RoleUser, Content: "go"},
+		{
+			Role:             tacklr.RoleReasoning,
+			MessageID:        "rs_082dfd4d6add7d95006a84d3765e188193adf577cdda46ae3f",
+			EncryptedContent: "gAAAAABcipher",
+			Content:          "plan the read",
+		},
+		{Role: tacklr.RoleAssistant, ToolCalls: []tacklr.ToolCall{
+			{CallID: "call_read", Name: "read", Arguments: `{}`},
+		}},
+		{Role: tacklr.RoleTool, ToolCallID: "call_read", Content: "doc"},
+		{
+			Role:      tacklr.RoleReasoning,
+			MessageID: "rs_orphan_lookup",
+			Content:   "after handoff",
+		},
+	})
+	if len(items) != 5 {
+		t.Fatalf("items = %d, want 5: %v", len(items), items)
+	}
+	var stored, orphan map[string]any
+	_ = json.Unmarshal(items[1], &stored)
+	_ = json.Unmarshal(items[4], &orphan)
+	if stored["type"] != "reasoning" || stored["id"] != "rs_082dfd4d6add7d95006a84d3765e188193adf577cdda46ae3f" {
+		t.Fatalf("stored = %#v", stored)
+	}
+	if stored["encrypted_content"] != "gAAAAABcipher" {
+		t.Fatalf("ciphertext missing: %#v", stored)
+	}
+	if _, hasID := orphan["id"]; hasID {
+		t.Fatalf("orphan must not send id (Azure store lookup): %#v", orphan)
+	}
+	if _, hasEnc := orphan["encrypted_content"]; hasEnc {
+		t.Fatalf("orphan must not invent ciphertext: %#v", orphan)
 	}
 }
 

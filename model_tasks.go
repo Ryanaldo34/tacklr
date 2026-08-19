@@ -49,10 +49,11 @@ func (s *streamAssembler) MessageFromComplete(chunk LLMResponseChunk) *Message {
 		role = RoleReasoning
 	}
 	return &Message{
-		Role:      role,
-		Content:   s.CompleteContent(chunk),
-		ToolCalls: append([]ToolCall(nil), chunk.ToolCalls...),
-		MessageID: chunk.MessageId,
+		Role:             role,
+		Content:          s.CompleteContent(chunk),
+		ToolCalls:        append([]ToolCall(nil), chunk.ToolCalls...),
+		MessageID:        chunk.MessageId,
+		EncryptedContent: chunk.EncryptedContent,
 	}
 }
 

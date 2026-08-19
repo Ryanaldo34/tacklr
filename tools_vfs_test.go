@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"testing"
 
@@ -409,6 +410,349 @@ func requireWriteUnchanged(t *testing.T, ms *vfs.MountSession, write *Tool, rt H
 	}
 }
 
+func TestVFSTools_projectedDocOutlineAndBlocks(t *testing.T) {
+	ctx := context.Background()
+	api := newToolMemDrive()
+	docsAPI := newToolMemDocs("doc1", "R0", []vfs.DocsSpan{
+		{TabID: "t.a", StartIndex: 1, EndIndex: 2, Kind: "sectionBreak"},
+		{TabID: "t.a", StartIndex: 2, EndIndex: 8, Kind: "heading", Level: 1, Text: "Spec"},
+		{TabID: "t.a", StartIndex: 8, EndIndex: 14, Kind: "paragraph", Text: "Hello"},
+		{TabID: "t.b", StartIndex: 1, EndIndex: 2, Kind: "sectionBreak"},
+		{TabID: "t.b", StartIndex: 2, EndIndex: 8, Kind: "paragraph", Text: "Other"},
+	}, []vfs.DocTab{{ID: "t.a", Title: "Intro", Index: 0}, {ID: "t.b", Title: "Appendix", Index: 1}})
+	auth := vfs.NewSessionAuth()
+	_ = auth.Bind("tools-docs", vfs.Binding{
+		Provider: "gdrive", Point: "/contracts", Writable: true,
+		Auth: vfs.Credential{Token: "t"}, Params: map[string]string{vfs.ParamFolderID: "root"},
+	})
+	reg := vfs.NewBackendRegistry()
+	if err := reg.Register(vfs.DriveFactory{ID: "gdrive", Auth: auth, API: api, Docs: docsAPI}); err != nil {
+		t.Fatal(err)
+	}
+	ms := vfs.MustNewMountSession("tools-docs", reg)
+	if err := ms.Mount(ctx, vfs.BindingSpec(vfs.Binding{
+		Provider: "gdrive", Point: "/contracts", Writable: true,
+		Params: map[string]string{vfs.ParamFolderID: "root"},
+	})); err != nil {
+		t.Fatal(err)
+	}
+	h := mustNewAgent(t, AgentOptions{
+		SessionID: "tools-docs", Store: stores.NewInMemoryStore(), MountSession: ms, Model: &mockStrategy{},
+	})
+	tools := map[string]*Tool{}
+	for _, tool := range h.tools {
+		tools[tool.Name] = tool
+	}
+	rt := turnRuntime(h)
+
+	res, err := tools["read"].invoke(ctx, `{"path":"/contracts/Spec"}`, rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.output, "outline:") || strings.Contains(res.output, "<html") ||
+		!strings.Contains(res.output, "media_type=application/vnd.google-apps.document") {
+		t.Fatalf("default read dumped HTML: %s", res.output)
+	}
+	rev := fieldKV(res.output, "rev")
+	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Spec","block_id":"intro/p-1"}`, rt)
+	if err != nil || !strings.Contains(res.output, "text=Hello") || strings.Contains(res.output, "<p>") {
+		t.Fatalf("block_id IR: %s err=%v", res.output, err)
+	}
+	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Spec","start":1,"end":6}`, rt)
+	if err != nil || !strings.Contains(res.output, "<html>") || !strings.Contains(res.output, "<h1") ||
+		!strings.Contains(res.output, "rev=") {
+		t.Fatalf("HTML line window: %s err=%v", res.output, err)
+	}
+	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Spec","ir":true}`, rt)
+	if err != nil || strings.Contains(res.output, "text=<html") {
+		t.Fatalf("ir dump: %s err=%v", res.output, err)
+	}
+
+	_, err = tools["write"].invoke(ctx, fmt.Sprintf(`{"path":"/contracts/Spec","rev":%q,"content":"<p>nope</p>"}`, rev), rt)
+	if !errors.Is(err, vfs.ErrProjected) {
+		t.Fatalf("content on Doc: %v", err)
+	}
+	_, err = tools["write"].invoke(ctx, fmt.Sprintf(`{"path":"/contracts/Spec","rev":%q,"start":1,"end":2}`, rev), rt)
+	if !errors.Is(err, vfs.ErrProjected) {
+		t.Fatalf("line write on Doc: %v", err)
+	}
+	_, err = tools["write"].invoke(ctx, fmt.Sprintf(`{"path":"/contracts/Spec","rev":%q,"old":"Hello"}`, rev), rt)
+	if !errors.Is(err, vfs.ErrProjected) {
+		t.Fatalf("substring write on Doc: %v", err)
+	}
+	_, err = tools["write"].invoke(ctx, fmt.Sprintf(`{"path":"/contracts/Spec","rev":%q,"blocks":[]}`, rev), rt)
+	if err == nil || !strings.Contains(err.Error(), "empty IR replace") {
+		t.Fatalf("empty blocks: %v", err)
+	}
+	noteRev, err := ms.ContentRev(ctx, "/contracts/note.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = tools["write"].invoke(ctx, fmt.Sprintf(
+		`{"path":"/contracts/note.txt","rev":%q,"blocks":[{"kind":"paragraph","text":"x"}]}`, noteRev.Hash), rt)
+	if !errors.Is(err, vfs.ErrProjected) {
+		t.Fatalf("blocks on plaintext: %v", err)
+	}
+	_, err = tools["write"].invoke(ctx, fmt.Sprintf(
+		`{"path":"/contracts/Spec","rev":%q,"blocks":[{"kind":"paragraph","text":"World"}]}`, rev), rt)
+	if err == nil || !strings.Contains(err.Error(), "tab_id required") {
+		t.Fatalf("missing tab_id: %v", err)
+	}
+
+	body, _ := json.Marshal(map[string]any{
+		"path": "/contracts/Spec", "rev": rev, "block_id": "intro/p-1", "body": "World",
+	})
+	if _, err = tools["write"].invoke(ctx, string(body), rt); err != nil {
+		t.Fatalf("block write: %v", err)
+	}
+	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Spec","block_id":"intro/p-1"}`, rt)
+	if err != nil || !strings.Contains(res.output, "text=World") {
+		t.Fatalf("block_id after write: %s err=%v", res.output, err)
+	}
+
+	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Spec"}`, rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rev = fieldKV(res.output, "rev")
+	blocksBody, _ := json.Marshal(map[string]any{
+		"path": "/contracts/Spec", "rev": rev, "tab_id": "t.a",
+		"blocks": []map[string]any{{"kind": "paragraph", "text": "Replaced"}},
+	})
+	if _, err = tools["write"].invoke(ctx, string(blocksBody), rt); err != nil {
+		t.Fatalf("tab blocks write: %v", err)
+	}
+	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Spec"}`, rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.output, "Replaced") || !strings.Contains(res.output, "Other") {
+		t.Fatalf("tab merge outline: %s", res.output)
+	}
+	rev = fieldKV(res.output, "rev")
+	docsAPI.rev["doc1"] = "R-sibling"
+	_, err = tools["write"].invoke(ctx, fmt.Sprintf(
+		`{"path":"/contracts/Spec","rev":%q,"block_id":"intro/p-1","body":"Stale"}`, rev), rt)
+	if !errors.Is(err, vfs.ErrStaleContent) {
+		t.Fatalf("stale CAS: %v", err)
+	}
+	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Spec","block_id":"intro/p-1"}`, rt)
+	if err != nil || !strings.Contains(res.output, "text=Replaced") {
+		t.Fatalf("body after stale write: %s err=%v", res.output, err)
+	}
+
+	if _, err = tools["write"].invoke(ctx, `{"path":"/contracts/Spec.md","media_type":"application/vnd.google-apps.document","content":"x"}`, rt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tools["write"].invoke(ctx, `{"path":"/contracts/Policy","media_type":"application/vnd.google-apps.document","blocks":[]}`, rt); err != nil {
+		t.Fatal(err)
+	}
+	_, err = tools["write"].invoke(ctx, `{"path":"/contracts/Foo","content":"<html><p>x</p></html>","media_type":"application/vnd.google-apps.document"}`, rt)
+	if err == nil || !strings.Contains(err.Error(), "HTML") {
+		t.Fatalf("html lift: %v", err)
+	}
+	if _, err = tools["write"].invoke(ctx, `{"path":"/contracts/Lifted","media_type":"application/vnd.google-apps.document","content":"Hello\n\nWorld"}`, rt); err != nil {
+		t.Fatal(err)
+	}
+	lifted, err := ms.ReadText(ctx, "/contracts/Lifted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var paras []string
+	for _, b := range lifted.(vfs.Structured).Blocks() {
+		if b.Kind == vfs.BlockKindParagraph {
+			paras = append(paras, b.Text)
+		}
+	}
+	if strings.Join(paras, ",") != "Hello,World" {
+		t.Fatalf("lifted blocks = %v", paras)
+	}
+	st, err := ms.Stat(ctx, "/contracts/Lifted")
+	if err != nil || st.MediaType != "application/vnd.google-apps.document" {
+		t.Fatalf("Lifted Stat = %+v err=%v", st, err)
+	}
+}
+
+type toolMemDrive struct {
+	files map[string]toolFile
+}
+
+type toolFile struct {
+	meta vfs.DriveMeta
+	body []byte
+}
+
+func newToolMemDrive() *toolMemDrive {
+	return &toolMemDrive{files: map[string]toolFile{
+		"root": {meta: vfs.DriveMeta{ID: "root", Name: ".", MimeType: "application/vnd.google-apps.folder", IsDir: true}},
+		"doc1": {meta: vfs.DriveMeta{ID: "doc1", Name: "Spec", MimeType: "application/vnd.google-apps.document"}},
+		"txt1": {meta: vfs.DriveMeta{ID: "txt1", Name: "note.txt", MimeType: "text/plain", Size: 3}, body: []byte("hi\n")},
+	}}
+}
+
+func (d *toolMemDrive) GetMeta(_ context.Context, id string) (vfs.DriveMeta, error) {
+	f, ok := d.files[id]
+	if !ok {
+		return vfs.DriveMeta{}, vfs.ErrNotExist
+	}
+	return f.meta, nil
+}
+func (d *toolMemDrive) GetMedia(_ context.Context, id string) (io.ReadCloser, int64, error) {
+	f, ok := d.files[id]
+	if !ok {
+		return nil, 0, vfs.ErrNotExist
+	}
+	return io.NopCloser(strings.NewReader(string(f.body))), int64(len(f.body)), nil
+}
+func (d *toolMemDrive) List(_ context.Context, folderID string) ([]vfs.DriveMeta, error) {
+	var out []vfs.DriveMeta
+	for id, f := range d.files {
+		if id != "root" && folderID == "root" {
+			out = append(out, f.meta)
+		}
+	}
+	return out, nil
+}
+func (d *toolMemDrive) Export(context.Context, string, string) (io.ReadCloser, int64, error) {
+	return nil, 0, vfs.ErrNotSupported
+}
+func (d *toolMemDrive) PutMedia(context.Context, string, string, io.Reader, int64) (vfs.DriveMeta, error) {
+	return vfs.DriveMeta{}, vfs.ErrNotSupported
+}
+func (d *toolMemDrive) Create(_ context.Context, parentID, name, metadataMIME, mediaMIME string, r io.Reader, size int64) (vfs.DriveMeta, error) {
+	id := "new-" + name
+	meta := vfs.DriveMeta{ID: id, Name: name, MimeType: metadataMIME}
+	var body []byte
+	if r != nil && mediaMIME != "" {
+		body, _ = io.ReadAll(io.LimitReader(r, size+1))
+	}
+	d.files[id] = toolFile{meta: meta, body: body}
+	_ = parentID
+	return meta, nil
+}
+func (d *toolMemDrive) Trash(context.Context, string) error { return nil }
+func (d *toolMemDrive) Mkdir(context.Context, string, string) (vfs.DriveMeta, error) {
+	return vfs.DriveMeta{}, vfs.ErrNotSupported
+}
+
+type toolMemDocs struct {
+	snaps map[string]vfs.DocsSnapshot
+	rev   map[string]string
+}
+
+func newToolMemDocs(id, rev string, spans []vfs.DocsSpan, tabs []vfs.DocTab) *toolMemDocs {
+	return &toolMemDocs{
+		snaps: map[string]vfs.DocsSnapshot{
+			id: {DocumentID: id, RevisionID: rev, Tabs: tabs, Body: spans, Lists: map[string]vfs.DocsListProps{}},
+		},
+		rev: map[string]string{id: rev},
+	}
+}
+
+func (d *toolMemDocs) Get(_ context.Context, documentID string) (vfs.DocsSnapshot, error) {
+	s, ok := d.snaps[documentID]
+	if !ok {
+		s = vfs.DocsSnapshot{
+			DocumentID: documentID, RevisionID: "R0",
+			Body: []vfs.DocsSpan{{StartIndex: 1, EndIndex: 2, Kind: "sectionBreak"}},
+		}
+		if d.snaps == nil {
+			d.snaps = map[string]vfs.DocsSnapshot{}
+		}
+		if d.rev == nil {
+			d.rev = map[string]string{}
+		}
+		d.snaps[documentID] = s
+		d.rev[documentID] = "R0"
+		return s, nil
+	}
+	s.RevisionID = d.rev[documentID]
+	return s, nil
+}
+
+func (d *toolMemDocs) BatchUpdate(_ context.Context, documentID string, req vfs.DocsBatch) (vfs.DocsBatchResult, error) {
+	if cur := d.rev[documentID]; req.RequiredRevisionID != "" && cur != "" && req.RequiredRevisionID != cur {
+		return vfs.DocsBatchResult{}, vfs.ErrConflict
+	}
+	s := d.snaps[documentID]
+	applyToolDocsBatch(&s, req)
+	next := d.rev[documentID] + "+1"
+	if d.rev[documentID] == "" {
+		next = "R1"
+	}
+	d.rev[documentID] = next
+	s.RevisionID = next
+	if d.snaps == nil {
+		d.snaps = map[string]vfs.DocsSnapshot{}
+	}
+	d.snaps[documentID] = s
+	return vfs.DocsBatchResult{RevisionID: next}, nil
+}
+
+func applyToolDocsBatch(s *vfs.DocsSnapshot, req vfs.DocsBatch) {
+	tabOf := func(tab string) string {
+		if tab != "" {
+			return tab
+		}
+		return req.TabID
+	}
+	sameTab := func(spTab, reqTab string) bool {
+		if reqTab == "" {
+			return true
+		}
+		return spTab == reqTab || spTab == ""
+	}
+	for _, r := range req.Requests {
+		if del := r.DeleteContentRange; del != nil && del.Range != nil {
+			start, end := int(del.Range.StartIndex), int(del.Range.EndIndex)
+			tab := tabOf(del.Range.TabId)
+			var next []vfs.DocsSpan
+			for _, sp := range s.Body {
+				if !sameTab(sp.TabID, tab) {
+					next = append(next, sp)
+					continue
+				}
+				if sp.Kind == "sectionBreak" && sp.StartIndex == 1 {
+					next = append(next, sp)
+					continue
+				}
+				if sp.StartIndex < end && sp.EndIndex > start {
+					continue
+				}
+				next = append(next, sp)
+			}
+			s.Body = next
+		}
+		if ins := r.InsertText; ins != nil && ins.Location != nil {
+			idx := int(ins.Location.Index)
+			tab := tabOf(ins.Location.TabId)
+			raw := strings.TrimSuffix(ins.Text, "\n")
+			level := 1
+			if trimmed := strings.TrimLeft(raw, "\t"); trimmed != raw {
+				level = len(raw) - len(trimmed) + 1
+				raw = trimmed
+			}
+			s.Body = append(s.Body, vfs.DocsSpan{
+				TabID: tab, StartIndex: idx, EndIndex: idx + 1 + len(ins.Text),
+				Kind: "paragraph", Text: raw, Level: level,
+			})
+		}
+		if st := r.UpdateParagraphStyle; st != nil && st.ParagraphStyle != nil && st.Range != nil {
+			named := st.ParagraphStyle.NamedStyleType
+			start := int(st.Range.StartIndex)
+			tab := tabOf(st.Range.TabId)
+			if strings.HasPrefix(named, "HEADING_") {
+				for i := range s.Body {
+					if s.Body[i].StartIndex == start && sameTab(s.Body[i].TabID, tab) {
+						s.Body[i].Kind = "heading"
+						s.Body[i].NamedStyle = named
+					}
+				}
+			}
+		}
+	}
+}
+
 func fieldKV(s, key string) string {
 	prefix := key + "="
 	line, _, _ := strings.Cut(s, "\n")
@@ -418,6 +762,53 @@ func fieldKV(s, key string) string {
 		}
 	}
 	return ""
+}
+
+func TestVFSTools_writeDocxBlocksAndInlineMarks(t *testing.T) {
+	ctx := context.Background()
+	base := t.TempDir()
+	reg := vfs.NewBackendRegistry()
+	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
+		t.Fatal(err)
+	}
+	ms := vfs.MustNewMountSession("tools-docx", reg)
+	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
+		t.Fatal(err)
+	}
+	h := mustNewAgent(t, AgentOptions{
+		SessionID: "tools-docx", Store: stores.NewInMemoryStore(), MountSession: ms, Model: &mockStrategy{},
+	})
+	tools := map[string]*Tool{}
+	for _, tool := range h.tools {
+		tools[tool.Name] = tool
+	}
+	rt := turnRuntime(h)
+	mt := "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+	res, err := tools["write"].invoke(ctx, fmt.Sprintf(
+		`{"path":"/work/note.docx","media_type":%q,"blocks":[{"kind":"heading","level":1,"text":"**Title**"},{"kind":"paragraph","text":"See [x](https://e)"}]}`, mt), rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.output, "rev=") {
+		t.Fatalf("create: %s", res.output)
+	}
+	res, err = tools["read"].invoke(ctx, `{"path":"/work/note.docx"}`, rt)
+	if err != nil || !strings.Contains(res.output, "outline:") || !strings.Contains(res.output, "**Title**") {
+		t.Fatalf("read outline: %s err=%v", res.output, err)
+	}
+	rev := fieldKV(res.output, "rev")
+	// content lift on new projected file
+	_, err = tools["write"].invoke(ctx, fmt.Sprintf(
+		`{"path":"/work/lift.docx","media_type":%q,"content":"Hello **x**"}`, mt), rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err = tools["write"].invoke(ctx, fmt.Sprintf(
+		`{"path":"/work/note.docx","rev":%q,"block_id":"p-1","body":"_hi_"}`, rev), rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = res
 }
 
 // TestVFSTools_runCommandLiveNames: host ls/find on a FUSE tree match session ReadDir.

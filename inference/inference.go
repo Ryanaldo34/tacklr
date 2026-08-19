@@ -287,10 +287,11 @@ func (s *OpenAIInferenceStrategy) Invoke(ctx context.Context, messages []*tacklr
 	}
 
 	reqBody := responsesRequest{
-		Model:  s.model,
-		Input:  inputJSON,
-		Tools:  toolsJSON,
-		Stream: true,
+		Model:   s.model,
+		Input:   inputJSON,
+		Tools:   toolsJSON,
+		Stream:  true,
+		Include: []string{"reasoning.encrypted_content"},
 	}
 	if s.maxOutputTokens > 0 {
 		reqBody.MaxOutputTokens = s.maxOutputTokens
@@ -842,8 +843,9 @@ func (s *OpenAIInferenceStrategy) emitFunctionCallChunk(raw json.RawMessage, eve
 
 func (s *OpenAIInferenceStrategy) emitReasoningChunk(raw json.RawMessage, events chan<- tacklr.LLMResponseChunk, reasoningStreamed map[string]struct{}) {
 	var reasoning struct {
-		ID      string `json:"id"`
-		Summary []struct {
+		ID               string `json:"id"`
+		EncryptedContent string `json:"encrypted_content"`
+		Summary          []struct {
 			Type string `json:"type"`
 			Text string `json:"text"`
 		} `json:"summary"`
@@ -884,10 +886,11 @@ func (s *OpenAIInferenceStrategy) emitReasoningChunk(raw json.RawMessage, events
 		}
 	}
 	events <- tacklr.LLMResponseChunk{
-		Type:       tacklr.StreamEventReasoning,
-		MessageId:  reasoning.ID,
-		Content:    content,
-		IsComplete: true,
+		Type:             tacklr.StreamEventReasoning,
+		MessageId:        reasoning.ID,
+		Content:          content,
+		EncryptedContent: reasoning.EncryptedContent,
+		IsComplete:       true,
 	}
 }
 
@@ -906,27 +909,35 @@ func marshalMessagesToInput(messages []*tacklr.Message) []json.RawMessage {
 		items = append(items, b)
 	}
 
-	takeToolOutput := func(callID string) *tacklr.Message {
-		if callID == "" {
+	takeToolOutput := func(tc tacklr.ToolCall) *tacklr.Message {
+		wire, key := tc.WireID(), tc.Key()
+		if wire == "" && key == "" {
 			return nil
 		}
+		var byKey *tacklr.Message
 		for _, m := range messages {
 			if m == nil || m.Role != tacklr.RoleTool || paired[m] {
 				continue
 			}
-			if m.ToolCallID == callID {
+			// Prefer the Responses call_id. A leftover result keyed by the
+			// provider item id (fc_…) must not steal a later call_ result.
+			if wire != "" && m.ToolCallID == wire {
 				paired[m] = true
 				return m
 			}
+			if byKey == nil && key != "" && m.ToolCallID == key {
+				byKey = m
+			}
+		}
+		if byKey != nil {
+			paired[byKey] = true
+			return byKey
 		}
 		return nil
 	}
 
 	appendFunctionCall := func(tc tacklr.ToolCall) {
-		callID := tc.CallID
-		if callID == "" {
-			callID = tc.ID
-		}
+		callID := tc.WireID()
 		name := tc.Name
 		if tc.Namespace != "" && name != "" && !strings.Contains(name, ".") {
 			name = tc.Namespace + "." + name
@@ -946,7 +957,7 @@ func marshalMessagesToInput(messages []*tacklr.Message) []json.RawMessage {
 			Arguments: args,
 			Status:    status,
 		})
-		if out := takeToolOutput(callID); out != nil {
+		if out := takeToolOutput(tc); out != nil {
 			appendJSON(functionCallOutputRequest{
 				Type:   "function_call_output",
 				CallID: callID,
@@ -965,15 +976,8 @@ func marshalMessagesToInput(messages []*tacklr.Message) []json.RawMessage {
 			if paired[msg] {
 				continue
 			}
-			// Orphan tool result (no prior function_call in window) — still emit
-			// so the model sees the output; pairing is best-effort.
-			appendJSON(functionCallOutputRequest{
-				Type:   "function_call_output",
-				CallID: msg.ToolCallID,
-				Output: msg.Content,
-				Status: string(tacklr.StatusCompleted),
-			})
-			paired[msg] = true
+			// Unmatched function_call_output is an invalid_request_error
+			// ("No tool call found for function call output"). Drop it.
 
 		case tacklr.RoleUser, tacklr.RoleSystem:
 			appendJSON(marshalRoleContent(string(msg.Role), msg))
@@ -989,10 +993,17 @@ func marshalMessagesToInput(messages []*tacklr.Message) []json.RawMessage {
 			// turn. `summary` is required (empty array when none). Do not send
 			// status — that is an output field and Azure rejects it on input.
 			// Harness Message.Content holds streamed thought; map to summary_text.
+			//
+			// `id` without encrypted_content is a provider store lookup. OpenAI
+			// ZDR and Azure (store=false) then 400 "Item with id 'rs_…' not found".
+			// Only send id when we have the ciphertext from include=.
 			item := reasoningInputRequest{
 				Type:    "reasoning",
-				ID:      msg.MessageID,
 				Summary: []reasoningSummaryPart{},
+			}
+			if enc := strings.TrimSpace(msg.EncryptedContent); enc != "" {
+				item.ID = msg.MessageID
+				item.EncryptedContent = enc
 			}
 			if text := strings.TrimSpace(msg.Content); text != "" {
 				item.Summary = []reasoningSummaryPart{{

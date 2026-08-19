@@ -18,12 +18,26 @@ type ContentRev struct {
 
 // ContentHash returns hex SHA-256 of body.
 func ContentHash(body string) string {
-	return hashSHA256(unsafe.Slice(unsafe.StringData(body), len(body)))
+	return hashSHA256(unsafeStringBytes(body))
+}
+
+func unsafeStringBytes(s string) []byte {
+	return unsafe.Slice(unsafe.StringData(s), len(s))
 }
 
 func hashSHA256(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
+}
+
+// ContentToken is the single rev helper. Used by ContentRev, lineWindowFromDoc,
+// readStructured, loadMatching, and stage. RichDocument uses the IR fingerprint
+// so HTML reproject does not change the token.
+func ContentToken(t Textual) string {
+	if rd, ok := t.(*RichDocument); ok {
+		return rd.ContentFingerprint()
+	}
+	return ContentHash(t.Text())
 }
 
 // ContentRev hashes the session-visible body: ReadText when textual (same
@@ -35,7 +49,7 @@ func (m *MountSession) ContentRev(ctx context.Context, virtualPath string) (Cont
 	}
 	t, err := m.ReadText(ctx, cleaned)
 	if err == nil {
-		return ContentRev{Path: cleaned, Hash: ContentHash(t.Text())}, nil
+		return ContentRev{Path: cleaned, Hash: ContentToken(t)}, nil
 	}
 	if !errors.Is(err, ErrNoCodec) && !errors.Is(err, ErrNotTextual) && !errors.Is(err, ErrNotSupported) {
 		return ContentRev{}, err

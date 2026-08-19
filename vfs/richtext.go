@@ -42,9 +42,10 @@ type RichTextNormalizer interface {
 	EncodeRich(ctx context.Context, doc *RichTextDocument) ([]byte, error)
 }
 
-// RichTextCodec adapts a RichTextNormalizer to the VFS codec registry. The VFS
-// exposes canonical JSON as TextDocument, allowing existing line tools and
-// indexing to work without knowing the source format.
+// RichTextCodec adapts a RichTextNormalizer to the VFS codec registry.
+// Decode yields a RichDocument (blocks are the source of truth; Text() is the
+// HTML projection). Encode writes native bytes (DOCX, editor HTML, …).
+// Not an IdentityCodec — FUSE is EROFS; persist via WriteDocument.
 type RichTextCodec struct {
 	Types      []string
 	Normalizer RichTextNormalizer
@@ -63,38 +64,21 @@ func (c RichTextCodec) Decode(ctx context.Context, path, mediaType string, data 
 	if err := validateRichText(doc); err != nil {
 		return nil, err
 	}
-	canonical, err := marshalRichText(doc)
-	if err != nil {
-		return nil, err
-	}
-	return NewEncodedRichTextDocument(path, mediaType, string(canonical), c), nil
+	return NewRichDocument(path, mediaType, projectRichBlocks(doc.Blocks, 1)), nil
 }
 
 func (c RichTextCodec) Encode(ctx context.Context, doc Document) ([]byte, error) {
 	if c.Normalizer == nil {
 		return nil, fmt.Errorf("vfs: rich text normalizer required")
 	}
-	td, ok := doc.(*TextDocument)
-	if !ok {
-		return nil, ErrNotTextual
-	}
-	var rich RichTextDocument
-	if err := json.Unmarshal([]byte(td.Text()), &rich); err != nil {
-		return nil, fmt.Errorf("vfs: invalid rich text JSON: %w", err)
-	}
-	if err := validateRichText(&rich); err != nil {
+	rich, err := richTextFromDocument(doc)
+	if err != nil {
 		return nil, err
 	}
-	return c.Normalizer.EncodeRich(ctx, &rich)
-}
-
-func NewEncodedRichTextDocument(path, mediaType, canonical string, encoder Encoder) *TextDocument {
-	d := NewEncodedTextDocument(path, mediaType, "utf-8", canonical, encoder)
-	var rich RichTextDocument
-	if json.Unmarshal([]byte(canonical), &rich) == nil {
-		d.richBlocks = projectRichBlocks(rich.Blocks, 1)
+	if err := validateRichText(rich); err != nil {
+		return nil, err
 	}
-	return d
+	return c.Normalizer.EncodeRich(ctx, rich)
 }
 
 func projectRichBlocks(blocks []RichTextBlock, line int) []Block {
@@ -103,21 +87,22 @@ func projectRichBlocks(blocks []RichTextBlock, line int) []Block {
 	}
 	out := make([]Block, 0, len(blocks))
 	for _, block := range blocks {
-		text := block.Text
-		if text == "" && len(block.Runs) > 0 {
-			var b strings.Builder
-			for _, run := range block.Runs {
-				b.WriteString(run.Text)
-			}
-			text = b.String()
+		runs := adapterRunsToIR(block)
+		text := FormatInline(runs)
+		if text == "" {
+			text = block.Text
 		}
-		end := line + maxRichTextLines(text)
+		kind := normalizeRichKind(block.Kind)
+		end := line + maxRichTextLines(runsPlain(runs))
+		if end == line {
+			end = line + maxRichTextLines(text)
+		}
 		attrs := map[string]string{"heading_path": block.ID}
 		for k, v := range block.Attributes {
 			attrs[k] = v
 		}
-		out = append(out, Block{ID: block.ID, Kind: block.Kind, Text: text, Style: StyleMeta{
-			Kind: block.Kind, Level: block.Level, Span: Span{StartLine: line, EndLine: end}, Attributes: attrs,
+		out = append(out, Block{ID: block.ID, Kind: kind, Text: text, Runs: runs, Style: StyleMeta{
+			Kind: kind, Level: block.Level, Span: Span{StartLine: line, EndLine: end}, Attributes: attrs,
 		}})
 		line = end
 		out = append(out, projectRichBlocks(block.Children, line)...)
@@ -125,13 +110,123 @@ func projectRichBlocks(blocks []RichTextBlock, line int) []Block {
 	return out
 }
 
-func maxRichTextLines(text string) int {
-	return max(1, strings.Count(text, "\n")+1)
+func adapterRunsToIR(block RichTextBlock) []Run {
+	if len(block.Runs) == 0 {
+		if block.Text == "" {
+			return nil
+		}
+		return []Run{{Text: block.Text}}
+	}
+	out := make([]Run, 0, len(block.Runs))
+	for _, r := range block.Runs {
+		marks := map[string]string{}
+		for k, v := range r.Attributes {
+			switch k {
+			case "b", "bold":
+				if v == "true" {
+					marks[MarkBold] = "true"
+				}
+			case "i", "italic":
+				if v == "true" {
+					marks[MarkItalic] = "true"
+				}
+			case "strike", "s":
+				if v == "true" {
+					marks[MarkStrike] = "true"
+				}
+			case "href":
+				if v != "" {
+					marks[MarkHref] = v
+				}
+			}
+		}
+		out = append(out, Run{Text: r.Text, Marks: marks})
+	}
+	return mergeRuns(out)
 }
 
-func marshalRichText(doc *RichTextDocument) ([]byte, error) {
-	doc.Schema = RichTextSchema
-	return json.MarshalIndent(doc, "", "  ")
+func irRunsToAdapter(runs []Run) []RichTextRun {
+	if len(runs) == 0 {
+		return nil
+	}
+	out := make([]RichTextRun, 0, len(runs))
+	for _, r := range runs {
+		attrs := map[string]string{}
+		if r.Marks[MarkBold] == "true" {
+			attrs["b"] = "true"
+			attrs["bold"] = "true"
+		}
+		if r.Marks[MarkItalic] == "true" {
+			attrs["i"] = "true"
+			attrs["italic"] = "true"
+		}
+		if r.Marks[MarkStrike] == "true" {
+			attrs["strike"] = "true"
+		}
+		if href := r.Marks[MarkHref]; href != "" {
+			attrs["href"] = href
+		}
+		out = append(out, RichTextRun{Text: strings.ReplaceAll(r.Text, "\n", " "), Attributes: attrs})
+	}
+	return out
+}
+
+func normalizeRichKind(kind string) string {
+	switch kind {
+	case "list-item":
+		return BlockKindListItem
+	default:
+		return kind
+	}
+}
+
+func adapterRichKind(kind string) string {
+	if kind == BlockKindListItem {
+		return "list-item"
+	}
+	return kind
+}
+
+func richTextFromDocument(doc Document) (*RichTextDocument, error) {
+	switch d := doc.(type) {
+	case *RichDocument:
+		return richTextFromBlocks(d.Blocks()), nil
+	case *TextDocument:
+		var rich RichTextDocument
+		if err := json.Unmarshal([]byte(d.Text()), &rich); err != nil {
+			return nil, fmt.Errorf("vfs: invalid rich text JSON: %w", err)
+		}
+		return &rich, nil
+	default:
+		return nil, ErrNotTextual
+	}
+}
+
+func richTextFromBlocks(blocks []Block) *RichTextDocument {
+	out := &RichTextDocument{Schema: RichTextSchema, Blocks: make([]RichTextBlock, 0, len(blocks))}
+	for _, b := range blocks {
+		attrs := map[string]string{}
+		for k, v := range b.Style.Attributes {
+			if k == "heading_path" || k == "tab_id" {
+				continue
+			}
+			attrs[k] = v
+		}
+		rb := RichTextBlock{
+			ID:         b.ID,
+			Kind:       adapterRichKind(b.Kind),
+			Level:      b.Style.Level,
+			Text:       b.PlainText(),
+			Attributes: attrs,
+			Runs:       irRunsToAdapter(b.inlineRuns()),
+		}
+		out.Blocks = append(out.Blocks, rb)
+	}
+	return out
+}
+
+func maxRichTextLines(text string) int {
+	return max(1, strings.Count(text, "\n")+1)
 }
 
 func validateRichText(doc *RichTextDocument) error {

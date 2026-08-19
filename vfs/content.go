@@ -34,6 +34,21 @@ type IdentityCodec interface {
 	Identity()
 }
 
+// IsProjected reports whether mediaType is owned by a registered non-identity
+// codec (DocsCodec today). PDF and unregistered types are not projected.
+func IsProjected(mediaType string) bool {
+	mediaType = normalizeMediaType(mediaType)
+	if mediaType == "" || mediaType == "application/octet-stream" {
+		return false
+	}
+	c, ok := defaultContentRegistry.codec(mediaType)
+	if !ok {
+		return false
+	}
+	_, id := c.(IdentityCodec)
+	return !id
+}
+
 // KernelWritable reports whether FUSE/host writes may persist raw bytes for
 // mediaType. True only when a registered IdentityCodec owns the type.
 // Providers must set FileInfo.MediaType; unregistered types are EROFS.
@@ -142,6 +157,9 @@ func mustDefaultContentRegistry(types []string) *ContentRegistry {
 	}
 	r := NewContentRegistry()
 	if err := r.Register(TextCodec{}); err != nil {
+		panic(err)
+	}
+	if err := r.Register(DocsCodec{}); err != nil {
 		panic(err)
 	}
 	return r

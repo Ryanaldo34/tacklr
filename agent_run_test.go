@@ -2,6 +2,7 @@ package tacklr
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -558,7 +559,7 @@ func TestRun_pairsOpenToolCallsBeforeTurn(t *testing.T) {
 	h.restoreMessages([]*Message{
 		{Role: RoleUser, Content: "goal"},
 		{Role: RoleAssistant, ToolCalls: []ToolCall{
-			{CallID: "orphan", Name: "echo", Arguments: `{}`},
+			{ID: "fc_orphan", CallID: "orphan", Name: "echo", Arguments: `{}`},
 		}},
 		{Role: RoleAssistant, ToolCalls: []ToolCall{
 			{CallID: "good", Name: "echo", Arguments: `{}`},
@@ -607,6 +608,95 @@ func TestRun_pairsOpenToolCallsBeforeTurn(t *testing.T) {
 	}
 	if !sawGood {
 		t.Fatalf("paired tool result missing: %+v", loaded.Messages())
+	}
+}
+
+// TestRun_permissionResumeDoesNotPairItemID: Azure function_call items have
+// ID=fc_… and CallID=call_…. pairOpenToolCalls must not inject a RoleTool
+// under the item id on permission resume — that output has no matching
+// function_call on the wire and Azure 400s.
+func TestRun_permissionResumeDoesNotPairItemID(t *testing.T) {
+	tool := NewTool(ToolConfig{
+		Name:    "write",
+		OnCall:  OnCalls(ToolPermissionOnCall),
+		Handler: func(ctx context.Context) (string, error) { return "wrote", nil },
+	})
+	var n int
+	var second []*Message
+	strategy := &mockStrategy{
+		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
+			n++
+			if n == 1 {
+				ch <- LLMResponseChunk{
+					Type: StreamEventFunctionCall,
+					ToolCalls: []ToolCall{
+						{ID: "fc_06f6item", CallID: "call_7Ge4wire", Name: "write", Arguments: `{}`},
+					},
+					IsComplete: true,
+				}
+				return
+			}
+			second = append([]*Message(nil), msgs...)
+			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
+		},
+	}
+	h := mustNewAgent(t, AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  strategy,
+		Tools:  []*Tool{tool},
+	})
+	events, err := h.Run(context.Background(), "write the doc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var interruptID string
+	for _, ev := range drainEvents(events) {
+		if ev.Type == StreamEventInterrupt {
+			var payload struct {
+				InterruptId string `json:"interruptId"`
+			}
+			if err := json.Unmarshal(ev.Data, &payload); err == nil {
+				interruptID = payload.InterruptId
+			}
+		}
+	}
+	if interruptID == "" {
+		t.Fatal("expected tool_permission yield")
+	}
+
+	resumed, err := h.ReturnFromInterrupt(context.Background(), map[string][]byte{
+		interruptID: []byte(`{"optionId":"allow-once"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := drainEvents(resumed)
+	if !hasToolResultContent(got, "wrote") {
+		t.Fatalf("want write result after allow, got %+v", summarizeEvents(got))
+	}
+	if n < 2 {
+		t.Fatalf("want second model invoke, got %d", n)
+	}
+
+	var results []*Message
+	for _, m := range second {
+		if m != nil && m.Role == RoleTool {
+			results = append(results, m)
+		}
+	}
+	if len(results) != 1 {
+		t.Fatalf("want exactly one tool result on resume invoke, got %d: %+v", len(results), results)
+	}
+	if results[0].ToolCallID != "call_7Ge4wire" {
+		t.Fatalf("tool result id = %q, want wire call_id", results[0].ToolCallID)
+	}
+	if results[0].Content != "wrote" {
+		t.Fatalf("tool result = %q, want wrote", results[0].Content)
+	}
+	for _, m := range second {
+		if m != nil && m.Role == RoleTool && m.ToolCallID == "fc_06f6item" {
+			t.Fatalf("item-id phantom tool result must not be sent to the model: %+v", second)
+		}
 	}
 }
 

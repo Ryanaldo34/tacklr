@@ -29,6 +29,12 @@ var (
 	ErrInvalidLine    = errors.New("vfs: line contains newline")
 	ErrLineTooLong    = errors.New("vfs: line too long")
 	ErrTooLarge       = errors.New("vfs: file too large")
+	// ErrProjected is returned when a line/HTML/SetText mutation is applied to a
+	// projected document. Agents must use block IR instead.
+	ErrProjected = errors.New("vfs: use block IR for this media type")
+	// ErrConflict is a provider-level compare-and-swap failure (Docs requiredRevisionId).
+	// Tools map it to ErrStaleContent. vfs path I/O does not return ErrStaleContent.
+	ErrConflict = errors.New("vfs: remote content changed")
 	// ErrStaleContent is for tool/host optimistic concurrency (expected hash ≠ current).
 	// vfs lower-level APIs do not return this; tools wrap ContentRev checks.
 	ErrStaleContent = errors.New("vfs: stale content revision")

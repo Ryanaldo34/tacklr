@@ -17,10 +17,8 @@ import (
 )
 
 const (
-	mimeGoogleFolder   = "application/vnd.google-apps.folder"
-	mimeGoogleShortcut = "application/vnd.google-apps.shortcut"
-	driveMetaFields    = "id,name,mimeType,modifiedTime,size,shortcutDetails"
-	driveListFields    = "nextPageToken,files(" + driveMetaFields + ")"
+	driveMetaFields = "id,name,mimeType,modifiedTime,size,shortcutDetails"
+	driveListFields = "nextPageToken,files(" + driveMetaFields + ")"
 )
 
 // DriveMeta is one Drive file or folder (IDs stay inside the provider).
@@ -40,6 +38,11 @@ type DriveAPI interface {
 	GetMeta(ctx context.Context, fileID string) (DriveMeta, error)
 	GetMedia(ctx context.Context, fileID string) (io.ReadCloser, int64, error)
 	List(ctx context.Context, folderID string) ([]DriveMeta, error)
+	Export(ctx context.Context, fileID, mimeType string) (io.ReadCloser, int64, error)
+	PutMedia(ctx context.Context, fileID, mediaMIME string, r io.Reader, size int64) (DriveMeta, error)
+	Create(ctx context.Context, parentID, name, metadataMIME, mediaMIME string, r io.Reader, size int64) (DriveMeta, error)
+	Trash(ctx context.Context, fileID string) error
+	Mkdir(ctx context.Context, parentID, name string) (DriveMeta, error)
 }
 
 // GoogleDrive implements DriveAPI with google.golang.org/api/drive/v3.
@@ -98,19 +101,101 @@ func (g GoogleDrive) GetMedia(ctx context.Context, fileID string) (io.ReadCloser
 	return res.Body, size, nil
 }
 
+// Export implements DriveAPI (official HTML export is application/zip).
+func (g GoogleDrive) Export(ctx context.Context, fileID, mimeType string) (io.ReadCloser, int64, error) {
+	if err := g.require(); err != nil {
+		return nil, 0, err
+	}
+	res, err := g.Service.Files.Export(fileID, mimeType).Context(ctx).Download()
+	if err != nil {
+		return nil, 0, mapDriveError(err)
+	}
+	return res.Body, res.ContentLength, nil
+}
+
+// PutMedia implements DriveAPI.
+func (g GoogleDrive) PutMedia(ctx context.Context, fileID, mediaMIME string, r io.Reader, size int64) (DriveMeta, error) {
+	if err := g.require(); err != nil {
+		return DriveMeta{}, err
+	}
+	_ = size
+	call := g.Service.Files.Update(fileID, nil).
+		SupportsAllDrives(true).
+		Fields(driveMetaFields).
+		Context(ctx)
+	if r != nil && mediaMIME != "" {
+		call = call.Media(r, googleapi.ContentType(mediaMIME))
+	}
+	f, err := call.Do()
+	if err != nil {
+		return DriveMeta{}, mapDriveError(err)
+	}
+	return fileToMeta(f), nil
+}
+
+// Create implements DriveAPI. r == nil or mediaMIME == "" is metadata-only.
+func (g GoogleDrive) Create(ctx context.Context, parentID, name, metadataMIME, mediaMIME string, r io.Reader, size int64) (DriveMeta, error) {
+	if err := g.require(); err != nil {
+		return DriveMeta{}, err
+	}
+	_ = size
+	f := &drive.File{Name: name, MimeType: metadataMIME, Parents: []string{parentID}}
+	call := g.Service.Files.Create(f).
+		SupportsAllDrives(true).
+		Fields(driveMetaFields).
+		Context(ctx)
+	if r != nil && mediaMIME != "" {
+		call = call.Media(r, googleapi.ContentType(mediaMIME))
+	}
+	created, err := call.Do()
+	if err != nil {
+		return DriveMeta{}, mapDriveError(err)
+	}
+	return fileToMeta(created), nil
+}
+
+// Trash implements DriveAPI (files.update trashed:true, not files.delete).
+func (g GoogleDrive) Trash(ctx context.Context, fileID string) error {
+	if err := g.require(); err != nil {
+		return err
+	}
+	_, err := g.Service.Files.Update(fileID, &drive.File{Trashed: true}).
+		SupportsAllDrives(true).
+		Context(ctx).
+		Do()
+	return mapDriveError(err)
+}
+
+// Mkdir implements DriveAPI.
+func (g GoogleDrive) Mkdir(ctx context.Context, parentID, name string) (DriveMeta, error) {
+	return g.Create(ctx, parentID, name, mimeGoogleFolder, "", nil, 0)
+}
+
 // List implements DriveAPI.
 func (g GoogleDrive) List(ctx context.Context, folderID string) ([]DriveMeta, error) {
+	q := fmt.Sprintf("'%s' in parents and trashed = false", escapeDriveQ(folderID))
+	return g.listQuery(ctx, q, 1000)
+}
+
+// Find lists children of folderID whose Drive name matches. Path resolve uses
+// this instead of List so a large folder does not transfer every sibling.
+func (g GoogleDrive) Find(ctx context.Context, folderID, name string) ([]DriveMeta, error) {
+	q := fmt.Sprintf("'%s' in parents and name = '%s' and trashed = false",
+		escapeDriveQ(folderID), escapeDriveQ(name))
+	return g.listQuery(ctx, q, 100)
+}
+
+func (g GoogleDrive) listQuery(ctx context.Context, q string, pageSize int64) ([]DriveMeta, error) {
 	if err := g.require(); err != nil {
 		return nil, err
 	}
-	q := fmt.Sprintf("'%s' in parents and trashed = false", escapeDriveQ(folderID))
 	var out []DriveMeta
 	err := g.Service.Files.List().
 		Q(q).
 		Fields(driveListFields).
 		SupportsAllDrives(true).
 		IncludeItemsFromAllDrives(true).
-		PageSize(1000).
+		PageSize(pageSize).
 		Context(ctx).
 		Pages(ctx, func(page *drive.FileList) error {
 			for _, f := range page.Files {
@@ -164,17 +249,30 @@ func mapDriveError(err error) error {
 		case 401:
 			return ErrAuthExpired
 		case 403:
-			return ErrPermission
+			msg := strings.ToLower(gerr.Message)
+			if strings.Contains(msg, "exportsizelimitexceeded") || strings.Contains(msg, "export size") {
+				return ErrTooLarge
+			}
+			if gerr.Message == "" {
+				return ErrPermission
+			}
+			return fmt.Errorf("%w: %s", ErrPermission, gerr.Message)
+		case 400:
+			msg := strings.ToLower(gerr.Message)
+			if strings.Contains(msg, "exportsizelimitexceeded") || strings.Contains(msg, "export size") {
+				return ErrTooLarge
+			}
 		}
 	}
 	return err
 }
 
-// DriveFactory opens read-only Drive folder providers. Auth is session-scoped.
+// DriveFactory opens Drive folder providers. Auth is session-scoped.
 type DriveFactory struct {
 	ID   string
 	Auth *SessionAuth
 	API  DriveAPI // optional; nil → GoogleDrive from the session token
+	Docs DocsAPI  // optional; nil on writable mounts → GoogleDocs from the session token
 }
 
 // Profile implements ProviderFactory.
@@ -207,13 +305,29 @@ func (f DriveFactory) Open(ctx context.Context, sessionID string, spec MountSpec
 		}
 		api = gd
 	}
-	return &driveProvider{api: api, rootID: folderID, holder: holder}, nil
+	docs := f.Docs
+	writable := !spec.ReadOnly
+	if docs == nil && writable && holder != nil && holder.Current().Token != "" {
+		gd, err := NewGoogleDocs(ctx, holder)
+		if err != nil {
+			return nil, err
+		}
+		docs = gd
+	}
+	return &driveProvider{
+		api: api, docs: docs, rootID: folderID, holder: holder, writable: writable,
+		zipCache: newFIFO[[]byte](32), getCache: newFIFO[DocsSnapshot](32),
+	}, nil
 }
 
 type driveProvider struct {
-	api    DriveAPI
-	rootID string
-	holder *TokenHolder
+	api      DriveAPI
+	docs     DocsAPI
+	rootID   string
+	holder   *TokenHolder
+	writable bool
+	zipCache *fifo[[]byte]
+	getCache *fifo[DocsSnapshot]
 }
 
 var _ documentBackend = (*driveProvider)(nil)
@@ -272,12 +386,39 @@ func (p *driveProvider) list(ctx context.Context, folderID string) ([]DriveMeta,
 	return kids, nil
 }
 
+func (p *driveProvider) childrenNamed(ctx context.Context, parentID, name string) ([]DriveMeta, error) {
+	var find func(context.Context, string, string) ([]DriveMeta, error)
+	switch a := p.api.(type) {
+	case GoogleDrive:
+		find = a.Find
+	case *GoogleDrive:
+		find = a.Find
+	default:
+		return p.list(ctx, parentID)
+	}
+	var kids []DriveMeta
+	err := p.call(ctx, func() error {
+		var e error
+		kids, e = find(ctx, parentID, name)
+		return e
+	})
+	return kids, err
+}
+
 func (m DriveMeta) dir() bool {
 	return m.IsDir || m.MimeType == mimeGoogleFolder
 }
 
 func (p *driveProvider) child(ctx context.Context, parentID, name string) (DriveMeta, error) {
-	kids, err := p.list(ctx, parentID)
+	return p.lookupChild(ctx, parentID, name, true)
+}
+
+func (p *driveProvider) childRaw(ctx context.Context, parentID, name string) (DriveMeta, error) {
+	return p.lookupChild(ctx, parentID, name, false)
+}
+
+func (p *driveProvider) lookupChild(ctx context.Context, parentID, name string, follow bool) (DriveMeta, error) {
+	kids, err := p.childrenNamed(ctx, parentID, name)
 	if err != nil {
 		return DriveMeta{}, err
 	}
@@ -294,7 +435,10 @@ func (p *driveProvider) child(ctx context.Context, parentID, name string) (Drive
 	case 0:
 		return DriveMeta{}, ErrNotExist
 	case 1:
-		return p.follow(ctx, found, 4)
+		if follow {
+			return p.follow(ctx, found, 4)
+		}
+		return found, nil
 	default:
 		return DriveMeta{}, fmt.Errorf("%w: %q", ErrAmbiguous, name)
 	}
@@ -361,7 +505,7 @@ func driveFileInfo(meta DriveMeta) FileInfo {
 	mt := ""
 	if !meta.dir() {
 		if isGoogleNativeFile(meta.MimeType) {
-			mt = "application/octet-stream"
+			mt = meta.MimeType
 		} else if t := s3KnownType(meta.MimeType); t != "" {
 			mt = t
 		} else {
@@ -421,7 +565,10 @@ func (p *driveProvider) OpenFile(ctx context.Context, name string, flag int, per
 	_ = perm
 	write := flag&(os.O_WRONLY|os.O_RDWR|os.O_APPEND) != 0 || flag&os.O_CREATE != 0 || flag&os.O_TRUNC != 0
 	if write {
-		return nil, ErrReadOnly
+		if !p.writable {
+			return nil, ErrReadOnly
+		}
+		return nil, ErrNotSupported
 	}
 	meta, err := p.resolve(ctx, name)
 	if err != nil {
@@ -437,7 +584,7 @@ func (p *driveProvider) OpenFile(ctx context.Context, name string, flag int, per
 	if err != nil {
 		return nil, err
 	}
-	data, err := io.ReadAll(io.LimitReader(body, int64(MaxReadFileBytes)+1))
+	data, err := readCapped(body, MaxReadFileBytes, meta.Size)
 	_ = body.Close()
 	if err != nil {
 		return nil, err
@@ -478,15 +625,27 @@ func (p *driveProvider) ReadDir(ctx context.Context, name string) ([]DirEntry, e
 	return out, nil
 }
 
-// Remove implements Provider.
+// Remove implements Provider. Drive trash; does not follow shortcuts.
 func (p *driveProvider) Remove(ctx context.Context, name string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if _, err := p.resolve(ctx, name); err != nil {
+	if !p.writable {
+		if _, err := p.resolve(ctx, name); err != nil {
+			return err
+		}
+		return ErrReadOnly
+	}
+	meta, err := p.resolveLeaf(ctx, name)
+	if err != nil {
 		return err
 	}
-	return ErrReadOnly
+	err = p.call(ctx, func() error { return p.api.Trash(ctx, meta.ID) })
+	if err != nil {
+		return err
+	}
+	p.invalidate(meta.ID)
+	return nil
 }
 
 // MkdirAll implements Provider.
@@ -502,7 +661,11 @@ func (p *driveProvider) MkdirAll(ctx context.Context, name string, perm fs.FileM
 	if rel == "" {
 		return nil
 	}
-	return ErrReadOnly
+	if !p.writable {
+		return ErrReadOnly
+	}
+	_, err = p.ensureDir(ctx, rel)
+	return err
 }
 
 // OpenDocument implements documentBackend.
@@ -518,6 +681,9 @@ func (p *driveProvider) OpenDocument(ctx context.Context, name string, reg *Cont
 		return nil, fmt.Errorf("vfs: %s is a directory", name)
 	}
 	if isGoogleNativeFile(meta.MimeType) {
+		if meta.MimeType == mimeGoogleDocument {
+			return p.openGoogleDoc(ctx, name, meta)
+		}
 		return nil, ErrNoCodec
 	}
 	if meta.Size > int64(MaxReadFileBytes) {
@@ -527,7 +693,7 @@ func (p *driveProvider) OpenDocument(ctx context.Context, name string, reg *Cont
 	if err != nil {
 		return nil, err
 	}
-	data, err := io.ReadAll(io.LimitReader(body, int64(MaxReadFileBytes)+1))
+	data, err := readCapped(body, MaxReadFileBytes, meta.Size)
 	_ = body.Close()
 	if err != nil {
 		return nil, err
@@ -538,14 +704,4 @@ func (p *driveProvider) OpenDocument(ctx context.Context, name string, reg *Cont
 	fi := driveFileInfo(meta)
 	fi.Size = int64(len(data))
 	return decodeProviderDocument(ctx, name, fi, data, reg)
-}
-
-// WriteDocument implements documentBackend.
-func (p *driveProvider) WriteDocument(ctx context.Context, name string, doc Document) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	_ = name
-	_ = doc
-	return ErrReadOnly
 }

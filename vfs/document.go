@@ -21,6 +21,7 @@ type Document interface {
 // Text() is that plaintext (FUSE / encode). Line numbers are
 // 1-based. Lines(start, end) is half-open [start, end).
 // SetText / SetLine / ReplaceLines mutate this value; persist with WriteDocument.
+// SetText returns ErrProjected on types whose Text() is a derived projection.
 type Textual interface {
 	Document
 	Encoding() string
@@ -28,7 +29,7 @@ type Textual interface {
 	LineCount() int
 	Line(n int) (string, error)
 	Lines(start, end int) ([]string, error)
-	SetText(text string)
+	SetText(text string) error
 	SetLine(n int, line string) error
 	ReplaceLines(start, end int, replacement []string) error
 }
@@ -42,8 +43,12 @@ type Structured interface {
 
 // Block kind vocabulary (stable for tools and brain props). Grow carefully.
 const (
-	BlockKindPreamble = "preamble"
-	BlockKindHeading  = "heading"
+	BlockKindPreamble  = "preamble"
+	BlockKindHeading   = "heading"
+	BlockKindParagraph = "paragraph"
+	BlockKindListItem  = "list_item"
+	BlockKindTable     = "table"
+	BlockKindImage     = "image"
 )
 
 // StyleMeta is optional presentation/structure for rich documents.
@@ -62,10 +67,16 @@ type Span struct {
 
 // Block is a structural unit (heading region, paragraph, …).
 // For Markdown, blocks are a projected view over the textual body (not a second body).
+//
+// Text is what tools show the agent. On RichDocument, inline marks in Text are
+// **bold**, _italic_ (also *italic* on input), ~~strike~~, and [label](url).
+// kind/level carry structure — do not put # or - lists in Text.
+// Runs is the decoded form; callers set Text and leave Runs empty.
 type Block struct {
 	ID    string
 	Kind  string
 	Text  string
+	Runs  []Run
 	Style StyleMeta
 }
 
@@ -108,8 +119,6 @@ type TextDocument struct {
 	path, mediaType, encoding string
 	text                      string
 	starts                    []int
-	encoder                   Encoder
-	richBlocks                []Block
 }
 
 // NewTextDocument builds a TextDocument from already-decoded UTF-8 text.
@@ -121,31 +130,24 @@ func NewTextDocument(path, mediaType, encoding, text string) *TextDocument {
 		mediaType = "text/plain"
 	}
 	d := &TextDocument{path: path, mediaType: mediaType, encoding: encoding}
-	d.SetText(text)
-	return d
-}
-
-// NewEncodedTextDocument creates a textual canonical projection whose source
-// bytes are produced by encoder when the document is written.
-func NewEncodedTextDocument(path, mediaType, encoding, text string, encoder Encoder) *TextDocument {
-	d := NewTextDocument(path, mediaType, encoding, text)
-	d.encoder = encoder
+	_ = d.SetText(text)
 	return d
 }
 
 func EncodeDocument(ctx context.Context, doc Document) ([]byte, error) {
-	t, ok := doc.(*TextDocument)
-	if !ok {
-		text, ok := doc.(Textual)
-		if !ok {
-			return nil, ErrNotTextual
+	if doc == nil {
+		return nil, ErrNotTextual
+	}
+	if c, ok := defaultContentRegistry.codec(normalizeMediaType(doc.MediaType())); ok {
+		if enc, ok := c.(Encoder); ok {
+			return enc.Encode(ctx, doc)
 		}
-		return EncodeTextual(text)
 	}
-	if t.encoder != nil {
-		return t.encoder.Encode(ctx, t)
+	text, ok := doc.(Textual)
+	if !ok {
+		return nil, ErrNotTextual
 	}
-	return EncodeTextual(t)
+	return EncodeTextual(text)
 }
 
 func (d *TextDocument) Path() string      { return d.path }
@@ -184,11 +186,11 @@ func (d *TextDocument) Lines(start, end int) ([]string, error) {
 }
 
 // SetText replaces the full body and rebuilds the line index.
-func (d *TextDocument) SetText(text string) {
+func (d *TextDocument) SetText(text string) error {
 	d.text = text
 	if text == "" {
 		d.starts = nil
-		return
+		return nil
 	}
 	starts := make([]int, 1, strings.Count(text, "\n")+1)
 	starts[0] = 0
@@ -198,6 +200,7 @@ func (d *TextDocument) SetText(text string) {
 		}
 	}
 	d.starts = starts
+	return nil
 }
 
 // SetLine replaces line n (1-based). line must not contain '\n'.
@@ -218,8 +221,7 @@ func (d *TextDocument) ReplaceLines(start, end int, replacement []string) error 
 		}
 	}
 	if n == 0 {
-		d.SetText(strings.Join(replacement, "\n"))
-		return nil
+		return d.SetText(strings.Join(replacement, "\n"))
 	}
 
 	prefixLines := start - 1
@@ -257,8 +259,7 @@ func (d *TextDocument) ReplaceLines(start, end int, replacement []string) error 
 		}
 		b.WriteString(d.text[d.starts[end-1]:])
 	}
-	d.SetText(b.String())
-	return nil
+	return d.SetText(b.String())
 }
 
 func (d *TextDocument) lineSlice(i int) string {

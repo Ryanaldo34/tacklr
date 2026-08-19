@@ -426,30 +426,60 @@ func (a *AgentHarness) runTurnLoop(ctx context.Context, out chan StreamEvent, tu
 // pairOpenToolCalls appends error tool results for assistant tool_calls that
 // have no matching tool message. Restored dirty windows become valid before
 // the next model turn; new turns never commit unpaired calls.
+//
+// Pair on WireID (Responses call_id), matching toolResultMessage. Do not
+// invent a result for a still-pending call — ReturnFromInterrupt resumes
+// those, and a Key()-keyed phantom (fc_ item id) is rejected by Azure as
+// "No tool call found for function call output".
 func (a *AgentHarness) pairOpenToolCalls(reason string) {
-	msgs := a.context.Messages()
-	haveResult := make(map[string]struct{})
-	for _, m := range msgs {
-		if m.Role == RoleTool && m.ToolCallID != "" {
-			haveResult[m.ToolCallID] = struct{}{}
-		}
-	}
-	for _, m := range msgs {
-		if m.Role != RoleAssistant {
+	hasOutput := toolOutputIDs(a.context.Messages())
+	pending := a.pendingSnapshot()
+	for _, m := range a.context.Messages() {
+		if m == nil || m.Role != RoleAssistant {
 			continue
 		}
 		for _, tc := range m.ToolCalls {
-			key := tc.Key()
-			if key == "" {
+			if tc.WireID() == "" {
 				continue
 			}
-			if _, ok := haveResult[key]; ok {
+			if toolCallHasResult(hasOutput, tc) || toolCallIsPending(pending, tc) {
 				continue
 			}
-			a.context.Add(&Message{Role: RoleTool, ToolCallID: key, Content: reason})
-			haveResult[key] = struct{}{}
+			msg, _ := a.toolResultMessage(tc, reason, "error")
+			a.context.Add(msg)
+			hasOutput[msg.ToolCallID] = struct{}{}
 		}
 	}
+}
+
+func toolCallHasResult(hasOutput map[string]struct{}, tc ToolCall) bool {
+	if _, ok := hasOutput[tc.WireID()]; ok {
+		return true
+	}
+	if key := tc.Key(); key != "" {
+		if _, ok := hasOutput[key]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func toolCallIsPending(pending map[string]stores.PendingToolCall, tc ToolCall) bool {
+	if _, ok := pending[tc.Key()]; ok {
+		return true
+	}
+	if _, ok := pending[tc.WireID()]; ok {
+		return true
+	}
+	for _, p := range pending {
+		if p.ToolCall == nil {
+			continue
+		}
+		if p.ToolCall.Key() == tc.Key() || p.ToolCall.WireID() == tc.WireID() {
+			return true
+		}
+	}
+	return false
 }
 
 func tagModelAfterToolsError(chunk LLMResponseChunk) LLMResponseChunk {

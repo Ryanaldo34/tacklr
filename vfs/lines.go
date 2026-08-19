@@ -102,7 +102,7 @@ func lineWindowFromDoc(path string, doc Textual, start, end int) (LineWindow, er
 	return LineWindow{
 		Path: path, Start: start, End: end, Lines: lines,
 		Returned: len(lines), EOF: eof, NextStart: start + len(lines),
-		Rev: ContentRev{Path: path, Hash: ContentHash(doc.Text())},
+		Rev: ContentRev{Path: path, Hash: ContentToken(doc)},
 	}, nil
 }
 

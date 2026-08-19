@@ -2,7 +2,7 @@ package vfs_test
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/ryanaldo34/tacklr/vfs"
@@ -34,29 +34,60 @@ func TestRichTextCodecProjectsAndEncodesEditedCanonicalDocument(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	text, ok := doc.(*vfs.TextDocument)
-	if !ok || text.Text() == "" {
-		t.Fatalf("decoded document = %#v", doc)
+	rd, ok := doc.(*vfs.RichDocument)
+	if !ok {
+		t.Fatalf("decoded document = %#v, want *RichDocument", doc)
 	}
-	if got := text.Blocks(); len(got) != 1 || got[0].ID != "intro" {
+	if err := rd.SetText("nope"); !errors.Is(err, vfs.ErrProjected) {
+		t.Fatalf("SetText = %v, want ErrProjected", err)
+	}
+	if got := rd.Blocks(); len(got) != 1 || got[0].Kind != vfs.BlockKindParagraph || got[0].Text != "original" {
 		t.Fatalf("blocks = %#v", got)
 	}
 
-	var canonical vfs.RichTextDocument
-	if err := json.Unmarshal([]byte(text.Text()), &canonical); err != nil {
-		t.Fatal(err)
-	}
-	canonical.Blocks[0].Text = "edited"
-	body, err := json.MarshalIndent(canonical, "", "  ")
-	if err != nil {
-		t.Fatal(err)
-	}
-	text.SetText(string(body))
-	encoded, err := codec.Encode(ctx, text)
+	rd.SetBlocks([]vfs.Block{{ID: "intro", Kind: vfs.BlockKindParagraph, Text: "edited"}})
+	encoded, err := codec.Encode(ctx, rd)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(encoded) != "source-format" || n.encoded.Blocks[0].Text != "edited" {
 		t.Fatalf("encoded=%q doc=%#v", encoded, n.encoded)
 	}
+}
+
+func TestRichTextCodec_errorsAndEmpty(t *testing.T) {
+	ctx := context.Background()
+	empty := vfs.RichTextCodec{Types: []string{"application/x-test-rich"}}
+	if _, err := empty.Decode(ctx, "/x", "application/x-test-rich", nil); err == nil {
+		t.Fatal("nil normalizer decode")
+	}
+	if _, err := empty.Encode(ctx, &vfs.RichDocument{}); err == nil {
+		t.Fatal("nil normalizer encode")
+	}
+	bad := &richNormalizer{}
+	codec := vfs.RichTextCodec{Types: []string{"application/x-test-rich"}, Normalizer: failRich{}}
+	if _, err := codec.Decode(ctx, "/x", "application/x-test-rich", nil); err == nil {
+		t.Fatal("decode fail")
+	}
+	if _, err := codec.Encode(ctx, vfs.NewTextDocument("/t", "text/plain", "utf-8", "not-json")); err == nil {
+		t.Fatal("bad json encode")
+	}
+	if _, err := codec.Encode(ctx, onlyDoc{}); err == nil {
+		t.Fatal("non-textual encode")
+	}
+	_ = bad
+}
+
+type onlyDoc struct{}
+
+func (onlyDoc) Path() string      { return "/x" }
+func (onlyDoc) MediaType() string { return "x" }
+
+type failRich struct{}
+
+func (failRich) DecodeRich(context.Context, string, string, []byte) (*vfs.RichTextDocument, error) {
+	return nil, errors.New("nope")
+}
+func (failRich) EncodeRich(context.Context, *vfs.RichTextDocument) ([]byte, error) {
+	return nil, errors.New("nope")
 }

@@ -60,6 +60,55 @@ func (d *acpMemDrive) GetMedia(ctx context.Context, fileID string) (io.ReadClose
 	return io.NopCloser(strings.NewReader(string(n.body))), int64(len(n.body)), nil
 }
 
+func (d *acpMemDrive) Export(ctx context.Context, fileID, mimeType string) (io.ReadCloser, int64, error) {
+	_ = mimeType
+	return nil, 0, vfs.ErrNotSupported
+}
+
+func (d *acpMemDrive) PutMedia(ctx context.Context, fileID, mediaMIME string, r io.Reader, size int64) (vfs.DriveMeta, error) {
+	if err := ctx.Err(); err != nil {
+		return vfs.DriveMeta{}, err
+	}
+	data, err := io.ReadAll(io.LimitReader(r, size+1))
+	if err != nil {
+		return vfs.DriveMeta{}, err
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	n, ok := d.nodes[fileID]
+	if !ok {
+		return vfs.DriveMeta{}, vfs.ErrNotExist
+	}
+	n.body = data
+	n.meta.Size = int64(len(data))
+	if mediaMIME != "" {
+		n.meta.MimeType = mediaMIME
+	}
+	d.nodes[fileID] = n
+	return n.meta, nil
+}
+
+func (d *acpMemDrive) Create(ctx context.Context, parentID, name, metadataMIME, mediaMIME string, r io.Reader, size int64) (vfs.DriveMeta, error) {
+	_ = parentID
+	_ = name
+	_ = metadataMIME
+	_ = mediaMIME
+	_ = r
+	_ = size
+	return vfs.DriveMeta{}, vfs.ErrNotSupported
+}
+
+func (d *acpMemDrive) Trash(ctx context.Context, fileID string) error {
+	_ = fileID
+	return vfs.ErrNotSupported
+}
+
+func (d *acpMemDrive) Mkdir(ctx context.Context, parentID, name string) (vfs.DriveMeta, error) {
+	_ = parentID
+	_ = name
+	return vfs.DriveMeta{}, vfs.ErrNotSupported
+}
+
 func (d *acpMemDrive) List(ctx context.Context, folderID string) ([]vfs.DriveMeta, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -107,7 +156,7 @@ func TestACP_vfsBindRefreshUnbind(t *testing.T) {
 	meta, _ := caps["_meta"].(map[string]any)
 	tacklrMeta, _ := meta["tacklr"].(map[string]any)
 	vfsCap, _ := tacklrMeta["vfs"].(map[string]any)
-	if vfsCap["credentials"] != true || vfsCap["tokenRefresh"] != true {
+	if vfsCap["credentials"] != true || vfsCap["tokenRefresh"] != true || vfsCap["writable"] != true {
 		t.Fatalf("vfs cap = %#v", vfsCap)
 	}
 	provs, _ := vfsCap["providers"].([]any)
@@ -168,6 +217,13 @@ func TestACP_vfsBindRefreshUnbind(t *testing.T) {
 	if err != nil || string(got) != "one" {
 		t.Fatalf("read contracts = %q err=%v", got, err)
 	}
+	if err := ms.WriteFile(t.Context(), "/contracts/a.txt", []byte("nope")); !errors.Is(err, vfs.ErrReadOnly) {
+		t.Fatalf("omit readOnly must deny write: %v", err)
+	}
+	got, err = ms.ReadFile(t.Context(), "/contracts/a.txt")
+	if err != nil || string(got) != "one" {
+		t.Fatalf("body after denied write = %q err=%v", got, err)
+	}
 	got, err = ms.ReadFile(t.Context(), "/notes/b.txt")
 	if err != nil || string(got) != "two" {
 		t.Fatalf("read notes = %q err=%v", got, err)
@@ -197,6 +253,55 @@ func TestACP_vfsBindRefreshUnbind(t *testing.T) {
 	_ = acpRPCResult(t, s.rpc(`{"jsonrpc":"2.0","id":6,"method":"session/close","params":{"sessionId":"`+sessionID+`"}}`))
 	if auth.HasBindings(sessionID) {
 		t.Fatal("close must clear tokens")
+	}
+}
+
+func TestACP_vfsBindWritable(t *testing.T) {
+	auth := vfs.NewSessionAuth()
+	api := newACPMemDrive()
+	spec, _ := driveAgent(t, auth, api)
+	r := NewRegistry(testStore(t), "default", WithVFSProjection(DirectProjection{}), WithVFSAuth(auth))
+	r.Register("default", spec)
+	s := newACPTestServer(t, r)
+	sessionID, _ := acpRPCResult(t, s.rpc(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{}}`))["sessionId"].(string)
+	body, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": 2, "method": methodVFSBind,
+		"params": map[string]any{
+			"sessionId": sessionID,
+			"backends": []map[string]any{
+				{"provider": "gdrive", "point": "/w", "readOnly": false, "auth": map[string]string{"token": "t"}, "params": map[string]string{"folderId": "root-a"}},
+			},
+		},
+	})
+	res := acpRPCResult(t, s.rpc(string(body)))
+	mounted, _ := res["mounted"].([]any)
+	if len(mounted) != 1 {
+		t.Fatalf("mounted=%v errors=%v", res["mounted"], res["errors"])
+	}
+	binds := auth.Bindings(sessionID)
+	if len(binds) != 1 || !binds[0].Writable {
+		t.Fatalf("writable bind = %+v", binds)
+	}
+	if vfs.BindingSpec(binds[0]).ReadOnly {
+		t.Fatal("BindingSpec must be writable")
+	}
+	stream, err := r.RunTurn(t.Context(), TurnRequest{
+		SessionID: sessionID, AgentID: "default", ThreadID: sessionID, Prompt: "hi",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { stream.Cancel(); stream.Close() })
+	ms := stream.VFS()
+	if ms == nil {
+		t.Fatal("want VFS after writable bind")
+	}
+	if err := ms.WriteFile(t.Context(), "/w/a.txt", []byte("two")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ms.ReadFile(t.Context(), "/w/a.txt")
+	if err != nil || string(got) != "two" {
+		t.Fatalf("writable write = %q err=%v", got, err)
 	}
 }
 

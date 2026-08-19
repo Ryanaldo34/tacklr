@@ -1,6 +1,6 @@
 # Virtual filesystem (`vfs`)
 
-Tacklr’s virtual filesystem gives agents one path-based interface over storage backends (local disk, S3, **brain Engrams**, and later Drive/Docs). Hosts own mounts and credentials; agents only see virtual paths like `/work/main.go` or `/engram/deal/acme.md`.
+Tacklr’s virtual filesystem gives agents one path-based interface over storage backends (local disk, S3, **brain Engrams**, and Google Drive / Docs). Hosts own mounts and credentials; agents only see virtual paths like `/work/main.go` or `/engram/deal/acme.md`.
 
 Package: [`github.com/ryanaldo34/tacklr/vfs`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfs).
 
@@ -21,8 +21,8 @@ Knowledge objects, search, and the graph are documented in **[docs/knowledge.md]
   WriteFile    WriteDocument
      │           │
      │           ▼
-     │      TextDocument (in memory)
-     │        lines + text
+     │      TextDocument / RichDocument
+     │        lines + text / blocks + HTML projection
      │           │
      └───────────┘
            │
@@ -95,7 +95,18 @@ _tacklr/vfs/unbind
 session/close        → tokens zeroed
 ```
 
-Drive in this delivery: read-only, many client-selected folders (one single-segment mount point each), ordinary files only. Native Google Docs/Sheets/Slides are listed; `read` returns `ErrNoCodec` until the Docs-export follow-up. Recommended client scope: `drive.readonly`. The server is not a Google OAuth client.
+Drive: many client-selected folders (one single-segment mount point each). Go zero-value `Binding` and ACP `readOnly` omitted stay **read-only** (`drive.readonly`, export-only). Writable binds are opt-in (`Binding.Writable` / ACP `"readOnly": false`) and need client scopes **`drive` and `documents`**. `drive` is a restricted (CASA) scope; the token is not folder-scoped. The server is not a Google OAuth client.
+
+Two surfaces, one document:
+
+| Surface | Behavior |
+|---------|----------|
+| FUSE / `open` / `rg` | HTML projection (`projectHTML`). Kernel writes stay `EROFS`. `ls` of a Doc is size 0 (no export/Get on getattr). |
+| Agent `read` / `write` | Block IR. Default `read` of a Doc is an outline (must not dump HTML). `write` uses `block_id` / `blocks`. Line/HTML/`SetText` return `ErrProjected`. |
+
+`Stat.MediaType` is the real Drive MIME. Sheets/Slides stay listed and return `ErrNoCodec` / `ErrNotSupported`. Native `PutFile` / identity `WriteDocument` return `ErrNotSupported`. `Remove` is Drive trash (`trashed:true`), does not follow shortcuts, and refuses ambiguous names and the mount root. Agent delete is `rm` (FUSE Unlink) only.
+
+Read-only bind: official ZIP export (`application/zip`, 10 MiB). Writable bind: `documents.get(includeTabsContent=true)` only (skip Export); persist is `documents.batchUpdate` with checkout `requiredRevisionId`. Create-as-Doc requires `write` + `media_type=application/vnd.google-apps.document` on an extensionless path. Bare `/contracts/Spec` is plaintext. `Foo.md` is never a Doc.
 
 ```go
 auth := vfs.NewSessionAuth()
@@ -129,7 +140,7 @@ virtual path → Provider (bytes) → Codec → Document IR
 | Type | Methods / fields |
 |------|------------------|
 | `Document` | `Path()`, `MediaType()` |
-| `Textual` | + `Encoding()`, `Text()`, `LineCount()`, `Line(n)`, `Lines(start, end)` |
+| `Textual` | + `Encoding()`, `Text()`, `LineCount()`, `Line(n)`, `Lines(start, end)`, `SetText(s) error` |
 | `Structured` | + `Blocks()` — projected outline; empty when the media type has no projector |
 
 **Concrete text (what ships today)** — `*TextDocument` implements `Document`, `Textual`, and `Structured`:
@@ -154,7 +165,9 @@ In memory:
 └── starts:     [0, 2, 4, 6]   // byte offsets of each line
 ```
 
-**Block schema** (shared for Markdown now; Word / Google Docs later):
+**`*RichDocument`** (Google Docs today; Word later): blocks are the source of truth; `Text()` is derived HTML. `SetText` / `SetLine` / `ReplaceLines` return `ErrProjected`. Agent writes use `ReplaceBlock` / `SetBlocks`. `ContentToken` hashes a block fingerprint, not HTML.
+
+**Block schema** (Markdown headings plus Docs paragraph / list_item / table / image):
 
 | Type | Fields |
 |------|--------|
@@ -244,7 +257,7 @@ ReadText → mutate IR → WriteDocument → WriteFile (raw UTF-8 bytes)
 
 | Method | What |
 |--------|------|
-| `SetText(s)` | Replace whole body; rebuild lines |
+| `SetText(s) error` | Replace whole body; rebuild lines. `TextDocument` returns nil; `RichDocument` returns `ErrProjected`. |
 | `SetLine(n, line)` | Replace one line (1-based); `line` must not contain `\n` |
 | `ReplaceLines(start, end, lines)` | Half-open splice: insert / delete / replace |
 | `Bytes()` | UTF-8 body for write |
@@ -529,7 +542,9 @@ No FUSE and no shell are required for this IR edit path. `run_command` needs a l
 |-----------|----------|
 | Access token expired / missing refresh | `ErrAuthExpired` |
 | Two Drive children share a name | `ErrAmbiguous` |
-| Drive 403 | `ErrPermission` |
+| Drive 403 | `ErrPermission` (Google message preserved) |
+| Docs checkout CAS miss | `ErrConflict` (tools map to `ErrStaleContent`) |
+| Line/HTML write on a Doc | `ErrProjected` |
 | Path not under a mount | `ErrNotMounted` |
 | `run_command` with no FUSE mount | `ErrFuseNotMounted` |
 | Write on read-only mount | `ErrReadOnly` |
@@ -546,8 +561,11 @@ No FUSE and no shell are required for this IR edit path. `run_command` needs a l
 
 ## Not in this package (yet)
 
-- Word / Google Docs codecs that fill the same `Block` / `StyleMeta` schema from native formats
-- Structured or style-preserving write-back for rich (non-text) docs
+- Word / `.docx` codec (the block IR is shared; this package ships the Docs codec only)
+- Sheets, Slides, Drawings, Forms
+- New image insert / upload pipeline (existing images are first-class IR)
+- Tab add/rename/delete/reorder UI
+- Permanent `files.delete`, untrash, revision-history UI
 - Streaming multi-GB line indexes
 - Setext headings / full CommonMark AST (Markdown projector is ATX + fence-aware only)
 

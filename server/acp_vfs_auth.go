@@ -27,6 +27,7 @@ type vfsBindItem struct {
 	Point    string            `json:"point"`
 	Auth     vfsAuthWire       `json:"auth"`
 	Params   map[string]string `json:"params"`
+	ReadOnly *bool             `json:"readOnly"`
 }
 
 type vfsBindParams struct {
@@ -96,11 +97,13 @@ func (p *acpProtocol) handleVFSBind(ctx context.Context, env ProtocolEnv, pr *pa
 		if provider == "" {
 			provider = item.Profile
 		}
+		writable := item.ReadOnly != nil && !*item.ReadOnly
 		b := vfs.Binding{
 			Provider: provider,
 			Point:    item.Point,
 			Auth:     item.Auth.credential(),
 			Params:   item.Params,
+			Writable: writable,
 		}
 		if err := env.Registry.BindVFS(ctx, params.SessionID, agentID, b); err != nil {
 			errs = append(errs, itemErr{Point: item.Point, Error: err.Error()})
