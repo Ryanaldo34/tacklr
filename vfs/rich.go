@@ -249,7 +249,10 @@ func (d *RichDocument) reproject() {
 }
 
 func attachPersistHint(doc Document, hint persistHint) {
-	if d, ok := doc.(*RichDocument); ok {
+	switch d := doc.(type) {
+	case *RichDocument:
+		d.hint = hint
+	case *TabularDocument:
 		d.hint = hint
 	}
 }

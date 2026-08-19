@@ -35,7 +35,7 @@ type IdentityCodec interface {
 }
 
 // IsProjected reports whether mediaType is owned by a registered non-identity
-// codec (DocsCodec today). PDF and unregistered types are not projected.
+// codec (DocsCodec, SheetsCodec). PDF and unregistered types are not projected.
 func IsProjected(mediaType string) bool {
 	mediaType = normalizeMediaType(mediaType)
 	if mediaType == "" || mediaType == "application/octet-stream" {
@@ -160,6 +160,9 @@ func mustDefaultContentRegistry(types []string) *ContentRegistry {
 		panic(err)
 	}
 	if err := r.Register(DocsCodec{}); err != nil {
+		panic(err)
+	}
+	if err := r.Register(SheetsCodec{}); err != nil {
 		panic(err)
 	}
 	return r

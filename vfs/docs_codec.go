@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"path"
 	"strconv"
 	"strings"
@@ -106,7 +105,7 @@ func unzipHTMLEntry(data []byte) ([]byte, error) {
 		return nil, err
 	}
 	defer rc.Close()
-	return io.ReadAll(io.LimitReader(rc, int64(MaxReadFileBytes)+1))
+	return readCapped(rc, MaxReadFileBytes, zipSizeHint(pick.UncompressedSize64, MaxReadFileBytes))
 }
 
 func decodeDocsHTML(raw []byte) ([]Block, error) {

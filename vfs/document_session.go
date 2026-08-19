@@ -113,6 +113,8 @@ func bindDocument(doc Document, virtual string) Document {
 		d.path = virtual
 	case *RichDocument:
 		d.path = virtual
+	case *TabularDocument:
+		d.path = virtual
 	}
 	return doc
 }

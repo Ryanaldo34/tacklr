@@ -37,6 +37,9 @@ func ContentToken(t Textual) string {
 	if rd, ok := t.(*RichDocument); ok {
 		return rd.ContentFingerprint()
 	}
+	if td, ok := t.(*TabularDocument); ok {
+		return td.ContentFingerprint()
+	}
 	return ContentHash(t.Text())
 }
 

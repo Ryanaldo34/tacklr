@@ -80,6 +80,17 @@ func cacheKey(fileID string, mod time.Time) string {
 func (p *driveProvider) invalidate(fileID string) {
 	p.zipCache.dropFile(fileID)
 	p.getCache.dropFile(fileID)
+	p.sheetCache.dropFile(fileID)
+}
+
+func driveRevision(m DriveMeta) string {
+	if m.Version != "" {
+		return m.Version
+	}
+	if !m.ModTime.IsZero() {
+		return m.ModTime.UTC().Format(time.RFC3339Nano)
+	}
+	return ""
 }
 
 func (p *driveProvider) docsGet(ctx context.Context, id string) (DocsSnapshot, error) {
@@ -100,6 +111,22 @@ func (p *driveProvider) docsBatch(ctx context.Context, id string, req DocsBatch)
 		return err
 	})
 	return res, err
+}
+
+func (p *driveProvider) sheetsGet(ctx context.Context, id string) (SheetsSnapshot, error) {
+	var snap SheetsSnapshot
+	err := p.call(ctx, func() error {
+		var err error
+		snap, err = p.sheets.Get(ctx, id)
+		return err
+	})
+	return snap, err
+}
+
+func (p *driveProvider) sheetsBatchValues(ctx context.Context, id string, req SheetsValuesBatch) error {
+	return p.call(ctx, func() error {
+		return p.sheets.BatchUpdateValues(ctx, id, req)
+	})
 }
 
 // resolveLeaf walks the path but does not follow the last component if it is a shortcut.
@@ -236,7 +263,63 @@ func (p *driveProvider) openGoogleDoc(ctx context.Context, name string, meta Dri
 	return DocsCodec{}.Decode(ctx, name, mimeGoogleDocument, html)
 }
 
+func (p *driveProvider) openGoogleSheet(ctx context.Context, name string, meta DriveMeta) (Document, error) {
+	key := cacheKey(meta.ID, meta.ModTime)
+	if p.writable && p.sheets != nil {
+		if snap, ok := p.sheetCache.get(key); ok {
+			td, err := snapshotToTabular(name, snap)
+			if err != nil {
+				return nil, err
+			}
+			td.hint.fileID = meta.ID
+			td.hint.revisionID = snap.RevisionID
+			return td, nil
+		}
+		snap, err := p.sheetsGet(ctx, meta.ID)
+		if err != nil {
+			return nil, err
+		}
+		snap.RevisionID = driveRevision(meta)
+		p.sheetCache.put(key, snap)
+		td, err := snapshotToTabular(name, snap)
+		if err != nil {
+			return nil, err
+		}
+		td.hint.fileID = meta.ID
+		td.hint.revisionID = snap.RevisionID
+		return td, nil
+	}
+	if html, ok := p.zipCache.get(key); ok {
+		return SheetsCodec{}.Decode(ctx, name, mimeGoogleSpreadsheet, html)
+	}
+	raw, err := p.exportZip(ctx, meta.ID)
+	if err != nil {
+		return nil, err
+	}
+	p.zipCache.put(key, raw)
+	return SheetsCodec{}.Decode(ctx, name, mimeGoogleSpreadsheet, raw)
+}
+
+func (p *driveProvider) exportZip(ctx context.Context, fileID string) ([]byte, error) {
+	return p.exportBytes(ctx, fileID)
+}
+
 func (p *driveProvider) exportHTML(ctx context.Context, fileID string) ([]byte, error) {
+	data, err := p.exportBytes(ctx, fileID)
+	if err != nil {
+		return nil, err
+	}
+	html, err := unzipHTML(data)
+	if err != nil {
+		return nil, err
+	}
+	if len(html) > MaxReadFileBytes {
+		return nil, errFileExceeds(MaxReadFileBytes)
+	}
+	return html, nil
+}
+
+func (p *driveProvider) exportBytes(ctx context.Context, fileID string) ([]byte, error) {
 	var body io.ReadCloser
 	var size int64
 	err := p.call(ctx, func() error {
@@ -255,14 +338,7 @@ func (p *driveProvider) exportHTML(ctx context.Context, fileID string) ([]byte, 
 	if len(data) > MaxDocsExportBytes {
 		return nil, errFileExceeds(MaxDocsExportBytes)
 	}
-	html, err := unzipHTML(data)
-	if err != nil {
-		return nil, err
-	}
-	if len(html) > MaxReadFileBytes {
-		return nil, errFileExceeds(MaxReadFileBytes)
-	}
-	return html, nil
+	return data, nil
 }
 
 // PutFile implements filePutter. Native Google files are rejected.
@@ -342,6 +418,9 @@ func (p *driveProvider) WriteDocument(ctx context.Context, name string, doc Docu
 	if rd, ok := doc.(*RichDocument); ok && normalizeMediaType(rd.MediaType()) == mimeGoogleDocument {
 		return p.writeGoogleDoc(ctx, name, rd)
 	}
+	if td, ok := doc.(*TabularDocument); ok && isSpreadsheet(td.MediaType()) {
+		return p.writeGoogleSheet(ctx, name, td)
+	}
 	meta, err := p.resolve(ctx, name)
 	if err == nil && isGoogleNativeFile(meta.MimeType) {
 		return ErrNotSupported
@@ -373,6 +452,126 @@ func readCapped(r io.Reader, limit int, hint int64) ([]byte, error) {
 	}
 	_, err := buf.ReadFrom(io.LimitReader(r, int64(limit)+1))
 	return buf.Bytes(), err
+}
+
+func zipSizeHint(n uint64, limit int) int64 {
+	if limit <= 0 || n == 0 || n > uint64(limit) {
+		return 0
+	}
+	return int64(n) //nolint:gosec // G115: n is capped at limit (≤ MaxReadFileBytes)
+}
+
+func (p *driveProvider) writeGoogleSheet(ctx context.Context, name string, td *TabularDocument) error {
+	if p.sheets == nil {
+		return ErrNotSupported
+	}
+	meta, err := p.resolve(ctx, name)
+	if isNotExist(err) {
+		return p.createGoogleSheet(ctx, name, td)
+	}
+	if err != nil {
+		return err
+	}
+	if meta.MimeType != mimeGoogleSpreadsheet {
+		return ErrNotSupported
+	}
+	if td.hint.revisionID == "" {
+		return ErrConflict
+	}
+	if driveRevision(meta) != td.hint.revisionID {
+		return ErrConflict
+	}
+	batch, err := tabularOverlayBatch(td)
+	if err != nil {
+		return err
+	}
+	if len(batch.Data) > 0 {
+		if err := p.sheetsBatchValues(ctx, meta.ID, batch); err != nil {
+			return err
+		}
+	}
+	p.invalidate(meta.ID)
+	return p.refreshSheetHint(ctx, meta.ID, td)
+}
+
+func (p *driveProvider) createGoogleSheet(ctx context.Context, name string, td *TabularDocument) error {
+	parentID, leaf, _, err := p.parentAndLeaf(ctx, name)
+	if err != nil {
+		return err
+	}
+	var created DriveMeta
+	err = p.call(ctx, func() error {
+		var e error
+		created, e = p.api.Create(ctx, parentID, leaf, mimeGoogleSpreadsheet, "", nil, 0)
+		return e
+	})
+	if err != nil {
+		return err
+	}
+	var last error
+	for attempt := 0; attempt < 4; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Duration(attempt) * 200 * time.Millisecond):
+			}
+		}
+		snap, err := p.sheetsGet(ctx, created.ID)
+		if err != nil {
+			return err
+		}
+		if len(td.sheets) == 0 || td.sheets[0].Rows == 0 {
+			last = nil
+			break
+		}
+		overlay := *td
+		if len(snap.Sheets) > 0 {
+			sh := overlay.sheets[0]
+			sh.Title = snap.Sheets[0].Title
+			sh.ID = snap.Sheets[0].ID
+			overlay.sheets = []Sheet{sh}
+		}
+		batch, err := tabularOverlayBatch(&overlay)
+		if err != nil {
+			return err
+		}
+		if len(batch.Data) == 0 {
+			last = nil
+			break
+		}
+		last = p.sheetsBatchValues(ctx, created.ID, batch)
+		if last == nil {
+			break
+		}
+		if !errors.Is(last, ErrConflict) {
+			return last
+		}
+	}
+	if last != nil {
+		return last
+	}
+	p.invalidate(created.ID)
+	return p.refreshSheetHint(ctx, created.ID, td)
+}
+
+func (p *driveProvider) refreshSheetHint(ctx context.Context, id string, td *TabularDocument) error {
+	meta, merr := p.getMeta(ctx, id)
+	snap, err := p.sheetsGet(ctx, id)
+	if err == nil {
+		fresh, ferr := adoptTabularDocument(td.path, mimeGoogleSpreadsheet, snap.Sheets, snap.Named)
+		if ferr == nil {
+			td.sheets = fresh.sheets
+			td.named = fresh.named
+			td.html = fresh.html
+			td.starts = fresh.starts
+			td.hint.fileID = id
+			if merr == nil {
+				td.hint.revisionID = driveRevision(meta)
+			}
+		}
+	}
+	return nil
 }
 
 func (p *driveProvider) writeGoogleDoc(ctx context.Context, name string, rd *RichDocument) error {

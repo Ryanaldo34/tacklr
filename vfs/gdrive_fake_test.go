@@ -37,6 +37,9 @@ func (m *memDrive) add(parent string, meta vfs.DriveMeta, body []byte) {
 	if meta.ModTime.IsZero() {
 		meta.ModTime = time.Now().UTC()
 	}
+	if meta.Version == "" && !meta.IsDir && meta.MimeType != "application/vnd.google-apps.folder" {
+		meta.Version = "1"
+	}
 	meta.IsDir = meta.MimeType == "application/vnd.google-apps.folder"
 	m.nodes[meta.ID] = &memNode{meta: meta, parent: parent, body: append([]byte(nil), body...)}
 }
@@ -141,8 +144,8 @@ func (m *memDrive) Create(ctx context.Context, parentID, name, metadataMIME, med
 	id := "id-" + name + "-" + time.Now().UTC().Format("150405.000000")
 	meta := vfs.DriveMeta{
 		ID: id, Name: name, MimeType: metadataMIME, Size: int64(len(data)),
-		ModTime: time.Now().UTC(),
-		IsDir:   metadataMIME == "application/vnd.google-apps.folder",
+		ModTime: time.Now().UTC(), Version: "1",
+		IsDir: metadataMIME == "application/vnd.google-apps.folder",
 	}
 	m.nodes[id] = &memNode{meta: meta, parent: parentID, body: data}
 	_ = mediaMIME

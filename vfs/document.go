@@ -49,6 +49,7 @@ const (
 	BlockKindListItem  = "list_item"
 	BlockKindTable     = "table"
 	BlockKindImage     = "image"
+	BlockKindSheet     = "sheet"
 )
 
 // StyleMeta is optional presentation/structure for rich documents.
@@ -92,6 +93,11 @@ func FindBlock(blocks []Block, idOrPath string) (Block, bool) {
 		}
 		if b.Style.Attributes != nil && b.Style.Attributes["heading_path"] == idOrPath {
 			return b, true
+		}
+		if b.Kind == BlockKindSheet && b.Style.Attributes != nil {
+			if b.Style.Attributes["title"] == idOrPath || b.Style.Attributes["sheet_id"] == idOrPath {
+				return b, true
+			}
 		}
 	}
 	return Block{}, false

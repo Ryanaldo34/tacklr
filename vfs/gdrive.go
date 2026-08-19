@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,7 +18,7 @@ import (
 )
 
 const (
-	driveMetaFields = "id,name,mimeType,modifiedTime,size,shortcutDetails"
+	driveMetaFields = "id,name,mimeType,modifiedTime,size,shortcutDetails,version"
 	driveListFields = "nextPageToken,files(" + driveMetaFields + ")"
 )
 
@@ -28,6 +29,7 @@ type DriveMeta struct {
 	MimeType   string
 	Size       int64
 	ModTime    time.Time
+	Version    string
 	IsDir      bool
 	TargetID   string
 	TargetMime string
@@ -220,6 +222,9 @@ func fileToMeta(f *drive.File) DriveMeta {
 		Size:     f.Size,
 		IsDir:    f.MimeType == mimeGoogleFolder,
 	}
+	if f.Version != 0 {
+		m.Version = strconv.FormatInt(f.Version, 10)
+	}
 	if f.ModifiedTime != "" {
 		if t, err := time.Parse(time.RFC3339, f.ModifiedTime); err == nil {
 			m.ModTime = t
@@ -269,10 +274,11 @@ func mapDriveError(err error) error {
 
 // DriveFactory opens Drive folder providers. Auth is session-scoped.
 type DriveFactory struct {
-	ID   string
-	Auth *SessionAuth
-	API  DriveAPI // optional; nil → GoogleDrive from the session token
-	Docs DocsAPI  // optional; nil on writable mounts → GoogleDocs from the session token
+	ID     string
+	Auth   *SessionAuth
+	API    DriveAPI  // optional; nil → GoogleDrive from the session token
+	Docs   DocsAPI   // optional; nil on writable mounts → GoogleDocs from the session token
+	Sheets SheetsAPI // optional; nil on writable mounts → GoogleSheets from the session token
 }
 
 // Profile implements ProviderFactory.
@@ -314,20 +320,31 @@ func (f DriveFactory) Open(ctx context.Context, sessionID string, spec MountSpec
 		}
 		docs = gd
 	}
+	shAPI := f.Sheets
+	if shAPI == nil && writable && holder != nil && holder.Current().Token != "" {
+		gs, err := newGoogleSheets(ctx, holder)
+		if err != nil {
+			return nil, err
+		}
+		shAPI = gs
+	}
 	return &driveProvider{
-		api: api, docs: docs, rootID: folderID, holder: holder, writable: writable,
+		api: api, docs: docs, sheets: shAPI, rootID: folderID, holder: holder, writable: writable,
 		zipCache: newFIFO[[]byte](32), getCache: newFIFO[DocsSnapshot](32),
+		sheetCache: newFIFO[SheetsSnapshot](32),
 	}, nil
 }
 
 type driveProvider struct {
-	api      DriveAPI
-	docs     DocsAPI
-	rootID   string
-	holder   *TokenHolder
-	writable bool
-	zipCache *fifo[[]byte]
-	getCache *fifo[DocsSnapshot]
+	api        DriveAPI
+	docs       DocsAPI
+	sheets     SheetsAPI
+	rootID     string
+	holder     *TokenHolder
+	writable   bool
+	zipCache   *fifo[[]byte]
+	getCache   *fifo[DocsSnapshot]
+	sheetCache *fifo[SheetsSnapshot]
 }
 
 var _ documentBackend = (*driveProvider)(nil)
@@ -683,6 +700,9 @@ func (p *driveProvider) OpenDocument(ctx context.Context, name string, reg *Cont
 	if isGoogleNativeFile(meta.MimeType) {
 		if meta.MimeType == mimeGoogleDocument {
 			return p.openGoogleDoc(ctx, name, meta)
+		}
+		if meta.MimeType == mimeGoogleSpreadsheet {
+			return p.openGoogleSheet(ctx, name, meta)
 		}
 		return nil, ErrNoCodec
 	}

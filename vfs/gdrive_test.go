@@ -21,6 +21,7 @@ func driveTree() *memDrive {
 	d.add("root-a", vfs.DriveMeta{ID: "dup2", Name: "dup.txt", MimeType: "text/plain", Size: 1}, []byte("b"))
 	d.add("root-a", vfs.DriveMeta{ID: "doc1", Name: "Spec", MimeType: "application/vnd.google-apps.document"}, nil)
 	d.add("root-a", vfs.DriveMeta{ID: "sheet1", Name: "Budget", MimeType: "application/vnd.google-apps.spreadsheet"}, nil)
+	d.add("root-a", vfs.DriveMeta{ID: "slides1", Name: "Deck", MimeType: "application/vnd.google-apps.presentation"}, nil)
 	d.add("root-b", vfs.DriveMeta{ID: "readme", Name: "readme.txt", MimeType: "text/plain", Size: 5}, []byte("hello"))
 	d.add("root-b", vfs.DriveMeta{
 		ID: "sc-folder", Name: "alias", MimeType: "application/vnd.google-apps.shortcut",

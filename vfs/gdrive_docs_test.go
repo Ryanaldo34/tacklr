@@ -267,11 +267,11 @@ func TestDrive_exportReadHonestStat(t *testing.T) {
 		t.Fatalf("Stat exported %d times", api.exports)
 	}
 	sheet, err := ms.Stat(ctx, "/contracts/Budget")
-	if err != nil || sheet.MediaType != "application/vnd.google-apps.spreadsheet" {
+	if err != nil || sheet.MediaType != "application/vnd.google-apps.spreadsheet" || sheet.Size != 0 {
 		t.Fatalf("sheet Stat = %+v err=%v", sheet, err)
 	}
-	if _, err := ms.ReadText(ctx, "/contracts/Budget"); !errors.Is(err, vfs.ErrNoCodec) {
-		t.Fatalf("sheet: %v", err)
+	if _, err := ms.ReadFile(ctx, "/contracts/Budget"); !errors.Is(err, vfs.ErrNotSupported) {
+		t.Fatalf("sheet ReadFile: %v", err)
 	}
 	if _, err := ms.ReadFile(ctx, "/contracts/Spec"); !errors.Is(err, vfs.ErrNotSupported) {
 		t.Fatalf("OpenFile native: %v", err)

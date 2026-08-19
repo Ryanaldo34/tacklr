@@ -67,6 +67,7 @@ func (v vfsTools) newRead() *Tool {
 Path only on ordinary files → start=1 through 1+MaxLinesPerWindow plus rev (pass rev to write).
 Path only on Google Docs/Word (projected) → outline. Use rg on the FUSE tree for HTML hits, then read({block_id}) for IR text.
 start/end → half-open 1-based window (HTML lines on Docs). block_id → that region's IR text. outline=true → block list (text uses **bold** _italic_ ~~strike~~ [label](url); kind/level is structure). ir=true → media_type/encoding (no HTML dump on Docs).
+Sheets: block_id is a sheet (id, title, or slug) or Sheet!A1 / Sheet!A1:C3. start/end are 1-based rows of that sheet, not HTML lines.
 Knowledge objects with no file: read_object. Live names/grep: run_command → ls / rg.`,
 		Category: streaming.ToolCategoryRead,
 		Access:   ToolReadAccess,
@@ -96,6 +97,10 @@ Knowledge objects with no file: read_object. Live names/grep: run_command → ls
 
 			if args.BlockID != "" || args.Outline || args.IR {
 				return v.readStructured(ctx, p, args, explicitWindow)
+			}
+
+			if projected && fi.MediaType == "application/vnd.google-apps.spreadsheet" {
+				return "", vfs.ErrProjected
 			}
 
 			if args.Start < 1 || args.End < args.Start {
@@ -147,9 +152,15 @@ func (v vfsTools) readStructured(ctx context.Context, p string, args readArgs, e
 	}
 	var b strings.Builder
 	b.Grow(128 + len(p) + len(rev) + len(doc.MediaType()))
+	td, tabular := doc.(*vfs.TabularDocument)
 	if args.IR {
-		fmt.Fprintf(&b, "path=%s rev=%s media_type=%s encoding=%s line_count=%d\n",
-			p, rev, doc.MediaType(), doc.Encoding(), doc.LineCount())
+		if tabular {
+			fmt.Fprintf(&b, "path=%s rev=%s media_type=%s encoding=%s line_count=%d sheet_count=%d\n",
+				p, rev, doc.MediaType(), doc.Encoding(), doc.LineCount(), len(td.Sheets()))
+		} else {
+			fmt.Fprintf(&b, "path=%s rev=%s media_type=%s encoding=%s line_count=%d\n",
+				p, rev, doc.MediaType(), doc.Encoding(), doc.LineCount())
+		}
 	} else {
 		fmt.Fprintf(&b, "path=%s rev=%s media_type=%s line_count=%d\n",
 			p, rev, doc.MediaType(), doc.LineCount())
@@ -159,6 +170,14 @@ func (v vfsTools) readStructured(ctx context.Context, p string, args readArgs, e
 			b.WriteString("tabs:\n")
 			for _, tb := range tabs {
 				fmt.Fprintf(&b, "  %s title=%q index=%d\n", tb.ID, tb.Title, tb.Index)
+			}
+		}
+	}
+	if tabular && args.Outline {
+		if named := td.NamedRanges(); len(named) > 0 {
+			b.WriteString("named_ranges:\n")
+			for _, n := range named {
+				fmt.Fprintf(&b, "  %s sheet_id=%s a1=%s\n", n.Name, n.SheetID, n.A1)
 			}
 		}
 	}
@@ -177,6 +196,9 @@ func (v vfsTools) readStructured(ctx context.Context, p string, args readArgs, e
 					bl.ID, bl.Kind, bl.Style.Level, bl.Style.Span.StartLine, bl.Style.Span.EndLine, bl.Text)
 			}
 		}
+	}
+	if tabular {
+		return v.readTabular(td, args, &b)
 	}
 	start, end := args.Start, args.End
 	if args.BlockID != "" {
@@ -212,6 +234,54 @@ func (v vfsTools) readStructured(ctx context.Context, p string, args readArgs, e
 	return b.String(), nil
 }
 
+func (v vfsTools) readTabular(td *vfs.TabularDocument, args readArgs, b *strings.Builder) (string, error) {
+	if args.BlockID == "" {
+		return b.String(), nil
+	}
+	sheetKey, a1 := vfs.SplitSheetAddr(args.BlockID)
+	if a1 != "" {
+		r1, c1, r2, c2, err := vfs.ParseA1(a1)
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintf(b, "block_id=%s\n", args.BlockID)
+		if r1 == r2 && c1 == c2 {
+			text, err := td.ReadCell(sheetKey, a1)
+			if err != nil {
+				return "", err
+			}
+			fmt.Fprintf(b, "text=%s\n", text)
+			return b.String(), nil
+		}
+		tsv, err := td.ReadRangeTSV(sheetKey, a1)
+		if err != nil {
+			return "", err
+		}
+		b.WriteString(tsv)
+		if tsv != "" && !strings.HasSuffix(tsv, "\n") {
+			b.WriteByte('\n')
+		}
+		return b.String(), nil
+	}
+	start, end := args.Start, args.End
+	if start < 1 {
+		start = 1
+		end = 1 + vfs.MaxLinesPerWindow
+	} else if end < start {
+		end = start + vfs.MaxLinesPerWindow
+	}
+	sh, lines, err := td.ReadRows(sheetKey, start, end)
+	if err != nil {
+		return "", err
+	}
+	fmt.Fprintf(b, "sheet=%s rows=%d cols=%d start=%d\n", sh.Title, sh.Rows, sh.Cols, start)
+	growLineWindow(b, 0, lines)
+	for i, line := range lines {
+		fmt.Fprintf(b, "%6d|%s\n", start+i, line)
+	}
+	return b.String(), nil
+}
+
 func (v vfsTools) newWrite() *Tool {
 	cfg := ToolConfig{
 		Name:        "write",
@@ -219,7 +289,8 @@ func (v vfsTools) newWrite() *Tool {
 		Description: `Write a virtual file: full body, line span, substring, structured block, or Docs blocks. Exactly one mode per call.
 
 Pass rev from read when the path exists. Create only via content or ir_text (empty content creates or truncates), or media_type+blocks for a Google Doc. Foo.md is never a Doc. Extensionless Spec without media_type is plaintext.
-Projected Docs/Word: use block_id or blocks. Inline marks in block text: **bold**, _italic_, ~~strike~~, [label](url). kind/level is structure (not # or -). No marks = plain replace (drops old marks). Line/HTML/SetText writes return an error. content lift is create-only. Persists immediately.`,
+Projected Docs/Word: use block_id or blocks. Inline marks in block text: **bold**, _italic_, ~~strike~~, [label](url). kind/level is structure (not # or -). No marks = plain replace (drops old marks). Line/HTML/SetText writes return an error. content lift is create-only. Persists immediately.
+Sheets: block_id is a sheet or Sheet!A1:C3 overlay. start/end are rows and line count must equal end-start.`,
 		Category: streaming.ToolCategoryEdit,
 		Access:   ToolWriteAccess,
 		Timeout:  60 * time.Second,
@@ -291,7 +362,7 @@ func writeModeCount(args writeArgs) (n int, full bool) {
 	if args.BlockID != "" {
 		n++
 	}
-	if args.Start != nil {
+	if args.Start != nil && args.BlockID == "" {
 		n++
 	}
 	if args.Blocks != nil {
