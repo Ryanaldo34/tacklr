@@ -29,7 +29,7 @@ func FuseAvailable() bool {
 
 // FuseMount projects the session as a host tree at dir.
 // If ReadText succeeds (Textual), the kernel sees that plaintext: size and
-// Read use the projection. Kernel writes stay EROFS unless KernelWritable
+// Read use the projection. Kernel writes stay EROFS unless kernelWritable
 // (IdentityCodec). Otherwise Open uses Stat + ReaderAt (binaries).
 // session.Mount attaches a provider; FuseMount is the host kernel mount.
 // Every live Specs() point must be a single path segment (/work, /engram).
@@ -163,7 +163,7 @@ func (n *fuseNode) Open(ctx context.Context, flags uint32) (fusefs.FileHandle, u
 		return nil, 0, syscall.EISDIR
 	}
 	wantWrite := flags&(syscall.O_WRONLY|syscall.O_RDWR|syscall.O_APPEND|syscall.O_TRUNC) != 0
-	if wantWrite && !KernelWritableFile(st) {
+	if wantWrite && !kernelWritableFile(st) {
 		return nil, 0, syscall.EROFS
 	}
 	f, errno := openFuseFile(ctx, n.sess, n.path, st, wantWrite, flags&syscall.O_TRUNC != 0, flags&syscall.O_APPEND != 0)
@@ -178,7 +178,7 @@ func (n *fuseNode) Create(ctx context.Context, name string, flags uint32, mode u
 		return nil, nil, 0, syscall.EPERM
 	}
 	p := n.childPath(name)
-	if !KernelCreateOK(name) {
+	if !kernelCreateOK(name) {
 		return nil, nil, 0, syscall.EROFS
 	}
 	if err := n.sess.WriteFile(ctx, p, nil); err != nil {
@@ -257,7 +257,7 @@ func (n *fuseNode) Setattr(ctx context.Context, f fusefs.FileHandle, in *gofuse.
 	if err != nil {
 		return fuseErrno(err)
 	}
-	if !KernelWritableFile(st) {
+	if !kernelWritableFile(st) {
 		return syscall.EROFS
 	}
 	if sz > uint64(MaxReadFileBytes) {
@@ -291,7 +291,7 @@ func (n *fuseNode) stat(ctx context.Context, virtualPath string) (FileInfo, erro
 	if st.IsDir {
 		return st, nil
 	}
-	if st.Size == 0 && !KernelWritable(st.MediaType) {
+	if st.Size == 0 && !kernelWritable(st.MediaType) {
 		return st, nil
 	}
 	t, err := n.sess.ReadText(ctx, virtualPath)
@@ -510,7 +510,7 @@ func fuseErrno(err error) syscall.Errno {
 func fillFuseAttr(out *gofuse.Attr, st FileInfo) {
 	if st.IsDir {
 		out.Mode = gofuse.S_IFDIR | 0755
-	} else if KernelWritableFile(st) {
+	} else if kernelWritableFile(st) {
 		out.Mode = gofuse.S_IFREG | 0644
 		if st.Size > 0 {
 			out.Size = uint64(st.Size)

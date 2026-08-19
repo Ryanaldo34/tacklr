@@ -3,6 +3,8 @@ package tacklr
 import (
 	"context"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 
 	"github.com/google/uuid"
@@ -19,9 +21,8 @@ import (
 
 // Config is harness limits and prompt settings.
 type Config struct {
-	MaxWindowSize    int
-	SystemPrompt     string
-	SkillDirectories []string
+	MaxWindowSize int
+	SystemPrompt  string
 	// MaxTurnRequests limits Model.Invoke calls per Run. 0 = unlimited.
 	// Exceeding the limit ends the turn with ErrMaxTurnRequests.
 	MaxTurnRequests int
@@ -65,16 +66,17 @@ type AgentOptions struct {
 	// ToolInterceptors wrap each tool call (outermost first). Built-in
 	// planning lock and OnCall middleware are installed after these.
 	ToolInterceptors []ToolInterceptor
-	// DisablePlanningLock omits planningWriteLock (workers and tests).
+	// disablePlanningLock omits planningWriteLock (workers and tests).
 	// The permission gate is still always installed.
-	DisablePlanningLock bool
-	// WriteUnattended injects write without ToolPermissionOnCall.
+	disablePlanningLock bool
+	// writeUnattended injects write without ToolPermissionOnCall.
 	// Write-mechanic tests use this so persist/index paths do not park.
-	WriteUnattended bool
+	writeUnattended bool
 	// ToolResultHooks map tool name → post-success window effects for host tools.
-	// Plan builtins use BuiltinResult instead.
+	// Plan builtins use ToolOutcome instead.
 	ToolResultHooks map[string]ToolResultHook
-	// SkillsLoader loads skills. Nil uses DirectoryLoader with Config.SkillDirectories.
+	// SkillsLoader loads skills. Nil uses skills.Loader on the /skills mount
+	// when MountSession has one (from SkillSource factories).
 	SkillsLoader skills.SkillLoader
 	// ExaAPIKey enables web_search and web_fetch. Empty falls back to EXA_API_KEY.
 	// When both are empty, those tools are not registered.
@@ -149,8 +151,9 @@ func newHarnessBase(opts AgentOptions, sm *session.SessionManager) (*AgentHarnes
 		tools:                 opts.Tools,
 		mcpConfigs:            opts.MCPConfigs,
 		mcpCredentialResolver: opts.MCPCredentialResolver,
-		skillDirectories:      opts.Config.SkillDirectories,
 		skillsLoader:          opts.SkillsLoader,
+		hostInterceptors:      slices.Clone(opts.ToolInterceptors),
+		hostResultHooks:       maps.Clone(opts.ToolResultHooks),
 		exaAPIKey:             resolveExaAPIKey(opts.ExaAPIKey),
 		brain:                 opts.Brain,
 		brainWriteKinds:       opts.BrainWriteKinds,
@@ -163,7 +166,7 @@ func newHarnessBase(opts AgentOptions, sm *session.SessionManager) (*AgentHarnes
 		context:               NewModelContextManager(),
 		contextPolicy:         opts.ContextPolicy,
 		runCommandUnattended:  opts.RunCommandUnattended,
-		writeUnattended:       opts.WriteUnattended,
+		writeUnattended:       opts.writeUnattended,
 		vfsBridge:             opts.shareIndexBridge,
 	}
 	h.jobsCtx, h.jobsCancel = context.WithCancel(context.Background())
@@ -182,7 +185,7 @@ func newHarnessBase(opts AgentOptions, sm *session.SessionManager) (*AgentHarnes
 	}
 	h.tasks = newDefaultModelTasks(h.model, h.context, h.contextPolicy, h.maxWindowSize)
 	chain := append([]ToolInterceptor{}, opts.ToolInterceptors...)
-	if !opts.DisablePlanningLock {
+	if !opts.disablePlanningLock {
 		chain = append(chain, h.planningWriteLock)
 	}
 	chain = append(chain, onCallMiddleware(sm))
@@ -344,7 +347,7 @@ func (a *AgentHarness) SearchNamespace() (uuid.UUID, bool) {
 
 // planningWriteLock blocks write tools until create_plan has set a plan.
 func (a *AgentHarness) planningWriteLock(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error) {
-	if inv.Tool != nil && inv.Tool.Access != nil && inv.Tool.Access.Contains(WritePermission) &&
+	if inv.Tool != nil && inv.Tool.Access.Allows(WritePermission) &&
 		!a.session.Plan.HasActive() {
 		return "", fmt.Errorf("%w: write tools are locked until create_plan establishes a todo list", ErrToolPermissionDenied)
 	}
@@ -357,7 +360,7 @@ func (a *AgentHarness) initSkills(ctx context.Context) error {
 	}
 	loader := a.skillsLoader
 	if loader == nil {
-		loader = skills.DirectoryLoader{Directories: a.skillDirectories}
+		loader = skills.Loader{Session: a.VFS()}
 	}
 	loaded, err := loader.Load(ctx)
 	if err != nil {

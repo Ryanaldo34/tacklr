@@ -172,7 +172,7 @@ func TestResolvePermissionViaRequest_outcomes(t *testing.T) {
 		store := testStore(t)
 		sensitive := tacklr.NewTool(tacklr.ToolConfig{
 			Name:    "sensitive",
-			OnCall:  tacklr.OnCalls(tacklr.ToolPermissionOnCall),
+			OnCall:  []tacklr.OnCallFunc{tacklr.ToolPermissionOnCall},
 			Handler: func(ctx context.Context) (string, error) { return "ok", nil },
 		})
 		ms := &mockInferenceStrategy{

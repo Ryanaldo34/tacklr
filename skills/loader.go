@@ -1,14 +1,20 @@
 // Package skills discovers and parses application-owned SKILL.md files.
+//
+// Discovery walks /skills on a vfs.MountSession. Hosts mark backends with
+// LocalFactory.Skills / S3Factory.Skills; the session attaches the union.
 package skills
 
 import (
+	"cmp"
 	"context"
+	"errors"
 	"fmt"
-	"io"
-	"os"
-	"path/filepath"
-	"sort"
+	"io/fs"
+	"path"
+	"slices"
 	"strings"
+
+	"github.com/ryanaldo34/tacklr/vfs"
 )
 
 const maxSkillFileSize = 1024 * 1024
@@ -17,6 +23,8 @@ type Skill struct {
 	Name         string
 	Description  string
 	Instructions string
+	// Path is the virtual path of SKILL.md when loaded from a mount.
+	Path string
 }
 
 // SkillLoader discovers skills for the harness. A loader owns its source
@@ -25,144 +33,40 @@ type SkillLoader interface {
 	Load(ctx context.Context) ([]Skill, error)
 }
 
-// DirectoryLoader loads one skill per immediate child directory under each
-// root. It is the default when AgentOptions.SkillsLoader is nil.
-type DirectoryLoader struct {
-	Directories []string
+var _ SkillLoader = Loader{}
+
+// Loader loads one skill per immediate child of /skills.
+// A nil session or missing /skills mount loads nothing.
+type Loader struct {
+	Session *vfs.MountSession
 }
 
-// Load implements SkillLoader using LoadDirectories.
-func (l DirectoryLoader) Load(ctx context.Context) ([]Skill, error) {
+// Load implements SkillLoader.
+func (l Loader) Load(ctx context.Context) ([]Skill, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return LoadDirectories(l.Directories)
-}
-
-// LoadDirectories loads one skill per immediate child directory. Directories
-// are processed in lexical order and duplicate skill names are rejected.
-func LoadDirectories(roots []string) ([]Skill, error) {
+	if l.Session == nil {
+		return nil, nil
+	}
+	entries, err := l.Session.ReadDir(ctx, vfs.SkillsPoint)
+	if err != nil {
+		if errors.Is(err, vfs.ErrNotMounted) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read skills directory %q: %w", vfs.SkillsPoint, err)
+	}
+	slices.SortFunc(entries, func(a, b vfs.DirEntry) int { return cmp.Compare(a.Name, b.Name) })
 	var loaded []Skill
 	seen := map[string]bool{}
-	for _, root := range roots {
-		entries, err := os.ReadDir(root)
-		if err != nil {
-			return nil, fmt.Errorf("read skills directory %q: %w", root, err)
-		}
-		for _, entry := range entries {
-			if !entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
-				continue
-			}
-			path := filepath.Join(root, entry.Name(), "SKILL.md")
-			info, err := os.Stat(path)
-			if err != nil {
-				return nil, fmt.Errorf("skill %q: read SKILL.md: %w", entry.Name(), err)
-			}
-			if info.Size() > maxSkillFileSize {
-				return nil, fmt.Errorf("skill %q: SKILL.md exceeds %d bytes", entry.Name(), maxSkillFileSize)
-			}
-			data, err := os.ReadFile(path)
-			if err != nil {
-				return nil, fmt.Errorf("skill %q: read SKILL.md: %w", entry.Name(), err)
-			}
-			skill, err := parse(string(data))
-			if err != nil {
-				return nil, fmt.Errorf("skill %q: %w", entry.Name(), err)
-			}
-			if seen[skill.Name] {
-				return nil, fmt.Errorf("duplicate skill name %q", skill.Name)
-			}
-			seen[skill.Name] = true
-			loaded = append(loaded, skill)
-		}
-	}
-	sort.Slice(loaded, func(i, j int) bool { return loaded[i].Name < loaded[j].Name })
-	return loaded, nil
-}
-
-// S3Client is the subset of an S3 client required by S3Loader. Implementations
-// can delegate to an SDK client and keep SDK-specific request types out of the
-// skills package.
-type S3Client interface {
-	ListObjects(ctx context.Context, bucket, prefix string) ([]string, error)
-	GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, error)
-}
-
-// S3Loader loads SKILL.md objects from an S3-compatible bucket.
-type S3Loader struct {
-	Client S3Client
-	Bucket string
-	Prefix string
-}
-
-// Load implements SkillLoader.
-func (l S3Loader) Load(ctx context.Context) ([]Skill, error) {
-	if l.Client == nil {
-		return nil, fmt.Errorf("skills: S3 client is required")
-	}
-	return loadObjects(ctx, l.Prefix, func(ctx context.Context, key string) (io.ReadCloser, error) {
-		return l.Client.GetObject(ctx, l.Bucket, key)
-	}, func(ctx context.Context) ([]string, error) {
-		return l.Client.ListObjects(ctx, l.Bucket, l.Prefix)
-	})
-}
-
-// BlobClient is the subset of an Azure Blob Storage client required by
-// BlobLoader. Implementations can delegate to an Azure SDK client.
-type BlobClient interface {
-	ListBlobs(ctx context.Context, container, prefix string) ([]string, error)
-	DownloadBlob(ctx context.Context, container, name string) (io.ReadCloser, error)
-}
-
-// BlobLoader loads SKILL.md blobs from an Azure Blob Storage container.
-type BlobLoader struct {
-	Client    BlobClient
-	Container string
-	Prefix    string
-}
-
-// Load implements SkillLoader.
-func (l BlobLoader) Load(ctx context.Context) ([]Skill, error) {
-	if l.Client == nil {
-		return nil, fmt.Errorf("skills: Blob client is required")
-	}
-	return loadObjects(ctx, l.Prefix, func(ctx context.Context, key string) (io.ReadCloser, error) {
-		return l.Client.DownloadBlob(ctx, l.Container, key)
-	}, func(ctx context.Context) ([]string, error) {
-		return l.Client.ListBlobs(ctx, l.Container, l.Prefix)
-	})
-}
-
-func loadObjects(
-	ctx context.Context,
-	prefix string,
-	read func(context.Context, string) (io.ReadCloser, error),
-	list func(context.Context) ([]string, error),
-) ([]Skill, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	keys, err := list(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("list skills objects: %w", err)
-	}
-	sort.Strings(keys)
-	loaded := make([]Skill, 0, len(keys))
-	seen := make(map[string]bool, len(keys))
-	for _, key := range keys {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if !isSkillObject(prefix, key) {
+	for _, entry := range entries {
+		if !entry.IsDir || entry.Type&fs.ModeSymlink != 0 {
 			continue
 		}
-		body, err := readSkillObject(ctx, key, read)
+		skillPath := path.Join(vfs.SkillsPoint, entry.Name, "SKILL.md")
+		skill, err := readSkill(ctx, l.Session, skillPath, entry.Name)
 		if err != nil {
 			return nil, err
-		}
-		skill, err := parse(string(body))
-		if err != nil {
-			return nil, fmt.Errorf("skill %q: %w", key, err)
 		}
 		if seen[skill.Name] {
 			return nil, fmt.Errorf("duplicate skill name %q", skill.Name)
@@ -170,35 +74,28 @@ func loadObjects(
 		seen[skill.Name] = true
 		loaded = append(loaded, skill)
 	}
-	sort.Slice(loaded, func(i, j int) bool { return loaded[i].Name < loaded[j].Name })
+	slices.SortFunc(loaded, func(a, b Skill) int { return cmp.Compare(a.Name, b.Name) })
 	return loaded, nil
 }
 
-func isSkillObject(prefix, key string) bool {
-	relative := key
-	if prefix != "" {
-		if !strings.HasPrefix(key, prefix) {
-			return false
-		}
-		relative = strings.TrimPrefix(key, prefix)
-	}
-	return strings.Count(relative, "/") == 1 && strings.HasSuffix(relative, "/SKILL.md")
-}
-
-func readSkillObject(ctx context.Context, key string, read func(context.Context, string) (io.ReadCloser, error)) ([]byte, error) {
-	object, err := read(ctx, key)
+func readSkill(ctx context.Context, ms *vfs.MountSession, skillPath, label string) (Skill, error) {
+	info, err := ms.Stat(ctx, skillPath)
 	if err != nil {
-		return nil, fmt.Errorf("skill %q: read SKILL.md: %w", key, err)
+		return Skill{}, fmt.Errorf("skill %q: read SKILL.md: %w", label, err)
 	}
-	defer object.Close()
-	data, err := io.ReadAll(io.LimitReader(object, maxSkillFileSize+1))
+	if info.Size > maxSkillFileSize {
+		return Skill{}, fmt.Errorf("skill %q: SKILL.md exceeds %d bytes", label, maxSkillFileSize)
+	}
+	data, err := ms.ReadFile(ctx, skillPath)
 	if err != nil {
-		return nil, fmt.Errorf("skill %q: read SKILL.md: %w", key, err)
+		return Skill{}, fmt.Errorf("skill %q: read SKILL.md: %w", label, err)
 	}
-	if len(data) > maxSkillFileSize {
-		return nil, fmt.Errorf("skill %q: SKILL.md exceeds %d bytes", key, maxSkillFileSize)
+	skill, err := parse(string(data))
+	if err != nil {
+		return Skill{}, fmt.Errorf("skill %q: %w", label, err)
 	}
-	return data, nil
+	skill.Path = skillPath
+	return skill, nil
 }
 
 func parse(document string) (Skill, error) {

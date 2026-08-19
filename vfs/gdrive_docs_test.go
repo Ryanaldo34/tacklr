@@ -716,7 +716,10 @@ func mountDrive(t *testing.T, api *memDrive, docs vfs.DocsAPI, writable bool) *v
 	if err := reg.Register(vfs.DriveFactory{ID: "gdrive", Auth: auth, API: api, Docs: docs}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.MustNewMountSession("s", reg)
+	ms, err := vfs.NewMountSession("s", reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := ms.Mount(t.Context(), vfs.BindingSpec(vfs.Binding{
 		Provider: "gdrive", Point: "/contracts", Writable: writable,
 		Params: map[string]string{vfs.ParamFolderID: "root-a"},

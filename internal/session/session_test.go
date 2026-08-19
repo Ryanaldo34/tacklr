@@ -129,8 +129,7 @@ func TestCheckpointer_applyRejectsUnsupportedVersion(t *testing.T) {
 	sm := session.NewSessionManager()
 	checkpoint := stores.SessionCheckpoint{
 		ContextWindow: []*streaming.Message{{Role: streaming.RoleUser, Content: "x"}},
-	}
-	checkpoint.State.Version = stores.CheckpointVersion + 1
+	}.WithVersion(stores.CheckpointVersion + 1)
 
 	// Act
 	_, err := session.NewCheckpointer().Apply(checkpoint, sm)
@@ -144,9 +143,9 @@ func TestCheckpointer_applyRejectsUnsupportedVersion(t *testing.T) {
 // TestCheckpointer_applyNilMaps_defaults empty pending/interrupt maps.
 func TestCheckpointer_applyNilMaps_defaults(t *testing.T) {
 	sm := session.NewSessionManager()
-	var checkpoint stores.SessionCheckpoint
-	checkpoint.ContextWindow = []*streaming.Message{{Role: streaming.RoleUser, Content: "x"}}
-	checkpoint.State.Version = stores.CheckpointVersion
+	checkpoint := stores.SessionCheckpoint{
+		ContextWindow: []*streaming.Message{{Role: streaming.RoleUser, Content: "x"}},
+	}.WithVersion(stores.CheckpointVersion)
 	applied, err := session.NewCheckpointer().Apply(checkpoint, sm)
 	if err != nil {
 		t.Fatal(err)

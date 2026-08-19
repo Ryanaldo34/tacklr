@@ -173,7 +173,7 @@ func (p s3Provider) OpenDocument(ctx context.Context, name string, reg *ContentR
 		return nil, err
 	}
 	if fi.IsDir {
-		return nil, fmt.Errorf("vfs: %s is a directory", name)
+		return nil, fmt.Errorf("%w: %s", ErrIsDir, name)
 	}
 	if fi.Size > int64(MaxReadFileBytes) {
 		return nil, errFileExceeds(MaxReadFileBytes)
@@ -284,7 +284,7 @@ func (p s3Provider) ReadDir(ctx context.Context, name string) ([]DirEntry, error
 		return nil, err
 	}
 	if !st.IsDir {
-		return nil, fmt.Errorf("vfs: not a directory")
+		return nil, ErrNotDir
 	}
 	prefix, err := p.dirPrefix(name)
 	if err != nil {
@@ -402,7 +402,7 @@ func (p s3Provider) MkdirAll(ctx context.Context, name string, perm fs.FileMode)
 		}
 		if _, _, _, err := p.api.Head(ctx, p.bucket, key); err == nil {
 			// Exists as file — cannot mkdir through a file.
-			return fmt.Errorf("vfs: not a directory")
+			return ErrNotDir
 		} else if !errors.Is(err, ErrNotExist) {
 			return err
 		}
@@ -455,10 +455,28 @@ type S3Factory struct {
 	ID            string
 	Client        S3API
 	DefaultBucket string
+	// Skills is an optional key prefix (use "." for the bucket root).
+	// When set, MountSession attaches that prefix as a /skills union member.
+	Skills string
 }
+
+var _ SkillSource = S3Factory{}
 
 // Profile implements ProviderFactory.
 func (f S3Factory) Profile() string { return f.ID }
+
+// SkillMember implements SkillSource.
+func (f S3Factory) SkillMember() (MountSpec, bool) {
+	root := strings.TrimSpace(f.Skills)
+	if root == "" {
+		return MountSpec{}, false
+	}
+	spec := MountSpec{Profile: f.ID}
+	if root != "." {
+		spec.Params = map[string]string{"prefix": strings.Trim(root, "/")}
+	}
+	return spec, true
+}
 
 // Open implements ProviderFactory.
 func (f S3Factory) Open(ctx context.Context, _ string, spec MountSpec) (Provider, error) {

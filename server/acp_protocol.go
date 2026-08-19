@@ -461,12 +461,11 @@ func resolvePermissionViaRequest(ctx context.Context, env ProtocolEnv, threadID 
 }
 
 func resolveSelectionViaElicitation(ctx context.Context, env ProtocolEnv, threadID string, stream *EventStream, ev *streaming.StreamEvent) (<-chan streaming.StreamEvent, error) {
-	interruptID, opts, err := ParseUserSelectionFromInterruptData(ev.Data)
+	interruptID, usi, err := ParseUserSelectionFromInterruptData(ev.Data)
 	if err != nil {
 		return nil, fmt.Errorf("parse selection interrupt: %w", err)
 	}
-	question := stream.AskUserQuestion(ev.MessageID)
-	params, err := SelectionToElicitationParams(threadID, ev.MessageID, question, opts)
+	params, err := SelectionToElicitationParams(threadID, ev.MessageID, usi.Question, usi.Options)
 	if err != nil {
 		return nil, err
 	}
@@ -474,7 +473,7 @@ func resolveSelectionViaElicitation(ctx context.Context, env ProtocolEnv, thread
 	if err != nil {
 		return nil, fmt.Errorf("elicitation/create: %w", err)
 	}
-	action, resolution, err := ElicitationResultToSelectionPayload(raw, opts)
+	action, resolution, err := ElicitationResultToSelectionPayload(raw, usi.Options)
 	if err != nil {
 		return nil, err
 	}

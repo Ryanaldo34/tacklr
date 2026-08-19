@@ -39,12 +39,8 @@ func unmarshalInterruptData[T any](data []byte) (interruptID string, v T, err er
 
 // ParseUserSelectionFromInterruptData extracts options from StreamEventInterrupt Data
 // payload shape {"interruptId":"...","data":<serialized UserSelectionInterrupt>}.
-func ParseUserSelectionFromInterruptData(data []byte) (interruptID string, opts []interrupt.UserChoice, err error) {
-	id, usi, err := unmarshalInterruptData[interrupt.UserSelectionInterrupt](data)
-	if err != nil {
-		return "", nil, err
-	}
-	return id, usi.Options, nil
+func ParseUserSelectionFromInterruptData(data []byte) (interruptID string, usi interrupt.UserSelectionInterrupt, err error) {
+	return unmarshalInterruptData[interrupt.UserSelectionInterrupt](data)
 }
 
 // ParseToolPermissionFromInterruptData extracts a tool permission interrupt from yield data.

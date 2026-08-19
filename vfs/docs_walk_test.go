@@ -54,7 +54,7 @@ func TestDocsWalkHelpers(t *testing.T) {
 		t.Fatal("bullet para")
 	}
 	_ = paragraphText(&docs.Paragraph{Elements: []*docs.ParagraphElement{nil}})
-	if KernelWritable("") || IsProjected("") || !KernelCreateOK("readme") {
+	if kernelWritable("") || IsProjected("") || !kernelCreateOK("readme") {
 		t.Fatal("registry helpers")
 	}
 	if _, err := EncodeDocument(t.Context(), NewTextDocument("/a.txt", "text/plain", "utf-8", "z")); err != nil {

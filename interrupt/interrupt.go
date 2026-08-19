@@ -45,6 +45,7 @@ type UserSelectionPayload struct {
 }
 
 type UserSelectionInterrupt struct {
+	Question        string       `json:"question,omitempty"`
 	Options         []UserChoice `json:"options"`
 	ConfirmedChoice *UserChoice
 }
@@ -274,5 +275,14 @@ type PayloadInitializer interface {
 }
 
 func (c *UserSelectionInterrupt) InitFromPayload(payload []byte) error {
+	var wrap struct {
+		Question string       `json:"question"`
+		Options  []UserChoice `json:"options"`
+	}
+	if err := json.Unmarshal(payload, &wrap); err == nil && len(wrap.Options) > 0 {
+		c.Question = wrap.Question
+		c.Options = wrap.Options
+		return nil
+	}
 	return json.Unmarshal(payload, &c.Options)
 }

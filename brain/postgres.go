@@ -174,7 +174,7 @@ func (s *PostgresStore) Put(ctx context.Context, obj Object) error {
 // SoftDelete implements ObjectWriter.
 func (s *PostgresStore) SoftDelete(ctx context.Context, scope Scope, id uuid.UUID) error {
 	if id == uuid.Nil {
-		return fmt.Errorf("brain: object id is required")
+		return ErrObjectIDRequired
 	}
 	q := `UPDATE objects SET deleted_at = $1, updated_at = $1 WHERE id = $2 AND deleted_at IS NULL`
 	args := []any{time.Now().UTC(), id}

@@ -21,7 +21,10 @@ func TestVFSTools_readWriteRev(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.MustNewMountSession("tools-vfs", reg)
+	ms, err := vfs.NewMountSession("tools-vfs", reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
 		t.Fatal(err)
 	}
@@ -370,7 +373,7 @@ func TestVFSTools_readWriteRev(t *testing.T) {
 		t.Fatalf("inverted range: %v", err)
 	}
 	_, err = tools["read"].invoke(ctx, `{"path":"work/plain.txt"}`, rt)
-	if err == nil || !strings.Contains(err.Error(), "absolute virtual path") {
+	if !errors.Is(err, vfs.ErrInvalidPath) {
 		t.Fatalf("relative path: %v", err)
 	}
 	_, err = tools["read"].invoke(ctx, `{"path":"/work/plain.txt","block_id":"nope"}`, rt)
@@ -429,7 +432,10 @@ func TestVFSTools_projectedDocOutlineAndBlocks(t *testing.T) {
 	if err := reg.Register(vfs.DriveFactory{ID: "gdrive", Auth: auth, API: api, Docs: docsAPI}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.MustNewMountSession("tools-docs", reg)
+	ms, err := vfs.NewMountSession("tools-docs", reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := ms.Mount(ctx, vfs.BindingSpec(vfs.Binding{
 		Provider: "gdrive", Point: "/contracts", Writable: true,
 		Params: map[string]string{vfs.ParamFolderID: "root"},
@@ -771,7 +777,10 @@ func TestVFSTools_writeDocxBlocksAndInlineMarks(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.MustNewMountSession("tools-docx", reg)
+	ms, err := vfs.NewMountSession("tools-docx", reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
 		t.Fatal(err)
 	}
@@ -822,7 +831,10 @@ func TestVFSTools_runCommandLiveNames(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.MustNewMountSession("live-names", reg)
+	ms, err := vfs.NewMountSession("live-names", reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
 		t.Fatal(err)
 	}

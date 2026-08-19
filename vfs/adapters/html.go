@@ -17,7 +17,7 @@ const HTMLMediaType = "text/html"
 // block structure, inline marks, links, and list items.
 type HTML struct{}
 
-func (HTML) DecodeRich(ctx context.Context, _ string, _ string, data []byte) (*vfs.RichTextDocument, error) {
+func (HTML) DecodeBlocks(ctx context.Context, _ string, _ string, data []byte) ([]vfs.Block, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -25,7 +25,7 @@ func (HTML) DecodeRich(ctx context.Context, _ string, _ string, data []byte) (*v
 	if err != nil {
 		return nil, err
 	}
-	doc := &vfs.RichTextDocument{Schema: vfs.RichTextSchema}
+	var blocks []vfs.Block
 	var walk func(*html.Node, map[string]string, int)
 	index := 0
 	walk = func(node *html.Node, marks map[string]string, listLevel int) {
@@ -43,7 +43,7 @@ func (HTML) DecodeRich(ctx context.Context, _ string, _ string, data []byte) (*v
 			if block.Text != "" || len(block.Runs) > 0 {
 				index++
 				block.ID = fmt.Sprintf("block-%06d", index)
-				doc.Blocks = append(doc.Blocks, block)
+				blocks = append(blocks, block)
 			}
 			return
 		}
@@ -52,35 +52,43 @@ func (HTML) DecodeRich(ctx context.Context, _ string, _ string, data []byte) (*v
 		}
 	}
 	walk(root, nil, 0)
-	return doc, nil
+	return blocks, nil
 }
 
-func (HTML) EncodeRich(ctx context.Context, doc *vfs.RichTextDocument) ([]byte, error) {
+func (HTML) EncodeBlocks(ctx context.Context, blocks []vfs.Block) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	var b strings.Builder
 	b.WriteString("<!doctype html><html><head><meta charset=\"utf-8\"></head><body>")
-	for _, block := range doc.Blocks {
+	for _, block := range blocks {
 		tag := "p"
 		switch {
-		case block.Kind == "heading" && block.Level > 0:
-			tag = fmt.Sprintf("h%d", min(block.Level, 6))
-		case block.Kind == "list-item":
+		case block.Kind == vfs.BlockKindHeading && block.Style.Level > 0:
+			tag = fmt.Sprintf("h%d", min(block.Style.Level, 6))
+		case block.Kind == vfs.BlockKindListItem || block.Kind == "list-item":
 			tag = "li"
 		case block.Kind == "quote":
 			tag = "blockquote"
 		}
 		b.WriteString("<" + tag + ">")
-		for _, run := range block.Runs {
+		runs := block.Runs
+		if len(runs) == 0 {
+			runs = vfs.ParseInline(block.Text)
+		}
+		for _, run := range runs {
 			value := stdhtml.EscapeString(run.Text)
-			if href := run.Attributes["href"]; href != "" {
+			if href := run.Marks[vfs.MarkHref]; href != "" {
 				value = `<a href="` + stdhtml.EscapeString(href) + `">` + value + "</a>"
 			}
-			for _, mark := range []struct{ name, tag string }{{"bold", "strong"}, {"italic", "em"}, {"underline", "u"}, {"strike", "s"}} {
-				if run.Attributes[mark.name] == "true" || run.Attributes[mark.tag] == "true" {
-					value = "<" + mark.tag + ">" + value + "</" + mark.tag + ">"
-				}
+			if run.Marks[vfs.MarkBold] == "true" {
+				value = "<strong>" + value + "</strong>"
+			}
+			if run.Marks[vfs.MarkItalic] == "true" {
+				value = "<em>" + value + "</em>"
+			}
+			if run.Marks[vfs.MarkStrike] == "true" {
+				value = "<s>" + value + "</s>"
 			}
 			b.WriteString(value)
 		}
@@ -90,21 +98,21 @@ func (HTML) EncodeRich(ctx context.Context, doc *vfs.RichTextDocument) ([]byte, 
 	return []byte(b.String()), nil
 }
 
-func collectHTMLBlock(node *html.Node, inherited map[string]string, listLevel int) vfs.RichTextBlock {
-	kind, level := "paragraph", 0
+func collectHTMLBlock(node *html.Node, inherited map[string]string, listLevel int) vfs.Block {
+	kind, level := vfs.BlockKindParagraph, 0
 	if strings.HasPrefix(node.Data, "h") && len(node.Data) == 2 {
-		kind = "heading"
+		kind = vfs.BlockKindHeading
 		level = int(node.Data[1] - '0')
 	} else if node.Data == "li" {
-		kind = "list-item"
+		kind = vfs.BlockKindListItem
 	}
-	block := vfs.RichTextBlock{Kind: kind, Level: level, Attributes: map[string]string{}}
+	block := vfs.Block{Kind: kind, Style: vfs.StyleMeta{Level: level}}
 	var visit func(*html.Node, map[string]string)
 	visit = func(current *html.Node, marks map[string]string) {
 		if current.Type == html.TextNode {
 			text := strings.NewReplacer("\r", "", "\n", " ", "\t", " ").Replace(current.Data)
 			if strings.TrimSpace(text) != "" {
-				block.Runs = append(block.Runs, vfs.RichTextRun{Text: text, Attributes: marks})
+				block.Runs = append(block.Runs, vfs.Run{Text: text, Marks: marks})
 			}
 			return
 		}
@@ -112,17 +120,15 @@ func collectHTMLBlock(node *html.Node, inherited map[string]string, listLevel in
 		if current.Type == html.ElementNode {
 			switch current.Data {
 			case "strong", "b":
-				next["bold"] = "true"
+				next[vfs.MarkBold] = "true"
 			case "em", "i":
-				next["italic"] = "true"
-			case "u":
-				next["underline"] = "true"
+				next[vfs.MarkItalic] = "true"
 			case "s", "strike":
-				next["strike"] = "true"
+				next[vfs.MarkStrike] = "true"
 			case "a":
 				for _, attr := range current.Attr {
 					if attr.Key == "href" {
-						next["href"] = attr.Val
+						next[vfs.MarkHref] = attr.Val
 					}
 				}
 			}
@@ -134,6 +140,7 @@ func collectHTMLBlock(node *html.Node, inherited map[string]string, listLevel in
 	for child := node.FirstChild; child != nil; child = child.NextSibling {
 		visit(child, cloneAttrs(inherited))
 	}
+	block.Text = vfs.FormatInline(block.Runs)
 	return block
 }
 

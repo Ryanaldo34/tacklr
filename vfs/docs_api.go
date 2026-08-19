@@ -79,12 +79,12 @@ type DocsBatchResult struct {
 }
 
 // GoogleDocs implements DocsAPI with google.golang.org/api/docs/v1.
-type GoogleDocs struct {
-	Service *docs.Service
+type googleDocs struct {
+	service *docs.Service
 }
 
-// NewGoogleDocs builds a Docs service that reads the live TokenHolder.
-func NewGoogleDocs(ctx context.Context, holder *TokenHolder) (*GoogleDocs, error) {
+// newGoogleDocs builds a Docs service that reads the live TokenHolder.
+func newGoogleDocs(ctx context.Context, holder *TokenHolder) (*googleDocs, error) {
 	if holder == nil {
 		return nil, fmt.Errorf("vfs: docs token required")
 	}
@@ -92,22 +92,22 @@ func NewGoogleDocs(ctx context.Context, holder *TokenHolder) (*GoogleDocs, error
 	if err != nil {
 		return nil, fmt.Errorf("vfs: docs service: %w", err)
 	}
-	return &GoogleDocs{Service: svc}, nil
+	return &googleDocs{service: svc}, nil
 }
 
-func (g GoogleDocs) require() error {
-	if g.Service == nil {
+func (g googleDocs) require() error {
+	if g.service == nil {
 		return fmt.Errorf("vfs: docs service required")
 	}
 	return nil
 }
 
 // Get implements DocsAPI. Always sets includeTabsContent=true.
-func (g GoogleDocs) Get(ctx context.Context, documentID string) (DocsSnapshot, error) {
+func (g googleDocs) Get(ctx context.Context, documentID string) (DocsSnapshot, error) {
 	if err := g.require(); err != nil {
 		return DocsSnapshot{}, err
 	}
-	f, err := g.Service.Documents.Get(documentID).
+	f, err := g.service.Documents.Get(documentID).
 		IncludeTabsContent(true).
 		Context(ctx).
 		Do()
@@ -118,7 +118,7 @@ func (g GoogleDocs) Get(ctx context.Context, documentID string) (DocsSnapshot, e
 }
 
 // BatchUpdate implements DocsAPI. Returns only writeControl.requiredRevisionId.
-func (g GoogleDocs) BatchUpdate(ctx context.Context, documentID string, req DocsBatch) (DocsBatchResult, error) {
+func (g googleDocs) BatchUpdate(ctx context.Context, documentID string, req DocsBatch) (DocsBatchResult, error) {
 	if err := g.require(); err != nil {
 		return DocsBatchResult{}, err
 	}
@@ -132,7 +132,7 @@ func (g GoogleDocs) BatchUpdate(ctx context.Context, documentID string, req Docs
 	if req.RequiredRevisionID != "" {
 		call.WriteControl = &docs.WriteControl{RequiredRevisionId: req.RequiredRevisionID}
 	}
-	resp, err := g.Service.Documents.BatchUpdate(documentID, call).Context(ctx).Do()
+	resp, err := g.service.Documents.BatchUpdate(documentID, call).Context(ctx).Do()
 	if err != nil {
 		return DocsBatchResult{}, mapDocsError(err)
 	}

@@ -48,19 +48,6 @@ func BindingSpec(b Binding) MountSpec {
 	}
 }
 
-// ValidMountPoint reports whether point is a single-segment virtual path
-// (/contracts). FUSE and client binds require this shape.
-func ValidMountPoint(point string) error {
-	if point == "" || !path.IsAbs(point) || strings.ContainsAny(point, "\\\x00") {
-		return ErrInvalidPath
-	}
-	cleaned := path.Clean(point)
-	if cleaned == "/" || strings.Count(cleaned, "/") != 1 {
-		return fmt.Errorf("%w: mount point must be one segment", ErrInvalidPath)
-	}
-	return nil
-}
-
 // ValidateBinding checks provider, point, and access token. folderId and other
 // backend params are validated when the factory opens.
 func ValidateBinding(b Binding) error {

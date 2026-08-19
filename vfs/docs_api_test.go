@@ -216,7 +216,7 @@ func TestGoogleDocs_httpGetBatchUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	api := GoogleDocs{Service: svc}
+	api := googleDocs{service: svc}
 	snap, err := api.Get(ctx, "doc1")
 	if err != nil || snap.DocumentID != "doc1" {
 		t.Fatalf("Get = %+v err=%v", snap, err)
@@ -236,10 +236,10 @@ func TestGoogleDocs_httpGetBatchUpdate(t *testing.T) {
 	if err != nil || res.RevisionID != "R1" || !sawWriteControl {
 		t.Fatalf("BatchUpdate = %+v saw=%v err=%v", res, sawWriteControl, err)
 	}
-	if _, err := NewGoogleDocs(ctx, nil); err == nil {
+	if _, err := newGoogleDocs(ctx, nil); err == nil {
 		t.Fatal("nil holder")
 	}
-	if err := (GoogleDocs{}).require(); err == nil {
+	if err := (googleDocs{}).require(); err == nil {
 		t.Fatal("empty service")
 	}
 }

@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/ryanaldo34/tacklr/brain"
-	"github.com/ryanaldo34/tacklr/internal/hostcontrol"
 	mcpruntime "github.com/ryanaldo34/tacklr/internal/mcp"
 	session "github.com/ryanaldo34/tacklr/internal/session"
 	"github.com/ryanaldo34/tacklr/mcp"
@@ -51,14 +50,17 @@ type AgentHarness struct {
 	parkedWorkersLive map[string]*AgentHarness
 	parkMu            sync.Mutex
 	// Worker runs share one live lifecycle registry across sync and async delivery.
-	jobs                 map[string]*workerRun
-	jobsMu               sync.Mutex
-	jobsCtx              context.Context
-	jobsCancel           context.CancelFunc
-	skillByName          map[string]skills.Skill
-	skillDirectories     []string
-	skillsLoader         skills.SkillLoader
-	skillsInitialized    bool
+	jobs              map[string]*workerRun
+	jobsMu            sync.Mutex
+	jobsCtx           context.Context
+	jobsCancel        context.CancelFunc
+	skillByName       map[string]skills.Skill
+	skillsLoader      skills.SkillLoader
+	skillsInitialized bool
+	// hostInterceptors and hostResultHooks are the host-supplied session
+	// world copied to workers. Planning lock and OnCall are reinstalled.
+	hostInterceptors     []ToolInterceptor
+	hostResultHooks      map[string]ToolResultHook
 	exaAPIKey            string
 	brain                *brain.Engine
 	brainWriteKinds      brain.WriteKinds
@@ -98,28 +100,6 @@ func (a *AgentHarness) SessionID() string { return a.sessionId }
 // Observation only; do not use this to rehydrate or rewrite the window.
 func (a *AgentHarness) Messages() []*Message {
 	return a.context.Messages()
-}
-
-// AskUserQuestion returns the ask_user_choice question for toolCallID, or empty.
-// Used by ACP elicitation. Reads session state (survives the turn).
-func (a *AgentHarness) AskUserQuestion(toolCallID string) string {
-	if toolCallID == "" {
-		return ""
-	}
-	v, ok := a.session.StateGet(askUserQuestionStateKey(toolCallID))
-	if !ok {
-		return ""
-	}
-	s, ok := v.(string)
-	if !ok {
-		slog.Error("ask_user_question state is not a string",
-			"session_id", a.sessionId,
-			"tool_call_id", toolCallID,
-			"type", fmt.Sprintf("%T", v),
-		)
-		return ""
-	}
-	return s
 }
 
 func (a *AgentHarness) pendingSnapshot() map[string]stores.PendingToolCall {
@@ -166,7 +146,7 @@ func (a *AgentHarness) persistSession(ctx context.Context) error {
 	if err := a.checkpointSession(saveCtx); err != nil {
 		a.setCheckpointError(err)
 		slog.ErrorContext(saveCtx, "session checkpoint failed",
-			"area", "session_management",
+			"area", telemetry.AreaHarness,
 			"session_id", a.sessionId,
 			"error", err,
 		)
@@ -174,7 +154,7 @@ func (a *AgentHarness) persistSession(ctx context.Context) error {
 	}
 	a.setCheckpointError(nil)
 	slog.DebugContext(saveCtx, "session checkpointed",
-		"area", "session_management",
+		"area", telemetry.AreaHarness,
 		"session_id", a.sessionId,
 		"context_window_size", len(a.Messages()),
 	)
@@ -405,13 +385,11 @@ func (a *AgentHarness) applyBatchToolResultEffect(ctx context.Context, effect To
 	switch effect {
 	case EffectInstallPlanDocument:
 		doc := a.session.Plan.Document()
-		ctx, span := telemetry.StartPlanInstallSpan(ctx, a.sessionId)
-		slog.InfoContext(ctx, "installing plan document into context", "session_id", a.sessionId, "area", telemetry.AreaContext)
+		_, span := telemetry.StartPlanInstallSpan(ctx, a.sessionId)
 		err := a.context.InstallPlanDocument(doc)
 		span.End(err)
 		return err
 	case EffectHandoff:
-		slog.InfoContext(ctx, "todos completed or plan revised; running handoff", "session_id", a.sessionId, "area", telemetry.AreaContext)
 		todos := a.session.Plan.Get()
 		doc := a.session.Plan.Document()
 		return a.tasks.Handoff(ctx, todos, doc, a.tools, a.constructSystemPrompt())
@@ -544,9 +522,7 @@ func (a *AgentHarness) emitPlanUpdate(out chan<- StreamEvent) {
 	out <- StreamEvent{Type: streaming.StreamEventPlanUpdate, Data: data}
 }
 
-// HostHasOpenToolWork reports pending tool work to trusted server adapters.
-// External SDK consumers cannot construct the internal hostcontrol token.
-func (a *AgentHarness) HostHasOpenToolWork(hostcontrol.Token) bool {
+func (a *AgentHarness) hasOpenToolWork() bool {
 	a.pendingMu.Lock()
 	nPending := len(a.pendingToolCalls)
 	a.pendingMu.Unlock()
@@ -554,11 +530,6 @@ func (a *AgentHarness) HostHasOpenToolWork(hostcontrol.Token) bool {
 		return true
 	}
 	return len(a.openToolCalls()) > 0
-}
-
-// HostFinalizeCancelledWork pairs cancelled tools for a trusted server adapter.
-func (a *AgentHarness) HostFinalizeCancelledWork(ctx context.Context, _ hostcontrol.Token) {
-	a.finalizeCancelledWork(nil)
 }
 
 func (a *AgentHarness) finalizeCancelledWork(out chan<- StreamEvent) {

@@ -75,9 +75,23 @@ _ = ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"})
 |------|---------|
 | `MountSpec` | Durable mount description (point, profile, read-only, params, **indexPolicy**). Checkpoint-safe; no secrets. |
 | `Params` | Backend options (`subpath`, `bucket`, `prefix`, …) |
+| `Members` | Optional member `MountSpec`s. Non-empty → one read-only union at `Point`. Use `vfs.Skills(...)` for the `/skills` pack. Duplicate first-level names → `ErrAmbiguous`. |
 | `IndexPolicy` | Optional string: `none` \| `selective` \| `prefix` \| `watch` (empty → selective when the index bridge is on) |
 
 `MountSession.SpecAt` returns the full durable `MountSpec` for a virtual path (for policy and host tooling).
+
+### Skills
+
+Set `Skills` on a factory to mark that backend as a skill pack. `Mount` / `Materialize` attach a read-only `/skills` union (`vfs.Skills`). `"."` means the whole provider root; any other value is a relative subpath (local) or key prefix (S3).
+
+```go
+_ = reg.Register(vfs.LocalFactory{ID: "team", Base: "/var/agent/skills", Skills: "."})
+_ = reg.Register(vfs.S3Factory{ID: "docs", Client: vfs.AWSS3{Client: s3c}, DefaultBucket: "work", Skills: "skills"})
+_ = ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "docs"})
+// /skills is now team ∪ docs/skills, IndexPolicy none, read-only
+```
+
+The harness loads the catalog from `/skills` when that mount exists. Overlapping first-level names are `ErrAmbiguous`.
 
 Host-owned roots and secrets (local jail, S3 client) live on factories, not on mounts or checkpoints.
 

@@ -2,11 +2,13 @@ package skills
 
 import (
 	"context"
-	"io"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/ryanaldo34/tacklr/vfs"
 )
 
 func writeSkill(t *testing.T, root, dir, name, desc, body string) {
@@ -21,122 +23,92 @@ func writeSkill(t *testing.T, root, dir, name, desc, body string) {
 	}
 }
 
-// TestDirectoryLoader_implementsLoader verifies the injectable SkillLoader path.
-func TestDirectoryLoader_implementsLoader(t *testing.T) {
-	root := t.TempDir()
-	writeSkill(t, root, "alpha", "alpha", "Alpha skill", "Do alpha things.")
-	var loader SkillLoader = DirectoryLoader{Directories: []string{root}}
-	loaded, err := loader.Load(context.Background())
+func mountSkills(t *testing.T, hosts ...string) *vfs.MountSession {
+	t.Helper()
+	reg := vfs.NewBackendRegistry()
+	for i, host := range hosts {
+		if err := os.MkdirAll(host, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		id := fmt.Sprintf("pack%d", i)
+		if err := reg.Register(vfs.LocalFactory{ID: id, Base: host, Skills: "."}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ms, err := vfs.NewMountSession(t.Name(), reg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(loaded) != 1 || loaded[0].Name != "alpha" {
-		t.Fatalf("loaded = %#v", loaded)
+	if err := ms.AttachSkills(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ms.Close() })
+	return ms
+}
+
+func TestLoader_emptySessionAndMissingMount(t *testing.T) {
+	loaded, err := (Loader{}).Load(context.Background())
+	if err != nil || loaded != nil {
+		t.Fatalf("nil session: loaded=%#v err=%v", loaded, err)
+	}
+
+	reg := vfs.NewBackendRegistry()
+	if err := reg.Register(vfs.LocalFactory{ID: "work", Base: t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := vfs.NewMountSession(t.Name(), reg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ms.Close() })
+	if err := ms.Mount(t.Context(), vfs.MountSpec{Point: "/work", Profile: "work"}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = (Loader{Session: ms}).Load(t.Context())
+	if err != nil || loaded != nil {
+		t.Fatalf("no /skills: loaded=%#v err=%v", loaded, err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := (Loader{Session: ms}).Load(ctx); err == nil {
+		t.Fatal("expected canceled context error")
 	}
 }
 
-type objectFixture struct {
-	objects map[string]string
-}
-
-func (f objectFixture) ListObjects(context.Context, string, string) ([]string, error) {
-	keys := make([]string, 0, len(f.objects))
-	for key := range f.objects {
-		keys = append(keys, key)
-	}
-	return keys, nil
-}
-
-func (f objectFixture) GetObject(_ context.Context, _, key string) (io.ReadCloser, error) {
-	return io.NopCloser(strings.NewReader(f.objects[key])), nil
-}
-
-func (f objectFixture) ListBlobs(context.Context, string, string) ([]string, error) {
-	return f.ListObjects(context.Background(), "", "")
-}
-
-func (f objectFixture) DownloadBlob(_ context.Context, _, key string) (io.ReadCloser, error) {
-	return f.GetObject(context.Background(), "", key)
-}
-
-func TestObjectLoaders_loadAndFilterSkillObjects(t *testing.T) {
-	objects := objectFixture{objects: map[string]string{
-		"skills/zeta/SKILL.md":  "---\nname: zeta\ndescription: Z\n---\n\nZ body",
-		"skills/alpha/SKILL.md": "---\nname: alpha\ndescription: A\n---\n\nA body",
-		"skills/alpha/readme":   "ignored",
-		"other/beta/SKILL.md":   "ignored",
-	}}
-
-	loaders := []SkillLoader{
-		S3Loader{Client: objects, Bucket: "bucket", Prefix: "skills/"},
-		BlobLoader{Client: objects, Container: "container", Prefix: "skills/"},
-	}
-	for _, loader := range loaders {
-		loaded, err := loader.Load(context.Background())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(loaded) != 2 || loaded[0].Name != "alpha" || loaded[1].Name != "zeta" {
-			t.Fatalf("loaded = %#v", loaded)
-		}
-	}
-}
-
-func TestCloudAdapters_requireSDKClients(t *testing.T) {
-	ctx := context.Background()
-	if _, err := (AWSS3Client{}).ListObjects(ctx, "b", ""); err == nil {
-		t.Fatal("nil AWS list")
-	}
-	if _, err := (AWSS3Client{}).GetObject(ctx, "b", "k"); err == nil {
-		t.Fatal("nil AWS get")
-	}
-	if _, err := (AzureBlobClient{}).ListBlobs(ctx, "c", ""); err == nil {
-		t.Fatal("nil Azure list")
-	}
-	if _, err := (AzureBlobClient{}).DownloadBlob(ctx, "c", "n"); err == nil {
-		t.Fatal("nil Azure download")
-	}
-}
-
-func TestS3Loader_rejectsOversizedObject(t *testing.T) {
-	loader := S3Loader{
-		Client: objectFixture{objects: map[string]string{
-			"skills/big/SKILL.md": strings.Repeat("x", maxSkillFileSize+1),
-		}},
-		Bucket: "bucket",
-		Prefix: "skills/",
-	}
-	if _, err := loader.Load(context.Background()); err == nil || !strings.Contains(err.Error(), "exceeds") {
-		t.Fatalf("err = %v", err)
-	}
-}
-
-// TestLoadDirectories_catalogAndFailurePaths loads a multi-skill tree (happy
-// path + catalog) and asserts each documented failure return as its own outcome.
-func TestLoadDirectories_catalogAndFailurePaths(t *testing.T) {
+func TestLoader_catalogAndFailurePaths(t *testing.T) {
 	root := t.TempDir()
 	writeSkill(t, root, "alpha", "alpha", "Alpha skill", "Do alpha things.")
 	writeSkill(t, root, "beta", "beta", "Beta skill", "Do beta things.")
-	// Non-dir entries are skipped.
 	if err := os.WriteFile(filepath.Join(root, "readme.txt"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	loaded, err := LoadDirectories([]string{root})
+	loaded, err := (Loader{Session: mountSkills(t, root)}).Load(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(loaded) != 2 || loaded[0].Name != "alpha" || loaded[1].Name != "beta" {
 		t.Fatalf("loaded = %#v (want alpha, beta sorted)", loaded)
 	}
+	if loaded[0].Path != "/skills/alpha/SKILL.md" {
+		t.Fatalf("path = %q", loaded[0].Path)
+	}
 	cat := Catalog(loaded)
 	if !strings.Contains(cat, "- alpha: Alpha skill") || !strings.Contains(cat, "- beta: Beta skill") {
 		t.Fatalf("catalog = %q", cat)
 	}
 
-	t.Run("missing root", func(t *testing.T) {
-		if _, err := LoadDirectories([]string{filepath.Join(root, "nope")}); err == nil {
-			t.Fatal("expected error")
+	t.Run("unreadable pack", func(t *testing.T) {
+		r := t.TempDir()
+		writeSkill(t, r, "alpha", "alpha", "A", "Body.")
+		ms := mountSkills(t, r)
+		if err := os.Chmod(r, 0); err != nil {
+			t.Skipf("chmod not supported: %v", err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(r, 0o755) })
+		if _, err := (Loader{Session: ms}).Load(context.Background()); err == nil {
+			t.Skip("unreadable dir still readable (e.g. root)")
 		}
 	})
 
@@ -145,7 +117,7 @@ func TestLoadDirectories_catalogAndFailurePaths(t *testing.T) {
 		if err := os.Mkdir(filepath.Join(r, "empty"), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := LoadDirectories([]string{r}); err == nil || !strings.Contains(err.Error(), "SKILL.md") {
+		if _, err := (Loader{Session: mountSkills(t, r)}).Load(context.Background()); err == nil || !strings.Contains(err.Error(), "SKILL.md") {
 			t.Fatalf("err = %v", err)
 		}
 	})
@@ -156,21 +128,20 @@ func TestLoadDirectories_catalogAndFailurePaths(t *testing.T) {
 		if err := os.Mkdir(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		// maxSkillFileSize is 1MiB; write slightly more.
 		huge := strings.Repeat("x", maxSkillFileSize+1)
 		if err := os.WriteFile(filepath.Join(d, "SKILL.md"), []byte(huge), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := LoadDirectories([]string{r}); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		if _, err := (Loader{Session: mountSkills(t, r)}).Load(context.Background()); err == nil || !strings.Contains(err.Error(), "exceeds") {
 			t.Fatalf("err = %v", err)
 		}
 	})
 
-	t.Run("duplicate skill names across roots", func(t *testing.T) {
+	t.Run("duplicate skill names across packs", func(t *testing.T) {
 		r1, r2 := t.TempDir(), t.TempDir()
 		writeSkill(t, r1, "a", "dup", "D1", "Body one.")
 		writeSkill(t, r2, "b", "dup", "D2", "Body two.")
-		if _, err := LoadDirectories([]string{r1, r2}); err == nil || !strings.Contains(err.Error(), "duplicate") {
+		if _, err := (Loader{Session: mountSkills(t, r1, r2)}).Load(context.Background()); err == nil || !strings.Contains(err.Error(), "duplicate") {
 			t.Fatalf("err = %v", err)
 		}
 	})
@@ -184,7 +155,7 @@ func TestLoadDirectories_catalogAndFailurePaths(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(d, "SKILL.md"), []byte("no front matter"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := LoadDirectories([]string{r}); err == nil || !strings.Contains(err.Error(), "front matter") {
+		if _, err := (Loader{Session: mountSkills(t, r)}).Load(context.Background()); err == nil || !strings.Contains(err.Error(), "front matter") {
 			t.Fatalf("err = %v", err)
 		}
 	})
@@ -192,12 +163,10 @@ func TestLoadDirectories_catalogAndFailurePaths(t *testing.T) {
 	t.Run("symlink child directories are skipped", func(t *testing.T) {
 		r := t.TempDir()
 		writeSkill(t, r, "real", "real", "Real", "Instructions here.")
-		target := filepath.Join(r, "real")
-		link := filepath.Join(r, "link")
-		if err := os.Symlink(target, link); err != nil {
+		if err := os.Symlink(filepath.Join(r, "real"), filepath.Join(r, "link")); err != nil {
 			t.Skipf("symlink not supported: %v", err)
 		}
-		loaded, err := LoadDirectories([]string{r})
+		loaded, err := (Loader{Session: mountSkills(t, r)}).Load(context.Background())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -220,9 +189,7 @@ func TestLoadDirectories_catalogAndFailurePaths(t *testing.T) {
 			t.Skipf("chmod not supported: %v", err)
 		}
 		t.Cleanup(func() { _ = os.Chmod(path, 0o644) })
-		// Also need dir executable for Stat of file in some setups.
-		if _, err := LoadDirectories([]string{r}); err == nil || !strings.Contains(err.Error(), "SKILL.md") {
-			// If running as root, chmod 0 may still allow read — skip then.
+		if _, err := (Loader{Session: mountSkills(t, r)}).Load(context.Background()); err == nil || !strings.Contains(err.Error(), "SKILL.md") {
 			if err == nil {
 				t.Skip("unreadable file still readable (e.g. root)")
 			}

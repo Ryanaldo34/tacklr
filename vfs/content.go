@@ -52,7 +52,7 @@ func IsProjected(mediaType string) bool {
 // KernelWritable reports whether FUSE/host writes may persist raw bytes for
 // mediaType. True only when a registered IdentityCodec owns the type.
 // Providers must set FileInfo.MediaType; unregistered types are EROFS.
-func KernelWritable(mediaType string) bool {
+func kernelWritable(mediaType string) bool {
 	mediaType = normalizeMediaType(mediaType)
 	if mediaType == "" || mediaType == "application/octet-stream" {
 		return false
@@ -67,13 +67,13 @@ func KernelWritable(mediaType string) bool {
 
 // KernelWritableFile reports whether an existing file may take kernel writes.
 // Empty MediaType is not writable — providers classify at Stat.
-func KernelWritableFile(st FileInfo) bool {
-	return KernelWritable(st.MediaType)
+func kernelWritableFile(st FileInfo) bool {
+	return kernelWritable(st.MediaType)
 }
 
 // KernelCreateOK reports whether a new name may be created via FUSE.
 // Unknown types (temps, README) are allowed; a registered non-identity codec is not.
-func KernelCreateOK(name string) bool {
+func kernelCreateOK(name string) bool {
 	mt := DetectMediaType(name, nil)
 	c, ok := defaultContentRegistry.codec(mt)
 	if !ok {

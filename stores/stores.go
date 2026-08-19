@@ -32,9 +32,69 @@ const CheckpointVersion = 2
 // SessionCheckpoint is the agent harness checkpoint blob.
 // Wire protocols (ACP, …) must not store protocol envelopes here — use a
 // ProtocolWireStore (or equivalent) owned by the protocol.
+// Harness-owned module/interrupt bytes are opaque to store implementations.
 type SessionCheckpoint struct {
 	ContextWindow []*streaming.Message `json:"contextWindow"`
+	state         sessionState
+}
+
+type checkpointJSON struct {
+	ContextWindow []*streaming.Message `json:"contextWindow"`
 	State         sessionState         `json:"state"`
+}
+
+func (c SessionCheckpoint) MarshalJSON() ([]byte, error) {
+	return json.Marshal(checkpointJSON{ContextWindow: c.ContextWindow, State: c.state})
+}
+
+func (c *SessionCheckpoint) UnmarshalJSON(data []byte) error {
+	var raw checkpointJSON
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	c.ContextWindow = raw.ContextWindow
+	c.state = raw.State
+	return nil
+}
+
+func (c SessionCheckpoint) Version() int { return c.state.Version }
+func (c SessionCheckpoint) UserState() map[string]json.RawMessage {
+	return c.state.UserState
+}
+func (c SessionCheckpoint) Modules() map[string]json.RawMessage { return c.state.Modules }
+func (c SessionCheckpoint) PendingToolCalls() map[string]PendingToolCall {
+	return c.state.PendingToolCalls
+}
+func (c SessionCheckpoint) PendingInterrupts() []byte  { return c.state.PendingInterrupts }
+func (c SessionCheckpoint) ResolvedInterrupts() []byte { return c.state.ResolvedInterrupts }
+
+// WithVersion returns a copy with the schema version set. Tests use this to
+// exercise apply reject paths.
+func (c SessionCheckpoint) WithVersion(v int) SessionCheckpoint {
+	c.state.Version = v
+	return c
+}
+
+// WithModule returns a copy with one harness module blob replaced.
+func (c SessionCheckpoint) WithModule(name string, raw json.RawMessage) SessionCheckpoint {
+	mods := cloneRawMap(c.state.Modules)
+	if mods == nil {
+		mods = map[string]json.RawMessage{}
+	}
+	mods[name] = raw
+	c.state.Modules = mods
+	return c
+}
+
+// WithUserStateKey returns a copy with one user-state blob replaced.
+func (c SessionCheckpoint) WithUserStateKey(key string, raw json.RawMessage) SessionCheckpoint {
+	us := cloneRawMap(c.state.UserState)
+	if us == nil {
+		us = map[string]json.RawMessage{}
+	}
+	us[key] = raw
+	c.state.UserState = us
+	return c
 }
 
 // NewCheckpoint builds the current checkpoint schema. modules contain
@@ -58,7 +118,7 @@ func NewCheckpoint(
 	}
 	return &SessionCheckpoint{
 		ContextWindow: contextWindow,
-		State: sessionState{
+		state: sessionState{
 			Version:            CheckpointVersion,
 			UserState:          cloneRawMap(userState),
 			Modules:            cloneRawMap(modules),

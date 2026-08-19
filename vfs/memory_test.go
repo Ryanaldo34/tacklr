@@ -17,7 +17,10 @@ func TestMemoryFactory_fileAndDirOps(t *testing.T) {
 	if err := reg.Register(&vfs.MemoryFactory{ID: "mem"}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.MustNewMountSession("mem-1", reg)
+	ms, err := vfs.NewMountSession("mem-1", reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/mem", Profile: "mem"}); err != nil {
 		t.Fatal(err)
 	}

@@ -110,13 +110,14 @@ func main() {
 		}
 	}
 
-	// Optional skills directories (colon-separated, like PATH).
-	var skillDirs []string
+	// Optional host skill directories (colon-separated, like PATH). Each
+	// directory is a union member; the agent sees one /skills mount.
+	var skillHostDirs []string
 	if raw := strings.TrimSpace(os.Getenv("SKILL_DIRECTORIES")); raw != "" {
 		for _, p := range strings.Split(raw, string(os.PathListSeparator)) {
 			p = strings.TrimSpace(p)
 			if p != "" {
-				skillDirs = append(skillDirs, p)
+				skillHostDirs = append(skillHostDirs, p)
 			}
 		}
 	}
@@ -133,7 +134,7 @@ func main() {
 		os.Exit(1)
 	}
 	fsReg := vfs.NewBackendRegistry()
-	if err := fsReg.Register(vfs.LocalFactory{ID: "local", Base: vfsJail}); err != nil {
+	if err := fsReg.Register(vfs.LocalFactory{ID: "local", Base: vfsJail, Skills: "skills"}); err != nil {
 		slog.Error("vfs register failed", "error", err)
 		os.Exit(1)
 	}
@@ -141,6 +142,18 @@ func main() {
 	if err := fsReg.Register(vfs.DriveFactory{ID: "gdrive", Auth: vfsAuth}); err != nil {
 		slog.Error("vfs gdrive register failed", "error", err)
 		os.Exit(1)
+	}
+	for i, hostDir := range skillHostDirs {
+		info, err := os.Stat(hostDir)
+		if err != nil || !info.IsDir() {
+			slog.Error("skill directory missing", "path", hostDir, "error", err)
+			os.Exit(1)
+		}
+		id := fmt.Sprintf("skills%d", i+1)
+		if err := fsReg.Register(vfs.LocalFactory{ID: id, Base: hostDir, Skills: "."}); err != nil {
+			slog.Error("vfs skills register failed", "path", hostDir, "error", err)
+			os.Exit(1)
+		}
 	}
 
 	defaultAgent := "test-agent"
@@ -157,8 +170,7 @@ func main() {
 			Config: tacklr.Config{
 				MaxWindowSize: maxWindow,
 				// Empty: rely on harness Adaptive Case Management system prompt only.
-				SystemPrompt:     "",
-				SkillDirectories: skillDirs,
+				SystemPrompt: "",
 			},
 			Model:     model,
 			ExaAPIKey: exaKey,
@@ -169,7 +181,7 @@ func main() {
 
 	slog.Info("harness showcase",
 		"max_window_size", maxWindow,
-		"skill_dirs", len(skillDirs),
+		"skill_dirs", len(skillHostDirs),
 		"web_tools", exaKey != "",
 		"host_tools", 0,
 		"vfs_mount", "/work",

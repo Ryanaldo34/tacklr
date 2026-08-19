@@ -240,7 +240,7 @@ func (p *engramProvider) OpenDocument(ctx context.Context, name string, _ *vfs.C
 		return nil, err
 	}
 	if isDir {
-		return nil, fmt.Errorf("brain: %s is a directory", name)
+		return nil, fmt.Errorf("%w: %s", vfs.ErrIsDir, name)
 	}
 	obj, err := p.lookupFile(ctx, kind, slug)
 	if err != nil {
@@ -279,7 +279,7 @@ func (p *engramProvider) ReadDir(ctx context.Context, name string) ([]vfs.DirEnt
 		return nil, err
 	}
 	if !isDir {
-		return nil, fmt.Errorf("brain: not a directory")
+		return nil, vfs.ErrNotDir
 	}
 	if name == "" || name == "." {
 		if p.mode == ModeRoots {

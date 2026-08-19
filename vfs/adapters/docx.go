@@ -21,7 +21,7 @@ const DOCXMediaType = "application/vnd.openxmlformats-officedocument.wordprocess
 // operates on the portable WordprocessingML subset used by common editors.
 type DOCX struct{}
 
-func (DOCX) DecodeRich(ctx context.Context, path, _ string, data []byte) (*vfs.RichTextDocument, error) {
+func (DOCX) DecodeBlocks(ctx context.Context, path, _ string, data []byte) ([]vfs.Block, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -32,7 +32,7 @@ func (DOCX) DecodeRich(ctx context.Context, path, _ string, data []byte) (*vfs.R
 	return parseDOCX(part)
 }
 
-func (DOCX) EncodeRich(ctx context.Context, doc *vfs.RichTextDocument) ([]byte, error) {
+func (DOCX) EncodeBlocks(ctx context.Context, blocks []vfs.Block) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -41,7 +41,7 @@ func (DOCX) EncodeRich(ctx context.Context, doc *vfs.RichTextDocument) ([]byte, 
 	parts := map[string]string{
 		"[Content_Types].xml": contentTypesXML,
 		"_rels/.rels":         relsXML,
-		"word/document.xml":   docXML(doc),
+		"word/document.xml":   docXML(blocks),
 	}
 	for name, body := range parts {
 		w, err := zw.Create(name)
@@ -87,14 +87,14 @@ func zipPart(data []byte, name string) ([]byte, error) {
 type docxParagraph struct {
 	style string
 	list  bool
-	runs  []vfs.RichTextRun
+	runs  []vfs.Run
 }
 
-func parseDOCX(data []byte) (*vfs.RichTextDocument, error) {
+func parseDOCX(data []byte) ([]vfs.Block, error) {
 	dec := xml.NewDecoder(bytes.NewReader(data))
 	var paragraphs []docxParagraph
 	var paragraph *docxParagraph
-	var run *vfs.RichTextRun
+	var run *vfs.Run
 	for {
 		tok, err := dec.Token()
 		if errors.Is(err, io.EOF) {
@@ -118,14 +118,21 @@ func parseDOCX(data []byte) (*vfs.RichTextDocument, error) {
 				}
 			case "r":
 				if paragraph != nil {
-					run = &vfs.RichTextRun{}
+					run = &vfs.Run{}
 				}
 			case "b", "i", "u", "strike":
 				if run != nil {
-					if run.Attributes == nil {
-						run.Attributes = map[string]string{}
+					if run.Marks == nil {
+						run.Marks = map[string]string{}
 					}
-					run.Attributes[t.Name.Local] = "true"
+					switch t.Name.Local {
+					case "b":
+						run.Marks[vfs.MarkBold] = "true"
+					case "i":
+						run.Marks[vfs.MarkItalic] = "true"
+					case "strike":
+						run.Marks[vfs.MarkStrike] = "true"
+					}
 				}
 			case "t":
 				if run == nil || paragraph == nil {
@@ -160,22 +167,28 @@ func parseDOCX(data []byte) (*vfs.RichTextDocument, error) {
 			}
 		}
 	}
-	blocks := make([]vfs.RichTextBlock, 0, len(paragraphs))
+	blocks := make([]vfs.Block, 0, len(paragraphs))
 	for i, paragraph := range paragraphs {
 		if len(paragraph.runs) == 0 {
 			continue
 		}
-		kind, level := "paragraph", 0
+		kind, level := vfs.BlockKindParagraph, 0
 		if strings.HasPrefix(paragraph.style, "Heading") {
-			kind = "heading"
+			kind = vfs.BlockKindHeading
 			level, _ = strconv.Atoi(strings.TrimPrefix(paragraph.style, "Heading"))
 		}
 		if paragraph.list {
-			kind = "list-item"
+			kind = vfs.BlockKindListItem
 		}
-		blocks = append(blocks, vfs.RichTextBlock{ID: fmt.Sprintf("block-%06d", i+1), Kind: kind, Level: level, Runs: paragraph.runs})
+		blocks = append(blocks, vfs.Block{
+			ID:    fmt.Sprintf("block-%06d", i+1),
+			Kind:  kind,
+			Text:  vfs.FormatInline(paragraph.runs),
+			Runs:  paragraph.runs,
+			Style: vfs.StyleMeta{Level: level},
+		})
 	}
-	return &vfs.RichTextDocument{Schema: vfs.RichTextSchema, Blocks: blocks}, nil
+	return blocks, nil
 }
 
 func attr(e xml.StartElement, name string) string {
@@ -187,24 +200,32 @@ func attr(e xml.StartElement, name string) string {
 	return ""
 }
 
-func docXML(doc *vfs.RichTextDocument) string {
+func docXML(blocks []vfs.Block) string {
 	var b strings.Builder
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>`)
-	for _, block := range doc.Blocks {
+	for _, block := range blocks {
 		b.WriteString("<w:p>")
-		if block.Kind == "heading" && block.Level > 0 {
-			b.WriteString(`<w:pPr><w:pStyle w:val="Heading` + strconv.Itoa(block.Level) + `"/></w:pPr>`)
-		} else if block.Kind == "list-item" {
+		if block.Kind == vfs.BlockKindHeading && block.Style.Level > 0 {
+			b.WriteString(`<w:pPr><w:pStyle w:val="Heading` + strconv.Itoa(block.Style.Level) + `"/></w:pPr>`)
+		} else if block.Kind == vfs.BlockKindListItem || block.Kind == "list-item" {
 			b.WriteString(`<w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>`)
 		}
-		for _, run := range block.Runs {
+		runs := block.Runs
+		if len(runs) == 0 {
+			runs = vfs.ParseInline(block.Text)
+		}
+		for _, run := range runs {
 			b.WriteString("<w:r>")
-			if len(run.Attributes) > 0 {
+			if len(run.Marks) > 0 {
 				b.WriteString("<w:rPr>")
-				for _, mark := range []string{"b", "i", "u", "strike"} {
-					if run.Attributes[mark] == "true" {
-						b.WriteString("<w:" + mark + "/>")
-					}
+				if run.Marks[vfs.MarkBold] == "true" {
+					b.WriteString("<w:b/>")
+				}
+				if run.Marks[vfs.MarkItalic] == "true" {
+					b.WriteString("<w:i/>")
+				}
+				if run.Marks[vfs.MarkStrike] == "true" {
+					b.WriteString("<w:strike/>")
 				}
 				b.WriteString("</w:rPr>")
 			}

@@ -167,7 +167,7 @@ func (g *Graph) RemoveObject(ctx context.Context, id uuid.UUID) error {
 		return err
 	}
 	if id == uuid.Nil {
-		return fmt.Errorf("helixgraph: object id is required")
+		return brain.ErrObjectIDRequired
 	}
 	q := helix.WriteQuery("brain_remove_object")
 	oid := q.ParamString("object_id", id.String())
@@ -407,7 +407,7 @@ func (g *Graph) EnsureObject(ctx context.Context, obj brain.Object) error {
 		return err
 	}
 	if obj.ID == uuid.Nil {
-		return fmt.Errorf("helixgraph: object id is required")
+		return brain.ErrObjectIDRequired
 	}
 	exists, err := g.objectExists(ctx, obj.ID)
 	if err != nil {

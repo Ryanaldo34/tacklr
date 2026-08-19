@@ -692,10 +692,9 @@ func emitProviderFailed(ctx context.Context, err error, httpStatus int, inputIte
 			code = api.Code
 		}
 	}
-	snip := truncateForLog(body, 400)
 	attrs := []log.KeyValue{
 		log.String(telemetry.EventAttrInputItems, inputItems),
-		log.String(telemetry.EventAttrBodySnip, snip),
+		log.String(telemetry.AttrErrorClass, telemetry.ClassifyErrorClass(err, httpStatus)),
 	}
 	if httpStatus > 0 {
 		attrs = append(attrs, log.Int(telemetry.AttrHTTPStatus, httpStatus))
@@ -703,17 +702,7 @@ func emitProviderFailed(ctx context.Context, err error, httpStatus int, inputIte
 	if code != "" {
 		attrs = append(attrs, log.String(telemetry.AttrErrorCode, code))
 	}
-	if err != nil {
-		attrs = append(attrs, log.String("error", err.Error()))
-	}
 	telemetry.EmitEventSeverity(ctx, telemetry.EventProviderFailed, log.SeverityError, attrs...)
-	slog.ErrorContext(ctx, "model provider returned a terminal failure",
-		"error", err,
-		"http_status", httpStatus,
-		"error_code", code,
-		"request_shape", inputItems,
-		"response_excerpt", snip,
-	)
 }
 
 func (s *OpenAIInferenceStrategy) emitOutputItemComplete(raw json.RawMessage, events chan<- tacklr.LLMResponseChunk, reasoningStreamed map[string]struct{}) {

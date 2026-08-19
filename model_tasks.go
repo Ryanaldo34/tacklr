@@ -137,7 +137,6 @@ func (t *defaultModelTasks) Handoff(ctx context.Context, plan []Todo, planDoc st
 		}
 	}
 	ctx, span := telemetry.StartHandoffSpan(ctx, open)
-	slog.InfoContext(ctx, "running context handoff", "area", telemetry.AreaModelTasks, "open_todos", open)
 
 	window, usedFallback, err := handoffGenerate(ctx, t.context.Messages(), plan, planDoc, t.model, tools)
 	if err != nil {
@@ -173,7 +172,7 @@ func (t *defaultModelTasks) absorbFit(
 
 	currSize, err := model.CountTokens(ctx, countView, tools)
 	if err != nil {
-		slog.ErrorContext(ctx, "failed to count tokens while absorbing message", "area", "model_tasks", "error", err)
+		slog.ErrorContext(ctx, "failed to count tokens while absorbing message", "area", telemetry.AreaModelTasks, "error", err)
 		return nil, nil, false, fmt.Errorf("count tokens: %w", err)
 	}
 	if len(window) == 0 || float64(currSize) <= float64(maxSize)*policy.PressureRatio {

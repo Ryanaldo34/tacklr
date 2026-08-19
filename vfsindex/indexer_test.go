@@ -24,7 +24,10 @@ func TestMountIndexer_indexSearchAndNotify(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.MustNewMountSession("idx", reg)
+	ms, err := vfs.NewMountSession("idx", reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +185,10 @@ func TestMountIndexer_markdownBlocksChunks(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.MustNewMountSession("idx-md", reg)
+	ms, err := vfs.NewMountSession("idx-md", reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
 		t.Fatal(err)
 	}
@@ -307,7 +313,10 @@ func TestMountIndexer_emptyMarkdownLineChunks(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.MustNewMountSession("idx-md-empty", reg)
+	ms, err := vfs.NewMountSession("idx-md-empty", reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
 		t.Fatal(err)
 	}
@@ -392,7 +401,10 @@ func TestMountIndexer_IndexFileResultAndDefaults(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.MustNewMountSession("idx-file-result", reg)
+	ms, err := vfs.NewMountSession("idx-file-result", reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
 		t.Fatal(err)
 	}
@@ -551,7 +563,10 @@ func TestMountIndexer_IndexFileResultAndDefaults(t *testing.T) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	ms2 := vfs.MustNewMountSession("idx-stream", bytesReg)
+	ms2, err := vfs.NewMountSession("idx-stream", bytesReg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := ms2.Mount(ctx, vfs.MountSpec{Point: "/raw", Profile: "bytes"}); err != nil {
 		t.Fatal(err)
 	}
@@ -648,7 +663,10 @@ func TestMountIndexer_docsBlockText(t *testing.T) {
 	if err := reg.Register(richFactory{doc: doc}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.MustNewMountSession("idx-docs", reg)
+	ms, err := vfs.NewMountSession("idx-docs", reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/docs", Profile: "rich"}); err != nil {
 		t.Fatal(err)
 	}

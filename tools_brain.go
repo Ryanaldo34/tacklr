@@ -60,7 +60,7 @@ Use after search, find_exact, find_objects, or expand when the hit has no vfs_pa
 			obj, err := b.engine.Read(ctx, b.sc.Scope(), id)
 			if err != nil {
 				if errors.Is(err, brain.ErrNotFound) {
-					return "", fmt.Errorf("read_object: object %s not found", id)
+					return "", fmt.Errorf("read_object: object %s: %w", id, err)
 				}
 				return "", fmt.Errorf("read_object: %w", err)
 			}
@@ -88,7 +88,7 @@ Call with a kind to see filterable_fields (name, type, operators) for that kind.
 			res, err := b.engine.Schema(ctx, args.Kind)
 			if err != nil {
 				if errors.Is(err, brain.ErrNotFound) {
-					return "", fmt.Errorf("schema: kind %q not found", strings.TrimSpace(args.Kind))
+					return "", fmt.Errorf("schema: kind %q: %w", strings.TrimSpace(args.Kind), err)
 				}
 				return "", fmt.Errorf("schema: %w", err)
 			}
@@ -182,7 +182,7 @@ Pass the result_set_id from the previous call. Each new search, find_exact, find
 			page, err := b.engine.Continue(ctx, b.sc.Scope(), id, args.Limit, b.sc)
 			if err != nil {
 				if errors.Is(err, brain.ErrResultSetNotFound) {
-					return "", fmt.Errorf("continue: result set not found; run search or find_exact again")
+					return "", fmt.Errorf("continue: result set not found; run search or find_exact again: %w", err)
 				}
 				return "", fmt.Errorf("continue: %w", err)
 			}

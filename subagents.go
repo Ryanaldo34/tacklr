@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -21,8 +22,10 @@ import (
 // spawn_worker tool. Specs may nest via SubAgents so interrupt propagation
 // and orchestration stay self-similar at any depth.
 //
-// Workers inherit the host MountSession, brain engine, and shared index
-// bridge. They skip planningWriteLock. They do not get a second FUSE.
+// Workers inherit the parent session world via inheritOptions (VFS including
+// /skills, brain, index bridge, MCP, web, policy, watchdog, interceptors).
+// Spec fields replace model, instructions, tools, and nested SubAgents.
+// They skip planningWriteLock. They do not get a second FUSE.
 type SubAgent struct {
 	Tools        []*Tool
 	Instructions string
@@ -206,14 +209,14 @@ func (a *AgentHarness) runWorker(ctx context.Context, workerName, task string, b
 		events, err = worker.ReturnFromInterrupt(workerCtx, a.childResolutionPayloads(toolCallID, meta))
 		if err != nil {
 			a.clearPark(toolCallID)
-			return "", failRun(fmt.Errorf("resuming worker %q: %w: %w", workerName, ErrFailed, err))
+			return "", failRun(fmt.Errorf("%w: resuming worker %q: %w", ErrFailed, workerName, err))
 		}
 		runtime.EmitUpdate(fmt.Sprintf("Worker %q resumed", workerName))
 	} else {
 		events, err = worker.Run(workerCtx, task)
 		if err != nil {
 			slog.Error("failed to start worker", append(logAttrs, "error", err, "elapsed", time.Since(start).Round(time.Millisecond))...)
-			return "", failRun(fmt.Errorf("starting worker %q: %w: %w", workerName, ErrFailed, err))
+			return "", failRun(fmt.Errorf("%w: starting worker %q: %w", ErrFailed, workerName, err))
 		}
 		runtime.EmitUpdate(fmt.Sprintf("Worker %q started", workerName))
 	}
@@ -229,7 +232,7 @@ func (a *AgentHarness) runWorker(ctx context.Context, workerName, task string, b
 	if drainErr != nil {
 		a.clearPark(toolCallID)
 		slog.Warn("worker failed", append(logAttrs, "elapsed", elapsed, "error", drainErr)...)
-		return "", failRun(fmt.Errorf("worker %q failed: %w: %w", workerName, ErrFailed, drainErr))
+		return "", failRun(fmt.Errorf("%w: worker %q: %w", ErrFailed, workerName, drainErr))
 	}
 	if drained.completed {
 		a.clearPark(toolCallID)
@@ -302,30 +305,42 @@ func workerSessionID(parentSessionID, workerName, parentToolCallID string) strin
 	return fmt.Sprintf("%s/w/%s/%s", parentSessionID, workerName, parentToolCallID)
 }
 
-// workerOptsFromSpec builds shared worker options: host mount, brain,
-// shared index bridge, and DisablePlanningLock. Omits SearchNamespace so
-// resume keeps the checkpointed worker session value.
-func (a *AgentHarness) workerOptsFromSpec(spec *SubAgent) AgentOptions {
+// inheritOptions is the parent session world a worker should keep.
+// Worker-specific fields (model, prompt, tools) are applied in workerOptsFromSpec.
+func (a *AgentHarness) inheritOptions() AgentOptions {
 	return AgentOptions{
 		Config: Config{
-			MaxWindowSize: a.maxWindowSize,
-			SystemPrompt:  spec.Instructions,
+			MaxWindowSize:   a.maxWindowSize,
+			MaxTurnRequests: a.maxTurnRequests,
 		},
-		Model:                 spec.Model,
-		Tools:                 slices.Clone(spec.Tools),
+		Store:                 a.store,
+		WatchDog:              a.watchDog,
 		MCPConfigs:            slices.Clone(a.mcpConfigs),
 		MCPCredentialResolver: a.mcpCredentialResolver,
-		Store:                 a.store,
-		SubAgents:             spec.SubAgents,
+		ContextPolicy:         a.contextPolicy,
+		ToolInterceptors:      slices.Clone(a.hostInterceptors),
+		ToolResultHooks:       maps.Clone(a.hostResultHooks),
+		SkillsLoader:          a.skillsLoader,
 		ExaAPIKey:             a.exaAPIKey,
 		Brain:                 a.brain,
 		BrainWriteKinds:       a.brainWriteKinds,
 		MountSession:          a.VFS(),
 		RunCommandUnattended:  a.runCommandUnattended,
+		writeUnattended:       a.writeUnattended,
 		shareIndexBridge:      a.vfsBridge,
-		DisablePlanningLock:   true,
-		WriteUnattended:       a.writeUnattended,
 	}
+}
+
+// workerOptsFromSpec overlays the worker spec on inheritOptions.
+// Omits SearchNamespace so resume keeps the checkpointed worker session value.
+func (a *AgentHarness) workerOptsFromSpec(spec *SubAgent) AgentOptions {
+	opts := a.inheritOptions()
+	opts.Config.SystemPrompt = spec.Instructions
+	opts.Model = spec.Model
+	opts.Tools = slices.Clone(spec.Tools)
+	opts.SubAgents = spec.SubAgents
+	opts.disablePlanningLock = true
+	return opts
 }
 
 func (a *AgentHarness) workerOptsForSpawn(spec *SubAgent) AgentOptions {

@@ -465,14 +465,21 @@ func TestRunTurn_constructFailures(t *testing.T) {
 		t.Fatalf("want unknown profile error, got %v", err)
 	}
 
+	broken := t.TempDir()
+	if err := os.Mkdir(filepath.Join(broken, "empty"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	skillReg := vfs.NewBackendRegistry()
+	if err := skillReg.Register(vfs.LocalFactory{ID: "local", Base: broken, Skills: "."}); err != nil {
+		t.Fatal(err)
+	}
 	r.Register("default", AgentSpec{
 		Options: tacklr.AgentOptions{
-			Config: tacklr.Config{
-				MaxWindowSize:    8192,
-				SkillDirectories: []string{filepath.Join(t.TempDir(), "does-not-exist")},
-			},
-			Model: okModel(),
+			Config: tacklr.Config{MaxWindowSize: 8192},
+			Model:  okModel(),
 		},
+		FSRegistry:  skillReg,
+		FSBootstrap: []vfs.MountSpec{{Point: "/work", Profile: "local"}},
 	})
 	_, err = r.RunTurn(ctx, TurnRequest{AgentID: "default", ThreadID: "sess-skills", Prompt: "hi"})
 	if err == nil || !strings.Contains(err.Error(), "initialize skills") {
@@ -483,7 +490,10 @@ func TestRunTurn_constructFailures(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "local", Base: t.TempDir()}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.MustNewMountSession("dot-sess", reg)
+	ms, err := vfs.NewMountSession("dot-sess", reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := ms.Materialize(ctx, []vfs.MountSpec{{Point: "/work", Profile: "local"}}); err != nil {
 		t.Fatal(err)
 	}

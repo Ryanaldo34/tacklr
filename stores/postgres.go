@@ -24,7 +24,7 @@ func (s *PostgresStore) SaveSession(ctx context.Context, sessionID string, check
 	if err != nil {
 		return fmt.Errorf("marshal context window: %w", err)
 	}
-	state, err := json.Marshal(checkpoint.State)
+	state, err := json.Marshal(checkpoint.state)
 	if err != nil {
 		return fmt.Errorf("marshal state: %w", err)
 	}
@@ -53,7 +53,7 @@ func (s *PostgresStore) LoadSession(ctx context.Context, sessionID string) (Sess
 	if err := json.Unmarshal(contextWindowRaw, &checkpoint.ContextWindow); err != nil {
 		return SessionCheckpoint{}, fmt.Errorf("unmarshal context window: %w", err)
 	}
-	if err := json.Unmarshal(stateRaw, &checkpoint.State); err != nil {
+	if err := json.Unmarshal(stateRaw, &checkpoint.state); err != nil {
 		return SessionCheckpoint{}, fmt.Errorf("unmarshal state: %w", err)
 	}
 	return checkpoint, nil

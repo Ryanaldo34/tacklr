@@ -34,9 +34,9 @@ func newToolRunner(interceptors ...ToolInterceptor) *toolRunner {
 }
 
 // Run runs the interceptor chain and the tool.
-// Disposition comes from the final invoke (BuiltinResult); short-circuits have none.
-func (r *toolRunner) Run(ctx context.Context, inv ToolInvocation) (string, ToolResultDisposition, error) {
-	var toolDisp ToolResultDisposition
+// Disposition comes from the final invoke (ToolOutcome); short-circuits have none.
+func (r *toolRunner) Run(ctx context.Context, inv ToolInvocation) (string, ToolOutcome, error) {
+	var toolDisp ToolOutcome
 	next := ToolCallFunc(func(ctx context.Context, inv ToolInvocation) (string, error) {
 		res, err := inv.Tool.invoke(ctx, inv.ArgsJSON, inv.Runtime)
 		toolDisp = res.disp

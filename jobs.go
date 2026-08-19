@@ -306,7 +306,7 @@ func (a *AgentHarness) runBackgroundJob(ctx context.Context, j *workerRun) {
 
 	events, err := j.worker.Run(ctx, j.task)
 	if err != nil {
-		j.setTerminal(jobStatusFailed, "", fmt.Errorf("starting worker %q: %w: %w", j.workerName, ErrFailed, err))
+		j.setTerminal(jobStatusFailed, "", fmt.Errorf("%w: starting worker %q: %w", ErrFailed, j.workerName, err))
 		j.worker.Close()
 		slog.Error("failed to start background worker", append(logAttrs, "error", err)...)
 		return
@@ -322,7 +322,7 @@ func (a *AgentHarness) runBackgroundJob(ctx context.Context, j *workerRun) {
 		return
 	}
 	if drainErr != nil {
-		j.setTerminal(jobStatusFailed, "", fmt.Errorf("worker %q failed: %w: %w", j.workerName, ErrFailed, drainErr))
+		j.setTerminal(jobStatusFailed, "", fmt.Errorf("%w: worker %q: %w", ErrFailed, j.workerName, drainErr))
 		j.worker.Close()
 		slog.Warn("background worker failed", append(logAttrs, "elapsed", elapsed, "error", drainErr)...)
 		return
@@ -454,7 +454,7 @@ func (a *AgentHarness) resumeInterruptedJob(ctx context.Context, j *workerRun, r
 	if err != nil {
 		a.clearPark(j.id)
 		a.removeJob(j.id)
-		return "", fmt.Errorf("resuming worker %q: %w: %w", workerName, ErrFailed, err)
+		return "", fmt.Errorf("%w: resuming worker %q: %w", ErrFailed, workerName, err)
 	}
 
 	drained, drainErr := drainWorkerEvents(ctx, workerName, events, runtime.EmitUpdate)
@@ -466,7 +466,7 @@ func (a *AgentHarness) resumeInterruptedJob(ctx context.Context, j *workerRun, r
 	if drainErr != nil {
 		a.clearPark(j.id)
 		a.removeJob(j.id)
-		return "", fmt.Errorf("worker %q failed: %w: %w", workerName, ErrFailed, drainErr)
+		return "", fmt.Errorf("%w: worker %q: %w", ErrFailed, workerName, drainErr)
 	}
 	if drained.completed {
 		result := finalWorkerOutput(worker.Messages(), drained.lastAssistant)

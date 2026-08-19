@@ -60,11 +60,11 @@ func TestPostgresStore_liveSaveLoad(t *testing.T) {
 	if len(loaded.ContextWindow) != 2 || loaded.ContextWindow[0].Content != "hi" {
 		t.Fatalf("load: %+v", loaded.ContextWindow)
 	}
-	if loaded.State.PendingToolCalls["c1"].ToolCall == nil || loaded.State.PendingToolCalls["c1"].ToolCall.Name != "search" {
-		t.Fatalf("pending: %+v", loaded.State.PendingToolCalls)
+	if loaded.PendingToolCalls()["c1"].ToolCall == nil || loaded.PendingToolCalls()["c1"].ToolCall.Name != "search" {
+		t.Fatalf("pending: %+v", loaded.PendingToolCalls())
 	}
-	if len(loaded.State.UserState["k"]) == 0 {
-		t.Fatalf("user state: %+v", loaded.State.UserState)
+	if len(loaded.UserState()["k"]) == 0 {
+		t.Fatalf("user state: %+v", loaded.UserState())
 	}
 
 	// Overwrite

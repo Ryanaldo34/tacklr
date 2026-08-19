@@ -76,7 +76,7 @@ func TestACP_WS_permissionMidTurn(t *testing.T) {
 	var ran bool
 	sensitive := tacklr.NewTool(tacklr.ToolConfig{
 		Name:   "sensitive",
-		OnCall: tacklr.OnCalls(tacklr.ToolPermissionOnCall),
+		OnCall: []tacklr.OnCallFunc{tacklr.ToolPermissionOnCall},
 		Handler: func(ctx context.Context) (string, error) {
 			ran = true
 			return "secret-ok", nil

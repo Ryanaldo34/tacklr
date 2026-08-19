@@ -256,15 +256,15 @@ func TestParseUserSelectionFromInterruptData(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, opts, err := ParseUserSelectionFromInterruptData(envelope)
+	id, usiOut, err := ParseUserSelectionFromInterruptData(envelope)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if id != "intr-1" {
 		t.Errorf("id = %q, want intr-1", id)
 	}
-	if len(opts) != 2 || opts[0].Title != "A" {
-		t.Fatalf("opts = %#v", opts)
+	if len(usiOut.Options) != 2 || usiOut.Options[0].Title != "A" {
+		t.Fatalf("opts = %#v", usiOut.Options)
 	}
 
 	// Regression: []byte in map becomes a JSON string and must not be accepted as-is.

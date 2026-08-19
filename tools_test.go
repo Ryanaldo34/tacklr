@@ -386,9 +386,9 @@ func TestNewTool_validation(t *testing.T) {
 		{"too many args", ToolConfig{Name: "t", Handler: func(ctx context.Context, a BasicArgs, b BasicArgs, c BasicArgs) (string, error) {
 			return "", nil
 		}}, ""}, // "too many parameters" or "unexpected parameter"
-		{"unregistered on-call", ToolConfig{Name: "t", Handler: zeroArgsStringHandler, OnCall: OnCalls(func(ToolInvocation) Interrupt {
+		{"unregistered on-call", ToolConfig{Name: "t", Handler: zeroArgsStringHandler, OnCall: []OnCallFunc{func(ToolInvocation) Interrupt {
 			return unregisteredOnCall{}
-		})}, "not registered"},
+		}}}, "not registered"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			defer func() {

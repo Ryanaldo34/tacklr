@@ -618,7 +618,7 @@ func TestRun_pairsOpenToolCallsBeforeTurn(t *testing.T) {
 func TestRun_permissionResumeDoesNotPairItemID(t *testing.T) {
 	tool := NewTool(ToolConfig{
 		Name:    "write",
-		OnCall:  OnCalls(ToolPermissionOnCall),
+		OnCall:  []OnCallFunc{ToolPermissionOnCall},
 		Handler: func(ctx context.Context) (string, error) { return "wrote", nil },
 	})
 	var n int

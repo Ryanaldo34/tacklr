@@ -88,15 +88,6 @@ func NewMountSession(sessionID string, reg *BackendRegistry) (*MountSession, err
 	return &MountSession{id: sessionID, reg: reg, tab: newMountTable()}, nil
 }
 
-// MustNewMountSession is for tests. It panics if NewMountSession fails.
-func MustNewMountSession(sessionID string, reg *BackendRegistry) *MountSession {
-	ms, err := NewMountSession(sessionID, reg)
-	if err != nil {
-		panic(err)
-	}
-	return ms
-}
-
 // HostDir is the directory last passed to FuseMount, or "".
 // Hosts and run_command use this as cwd. Harness tool results, errors,
 // Specs, and checkpoints must never print it. The child
@@ -114,18 +105,22 @@ func (m *MountSession) table() *mountTable {
 }
 
 // Materialize replaces the live tree from specs. On error the previous tree is kept.
+// Factories that implement SkillSource are then attached at /skills.
 func (m *MountSession) Materialize(ctx context.Context, specs []MountSpec) error {
-	if len(specs) == 0 {
-		m.mu.Lock()
-		m.tab = newMountTable()
-		m.mu.Unlock()
-		return nil
-	}
 	if m.reg == nil {
 		return errRegistryRequired
 	}
-	next, err := materialize(ctx, m.reg, m.id, specs)
-	if err != nil {
+	var next *mountTable
+	var err error
+	if len(specs) == 0 {
+		next = newMountTable()
+	} else {
+		next, err = materialize(ctx, m.reg, m.id, specs)
+		if err != nil {
+			return err
+		}
+	}
+	if err := attachSkillsTo(ctx, m.reg, m.id, next); err != nil {
 		return err
 	}
 	m.mu.Lock()
@@ -135,6 +130,7 @@ func (m *MountSession) Materialize(ctx context.Context, specs []MountSpec) error
 }
 
 // Mount attaches a backend at spec.Point for the rest of the session life.
+// Non-union mounts refresh /skills from SkillSource factories.
 func (m *MountSession) Mount(ctx context.Context, spec MountSpec) error {
 	if m.reg == nil {
 		return errRegistryRequired
@@ -143,7 +139,23 @@ func (m *MountSession) Mount(ctx context.Context, spec MountSpec) error {
 	if err != nil {
 		return err
 	}
-	return m.table().mount(ctx, spec, p)
+	if err := m.table().mount(ctx, spec, p); err != nil {
+		return err
+	}
+	if spec.Point == SkillsPoint || len(spec.Members) > 0 {
+		return nil
+	}
+	return m.AttachSkills(ctx)
+}
+
+// AttachSkills mounts or replaces /skills from SkillSource factories.
+// No-op when no factory declares Skills. Hosts that bind session backends
+// (Drive) should call this after bind so new members are picked up.
+func (m *MountSession) AttachSkills(ctx context.Context) error {
+	if m.reg == nil {
+		return errRegistryRequired
+	}
+	return attachSkillsTo(ctx, m.reg, m.id, m.table())
 }
 
 // Unmount detaches the mount at point.
@@ -381,6 +393,9 @@ func (t *mountTable) mount(ctx context.Context, spec MountSpec, provider Provide
 
 	stored := cloneSpec(spec)
 	stored.Point = cleaned
+	if len(stored.Members) > 0 {
+		stored.ReadOnly = true
+	}
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -450,11 +465,22 @@ func (t *mountTable) resolve(virtualPath string) (p Provider, point, rel string,
 	return e.provider, point, rel, e.spec.ReadOnly, nil
 }
 
-func cleanVirtualPath(s string) (string, error) {
-	if s == "" || !path.IsAbs(s) || strings.ContainsAny(s, "\\\x00") {
-		return "", ErrInvalidPath
+func cleanVirtualPath(s string) (string, error) { return CleanPath(s) }
+
+func attachSkillsTo(ctx context.Context, reg *BackendRegistry, sessionID string, tab *mountTable) error {
+	members := reg.skillMembers()
+	if len(members) == 0 {
+		return nil
 	}
-	return path.Clean(s), nil
+	if err := tab.unmount(SkillsPoint); err != nil && !errors.Is(err, ErrNotMounted) {
+		return err
+	}
+	spec := Skills(members...)
+	p, err := reg.open(ctx, sessionID, spec)
+	if err != nil {
+		return err
+	}
+	return tab.mount(ctx, spec, p)
 }
 
 func materialize(ctx context.Context, reg *BackendRegistry, sessionID string, specs []MountSpec) (*mountTable, error) {
