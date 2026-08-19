@@ -35,6 +35,7 @@ func StartTurnSpan(ctx context.Context, a TurnAttrs) (context.Context, *TurnSpan
 		a.Kind = "prompt"
 	}
 	ctx = ContextWithAgentID(ctx, a.AgentID)
+	ctx = ContextWithSessionID(ctx, a.SessionID)
 	start := time.Now()
 	ctx, span := TracerFromContext(ctx).Start(ctx, SpanTurn,
 		trace.WithAttributes(
@@ -73,9 +74,9 @@ func (t *TurnSpan) End(outcome string, err error) {
 	if t.span != nil {
 		if err != nil {
 			t.span.RecordError(err)
-			t.span.SetStatus(codes.Error, err.Error())
+			t.span.SetStatus(codes.Error, ErrorClassOther)
 		} else if outcome == OutcomeCancelled {
-			t.span.SetStatus(codes.Error, outcome)
+			t.span.SetStatus(codes.Error, OutcomeCancelled)
 		} else {
 			t.span.SetStatus(codes.Ok, "")
 		}
@@ -134,7 +135,7 @@ func (t *ToolSpan) Finish(status string, err error) {
 		attrs = append(attrs, attribute.String(AttrOutcome, OutcomeError))
 		if err != nil {
 			t.span.RecordError(err)
-			t.span.SetStatus(codes.Error, err.Error())
+			t.span.SetStatus(codes.Error, ErrorClassOther)
 		}
 	} else {
 		attrs = append(attrs, attribute.String(AttrOutcome, OutcomeOK))
@@ -167,12 +168,14 @@ func StartBrainSpan(ctx context.Context, op string) (context.Context, *BrainSpan
 		op = BrainOpSearch
 	}
 	start := time.Now()
-	ctx, span := TracerFromContext(ctx).Start(ctx, SpanBrain,
-		trace.WithAttributes(
-			attribute.String(AttrArea, AreaBrain),
-			attribute.String(AttrBrainOp, op),
-		),
-	)
+	attrs := []attribute.KeyValue{
+		attribute.String(AttrArea, AreaBrain),
+		attribute.String(AttrBrainOp, op),
+	}
+	if sid := SessionIDFromContext(ctx); sid != "" {
+		attrs = append(attrs, attribute.String(AttrSessionID, sid))
+	}
+	ctx, span := TracerFromContext(ctx).Start(ctx, SpanBrain, trace.WithAttributes(attrs...))
 	return ctx, &BrainSpan{ctx: ctx, span: span, start: start, op: op}
 }
 
@@ -195,7 +198,7 @@ func (b *BrainSpan) End(hits int, degrade string, err error) {
 	if b.span != nil {
 		if err != nil {
 			b.span.RecordError(err)
-			b.span.SetStatus(codes.Error, err.Error())
+			b.span.SetStatus(codes.Error, ErrorClassOther)
 		} else {
 			b.span.SetStatus(codes.Ok, "")
 		}
@@ -240,7 +243,7 @@ func (s *PlanInstallSpan) End(err error) {
 	}
 	if err != nil {
 		s.span.RecordError(err)
-		s.span.SetStatus(codes.Error, err.Error())
+		s.span.SetStatus(codes.Error, ErrorClassOther)
 		s.span.SetAttributes(attribute.String(AttrOutcome, OutcomeError))
 	} else {
 		s.span.SetStatus(codes.Ok, "")
@@ -258,12 +261,14 @@ type HandoffSpan struct {
 
 // StartHandoffSpan starts a context-handoff span. openTodos is remaining work.
 func StartHandoffSpan(ctx context.Context, openTodos int) (context.Context, *HandoffSpan) {
-	ctx, span := TracerFromContext(ctx).Start(ctx, SpanContextHandoff,
-		trace.WithAttributes(
-			attribute.String(AttrArea, AreaModelTasks),
-			attribute.Int(AttrOpenTodos, openTodos),
-		),
-	)
+	attrs := []attribute.KeyValue{
+		attribute.String(AttrArea, AreaModelTasks),
+		attribute.Int(AttrOpenTodos, openTodos),
+	}
+	if sid := SessionIDFromContext(ctx); sid != "" {
+		attrs = append(attrs, attribute.String(AttrSessionID, sid))
+	}
+	ctx, span := TracerFromContext(ctx).Start(ctx, SpanContextHandoff, trace.WithAttributes(attrs...))
 	return ctx, &HandoffSpan{ctx: ctx, span: span}
 }
 
@@ -286,7 +291,7 @@ func (s *HandoffSpan) End(outcome string, err error) {
 	}
 	if err != nil {
 		s.span.RecordError(err)
-		s.span.SetStatus(codes.Error, err.Error())
+		s.span.SetStatus(codes.Error, ErrorClassOther)
 	} else {
 		s.span.SetStatus(codes.Ok, "")
 	}

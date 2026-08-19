@@ -12,22 +12,22 @@ import (
 )
 
 func TestHTMLRoundTripPreservesBlocksAndMarks(t *testing.T) {
-	doc, err := (HTML{}).DecodeRich(context.Background(), "/x.html", HTMLMediaType, []byte(`<h1>Title</h1><p>Hello <strong>world</strong> <a href="https://example.com">link</a></p>`))
+	doc, err := (HTML{}).DecodeBlocks(context.Background(), "/x.html", HTMLMediaType, []byte(`<h1>Title</h1><p>Hello <strong>world</strong> <a href="https://example.com">link</a></p>`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(doc.Blocks) != 2 || doc.Blocks[0].Kind != "heading" || doc.Blocks[1].Runs[1].Attributes["bold"] != "true" {
+	if len(doc) != 2 || doc[0].Kind != vfs.BlockKindHeading || doc[1].Runs[1].Marks[vfs.MarkBold] != "true" {
 		t.Fatalf("doc=%#v", doc)
 	}
-	out, err := (HTML{}).EncodeRich(context.Background(), doc)
+	out, err := (HTML{}).EncodeBlocks(context.Background(), doc)
 	if err != nil || !strings.Contains(string(out), "<strong>world</strong>") || !strings.Contains(string(out), "https://example.com") {
 		t.Fatalf("out=%q err=%v", out, err)
 	}
-	more, err := (HTML{}).EncodeRich(context.Background(), &vfs.RichTextDocument{Blocks: []vfs.RichTextBlock{
-		{Kind: "heading", Level: 2, Runs: []vfs.RichTextRun{{Text: "H"}}},
-		{Kind: "list-item", Runs: []vfs.RichTextRun{{Text: "L", Attributes: map[string]string{"italic": "true", "strike": "true", "u": "true"}}}},
-		{Kind: "quote", Runs: []vfs.RichTextRun{{Text: "Q"}}},
-	}})
+	more, err := (HTML{}).EncodeBlocks(context.Background(), []vfs.Block{
+		{Kind: vfs.BlockKindHeading, Style: vfs.StyleMeta{Level: 2}, Runs: []vfs.Run{{Text: "H"}}},
+		{Kind: vfs.BlockKindListItem, Runs: []vfs.Run{{Text: "L", Marks: map[string]string{vfs.MarkItalic: "true", vfs.MarkStrike: "true"}}}},
+		{Kind: "quote", Runs: []vfs.Run{{Text: "Q"}}},
+	})
 	if err != nil || !strings.Contains(string(more), "<h2>") || !strings.Contains(string(more), "<li>") || !strings.Contains(string(more), "<blockquote>") {
 		t.Fatalf("more=%q err=%v", more, err)
 	}
@@ -44,11 +44,11 @@ func TestDOCXRoundTripReadsAndWritesMainDocument(t *testing.T) {
 	if err := zw.Close(); err != nil {
 		t.Fatal(err)
 	}
-	doc, err := (DOCX{}).DecodeRich(context.Background(), "/x.docx", DOCXMediaType, input.Bytes())
-	if err != nil || len(doc.Blocks) != 1 || doc.Blocks[0].Kind != "heading" {
+	doc, err := (DOCX{}).DecodeBlocks(context.Background(), "/x.docx", DOCXMediaType, input.Bytes())
+	if err != nil || len(doc) != 1 || doc[0].Kind != vfs.BlockKindHeading {
 		t.Fatalf("doc=%#v err=%v", doc, err)
 	}
-	out, err := (DOCX{}).EncodeRich(context.Background(), doc)
+	out, err := (DOCX{}).EncodeBlocks(context.Background(), doc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,14 +73,14 @@ func TestDOCX_marksListMissingAndBadZip(t *testing.T) {
 	if err := zw.Close(); err != nil {
 		t.Fatal(err)
 	}
-	doc, err := (DOCX{}).DecodeRich(context.Background(), "/x.docx", DOCXMediaType, input.Bytes())
-	if err != nil || len(doc.Blocks) < 2 {
+	doc, err := (DOCX{}).DecodeBlocks(context.Background(), "/x.docx", DOCXMediaType, input.Bytes())
+	if err != nil || len(doc) < 2 {
 		t.Fatalf("doc=%#v err=%v", doc, err)
 	}
-	if doc.Blocks[0].Kind != "heading" || doc.Blocks[1].Kind != "list-item" {
-		t.Fatalf("kinds=%v %v", doc.Blocks[0].Kind, doc.Blocks[1].Kind)
+	if doc[0].Kind != vfs.BlockKindHeading || doc[1].Kind != vfs.BlockKindListItem {
+		t.Fatalf("kinds=%v %v", doc[0].Kind, doc[1].Kind)
 	}
-	out, err := (DOCX{}).EncodeRich(context.Background(), doc)
+	out, err := (DOCX{}).EncodeBlocks(context.Background(), doc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +91,7 @@ func TestDOCX_marksListMissingAndBadZip(t *testing.T) {
 	if _, err := zipPart(out, "nope.xml"); err == nil {
 		t.Fatal("missing part")
 	}
-	if _, err := (DOCX{}).DecodeRich(context.Background(), "/x.docx", DOCXMediaType, []byte("not-zip")); err == nil {
+	if _, err := (DOCX{}).DecodeBlocks(context.Background(), "/x.docx", DOCXMediaType, []byte("not-zip")); err == nil {
 		t.Fatal("bad zip")
 	}
 	if _, err := parseDOCX([]byte("<not")); err == nil {
@@ -102,16 +102,16 @@ func TestDOCX_marksListMissingAndBadZip(t *testing.T) {
 func TestDOCXAndHTML_canceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := (HTML{}).DecodeRich(ctx, "/x.html", HTMLMediaType, []byte("<p>x</p>")); err == nil {
+	if _, err := (HTML{}).DecodeBlocks(ctx, "/x.html", HTMLMediaType, []byte("<p>x</p>")); err == nil {
 		t.Fatal("html decode")
 	}
-	if _, err := (HTML{}).EncodeRich(ctx, &vfs.RichTextDocument{}); err == nil {
+	if _, err := (HTML{}).EncodeBlocks(ctx, nil); err == nil {
 		t.Fatal("html encode")
 	}
-	if _, err := (DOCX{}).DecodeRich(ctx, "/x.docx", DOCXMediaType, []byte("PK")); err == nil {
+	if _, err := (DOCX{}).DecodeBlocks(ctx, "/x.docx", DOCXMediaType, []byte("PK")); err == nil {
 		t.Fatal("docx decode")
 	}
-	if _, err := (DOCX{}).EncodeRich(ctx, &vfs.RichTextDocument{}); err == nil {
+	if _, err := (DOCX{}).EncodeBlocks(ctx, nil); err == nil {
 		t.Fatal("docx encode")
 	}
 }

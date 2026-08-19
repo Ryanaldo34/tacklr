@@ -8,7 +8,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.33
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.106.4
 	github.com/coder/websocket v1.8.15
-	github.com/deckarep/golang-set/v2 v2.9.0
 	github.com/google/uuid v1.6.0
 	github.com/hanwen/go-fuse/v2 v2.11.0
 	github.com/helixdb/helix-db/sdks/go v0.1.3
@@ -118,7 +117,6 @@ require (
 	github.com/tklauser/numcpus v0.11.0 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
-	go.mongodb.org/mongo-driver v1.17.4 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.67.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.10.0 // indirect

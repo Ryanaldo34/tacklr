@@ -243,7 +243,7 @@ func idMatch(id any, want int) bool {
 func TestACP_requestPermission_allowsToolAndCompletes(t *testing.T) {
 	sensitive := tacklr.NewTool(tacklr.ToolConfig{
 		Name:   "sensitive",
-		OnCall: tacklr.OnCalls(tacklr.ToolPermissionOnCall),
+		OnCall: []tacklr.OnCallFunc{tacklr.ToolPermissionOnCall},
 		Handler: func(ctx context.Context) (string, error) {
 			return "secret-ok", nil
 		},
@@ -423,7 +423,7 @@ func TestACP_requestPermission_rejectFailsToolAndCompletes(t *testing.T) {
 	var ran bool
 	sensitive := tacklr.NewTool(tacklr.ToolConfig{
 		Name:   "sensitive",
-		OnCall: tacklr.OnCalls(tacklr.ToolPermissionOnCall),
+		OnCall: []tacklr.OnCallFunc{tacklr.ToolPermissionOnCall},
 		Handler: func(ctx context.Context) (string, error) {
 			ran = true
 			return "secret-ok", nil
@@ -601,7 +601,7 @@ func TestACP_requestPermission_rejectFailsToolAndCompletes(t *testing.T) {
 func TestACP_requestPermission_cancelledEndsPrompt(t *testing.T) {
 	sensitive := tacklr.NewTool(tacklr.ToolConfig{
 		Name:    "sensitive",
-		OnCall:  tacklr.OnCalls(tacklr.ToolPermissionOnCall),
+		OnCall:  []tacklr.OnCallFunc{tacklr.ToolPermissionOnCall},
 		Handler: func(ctx context.Context) (string, error) { return "nope", nil },
 	})
 	strategy := &mockInferenceStrategy{

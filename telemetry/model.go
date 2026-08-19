@@ -79,6 +79,11 @@ func inferProviderName(baseURL string) string {
 	}
 }
 
+// ClassifyErrorClass buckets err into a closed error.class enum.
+func ClassifyErrorClass(err error, httpStatus int) string {
+	return classifyErrorClass(err, httpStatus)
+}
+
 func classifyErrorClass(err error, httpStatus int) string {
 	if err == nil {
 		return ErrorClassOK
@@ -191,7 +196,7 @@ func (m *ModelSpan) End(err error, usage TokenUsage) {
 			outcome = OutcomeError
 		}
 		m.span.RecordError(err)
-		m.span.SetStatus(codes.Error, err.Error())
+		m.span.SetStatus(codes.Error, errClass)
 	} else {
 		m.span.SetStatus(codes.Ok, "")
 	}

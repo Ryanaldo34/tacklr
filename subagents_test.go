@@ -744,7 +744,10 @@ func TestSpawnWorker_inheritsParentSkills(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "pack", Base: pack, Skills: "."}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.MustNewMountSession(t.Name(), reg)
+	ms, err := vfs.NewMountSession(t.Name(), reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "work"}); err != nil {
 		t.Fatal(err)
 	}
@@ -846,7 +849,10 @@ func TestSpawnWorker_resumeKeepsParentVFS(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: t.TempDir()}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.MustNewMountSession(t.Name(), reg)
+	ms, err := vfs.NewMountSession(t.Name(), reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
 		t.Fatal(err)
 	}
@@ -862,7 +868,7 @@ func TestSpawnWorker_resumeKeepsParentVFS(t *testing.T) {
 		MountSession:    ms,
 		Brain:           eng,
 		SearchNamespace: &ns,
-		WriteUnattended: true,
+		writeUnattended: true,
 		SubAgents: []*SubAgent{
 			{WorkerName: "researcher", Model: workerModel, Tools: []*Tool{interruptTool}},
 		},

@@ -58,7 +58,7 @@ func (s *MemoryStore) Put(_ context.Context, obj Object) error {
 // SoftDelete implements ObjectWriter.
 func (s *MemoryStore) SoftDelete(_ context.Context, scope Scope, id uuid.UUID) error {
 	if id == uuid.Nil {
-		return fmt.Errorf("brain: object id is required")
+		return ErrObjectIDRequired
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

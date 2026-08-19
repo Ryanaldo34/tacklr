@@ -60,18 +60,18 @@ func (Checkpointer) Apply(cp stores.SessionCheckpoint, sm *SessionManager) (Appl
 	if err := streaming.ValidateMessages(cp.ContextWindow); err != nil {
 		return AppliedCheckpoint{}, fmt.Errorf("checkpointer: invalid context window: %w", err)
 	}
-	pendingInterrupts, resolvedInterrupts, err := decodeInterruptMaps(cp.State.PendingInterrupts, cp.State.ResolvedInterrupts)
+	pendingInterrupts, resolvedInterrupts, err := decodeInterruptMaps(cp.PendingInterrupts(), cp.ResolvedInterrupts())
 	if err != nil {
 		return AppliedCheckpoint{}, err
 	}
-	if cp.State.Version != stores.CheckpointVersion {
-		return AppliedCheckpoint{}, fmt.Errorf("checkpointer: unsupported checkpoint version %d", cp.State.Version)
+	if cp.Version() != stores.CheckpointVersion {
+		return AppliedCheckpoint{}, fmt.Errorf("checkpointer: unsupported checkpoint version %d", cp.Version())
 	}
-	if err := sm.applyCheckpoint(cp.State.UserState, cp.State.Modules); err != nil {
+	if err := sm.applyCheckpoint(cp.UserState(), cp.Modules()); err != nil {
 		return AppliedCheckpoint{}, err
 	}
 	sm.replaceInterrupts(pendingInterrupts, resolvedInterrupts)
-	ptc := cp.State.PendingToolCalls
+	ptc := cp.PendingToolCalls()
 	if ptc == nil {
 		ptc = make(map[string]stores.PendingToolCall)
 	}

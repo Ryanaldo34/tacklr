@@ -88,15 +88,6 @@ func NewMountSession(sessionID string, reg *BackendRegistry) (*MountSession, err
 	return &MountSession{id: sessionID, reg: reg, tab: newMountTable()}, nil
 }
 
-// MustNewMountSession is for tests. It panics if NewMountSession fails.
-func MustNewMountSession(sessionID string, reg *BackendRegistry) *MountSession {
-	ms, err := NewMountSession(sessionID, reg)
-	if err != nil {
-		panic(err)
-	}
-	return ms
-}
-
 // HostDir is the directory last passed to FuseMount, or "".
 // Hosts and run_command use this as cwd. Harness tool results, errors,
 // Specs, and checkpoints must never print it. The child
@@ -474,12 +465,7 @@ func (t *mountTable) resolve(virtualPath string) (p Provider, point, rel string,
 	return e.provider, point, rel, e.spec.ReadOnly, nil
 }
 
-func cleanVirtualPath(s string) (string, error) {
-	if s == "" || !path.IsAbs(s) || strings.ContainsAny(s, "\\\x00") {
-		return "", ErrInvalidPath
-	}
-	return path.Clean(s), nil
-}
+func cleanVirtualPath(s string) (string, error) { return CleanPath(s) }
 
 func attachSkillsTo(ctx context.Context, reg *BackendRegistry, sessionID string, tab *mountTable) error {
 	members := reg.skillMembers()

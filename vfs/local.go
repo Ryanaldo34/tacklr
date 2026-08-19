@@ -123,7 +123,7 @@ func (p localProvider) OpenDocument(ctx context.Context, name string, reg *Conte
 		return nil, err
 	}
 	if fi.IsDir {
-		return nil, fmt.Errorf("vfs: %s is a directory", name)
+		return nil, fmt.Errorf("%w: %s", ErrIsDir, name)
 	}
 	if fi.Size > int64(MaxReadFileBytes) {
 		return nil, errFileExceeds(MaxReadFileBytes)

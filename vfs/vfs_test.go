@@ -26,7 +26,10 @@ func TestMountSession_localSession(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ms := vfs.MustNewMountSession("sess-1", reg)
+	ms, err := vfs.NewMountSession("sess-1", reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := ms.Materialize(ctx, []vfs.MountSpec{
 		{Point: "/work", Profile: "scratch"},
 		{Point: "/work/nested", Profile: "scratch", ReadOnly: true, Params: map[string]string{"subpath": "nested"}},
@@ -139,7 +142,10 @@ func TestMountSession_localSession(t *testing.T) {
 
 	// Rematerialize from Specs (restart shape)
 	specs := ms.Specs()
-	ms2 := vfs.MustNewMountSession("sess-2", reg)
+	ms2, err := vfs.NewMountSession("sess-2", reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := ms2.Materialize(ctx, specs); err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +177,10 @@ func TestMountSession_byteProviderWriteAndLimits(t *testing.T) {
 	if err := reg.Register(memFactory{id: "mem", store: store}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.MustNewMountSession("mem-sess", reg)
+	ms, err := vfs.NewMountSession("mem-sess", reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/mem", Profile: "mem"}); err != nil {
 		t.Fatal(err)
 	}
@@ -274,7 +283,10 @@ func TestDocument_session(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.MustNewMountSession("doc-sess", reg)
+	ms, err := vfs.NewMountSession("doc-sess", reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := ms.Materialize(ctx, []vfs.MountSpec{
 		{Point: "/work", Profile: "scratch"},
 		{Point: "/ro", Profile: "scratch", ReadOnly: true, Params: map[string]string{"subpath": "ro"}},
@@ -603,7 +615,10 @@ func TestMountSession_configErrors(t *testing.T) {
 	if !reg.HasProfile("scratch") || reg.HasProfile("nope") {
 		t.Fatal("HasProfile")
 	}
-	ms := vfs.MustNewMountSession("s", reg)
+	ms, err := vfs.NewMountSession("s", reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/x", Profile: "nope"}); !errors.Is(err, vfs.ErrUnknownProfile) {
 		t.Fatalf("unknown profile: %v", err)
 	}
@@ -660,7 +675,10 @@ func TestMountSession_configErrors(t *testing.T) {
 		t.Fatalf("codec cancel: %v", err)
 	}
 	// materialize duplicate points
-	ms3 := vfs.MustNewMountSession("s3", reg)
+	ms3, err := vfs.NewMountSession("s3", reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := ms3.Materialize(ctx, []vfs.MountSpec{
 		{Point: "/d", Profile: "scratch"},
 		{Point: "/d", Profile: "scratch"},
@@ -673,60 +691,6 @@ func TestMountSession_configErrors(t *testing.T) {
 	if err := ms.Mount(cctx2, vfs.MountSpec{Point: "/z", Profile: "scratch"}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("mount cancel: %v", err)
 	}
-}
-
-// TestKernelWritable: plaintext IdentityCodec is FUSE-writable; office/cloud
-// types and a registered non-identity codec are not.
-func TestKernelWritable(t *testing.T) {
-	for _, mt := range []string{
-		"text/plain", "text/markdown", "text/x-go", "application/json",
-		"application/yaml", "text/plain; charset=utf-8",
-	} {
-		if !vfs.KernelWritable(mt) {
-			t.Fatalf("KernelWritable(%q) = false, want plaintext writable", mt)
-		}
-	}
-	for _, mt := range []string{
-		"", "application/octet-stream", "image/png",
-		"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-		"application/vnd.google-apps.document", "application/vnd.notion.page",
-	} {
-		if vfs.KernelWritable(mt) {
-			t.Fatalf("KernelWritable(%q) = true, want EROFS", mt)
-		}
-	}
-	if err := vfs.DefaultContentRegistry().Register(projectedCodec{}); err != nil {
-		t.Fatal(err)
-	}
-	if vfs.KernelWritable("application/x-test-projected") {
-		t.Fatal("registered non-identity codec must not be kernel-writable")
-	}
-	if !vfs.KernelWritableFile(vfs.FileInfo{Name: "a.go", MediaType: "text/x-go"}) {
-		t.Fatal("KernelWritableFile go")
-	}
-	if vfs.KernelWritableFile(vfs.FileInfo{Name: "pic.png", MediaType: "image/png"}) {
-		t.Fatal("KernelWritableFile png")
-	}
-	if vfs.KernelWritableFile(vfs.FileInfo{Name: "a.go"}) {
-		t.Fatal("KernelWritableFile empty media type")
-	}
-	doc, err := vfs.DefaultContentRegistry().Decode(context.Background(), "/x.go", "text/x-go; charset=utf-8", []byte("package x\n"))
-	if err != nil {
-		t.Fatalf("default registry must own extension-map types: %v", err)
-	}
-	if doc.MediaType() != "text/x-go" {
-		t.Fatalf("decoded media type %q", doc.MediaType())
-	}
-	if !vfs.KernelCreateOK("README") || !vfs.KernelCreateOK("note.txt") {
-		t.Fatal("KernelCreateOK plaintext")
-	}
-}
-
-type projectedCodec struct{}
-
-func (projectedCodec) MediaTypes() []string { return []string{"application/x-test-projected"} }
-func (projectedCodec) Decode(_ context.Context, p, mt string, data []byte) (vfs.Document, error) {
-	return vfs.NewTextDocument(p, mt, "utf-8", string(data)), nil
 }
 
 type emptyTypesCodec struct{}

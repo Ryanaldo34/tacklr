@@ -35,7 +35,10 @@ func TestMountSession_s3MinIO(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ms := vfs.MustNewMountSession("sess-s3", reg)
+	ms, err := vfs.NewMountSession("sess-s3", reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := ms.Materialize(ctx, []vfs.MountSpec{
 		{Point: "/data", Profile: "s3", Params: map[string]string{"prefix": "runs/1"}},
 		{Point: "/ro", Profile: "s3", ReadOnly: true, Params: map[string]string{"prefix": "readonly"}},

@@ -31,12 +31,15 @@ func TestNewAgent_constructFailClosed(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "skills", Base: root, Skills: "."}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.MustNewMountSession(t.Name(), reg)
+	ms, err := vfs.NewMountSession(t.Name(), reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := ms.AttachSkills(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ms.Close() })
-	_, err := NewAgent(context.Background(), AgentOptions{
+	_, err = NewAgent(context.Background(), AgentOptions{
 		Config:       Config{MaxWindowSize: 8192},
 		Model:        &mockStrategy{},
 		MountSession: ms,

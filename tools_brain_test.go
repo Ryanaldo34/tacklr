@@ -600,7 +600,10 @@ func TestBrainTools_engramPathGraph(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: t.TempDir()}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.MustNewMountSession("engram-graph", reg)
+	ms, err := vfs.NewMountSession("engram-graph", reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
 		t.Fatal(err)
 	}

@@ -342,11 +342,10 @@ func TestSetConfigOption_unknownSession(t *testing.T) {
 
 func TestResolveSelectionViaElicitation_withQuestion(t *testing.T) {
 	// Drive accept path with question stashed on harness runtime.
-	optionsJSON := `[{"title":"A","description":"","isRecommended":true},{"title":"B","description":"","isRecommended":false}]`
+	optionsJSON := `{"question":"Which?","options":[{"title":"A","description":"","isRecommended":true},{"title":"B","description":"","isRecommended":false}]}`
 	tool := tacklr.NewTool(tacklr.ToolConfig{
 		Name: "ask_user",
 		Handler: func(ctx context.Context, _ struct{}, runtime tacklr.HarnessRuntime) (string, error) {
-			_ = runtime.StateSet("_ask_user_question:"+runtime.CurrentToolCallID(), "Which?")
 			intr, err := runtime.RaiseInterrupt("user_selection_choice", []byte(optionsJSON))
 			if err != nil {
 				return "", err

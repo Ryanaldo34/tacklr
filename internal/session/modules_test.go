@@ -80,11 +80,11 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cp.State.Modules["search"]) == 0 {
+	if len(cp.Modules()["search"]) == 0 {
 		t.Fatal("checkpoint must include search context")
 	}
-	if cp.State.Version != stores.CheckpointVersion {
-		t.Fatalf("checkpoint schema version = %d", cp.State.Version)
+	if cp.Version() != stores.CheckpointVersion {
+		t.Fatalf("checkpoint schema version = %d", cp.Version())
 	}
 
 	// In-process Apply: typed park/permission maps + SearchContext blob.
@@ -149,12 +149,12 @@ func TestTypedCheckpoint_rejectsNamedModuleWithoutPartialApply(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	checkpoint.State.Modules["permissions"] = json.RawMessage(`{"allow":`)
+	cp := checkpoint.WithModule("permissions", json.RawMessage(`{"allow":`))
 	target := session.NewSessionManager()
 	target.Plan.SetDocument("target")
 
 	// Act
-	_, err = session.NewCheckpointer().Apply(*checkpoint, target)
+	_, err = session.NewCheckpointer().Apply(cp, target)
 
 	// Assert
 	if err == nil || target.Plan.Document() != "target" {
@@ -183,8 +183,7 @@ func TestTypedCheckpoint_rejectsCorruptModuleSections(t *testing.T) {
 	}
 	for module, raw := range cases {
 		t.Run(module, func(t *testing.T) {
-			wire := *checkpoint
-			wire.State.Modules[module] = raw
+			wire := checkpoint.WithModule(module, raw)
 			target := session.NewSessionManager()
 			target.Plan.SetDocument("target")
 			if _, err := session.NewCheckpointer().Apply(wire, target); err == nil {
@@ -211,11 +210,11 @@ func TestTypedCheckpoint_rejectsCorruptUserState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	checkpoint.State.UserState["bad"] = json.RawMessage(`{`)
+	cp := checkpoint.WithUserStateKey("bad", json.RawMessage(`{`))
 	target := session.NewSessionManager()
 
 	// Act
-	_, err = session.NewCheckpointer().Apply(*checkpoint, target)
+	_, err = session.NewCheckpointer().Apply(cp, target)
 
 	// Assert
 	if err == nil {

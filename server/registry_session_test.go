@@ -490,7 +490,10 @@ func TestRunTurn_constructFailures(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "local", Base: t.TempDir()}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.MustNewMountSession("dot-sess", reg)
+	ms, err := vfs.NewMountSession("dot-sess", reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := ms.Materialize(ctx, []vfs.MountSpec{{Point: "/work", Profile: "local"}}); err != nil {
 		t.Fatal(err)
 	}

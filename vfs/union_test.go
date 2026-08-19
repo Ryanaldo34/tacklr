@@ -35,7 +35,10 @@ func unionSession(t *testing.T, hosts map[string]string, members []vfs.MountSpec
 			t.Fatal(err)
 		}
 	}
-	ms := vfs.MustNewMountSession(t.Name(), reg)
+	ms, err := vfs.NewMountSession(t.Name(), reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { _ = ms.Close() })
 	if err := ms.Mount(t.Context(), vfs.MountSpec{
 		Point: "/skills", Profile: "skills", IndexPolicy: "none", Members: members,
@@ -65,7 +68,10 @@ func TestMountSession_unionMergesBackends(t *testing.T) {
 	if err := vfs.CheckMount(ctx, reg, t.Name(), spec); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.MustNewMountSession(t.Name(), reg)
+	ms, err := vfs.NewMountSession(t.Name(), reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { _ = ms.Close() })
 	if err := ms.Mount(ctx, spec); err != nil {
 		t.Fatal(err)
@@ -129,7 +135,10 @@ func TestMountSession_unionNameCollisionAtMount(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "d", Base: d}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.MustNewMountSession(t.Name(), reg)
+	ms, err := vfs.NewMountSession(t.Name(), reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { _ = ms.Close() })
 	if err := ms.Mount(t.Context(), vfs.MountSpec{
 		Point: "/skills", Profile: "skills",
@@ -158,7 +167,10 @@ func TestMountSession_unionConstructErrors(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "a", Base: t.TempDir()}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.MustNewMountSession(t.Name(), reg)
+	ms, err := vfs.NewMountSession(t.Name(), reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { _ = ms.Close() })
 	ctx := t.Context()
 
@@ -239,7 +251,11 @@ func TestMountSession_unionMissingAndCanceled(t *testing.T) {
 	if _, err := ms.ReadText(canceled, "/skills/x"); err == nil {
 		t.Fatal("ReadText canceled")
 	}
-	if err := vfs.MustNewMountSession("union-cancel", vfs.NewBackendRegistry()).Mount(canceled, vfs.MountSpec{
+	cancelSess, err := vfs.NewMountSession("union-cancel", vfs.NewBackendRegistry())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cancelSess.Mount(canceled, vfs.MountSpec{
 		Point: "/skills", Profile: "skills", Members: []vfs.MountSpec{{Profile: "a"}},
 	}); err == nil {
 		t.Fatal("Mount canceled")
@@ -257,7 +273,10 @@ func TestMountSession_attachesSkillsFromFactory(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "pack", Base: pack, Skills: "."}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.MustNewMountSession(t.Name(), reg)
+	ms, err := vfs.NewMountSession(t.Name(), reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { _ = ms.Close() })
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "work"}); err != nil {
 		t.Fatal(err)

@@ -679,12 +679,7 @@ func chunkID(parent uuid.UUID, pos int) uuid.UUID {
 	return uuid.NewSHA1(parent, buf)
 }
 
-func cleanPath(p string) (string, error) {
-	if p == "" || !path.IsAbs(p) || strings.ContainsAny(p, "\\\x00") {
-		return "", vfs.ErrInvalidPath
-	}
-	return path.Clean(p), nil
-}
+func cleanPath(p string) (string, error) { return vfs.CleanPath(p) }
 
 func walk(ctx context.Context, ms *vfs.MountSession, vpath string, fn func(vpath string, isDir bool) error) error {
 	if err := ctx.Err(); err != nil {

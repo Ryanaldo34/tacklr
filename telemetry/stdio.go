@@ -13,13 +13,13 @@ type StdioWatchDog struct{}
 func NewStdioWatchDog() *StdioWatchDog { return &StdioWatchDog{} }
 
 func (s *StdioWatchDog) RecordThinking(msg *streaming.Message) error {
-	slog.Debug("agent thinking", "content", msg.Content)
+	slog.Debug("agent thinking", "content_len", len(msg.Content))
 	return nil
 }
 
 func (s *StdioWatchDog) RecordOutput(msg *streaming.Message) error {
 	if msg.Role == streaming.RoleAssistant {
-		slog.Info("agent output", "content", msg.Content, "tool_calls", len(msg.ToolCalls))
+		slog.Info("agent output", "content_len", len(msg.Content), "tool_calls", len(msg.ToolCalls))
 	}
 	return nil
 }
@@ -44,6 +44,6 @@ func (s *StdioWatchDog) RecordToolCalls(msg *streaming.Message) error {
 }
 
 func (s *StdioWatchDog) RecordToolResult(msg *streaming.Message) error {
-	slog.Info("tool result", "tool_call_id", msg.ToolCallID, "content", msg.Content)
+	slog.Info("tool result", "tool_call_id", msg.ToolCallID, "content_len", len(msg.Content))
 	return nil
 }

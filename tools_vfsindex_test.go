@@ -24,7 +24,10 @@ func vfsIndexHarness(t *testing.T, withNS bool) (*AgentHarness, *vfs.MountSessio
 	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.MustNewMountSession("vfs-idx-tools", reg)
+	ms, err := vfs.NewMountSession("vfs-idx-tools", reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +46,7 @@ func vfsIndexHarness(t *testing.T, withNS bool) (*AgentHarness, *vfs.MountSessio
 		MountSession:    ms,
 		Model:           &mockStrategy{},
 		Brain:           eng,
-		WriteUnattended: true,
+		writeUnattended: true,
 	}
 	if withNS {
 		opts.SearchNamespace = &ns
@@ -272,7 +275,10 @@ func TestVFSIndexTools_prefixAutoIndex(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.MustNewMountSession("policy-prefix", reg)
+	ms, err := vfs.NewMountSession("policy-prefix", reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := ms.Mount(ctx, vfs.MountSpec{
 		Point: "/work", Profile: "scratch", IndexPolicy: "  Prefix  ",
 	}); err != nil {
@@ -308,7 +314,10 @@ func TestKnowledgeSaveSearchRead(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.MustNewMountSession("save-mem", reg)
+	ms, err := vfs.NewMountSession("save-mem", reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
 		t.Fatal(err)
 	}
@@ -435,7 +444,10 @@ func TestKnowledgeSave_rootsMount(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.MustNewMountSession("save-roots", reg)
+	ms, err := vfs.NewMountSession("save-roots", reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
 		t.Fatal(err)
 	}
@@ -506,7 +518,10 @@ func TestRun_workspaceResearchTurn(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.MustNewMountSession("research-turn", reg)
+	ms, err := vfs.NewMountSession("research-turn", reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
 		t.Fatal(err)
 	}
@@ -609,7 +624,7 @@ func TestRun_workspaceResearchTurn(t *testing.T) {
 		Brain:           eng,
 		SearchNamespace: &ns,
 		BrainWriteKinds: brain.WriteKinds{Discovery: "Discovery"},
-		WriteUnattended: true,
+		writeUnattended: true,
 		Model:           strategy,
 		SubAgents: []*SubAgent{{
 			WorkerName:  "researcher",
@@ -679,7 +694,10 @@ func TestPathNativeGraphLinkExpand(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.MustNewMountSession("path-graph", reg)
+	ms, err := vfs.NewMountSession("path-graph", reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
 		t.Fatal(err)
 	}

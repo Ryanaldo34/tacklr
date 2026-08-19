@@ -351,8 +351,9 @@ func TestAskUserChoiceTool_raiseAndResume(t *testing.T) {
 	if !errors.As(err, &intr) {
 		t.Fatalf("expected Interrupt, got %T %v", err, err)
 	}
-	if v, ok := rt.StateGet(askUserQuestionStateKey("tc_ask")); !ok || v != "Which approach?" {
-		t.Errorf("question state = %v ok=%v", v, ok)
+	var usi *interrupt.UserSelectionInterrupt
+	if !errors.As(err, &usi) || usi.Question != "Which approach?" {
+		t.Errorf("interrupt question = %+v", usi)
 	}
 
 	// Resolve and re-invoke (harness re-execution pattern).
@@ -481,18 +482,6 @@ func TestRun_askUserChoice_withoutDescription_formatsSelection(t *testing.T) {
 	}
 	if interruptID == "" {
 		t.Fatal("expected interrupt")
-	}
-	if q := h.AskUserQuestion("ask1"); q != "Pick?" {
-		t.Fatalf("question = %q", q)
-	}
-	if h.AskUserQuestion("") != "" || h.AskUserQuestion("missing") != "" {
-		t.Fatal("empty/missing tool call ids should yield empty question")
-	}
-	if err := h.session.StateSet(askUserQuestionStateKey("bad"), 123); err != nil {
-		t.Fatal(err)
-	}
-	if h.AskUserQuestion("bad") != "" {
-		t.Fatal("non-string ask_user_question state should be ignored")
 	}
 	resumed, err := h.ReturnFromInterrupt(context.Background(), map[string][]byte{
 		interruptID: []byte(`{"selectionIdx":0}`),

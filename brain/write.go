@@ -362,7 +362,7 @@ func isReservedStoreProp(name string) bool {
 
 func requireObjectIdentity(obj Object) error {
 	if obj.ID == uuid.Nil {
-		return fmt.Errorf("brain: object id is required")
+		return ErrObjectIDRequired
 	}
 	if strings.TrimSpace(obj.Kind) == "" {
 		return fmt.Errorf("brain: object kind is required")

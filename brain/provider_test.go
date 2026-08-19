@@ -34,7 +34,10 @@ func TestBrainProvider_prefixWriteReadDirRemoveAndIR(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.MustNewMountSession("engram", reg)
+	ms, err := vfs.NewMountSession("engram", reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := ms.Mount(ctx, vfs.MountSpec{
 		Point: "/engram", Profile: "brain",
 		Params: map[string]string{"mode": "prefix"},
@@ -261,7 +264,10 @@ func TestBrainProvider_rootsLayout(t *testing.T) {
 	if reg.HasProfile("brain") == false {
 		t.Fatal("default profile")
 	}
-	ms := vfs.MustNewMountSession("roots", reg)
+	ms, err := vfs.NewMountSession("roots", reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := ms.Mount(ctx, vfs.MountSpec{
 		Point: "/person", Profile: "brain",
 		Params: map[string]string{"mode": "roots", "kind": "Person"},
@@ -308,7 +314,10 @@ func TestBrainProvider_openCatalogListsKindsInUseAndMkdir(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.MustNewMountSession("open", reg)
+	ms, err := vfs.NewMountSession("open", reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/engram", Profile: "brain"}); err != nil {
 		t.Fatal(err)
 	}
@@ -392,7 +401,10 @@ func TestBrainFactory_openRejectsInvalidConfig(t *testing.T) {
 	if err := reg.Register(valid); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.MustNewMountSession("factory", reg)
+	ms, err := vfs.NewMountSession("factory", reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := ms.Mount(ctx, vfs.MountSpec{
 		Point: "/person", Profile: "brain",
 		Params: map[string]string{"mode": "roots", "kinds": "Note"},
@@ -453,7 +465,10 @@ func TestBrainFactory_openRejectsInvalidConfig(t *testing.T) {
 	}
 
 	// prefix kinds= allow-list: ReadDir lists only the allowed kind after a write.
-	ms2 := vfs.MustNewMountSession("kinds-allow", reg)
+	ms2, err := vfs.NewMountSession("kinds-allow", reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := ms2.Mount(ctx, vfs.MountSpec{
 		Point: "/engram", Profile: "brain",
 		Params: map[string]string{"mode": "prefix", "kinds": "Note"},

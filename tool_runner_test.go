@@ -22,7 +22,7 @@ func TestHarness_planningWriteLock_thenUnlockAfterCreatePlan(t *testing.T) {
 	writeTool := NewTool(ToolConfig{
 		Name:   "mutate",
 		Access: ToolWriteAccess,
-		OnCall: OnCalls(ToolPermissionOnCall),
+		OnCall: []OnCallFunc{ToolPermissionOnCall},
 		Handler: func(ctx context.Context) (string, error) {
 			calls++
 			return "mutated", nil
@@ -123,7 +123,7 @@ func TestHarness_toolPermission_allowAlwaysRemembers(t *testing.T) {
 	var handlerCalls int
 	tool := NewTool(ToolConfig{
 		Name:   "sensitive",
-		OnCall: OnCalls(ToolPermissionOnCall),
+		OnCall: []OnCallFunc{ToolPermissionOnCall},
 		Handler: func(ctx context.Context) (string, error) {
 			handlerCalls++
 			return "secret-ok", nil
@@ -214,7 +214,7 @@ func TestHarness_toolPermission_allowAlwaysRemembers(t *testing.T) {
 func TestHarness_toolPermission_rejectAlwaysRemembers(t *testing.T) {
 	tool := NewTool(ToolConfig{
 		Name:    "sensitive",
-		OnCall:  OnCalls(ToolPermissionOnCall),
+		OnCall:  []OnCallFunc{ToolPermissionOnCall},
 		Handler: func(ctx context.Context) (string, error) { return "nope", nil },
 	})
 	var invokeCount int
@@ -363,7 +363,7 @@ func TestHarness_hostInterceptor_keepsPermissionGate(t *testing.T) {
 	tool := NewTool(ToolConfig{
 		Name:   "gated",
 		Access: ToolWriteAccess,
-		OnCall: OnCalls(ToolPermissionOnCall),
+		OnCall: []OnCallFunc{ToolPermissionOnCall},
 		Handler: func(ctx context.Context) (string, error) {
 			return "should-not-run", nil
 		},
@@ -386,7 +386,7 @@ func TestHarness_hostInterceptor_keepsPermissionGate(t *testing.T) {
 		Config:              Config{MaxWindowSize: 8192},
 		Model:               strategy,
 		Tools:               []*Tool{tool},
-		DisablePlanningLock: true,
+		disablePlanningLock: true,
 		ToolInterceptors: []ToolInterceptor{
 			func(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error) {
 				hostSaw = inv.Tool.Name
@@ -414,7 +414,7 @@ func TestHarness_toolPermission_rejectOnceDeniesWrite(t *testing.T) {
 	tool := NewTool(ToolConfig{
 		Name:   "mutate",
 		Access: ToolWriteAccess,
-		OnCall: OnCalls(ToolPermissionOnCall),
+		OnCall: []OnCallFunc{ToolPermissionOnCall},
 		Handler: func(ctx context.Context) (string, error) {
 			calls++
 			return "mutated", nil
@@ -438,7 +438,7 @@ func TestHarness_toolPermission_rejectOnceDeniesWrite(t *testing.T) {
 		Config:              Config{MaxWindowSize: 8192},
 		Model:               strategy,
 		Tools:               []*Tool{tool},
-		DisablePlanningLock: true,
+		disablePlanningLock: true,
 	})
 	ch, err := ah.Run(context.Background(), "write")
 	if err != nil {
@@ -506,7 +506,7 @@ func TestOnCallMiddleware_permissionThenInvoke(t *testing.T) {
 	var seen string
 	tool := NewTool(ToolConfig{
 		Name:   "mutate",
-		OnCall: OnCalls(func(ToolInvocation) Interrupt { return nil }, ToolPermissionOnCall),
+		OnCall: []OnCallFunc{func(ToolInvocation) Interrupt { return nil }, ToolPermissionOnCall},
 		Handler: func(ctx context.Context, args struct {
 			Path string `json:"path"`
 		}) (string, error) {
@@ -540,7 +540,7 @@ func TestOnCallMiddleware_permissionMemory(t *testing.T) {
 	var calls int
 	tool := NewTool(ToolConfig{
 		Name:   "sensitive",
-		OnCall: OnCalls(ToolPermissionOnCall),
+		OnCall: []OnCallFunc{ToolPermissionOnCall},
 		Handler: func(ctx context.Context) (string, error) {
 			calls++
 			return "secret", nil
@@ -573,7 +573,7 @@ func TestOnCallMiddleware_permissionMemory(t *testing.T) {
 func TestOnCallMiddleware_requiresRuntime(t *testing.T) {
 	tool := NewTool(ToolConfig{
 		Name:    "gated",
-		OnCall:  OnCalls(ToolPermissionOnCall),
+		OnCall:  []OnCallFunc{ToolPermissionOnCall},
 		Handler: func(ctx context.Context) (string, error) { return "x", nil },
 	})
 	_, _, err := newToolRunner(onCallMiddleware(nil)).Run(t.Context(), ToolInvocation{
@@ -599,14 +599,17 @@ func TestHarness_writeTool_parksPermission(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: t.TempDir()}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.MustNewMountSession("write-perm", reg)
+	ms, err := vfs.NewMountSession("write-perm", reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
 		t.Fatal(err)
 	}
 	var n int
 	ah := mustNewAgent(t, AgentOptions{
 		Config:              Config{MaxWindowSize: 8192},
-		DisablePlanningLock: true,
+		disablePlanningLock: true,
 		MountSession:        ms,
 		Model: &mockStrategy{
 			invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, events chan<- LLMResponseChunk) {

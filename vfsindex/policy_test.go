@@ -19,7 +19,10 @@ func TestBridge_policyAndTrack(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: t.TempDir()}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.MustNewMountSession("br", reg)
+	ms, err := vfs.NewMountSession("br", reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var composed []string
 	ms.SetAfterPersist(func(_ context.Context, path string) error {
 		composed = append(composed, path)

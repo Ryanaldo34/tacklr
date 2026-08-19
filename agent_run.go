@@ -90,6 +90,9 @@ func (a *AgentHarness) startTurn(ctx context.Context, user *Message) (<-chan Str
 
 		a.pairOpenToolCalls("unpaired tool call")
 		if user != nil {
+			if a.hasOpenToolWork() {
+				a.finalizeCancelledWork(nil)
+			}
 			if err := a.addToContext(ctx, user, out); err != nil {
 				if ctx.Err() != nil {
 					emitCancelled()

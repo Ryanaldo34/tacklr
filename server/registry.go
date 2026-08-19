@@ -17,7 +17,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/ryanaldo34/tacklr"
-	"github.com/ryanaldo34/tacklr/internal/hostcontrol"
 	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/streaming"
@@ -105,14 +104,6 @@ func (s *EventStream) SessionID() string {
 		return ""
 	}
 	return s.harness.SessionID()
-}
-
-// AskUserQuestion returns the ask_user_choice question for toolCallID, or empty.
-func (s *EventStream) AskUserQuestion(toolCallID string) string {
-	if s == nil || s.harness == nil {
-		return ""
-	}
-	return s.harness.AskUserQuestion(toolCallID)
 }
 
 // VFS is the session mount table, or nil.
@@ -463,12 +454,6 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 	h, _, err := r.loadAgent(ctx, agentID, threadID, load, mcpServers, req.AllowMissingCheckpoint)
 	if err != nil {
 		return nil, fmt.Errorf("load agent %q: %w", agentID, err)
-	}
-
-	// Parked interrupt + new user prompt (ACP session/prompt): clear park and
-	// pair cancelled tools before the new turn. Resume (Responses) is unchanged.
-	if req.Prompt != "" && len(req.Responses) == 0 && h.HostHasOpenToolWork(hostcontrol.Token{}) {
-		h.HostFinalizeCancelledWork(ctx, hostcontrol.Token{})
 	}
 
 	turnKind := "prompt"

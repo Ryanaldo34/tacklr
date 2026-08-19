@@ -32,14 +32,14 @@ func newRunCommand(ms *vfs.MountSession, permissionRequired bool) *Tool {
 			}
 			cmdStr := strings.TrimSpace(args.Command)
 			if cmdStr == "" {
-				return "", fmt.Errorf("run_command: command is required")
+				return "", fmt.Errorf("run_command: command is required: %w", ErrInvalid)
 			}
 			rt.EmitUpdate("Running " + cmdStr)
 			return command.Run(ctx, dir, cmdStr)
 		},
 	}
 	if permissionRequired {
-		cfg.OnCall = OnCalls(ToolPermissionOnCall)
+		cfg.OnCall = []OnCallFunc{ToolPermissionOnCall}
 	}
 	return NewTool(cfg)
 }

@@ -48,7 +48,10 @@ func TestLoader_s3Mount(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.MustNewMountSession("skills-s3", reg)
+	ms, err := vfs.NewMountSession("skills-s3", reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := ms.AttachSkills(ctx); err != nil {
 		t.Fatal(err)
 	}

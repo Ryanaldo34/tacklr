@@ -58,16 +58,16 @@ func TestInMemoryStore_saveLoadRoundTrip(t *testing.T) {
 	if loaded.ContextWindow[0].Content != "hello" || loaded.ContextWindow[1].Content != "world" {
 		t.Errorf("context = %+v", loaded.ContextWindow)
 	}
-	ptc, ok := loaded.State.PendingToolCalls["call_1"]
+	ptc, ok := loaded.PendingToolCalls()["call_1"]
 	if !ok || ptc.ToolCall == nil || ptc.ToolCall.Name != "greet" || !ptc.InterruptActive {
-		t.Errorf("pending tool calls = %+v", loaded.State.PendingToolCalls)
+		t.Errorf("pending tool calls = %+v", loaded.PendingToolCalls())
 	}
-	if len(loaded.State.UserState["plan"]) == 0 || len(loaded.State.Modules["module"]) == 0 {
-		t.Errorf("checkpoint state missing: user=%+v modules=%+v", loaded.State.UserState, loaded.State.Modules)
+	if len(loaded.UserState()["plan"]) == 0 || len(loaded.Modules()["module"]) == 0 {
+		t.Errorf("checkpoint state missing: user=%+v modules=%+v", loaded.UserState(), loaded.Modules())
 	}
-	if len(loaded.State.PendingInterrupts) == 0 || len(loaded.State.ResolvedInterrupts) == 0 {
+	if len(loaded.PendingInterrupts()) == 0 || len(loaded.ResolvedInterrupts()) == 0 {
 		t.Errorf("interrupt blobs empty: pending=%d resolved=%d",
-			len(loaded.State.PendingInterrupts), len(loaded.State.ResolvedInterrupts))
+			len(loaded.PendingInterrupts()), len(loaded.ResolvedInterrupts()))
 	}
 }
 
@@ -111,9 +111,9 @@ func TestNewCheckpoint_nilInterruptBlobsAndMarshalError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cp.State.PendingInterrupts != nil || cp.State.ResolvedInterrupts != nil {
+	if cp.PendingInterrupts() != nil || cp.ResolvedInterrupts() != nil {
 		t.Fatalf("nil blobs should stay nil: pending=%v resolved=%v",
-			cp.State.PendingInterrupts, cp.State.ResolvedInterrupts)
+			cp.PendingInterrupts(), cp.ResolvedInterrupts())
 	}
 	// json.Marshal of a channel fails — exercise error return path.
 	if _, err := NewCheckpoint(nil, nil, nil, nil, make(chan int), nil); err == nil {

@@ -398,3 +398,19 @@ func AgentIDFromContext(ctx context.Context) string {
 	s, _ := ctx.Value(agentIDContextKey{}).(string)
 	return s
 }
+
+type sessionIDContextKey struct{}
+
+// ContextWithSessionID attaches session_id for child spans.
+func ContextWithSessionID(ctx context.Context, sessionID string) context.Context {
+	if sessionID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, sessionIDContextKey{}, sessionID)
+}
+
+// SessionIDFromContext returns session_id or "".
+func SessionIDFromContext(ctx context.Context) string {
+	s, _ := ctx.Value(sessionIDContextKey{}).(string)
+	return s
+}

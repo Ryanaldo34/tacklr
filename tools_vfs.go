@@ -2,9 +2,7 @@ package tacklr
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"path"
 	"strings"
 	"time"
 
@@ -12,8 +10,7 @@ import (
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
-// vfsTools closes over session mounts. Rev checks live here so MountSession
-// stays a thin path/IR API (no high-level ReplaceLinesAt surface).
+// vfsTools is the thin tool adapter over MountSession.Apply / ReadLines / ReadText.
 type vfsTools struct {
 	ms                 *vfs.MountSession
 	permissionRequired bool
@@ -238,44 +235,47 @@ Projected Docs/Word: use block_id or blocks. Inline marks in block text: **bold*
 			case n > 1:
 				return "", fmt.Errorf("write: exactly one of content|ir_text, old, block_id, start, blocks")
 			}
-			var fullBody string
+			mut := vfs.Mutation{
+				Rev:            args.Rev,
+				Old:            args.Old,
+				New:            args.New,
+				ReplaceAll:     args.ReplaceAll,
+				Start:          args.Start,
+				End:            args.End,
+				Lines:          args.Lines,
+				Body:           args.Body,
+				BlockID:        args.BlockID,
+				IncludeHeading: args.IncludeHeading,
+				TabID:          args.TabID,
+				MediaType:      args.MediaType,
+			}
 			if full {
-				fullBody, err = fullWriteBody(args)
+				body, err := fullWriteBody(args)
 				if err != nil {
 					return "", err
 				}
+				mut.Content = &body
+			}
+			if args.Blocks != nil {
+				next := make([]vfs.Block, 0, len(*args.Blocks))
+				for _, wb := range *args.Blocks {
+					next = append(next, vfs.Block{
+						ID: wb.ID, Kind: wb.Kind, Text: wb.Text,
+						Style: vfs.StyleMeta{Level: wb.Level, Attributes: wb.Attributes},
+					})
+				}
+				mut.Blocks = next
 			}
 			rt.EmitUpdate("Writing " + p)
-
-			fi, err := v.ms.Stat(ctx, p)
-			exists := err == nil
-			if err != nil && !errors.Is(err, vfs.ErrNotExist) {
+			res, err := v.ms.Apply(ctx, p, mut)
+			if err != nil {
 				return "", err
 			}
-			if exists {
-				if strings.TrimSpace(args.Rev) == "" {
-					return "", fmt.Errorf("write: rev required when path exists")
-				}
-			} else if !full && args.Blocks == nil {
-				return "", vfs.ErrNotExist
-			}
-
-			switch {
-			case full:
-				return v.writeFull(ctx, p, exists, fi, args, fullBody)
-			case args.Blocks != nil:
-				return v.writeBlocks(ctx, p, exists, fi, args)
-			case args.Old != nil:
-				return v.writeSubstring(ctx, p, args)
-			case args.BlockID != "":
-				return v.writeBlock(ctx, p, args)
-			default:
-				return v.writeLines(ctx, p, args)
-			}
+			return res.String(), nil
 		},
 	}
 	if v.permissionRequired {
-		cfg.OnCall = OnCalls(ToolPermissionOnCall)
+		cfg.OnCall = []OnCallFunc{ToolPermissionOnCall}
 	}
 	return NewTool(cfg)
 }
@@ -300,70 +300,6 @@ func writeModeCount(args writeArgs) (n int, full bool) {
 	return n, full
 }
 
-const mediaGoogleDocument = "application/vnd.google-apps.document"
-
-func (v vfsTools) writeFull(ctx context.Context, p string, exists bool, fi vfs.FileInfo, args writeArgs, body string) (string, error) {
-	if exists {
-		if vfs.IsProjected(fi.MediaType) {
-			return "", vfs.ErrProjected
-		}
-		cur, err := v.ms.ContentRev(ctx, p)
-		if err != nil {
-			return "", err
-		}
-		if cur.Hash != args.Rev {
-			return "", vfs.ErrStaleContent
-		}
-	}
-	if len(body) > vfs.MaxReadFileBytes {
-		return "", vfs.ErrTooLarge
-	}
-	mt := ""
-	if exists {
-		mt = fi.MediaType
-	} else if args.MediaType == mediaGoogleDocument && path.Ext(p) == "" {
-		if looksLikeHTML(body) {
-			return "", fmt.Errorf("write: HTML content is not accepted; use blocks")
-		}
-		return v.stage(ctx, vfs.NewRichDocument(p, mediaGoogleDocument, liftPlaintext(body)))
-	} else {
-		n := min(len(body), 512)
-		mt = vfs.DetectMediaType(path.Base(p), []byte(body[:n]))
-		if args.MediaType != "" && vfs.IsProjected(args.MediaType) {
-			mt = args.MediaType
-		}
-		if vfs.IsProjected(mt) {
-			return v.stage(ctx, vfs.NewRichDocument(p, mt, liftPlaintext(body)))
-		}
-	}
-	return v.stage(ctx, vfs.NewTextDocument(p, mt, "utf-8", body))
-}
-
-func looksLikeHTML(s string) bool {
-	t := strings.TrimSpace(s)
-	return strings.HasPrefix(t, "<") && strings.Contains(t, ">")
-}
-
-func liftPlaintext(s string) []vfs.Block {
-	s = strings.ReplaceAll(s, "\r\n", "\n")
-	s = strings.TrimRight(s, "\n")
-	if s == "" {
-		return nil
-	}
-	var out []vfs.Block
-	for _, para := range strings.Split(s, "\n\n") {
-		para = strings.TrimSpace(para)
-		if para == "" {
-			continue
-		}
-		out = append(out, vfs.Block{Kind: vfs.BlockKindParagraph, Text: para})
-	}
-	if len(out) == 0 {
-		out = append(out, vfs.Block{Kind: vfs.BlockKindParagraph, Text: s})
-	}
-	return out
-}
-
 func fullWriteBody(args writeArgs) (string, error) {
 	switch {
 	case args.Content != nil && args.IRText != nil:
@@ -376,172 +312,6 @@ func fullWriteBody(args writeArgs) (string, error) {
 	default:
 		return *args.Content, nil
 	}
-}
-
-func (v vfsTools) writeSubstring(ctx context.Context, p string, args writeArgs) (string, error) {
-	if *args.Old == "" {
-		return "", fmt.Errorf("write: old is required")
-	}
-	doc, err := v.loadMatching(ctx, p, args.Rev)
-	if err != nil {
-		return "", err
-	}
-	if vfs.IsProjected(doc.MediaType()) {
-		return "", vfs.ErrProjected
-	}
-	repl := ""
-	if args.New != nil {
-		repl = *args.New
-	}
-	body := doc.Text()
-	n := strings.Count(body, *args.Old)
-	switch {
-	case n == 0:
-		return "", fmt.Errorf("write: old text not found")
-	case !args.ReplaceAll && n != 1:
-		return "", fmt.Errorf("write: old text occurs %d times (need unique match or replace_all)", n)
-	}
-	if args.ReplaceAll {
-		if err := doc.SetText(strings.ReplaceAll(body, *args.Old, repl)); err != nil {
-			return "", err
-		}
-	} else if err := doc.SetText(strings.Replace(body, *args.Old, repl, 1)); err != nil {
-		return "", err
-	}
-	out, err := v.stage(ctx, doc)
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%s replacements=%d", out, n), nil
-}
-
-func (v vfsTools) writeBlock(ctx context.Context, p string, args writeArgs) (string, error) {
-	doc, err := v.loadMatching(ctx, p, args.Rev)
-	if err != nil {
-		return "", err
-	}
-	var blocks []vfs.Block
-	if s, ok := doc.(vfs.Structured); ok {
-		blocks = s.Blocks()
-	}
-	bl, ok := vfs.FindBlock(blocks, args.BlockID)
-	if !ok {
-		return "", fmt.Errorf("write: unknown block_id %q", args.BlockID)
-	}
-	if args.TabID != "" && bl.Style.Attributes != nil {
-		if got := bl.Style.Attributes["tab_id"]; got != "" && got != args.TabID {
-			return "", fmt.Errorf("write: tab_id %q does not match block %q", args.TabID, got)
-		}
-	}
-	if rd, ok := doc.(*vfs.RichDocument); ok {
-		text := strings.Join(replacementLines(args.Lines, args.Body), "\n")
-		if err := rd.ReplaceBlock(bl.ID, text, args.IncludeHeading); err != nil {
-			return "", err
-		}
-		return v.stage(ctx, doc)
-	}
-	start, end, err := vfs.BlockReplaceSpan(bl, args.IncludeHeading)
-	if err != nil {
-		return "", err
-	}
-	if err := doc.ReplaceLines(start, end, replacementLines(args.Lines, args.Body)); err != nil {
-		return "", err
-	}
-	return v.stage(ctx, doc)
-}
-
-func (v vfsTools) writeBlocks(ctx context.Context, p string, exists bool, fi vfs.FileInfo, args writeArgs) (string, error) {
-	next := make([]vfs.Block, 0, len(*args.Blocks))
-	for _, wb := range *args.Blocks {
-		attrs := map[string]string{}
-		for k, v := range wb.Attributes {
-			attrs[k] = v
-		}
-		if args.TabID != "" {
-			attrs["tab_id"] = args.TabID
-		}
-		next = append(next, vfs.Block{
-			ID: wb.ID, Kind: wb.Kind, Text: wb.Text,
-			Style: vfs.StyleMeta{Level: wb.Level, Attributes: attrs},
-		})
-	}
-	if !exists {
-		mt := args.MediaType
-		if mt == "" {
-			mt = vfs.DetectMediaType(path.Base(p), nil)
-		}
-		if mt == mediaGoogleDocument {
-			if path.Ext(p) != "" {
-				return "", fmt.Errorf("write: blocks require media_type=%s on an extensionless path", mediaGoogleDocument)
-			}
-			return v.stage(ctx, vfs.NewRichDocument(p, mediaGoogleDocument, next))
-		}
-		if vfs.IsProjected(mt) {
-			return v.stage(ctx, vfs.NewRichDocument(p, mt, next))
-		}
-		return "", fmt.Errorf("write: blocks require media_type=%s on an extensionless path", mediaGoogleDocument)
-	}
-	if !vfs.IsProjected(fi.MediaType) {
-		return "", vfs.ErrProjected
-	}
-	if len(next) == 0 {
-		return "", fmt.Errorf("write: refusing empty IR replace")
-	}
-	doc, err := v.loadMatching(ctx, p, args.Rev)
-	if err != nil {
-		return "", err
-	}
-	rd, ok := doc.(*vfs.RichDocument)
-	if !ok {
-		return "", vfs.ErrProjected
-	}
-	tabs := rd.Tabs()
-	if len(tabs) > 1 && args.TabID == "" {
-		return "", fmt.Errorf("write: tab_id required")
-	}
-	if args.TabID != "" && len(tabs) > 0 {
-		var keep []vfs.Block
-		for _, b := range rd.Blocks() {
-			tab := ""
-			if b.Style.Attributes != nil {
-				tab = b.Style.Attributes["tab_id"]
-			}
-			if tab != args.TabID {
-				keep = append(keep, b)
-			}
-		}
-		next = append(next, keep...)
-	}
-	rd.SetBlocks(next)
-	return v.stage(ctx, doc)
-}
-
-func (v vfsTools) writeLines(ctx context.Context, p string, args writeArgs) (string, error) {
-	if args.End == nil || *args.Start < 1 || *args.End < *args.Start {
-		return "", fmt.Errorf("write: invalid range start=%d end=%v", *args.Start, args.End)
-	}
-	doc, err := v.loadMatching(ctx, p, args.Rev)
-	if err != nil {
-		return "", err
-	}
-	if vfs.IsProjected(doc.MediaType()) {
-		return "", vfs.ErrProjected
-	}
-	if err := doc.ReplaceLines(*args.Start, *args.End, replacementLines(args.Lines, args.Body)); err != nil {
-		return "", err
-	}
-	return v.stage(ctx, doc)
-}
-
-func replacementLines(lines []string, body *string) []string {
-	if len(lines) > 0 || body == nil || *body == "" {
-		return lines
-	}
-	out := strings.Split(*body, "\n")
-	if strings.HasSuffix(*body, "\n") && len(out) > 0 && out[len(out)-1] == "" {
-		out = out[:len(out)-1]
-	}
-	return out
 }
 
 func lineWindowFromTextDoc(doc vfs.Textual, start, end int) (vfs.LineWindow, error) {
@@ -567,27 +337,6 @@ func lineWindowFromTextDoc(doc vfs.Textual, start, end int) (vfs.LineWindow, err
 	}, nil
 }
 
-func (v vfsTools) loadMatching(ctx context.Context, p, expected string) (vfs.Textual, error) {
-	doc, err := v.ms.ReadText(ctx, p)
-	if err != nil {
-		return nil, err
-	}
-	if vfs.ContentToken(doc) != expected {
-		return nil, vfs.ErrStaleContent
-	}
-	return doc, nil
-}
-
-func (v vfsTools) stage(ctx context.Context, doc vfs.Textual) (string, error) {
-	if err := v.ms.WriteDocument(ctx, doc); err != nil {
-		if errors.Is(err, vfs.ErrConflict) {
-			return "", vfs.ErrStaleContent
-		}
-		return "", err
-	}
-	return fmt.Sprintf("path=%s rev=%s line_count=%d", doc.Path(), vfs.ContentToken(doc), doc.LineCount()), nil
-}
-
 func growLineWindow(b *strings.Builder, extra int, lines []string) {
 	n := extra
 	for _, line := range lines {
@@ -596,13 +345,4 @@ func growLineWindow(b *strings.Builder, extra int, lines []string) {
 	b.Grow(n)
 }
 
-func absVirtual(p string) (string, error) {
-	p = strings.TrimSpace(p)
-	if p == "" || !path.IsAbs(p) {
-		return "", fmt.Errorf("path must be an absolute virtual path")
-	}
-	if strings.ContainsAny(p, "\\\x00") {
-		return "", vfs.ErrInvalidPath
-	}
-	return path.Clean(p), nil
-}
+func absVirtual(p string) (string, error) { return vfs.CleanPath(p) }

@@ -11,35 +11,41 @@ import (
 	"sync/atomic"
 	"time"
 
-	mapset "github.com/deckarep/golang-set/v2"
-
 	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
 // Tool definitions, JSON schema, and post-tool ACM result hooks.
 
-type ToolPermission int
+type ToolPermission uint8
 
 const (
-	ReadPermission ToolPermission = iota
+	ReadPermission ToolPermission = 1 << iota
 	WritePermission
 	ExecutePermission
 )
 
-var ToolReadAccess = mapset.NewSet[ToolPermission](ReadPermission)
-var ToolWriteAccess = mapset.NewSet[ToolPermission](WritePermission)
-var ToolReadWriteAccess = mapset.NewSet[ToolPermission](ReadPermission, WritePermission)
-var ToolExecuteAccess = mapset.NewSet[ToolPermission](ExecutePermission)
-var ToolReadExecuteAccess = mapset.NewSet[ToolPermission](ReadPermission, ExecutePermission)
-var ToolFullAccess = mapset.NewSet[ToolPermission](ReadPermission, WritePermission, ExecutePermission)
+// ToolAccess is an immutable permission bitmask. Zero allows nothing.
+type ToolAccess uint8
+
+const (
+	ToolReadAccess        ToolAccess = ToolAccess(ReadPermission)
+	ToolWriteAccess       ToolAccess = ToolAccess(WritePermission)
+	ToolReadWriteAccess   ToolAccess = ToolAccess(ReadPermission | WritePermission)
+	ToolExecuteAccess     ToolAccess = ToolAccess(ExecutePermission)
+	ToolReadExecuteAccess ToolAccess = ToolAccess(ReadPermission | ExecutePermission)
+	ToolFullAccess        ToolAccess = ToolAccess(ReadPermission | WritePermission | ExecutePermission)
+)
+
+// Allows reports whether a includes p.
+func (a ToolAccess) Allows(p ToolPermission) bool { return a&ToolAccess(p) != 0 }
 
 type ToolHandlerFunc func(ctx context.Context, args map[string]any, runtime HarnessRuntime) (string, error)
 
 // toolCallResult is the internal success path for a single tool invoke.
 type toolCallResult struct {
 	output string
-	disp   ToolResultDisposition
+	disp   ToolOutcome
 }
 
 type Tool struct {
@@ -48,7 +54,7 @@ type Tool struct {
 	Description string
 	Namespace   string
 	Category    streaming.ToolCategory
-	Access      mapset.Set[ToolPermission]
+	Access      ToolAccess
 	// Timeout is an optional per-invocation deadline. Zero means none.
 	Timeout time.Duration
 	// OnCall is the pre-invoke middleware stack. Each constructor may park.
@@ -65,7 +71,7 @@ type ToolConfig struct {
 	DisplayName string
 	Namespace   string
 	Category    streaming.ToolCategory
-	Access      mapset.Set[ToolPermission]
+	Access      ToolAccess
 	Timeout     time.Duration
 	// OnCall is the pre-invoke middleware stack. Each constructor may park.
 	// Return nil from a constructor to skip that layer. Types must be registered.
@@ -76,11 +82,6 @@ type ToolConfig struct {
 
 // OnCallFunc builds a pre-invoke interrupt. Return nil to skip that layer.
 type OnCallFunc func(ToolInvocation) Interrupt
-
-// OnCalls builds an OnCall stack from constructors (middleware order).
-func OnCalls(ctors ...OnCallFunc) []OnCallFunc {
-	return ctors
-}
 
 type mcpToolConfig struct {
 	Name        string
@@ -225,14 +226,8 @@ func NewTool(cfg ToolConfig) *Tool {
 		if results[0].Kind() == reflect.String {
 			return toolCallResult{output: results[0].String()}, nil
 		}
-		if br, ok := results[0].Interface().(BuiltinResult); ok {
-			return toolCallResult{
-				output: br.Output,
-				disp: ToolResultDisposition{
-					Effect:                br.Effect,
-					SuppressWindowMessage: br.SuppressWindowMessage,
-				},
-			}, nil
+		if br, ok := results[0].Interface().(ToolOutcome); ok {
+			return toolCallResult{output: br.Output, disp: br}, nil
 		}
 		b, err := json.Marshal(results[0].Interface())
 		if err != nil {
@@ -558,8 +553,7 @@ const (
 )
 
 // ToolOutcome is the single post-tool result: model-visible output plus a
-// window effect. Plan builtins return this (as BuiltinResult). Host hooks
-// return the same type and leave Output empty.
+// window effect. Plan builtins return this. Host hooks leave Output empty.
 type ToolOutcome struct {
 	Output string
 	// Effect is merged for the batch and applied once at batch end.
@@ -568,12 +562,6 @@ type ToolOutcome struct {
 	// The client still receives StreamEventToolResult.
 	SuppressWindowMessage bool
 }
-
-// BuiltinResult is the tool-handler success type.
-type BuiltinResult = ToolOutcome
-
-// ToolResultDisposition is the window-effect view of ToolOutcome.
-type ToolResultDisposition = ToolOutcome
 
 // ToolResultObservation is a successful tool result seen by a ToolResultHook.
 type ToolResultObservation struct {
@@ -584,8 +572,8 @@ type ToolResultObservation struct {
 }
 
 // ToolResultHook runs after a successful host tool and before the tool result is emitted.
-// Effects apply at batch end. Plan builtins return BuiltinResult instead.
-type ToolResultHook func(ctx context.Context, obs ToolResultObservation) ToolResultDisposition
+// Effects apply at batch end. Plan builtins return ToolOutcome instead.
+type ToolResultHook func(ctx context.Context, obs ToolResultObservation) ToolOutcome
 
 type toolResultHookRegistry struct {
 	byName map[string]ToolResultHook
@@ -599,13 +587,13 @@ func newToolResultHookRegistry(hooks map[string]ToolResultHook) *toolResultHookR
 	return &toolResultHookRegistry{byName: cp}
 }
 
-func (r *toolResultHookRegistry) observe(ctx context.Context, obs ToolResultObservation) ToolResultDisposition {
+func (r *toolResultHookRegistry) observe(ctx context.Context, obs ToolResultObservation) ToolOutcome {
 	if r == nil {
-		return ToolResultDisposition{}
+		return ToolOutcome{}
 	}
 	hook := r.byName[obs.Name]
 	if hook == nil {
-		return ToolResultDisposition{}
+		return ToolOutcome{}
 	}
 	return hook(ctx, obs)
 }
@@ -616,7 +604,7 @@ type batchToolResultEffects struct {
 	suppress    atomic.Bool
 }
 
-func (b *batchToolResultEffects) merge(d ToolResultDisposition) {
+func (b *batchToolResultEffects) merge(d ToolOutcome) {
 	switch d.Effect {
 	case EffectInstallPlanDocument:
 		b.installPlan.Store(true)

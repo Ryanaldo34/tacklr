@@ -1375,7 +1375,10 @@ func TestRun_readSkill_returnsInstructions(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "skills", Base: skillsRoot, Skills: "."}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.MustNewMountSession(t.Name(), reg)
+	ms, err := vfs.NewMountSession(t.Name(), reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := ms.AttachSkills(context.Background()); err != nil {
 		t.Fatal(err)
 	}

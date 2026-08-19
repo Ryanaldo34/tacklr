@@ -173,7 +173,7 @@ func (p s3Provider) OpenDocument(ctx context.Context, name string, reg *ContentR
 		return nil, err
 	}
 	if fi.IsDir {
-		return nil, fmt.Errorf("vfs: %s is a directory", name)
+		return nil, fmt.Errorf("%w: %s", ErrIsDir, name)
 	}
 	if fi.Size > int64(MaxReadFileBytes) {
 		return nil, errFileExceeds(MaxReadFileBytes)
@@ -284,7 +284,7 @@ func (p s3Provider) ReadDir(ctx context.Context, name string) ([]DirEntry, error
 		return nil, err
 	}
 	if !st.IsDir {
-		return nil, fmt.Errorf("vfs: not a directory")
+		return nil, ErrNotDir
 	}
 	prefix, err := p.dirPrefix(name)
 	if err != nil {
@@ -402,7 +402,7 @@ func (p s3Provider) MkdirAll(ctx context.Context, name string, perm fs.FileMode)
 		}
 		if _, _, _, err := p.api.Head(ctx, p.bucket, key); err == nil {
 			// Exists as file — cannot mkdir through a file.
-			return fmt.Errorf("vfs: not a directory")
+			return ErrNotDir
 		} else if !errors.Is(err, ErrNotExist) {
 			return err
 		}

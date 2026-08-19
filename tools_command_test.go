@@ -157,7 +157,10 @@ func newRunCommandSession(t *testing.T) (*vfs.MountSession, HarnessRuntime) {
 	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: t.TempDir()}); err != nil {
 		t.Fatal(err)
 	}
-	ms := vfs.MustNewMountSession(t.Name(), reg)
+	ms, err := vfs.NewMountSession(t.Name(), reg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := ms.Mount(t.Context(), vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
 		t.Fatal(err)
 	}
