@@ -24,6 +24,7 @@ type Mutation struct {
 	Blocks         []Block
 	TabID          string
 	MediaType      string
+	Format         *CellFormat
 }
 
 // ApplyResult is the post-write identity of the document.
@@ -149,6 +150,14 @@ func (ms *MountSession) applyFull(ctx context.Context, p string, exists bool, fi
 	if mut.MediaType != "" && IsProjected(mut.MediaType) && !isSpreadsheet(mut.MediaType) {
 		mt = mut.MediaType
 	}
+	if isXLSX(mt) {
+		title := strings.TrimSuffix(path.Base(p), path.Ext(p))
+		td, err := adoptTabularDocument(p, mimeXLSX, liftTabular(title, body), nil)
+		if err != nil {
+			return ApplyResult{}, err
+		}
+		return ms.stage(ctx, td)
+	}
 	if IsProjected(mt) {
 		return ms.stage(ctx, NewRichDocument(p, mt, liftPlaintext(body)))
 	}
@@ -265,6 +274,14 @@ func (ms *MountSession) applyTabularBlock(ctx context.Context, td *TabularDocume
 	if mut.TabID != "" && td.sheets[idx].ID != "" && td.sheets[idx].ID != mut.TabID {
 		return ApplyResult{}, fmt.Errorf("vfs: tab_id %q does not match block %q", mut.TabID, td.sheets[idx].ID)
 	}
+	hasValue := mut.Body != nil || len(mut.Lines) > 0
+	var format *CellFormat
+	if mut.Format != nil && !mut.Format.IsZero() {
+		format = mut.Format
+	}
+	if !hasValue && format == nil {
+		hasValue = true
+	}
 	lines := replacementLines(mut.Lines, mut.Body)
 	switch {
 	case a1 != "":
@@ -273,13 +290,17 @@ func (ms *MountSession) applyTabularBlock(ctx context.Context, td *TabularDocume
 			return ApplyResult{}, err
 		}
 		if r1 == r2 && c1 == c2 {
-			text := strings.Join(lines, "\n")
-			if err := td.overlayCell(idx, r1, c1, text); err != nil {
+			var input *string
+			if hasValue {
+				text := strings.Join(lines, "\n")
+				input = &text
+			}
+			if err := td.overlayCell(idx, r1, c1, input, format); err != nil {
 				return ApplyResult{}, err
 			}
 			return ms.stage(ctx, td)
 		}
-		if err := td.overlayRange(idx, r1, c1, r2, c2, lines); err != nil {
+		if err := td.overlayRange(idx, r1, c1, r2, c2, lines, hasValue, format); err != nil {
 			return ApplyResult{}, err
 		}
 		return ms.stage(ctx, td)
@@ -291,13 +312,20 @@ func (ms *MountSession) applyTabularBlock(ctx context.Context, td *TabularDocume
 		if *mut.Start < 1 || end < *mut.Start {
 			return ApplyResult{}, fmt.Errorf("vfs: invalid range start=%d end=%v", *mut.Start, mut.End)
 		}
-		if err := td.overlayRows(idx, *mut.Start, end, lines); err != nil {
+		if err := td.overlayRows(idx, *mut.Start, end, lines, hasValue, format); err != nil {
 			return ApplyResult{}, err
 		}
 		return ms.stage(ctx, td)
 	default:
-		if err := td.replaceSheetValues(idx, cellsFromToolLines(lines)); err != nil {
-			return ApplyResult{}, err
+		if hasValue {
+			if err := td.replaceSheetValues(idx, cellsFromToolLines(lines)); err != nil {
+				return ApplyResult{}, err
+			}
+		}
+		if format != nil {
+			if err := td.overlaySheetFormat(idx, format); err != nil {
+				return ApplyResult{}, err
+			}
 		}
 		return ms.stage(ctx, td)
 	}
@@ -326,6 +354,14 @@ func (ms *MountSession) applyBlocks(ctx context.Context, p string, exists bool, 
 				return ApplyResult{}, fmt.Errorf("vfs: blocks require media_type=%s on an extensionless path", mimeGoogleSpreadsheet)
 			}
 			td, err := adoptTabularDocument(p, mimeGoogleSpreadsheet, sheetsFromBlocks(next, path.Base(p)), nil)
+			if err != nil {
+				return ApplyResult{}, err
+			}
+			return ms.stage(ctx, td)
+		}
+		if isXLSX(mt) {
+			title := strings.TrimSuffix(path.Base(p), path.Ext(p))
+			td, err := adoptTabularDocument(p, mimeXLSX, sheetsFromBlocks(next, title), nil)
 			if err != nil {
 				return ApplyResult{}, err
 			}

@@ -235,6 +235,7 @@ var (
 	fingerprintSep = []byte{0}
 	fingerprintEq  = []byte{'='}
 	fingerprintNL  = []byte{'\n'}
+	fingerprintOne = []byte{'1'}
 )
 
 func (d *RichDocument) reproject() {

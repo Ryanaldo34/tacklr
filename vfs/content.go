@@ -190,6 +190,7 @@ func DetectMediaType(virtualPath string, sample []byte) string {
 var extMediaTypes = map[string]string{
 	".txt": "text/plain", ".md": "text/markdown", ".markdown": "text/markdown",
 	".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+	".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 	".go":   "text/x-go", ".py": "text/x-python",
 	".js": "text/javascript", ".mjs": "text/javascript", ".cjs": "text/javascript", ".jsx": "text/javascript",
 	".ts": "text/x.typescript", ".tsx": "text/x.typescript",

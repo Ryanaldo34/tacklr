@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -14,6 +15,7 @@ import (
 type memSheets struct {
 	snaps   map[string]vfs.SheetsSnapshot
 	batches []vfs.SheetsValuesBatch
+	updates []vfs.SheetsBatch
 	fail    error
 }
 
@@ -45,6 +47,26 @@ func (m *memSheets) Get(ctx context.Context, spreadsheetID string) (vfs.SheetsSn
 		return s, nil
 	}
 	return cloneSheetsSnap(s), nil
+}
+
+func (m *memSheets) BatchUpdate(ctx context.Context, spreadsheetID string, req vfs.SheetsBatch) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if m.fail != nil {
+		return m.fail
+	}
+	m.updates = append(m.updates, req)
+	s := m.snaps[spreadsheetID]
+	if s.SpreadsheetID == "" {
+		s.SpreadsheetID = spreadsheetID
+	}
+	applySheetsFormat(&s, req)
+	if m.snaps == nil {
+		m.snaps = map[string]vfs.SheetsSnapshot{}
+	}
+	m.snaps[spreadsheetID] = s
+	return nil
 }
 
 func (m *memSheets) BatchUpdateValues(ctx context.Context, spreadsheetID string, req vfs.SheetsValuesBatch) error {
@@ -136,6 +158,44 @@ func applySheetsValues(s *vfs.SheetsSnapshot, req vfs.SheetsValuesBatch) {
 	}
 }
 
+func applySheetsFormat(s *vfs.SheetsSnapshot, req vfs.SheetsBatch) {
+	for _, rc := range req.Requests {
+		idx := -1
+		id := strconv.FormatInt(rc.SheetID, 10)
+		for i, sh := range s.Sheets {
+			if sh.ID == id {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 && len(s.Sheets) == 1 {
+			idx = 0
+		}
+		if idx < 0 {
+			continue
+		}
+		sh := s.Sheets[idx]
+		needR, needC := rc.EndRow, rc.EndCol
+		for len(sh.Cells) < needR {
+			sh.Cells = append(sh.Cells, nil)
+		}
+		for r := rc.StartRow; r < rc.EndRow && r < len(sh.Cells); r++ {
+			for len(sh.Cells[r]) < needC {
+				sh.Cells[r] = append(sh.Cells[r], vfs.Cell{})
+			}
+			for c := rc.StartCol; c < rc.EndCol && c < len(sh.Cells[r]); c++ {
+				cell := sh.Cells[r][c]
+				cell.Format.Overlay(rc.Format)
+				sh.Cells[r][c] = cell
+			}
+		}
+		if len(sh.Cells) > sh.Rows {
+			sh.Rows = len(sh.Cells)
+		}
+		s.Sheets[idx] = sh
+	}
+}
+
 func budgetSheets() []vfs.Sheet {
 	return []vfs.Sheet{
 		{
@@ -221,9 +281,10 @@ func TestDrive_sheetStatAndExportRead(t *testing.T) {
 	if td.Sheets()[1].Title != "Notes" || a1.Input != "Hello" || a1.Value != "Hello" {
 		t.Fatalf("notes A1 = %+v sheet=%+v", a1, td.Sheets()[1])
 	}
-	html := td.Text()
-	if !strings.Contains(html, `class="tacklr-tab"`) || !strings.Contains(html, "<table>") {
-		t.Fatalf("projection = %s", html)
+	text := td.Text()
+	if !strings.Contains(text, "# Sheet: Budget") || !strings.Contains(text, "42") ||
+		strings.Contains(text, "<table>") || strings.Contains(text, "bold") {
+		t.Fatalf("projection = %s", text)
 	}
 
 	if !vfs.FuseAvailable() {
@@ -243,7 +304,7 @@ func TestDrive_sheetStatAndExportRead(t *testing.T) {
 		t.Fatalf("FUSE getattr size=%d want 0", hst.Size())
 	}
 	got, err := os.ReadFile(host)
-	if err != nil || !strings.Contains(string(got), `class="tacklr-tab"`) {
+	if err != nil || !strings.Contains(string(got), "# Sheet: Budget") || !strings.Contains(string(got), "42") {
 		t.Fatalf("FUSE cat = %q err=%v", got, err)
 	}
 }
@@ -344,3 +405,77 @@ func TestDrive_sheetCheckoutTooLarge(t *testing.T) {
 }
 
 func strPtr(s string) *string { return &s }
+
+func TestDrive_sheetFormatCheckoutWriteAndCAS(t *testing.T) {
+	ctx := t.Context()
+	api := driveTree()
+	sheets := budgetSheets()
+	sheets[0].Cells[1][1].Format = vfs.CellFormat{Number: "$#,##0.00", Bold: true}
+	apiSheets := newMemSheets("sheet1", sheets, nil)
+	ms := mountDriveSheets(t, api, nil, apiSheets, true)
+
+	doc, err := ms.ReadText(ctx, "/contracts/Budget")
+	if err != nil {
+		t.Fatal(err)
+	}
+	td := doc.(*vfs.TabularDocument)
+	b2 := td.Sheets()[0].Cells[1][1]
+	if b2.Input != "42" || !b2.Format.Bold || b2.Format.Number != "$#,##0.00" {
+		t.Fatalf("checkout format B2 = %+v", b2)
+	}
+
+	_, err = ms.Apply(ctx, "/contracts/Budget", vfs.Mutation{
+		Rev: vfs.ContentToken(td), BlockID: "Budget!A1:C1",
+		Format: &vfs.CellFormat{Border: &vfs.CellBorder{Style: "thin", Edges: "bottom"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ms.ReadText(ctx, "/contracts/Budget")
+	if err != nil {
+		t.Fatal(err)
+	}
+	td = got.(*vfs.TabularDocument)
+	if v, _ := td.ReadCell("Budget", "B2"); v != "42" {
+		t.Fatalf("format-only values: %q", v)
+	}
+	token := vfs.ContentToken(td)
+
+	_, err = ms.Apply(ctx, "/contracts/Budget", vfs.Mutation{
+		Rev: token, BlockID: "Budget!B2",
+		Format: &vfs.CellFormat{Italic: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err = ms.ReadText(ctx, "/contracts/Budget")
+	if err != nil {
+		t.Fatal(err)
+	}
+	td = got.(*vfs.TabularDocument)
+	b2 = td.Sheets()[0].Cells[1][1]
+	if b2.Input != "42" || !b2.Format.Italic || !b2.Format.Bold {
+		t.Fatalf("second format-only: %+v", b2)
+	}
+	if vfs.ContentToken(td) == token {
+		t.Fatal("format-only must change rev")
+	}
+	bare, err := vfs.NewTabularDocument(td.Path(), td.MediaType(), td.Sheets(), td.NamedRanges())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.WriteDocument(ctx, bare); !errors.Is(err, vfs.ErrConflict) {
+		t.Fatalf("empty checkout: %v", err)
+	}
+	still, err := ms.ReadText(ctx, "/contracts/Budget")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stillTD := still.(*vfs.TabularDocument)
+	if v, _ := stillTD.ReadCell("Budget", "B2"); v != "42" {
+		t.Fatalf("stale mutated grid: %q", v)
+	}
+	if !stillTD.Sheets()[0].Cells[1][1].Format.Italic {
+		t.Fatal("stale dropped format")
+	}
+}

@@ -834,7 +834,7 @@ func TestVFSTools_projectedSheetReadWrite(t *testing.T) {
 			Sheets: []vfs.Sheet{
 				{ID: "1", Title: "Budget", Rows: 3, Cols: 3, Cells: [][]vfs.Cell{
 					{{Input: "Date", Value: "Date"}, {Input: "Amount", Value: "Amount"}, {Input: "Note", Value: "Note"}},
-					{{Input: "2026-01-01", Value: "2026-01-01"}, {Input: "42", Value: "42"}, {Input: "ok", Value: "ok"}},
+					{{Input: "2026-01-01", Value: "2026-01-01"}, {Input: "42", Value: "42", Format: vfs.CellFormat{Number: "$#,##0.00", Bold: true}}, {Input: "ok", Value: "ok"}},
 					{{Input: "=A1+1", Value: "43"}},
 				}},
 				{ID: "2", Title: "Notes", Rows: 1, Cols: 2, Cells: [][]vfs.Cell{
@@ -887,6 +887,25 @@ func TestVFSTools_projectedSheetReadWrite(t *testing.T) {
 	if err != nil || !strings.Contains(res.output, "sheet=Budget") || !strings.Contains(res.output, "=A1+1") {
 		t.Fatalf("row window: %s err=%v", res.output, err)
 	}
+	if strings.Contains(res.output, "format=") {
+		t.Fatalf("row window dumped format: %s", res.output)
+	}
+	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","block_id":"Budget!B2"}`, rt)
+	if err != nil || !strings.Contains(res.output, "text=42") ||
+		!strings.Contains(res.output, "format=number=$#,##0.00,bold") {
+		t.Fatalf("cell format: %s err=%v", res.output, err)
+	}
+	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","block_id":"Budget!A1:C3"}`, rt)
+	if err != nil || !strings.Contains(res.output, "Date\tAmount\tNote") ||
+		!strings.Contains(res.output, "B2 format=number=$#,##0.00,bold") {
+		t.Fatalf("small A1 range format: %s err=%v", res.output, err)
+	}
+	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","block_id":"budget","ir":true}`, rt)
+	if err != nil || !strings.Contains(res.output, "sheet=Budget") ||
+		!strings.Contains(res.output, "Date\tAmount\tNote") ||
+		!strings.Contains(res.output, "B2 format=number=$#,##0.00,bold") {
+		t.Fatalf("ir row window format: %s err=%v", res.output, err)
+	}
 	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","block_id":"Budget!A3"}`, rt)
 	if err != nil || !strings.Contains(res.output, "text==A1+1") {
 		t.Fatalf("cell: %s err=%v", res.output, err)
@@ -911,8 +930,68 @@ func TestVFSTools_projectedSheetReadWrite(t *testing.T) {
 		t.Fatalf("cell write: %v", err)
 	}
 	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","block_id":"Budget!B2"}`, rt)
-	if err != nil || !strings.Contains(res.output, "text=99") {
+	if err != nil || !strings.Contains(res.output, "text=99") ||
+		!strings.Contains(res.output, "format=number=$#,##0.00,bold") {
 		t.Fatalf("after overlay: %s err=%v", res.output, err)
+	}
+	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget"}`, rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rev = fieldKV(res.output, "rev")
+	borderBody, _ := json.Marshal(map[string]any{
+		"path": "/contracts/Budget", "rev": rev, "block_id": "Budget!A1:B1",
+		"format": map[string]any{"border": map[string]any{"style": "thin", "edges": "bottom"}},
+	})
+	if _, err = tools["write"].invoke(ctx, string(borderBody), rt); err != nil {
+		t.Fatalf("format-only: %v", err)
+	}
+	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","block_id":"Budget!A1"}`, rt)
+	if err != nil || !strings.Contains(res.output, "text=Date") ||
+		!strings.Contains(res.output, "border=thin:bottom") {
+		t.Fatalf("format-only read: %s err=%v", res.output, err)
+	}
+	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","block_id":"Budget!B2"}`, rt)
+	if err != nil || !strings.Contains(res.output, "text=99") {
+		t.Fatalf("format-only left values: %s err=%v", res.output, err)
+	}
+	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget"}`, rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rev = fieldKV(res.output, "rev")
+	combined, _ := json.Marshal(map[string]any{
+		"path": "/contracts/Budget", "rev": rev, "block_id": "Budget!B2",
+		"body": "77", "format": map[string]any{
+			"number": "$#,##0.00", "bold": true, "italic": true, "strike": true,
+			"fill": "#ffcc00", "color": "#003366", "align": "right",
+		},
+	})
+	if _, err = tools["write"].invoke(ctx, string(combined), rt); err != nil {
+		t.Fatalf("combined: %v", err)
+	}
+	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","block_id":"Budget!B2"}`, rt)
+	if err != nil || !strings.Contains(res.output, "text=77") ||
+		!strings.Contains(res.output, "number=$#,##0.00") || !strings.Contains(res.output, "bold") ||
+		!strings.Contains(res.output, "italic") || !strings.Contains(res.output, "strike") ||
+		!strings.Contains(res.output, "fill=#ffcc00") || !strings.Contains(res.output, "color=#003366") ||
+		!strings.Contains(res.output, "align=right") {
+		t.Fatalf("combined read-back: %s err=%v", res.output, err)
+	}
+	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget"}`, rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rev = fieldKV(res.output, "rev")
+	formulaBody, _ := json.Marshal(map[string]any{
+		"path": "/contracts/Budget", "rev": rev, "block_id": "Budget!C2", "body": "=A1+1",
+	})
+	if _, err = tools["write"].invoke(ctx, string(formulaBody), rt); err != nil {
+		t.Fatalf("formula write: %v", err)
+	}
+	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","block_id":"Budget!C2"}`, rt)
+	if err != nil || !strings.Contains(res.output, "text==A1+1") {
+		t.Fatalf("formula write read: %s err=%v", res.output, err)
 	}
 	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","block_id":"Budget!A3"}`, rt)
 	if err != nil || !strings.Contains(res.output, "text==A1+1") {
@@ -1005,6 +1084,49 @@ func TestVFSTools_projectedSheetReadWrite(t *testing.T) {
 	if err != nil || !strings.HasSuffix(strings.TrimSpace(res.output), "text=") {
 		t.Fatalf("cleared trailer C3: %s err=%v", res.output, err)
 	}
+	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget"}`, rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rev = fieldKV(res.output, "rev")
+	sheetFmt, _ := json.Marshal(map[string]any{
+		"path": "/contracts/Budget", "rev": rev, "block_id": "budget",
+		"format": map[string]any{"italic": true},
+	})
+	if _, err = tools["write"].invoke(ctx, string(sheetFmt), rt); err != nil {
+		t.Fatalf("sheet format-only: %v", err)
+	}
+	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","block_id":"Budget!A1"}`, rt)
+	if err != nil || !strings.Contains(res.output, "text=Date") || !strings.Contains(res.output, "italic") {
+		t.Fatalf("sheet format A1: %s err=%v", res.output, err)
+	}
+	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","block_id":"Budget!B2"}`, rt)
+	if err != nil || !strings.Contains(res.output, "text=7") || !strings.Contains(res.output, "italic") {
+		t.Fatalf("sheet format left values: %s err=%v", res.output, err)
+	}
+	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget"}`, rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preGrow := fieldKV(res.output, "rev")
+	growFmt, _ := json.Marshal(map[string]any{
+		"path": "/contracts/Budget", "rev": preGrow, "block_id": "Budget!A10",
+		"format": map[string]any{"fill": "#ffee00"},
+	})
+	if _, err = tools["write"].invoke(ctx, string(growFmt), rt); err != nil {
+		t.Fatalf("format-only grow: %v", err)
+	}
+	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","block_id":"Budget!A10"}`, rt)
+	if err != nil || !strings.Contains(res.output, "fill=#ffee00") {
+		t.Fatalf("A10 format-only: %s err=%v", res.output, err)
+	}
+	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget"}`, rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fieldKV(res.output, "rev") == preGrow {
+		t.Fatal("format-only grow must change rev")
+	}
 
 	if _, err = tools["write"].invoke(ctx, `{"path":"/contracts/Ledger","media_type":"application/vnd.google-apps.spreadsheet","blocks":[{"kind":"sheet","text":"A\tB\n1\t2","attributes":{"title":"Sheet1"}}]}`, rt); err != nil {
 		t.Fatal(err)
@@ -1047,7 +1169,7 @@ func TestVFSTools_projectedSheetReadWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	xlsx, err := ms.Stat(ctx, "/contracts/Budget.xlsx")
-	if err != nil || xlsx.MediaType != "application/octet-stream" {
+	if err != nil || xlsx.MediaType == "application/vnd.google-apps.spreadsheet" {
 		t.Fatalf("xlsx Stat = %+v err=%v", xlsx, err)
 	}
 	if _, err = tools["write"].invoke(ctx, `{"path":"/contracts/Bare","content":"plain"}`, rt); err != nil {
@@ -1146,7 +1268,8 @@ func TestVFSTools_runCommandLiveNames(t *testing.T) {
 }
 
 type toolMemSheets struct {
-	snaps map[string]vfs.SheetsSnapshot
+	snaps   map[string]vfs.SheetsSnapshot
+	updates []vfs.SheetsBatch
 }
 
 func (m *toolMemSheets) Get(_ context.Context, id string) (vfs.SheetsSnapshot, error) {
@@ -1162,6 +1285,40 @@ func (m *toolMemSheets) Get(_ context.Context, id string) (vfs.SheetsSnapshot, e
 		m.snaps[id] = s
 	}
 	return s, nil
+}
+
+func (m *toolMemSheets) BatchUpdate(_ context.Context, id string, req vfs.SheetsBatch) error {
+	m.updates = append(m.updates, req)
+	s := m.snaps[id]
+	if s.SpreadsheetID == "" {
+		s.SpreadsheetID = id
+	}
+	for _, rc := range req.Requests {
+		idx := 0
+		if len(s.Sheets) == 0 {
+			continue
+		}
+		sh := s.Sheets[idx]
+		for r := rc.StartRow; r < rc.EndRow; r++ {
+			for len(sh.Cells) <= r {
+				sh.Cells = append(sh.Cells, nil)
+			}
+			for c := rc.StartCol; c < rc.EndCol; c++ {
+				for len(sh.Cells[r]) <= c {
+					sh.Cells[r] = append(sh.Cells[r], vfs.Cell{})
+				}
+				cell := sh.Cells[r][c]
+				cell.Format.Overlay(rc.Format)
+				sh.Cells[r][c] = cell
+			}
+		}
+		s.Sheets[idx] = sh
+	}
+	if m.snaps == nil {
+		m.snaps = map[string]vfs.SheetsSnapshot{}
+	}
+	m.snaps[id] = s
+	return nil
 }
 
 func (m *toolMemSheets) BatchUpdateValues(_ context.Context, id string, req vfs.SheetsValuesBatch) error {

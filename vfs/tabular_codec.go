@@ -13,8 +13,8 @@ import (
 	"golang.org/x/net/html"
 )
 
-// SheetsCodec decodes Google Sheets HTML (ZIP export or projection) into
-// *TabularDocument. It does not implement IdentityCodec.
+// SheetsCodec decodes Google Sheets HTML ZIP export (Drive RO) into
+// *TabularDocument. It does not decode the TSV kernel projection.
 type SheetsCodec struct{}
 
 // MediaTypes implements Codec.
@@ -122,9 +122,6 @@ func parseSheetsHTML(raw []byte, fallback string) ([]Sheet, error) {
 	if body == nil {
 		body = doc
 	}
-	if titled := sheetsFromTabHeadings(body); len(titled) > 0 {
-		return titled, nil
-	}
 	tables := collectHTMLTables(body)
 	if len(tables) == 0 {
 		title := fallback
@@ -155,45 +152,6 @@ func parseSheetsHTML(raw []byte, fallback string) ([]Sheet, error) {
 		out = append(out, sh)
 	}
 	return out, nil
-}
-
-func sheetsFromTabHeadings(n *html.Node) []Sheet {
-	var out []Sheet
-	var walk func(*html.Node)
-	walk = func(n *html.Node) {
-		if n == nil {
-			return
-		}
-		if n.Type == html.ElementNode && strings.EqualFold(n.Data, "h1") && hasClass(n, "tacklr-tab") {
-			title := strings.TrimSpace(FormatInline(collectInline(n, nil)))
-			table := nextTable(n.NextSibling)
-			grid := [][]string(nil)
-			if table != nil {
-				grid, _ = tableGrid(table)
-			}
-			sh := Sheet{Title: title, Cells: cellsFromStrings(grid)}
-			trimSheet(&sh)
-			out = append(out, sh)
-			return
-		}
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			walk(c)
-		}
-	}
-	walk(n)
-	return out
-}
-
-func nextTable(n *html.Node) *html.Node {
-	for ; n != nil; n = n.NextSibling {
-		if n.Type == html.ElementNode && strings.EqualFold(n.Data, "table") {
-			return n
-		}
-		if n.Type == html.ElementNode && strings.EqualFold(n.Data, "h1") && hasClass(n, "tacklr-tab") {
-			return nil
-		}
-	}
-	return nil
 }
 
 func collectHTMLTables(n *html.Node) [][][]string {

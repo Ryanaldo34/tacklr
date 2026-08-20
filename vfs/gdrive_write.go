@@ -129,6 +129,12 @@ func (p *driveProvider) sheetsBatchValues(ctx context.Context, id string, req Sh
 	})
 }
 
+func (p *driveProvider) sheetsBatchUpdate(ctx context.Context, id string, req SheetsBatch) error {
+	return p.call(ctx, func() error {
+		return p.sheets.BatchUpdate(ctx, id, req)
+	})
+}
+
 // resolveLeaf walks the path but does not follow the last component if it is a shortcut.
 func (p *driveProvider) resolveLeaf(ctx context.Context, name string) (DriveMeta, error) {
 	rel, err := cleanRel(name)
@@ -428,7 +434,7 @@ func (p *driveProvider) WriteDocument(ctx context.Context, name string, doc Docu
 	if err != nil && !isNotExist(err) {
 		return err
 	}
-	data, _, err := encodeDocument(ctx, doc, DefaultContentRegistry())
+	data, err := EncodeDocument(ctx, doc)
 	if err != nil {
 		return err
 	}
@@ -487,6 +493,11 @@ func (p *driveProvider) writeGoogleSheet(ctx context.Context, name string, td *T
 			return err
 		}
 	}
+	if formats := tabularFormatBatch(td); len(formats.Requests) > 0 {
+		if err := p.sheetsBatchUpdate(ctx, meta.ID, formats); err != nil {
+			return err
+		}
+	}
 	p.invalidate(meta.ID)
 	return p.refreshSheetHint(ctx, meta.ID, td)
 }
@@ -539,6 +550,11 @@ func (p *driveProvider) createGoogleSheet(ctx context.Context, name string, td *
 		}
 		last = p.sheetsBatchValues(ctx, created.ID, batch)
 		if last == nil {
+			if formats := tabularFormatBatch(&overlay); len(formats.Requests) > 0 {
+				last = p.sheetsBatchUpdate(ctx, created.ID, formats)
+			}
+		}
+		if last == nil {
 			break
 		}
 		if !errors.Is(last, ErrConflict) {
@@ -560,7 +576,7 @@ func (p *driveProvider) refreshSheetHint(ctx context.Context, id string, td *Tab
 		if ferr == nil {
 			td.sheets = fresh.sheets
 			td.named = fresh.named
-			td.html = fresh.html
+			td.text = fresh.text
 			td.starts = fresh.starts
 			td.hint.fileID = id
 			if merr == nil {

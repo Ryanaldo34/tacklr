@@ -2,6 +2,7 @@ package vfs
 
 import (
 	"errors"
+	"os"
 	"strings"
 	"testing"
 )
@@ -66,13 +67,14 @@ func TestTabularDocument_outlineProjectionAndA1(t *testing.T) {
 		t.Fatal("FindBlock slug")
 	}
 
-	html := d.Text()
-	if !strings.Contains(html, `<h1 class="tacklr-tab">Budget</h1>`) ||
-		!strings.Contains(html, `<h1 class="tacklr-tab">Notes</h1>`) ||
-		!strings.Contains(html, "<table>") ||
-		!strings.Contains(html, "<td>2026-01-01</td>") ||
-		!strings.Contains(html, "=A1+1") {
-		t.Fatalf("projection = %s", html)
+	d.sheets[0].Cells[1][1].Format = CellFormat{Number: "$#,##0.00", Bold: true, Fill: "#ffcc00"}
+	d.reproject()
+	text := d.Text()
+	if !strings.Contains(text, "# Sheet: Budget") ||
+		!strings.Contains(text, "# Sheet: Notes") ||
+		!strings.Contains(text, "42") ||
+		!strings.Contains(text, "=A1+1") {
+		t.Fatalf("projection = %s", text)
 	}
 
 	got, err := d.ReadCell("Budget", "B2")
@@ -108,9 +110,12 @@ func TestTabularDocument_projectedMutators(t *testing.T) {
 	}
 }
 
-func TestSheetsCodec_projectionRoundTrip(t *testing.T) {
-	src := twoSheetBudget()
-	doc, err := (SheetsCodec{}).Decode(t.Context(), "/contracts/Budget", mimeGoogleSpreadsheet, []byte(src.Text()))
+func TestSheetsCodec_htmlZipDecode(t *testing.T) {
+	raw, err := os.ReadFile("testdata/drive_export_budget.zip")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, err := (SheetsCodec{}).Decode(t.Context(), "/contracts/Budget", mimeGoogleSpreadsheet, raw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +123,25 @@ func TestSheetsCodec_projectionRoundTrip(t *testing.T) {
 	if len(td.Sheets()) != 2 || td.Sheets()[0].Title != "Budget" || td.Sheets()[1].Title != "Notes" {
 		t.Fatalf("sheets = %+v", td.Sheets())
 	}
-	if td.Sheets()[0].Cells[2][0].Input != "=A1+1" {
-		t.Fatalf("formula cell = %+v", td.Sheets()[0].Cells[2][0])
+	b2 := td.Sheets()[0].Cells[1][1]
+	if b2.Input != "42" || b2.Value != "42" || !b2.Format.IsZero() {
+		t.Fatalf("RO ZIP B2 = %+v", b2)
+	}
+
+	inline := []byte(`<html><body><table>
+<tr><td>Date</td><td>Amount</td></tr>
+<tr><td>2026-01-01</td><td>42</td></tr>
+<tr><td>=A1+1</td><td></td></tr>
+</table></body></html>`)
+	doc, err = (SheetsCodec{}).Decode(t.Context(), "/contracts/Budget", mimeGoogleSpreadsheet, inline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	td = doc.(*TabularDocument)
+	if len(td.Sheets()) != 1 || td.Sheets()[0].Cells[2][0].Input != "=A1+1" {
+		t.Fatalf("table HTML = %+v", td.Sheets())
+	}
+	if !td.Sheets()[0].Cells[1][1].Format.IsZero() {
+		t.Fatalf("RO HTML must be value-only: %+v", td.Sheets()[0].Cells[1][1])
 	}
 }

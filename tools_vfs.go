@@ -10,6 +10,8 @@ import (
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
+const smallFormatCells = 32
+
 // vfsTools is the thin tool adapter over MountSession.Apply / ReadLines / ReadText.
 type vfsTools struct {
 	ms                 *vfs.MountSession
@@ -40,22 +42,23 @@ type writeBlock struct {
 }
 
 type writeArgs struct {
-	Path           string        `json:"path" desc:"Absolute virtual path to write."`
-	Rev            string        `json:"rev,omitempty" desc:"Required when path exists: hash from the latest read. Omit only to create (full mode)."`
-	Content        *string       `json:"content,omitempty" desc:"Full new file body (UTF-8). Creates or replaces the whole file. Empty creates or truncates. Create-only lift for Docs."`
-	IRText         *string       `json:"ir_text,omitempty" desc:"Full IR body. Same as content; if both are set they must match."`
-	Start          *int          `json:"start,omitempty" desc:"1-based start line (inclusive). Lines mode."`
-	End            *int          `json:"end,omitempty" desc:"1-based end line (exclusive). Required in lines mode."`
-	Lines          []string      `json:"lines,omitempty" desc:"Replacement lines (no embedded newlines). Empty deletes the span. Or use body."`
-	Body           *string       `json:"body,omitempty" desc:"Replacement body as one string (split on newlines). Used if lines is empty."`
-	Old            *string       `json:"old,omitempty" desc:"Exact substring to find. Must be unique unless replace_all."`
-	New            *string       `json:"new,omitempty" desc:"Replacement text. Omitted treated as empty."`
-	ReplaceAll     bool          `json:"replace_all,omitempty" desc:"Replace every occurrence of old."`
-	BlockID        string        `json:"block_id,omitempty" desc:"Replace this structured block's body (or full span if include_heading)."`
-	IncludeHeading bool          `json:"include_heading,omitempty" desc:"When block_id is a heading, replace the heading line too."`
-	MediaType      string        `json:"media_type,omitempty" desc:"Create-as-Doc: application/vnd.google-apps.document. Ignored when the path exists. Foo.md is never a Doc."`
-	Blocks         *[]writeBlock `json:"blocks,omitempty" desc:"Replace a tab body (SetBlocks) or create a Doc/Word file from IR. text uses **bold** _italic_ ~~strike~~ [label](url)."`
-	TabID          string        `json:"tab_id,omitempty" desc:"Required for blocks when the Doc has more than one tab."`
+	Path           string          `json:"path" desc:"Absolute virtual path to write."`
+	Rev            string          `json:"rev,omitempty" desc:"Required when path exists: hash from the latest read. Omit only to create (full mode)."`
+	Content        *string         `json:"content,omitempty" desc:"Full new file body (UTF-8). Creates or replaces the whole file. Empty creates or truncates. Create-only lift for Docs."`
+	IRText         *string         `json:"ir_text,omitempty" desc:"Full IR body. Same as content; if both are set they must match."`
+	Start          *int            `json:"start,omitempty" desc:"1-based start line (inclusive). Lines mode."`
+	End            *int            `json:"end,omitempty" desc:"1-based end line (exclusive). Required in lines mode."`
+	Lines          []string        `json:"lines,omitempty" desc:"Replacement lines (no embedded newlines). Empty deletes the span. Or use body."`
+	Body           *string         `json:"body,omitempty" desc:"Replacement body as one string (split on newlines). Used if lines is empty."`
+	Old            *string         `json:"old,omitempty" desc:"Exact substring to find. Must be unique unless replace_all."`
+	New            *string         `json:"new,omitempty" desc:"Replacement text. Omitted treated as empty."`
+	ReplaceAll     bool            `json:"replace_all,omitempty" desc:"Replace every occurrence of old."`
+	BlockID        string          `json:"block_id,omitempty" desc:"Replace this structured block's body (or full span if include_heading)."`
+	IncludeHeading bool            `json:"include_heading,omitempty" desc:"When block_id is a heading, replace the heading line too."`
+	MediaType      string          `json:"media_type,omitempty" desc:"Create-as-Doc: application/vnd.google-apps.document. Ignored when the path exists. Foo.md is never a Doc."`
+	Blocks         *[]writeBlock   `json:"blocks,omitempty" desc:"Replace a tab body (SetBlocks) or create a Doc/Word file from IR. text uses **bold** _italic_ ~~strike~~ [label](url)."`
+	TabID          string          `json:"tab_id,omitempty" desc:"Required for blocks when the Doc has more than one tab."`
+	Format         *vfs.CellFormat `json:"format,omitempty" desc:"Optional cell format bag overlaid on the same block_id range (number, bold, italic, strike, fill, color, align, border). Value-only writes leave format; format-only writes leave values."`
 }
 
 func (v vfsTools) newRead() *Tool {
@@ -67,7 +70,7 @@ func (v vfsTools) newRead() *Tool {
 Path only on ordinary files → start=1 through 1+MaxLinesPerWindow plus rev (pass rev to write).
 Path only on Google Docs/Word (projected) → outline. Use rg on the FUSE tree for HTML hits, then read({block_id}) for IR text.
 start/end → half-open 1-based window (HTML lines on Docs). block_id → that region's IR text. outline=true → block list (text uses **bold** _italic_ ~~strike~~ [label](url); kind/level is structure). ir=true → media_type/encoding (no HTML dump on Docs).
-Sheets: block_id is a sheet (id, title, or slug) or Sheet!A1 / Sheet!A1:C3. start/end are 1-based rows of that sheet, not HTML lines.
+Sheets: block_id is a sheet (id, title, or slug) or Sheet!A1 / Sheet!A1:C3. start/end are 1-based rows of that sheet, not HTML lines. One-cell and small A1 reads print format when present; row windows stay TSV unless ir is set on a small range.
 Knowledge objects with no file: read_object. Live names/grep: run_command → ls / rg.`,
 		Category: streaming.ToolCategoryRead,
 		Access:   ToolReadAccess,
@@ -246,11 +249,11 @@ func (v vfsTools) readTabular(td *vfs.TabularDocument, args readArgs, b *strings
 		}
 		fmt.Fprintf(b, "block_id=%s\n", args.BlockID)
 		if r1 == r2 && c1 == c2 {
-			text, err := td.ReadCell(sheetKey, a1)
+			cell, err := td.Cell(sheetKey, a1)
 			if err != nil {
 				return "", err
 			}
-			fmt.Fprintf(b, "text=%s\n", text)
+			fmt.Fprintf(b, "%s\n", formatToolCell(cell))
 			return b.String(), nil
 		}
 		tsv, err := td.ReadRangeTSV(sheetKey, a1)
@@ -260,6 +263,12 @@ func (v vfsTools) readTabular(td *vfs.TabularDocument, args readArgs, b *strings
 		b.WriteString(tsv)
 		if tsv != "" && !strings.HasSuffix(tsv, "\n") {
 			b.WriteByte('\n')
+		}
+		cells := (r2 - r1 + 1) * (c2 - c1 + 1)
+		if cells > 0 && cells <= smallFormatCells {
+			if err := writeRangeFormats(b, td, sheetKey, r1, c1, r2, c2); err != nil {
+				return "", err
+			}
 		}
 		return b.String(), nil
 	}
@@ -279,7 +288,39 @@ func (v vfsTools) readTabular(td *vfs.TabularDocument, args readArgs, b *strings
 	for i, line := range lines {
 		fmt.Fprintf(b, "%6d|%s\n", start+i, line)
 	}
+	if args.IR {
+		endRow := start + len(lines) - 1
+		if sh.Cols > 0 && len(lines)*sh.Cols <= smallFormatCells {
+			if err := writeRangeFormats(b, td, sheetKey, start, 1, endRow, sh.Cols); err != nil {
+				return "", err
+			}
+		}
+	}
 	return b.String(), nil
+}
+
+func formatToolCell(c vfs.Cell) string {
+	s := "text=" + c.Display()
+	if f := c.Format.String(); f != "" {
+		s += " format=" + f
+	}
+	return s
+}
+
+func writeRangeFormats(b *strings.Builder, td *vfs.TabularDocument, sheet string, r1, c1, r2, c2 int) error {
+	for r := r1; r <= r2; r++ {
+		for c := c1; c <= c2; c++ {
+			cell, err := td.Cell(sheet, vfs.FormatA1(r, c))
+			if err != nil {
+				return err
+			}
+			if cell.Format.IsZero() {
+				continue
+			}
+			fmt.Fprintf(b, "%s format=%s\n", vfs.FormatA1(r, c), cell.Format.String())
+		}
+	}
+	return nil
 }
 
 func (v vfsTools) newWrite() *Tool {
@@ -290,7 +331,7 @@ func (v vfsTools) newWrite() *Tool {
 
 Pass rev from read when the path exists. Create only via content or ir_text (empty content creates or truncates), or media_type+blocks for a Google Doc. Foo.md is never a Doc. Extensionless Spec without media_type is plaintext.
 Projected Docs/Word: use block_id or blocks. Inline marks in block text: **bold**, _italic_, ~~strike~~, [label](url). kind/level is structure (not # or -). No marks = plain replace (drops old marks). Line/HTML/SetText writes return an error. content lift is create-only. Persists immediately.
-Sheets: block_id is a sheet or Sheet!A1:C3 overlay. start/end are rows and line count must equal end-start.`,
+Sheets: block_id is a sheet or Sheet!A1:C3 overlay. start/end are rows and line count must equal end-start. Optional format overlays the same range (value-only leaves format; format-only leaves values).`,
 		Category: streaming.ToolCategoryEdit,
 		Access:   ToolWriteAccess,
 		Timeout:  60 * time.Second,
@@ -319,6 +360,7 @@ Sheets: block_id is a sheet or Sheet!A1:C3 overlay. start/end are rows and line 
 				IncludeHeading: args.IncludeHeading,
 				TabID:          args.TabID,
 				MediaType:      args.MediaType,
+				Format:         args.Format,
 			}
 			if full {
 				body, err := fullWriteBody(args)

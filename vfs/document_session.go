@@ -118,12 +118,3 @@ func bindDocument(doc Document, virtual string) Document {
 	}
 	return doc
 }
-
-func encodeDocument(_ context.Context, doc Document, _ *ContentRegistry) (data []byte, persistType string, err error) {
-	t, ok := doc.(Textual)
-	if !ok {
-		return nil, "", ErrNotTextual
-	}
-	body, err := textualPayload(t)
-	return []byte(body), t.MediaType(), err
-}

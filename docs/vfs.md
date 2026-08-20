@@ -22,7 +22,7 @@ Knowledge objects, search, and the graph are documented in **[docs/knowledge.md]
      │           │
      │           ▼
      │      TextDocument / RichDocument / TabularDocument
-     │        lines + text / blocks + HTML / sheets + HTML tables
+     │        lines + text / blocks + HTML / sheets + TSV values
      │           │
      └───────────┘
            │
@@ -115,12 +115,12 @@ Two surfaces, one document:
 
 | Surface | Behavior |
 |---------|----------|
-| FUSE / `open` / `rg` | HTML projection (Docs `projectHTML`; Sheets HTML tables under `h1.tacklr-tab`). Kernel writes stay `EROFS`. `ls` of a Doc or Sheet is size 0 (no export/Get on getattr). |
-| Agent `read` / `write` | Block / grid IR. Default `read` of a Doc or Sheet is an outline (must not dump HTML or TSV). Docs `write` uses `block_id` / `blocks`. Sheets use `block_id` as a sheet or `Sheet!A1:C3`; `start`/`end` are rows. Line/HTML/`SetText` return `ErrProjected`. |
+| FUSE / `open` / `rg` | Docs: HTML projection. Sheets: TSV of displayed values with `# Sheet: Title` headers (no bold/markdown/JSON/`#rrggbb`). Kernel writes stay `EROFS`. `ls` of a Doc or Sheet is size 0 (no export/Get on getattr). |
+| Agent `read` / `write` | Block / grid IR. Default `read` of a Doc or Sheet is an outline (must not dump HTML or TSV). Docs `write` uses `block_id` / `blocks`. Sheets use `block_id` as a sheet or `Sheet!A1:C3`; `start`/`end` are rows. Optional `format` overlays the same range. Line/HTML/`SetText` return `ErrProjected`. |
 
 `Stat.MediaType` is the real Drive MIME. Slides/Drawings/Forms stay listed and return `ErrNoCodec` / `ErrNotSupported`. Native `PutFile` / identity `WriteDocument` return `ErrNotSupported`. `Remove` is Drive trash (`trashed:true`), does not follow shortcuts, and refuses ambiguous names and the mount root. Agent delete is `rm` (FUSE Unlink) only.
 
-Read-only bind: official ZIP export (`application/zip`, 10 MiB). Writable bind: Docs `documents.get(includeTabsContent=true)` and Sheets `spreadsheets.get` / `values.batchGet` (skip Export); persist is `documents.batchUpdate` with checkout `requiredRevisionId`, or Sheets `values.batchUpdate` after Drive `files.get(version)` CAS. Create-as-Doc / Create-as-Sheet requires `write` + the Google MIME on an **extensionless** path. Bare `/contracts/Spec` is plaintext. `Foo.md` is never a Doc. `Budget.xlsx` is never a Google Sheet.
+Read-only bind: official ZIP export (`application/zip`, 10 MiB). Writable bind: Docs `documents.get(includeTabsContent=true)` and Sheets `spreadsheets.get` with grid `userEnteredFormat` (skip Export); persist is `documents.batchUpdate` with checkout `requiredRevisionId`, or Sheets `values.batchUpdate` (`USER_ENTERED`) plus `spreadsheets.batchUpdate` `repeatCell`/`userEnteredFormat` after Drive `files.get(version)` CAS. Create-as-Doc / Create-as-Sheet requires `write` + the Google MIME on an **extensionless** path. Bare `/contracts/Spec` is plaintext. `Foo.md` is never a Doc. `Budget.xlsx` is never a Google Sheet (local/S3/Drive *file* `.xlsx` uses the Excel codec).
 
 ```go
 auth := vfs.NewSessionAuth()
@@ -181,7 +181,7 @@ In memory:
 
 **`*RichDocument`** (Google Docs today; Word later): blocks are the source of truth; `Text()` is derived HTML. `SetText` / `SetLine` / `ReplaceLines` return `ErrProjected`. Agent writes use `ReplaceBlock` / `SetBlocks`. `ContentToken` hashes a block fingerprint, not HTML.
 
-**`*TabularDocument`** (Google Sheets today; Excel later): sheets are the source of truth (dense used rectangle of string cells). `Text()` is derived HTML tables under `<h1 class="tacklr-tab">`. `SetText` / `SetLine` / `ReplaceLines` return `ErrProjected`. `Blocks()` is one `kind=sheet` block per sheet (metadata + header preview, no cell dump). `ContentToken` hashes the grid, not HTML. Cell `Input` starting with `=` is a formula; read shows the formula if present, else the formatted value.
+**`*TabularDocument`** (Google Sheets and Excel `.xlsx`): sheets are the source of truth (dense used rectangle of string cells plus a portable `CellFormat` bag: number, bold/italic/strike, fill/color, align, border). `Text()` is derived TSV of displayed values with `# Sheet: Title` headers. `SetText` / `SetLine` / `ReplaceLines` return `ErrProjected`. `Blocks()` is one `kind=sheet` block per sheet (metadata + header preview, no cell dump). `ContentToken` hashes the grid and format (not the TSV). Cell `Input` starting with `=` is a formula; read shows the formula if present, else the formatted value. Value-only writes leave format; format-only writes leave values. Native Google Sheets persist via the Sheets API; `.xlsx` files use the Excel codec (`styles.xml`). A native Sheet never round-trips through xlsx.
 
 **Block schema** (Markdown headings plus Docs paragraph / list_item / table / image):
 
@@ -577,7 +577,6 @@ No FUSE and no shell are required for this IR edit path. `run_command` needs a l
 
 ## Not in this package (yet)
 
-- Excel / `.xlsx` codec (the grid IR is shared; this package ships native Google Sheets)
 - Slides, Drawings, Forms
 - New image insert / upload pipeline (existing images are first-class IR)
 - Tab add/rename/delete/reorder UI

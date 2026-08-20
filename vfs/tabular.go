@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"slices"
 	"strconv"
 	"strings"
@@ -11,6 +12,7 @@ import (
 
 const (
 	mimeGoogleSpreadsheet = "application/vnd.google-apps.spreadsheet"
+	mimeXLSX              = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 	// MaxSheetCells is the hard cap on loaded cells in one workbook.
 	MaxSheetCells = 200_000
 	headerPreview = 80
@@ -18,12 +20,190 @@ const (
 
 // Cell is one grid value. Input is what the agent writes ("Acme", "42", "=A1+1").
 // Value is the provider's formatted/computed text; empty when unknown.
+// Zero Format means unspecified (do not send on write).
 type Cell struct {
-	Input string
-	Value string
+	Input  string
+	Value  string
+	Format CellFormat
 }
 
-func (c Cell) empty() bool { return c.Input == "" && c.Value == "" }
+// CellFormat is the portable subset mapped by Sheets and Excel codecs.
+type CellFormat struct {
+	Number string      `json:"number,omitempty"`
+	Bold   bool        `json:"bold,omitempty"`
+	Italic bool        `json:"italic,omitempty"`
+	Strike bool        `json:"strike,omitempty"`
+	Fill   string      `json:"fill,omitempty"`
+	Color  string      `json:"color,omitempty"`
+	Align  string      `json:"align,omitempty"`
+	Border *CellBorder `json:"border,omitempty"`
+}
+
+// CellBorder is one named-style bag. Empty Edges means all four sides.
+type CellBorder struct {
+	Style string `json:"style,omitempty"`
+	Color string `json:"color,omitempty"`
+	Edges string `json:"edges,omitempty"`
+}
+
+func (c Cell) empty() bool { return c.Input == "" && c.Value == "" && c.Format.IsZero() }
+
+// IsZero reports whether no format fields are set (do not send on write).
+func (f CellFormat) IsZero() bool {
+	return f.Number == "" && !f.Bold && !f.Italic && !f.Strike &&
+		f.Fill == "" && f.Color == "" && f.Align == "" &&
+		(f.Border == nil || f.Border.zero())
+}
+
+func (b CellBorder) zero() bool {
+	return b.Style == "" && b.Color == "" && b.Edges == ""
+}
+
+func (f CellFormat) equal(o CellFormat) bool {
+	if f.Number != o.Number || f.Bold != o.Bold || f.Italic != o.Italic ||
+		f.Strike != o.Strike || f.Fill != o.Fill || f.Color != o.Color || f.Align != o.Align {
+		return false
+	}
+	if f.Border == nil || o.Border == nil {
+		return f.Border == nil && o.Border == nil
+	}
+	return *f.Border == *o.Border
+}
+
+// String is the tool format bag: number=$#,##0.00,bold,border=thin:bottom
+func (f CellFormat) String() string {
+	if f.IsZero() {
+		return ""
+	}
+	var parts []string
+	if f.Number != "" {
+		parts = append(parts, "number="+f.Number)
+	}
+	if f.Bold {
+		parts = append(parts, "bold")
+	}
+	if f.Italic {
+		parts = append(parts, "italic")
+	}
+	if f.Strike {
+		parts = append(parts, "strike")
+	}
+	if f.Fill != "" {
+		parts = append(parts, "fill="+f.Fill)
+	}
+	if f.Color != "" {
+		parts = append(parts, "color="+f.Color)
+	}
+	if f.Align != "" {
+		parts = append(parts, "align="+f.Align)
+	}
+	if f.Border != nil && !f.Border.zero() {
+		style := normalizeBorderStyle(f.Border.Style)
+		b := "border=" + style
+		if f.Border.Edges != "" {
+			b += ":" + f.Border.Edges
+		}
+		if f.Border.Color != "" {
+			b += ":" + f.Border.Color
+		}
+		parts = append(parts, b)
+	}
+	return strings.Join(parts, ",")
+}
+
+func normalizeBorderStyle(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	switch s {
+	case "none", "thin", "medium", "thick", "dashed", "dotted", "double":
+		return s
+	default:
+		return "thin"
+	}
+}
+
+func normalizeAlign(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	switch s {
+	case "left", "center", "right":
+		return s
+	default:
+		return ""
+	}
+}
+
+// Overlay copies non-zero src fields onto f (value-only writes leave format).
+func (f *CellFormat) Overlay(src CellFormat) {
+	if f == nil {
+		return
+	}
+	overlayCellFormat(f, src)
+}
+
+func overlayCellFormat(dst *CellFormat, src CellFormat) {
+	if dst == nil {
+		return
+	}
+	if src.Number != "" {
+		dst.Number = src.Number
+	}
+	if src.Bold {
+		dst.Bold = true
+	}
+	if src.Italic {
+		dst.Italic = true
+	}
+	if src.Strike {
+		dst.Strike = true
+	}
+	if src.Fill != "" {
+		dst.Fill = src.Fill
+	}
+	if src.Color != "" {
+		dst.Color = src.Color
+	}
+	if a := normalizeAlign(src.Align); a != "" {
+		dst.Align = a
+	}
+	if src.Border != nil {
+		b := *src.Border
+		b.Style = normalizeBorderStyle(b.Style)
+		dst.Border = &b
+	}
+}
+
+// Normalize maps align and border style onto the portable bag.
+func (f *CellFormat) Normalize() {
+	if f == nil {
+		return
+	}
+	if f.Align != "" {
+		f.Align = normalizeAlign(f.Align)
+	}
+	if f.Border == nil {
+		return
+	}
+	if f.Border.zero() {
+		f.Border = nil
+		return
+	}
+	if f.Border.Style != "" {
+		f.Border.Style = normalizeBorderStyle(f.Border.Style)
+	}
+}
+
+func applyCellOverlay(dst *Cell, input string, hasValue bool, format *CellFormat) {
+	if hasValue {
+		dst.Input = input
+		if strings.HasPrefix(input, "=") {
+			dst.Value = ""
+		} else {
+			dst.Value = input
+		}
+	}
+	if format != nil {
+		dst.Format.Overlay(*format)
+	}
+}
 
 // Display is the agent-visible cell: formula if present, else formatted value.
 func (c Cell) Display() string {
@@ -59,13 +239,13 @@ type Sheet struct {
 }
 
 // TabularDocument is the spreadsheet IR. Sheets are the source of truth;
-// Text() is a derived HTML projection for FUSE / rg.
+// Text() is a derived TSV projection of displayed values for FUSE / rg.
 type TabularDocument struct {
 	path, mediaType, encoding string
 	sheets                    []Sheet
 	named                     []NamedRange
 	hint                      persistHint
-	html                      string
+	text                      string
 	starts                    []int
 }
 
@@ -103,7 +283,7 @@ func adoptTabularDocument(path, mediaType string, sheets []Sheet, named []NamedR
 func (d *TabularDocument) Path() string      { return d.path }
 func (d *TabularDocument) MediaType() string { return d.mediaType }
 func (d *TabularDocument) Encoding() string  { return d.encoding }
-func (d *TabularDocument) Text() string      { return d.html }
+func (d *TabularDocument) Text() string      { return d.text }
 func (d *TabularDocument) LineCount() int    { return len(d.starts) }
 func (d *TabularDocument) Sheets() []Sheet   { return d.sheets }
 func (d *TabularDocument) NamedRanges() []NamedRange {
@@ -135,9 +315,9 @@ func (d *TabularDocument) Lines(start, end int) ([]string, error) {
 func (d *TabularDocument) lineSlice(i int) string {
 	start := d.starts[i]
 	if i+1 < len(d.starts) {
-		return d.html[start : d.starts[i+1]-1]
+		return d.text[start : d.starts[i+1]-1]
 	}
-	return d.html[start:]
+	return d.text[start:]
 }
 
 func (d *TabularDocument) SetText(string) error { return ErrProjected }
@@ -149,8 +329,29 @@ func (d *TabularDocument) ReplaceLines(int, int, []string) error {
 }
 
 func (d *TabularDocument) reproject() {
-	d.html = projectTabularHTML(d.sheets)
-	d.starts = lineStartsOf(d.html)
+	d.text = projectTabularTSV(d.sheets)
+	d.starts = lineStartsOf(d.text)
+}
+
+func projectTabularTSV(sheets []Sheet) string {
+	var b strings.Builder
+	need := 16
+	for _, sh := range sheets {
+		need += len(sh.Title) + 16 + sh.Rows*(sh.Cols+1)*8
+	}
+	b.Grow(need)
+	for i, sh := range sheets {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString("# Sheet: ")
+		b.WriteString(sh.Title)
+		for _, row := range sh.Cells {
+			b.WriteByte('\n')
+			writeToolRow(&b, row)
+		}
+	}
+	return b.String()
 }
 
 func (d *TabularDocument) cellCount() int {
@@ -235,7 +436,9 @@ func sheetPreview(sh Sheet) string {
 	return b.String()
 }
 
-// ContentFingerprint is SHA-256 of the grid (not the HTML projection).
+// ContentFingerprint is SHA-256 of the grid (not the TSV projection).
+// Formula Cell.Value is ignored (Display uses Input). Format fields are included
+// so a format-only mutation changes rev.
 func (d *TabularDocument) ContentFingerprint() string {
 	h := sha256.New()
 	var buf [24]byte
@@ -252,6 +455,8 @@ func (d *TabularDocument) ContentFingerprint() string {
 			for _, c := range row {
 				_, _ = h.Write(unsafeStringBytes(c.Display()))
 				_, _ = h.Write(fingerprintSep)
+				c.Format.writeFingerprint(h)
+				_, _ = h.Write(fingerprintSep)
 			}
 			_, _ = h.Write(fingerprintNL)
 		}
@@ -265,6 +470,40 @@ func (d *TabularDocument) ContentFingerprint() string {
 		_, _ = h.Write(fingerprintNL)
 	}
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+func (f CellFormat) writeFingerprint(w io.Writer) {
+	if f.IsZero() {
+		return
+	}
+	_, _ = w.Write(unsafeStringBytes(f.Number))
+	_, _ = w.Write(fingerprintSep)
+	if f.Bold {
+		_, _ = w.Write(fingerprintOne)
+	}
+	_, _ = w.Write(fingerprintSep)
+	if f.Italic {
+		_, _ = w.Write(fingerprintOne)
+	}
+	_, _ = w.Write(fingerprintSep)
+	if f.Strike {
+		_, _ = w.Write(fingerprintOne)
+	}
+	_, _ = w.Write(fingerprintSep)
+	_, _ = w.Write(unsafeStringBytes(f.Fill))
+	_, _ = w.Write(fingerprintSep)
+	_, _ = w.Write(unsafeStringBytes(f.Color))
+	_, _ = w.Write(fingerprintSep)
+	_, _ = w.Write(unsafeStringBytes(f.Align))
+	if f.Border == nil || f.Border.zero() {
+		return
+	}
+	_, _ = w.Write(fingerprintSep)
+	_, _ = w.Write(unsafeStringBytes(f.Border.Style))
+	_, _ = w.Write(fingerprintSep)
+	_, _ = w.Write(unsafeStringBytes(f.Border.Color))
+	_, _ = w.Write(fingerprintSep)
+	_, _ = w.Write(unsafeStringBytes(f.Border.Edges))
 }
 
 func (d *TabularDocument) findSheet(key string) (int, bool) {
@@ -358,7 +597,8 @@ func parseA1Cell(s string) (row, col int, err error) {
 	return row, col, nil
 }
 
-func formatA1(row, col int) string {
+// FormatA1 is the 1-based cell address (A1, B2, AA10).
+func FormatA1(row, col int) string {
 	return colLetters(col) + strconv.Itoa(row)
 }
 
@@ -380,9 +620,9 @@ func colLetters(col int) string {
 func sheetA1(title string, r1, c1, r2, c2 int) string {
 	q := quoteSheetTitle(title)
 	if r1 == r2 && c1 == c2 {
-		return q + "!" + formatA1(r1, c1)
+		return q + "!" + FormatA1(r1, c1)
 	}
-	return q + "!" + formatA1(r1, c1) + ":" + formatA1(r2, c2)
+	return q + "!" + FormatA1(r1, c1) + ":" + FormatA1(r2, c2)
 }
 
 func quoteSheetTitle(title string) string {
@@ -418,18 +658,27 @@ func (d *TabularDocument) ReadRows(key string, start, end int) (Sheet, []string,
 }
 
 func (d *TabularDocument) ReadCell(key, a1 string) (string, error) {
-	i, ok := d.findSheet(key)
-	if !ok {
-		return "", fmt.Errorf("unknown block_id %q", key)
-	}
-	r1, c1, r2, c2, err := parseA1(a1)
+	c, err := d.Cell(key, a1)
 	if err != nil {
 		return "", err
 	}
-	if r1 != r2 || c1 != c2 {
-		return "", fmt.Errorf("vfs: not a single cell %q", a1)
+	return c.Display(), nil
+}
+
+// Cell returns the cell at sheet!A1 (single cell).
+func (d *TabularDocument) Cell(key, a1 string) (Cell, error) {
+	i, ok := d.findSheet(key)
+	if !ok {
+		return Cell{}, fmt.Errorf("unknown block_id %q", key)
 	}
-	return d.sheets[i].cellAt(r1, c1).Display(), nil
+	r1, c1, r2, c2, err := parseA1(a1)
+	if err != nil {
+		return Cell{}, err
+	}
+	if r1 != r2 || c1 != c2 {
+		return Cell{}, fmt.Errorf("vfs: not a single cell %q", a1)
+	}
+	return d.sheets[i].cellAt(r1, c1), nil
 }
 
 func (d *TabularDocument) ReadRangeTSV(key, a1 string) (string, error) {
@@ -483,19 +732,23 @@ func WithMerge(sh Sheet, startRow, startCol, endRow, endCol int) Sheet {
 	return sh
 }
 
-func (d *TabularDocument) overlayCell(idx, row, col int, input string) error {
+func (d *TabularDocument) overlayCell(idx, row, col int, input *string, format *CellFormat) error {
 	sh := &d.sheets[idx]
 	if sh.mergeHit(row-1, col-1) {
 		return fmt.Errorf("%w: write into a merge", ErrNotSupported)
 	}
 	growSheet(sh, row, col)
-	sh.Cells[row-1][col-1] = Cell{Input: input}
+	if input != nil {
+		applyCellOverlay(&sh.Cells[row-1][col-1], *input, true, format)
+	} else {
+		applyCellOverlay(&sh.Cells[row-1][col-1], "", false, format)
+	}
 	trimSheet(sh)
 	return d.finishMut()
 }
 
-func (d *TabularDocument) overlayRows(idx, start, end int, lines []string) error {
-	if end-start != len(lines) {
+func (d *TabularDocument) overlayRows(idx, start, end int, lines []string, hasValue bool, format *CellFormat) error {
+	if hasValue && end-start != len(lines) {
 		return fmt.Errorf("%w: line count must equal end-start", ErrNotSupported)
 	}
 	sh := &d.sheets[idx]
@@ -511,36 +764,57 @@ func (d *TabularDocument) overlayRows(idx, start, end int, lines []string) error
 	if cols < 1 {
 		cols = 1
 	}
-	growSheet(sh, end-1, cols)
-	for i, cells := range parsed {
+	last := end - 1
+	if last < 1 {
+		last = 1
+	}
+	growSheet(sh, last, cols)
+	n := end - start
+	if !hasValue {
+		n = last - (start - 1)
+		if n < 0 {
+			n = 0
+		}
+	}
+	for i := 0; i < n; i++ {
 		r := start - 1 + i
+		if r < 0 || r >= len(sh.Cells) {
+			continue
+		}
+		var cells []string
+		if hasValue && i < len(parsed) {
+			cells = parsed[i]
+		}
 		for c := 0; c < sh.Cols; c++ {
 			if sh.mergeHit(r, c) {
 				return fmt.Errorf("%w: write into a merge", ErrNotSupported)
 			}
 			val := ""
-			if c < len(cells) {
+			if hasValue && c < len(cells) {
 				val = cells[c]
 			}
-			sh.Cells[r][c] = Cell{Input: val}
+			applyCellOverlay(&sh.Cells[r][c], val, hasValue, format)
 		}
 	}
 	trimSheet(sh)
 	return d.finishMut()
 }
 
-func (d *TabularDocument) overlayRange(idx, r1, c1, r2, c2 int, lines []string) error {
+func (d *TabularDocument) overlayRange(idx, r1, c1, r2, c2 int, lines []string, hasValue bool, format *CellFormat) error {
 	rows := r2 - r1 + 1
 	cols := c2 - c1 + 1
-	if len(lines) != rows {
+	if hasValue && len(lines) != rows {
 		return fmt.Errorf("%w: line count must equal end-start", ErrNotSupported)
 	}
 	sh := &d.sheets[idx]
 	growSheet(sh, r2, c2)
-	for i, line := range lines {
-		cells := splitToolRow(line)
-		if len(cells) > cols {
-			return fmt.Errorf("%w: row has %d cells, range is %d cols", ErrNotSupported, len(cells), cols)
+	for i := 0; i < rows; i++ {
+		var cells []string
+		if hasValue {
+			cells = splitToolRow(lines[i])
+			if len(cells) > cols {
+				return fmt.Errorf("%w: row has %d cells, range is %d cols", ErrNotSupported, len(cells), cols)
+			}
 		}
 		r := r1 - 1 + i
 		for c := 0; c < cols; c++ {
@@ -548,10 +822,10 @@ func (d *TabularDocument) overlayRange(idx, r1, c1, r2, c2 int, lines []string) 
 				return fmt.Errorf("%w: write into a merge", ErrNotSupported)
 			}
 			val := ""
-			if c < len(cells) {
+			if hasValue && c < len(cells) {
 				val = cells[c]
 			}
-			sh.Cells[r][c1-1+c] = Cell{Input: val}
+			applyCellOverlay(&sh.Cells[r][c1-1+c], val, hasValue, format)
 		}
 	}
 	trimSheet(sh)
@@ -568,10 +842,35 @@ func (d *TabularDocument) replaceSheetValues(idx int, grid [][]Cell) error {
 		}
 	}
 	oldR, oldC := sh.Rows, sh.Cols
+	old := sh.Cells
+	for r := range grid {
+		for c := range grid[r] {
+			if r < len(old) && c < len(old[r]) {
+				grid[r][c].Format = cloneCellFormat(old[r][c].Format)
+			}
+		}
+	}
 	sh.Cells = grid
 	trimSheet(sh)
 	sh.persistRows = max(oldR, sh.Rows)
 	sh.persistCols = max(oldC, sh.Cols)
+	return d.finishMut()
+}
+
+func (d *TabularDocument) overlaySheetFormat(idx int, format *CellFormat) error {
+	if format == nil {
+		return nil
+	}
+	sh := &d.sheets[idx]
+	for r := 0; r < sh.Rows; r++ {
+		for c := 0; c < sh.Cols; c++ {
+			if sh.mergeHit(r, c) {
+				return fmt.Errorf("%w: write into a merge", ErrNotSupported)
+			}
+			applyCellOverlay(&sh.Cells[r][c], "", false, format)
+		}
+	}
+	trimSheet(sh)
 	return d.finishMut()
 }
 
@@ -597,11 +896,7 @@ func growSheet(sh *Sheet, rows, cols int) {
 		}
 	}
 	for i := range sh.Cells {
-		if len(sh.Cells[i]) < cols {
-			row := make([]Cell, cols)
-			copy(row, sh.Cells[i])
-			sh.Cells[i] = row
-		}
+		extendCells(&sh.Cells[i], cols)
 	}
 	sh.Rows = len(sh.Cells)
 	if len(sh.Cells) > 0 {
@@ -653,11 +948,7 @@ func normalizeSheetShape(sh *Sheet) {
 	}
 	if cols > 0 {
 		for i := range sh.Cells {
-			if len(sh.Cells[i]) < cols {
-				row := make([]Cell, cols)
-				copy(row, sh.Cells[i])
-				sh.Cells[i] = row
-			}
+			extendCells(&sh.Cells[i], cols)
 		}
 	}
 	if extra := sh.Rows - len(sh.Cells); extra > 0 {
@@ -670,16 +961,36 @@ func normalizeSheetShape(sh *Sheet) {
 	sh.Cols = cols
 }
 
+func extendCells(row *[]Cell, cols int) {
+	if n := cols - len(*row); n > 0 {
+		*row = slices.Grow(*row, n)
+		old := len(*row)
+		*row = (*row)[:old+n]
+		clear((*row)[old:])
+	}
+}
+
 func cloneSheet(sh Sheet) Sheet {
 	out := sh
 	if sh.Cells != nil {
 		out.Cells = make([][]Cell, len(sh.Cells))
 		for i, row := range sh.Cells {
 			out.Cells[i] = slices.Clone(row)
+			for j := range out.Cells[i] {
+				out.Cells[i][j].Format = cloneCellFormat(out.Cells[i][j].Format)
+			}
 		}
 	}
 	out.merges = slices.Clone(sh.merges)
 	return out
+}
+
+func cloneCellFormat(f CellFormat) CellFormat {
+	if f.Border != nil {
+		b := *f.Border
+		f.Border = &b
+	}
+	return f
 }
 
 func cellsFromStrings(grid [][]string) [][]Cell {
@@ -699,6 +1010,15 @@ func escapeToolCell(s string) string {
 	}
 	var b strings.Builder
 	b.Grow(len(s) + 4)
+	writeEscapedToolCell(&b, s)
+	return b.String()
+}
+
+func writeEscapedToolCell(b *strings.Builder, s string) {
+	if !strings.ContainsAny(s, "\t\n\r\\") {
+		b.WriteString(s)
+		return
+	}
 	for i := 0; i < len(s); i++ {
 		switch s[i] {
 		case '\\':
@@ -713,7 +1033,6 @@ func escapeToolCell(s string) string {
 			b.WriteByte(s[i])
 		}
 	}
-	return b.String()
 }
 
 func unescapeToolCell(s string) string {
@@ -752,14 +1071,17 @@ func encodeToolRow(row []Cell) string {
 		return ""
 	}
 	var b strings.Builder
-	b.Grow(len(row) * 8)
+	writeToolRow(&b, row)
+	return b.String()
+}
+
+func writeToolRow(b *strings.Builder, row []Cell) {
 	for i, c := range row {
 		if i > 0 {
 			b.WriteByte('\t')
 		}
-		b.WriteString(escapeToolCell(c.Display()))
+		writeEscapedToolCell(b, c.Display())
 	}
-	return b.String()
 }
 
 func splitToolRow(line string) []string {
@@ -808,10 +1130,11 @@ func padStringGrid(rows [][]string) [][]string {
 		return rows
 	}
 	for i := range rows {
-		if len(rows[i]) < cols {
-			row := make([]string, cols)
-			copy(row, rows[i])
-			rows[i] = row
+		if n := cols - len(rows[i]); n > 0 {
+			rows[i] = slices.Grow(rows[i], n)
+			old := len(rows[i])
+			rows[i] = rows[i][:old+n]
+			clear(rows[i][old:])
 		}
 	}
 	return rows
@@ -819,6 +1142,10 @@ func padStringGrid(rows [][]string) [][]string {
 
 func isSpreadsheet(mediaType string) bool {
 	return normalizeMediaType(mediaType) == mimeGoogleSpreadsheet
+}
+
+func isXLSX(mediaType string) bool {
+	return normalizeMediaType(mediaType) == mimeXLSX
 }
 
 var (
