@@ -250,9 +250,7 @@ func (d *TabularDocument) ContentFingerprint() string {
 		_, _ = h.Write(fingerprintNL)
 		for _, row := range sh.Cells {
 			for _, c := range row {
-				_, _ = h.Write(unsafeStringBytes(c.Input))
-				_, _ = h.Write(fingerprintEq)
-				_, _ = h.Write(unsafeStringBytes(c.Value))
+				_, _ = h.Write(unsafeStringBytes(c.Display()))
 				_, _ = h.Write(fingerprintSep)
 			}
 			_, _ = h.Write(fingerprintNL)

@@ -8,6 +8,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/vfs"
@@ -1063,8 +1064,11 @@ func TestVFSTools_projectedSheetReadWrite(t *testing.T) {
 	}
 	rev = fieldKV(res.output, "rev")
 	f := api.files["sheet1"]
-	f.meta.Version = "stale"
+	f.meta.ModTime = time.Now().UTC()
 	api.files["sheet1"] = f
+	snap := sheetsAPI.snaps["sheet1"]
+	snap.Sheets[0].Cells[0][0] = vfs.Cell{Input: "Changed", Value: "Changed"}
+	sheetsAPI.snaps["sheet1"] = snap
 	_, err = tools["write"].invoke(ctx, fmt.Sprintf(
 		`{"path":"/contracts/Budget","rev":%q,"block_id":"Budget!B2","body":"0"}`, rev), rt)
 	if !errors.Is(err, vfs.ErrStaleContent) {

@@ -478,9 +478,6 @@ func (p *driveProvider) writeGoogleSheet(ctx context.Context, name string, td *T
 	if td.hint.revisionID == "" {
 		return ErrConflict
 	}
-	if driveRevision(meta) != td.hint.revisionID {
-		return ErrConflict
-	}
 	batch, err := tabularOverlayBatch(td)
 	if err != nil {
 		return err

@@ -29,6 +29,15 @@ func twoSheetBudget() *TabularDocument {
 	return d
 }
 
+func TestTabularDocument_fingerprintIgnoresFormattedValue(t *testing.T) {
+	a := twoSheetBudget()
+	b := twoSheetBudget()
+	b.sheets[0].Cells[2][0].Value = "999"
+	if a.ContentFingerprint() != b.ContentFingerprint() {
+		t.Fatal("formula formatted value must not change rev")
+	}
+}
+
 func TestTabularDocument_outlineProjectionAndA1(t *testing.T) {
 	d := twoSheetBudget()
 	blocks := d.Blocks()
