@@ -267,11 +267,11 @@ func TestDrive_exportReadHonestStat(t *testing.T) {
 		t.Fatalf("Stat exported %d times", api.exports)
 	}
 	sheet, err := ms.Stat(ctx, "/contracts/Budget")
-	if err != nil || sheet.MediaType != "application/vnd.google-apps.spreadsheet" {
+	if err != nil || sheet.MediaType != "application/vnd.google-apps.spreadsheet" || sheet.Size != 0 {
 		t.Fatalf("sheet Stat = %+v err=%v", sheet, err)
 	}
-	if _, err := ms.ReadText(ctx, "/contracts/Budget"); !errors.Is(err, vfs.ErrNoCodec) {
-		t.Fatalf("sheet: %v", err)
+	if _, err := ms.ReadFile(ctx, "/contracts/Budget"); !errors.Is(err, vfs.ErrNotSupported) {
+		t.Fatalf("sheet ReadFile: %v", err)
 	}
 	if _, err := ms.ReadFile(ctx, "/contracts/Spec"); !errors.Is(err, vfs.ErrNotSupported) {
 		t.Fatalf("OpenFile native: %v", err)
@@ -406,7 +406,7 @@ func TestDrive_docsWriteCAS(t *testing.T) {
 		t.Fatalf("after empty hint: %v", err)
 	}
 
-	rd, ok := orig.(*vfs.RichDocument)
+	rd, ok := vfs.AsRich(orig)
 	if !ok {
 		t.Fatalf("type %T", orig)
 	}
@@ -445,7 +445,10 @@ func TestDrive_docsReplaceSucceeds(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := vfs.ContentToken(doc)
-	rd := doc.(*vfs.RichDocument)
+	rd, ok := vfs.AsRich(doc)
+	if !ok {
+		t.Fatalf("type %T", doc)
+	}
 	var paraID string
 	for _, b := range rd.Blocks() {
 		if b.Kind == vfs.BlockKindParagraph {
@@ -634,12 +637,15 @@ func TestDrive_writeDocumentEdges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rd := doc.(*vfs.RichDocument)
+	rd, ok := vfs.AsRich(doc)
+	if !ok {
+		t.Fatalf("type %T", doc)
+	}
 	rd.SetBlocks([]vfs.Block{
 		{Kind: vfs.BlockKindHeading, Text: "**Spec**", Style: vfs.StyleMeta{Level: 1}},
 		{Kind: vfs.BlockKindParagraph, Text: "See [x](https://e)"},
 	})
-	if err := ms.WriteDocument(ctx, rd); err != nil {
+	if err := ms.WriteDocument(ctx, doc); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -659,7 +665,10 @@ func TestDrive_docsSetBlocksNestedAndOmitImage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rd := doc.(*vfs.RichDocument)
+	rd, ok := vfs.AsRich(doc)
+	if !ok {
+		t.Fatalf("type %T", doc)
+	}
 	rd.SetBlocks([]vfs.Block{
 		{Kind: vfs.BlockKindHeading, Text: "Title", Style: vfs.StyleMeta{Level: 1, Attributes: map[string]string{"tab_id": "t.abc"}}},
 		{Kind: vfs.BlockKindListItem, Text: "a", Style: vfs.StyleMeta{Level: 1, Attributes: map[string]string{"tab_id": "t.abc", "list_type": "ul", "list_id": "l1"}}},

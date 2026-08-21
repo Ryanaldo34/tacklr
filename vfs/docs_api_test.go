@@ -239,7 +239,4 @@ func TestGoogleDocs_httpGetBatchUpdate(t *testing.T) {
 	if _, err := newGoogleDocs(ctx, nil); err == nil {
 		t.Fatal("nil holder")
 	}
-	if err := (googleDocs{}).require(); err == nil {
-		t.Fatal("empty service")
-	}
 }

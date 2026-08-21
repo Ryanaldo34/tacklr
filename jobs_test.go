@@ -883,17 +883,29 @@ func TestBackgroundJobs_listJobsIncludesRunningWorker(t *testing.T) {
 
 func TestBackgroundJobs_backgroundJobsNudgeAndFormatJobErrors(t *testing.T) {
 	// Arrange
+	started := make(chan struct{})
+	workerModel := &mockStrategy{
+		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
+			close(started)
+			<-ctx.Done()
+		},
+	}
 	h := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  &mockStrategy{},
 		SubAgents: []*SubAgent{
-			{WorkerName: "researcher", Model: &mockStrategy{}},
+			{WorkerName: "researcher", Model: workerModel},
 		},
 	})
 	t.Cleanup(h.Close)
 	rt := turnRuntime(h)
 	if _, err := h.scheduleBackgroundWorker("researcher", "task", "nudge-me", rt); err != nil {
 		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker did not start")
 	}
 
 	// Act

@@ -21,8 +21,8 @@ Knowledge objects, search, and the graph are documented in **[docs/knowledge.md]
   WriteFile    WriteDocument
      │           │
      │           ▼
-     │      TextDocument / RichDocument
-     │        lines + text / blocks + HTML projection
+     │      Document (*IR) + body strategy
+     │        text / blocks / grid — representation, not backend or file type
      │           │
      └───────────┘
            │
@@ -109,18 +109,18 @@ _tacklr/vfs/unbind
 session/close        → tokens zeroed
 ```
 
-Drive: many client-selected folders (one single-segment mount point each). Go zero-value `Binding` and ACP `readOnly` omitted stay **read-only** (`drive.readonly`, export-only). Writable binds are opt-in (`Binding.Writable` / ACP `"readOnly": false`) and need client scopes **`drive` and `documents`**. `drive` is a restricted (CASA) scope; the token is not folder-scoped. The server is not a Google OAuth client.
+Drive: many client-selected folders (one single-segment mount point each). Go zero-value `Binding` and ACP `readOnly` omitted stay **read-only** (`drive.readonly`, export-only). Writable binds are opt-in (`Binding.Writable` / ACP `"readOnly": false`) and need client scopes **`drive`**, **`documents`**, and **`spreadsheets`**. `drive` is a restricted (CASA) scope; the token is not folder-scoped. The server is not a Google OAuth client.
 
 Two surfaces, one document:
 
 | Surface | Behavior |
 |---------|----------|
-| FUSE / `open` / `rg` | HTML projection (`projectHTML`). Kernel writes stay `EROFS`. `ls` of a Doc is size 0 (no export/Get on getattr). |
-| Agent `read` / `write` | Block IR. Default `read` of a Doc is an outline (must not dump HTML). `write` uses `block_id` / `blocks`. Line/HTML/`SetText` return `ErrProjected`. |
+| FUSE / `open` / `rg` | Docs: HTML projection. Sheets: TSV of displayed values with `# Sheet: Title` headers (no bold/markdown/JSON/`#rrggbb`). Kernel writes stay `EROFS`. `ls` of a Doc or Sheet is size 0 (no export/Get on getattr). |
+| Agent `read` / `write` | Block / grid IR. Default `read` of a Doc or Sheet is an outline (must not dump HTML or TSV). Docs `write` uses `block_id` / `blocks`. Sheets `write` is one cell (`Sheet!A1`) plus optional `format`, or create via `content` / `blocks` on a new path. Range, row-window, and in-place sheet replace return `ErrNotSupported`. Line/HTML/`SetText` return `ErrProjected`. |
 
-`Stat.MediaType` is the real Drive MIME. Sheets/Slides stay listed and return `ErrNoCodec` / `ErrNotSupported`. Native `PutFile` / identity `WriteDocument` return `ErrNotSupported`. `Remove` is Drive trash (`trashed:true`), does not follow shortcuts, and refuses ambiguous names and the mount root. Agent delete is `rm` (FUSE Unlink) only.
+`Stat.MediaType` is the real Drive MIME. Slides/Drawings/Forms stay listed and return `ErrNoCodec` / `ErrNotSupported`. Native `PutFile` / identity `WriteDocument` return `ErrNotSupported`. `Remove` is Drive trash (`trashed:true`), does not follow shortcuts, and refuses ambiguous names and the mount root. Agent delete is `rm` (FUSE Unlink) only.
 
-Read-only bind: official ZIP export (`application/zip`, 10 MiB). Writable bind: `documents.get(includeTabsContent=true)` only (skip Export); persist is `documents.batchUpdate` with checkout `requiredRevisionId`. Create-as-Doc requires `write` + `media_type=application/vnd.google-apps.document` on an extensionless path. Bare `/contracts/Spec` is plaintext. `Foo.md` is never a Doc.
+Read-only bind: official ZIP export (`application/zip`, 10 MiB). Writable bind: Docs `documents.get(includeTabsContent=true)` and Sheets `spreadsheets.get` with grid `userEnteredFormat` (skip Export); persist is `documents.batchUpdate` with checkout `requiredRevisionId`, or Sheets `values.batchUpdate` (`USER_ENTERED`) plus `spreadsheets.batchUpdate` `repeatCell`/`userEnteredFormat` after Drive `files.get(version)` CAS. Create-as-Doc / Create-as-Sheet requires `write` + the Google MIME on an **extensionless** path. Bare `/contracts/Spec` is plaintext. `Foo.md` is never a Doc. `Budget.xlsx` is never a Google Sheet (local/S3/Drive *file* `.xlsx` uses the Excel codec).
 
 ```go
 auth := vfs.NewSessionAuth()
@@ -157,29 +157,19 @@ virtual path → Provider (bytes) → Codec → Document IR
 | `Textual` | + `Encoding()`, `Text()`, `LineCount()`, `Line(n)`, `Lines(start, end)`, `SetText(s) error` |
 | `Structured` | + `Blocks()` — projected outline; empty when the media type has no projector |
 
-**Concrete text (what ships today)** — `*TextDocument` implements `Document`, `Textual`, and `Structured`:
+**One checkout** — `*IR` implements `Document`, `Textual`, and `Structured`. The body strategy is what the checkout can be represented as (text, blocks, or grid), plus whether `Text()` is a read-only projection (`SetText` returns `ErrProjected`). MountSession and tools do not know backends or file types. Codecs pick the body; backends persist.
 
-| Field / method | Meaning |
-|----------------|---------|
-| `path` | Virtual path only (`/work/main.go`) |
-| `mediaType` | e.g. `text/x-go`, `text/plain`, `text/markdown`, `application/json` |
-| `encoding` | `utf-8` |
-| `text` | Full body string |
-| line index | Line-start offsets into `text` (not a second stored body) |
-| `Blocks()` | Structure projected by media type (Markdown headings today; nil/empty otherwise) |
+| Representation | How to ask | Source of truth |
+|----------------|------------|-----------------|
+| Text | `Textual` | UTF-8 body |
+| Blocks | `AsRich` | block tree; HTML is a projection |
+| Grid | `AsGrid` | sheets; TSV is a projection |
 
-In memory:
+`FindBlock` is media-agnostic (id / heading_path). Sheet title and sheet_id lookup is `AsGrid` → sheet key.
 
-```text
-*TextDocument
-├── path:       "/work/note.txt"
-├── mediaType:  "text/plain"
-├── encoding:   "utf-8"
-├── text:       "a\nB\nc\n"
-└── starts:     [0, 2, 4, 6]   // byte offsets of each line
-```
+Create uses the codec registry (`Creator`). Path extension wins over a requested media type (`Foo.md` is never a Doc). Extensionless + `media_type` is how a codec is selected.
 
-**`*RichDocument`** (Google Docs today; Word later): blocks are the source of truth; `Text()` is derived HTML. `SetText` / `SetLine` / `ReplaceLines` return `ErrProjected`. Agent writes use `ReplaceBlock` / `SetBlocks`. `ContentToken` hashes a block fingerprint, not HTML.
+**Grid format:** stored `CellFormat` is an absolute bag (number, bold/italic/strike/underline, fill/color, align/valign/wrap, border). Writes use `FormatPatch` so `bold=false` clears. `ParseCellFormat` reads the `String()` bag. Sheets persist uses `ColorStyle.RgbColor` and classifies number patterns (`CURRENCY`, `PERCENT`, `SCIENTIFIC`, `TIME`, `DATE`, `DATE_TIME`, `NUMBER`). Writes to a merge master are allowed; slave cells are refused. Theme colors stay empty (lossy). Native Google persist is a Drive concern; `.xlsx` uses the Excel codec. A native Sheet never round-trips through xlsx.
 
 **Block schema** (Markdown headings plus Docs paragraph / list_item / table / image):
 
@@ -558,7 +548,7 @@ No FUSE and no shell are required for this IR edit path. `run_command` needs a l
 | Two Drive children share a name | `ErrAmbiguous` |
 | Drive 403 | `ErrPermission` (Google message preserved) |
 | Docs checkout CAS miss | `ErrConflict` (tools map to `ErrStaleContent`) |
-| Line/HTML write on a Doc | `ErrProjected` |
+| Line/HTML write on a Doc or Sheet | `ErrProjected` |
 | Path not under a mount | `ErrNotMounted` |
 | `run_command` with no FUSE mount | `ErrFuseNotMounted` |
 | Write on read-only mount | `ErrReadOnly` |
@@ -575,8 +565,7 @@ No FUSE and no shell are required for this IR edit path. `run_command` needs a l
 
 ## Not in this package (yet)
 
-- Word / `.docx` codec (the block IR is shared; this package ships the Docs codec only)
-- Sheets, Slides, Drawings, Forms
+- Slides, Drawings, Forms
 - New image insert / upload pipeline (existing images are first-class IR)
 - Tab add/rename/delete/reorder UI
 - Permanent `files.delete`, untrash, revision-history UI

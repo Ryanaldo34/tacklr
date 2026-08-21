@@ -24,6 +24,29 @@ type Encoder interface {
 	Encode(ctx context.Context, doc Document) ([]byte, error)
 }
 
+// Creator builds a new document from a create-mode Mutation.
+// Codecs that own a representation (blocks, grid) implement this.
+// MountSession looks up the codec by media type; it does not switch on vendors.
+type Creator interface {
+	Create(path, mediaType string, mut Mutation) (Document, error)
+}
+
+func createDocument(path, mediaType string, mut Mutation) (Document, error) {
+	if c, ok := defaultContentRegistry.codec(mediaType); ok {
+		if cr, ok := c.(Creator); ok {
+			return cr.Create(path, mediaType, mut)
+		}
+	}
+	if mut.Blocks != nil {
+		return nil, fmt.Errorf("vfs: blocks require a structured codec")
+	}
+	body := ""
+	if mut.Content != nil {
+		body = *mut.Content
+	}
+	return NewTextDocument(path, mediaType, "utf-8", body), nil
+}
+
 // IdentityCodec is a Codec whose persist form is the UTF-8 payload itself
 // (no container). TextCodec implements it. Office/cloud codecs (Word, Notion,
 // Google Docs) must not — FUSE then returns EROFS and the write tool uses
@@ -35,7 +58,7 @@ type IdentityCodec interface {
 }
 
 // IsProjected reports whether mediaType is owned by a registered non-identity
-// codec (DocsCodec today). PDF and unregistered types are not projected.
+// codec (DocsCodec, SheetsCodec). PDF and unregistered types are not projected.
 func IsProjected(mediaType string) bool {
 	mediaType = normalizeMediaType(mediaType)
 	if mediaType == "" || mediaType == "application/octet-stream" {
@@ -162,6 +185,9 @@ func mustDefaultContentRegistry(types []string) *ContentRegistry {
 	if err := r.Register(DocsCodec{}); err != nil {
 		panic(err)
 	}
+	if err := r.Register(SheetsCodec{}); err != nil {
+		panic(err)
+	}
 	return r
 }
 
@@ -187,6 +213,7 @@ func DetectMediaType(virtualPath string, sample []byte) string {
 var extMediaTypes = map[string]string{
 	".txt": "text/plain", ".md": "text/markdown", ".markdown": "text/markdown",
 	".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+	".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 	".go":   "text/x-go", ".py": "text/x-python",
 	".js": "text/javascript", ".mjs": "text/javascript", ".cjs": "text/javascript", ".jsx": "text/javascript",
 	".ts": "text/x.typescript", ".tsx": "text/x.typescript",

@@ -60,7 +60,7 @@ func TestDocsCodec_realExportFixture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rd, ok := doc.(*RichDocument)
+	rd, ok := AsRich(doc)
 	if !ok {
 		t.Fatalf("type %T", doc)
 	}
@@ -97,7 +97,7 @@ func TestDocsCodec_realExportFixture(t *testing.T) {
 	if !sawTable || !sawImage || !sawList {
 		t.Fatalf("kinds = %+v", kinds)
 	}
-	html := rd.Text()
+	html := doc.(Textual).Text()
 	if strings.Contains(html, "c1") || strings.Contains(html, "font-weight") {
 		t.Fatalf("projection leaked Drive classes: %s", html)
 	}
@@ -151,8 +151,12 @@ func TestDocsCodec_canonicalRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !blocksEqual(stripIDs(orig.Blocks()), stripIDs(got.(*RichDocument).Blocks())) {
-		t.Fatalf("round-trip\nwant %+v\ngot  %+v", orig.Blocks(), got.(*RichDocument).Blocks())
+	gotRich, ok := AsRich(got)
+	if !ok {
+		t.Fatalf("type %T", got)
+	}
+	if !blocksEqual(stripIDs(orig.Blocks()), stripIDs(gotRich.Blocks())) {
+		t.Fatalf("round-trip\nwant %+v\ngot  %+v", orig.Blocks(), gotRich.Blocks())
 	}
 }
 
@@ -165,7 +169,7 @@ func TestDocsCodec_invalidUTF8AndTableTSV(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bl := doc.(*RichDocument).Blocks()
+	bl := doc.(Structured).Blocks()
 	if len(bl) != 1 || bl[0].Kind != BlockKindTable {
 		t.Fatalf("blocks = %+v", bl)
 	}
@@ -181,17 +185,21 @@ func TestRichDocument_replaceBlockMatrix(t *testing.T) {
 		{Kind: BlockKindTable, Text: "A\tB", Style: StyleMeta{Attributes: map[string]string{"rows": "1", "cols": "2"}}},
 		{Kind: BlockKindImage, Style: StyleMeta{Attributes: map[string]string{"object_id": "kix.x"}}},
 	})
-	if err := d.ReplaceBlock(d.Blocks()[0].ID, "New", false); err == nil {
+	rd, ok := AsRich(d)
+	if !ok {
+		t.Fatalf("type %T", d)
+	}
+	if err := rd.ReplaceBlock(d.Blocks()[0].ID, "New", false); err == nil {
 		t.Fatal("heading without include_heading")
 	}
-	if err := d.ReplaceBlock(d.Blocks()[0].ID, "New", true); err != nil {
+	if err := rd.ReplaceBlock(d.Blocks()[0].ID, "New", true); err != nil {
 		t.Fatal(err)
 	}
 	if d.Blocks()[0].Text != "New" {
 		t.Fatalf("heading = %q", d.Blocks()[0].Text)
 	}
 	pre := d.ContentFingerprint()
-	if err := d.ReplaceBlock(d.Blocks()[1].ID, "world", false); err != nil {
+	if err := rd.ReplaceBlock(d.Blocks()[1].ID, "world", false); err != nil {
 		t.Fatal(err)
 	}
 	if d.ContentFingerprint() == pre {
@@ -200,16 +208,16 @@ func TestRichDocument_replaceBlockMatrix(t *testing.T) {
 	if tok := ContentToken(d); tok != d.ContentFingerprint() || tok == ContentHash(d.Text()) {
 		t.Fatal("ContentToken must be IR fingerprint, not HTML hash")
 	}
-	if err := d.ReplaceBlock(d.Blocks()[2].ID, "X\tY\nZ\tW", false); !errors.Is(err, ErrNotSupported) {
+	if err := rd.ReplaceBlock(d.Blocks()[2].ID, "X\tY\nZ\tW", false); !errors.Is(err, ErrNotSupported) {
 		t.Fatalf("table shape: %v", err)
 	}
-	if err := d.ReplaceBlock(d.Blocks()[2].ID, "X\tY", false); err != nil {
+	if err := rd.ReplaceBlock(d.Blocks()[2].ID, "X\tY", false); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.ReplaceBlock(d.Blocks()[3].ID, "nope", false); !errors.Is(err, ErrNotSupported) {
+	if err := rd.ReplaceBlock(d.Blocks()[3].ID, "nope", false); !errors.Is(err, ErrNotSupported) {
 		t.Fatalf("image replace: %v", err)
 	}
-	if err := d.ReplaceBlock("missing", "x", false); err == nil {
+	if err := rd.ReplaceBlock("missing", "x", false); err == nil {
 		t.Fatal("unknown block")
 	}
 }

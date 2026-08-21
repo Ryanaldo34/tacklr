@@ -49,6 +49,7 @@ const (
 	BlockKindListItem  = "list_item"
 	BlockKindTable     = "table"
 	BlockKindImage     = "image"
+	BlockKindSheet     = "sheet"
 )
 
 // StyleMeta is optional presentation/structure for rich documents.
@@ -113,25 +114,114 @@ func BlockReplaceSpan(b Block, includeHeading bool) (start, end int, err error) 
 	return start, end, nil
 }
 
-// TextDocument is the concrete plaintext/source IR (Document + Textual).
-// One UTF-8 body + line-start index. Empty files have LineCount 0.
-type TextDocument struct {
+// ir is the one document checkout. Codecs pick a body (text, blocks, or grid).
+// MountSession and tools see Path, MediaType, Textual, Structured, and optional
+// AsGrid / AsRich — not backends or concrete file types.
+type IR struct {
 	path, mediaType, encoding string
-	text                      string
-	starts                    []int
+	body                      body
+	hint                      persistHint
 }
 
-// NewTextDocument builds a TextDocument from already-decoded UTF-8 text.
-func NewTextDocument(path, mediaType, encoding, text string) *TextDocument {
+type body interface {
+	text() string
+	lineStarts() []int
+	setText(string) error
+	setLine(int, string) error
+	replaceLines(int, int, []string) error
+	blocks(mediaType string) []Block
+	fingerprint() string
+}
+
+type textBody struct {
+	payload string
+	starts  []int
+}
+
+// NewTextDocument builds a plaintext checkout (identity body).
+func NewTextDocument(path, mediaType, encoding, text string) *IR {
 	if encoding == "" {
 		encoding = "utf-8"
 	}
 	if mediaType == "" {
 		mediaType = "text/plain"
 	}
-	d := &TextDocument{path: path, mediaType: mediaType, encoding: encoding}
+	d := &IR{path: path, mediaType: mediaType, encoding: encoding, body: &textBody{}}
 	_ = d.SetText(text)
 	return d
+}
+
+func newIR(path, mediaType, encoding string, b body) *IR {
+	if encoding == "" {
+		encoding = "utf-8"
+	}
+	if mediaType == "" {
+		mediaType = "text/plain"
+	}
+	return &IR{path: path, mediaType: mediaType, encoding: encoding, body: b}
+}
+
+func asIR(doc Document) (*IR, bool) {
+	d, ok := doc.(*IR)
+	return d, ok
+}
+
+// Grid is the spreadsheet representation of a Document (Sheets / Excel).
+type Grid interface {
+	Sheets() []Sheet
+	NamedRanges() []NamedRange
+	Cell(key, a1 string) (Cell, error)
+	ReadRows(key string, start, end int) (Sheet, []string, error)
+	ReadCell(key, a1 string) (string, error)
+	ReadRangeTSV(key, a1 string) (string, error)
+}
+
+// AsGrid reports whether doc is represented as a spreadsheet grid.
+func AsGrid(doc Document) (Grid, bool) {
+	d, ok := asIR(doc)
+	if !ok {
+		return nil, false
+	}
+	g, ok := d.body.(*gridBody)
+	if !ok {
+		return nil, false
+	}
+	return g, true
+}
+
+func asGridBody(doc Document) (*gridBody, bool) {
+	d, ok := asIR(doc)
+	if !ok {
+		return nil, false
+	}
+	g, ok := d.body.(*gridBody)
+	return g, ok
+}
+
+// Rich is the block-tree representation of a Document (Docs / Word).
+type Rich interface {
+	Tabs() []DocTab
+	Blocks() []Block
+	ReplaceBlock(id, text string, includeHeading bool) error
+	SetBlocks(blocks []Block)
+}
+
+// AsRich reports whether doc is represented as a block tree (Docs / Word).
+func AsRich(doc Document) (Rich, bool) {
+	r, ok := asRichBody(doc)
+	if !ok {
+		return nil, false
+	}
+	return r, true
+}
+
+func asRichBody(doc Document) (*richBody, bool) {
+	d, ok := asIR(doc)
+	if !ok {
+		return nil, false
+	}
+	r, ok := d.body.(*richBody)
+	return r, ok
 }
 
 func EncodeDocument(ctx context.Context, doc Document) ([]byte, error) {
@@ -150,28 +240,27 @@ func EncodeDocument(ctx context.Context, doc Document) ([]byte, error) {
 	return EncodeTextual(text)
 }
 
-func (d *TextDocument) Path() string      { return d.path }
-func (d *TextDocument) MediaType() string { return d.mediaType }
-func (d *TextDocument) Encoding() string  { return d.encoding }
-func (d *TextDocument) Text() string      { return d.text }
-func (d *TextDocument) LineCount() int    { return len(d.starts) }
+func (d *IR) Path() string      { return d.path }
+func (d *IR) MediaType() string { return d.mediaType }
+func (d *IR) Encoding() string  { return d.encoding }
+func (d *IR) Text() string      { return d.body.text() }
+func (d *IR) LineCount() int    { return len(d.body.lineStarts()) }
 
-// Blocks implements Structured. Structure is projected from the body by media
-// type (e.g. Markdown headings). Always recomputed from Text() so edits cannot
-// leave a stale outline. Empty means no structure for this type.
-func (d *TextDocument) Blocks() []Block {
-	return structureFor(d)
+func (d *IR) Blocks() []Block {
+	return d.body.blocks(d.mediaType)
 }
 
-func (d *TextDocument) Line(n int) (string, error) {
-	if n < 1 || n > len(d.starts) {
+func (d *IR) Line(n int) (string, error) {
+	starts := d.body.lineStarts()
+	if n < 1 || n > len(starts) {
 		return "", ErrLineOutOfRange
 	}
-	return d.lineSlice(n - 1), nil
+	return lineAt(d.body.text(), starts, n-1), nil
 }
 
-func (d *TextDocument) Lines(start, end int) ([]string, error) {
-	n := len(d.starts)
+func (d *IR) Lines(start, end int) ([]string, error) {
+	starts := d.body.lineStarts()
+	n := len(starts)
 	if start < 1 || end < start || end > n+1 {
 		return nil, ErrLineOutOfRange
 	}
@@ -179,39 +268,56 @@ func (d *TextDocument) Lines(start, end int) ([]string, error) {
 		return []string{}, nil
 	}
 	out := make([]string, end-start)
+	text := d.body.text()
 	for i := range out {
-		out[i] = d.lineSlice(start - 1 + i)
+		out[i] = lineAt(text, starts, start-1+i)
 	}
 	return out, nil
 }
 
-// SetText replaces the full body and rebuilds the line index.
-func (d *TextDocument) SetText(text string) error {
-	d.text = text
-	if text == "" {
-		d.starts = nil
-		return nil
+func (d *IR) SetText(text string) error {
+	return d.body.setText(text)
+}
+
+func (d *IR) SetLine(n int, line string) error {
+	return d.body.setLine(n, line)
+}
+
+func (d *IR) ReplaceLines(start, end int, replacement []string) error {
+	return d.body.replaceLines(start, end, replacement)
+}
+
+func (d *IR) ContentFingerprint() string { return d.body.fingerprint() }
+
+func (d *IR) bindPath(virtual string) { d.path = virtual }
+
+func lineAt(text string, starts []int, i int) string {
+	start := starts[i]
+	if i+1 < len(starts) {
+		return text[start : starts[i+1]-1]
 	}
-	starts := make([]int, 1, strings.Count(text, "\n")+1)
-	starts[0] = 0
-	for i := 0; i < len(text); i++ {
-		if text[i] == '\n' {
-			starts = append(starts, i+1)
-		}
-	}
-	d.starts = starts
+	return text[start:]
+}
+
+func (b *textBody) text() string        { return b.payload }
+func (b *textBody) lineStarts() []int   { return b.starts }
+func (b *textBody) fingerprint() string { return ContentHash(b.payload) }
+func (b *textBody) blocks(mediaType string) []Block {
+	return structureFor(mediaType, b.payload, b.starts)
+}
+
+func (b *textBody) setText(text string) error {
+	b.payload = text
+	b.starts = lineStartsOf(text)
 	return nil
 }
 
-// SetLine replaces line n (1-based). line must not contain '\n'.
-func (d *TextDocument) SetLine(n int, line string) error {
-	return d.ReplaceLines(n, n+1, []string{line})
+func (b *textBody) setLine(n int, line string) error {
+	return b.replaceLines(n, n+1, []string{line})
 }
 
-// ReplaceLines replaces half-open [start, end) with replacement lines (no '\n' in elements).
-// Splices the UTF-8 body; it does not allocate a []string of every line.
-func (d *TextDocument) ReplaceLines(start, end int, replacement []string) error {
-	n := len(d.starts)
+func (b *textBody) replaceLines(start, end int, replacement []string) error {
+	n := len(b.starts)
 	if start < 1 || end < start || end > n+1 {
 		return ErrLineOutOfRange
 	}
@@ -221,51 +327,49 @@ func (d *TextDocument) ReplaceLines(start, end int, replacement []string) error 
 		}
 	}
 	if n == 0 {
-		return d.SetText(strings.Join(replacement, "\n"))
+		return b.setText(strings.Join(replacement, "\n"))
 	}
 
 	prefixLines := start - 1
 	suffixLines := n - (end - 1)
 	moreAfterPrefix := len(replacement) > 0 || suffixLines > 0
 
-	need := len(d.text) + 1
+	need := len(b.payload) + 1
 	for _, line := range replacement {
 		need += len(line) + 1
 	}
-	var b strings.Builder
-	b.Grow(need)
+	var buf strings.Builder
+	buf.Grow(need)
 
 	if prefixLines > 0 {
 		if prefixLines == n {
-			b.WriteString(d.text)
+			buf.WriteString(b.payload)
 			if moreAfterPrefix {
-				b.WriteByte('\n')
+				buf.WriteByte('\n')
 			}
 		} else if moreAfterPrefix {
-			b.WriteString(d.text[:d.starts[prefixLines]])
+			buf.WriteString(b.payload[:b.starts[prefixLines]])
 		} else {
-			b.WriteString(d.text[:d.starts[prefixLines]-1])
+			buf.WriteString(b.payload[:b.starts[prefixLines]-1])
 		}
 	}
 	for i, line := range replacement {
 		if i > 0 {
-			b.WriteByte('\n')
+			buf.WriteByte('\n')
 		}
-		b.WriteString(line)
+		buf.WriteString(line)
 	}
 	if suffixLines > 0 {
 		if len(replacement) > 0 {
-			b.WriteByte('\n')
+			buf.WriteByte('\n')
 		}
-		b.WriteString(d.text[d.starts[end-1]:])
+		buf.WriteString(b.payload[b.starts[end-1]:])
 	}
-	return d.SetText(b.String())
+	return b.setText(buf.String())
 }
 
-func (d *TextDocument) lineSlice(i int) string {
-	start := d.starts[i]
-	if i+1 < len(d.starts) {
-		return d.text[start : d.starts[i+1]-1]
-	}
-	return d.text[start:]
-}
+var (
+	_ Document   = (*IR)(nil)
+	_ Textual    = (*IR)(nil)
+	_ Structured = (*IR)(nil)
+)

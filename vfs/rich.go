@@ -62,92 +62,84 @@ const (
 	richSet
 )
 
-// RichDocument is the office/cloud IR. Blocks are the source of truth;
-// Text() is a derived HTML projection for FUSE / rg.
-type RichDocument struct {
-	path, mediaType, encoding string
-	blocks                    []Block
-	html                      string
-	starts                    []int
-	hint                      persistHint
-	tabs                      []DocTab
-	mut                       richMutation
+// richBody is the block-tree representation (Docs / Word).
+type richBody struct {
+	tree   []Block
+	html   string
+	starts []int
+	tabs   []DocTab
+	mut    richMutation
 }
 
-// NewRichDocument builds a RichDocument from blocks. IDs and HTML spans are
-// assigned here. persistHint stays empty until the provider attaches one.
-func NewRichDocument(path, mediaType string, blocks []Block) *RichDocument {
+// NewRichDocument builds a block-tree checkout. persistHint stays empty until
+// the provider attaches one.
+func liftPlaintext(s string) []Block {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.TrimRight(s, "\n")
+	if s == "" {
+		return nil
+	}
+	var out []Block
+	for _, para := range strings.Split(s, "\n\n") {
+		para = strings.TrimSpace(para)
+		if para == "" {
+			continue
+		}
+		out = append(out, Block{Kind: BlockKindParagraph, Text: para})
+	}
+	if len(out) == 0 {
+		out = append(out, Block{Kind: BlockKindParagraph, Text: s})
+	}
+	return out
+}
+
+func createRichDocument(path, mediaType string, mut Mutation) (Document, error) {
+	if mut.Content != nil {
+		if looksLikeHTML(*mut.Content) {
+			return nil, fmt.Errorf("vfs: HTML content is not accepted; use blocks")
+		}
+		return NewRichDocument(path, mediaType, liftPlaintext(*mut.Content)), nil
+	}
+	return NewRichDocument(path, mediaType, mut.Blocks), nil
+}
+
+func NewRichDocument(path, mediaType string, blocks []Block) *IR {
 	return newRichDocument(path, mediaType, blocks, nil)
 }
 
-func newRichDocument(path, mediaType string, blocks []Block, tabs []DocTab) *RichDocument {
+func newRichDocument(path, mediaType string, blocks []Block, tabs []DocTab) *IR {
 	if mediaType == "" {
 		mediaType = mimeGoogleDocument
 	}
-	d := &RichDocument{path: path, mediaType: mediaType, encoding: "utf-8", tabs: tabs}
-	d.blocks = assignBlockIDs(cloneBlocks(blocks), tabs)
-	d.reproject()
-	return d
+	b := &richBody{tabs: tabs}
+	b.tree = assignBlockIDs(cloneBlocks(blocks), tabs)
+	b.reproject()
+	return newIR(path, mediaType, "utf-8", b)
 }
 
-func (d *RichDocument) Path() string      { return d.path }
-func (d *RichDocument) MediaType() string { return d.mediaType }
-func (d *RichDocument) Encoding() string  { return d.encoding }
-func (d *RichDocument) Text() string      { return d.html }
-func (d *RichDocument) LineCount() int    { return len(d.starts) }
-func (d *RichDocument) Blocks() []Block   { return d.blocks }
-func (d *RichDocument) Tabs() []DocTab    { return d.tabs }
-
-func (d *RichDocument) Line(n int) (string, error) {
-	if n < 1 || n > len(d.starts) {
-		return "", ErrLineOutOfRange
-	}
-	return d.lineSlice(n - 1), nil
-}
-
-func (d *RichDocument) Lines(start, end int) ([]string, error) {
-	n := len(d.starts)
-	if start < 1 || end < start || end > n+1 {
-		return nil, ErrLineOutOfRange
-	}
-	if start == end {
-		return []string{}, nil
-	}
-	out := make([]string, end-start)
-	for i := range out {
-		out[i] = d.lineSlice(start - 1 + i)
-	}
-	return out, nil
-}
-
-func (d *RichDocument) lineSlice(i int) string {
-	start := d.starts[i]
-	if i+1 < len(d.starts) {
-		return d.html[start : d.starts[i+1]-1]
-	}
-	return d.html[start:]
-}
-
-func (d *RichDocument) SetText(string) error { return ErrProjected }
-func (d *RichDocument) SetLine(int, string) error {
+func (d *richBody) text() string              { return d.html }
+func (d *richBody) lineStarts() []int         { return d.starts }
+func (d *richBody) setText(string) error      { return ErrProjected }
+func (d *richBody) setLine(int, string) error { return ErrProjected }
+func (d *richBody) replaceLines(int, int, []string) error {
 	return ErrProjected
 }
-func (d *RichDocument) ReplaceLines(int, int, []string) error {
-	return ErrProjected
-}
+func (d *richBody) blocks(_ string) []Block { return d.tree }
+func (d *richBody) Blocks() []Block         { return d.tree }
+func (d *richBody) Tabs() []DocTab          { return d.tabs }
 
 // ReplaceBlock mutates one IR block and re-projects HTML.
-func (d *RichDocument) ReplaceBlock(id string, text string, includeHeading bool) error {
+func (d *richBody) ReplaceBlock(id string, text string, includeHeading bool) error {
 	i := -1
-	for j, b := range d.blocks {
+	for j, b := range d.tree {
 		if b.ID == id {
 			i = j
 			break
 		}
 	}
 	if i < 0 {
-		if b, ok := FindBlock(d.blocks, id); ok {
-			for j, x := range d.blocks {
+		if b, ok := FindBlock(d.tree, id); ok {
+			for j, x := range d.tree {
 				if x.ID == b.ID {
 					i = j
 					break
@@ -158,7 +150,7 @@ func (d *RichDocument) ReplaceBlock(id string, text string, includeHeading bool)
 	if i < 0 {
 		return fmt.Errorf("unknown block_id %q", id)
 	}
-	b := d.blocks[i]
+	b := d.tree[i]
 	switch b.Kind {
 	case BlockKindImage:
 		return fmt.Errorf("%w: write: cannot replace an image; omit it from blocks to delete, or leave it", ErrNotSupported)
@@ -187,7 +179,7 @@ func (d *RichDocument) ReplaceBlock(id string, text string, includeHeading bool)
 		b.Runs = nil
 	}
 	normalizeInline(&b)
-	d.blocks[i] = b
+	d.tree[i] = b
 	d.mut = richReplace
 	d.reproject()
 	return nil
@@ -195,18 +187,18 @@ func (d *RichDocument) ReplaceBlock(id string, text string, includeHeading bool)
 
 // SetBlocks replaces the IR and re-projects. Empty lists are allowed here;
 // WriteDocument / the write tool reject an empty replace on an existing path.
-func (d *RichDocument) SetBlocks(blocks []Block) {
-	d.blocks = assignBlockIDs(cloneBlocks(blocks), d.tabs)
+func (d *richBody) SetBlocks(blocks []Block) {
+	d.tree = assignBlockIDs(cloneBlocks(blocks), d.tabs)
 	d.mut = richSet
 	d.reproject()
 }
 
 // ContentFingerprint is SHA-256 of kind, text, level, and sorted attributes.
 // Span and ID are ignored.
-func (d *RichDocument) ContentFingerprint() string {
+func (d *richBody) fingerprint() string {
 	h := sha256.New()
 	var level [12]byte
-	for _, bl := range d.blocks {
+	for _, bl := range d.tree {
 		_, _ = h.Write(unsafeStringBytes(bl.Kind))
 		_, _ = h.Write(fingerprintSep)
 		_, _ = h.Write(unsafeStringBytes(bl.Text))
@@ -235,21 +227,22 @@ var (
 	fingerprintSep = []byte{0}
 	fingerprintEq  = []byte{'='}
 	fingerprintNL  = []byte{'\n'}
+	fingerprintOne = []byte{'1'}
 )
 
-func (d *RichDocument) reproject() {
-	htmlOut, spans := projectHTMLSpans(d.blocks, d.tabs)
+func (d *richBody) reproject() {
+	htmlOut, spans := projectHTMLSpans(d.tree, d.tabs)
 	d.html = htmlOut
 	d.starts = lineStartsOf(d.html)
-	for i := range d.blocks {
+	for i := range d.tree {
 		if i < len(spans) {
-			d.blocks[i].Style.Span = spans[i]
+			d.tree[i].Style.Span = spans[i]
 		}
 	}
 }
 
 func attachPersistHint(doc Document, hint persistHint) {
-	if d, ok := doc.(*RichDocument); ok {
+	if d, ok := asIR(doc); ok {
 		d.hint = hint
 	}
 }
@@ -480,9 +473,3 @@ func docsIndexLen(s string) int {
 	}
 	return n
 }
-
-var (
-	_ Document   = (*RichDocument)(nil)
-	_ Textual    = (*RichDocument)(nil)
-	_ Structured = (*RichDocument)(nil)
-)

@@ -17,7 +17,8 @@ func TestKernelWritable(t *testing.T) {
 	for _, mt := range []string{
 		"", "application/octet-stream", "image/png",
 		"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-		"application/vnd.google-apps.document", "application/vnd.notion.page",
+		"application/vnd.google-apps.document", "application/vnd.google-apps.spreadsheet",
+		"application/vnd.notion.page",
 	} {
 		if kernelWritable(mt) {
 			t.Fatalf("kernelWritable(%q) = true, want EROFS", mt)

@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"path"
 	"strconv"
 	"strings"
@@ -50,6 +49,14 @@ func (DocsCodec) Decode(ctx context.Context, virtualPath, mediaType string, data
 		return nil, err
 	}
 	return NewRichDocument(virtualPath, mediaType, blocks), nil
+}
+
+// Create lifts plaintext or blocks into a rich checkout.
+func (DocsCodec) Create(path, mediaType string, mut Mutation) (Document, error) {
+	if mediaType == "" {
+		mediaType = mimeGoogleDocument
+	}
+	return createRichDocument(path, mediaType, mut)
 }
 
 func looksLikeZip(data []byte) bool {
@@ -106,7 +113,7 @@ func unzipHTMLEntry(data []byte) ([]byte, error) {
 		return nil, err
 	}
 	defer rc.Close()
-	return io.ReadAll(io.LimitReader(rc, int64(MaxReadFileBytes)+1))
+	return readCapped(rc, MaxReadFileBytes, zipSizeHint(pick.UncompressedSize64, MaxReadFileBytes))
 }
 
 func decodeDocsHTML(raw []byte) ([]Block, error) {

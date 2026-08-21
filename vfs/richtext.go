@@ -36,9 +36,17 @@ func (c BlockCodec) Encode(ctx context.Context, doc Document) ([]byte, error) {
 	if c.Normalizer == nil {
 		return nil, fmt.Errorf("vfs: block normalizer required")
 	}
-	rd, ok := doc.(*RichDocument)
+	rd, ok := asRichBody(doc)
 	if !ok {
 		return nil, ErrNotTextual
 	}
-	return c.Normalizer.EncodeBlocks(ctx, rd.Blocks())
+	return c.Normalizer.EncodeBlocks(ctx, rd.tree)
+}
+
+// Create lifts plaintext or blocks into a rich checkout.
+func (c BlockCodec) Create(path, mediaType string, mut Mutation) (Document, error) {
+	if mediaType == "" && len(c.Types) > 0 {
+		mediaType = c.Types[0]
+	}
+	return createRichDocument(path, mediaType, mut)
 }

@@ -8,10 +8,10 @@ import (
 
 // structureFor attaches a block view for known media types (internal projectors).
 // Uses the document line index so large files are not re-split into []string.
-func structureFor(d *TextDocument) []Block {
-	switch d.mediaType {
+func structureFor(mediaType, text string, starts []int) []Block {
+	switch mediaType {
 	case "text/markdown":
-		return blocksFromMarkdown(d)
+		return blocksFromMarkdown(text, starts)
 	default:
 		return nil
 	}
@@ -20,8 +20,8 @@ func structureFor(d *TextDocument) []Block {
 // blocksFromMarkdown projects ATX headings into the shared Block schema.
 // Headings inside fenced code are ignored. Content before the first heading
 // is a preamble block. IDs are hierarchical slugs (e.g. api/errors).
-func blocksFromMarkdown(d *TextDocument) []Block {
-	nLines := d.LineCount()
+func blocksFromMarkdown(text string, starts []int) []Block {
+	nLines := len(starts)
 	if nLines == 0 {
 		return nil
 	}
@@ -36,7 +36,7 @@ func blocksFromMarkdown(d *TextDocument) []Block {
 	fenceMark := ""
 
 	for i := 0; i < nLines; i++ {
-		line := d.lineSlice(i)
+		line := lineAt(text, starts, i)
 		lineNo := i + 1
 		trim := strings.TrimSpace(line)
 		if !inFence {

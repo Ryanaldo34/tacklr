@@ -95,18 +95,8 @@ func newGoogleDocs(ctx context.Context, holder *TokenHolder) (*googleDocs, error
 	return &googleDocs{service: svc}, nil
 }
 
-func (g googleDocs) require() error {
-	if g.service == nil {
-		return fmt.Errorf("vfs: docs service required")
-	}
-	return nil
-}
-
 // Get implements DocsAPI. Always sets includeTabsContent=true.
 func (g googleDocs) Get(ctx context.Context, documentID string) (DocsSnapshot, error) {
-	if err := g.require(); err != nil {
-		return DocsSnapshot{}, err
-	}
 	f, err := g.service.Documents.Get(documentID).
 		IncludeTabsContent(true).
 		Context(ctx).
@@ -119,9 +109,6 @@ func (g googleDocs) Get(ctx context.Context, documentID string) (DocsSnapshot, e
 
 // BatchUpdate implements DocsAPI. Returns only writeControl.requiredRevisionId.
 func (g googleDocs) BatchUpdate(ctx context.Context, documentID string, req DocsBatch) (DocsBatchResult, error) {
-	if err := g.require(); err != nil {
-		return DocsBatchResult{}, err
-	}
 	out := make([]*docs.Request, 0, len(req.Requests))
 	for i := range req.Requests {
 		out = append(out, docsRequestToAPI(req.Requests[i], req.TabID))
@@ -506,7 +493,7 @@ func paragraphText(p *docs.Paragraph) string {
 	return FormatInline(mergeRuns(runs))
 }
 
-func snapshotToRich(path string, snap DocsSnapshot) *RichDocument {
+func snapshotToRich(path string, snap DocsSnapshot) *IR {
 	blocks := make([]Block, 0, len(snap.Body))
 	locs := make([]blockLocation, 0, len(snap.Body))
 	var structural []structuralSpan
@@ -523,9 +510,11 @@ func snapshotToRich(path string, snap DocsSnapshot) *RichDocument {
 		locs = append(locs, spanToLocation(sp))
 	}
 	d := newRichDocument(path, mimeGoogleDocument, blocks, snap.Tabs)
-	for i := range locs {
-		if i < len(d.blocks) {
-			locs[i].id = d.blocks[i].ID
+	if rb, ok := asRichBody(d); ok {
+		for i := range locs {
+			if i < len(rb.tree) {
+				locs[i].id = rb.tree[i].ID
+			}
 		}
 	}
 	attachPersistHint(d, persistHint{
