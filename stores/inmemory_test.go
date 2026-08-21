@@ -79,10 +79,10 @@ func TestFaultyStore_saveAndLoadFaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	save := FaultyStore{Inner: inner, SaveErr: errors.New("disk full")}
-	if err := save.SaveSession(ctx, "s1", cp); err == nil || err.Error() != "disk full" {
+	if err := save.SaveSession(ctx, "s1", *cp); err == nil || err.Error() != "disk full" {
 		t.Fatalf("save fault: %v", err)
 	}
-	if err := inner.SaveSession(ctx, "s1", cp); err != nil {
+	if err := inner.SaveSession(ctx, "s1", *cp); err != nil {
 		t.Fatal(err)
 	}
 	load := FaultyStore{Inner: inner, LoadErr: errors.New("db down")}
