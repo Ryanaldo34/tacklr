@@ -1,0 +1,304 @@
+package vfs
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	abstractions "github.com/microsoft/kiota-abstractions-go"
+	msgraphsdk "github.com/microsoftgraph/msgraph-sdk-go"
+	msgraphgocore "github.com/microsoftgraph/msgraph-sdk-go-core"
+	"github.com/microsoftgraph/msgraph-sdk-go/drives"
+	"github.com/microsoftgraph/msgraph-sdk-go/models"
+)
+
+const graphAPIRoot = "https://graph.microsoft.com/v1.0"
+
+// graphSDK implements GraphAPI with github.com/microsoftgraph/msgraph-sdk-go.
+type graphSDK struct {
+	client *msgraphsdk.GraphServiceClient
+}
+
+// graphTokenAuth sends the live TokenHolder bearer token on each Graph request.
+type graphTokenAuth struct {
+	holder *TokenHolder
+}
+
+func (a *graphTokenAuth) AuthenticateRequest(ctx context.Context, request *abstractions.RequestInformation, _ map[string]any) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	tok := ""
+	if a.holder != nil {
+		tok = a.holder.Current().Token
+	}
+	if tok == "" {
+		return ErrAuthExpired
+	}
+	request.Headers.Add("Authorization", "Bearer "+tok)
+	return nil
+}
+
+func newGraphSDK(holder *TokenHolder, base string) (*graphSDK, error) {
+	opts := msgraphsdk.GetDefaultClientOptions()
+	httpClient := msgraphgocore.GetDefaultClient(&opts)
+	// Graph /content often 302s to a download host. The SDK client otherwise
+	// returns the redirect response (CheckRedirect = ErrUseLastResponse).
+	httpClient.CheckRedirect = nil
+	adapter, err := msgraphsdk.NewGraphRequestAdapterWithParseNodeFactoryAndSerializationWriterFactoryAndHttpClient(
+		&graphTokenAuth{holder: holder}, nil, nil, httpClient)
+	if err != nil {
+		return nil, fmt.Errorf("vfs: msgraph client: %w", err)
+	}
+	if b := strings.TrimSpace(base); b != "" {
+		adapter.SetBaseUrl(strings.TrimRight(b, "/"))
+	} else {
+		adapter.SetBaseUrl(graphAPIRoot)
+	}
+	return &graphSDK{client: msgraphsdk.NewGraphServiceClient(adapter)}, nil
+}
+
+func (g *graphSDK) adapter() abstractions.RequestAdapter {
+	return g.client.GetAdapter()
+}
+
+func (g *graphSDK) absURL(path string) string {
+	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
+		return path
+	}
+	return strings.TrimRight(g.adapter().GetBaseUrl(), "/") + path
+}
+
+func (g *graphSDK) resolveRoot(ctx context.Context, driveID, itemID, siteID string) (string, string, error) {
+	if driveID == "" {
+		var drive models.Driveable
+		var err error
+		if siteID != "" {
+			drive, err = g.client.Sites().BySiteId(siteID).Drive().Get(ctx, nil)
+		} else {
+			drive, err = g.client.Me().Drive().Get(ctx, nil)
+		}
+		if err != nil {
+			return "", "", mapGraphError(err)
+		}
+		if drive == nil || drive.GetId() == nil || *drive.GetId() == "" {
+			return "", "", fmt.Errorf("vfs: msgraph drive id missing")
+		}
+		driveID = *drive.GetId()
+	}
+	item, err := g.GetItem(ctx, driveID, itemID)
+	if err != nil {
+		return "", "", err
+	}
+	if !item.IsDir {
+		return "", "", fmt.Errorf("vfs: msgraph itemId is not a folder")
+	}
+	return driveID, item.ID, nil
+}
+
+func graphItemURL(driveID, itemID, rel string) string {
+	d := "/drives/" + url.PathEscape(driveID)
+	switch {
+	case itemID == "" && rel == "":
+		return d + "/root"
+	case itemID == "":
+		return d + "/root:/" + encodeGraphRel(rel)
+	case rel == "":
+		return d + "/items/" + url.PathEscape(itemID)
+	default:
+		return d + "/items/" + url.PathEscape(itemID) + ":/" + encodeGraphRel(rel)
+	}
+}
+
+func encodeGraphRel(rel string) string {
+	if !strings.Contains(rel, "/") {
+		return url.PathEscape(rel)
+	}
+	parts := strings.Split(rel, "/")
+	for i, p := range parts {
+		parts[i] = url.PathEscape(p)
+	}
+	return strings.Join(parts, "/")
+}
+
+func (g *graphSDK) GetItem(ctx context.Context, driveID, itemID string) (GraphItem, error) {
+	if err := ctx.Err(); err != nil {
+		return GraphItem{}, err
+	}
+	var item models.DriveItemable
+	var err error
+	if itemID == "" {
+		item, err = g.client.Drives().ByDriveId(driveID).Root().Get(ctx, nil)
+	} else {
+		item, err = g.client.Drives().ByDriveId(driveID).Items().ByDriveItemId(itemID).Get(ctx, nil)
+	}
+	if err != nil {
+		return GraphItem{}, mapGraphError(err)
+	}
+	if item == nil {
+		return GraphItem{}, ErrNotExist
+	}
+	return graphItemFrom(item), nil
+}
+
+func (g *graphSDK) GetByPath(ctx context.Context, driveID, itemID, rel string) (GraphItem, error) {
+	if rel == "" {
+		return g.GetItem(ctx, driveID, itemID)
+	}
+	if err := ctx.Err(); err != nil {
+		return GraphItem{}, err
+	}
+	// Kiota does not generate ItemWithPath; use the official builder with the Graph path URL.
+	item, err := drives.NewItemItemsDriveItemItemRequestBuilder(g.absURL(graphItemURL(driveID, itemID, rel)), g.adapter()).Get(ctx, nil)
+	if err != nil {
+		return GraphItem{}, mapGraphError(err)
+	}
+	if item == nil {
+		return GraphItem{}, ErrNotExist
+	}
+	return graphItemFrom(item), nil
+}
+
+func (g *graphSDK) ListChildren(ctx context.Context, driveID, itemID string) ([]GraphItem, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	page, err := g.client.Drives().ByDriveId(driveID).Items().ByDriveItemId(itemID).Children().Get(ctx, nil)
+	if err != nil {
+		return nil, mapGraphError(err)
+	}
+	if page == nil {
+		return nil, nil
+	}
+	iter, err := msgraphgocore.NewPageIterator[models.DriveItemable](page, g.adapter(), models.CreateDriveItemCollectionResponseFromDiscriminatorValue)
+	if err != nil {
+		return nil, err
+	}
+	var out []GraphItem
+	err = iter.Iterate(ctx, func(item models.DriveItemable) bool {
+		out = append(out, graphItemFrom(item))
+		return true
+	})
+	if err != nil {
+		return nil, mapGraphError(err)
+	}
+	return out, nil
+}
+
+func (g *graphSDK) GetContent(ctx context.Context, driveID, itemID string) (io.ReadCloser, int64, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
+	}
+	data, err := g.client.Drives().ByDriveId(driveID).Items().ByDriveItemId(itemID).Content().Get(ctx, nil)
+	if err != nil {
+		return nil, 0, mapGraphError(err)
+	}
+	return io.NopCloser(bytes.NewReader(data)), int64(len(data)), nil
+}
+
+func (g *graphSDK) PutContent(ctx context.Context, driveID, itemID, name, parentID string, r io.Reader, size int64) (GraphItem, error) {
+	if err := ctx.Err(); err != nil {
+		return GraphItem{}, err
+	}
+	_ = size
+	body, err := io.ReadAll(r)
+	if err != nil {
+		return GraphItem{}, err
+	}
+	var item models.DriveItemable
+	if itemID == "" {
+		item, err = drives.NewItemItemsItemContentRequestBuilder(
+			g.absURL(graphItemURL(driveID, parentID, name)+":/content"), g.adapter()).Put(ctx, body, nil)
+	} else {
+		item, err = g.client.Drives().ByDriveId(driveID).Items().ByDriveItemId(itemID).Content().Put(ctx, body, nil)
+	}
+	if err != nil {
+		return GraphItem{}, mapGraphError(err)
+	}
+	if item == nil {
+		return GraphItem{}, ErrNotExist
+	}
+	return graphItemFrom(item), nil
+}
+
+func (g *graphSDK) CreateFolder(ctx context.Context, driveID, parentID, name string) (GraphItem, error) {
+	if err := ctx.Err(); err != nil {
+		return GraphItem{}, err
+	}
+	folder := models.NewDriveItem()
+	folder.SetName(&name)
+	folder.SetFolder(models.NewFolder())
+	folder.SetAdditionalData(map[string]any{"@microsoft.graph.conflictBehavior": "fail"})
+	item, err := g.client.Drives().ByDriveId(driveID).Items().ByDriveItemId(parentID).Children().Post(ctx, folder, nil)
+	if err != nil {
+		return GraphItem{}, mapGraphError(err)
+	}
+	if item == nil {
+		return GraphItem{}, ErrNotExist
+	}
+	return graphItemFrom(item), nil
+}
+
+func (g *graphSDK) Delete(ctx context.Context, driveID, itemID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return mapGraphError(g.client.Drives().ByDriveId(driveID).Items().ByDriveItemId(itemID).Delete(ctx, nil))
+}
+
+func graphItemFrom(item models.DriveItemable) GraphItem {
+	if item == nil {
+		return GraphItem{}
+	}
+	g := GraphItem{IsDir: item.GetFolder() != nil}
+	if id := item.GetId(); id != nil {
+		g.ID = *id
+	}
+	if name := item.GetName(); name != nil {
+		g.Name = *name
+	}
+	if size := item.GetSize(); size != nil {
+		g.Size = *size
+	}
+	if lm := item.GetLastModifiedDateTime(); lm != nil {
+		g.LastModified = lm.UTC().Format(time.RFC3339)
+	}
+	if parent := item.GetParentReference(); parent != nil {
+		if pid := parent.GetId(); pid != nil {
+			g.ParentID = *pid
+		}
+	}
+	if file := item.GetFile(); file != nil {
+		if mime := file.GetMimeType(); mime != nil {
+			g.Mime = *mime
+		}
+	} else if pkg := item.GetPackageEscaped(); pkg != nil {
+		if t := pkg.GetTypeEscaped(); t != nil {
+			g.Mime = *t
+		}
+	}
+	return g
+}
+
+func mapGraphError(err error) error {
+	var sc interface{ GetStatusCode() int }
+	if errors.As(err, &sc) {
+		switch sc.GetStatusCode() {
+		case http.StatusUnauthorized:
+			return ErrAuthExpired
+		case http.StatusNotFound:
+			return ErrNotExist
+		case http.StatusForbidden:
+			return ErrPermission
+		case http.StatusConflict:
+			return ErrExist
+		}
+	}
+	return err
+}

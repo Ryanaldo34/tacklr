@@ -1,6 +1,7 @@
 package vfs_test
 
 import (
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -28,10 +29,29 @@ func graphColonRel(p string) (string, bool) {
 	return name, true
 }
 
+func writeGraphJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func readGraphRequest(r *http.Request) []byte {
+	var reader io.Reader = r.Body
+	if r.Header.Get("Content-Encoding") == "gzip" {
+		gz, err := gzip.NewReader(r.Body)
+		if err != nil {
+			return nil
+		}
+		defer gz.Close()
+		reader = gz
+	}
+	body, _ := io.ReadAll(reader)
+	return body
+}
+
 func writeGraphNamed(w http.ResponseWriter, name string, items ...map[string]any) bool {
 	for _, it := range items {
 		if it["name"] == name {
-			_ = json.NewEncoder(w).Encode(it)
+			writeGraphJSON(w, it)
 			return true
 		}
 	}
@@ -341,28 +361,28 @@ func TestGraphHTTP_bytesPersistAndCreate(t *testing.T) {
 		defer mu.Unlock()
 		switch {
 		case p == "/me/drive":
-			_ = json.NewEncoder(w).Encode(map[string]any{"id": "drv", "folder": map[string]any{}})
+			writeGraphJSON(w, map[string]any{"id": "drv", "folder": map[string]any{}})
 		case p == "/drives/drv/root" || p == "/drives/drv/items/root":
-			_ = json.NewEncoder(w).Encode(graphJSONFolder("root", "root"))
+			writeGraphJSON(w, graphJSONFolder("root", "root"))
 		case p == "/drives/drv/items/root/children" && r.Method == http.MethodGet:
 			value := []any{graphJSONFile("f1", "a.txt", len(files["f1"]))}
 			for _, it := range created {
 				value = append(value, it)
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"value": value})
+			writeGraphJSON(w, map[string]any{"value": value})
 		case p == "/drives/drv/items/f1/content":
 			switch r.Method {
 			case http.MethodGet:
 				_, _ = w.Write(files["f1"])
 			case http.MethodPut:
-				body, _ := io.ReadAll(r.Body)
+				body := readGraphRequest(r)
 				files["f1"] = append([]byte(nil), body...)
-				_ = json.NewEncoder(w).Encode(graphJSONFile("f1", "a.txt", len(body)))
+				writeGraphJSON(w, graphJSONFile("f1", "a.txt", len(body)))
 			default:
 				w.WriteHeader(http.StatusNotFound)
 			}
 		case r.Method == http.MethodPut && strings.Contains(p, ":/") && strings.HasSuffix(p, ":/content"):
-			body, _ := io.ReadAll(r.Body)
+			body := readGraphRequest(r)
 			inner := strings.TrimPrefix(p, "/drives/drv/items/")
 			_, rest, _ := strings.Cut(inner, ":/")
 			name := strings.TrimSuffix(rest, ":/content")
@@ -372,7 +392,7 @@ func TestGraphHTTP_bytesPersistAndCreate(t *testing.T) {
 			id := "new-" + name
 			files[id] = append([]byte(nil), body...)
 			created[id] = graphJSONFile(id, name, len(body))
-			_ = json.NewEncoder(w).Encode(created[id])
+			writeGraphJSON(w, created[id])
 		case strings.HasPrefix(p, "/drives/drv/items/") && strings.HasSuffix(p, "/content") && r.Method == http.MethodGet:
 			id := strings.TrimSuffix(strings.TrimPrefix(p, "/drives/drv/items/"), "/content")
 			if body, ok := files[id]; ok {
@@ -384,7 +404,7 @@ func TestGraphHTTP_bytesPersistAndCreate(t *testing.T) {
 			if r.Method == http.MethodGet {
 				if rel, ok := graphColonRel(p); ok {
 					if rel == "a.txt" {
-						_ = json.NewEncoder(w).Encode(graphJSONFile("f1", "a.txt", len(files["f1"])))
+						writeGraphJSON(w, graphJSONFile("f1", "a.txt", len(files["f1"])))
 						return
 					}
 					for _, it := range created {
@@ -428,21 +448,21 @@ func TestGraphHTTP_siteDriveWinsOverEmpty(t *testing.T) {
 	serveDrive := func(w http.ResponseWriter, r *http.Request, drive, root, fileID, name, body string) bool {
 		switch r.URL.Path {
 		case "/drives/" + drive + "/root", "/drives/" + drive + "/items/" + root:
-			_ = json.NewEncoder(w).Encode(graphJSONFolder(root, "root"))
+			writeGraphJSON(w, graphJSONFolder(root, "root"))
 			return true
 		case "/drives/" + drive + "/items/" + root + "/children":
-			_ = json.NewEncoder(w).Encode(map[string]any{"value": []any{graphJSONFile(fileID, name, len(body))}})
+			writeGraphJSON(w, map[string]any{"value": []any{graphJSONFile(fileID, name, len(body))}})
 			return true
 		case "/drives/" + drive + "/items/" + fileID + "/content":
 			_, _ = w.Write([]byte(body))
 			return true
 		case "/drives/" + drive + "/items/" + fileID:
-			_ = json.NewEncoder(w).Encode(graphJSONFile(fileID, name, len(body)))
+			writeGraphJSON(w, graphJSONFile(fileID, name, len(body)))
 			return true
 		}
 		if r.Method == http.MethodGet {
 			if rel, ok := graphColonRel(r.URL.Path); ok && rel == name && strings.Contains(r.URL.Path, "/drives/"+drive+"/") {
-				_ = json.NewEncoder(w).Encode(graphJSONFile(fileID, name, len(body)))
+				writeGraphJSON(w, graphJSONFile(fileID, name, len(body)))
 				return true
 			}
 		}
@@ -450,7 +470,7 @@ func TestGraphHTTP_siteDriveWinsOverEmpty(t *testing.T) {
 	}
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/sites/site-1/drive" {
-			_ = json.NewEncoder(w).Encode(map[string]any{"id": "site-drv", "folder": map[string]any{}})
+			writeGraphJSON(w, map[string]any{"id": "site-drv", "folder": map[string]any{}})
 			return
 		}
 		if serveDrive(w, r, "drv-set", "root-set", "fd", "note.txt", "from-drive") {
@@ -488,7 +508,8 @@ func TestGraphHTTP_errorsPaginationMkdirTrash(t *testing.T) {
 	page2 := []map[string]any{graphJSONFile("f2", "c.txt", 1)}
 	bodies := map[string][]byte{"f1": []byte("abc"), "f2": []byte("c")}
 	dirs := map[string]map[string]any{}
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var ts *httptest.Server
+	ts = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer tok" {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
@@ -498,12 +519,12 @@ func TestGraphHTTP_errorsPaginationMkdirTrash(t *testing.T) {
 		defer mu.Unlock()
 		switch {
 		case p == "/me/drive":
-			_ = json.NewEncoder(w).Encode(map[string]any{"id": "drv", "folder": map[string]any{}})
+			writeGraphJSON(w, map[string]any{"id": "drv", "folder": map[string]any{}})
 		case p == "/drives/drv/root" || p == "/drives/drv/items/root":
-			_ = json.NewEncoder(w).Encode(graphJSONFolder("root", "root"))
+			writeGraphJSON(w, graphJSONFolder("root", "root"))
 		case p == "/drives/drv/items/root/children" && r.Method == http.MethodGet:
 			if r.URL.Query().Get("skip") == "1" {
-				_ = json.NewEncoder(w).Encode(map[string]any{"value": page2})
+				writeGraphJSON(w, map[string]any{"value": page2})
 				return
 			}
 			value := make([]any, 0, len(kids)+len(dirs))
@@ -513,17 +534,17 @@ func TestGraphHTTP_errorsPaginationMkdirTrash(t *testing.T) {
 			for _, d := range dirs {
 				value = append(value, d)
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{
+			writeGraphJSON(w, map[string]any{
 				"value":           value,
-				"@odata.nextLink": "/drives/drv/items/root/children?skip=1",
+				"@odata.nextLink": ts.URL + "/drives/drv/items/root/children?skip=1",
 			})
 		case p == "/drives/drv/items/root/children" && r.Method == http.MethodPost:
 			var body map[string]any
-			_ = json.NewDecoder(r.Body).Decode(&body)
+			_ = json.Unmarshal(readGraphRequest(r), &body)
 			name, _ := body["name"].(string)
 			id := "dir-" + name
 			dirs[id] = graphJSONFolder(id, name)
-			_ = json.NewEncoder(w).Encode(dirs[id])
+			writeGraphJSON(w, dirs[id])
 		case p == "/drives/drv/items/gone/content":
 			w.WriteHeader(http.StatusNotFound)
 		case p == "/drives/drv/items/exp/content":
@@ -564,18 +585,18 @@ func TestGraphHTTP_errorsPaginationMkdirTrash(t *testing.T) {
 			}
 			id := strings.TrimPrefix(p, "/drives/drv/items/")
 			if d, ok := dirs[id]; ok {
-				_ = json.NewEncoder(w).Encode(d)
+				writeGraphJSON(w, d)
 				return
 			}
 			for _, k := range kids {
 				if k["id"] == id {
-					_ = json.NewEncoder(w).Encode(k)
+					writeGraphJSON(w, k)
 					return
 				}
 			}
 			for _, k := range page2 {
 				if k["id"] == id {
-					_ = json.NewEncoder(w).Encode(k)
+					writeGraphJSON(w, k)
 					return
 				}
 			}

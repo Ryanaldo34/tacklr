@@ -36,7 +36,7 @@ type GraphItem struct {
 type GraphFactory struct {
 	ID   string
 	Auth *SessionAuth
-	API  GraphAPI // optional; nil → graphHTTP from the session token
+	API  GraphAPI // optional; nil → official msgraph-sdk-go client from the session token
 	Base string   // optional Graph root URL (tests)
 }
 
@@ -62,13 +62,16 @@ func (f GraphFactory) Open(ctx context.Context, sessionID string, spec MountSpec
 		if holder == nil || holder.Current().Token == "" {
 			return nil, fmt.Errorf("vfs: msgraph access token required")
 		}
-		h := newGraphHTTP(holder, f.Base)
-		d, i, err := h.resolveRoot(ctx, driveID, itemID, strings.TrimSpace(spec.Params[ParamSiteID]))
+		sdk, err := newGraphSDK(holder, f.Base)
+		if err != nil {
+			return nil, err
+		}
+		d, i, err := sdk.resolveRoot(ctx, driveID, itemID, strings.TrimSpace(spec.Params[ParamSiteID]))
 		if err != nil {
 			return nil, err
 		}
 		driveID, itemID = d, i
-		api = h
+		api = sdk
 	}
 	return &graphProvider{
 		api: api, driveID: driveID, rootID: itemID, holder: holder, writable: !spec.ReadOnly,
