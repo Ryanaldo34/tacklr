@@ -193,9 +193,9 @@ func TestXLSX_usedRangeFormulaFormatRoundTrip(t *testing.T) {
 			{
 				{Input: "Amount", Value: "Amount"},
 				{Input: "42", Value: "42", Format: vfs.CellFormat{
-					Number: "$#,##0.00", Bold: true, Italic: true, Strike: true,
-					Fill: "#ffcc00", Color: "#003366", Align: "right",
-					Border: &vfs.CellBorder{Style: "thin", Edges: "bottom"},
+					Number: "$#,##0.00", Bold: true, Italic: true, Strike: true, Underline: true,
+					Fill: "#ffcc00", Color: "#003366", Align: "right", VAlign: "middle", Wrap: "wrap",
+					Border: &vfs.CellBorder{Style: "thin", Edges: "bottom", Color: "#000000"},
 				}},
 			},
 			{{Input: "=A1+1", Value: "43"}},
@@ -203,6 +203,9 @@ func TestXLSX_usedRangeFormulaFormatRoundTrip(t *testing.T) {
 	}}, nil)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if (XLSX{}).MediaTypes()[0] != XLSXMediaType {
+		t.Fatal("MediaTypes")
 	}
 	if _, err := (XLSX{}).Encode(ctx, vfs.NewTextDocument("/work/x.txt", "text/plain", "utf-8", "x")); !errors.Is(err, vfs.ErrNotSupported) {
 		t.Fatalf("Encode text: %v", err)
@@ -215,8 +218,10 @@ func TestXLSX_usedRangeFormulaFormatRoundTrip(t *testing.T) {
 	if err != nil || !strings.Contains(string(styles), "$#,##0.00") ||
 		!strings.Contains(string(styles), `style="thin"`) || !strings.Contains(string(styles), "<b/>") ||
 		!strings.Contains(string(styles), "<i/>") || !strings.Contains(string(styles), "<strike/>") ||
-		!strings.Contains(string(styles), "FFCC00") || !strings.Contains(string(styles), "003366") ||
-		!strings.Contains(string(styles), `horizontal="right"`) {
+		!strings.Contains(string(styles), "<u/>") || !strings.Contains(string(styles), "FFCC00") ||
+		!strings.Contains(string(styles), "003366") || !strings.Contains(string(styles), `horizontal="right"`) ||
+		!strings.Contains(string(styles), `vertical="middle"`) || !strings.Contains(string(styles), `wrapText="1"`) ||
+		!strings.Contains(string(styles), "FF000000") {
 		t.Fatalf("styles.xml = %s err=%v", styles, err)
 	}
 	doc, err := (XLSX{}).Decode(ctx, "/work/Budget.xlsx", XLSXMediaType, raw)
@@ -232,9 +237,10 @@ func TestXLSX_usedRangeFormulaFormatRoundTrip(t *testing.T) {
 		t.Fatalf("sheet = %+v", sh)
 	}
 	b1 := sh.Cells[0][1]
-	if b1.Input != "42" || !b1.Format.Bold || !b1.Format.Italic || !b1.Format.Strike ||
+	if b1.Input != "42" || !b1.Format.Bold || !b1.Format.Italic || !b1.Format.Strike || !b1.Format.Underline ||
 		b1.Format.Number != "$#,##0.00" || b1.Format.Fill != "#ffcc00" || b1.Format.Color != "#003366" ||
-		b1.Format.Align != "right" || b1.Format.Border == nil || b1.Format.Border.Style != "thin" {
+		b1.Format.Align != "right" || b1.Format.VAlign != "middle" || b1.Format.Wrap != "wrap" ||
+		b1.Format.Border == nil || b1.Format.Border.Style != "thin" {
 		t.Fatalf("B1 = %+v format=%+v", b1, b1.Format)
 	}
 	a2 := sh.Cells[1][0]

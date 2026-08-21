@@ -159,9 +159,15 @@ func TestDrive_sheetOverlayFormatAndMerge(t *testing.T) {
 	if !td.Sheets()[0].Cells[1][1].Format.Bold {
 		t.Fatalf("checkout format B2 = %+v", td.Sheets()[0].Cells[1][1])
 	}
+	on, fill, color, align, valign, wrap := true, "#ffcc00", "#003366", "right", "middle", "wrap"
+	num := "$#,##0.00"
 	_, err = ms.Apply(ctx, "/contracts/Budget", vfs.Mutation{
 		Rev: vfs.ContentToken(doc), BlockID: "Budget!B2", Body: strPtr("99"),
-		Format: &vfs.FormatPatch{Italic: boolPtr(true)},
+		Format: &vfs.FormatPatch{
+			Number: &num, Italic: boolPtr(true), Strike: &on, Underline: &on,
+			Fill: &fill, Color: &color, Align: &align, VAlign: &valign, Wrap: &wrap,
+			Border: &vfs.CellBorder{Style: "thin", Edges: "bottom", Color: "#000000"},
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -175,7 +181,11 @@ func TestDrive_sheetOverlayFormatAndMerge(t *testing.T) {
 		t.Fatalf("type %T", got)
 	}
 	b2, err := td.Cell("Budget", "B2")
-	if err != nil || b2.Display() != "99" || !b2.Format.Italic || !b2.Format.Bold {
+	if err != nil || b2.Display() != "99" || !b2.Format.Italic || !b2.Format.Bold ||
+		!b2.Format.Strike || !b2.Format.Underline || b2.Format.Number != num ||
+		b2.Format.Fill != fill || b2.Format.Color != color || b2.Format.Align != align ||
+		b2.Format.VAlign != valign || b2.Format.Wrap != wrap ||
+		b2.Format.Border == nil || b2.Format.Border.Style != "thin" {
 		t.Fatalf("overlay B2 = %+v err=%v", b2, err)
 	}
 	if formula, _ := td.ReadCell("Budget", "A3"); formula != "=A1+1" {

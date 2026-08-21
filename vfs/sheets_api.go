@@ -532,6 +532,10 @@ func repeatCellPayload(f CellFormat) (*sheets.CellData, string) {
 }
 
 func irBorders(b *CellBorder) *sheets.Borders {
+	if b == nil || b.zero() {
+		none := &sheets.Border{Style: "NONE"}
+		return &sheets.Borders{Top: none, Bottom: none, Left: none, Right: none}
+	}
 	style := irBorderStyle(b.Style)
 	col := hexColor(b.Color)
 	edge := func() *sheets.Border {

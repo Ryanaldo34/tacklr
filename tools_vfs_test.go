@@ -879,14 +879,27 @@ func TestVFSTools_projectedSheetReadWrite(t *testing.T) {
 		t.Fatalf("default read outline: %s", res.output)
 	}
 	rev := fieldKV(res.output, "rev")
+	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","ir":true}`, rt)
+	if err != nil || !strings.Contains(res.output, "sheet_count=2") || !strings.Contains(res.output, "encoding=") {
+		t.Fatalf("ir header: %s err=%v", res.output, err)
+	}
 	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","block_id":"Budget!B2"}`, rt)
 	if err != nil || !strings.Contains(res.output, "text=42") ||
 		!strings.Contains(res.output, "format=number=$#,##0.00,bold") {
 		t.Fatalf("cell format: %s err=%v", res.output, err)
 	}
+	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","block_id":"Budget!A1:C2"}`, rt)
+	if err != nil || !strings.Contains(res.output, "Date") || !strings.Contains(res.output, "42") ||
+		!strings.Contains(res.output, "B2 format=number=$#,##0.00,bold") {
+		t.Fatalf("range: %s err=%v", res.output, err)
+	}
 	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","block_id":"Budget"}`, rt)
 	if err != nil || !strings.Contains(res.output, "sheet=Budget") || !strings.Contains(res.output, "42") {
 		t.Fatalf("sheet rows: %s err=%v", res.output, err)
+	}
+	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","block_id":"Budget","start":2,"end":3,"ir":true}`, rt)
+	if err != nil || !strings.Contains(res.output, "   2|") || !strings.Contains(res.output, "B2 format=") {
+		t.Fatalf("row window ir: %s err=%v", res.output, err)
 	}
 	_, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","start":1,"end":3}`, rt)
 	if !errors.Is(err, vfs.ErrProjected) {
