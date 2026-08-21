@@ -31,11 +31,13 @@ func (nopRerank) Rerank(context.Context, []brain.RichObject) ([]brain.RichObject
 func TestNewEngine_options(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
+	if _, err := brain.NewEngine(store, brain.WithExpandRecipes(brain.ExpandRecipe{Name: ""})); err == nil || !errors.Is(err, brain.ErrInvalid) {
+		t.Fatalf("empty expand recipe name must fail construct: %v", err)
+	}
 	eng, err := brain.NewEngine(store,
 		brain.WithObserver(nopObserver{}),
 		brain.WithReranker(nopRerank{}),
 		brain.WithExpandRecipes(
-			brain.ExpandRecipe{Name: ""}, // ignored empty name
 			brain.ExpandRecipe{Name: "kids", MaxHops: 1, WantContainment: true},
 		),
 		brain.WithKinds(brain.KindSpec{
@@ -79,10 +81,10 @@ func TestNewEngine_options(t *testing.T) {
 	}
 	if _, err := eng.FindLinks(ctx, brain.Scope{}, brain.FindLinksRequest{
 		RelationType: "about", Query: "x",
-	}); !errors.Is(err, brain.ErrEdgeSearchUnavailable) {
+	}); !errors.Is(err, brain.ErrUnsupported) {
 		t.Fatalf("FindLinks without graph: %v", err)
 	}
-	if _, err := eng.FindObjects(ctx, brain.Scope{}, brain.FindObjectsRequest{Query: "x"}, brain.NewSearchContext()); !errors.Is(err, brain.ErrObjectSearchUnavailable) {
+	if _, err := eng.FindObjects(ctx, brain.Scope{}, brain.FindObjectsRequest{Query: "x"}, brain.NewSearchContext()); !errors.Is(err, brain.ErrUnsupported) {
 		t.Fatalf("FindObjects without graph: %v", err)
 	}
 	if eng.HasObjectSearch() {

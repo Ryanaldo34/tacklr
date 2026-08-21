@@ -83,7 +83,7 @@ func NewMountSession(sessionID string, reg *BackendRegistry) (*MountSession, err
 		return nil, fmt.Errorf("%w: session id is required", ErrInvalidPath)
 	}
 	if reg == nil {
-		return nil, errRegistryRequired
+		panic("vfs: NewMountSession requires a backend registry")
 	}
 	return &MountSession{id: sessionID, reg: reg, tab: newMountTable()}, nil
 }
@@ -108,7 +108,7 @@ func (m *MountSession) table() *mountTable {
 // Factories that implement SkillSource are then attached at /skills.
 func (m *MountSession) Materialize(ctx context.Context, specs []MountSpec) error {
 	if m.reg == nil {
-		return errRegistryRequired
+		panic("vfs: mount session has no registry")
 	}
 	var next *mountTable
 	var err error
@@ -133,7 +133,7 @@ func (m *MountSession) Materialize(ctx context.Context, specs []MountSpec) error
 // Non-union mounts refresh /skills from SkillSource factories.
 func (m *MountSession) Mount(ctx context.Context, spec MountSpec) error {
 	if m.reg == nil {
-		return errRegistryRequired
+		panic("vfs: mount session has no registry")
 	}
 	p, err := m.reg.open(ctx, m.id, spec)
 	if err != nil {
@@ -153,7 +153,7 @@ func (m *MountSession) Mount(ctx context.Context, spec MountSpec) error {
 // (Drive) should call this after bind so new members are picked up.
 func (m *MountSession) AttachSkills(ctx context.Context) error {
 	if m.reg == nil {
-		return errRegistryRequired
+		panic("vfs: mount session has no registry")
 	}
 	return attachSkillsTo(ctx, m.reg, m.id, m.table())
 }

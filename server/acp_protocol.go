@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -180,7 +181,7 @@ func (p *acpProtocol) handleACPWebSocket(env ProtocolEnv, w http.ResponseWriter,
 
 func (p *acpProtocol) HandleInbound(ctx context.Context, env ProtocolEnv, body []byte) error {
 	if err := ctx.Err(); err != nil {
-		_ = env.Conn.Writer.WriteError(nil, err)
+		writeWireError(env.Conn.Writer, nil, err)
 		return err
 	}
 
@@ -188,7 +189,7 @@ func (p *acpProtocol) HandleInbound(ctx context.Context, env ProtocolEnv, body [
 	if err != nil {
 		// validateACPRequest always returns a nil *parsedRequest on error.
 		slog.Debug("client error", "error", err)
-		_ = env.Conn.Writer.WriteError(nil, err)
+		writeWireError(env.Conn.Writer, nil, err)
 		return err
 	}
 
@@ -294,7 +295,10 @@ func (p *acpProtocol) authenticate(ctx context.Context, env ProtocolEnv, methodI
 		Binding: binding,
 	})
 	if err != nil {
-		return clientErrorf(ErrAuthenticationRequired, "authentication required")
+		if errors.Is(err, tacklrsecurity.ErrAuthenticationFailed) {
+			return clientErrorCause(ErrAuthenticationFailed, err, "authentication failed")
+		}
+		return clientErrorCause(ErrAuthenticationRequired, err, "authentication required")
 	}
 	env.Conn.establishSecurity(securityContext)
 	return nil
@@ -313,13 +317,13 @@ func (p *acpProtocol) requireAuthentication(env ProtocolEnv) error {
 func (p *acpProtocol) handleSessionTurn(ctx context.Context, env ProtocolEnv, pr *parsedRequest) error {
 	if env.Conn != nil && env.Conn.RPC != nil {
 		if err := env.Conn.RPC.WaitInitialized(ctx); err != nil {
-			_ = env.Conn.Writer.WriteError(pr.ID, err)
+			writeWireError(env.Conn.Writer, pr.ID, err)
 			return err
 		}
 	}
 	req, err := p.BindTurn(ctx, env, pr.ThreadID, pr.Method, pr.Params)
 	if err != nil {
-		_ = env.Conn.Writer.WriteError(pr.ID, err)
+		writeWireError(env.Conn.Writer, pr.ID, err)
 		return err
 	}
 	stream, err := env.Registry.RunTurn(ctx, req)
@@ -327,7 +331,7 @@ func (p *acpProtocol) handleSessionTurn(ctx context.Context, env ProtocolEnv, pr
 		if !IsClientError(err) {
 			logTurnError(err, req.AgentID, req.ThreadID)
 		}
-		_ = env.Conn.Writer.WriteError(pr.ID, err)
+		writeWireError(env.Conn.Writer, pr.ID, err)
 		return err
 	}
 	defer func() {

@@ -55,16 +55,8 @@ func (r *toolRunner) Run(ctx context.Context, inv ToolInvocation) (string, ToolO
 	return out, toolDisp, err
 }
 
-func rejectedOnCall(name string) error {
-	return fmt.Errorf("%w: user rejected tool %q", ErrToolPermissionDenied, name)
-}
-
 func toolNameOf(inv ToolInvocation) string {
 	return inv.Tool.Name
-}
-
-func toolDisplayOf(inv ToolInvocation) string {
-	return inv.Tool.DisplayName
 }
 
 // ToolPermissionOnCall parks a tool_permission interrupt before the handler.
@@ -73,7 +65,7 @@ func ToolPermissionOnCall(inv ToolInvocation) Interrupt {
 	name := toolNameOf(inv)
 	return &interrupt.ToolPermissionInterrupt{
 		ToolName: name,
-		Title:    ResolveToolTitle(toolDisplayOf(inv), name, inv.ArgsJSON),
+		Title:    ResolveToolTitle(inv.Tool.DisplayName, name, inv.ArgsJSON),
 		Options:  interrupt.DefaultPermissionOptions(),
 	}
 }
@@ -105,7 +97,7 @@ func applyOnCallLayer(inv *ToolInvocation, ctor OnCallFunc, sm *session.SessionM
 	callID := inv.Runtime.CurrentToolCallID()
 	if layer, ok := sm.OnCall.Get(callID, intr.TypeName()); ok {
 		if layer.Denied {
-			return rejectedOnCall(toolNameOf(*inv))
+			return fmt.Errorf("%w: user rejected tool %q", ErrToolPermissionDenied, toolNameOf(*inv))
 		}
 		inv.ArgsJSON = layer.Args
 		return nil
@@ -136,7 +128,7 @@ func finishOnCallLayer(inv *ToolInvocation, typeName string, denied bool, sm *se
 		Denied: denied,
 	})
 	if denied {
-		return rejectedOnCall(toolNameOf(*inv))
+		return fmt.Errorf("%w: user rejected tool %q", ErrToolPermissionDenied, toolNameOf(*inv))
 	}
 	return nil
 }

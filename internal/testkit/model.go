@@ -9,6 +9,8 @@ import (
 	"github.com/ryanaldo34/tacklr"
 )
 
+var _ tacklr.InferenceStrategy = (*ScriptedModel)(nil)
+
 // ScriptedModel is a cancel-aware InferenceStrategy for tests.
 // Default CountTokens is sum of message content lengths (not zero), so window-pressure
 // paths can fire when MaxWindowSize is small. Override CountTokensFn to customize.

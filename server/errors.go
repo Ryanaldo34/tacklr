@@ -2,8 +2,10 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/ryanaldo34/tacklr/interrupt"
 	tacklrsecurity "github.com/ryanaldo34/tacklr/security"
@@ -15,11 +17,12 @@ var (
 	ErrInvalidRequest            = errors.New("invalid request")
 	ErrMethodNotFound            = errors.New("method not found")
 	ErrAgentNotFound             = errors.New("agent not found")
-	ErrSessionNotFound           = errors.New("session not found")
+	ErrSessionNotFound           = stores.ErrSessionNotFound
 	ErrSessionStoreNotConfigured = errors.New("session store is not configured")
 	ErrStreamingNotSupported     = errors.New("streaming not supported")
 	ErrInternal                  = errors.New("internal server error")
 	ErrAuthenticationRequired    = tacklrsecurity.ErrAuthenticationRequired
+	ErrAuthenticationFailed      = tacklrsecurity.ErrAuthenticationFailed
 	ErrAuthorizationDenied       = tacklrsecurity.ErrAuthorizationDenied
 )
 
@@ -37,16 +40,38 @@ const (
 var ErrRequestCancelled = errors.New("request cancelled")
 
 // clientError is a caller-facing error that unwraps to a sentinel.
+// When cause is set, errors.Is/As can also match the underlying failure.
 type clientError struct {
 	sentinel error
 	msg      string
+	cause    error
 }
 
 func (e *clientError) Error() string { return e.msg }
-func (e *clientError) Unwrap() error { return e.sentinel }
+
+func (e *clientError) Unwrap() []error {
+	if e.cause != nil {
+		return []error{e.sentinel, e.cause}
+	}
+	return []error{e.sentinel}
+}
 
 func clientErrorf(sentinel error, format string, args ...any) error {
 	return &clientError{sentinel: sentinel, msg: fmt.Sprintf(format, args...)}
+}
+
+func clientErrorCause(sentinel, cause error, format string, args ...any) error {
+	return &clientError{sentinel: sentinel, cause: cause, msg: fmt.Sprintf(format, args...)}
+}
+
+// writeWireError writes a client-visible error and logs a write failure.
+func writeWireError(w MessageWriter, id json.RawMessage, err error) {
+	if w == nil {
+		return
+	}
+	if writeErr := w.WriteError(id, err); writeErr != nil {
+		slog.Warn("failed to write client error", "error", writeErr, "cause", err)
+	}
 }
 
 // IsClientError reports whether err is safe to surface to the client
@@ -68,6 +93,7 @@ func IsClientError(err error) bool {
 		errors.Is(err, ErrSessionNotFound) ||
 		errors.Is(err, ErrSessionStoreNotConfigured) ||
 		errors.Is(err, ErrAuthenticationRequired) ||
+		errors.Is(err, ErrAuthenticationFailed) ||
 		errors.Is(err, ErrAuthorizationDenied) ||
 		errors.Is(err, errConnectionNotInitialized)
 }

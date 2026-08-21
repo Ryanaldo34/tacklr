@@ -70,7 +70,7 @@ func (c *SearchContext) Namespace() (uuid.UUID, bool) {
 // Put implements ResultSetStore: stores set as the sole active ResultSet.
 func (c *SearchContext) Put(_ context.Context, set ResultSet) error {
 	if set.ID == uuid.Nil {
-		return ErrResultSetIDRequired
+		return fmt.Errorf("%w: result_set_id is required", ErrInvalid)
 	}
 	cp := cloneResultSet(set)
 	if cp.CreatedAt.IsZero() {

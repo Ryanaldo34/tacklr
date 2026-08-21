@@ -68,7 +68,7 @@ func (e *Engine) Expand(ctx context.Context, scope Scope, req ExpandRequest, res
 		return res, err
 	}
 	if req.ObjectID == uuid.Nil {
-		return res, ErrObjectIDRequired
+		return res, fmt.Errorf("%w: object id is required", ErrInvalid)
 	}
 	obj, err := e.store.Get(ctx, scope, req.ObjectID)
 	if err != nil {
@@ -77,7 +77,7 @@ func (e *Engine) Expand(ctx context.Context, scope Scope, req ExpandRequest, res
 
 	wantContainment, graphLabels := resolveExpandRelations(req.RelationTypes, req.WantContainment)
 	if len(graphLabels) > 0 && e.graph == nil {
-		return res, fmt.Errorf("%w for relation types %v", ErrGraphRequired, graphLabels)
+		return res, fmt.Errorf("%w: graph backend is required for relation types %v", ErrUnsupported, graphLabels)
 	}
 
 	var (
@@ -98,7 +98,7 @@ func (e *Engine) Expand(ctx context.Context, scope Scope, req ExpandRequest, res
 	if len(graphLabels) > 0 {
 		hits, gErr := e.graphNeighborsMulti(ctx, scope, obj.ID, graphLabels, req.MaxHops, req.Direction)
 		if gErr != nil {
-			if e.cfg.allowGraphDegrade() && usedContainment {
+			if !e.cfg.FailOnGraphError && usedContainment {
 				degrade = DegradeContainmentOnly
 			} else {
 				return res, gErr
@@ -171,7 +171,7 @@ func (e *Engine) ExpandMany(ctx context.Context, scope Scope, req ExpandManyRequ
 
 	wantContainment, graphLabels := resolveExpandRelations(req.RelationTypes, req.WantContainment)
 	if len(graphLabels) > 0 && e.graph == nil {
-		return res, fmt.Errorf("%w for relation types %v", ErrGraphRequired, graphLabels)
+		return res, fmt.Errorf("%w: graph backend is required for relation types %v", ErrUnsupported, graphLabels)
 	}
 
 	seen := make(map[uuid.UUID]struct{}, budget)
@@ -248,7 +248,7 @@ func (e *Engine) ExpandMany(ctx context.Context, scope Scope, req ExpandManyRequ
 func (e *Engine) ExpandByRecipe(ctx context.Context, scope Scope, objectID uuid.UUID, recipeName string, results ResultSetStore) (ExpandResult, error) {
 	r, ok := e.recipe(recipeName)
 	if !ok {
-		return ExpandResult{}, fmt.Errorf("%w: %q", ErrExpandRecipeNotFound, strings.TrimSpace(recipeName))
+		return ExpandResult{}, fmt.Errorf("%w: expand recipe %q", ErrNotFound, strings.TrimSpace(recipeName))
 	}
 	return e.Expand(ctx, scope, ExpandRequest{
 		ObjectID:        objectID,
@@ -264,7 +264,7 @@ func (e *Engine) ExpandByRecipe(ctx context.Context, scope Scope, objectID uuid.
 func (e *Engine) RegisterExpandRecipe(r ExpandRecipe) error {
 	name := strings.TrimSpace(r.Name)
 	if name == "" {
-		return ErrExpandRecipeNameRequired
+		return fmt.Errorf("%w: expand recipe name is required", ErrInvalid)
 	}
 	r.Name = name
 	e.recipeMu.Lock()

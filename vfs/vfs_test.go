@@ -647,10 +647,15 @@ func TestMountSession_configErrors(t *testing.T) {
 	if err := ms.Unmount("/missing"); !errors.Is(err, vfs.ErrNotMounted) {
 		t.Fatalf("unmount missing: %v", err)
 	}
-	// nil registry session is rejected at construct
-	if _, err := vfs.NewMountSession("s2", nil); err == nil {
-		t.Fatal("nil registry construct")
-	}
+	// nil registry is a programmer error
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("nil registry must panic")
+			}
+		}()
+		_, _ = vfs.NewMountSession("s2", nil)
+	}()
 	if _, err := vfs.NewMountSession("", reg); err == nil {
 		t.Fatal("empty session id construct")
 	}

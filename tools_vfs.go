@@ -76,7 +76,7 @@ Knowledge objects with no file: read_object. Live names/grep: run_command → ls
 		Access:   ToolReadAccess,
 		Timeout:  60 * time.Second,
 		Handler: func(ctx context.Context, args readArgs, rt HarnessRuntime) (string, error) {
-			p, err := absVirtual(args.Path)
+			p, err := vfs.CleanPath(args.Path)
 			if err != nil {
 				return "", err
 			}
@@ -342,7 +342,7 @@ Sheets: write block_id is Sheet!A1 (one cell). Optional format patches that cell
 		Access:   ToolWriteAccess,
 		Timeout:  60 * time.Second,
 		Handler: func(ctx context.Context, args writeArgs, rt HarnessRuntime) (string, error) {
-			p, err := absVirtual(args.Path)
+			p, err := vfs.CleanPath(args.Path)
 			if err != nil {
 				return "", err
 			}
@@ -463,5 +463,3 @@ func growLineWindow(b *strings.Builder, extra int, lines []string) {
 	}
 	b.Grow(n)
 }
-
-func absVirtual(p string) (string, error) { return vfs.CleanPath(p) }

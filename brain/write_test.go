@@ -270,7 +270,7 @@ func TestPut_multiTurnMemoryGraph(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Parts cannot be link endpoints.
-	if err := eng.Link(ctx, scope, chunk.ID, b.ID, "about"); err == nil || !errors.Is(err, brain.ErrLinkNotFirstClass) {
+	if err := eng.Link(ctx, scope, chunk.ID, b.ID, "about"); err == nil || !errors.Is(err, brain.ErrInvalid) {
 		t.Fatalf("link part: %v", err)
 	}
 
@@ -310,7 +310,7 @@ func TestPut_multiTurnMemoryGraph(t *testing.T) {
 	// Soft-deleted Put is refused.
 	now := time.Now().UTC()
 	b.DeletedAt = &now
-	if _, err := eng.Put(ctx, scope, b); err == nil || !errors.Is(err, brain.ErrSoftDeletedPut) {
+	if _, err := eng.Put(ctx, scope, b); err == nil || !errors.Is(err, brain.ErrInvalid) {
 		t.Fatalf("put soft-deleted: %v", err)
 	}
 	// SoftDelete wrong namespace / missing id.
@@ -385,8 +385,8 @@ func TestLink_expandFindsNeighbor(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := eng.Link(ctx, scope, a.ID, b.ID, ""); !errors.Is(err, brain.ErrLinkArgs) {
-		t.Fatalf("want ErrLinkArgs: %v", err)
+	if err := eng.Link(ctx, scope, a.ID, b.ID, ""); !errors.Is(err, brain.ErrInvalid) {
+		t.Fatalf("want ErrInvalid for incomplete link: %v", err)
 	}
 	engNoGraph, err := brain.NewEngine(store)
 	if err != nil {
@@ -395,11 +395,11 @@ func TestLink_expandFindsNeighbor(t *testing.T) {
 	if engNoGraph.HasGraphWriter() {
 		t.Fatal("engine without WithGraph must not report HasGraphWriter")
 	}
-	if err := engNoGraph.Link(ctx, scope, a.ID, b.ID, "references"); !errors.Is(err, brain.ErrGraphWriterRequired) {
-		t.Fatalf("want ErrGraphWriterRequired: %v", err)
+	if err := engNoGraph.Link(ctx, scope, a.ID, b.ID, "references"); !errors.Is(err, brain.ErrUnsupported) {
+		t.Fatalf("want ErrUnsupported: %v", err)
 	}
-	if err := engNoGraph.Unlink(ctx, scope, a.ID, b.ID, "references"); !errors.Is(err, brain.ErrGraphWriterRequired) {
-		t.Fatalf("unlink want ErrGraphWriterRequired: %v", err)
+	if err := engNoGraph.Unlink(ctx, scope, a.ID, b.ID, "references"); !errors.Is(err, brain.ErrUnsupported) {
+		t.Fatalf("unlink want ErrUnsupported: %v", err)
 	}
 }
 

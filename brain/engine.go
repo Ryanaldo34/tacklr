@@ -86,7 +86,6 @@ func (c EngineConfig) withDefaults() EngineConfig {
 }
 
 func (c EngineConfig) allowEmbedderDegrade() bool { return !c.FailOnEmbedderError }
-func (c EngineConfig) allowGraphDegrade() bool    { return !c.FailOnGraphError }
 
 func posOr(v, fallback int) int {
 	if v > 0 {
@@ -135,11 +134,13 @@ func WithReranker(r Reranker) EngineOption {
 
 // WithExpandRecipes registers host-named expand views at construct time.
 // Each recipe is a named ExpandRequest template (ObjectID filled at call time).
-// Invalid recipes (empty name) are ignored here; use RegisterExpandRecipe for errors.
+// Invalid recipes (empty name) fail NewEngine.
 func WithExpandRecipes(recipes ...ExpandRecipe) EngineOption {
 	return func(eng *Engine) {
 		for _, r := range recipes {
-			_ = eng.RegisterExpandRecipe(r)
+			if err := eng.RegisterExpandRecipe(r); err != nil && eng.bootErr == nil {
+				eng.bootErr = err
+			}
 		}
 	}
 }
@@ -191,7 +192,9 @@ func NewEngine(store Store, opts ...EngineOption) (*Engine, error) {
 		return nil, e.bootErr
 	}
 	e.cfg = e.cfg.withDefaults()
-	e.observer = observerOrNoop(e.observer)
+	if e.observer == nil {
+		e.observer = noopObserver{}
+	}
 	return e, nil
 }
 
@@ -217,7 +220,7 @@ func (e *Engine) Catalog() *KindCatalog {
 // Read returns the full rich object for id under scope.
 func (e *Engine) Read(ctx context.Context, scope Scope, id uuid.UUID) (RichObject, error) {
 	if id == uuid.Nil {
-		return RichObject{}, ErrObjectIDRequired
+		return RichObject{}, fmt.Errorf("%w: object id is required", ErrInvalid)
 	}
 	obj, err := e.store.Get(ctx, scope, id)
 	if err != nil {
@@ -341,7 +344,7 @@ func (e *Engine) KindsWithObjects(ctx context.Context, scope Scope) ([]string, e
 func (e *Engine) objectLister() (ObjectLister, error) {
 	l, ok := e.store.(ObjectLister)
 	if !ok {
-		return nil, ErrListingUnsupported
+		return nil, fmt.Errorf("%w: store does not support object listing", ErrUnsupported)
 	}
 	return l, nil
 }
@@ -349,7 +352,7 @@ func (e *Engine) objectLister() (ObjectLister, error) {
 // Get returns the stored object (including Content) under scope.
 func (e *Engine) Get(ctx context.Context, scope Scope, id uuid.UUID) (Object, error) {
 	if id == uuid.Nil {
-		return Object{}, ErrObjectIDRequired
+		return Object{}, fmt.Errorf("%w: object id is required", ErrInvalid)
 	}
 	return e.store.Get(ctx, scope, id)
 }

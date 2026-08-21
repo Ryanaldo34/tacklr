@@ -77,7 +77,7 @@ func (r *BackendRegistry) Profiles() []string {
 // Used to fail client binds before the mount is visible.
 func CheckMount(ctx context.Context, reg *BackendRegistry, sessionID string, spec MountSpec) error {
 	if reg == nil {
-		return errRegistryRequired
+		panic("vfs: CheckMount requires a backend registry")
 	}
 	p, err := reg.open(ctx, sessionID, spec)
 	if err != nil {

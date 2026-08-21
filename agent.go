@@ -656,7 +656,13 @@ func (a *AgentHarness) Close() {
 		a.mcpCleanup = nil
 	}
 	if a.ownsVFSBridge && a.vfsBridge != nil {
-		_ = a.vfsBridge.Close()
+		if err := a.vfsBridge.Close(); err != nil {
+			slog.Error("vfsindex bridge close failed",
+				"area", telemetry.AreaHarness,
+				"session_id", a.sessionId,
+				"error", err,
+			)
+		}
 		a.vfsBridge = nil
 	}
 }

@@ -74,3 +74,20 @@ func TestClientError_errorsIs(t *testing.T) {
 		t.Fatal("expected errors.Is to match ErrAgentNotFound through wrap")
 	}
 }
+
+func TestClientErrorCause_preservesUnderlyingClass(t *testing.T) {
+	cause := fmt.Errorf("%w: drive token expired", stores.ErrSessionNotFound)
+	err := clientErrorCause(ErrInvalidRequest, cause, "bind vfs")
+	if !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("want ErrInvalidRequest: %v", err)
+	}
+	if !errors.Is(err, stores.ErrSessionNotFound) {
+		t.Fatalf("want underlying class preserved: %v", err)
+	}
+	if err.Error() != "bind vfs" {
+		t.Fatalf("wire message = %q", err.Error())
+	}
+	if !IsClientError(err) {
+		t.Fatal("clientErrorCause must stay client-safe")
+	}
+}

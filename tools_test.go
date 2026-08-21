@@ -489,3 +489,14 @@ func asParams(t *testing.T, tool *Tool) map[string]any {
 	t.Helper()
 	return tool.AsJson()["parameters"].(map[string]any)
 }
+
+func TestResolveToolTitle_invalidJSONKeepsTemplate(t *testing.T) {
+	got := ResolveToolTitle("read {path}", "read", `{not-json`)
+	if got != "read {path}" {
+		t.Fatalf("got %q, want template unchanged", got)
+	}
+	got = ResolveToolTitle("read {path}", "read", `{"path":"/work/a.txt"}`)
+	if got != "read /work/a.txt" {
+		t.Fatalf("got %q", got)
+	}
+}

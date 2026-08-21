@@ -125,7 +125,7 @@ Does not delete the real VFS file. Idempotent if nothing was indexed. Requires a
 		Access:   ToolWriteAccess,
 		Timeout:  30 * time.Second,
 		Handler: func(ctx context.Context, args unindexArgs, runtime HarnessRuntime) (string, error) {
-			p, err := absVirtual(args.Path)
+			p, err := vfs.CleanPath(args.Path)
 			if err != nil {
 				return "", err
 			}
@@ -159,14 +159,14 @@ func collectIndexPaths(path string, paths []string) ([]string, error) {
 	}
 	out := make([]string, 0, n)
 	if single != "" {
-		abs, err := absVirtual(single)
+		abs, err := vfs.CleanPath(single)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, abs)
 	}
 	for _, p := range paths {
-		abs, err := absVirtual(p)
+		abs, err := vfs.CleanPath(p)
 		if err != nil {
 			return nil, err
 		}

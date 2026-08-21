@@ -35,10 +35,3 @@ func (noopObserver) StartOp(ctx context.Context, _ Op) (context.Context, OpSpan)
 type noopSpan struct{}
 
 func (noopSpan) End(int, DegradeMode, error) {}
-
-func observerOrNoop(o Observer) Observer {
-	if o == nil {
-		return noopObserver{}
-	}
-	return o
-}

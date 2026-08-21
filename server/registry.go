@@ -328,6 +328,15 @@ func (r *Registry) DropLiveHarness(sessionID string) {
 	r.closeSessionVFS(sessionID)
 }
 
+func closeMountLogged(ms *vfs.MountSession, sessionID, reason string) {
+	if ms == nil {
+		return
+	}
+	if err := ms.Close(); err != nil {
+		slog.Warn("session vfs close failed", "session_id", sessionID, "reason", reason, "error", err)
+	}
+}
+
 func (r *Registry) closeSessionVFS(sessionID string) {
 	if r.vfsAuth != nil {
 		r.vfsAuth.Clear(sessionID)
@@ -343,9 +352,11 @@ func (r *Registry) closeSessionVFS(sessionID string) {
 	if dir != "" {
 		telemetry.EmitEvent(context.Background(), telemetry.EventFuseUnmount)
 	}
-	_ = ms.Close()
+	closeMountLogged(ms, sessionID, "session_teardown")
 	if dir != "" {
-		_ = os.Remove(dir)
+		if err := os.Remove(dir); err != nil {
+			slog.Warn("session vfs host dir remove failed", "session_id", sessionID, "dir", dir, "error", err)
+		}
 	}
 }
 
@@ -369,17 +380,18 @@ func (r *Registry) sessionVFS(ctx context.Context, threadID string, spec *AgentS
 		return nil, err
 	}
 	if err := ms.Materialize(ctx, spec.FSBootstrap); err != nil {
+		closeMountLogged(ms, threadID, "materialize")
 		return nil, err
 	}
 	if hasBindings {
 		for _, b := range r.vfsAuth.Bindings(threadID) {
 			if err := ms.Mount(ctx, vfs.BindingSpec(b)); err != nil && !errors.Is(err, vfs.ErrAlreadyMounted) {
-				_ = ms.Close()
+				closeMountLogged(ms, threadID, "bind")
 				return nil, err
 			}
 		}
 		if err := ms.AttachSkills(ctx); err != nil {
-			_ = ms.Close()
+			closeMountLogged(ms, threadID, "attach_skills")
 			return nil, err
 		}
 	}

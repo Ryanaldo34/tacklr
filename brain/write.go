@@ -33,7 +33,7 @@ func (e *Engine) Put(ctx context.Context, scope Scope, obj Object) (Object, erro
 		return Object{}, err
 	}
 	if obj.DeletedAt != nil {
-		return Object{}, ErrSoftDeletedPut
+		return Object{}, fmt.Errorf("%w: put refuses soft-deleted objects; use SoftDelete", ErrInvalid)
 	}
 	obj = preparePut(scope, obj, e.cfg.Now())
 	if err := ValidateObject(obj, e.catalog); err != nil {
@@ -95,11 +95,11 @@ func (e *Engine) LinkWith(ctx context.Context, scope Scope, from, to uuid.UUID, 
 		return err
 	}
 	if e.graphW == nil {
-		return ErrGraphWriterRequired
+		return fmt.Errorf("%w: graph writer is required for Link", ErrUnsupported)
 	}
 	rel := strings.TrimSpace(relationType)
 	if from == uuid.Nil || to == uuid.Nil || rel == "" {
-		return ErrLinkArgs
+		return fmt.Errorf("%w: from, to, and relation type are required", ErrInvalid)
 	}
 	if err := e.requireLinkEndpoint(ctx, scope, from, "from"); err != nil {
 		return err
@@ -116,11 +116,11 @@ func (e *Engine) Unlink(ctx context.Context, scope Scope, from, to uuid.UUID, re
 		return err
 	}
 	if e.graphW == nil {
-		return ErrGraphWriterRequired
+		return fmt.Errorf("%w: graph writer is required for Link", ErrUnsupported)
 	}
 	rel := strings.TrimSpace(relationType)
 	if from == uuid.Nil || to == uuid.Nil || rel == "" {
-		return ErrLinkArgs
+		return fmt.Errorf("%w: from, to, and relation type are required", ErrInvalid)
 	}
 	if err := e.requireLinkEndpoint(ctx, scope, from, "from"); err != nil {
 		return err
@@ -137,7 +137,7 @@ func (e *Engine) requireLinkEndpoint(ctx context.Context, scope Scope, id uuid.U
 		return fmt.Errorf("brain: link %s: %w", label, err)
 	}
 	if obj.ParentID != nil {
-		return fmt.Errorf("brain: link %s: %w", label, ErrLinkNotFirstClass)
+		return fmt.Errorf("brain: link %s: %w: endpoint must be a first-class object (not a part)", label, ErrInvalid)
 	}
 	return nil
 }
@@ -150,7 +150,7 @@ func (e *Engine) HasGraphWriter() bool {
 func (e *Engine) objectWriter() (ObjectWriter, error) {
 	w, ok := e.store.(ObjectWriter)
 	if !ok {
-		return nil, ErrWritesUnsupported
+		return nil, fmt.Errorf("%w: store does not support object writes", ErrUnsupported)
 	}
 	return w, nil
 }
@@ -362,13 +362,13 @@ func isReservedStoreProp(name string) bool {
 
 func requireObjectIdentity(obj Object) error {
 	if obj.ID == uuid.Nil {
-		return ErrObjectIDRequired
+		return fmt.Errorf("%w: object id is required", ErrInvalid)
 	}
 	if strings.TrimSpace(obj.Kind) == "" {
-		return fmt.Errorf("brain: object kind is required")
+		return fmt.Errorf("%w: object kind is required", ErrInvalid)
 	}
 	if obj.NamespaceID == uuid.Nil {
-		return fmt.Errorf("brain: object namespace_id is required")
+		return fmt.Errorf("%w: object namespace_id is required", ErrInvalid)
 	}
 	return nil
 }

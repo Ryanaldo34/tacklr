@@ -27,14 +27,14 @@ func (e *Engine) FindObjects(ctx context.Context, scope Scope, req FindObjectsRe
 	defer func() { span.End(len(page.Objects), degrade, err) }()
 
 	if e.graphS == nil {
-		return page, ErrObjectSearchUnavailable
+		return page, fmt.Errorf("%w: graph object search is not available", ErrUnsupported)
 	}
 	if results == nil {
-		return page, ErrResultSetRequired
+		return page, fmt.Errorf("%w: result set store is required", ErrUnsupported)
 	}
 	query := strings.TrimSpace(req.Query)
 	if query == "" {
-		return page, ErrQueryRequired
+		return page, fmt.Errorf("%w: query is required", ErrInvalid)
 	}
 	filters, err := e.prepareFindObjectFilters(req)
 	if err != nil {

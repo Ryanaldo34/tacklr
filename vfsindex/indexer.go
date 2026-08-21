@@ -124,7 +124,7 @@ func (x *MountIndexer) IndexFileResult(ctx context.Context, virtualPath string, 
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	cleaned, err := cleanPath(virtualPath)
+	cleaned, err := vfs.CleanPath(virtualPath)
 	if err != nil {
 		return "", err
 	}
@@ -144,7 +144,7 @@ func (x *MountIndexer) UnindexPath(ctx context.Context, virtualPath string) (boo
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
-	cleaned, err := cleanPath(virtualPath)
+	cleaned, err := vfs.CleanPath(virtualPath)
 	if err != nil {
 		return false, err
 	}
@@ -170,7 +170,7 @@ func (x *MountIndexer) indexPath(ctx context.Context, virtualPath string) (PathI
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	cleaned, err := cleanPath(virtualPath)
+	cleaned, err := vfs.CleanPath(virtualPath)
 	if err != nil {
 		return "", err
 	}
@@ -196,7 +196,7 @@ func (x *MountIndexer) indexPath(ctx context.Context, virtualPath string) (PathI
 // IndexPrefix walks a directory (or single file) and indexes text-like files.
 func (x *MountIndexer) IndexPrefix(ctx context.Context, prefix string, opts IndexOpts) (Stats, error) {
 	var stats Stats
-	cleaned, err := cleanPath(prefix)
+	cleaned, err := vfs.CleanPath(prefix)
 	if err != nil {
 		return stats, err
 	}
@@ -678,8 +678,6 @@ func chunkID(parent uuid.UUID, pos int) uuid.UUID {
 	buf = strconv.AppendInt(buf, int64(pos), 10)
 	return uuid.NewSHA1(parent, buf)
 }
-
-func cleanPath(p string) (string, error) { return vfs.CleanPath(p) }
 
 func walk(ctx context.Context, ms *vfs.MountSession, vpath string, fn func(vpath string, isDir bool) error) error {
 	if err := ctx.Err(); err != nil {

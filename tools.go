@@ -276,7 +276,9 @@ func ResolveToolTitle(displayName, toolName, argsJSON string) string {
 		return displayName
 	}
 	var args map[string]any
-	_ = json.Unmarshal([]byte(argsJSON), &args)
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return displayName
+	}
 	return titleParamRE.ReplaceAllStringFunc(displayName, func(m string) string {
 		key := m[1 : len(m)-1]
 		s, _ := args[key].(string)

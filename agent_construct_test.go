@@ -145,7 +145,7 @@ func TestAgentHarness_checkpointFailureIsHostVisibleAndClearsAfterRecovery(t *te
 	h := mustNewAgent(t, AgentOptions{
 		SessionID: "checkpoint-health",
 		Model:     &mockStrategy{},
-		Store:     failSaveStore{InMemoryStore: stores.NewInMemoryStore()},
+		Store:     stores.FaultyStore{Inner: stores.NewInMemoryStore(), SaveErr: errors.New("checkpoint disk full")},
 	})
 
 	// Act

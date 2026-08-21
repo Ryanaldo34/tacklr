@@ -17,6 +17,13 @@ import (
 	"github.com/google/uuid"
 )
 
+var (
+	_ Store        = (*MemoryStore)(nil)
+	_ ObjectWriter = (*MemoryStore)(nil)
+	_ ObjectLister = (*MemoryStore)(nil)
+	_ KindWriter   = (*MemoryStore)(nil)
+)
+
 // MemoryStore is an in-process Store (tests, fixtures, and ObjectWriter for Engine.Put).
 type MemoryStore struct {
 	mu      sync.RWMutex
@@ -58,7 +65,7 @@ func (s *MemoryStore) Put(_ context.Context, obj Object) error {
 // SoftDelete implements ObjectWriter.
 func (s *MemoryStore) SoftDelete(_ context.Context, scope Scope, id uuid.UUID) error {
 	if id == uuid.Nil {
-		return ErrObjectIDRequired
+		return fmt.Errorf("%w: object id is required", ErrInvalid)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

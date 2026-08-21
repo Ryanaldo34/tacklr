@@ -587,7 +587,7 @@ func (b brainTools) resolveEngramSavePath(ctx context.Context, kind, title, obje
 			return "", err
 		}
 		if p := vfsPathFromProps(obj.Properties); p != "" {
-			return absVirtual(p)
+			return vfs.CleanPath(p)
 		}
 		return "", fmt.Errorf("object_id %s has no vfs_path; cannot update as file", id)
 	}
@@ -613,7 +613,7 @@ func (b brainTools) resolveEngramSavePath(ctx context.Context, kind, title, obje
 func (b brainTools) resolveFileRef(ctx context.Context, pathStr, idStr, field string, requireFirstClass bool) (uuid.UUID, string, error) {
 	p := strings.TrimSpace(pathStr)
 	if p != "" {
-		abs, err := absVirtual(p)
+		abs, err := vfs.CleanPath(p)
 		if err != nil {
 			return uuid.Nil, "", err
 		}
@@ -657,8 +657,12 @@ func (b brainTools) resolveFileRef(ctx context.Context, pathStr, idStr, field st
 	if err != nil {
 		return uuid.Nil, "", err
 	}
+	obj, err := b.engine.Read(ctx, b.sc.Scope(), id)
+	if err != nil && !errors.Is(err, brain.ErrNotFound) {
+		return uuid.Nil, "", err
+	}
 	var vpath string
-	if obj, err := b.engine.Read(ctx, b.sc.Scope(), id); err == nil {
+	if err == nil {
 		vpath, _ = obj.Properties[brain.PropVFSPath].(string)
 	}
 	return id, vpath, nil
