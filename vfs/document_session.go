@@ -108,13 +108,8 @@ func (m *MountSession) WriteDocument(ctx context.Context, doc Document) error {
 }
 
 func bindDocument(doc Document, virtual string) Document {
-	switch d := doc.(type) {
-	case *TextDocument:
-		d.path = virtual
-	case *RichDocument:
-		d.path = virtual
-	case *TabularDocument:
-		d.path = virtual
+	if d, ok := asIR(doc); ok {
+		d.bindPath(virtual)
 	}
 	return doc
 }

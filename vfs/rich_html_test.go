@@ -17,8 +17,12 @@ func TestProjectHTMLSpans_tabsListsTablesMarks(t *testing.T) {
 		{Kind: "quote", Text: "aside", Style: StyleMeta{Attributes: map[string]string{"tab_id": "t.b"}}},
 	})
 	// tabs so projection emits sections
-	doc.tabs = []DocTab{{ID: "t.a", Title: "A", Index: 0}, {ID: "t.b", Title: "B", Index: 1}}
-	doc.reproject()
+	rb, ok := asRichBody(doc)
+	if !ok {
+		t.Fatal("rich body")
+	}
+	rb.tabs = []DocTab{{ID: "t.a", Title: "A", Index: 0}, {ID: "t.b", Title: "B", Index: 1}}
+	rb.reproject()
 	html := doc.Text()
 	for _, want := range []string{"<strong>x</strong>", "<em>i</em>", "<a href=", "<s>s</s>", "<ul>", "<ol>", "<table>", "<section", "data-object-id", "&amp;", "&#34;"} {
 		if !strings.Contains(html, want) {

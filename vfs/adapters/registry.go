@@ -8,5 +8,5 @@ func RegisterCommon(reg *vfs.ContentRegistry) error {
 	if err := reg.Register(vfs.BlockCodec{Types: []string{DOCXMediaType}, Normalizer: DOCX{}}); err != nil {
 		return err
 	}
-	return reg.Register(XLSX{})
+	return reg.Register(vfs.TabularCodec{Types: []string{XLSXMediaType}, Normalizer: XLSX{}})
 }

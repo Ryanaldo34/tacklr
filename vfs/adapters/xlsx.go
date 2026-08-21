@@ -37,32 +37,44 @@ type XLSX struct{}
 
 func (XLSX) MediaTypes() []string { return []string{XLSXMediaType} }
 
-func (XLSX) Decode(ctx context.Context, virtualPath, mediaType string, data []byte) (vfs.Document, error) {
+func (XLSX) DecodeSheets(ctx context.Context, _, _ string, data []byte) ([]vfs.Sheet, []vfs.NamedRange, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(data) > vfs.MaxReadFileBytes {
-		return nil, fmt.Errorf("%w (max %d bytes)", vfs.ErrTooLarge, vfs.MaxReadFileBytes)
-	}
-	if mediaType == "" {
-		mediaType = XLSXMediaType
+		return nil, nil, fmt.Errorf("%w (max %d bytes)", vfs.ErrTooLarge, vfs.MaxReadFileBytes)
 	}
 	sheets, err := parseXLSX(data)
 	if err != nil {
+		return nil, nil, err
+	}
+	return sheets, nil, nil
+}
+
+func (XLSX) EncodeSheets(ctx context.Context, sheets []vfs.Sheet, _ []vfs.NamedRange) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	return encodeXLSX(sheets)
+}
+
+func (XLSX) Decode(ctx context.Context, virtualPath, mediaType string, data []byte) (vfs.Document, error) {
+	sheets, _, err := (XLSX{}).DecodeSheets(ctx, virtualPath, mediaType, data)
+	if err != nil {
+		return nil, err
+	}
+	if mediaType == "" {
+		mediaType = XLSXMediaType
 	}
 	return vfs.NewTabularDocument(virtualPath, mediaType, sheets, nil)
 }
 
 func (XLSX) Encode(ctx context.Context, doc vfs.Document) ([]byte, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	td, ok := doc.(*vfs.TabularDocument)
+	g, ok := vfs.AsGrid(doc)
 	if !ok {
 		return nil, fmt.Errorf("xlsx: %w", vfs.ErrNotSupported)
 	}
-	return encodeXLSX(td.Sheets())
+	return (XLSX{}).EncodeSheets(ctx, g.Sheets(), g.NamedRanges())
 }
 
 func parseXLSX(data []byte) ([]vfs.Sheet, error) {
@@ -308,16 +320,18 @@ func parseStyles(r io.Reader) (xlsxStyles, error) {
 				font.Italic = true
 			case "strike":
 				font.Strike = true
+			case "u":
+				font.Underline = true
 			case "color":
 				if section == "fonts" {
-					font.Color = xlsxRGB(attr(t, "rgb"))
+					font.Color = vfs.HexColor(attr(t, "rgb"))
 				} else if inBorder {
-					border.Color = xlsxRGB(attr(t, "rgb"))
+					border.Color = vfs.HexColor(attr(t, "rgb"))
 				}
 			case "fill":
 				fill = ""
 			case "fgColor":
-				fill = xlsxRGB(attr(t, "rgb"))
+				fill = vfs.HexColor(attr(t, "rgb"))
 			case "border":
 				border = vfs.CellBorder{}
 			case "left", "right", "top", "bottom":
@@ -352,7 +366,7 @@ func parseStyles(r io.Reader) (xlsxStyles, error) {
 				}
 				if fontID >= 0 && fontID < len(st.fonts) {
 					f := st.fonts[fontID]
-					xf.Bold, xf.Italic, xf.Strike, xf.Color = f.Bold, f.Italic, f.Strike, f.Color
+					xf.Bold, xf.Italic, xf.Strike, xf.Underline, xf.Color = f.Bold, f.Italic, f.Strike, f.Underline, f.Color
 				}
 				if fillID >= 0 && fillID < len(st.fills) {
 					xf.Fill = st.fills[fillID]
@@ -366,6 +380,10 @@ func parseStyles(r io.Reader) (xlsxStyles, error) {
 				}
 			case "alignment":
 				xf.Align = strings.ToLower(attr(t, "horizontal"))
+				xf.VAlign = strings.ToLower(attr(t, "vertical"))
+				if attr(t, "wrapText") == "1" || strings.EqualFold(attr(t, "wrapText"), "true") {
+					xf.Wrap = "wrap"
+				}
 			}
 		case xml.EndElement:
 			switch t.Name.Local {
@@ -547,36 +565,22 @@ func parseSheetXML(r io.Reader, ss []string, st xlsxStyles) ([][]vfs.Cell, error
 	return grid, nil
 }
 
-func xlsxRGB(s string) string {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return ""
-	}
-	s = strings.TrimPrefix(s, "#")
-	if len(s) == 8 {
-		s = s[2:]
-	}
-	if len(s) != 6 {
-		return ""
-	}
-	return "#" + strings.ToLower(s)
-}
-
 var builtinNumFmts = map[int]string{
 	0: "General", 1: "0", 2: "0.00", 3: "#,##0", 4: "#,##0.00",
 	9: "0%", 10: "0.00%", 14: "mm-dd-yy", 49: "@",
 }
 
 type styleKey struct {
-	Number, Fill, Color, Align string
-	Bold, Italic, Strike       bool
-	BStyle, BColor, BEdges     string
+	Number, Fill, Color, Align, VAlign, Wrap string
+	Bold, Italic, Strike, Underline          bool
+	BStyle, BColor, BEdges                   string
 }
 
 func formatKey(f vfs.CellFormat) styleKey {
 	k := styleKey{
 		Number: f.Number, Fill: f.Fill, Color: f.Color, Align: f.Align,
-		Bold: f.Bold, Italic: f.Italic, Strike: f.Strike,
+		VAlign: f.VAlign, Wrap: f.Wrap,
+		Bold: f.Bold, Italic: f.Italic, Strike: f.Strike, Underline: f.Underline,
 	}
 	if f.Border != nil {
 		k.BStyle, k.BColor, k.BEdges = f.Border.Style, f.Border.Color, f.Border.Edges
@@ -613,7 +617,7 @@ func encodeXLSX(sheets []vfs.Sheet) ([]byte, error) {
 		if i, ok := st.xfIndex[k]; ok {
 			return i
 		}
-		st.fonts = append(st.fonts, vfs.CellFormat{Bold: f.Bold, Italic: f.Italic, Strike: f.Strike, Color: f.Color})
+		st.fonts = append(st.fonts, vfs.CellFormat{Bold: f.Bold, Italic: f.Italic, Strike: f.Strike, Underline: f.Underline, Color: f.Color})
 		st.fills = append(st.fills, f.Fill)
 		if f.Border != nil {
 			st.borders = append(st.borders, *f.Border)
@@ -816,8 +820,11 @@ func writeStyles(w *bytes.Buffer, fonts []vfs.CellFormat, fills []string, border
 		if f.Strike {
 			w.WriteString(`<strike/>`)
 		}
+		if f.Underline {
+			w.WriteString(`<u/>`)
+		}
 		if f.Color != "" {
-			w.WriteString(`<color rgb="` + excelRGB(f.Color) + `"/>`)
+			w.WriteString(`<color rgb="` + vfs.ExcelARGB(f.Color) + `"/>`)
 		}
 		w.WriteString(`<sz val="11"/><name val="Calibri"/></font>`)
 	}
@@ -830,7 +837,7 @@ func writeStyles(w *bytes.Buffer, fonts []vfs.CellFormat, fills []string, border
 		case i == 1 && fill == "gray125":
 			w.WriteString(`<fill><patternFill patternType="gray125"/></fill>`)
 		case fill != "":
-			w.WriteString(`<fill><patternFill patternType="solid"><fgColor rgb="` + excelRGB(fill) + `"/></patternFill></fill>`)
+			w.WriteString(`<fill><patternFill patternType="solid"><fgColor rgb="` + vfs.ExcelARGB(fill) + `"/></patternFill></fill>`)
 		default:
 			w.WriteString(`<fill><patternFill patternType="none"/></fill>`)
 		}
@@ -866,7 +873,7 @@ func writeStyles(w *bytes.Buffer, fonts []vfs.CellFormat, fills []string, border
 		if xf.Number != "" {
 			w.WriteString(` applyNumberFormat="1"`)
 		}
-		if xf.Bold || xf.Italic || xf.Strike || xf.Color != "" {
+		if xf.Bold || xf.Italic || xf.Strike || xf.Underline || xf.Color != "" {
 			w.WriteString(` applyFont="1"`)
 		}
 		if xf.Fill != "" {
@@ -875,10 +882,22 @@ func writeStyles(w *bytes.Buffer, fonts []vfs.CellFormat, fills []string, border
 		if xf.Border != nil {
 			w.WriteString(` applyBorder="1"`)
 		}
-		if xf.Align != "" {
-			w.WriteString(` applyAlignment="1"><alignment horizontal="`)
-			writeXMLEsc(w, xf.Align)
-			w.WriteString(`"/></xf>`)
+		if xf.Align != "" || xf.VAlign != "" || xf.Wrap != "" {
+			w.WriteString(` applyAlignment="1"><alignment`)
+			if xf.Align != "" {
+				w.WriteString(` horizontal="`)
+				writeXMLEsc(w, xf.Align)
+				w.WriteString(`"`)
+			}
+			if xf.VAlign != "" {
+				w.WriteString(` vertical="`)
+				writeXMLEsc(w, xf.VAlign)
+				w.WriteString(`"`)
+			}
+			if xf.Wrap == "wrap" {
+				w.WriteString(` wrapText="1"`)
+			}
+			w.WriteString(`/></xf>`)
 		} else {
 			w.WriteString(`/>`)
 		}
@@ -898,21 +917,10 @@ func writeBorderEdge(w *bytes.Buffer, name string, br vfs.CellBorder) {
 	}
 	w.WriteString(`<` + name + ` style="` + style + `"`)
 	if br.Color != "" {
-		w.WriteString(`><color rgb="` + excelRGB(br.Color) + `"/></` + name + `>`)
+		w.WriteString(`><color rgb="` + vfs.ExcelARGB(br.Color) + `"/></` + name + `>`)
 		return
 	}
 	w.WriteString(`/>`)
-}
-
-func excelRGB(s string) string {
-	s = strings.TrimPrefix(strings.TrimSpace(s), "#")
-	if len(s) == 8 {
-		return strings.ToUpper(s)
-	}
-	if len(s) == 6 {
-		return "FF" + strings.ToUpper(s)
-	}
-	return "FF000000"
 }
 
 func isNumericInput(s string) bool {

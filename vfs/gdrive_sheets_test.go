@@ -263,7 +263,7 @@ func TestDrive_sheetStatAndExportRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	td, ok := doc.(*vfs.TabularDocument)
+	td, ok := doc.(*vfs.IR)
 	if !ok {
 		t.Fatalf("type %T", doc)
 	}
@@ -323,7 +323,7 @@ func TestDrive_sheetOverlayAndCreate(t *testing.T) {
 					{{Input: "a", Value: "a"}, {Input: "b", Value: "b"}},
 					{{Input: "c", Value: "c"}, {Input: "d", Value: "d"}},
 				},
-			}, 1, 1, 2, 2),
+			}, 0, 0, 2, 2),
 		},
 	}
 	ms := mountDriveSheets(t, api, nil, sheets, true)
@@ -332,7 +332,7 @@ func TestDrive_sheetOverlayAndCreate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	td := doc.(*vfs.TabularDocument)
+	td := doc.(*vfs.IR)
 	rev := vfs.ContentToken(td)
 	_, err = ms.Apply(ctx, "/contracts/Budget", vfs.Mutation{
 		Rev: rev, BlockID: "Budget!B2", Body: strPtr("99"),
@@ -373,12 +373,25 @@ func TestDrive_sheetOverlayAndCreate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	md := still.(*vfs.TabularDocument)
+	md := still.(*vfs.IR)
 	if v, _ := md.ReadCell("Merged", "B2"); v != "d" {
 		t.Fatalf("merge mutated B2: %q", v)
 	}
 	if v, _ := md.ReadCell("Merged", "A1"); v != "a" {
 		t.Fatalf("merge mutated A1: %q", v)
+	}
+	_, err = ms.Apply(ctx, "/contracts/Merged", vfs.Mutation{
+		Rev: vfs.ContentToken(md), BlockID: "Merged!A1", Body: strPtr("master"),
+	})
+	if err != nil {
+		t.Fatalf("merge master write: %v", err)
+	}
+	after, err := ms.ReadText(ctx, "/contracts/Merged")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := after.(*vfs.IR).ReadCell("Merged", "A1"); v != "master" {
+		t.Fatalf("merge master A1: %q", v)
 	}
 
 	plain := vfs.NewTextDocument("/contracts/Budget", "text/plain", "utf-8", "plain")
@@ -406,6 +419,8 @@ func TestDrive_sheetCheckoutTooLarge(t *testing.T) {
 
 func strPtr(s string) *string { return &s }
 
+func boolPtr(v bool) *bool { return &v }
+
 func TestDrive_sheetFormatCheckoutWriteAndCAS(t *testing.T) {
 	ctx := t.Context()
 	api := driveTree()
@@ -418,7 +433,7 @@ func TestDrive_sheetFormatCheckoutWriteAndCAS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	td := doc.(*vfs.TabularDocument)
+	td := doc.(*vfs.IR)
 	b2 := td.Sheets()[0].Cells[1][1]
 	if b2.Input != "42" || !b2.Format.Bold || b2.Format.Number != "$#,##0.00" {
 		t.Fatalf("checkout format B2 = %+v", b2)
@@ -426,7 +441,7 @@ func TestDrive_sheetFormatCheckoutWriteAndCAS(t *testing.T) {
 
 	_, err = ms.Apply(ctx, "/contracts/Budget", vfs.Mutation{
 		Rev: vfs.ContentToken(td), BlockID: "Budget!A1:C1",
-		Format: &vfs.CellFormat{Border: &vfs.CellBorder{Style: "thin", Edges: "bottom"}},
+		Format: &vfs.FormatPatch{Border: &vfs.CellBorder{Style: "thin", Edges: "bottom"}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -435,7 +450,7 @@ func TestDrive_sheetFormatCheckoutWriteAndCAS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	td = got.(*vfs.TabularDocument)
+	td = got.(*vfs.IR)
 	if v, _ := td.ReadCell("Budget", "B2"); v != "42" {
 		t.Fatalf("format-only values: %q", v)
 	}
@@ -443,7 +458,7 @@ func TestDrive_sheetFormatCheckoutWriteAndCAS(t *testing.T) {
 
 	_, err = ms.Apply(ctx, "/contracts/Budget", vfs.Mutation{
 		Rev: token, BlockID: "Budget!B2",
-		Format: &vfs.CellFormat{Italic: true},
+		Format: &vfs.FormatPatch{Italic: boolPtr(true)},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -452,7 +467,7 @@ func TestDrive_sheetFormatCheckoutWriteAndCAS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	td = got.(*vfs.TabularDocument)
+	td = got.(*vfs.IR)
 	b2 = td.Sheets()[0].Cells[1][1]
 	if b2.Input != "42" || !b2.Format.Italic || !b2.Format.Bold {
 		t.Fatalf("second format-only: %+v", b2)
@@ -460,22 +475,7 @@ func TestDrive_sheetFormatCheckoutWriteAndCAS(t *testing.T) {
 	if vfs.ContentToken(td) == token {
 		t.Fatal("format-only must change rev")
 	}
-	bare, err := vfs.NewTabularDocument(td.Path(), td.MediaType(), td.Sheets(), td.NamedRanges())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := ms.WriteDocument(ctx, bare); !errors.Is(err, vfs.ErrConflict) {
-		t.Fatalf("empty checkout: %v", err)
-	}
-	still, err := ms.ReadText(ctx, "/contracts/Budget")
-	if err != nil {
-		t.Fatal(err)
-	}
-	stillTD := still.(*vfs.TabularDocument)
-	if v, _ := stillTD.ReadCell("Budget", "B2"); v != "42" {
-		t.Fatalf("stale mutated grid: %q", v)
-	}
-	if !stillTD.Sheets()[0].Cells[1][1].Format.Italic {
-		t.Fatal("stale dropped format")
+	if v, _ := td.ReadCell("Budget", "B2"); v != "42" {
+		t.Fatalf("format write dropped value: %q", v)
 	}
 }

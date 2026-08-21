@@ -34,11 +34,11 @@ func TestBlockCodecProjectsAndEncodesEditedCanonicalDocument(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rd, ok := doc.(*vfs.RichDocument)
+	rd, ok := vfs.AsRich(doc)
 	if !ok {
-		t.Fatalf("decoded document = %#v, want *RichDocument", doc)
+		t.Fatalf("decoded document = %#v, want rich body", doc)
 	}
-	if err := rd.SetText("nope"); !errors.Is(err, vfs.ErrProjected) {
+	if err := doc.(vfs.Textual).SetText("nope"); !errors.Is(err, vfs.ErrProjected) {
 		t.Fatalf("SetText = %v, want ErrProjected", err)
 	}
 	if got := rd.Blocks(); len(got) != 1 || got[0].Kind != vfs.BlockKindParagraph || got[0].Text != "original" {
@@ -46,7 +46,7 @@ func TestBlockCodecProjectsAndEncodesEditedCanonicalDocument(t *testing.T) {
 	}
 
 	rd.SetBlocks([]vfs.Block{{ID: "intro", Kind: vfs.BlockKindParagraph, Text: "edited"}})
-	encoded, err := codec.Encode(ctx, rd)
+	encoded, err := codec.Encode(ctx, doc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +61,7 @@ func TestBlockCodec_errorsAndEmpty(t *testing.T) {
 	if _, err := empty.Decode(ctx, "/x", "application/x-test-rich", nil); err == nil {
 		t.Fatal("nil normalizer decode")
 	}
-	if _, err := empty.Encode(ctx, &vfs.RichDocument{}); err == nil {
+	if _, err := empty.Encode(ctx, vfs.NewRichDocument("/x", "application/x-test-rich", nil)); err == nil {
 		t.Fatal("nil normalizer encode")
 	}
 	codec := vfs.BlockCodec{Types: []string{"application/x-test-rich"}, Normalizer: failRich{}}

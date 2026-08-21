@@ -51,6 +51,14 @@ func (DocsCodec) Decode(ctx context.Context, virtualPath, mediaType string, data
 	return NewRichDocument(virtualPath, mediaType, blocks), nil
 }
 
+// Create lifts plaintext or blocks into a rich checkout.
+func (DocsCodec) Create(path, mediaType string, mut Mutation) (Document, error) {
+	if mediaType == "" {
+		mediaType = mimeGoogleDocument
+	}
+	return createRichDocument(path, mediaType, mut)
+}
+
 func looksLikeZip(data []byte) bool {
 	return len(data) >= 2 && data[0] == 'P' && data[1] == 'K'
 }

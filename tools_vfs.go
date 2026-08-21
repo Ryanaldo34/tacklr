@@ -42,23 +42,23 @@ type writeBlock struct {
 }
 
 type writeArgs struct {
-	Path           string          `json:"path" desc:"Absolute virtual path to write."`
-	Rev            string          `json:"rev,omitempty" desc:"Required when path exists: hash from the latest read. Omit only to create (full mode)."`
-	Content        *string         `json:"content,omitempty" desc:"Full new file body (UTF-8). Creates or replaces the whole file. Empty creates or truncates. Create-only lift for Docs."`
-	IRText         *string         `json:"ir_text,omitempty" desc:"Full IR body. Same as content; if both are set they must match."`
-	Start          *int            `json:"start,omitempty" desc:"1-based start line (inclusive). Lines mode."`
-	End            *int            `json:"end,omitempty" desc:"1-based end line (exclusive). Required in lines mode."`
-	Lines          []string        `json:"lines,omitempty" desc:"Replacement lines (no embedded newlines). Empty deletes the span. Or use body."`
-	Body           *string         `json:"body,omitempty" desc:"Replacement body as one string (split on newlines). Used if lines is empty."`
-	Old            *string         `json:"old,omitempty" desc:"Exact substring to find. Must be unique unless replace_all."`
-	New            *string         `json:"new,omitempty" desc:"Replacement text. Omitted treated as empty."`
-	ReplaceAll     bool            `json:"replace_all,omitempty" desc:"Replace every occurrence of old."`
-	BlockID        string          `json:"block_id,omitempty" desc:"Replace this structured block's body (or full span if include_heading)."`
-	IncludeHeading bool            `json:"include_heading,omitempty" desc:"When block_id is a heading, replace the heading line too."`
-	MediaType      string          `json:"media_type,omitempty" desc:"Create-as-Doc: application/vnd.google-apps.document. Ignored when the path exists. Foo.md is never a Doc."`
-	Blocks         *[]writeBlock   `json:"blocks,omitempty" desc:"Replace a tab body (SetBlocks) or create a Doc/Word file from IR. text uses **bold** _italic_ ~~strike~~ [label](url)."`
-	TabID          string          `json:"tab_id,omitempty" desc:"Required for blocks when the Doc has more than one tab."`
-	Format         *vfs.CellFormat `json:"format,omitempty" desc:"Optional cell format bag overlaid on the same block_id range (number, bold, italic, strike, fill, color, align, border). Value-only writes leave format; format-only writes leave values."`
+	Path           string           `json:"path" desc:"Absolute virtual path to write."`
+	Rev            string           `json:"rev,omitempty" desc:"Required when path exists: hash from the latest read. Omit only to create (full mode)."`
+	Content        *string          `json:"content,omitempty" desc:"Full new file body (UTF-8). Creates or replaces the whole file. Empty creates or truncates. Create-only lift for Docs."`
+	IRText         *string          `json:"ir_text,omitempty" desc:"Full IR body. Same as content; if both are set they must match."`
+	Start          *int             `json:"start,omitempty" desc:"1-based start line (inclusive). Lines mode."`
+	End            *int             `json:"end,omitempty" desc:"1-based end line (exclusive). Required in lines mode."`
+	Lines          []string         `json:"lines,omitempty" desc:"Replacement lines (no embedded newlines). Empty deletes the span. Or use body."`
+	Body           *string          `json:"body,omitempty" desc:"Replacement body as one string (split on newlines). Used if lines is empty."`
+	Old            *string          `json:"old,omitempty" desc:"Exact substring to find. Must be unique unless replace_all."`
+	New            *string          `json:"new,omitempty" desc:"Replacement text. Omitted treated as empty."`
+	ReplaceAll     bool             `json:"replace_all,omitempty" desc:"Replace every occurrence of old."`
+	BlockID        string           `json:"block_id,omitempty" desc:"Replace this structured block's body (or full span if include_heading)."`
+	IncludeHeading bool             `json:"include_heading,omitempty" desc:"When block_id is a heading, replace the heading line too."`
+	MediaType      string           `json:"media_type,omitempty" desc:"Create-as media type on an extensionless path. Ignored when the path exists or has an extension. Foo.md is never a Doc."`
+	Blocks         *[]writeBlock    `json:"blocks,omitempty" desc:"Replace a tab body (SetBlocks) or create a Doc/Word file from IR. text uses **bold** _italic_ ~~strike~~ [label](url)."`
+	TabID          string           `json:"tab_id,omitempty" desc:"Required for blocks when the Doc has more than one tab."`
+	Format         *vfs.FormatPatch `json:"format,omitempty" desc:"Optional cell format patch on the same block_id range (number, bold, italic, strike, underline, fill, color, align, valign, wrap, border). Omit a field to leave it; set bold=false to clear. Value-only writes leave format; format-only writes leave values."`
 }
 
 func (v vfsTools) newRead() *Tool {
@@ -102,7 +102,7 @@ Knowledge objects with no file: read_object. Live names/grep: run_command → ls
 				return v.readStructured(ctx, p, args, explicitWindow)
 			}
 
-			if projected && fi.MediaType == "application/vnd.google-apps.spreadsheet" {
+			if projected {
 				return "", vfs.ErrProjected
 			}
 
@@ -155,7 +155,7 @@ func (v vfsTools) readStructured(ctx context.Context, p string, args readArgs, e
 	}
 	var b strings.Builder
 	b.Grow(128 + len(p) + len(rev) + len(doc.MediaType()))
-	td, tabular := doc.(*vfs.TabularDocument)
+	td, tabular := vfs.AsGrid(doc)
 	if args.IR {
 		if tabular {
 			fmt.Fprintf(&b, "path=%s rev=%s media_type=%s encoding=%s line_count=%d sheet_count=%d\n",
@@ -168,7 +168,7 @@ func (v vfsTools) readStructured(ctx context.Context, p string, args readArgs, e
 		fmt.Fprintf(&b, "path=%s rev=%s media_type=%s line_count=%d\n",
 			p, rev, doc.MediaType(), doc.LineCount())
 	}
-	if rd, ok := doc.(*vfs.RichDocument); ok && args.Outline {
+	if rd, ok := vfs.AsRich(doc); ok && args.Outline {
 		if tabs := rd.Tabs(); len(tabs) > 0 {
 			b.WriteString("tabs:\n")
 			for _, tb := range tabs {
@@ -237,7 +237,7 @@ func (v vfsTools) readStructured(ctx context.Context, p string, args readArgs, e
 	return b.String(), nil
 }
 
-func (v vfsTools) readTabular(td *vfs.TabularDocument, args readArgs, b *strings.Builder) (string, error) {
+func (v vfsTools) readTabular(td vfs.Grid, args readArgs, b *strings.Builder) (string, error) {
 	if args.BlockID == "" {
 		return b.String(), nil
 	}
@@ -307,7 +307,7 @@ func formatToolCell(c vfs.Cell) string {
 	return s
 }
 
-func writeRangeFormats(b *strings.Builder, td *vfs.TabularDocument, sheet string, r1, c1, r2, c2 int) error {
+func writeRangeFormats(b *strings.Builder, td vfs.Grid, sheet string, r1, c1, r2, c2 int) error {
 	for r := r1; r <= r2; r++ {
 		for c := c1; c <= c2; c++ {
 			cell, err := td.Cell(sheet, vfs.FormatA1(r, c))

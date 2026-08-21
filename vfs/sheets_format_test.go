@@ -121,11 +121,30 @@ func TestGoogleSheets_httpGetBatchUpdate(t *testing.T) {
 	if !strings.Contains(batchBody, "userEnteredFormat") ||
 		!strings.Contains(batchBody, "italic") ||
 		!strings.Contains(batchBody, "strikethrough") ||
-		!strings.Contains(batchBody, "backgroundColor") ||
-		!strings.Contains(batchBody, "foregroundColor") ||
+		!strings.Contains(batchBody, "backgroundColorStyle") ||
+		!strings.Contains(batchBody, "foregroundColorStyle") ||
+		!strings.Contains(batchBody, "rgbColor") ||
 		!strings.Contains(batchBody, "horizontalAlignment") ||
 		!strings.Contains(batchBody, "numberFormat") ||
 		!strings.Contains(batchBody, "borders") {
 		t.Fatalf("BatchUpdate body = %s", batchBody)
+	}
+
+	off := false
+	cleared := CellFormat{}
+	cleared.ApplyPatch(FormatPatch{Bold: &off})
+	err = api.BatchUpdate(ctx, "sheet1", SheetsBatch{Requests: []SheetsRepeatCell{{
+		SheetID: 1, StartRow: 0, StartCol: 0, EndRow: 1, EndCol: 1,
+		Format: cleared,
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(batchBody, `"bold":false`) && !strings.Contains(batchBody, `"bold": false`) {
+		t.Fatalf("clear bold body = %s", batchBody)
+	}
+	if numberFormatType("h:mm") != "TIME" || numberFormatType("m/d/yyyy h:mm") != "DATE_TIME" ||
+		numberFormatType("0.00E+00") != "SCIENTIFIC" {
+		t.Fatalf("number types: %s %s %s", numberFormatType("h:mm"), numberFormatType("m/d/yyyy h:mm"), numberFormatType("0.00E+00"))
 	}
 }

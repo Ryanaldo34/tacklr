@@ -169,7 +169,7 @@ func TestXLSX_usedRangeFormulaFormatRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	td, ok := doc.(*vfs.TabularDocument)
+	td, ok := vfs.AsGrid(doc)
 	if !ok {
 		t.Fatalf("type %T", doc)
 	}

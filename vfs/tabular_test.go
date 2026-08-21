@@ -7,7 +7,16 @@ import (
 	"testing"
 )
 
-func twoSheetBudget() *TabularDocument {
+func mustGrid(t testing.TB, doc Document) *gridBody {
+	t.Helper()
+	g, ok := asGridBody(doc)
+	if !ok {
+		t.Fatalf("grid body: %T", doc)
+	}
+	return g
+}
+
+func twoSheetBudget() *IR {
 	d, err := NewTabularDocument("/contracts/Budget", mimeGoogleSpreadsheet, []Sheet{
 		{
 			ID: "1", Title: "Budget", Index: 0,
@@ -33,7 +42,7 @@ func twoSheetBudget() *TabularDocument {
 func TestTabularDocument_fingerprintIgnoresFormattedValue(t *testing.T) {
 	a := twoSheetBudget()
 	b := twoSheetBudget()
-	b.sheets[0].Cells[2][0].Value = "999"
+	mustGrid(t, b).sheets[0].Cells[2][0].Value = "999"
 	if a.ContentFingerprint() != b.ContentFingerprint() {
 		t.Fatal("formula formatted value must not change rev")
 	}
@@ -57,18 +66,18 @@ func TestTabularDocument_outlineProjectionAndA1(t *testing.T) {
 	if !strings.HasPrefix(blocks[0].Text, "rows=3 cols=3 | Date\tAmount\tNote") {
 		t.Fatalf("preview = %q", blocks[0].Text)
 	}
-	if _, ok := FindBlock(blocks, "Budget"); !ok {
-		t.Fatal("FindBlock title")
+	if _, ok := mustGrid(t, d).findSheet("Budget"); !ok {
+		t.Fatal("findSheet title")
 	}
-	if _, ok := FindBlock(blocks, "1"); !ok {
-		t.Fatal("FindBlock sheet_id")
+	if _, ok := mustGrid(t, d).findSheet("1"); !ok {
+		t.Fatal("findSheet sheet_id")
 	}
 	if _, ok := FindBlock(blocks, "budget"); !ok {
 		t.Fatal("FindBlock slug")
 	}
 
-	d.sheets[0].Cells[1][1].Format = CellFormat{Number: "$#,##0.00", Bold: true, Fill: "#ffcc00"}
-	d.reproject()
+	mustGrid(t, d).sheets[0].Cells[1][1].Format = CellFormat{Number: "$#,##0.00", Bold: true, Fill: "#ffcc00"}
+	mustGrid(t, d).reproject()
 	text := d.Text()
 	if !strings.Contains(text, "# Sheet: Budget") ||
 		!strings.Contains(text, "# Sheet: Notes") ||
@@ -119,7 +128,10 @@ func TestSheetsCodec_htmlZipDecode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	td := doc.(*TabularDocument)
+	td, ok := AsGrid(doc)
+	if !ok {
+		t.Fatalf("type %T", doc)
+	}
 	if len(td.Sheets()) != 2 || td.Sheets()[0].Title != "Budget" || td.Sheets()[1].Title != "Notes" {
 		t.Fatalf("sheets = %+v", td.Sheets())
 	}
@@ -137,11 +149,36 @@ func TestSheetsCodec_htmlZipDecode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	td = doc.(*TabularDocument)
+	td, ok = AsGrid(doc)
+	if !ok {
+		t.Fatalf("type %T", doc)
+	}
 	if len(td.Sheets()) != 1 || td.Sheets()[0].Cells[2][0].Input != "=A1+1" {
 		t.Fatalf("table HTML = %+v", td.Sheets())
 	}
 	if !td.Sheets()[0].Cells[1][1].Format.IsZero() {
 		t.Fatalf("RO HTML must be value-only: %+v", td.Sheets()[0].Cells[1][1])
+	}
+}
+
+func TestParseCellFormat_stringRoundTrip(t *testing.T) {
+	src := CellFormat{
+		Number: "$#,##0.00", Bold: true, Italic: true, Underline: true,
+		Fill: "#ffcc00", Color: "#003366", Align: "right", VAlign: "middle", Wrap: "wrap",
+		Border: &CellBorder{Style: "thin", Edges: "bottom"},
+	}
+	got, err := ParseCellFormat(src.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Number != src.Number || !got.Bold || !got.Italic || !got.Underline ||
+		got.Fill != src.Fill || got.Color != src.Color || got.Align != src.Align ||
+		got.VAlign != src.VAlign || got.Wrap != src.Wrap ||
+		got.Border == nil || got.Border.Style != "thin" || got.Border.Edges != "bottom" {
+		t.Fatalf("parse = %+v border=%+v from %q", got, got.Border, src.String())
+	}
+	cleared, err := ParseCellFormat("bold=false")
+	if err != nil || cleared.Bold || !cleared.has(fmtBold) {
+		t.Fatalf("bold=false = %+v err=%v", cleared, err)
 	}
 }

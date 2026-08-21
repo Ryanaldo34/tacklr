@@ -34,11 +34,8 @@ func hashSHA256(b []byte) string {
 // readStructured, loadMatching, and stage. RichDocument uses the IR fingerprint
 // so HTML reproject does not change the token.
 func ContentToken(t Textual) string {
-	if rd, ok := t.(*RichDocument); ok {
-		return rd.ContentFingerprint()
-	}
-	if td, ok := t.(*TabularDocument); ok {
-		return td.ContentFingerprint()
+	if d, ok := t.(*IR); ok {
+		return d.ContentFingerprint()
 	}
 	return ContentHash(t.Text())
 }

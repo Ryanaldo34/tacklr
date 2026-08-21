@@ -26,20 +26,31 @@ func newFIFO[T any](n int) *fifo[T] {
 }
 
 func (c *fifo[T]) get(key string) (T, bool) {
-	var zero T
-	if c == nil {
-		return zero, false
-	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	v, ok := c.items[key]
 	return v, ok
 }
 
-func (c *fifo[T]) put(key string, val T) {
-	if c == nil {
-		return
+func (p *driveProvider) persistNative(ctx context.Context, name string, doc Document) (bool, error) {
+	d, ok := asIR(doc)
+	if !ok {
+		return false, nil
 	}
+	switch normalizeMediaType(d.MediaType()) {
+	case mimeGoogleDocument:
+		if _, ok := asRichBody(d); ok {
+			return true, p.writeGoogleDoc(ctx, name, d)
+		}
+	case mimeGoogleSpreadsheet:
+		if _, ok := asGridBody(d); ok {
+			return true, p.writeGoogleSheet(ctx, name, d)
+		}
+	}
+	return false, nil
+}
+
+func (c *fifo[T]) put(key string, val T) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if _, ok := c.items[key]; ok {
@@ -56,9 +67,6 @@ func (c *fifo[T]) put(key string, val T) {
 }
 
 func (c *fifo[T]) dropFile(fileID string) {
-	if c == nil {
-		return
-	}
 	prefix := fileID + "\x00"
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -421,11 +429,8 @@ func (p *driveProvider) WriteDocument(ctx context.Context, name string, doc Docu
 	if !p.writable {
 		return ErrReadOnly
 	}
-	if rd, ok := doc.(*RichDocument); ok && normalizeMediaType(rd.MediaType()) == mimeGoogleDocument {
-		return p.writeGoogleDoc(ctx, name, rd)
-	}
-	if td, ok := doc.(*TabularDocument); ok && isSpreadsheet(td.MediaType()) {
-		return p.writeGoogleSheet(ctx, name, td)
+	if handled, err := p.persistNative(ctx, name, doc); handled {
+		return err
 	}
 	meta, err := p.resolve(ctx, name)
 	if err == nil && isGoogleNativeFile(meta.MimeType) {
@@ -467,7 +472,7 @@ func zipSizeHint(n uint64, limit int) int64 {
 	return int64(n) //nolint:gosec // G115: n is capped at limit (≤ MaxReadFileBytes)
 }
 
-func (p *driveProvider) writeGoogleSheet(ctx context.Context, name string, td *TabularDocument) error {
+func (p *driveProvider) writeGoogleSheet(ctx context.Context, name string, td *IR) error {
 	if p.sheets == nil {
 		return ErrNotSupported
 	}
@@ -481,10 +486,11 @@ func (p *driveProvider) writeGoogleSheet(ctx context.Context, name string, td *T
 	if meta.MimeType != mimeGoogleSpreadsheet {
 		return ErrNotSupported
 	}
-	if td.hint.revisionID == "" {
-		return ErrConflict
+	g, ok := asGridBody(td)
+	if !ok {
+		return ErrNotSupported
 	}
-	batch, err := tabularOverlayBatch(td)
+	batch, err := tabularOverlayBatch(g)
 	if err != nil {
 		return err
 	}
@@ -493,7 +499,7 @@ func (p *driveProvider) writeGoogleSheet(ctx context.Context, name string, td *T
 			return err
 		}
 	}
-	if formats := tabularFormatBatch(td); len(formats.Requests) > 0 {
+	if formats := tabularFormatBatch(g); len(formats.Requests) > 0 {
 		if err := p.sheetsBatchUpdate(ctx, meta.ID, formats); err != nil {
 			return err
 		}
@@ -502,7 +508,7 @@ func (p *driveProvider) writeGoogleSheet(ctx context.Context, name string, td *T
 	return p.refreshSheetHint(ctx, meta.ID, td)
 }
 
-func (p *driveProvider) createGoogleSheet(ctx context.Context, name string, td *TabularDocument) error {
+func (p *driveProvider) createGoogleSheet(ctx context.Context, name string, td *IR) error {
 	parentID, leaf, _, err := p.parentAndLeaf(ctx, name)
 	if err != nil {
 		return err
@@ -529,11 +535,15 @@ func (p *driveProvider) createGoogleSheet(ctx context.Context, name string, td *
 		if err != nil {
 			return err
 		}
-		if len(td.sheets) == 0 || td.sheets[0].Rows == 0 {
+		overlayBody, ok := asGridBody(td)
+		if !ok {
+			return ErrNotSupported
+		}
+		if len(overlayBody.sheets) == 0 || overlayBody.sheets[0].Rows == 0 {
 			last = nil
 			break
 		}
-		overlay := *td
+		overlay := *overlayBody
 		if len(snap.Sheets) > 0 {
 			sh := overlay.sheets[0]
 			sh.Title = snap.Sheets[0].Title
@@ -568,26 +578,25 @@ func (p *driveProvider) createGoogleSheet(ctx context.Context, name string, td *
 	return p.refreshSheetHint(ctx, created.ID, td)
 }
 
-func (p *driveProvider) refreshSheetHint(ctx context.Context, id string, td *TabularDocument) error {
+func (p *driveProvider) refreshSheetHint(ctx context.Context, id string, td *IR) error {
 	meta, merr := p.getMeta(ctx, id)
 	snap, err := p.sheetsGet(ctx, id)
-	if err == nil {
-		fresh, ferr := adoptTabularDocument(td.path, mimeGoogleSpreadsheet, snap.Sheets, snap.Named)
-		if ferr == nil {
-			td.sheets = fresh.sheets
-			td.named = fresh.named
-			td.text = fresh.text
-			td.starts = fresh.starts
-			td.hint.fileID = id
-			if merr == nil {
-				td.hint.revisionID = driveRevision(meta)
-			}
-		}
+	if err != nil {
+		return err
+	}
+	fresh, ferr := adoptTabularDocument(td.path, mimeGoogleSpreadsheet, snap.Sheets, snap.Named)
+	if ferr != nil {
+		return ferr
+	}
+	td.body = fresh.body
+	td.hint.fileID = id
+	if merr == nil {
+		td.hint.revisionID = driveRevision(meta)
 	}
 	return nil
 }
 
-func (p *driveProvider) writeGoogleDoc(ctx context.Context, name string, rd *RichDocument) error {
+func (p *driveProvider) writeGoogleDoc(ctx context.Context, name string, rd *IR) error {
 	if p.docs == nil {
 		return ErrNotSupported
 	}
@@ -604,15 +613,19 @@ func (p *driveProvider) writeGoogleDoc(ctx context.Context, name string, rd *Ric
 	if meta.MimeType != mimeGoogleDocument {
 		return ErrNotSupported
 	}
+	rb, ok := asRichBody(rd)
+	if !ok {
+		return ErrNotSupported
+	}
 	if rd.hint.revisionID == "" {
 		return ErrConflict
 	}
-	if rd.mut == richSet {
-		if err := p.setBlocksDoc(ctx, meta.ID, rd); err != nil {
+	if rb.mut == richSet {
+		if err := p.setBlocksDoc(ctx, meta.ID, rd, rb); err != nil {
 			return err
 		}
 	} else {
-		if err := p.replaceBlocksDoc(ctx, meta.ID, rd); err != nil {
+		if err := p.replaceBlocksDoc(ctx, meta.ID, rd, rb); err != nil {
 			return err
 		}
 	}
@@ -620,8 +633,8 @@ func (p *driveProvider) writeGoogleDoc(ctx context.Context, name string, rd *Ric
 	return p.refreshHint(ctx, meta.ID, rd)
 }
 
-func (p *driveProvider) replaceBlocksDoc(ctx context.Context, id string, rd *RichDocument) error {
-	reqs, err := mapReplaceBlocks(rd.hint, rd.blocks)
+func (p *driveProvider) replaceBlocksDoc(ctx context.Context, id string, rd *IR, rb *richBody) error {
+	reqs, err := mapReplaceBlocks(rd.hint, rb.tree)
 	if err != nil {
 		return err
 	}
@@ -632,24 +645,24 @@ func (p *driveProvider) replaceBlocksDoc(ctx context.Context, id string, rd *Ric
 	return err
 }
 
-func (p *driveProvider) setBlocksDoc(ctx context.Context, id string, rd *RichDocument) error {
-	if len(rd.blocks) == 0 {
+func (p *driveProvider) setBlocksDoc(ctx context.Context, id string, rd *IR, rb *richBody) error {
+	if len(rb.tree) == 0 {
 		return fmt.Errorf("write: refusing empty IR replace")
 	}
 	tabID := ""
-	tabs := uniqueTabIDs(rd.blocks, rd.tabs)
-	if len(rd.tabs) > 1 || len(tabs) > 1 {
-		tabID = blockAttr(rd.blocks[0], "tab_id")
+	tabs := uniqueTabIDs(rb.tree, rb.tabs)
+	if len(rb.tabs) > 1 || len(tabs) > 1 {
+		tabID = blockAttr(rb.tree[0], "tab_id")
 		if tabID == "" {
 			return fmt.Errorf("write: tab_id required")
 		}
-	} else if len(rd.tabs) == 1 {
-		tabID = rd.tabs[0].ID
+	} else if len(rb.tabs) == 1 {
+		tabID = rb.tabs[0].ID
 	} else if len(tabs) == 1 {
 		tabID = tabs[0]
 	}
-	tabBlocks := make([]Block, 0, len(rd.blocks))
-	for _, b := range rd.blocks {
+	tabBlocks := make([]Block, 0, len(rb.tree))
+	for _, b := range rb.tree {
 		if tabID == "" || blockAttr(b, "tab_id") == tabID {
 			tabBlocks = append(tabBlocks, b)
 		}
@@ -672,7 +685,7 @@ func (p *driveProvider) setBlocksDoc(ctx context.Context, id string, rd *RichDoc
 	return p.insertBlocks(ctx, id, tabID, cas, tabBlocks)
 }
 
-func (p *driveProvider) createGoogleDoc(ctx context.Context, name string, rd *RichDocument) error {
+func (p *driveProvider) createGoogleDoc(ctx context.Context, name string, rd *IR) error {
 	parentID, leaf, _, err := p.parentAndLeaf(ctx, name)
 	if err != nil {
 		return err
@@ -703,7 +716,11 @@ func (p *driveProvider) createGoogleDoc(ctx context.Context, name string, rd *Ri
 		if len(snap.Tabs) > 0 {
 			tabID = snap.Tabs[0].ID
 		}
-		last = p.insertBlocks(ctx, created.ID, tabID, snap.RevisionID, rd.blocks)
+		rb, ok := asRichBody(rd)
+		if !ok {
+			return ErrNotSupported
+		}
+		last = p.insertBlocks(ctx, created.ID, tabID, snap.RevisionID, rb.tree)
 		if last == nil {
 			break
 		}
@@ -788,19 +805,14 @@ func (p *driveProvider) insertBlocks(ctx context.Context, id, tabID, cas string,
 	return nil
 }
 
-func (p *driveProvider) refreshHint(ctx context.Context, id string, rd *RichDocument) error {
+func (p *driveProvider) refreshHint(ctx context.Context, id string, rd *IR) error {
 	snap, err := p.docsGet(ctx, id)
-	if err == nil {
-		fresh := snapshotToRich(rd.path, snap)
-		rd.hint = fresh.hint
-		rd.tabs = fresh.tabs
-		rd.blocks = fresh.blocks
-		rd.reproject()
-		rd.mut = richClean
-		return nil
+	if err != nil {
+		return err
 	}
-	rd.hint.locations = nil
-	rd.hint.structural = nil
+	fresh := snapshotToRich(rd.path, snap)
+	rd.body = fresh.body
+	rd.hint = fresh.hint
 	return nil
 }
 

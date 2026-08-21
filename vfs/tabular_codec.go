@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/csv"
+	"fmt"
 	"path"
 	"strconv"
 	"strings"
@@ -13,31 +14,108 @@ import (
 	"golang.org/x/net/html"
 )
 
-// SheetsCodec decodes Google Sheets HTML ZIP export (Drive RO) into
-// *TabularDocument. It does not decode the TSV kernel projection.
-type SheetsCodec struct{}
-
-// MediaTypes implements Codec.
-func (SheetsCodec) MediaTypes() []string {
-	return []string{mimeGoogleSpreadsheet}
+// SheetNormalizer converts a workbook format to and from []Sheet.
+type SheetNormalizer interface {
+	DecodeSheets(ctx context.Context, path, mediaType string, data []byte) ([]Sheet, []NamedRange, error)
+	EncodeSheets(ctx context.Context, sheets []Sheet, named []NamedRange) ([]byte, error)
 }
 
-// Decode requires valid UTF-8 and rejects payloads larger than MaxReadFileBytes.
-func (SheetsCodec) Decode(ctx context.Context, virtualPath, mediaType string, data []byte) (Document, error) {
+// TabularCodec adapts a SheetNormalizer to the VFS codec registry.
+// Decode yields a grid checkout. Encode writes native bytes (xlsx, …).
+type TabularCodec struct {
+	Types      []string
+	Normalizer SheetNormalizer
+}
+
+func (c TabularCodec) MediaTypes() []string { return c.Types }
+
+func (c TabularCodec) Decode(ctx context.Context, virtualPath, mediaType string, data []byte) (Document, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if c.Normalizer == nil {
+		return nil, fmt.Errorf("vfs: sheet normalizer required")
 	}
 	if len(data) > MaxReadFileBytes {
 		return nil, errFileExceeds(MaxReadFileBytes)
 	}
-	if mediaType == "" {
-		mediaType = mimeGoogleSpreadsheet
+	if mediaType == "" && len(c.Types) > 0 {
+		mediaType = c.Types[0]
 	}
-	sheets, err := decodeSheetsHTML(data)
+	sheets, named, err := c.Normalizer.DecodeSheets(ctx, virtualPath, mediaType, data)
 	if err != nil {
 		return nil, err
 	}
+	return adoptTabularDocument(virtualPath, mediaType, sheets, named)
+}
+
+func (c TabularCodec) Encode(ctx context.Context, doc Document) ([]byte, error) {
+	if c.Normalizer == nil {
+		return nil, fmt.Errorf("vfs: sheet normalizer required")
+	}
+	g, ok := AsGrid(doc)
+	if !ok {
+		return nil, ErrNotTextual
+	}
+	return c.Normalizer.EncodeSheets(ctx, g.Sheets(), g.NamedRanges())
+}
+
+func (c TabularCodec) Create(virtualPath, mediaType string, mut Mutation) (Document, error) {
+	if mediaType == "" && len(c.Types) > 0 {
+		mediaType = c.Types[0]
+	}
+	title := strings.TrimSuffix(path.Base(virtualPath), path.Ext(virtualPath))
+	if title == "" || title == "." {
+		title = "Sheet1"
+	}
+	var sheets []Sheet
+	if mut.Blocks != nil {
+		sheets = sheetsFromBlocks(mut.Blocks, title)
+	} else {
+		body := ""
+		if mut.Content != nil {
+			body = *mut.Content
+		}
+		if looksLikeHTML(body) {
+			return nil, fmt.Errorf("vfs: HTML content is not accepted; use blocks")
+		}
+		sheets = liftTabular(title, body)
+	}
 	return adoptTabularDocument(virtualPath, mediaType, sheets, nil)
+}
+
+// SheetsHTML decodes Google Sheets HTML ZIP export (Drive RO).
+type SheetsHTML struct{}
+
+func (SheetsHTML) DecodeSheets(_ context.Context, _, _ string, data []byte) ([]Sheet, []NamedRange, error) {
+	sheets, err := decodeSheetsHTML(data)
+	if err != nil {
+		return nil, nil, err
+	}
+	return sheets, nil, nil
+}
+
+func (SheetsHTML) EncodeSheets(context.Context, []Sheet, []NamedRange) ([]byte, error) {
+	return nil, ErrNotSupported
+}
+
+func sheetsTabularCodec() TabularCodec {
+	return TabularCodec{Types: []string{mimeGoogleSpreadsheet}, Normalizer: SheetsHTML{}}
+}
+
+// SheetsCodec is the default-registry codec for Google Sheets HTML export.
+type SheetsCodec struct{}
+
+func (SheetsCodec) MediaTypes() []string {
+	return []string{mimeGoogleSpreadsheet}
+}
+
+func (SheetsCodec) Decode(ctx context.Context, virtualPath, mediaType string, data []byte) (Document, error) {
+	return sheetsTabularCodec().Decode(ctx, virtualPath, mediaType, data)
+}
+
+func (SheetsCodec) Create(path, mediaType string, mut Mutation) (Document, error) {
+	return sheetsTabularCodec().Create(path, mediaType, mut)
 }
 
 func decodeSheetsHTML(data []byte) ([]Sheet, error) {

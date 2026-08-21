@@ -24,6 +24,29 @@ type Encoder interface {
 	Encode(ctx context.Context, doc Document) ([]byte, error)
 }
 
+// Creator builds a new document from a create-mode Mutation.
+// Codecs that own a representation (blocks, grid) implement this.
+// MountSession looks up the codec by media type; it does not switch on vendors.
+type Creator interface {
+	Create(path, mediaType string, mut Mutation) (Document, error)
+}
+
+func createDocument(path, mediaType string, mut Mutation) (Document, error) {
+	if c, ok := defaultContentRegistry.codec(mediaType); ok {
+		if cr, ok := c.(Creator); ok {
+			return cr.Create(path, mediaType, mut)
+		}
+	}
+	if mut.Blocks != nil {
+		return nil, fmt.Errorf("vfs: blocks require a structured codec")
+	}
+	body := ""
+	if mut.Content != nil {
+		body = *mut.Content
+	}
+	return NewTextDocument(path, mediaType, "utf-8", body), nil
+}
+
 // IdentityCodec is a Codec whose persist form is the UTF-8 payload itself
 // (no container). TextCodec implements it. Office/cloud codecs (Word, Notion,
 // Google Docs) must not — FUSE then returns EROFS and the write tool uses

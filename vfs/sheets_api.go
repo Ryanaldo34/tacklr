@@ -64,17 +64,7 @@ func newGoogleSheets(ctx context.Context, holder *TokenHolder) (*googleSheets, e
 	return &googleSheets{service: svc}, nil
 }
 
-func (g googleSheets) require() error {
-	if g.service == nil {
-		return fmt.Errorf("vfs: sheets service required")
-	}
-	return nil
-}
-
 func (g googleSheets) Get(ctx context.Context, spreadsheetID string) (SheetsSnapshot, error) {
-	if err := g.require(); err != nil {
-		return SheetsSnapshot{}, err
-	}
 	meta, err := g.service.Spreadsheets.Get(spreadsheetID).
 		IncludeGridData(true).
 		Fields("spreadsheetId,sheets.properties,sheets.merges,sheets.data,namedRanges").
@@ -134,9 +124,6 @@ func (g googleSheets) Get(ctx context.Context, spreadsheetID string) (SheetsSnap
 }
 
 func (g googleSheets) BatchUpdateValues(ctx context.Context, spreadsheetID string, req SheetsValuesBatch) error {
-	if err := g.require(); err != nil {
-		return err
-	}
 	data := make([]*sheets.ValueRange, 0, len(req.Data))
 	for _, r := range req.Data {
 		vals := make([][]any, len(r.Values))
@@ -156,9 +143,6 @@ func (g googleSheets) BatchUpdateValues(ctx context.Context, spreadsheetID strin
 }
 
 func (g googleSheets) BatchUpdate(ctx context.Context, spreadsheetID string, req SheetsBatch) error {
-	if err := g.require(); err != nil {
-		return err
-	}
 	if len(req.Requests) == 0 {
 		return nil
 	}
@@ -292,19 +276,56 @@ func cellFormatFromSheets(f *sheets.CellFormat) CellFormat {
 	out := CellFormat{}
 	if f.NumberFormat != nil {
 		out.Number = f.NumberFormat.Pattern
+		out.mark(fmtNumber)
 	}
 	if tf := f.TextFormat; tf != nil {
 		out.Bold = tf.Bold
 		out.Italic = tf.Italic
 		out.Strike = tf.Strikethrough
-		out.Color = colorHex(tf.ForegroundColor, tf.ForegroundColorStyle)
+		out.Underline = tf.Underline
+		out.mark(fmtBold)
+		out.mark(fmtItalic)
+		out.mark(fmtStrike)
+		out.mark(fmtUnderline)
+		if c := colorHex(tf.ForegroundColor, tf.ForegroundColorStyle); c != "" {
+			out.Color = c
+			out.mark(fmtColor)
+		}
 	}
-	out.Fill = colorHex(f.BackgroundColor, f.BackgroundColorStyle)
-	out.Align = normalizeAlign(f.HorizontalAlignment)
+	if c := colorHex(f.BackgroundColor, f.BackgroundColorStyle); c != "" {
+		out.Fill = c
+		out.mark(fmtFill)
+	}
+	if a := normalizeAlign(f.HorizontalAlignment); a != "" {
+		out.Align = a
+		out.mark(fmtAlign)
+	}
+	if a := normalizeVAlign(f.VerticalAlignment); a != "" {
+		out.VAlign = a
+		out.mark(fmtVAlign)
+	}
+	if w := sheetsWrap(f.WrapStrategy); w != "" {
+		out.Wrap = w
+		out.mark(fmtWrap)
+	}
 	if b := borderFromSheets(f.Borders); b != nil {
 		out.Border = b
+		out.mark(fmtBorder)
 	}
 	return out
+}
+
+func sheetsWrap(s string) string {
+	switch strings.ToUpper(s) {
+	case "WRAP":
+		return "wrap"
+	case "OVERFLOW_CELL":
+		return "overflow"
+	case "CLIP":
+		return "clip"
+	default:
+		return ""
+	}
 }
 
 func borderFromSheets(b *sheets.Borders) *CellBorder {
@@ -395,19 +416,7 @@ func colorHex(c *sheets.Color, style *sheets.ColorStyle) string {
 	if c == nil {
 		return ""
 	}
-	r, g, b := round255(c.Red), round255(c.Green), round255(c.Blue)
-	var buf [7]byte
-	buf[0] = '#'
-	hexPut(buf[1:3], r)
-	hexPut(buf[3:5], g)
-	hexPut(buf[5:7], b)
-	return string(buf[:])
-}
-
-func hexPut(dst []byte, n int) {
-	const digits = "0123456789abcdef"
-	dst[0] = digits[n>>4]
-	dst[1] = digits[n&15]
+	return FormatRGB(uint8(round255(c.Red)), uint8(round255(c.Green)), uint8(round255(c.Blue)))
 }
 
 func round255(v float64) int {
@@ -422,23 +431,22 @@ func round255(v float64) int {
 }
 
 func hexColor(s string) *sheets.Color {
-	s = strings.TrimSpace(s)
-	s = strings.TrimPrefix(s, "#")
-	if len(s) == 8 {
-		s = s[2:]
-	}
-	if len(s) != 6 {
-		return nil
-	}
-	n, err := strconv.ParseUint(s, 16, 32)
-	if err != nil {
+	r, g, b, ok := ParseRGB(s)
+	if !ok {
 		return nil
 	}
 	return &sheets.Color{
-		Red:   float64(n>>16) / 255,
-		Green: float64((n>>8)&0xff) / 255,
-		Blue:  float64(n&0xff) / 255,
+		Red:   float64(r) / 255,
+		Green: float64(g) / 255,
+		Blue:  float64(b) / 255,
 	}
+}
+
+func rgbStyle(c *sheets.Color) *sheets.ColorStyle {
+	if c == nil {
+		return nil
+	}
+	return &sheets.ColorStyle{RgbColor: c}
 }
 
 func repeatCellPayload(f CellFormat) (*sheets.CellData, string) {
@@ -447,40 +455,72 @@ func repeatCellPayload(f CellFormat) (*sheets.CellData, string) {
 	}
 	sf := &sheets.CellFormat{}
 	var fields []string
-	if f.Number != "" {
+	if f.has(fmtNumber) || f.Number != "" {
 		sf.NumberFormat = &sheets.NumberFormat{Type: numberFormatType(f.Number), Pattern: f.Number}
 		fields = append(fields, "userEnteredFormat.numberFormat")
 	}
-	if f.Bold || f.Italic || f.Strike || f.Color != "" {
-		tf := &sheets.TextFormat{Bold: f.Bold, Italic: f.Italic, Strikethrough: f.Strike}
+	if f.has(fmtBold) || f.has(fmtItalic) || f.has(fmtStrike) || f.has(fmtUnderline) ||
+		f.Bold || f.Italic || f.Strike || f.Underline || f.has(fmtColor) || f.Color != "" {
+		tf := &sheets.TextFormat{
+			Bold: f.Bold, Italic: f.Italic, Strikethrough: f.Strike, Underline: f.Underline,
+		}
 		if c := hexColor(f.Color); c != nil {
-			tf.ForegroundColor = c
+			tf.ForegroundColorStyle = rgbStyle(c)
 		}
 		sf.TextFormat = tf
-		if f.Bold {
+		if f.has(fmtBold) || f.Bold {
 			fields = append(fields, "userEnteredFormat.textFormat.bold")
 		}
-		if f.Italic {
+		if f.has(fmtItalic) || f.Italic {
 			fields = append(fields, "userEnteredFormat.textFormat.italic")
 		}
-		if f.Strike {
+		if f.has(fmtStrike) || f.Strike {
 			fields = append(fields, "userEnteredFormat.textFormat.strikethrough")
 		}
-		if f.Color != "" {
-			fields = append(fields, "userEnteredFormat.textFormat.foregroundColor")
+		if f.has(fmtUnderline) || f.Underline {
+			fields = append(fields, "userEnteredFormat.textFormat.underline")
+		}
+		if f.has(fmtColor) || f.Color != "" {
+			fields = append(fields, "userEnteredFormat.textFormat.foregroundColorStyle")
 		}
 	}
-	if f.Fill != "" {
+	if f.has(fmtFill) || f.Fill != "" {
 		if c := hexColor(f.Fill); c != nil {
-			sf.BackgroundColor = c
-			fields = append(fields, "userEnteredFormat.backgroundColor")
+			sf.BackgroundColorStyle = rgbStyle(c)
+			fields = append(fields, "userEnteredFormat.backgroundColorStyle")
+		} else if f.has(fmtFill) {
+			sf.BackgroundColorStyle = &sheets.ColorStyle{}
+			fields = append(fields, "userEnteredFormat.backgroundColorStyle")
 		}
 	}
-	if a := normalizeAlign(f.Align); a != "" {
-		sf.HorizontalAlignment = strings.ToUpper(a)
+	if f.has(fmtAlign) || f.Align != "" {
+		if a := normalizeAlign(f.Align); a != "" {
+			sf.HorizontalAlignment = strings.ToUpper(a)
+		} else {
+			sf.HorizontalAlignment = "LEFT"
+		}
 		fields = append(fields, "userEnteredFormat.horizontalAlignment")
 	}
-	if f.Border != nil && !f.Border.zero() {
+	if f.has(fmtVAlign) || f.VAlign != "" {
+		if a := normalizeVAlign(f.VAlign); a != "" {
+			sf.VerticalAlignment = strings.ToUpper(a)
+		} else {
+			sf.VerticalAlignment = "BOTTOM"
+		}
+		fields = append(fields, "userEnteredFormat.verticalAlignment")
+	}
+	if f.has(fmtWrap) || f.Wrap != "" {
+		switch f.Wrap {
+		case "wrap":
+			sf.WrapStrategy = "WRAP"
+		case "clip":
+			sf.WrapStrategy = "CLIP"
+		default:
+			sf.WrapStrategy = "OVERFLOW_CELL"
+		}
+		fields = append(fields, "userEnteredFormat.wrapStrategy")
+	}
+	if f.has(fmtBorder) || (f.Border != nil && !f.Border.zero()) {
 		sf.Borders = irBorders(f.Border)
 		fields = append(fields, "userEnteredFormat.borders")
 	}
@@ -494,7 +534,7 @@ func irBorders(b *CellBorder) *sheets.Borders {
 	style := irBorderStyle(b.Style)
 	col := hexColor(b.Color)
 	edge := func() *sheets.Border {
-		return &sheets.Border{Style: style, Color: col}
+		return &sheets.Border{Style: style, ColorStyle: rgbStyle(col)}
 	}
 	out := &sheets.Borders{}
 	if borderEdge(b.Edges, "top") {
@@ -519,15 +559,61 @@ func borderEdge(edges, name string) bool {
 func numberFormatType(pattern string) string {
 	p := strings.ToLower(pattern)
 	switch {
-	case strings.Contains(p, "$") || strings.Contains(p, "€") || strings.Contains(p, "¥"):
+	case strings.ContainsAny(p, "$€¥"):
 		return "CURRENCY"
 	case strings.Contains(p, "%"):
 		return "PERCENT"
-	case strings.ContainsAny(p, "ymd"):
+	case strings.Contains(p, "e+") || strings.Contains(p, "e-"):
+		return "SCIENTIFIC"
+	}
+	date, time := dateTimeTokens(p)
+	switch {
+	case date && time:
+		return "DATE_TIME"
+	case time:
+		return "TIME"
+	case date:
 		return "DATE"
 	default:
 		return "NUMBER"
 	}
+}
+
+func dateTimeTokens(p string) (date, time bool) {
+	if strings.Contains(p, "am/pm") || strings.Contains(p, "a/p") {
+		time = true
+	}
+	for i := 0; i < len(p); i++ {
+		switch p[i] {
+		case 'h', 's':
+			time = true
+		case 'y', 'd':
+			date = true
+		case 'm':
+			if minuteContext(p, i) {
+				time = true
+			} else {
+				date = true
+			}
+		}
+	}
+	return date, time
+}
+
+func minuteContext(p string, i int) bool {
+	for j := i - 1; j >= 0; j-- {
+		if p[j] == ':' || p[j] == ' ' {
+			continue
+		}
+		return p[j] == 'h' || p[j] == 's'
+	}
+	for j := i + 1; j < len(p); j++ {
+		if p[j] == ':' || p[j] == ' ' {
+			continue
+		}
+		return p[j] == 'h' || p[j] == 's'
+	}
+	return false
 }
 
 func cellString(v any) string {
@@ -568,7 +654,7 @@ func gridRangeA1(r *sheets.GridRange) string {
 	return FormatA1(r1, c1) + ":" + FormatA1(r2, c2)
 }
 
-func snapshotToTabular(path string, snap SheetsSnapshot) (*TabularDocument, error) {
+func snapshotToTabular(path string, snap SheetsSnapshot) (*IR, error) {
 	td, err := NewTabularDocument(path, mimeGoogleSpreadsheet, snap.Sheets, snap.Named)
 	if err != nil {
 		return nil, err
@@ -577,7 +663,7 @@ func snapshotToTabular(path string, snap SheetsSnapshot) (*TabularDocument, erro
 	return td, nil
 }
 
-func tabularOverlayBatch(td *TabularDocument) (SheetsValuesBatch, error) {
+func tabularOverlayBatch(td *gridBody) (SheetsValuesBatch, error) {
 	var data []SheetsValueRange
 	for _, sh := range td.sheets {
 		rows := sh.Rows
@@ -591,20 +677,14 @@ func tabularOverlayBatch(td *TabularDocument) (SheetsValuesBatch, error) {
 		if rows == 0 || cols == 0 {
 			continue
 		}
-		if len(sh.merges) > 0 {
-			for r := 0; r < rows; r++ {
-				for c := 0; c < cols; c++ {
-					if sh.mergeHit(r, c) {
-						return SheetsValuesBatch{}, fmt.Errorf("%w: write into a merge", ErrNotSupported)
-					}
-				}
-			}
-		}
 		grid := make([][]string, rows)
 		for r := 0; r < rows; r++ {
 			grid[r] = make([]string, cols)
 			if r < len(sh.Cells) {
 				for c := 0; c < cols && c < len(sh.Cells[r]); c++ {
+					if sh.mergeSlave(r, c) {
+						continue
+					}
 					grid[r][c] = sh.Cells[r][c].Input
 				}
 			}
@@ -621,32 +701,26 @@ func tabularOverlayBatch(td *TabularDocument) (SheetsValuesBatch, error) {
 	return SheetsValuesBatch{Data: data}, nil
 }
 
-func tabularFormatBatch(td *TabularDocument) SheetsBatch {
+func tabularFormatBatch(td *gridBody) SheetsBatch {
 	var reqs []SheetsRepeatCell
 	for _, sh := range td.sheets {
 		id, err := strconv.ParseInt(sh.ID, 10, 64)
 		if err != nil {
 			id = 0
 		}
-		for r := 0; r < sh.Rows; r++ {
-			c := 0
-			for c < sh.Cols {
-				cell := sh.Cells[r][c]
-				if cell.Format.IsZero() {
-					c++
-					continue
-				}
-				end := c + 1
-				for end < sh.Cols && sh.Cells[r][end].Format.equal(cell.Format) {
-					end++
-				}
-				reqs = append(reqs, SheetsRepeatCell{
-					SheetID:  id,
-					StartRow: r, StartCol: c, EndRow: r + 1, EndCol: end,
-					Format: cell.Format,
-				})
-				c = end
-			}
+		rows, cols := sh.Rows, sh.Cols
+		if sh.persistRows > rows {
+			rows = sh.persistRows
+		}
+		if sh.persistCols > cols {
+			cols = sh.persistCols
+		}
+		for _, rec := range formatRects(sh, rows, cols) {
+			reqs = append(reqs, SheetsRepeatCell{
+				SheetID:  id,
+				StartRow: rec.r1, StartCol: rec.c1, EndRow: rec.r2, EndCol: rec.c2,
+				Format: rec.format,
+			})
 		}
 	}
 	return SheetsBatch{Requests: reqs}

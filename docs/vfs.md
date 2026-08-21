@@ -21,8 +21,8 @@ Knowledge objects, search, and the graph are documented in **[docs/knowledge.md]
   WriteFile    WriteDocument
      │           │
      │           ▼
-     │      TextDocument / RichDocument / TabularDocument
-     │        lines + text / blocks + HTML / sheets + TSV values
+     │      Document (*IR) + body strategy
+     │        text / blocks / grid — representation, not backend or file type
      │           │
      └───────────┘
            │
@@ -157,31 +157,19 @@ virtual path → Provider (bytes) → Codec → Document IR
 | `Textual` | + `Encoding()`, `Text()`, `LineCount()`, `Line(n)`, `Lines(start, end)`, `SetText(s) error` |
 | `Structured` | + `Blocks()` — projected outline; empty when the media type has no projector |
 
-**Concrete text (what ships today)** — `*TextDocument` implements `Document`, `Textual`, and `Structured`:
+**One checkout** — `*IR` implements `Document`, `Textual`, and `Structured`. The body strategy is what the checkout can be represented as (text, blocks, or grid), plus whether `Text()` is a read-only projection (`SetText` returns `ErrProjected`). MountSession and tools do not know backends or file types. Codecs pick the body; backends persist.
 
-| Field / method | Meaning |
-|----------------|---------|
-| `path` | Virtual path only (`/work/main.go`) |
-| `mediaType` | e.g. `text/x-go`, `text/plain`, `text/markdown`, `application/json` |
-| `encoding` | `utf-8` |
-| `text` | Full body string |
-| line index | Line-start offsets into `text` (not a second stored body) |
-| `Blocks()` | Structure projected by media type (Markdown headings today; nil/empty otherwise) |
+| Representation | How to ask | Source of truth |
+|----------------|------------|-----------------|
+| Text | `Textual` | UTF-8 body |
+| Blocks | `AsRich` | block tree; HTML is a projection |
+| Grid | `AsGrid` | sheets; TSV is a projection |
 
-In memory:
+`FindBlock` is media-agnostic (id / heading_path). Sheet title and sheet_id lookup is `AsGrid` → sheet key.
 
-```text
-*TextDocument
-├── path:       "/work/note.txt"
-├── mediaType:  "text/plain"
-├── encoding:   "utf-8"
-├── text:       "a\nB\nc\n"
-└── starts:     [0, 2, 4, 6]   // byte offsets of each line
-```
+Create uses the codec registry (`Creator`). Path extension wins over a requested media type (`Foo.md` is never a Doc). Extensionless + `media_type` is how a codec is selected.
 
-**`*RichDocument`** (Google Docs today; Word later): blocks are the source of truth; `Text()` is derived HTML. `SetText` / `SetLine` / `ReplaceLines` return `ErrProjected`. Agent writes use `ReplaceBlock` / `SetBlocks`. `ContentToken` hashes a block fingerprint, not HTML.
-
-**`*TabularDocument`** (Google Sheets and Excel `.xlsx`): sheets are the source of truth (dense used rectangle of string cells plus a portable `CellFormat` bag: number, bold/italic/strike, fill/color, align, border). `Text()` is derived TSV of displayed values with `# Sheet: Title` headers. `SetText` / `SetLine` / `ReplaceLines` return `ErrProjected`. `Blocks()` is one `kind=sheet` block per sheet (metadata + header preview, no cell dump). `ContentToken` hashes the grid and format (not the TSV). Cell `Input` starting with `=` is a formula; read shows the formula if present, else the formatted value. Value-only writes leave format; format-only writes leave values. Native Google Sheets persist via the Sheets API; `.xlsx` files use the Excel codec (`styles.xml`). A native Sheet never round-trips through xlsx.
+**Grid format:** stored `CellFormat` is an absolute bag (number, bold/italic/strike/underline, fill/color, align/valign/wrap, border). Writes use `FormatPatch` so `bold=false` clears. `ParseCellFormat` reads the `String()` bag. Sheets persist uses `ColorStyle.RgbColor` and classifies number patterns (`CURRENCY`, `PERCENT`, `SCIENTIFIC`, `TIME`, `DATE`, `DATE_TIME`, `NUMBER`). Writes to a merge master are allowed; slave cells are refused. Theme colors stay empty (lossy). Native Google persist is a Drive concern; `.xlsx` uses the Excel codec. A native Sheet never round-trips through xlsx.
 
 **Block schema** (Markdown headings plus Docs paragraph / list_item / table / image):
 

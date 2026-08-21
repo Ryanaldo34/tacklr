@@ -24,7 +24,7 @@ type Mutation struct {
 	Blocks         []Block
 	TabID          string
 	MediaType      string
-	Format         *CellFormat
+	Format         *FormatPatch
 }
 
 // ApplyResult is the post-write identity of the document.
@@ -62,8 +62,6 @@ func (m Mutation) modeCount() (n int, full bool) {
 	}
 	return n, full
 }
-
-const mediaGoogleDocument = "application/vnd.google-apps.document"
 
 // Apply persists one mutation. Rev is required when the path exists.
 func (ms *MountSession) Apply(ctx context.Context, virtualPath string, mut Mutation) (ApplyResult, error) {
@@ -129,64 +127,32 @@ func (ms *MountSession) applyFull(ctx context.Context, p string, exists bool, fi
 	if exists {
 		return ms.stage(ctx, NewTextDocument(p, fi.MediaType, "utf-8", body))
 	}
-	if isSpreadsheet(mut.MediaType) && path.Ext(p) == "" {
-		if looksLikeHTML(body) {
-			return ApplyResult{}, fmt.Errorf("vfs: HTML content is not accepted; use blocks")
-		}
-		td, err := adoptTabularDocument(p, mimeGoogleSpreadsheet, liftTabular(path.Base(p), body), nil)
-		if err != nil {
-			return ApplyResult{}, err
-		}
-		return ms.stage(ctx, td)
-	}
-	if mut.MediaType == mediaGoogleDocument && path.Ext(p) == "" {
-		if looksLikeHTML(body) {
-			return ApplyResult{}, fmt.Errorf("vfs: HTML content is not accepted; use blocks")
-		}
-		return ms.stage(ctx, NewRichDocument(p, mediaGoogleDocument, liftPlaintext(body)))
-	}
 	n := min(len(body), 512)
-	mt := DetectMediaType(path.Base(p), []byte(body[:n]))
-	if mut.MediaType != "" && IsProjected(mut.MediaType) && !isSpreadsheet(mut.MediaType) {
-		mt = mut.MediaType
+	mt := createMediaType(p, mut.MediaType, []byte(body[:n]))
+	doc, err := createDocument(p, mt, mut)
+	if err != nil {
+		return ApplyResult{}, err
 	}
-	if isXLSX(mt) {
-		title := strings.TrimSuffix(path.Base(p), path.Ext(p))
-		td, err := adoptTabularDocument(p, mimeXLSX, liftTabular(title, body), nil)
-		if err != nil {
-			return ApplyResult{}, err
-		}
-		return ms.stage(ctx, td)
+	text, ok := doc.(Textual)
+	if !ok {
+		return ApplyResult{}, ErrNotTextual
 	}
-	if IsProjected(mt) {
-		return ms.stage(ctx, NewRichDocument(p, mt, liftPlaintext(body)))
+	return ms.stage(ctx, text)
+}
+
+func createMediaType(p, requested string, sample []byte) string {
+	if path.Ext(p) != "" {
+		return DetectMediaType(path.Base(p), sample)
 	}
-	return ms.stage(ctx, NewTextDocument(p, mt, "utf-8", body))
+	if requested != "" {
+		return requested
+	}
+	return DetectMediaType(path.Base(p), sample)
 }
 
 func looksLikeHTML(s string) bool {
 	t := strings.TrimSpace(s)
 	return strings.HasPrefix(t, "<") && strings.Contains(t, ">")
-}
-
-func liftPlaintext(s string) []Block {
-	s = strings.ReplaceAll(s, "\r\n", "\n")
-	s = strings.TrimRight(s, "\n")
-	if s == "" {
-		return nil
-	}
-	var out []Block
-	for _, para := range strings.Split(s, "\n\n") {
-		para = strings.TrimSpace(para)
-		if para == "" {
-			continue
-		}
-		out = append(out, Block{Kind: BlockKindParagraph, Text: para})
-	}
-	if len(out) == 0 {
-		out = append(out, Block{Kind: BlockKindParagraph, Text: s})
-	}
-	return out
 }
 
 func (ms *MountSession) applySubstring(ctx context.Context, p string, mut Mutation) (ApplyResult, error) {
@@ -232,8 +198,9 @@ func (ms *MountSession) applyBlock(ctx context.Context, p string, mut Mutation) 
 	if err != nil {
 		return ApplyResult{}, err
 	}
-	if td, ok := doc.(*TabularDocument); ok {
-		return ms.applyTabularBlock(ctx, td, mut)
+	if g, ok := asGridBody(doc); ok {
+		d, _ := asIR(doc)
+		return ms.applyTabularBlock(ctx, d, g, mut)
 	}
 	var blocks []Block
 	if s, ok := doc.(Structured); ok {
@@ -248,7 +215,7 @@ func (ms *MountSession) applyBlock(ctx context.Context, p string, mut Mutation) 
 			return ApplyResult{}, fmt.Errorf("vfs: tab_id %q does not match block %q", mut.TabID, got)
 		}
 	}
-	if rd, ok := doc.(*RichDocument); ok {
+	if rd, ok := AsRich(doc); ok {
 		text := strings.Join(replacementLines(mut.Lines, mut.Body), "\n")
 		if err := rd.ReplaceBlock(bl.ID, text, mut.IncludeHeading); err != nil {
 			return ApplyResult{}, err
@@ -265,22 +232,22 @@ func (ms *MountSession) applyBlock(ctx context.Context, p string, mut Mutation) 
 	return ms.stage(ctx, doc)
 }
 
-func (ms *MountSession) applyTabularBlock(ctx context.Context, td *TabularDocument, mut Mutation) (ApplyResult, error) {
+func (ms *MountSession) applyTabularBlock(ctx context.Context, td *IR, g *gridBody, mut Mutation) (ApplyResult, error) {
 	sheetKey, a1 := SplitSheetAddr(mut.BlockID)
-	idx, ok := td.findSheet(sheetKey)
+	idx, ok := g.findSheet(sheetKey)
 	if !ok {
 		return ApplyResult{}, fmt.Errorf("vfs: unknown block_id %q", mut.BlockID)
 	}
-	if mut.TabID != "" && td.sheets[idx].ID != "" && td.sheets[idx].ID != mut.TabID {
-		return ApplyResult{}, fmt.Errorf("vfs: tab_id %q does not match block %q", mut.TabID, td.sheets[idx].ID)
+	if mut.TabID != "" && g.sheets[idx].ID != "" && g.sheets[idx].ID != mut.TabID {
+		return ApplyResult{}, fmt.Errorf("vfs: tab_id %q does not match block %q", mut.TabID, g.sheets[idx].ID)
 	}
 	hasValue := mut.Body != nil || len(mut.Lines) > 0
-	var format *CellFormat
-	if mut.Format != nil && !mut.Format.IsZero() {
+	var format *FormatPatch
+	if !mut.Format.empty() {
 		format = mut.Format
 	}
 	if !hasValue && format == nil {
-		hasValue = true
+		return ApplyResult{}, fmt.Errorf("vfs: no mutation")
 	}
 	lines := replacementLines(mut.Lines, mut.Body)
 	switch {
@@ -295,12 +262,12 @@ func (ms *MountSession) applyTabularBlock(ctx context.Context, td *TabularDocume
 				text := strings.Join(lines, "\n")
 				input = &text
 			}
-			if err := td.overlayCell(idx, r1, c1, input, format); err != nil {
+			if err := g.overlayCell(idx, r1, c1, input, format); err != nil {
 				return ApplyResult{}, err
 			}
 			return ms.stage(ctx, td)
 		}
-		if err := td.overlayRange(idx, r1, c1, r2, c2, lines, hasValue, format); err != nil {
+		if err := g.overlayRange(idx, r1, c1, r2, c2, lines, hasValue, format); err != nil {
 			return ApplyResult{}, err
 		}
 		return ms.stage(ctx, td)
@@ -312,18 +279,18 @@ func (ms *MountSession) applyTabularBlock(ctx context.Context, td *TabularDocume
 		if *mut.Start < 1 || end < *mut.Start {
 			return ApplyResult{}, fmt.Errorf("vfs: invalid range start=%d end=%v", *mut.Start, mut.End)
 		}
-		if err := td.overlayRows(idx, *mut.Start, end, lines, hasValue, format); err != nil {
+		if err := g.overlayRows(idx, *mut.Start, end, lines, hasValue, format); err != nil {
 			return ApplyResult{}, err
 		}
 		return ms.stage(ctx, td)
 	default:
 		if hasValue {
-			if err := td.replaceSheetValues(idx, cellsFromToolLines(lines)); err != nil {
+			if err := g.replaceSheetValues(idx, cellsFromToolLines(lines)); err != nil {
 				return ApplyResult{}, err
 			}
 		}
 		if format != nil {
-			if err := td.overlaySheetFormat(idx, format); err != nil {
+			if err := g.overlaySheetFormat(idx, format); err != nil {
 				return ApplyResult{}, err
 			}
 		}
@@ -345,38 +312,18 @@ func (ms *MountSession) applyBlocks(ctx context.Context, p string, exists bool, 
 		next = append(next, b)
 	}
 	if !exists {
-		mt := mut.MediaType
-		if mt == "" {
-			mt = DetectMediaType(path.Base(p), nil)
+		mt := createMediaType(p, mut.MediaType, nil)
+		created := mut
+		created.Blocks = next
+		doc, err := createDocument(p, mt, created)
+		if err != nil {
+			return ApplyResult{}, err
 		}
-		if isSpreadsheet(mt) {
-			if path.Ext(p) != "" {
-				return ApplyResult{}, fmt.Errorf("vfs: blocks require media_type=%s on an extensionless path", mimeGoogleSpreadsheet)
-			}
-			td, err := adoptTabularDocument(p, mimeGoogleSpreadsheet, sheetsFromBlocks(next, path.Base(p)), nil)
-			if err != nil {
-				return ApplyResult{}, err
-			}
-			return ms.stage(ctx, td)
+		text, ok := doc.(Textual)
+		if !ok {
+			return ApplyResult{}, ErrNotTextual
 		}
-		if isXLSX(mt) {
-			title := strings.TrimSuffix(path.Base(p), path.Ext(p))
-			td, err := adoptTabularDocument(p, mimeXLSX, sheetsFromBlocks(next, title), nil)
-			if err != nil {
-				return ApplyResult{}, err
-			}
-			return ms.stage(ctx, td)
-		}
-		if mt == mediaGoogleDocument {
-			if path.Ext(p) != "" {
-				return ApplyResult{}, fmt.Errorf("vfs: blocks require media_type=%s on an extensionless path", mediaGoogleDocument)
-			}
-			return ms.stage(ctx, NewRichDocument(p, mediaGoogleDocument, next))
-		}
-		if IsProjected(mt) {
-			return ms.stage(ctx, NewRichDocument(p, mt, next))
-		}
-		return ApplyResult{}, fmt.Errorf("vfs: blocks require media_type=%s on an extensionless path", mediaGoogleDocument)
+		return ms.stage(ctx, text)
 	}
 	if !IsProjected(fi.MediaType) {
 		return ApplyResult{}, ErrProjected
@@ -388,13 +335,15 @@ func (ms *MountSession) applyBlocks(ctx context.Context, p string, exists bool, 
 	if err != nil {
 		return ApplyResult{}, err
 	}
-	if td, ok := doc.(*TabularDocument); ok {
-		return ms.applyTabularBlocks(ctx, td, mut, next)
+	if g, ok := asGridBody(doc); ok {
+		d, _ := asIR(doc)
+		return ms.applyTabularBlocks(ctx, d, g, mut, next)
 	}
-	rd, ok := doc.(*RichDocument)
+	rd, ok := AsRich(doc)
 	if !ok {
 		return ApplyResult{}, ErrProjected
 	}
+	d, _ := asIR(doc)
 	tabs := rd.Tabs()
 	if len(tabs) > 1 && mut.TabID == "" {
 		return ApplyResult{}, fmt.Errorf("vfs: tab_id required")
@@ -413,27 +362,27 @@ func (ms *MountSession) applyBlocks(ctx context.Context, p string, exists bool, 
 		next = append(next, keep...)
 	}
 	rd.SetBlocks(next)
-	return ms.stage(ctx, doc)
+	return ms.stage(ctx, d)
 }
 
-func (ms *MountSession) applyTabularBlocks(ctx context.Context, td *TabularDocument, mut Mutation, next []Block) (ApplyResult, error) {
+func (ms *MountSession) applyTabularBlocks(ctx context.Context, td *IR, g *gridBody, mut Mutation, next []Block) (ApplyResult, error) {
 	var idx int
 	if mut.TabID != "" {
 		var ok bool
-		idx, ok = td.findSheet(mut.TabID)
+		idx, ok = g.findSheet(mut.TabID)
 		if !ok {
 			return ApplyResult{}, fmt.Errorf("vfs: unknown tab_id %q", mut.TabID)
 		}
-	} else if len(td.sheets) == 1 {
+	} else if len(g.sheets) == 1 {
 		idx = 0
 	} else {
 		return ApplyResult{}, fmt.Errorf("vfs: tab_id required")
 	}
-	sheets := sheetsFromBlocks(next, td.sheets[idx].Title)
+	sheets := sheetsFromBlocks(next, g.sheets[idx].Title)
 	if len(sheets) == 0 {
 		return ApplyResult{}, fmt.Errorf("vfs: refusing empty IR replace")
 	}
-	if err := td.replaceSheetValues(idx, sheets[0].Cells); err != nil {
+	if err := g.replaceSheetValues(idx, sheets[0].Cells); err != nil {
 		return ApplyResult{}, err
 	}
 	return ms.stage(ctx, td)
