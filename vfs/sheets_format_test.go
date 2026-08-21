@@ -46,7 +46,8 @@ func TestGoogleSheets_httpGetBatchUpdate(t *testing.T) {
 										map[string]any{"userEnteredValue": map[string]any{"stringValue": "Amount"}, "formattedValue": "Amount"},
 										map[string]any{"userEnteredValue": map[string]any{"boolValue": true}, "formattedValue": "TRUE"},
 										map[string]any{"userEnteredValue": map[string]any{"numberValue": 3.5}, "formattedValue": "3.5"},
-										nil,
+										map[string]any{"userEnteredValue": map[string]any{"numberValue": 42}, "formattedValue": "42"},
+										map[string]any{"formattedValue": "shown"},
 									}},
 									map[string]any{"values": []any{
 										map[string]any{"userEnteredValue": map[string]any{"stringValue": "2026-01-01"}, "formattedValue": "2026-01-01"},
@@ -168,6 +169,14 @@ func TestGoogleSheets_httpGetBatchUpdate(t *testing.T) {
 	d1 := snap.Sheets[0].cellAt(1, 4)
 	if d1.Input != "3.5" {
 		t.Fatalf("Get number D1 = %+v", d1)
+	}
+	e1 := snap.Sheets[0].cellAt(1, 5)
+	if e1.Input != "42" {
+		t.Fatalf("Get int E1 = %+v", e1)
+	}
+	f1 := snap.Sheets[0].cellAt(1, 6)
+	if f1.Input != "shown" || f1.Value != "shown" {
+		t.Fatalf("Get formatted-only F1 = %+v", f1)
 	}
 	a3 := snap.Sheets[0].cellAt(3, 1)
 	if a3.Input != "=A1+1" {

@@ -1,6 +1,8 @@
 package vfs
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -95,6 +97,9 @@ func TestGrid_projectionA1AndFingerprint(t *testing.T) {
 	if cell, err := g.Cell("Budget", "C2"); err != nil || cell.Display() != "ok\tline" {
 		t.Fatalf("escaped cell = %+v err=%v", cell, err)
 	}
+	if rect, err := g.ReadRangeTSV("Budget", "C2:D2"); err != nil || !strings.Contains(rect, `\t`) || !strings.Contains(rect, `\`) {
+		t.Fatalf("escaped range = %q err=%v", rect, err)
+	}
 	twin := twoSheetBudget()
 	mustGrid(t, twin).sheets[0].Cells[2][0].Value = "999"
 	if d.ContentFingerprint() != twin.ContentFingerprint() {
@@ -150,6 +155,31 @@ func TestSheetsHTML_decodesZipAndTable(t *testing.T) {
 	if _, err := (TabularCodec{Types: []string{mimeGoogleSpreadsheet}, Normalizer: SheetsHTML{}}).Decode(canceled, "/x", "", nil); err == nil {
 		t.Fatal("canceled decode")
 	}
+
+	var zbuf bytes.Buffer
+	zw := zip.NewWriter(&zbuf)
+	_, _ = zw.Create("folder/")
+	txt, err := zw.Create("notes.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = txt.Write([]byte("skip"))
+	idx, err := zw.Create("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = idx.Write([]byte(`<html><head><title>IndexOnly</title></head><body><table><tr><td>Only</td></tr></table></body></html>`))
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	indexed, err := (SheetsCodec{}).Decode(t.Context(), "/contracts/Index", mimeGoogleSpreadsheet, zbuf.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ig, ok := AsGrid(indexed)
+	if !ok || len(ig.Sheets()) != 1 || ig.Sheets()[0].Cells[0][0].Input != "Only" {
+		t.Fatalf("index zip = %+v ok=%v sheets=%+v", indexed, ok, ig.Sheets())
+	}
 }
 
 func TestCreator_liftsGridAndRich(t *testing.T) {
@@ -184,15 +214,21 @@ func TestCreator_liftsGridAndRich(t *testing.T) {
 		{Kind: BlockKindParagraph, Text: "skip"},
 		{Kind: BlockKindSheet, Text: "X\tY", Style: StyleMeta{Attributes: map[string]string{"title": "Sheet1"}}},
 		{Kind: BlockKindSheet, ID: "extra", Text: "Z"},
+		{Kind: BlockKindSheet, Text: "hello\\tworld\tok\\nline\ta\\\\b\tend\\\tcr\\r\tunk\\x", Style: StyleMeta{Attributes: map[string]string{"title": "Esc"}}},
 	}
 	fromBlocks, err := (SheetsCodec{}).Create("/Ledger", mimeGoogleSpreadsheet, Mutation{Blocks: blocks})
 	if err != nil {
 		t.Fatal(err)
 	}
 	g, ok = AsGrid(fromBlocks)
-	if !ok || len(g.Sheets()) != 2 || g.Sheets()[0].Title != "Sheet1" || g.Sheets()[0].Cells[0][0].Input != "X" ||
+	if !ok || len(g.Sheets()) != 3 || g.Sheets()[0].Title != "Sheet1" || g.Sheets()[0].Cells[0][0].Input != "X" ||
 		g.Sheets()[1].Title != "extra" {
 		t.Fatalf("blocks lift = %+v ok=%v", fromBlocks, ok)
+	}
+	esc := g.Sheets()[2].Cells[0]
+	if len(esc) < 6 || esc[0].Input != "hello\tworld" || esc[1].Input != "ok\nline" ||
+		esc[2].Input != "a\\b" || esc[3].Input != "end\\" || esc[4].Input != "cr\r" || esc[5].Input != "unk\\x" {
+		t.Fatalf("escaped lift = %+v", esc)
 	}
 	fallback, err := (SheetsCodec{}).Create("/Ledger", mimeGoogleSpreadsheet, Mutation{Blocks: []Block{{Kind: BlockKindParagraph, Text: "x"}}})
 	if err != nil {
