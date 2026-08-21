@@ -70,7 +70,7 @@ func (v vfsTools) newRead() *Tool {
 Path only on ordinary files → start=1 through 1+MaxLinesPerWindow plus rev (pass rev to write).
 Path only on Google Docs/Word (projected) → outline. Use rg on the FUSE tree for HTML hits, then read({block_id}) for IR text.
 start/end → half-open 1-based window (HTML lines on Docs). block_id → that region's IR text. outline=true → block list (text uses **bold** _italic_ ~~strike~~ [label](url); kind/level is structure). ir=true → media_type/encoding (no HTML dump on Docs).
-Sheets: block_id is a sheet (id, title, or slug) or Sheet!A1 / Sheet!A1:C3. start/end are 1-based rows of that sheet, not HTML lines. One-cell and small A1 reads print format when present; row windows stay TSV unless ir is set on a small range.
+Sheets: block_id is a sheet (id, title, or slug) or Sheet!A1 / Sheet!A1:C3. start/end are 1-based rows of that sheet, not HTML lines. One-cell and small A1 reads print format when present; row windows stay TSV unless ir is set on a small range. Write is one cell (Sheet!A1) or create.
 Knowledge objects with no file: read_object. Live names/grep: run_command → ls / rg.`,
 		Category: streaming.ToolCategoryRead,
 		Access:   ToolReadAccess,
@@ -337,7 +337,7 @@ func (v vfsTools) newWrite() *Tool {
 
 Pass rev from read when the path exists. Create only via content or ir_text (empty content creates or truncates), or media_type+blocks for a Google Doc. Foo.md is never a Doc. Extensionless Spec without media_type is plaintext.
 Projected Docs/Word: use block_id or blocks. Inline marks in block text: **bold**, _italic_, ~~strike~~, [label](url). kind/level is structure (not # or -). No marks = plain replace (drops old marks). Line/HTML/SetText writes return an error. content lift is create-only. Persists immediately.
-Sheets: block_id is a sheet or Sheet!A1:C3 overlay. start/end are rows and line count must equal end-start. Optional format overlays the same range (value-only leaves format; format-only leaves values).`,
+Sheets: write block_id is Sheet!A1 (one cell). Optional format patches that cell (value-only leaves format; format-only leaves values). Range, row-window, and in-place sheet replace are not writes — create a new sheet with content or blocks.`,
 		Category: streaming.ToolCategoryEdit,
 		Access:   ToolWriteAccess,
 		Timeout:  60 * time.Second,

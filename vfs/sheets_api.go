@@ -669,12 +669,6 @@ func tabularOverlayBatch(td *gridBody) (SheetsValuesBatch, error) {
 	for _, sh := range td.sheets {
 		rows := sh.Rows
 		cols := sh.Cols
-		if sh.persistRows > rows {
-			rows = sh.persistRows
-		}
-		if sh.persistCols > cols {
-			cols = sh.persistCols
-		}
 		if rows == 0 || cols == 0 {
 			continue
 		}
@@ -710,12 +704,6 @@ func tabularFormatBatch(td *gridBody) SheetsBatch {
 			id = 0
 		}
 		rows, cols := sh.Rows, sh.Cols
-		if sh.persistRows > rows {
-			rows = sh.persistRows
-		}
-		if sh.persistCols > cols {
-			cols = sh.persistCols
-		}
 		for _, rec := range formatRects(sh, rows, cols) {
 			reqs = append(reqs, SheetsRepeatCell{
 				SheetID:  id,

@@ -53,14 +53,15 @@ func TestGrid_projectionA1AndFingerprint(t *testing.T) {
 	if err := d.SetText("nope"); !errors.Is(err, ErrProjected) {
 		t.Fatalf("SetText: %v", err)
 	}
-	got, err := d.ReadCell("Budget", "B2")
+	g := mustGrid(t, d)
+	got, err := g.ReadCell("Budget", "B2")
 	if err != nil || got != "42" {
 		t.Fatalf("B2 = %q err=%v", got, err)
 	}
-	if formula, err := d.ReadCell("budget", "A3"); err != nil || formula != "=A1+1" {
+	if formula, err := g.ReadCell("budget", "A3"); err != nil || formula != "=A1+1" {
 		t.Fatalf("formula = %q err=%v", formula, err)
 	}
-	if rect, err := d.ReadRangeTSV("Notes", "A1:B1"); err != nil || rect != "Hello\tWorld" {
+	if rect, err := g.ReadRangeTSV("Notes", "A1:B1"); err != nil || rect != "Hello\tWorld" {
 		t.Fatalf("range = %q err=%v", rect, err)
 	}
 	twin := twoSheetBudget()

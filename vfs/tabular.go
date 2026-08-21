@@ -531,8 +531,7 @@ type Sheet struct {
 	Cols  int
 	Cells [][]Cell
 
-	merges                   []gridMerge
-	persistRows, persistCols int
+	merges []gridMerge
 }
 
 // gridBody is the spreadsheet representation (Sheets / Excel).
@@ -1008,133 +1007,6 @@ func (d *gridBody) overlayCell(idx, row, col int, input *string, format *FormatP
 	return d.finishMut()
 }
 
-func (d *gridBody) overlayRows(idx, start, end int, lines []string, hasValue bool, format *FormatPatch) error {
-	if hasValue && end-start != len(lines) {
-		return fmt.Errorf("%w: line count must equal end-start", ErrNotSupported)
-	}
-	sh := &d.sheets[idx]
-	cols := sh.Cols
-	parsed := make([][]string, len(lines))
-	for i, line := range lines {
-		cells := splitToolRow(line)
-		parsed[i] = cells
-		if len(cells) > cols {
-			cols = len(cells)
-		}
-	}
-	if cols < 1 {
-		cols = 1
-	}
-	last := end - 1
-	if last < 1 {
-		last = 1
-	}
-	growSheet(sh, last, cols)
-	n := end - start
-	if !hasValue {
-		n = last - (start - 1)
-		if n < 0 {
-			n = 0
-		}
-	}
-	for i := 0; i < n; i++ {
-		r := start - 1 + i
-		if r < 0 || r >= len(sh.Cells) {
-			continue
-		}
-		var cells []string
-		if hasValue && i < len(parsed) {
-			cells = parsed[i]
-		}
-		for c := 0; c < sh.Cols; c++ {
-			if sh.mergeSlave(r, c) {
-				return fmt.Errorf("%w: write into a merge", ErrNotSupported)
-			}
-			val := ""
-			if hasValue && c < len(cells) {
-				val = cells[c]
-			}
-			applyCellOverlay(&sh.Cells[r][c], val, hasValue, format)
-		}
-	}
-	trimSheet(sh)
-	return d.finishMut()
-}
-
-func (d *gridBody) overlayRange(idx, r1, c1, r2, c2 int, lines []string, hasValue bool, format *FormatPatch) error {
-	rows := r2 - r1 + 1
-	cols := c2 - c1 + 1
-	if hasValue && len(lines) != rows {
-		return fmt.Errorf("%w: line count must equal end-start", ErrNotSupported)
-	}
-	sh := &d.sheets[idx]
-	growSheet(sh, r2, c2)
-	for i := 0; i < rows; i++ {
-		var cells []string
-		if hasValue {
-			cells = splitToolRow(lines[i])
-			if len(cells) > cols {
-				return fmt.Errorf("%w: row has %d cells, range is %d cols", ErrNotSupported, len(cells), cols)
-			}
-		}
-		r := r1 - 1 + i
-		for c := 0; c < cols; c++ {
-			if sh.mergeSlave(r, c1-1+c) {
-				return fmt.Errorf("%w: write into a merge", ErrNotSupported)
-			}
-			val := ""
-			if hasValue && c < len(cells) {
-				val = cells[c]
-			}
-			applyCellOverlay(&sh.Cells[r][c1-1+c], val, hasValue, format)
-		}
-	}
-	trimSheet(sh)
-	return d.finishMut()
-}
-
-func (d *gridBody) replaceSheetValues(idx int, grid [][]Cell) error {
-	sh := &d.sheets[idx]
-	for r := range grid {
-		for c := range grid[r] {
-			if sh.mergeSlave(r, c) {
-				return fmt.Errorf("%w: write into a merge", ErrNotSupported)
-			}
-		}
-	}
-	oldR, oldC := sh.Rows, sh.Cols
-	old := sh.Cells
-	for r := range grid {
-		for c := range grid[r] {
-			if r < len(old) && c < len(old[r]) {
-				grid[r][c].Format = cloneCellFormat(old[r][c].Format)
-			}
-		}
-	}
-	sh.Cells = grid
-	trimSheet(sh)
-	sh.persistRows = max(oldR, sh.Rows)
-	sh.persistCols = max(oldC, sh.Cols)
-	return d.finishMut()
-}
-
-func (d *gridBody) overlaySheetFormat(idx int, format *FormatPatch) error {
-	if format == nil {
-		return nil
-	}
-	sh := &d.sheets[idx]
-	for r := 0; r < sh.Rows; r++ {
-		for c := 0; c < sh.Cols; c++ {
-			if sh.mergeSlave(r, c) {
-				return fmt.Errorf("%w: write into a merge", ErrNotSupported)
-			}
-			applyCellOverlay(&sh.Cells[r][c], "", false, format)
-		}
-	}
-	trimSheet(sh)
-	return d.finishMut()
-}
-
 func (d *gridBody) finishMut() error {
 	if err := d.checkCap(); err != nil {
 		return err
@@ -1367,17 +1239,6 @@ func parseToolTSV(text string) [][]string {
 		out[i] = splitToolRow(strings.TrimSuffix(line, "\r"))
 	}
 	return padStringGrid(out)
-}
-
-func cellsFromToolLines(lines []string) [][]Cell {
-	if len(lines) == 0 {
-		return nil
-	}
-	grid := make([][]string, len(lines))
-	for i, line := range lines {
-		grid[i] = splitToolRow(strings.TrimSuffix(line, "\r"))
-	}
-	return cellsFromStrings(padStringGrid(grid))
 }
 
 func padStringGrid(rows [][]string) [][]string {

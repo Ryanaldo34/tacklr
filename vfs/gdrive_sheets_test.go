@@ -83,12 +83,12 @@ func TestDrive_sheetStatAndExportRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	td, ok := doc.(*vfs.IR)
+	td, ok := vfs.AsGrid(doc)
 	if !ok {
 		t.Fatalf("type %T", doc)
 	}
-	if td.Path() != "/contracts/Budget" {
-		t.Fatalf("path = %s", td.Path())
+	if doc.Path() != "/contracts/Budget" {
+		t.Fatalf("path = %s", doc.Path())
 	}
 	if len(td.Sheets()) != 2 {
 		t.Fatalf("sheets = %d", len(td.Sheets()))
@@ -101,7 +101,7 @@ func TestDrive_sheetStatAndExportRead(t *testing.T) {
 	if td.Sheets()[1].Title != "Notes" || a1.Input != "Hello" || a1.Value != "Hello" {
 		t.Fatalf("notes A1 = %+v sheet=%+v", a1, td.Sheets()[1])
 	}
-	text := td.Text()
+	text := doc.Text()
 	if !strings.Contains(text, "# Sheet: Budget") || !strings.Contains(text, "42") ||
 		strings.Contains(text, "<table>") || strings.Contains(text, "bold") {
 		t.Fatalf("projection = %s", text)
@@ -152,12 +152,15 @@ func TestDrive_sheetOverlayFormatAndMerge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	td := doc.(*vfs.IR)
+	td, ok := vfs.AsGrid(doc)
+	if !ok {
+		t.Fatalf("type %T", doc)
+	}
 	if !td.Sheets()[0].Cells[1][1].Format.Bold {
 		t.Fatalf("checkout format B2 = %+v", td.Sheets()[0].Cells[1][1])
 	}
 	_, err = ms.Apply(ctx, "/contracts/Budget", vfs.Mutation{
-		Rev: vfs.ContentToken(td), BlockID: "Budget!B2", Body: strPtr("99"),
+		Rev: vfs.ContentToken(doc), BlockID: "Budget!B2", Body: strPtr("99"),
 		Format: &vfs.FormatPatch{Italic: boolPtr(true)},
 	})
 	if err != nil {
@@ -167,7 +170,10 @@ func TestDrive_sheetOverlayFormatAndMerge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	td = got.(*vfs.IR)
+	td, ok = vfs.AsGrid(got)
+	if !ok {
+		t.Fatalf("type %T", got)
+	}
 	b2, err := td.Cell("Budget", "B2")
 	if err != nil || b2.Display() != "99" || !b2.Format.Italic || !b2.Format.Bold {
 		t.Fatalf("overlay B2 = %+v err=%v", b2, err)
@@ -190,7 +196,9 @@ func TestDrive_sheetOverlayFormatAndMerge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if v, _ := still.(*vfs.IR).ReadCell("Merged", "B2"); v != "d" {
+	if g, _ := vfs.AsGrid(still); g == nil {
+		t.Fatalf("type %T", still)
+	} else if v, _ := g.ReadCell("Merged", "B2"); v != "d" {
 		t.Fatalf("slave write landed: %q", v)
 	}
 	_, err = ms.Apply(ctx, "/contracts/Merged", vfs.Mutation{
@@ -203,7 +211,9 @@ func TestDrive_sheetOverlayFormatAndMerge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if v, _ := after.(*vfs.IR).ReadCell("Merged", "A1"); v != "master" {
+	if g, _ := vfs.AsGrid(after); g == nil {
+		t.Fatalf("type %T", after)
+	} else if v, _ := g.ReadCell("Merged", "A1"); v != "master" {
 		t.Fatalf("merge master A1: %q", v)
 	}
 
@@ -213,6 +223,23 @@ func TestDrive_sheetOverlayFormatAndMerge(t *testing.T) {
 	}
 	if err := ms.WriteFile(ctx, "/contracts/Budget", []byte("x")); !errors.Is(err, vfs.ErrNotSupported) {
 		t.Fatalf("PutFile native: %v", err)
+	}
+
+	rev := vfs.ContentToken(got)
+	if _, err := ms.Apply(ctx, "/contracts/Budget", vfs.Mutation{
+		Rev: rev, BlockID: "Budget!A1:C3", Body: strPtr("x"),
+	}); !errors.Is(err, vfs.ErrNotSupported) {
+		t.Fatalf("range write: %v", err)
+	}
+	if _, err := ms.Apply(ctx, "/contracts/Budget", vfs.Mutation{
+		Rev: rev, BlockID: "Budget", Body: strPtr("x"),
+	}); !errors.Is(err, vfs.ErrNotSupported) {
+		t.Fatalf("sheet replace: %v", err)
+	}
+	if _, err := ms.Apply(ctx, "/contracts/Budget", vfs.Mutation{
+		Rev: rev, Blocks: []vfs.Block{{Kind: vfs.BlockKindSheet, Text: "A\tB"}},
+	}); !errors.Is(err, vfs.ErrNotSupported) {
+		t.Fatalf("blocks replace: %v", err)
 	}
 }
 

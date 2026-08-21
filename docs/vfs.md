@@ -116,7 +116,7 @@ Two surfaces, one document:
 | Surface | Behavior |
 |---------|----------|
 | FUSE / `open` / `rg` | Docs: HTML projection. Sheets: TSV of displayed values with `# Sheet: Title` headers (no bold/markdown/JSON/`#rrggbb`). Kernel writes stay `EROFS`. `ls` of a Doc or Sheet is size 0 (no export/Get on getattr). |
-| Agent `read` / `write` | Block / grid IR. Default `read` of a Doc or Sheet is an outline (must not dump HTML or TSV). Docs `write` uses `block_id` / `blocks`. Sheets use `block_id` as a sheet or `Sheet!A1:C3`; `start`/`end` are rows. Optional `format` overlays the same range. Line/HTML/`SetText` return `ErrProjected`. |
+| Agent `read` / `write` | Block / grid IR. Default `read` of a Doc or Sheet is an outline (must not dump HTML or TSV). Docs `write` uses `block_id` / `blocks`. Sheets `write` is one cell (`Sheet!A1`) plus optional `format`, or create via `content` / `blocks` on a new path. Range, row-window, and in-place sheet replace return `ErrNotSupported`. Line/HTML/`SetText` return `ErrProjected`. |
 
 `Stat.MediaType` is the real Drive MIME. Slides/Drawings/Forms stay listed and return `ErrNoCodec` / `ErrNotSupported`. Native `PutFile` / identity `WriteDocument` return `ErrNotSupported`. `Remove` is Drive trash (`trashed:true`), does not follow shortcuts, and refuses ambiguous names and the mount root. Agent delete is `rm` (FUSE Unlink) only.
 

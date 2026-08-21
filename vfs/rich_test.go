@@ -185,17 +185,21 @@ func TestRichDocument_replaceBlockMatrix(t *testing.T) {
 		{Kind: BlockKindTable, Text: "A\tB", Style: StyleMeta{Attributes: map[string]string{"rows": "1", "cols": "2"}}},
 		{Kind: BlockKindImage, Style: StyleMeta{Attributes: map[string]string{"object_id": "kix.x"}}},
 	})
-	if err := d.ReplaceBlock(d.Blocks()[0].ID, "New", false); err == nil {
+	rd, ok := AsRich(d)
+	if !ok {
+		t.Fatalf("type %T", d)
+	}
+	if err := rd.ReplaceBlock(d.Blocks()[0].ID, "New", false); err == nil {
 		t.Fatal("heading without include_heading")
 	}
-	if err := d.ReplaceBlock(d.Blocks()[0].ID, "New", true); err != nil {
+	if err := rd.ReplaceBlock(d.Blocks()[0].ID, "New", true); err != nil {
 		t.Fatal(err)
 	}
 	if d.Blocks()[0].Text != "New" {
 		t.Fatalf("heading = %q", d.Blocks()[0].Text)
 	}
 	pre := d.ContentFingerprint()
-	if err := d.ReplaceBlock(d.Blocks()[1].ID, "world", false); err != nil {
+	if err := rd.ReplaceBlock(d.Blocks()[1].ID, "world", false); err != nil {
 		t.Fatal(err)
 	}
 	if d.ContentFingerprint() == pre {
@@ -204,16 +208,16 @@ func TestRichDocument_replaceBlockMatrix(t *testing.T) {
 	if tok := ContentToken(d); tok != d.ContentFingerprint() || tok == ContentHash(d.Text()) {
 		t.Fatal("ContentToken must be IR fingerprint, not HTML hash")
 	}
-	if err := d.ReplaceBlock(d.Blocks()[2].ID, "X\tY\nZ\tW", false); !errors.Is(err, ErrNotSupported) {
+	if err := rd.ReplaceBlock(d.Blocks()[2].ID, "X\tY\nZ\tW", false); !errors.Is(err, ErrNotSupported) {
 		t.Fatalf("table shape: %v", err)
 	}
-	if err := d.ReplaceBlock(d.Blocks()[2].ID, "X\tY", false); err != nil {
+	if err := rd.ReplaceBlock(d.Blocks()[2].ID, "X\tY", false); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.ReplaceBlock(d.Blocks()[3].ID, "nope", false); !errors.Is(err, ErrNotSupported) {
+	if err := rd.ReplaceBlock(d.Blocks()[3].ID, "nope", false); !errors.Is(err, ErrNotSupported) {
 		t.Fatalf("image replace: %v", err)
 	}
-	if err := d.ReplaceBlock("missing", "x", false); err == nil {
+	if err := rd.ReplaceBlock("missing", "x", false); err == nil {
 		t.Fatal("unknown block")
 	}
 }

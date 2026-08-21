@@ -15,7 +15,7 @@ import (
 
 func TestGoogleSheets_httpGetBatchUpdate(t *testing.T) {
 	ctx := t.Context()
-	var batchBody string
+	var batchBody, valuesBody string
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -69,6 +69,12 @@ func TestGoogleSheets_httpGetBatchUpdate(t *testing.T) {
 					},
 				},
 			})
+			return
+		}
+		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "values:batchUpdate") {
+			raw, _ := io.ReadAll(r.Body)
+			valuesBody = string(raw)
+			_ = json.NewEncoder(w).Encode(map[string]any{})
 			return
 		}
 		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, ":batchUpdate") {
@@ -146,5 +152,16 @@ func TestGoogleSheets_httpGetBatchUpdate(t *testing.T) {
 	if numberFormatType("h:mm") != "TIME" || numberFormatType("m/d/yyyy h:mm") != "DATE_TIME" ||
 		numberFormatType("0.00E+00") != "SCIENTIFIC" {
 		t.Fatalf("number types: %s %s %s", numberFormatType("h:mm"), numberFormatType("m/d/yyyy h:mm"), numberFormatType("0.00E+00"))
+	}
+
+	err = api.BatchUpdateValues(ctx, "sheet1", SheetsValuesBatch{Data: []SheetsValueRange{
+		{Range: "Budget!B2", Values: [][]string{{"99"}}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(valuesBody, "USER_ENTERED") || !strings.Contains(valuesBody, "99") ||
+		!strings.Contains(valuesBody, "Budget!B2") {
+		t.Fatalf("BatchUpdateValues body = %s", valuesBody)
 	}
 }

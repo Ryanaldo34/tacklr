@@ -249,53 +249,25 @@ func (ms *MountSession) applyTabularBlock(ctx context.Context, td *IR, g *gridBo
 	if !hasValue && format == nil {
 		return ApplyResult{}, fmt.Errorf("vfs: no mutation")
 	}
-	lines := replacementLines(mut.Lines, mut.Body)
-	switch {
-	case a1 != "":
-		r1, c1, r2, c2, err := parseA1(a1)
-		if err != nil {
-			return ApplyResult{}, err
-		}
-		if r1 == r2 && c1 == c2 {
-			var input *string
-			if hasValue {
-				text := strings.Join(lines, "\n")
-				input = &text
-			}
-			if err := g.overlayCell(idx, r1, c1, input, format); err != nil {
-				return ApplyResult{}, err
-			}
-			return ms.stage(ctx, td)
-		}
-		if err := g.overlayRange(idx, r1, c1, r2, c2, lines, hasValue, format); err != nil {
-			return ApplyResult{}, err
-		}
-		return ms.stage(ctx, td)
-	case mut.Start != nil:
-		end := 0
-		if mut.End != nil {
-			end = *mut.End
-		}
-		if *mut.Start < 1 || end < *mut.Start {
-			return ApplyResult{}, fmt.Errorf("vfs: invalid range start=%d end=%v", *mut.Start, mut.End)
-		}
-		if err := g.overlayRows(idx, *mut.Start, end, lines, hasValue, format); err != nil {
-			return ApplyResult{}, err
-		}
-		return ms.stage(ctx, td)
-	default:
-		if hasValue {
-			if err := g.replaceSheetValues(idx, cellsFromToolLines(lines)); err != nil {
-				return ApplyResult{}, err
-			}
-		}
-		if format != nil {
-			if err := g.overlaySheetFormat(idx, format); err != nil {
-				return ApplyResult{}, err
-			}
-		}
-		return ms.stage(ctx, td)
+	if a1 == "" {
+		return ApplyResult{}, fmt.Errorf("%w: sheet write requires Sheet!A1", ErrNotSupported)
 	}
+	r1, c1, r2, c2, err := parseA1(a1)
+	if err != nil {
+		return ApplyResult{}, err
+	}
+	if r1 != r2 || c1 != c2 {
+		return ApplyResult{}, fmt.Errorf("%w: sheet write is one cell (Sheet!A1)", ErrNotSupported)
+	}
+	var input *string
+	if hasValue {
+		text := strings.Join(replacementLines(mut.Lines, mut.Body), "\n")
+		input = &text
+	}
+	if err := g.overlayCell(idx, r1, c1, input, format); err != nil {
+		return ApplyResult{}, err
+	}
+	return ms.stage(ctx, td)
 }
 
 func (ms *MountSession) applyBlocks(ctx context.Context, p string, exists bool, fi FileInfo, mut Mutation) (ApplyResult, error) {
@@ -335,9 +307,8 @@ func (ms *MountSession) applyBlocks(ctx context.Context, p string, exists bool, 
 	if err != nil {
 		return ApplyResult{}, err
 	}
-	if g, ok := asGridBody(doc); ok {
-		d, _ := asIR(doc)
-		return ms.applyTabularBlocks(ctx, d, g, mut, next)
+	if _, ok := asGridBody(doc); ok {
+		return ApplyResult{}, fmt.Errorf("%w: sheet replace uses create (content or blocks on a new path)", ErrNotSupported)
 	}
 	rd, ok := AsRich(doc)
 	if !ok {
@@ -363,29 +334,6 @@ func (ms *MountSession) applyBlocks(ctx context.Context, p string, exists bool, 
 	}
 	rd.SetBlocks(next)
 	return ms.stage(ctx, d)
-}
-
-func (ms *MountSession) applyTabularBlocks(ctx context.Context, td *IR, g *gridBody, mut Mutation, next []Block) (ApplyResult, error) {
-	var idx int
-	if mut.TabID != "" {
-		var ok bool
-		idx, ok = g.findSheet(mut.TabID)
-		if !ok {
-			return ApplyResult{}, fmt.Errorf("vfs: unknown tab_id %q", mut.TabID)
-		}
-	} else if len(g.sheets) == 1 {
-		idx = 0
-	} else {
-		return ApplyResult{}, fmt.Errorf("vfs: tab_id required")
-	}
-	sheets := sheetsFromBlocks(next, g.sheets[idx].Title)
-	if len(sheets) == 0 {
-		return ApplyResult{}, fmt.Errorf("vfs: refusing empty IR replace")
-	}
-	if err := g.replaceSheetValues(idx, sheets[0].Cells); err != nil {
-		return ApplyResult{}, err
-	}
-	return ms.stage(ctx, td)
 }
 
 func (ms *MountSession) applyLines(ctx context.Context, p string, mut Mutation) (ApplyResult, error) {
