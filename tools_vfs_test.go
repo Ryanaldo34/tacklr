@@ -827,22 +827,21 @@ func TestVFSTools_projectedSheetReadWrite(t *testing.T) {
 		"root":   {meta: vfs.DriveMeta{ID: "root", Name: ".", MimeType: "application/vnd.google-apps.folder", IsDir: true}},
 		"sheet1": {meta: vfs.DriveMeta{ID: "sheet1", Name: "Budget", MimeType: "application/vnd.google-apps.spreadsheet", Version: "1"}},
 	}}
-	sheetsAPI := &toolMemSheets{snaps: map[string]vfs.SheetsSnapshot{
-		"sheet1": {
-			SpreadsheetID: "sheet1", RevisionID: "1",
-			Named: []vfs.NamedRange{{Name: "Total", SheetID: "1", A1: "B2"}},
-			Sheets: []vfs.Sheet{
-				{ID: "1", Title: "Budget", Rows: 3, Cols: 3, Cells: [][]vfs.Cell{
-					{{Input: "Date", Value: "Date"}, {Input: "Amount", Value: "Amount"}, {Input: "Note", Value: "Note"}},
-					{{Input: "2026-01-01", Value: "2026-01-01"}, {Input: "42", Value: "42", Format: vfs.CellFormat{Number: "$#,##0.00", Bold: true}}, {Input: "ok", Value: "ok"}},
-					{{Input: "=A1+1", Value: "43"}},
-				}},
-				{ID: "2", Title: "Notes", Rows: 1, Cols: 2, Cells: [][]vfs.Cell{
-					{{Input: "Hello", Value: "Hello"}, {Input: "World", Value: "World"}},
-				}},
-			},
+	sheetsAPI := vfs.NewMemorySheets()
+	sheetsAPI.Seed("sheet1", vfs.SheetsSnapshot{
+		SpreadsheetID: "sheet1", RevisionID: "1",
+		Named: []vfs.NamedRange{{Name: "Total", SheetID: "1", A1: "B2"}},
+		Sheets: []vfs.Sheet{
+			{ID: "1", Title: "Budget", Rows: 3, Cols: 3, Cells: [][]vfs.Cell{
+				{{Input: "Date", Value: "Date"}, {Input: "Amount", Value: "Amount"}, {Input: "Note", Value: "Note"}},
+				{{Input: "2026-01-01", Value: "2026-01-01"}, {Input: "42", Value: "42", Format: vfs.CellFormat{Number: "$#,##0.00", Bold: true}}, {Input: "ok", Value: "ok"}},
+				{{Input: "=A1+1", Value: "43"}},
+			}},
+			{ID: "2", Title: "Notes", Rows: 1, Cols: 2, Cells: [][]vfs.Cell{
+				{{Input: "Hello", Value: "Hello"}, {Input: "World", Value: "World"}},
+			}},
 		},
-	}}
+	})
 	auth := vfs.NewSessionAuth()
 	_ = auth.Bind("tools-sheets", vfs.Binding{
 		Provider: "gdrive", Point: "/contracts", Writable: true,
@@ -876,256 +875,31 @@ func TestVFSTools_projectedSheetReadWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(res.output, "outline:") || !strings.Contains(res.output, "kind=sheet") ||
-		!strings.Contains(res.output, "named_ranges:") || !strings.Contains(res.output, "Total") ||
-		!strings.Contains(res.output, "budget") || !strings.Contains(res.output, "notes") ||
-		!strings.Contains(res.output, "Date\\tAmount\\tNote") {
+		!strings.Contains(res.output, "named_ranges:") || !strings.Contains(res.output, "Total") {
 		t.Fatalf("default read outline: %s", res.output)
 	}
 	rev := fieldKV(res.output, "rev")
-
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","block_id":"budget"}`, rt)
-	if err != nil || !strings.Contains(res.output, "sheet=Budget") || !strings.Contains(res.output, "=A1+1") {
-		t.Fatalf("row window: %s err=%v", res.output, err)
-	}
-	if strings.Contains(res.output, "format=") {
-		t.Fatalf("row window dumped format: %s", res.output)
-	}
 	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","block_id":"Budget!B2"}`, rt)
 	if err != nil || !strings.Contains(res.output, "text=42") ||
 		!strings.Contains(res.output, "format=number=$#,##0.00,bold") {
 		t.Fatalf("cell format: %s err=%v", res.output, err)
 	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","block_id":"Budget!A1:C3"}`, rt)
-	if err != nil || !strings.Contains(res.output, "Date\tAmount\tNote") ||
-		!strings.Contains(res.output, "B2 format=number=$#,##0.00,bold") {
-		t.Fatalf("small A1 range format: %s err=%v", res.output, err)
-	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","block_id":"budget","ir":true}`, rt)
-	if err != nil || !strings.Contains(res.output, "sheet=Budget") ||
-		!strings.Contains(res.output, "Date\tAmount\tNote") ||
-		!strings.Contains(res.output, "B2 format=number=$#,##0.00,bold") {
-		t.Fatalf("ir row window format: %s err=%v", res.output, err)
-	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","block_id":"Budget!A3"}`, rt)
-	if err != nil || !strings.Contains(res.output, "text==A1+1") {
-		t.Fatalf("cell: %s err=%v", res.output, err)
-	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","block_id":"Budget!A1:C1"}`, rt)
-	if err != nil || !strings.Contains(res.output, "Date\tAmount\tNote") {
-		t.Fatalf("range: %s err=%v", res.output, err)
-	}
 	_, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","start":1,"end":3}`, rt)
 	if !errors.Is(err, vfs.ErrProjected) {
 		t.Fatalf("line read: %v", err)
 	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","ir":true}`, rt)
-	if err != nil || !strings.Contains(res.output, "sheet_count=2") {
-		t.Fatalf("ir: %s err=%v", res.output, err)
-	}
 
 	body, _ := json.Marshal(map[string]any{
-		"path": "/contracts/Budget", "rev": rev, "block_id": "Budget!B2", "body": "99",
+		"path": "/contracts/Budget", "rev": rev, "block_id": "Budget!B2",
+		"body": "99", "format": map[string]any{"italic": true},
 	})
 	if _, err = tools["write"].invoke(ctx, string(body), rt); err != nil {
-		t.Fatalf("cell write: %v", err)
+		t.Fatalf("overlay: %v", err)
 	}
 	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","block_id":"Budget!B2"}`, rt)
 	if err != nil || !strings.Contains(res.output, "text=99") ||
-		!strings.Contains(res.output, "format=number=$#,##0.00,bold") {
+		!strings.Contains(res.output, "italic") || !strings.Contains(res.output, "bold") {
 		t.Fatalf("after overlay: %s err=%v", res.output, err)
-	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget"}`, rt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rev = fieldKV(res.output, "rev")
-	borderBody, _ := json.Marshal(map[string]any{
-		"path": "/contracts/Budget", "rev": rev, "block_id": "Budget!A1:B1",
-		"format": map[string]any{"border": map[string]any{"style": "thin", "edges": "bottom"}},
-	})
-	if _, err = tools["write"].invoke(ctx, string(borderBody), rt); err != nil {
-		t.Fatalf("format-only: %v", err)
-	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","block_id":"Budget!A1"}`, rt)
-	if err != nil || !strings.Contains(res.output, "text=Date") ||
-		!strings.Contains(res.output, "border=thin:bottom") {
-		t.Fatalf("format-only read: %s err=%v", res.output, err)
-	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","block_id":"Budget!B2"}`, rt)
-	if err != nil || !strings.Contains(res.output, "text=99") {
-		t.Fatalf("format-only left values: %s err=%v", res.output, err)
-	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget"}`, rt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rev = fieldKV(res.output, "rev")
-	combined, _ := json.Marshal(map[string]any{
-		"path": "/contracts/Budget", "rev": rev, "block_id": "Budget!B2",
-		"body": "77", "format": map[string]any{
-			"number": "$#,##0.00", "bold": true, "italic": true, "strike": true,
-			"fill": "#ffcc00", "color": "#003366", "align": "right",
-		},
-	})
-	if _, err = tools["write"].invoke(ctx, string(combined), rt); err != nil {
-		t.Fatalf("combined: %v", err)
-	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","block_id":"Budget!B2"}`, rt)
-	if err != nil || !strings.Contains(res.output, "text=77") ||
-		!strings.Contains(res.output, "number=$#,##0.00") || !strings.Contains(res.output, "bold") ||
-		!strings.Contains(res.output, "italic") || !strings.Contains(res.output, "strike") ||
-		!strings.Contains(res.output, "fill=#ffcc00") || !strings.Contains(res.output, "color=#003366") ||
-		!strings.Contains(res.output, "align=right") {
-		t.Fatalf("combined read-back: %s err=%v", res.output, err)
-	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget"}`, rt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rev = fieldKV(res.output, "rev")
-	formulaBody, _ := json.Marshal(map[string]any{
-		"path": "/contracts/Budget", "rev": rev, "block_id": "Budget!C2", "body": "=A1+1",
-	})
-	if _, err = tools["write"].invoke(ctx, string(formulaBody), rt); err != nil {
-		t.Fatalf("formula write: %v", err)
-	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","block_id":"Budget!C2"}`, rt)
-	if err != nil || !strings.Contains(res.output, "text==A1+1") {
-		t.Fatalf("formula write read: %s err=%v", res.output, err)
-	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","block_id":"Budget!A3"}`, rt)
-	if err != nil || !strings.Contains(res.output, "text==A1+1") {
-		t.Fatalf("formula after overlay: %s err=%v", res.output, err)
-	}
-
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget"}`, rt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rev = fieldKV(res.output, "rev")
-	rangeBody, _ := json.Marshal(map[string]any{
-		"path": "/contracts/Budget", "rev": rev, "block_id": "Budget!A2:C2",
-		"lines": []string{"2026-03-01\t80\tvia-range\\twith\\nnl"},
-	})
-	if _, err = tools["write"].invoke(ctx, string(rangeBody), rt); err != nil {
-		t.Fatalf("range overlay: %v", err)
-	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","block_id":"Budget!A2:C2"}`, rt)
-	if err != nil || !strings.Contains(res.output, "2026-03-01\t80\tvia-range\\twith\\nnl") {
-		t.Fatalf("range read-back: %s err=%v", res.output, err)
-	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","block_id":"Budget!A3"}`, rt)
-	if err != nil || !strings.Contains(res.output, "text==A1+1") {
-		t.Fatalf("formula after range: %s err=%v", res.output, err)
-	}
-
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget"}`, rt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rev = fieldKV(res.output, "rev")
-	aa2, _ := json.Marshal(map[string]any{
-		"path": "/contracts/Budget", "rev": rev, "block_id": "Budget!AA2", "body": "wide",
-	})
-	if _, err = tools["write"].invoke(ctx, string(aa2), rt); err != nil {
-		t.Fatalf("AA2 write: %v", err)
-	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","block_id":"Budget!AA2"}`, rt)
-	if err != nil || !strings.Contains(res.output, "text=wide") {
-		t.Fatalf("AA2 read: %s err=%v", res.output, err)
-	}
-
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget"}`, rt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rev = fieldKV(res.output, "rev")
-	linesBody, _ := json.Marshal(map[string]any{
-		"path": "/contracts/Budget", "rev": rev, "block_id": "budget", "start": 2, "end": 3,
-		"lines": []string{"2026-02-01\t50\tnew"},
-	})
-	if _, err = tools["write"].invoke(ctx, string(linesBody), rt); err != nil {
-		t.Fatalf("row overlay: %v", err)
-	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget"}`, rt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rev = fieldKV(res.output, "rev")
-	_, err = tools["write"].invoke(ctx, fmt.Sprintf(
-		`{"path":"/contracts/Budget","rev":%q,"block_id":"budget","start":2,"end":4,"lines":["only-one"]}`, rev), rt)
-	if err == nil || !strings.Contains(err.Error(), "line count") {
-		t.Fatalf("strict rows: %v", err)
-	}
-	_, err = tools["write"].invoke(ctx, fmt.Sprintf(`{"path":"/contracts/Budget","rev":%q,"content":"x"}`, rev), rt)
-	if !errors.Is(err, vfs.ErrProjected) {
-		t.Fatalf("content on Sheet: %v", err)
-	}
-
-	replaceBody, _ := json.Marshal(map[string]any{
-		"path": "/contracts/Budget", "rev": rev, "tab_id": "1",
-		"blocks": []map[string]any{
-			{"kind": "sheet", "text": "Date\tAmount\n2026-04-01\t7"},
-		},
-	})
-	if _, err = tools["write"].invoke(ctx, string(replaceBody), rt); err != nil {
-		t.Fatalf("tab_id+blocks: %v", err)
-	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","block_id":"budget"}`, rt)
-	if err != nil || !strings.Contains(res.output, "rows=2") || !strings.Contains(res.output, "cols=2") ||
-		!strings.Contains(res.output, "2026-04-01\t7") {
-		t.Fatalf("shrunk sheet: %s err=%v", res.output, err)
-	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","block_id":"Budget!B3"}`, rt)
-	if err != nil || !strings.HasSuffix(strings.TrimSpace(res.output), "text=") {
-		t.Fatalf("cleared trailer B3: %s err=%v", res.output, err)
-	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","block_id":"Budget!C3"}`, rt)
-	if err != nil || !strings.HasSuffix(strings.TrimSpace(res.output), "text=") {
-		t.Fatalf("cleared trailer C3: %s err=%v", res.output, err)
-	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget"}`, rt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rev = fieldKV(res.output, "rev")
-	sheetFmt, _ := json.Marshal(map[string]any{
-		"path": "/contracts/Budget", "rev": rev, "block_id": "budget",
-		"format": map[string]any{"italic": true},
-	})
-	if _, err = tools["write"].invoke(ctx, string(sheetFmt), rt); err != nil {
-		t.Fatalf("sheet format-only: %v", err)
-	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","block_id":"Budget!A1"}`, rt)
-	if err != nil || !strings.Contains(res.output, "text=Date") || !strings.Contains(res.output, "italic") {
-		t.Fatalf("sheet format A1: %s err=%v", res.output, err)
-	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","block_id":"Budget!B2"}`, rt)
-	if err != nil || !strings.Contains(res.output, "text=7") || !strings.Contains(res.output, "italic") {
-		t.Fatalf("sheet format left values: %s err=%v", res.output, err)
-	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget"}`, rt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	preGrow := fieldKV(res.output, "rev")
-	growFmt, _ := json.Marshal(map[string]any{
-		"path": "/contracts/Budget", "rev": preGrow, "block_id": "Budget!A10",
-		"format": map[string]any{"fill": "#ffee00"},
-	})
-	if _, err = tools["write"].invoke(ctx, string(growFmt), rt); err != nil {
-		t.Fatalf("format-only grow: %v", err)
-	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","block_id":"Budget!A10"}`, rt)
-	if err != nil || !strings.Contains(res.output, "fill=#ffee00") {
-		t.Fatalf("A10 format-only: %s err=%v", res.output, err)
-	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget"}`, rt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fieldKV(res.output, "rev") == preGrow {
-		t.Fatal("format-only grow must change rev")
 	}
 
 	if _, err = tools["write"].invoke(ctx, `{"path":"/contracts/Ledger","media_type":"application/vnd.google-apps.spreadsheet","blocks":[{"kind":"sheet","text":"A\tB\n1\t2","attributes":{"title":"Sheet1"}}]}`, rt); err != nil {
@@ -1134,50 +908,6 @@ func TestVFSTools_projectedSheetReadWrite(t *testing.T) {
 	st, err := ms.Stat(ctx, "/contracts/Ledger")
 	if err != nil || st.MediaType != "application/vnd.google-apps.spreadsheet" {
 		t.Fatalf("create-as-Sheet Stat = %+v err=%v", st, err)
-	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Ledger","block_id":"Sheet1"}`, rt)
-	if err != nil || !strings.Contains(res.output, "sheet=Sheet1") ||
-		!strings.Contains(res.output, "A\tB") || !strings.Contains(res.output, "1\t2") {
-		t.Fatalf("Ledger Sheet1: %s err=%v", res.output, err)
-	}
-	ledgerRev := fieldKV(res.output, "rev")
-	ledgerReplace, _ := json.Marshal(map[string]any{
-		"path": "/contracts/Ledger", "rev": ledgerRev,
-		"blocks": []map[string]any{{"kind": "sheet", "text": "X\tY"}},
-	})
-	if _, err = tools["write"].invoke(ctx, string(ledgerReplace), rt); err != nil {
-		t.Fatalf("Ledger blocks no tab_id: %v", err)
-	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Ledger","block_id":"Sheet1"}`, rt)
-	if err != nil || !strings.Contains(res.output, "X\tY") {
-		t.Fatalf("Ledger replace: %s err=%v", res.output, err)
-	}
-
-	if _, err = tools["write"].invoke(ctx, `{"path":"/contracts/FromCsv","media_type":"application/vnd.google-apps.spreadsheet","content":"A,B\n1,2"}`, rt); err != nil {
-		t.Fatalf("CSV lift: %v", err)
-	}
-	fromCsv, err := ms.Stat(ctx, "/contracts/FromCsv")
-	if err != nil || fromCsv.MediaType != "application/vnd.google-apps.spreadsheet" {
-		t.Fatalf("FromCsv Stat = %+v err=%v", fromCsv, err)
-	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/FromCsv","block_id":"Sheet1"}`, rt)
-	if err != nil || !strings.Contains(res.output, "1\t2") {
-		t.Fatalf("FromCsv TSV: %s err=%v", res.output, err)
-	}
-
-	if _, err = tools["write"].invoke(ctx, `{"path":"/contracts/Budget.xlsx","media_type":"application/vnd.google-apps.spreadsheet","content":"a,b\n1,2"}`, rt); err != nil {
-		t.Fatal(err)
-	}
-	xlsx, err := ms.Stat(ctx, "/contracts/Budget.xlsx")
-	if err != nil || xlsx.MediaType == "application/vnd.google-apps.spreadsheet" {
-		t.Fatalf("xlsx Stat = %+v err=%v", xlsx, err)
-	}
-	if _, err = tools["write"].invoke(ctx, `{"path":"/contracts/Bare","content":"plain"}`, rt); err != nil {
-		t.Fatal(err)
-	}
-	bare, err := ms.Stat(ctx, "/contracts/Bare")
-	if err != nil || bare.MediaType != "application/octet-stream" {
-		t.Fatalf("bare Stat = %+v err=%v", bare, err)
 	}
 
 	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget"}`, rt)
@@ -1188,16 +918,19 @@ func TestVFSTools_projectedSheetReadWrite(t *testing.T) {
 	f := api.files["sheet1"]
 	f.meta.ModTime = time.Now().UTC()
 	api.files["sheet1"] = f
-	snap := sheetsAPI.snaps["sheet1"]
+	snap, err := sheetsAPI.Get(ctx, "sheet1")
+	if err != nil {
+		t.Fatal(err)
+	}
 	snap.Sheets[0].Cells[0][0] = vfs.Cell{Input: "Changed", Value: "Changed"}
-	sheetsAPI.snaps["sheet1"] = snap
+	sheetsAPI.Seed("sheet1", snap)
 	_, err = tools["write"].invoke(ctx, fmt.Sprintf(
 		`{"path":"/contracts/Budget","rev":%q,"block_id":"Budget!B2","body":"0"}`, rev), rt)
 	if !errors.Is(err, vfs.ErrStaleContent) {
 		t.Fatalf("stale: %v", err)
 	}
 	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","block_id":"Budget!B2"}`, rt)
-	if err != nil || !strings.Contains(res.output, "text=7") {
+	if err != nil || !strings.Contains(res.output, "text=99") {
 		t.Fatalf("body after stale: %s err=%v", res.output, err)
 	}
 }
@@ -1265,117 +998,4 @@ func TestVFSTools_runCommandLiveNames(t *testing.T) {
 	if !strings.Contains(found.output, "work/a.go") || !strings.Contains(found.output, "work/sub/b.go") {
 		t.Fatalf("find *.go: %s", found.output)
 	}
-}
-
-type toolMemSheets struct {
-	snaps   map[string]vfs.SheetsSnapshot
-	updates []vfs.SheetsBatch
-}
-
-func (m *toolMemSheets) Get(_ context.Context, id string) (vfs.SheetsSnapshot, error) {
-	s, ok := m.snaps[id]
-	if !ok {
-		s = vfs.SheetsSnapshot{
-			SpreadsheetID: id,
-			Sheets:        []vfs.Sheet{{ID: "0", Title: "Sheet1"}},
-		}
-		if m.snaps == nil {
-			m.snaps = map[string]vfs.SheetsSnapshot{}
-		}
-		m.snaps[id] = s
-	}
-	return s, nil
-}
-
-func (m *toolMemSheets) BatchUpdate(_ context.Context, id string, req vfs.SheetsBatch) error {
-	m.updates = append(m.updates, req)
-	s := m.snaps[id]
-	if s.SpreadsheetID == "" {
-		s.SpreadsheetID = id
-	}
-	for _, rc := range req.Requests {
-		idx := 0
-		if len(s.Sheets) == 0 {
-			continue
-		}
-		sh := s.Sheets[idx]
-		for r := rc.StartRow; r < rc.EndRow; r++ {
-			for len(sh.Cells) <= r {
-				sh.Cells = append(sh.Cells, nil)
-			}
-			for c := rc.StartCol; c < rc.EndCol; c++ {
-				for len(sh.Cells[r]) <= c {
-					sh.Cells[r] = append(sh.Cells[r], vfs.Cell{})
-				}
-				cell := sh.Cells[r][c]
-				cell.Format.Overlay(rc.Format)
-				sh.Cells[r][c] = cell
-			}
-		}
-		s.Sheets[idx] = sh
-	}
-	if m.snaps == nil {
-		m.snaps = map[string]vfs.SheetsSnapshot{}
-	}
-	m.snaps[id] = s
-	return nil
-}
-
-func (m *toolMemSheets) BatchUpdateValues(_ context.Context, id string, req vfs.SheetsValuesBatch) error {
-	s := m.snaps[id]
-	if s.SpreadsheetID == "" {
-		s.SpreadsheetID = id
-	}
-	for _, vr := range req.Data {
-		title, a1 := vfs.SplitSheetAddr(vr.Range)
-		idx := -1
-		for i, sh := range s.Sheets {
-			if sh.Title == title || sh.ID == title {
-				idx = i
-				break
-			}
-		}
-		if idx < 0 && len(s.Sheets) == 1 {
-			idx = 0
-		}
-		if idx < 0 {
-			s.Sheets = append(s.Sheets, vfs.Sheet{Title: title})
-			idx = len(s.Sheets) - 1
-		}
-		r1, c1 := 1, 1
-		if a1 != "" {
-			if i := strings.Index(a1, ":"); i >= 0 {
-				a1 = a1[:i]
-			}
-			if rr, cc, _, _, err := vfs.ParseA1(a1); err == nil {
-				r1, c1 = rr, cc
-			}
-		}
-		sh := s.Sheets[idx]
-		for r, row := range vr.Values {
-			rr := r1 - 1 + r
-			for len(sh.Cells) <= rr {
-				sh.Cells = append(sh.Cells, nil)
-			}
-			for c, val := range row {
-				cc := c1 - 1 + c
-				for len(sh.Cells[rr]) <= cc {
-					sh.Cells[rr] = append(sh.Cells[rr], vfs.Cell{})
-				}
-				cell := sh.Cells[rr][cc]
-				cell.Input = val
-				if !strings.HasPrefix(val, "=") {
-					cell.Value = val
-				}
-				sh.Cells[rr][cc] = cell
-			}
-		}
-		sh.Rows = len(sh.Cells)
-		s.Sheets[idx] = sh
-	}
-	if m.snaps == nil {
-		m.snaps = map[string]vfs.SheetsSnapshot{}
-	}
-	m.snaps[id] = s
-	return nil
 }

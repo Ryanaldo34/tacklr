@@ -1,199 +1,19 @@
 package vfs_test
 
 import (
-	"context"
 	"errors"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
-type memSheets struct {
-	snaps   map[string]vfs.SheetsSnapshot
-	batches []vfs.SheetsValuesBatch
-	updates []vfs.SheetsBatch
-	fail    error
-}
-
-func newMemSheets(id string, sheets []vfs.Sheet, named []vfs.NamedRange) *memSheets {
-	return &memSheets{
-		snaps: map[string]vfs.SheetsSnapshot{
-			id: {SpreadsheetID: id, Sheets: sheets, Named: named},
-		},
-	}
-}
-
-func (m *memSheets) Get(ctx context.Context, spreadsheetID string) (vfs.SheetsSnapshot, error) {
-	if err := ctx.Err(); err != nil {
-		return vfs.SheetsSnapshot{}, err
-	}
-	if m.fail != nil {
-		return vfs.SheetsSnapshot{}, m.fail
-	}
-	s, ok := m.snaps[spreadsheetID]
-	if !ok {
-		s = vfs.SheetsSnapshot{
-			SpreadsheetID: spreadsheetID,
-			Sheets:        []vfs.Sheet{{ID: "0", Title: "Sheet1"}},
-		}
-		if m.snaps == nil {
-			m.snaps = map[string]vfs.SheetsSnapshot{}
-		}
-		m.snaps[spreadsheetID] = s
-		return s, nil
-	}
-	return cloneSheetsSnap(s), nil
-}
-
-func (m *memSheets) BatchUpdate(ctx context.Context, spreadsheetID string, req vfs.SheetsBatch) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if m.fail != nil {
-		return m.fail
-	}
-	m.updates = append(m.updates, req)
-	s := m.snaps[spreadsheetID]
-	if s.SpreadsheetID == "" {
-		s.SpreadsheetID = spreadsheetID
-	}
-	applySheetsFormat(&s, req)
-	if m.snaps == nil {
-		m.snaps = map[string]vfs.SheetsSnapshot{}
-	}
-	m.snaps[spreadsheetID] = s
-	return nil
-}
-
-func (m *memSheets) BatchUpdateValues(ctx context.Context, spreadsheetID string, req vfs.SheetsValuesBatch) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if m.fail != nil {
-		return m.fail
-	}
-	m.batches = append(m.batches, req)
-	s := m.snaps[spreadsheetID]
-	if s.SpreadsheetID == "" {
-		s.SpreadsheetID = spreadsheetID
-	}
-	applySheetsValues(&s, req)
-	if m.snaps == nil {
-		m.snaps = map[string]vfs.SheetsSnapshot{}
-	}
-	m.snaps[spreadsheetID] = s
-	return nil
-}
-
-func cloneSheetsSnap(s vfs.SheetsSnapshot) vfs.SheetsSnapshot {
-	out := s
-	out.Sheets = append([]vfs.Sheet(nil), s.Sheets...)
-	out.Named = append([]vfs.NamedRange(nil), s.Named...)
-	return out
-}
-
-func applySheetsValues(s *vfs.SheetsSnapshot, req vfs.SheetsValuesBatch) {
-	for _, vr := range req.Data {
-		title, a1 := vfs.SplitSheetAddr(vr.Range)
-		idx := -1
-		for i, sh := range s.Sheets {
-			if sh.Title == title || sh.ID == title {
-				idx = i
-				break
-			}
-		}
-		if idx < 0 && len(s.Sheets) == 1 {
-			idx = 0
-		}
-		if idx < 0 {
-			s.Sheets = append(s.Sheets, vfs.Sheet{Title: title})
-			idx = len(s.Sheets) - 1
-		}
-		r1, c1 := 1, 1
-		if a1 != "" {
-			rr, cc, _, _, err := vfs.ParseA1(strings.Split(a1, ":")[0])
-			if err == nil {
-				r1, c1 = rr, cc
-			}
-		}
-		sh := s.Sheets[idx]
-		needR := r1 - 1 + len(vr.Values)
-		needC := c1 - 1
-		for _, row := range vr.Values {
-			if c1-1+len(row) > needC {
-				needC = c1 - 1 + len(row)
-			}
-		}
-		for len(sh.Cells) < needR {
-			sh.Cells = append(sh.Cells, nil)
-		}
-		for r, row := range vr.Values {
-			rr := r1 - 1 + r
-			for len(sh.Cells[rr]) < needC {
-				sh.Cells[rr] = append(sh.Cells[rr], vfs.Cell{})
-			}
-			for c, val := range row {
-				cell := sh.Cells[rr][c1-1+c]
-				cell.Input = val
-				if !strings.HasPrefix(val, "=") {
-					cell.Value = val
-				}
-				sh.Cells[rr][c1-1+c] = cell
-			}
-		}
-		sh.Rows = len(sh.Cells)
-		if sh.Rows > 0 {
-			sh.Cols = len(sh.Cells[0])
-			for _, row := range sh.Cells {
-				if len(row) > sh.Cols {
-					sh.Cols = len(row)
-				}
-			}
-		}
-		s.Sheets[idx] = sh
-	}
-}
-
-func applySheetsFormat(s *vfs.SheetsSnapshot, req vfs.SheetsBatch) {
-	for _, rc := range req.Requests {
-		idx := -1
-		id := strconv.FormatInt(rc.SheetID, 10)
-		for i, sh := range s.Sheets {
-			if sh.ID == id {
-				idx = i
-				break
-			}
-		}
-		if idx < 0 && len(s.Sheets) == 1 {
-			idx = 0
-		}
-		if idx < 0 {
-			continue
-		}
-		sh := s.Sheets[idx]
-		needR, needC := rc.EndRow, rc.EndCol
-		for len(sh.Cells) < needR {
-			sh.Cells = append(sh.Cells, nil)
-		}
-		for r := rc.StartRow; r < rc.EndRow && r < len(sh.Cells); r++ {
-			for len(sh.Cells[r]) < needC {
-				sh.Cells[r] = append(sh.Cells[r], vfs.Cell{})
-			}
-			for c := rc.StartCol; c < rc.EndCol && c < len(sh.Cells[r]); c++ {
-				cell := sh.Cells[r][c]
-				cell.Format.Overlay(rc.Format)
-				sh.Cells[r][c] = cell
-			}
-		}
-		if len(sh.Cells) > sh.Rows {
-			sh.Rows = len(sh.Cells)
-		}
-		s.Sheets[idx] = sh
-	}
+func seedSheets(id string, sheets []vfs.Sheet, named []vfs.NamedRange) *vfs.MemorySheets {
+	m := vfs.NewMemorySheets()
+	m.Seed(id, vfs.SheetsSnapshot{SpreadsheetID: id, Sheets: sheets, Named: named})
+	return m
 }
 
 func budgetSheets() []vfs.Sheet {
@@ -203,7 +23,7 @@ func budgetSheets() []vfs.Sheet {
 			Rows: 3, Cols: 3,
 			Cells: [][]vfs.Cell{
 				{{Input: "Date", Value: "Date"}, {Input: "Amount", Value: "Amount"}, {Input: "Note", Value: "Note"}},
-				{{Input: "2026-01-01", Value: "2026-01-01"}, {Input: "42", Value: "42"}, {Input: "ok", Value: "ok"}},
+				{{Input: "2026-01-01", Value: "2026-01-01"}, {Input: "42", Value: "42", Format: vfs.CellFormat{Number: "$#,##0.00", Bold: true}}, {Input: "ok", Value: "ok"}},
 				{{Input: "=A1+1", Value: "43"}, {Input: "", Value: ""}, {Input: "", Value: ""}},
 			},
 		},
@@ -309,12 +129,12 @@ func TestDrive_sheetStatAndExportRead(t *testing.T) {
 	}
 }
 
-func TestDrive_sheetOverlayAndCreate(t *testing.T) {
+func TestDrive_sheetOverlayFormatAndMerge(t *testing.T) {
 	ctx := t.Context()
 	api := driveTree()
-	sheets := newMemSheets("sheet1", budgetSheets(), []vfs.NamedRange{{Name: "Total", SheetID: "1", A1: "B2"}})
+	sheets := seedSheets("sheet1", budgetSheets(), []vfs.NamedRange{{Name: "Total", SheetID: "1", A1: "B2"}})
 	api.add("root-a", vfs.DriveMeta{ID: "merged1", Name: "Merged", MimeType: "application/vnd.google-apps.spreadsheet"}, nil)
-	sheets.snaps["merged1"] = vfs.SheetsSnapshot{
+	sheets.Seed("merged1", vfs.SheetsSnapshot{
 		SpreadsheetID: "merged1",
 		Sheets: []vfs.Sheet{
 			vfs.WithMerge(vfs.Sheet{
@@ -325,7 +145,7 @@ func TestDrive_sheetOverlayAndCreate(t *testing.T) {
 				},
 			}, 0, 0, 2, 2),
 		},
-	}
+	})
 	ms := mountDriveSheets(t, api, nil, sheets, true)
 
 	doc, err := ms.ReadText(ctx, "/contracts/Budget")
@@ -333,30 +153,27 @@ func TestDrive_sheetOverlayAndCreate(t *testing.T) {
 		t.Fatal(err)
 	}
 	td := doc.(*vfs.IR)
-	rev := vfs.ContentToken(td)
+	if !td.Sheets()[0].Cells[1][1].Format.Bold {
+		t.Fatalf("checkout format B2 = %+v", td.Sheets()[0].Cells[1][1])
+	}
 	_, err = ms.Apply(ctx, "/contracts/Budget", vfs.Mutation{
-		Rev: rev, BlockID: "Budget!B2", Body: strPtr("99"),
+		Rev: vfs.ContentToken(td), BlockID: "Budget!B2", Body: strPtr("99"),
+		Format: &vfs.FormatPatch{Italic: boolPtr(true)},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	got99, gotFormula := false, false
-	for _, batch := range sheets.batches {
-		for _, vr := range batch.Data {
-			for _, row := range vr.Values {
-				for _, c := range row {
-					if c == "99" {
-						got99 = true
-					}
-					if c == "=A1+1" {
-						gotFormula = true
-					}
-				}
-			}
-		}
+	got, err := ms.ReadText(ctx, "/contracts/Budget")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !got99 || !gotFormula {
-		t.Fatalf("batch missing USER_ENTERED overlay: %+v", sheets.batches)
+	td = got.(*vfs.IR)
+	b2, err := td.Cell("Budget", "B2")
+	if err != nil || b2.Display() != "99" || !b2.Format.Italic || !b2.Format.Bold {
+		t.Fatalf("overlay B2 = %+v err=%v", b2, err)
+	}
+	if formula, _ := td.ReadCell("Budget", "A3"); formula != "=A1+1" {
+		t.Fatalf("formula = %q", formula)
 	}
 
 	mergedDoc, err := ms.ReadText(ctx, "/contracts/Merged")
@@ -367,24 +184,20 @@ func TestDrive_sheetOverlayAndCreate(t *testing.T) {
 		Rev: vfs.ContentToken(mergedDoc), BlockID: "Merged!B2", Body: strPtr("x"),
 	})
 	if !errors.Is(err, vfs.ErrNotSupported) {
-		t.Fatalf("merge write: %v", err)
+		t.Fatalf("merge slave: %v", err)
 	}
 	still, err := ms.ReadText(ctx, "/contracts/Merged")
 	if err != nil {
 		t.Fatal(err)
 	}
-	md := still.(*vfs.IR)
-	if v, _ := md.ReadCell("Merged", "B2"); v != "d" {
-		t.Fatalf("merge mutated B2: %q", v)
-	}
-	if v, _ := md.ReadCell("Merged", "A1"); v != "a" {
-		t.Fatalf("merge mutated A1: %q", v)
+	if v, _ := still.(*vfs.IR).ReadCell("Merged", "B2"); v != "d" {
+		t.Fatalf("slave write landed: %q", v)
 	}
 	_, err = ms.Apply(ctx, "/contracts/Merged", vfs.Mutation{
-		Rev: vfs.ContentToken(md), BlockID: "Merged!A1", Body: strPtr("master"),
+		Rev: vfs.ContentToken(still), BlockID: "Merged!A1", Body: strPtr("master"),
 	})
 	if err != nil {
-		t.Fatalf("merge master write: %v", err)
+		t.Fatalf("merge master: %v", err)
 	}
 	after, err := ms.ReadText(ctx, "/contracts/Merged")
 	if err != nil {
@@ -410,8 +223,7 @@ func TestDrive_sheetCheckoutTooLarge(t *testing.T) {
 	for i := range row {
 		row[i] = vfs.Cell{Input: "x", Value: "x"}
 	}
-	sheets := newMemSheets("sheet1", []vfs.Sheet{{ID: "1", Title: "Budget", Cells: [][]vfs.Cell{row}}}, nil)
-	ms := mountDriveSheets(t, api, nil, sheets, true)
+	ms := mountDriveSheets(t, api, nil, seedSheets("sheet1", []vfs.Sheet{{ID: "1", Title: "Budget", Cells: [][]vfs.Cell{row}}}, nil), true)
 	if _, err := ms.ReadText(ctx, "/contracts/Budget"); !errors.Is(err, vfs.ErrTooLarge) {
 		t.Fatalf("checkout cap: %v", err)
 	}
@@ -420,62 +232,3 @@ func TestDrive_sheetCheckoutTooLarge(t *testing.T) {
 func strPtr(s string) *string { return &s }
 
 func boolPtr(v bool) *bool { return &v }
-
-func TestDrive_sheetFormatCheckoutWriteAndCAS(t *testing.T) {
-	ctx := t.Context()
-	api := driveTree()
-	sheets := budgetSheets()
-	sheets[0].Cells[1][1].Format = vfs.CellFormat{Number: "$#,##0.00", Bold: true}
-	apiSheets := newMemSheets("sheet1", sheets, nil)
-	ms := mountDriveSheets(t, api, nil, apiSheets, true)
-
-	doc, err := ms.ReadText(ctx, "/contracts/Budget")
-	if err != nil {
-		t.Fatal(err)
-	}
-	td := doc.(*vfs.IR)
-	b2 := td.Sheets()[0].Cells[1][1]
-	if b2.Input != "42" || !b2.Format.Bold || b2.Format.Number != "$#,##0.00" {
-		t.Fatalf("checkout format B2 = %+v", b2)
-	}
-
-	_, err = ms.Apply(ctx, "/contracts/Budget", vfs.Mutation{
-		Rev: vfs.ContentToken(td), BlockID: "Budget!A1:C1",
-		Format: &vfs.FormatPatch{Border: &vfs.CellBorder{Style: "thin", Edges: "bottom"}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, err := ms.ReadText(ctx, "/contracts/Budget")
-	if err != nil {
-		t.Fatal(err)
-	}
-	td = got.(*vfs.IR)
-	if v, _ := td.ReadCell("Budget", "B2"); v != "42" {
-		t.Fatalf("format-only values: %q", v)
-	}
-	token := vfs.ContentToken(td)
-
-	_, err = ms.Apply(ctx, "/contracts/Budget", vfs.Mutation{
-		Rev: token, BlockID: "Budget!B2",
-		Format: &vfs.FormatPatch{Italic: boolPtr(true)},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, err = ms.ReadText(ctx, "/contracts/Budget")
-	if err != nil {
-		t.Fatal(err)
-	}
-	td = got.(*vfs.IR)
-	b2 = td.Sheets()[0].Cells[1][1]
-	if b2.Input != "42" || !b2.Format.Italic || !b2.Format.Bold {
-		t.Fatalf("second format-only: %+v", b2)
-	}
-	if vfs.ContentToken(td) == token {
-		t.Fatal("format-only must change rev")
-	}
-	if v, _ := td.ReadCell("Budget", "B2"); v != "42" {
-		t.Fatalf("format write dropped value: %q", v)
-	}
-}

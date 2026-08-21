@@ -10,7 +10,8 @@ import (
 	"google.golang.org/api/sheets/v4"
 )
 
-// SheetsAPI is the Sheets subset used by the provider. Tests inject a fake.
+// SheetsAPI is the Sheets subset used by the provider. MemorySheets is the
+// in-memory implementation; GoogleSheets talks to the service.
 type SheetsAPI interface {
 	Get(ctx context.Context, spreadsheetID string) (SheetsSnapshot, error)
 	BatchUpdateValues(ctx context.Context, spreadsheetID string, req SheetsValuesBatch) error

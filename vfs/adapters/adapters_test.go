@@ -131,6 +131,60 @@ func TestRegisterCommon(t *testing.T) {
 	}
 }
 
+func TestMountSession_xlsxCreateFormatPersists(t *testing.T) {
+	if err := RegisterCommon(vfs.DefaultContentRegistry()); err != nil {
+		t.Fatal(err)
+	}
+	ctx := t.Context()
+	reg := vfs.NewBackendRegistry()
+	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := vfs.NewMountSession("xlsx-create", reg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
+		t.Fatal(err)
+	}
+	body := "Amount,Note\n42,ok"
+	_, err = ms.Apply(ctx, "/work/Budget.xlsx", vfs.Mutation{Content: &body})
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, err := ms.ReadText(ctx, "/work/Budget.xlsx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ms.Apply(ctx, "/work/Budget.xlsx", vfs.Mutation{
+		Rev: vfs.ContentToken(doc), BlockID: "Budget!B2",
+	}); err == nil || !strings.Contains(err.Error(), "no mutation") {
+		t.Fatalf("block_id without value or format: %v", err)
+	}
+	on := true
+	_, err = ms.Apply(ctx, "/work/Budget.xlsx", vfs.Mutation{
+		Rev: vfs.ContentToken(doc), BlockID: "Budget!B2",
+		Format: &vfs.FormatPatch{Bold: &on, Number: strPtr("$#,##0.00")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ms.ReadText(ctx, "/work/Budget.xlsx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, ok := vfs.AsGrid(got)
+	if !ok {
+		t.Fatalf("type %T", got)
+	}
+	cell, err := g.Cell("Budget", "B2")
+	if err != nil || cell.Display() != "ok" || !cell.Format.Bold || cell.Format.Number != "$#,##0.00" {
+		t.Fatalf("persisted B2 = %+v err=%v", cell, err)
+	}
+}
+
+func strPtr(s string) *string { return &s }
+
 func TestXLSX_usedRangeFormulaFormatRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	src, err := vfs.NewTabularDocument("/work/Budget.xlsx", XLSXMediaType, []vfs.Sheet{{
