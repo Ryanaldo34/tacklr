@@ -2,6 +2,7 @@ package session
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -126,6 +127,9 @@ func (s *SessionManager) returnInterrupt(id string, result []byte) (interrupt.In
 	}
 	if validator, ok := intr.(interrupt.PayloadValidator); ok {
 		if err := validator.ValidatePayload(result); err != nil {
+			if errors.Is(err, interrupt.ErrInvalidPayload) {
+				return nil, err
+			}
 			return nil, fmt.Errorf("%w: %w", interrupt.ErrInvalidPayload, err)
 		}
 	}

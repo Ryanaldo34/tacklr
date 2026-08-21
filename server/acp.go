@@ -633,9 +633,6 @@ func presentationToACP(threadID string, ev streaming.StreamEvent) ([][]byte, err
 	}
 }
 
-// acpToolCallID is the client lifecycle id (same as ToolCall.Key).
-func acpToolCallID(tc streaming.ToolCall) string { return tc.Key() }
-
 // acpToolCallUpdate builds the common tool_call / tool_call_update body.
 // Title is the human label; name is the programmatic tool id (ACP RFD-aligned).
 func acpToolCallUpdate(tc streaming.ToolCall, sessionUpdate, status, content string) map[string]any {
@@ -645,7 +642,7 @@ func acpToolCallUpdate(tc streaming.ToolCall, sessionUpdate, status, content str
 	}
 	update := map[string]any{
 		"sessionUpdate": sessionUpdate,
-		"toolCallId":    acpToolCallID(tc),
+		"toolCallId":    tc.Key(),
 		"title":         title,
 		"status":        status,
 	}

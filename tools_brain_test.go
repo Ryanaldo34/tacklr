@@ -3,6 +3,7 @@ package tacklr
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -733,5 +734,47 @@ func TestBrainTools_expandAndUnlinkValidationErrors(t *testing.T) {
 		"from_id":"not-a-uuid","to_id":"not-a-uuid","relation_type":"about"
 	}`, rt); err == nil || !strings.Contains(err.Error(), "from") {
 		t.Fatalf("unlink invalid uuid = %v", err)
+	}
+}
+
+type failGetStore struct {
+	*brain.MemoryStore
+	err error
+}
+
+func (s failGetStore) Get(ctx context.Context, scope brain.Scope, id uuid.UUID) (brain.Object, error) {
+	if s.err != nil {
+		return brain.Object{}, s.err
+	}
+	return s.MemoryStore.Get(ctx, scope, id)
+}
+
+func TestBrainTools_resolveFileRefPropagatesStoreFailure(t *testing.T) {
+	ctx := context.Background()
+	mem := brain.NewMemoryStore()
+	ns := uuid.New()
+	id := uuid.New()
+	if err := mem.Put(ctx, brain.Object{
+		ID: id, Kind: "Document", Title: "memo", NamespaceID: ns, UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	eng, err := brain.NewEngine(failGetStore{MemoryStore: mem, err: errors.New("brain store down")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := mustNewAgent(t, AgentOptions{
+		Config:          Config{MaxWindowSize: 1024},
+		Model:           &mockStrategy{},
+		Brain:           eng,
+		SearchNamespace: &ns,
+	})
+	expand := h.findTool("expand", "")
+	if expand == nil {
+		t.Fatal("expand required")
+	}
+	_, err = expand.invoke(ctx, `{"object_id":"`+id.String()+`"}`, turnRuntime(h))
+	if err == nil || !strings.Contains(err.Error(), "brain store down") {
+		t.Fatalf("want store failure propagated, got %v", err)
 	}
 }

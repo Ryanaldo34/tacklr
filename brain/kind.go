@@ -105,7 +105,7 @@ func (c *KindCatalog) register(specs ...KindSpec) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.frozen {
-		return errCatalogFrozen
+		return fmt.Errorf("%w: kind catalog is frozen", ErrInvalid)
 	}
 	maps.Copy(c.kinds, batch)
 	return nil
@@ -123,7 +123,7 @@ func (c *KindCatalog) replaceNormalized(batch map[string]KindSpec) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.frozen {
-		return errCatalogFrozen
+		return fmt.Errorf("%w: kind catalog is frozen", ErrInvalid)
 	}
 	if batch == nil {
 		batch = map[string]KindSpec{}
@@ -136,12 +136,10 @@ func (c *KindCatalog) ensureNotFrozen() error {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	if c.frozen {
-		return errCatalogFrozen
+		return fmt.Errorf("%w: kind catalog is frozen", ErrInvalid)
 	}
 	return nil
 }
-
-var errCatalogFrozen = fmt.Errorf("brain: kind catalog is frozen")
 
 func normalizeKindBatch(specs []KindSpec) (map[string]KindSpec, error) {
 	out := make(map[string]KindSpec, len(specs))

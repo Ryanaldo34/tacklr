@@ -39,12 +39,12 @@ func (e *Engine) FindLinks(ctx context.Context, scope Scope, req FindLinksReques
 		return res, err
 	}
 	if e.graphE == nil {
-		return res, ErrEdgeSearchUnavailable
+		return res, fmt.Errorf("%w: graph edge search is not available", ErrUnsupported)
 	}
 	rel := strings.TrimSpace(req.RelationType)
 	query := strings.TrimSpace(req.Query)
 	if rel == "" || query == "" {
-		return res, ErrLinkQueryRequired
+		return res, fmt.Errorf("%w: relation type and query are required", ErrInvalid)
 	}
 	limit := e.normalizeLimit(req.Limit)
 	hits, err := e.graphE.SearchEdgesText(ctx, rel, query, max(limit*2, e.cfg.CandidateK))

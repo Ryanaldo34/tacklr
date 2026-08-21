@@ -75,7 +75,7 @@ func (e *Engine) Continue(ctx context.Context, scope Scope, resultSetID uuid.UUI
 	defer func() { span.End(len(page.Objects), DegradeNone, err) }()
 
 	if resultSetID == uuid.Nil {
-		return page, ErrResultSetIDRequired
+		return page, fmt.Errorf("%w: result_set_id is required", ErrInvalid)
 	}
 	limit = e.normalizeLimit(limit)
 	set, err := results.Get(ctx, resultSetID)
@@ -135,7 +135,7 @@ func (e *Engine) materialize(ctx context.Context, scope Scope, ranked []ScoredID
 // rejected, and missing kind filters are expanded to all registered kinds.
 func (e *Engine) prepareSearch(req SearchRequest) (Filters, error) {
 	if strings.TrimSpace(req.Query) == "" {
-		return nil, ErrQueryRequired
+		return nil, fmt.Errorf("%w: query is required", ErrInvalid)
 	}
 	return e.effectiveFilters(req.Filters)
 }
@@ -269,7 +269,7 @@ func (e *Engine) hydrateIDs(ctx context.Context, scope Scope, ids []uuid.UUID) (
 // pageIDs materializes a ResultSet page. relations (optional) is stored for continue.
 func (e *Engine) pageIDs(ctx context.Context, scope Scope, ids []uuid.UUID, limit int, results ResultSetStore, relations map[uuid.UUID]Relation) (SearchPage, error) {
 	if results == nil {
-		return SearchPage{}, ErrResultSetRequired
+		return SearchPage{}, fmt.Errorf("%w: result set store is required", ErrUnsupported)
 	}
 	limit = e.normalizeLimit(limit)
 	if maxN := e.cfg.MaxResultSetSize; maxN > 0 && len(ids) > maxN {

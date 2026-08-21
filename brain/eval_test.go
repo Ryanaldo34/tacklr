@@ -289,7 +289,7 @@ func TestEval_graphRAGComposition(t *testing.T) {
 		t.Fatalf("link meta: %+v", links.Links[0].Meta)
 	}
 
-	if _, err := eng.FindLinks(ctx, scope, brain.FindLinksRequest{}); !errors.Is(err, brain.ErrLinkQueryRequired) {
+	if _, err := eng.FindLinks(ctx, scope, brain.FindLinksRequest{}); !errors.Is(err, brain.ErrInvalid) {
 		t.Fatalf("find_links required: %v", err)
 	}
 

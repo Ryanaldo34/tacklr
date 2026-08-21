@@ -86,6 +86,13 @@ type edgeKey struct {
 	rel      string
 }
 
+var (
+	_ GraphReader         = (*MemoryGraph)(nil)
+	_ GraphWriter         = (*MemoryGraph)(nil)
+	_ GraphObjectSearcher = (*MemoryGraph)(nil)
+	_ GraphEdgeSearcher   = (*MemoryGraph)(nil)
+)
+
 // MemoryGraph is an in-process GraphReader/GraphWriter/GraphObjectSearcher (tests / offline).
 // Edges are a single map; directions are derived on Neighbors.
 type MemoryGraph struct {
@@ -119,7 +126,7 @@ func (g *MemoryGraph) EnsureObject(ctx context.Context, obj Object) error {
 		return err
 	}
 	if obj.ID == uuid.Nil {
-		return ErrObjectIDRequired
+		return fmt.Errorf("%w: object id is required", ErrInvalid)
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -144,7 +151,7 @@ func (g *MemoryGraph) RemoveObject(ctx context.Context, id uuid.UUID) error {
 		return err
 	}
 	if id == uuid.Nil {
-		return ErrObjectIDRequired
+		return fmt.Errorf("%w: object id is required", ErrInvalid)
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()

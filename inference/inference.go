@@ -47,6 +47,8 @@ var (
 	ErrIncompleteStream = errors.New("incomplete provider stream")
 	// ErrMalformedStream means a provider emitted invalid SSE event JSON.
 	ErrMalformedStream = errors.New("malformed provider stream")
+
+	_ tacklr.InferenceStrategy = (*OpenAIInferenceStrategy)(nil)
 )
 
 func (s *OpenAIInferenceStrategy) SetSystemPrompt(prompt string) {
@@ -177,10 +179,10 @@ var getEncoding = tiktoken.GetEncoding
 
 func (s *OpenAIInferenceStrategy) CountTokens(ctx context.Context, messages []*tacklr.Message, tools []*tacklr.Tool) (int, error) {
 	if s.apiKey == "" {
-		return 0, fmt.Errorf("count tokens: %w", tacklr.ErrApiKeyNotSet)
+		return 0, tacklr.ErrApiKeyNotSet
 	}
 	if s.model == "" {
-		return 0, fmt.Errorf("count tokens: %w", tacklr.ErrModelNotSet)
+		return 0, tacklr.ErrModelNotSet
 	}
 
 	items := marshalMessagesToInput(messages)
@@ -267,10 +269,10 @@ func (s *OpenAIInferenceStrategy) CountTokens(ctx context.Context, messages []*t
 
 func (s *OpenAIInferenceStrategy) Invoke(ctx context.Context, messages []*tacklr.Message, tools []*tacklr.Tool, systemPrompt string) (chan tacklr.LLMResponseChunk, error) {
 	if s.apiKey == "" {
-		return nil, fmt.Errorf("invoke: %w", tacklr.ErrApiKeyNotSet)
+		return nil, tacklr.ErrApiKeyNotSet
 	}
 	if s.model == "" {
-		return nil, fmt.Errorf("invoke: %w", tacklr.ErrModelNotSet)
+		return nil, tacklr.ErrModelNotSet
 	}
 
 	items := marshalMessagesToInput(messages)

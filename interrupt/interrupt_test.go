@@ -28,10 +28,10 @@ func TestUserSelection_fullLifecycle(t *testing.T) {
 		t.Fatal("error string")
 	}
 
-	if err := usi.ValidatePayload([]byte(`not-json`)); err == nil {
-		t.Fatal("invalid json")
+	if err := usi.ValidatePayload([]byte(`not-json`)); err == nil || !errors.Is(err, interrupt.ErrInvalidPayload) {
+		t.Fatalf("invalid json: %v", err)
 	}
-	if err := usi.ValidatePayload([]byte(`{}`)); err == nil || !strings.Contains(err.Error(), "selectionIdx") {
+	if err := usi.ValidatePayload([]byte(`{}`)); err == nil || !errors.Is(err, interrupt.ErrInvalidPayload) || !strings.Contains(err.Error(), "selectionIdx") {
 		t.Fatalf("missing field: %v", err)
 	}
 	if err := usi.ValidatePayload([]byte(`{"selectionIdx":99}`)); err == nil {

@@ -71,6 +71,31 @@ func TestInMemoryStore_saveLoadRoundTrip(t *testing.T) {
 	}
 }
 
+func TestFaultyStore_saveAndLoadFaults(t *testing.T) {
+	ctx := context.Background()
+	inner := NewInMemoryStore()
+	cp, err := NewCheckpoint([]*streaming.Message{{Role: streaming.RoleUser, Content: "hi"}}, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	save := FaultyStore{Inner: inner, SaveErr: errors.New("disk full")}
+	if err := save.SaveSession(ctx, "s1", cp); err == nil || err.Error() != "disk full" {
+		t.Fatalf("save fault: %v", err)
+	}
+	if err := inner.SaveSession(ctx, "s1", cp); err != nil {
+		t.Fatal(err)
+	}
+	load := FaultyStore{Inner: inner, LoadErr: errors.New("db down")}
+	if _, err := load.LoadSession(ctx, "s1"); err == nil || err.Error() != "db down" {
+		t.Fatalf("load fault: %v", err)
+	}
+	ok := FaultyStore{Inner: inner}
+	got, err := ok.LoadSession(ctx, "s1")
+	if err != nil || len(got.ContextWindow) != 1 {
+		t.Fatalf("passthrough load: %+v err=%v", got, err)
+	}
+}
+
 func TestInMemoryStore_loadMissing_returnsErrSessionNotFound(t *testing.T) {
 	store := NewInMemoryStore()
 	_, err := store.LoadSession(context.Background(), "does-not-exist")

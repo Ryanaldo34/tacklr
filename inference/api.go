@@ -8,6 +8,8 @@ import (
 	"github.com/ryanaldo34/tacklr"
 )
 
+var _ tacklr.ProviderStatus = (*APIStatusError)(nil)
+
 // APIStatusError conveys an HTTP error response from an upstream LLM API.
 // Use errors.As to extract structured status/body details from a wrapped chain.
 type APIStatusError struct {

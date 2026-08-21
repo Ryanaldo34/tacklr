@@ -23,6 +23,13 @@ import (
 	"github.com/ryanaldo34/tacklr/brain"
 )
 
+var (
+	_ brain.GraphReader         = (*Graph)(nil)
+	_ brain.GraphWriter         = (*Graph)(nil)
+	_ brain.GraphObjectSearcher = (*Graph)(nil)
+	_ brain.GraphEdgeSearcher   = (*Graph)(nil)
+)
+
 // Graph implements brain.GraphWriter via HelixDB.
 type Graph struct {
 	client        *helix.Client
@@ -167,7 +174,7 @@ func (g *Graph) RemoveObject(ctx context.Context, id uuid.UUID) error {
 		return err
 	}
 	if id == uuid.Nil {
-		return brain.ErrObjectIDRequired
+		return fmt.Errorf("%w: object id is required", brain.ErrInvalid)
 	}
 	q := helix.WriteQuery("brain_remove_object")
 	oid := q.ParamString("object_id", id.String())
@@ -407,7 +414,7 @@ func (g *Graph) EnsureObject(ctx context.Context, obj brain.Object) error {
 		return err
 	}
 	if obj.ID == uuid.Nil {
-		return brain.ErrObjectIDRequired
+		return fmt.Errorf("%w: object id is required", brain.ErrInvalid)
 	}
 	exists, err := g.objectExists(ctx, obj.ID)
 	if err != nil {

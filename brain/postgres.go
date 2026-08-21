@@ -21,6 +21,13 @@ type PgxDB interface {
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 }
 
+var (
+	_ Store        = (*PostgresStore)(nil)
+	_ ObjectWriter = (*PostgresStore)(nil)
+	_ ObjectLister = (*PostgresStore)(nil)
+	_ KindWriter   = (*PostgresStore)(nil)
+)
+
 // PostgresStore implements Store against the objects / object_kinds schema.
 type PostgresStore struct {
 	db PgxDB
@@ -174,7 +181,7 @@ func (s *PostgresStore) Put(ctx context.Context, obj Object) error {
 // SoftDelete implements ObjectWriter.
 func (s *PostgresStore) SoftDelete(ctx context.Context, scope Scope, id uuid.UUID) error {
 	if id == uuid.Nil {
-		return ErrObjectIDRequired
+		return fmt.Errorf("%w: object id is required", ErrInvalid)
 	}
 	q := `UPDATE objects SET deleted_at = $1, updated_at = $1 WHERE id = $2 AND deleted_at IS NULL`
 	args := []any{time.Now().UTC(), id}

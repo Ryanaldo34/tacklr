@@ -256,17 +256,9 @@ func TestParsePermissionAndSelection_badData(t *testing.T) {
 	}
 }
 
-type failSaveStore struct {
-	*stores.InMemoryStore
-}
-
-func (f failSaveStore) SaveSession(ctx context.Context, id string, cp stores.SessionCheckpoint) error {
-	return errors.New("save fail")
-}
-
 func TestCreateSession_wireStoreIndependentOfHarnessStore(t *testing.T) {
 	// Wire session create does not require harness BaseStore.
-	r := NewRegistry(failSaveStore{InMemoryStore: stores.NewInMemoryStore()}, "default")
+	r := NewRegistry(stores.FaultyStore{Inner: stores.NewInMemoryStore(), SaveErr: errors.New("save fail")}, "default")
 	r.Register("default", AgentSpec{Options: tacklr.AgentOptions{Model: &mockInferenceStrategy{}}})
 	p := NewACPProtocol(nil).(*acpProtocol)
 	params, _ := json.Marshal(map[string]any{"cwd": "/tmp"})
@@ -582,7 +574,7 @@ func TestHandleInbound_sessionCancelRequestAndMethodNotFound(t *testing.T) {
 
 func TestHandleSessionTurn_nonClientError(t *testing.T) {
 	// Second session prompt loads from harness store; non-client LoadSession error.
-	r := NewRegistry(&failLoadStore{InMemoryStore: stores.NewInMemoryStore(), err: errors.New("db down")}, "default")
+	r := NewRegistry(stores.FaultyStore{Inner: stores.NewInMemoryStore(), LoadErr: errors.New("db down")}, "default")
 	r.Register("default", AgentSpec{
 		Options: tacklr.AgentOptions{
 			Config: tacklr.Config{MaxWindowSize: 1024},
@@ -616,22 +608,6 @@ func TestHandleSessionTurn_nonClientError(t *testing.T) {
 	if err == nil {
 		t.Fatal("want non-client load error on second prompt")
 	}
-}
-
-type failLoadStore struct {
-	*stores.InMemoryStore
-	err error
-}
-
-func (f *failLoadStore) LoadSession(ctx context.Context, id string) (stores.SessionCheckpoint, error) {
-	return stores.SessionCheckpoint{}, f.err
-}
-
-func (f *failLoadStore) SaveSession(ctx context.Context, id string, cp stores.SessionCheckpoint) error {
-	if f.InMemoryStore != nil {
-		return f.InMemoryStore.SaveSession(ctx, id, cp)
-	}
-	return nil
 }
 
 func TestOnStreamEvent_cancelledCompleteAndEncodeError(t *testing.T) {
@@ -968,10 +944,8 @@ func TestHandleSSE_bodyReadErrorAndInternalRunError(t *testing.T) {
 		t.Fatalf("code=%d", rec.Code)
 	}
 
-	// Non-client RunTurn error: use failLoadStore with Load via thread — agent path without session
-	// Internal: mock that returns error from Run is hard. Use agent not found is client error.
-	// logTurnError path for non-client: failLoadStore on load
-	r2 := NewRegistry(&failLoadStore{err: errors.New("disk fail")}, "default")
+	// Non-client RunTurn error: FaultyStore LoadSession fails on resume.
+	r2 := NewRegistry(stores.FaultyStore{LoadErr: errors.New("disk fail")}, "default")
 	r2.Register("default", AgentSpec{Options: tacklr.AgentOptions{
 		Config: tacklr.Config{MaxWindowSize: 1024},
 		Model:  &mockInferenceStrategy{},
@@ -1020,7 +994,7 @@ func TestHandleWS_acceptFailAndReadFail(t *testing.T) {
 
 func TestHandleWS_nonClientRunErrorAndWriteThreadFail(t *testing.T) {
 	// Non-client load error on WS resume path.
-	r := NewRegistry(&failLoadStore{err: errors.New("ws-db-down")}, "default")
+	r := NewRegistry(stores.FaultyStore{LoadErr: errors.New("ws-db-down")}, "default")
 	r.Register("default", AgentSpec{Options: tacklr.AgentOptions{
 		Config: tacklr.Config{MaxWindowSize: 1024},
 		Model:  &mockInferenceStrategy{},

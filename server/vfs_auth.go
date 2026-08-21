@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 
 	"github.com/ryanaldo34/tacklr/vfs"
 )
@@ -39,7 +40,7 @@ func (r *Registry) BindVFS(ctx context.Context, sessionID, agentID string, b vfs
 		return clientErrorf(ErrInvalidRequest, "sessionId is required")
 	}
 	if err := vfs.ValidateBinding(b); err != nil {
-		return clientErrorf(ErrInvalidRequest, "%s", err.Error())
+		return clientErrorCause(ErrInvalidRequest, err, "invalid vfs binding")
 	}
 	fsReg, err := r.agentFS(agentID)
 	if err != nil {
@@ -50,7 +51,7 @@ func (r *Registry) BindVFS(ctx context.Context, sessionID, agentID string, b vfs
 	}
 	auth := r.VFSAuth()
 	if err := auth.Bind(sessionID, b); err != nil {
-		return clientErrorf(ErrInvalidRequest, "%s", err.Error())
+		return clientErrorCause(ErrInvalidRequest, err, "bind vfs")
 	}
 	spec := vfs.BindingSpec(b)
 
@@ -58,15 +59,21 @@ func (r *Registry) BindVFS(ctx context.Context, sessionID, agentID string, b vfs
 	ms := r.mounts[sessionID]
 	r.mountsMu.Unlock()
 	if ms != nil {
-		_ = ms.Unmount(spec.Point)
+		if err := ms.Unmount(spec.Point); err != nil {
+			slog.Warn("vfs remount: unmount previous", "session_id", sessionID, "point", spec.Point, "error", err)
+		}
 		if err := ms.Mount(ctx, spec); err != nil {
-			_ = auth.Unbind(sessionID, spec.Point)
+			if unbindErr := auth.Unbind(sessionID, spec.Point); unbindErr != nil {
+				slog.Error("vfs bind rollback failed", "session_id", sessionID, "point", spec.Point, "error", unbindErr)
+			}
 			return err
 		}
 		return nil
 	}
 	if err := vfs.CheckMount(ctx, fsReg, sessionID, spec); err != nil {
-		_ = auth.Unbind(sessionID, spec.Point)
+		if unbindErr := auth.Unbind(sessionID, spec.Point); unbindErr != nil {
+			slog.Error("vfs bind rollback failed", "session_id", sessionID, "point", spec.Point, "error", unbindErr)
+		}
 		return err
 	}
 	return nil
@@ -78,7 +85,7 @@ func (r *Registry) RefreshVFS(sessionID, provider string, c vfs.Credential) erro
 		return clientErrorf(ErrInvalidRequest, "vfs auth is not configured")
 	}
 	if err := r.vfsAuth.Refresh(sessionID, provider, c); err != nil {
-		return clientErrorf(ErrInvalidRequest, "%s", err.Error())
+		return clientErrorCause(ErrInvalidRequest, err, "refresh vfs token")
 	}
 	return nil
 }
@@ -97,18 +104,22 @@ func (r *Registry) UnbindVFS(sessionID, point, provider string) error {
 		return clientErrorf(ErrInvalidRequest, "point or provider is required")
 	}
 	if err != nil {
-		return clientErrorf(ErrInvalidRequest, "%s", err.Error())
+		return clientErrorCause(ErrInvalidRequest, err, "unbind vfs")
 	}
 	r.mountsMu.Lock()
 	ms := r.mounts[sessionID]
 	r.mountsMu.Unlock()
 	if ms != nil && point != "" {
-		_ = ms.Unmount(point)
+		if unmountErr := ms.Unmount(point); unmountErr != nil {
+			slog.Warn("vfs unbind: unmount failed", "session_id", sessionID, "point", point, "error", unmountErr)
+		}
 	}
 	if ms != nil && point == "" && provider != "" {
 		for _, spec := range ms.Specs() {
 			if spec.Profile == provider {
-				_ = ms.Unmount(spec.Point)
+				if unmountErr := ms.Unmount(spec.Point); unmountErr != nil {
+					slog.Warn("vfs unbind: unmount failed", "session_id", sessionID, "point", spec.Point, "error", unmountErr)
+				}
 			}
 		}
 	}

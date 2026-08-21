@@ -53,7 +53,7 @@ func (p sseProtocol) handleSSE(env ProtocolEnv, w http.ResponseWriter, r *http.R
 	pr, err := validateSSERequest(body)
 	if err != nil {
 		mw := &sseMessageWriter{w: w, flusher: flusher}
-		_ = mw.WriteError(nil, err)
+		writeWireError(mw, nil, err)
 		return
 	}
 
@@ -69,7 +69,7 @@ func (p sseProtocol) handleSSE(env ProtocolEnv, w http.ResponseWriter, r *http.R
 	}, func(err error) {
 		flusher.Flush()
 		mw := &sseMessageWriter{w: w, flusher: flusher}
-		_ = mw.WriteError(nil, err)
+		writeWireError(mw, nil, err)
 	}); err != nil && !IsClientError(err) {
 		slog.Debug("sse turn stream ended", "error", err)
 	}

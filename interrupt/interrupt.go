@@ -2,7 +2,6 @@ package interrupt
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 )
 
@@ -61,14 +60,14 @@ func (c *UserSelectionInterrupt) Serialize() ([]byte, error) {
 func (c *UserSelectionInterrupt) ValidatePayload(payload []byte) error {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &raw); err != nil {
-		return fmt.Errorf("invalid JSON: %w", err)
+		return fmt.Errorf("%w: invalid JSON: %w", ErrInvalidPayload, err)
 	}
 	if _, ok := raw["selectionIdx"]; !ok {
-		return errors.New("missing required field: selectionIdx")
+		return fmt.Errorf("%w: missing required field: selectionIdx", ErrInvalidPayload)
 	}
 	var selection UserSelectionPayload
 	if err := json.Unmarshal(payload, &selection); err != nil {
-		return fmt.Errorf("invalid payload shape: %w", err)
+		return fmt.Errorf("%w: invalid payload shape: %w", ErrInvalidPayload, err)
 	}
 	if selection.SelectionIdx < 0 || selection.SelectionIdx >= len(c.Options) {
 		return fmt.Errorf("selectionIdx %d out of range [0, %d)", selection.SelectionIdx, len(c.Options))
@@ -169,21 +168,21 @@ func (p *ToolPermissionInterrupt) InitFromPayload(payload []byte) error {
 func (p *ToolPermissionInterrupt) ValidatePayload(payload []byte) error {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &raw); err != nil {
-		return fmt.Errorf("invalid JSON: %w", err)
+		return fmt.Errorf("%w: invalid JSON: %w", ErrInvalidPayload, err)
 	}
 	if _, ok := raw["optionId"]; !ok {
-		return errors.New("missing required field: optionId")
+		return fmt.Errorf("%w: missing required field: optionId", ErrInvalidPayload)
 	}
 	var res ToolPermissionPayload
 	if err := json.Unmarshal(payload, &res); err != nil {
-		return fmt.Errorf("invalid payload shape: %w", err)
+		return fmt.Errorf("%w: invalid payload shape: %w", ErrInvalidPayload, err)
 	}
 	for i := range p.Options {
 		if p.Options[i].OptionID == res.OptionID {
 			return nil
 		}
 	}
-	return fmt.Errorf("unknown optionId %q", res.OptionID)
+	return fmt.Errorf("%w: unknown optionId %q", ErrInvalidPayload, res.OptionID)
 }
 
 func (p *ToolPermissionInterrupt) Return(payload []byte) error {

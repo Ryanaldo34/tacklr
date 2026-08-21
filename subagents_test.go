@@ -628,16 +628,6 @@ func TestSpawnWorker_interruptSurvivesSessionReload(t *testing.T) {
 	}
 }
 
-// failSaveStore keeps LoadSession working but every SaveSession fails so a
-// worker interrupt must still bubble from the live park.
-type failSaveStore struct {
-	*stores.InMemoryStore
-}
-
-func (failSaveStore) SaveSession(context.Context, string, stores.SessionCheckpoint) error {
-	return errors.New("checkpoint disk full")
-}
-
 // newWorkerHost builds a parent with VFS+Brain+namespace and a spawn-shaped
 // worker that shares the mount, engine, and index bridge.
 func newWorkerHost(t *testing.T) (*AgentHarness, *AgentHarness, *vfs.MountSession, *brain.Engine, uuid.UUID) {

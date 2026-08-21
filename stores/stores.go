@@ -163,3 +163,37 @@ type BaseStore interface {
 // ErrSessionNotFound is returned by LoadSession when the requested session
 // does not exist.
 var ErrSessionNotFound = errors.New("session not found")
+
+// FaultyStore wraps a BaseStore and injects Save/Load failures.
+// A nil Inner is a no-op store except when a fault is set.
+type FaultyStore struct {
+	Inner   BaseStore
+	SaveErr error
+	LoadErr error
+}
+
+func (s FaultyStore) SaveSession(ctx context.Context, id string, cp SessionCheckpoint) error {
+	if s.SaveErr != nil {
+		return s.SaveErr
+	}
+	if s.Inner != nil {
+		return s.Inner.SaveSession(ctx, id, cp)
+	}
+	return nil
+}
+
+func (s FaultyStore) LoadSession(ctx context.Context, id string) (SessionCheckpoint, error) {
+	if s.LoadErr != nil {
+		return SessionCheckpoint{}, s.LoadErr
+	}
+	if s.Inner != nil {
+		return s.Inner.LoadSession(ctx, id)
+	}
+	return SessionCheckpoint{}, fmt.Errorf("load session %q: %w", id, ErrSessionNotFound)
+}
+
+var (
+	_ BaseStore = (*InMemoryStore)(nil)
+	_ BaseStore = (*PostgresStore)(nil)
+	_ BaseStore = FaultyStore{}
+)

@@ -38,6 +38,4 @@ var (
 	// ErrStaleContent is for tool/host optimistic concurrency (expected hash ≠ current).
 	// vfs lower-level APIs do not return this; tools wrap ContentRev checks.
 	ErrStaleContent = errors.New("vfs: stale content revision")
-
-	errRegistryRequired = errors.New("vfs: registry required")
 )

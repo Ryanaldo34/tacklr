@@ -8,47 +8,18 @@ import (
 	"github.com/google/uuid"
 )
 
-// Sentinel errors for Engine / store / graph call sites.
-// Callers should use errors.Is / errors.As — messages stay stable and wrap-friendly.
+// Coarse categories for errors.Is. Wrap a specific message at the call site
+// (fmt.Errorf("…: %w", ErrInvalid)) instead of adding a sentinel per situation.
 var (
 	// ErrNotFound is returned when an object is missing, soft-deleted, or outside scope.
 	ErrNotFound = errors.New("brain: object not found")
-	// ErrObjectIDRequired is returned when a UUID argument is the nil UUID.
-	ErrObjectIDRequired = errors.New("brain: object id is required")
-	// ErrQueryRequired is returned when a search/find query string is empty.
-	ErrQueryRequired = errors.New("brain: query is required")
-	// ErrResultSetRequired is returned when paging needs a ResultSetStore and none was provided.
-	ErrResultSetRequired = errors.New("brain: result set store is required")
-	// ErrResultSetIDRequired is returned when continue is called with a nil result set id.
-	ErrResultSetIDRequired = errors.New("brain: result_set_id is required")
-	// ErrGraphWriterRequired is returned when Link is called without a GraphWriter.
-	ErrGraphWriterRequired = errors.New("brain: graph writer is required for Link")
-	// ErrObjectSearchUnavailable is returned when FindObjects lacks a GraphObjectSearcher.
-	ErrObjectSearchUnavailable = errors.New("brain: graph object search is not available")
-	// ErrGraphRequired is returned when expand needs graph labels but no GraphReader is set.
-	ErrGraphRequired = errors.New("brain: graph backend is required")
-	// ErrWritesUnsupported is returned when Put/SoftDelete is used on a read-only store.
-	ErrWritesUnsupported = errors.New("brain: store does not support object writes")
-	// ErrListingUnsupported is returned when ListByKind/GetByProperty/KindsWithObjects
-	// is used on a store that does not implement ObjectLister.
-	ErrListingUnsupported = errors.New("brain: store does not support object listing")
-	// ErrSoftDeletedPut is returned when Put is called with DeletedAt already set.
-	ErrSoftDeletedPut = errors.New("brain: put refuses soft-deleted objects; use SoftDelete")
-	// ErrLinkNotFirstClass is returned when a link endpoint is a part (has parent_id).
-	ErrLinkNotFirstClass = errors.New("brain: link endpoint must be a first-class object (not a part)")
-	// ErrLinkArgs is returned when from/to/relation are incomplete.
-	ErrLinkArgs = errors.New("brain: from, to, and relation type are required")
+	// ErrInvalid groups validation failures (empty query, missing args, frozen catalog).
+	ErrInvalid = errors.New("brain: invalid")
+	// ErrUnsupported groups missing backend capabilities (no writer, no graph, no listing).
+	ErrUnsupported = errors.New("brain: unsupported")
 	// ErrGraphEnsure and ErrGraphRemove wrap dual-write failures (cause via errors.Unwrap).
 	ErrGraphEnsure = errors.New("brain: graph ensure object")
 	ErrGraphRemove = errors.New("brain: graph remove object")
-	// ErrEdgeSearchUnavailable is returned when FindLinks lacks a GraphEdgeSearcher.
-	ErrEdgeSearchUnavailable = errors.New("brain: graph edge search is not available")
-	// ErrLinkQueryRequired is returned when FindLinks is missing relation type or query.
-	ErrLinkQueryRequired = errors.New("brain: relation type and query are required")
-	// ErrExpandRecipeNotFound is returned when ExpandByRecipe names an unknown recipe.
-	ErrExpandRecipeNotFound = errors.New("brain: expand recipe not found")
-	// ErrExpandRecipeNameRequired is returned when registering a recipe without a name.
-	ErrExpandRecipeNameRequired = errors.New("brain: expand recipe name is required")
 )
 
 // Scope is optional retrieval isolation for Engine methods.
