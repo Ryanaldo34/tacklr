@@ -14,9 +14,15 @@ import (
 )
 
 // ProviderGoogleDrive is the factory / bind id for Drive.
+// ProviderMicrosoft is the factory / bind id for OneDrive and SharePoint libraries.
 const (
 	ProviderGoogleDrive = "gdrive"
+	ProviderMicrosoft   = "msgraph"
 	ParamFolderID       = "folderId"
+	ParamName           = "name"
+	ParamDriveID        = "driveId"
+	ParamItemID         = "itemId"
+	ParamSiteID         = "siteId"
 )
 
 // Credential is a session-scoped access token. Never store this on MountSpec
@@ -26,8 +32,9 @@ type Credential struct {
 	ExpiresAt time.Time
 }
 
-// Binding attaches one user-owned backend folder to a virtual mount point.
-// Provider is the BackendRegistry profile id (and the SessionAuth key).
+// Binding is one user-owned cloud folder under /workspace/<alias>.
+// Alias is params["name"] or a leftover single-segment Point (not /workspace).
+// Bind stores Point=/workspace. Provider is the factory / SessionAuth key.
 // Writable is opt-in; the Go zero value stays read-only.
 type Binding struct {
 	Provider string
@@ -37,30 +44,89 @@ type Binding struct {
 	Writable bool
 }
 
-// BindingSpec is the secret-free MountSpec for a binding.
-// ReadOnly is !Writable so current Go binds stay read-only.
-func BindingSpec(b Binding) MountSpec {
+// BindingMember is the secret-free member MountSpec for a cloud bind.
+// Point is empty (members are not mount points). ReadOnly is !Writable.
+func BindingMember(b Binding) MountSpec {
+	params := maps.Clone(b.Params)
+	if alias, err := resolveBindingAlias(b); err == nil && alias != "" {
+		if params == nil {
+			params = make(map[string]string, 1)
+		}
+		params[ParamName] = alias
+	}
 	return MountSpec{
-		Point:    b.Point,
 		Profile:  b.Provider,
 		ReadOnly: !b.Writable,
-		Params:   maps.Clone(b.Params),
+		Params:   params,
 	}
 }
 
-// ValidateBinding checks provider, point, and access token. folderId and other
-// backend params are validated when the factory opens.
+// BindingSpec is the /workspace MountSpec for a single binding.
+func BindingSpec(b Binding) MountSpec {
+	return Workspace(BindingMember(b))
+}
+
+// ValidateBinding checks provider, alias, and access token. folderId and other
+// backend params are validated when the factory opens. Point may be empty when
+// params["name"] is set; leftover "/contracts" becomes alias contracts.
 func ValidateBinding(b Binding) error {
 	if strings.TrimSpace(b.Provider) == "" {
 		return fmt.Errorf("vfs: provider required")
 	}
-	if err := ValidMountPoint(b.Point); err != nil {
+	if _, err := resolveBindingAlias(b); err != nil {
 		return err
 	}
 	if strings.TrimSpace(b.Auth.Token) == "" {
 		return fmt.Errorf("vfs: access token required")
 	}
 	return nil
+}
+
+func resolveBindingAlias(b Binding) (string, error) {
+	name := strings.TrimSpace(b.Params[ParamName])
+	if name != "" {
+		if err := validAlias(name); err != nil {
+			return "", err
+		}
+		return name, nil
+	}
+	point := strings.TrimSpace(b.Point)
+	if point == "" || point == WorkspacePoint {
+		return "", fmt.Errorf("%w: name required", ErrInvalidPath)
+	}
+	if err := ValidMountPoint(point); err != nil {
+		return "", err
+	}
+	alias := strings.TrimPrefix(path.Clean(point), "/")
+	if err := validAlias(alias); err != nil {
+		return "", err
+	}
+	return alias, nil
+}
+
+func bindingAlias(b Binding) string {
+	return strings.TrimSpace(b.Params[ParamName])
+}
+
+func unbindAlias(point string) (string, error) {
+	point = strings.TrimSpace(point)
+	if point == "" {
+		return "", ErrInvalidPath
+	}
+	if !strings.HasPrefix(point, "/") {
+		if err := validAlias(point); err != nil {
+			return "", err
+		}
+		return point, nil
+	}
+	if err := ValidMountPoint(point); err != nil {
+		return "", err
+	}
+	alias := strings.TrimPrefix(path.Clean(point), "/")
+	if err := validAlias(alias); err != nil {
+		return "", err
+	}
+	return alias, nil
 }
 
 // TokenRefreshFunc fetches a new access token from the client (ACP _tacklr/vfs/token).
@@ -248,8 +314,9 @@ func (s *SessionAuth) ensure(sessionID string) *sessionBindings {
 	return sess
 }
 
-// Bind records a folder mount and its access token. A second bind to the same
-// point replaces it. A new token for the same provider updates the shared holder.
+// Bind records a folder mount and its access token. Cloud binds attach under
+// /workspace/<alias>. A second bind to the same alias replaces it. A new token
+// for the same provider updates the shared holder.
 func (s *SessionAuth) Bind(sessionID string, b Binding) error {
 	if s == nil {
 		return fmt.Errorf("vfs: session auth required")
@@ -260,8 +327,10 @@ func (s *SessionAuth) Bind(sessionID string, b Binding) error {
 	if err := ValidateBinding(b); err != nil {
 		return err
 	}
-	b.Point = path.Clean(b.Point)
-	b.Params = maps.Clone(b.Params)
+	member := BindingMember(b)
+	alias := member.Params[ParamName]
+	b.Point = WorkspacePoint
+	b.Params = member.Params
 	token := b.Auth
 	b.Auth = Credential{} // live token lives on the holder only
 
@@ -274,7 +343,7 @@ func (s *SessionAuth) Bind(sessionID string, b Binding) error {
 		sess.holders[b.Provider] = NewTokenHolder(token)
 	}
 	for i, existing := range sess.list {
-		if existing.Point == b.Point {
+		if bindingAlias(existing) == alias {
 			sess.list[i] = b
 			return nil
 		}
@@ -308,8 +377,9 @@ func (s *SessionAuth) Refresh(sessionID, provider string, c Credential) error {
 	return nil
 }
 
-// Unbind removes the binding at point. The provider token is dropped when no
-// binding remains for that provider.
+// Unbind removes the binding for alias. point may be leftover "/contracts" or
+// the alias itself. The provider token is dropped when no binding remains for
+// that provider. Unbind("/workspace") is invalid — pass the alias.
 func (s *SessionAuth) Unbind(sessionID, point string) error {
 	if s == nil {
 		return fmt.Errorf("vfs: session auth required")
@@ -317,10 +387,11 @@ func (s *SessionAuth) Unbind(sessionID, point string) error {
 	if strings.TrimSpace(sessionID) == "" {
 		return fmt.Errorf("%w: session id is required", ErrInvalidPath)
 	}
-	if err := ValidMountPoint(point); err != nil {
+	alias, err := unbindAlias(point)
+	if err != nil {
 		return err
 	}
-	return s.drop(sessionID, path.Clean(point), "")
+	return s.drop(sessionID, alias, "")
 }
 
 // UnbindProvider removes every binding for provider on the session.
@@ -344,7 +415,7 @@ func (s *SessionAuth) drop(sessionID, point, provider string) error {
 	kept := sess.list[:0]
 	removed := map[string]struct{}{}
 	for _, b := range sess.list {
-		match := (point != "" && b.Point == point) || (provider != "" && b.Provider == provider)
+		match := (point != "" && bindingAlias(b) == point) || (provider != "" && b.Provider == provider)
 		if match {
 			removed[b.Provider] = struct{}{}
 			continue

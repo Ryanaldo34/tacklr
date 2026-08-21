@@ -56,41 +56,37 @@ func TestMountSession_gdriveReadOnlySession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.Mount(ctx, vfs.BindingSpec(vfs.Binding{
-		Provider: "gdrive", Point: "/contracts", Params: map[string]string{vfs.ParamFolderID: "root-a"},
-	})); err != nil {
-		t.Fatal(err)
-	}
-	if err := ms.Mount(ctx, vfs.BindingSpec(vfs.Binding{
-		Provider: "gdrive", Point: "/notes", Params: map[string]string{vfs.ParamFolderID: "root-b"},
-	})); err != nil {
+	if err := ms.Mount(ctx, vfs.Workspace(
+		vfs.BindingMember(vfs.Binding{Provider: "gdrive", Point: "/contracts", Params: map[string]string{vfs.ParamFolderID: "root-a"}}),
+		vfs.BindingMember(vfs.Binding{Provider: "gdrive", Point: "/notes", Params: map[string]string{vfs.ParamFolderID: "root-b"}}),
+	)); err != nil {
 		t.Fatal(err)
 	}
 
 	specs := ms.Specs()
-	if len(specs) != 2 {
-		t.Fatalf("Specs = %d", len(specs))
+	if len(specs) != 1 || specs[0].Point != vfs.WorkspacePoint || len(specs[0].Members) != 2 {
+		t.Fatalf("Specs = %+v", specs)
 	}
-	for _, s := range specs {
-		if !s.ReadOnly || s.Params[vfs.ParamFolderID] == "" {
-			t.Fatalf("spec = %+v", s)
+	for _, m := range specs[0].Members {
+		if !m.ReadOnly || m.Params[vfs.ParamFolderID] == "" || m.Params[vfs.ParamName] == "" {
+			t.Fatalf("member = %+v", m)
 		}
 	}
 
-	st, err := ms.Stat(ctx, "/contracts/nda.pdf")
+	st, err := ms.Stat(ctx, "/workspace/contracts/nda.pdf")
 	if err != nil || st.IsDir || st.MediaType != "application/pdf" || st.Size != 4 {
 		t.Fatalf("Stat nda = %+v err=%v", st, err)
 	}
-	raw, err := ms.ReadFile(ctx, "/contracts/nda.pdf")
+	raw, err := ms.ReadFile(ctx, "/workspace/contracts/nda.pdf")
 	if err != nil || string(raw) != "%PDF" {
 		t.Fatalf("ReadFile nda = %q err=%v", raw, err)
 	}
-	text, err := ms.ReadText(ctx, "/contracts/acme/note.md")
+	text, err := ms.ReadText(ctx, "/workspace/contracts/acme/note.md")
 	if err != nil || !strings.Contains(text.Text(), "# hi") {
 		t.Fatalf("ReadText note = %v err=%v", text, err)
 	}
 
-	ents, err := ms.ReadDir(ctx, "/contracts")
+	ents, err := ms.ReadDir(ctx, "/workspace/contracts")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,35 +102,35 @@ func TestMountSession_gdriveReadOnlySession(t *testing.T) {
 		t.Fatalf("ReadDir names = %+v", ents)
 	}
 
-	if _, err := ms.ReadFile(ctx, "/contracts/dup.txt"); !errors.Is(err, vfs.ErrAmbiguous) {
+	if _, err := ms.ReadFile(ctx, "/workspace/contracts/dup.txt"); !errors.Is(err, vfs.ErrAmbiguous) {
 		t.Fatalf("collision: %v", err)
 	}
-	if _, err := ms.ReadFile(ctx, "/contracts/missing"); !errors.Is(err, vfs.ErrNotExist) {
+	if _, err := ms.ReadFile(ctx, "/workspace/contracts/missing"); !errors.Is(err, vfs.ErrNotExist) {
 		t.Fatalf("missing: %v", err)
 	}
-	if err := ms.WriteFile(ctx, "/contracts/nda.pdf", []byte("x")); !errors.Is(err, vfs.ErrReadOnly) {
+	if err := ms.WriteFile(ctx, "/workspace/contracts/nda.pdf", []byte("x")); !errors.Is(err, vfs.ErrReadOnly) {
 		t.Fatalf("write: %v", err)
 	}
-	if err := ms.MkdirAll(ctx, "/contracts/new"); !errors.Is(err, vfs.ErrReadOnly) {
+	if err := ms.MkdirAll(ctx, "/workspace/contracts/new"); !errors.Is(err, vfs.ErrReadOnly) {
 		t.Fatalf("mkdir: %v", err)
 	}
-	if err := ms.Remove(ctx, "/contracts/nda.pdf"); !errors.Is(err, vfs.ErrReadOnly) {
+	if err := ms.Remove(ctx, "/workspace/contracts/nda.pdf"); !errors.Is(err, vfs.ErrReadOnly) {
 		t.Fatalf("remove: %v", err)
 	}
 
 	// Shortcut to a folder is walkable by the shortcut name.
-	got, err := ms.ReadFile(ctx, "/notes/alias/note.md")
+	got, err := ms.ReadFile(ctx, "/workspace/notes/alias/note.md")
 	if err != nil || string(got) != "# hi\n\n" {
 		t.Fatalf("shortcut walk = %q err=%v", got, err)
 	}
 
-	if _, err := ms.ReadFile(ctx, "/contracts/huge.bin"); !errors.Is(err, vfs.ErrTooLarge) {
+	if _, err := ms.ReadFile(ctx, "/workspace/contracts/huge.bin"); !errors.Is(err, vfs.ErrTooLarge) {
 		t.Fatalf("huge: %v", err)
 	}
 
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
-	if _, err := ms.Stat(canceled, "/contracts/nda.pdf"); !errors.Is(err, context.Canceled) {
+	if _, err := ms.Stat(canceled, "/workspace/contracts/nda.pdf"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled: %v", err)
 	}
 
@@ -146,7 +142,7 @@ func TestMountSession_gdriveReadOnlySession(t *testing.T) {
 		proactiveRefreshes++
 		return vfs.Credential{Token: "proactive", ExpiresAt: time.Now().Add(time.Hour)}, nil
 	})
-	raw, err = ms.ReadFile(ctx, "/notes/readme.txt")
+	raw, err = ms.ReadFile(ctx, "/workspace/notes/readme.txt")
 	if err != nil || string(raw) != "hello" || proactiveRefreshes != 1 {
 		t.Fatalf("proactive refresh read = %q refreshes=%d err=%v", raw, proactiveRefreshes, err)
 	}
@@ -156,7 +152,7 @@ func TestMountSession_gdriveReadOnlySession(t *testing.T) {
 	h.SetRefresh(func(context.Context) (vfs.Credential, error) {
 		return vfs.Credential{Token: "fresh"}, nil
 	})
-	raw, err = ms.ReadFile(ctx, "/notes/readme.txt")
+	raw, err = ms.ReadFile(ctx, "/workspace/notes/readme.txt")
 	if err != nil || string(raw) != "hello" {
 		t.Fatalf("refresh read = %q err=%v", raw, err)
 	}
@@ -164,7 +160,7 @@ func TestMountSession_gdriveReadOnlySession(t *testing.T) {
 	// 401 without refresh stays expired.
 	api.fail["GetMeta"] = vfs.ErrAuthExpired
 	h.SetRefresh(nil)
-	if _, err := ms.Stat(ctx, "/notes/readme.txt"); !errors.Is(err, vfs.ErrAuthExpired) {
+	if _, err := ms.Stat(ctx, "/workspace/notes/readme.txt"); !errors.Is(err, vfs.ErrAuthExpired) {
 		t.Fatalf("expired: %v", err)
 	}
 }
@@ -219,16 +215,16 @@ func TestMountSession_gdriveDirectoryAndWriteDocument(t *testing.T) {
 	})); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ms.ReadFile(ctx, "/contracts/acme"); err == nil {
+	if _, err := ms.ReadFile(ctx, "/workspace/contracts/acme"); err == nil {
 		t.Fatal("ReadFile on directory")
 	}
-	if _, err := ms.ReadText(ctx, "/contracts/acme"); err == nil {
+	if _, err := ms.ReadText(ctx, "/workspace/contracts/acme"); err == nil {
 		t.Fatal("ReadText on directory")
 	}
-	if _, err := ms.ReadDir(ctx, "/contracts/nda.pdf"); err == nil {
+	if _, err := ms.ReadDir(ctx, "/workspace/contracts/nda.pdf"); err == nil {
 		t.Fatal("ReadDir on file")
 	}
-	doc, err := ms.OpenDocument(ctx, "/contracts/acme/note.md", nil)
+	doc, err := ms.OpenDocument(ctx, "/workspace/contracts/acme/note.md", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

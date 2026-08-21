@@ -13,7 +13,7 @@ import (
 //
 // Production injects FuseProjection (kernel tree). Tests inject
 // DirectProjection (in-process only; no /dev/fuse). If Available is false,
-// Registry does not create a MountSession and VFS tools are not injected.
+// Registry does not inject a MountSession and VFS tools are not added.
 type VFSProjection interface {
 	Available() bool
 	Attach(ms *vfs.MountSession, sessionID string) error

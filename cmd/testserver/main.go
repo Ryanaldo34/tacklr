@@ -124,7 +124,7 @@ func main() {
 
 	// Host tools intentionally empty: the harness injects plan builtins,
 	// ask_user_choice, web_search/web_fetch (when EXA_API_KEY is set), and
-	// VFS tools when FSRegistry + FSBootstrap are set (Registry owns the MountSession).
+	// VFS tools when FSRegistry + FSBootstrap are set (Registry injects a turn-scoped MountSession).
 	exaKey := strings.TrimSpace(os.Getenv("EXA_API_KEY"))
 
 	// Local VFS: virtual /work → host jail /tmp/tacklr. Registry starts FUSE.
@@ -141,6 +141,10 @@ func main() {
 	vfsAuth := vfs.NewSessionAuth()
 	if err := fsReg.Register(vfs.DriveFactory{ID: "gdrive", Auth: vfsAuth}); err != nil {
 		slog.Error("vfs gdrive register failed", "error", err)
+		os.Exit(1)
+	}
+	if err := fsReg.Register(vfs.GraphFactory{ID: vfs.ProviderMicrosoft, Auth: vfsAuth}); err != nil {
+		slog.Error("vfs msgraph register failed", "error", err)
 		os.Exit(1)
 	}
 	for i, hostDir := range skillHostDirs {

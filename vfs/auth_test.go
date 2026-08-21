@@ -39,6 +39,7 @@ func TestSessionAuth_bindRefreshUnbind(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("bindings = %d", len(got))
 	}
+	aliases := map[string]bool{}
 	for _, b := range got {
 		if b.Auth.Token != "" {
 			t.Fatalf("Bindings leaked token: %+v", b)
@@ -46,6 +47,10 @@ func TestSessionAuth_bindRefreshUnbind(t *testing.T) {
 		if b.Provider != vfs.ProviderGoogleDrive {
 			t.Fatalf("provider = %q", b.Provider)
 		}
+		if b.Point != vfs.WorkspacePoint {
+			t.Fatalf("point = %q", b.Point)
+		}
+		aliases[b.Params[vfs.ParamName]] = true
 		raw, err := json.Marshal(vfs.BindingSpec(b))
 		if err != nil {
 			t.Fatal(err)
@@ -53,9 +58,12 @@ func TestSessionAuth_bindRefreshUnbind(t *testing.T) {
 		if strings.Contains(string(raw), tok) {
 			t.Fatalf("MountSpec JSON contained token: %s", raw)
 		}
-		if !vfs.BindingSpec(b).ReadOnly {
-			t.Fatal("BindingSpec must be read-only")
+		if len(vfs.BindingSpec(b).Members) != 1 || !vfs.BindingSpec(b).Members[0].ReadOnly {
+			t.Fatal("BindingSpec member must be read-only")
 		}
+	}
+	if !aliases["contracts"] || !aliases["notes"] {
+		t.Fatalf("aliases = %v", aliases)
 	}
 
 	c, ok := auth.Credential("sess-1", vfs.ProviderGoogleDrive)
@@ -99,8 +107,8 @@ func TestSessionAuth_bindRefreshUnbind(t *testing.T) {
 
 	if err := auth.Bind("sess-2", vfs.Binding{
 		Provider: "gdrive",
-		Point:    "/a",
 		Auth:     vfs.Credential{Token: "t"},
+		Params:   map[string]string{vfs.ParamName: "legal"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -173,6 +181,8 @@ func TestSessionAuth_bindRejects(t *testing.T) {
 		{"empty provider", "s", vfs.Binding{Point: "/a", Auth: tok}, nil},
 		{"multi segment", "s", vfs.Binding{Provider: "gdrive", Point: "/a/b", Auth: tok}, vfs.ErrInvalidPath},
 		{"relative point", "s", vfs.Binding{Provider: "gdrive", Point: "contracts", Auth: tok}, vfs.ErrInvalidPath},
+		{"workspace without name", "s", vfs.Binding{Provider: "gdrive", Point: vfs.WorkspacePoint, Auth: tok}, nil},
+		{"reserved alias", "s", vfs.Binding{Provider: "gdrive", Auth: tok, Params: map[string]string{vfs.ParamName: "work"}}, vfs.ErrInvalidPath},
 	}
 	for _, tc := range cases {
 		err := auth.Bind(tc.sid, tc.b)

@@ -13,7 +13,7 @@
 
 ## Overview
 
-Phases 0–2 of this train are in the tree. A live Registry session with a VFS and a FUSE device gets a kernel projection. `run_command` runs `/bin/sh -c` with cwd at that root. Providers persist on write. The harness is turn-scoped; the host owns the mount table and the FUSE tree.
+Phases 0–2 of this train are in the tree. A live Registry turn with a VFS and a FUSE device gets a kernel projection. `run_command` runs `/bin/sh -c` with cwd at that root. Providers persist on write. The harness and the mount table are turn-scoped: Registry injects a `MountSession` at construct and `EventStream.Close` unmounts it.
 
 The **agent file catalog** is collapsed. Discovery (`find_files`, `find_content`), line editors (`read_lines`, `replace_lines`, `replace_text`), and directory tools (`list`, `stat`, `mkdir`, `remove`) are gone. The model sees `read`, `write`, and `run_command`. Live names and grep go through `run_command` → `ls` / `rg` / `fd` on the FUSE tree. Writable FUSE, jail, broker, and a custom shell stay out.
 
@@ -24,25 +24,25 @@ The **agent file catalog** is collapsed. Discovery (`find_files`, `find_content`
 ```text
   Model
     → AgentHarness (one turn: tools, plan, checkpoint)
-         → MountSession (borrowed; host-owned)
+         → MountSession (injected; closed with the turn)
               → providers (local / S3 / brain)     persist immediately
               → FuseMount (read-only kernel tree)  HostDir = cwd for run_command
     → Registry
-         mounts[sessionID]     session-lived MountSession
+         vfsAuth               client bind recipes + tokens (next turn)
          VFSProjection         FuseProjection | DirectProjection
-         EventStream.Close     Close harness (not the MountSession)
-         DropLiveHarness       closeSessionVFS → MountSession.Close + remove HostDir
+         EventStream.Close     Close harness + MountSession + HostDir
+         DropLiveHarness       cancel turn + Clear bind recipes
 ```
 
 | Layer | Owner | Rule |
 |-------|--------|------|
-| `MountSession` | Host (`Registry.mounts`, or embedder) | Created in `sessionVFS`; reused across turns; `Materialize(FSBootstrap)` |
-| FUSE | Host via `VFSProjection.Attach` | `ensureSessionFuse` after construct; skip if `HostDir() != ""` |
-| Harness | Turn | `NewAgent` / `NewAgentFromSession` with `MountSession` set; `Close` dumps checkpoint, parks, MCP, vfsindex — **does not** unmount FUSE |
+| `MountSession` | Injector (`openTurnVFS`, or embedder) | Fresh tree each turn from `FSBootstrap` + bind recipes |
+| FUSE | Registry via `VFSProjection.Attach` | `ensureSessionFuse` after construct; skip if `HostDir() != ""` |
+| Harness | Turn | `NewAgent` / `NewAgentFromSession` with `MountSession` set; `Close` dumps checkpoint, parks, MCP, vfsindex — **does not** unmount FUSE (workers inherit) |
 | IR | Provider | `WriteDocument` / `WriteFile` persist now. There is no session dirty cache (`vfs/cache.go` is gone). `ReadText` is provider plaintext. |
 | Tests without `/dev/fuse` | `DirectProjection` | `Available()==true`, `Attach` is a no-op; VFS tools work; `run_command` still needs `HostDir` |
 
-**Production without a FUSE device.** `sessionVFS` returns nil when `!projection.Available()`. There is no MountSession, so no VFS tools and no `run_command`. Registry emits `vfs.fuse.unavailable` and Stores the harness. That is harsher than the old “keep list/stat without a kernel tree” draft. Tests that need the tree inject `WithVFSProjection(DirectProjection{})`. Embedders that want the same in-process tree pass a `MountSession` themselves.
+**Production without a FUSE device.** `openTurnVFS` returns nil when `!projection.Available()`. There is no MountSession, so no VFS tools and no `run_command`. Registry emits `vfs.fuse.unavailable` and Stores the harness. That is harsher than the old “keep list/stat without a kernel tree” draft. Tests that need the tree inject `WithVFSProjection(DirectProjection{})`. Embedders that want the same in-process tree pass a `MountSession` themselves.
 
 **Path identity (shipped).** FUSE root is virtual `/`. Every `Specs()` point is one segment (`/work`, `/engram`). `FuseMount` rejects multi-segment points. testserver bootstraps `Point: "/work"` with `LocalFactory.Base` as the jail. Agent tools take `/work/note.md`. Host commands take `work/note.md` relative to `HostDir()`.
 
@@ -60,7 +60,7 @@ The **agent file catalog** is collapsed. Discovery (`find_files`, `find_content`
 | Kernel identity smoke (skip without device) | `vfs/fuse_test.go` |
 | `VFSProjection` / `FuseProjection` / `DirectProjection` | `server/projection.go` |
 | `ensureSessionFuse`; fail-hard on device + mount fail; skip remount if `HostDir` set | `server/registry.go` |
-| Host-owned mounts; turn-scoped harness Close | `Registry.mounts`, `AgentHarness.Close` |
+| Turn-scoped mounts; harness Close does not unmount | `openTurnVFS`, `EventStream.Close`, `AgentHarness.Close` |
 | testserver `/work` | `cmd/testserver/main.go` |
 | `run_command` | `tools_command.go` |
 | Fuse mount metrics / events | `telemetry` + Registry |
@@ -264,7 +264,7 @@ Each PR is independently reviewable. Do not combine Phase 3 removal with the `wr
 - `vfs/fuse_test.go` — kernel identity smoke
 - `vfs/document_session.go` — write-through `WriteDocument`
 - `server/projection.go` — `VFSProjection`
-- `server/registry.go` — `sessionVFS`, `ensureSessionFuse`, `closeSessionVFS`
+- `server/registry.go` — `openTurnVFS`, `ensureSessionFuse`, `closeTurnVFS`
 - `tools_command.go` — `run_command`
 - `tools_vfs.go` — remaining file tools
 - `tools_vfsindex.go` — `index_file` / `unindex` / `find_content` (until PR A)

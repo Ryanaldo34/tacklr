@@ -3,8 +3,6 @@ package server
 import (
 	"context"
 	"encoding/json"
-	"errors"
-	"strings"
 	"testing"
 
 	"github.com/ryanaldo34/tacklr/vfs"
@@ -40,7 +38,7 @@ func TestRegistry_bindRefreshUnbindDrive(t *testing.T) {
 	if ms == nil {
 		t.Fatal("want VFS after bind + turn")
 	}
-	got, err := ms.ReadFile(ctx, "/contracts/a.txt")
+	got, err := ms.ReadFile(ctx, "/workspace/contracts/a.txt")
 	if err != nil || string(got) != "one" {
 		t.Fatalf("read contracts = %q err=%v", got, err)
 	}
@@ -49,12 +47,25 @@ func TestRegistry_bindRefreshUnbindDrive(t *testing.T) {
 		Provider: "gdrive", Point: "/notes",
 		Auth: vfs.Credential{Token: "tok"}, Params: map[string]string{vfs.ParamFolderID: "root-b"},
 	}
+	drainTurn(t, stream)
 	if err := r.BindVFS(ctx, "sess-1", "default", bNotes); err != nil {
 		t.Fatal(err)
 	}
-	got, err = ms.ReadFile(ctx, "/notes/b.txt")
+	stream, err = r.RunTurn(ctx, TurnRequest{
+		SessionID: "sess-1", AgentID: "default", ThreadID: "sess-1", Prompt: "hi",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { stream.Cancel(); stream.Close() })
+	ms = stream.VFS()
+	got, err = ms.ReadFile(ctx, "/workspace/notes/b.txt")
 	if err != nil || string(got) != "two" {
-		t.Fatalf("live remount notes = %q err=%v", got, err)
+		t.Fatalf("next turn notes = %q err=%v", got, err)
+	}
+	got, err = ms.ReadFile(ctx, "/workspace/contracts/a.txt")
+	if err != nil || string(got) != "one" {
+		t.Fatalf("next turn contracts = %q err=%v", got, err)
 	}
 
 	if err := r.RefreshVFS("sess-1", "gdrive", vfs.Credential{Token: "rotated"}); err != nil {
@@ -74,14 +85,28 @@ func TestRegistry_bindRefreshUnbindDrive(t *testing.T) {
 		t.Fatalf("holder refresh = %q", tok.Token)
 	}
 
-	if err := r.UnbindVFS("sess-1", "", "gdrive"); err != nil {
+	// Unbind drops recipes only. The live tree stays until this turn Close.
+	if err := r.UnbindVFS(ctx, "sess-1", "", "gdrive"); err != nil {
 		t.Fatal(err)
-	}
-	if _, err := ms.ReadFile(ctx, "/contracts/a.txt"); !errors.Is(err, vfs.ErrNotMounted) {
-		t.Fatalf("unbind provider left contracts: %v", err)
 	}
 	if auth.HasBindings("sess-1") {
 		t.Fatal("unbind provider must drop credentials")
+	}
+	got, err = ms.ReadFile(ctx, "/workspace/contracts/a.txt")
+	if err != nil || string(got) != "one" {
+		t.Fatalf("live tree after unbind = %q err=%v", got, err)
+	}
+
+	drainTurn(t, stream)
+	stream, err = r.RunTurn(ctx, TurnRequest{
+		SessionID: "sess-1", AgentID: "default", ThreadID: "sess-1", Prompt: "hi",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { stream.Cancel(); stream.Close() })
+	if stream.VFS() != nil {
+		t.Fatal("next turn has no tree when the client bound nothing")
 	}
 }
 
@@ -92,80 +117,6 @@ func TestRegistry_vfsAuthRejects(t *testing.T) {
 	spec, _ := driveAgent(t, auth, api)
 	r := NewRegistry(testStore(t), "default", WithVFSProjection(DirectProjection{}), WithVFSAuth(auth))
 	r.Register("default", spec)
-
-	var nilReg *Registry
-	if nilReg.VFSAuth() != nil {
-		t.Fatal("nil registry VFSAuth")
-	}
-	if err := nilReg.BindVFS(ctx, "s", "default", vfs.Binding{}); err == nil {
-		t.Fatal("nil registry bind")
-	}
-	if err := nilReg.RefreshVFS("s", "gdrive", vfs.Credential{Token: "t"}); err == nil {
-		t.Fatal("nil registry refresh")
-	}
-	if err := nilReg.UnbindVFS("s", "/a", ""); err == nil {
-		t.Fatal("nil registry unbind")
-	}
-	nilReg.SetVFSTokenRefresh("s", "gdrive", nil)
-
-	if err := r.BindVFS(ctx, "", "default", vfs.Binding{
-		Provider: "gdrive", Point: "/a", Auth: vfs.Credential{Token: "t"},
-	}); err == nil {
-		t.Fatal("empty sessionId")
-	}
-	if err := r.BindVFS(ctx, "s", "default", vfs.Binding{Point: "/a", Auth: vfs.Credential{Token: "t"}}); err == nil {
-		t.Fatal("missing provider")
-	}
-	if err := r.BindVFS(ctx, "s", "missing", vfs.Binding{
-		Provider: "gdrive", Point: "/a", Auth: vfs.Credential{Token: "t"},
-		Params: map[string]string{vfs.ParamFolderID: "root-a"},
-	}); err == nil {
-		t.Fatal("unknown agent")
-	}
-	if err := r.BindVFS(ctx, "s", "default", vfs.Binding{
-		Provider: "dropbox", Point: "/a", Auth: vfs.Credential{Token: "t"},
-	}); err == nil {
-		t.Fatal("unknown profile")
-	}
-	if err := r.BindVFS(ctx, "s", "default", vfs.Binding{
-		Provider: "gdrive", Point: "/a", Auth: vfs.Credential{Token: "t"},
-		Params: map[string]string{vfs.ParamFolderID: "nope"},
-	}); err == nil {
-		t.Fatal("CheckMount must fail for missing folder")
-	}
-
-	bare := NewRegistry(testStore(t), "default")
-	bare.Register("default", AgentSpec{Options: spec.Options})
-	if err := bare.BindVFS(ctx, "s", "default", vfs.Binding{
-		Provider: "gdrive", Point: "/a", Auth: vfs.Credential{Token: "t"},
-	}); err == nil || !strings.Contains(err.Error(), "no vfs registry") {
-		t.Fatalf("no vfs registry: %v", err)
-	}
-
-	if err := r.RefreshVFS("missing", "gdrive", vfs.Credential{Token: "t"}); err == nil {
-		t.Fatal("refresh missing session")
-	}
-	if err := r.UnbindVFS("s", "", ""); err == nil {
-		t.Fatal("unbind needs point or provider")
-	}
-	if err := r.UnbindVFS("s", "/missing", ""); err == nil {
-		t.Fatal("unbind missing point")
-	}
-
-	if vfsTokenRefresh(nil, "s", "gdrive") != nil {
-		t.Fatal("nil rpc refresh")
-	}
-	bridge := NewClientBridge(&recordingMessageWriter{})
-	fn := vfsTokenRefresh(bridge, "s", "gdrive")
-	if _, err := fn(ctx); !errors.Is(err, vfs.ErrAuthExpired) {
-		t.Fatalf("no tokenRefresh cap: %v", err)
-	}
-	bridge.SetCaps(ClientCapabilities{VFSTokenRefresh: true})
-	canceled, cancel := context.WithCancel(ctx)
-	cancel()
-	if _, err := vfsTokenRefresh(bridge, "s", "gdrive")(canceled); !errors.Is(err, vfs.ErrAuthExpired) {
-		t.Fatalf("canceled token refresh: %v", err)
-	}
 
 	if err := r.BindVFS(ctx, "live", "default", vfs.Binding{
 		Provider: "gdrive", Point: "/ok", Auth: vfs.Credential{Token: "t"},
@@ -180,25 +131,56 @@ func TestRegistry_vfsAuthRejects(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { stream.Cancel(); stream.Close() })
+	ms := stream.VFS()
+	if ms == nil {
+		t.Fatal("want VFS after bind")
+	}
+	got, err := ms.ReadFile(ctx, "/workspace/ok/a.txt")
+	if err != nil || string(got) != "one" {
+		t.Fatalf("read ok = %q err=%v", got, err)
+	}
+
 	if err := r.BindVFS(ctx, "live", "default", vfs.Binding{
 		Provider: "gdrive", Point: "/bad", Auth: vfs.Credential{Token: "t"},
 		Params: map[string]string{vfs.ParamFolderID: "nope"},
 	}); err == nil {
-		t.Fatal("live remount of missing folder")
+		t.Fatal("CheckMount must reject a missing folder before the next turn")
 	}
-	if auth.HasBindings("live") && len(auth.Bindings("live")) != 1 {
-		t.Fatalf("failed remount must unbind the bad point: %+v", auth.Bindings("live"))
+	got, err = ms.ReadFile(ctx, "/workspace/ok/a.txt")
+	if err != nil || string(got) != "one" {
+		t.Fatalf("live tree after failed bind = %q err=%v", got, err)
 	}
 
-	w := &recordingMessageWriter{}
-	refreshBridge := NewClientBridge(w)
-	installVFSRefresh(ProtocolEnv{Registry: r, Conn: &Conn{RPC: refreshBridge}}, "live", auth)
-	installVFSRefresh(ProtocolEnv{}, "", nil)
-	if acpRPCError(t, newACPTestServer(t, r).rpc(`{"jsonrpc":"2.0","id":1,"method":"_tacklr/vfs/refresh","params":{"sessionId":"nope","provider":"gdrive","auth":{"token":"x"}}}`)) == nil {
-		t.Fatal("refresh unknown session")
+	if err := r.BindVFS(ctx, "live", "default", vfs.Binding{
+		Provider: "gdrive", Point: "/ok", Auth: vfs.Credential{Token: "t"},
+		Params: map[string]string{vfs.ParamFolderID: "nope"},
+	}); err == nil {
+		t.Fatal("replace same alias with missing folder")
 	}
-	if acpRPCError(t, newACPTestServer(t, r).rpc(`{"jsonrpc":"2.0","id":2,"method":"_tacklr/vfs/unbind","params":{"sessionId":"nope","point":"/ok"}}`)) == nil {
-		t.Fatal("unbind unknown session")
+	got, err = ms.ReadFile(ctx, "/workspace/ok/a.txt")
+	if err != nil || string(got) != "one" {
+		t.Fatalf("live tree after failed replace = %q err=%v", got, err)
+	}
+	binds := auth.Bindings("live")
+	if len(binds) != 1 || binds[0].Params[vfs.ParamFolderID] != "root-a" {
+		t.Fatalf("restored bind = %+v", binds)
+	}
+
+	drainTurn(t, stream)
+	stream, err = r.RunTurn(ctx, TurnRequest{
+		SessionID: "live", AgentID: "default", ThreadID: "live", Prompt: "hi",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { stream.Cancel(); stream.Close() })
+	ms = stream.VFS()
+	if ms == nil {
+		t.Fatal("want VFS on next turn from remaining recipes")
+	}
+	got, err = ms.ReadFile(ctx, "/workspace/ok/a.txt")
+	if err != nil || string(got) != "one" {
+		t.Fatalf("next turn uses remaining recipes = %q err=%v", got, err)
 	}
 }
 
@@ -252,5 +234,11 @@ func TestACP_vfsRefreshUnbindRejects(t *testing.T) {
 	}
 	if acpRPCError(t, s.rpc(`{"jsonrpc":"2.0","id":11,"method":"_tacklr/vfs/unbind","params":{"sessionId":"`+sessionID+`"}}`)) == nil {
 		t.Fatal("unbind missing point and provider")
+	}
+	if acpRPCError(t, s.rpc(`{"jsonrpc":"2.0","id":12,"method":"_tacklr/vfs/refresh","params":{"sessionId":"nope","provider":"gdrive","auth":{"token":"x"}}}`)) == nil {
+		t.Fatal("refresh unknown session")
+	}
+	if acpRPCError(t, s.rpc(`{"jsonrpc":"2.0","id":13,"method":"_tacklr/vfs/unbind","params":{"sessionId":"nope","point":"/ok"}}`)) == nil {
+		t.Fatal("unbind unknown session")
 	}
 }

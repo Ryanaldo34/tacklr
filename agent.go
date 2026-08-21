@@ -86,8 +86,7 @@ type AgentHarness struct {
 	runMu sync.Mutex
 }
 
-// VFS is the session mount table, or nil. Hosts call FuseMount on this.
-// The harness does not start or own the kernel mount.
+// VFS is the mount table injected for this turn, or nil.
 func (a *AgentHarness) VFS() *vfs.MountSession {
 	return a.session.VFS
 }
@@ -637,8 +636,8 @@ func (a *AgentHarness) initMCP(ctx context.Context) {
 }
 
 // Close dumps session state then releases turn resources (MCP, owned vfsindex).
-// Shared worker bridges are not closed. The host owns MountSession (including
-// FUSE); this does not close it.
+// Shared worker bridges are not closed. MountSession is closed by the turn
+// owner (EventStream), not here — workers inherit the same tree.
 // Call after the Run events channel is drained, or when construct/runHarness fails.
 func (a *AgentHarness) Close() {
 	a.cancelBackgroundJobs()

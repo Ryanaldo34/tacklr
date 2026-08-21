@@ -133,6 +133,9 @@ func driveAgent(t *testing.T, auth *vfs.SessionAuth, api vfs.DriveAPI) (AgentSpe
 	if err := fsReg.Register(vfs.DriveFactory{ID: "gdrive", Auth: auth, API: api}); err != nil {
 		t.Fatal(err)
 	}
+	if err := fsReg.Register(vfs.GraphFactory{ID: vfs.ProviderMicrosoft, Auth: auth}); err != nil {
+		t.Fatal(err)
+	}
 	return AgentSpec{
 		Options: tacklr.AgentOptions{
 			Config: tacklr.Config{MaxWindowSize: 8192},
@@ -160,7 +163,12 @@ func TestACP_vfsBindRefreshUnbind(t *testing.T) {
 		t.Fatalf("vfs cap = %#v", vfsCap)
 	}
 	provs, _ := vfsCap["providers"].([]any)
-	if len(provs) != 1 || provs[0] != "gdrive" {
+	have := map[string]bool{}
+	for _, p := range provs {
+		s, _ := p.(string)
+		have[s] = true
+	}
+	if !have["gdrive"] || !have[vfs.ProviderMicrosoft] {
 		t.Fatalf("providers = %#v", vfsCap["providers"])
 	}
 
@@ -178,7 +186,7 @@ func TestACP_vfsBindRefreshUnbind(t *testing.T) {
 			"sessionId": sessionID,
 			"backends": []map[string]any{
 				{"provider": "gdrive", "point": "/contracts", "auth": map[string]any{"scheme": "bearer", "token": secret, "expiresAt": expiresAt}, "params": map[string]string{"folderId": "root-a"}},
-				{"provider": "gdrive", "point": "/notes", "auth": map[string]any{"token": secret, "expiresAt": expiresAt}, "params": map[string]string{"folderId": "root-b"}},
+				{"provider": "gdrive", "point": "/workspace", "auth": map[string]any{"token": secret, "expiresAt": expiresAt}, "params": map[string]string{"name": "legal", "folderId": "root-b"}},
 			},
 		},
 	})
@@ -189,6 +197,12 @@ func TestACP_vfsBindRefreshUnbind(t *testing.T) {
 	mounted, _ := bindRes["mounted"].([]any)
 	if len(mounted) != 2 {
 		t.Fatalf("mounted = %#v errors=%v", bindRes["mounted"], bindRes["errors"])
+	}
+	for _, item := range mounted {
+		m, _ := item.(map[string]any)
+		if m["point"] != vfs.WorkspacePoint {
+			t.Fatalf("mounted.point = %#v", item)
+		}
 	}
 
 	raw, err := s.wire.Get(t.Context(), sessionID)
@@ -213,20 +227,27 @@ func TestACP_vfsBindRefreshUnbind(t *testing.T) {
 	if ms == nil {
 		t.Fatal("want VFS after bind")
 	}
-	got, err := ms.ReadFile(t.Context(), "/contracts/a.txt")
+	ents, err := ms.ReadDir(t.Context(), vfs.WorkspacePoint)
+	if err != nil || len(ents) != 2 || ents[0].Name != "contracts" || ents[1].Name != "legal" {
+		t.Fatalf("ReadDir /workspace = %+v err=%v", ents, err)
+	}
+	got, err := ms.ReadFile(t.Context(), "/workspace/contracts/a.txt")
 	if err != nil || string(got) != "one" {
 		t.Fatalf("read contracts = %q err=%v", got, err)
 	}
-	if err := ms.WriteFile(t.Context(), "/contracts/a.txt", []byte("nope")); !errors.Is(err, vfs.ErrReadOnly) {
+	if _, err := ms.ReadFile(t.Context(), "/contracts/a.txt"); !errors.Is(err, vfs.ErrNotMounted) {
+		t.Fatalf("old /contracts path: %v", err)
+	}
+	if err := ms.WriteFile(t.Context(), "/workspace/contracts/a.txt", []byte("nope")); !errors.Is(err, vfs.ErrReadOnly) {
 		t.Fatalf("omit readOnly must deny write: %v", err)
 	}
-	got, err = ms.ReadFile(t.Context(), "/contracts/a.txt")
+	got, err = ms.ReadFile(t.Context(), "/workspace/contracts/a.txt")
 	if err != nil || string(got) != "one" {
 		t.Fatalf("body after denied write = %q err=%v", got, err)
 	}
-	got, err = ms.ReadFile(t.Context(), "/notes/b.txt")
+	got, err = ms.ReadFile(t.Context(), "/workspace/legal/b.txt")
 	if err != nil || string(got) != "two" {
-		t.Fatalf("read notes = %q err=%v", got, err)
+		t.Fatalf("read legal = %q err=%v", got, err)
 	}
 
 	refreshBody, _ := json.Marshal(map[string]any{
@@ -240,14 +261,23 @@ func TestACP_vfsBindRefreshUnbind(t *testing.T) {
 
 	unbindBody, _ := json.Marshal(map[string]any{
 		"jsonrpc": "2.0", "id": 5, "method": methodVFSUnbind,
-		"params": map[string]any{"sessionId": sessionID, "point": "/notes"},
+		"params": map[string]any{"sessionId": sessionID, "point": vfs.WorkspacePoint, "name": "legal"},
 	})
 	_ = acpRPCResult(t, s.rpc(string(unbindBody)))
-	if _, err := ms.ReadFile(t.Context(), "/notes/b.txt"); !errors.Is(err, vfs.ErrNotMounted) {
-		t.Fatalf("unbound notes: %v", err)
+	drainTurn(t, stream)
+	stream, err = r.RunTurn(t.Context(), TurnRequest{
+		SessionID: sessionID, AgentID: "default", ThreadID: sessionID, Prompt: "hi",
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := ms.ReadFile(t.Context(), "/contracts/a.txt"); err != nil {
-		t.Fatalf("contracts after unbind notes: %v", err)
+	t.Cleanup(func() { stream.Cancel(); stream.Close() })
+	ms = stream.VFS()
+	if _, err := ms.ReadFile(t.Context(), "/workspace/legal/b.txt"); !errors.Is(err, vfs.ErrNotExist) {
+		t.Fatalf("unbound legal: %v", err)
+	}
+	if _, err := ms.ReadFile(t.Context(), "/workspace/contracts/a.txt"); err != nil {
+		t.Fatalf("contracts after unbind legal: %v", err)
 	}
 
 	_ = acpRPCResult(t, s.rpc(`{"jsonrpc":"2.0","id":6,"method":"session/close","params":{"sessionId":"`+sessionID+`"}}`))
@@ -282,9 +312,6 @@ func TestACP_vfsBindWritable(t *testing.T) {
 	if len(binds) != 1 || !binds[0].Writable {
 		t.Fatalf("writable bind = %+v", binds)
 	}
-	if vfs.BindingSpec(binds[0]).ReadOnly {
-		t.Fatal("BindingSpec must be writable")
-	}
 	stream, err := r.RunTurn(t.Context(), TurnRequest{
 		SessionID: sessionID, AgentID: "default", ThreadID: sessionID, Prompt: "hi",
 	})
@@ -296,10 +323,10 @@ func TestACP_vfsBindWritable(t *testing.T) {
 	if ms == nil {
 		t.Fatal("want VFS after writable bind")
 	}
-	if err := ms.WriteFile(t.Context(), "/w/a.txt", []byte("two")); err != nil {
+	if err := ms.WriteFile(t.Context(), "/workspace/w/a.txt", []byte("two")); err != nil {
 		t.Fatal(err)
 	}
-	got, err := ms.ReadFile(t.Context(), "/w/a.txt")
+	got, err := ms.ReadFile(t.Context(), "/workspace/w/a.txt")
 	if err != nil || string(got) != "two" {
 		t.Fatalf("writable write = %q err=%v", got, err)
 	}

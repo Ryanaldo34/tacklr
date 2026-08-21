@@ -38,9 +38,9 @@ type AgentSpec struct {
 	Options tacklr.AgentOptions
 	// FSRegistry resolves MountSpec.Profile (process-scoped). Required when FSBootstrap is set.
 	FSRegistry *vfs.BackendRegistry
-	// FSBootstrap mounts applied once when the host creates the session MountSession.
+	// FSBootstrap mounts applied each turn when Registry injects a MountSession.
 	// Requires a live VFSProjection (FUSE in production). If the projection
-	// is not Available, the session has no MountSession and no VFS tools.
+	// is not Available, the turn has no MountSession and no VFS tools.
 	FSBootstrap []vfs.MountSpec
 }
 
@@ -83,8 +83,10 @@ type TurnRequest struct {
 // is cancelled and the registry forwarder exits.
 //
 // Cancel cancels the turn context (session/cancel). Close ends the turn:
-// cancel, Harness.Close (MCP/index), then nil the pointer.
-// The next RunTurn reconstructs from the store checkpoint. Callers typically:
+// cancel, Harness.Close (MCP/index), unmount the injected VFS, then nil the
+// pointer. The next RunTurn reconstructs from the store checkpoint and
+// injects a new tree from FSBootstrap plus client bind recipes. Callers
+// typically:
 //
 //	defer func() { stream.Cancel(); stream.Close() }()
 //
@@ -106,7 +108,7 @@ func (s *EventStream) SessionID() string {
 	return s.harness.SessionID()
 }
 
-// VFS is the session mount table, or nil.
+// VFS is this turn's mount table, or nil.
 func (s *EventStream) VFS() *vfs.MountSession {
 	if s == nil || s.harness == nil {
 		return nil
@@ -130,7 +132,8 @@ func (s *EventStream) Cancel() {
 	s.cancel()
 }
 
-// Close ends the turn (idempotent): cancel, release the harness, nil the pointer.
+// Close ends the turn (idempotent): cancel, release the harness, unmount the
+// injected VFS tree, nil the pointer. Bind recipes in SessionAuth stay.
 func (s *EventStream) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -141,7 +144,14 @@ func (s *EventStream) Close() {
 	if s.cancel != nil {
 		s.cancel()
 	}
+	var ms *vfs.MountSession
+	sid := ""
+	if s.harness != nil {
+		ms = s.harness.VFS()
+		sid = s.harness.SessionID()
+	}
 	closeTurnHarness(s.harness)
+	closeTurnVFS(ms, sid, "turn_end")
 	s.harness = nil
 }
 
@@ -173,10 +183,8 @@ type Registry struct {
 	tracer       trace.Tracer           // turn and child spans; default global
 	instruments  *telemetry.Instruments // turn/tool metrics; default global
 	activeTurns  sync.Map               // thread id → *turnHandle
-	mountsMu     sync.Mutex
-	mounts       map[string]*vfs.MountSession // thread id → host-owned session tree
-	projection   VFSProjection                // nil → FuseProjection
-	vfsAuth      *vfs.SessionAuth             // user-owned backend tokens (Drive, …)
+	projection   VFSProjection          // nil → FuseProjection
+	vfsAuth      *vfs.SessionAuth       // client bind recipes + tokens; applied at the next RunTurn
 }
 
 // RegistryOption configures NewRegistry.
@@ -212,7 +220,7 @@ func WithMeterProvider(mp metric.MeterProvider) RegistryOption {
 	}
 }
 
-// WithVFSProjection sets how a session tree is published to the host.
+// WithVFSProjection sets how a turn tree is published to the host.
 // Nil or omitted uses FuseProjection. Tests that need VFS tools without a
 // kernel mount pass DirectProjection{}.
 func WithVFSProjection(p VFSProjection) RegistryOption {
@@ -240,7 +248,6 @@ func NewRegistry(store stores.BaseStore, defaultAgent string, opts ...RegistryOp
 		store:        store,
 		tracer:       telemetry.Tracer(),
 		instruments:  telemetry.MustInstruments(telemetry.Meter()),
-		mounts:       make(map[string]*vfs.MountSession),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -267,7 +274,7 @@ func (r *Registry) Register(agentID string, spec AgentSpec) {
 		panic("server: agent id is required")
 	}
 	if spec.Options.SessionID != "" || spec.Options.MountSession != nil {
-		panic("server: AgentSpec.Options cannot contain session-owned fields")
+		panic("server: AgentSpec.Options cannot set SessionID or MountSession; Registry injects those per turn")
 	}
 	if err := spec.Options.Validate(); err != nil {
 		panic(fmt.Sprintf("server: register agent %q: %v", agentID, err))
@@ -320,31 +327,17 @@ func (r *Registry) CancelSession(sessionID string) {
 	}
 }
 
-// DropLiveHarness is kept for session/close callers. The harness is turn-scoped
-// and already released by EventStream.Close; this cancels an in-flight turn and
-// closes the host-owned MountSession (FUSE included).
+// DropLiveHarness cancels an in-flight turn and drops bind credentials.
+// The turn's MountSession is closed by EventStream.Close. Between turns
+// there is no tree to drop.
 func (r *Registry) DropLiveHarness(sessionID string) {
 	r.CancelSession(sessionID)
-	r.closeSessionVFS(sessionID)
-}
-
-func closeMountLogged(ms *vfs.MountSession, sessionID, reason string) {
-	if ms == nil {
-		return
-	}
-	if err := ms.Close(); err != nil {
-		slog.Warn("session vfs close failed", "session_id", sessionID, "reason", reason, "error", err)
-	}
-}
-
-func (r *Registry) closeSessionVFS(sessionID string) {
 	if r.vfsAuth != nil {
 		r.vfsAuth.Clear(sessionID)
 	}
-	r.mountsMu.Lock()
-	ms := r.mounts[sessionID]
-	delete(r.mounts, sessionID)
-	r.mountsMu.Unlock()
+}
+
+func closeTurnVFS(ms *vfs.MountSession, sessionID, reason string) {
 	if ms == nil {
 		return
 	}
@@ -352,50 +345,46 @@ func (r *Registry) closeSessionVFS(sessionID string) {
 	if dir != "" {
 		telemetry.EmitEvent(context.Background(), telemetry.EventFuseUnmount)
 	}
-	closeMountLogged(ms, sessionID, "session_teardown")
+	if err := ms.Close(); err != nil {
+		slog.Warn("turn vfs close failed", "session_id", sessionID, "reason", reason, "error", err)
+	}
 	if dir != "" {
 		if err := os.Remove(dir); err != nil {
-			slog.Warn("session vfs host dir remove failed", "session_id", sessionID, "dir", dir, "error", err)
+			slog.Warn("turn vfs host dir remove failed", "session_id", sessionID, "dir", dir, "error", err)
 		}
 	}
 }
 
-func (r *Registry) sessionVFS(ctx context.Context, threadID string, spec *AgentSpec) (*vfs.MountSession, error) {
+// openTurnVFS builds a fresh tree for this turn from FSBootstrap and any
+// client bind recipes already recorded on SessionAuth. Returns nil when VFS
+// is not configured (no registry, no mounts, or projection unavailable).
+func (r *Registry) openTurnVFS(ctx context.Context, threadID string, spec *AgentSpec) (*vfs.MountSession, error) {
 	hasBindings := r.vfsAuth != nil && r.vfsAuth.HasBindings(threadID)
 	if spec.FSRegistry == nil || (len(spec.FSBootstrap) == 0 && !hasBindings) {
 		return nil, nil
 	}
-	// Production: FUSE is the VFS. No device → no tree, no VFS tools.
-	// Tests may still attach a MountSession without a kernel mount.
 	if !r.vfsProjection().Available() {
 		return nil, nil
-	}
-	r.mountsMu.Lock()
-	defer r.mountsMu.Unlock()
-	if ms, ok := r.mounts[threadID]; ok {
-		return ms, nil
 	}
 	ms, err := vfs.NewMountSession(threadID, spec.FSRegistry)
 	if err != nil {
 		return nil, err
 	}
 	if err := ms.Materialize(ctx, spec.FSBootstrap); err != nil {
-		closeMountLogged(ms, threadID, "materialize")
+		closeTurnVFS(ms, threadID, "materialize")
 		return nil, err
 	}
 	if hasBindings {
-		for _, b := range r.vfsAuth.Bindings(threadID) {
-			if err := ms.Mount(ctx, vfs.BindingSpec(b)); err != nil && !errors.Is(err, vfs.ErrAlreadyMounted) {
-				closeMountLogged(ms, threadID, "bind")
-				return nil, err
-			}
+		binds := r.vfsAuth.Bindings(threadID)
+		if err := ms.Mount(ctx, vfs.Workspace(workspaceMembers(binds)...)); err != nil {
+			closeTurnVFS(ms, threadID, "workspace")
+			return nil, err
 		}
 		if err := ms.AttachSkills(ctx); err != nil {
-			closeMountLogged(ms, threadID, "attach_skills")
+			closeTurnVFS(ms, threadID, "attach_skills")
 			return nil, err
 		}
 	}
-	r.mounts[threadID] = ms
 	return ms, nil
 }
 
@@ -509,7 +498,9 @@ func (r *Registry) RunTurn(ctx context.Context, req TurnRequest) (*EventStream, 
 		close(th.done)
 		turnSpan.End(telemetry.OutcomeError, err)
 		cancel()
+		ms := h.VFS()
 		closeTurnHarness(h)
+		closeTurnVFS(ms, threadID, "run")
 		return nil, fmt.Errorf("run harness: %w", err)
 	}
 
@@ -607,7 +598,7 @@ func (r *Registry) loadAgent(ctx context.Context, agentID, threadID string, load
 	mcpConfigs = append(mcpConfigs, sessionMCP...)
 
 	wantVFS := spec.FSRegistry != nil && (len(spec.FSBootstrap) > 0 || (r.vfsAuth != nil && r.vfsAuth.HasBindings(threadID)))
-	ms, err := r.sessionVFS(ctx, threadID, &spec)
+	ms, err := r.openTurnVFS(ctx, threadID, &spec)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -626,6 +617,7 @@ func (r *Registry) loadAgent(ctx context.Context, agentID, threadID string, load
 	var h *tacklr.AgentHarness
 	if load {
 		if store == nil {
+			closeTurnVFS(ms, threadID, "no_store")
 			return nil, nil, clientErrorf(ErrSessionStoreNotConfigured, "session store is not configured")
 		}
 		loaded, err := tacklr.NewAgentFromSession(ctx, threadID, opts)
@@ -635,15 +627,18 @@ func (r *Registry) loadAgent(ctx context.Context, agentID, threadID string, load
 		case errors.Is(err, stores.ErrSessionNotFound) && allowMissingCheckpoint:
 			created, err := tacklr.NewAgent(ctx, opts)
 			if err != nil {
+				closeTurnVFS(ms, threadID, "construct")
 				return nil, nil, err
 			}
 			h = created
 		default:
+			closeTurnVFS(ms, threadID, "load")
 			return nil, nil, err
 		}
 	} else {
 		created, err := tacklr.NewAgent(ctx, opts)
 		if err != nil {
+			closeTurnVFS(ms, threadID, "construct")
 			return nil, nil, err
 		}
 		h = created
@@ -665,7 +660,7 @@ func (r *Registry) ensureSessionFuse(ctx context.Context, h *tacklr.AgentHarness
 		if name == "" || strings.Contains(name, "/") {
 			err := fmt.Errorf("vfs: fuse requires single-segment mount points (got %q); use /work and /engram", spec.Point)
 			h.Close()
-			r.closeSessionVFS(threadID)
+			closeTurnVFS(ms, threadID, "fuse_point")
 			return err
 		}
 	}
@@ -687,7 +682,7 @@ func (r *Registry) ensureSessionFuse(ctx context.Context, h *tacklr.AgentHarness
 			log.String(telemetry.AttrErrorClass, "mount_failed"),
 		)
 		h.Close()
-		r.closeSessionVFS(threadID)
+		closeTurnVFS(ms, threadID, "fuse_attach")
 		return err
 	}
 	r.instruments.RecordFuseMount(ctx, telemetry.FuseMountOutcomeOK)

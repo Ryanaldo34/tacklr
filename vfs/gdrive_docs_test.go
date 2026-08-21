@@ -259,24 +259,24 @@ func TestDrive_exportReadHonestStat(t *testing.T) {
 	api.nodes["doc1"].export = exportZip(t)
 
 	ms := mountDrive(t, api, nil, false)
-	st, err := ms.Stat(ctx, "/contracts/Spec")
+	st, err := ms.Stat(ctx, "/workspace/contracts/Spec")
 	if err != nil || st.MediaType != "application/vnd.google-apps.document" || st.Size != 0 {
 		t.Fatalf("Stat = %+v err=%v", st, err)
 	}
 	if api.exports != 0 {
 		t.Fatalf("Stat exported %d times", api.exports)
 	}
-	sheet, err := ms.Stat(ctx, "/contracts/Budget")
+	sheet, err := ms.Stat(ctx, "/workspace/contracts/Budget")
 	if err != nil || sheet.MediaType != "application/vnd.google-apps.spreadsheet" || sheet.Size != 0 {
 		t.Fatalf("sheet Stat = %+v err=%v", sheet, err)
 	}
-	if _, err := ms.ReadFile(ctx, "/contracts/Budget"); !errors.Is(err, vfs.ErrNotSupported) {
+	if _, err := ms.ReadFile(ctx, "/workspace/contracts/Budget"); !errors.Is(err, vfs.ErrNotSupported) {
 		t.Fatalf("sheet ReadFile: %v", err)
 	}
-	if _, err := ms.ReadFile(ctx, "/contracts/Spec"); !errors.Is(err, vfs.ErrNotSupported) {
+	if _, err := ms.ReadFile(ctx, "/workspace/contracts/Spec"); !errors.Is(err, vfs.ErrNotSupported) {
 		t.Fatalf("OpenFile native: %v", err)
 	}
-	doc, err := ms.ReadText(ctx, "/contracts/Spec")
+	doc, err := ms.ReadText(ctx, "/workspace/contracts/Spec")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -296,7 +296,7 @@ func TestDrive_exportReadHonestStat(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ms.Close() })
-	host := filepath.Join(dir, "contracts", "Spec")
+	host := filepath.Join(dir, "workspace", "contracts", "Spec")
 	hst, err := os.Stat(host)
 	if err != nil {
 		t.Fatal(err)
@@ -318,7 +318,7 @@ func TestDrive_exportTooLarge(t *testing.T) {
 	api := driveTree()
 	api.nodes["doc1"].export = bytesRepeat(vfs.MaxDocsExportBytes + 2)
 	ms := mountDrive(t, api, nil, false)
-	if _, err := ms.ReadText(ctx, "/contracts/Spec"); !errors.Is(err, vfs.ErrTooLarge) {
+	if _, err := ms.ReadText(ctx, "/workspace/contracts/Spec"); !errors.Is(err, vfs.ErrTooLarge) {
 		t.Fatalf("oversize: %v", err)
 	}
 }
@@ -337,46 +337,46 @@ func TestDrive_writablePlaintextAndTrash(t *testing.T) {
 	}
 	docs := newMemDocs("doc1", "R0", spans, nil)
 	ms := mountDrive(t, api, docs, true)
-	if err := ms.WriteFile(ctx, "/contracts/new.txt", []byte("hello\n")); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/contracts/new.txt", []byte("hello\n")); err != nil {
 		t.Fatal(err)
 	}
-	got, err := ms.ReadFile(ctx, "/contracts/new.txt")
+	got, err := ms.ReadFile(ctx, "/workspace/contracts/new.txt")
 	if err != nil || string(got) != "hello\n" {
 		t.Fatalf("read new = %q err=%v", got, err)
 	}
-	if err := ms.MkdirAll(ctx, "/contracts/sub/dir"); err != nil {
+	if err := ms.MkdirAll(ctx, "/workspace/contracts/sub/dir"); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.Remove(ctx, "/contracts/new.txt"); err != nil {
+	if err := ms.Remove(ctx, "/workspace/contracts/new.txt"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ms.ReadFile(ctx, "/contracts/new.txt"); !errors.Is(err, vfs.ErrNotExist) {
+	if _, err := ms.ReadFile(ctx, "/workspace/contracts/new.txt"); !errors.Is(err, vfs.ErrNotExist) {
 		t.Fatalf("trashed: %v", err)
 	}
-	if err := ms.Remove(ctx, "/contracts"); !errors.Is(err, vfs.ErrInvalidPath) {
+	if err := ms.Remove(ctx, "/workspace/contracts"); !errors.Is(err, vfs.ErrInvalidPath) {
 		t.Fatalf("root: %v", err)
 	}
-	if err := ms.Remove(ctx, "/contracts/dup.txt"); !errors.Is(err, vfs.ErrAmbiguous) {
+	if err := ms.Remove(ctx, "/workspace/contracts/dup.txt"); !errors.Is(err, vfs.ErrAmbiguous) {
 		t.Fatalf("ambiguous: %v", err)
 	}
-	if err := ms.WriteFile(ctx, "/contracts/Spec", []byte("x")); !errors.Is(err, vfs.ErrNotSupported) {
+	if err := ms.WriteFile(ctx, "/workspace/contracts/Spec", []byte("x")); !errors.Is(err, vfs.ErrNotSupported) {
 		t.Fatalf("native PutFile: %v", err)
 	}
-	plain := vfs.NewTextDocument("/contracts/Spec", "text/plain", "utf-8", "plain")
+	plain := vfs.NewTextDocument("/workspace/contracts/Spec", "text/plain", "utf-8", "plain")
 	if err := ms.WriteDocument(ctx, plain); !errors.Is(err, vfs.ErrNotSupported) {
 		t.Fatalf("identity WriteDocument: %v", err)
 	}
-	still, err := ms.ReadText(ctx, "/contracts/Spec")
+	still, err := ms.ReadText(ctx, "/workspace/contracts/Spec")
 	if err != nil || !blockHasText(still, "Hello") {
 		t.Fatalf("identity write must not replace Doc IR: %v", err)
 	}
-	if err := ms.Remove(ctx, "/contracts/Spec"); err != nil {
+	if err := ms.Remove(ctx, "/workspace/contracts/Spec"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ms.Stat(ctx, "/contracts/Spec"); !errors.Is(err, vfs.ErrNotExist) {
+	if _, err := ms.Stat(ctx, "/workspace/contracts/Spec"); !errors.Is(err, vfs.ErrNotExist) {
 		t.Fatalf("trashed doc Stat: %v", err)
 	}
-	if _, err := ms.ReadText(ctx, "/contracts/Spec"); !errors.Is(err, vfs.ErrNotExist) {
+	if _, err := ms.ReadText(ctx, "/workspace/contracts/Spec"); !errors.Is(err, vfs.ErrNotExist) {
 		t.Fatalf("trashed doc ReadText: %v", err)
 	}
 }
@@ -392,7 +392,7 @@ func TestDrive_docsWriteCAS(t *testing.T) {
 	docs := newMemDocs("doc1", "R0", spans, nil)
 	ms := mountDrive(t, api, docs, true)
 
-	empty := vfs.NewRichDocument("/contracts/Spec", "application/vnd.google-apps.document", []vfs.Block{
+	empty := vfs.NewRichDocument("/workspace/contracts/Spec", "application/vnd.google-apps.document", []vfs.Block{
 		{Kind: vfs.BlockKindParagraph, Text: "Nope"},
 	})
 	if err := ms.WriteDocument(ctx, empty); !errors.Is(err, vfs.ErrConflict) {
@@ -401,7 +401,7 @@ func TestDrive_docsWriteCAS(t *testing.T) {
 	if len(docs.batches) != 0 {
 		t.Fatalf("empty hint must not BatchUpdate: %d", len(docs.batches))
 	}
-	orig, err := ms.ReadText(ctx, "/contracts/Spec")
+	orig, err := ms.ReadText(ctx, "/workspace/contracts/Spec")
 	if err != nil || !blockHasText(orig, "Hello") {
 		t.Fatalf("after empty hint: %v", err)
 	}
@@ -424,7 +424,7 @@ func TestDrive_docsWriteCAS(t *testing.T) {
 	if err := ms.WriteDocument(ctx, orig); !errors.Is(err, vfs.ErrConflict) {
 		t.Fatalf("CAS: %v", err)
 	}
-	again, err := ms.ReadText(ctx, "/contracts/Spec")
+	again, err := ms.ReadText(ctx, "/workspace/contracts/Spec")
 	if err != nil || !blockHasText(again, "Hello") || vfs.ContentToken(again) != before {
 		t.Fatalf("sibling CAS must keep Hello: %v", err)
 	}
@@ -440,7 +440,7 @@ func TestDrive_docsReplaceSucceeds(t *testing.T) {
 	}
 	docs := newMemDocs("doc1", "R0", spans, nil)
 	ms := mountDrive(t, api, docs, true)
-	doc, err := ms.ReadText(ctx, "/contracts/Spec")
+	doc, err := ms.ReadText(ctx, "/workspace/contracts/Spec")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -461,7 +461,7 @@ func TestDrive_docsReplaceSucceeds(t *testing.T) {
 	if err := ms.WriteDocument(ctx, doc); err != nil {
 		t.Fatal(err)
 	}
-	got, err := ms.ReadText(ctx, "/contracts/Spec")
+	got, err := ms.ReadText(ctx, "/workspace/contracts/Spec")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -478,7 +478,7 @@ func TestDrive_createAsDoc(t *testing.T) {
 	api := driveTree()
 	docs := &memDocs{snaps: map[string]vfs.DocsSnapshot{}, rev: map[string]string{}}
 	ms := mountDrive(t, api, docs, true)
-	created := vfs.NewRichDocument("/contracts/Policy", "application/vnd.google-apps.document", []vfs.Block{
+	created := vfs.NewRichDocument("/workspace/contracts/Policy", "application/vnd.google-apps.document", []vfs.Block{
 		{Kind: vfs.BlockKindParagraph, Text: "Hi"},
 	})
 	if err := ms.WriteDocument(ctx, created); err != nil {
@@ -496,23 +496,23 @@ func TestDrive_createAsDoc(t *testing.T) {
 	if !found {
 		t.Fatal("create-as-Doc missing")
 	}
-	st, err := ms.Stat(ctx, "/contracts/Policy")
+	st, err := ms.Stat(ctx, "/workspace/contracts/Policy")
 	if err != nil || st.MediaType != "application/vnd.google-apps.document" {
 		t.Fatalf("Stat Policy = %+v err=%v", st, err)
 	}
-	got, err := ms.ReadText(ctx, "/contracts/Policy")
+	got, err := ms.ReadText(ctx, "/workspace/contracts/Policy")
 	if err != nil || !blockHasText(got, "Hi") {
 		t.Fatalf("create body: %v", err)
 	}
 
-	table := vfs.NewRichDocument("/contracts/Grid", "application/vnd.google-apps.document", []vfs.Block{{
+	table := vfs.NewRichDocument("/workspace/contracts/Grid", "application/vnd.google-apps.document", []vfs.Block{{
 		Kind: vfs.BlockKindTable, Text: "A\tB",
 		Style: vfs.StyleMeta{Attributes: map[string]string{"rows": "1", "cols": "2"}},
 	}})
 	if err := ms.WriteDocument(ctx, table); err != nil {
 		t.Fatal(err)
 	}
-	grid, err := ms.ReadText(ctx, "/contracts/Grid")
+	grid, err := ms.ReadText(ctx, "/workspace/contracts/Grid")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -532,7 +532,7 @@ func TestDrive_createDocAppliesInlineMarksInFollowupBatch(t *testing.T) {
 	api := driveTree()
 	docs := &memDocs{snaps: map[string]vfs.DocsSnapshot{}, rev: map[string]string{}}
 	ms := mountDrive(t, api, docs, true)
-	doc := vfs.NewRichDocument("/contracts/Marks", "application/vnd.google-apps.document", []vfs.Block{
+	doc := vfs.NewRichDocument("/workspace/contracts/Marks", "application/vnd.google-apps.document", []vfs.Block{
 		{Kind: vfs.BlockKindParagraph, Text: "See **x**"},
 	})
 	if err := ms.WriteDocument(ctx, doc); err != nil {
@@ -565,7 +565,7 @@ func TestDrive_writeSheetRejected(t *testing.T) {
 	api := driveTree()
 	docs := newMemDocs("sheet1", "R0", nil, nil)
 	ms := mountDrive(t, api, docs, true)
-	if err := ms.WriteDocument(ctx, vfs.NewRichDocument("/contracts/Budget", "application/vnd.google-apps.document", []vfs.Block{
+	if err := ms.WriteDocument(ctx, vfs.NewRichDocument("/workspace/contracts/Budget", "application/vnd.google-apps.document", []vfs.Block{
 		{Kind: vfs.BlockKindParagraph, Text: "x"},
 	})); !errors.Is(err, vfs.ErrNotSupported) {
 		t.Fatalf("sheet: %v", err)
@@ -575,21 +575,21 @@ func TestDrive_writeSheetRejected(t *testing.T) {
 func TestDrive_nestedPlainFilesAndDirs(t *testing.T) {
 	ctx := t.Context()
 	ms := mountDrive(t, driveTree(), newMemDocs("doc1", "R0", nil, nil), true)
-	if err := ms.WriteFile(ctx, "/contracts/a/b/c.txt", []byte("z")); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/contracts/a/b/c.txt", []byte("z")); err != nil {
 		t.Fatal(err)
 	}
-	got, err := ms.ReadFile(ctx, "/contracts/a/b/c.txt")
+	got, err := ms.ReadFile(ctx, "/workspace/contracts/a/b/c.txt")
 	if err != nil || string(got) != "z" {
 		t.Fatalf("read = %q err=%v", got, err)
 	}
-	ents, err := ms.ReadDir(ctx, "/contracts/a")
+	ents, err := ms.ReadDir(ctx, "/workspace/contracts/a")
 	if err != nil || len(ents) == 0 {
 		t.Fatalf("readdir: %+v err=%v", ents, err)
 	}
-	if err := ms.MkdirAll(ctx, "/contracts/d/e"); err != nil {
+	if err := ms.MkdirAll(ctx, "/workspace/contracts/d/e"); err != nil {
 		t.Fatal(err)
 	}
-	st, err := ms.Stat(ctx, "/contracts/d/e")
+	st, err := ms.Stat(ctx, "/workspace/contracts/d/e")
 	if err != nil || !st.IsDir {
 		t.Fatalf("stat dir %+v err=%v", st, err)
 	}
@@ -604,7 +604,7 @@ func TestDrive_writeDocumentEdges(t *testing.T) {
 		{StartIndex: 8, EndIndex: 14, Kind: "paragraph", Text: "Hello"},
 	}, nil)
 	ro := mountDrive(t, api, docs, false)
-	if err := ro.WriteDocument(ctx, vfs.NewRichDocument("/contracts/Spec", "application/vnd.google-apps.document", []vfs.Block{
+	if err := ro.WriteDocument(ctx, vfs.NewRichDocument("/workspace/contracts/Spec", "application/vnd.google-apps.document", []vfs.Block{
 		{Kind: vfs.BlockKindParagraph, Text: "x"},
 	})); !errors.Is(err, vfs.ErrReadOnly) {
 		t.Fatalf("readonly: %v", err)
@@ -612,28 +612,28 @@ func TestDrive_writeDocumentEdges(t *testing.T) {
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
 	ms := mountDrive(t, api, docs, true)
-	if err := ms.WriteDocument(canceled, vfs.NewRichDocument("/contracts/Spec", "application/vnd.google-apps.document", []vfs.Block{
+	if err := ms.WriteDocument(canceled, vfs.NewRichDocument("/workspace/contracts/Spec", "application/vnd.google-apps.document", []vfs.Block{
 		{Kind: vfs.BlockKindParagraph, Text: "x"},
 	})); err == nil {
 		t.Fatal("canceled write")
 	}
-	nested := vfs.NewTextDocument("/contracts/sub/dir/edge.txt", "text/plain", "utf-8", "plain")
+	nested := vfs.NewTextDocument("/workspace/contracts/sub/dir/edge.txt", "text/plain", "utf-8", "plain")
 	if err := ms.WriteDocument(ctx, nested); err != nil {
 		t.Fatal(err)
 	}
-	gotNested, err := ms.ReadFile(ctx, "/contracts/sub/dir/edge.txt")
+	gotNested, err := ms.ReadFile(ctx, "/workspace/contracts/sub/dir/edge.txt")
 	if err != nil || string(gotNested) != "plain" {
 		t.Fatalf("nested txt = %q err=%v", gotNested, err)
 	}
-	txt := vfs.NewTextDocument("/contracts/edge.txt", "text/plain", "utf-8", "plain")
+	txt := vfs.NewTextDocument("/workspace/contracts/edge.txt", "text/plain", "utf-8", "plain")
 	if err := ms.WriteDocument(ctx, txt); err != nil {
 		t.Fatal(err)
 	}
-	got, err := ms.ReadFile(ctx, "/contracts/edge.txt")
+	got, err := ms.ReadFile(ctx, "/workspace/contracts/edge.txt")
 	if err != nil || string(got) != "plain" {
 		t.Fatalf("txt = %q err=%v", got, err)
 	}
-	doc, err := ms.ReadText(ctx, "/contracts/Spec")
+	doc, err := ms.ReadText(ctx, "/workspace/contracts/Spec")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -661,7 +661,7 @@ func TestDrive_docsSetBlocksNestedAndOmitImage(t *testing.T) {
 	}
 	docs := newMemDocs("doc1", "R0", spans, []vfs.DocTab{{ID: "t.abc", Title: "Intro", Index: 0}})
 	ms := mountDrive(t, api, docs, true)
-	doc, err := ms.ReadText(ctx, "/contracts/Spec")
+	doc, err := ms.ReadText(ctx, "/workspace/contracts/Spec")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -678,7 +678,7 @@ func TestDrive_docsSetBlocksNestedAndOmitImage(t *testing.T) {
 	if err := ms.WriteDocument(ctx, doc); err != nil {
 		t.Fatal(err)
 	}
-	got, err := ms.ReadText(ctx, "/contracts/Spec")
+	got, err := ms.ReadText(ctx, "/workspace/contracts/Spec")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -697,17 +697,6 @@ func TestDrive_docsSetBlocksNestedAndOmitImage(t *testing.T) {
 	joined := strings.Join(texts, " ")
 	if !strings.Contains(joined, "nested") || !strings.Contains(joined, "Title") || !strings.Contains(joined, "kept") {
 		t.Fatalf("texts = %v", texts)
-	}
-}
-
-func TestBindingSpec_writableOptIn(t *testing.T) {
-	ro := vfs.BindingSpec(vfs.Binding{Provider: "gdrive", Point: "/c"})
-	if !ro.ReadOnly {
-		t.Fatal("zero-value must be read-only")
-	}
-	w := vfs.BindingSpec(vfs.Binding{Provider: "gdrive", Point: "/c", Writable: true})
-	if w.ReadOnly {
-		t.Fatal("Writable bind must not be read-only")
 	}
 }
 

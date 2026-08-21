@@ -93,9 +93,10 @@ type AgentOptions struct {
 	// SearchNamespace isolates brain retrieval when set (session-owned, checkpointed).
 	// Nil leaves a loaded session value unchanged. Workers get a copy at spawn.
 	SearchNamespace *uuid.UUID
-	// MountSession is the host-owned VFS mount table. The harness borrows it
-	// for this turn (tool dispatch only). Hosts create, mount, FuseMount, and
-	// Close it. Nil means no VFS tools.
+	// MountSession is the VFS tree injected for this turn, or nil (no VFS tools).
+	// Registry builds one from FSBootstrap plus client bind recipes when a
+	// projection is available. Embedders pass their own. The injector Closes
+	// it after the turn; the harness never does (workers inherit the pointer).
 	MountSession *vfs.MountSession
 	// RunCommandUnattended injects run_command without ToolPermissionOnCall.
 	// Zero value (Registry, testserver) parks run_command for permission.

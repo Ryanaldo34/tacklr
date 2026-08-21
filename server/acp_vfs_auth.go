@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/ryanaldo34/tacklr/vfs"
@@ -45,6 +46,7 @@ type vfsUnbindParams struct {
 	SessionID string `json:"sessionId"`
 	Point     string `json:"point"`
 	Provider  string `json:"provider"`
+	Name      string `json:"name"`
 }
 
 func (p *acpProtocol) sessionAgent(ctx context.Context, sessionID string) string {
@@ -112,7 +114,7 @@ func (p *acpProtocol) handleVFSBind(ctx context.Context, env ProtocolEnv, pr *pa
 		if env.Conn != nil && env.Conn.RPC != nil {
 			env.Registry.SetVFSTokenRefresh(params.SessionID, b.Provider, vfsTokenRefresh(env.Conn.RPC, params.SessionID, b.Provider))
 		}
-		okItems = append(okItems, mounted{Point: vfs.BindingSpec(b).Point, Provider: b.Provider})
+		okItems = append(okItems, mounted{Point: vfs.WorkspacePoint, Provider: b.Provider})
 	}
 	return env.Conn.Writer.WriteResult(pr.ID, map[string]any{
 		"mounted": okItems,
@@ -148,7 +150,11 @@ func (p *acpProtocol) handleVFSUnbind(ctx context.Context, env ProtocolEnv, pr *
 	if _, err := p.resolveOwnedWireSession(ctx, env, params.SessionID, actionVFSCredentials); err != nil {
 		return env.Conn.Writer.WriteError(pr.ID, err)
 	}
-	if err := env.Registry.UnbindVFS(params.SessionID, params.Point, params.Provider); err != nil {
+	point := params.Point
+	if name := strings.TrimSpace(params.Name); name != "" {
+		point = name
+	}
+	if err := env.Registry.UnbindVFS(ctx, params.SessionID, point, params.Provider); err != nil {
 		return env.Conn.Writer.WriteError(pr.ID, err)
 	}
 	return env.Conn.Writer.WriteResult(pr.ID, map[string]any{})

@@ -36,10 +36,11 @@ type filePutter interface {
 // importing them. Errors from the hook are ignored so persist never rolls back.
 type AfterPersistFunc func(ctx context.Context, virtualPath string) error
 
-// MountSession is the session-owned virtual filesystem: mount table + path I/O.
+// MountSession is one isolated virtual filesystem: mount table + path I/O.
 // It routes document I/O to the provider; it does not encode IR or cache dirty
-// documents. Hosts attach/detach mounts here (not on the agent harness).
-// BackendRegistry is process-scoped; this type holds the live per-session tree.
+// documents. The injector (Registry per turn, or an embedder) creates, Mounts,
+// FuseMounts, and Closes it. The agent harness only borrows the pointer.
+// BackendRegistry is process-scoped.
 type MountSession struct {
 	mu           sync.Mutex
 	id           string
@@ -393,9 +394,6 @@ func (t *mountTable) mount(ctx context.Context, spec MountSpec, provider Provide
 
 	stored := cloneSpec(spec)
 	stored.Point = cleaned
-	if len(stored.Members) > 0 {
-		stored.ReadOnly = true
-	}
 
 	t.mu.Lock()
 	defer t.mu.Unlock()

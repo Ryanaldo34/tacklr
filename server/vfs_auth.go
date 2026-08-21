@@ -31,7 +31,11 @@ func (r *Registry) agentFS(agentID string) (*vfs.BackendRegistry, error) {
 	return spec.FSRegistry, nil
 }
 
-// BindVFS records a user-owned backend and mounts it when the session tree exists.
+// BindVFS records a user-owned backend for the next turn. The client supplies
+// credentials before RunTurn; this does not remount a live tree. Cloud binds
+// attach under /workspace/<alias> when openTurnVFS materializes. CheckMount
+// of the inner factory runs before credentials are kept so a bad token does
+// not drop sibling aliases.
 func (r *Registry) BindVFS(ctx context.Context, sessionID, agentID string, b vfs.Binding) error {
 	if r == nil {
 		return clientErrorf(ErrInvalidRequest, "registry required")
@@ -50,33 +54,48 @@ func (r *Registry) BindVFS(ctx context.Context, sessionID, agentID string, b vfs
 		return clientErrorf(ErrInvalidRequest, "unknown vfs profile %q", b.Provider)
 	}
 	auth := r.VFSAuth()
+	inner := vfs.BindingMember(b)
+	alias := inner.Params[vfs.ParamName]
+	prev, prevCred := snapshotBinding(auth, sessionID, b.Provider, alias)
+
 	if err := auth.Bind(sessionID, b); err != nil {
 		return clientErrorCause(ErrInvalidRequest, err, "bind vfs")
 	}
-	spec := vfs.BindingSpec(b)
-
-	r.mountsMu.Lock()
-	ms := r.mounts[sessionID]
-	r.mountsMu.Unlock()
-	if ms != nil {
-		if err := ms.Unmount(spec.Point); err != nil {
-			slog.Warn("vfs remount: unmount previous", "session_id", sessionID, "point", spec.Point, "error", err)
-		}
-		if err := ms.Mount(ctx, spec); err != nil {
-			if unbindErr := auth.Unbind(sessionID, spec.Point); unbindErr != nil {
-				slog.Error("vfs bind rollback failed", "session_id", sessionID, "point", spec.Point, "error", unbindErr)
-			}
-			return err
-		}
-		return nil
-	}
-	if err := vfs.CheckMount(ctx, fsReg, sessionID, spec); err != nil {
-		if unbindErr := auth.Unbind(sessionID, spec.Point); unbindErr != nil {
-			slog.Error("vfs bind rollback failed", "session_id", sessionID, "point", spec.Point, "error", unbindErr)
-		}
+	if err := vfs.CheckMount(ctx, fsReg, sessionID, inner); err != nil {
+		restoreBinding(auth, sessionID, b.Provider, alias, prev, prevCred)
 		return err
 	}
 	return nil
+}
+
+func snapshotBinding(auth *vfs.SessionAuth, sessionID, provider, alias string) (vfs.Binding, vfs.Credential) {
+	cred, _ := auth.Credential(sessionID, provider)
+	var prev vfs.Binding
+	for _, existing := range auth.Bindings(sessionID) {
+		if existing.Params[vfs.ParamName] == alias {
+			prev = existing
+			break
+		}
+	}
+	return prev, cred
+}
+
+func restoreBinding(auth *vfs.SessionAuth, sessionID, provider, alias string, prev vfs.Binding, prevCred vfs.Credential) {
+	if prev.Provider == "" {
+		if err := auth.Unbind(sessionID, alias); err != nil {
+			slog.Error("vfs bind rollback failed", "session_id", sessionID, "alias", alias, "error", err)
+		}
+		if prevCred.Token != "" && auth.Holder(sessionID, provider) != nil {
+			if err := auth.Refresh(sessionID, provider, prevCred); err != nil {
+				slog.Error("vfs bind rollback token restore failed", "session_id", sessionID, "provider", provider, "error", err)
+			}
+		}
+		return
+	}
+	prev.Auth = prevCred
+	if err := auth.Bind(sessionID, prev); err != nil {
+		slog.Error("vfs bind rollback restore failed", "session_id", sessionID, "alias", alias, "error", err)
+	}
 }
 
 // RefreshVFS replaces the access token for a provider on the session.
@@ -90,8 +109,9 @@ func (r *Registry) RefreshVFS(sessionID, provider string, c vfs.Credential) erro
 	return nil
 }
 
-// UnbindVFS removes one mount point or every binding for a provider.
-func (r *Registry) UnbindVFS(sessionID, point, provider string) error {
+// UnbindVFS drops one alias or every binding for a provider. Takes effect on
+// the next turn. The live tree is unchanged.
+func (r *Registry) UnbindVFS(_ context.Context, sessionID, point, provider string) error {
 	if r == nil || r.VFSAuth() == nil {
 		return clientErrorf(ErrInvalidRequest, "vfs auth is not configured")
 	}
@@ -106,24 +126,15 @@ func (r *Registry) UnbindVFS(sessionID, point, provider string) error {
 	if err != nil {
 		return clientErrorCause(ErrInvalidRequest, err, "unbind vfs")
 	}
-	r.mountsMu.Lock()
-	ms := r.mounts[sessionID]
-	r.mountsMu.Unlock()
-	if ms != nil && point != "" {
-		if unmountErr := ms.Unmount(point); unmountErr != nil {
-			slog.Warn("vfs unbind: unmount failed", "session_id", sessionID, "point", point, "error", unmountErr)
-		}
-	}
-	if ms != nil && point == "" && provider != "" {
-		for _, spec := range ms.Specs() {
-			if spec.Profile == provider {
-				if unmountErr := ms.Unmount(spec.Point); unmountErr != nil {
-					slog.Warn("vfs unbind: unmount failed", "session_id", sessionID, "point", spec.Point, "error", unmountErr)
-				}
-			}
-		}
-	}
 	return nil
+}
+
+func workspaceMembers(binds []vfs.Binding) []vfs.MountSpec {
+	members := make([]vfs.MountSpec, 0, len(binds))
+	for _, b := range binds {
+		members = append(members, vfs.BindingMember(b))
+	}
+	return members
 }
 
 // SetVFSTokenRefresh installs the client callback used after a 401.
