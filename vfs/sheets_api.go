@@ -416,18 +416,18 @@ func colorHex(c *sheets.Color, style *sheets.ColorStyle) string {
 	if c == nil {
 		return ""
 	}
-	return FormatRGB(uint8(round255(c.Red)), uint8(round255(c.Green)), uint8(round255(c.Blue)))
+	return FormatRGB(round255(c.Red), round255(c.Green), round255(c.Blue))
 }
 
-func round255(v float64) int {
-	n := int(v*255 + 0.5)
+func round255(v float64) uint8 {
+	n := v*255 + 0.5
 	if n < 0 {
 		return 0
 	}
 	if n > 255 {
 		return 255
 	}
-	return n
+	return uint8(uint(n) & 0xff)
 }
 
 func hexColor(s string) *sheets.Color {
@@ -602,13 +602,13 @@ func dateTimeTokens(p string) (date, time bool) {
 
 func minuteContext(p string, i int) bool {
 	for j := i - 1; j >= 0; j-- {
-		if p[j] == ':' || p[j] == ' ' {
+		if p[j] == ':' || p[j] == ' ' || p[j] == 'm' {
 			continue
 		}
 		return p[j] == 'h' || p[j] == 's'
 	}
 	for j := i + 1; j < len(p); j++ {
-		if p[j] == ':' || p[j] == ' ' {
+		if p[j] == ':' || p[j] == ' ' || p[j] == 'm' {
 			continue
 		}
 		return p[j] == 'h' || p[j] == 's'

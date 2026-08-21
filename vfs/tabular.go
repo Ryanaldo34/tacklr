@@ -354,13 +354,22 @@ func ParseCellFormat(s string) (CellFormat, error) {
 	if s == "" {
 		return f, nil
 	}
-	for part := range strings.SplitSeq(s, ",") {
-		part = strings.TrimSpace(part)
+	parts := strings.Split(s, ",")
+	for i := 0; i < len(parts); {
+		part := strings.TrimSpace(parts[i])
 		if part == "" {
+			i++
 			continue
 		}
 		key, val, hasVal := strings.Cut(part, "=")
 		key = strings.ToLower(strings.TrimSpace(key))
+		if key == "number" {
+			for i+1 < len(parts) && !formatBagKey(parts[i+1]) {
+				i++
+				val += "," + parts[i]
+			}
+		}
+		i++
 		switch key {
 		case "number":
 			f.Number = val
@@ -404,6 +413,17 @@ func ParseCellFormat(s string) (CellFormat, error) {
 		}
 	}
 	return f, nil
+}
+
+func formatBagKey(part string) bool {
+	part = strings.TrimSpace(part)
+	key, _, _ := strings.Cut(part, "=")
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "number", "bold", "italic", "strike", "underline", "fill", "color", "align", "valign", "wrap", "border":
+		return true
+	default:
+		return false
+	}
 }
 
 func parseFormatFlag(hasVal bool, val string) bool {
@@ -1471,7 +1491,7 @@ func ParseRGB(s string) (r, g, b uint8, ok bool) {
 	if err != nil {
 		return 0, 0, 0, false
 	}
-	return uint8(n >> 16), uint8((n >> 8) & 0xff), uint8(n & 0xff), true
+	return uint8((n >> 16) & 0xff), uint8((n >> 8) & 0xff), uint8(n & 0xff), true
 }
 
 // FormatRGB writes #rrggbb.

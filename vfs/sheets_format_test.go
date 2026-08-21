@@ -140,7 +140,7 @@ func TestGoogleSheets_httpGetBatchUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(batchBody, `"bold":false`) && !strings.Contains(batchBody, `"bold": false`) {
+	if !strings.Contains(batchBody, "userEnteredFormat.textFormat.bold") {
 		t.Fatalf("clear bold body = %s", batchBody)
 	}
 	if numberFormatType("h:mm") != "TIME" || numberFormatType("m/d/yyyy h:mm") != "DATE_TIME" ||

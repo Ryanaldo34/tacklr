@@ -103,7 +103,13 @@ Knowledge objects with no file: read_object. Live names/grep: run_command → ls
 			}
 
 			if projected {
-				return "", vfs.ErrProjected
+				doc, err := v.ms.ReadText(ctx, p)
+				if err != nil {
+					return "", err
+				}
+				if _, ok := vfs.AsGrid(doc); ok {
+					return "", vfs.ErrProjected
+				}
 			}
 
 			if args.Start < 1 || args.End < args.Start {
