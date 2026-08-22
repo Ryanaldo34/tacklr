@@ -6,12 +6,13 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/ryanaldo34/tacklr/vfs/testhttp"
 )
 
-func TestGraphSDK_adapterMapsAuthErrorsAndLiveToken(t *testing.T) {
+func TestGraphSDK_adapterMapsStatusesTokenAndRedirect(t *testing.T) {
 	ctx := t.Context()
 	var sawAuth []string
 	writeJSON := func(w http.ResponseWriter, status int, body any) {
@@ -34,15 +35,13 @@ func TestGraphSDK_adapterMapsAuthErrorsAndLiveToken(t *testing.T) {
 		}
 		return it
 	}
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := testhttp.New(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sawAuth = append(sawAuth, r.Header.Get("Authorization"))
 		p := r.URL.Path
 		switch {
 		case p == "/me/drive":
 			writeJSON(w, 200, map[string]any{"id": "drv"})
-		case p == "/drives/drv/root":
-			writeJSON(w, 200, itemJSON("root", "Root", true))
-		case p == "/drives/drv/items/root":
+		case p == "/drives/drv/root", p == "/drives/drv/items/root":
 			writeJSON(w, 200, itemJSON("root", "Root", true))
 		case p == "/drives/drv/items/note1":
 			writeJSON(w, 200, map[string]any{
@@ -59,6 +58,8 @@ func TestGraphSDK_adapterMapsAuthErrorsAndLiveToken(t *testing.T) {
 			writeJSON(w, 500, map[string]any{"error": map[string]any{"code": "server", "message": "fail"}})
 		case p == "/drives/drv/items/empty":
 			w.WriteHeader(http.StatusOK)
+		case p == "/drives/drv/items/root/children":
+			writeJSON(w, 200, map[string]any{})
 		case strings.HasSuffix(p, "/redir/content"):
 			http.Redirect(w, r, "/drives/drv/items/blob/content", http.StatusFound)
 		case strings.HasSuffix(p, "/blob/content"):
@@ -67,12 +68,15 @@ func TestGraphSDK_adapterMapsAuthErrorsAndLiveToken(t *testing.T) {
 			http.NotFound(w, r)
 		}
 	}))
-	t.Cleanup(ts.Close)
 
 	holder := NewTokenHolder(Credential{Token: "tok-1"})
-	api, err := newGraphSDK(holder, ts.URL)
+	api, err := newGraphSDK(holder, srv.URL, srv.Client())
 	if err != nil {
 		t.Fatal(err)
+	}
+	prod, err := newGraphSDK(holder, "", nil)
+	if err != nil || prod.adapter().GetBaseUrl() != graphAPIRoot {
+		t.Fatalf("default base = %q err=%v", prod.adapter().GetBaseUrl(), err)
 	}
 
 	drive, item, err := api.resolveRoot(ctx, "", "", "")
@@ -98,6 +102,10 @@ func TestGraphSDK_adapterMapsAuthErrorsAndLiveToken(t *testing.T) {
 	if _, err := api.GetItem(ctx, "drv", "empty"); !errors.Is(err, ErrNotExist) {
 		t.Fatalf("empty body: %v", err)
 	}
+	kids, err := api.ListChildren(ctx, "drv", "root")
+	if err != nil || len(kids) != 0 {
+		t.Fatalf("empty children page = %v err=%v", kids, err)
+	}
 
 	body, n, err := api.GetContent(ctx, "drv", "redir")
 	if err != nil {
@@ -105,7 +113,7 @@ func TestGraphSDK_adapterMapsAuthErrorsAndLiveToken(t *testing.T) {
 	}
 	data, _ := io.ReadAll(body)
 	_ = body.Close()
-	if string(data) != "blob" || n != int64(len(data)) && n != 4 {
+	if string(data) != "blob" || n != 4 {
 		t.Fatalf("redirect content = %q n=%d", data, n)
 	}
 
@@ -117,7 +125,6 @@ func TestGraphSDK_adapterMapsAuthErrorsAndLiveToken(t *testing.T) {
 	if !strings.Contains(joined, "Bearer tok-1") || !strings.Contains(joined, "Bearer tok-2") {
 		t.Fatalf("auth headers = %v", sawAuth)
 	}
-
 	holder.Set(Credential{})
 	if _, err := api.GetItem(ctx, "drv", "root"); !errors.Is(err, ErrAuthExpired) {
 		t.Fatalf("empty token: %v", err)
@@ -130,7 +137,7 @@ func TestGraphSDK_resolveRootRejectsFileAndMissingDrive(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(body)
 	}
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := testhttp.New(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/me/drive":
 			writeJSON(w, map[string]any{})
@@ -142,9 +149,8 @@ func TestGraphSDK_resolveRootRejectsFileAndMissingDrive(t *testing.T) {
 			http.NotFound(w, r)
 		}
 	}))
-	t.Cleanup(ts.Close)
 
-	api, err := newGraphSDK(NewTokenHolder(Credential{Token: "tok"}), ts.URL)
+	api, err := newGraphSDK(NewTokenHolder(Credential{Token: "tok"}), srv.URL, srv.Client())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +163,6 @@ func TestGraphSDK_resolveRootRejectsFileAndMissingDrive(t *testing.T) {
 	if _, _, err := api.resolveRoot(ctx, "", "txt1", "site-1"); err == nil || !strings.Contains(err.Error(), "not a folder") {
 		t.Fatalf("site file root: %v", err)
 	}
-
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
 	if _, err := api.GetItem(canceled, "drv", "root"); !errors.Is(err, context.Canceled) {

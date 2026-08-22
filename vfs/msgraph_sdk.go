@@ -20,7 +20,7 @@ import (
 
 const graphAPIRoot = "https://graph.microsoft.com/v1.0"
 
-// graphSDK implements GraphAPI with github.com/microsoftgraph/msgraph-sdk-go.
+// graphSDK is the official msgraph-sdk-go client used by graphProvider.
 type graphSDK struct {
 	client *msgraphsdk.GraphServiceClient
 }
@@ -45,12 +45,14 @@ func (a *graphTokenAuth) AuthenticateRequest(ctx context.Context, request *abstr
 	return nil
 }
 
-func newGraphSDK(holder *TokenHolder, base string) (*graphSDK, error) {
-	opts := msgraphsdk.GetDefaultClientOptions()
-	httpClient := msgraphgocore.GetDefaultClient(&opts)
-	// Graph /content often 302s to a download host. The SDK client otherwise
-	// returns the redirect response (CheckRedirect = ErrUseLastResponse).
-	httpClient.CheckRedirect = nil
+func newGraphSDK(holder *TokenHolder, base string, httpClient *http.Client) (*graphSDK, error) {
+	if httpClient == nil {
+		opts := msgraphsdk.GetDefaultClientOptions()
+		httpClient = msgraphgocore.GetDefaultClient(&opts)
+		// Graph /content often 302s to a download host. The SDK client otherwise
+		// returns the redirect response (CheckRedirect = ErrUseLastResponse).
+		httpClient.CheckRedirect = nil
+	}
 	adapter, err := msgraphsdk.NewGraphRequestAdapterWithParseNodeFactoryAndSerializationWriterFactoryAndHttpClient(
 		&graphTokenAuth{holder: holder}, nil, nil, httpClient)
 	if err != nil {
@@ -73,6 +75,10 @@ func (g *graphSDK) absURL(path string) string {
 		return path
 	}
 	return strings.TrimRight(g.adapter().GetBaseUrl(), "/") + path
+}
+
+func (g *graphSDK) item(driveID, itemID string) *drives.ItemItemsDriveItemItemRequestBuilder {
+	return g.client.Drives().ByDriveId(driveID).Items().ByDriveItemId(itemID)
 }
 
 func (g *graphSDK) resolveRoot(ctx context.Context, driveID, itemID, siteID string) (string, string, error) {
@@ -127,49 +133,28 @@ func encodeGraphRel(rel string) string {
 	return strings.Join(parts, "/")
 }
 
-func (g *graphSDK) GetItem(ctx context.Context, driveID, itemID string) (GraphItem, error) {
-	if err := ctx.Err(); err != nil {
-		return GraphItem{}, err
-	}
+func (g *graphSDK) GetItem(ctx context.Context, driveID, itemID string) (graphItem, error) {
 	var item models.DriveItemable
 	var err error
 	if itemID == "" {
 		item, err = g.client.Drives().ByDriveId(driveID).Root().Get(ctx, nil)
 	} else {
-		item, err = g.client.Drives().ByDriveId(driveID).Items().ByDriveItemId(itemID).Get(ctx, nil)
+		item, err = g.item(driveID, itemID).Get(ctx, nil)
 	}
-	if err != nil {
-		return GraphItem{}, mapGraphError(err)
-	}
-	if item == nil {
-		return GraphItem{}, ErrNotExist
-	}
-	return graphItemFrom(item), nil
+	return graphItemOrErr(item, err)
 }
 
-func (g *graphSDK) GetByPath(ctx context.Context, driveID, itemID, rel string) (GraphItem, error) {
+func (g *graphSDK) GetByPath(ctx context.Context, driveID, itemID, rel string) (graphItem, error) {
 	if rel == "" {
 		return g.GetItem(ctx, driveID, itemID)
 	}
-	if err := ctx.Err(); err != nil {
-		return GraphItem{}, err
-	}
-	// Kiota does not generate ItemWithPath; use the official builder with the Graph path URL.
-	item, err := drives.NewItemItemsDriveItemItemRequestBuilder(g.absURL(graphItemURL(driveID, itemID, rel)), g.adapter()).Get(ctx, nil)
-	if err != nil {
-		return GraphItem{}, mapGraphError(err)
-	}
-	if item == nil {
-		return GraphItem{}, ErrNotExist
-	}
-	return graphItemFrom(item), nil
+	// Kiota does not generate ItemWithPath; WithUrl uses the official builder.
+	item, err := g.item(driveID, orRootID(itemID)).WithUrl(g.absURL(graphItemURL(driveID, itemID, rel))).Get(ctx, nil)
+	return graphItemOrErr(item, err)
 }
 
-func (g *graphSDK) ListChildren(ctx context.Context, driveID, itemID string) ([]GraphItem, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	page, err := g.client.Drives().ByDriveId(driveID).Items().ByDriveItemId(itemID).Children().Get(ctx, nil)
+func (g *graphSDK) ListChildren(ctx context.Context, driveID, itemID string) ([]graphItem, error) {
+	page, err := g.item(driveID, itemID).Children().Get(ctx, nil)
 	if err != nil {
 		return nil, mapGraphError(err)
 	}
@@ -180,7 +165,7 @@ func (g *graphSDK) ListChildren(ctx context.Context, driveID, itemID string) ([]
 	if err != nil {
 		return nil, err
 	}
-	var out []GraphItem
+	var out []graphItem
 	err = iter.Iterate(ctx, func(item models.DriveItemable) bool {
 		out = append(out, graphItemFrom(item))
 		return true
@@ -192,71 +177,65 @@ func (g *graphSDK) ListChildren(ctx context.Context, driveID, itemID string) ([]
 }
 
 func (g *graphSDK) GetContent(ctx context.Context, driveID, itemID string) (io.ReadCloser, int64, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, 0, err
-	}
-	data, err := g.client.Drives().ByDriveId(driveID).Items().ByDriveItemId(itemID).Content().Get(ctx, nil)
+	data, err := g.item(driveID, itemID).Content().Get(ctx, nil)
 	if err != nil {
 		return nil, 0, mapGraphError(err)
 	}
 	return io.NopCloser(bytes.NewReader(data)), int64(len(data)), nil
 }
 
-func (g *graphSDK) PutContent(ctx context.Context, driveID, itemID, name, parentID string, r io.Reader, size int64) (GraphItem, error) {
-	if err := ctx.Err(); err != nil {
-		return GraphItem{}, err
-	}
+func (g *graphSDK) PutContent(ctx context.Context, driveID, itemID, name, parentID string, r io.Reader, size int64) (graphItem, error) {
 	_ = size
 	body, err := io.ReadAll(r)
 	if err != nil {
-		return GraphItem{}, err
+		return graphItem{}, err
 	}
 	var item models.DriveItemable
 	if itemID == "" {
-		item, err = drives.NewItemItemsItemContentRequestBuilder(
-			g.absURL(graphItemURL(driveID, parentID, name)+":/content"), g.adapter()).Put(ctx, body, nil)
+		item, err = g.item(driveID, orRootID(parentID)).Content().
+			WithUrl(g.absURL(graphItemURL(driveID, parentID, name)+":/content")).
+			Put(ctx, body, nil)
 	} else {
-		item, err = g.client.Drives().ByDriveId(driveID).Items().ByDriveItemId(itemID).Content().Put(ctx, body, nil)
+		item, err = g.item(driveID, itemID).Content().Put(ctx, body, nil)
 	}
-	if err != nil {
-		return GraphItem{}, mapGraphError(err)
-	}
-	if item == nil {
-		return GraphItem{}, ErrNotExist
-	}
-	return graphItemFrom(item), nil
+	return graphItemOrErr(item, err)
 }
 
-func (g *graphSDK) CreateFolder(ctx context.Context, driveID, parentID, name string) (GraphItem, error) {
-	if err := ctx.Err(); err != nil {
-		return GraphItem{}, err
-	}
+func (g *graphSDK) CreateFolder(ctx context.Context, driveID, parentID, name string) (graphItem, error) {
 	folder := models.NewDriveItem()
 	folder.SetName(&name)
 	folder.SetFolder(models.NewFolder())
 	folder.SetAdditionalData(map[string]any{"@microsoft.graph.conflictBehavior": "fail"})
-	item, err := g.client.Drives().ByDriveId(driveID).Items().ByDriveItemId(parentID).Children().Post(ctx, folder, nil)
+	item, err := g.item(driveID, parentID).Children().Post(ctx, folder, nil)
+	return graphItemOrErr(item, err)
+}
+
+func (g *graphSDK) Delete(ctx context.Context, driveID, itemID string) error {
+	return mapGraphError(g.item(driveID, itemID).Delete(ctx, nil))
+}
+
+func orRootID(id string) string {
+	if id == "" {
+		return "root"
+	}
+	return id
+}
+
+func graphItemOrErr(item models.DriveItemable, err error) (graphItem, error) {
 	if err != nil {
-		return GraphItem{}, mapGraphError(err)
+		return graphItem{}, mapGraphError(err)
 	}
 	if item == nil {
-		return GraphItem{}, ErrNotExist
+		return graphItem{}, ErrNotExist
 	}
 	return graphItemFrom(item), nil
 }
 
-func (g *graphSDK) Delete(ctx context.Context, driveID, itemID string) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	return mapGraphError(g.client.Drives().ByDriveId(driveID).Items().ByDriveItemId(itemID).Delete(ctx, nil))
-}
-
-func graphItemFrom(item models.DriveItemable) GraphItem {
+func graphItemFrom(item models.DriveItemable) graphItem {
 	if item == nil {
-		return GraphItem{}
+		return graphItem{}
 	}
-	g := GraphItem{IsDir: item.GetFolder() != nil}
+	g := graphItem{IsDir: item.GetFolder() != nil}
 	if id := item.GetId(); id != nil {
 		g.ID = *id
 	}

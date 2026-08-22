@@ -7,25 +7,14 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/http"
 	"path"
 	"strings"
 	"time"
 )
 
-// GraphAPI is the Graph driveItem subset used by the provider. Tests inject a fake.
-type GraphAPI interface {
-	GetItem(ctx context.Context, driveID, itemID string) (GraphItem, error)
-	// GetByPath is GET .../items/{itemID}:/{rel} (one call). Empty rel is GetItem.
-	GetByPath(ctx context.Context, driveID, itemID, rel string) (GraphItem, error)
-	ListChildren(ctx context.Context, driveID, itemID string) ([]GraphItem, error)
-	GetContent(ctx context.Context, driveID, itemID string) (io.ReadCloser, int64, error)
-	PutContent(ctx context.Context, driveID, itemID, name, parentID string, r io.Reader, size int64) (GraphItem, error)
-	CreateFolder(ctx context.Context, driveID, parentID, name string) (GraphItem, error)
-	Delete(ctx context.Context, driveID, itemID string) error
-}
-
-// GraphItem is one Graph file or folder (IDs stay inside the provider).
-type GraphItem struct {
+// graphItem is one Graph file or folder (IDs stay inside the provider).
+type graphItem struct {
 	ID, Name, Mime, ParentID string
 	Size                     int64
 	IsDir                    bool
@@ -33,11 +22,12 @@ type GraphItem struct {
 }
 
 // GraphFactory opens OneDrive / SharePoint library providers. Auth is session-scoped.
+// Base and HTTP are for tests: point the official client at testhttp.Server.
 type GraphFactory struct {
 	ID   string
 	Auth *SessionAuth
-	API  GraphAPI // optional; nil → official msgraph-sdk-go client from the session token
-	Base string   // optional Graph root URL (tests)
+	Base string       // optional Graph root URL (tests)
+	HTTP *http.Client // optional; tests inject testhttp.Server.Client
 }
 
 // Profile implements ProviderFactory.
@@ -55,31 +45,27 @@ func (f GraphFactory) Open(ctx context.Context, sessionID string, spec MountSpec
 	if f.Auth != nil {
 		holder = f.Auth.Holder(sessionID, f.ID)
 	}
-	api := f.API
-	driveID := strings.TrimSpace(spec.Params[ParamDriveID])
-	itemID := strings.TrimSpace(spec.Params[ParamItemID])
-	if api == nil {
-		if holder == nil || holder.Current().Token == "" {
-			return nil, fmt.Errorf("vfs: msgraph access token required")
-		}
-		sdk, err := newGraphSDK(holder, f.Base)
-		if err != nil {
-			return nil, err
-		}
-		d, i, err := sdk.resolveRoot(ctx, driveID, itemID, strings.TrimSpace(spec.Params[ParamSiteID]))
-		if err != nil {
-			return nil, err
-		}
-		driveID, itemID = d, i
-		api = sdk
+	if holder == nil || holder.Current().Token == "" {
+		return nil, fmt.Errorf("vfs: msgraph access token required")
+	}
+	sdk, err := newGraphSDK(holder, f.Base, f.HTTP)
+	if err != nil {
+		return nil, err
+	}
+	driveID, itemID, err := sdk.resolveRoot(ctx,
+		strings.TrimSpace(spec.Params[ParamDriveID]),
+		strings.TrimSpace(spec.Params[ParamItemID]),
+		strings.TrimSpace(spec.Params[ParamSiteID]))
+	if err != nil {
+		return nil, err
 	}
 	return &graphProvider{
-		api: api, driveID: driveID, rootID: itemID, holder: holder, writable: !spec.ReadOnly,
+		api: sdk, driveID: driveID, rootID: itemID, holder: holder, writable: !spec.ReadOnly,
 	}, nil
 }
 
 type graphProvider struct {
-	api      GraphAPI
+	api      *graphSDK
 	driveID  string
 	rootID   string
 	holder   *TokenHolder
@@ -92,18 +78,12 @@ var (
 )
 
 func (p *graphProvider) call(ctx context.Context, fn func() error) error {
-	staleToken := ""
-	if p.holder != nil {
-		if err := p.holder.EnsureValid(ctx); err != nil {
-			return err
-		}
-		staleToken = p.holder.Current().Token
-	}
-	if err := fn(); err == nil || !errors.Is(err, ErrAuthExpired) {
+	if err := p.holder.EnsureValid(ctx); err != nil {
 		return err
 	}
-	if p.holder == nil {
-		return ErrAuthExpired
+	staleToken := p.holder.Current().Token
+	if err := fn(); err == nil || !errors.Is(err, ErrAuthExpired) {
+		return err
 	}
 	if err := p.holder.RefreshIfCurrent(ctx, staleToken); err != nil {
 		return err
@@ -111,8 +91,8 @@ func (p *graphProvider) call(ctx context.Context, fn func() error) error {
 	return fn()
 }
 
-func (p *graphProvider) getItem(ctx context.Context, id string) (GraphItem, error) {
-	var item GraphItem
+func (p *graphProvider) getItem(ctx context.Context, id string) (graphItem, error) {
+	var item graphItem
 	err := p.call(ctx, func() error {
 		var err error
 		item, err = p.api.GetItem(ctx, p.driveID, id)
@@ -121,8 +101,8 @@ func (p *graphProvider) getItem(ctx context.Context, id string) (GraphItem, erro
 	return item, err
 }
 
-func (p *graphProvider) listChildren(ctx context.Context, id string) ([]GraphItem, error) {
-	var kids []GraphItem
+func (p *graphProvider) listChildren(ctx context.Context, id string) ([]graphItem, error) {
+	var kids []graphItem
 	err := p.call(ctx, func() error {
 		var err error
 		kids, err = p.api.ListChildren(ctx, p.driveID, id)
@@ -131,11 +111,11 @@ func (p *graphProvider) listChildren(ctx context.Context, id string) ([]GraphIte
 	return kids, err
 }
 
-func (p *graphProvider) getByPath(ctx context.Context, id, rel string) (GraphItem, error) {
+func (p *graphProvider) getByPath(ctx context.Context, id, rel string) (graphItem, error) {
 	if rel == "" {
 		return p.getItem(ctx, id)
 	}
-	var item GraphItem
+	var item graphItem
 	err := p.call(ctx, func() error {
 		var err error
 		item, err = p.api.GetByPath(ctx, p.driveID, id, rel)
@@ -144,19 +124,19 @@ func (p *graphProvider) getByPath(ctx context.Context, id, rel string) (GraphIte
 	return item, err
 }
 
-func (p *graphProvider) lookupChild(ctx context.Context, parentID, name string) (GraphItem, error) {
+func (p *graphProvider) lookupChild(ctx context.Context, parentID, name string) (graphItem, error) {
 	return p.getByPath(ctx, parentID, name)
 }
 
-func (p *graphProvider) resolve(ctx context.Context, name string) (GraphItem, error) {
+func (p *graphProvider) resolve(ctx context.Context, name string) (graphItem, error) {
 	rel, err := cleanRel(name)
 	if err != nil {
-		return GraphItem{}, err
+		return graphItem{}, err
 	}
 	if rel == "" {
 		root, err := p.getItem(ctx, p.rootID)
 		if err != nil {
-			return GraphItem{}, err
+			return graphItem{}, err
 		}
 		root.Name = "."
 		root.IsDir = true
@@ -165,7 +145,7 @@ func (p *graphProvider) resolve(ctx context.Context, name string) (GraphItem, er
 	return p.getByPath(ctx, p.rootID, rel)
 }
 
-func graphFileInfo(item GraphItem) FileInfo {
+func graphFileInfo(item graphItem) FileInfo {
 	mt := ""
 	if !item.IsDir {
 		if item.Mime != "" {
@@ -246,7 +226,7 @@ func (p *graphProvider) OpenFile(ctx context.Context, name string, flag int, per
 	return &s3ReadFile{Reader: bytes.NewReader(data), info: fi}, nil
 }
 
-func (p *graphProvider) readBytes(ctx context.Context, item GraphItem) ([]byte, error) {
+func (p *graphProvider) readBytes(ctx context.Context, item graphItem) ([]byte, error) {
 	if item.Size > int64(MaxReadFileBytes) {
 		return nil, errFileExceeds(MaxReadFileBytes)
 	}
@@ -265,7 +245,7 @@ func (p *graphProvider) readBytes(ctx context.Context, item GraphItem) ([]byte, 
 	return data, nil
 }
 
-func (p *graphProvider) getContent(ctx context.Context, item GraphItem) (io.ReadCloser, int64, error) {
+func (p *graphProvider) getContent(ctx context.Context, item graphItem) (io.ReadCloser, int64, error) {
 	if item.Mime == "" && !item.IsDir {
 		// OneNote / loop / shortcut: listed, no file bytes.
 		return nil, 0, ErrNoCodec
@@ -346,37 +326,37 @@ func (p *graphProvider) MkdirAll(ctx context.Context, name string, perm fs.FileM
 	return err
 }
 
-func (p *graphProvider) ensureDir(ctx context.Context, rel string) (GraphItem, error) {
+func (p *graphProvider) ensureDir(ctx context.Context, rel string) (graphItem, error) {
 	root, err := p.getItem(ctx, p.rootID)
 	if err != nil {
-		return GraphItem{}, err
+		return graphItem{}, err
 	}
 	if rel == "" {
 		return root, nil
 	}
 	parentID := root.ID
-	var cur GraphItem
+	var cur graphItem
 	for _, part := range strings.Split(rel, "/") {
 		child, err := p.lookupChild(ctx, parentID, part)
 		if err == nil {
 			if !child.IsDir {
-				return GraphItem{}, fmt.Errorf("%w: %q is not a folder", ErrNotSupported, part)
+				return graphItem{}, fmt.Errorf("%w: %q is not a folder", ErrNotSupported, part)
 			}
 			cur = child
 			parentID = child.ID
 			continue
 		}
 		if !errors.Is(err, ErrNotExist) {
-			return GraphItem{}, err
+			return graphItem{}, err
 		}
-		var created GraphItem
+		var created graphItem
 		err = p.call(ctx, func() error {
 			var e error
 			created, e = p.api.CreateFolder(ctx, p.driveID, parentID, part)
 			return e
 		})
 		if err != nil {
-			return GraphItem{}, err
+			return graphItem{}, err
 		}
 		cur = created
 		parentID = created.ID
