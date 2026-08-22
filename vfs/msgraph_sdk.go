@@ -12,6 +12,7 @@ import (
 	"time"
 
 	abstractions "github.com/microsoft/kiota-abstractions-go"
+	khttp "github.com/microsoft/kiota-http-go"
 	msgraphsdk "github.com/microsoftgraph/msgraph-sdk-go"
 	msgraphgocore "github.com/microsoftgraph/msgraph-sdk-go-core"
 	"github.com/microsoftgraph/msgraph-sdk-go/drives"
@@ -46,15 +47,19 @@ func (a *graphTokenAuth) AuthenticateRequest(ctx context.Context, request *abstr
 }
 
 func newGraphSDK(holder *TokenHolder, base string, httpClient *http.Client) (*graphSDK, error) {
-	if httpClient == nil {
-		opts := msgraphsdk.GetDefaultClientOptions()
-		httpClient = msgraphgocore.GetDefaultClient(&opts)
-		// Graph /content often 302s to a download host. The SDK client otherwise
-		// returns the redirect response (CheckRedirect = ErrUseLastResponse).
-		httpClient.CheckRedirect = nil
+	opts := msgraphsdk.GetDefaultClientOptions()
+	var parent http.RoundTripper
+	if httpClient != nil {
+		parent = httpClient.Transport
+	}
+	// Official middleware (URL rewrite /me, compression, redirects). Tests
+	// inject testhttp.Server.Client so only the parent transport is replaced.
+	client := &http.Client{
+		Transport: khttp.NewCustomTransportWithParentTransport(parent, msgraphgocore.GetDefaultMiddlewaresWithOptions(&opts)...),
+		Timeout:   httpClientTimeout(httpClient),
 	}
 	adapter, err := msgraphsdk.NewGraphRequestAdapterWithParseNodeFactoryAndSerializationWriterFactoryAndHttpClient(
-		&graphTokenAuth{holder: holder}, nil, nil, httpClient)
+		&graphTokenAuth{holder: holder}, nil, nil, client)
 	if err != nil {
 		return nil, fmt.Errorf("vfs: msgraph client: %w", err)
 	}
@@ -64,6 +69,13 @@ func newGraphSDK(holder *TokenHolder, base string, httpClient *http.Client) (*gr
 		adapter.SetBaseUrl(graphAPIRoot)
 	}
 	return &graphSDK{client: msgraphsdk.NewGraphServiceClient(adapter)}, nil
+}
+
+func httpClientTimeout(httpClient *http.Client) time.Duration {
+	if httpClient != nil && httpClient.Timeout > 0 {
+		return httpClient.Timeout
+	}
+	return 100 * time.Second
 }
 
 func (g *graphSDK) adapter() abstractions.RequestAdapter {

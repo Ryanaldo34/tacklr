@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -118,6 +119,7 @@ func (g *graphFX) kids(parent string) []*graphNode {
 			out = append(out, n)
 		}
 	}
+	slices.SortFunc(out, func(a, b *graphNode) int { return strings.Compare(a.id, b.id) })
 	return out
 }
 
@@ -163,7 +165,7 @@ func (g *graphFX) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	switch {
-	case p == "/me/drive":
+	case p == "/me/drive" || p == "/users/me-token-to-replace/drive":
 		writeGraphJSON(w, map[string]any{"id": g.meDrive})
 		return
 	case strings.HasPrefix(p, "/sites/") && strings.HasSuffix(p, "/drive"):
@@ -340,7 +342,7 @@ func mountGraphHTTP(t *testing.T, srv *testhttp.Server, writable bool, members .
 		t.Fatal(err)
 	}
 	if len(members) == 0 {
-		members = []vfs.MountSpec{vfs.MountSpec{
+		members = []vfs.MountSpec{{
 			Profile:  vfs.ProviderMicrosoft,
 			ReadOnly: !writable,
 			Params:   map[string]string{vfs.ParamName: "legal"},
@@ -436,6 +438,13 @@ func TestGraph_readWriteMkdirTrashRefreshAndErrors(t *testing.T) {
 	}
 	if err := ms.WriteFile(ctx, "/workspace/legal/huge.bin", make([]byte, vfs.MaxReadFileBytes+1)); !errors.Is(err, vfs.ErrTooLarge) {
 		t.Fatalf("oversize put: %v", err)
+	}
+	if err := ms.WriteDocument(ctx, vfs.NewTextDocument("/workspace/legal/note.md", "text/markdown", "utf-8", "# hi\n")); err != nil {
+		t.Fatal(err)
+	}
+	got, err = ms.ReadFile(ctx, "/workspace/legal/note.md")
+	if err != nil || !strings.Contains(string(got), "# hi") {
+		t.Fatalf("WriteDocument = %q err=%v", got, err)
 	}
 	if err := ms.MkdirAll(ctx, "/workspace/legal/Budget.xlsx/nope"); err == nil || !errors.Is(err, vfs.ErrNotSupported) {
 		t.Fatalf("mkdir through file: %v", err)
