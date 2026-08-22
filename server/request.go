@@ -1,13 +1,29 @@
 package server
 
 import (
-	"context"
 	"encoding/json"
 
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/durable"
+	"github.com/ryanaldo34/tacklr/mcp"
 )
+
+// TurnRequest describes a prompt or resume turn after Protocol.BindTurn.
+type TurnRequest struct {
+	SessionID              string
+	AgentID                string
+	ThreadID               string
+	Prompt                 string
+	UserMessage            *tacklr.Message
+	Responses              map[string]json.RawMessage
+	Load                   bool
+	AllowMissingCheckpoint bool
+	CWD                    string
+	MCPServers             []mcp.MCPConfig
+	Auth                   durable.AuthContext
+}
 
 // turnRequest is the common payload for both SSE and WebSocket prompt/resume
 // endpoints. Fields are omitempty so the same shape can be reused across all
@@ -17,6 +33,7 @@ type turnRequest struct {
 	ThreadID  string                     `json:"thread_id,omitempty"`
 	Prompt    string                     `json:"prompt,omitempty"`
 	Responses map[string]json.RawMessage `json:"responses,omitempty"`
+	Auth      *durable.AuthContext       `json:"auth,omitempty"`
 }
 
 // resolveThread chooses the thread ID and whether to load an existing session
@@ -26,21 +43,4 @@ func resolveThread(pr *parsedRequest) (threadID string, load bool) {
 		return pr.ThreadID, true
 	}
 	return uuid.New().String(), false
-}
-
-// runHarness executes either a prompt run or a resume from interrupt based on
-// whether the request carries interrupt responses. The caller owns the harness
-// (and any transport-specific streaming strategy).
-func runHarness(ctx context.Context, h *tacklr.AgentHarness, pr *parsedRequest) (<-chan tacklr.StreamEvent, error) {
-	if len(pr.Responses) > 0 {
-		responses := make(map[string][]byte, len(pr.Responses))
-		for id, payload := range pr.Responses {
-			responses[id] = []byte(payload)
-		}
-		return h.ReturnFromInterrupt(ctx, responses)
-	}
-	if pr.UserMessage != nil {
-		return h.RunMessage(ctx, pr.UserMessage)
-	}
-	return h.Run(ctx, pr.Prompt)
 }

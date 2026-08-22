@@ -11,9 +11,11 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/streaming"
+	"github.com/ryanaldo34/tacklr/vfs"
 )
 
 // acpWireSession is live ACP wire state for one session id (not harness state).
@@ -24,6 +26,8 @@ type acpWireSession struct {
 	configValues map[string]string
 	owner        string
 	prompted     bool // true after the first prompt turn was bound
+	vfs          []vfs.Binding
+	vfsDrop      []string
 }
 
 // acpWireEnvelope is the durable JSON blob in ProtocolWireStore.
@@ -51,6 +55,83 @@ func (s *acpWireSession) envelope() acpWireEnvelope {
 		Owner:        s.owner,
 		Prompted:     s.prompted,
 	}
+}
+
+func (s *acpWireSession) takeAuth() durable.AuthContext {
+	if s == nil {
+		return durable.AuthContext{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := durable.AuthContext{
+		Bindings: append([]vfs.Binding(nil), s.vfs...),
+		Drop:     append([]string(nil), s.vfsDrop...),
+	}
+	s.vfsDrop = nil
+	return out
+}
+
+func (s *acpWireSession) stashBind(b vfs.Binding) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	alias := strings.TrimSpace(b.Params[vfs.ParamName])
+	if alias == "" {
+		alias = strings.TrimPrefix(strings.TrimSpace(b.Point), "/")
+	}
+	for i, existing := range s.vfs {
+		ex := strings.TrimSpace(existing.Params[vfs.ParamName])
+		if ex == "" {
+			ex = strings.TrimPrefix(strings.TrimSpace(existing.Point), "/")
+		}
+		if ex == alias && existing.Provider == b.Provider {
+			s.vfs[i] = b
+			return
+		}
+	}
+	s.vfs = append(s.vfs, b)
+}
+
+func (s *acpWireSession) stashRefresh(provider string, c vfs.Credential) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	found := false
+	for i, existing := range s.vfs {
+		if existing.Provider != provider {
+			continue
+		}
+		s.vfs[i].Auth = c
+		found = true
+	}
+	return found
+}
+
+func (s *acpWireSession) stashUnbind(point, provider string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	kept := s.vfs[:0]
+	for _, existing := range s.vfs {
+		alias := strings.TrimSpace(existing.Params[vfs.ParamName])
+		if alias == "" {
+			alias = strings.TrimPrefix(strings.TrimSpace(existing.Point), "/")
+		}
+		drop := false
+		if point != "" && (alias == point || existing.Point == point) {
+			drop = true
+		}
+		if provider != "" && existing.Provider == provider {
+			drop = true
+		}
+		if drop {
+			if alias != "" {
+				s.vfsDrop = append(s.vfsDrop, alias)
+			} else {
+				s.vfsDrop = append(s.vfsDrop, existing.Provider)
+			}
+			continue
+		}
+		kept = append(kept, existing)
+	}
+	s.vfs = kept
 }
 
 func wireSessionFromEnvelope(env acpWireEnvelope) *acpWireSession {
@@ -126,10 +207,7 @@ func (p *acpProtocol) CreateSession(ctx context.Context, env ProtocolEnv, params
 			return "", nil, clientErrorf(ErrInvalidRequest, "invalid session/new params: %v", err)
 		}
 	}
-	defaultAgent := ""
-	if env.Registry != nil {
-		defaultAgent = env.Registry.DefaultAgent()
-	}
+	defaultAgent := catalogDefault(env.Catalog)
 	cfg := map[string]string{}
 	if defaultAgent != "" {
 		cfg["agent"] = defaultAgent
@@ -147,16 +225,20 @@ func (p *acpProtocol) CreateSession(ctx context.Context, env ProtocolEnv, params
 	}
 	p.sessions[sessionID] = sess
 	p.mu.Unlock()
-	if env.Registry != nil {
-		env.Registry.RecordSessionCreated(ctx)
+	recordSessionCreated(ctx)
+	if env.Runtime != nil {
+		if _, err := env.Runtime.CreateSession(ctx, durable.CreateSession{
+			AgentID:    defaultAgent,
+			SessionID:  durable.SessionID(sessionID),
+			MCPServers: pr.MCPServers,
+		}); err != nil {
+			return "", nil, err
+		}
 	}
 	if err := p.persistWire(ctx, sessionID, sess); err != nil {
 		return "", nil, err
 	}
-	opts := []ConfigOption{}
-	if env.Registry != nil {
-		opts = env.Registry.ConfigOptions(defaultAgent)
-	}
+	opts := catalogConfigOptions(env.Catalog, defaultAgent)
 	return sessionID, map[string]any{
 		"sessionId":     sessionID,
 		"configOptions": opts,
@@ -200,13 +282,20 @@ func (p *acpProtocol) LoadSession(ctx context.Context, env ProtocolEnv, sessionI
 	if err := p.persistWire(ctx, sessionID, sess); err != nil {
 		return nil, err
 	}
-	if agent == "" && env.Registry != nil {
-		agent = env.Registry.DefaultAgent()
+	if agent == "" {
+		agent = catalogDefault(env.Catalog)
 	}
-	opts := []ConfigOption{}
-	if env.Registry != nil {
-		opts = env.Registry.ConfigOptions(agent)
+	if env.Runtime != nil {
+		_, err := env.Runtime.CreateSession(ctx, durable.CreateSession{
+			AgentID:    agent,
+			SessionID:  durable.SessionID(sessionID),
+			MCPServers: sess.mcpServers,
+		})
+		if err != nil && !errors.Is(err, durable.ErrSessionExists) {
+			return nil, err
+		}
 	}
+	opts := catalogConfigOptions(env.Catalog, agent)
 	return map[string]any{
 		"sessionId":     sessionID,
 		"configOptions": opts,
@@ -296,16 +385,16 @@ func (p *acpProtocol) BindTurn(ctx context.Context, env ProtocolEnv, sessionID, 
 	sessCWD := sess.cwd
 	sess.mu.Unlock()
 
-	if agentID == "" && env.Registry != nil {
-		agentID = env.Registry.DefaultAgent()
+	if agentID == "" {
+		agentID = catalogDefault(env.Catalog)
 	}
 	if agentID == "" {
 		return TurnRequest{}, clientErrorf(ErrInvalidRequest, "no agent configured for session and no default agent configured")
 	}
 	// Reject binary content the agent model cannot accept before the turn starts.
-	if userMsg != nil && env.Registry != nil {
+	if userMsg != nil {
 		if mimes := userMsg.MIMETypes(); len(mimes) > 0 {
-			if model := env.Registry.AgentModel(agentID); model != nil {
+			if model := catalogAgentModel(env.Catalog, agentID); model != nil {
 				if bad := tacklr.UnsupportedMIMEs(model, mimes); len(bad) > 0 {
 					return TurnRequest{}, clientErrorf(ErrInvalidRequest, "unsupported content type(s): %s", strings.Join(bad, ", "))
 				}
@@ -326,9 +415,6 @@ func (p *acpProtocol) BindTurn(ctx context.Context, env ProtocolEnv, sessionID, 
 	if err := p.persistWire(ctx, sessionID, sess); err != nil {
 		return TurnRequest{}, err
 	}
-	if env.Registry != nil {
-		installVFSRefresh(env, sessionID, env.Registry.vfsAuth)
-	}
 
 	return TurnRequest{
 		SessionID:              sessionID,
@@ -341,6 +427,7 @@ func (p *acpProtocol) BindTurn(ctx context.Context, env ProtocolEnv, sessionID, 
 		AllowMissingCheckpoint: true, // wire session may outlive harness rows
 		CWD:                    sessCWD,
 		MCPServers:             mcpServers,
+		Auth:                   sess.takeAuth(),
 	}, nil
 }
 
@@ -359,9 +446,8 @@ func (p *acpProtocol) CloseSession(ctx context.Context, env ProtocolEnv, session
 			}
 		}
 	}
-	if env.Registry != nil {
-		env.Registry.CancelSession(sessionID)
-		env.Registry.DropLiveHarness(sessionID)
+	if env.Runtime != nil {
+		_ = env.Runtime.Close(ctx, durable.SessionID(sessionID))
 	}
 	return nil
 }
@@ -377,7 +463,7 @@ func (p *acpProtocol) setConfig(ctx context.Context, env ProtocolEnv, sessionID,
 	}
 	switch configID {
 	case "model":
-		if env.Registry == nil || !env.Registry.HasAgent(value) {
+		if !catalogHasAgent(env.Catalog, value) {
 			sess.mu.Unlock()
 			return nil, clientErrorf(ErrAgentNotFound, "agent %q not found", value)
 		}
@@ -392,6 +478,6 @@ func (p *acpProtocol) setConfig(ctx context.Context, env ProtocolEnv, sessionID,
 		return nil, err
 	}
 	return map[string]any{
-		"configOptions": env.Registry.ConfigOptions(agent),
+		"configOptions": catalogConfigOptions(env.Catalog, agent),
 	}, nil
 }

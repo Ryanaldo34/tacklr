@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -10,6 +12,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
@@ -111,35 +114,45 @@ func (p sseProtocol) runSSEProtocolTurn(
 	onStartError func(error),
 ) error {
 	threadID, load := resolveThread(pr)
-	req := TurnRequest{
-		AgentID:   pr.AgentID,
-		ThreadID:  threadID,
-		Prompt:    pr.Prompt,
-		Responses: pr.Responses,
-		Load:      load,
+	id := durable.SessionID(threadID)
+	if env.Runtime != nil && !load {
+		if _, err := env.Runtime.CreateSession(ctx, durable.CreateSession{
+			AgentID:   pr.AgentID,
+			SessionID: id,
+		}); err != nil && !errors.Is(err, durable.ErrSessionExists) {
+			if !IsClientError(err) {
+				logTurnError(err, pr.AgentID, threadID)
+			}
+			if onStartError != nil {
+				onStartError(err)
+			}
+			return err
+		}
 	}
-	stream, err := env.Registry.RunTurn(ctx, req)
-	if err != nil {
+	env.Conn = &Conn{Writer: ready(threadID)}
+	turn := PromptOrResume{Prompt: durable.Prompt{Text: pr.Prompt, AgentID: pr.AgentID, Auth: pr.Auth}}
+	if len(pr.Responses) > 0 {
+		resume := &durable.Resume{Auth: pr.Auth, Responses: make(map[string][]byte, len(pr.Responses))}
+		for k, v := range pr.Responses {
+			resume.Responses[k] = []byte(v)
+		}
+		turn.Resume = resume
+	}
+	err := runRuntimeTurn(ctx, env, p, threadID, nil, turn)
+	if err != nil && onStartError != nil {
+		if errors.Is(err, durable.ErrSessionNotFound) {
+			onStartError(fmt.Errorf("load session %q: %w", threadID, err))
+			return err
+		}
 		if !IsClientError(err) {
 			logTurnError(err, pr.AgentID, threadID)
 		}
-		if onStartError != nil {
-			onStartError(err)
-		}
-		return err
+		onStartError(err)
 	}
-	defer func() {
-		stream.Cancel()
-		stream.Close()
-	}()
-	if stream.SessionID() != "" {
-		threadID = stream.SessionID()
-	}
-	env.Conn = &Conn{Writer: ready(threadID)}
-	return runTurnStream(ctx, env, p, threadID, stream, nil)
+	return err
 }
 
-func (p sseProtocol) OnStreamEvent(ctx context.Context, env ProtocolEnv, threadID string, stream *EventStream, ev streaming.StreamEvent, reqID json.RawMessage) StreamControl {
+func (p sseProtocol) OnStreamEvent(ctx context.Context, env ProtocolEnv, threadID string, ev streaming.StreamEvent, reqID json.RawMessage) StreamControl {
 	presented, err := presentStreamEvent(ev)
 	if err != nil {
 		return StreamControl{Err: err, Finished: true}
@@ -149,7 +162,7 @@ func (p sseProtocol) OnStreamEvent(ctx context.Context, env ProtocolEnv, threadI
 		return StreamControl{Err: err, Finished: true}
 	}
 	frames := [][]byte{data}
-	terminal := ev.Type == streaming.StreamEventComplete || ev.Type == streaming.StreamEventError
+	terminal := ev.Type == streaming.StreamEventComplete || ev.Type == streaming.StreamEventError || ev.Type == streaming.StreamEventInterrupt
 	return StreamControl{Frames: frames, Finished: terminal}
 }
 

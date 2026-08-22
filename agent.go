@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -104,11 +105,7 @@ func (a *AgentHarness) Messages() []*Message {
 func (a *AgentHarness) pendingSnapshot() map[string]stores.PendingToolCall {
 	a.pendingMu.Lock()
 	defer a.pendingMu.Unlock()
-	ptc := make(map[string]stores.PendingToolCall, len(a.pendingToolCalls))
-	for k, v := range a.pendingToolCalls {
-		ptc[k] = v
-	}
-	return ptc
+	return maps.Clone(a.pendingToolCalls)
 }
 
 func (a *AgentHarness) lookupToolCallID(id string) (string, bool) {
@@ -131,7 +128,10 @@ const checkpointSaveTimeout = 10 * time.Second
 // process resources. Interrupt paths also call it because the harness stays
 // live for ResumeInterrupts.
 func (a *AgentHarness) persistSession(ctx context.Context) error {
-	if a.store == nil || strings.TrimSpace(a.sessionId) == "" {
+	if strings.TrimSpace(a.sessionId) == "" {
+		return nil
+	}
+	if a.store == nil {
 		return nil
 	}
 	// Keep trace context; drop cancel so save can finish after abort.
@@ -181,16 +181,15 @@ func (a *AgentHarness) setCheckpointError(err error) {
 func (a *AgentHarness) checkpointSession(ctx context.Context) error {
 	msgs := a.Messages()
 	slog.Debug("checkpointing session", "session_id", a.sessionId, "context_window_size", len(msgs))
-	if a.store == nil {
-		return nil
-	}
-
 	ptc := a.pendingSnapshot()
 
 	cp, err := session.NewCheckpointer().Capture(a.context.Messages(), a.session, ptc)
 	if err != nil {
 		telemetry.InstrumentsFromContext(ctx).RecordCheckpointSave(ctx, telemetry.OutcomeError)
 		return err
+	}
+	if a.store == nil {
+		return nil
 	}
 	if err := a.store.SaveSession(ctx, a.sessionId, *cp); err != nil {
 		telemetry.InstrumentsFromContext(ctx).RecordCheckpointSave(ctx, telemetry.OutcomeError)
@@ -637,7 +636,7 @@ func (a *AgentHarness) initMCP(ctx context.Context) {
 
 // Close dumps session state then releases turn resources (MCP, owned vfsindex).
 // Shared worker bridges are not closed. MountSession is closed by the turn
-// owner (EventStream), not here — workers inherit the same tree.
+// owner (durable.Runtime activity preamble), not here — workers inherit the same tree.
 // Call after the Run events channel is drained, or when construct/runHarness fails.
 func (a *AgentHarness) Close() {
 	a.cancelBackgroundJobs()

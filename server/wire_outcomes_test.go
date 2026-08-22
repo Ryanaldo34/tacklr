@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ryanaldo34/tacklr/durable"
+
 	"github.com/coder/websocket"
 
 	"github.com/ryanaldo34/tacklr"
@@ -64,18 +66,18 @@ func TestWireAndConstruct_outcomes(t *testing.T) {
 	if p := NewACPProtocolPostgres(nil); p == nil || p.Name() != "acp" {
 		t.Fatal("NewACPProtocolPostgres")
 	}
-	if srv := NewACPServerPostgres(r, nil); srv == nil || srv.Protocols[0].Name() != "acp" {
+	if srv := NewACPServerPostgres(r.Runtime, r.Catalog, nil); srv == nil || srv.Protocols[0].Name() != "acp" {
 		t.Fatal("NewACPServerPostgres")
 	}
 	if NewACPProtocolMemory().Name() != "acp" {
 		t.Fatal("NewACPProtocolMemory")
 	}
-	srv := NewACPServer(r)
-	if srv == nil || srv.Registry != r || len(srv.Protocols) != 1 {
+	srv := NewACPServer(r.Runtime, r.Catalog)
+	if srv == nil || srv.Runtime != r.Runtime || len(srv.Protocols) != 1 {
 		t.Fatal("NewACPServer")
 	}
 	wire := NewMemoryWireStore()
-	srvWire := NewACPServerWithWire(r, wire)
+	srvWire := NewACPServerWithWire(r.Runtime, r.Catalog, wire)
 	s := &acpTestServer{t: t, r: r, proto: srvWire.Protocols[0], wire: wire}
 	rec := s.rpc(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/w"}}`)
 	sid, _ := acpRPCResult(t, rec)["sessionId"].(string)
@@ -121,18 +123,14 @@ func TestWireAndConstruct_outcomes(t *testing.T) {
 	}
 
 	// --- Registry DefaultAgent / options ---
-	_ = NewRegistry(testStore(t), "d", WithTracer(nil), nil)
-	r2 := NewRegistry(testStore(t), "d", WithTracer(nil), func(reg *Registry) {
-		reg.tracer = nil
-		reg.instruments = nil
-	})
-	if r2.DefaultAgent() != "d" {
+	_ = newTestKernel(&mockInferenceStrategy{}, nil, durable.AgentSpec{})
+	r2 := newTestKernel(&mockInferenceStrategy{}, nil, durable.AgentSpec{})
+	if r2.DefaultAgent() != "default" {
 		t.Fatal(r2.DefaultAgent())
 	}
 	if r2.HasAgent("x") {
 		t.Fatal("unknown agent")
 	}
-	r2.RecordSessionCreated(context.Background())
 
 	// --- ClientBridge nil caps ---
 	var bridge *ClientBridge
@@ -303,7 +301,7 @@ func TestWireAndConstruct_outcomes(t *testing.T) {
 
 	// --- Direct handler: Connections nil → 500 ---
 	p := NewACPProtocol(NewMemoryWireStore()).(*acpProtocol)
-	regEnv := ProtocolEnv{Registry: r}
+	regEnv := ProtocolEnv{Runtime: r.Runtime, Catalog: r.Catalog}
 	for _, fn := range []struct {
 		name string
 		call func(http.ResponseWriter, *http.Request)
@@ -336,7 +334,7 @@ func TestWireAndConstruct_outcomes(t *testing.T) {
 		`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{}}`))
 	hr.Header.Set("Content-Type", "application/json")
 	hr.Header.Set(HeaderAcpConnectionID, half.ID)
-	p.handleACPPost(ProtocolEnv{Registry: r, Connections: reg}, notReady, hr)
+	p.handleACPPost(ProtocolEnv{Runtime: r.Runtime, Catalog: r.Catalog, Connections: reg}, notReady, hr)
 	if notReady.Code != http.StatusInternalServerError {
 		t.Fatalf("not ready: %d", notReady.Code)
 	}
@@ -479,7 +477,7 @@ func TestWireAndConstruct_outcomes(t *testing.T) {
 	// --- Wire session error outcomes ---
 	// Create invalid / Load invalid / empty session / close+load
 	p2 := NewACPProtocol(NewMemoryWireStore()).(*acpProtocol)
-	env := ProtocolEnv{Registry: r}
+	env := ProtocolEnv{Runtime: r.Runtime, Catalog: r.Catalog}
 	if _, _, err := p2.CreateSession(context.Background(), env, json.RawMessage(`{`)); err == nil {
 		t.Fatal("want invalid create params")
 	}
@@ -531,9 +529,9 @@ func TestWireAndConstruct_outcomes(t *testing.T) {
 		t.Fatal("want delete fail")
 	}
 	// no default agent on bind
-	emptyReg := NewRegistry(testStore(t), "")
+	emptyReg := emptyTestKernel()
 	pEmpty := NewACPProtocol(NewMemoryWireStore()).(*acpProtocol)
-	sidEmpty, _, err := pEmpty.CreateSession(context.Background(), ProtocolEnv{Registry: emptyReg}, json.RawMessage(`{"cwd":"/e"}`))
+	sidEmpty, _, err := pEmpty.CreateSession(context.Background(), ProtocolEnv{Runtime: emptyReg.Runtime, Catalog: emptyReg.Catalog}, json.RawMessage(`{"cwd":"/e"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -541,7 +539,7 @@ func TestWireAndConstruct_outcomes(t *testing.T) {
 		"sessionId": sidEmpty,
 		"prompt":    []map[string]any{{"type": "text", "text": "hi"}},
 	})
-	if _, err := pEmpty.BindTurn(context.Background(), ProtocolEnv{Registry: emptyReg}, sidEmpty, "session/prompt", prompt); err == nil {
+	if _, err := pEmpty.BindTurn(context.Background(), ProtocolEnv{Runtime: emptyReg.Runtime, Catalog: emptyReg.Catalog}, sidEmpty, "session/prompt", prompt); err == nil {
 		t.Fatal("want no agent")
 	}
 	// empty text prompt

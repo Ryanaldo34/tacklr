@@ -66,7 +66,7 @@ func TestACP_elicitationForm_resolvesInterruptAndCompletes(t *testing.T) {
 	}
 
 	r := newTestRegistry(testStore(t), strategy, []*tacklr.Tool{interruptTool})
-	srv := NewServer(r, NewACPProtocol(NewMemoryWireStore()))
+	srv := NewServer(r.Runtime, r.Catalog, NewACPProtocol(NewMemoryWireStore()))
 
 	// server reads serverIn; client writes clientToServer
 	serverIn, clientToServer := io.Pipe()
@@ -264,7 +264,7 @@ func TestACP_requestPermission_allowsToolAndCompletes(t *testing.T) {
 	}
 
 	r := newTestRegistry(testStore(t), strategy, []*tacklr.Tool{sensitive})
-	srv := NewServer(r, NewACPProtocol(NewMemoryWireStore()))
+	srv := NewServer(r.Runtime, r.Catalog, NewACPProtocol(NewMemoryWireStore()))
 
 	serverIn, clientToServer := io.Pipe()
 	clientFromServer, serverOut := io.Pipe()
@@ -445,7 +445,7 @@ func TestACP_requestPermission_rejectFailsToolAndCompletes(t *testing.T) {
 	}
 
 	r := newTestRegistry(testStore(t), strategy, []*tacklr.Tool{sensitive})
-	srv := NewServer(r, NewACPProtocol(NewMemoryWireStore()))
+	srv := NewServer(r.Runtime, r.Catalog, NewACPProtocol(NewMemoryWireStore()))
 
 	serverIn, clientToServer := io.Pipe()
 	clientFromServer, serverOut := io.Pipe()
@@ -613,7 +613,7 @@ func TestACP_requestPermission_cancelledEndsPrompt(t *testing.T) {
 		},
 	}
 	r := newTestRegistry(testStore(t), strategy, []*tacklr.Tool{sensitive})
-	srv := NewServer(r, NewACPProtocol(NewMemoryWireStore()))
+	srv := NewServer(r.Runtime, r.Catalog, NewACPProtocol(NewMemoryWireStore()))
 
 	serverIn, clientToServer := io.Pipe()
 	clientFromServer, serverOut := io.Pipe()
@@ -720,7 +720,7 @@ func TestACP_elicitationForm_declineEndsPrompt(t *testing.T) {
 		},
 	}
 	r := newTestRegistry(testStore(t), strategy, []*tacklr.Tool{interruptTool})
-	srv := NewServer(r, NewACPProtocol(NewMemoryWireStore()))
+	srv := NewServer(r.Runtime, r.Catalog, NewACPProtocol(NewMemoryWireStore()))
 	serverIn, clientToServer := io.Pipe()
 	clientFromServer, serverOut := io.Pipe()
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
@@ -834,7 +834,7 @@ func TestACP_elicitationForm_cancelEndsPrompt(t *testing.T) {
 		},
 	}
 	r := newTestRegistry(testStore(t), strategy, []*tacklr.Tool{interruptTool})
-	srv := NewServer(r, NewACPProtocol(NewMemoryWireStore()))
+	srv := NewServer(r.Runtime, r.Catalog, NewACPProtocol(NewMemoryWireStore()))
 	serverIn, clientToServer := io.Pipe()
 	clientFromServer, serverOut := io.Pipe()
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
@@ -953,7 +953,7 @@ func TestACP_elicitation_malformedInterruptEndsTurn(t *testing.T) {
 		},
 	}
 	r := newTestRegistry(testStore(t), strategy, []*tacklr.Tool{interruptTool})
-	srv := NewServer(r, NewACPProtocol(NewMemoryWireStore()))
+	srv := NewServer(r.Runtime, r.Catalog, NewACPProtocol(NewMemoryWireStore()))
 	serverIn, clientToServer := io.Pipe()
 	clientFromServer, serverOut := io.Pipe()
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
@@ -1004,6 +1004,7 @@ func TestACP_elicitation_malformedInterruptEndsTurn(t *testing.T) {
 // TestACP_createPlan_streamsPlanUpdate: create_plan streams plan sessionUpdate over ACP.
 func TestACP_createPlan_streamsPlanUpdate(t *testing.T) {
 	store := testStore(t)
+	_ = store
 	var n int
 	strategy := &mockInferenceStrategy{
 		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
@@ -1049,6 +1050,7 @@ func TestACP_createPlan_streamsPlanUpdate(t *testing.T) {
 // restored statuses.
 func TestACP_sessionCheckpoint_secondPromptContinuesPlan(t *testing.T) {
 	store := testStore(t)
+	_ = store
 	var mu sync.Mutex
 	phase := "turn1"
 	var turn1Steps, turn2Steps int
@@ -1091,7 +1093,7 @@ func TestACP_sessionCheckpoint_secondPromptContinuesPlan(t *testing.T) {
 	}
 
 	r := newTestRegistry(store, strategy, nil)
-	srv := NewServer(r, NewACPProtocol(NewMemoryWireStore()))
+	srv := NewServer(r.Runtime, r.Catalog, NewACPProtocol(NewMemoryWireStore()))
 
 	recNew := &recordingMessageWriter{}
 	srv.HandleMessage(context.Background(), []byte(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`), recNew)

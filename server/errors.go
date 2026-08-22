@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/interrupt"
 	tacklrsecurity "github.com/ryanaldo34/tacklr/security"
 	"github.com/ryanaldo34/tacklr/stores"
@@ -76,6 +77,14 @@ func writeWireError(w MessageWriter, id json.RawMessage, err error) {
 
 // IsClientError reports whether err is safe to surface to the client
 // (validation, not-found, bad payload). Internal failures return false.
+func logTurnError(err error, agentID, threadID string) {
+	if IsClientError(err) {
+		slog.Debug("client error", "error", err, "agent_id", agentID, "thread_id", threadID)
+		return
+	}
+	slog.Error("agent turn failed", "error", err, "agent_id", agentID, "thread_id", threadID)
+}
+
 func IsClientError(err error) bool {
 	if err == nil {
 		return false
@@ -85,6 +94,8 @@ func IsClientError(err error) bool {
 		return true
 	}
 	return errors.Is(err, stores.ErrSessionNotFound) ||
+		errors.Is(err, durable.ErrAgentNotFound) ||
+		errors.Is(err, durable.ErrSessionNotFound) ||
 		errors.Is(err, interrupt.ErrInterruptNotFound) ||
 		errors.Is(err, interrupt.ErrInvalidPayload) ||
 		errors.Is(err, ErrInvalidRequest) ||

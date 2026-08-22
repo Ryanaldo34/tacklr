@@ -35,9 +35,9 @@ func dialACPWebSocket(t *testing.T, hs *httptest.Server) (*websocket.Conn, strin
 	return conn, connID
 }
 
-func startACPWSServer(t *testing.T, r *Registry) (*httptest.Server, *Server) {
+func startACPWSServer(t *testing.T, r *testKernel) (*httptest.Server, *Server) {
 	t.Helper()
-	srv := NewServer(r, NewACPProtocol(NewMemoryWireStore()))
+	srv := NewServer(r.Runtime, r.Catalog, NewACPProtocol(NewMemoryWireStore()))
 	hs := httptest.NewServer(srv.HTTPMux())
 	t.Cleanup(hs.Close)
 	return hs, srv

@@ -26,10 +26,11 @@ const (
 )
 
 // Credential is a session-scoped access token. Never store this on MountSpec
-// or in a checkpoint / wire envelope.
+// or in a checkpoint / SnapshotStore. Work-item payloads (Prompt/Resume) may
+// carry it; backends must not persist it with recipes.
 type Credential struct {
-	Token     string
-	ExpiresAt time.Time
+	Token     string    `json:"token,omitempty"`
+	ExpiresAt time.Time `json:"expiresAt,omitempty"`
 }
 
 // Binding is one user-owned cloud folder under /workspace/<alias>.
@@ -37,11 +38,11 @@ type Credential struct {
 // Bind stores Point=/workspace. Provider is the factory / SessionAuth key.
 // Writable is opt-in; the Go zero value stays read-only.
 type Binding struct {
-	Provider string
-	Point    string
-	Auth     Credential
-	Params   map[string]string // non-secret (folderId, …)
-	Writable bool
+	Provider string            `json:"provider"`
+	Point    string            `json:"point,omitempty"`
+	Auth     Credential        `json:"auth,omitempty"`
+	Params   map[string]string `json:"params,omitempty"`
+	Writable bool              `json:"writable,omitempty"`
 }
 
 // BindingMember is the secret-free member MountSpec for a cloud bind.
@@ -129,7 +130,7 @@ func unbindAlias(point string) (string, error) {
 	return alias, nil
 }
 
-// TokenRefreshFunc fetches a new access token from the client (ACP _tacklr/vfs/token).
+// TokenRefreshFunc fetches a new access token (IdP or host callback).
 type TokenRefreshFunc func(ctx context.Context) (Credential, error)
 
 // TokenHolder is the live access token for one (session, provider).

@@ -13,6 +13,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/ryanaldo34/tacklr/durable"
 	tacklrsecurity "github.com/ryanaldo34/tacklr/security"
 	"github.com/ryanaldo34/tacklr/streaming"
 )
@@ -151,7 +152,8 @@ func (p *acpProtocol) handleACPWebSocket(env ProtocolEnv, w http.ResponseWriter,
 				setSecurity: acpConn.setSecurityContext,
 			}
 			reqEnv := ProtocolEnv{
-				Registry:    env.Registry,
+				Runtime:     env.Runtime,
+				Catalog:     env.Catalog,
 				Conn:        reqConn,
 				Security:    env.Security,
 				Connections: env.Connections,
@@ -196,7 +198,7 @@ func (p *acpProtocol) HandleInbound(ctx context.Context, env ProtocolEnv, body [
 	if pr.Notification {
 		if pr.Method == "session/cancel" && pr.ThreadID != "" {
 			if _, err := p.resolveOwnedWireSession(ctx, env, pr.ThreadID, actionSessionPrompt); err == nil {
-				env.Registry.CancelSession(pr.ThreadID)
+				_ = env.Runtime.Cancel(ctx, durable.SessionID(pr.ThreadID))
 			}
 		} else {
 			slog.Debug("ignored notification", "method", pr.Method)
@@ -214,7 +216,7 @@ func (p *acpProtocol) HandleInbound(ctx context.Context, env ProtocolEnv, body [
 			}
 			env.Conn.RPC.MarkInitialized()
 		}
-		return env.Conn.Writer.WriteResult(pr.ID, acpInitializeResultWithAuth(env.Registry, pr.ProtocolVersion, p.authMethods, p.logout))
+		return env.Conn.Writer.WriteResult(pr.ID, acpInitializeResultWithAuth(env.Catalog, pr.ProtocolVersion, p.authMethods, p.logout))
 	case "authenticate":
 		if err := p.authenticate(ctx, env, pr.AuthMethodID); err != nil {
 			return env.Conn.Writer.WriteError(pr.ID, err)
@@ -256,7 +258,7 @@ func (p *acpProtocol) HandleInbound(ctx context.Context, env ProtocolEnv, body [
 		if _, err := p.resolveOwnedWireSession(ctx, env, pr.ThreadID, actionSessionPrompt); err != nil {
 			return env.Conn.Writer.WriteError(pr.ID, err)
 		}
-		env.Registry.CancelSession(pr.ThreadID)
+		_ = env.Runtime.Cancel(ctx, durable.SessionID(pr.ThreadID))
 		return env.Conn.Writer.WriteResult(pr.ID, map[string]any{})
 	case methodVFSBind:
 		return p.handleVFSBind(ctx, env, pr)
@@ -326,32 +328,32 @@ func (p *acpProtocol) handleSessionTurn(ctx context.Context, env ProtocolEnv, pr
 		writeWireError(env.Conn.Writer, pr.ID, err)
 		return err
 	}
-	stream, err := env.Registry.RunTurn(ctx, req)
-	if err != nil {
-		if !IsClientError(err) {
-			logTurnError(err, req.AgentID, req.ThreadID)
-		}
-		writeWireError(env.Conn.Writer, pr.ID, err)
-		return err
-	}
-	defer func() {
-		stream.Cancel()
-		stream.Close()
-	}()
 	threadID := req.ThreadID
-	if stream.SessionID() != "" {
-		threadID = stream.SessionID()
+	turn := PromptOrResume{Prompt: durable.Prompt{
+		Text:        req.Prompt,
+		UserMessage: req.UserMessage,
+		AgentID:     req.AgentID,
+		MCPServers:  req.MCPServers,
+		Auth:        req.Auth,
+	}}
+	if len(req.Responses) > 0 {
+		resume := &durable.Resume{Auth: req.Auth, Responses: make(map[string][]byte, len(req.Responses))}
+		for id, payload := range req.Responses {
+			resume.Responses[id] = []byte(payload)
+		}
+		turn.Resume = resume
 	}
-	err = runTurnStream(ctx, env, p, threadID, stream, pr.ID)
+	err = runRuntimeTurn(ctx, env, p, threadID, pr.ID, turn)
 	if err != nil && !IsClientError(err) {
+		logTurnError(err, req.AgentID, threadID)
 		slog.Debug("acp turn stream ended", "error", err, "thread_id", threadID)
 	}
 	return err
 }
 
-func (p *acpProtocol) OnStreamEvent(ctx context.Context, env ProtocolEnv, threadID string, stream *EventStream, ev streaming.StreamEvent, reqID json.RawMessage) StreamControl {
+func (p *acpProtocol) OnStreamEvent(ctx context.Context, env ProtocolEnv, threadID string, ev streaming.StreamEvent, reqID json.RawMessage) StreamControl {
 	if ev.Type == streaming.StreamEventInterrupt && env.Conn != nil && env.Conn.RPC != nil {
-		newEvents, err := resolveInterruptViaACP(ctx, env, threadID, stream, &ev)
+		resume, err := resolveInterruptViaACP(ctx, env, threadID, &ev)
 		if err != nil {
 			slog.Warn("acp interrupt resolution failed", "error", err, "thread_id", threadID)
 			frames, _ := presentationToACP(threadID, streaming.StreamEvent{
@@ -361,24 +363,29 @@ func (p *acpProtocol) OnStreamEvent(ctx context.Context, env ProtocolEnv, thread
 			frames = injectReqID(frames, reqID, true)
 			return StreamControl{Frames: frames, Finished: true, Err: err}
 		}
-		if newEvents != nil {
-			return StreamControl{ReplaceEvents: newEvents}
+		if resume != nil {
+			return StreamControl{Resume: resume}
 		}
-		// nil, nil → client cannot resolve mid-turn; park for OnStreamClosed.
 	}
 
-	if ev.Type == streaming.StreamEventComplete && len(reqID) > 0 && stream.Cancelled() {
-		_ = env.Conn.Writer.WriteResult(reqID, acpPromptResult(stopReasonCancelled))
+	if ev.Type == streaming.StreamEventError && (errors.Is(ev.Error, context.Canceled) || errors.Is(ev.Error, ErrRequestCancelled)) {
+		if env.Conn != nil && env.Conn.Writer != nil && len(reqID) > 0 {
+			_ = env.Conn.Writer.WriteResult(reqID, acpPromptResult(stopReasonCancelled))
+		}
 		return StreamControl{Finished: true}
 	}
-
 	frames, err := presentationToACP(threadID, ev)
 	if err != nil {
 		return StreamControl{Err: fmt.Errorf("protocol encode: %w", err)}
 	}
 	terminal := ev.Type == streaming.StreamEventComplete || ev.Type == streaming.StreamEventError
+	park := ev.Type == streaming.StreamEventInterrupt
 	frames = injectReqID(frames, reqID, terminal)
-	return StreamControl{Frames: frames, Finished: terminal}
+	if park && len(reqID) > 0 && env.Conn != nil && env.Conn.Writer != nil {
+		_ = env.Conn.Writer.WriteError(reqID, clientErrorf(ErrInvalidRequest,
+			"turn requires user input but client cannot resolve interrupts mid-turn"))
+	}
+	return StreamControl{Frames: frames, Finished: terminal || park}
 }
 
 func (p *acpProtocol) OnStreamClosed(ctx context.Context, env ProtocolEnv, threadID string, reqID json.RawMessage, cancelled bool) error {
@@ -413,7 +420,7 @@ func injectReqID(frames [][]byte, reqID json.RawMessage, terminal bool) [][]byte
 // resolveInterruptViaACP handles mid-turn interrupts over client RPC.
 // Returns (nil, nil) when this interrupt kind cannot be resolved mid-turn
 // (caller parks the turn). Returns (events, nil) on successful resume.
-func resolveInterruptViaACP(ctx context.Context, env ProtocolEnv, threadID string, stream *EventStream, ev *streaming.StreamEvent) (<-chan streaming.StreamEvent, error) {
+func resolveInterruptViaACP(ctx context.Context, env ProtocolEnv, threadID string, ev *streaming.StreamEvent) (map[string][]byte, error) {
 	envl, err := ParseInterruptEnvelope(ev.Data)
 	if err != nil {
 		return nil, fmt.Errorf("parse interrupt envelope: %w", err)
@@ -424,12 +431,12 @@ func resolveInterruptViaACP(ctx context.Context, env ProtocolEnv, threadID strin
 	}
 	switch kind {
 	case "tool_permission":
-		return resolvePermissionViaRequest(ctx, env, threadID, stream, ev)
+		return resolvePermissionViaRequest(ctx, env, threadID, ev)
 	case "user_selection_choice":
 		if !connElicitationForm(env.Conn) {
 			return nil, nil
 		}
-		return resolveSelectionViaElicitation(ctx, env, threadID, stream, ev)
+		return resolveSelectionViaElicitation(ctx, env, threadID, ev)
 	default:
 		return nil, fmt.Errorf("unsupported interrupt type %q", kind)
 	}
@@ -444,7 +451,7 @@ func connElicitationForm(c *Conn) bool {
 	return c.RPC.GetCaps().ElicitationForm
 }
 
-func resolvePermissionViaRequest(ctx context.Context, env ProtocolEnv, threadID string, stream *EventStream, ev *streaming.StreamEvent) (<-chan streaming.StreamEvent, error) {
+func resolvePermissionViaRequest(ctx context.Context, env ProtocolEnv, threadID string, ev *streaming.StreamEvent) (map[string][]byte, error) {
 	interruptID, perm, err := ParseToolPermissionFromInterruptData(ev.Data)
 	if err != nil {
 		return nil, fmt.Errorf("parse permission interrupt: %w", err)
@@ -461,10 +468,10 @@ func resolvePermissionViaRequest(ctx context.Context, env ProtocolEnv, threadID 
 	if cancelled {
 		return nil, fmt.Errorf("permission request cancelled")
 	}
-	return stream.ResumeInterrupts(ctx, map[string][]byte{interruptID: resolution})
+	return map[string][]byte{interruptID: resolution}, nil
 }
 
-func resolveSelectionViaElicitation(ctx context.Context, env ProtocolEnv, threadID string, stream *EventStream, ev *streaming.StreamEvent) (<-chan streaming.StreamEvent, error) {
+func resolveSelectionViaElicitation(ctx context.Context, env ProtocolEnv, threadID string, ev *streaming.StreamEvent) (map[string][]byte, error) {
 	interruptID, usi, err := ParseUserSelectionFromInterruptData(ev.Data)
 	if err != nil {
 		return nil, fmt.Errorf("parse selection interrupt: %w", err)
@@ -481,16 +488,16 @@ func resolveSelectionViaElicitation(ctx context.Context, env ProtocolEnv, thread
 	if err != nil {
 		return nil, err
 	}
-	return resumeElicitation(ctx, stream, interruptID, action, resolution,
+	return resumeElicitation(interruptID, action, resolution,
 		fmt.Errorf("user declined to answer"),
 		fmt.Errorf("user cancelled the prompt"),
 	)
 }
 
-func resumeElicitation(ctx context.Context, stream *EventStream, interruptID, action string, resolution []byte, declined, cancelled error) (<-chan streaming.StreamEvent, error) {
+func resumeElicitation(interruptID, action string, resolution []byte, declined, cancelled error) (map[string][]byte, error) {
 	switch action {
 	case "accept":
-		return stream.ResumeInterrupts(ctx, map[string][]byte{interruptID: resolution})
+		return map[string][]byte{interruptID: resolution}, nil
 	case "decline":
 		return nil, declined
 	default:
@@ -502,16 +509,14 @@ func resumeElicitation(ctx context.Context, stream *EventStream, interruptID, ac
 //
 // Prompt baseline (no capability bits): Text + ResourceLink are always accepted.
 // Optional: image (model-gated), audio (off), embeddedContext (Resource text/blob).
-func acpInitializeResult(r *Registry, clientProtocolVersion int) map[string]any {
-	return acpInitializeResultWithAuth(r, clientProtocolVersion, nil, false)
+func acpInitializeResult(cat durable.Catalog, clientProtocolVersion int) map[string]any {
+	return acpInitializeResultWithAuth(cat, clientProtocolVersion, nil, false)
 }
 
-func acpInitializeResultWithAuth(r *Registry, clientProtocolVersion int, methods []ACPAuthMethod, logout bool) map[string]any {
+func acpInitializeResultWithAuth(cat durable.Catalog, clientProtocolVersion int, methods []ACPAuthMethod, logout bool) map[string]any {
 	image := false
-	if r != nil {
-		if m := r.AgentModel(""); m != nil {
-			image = m.SupportsMIME("image/png")
-		}
+	if m := catalogAgentModel(cat, ""); m != nil {
+		image = m.SupportsMIME("image/png")
 	}
 	_ = clientProtocolVersion
 	authMethods := make([]map[string]any, 0, len(methods))
@@ -546,7 +551,7 @@ func acpInitializeResultWithAuth(r *Registry, clientProtocolVersion int, methods
 		},
 		"_meta": map[string]any{
 			"tacklr": map[string]any{
-				"vfs": acpVFSCapability(r),
+				"vfs": acpVFSCapability(cat),
 			},
 		},
 	}
@@ -568,16 +573,16 @@ func acpInitializeResultWithAuth(r *Registry, clientProtocolVersion int, methods
 		"_meta": map[string]any{
 			"tacklr": map[string]any{
 				"transports": []string{"stdio", "websocket", "streamable_http"},
-				"vfs":        acpVFSCapability(r),
+				"vfs":        acpVFSCapability(cat),
 			},
 		},
 	}
 }
 
-func acpVFSCapability(r *Registry) map[string]any {
+func acpVFSCapability(cat durable.Catalog) map[string]any {
 	providers := []string{}
-	if r != nil {
-		if spec, ok := r.agents[r.defaultAgent]; ok && spec.FSRegistry != nil {
+	if cat != nil {
+		if spec, ok := cat.Lookup(cat.DefaultID()); ok && spec.FSRegistry != nil {
 			providers = spec.FSRegistry.Profiles()
 		}
 	}

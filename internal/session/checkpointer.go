@@ -9,7 +9,7 @@ import (
 
 // Checkpointer builds and applies SessionCheckpoint blobs. It does not own
 // live session data — SessionManager does. It does not own persistence I/O —
-// stores.BaseStore does.
+// durable.SnapshotStore (runtime sessions) or stores.BaseStore (Path A embedders).
 //
 // Capture/Apply are pure over their inputs so tests can assert wire format
 // without a real store.

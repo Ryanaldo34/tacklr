@@ -137,7 +137,7 @@ auth := vfs.NewSessionAuth()
 reg := vfs.NewBackendRegistry()
 _ = reg.Register(vfs.DriveFactory{ID: "gdrive", Auth: auth})
 _ = reg.Register(vfs.GraphFactory{ID: "msgraph", Auth: auth})
-// Hosts pass the same auth to server.WithVFSAuth(auth).
+// Work-item Prompt/Resume AuthContext tokens are bound onto this SessionAuth for the turn.
 ```
 
 Raw path I/O (absolute virtual paths only):
@@ -246,7 +246,7 @@ Tool guidance:
 
 FUSE: hosts call `MountSession.FuseMount(dir)` for a kernel tree. **Every mount point must be a single path segment** (`/work`, `/engram`). Multi-segment points (`/tmp/tacklr`) fail `FuseMount`. If `ReadText` succeeds (`Textual`), `getattr`/`Read` use that plaintext (so `cat`/`rg` see the projection). Otherwise `Stat.Size` + `io.ReaderAt`. Kernel writes persist through `WriteFile` only when `KernelWritable` (`IdentityCodec`). Projected textual types (Word, Notion, Docs) are **read-only** on the kernel (`EROFS`); the agent `write` tool still uses `WriteDocument`. `session.Mount` attaches a provider; `FuseMount` is the host kernel mount. `HostDir()` is the last mount directory (host-facing only). `FuseAvailable()` probes `/dev/fuse` and `/dev/macfuse*`. `Close` unmounts.
 
-`server.Registry` injects a **turn-scoped** `MountSession` at construct (bootstrap + `/workspace` binds) and attaches FUSE for that turn: `$TMP/tacklr-fuse/<session>` mode `0700`. `EventStream.Close` unmounts. Bind/unbind only record credentials; they do not keep a live tree between prompts. Production without a device has **no** `MountSession` (no VFS tools, no `run_command`). Tests inject `DirectProjection` so `read`/`write` still work and `run_command` returns `ErrFuseNotMounted` until `HostDir` is set. Device present and mount fails after one suffix retry → fail-hard. `cmd/testserver` bootstraps `Point: /work`. Workers inherit the turn `MountSession`; they do not close it.
+`durable.Runtime` injects a **turn-scoped** `MountSession` in the inference/tool activity preamble (FSBootstrap + `/workspace` binds) and attaches FUSE for that slice: `$TMP/tacklr-fuse/<session>` mode `0700`. The activity (or in-process turn slice) closes the tree when the step ends. Bind/unbind only record credentials; they do not keep a live tree between prompts. Production without a device has **no** `MountSession` (no VFS tools, no `run_command`). Tests inject `vfs.DirectProjection` so `read`/`write` still work and `run_command` returns `ErrFuseNotMounted` until `HostDir` is set. Device present and mount fails after one suffix retry → fail-hard. Workers reconstruct a `MountSession` per activity; they do not hold a parent pointer.
 
 `TextCodec` requires valid UTF-8 and builds a `TextDocument` labeled with the caller’s media type.
 

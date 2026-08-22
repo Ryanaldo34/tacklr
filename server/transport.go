@@ -12,12 +12,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ryanaldo34/tacklr/durable"
 	tacklrsecurity "github.com/ryanaldo34/tacklr/security"
 )
 
-// Server serves a Registry over one or more wire Protocols.
+// Server serves a durable.Runtime over one or more wire Protocols.
 type Server struct {
-	Registry  *Registry
+	Runtime   durable.Runtime
+	Catalog   durable.Catalog
 	Protocols []Protocol
 	// Client is set for the active stdio connection (outbound Agent→Client RPC).
 	// Prefer Conn.RPC inside protocol handlers; this field supports demux on stdio.
@@ -33,29 +35,25 @@ type Server struct {
 	networkPolicyConfigured bool
 }
 
-// NewServer wraps a Registry and one or more protocols.
+// NewServer wraps a Runtime and one or more protocols.
 // The first protocol is used for connection-oriented transports (stdio).
-func NewServer(r *Registry, protocols ...Protocol) *Server {
-	if r == nil {
-		panic("server: Registry is required")
+func NewServer(rt durable.Runtime, cat durable.Catalog, protocols ...Protocol) *Server {
+	if rt == nil {
+		panic("server: Runtime is required")
 	}
 	if len(protocols) == 0 {
 		panic("server: at least one Protocol is required")
 	}
-	connections := NewConnectionRegistry()
-	connections.onRemove = func(connection *Connection) {
-		if r.vfsAuth == nil {
-			return
-		}
-		for _, sessionID := range connection.sessionIDs() {
-			r.vfsAuth.Clear(sessionID)
-		}
-	}
 	return &Server{
-		Registry:    r,
+		Runtime:     rt,
+		Catalog:     cat,
 		Protocols:   protocols,
-		Connections: connections,
+		Connections: NewConnectionRegistry(),
 	}
+}
+
+func (s *Server) env(conn *Conn) ProtocolEnv {
+	return ProtocolEnv{Runtime: s.Runtime, Catalog: s.Catalog, Conn: conn, Security: s.Security, Connections: s.Connections}
 }
 
 type stdioReadResult struct {
@@ -109,7 +107,7 @@ func (s *Server) ServeStdio(ctx context.Context, in io.Reader, out io.Writer) er
 				RPC:      bridge,
 				Security: &localSecurity,
 			}
-			reqEnv := ProtocolEnv{Registry: s.Registry, Conn: reqConn, Security: s.Security}
+			reqEnv := s.env(reqConn)
 			if err := proto.HandleInbound(ctx, reqEnv, body); err != nil {
 				slog.Debug("inbound handler", "error", err, "protocol", proto.Name())
 			}
@@ -191,12 +189,7 @@ func (s *Server) HTTPMux() *http.ServeMux {
 					http.Error(w, http.StatusText(status), status)
 					return
 				}
-				env := ProtocolEnv{
-					Registry:    s.Registry,
-					Conn:        &Conn{Security: securityContext},
-					Security:    s.Security,
-					Connections: s.Connections,
-				}
+				env := s.env(&Conn{Security: securityContext})
 				r.Handler(env, w, req)
 			})
 		}
@@ -242,7 +235,7 @@ func waitHTTPServer(ctx context.Context, shutdown func(context.Context) error, e
 // Used by tests and unary HTTP adapters.
 func (s *Server) HandleMessage(ctx context.Context, body []byte, w MessageWriter) {
 	conn := &Conn{Writer: w, RPC: s.Client}
-	env := ProtocolEnv{Registry: s.Registry, Conn: conn}
+	env := s.env(conn)
 	if err := s.Protocols[0].HandleInbound(ctx, env, body); err != nil {
 		slog.Debug("HandleMessage", "error", err)
 	}

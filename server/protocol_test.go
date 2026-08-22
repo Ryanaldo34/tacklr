@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
@@ -31,7 +32,7 @@ func (healthProtocol) HTTPRoutes() []HTTPRoute {
 	}}
 }
 
-func (healthProtocol) OnStreamEvent(ctx context.Context, env ProtocolEnv, threadID string, stream *EventStream, ev streaming.StreamEvent, reqID json.RawMessage) StreamControl {
+func (healthProtocol) OnStreamEvent(ctx context.Context, env ProtocolEnv, threadID string, ev streaming.StreamEvent, reqID json.RawMessage) StreamControl {
 	return StreamControl{Finished: true}
 }
 
@@ -40,15 +41,15 @@ func (healthProtocol) OnStreamClosed(ctx context.Context, env ProtocolEnv, threa
 }
 
 func TestServer_mountsArbitraryProtocolRoutes(t *testing.T) {
-	reg := NewRegistry(testStore(t), "")
-	srv := NewServer(reg, healthProtocol{})
+	k := newTestKernel(nil, nil, durable.AgentSpec{})
+	srv := NewServer(k.Runtime, k.Catalog, healthProtocol{})
 
 	mux := http.NewServeMux()
 	for _, p := range srv.Protocols {
 		for _, route := range p.HTTPRoutes() {
 			r := route
 			mux.HandleFunc(r.Method+" "+r.Pattern, func(w http.ResponseWriter, req *http.Request) {
-				r.Handler(ProtocolEnv{Registry: reg, Conn: &Conn{}}, w, req)
+				r.Handler(ProtocolEnv{Runtime: k.Runtime, Catalog: k.Catalog, Conn: &Conn{}}, w, req)
 			})
 		}
 	}

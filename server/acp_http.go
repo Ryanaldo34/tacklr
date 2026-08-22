@@ -98,7 +98,8 @@ func (p *acpProtocol) handleACPPost(env ProtocolEnv, w http.ResponseWriter, r *h
 	securityContext := conn.securityContext()
 	reqConn.Security = &securityContext
 	reqEnv := ProtocolEnv{
-		Registry:    env.Registry,
+		Runtime:     env.Runtime,
+		Catalog:     env.Catalog,
 		Conn:        reqConn,
 		Security:    env.Security,
 		Connections: env.Connections,
@@ -138,7 +139,7 @@ func (p *acpProtocol) handleStreamableInitialize(env ProtocolEnv, w http.Respons
 		Security:    &securityContext,
 		setSecurity: conn.setSecurityContext,
 	}
-	reqEnv := ProtocolEnv{Registry: env.Registry, Conn: reqConn, Security: env.Security, Connections: env.Connections}
+	reqEnv := ProtocolEnv{Runtime: env.Runtime, Catalog: env.Catalog, Conn: reqConn, Security: env.Security, Connections: env.Connections}
 	if err := p.HandleInbound(r.Context(), reqEnv, body); err != nil {
 		slog.Debug("acp streamable initialize", "error", err)
 	}

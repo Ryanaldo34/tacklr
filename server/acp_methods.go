@@ -29,7 +29,6 @@ const (
 	methodVFSBind    = "_tacklr/vfs/bind"
 	methodVFSRefresh = "_tacklr/vfs/refresh"
 	methodVFSUnbind  = "_tacklr/vfs/unbind"
-	methodVFSToken   = "_tacklr/vfs/token" // server → client notification
 )
 
 var acpTransportRegistry = map[string]acpTransportFlags{

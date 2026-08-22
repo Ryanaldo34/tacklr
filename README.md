@@ -19,6 +19,7 @@ go get github.com/ryanaldo34/tacklr
 | Doc | What it covers |
 |-----|----------------|
 | [docs/knowledge.md](docs/knowledge.md) | **Canonical** knowledge system: Engrams, search, graph, tools |
+| [docs/durable.md](docs/durable.md) | Runtime kernel, Path A/B/C, Temporal, HITL |
 | [docs/vfs.md](docs/vfs.md) | Mounts, content IR, provider persist, lifecycle |
 | [pkg.go.dev/tacklr](https://pkg.go.dev/github.com/ryanaldo34/tacklr) | Harness, tools, types |
 | [pkg.go.dev/vfs](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfs) | Virtual filesystem API |
@@ -110,9 +111,10 @@ Security is a **platform property**. If it only lives in the system prompt, you 
 | **Inference** | Talk to the model, nothing else | [`inference`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/inference) |
 | **Harness** | Turn loop, tools, plan, context, save/load | [`tacklr`](https://pkg.go.dev/github.com/ryanaldo34/tacklr) |
 | **VFS** | Mounts, IR, provider persist | [docs/vfs.md](docs/vfs.md) · [`vfs`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfs) |
-| **Store** | Checkpoints | [`stores`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/stores) |
+| **Store** | Cross-session records; Path A checkpoints | [`stores`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/stores) |
+| **Runtime** | Session kernel (in-process or Temporal) | [`durable`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/durable) |
 | **Brain** | Knowledge (optional) | [`brain`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/brain) |
-| **Server** | Multi-agent / protocols (optional) | [`server`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/server) |
+| **Server** | Protocol handlers over Runtime (ACP, SSE) | [`server`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/server) |
 
 A **turn** is one prompt (or resume after interrupt) until done, error, cancel, or a deliberate wait for the user:
 

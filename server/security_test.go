@@ -10,9 +10,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ryanaldo34/tacklr/durable"
+
 	tacklr "github.com/ryanaldo34/tacklr"
 	tacklrsecurity "github.com/ryanaldo34/tacklr/security"
-	"github.com/ryanaldo34/tacklr/vfs"
 )
 
 type testAuthenticator func(context.Context, tacklrsecurity.Attempt) (tacklrsecurity.Principal, error)
@@ -43,9 +44,9 @@ func TestACPAuthentication_ownsSessionsByGenericPrincipal(t *testing.T) {
 		Description: "Authenticate with the host",
 		Scheme:      "host-login",
 	}}, true)
-	registry := NewRegistry(testStore(t), "")
+	registry := newTestKernel(&mockInferenceStrategy{}, nil, durable.AgentSpec{})
 	connection := &Conn{}
-	env := ProtocolEnv{Registry: registry, Conn: connection, Security: service}
+	env := ProtocolEnv{Runtime: registry.Runtime, Catalog: registry.Catalog, Conn: connection, Security: service}
 	call := func(body string) map[string]any {
 		t.Helper()
 		recorder := httptest.NewRecorder()
@@ -86,7 +87,7 @@ func TestACPAuthentication_ownsSessionsByGenericPrincipal(t *testing.T) {
 	bobConnection := &Conn{Security: &bobContext}
 	bobRecorder := httptest.NewRecorder()
 	bobConnection.Writer = &jsonRPCMessageWriter{w: bobRecorder}
-	bobEnv := ProtocolEnv{Registry: registry, Conn: bobConnection, Security: service}
+	bobEnv := ProtocolEnv{Runtime: registry.Runtime, Catalog: registry.Catalog, Conn: bobConnection, Security: service}
 	load := `{"jsonrpc":"2.0","id":5,"method":"session/load","params":{"sessionId":"` + sessionID + `"}}`
 	_ = protocol.HandleInbound(t.Context(), bobEnv, []byte(load))
 	var bobResponse map[string]any
@@ -100,7 +101,7 @@ func TestACPAuthentication_ownsSessionsByGenericPrincipal(t *testing.T) {
 
 func TestServer_networkPolicyMustBeExplicit(t *testing.T) {
 	// Arrange
-	server := NewServer(NewRegistry(testStore(t), ""), SSE)
+	server := newTestServer(&mockInferenceStrategy{}, nil, SSE)
 
 	// Act
 	err := server.ServeHTTP(t.Context(), "127.0.0.1:0")
@@ -130,7 +131,7 @@ func TestServer_networkContext_enforcesExplicitPolicy(t *testing.T) {
 		}
 		return tacklrsecurity.Attempt{}, false
 	}
-	srv := NewServer(NewRegistry(testStore(t), ""), SSE).WithSecurity(service, extract)
+	srv := newTestServer(&mockInferenceStrategy{}, nil, SSE).WithSecurity(service, extract)
 
 	// Act
 	anonymousCtx, anonymousStatus := srv.networkContext(t.Context(), httptest.NewRequest(http.MethodGet, "/", nil), false)
@@ -142,11 +143,11 @@ func TestServer_networkContext_enforcesExplicitPolicy(t *testing.T) {
 	badReq.Header.Set("Authorization", "Bearer bad")
 	_, badStatus := srv.networkContext(t.Context(), badReq, false)
 
-	explicit := NewServer(NewRegistry(testStore(t), ""), SSE)
+	explicit := newTestServer(&mockInferenceStrategy{}, nil, SSE)
 	explicit.networkPolicyConfigured = true
 	_, blockedStatus := explicit.networkContext(t.Context(), httptest.NewRequest(http.MethodGet, "/", nil), false)
 
-	allowedAnonymous := NewServer(NewRegistry(testStore(t), ""), SSE).AllowAnonymousNetwork()
+	allowedAnonymous := newTestServer(&mockInferenceStrategy{}, nil, SSE).AllowAnonymousNetwork()
 	anonCtx, anonStatus := allowedAnonymous.networkContext(t.Context(), httptest.NewRequest(http.MethodGet, "/", nil), false)
 
 	// Assert
@@ -163,7 +164,7 @@ func TestServer_networkContext_enforcesExplicitPolicy(t *testing.T) {
 		t.Fatalf("bad token status = %d", badStatus)
 	}
 
-	rejecting := NewServer(NewRegistry(testStore(t), ""), SSE).WithSecurity(service, func(r *http.Request) (tacklrsecurity.Attempt, bool) {
+	rejecting := newTestServer(&mockInferenceStrategy{}, nil, SSE).WithSecurity(service, func(r *http.Request) (tacklrsecurity.Attempt, bool) {
 		if r.Header.Get("Authorization") != "" {
 			return tacklrsecurity.Attempt{
 				Scheme:     "bearer",
@@ -179,7 +180,7 @@ func TestServer_networkContext_enforcesExplicitPolicy(t *testing.T) {
 		t.Fatalf("rejected credential status = %d", rejectedStatus)
 	}
 
-	extractorless := NewServer(NewRegistry(testStore(t), ""), SSE).WithSecurity(service, nil)
+	extractorless := newTestServer(&mockInferenceStrategy{}, nil, SSE).WithSecurity(service, nil)
 	_, extractorlessStatus := extractorless.networkContext(t.Context(), httptest.NewRequest(http.MethodGet, "/", nil), true)
 	if extractorlessStatus != 0 {
 		t.Fatalf("extractorless allowed status = %d", extractorlessStatus)
@@ -205,7 +206,7 @@ func TestServer_WithSecurity_authenticatesHTTPRequests(t *testing.T) {
 			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "secured", IsComplete: true}
 		},
 	}
-	srv := NewServer(newTestRegistry(testStore(t), strategy, nil), SSE).WithSecurity(service, func(r *http.Request) (tacklrsecurity.Attempt, bool) {
+	srv := serverFromKernel(newTestRegistry(testStore(t), strategy, nil), SSE).WithSecurity(service, func(r *http.Request) (tacklrsecurity.Attempt, bool) {
 		if token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "); token != r.Header.Get("Authorization") {
 			return tacklrsecurity.Attempt{Scheme: "bearer", Credential: tacklrsecurity.NewSecret([]byte(token))}, true
 		}
@@ -375,33 +376,22 @@ func TestServer_securityBuildersPanicOnInvalidReceiverOrService(t *testing.T) {
 		(*Server)(nil).WithSecurity(&tacklrsecurity.Service{}, nil)
 	})
 	assertPanics("WithSecurity nil service", func() {
-		NewServer(NewRegistry(testStore(t), ""), SSE).WithSecurity(nil, nil)
+		newTestServer(&mockInferenceStrategy{}, nil, SSE).WithSecurity(nil, nil)
 	})
 	assertPanics("AllowAnonymousNetwork nil server", func() {
 		(*Server)(nil).AllowAnonymousNetwork()
 	})
 }
 
-func TestConnectionRemoval_clearsEphemeralVFSCredentials(t *testing.T) {
-	// Arrange
-	auth := vfs.NewSessionAuth()
-	if err := auth.Bind("session", vfs.Binding{
-		Provider: "gdrive",
-		Point:    "/drive",
-		Auth:     vfs.Credential{Token: "secret"},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	registry := NewRegistry(testStore(t), "", WithVFSAuth(auth))
-	server := NewServer(registry, ACP)
+func TestConnectionRemoval_unregistersConnection(t *testing.T) {
+	registry := newTestKernel(&mockInferenceStrategy{}, nil, durable.AgentSpec{})
+	server := NewServer(registry.Runtime, registry.Catalog, ACP)
 	connection := server.Connections.Create(nil, nil)
 	connection.noteSession("session")
 
-	// Act
 	server.Connections.Remove(connection.ID)
 
-	// Assert
-	if auth.HasBindings("session") {
-		t.Fatal("connection removal retained VFS credentials")
+	if got := server.Connections.Get(connection.ID); got != nil {
+		t.Fatal("connection still registered after Remove")
 	}
 }

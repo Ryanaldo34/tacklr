@@ -253,19 +253,6 @@ func (c *Connection) hasSession(sessionID string) bool {
 	return ok
 }
 
-func (c *Connection) sessionIDs() []string {
-	if c == nil {
-		return nil
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	ids := make([]string, 0, len(c.sessions))
-	for id := range c.sessions {
-		ids = append(ids, id)
-	}
-	return ids
-}
-
 // attachConnSSE registers the connection-scoped GET stream. Returns a detach func
 // and the sink so the caller can write the open frame under sink serialization.
 func (c *Connection) attachConnSSE(w http.ResponseWriter, f http.Flusher) (detach func(), sink *sseSink, err error) {

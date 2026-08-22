@@ -209,3 +209,30 @@ func TestNewAgentFromSession_rejectsCorruptCheckpointModules(t *testing.T) {
 		t.Fatal("corrupt checkpoint was accepted")
 	}
 }
+
+func TestNewAgent_runCheckpointsToStore(t *testing.T) {
+	store := testStore(t)
+	h, err := NewAgent(t.Context(), AgentOptions{
+		SessionID: "path-a",
+		Model:     &mockStrategy{},
+		Store:     store,
+		Config:    Config{MaxWindowSize: 8192},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(h.Close)
+	events, err := h.Run(t.Context(), "hello path a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range events {
+	}
+	cp, err := store.LoadSession(t.Context(), "path-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cp.ContextWindow) == 0 {
+		t.Fatal("Path A Run must checkpoint the conversation on Store")
+	}
+}

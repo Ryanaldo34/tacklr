@@ -147,7 +147,11 @@ func cloneRawMap(values map[string]json.RawMessage) map[string]json.RawMessage {
 	return out
 }
 
-// BaseStore is the minimal persistence interface for agent harness session state.
+// BaseStore is cross-session persistence for host/brain records.
+// Conversation windows for durable.Runtime sessions live in SnapshotStore,
+// not here. Path A embedders may still pass BaseStore as AgentOptions.Store
+// so NewAgent+Run checkpoints the thread. Runtime backends must not hydrate
+// a new session from this conversation blob.
 //
 // Implementations included in this package:
 //   - InMemoryStore — sessions live in memory, lost on restart.

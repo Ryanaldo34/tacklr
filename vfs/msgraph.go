@@ -33,6 +33,11 @@ type GraphFactory struct {
 // Profile implements ProviderFactory.
 func (f GraphFactory) Profile() string { return f.ID }
 
+// TokenAuth implements TokenSource.
+func (f GraphFactory) TokenAuth() *SessionAuth { return f.Auth }
+
+var _ TokenSource = GraphFactory{}
+
 // Open implements ProviderFactory.
 func (f GraphFactory) Open(ctx context.Context, sessionID string, spec MountSpec) (Provider, error) {
 	if err := ctx.Err(); err != nil {

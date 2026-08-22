@@ -41,18 +41,26 @@ func validateSSERequest(body []byte) (*parsedRequest, error) {
 		}
 		// Response payloads are json.RawMessage from a successful Unmarshal, so they
 		// are already valid JSON tokens; no extra json.Valid scan is required.
-		return &parsedRequest{
+		pr := &parsedRequest{
 			AgentID:   req.AgentID,
 			ThreadID:  req.ThreadID,
 			Responses: req.Responses,
-		}, nil
+		}
+		if req.Auth != nil {
+			pr.Auth = *req.Auth
+		}
+		return pr, nil
 	}
 	if req.Prompt == "" {
 		return nil, clientErrorf(ErrInvalidRequest, "prompt is required")
 	}
-	return &parsedRequest{
+	pr := &parsedRequest{
 		AgentID:  req.AgentID,
 		ThreadID: req.ThreadID,
 		Prompt:   req.Prompt,
-	}, nil
+	}
+	if req.Auth != nil {
+		pr.Auth = *req.Auth
+	}
+	return pr, nil
 }

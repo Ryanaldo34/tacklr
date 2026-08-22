@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/mcp"
 )
 
@@ -63,4 +64,6 @@ type parsedRequest struct {
 
 	// Extensibility — raw _meta blob for custom fields
 	Meta json.RawMessage
+
+	Auth durable.AuthContext
 }

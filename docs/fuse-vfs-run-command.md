@@ -27,11 +27,11 @@ The **agent file catalog** is collapsed. Discovery (`find_files`, `find_content`
          → MountSession (injected; closed with the turn)
               → providers (local / S3 / brain)     persist immediately
               → FuseMount (read-only kernel tree)  HostDir = cwd for run_command
-    → Registry
-         vfsAuth               client bind recipes + tokens (next turn)
+    → durable.Runtime
+         Prompt/Resume.Auth    work-item tokens + bindings (next turn)
+         Snapshot.Mounts       secret-free recipes (source ids, no bytes)
          VFSProjection         FuseProjection | DirectProjection
-         EventStream.Close     Close harness + MountSession + HostDir
-         DropLiveHarness       cancel turn + Clear bind recipes
+         turn end              Close harness + MountSession + HostDir
 ```
 
 | Layer | Owner | Rule |
@@ -61,7 +61,7 @@ The **agent file catalog** is collapsed. Discovery (`find_files`, `find_content`
 | `VFSProjection` / `FuseProjection` / `DirectProjection` | `server/projection.go` |
 | `ensureSessionFuse`; fail-hard on device + mount fail; skip remount if `HostDir` set | `server/registry.go` |
 | Turn-scoped mounts; harness Close does not unmount | `openTurnVFS`, `EventStream.Close`, `AgentHarness.Close` |
-| testserver `/work` | `cmd/testserver/main.go` |
+| host `/work` | Runtime `FSBootstrap` `Point: /work` |
 | `run_command` | `tools_command.go` |
 | Fuse mount metrics / events | `telemetry` + Registry |
 | go-fuse as a direct module | `go.mod` |
@@ -270,7 +270,7 @@ Each PR is independently reviewable. Do not combine Phase 3 removal with the `wr
 - `tools_vfsindex.go` — `index_file` / `unindex` / `find_content` (until PR A)
 - `agent.go` — turn-scoped `Close` (does not close MountSession)
 - `agent_construct.go` — `injectBuiltinTools`, `RunCommandUnattended`
-- `cmd/testserver/main.go` — `Point: /work`
+- Runtime catalog `FSBootstrap` — `Point: /work`
 - `docs/vfs.md`, `docs/knowledge.md`, `README.md` — update in PR D
 
 ---

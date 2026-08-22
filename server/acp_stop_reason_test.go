@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/ryanaldo34/tacklr/durable"
+
 	"github.com/ryanaldo34/tacklr"
 )
 
@@ -60,8 +62,9 @@ func TestACP_prompt_stopReason_maxTurnRequests(t *testing.T) {
 		},
 	}
 	store := testStore(t)
-	r := NewRegistry(store, "default")
-	r.Register("default", AgentSpec{
+	_ = store
+	r := newTestKernel(&mockInferenceStrategy{}, nil, durable.AgentSpec{})
+	r.Register("default", durable.AgentSpec{
 		Options: tacklr.AgentOptions{
 			Config: tacklr.Config{
 				MaxWindowSize:   8192,

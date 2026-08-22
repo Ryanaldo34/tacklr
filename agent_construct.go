@@ -45,14 +45,17 @@ func (c Config) Validate() error {
 // ContextPolicy knobs (ratios, stream-summary) stay host-settable. Adaptive
 // Case Management itself is harness-owned and cannot be replaced.
 //
-// Store is the harness thread checkpoint (stores.BaseStore). Wire session
-// envelopes (server.ProtocolWireStore) are a separate protocol contract and
-// are not merged with this store.
+// Store is the Path A embedder checkpoint (stores.BaseStore). Conversation
+// for durable.Runtime sessions lives on Snapshot, not BaseStore.
+// Wire session envelopes (server.ProtocolWireStore) are a separate protocol
+// contract and are not merged with this store.
 type AgentOptions struct {
 	Config Config
 	// SessionID is the durable thread id. Set at construction; do not change mid-turn.
-	SessionID  string
-	Model      InferenceStrategy
+	SessionID string
+	Model     InferenceStrategy
+	// Store is the Path A embedder checkpoint (cross-session BaseStore).
+	// Runtime sessions persist conversation on SnapshotStore, not BaseStore.
 	Store      stores.BaseStore
 	WatchDog   AgentWatchDog
 	Tools      []*Tool

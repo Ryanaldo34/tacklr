@@ -7,9 +7,12 @@ import (
 	"testing"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/durable"
+	"github.com/ryanaldo34/tacklr/durable/inprocess"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
 	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/streaming"
+	"github.com/ryanaldo34/tacklr/vfs"
 )
 
 // mockInferenceStrategy is a controllable InferenceStrategy for tests.
@@ -25,7 +28,6 @@ func (m *mockInferenceStrategy) SupportsMIME(mimeType string) bool {
 	if m.supportsMIMEFn != nil {
 		return m.supportsMIMEFn(mimeType)
 	}
-	// Default: text-only. Multimodal tests opt in via supportsMIMEFn.
 	return streaming.IsTextMIME(mimeType)
 }
 func (m *mockInferenceStrategy) CountTokens(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool) (int, error) {
@@ -64,19 +66,70 @@ func testStore(t *testing.T) *stores.InMemoryStore {
 	return stores.NewInMemoryStore()
 }
 
-func newTestRegistry(store *stores.InMemoryStore, strategy tacklr.InferenceStrategy, tools []*tacklr.Tool, opts ...RegistryOption) *Registry {
-	r := NewRegistry(store, "default", append([]RegistryOption{WithVFSProjection(DirectProjection{})}, opts...)...)
-	r.Register("default", AgentSpec{
-		Options: tacklr.AgentOptions{
-			Config: tacklr.Config{
-				MaxWindowSize: 8192,
-				SystemPrompt:  "test prompt",
-			},
-			Model: strategy,
-			Tools: tools,
-		},
-	})
-	return r
+func newTestRegistry(store *stores.InMemoryStore, strategy tacklr.InferenceStrategy, tools []*tacklr.Tool, opts ...inprocess.Option) *testKernel {
+	_ = store
+	return newTestKernel(strategy, tools, durable.AgentSpec{}, opts...)
+}
+
+type testKernel struct {
+	Runtime durable.Runtime
+	Catalog *durable.MemoryCatalog
+}
+
+func emptyTestKernel() *testKernel {
+	cat := durable.NewCatalog("")
+	return &testKernel{
+		Runtime: inprocess.New(cat, inprocess.WithProjection(vfs.DirectProjection{})),
+		Catalog: cat,
+	}
+}
+
+func newTestKernel(strategy tacklr.InferenceStrategy, tools []*tacklr.Tool, spec durable.AgentSpec, opts ...inprocess.Option) *testKernel {
+	if spec.Options.Model == nil {
+		spec.Options.Model = strategy
+	}
+	if spec.Options.Config.MaxWindowSize == 0 {
+		spec.Options.Config.MaxWindowSize = 8192
+	}
+	if spec.Options.Tools == nil {
+		spec.Options.Tools = tools
+	}
+	if spec.Options.Config.SystemPrompt == "" {
+		spec.Options.Config.SystemPrompt = "test prompt"
+	}
+	if spec.Options.Model == nil {
+		spec.Options.Model = &mockInferenceStrategy{}
+	}
+	cat := durable.NewCatalog("default")
+	cat.Register("default", spec)
+	all := append([]inprocess.Option{inprocess.WithProjection(vfs.DirectProjection{})}, opts...)
+	return &testKernel{Runtime: inprocess.New(cat, all...), Catalog: cat}
+}
+
+func (k *testKernel) Register(id string, spec durable.AgentSpec) {
+	k.Catalog.Register(id, spec)
+}
+
+func (k *testKernel) DefaultAgent() string { return k.Catalog.DefaultID() }
+func (k *testKernel) HasAgent(id string) bool {
+	_, ok := k.Catalog.Lookup(id)
+	return ok
+}
+
+func (k *testKernel) CancelSession(id string) {
+	_ = k.Runtime.Cancel(context.Background(), durable.SessionID(id))
+}
+
+func serverFromKernel(k *testKernel, protocols ...Protocol) *Server {
+	return NewServer(k.Runtime, k.Catalog, protocols...)
+}
+
+func newTestServer(strategy tacklr.InferenceStrategy, tools []*tacklr.Tool, protocols ...Protocol) *Server {
+	k := newTestKernel(strategy, tools, durable.AgentSpec{})
+	if len(protocols) == 0 {
+		protocols = []Protocol{SSE}
+	}
+	return NewServer(k.Runtime, k.Catalog, protocols...)
 }
 
 // recordingMessageWriter records MessageWriter traffic via shared testkit.

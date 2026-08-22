@@ -284,6 +284,11 @@ type DriveFactory struct {
 // Profile implements ProviderFactory.
 func (f DriveFactory) Profile() string { return f.ID }
 
+// TokenAuth implements TokenSource.
+func (f DriveFactory) TokenAuth() *SessionAuth { return f.Auth }
+
+var _ TokenSource = DriveFactory{}
+
 // Open implements ProviderFactory.
 func (f DriveFactory) Open(ctx context.Context, sessionID string, spec MountSpec) (Provider, error) {
 	if err := ctx.Err(); err != nil {
