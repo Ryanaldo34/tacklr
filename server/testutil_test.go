@@ -84,7 +84,7 @@ func newTestKernel(t *testing.T, model tacklr.InferenceStrategy, spec durable.Ag
 	}
 	cat := durable.NewCatalog("default")
 	cat.Register("default", spec)
-	if testing.Short() {
+	if testing.Short() || !temporallive.Available() {
 		return &testKernel{
 			Runtime: inprocess.New(cat, inprocess.WithProjection(vfs.DirectProjection{})),
 			Catalog: cat,

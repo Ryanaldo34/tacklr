@@ -48,7 +48,7 @@ The **agent file catalog** is collapsed. Discovery (`find_files`, `find_content`
 
 **Byte identity (shipped).** Textual FUSE `Read` / `getattr` use `ReadText`. Binaries use `Stat` + `io.ReaderAt`. Writes are write-through, so host `rg` sees the last persist, not a dirty IR buffer.
 
-**`run_command` (shipped).** `tools_command.go`. cwd = `HostDir()`; empty HostDir → `ErrFuseNotMounted`. Timeout 60 s, 1 MiB shared stdout+stderr, `Setpgid` + kill group, `exit=N` is success. `PermissionRequired` unless `RunCommandUnattended`. Injected when `session.VFS != nil`.
+**`run_command` (shipped).** `tools_vfs.go`. cwd = `HostDir()`; empty HostDir → `ErrFuseNotMounted`. Timeout 60 s, 1 MiB shared stdout+stderr, `Setpgid` + kill group, `exit=N` is success. `PermissionRequired` unless `RunCommandUnattended`. Injected when `session.VFS != nil`.
 
 ---
 
@@ -62,7 +62,7 @@ The **agent file catalog** is collapsed. Discovery (`find_files`, `find_content`
 | FUSE attach; fail-hard on device + mount fail; skip remount if `HostDir` set | `durable.OpenTurnVFS` |
 | Turn-scoped mounts; harness Close does not unmount | `openTurnVFS`, `EventStream.Close`, `AgentHarness.Close` |
 | host `/work` | Runtime `FSBootstrap` `Point: /work` |
-| `run_command` | `tools_command.go` |
+| `run_command` | `tools_vfs.go` |
 | Fuse mount metrics / events | `telemetry` + Registry |
 | go-fuse as a direct module | `go.mod` |
 | Typed park / permission bags on `RestoreCheckpoint` | `session.ApplyCheckpoint` |
@@ -265,8 +265,7 @@ Each PR is independently reviewable. Do not combine Phase 3 removal with the `wr
 - `vfs/document_session.go` — write-through `WriteDocument`
 - `server/projection.go` — `VFSProjection`
 - `durable/vfs.go` — `OpenTurnVFS`, `CloseTurnVFS`
-- `tools_command.go` — `run_command`
-- `tools_vfs.go` — remaining file tools
+- `tools_vfs.go` — `read`, `write`, `run_command`
 - `tools_vfsindex.go` — `index_file` / `unindex` / `find_content` (until PR A)
 - `agent.go` — turn-scoped `Close` (does not close MountSession)
 - `agent_construct.go` — `injectBuiltinTools`, `RunCommandUnattended`

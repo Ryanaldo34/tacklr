@@ -54,6 +54,11 @@ func cliPath() string {
 	return ""
 }
 
+// Available reports whether the Temporal CLI binary can be resolved.
+func Available() bool {
+	return cliPath() != ""
+}
+
 // Client returns the shared Temporal CLI dev-server client. Skips in -short
 // or when the server cannot start. If the CLI is not on PATH, the SDK
 // downloads a compatible binary (same as testsuite.StartDevServer).
