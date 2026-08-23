@@ -99,7 +99,7 @@ func TestNewServer_panicsWithoutRuntimeOrProtocol(t *testing.T) {
 				t.Fatal("expected panic")
 			}
 		}()
-		k := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+		k := newEmptyKernel()
 		_ = NewServer(k.Runtime, k.Catalog, nil)
 	})
 	t.Run("no protocols", func(t *testing.T) {
@@ -108,7 +108,7 @@ func TestNewServer_panicsWithoutRuntimeOrProtocol(t *testing.T) {
 				t.Fatal("expected panic")
 			}
 		}()
-		k := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+		k := newEmptyKernel()
 		_ = NewServer(k.Runtime, k.Catalog)
 	})
 }
