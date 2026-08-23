@@ -88,7 +88,7 @@ func Init(ctx context.Context, cfg Config) (func(context.Context) error, error) 
 	if ratio <= 0 || ratio > 1 {
 		ratio = 1
 	}
-	sampler := sdktrace.Sampler(sdktrace.AlwaysSample())
+	sampler := sdktrace.AlwaysSample()
 	if ratio < 1 {
 		sampler = sdktrace.ParentBased(sdktrace.TraceIDRatioBased(ratio))
 	}
