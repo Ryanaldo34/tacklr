@@ -3,7 +3,6 @@ package temporallive
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -43,20 +42,21 @@ func HostPort(t *testing.T) string {
 	return dev.FrontendHostPort()
 }
 
-func cliPath() (string, error) {
+func cliPath() string {
 	if p, err := exec.LookPath("temporal"); err == nil {
-		return p, nil
+		return p
 	}
 	for _, p := range []string{"/opt/homebrew/bin/temporal", "/usr/local/bin/temporal"} {
 		if st, err := os.Stat(p); err == nil && !st.IsDir() {
-			return p, nil
+			return p
 		}
 	}
-	return "", fmt.Errorf("temporal CLI not found on PATH")
+	return ""
 }
 
 // Client returns the shared Temporal CLI dev-server client. Skips in -short
-// or when the CLI cannot start.
+// or when the server cannot start. If the CLI is not on PATH, the SDK
+// downloads a compatible binary (same as testsuite.StartDevServer).
 func Client(t *testing.T) client.Client {
 	t.Helper()
 	if testing.Short() {
@@ -66,23 +66,21 @@ func Client(t *testing.T) client.Client {
 	defer mu.Unlock()
 	if !started {
 		started = true
-		path, err := cliPath()
-		if err != nil {
-			startErr = err
-		} else {
-			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-			dev, startErr = testsuite.StartDevServer(ctx, testsuite.DevServerOptions{
-				ExistingPath: path,
-				LogLevel:     "error",
-				EnableUI:     false,
-				Stdout:       io.Discard,
-				Stderr:       io.Discard,
-			})
-			cancel()
-		}
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		dev, startErr = testsuite.StartDevServer(ctx, testsuite.DevServerOptions{
+			ExistingPath: cliPath(),
+			LogLevel:     "error",
+			EnableUI:     false,
+			Stdout:       io.Discard,
+			Stderr:       io.Discard,
+		})
+		cancel()
 	}
 	if startErr != nil {
 		t.Skipf("temporal dev server: %v", startErr)
+	}
+	if dev == nil {
+		t.Skip("temporal dev server not started")
 	}
 	return dev.Client()
 }
