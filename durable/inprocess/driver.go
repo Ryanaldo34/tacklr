@@ -204,13 +204,13 @@ func (r *Runtime) recordTurn(ctx context.Context, agentID, threadID, kind string
 	return ctx, func(o turnOutcome) {
 		switch o {
 		case turnCancelled:
-			span.End(telemetry.OutcomeCancelled, nil)
+			span.End(telemetry.OutcomeCancelled)
 		case turnError:
-			span.End(telemetry.OutcomeError, nil)
+			span.End(telemetry.OutcomeError)
 		case turnYield:
-			span.End(telemetry.OutcomeYield, nil)
+			span.End(telemetry.OutcomeYield)
 		default:
-			span.End(telemetry.OutcomeOK, nil)
+			span.End(telemetry.OutcomeOK)
 		}
 	}
 }

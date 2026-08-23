@@ -60,17 +60,17 @@ func StartTurnSpan(ctx context.Context, a TurnAttrs) (context.Context, *TurnSpan
 
 // End ends the turn span, emits turn.ended, and records metrics.
 // outcome is a closed enum (OutcomeOK, OutcomeError, OutcomeCancelled, OutcomeYield).
-func (t *TurnSpan) End(outcome string, err error) {
+func (t *TurnSpan) End(outcome string) {
 	if t.finished {
 		return
 	}
 	t.finished = true
-	if err != nil {
-		t.span.RecordError(err)
-		t.span.SetStatus(codes.Error, ErrorClassOther)
-	} else if outcome == OutcomeCancelled {
+	switch outcome {
+	case OutcomeCancelled:
 		t.span.SetStatus(codes.Error, OutcomeCancelled)
-	} else {
+	case OutcomeError:
+		t.span.SetStatus(codes.Error, ErrorClassOther)
+	default:
 		t.span.SetStatus(codes.Ok, "")
 	}
 	t.span.SetAttributes(attribute.String(AttrOutcome, outcome))

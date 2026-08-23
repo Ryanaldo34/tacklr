@@ -11,10 +11,7 @@ import (
 // a host Registerer and produces a MeterProvider that records instruments.
 func TestMeterProviderFromPrometheusRegisterer_records(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	mp, err := MeterProviderFromPrometheusRegisterer(reg, "tacklr-test", "dev")
-	if err != nil {
-		t.Fatal(err)
-	}
+	mp := MeterProviderFromPrometheusRegisterer(reg, "", "")
 	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
 
 	inst := MustInstruments(MeterFromProvider(mp))

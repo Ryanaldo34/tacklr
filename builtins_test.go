@@ -455,6 +455,16 @@ func TestRun_planToolHappyAndErrorPaths(t *testing.T) {
 	}
 }
 
+func TestAgentHarness_installPlanDocumentRequiresWindow(t *testing.T) {
+	h := mustNewAgent(t, AgentOptions{Model: &mockStrategy{}, Config: Config{MaxWindowSize: 8192}})
+	t.Cleanup(h.Close)
+	h.session.Plan.SetDocument("PROJECT PLAN")
+	err := h.applyBatchToolResultEffect(context.Background(), EffectInstallPlanDocument)
+	if err == nil || !strings.Contains(err.Error(), "empty window") {
+		t.Fatalf("empty window install: %v", err)
+	}
+}
+
 // TestRun_askUserChoice_withoutDescription_formatsSelection: selection without
 // a description still returns a clear confirmation after resume; also probes
 // AskUserQuestion state helpers.

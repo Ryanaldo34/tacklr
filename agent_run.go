@@ -87,7 +87,7 @@ func (a *AgentHarness) startTurn(ctx context.Context, user *Message) (<-chan Str
 		})
 		telemetry.EmitTurnReceived(ctx, kind, promptLen, 0)
 		outcome := telemetry.OutcomeOK
-		defer func() { span.End(outcome, nil) }()
+		defer func() { span.End(outcome) }()
 
 		cancelled := false
 		emitCancelled := func() {

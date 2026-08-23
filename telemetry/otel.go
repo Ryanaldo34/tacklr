@@ -73,10 +73,7 @@ func Init(ctx context.Context, cfg Config) (func(context.Context) error, error) 
 		return tp.Shutdown, nil
 	}
 
-	res, err := DefaultResource(cfg.ServiceName, cfg.ServiceVersion)
-	if err != nil {
-		return nil, err
-	}
+	res := DefaultResource(cfg.ServiceName, cfg.ServiceVersion)
 	insecure := cfg.Insecure || strings.HasPrefix(endpoint, "http://") || !strings.Contains(endpoint, "://")
 	host := stripScheme(endpoint)
 

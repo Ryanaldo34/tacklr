@@ -266,7 +266,7 @@ func TestAskUserChoiceYieldsThenResumeCompletes(t *testing.T) {
 
 func TestCancelWhileRunningEndsSubscriptionThenNextPromptRuns(t *testing.T) {
 	ctx := t.Context()
-	started := make(chan struct{})
+	started := make(chan struct{}, 1)
 	model := &testkit.ScriptedModel{
 		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 			select {

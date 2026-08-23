@@ -25,10 +25,7 @@ func (e stubProviderErr) ProviderErrorCode() string { return e.code }
 
 func TestModelSpan_lifecycleAndClassify(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	mp, err := MeterProviderFromPrometheusRegisterer(reg, "model-cov", "v0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	mp := MeterProviderFromPrometheusRegisterer(reg, "model-cov", "v0")
 	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
 	SetMeterProvider(mp)
 	t.Cleanup(func() { SetMeterProvider(nil) })
