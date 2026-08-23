@@ -14,7 +14,6 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
-	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
 const wirePgImage = "tacklr-pg-brain:test"
@@ -167,12 +166,7 @@ func wireConn(t *testing.T) *pgx.Conn {
 	if wireErr != nil {
 		t.Fatal(wireErr)
 	}
-	cfg, err := pgx.ParseConfig(wireURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	telemetry.InstrumentPgx(cfg)
-	conn, err := pgx.ConnectConfig(ctx, cfg)
+	conn, err := pgx.Connect(ctx, wireURL)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -6,8 +6,6 @@
 // Host API:
 //   - Config, Init — process-wide OTLP traces/metrics/logs with Temporal's
 //     ReplaySafe tracer provider. Call before durable/temporal.Dial.
-//   - InstrumentPgx, RecordPgxPoolStats — otelpgx on a host-owned pgx
-//     ConnConfig / pool (brain.PostgresStore does not instrument itself)
 //   - MeterProviderFromPrometheusRegisterer — Prometheus scrape
 //   - DefaultResource — service resource
 //

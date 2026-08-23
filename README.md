@@ -253,15 +253,7 @@ The durable **wait loop is the primary instrumentor**. One `tacklr.turn` span pe
 
 Temporal ships out of the box: `telemetry.Init` installs the process-wide OpenTelemetry providers (ReplaySafe tracer so workflow spans replay cleanly). `durable/temporal.Dial` prepends the [OpenTelemetry v2 plugin](https://docs.temporal.io/develop/go/integrations/opentelemetry-v2) for context propagation (no extra SDK auto-spans). Call `Init` before `Dial`.
 
-Postgres is the same pattern: instrument the **host-owned pool**, not `brain.PostgresStore`. After `Init`, set `otelpgx` on the pgx config so Query/Exec spans parent under the current `tacklr.turn` / `tacklr.tool`:
-
-```go
-cfg, err := pgxpool.ParseConfig(dsn)
-telemetry.InstrumentPgx(cfg.ConnConfig) // ConnConfig is already *pgx.ConnConfig
-pool, err := pgxpool.NewWithConfig(ctx, cfg)
-_ = telemetry.RecordPgxPoolStats(pool) // optional pool gauges; query metrics come from InstrumentPgx
-store, err := brain.NewPostgresStore(pool)
-```
+Postgres Query/Exec on `brain.PostgresStore` and `server.PostgresWireStore` emit otelpgx client spans as children of the caller context, so they share the `tacklr.turn` / `tacklr.tool` trace after `Init`. Hosts pass the request `ctx` through; they do not configure pgx tracing.
 
 Nothing configured still installs a replay-safe no-op provider so Temporal workflows do not panic. Point `OTEL_EXPORTER_OTLP_ENDPOINT` at your collector when you want data.
 
