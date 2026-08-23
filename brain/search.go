@@ -11,33 +11,24 @@ import (
 
 // Search runs hybrid retrieval (BM25 + optional vector), RRF, temporal decay,
 // parent promotion, and materializes a ResultSet into results.
-func (e *Engine) Search(ctx context.Context, scope Scope, req SearchRequest, results ResultSetStore) (page SearchPage, err error) {
-	ctx, span := e.observer.StartOp(ctx, OpSearch)
-	degrade := DegradeNone
-	defer func() { span.End(len(page.Objects), degrade, err) }()
-
-	ranked, degrade, err := e.hybridCandidates(ctx, scope, req)
+func (e *Engine) Search(ctx context.Context, scope Scope, req SearchRequest, results ResultSetStore) (SearchPage, error) {
+	ranked, err := e.hybridCandidates(ctx, scope, req)
 	if err != nil {
-		return page, err
+		return SearchPage{}, err
 	}
 	ranked = filterScoredByScopeIDs(ranked, req.ScopeIDs)
-	page, err = e.materialize(ctx, scope, ranked, req.Limit, results)
-	return page, err
+	return e.materialize(ctx, scope, ranked, req.Limit, results)
 }
 
 // FindExact runs equality-first exact retrieval (no dense channel), then
 // lexical + trigram fusion, promotion, and ResultSet materialization.
-func (e *Engine) FindExact(ctx context.Context, scope Scope, req SearchRequest, results ResultSetStore) (page SearchPage, err error) {
-	ctx, span := e.observer.StartOp(ctx, OpFindExact)
-	defer func() { span.End(len(page.Objects), DegradeNone, err) }()
-
+func (e *Engine) FindExact(ctx context.Context, scope Scope, req SearchRequest, results ResultSetStore) (SearchPage, error) {
 	ranked, err := e.exactCandidates(ctx, scope, req)
 	if err != nil {
-		return page, err
+		return SearchPage{}, err
 	}
 	ranked = filterScoredByScopeIDs(ranked, req.ScopeIDs)
-	page, err = e.materialize(ctx, scope, ranked, req.Limit, results)
-	return page, err
+	return e.materialize(ctx, scope, ranked, req.Limit, results)
 }
 
 // filterScoredByScopeIDs keeps hits whose id or parent_id is in allow (empty allow = no-op).
@@ -71,9 +62,6 @@ func filterScoredByScopeIDs(ranked []ScoredID, allow []uuid.UUID) []ScoredID {
 
 // Continue returns the next page of a prior ResultSet under scope.
 func (e *Engine) Continue(ctx context.Context, scope Scope, resultSetID uuid.UUID, limit int, results ResultSetStore) (page SearchPage, err error) {
-	ctx, span := e.observer.StartOp(ctx, OpContinue)
-	defer func() { span.End(len(page.Objects), DegradeNone, err) }()
-
 	if resultSetID == uuid.Nil {
 		return page, fmt.Errorf("%w: result_set_id is required", ErrInvalid)
 	}
@@ -152,41 +140,36 @@ func (e *Engine) effectiveFilters(f Filters) (Filters, error) {
 	return injectKindAllowList(f, e.catalog), nil
 }
 
-func (e *Engine) hybridCandidates(ctx context.Context, scope Scope, req SearchRequest) ([]ScoredID, DegradeMode, error) {
+func (e *Engine) hybridCandidates(ctx context.Context, scope Scope, req SearchRequest) ([]ScoredID, error) {
 	filters, err := e.prepareSearch(req)
 	if err != nil {
-		return nil, DegradeNone, err
+		return nil, err
 	}
 	query := strings.TrimSpace(req.Query)
 	k := e.cfg.CandidateK
 	lex, err := e.store.SearchLexical(ctx, scope, query, filters, k)
 	if err != nil {
-		return nil, DegradeNone, err
+		return nil, err
 	}
 	lists := [][]ScoredID{lex}
-	degrade := DegradeNone
 	if e.embedder != nil {
 		emb, embErr := e.embedder.Embed(ctx, query)
 		if embErr != nil {
-			if e.cfg.allowEmbedderDegrade() {
-				degrade = DegradeLexicalOnly
-			} else {
-				return nil, DegradeNone, fmt.Errorf("brain: embed query: %w", embErr)
+			if !e.cfg.allowEmbedderDegrade() {
+				return nil, fmt.Errorf("brain: embed query: %w", embErr)
 			}
 		} else if len(emb) > 0 {
 			vec, err := e.store.SearchVector(ctx, scope, emb, filters, k)
 			if err != nil {
-				if e.cfg.allowEmbedderDegrade() {
-					degrade = DegradeLexicalOnly
-				} else {
-					return nil, DegradeNone, err
+				if !e.cfg.allowEmbedderDegrade() {
+					return nil, err
 				}
 			} else if len(vec) > 0 {
 				lists = append(lists, vec)
 			}
 		}
 	}
-	return rrfFuse(lists, e.cfg.RRFk), degrade, nil
+	return rrfFuse(lists, e.cfg.RRFk), nil
 }
 
 func (e *Engine) exactCandidates(ctx context.Context, scope Scope, req SearchRequest) ([]ScoredID, error) {

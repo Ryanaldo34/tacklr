@@ -13,6 +13,7 @@ import (
 	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/streaming"
+	"github.com/ryanaldo34/tacklr/telemetry"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -331,13 +332,15 @@ func (r *Runtime) loop(p *sessionProc) {
 			}
 			continue
 		}
-		kind := "prompt"
+		kind := telemetry.TurnKindPrompt
 		var user *tacklr.Message
 		var resume map[string][]byte
 		var auth durable.AuthContext
+		promptLen, resumeCount := 0, 0
 		if sig.kind == sigResume {
-			kind = "resume"
+			kind = telemetry.TurnKindResume
 			resume = sig.resume.Responses
+			resumeCount = len(resume)
 			auth = sig.resume.Auth
 		} else {
 			if err := r.applyPromptMeta(p, sig.prompt); err != nil {
@@ -348,6 +351,9 @@ func (r *Runtime) loop(p *sessionProc) {
 			}
 			user = promptMessage(sig.prompt)
 			auth = sig.prompt.Auth
+			if user != nil {
+				promptLen = len(user.Content)
+			}
 		}
 		p.mounts = durable.ApplyAuth(p.mounts, auth)
 		bindings := durable.BindingsForTurn(p.mounts, auth)
@@ -363,9 +369,9 @@ func (r *Runtime) loop(p *sessionProc) {
 		go func() {
 			defer close(done)
 			defer cancel()
-			ctx, end := recordTurn(turnCtx, p.agentID, string(p.id), kind)
+			ctx, end := r.recordTurn(turnCtx, p.agentID, string(p.id), kind, promptLen, resumeCount)
 			outcome := r.driveTurn(ctx, p, user, resume, bindings)
-			end(nil, outcome == turnCancelled || turnCtx.Err() != nil)
+			end(outcome)
 		}()
 	}
 }

@@ -49,6 +49,7 @@ func OpenTurnVFS(ctx context.Context, threadID string, spec AgentSpec, bindings 
 		return nil, nil
 	}
 	if proj == nil || !proj.Available() {
+		telemetry.InstrumentsFromContext(ctx).RecordFuseMount(ctx, telemetry.FuseMountOutcomeUnavailable)
 		return nil, nil
 	}
 	if hasBindings {
@@ -84,12 +85,14 @@ func OpenTurnVFS(ctx context.Context, threadID string, spec AgentSpec, bindings 
 	}
 	if ms.HostDir() == "" {
 		if err := proj.Attach(ms, threadID); err != nil {
+			telemetry.InstrumentsFromContext(ctx).RecordFuseMount(ctx, telemetry.FuseMountOutcomeError)
 			CloseTurnVFS(ms, threadID, "fuse_attach")
 			return nil, err
 		}
 		telemetry.EmitEvent(ctx, telemetry.EventFuseMount,
 			log.String(telemetry.AttrSessionID, threadID),
 		)
+		telemetry.InstrumentsFromContext(ctx).RecordFuseMount(ctx, telemetry.FuseMountOutcomeOK)
 	}
 	return ms, nil
 }

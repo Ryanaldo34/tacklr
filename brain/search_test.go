@@ -93,6 +93,16 @@ func TestSearch_promotesParentWithEvidenceAndNamespace(t *testing.T) {
 			t.Fatal("parent from nsA must not appear under nsB")
 		}
 	}
+
+	miss, err := eng.Search(ctx, brain.Scope{Namespace: &nsA}, brain.SearchRequest{
+		Query: "quantum-chromodynamics-unrelated",
+	}, brain.NewSearchContext())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(miss.Objects) != 0 {
+		t.Fatalf("unrelated query must miss, got %+v", miss.Objects)
+	}
 }
 
 func TestSearch_filtersProperty(t *testing.T) {

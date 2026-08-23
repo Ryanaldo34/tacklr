@@ -31,9 +31,6 @@ type FindLinksResult struct {
 
 // FindLinks lands on relationships via GraphEdgeSearcher, then hydrates endpoints under Scope.
 func (e *Engine) FindLinks(ctx context.Context, scope Scope, req FindLinksRequest) (res FindLinksResult, err error) {
-	ctx, span := e.observer.StartOp(ctx, OpFindLinks)
-	defer func() { span.End(len(res.Links), DegradeNone, err) }()
-
 	if e := ctx.Err(); e != nil {
 		err = e
 		return res, err

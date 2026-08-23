@@ -11,23 +11,13 @@ import (
 	"github.com/ryanaldo34/tacklr/brain"
 )
 
-type nopObserver struct{}
-
-func (nopObserver) StartOp(ctx context.Context, _ brain.Op) (context.Context, brain.OpSpan) {
-	return ctx, nopSpan{}
-}
-
-type nopSpan struct{}
-
-func (nopSpan) End(int, brain.DegradeMode, error) {}
-
 type nopRerank struct{}
 
 func (nopRerank) Rerank(context.Context, []brain.RichObject) ([]brain.RichObject, error) {
 	return nil, nil
 }
 
-// TestNewEngine_options: WithObserver/Reranker/ExpandRecipes/Kinds construct path.
+// TestNewEngine_options: WithReranker/ExpandRecipes/Kinds construct path.
 func TestNewEngine_options(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
@@ -35,7 +25,6 @@ func TestNewEngine_options(t *testing.T) {
 		t.Fatalf("empty expand recipe name must fail construct: %v", err)
 	}
 	eng, err := brain.NewEngine(store,
-		brain.WithObserver(nopObserver{}),
 		brain.WithReranker(nopRerank{}),
 		brain.WithExpandRecipes(
 			brain.ExpandRecipe{Name: "kids", MaxHops: 1, WantContainment: true},

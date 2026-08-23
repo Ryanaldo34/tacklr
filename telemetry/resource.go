@@ -1,8 +1,6 @@
 package telemetry
 
 import (
-	"fmt"
-	"os"
 	"strings"
 
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -11,24 +9,17 @@ import (
 
 // DefaultResource builds a shared Resource for TracerProvider and MeterProvider
 // so backends can correlate service.name across traces, metrics, and logs.
-func DefaultResource(serviceName, serviceVersion string) (*resource.Resource, error) {
+// Empty serviceName becomes "tacklr".
+func DefaultResource(serviceName, serviceVersion string) *resource.Resource {
 	if strings.TrimSpace(serviceName) == "" {
-		if v := strings.TrimSpace(os.Getenv("OTEL_SERVICE_NAME")); v != "" {
-			serviceName = v
-		} else {
-			serviceName = "tacklr"
-		}
+		serviceName = "tacklr"
 	}
-	// NewSchemaless avoids Schema URL conflicts with resource.Default()'s SDK schema.
-	res, err := resource.Merge(
+	res, _ := resource.Merge(
 		resource.Default(),
 		resource.NewSchemaless(
 			semconv.ServiceName(serviceName),
 			semconv.ServiceVersion(serviceVersion),
 		),
 	)
-	if err != nil {
-		return nil, fmt.Errorf("otel resource: %w", err)
-	}
-	return res, nil
+	return res
 }

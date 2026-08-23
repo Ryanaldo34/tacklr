@@ -114,13 +114,10 @@ func UnsupportedMIMEs(s InferenceStrategy, mimes []string) []string {
 	return bad
 }
 
-// AgentWatchDog records optional turn telemetry (thinking, tools, tokens).
+// AgentWatchDog records assistant output and tool results for a turn.
+// Nil on AgentOptions means no watchdog.
 type AgentWatchDog interface {
-	RecordThinking(*Message) error
 	RecordOutput(*Message) error
-	RecordError(error) error
-	RecordTokens(int, int) error
-	RecordToolCalls(*Message) error
 	RecordToolResult(*Message) error
 }
 

@@ -9,6 +9,7 @@ import (
 
 	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/stores"
+	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
 // Run starts a turn with a plain-text user message.
@@ -70,7 +71,31 @@ func (a *AgentHarness) startTurn(ctx context.Context, user *Message) (<-chan Str
 		defer a.runMu.Unlock()
 		defer close(out)
 
+		kind := telemetry.TurnKindPrompt
+		promptLen := 0
+		if user == nil {
+			kind = telemetry.TurnKindResume
+		} else {
+			promptLen = len(user.Content)
+		}
+		ctx = telemetry.BindTurnContext(ctx, "", a.sessionId)
+		ctx, span := telemetry.StartTurnSpan(ctx, telemetry.TurnAttrs{
+			SessionID: a.sessionId,
+			ThreadID:  a.sessionId,
+			Kind:      kind,
+			Runtime:   telemetry.RuntimeEmbed,
+		})
+		telemetry.EmitTurnReceived(ctx, kind, promptLen, 0)
+		outcome := telemetry.OutcomeOK
+		defer func() { span.End(outcome) }()
+
+		cancelled := false
 		emitCancelled := func() {
+			if cancelled {
+				return
+			}
+			cancelled = true
+			outcome = telemetry.OutcomeCancelled
 			a.finalizeCancelledWork(out)
 			out <- StreamEvent{Type: StreamEventError, Error: fmt.Errorf("run: context cancelled: %w", ctx.Err())}
 		}
@@ -81,23 +106,27 @@ func (a *AgentHarness) startTurn(ctx context.Context, user *Message) (<-chan Str
 					emitCancelled()
 					return
 				}
+				outcome = telemetry.OutcomeError
 				out <- StreamEvent{Type: StreamEventError, Error: fmt.Errorf("run: %w", err)}
 				return
 			}
 		} else {
 			a.pairOpenToolCalls("unpaired tool call")
 		}
-		a.runTurnLoop(ctx, out, emitCancelled)
+		loopOut := a.runTurnLoop(ctx, out, emitCancelled)
+		if outcome == telemetry.OutcomeOK {
+			outcome = loopOut
+		}
 	}()
 	return out, nil
 }
 
-func (a *AgentHarness) runTurnLoop(ctx context.Context, out chan StreamEvent, emitCancelled func()) {
+func (a *AgentHarness) runTurnLoop(ctx context.Context, out chan StreamEvent, emitCancelled func()) string {
 	st := &TurnState{}
 	for {
 		if ctx.Err() != nil {
 			emitCancelled()
-			return
+			return telemetry.OutcomeCancelled
 		}
 		var toolCalls []ToolCall
 		pending := a.pendingSnapshot()
@@ -105,13 +134,13 @@ func (a *AgentHarness) runTurnLoop(ctx context.Context, out chan StreamEvent, em
 			step, err := a.RunInference(ctx, st, out)
 			if ctx.Err() != nil {
 				emitCancelled()
-				return
+				return telemetry.OutcomeCancelled
 			}
 			if err != nil {
-				return
+				return telemetry.OutcomeError
 			}
 			if step.Complete {
-				return
+				return telemetry.OutcomeOK
 			}
 			toolCalls = step.ToolCalls
 		} else {
@@ -125,7 +154,7 @@ func (a *AgentHarness) runTurnLoop(ctx context.Context, out chan StreamEvent, em
 
 		if ctx.Err() != nil {
 			emitCancelled()
-			return
+			return telemetry.OutcomeCancelled
 		}
 
 		st.HadToolRound = st.HadToolRound || len(toolCalls) > 0
@@ -143,10 +172,10 @@ func (a *AgentHarness) runTurnLoop(ctx context.Context, out chan StreamEvent, em
 		wg.Wait()
 		if ctx.Err() != nil {
 			emitCancelled()
-			return
+			return telemetry.OutcomeCancelled
 		}
 		if len(a.pendingSnapshot()) > 0 {
-			return
+			return telemetry.OutcomeYield
 		}
 	}
 }

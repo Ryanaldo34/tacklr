@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 
-	"go.opentelemetry.io/otel/log"
-
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/mcp"
@@ -75,9 +73,11 @@ func (r *Runtime) constructHarness(ctx context.Context, p *sessionProc, load boo
 func (r *Runtime) persistHarness(ctx context.Context, p *sessionProc, h *tacklr.AgentHarness) error {
 	cp, err := h.Checkpoint()
 	if err != nil {
+		telemetry.RecordCheckpointAttempt(ctx, err)
 		return err
 	}
 	etag, err := r.snapshots.Save(ctx, p.id, durable.Snapshot{AgentID: p.agentID, Checkpoint: *cp, Mounts: p.mounts}, p.etag)
+	telemetry.RecordCheckpointAttempt(ctx, err)
 	if err != nil {
 		return err
 	}
@@ -190,24 +190,27 @@ func (r *Runtime) driveTurn(ctx context.Context, p *sessionProc, user *tacklr.Me
 	}
 }
 
-func recordTurn(ctx context.Context, agentID, threadID, kind string) (context.Context, func(error, bool)) {
-	ctx = telemetry.ContextWithInstruments(ctx, telemetry.MustInstruments(telemetry.Meter()))
+func (r *Runtime) recordTurn(ctx context.Context, agentID, threadID, kind string, promptLen, resumeCount int) (context.Context, func(turnOutcome)) {
+	ctx = telemetry.BindTurnContext(ctx, agentID, threadID)
 	ctx, span := telemetry.StartTurnSpan(ctx, telemetry.TurnAttrs{
-		AgentID:   agentID,
-		ThreadID:  threadID,
-		SessionID: threadID,
-		Kind:      kind,
+		AgentID:     agentID,
+		ThreadID:    threadID,
+		SessionID:   threadID,
+		Kind:        kind,
+		Runtime:     telemetry.RuntimeInProcess,
+		LoadSession: kind == telemetry.TurnKindResume,
 	})
-	if kind == "prompt" {
-		telemetry.EmitEvent(ctx, telemetry.EventPromptReceived, log.Int(telemetry.EventAttrPromptLen, 0))
-	} else {
-		telemetry.EmitEvent(ctx, telemetry.EventResumeReceived)
-	}
-	return ctx, func(err error, cancelled bool) {
-		if cancelled {
-			span.End(telemetry.OutcomeCancelled, err)
-			return
+	telemetry.EmitTurnReceived(ctx, kind, promptLen, resumeCount)
+	return ctx, func(o turnOutcome) {
+		switch o {
+		case turnCancelled:
+			span.End(telemetry.OutcomeCancelled)
+		case turnError:
+			span.End(telemetry.OutcomeError)
+		case turnYield:
+			span.End(telemetry.OutcomeYield)
+		default:
+			span.End(telemetry.OutcomeOK)
 		}
-		span.End("", err)
 	}
 }

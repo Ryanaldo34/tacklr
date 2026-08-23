@@ -21,6 +21,7 @@ import (
 	"github.com/ryanaldo34/tacklr/internal/temporallive"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
 	"github.com/ryanaldo34/tacklr/streaming"
+	"github.com/ryanaldo34/tacklr/telemetry"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -37,7 +38,12 @@ type liveStack struct {
 
 func newLiveStack(t *testing.T, cat durable.Catalog) *liveStack {
 	t.Helper()
-	c := temporallive.Client(t)
+	_ = temporallive.Client(t)
+	c, err := Dial(client.Options{HostPort: temporallive.HostPort(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(c.Close)
 	n := liveSeq.Add(1)
 	tq := fmt.Sprintf("tacklr-live-%d", n)
 	snaps := inprocess.NewMemorySnapshot()
@@ -73,7 +79,12 @@ func (s *liveStack) RestartWorker(t *testing.T) {
 }
 
 func TestMain(m *testing.M) {
+	shutdown, err := telemetry.Init(context.Background(), telemetry.Config{})
+	if err != nil {
+		panic(err)
+	}
 	code := m.Run()
+	_ = shutdown(context.Background())
 	temporallive.Stop()
 	os.Exit(code)
 }
@@ -500,10 +511,14 @@ func TestLive_cancelThenNextPrompt(t *testing.T) {
 			},
 		}, Config: tacklr.Config{MaxWindowSize: 8192}},
 	})
+	head, err := stack.Runtime.Head(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := stack.Runtime.Prompt(ctx, id, durable.Prompt{Text: "again"}); err != nil {
 		t.Fatal(err)
 	}
-	sub, err := stack.Runtime.Subscribe(ctx, id, 0)
+	sub, err := stack.Runtime.Subscribe(ctx, id, head)
 	if err != nil {
 		t.Fatal(err)
 	}
