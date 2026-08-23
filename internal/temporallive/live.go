@@ -56,8 +56,7 @@ func cliPath() string {
 
 // Available reports whether the Temporal CLI binary can be resolved.
 func Available() bool {
-	_, err := cliPath()
-	return err == nil
+	return cliPath() != ""
 }
 
 // Client returns the shared Temporal CLI dev-server client. Skips in -short
