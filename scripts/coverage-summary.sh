@@ -10,7 +10,7 @@ if [[ ! -f "$PROFILE" ]]; then
 fi
 
 # Keep in sync with exclude.paths in .testcoverage.yml / update-coverage-badge.sh
-EXCLUDE_REGEX='cmd/|internal/testkit|internal/agentbench|stores/postgres\.go'
+EXCLUDE_REGEX='cmd/|internal/testkit|internal/agentbench|internal/temporallive|stores/postgres\.go'
 
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT

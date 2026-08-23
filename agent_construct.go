@@ -39,21 +39,20 @@ func (c Config) Validate() error {
 	return nil
 }
 
-// AgentOptions configures NewAgent and NewAgentFromSession.
+// AgentOptions configures NewAgent.
 //
-// Usual fields: Config, Model, Store, Tools, MCPConfigs, SubAgents, SessionID.
+// Usual fields: Config, Model, Tools, MCPConfigs, SubAgents, SessionID.
 // ContextPolicy knobs (ratios, stream-summary) stay host-settable. Adaptive
 // Case Management itself is harness-owned and cannot be replaced.
 //
-// Store is the harness thread checkpoint (stores.BaseStore). Wire session
-// envelopes (server.ProtocolWireStore) are a separate protocol contract and
-// are not merged with this store.
+// Conversation for durable.Runtime sessions lives on SnapshotStore.
+// Wire session envelopes (server.ProtocolWireStore) are a separate protocol
+// contract.
 type AgentOptions struct {
 	Config Config
 	// SessionID is the durable thread id. Set at construction; do not change mid-turn.
 	SessionID  string
 	Model      InferenceStrategy
-	Store      stores.BaseStore
 	WatchDog   AgentWatchDog
 	Tools      []*Tool
 	MCPConfigs []mcp.MCPConfig
@@ -93,20 +92,16 @@ type AgentOptions struct {
 	// SearchNamespace isolates brain retrieval when set (session-owned, checkpointed).
 	// Nil leaves a loaded session value unchanged. Workers get a copy at spawn.
 	SearchNamespace *uuid.UUID
-	// MountSession is the host-owned VFS mount table. The harness borrows it
-	// for this turn (tool dispatch only). Hosts create, mount, FuseMount, and
-	// Close it. Nil means no VFS tools.
+	// MountSession is the VFS tree injected for this turn, or nil (no VFS tools).
+	// Runtime builds one from FSBootstrap plus Prompt.Auth bindings when a
+	// projection is available. Embedders pass their own. The injector Closes
+	// it after the turn; the harness never does (workers inherit the pointer).
 	MountSession *vfs.MountSession
 	// RunCommandUnattended injects run_command without ToolPermissionOnCall.
-	// Zero value (Registry, testserver) parks run_command for permission.
+	// Zero value parks run_command for permission.
 	RunCommandUnattended bool
 	// shareIndexBridge is the parent index bridge. Nil means Start a new bridge.
 	shareIndexBridge *vfsindex.Bridge
-}
-
-// Validate checks the complete public construction contract.
-func (opts AgentOptions) Validate() error {
-	return opts.validateAndNormalize()
 }
 
 // streamEventBuffer is the harness event channel size so EmitUpdate is not dropped
@@ -115,37 +110,15 @@ const streamEventBuffer = 64
 
 // NewAgent builds a session-scoped harness. Turn-scoped Runtime is created in Run.
 func NewAgent(ctx context.Context, opts AgentOptions) (*AgentHarness, error) {
-	h, err := newHarnessBase(opts, session.NewSessionManager())
-	if err != nil {
+	if err := opts.Validate(); err != nil {
 		return nil, err
 	}
-	if opts.SessionID != "" {
-		h.sessionId = opts.SessionID
-	}
-	if err := h.finishInit(ctx, opts.SubAgents); err != nil {
-		return nil, err
-	}
-	return h, nil
-}
-
-// newHarnessBase fills shared fields. Session state lives on sm across turns.
-// sm must be non-nil.
-func newHarnessBase(opts AgentOptions, sm *session.SessionManager) (*AgentHarness, error) {
-	if opts.Model == nil {
-		return nil, fmt.Errorf("tacklr: AgentOptions.Model is required")
-	}
-	if sm == nil {
-		return nil, fmt.Errorf("tacklr: session manager is required")
-	}
-	if err := opts.validateAndNormalize(); err != nil {
-		return nil, err
-	}
+	sm := session.NewSessionManager()
 	h := &AgentHarness{
 		model:                 opts.Model,
 		maxWindowSize:         opts.Config.MaxWindowSize,
 		maxTurnRequests:       opts.Config.MaxTurnRequests,
 		instructions:          opts.Config.SystemPrompt,
-		store:                 opts.Store,
 		session:               sm,
 		watchDog:              opts.WatchDog,
 		tools:                 opts.Tools,
@@ -157,7 +130,7 @@ func newHarnessBase(opts AgentOptions, sm *session.SessionManager) (*AgentHarnes
 		exaAPIKey:             resolveExaAPIKey(opts.ExaAPIKey),
 		brain:                 opts.Brain,
 		brainWriteKinds:       opts.BrainWriteKinds,
-		sessionId:             "",
+		sessionId:             opts.SessionID,
 		subagents:             make(map[string]*SubAgent),
 		pendingToolCalls:      make(map[string]stores.PendingToolCall),
 		interruptPayloads:     make(map[string][]byte),
@@ -191,10 +164,15 @@ func newHarnessBase(opts AgentOptions, sm *session.SessionManager) (*AgentHarnes
 	chain = append(chain, onCallMiddleware(sm))
 	h.toolRunner = newToolRunner(chain...)
 	h.toolResultHooks = newToolResultHookRegistry(opts.ToolResultHooks)
+	if err := h.finishInit(ctx, opts.SubAgents); err != nil {
+		return nil, err
+	}
 	return h, nil
 }
 
-func (opts *AgentOptions) validateAndNormalize() error {
+// Validate checks the construction contract and fills MaxWindowSize from the
+// model when the host left it at zero.
+func (opts *AgentOptions) Validate() error {
 	if opts.Model == nil {
 		return fmt.Errorf("tacklr: AgentOptions.Model is required")
 	}
@@ -391,35 +369,4 @@ func (a *AgentHarness) skillTool() *Tool {
 			return skill.Instructions, nil
 		},
 	})
-}
-
-// NewAgentFromSession loads a harness from a session checkpoint.
-// opts.Store is required. Uses the same AgentOptions shape as NewAgent.
-func NewAgentFromSession(ctx context.Context, sessionId string, opts AgentOptions) (*AgentHarness, error) {
-	if opts.Store == nil {
-		return nil, fmt.Errorf("agent harness: store is required to load session %q", sessionId)
-	}
-	if err := opts.validateAndNormalize(); err != nil {
-		return nil, err
-	}
-	checkpoint, err := opts.Store.LoadSession(ctx, sessionId)
-	if err != nil {
-		return nil, err
-	}
-	sm := session.NewSessionManager()
-	applied, err := session.NewCheckpointer().Apply(checkpoint, sm)
-	if err != nil {
-		return nil, err
-	}
-	h, err := newHarnessBase(opts, sm)
-	if err != nil {
-		return nil, err
-	}
-	h.sessionId = sessionId
-	h.context.Restore(applied.Window)
-	h.pendingToolCalls = applied.PendingToolCalls
-	if err := h.finishInit(ctx, opts.SubAgents); err != nil {
-		return nil, err
-	}
-	return h, nil
 }

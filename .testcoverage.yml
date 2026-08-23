@@ -57,6 +57,7 @@ exclude:
     - cmd/
     - internal/testkit
     - internal/agentbench
+    - internal/temporallive
 
 breakdown-file-name: coverage.breakdown
 

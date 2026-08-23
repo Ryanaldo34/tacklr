@@ -97,8 +97,7 @@ func TestModelSpan_lifecycleAndClassify(t *testing.T) {
 	_, s3 := StartModelSpan(ctx2, ModelPhaseTurn, 0, WindowShape{})
 	s3.End(nil, TokenUsage{})
 
-	// classifyErrorClass direct
-	if classifyErrorClass(nil, 0) != ErrorClassOK {
+	if ClassifyErrorClass(nil, 0) != ErrorClassOK {
 		t.Fatal("ok")
 	}
 }

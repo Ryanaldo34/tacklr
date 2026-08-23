@@ -172,7 +172,7 @@ func TestEval_graphRAGComposition(t *testing.T) {
 	}
 
 	// 2) Promote to expand-safe first-class ids
-	seeds := brain.LandingIDsFromPage(land)
+	seeds := brain.LandingIDs(land.Objects)
 	if len(seeds) == 0 || seeds[0] != deal.ID {
 		// Landing may include only Acme; if multiple Deals match, Acme must be present.
 		if !containsUUID(seeds, deal.ID) {
@@ -186,7 +186,7 @@ func TestEval_graphRAGComposition(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fromCorpus := brain.LandingIDsFromPage(corpusHit)
+	fromCorpus := brain.LandingIDs(corpusHit.Objects)
 	if !containsUUID(fromCorpus, deal.ID) {
 		t.Fatalf("corpus landings must promote to Acme parent: hits=%v landings=%v",
 			titlesOf(corpusHit.Objects), fromCorpus)

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/ryanaldo34/tacklr/vfs"
@@ -79,7 +80,7 @@ func TestDrive_sheetStatAndExportRead(t *testing.T) {
 	api.nodes["sheet1"].export = exportBudgetZip(t)
 
 	ms := mountDrive(t, api, nil, false)
-	doc, err := ms.ReadText(ctx, "/contracts/Budget")
+	doc, err := ms.ReadText(ctx, "/workspace/contracts/Budget")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +88,7 @@ func TestDrive_sheetStatAndExportRead(t *testing.T) {
 	if !ok {
 		t.Fatalf("type %T", doc)
 	}
-	if doc.Path() != "/contracts/Budget" {
+	if doc.Path() != "/workspace/contracts/Budget" {
 		t.Fatalf("path = %s", doc.Path())
 	}
 	if len(td.Sheets()) != 2 {
@@ -115,7 +116,11 @@ func TestDrive_sheetStatAndExportRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ms.Close() })
-	host := filepath.Join(dir, "contracts", "Budget")
+	wst, err := os.Stat(filepath.Join(dir, "workspace"))
+	if err != nil || !wst.IsDir() {
+		t.Fatalf("getattr /workspace = %+v err=%v", wst, err)
+	}
+	host := filepath.Join(dir, "workspace", "contracts", "Budget")
 	hst, err := os.Stat(host)
 	if err != nil {
 		t.Fatal(err)
@@ -126,6 +131,12 @@ func TestDrive_sheetStatAndExportRead(t *testing.T) {
 	got, err := os.ReadFile(host)
 	if err != nil || !strings.Contains(string(got), "# Sheet: Budget") || !strings.Contains(string(got), "42") {
 		t.Fatalf("FUSE cat = %q err=%v", got, err)
+	}
+	if err := os.WriteFile(host, []byte("nope"), 0o644); err == nil {
+		t.Fatal("kernel write: want EROFS")
+	} else if !errors.Is(err, syscall.EROFS) && !errors.Is(err, os.ErrPermission) &&
+		!strings.Contains(err.Error(), "read-only") && !strings.Contains(err.Error(), "EROFS") {
+		t.Fatalf("kernel write err = %v", err)
 	}
 }
 
@@ -148,7 +159,7 @@ func TestDrive_sheetOverlayFormatAndMerge(t *testing.T) {
 	})
 	ms := mountDriveSheets(t, api, nil, sheets, true)
 
-	doc, err := ms.ReadText(ctx, "/contracts/Budget")
+	doc, err := ms.ReadText(ctx, "/workspace/contracts/Budget")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +172,7 @@ func TestDrive_sheetOverlayFormatAndMerge(t *testing.T) {
 	}
 	on, fill, color, align, valign, wrap := true, "#ffcc00", "#003366", "right", "middle", "wrap"
 	num := "$#,##0.00"
-	_, err = ms.Apply(ctx, "/contracts/Budget", vfs.Mutation{
+	_, err = ms.Apply(ctx, "/workspace/contracts/Budget", vfs.Mutation{
 		Rev: vfs.ContentToken(doc), BlockID: "Budget!B2", Body: strPtr("99"),
 		Format: &vfs.FormatPatch{
 			Number: &num, Italic: boolPtr(true), Strike: &on, Underline: &on,
@@ -172,7 +183,7 @@ func TestDrive_sheetOverlayFormatAndMerge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := ms.ReadText(ctx, "/contracts/Budget")
+	got, err := ms.ReadText(ctx, "/workspace/contracts/Budget")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,17 +203,17 @@ func TestDrive_sheetOverlayFormatAndMerge(t *testing.T) {
 		t.Fatalf("formula = %q", formula)
 	}
 
-	mergedDoc, err := ms.ReadText(ctx, "/contracts/Merged")
+	mergedDoc, err := ms.ReadText(ctx, "/workspace/contracts/Merged")
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = ms.Apply(ctx, "/contracts/Merged", vfs.Mutation{
+	_, err = ms.Apply(ctx, "/workspace/contracts/Merged", vfs.Mutation{
 		Rev: vfs.ContentToken(mergedDoc), BlockID: "Merged!B2", Body: strPtr("x"),
 	})
 	if !errors.Is(err, vfs.ErrNotSupported) {
 		t.Fatalf("merge slave: %v", err)
 	}
-	still, err := ms.ReadText(ctx, "/contracts/Merged")
+	still, err := ms.ReadText(ctx, "/workspace/contracts/Merged")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,13 +222,13 @@ func TestDrive_sheetOverlayFormatAndMerge(t *testing.T) {
 	} else if v, _ := g.ReadCell("Merged", "B2"); v != "d" {
 		t.Fatalf("slave write landed: %q", v)
 	}
-	_, err = ms.Apply(ctx, "/contracts/Merged", vfs.Mutation{
+	_, err = ms.Apply(ctx, "/workspace/contracts/Merged", vfs.Mutation{
 		Rev: vfs.ContentToken(still), BlockID: "Merged!A1", Body: strPtr("master"),
 	})
 	if err != nil {
 		t.Fatalf("merge master: %v", err)
 	}
-	after, err := ms.ReadText(ctx, "/contracts/Merged")
+	after, err := ms.ReadText(ctx, "/workspace/contracts/Merged")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,26 +238,26 @@ func TestDrive_sheetOverlayFormatAndMerge(t *testing.T) {
 		t.Fatalf("merge master A1: %q", v)
 	}
 
-	plain := vfs.NewTextDocument("/contracts/Budget", "text/plain", "utf-8", "plain")
+	plain := vfs.NewTextDocument("/workspace/contracts/Budget", "text/plain", "utf-8", "plain")
 	if err := ms.WriteDocument(ctx, plain); !errors.Is(err, vfs.ErrNotSupported) {
 		t.Fatalf("identity WriteDocument: %v", err)
 	}
-	if err := ms.WriteFile(ctx, "/contracts/Budget", []byte("x")); !errors.Is(err, vfs.ErrNotSupported) {
+	if err := ms.WriteFile(ctx, "/workspace/contracts/Budget", []byte("x")); !errors.Is(err, vfs.ErrNotSupported) {
 		t.Fatalf("PutFile native: %v", err)
 	}
 
 	rev := vfs.ContentToken(got)
-	if _, err := ms.Apply(ctx, "/contracts/Budget", vfs.Mutation{
+	if _, err := ms.Apply(ctx, "/workspace/contracts/Budget", vfs.Mutation{
 		Rev: rev, BlockID: "Budget!A1:C3", Body: strPtr("x"),
 	}); !errors.Is(err, vfs.ErrNotSupported) {
 		t.Fatalf("range write: %v", err)
 	}
-	if _, err := ms.Apply(ctx, "/contracts/Budget", vfs.Mutation{
+	if _, err := ms.Apply(ctx, "/workspace/contracts/Budget", vfs.Mutation{
 		Rev: rev, BlockID: "Budget", Body: strPtr("x"),
 	}); !errors.Is(err, vfs.ErrNotSupported) {
 		t.Fatalf("sheet replace: %v", err)
 	}
-	if _, err := ms.Apply(ctx, "/contracts/Budget", vfs.Mutation{
+	if _, err := ms.Apply(ctx, "/workspace/contracts/Budget", vfs.Mutation{
 		Rev: rev, Blocks: []vfs.Block{{Kind: vfs.BlockKindSheet, Text: "A\tB"}},
 	}); !errors.Is(err, vfs.ErrNotSupported) {
 		t.Fatalf("blocks replace: %v", err)
@@ -261,7 +272,7 @@ func TestDrive_sheetCheckoutTooLarge(t *testing.T) {
 		row[i] = vfs.Cell{Input: "x", Value: "x"}
 	}
 	ms := mountDriveSheets(t, api, nil, seedSheets("sheet1", []vfs.Sheet{{ID: "1", Title: "Budget", Cells: [][]vfs.Cell{row}}}, nil), true)
-	if _, err := ms.ReadText(ctx, "/contracts/Budget"); !errors.Is(err, vfs.ErrTooLarge) {
+	if _, err := ms.ReadText(ctx, "/workspace/contracts/Budget"); !errors.Is(err, vfs.ErrTooLarge) {
 		t.Fatalf("checkout cap: %v", err)
 	}
 }

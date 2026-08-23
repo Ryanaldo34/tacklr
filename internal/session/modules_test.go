@@ -73,7 +73,7 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 		t.Fatal("VFS field must hold the host mount table")
 	}
 
-	cp, err := session.NewCheckpointer().Capture(
+	cp, err := session.CaptureCheckpoint(
 		[]*streaming.Message{{Role: streaming.RoleUser, Content: "go"}},
 		sm, nil,
 	)
@@ -89,7 +89,7 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 
 	// In-process Apply: typed park/permission maps + SearchContext blob.
 	smTyped := session.NewSessionManager()
-	if _, err := session.NewCheckpointer().Apply(*cp, smTyped); err != nil {
+	if _, err := session.ApplyCheckpoint(*cp, smTyped); err != nil {
 		t.Fatal(err)
 	}
 	assertModules(t, smTyped, ns, "spawn_1", "researcher")
@@ -105,19 +105,19 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 	}
 
 	sm2 := session.NewSessionManager()
-	if _, err := session.NewCheckpointer().Apply(wire, sm2); err != nil {
+	if _, err := session.ApplyCheckpoint(wire, sm2); err != nil {
 		t.Fatal(err)
 	}
 	assertModules(t, sm2, ns, "spawn_1", "researcher")
 
 	sm2.DeleteParkedWorker("spawn_1")
 	sm2.SetParkedWorker("spawn_2", session.ParkedWorkerMeta{WorkerName: "writer", Task: "draft"})
-	cp2, err := session.NewCheckpointer().Capture(nil, sm2, nil)
+	cp2, err := session.CaptureCheckpoint(nil, sm2, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	sm3 := session.NewSessionManager()
-	if _, err := session.NewCheckpointer().Apply(*cp2, sm3); err != nil {
+	if _, err := session.ApplyCheckpoint(*cp2, sm3); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := sm3.ParkedWorker("spawn_1"); ok {
@@ -141,7 +141,7 @@ func TestTypedCheckpoint_rejectsNamedModuleWithoutPartialApply(t *testing.T) {
 	// Arrange
 	source := session.NewSessionManager()
 	source.Plan.SetDocument("source")
-	checkpoint, err := session.NewCheckpointer().Capture(
+	checkpoint, err := session.CaptureCheckpoint(
 		[]*streaming.Message{{Role: streaming.RoleUser, Content: "go"}},
 		source,
 		nil,
@@ -154,7 +154,7 @@ func TestTypedCheckpoint_rejectsNamedModuleWithoutPartialApply(t *testing.T) {
 	target.Plan.SetDocument("target")
 
 	// Act
-	_, err = session.NewCheckpointer().Apply(cp, target)
+	_, err = session.ApplyCheckpoint(cp, target)
 
 	// Assert
 	if err == nil || target.Plan.Document() != "target" {
@@ -165,7 +165,7 @@ func TestTypedCheckpoint_rejectsNamedModuleWithoutPartialApply(t *testing.T) {
 func TestTypedCheckpoint_rejectsCorruptModuleSections(t *testing.T) {
 	// Arrange
 	source := session.NewSessionManager()
-	checkpoint, err := session.NewCheckpointer().Capture(
+	checkpoint, err := session.CaptureCheckpoint(
 		[]*streaming.Message{{Role: streaming.RoleUser, Content: "go"}},
 		source,
 		nil,
@@ -186,7 +186,7 @@ func TestTypedCheckpoint_rejectsCorruptModuleSections(t *testing.T) {
 			wire := checkpoint.WithModule(module, raw)
 			target := session.NewSessionManager()
 			target.Plan.SetDocument("target")
-			if _, err := session.NewCheckpointer().Apply(wire, target); err == nil {
+			if _, err := session.ApplyCheckpoint(wire, target); err == nil {
 				t.Fatalf("module %q was accepted", module)
 			}
 			if target.Plan.Document() != "target" {
@@ -202,7 +202,7 @@ func TestTypedCheckpoint_rejectsCorruptUserState(t *testing.T) {
 	if err := source.StateSet("keep", "user"); err != nil {
 		t.Fatal(err)
 	}
-	checkpoint, err := session.NewCheckpointer().Capture(
+	checkpoint, err := session.CaptureCheckpoint(
 		[]*streaming.Message{{Role: streaming.RoleUser, Content: "go"}},
 		source,
 		nil,
@@ -214,7 +214,7 @@ func TestTypedCheckpoint_rejectsCorruptUserState(t *testing.T) {
 	target := session.NewSessionManager()
 
 	// Act
-	_, err = session.NewCheckpointer().Apply(cp, target)
+	_, err = session.ApplyCheckpoint(cp, target)
 
 	// Assert
 	if err == nil {

@@ -730,7 +730,7 @@ func (s *OpenAIInferenceStrategy) emitOutputItemComplete(raw json.RawMessage, ev
 		// Refusal-only completed message → terminal stop reason, not end_turn.
 		if isRefusalMessage(msg.Content) {
 			text := refusalText(msg.Content)
-			err := tacklr.WrapStopReason(tacklr.ErrModelRefused, fmt.Errorf("%s", text))
+			err := fmt.Errorf("%w: %s", tacklr.ErrModelRefused, text)
 			events <- tacklr.LLMResponseChunk{
 				Type:       tacklr.StreamEventError,
 				MessageId:  msg.ID,

@@ -1107,11 +1107,9 @@ func TestBackgroundJobs_resumeInterruptedJobReportsMissingParkState(t *testing.T
 }
 
 func TestBackgroundJobs_resumeInterruptedJobReportsMissingWorkerSpec(t *testing.T) {
-	store := testStore(t)
 	h := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  &mockStrategy{},
-		Store:  store,
 		SubAgents: []*SubAgent{
 			{WorkerName: "researcher", Model: &mockStrategy{}},
 		},

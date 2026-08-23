@@ -248,7 +248,7 @@ func KindSpecFromObjectKind(k ObjectKind) (KindSpec, error) {
 
 // KindInfoFromSpec builds the agent-facing schema payload for one kind.
 func KindInfoFromSpec(spec KindSpec) ObjectKindInfo {
-	return KindInfoFrom(objectKindFromNormalized(spec))
+	return ObjectKindInfo(objectKindFromNormalized(spec))
 }
 
 // KindRegistry is KindReader + KindWriter for durable kind schemas.

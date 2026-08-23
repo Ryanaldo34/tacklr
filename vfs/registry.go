@@ -19,6 +19,11 @@ type SkillSource interface {
 	SkillMember() (MountSpec, bool)
 }
 
+// TokenSource is an optional ProviderFactory that reads user tokens from SessionAuth.
+type TokenSource interface {
+	TokenAuth() *SessionAuth
+}
+
 // BackendRegistry maps profile ids to factories (and thus to pooled clients).
 // Hosts Register factories; MountSession opens them. Open is not part of the
 // host-facing API.
@@ -45,6 +50,47 @@ func (r *BackendRegistry) Register(factory ProviderFactory) error {
 	r.factories[id] = factory
 	r.mu.Unlock()
 	return nil
+}
+
+// BindSession applies work-item bindings onto factories that hold SessionAuth.
+func (r *BackendRegistry) BindSession(sessionID string, bindings []Binding) error {
+	var first error
+	r.eachTokenAuth(func(a *SessionAuth) {
+		for _, b := range bindings {
+			if err := a.Bind(sessionID, b); err != nil && first == nil {
+				first = err
+			}
+		}
+	})
+	return first
+}
+
+// ClearSession drops session tokens from factories that hold SessionAuth.
+func (r *BackendRegistry) ClearSession(sessionID string) {
+	r.eachTokenAuth(func(a *SessionAuth) {
+		a.Clear(sessionID)
+	})
+}
+
+func (r *BackendRegistry) eachTokenAuth(fn func(*SessionAuth)) {
+	seen := make(map[*SessionAuth]struct{})
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, f := range r.factories {
+		src, ok := f.(TokenSource)
+		if !ok {
+			continue
+		}
+		a := src.TokenAuth()
+		if a == nil {
+			continue
+		}
+		if _, dup := seen[a]; dup {
+			continue
+		}
+		seen[a] = struct{}{}
+		fn(a)
+	}
 }
 
 // HasProfile reports whether a factory is registered under id.
@@ -105,6 +151,9 @@ func (r *BackendRegistry) skillMembers() []MountSpec {
 
 func (r *BackendRegistry) open(ctx context.Context, sessionID string, spec MountSpec) (Provider, error) {
 	if len(spec.Members) > 0 {
+		if isWorkspaceSpec(spec) {
+			return r.openWorkspace(ctx, sessionID, spec)
+		}
 		return r.openUnion(ctx, sessionID, spec)
 	}
 	if spec.Profile == "" {

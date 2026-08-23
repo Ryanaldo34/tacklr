@@ -33,8 +33,3 @@ func LandingIDs(objects []RichObject) []uuid.UUID {
 	}
 	return out
 }
-
-// LandingIDsFromPage is LandingIDs(page.Objects).
-func LandingIDsFromPage(page SearchPage) []uuid.UUID {
-	return LandingIDs(page.Objects)
-}

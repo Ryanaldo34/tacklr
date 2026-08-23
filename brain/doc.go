@@ -72,7 +72,7 @@
 // GraphRAG-style composition (host-agnostic):
 //
 //	find_objects (entity land; filters via schema filterable_fields)
-//	  or search/find_exact (corpus) → LandingIDs / LandingIDsFromPage (parent promote)
+//	  or search/find_exact (corpus) → LandingIDs (parent promote)
 //	→ expand / ExpandMany (max_hops, direction, WantContainment)
 //	  or ExpandByRecipe (host-named ExpandRequest template) → hydrate Postgres
 //	→ optional find_links (edge text) for relationship-first land

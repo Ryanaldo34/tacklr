@@ -1,11 +1,9 @@
 package server
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,23 +11,94 @@ import (
 	"time"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/interrupt"
 )
 
-// scanStdioLines reads newline-delimited frames. A large buffer avoids pipe
-// deadlock when the test writes JSON-RPC replies while session/update frames
-// are still arriving. Callers still select with a deadline.
-func scanStdioLines(r io.Reader) <-chan string {
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	ch := make(chan string, 4096)
-	go func() {
-		defer close(ch)
-		for sc.Scan() {
-			ch <- sc.Text()
+// acpRPC is an in-process ACP connection: HandleInbound plus ClientBridge
+// for mid-turn client RPC (request_permission / elicitation).
+type acpRPC struct {
+	t      *testing.T
+	ctx    context.Context
+	proto  Protocol
+	env    ProtocolEnv
+	bridge *ClientBridge
+	ch     chan []byte
+}
+
+type chanWriter struct{ ch chan []byte }
+
+func (w *chanWriter) WriteFrame(data []byte) error {
+	w.ch <- append([]byte(nil), data...)
+	return nil
+}
+
+func (w *chanWriter) WriteResult(id json.RawMessage, result any) error {
+	b, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "result": result})
+	if err != nil {
+		return err
+	}
+	w.ch <- b
+	return nil
+}
+
+func (w *chanWriter) WriteError(id json.RawMessage, err error) error {
+	b, mErr := json.Marshal(jsonRPCErrorBody(id, err))
+	if mErr != nil {
+		return mErr
+	}
+	w.ch <- b
+	return nil
+}
+
+func newACPRPC(ctx context.Context, t *testing.T, srv *Server) *acpRPC {
+	t.Helper()
+	ch := make(chan []byte, 64)
+	w := &chanWriter{ch: ch}
+	bridge := NewClientBridge(w)
+	return &acpRPC{
+		t: t, ctx: ctx, proto: srv.Protocols[0], bridge: bridge, ch: ch,
+		env: ProtocolEnv{Runtime: srv.Runtime, Catalog: srv.Catalog, Conn: &Conn{Writer: w, RPC: bridge}},
+	}
+}
+
+func (c *acpRPC) write(s string) {
+	c.t.Helper()
+	var peek struct {
+		Method string `json:"method"`
+	}
+	_ = json.Unmarshal([]byte(s), &peek)
+	if peek.Method == "" {
+		if !c.bridge.TryCompleteResponse([]byte(s)) {
+			c.t.Fatalf("rpc response not matched: %s", s)
 		}
-	}()
-	return ch
+		return
+	}
+	body := []byte(s)
+	if peek.Method == "session/prompt" {
+		go func() { _ = c.proto.HandleInbound(c.ctx, c.env, body) }()
+		return
+	}
+	if err := c.proto.HandleInbound(c.ctx, c.env, body); err != nil {
+		c.t.Logf("inbound: %v", err)
+	}
+}
+
+func (c *acpRPC) frame() map[string]any {
+	c.t.Helper()
+	select {
+	case <-c.ctx.Done():
+		c.t.Fatal("context done before prompt completed")
+	case raw := <-c.ch:
+		var frame map[string]any
+		if err := json.Unmarshal(raw, &frame); err != nil {
+			c.t.Fatalf("bad frame %q: %v", raw, err)
+		}
+		return frame
+	case <-time.After(4 * time.Second):
+		c.t.Fatal("timed out waiting for server frame")
+	}
+	return nil
 }
 
 // TestACP_elicitationForm_resolvesInterruptAndCompletes is the mid-turn
@@ -65,42 +134,14 @@ func TestACP_elicitationForm_resolvesInterruptAndCompletes(t *testing.T) {
 		},
 	}
 
-	r := newTestRegistry(testStore(t), strategy, []*tacklr.Tool{interruptTool})
-	srv := NewServer(r, NewACPProtocol(NewMemoryWireStore()))
-
-	// server reads serverIn; client writes clientToServer
-	serverIn, clientToServer := io.Pipe()
-	// client reads clientFromServer; server writes serverOut
-	clientFromServer, serverOut := io.Pipe()
+	r := newTestKernel(t, strategy, durable.AgentSpec{Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{interruptTool}}})
+	srv := NewServer(r.Runtime, r.Catalog, NewACPProtocol(NewMemoryWireStore()))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
-
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- srv.ServeStdio(ctx, serverIn, serverOut)
-	}()
-	t.Cleanup(func() {
-		_ = clientToServer.Close()
-		_ = serverIn.Close()
-		_ = clientFromServer.Close()
-		_ = serverOut.Close()
-		cancel()
-		select {
-		case <-errCh:
-		case <-time.After(time.Second):
-		}
-	})
-
-	writeLine := func(s string) {
-		t.Helper()
-		if _, err := io.WriteString(clientToServer, s+"\n"); err != nil {
-			t.Fatalf("write client→server: %v", err)
-		}
-	}
-
-	scanner := bufio.NewScanner(clientFromServer)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	rpc := newACPRPC(ctx, t, srv)
+	writeLine := rpc.write
+	readFrame := rpc.frame
 
 	var (
 		sessionID       string
@@ -114,40 +155,7 @@ func TestACP_elicitationForm_resolvesInterruptAndCompletes(t *testing.T) {
 		sessionReqSent  bool
 	)
 
-	// Initialize first so client Caps are on the bridge before session/prompt
-	// is dispatched (stdio handlers run concurrently per inbound line).
 	writeLine(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"elicitation":{"form":{}}}}}`)
-
-	readFrame := func() map[string]any {
-		t.Helper()
-		lineCh := make(chan string, 1)
-		errCh := make(chan error, 1)
-		go func() {
-			if scanner.Scan() {
-				lineCh <- scanner.Text()
-				return
-			}
-			errCh <- scanner.Err()
-		}()
-		select {
-		case <-ctx.Done():
-			t.Fatal("context done before prompt completed")
-		case err := <-errCh:
-			if err != nil {
-				t.Fatalf("scan: %v", err)
-			}
-			t.Fatal("server closed stdout early")
-		case line := <-lineCh:
-			var frame map[string]any
-			if err := json.Unmarshal([]byte(line), &frame); err != nil {
-				t.Fatalf("bad frame %q: %v", line, err)
-			}
-			return frame
-		case <-time.After(4 * time.Second):
-			t.Fatal("timed out waiting for server frame")
-		}
-		return nil
-	}
 
 	for !promptDone {
 		frame := readFrame()
@@ -263,43 +271,16 @@ func TestACP_requestPermission_allowsToolAndCompletes(t *testing.T) {
 		},
 	}
 
-	r := newTestRegistry(testStore(t), strategy, []*tacklr.Tool{sensitive})
-	srv := NewServer(r, NewACPProtocol(NewMemoryWireStore()))
-
-	serverIn, clientToServer := io.Pipe()
-	clientFromServer, serverOut := io.Pipe()
+	r := newTestKernel(t, strategy, durable.AgentSpec{Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{sensitive}}})
+	srv := NewServer(r.Runtime, r.Catalog, NewACPProtocol(NewMemoryWireStore()))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
-
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- srv.ServeStdio(ctx, serverIn, serverOut)
-	}()
-	t.Cleanup(func() {
-		_ = clientToServer.Close()
-		_ = serverIn.Close()
-		_ = clientFromServer.Close()
-		_ = serverOut.Close()
-		cancel()
-		select {
-		case <-errCh:
-		case <-time.After(time.Second):
-		}
-	})
-
-	writeLine := func(s string) {
-		t.Helper()
-		if _, err := io.WriteString(clientToServer, s+"\n"); err != nil {
-			t.Fatalf("write: %v", err)
-		}
-	}
-	// No elicitation needed; request_permission uses the client RPC bridge.
+	rpc := newACPRPC(ctx, t, srv)
+	writeLine := rpc.write
+	readFrame := rpc.frame
 	writeLine(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}`)
 	writeLine(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp"}}`)
-
-	scanner := bufio.NewScanner(clientFromServer)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
 	var (
 		sessionID     string
@@ -310,37 +291,6 @@ func TestACP_requestPermission_allowsToolAndCompletes(t *testing.T) {
 		promptDone    bool
 		promptSent    bool
 	)
-
-	readFrame := func() map[string]any {
-		t.Helper()
-		lineCh := make(chan string, 1)
-		errCh := make(chan error, 1)
-		go func() {
-			if scanner.Scan() {
-				lineCh <- scanner.Text()
-				return
-			}
-			errCh <- scanner.Err()
-		}()
-		select {
-		case <-ctx.Done():
-			t.Fatal("context done before prompt completed")
-		case err := <-errCh:
-			if err != nil {
-				t.Fatalf("scan: %v", err)
-			}
-			t.Fatal("server closed stdout early")
-		case line := <-lineCh:
-			var frame map[string]any
-			if err := json.Unmarshal([]byte(line), &frame); err != nil {
-				t.Fatalf("bad frame %q: %v", line, err)
-			}
-			return frame
-		case <-time.After(4 * time.Second):
-			t.Fatal("timed out waiting for server frame")
-		}
-		return nil
-	}
 
 	for !promptDone {
 		frame := readFrame()
@@ -444,42 +394,16 @@ func TestACP_requestPermission_rejectFailsToolAndCompletes(t *testing.T) {
 		},
 	}
 
-	r := newTestRegistry(testStore(t), strategy, []*tacklr.Tool{sensitive})
-	srv := NewServer(r, NewACPProtocol(NewMemoryWireStore()))
-
-	serverIn, clientToServer := io.Pipe()
-	clientFromServer, serverOut := io.Pipe()
+	r := newTestKernel(t, strategy, durable.AgentSpec{Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{sensitive}}})
+	srv := NewServer(r.Runtime, r.Catalog, NewACPProtocol(NewMemoryWireStore()))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
-
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- srv.ServeStdio(ctx, serverIn, serverOut)
-	}()
-	t.Cleanup(func() {
-		_ = clientToServer.Close()
-		_ = serverIn.Close()
-		_ = clientFromServer.Close()
-		_ = serverOut.Close()
-		cancel()
-		select {
-		case <-errCh:
-		case <-time.After(time.Second):
-		}
-	})
-
-	writeLine := func(s string) {
-		t.Helper()
-		if _, err := io.WriteString(clientToServer, s+"\n"); err != nil {
-			t.Fatalf("write: %v", err)
-		}
-	}
+	rpc := newACPRPC(ctx, t, srv)
+	writeLine := rpc.write
+	readFrame := rpc.frame
 	writeLine(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}`)
 	writeLine(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp"}}`)
-
-	scanner := bufio.NewScanner(clientFromServer)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
 	var (
 		sessionID     string
@@ -490,37 +414,6 @@ func TestACP_requestPermission_rejectFailsToolAndCompletes(t *testing.T) {
 		promptDone    bool
 		promptSent    bool
 	)
-
-	readFrame := func() map[string]any {
-		t.Helper()
-		lineCh := make(chan string, 1)
-		errCh := make(chan error, 1)
-		go func() {
-			if scanner.Scan() {
-				lineCh <- scanner.Text()
-				return
-			}
-			errCh <- scanner.Err()
-		}()
-		select {
-		case <-ctx.Done():
-			t.Fatal("context done before prompt completed")
-		case err := <-errCh:
-			if err != nil {
-				t.Fatalf("scan: %v", err)
-			}
-			t.Fatal("server closed stdout early")
-		case line := <-lineCh:
-			var frame map[string]any
-			if err := json.Unmarshal([]byte(line), &frame); err != nil {
-				t.Fatalf("bad frame %q: %v", line, err)
-			}
-			return frame
-		case <-time.After(4 * time.Second):
-			t.Fatal("timed out waiting for server frame")
-		}
-		return nil
-	}
 
 	for !promptDone {
 		frame := readFrame()
@@ -612,59 +505,20 @@ func TestACP_requestPermission_cancelledEndsPrompt(t *testing.T) {
 			ch <- tacklr.LLMResponseChunk{IsComplete: true}
 		},
 	}
-	r := newTestRegistry(testStore(t), strategy, []*tacklr.Tool{sensitive})
-	srv := NewServer(r, NewACPProtocol(NewMemoryWireStore()))
+	r := newTestKernel(t, strategy, durable.AgentSpec{Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{sensitive}}})
+	srv := NewServer(r.Runtime, r.Catalog, NewACPProtocol(NewMemoryWireStore()))
 
-	serverIn, clientToServer := io.Pipe()
-	clientFromServer, serverOut := io.Pipe()
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
-	errCh := make(chan error, 1)
-	go func() { errCh <- srv.ServeStdio(ctx, serverIn, serverOut) }()
-	t.Cleanup(func() {
-		_ = clientToServer.Close()
-		_ = serverIn.Close()
-		_ = clientFromServer.Close()
-		_ = serverOut.Close()
-		cancel()
-		select {
-		case <-errCh:
-		case <-time.After(time.Second):
-		}
-	})
-
-	write := func(s string) {
-		if _, err := io.WriteString(clientToServer, s+"\n"); err != nil {
-			t.Fatalf("write: %v", err)
-		}
-	}
+	rpc := newACPRPC(ctx, t, srv)
+	write := rpc.write
 	write(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}`)
 	write(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp"}}`)
-
-	scanner := bufio.NewScanner(clientFromServer)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	var sessionID string
 	var sawPermission, promptSent, promptDone, sawError bool
 
 	for !promptDone {
-		lineCh := make(chan string, 1)
-		go func() {
-			if scanner.Scan() {
-				lineCh <- scanner.Text()
-			}
-		}()
-		var line string
-		select {
-		case <-ctx.Done():
-			t.Fatal("timeout")
-		case line = <-lineCh:
-		case <-time.After(4 * time.Second):
-			t.Fatal("frame timeout")
-		}
-		var frame map[string]any
-		if err := json.Unmarshal([]byte(line), &frame); err != nil {
-			t.Fatal(err)
-		}
+		frame := rpc.frame()
 		if res, ok := frame["result"].(map[string]any); ok {
 			if sid, ok := res["sessionId"].(string); ok && sid != "" {
 				sessionID = sid
@@ -699,7 +553,7 @@ func TestACP_requestPermission_cancelledEndsPrompt(t *testing.T) {
 
 // TestACP_elicitationForm_declineEndsPrompt: client declines form → turn errors, no resume invoke.
 // Initialize must complete before session/prompt so form caps are on the bridge
-// (stdio handlers run concurrently; racing prompt without caps parks the interrupt).
+
 func TestACP_elicitationForm_declineEndsPrompt(t *testing.T) {
 	optionsJSON := `[{"title":"A","description":"","isRecommended":true},{"title":"B","description":"","isRecommended":false}]`
 	interruptTool := tacklr.NewTool(tacklr.ToolConfig{
@@ -719,58 +573,15 @@ func TestACP_elicitationForm_declineEndsPrompt(t *testing.T) {
 			ch <- tacklr.LLMResponseChunk{IsComplete: true}
 		},
 	}
-	r := newTestRegistry(testStore(t), strategy, []*tacklr.Tool{interruptTool})
-	srv := NewServer(r, NewACPProtocol(NewMemoryWireStore()))
-	serverIn, clientToServer := io.Pipe()
-	clientFromServer, serverOut := io.Pipe()
+	r := newTestKernel(t, strategy, durable.AgentSpec{Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{interruptTool}}})
+	srv := NewServer(r.Runtime, r.Catalog, NewACPProtocol(NewMemoryWireStore()))
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()
-	errCh := make(chan error, 1)
-	go func() { errCh <- srv.ServeStdio(ctx, serverIn, serverOut) }()
-	t.Cleanup(func() {
-		_ = clientToServer.Close()
-		_ = serverIn.Close()
-		_ = clientFromServer.Close()
-		_ = serverOut.Close()
-		cancel()
-		select {
-		case <-errCh:
-		case <-time.After(time.Second):
-		}
-	})
+	rpc := newACPRPC(ctx, t, srv)
+	writeLine := rpc.write
+	readFrame := rpc.frame
 
-	writeLine := func(s string) {
-		t.Helper()
-		if _, err := io.WriteString(clientToServer, s+"\n"); err != nil {
-			t.Fatalf("write: %v", err)
-		}
-	}
-	scanner := bufio.NewScanner(clientFromServer)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	readFrame := func() map[string]any {
-		t.Helper()
-		lineCh := make(chan string, 1)
-		go func() {
-			if scanner.Scan() {
-				lineCh <- scanner.Text()
-			}
-		}()
-		select {
-		case <-ctx.Done():
-			t.Fatal("context done before elicitation decline completed")
-		case line := <-lineCh:
-			var frame map[string]any
-			if err := json.Unmarshal([]byte(line), &frame); err != nil {
-				t.Fatalf("bad frame %q: %v", line, err)
-			}
-			return frame
-		case <-time.After(5 * time.Second):
-			t.Fatal("timed out waiting for server frame")
-		}
-		return nil
-	}
-
-	// Caps on bridge before prompt (same ordering as cancel/success elicitation tests).
+	// Caps on bridge before prompt.
 	writeLine(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"elicitation":{"form":{}}}}}`)
 	var initDone, sessionReqSent, promptSent, sawDeclinePath bool
 	var sessionID string
@@ -815,7 +626,7 @@ func TestACP_elicitationForm_declineEndsPrompt(t *testing.T) {
 
 // TestACP_elicitationForm_cancelEndsPrompt: client cancels form → turn ends with error.
 // Initialize must complete before session/prompt so form caps are on the bridge
-// (stdio handlers run concurrently; racing prompt without caps parks the interrupt).
+
 func TestACP_elicitationForm_cancelEndsPrompt(t *testing.T) {
 	optionsJSON := `[{"title":"A","description":"","isRecommended":true},{"title":"B","description":"","isRecommended":false}]`
 	interruptTool := tacklr.NewTool(tacklr.ToolConfig{
@@ -833,58 +644,15 @@ func TestACP_elicitationForm_cancelEndsPrompt(t *testing.T) {
 			ch <- tacklr.LLMResponseChunk{IsComplete: true}
 		},
 	}
-	r := newTestRegistry(testStore(t), strategy, []*tacklr.Tool{interruptTool})
-	srv := NewServer(r, NewACPProtocol(NewMemoryWireStore()))
-	serverIn, clientToServer := io.Pipe()
-	clientFromServer, serverOut := io.Pipe()
+	r := newTestKernel(t, strategy, durable.AgentSpec{Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{interruptTool}}})
+	srv := NewServer(r.Runtime, r.Catalog, NewACPProtocol(NewMemoryWireStore()))
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()
-	errCh := make(chan error, 1)
-	go func() { errCh <- srv.ServeStdio(ctx, serverIn, serverOut) }()
-	t.Cleanup(func() {
-		_ = clientToServer.Close()
-		_ = serverIn.Close()
-		_ = clientFromServer.Close()
-		_ = serverOut.Close()
-		cancel()
-		select {
-		case <-errCh:
-		case <-time.After(time.Second):
-		}
-	})
+	rpc := newACPRPC(ctx, t, srv)
+	writeLine := rpc.write
+	readFrame := rpc.frame
 
-	writeLine := func(s string) {
-		t.Helper()
-		if _, err := io.WriteString(clientToServer, s+"\n"); err != nil {
-			t.Fatalf("write: %v", err)
-		}
-	}
-	scanner := bufio.NewScanner(clientFromServer)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	readFrame := func() map[string]any {
-		t.Helper()
-		lineCh := make(chan string, 1)
-		go func() {
-			if scanner.Scan() {
-				lineCh <- scanner.Text()
-			}
-		}()
-		select {
-		case <-ctx.Done():
-			t.Fatal("context done before elicitation cancel completed")
-		case line := <-lineCh:
-			var frame map[string]any
-			if err := json.Unmarshal([]byte(line), &frame); err != nil {
-				t.Fatalf("bad frame %q: %v", line, err)
-			}
-			return frame
-		case <-time.After(5 * time.Second):
-			t.Fatal("timed out waiting for server frame")
-		}
-		return nil
-	}
-
-	// Caps on bridge before prompt (same ordering as successful elicitation test).
+	// Caps on bridge before prompt.
 	writeLine(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"elicitation":{"form":{}}}}}`)
 	var initDone, sessionReqSent, promptSent, sawCancel bool
 	var sessionID string
@@ -952,58 +720,41 @@ func TestACP_elicitation_malformedInterruptEndsTurn(t *testing.T) {
 			ch <- tacklr.LLMResponseChunk{IsComplete: true}
 		},
 	}
-	r := newTestRegistry(testStore(t), strategy, []*tacklr.Tool{interruptTool})
-	srv := NewServer(r, NewACPProtocol(NewMemoryWireStore()))
-	serverIn, clientToServer := io.Pipe()
-	clientFromServer, serverOut := io.Pipe()
+	r := newTestKernel(t, strategy, durable.AgentSpec{Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{interruptTool}}})
+	srv := NewServer(r.Runtime, r.Catalog, NewACPProtocol(NewMemoryWireStore()))
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
-	go func() { _ = srv.ServeStdio(ctx, serverIn, serverOut) }()
-	t.Cleanup(func() {
-		_ = clientToServer.Close()
-		cancel()
-	})
-	write := func(s string) {
-		if _, err := io.WriteString(clientToServer, s+"\n"); err != nil {
-			t.Fatal(err)
-		}
-	}
+	rpc := newACPRPC(ctx, t, srv)
+	write := rpc.write
 	write(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"elicitation":{"form":{}}}}}`)
 	write(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp"}}`)
-	lines := scanStdioLines(clientFromServer)
 	var sessionID string
 	var sawErr bool
 	deadline := time.After(5 * time.Second)
 	for !sawErr {
+		var frame map[string]any
 		select {
 		case <-deadline:
-			// Turn may finish via stream error without JSON-RPC error id 12.
 			t.Log("no JSON-RPC error id=12 within deadline; soft pass for malformed elicitation path")
 			return
-		case line, ok := <-lines:
-			if !ok {
-				return
+		case raw := <-rpc.ch:
+			_ = json.Unmarshal(raw, &frame)
+		}
+		if res, ok := frame["result"].(map[string]any); ok {
+			if sid, _ := res["sessionId"].(string); sid != "" {
+				sessionID = sid
+				write(`{"jsonrpc":"2.0","id":12,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"q"}]}}`)
 			}
-			var frame map[string]any
-			_ = json.Unmarshal([]byte(line), &frame)
-			if res, ok := frame["result"].(map[string]any); ok {
-				if sid, _ := res["sessionId"].(string); sid != "" {
-					sessionID = sid
-					write(`{"jsonrpc":"2.0","id":12,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"q"}]}}`)
-				}
-			}
-			// elicitation should not succeed with <2 options — error path instead
-			if errObj, ok := frame["error"].(map[string]any); ok && idMatch(frame["id"], 12) {
-				sawErr = true
-				_ = errObj
-			}
+		}
+		if errObj, ok := frame["error"].(map[string]any); ok && idMatch(frame["id"], 12) {
+			sawErr = true
+			_ = errObj
 		}
 	}
 }
 
 // TestACP_createPlan_streamsPlanUpdate: create_plan streams plan sessionUpdate over ACP.
 func TestACP_createPlan_streamsPlanUpdate(t *testing.T) {
-	store := testStore(t)
 	var n int
 	strategy := &mockInferenceStrategy{
 		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
@@ -1018,7 +769,7 @@ func TestACP_createPlan_streamsPlanUpdate(t *testing.T) {
 			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "planned", IsComplete: true}
 		},
 	}
-	r := newTestRegistry(store, strategy, nil)
+	r := newTestKernel(t, strategy, durable.AgentSpec{})
 	recNew := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
 	sessionID := acpSessionID(t, recNew)
 	rec := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"`+sessionID+`","prompt":[{"type":"text","text":"plan it"}]}}`)
@@ -1048,7 +799,6 @@ func TestACP_createPlan_streamsPlanUpdate(t *testing.T) {
 // checkpoints, then a second session/prompt loads the store and list_plan shows
 // restored statuses.
 func TestACP_sessionCheckpoint_secondPromptContinuesPlan(t *testing.T) {
-	store := testStore(t)
 	var mu sync.Mutex
 	phase := "turn1"
 	var turn1Steps, turn2Steps int
@@ -1090,15 +840,15 @@ func TestACP_sessionCheckpoint_secondPromptContinuesPlan(t *testing.T) {
 		},
 	}
 
-	r := newTestRegistry(store, strategy, nil)
-	srv := NewServer(r, NewACPProtocol(NewMemoryWireStore()))
+	r := newTestKernel(t, strategy, durable.AgentSpec{})
+	srv := NewServer(r.Runtime, r.Catalog, NewACPProtocol(NewMemoryWireStore()))
 
 	recNew := &recordingMessageWriter{}
-	srv.HandleMessage(context.Background(), []byte(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`), recNew)
+	srv.inbound(context.Background(), []byte(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`), recNew)
 	sessionID := recNew.Results[0].Result.(map[string]any)["sessionId"].(string)
 
 	rec1 := &recordingMessageWriter{}
-	srv.HandleMessage(context.Background(), []byte(`{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"`+sessionID+`","prompt":[{"type":"text","text":"do the plan"}]}}`), rec1)
+	srv.inbound(context.Background(), []byte(`{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"`+sessionID+`","prompt":[{"type":"text","text":"do the plan"}]}}`), rec1)
 	if len(rec1.Errors) > 0 {
 		t.Fatalf("turn1 errors: %#v", rec1.Errors)
 	}
@@ -1108,7 +858,7 @@ func TestACP_sessionCheckpoint_secondPromptContinuesPlan(t *testing.T) {
 	mu.Unlock()
 
 	rec2 := &recordingMessageWriter{}
-	srv.HandleMessage(context.Background(), []byte(`{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"`+sessionID+`","prompt":[{"type":"text","text":"continue"}]}}`), rec2)
+	srv.inbound(context.Background(), []byte(`{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"`+sessionID+`","prompt":[{"type":"text","text":"continue"}]}}`), rec2)
 	if len(rec2.Errors) > 0 {
 		t.Fatalf("turn2 errors: %#v", rec2.Errors)
 	}

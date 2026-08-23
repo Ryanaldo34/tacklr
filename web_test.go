@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/ryanaldo34/tacklr/internal/exa"
-	"github.com/ryanaldo34/tacklr/stores"
 )
 
 func newExaTestClient(t *testing.T, handler http.HandlerFunc) *exa.Client {
@@ -96,9 +95,7 @@ func TestWebSearchTool_invokeAgainstServer(t *testing.T) {
 		t.Fatalf("text mode: %q err=%v", res.output, err)
 	}
 
-	h := mustNewAgent(t, AgentOptions{
-		Store: stores.NewInMemoryStore(), Model: &mockStrategy{}, ExaAPIKey: "from-opts",
-	})
+	h := mustNewAgent(t, AgentOptions{Model: &mockStrategy{}, ExaAPIKey: "from-opts"})
 	t.Cleanup(h.Close)
 	if h.findTool("web_search", "") == nil || h.findTool("web_fetch", "") == nil {
 		t.Fatal("ExaAPIKey should install web tools")

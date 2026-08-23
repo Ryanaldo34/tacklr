@@ -12,35 +12,21 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/durable"
 )
 
 func TestServeHTTP_listenCancelAndMountedHandlers(t *testing.T) {
-	strategy := &mockInferenceStrategy{
-		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "http-ok", IsComplete: true}
-		},
-	}
-	r := newTestRegistry(testStore(t), strategy, nil)
-	srvSSE := NewServer(r, SSE)
-	srvACP := NewServer(r, ACP)
+	r := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	srv := NewServer(r.Runtime, r.Catalog, NewACPProtocol(nil)).AllowAnonymousNetwork()
 
-	rec := httptest.NewRecorder()
-	req := newSSERequest(t, "/", bytes.NewReader([]byte(`{"agent_id":"default","prompt":"hi"}`)))
-	serveSSEHTTP(srvSSE, rec, req)
-	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "http-ok") {
-		t.Fatalf("sse: %d %s", rec.Code, rec.Body.String())
+	rec := serveACPInbound(t, r, srv.Protocols[0], `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}`)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "protocolVersion") {
+		t.Fatalf("acp: %d %s", rec.Code, rec.Body.String())
 	}
 
-	rec2 := serveACPInbound(t, r, srvACP.Protocols[0], `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}`)
-	if rec2.Code != 200 || !strings.Contains(rec2.Body.String(), "protocolVersion") {
-		t.Fatalf("acp: %d %s", rec2.Code, rec2.Body.String())
-	}
-
-	// ServeHTTP + cancel (one protocol per mux — both register POST /).
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
-	go func() { errCh <- srvSSE.ServeHTTP(ctx, "127.0.0.1:0") }()
+	go func() { errCh <- srv.ServeHTTP(ctx, "127.0.0.1:0") }()
 	time.Sleep(40 * time.Millisecond)
 	cancel()
 	select {
@@ -51,47 +37,70 @@ func TestServeHTTP_listenCancelAndMountedHandlers(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("ServeHTTP did not exit")
 	}
+}
 
-	// nil ctx uses Background then we still need a cancellable path — exercise via short cancel parent is enough above.
-	_ = NewServer(r, SSE).ServeHTTP
+func TestWaitHTTPServer_listenAndCancel(t *testing.T) {
+	errCh := make(chan error, 1)
+	errCh <- errors.New("bind")
+	if err := waitHTTPServer(context.Background(), func(context.Context) error { return nil }, errCh); err == nil || err.Error() != "bind" {
+		t.Fatalf("listen: %v", err)
+	}
+	errCh = make(chan error, 1)
+	errCh <- http.ErrServerClosed
+	if err := waitHTTPServer(context.Background(), func(context.Context) error { return nil }, errCh); err != nil {
+		t.Fatalf("closed: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	errCh = make(chan error, 1)
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		errCh <- http.ErrServerClosed
+	}()
+	if err := waitHTTPServer(ctx, func(context.Context) error { return nil }, errCh); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancel closed: %v", err)
+	}
+
+	ctx, cancel = context.WithCancel(context.Background())
+	cancel()
+	errCh = make(chan error, 1)
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		errCh <- errors.New("listen fail")
+	}()
+	if err := waitHTTPServer(ctx, func(context.Context) error { return errors.New("shutdown") }, errCh); err == nil || err.Error() != "listen fail" {
+		t.Fatalf("cancel err: %v", err)
+	}
 }
 
 func TestHTTPMux_unregisteredProtocolPaths(t *testing.T) {
-	r := newTestRegistry(testStore(t), &mockInferenceStrategy{}, nil)
-	acpOnly := NewServer(r, ACP)
+	r := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	acpOnly := NewServer(r.Runtime, r.Catalog, NewACPProtocol(nil)).AllowAnonymousNetwork()
 	rec := httptest.NewRecorder()
-	serveSSEHTTP(acpOnly, rec, httptest.NewRequest(http.MethodPost, "/", bytes.NewReader([]byte(`{}`))))
+	acpOnly.HTTPMux().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/", bytes.NewReader([]byte(`{}`))))
 	if rec.Code != http.StatusNotFound {
-		t.Fatalf("sse path on acp-only mux status = %d", rec.Code)
-	}
-	rec2 := httptest.NewRecorder()
-	NewServer(r, SSE).HTTPMux().ServeHTTP(rec2, httptest.NewRequest(http.MethodPost, "/acp", bytes.NewReader([]byte(`{}`))))
-	if rec2.Code != http.StatusNotFound {
-		t.Fatalf("acp path on sse-only mux status = %d", rec2.Code)
-	}
-
-	strategy := &mockInferenceStrategy{
-		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "fb", IsComplete: true}
-		},
-	}
-	srv := NewServer(newTestRegistry(testStore(t), strategy, nil), SSE)
-	rec3 := httptest.NewRecorder()
-	req := newSSERequest(t, "/", bytes.NewReader([]byte(`{"agent_id":"default","prompt":"x"}`)))
-	serveSSEHTTP(srv, rec3, req)
-	if !strings.Contains(rec3.Body.String(), "fb") {
-		t.Fatalf("sse body = %s", rec3.Body.String())
+		t.Fatalf("root path on acp mux status = %d", rec.Code)
 	}
 }
 
-func TestNewServer_panicsWithoutRegistryOrProtocols(t *testing.T) {
-	t.Run("nil registry", func(t *testing.T) {
+func TestNewServer_panicsWithoutRuntimeOrProtocol(t *testing.T) {
+	t.Run("nil runtime", func(t *testing.T) {
 		defer func() {
 			if recover() == nil {
 				t.Fatal("expected panic")
 			}
 		}()
-		_ = NewServer(nil, ACP)
+		_ = NewServer(nil, nil, NewACPProtocol(nil))
+	})
+	t.Run("nil protocol", func(t *testing.T) {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("expected panic")
+			}
+		}()
+		k := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+		_ = NewServer(k.Runtime, k.Catalog, nil)
 	})
 	t.Run("no protocols", func(t *testing.T) {
 		defer func() {
@@ -99,38 +108,9 @@ func TestNewServer_panicsWithoutRegistryOrProtocols(t *testing.T) {
 				t.Fatal("expected panic")
 			}
 		}()
-		_ = NewServer(newTestRegistry(testStore(t), &mockInferenceStrategy{}, nil))
+		k := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+		_ = NewServer(k.Runtime, k.Catalog)
 	})
-}
-
-func TestRunTurn_agentTurnAndErrors(t *testing.T) {
-	store := testStore(t)
-	strategy := &mockInferenceStrategy{
-		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "ok", IsComplete: true}
-		},
-	}
-	r := newTestRegistry(store, strategy, nil)
-
-	stream, err := r.RunTurn(context.Background(), TurnRequest{AgentID: "default", Prompt: "hi"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for range stream.Events {
-	}
-	stream.Cancel()
-	stream.Close()
-	stream.Cancel()
-	stream.Close()
-	_ = stream.TurnContext()
-	_ = stream.Cancelled()
-
-	if _, err := r.RunTurn(context.Background(), TurnRequest{AgentID: "nope", Prompt: "x"}); err == nil {
-		t.Fatal("want agent not found")
-	}
-	if _, err := (&EventStream{}).ResumeInterrupts(context.Background(), nil); err == nil {
-		t.Fatal("want no harness error")
-	}
 }
 
 func TestLogTurnError(t *testing.T) {
@@ -138,16 +118,17 @@ func TestLogTurnError(t *testing.T) {
 	logTurnError(clientErrorf(ErrAgentNotFound, "missing"), "a", "t")
 }
 
-// TestHandleMessage_lifecycleMethods exercises HandleInbound through HandleMessage
-// for initialize, session CRUD/config, authenticate, and unknown method.
-func TestHandleMessage_lifecycleMethods(t *testing.T) {
-	r := newTestRegistry(testStore(t), &mockInferenceStrategy{}, nil)
-	srv := NewServer(r, ACP)
+// TestHandleInbound_lifecycleMethods exercises initialize, session CRUD/config,
+// authenticate, and unknown method.
+func TestHandleInbound_lifecycleMethods(t *testing.T) {
+	r := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	srv := NewServer(r.Runtime, r.Catalog, NewACPProtocol(nil))
 	w := &recordingMessageWriter{}
-	srv.Client = NewClientBridge(w)
+	bridge := NewClientBridge(w)
+	env := ProtocolEnv{Runtime: r.Runtime, Catalog: r.Catalog, Conn: &Conn{Writer: w, RPC: bridge}}
 
 	send := func(body string) {
-		srv.HandleMessage(context.Background(), []byte(body), w)
+		_ = srv.Protocols[0].HandleInbound(context.Background(), env, []byte(body))
 	}
 
 	send(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"elicitation":{"form":{}}}}}`)
@@ -178,70 +159,18 @@ func TestHandleMessage_lifecycleMethods(t *testing.T) {
 	}
 }
 
-func TestHandleSSE_invalidAgentAndMissingAccept(t *testing.T) {
-	r := newTestRegistry(testStore(t), &mockInferenceStrategy{}, nil)
-	srv := NewServer(r, SSE)
-
-	// Missing Accept → 406 (handleSSE early path).
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader([]byte(`{"agent_id":"default","prompt":"x"}`)))
-	serveSSEHTTP(srv, rec, req)
-	if rec.Code != http.StatusNotAcceptable {
-		t.Fatalf("status = %d", rec.Code)
-	}
-
-	// Valid Accept but unknown agent → SSE error event after headers.
-	rec2 := httptest.NewRecorder()
-	req2 := newSSERequest(t, "/", bytes.NewReader([]byte(`{"agent_id":"nope","prompt":"x"}`)))
-	serveSSEHTTP(srv, rec2, req2)
-	if !strings.Contains(rec2.Body.String(), "error") && !strings.Contains(rec2.Body.String(), "not found") {
-		t.Fatalf("body = %s", rec2.Body.String())
-	}
-}
-
 func TestServeHTTP_listenError(t *testing.T) {
-	r := newTestRegistry(testStore(t), &mockInferenceStrategy{}, nil)
-	// Invalid address should fail ListenAndServe quickly.
-	err := NewServer(r, SSE).ServeHTTP(context.Background(), "127.0.0.1:99999x")
+	r := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	err := NewServer(r.Runtime, r.Catalog, NewACPProtocol(nil)).AllowAnonymousNetwork().ServeHTTP(context.Background(), "127.0.0.1:99999x")
 	if err == nil {
 		t.Fatal("expected listen error")
 	}
 }
 
 func TestACP_handleInbound_invalidJSON(t *testing.T) {
-	r := newTestRegistry(testStore(t), &mockInferenceStrategy{}, nil)
+	r := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
 	rec := serveACPRaw(t, r, `{`)
 	if rec.Body.Len() == 0 {
 		t.Fatal("expected error body")
 	}
-}
-
-func TestRunTurnStream_nilStreamAndCancel(t *testing.T) {
-	if err := runTurnStream(context.Background(), ProtocolEnv{}, SSE, "t", nil, nil); err != nil {
-		t.Fatal(err)
-	}
-
-	strategy := &mockInferenceStrategy{
-		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-			// Block until cancelled so turnCtx.Done path runs.
-			<-ctx.Done()
-		},
-	}
-	r := newTestRegistry(testStore(t), strategy, nil)
-	stream, err := r.RunTurn(context.Background(), TurnRequest{AgentID: "default", Prompt: "hi"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	w := &recordingMessageWriter{}
-	env := ProtocolEnv{Registry: r, Conn: &Conn{Writer: w}}
-	// Cancel turn after stream starts.
-	go func() {
-		time.Sleep(20 * time.Millisecond)
-		stream.Cancel()
-	}()
-	err = runTurnStream(context.Background(), env, SSE, "thread", stream, nil)
-	if err != nil && !errors.Is(err, context.Canceled) {
-		t.Logf("runTurnStream cancel: %v", err)
-	}
-	stream.Close()
 }

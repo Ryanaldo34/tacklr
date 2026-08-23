@@ -59,18 +59,17 @@ func (rt Runtime) EmitUpdate(message string) {
 
 // StateGet returns a session value stored with StateSet.
 func (rt Runtime) StateGet(key string) (any, bool) {
-	return rt.session.stateGet(key)
+	return rt.session.StateGet(key)
 }
 
 // StateSet stores a session value for tools and interceptors.
-// Reserved module keys return an error.
 func (rt Runtime) StateSet(key string, value any) error {
-	return rt.session.stateSet(key, value)
+	return rt.session.StateSet(key, value)
 }
 
 // StateDelete removes a session value.
 func (rt Runtime) StateDelete(key string) {
-	rt.session.stateDelete(key)
+	rt.session.StateDelete(key)
 }
 
 // RaiseInterrupt parks the current tool until the host resumes with a payload.

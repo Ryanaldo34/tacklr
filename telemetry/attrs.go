@@ -137,7 +137,7 @@ const (
 
 // Area values for AttrArea.
 const (
-	AreaRegistry   = "registry"
+	AreaRuntime    = "runtime"
 	AreaHarness    = "harness"
 	AreaModelTasks = "model_tasks"
 	AreaContext    = "context"

@@ -59,10 +59,7 @@ Use after search, find_exact, find_objects, or expand when the hit has no vfs_pa
 			runtime.EmitUpdate("Reading knowledge object…")
 			obj, err := b.engine.Read(ctx, b.sc.Scope(), id)
 			if err != nil {
-				if errors.Is(err, brain.ErrNotFound) {
-					return "", fmt.Errorf("read_object: object %s: %w", id, err)
-				}
-				return "", fmt.Errorf("read_object: %w", err)
+				return "", fmt.Errorf("read_object: object %s: %w", id, err)
 			}
 			return formatBrainJSON(obj)
 		},
@@ -87,9 +84,6 @@ Call with a kind to see filterable_fields (name, type, operators) for that kind.
 			runtime.EmitUpdate("Loading knowledge schema…")
 			res, err := b.engine.Schema(ctx, args.Kind)
 			if err != nil {
-				if errors.Is(err, brain.ErrNotFound) {
-					return "", fmt.Errorf("schema: kind %q: %w", strings.TrimSpace(args.Kind), err)
-				}
 				return "", fmt.Errorf("schema: %w", err)
 			}
 			return formatBrainJSON(res)
@@ -181,7 +175,7 @@ Pass the result_set_id from the previous call. Each new search, find_exact, find
 			runtime.EmitUpdate("Loading more results…")
 			page, err := b.engine.Continue(ctx, b.sc.Scope(), id, args.Limit, b.sc)
 			if err != nil {
-				if errors.Is(err, brain.ErrResultSetNotFound) {
+				if errors.Is(err, brain.ErrNotFound) {
 					return "", fmt.Errorf("continue: result set not found; run search or find_exact again: %w", err)
 				}
 				return "", fmt.Errorf("continue: %w", err)

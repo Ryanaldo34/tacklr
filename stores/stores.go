@@ -1,9 +1,7 @@
 package stores
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 
 	"github.com/ryanaldo34/tacklr/streaming"
@@ -30,7 +28,7 @@ type sessionState struct {
 const CheckpointVersion = 2
 
 // SessionCheckpoint is the agent harness checkpoint blob.
-// Wire protocols (ACP, …) must not store protocol envelopes here — use a
+// Wire protocols must not store protocol envelopes here — use a
 // ProtocolWireStore (or equivalent) owned by the protocol.
 // Harness-owned module/interrupt bytes are opaque to store implementations.
 type SessionCheckpoint struct {
@@ -146,54 +144,3 @@ func cloneRawMap(values map[string]json.RawMessage) map[string]json.RawMessage {
 	}
 	return out
 }
-
-// BaseStore is the minimal persistence interface for agent harness session state.
-//
-// Implementations included in this package:
-//   - InMemoryStore — sessions live in memory, lost on restart.
-//   - PostgresStore — sessions persisted via PostgreSQL/pgx.
-//
-// Users may provide their own implementation (e.g. Redis, SQLite, custom DB).
-// Wire-protocol session envelopes are not part of this API.
-type BaseStore interface {
-	SaveSession(context.Context, string, SessionCheckpoint) error
-	LoadSession(context.Context, string) (SessionCheckpoint, error)
-}
-
-// ErrSessionNotFound is returned by LoadSession when the requested session
-// does not exist.
-var ErrSessionNotFound = errors.New("session not found")
-
-// FaultyStore wraps a BaseStore and injects Save/Load failures.
-// A nil Inner is a no-op store except when a fault is set.
-type FaultyStore struct {
-	Inner   BaseStore
-	SaveErr error
-	LoadErr error
-}
-
-func (s FaultyStore) SaveSession(ctx context.Context, id string, cp SessionCheckpoint) error {
-	if s.SaveErr != nil {
-		return s.SaveErr
-	}
-	if s.Inner != nil {
-		return s.Inner.SaveSession(ctx, id, cp)
-	}
-	return nil
-}
-
-func (s FaultyStore) LoadSession(ctx context.Context, id string) (SessionCheckpoint, error) {
-	if s.LoadErr != nil {
-		return SessionCheckpoint{}, s.LoadErr
-	}
-	if s.Inner != nil {
-		return s.Inner.LoadSession(ctx, id)
-	}
-	return SessionCheckpoint{}, fmt.Errorf("load session %q: %w", id, ErrSessionNotFound)
-}
-
-var (
-	_ BaseStore = (*InMemoryStore)(nil)
-	_ BaseStore = (*PostgresStore)(nil)
-	_ BaseStore = FaultyStore{}
-)

@@ -1,4 +1,4 @@
-.PHONY: test test-short brain-pg-image helix-image require-docker vet lint fmt cover coverage check testserver
+.PHONY: test test-short brain-pg-image helix-image require-docker vet lint fmt cover coverage check
 
 # Docker CLI is often missing from PATH when Docker Desktop is installed via the
 # app bundle only. Prefer PATH, then the standard macOS Desktop location.
@@ -63,10 +63,6 @@ check: vet lint cover
 	if [ -n "$$unformatted" ]; then \
 		echo "gofmt needed on:"; echo "$$unformatted"; exit 1; \
 	fi
-
-# Local ACP harness (reads OTEL_* / .env; see cmd/testserver).
-testserver:
-	go run ./cmd/testserver
 
 # Multi-turn agent harness benchmarks (OPENAI_*; optional EXA_API_KEY). See cmd/agent-bench.
 agent-bench:

@@ -61,10 +61,9 @@ func TestMountSession_unionMergesBackends(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "b", Base: b}); err != nil {
 		t.Fatal(err)
 	}
-	spec := vfs.MountSpec{
-		Point: "/skills", Profile: "skills", IndexPolicy: "none",
-		Members: []vfs.MountSpec{{Profile: "a"}, {Profile: "b"}},
-	}
+	spec := vfs.Skills(
+		vfs.MountSpec{Profile: "a"}, vfs.MountSpec{Profile: "b"},
+	)
 	if err := vfs.CheckMount(ctx, reg, t.Name(), spec); err != nil {
 		t.Fatal(err)
 	}

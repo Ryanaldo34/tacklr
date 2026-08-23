@@ -17,7 +17,8 @@ var (
 	ErrInvalid = errors.New("brain: invalid")
 	// ErrUnsupported groups missing backend capabilities (no writer, no graph, no listing).
 	ErrUnsupported = errors.New("brain: unsupported")
-	// ErrGraphEnsure and ErrGraphRemove wrap dual-write failures (cause via errors.Unwrap).
+	// ErrGraphEnsure / ErrGraphRemove are dual-write failures. Callers re-Put
+	// after fixing the graph; store row is the source of truth.
 	ErrGraphEnsure = errors.New("brain: graph ensure object")
 	ErrGraphRemove = errors.New("brain: graph remove object")
 )
@@ -164,11 +165,6 @@ type ObjectKindInfo struct {
 	IsPart           bool            `json:"is_part"`
 	IsParent         bool            `json:"is_parent"`
 	FilterableFields json.RawMessage `json:"filterable_fields,omitempty"`
-}
-
-// KindInfoFrom maps a registry row to the agent-facing shape.
-func KindInfoFrom(k ObjectKind) ObjectKindInfo {
-	return ObjectKindInfo(k)
 }
 
 // Filters narrows retrieval. Keys are field names; values are equality targets

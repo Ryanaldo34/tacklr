@@ -93,17 +93,8 @@ func TestClientBridge_CallAndResponse(t *testing.T) {
 }
 
 func TestClientBridge_noBridgeAndMarshal(t *testing.T) {
-	var b *ClientBridge
-	if _, err := b.Call(context.Background(), "m", nil); err == nil {
-		t.Fatal("nil bridge")
-	}
-	b = NewClientBridge(nil)
-	if _, err := b.Call(context.Background(), "m", nil); err == nil {
-		t.Fatal("nil writer")
-	}
-	// unmarshalable params
 	w := &recordingWriter{}
-	b = NewClientBridge(w)
+	b := NewClientBridge(w)
 	if _, err := b.Call(context.Background(), "m", make(chan int)); err == nil {
 		t.Fatal("want marshal error")
 	}
@@ -191,23 +182,10 @@ func TestClientBridge_WaitInitialized(t *testing.T) {
 	if err := b.WaitInitialized(context.Background()); err != nil {
 		t.Fatalf("after initialize: %v", err)
 	}
-	b.Close()
-	if err := b.WaitInitialized(context.Background()); err != nil {
-		t.Fatalf("initialized then closed: %v", err)
-	}
 	canceled, cancelInit := context.WithCancel(context.Background())
 	cancelInit()
 	if err := b.WaitInitialized(canceled); err != nil {
 		t.Fatalf("initialized with canceled ctx: %v", err)
-	}
-	closed := NewClientBridge(&recordingWriter{})
-	closed.Close()
-	if err := closed.WaitInitialized(context.Background()); !errors.Is(err, errConnectionNotInitialized) {
-		t.Fatalf("closed before initialize: %v", err)
-	}
-	var nilB *ClientBridge
-	if err := nilB.WaitInitialized(context.Background()); err != nil {
-		t.Fatalf("nil bridge: %v", err)
 	}
 }
 

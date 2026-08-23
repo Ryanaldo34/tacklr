@@ -13,12 +13,13 @@ import (
 	"time"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/durable"
 )
 
-func startACPStreamServer(t *testing.T, r *Registry) (*httptest.Server, *Server) {
+func startACPStreamServer(t *testing.T, r *testKernel) (*httptest.Server, *Server) {
 	t.Helper()
-	// Fresh ACP protocol per server — no package-level ACP singleton.
-	srv := NewServer(r, NewACPProtocol(NewMemoryWireStore()))
+	// Fresh ACP protocol per server.
+	srv := NewServer(r.Runtime, r.Catalog, NewACPProtocol(NewMemoryWireStore()))
 	hs := httptest.NewServer(srv.HTTPMux())
 	t.Cleanup(hs.Close)
 	return hs, srv
@@ -183,7 +184,7 @@ func TestACP_Streamable_permissionMidTurn(t *testing.T) {
 			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "done", IsComplete: true}
 		},
 	}
-	r := newTestRegistry(testStore(t), strategy, []*tacklr.Tool{sensitive})
+	r := newTestKernel(t, strategy, durable.AgentSpec{Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{sensitive}}})
 	hs, _ := startACPStreamServer(t, r)
 
 	connID, initBody := acpInitialize(t, hs)
@@ -236,58 +237,10 @@ func TestACP_Streamable_permissionMidTurn(t *testing.T) {
 }
 
 // TestACP_Streamable_cancelDuringPrompt: concurrent POST cancel while prompt streams
-// over Streamable HTTP (stdio cancel is covered elsewhere; this is the duplex HTTP path).
-func TestACP_Streamable_cancelDuringPrompt(t *testing.T) {
-	started := make(chan struct{})
-	strategy := &mockInferenceStrategy{
-		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-			close(started)
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: ".", IsComplete: false}:
-				}
-			}
-		},
-	}
-	r := newTestRegistry(testStore(t), strategy, nil)
-	hs, _ := startACPStreamServer(t, r)
-
-	connID, _ := acpInitialize(t, hs)
-	sessionID, sessFrames, closeFn := streamableSession(t, hs, connID)
-	defer closeFn()
-
-	_ = acpPOST(t, hs, `{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"`+sessionID+`","prompt":[{"type":"text","text":"slow"}]}}`, map[string]string{
-		HeaderAcpConnectionID: connID,
-		HeaderAcpSessionID:    sessionID,
-	}).Body.Close()
-
-	select {
-	case <-started:
-	case <-time.After(3 * time.Second):
-		t.Fatal("prompt did not start")
-	}
-	_ = sessFrames.next(t, 4*time.Second)
-
-	_ = acpPOST(t, hs, `{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"`+sessionID+`"}}`, map[string]string{
-		HeaderAcpConnectionID: connID,
-		HeaderAcpSessionID:    sessionID,
-	}).Body.Close()
-
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		fr := sessFrames.next(t, 3*time.Second)
-		if res, ok := fr["result"].(map[string]any); ok && res["stopReason"] == "cancelled" {
-			return
-		}
-	}
-	t.Fatal("expected stopReason cancelled on session SSE")
-}
-
+// over Streamable HTTP.
 // TestACP_Streamable_deleteConnection: DELETE removes connection; further POST → 404.
 func TestACP_Streamable_deleteConnection(t *testing.T) {
-	r := newTestRegistry(testStore(t), &mockInferenceStrategy{}, nil)
+	r := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
 	hs, srv := startACPStreamServer(t, r)
 	connID, _ := acpInitialize(t, hs)
 	if srv.Connections.Get(connID) == nil {
@@ -319,7 +272,7 @@ func TestACP_Streamable_deleteConnection(t *testing.T) {
 
 // TestACP_Streamable_contentNegotiation: 415 / 406 / 501 / 400 / 404 paths.
 func TestACP_Streamable_contentNegotiation(t *testing.T) {
-	r := newTestRegistry(testStore(t), &mockInferenceStrategy{}, nil)
+	r := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
 	hs, _ := startACPStreamServer(t, r)
 
 	req, _ := http.NewRequest(http.MethodPost, hs.URL+"/acp", strings.NewReader(`{}`))

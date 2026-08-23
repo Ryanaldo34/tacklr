@@ -1,11 +1,10 @@
 // Package streaming holds protocol-agnostic conversation and stream types
-// shared by inference, the agent harness, and server protocols (ACP, SSE,
-// and future A2A).
+// shared by inference, the agent harness, and server.Protocol implementations.
 //
 // Layering:
 //   - inference: provider wire (e.g. OpenAI SSE) → LLMResponseChunk
 //   - harness: agent loop → StreamEvent (tools, interrupts, complete, cancel)
-//   - server.Protocol: StreamEvent → client wire (ACP session/update, SSE, A2A, …)
+//   - server.Protocol: StreamEvent → client wire (ACP, or a host protocol)
 //
 // This package does not parse provider SSE and does not encode client protocols.
 // Client presentation belongs on server.Protocol.OnStreamEvent / OnStreamClosed.
@@ -149,7 +148,7 @@ const (
 )
 
 // StreamEvent is the harness interior event bus. Protocols map these events
-// to wire formats; the harness does not own ACP/SSE/A2A framing.
+// to wire formats; the harness does not own protocol framing.
 type StreamEvent struct {
 	Type      StreamEventType
 	TurnID    string
@@ -157,7 +156,10 @@ type StreamEvent struct {
 	Content   string
 	Data      []byte
 	ToolCalls []ToolCall
-	Error     error
+	// Error is in-process only. Workflow Streams cannot encode error values;
+	// Fail is the durable stand-in (sentinel Error() text).
+	Error error  `json:"-"`
+	Fail  string `json:"fail,omitempty"`
 }
 
 // LLMResponseChunk is the streaming unit emitted by an InferenceStrategy's

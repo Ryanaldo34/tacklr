@@ -119,11 +119,15 @@ func (s *SessionManager) applyCheckpoint(userState, modules map[string]json.RawM
 		return err
 	}
 
-	search := brain.NewSearchContext()
+	if s.Search == nil {
+		s.Search = brain.NewSearchContext()
+	}
 	if raw := modules[moduleSearch]; len(raw) > 0 {
-		if err := search.Restore(raw); err != nil {
+		if err := s.Search.Restore(raw); err != nil {
 			return fmt.Errorf("checkpoint module %q: %w", moduleSearch, err)
 		}
+	} else if err := s.Search.Restore(nil); err != nil {
+		return fmt.Errorf("checkpoint module %q: %w", moduleSearch, err)
 	}
 
 	decodedUser := make(map[string]any, len(userState))
@@ -160,7 +164,6 @@ func (s *SessionManager) applyCheckpoint(userState, modules map[string]json.RawM
 
 	s.mu.Lock()
 	s.userState = decodedUser
-	s.Search = search
 	s.mu.Unlock()
 	return nil
 }

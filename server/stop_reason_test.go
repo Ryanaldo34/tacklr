@@ -18,7 +18,7 @@ func TestStopReasonFromError(t *testing.T) {
 	}{
 		{"nil", nil, "", false},
 		{"refused", tacklr.ErrModelRefused, stopReasonRefusal, true},
-		{"refused wrapped", tacklr.WrapStopReason(tacklr.ErrModelRefused, errors.New("filter")), stopReasonRefusal, true},
+		{"refused wrapped", fmt.Errorf("%w: %s", tacklr.ErrModelRefused, "filter"), stopReasonRefusal, true},
 		{"max tokens", tacklr.ErrMaxTokens, stopReasonMaxTokens, true},
 		{"max turn", tacklr.ErrMaxTurnRequests, stopReasonMaxTurnRequests, true},
 		{"canceled", context.Canceled, stopReasonCancelled, true},

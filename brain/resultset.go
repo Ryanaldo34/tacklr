@@ -2,14 +2,10 @@ package brain
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"github.com/google/uuid"
 )
-
-// ErrResultSetNotFound is returned when a ResultSet id is unknown or replaced.
-var ErrResultSetNotFound = errors.New("brain: result set not found")
 
 // ResultSet is a ranked-list snapshot for deterministic continue() pagination.
 type ResultSet struct {

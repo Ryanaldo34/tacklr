@@ -11,7 +11,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
-	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfsindex"
 )
@@ -261,13 +260,11 @@ func TestBrainTools_searchFindExactContinueAndCheckpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sessStore := stores.NewInMemoryStore()
 	h := mustNewAgent(t, AgentOptions{
 		Config:          Config{MaxWindowSize: 1024},
 		Model:           &mockStrategy{},
 		Brain:           eng,
 		SearchNamespace: &ns,
-		Store:           sessStore,
 		SessionID:       "brain-sc-1",
 	})
 
@@ -290,19 +287,13 @@ func TestBrainTools_searchFindExactContinueAndCheckpoint(t *testing.T) {
 		t.Fatalf("page: %+v", page)
 	}
 
-	if err := h.checkpointSession(ctx); err != nil {
-		t.Fatal(err)
-	}
-	h2, err := NewAgentFromSession(ctx, "brain-sc-1", AgentOptions{
+	h2 := reloadHarness(t, h, AgentOptions{
 		Config:          Config{MaxWindowSize: 1024},
 		Model:           &mockStrategy{},
 		Brain:           eng,
 		SearchNamespace: &ns,
-		Store:           sessStore,
+		SessionID:       "brain-sc-1",
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	out2, err := h2.findTool("continue", "").invoke(ctx, `{"result_set_id":"`+page.ResultSetID.String()+`","limit":2}`, turnRuntime(h2))
 	if err != nil {
 		t.Fatal(err)
@@ -625,7 +616,7 @@ func TestBrainTools_engramPathGraph(t *testing.T) {
 	ns := uuid.New()
 	mustMountBrain(ctx, t, reg, ms, eng, ns, vfs.MountSpec{})
 	h := mustNewAgent(t, AgentOptions{
-		SessionID: "engram-graph", Store: stores.NewInMemoryStore(),
+		SessionID:    "engram-graph",
 		MountSession: ms, Model: &mockStrategy{},
 		Brain: eng, SearchNamespace: &ns,
 	})

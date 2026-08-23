@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/mcp"
 )
 
@@ -27,7 +28,7 @@ type ConfigOptionValue struct {
 }
 
 // parsedRequest is retained for ACP parse helpers and tests that assert on
-// validated request fields. Session lifecycle uses Protocol methods with Params.
+// validated request fields.
 type parsedRequest struct {
 	AgentID  string
 	ThreadID string
@@ -63,4 +64,6 @@ type parsedRequest struct {
 
 	// Extensibility — raw _meta blob for custom fields
 	Meta json.RawMessage
+
+	Auth durable.AuthContext
 }

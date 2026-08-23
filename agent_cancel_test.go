@@ -12,7 +12,6 @@ import (
 func TestAgent_HasOpenToolWorkAndFinalizeCancelled(t *testing.T) {
 	h := mustNewAgent(t, AgentOptions{
 		SessionID: "cancel-open-tools",
-		Store:     stores.NewInMemoryStore(),
 		Model:     &mockStrategy{},
 	})
 	t.Cleanup(h.Close)
@@ -22,7 +21,7 @@ func TestAgent_HasOpenToolWorkAndFinalizeCancelled(t *testing.T) {
 	}
 
 	// Unpaired assistant tool_call in the window
-	h.restoreMessages([]*Message{
+	h.context.Restore([]*Message{
 		{Role: RoleUser, Content: "do it"},
 		{Role: RoleAssistant, Content: "", ToolCalls: []ToolCall{
 			{ID: "c1", CallID: "c1", Name: "list", Arguments: `{}`},
@@ -60,7 +59,7 @@ func TestAgent_HasOpenToolWorkAndFinalizeCancelled(t *testing.T) {
 	}
 
 	// Empty tool call id is ignored by openToolCalls
-	h.restoreMessages([]*Message{
+	h.context.Restore([]*Message{
 		{Role: RoleAssistant, ToolCalls: []ToolCall{{Name: "x"}}}, // no WireID
 	})
 	if h.hasOpenToolWork() {
@@ -68,7 +67,7 @@ func TestAgent_HasOpenToolWorkAndFinalizeCancelled(t *testing.T) {
 	}
 
 	// Already paired: not open
-	h.restoreMessages([]*Message{
+	h.context.Restore([]*Message{
 		{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "c2", CallID: "c2", Name: "list"}}},
 		{Role: RoleTool, ToolCallID: "c2", Content: "ok"},
 	})
@@ -77,7 +76,7 @@ func TestAgent_HasOpenToolWorkAndFinalizeCancelled(t *testing.T) {
 	}
 
 	// Live-turn path: pairCancelledToolResults streams when out != nil
-	h.restoreMessages([]*Message{
+	h.context.Restore([]*Message{
 		{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "c3", CallID: "c3", Name: "list", Arguments: `{}`}}},
 	})
 	out := make(chan StreamEvent, 8)

@@ -123,6 +123,25 @@ func TestListTools_sessionError(t *testing.T) {
 	}
 }
 
+func TestCallTool_isErrorJoinsTextParts(t *testing.T) {
+	c := &client{
+		config: mcp.MCPConfig{Name: "p"},
+		session: &fakeSession{
+			callResult: &mcpsdk.CallToolResult{
+				IsError: true,
+				Content: []mcpsdk.Content{
+					&mcpsdk.TextContent{Text: "nope"},
+					&mcpsdk.TextContent{Text: "denied"},
+				},
+			},
+		},
+	}
+	_, err := c.callTool(context.Background(), "t", nil)
+	if err == nil || !strings.Contains(err.Error(), "nope; denied") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
 func TestCallTool_sessionErrorAndMarshalFail(t *testing.T) {
 	c := &client{
 		config:  mcp.MCPConfig{Name: "p"},

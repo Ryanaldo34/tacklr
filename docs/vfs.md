@@ -1,6 +1,6 @@
 # Virtual filesystem (`vfs`)
 
-Tacklr’s virtual filesystem gives agents one path-based interface over storage backends (local disk, S3, **brain Engrams**, and Google Drive / Docs). Hosts own mounts and credentials; agents only see virtual paths like `/work/main.go` or `/engram/deal/acme.md`.
+Tacklr’s virtual filesystem gives agents one path-based interface over storage backends (local disk, S3, **brain Engrams**, Google Drive / Docs, and Microsoft Graph files). Hosts register factories; the client supplies credentials before a turn; agents only see virtual paths like `/work/main.go`, `/engram/deal/acme.md`, or `/workspace/contracts/nda.pdf`.
 
 Package: [`github.com/ryanaldo34/tacklr/vfs`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfs).
 
@@ -9,10 +9,10 @@ Knowledge objects, search, and the graph are documented in **[docs/knowledge.md]
 ## Big picture
 
 ```text
-  Host mounts backends once
+  Host registers factories; client binds credentials before the turn
            │
            ▼
-  MountSession  ── virtual paths like /work/main.go
+  MountSession (injected if configured)  ── virtual paths like /work/main.go
            │
      ┌─────┴─────┐
      │           │
@@ -32,7 +32,7 @@ Knowledge objects, search, and the graph are documented in **[docs/knowledge.md]
 
 | Layer | Role |
 |-------|------|
-| **MountSession** | Session-owned tree of virtual mount points + path ops |
+| **MountSession** | Isolated tree of virtual mount points + path ops (injected per turn) |
 | **Provider** | Bytes for one backend (local jail, S3 prefix, …) |
 | **Document IR** | Agent-facing view of a file (lines + optional structured blocks) |
 | **Codec** | Bytes ↔ Document by media type |
@@ -75,7 +75,7 @@ _ = ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"})
 |------|---------|
 | `MountSpec` | Durable mount description (point, profile, read-only, params, **indexPolicy**). Checkpoint-safe; no secrets. |
 | `Params` | Backend options (`subpath`, `bucket`, `prefix`, …) |
-| `Members` | Optional member `MountSpec`s. Non-empty → one read-only union at `Point`. Use `vfs.Skills(...)` for the `/skills` pack. Duplicate first-level names → `ErrAmbiguous`. |
+| `Members` | Optional member `MountSpec`s. Non-empty → a union at `Point`. Use `vfs.Skills(...)` for the flat read-only `/skills` pack. Use `vfs.Workspace(...)` for named writable `/workspace` aliases (`params.name`). Duplicate aliases / first-level names → `ErrAmbiguous`. |
 | `IndexPolicy` | Optional string: `none` \| `selective` \| `prefix` \| `watch` (empty → selective when the index bridge is on) |
 
 `MountSession.SpecAt` returns the full durable `MountSpec` for a virtual path (for policy and host tooling).
@@ -95,21 +95,31 @@ The harness loads the catalog from `/skills` when that mount exists. Overlapping
 
 Host-owned roots and secrets (local jail, S3 client) live on factories, not on mounts or checkpoints.
 
-User-owned backends (Google Drive today) are different: the **client** does OAuth (PKCE). It sends only a short-lived access token over ACP extension methods. Tokens live in `vfs.SessionAuth` (process memory). They are never written to `MountSpec`, session checkpoints, or the ACP wire store. After `session/load` or process restart the client must bind again.
+User-owned cloud folders (Google Drive, OneDrive, SharePoint libraries) attach under one mount **`/workspace/<alias>`**. The **client** does OAuth (PKCE). It sends only a short-lived access token over ACP extension methods. Tokens live in `vfs.SessionAuth` (process memory), keyed by `(session, provider)`. They are never written to `MountSpec`, session checkpoints, or the ACP wire store. After `session/load` or process restart the client must bind again. `/work` and `/engram` stay host scratch/knowledge. `/skills` stays a flat read-only union.
 
 ```text
 initialize  →  agentCapabilities._meta.tacklr.vfs { credentials, providers, tokenRefresh }
 session/new
-_tacklr/vfs/bind     { sessionId, backends: [{ provider, point, auth.token, params.folderId }] }
-                     provider is the factory profile id (gdrive)
-session/prompt       → agent sees /contracts, /notes
-_tacklr/vfs/refresh  → new access token for a provider
+_tacklr/vfs/bind     { sessionId, backends: [{ provider, point, auth.token, params }] }
+                     provider is gdrive | msgraph
+                     point is /workspace (or omit). Old /contracts → alias contracts (W2).
+                     params.name is the alias (required when point is /workspace).
+                     gdrive: folderId. msgraph: driveId (empty → /me/drive), itemId (empty → root), siteId (optional).
+session/prompt       → Runtime injects a tree from bootstrap + bind recipes; agent sees /workspace/contracts, /workspace/legal
+_tacklr/vfs/refresh  → new access token for a provider (gdrive and msgraph are different holders); next prompt
 _tacklr/vfs/token    ← agent asks the client after a 401 (if the client advertised tokenRefresh)
-_tacklr/vfs/unbind
-session/close        → tokens zeroed
+_tacklr/vfs/unbind   → by alias (point leftover /contracts, or point /workspace + name); next prompt
+session/close        → tokens zeroed; FUSE unmounts with the turn
+
 ```
 
-Drive: many client-selected folders (one single-segment mount point each). Go zero-value `Binding` and ACP `readOnly` omitted stay **read-only** (`drive.readonly`, export-only). Writable binds are opt-in (`Binding.Writable` / ACP `"readOnly": false`) and need client scopes **`drive`**, **`documents`**, and **`spreadsheets`**. `drive` is a restricted (CASA) scope; the token is not folder-scoped. The server is not a Google OAuth client.
+Bind, refresh, and unbind record credentials only. They do not remount a live turn. The next `session/prompt` injects a new tree. `mounted.point` is always `/workspace`. Duplicate alias names are `ErrAmbiguous`. Rebind of the same alias replaces that member. `mkdir /workspace/new` does not create an alias (`ErrNotSupported`). Remove of an alias is `ErrInvalidPath` (unbind instead). The last unbind drops `/workspace` on the next prompt.
+
+Go zero-value `Binding` and ACP `readOnly` omitted stay **read-only**. Writable binds are opt-in (`Binding.Writable` / ACP `"readOnly": false`). The server is not an OAuth client.
+
+Drive scopes: read-only `drive.readonly` (export-only). Writable needs **`drive`**, **`documents`**, and **`spreadsheets`**. `drive` is a restricted (CASA) scope; the token is not folder-scoped.
+
+Graph (OneDrive and SharePoint libraries, one factory `msgraph`): read-only **`Files.Read`**; writable **`Files.ReadWrite`**. A SharePoint library also needs **`Sites.Read.All`** or **`Sites.ReadWrite.All`** as the **client** already consented. CASA: prefer `Files.ReadWrite` (user files) over `Files.ReadWrite.All` when it covers the bound drive. Graph files are real `.docx` / `.xlsx` (Word/Excel codecs). Native Google Docs/Sheets on a Drive member still use Docs/Sheets APIs.
 
 Two surfaces, one document:
 
@@ -120,13 +130,14 @@ Two surfaces, one document:
 
 `Stat.MediaType` is the real Drive MIME. Slides/Drawings/Forms stay listed and return `ErrNoCodec` / `ErrNotSupported`. Native `PutFile` / identity `WriteDocument` return `ErrNotSupported`. `Remove` is Drive trash (`trashed:true`), does not follow shortcuts, and refuses ambiguous names and the mount root. Agent delete is `rm` (FUSE Unlink) only.
 
-Read-only bind: official ZIP export (`application/zip`, 10 MiB). Writable bind: Docs `documents.get(includeTabsContent=true)` and Sheets `spreadsheets.get` with grid `userEnteredFormat` (skip Export); persist is `documents.batchUpdate` with checkout `requiredRevisionId`, or Sheets `values.batchUpdate` (`USER_ENTERED`) plus `spreadsheets.batchUpdate` `repeatCell`/`userEnteredFormat` after Drive `files.get(version)` CAS. Create-as-Doc / Create-as-Sheet requires `write` + the Google MIME on an **extensionless** path. Bare `/contracts/Spec` is plaintext. `Foo.md` is never a Doc. `Budget.xlsx` is never a Google Sheet (local/S3/Drive *file* `.xlsx` uses the Excel codec).
+Read-only bind: official ZIP export (`application/zip`, 10 MiB). Writable bind: Docs `documents.get(includeTabsContent=true)` and Sheets `spreadsheets.get` with grid `userEnteredFormat` (skip Export); persist is `documents.batchUpdate` with checkout `requiredRevisionId`, or Sheets `values.batchUpdate` (`USER_ENTERED`) plus `spreadsheets.batchUpdate` `repeatCell`/`userEnteredFormat` after Drive `files.get(version)` CAS. Create-as-Doc / Create-as-Sheet requires `write` + the Google MIME on an **extensionless** path. Bare `/workspace/contracts/Spec` is plaintext. `Foo.md` is never a Doc. `Budget.xlsx` is never a Google Sheet (local/S3/Drive/Graph *file* `.xlsx` uses the Excel codec).
 
 ```go
 auth := vfs.NewSessionAuth()
 reg := vfs.NewBackendRegistry()
 _ = reg.Register(vfs.DriveFactory{ID: "gdrive", Auth: auth})
-// Hosts pass the same auth to server.WithVFSAuth(auth).
+_ = reg.Register(vfs.GraphFactory{ID: "msgraph", Auth: auth})
+// Work-item Prompt/Resume AuthContext tokens are bound onto this SessionAuth for the turn.
 ```
 
 Raw path I/O (absolute virtual paths only):
@@ -235,7 +246,7 @@ Tool guidance:
 
 FUSE: hosts call `MountSession.FuseMount(dir)` for a kernel tree. **Every mount point must be a single path segment** (`/work`, `/engram`). Multi-segment points (`/tmp/tacklr`) fail `FuseMount`. If `ReadText` succeeds (`Textual`), `getattr`/`Read` use that plaintext (so `cat`/`rg` see the projection). Otherwise `Stat.Size` + `io.ReaderAt`. Kernel writes persist through `WriteFile` only when `KernelWritable` (`IdentityCodec`). Projected textual types (Word, Notion, Docs) are **read-only** on the kernel (`EROFS`); the agent `write` tool still uses `WriteDocument`. `session.Mount` attaches a provider; `FuseMount` is the host kernel mount. `HostDir()` is the last mount directory (host-facing only). `FuseAvailable()` probes `/dev/fuse` and `/dev/macfuse*`. `Close` unmounts.
 
-`server.Registry` starts FUSE after construct when the session has a VFS: `$TMP/tacklr-fuse/<session>` mode `0700`. Production without a device has **no** `MountSession` (no VFS tools, no `run_command`). Tests inject `DirectProjection` so `read`/`write` still work and `run_command` returns `ErrFuseNotMounted` until `HostDir` is set. Device present and mount fails after one suffix retry → fail-hard (Close, do not Store). `cmd/testserver` bootstraps `Point: /work` (`LocalFactory.Base` is the host jail). The harness does not call `FuseMount` and `Close` does not unmount. Workers share the host `MountSession` and brain engine; they do not get a second FUSE.
+`durable.Runtime` injects a **turn-scoped** `MountSession` in the inference/tool activity preamble (FSBootstrap + `/workspace` binds) and attaches FUSE for that slice: `$TMP/tacklr-fuse/<session>` mode `0700`. The activity (or in-process turn slice) closes the tree when the step ends. Bind/unbind only record credentials; they do not keep a live tree between prompts. Production without a device has **no** `MountSession` (no VFS tools, no `run_command`). Tests inject `vfs.DirectProjection` so `read`/`write` still work and `run_command` returns `ErrFuseNotMounted` until `HostDir` is set. Device present and mount fails after one suffix retry → fail-hard. Workers reconstruct a `MountSession` per activity; they do not hold a parent pointer.
 
 `TextCodec` requires valid UTF-8 and builds a `TextDocument` labeled with the caller’s media type.
 

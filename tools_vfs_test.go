@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -35,7 +34,6 @@ func TestVFSTools_readWriteRev(t *testing.T) {
 
 	h := mustNewAgent(t, AgentOptions{
 		SessionID:    "tools-vfs",
-		Store:        stores.NewInMemoryStore(),
 		MountSession: ms,
 		Model:        &mockStrategy{},
 	})
@@ -444,7 +442,7 @@ func TestVFSTools_projectedDocOutlineAndBlocks(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := mustNewAgent(t, AgentOptions{
-		SessionID: "tools-docs", Store: stores.NewInMemoryStore(), MountSession: ms, Model: &mockStrategy{},
+		SessionID: "tools-docs", MountSession: ms, Model: &mockStrategy{},
 	})
 	tools := map[string]*Tool{}
 	for _, tool := range h.tools {
@@ -452,7 +450,7 @@ func TestVFSTools_projectedDocOutlineAndBlocks(t *testing.T) {
 	}
 	rt := turnRuntime(h)
 
-	res, err := tools["read"].invoke(ctx, `{"path":"/contracts/Spec"}`, rt)
+	res, err := tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Spec"}`, rt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -461,75 +459,75 @@ func TestVFSTools_projectedDocOutlineAndBlocks(t *testing.T) {
 		t.Fatalf("default read dumped HTML: %s", res.output)
 	}
 	rev := fieldKV(res.output, "rev")
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Spec","block_id":"intro/p-1"}`, rt)
+	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Spec","block_id":"intro/p-1"}`, rt)
 	if err != nil || !strings.Contains(res.output, "text=Hello") || strings.Contains(res.output, "<p>") {
 		t.Fatalf("block_id IR: %s err=%v", res.output, err)
 	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Spec","start":1,"end":6}`, rt)
+	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Spec","start":1,"end":6}`, rt)
 	if err != nil || !strings.Contains(res.output, "<html>") || !strings.Contains(res.output, "<h1") ||
 		!strings.Contains(res.output, "rev=") {
 		t.Fatalf("HTML line window: %s err=%v", res.output, err)
 	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Spec","ir":true}`, rt)
+	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Spec","ir":true}`, rt)
 	if err != nil || strings.Contains(res.output, "text=<html") {
 		t.Fatalf("ir dump: %s err=%v", res.output, err)
 	}
 
-	_, err = tools["write"].invoke(ctx, fmt.Sprintf(`{"path":"/contracts/Spec","rev":%q,"content":"<p>nope</p>"}`, rev), rt)
+	_, err = tools["write"].invoke(ctx, fmt.Sprintf(`{"path":"/workspace/contracts/Spec","rev":%q,"content":"<p>nope</p>"}`, rev), rt)
 	if !errors.Is(err, vfs.ErrProjected) {
 		t.Fatalf("content on Doc: %v", err)
 	}
-	_, err = tools["write"].invoke(ctx, fmt.Sprintf(`{"path":"/contracts/Spec","rev":%q,"start":1,"end":2}`, rev), rt)
+	_, err = tools["write"].invoke(ctx, fmt.Sprintf(`{"path":"/workspace/contracts/Spec","rev":%q,"start":1,"end":2}`, rev), rt)
 	if !errors.Is(err, vfs.ErrProjected) {
 		t.Fatalf("line write on Doc: %v", err)
 	}
-	_, err = tools["write"].invoke(ctx, fmt.Sprintf(`{"path":"/contracts/Spec","rev":%q,"old":"Hello"}`, rev), rt)
+	_, err = tools["write"].invoke(ctx, fmt.Sprintf(`{"path":"/workspace/contracts/Spec","rev":%q,"old":"Hello"}`, rev), rt)
 	if !errors.Is(err, vfs.ErrProjected) {
 		t.Fatalf("substring write on Doc: %v", err)
 	}
-	_, err = tools["write"].invoke(ctx, fmt.Sprintf(`{"path":"/contracts/Spec","rev":%q,"blocks":[]}`, rev), rt)
+	_, err = tools["write"].invoke(ctx, fmt.Sprintf(`{"path":"/workspace/contracts/Spec","rev":%q,"blocks":[]}`, rev), rt)
 	if err == nil || !strings.Contains(err.Error(), "empty IR replace") {
 		t.Fatalf("empty blocks: %v", err)
 	}
-	noteRev, err := ms.ContentRev(ctx, "/contracts/note.txt")
+	noteRev, err := ms.ContentRev(ctx, "/workspace/contracts/note.txt")
 	if err != nil {
 		t.Fatal(err)
 	}
 	_, err = tools["write"].invoke(ctx, fmt.Sprintf(
-		`{"path":"/contracts/note.txt","rev":%q,"blocks":[{"kind":"paragraph","text":"x"}]}`, noteRev.Hash), rt)
+		`{"path":"/workspace/contracts/note.txt","rev":%q,"blocks":[{"kind":"paragraph","text":"x"}]}`, noteRev.Hash), rt)
 	if !errors.Is(err, vfs.ErrProjected) {
 		t.Fatalf("blocks on plaintext: %v", err)
 	}
 	_, err = tools["write"].invoke(ctx, fmt.Sprintf(
-		`{"path":"/contracts/Spec","rev":%q,"blocks":[{"kind":"paragraph","text":"World"}]}`, rev), rt)
+		`{"path":"/workspace/contracts/Spec","rev":%q,"blocks":[{"kind":"paragraph","text":"World"}]}`, rev), rt)
 	if err == nil || !strings.Contains(err.Error(), "tab_id required") {
 		t.Fatalf("missing tab_id: %v", err)
 	}
 
 	body, _ := json.Marshal(map[string]any{
-		"path": "/contracts/Spec", "rev": rev, "block_id": "intro/p-1", "body": "World",
+		"path": "/workspace/contracts/Spec", "rev": rev, "block_id": "intro/p-1", "body": "World",
 	})
 	if _, err = tools["write"].invoke(ctx, string(body), rt); err != nil {
 		t.Fatalf("block write: %v", err)
 	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Spec","block_id":"intro/p-1"}`, rt)
+	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Spec","block_id":"intro/p-1"}`, rt)
 	if err != nil || !strings.Contains(res.output, "text=World") {
 		t.Fatalf("block_id after write: %s err=%v", res.output, err)
 	}
 
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Spec"}`, rt)
+	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Spec"}`, rt)
 	if err != nil {
 		t.Fatal(err)
 	}
 	rev = fieldKV(res.output, "rev")
 	blocksBody, _ := json.Marshal(map[string]any{
-		"path": "/contracts/Spec", "rev": rev, "tab_id": "t.a",
+		"path": "/workspace/contracts/Spec", "rev": rev, "tab_id": "t.a",
 		"blocks": []map[string]any{{"kind": "paragraph", "text": "Replaced"}},
 	})
 	if _, err = tools["write"].invoke(ctx, string(blocksBody), rt); err != nil {
 		t.Fatalf("tab blocks write: %v", err)
 	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Spec"}`, rt)
+	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Spec"}`, rt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -539,29 +537,29 @@ func TestVFSTools_projectedDocOutlineAndBlocks(t *testing.T) {
 	rev = fieldKV(res.output, "rev")
 	docsAPI.rev["doc1"] = "R-sibling"
 	_, err = tools["write"].invoke(ctx, fmt.Sprintf(
-		`{"path":"/contracts/Spec","rev":%q,"block_id":"intro/p-1","body":"Stale"}`, rev), rt)
+		`{"path":"/workspace/contracts/Spec","rev":%q,"block_id":"intro/p-1","body":"Stale"}`, rev), rt)
 	if !errors.Is(err, vfs.ErrStaleContent) {
 		t.Fatalf("stale CAS: %v", err)
 	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Spec","block_id":"intro/p-1"}`, rt)
+	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Spec","block_id":"intro/p-1"}`, rt)
 	if err != nil || !strings.Contains(res.output, "text=Replaced") {
 		t.Fatalf("body after stale write: %s err=%v", res.output, err)
 	}
 
-	if _, err = tools["write"].invoke(ctx, `{"path":"/contracts/Spec.md","media_type":"application/vnd.google-apps.document","content":"x"}`, rt); err != nil {
+	if _, err = tools["write"].invoke(ctx, `{"path":"/workspace/contracts/Spec.md","media_type":"application/vnd.google-apps.document","content":"x"}`, rt); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tools["write"].invoke(ctx, `{"path":"/contracts/Policy","media_type":"application/vnd.google-apps.document","blocks":[]}`, rt); err != nil {
+	if _, err := tools["write"].invoke(ctx, `{"path":"/workspace/contracts/Policy","media_type":"application/vnd.google-apps.document","blocks":[]}`, rt); err != nil {
 		t.Fatal(err)
 	}
-	_, err = tools["write"].invoke(ctx, `{"path":"/contracts/Foo","content":"<html><p>x</p></html>","media_type":"application/vnd.google-apps.document"}`, rt)
+	_, err = tools["write"].invoke(ctx, `{"path":"/workspace/contracts/Foo","content":"<html><p>x</p></html>","media_type":"application/vnd.google-apps.document"}`, rt)
 	if err == nil || !strings.Contains(err.Error(), "HTML") {
 		t.Fatalf("html lift: %v", err)
 	}
-	if _, err = tools["write"].invoke(ctx, `{"path":"/contracts/Lifted","media_type":"application/vnd.google-apps.document","content":"Hello\n\nWorld"}`, rt); err != nil {
+	if _, err = tools["write"].invoke(ctx, `{"path":"/workspace/contracts/Lifted","media_type":"application/vnd.google-apps.document","content":"Hello\n\nWorld"}`, rt); err != nil {
 		t.Fatal(err)
 	}
-	lifted, err := ms.ReadText(ctx, "/contracts/Lifted")
+	lifted, err := ms.ReadText(ctx, "/workspace/contracts/Lifted")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -574,7 +572,7 @@ func TestVFSTools_projectedDocOutlineAndBlocks(t *testing.T) {
 	if strings.Join(paras, ",") != "Hello,World" {
 		t.Fatalf("lifted blocks = %v", paras)
 	}
-	st, err := ms.Stat(ctx, "/contracts/Lifted")
+	st, err := ms.Stat(ctx, "/workspace/contracts/Lifted")
 	if err != nil || st.MediaType != "application/vnd.google-apps.document" {
 		t.Fatalf("Lifted Stat = %+v err=%v", st, err)
 	}
@@ -786,7 +784,7 @@ func TestVFSTools_writeDocxBlocksAndInlineMarks(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := mustNewAgent(t, AgentOptions{
-		SessionID: "tools-docx", Store: stores.NewInMemoryStore(), MountSession: ms, Model: &mockStrategy{},
+		SessionID: "tools-docx", MountSession: ms, Model: &mockStrategy{},
 	})
 	tools := map[string]*Tool{}
 	for _, tool := range h.tools {
@@ -862,7 +860,7 @@ func TestVFSTools_projectedSheetReadWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := mustNewAgent(t, AgentOptions{
-		SessionID: "tools-sheets", Store: stores.NewInMemoryStore(), MountSession: ms, Model: &mockStrategy{},
+		SessionID: "tools-sheets", MountSession: ms, Model: &mockStrategy{},
 	})
 	tools := map[string]*Tool{}
 	for _, tool := range h.tools {
@@ -870,7 +868,7 @@ func TestVFSTools_projectedSheetReadWrite(t *testing.T) {
 	}
 	rt := turnRuntime(h)
 
-	res, err := tools["read"].invoke(ctx, `{"path":"/contracts/Budget"}`, rt)
+	res, err := tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Budget"}`, rt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -879,55 +877,55 @@ func TestVFSTools_projectedSheetReadWrite(t *testing.T) {
 		t.Fatalf("default read outline: %s", res.output)
 	}
 	rev := fieldKV(res.output, "rev")
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","ir":true}`, rt)
+	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Budget","ir":true}`, rt)
 	if err != nil || !strings.Contains(res.output, "sheet_count=2") || !strings.Contains(res.output, "encoding=") {
 		t.Fatalf("ir header: %s err=%v", res.output, err)
 	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","block_id":"Budget!B2"}`, rt)
+	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Budget","block_id":"Budget!B2"}`, rt)
 	if err != nil || !strings.Contains(res.output, "text=42") ||
 		!strings.Contains(res.output, "format=number=$#,##0.00,bold") {
 		t.Fatalf("cell format: %s err=%v", res.output, err)
 	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","block_id":"Budget!A1:C2"}`, rt)
+	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Budget","block_id":"Budget!A1:C2"}`, rt)
 	if err != nil || !strings.Contains(res.output, "Date") || !strings.Contains(res.output, "42") ||
 		!strings.Contains(res.output, "B2 format=number=$#,##0.00,bold") {
 		t.Fatalf("range: %s err=%v", res.output, err)
 	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","block_id":"Budget"}`, rt)
+	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Budget","block_id":"Budget"}`, rt)
 	if err != nil || !strings.Contains(res.output, "sheet=Budget") || !strings.Contains(res.output, "42") {
 		t.Fatalf("sheet rows: %s err=%v", res.output, err)
 	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","block_id":"Budget","start":2,"end":3,"ir":true}`, rt)
+	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Budget","block_id":"Budget","start":2,"end":3,"ir":true}`, rt)
 	if err != nil || !strings.Contains(res.output, "   2|") || !strings.Contains(res.output, "B2 format=") {
 		t.Fatalf("row window ir: %s err=%v", res.output, err)
 	}
-	_, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","start":1,"end":3}`, rt)
+	_, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Budget","start":1,"end":3}`, rt)
 	if !errors.Is(err, vfs.ErrProjected) {
 		t.Fatalf("line read: %v", err)
 	}
 
 	body, _ := json.Marshal(map[string]any{
-		"path": "/contracts/Budget", "rev": rev, "block_id": "Budget!B2",
+		"path": "/workspace/contracts/Budget", "rev": rev, "block_id": "Budget!B2",
 		"body": "99", "format": map[string]any{"italic": true},
 	})
 	if _, err = tools["write"].invoke(ctx, string(body), rt); err != nil {
 		t.Fatalf("overlay: %v", err)
 	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","block_id":"Budget!B2"}`, rt)
+	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Budget","block_id":"Budget!B2"}`, rt)
 	if err != nil || !strings.Contains(res.output, "text=99") ||
 		!strings.Contains(res.output, "italic") || !strings.Contains(res.output, "bold") {
 		t.Fatalf("after overlay: %s err=%v", res.output, err)
 	}
 
-	if _, err = tools["write"].invoke(ctx, `{"path":"/contracts/Ledger","media_type":"application/vnd.google-apps.spreadsheet","blocks":[{"kind":"sheet","text":"A\tB\n1\t2","attributes":{"title":"Sheet1"}}]}`, rt); err != nil {
+	if _, err = tools["write"].invoke(ctx, `{"path":"/workspace/contracts/Ledger","media_type":"application/vnd.google-apps.spreadsheet","blocks":[{"kind":"sheet","text":"A\tB\n1\t2","attributes":{"title":"Sheet1"}}]}`, rt); err != nil {
 		t.Fatal(err)
 	}
-	st, err := ms.Stat(ctx, "/contracts/Ledger")
+	st, err := ms.Stat(ctx, "/workspace/contracts/Ledger")
 	if err != nil || st.MediaType != "application/vnd.google-apps.spreadsheet" {
 		t.Fatalf("create-as-Sheet Stat = %+v err=%v", st, err)
 	}
 
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget"}`, rt)
+	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Budget"}`, rt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -942,11 +940,11 @@ func TestVFSTools_projectedSheetReadWrite(t *testing.T) {
 	snap.Sheets[0].Cells[0][0] = vfs.Cell{Input: "Changed", Value: "Changed"}
 	sheetsAPI.Seed("sheet1", snap)
 	_, err = tools["write"].invoke(ctx, fmt.Sprintf(
-		`{"path":"/contracts/Budget","rev":%q,"block_id":"Budget!B2","body":"0"}`, rev), rt)
+		`{"path":"/workspace/contracts/Budget","rev":%q,"block_id":"Budget!B2","body":"0"}`, rev), rt)
 	if !errors.Is(err, vfs.ErrStaleContent) {
 		t.Fatalf("stale: %v", err)
 	}
-	res, err = tools["read"].invoke(ctx, `{"path":"/contracts/Budget","block_id":"Budget!B2"}`, rt)
+	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Budget","block_id":"Budget!B2"}`, rt)
 	if err != nil || !strings.Contains(res.output, "text=99") {
 		t.Fatalf("body after stale: %s err=%v", res.output, err)
 	}
@@ -988,7 +986,7 @@ func TestVFSTools_runCommandLiveNames(t *testing.T) {
 	t.Cleanup(func() { _ = ms.Close() })
 
 	h := mustNewAgent(t, AgentOptions{
-		SessionID: "live-names", Store: stores.NewInMemoryStore(),
+		SessionID:    "live-names",
 		MountSession: ms, Model: &mockStrategy{},
 	})
 	tool := h.findTool("run_command", "")

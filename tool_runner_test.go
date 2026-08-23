@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/ryanaldo34/tacklr/internal/session"
-	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
@@ -54,12 +53,10 @@ func TestHarness_planningWriteLock_thenUnlockAfterCreatePlan(t *testing.T) {
 			}
 		},
 	}
-	store := stores.NewInMemoryStore()
 	opts := AgentOptions{
 		SessionID: "plan-then-write",
 		Config:    Config{MaxWindowSize: 8192},
 		Model:     strategy,
-		Store:     store,
 		Tools:     []*Tool{writeTool},
 	}
 	ah := mustNewAgent(t, opts)
@@ -94,11 +91,7 @@ func TestHarness_planningWriteLock_thenUnlockAfterCreatePlan(t *testing.T) {
 		t.Fatalf("park: calls=%d kind=%q id=%q", calls, kind, interruptID)
 	}
 
-	ah.Close()
-	reloaded, err := NewAgentFromSession(context.Background(), "plan-then-write", opts)
-	if err != nil {
-		t.Fatal(err)
-	}
+	reloaded := reloadHarness(t, ah, opts)
 	ch2, err := reloaded.ReturnFromInterrupt(context.Background(), map[string][]byte{
 		interruptID: []byte(`{"optionId":"allow-once"}`),
 	})
@@ -117,8 +110,8 @@ func TestHarness_planningWriteLock_thenUnlockAfterCreatePlan(t *testing.T) {
 }
 
 // TestHarness_toolPermission_allowAlwaysRemembers: first call parks for
-// permission; allow-always resumes and runs the tool. After Close +
-// NewAgentFromSession the grant still skips the interrupt.
+// permission; allow-always resumes and runs the tool. After checkpoint reload
+// the grant still skips the interrupt.
 func TestHarness_toolPermission_allowAlwaysRemembers(t *testing.T) {
 	var handlerCalls int
 	tool := NewTool(ToolConfig{
@@ -144,12 +137,10 @@ func TestHarness_toolPermission_allowAlwaysRemembers(t *testing.T) {
 			}
 		},
 	}
-	store := stores.NewInMemoryStore()
 	opts := AgentOptions{
 		SessionID: "perm-reload",
 		Config:    Config{MaxWindowSize: 8192},
 		Model:     strategy,
-		Store:     store,
 		Tools:     []*Tool{tool},
 	}
 	ah := mustNewAgent(t, opts)
@@ -192,11 +183,7 @@ func TestHarness_toolPermission_allowAlwaysRemembers(t *testing.T) {
 		t.Fatalf("handlerCalls after allow = %d, want 1", handlerCalls)
 	}
 
-	ah.Close()
-	reloaded, err := NewAgentFromSession(context.Background(), "perm-reload", opts)
-	if err != nil {
-		t.Fatal(err)
-	}
+	reloaded := reloadHarness(t, ah, opts)
 
 	ch3, err := reloaded.Run(context.Background(), "again")
 	if err != nil {

@@ -224,6 +224,37 @@ func TestBuildTransportStdioDefaultWhenTypeEmpty(t *testing.T) {
 	}
 }
 
+func TestAppendExplicitEnvironment_skipsMalformedEntries(t *testing.T) {
+	out := appendExplicitEnvironment(
+		[]string{"PLAIN", "A=1"},
+		[]mcp.EnvVariable{{Name: "", Value: "x"}, {Name: "B=C", Value: "x"}, {Name: "OK", Value: "2"}},
+	)
+	if !slices.Contains(out, "A=1") || !slices.Contains(out, "OK=2") {
+		t.Fatalf("out = %v", out)
+	}
+	for _, e := range out {
+		if e == "PLAIN" || strings.HasPrefix(e, "B=C=") || e == "=x" {
+			t.Fatalf("malformed leaked: %v", out)
+		}
+	}
+}
+
+func TestCommandEnvironment_skipsInvalidNames(t *testing.T) {
+	t.Setenv("GOOD", "yes")
+	out := commandEnvironment(mcp.MCPConfig{
+		HostEnv: []string{"", "BAD=NAME", "GOOD"},
+		Env:     []mcp.EnvVariable{{Name: "", Value: "x"}, {Name: "A=B", Value: "x"}, {Name: "OK", Value: "1"}},
+	})
+	if !slices.Contains(out, "GOOD=yes") || !slices.Contains(out, "OK=1") {
+		t.Fatalf("out = %v", out)
+	}
+	for _, e := range out {
+		if strings.HasPrefix(e, "BAD=NAME") || e == "=x" || strings.HasPrefix(e, "A=B=") {
+			t.Fatalf("invalid name leaked: %v", out)
+		}
+	}
+}
+
 func TestBuildTransportStdioRequiresCommand(t *testing.T) {
 	c := &client{config: mcp.MCPConfig{Name: "fs"}}
 	_, err := c.buildTransport()

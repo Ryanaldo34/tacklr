@@ -379,7 +379,7 @@ func TestContinue_andReplaceResultSet(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = eng.Continue(ctx, brain.Scope{Namespace: &ns}, oldID, 2, sc)
-	if !errors.Is(err, brain.ErrResultSetNotFound) {
+	if !errors.Is(err, brain.ErrNotFound) {
 		t.Fatalf("want not found after replace, got %v", err)
 	}
 }

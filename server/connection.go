@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -26,7 +27,7 @@ const (
 var errSSESinkClosed = errors.New("acp sse sink closed")
 
 // Connection is one client transport connection (WebSocket or Streamable HTTP).
-// Harness sessions live in Registry; this is ephemeral wire state only.
+// Harness sessions live on durable.Runtime; this is ephemeral wire state only.
 type Connection struct {
 	ID     string
 	Bridge *ClientBridge
@@ -43,24 +44,15 @@ type Connection struct {
 	routes   map[string]streamRoute
 	sessions map[string]struct{}
 	security tacklrsecurity.Context
-	closed   bool
-	// lateSessionSSEFallback copies ConnectionRegistry.LateSessionSSEFallback.
-	lateSessionSSEFallback bool
 }
 
 func (c *Connection) securityContext() tacklrsecurity.Context {
-	if c == nil {
-		return tacklrsecurity.Context{}
-	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.security
 }
 
 func (c *Connection) setSecurityContext(securityContext tacklrsecurity.Context) {
-	if c == nil {
-		return
-	}
 	c.mu.Lock()
 	c.security = securityContext
 	c.mu.Unlock()
@@ -81,6 +73,14 @@ type sseSink struct {
 	w      http.ResponseWriter
 	f      http.Flusher
 	closed bool
+}
+
+func writeSSEEvent(w io.Writer, flusher http.Flusher, evType string, data []byte) error {
+	if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", evType, data); err != nil {
+		return err
+	}
+	flusher.Flush()
+	return nil
 }
 
 func (s *sseSink) writeJSONRPC(data []byte) error {
@@ -118,10 +118,6 @@ func (s *sseSink) close() {
 type ConnectionRegistry struct {
 	mu   sync.Mutex
 	byID map[string]*Connection
-	// LateSessionSSEFallback delivers session traffic on the connection SSE
-	// when the session sink is not open yet. Off by default.
-	LateSessionSSEFallback bool
-	onRemove               func(*Connection)
 }
 
 // NewConnectionRegistry returns an empty registry.
@@ -134,18 +130,14 @@ func NewConnectionRegistry() *ConnectionRegistry {
 func (r *ConnectionRegistry) Create(bridge *ClientBridge, writer MessageWriter) *Connection {
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &Connection{
-		ID:                     uuid.NewString(),
-		Bridge:                 bridge,
-		Writer:                 writer,
-		ctx:                    ctx,
-		cancel:                 cancel,
-		sessionSinks:           make(map[string]*sseSink),
-		routes:                 make(map[string]streamRoute),
-		sessions:               make(map[string]struct{}),
-		lateSessionSSEFallback: r != nil && r.LateSessionSSEFallback,
-	}
-	if r == nil {
-		return c
+		ID:           uuid.NewString(),
+		Bridge:       bridge,
+		Writer:       writer,
+		ctx:          ctx,
+		cancel:       cancel,
+		sessionSinks: make(map[string]*sseSink),
+		routes:       make(map[string]streamRoute),
+		sessions:     make(map[string]struct{}),
 	}
 	r.mu.Lock()
 	r.byID[c.ID] = c
@@ -155,9 +147,6 @@ func (r *ConnectionRegistry) Create(bridge *ClientBridge, writer MessageWriter) 
 
 // Get returns the connection for id, or nil.
 func (r *ConnectionRegistry) Get(id string) *Connection {
-	if r == nil || id == "" {
-		return nil
-	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.byID[id]
@@ -165,28 +154,17 @@ func (r *ConnectionRegistry) Get(id string) *Connection {
 
 // Remove deletes the connection and cancels its context. Safe if missing or r is nil.
 func (r *ConnectionRegistry) Remove(id string) {
-	if r == nil || id == "" {
-		return
-	}
 	r.mu.Lock()
 	c := r.byID[id]
 	delete(r.byID, id)
 	r.mu.Unlock()
 	if c != nil {
-		if r.onRemove != nil {
-			r.onRemove(c)
-		}
 		c.shutdown()
 	}
 }
 
 func (c *Connection) shutdown() {
 	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
-		return
-	}
-	c.closed = true
 	if c.connSink != nil {
 		c.connSink.close()
 		c.connSink = nil
@@ -197,24 +175,16 @@ func (c *Connection) shutdown() {
 	}
 	cancel := c.cancel
 	c.mu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
+	cancel()
 }
 
 // Context is cancelled when the connection is removed or shut down.
 func (c *Connection) Context() context.Context {
-	if c == nil || c.ctx == nil {
-		return context.Background()
-	}
 	return c.ctx
 }
 
 // rememberRoute records where a request's JSON-RPC result should be delivered.
 func (c *Connection) rememberRoute(id json.RawMessage, method, sessionID string) {
-	if c == nil || len(id) == 0 {
-		return
-	}
 	flags := acpTransportFlagsFor(method)
 	c.mu.Lock()
 	c.routes[string(id)] = streamRoute{method: method, sessionID: sessionID, connLevel: flags.connLevelResult}
@@ -222,9 +192,6 @@ func (c *Connection) rememberRoute(id json.RawMessage, method, sessionID string)
 }
 
 func (c *Connection) takeRoute(id json.RawMessage) streamRoute {
-	if c == nil || len(id) == 0 {
-		return streamRoute{}
-	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	r, ok := c.routes[string(id)]
@@ -235,49 +202,23 @@ func (c *Connection) takeRoute(id json.RawMessage) streamRoute {
 }
 
 func (c *Connection) noteSession(sessionID string) {
-	if c == nil || sessionID == "" {
-		return
-	}
 	c.mu.Lock()
 	c.sessions[sessionID] = struct{}{}
 	c.mu.Unlock()
 }
 
 func (c *Connection) hasSession(sessionID string) bool {
-	if c == nil || sessionID == "" {
-		return false
-	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	_, ok := c.sessions[sessionID]
 	return ok
 }
 
-func (c *Connection) sessionIDs() []string {
-	if c == nil {
-		return nil
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	ids := make([]string, 0, len(c.sessions))
-	for id := range c.sessions {
-		ids = append(ids, id)
-	}
-	return ids
-}
-
 // attachConnSSE registers the connection-scoped GET stream. Returns a detach func
 // and the sink so the caller can write the open frame under sink serialization.
 func (c *Connection) attachConnSSE(w http.ResponseWriter, f http.Flusher) (detach func(), sink *sseSink, err error) {
-	if c == nil {
-		return nil, nil, fmt.Errorf("nil connection")
-	}
 	sink = &sseSink{w: w, f: f}
 	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
-		return nil, nil, errSSESinkClosed
-	}
 	if c.connSink != nil {
 		c.mu.Unlock()
 		return nil, nil, fmt.Errorf("connection-scoped SSE already open")
@@ -296,15 +237,8 @@ func (c *Connection) attachConnSSE(w http.ResponseWriter, f http.Flusher) (detac
 
 // attachSessionSSE registers a session-scoped GET stream.
 func (c *Connection) attachSessionSSE(sessionID string, w http.ResponseWriter, f http.Flusher) (detach func(), sink *sseSink, err error) {
-	if c == nil || sessionID == "" {
-		return nil, nil, fmt.Errorf("session id required")
-	}
 	sink = &sseSink{w: w, f: f}
 	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
-		return nil, nil, errSSESinkClosed
-	}
 	if _, ok := c.sessionSinks[sessionID]; ok {
 		c.mu.Unlock()
 		return nil, nil, fmt.Errorf("session-scoped SSE already open for %s", sessionID)
@@ -324,27 +258,16 @@ func (c *Connection) attachSessionSSE(sessionID string, w http.ResponseWriter, f
 
 // deliver sends one JSON-RPC message to the appropriate SSE stream(s).
 // connLevel or empty sessionID → connection stream; else the session stream.
-// Late session traffic is dropped unless LateSessionSSEFallback is set.
+// Late session traffic is dropped (RFD v1: no replay onto the connection stream).
 func (c *Connection) deliver(sessionID string, data []byte, connLevel bool) error {
-	if c == nil {
-		return fmt.Errorf("nil connection")
-	}
 	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
-		return errSSESinkClosed
-	}
 	var targets []*sseSink
 	if connLevel || sessionID == "" {
 		if c.connSink != nil {
 			targets = append(targets, c.connSink)
 		}
-	} else {
-		if s := c.sessionSinks[sessionID]; s != nil {
-			targets = append(targets, s)
-		} else if c.lateSessionSSEFallback && c.connSink != nil {
-			targets = append(targets, c.connSink)
-		}
+	} else if s := c.sessionSinks[sessionID]; s != nil {
+		targets = append(targets, s)
 	}
 	c.mu.Unlock()
 

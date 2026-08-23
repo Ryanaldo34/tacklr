@@ -39,7 +39,7 @@ func StartTurnSpan(ctx context.Context, a TurnAttrs) (context.Context, *TurnSpan
 	start := time.Now()
 	ctx, span := TracerFromContext(ctx).Start(ctx, SpanTurn,
 		trace.WithAttributes(
-			attribute.String(AttrArea, AreaRegistry),
+			attribute.String(AttrArea, AreaRuntime),
 			attribute.String(AttrAgentID, a.AgentID),
 			attribute.String(AttrThreadID, a.ThreadID),
 			attribute.String(AttrSessionID, a.SessionID),

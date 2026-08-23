@@ -19,13 +19,13 @@ func TestResolveInterruptViaACP_dispatchOutcomes(t *testing.T) {
 		"type":        "not_a_real_kind",
 		"data":        map[string]any{},
 	})
-	_, err := resolveInterruptViaACP(context.Background(), ProtocolEnv{Conn: &Conn{RPC: NewClientBridge(&recordingWriter{})}}, "s", &EventStream{}, &streaming.StreamEvent{Data: data})
+	_, err := resolveInterruptViaACP(context.Background(), ProtocolEnv{Conn: &Conn{RPC: NewClientBridge(&recordingWriter{})}}, "s", &streaming.StreamEvent{Data: data})
 	if err == nil || !strings.Contains(err.Error(), "unsupported") {
 		t.Fatalf("unsupported: %v", err)
 	}
 
 	// Bad envelope.
-	_, err = resolveInterruptViaACP(context.Background(), ProtocolEnv{Conn: &Conn{RPC: NewClientBridge(&recordingWriter{})}}, "s", &EventStream{}, &streaming.StreamEvent{Data: []byte(`{`)})
+	_, err = resolveInterruptViaACP(context.Background(), ProtocolEnv{Conn: &Conn{RPC: NewClientBridge(&recordingWriter{})}}, "s", &streaming.StreamEvent{Data: []byte(`{`)})
 	if err == nil {
 		t.Fatal("expected parse error")
 	}
@@ -40,7 +40,7 @@ func TestResolveInterruptViaACP_dispatchOutcomes(t *testing.T) {
 	})
 	ch, err := resolveInterruptViaACP(context.Background(), ProtocolEnv{Conn: &Conn{
 		RPC: NewClientBridge(&recordingWriter{}),
-	}}, "s", &EventStream{}, &streaming.StreamEvent{Data: selData, MessageID: "tc"})
+	}}, "s", &streaming.StreamEvent{Data: selData, MessageID: "tc"})
 	if err != nil || ch != nil {
 		t.Fatalf("no-form park: ch=%v err=%v", ch, err)
 	}
@@ -52,7 +52,7 @@ func TestResolveInterruptViaACP_dispatchOutcomes(t *testing.T) {
 	})
 	_, err = resolveInterruptViaACP(context.Background(), ProtocolEnv{Conn: &Conn{
 		RPC: NewClientBridge(&recordingWriter{}),
-	}}, "s", &EventStream{}, &streaming.StreamEvent{Data: legacy})
+	}}, "s", &streaming.StreamEvent{Data: legacy})
 	if err == nil || !strings.Contains(err.Error(), "missing type") {
 		t.Fatalf("missing type: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestResolveInterruptViaACP_dispatchOutcomes(t *testing.T) {
 	defer cancel()
 	_, err = resolveInterruptViaACP(ctx, ProtocolEnv{Conn: &Conn{
 		RPC: bridge,
-	}}, "s", &EventStream{}, &streaming.StreamEvent{Data: selData, MessageID: "tc"})
+	}}, "s", &streaming.StreamEvent{Data: selData, MessageID: "tc"})
 	// Must not park (nil, nil): should attempt elicitation and fail via ctx/call.
 	if err == nil {
 		t.Fatal("expected error from elicitation call, not silent park")
@@ -109,7 +109,7 @@ func TestResolvePermissionViaRequest_outcomes(t *testing.T) {
 
 	t.Run("parse error", func(t *testing.T) {
 		env := ProtocolEnv{Conn: &Conn{RPC: NewClientBridge(&recordingWriter{})}}
-		_, err := resolvePermissionViaRequest(context.Background(), env, "sess", &EventStream{}, mkEvent([]byte(`{`)))
+		_, err := resolvePermissionViaRequest(context.Background(), env, "sess", mkEvent([]byte(`{`)))
 		if err == nil {
 			t.Fatal("expected parse error")
 		}
@@ -121,7 +121,7 @@ func TestResolvePermissionViaRequest_outcomes(t *testing.T) {
 		env := ProtocolEnv{Conn: &Conn{RPC: bridge}}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 		defer cancel()
-		_, err := resolvePermissionViaRequest(ctx, env, "sess", &EventStream{}, mkEvent(goodData()))
+		_, err := resolvePermissionViaRequest(ctx, env, "sess", mkEvent(goodData()))
 		if err == nil {
 			t.Fatal("expected rpc/context error")
 		}
@@ -136,7 +136,7 @@ func TestResolvePermissionViaRequest_outcomes(t *testing.T) {
 
 		errCh := make(chan error, 1)
 		go func() {
-			_, err := resolvePermissionViaRequest(ctx, env, "sess", &EventStream{}, mkEvent(goodData()))
+			_, err := resolvePermissionViaRequest(ctx, env, "sess", mkEvent(goodData()))
 			errCh <- err
 		}()
 		respondToBridge(t, bridge, w, map[string]any{
@@ -156,7 +156,7 @@ func TestResolvePermissionViaRequest_outcomes(t *testing.T) {
 
 		errCh := make(chan error, 1)
 		go func() {
-			_, err := resolvePermissionViaRequest(ctx, env, "sess", &EventStream{}, mkEvent(goodData()))
+			_, err := resolvePermissionViaRequest(ctx, env, "sess", mkEvent(goodData()))
 			errCh <- err
 		}()
 		respondToBridge(t, bridge, w, map[string]any{
@@ -169,7 +169,6 @@ func TestResolvePermissionViaRequest_outcomes(t *testing.T) {
 	})
 
 	t.Run("selected resumes interrupts", func(t *testing.T) {
-		store := testStore(t)
 		sensitive := tacklr.NewTool(tacklr.ToolConfig{
 			Name:    "sensitive",
 			OnCall:  []tacklr.OnCallFunc{tacklr.ToolPermissionOnCall},
@@ -183,13 +182,15 @@ func TestResolvePermissionViaRequest_outcomes(t *testing.T) {
 				ch <- tacklr.LLMResponseChunk{IsComplete: true}
 			},
 		}
-		h := mustAgent(t, tacklr.AgentOptions{
+		h, err := tacklr.NewAgent(context.Background(), tacklr.AgentOptions{
 			Config:    tacklr.Config{MaxWindowSize: 8192},
 			SessionID: "sess-perm-resolve",
 			Model:     ms,
-			Store:     store,
 			Tools:     []*tacklr.Tool{sensitive},
 		})
+		if err != nil {
+			t.Fatal(err)
+		}
 		events, err := h.Run(context.Background(), "go")
 		if err != nil {
 			t.Fatal(err)
@@ -212,17 +213,15 @@ func TestResolvePermissionViaRequest_outcomes(t *testing.T) {
 		w := &recordingWriter{}
 		bridge := NewClientBridge(w)
 		env := ProtocolEnv{Conn: &Conn{RPC: bridge}}
-		stream := &EventStream{harness: h, runCtx: context.Background()}
-
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		type result struct {
-			ch  <-chan streaming.StreamEvent
+			ch  map[string][]byte
 			err error
 		}
 		resCh := make(chan result, 1)
 		go func() {
-			ch, err := resolvePermissionViaRequest(ctx, env, "sess-perm-resolve", stream, &interruptEv)
+			ch, err := resolvePermissionViaRequest(ctx, env, "sess-perm-resolve", &interruptEv)
 			resCh <- result{ch, err}
 		}()
 		respondToBridge(t, bridge, w, map[string]any{

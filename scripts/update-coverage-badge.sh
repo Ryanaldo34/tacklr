@@ -14,7 +14,7 @@ if [[ ! -f "$PROFILE" ]]; then
 fi
 
 # Keep in sync with exclude.paths in .testcoverage.yml
-EXCLUDE_REGEX='cmd/|internal/testkit|internal/agentbench|stores/postgres\.go'
+EXCLUDE_REGEX='cmd/|internal/testkit|internal/agentbench|internal/temporallive|stores/postgres\.go'
 
 # -coverpkg=./... writes each block once per tested package. Merge by taking
 # the max hit count per block so the badge matches go-test-coverage.

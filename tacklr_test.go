@@ -16,7 +16,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/interrupt"
-	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/telemetry"
 	"github.com/ryanaldo34/tacklr/vfs"
@@ -145,9 +144,21 @@ func (w *recordingWatchdog) RecordToolResult(msg *Message) error {
 	return nil
 }
 
-func testStore(t *testing.T) *stores.InMemoryStore {
+func reloadHarness(t *testing.T, h *AgentHarness, opts AgentOptions) *AgentHarness {
 	t.Helper()
-	return stores.NewInMemoryStore()
+	cp, err := h.Checkpoint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.Close()
+	n, err := NewAgent(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := n.RestoreCheckpoint(*cp); err != nil {
+		t.Fatal(err)
+	}
+	return n
 }
 
 func TestAgentHarness_Run(t *testing.T) {
@@ -178,13 +189,12 @@ func TestAgentHarness_Run(t *testing.T) {
 	})
 
 	t.Run("single turn no tool calls", func(t *testing.T) {
-		store := testStore(t)
 		strategy := &mockStrategy{
 			invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, events chan<- LLMResponseChunk) {
 				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "Hello!", IsComplete: true}
 			},
 		}
-		ah := mustNewAgent(t, AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
+		ah := mustNewAgent(t, AgentOptions{Config: Config{}, Model: strategy, Tools: []*Tool{validTool}})
 		ch, err := ah.Run(context.Background(), "Hi")
 		if err != nil {
 			t.Fatal(err)
@@ -210,7 +220,6 @@ func TestAgentHarness_Run(t *testing.T) {
 	})
 
 	t.Run("tool progress updates stream during turn", func(t *testing.T) {
-		store := testStore(t)
 		progress := NewTool(ToolConfig{
 			Name: "progress_demo",
 			Handler: func(ctx context.Context, _ struct{}, runtime HarnessRuntime) (string, error) {
@@ -233,7 +242,7 @@ func TestAgentHarness_Run(t *testing.T) {
 				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "after progress", IsComplete: true}
 			},
 		}
-		ah := mustNewAgent(t, AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{progress}})
+		ah := mustNewAgent(t, AgentOptions{Config: Config{}, Model: strategy, Tools: []*Tool{progress}})
 		ch, err := ah.Run(context.Background(), "progress")
 		if err != nil {
 			t.Fatal(err)
@@ -260,7 +269,6 @@ func TestAgentHarness_Run(t *testing.T) {
 	})
 
 	t.Run("full tool call loop", func(t *testing.T) {
-		store := testStore(t)
 		var invokeCount int
 		strategy := &mockStrategy{
 			invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, events chan<- LLMResponseChunk) {
@@ -275,7 +283,7 @@ func TestAgentHarness_Run(t *testing.T) {
 				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "Done!", IsComplete: true}
 			},
 		}
-		ah := mustNewAgent(t, AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
+		ah := mustNewAgent(t, AgentOptions{Config: Config{}, Model: strategy, Tools: []*Tool{validTool}})
 		ch, err := ah.Run(context.Background(), "Say hello")
 		if err != nil {
 			t.Fatal(err)
@@ -337,7 +345,6 @@ func TestAgentHarness_Run(t *testing.T) {
 	})
 
 	t.Run("tool not found", func(t *testing.T) {
-		store := testStore(t)
 		var callCount int
 		strategy := &mockStrategy{
 			invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, events chan<- LLMResponseChunk) {
@@ -351,7 +358,7 @@ func TestAgentHarness_Run(t *testing.T) {
 				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
 			},
 		}
-		ah := mustNewAgent(t, AgentOptions{Config: Config{}, Model: strategy, Store: store})
+		ah := mustNewAgent(t, AgentOptions{Config: Config{}, Model: strategy})
 		ch, err := ah.Run(context.Background(), "test")
 		if err != nil {
 			t.Fatal(err)
@@ -375,7 +382,6 @@ func TestAgentHarness_Run(t *testing.T) {
 
 	t.Run("incomplete function call gets terminal failed result", func(t *testing.T) {
 		// Announced (streamed) but IsComplete=false must not leave clients stuck on in_progress.
-		store := testStore(t)
 		strategy := &mockStrategy{
 			invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, events chan<- LLMResponseChunk) {
 				events <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
@@ -384,7 +390,7 @@ func TestAgentHarness_Run(t *testing.T) {
 				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "gave up", IsComplete: true}
 			},
 		}
-		ah := mustNewAgent(t, AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
+		ah := mustNewAgent(t, AgentOptions{Config: Config{}, Model: strategy, Tools: []*Tool{validTool}})
 		ch, err := ah.Run(context.Background(), "test")
 		if err != nil {
 			t.Fatal(err)
@@ -424,7 +430,6 @@ func TestAgentHarness_Run(t *testing.T) {
 	})
 
 	t.Run("tool handler error", func(t *testing.T) {
-		store := testStore(t)
 		var callCount int
 		strategy := &mockStrategy{
 			invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, events chan<- LLMResponseChunk) {
@@ -438,7 +443,7 @@ func TestAgentHarness_Run(t *testing.T) {
 				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
 			},
 		}
-		ah := mustNewAgent(t, AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{brokenTool}})
+		ah := mustNewAgent(t, AgentOptions{Config: Config{}, Model: strategy, Tools: []*Tool{brokenTool}})
 		ch, err := ah.Run(context.Background(), "test")
 		if err != nil {
 			t.Fatal(err)
@@ -456,11 +461,10 @@ func TestAgentHarness_Run(t *testing.T) {
 	})
 
 	t.Run("invoke returns error", func(t *testing.T) {
-		store := testStore(t)
 		strategy := &mockStrategy{
 			invokeErr: fmt.Errorf("network error"),
 		}
-		ah := mustNewAgent(t, AgentOptions{Config: Config{}, Model: strategy, Store: store})
+		ah := mustNewAgent(t, AgentOptions{Config: Config{}, Model: strategy})
 		ch, err := ah.Run(context.Background(), "test")
 		if err != nil {
 			t.Fatal(err)
@@ -478,7 +482,6 @@ func TestAgentHarness_Run(t *testing.T) {
 	})
 
 	t.Run("tool raises and resolves interrupt", func(t *testing.T) {
-		store := testStore(t)
 		var callCount int
 		strategy := &mockStrategy{
 			invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, events chan<- LLMResponseChunk) {
@@ -494,7 +497,7 @@ func TestAgentHarness_Run(t *testing.T) {
 			},
 		}
 
-		ah := mustNewAgent(t, AgentOptions{Config: Config{}, Model: strategy, Store: store, Tools: []*Tool{interruptTool}})
+		ah := mustNewAgent(t, AgentOptions{Config: Config{}, Model: strategy, Tools: []*Tool{interruptTool}})
 
 		ch, err := ah.Run(context.Background(), "start")
 		if err != nil {
@@ -592,7 +595,6 @@ func TestAgentHarness_Run(t *testing.T) {
 	})
 
 	t.Run("complete todo triggers compression between turns", func(t *testing.T) {
-		store := testStore(t)
 		var invokeCount int
 		var handoffHadNoTools bool
 		var continueSawNudge bool
@@ -631,7 +633,7 @@ func TestAgentHarness_Run(t *testing.T) {
 			},
 		}
 
-		ah := mustNewAgent(t, AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
+		ah := mustNewAgent(t, AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Tools: []*Tool{validTool}})
 		ah.session.Plan.Set([]Todo{
 			{Title: "Task 1", Status: streaming.TodoStatusInProgress},
 			{Title: "Task 2", Status: streaming.TodoStatusPending},
@@ -715,7 +717,6 @@ func TestAgentHarness_Run(t *testing.T) {
 	t.Run("interrupt with completed todo parks turn with full history", func(t *testing.T) {
 		// complete_todo + interrupt in the same batch: plan updates, interrupt
 		// parks the turn, and handoff compress must not run (still one model invoke).
-		store := testStore(t)
 		var invokeCount int
 
 		strategy := &mockStrategy{
@@ -731,7 +732,7 @@ func TestAgentHarness_Run(t *testing.T) {
 			},
 		}
 
-		ah := mustNewAgent(t, AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{interruptTool}})
+		ah := mustNewAgent(t, AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Tools: []*Tool{interruptTool}})
 		ah.session.Plan.Set([]Todo{
 			{Title: "Task 1", Status: streaming.TodoStatusInProgress},
 		})
@@ -795,7 +796,6 @@ func TestAgentHarness_Run(t *testing.T) {
 	})
 
 	t.Run("regular tool call retains tool traffic in window", func(t *testing.T) {
-		store := testStore(t)
 		var invokeCount int
 
 		strategy := &mockStrategy{
@@ -812,7 +812,7 @@ func TestAgentHarness_Run(t *testing.T) {
 			},
 		}
 
-		ah := mustNewAgent(t, AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
+		ah := mustNewAgent(t, AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Tools: []*Tool{validTool}})
 
 		ch, err := ah.Run(context.Background(), "Greet the world")
 		if err != nil {
@@ -874,7 +874,6 @@ func TestAgentHarness_Run(t *testing.T) {
 
 	t.Run("complete last todo skips handoff", func(t *testing.T) {
 		// Final complete_todo must not collapse context or spend a handoff model call.
-		store := testStore(t)
 		var invokeCount int
 		var sawHandoffDeveloper bool
 
@@ -897,7 +896,7 @@ func TestAgentHarness_Run(t *testing.T) {
 			},
 		}
 
-		ah := mustNewAgent(t, AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
+		ah := mustNewAgent(t, AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Tools: []*Tool{validTool}})
 		ah.session.Plan.Set([]Todo{
 			{Title: "Only", Status: streaming.TodoStatusInProgress},
 		})
@@ -933,7 +932,6 @@ func TestAgentHarness_Run(t *testing.T) {
 	t.Run("handoff invoke error soft-fails with fallback", func(t *testing.T) {
 		// Mid-plan complete_todo must not die when the handoff model call fails
 		// (Azure response.failed). We install a plan-derived fallback and continue.
-		store := testStore(t)
 		var invokeCount int
 		var handoffAttempted bool
 
@@ -960,7 +958,7 @@ func TestAgentHarness_Run(t *testing.T) {
 			},
 		}
 
-		ah := mustNewAgent(t, AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Store: store, Tools: []*Tool{validTool}})
+		ah := mustNewAgent(t, AgentOptions{Config: Config{MaxWindowSize: 65536}, Model: strategy, Tools: []*Tool{validTool}})
 		ah.session.Plan.Set([]Todo{
 			{Title: "Task 1", Status: streaming.TodoStatusInProgress},
 			{Title: "Task 2", Status: streaming.TodoStatusPending},
@@ -1005,7 +1003,6 @@ func TestNewAgent_nilModel_error(t *testing.T) {
 }
 
 func TestNewAgent(t *testing.T) {
-	store := testStore(t)
 	mockModel := &mockStrategy{}
 	wd := &recordingWatchdog{}
 
@@ -1015,7 +1012,6 @@ func TestNewAgent(t *testing.T) {
 			SystemPrompt:  "test prompt",
 		},
 		Model:    mockModel,
-		Store:    store,
 		WatchDog: wd,
 	})
 
@@ -1027,9 +1023,6 @@ func TestNewAgent(t *testing.T) {
 	}
 	if h.instructions != "test prompt" {
 		t.Errorf("SystemPrompt = %q, want 'test prompt'", h.instructions)
-	}
-	if h.store != store {
-		t.Error("Store not wired from arg")
 	}
 	if h.watchDog != AgentWatchDog(wd) {
 		t.Error("WatchDog not wired from arg")
@@ -1158,7 +1151,6 @@ func TestRun_reasoningCapturedInContextWindow(t *testing.T) {
 func TestRun_windowPressure_summarizesAndPreservesUser(t *testing.T) {
 	// When token estimate exceeds 85% of MaxWindowSize, addToContext summarizes
 	// older history, keeps the original user message, and continues the turn.
-	store := testStore(t)
 	const maxWindow = 40
 	var invokeCount int
 	var sawSummaryInvoke bool
@@ -1191,7 +1183,6 @@ func TestRun_windowPressure_summarizesAndPreservesUser(t *testing.T) {
 	ah := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: maxWindow},
 		Model:  strategy,
-		Store:  store,
 	})
 
 	// First turn fills the window.
@@ -1239,7 +1230,6 @@ func TestRun_windowPressure_summarizesAndPreservesUser(t *testing.T) {
 func TestRun_windowPressure_onToolResult_summarizes(t *testing.T) {
 	// Tool results go through addToContext; pressure there must summarize without
 	// hanging the turn (same deadlock class as user-prompt pressure).
-	store := testStore(t)
 	const maxWindow = 100
 	const summaryText = "TOOL_PATH_SUMMARY"
 	var invokeCount int
@@ -1280,10 +1270,9 @@ func TestRun_windowPressure_onToolResult_summarizes(t *testing.T) {
 	ah := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: maxWindow},
 		Model:  strategy,
-		Store:  store,
 		Tools:  []*Tool{greet},
 	})
-	ah.restoreMessages([]*Message{
+	ah.context.Restore([]*Message{
 		{Role: RoleUser, Content: "start"},
 		{Role: RoleAssistant, Content: strings.Repeat("a", 40)},
 	})
@@ -1324,7 +1313,6 @@ func TestRun_countTokensError_emitsErrorEvent(t *testing.T) {
 	ah := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  strategy,
-		Store:  testStore(t),
 	})
 	ch, err := ah.Run(context.Background(), "hi")
 	if err != nil {
@@ -1387,7 +1375,6 @@ func TestRun_readSkill_returnsInstructions(t *testing.T) {
 	ah := mustNewAgent(t, AgentOptions{
 		Config:       Config{MaxWindowSize: 8192},
 		Model:        strategy,
-		Store:        testStore(t),
 		MountSession: ms,
 	})
 
@@ -1412,8 +1399,7 @@ func TestRun_readSkill_returnsInstructions(t *testing.T) {
 	}
 }
 
-func TestNewAgentFromSession_resumesPendingToolInterrupt(t *testing.T) {
-	store := testStore(t)
+func TestRestoreCheckpoint_resumesPendingToolInterrupt(t *testing.T) {
 	interruptTool := NewTool(ToolConfig{
 		Name: "ask_user",
 		Handler: func(ctx context.Context, _ struct{}, runtime HarnessRuntime) (string, error) {
@@ -1446,7 +1432,6 @@ func TestNewAgentFromSession_resumesPendingToolInterrupt(t *testing.T) {
 	ah := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  strategy,
-		Store:  store,
 		Tools:  []*Tool{interruptTool},
 	})
 	ns := uuid.New()
@@ -1483,20 +1468,12 @@ func TestNewAgentFromSession_resumesPendingToolInterrupt(t *testing.T) {
 		t.Fatalf("pending tools = %d, want 1", len(ah.pendingToolCalls))
 	}
 
-	if _, err := NewAgentFromSession(context.Background(), "sess-pending-resume", AgentOptions{}); err == nil {
-		t.Fatal("NewAgentFromSession requires store")
-	}
-
-	// Process boundary: drop live harness, reload checkpoint.
-	restored, err := NewAgentFromSession(context.Background(), "sess-pending-resume", AgentOptions{
-		Config: Config{MaxWindowSize: 8192},
-		Model:  strategy,
-		Store:  store,
-		Tools:  []*Tool{interruptTool},
+	restored := reloadHarness(t, ah, AgentOptions{
+		Config:    Config{MaxWindowSize: 8192},
+		Model:     strategy,
+		Tools:     []*Tool{interruptTool},
+		SessionID: "sess-pending-resume",
 	})
-	if err != nil {
-		t.Fatalf("NewAgentFromSession: %v", err)
-	}
 	if len(restored.pendingToolCalls) != 1 {
 		t.Fatalf("restored pending tools = %d, want 1", len(restored.pendingToolCalls))
 	}

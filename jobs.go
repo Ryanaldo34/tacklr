@@ -63,11 +63,7 @@ func (j *workerRun) setTerminal(status, result string, err error) {
 	j.status = status
 	j.result = result
 	j.err = err
-	select {
-	case <-j.done:
-	default:
-		close(j.done)
-	}
+	close(j.done)
 }
 
 func (j *workerRun) setInterrupted(intr interrupt.Interrupt, ids []string) {
@@ -79,11 +75,7 @@ func (j *workerRun) setInterrupted(intr interrupt.Interrupt, ids []string) {
 	j.status = jobStatusInterrupted
 	j.childIntr = intr
 	j.childIntrIDs = ids
-	select {
-	case <-j.done:
-	default:
-		close(j.done)
-	}
+	close(j.done)
 }
 
 type listJobsArgs struct{}
@@ -349,16 +341,9 @@ func (a *AgentHarness) runBackgroundJob(ctx context.Context, j *workerRun) {
 		return
 	}
 
-	if j.worker.store != nil && j.worker.sessionId != "" {
-		if err := j.worker.persistSession(ctx); err != nil {
-			slog.Error("failed to checkpoint background worker", append(logAttrs, "error", err)...)
-		}
-	}
-	parkMeta := parkedWorkerMeta{
-		WorkerName:        j.workerName,
-		WorkerSessionID:   j.worker.sessionId,
-		Task:              j.task,
-		ChildInterruptIDs: childIntrIDs,
+	parkMeta, err := workerParkMeta(j.worker, j.workerName, j.task, childIntrIDs)
+	if err != nil {
+		slog.Error("failed to checkpoint background worker", append(logAttrs, "error", err)...)
 	}
 	a.setPark(j.id, parkMeta, j.worker)
 	j.setInterrupted(childIntr, childIntrIDs)
@@ -485,18 +470,11 @@ func (a *AgentHarness) resumeInterruptedJob(ctx context.Context, j *workerRun, r
 		a.removeJob(j.id)
 		return "", fmt.Errorf("worker %q: incomplete: %w", workerName, ErrFailed)
 	}
-	if worker.store != nil && worker.sessionId != "" {
-		if err := worker.persistSession(ctx); err != nil {
-			a.clearPark(j.id)
-			a.removeJob(j.id)
-			return "", fmt.Errorf("checkpoint interrupted worker %q: %w", workerName, err)
-		}
-	}
-	parkMeta := parkedWorkerMeta{
-		WorkerName:        workerName,
-		WorkerSessionID:   worker.sessionId,
-		Task:              j.task,
-		ChildInterruptIDs: childIntrIDs,
+	parkMeta, err := workerParkMeta(worker, workerName, j.task, childIntrIDs)
+	if err != nil {
+		a.clearPark(j.id)
+		a.removeJob(j.id)
+		return "", fmt.Errorf("checkpoint interrupted worker %q: %w", workerName, err)
 	}
 	a.setPark(j.id, parkMeta, worker)
 	j.mu.Lock()

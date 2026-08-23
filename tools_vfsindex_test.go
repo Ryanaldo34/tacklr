@@ -10,7 +10,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
-	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfsindex"
@@ -42,7 +41,6 @@ func vfsIndexHarness(t *testing.T, withNS bool) (*AgentHarness, *vfs.MountSessio
 	ns := uuid.New()
 	opts := AgentOptions{
 		SessionID:       "vfs-idx-tools",
-		Store:           stores.NewInMemoryStore(),
 		MountSession:    ms,
 		Model:           &mockStrategy{},
 		Brain:           eng,
@@ -293,7 +291,7 @@ func TestVFSIndexTools_prefixAutoIndex(t *testing.T) {
 	}
 	ns := uuid.New()
 	h := mustNewAgent(t, AgentOptions{
-		SessionID: "policy-prefix", Store: stores.NewInMemoryStore(),
+		SessionID:    "policy-prefix",
 		MountSession: ms, Model: &mockStrategy{},
 		Brain: eng, SearchNamespace: &ns,
 	})
@@ -338,7 +336,7 @@ func TestKnowledgeSaveSearchRead(t *testing.T) {
 	ns := uuid.New()
 	mustMountBrain(ctx, t, reg, ms, eng, ns, vfs.MountSpec{})
 	h := mustNewAgent(t, AgentOptions{
-		SessionID: "save-mem", Store: stores.NewInMemoryStore(),
+		SessionID:    "save-mem",
 		MountSession: ms, Model: &mockStrategy{},
 		Brain: eng, SearchNamespace: &ns,
 		BrainWriteKinds: brain.WriteKinds{Discovery: "Discovery", Fact: "Fact"},
@@ -469,7 +467,7 @@ func TestKnowledgeSave_rootsMount(t *testing.T) {
 		Params: map[string]string{"mode": brain.ModeRoots, "kind": "Discovery"},
 	})
 	h := mustNewAgent(t, AgentOptions{
-		SessionID: "save-roots", Store: stores.NewInMemoryStore(),
+		SessionID:    "save-roots",
 		MountSession: ms, Model: &mockStrategy{},
 		Brain: eng, SearchNamespace: &ns,
 		BrainWriteKinds: brain.WriteKinds{Discovery: "Discovery"},
@@ -612,7 +610,6 @@ func TestRun_workspaceResearchTurn(t *testing.T) {
 
 	h := mustNewAgent(t, AgentOptions{
 		SessionID: "research-turn",
-		Store:     stores.NewInMemoryStore(),
 		Config: Config{
 			MaxWindowSize:   400,
 			SystemPrompt:    "You are a research agent. Prefer tools over guessing.",
@@ -712,7 +709,7 @@ func TestPathNativeGraphLinkExpand(t *testing.T) {
 	}
 	ns := uuid.New()
 	h := mustNewAgent(t, AgentOptions{
-		SessionID: "path-graph", Store: stores.NewInMemoryStore(),
+		SessionID:    "path-graph",
 		MountSession: ms, Model: &mockStrategy{},
 		Brain: eng, SearchNamespace: &ns,
 	})

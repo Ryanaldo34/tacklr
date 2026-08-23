@@ -87,7 +87,7 @@ func (c *SearchContext) Get(_ context.Context, id uuid.UUID) (ResultSet, error) 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.current == nil || c.current.ID != id {
-		return ResultSet{}, fmt.Errorf("%w: %s", ErrResultSetNotFound, id)
+		return ResultSet{}, fmt.Errorf("%w: result set %s", ErrNotFound, id)
 	}
 	return cloneResultSet(*c.current), nil
 }

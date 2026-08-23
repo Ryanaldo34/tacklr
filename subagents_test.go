@@ -15,7 +15,6 @@ import (
 
 	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/interrupt"
-	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfsindex"
@@ -144,7 +143,6 @@ func TestSpawnWorker_success(t *testing.T) {
 	h := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 8192, MaxTurnRequests: 16},
 		Model:  parent,
-		Store:  stores.NewInMemoryStore(),
 		SubAgents: []*SubAgent{
 			{WorkerName: "researcher", Model: researcher, Description: "research", Tools: []*Tool{ping}},
 			{WorkerName: "down", Model: down},
@@ -289,12 +287,10 @@ func TestSpawnWorker_interruptPropagatesAndResumes(t *testing.T) {
 	}
 
 	// Durable store preserves the bubbled worker interrupt across the parent park.
-	store := stores.NewInMemoryStore()
 	h := mustNewAgent(t, AgentOptions{
 		SessionID: "sess-root",
 		Config:    Config{MaxWindowSize: 8192},
 		Model:     parentModel,
-		Store:     store,
 		SubAgents: []*SubAgent{
 			{WorkerName: "researcher", Model: workerModel, Tools: []*Tool{interruptTool}},
 		},
@@ -349,7 +345,9 @@ func TestSpawnWorker_interruptPropagatesAndResumes(t *testing.T) {
 		t.Errorf("spawn result = %q, want worker done with choice", toolResults[0])
 	}
 
-	// No store: dropping the live park must fail resume (nothing durable to attach).
+	// Close drops live workers; park metadata still has the worker checkpoint.
+	parentModel.callNum.Store(0)
+	workerModel.callNum.Store(0)
 	volatile := mustNewAgent(t, AgentOptions{
 		SessionID: "sess-volatile",
 		Config:    Config{MaxWindowSize: 8192},
@@ -358,9 +356,7 @@ func TestSpawnWorker_interruptPropagatesAndResumes(t *testing.T) {
 			{WorkerName: "researcher", Model: workerModel, Tools: []*Tool{interruptTool}},
 		},
 	})
-	parentModel.callNum.Store(0)
-	workerModel.callNum.Store(0)
-	ev2, err := volatile.Run(context.Background(), "park then lose live")
+	ev2, err := volatile.Run(context.Background(), "park then close live")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -375,10 +371,16 @@ func TestSpawnWorker_interruptPropagatesAndResumes(t *testing.T) {
 		}
 	}
 	if interruptID == "" {
-		t.Fatal("expected interrupt without store")
+		t.Fatal("expected interrupt")
 	}
-	// Close is process teardown: live parks are released. No store → resume cannot attach.
-	volatile.Close()
+	volatile = reloadHarness(t, volatile, AgentOptions{
+		SessionID: "sess-volatile",
+		Config:    Config{MaxWindowSize: 8192},
+		Model:     parentModel,
+		SubAgents: []*SubAgent{
+			{WorkerName: "researcher", Model: workerModel, Tools: []*Tool{interruptTool}},
+		},
+	})
 	resolution = fmt.Sprintf(`{"interruptId":%q,"selectionIdx":0}`, interruptID)
 	resumed, err = volatile.ReturnFromInterrupt(context.Background(), map[string][]byte{
 		interruptID: []byte(resolution),
@@ -387,11 +389,8 @@ func TestSpawnWorker_interruptPropagatesAndResumes(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := drainEvents(resumed)
-	if !hasToolResultContent(got, "parked worker state is missing") {
-		t.Fatalf("want parked-state detail, got %+v", summarizeEvents(got))
-	}
-	if !hasToolResultContent(got, "not found") {
-		t.Fatalf("want ErrNotFound category in wrap, got %+v", summarizeEvents(got))
+	if !hasToolResultContent(got, "worker done with choice") {
+		t.Fatalf("want worker result after checkpoint reload, got %+v", summarizeEvents(got))
 	}
 }
 
@@ -463,12 +462,10 @@ func TestSpawnWorker_nestedInterruptPropagates(t *testing.T) {
 		ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "root finished", IsComplete: true}
 	}
 
-	store := stores.NewInMemoryStore()
 	h := mustNewAgent(t, AgentOptions{
 		SessionID: "sess-nested",
 		Config:    Config{MaxWindowSize: 8192},
 		Model:     rootModel,
-		Store:     store,
 		SubAgents: []*SubAgent{
 			{
 				WorkerName: "mid",
@@ -568,12 +565,10 @@ func TestSpawnWorker_interruptSurvivesSessionReload(t *testing.T) {
 		ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "parent after", IsComplete: true}
 	}
 
-	store := stores.NewInMemoryStore()
 	opts := AgentOptions{
 		SessionID: "sess-reload",
 		Config:    Config{MaxWindowSize: 8192},
 		Model:     parentModel,
-		Store:     store,
 		SubAgents: []*SubAgent{
 			{WorkerName: "researcher", Model: workerModel, Tools: []*Tool{interruptTool}},
 		},
@@ -598,12 +593,7 @@ func TestSpawnWorker_interruptSurvivesSessionReload(t *testing.T) {
 		t.Fatal("expected interrupt")
 	}
 
-	// Host teardown: persist + drop live parks. Reload is the process-restart path.
-	h.Close()
-	reloaded, err := NewAgentFromSession(context.Background(), "sess-reload", opts)
-	if err != nil {
-		t.Fatal(err)
-	}
+	reloaded := reloadHarness(t, h, opts)
 	// Parent model call count continues for invoke after tool resume.
 	// Fresh mock would break the second invoke expectation — reuse same opts.Model.
 
@@ -633,7 +623,7 @@ func TestSpawnWorker_interruptSurvivesSessionReload(t *testing.T) {
 func newWorkerHost(t *testing.T) (*AgentHarness, *AgentHarness, *vfs.MountSession, *brain.Engine, uuid.UUID) {
 	t.Helper()
 	parent, ms, eng, ns := vfsIndexHarness(t, true)
-	worker := mustNewAgent(t, parent.workerOptsForSpawn(&SubAgent{WorkerName: "researcher", Model: &mockStrategy{}}))
+	worker := mustNewAgent(t, parent.workerOptsFromSpec(&SubAgent{WorkerName: "researcher", Model: &mockStrategy{}}))
 	t.Cleanup(worker.Close)
 	return parent, worker, ms, eng, ns
 }
@@ -747,18 +737,17 @@ func TestSpawnWorker_inheritsParentSkills(t *testing.T) {
 		Config:       Config{MaxWindowSize: 8192, MaxTurnRequests: 4},
 		Model:        &mockStrategy{},
 		MountSession: ms,
-		Store:        testStore(t),
 	})
 	t.Cleanup(parent.Close)
 	if parent.findTool("read_skill", "") == nil {
 		t.Fatal("parent missing read_skill")
 	}
-	inherited := parent.inheritOptions()
+	inherited := parent.workerOptsFromSpec(&SubAgent{WorkerName: "researcher", Model: &mockStrategy{}})
 	if inherited.Config.MaxTurnRequests != 4 || inherited.MountSession != ms {
-		t.Fatalf("inheritOptions = %+v", inherited.Config)
+		t.Fatalf("workerOptsFromSpec = %+v", inherited.Config)
 	}
 
-	worker := mustNewAgent(t, parent.workerOptsForSpawn(&SubAgent{WorkerName: "researcher", Model: &mockStrategy{}}))
+	worker := mustNewAgent(t, inherited)
 	t.Cleanup(worker.Close)
 	skill := worker.findTool("read_skill", "")
 	if skill == nil {
@@ -854,7 +843,6 @@ func TestSpawnWorker_resumeKeepsParentVFS(t *testing.T) {
 		SessionID:       "sess-resume-vfs",
 		Config:          Config{MaxWindowSize: 8192},
 		Model:           parentModel,
-		Store:           stores.NewInMemoryStore(),
 		MountSession:    ms,
 		Brain:           eng,
 		SearchNamespace: &ns,
@@ -883,13 +871,9 @@ func TestSpawnWorker_resumeKeepsParentVFS(t *testing.T) {
 		t.Fatal("expected worker interrupt")
 	}
 
-	parent.Close()
 	reloadOpts := opts
 	reloadOpts.SearchNamespace = nil
-	reloaded, err := NewAgentFromSession(ctx, "sess-resume-vfs", reloadOpts)
-	if err != nil {
-		t.Fatal(err)
-	}
+	reloaded := reloadHarness(t, parent, reloadOpts)
 	t.Cleanup(reloaded.Close)
 
 	const spawnID = "spawn_1"

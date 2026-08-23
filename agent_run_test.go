@@ -12,7 +12,6 @@ import (
 
 	mcpruntime "github.com/ryanaldo34/tacklr/internal/mcp"
 	"github.com/ryanaldo34/tacklr/mcp"
-	"github.com/ryanaldo34/tacklr/stores"
 )
 
 // drainEvents collects all events until the channel closes.
@@ -256,7 +255,7 @@ func TestReturnFromInterrupt_rejectsUnknownInterrupt(t *testing.T) {
 	model := sequentialToolModel([]ToolCall{toolCall("ask1", "ask_user_choice",
 		`{"question":"Pick?","choices":[{"title":"A"}]}`)})
 	h := mustNewAgent(t, AgentOptions{
-		Model: model, Config: Config{MaxWindowSize: 8192}, Store: testStore(t),
+		Model: model, Config: Config{MaxWindowSize: 8192},
 	})
 	t.Cleanup(h.Close)
 	events, err := h.Run(context.Background(), "ask")
@@ -271,20 +270,6 @@ func TestReturnFromInterrupt_rejectsUnknownInterrupt(t *testing.T) {
 	// Assert
 	if err == nil || !strings.Contains(err.Error(), "missing") {
 		t.Fatalf("error = %v", err)
-	}
-}
-
-func TestAgentHarness_persistSessionSkipsWithoutStoreOrSessionID(t *testing.T) {
-	// Arrange
-	h := mustNewAgent(t, AgentOptions{Model: &mockStrategy{}})
-	t.Cleanup(h.Close)
-
-	// Act
-	err := h.persistSession(t.Context())
-
-	// Assert
-	if err != nil {
-		t.Fatal(err)
 	}
 }
 
@@ -451,7 +436,6 @@ func TestRun_functionCallRecordedBeforeToolResult(t *testing.T) {
 // batch, a provider stream failure is marked ErrModelAfterTools and the durable
 // window retains user + function_call + tool result for resume.
 func TestRun_modelErrorAfterTools_tagsAndCheckpointsPairs(t *testing.T) {
-	store := stores.NewInMemoryStore()
 	tool := NewTool(ToolConfig{
 		Name:    "echo",
 		Handler: func(ctx context.Context) (string, error) { return "tool-ok", nil },
@@ -481,7 +465,6 @@ func TestRun_modelErrorAfterTools_tagsAndCheckpointsPairs(t *testing.T) {
 		Config: Config{MaxWindowSize: 8192},
 		Model:  strategy,
 		Tools:  []*Tool{tool},
-		Store:  store,
 	})
 	h.sessionId = "sess-after-tools-ckpt"
 	events, err := h.Run(context.Background(), "do the tool then die")
@@ -502,15 +485,11 @@ func TestRun_modelErrorAfterTools_tagsAndCheckpointsPairs(t *testing.T) {
 		t.Fatalf("want ErrModelAfterTools, got %+v", summarizeEvents(got))
 	}
 
-	loaded, err := NewAgentFromSession(context.Background(), "sess-after-tools-ckpt", AgentOptions{
+	loaded := reloadHarness(t, h, AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  &mockStrategy{},
-		Store:  store,
 		Tools:  []*Tool{tool},
 	})
-	if err != nil {
-		t.Fatalf("reload: %v", err)
-	}
 	var sawUser, sawFC, sawTool bool
 	for _, m := range loaded.Messages() {
 		if m == nil {
@@ -540,7 +519,6 @@ func TestRun_modelErrorAfterTools_tagsAndCheckpointsPairs(t *testing.T) {
 // TestRun_pairsOpenToolCallsBeforeTurn: a restored open function_call is paired
 // with an error tool result so the next model turn sees a valid window.
 func TestRun_pairsOpenToolCallsBeforeTurn(t *testing.T) {
-	store := stores.NewInMemoryStore()
 	strategy := &mockStrategy{
 		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
 			ch <- LLMResponseChunk{
@@ -553,10 +531,9 @@ func TestRun_pairsOpenToolCallsBeforeTurn(t *testing.T) {
 	h := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  strategy,
-		Store:  store,
 	})
 	h.sessionId = "sess-pair-open"
-	h.restoreMessages([]*Message{
+	h.context.Restore([]*Message{
 		{Role: RoleUser, Content: "goal"},
 		{Role: RoleAssistant, ToolCalls: []ToolCall{
 			{ID: "fc_orphan", CallID: "orphan", Name: "echo", Arguments: `{}`},
@@ -573,14 +550,10 @@ func TestRun_pairsOpenToolCallsBeforeTurn(t *testing.T) {
 	}
 	_ = drainEvents(events)
 
-	loaded, err := NewAgentFromSession(context.Background(), "sess-pair-open", AgentOptions{
+	loaded := reloadHarness(t, h, AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  &mockStrategy{},
-		Store:  store,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	var sawGood, sawOrphanCall, sawOrphanResult bool
 	for _, m := range loaded.Messages() {
 		if m == nil {
@@ -898,12 +871,10 @@ func TestRun_cancelMidTool_pairsCancelledResultsInWindow(t *testing.T) {
 			}
 		},
 	}
-	store := stores.NewInMemoryStore()
 	h := mustNewAgent(t, AgentOptions{
 		Config:    Config{MaxWindowSize: 8192},
 		Model:     strategy,
 		Tools:     []*Tool{slow},
-		Store:     store,
 		SessionID: "steer-cancel-mid-tool",
 	})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -919,17 +890,12 @@ func TestRun_cancelMidTool_pairsCancelledResultsInWindow(t *testing.T) {
 	cancel()
 	_ = drainEvents(events)
 
-	// Reload from checkpoint — every tool_call must have a tool result.
-	loaded, err := NewAgentFromSession(context.Background(), "steer-cancel-mid-tool", AgentOptions{
+	loaded := reloadHarness(t, h, AgentOptions{
 		Config:    Config{MaxWindowSize: 8192},
 		Model:     strategy,
 		Tools:     []*Tool{slow},
-		Store:     store,
 		SessionID: "steer-cancel-mid-tool",
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	var sawToolCancel bool
 	hasCall := false
 	for _, m := range loaded.Messages() {

@@ -5,10 +5,11 @@
 //   - MountSession — mounts, path I/O, ReadText / WriteDocument, ReadLines, FuseMount / Close, HostDir
 //   - FuseAvailable — process can mount a kernel tree (/dev/fuse or /dev/macfuse*)
 //   - ContentRev / ContentHash — session-visible content identity (for tools)
-//   - BackendRegistry + LocalFactory / S3Factory / DriveFactory + AWSS3 — process profiles
+//   - BackendRegistry + LocalFactory / S3Factory / DriveFactory / GraphFactory + AWSS3 — process profiles
 //   - SessionAuth + TokenHolder + Binding — session-scoped user-owned credentials (never on MountSpec)
-//   - MountSpec — durable mount description (checkpoint-safe; Members = read-only union)
-//   - Skills / SkillsPoint — /skills union from SkillSource factories (LocalFactory.Skills, S3Factory.Skills)
+//   - MountSpec — durable mount description (checkpoint-safe; Members = skills or /workspace union)
+//   - Skills / SkillsPoint — /skills flat read-only union from SkillSource factories
+//   - Workspace / WorkspacePoint — /workspace named writable union (cloud aliases)
 //   - Provider / ProviderFactory / S3API / DriveAPI — custom backends
 //   - File, FileInfo, DirEntry — I/O types (File is Close+Stat; io.Reader / io.ReaderAt / io.Writer via comma-ok)
 //   - Document / Textual / Structured / TextDocument — content IR
@@ -38,7 +39,7 @@
 //	Stat, Open, ReadFile, WriteFile, ReadDir, Remove, MkdirAll, FuseMount, Close
 //	File is Close + Stat. Read / ReadAt / Write are optional (comma-ok).
 //	FuseMount is explicit (host kernel tree). Mount points must be one segment
-//	(/work, /engram). If ReadText succeeds, the kernel sees that plaintext
+//	(/work, /engram, /workspace). If ReadText succeeds, the kernel sees that plaintext
 //	(read-only unless IdentityCodec). Otherwise Stat + io.ReaderAt. Close
 //	unmounts. HostDir is the last FuseMount directory.
 //

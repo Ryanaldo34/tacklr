@@ -1,28 +1,25 @@
 package server
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"errors"
-	"fmt"
-	"io"
-	"log/slog"
 	"net/http"
-	"sync"
 	"time"
 
+	"github.com/ryanaldo34/tacklr/durable"
 	tacklrsecurity "github.com/ryanaldo34/tacklr/security"
 )
 
-// Server serves a Registry over one or more wire Protocols.
+const defaultHTTPShutdown = 5 * time.Second
+
+// Server serves a durable.Runtime over HTTP, with WebSocket when the request upgrades.
+// Protocols is the ordered list of wire implementations (ACP and/or host protocols).
 type Server struct {
-	Registry  *Registry
+	Runtime   durable.Runtime
+	Catalog   durable.Catalog
 	Protocols []Protocol
-	// Client is set for the active stdio connection (outbound Agent→Client RPC).
-	// Prefer Conn.RPC inside protocol handlers; this field supports demux on stdio.
-	Client *ClientBridge
-	// Connections tracks ACP WebSocket (and future Streamable HTTP) connections.
+	// Connections tracks ACP Streamable HTTP / WebSocket connections.
+	// Custom protocols may ignore it.
 	Connections *ConnectionRegistry
 	// Security is protocol-neutral authentication and authorization supplied by the host.
 	Security *tacklrsecurity.Service
@@ -33,152 +30,33 @@ type Server struct {
 	networkPolicyConfigured bool
 }
 
-// NewServer wraps a Registry and one or more protocols.
-// The first protocol is used for connection-oriented transports (stdio).
-func NewServer(r *Registry, protocols ...Protocol) *Server {
-	if r == nil {
-		panic("server: Registry is required")
+// NewServer wraps a Runtime and one or more Protocols. ACP is NewACPProtocol;
+// pass additional implementations to mount their HTTPRoutes on the same mux.
+func NewServer(rt durable.Runtime, cat durable.Catalog, protocols ...Protocol) *Server {
+	if rt == nil {
+		panic("server: Runtime is required")
 	}
 	if len(protocols) == 0 {
 		panic("server: at least one Protocol is required")
 	}
-	connections := NewConnectionRegistry()
-	connections.onRemove = func(connection *Connection) {
-		if r.vfsAuth == nil {
-			return
-		}
-		for _, sessionID := range connection.sessionIDs() {
-			r.vfsAuth.Clear(sessionID)
+	for _, p := range protocols {
+		if p == nil {
+			panic("server: Protocol is required")
 		}
 	}
 	return &Server{
-		Registry:    r,
+		Runtime:     rt,
+		Catalog:     cat,
 		Protocols:   protocols,
-		Connections: connections,
+		Connections: NewConnectionRegistry(),
 	}
 }
 
-type stdioReadResult struct {
-	line []byte
-	err  error
+func (s *Server) env(conn *Conn) ProtocolEnv {
+	return ProtocolEnv{Runtime: s.Runtime, Catalog: s.Catalog, Conn: conn, Security: s.Security, Connections: s.Connections}
 }
 
-// ServeStdio serves line-delimited JSON messages over in/out.
-func (s *Server) ServeStdio(ctx context.Context, in io.Reader, out io.Writer) error {
-	reader := bufio.NewReader(in)
-	w := &lineMessageWriter{w: out}
-	bridge := NewClientBridge(w)
-	s.Client = bridge
-	defer func() { s.Client = nil }()
-
-	proto := s.Protocols[0]
-	localPrincipal, err := tacklrsecurity.NewPrincipal("stdio")
-	if err != nil {
-		panic(err)
-	}
-	localSecurity := tacklrsecurity.Context{
-		Principal: localPrincipal,
-		Binding:   tacklrsecurity.ChannelBinding{Kind: "stdio", ID: "process"},
-	}
-
-	readCh := make(chan stdioReadResult, 1)
-
-	go func() {
-		defer close(readCh)
-		for {
-			line, err := reader.ReadBytes('\n')
-			select {
-			case readCh <- stdioReadResult{line: line, err: err}:
-				if err != nil {
-					return
-				}
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-
-	var wg sync.WaitGroup
-	// Each inbound line gets its own Conn so concurrent handlers do not race on
-	// Caps. Capabilities are loaded from / stored on the bridge under its mutex.
-	// initialize runs synchronously so later methods on the same input see it.
-	dispatch := func(body []byte) {
-		run := func() {
-			reqConn := &Conn{
-				Writer:   w,
-				RPC:      bridge,
-				Security: &localSecurity,
-			}
-			reqEnv := ProtocolEnv{Registry: s.Registry, Conn: reqConn, Security: s.Security}
-			if err := proto.HandleInbound(ctx, reqEnv, body); err != nil {
-				slog.Debug("inbound handler", "error", err, "protocol", proto.Name())
-			}
-		}
-		if peek, err := peekJSONRPC(body); err == nil && peek.Method == "initialize" {
-			run()
-			return
-		}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			run()
-		}()
-	}
-
-	return runStdioLoop(ctx, readCh, bridge, dispatch, &wg, bridge.Close)
-}
-
-// runStdioLoop is the ServeStdio select loop. Extracted so the readCh-closed
-// path can be tested without racing the real reader goroutine.
-func runStdioLoop(
-	ctx context.Context,
-	readCh <-chan stdioReadResult,
-	bridge *ClientBridge,
-	dispatch func([]byte),
-	wg *sync.WaitGroup,
-	onClose context.CancelFunc,
-) error {
-	if onClose == nil {
-		onClose = func() {}
-	}
-	for {
-		select {
-		case <-ctx.Done():
-			onClose()
-			return ctx.Err()
-		case rr, ok := <-readCh:
-			if !ok {
-				// Reader exited without a final result (typically parent cancel).
-				onClose()
-				return ctx.Err()
-			}
-			if rr.err != nil {
-				if errors.Is(rr.err, io.EOF) {
-					if trimmed := bytes.TrimRight(rr.line, "\n\r"); len(trimmed) > 0 {
-						if !bridge.TryCompleteResponse(trimmed) {
-							dispatch(trimmed)
-						}
-					}
-					onClose()
-					wg.Wait()
-					return nil
-				}
-				onClose()
-				return fmt.Errorf("stdio read: %w", rr.err)
-			}
-			line := bytes.TrimRight(rr.line, "\n\r")
-			if len(line) == 0 {
-				continue
-			}
-			if bridge.TryCompleteResponse(line) {
-				continue
-			}
-			dispatch(line)
-		}
-	}
-}
-
-// HTTPMux mounts all protocol HTTP routes. Used by ServeHTTP and tests.
+// HTTPMux mounts every Protocol's HTTP routes. Used by ServeHTTP and tests.
 func (s *Server) HTTPMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	for _, p := range s.Protocols {
@@ -191,12 +69,7 @@ func (s *Server) HTTPMux() *http.ServeMux {
 					http.Error(w, http.StatusText(status), status)
 					return
 				}
-				env := ProtocolEnv{
-					Registry:    s.Registry,
-					Conn:        &Conn{Security: securityContext},
-					Security:    s.Security,
-					Connections: s.Connections,
-				}
+				env := s.env(&Conn{Security: securityContext})
 				r.Handler(env, w, req)
 			})
 		}
@@ -235,15 +108,5 @@ func waitHTTPServer(ctx context.Context, shutdown func(context.Context) error, e
 			return nil
 		}
 		return err
-	}
-}
-
-// HandleMessage dispatches one inbound body on the primary protocol.
-// Used by tests and unary HTTP adapters.
-func (s *Server) HandleMessage(ctx context.Context, body []byte, w MessageWriter) {
-	conn := &Conn{Writer: w, RPC: s.Client}
-	env := ProtocolEnv{Registry: s.Registry, Conn: conn}
-	if err := s.Protocols[0].HandleInbound(ctx, env, body); err != nil {
-		slog.Debug("HandleMessage", "error", err)
 	}
 }

@@ -19,6 +19,7 @@ go get github.com/ryanaldo34/tacklr
 | Doc | What it covers |
 |-----|----------------|
 | [docs/knowledge.md](docs/knowledge.md) | **Canonical** knowledge system: Engrams, search, graph, tools |
+| [docs/durable.md](docs/durable.md) | Runtime kernel, Path A/B/C, Temporal, HITL |
 | [docs/vfs.md](docs/vfs.md) | Mounts, content IR, provider persist, lifecycle |
 | [pkg.go.dev/tacklr](https://pkg.go.dev/github.com/ryanaldo34/tacklr) | Harness, tools, types |
 | [pkg.go.dev/vfs](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfs) | Virtual filesystem API |
@@ -110,9 +111,10 @@ Security is a **platform property**. If it only lives in the system prompt, you 
 | **Inference** | Talk to the model, nothing else | [`inference`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/inference) |
 | **Harness** | Turn loop, tools, plan, context, save/load | [`tacklr`](https://pkg.go.dev/github.com/ryanaldo34/tacklr) |
 | **VFS** | Mounts, IR, provider persist | [docs/vfs.md](docs/vfs.md) · [`vfs`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfs) |
-| **Store** | Checkpoints | [`stores`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/stores) |
+| **Store** | Checkpoint blob types (`SessionCheckpoint`) | [`stores`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/stores) |
+| **Runtime** | Session kernel (in-process or Temporal) | [`durable`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/durable) |
 | **Brain** | Knowledge (optional) | [`brain`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/brain) |
-| **Server** | Multi-agent / protocols (optional) | [`server`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/server) |
+| **Server** | `Protocol` interface over Runtime. ACP is the native option | [`server`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/server) |
 
 A **turn** is one prompt (or resume after interrupt) until done, error, cancel, or a deliberate wait for the user:
 
@@ -197,7 +199,9 @@ tool := tacklr.NewTool(tacklr.ToolConfig{
 
 ```go
 agent := tacklr.NewAgent(ctx, opts)
-agent, err := tacklr.NewAgentFromSession(ctx, sessionID, opts)
+cp, _ := agent.Checkpoint()
+restored, _ := tacklr.NewAgent(ctx, opts)
+_ = restored.RestoreCheckpoint(*cp)
 ```
 
 Checkpoints cover conversation, plan, tool/user state, and pending interrupts. In-memory for throwaway runs; Postgres when you need durability. VFS writes persist immediately (write-through IR); checkpoints store mount specs, not a dirty document cache.
@@ -293,8 +297,6 @@ We already have the harness, VFS, IR, brain hooks, and checkpoints. Next we clos
 | Capability broker | **Planned** | Mid-flight allow / deny / ask |
 | Linux eBPF / cgroup | **Eventually** | Backstop when something tries to leave the box |
 | Materialize tree (no FUSE) | **Eventually** | Same idea without kernel FS glue |
-
-**testserver** bootstraps virtual `Point: /work` with `LocalFactory.Base` as the host jail so you can poke mounts and file tools end-to-end.
 
 ### Target architecture
 

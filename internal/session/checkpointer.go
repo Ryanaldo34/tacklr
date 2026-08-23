@@ -7,22 +7,10 @@ import (
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
-// Checkpointer builds and applies SessionCheckpoint blobs. It does not own
-// live session data — SessionManager does. It does not own persistence I/O —
-// stores.BaseStore does.
-//
-// Capture/Apply are pure over their inputs so tests can assert wire format
-// without a real store.
-type Checkpointer struct{}
-
-// NewCheckpointer returns a Checkpointer.
-func NewCheckpointer() Checkpointer {
-	return Checkpointer{}
-}
-
-// Capture assembles a durable checkpoint from the message window, session
-// manager (user state + plan + interrupts), and harness park maps.
-func (Checkpointer) Capture(
+// CaptureCheckpoint assembles a durable checkpoint from the message window,
+// session manager (user state + plan + interrupts), and harness park maps.
+// Persistence I/O is durable.SnapshotStore.
+func CaptureCheckpoint(
 	window []*streaming.Message,
 	sm *SessionManager,
 	pendingToolCalls map[string]stores.PendingToolCall,
@@ -51,9 +39,9 @@ type AppliedCheckpoint struct {
 	PendingToolCalls map[string]stores.PendingToolCall
 }
 
-// Apply loads SessionManager state from the checkpoint and returns maps the
-// harness must reattach (window, pending tools, interrupt routing).
-func (Checkpointer) Apply(cp stores.SessionCheckpoint, sm *SessionManager) (AppliedCheckpoint, error) {
+// ApplyCheckpoint loads SessionManager state from the checkpoint and returns
+// maps the harness must reattach (window, pending tools, interrupt routing).
+func ApplyCheckpoint(cp stores.SessionCheckpoint, sm *SessionManager) (AppliedCheckpoint, error) {
 	if sm == nil {
 		return AppliedCheckpoint{}, fmt.Errorf("checkpointer: session manager is nil")
 	}
