@@ -272,7 +272,7 @@ func TestAsJson(t *testing.T) {
 		t.Error("parameters missing")
 	}
 	// Nil parameters map → default empty object schema (strict tool host shape).
-	empty := (&Tool{Name: "bare"}).AsJson()
+	empty := (&Tool{name: "bare"}).AsJson()
 	params, _ := empty["parameters"].(map[string]any)
 	if params == nil || params["type"] != "object" {
 		t.Fatalf("nil params default = %#v", empty["parameters"])

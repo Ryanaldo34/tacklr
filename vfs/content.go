@@ -117,7 +117,8 @@ func NewContentRegistry() *ContentRegistry {
 	return &ContentRegistry{codecs: make(map[string]Codec)}
 }
 
-// Register adds or replaces codec bindings for each of c.MediaTypes().
+// Register binds c for each of c.MediaTypes(). It does not replace an existing
+// binding; first registration wins.
 func (r *ContentRegistry) Register(c Codec) error {
 	if c == nil {
 		return fmt.Errorf("vfs: codec required")
@@ -126,17 +127,30 @@ func (r *ContentRegistry) Register(c Codec) error {
 	if len(types) == 0 {
 		return fmt.Errorf("vfs: codec media types required")
 	}
+	normalized := make([]string, 0, len(types))
 	for _, mt := range types {
+		mt = normalizeMediaType(mt)
 		if mt == "" {
 			return fmt.Errorf("vfs: codec media type required")
 		}
+		normalized = append(normalized, mt)
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for _, mt := range types {
+	for _, mt := range normalized {
+		if _, exists := r.codecs[mt]; exists {
+			return fmt.Errorf("%w: %s", ErrAlreadyRegistered, mt)
+		}
+	}
+	for _, mt := range normalized {
 		r.codecs[mt] = c
 	}
 	return nil
+}
+
+// Lookup returns the codec bound to mediaType, if any.
+func (r *ContentRegistry) Lookup(mediaType string) (Codec, bool) {
+	return r.codec(mediaType)
 }
 
 func normalizeMediaType(mediaType string) string {

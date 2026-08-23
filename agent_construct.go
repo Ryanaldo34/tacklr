@@ -97,9 +97,10 @@ type AgentOptions struct {
 	// projection is available. Embedders pass their own. The injector Closes
 	// it after the turn; the harness never does (workers inherit the pointer).
 	MountSession *vfs.MountSession
-	// RunCommandUnattended injects run_command without ToolPermissionOnCall.
-	// Zero value parks run_command for permission.
-	RunCommandUnattended bool
+	// runCommandUnattended injects run_command without ToolPermissionOnCall.
+	// Zero value parks run_command for permission. Unexported so hosts cannot
+	// disable the permission park from AgentOptions.
+	runCommandUnattended bool
 	// shareIndexBridge is the parent index bridge. Nil means Start a new bridge.
 	shareIndexBridge *vfsindex.Bridge
 }
@@ -136,9 +137,9 @@ func NewAgent(ctx context.Context, opts AgentOptions) (*AgentHarness, error) {
 		interruptPayloads:     make(map[string][]byte),
 		parkedWorkersLive:     make(map[string]*AgentHarness),
 		jobs:                  make(map[string]*workerRun),
-		context:               NewModelContextManager(),
+		context:               newModelContextManager(),
 		contextPolicy:         opts.ContextPolicy,
-		runCommandUnattended:  opts.RunCommandUnattended,
+		runCommandUnattended:  opts.runCommandUnattended,
 		writeUnattended:       opts.writeUnattended,
 		vfsBridge:             opts.shareIndexBridge,
 	}
@@ -325,7 +326,7 @@ func (a *AgentHarness) SearchNamespace() (uuid.UUID, bool) {
 
 // planningWriteLock blocks write tools until create_plan has set a plan.
 func (a *AgentHarness) planningWriteLock(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error) {
-	if inv.Tool != nil && inv.Tool.Access.Allows(WritePermission) &&
+	if inv.Tool != nil && inv.Tool.access.Allows(WritePermission) &&
 		!a.session.Plan.HasActive() {
 		return "", fmt.Errorf("%w: write tools are locked until create_plan establishes a todo list", ErrToolPermissionDenied)
 	}

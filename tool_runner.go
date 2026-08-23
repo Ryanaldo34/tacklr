@@ -56,7 +56,7 @@ func (r *toolRunner) Run(ctx context.Context, inv ToolInvocation) (string, ToolO
 }
 
 func toolNameOf(inv ToolInvocation) string {
-	return inv.Tool.Name
+	return inv.Tool.name
 }
 
 // ToolPermissionOnCall parks a tool_permission interrupt before the handler.
@@ -65,7 +65,7 @@ func ToolPermissionOnCall(inv ToolInvocation) Interrupt {
 	name := toolNameOf(inv)
 	return &interrupt.ToolPermissionInterrupt{
 		ToolName: name,
-		Title:    ResolveToolTitle(inv.Tool.DisplayName, name, inv.ArgsJSON),
+		Title:    ResolveToolTitle(inv.Tool.displayName, name, inv.ArgsJSON),
 		Options:  interrupt.DefaultPermissionOptions(),
 	}
 }
@@ -74,13 +74,13 @@ func ToolPermissionOnCall(inv ToolInvocation) Interrupt {
 // and interrupt adopt live on SessionManager, not Runtime.
 func onCallMiddleware(sm *session.SessionManager) ToolInterceptor {
 	return func(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error) {
-		if inv.Tool == nil || len(inv.Tool.OnCall) == 0 {
+		if inv.Tool == nil || len(inv.Tool.onCall) == 0 {
 			return next(ctx, inv)
 		}
 		if inv.Runtime == nil || sm == nil {
 			return "", fmt.Errorf("%w: on-call interrupt requires a runtime", ErrFailed)
 		}
-		for _, ctor := range inv.Tool.OnCall {
+		for _, ctor := range inv.Tool.onCall {
 			if err := applyOnCallLayer(&inv, ctor, sm); err != nil {
 				return "", err
 			}

@@ -129,6 +129,9 @@ func TestRegisterCommon(t *testing.T) {
 	if err == nil || errors.Is(err, vfs.ErrNoCodec) {
 		t.Fatalf("xlsx must be registered: %v", err)
 	}
+	if err := RegisterCommon(reg); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestMountSession_xlsxCreateFormatPersists(t *testing.T) {

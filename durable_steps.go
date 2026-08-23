@@ -6,35 +6,14 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/ryanaldo34/tacklr/internal/drive"
 	"github.com/ryanaldo34/tacklr/internal/session"
 	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
-// InferenceStep is the result of one model invocation for the durable driver.
-type InferenceStep struct {
-	ToolCalls []ToolCall
-	Complete  bool
-}
-
-// ToolStep is the result of one tool invocation for the durable driver.
-// Interrupted means the tool parked; the driver must persist, publish yield,
-// and wait for Resume. It must not block inside the tool function.
-type ToolStep struct {
-	Interrupted   bool
-	InterruptID   string
-	InterruptData []byte
-}
-
-// TurnState is per-slice counters for the durable inference loop.
-type TurnState struct {
-	ModelRequests int
-	HadToolRound  bool
-}
-
-// AbsorbUser adds a user message to the window (durable prompt start).
-func (a *AgentHarness) AbsorbUser(ctx context.Context, user *Message, out chan StreamEvent) error {
+func (a *AgentHarness) absorbUser(ctx context.Context, user *Message, out chan StreamEvent) error {
 	if user == nil {
 		return nil
 	}
@@ -45,8 +24,7 @@ func (a *AgentHarness) AbsorbUser(ctx context.Context, user *Message, out chan S
 	return a.addToContext(ctx, user, out)
 }
 
-// PendingToolCalls returns tool calls waiting to run (resume after yield).
-func (a *AgentHarness) PendingToolCalls() []ToolCall {
+func (a *AgentHarness) runnableToolCalls() []ToolCall {
 	pending := a.pendingSnapshot()
 	out := make([]ToolCall, 0, len(pending))
 	for _, tc := range pending {
@@ -78,17 +56,15 @@ func (a *AgentHarness) RestoreCheckpoint(cp stores.SessionCheckpoint) error {
 	return nil
 }
 
-// RunInference is the inference activity body: model Invoke plus StreamEvent
-// publish. Runtime drivers and in-process Run call this.
-func (a *AgentHarness) RunInference(ctx context.Context, st *TurnState, out chan StreamEvent) (InferenceStep, error) {
+func (a *AgentHarness) runInference(ctx context.Context, st *drive.TurnState, out chan StreamEvent) (drive.InferenceStep, error) {
 	if st == nil {
-		st = &TurnState{}
+		st = &drive.TurnState{}
 	}
 
 	if a.maxTurnRequests > 0 && st.ModelRequests >= a.maxTurnRequests {
 		err := fmt.Errorf("%w: limit %d", ErrMaxTurnRequests, a.maxTurnRequests)
 		out <- StreamEvent{Type: StreamEventError, Error: err}
-		return InferenceStep{}, err
+		return drive.InferenceStep{}, err
 	}
 	turnCtx := ctx
 	if st.HadToolRound {
@@ -97,7 +73,7 @@ func (a *AgentHarness) RunInference(ctx context.Context, st *TurnState, out chan
 	events, err := a.tasks.Turn(turnCtx, a.tools, a.constructSystemPrompt())
 	if err != nil {
 		if ctx.Err() != nil {
-			return InferenceStep{}, ctx.Err()
+			return drive.InferenceStep{}, ctx.Err()
 		}
 		var outErr error
 		if st.HadToolRound {
@@ -106,7 +82,7 @@ func (a *AgentHarness) RunInference(ctx context.Context, st *TurnState, out chan
 			outErr = fmt.Errorf("model request failed: %w", err)
 		}
 		out <- StreamEvent{Type: StreamEventError, Error: outErr}
-		return InferenceStep{}, outErr
+		return drive.InferenceStep{}, outErr
 	}
 	st.ModelRequests++
 	asm := newStreamAssembler()
@@ -130,14 +106,14 @@ func (a *AgentHarness) RunInference(ctx context.Context, st *TurnState, out chan
 	for {
 		if err := ctx.Err(); err != nil {
 			failAnnounced("tool call cancelled")
-			return InferenceStep{}, err
+			return drive.InferenceStep{}, err
 		}
 		var chunk LLMResponseChunk
 		var ok bool
 		select {
 		case <-ctx.Done():
 			failAnnounced("tool call cancelled")
-			return InferenceStep{}, ctx.Err()
+			return drive.InferenceStep{}, ctx.Err()
 		case chunk, ok = <-events:
 		}
 		if !ok {
@@ -148,14 +124,14 @@ func (a *AgentHarness) RunInference(ctx context.Context, st *TurnState, out chan
 		}
 		if !a.streamChunk(ctx, chunk, out) {
 			failAnnounced("tool call cancelled")
-			return InferenceStep{}, ctx.Err()
+			return drive.InferenceStep{}, ctx.Err()
 		}
 		if chunk.Type == StreamEventError || chunk.Error != nil {
 			failAnnounced("model error")
 			if chunk.Error != nil {
-				return InferenceStep{}, chunk.Error
+				return drive.InferenceStep{}, chunk.Error
 			}
-			return InferenceStep{}, errors.New(chunk.Content)
+			return drive.InferenceStep{}, errors.New(chunk.Content)
 		}
 		if chunk.Type == StreamEventFunctionCall {
 			for _, tc := range chunk.ToolCalls {
@@ -181,7 +157,7 @@ func (a *AgentHarness) RunInference(ctx context.Context, st *TurnState, out chan
 	}
 	if ctx.Err() != nil {
 		failAnnounced("tool call cancelled")
-		return InferenceStep{}, ctx.Err()
+		return drive.InferenceStep{}, ctx.Err()
 	}
 	executable := make(map[string]struct{}, len(toolCalls))
 	for _, tc := range toolCalls {
@@ -205,25 +181,22 @@ func (a *AgentHarness) RunInference(ctx context.Context, st *TurnState, out chan
 	if len(toolCalls) == 0 {
 		if nudge := a.backgroundJobsNudge(); nudge != "" {
 			if err := a.addToContext(ctx, &Message{Role: RoleUser, Content: nudge}, out); err != nil {
-				return InferenceStep{}, err
+				return drive.InferenceStep{}, err
 			}
 			st.HadToolRound = true
-			return a.RunInference(ctx, st, out)
+			return a.runInference(ctx, st, out)
 		}
 		out <- StreamEvent{Type: StreamEventComplete}
-		return InferenceStep{Complete: true}, nil
+		return drive.InferenceStep{Complete: true}, nil
 	}
 	a.context.Add(&Message{
 		Role:      RoleAssistant,
 		ToolCalls: append([]ToolCall(nil), toolCalls...),
 	})
-	return InferenceStep{ToolCalls: toolCalls}, nil
+	return drive.InferenceStep{ToolCalls: toolCalls}, nil
 }
 
-// RunToolCall is the tool activity body: toolRunner.Run plus interrupt-as-outcome.
-// VFS is injected by the caller (activity preamble). spawn_worker stays a tool
-// here; the Temporal workflow intercepts it as a child workflow.
-func (a *AgentHarness) RunToolCall(ctx context.Context, tc ToolCall, out chan StreamEvent) (ToolStep, error) {
+func (a *AgentHarness) runToolCall(ctx context.Context, tc ToolCall, out chan StreamEvent) (drive.ToolStep, error) {
 	turnRT := session.NewRuntime(out, a.session)
 	tcKey := tc.Key()
 	toolCtx, toolSpan := telemetry.StartToolSpan(ctx, tc.Name, tc.Namespace)
@@ -233,7 +206,7 @@ func (a *AgentHarness) RunToolCall(ctx context.Context, tc ToolCall, out chan St
 		toolSpan.Finish("error", toolErr)
 		msg := a.emitToolResult(out, tc, toolErr.Error(), "error")
 		_ = a.addToContext(ctx, msg, out)
-		return ToolStep{}, toolErr
+		return drive.ToolStep{}, toolErr
 	}
 	runtimeCopy := turnRT.WithToolCallID(tcKey)
 	output, toolDisp, err := a.toolRunner.Run(toolCtx, ToolInvocation{
@@ -247,7 +220,7 @@ func (a *AgentHarness) RunToolCall(ctx context.Context, tc ToolCall, out chan St
 		if serErr != nil {
 			toolSpan.Finish("error", serErr)
 			out <- StreamEvent{Type: StreamEventError, Error: fmt.Errorf("serialize interrupt: %w", serErr)}
-			return ToolStep{}, serErr
+			return drive.ToolStep{}, serErr
 		}
 		payload := map[string]any{
 			"interruptId": tcKey,
@@ -258,7 +231,7 @@ func (a *AgentHarness) RunToolCall(ctx context.Context, tc ToolCall, out chan St
 		if marErr != nil {
 			toolSpan.Finish("error", marErr)
 			out <- StreamEvent{Type: StreamEventError, Error: fmt.Errorf("marshal interrupt: %w", marErr)}
-			return ToolStep{}, marErr
+			return drive.ToolStep{}, marErr
 		}
 		telemetry.InstrumentsFromContext(ctx).RecordInterrupt(
 			toolCtx, telemetry.AgentIDFromContext(ctx), parked.TypeName(),
@@ -268,7 +241,7 @@ func (a *AgentHarness) RunToolCall(ctx context.Context, tc ToolCall, out chan St
 		a.pendingToolCalls[tcKey] = stores.PendingToolCall{ToolCall: &tc, InterruptActive: true}
 		a.pendingMu.Unlock()
 		out <- StreamEvent{Type: StreamEventInterrupt, MessageID: tcKey, Data: data}
-		return ToolStep{Interrupted: true, InterruptID: tcKey, InterruptData: data}, nil
+		return drive.ToolStep{Interrupted: true, InterruptID: tcKey, InterruptData: data}, nil
 	}
 	a.pendingMu.Lock()
 	delete(a.pendingToolCalls, tcKey)
@@ -281,7 +254,7 @@ func (a *AgentHarness) RunToolCall(ctx context.Context, tc ToolCall, out chan St
 		}
 		msg := a.emitToolResult(out, tc, content, "error")
 		_ = a.addToContext(ctx, msg, out)
-		return ToolStep{}, err
+		return drive.ToolStep{}, err
 	}
 	var effects batchToolResultEffects
 	effects.merge(toolDisp)
@@ -297,35 +270,16 @@ func (a *AgentHarness) RunToolCall(ctx context.Context, tc ToolCall, out chan St
 	msg := a.emitToolResult(out, tc, output, "success")
 	if !toolDisp.SuppressWindowMessage && !hookDisp.SuppressWindowMessage {
 		if err := a.addToContext(ctx, msg, out); err != nil {
-			return ToolStep{}, err
+			return drive.ToolStep{}, err
 		}
 	}
 	if effect := effects.resolved(); effect != EffectNone {
 		if err := a.applyBatchToolResultEffect(ctx, effect); err != nil {
 			out <- StreamEvent{Type: StreamEventError, Error: err, Content: err.Error()}
-			return ToolStep{}, err
+			return drive.ToolStep{}, err
 		}
 	}
-	return ToolStep{}, nil
-}
-
-// PipeStreamEvents copies channel events to emit. Durable backends adapt
-// emit callbacks to the harness chan StreamEvent API.
-func PipeStreamEvents(emit func(StreamEvent)) (chan StreamEvent, func()) {
-	out := make(chan StreamEvent, streamEventBuffer)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for ev := range out {
-			if emit != nil {
-				emit(ev)
-			}
-		}
-	}()
-	return out, func() {
-		close(out)
-		<-done
-	}
+	return drive.ToolStep{}, nil
 }
 
 // SpawnWorkerName is the tool the durable driver maps to a nested run

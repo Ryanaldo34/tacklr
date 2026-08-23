@@ -14,6 +14,7 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
+	"github.com/ryanaldo34/tacklr/internal/drive"
 	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/telemetry"
@@ -131,26 +132,27 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 		h.Close()
 		durable.CloseTurnVFS(ms, string(in.SessionID), "inference")
 	}()
-	out, stop := tacklr.PipeStreamEvents(a.emitter(ctx, stream, in.SessionID))
+	eng := drive.EngineOf(h)
+	out, stop := drive.PipeStreamEvents(a.emitter(ctx, stream, in.SessionID))
 	defer stop()
 	if len(in.Resume) > 0 {
-		if err := h.ApplyResume(in.Resume); err != nil {
+		if err := eng.ApplyResume(in.Resume); err != nil {
 			_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, streaming.StreamEvent{Type: streaming.StreamEventError, Error: err, Content: err.Error()}, true)
 			return InferenceOutput{}, canceledIf(ctx, err)
 		}
-		if pending := h.PendingToolCalls(); len(pending) > 0 {
+		if pending := eng.PendingToolCalls(); len(pending) > 0 {
 			etag, err = a.save(ctx, in.SessionID, in.AgentID, h, etag, in.Mounts)
 			return InferenceOutput{Etag: etag, ToolCalls: pending}, err
 		}
 	}
 	if in.User != nil {
-		if err := h.AbsorbUser(ctx, in.User, out); err != nil {
+		if err := eng.AbsorbUser(ctx, in.User, out); err != nil {
 			slog.ErrorContext(ctx, "inference absorb", "area", telemetry.AreaRuntime, "error", err)
 			return InferenceOutput{}, canceledIf(ctx, err)
 		}
 	}
-	st := &tacklr.TurnState{HadToolRound: in.HadToolRound, ModelRequests: in.ModelRequests}
-	step, err := h.RunInference(ctx, st, out)
+	st := &drive.TurnState{HadToolRound: in.HadToolRound, ModelRequests: in.ModelRequests}
+	step, err := eng.RunInference(ctx, st, out)
 	if err != nil {
 		pub := err
 		if ctx.Err() != nil {
@@ -205,9 +207,10 @@ func (a *Activities) Tool(ctx context.Context, in ToolInput) (ToolOutput, error)
 		h.Close()
 		durable.CloseTurnVFS(ms, string(in.SessionID), "tool")
 	}()
-	out, stop := tacklr.PipeStreamEvents(a.emitter(ctx, stream, in.SessionID))
+	eng := drive.EngineOf(h)
+	out, stop := drive.PipeStreamEvents(a.emitter(ctx, stream, in.SessionID))
 	defer stop()
-	step, runErr := h.RunToolCall(ctx, in.Call, out)
+	step, runErr := eng.RunToolCall(ctx, in.Call, out)
 	if runErr != nil && ctx.Err() != nil {
 		slog.WarnContext(ctx, "tool cancelled", "area", telemetry.AreaHarness, "tool", in.Call.Name)
 		_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, streaming.StreamEvent{Type: streaming.StreamEventError, Error: context.Canceled, Content: context.Canceled.Error()}, true)

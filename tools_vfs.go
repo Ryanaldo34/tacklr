@@ -9,14 +9,7 @@ import (
 	"github.com/ryanaldo34/tacklr/internal/command"
 	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/vfs"
-	"github.com/ryanaldo34/tacklr/vfs/adapters"
 )
-
-func init() {
-	// The harness default registry includes common editor formats. The vfs
-	// package itself remains format-agnostic and can be used standalone.
-	_ = adapters.RegisterCommon(vfs.DefaultContentRegistry())
-}
 
 const smallFormatCells = 32
 

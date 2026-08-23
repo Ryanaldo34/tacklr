@@ -39,10 +39,10 @@ func DefaultContextPolicy() ContextPolicy {
 	}
 }
 
-// ContextManager owns the conversation window structure only (no inference).
+// contextManager owns the conversation window structure only (no inference).
 // modelTasks does model work and applies results with Replace or InstallPlanDocument.
 // Messages must be safe while another path Absorbs or Replaces after resume.
-type ContextManager interface {
+type contextManager interface {
 	// Messages returns a retainable snapshot of the live window (also used for checkpoints).
 	Messages() []*Message
 	// Restore copies window into storage (caller keeps its slice).
@@ -55,18 +55,17 @@ type ContextManager interface {
 	InstallPlanDocument(planRaw string) error
 }
 
-// ModelContextManager is the default ContextManager (name is historical).
-type ModelContextManager struct {
+// modelContextManager is the default contextManager (name is historical).
+type modelContextManager struct {
 	mu     sync.RWMutex
 	window []*Message
 }
 
-// NewModelContextManager returns an empty ContextManager.
-func NewModelContextManager() *ModelContextManager {
-	return &ModelContextManager{}
+func newModelContextManager() *modelContextManager {
+	return &modelContextManager{}
 }
 
-func (m *ModelContextManager) Messages() []*Message {
+func (m *modelContextManager) Messages() []*Message {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if len(m.window) == 0 {
@@ -75,7 +74,7 @@ func (m *ModelContextManager) Messages() []*Message {
 	return slices.Clone(m.window)
 }
 
-func (m *ModelContextManager) Restore(window []*Message) {
+func (m *modelContextManager) Restore(window []*Message) {
 	assertValidContextWindow(window)
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -86,14 +85,14 @@ func (m *ModelContextManager) Restore(window []*Message) {
 	m.window = slices.Clone(window)
 }
 
-func (m *ModelContextManager) Replace(window []*Message) {
+func (m *modelContextManager) Replace(window []*Message) {
 	assertValidContextWindow(window)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.window = window
 }
 
-func (m *ModelContextManager) Add(msg *Message) {
+func (m *modelContextManager) Add(msg *Message) {
 	if err := streaming.ValidateMessages([]*Message{msg}); err != nil {
 		panic("tacklr: invalid context message: " + err.Error())
 	}
@@ -108,7 +107,7 @@ func assertValidContextWindow(window []*Message) {
 	}
 }
 
-func (m *ModelContextManager) InstallPlanDocument(planRaw string) error {
+func (m *modelContextManager) InstallPlanDocument(planRaw string) error {
 	if planRaw == "" {
 		return fmt.Errorf("install plan document: no plan document")
 	}

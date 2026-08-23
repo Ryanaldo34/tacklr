@@ -48,7 +48,7 @@ The **agent file catalog** is collapsed. Discovery (`find_files`, `find_content`
 
 **Byte identity (shipped).** Textual FUSE `Read` / `getattr` use `ReadText`. Binaries use `Stat` + `io.ReaderAt`. Writes are write-through, so host `rg` sees the last persist, not a dirty IR buffer.
 
-**`run_command` (shipped).** `tools_vfs.go`. cwd = `HostDir()`; empty HostDir → `ErrFuseNotMounted`. Timeout 60 s, 1 MiB shared stdout+stderr, `Setpgid` + kill group, `exit=N` is success. `PermissionRequired` unless `RunCommandUnattended`. Injected when `session.VFS != nil`.
+**`run_command` (shipped).** `tools_vfs.go`. cwd = `HostDir()`; empty HostDir → `ErrFuseNotMounted`. Timeout 60 s, 1 MiB shared stdout+stderr, `Setpgid` + kill group, `exit=N` is success. `PermissionRequired` by default. Injected when `session.VFS != nil`.
 
 ---
 
@@ -195,7 +195,7 @@ Update `docs/vfs.md`, `docs/knowledge.md`, `README.md`, `vfs/doc.go` so they mat
 1. FUSE root is virtual `/`. Single-segment points only.
 2. Harness tools, `MountInfo`, `Specs`, and checkpoints never print `HostDir`. The child may `pwd` it.
 3. `run_command` is cwd-only `/bin/sh -c`. No chroot in this train. Residual escape risk is documented, not tested as a negative.
-4. Registry `run_command` is `PermissionRequired: true` unless `RunCommandUnattended`.
+4. Registry `run_command` is `PermissionRequired: true` by default.
 5. `list` / `stat` stay whenever a `MountSession` exists. Do not gate them on `FuseAvailable()`.
 6. `write` modes are counted by field presence. IR body field is `ir_text`.
 7. Tests assert positive outcomes. Kernel and host-exec tests `Skip` without a FUSE device.
@@ -268,7 +268,7 @@ Each PR is independently reviewable. Do not combine Phase 3 removal with the `wr
 - `tools_vfs.go` — `read`, `write`, `run_command`
 - `tools_vfsindex.go` — `index_file` / `unindex` / `find_content` (until PR A)
 - `agent.go` — turn-scoped `Close` (does not close MountSession)
-- `agent_construct.go` — `injectBuiltinTools`, `RunCommandUnattended`
+- `agent_construct.go` — `injectBuiltinTools`
 - Runtime catalog `FSBootstrap` — `Point: /work`
 - `docs/vfs.md`, `docs/knowledge.md`, `README.md` — update in PR D
 

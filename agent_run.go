@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/ryanaldo34/tacklr/internal/drive"
 	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/telemetry"
@@ -34,13 +35,13 @@ func (a *AgentHarness) RunMessage(ctx context.Context, user *Message) (<-chan St
 // ReturnFromInterrupt applies host resolutions and resumes the parked tool batch.
 // Keys are tool call ids, which are also the wire interrupt ids.
 func (a *AgentHarness) ReturnFromInterrupt(ctx context.Context, finishedInterrupts map[string][]byte) (<-chan StreamEvent, error) {
-	if err := a.ApplyResume(finishedInterrupts); err != nil {
+	if err := a.applyResume(finishedInterrupts); err != nil {
 		return nil, err
 	}
 	return a.startTurn(ctx, nil)
 }
 
-func (a *AgentHarness) ApplyResume(finishedInterrupts map[string][]byte) error {
+func (a *AgentHarness) applyResume(finishedInterrupts map[string][]byte) error {
 	a.pendingMu.Lock()
 	defer a.pendingMu.Unlock()
 	if a.interruptPayloads == nil {
@@ -101,7 +102,7 @@ func (a *AgentHarness) startTurn(ctx context.Context, user *Message) (<-chan Str
 		}
 
 		if user != nil {
-			if err := a.AbsorbUser(ctx, user, out); err != nil {
+			if err := a.absorbUser(ctx, user, out); err != nil {
 				if ctx.Err() != nil {
 					emitCancelled()
 					return
@@ -122,7 +123,7 @@ func (a *AgentHarness) startTurn(ctx context.Context, user *Message) (<-chan Str
 }
 
 func (a *AgentHarness) runTurnLoop(ctx context.Context, out chan StreamEvent, emitCancelled func()) string {
-	st := &TurnState{}
+	st := &drive.TurnState{}
 	for {
 		if ctx.Err() != nil {
 			emitCancelled()
@@ -131,7 +132,7 @@ func (a *AgentHarness) runTurnLoop(ctx context.Context, out chan StreamEvent, em
 		var toolCalls []ToolCall
 		pending := a.pendingSnapshot()
 		if len(pending) == 0 {
-			step, err := a.RunInference(ctx, st, out)
+			step, err := a.runInference(ctx, st, out)
 			if ctx.Err() != nil {
 				emitCancelled()
 				return telemetry.OutcomeCancelled
@@ -166,7 +167,7 @@ func (a *AgentHarness) runTurnLoop(ctx context.Context, out chan StreamEvent, em
 				if ctx.Err() != nil {
 					return
 				}
-				_, _ = a.RunToolCall(ctx, tc, out)
+				_, _ = a.runToolCall(ctx, tc, out)
 			}(tc)
 		}
 		wg.Wait()

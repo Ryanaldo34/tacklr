@@ -71,7 +71,7 @@ type AgentHarness struct {
 	mcpCleanup       func()
 	mcpInitialized   bool
 	builtinsInjected bool
-	context          ContextManager
+	context          contextManager
 	tasks            modelTasks
 	contextPolicy    ContextPolicy
 	toolRunner       *toolRunner
@@ -301,7 +301,7 @@ func (a *AgentHarness) applyBatchToolResultEffect(ctx context.Context, effect To
 
 func (a *AgentHarness) findTool(name, namespace string) *Tool {
 	idx := slices.IndexFunc(a.tools, func(t *Tool) bool {
-		return t.Name == name && t.Namespace == namespace
+		return t.name == name && t.namespace == namespace
 	})
 	if idx < 0 {
 		return nil
@@ -351,8 +351,8 @@ func (a *AgentHarness) withToolPresentation(tc ToolCall) ToolCall {
 	if tool == nil {
 		return tc
 	}
-	tc.Category = tool.Category
-	tc.Title = ResolveToolTitle(tool.DisplayName, tool.Name, tc.Arguments)
+	tc.Category = tool.category
+	tc.Title = ResolveToolTitle(tool.displayName, tool.name, tc.Arguments)
 	return tc
 }
 
