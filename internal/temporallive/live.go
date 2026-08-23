@@ -44,6 +44,12 @@ func cliPath() (string, error) {
 	return "", fmt.Errorf("temporal CLI not found on PATH")
 }
 
+// Available reports whether the Temporal CLI binary can be resolved.
+func Available() bool {
+	_, err := cliPath()
+	return err == nil
+}
+
 // Client returns the shared Temporal CLI dev-server client. Skips in -short
 // or when the CLI cannot start.
 func Client(t *testing.T) client.Client {
