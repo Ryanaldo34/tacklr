@@ -22,9 +22,6 @@ type PostgresWireStore struct {
 // NewPostgresWireStore wraps an existing pgx connection.
 // protocolKey labels rows (e.g. "acp"); empty defaults to "acp".
 func NewPostgresWireStore(conn *pgx.Conn, protocolKey string) *PostgresWireStore {
-	if conn == nil {
-		panic("server: postgres wire store requires conn")
-	}
 	if protocolKey == "" {
 		protocolKey = "acp"
 	}

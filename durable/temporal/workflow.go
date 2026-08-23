@@ -102,7 +102,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 			CreationTimeout:  2 * time.Second,
 			ExecutionTimeout: 10 * time.Minute,
 		}); err != nil {
-			logError(ctx, "worker session", "error", err)
+			workflow.GetLogger(ctx).Error("worker session", "error", err)
 		} else {
 			sessionCtx = sctx
 		}
@@ -216,7 +216,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 						Auth:      lastAuth,
 						Mounts:    mounts,
 					}).Get(ctx, nil); err != nil {
-						logError(ctx, "child workflow", "error", err)
+						workflow.GetLogger(ctx).Error("child workflow", "error", err)
 						outcome, turnErr, stopSlice = telemetry.OutcomeError, err, true
 						break
 					}

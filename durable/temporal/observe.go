@@ -17,9 +17,6 @@ import (
 // Turn totals are recorded on the non-replay path only so the in-flight gauge
 // is not double-counted (see Instruments.RecordTurnOutcome).
 func startTurn(ctx workflow.Context, agentID string, sessionID durable.SessionID, kind string) (workflow.Context, func(string, error)) {
-	if kind == "" {
-		kind = telemetry.TurnKindPrompt
-	}
 	started := workflow.Now(ctx)
 	ctx, span := temporalotel.Tracer(telemetry.InstrumentationName).Start(ctx, telemetry.SpanTurn, trace.WithAttributes(
 		attribute.String(telemetry.AttrArea, telemetry.AreaRuntime),
@@ -30,13 +27,6 @@ func startTurn(ctx workflow.Context, agentID string, sessionID durable.SessionID
 		attribute.String(telemetry.AttrTurnKind, kind),
 	))
 	return ctx, func(outcome string, err error) {
-		if outcome == "" {
-			if err != nil {
-				outcome = telemetry.OutcomeError
-			} else {
-				outcome = telemetry.OutcomeOK
-			}
-		}
 		if err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, telemetry.ErrorClassOther)
@@ -58,8 +48,4 @@ func startTurn(ctx workflow.Context, agentID string, sessionID durable.SessionID
 
 func logInfo(ctx workflow.Context, msg string, keyvals ...any) {
 	workflow.GetLogger(ctx).Info(msg, keyvals...)
-}
-
-func logError(ctx workflow.Context, msg string, keyvals ...any) {
-	workflow.GetLogger(ctx).Error(msg, keyvals...)
 }

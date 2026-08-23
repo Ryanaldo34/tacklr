@@ -5,7 +5,6 @@ import (
 	"go.temporal.io/sdk/worker"
 
 	"github.com/ryanaldo34/tacklr/durable"
-	"github.com/ryanaldo34/tacklr/durable/inprocess"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -26,12 +25,6 @@ func NewWorker(c client.Client, taskQueue string, opts WorkerOptions) worker.Wor
 		EnableSessionWorker:               true,
 		MaxConcurrentSessionExecutionSize: 1000,
 	})
-	if opts.Snapshots == nil {
-		opts.Snapshots = inprocess.NewMemorySnapshot()
-	}
-	if opts.Projection == nil {
-		opts.Projection = vfs.FuseProjection{}
-	}
 	acts := &Activities{
 		Catalog:        opts.Catalog,
 		Snapshots:      opts.Snapshots,
