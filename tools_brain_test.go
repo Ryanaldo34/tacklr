@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
+	"github.com/ryanaldo34/tacklr/telemetry"
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfsindex"
 )
@@ -19,7 +20,7 @@ func TestBrainTools_saveDiscoveryAndLink(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
 	g := brain.NewMemoryGraph()
-	eng, err := brain.NewEngine(store, brain.WithGraph(g), brain.WithKinds(
+	eng, err := brain.NewEngine(store, brain.WithObserver(telemetry.NewBrainObserver()), brain.WithGraph(g), brain.WithKinds(
 		brain.KindSpec{Kind: "Discovery", IsParent: true},
 		brain.KindSpec{Kind: "Fact", IsParent: true},
 	))

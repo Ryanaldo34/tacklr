@@ -58,6 +58,9 @@ exclude:
     - internal/temporallive
     # Exporter constructors, not product outcomes.
     - telemetry/otel.go
+    # Host AgentWatchDog adapter. The harness only calls RecordOutput /
+    # RecordToolResult and tests use recordingWatchdog, not stderr logging.
+    - telemetry/stdio.go
 
 breakdown-file-name: coverage.breakdown
 

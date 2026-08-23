@@ -22,3 +22,12 @@ func EmitTurnReceived(ctx context.Context, kind string, promptLen, resumeCount i
 	}
 	EmitEvent(ctx, EventPromptReceived, log.Int(EventAttrPromptLen, promptLen))
 }
+
+// RecordCheckpointAttempt records one harness snapshot persist (ok or error).
+func RecordCheckpointAttempt(ctx context.Context, err error) {
+	outcome := OutcomeOK
+	if err != nil {
+		outcome = OutcomeError
+	}
+	InstrumentsFromContext(ctx).RecordCheckpointSave(ctx, outcome)
+}

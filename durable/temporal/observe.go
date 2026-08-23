@@ -1,6 +1,8 @@
 package temporal
 
 import (
+	"context"
+
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -12,10 +14,13 @@ import (
 )
 
 // startTurn opens tacklr.turn with Temporal's replay-safe Tracer (OTEL v2).
+// Turn totals are recorded on the non-replay path only so the in-flight gauge
+// is not double-counted (see Instruments.RecordTurnOutcome).
 func startTurn(ctx workflow.Context, agentID string, sessionID durable.SessionID, kind string) (workflow.Context, func(string, error)) {
 	if kind == "" {
 		kind = telemetry.TurnKindPrompt
 	}
+	started := workflow.Now(ctx)
 	ctx, span := temporalotel.Tracer(telemetry.InstrumentationName).Start(ctx, telemetry.SpanTurn, trace.WithAttributes(
 		attribute.String(telemetry.AttrArea, telemetry.AreaRuntime),
 		attribute.String(telemetry.AttrRuntime, telemetry.RuntimeTemporal),
@@ -42,6 +47,12 @@ func startTurn(ctx workflow.Context, agentID string, sessionID durable.SessionID
 		}
 		span.SetAttributes(attribute.String(telemetry.AttrOutcome, outcome))
 		span.End()
+		if workflow.IsReplaying(ctx) {
+			return
+		}
+		telemetry.InstrumentsFromContext(context.Background()).RecordTurnOutcome(
+			context.Background(), agentID, kind, outcome, workflow.Now(ctx).Sub(started),
+		)
 	}
 }
 

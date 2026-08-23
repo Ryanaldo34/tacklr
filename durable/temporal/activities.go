@@ -280,9 +280,12 @@ func (a *Activities) harness(ctx context.Context, id durable.SessionID, agentID 
 func (a *Activities) save(ctx context.Context, id durable.SessionID, agentID string, h *tacklr.AgentHarness, etag string, mounts []durable.MountRecipe) (string, error) {
 	cp, err := h.Checkpoint()
 	if err != nil {
+		telemetry.RecordCheckpointAttempt(ctx, err)
 		return "", err
 	}
-	return a.Snapshots.Save(ctx, id, durable.Snapshot{AgentID: agentID, Checkpoint: *cp, Mounts: mounts}, etag)
+	etag, err = a.Snapshots.Save(ctx, id, durable.Snapshot{AgentID: agentID, Checkpoint: *cp, Mounts: mounts}, etag)
+	telemetry.RecordCheckpointAttempt(ctx, err)
+	return etag, err
 }
 
 const streamBatchInterval = 200 * time.Millisecond

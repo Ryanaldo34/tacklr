@@ -73,9 +73,11 @@ func (r *Runtime) constructHarness(ctx context.Context, p *sessionProc, load boo
 func (r *Runtime) persistHarness(ctx context.Context, p *sessionProc, h *tacklr.AgentHarness) error {
 	cp, err := h.Checkpoint()
 	if err != nil {
+		telemetry.RecordCheckpointAttempt(ctx, err)
 		return err
 	}
 	etag, err := r.snapshots.Save(ctx, p.id, durable.Snapshot{AgentID: p.agentID, Checkpoint: *cp, Mounts: p.mounts}, p.etag)
+	telemetry.RecordCheckpointAttempt(ctx, err)
 	if err != nil {
 		return err
 	}
