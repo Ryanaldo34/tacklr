@@ -181,6 +181,7 @@ opts.Specialists = []*tacklr.Specialist{{
 | MCP | External tool servers | [`mcp`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/mcp) |
 | Skills | `SKILL.md` catalogs from VFS mounts | [`skills`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/skills) |
 | Web | Search and fetch when Exa is configured | [`tacklr`](https://pkg.go.dev/github.com/ryanaldo34/tacklr) |
+| Email | `read_inbox` and permission-gated `send_email`; structured filters hide Gmail and Graph query languages | [`email`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/email) |
 | Server | `Protocol` over Runtime; ACP is the native option | [`server`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/server) |
 | Telemetry | One `tacklr.turn` span per prompt or resume; OTLP | [`telemetry`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/telemetry) |
 
@@ -206,6 +207,7 @@ When VFS is wired, the harness injects file tools over virtual paths only. `run_
 | Package | Role |
 |---------|------|
 | `tacklr` | Harness, tools, plan loop, specialists |
+| `email` | Gmail and Outlook provider contract and SDK adapters |
 | `vfs` | Virtual filesystem, mounts, content IR |
 | `vfsindex` | Optional mount → brain ingest |
 | `brain` | Knowledge engine |
