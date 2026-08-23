@@ -53,7 +53,6 @@ type Runtime struct {
 	snapshots  durable.SnapshotStore
 	events     *MemoryEventLog
 	projection vfs.Projection
-	observe    telemetry.Instrumentor
 
 	mu       sync.RWMutex
 	sessions map[durable.SessionID]*sessionProc
@@ -76,15 +75,6 @@ func WithProjection(p vfs.Projection) Option {
 	return func(r *Runtime) {
 		if p != nil {
 			r.projection = p
-		}
-	}
-}
-
-// WithInstrumentor replaces the wait-loop turn span starter. Nil is ignored.
-func WithInstrumentor(i telemetry.Instrumentor) Option {
-	return func(r *Runtime) {
-		if i != nil {
-			r.observe = i
 		}
 	}
 }

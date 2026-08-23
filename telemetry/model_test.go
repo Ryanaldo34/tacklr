@@ -57,7 +57,6 @@ func TestModelSpan_lifecycleAndClassify(t *testing.T) {
 	ctx = ContextWithAgentID(ctx, "agent-1")
 	ctx = ContextWithModelIdentity(ctx, id)
 	ctx = ContextWithAfterTools(ctx)
-	ctx = ContextWithTracer(ctx, TracerFromProvider(tp))
 
 	ctx, span := StartModelSpan(ctx, "", 1, WindowShape{Messages: 3, ToolPairs: 1})
 	span.End(nil, TokenUsage{Input: 10, Output: 5, Reasoning: 2})
@@ -92,7 +91,6 @@ func TestModelSpan_lifecycleAndClassify(t *testing.T) {
 
 	// Empty identity defaults
 	ctx2 := ContextWithInstruments(context.Background(), inst)
-	ctx2 = ContextWithTracer(ctx2, TracerFromProvider(tp))
 	ctx2 = ContextWithModelIdentity(ctx2, ModelIdentity{})
 	_, s3 := StartModelSpan(ctx2, ModelPhaseTurn, 0, WindowShape{})
 	s3.End(nil, TokenUsage{})

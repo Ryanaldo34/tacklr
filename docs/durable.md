@@ -112,10 +112,10 @@ The wait loop (in-process goroutine or `SessionWorkflow`) starts `tacklr.turn`. 
 | Runtime | How the turn span starts |
 |---------|--------------------------|
 | Path A embedder | `AgentHarness.Run` / `ReturnFromInterrupt` |
-| Path B in-process | `telemetry.Instrumentor` (replace with `inprocess.WithInstrumentor`) |
-| Path C Temporal | replay-safe `temporalotel.Tracer` inside `SessionWorkflow` |
+| Path B in-process | wait loop calls `telemetry.StartTurnSpan` |
+| Path C Temporal | `temporalotel.Tracer` inside `SessionWorkflow` |
 
-Host setup for Temporal + LGTM. `Init` first: it installs one ReplaySafe `TracerProvider` and one `MeterProvider`, and (gRPC) one `grpc.ClientConn` shared by the trace, metric, and log exporters. `Dial` attaches Temporal's official OpenTelemetry v2 plugin to those globals. It does not open a second exporter.
+Host setup: `telemetry.Init` installs the process-wide ReplaySafe tracer (and OTLP exporters when an endpoint is set). `Dial` prepends Temporal’s official OpenTelemetry v2 plugin onto that global provider.
 
 ```go
 shutdown, err := telemetry.Init(ctx, telemetry.Config{

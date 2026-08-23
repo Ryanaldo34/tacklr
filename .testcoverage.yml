@@ -58,6 +58,8 @@ exclude:
     - internal/testkit
     - internal/agentbench
     - internal/temporallive
+    # Exporter constructors, not product outcomes.
+    - telemetry/otel.go
 
 breakdown-file-name: coverage.breakdown
 

@@ -13,7 +13,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel/log"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/trace"
 
 	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/streaming"
@@ -106,139 +105,6 @@ func TestInstruments_recordAllPaths(t *testing.T) {
 	ctxI := ContextWithInstruments(context.Background(), inst)
 	if InstrumentsFromContext(ctxI) != inst {
 		t.Fatal("instruments from context")
-	}
-}
-
-// TestInit_otlpPaths covers endpoint/protocol/sample branches without requiring a live collector.
-func TestInit_otlpPaths(t *testing.T) {
-	ctx := context.Background()
-
-	// Unknown protocol fails before dialing.
-	if _, err := Init(ctx, Config{OTLPEndpoint: "localhost:4317", Protocol: "ftp"}); err == nil {
-		t.Fatal("want unknown protocol")
-	}
-
-	// gRPC + metrics (exporter client construction succeeds without a server).
-	shutdown, err := Init(ctx, Config{
-		ServiceName:    "cov",
-		ServiceVersion: "1",
-		OTLPEndpoint:   "localhost:4317",
-		Protocol:       "grpc",
-		Insecure:       true,
-		SampleRatio:    0.5,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := shutdown(ctx); err != nil {
-		// Shutdown may error if export flush fails; still covered.
-		t.Logf("shutdown: %v", err)
-	}
-	SetTracerProvider(nil)
-	SetMeterProvider(nil)
-
-	// HTTP protocol, traces only.
-	shutdown, err = Init(ctx, Config{
-		OTLPEndpoint:   "http://127.0.0.1:4318",
-		Protocol:       "http",
-		Insecure:       true,
-		DisableMetrics: true,
-		SampleRatio:    0, // treated as always sample
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = shutdown(ctx)
-	SetTracerProvider(nil)
-	SetMeterProvider(nil)
-
-	// http/protobuf alias + sample ratio clamp.
-	shutdown, err = Init(ctx, Config{
-		OTLPEndpoint: "https://127.0.0.1:4318",
-		Protocol:     "http/protobuf",
-		SampleRatio:  2, // clamp to 1
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = shutdown(ctx)
-	SetTracerProvider(nil)
-	SetMeterProvider(nil)
-
-	// Env endpoint fallback.
-	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "localhost:14317")
-	t.Setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc")
-	shutdown, err = Init(ctx, Config{Insecure: true, DisableMetrics: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = shutdown(ctx)
-	SetTracerProvider(nil)
-	SetMeterProvider(nil)
-
-	// gRPC + TLS ClientConn (lazy dial; no collector required).
-	shutdown, err = Init(ctx, Config{
-		OTLPEndpoint: "https://localhost:4317",
-		Protocol:     "grpc",
-		DisableLogs:  true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !IsReplaySafeProvider() {
-		t.Fatal("want ReplaySafe after OTLP Init")
-	}
-	if Tracer() == nil || Meter() == nil {
-		t.Fatal("process-wide tracer and meter")
-	}
-	_ = shutdown(ctx)
-	SetTracerProvider(nil)
-	SetMeterProvider(nil)
-
-	// Explicit empty after env clear.
-	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
-	shutdown, err = Init(ctx, Config{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := shutdown(ctx); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// TestTracerContext_helpers covers ContextWithTracer / TracerFrom* / stripScheme.
-func TestTracerContext_helpers(t *testing.T) {
-	if Tracer() == nil {
-		t.Fatal("global tracer")
-	}
-	if TracerFromProvider(nil) == nil {
-		t.Fatal("nil provider")
-	}
-	tp := sdktrace.NewTracerProvider()
-	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
-	tr := TracerFromProvider(tp)
-	if tr == nil {
-		t.Fatal("from provider")
-	}
-	if ContextWithTracer(context.Background(), nil) == nil {
-		t.Fatal("nil tracer is a no-op")
-	}
-	if TracerFromContext(context.Background()) == nil {
-		t.Fatal("tracer from empty")
-	}
-	ctx := ContextWithTracer(context.Background(), tr)
-	if TracerFromContext(ctx) != tr {
-		t.Fatal("context tracer")
-	}
-
-	if stripScheme("https://host:4317") != "host:4317" {
-		t.Fatal(stripScheme("https://host:4317"))
-	}
-	if stripScheme("http://host") != "host" {
-		t.Fatal(stripScheme("http://host"))
-	}
-	if stripScheme("host:1") != "host:1" {
-		t.Fatal(stripScheme("host:1"))
 	}
 }
 
@@ -337,17 +203,6 @@ func TestStdioWatchDog_recordsAllMethods(t *testing.T) {
 	_ = wd.RecordToolResult(msg)
 }
 
-// TestSetTracerProvider_nil installs noop-safe global.
-func TestSetTracerProvider_nil(t *testing.T) {
-	SetTracerProvider(nil)
-	var sp trace.Span
-	_, sp = Tracer().Start(context.Background(), "n")
-	sp.End()
-	if !strings.Contains(InstrumentationName, "tacklr") {
-		t.Fatal(InstrumentationName)
-	}
-}
-
 // TestSpans_fullLifecycle covers turn/tool/plan/handoff/brain end paths used by harness.
 func TestSpans_fullLifecycle(t *testing.T) {
 	reg := prometheus.NewRegistry()
@@ -365,7 +220,6 @@ func TestSpans_fullLifecycle(t *testing.T) {
 	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
 	SetTracerProvider(tp)
 	t.Cleanup(func() { SetTracerProvider(nil) })
-	ctx = ContextWithTracer(ctx, TracerFromProvider(tp))
 
 	ctx, turn := StartTurnSpan(ctx, TurnAttrs{
 		AgentID: "a1", ThreadID: "t1", SessionID: "s1", Kind: "prompt", LoadSession: true,

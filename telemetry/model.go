@@ -161,7 +161,7 @@ func StartModelSpan(ctx context.Context, phase string, seq int, shape WindowShap
 	}
 
 	started := time.Now()
-	ctx, span := TracerFromContext(ctx).Start(ctx, SpanModel, trace.WithAttributes(attrs...))
+	ctx, span := Tracer().Start(ctx, SpanModel, trace.WithAttributes(attrs...))
 	return ctx, &ModelSpan{ctx: ctx, span: span, phase: phase, started: started}
 }
 

@@ -21,8 +21,12 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	telemetry.EnsureReplaySafeProvider()
+	shutdown, err := telemetry.Init(context.Background(), telemetry.Config{})
+	if err != nil {
+		panic(err)
+	}
 	code := m.Run()
+	_ = shutdown(context.Background())
 	temporallive.Stop()
 	os.Exit(code)
 }

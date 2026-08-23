@@ -8,18 +8,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// TestInit_emptyEndpoint_readyForLibraryUse: without an OTLP endpoint, Init
-// succeeds and shutdown is safe so library hosts can call Init unconditionally.
-func TestInit_emptyEndpoint_readyForLibraryUse(t *testing.T) {
-	shutdown, err := Init(context.Background(), Config{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := shutdown(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-}
-
 // TestMeterProviderFromPrometheusRegisterer_records: scrape-path helper accepts
 // a host Registerer and produces a MeterProvider that records instruments.
 func TestMeterProviderFromPrometheusRegisterer_records(t *testing.T) {

@@ -31,8 +31,7 @@ type TurnAttrs struct {
 	Runtime string
 }
 
-// StartTurnSpan starts the root turn span and records turn-active.
-// Uses the process-wide tracer from Init (TracerFromContext falls back to Tracer()).
+// StartTurnSpan starts the root turn span on the process-wide tracer.
 func StartTurnSpan(ctx context.Context, a TurnAttrs) (context.Context, *TurnSpan) {
 	if a.Kind == "" {
 		a.Kind = TurnKindPrompt
@@ -51,7 +50,7 @@ func StartTurnSpan(ctx context.Context, a TurnAttrs) (context.Context, *TurnSpan
 	if a.Runtime != "" {
 		attrs = append(attrs, attribute.String(AttrRuntime, a.Runtime))
 	}
-	ctx, span := TracerFromContext(ctx).Start(ctx, SpanTurn, trace.WithAttributes(attrs...))
+	ctx, span := Tracer().Start(ctx, SpanTurn, trace.WithAttributes(attrs...))
 	InstrumentsFromContext(ctx).RecordTurnStart(ctx, a.AgentID)
 	return ctx, &TurnSpan{
 		ctx:      ctx,
@@ -110,7 +109,7 @@ type ToolSpan struct {
 // StartToolSpan starts a child tool span.
 func StartToolSpan(ctx context.Context, name, namespace string) (context.Context, *ToolSpan) {
 	start := time.Now()
-	ctx, span := TracerFromContext(ctx).Start(ctx, SpanTool,
+	ctx, span := Tracer().Start(ctx, SpanTool,
 		trace.WithAttributes(
 			attribute.String(AttrArea, AreaHarness),
 			attribute.String(AttrToolName, name),
@@ -184,7 +183,7 @@ func StartBrainSpan(ctx context.Context, op string) (context.Context, *BrainSpan
 	if sid := SessionIDFromContext(ctx); sid != "" {
 		attrs = append(attrs, attribute.String(AttrSessionID, sid))
 	}
-	ctx, span := TracerFromContext(ctx).Start(ctx, SpanBrain, trace.WithAttributes(attrs...))
+	ctx, span := Tracer().Start(ctx, SpanBrain, trace.WithAttributes(attrs...))
 	return ctx, &BrainSpan{ctx: ctx, span: span, start: start, op: op}
 }
 
@@ -232,7 +231,7 @@ type PlanInstallSpan struct {
 
 // StartPlanInstallSpan starts a plan-document install span.
 func StartPlanInstallSpan(ctx context.Context, sessionID string) (context.Context, *PlanInstallSpan) {
-	ctx, span := TracerFromContext(ctx).Start(ctx, SpanPlanInstall,
+	ctx, span := Tracer().Start(ctx, SpanPlanInstall,
 		trace.WithAttributes(
 			attribute.String(AttrArea, AreaContext),
 			attribute.String(AttrSessionID, sessionID),
@@ -277,7 +276,7 @@ func StartHandoffSpan(ctx context.Context, openTodos int) (context.Context, *Han
 	if sid := SessionIDFromContext(ctx); sid != "" {
 		attrs = append(attrs, attribute.String(AttrSessionID, sid))
 	}
-	ctx, span := TracerFromContext(ctx).Start(ctx, SpanContextHandoff, trace.WithAttributes(attrs...))
+	ctx, span := Tracer().Start(ctx, SpanContextHandoff, trace.WithAttributes(attrs...))
 	return ctx, &HandoffSpan{ctx: ctx, span: span}
 }
 

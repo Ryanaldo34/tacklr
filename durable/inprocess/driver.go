@@ -189,16 +189,8 @@ func (r *Runtime) driveTurn(ctx context.Context, p *sessionProc, user *tacklr.Me
 }
 
 func (r *Runtime) recordTurn(ctx context.Context, agentID, threadID, kind string, promptLen, resumeCount int) (context.Context, func(turnOutcome)) {
-	inst := r.observe
-	if inst == nil {
-		inst = telemetry.DefaultInstrumentor()
-	}
-	return recordTurnWith(ctx, inst, agentID, threadID, kind, promptLen, resumeCount)
-}
-
-func recordTurnWith(ctx context.Context, inst telemetry.Instrumentor, agentID, threadID, kind string, promptLen, resumeCount int) (context.Context, func(turnOutcome)) {
 	ctx = telemetry.BindTurnContext(ctx, agentID, threadID)
-	ctx, span := inst.StartTurn(ctx, telemetry.TurnAttrs{
+	ctx, span := telemetry.StartTurnSpan(ctx, telemetry.TurnAttrs{
 		AgentID:     agentID,
 		ThreadID:    threadID,
 		SessionID:   threadID,
