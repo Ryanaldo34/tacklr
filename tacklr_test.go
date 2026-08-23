@@ -97,44 +97,12 @@ type recordingWatchdog struct {
 	mu          sync.Mutex
 	outputs     []*Message
 	toolResults []*Message
-	errors      []error
-	thinking    []*Message
-	tokenCounts []tokenCount
-	toolCalls   []*Message
 }
 
-type tokenCount struct {
-	input, output int
-}
-
-func (w *recordingWatchdog) RecordThinking(msg *Message) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.thinking = append(w.thinking, msg)
-	return nil
-}
 func (w *recordingWatchdog) RecordOutput(msg *Message) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.outputs = append(w.outputs, msg)
-	return nil
-}
-func (w *recordingWatchdog) RecordError(err error) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.errors = append(w.errors, err)
-	return nil
-}
-func (w *recordingWatchdog) RecordTokens(input, output int) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.tokenCounts = append(w.tokenCounts, tokenCount{input, output})
-	return nil
-}
-func (w *recordingWatchdog) RecordToolCalls(msg *Message) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.toolCalls = append(w.toolCalls, msg)
 	return nil
 }
 func (w *recordingWatchdog) RecordToolResult(msg *Message) error {

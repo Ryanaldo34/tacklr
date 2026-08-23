@@ -201,8 +201,18 @@ func (s *sub) Close() error {
 	return nil
 }
 
-// Head implements durable.Runtime.
+// Head implements durable.Runtime. When Workflow Streams is on, this is the
+// stream's next offset so Subscribe(after Head) skips prior-turn events.
 func (r *Runtime) Head(ctx context.Context, sessionID durable.SessionID) (durable.Seq, error) {
+	if !r.disableStreams {
+		val, err := r.client.QueryWorkflow(ctx, r.workflowID(sessionID), "", workflowstreams.OffsetQueryName)
+		if err == nil {
+			var n int64
+			if err := val.Get(&n); err == nil && n >= 0 {
+				return durable.Seq(n), nil //nolint:gosec // G115: stream offsets are well below MaxUint64
+			}
+		}
+	}
 	return r.fallback.Head(ctx, sessionID)
 }
 

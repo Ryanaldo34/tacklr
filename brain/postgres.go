@@ -26,6 +26,7 @@ var (
 	_ ObjectWriter = (*PostgresStore)(nil)
 	_ ObjectLister = (*PostgresStore)(nil)
 	_ KindWriter   = (*PostgresStore)(nil)
+	_ PgxDB        = tracedDB{}
 )
 
 // PostgresStore implements Store against the objects / object_kinds schema.
@@ -33,12 +34,13 @@ type PostgresStore struct {
 	db PgxDB
 }
 
-// NewPostgresStore wraps a pgx pool or connection.
+// NewPostgresStore wraps a pgx pool or connection. Query/Exec emit otelpgx
+// client spans as children of ctx (after telemetry.Init).
 func NewPostgresStore(db PgxDB) (*PostgresStore, error) {
 	if db == nil {
 		return nil, fmt.Errorf("brain: db is required")
 	}
-	return &PostgresStore{db: db}, nil
+	return &PostgresStore{db: newTracedDB(db)}, nil
 }
 
 const objectSelectCols = `

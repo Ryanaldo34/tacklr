@@ -3,11 +3,8 @@ package telemetry
 import (
 	"context"
 	"errors"
-	"io"
-	"log/slog"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel/log"
@@ -28,10 +25,7 @@ func (e stubProviderErr) ProviderErrorCode() string { return e.code }
 
 func TestModelSpan_lifecycleAndClassify(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	mp, err := MeterProviderFromPrometheusRegisterer(reg, "model-cov", "v0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	mp := MeterProviderFromPrometheusRegisterer(reg, "model-cov", "v0")
 	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
 	SetMeterProvider(mp)
 	t.Cleanup(func() { SetMeterProvider(nil) })
@@ -57,9 +51,8 @@ func TestModelSpan_lifecycleAndClassify(t *testing.T) {
 	ctx = ContextWithAgentID(ctx, "agent-1")
 	ctx = ContextWithModelIdentity(ctx, id)
 	ctx = ContextWithAfterTools(ctx)
-	ctx = ContextWithTracer(ctx, TracerFromProvider(tp))
 
-	ctx, span := StartModelSpan(ctx, "", 1, WindowShape{Messages: 3, ToolPairs: 1})
+	ctx, span := StartModelSpan(ctx, ModelPhaseTurn, 1, WindowShape{Messages: 3, ToolPairs: 1})
 	span.End(nil, TokenUsage{Input: 10, Output: 5, Reasoning: 2})
 
 	// Error classes
@@ -88,11 +81,9 @@ func TestModelSpan_lifecycleAndClassify(t *testing.T) {
 	_, s2 := StartModelSpan(ctx, ModelPhaseCompress, 2, WindowShape{})
 	s2.End(nil, TokenUsage{})
 	s2.End(errors.New("again"), TokenUsage{})
-	(*ModelSpan)(nil).End(nil, TokenUsage{})
 
 	// Empty identity defaults
 	ctx2 := ContextWithInstruments(context.Background(), inst)
-	ctx2 = ContextWithTracer(ctx2, TracerFromProvider(tp))
 	ctx2 = ContextWithModelIdentity(ctx2, ModelIdentity{})
 	_, s3 := StartModelSpan(ctx2, ModelPhaseTurn, 0, WindowShape{})
 	s3.End(nil, TokenUsage{})
@@ -126,24 +117,4 @@ func TestMeterContext_helpers(t *testing.T) {
 
 	EmitEvent(context.Background(), "") // no-op empty name
 	EmitEventSeverity(context.Background(), EventTurnEnded, log.SeverityError)
-
-	InstallDefaultWithOTLP(nil, nil)
-	InstallDefaultWithOTLP(slog.DiscardHandler, nil)
-	InstallDefaultWithOTLP(nil, NewOTLPSlogHandler(""))
-	InstallDefaultWithOTLP(slog.DiscardHandler, NewOTLPSlogHandler("svc"))
-	// restore quiet default
-	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
-
-	// RecordBrain empty defaults
-	reg := prometheus.NewRegistry()
-	mp, err := MeterProviderFromPrometheusRegisterer(reg, "rb", "v")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
-	inst := MustInstruments(MeterFromProvider(mp))
-	inst.RecordBrain(context.Background(), "a", "", "", "", false, 0)
-	inst.RecordBrain(context.Background(), "a", BrainOpSearch, OutcomeOK, BrainDegradeNone, false, time.Millisecond)
-
-	_ = time.Millisecond
 }

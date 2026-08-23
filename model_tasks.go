@@ -79,6 +79,8 @@ type modelTasks interface {
 
 // defaultModelTasks is the product modelTasks implementation.
 type defaultModelTasks struct {
+	mu sync.Mutex // Absorb/Handoff/Turn snapshot; parallel tool results serialize here
+
 	model    InferenceStrategy
 	context  ContextManager
 	policy   ContextPolicy
@@ -103,12 +105,15 @@ func (t *defaultModelTasks) Turn(ctx context.Context, tools []*Tool, systemPromp
 	}
 	// Context is only reshaped on Absorb pressure (token threshold) or Handoff
 	// after complete_todo / plan revision — never by dropping tool history here.
+	t.mu.Lock()
 	msgs := t.context.Messages()
 	t.modelSeq++
+	seq := t.modelSeq
+	t.mu.Unlock()
 	if src, ok := t.model.(modelIdentityProvider); ok {
 		ctx = telemetry.ContextWithModelIdentity(ctx, src.ModelTelemetryIdentity())
 	}
-	ctx, span := telemetry.StartModelSpan(ctx, telemetry.ModelPhaseTurn, t.modelSeq, windowShape(msgs))
+	ctx, span := telemetry.StartModelSpan(ctx, telemetry.ModelPhaseTurn, seq, windowShape(msgs))
 	ch, err := t.model.Invoke(ctx, msgs, tools, systemPrompt)
 	if err != nil {
 		span.End(err, telemetry.TokenUsage{})
@@ -121,6 +126,8 @@ func (t *defaultModelTasks) Absorb(ctx context.Context, msg *Message, tools []*T
 	if err := ctx.Err(); err != nil {
 		return AbsorbResult{}, err
 	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	window, chunks, _, err := t.absorbFit(ctx, t.context.Messages(), msg, tools)
 	if err != nil {
 		return AbsorbResult{}, err
@@ -130,6 +137,8 @@ func (t *defaultModelTasks) Absorb(ctx context.Context, msg *Message, tools []*T
 }
 
 func (t *defaultModelTasks) Handoff(ctx context.Context, plan []Todo, planDoc string, tools []*Tool, systemPrompt string) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	open := 0
 	for i := range plan {
 		if plan[i].Status != streaming.TodoStatusCompleted {

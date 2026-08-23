@@ -4,16 +4,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/contrib/workflowstreams"
+	"go.temporal.io/sdk/temporal"
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/streaming"
+	"github.com/ryanaldo34/tacklr/telemetry"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -28,11 +31,18 @@ func bindLiveTurn(id durable.SessionID, cancel context.CancelFunc) func() {
 }
 
 func cancelLiveTurn(id durable.SessionID) {
-	if v, ok := liveTurns.Load(id); ok {
+	if v, ok := liveTurns.LoadAndDelete(id); ok {
 		if cancel, ok := v.(context.CancelFunc); ok {
 			cancel()
 		}
 	}
+}
+
+func canceledIf(ctx context.Context, err error) error {
+	if ctx.Err() != nil {
+		return temporal.NewCanceledError("turn cancelled")
+	}
+	return err
 }
 
 // Activities are the Inference and Tool bodies registered on the worker.
@@ -88,15 +98,34 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 	defer cancel()
 	defer bindLiveTurn(in.SessionID, cancel)()
 	defer startHeartbeat(ctx)()
+	ctx = telemetry.BindTurnContext(ctx, in.AgentID, string(in.SessionID))
+	attempt := int32(1)
+	if activity.IsActivity(ctx) {
+		attempt = activity.GetInfo(ctx).Attempt
+	}
+	if attempt > 1 {
+		slog.WarnContext(ctx, "inference retry",
+			"area", telemetry.AreaRuntime, "session_id", in.SessionID,
+			"agent_id", in.AgentID, "attempt", attempt)
+	} else {
+		slog.InfoContext(ctx, "inference started",
+			"area", telemetry.AreaRuntime, "session_id", in.SessionID,
+			"agent_id", in.AgentID, "had_tools", in.HadToolRound)
+	}
 	stream := a.openStream(ctx)
 	defer closeStream(ctx, stream)
-	if activity.IsActivity(ctx) && activity.GetInfo(ctx).Attempt > 1 {
+	if attempt > 1 {
 		_ = a.publish(ctx, stream, in.SessionID, durable.TopicRetry, streaming.StreamEvent{Type: streaming.StreamEventError, Content: "retry"}, true)
 	}
 	h, ms, etag, err := a.harness(ctx, in.SessionID, in.AgentID, in.MCPServers, in.Etag, in.Auth, in.Mounts)
 	if err != nil {
-		_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, streaming.StreamEvent{Type: streaming.StreamEventError, Error: err, Content: err.Error()}, true)
-		return InferenceOutput{}, err
+		pub := err
+		if ctx.Err() != nil {
+			pub = context.Canceled
+		}
+		slog.ErrorContext(ctx, "inference harness", "area", telemetry.AreaRuntime, "error", pub)
+		_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, streaming.StreamEvent{Type: streaming.StreamEventError, Error: pub, Content: pub.Error()}, true)
+		return InferenceOutput{}, canceledIf(ctx, err)
 	}
 	defer func() {
 		h.Close()
@@ -107,7 +136,7 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 	if len(in.Resume) > 0 {
 		if err := h.ApplyResume(in.Resume); err != nil {
 			_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, streaming.StreamEvent{Type: streaming.StreamEventError, Error: err, Content: err.Error()}, true)
-			return InferenceOutput{}, err
+			return InferenceOutput{}, canceledIf(ctx, err)
 		}
 		if pending := h.PendingToolCalls(); len(pending) > 0 {
 			etag, err = a.save(ctx, in.SessionID, in.AgentID, h, etag, in.Mounts)
@@ -116,7 +145,8 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 	}
 	if in.User != nil {
 		if err := h.AbsorbUser(ctx, in.User, out); err != nil {
-			return InferenceOutput{}, err
+			slog.ErrorContext(ctx, "inference absorb", "area", telemetry.AreaRuntime, "error", err)
+			return InferenceOutput{}, canceledIf(ctx, err)
 		}
 	}
 	st := &tacklr.TurnState{HadToolRound: in.HadToolRound, ModelRequests: in.ModelRequests}
@@ -125,14 +155,20 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 		pub := err
 		if ctx.Err() != nil {
 			pub = context.Canceled
+			slog.WarnContext(ctx, "inference cancelled", "area", telemetry.AreaRuntime)
+		} else {
+			slog.ErrorContext(ctx, "inference failed", "area", telemetry.AreaRuntime, "error", err)
 		}
 		_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, streaming.StreamEvent{Type: streaming.StreamEventError, Error: pub, Content: pub.Error()}, true)
-		return InferenceOutput{}, err
+		return InferenceOutput{}, canceledIf(ctx, err)
 	}
 	etag, err = a.save(ctx, in.SessionID, in.AgentID, h, etag, in.Mounts)
 	if err != nil {
+		slog.ErrorContext(ctx, "inference persist", "area", telemetry.AreaRuntime, "error", err)
 		return InferenceOutput{}, err
 	}
+	slog.InfoContext(ctx, "inference completed",
+		"area", telemetry.AreaRuntime, "complete", step.Complete, "tool_calls", len(step.ToolCalls))
 	return InferenceOutput{Etag: etag, Complete: step.Complete, ToolCalls: step.ToolCalls}, nil
 }
 
@@ -141,13 +177,28 @@ func (a *Activities) Tool(ctx context.Context, in ToolInput) (ToolOutput, error)
 	defer cancel()
 	defer bindLiveTurn(in.SessionID, cancel)()
 	defer startHeartbeat(ctx)()
+	ctx = telemetry.BindTurnContext(ctx, in.AgentID, string(in.SessionID))
+	attempt := int32(1)
+	if activity.IsActivity(ctx) {
+		attempt = activity.GetInfo(ctx).Attempt
+	}
+	if attempt > 1 {
+		slog.WarnContext(ctx, "tool retry",
+			"area", telemetry.AreaHarness, "session_id", in.SessionID,
+			"agent_id", in.AgentID, "tool", in.Call.Name, "attempt", attempt)
+	} else {
+		slog.InfoContext(ctx, "tool started",
+			"area", telemetry.AreaHarness, "session_id", in.SessionID,
+			"agent_id", in.AgentID, "tool", in.Call.Name, "namespace", in.Call.Namespace)
+	}
 	stream := a.openStream(ctx)
 	defer closeStream(ctx, stream)
-	if activity.IsActivity(ctx) && activity.GetInfo(ctx).Attempt > 1 {
+	if attempt > 1 {
 		_ = a.publish(ctx, stream, in.SessionID, durable.TopicRetry, streaming.StreamEvent{Type: streaming.StreamEventError, Content: "retry"}, true)
 	}
 	h, ms, etag, err := a.harness(ctx, in.SessionID, in.AgentID, in.MCPServers, in.Etag, in.Auth, in.Mounts)
 	if err != nil {
+		slog.ErrorContext(ctx, "tool harness", "area", telemetry.AreaHarness, "error", err)
 		return ToolOutput{}, err
 	}
 	defer func() {
@@ -158,15 +209,26 @@ func (a *Activities) Tool(ctx context.Context, in ToolInput) (ToolOutput, error)
 	defer stop()
 	step, runErr := h.RunToolCall(ctx, in.Call, out)
 	if runErr != nil && ctx.Err() != nil {
+		slog.WarnContext(ctx, "tool cancelled", "area", telemetry.AreaHarness, "tool", in.Call.Name)
 		_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, streaming.StreamEvent{Type: streaming.StreamEventError, Error: context.Canceled, Content: context.Canceled.Error()}, true)
+		return ToolOutput{}, temporal.NewCanceledError("turn cancelled")
+	} else if runErr != nil {
+		slog.ErrorContext(ctx, "tool failed", "area", telemetry.AreaHarness, "tool", in.Call.Name, "error", runErr)
 	}
 	etag, saveErr := a.save(ctx, in.SessionID, in.AgentID, h, etag, in.Mounts)
 	if saveErr != nil {
+		slog.ErrorContext(ctx, "tool persist", "area", telemetry.AreaHarness, "error", saveErr)
 		if runErr != nil {
 			return ToolOutput{}, fmt.Errorf("tool: %w: persist: %w", runErr, saveErr)
 		}
 		return ToolOutput{}, saveErr
 	}
+	status := "success"
+	if step.Interrupted {
+		status = "interrupt"
+	}
+	slog.InfoContext(ctx, "tool completed",
+		"area", telemetry.AreaHarness, "tool", in.Call.Name, "status", status)
 	return ToolOutput{Etag: etag, Interrupted: step.Interrupted, InterruptID: step.InterruptID}, nil
 }
 
@@ -218,9 +280,12 @@ func (a *Activities) harness(ctx context.Context, id durable.SessionID, agentID 
 func (a *Activities) save(ctx context.Context, id durable.SessionID, agentID string, h *tacklr.AgentHarness, etag string, mounts []durable.MountRecipe) (string, error) {
 	cp, err := h.Checkpoint()
 	if err != nil {
+		telemetry.RecordCheckpointAttempt(ctx, err)
 		return "", err
 	}
-	return a.Snapshots.Save(ctx, id, durable.Snapshot{AgentID: agentID, Checkpoint: *cp, Mounts: mounts}, etag)
+	etag, err = a.Snapshots.Save(ctx, id, durable.Snapshot{AgentID: agentID, Checkpoint: *cp, Mounts: mounts}, etag)
+	telemetry.RecordCheckpointAttempt(ctx, err)
+	return etag, err
 }
 
 const streamBatchInterval = 200 * time.Millisecond

@@ -22,10 +22,6 @@ type FindObjectsRequest struct {
 // Filters use the same catalog rules as search/find_exact (schema filterable_fields).
 // Not a substitute for corpus Search: no part promotion evidence path.
 func (e *Engine) FindObjects(ctx context.Context, scope Scope, req FindObjectsRequest, results ResultSetStore) (page SearchPage, err error) {
-	ctx, span := e.observer.StartOp(ctx, OpFindObjects)
-	degrade := DegradeNone
-	defer func() { span.End(len(page.Objects), degrade, err) }()
-
 	if e.graphS == nil {
 		return page, fmt.Errorf("%w: graph object search is not available", ErrUnsupported)
 	}
@@ -58,14 +54,12 @@ func (e *Engine) FindObjects(ctx context.Context, scope Scope, req FindObjectsRe
 			if !e.cfg.allowEmbedderDegrade() {
 				return page, fmt.Errorf("brain: embed query: %w", embErr)
 			}
-			degrade = DegradeLexicalOnly
 		} else if len(emb) > 0 {
 			vecHits, vErr := e.graphS.SearchVector(ctx, emb, k, ns)
 			if vErr != nil {
 				if !e.cfg.allowEmbedderDegrade() {
 					return page, fmt.Errorf("brain: vector search: %w", vErr)
 				}
-				degrade = DegradeLexicalOnly
 			} else if len(vecHits) > 0 {
 				lists = append(lists, vecHits)
 			}

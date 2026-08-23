@@ -677,8 +677,7 @@ Factory mount params (`Profile: "brain"`):
 | `kinds` | Comma allow-list. Empty catalog: pass this, or listing shows only kinds that already have objects |
 
 Optional knobs: `WithReranker` (post-hydrate product scoring),
-`WithExpandRecipes` (named expand templates), `WithObserver` (OpenTelemetry
-via `telemetry.NewBrainObserver`), `WithConfig` (candidate *k*, decay, limits).
+`WithExpandRecipes` (named expand templates), `WithConfig` (candidate *k*, decay, limits).
 
 Integration tests that need real backends use Testcontainers (Postgres image
 under `brain/testdata`, Helix `enterprise-dev`). They skip under `-short`.

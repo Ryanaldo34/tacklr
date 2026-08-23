@@ -290,7 +290,8 @@ func TestServer_securityBuildersPanicOnInvalidReceiverOrService(t *testing.T) {
 		(*Server)(nil).WithSecurity(&tacklrsecurity.Service{}, nil)
 	})
 	assertPanics("WithSecurity nil service", func() {
-		newTestServer(t).WithSecurity(nil, nil)
+		k := newEmptyKernel()
+		NewServer(k.Runtime, k.Catalog, NewACPProtocol(nil)).WithSecurity(nil, nil)
 	})
 	assertPanics("AllowAnonymousNetwork nil server", func() {
 		(*Server)(nil).AllowAnonymousNetwork()

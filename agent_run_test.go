@@ -143,6 +143,54 @@ func requireToolResult(t *testing.T, got []StreamEvent, substr string) {
 	}
 }
 
+// TestRun_parallelToolResultsBothLandInWindow: one model round with two tool
+// calls absorbs both results so the next Turn sees them (not last-writer-wins).
+func TestRun_parallelToolResultsBothLandInWindow(t *testing.T) {
+	var (
+		n   int
+		got []string
+	)
+	model := &mockStrategy{
+		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
+			n++
+			if n == 1 {
+				ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
+					toolCall("a", "alpha", `{}`),
+					toolCall("b", "beta", `{}`),
+				}, IsComplete: true}
+				return
+			}
+			for _, m := range msgs {
+				if m != nil && m.Role == RoleTool {
+					got = append(got, m.Content)
+				}
+			}
+			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
+		},
+	}
+	h := mustNewAgent(t, AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  model,
+		Tools: []*Tool{
+			NewTool(ToolConfig{Name: "alpha", Handler: func(context.Context) (string, error) { return "from-alpha", nil }}),
+			NewTool(ToolConfig{Name: "beta", Handler: func(context.Context) (string, error) { return "from-beta", nil }}),
+		},
+	})
+	t.Cleanup(h.Close)
+	events, err := h.Run(context.Background(), "hi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = drainEvents(events)
+	saw := map[string]bool{}
+	for _, c := range got {
+		saw[c] = true
+	}
+	if !saw["from-alpha"] || !saw["from-beta"] {
+		t.Fatalf("next turn window tool results = %q", got)
+	}
+}
+
 // TestRun_uninitializedHarnessFails: Run without constructor setup is rejected.
 func TestRun_maxTurnRequests_emitsStopReason(t *testing.T) {
 	tool := NewTool(ToolConfig{

@@ -127,9 +127,6 @@ type ModelSpan struct {
 
 // StartModelSpan starts a model span. Emits model.after_tools when ContextWithAfterTools is set.
 func StartModelSpan(ctx context.Context, phase string, seq int, shape WindowShape) (context.Context, *ModelSpan) {
-	if phase == "" {
-		phase = ModelPhaseTurn
-	}
 	id := modelIdentityFromContext(ctx)
 	op := id.Operation
 	if op == "" {
@@ -161,14 +158,14 @@ func StartModelSpan(ctx context.Context, phase string, seq int, shape WindowShap
 	}
 
 	started := time.Now()
-	ctx, span := TracerFromContext(ctx).Start(ctx, SpanModel, trace.WithAttributes(attrs...))
+	ctx, span := Tracer().Start(ctx, SpanModel, trace.WithAttributes(attrs...))
 	return ctx, &ModelSpan{ctx: ctx, span: span, phase: phase, started: started}
 }
 
 // End ends the model span with outcome, usage, and metrics.
 // HTTP status and code come from err when it implements providerStatus.
 func (m *ModelSpan) End(err error, usage TokenUsage) {
-	if m == nil || m.finished {
+	if m.finished {
 		return
 	}
 	m.finished = true

@@ -26,27 +26,28 @@ type TurnAttrs struct {
 	SessionID   string
 	Kind        string // prompt | resume
 	LoadSession bool
+	// Runtime is a closed enum (RuntimeEmbed | RuntimeInProcess | RuntimeTemporal)
+	// or a host-defined durable-backend id. Empty omits the attribute.
+	Runtime string
 }
 
-// StartTurnSpan starts the root turn span and records turn-active.
-// Uses TracerFromContext (set ContextWithTracer first).
+// StartTurnSpan starts the root turn span on the process-wide tracer.
 func StartTurnSpan(ctx context.Context, a TurnAttrs) (context.Context, *TurnSpan) {
-	if a.Kind == "" {
-		a.Kind = "prompt"
-	}
 	ctx = ContextWithAgentID(ctx, a.AgentID)
 	ctx = ContextWithSessionID(ctx, a.SessionID)
 	start := time.Now()
-	ctx, span := TracerFromContext(ctx).Start(ctx, SpanTurn,
-		trace.WithAttributes(
-			attribute.String(AttrArea, AreaRuntime),
-			attribute.String(AttrAgentID, a.AgentID),
-			attribute.String(AttrThreadID, a.ThreadID),
-			attribute.String(AttrSessionID, a.SessionID),
-			attribute.String(AttrTurnKind, a.Kind),
-			attribute.Bool(AttrLoadSession, a.LoadSession),
-		),
-	)
+	attrs := []attribute.KeyValue{
+		attribute.String(AttrArea, AreaRuntime),
+		attribute.String(AttrAgentID, a.AgentID),
+		attribute.String(AttrThreadID, a.ThreadID),
+		attribute.String(AttrSessionID, a.SessionID),
+		attribute.String(AttrTurnKind, a.Kind),
+		attribute.Bool(AttrLoadSession, a.LoadSession),
+	}
+	if a.Runtime != "" {
+		attrs = append(attrs, attribute.String(AttrRuntime, a.Runtime))
+	}
+	ctx, span := Tracer().Start(ctx, SpanTurn, trace.WithAttributes(attrs...))
 	InstrumentsFromContext(ctx).RecordTurnStart(ctx, a.AgentID)
 	return ctx, &TurnSpan{
 		ctx:      ctx,
@@ -58,32 +59,27 @@ func StartTurnSpan(ctx context.Context, a TurnAttrs) (context.Context, *TurnSpan
 }
 
 // End ends the turn span, emits turn.ended, and records metrics.
-// outcome is OutcomeOK, OutcomeError, or OutcomeCancelled; empty derives from err.
-func (t *TurnSpan) End(outcome string, err error) {
-	if t == nil || t.finished {
+// outcome is a closed enum (OutcomeOK, OutcomeError, OutcomeCancelled, OutcomeYield).
+func (t *TurnSpan) End(outcome string) {
+	if t.finished {
 		return
 	}
 	t.finished = true
-	if outcome == "" {
-		if err != nil {
-			outcome = OutcomeError
-		} else {
-			outcome = OutcomeOK
-		}
+	switch outcome {
+	case OutcomeCancelled:
+		t.span.SetStatus(codes.Error, OutcomeCancelled)
+	case OutcomeError:
+		t.span.SetStatus(codes.Error, ErrorClassOther)
+	default:
+		t.span.SetStatus(codes.Ok, "")
 	}
-	if t.span != nil {
-		if err != nil {
-			t.span.RecordError(err)
-			t.span.SetStatus(codes.Error, ErrorClassOther)
-		} else if outcome == OutcomeCancelled {
-			t.span.SetStatus(codes.Error, OutcomeCancelled)
-		} else {
-			t.span.SetStatus(codes.Ok, "")
-		}
-		t.span.SetAttributes(attribute.String(AttrOutcome, outcome))
-		t.span.End()
+	t.span.SetAttributes(attribute.String(AttrOutcome, outcome))
+	t.span.End()
+	if outcome == OutcomeYield {
+		EmitEvent(t.ctx, EventTurnYielded, log.String(EventAttrOutcome, outcome))
+	} else {
+		EmitEvent(t.ctx, EventTurnEnded, log.String(EventAttrOutcome, outcome))
 	}
-	EmitEvent(t.ctx, EventTurnEnded, log.String(EventAttrOutcome, outcome))
 	InstrumentsFromContext(t.ctx).RecordTurnEnd(
 		t.ctx, t.agentID, t.turnKind, outcome, time.Since(t.start),
 	)
@@ -101,7 +97,7 @@ type ToolSpan struct {
 // StartToolSpan starts a child tool span.
 func StartToolSpan(ctx context.Context, name, namespace string) (context.Context, *ToolSpan) {
 	start := time.Now()
-	ctx, span := TracerFromContext(ctx).Start(ctx, SpanTool,
+	ctx, span := Tracer().Start(ctx, SpanTool,
 		trace.WithAttributes(
 			attribute.String(AttrArea, AreaHarness),
 			attribute.String(AttrToolName, name),
@@ -114,20 +110,10 @@ func StartToolSpan(ctx context.Context, name, namespace string) (context.Context
 // Finish ends the tool span and records metrics.
 // status is success, error, interrupt, or similar.
 func (t *ToolSpan) Finish(status string, err error) {
-	if t == nil || t.finished {
+	if t.finished {
 		return
 	}
 	t.finished = true
-	if t.span == nil {
-		return
-	}
-	if status == "" {
-		if err != nil {
-			status = "error"
-		} else {
-			status = "success"
-		}
-	}
 	attrs := []attribute.KeyValue{
 		attribute.String(AttrToolStatus, status),
 	}
@@ -153,68 +139,6 @@ func (t *ToolSpan) Finish(status string, err error) {
 	)
 }
 
-// BrainSpan is an in-flight tacklr.brain span.
-type BrainSpan struct {
-	ctx      context.Context
-	span     trace.Span
-	start    time.Time
-	op       string
-	finished bool
-}
-
-// StartBrainSpan starts a tacklr.brain child span.
-func StartBrainSpan(ctx context.Context, op string) (context.Context, *BrainSpan) {
-	if op == "" {
-		op = BrainOpSearch
-	}
-	start := time.Now()
-	attrs := []attribute.KeyValue{
-		attribute.String(AttrArea, AreaBrain),
-		attribute.String(AttrBrainOp, op),
-	}
-	if sid := SessionIDFromContext(ctx); sid != "" {
-		attrs = append(attrs, attribute.String(AttrSessionID, sid))
-	}
-	ctx, span := TracerFromContext(ctx).Start(ctx, SpanBrain, trace.WithAttributes(attrs...))
-	return ctx, &BrainSpan{ctx: ctx, span: span, start: start, op: op}
-}
-
-// End finishes the span and records brain metrics.
-// hits is returned page size (0 on error) — span-only for debug, not a metric.
-// degrade is BrainDegrade*; empty-result rate is derived for the total counter.
-func (b *BrainSpan) End(hits int, degrade string, err error) {
-	if b == nil || b.finished {
-		return
-	}
-	b.finished = true
-	if degrade == "" {
-		degrade = BrainDegradeNone
-	}
-	outcome := OutcomeOK
-	if err != nil {
-		outcome = OutcomeError
-		hits = 0
-	}
-	if b.span != nil {
-		if err != nil {
-			b.span.RecordError(err)
-			b.span.SetStatus(codes.Error, ErrorClassOther)
-		} else {
-			b.span.SetStatus(codes.Ok, "")
-		}
-		b.span.SetAttributes(
-			attribute.String(AttrOutcome, outcome),
-			attribute.String(AttrBrainDegrade, degrade),
-			attribute.Int(AttrBrainHits, hits),
-		)
-		b.span.End()
-	}
-	InstrumentsFromContext(b.ctx).RecordBrain(
-		b.ctx, AgentIDFromContext(b.ctx), b.op, outcome, degrade,
-		err == nil && hits == 0, time.Since(b.start),
-	)
-}
-
 // PlanInstallSpan is an in-flight tacklr.plan.install span. Call End once.
 type PlanInstallSpan struct {
 	span     trace.Span
@@ -223,7 +147,7 @@ type PlanInstallSpan struct {
 
 // StartPlanInstallSpan starts a plan-document install span.
 func StartPlanInstallSpan(ctx context.Context, sessionID string) (context.Context, *PlanInstallSpan) {
-	ctx, span := TracerFromContext(ctx).Start(ctx, SpanPlanInstall,
+	ctx, span := Tracer().Start(ctx, SpanPlanInstall,
 		trace.WithAttributes(
 			attribute.String(AttrArea, AreaContext),
 			attribute.String(AttrSessionID, sessionID),
@@ -234,13 +158,10 @@ func StartPlanInstallSpan(ctx context.Context, sessionID string) (context.Contex
 
 // End ends the span. err nil means ok; non-nil means error.
 func (s *PlanInstallSpan) End(err error) {
-	if s == nil || s.finished {
+	if s.finished {
 		return
 	}
 	s.finished = true
-	if s.span == nil {
-		return
-	}
 	if err != nil {
 		s.span.RecordError(err)
 		s.span.SetStatus(codes.Error, ErrorClassOther)
@@ -268,27 +189,17 @@ func StartHandoffSpan(ctx context.Context, openTodos int) (context.Context, *Han
 	if sid := SessionIDFromContext(ctx); sid != "" {
 		attrs = append(attrs, attribute.String(AttrSessionID, sid))
 	}
-	ctx, span := TracerFromContext(ctx).Start(ctx, SpanContextHandoff, trace.WithAttributes(attrs...))
+	ctx, span := Tracer().Start(ctx, SpanContextHandoff, trace.WithAttributes(attrs...))
 	return ctx, &HandoffSpan{ctx: ctx, span: span}
 }
 
 // End ends the handoff span and records the handoff metric.
 // outcome is HandoffOutcomeOK, HandoffOutcomeFallback, or HandoffOutcomeError.
 func (s *HandoffSpan) End(outcome string, err error) {
-	if s == nil || s.finished {
+	if s.finished {
 		return
 	}
 	s.finished = true
-	if s.span == nil {
-		return
-	}
-	if outcome == "" {
-		if err != nil {
-			outcome = HandoffOutcomeError
-		} else {
-			outcome = HandoffOutcomeOK
-		}
-	}
 	if err != nil {
 		s.span.RecordError(err)
 		s.span.SetStatus(codes.Error, ErrorClassOther)

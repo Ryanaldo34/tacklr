@@ -307,6 +307,61 @@ func TestSessionWorkflow_hitlCancel(t *testing.T) {
 	}
 }
 
+func TestSessionWorkflow_cancelThenNextPromptCompletes(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+	env.SetWorkerOptions(worker.Options{EnableSessionWorker: true})
+	cat := durable.NewCatalog("default")
+	var n atomic.Int64
+	model := &testkit.ScriptedModel{
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			if n.Add(1) == 1 {
+				<-ctx.Done()
+				return
+			}
+			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "after-cancel", IsComplete: true}
+		},
+	}
+	cat.Register("default", durable.AgentSpec{
+		Options: tacklr.AgentOptions{Model: model, Config: tacklr.Config{MaxWindowSize: 8192}},
+	})
+	fallback := inprocess.NewMemoryEventLog()
+	env.RegisterWorkflow(SessionWorkflow)
+	env.RegisterActivity(newActs(cat, fallback, true))
+
+	id := durable.SessionID("sess-cancel-next")
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(signalPrompt, promptSignal{Text: "slow"})
+	}, time.Millisecond)
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(signalCancel, nil)
+	}, 20*time.Millisecond)
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(signalPrompt, promptSignal{Text: "again"})
+	}, 40*time.Millisecond)
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(signalClose, nil)
+	}, 80*time.Millisecond)
+
+	env.ExecuteWorkflow(SessionWorkflow, WorkflowInput{SessionID: id, AgentID: "default"})
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatal(err)
+	}
+	got := drainLog(t, fallback, id)
+	var sawAfter, complete bool
+	for _, ev := range got {
+		if ev.Type == streaming.StreamEventMessage && strings.Contains(ev.Content, "after-cancel") {
+			sawAfter = true
+		}
+		if ev.Type == streaming.StreamEventComplete {
+			complete = true
+		}
+	}
+	if !sawAfter || !complete {
+		t.Fatalf("want after-cancel + complete, got %+v", got)
+	}
+}
+
 func TestSessionWorkflow_spawnWorker(t *testing.T) {
 	var suite testsuite.WorkflowTestSuite
 	env := suite.NewTestWorkflowEnvironment()

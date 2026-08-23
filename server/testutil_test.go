@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"go.temporal.io/sdk/client"
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
@@ -15,11 +16,17 @@ import (
 	"github.com/ryanaldo34/tacklr/internal/temporallive"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
 	"github.com/ryanaldo34/tacklr/streaming"
+	"github.com/ryanaldo34/tacklr/telemetry"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
 func TestMain(m *testing.M) {
+	shutdown, err := telemetry.Init(context.Background(), telemetry.Config{})
+	if err != nil {
+		panic(err)
+	}
 	code := m.Run()
+	_ = shutdown(context.Background())
 	temporallive.Stop()
 	os.Exit(code)
 }
@@ -83,7 +90,11 @@ func newTestKernel(t *testing.T, model tacklr.InferenceStrategy, spec durable.Ag
 			Catalog: cat,
 		}
 	}
-	c := temporallive.Client(t)
+	c, err := tacklrtemporal.Dial(client.Options{HostPort: temporallive.HostPort(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(c.Close)
 	tq := "tacklr-server-" + uuid.NewString()
 	snaps := inprocess.NewMemorySnapshot()
 	log := inprocess.NewMemoryEventLog()

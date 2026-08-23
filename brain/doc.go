@@ -26,9 +26,6 @@
 // kinds are directories; parts/chunks are not files. Write/Close/PutFile parse,
 // validate, and Put (fail closed). Rename is delete+create. Graph edges stay in
 // Helix and show up through path-native link/expand/find_links — not sidecar files.
-// Optional Observer (telemetry.NewBrainObserver) records retrieval ops without
-// domain coupling: search, find_exact, find_objects, find_links, continue,
-// expand, expand_many.
 //
 // SearchContext is the retrieval session surface: host namespace + active ResultSet
 // for continue (replaced on each search, find_exact, find_objects, or large expand).

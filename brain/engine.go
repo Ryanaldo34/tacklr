@@ -122,11 +122,6 @@ func WithGraph(g GraphReader) EngineOption {
 	}
 }
 
-// WithObserver sets retrieval observability (default no-op).
-func WithObserver(o Observer) EngineOption {
-	return func(eng *Engine) { eng.observer = o }
-}
-
 // WithReranker sets an optional post-hydrate reranker for search and find_objects.
 func WithReranker(r Reranker) EngineOption {
 	return func(eng *Engine) { eng.reranker = r }
@@ -167,7 +162,6 @@ type Engine struct {
 	reranker Reranker
 	recipeMu sync.RWMutex
 	recipes  map[string]ExpandRecipe // guarded by recipeMu
-	observer Observer
 	cfg      EngineConfig
 	catalog  *KindCatalog // always non-nil; empty ⇒ open mode
 	bootErr  error        // set by WithKinds when registration fails
@@ -192,9 +186,6 @@ func NewEngine(store Store, opts ...EngineOption) (*Engine, error) {
 		return nil, e.bootErr
 	}
 	e.cfg = e.cfg.withDefaults()
-	if e.observer == nil {
-		e.observer = noopObserver{}
-	}
 	return e, nil
 }
 
