@@ -87,8 +87,6 @@ func acpSessionID(t *testing.T, rec *httptest.ResponseRecorder) string {
 // and can be invoked successfully.
 func TestHandleRPC_sessionMCPServers_partialFailureStillExposesHealthyTools(t *testing.T) {
 	good := newTestMCPServer(t, "ping")
-	store := testStore(t)
-	_ = store
 	var invokeCount int
 	strategy := &mockInferenceStrategy{
 		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
@@ -114,7 +112,7 @@ func TestHandleRPC_sessionMCPServers_partialFailureStillExposesHealthyTools(t *t
 			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "partial ok", IsComplete: true}
 		},
 	}
-	r := newTestRegistry(store, strategy, nil)
+	r := newTestKernel(t, strategy, durable.AgentSpec{})
 
 	// dead URL: nothing listening
 	body := `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[` +
@@ -139,8 +137,6 @@ func TestHandleRPC_sessionMCPServers_partialFailureStillExposesHealthyTools(t *t
 // result is delivered as a tool result event to the client.
 func TestHandleRPC_sessionMCPServers_toolCallReturnsResult(t *testing.T) {
 	mcpHTTP := newTestMCPServer(t, "greet")
-	store := testStore(t)
-	_ = store
 	var invokeCount int
 	strategy := &mockInferenceStrategy{
 		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
@@ -155,7 +151,7 @@ func TestHandleRPC_sessionMCPServers_toolCallReturnsResult(t *testing.T) {
 			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "mcp done", IsComplete: true}
 		},
 	}
-	r := newTestRegistry(store, strategy, []*tacklr.Tool{})
+	r := newTestKernel(t, strategy, durable.AgentSpec{})
 
 	rec1 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[{"type":"http","name":"testmcp","url":"`+mcpHTTP.URL+`","headers":[]}]}}`)
 	sessionID := acpSessionID(t, rec1)
@@ -221,10 +217,8 @@ func TestHandleRPC_sessionMCPServers_toolCallReturnsResult(t *testing.T) {
 // harness and its tools are exposed to the model during the prompt turn.
 func TestHandleRPC_sessionMCPServers_toolsDiscovered(t *testing.T) {
 	mcpHTTP := newTestMCPServer(t, "greet")
-	store := testStore(t)
-	_ = store
 	recorder := &toolRecorder{}
-	r := newTestRegistry(store, recordingStrategy(recorder), []*tacklr.Tool{})
+	r := newTestKernel(t, recordingStrategy(recorder), durable.AgentSpec{})
 
 	rec1 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[{"type":"http","name":"testmcp","url":"`+mcpHTTP.URL+`","headers":[{"name":"X-Key","value":"k"}]}]}}`)
 	sessionID := acpSessionID(t, rec1)
@@ -249,10 +243,8 @@ func TestHandleRPC_sessionMCPServers_toolsDiscovered(t *testing.T) {
 func TestHandleRPC_sessionResume_overridesMCPServers(t *testing.T) {
 	serverA := newTestMCPServer(t, "tool_a")
 	serverB := newTestMCPServer(t, "tool_b")
-	store := testStore(t)
-	_ = store
 	recorder := &toolRecorder{}
-	r := newTestRegistry(store, recordingStrategy(recorder), []*tacklr.Tool{})
+	r := newTestKernel(t, recordingStrategy(recorder), durable.AgentSpec{})
 
 	rec1 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[{"type":"http","name":"a","url":"`+serverA.URL+`","headers":[]}]}}`)
 	sessionID := acpSessionID(t, rec1)

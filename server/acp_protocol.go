@@ -18,8 +18,8 @@ import (
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
-// acpProtocol implements Protocol for the Agent Client Protocol.
-// Wire session state (cwd, mcp, config) lives here — not on Registry or BaseStore.
+// acpProtocol is the native Protocol implementation for the Agent Client Protocol.
+// Wire session state (cwd, mcp, config) lives here — not on SnapshotStore.
 type acpProtocol struct {
 	mu       sync.Mutex
 	sessions map[string]*acpWireSession
@@ -38,8 +38,7 @@ type ACPAuthMethod struct {
 	Scheme      string
 }
 
-// NewACPProtocol returns an ACP protocol with optional durable wire store.
-// Nil wire uses an in-memory ProtocolWireStore.
+// NewACPProtocol returns the native ACP Protocol. Nil wire uses an in-memory store.
 func NewACPProtocol(wire ProtocolWireStore) Protocol {
 	return NewACPProtocolWithAuth(wire, nil, false)
 }
@@ -74,23 +73,6 @@ func NewACPProtocolWithAuth(wire ProtocolWireStore, methods []ACPAuthMethod, log
 	}
 }
 
-// ACPProtocol returns a new ACP protocol with an in-memory wire store.
-// Each call is a fresh instance (own live map + wire store).
-func ACPProtocol() Protocol { return NewACPProtocol(nil) }
-
-// Built-in protocol aliases.
-//
-// ACP is a process-scoped default for simple apps (NewServer(reg, server.ACP)).
-// Prefer NewACPProtocol(wire) when you need durable/shared wire state or test isolation.
-// Tests that share a *Registry should use protocolForRegistry (via serveACPRaw) or
-// acpTestServer — not this package-level value for multi-step session flows.
-var (
-	ACP Protocol = NewACPProtocol(NewMemoryWireStore())
-	SSE Protocol = SSEProtocol()
-)
-
-func (*acpProtocol) Name() string { return "acp" }
-
 func (p *acpProtocol) HTTPRoutes() []HTTPRoute {
 	return []HTTPRoute{
 		// ACP remote transport (RFD Streamable HTTP + WebSocket).
@@ -105,24 +87,19 @@ func isWebSocketUpgrade(r *http.Request) bool {
 }
 
 // handleACPWebSocket serves a full-duplex ACP JSON-RPC connection over WebSocket.
-// Same lifecycle and ClientBridge demux as ServeStdio.
+// Same ClientBridge demux as Streamable HTTP.
 func (p *acpProtocol) handleACPWebSocket(env ProtocolEnv, w http.ResponseWriter, r *http.Request) {
 	// Register before Accept so Acp-Connection-Id is on the 101 response (RFD).
 	// Bridge/writer are filled in after the socket is open.
-	var acpConn *Connection
-	if env.Connections != nil {
-		acpConn = env.Connections.Create(nil, nil)
-		if env.Conn != nil && env.Conn.Security != nil {
-			acpConn.setSecurityContext(*env.Conn.Security)
-		}
-		w.Header().Set(HeaderAcpConnectionID, acpConn.ID)
+	acpConn := env.Connections.Create(nil, nil)
+	if env.Conn != nil && env.Conn.Security != nil {
+		acpConn.setSecurityContext(*env.Conn.Security)
 	}
+	w.Header().Set(HeaderAcpConnectionID, acpConn.ID)
 
 	c, err := websocket.Accept(w, r, nil)
 	if err != nil {
-		if acpConn != nil {
-			env.Connections.Remove(acpConn.ID)
-		}
+		env.Connections.Remove(acpConn.ID)
 		slog.Warn("acp websocket accept failed", "error", err)
 		return
 	}
@@ -131,13 +108,9 @@ func (p *acpProtocol) handleACPWebSocket(env ProtocolEnv, w http.ResponseWriter,
 	ctx := r.Context()
 	mw := &jsonRPCWSMessageWriter{ctx: ctx, c: c}
 	bridge := NewClientBridge(mw)
-	if acpConn != nil {
-		acpConn.Bridge = bridge
-		acpConn.Writer = mw
-		defer env.Connections.Remove(acpConn.ID)
-	} else {
-		acpConn = &Connection{ID: "local", Bridge: bridge, Writer: mw}
-	}
+	acpConn.Bridge = bridge
+	acpConn.Writer = mw
+	defer env.Connections.Remove(acpConn.ID)
 
 	var wg sync.WaitGroup
 	dispatch := func(body []byte) {
@@ -164,7 +137,7 @@ func (p *acpProtocol) handleACPWebSocket(env ProtocolEnv, w http.ResponseWriter,
 		}()
 	}
 
-	// Read loop: demux client RPC responses vs agent method requests (stdio twin).
+	// Read loop: demux client RPC responses vs agent method requests.
 	for {
 		_, data, err := c.Read(ctx)
 		if err != nil {
@@ -232,13 +205,13 @@ func (p *acpProtocol) HandleInbound(ctx context.Context, env ProtocolEnv, body [
 		if err := p.requireAuthentication(env); err != nil {
 			return env.Conn.Writer.WriteError(pr.ID, err)
 		}
-		_, result, err := p.CreateSession(ctx, env, pr.Params)
+		_, result, err := p.createSession(ctx, env, pr)
 		if err != nil {
 			return env.Conn.Writer.WriteError(pr.ID, err)
 		}
 		return env.Conn.Writer.WriteResult(pr.ID, result)
 	case "session/load":
-		result, err := p.LoadSession(ctx, env, pr.ThreadID, pr.Params)
+		result, err := p.loadSession(ctx, env, pr)
 		if err != nil {
 			return env.Conn.Writer.WriteError(pr.ID, err)
 		}
@@ -250,7 +223,7 @@ func (p *acpProtocol) HandleInbound(ctx context.Context, env ProtocolEnv, body [
 		}
 		return env.Conn.Writer.WriteResult(pr.ID, result)
 	case "session/close":
-		if err := p.CloseSession(ctx, env, pr.ThreadID); err != nil {
+		if err := p.closeSession(ctx, env, pr.ThreadID); err != nil {
 			return env.Conn.Writer.WriteError(pr.ID, err)
 		}
 		return env.Conn.Writer.WriteResult(pr.ID, map[string]any{})
@@ -323,7 +296,7 @@ func (p *acpProtocol) handleSessionTurn(ctx context.Context, env ProtocolEnv, pr
 			return err
 		}
 	}
-	req, err := p.BindTurn(ctx, env, pr.ThreadID, pr.Method, pr.Params)
+	req, err := p.bindTurn(ctx, env, pr)
 	if err != nil {
 		writeWireError(env.Conn.Writer, pr.ID, err)
 		return err
@@ -343,7 +316,7 @@ func (p *acpProtocol) handleSessionTurn(ctx context.Context, env ProtocolEnv, pr
 		}
 		turn.Resume = resume
 	}
-	err = runRuntimeTurn(ctx, env, p, threadID, pr.ID, turn)
+	err = RunTurn(ctx, env, p, threadID, pr.ID, turn)
 	if err != nil && !IsClientError(err) {
 		logTurnError(err, req.AgentID, threadID)
 		slog.Debug("acp turn stream ended", "error", err, "thread_id", threadID)
@@ -389,15 +362,14 @@ func (p *acpProtocol) OnStreamEvent(ctx context.Context, env ProtocolEnv, thread
 }
 
 func (p *acpProtocol) OnStreamClosed(ctx context.Context, env ProtocolEnv, threadID string, reqID json.RawMessage, cancelled bool) error {
+	if !cancelled {
+		// Complete and park already wrote the JSON-RPC result from OnStreamEvent.
+		return nil
+	}
 	if len(reqID) == 0 || env.Conn == nil || env.Conn.Writer == nil {
 		return nil
 	}
-	if cancelled {
-		return env.Conn.Writer.WriteResult(reqID, acpPromptResult(stopReasonCancelled))
-	}
-	// Parked for user input without mid-turn client RPC resolution.
-	return env.Conn.Writer.WriteError(reqID, clientErrorf(ErrInvalidRequest,
-		"turn requires user input but client cannot resolve interrupts mid-turn"))
+	return env.Conn.Writer.WriteResult(reqID, acpPromptResult(stopReasonCancelled))
 }
 
 func injectReqID(frames [][]byte, reqID json.RawMessage, terminal bool) [][]byte {
@@ -445,9 +417,6 @@ func resolveInterruptViaACP(ctx context.Context, env ProtocolEnv, threadID strin
 // connElicitationForm reports form-mode elicitation support from the live RPC
 // bridge. No snapshot: initialize writes caps on the bridge.
 func connElicitationForm(c *Conn) bool {
-	if c == nil || c.RPC == nil {
-		return false
-	}
 	return c.RPC.GetCaps().ElicitationForm
 }
 
@@ -505,18 +474,14 @@ func resumeElicitation(interruptID, action string, resolution []byte, declined, 
 	}
 }
 
-// acpInitializeResult is the ACP initialize advertisement (wire shape).
-//
 // Prompt baseline (no capability bits): Text + ResourceLink are always accepted.
 // Optional: image (model-gated), audio (off), embeddedContext (Resource text/blob).
-func acpInitializeResult(cat durable.Catalog, clientProtocolVersion int) map[string]any {
-	return acpInitializeResultWithAuth(cat, clientProtocolVersion, nil, false)
-}
-
 func acpInitializeResultWithAuth(cat durable.Catalog, clientProtocolVersion int, methods []ACPAuthMethod, logout bool) map[string]any {
 	image := false
-	if m := catalogAgentModel(cat, ""); m != nil {
-		image = m.SupportsMIME("image/png")
+	if cat != nil {
+		if spec, ok := cat.Lookup(""); ok && spec.Options.Model != nil {
+			image = spec.Options.Model.SupportsMIME("image/png")
+		}
 	}
 	_ = clientProtocolVersion
 	authMethods := make([]map[string]any, 0, len(methods))
@@ -531,7 +496,6 @@ func acpInitializeResultWithAuth(cat durable.Catalog, clientProtocolVersion int,
 		authMethods = append(authMethods, item)
 	}
 	agentCapabilities := map[string]any{
-		// Durable session/load against the registry store (survives restarts).
 		"loadSession": true,
 		"promptCapabilities": map[string]any{
 			// image: ContentBlock::Image when the default agent model accepts vision.
@@ -572,7 +536,7 @@ func acpInitializeResultWithAuth(cat durable.Catalog, clientProtocolVersion int,
 		// Non-standard transport hint for operators (not part of ACP schema).
 		"_meta": map[string]any{
 			"tacklr": map[string]any{
-				"transports": []string{"stdio", "websocket", "streamable_http"},
+				"transports": []string{"websocket", "streamable_http"},
 				"vfs":        acpVFSCapability(cat),
 			},
 		},

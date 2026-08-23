@@ -14,10 +14,6 @@ import (
 //	initialize → 200 + JSON body + Acp-Connection-Id (+ affinity cookie)
 //	other methods / client RPC replies → 202; results arrive on GET SSE streams
 func (p *acpProtocol) handleACPPost(env ProtocolEnv, w http.ResponseWriter, r *http.Request) {
-	if env.Connections == nil {
-		http.Error(w, "connection registry not configured", http.StatusInternalServerError)
-		return
-	}
 	if !isJSONContentType(r.Header.Get("Content-Type")) {
 		http.Error(w, "Content-Type must be application/json", http.StatusUnsupportedMediaType)
 		return
@@ -166,17 +162,13 @@ func (p *acpProtocol) handleACPGet(env ProtocolEnv, w http.ResponseWriter, r *ht
 
 // handleACPStreamSSE opens a connection- or session-scoped long-lived SSE stream.
 func (p *acpProtocol) handleACPStreamSSE(env ProtocolEnv, w http.ResponseWriter, r *http.Request) {
-	if env.Connections == nil {
-		http.Error(w, "connection registry not configured", http.StatusInternalServerError)
-		return
-	}
 	if !acceptSSE(r.Header.Get("Accept")) {
 		http.Error(w, "Accept: text/event-stream required", http.StatusNotAcceptable)
 		return
 	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		http.Error(w, ErrStreamingNotSupported.Error(), http.StatusInternalServerError)
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
 		return
 	}
 
@@ -235,10 +227,6 @@ func (p *acpProtocol) handleACPStreamSSE(env ProtocolEnv, w http.ResponseWriter,
 
 // handleACPDelete tears down a Streamable HTTP / logical connection.
 func (p *acpProtocol) handleACPDelete(env ProtocolEnv, w http.ResponseWriter, r *http.Request) {
-	if env.Connections == nil {
-		http.Error(w, "connection registry not configured", http.StatusInternalServerError)
-		return
-	}
 	connID := strings.TrimSpace(r.Header.Get(HeaderAcpConnectionID))
 	if connID == "" {
 		http.Error(w, HeaderAcpConnectionID+" required", http.StatusBadRequest)
@@ -271,10 +259,6 @@ func (p *acpProtocol) lookupConnection(env ProtocolEnv, w http.ResponseWriter, r
 	conn := env.Connections.Get(connID)
 	if conn == nil {
 		http.Error(w, "unknown connection", http.StatusNotFound)
-		return nil, false
-	}
-	if conn.Bridge == nil || conn.Writer == nil {
-		http.Error(w, "connection not ready", http.StatusInternalServerError)
 		return nil, false
 	}
 	return conn, true

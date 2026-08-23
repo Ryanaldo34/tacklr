@@ -11,6 +11,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/durable"
 )
 
 // dialACPWebSocket opens a WebSocket to GET /acp and returns the connection
@@ -96,7 +97,7 @@ func TestACP_WS_permissionMidTurn(t *testing.T) {
 			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "done", IsComplete: true}
 		},
 	}
-	r := newTestRegistry(testStore(t), strategy, []*tacklr.Tool{sensitive})
+	r := newTestKernel(t, strategy, durable.AgentSpec{Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{sensitive}}})
 	hs, srv := startACPWSServer(t, r)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

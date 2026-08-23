@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -49,22 +50,6 @@ type vfsUnbindParams struct {
 	Name      string `json:"name"`
 }
 
-func (p *acpProtocol) sessionAgent(ctx context.Context, sessionID string) string {
-	if p == nil || sessionID == "" {
-		return ""
-	}
-	sess, err := p.resolveWireSession(ctx, sessionID)
-	if err != nil || sess == nil {
-		return ""
-	}
-	sess.mu.Lock()
-	defer sess.mu.Unlock()
-	if sess.configValues != nil {
-		return sess.configValues["agent"]
-	}
-	return ""
-}
-
 func (item vfsBindItem) binding() vfs.Binding {
 	provider := item.Provider
 	if provider == "" {
@@ -81,7 +66,7 @@ func (item vfsBindItem) binding() vfs.Binding {
 }
 
 // handleVFSBind stashes credentials on the ACP wire session. They are copied
-// onto Prompt/Resume AuthContext in BindTurn. This is protocol state, not kernel.
+// onto Prompt/Resume AuthContext in bindTurn. This is protocol state, not kernel.
 func (p *acpProtocol) handleVFSBind(ctx context.Context, env ProtocolEnv, pr *parsedRequest) error {
 	var params vfsBindParams
 	if err := json.Unmarshal(pr.Params, &params); err != nil {
@@ -97,11 +82,16 @@ func (p *acpProtocol) handleVFSBind(ctx context.Context, env ProtocolEnv, pr *pa
 	if len(params.Backends) == 0 {
 		return env.Conn.Writer.WriteError(pr.ID, clientErrorf(ErrInvalidRequest, "backends is required"))
 	}
-	agentID := p.sessionAgent(ctx, params.SessionID)
-	if agentID == "" {
-		agentID = catalogDefault(env.Catalog)
+	sess.mu.Lock()
+	agentID := sess.configValues["agent"]
+	sess.mu.Unlock()
+	if agentID == "" && env.Catalog != nil {
+		agentID = env.Catalog.DefaultID()
 	}
-	spec, _ := env.Catalog.Lookup(agentID)
+	var spec durable.AgentSpec
+	if env.Catalog != nil {
+		spec, _ = env.Catalog.Lookup(agentID)
+	}
 
 	type mounted struct {
 		Point    string `json:"point"`

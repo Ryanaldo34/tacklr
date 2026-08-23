@@ -59,11 +59,11 @@ func (l *MemoryEventLog) Append(_ context.Context, sessionID durable.SessionID, 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
-		return durable.ErrSessionClosed
+		return durable.ErrSessionNotFound
 	}
 	seq := durable.Seq(len(s.entries) + 1)
 	s.entries = append(s.entries, logEntry{seq: seq, topic: topic, ev: ev})
-	if topic == durable.TopicRetry || topic == durable.TopicClose {
+	if topic == durable.TopicRetry {
 		return nil
 	}
 	for ch, after := range s.subs {
@@ -80,7 +80,7 @@ func (l *MemoryEventLog) Append(_ context.Context, sessionID durable.SessionID, 
 }
 
 func visible(e logEntry) bool {
-	return e.topic != durable.TopicRetry && e.topic != durable.TopicClose
+	return e.topic != durable.TopicRetry
 }
 
 // seq is 1-based and equal to index in entries plus one. Caller holds s.mu.

@@ -1,6 +1,7 @@
 package temporal
 
 import (
+	"context"
 	"encoding/json"
 	"time"
 
@@ -35,7 +36,16 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 		cancelCh = workflow.GetSignalChannel(ctx, signalCancel)
 		closeCh  = workflow.GetSignalChannel(ctx, signalClose)
 	)
-	_ = stream
+	emitCancel := func() {
+		if stream == nil {
+			return
+		}
+		_ = stream.Topic(durable.TopicEvents).Publish(streaming.StreamEvent{
+			Type:    streaming.StreamEventError,
+			Fail:    context.Canceled.Error(),
+			Content: context.Canceled.Error(),
+		})
+	}
 
 	selectorWait := func() waitSignal {
 		var out waitSignal
@@ -89,13 +99,28 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 			sessionCtx = sctx
 		}
 		actCtx := workflow.WithActivityOptions(sessionCtx, activityOpts)
+		waitAct := func(name string, arg any, result any) error {
+			cctx, cancelAct := workflow.WithCancel(actCtx)
+			fut := workflow.ExecuteActivity(cctx, name, arg)
+			var err error
+			s := workflow.NewSelector(ctx)
+			s.AddFuture(fut, func(f workflow.Future) { err = f.Get(ctx, result) })
+			s.AddReceive(cancelCh, func(c workflow.ReceiveChannel, more bool) {
+				c.Receive(ctx, nil)
+				cancelAct()
+				emitCancel()
+				err = fut.Get(ctx, result)
+			})
+			s.Select(ctx)
+			return err
+		}
 		hadTools := false
 		reqs := 0
 		pending := []streaming.ToolCall(nil)
 		for {
 			if len(pending) == 0 {
 				var out InferenceOutput
-				err := workflow.ExecuteActivity(actCtx, "Inference", InferenceInput{
+				err := waitAct("Inference", InferenceInput{
 					SessionID:     in.SessionID,
 					AgentID:       agentID,
 					MCPServers:    mcp,
@@ -106,7 +131,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 					Resume:        resume,
 					Auth:          lastAuth,
 					Mounts:        mounts,
-				}).Get(ctx, &out)
+				}, &out)
 				user = nil
 				resume = nil
 				if err != nil {
@@ -148,7 +173,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 					continue
 				}
 				var tout ToolOutput
-				err := workflow.ExecuteActivity(actCtx, "Tool", ToolInput{
+				err := waitAct("Tool", ToolInput{
 					SessionID:  in.SessionID,
 					AgentID:    agentID,
 					MCPServers: mcp,
@@ -156,7 +181,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 					Call:       tc,
 					Auth:       lastAuth,
 					Mounts:     mounts,
-				}).Get(ctx, &tout)
+				}, &tout)
 				if err != nil {
 					stopSlice = true
 					break
@@ -204,6 +229,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 						stopSlice = true
 						parked = false
 					case signalCancel:
+						emitCancel()
 						stopSlice = true
 						parked = false
 					default:
@@ -232,6 +258,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 		case signalClose:
 			closed = true
 		case signalCancel:
+			emitCancel()
 			continue
 		case signalPrompt:
 			if ev.prompt.AgentID != "" {

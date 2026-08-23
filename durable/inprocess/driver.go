@@ -43,7 +43,6 @@ func (r *Runtime) constructHarness(ctx context.Context, p *sessionProc, load boo
 	mcpConfigs = append(mcpConfigs, p.mcp...)
 	opts := spec.Options
 	opts.SessionID = threadID
-	opts.Store = nil
 	opts.MCPConfigs = mcpConfigs
 	opts.MountSession = ms
 

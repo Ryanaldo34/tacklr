@@ -1,38 +1,8 @@
 package server
 
 import (
-	"context"
-
-	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
-	"github.com/ryanaldo34/tacklr/telemetry"
 )
-
-func catalogDefault(cat durable.Catalog) string {
-	if cat == nil {
-		return ""
-	}
-	return cat.DefaultID()
-}
-
-func catalogHasAgent(cat durable.Catalog, id string) bool {
-	if cat == nil {
-		return false
-	}
-	_, ok := cat.Lookup(id)
-	return ok
-}
-
-func catalogAgentModel(cat durable.Catalog, agentID string) tacklr.InferenceStrategy {
-	if cat == nil {
-		return nil
-	}
-	spec, ok := cat.Lookup(agentID)
-	if !ok {
-		return nil
-	}
-	return spec.Options.Model
-}
 
 func catalogConfigOptions(cat durable.Catalog, currentAgent string) []ConfigOption {
 	if cat == nil {
@@ -62,8 +32,4 @@ func catalogConfigOptions(cat durable.Catalog, currentAgent string) []ConfigOpti
 			Options:      opts,
 		},
 	}
-}
-
-func recordSessionCreated(ctx context.Context) {
-	telemetry.MustInstruments(telemetry.Meter()).RecordSessionCreated(ctx)
 }

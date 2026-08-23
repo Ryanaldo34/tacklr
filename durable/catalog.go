@@ -12,7 +12,7 @@ import (
 )
 
 // AgentSpec is the immutable agent definition. Runtime injects SessionID and
-// MountSession per turn. Protocol-neutral: no ACP/A2A types.
+// MountSession per turn. Protocol-neutral: no server.Protocol types.
 type AgentSpec struct {
 	Name string
 	// Options is the canonical agent definition. SessionID and MountSession

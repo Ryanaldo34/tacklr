@@ -3,7 +3,6 @@ package tacklr
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -46,23 +45,6 @@ func TestNewAgent_constructFailClosed(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "initialize skills") {
 		t.Fatalf("want skills construct error, got %v", err)
-	}
-
-	_, err = NewAgentFromSession(context.Background(), "no-such-session", AgentOptions{
-		Model: &mockStrategy{},
-		Store: testStore(t),
-	})
-	if err == nil || !strings.Contains(err.Error(), "no-such-session") {
-		t.Fatalf("want missing session error, got %v", err)
-	}
-
-	store := testStore(t)
-	if err := store.SaveSession(context.Background(), "sess-nomodel", stores.SessionCheckpoint{}); err != nil {
-		t.Fatal(err)
-	}
-	_, err = NewAgentFromSession(context.Background(), "sess-nomodel", AgentOptions{Store: store})
-	if err == nil || !strings.Contains(err.Error(), "Model is required") {
-		t.Fatalf("want model required, got %v", err)
 	}
 }
 
@@ -140,34 +122,9 @@ func TestNewAgent_configurationInvariants(t *testing.T) {
 	}
 }
 
-func TestAgentHarness_checkpointFailureIsHostVisibleAndClearsAfterRecovery(t *testing.T) {
-	// Arrange
-	h := mustNewAgent(t, AgentOptions{
-		SessionID: "checkpoint-health",
-		Model:     &mockStrategy{},
-		Store:     stores.FaultyStore{Inner: stores.NewInMemoryStore(), SaveErr: errors.New("checkpoint disk full")},
-	})
-
-	// Act
-	saveErr := h.persistSession(t.Context())
-	reported := h.CheckpointError()
-	h.store = stores.NewInMemoryStore()
-	recoveryErr := h.persistSession(t.Context())
-
-	// Assert
-	if saveErr == nil || !errors.Is(reported, saveErr) {
-		t.Fatalf("save error = %v reported = %v", saveErr, reported)
-	}
-	if recoveryErr != nil || h.CheckpointError() != nil {
-		t.Fatalf("recovery error = %v reported = %v", recoveryErr, h.CheckpointError())
-	}
-}
-
-func TestNewAgentFromSession_rejectsCorruptCheckpointModules(t *testing.T) {
-	// Arrange
-	store := testStore(t)
+func TestRestoreCheckpoint_rejectsCorruptModules(t *testing.T) {
 	sm := session.NewSessionManager()
-	valid, err := session.NewCheckpointer().Capture(
+	valid, err := session.CaptureCheckpoint(
 		[]*streaming.Message{{Role: streaming.RoleUser, Content: "go"}},
 		sm,
 		nil,
@@ -194,45 +151,33 @@ func TestNewAgentFromSession_rejectsCorruptCheckpointModules(t *testing.T) {
 	if err := json.Unmarshal(raw, &checkpoint); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SaveSession(t.Context(), "sess-corrupt", checkpoint); err != nil {
-		t.Fatal(err)
-	}
-
-	// Act
-	_, err = NewAgentFromSession(t.Context(), "sess-corrupt", AgentOptions{
-		Model: &mockStrategy{},
-		Store: store,
-	})
-
-	// Assert
-	if err == nil {
+	h := mustNewAgent(t, AgentOptions{Model: &mockStrategy{}})
+	if err := h.RestoreCheckpoint(checkpoint); err == nil {
 		t.Fatal("corrupt checkpoint was accepted")
 	}
 }
 
-func TestNewAgent_runCheckpointsToStore(t *testing.T) {
-	store := testStore(t)
+func TestAgentHarness_checkpointAfterRun(t *testing.T) {
 	h, err := NewAgent(t.Context(), AgentOptions{
-		SessionID: "path-a",
+		SessionID: "sess",
 		Model:     &mockStrategy{},
-		Store:     store,
 		Config:    Config{MaxWindowSize: 8192},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(h.Close)
-	events, err := h.Run(t.Context(), "hello path a")
+	events, err := h.Run(t.Context(), "hello")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for range events {
 	}
-	cp, err := store.LoadSession(t.Context(), "path-a")
+	cp, err := h.Checkpoint()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(cp.ContextWindow) == 0 {
-		t.Fatal("Path A Run must checkpoint the conversation on Store")
+		t.Fatal("Run must leave a conversation on Checkpoint")
 	}
 }

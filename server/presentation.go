@@ -50,8 +50,3 @@ func presentStreamEvent(event streaming.StreamEvent) (presentationEvent, error) 
 	}
 	return presented, nil
 }
-
-func presentationError(err error) presentationEvent {
-	message := PublicError(err).Error()
-	return presentationEvent{Type: string(streaming.StreamEventError), Content: message, ErrorText: message, Error: err}
-}

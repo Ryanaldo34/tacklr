@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"fmt"
 
 	tacklrsecurity "github.com/ryanaldo34/tacklr/security"
 )
@@ -20,8 +19,8 @@ func securitySubject(env ProtocolEnv) string {
 	if env.Conn != nil && env.Conn.Security != nil && env.Conn.Security.Authenticated() {
 		return env.Conn.Security.Principal.Subject
 	}
-	// Direct protocol use and stdio without a configured host security service
-	// use one process-local principal.
+	// Direct protocol use without a configured host security service
+	// uses one process-local principal.
 	if env.Security == nil {
 		return "local"
 	}
@@ -57,9 +56,6 @@ func (p *acpProtocol) resolveOwnedWireSession(ctx context.Context, env ProtocolE
 	sess.mu.Lock()
 	owner := sess.owner
 	sess.mu.Unlock()
-	if owner == "" {
-		return nil, fmt.Errorf("server: wire session %q has no owner", sessionID)
-	}
 	if owner != subject {
 		return nil, clientErrorf(ErrAuthorizationDenied, "session is owned by another principal")
 	}

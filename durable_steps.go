@@ -45,11 +45,6 @@ func (a *AgentHarness) AbsorbUser(ctx context.Context, user *Message, out chan S
 	return a.addToContext(ctx, user, out)
 }
 
-// ApplyResume applies host interrupt resolutions without starting a Path A Run.
-func (a *AgentHarness) ApplyResume(responses map[string][]byte) error {
-	return a.applyInterruptResolutions(responses)
-}
-
 // PendingToolCalls returns tool calls waiting to run (resume after yield).
 func (a *AgentHarness) PendingToolCalls() []ToolCall {
 	pending := a.pendingSnapshot()
@@ -64,16 +59,16 @@ func (a *AgentHarness) PendingToolCalls() []ToolCall {
 
 // Checkpoint captures the session blob for SnapshotStore.
 func (a *AgentHarness) Checkpoint() (*stores.SessionCheckpoint, error) {
-	return session.NewCheckpointer().Capture(a.context.Messages(), a.session, a.pendingSnapshot())
+	return session.CaptureCheckpoint(a.context.Messages(), a.session, a.pendingSnapshot())
 }
 
 // RestoreCheckpoint applies a SnapshotStore blob onto this harness.
 func (a *AgentHarness) RestoreCheckpoint(cp stores.SessionCheckpoint) error {
-	applied, err := session.NewCheckpointer().Apply(cp, a.session)
+	applied, err := session.ApplyCheckpoint(cp, a.session)
 	if err != nil {
 		return err
 	}
-	a.restoreMessages(applied.Window)
+	a.context.Restore(applied.Window)
 	a.pendingMu.Lock()
 	a.pendingToolCalls = applied.PendingToolCalls
 	if a.pendingToolCalls == nil {
@@ -84,14 +79,14 @@ func (a *AgentHarness) RestoreCheckpoint(cp stores.SessionCheckpoint) error {
 }
 
 // RunInference is the inference activity body: model Invoke plus StreamEvent
-// publish. Path A runTurnLoop and Path B/C drivers call this.
+// publish. Runtime drivers and in-process Run call this.
 func (a *AgentHarness) RunInference(ctx context.Context, st *TurnState, out chan StreamEvent) (InferenceStep, error) {
 	if st == nil {
 		st = &TurnState{}
 	}
 
 	if a.maxTurnRequests > 0 && st.ModelRequests >= a.maxTurnRequests {
-		err := WrapStopReason(ErrMaxTurnRequests, fmt.Errorf("limit %d", a.maxTurnRequests))
+		err := fmt.Errorf("%w: limit %d", ErrMaxTurnRequests, a.maxTurnRequests)
 		out <- StreamEvent{Type: StreamEventError, Error: err}
 		return InferenceStep{}, err
 	}
@@ -133,6 +128,10 @@ func (a *AgentHarness) RunInference(ctx context.Context, st *TurnState, out chan
 	}
 	var toolCalls []ToolCall
 	for {
+		if err := ctx.Err(); err != nil {
+			failAnnounced("tool call cancelled")
+			return InferenceStep{}, err
+		}
 		var chunk LLMResponseChunk
 		var ok bool
 		select {
@@ -226,15 +225,11 @@ func (a *AgentHarness) RunInference(ctx context.Context, st *TurnState, out chan
 // here; the Temporal workflow intercepts it as a child workflow.
 func (a *AgentHarness) RunToolCall(ctx context.Context, tc ToolCall, out chan StreamEvent) (ToolStep, error) {
 	turnRT := session.NewRuntime(out, a.session)
-	return a.runOneTool(ctx, tc, turnRT, out)
-}
-
-func (a *AgentHarness) runOneTool(ctx context.Context, tc ToolCall, turnRT session.Runtime, out chan StreamEvent) (ToolStep, error) {
 	tcKey := tc.Key()
 	toolCtx, toolSpan := telemetry.StartToolSpan(ctx, tc.Name, tc.Namespace)
 	tool := a.findTool(tc.Name, tc.Namespace)
 	if tool == nil {
-		toolErr := fmt.Errorf("tool %q: %w", tc.Name, ErrToolNotFound)
+		toolErr := fmt.Errorf("tool %q: %w", tc.Name, ErrNotFound)
 		toolSpan.Finish("error", toolErr)
 		msg := a.emitToolResult(out, tc, toolErr.Error(), "error")
 		_ = a.addToContext(ctx, msg, out)
@@ -272,16 +267,6 @@ func (a *AgentHarness) runOneTool(ctx context.Context, tc ToolCall, turnRT sessi
 		a.pendingMu.Lock()
 		a.pendingToolCalls[tcKey] = stores.PendingToolCall{ToolCall: &tc, InterruptActive: true}
 		a.pendingMu.Unlock()
-		if a.store != nil {
-			if err := a.persistSession(toolCtx); err != nil {
-				a.pendingMu.Lock()
-				delete(a.pendingToolCalls, tcKey)
-				a.pendingMu.Unlock()
-				a.session.DropInterrupt(tcKey)
-				out <- StreamEvent{Type: StreamEventError, Error: fmt.Errorf("persist interrupt before delivery: %w", err)}
-				return ToolStep{}, err
-			}
-		}
 		out <- StreamEvent{Type: StreamEventInterrupt, MessageID: tcKey, Data: data}
 		return ToolStep{Interrupted: true, InterruptID: tcKey, InterruptData: data}, nil
 	}

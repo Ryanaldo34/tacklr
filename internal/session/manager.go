@@ -47,43 +47,33 @@ func NewSessionManager() *SessionManager {
 
 // StateGet returns a host/tool state value without a turn Runtime.
 func (s *SessionManager) StateGet(key string) (any, bool) {
-	return s.stateGet(key)
-}
-
-// StateSet stores a host/tool state value without a turn Runtime.
-// Reserved module keys return an error.
-func (s *SessionManager) StateSet(key string, value any) error {
-	return s.stateSet(key, value)
-}
-
-// StateDelete removes a host/tool state value without a turn Runtime.
-func (s *SessionManager) StateDelete(key string) {
-	s.stateDelete(key)
-}
-
-// PendingInterrupt returns an open interrupt for id if any.
-func (s *SessionManager) PendingInterrupt(id string) (interrupt.Interrupt, bool) {
-	return s.pendingInterrupt(id)
-}
-
-func (s *SessionManager) stateGet(key string) (any, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	v, ok := s.userState[key]
 	return v, ok
 }
 
-func (s *SessionManager) stateSet(key string, value any) error {
+// StateSet stores a host/tool state value without a turn Runtime.
+func (s *SessionManager) StateSet(key string, value any) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.userState[key] = value
 	return nil
 }
 
-func (s *SessionManager) stateDelete(key string) {
+// StateDelete removes a host/tool state value without a turn Runtime.
+func (s *SessionManager) StateDelete(key string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.userState, key)
+}
+
+// PendingInterrupt returns an open interrupt for id if any.
+func (s *SessionManager) PendingInterrupt(id string) (interrupt.Interrupt, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	intr, ok := s.pending[id]
+	return intr, ok
 }
 
 // HasPendingInterrupt reports whether any interrupt is still awaiting a client payload.
@@ -115,10 +105,6 @@ func (s *SessionManager) DropInterrupt(id string) {
 
 // ReturnInterrupt resolves a parked interrupt (session-scoped; no turn bus needed).
 func (s *SessionManager) ReturnInterrupt(id string, result []byte) (interrupt.Interrupt, error) {
-	return s.returnInterrupt(id, result)
-}
-
-func (s *SessionManager) returnInterrupt(id string, result []byte) (interrupt.Interrupt, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	intr, ok := s.pending[id]
@@ -170,13 +156,6 @@ func (s *SessionManager) TakeResolvedInterrupt(id string) (interrupt.Interrupt, 
 	}
 	delete(s.resolved, id)
 	return intr, true
-}
-
-func (s *SessionManager) pendingInterrupt(id string) (interrupt.Interrupt, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	intr, ok := s.pending[id]
-	return intr, ok
 }
 
 func (s *SessionManager) raiseInterrupt(toolCallID string, kind string, payload []byte) (interrupt.Interrupt, error) {

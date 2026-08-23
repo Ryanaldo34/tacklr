@@ -13,7 +13,7 @@
 
 ## Overview
 
-Phases 0–2 of this train are in the tree. A live Registry turn with a VFS and a FUSE device gets a kernel projection. `run_command` runs `/bin/sh -c` with cwd at that root. Providers persist on write. The harness and the mount table are turn-scoped: Registry injects a `MountSession` at construct and `EventStream.Close` unmounts it.
+Phases 0–2 of this train are in the tree. A live Runtime turn with a VFS and a FUSE device gets a kernel projection. `run_command` runs `/bin/sh -c` with cwd at that root. Providers persist on write. The harness and the mount table are turn-scoped: Runtime injects a `MountSession` at construct and the turn owner unmounts it.
 
 The **agent file catalog** is collapsed. Discovery (`find_files`, `find_content`), line editors (`read_lines`, `replace_lines`, `replace_text`), and directory tools (`list`, `stat`, `mkdir`, `remove`) are gone. The model sees `read`, `write`, and `run_command`. Live names and grep go through `run_command` → `ls` / `rg` / `fd` on the FUSE tree. Writable FUSE, jail, broker, and a custom shell stay out.
 
@@ -37,14 +37,14 @@ The **agent file catalog** is collapsed. Discovery (`find_files`, `find_content`
 | Layer | Owner | Rule |
 |-------|--------|------|
 | `MountSession` | Injector (`openTurnVFS`, or embedder) | Fresh tree each turn from `FSBootstrap` + bind recipes |
-| FUSE | Registry via `VFSProjection.Attach` | `ensureSessionFuse` after construct; skip if `HostDir() != ""` |
-| Harness | Turn | `NewAgent` / `NewAgentFromSession` with `MountSession` set; `Close` dumps checkpoint, parks, MCP, vfsindex — **does not** unmount FUSE (workers inherit) |
+| FUSE | Runtime via `vfs.Projection.Attach` | Attach after construct; skip if `HostDir() != ""` |
+| Harness | Turn | `NewAgent` with `MountSession` set; `Close` parks MCP/vfsindex — **does not** unmount FUSE (workers inherit) |
 | IR | Provider | `WriteDocument` / `WriteFile` persist now. There is no session dirty cache (`vfs/cache.go` is gone). `ReadText` is provider plaintext. |
 | Tests without `/dev/fuse` | `DirectProjection` | `Available()==true`, `Attach` is a no-op; VFS tools work; `run_command` still needs `HostDir` |
 
-**Production without a FUSE device.** `openTurnVFS` returns nil when `!projection.Available()`. There is no MountSession, so no VFS tools and no `run_command`. Registry emits `vfs.fuse.unavailable` and Stores the harness. That is harsher than the old “keep list/stat without a kernel tree” draft. Tests that need the tree inject `WithVFSProjection(DirectProjection{})`. Embedders that want the same in-process tree pass a `MountSession` themselves.
+**Production without a FUSE device.** `OpenTurnVFS` returns nil when `!projection.Available()`. There is no MountSession, so no VFS tools and no `run_command`. Tests that need the tree inject `DirectProjection`. Embedders that want the same in-process tree pass a `MountSession` themselves.
 
-**Path identity (shipped).** FUSE root is virtual `/`. Every `Specs()` point is one segment (`/work`, `/engram`). `FuseMount` rejects multi-segment points. testserver bootstraps `Point: "/work"` with `LocalFactory.Base` as the jail. Agent tools take `/work/note.md`. Host commands take `work/note.md` relative to `HostDir()`.
+**Path identity (shipped).** FUSE root is virtual `/`. Every `Specs()` point is one segment (`/work`, `/engram`). `FuseMount` rejects multi-segment points. Hosts bootstrap `Point: "/work"` with `LocalFactory.Base` as the jail. Agent tools take `/work/note.md`. Host commands take `work/note.md` relative to `HostDir()`.
 
 **Byte identity (shipped).** Textual FUSE `Read` / `getattr` use `ReadText`. Binaries use `Stat` + `io.ReaderAt`. Writes are write-through, so host `rg` sees the last persist, not a dirty IR buffer.
 
@@ -59,13 +59,13 @@ The **agent file catalog** is collapsed. Discovery (`find_files`, `find_content`
 | Zero FUSE TTLs; single-segment reject; `HostDir`; `FuseAvailable`; `ErrFuseNotMounted` | `vfs/fuse_node.go`, `vfs/errors.go` |
 | Kernel identity smoke (skip without device) | `vfs/fuse_test.go` |
 | `VFSProjection` / `FuseProjection` / `DirectProjection` | `server/projection.go` |
-| `ensureSessionFuse`; fail-hard on device + mount fail; skip remount if `HostDir` set | `server/registry.go` |
+| FUSE attach; fail-hard on device + mount fail; skip remount if `HostDir` set | `durable.OpenTurnVFS` |
 | Turn-scoped mounts; harness Close does not unmount | `openTurnVFS`, `EventStream.Close`, `AgentHarness.Close` |
 | host `/work` | Runtime `FSBootstrap` `Point: /work` |
 | `run_command` | `tools_command.go` |
 | Fuse mount metrics / events | `telemetry` + Registry |
 | go-fuse as a direct module | `go.mod` |
-| Typed park / permission bags on `NewAgentFromSession` | `rehydrateHarnessState` |
+| Typed park / permission bags on `RestoreCheckpoint` | `session.ApplyCheckpoint` |
 
 ---
 
@@ -264,7 +264,7 @@ Each PR is independently reviewable. Do not combine Phase 3 removal with the `wr
 - `vfs/fuse_test.go` — kernel identity smoke
 - `vfs/document_session.go` — write-through `WriteDocument`
 - `server/projection.go` — `VFSProjection`
-- `server/registry.go` — `openTurnVFS`, `ensureSessionFuse`, `closeTurnVFS`
+- `durable/vfs.go` — `OpenTurnVFS`, `CloseTurnVFS`
 - `tools_command.go` — `run_command`
 - `tools_vfs.go` — remaining file tools
 - `tools_vfsindex.go` — `index_file` / `unindex` / `find_content` (until PR A)
@@ -279,4 +279,4 @@ Each PR is independently reviewable. Do not combine Phase 3 removal with the `wr
 
 2026-08-13 — Initial train (start FUSE, `run_command`, collapse tools).
 
-2026-08-15 — Reoriented after the host-owned session refactor. Phases 0–2 are shipped (`VFSProjection`, Registry `ensureSessionFuse`, `run_command`, write-through IR, turn-scoped harness). This file now covers only Phase 3–5 and names the next plan (writable FUSE). Production without a FUSE device no longer gets an in-process VFS tree; tests use `DirectProjection`.
+2026-08-15 — Reoriented after the host-owned session refactor. Phases 0–2 are shipped (`vfs.Projection`, `OpenTurnVFS`, `run_command`, write-through IR, turn-scoped harness). This file now covers only Phase 3–5 and names the next plan (writable FUSE). Production without a FUSE device no longer gets an in-process VFS tree; tests use `DirectProjection`.

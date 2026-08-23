@@ -19,8 +19,8 @@ import (
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
-// TestMultiHandler_forwardsToBase: dual-write helper used by testserver must
-// deliver records to the local handler (does not mutate process slog default).
+// TestMultiHandler_forwardsToBase: dual-write helper must deliver records to
+// the local handler (does not mutate process slog default).
 func TestBrainObserver_startEnd(t *testing.T) {
 	obs := NewBrainObserver()
 	ctx, span := obs.StartOp(context.Background(), brain.OpSearch)

@@ -1,6 +1,6 @@
 # Durable runtime
 
-Tacklr’s session kernel is `durable.Runtime`. A protocol handler (ACP today, SSE, or none) maps wire frames to Runtime calls. The kernel does not import ACP or A2A. Autonomous workflows call Runtime directly.
+Tacklr’s session kernel is `durable.Runtime`. A `server.Protocol` maps wire frames to Runtime calls. ACP is the native implementation (`NewACPProtocol`); hosts implement `Protocol` for their own streaming and delivery. The kernel does not import protocol types. Autonomous workflows call Runtime directly.
 
 There are three ways to run an agent:
 
@@ -12,7 +12,7 @@ events, _ := h.Run(ctx, prompt)
 // HITL: read yield, then h.ReturnFromInterrupt
 ```
 
-Human-in-the-loop waits in-process on the same harness. If `AgentOptions.Store` is set, `Run` still checkpoints that `BaseStore`. This path does not require Temporal.
+Human-in-the-loop waits in-process on the same harness. Persistence is `h.Checkpoint` / `h.RestoreCheckpoint` (the same blob `durable.Runtime` writes to SnapshotStore). This path does not require Temporal.
 
 ## Path B — in-process Runtime
 
@@ -25,7 +25,7 @@ _ = rt.Prompt(ctx, id, durable.Prompt{Text: prompt, Auth: auth})
 sub, _ := rt.Subscribe(ctx, id, 0)
 ```
 
-One goroutine per session runs the harness wait loop. HITL parks that goroutine and waits for `Runtime.Resume`. Session conversation lives in `SnapshotStore`, not `BaseStore`.
+One goroutine per session runs the harness wait loop. HITL parks that goroutine and waits for `Runtime.Resume`. Session conversation lives in `SnapshotStore`.
 
 ## Path C — Temporal
 
@@ -54,7 +54,7 @@ Prompt.Auth            tokens + optional new bindings / drops
 Resume.Auth            tokens for remount after park or worker recycle
 ```
 
-`AuthContext` is protocol-neutral. ACP `_tacklr/vfs/bind` only stashes on the ACP wire session; `BindTurn` copies that stash onto `Prompt.Auth`. SSE sends `auth` on the request body. An autonomous host sets `Prompt.Auth` (and optional `CreateSession.Mounts`) when it queues the workflow. No protocol is required.
+`AuthContext` is protocol-neutral. ACP `_tacklr/vfs/bind` only stashes on the ACP wire session; `BindTurn` copies that stash onto `Prompt.Auth`. An autonomous host sets `Prompt.Auth` (and optional `CreateSession.Mounts`) when it queues the workflow. No protocol is required.
 
 Recipes are cached on the session snapshot (`Snapshot.Mounts`): where a mount came from, not file contents. Providers lazy-load bytes on open/read. Tokens are not snapshotted. After HITL or a worker restart, the next Prompt/Resume supplies tokens; cached recipes remount the same folders.
 
@@ -64,25 +64,30 @@ Encrypt work-item payloads at rest with a Temporal payload codec (or the equival
 
 ## Protocol contract
 
-A protocol is only the handshake: create a session, start a turn, stream `StreamEvent`, end a turn, return HITL answers. Map wire auth into `AuthContext`.
+`server.Protocol` is the host extension point. Implement HTTP/WebSocket routes, map each `StreamEvent` to wire frames in `OnStreamEvent`, and call `server.RunTurn` to pump `Runtime.Subscribe`. ACP is one implementation:
 
-| Runtime | ACP example | Autonomous |
-|---------|-------------|------------|
+```go
+srv := server.NewServer(rt, cat, server.NewACPProtocol(wire), myProtocol{})
+```
+
+A protocol is the handshake: create a session, start a turn, stream `StreamEvent`, end a turn, return HITL answers. Map wire auth into `AuthContext`.
+
+| Runtime | ACP example | Host protocol / autonomous |
+|---------|-------------|----------------------------|
 | `CreateSession` | `session/new` | host start |
-| `Prompt` + `Subscribe` | `session/prompt` | host prompt payload |
-| `Resume` | `session/resume` (or mid-turn permission RPC) | host external event |
+| `Prompt` + `Subscribe` | `session/prompt` | `RunTurn` / host prompt payload |
+| `Resume` | `session/resume` (or mid-turn permission RPC) | `OnStreamEvent` Resume / host event |
 | `Cancel` | `session/cancel` | host cancel |
 | `Close` | `session/close` | host close |
 | `Prompt.Auth` | `_tacklr/vfs/bind` stash → BindTurn | payload field |
 
-ACP is one handler in `server`. Kernel, harness, VFS, and Temporal files compile with no ACP imports.
+Kernel, harness, VFS, and Temporal files compile with no protocol imports.
 
-## SnapshotStore vs BaseStore
+## SnapshotStore
 
 | Store | Lifetime | Contents |
 |-------|----------|----------|
-| SnapshotStore | One Runtime session | Window, plan, pending tools, interrupts, VFS recipes (no tokens, no file bytes) |
-| BaseStore | Across sessions | Brain / host records. Path A embedders may still pass `Store` |
+| SnapshotStore | One Runtime session | Window, plan, pending tools, interrupts, parked-worker checkpoints, VFS recipes (no tokens, no file bytes) |
 
 `Close` deletes the runtime snapshot. A new session id does not load a previous snapshot.
 

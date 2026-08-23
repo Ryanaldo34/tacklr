@@ -87,10 +87,10 @@ func classifyAPIStatus(apiErr *APIStatusError, errType string) error {
 	}
 	lower := strings.ToLower(apiErr.Body + " " + apiErr.Code + " " + errType)
 	if isRefusalSignal(lower) {
-		return tacklr.WrapStopReason(tacklr.ErrModelRefused, apiErr)
+		return fmt.Errorf("%w: %w", tacklr.ErrModelRefused, apiErr)
 	}
 	if isMaxTokensSignal(lower) {
-		return tacklr.WrapStopReason(tacklr.ErrMaxTokens, apiErr)
+		return fmt.Errorf("%w: %w", tacklr.ErrMaxTokens, apiErr)
 	}
 	return apiErr
 }
@@ -103,10 +103,10 @@ func classifyIncompleteReason(reason string) error {
 		return nil
 	}
 	if isMaxTokensSignal(r) || r == "max_output_tokens" || r == "max_tokens" {
-		return tacklr.WrapStopReason(tacklr.ErrMaxTokens, fmt.Errorf("response incomplete (%s)", reason))
+		return fmt.Errorf("%w: response incomplete (%s)", tacklr.ErrMaxTokens, reason)
 	}
 	if isRefusalSignal(r) || r == "content_filter" {
-		return tacklr.WrapStopReason(tacklr.ErrModelRefused, fmt.Errorf("response incomplete (%s)", reason))
+		return fmt.Errorf("%w: response incomplete (%s)", tacklr.ErrModelRefused, reason)
 	}
 	return fmt.Errorf("response incomplete (%s)", reason)
 }

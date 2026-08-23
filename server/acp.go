@@ -91,8 +91,10 @@ type acpSessionParams struct {
 
 // acpPromptParams holds params for session/prompt.
 type acpPromptParams struct {
-	SessionID string          `json:"sessionId"`
-	Prompt    json.RawMessage `json:"prompt"`
+	SessionID  string          `json:"sessionId"`
+	Prompt     json.RawMessage `json:"prompt"`
+	Cwd        string          `json:"cwd"`
+	MCPServers []mcp.MCPConfig `json:"mcpServers,omitempty"`
 }
 
 // acpSessionIDParams holds params for methods that only need a session ID.
@@ -196,6 +198,12 @@ func validateACPRequest(body []byte) (*parsedRequest, error) {
 		pr.ThreadID = p.SessionID
 		pr.CWD = p.Cwd
 		pr.MCPServers = p.MCPServers
+		var withResp struct {
+			Responses map[string]json.RawMessage `json:"responses"`
+		}
+		if json.Unmarshal(env.Params, &withResp) == nil {
+			pr.Responses = withResp.Responses
+		}
 		return pr, nil
 	case "session/prompt":
 		if env.Params == nil {
@@ -218,6 +226,8 @@ func validateACPRequest(body []byte) (*parsedRequest, error) {
 		pr.ThreadID = p.SessionID
 		pr.Prompt = msg.Content
 		pr.UserMessage = msg
+		pr.CWD = p.Cwd
+		pr.MCPServers = p.MCPServers
 		return pr, nil
 	case "session/set_config_option":
 		if env.Params == nil {

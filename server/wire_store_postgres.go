@@ -6,8 +6,6 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
-
-	"github.com/ryanaldo34/tacklr/stores"
 )
 
 // PostgresWireStore implements ProtocolWireStore against Postgres.
@@ -22,6 +20,9 @@ type PostgresWireStore struct {
 // NewPostgresWireStore wraps an existing pgx connection.
 // protocolKey labels rows (e.g. "acp"); empty defaults to "acp".
 func NewPostgresWireStore(conn *pgx.Conn, protocolKey string) *PostgresWireStore {
+	if conn == nil {
+		panic("server: postgres wire store requires conn")
+	}
 	if protocolKey == "" {
 		protocolKey = "acp"
 	}
@@ -29,9 +30,6 @@ func NewPostgresWireStore(conn *pgx.Conn, protocolKey string) *PostgresWireStore
 }
 
 func (s *PostgresWireStore) Put(ctx context.Context, sessionID string, payload []byte) error {
-	if s == nil || s.conn == nil {
-		return fmt.Errorf("postgres wire store: nil conn")
-	}
 	if len(payload) == 0 {
 		payload = []byte("{}")
 	}
@@ -50,15 +48,12 @@ func (s *PostgresWireStore) Put(ctx context.Context, sessionID string, payload [
 }
 
 func (s *PostgresWireStore) Get(ctx context.Context, sessionID string) ([]byte, error) {
-	if s == nil || s.conn == nil {
-		return nil, fmt.Errorf("postgres wire store: nil conn")
-	}
 	const q = `SELECT payload FROM public.protocol_wire_session WHERE session_id = $1`
 	var payload []byte
 	err := s.conn.QueryRow(ctx, q, sessionID).Scan(&payload)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("wire session %q: %w", sessionID, stores.ErrSessionNotFound)
+			return nil, fmt.Errorf("wire session %q: %w", sessionID, ErrSessionNotFound)
 		}
 		return nil, fmt.Errorf("wire get %q: %w", sessionID, err)
 	}
@@ -66,9 +61,6 @@ func (s *PostgresWireStore) Get(ctx context.Context, sessionID string) ([]byte, 
 }
 
 func (s *PostgresWireStore) Delete(ctx context.Context, sessionID string) error {
-	if s == nil || s.conn == nil {
-		return nil
-	}
 	const q = `DELETE FROM public.protocol_wire_session WHERE session_id = $1`
 	_, err := s.conn.Exec(ctx, q, sessionID)
 	if err != nil {

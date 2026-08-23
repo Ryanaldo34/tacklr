@@ -22,7 +22,7 @@ import (
 // spawn_worker tool. Specs may nest via SubAgents so interrupt propagation
 // and orchestration stay self-similar at any depth.
 //
-// Workers inherit the parent session world via inheritOptions (VFS including
+// Workers inherit the parent session world via workerOptsFromSpec (VFS including
 // /skills, brain, index bridge, MCP, web, policy, watchdog, interceptors).
 // Spec fields replace model, instructions, tools, and nested SubAgents.
 // They skip planningWriteLock. They do not get a second FUSE.
@@ -38,6 +38,24 @@ type SubAgent struct {
 
 // parkedWorkerMeta is durable park metadata. Live harness pointers live in parkedWorkersLive.
 type parkedWorkerMeta = session.ParkedWorkerMeta
+
+func workerParkMeta(worker *AgentHarness, name, task string, childIDs []string) (parkedWorkerMeta, error) {
+	meta := parkedWorkerMeta{
+		WorkerName:        name,
+		Task:              task,
+		ChildInterruptIDs: childIDs,
+	}
+	if worker == nil {
+		return meta, nil
+	}
+	meta.WorkerSessionID = worker.sessionId
+	cp, err := worker.Checkpoint()
+	if err != nil {
+		return parkedWorkerMeta{}, err
+	}
+	meta.Checkpoint = cp
+	return meta, nil
+}
 
 // initSubAgentWorkers registers worker specs. Invalid or duplicate specs are
 // constructor errors (panic): a misconfigured host must not start a harness
@@ -254,19 +272,10 @@ func (a *AgentHarness) runWorker(ctx context.Context, workerName, task string, b
 		return "", failRun(fmt.Errorf("worker %q: incomplete: %w", workerName, ErrFailed))
 	}
 
-	// Ensure child is durable when a store is available.
-	if worker.store != nil && worker.sessionId != "" {
-		if err := worker.persistSession(ctx); err != nil {
-			slog.Error("failed to checkpoint worker", append(logAttrs, "error", err)...)
-			return "", failRun(fmt.Errorf("checkpoint interrupted worker %q: %w", workerName, err))
-		}
-	}
-
-	parkMeta := parkedWorkerMeta{
-		WorkerName:        workerName,
-		WorkerSessionID:   worker.sessionId,
-		Task:              task,
-		ChildInterruptIDs: childIntrIDs,
+	parkMeta, err := workerParkMeta(worker, workerName, task, childIntrIDs)
+	if err != nil {
+		slog.Error("failed to checkpoint worker", append(logAttrs, "error", err)...)
+		return "", failRun(fmt.Errorf("checkpoint interrupted worker %q: %w", workerName, err))
 	}
 	a.setPark(toolCallID, parkMeta, worker)
 	parked = true
@@ -289,8 +298,13 @@ func (a *AgentHarness) runWorker(ctx context.Context, workerName, task string, b
 }
 
 func (a *AgentHarness) newWorkerHarness(ctx context.Context, workerName, parentToolCallID string, spec *SubAgent) (*AgentHarness, error) {
+	opts := a.workerOptsFromSpec(spec)
+	if id, ok := a.session.Search.Namespace(); ok {
+		cp := id
+		opts.SearchNamespace = &cp
+	}
 	sessionID := workerSessionID(a.sessionId, workerName, parentToolCallID)
-	worker, err := NewAgent(ctx, a.workerOptsForSpawn(spec))
+	worker, err := NewAgent(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -305,15 +319,18 @@ func workerSessionID(parentSessionID, workerName, parentToolCallID string) strin
 	return fmt.Sprintf("%s/w/%s/%s", parentSessionID, workerName, parentToolCallID)
 }
 
-// inheritOptions is the parent session world a worker should keep.
-// Worker-specific fields (model, prompt, tools) are applied in workerOptsFromSpec.
-func (a *AgentHarness) inheritOptions() AgentOptions {
+// workerOptsFromSpec is the parent session world with worker spec fields overlaid.
+// Omits SearchNamespace so resume keeps the checkpointed worker session value.
+func (a *AgentHarness) workerOptsFromSpec(spec *SubAgent) AgentOptions {
 	return AgentOptions{
 		Config: Config{
 			MaxWindowSize:   a.maxWindowSize,
 			MaxTurnRequests: a.maxTurnRequests,
+			SystemPrompt:    spec.Instructions,
 		},
-		Store:                 a.store,
+		Model:                 spec.Model,
+		Tools:                 slices.Clone(spec.Tools),
+		SubAgents:             spec.SubAgents,
 		WatchDog:              a.watchDog,
 		MCPConfigs:            slices.Clone(a.mcpConfigs),
 		MCPCredentialResolver: a.mcpCredentialResolver,
@@ -324,32 +341,12 @@ func (a *AgentHarness) inheritOptions() AgentOptions {
 		ExaAPIKey:             a.exaAPIKey,
 		Brain:                 a.brain,
 		BrainWriteKinds:       a.brainWriteKinds,
-		MountSession:          a.VFS(),
+		MountSession:          a.session.VFS,
 		RunCommandUnattended:  a.runCommandUnattended,
 		writeUnattended:       a.writeUnattended,
 		shareIndexBridge:      a.vfsBridge,
+		disablePlanningLock:   true,
 	}
-}
-
-// workerOptsFromSpec overlays the worker spec on inheritOptions.
-// Omits SearchNamespace so resume keeps the checkpointed worker session value.
-func (a *AgentHarness) workerOptsFromSpec(spec *SubAgent) AgentOptions {
-	opts := a.inheritOptions()
-	opts.Config.SystemPrompt = spec.Instructions
-	opts.Model = spec.Model
-	opts.Tools = slices.Clone(spec.Tools)
-	opts.SubAgents = spec.SubAgents
-	opts.disablePlanningLock = true
-	return opts
-}
-
-func (a *AgentHarness) workerOptsForSpawn(spec *SubAgent) AgentOptions {
-	opts := a.workerOptsFromSpec(spec)
-	if id, ok := a.SearchNamespace(); ok {
-		cp := id
-		opts.SearchNamespace = &cp
-	}
-	return opts
 }
 
 func (a *AgentHarness) attachParkedWorker(ctx context.Context, toolCallID string, meta parkedWorkerMeta, spec *SubAgent) (*AgentHarness, error) {
@@ -360,12 +357,18 @@ func (a *AgentHarness) attachParkedWorker(ctx context.Context, toolCallID string
 	}
 	a.parkMu.Unlock()
 
-	if a.store == nil || meta.WorkerSessionID == "" {
+	if meta.Checkpoint == nil {
 		return nil, fmt.Errorf("parked worker state is missing: %w", ErrNotFound)
 	}
-	worker, err := NewAgentFromSession(ctx, meta.WorkerSessionID, a.workerOptsFromSpec(spec))
+	opts := a.workerOptsFromSpec(spec)
+	opts.SessionID = meta.WorkerSessionID
+	worker, err := NewAgent(ctx, opts)
 	if err != nil {
-		return nil, fmt.Errorf("parked worker state is missing: load session %q: %w: %w", meta.WorkerSessionID, ErrNotFound, err)
+		return nil, fmt.Errorf("parked worker state is missing: %w: %w", ErrNotFound, err)
+	}
+	if err := worker.RestoreCheckpoint(*meta.Checkpoint); err != nil {
+		worker.Close()
+		return nil, fmt.Errorf("parked worker state is missing: restore %q: %w: %w", meta.WorkerSessionID, ErrNotFound, err)
 	}
 	a.parkMu.Lock()
 	a.parkedWorkersLive[toolCallID] = worker
@@ -398,33 +401,11 @@ func collectChildInterrupts(worker *AgentHarness, drainedIDs []string) (ids []st
 	return ids, nil
 }
 
-// --- park metadata (durable user State + live harness cache) ---
-
-// parkStore groups parked-worker get/set/clear over durable state and the
-// same-process live map. Callers use a.parks().
-type parkStore struct {
-	h *AgentHarness
-}
-
-func (a *AgentHarness) parks() parkStore { return parkStore{h: a} }
-
 func (a *AgentHarness) getParkMeta(toolCallID string) *parkedWorkerMeta {
-	return a.parks().get(toolCallID)
-}
-
-func (a *AgentHarness) setPark(toolCallID string, meta parkedWorkerMeta, worker *AgentHarness) {
-	a.parks().set(toolCallID, meta, worker)
-}
-
-func (a *AgentHarness) clearPark(toolCallID string) {
-	a.parks().clear(toolCallID)
-}
-
-func (p parkStore) get(toolCallID string) *parkedWorkerMeta {
 	if toolCallID == "" {
 		return nil
 	}
-	meta, ok := p.h.session.ParkedWorker(toolCallID)
+	meta, ok := a.session.ParkedWorker(toolCallID)
 	if !ok {
 		return nil
 	}
@@ -432,29 +413,29 @@ func (p parkStore) get(toolCallID string) *parkedWorkerMeta {
 	return &cp
 }
 
-func (p parkStore) set(toolCallID string, meta parkedWorkerMeta, worker *AgentHarness) {
-	p.h.session.SetParkedWorker(toolCallID, meta)
-	p.h.parkMu.Lock()
+func (a *AgentHarness) setPark(toolCallID string, meta parkedWorkerMeta, worker *AgentHarness) {
+	a.session.SetParkedWorker(toolCallID, meta)
+	a.parkMu.Lock()
 	if worker != nil {
-		p.h.parkedWorkersLive[toolCallID] = worker
+		a.parkedWorkersLive[toolCallID] = worker
 	}
-	p.h.parkMu.Unlock()
+	a.parkMu.Unlock()
 }
 
-func (p parkStore) clear(toolCallID string) {
+func (a *AgentHarness) clearPark(toolCallID string) {
 	if toolCallID == "" {
 		return
 	}
-	p.h.session.DeleteParkedWorker(toolCallID)
-	p.h.parkMu.Lock()
-	live := p.h.parkedWorkersLive[toolCallID]
-	delete(p.h.parkedWorkersLive, toolCallID)
-	p.h.parkMu.Unlock()
+	a.session.DeleteParkedWorker(toolCallID)
+	a.parkMu.Lock()
+	live := a.parkedWorkersLive[toolCallID]
+	delete(a.parkedWorkersLive, toolCallID)
+	a.parkMu.Unlock()
 	if live != nil {
 		live.Close()
 	}
-	if p.h.interruptPayloads != nil {
-		delete(p.h.interruptPayloads, toolCallID)
+	if a.interruptPayloads != nil {
+		delete(a.interruptPayloads, toolCallID)
 	}
 }
 

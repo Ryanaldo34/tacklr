@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/converter"
 	"go.temporal.io/sdk/testsuite"
 	"go.temporal.io/sdk/worker"
@@ -24,6 +24,97 @@ import (
 	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
+
+func TestFailFromWire(t *testing.T) {
+	cases := []struct {
+		in   string
+		want error
+	}{
+		{"model refused: nope", tacklr.ErrModelRefused},
+		{"max tokens reached", tacklr.ErrMaxTokens},
+		{"max turn model requests exceeded", tacklr.ErrMaxTurnRequests},
+		{"context canceled", context.Canceled},
+		{"run: context cancelled: context canceled", context.Canceled},
+		{"boom", errors.New("boom")},
+	}
+	for _, tc := range cases {
+		got := failFromWire(tc.in)
+		if tc.want.Error() == "boom" {
+			if got.Error() != "boom" {
+				t.Fatalf("%q: %v", tc.in, got)
+			}
+			continue
+		}
+		if !errors.Is(got, tc.want) {
+			t.Fatalf("%q: got %v want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestActivities_unknownAgentAndDirectCall(t *testing.T) {
+	cat := durable.NewCatalog("default")
+	cat.Register("default", durable.AgentSpec{
+		Options: tacklr.AgentOptions{Model: &testkit.ScriptedModel{
+			InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "ok", IsComplete: true}
+			},
+		}, Config: tacklr.Config{MaxWindowSize: 8192}},
+	})
+	log := inprocess.NewMemoryEventLog()
+	acts := &Activities{Catalog: cat, Snapshots: inprocess.NewMemorySnapshot(), Fallback: log, DisableStreams: true}
+	_, err := acts.Inference(t.Context(), InferenceInput{SessionID: "s", AgentID: "nope"})
+	if !errors.Is(err, durable.ErrAgentNotFound) {
+		t.Fatalf("missing agent: %v", err)
+	}
+	_, err = acts.Tool(t.Context(), ToolInput{SessionID: "s", AgentID: "nope", Call: streaming.ToolCall{ID: "c", Name: "x"}})
+	if !errors.Is(err, durable.ErrAgentNotFound) {
+		t.Fatalf("tool missing agent: %v", err)
+	}
+	out, err := acts.Inference(t.Context(), InferenceInput{
+		SessionID: "s", AgentID: "default",
+		User: &streaming.Message{Role: streaming.RoleUser, Content: "hi"},
+	})
+	if err != nil || !out.Complete {
+		t.Fatalf("direct inference: %+v %v", out, err)
+	}
+}
+
+func TestNew_panicsWithoutClientOrCatalog(t *testing.T) {
+	cat := durable.NewCatalog("default")
+	cat.Register("default", durable.AgentSpec{
+		Options: tacklr.AgentOptions{Model: &testkit.ScriptedModel{}, Config: tacklr.Config{MaxWindowSize: 8192}},
+	})
+	mustPanic(t, func() { New(nil, "q", cat) })
+	mustPanic(t, func() { New(&struct{ client.Client }{}, "q", nil) })
+	log := inprocess.NewMemoryEventLog()
+	rt := New(&struct{ client.Client }{}, "", cat, nil, WithDisableStreams(), WithSnapshotStore(nil), WithEventLog(nil), WithEventLog(log))
+	if rt.taskQueue != "tacklr" || !rt.disableStreams {
+		t.Fatalf("defaults tq=%q streams=%v", rt.taskQueue, rt.disableStreams)
+	}
+	ctx := t.Context()
+	if _, err := rt.Head(ctx, "gone"); err != nil {
+		t.Fatal(err)
+	}
+	sub, err := rt.Subscribe(ctx, "gone", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = sub.Close()
+	rt.markClosed("gone")
+	if err := rt.Prompt(ctx, "gone", durable.Prompt{Text: "x"}); !errors.Is(err, durable.ErrSessionNotFound) {
+		t.Fatalf("closed session: %v", err)
+	}
+}
+
+func mustPanic(t *testing.T, fn func()) {
+	t.Helper()
+	defer func() {
+		if recover() == nil {
+			t.Fatal("want panic")
+		}
+	}()
+	fn()
+}
 
 func lastMsg(msgs []*tacklr.Message) *tacklr.Message {
 	for i := len(msgs) - 1; i >= 0; i-- {
@@ -296,91 +387,6 @@ func TestSessionWorkflow_spawnWorker(t *testing.T) {
 	}
 	if !sawChild {
 		t.Fatalf("want child complete event, parent=%+v child=%+v", got, childGot)
-	}
-}
-
-func TestRuntime_createPromptSubscribeClose(t *testing.T) {
-	if testing.Short() {
-		t.Skip("temporal dev server")
-	}
-	ctx := t.Context()
-	ds, err := testsuite.StartDevServer(ctx, testsuite.DevServerOptions{
-		LogLevel: "error",
-		Stdout:   io.Discard,
-		Stderr:   io.Discard,
-	})
-	if err != nil {
-		t.Fatalf("start temporal dev server: %v", err)
-	}
-	t.Cleanup(func() { _ = ds.Stop() })
-	c := ds.Client()
-	tq := "tacklr-runtime-test"
-	cat := durable.NewCatalog("default")
-	model := &testkit.ScriptedModel{
-		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "hello-runtime", IsComplete: true}
-		},
-	}
-	cat.Register("default", durable.AgentSpec{
-		Options: tacklr.AgentOptions{Model: model, Config: tacklr.Config{MaxWindowSize: 8192}},
-	})
-	fallback := inprocess.NewMemoryEventLog()
-	snaps := inprocess.NewMemorySnapshot()
-	rt := New(c, tq, cat,
-		WithEventLog(fallback),
-		WithSnapshotStore(snaps),
-	)
-	w := NewWorker(c, tq, WorkerOptions{
-		Catalog:    cat,
-		Snapshots:  snaps,
-		Fallback:   fallback,
-		Projection: vfs.DirectProjection{},
-	})
-	if err := w.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(w.Stop)
-
-	id, err := rt.CreateSession(ctx, durable.CreateSession{AgentID: "default", SessionID: "rt1"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := rt.Prompt(ctx, id, durable.Prompt{Text: "hi"}); err != nil {
-		t.Fatal(err)
-	}
-	sub, err := rt.Subscribe(ctx, id, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = sub.Close() })
-	deadline := time.After(20 * time.Second)
-	var sawMsg, sawComplete bool
-	for !sawMsg || !sawComplete {
-		select {
-		case ev, ok := <-sub.Events():
-			if !ok {
-				t.Fatalf("subscribe closed msg=%v complete=%v", sawMsg, sawComplete)
-			}
-			if ev.Type == streaming.StreamEventMessage && strings.Contains(ev.Content, "hello-runtime") {
-				sawMsg = true
-			}
-			if ev.Type == streaming.StreamEventComplete {
-				sawComplete = true
-			}
-		case <-deadline:
-			t.Fatalf("timeout msg=%v complete=%v", sawMsg, sawComplete)
-		}
-	}
-
-	if err := rt.Close(ctx, id); err != nil {
-		t.Fatal(err)
-	}
-	_, _, err = snaps.Load(ctx, id)
-	if !errors.Is(err, durable.ErrSessionNotFound) {
-		t.Fatalf("want snapshot gone, got %v", err)
-	}
-	if err := rt.Prompt(ctx, id, durable.Prompt{Text: "again"}); !errors.Is(err, durable.ErrSessionNotFound) {
-		t.Fatalf("want session-not-found, got %v", err)
 	}
 }
 

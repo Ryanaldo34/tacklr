@@ -116,4 +116,19 @@ func TestWorkspace_writableMemberAndReadOnlyMember(t *testing.T) {
 	if err := ms.WriteFile(ctx, "/workspace/root.txt", []byte("x")); !errors.Is(err, vfs.ErrNotExist) && !errors.Is(err, vfs.ErrNotSupported) {
 		t.Fatalf("write at workspace file = %v", err)
 	}
+	if _, err := ms.Open(ctx, "/workspace"); err == nil {
+		t.Fatal("open workspace root as file")
+	}
+	if _, err := ms.Open(ctx, "/workspace/missing/x"); !errors.Is(err, vfs.ErrNotExist) {
+		t.Fatalf("open missing = %v", err)
+	}
+	if _, err := ms.OpenDocument(ctx, "/workspace", nil); err == nil {
+		t.Fatal("opendoc workspace root")
+	}
+	if _, err := ms.OpenDocument(ctx, "/workspace/missing/x", nil); !errors.Is(err, vfs.ErrNotExist) {
+		t.Fatalf("opendoc missing = %v", err)
+	}
+	if _, err := ms.OpenDocument(ctx, "/workspace/legal/a.txt", nil); err != nil && !errors.Is(err, vfs.ErrNotSupported) {
+		t.Fatalf("opendoc local = %v", err)
+	}
 }

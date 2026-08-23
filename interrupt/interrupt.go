@@ -130,16 +130,22 @@ type ToolPermissionInterrupt struct {
 	Title    string             `json:"title,omitempty"` // human-readable invocation label
 	Options  []PermissionOption `json:"options"`
 
-	// Set by Return after the consumer selects an option.
-	SelectedOptionID string `json:"-"`
-	SelectedKind     string `json:"-"`
-	Allowed          bool   `json:"-"`
+	// Set by Return after the consumer selects an option. Checkpointed so a
+	// later activity can AdoptInterrupt and see the decision. Serialize omits
+	// these so the client park payload stays unresolved.
+	SelectedOptionID string `json:"selectedOptionId,omitempty"`
+	SelectedKind     string `json:"selectedKind,omitempty"`
+	Allowed          bool   `json:"allowed,omitempty"`
 }
 
 func (p *ToolPermissionInterrupt) TypeName() string { return "tool_permission" }
 
 func (p *ToolPermissionInterrupt) Serialize() ([]byte, error) {
-	return json.Marshal(p)
+	return json.Marshal(struct {
+		ToolName string             `json:"toolName,omitempty"`
+		Title    string             `json:"title,omitempty"`
+		Options  []PermissionOption `json:"options"`
+	}{ToolName: p.ToolName, Title: p.Title, Options: p.Options})
 }
 
 func (p *ToolPermissionInterrupt) InitFromPayload(payload []byte) error {

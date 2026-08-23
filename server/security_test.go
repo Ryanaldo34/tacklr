@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,8 +10,6 @@ import (
 	"testing"
 
 	"github.com/ryanaldo34/tacklr/durable"
-
-	tacklr "github.com/ryanaldo34/tacklr"
 	tacklrsecurity "github.com/ryanaldo34/tacklr/security"
 )
 
@@ -44,9 +41,9 @@ func TestACPAuthentication_ownsSessionsByGenericPrincipal(t *testing.T) {
 		Description: "Authenticate with the host",
 		Scheme:      "host-login",
 	}}, true)
-	registry := newTestKernel(&mockInferenceStrategy{}, nil, durable.AgentSpec{})
+	k := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
 	connection := &Conn{}
-	env := ProtocolEnv{Runtime: registry.Runtime, Catalog: registry.Catalog, Conn: connection, Security: service}
+	env := ProtocolEnv{Runtime: k.Runtime, Catalog: k.Catalog, Conn: connection, Security: service}
 	call := func(body string) map[string]any {
 		t.Helper()
 		recorder := httptest.NewRecorder()
@@ -87,7 +84,7 @@ func TestACPAuthentication_ownsSessionsByGenericPrincipal(t *testing.T) {
 	bobConnection := &Conn{Security: &bobContext}
 	bobRecorder := httptest.NewRecorder()
 	bobConnection.Writer = &jsonRPCMessageWriter{w: bobRecorder}
-	bobEnv := ProtocolEnv{Runtime: registry.Runtime, Catalog: registry.Catalog, Conn: bobConnection, Security: service}
+	bobEnv := ProtocolEnv{Runtime: k.Runtime, Catalog: k.Catalog, Conn: bobConnection, Security: service}
 	load := `{"jsonrpc":"2.0","id":5,"method":"session/load","params":{"sessionId":"` + sessionID + `"}}`
 	_ = protocol.HandleInbound(t.Context(), bobEnv, []byte(load))
 	var bobResponse map[string]any
@@ -101,7 +98,7 @@ func TestACPAuthentication_ownsSessionsByGenericPrincipal(t *testing.T) {
 
 func TestServer_networkPolicyMustBeExplicit(t *testing.T) {
 	// Arrange
-	server := newTestServer(&mockInferenceStrategy{}, nil, SSE)
+	server := newTestServer(t)
 
 	// Act
 	err := server.ServeHTTP(t.Context(), "127.0.0.1:0")
@@ -131,7 +128,7 @@ func TestServer_networkContext_enforcesExplicitPolicy(t *testing.T) {
 		}
 		return tacklrsecurity.Attempt{}, false
 	}
-	srv := newTestServer(&mockInferenceStrategy{}, nil, SSE).WithSecurity(service, extract)
+	srv := newTestServer(t).WithSecurity(service, extract)
 
 	// Act
 	anonymousCtx, anonymousStatus := srv.networkContext(t.Context(), httptest.NewRequest(http.MethodGet, "/", nil), false)
@@ -143,11 +140,11 @@ func TestServer_networkContext_enforcesExplicitPolicy(t *testing.T) {
 	badReq.Header.Set("Authorization", "Bearer bad")
 	_, badStatus := srv.networkContext(t.Context(), badReq, false)
 
-	explicit := newTestServer(&mockInferenceStrategy{}, nil, SSE)
+	explicit := newTestServer(t)
 	explicit.networkPolicyConfigured = true
 	_, blockedStatus := explicit.networkContext(t.Context(), httptest.NewRequest(http.MethodGet, "/", nil), false)
 
-	allowedAnonymous := newTestServer(&mockInferenceStrategy{}, nil, SSE).AllowAnonymousNetwork()
+	allowedAnonymous := newTestServer(t).AllowAnonymousNetwork()
 	anonCtx, anonStatus := allowedAnonymous.networkContext(t.Context(), httptest.NewRequest(http.MethodGet, "/", nil), false)
 
 	// Assert
@@ -164,7 +161,7 @@ func TestServer_networkContext_enforcesExplicitPolicy(t *testing.T) {
 		t.Fatalf("bad token status = %d", badStatus)
 	}
 
-	rejecting := newTestServer(&mockInferenceStrategy{}, nil, SSE).WithSecurity(service, func(r *http.Request) (tacklrsecurity.Attempt, bool) {
+	rejecting := newTestServer(t).WithSecurity(service, func(r *http.Request) (tacklrsecurity.Attempt, bool) {
 		if r.Header.Get("Authorization") != "" {
 			return tacklrsecurity.Attempt{
 				Scheme:     "bearer",
@@ -180,7 +177,7 @@ func TestServer_networkContext_enforcesExplicitPolicy(t *testing.T) {
 		t.Fatalf("rejected credential status = %d", rejectedStatus)
 	}
 
-	extractorless := newTestServer(&mockInferenceStrategy{}, nil, SSE).WithSecurity(service, nil)
+	extractorless := newTestServer(t).WithSecurity(service, nil)
 	_, extractorlessStatus := extractorless.networkContext(t.Context(), httptest.NewRequest(http.MethodGet, "/", nil), true)
 	if extractorlessStatus != 0 {
 		t.Fatalf("extractorless allowed status = %d", extractorlessStatus)
@@ -195,169 +192,86 @@ func TestServer_networkContext_enforcesExplicitPolicy(t *testing.T) {
 }
 
 func TestServer_WithSecurity_authenticatesHTTPRequests(t *testing.T) {
-	// Arrange
 	service := &tacklrsecurity.Service{
 		Authenticator: testAuthenticator(func(_ context.Context, attempt tacklrsecurity.Attempt) (tacklrsecurity.Principal, error) {
 			return tacklrsecurity.NewPrincipal(string(attempt.Credential.Bytes()))
 		}),
 	}
-	strategy := &mockInferenceStrategy{
-		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "secured", IsComplete: true}
-		},
-	}
-	srv := serverFromKernel(newTestRegistry(testStore(t), strategy, nil), SSE).WithSecurity(service, func(r *http.Request) (tacklrsecurity.Attempt, bool) {
+	k := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	srv := NewServer(k.Runtime, k.Catalog, healthProtocol{}).WithSecurity(service, func(r *http.Request) (tacklrsecurity.Attempt, bool) {
 		if token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "); token != r.Header.Get("Authorization") {
 			return tacklrsecurity.Attempt{Scheme: "bearer", Credential: tacklrsecurity.NewSecret([]byte(token))}, true
 		}
 		return tacklrsecurity.Attempt{}, false
 	})
 
-	// Act
 	authorized := httptest.NewRecorder()
-	authorizedReq := newSSERequest(t, "/", bytes.NewReader([]byte(`{"agent_id":"default","prompt":"hi"}`)))
+	authorizedReq := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	authorizedReq.Header.Set("Authorization", "Bearer alice")
 	srv.HTTPMux().ServeHTTP(authorized, authorizedReq)
 
 	unauthorized := httptest.NewRecorder()
-	srv.HTTPMux().ServeHTTP(unauthorized, newSSERequest(t, "/", bytes.NewReader([]byte(`{"agent_id":"default","prompt":"hi"}`))))
+	srv.HTTPMux().ServeHTTP(unauthorized, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 
-	// Assert
-	if !strings.Contains(authorized.Body.String(), "secured") {
-		t.Fatalf("authorized body = %s", authorized.Body.String())
+	if authorized.Code != http.StatusOK || authorized.Body.String() != "ok" {
+		t.Fatalf("authorized = %d %s", authorized.Code, authorized.Body.String())
 	}
 	if unauthorized.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthorized status = %d body = %s", unauthorized.Code, unauthorized.Body.String())
 	}
 }
 
-func TestSessionSecurity_authorizeOperationAndSubject(t *testing.T) {
-	// Arrange
+func TestACP_sessionLoad_authorizerDeniesAndUnauthenticated(t *testing.T) {
 	alice, err := tacklrsecurity.NewPrincipal("alice")
 	if err != nil {
 		t.Fatal(err)
 	}
-	aliceContext := tacklrsecurity.Context{Principal: alice}
 	service := &tacklrsecurity.Service{
-		Authorizer: testAuthorizer(func(_ context.Context, principal tacklrsecurity.Principal, operation tacklrsecurity.Operation) error {
-			if principal.Subject != "alice" || operation.Action != actionSessionLoad {
+		Authenticator: testAuthenticator(func(context.Context, tacklrsecurity.Attempt) (tacklrsecurity.Principal, error) {
+			return alice, nil
+		}),
+		Authorizer: testAuthorizer(func(_ context.Context, _ tacklrsecurity.Principal, operation tacklrsecurity.Operation) error {
+			if operation.Action == actionSessionLoad {
 				return errors.New("denied")
 			}
 			return nil
 		}),
 	}
-	authenticatedEnv := ProtocolEnv{
-		Security: service,
-		Conn:     &Conn{Security: &aliceContext},
-	}
-	unauthenticatedEnv := ProtocolEnv{
-		Security: service,
-		Conn:     &Conn{},
-	}
-
-	// Act
-	localSubject := securitySubject(ProtocolEnv{})
-	authenticatedSubject := securitySubject(authenticatedEnv)
-	missingSubject := securitySubject(unauthenticatedEnv)
-	authorizedErr := authorizeOperation(t.Context(), authenticatedEnv, actionSessionLoad, "session-1")
-	unauthenticatedErr := authorizeOperation(t.Context(), unauthenticatedEnv, actionSessionLoad, "session-1")
-	deniedErr := authorizeOperation(t.Context(), authenticatedEnv, actionSessionPrompt, "session-1")
-
-	// Assert
-	if localSubject != "local" {
-		t.Fatalf("local subject = %q", localSubject)
-	}
-	if authenticatedSubject != "alice" {
-		t.Fatalf("authenticated subject = %q", authenticatedSubject)
-	}
-	if missingSubject != "" {
-		t.Fatalf("missing subject = %q", missingSubject)
-	}
-	if authorizedErr != nil {
-		t.Fatal(authorizedErr)
-	}
-	if !errors.Is(unauthenticatedErr, ErrAuthenticationRequired) {
-		t.Fatalf("unauthenticated error = %v", unauthenticatedErr)
-	}
-	if !errors.Is(deniedErr, ErrAuthorizationDenied) {
-		t.Fatalf("denied error = %v", deniedErr)
-	}
-}
-
-func TestACPProtocol_resolveOwnedWireSession_requiresAuthentication(t *testing.T) {
-	// Arrange
-	protocol := NewACPProtocol(nil).(*acpProtocol)
-	protocol.sessions = map[string]*acpWireSession{
-		"session": {owner: "alice"},
-	}
-	env := ProtocolEnv{
-		Conn:     &Conn{},
-		Security: &tacklrsecurity.Service{},
+	protocol := NewACPProtocolWithAuth(nil, []ACPAuthMethod{{ID: "login", Name: "Login", Scheme: "host"}}, false)
+	k := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	aliceContext := tacklrsecurity.Context{Principal: alice}
+	conn := &Conn{Security: &aliceContext}
+	env := ProtocolEnv{Runtime: k.Runtime, Catalog: k.Catalog, Conn: conn, Security: service}
+	call := func(body string) map[string]any {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		conn.Writer = &jsonRPCMessageWriter{w: rec}
+		_ = protocol.HandleInbound(t.Context(), env, []byte(body))
+		var response map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+			t.Fatalf("decode %q: %v", rec.Body.String(), err)
+		}
+		return response
 	}
 
-	// Act
-	_, loadErr := protocol.resolveOwnedWireSession(t.Context(), env, "session", actionSessionLoad)
-
-	// Assert
-	if !errors.Is(loadErr, ErrAuthenticationRequired) {
-		t.Fatalf("load error = %v", loadErr)
+	created := call(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
+	sessionID := created["result"].(map[string]any)["sessionId"].(string)
+	denied := call(`{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"` + sessionID + `"}}`)
+	if denied["error"] == nil {
+		t.Fatalf("authorizer deny = %v", denied)
 	}
-}
 
-func TestACPProtocol_resolveOwnedWireSession_enforcesAuthorizer(t *testing.T) {
-	// Arrange
-	protocol := NewACPProtocol(nil).(*acpProtocol)
-	protocol.sessions = map[string]*acpWireSession{
-		"session": {owner: "alice"},
-	}
-	alice, err := tacklrsecurity.NewPrincipal("alice")
-	if err != nil {
+	unauthConn := &Conn{}
+	unauthRec := httptest.NewRecorder()
+	unauthConn.Writer = &jsonRPCMessageWriter{w: unauthRec}
+	unauthEnv := ProtocolEnv{Runtime: k.Runtime, Catalog: k.Catalog, Conn: unauthConn, Security: service}
+	_ = protocol.HandleInbound(t.Context(), unauthEnv, []byte(`{"jsonrpc":"2.0","id":3,"method":"session/load","params":{"sessionId":"`+sessionID+`"}}`))
+	var unauth map[string]any
+	if err := json.Unmarshal(unauthRec.Body.Bytes(), &unauth); err != nil {
 		t.Fatal(err)
 	}
-	aliceContext := tacklrsecurity.Context{Principal: alice}
-	env := ProtocolEnv{
-		Conn: &Conn{Security: &aliceContext},
-		Security: &tacklrsecurity.Service{
-			Authorizer: testAuthorizer(func(_ context.Context, _ tacklrsecurity.Principal, operation tacklrsecurity.Operation) error {
-				if operation.Action == actionSessionLoad {
-					return errors.New("denied")
-				}
-				return nil
-			}),
-		},
-	}
-
-	// Act
-	_, loadErr := protocol.resolveOwnedWireSession(t.Context(), env, "session", actionSessionLoad)
-
-	// Assert
-	if !errors.Is(loadErr, ErrAuthorizationDenied) {
-		t.Fatalf("load error = %v", loadErr)
-	}
-}
-
-func TestACPProtocol_resolveOwnedWireSession_rejectsMissingOwner(t *testing.T) {
-	// Arrange
-	protocol := NewACPProtocol(nil).(*acpProtocol)
-	protocol.sessions = map[string]*acpWireSession{
-		"session": {owner: ""},
-	}
-	alice, err := tacklrsecurity.NewPrincipal("alice")
-	if err != nil {
-		t.Fatal(err)
-	}
-	aliceContext := tacklrsecurity.Context{Principal: alice}
-	env := ProtocolEnv{
-		Conn:     &Conn{Security: &aliceContext},
-		Security: &tacklrsecurity.Service{},
-	}
-
-	// Act
-	_, loadErr := protocol.resolveOwnedWireSession(t.Context(), env, "session", actionSessionLoad)
-
-	// Assert
-	if loadErr == nil || !strings.Contains(loadErr.Error(), "no owner") {
-		t.Fatalf("load error = %v", loadErr)
+	if unauth["error"] == nil {
+		t.Fatalf("unauthenticated load = %v", unauth)
 	}
 }
 
@@ -376,7 +290,7 @@ func TestServer_securityBuildersPanicOnInvalidReceiverOrService(t *testing.T) {
 		(*Server)(nil).WithSecurity(&tacklrsecurity.Service{}, nil)
 	})
 	assertPanics("WithSecurity nil service", func() {
-		newTestServer(&mockInferenceStrategy{}, nil, SSE).WithSecurity(nil, nil)
+		newTestServer(t).WithSecurity(nil, nil)
 	})
 	assertPanics("AllowAnonymousNetwork nil server", func() {
 		(*Server)(nil).AllowAnonymousNetwork()
@@ -384,8 +298,8 @@ func TestServer_securityBuildersPanicOnInvalidReceiverOrService(t *testing.T) {
 }
 
 func TestConnectionRemoval_unregistersConnection(t *testing.T) {
-	registry := newTestKernel(&mockInferenceStrategy{}, nil, durable.AgentSpec{})
-	server := NewServer(registry.Runtime, registry.Catalog, ACP)
+	k := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	server := NewServer(k.Runtime, k.Catalog, NewACPProtocol(nil))
 	connection := server.Connections.Create(nil, nil)
 	connection.noteSession("session")
 

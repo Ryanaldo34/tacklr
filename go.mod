@@ -37,6 +37,7 @@ require (
 	go.opentelemetry.io/otel/sdk/log v0.13.0
 	go.opentelemetry.io/otel/sdk/metric v1.44.0
 	go.opentelemetry.io/otel/trace v1.44.0
+	go.temporal.io/api v1.62.12
 	go.temporal.io/sdk v1.45.0
 	go.temporal.io/sdk/contrib/workflowstreams v0.1.1
 	golang.org/x/net v0.58.0
@@ -141,7 +142,6 @@ require (
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.67.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.10.0 // indirect
-	go.temporal.io/api v1.62.12 // indirect
 	go.yaml.in/yaml/v2 v2.4.4 // indirect
 	golang.org/x/crypto v0.55.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect

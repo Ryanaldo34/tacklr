@@ -175,6 +175,23 @@ func TestRegister_New_Clone(t *testing.T) {
 		t.Fatal("unknown type")
 	}
 
+	perm := &interrupt.ToolPermissionInterrupt{Options: interrupt.DefaultPermissionOptions()}
+	if err := perm.Return([]byte(`{"optionId":"allow-once"}`)); err != nil {
+		t.Fatal(err)
+	}
+	cpPerm := interrupt.Clone(perm)
+	clonedPerm, ok := cpPerm.(*interrupt.ToolPermissionInterrupt)
+	if !ok || !clonedPerm.Allowed || clonedPerm.SelectedOptionID != "allow-once" || clonedPerm.SelectedKind != interrupt.PermissionAllowOnce {
+		t.Fatalf("clone lost permission resolution: %+v", cpPerm)
+	}
+	wire, err := perm.Serialize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(wire), "allowed") || strings.Contains(string(wire), "selectedOption") {
+		t.Fatalf("serialize leaked resolution: %s", wire)
+	}
+
 	src := &interrupt.UserSelectionInterrupt{
 		Options: []interrupt.UserChoice{{Title: "A"}},
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"go.temporal.io/sdk/activity"
@@ -15,6 +16,24 @@ import (
 	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
+
+// liveTurns lets a same-process Runtime.Cancel stop the activity body without
+// waiting for a Temporal heartbeat round-trip. Cross-process workers still
+// cancel via activity context + heartbeats.
+var liveTurns sync.Map // durable.SessionID -> context.CancelFunc
+
+func bindLiveTurn(id durable.SessionID, cancel context.CancelFunc) func() {
+	liveTurns.Store(id, cancel)
+	return func() { liveTurns.Delete(id) }
+}
+
+func cancelLiveTurn(id durable.SessionID) {
+	if v, ok := liveTurns.Load(id); ok {
+		if cancel, ok := v.(context.CancelFunc); ok {
+			cancel()
+		}
+	}
+}
 
 // Activities are the Inference and Tool bodies registered on the worker.
 type Activities struct {
@@ -65,6 +84,10 @@ type ToolOutput struct {
 }
 
 func (a *Activities) Inference(ctx context.Context, in InferenceInput) (InferenceOutput, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	defer bindLiveTurn(in.SessionID, cancel)()
+	defer startHeartbeat(ctx)()
 	stream := a.openStream(ctx)
 	defer closeStream(ctx, stream)
 	if activity.IsActivity(ctx) && activity.GetInfo(ctx).Attempt > 1 {
@@ -72,6 +95,7 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 	}
 	h, ms, etag, err := a.harness(ctx, in.SessionID, in.AgentID, in.MCPServers, in.Etag, in.Auth, in.Mounts)
 	if err != nil {
+		_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, streaming.StreamEvent{Type: streaming.StreamEventError, Error: err, Content: err.Error()}, true)
 		return InferenceOutput{}, err
 	}
 	defer func() {
@@ -82,6 +106,7 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 	defer stop()
 	if len(in.Resume) > 0 {
 		if err := h.ApplyResume(in.Resume); err != nil {
+			_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, streaming.StreamEvent{Type: streaming.StreamEventError, Error: err, Content: err.Error()}, true)
 			return InferenceOutput{}, err
 		}
 		if pending := h.PendingToolCalls(); len(pending) > 0 {
@@ -97,19 +122,25 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 	st := &tacklr.TurnState{HadToolRound: in.HadToolRound, ModelRequests: in.ModelRequests}
 	step, err := h.RunInference(ctx, st, out)
 	if err != nil {
+		pub := err
+		if ctx.Err() != nil {
+			pub = context.Canceled
+		}
+		_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, streaming.StreamEvent{Type: streaming.StreamEventError, Error: pub, Content: pub.Error()}, true)
 		return InferenceOutput{}, err
 	}
 	etag, err = a.save(ctx, in.SessionID, in.AgentID, h, etag, in.Mounts)
 	if err != nil {
 		return InferenceOutput{}, err
 	}
-	if activity.IsActivity(ctx) {
-		activity.RecordHeartbeat(ctx, "inference")
-	}
 	return InferenceOutput{Etag: etag, Complete: step.Complete, ToolCalls: step.ToolCalls}, nil
 }
 
 func (a *Activities) Tool(ctx context.Context, in ToolInput) (ToolOutput, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	defer bindLiveTurn(in.SessionID, cancel)()
+	defer startHeartbeat(ctx)()
 	stream := a.openStream(ctx)
 	defer closeStream(ctx, stream)
 	if activity.IsActivity(ctx) && activity.GetInfo(ctx).Attempt > 1 {
@@ -126,15 +157,15 @@ func (a *Activities) Tool(ctx context.Context, in ToolInput) (ToolOutput, error)
 	out, stop := tacklr.PipeStreamEvents(a.emitter(ctx, stream, in.SessionID))
 	defer stop()
 	step, runErr := h.RunToolCall(ctx, in.Call, out)
+	if runErr != nil && ctx.Err() != nil {
+		_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, streaming.StreamEvent{Type: streaming.StreamEventError, Error: context.Canceled, Content: context.Canceled.Error()}, true)
+	}
 	etag, saveErr := a.save(ctx, in.SessionID, in.AgentID, h, etag, in.Mounts)
 	if saveErr != nil {
 		if runErr != nil {
 			return ToolOutput{}, fmt.Errorf("tool: %w: persist: %w", runErr, saveErr)
 		}
 		return ToolOutput{}, saveErr
-	}
-	if activity.IsActivity(ctx) {
-		activity.RecordHeartbeat(ctx, in.Call.Name)
 	}
 	return ToolOutput{Etag: etag, Interrupted: step.Interrupted, InterruptID: step.InterruptID}, nil
 }
@@ -154,7 +185,6 @@ func (a *Activities) harness(ctx context.Context, id durable.SessionID, agentID 
 	}
 	opts := spec.Options
 	opts.SessionID = string(id)
-	opts.Store = nil
 	opts.MountSession = ms
 	if len(extraMCP) > 0 {
 		mcpConfigs := make([]mcp.MCPConfig, 0, len(opts.MCPConfigs)+len(extraMCP))
@@ -210,32 +240,66 @@ func (a *Activities) openStream(ctx context.Context) *workflowstreams.Client {
 
 func closeStream(ctx context.Context, c *workflowstreams.Client) {
 	if c != nil {
-		_ = c.Close(ctx)
+		_ = c.Close(publishContext(ctx))
 	}
 }
 
 func (a *Activities) emitter(ctx context.Context, stream *workflowstreams.Client, sessionID durable.SessionID) func(streaming.StreamEvent) {
 	first := true
 	return func(ev streaming.StreamEvent) {
+		if ctx.Err() != nil && ev.Type != streaming.StreamEventError && ev.Type != streaming.StreamEventComplete {
+			return
+		}
 		force := first || ev.Type == streaming.StreamEventComplete || ev.Type == streaming.StreamEventInterrupt || ev.Type == streaming.StreamEventError
 		first = false
 		_ = a.publish(ctx, stream, sessionID, durable.TopicEvents, ev, force)
-		if activity.IsActivity(ctx) {
-			activity.RecordHeartbeat(ctx, ev.Type)
-		}
 	}
 }
 
+func startHeartbeat(ctx context.Context) func() {
+	if !activity.IsActivity(ctx) {
+		return func() {}
+	}
+	done := make(chan struct{})
+	go func() {
+		activity.RecordHeartbeat(ctx, "tick")
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				activity.RecordHeartbeat(ctx, "tick")
+			}
+		}
+	}()
+	return func() { close(done) }
+}
+
+func publishContext(ctx context.Context) context.Context {
+	if ctx == nil || ctx.Err() == nil {
+		return ctx
+	}
+	return context.WithoutCancel(ctx)
+}
+
 func (a *Activities) publish(ctx context.Context, stream *workflowstreams.Client, sessionID durable.SessionID, topic string, ev streaming.StreamEvent, force bool) error {
+	if ev.Error != nil && ev.Fail == "" {
+		ev.Fail = ev.Error.Error()
+	}
+	pubCtx := publishContext(ctx)
 	var streamErr error
 	if stream != nil {
 		stream.Topic(topic).Publish(ev, force)
 		if force {
-			streamErr = stream.Flush(ctx)
+			streamErr = stream.Flush(pubCtx)
 		}
 	}
 	if a.Fallback != nil {
-		if err := a.Fallback.Append(ctx, sessionID, topic, ev); err != nil {
+		if err := a.Fallback.Append(pubCtx, sessionID, topic, ev); err != nil {
 			return err
 		}
 	}

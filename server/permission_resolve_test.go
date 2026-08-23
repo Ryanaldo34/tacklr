@@ -169,8 +169,6 @@ func TestResolvePermissionViaRequest_outcomes(t *testing.T) {
 	})
 
 	t.Run("selected resumes interrupts", func(t *testing.T) {
-		store := testStore(t)
-		_ = store
 		sensitive := tacklr.NewTool(tacklr.ToolConfig{
 			Name:    "sensitive",
 			OnCall:  []tacklr.OnCallFunc{tacklr.ToolPermissionOnCall},
@@ -184,13 +182,15 @@ func TestResolvePermissionViaRequest_outcomes(t *testing.T) {
 				ch <- tacklr.LLMResponseChunk{IsComplete: true}
 			},
 		}
-		h := mustAgent(t, tacklr.AgentOptions{
+		h, err := tacklr.NewAgent(context.Background(), tacklr.AgentOptions{
 			Config:    tacklr.Config{MaxWindowSize: 8192},
 			SessionID: "sess-perm-resolve",
 			Model:     ms,
-			Store:     store,
 			Tools:     []*tacklr.Tool{sensitive},
 		})
+		if err != nil {
+			t.Fatal(err)
+		}
 		events, err := h.Run(context.Background(), "go")
 		if err != nil {
 			t.Fatal(err)

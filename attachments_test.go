@@ -4,12 +4,10 @@ import (
 	"context"
 	"strings"
 	"testing"
-
-	"github.com/ryanaldo34/tacklr/stores"
 )
 
 func TestAttachDocumentMakesBytesAvailableThroughVFSAndContext(t *testing.T) {
-	h, err := NewAgent(context.Background(), AgentOptions{SessionID: "attach", Store: stores.NewInMemoryStore(), Model: &mockStrategy{}})
+	h, err := NewAgent(context.Background(), AgentOptions{SessionID: "attach", Model: &mockStrategy{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +37,7 @@ func TestAttachDocument_rejectsBadNameAndNilSession(t *testing.T) {
 	if _, err := none.AttachDocument(context.Background(), "a.txt", []byte("x")); err == nil {
 		t.Fatal("nil harness")
 	}
-	h, err := NewAgent(context.Background(), AgentOptions{SessionID: "attach-bad", Store: stores.NewInMemoryStore(), Model: &mockStrategy{}})
+	h, err := NewAgent(context.Background(), AgentOptions{SessionID: "attach-bad", Model: &mockStrategy{}})
 	if err != nil {
 		t.Fatal(err)
 	}

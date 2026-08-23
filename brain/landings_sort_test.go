@@ -32,7 +32,7 @@ func TestLandingIDs_partsAndParents(t *testing.T) {
 	if brain.LandingIDs(nil) != nil {
 		t.Fatal("empty")
 	}
-	pageIDs := brain.LandingIDsFromPage(brain.SearchPage{Objects: objs})
+	pageIDs := brain.LandingIDs(objs)
 	if len(pageIDs) != 2 {
 		t.Fatalf("from page: %v", pageIDs)
 	}

@@ -15,7 +15,6 @@ import (
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/inference"
-	"github.com/ryanaldo34/tacklr/stores"
 )
 
 // Config configures a benchmark run.
@@ -145,7 +144,6 @@ func runCase(ctx context.Context, cfg Config, c Case, exa string) CaseResult {
 
 	ns := uuid.New()
 	sessionID := "bench-" + c.ID + "-" + uuid.NewString()[:8]
-	sessStore := stores.NewInMemoryStore()
 	httpClient := &http.Client{Timeout: 120 * time.Second}
 
 	brainStore := brain.NewMemoryStore()
@@ -171,8 +169,7 @@ func runCase(ctx context.Context, cfg Config, c Case, exa string) CaseResult {
 
 	model := inference.NewOpenAIInferenceStrategy(httpClient)
 	model.WithURL(cfg.ModelURL).WithApiKey(cfg.ModelAPIKey).WithModel(cfg.ModelName)
-	// Align with cmd/testserver + Azure Responses docs: cap completion size
-	// (reasoning + visible text). Context window is separate (MaxWindowSize).
+	// Cap completion size (reasoning + visible text). Context window is separate (MaxWindowSize).
 	maxOut := 32_768
 	if v := strings.TrimSpace(os.Getenv("MAX_OUTPUT_TOKENS")); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
@@ -206,7 +203,6 @@ func runCase(ctx context.Context, cfg Config, c Case, exa string) CaseResult {
 			},
 			SessionID:       sessionID,
 			Model:           model,
-			Store:           sessStore,
 			Brain:           eng,
 			BrainWriteKinds: brain.WriteKinds{Discovery: "Discovery", Fact: "Fact", Memory: "Memory"},
 			SearchNamespace: &ns,
@@ -221,9 +217,17 @@ func runCase(ctx context.Context, cfg Config, c Case, exa string) CaseResult {
 	}
 	for i, prompt := range c.Turns {
 		if c.RestoreSession && i == len(c.Turns)-1 && i > 0 {
-			loaded, err := tacklr.NewAgentFromSession(caseCtx, sessionID, agentOpts())
+			cp, err := agent.Checkpoint()
+			if err != nil {
+				return failResult(c, turns, "checkpoint: "+err.Error())
+			}
+			agent.Close()
+			loaded, err := tacklr.NewAgent(caseCtx, agentOpts())
 			if err != nil {
 				return failResult(c, turns, "restore session: "+err.Error())
+			}
+			if err := loaded.RestoreCheckpoint(*cp); err != nil {
+				return failResult(c, turns, "restore checkpoint: "+err.Error())
 			}
 			agent = loaded
 		}

@@ -1,7 +1,7 @@
 // Package security defines protocol-neutral authentication and authorization
-// capabilities for Tacklr servers. Protocol adapters translate their wire
-// formats into Attempt and Operation values; this package never interprets
-// ACP, A2A, JSON-RPC, or HTTP types.
+// capabilities for Tacklr servers. server.Protocol implementations translate
+// their wire formats into Attempt and Operation values; this package never
+// interprets ACP, JSON-RPC, or HTTP types.
 package security
 
 import (

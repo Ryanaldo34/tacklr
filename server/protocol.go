@@ -11,7 +11,7 @@ import (
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
-// Conn is one client connection (stdio session, or a logical HTTP request scope).
+// Conn is one client connection (WebSocket session, or a logical HTTP request scope).
 type Conn struct {
 	Writer   MessageWriter
 	RPC      *ClientBridge
@@ -21,9 +21,6 @@ type Conn struct {
 }
 
 func (c *Conn) establishSecurity(securityContext tacklrsecurity.Context) {
-	if c == nil {
-		return
-	}
 	c.Security = &securityContext
 	if c.setSecurity != nil {
 		c.setSecurity(securityContext)
@@ -35,11 +32,11 @@ type ProtocolEnv struct {
 	Runtime durable.Runtime
 	Catalog durable.Catalog
 	Conn    *Conn
-	// Security is protocol-neutral. Protocol implementations translate their
-	// wire authentication into this service and store the resulting Context on Conn.
+	// Security is protocol-neutral. Implementations map wire credentials into
+	// this service and store the resulting Context on Conn.
 	Security *tacklrsecurity.Service
-	// Connections is the server-wide connection registry (WebSocket / Streamable HTTP).
-	// Nil for pure stdio or tests that only use HandleInbound.
+	// Connections is optional connection tracking (ACP Streamable HTTP uses it).
+	// Custom protocols may leave it unused.
 	Connections *ConnectionRegistry
 }
 
@@ -51,38 +48,32 @@ type StreamControl struct {
 	Err      error
 }
 
-// HTTPRoute is one HTTP endpoint owned by a protocol.
+// HTTPRoute is one HTTP endpoint owned by a Protocol.
 type HTTPRoute struct {
 	Method               string // e.g. "POST"
-	Pattern              string // e.g. "/" or "/resume"
+	Pattern              string // e.g. "/acp"
 	AllowUnauthenticated bool
 	Handler              func(env ProtocolEnv, w http.ResponseWriter, r *http.Request)
 }
 
-// ErrWireSessionUnsupported is returned by Protocol session methods when the
-// protocol has no wire-session lifecycle (e.g. simple SSE).
-var ErrWireSessionUnsupported = errors.New("wire sessions not supported by this protocol")
-
-// Protocol is a complete wire façade over durable.Runtime.
-// Transports only provide Conn I/O; protocols own methods, routes, stream policy,
-// and wire-session lifecycle (create/load/bind/close).
+// Protocol is the host extension point for streaming and delivery over durable.Runtime.
+//
+// ACP is the native implementation (NewACPProtocol). Hosts implement Protocol to
+// define their own wire: HTTP/WebSocket routes, frame encoding, and HITL resume.
+// The kernel does not import protocol types. Map wire auth into durable.AuthContext
+// on Prompt/Resume; call RunTurn to pump Runtime.Subscribe through OnStreamEvent.
 type Protocol interface {
-	Name() string
-
+	// HandleInbound decodes one connection-oriented body (WebSocket or unary HTTP).
+	// HTTP-route-only protocols may return nil.
 	HandleInbound(ctx context.Context, env ProtocolEnv, body []byte) error
 	HTTPRoutes() []HTTPRoute
 
 	OnStreamEvent(ctx context.Context, env ProtocolEnv, threadID string, ev streaming.StreamEvent, reqID json.RawMessage) StreamControl
 	OnStreamClosed(ctx context.Context, env ProtocolEnv, threadID string, reqID json.RawMessage, cancelled bool) error
-
-	CreateSession(ctx context.Context, env ProtocolEnv, params json.RawMessage) (sessionID string, result any, err error)
-	LoadSession(ctx context.Context, env ProtocolEnv, sessionID string, params json.RawMessage) (result any, err error)
-	BindTurn(ctx context.Context, env ProtocolEnv, sessionID, method string, turnParams json.RawMessage) (TurnRequest, error)
-	CloseSession(ctx context.Context, env ProtocolEnv, sessionID string) error
 }
 
-// runRuntimeTurn pumps Runtime.Subscribe through a protocol stream policy.
-func runRuntimeTurn(
+// RunTurn pumps Runtime.Prompt or Resume, then Subscribe, through proto's stream policy.
+func RunTurn(
 	ctx context.Context,
 	env ProtocolEnv,
 	proto Protocol,
@@ -165,7 +156,7 @@ func runRuntimeTurn(
 				continue
 			}
 			if ctrl.Finished {
-				return nil
+				return end(false)
 			}
 		}
 	}

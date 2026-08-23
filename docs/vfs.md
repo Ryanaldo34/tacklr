@@ -105,7 +105,7 @@ _tacklr/vfs/bind     { sessionId, backends: [{ provider, point, auth.token, para
                      point is /workspace (or omit). Old /contracts → alias contracts (W2).
                      params.name is the alias (required when point is /workspace).
                      gdrive: folderId. msgraph: driveId (empty → /me/drive), itemId (empty → root), siteId (optional).
-session/prompt       → Registry injects a tree from bootstrap + bind recipes; agent sees /workspace/contracts, /workspace/legal
+session/prompt       → Runtime injects a tree from bootstrap + bind recipes; agent sees /workspace/contracts, /workspace/legal
 _tacklr/vfs/refresh  → new access token for a provider (gdrive and msgraph are different holders); next prompt
 _tacklr/vfs/token    ← agent asks the client after a 401 (if the client advertised tokenRefresh)
 _tacklr/vfs/unbind   → by alias (point leftover /contracts, or point /workspace + name); next prompt

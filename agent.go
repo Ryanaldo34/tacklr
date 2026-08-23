@@ -8,9 +8,7 @@ import (
 	"log/slog"
 	"maps"
 	"slices"
-	"strings"
 	"sync"
-	"time"
 
 	"github.com/ryanaldo34/tacklr/brain"
 	mcpruntime "github.com/ryanaldo34/tacklr/internal/mcp"
@@ -24,8 +22,9 @@ import (
 	"github.com/ryanaldo34/tacklr/vfsindex"
 )
 
-// AgentHarness is the product agent. Create with NewAgent or NewAgentFromSession.
-// Fields are unexported.
+// AgentHarness is the product agent. Create with NewAgent.
+// Fields are unexported. Session conversation is persisted by durable.Runtime
+// via Checkpoint/RestoreCheckpoint, not by this type.
 type AgentHarness struct {
 	model                 InferenceStrategy
 	sessionId             string
@@ -33,9 +32,6 @@ type AgentHarness struct {
 	mcpConfigs            []mcp.MCPConfig
 	mcpCredentialResolver mcp.CredentialResolver
 	instructions          string
-	store                 stores.BaseStore
-	checkpointMu          sync.Mutex
-	checkpointErr         error
 	watchDog              AgentWatchDog
 	maxWindowSize         int
 	maxTurnRequests       int // 0 = unlimited; from Config.MaxTurnRequests
@@ -106,97 +102,6 @@ func (a *AgentHarness) pendingSnapshot() map[string]stores.PendingToolCall {
 	a.pendingMu.Lock()
 	defer a.pendingMu.Unlock()
 	return maps.Clone(a.pendingToolCalls)
-}
-
-func (a *AgentHarness) lookupToolCallID(id string) (string, bool) {
-	if _, ok := a.pendingToolCalls[id]; ok {
-		return id, true
-	}
-	return "", false
-}
-
-func (a *AgentHarness) restoreMessages(window []*Message) {
-	a.context.Restore(window)
-}
-
-// checkpointSaveTimeout is the max save duration when the turn context is cancelled.
-const checkpointSaveTimeout = 10 * time.Second
-
-// persistSession writes a checkpoint and records the latest durability error.
-// Skips when store or session id is missing. Uses a timeout that outlives
-// turn cancel so abort still dumps. Close always calls this, then releases
-// process resources. Interrupt paths also call it because the harness stays
-// live for ResumeInterrupts.
-func (a *AgentHarness) persistSession(ctx context.Context) error {
-	if strings.TrimSpace(a.sessionId) == "" {
-		return nil
-	}
-	if a.store == nil {
-		return nil
-	}
-	// Keep trace context; drop cancel so save can finish after abort.
-	parent := context.Background()
-	if ctx != nil {
-		parent = context.WithoutCancel(ctx)
-	}
-	saveCtx, cancel := context.WithTimeout(parent, checkpointSaveTimeout)
-	defer cancel()
-
-	if err := a.checkpointSession(saveCtx); err != nil {
-		a.setCheckpointError(err)
-		slog.ErrorContext(saveCtx, "session checkpoint failed",
-			"area", telemetry.AreaHarness,
-			"session_id", a.sessionId,
-			"error", err,
-		)
-		return err
-	}
-	a.setCheckpointError(nil)
-	slog.DebugContext(saveCtx, "session checkpointed",
-		"area", telemetry.AreaHarness,
-		"session_id", a.sessionId,
-		"context_window_size", len(a.Messages()),
-	)
-	return nil
-}
-
-// CheckpointError returns the most recent checkpoint failure, if any.
-func (a *AgentHarness) CheckpointError() error {
-	if a == nil {
-		return nil
-	}
-	a.checkpointMu.Lock()
-	defer a.checkpointMu.Unlock()
-	return a.checkpointErr
-}
-
-func (a *AgentHarness) setCheckpointError(err error) {
-	a.checkpointMu.Lock()
-	a.checkpointErr = err
-	a.checkpointMu.Unlock()
-}
-
-// checkpointSession builds and stores a SessionCheckpoint. Call persistSession
-// from Run so save errors stay non-fatal.
-func (a *AgentHarness) checkpointSession(ctx context.Context) error {
-	msgs := a.Messages()
-	slog.Debug("checkpointing session", "session_id", a.sessionId, "context_window_size", len(msgs))
-	ptc := a.pendingSnapshot()
-
-	cp, err := session.NewCheckpointer().Capture(a.context.Messages(), a.session, ptc)
-	if err != nil {
-		telemetry.InstrumentsFromContext(ctx).RecordCheckpointSave(ctx, telemetry.OutcomeError)
-		return err
-	}
-	if a.store == nil {
-		return nil
-	}
-	if err := a.store.SaveSession(ctx, a.sessionId, *cp); err != nil {
-		telemetry.InstrumentsFromContext(ctx).RecordCheckpointSave(ctx, telemetry.OutcomeError)
-		return err
-	}
-	telemetry.InstrumentsFromContext(ctx).RecordCheckpointSave(ctx, telemetry.OutcomeOK)
-	return nil
 }
 
 func (a *AgentHarness) constructSystemPrompt() string {
@@ -640,7 +545,6 @@ func (a *AgentHarness) initMCP(ctx context.Context) {
 // Call after the Run events channel is drained, or when construct/runHarness fails.
 func (a *AgentHarness) Close() {
 	a.cancelBackgroundJobs()
-	_ = a.persistSession(context.Background())
 	a.parkMu.Lock()
 	for id, w := range a.parkedWorkersLive {
 		if w != nil {

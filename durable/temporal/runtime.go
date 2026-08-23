@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/google/uuid"
@@ -12,6 +13,7 @@ import (
 	"go.temporal.io/sdk/contrib/workflowstreams"
 	"go.temporal.io/sdk/converter"
 
+	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/durable/inprocess"
 	"github.com/ryanaldo34/tacklr/streaming"
@@ -140,7 +142,7 @@ func (r *Runtime) signal(ctx context.Context, id durable.SessionID, name string,
 	}
 	var nf *serviceerror.NotFound
 	if errors.As(err, &nf) {
-		return fmt.Errorf("%w: %w", durable.ErrSessionNotFound, err)
+		return durable.ErrSessionNotFound
 	}
 	return err
 }
@@ -163,6 +165,13 @@ func (r *Runtime) Resume(ctx context.Context, sessionID durable.SessionID, resum
 
 // Cancel implements durable.Runtime.
 func (r *Runtime) Cancel(ctx context.Context, sessionID durable.SessionID) error {
+	cancelLiveTurn(sessionID)
+	_ = r.fallback.Append(context.WithoutCancel(ctx), sessionID, durable.TopicEvents, streaming.StreamEvent{
+		Type:    streaming.StreamEventError,
+		Error:   context.Canceled,
+		Fail:    context.Canceled.Error(),
+		Content: context.Canceled.Error(),
+	})
 	return r.signal(ctx, sessionID, signalCancel, nil)
 }
 
@@ -226,6 +235,9 @@ func (r *Runtime) Subscribe(ctx context.Context, sessionID durable.SessionID, af
 			if err := dc.FromPayload(item.Data, &ev); err != nil {
 				return
 			}
+			if ev.Error == nil && ev.Fail != "" {
+				ev.Error = failFromWire(ev.Fail)
+			}
 			select {
 			case ch <- ev:
 			case <-subCtx.Done():
@@ -238,5 +250,20 @@ func (r *Runtime) Subscribe(ctx context.Context, sessionID durable.SessionID, af
 
 // FallbackLog is the in-process EventLog used when Workflow Streams is unavailable (tests).
 func (r *Runtime) FallbackLog() durable.EventLog { return r.fallback }
+
+func failFromWire(s string) error {
+	switch {
+	case strings.Contains(s, tacklr.ErrModelRefused.Error()):
+		return tacklr.ErrModelRefused
+	case strings.Contains(s, tacklr.ErrMaxTokens.Error()):
+		return tacklr.ErrMaxTokens
+	case strings.Contains(s, tacklr.ErrMaxTurnRequests.Error()):
+		return tacklr.ErrMaxTurnRequests
+	case strings.Contains(s, context.Canceled.Error()), strings.Contains(s, "context cancelled"):
+		return context.Canceled
+	default:
+		return errors.New(s)
+	}
+}
 
 var _ durable.Runtime = (*Runtime)(nil)

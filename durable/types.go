@@ -76,18 +76,15 @@ type Snapshot struct {
 const (
 	TopicEvents = "events"
 	TopicRetry  = "retry"
-	TopicClose  = "close"
 )
 
 var (
-	// ErrSessionNotFound is returned when a session id is unknown or was closed.
+	// ErrSessionNotFound is unknown, closed, or already torn down.
 	ErrSessionNotFound = errors.New("session not found")
-	// ErrSessionExists is returned when CreateSession is called with an id that is live.
+	// ErrSessionExists is CreateSession with an id that is already live.
 	ErrSessionExists = errors.New("session already exists")
-	// ErrAgentNotFound is returned when Catalog has no such agent.
+	// ErrAgentNotFound is Catalog miss.
 	ErrAgentNotFound = errors.New("agent not found")
-	// ErrSessionClosed is returned when a signal targets a session that is shutting down.
-	ErrSessionClosed = errors.New("session closed")
-	// ErrEtagMismatch is returned when SnapshotStore.Save sees a stale etag.
+	// ErrEtagMismatch is SnapshotStore.Save with a stale etag (retry with Head).
 	ErrEtagMismatch = errors.New("snapshot: etag mismatch")
 )

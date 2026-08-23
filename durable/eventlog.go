@@ -7,8 +7,8 @@ import (
 )
 
 // EventLog is the portable progress stream. Temporal implements it with
-// Workflow Streams. In-process uses a memory channel. Topics are TopicEvents,
-// TopicRetry (activity attempt > 1), and TopicClose (turn-slice terminator).
+// Workflow Streams. In-process uses a memory channel. Topics are TopicEvents
+// and TopicRetry (activity attempt > 1).
 type EventLog interface {
 	Append(ctx context.Context, sessionID SessionID, topic string, ev streaming.StreamEvent) error
 	Subscribe(ctx context.Context, sessionID SessionID, after Seq) (<-chan streaming.StreamEvent, error)

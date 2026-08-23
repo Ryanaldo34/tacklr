@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -166,7 +165,6 @@ func newRunCommandSession(t *testing.T) (*vfs.MountSession, HarnessRuntime) {
 	}
 	h := mustNewAgent(t, AgentOptions{
 		SessionID:    t.Name(),
-		Store:        stores.NewInMemoryStore(),
 		MountSession: ms,
 		Model:        &mockStrategy{},
 	})

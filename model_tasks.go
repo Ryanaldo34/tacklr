@@ -446,16 +446,28 @@ func watchModelStream(ctx context.Context, span *telemetry.ModelSpan, in <-chan 
 			}
 		}
 
-		// Drain until close. Do not select on ctx.Done (already fired after cancel).
+		// Drop already-buffered chunks without blocking. A blocking drain
+		// keeps a fast producer alive and starves its ctx.Done.
 		drainIn := func() {
 			for {
-				if _, ok := <-in; !ok {
+				select {
+				case _, ok := <-in:
+					if !ok {
+						return
+					}
+				default:
 					return
 				}
 			}
 		}
 
 		for {
+			if err := ctx.Err(); err != nil {
+				streamErr = err
+				end(streamErr)
+				drainIn()
+				return
+			}
 			select {
 			case <-ctx.Done():
 				streamErr = ctx.Err()

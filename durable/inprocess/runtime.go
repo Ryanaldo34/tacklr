@@ -21,7 +21,6 @@ type signalKind int
 const (
 	sigPrompt signalKind = iota
 	sigResume
-	sigCancel
 	sigClose
 )
 
@@ -70,10 +69,12 @@ func WithSnapshotStore(s durable.SnapshotStore) Option {
 	}
 }
 
-// WithProjection sets how a turn tree is published. Nil uses vfs.FuseProjection.
+// WithProjection sets how a turn tree is published. Nil is ignored (Fuse stays).
 func WithProjection(p vfs.Projection) Option {
 	return func(r *Runtime) {
-		r.projection = p
+		if p != nil {
+			r.projection = p
+		}
 	}
 }
 
@@ -94,9 +95,6 @@ func New(catalog durable.Catalog, opts ...Option) *Runtime {
 		if opt != nil {
 			opt(r)
 		}
-	}
-	if r.projection == nil {
-		r.projection = vfs.FuseProjection{}
 	}
 	if r.snapshots == nil {
 		r.snapshots = NewMemorySnapshot()
@@ -322,17 +320,6 @@ func (r *Runtime) loop(p *sessionProc) {
 				sig.reply <- nil
 			}
 			return
-		}
-		if sig.kind == sigCancel {
-			p.mu.Lock()
-			if p.cancelTurn != nil {
-				p.cancelTurn()
-			}
-			p.mu.Unlock()
-			if sig.reply != nil {
-				sig.reply <- nil
-			}
-			continue
 		}
 		parent := sig.turnCtx
 		if parent == nil {

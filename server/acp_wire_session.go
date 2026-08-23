@@ -13,8 +13,8 @@ import (
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/mcp"
-	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/streaming"
+	"github.com/ryanaldo34/tacklr/telemetry"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -25,7 +25,6 @@ type acpWireSession struct {
 	mcpServers   []mcp.MCPConfig
 	configValues map[string]string
 	owner        string
-	prompted     bool // true after the first prompt turn was bound
 	vfs          []vfs.Binding
 	vfsDrop      []string
 }
@@ -36,13 +35,12 @@ type acpWireEnvelope struct {
 	ConfigValues map[string]string `json:"configValues"`
 	MCPServers   []mcp.MCPConfig   `json:"mcpServers"`
 	Owner        string            `json:"owner,omitempty"`
-	Prompted     bool              `json:"prompted"`
 }
 
 func (s *acpWireSession) envelope() acpWireEnvelope {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// Copy map/slice so concurrent setConfig/BindTurn cannot race json.Marshal
+	// Copy map/slice so concurrent setConfig/bindTurn cannot race json.Marshal
 	// after this lock is released.
 	cfg := make(map[string]string, len(s.configValues))
 	for k, v := range s.configValues {
@@ -53,14 +51,10 @@ func (s *acpWireSession) envelope() acpWireEnvelope {
 		ConfigValues: cfg,
 		MCPServers:   mcp.DurableConfigs(s.mcpServers),
 		Owner:        s.owner,
-		Prompted:     s.prompted,
 	}
 }
 
 func (s *acpWireSession) takeAuth() durable.AuthContext {
-	if s == nil {
-		return durable.AuthContext{}
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := durable.AuthContext{
@@ -144,25 +138,15 @@ func wireSessionFromEnvelope(env acpWireEnvelope) *acpWireSession {
 		mcpServers:   append([]mcp.MCPConfig(nil), env.MCPServers...),
 		configValues: cfg,
 		owner:        env.Owner,
-		prompted:     env.Prompted,
 	}
 }
 
 func (p *acpProtocol) persistWire(ctx context.Context, sessionID string, sess *acpWireSession) error {
-	if p == nil || p.wire == nil || sess == nil {
-		return nil
-	}
-	raw, err := json.Marshal(sess.envelope())
-	if err != nil {
-		return err
-	}
+	raw, _ := json.Marshal(sess.envelope())
 	return p.wire.Put(ctx, sessionID, raw)
 }
 
 func (p *acpProtocol) resolveWireSession(ctx context.Context, sessionID string) (*acpWireSession, error) {
-	if p == nil {
-		return nil, clientErrorf(ErrSessionNotFound, "session %q not found", sessionID)
-	}
 	p.mu.Lock()
 	if sess, ok := p.sessions[sessionID]; ok {
 		p.mu.Unlock()
@@ -170,12 +154,9 @@ func (p *acpProtocol) resolveWireSession(ctx context.Context, sessionID string) 
 	}
 	p.mu.Unlock()
 
-	if p.wire == nil {
-		return nil, clientErrorf(ErrSessionNotFound, "session %q not found", sessionID)
-	}
 	raw, err := p.wire.Get(ctx, sessionID)
 	if err != nil {
-		if errors.Is(err, stores.ErrSessionNotFound) {
+		if errors.Is(err, ErrSessionNotFound) {
 			return nil, clientErrorf(ErrSessionNotFound, "session %q not found", sessionID)
 		}
 		return nil, fmt.Errorf("load wire session %q: %w", sessionID, err)
@@ -196,44 +177,35 @@ func (p *acpProtocol) resolveWireSession(ctx context.Context, sessionID string) 
 	return sess, nil
 }
 
-// CreateSession implements Protocol wire session create for ACP.
-func (p *acpProtocol) CreateSession(ctx context.Context, env ProtocolEnv, params json.RawMessage) (string, any, error) {
+func (p *acpProtocol) createSession(ctx context.Context, env ProtocolEnv, pr *parsedRequest) (string, any, error) {
 	if err := authorizeOperation(ctx, env, actionSessionCreate, ""); err != nil {
 		return "", nil, err
 	}
-	var pr acpSessionParams
-	if len(params) > 0 {
-		if err := json.Unmarshal(params, &pr); err != nil {
-			return "", nil, clientErrorf(ErrInvalidRequest, "invalid session/new params: %v", err)
-		}
+	defaultAgent := ""
+	if env.Catalog != nil {
+		defaultAgent = env.Catalog.DefaultID()
 	}
-	defaultAgent := catalogDefault(env.Catalog)
 	cfg := map[string]string{}
 	if defaultAgent != "" {
 		cfg["agent"] = defaultAgent
 	}
 	sessionID := uuid.NewString()
 	sess := &acpWireSession{
-		cwd:          pr.Cwd,
+		cwd:          pr.CWD,
 		mcpServers:   pr.MCPServers,
 		configValues: cfg,
 		owner:        securitySubject(env),
 	}
 	p.mu.Lock()
-	if p.sessions == nil {
-		p.sessions = make(map[string]*acpWireSession)
-	}
 	p.sessions[sessionID] = sess
 	p.mu.Unlock()
-	recordSessionCreated(ctx)
-	if env.Runtime != nil {
-		if _, err := env.Runtime.CreateSession(ctx, durable.CreateSession{
-			AgentID:    defaultAgent,
-			SessionID:  durable.SessionID(sessionID),
-			MCPServers: pr.MCPServers,
-		}); err != nil {
-			return "", nil, err
-		}
+	telemetry.MustInstruments(telemetry.Meter()).RecordSessionCreated(ctx)
+	if _, err := env.Runtime.CreateSession(ctx, durable.CreateSession{
+		AgentID:    defaultAgent,
+		SessionID:  durable.SessionID(sessionID),
+		MCPServers: pr.MCPServers,
+	}); err != nil {
+		return "", nil, err
 	}
 	if err := p.persistWire(ctx, sessionID, sess); err != nil {
 		return "", nil, err
@@ -245,55 +217,38 @@ func (p *acpProtocol) CreateSession(ctx context.Context, env ProtocolEnv, params
 	}, nil
 }
 
-// LoadSession implements Protocol wire session load for ACP.
-func (p *acpProtocol) LoadSession(ctx context.Context, env ProtocolEnv, sessionID string, params json.RawMessage) (any, error) {
-	if sessionID == "" {
-		return nil, clientErrorf(ErrInvalidRequest, "sessionId is required")
-	}
-	var pr acpSessionParams
-	if len(params) > 0 {
-		if err := json.Unmarshal(params, &pr); err != nil {
-			return nil, clientErrorf(ErrInvalidRequest, "invalid session/load params: %v", err)
-		}
-		if pr.SessionID != "" {
-			sessionID = pr.SessionID
-		}
-	}
+func (p *acpProtocol) loadSession(ctx context.Context, env ProtocolEnv, pr *parsedRequest) (any, error) {
+	sessionID := pr.ThreadID
 	sess, err := p.resolveOwnedWireSession(ctx, env, sessionID, actionSessionLoad)
 	if err != nil {
 		return nil, err
 	}
 	sess.mu.Lock()
-	if pr.Cwd != "" && sess.cwd != "" && pr.Cwd != sess.cwd {
+	if pr.CWD != "" && sess.cwd != "" && pr.CWD != sess.cwd {
 		sess.mu.Unlock()
-		return nil, clientErrorf(ErrInvalidRequest, "cwd %q does not match session cwd %q", pr.Cwd, sess.cwd)
+		return nil, clientErrorf(ErrInvalidRequest, "cwd %q does not match session cwd %q", pr.CWD, sess.cwd)
 	}
-	if pr.Cwd != "" && sess.cwd == "" {
-		sess.cwd = pr.Cwd
+	if pr.CWD != "" && sess.cwd == "" {
+		sess.cwd = pr.CWD
 	}
 	if len(pr.MCPServers) > 0 {
 		sess.mcpServers = pr.MCPServers
 	}
-	agent := ""
-	if sess.configValues != nil {
-		agent = sess.configValues["agent"]
-	}
+	agent := sess.configValues["agent"]
 	sess.mu.Unlock()
 	if err := p.persistWire(ctx, sessionID, sess); err != nil {
 		return nil, err
 	}
-	if agent == "" {
-		agent = catalogDefault(env.Catalog)
+	if agent == "" && env.Catalog != nil {
+		agent = env.Catalog.DefaultID()
 	}
-	if env.Runtime != nil {
-		_, err := env.Runtime.CreateSession(ctx, durable.CreateSession{
-			AgentID:    agent,
-			SessionID:  durable.SessionID(sessionID),
-			MCPServers: sess.mcpServers,
-		})
-		if err != nil && !errors.Is(err, durable.ErrSessionExists) {
-			return nil, err
-		}
+	_, err = env.Runtime.CreateSession(ctx, durable.CreateSession{
+		AgentID:    agent,
+		SessionID:  durable.SessionID(sessionID),
+		MCPServers: sess.mcpServers,
+	})
+	if err != nil && !errors.Is(err, durable.ErrSessionExists) {
+		return nil, err
 	}
 	opts := catalogConfigOptions(env.Catalog, agent)
 	return map[string]any{
@@ -302,101 +257,56 @@ func (p *acpProtocol) LoadSession(ctx context.Context, env ProtocolEnv, sessionI
 	}, nil
 }
 
-// BindTurn implements Protocol: maps ACP session/prompt or session/resume params
-// into a Registry TurnRequest. This is the only turn-binding path for ACP.
-func (p *acpProtocol) BindTurn(ctx context.Context, env ProtocolEnv, sessionID, method string, turnParams json.RawMessage) (TurnRequest, error) {
-	var prompt string
-	var userMsg *tacklr.Message
-	var responses map[string]json.RawMessage
-	var cwd string
-	var mcpFromClient []mcp.MCPConfig
+// turnRequest is bindTurn output: one prompt or resume against Runtime.
+type turnRequest struct {
+	AgentID     string
+	ThreadID    string
+	Prompt      string
+	UserMessage *tacklr.Message
+	Responses   map[string]json.RawMessage
+	MCPServers  []mcp.MCPConfig
+	Auth        durable.AuthContext
+}
 
-	if len(turnParams) > 0 {
-		switch method {
-		case "session/resume":
-			var sp acpSessionParams
-			if err := json.Unmarshal(turnParams, &sp); err == nil {
-				if sp.SessionID != "" {
-					sessionID = sp.SessionID
-				}
-				cwd = sp.Cwd
-				mcpFromClient = sp.MCPServers
-			}
-			var withResp struct {
-				Responses map[string]json.RawMessage `json:"responses"`
-			}
-			if err := json.Unmarshal(turnParams, &withResp); err == nil {
-				responses = withResp.Responses
-			}
-		default:
-			var pp acpPromptParams
-			if err := json.Unmarshal(turnParams, &pp); err != nil {
-				return TurnRequest{}, clientErrorf(ErrInvalidRequest, "invalid prompt params: %v", err)
-			}
-			if pp.SessionID != "" {
-				sessionID = pp.SessionID
-			}
-			if len(pp.Prompt) > 0 {
-				msg, err := parseACPPrompt(pp.Prompt)
-				if err != nil {
-					return TurnRequest{}, clientErrorf(ErrInvalidRequest, "invalid prompt content: %v", err)
-				}
-				userMsg = msg
-				prompt = msg.Content
-			}
-			var sp acpSessionParams
-			if err := json.Unmarshal(turnParams, &sp); err == nil {
-				if sp.SessionID != "" && sessionID == "" {
-					sessionID = sp.SessionID
-				}
-				cwd = sp.Cwd
-				mcpFromClient = sp.MCPServers
-			}
-		}
-	}
-
-	if sessionID == "" {
-		return TurnRequest{}, clientErrorf(ErrInvalidRequest, "sessionId is required")
-	}
+func (p *acpProtocol) bindTurn(ctx context.Context, env ProtocolEnv, pr *parsedRequest) (turnRequest, error) {
+	sessionID := pr.ThreadID
 	sess, err := p.resolveOwnedWireSession(ctx, env, sessionID, actionSessionPrompt)
 	if err != nil {
-		return TurnRequest{}, err
+		return turnRequest{}, err
 	}
 
 	sess.mu.Lock()
-	if cwd != "" && sess.cwd != "" && cwd != sess.cwd {
+	if pr.CWD != "" && sess.cwd != "" && pr.CWD != sess.cwd {
 		sess.mu.Unlock()
-		return TurnRequest{}, clientErrorf(ErrInvalidRequest, "cwd does not match session cwd")
+		return turnRequest{}, clientErrorf(ErrInvalidRequest, "cwd does not match session cwd")
 	}
-	mcpServers := mcpFromClient
+	mcpServers := pr.MCPServers
 	if len(mcpServers) > 0 {
 		sess.mcpServers = mcpServers
 	} else {
 		mcpServers = sess.mcpServers
 	}
-	load := sess.prompted
-	if !sess.prompted {
-		sess.prompted = true
-	}
-	agentID := ""
-	if sess.configValues != nil {
-		agentID = sess.configValues["agent"]
-	}
-	sessCWD := sess.cwd
+	agentID := sess.configValues["agent"]
 	sess.mu.Unlock()
 
-	if agentID == "" {
-		agentID = catalogDefault(env.Catalog)
+	if agentID == "" && env.Catalog != nil {
+		agentID = env.Catalog.DefaultID()
 	}
 	if agentID == "" {
-		return TurnRequest{}, clientErrorf(ErrInvalidRequest, "no agent configured for session and no default agent configured")
+		return turnRequest{}, clientErrorf(ErrInvalidRequest, "no agent configured for session and no default agent configured")
 	}
 	// Reject binary content the agent model cannot accept before the turn starts.
-	if userMsg != nil {
-		if mimes := userMsg.MIMETypes(); len(mimes) > 0 {
-			if model := catalogAgentModel(env.Catalog, agentID); model != nil {
+	if pr.UserMessage != nil {
+		if mimes := pr.UserMessage.MIMETypes(); len(mimes) > 0 {
+			var model tacklr.InferenceStrategy
+			if env.Catalog != nil {
+				if spec, ok := env.Catalog.Lookup(agentID); ok {
+					model = spec.Options.Model
+				}
+			}
+			if model != nil {
 				if bad := tacklr.UnsupportedMIMEs(model, mimes); len(bad) > 0 {
-					return TurnRequest{}, clientErrorf(ErrInvalidRequest, "unsupported content type(s): %s", strings.Join(bad, ", "))
+					return turnRequest{}, clientErrorf(ErrInvalidRequest, "unsupported content type(s): %s", strings.Join(bad, ", "))
 				}
 			} else {
 				// No model: reject all non-text.
@@ -407,48 +317,37 @@ func (p *acpProtocol) BindTurn(ctx context.Context, env ProtocolEnv, sessionID, 
 					}
 				}
 				if len(bad) > 0 {
-					return TurnRequest{}, clientErrorf(ErrInvalidRequest, "unsupported content type(s): %s", strings.Join(bad, ", "))
+					return turnRequest{}, clientErrorf(ErrInvalidRequest, "unsupported content type(s): %s", strings.Join(bad, ", "))
 				}
 			}
 		}
 	}
 	if err := p.persistWire(ctx, sessionID, sess); err != nil {
-		return TurnRequest{}, err
+		return turnRequest{}, err
 	}
 
-	return TurnRequest{
-		SessionID:              sessionID,
-		AgentID:                agentID,
-		ThreadID:               sessionID,
-		Prompt:                 prompt,
-		UserMessage:            userMsg,
-		Responses:              responses,
-		Load:                   load,
-		AllowMissingCheckpoint: true, // wire session may outlive harness rows
-		CWD:                    sessCWD,
-		MCPServers:             mcpServers,
-		Auth:                   sess.takeAuth(),
+	return turnRequest{
+		AgentID:     agentID,
+		ThreadID:    sessionID,
+		Prompt:      pr.Prompt,
+		UserMessage: pr.UserMessage,
+		Responses:   pr.Responses,
+		MCPServers:  mcpServers,
+		Auth:        sess.takeAuth(),
 	}, nil
 }
 
-// CloseSession implements Protocol for ACP.
-func (p *acpProtocol) CloseSession(ctx context.Context, env ProtocolEnv, sessionID string) error {
+func (p *acpProtocol) closeSession(ctx context.Context, env ProtocolEnv, sessionID string) error {
 	if _, err := p.resolveOwnedWireSession(ctx, env, sessionID, actionSessionClose); err != nil {
 		return err
 	}
-	if p != nil {
-		p.mu.Lock()
-		delete(p.sessions, sessionID)
-		p.mu.Unlock()
-		if p.wire != nil {
-			if err := p.wire.Delete(ctx, sessionID); err != nil {
-				return err
-			}
-		}
+	p.mu.Lock()
+	delete(p.sessions, sessionID)
+	p.mu.Unlock()
+	if err := p.wire.Delete(ctx, sessionID); err != nil {
+		return err
 	}
-	if env.Runtime != nil {
-		_ = env.Runtime.Close(ctx, durable.SessionID(sessionID))
-	}
+	_ = env.Runtime.Close(ctx, durable.SessionID(sessionID))
 	return nil
 }
 
@@ -458,12 +357,13 @@ func (p *acpProtocol) setConfig(ctx context.Context, env ProtocolEnv, sessionID,
 		return nil, err
 	}
 	sess.mu.Lock()
-	if sess.configValues == nil {
-		sess.configValues = map[string]string{}
-	}
 	switch configID {
 	case "model":
-		if !catalogHasAgent(env.Catalog, value) {
+		if env.Catalog == nil {
+			sess.mu.Unlock()
+			return nil, clientErrorf(ErrAgentNotFound, "agent %q not found", value)
+		}
+		if _, ok := env.Catalog.Lookup(value); !ok {
 			sess.mu.Unlock()
 			return nil, clientErrorf(ErrAgentNotFound, "agent %q not found", value)
 		}

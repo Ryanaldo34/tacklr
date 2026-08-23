@@ -73,9 +73,6 @@ func (r *BackendRegistry) ClearSession(sessionID string) {
 }
 
 func (r *BackendRegistry) eachTokenAuth(fn func(*SessionAuth)) {
-	if r == nil {
-		return
-	}
 	seen := make(map[*SessionAuth]struct{})
 	r.mu.RLock()
 	defer r.mu.RUnlock()

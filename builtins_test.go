@@ -462,7 +462,7 @@ func TestRun_askUserChoice_withoutDescription_formatsSelection(t *testing.T) {
 	model := sequentialToolModel([]ToolCall{toolCall("ask1", "ask_user_choice",
 		`{"question":"Pick?","choices":[{"title":"A"},{"title":"B"}]}`)})
 	h := mustNewAgent(t, AgentOptions{
-		Model: model, Config: Config{MaxWindowSize: 8192}, Store: testStore(t),
+		Model: model, Config: Config{MaxWindowSize: 8192},
 	})
 	t.Cleanup(h.Close)
 	h.sessionId = "ask-sess"
@@ -575,7 +575,7 @@ func TestRun_createPlan_installsPlanDocumentAndPrunesWindow(t *testing.T) {
 			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "executing", IsComplete: true}
 		},
 	}
-	h, got := runPrompt(t, strategy, AgentOptions{Store: testStore(t)})
+	h, got := runPrompt(t, strategy, AgentOptions{})
 	if hasEventType(got, StreamEventError) {
 		t.Fatalf("events=%+v", summarizeEvents(got))
 	}
@@ -602,7 +602,7 @@ func TestRun_completeTodo_withPlanDocument_preservesFullPlan(t *testing.T) {
 		},
 	}
 	h := mustNewAgent(t, AgentOptions{
-		Model: strategy, Config: Config{MaxWindowSize: 8192}, Store: testStore(t),
+		Model: strategy, Config: Config{MaxWindowSize: 8192},
 	})
 	t.Cleanup(h.Close)
 	h.session.Plan.Set([]Todo{
@@ -654,7 +654,7 @@ func TestRun_editPlan_planChange_triggersHandoff(t *testing.T) {
 		},
 	}
 	h := mustNewAgent(t, AgentOptions{
-		Model: strategy, Config: Config{MaxWindowSize: 8192}, Store: testStore(t),
+		Model: strategy, Config: Config{MaxWindowSize: 8192},
 	})
 	t.Cleanup(h.Close)
 	h.session.Plan.Set([]Todo{
@@ -679,7 +679,6 @@ func TestRun_editPlan_planChange_triggersHandoff(t *testing.T) {
 }
 
 func TestRun_completeTodo_persistsPlanInStore(t *testing.T) {
-	store := testStore(t)
 	// complete → handoff model message → continue message
 	var n int
 	strategy := &mockStrategy{
@@ -701,7 +700,6 @@ func TestRun_completeTodo_persistsPlanInStore(t *testing.T) {
 	ah := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  strategy,
-		Store:  store,
 	})
 	ah.sessionId = "sess-plan-persist"
 	ah.session.Plan.Set([]Todo{
@@ -715,15 +713,10 @@ func TestRun_completeTodo_persistsPlanInStore(t *testing.T) {
 	for range ch {
 	}
 
-	// Reload via NewAgentFromSession and assert plan status survived the checkpoint.
-	restored, err := NewAgentFromSession(context.Background(), "sess-plan-persist", AgentOptions{
+	restored := reloadHarness(t, ah, AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  &mockStrategy{},
-		Store:  store,
 	})
-	if err != nil {
-		t.Fatalf("NewAgentFromSession: %v", err)
-	}
 	plan := restored.session.Plan.Get()
 	if len(plan) != 1 {
 		t.Fatalf("restored plan len = %d, want 1", len(plan))

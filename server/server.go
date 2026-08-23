@@ -28,7 +28,7 @@ type ConfigOptionValue struct {
 }
 
 // parsedRequest is retained for ACP parse helpers and tests that assert on
-// validated request fields. Session lifecycle uses Protocol methods with Params.
+// validated request fields.
 type parsedRequest struct {
 	AgentID  string
 	ThreadID string

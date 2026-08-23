@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -35,7 +34,6 @@ func TestVFSTools_readWriteRev(t *testing.T) {
 
 	h := mustNewAgent(t, AgentOptions{
 		SessionID:    "tools-vfs",
-		Store:        stores.NewInMemoryStore(),
 		MountSession: ms,
 		Model:        &mockStrategy{},
 	})
@@ -444,7 +442,7 @@ func TestVFSTools_projectedDocOutlineAndBlocks(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := mustNewAgent(t, AgentOptions{
-		SessionID: "tools-docs", Store: stores.NewInMemoryStore(), MountSession: ms, Model: &mockStrategy{},
+		SessionID: "tools-docs", MountSession: ms, Model: &mockStrategy{},
 	})
 	tools := map[string]*Tool{}
 	for _, tool := range h.tools {
@@ -786,7 +784,7 @@ func TestVFSTools_writeDocxBlocksAndInlineMarks(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := mustNewAgent(t, AgentOptions{
-		SessionID: "tools-docx", Store: stores.NewInMemoryStore(), MountSession: ms, Model: &mockStrategy{},
+		SessionID: "tools-docx", MountSession: ms, Model: &mockStrategy{},
 	})
 	tools := map[string]*Tool{}
 	for _, tool := range h.tools {
@@ -862,7 +860,7 @@ func TestVFSTools_projectedSheetReadWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := mustNewAgent(t, AgentOptions{
-		SessionID: "tools-sheets", Store: stores.NewInMemoryStore(), MountSession: ms, Model: &mockStrategy{},
+		SessionID: "tools-sheets", MountSession: ms, Model: &mockStrategy{},
 	})
 	tools := map[string]*Tool{}
 	for _, tool := range h.tools {
@@ -988,7 +986,7 @@ func TestVFSTools_runCommandLiveNames(t *testing.T) {
 	t.Cleanup(func() { _ = ms.Close() })
 
 	h := mustNewAgent(t, AgentOptions{
-		SessionID: "live-names", Store: stores.NewInMemoryStore(),
+		SessionID:    "live-names",
 		MountSession: ms, Model: &mockStrategy{},
 	})
 	tool := h.findTool("run_command", "")

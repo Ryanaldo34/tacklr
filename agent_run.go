@@ -11,7 +11,7 @@ import (
 	"github.com/ryanaldo34/tacklr/stores"
 )
 
-// Run starts a turn with a plain-text user message (SSE and simple hosts).
+// Run starts a turn with a plain-text user message.
 func (a *AgentHarness) Run(ctx context.Context, prompt string) (<-chan StreamEvent, error) {
 	return a.RunMessage(ctx, &Message{Role: RoleUser, Content: prompt})
 }
@@ -33,32 +33,28 @@ func (a *AgentHarness) RunMessage(ctx context.Context, user *Message) (<-chan St
 // ReturnFromInterrupt applies host resolutions and resumes the parked tool batch.
 // Keys are tool call ids, which are also the wire interrupt ids.
 func (a *AgentHarness) ReturnFromInterrupt(ctx context.Context, finishedInterrupts map[string][]byte) (<-chan StreamEvent, error) {
-	if err := a.applyInterruptResolutions(finishedInterrupts); err != nil {
+	if err := a.ApplyResume(finishedInterrupts); err != nil {
 		return nil, err
 	}
 	return a.startTurn(ctx, nil)
 }
 
-func (a *AgentHarness) applyInterruptResolutions(finishedInterrupts map[string][]byte) error {
+func (a *AgentHarness) ApplyResume(finishedInterrupts map[string][]byte) error {
 	a.pendingMu.Lock()
 	defer a.pendingMu.Unlock()
 	if a.interruptPayloads == nil {
 		a.interruptPayloads = make(map[string][]byte)
 	}
 	for id, payload := range finishedInterrupts {
-		toolCallID, ok := a.lookupToolCallID(id)
+		tc, ok := a.pendingToolCalls[id]
 		if !ok {
 			return fmt.Errorf("no tool call id found for interrupt %s: %w", id, interrupt.ErrInterruptNotFound)
 		}
-		a.interruptPayloads[toolCallID] = payload
-		if _, err := a.session.ReturnInterrupt(toolCallID, payload); err != nil {
+		a.interruptPayloads[id] = payload
+		if _, err := a.session.ReturnInterrupt(id, payload); err != nil {
 			return fmt.Errorf("return from interrupt %q: %w", id, err)
 		}
-		tc, ok := a.pendingToolCalls[toolCallID]
-		if !ok {
-			return fmt.Errorf("no pending tool call found for tool call id %s", toolCallID)
-		}
-		a.pendingToolCalls[toolCallID] = stores.PendingToolCall{ToolCall: tc.ToolCall, InterruptActive: false}
+		a.pendingToolCalls[id] = stores.PendingToolCall{ToolCall: tc.ToolCall, InterruptActive: false}
 	}
 	return nil
 }
@@ -73,9 +69,6 @@ func (a *AgentHarness) startTurn(ctx context.Context, user *Message) (<-chan Str
 		a.runMu.Lock()
 		defer a.runMu.Unlock()
 		defer close(out)
-		defer func() {
-			_ = a.persistSession(ctx)
-		}()
 
 		emitCancelled := func() {
 			a.finalizeCancelledWork(out)
@@ -153,9 +146,6 @@ func (a *AgentHarness) runTurnLoop(ctx context.Context, out chan StreamEvent, em
 			return
 		}
 		if len(a.pendingSnapshot()) > 0 {
-			if err := a.persistSession(ctx); err != nil {
-				out <- StreamEvent{Type: StreamEventError, Error: fmt.Errorf("persist interrupted turn: %w", err)}
-			}
 			return
 		}
 	}

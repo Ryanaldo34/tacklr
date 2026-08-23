@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/ryanaldo34/tacklr/interrupt"
-	"github.com/ryanaldo34/tacklr/stores"
 )
 
 func TestIsClientError(t *testing.T) {
@@ -17,10 +16,9 @@ func TestIsClientError(t *testing.T) {
 	}{
 		{"validation", clientErrorf(ErrInvalidRequest, "agent_id is required"), true},
 		{"agent not found", clientErrorf(ErrAgentNotFound, "agent not found"), true},
-		{"store not configured", clientErrorf(ErrSessionStoreNotConfigured, "store missing"), true},
 		{"method not found", clientErrorf(ErrMethodNotFound, "method not found"), true},
 		{"wrapped client", fmt.Errorf("load agent: %w", clientErrorf(ErrAgentNotFound, "missing")), true},
-		{"session not found", fmt.Errorf("load: %w", stores.ErrSessionNotFound), true},
+		{"session not found", fmt.Errorf("load: %w", ErrSessionNotFound), true},
 		{"interrupt not found", fmt.Errorf("return: %w", interrupt.ErrInterruptNotFound), true},
 		{"invalid payload", fmt.Errorf("return: %w", interrupt.ErrInvalidPayload), true},
 		{"internal", fmt.Errorf("something broke"), false},
@@ -76,12 +74,12 @@ func TestClientError_errorsIs(t *testing.T) {
 }
 
 func TestClientErrorCause_preservesUnderlyingClass(t *testing.T) {
-	cause := fmt.Errorf("%w: drive token expired", stores.ErrSessionNotFound)
+	cause := fmt.Errorf("%w: drive token expired", ErrSessionNotFound)
 	err := clientErrorCause(ErrInvalidRequest, cause, "bind vfs")
 	if !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("want ErrInvalidRequest: %v", err)
 	}
-	if !errors.Is(err, stores.ErrSessionNotFound) {
+	if !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("want underlying class preserved: %v", err)
 	}
 	if err.Error() != "bind vfs" {
