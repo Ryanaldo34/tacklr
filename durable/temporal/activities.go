@@ -10,6 +10,7 @@ import (
 
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/contrib/workflowstreams"
+	"go.temporal.io/sdk/temporal"
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
@@ -30,11 +31,18 @@ func bindLiveTurn(id durable.SessionID, cancel context.CancelFunc) func() {
 }
 
 func cancelLiveTurn(id durable.SessionID) {
-	if v, ok := liveTurns.Load(id); ok {
+	if v, ok := liveTurns.LoadAndDelete(id); ok {
 		if cancel, ok := v.(context.CancelFunc); ok {
 			cancel()
 		}
 	}
+}
+
+func canceledIf(ctx context.Context, err error) error {
+	if ctx.Err() != nil {
+		return temporal.NewCanceledError("turn cancelled")
+	}
+	return err
 }
 
 // Activities are the Inference and Tool bodies registered on the worker.
@@ -111,9 +119,13 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 	}
 	h, ms, etag, err := a.harness(ctx, in.SessionID, in.AgentID, in.MCPServers, in.Etag, in.Auth, in.Mounts)
 	if err != nil {
-		slog.ErrorContext(ctx, "inference harness", "area", telemetry.AreaRuntime, "error", err)
-		_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, streaming.StreamEvent{Type: streaming.StreamEventError, Error: err, Content: err.Error()}, true)
-		return InferenceOutput{}, err
+		pub := err
+		if ctx.Err() != nil {
+			pub = context.Canceled
+		}
+		slog.ErrorContext(ctx, "inference harness", "area", telemetry.AreaRuntime, "error", pub)
+		_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, streaming.StreamEvent{Type: streaming.StreamEventError, Error: pub, Content: pub.Error()}, true)
+		return InferenceOutput{}, canceledIf(ctx, err)
 	}
 	defer func() {
 		h.Close()
@@ -124,7 +136,7 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 	if len(in.Resume) > 0 {
 		if err := h.ApplyResume(in.Resume); err != nil {
 			_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, streaming.StreamEvent{Type: streaming.StreamEventError, Error: err, Content: err.Error()}, true)
-			return InferenceOutput{}, err
+			return InferenceOutput{}, canceledIf(ctx, err)
 		}
 		if pending := h.PendingToolCalls(); len(pending) > 0 {
 			etag, err = a.save(ctx, in.SessionID, in.AgentID, h, etag, in.Mounts)
@@ -134,7 +146,7 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 	if in.User != nil {
 		if err := h.AbsorbUser(ctx, in.User, out); err != nil {
 			slog.ErrorContext(ctx, "inference absorb", "area", telemetry.AreaRuntime, "error", err)
-			return InferenceOutput{}, err
+			return InferenceOutput{}, canceledIf(ctx, err)
 		}
 	}
 	st := &tacklr.TurnState{HadToolRound: in.HadToolRound, ModelRequests: in.ModelRequests}
@@ -148,7 +160,7 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 			slog.ErrorContext(ctx, "inference failed", "area", telemetry.AreaRuntime, "error", err)
 		}
 		_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, streaming.StreamEvent{Type: streaming.StreamEventError, Error: pub, Content: pub.Error()}, true)
-		return InferenceOutput{}, err
+		return InferenceOutput{}, canceledIf(ctx, err)
 	}
 	etag, err = a.save(ctx, in.SessionID, in.AgentID, h, etag, in.Mounts)
 	if err != nil {
@@ -199,6 +211,7 @@ func (a *Activities) Tool(ctx context.Context, in ToolInput) (ToolOutput, error)
 	if runErr != nil && ctx.Err() != nil {
 		slog.WarnContext(ctx, "tool cancelled", "area", telemetry.AreaHarness, "tool", in.Call.Name)
 		_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, streaming.StreamEvent{Type: streaming.StreamEventError, Error: context.Canceled, Content: context.Canceled.Error()}, true)
+		return ToolOutput{}, temporal.NewCanceledError("turn cancelled")
 	} else if runErr != nil {
 		slog.ErrorContext(ctx, "tool failed", "area", telemetry.AreaHarness, "tool", in.Call.Name, "error", runErr)
 	}

@@ -511,10 +511,14 @@ func TestLive_cancelThenNextPrompt(t *testing.T) {
 			},
 		}, Config: tacklr.Config{MaxWindowSize: 8192}},
 	})
+	head, err := stack.Runtime.Head(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := stack.Runtime.Prompt(ctx, id, durable.Prompt{Text: "again"}); err != nil {
 		t.Fatal(err)
 	}
-	sub, err := stack.Runtime.Subscribe(ctx, id, 0)
+	sub, err := stack.Runtime.Subscribe(ctx, id, head)
 	if err != nil {
 		t.Fatal(err)
 	}

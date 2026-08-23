@@ -39,6 +39,11 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 		cancelCh = workflow.GetSignalChannel(ctx, signalCancel)
 		closeCh  = workflow.GetSignalChannel(ctx, signalClose)
 	)
+	drainCancels := func() {
+		var ignored any
+		for cancelCh.ReceiveAsync(&ignored) {
+		}
+	}
 	emitCancel := func() {
 		if stream == nil {
 			return
@@ -144,10 +149,10 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 			s.AddReceive(cancelCh, func(c workflow.ReceiveChannel, more bool) {
 				c.Receive(ctx, nil)
 				cancelAct()
-				emitCancel()
 				err = fut.Get(ctx, result)
 			})
 			s.Select(ctx)
+			drainCancels()
 			return err
 		}
 		hadTools := false
@@ -171,7 +176,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 				user = nil
 				resume = nil
 				if err != nil {
-					if ctx.Err() != nil {
+					if turnCanceled(ctx, err) {
 						outcome = telemetry.OutcomeCancelled
 					} else {
 						outcome = telemetry.OutcomeError
@@ -228,7 +233,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 					Mounts:     mounts,
 				}, &tout)
 				if err != nil {
-					if ctx.Err() != nil {
+					if turnCanceled(ctx, err) {
 						outcome = telemetry.OutcomeCancelled
 					} else {
 						outcome, turnErr = telemetry.OutcomeError, err
@@ -278,7 +283,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 							Mounts:     mounts,
 						}).Get(ctx, &iout)
 						if err != nil {
-							if ctx.Err() != nil {
+							if turnCanceled(ctx, err) {
 								outcome = telemetry.OutcomeCancelled
 							} else {
 								outcome, turnErr = telemetry.OutcomeError, err
@@ -321,7 +326,8 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 		case signalClose:
 			closed = true
 		case signalCancel:
-			emitCancel()
+			// Idle cancel is a no-op. Emitting here poisons the next prompt's
+			// Subscribe(after Head) when Cancel raced with a just-finished turn.
 			continue
 		case signalPrompt:
 			if ev.prompt.AgentID != "" {
@@ -340,4 +346,8 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 		}
 	}
 	return nil
+}
+
+func turnCanceled(ctx workflow.Context, err error) bool {
+	return err != nil && (ctx.Err() != nil || temporal.IsCanceledError(err))
 }

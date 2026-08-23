@@ -7,10 +7,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/streaming"
 )
@@ -302,4 +304,100 @@ func TestRunTurn_outcomes(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+}
+
+func terminalControl(ev streaming.StreamEvent) StreamControl {
+	if ev.Type == streaming.StreamEventComplete || ev.Type == streaming.StreamEventError {
+		return StreamControl{Finished: true}
+	}
+	return StreamControl{}
+}
+
+// TestRunTurn_midPromptCancelThenNextPrompt is the protocol-agnostic coverage
+// for Runtime.Cancel during a turn: the pump finishes, then the next prompt
+// on the same session completes with new content (no leftover cancel).
+func TestRunTurn_midPromptCancelThenNextPrompt(t *testing.T) {
+	started := make(chan struct{})
+	var startedOnce sync.Once
+	strategy := &mockInferenceStrategy{
+		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			startedOnce.Do(func() { close(started) })
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case ch <- tacklr.LLMResponseChunk{
+					Type: tacklr.StreamEventMessage, Content: "early", IsComplete: false,
+				}:
+				}
+			}
+		},
+	}
+	k := newTestKernel(t, strategy, durable.AgentSpec{})
+	ctx := t.Context()
+	id, err := k.Runtime.CreateSession(ctx, durable.CreateSession{AgentID: "default"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := ProtocolEnv{Runtime: k.Runtime, Catalog: k.Catalog}
+
+	var sawStream atomic.Bool
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- RunTurn(ctx, env, pumpProto{onEvent: func(ev streaming.StreamEvent) StreamControl {
+			if ev.Type == streaming.StreamEventMessage {
+				sawStream.Store(true)
+			}
+			return terminalControl(ev)
+		}}, string(id), nil, PromptOrResume{Prompt: durable.Prompt{Text: "hi"}})
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("prompt did not start")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !sawStream.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for first stream event")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := k.Runtime.Cancel(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-firstDone:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatalf("first turn: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("first turn did not finish after cancel")
+	}
+
+	strategy.invokeFn = func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+		ch <- tacklr.LLMResponseChunk{
+			Type: tacklr.StreamEventMessage, Content: "after-cancel", IsComplete: true,
+		}
+	}
+	var second []streaming.StreamEvent
+	if err := RunTurn(ctx, env, pumpProto{onEvent: func(ev streaming.StreamEvent) StreamControl {
+		second = append(second, ev)
+		return terminalControl(ev)
+	}}, string(id), nil, PromptOrResume{Prompt: durable.Prompt{Text: "again"}}); err != nil {
+		t.Fatalf("second turn: %v", err)
+	}
+	var sawAfter, complete bool
+	for _, ev := range second {
+		if ev.Type == streaming.StreamEventMessage && strings.Contains(ev.Content, "after-cancel") {
+			sawAfter = true
+		}
+		if ev.Type == streaming.StreamEventComplete {
+			complete = true
+		}
+	}
+	if !sawAfter || !complete {
+		t.Fatalf("want after-cancel + complete, got %+v", second)
+	}
 }
