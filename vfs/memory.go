@@ -12,8 +12,9 @@ import (
 	"time"
 )
 
-// MemoryFactory provides an ephemeral, session-scoped backend. It is intended
-// for attachments and generated context, not durable user files.
+// MemoryFactory provides an ephemeral, session-scoped backend. Hosts Mount it
+// like any other backend; WriteFile stores bytes on that mount. It is not a
+// durable store for user files.
 type MemoryFactory struct {
 	ID        string
 	mu        sync.Mutex
