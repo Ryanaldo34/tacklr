@@ -139,60 +139,6 @@ func (t *ToolSpan) Finish(status string, err error) {
 	)
 }
 
-// BrainSpan is an in-flight tacklr.brain span.
-type BrainSpan struct {
-	ctx      context.Context
-	span     trace.Span
-	start    time.Time
-	op       string
-	finished bool
-}
-
-// StartBrainSpan starts a tacklr.brain child span.
-func StartBrainSpan(ctx context.Context, op string) (context.Context, *BrainSpan) {
-	start := time.Now()
-	attrs := []attribute.KeyValue{
-		attribute.String(AttrArea, AreaBrain),
-		attribute.String(AttrBrainOp, op),
-	}
-	if sid := SessionIDFromContext(ctx); sid != "" {
-		attrs = append(attrs, attribute.String(AttrSessionID, sid))
-	}
-	ctx, span := Tracer().Start(ctx, SpanBrain, trace.WithAttributes(attrs...))
-	return ctx, &BrainSpan{ctx: ctx, span: span, start: start, op: op}
-}
-
-// End finishes the span and records brain metrics.
-// hits is returned page size (0 on error) — span-only for debug, not a metric.
-// degrade is BrainDegrade*; empty-result rate is derived for the total counter.
-func (b *BrainSpan) End(hits int, degrade string, err error) {
-	if b.finished {
-		return
-	}
-	b.finished = true
-	outcome := OutcomeOK
-	if err != nil {
-		outcome = OutcomeError
-		hits = 0
-	}
-	if err != nil {
-		b.span.RecordError(err)
-		b.span.SetStatus(codes.Error, ErrorClassOther)
-	} else {
-		b.span.SetStatus(codes.Ok, "")
-	}
-	b.span.SetAttributes(
-		attribute.String(AttrOutcome, outcome),
-		attribute.String(AttrBrainDegrade, degrade),
-		attribute.Int(AttrBrainHits, hits),
-	)
-	b.span.End()
-	InstrumentsFromContext(b.ctx).RecordBrain(
-		b.ctx, AgentIDFromContext(b.ctx), b.op, outcome, degrade,
-		err == nil && hits == 0, time.Since(b.start),
-	)
-}
-
 // PlanInstallSpan is an in-flight tacklr.plan.install span. Call End once.
 type PlanInstallSpan struct {
 	span     trace.Span

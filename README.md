@@ -249,7 +249,7 @@ Canonical write-up: [docs/knowledge.md](docs/knowledge.md). API: [`brain`](https
 
 Default export is the **LGTM stack** via one OTLP endpoint: Grafana Alloy or the OpenTelemetry Collector in front of **Tempo** (traces), **Loki** (logs), **Mimir**/Prometheus (metrics), and **Grafana**.
 
-The durable **wait loop is the primary instrumentor**. One `tacklr.turn` span per prompt or resume. Child spans are only the key harness events (`tacklr.model`, `tacklr.tool`, `tacklr.plan.install`, `tacklr.context.handoff`, `tacklr.brain`). Span attributes are static (agent, session, turn kind, runtime, outcome) so they stay queryable for dashboards. Dynamic values (prompt length, retry attempt, error body) go on span-correlated logs at Info/Warn/Error.
+The durable **wait loop is the primary instrumentor**. One `tacklr.turn` span per prompt or resume. Child spans are only the key harness events (`tacklr.model`, `tacklr.tool`, `tacklr.plan.install`, `tacklr.context.handoff`). Span attributes are static (agent, session, turn kind, runtime, outcome) so they stay queryable for dashboards. Dynamic values (prompt length, retry attempt, error body) go on span-correlated logs at Info/Warn/Error.
 
 Temporal ships out of the box: `telemetry.Init` installs the process-wide OpenTelemetry providers (ReplaySafe tracer so workflow spans replay cleanly). `durable/temporal.Dial` prepends the [OpenTelemetry v2 plugin](https://docs.temporal.io/develop/go/integrations/opentelemetry-v2) for context propagation (no extra SDK auto-spans). Call `Init` before `Dial`.
 

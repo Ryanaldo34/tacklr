@@ -59,10 +59,6 @@ type ExpandRecipe struct {
 
 // Expand returns the structural neighborhood of object_id under scope.
 func (e *Engine) Expand(ctx context.Context, scope Scope, req ExpandRequest, results ResultSetStore) (res ExpandResult, err error) {
-	ctx, span := e.observer.StartOp(ctx, OpExpand)
-	degrade := DegradeNone
-	defer func() { span.End(len(res.Objects), degrade, err) }()
-
 	if e := ctx.Err(); e != nil {
 		err = e
 		return res, err
@@ -98,9 +94,7 @@ func (e *Engine) Expand(ctx context.Context, scope Scope, req ExpandRequest, res
 	if len(graphLabels) > 0 {
 		hits, gErr := e.graphNeighborsMulti(ctx, scope, obj.ID, graphLabels, req.MaxHops, req.Direction)
 		if gErr != nil {
-			if !e.cfg.FailOnGraphError && usedContainment {
-				degrade = DegradeContainmentOnly
-			} else {
+			if e.cfg.FailOnGraphError || !usedContainment {
 				return res, gErr
 			}
 		} else {
@@ -151,9 +145,6 @@ func (e *Engine) Expand(ctx context.Context, scope Scope, req ExpandRequest, res
 // ExpandMany walks the graph from many landing ids without paging / SearchContext.
 // First seed to claim a neighbor wins Relation.SourceID. Out-of-scope seeds are skipped.
 func (e *Engine) ExpandMany(ctx context.Context, scope Scope, req ExpandManyRequest) (res ExpandManyResult, err error) {
-	ctx, span := e.observer.StartOp(ctx, OpExpandMany)
-	defer func() { span.End(len(res.Objects), DegradeNone, err) }()
-
 	if e := ctx.Err(); e != nil {
 		err = e
 		return res, err

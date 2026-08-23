@@ -9,7 +9,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
-	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
 type nopRerank struct{}
@@ -18,7 +17,7 @@ func (nopRerank) Rerank(context.Context, []brain.RichObject) ([]brain.RichObject
 	return nil, nil
 }
 
-// TestNewEngine_options: WithObserver/Reranker/ExpandRecipes/Kinds construct path.
+// TestNewEngine_options: WithReranker/ExpandRecipes/Kinds construct path.
 func TestNewEngine_options(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
@@ -26,7 +25,6 @@ func TestNewEngine_options(t *testing.T) {
 		t.Fatalf("empty expand recipe name must fail construct: %v", err)
 	}
 	eng, err := brain.NewEngine(store,
-		brain.WithObserver(telemetry.NewBrainObserver()),
 		brain.WithReranker(nopRerank{}),
 		brain.WithExpandRecipes(
 			brain.ExpandRecipe{Name: "kids", MaxHops: 1, WantContainment: true},

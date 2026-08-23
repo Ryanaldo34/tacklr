@@ -25,8 +25,6 @@ const (
 	MetricTokensInput     = "tacklr.tokens.input"
 	MetricTokensOutput    = "tacklr.tokens.output"
 	MetricTokensReasoning = "tacklr.tokens.reasoning"
-	MetricBrainTotal      = "tacklr.brain.total"
-	MetricBrainDuration   = "tacklr.brain.duration"
 	MetricFuseMount       = "tacklr.fuse.mount.total"
 )
 
@@ -41,9 +39,6 @@ const (
 	LabelKind       = "kind" // interrupt kind
 	LabelModelPhase = "model_phase"
 	LabelErrorClass = "error_class"
-	LabelBrainOp    = "brain_op"
-	LabelDegrade    = "degrade"
-	LabelEmpty      = "empty" // "true" | "false"
 )
 
 // Instruments holds cached metric instruments for one Meter.
@@ -63,8 +58,6 @@ type Instruments struct {
 	tokensInput     metric.Int64Counter
 	tokensOutput    metric.Int64Counter
 	tokensReasoning metric.Int64Counter
-	brainTotal      metric.Int64Counter
-	brainDuration   metric.Float64Histogram
 	fuseMountTotal  metric.Int64Counter
 }
 
@@ -119,13 +112,6 @@ func MustInstruments(m metric.Meter) *Instruments {
 	)
 	i.tokensReasoning, _ = m.Int64Counter(MetricTokensReasoning,
 		metric.WithDescription("Provider-reported reasoning tokens when present"),
-	)
-	i.brainTotal, _ = m.Int64Counter(MetricBrainTotal,
-		metric.WithDescription("Brain retrieval ops (labels: brain_op, outcome, degrade, empty)"),
-	)
-	i.brainDuration, _ = m.Float64Histogram(MetricBrainDuration,
-		metric.WithDescription("Brain retrieval latency (labels: brain_op, outcome, degrade)"),
-		metric.WithUnit("s"),
 	)
 	i.fuseMountTotal, _ = m.Int64Counter(MetricFuseMount,
 		metric.WithDescription("FUSE mount attempts by outcome (ok, error, unavailable)"),
@@ -221,34 +207,6 @@ func (i *Instruments) RecordSessionCreated(ctx context.Context) {
 
 func (i *Instruments) RecordCheckpointSave(ctx context.Context, outcome string) {
 	i.checkpointSave.Add(ctx, 1, metric.WithAttributes(attribute.String(LabelOutcome, outcome)))
-}
-
-// RecordBrain records one knowledge-retrieval op.
-//
-// Counter labels: agent_id, brain_op, outcome, degrade, empty ("true"|"false").
-// empty is only on the counter (empty-result rate); duration omits it to keep
-// histogram series smaller. Hits live on the span only (per-request debug).
-func (i *Instruments) RecordBrain(ctx context.Context, agentID, op, outcome, degrade string, empty bool, d time.Duration) {
-	emptyLabel := "false"
-	if empty {
-		emptyLabel = "true"
-	}
-	latency := metric.WithAttributes(
-		attribute.String(LabelAgentID, agentID),
-		attribute.String(LabelBrainOp, op),
-		attribute.String(LabelOutcome, outcome),
-		attribute.String(LabelDegrade, degrade),
-	)
-	i.brainTotal.Add(ctx, 1, metric.WithAttributes(
-		attribute.String(LabelAgentID, agentID),
-		attribute.String(LabelBrainOp, op),
-		attribute.String(LabelOutcome, outcome),
-		attribute.String(LabelDegrade, degrade),
-		attribute.String(LabelEmpty, emptyLabel),
-	))
-	if d > 0 {
-		i.brainDuration.Record(ctx, d.Seconds(), latency)
-	}
 }
 
 // Fuse mount outcomes for RecordFuseMount (closed enum).
