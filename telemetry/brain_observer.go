@@ -23,8 +23,5 @@ type brainOpSpan struct {
 }
 
 func (s brainOpSpan) End(hits int, degrade brain.DegradeMode, err error) {
-	if s.span == nil {
-		return
-	}
 	s.span.End(hits, degrade.String(), err)
 }

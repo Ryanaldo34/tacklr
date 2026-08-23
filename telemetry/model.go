@@ -168,7 +168,7 @@ func StartModelSpan(ctx context.Context, phase string, seq int, shape WindowShap
 // End ends the model span with outcome, usage, and metrics.
 // HTTP status and code come from err when it implements providerStatus.
 func (m *ModelSpan) End(err error, usage TokenUsage) {
-	if m == nil || m.finished {
+	if m.finished {
 		return
 	}
 	m.finished = true

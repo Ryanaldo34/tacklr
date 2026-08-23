@@ -6,10 +6,8 @@
 // Host API:
 //   - Config, Init — process-wide OTLP traces/metrics/logs with Temporal's
 //     ReplaySafe tracer provider. Call before durable/temporal.Dial.
-//   - InstallDefault, InstallDefaultWithOTLP, NewLogger — slog setup
 //   - MeterProviderFromPrometheusRegisterer — Prometheus scrape
 //   - DefaultResource — service resource
-//   - StdioWatchDog — AgentWatchDog that writes to stderr
 //
 // Span starters, Instruments.Record*, attribute constants, and EmitEvent are
 // for the harness and durable packages. Hosts must not start tacklr spans or

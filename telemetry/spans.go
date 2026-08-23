@@ -64,7 +64,7 @@ func StartTurnSpan(ctx context.Context, a TurnAttrs) (context.Context, *TurnSpan
 // End ends the turn span, emits turn.ended, and records metrics.
 // outcome is OutcomeOK, OutcomeError, or OutcomeCancelled; empty derives from err.
 func (t *TurnSpan) End(outcome string, err error) {
-	if t == nil || t.finished {
+	if t.finished {
 		return
 	}
 	t.finished = true
@@ -75,18 +75,16 @@ func (t *TurnSpan) End(outcome string, err error) {
 			outcome = OutcomeOK
 		}
 	}
-	if t.span != nil {
-		if err != nil {
-			t.span.RecordError(err)
-			t.span.SetStatus(codes.Error, ErrorClassOther)
-		} else if outcome == OutcomeCancelled {
-			t.span.SetStatus(codes.Error, OutcomeCancelled)
-		} else {
-			t.span.SetStatus(codes.Ok, "")
-		}
-		t.span.SetAttributes(attribute.String(AttrOutcome, outcome))
-		t.span.End()
+	if err != nil {
+		t.span.RecordError(err)
+		t.span.SetStatus(codes.Error, ErrorClassOther)
+	} else if outcome == OutcomeCancelled {
+		t.span.SetStatus(codes.Error, OutcomeCancelled)
+	} else {
+		t.span.SetStatus(codes.Ok, "")
 	}
+	t.span.SetAttributes(attribute.String(AttrOutcome, outcome))
+	t.span.End()
 	if outcome == OutcomeYield {
 		EmitEvent(t.ctx, EventTurnYielded, log.String(EventAttrOutcome, outcome))
 	} else {
@@ -122,13 +120,10 @@ func StartToolSpan(ctx context.Context, name, namespace string) (context.Context
 // Finish ends the tool span and records metrics.
 // status is success, error, interrupt, or similar.
 func (t *ToolSpan) Finish(status string, err error) {
-	if t == nil || t.finished {
+	if t.finished {
 		return
 	}
 	t.finished = true
-	if t.span == nil {
-		return
-	}
 	if status == "" {
 		if err != nil {
 			status = "error"
@@ -191,7 +186,7 @@ func StartBrainSpan(ctx context.Context, op string) (context.Context, *BrainSpan
 // hits is returned page size (0 on error) — span-only for debug, not a metric.
 // degrade is BrainDegrade*; empty-result rate is derived for the total counter.
 func (b *BrainSpan) End(hits int, degrade string, err error) {
-	if b == nil || b.finished {
+	if b.finished {
 		return
 	}
 	b.finished = true
@@ -203,20 +198,18 @@ func (b *BrainSpan) End(hits int, degrade string, err error) {
 		outcome = OutcomeError
 		hits = 0
 	}
-	if b.span != nil {
-		if err != nil {
-			b.span.RecordError(err)
-			b.span.SetStatus(codes.Error, ErrorClassOther)
-		} else {
-			b.span.SetStatus(codes.Ok, "")
-		}
-		b.span.SetAttributes(
-			attribute.String(AttrOutcome, outcome),
-			attribute.String(AttrBrainDegrade, degrade),
-			attribute.Int(AttrBrainHits, hits),
-		)
-		b.span.End()
+	if err != nil {
+		b.span.RecordError(err)
+		b.span.SetStatus(codes.Error, ErrorClassOther)
+	} else {
+		b.span.SetStatus(codes.Ok, "")
 	}
+	b.span.SetAttributes(
+		attribute.String(AttrOutcome, outcome),
+		attribute.String(AttrBrainDegrade, degrade),
+		attribute.Int(AttrBrainHits, hits),
+	)
+	b.span.End()
 	InstrumentsFromContext(b.ctx).RecordBrain(
 		b.ctx, AgentIDFromContext(b.ctx), b.op, outcome, degrade,
 		err == nil && hits == 0, time.Since(b.start),
@@ -242,13 +235,10 @@ func StartPlanInstallSpan(ctx context.Context, sessionID string) (context.Contex
 
 // End ends the span. err nil means ok; non-nil means error.
 func (s *PlanInstallSpan) End(err error) {
-	if s == nil || s.finished {
+	if s.finished {
 		return
 	}
 	s.finished = true
-	if s.span == nil {
-		return
-	}
 	if err != nil {
 		s.span.RecordError(err)
 		s.span.SetStatus(codes.Error, ErrorClassOther)
@@ -283,13 +273,10 @@ func StartHandoffSpan(ctx context.Context, openTodos int) (context.Context, *Han
 // End ends the handoff span and records the handoff metric.
 // outcome is HandoffOutcomeOK, HandoffOutcomeFallback, or HandoffOutcomeError.
 func (s *HandoffSpan) End(outcome string, err error) {
-	if s == nil || s.finished {
+	if s.finished {
 		return
 	}
 	s.finished = true
-	if s.span == nil {
-		return
-	}
 	if outcome == "" {
 		if err != nil {
 			outcome = HandoffOutcomeError

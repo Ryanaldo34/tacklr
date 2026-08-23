@@ -3,11 +3,8 @@ package telemetry
 import (
 	"context"
 	"errors"
-	"io"
-	"log/slog"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel/log"
@@ -87,7 +84,6 @@ func TestModelSpan_lifecycleAndClassify(t *testing.T) {
 	_, s2 := StartModelSpan(ctx, ModelPhaseCompress, 2, WindowShape{})
 	s2.End(nil, TokenUsage{})
 	s2.End(errors.New("again"), TokenUsage{})
-	(*ModelSpan)(nil).End(nil, TokenUsage{})
 
 	// Empty identity defaults
 	ctx2 := ContextWithInstruments(context.Background(), inst)
@@ -124,24 +120,4 @@ func TestMeterContext_helpers(t *testing.T) {
 
 	EmitEvent(context.Background(), "") // no-op empty name
 	EmitEventSeverity(context.Background(), EventTurnEnded, log.SeverityError)
-
-	InstallDefaultWithOTLP(nil, nil)
-	InstallDefaultWithOTLP(slog.DiscardHandler, nil)
-	InstallDefaultWithOTLP(nil, NewOTLPSlogHandler(""))
-	InstallDefaultWithOTLP(slog.DiscardHandler, NewOTLPSlogHandler("svc"))
-	// restore quiet default
-	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
-
-	// RecordBrain empty defaults
-	reg := prometheus.NewRegistry()
-	mp, err := MeterProviderFromPrometheusRegisterer(reg, "rb", "v")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
-	inst := MustInstruments(MeterFromProvider(mp))
-	inst.RecordBrain(context.Background(), "a", "", "", "", false, 0)
-	inst.RecordBrain(context.Background(), "a", BrainOpSearch, OutcomeOK, BrainDegradeNone, false, time.Millisecond)
-
-	_ = time.Millisecond
 }

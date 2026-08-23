@@ -203,16 +203,10 @@ func NewInstruments(m metric.Meter) (*Instruments, error) {
 }
 
 func (i *Instruments) RecordTurnStart(ctx context.Context, agentID string) {
-	if i == nil {
-		return
-	}
 	i.turnActive.Add(ctx, 1, metric.WithAttributes(attribute.String(LabelAgentID, agentID)))
 }
 
 func (i *Instruments) RecordTurnEnd(ctx context.Context, agentID, turnKind, outcome string, d time.Duration) {
-	if i == nil {
-		return
-	}
 	i.turnActive.Add(ctx, -1, metric.WithAttributes(attribute.String(LabelAgentID, agentID)))
 	i.RecordTurnOutcome(ctx, agentID, turnKind, outcome, d)
 }
@@ -221,9 +215,6 @@ func (i *Instruments) RecordTurnEnd(ctx context.Context, agentID, turnKind, outc
 // in-flight gauge. Temporal workflows use this: replay would double-count
 // RecordTurnStart/RecordTurnEnd on the active gauge.
 func (i *Instruments) RecordTurnOutcome(ctx context.Context, agentID, turnKind, outcome string, d time.Duration) {
-	if i == nil {
-		return
-	}
 	attrs := metric.WithAttributes(
 		attribute.String(LabelAgentID, agentID),
 		attribute.String(LabelTurnKind, turnKind),
@@ -234,9 +225,6 @@ func (i *Instruments) RecordTurnOutcome(ctx context.Context, agentID, turnKind, 
 }
 
 func (i *Instruments) RecordTool(ctx context.Context, agentID, tool, namespace, status string, d time.Duration) {
-	if i == nil {
-		return
-	}
 	attrs := metric.WithAttributes(
 		attribute.String(LabelAgentID, agentID),
 		attribute.String(LabelTool, tool),
@@ -248,9 +236,6 @@ func (i *Instruments) RecordTool(ctx context.Context, agentID, tool, namespace, 
 }
 
 func (i *Instruments) RecordInterrupt(ctx context.Context, agentID, kind string) {
-	if i == nil {
-		return
-	}
 	i.interruptTotal.Add(ctx, 1, metric.WithAttributes(
 		attribute.String(LabelAgentID, agentID),
 		attribute.String(LabelKind, kind),
@@ -260,9 +245,6 @@ func (i *Instruments) RecordInterrupt(ctx context.Context, agentID, kind string)
 // RecordHandoff records a context handoff. outcome is a closed enum
 // (HandoffOutcomeOK | HandoffOutcomeFallback | HandoffOutcomeError).
 func (i *Instruments) RecordHandoff(ctx context.Context, agentID, outcome string) {
-	if i == nil {
-		return
-	}
 	if outcome == "" {
 		outcome = HandoffOutcomeOK
 	}
@@ -275,9 +257,6 @@ func (i *Instruments) RecordHandoff(ctx context.Context, agentID, outcome string
 // RecordModel records one model invoke (duration + count). phase and errClass
 // must be closed enums (ModelPhase* / ErrorClass*).
 func (i *Instruments) RecordModel(ctx context.Context, agentID, phase, outcome, errClass string, d time.Duration) {
-	if i == nil {
-		return
-	}
 	if phase == "" {
 		phase = ModelPhaseTurn
 	}
@@ -301,9 +280,6 @@ func (i *Instruments) RecordModel(ctx context.Context, agentID, phase, outcome, 
 
 // RecordTokens adds provider-reported token counts (no high-cardinality labels).
 func (i *Instruments) RecordTokens(ctx context.Context, agentID string, input, output, reasoning int) {
-	if i == nil {
-		return
-	}
 	attrs := metric.WithAttributes(attribute.String(LabelAgentID, agentID))
 	if input > 0 {
 		i.tokensInput.Add(ctx, int64(input), attrs)
@@ -317,23 +293,14 @@ func (i *Instruments) RecordTokens(ctx context.Context, agentID string, input, o
 }
 
 func (i *Instruments) RecordCompress(ctx context.Context, agentID string) {
-	if i == nil {
-		return
-	}
 	i.compressTotal.Add(ctx, 1, metric.WithAttributes(attribute.String(LabelAgentID, agentID)))
 }
 
 func (i *Instruments) RecordSessionCreated(ctx context.Context) {
-	if i == nil {
-		return
-	}
 	i.sessionCreated.Add(ctx, 1)
 }
 
 func (i *Instruments) RecordCheckpointSave(ctx context.Context, outcome string) {
-	if i == nil {
-		return
-	}
 	i.checkpointSave.Add(ctx, 1, metric.WithAttributes(attribute.String(LabelOutcome, outcome)))
 }
 
@@ -343,9 +310,6 @@ func (i *Instruments) RecordCheckpointSave(ctx context.Context, outcome string) 
 // empty is only on the counter (empty-result rate); duration omits it to keep
 // histogram series smaller. Hits live on the span only (per-request debug).
 func (i *Instruments) RecordBrain(ctx context.Context, agentID, op, outcome, degrade string, empty bool, d time.Duration) {
-	if i == nil {
-		return
-	}
 	if op == "" {
 		op = BrainOpSearch
 	}
@@ -386,9 +350,6 @@ const (
 
 // RecordFuseMount increments tacklr.fuse.mount.total{outcome=...}.
 func (i *Instruments) RecordFuseMount(ctx context.Context, outcome string) {
-	if i == nil {
-		return
-	}
 	if outcome == "" {
 		outcome = FuseMountOutcomeOK
 	}
