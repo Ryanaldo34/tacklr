@@ -127,9 +127,6 @@ type ModelSpan struct {
 
 // StartModelSpan starts a model span. Emits model.after_tools when ContextWithAfterTools is set.
 func StartModelSpan(ctx context.Context, phase string, seq int, shape WindowShape) (context.Context, *ModelSpan) {
-	if phase == "" {
-		phase = ModelPhaseTurn
-	}
 	id := modelIdentityFromContext(ctx)
 	op := id.Operation
 	if op == "" {

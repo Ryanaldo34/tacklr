@@ -33,9 +33,6 @@ type TurnAttrs struct {
 
 // StartTurnSpan starts the root turn span on the process-wide tracer.
 func StartTurnSpan(ctx context.Context, a TurnAttrs) (context.Context, *TurnSpan) {
-	if a.Kind == "" {
-		a.Kind = TurnKindPrompt
-	}
 	ctx = ContextWithAgentID(ctx, a.AgentID)
 	ctx = ContextWithSessionID(ctx, a.SessionID)
 	start := time.Now()
@@ -62,19 +59,12 @@ func StartTurnSpan(ctx context.Context, a TurnAttrs) (context.Context, *TurnSpan
 }
 
 // End ends the turn span, emits turn.ended, and records metrics.
-// outcome is OutcomeOK, OutcomeError, or OutcomeCancelled; empty derives from err.
+// outcome is a closed enum (OutcomeOK, OutcomeError, OutcomeCancelled, OutcomeYield).
 func (t *TurnSpan) End(outcome string, err error) {
 	if t.finished {
 		return
 	}
 	t.finished = true
-	if outcome == "" {
-		if err != nil {
-			outcome = OutcomeError
-		} else {
-			outcome = OutcomeOK
-		}
-	}
 	if err != nil {
 		t.span.RecordError(err)
 		t.span.SetStatus(codes.Error, ErrorClassOther)
@@ -124,13 +114,6 @@ func (t *ToolSpan) Finish(status string, err error) {
 		return
 	}
 	t.finished = true
-	if status == "" {
-		if err != nil {
-			status = "error"
-		} else {
-			status = "success"
-		}
-	}
 	attrs := []attribute.KeyValue{
 		attribute.String(AttrToolStatus, status),
 	}
@@ -167,9 +150,6 @@ type BrainSpan struct {
 
 // StartBrainSpan starts a tacklr.brain child span.
 func StartBrainSpan(ctx context.Context, op string) (context.Context, *BrainSpan) {
-	if op == "" {
-		op = BrainOpSearch
-	}
 	start := time.Now()
 	attrs := []attribute.KeyValue{
 		attribute.String(AttrArea, AreaBrain),
@@ -190,9 +170,6 @@ func (b *BrainSpan) End(hits int, degrade string, err error) {
 		return
 	}
 	b.finished = true
-	if degrade == "" {
-		degrade = BrainDegradeNone
-	}
 	outcome := OutcomeOK
 	if err != nil {
 		outcome = OutcomeError
@@ -277,13 +254,6 @@ func (s *HandoffSpan) End(outcome string, err error) {
 		return
 	}
 	s.finished = true
-	if outcome == "" {
-		if err != nil {
-			outcome = HandoffOutcomeError
-		} else {
-			outcome = HandoffOutcomeOK
-		}
-	}
 	if err != nil {
 		s.span.RecordError(err)
 		s.span.SetStatus(codes.Error, ErrorClassOther)

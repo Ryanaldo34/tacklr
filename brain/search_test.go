@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
+	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
 func seedDocWithParts(t *testing.T, store *brain.MemoryStore, ns uuid.UUID, title string, partBodies []string, updated time.Time) (parentID uuid.UUID) {
@@ -48,7 +49,7 @@ func TestSearch_promotesParentWithEvidenceAndNamespace(t *testing.T) {
 	}, now)
 	seedDocWithParts(t, store, nsB, "Other ns", []string{"OAuth PKCE elsewhere"}, now)
 
-	eng, err := brain.NewEngine(store, brain.WithConfig(fixedNow(now)))
+	eng, err := brain.NewEngine(store, brain.WithObserver(telemetry.NewBrainObserver()), brain.WithConfig(fixedNow(now)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,6 +93,16 @@ func TestSearch_promotesParentWithEvidenceAndNamespace(t *testing.T) {
 		if o.ID == parent {
 			t.Fatal("parent from nsA must not appear under nsB")
 		}
+	}
+
+	miss, err := eng.Search(ctx, brain.Scope{Namespace: &nsA}, brain.SearchRequest{
+		Query: "quantum-chromodynamics-unrelated",
+	}, brain.NewSearchContext())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(miss.Objects) != 0 {
+		t.Fatalf("unrelated query must miss, got %+v", miss.Objects)
 	}
 }
 

@@ -2,7 +2,6 @@ package telemetry
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -69,137 +68,69 @@ type Instruments struct {
 	fuseMountTotal  metric.Int64Counter
 }
 
-// MustInstruments builds instruments from m. Panics only on programmer error
-// from the SDK (invalid names); treated as init-time failure.
+// MustInstruments builds instruments from m. Names are constants; the SDK
+// only errors on invalid names, which would be a compile-time programmer error.
 func MustInstruments(m metric.Meter) *Instruments {
-	inst, err := NewInstruments(m)
-	if err != nil {
-		panic(fmt.Sprintf("telemetry instruments: %v", err))
-	}
-	return inst
-}
-
-// NewInstruments creates counters/histograms on m.
-func NewInstruments(m metric.Meter) (*Instruments, error) {
-	if m == nil {
-		m = Meter()
-	}
 	i := &Instruments{}
-	var err error
-
-	i.turnDuration, err = m.Float64Histogram(MetricTurnDuration,
+	i.turnDuration, _ = m.Float64Histogram(MetricTurnDuration,
 		metric.WithDescription("End-to-end agent turn duration"),
 		metric.WithUnit("s"),
 	)
-	if err != nil {
-		return nil, err
-	}
-	i.turnTotal, err = m.Int64Counter(MetricTurnTotal,
+	i.turnTotal, _ = m.Int64Counter(MetricTurnTotal,
 		metric.WithDescription("Total agent turns by outcome"),
 	)
-	if err != nil {
-		return nil, err
-	}
-	i.turnActive, err = m.Int64UpDownCounter(MetricTurnActive,
+	i.turnActive, _ = m.Int64UpDownCounter(MetricTurnActive,
 		metric.WithDescription("In-flight agent turns"),
 	)
-	if err != nil {
-		return nil, err
-	}
-	i.toolCalls, err = m.Int64Counter(MetricToolCalls,
+	i.toolCalls, _ = m.Int64Counter(MetricToolCalls,
 		metric.WithDescription("Tool invocations by name and status"),
 	)
-	if err != nil {
-		return nil, err
-	}
-	i.toolDuration, err = m.Float64Histogram(MetricToolDuration,
+	i.toolDuration, _ = m.Float64Histogram(MetricToolDuration,
 		metric.WithDescription("Tool invocation duration"),
 		metric.WithUnit("s"),
 	)
-	if err != nil {
-		return nil, err
-	}
-	i.interruptTotal, err = m.Int64Counter(MetricInterruptTotal,
+	i.interruptTotal, _ = m.Int64Counter(MetricInterruptTotal,
 		metric.WithDescription("Interrupts raised (human-in-the-loop)"),
 	)
-	if err != nil {
-		return nil, err
-	}
-	i.handoffTotal, err = m.Int64Counter(MetricHandoffTotal,
+	i.handoffTotal, _ = m.Int64Counter(MetricHandoffTotal,
 		metric.WithDescription("Context handoffs after plan progress"),
 	)
-	if err != nil {
-		return nil, err
-	}
-	i.compressTotal, err = m.Int64Counter(MetricCompressTotal,
+	i.compressTotal, _ = m.Int64Counter(MetricCompressTotal,
 		metric.WithDescription("Context window compressions under pressure"),
 	)
-	if err != nil {
-		return nil, err
-	}
-	i.sessionCreated, err = m.Int64Counter(MetricSessionCreated,
+	i.sessionCreated, _ = m.Int64Counter(MetricSessionCreated,
 		metric.WithDescription("Sessions created via registry"),
 	)
-	if err != nil {
-		return nil, err
-	}
-	i.checkpointSave, err = m.Int64Counter(MetricCheckpointSave,
+	i.checkpointSave, _ = m.Int64Counter(MetricCheckpointSave,
 		metric.WithDescription("Session checkpoint save attempts"),
 	)
-	if err != nil {
-		return nil, err
-	}
-	i.modelDuration, err = m.Float64Histogram(MetricModelDuration,
+	i.modelDuration, _ = m.Float64Histogram(MetricModelDuration,
 		metric.WithDescription("Model invoke duration (turn | handoff | compress)"),
 		metric.WithUnit("s"),
 	)
-	if err != nil {
-		return nil, err
-	}
-	i.modelTotal, err = m.Int64Counter(MetricModelTotal,
+	i.modelTotal, _ = m.Int64Counter(MetricModelTotal,
 		metric.WithDescription("Model invokes by phase, outcome, and error class"),
 	)
-	if err != nil {
-		return nil, err
-	}
-	i.tokensInput, err = m.Int64Counter(MetricTokensInput,
+	i.tokensInput, _ = m.Int64Counter(MetricTokensInput,
 		metric.WithDescription("Provider-reported input tokens"),
 	)
-	if err != nil {
-		return nil, err
-	}
-	i.tokensOutput, err = m.Int64Counter(MetricTokensOutput,
+	i.tokensOutput, _ = m.Int64Counter(MetricTokensOutput,
 		metric.WithDescription("Provider-reported output tokens"),
 	)
-	if err != nil {
-		return nil, err
-	}
-	i.tokensReasoning, err = m.Int64Counter(MetricTokensReasoning,
+	i.tokensReasoning, _ = m.Int64Counter(MetricTokensReasoning,
 		metric.WithDescription("Provider-reported reasoning tokens when present"),
 	)
-	if err != nil {
-		return nil, err
-	}
-	i.brainTotal, err = m.Int64Counter(MetricBrainTotal,
+	i.brainTotal, _ = m.Int64Counter(MetricBrainTotal,
 		metric.WithDescription("Brain retrieval ops (labels: brain_op, outcome, degrade, empty)"),
 	)
-	if err != nil {
-		return nil, err
-	}
-	i.brainDuration, err = m.Float64Histogram(MetricBrainDuration,
+	i.brainDuration, _ = m.Float64Histogram(MetricBrainDuration,
 		metric.WithDescription("Brain retrieval latency (labels: brain_op, outcome, degrade)"),
 		metric.WithUnit("s"),
 	)
-	if err != nil {
-		return nil, err
-	}
-	i.fuseMountTotal, err = m.Int64Counter(MetricFuseMount,
+	i.fuseMountTotal, _ = m.Int64Counter(MetricFuseMount,
 		metric.WithDescription("FUSE mount attempts by outcome (ok, error, unavailable)"),
 	)
-	if err != nil {
-		return nil, err
-	}
-	return i, nil
+	return i
 }
 
 func (i *Instruments) RecordTurnStart(ctx context.Context, agentID string) {
@@ -245,9 +176,6 @@ func (i *Instruments) RecordInterrupt(ctx context.Context, agentID, kind string)
 // RecordHandoff records a context handoff. outcome is a closed enum
 // (HandoffOutcomeOK | HandoffOutcomeFallback | HandoffOutcomeError).
 func (i *Instruments) RecordHandoff(ctx context.Context, agentID, outcome string) {
-	if outcome == "" {
-		outcome = HandoffOutcomeOK
-	}
 	i.handoffTotal.Add(ctx, 1, metric.WithAttributes(
 		attribute.String(LabelAgentID, agentID),
 		attribute.String(LabelOutcome, outcome),
@@ -257,15 +185,6 @@ func (i *Instruments) RecordHandoff(ctx context.Context, agentID, outcome string
 // RecordModel records one model invoke (duration + count). phase and errClass
 // must be closed enums (ModelPhase* / ErrorClass*).
 func (i *Instruments) RecordModel(ctx context.Context, agentID, phase, outcome, errClass string, d time.Duration) {
-	if phase == "" {
-		phase = ModelPhaseTurn
-	}
-	if outcome == "" {
-		outcome = OutcomeOK
-	}
-	if errClass == "" {
-		errClass = ErrorClassOK
-	}
 	attrs := metric.WithAttributes(
 		attribute.String(LabelAgentID, agentID),
 		attribute.String(LabelModelPhase, phase),
@@ -310,15 +229,6 @@ func (i *Instruments) RecordCheckpointSave(ctx context.Context, outcome string) 
 // empty is only on the counter (empty-result rate); duration omits it to keep
 // histogram series smaller. Hits live on the span only (per-request debug).
 func (i *Instruments) RecordBrain(ctx context.Context, agentID, op, outcome, degrade string, empty bool, d time.Duration) {
-	if op == "" {
-		op = BrainOpSearch
-	}
-	if outcome == "" {
-		outcome = OutcomeOK
-	}
-	if degrade == "" {
-		degrade = BrainDegradeNone
-	}
 	emptyLabel := "false"
 	if empty {
 		emptyLabel = "true"
@@ -350,9 +260,6 @@ const (
 
 // RecordFuseMount increments tacklr.fuse.mount.total{outcome=...}.
 func (i *Instruments) RecordFuseMount(ctx context.Context, outcome string) {
-	if outcome == "" {
-		outcome = FuseMountOutcomeOK
-	}
 	i.fuseMountTotal.Add(ctx, 1, metric.WithAttributes(attribute.String(LabelOutcome, outcome)))
 }
 

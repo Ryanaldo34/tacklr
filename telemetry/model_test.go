@@ -55,7 +55,7 @@ func TestModelSpan_lifecycleAndClassify(t *testing.T) {
 	ctx = ContextWithModelIdentity(ctx, id)
 	ctx = ContextWithAfterTools(ctx)
 
-	ctx, span := StartModelSpan(ctx, "", 1, WindowShape{Messages: 3, ToolPairs: 1})
+	ctx, span := StartModelSpan(ctx, ModelPhaseTurn, 1, WindowShape{Messages: 3, ToolPairs: 1})
 	span.End(nil, TokenUsage{Input: 10, Output: 5, Reasoning: 2})
 
 	// Error classes
