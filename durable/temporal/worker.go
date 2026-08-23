@@ -19,7 +19,8 @@ type WorkerOptions struct {
 }
 
 // NewWorker returns a Temporal worker with EnableSessionWorker and the
-// Inference/Tool activities plus SessionWorkflow.
+// Inference/Tool activities plus SessionWorkflow. The client should be created
+// with ObservabilityPlugin (see Dial) so trace context crosses Temporal bounds.
 func NewWorker(c client.Client, taskQueue string, opts WorkerOptions) worker.Worker {
 	w := worker.New(c, taskQueue, worker.Options{
 		EnableSessionWorker:               true,

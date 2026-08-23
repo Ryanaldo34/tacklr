@@ -104,3 +104,27 @@ Kernel, harness, VFS, and Temporal files compile with no protocol imports.
 | Auth | Prompt/Resume payload | orchestration input / event | invocation payload |
 
 Do not put Temporal `workflow.Context` on `durable.Runtime`.
+
+## Observability
+
+The wait loop (in-process goroutine or `SessionWorkflow`) starts `tacklr.turn`. Inference and Tool activities inherit that span through Temporal OpenTelemetry v2 header propagation. Do not add extra activity wrapper spans.
+
+| Runtime | How the turn span starts |
+|---------|--------------------------|
+| Path A embedder | `AgentHarness.Run` / `ReturnFromInterrupt` |
+| Path B in-process | `telemetry.Instrumentor` (replace with `inprocess.WithInstrumentor`) |
+| Path C Temporal | replay-safe `temporalotel.Tracer` inside `SessionWorkflow` |
+
+Host setup for Temporal + LGTM:
+
+```go
+shutdown, err := telemetry.Init(ctx, telemetry.Config{
+    ServiceName:  "tacklr-worker",
+    OTLPEndpoint: os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"), // Alloy / collector
+    Insecure:     true, // local
+})
+c, err := tacklrtemporal.Dial(client.Options{HostPort: temporalHost})
+w := tacklrtemporal.NewWorker(c, taskQueue, opts)
+```
+
+Span attributes are closed enums and ids (`tacklr.runtime`, `tacklr.turn.kind`, `tacklr.agent_id`, `tacklr.outcome`). Logs carry prompt length, resume counts, retries, and error text.

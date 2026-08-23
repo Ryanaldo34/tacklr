@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 
-	"go.opentelemetry.io/otel/log"
-
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/mcp"
@@ -190,24 +188,35 @@ func (r *Runtime) driveTurn(ctx context.Context, p *sessionProc, user *tacklr.Me
 	}
 }
 
-func recordTurn(ctx context.Context, agentID, threadID, kind string) (context.Context, func(error, bool)) {
-	ctx = telemetry.ContextWithInstruments(ctx, telemetry.MustInstruments(telemetry.Meter()))
-	ctx, span := telemetry.StartTurnSpan(ctx, telemetry.TurnAttrs{
-		AgentID:   agentID,
-		ThreadID:  threadID,
-		SessionID: threadID,
-		Kind:      kind,
-	})
-	if kind == "prompt" {
-		telemetry.EmitEvent(ctx, telemetry.EventPromptReceived, log.Int(telemetry.EventAttrPromptLen, 0))
-	} else {
-		telemetry.EmitEvent(ctx, telemetry.EventResumeReceived)
+func (r *Runtime) recordTurn(ctx context.Context, agentID, threadID, kind string, promptLen, resumeCount int) (context.Context, func(turnOutcome)) {
+	inst := r.observe
+	if inst == nil {
+		inst = telemetry.DefaultInstrumentor()
 	}
-	return ctx, func(err error, cancelled bool) {
-		if cancelled {
-			span.End(telemetry.OutcomeCancelled, err)
-			return
+	return recordTurnWith(ctx, inst, agentID, threadID, kind, promptLen, resumeCount)
+}
+
+func recordTurnWith(ctx context.Context, inst telemetry.Instrumentor, agentID, threadID, kind string, promptLen, resumeCount int) (context.Context, func(turnOutcome)) {
+	ctx = telemetry.BindTurnContext(ctx, agentID, threadID)
+	ctx, span := inst.StartTurn(ctx, telemetry.TurnAttrs{
+		AgentID:     agentID,
+		ThreadID:    threadID,
+		SessionID:   threadID,
+		Kind:        kind,
+		Runtime:     telemetry.RuntimeInProcess,
+		LoadSession: kind == telemetry.TurnKindResume,
+	})
+	telemetry.EmitTurnReceived(ctx, kind, promptLen, resumeCount)
+	return ctx, func(o turnOutcome) {
+		switch o {
+		case turnCancelled:
+			span.End(telemetry.OutcomeCancelled, nil)
+		case turnError:
+			span.End(telemetry.OutcomeError, nil)
+		case turnYield:
+			span.End(telemetry.OutcomeYield, nil)
+		default:
+			span.End(telemetry.OutcomeOK, nil)
 		}
-		span.End("", err)
 	}
 }

@@ -72,6 +72,7 @@ func TestInstruments_recordAllPaths(t *testing.T) {
 
 	inst.RecordTurnStart(ctx, "agent-1")
 	inst.RecordTurnEnd(ctx, "agent-1", "prompt", OutcomeOK, 10*time.Millisecond)
+	inst.RecordTurnOutcome(ctx, "agent-1", TurnKindResume, OutcomeYield, 5*time.Millisecond)
 	inst.RecordTool(ctx, "agent-1", "search", "web", "success", time.Millisecond)
 	inst.RecordInterrupt(ctx, "agent-1", "user_selection_choice")
 	inst.RecordHandoff(ctx, "agent-1", HandoffOutcomeOK)
@@ -381,6 +382,11 @@ func TestSpans_fullLifecycle(t *testing.T) {
 	_, turn3 := StartTurnSpan(ContextWithInstruments(context.Background(), inst), TurnAttrs{})
 	turn3.End("", errors.New("boom"))
 
+	_, turn4 := StartTurnSpan(ContextWithInstruments(context.Background(), inst), TurnAttrs{
+		Kind: TurnKindPrompt, Runtime: RuntimeEmbed,
+	})
+	turn4.End(OutcomeYield, nil)
+
 	// EmitEvent path
 	EmitEvent(ctx, EventPromptReceived, log.String(EventAttrPromptLen, "1"))
 	EmitEvent(context.Background(), EventTurnEnded)
@@ -391,6 +397,7 @@ func TestSpans_fullLifecycle(t *testing.T) {
 	inst.RecordHandoff(ctx, "a", "")
 	(*Instruments)(nil).RecordTurnStart(ctx, "")
 	(*Instruments)(nil).RecordTurnEnd(ctx, "", "", "", 0)
+	(*Instruments)(nil).RecordTurnOutcome(ctx, "", "", "", 0)
 	(*Instruments)(nil).RecordTool(ctx, "", "", "", "", 0)
 	(*Instruments)(nil).RecordInterrupt(ctx, "", "")
 	(*Instruments)(nil).RecordHandoff(ctx, "", "")

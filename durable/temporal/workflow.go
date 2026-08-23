@@ -12,11 +12,14 @@ import (
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/streaming"
+	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
 const spawnWorkerName = tacklr.SpawnWorkerName
 
 // SessionWorkflow is the harness wait loop: one Temporal workflow per agent session.
+// It is the primary OpenTelemetry instrumentor: one tacklr.turn span per prompt or
+// resume, with Inference/Tool activities as children via OTEL v2 propagation.
 func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 	logger := workflow.GetLogger(ctx)
 	stream, err := workflowstreams.NewWorkflowStream(ctx, nil)
@@ -87,17 +90,50 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 		}
 	}
 
-	runSlice := func(user *streaming.Message, resume map[string][]byte, auth durable.AuthContext) {
+	runSlice := func(user *streaming.Message, resume map[string][]byte, auth durable.AuthContext, kind string) {
 		applyAuth(auth)
 		sessionCtx := ctx
 		if sctx, err := workflow.CreateSession(ctx, &workflow.SessionOptions{
 			CreationTimeout:  2 * time.Second,
 			ExecutionTimeout: 10 * time.Minute,
 		}); err != nil {
-			logger.Error("worker session", "error", err)
+			logError(ctx, "worker session", "error", err)
 		} else {
 			sessionCtx = sctx
 		}
+
+		var endTurn func(string, error)
+		openTurn := func(k string) {
+			var spanCtx workflow.Context
+			spanCtx, endTurn = startTurn(sessionCtx, agentID, in.SessionID, k)
+			sessionCtx = spanCtx
+		}
+		closeTurn := func(outcome string, err error) {
+			if endTurn == nil {
+				return
+			}
+			endTurn(outcome, err)
+			endTurn = nil
+		}
+
+		promptBytes := 0
+		if user != nil {
+			promptBytes = len(user.Content)
+		}
+		logInfo(ctx, "turn start",
+			"kind", kind, "agent_id", agentID, "session_id", in.SessionID,
+			"prompt_len", promptBytes, "resume_count", len(resume),
+		)
+		openTurn(kind)
+		outcome := telemetry.OutcomeOK
+		var turnErr error
+		defer func() {
+			closeTurn(outcome, turnErr)
+			if sessionCtx != ctx {
+				workflow.CompleteSession(sessionCtx)
+			}
+		}()
+
 		actCtx := workflow.WithActivityOptions(sessionCtx, activityOpts)
 		waitAct := func(name string, arg any, result any) error {
 			cctx, cancelAct := workflow.WithCancel(actCtx)
@@ -135,6 +171,12 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 				user = nil
 				resume = nil
 				if err != nil {
+					if ctx.Err() != nil {
+						outcome = telemetry.OutcomeCancelled
+					} else {
+						outcome = telemetry.OutcomeError
+						turnErr = err
+					}
 					break
 				}
 				etag = out.Etag
@@ -158,7 +200,10 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 					cwo := workflow.ChildWorkflowOptions{
 						WorkflowID: string(in.SessionID) + "/worker/" + tc.Key(),
 					}
-					cctx := workflow.WithChildOptions(ctx, cwo)
+					logInfo(sessionCtx, "child workflow",
+						"workflow_id", cwo.WorkflowID, "agent_id", agentID,
+					)
+					cctx := workflow.WithChildOptions(sessionCtx, cwo)
 					if err := workflow.ExecuteChildWorkflow(cctx, SessionWorkflow, WorkflowInput{
 						SessionID: durable.SessionID(cwo.WorkflowID),
 						AgentID:   agentID,
@@ -166,8 +211,8 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 						Auth:      lastAuth,
 						Mounts:    mounts,
 					}).Get(ctx, nil); err != nil {
-						logger.Error("child workflow", "error", err)
-						stopSlice = true
+						logError(ctx, "child workflow", "error", err)
+						outcome, turnErr, stopSlice = telemetry.OutcomeError, err, true
 						break
 					}
 					continue
@@ -183,6 +228,11 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 					Mounts:     mounts,
 				}, &tout)
 				if err != nil {
+					if ctx.Err() != nil {
+						outcome = telemetry.OutcomeCancelled
+					} else {
+						outcome, turnErr = telemetry.OutcomeError, err
+					}
 					stopSlice = true
 					break
 				}
@@ -192,7 +242,10 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 				}
 				if sessionCtx != ctx {
 					workflow.CompleteSession(sessionCtx)
+					sessionCtx = ctx
 				}
+				logInfo(ctx, "turn yielded", "agent_id", agentID, "session_id", in.SessionID, "interrupt_id", tout.InterruptID)
+				closeTurn(telemetry.OutcomeYield, nil)
 				parked := true
 				for parked {
 					ev := selectorWait()
@@ -207,6 +260,12 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 						if err != nil {
 							sessionCtx = ctx
 						}
+						logInfo(ctx, "turn start",
+							"kind", telemetry.TurnKindResume, "agent_id", agentID,
+							"session_id", in.SessionID, "resume_count", len(ev.resume.Responses),
+						)
+						openTurn(telemetry.TurnKindResume)
+						outcome, turnErr = telemetry.OutcomeOK, nil
 						actCtx = workflow.WithActivityOptions(sessionCtx, activityOpts)
 						var iout InferenceOutput
 						err = workflow.ExecuteActivity(actCtx, "Inference", InferenceInput{
@@ -219,6 +278,11 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 							Mounts:     mounts,
 						}).Get(ctx, &iout)
 						if err != nil {
+							if ctx.Err() != nil {
+								outcome = telemetry.OutcomeCancelled
+							} else {
+								outcome, turnErr = telemetry.OutcomeError, err
+							}
 							stopSlice = true
 							break
 						}
@@ -226,10 +290,12 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 						pending = iout.ToolCalls
 					case signalClose:
 						closed = true
+						outcome = telemetry.OutcomeOK
 						stopSlice = true
 						parked = false
 					case signalCancel:
 						emitCancel()
+						outcome = telemetry.OutcomeCancelled
 						stopSlice = true
 						parked = false
 					default:
@@ -242,13 +308,10 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 				break
 			}
 		}
-		if sessionCtx != ctx {
-			workflow.CompleteSession(sessionCtx)
-		}
 	}
 
 	if in.Prompt != "" {
-		runSlice(&streaming.Message{Role: streaming.RoleUser, Content: in.Prompt}, nil, in.Auth)
+		runSlice(&streaming.Message{Role: streaming.RoleUser, Content: in.Prompt}, nil, in.Auth, telemetry.TurnKindPrompt)
 		return nil
 	}
 
@@ -271,9 +334,9 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 			if user == nil && ev.prompt.Text != "" {
 				user = &streaming.Message{Role: streaming.RoleUser, Content: ev.prompt.Text}
 			}
-			runSlice(user, nil, ev.prompt.Auth)
+			runSlice(user, nil, ev.prompt.Auth, telemetry.TurnKindPrompt)
 		case signalResume:
-			runSlice(nil, ev.resume.Responses, ev.resume.Auth)
+			runSlice(nil, ev.resume.Responses, ev.resume.Auth, telemetry.TurnKindResume)
 		}
 	}
 	return nil

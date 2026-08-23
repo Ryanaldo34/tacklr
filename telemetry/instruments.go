@@ -213,12 +213,22 @@ func (i *Instruments) RecordTurnEnd(ctx context.Context, agentID, turnKind, outc
 	if i == nil {
 		return
 	}
+	i.turnActive.Add(ctx, -1, metric.WithAttributes(attribute.String(LabelAgentID, agentID)))
+	i.RecordTurnOutcome(ctx, agentID, turnKind, outcome, d)
+}
+
+// RecordTurnOutcome increments turn totals and duration without touching the
+// in-flight gauge. Temporal workflows use this: replay would double-count
+// RecordTurnStart/RecordTurnEnd on the active gauge.
+func (i *Instruments) RecordTurnOutcome(ctx context.Context, agentID, turnKind, outcome string, d time.Duration) {
+	if i == nil {
+		return
+	}
 	attrs := metric.WithAttributes(
 		attribute.String(LabelAgentID, agentID),
 		attribute.String(LabelTurnKind, turnKind),
 		attribute.String(LabelOutcome, outcome),
 	)
-	i.turnActive.Add(ctx, -1, metric.WithAttributes(attribute.String(LabelAgentID, agentID)))
 	i.turnTotal.Add(ctx, 1, attrs)
 	i.turnDuration.Record(ctx, d.Seconds(), attrs)
 }

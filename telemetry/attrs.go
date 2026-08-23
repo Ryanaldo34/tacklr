@@ -2,15 +2,17 @@ package telemetry
 
 // Span names (use these; backends index span name).
 //
-// Trace shape:
+// Trace shape (workflow is the primary instrumentor; do not wrap these in
+// extra SDK/activity spans):
 //
-//	tacklr.turn
-//	  log: prompt.received | resume.received
+//	tacklr.turn                 static attrs: area, runtime, agent_id, session_id, turn.kind
+//	  log: prompt.received | resume.received | turn.yielded | turn.ended
 //	  tacklr.model | tacklr.tool | tacklr.plan.install | tacklr.context.handoff
 //	    tacklr.brain   (under tool when knowledge builtins run)
-//	  log: turn.ended
 //
 // Set static attributes at span start. Outcome and error enums at end only.
+// Dynamic values (prompt text length, retry attempt, error body) belong on
+// span-correlated logs, not as span attributes.
 // Do not use high-cardinality values as metric labels; use log events for free text.
 // Lifecycle milestones use OTel Logs SetEventName, not span.AddEvent.
 const (
@@ -30,6 +32,7 @@ const (
 	AttrThreadID    = "tacklr.thread_id"
 	AttrTurnKind    = "tacklr.turn.kind" // prompt | resume
 	AttrLoadSession = "tacklr.load_session"
+	AttrRuntime     = "tacklr.runtime" // embed | inprocess | temporal
 	AttrToolName    = "tacklr.tool.name"
 	AttrToolNS      = "tacklr.tool.namespace"
 	AttrToolStatus  = "tacklr.tool.status" // success | error | interrupt | …
@@ -59,6 +62,21 @@ const (
 	AttrGenAIRequestModel  = "gen_ai.request.model"
 	AttrGenAIInputTokens   = "gen_ai.usage.input_tokens"
 	AttrGenAIOutputTokens  = "gen_ai.usage.output_tokens"
+)
+
+// Turn kind values for AttrTurnKind (closed enum).
+const (
+	TurnKindPrompt = "prompt"
+	TurnKindResume = "resume"
+)
+
+// Runtime values for AttrRuntime (closed enum). Durable backends that are not
+// Temporal should pick a stable id of their own (e.g. "azure-df") rather than
+// overloading these.
+const (
+	RuntimeEmbed     = "embed"
+	RuntimeInProcess = "inprocess"
+	RuntimeTemporal  = "temporal"
 )
 
 // Model phase values for AttrModelPhase (closed enum).
@@ -118,6 +136,8 @@ const (
 	EventPromptReceived  = "prompt.received"
 	EventResumeReceived  = "resume.received"
 	EventTurnEnded       = "turn.ended"
+	EventTurnYielded     = "turn.yielded"
+	EventChildSpawned    = "workflow.child_spawned"
 	EventProviderFailed  = "provider.failed"
 	EventModelAfterTools = "model.after_tools"
 	EventFuseMount       = "vfs.fuse.mount"
@@ -150,4 +170,5 @@ const (
 	OutcomeOK        = "ok"
 	OutcomeError     = "error"
 	OutcomeCancelled = "cancelled"
+	OutcomeYield     = "yield"
 )

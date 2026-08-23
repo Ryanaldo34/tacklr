@@ -26,27 +26,32 @@ type TurnAttrs struct {
 	SessionID   string
 	Kind        string // prompt | resume
 	LoadSession bool
+	// Runtime is a closed enum (RuntimeEmbed | RuntimeInProcess | RuntimeTemporal)
+	// or a host-defined durable-backend id. Empty omits the attribute.
+	Runtime string
 }
 
 // StartTurnSpan starts the root turn span and records turn-active.
 // Uses TracerFromContext (set ContextWithTracer first).
 func StartTurnSpan(ctx context.Context, a TurnAttrs) (context.Context, *TurnSpan) {
 	if a.Kind == "" {
-		a.Kind = "prompt"
+		a.Kind = TurnKindPrompt
 	}
 	ctx = ContextWithAgentID(ctx, a.AgentID)
 	ctx = ContextWithSessionID(ctx, a.SessionID)
 	start := time.Now()
-	ctx, span := TracerFromContext(ctx).Start(ctx, SpanTurn,
-		trace.WithAttributes(
-			attribute.String(AttrArea, AreaRuntime),
-			attribute.String(AttrAgentID, a.AgentID),
-			attribute.String(AttrThreadID, a.ThreadID),
-			attribute.String(AttrSessionID, a.SessionID),
-			attribute.String(AttrTurnKind, a.Kind),
-			attribute.Bool(AttrLoadSession, a.LoadSession),
-		),
-	)
+	attrs := []attribute.KeyValue{
+		attribute.String(AttrArea, AreaRuntime),
+		attribute.String(AttrAgentID, a.AgentID),
+		attribute.String(AttrThreadID, a.ThreadID),
+		attribute.String(AttrSessionID, a.SessionID),
+		attribute.String(AttrTurnKind, a.Kind),
+		attribute.Bool(AttrLoadSession, a.LoadSession),
+	}
+	if a.Runtime != "" {
+		attrs = append(attrs, attribute.String(AttrRuntime, a.Runtime))
+	}
+	ctx, span := TracerFromContext(ctx).Start(ctx, SpanTurn, trace.WithAttributes(attrs...))
 	InstrumentsFromContext(ctx).RecordTurnStart(ctx, a.AgentID)
 	return ctx, &TurnSpan{
 		ctx:      ctx,
@@ -83,7 +88,11 @@ func (t *TurnSpan) End(outcome string, err error) {
 		t.span.SetAttributes(attribute.String(AttrOutcome, outcome))
 		t.span.End()
 	}
-	EmitEvent(t.ctx, EventTurnEnded, log.String(EventAttrOutcome, outcome))
+	if outcome == OutcomeYield {
+		EmitEvent(t.ctx, EventTurnYielded, log.String(EventAttrOutcome, outcome))
+	} else {
+		EmitEvent(t.ctx, EventTurnEnded, log.String(EventAttrOutcome, outcome))
+	}
 	InstrumentsFromContext(t.ctx).RecordTurnEnd(
 		t.ctx, t.agentID, t.turnKind, outcome, time.Since(t.start),
 	)

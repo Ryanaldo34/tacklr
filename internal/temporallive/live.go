@@ -32,6 +32,17 @@ func Stop() {
 	}
 }
 
+func HostPort(t *testing.T) string {
+	t.Helper()
+	_ = Client(t)
+	mu.Lock()
+	defer mu.Unlock()
+	if dev == nil {
+		t.Fatal("temporal dev server not started")
+	}
+	return dev.FrontendHostPort()
+}
+
 func cliPath() (string, error) {
 	if p, err := exec.LookPath("temporal"); err == nil {
 		return p, nil

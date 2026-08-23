@@ -24,6 +24,7 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
+	temporalotel "go.temporal.io/sdk/contrib/opentelemetry-v2"
 )
 
 // InstrumentationName is the OpenTelemetry instrumentation library name for
@@ -88,7 +89,10 @@ type Config struct {
 // Init installs global TracerProvider, MeterProvider (unless DisableMetrics),
 // LoggerProvider (unless DisableLogs), and a W3C text-map propagator. One OTLP
 // endpoint serves traces, metrics, and logs so hosts can point a collector at a
-// single address (Tempo + Mimir/Prometheus + Loki).
+// single address (Tempo + Loki + Mimir/Prometheus — the LGTM stack).
+//
+// The tracer provider is Temporal's replay-safe implementation so the same
+// process can instrument SessionWorkflow without duplicate span IDs on replay.
 // Returns a shutdown that flushes exporters.
 func Init(ctx context.Context, cfg Config) (shutdown func(context.Context) error, err error) {
 	endpoint := strings.TrimSpace(cfg.OTLPEndpoint)
@@ -96,10 +100,11 @@ func Init(ctx context.Context, cfg Config) (shutdown func(context.Context) error
 		endpoint = strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
 	}
 	if endpoint == "" {
-		SetTracerProvider(nil)
+		tp := temporalotel.NewReplaySafeTracerProvider()
+		otel.SetTracerProvider(tp)
 		SetMeterProvider(nil)
 		global.SetLoggerProvider(lognoop.NewLoggerProvider())
-		return func(context.Context) error { return nil }, nil
+		return func(ctx context.Context) error { return tp.Shutdown(ctx) }, nil
 	}
 
 	res, err := DefaultResource(cfg.ServiceName, cfg.ServiceVersion)
@@ -197,7 +202,7 @@ func newOTLPLoggerProvider(ctx context.Context, host, protocol string, insecure 
 	), nil
 }
 
-func newOTLPTracerProvider(ctx context.Context, host, protocol string, insecure bool, sampleRatio float64, res *resource.Resource) (*sdktrace.TracerProvider, error) {
+func newOTLPTracerProvider(ctx context.Context, host, protocol string, insecure bool, sampleRatio float64, res *resource.Resource) (*temporalotel.ReplaySafeTracerProvider, error) {
 	var exp *otlptrace.Exporter
 	var err error
 	switch protocol {
@@ -231,11 +236,28 @@ func newOTLPTracerProvider(ctx context.Context, host, protocol string, insecure 
 		sampler = sdktrace.ParentBased(sdktrace.TraceIDRatioBased(ratio))
 	}
 
-	return sdktrace.NewTracerProvider(
+	return temporalotel.NewReplaySafeTracerProvider(
 		sdktrace.WithBatcher(exp, sdktrace.WithBatchTimeout(2*time.Second)),
 		sdktrace.WithResource(res),
 		sdktrace.WithSampler(sampler),
 	), nil
+}
+
+// IsReplaySafeProvider reports whether the global TracerProvider can drive
+// Temporal workflow spans (opentelemetry-v2 ReplaySafeTracerProvider).
+func IsReplaySafeProvider() bool {
+	_, ok := otel.GetTracerProvider().(*temporalotel.ReplaySafeTracerProvider)
+	return ok
+}
+
+// EnsureReplaySafeProvider installs a no-exporter ReplaySafe tracer provider
+// when the global is not already one. Temporal ObservabilityPlugin and
+// workflow Tracer require this. Init already installs ReplaySafe.
+func EnsureReplaySafeProvider() {
+	if IsReplaySafeProvider() {
+		return
+	}
+	otel.SetTracerProvider(temporalotel.NewReplaySafeTracerProvider())
 }
 
 func newOTLPMeterProvider(ctx context.Context, host, protocol string, insecure bool, res *resource.Resource) (*sdkmetric.MeterProvider, error) {
@@ -278,8 +300,8 @@ func Tracer() trace.Tracer {
 }
 
 // SetTracerProvider installs tp as the process-wide OpenTelemetry TracerProvider.
-// Hosts that already own OTEL should prefer server.WithTracerProvider on the
-// registry instead of replacing the global. Pass nil for a no-op provider.
+// Hosts that already own OTEL should call SetTracerProvider with a
+// ReplaySafe provider when using Temporal. Pass nil for a no-op provider.
 func SetTracerProvider(tp trace.TracerProvider) {
 	if tp == nil {
 		tp = tracenoop.NewTracerProvider()
