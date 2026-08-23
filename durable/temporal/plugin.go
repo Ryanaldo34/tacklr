@@ -1,6 +1,7 @@
 package temporal
 
 import (
+	"fmt"
 	"log/slog"
 
 	"go.temporal.io/sdk/client"
@@ -14,11 +15,13 @@ type PluginOption func(*temporalotel.PluginOptions)
 
 // ObservabilityPlugin returns the Temporal OTEL v2 plugin. Default: context
 // propagation only (no SDK auto-spans — SessionWorkflow is the instrumentor)
-// plus Temporal SDK metrics on the global MeterProvider.
-//
-// Requires a ReplaySafe tracer provider (telemetry.Init or EnsureReplaySafeProvider).
+// plus Temporal SDK metrics on the process-wide MeterProvider installed by
+// telemetry.Init. NewPlugin captures tracers and meters at construction, so
+// Init must run first; this does not install a second provider.
 func ObservabilityPlugin(opts ...PluginOption) (client.Plugin, error) {
-	telemetry.EnsureReplaySafeProvider()
+	if !telemetry.IsReplaySafeProvider() {
+		return nil, fmt.Errorf("durable/temporal: telemetry.Init must run before Dial so the process shares one ReplaySafe TracerProvider")
+	}
 	o := temporalotel.PluginOptions{
 		MetricsHandlerOptions: &temporalotel.MetricsHandlerOptions{
 			UseMonotonicCounters: true,
@@ -36,7 +39,7 @@ func ObservabilityPlugin(opts ...PluginOption) (client.Plugin, error) {
 }
 
 // Dial is client.Dial with ObservabilityPlugin prepended so workers inherit
-// trace context propagation.
+// trace context from the process-wide OTel providers. Call telemetry.Init first.
 func Dial(opts client.Options) (client.Client, error) {
 	plugin, err := ObservabilityPlugin()
 	if err != nil {

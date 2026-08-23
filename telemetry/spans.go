@@ -32,7 +32,7 @@ type TurnAttrs struct {
 }
 
 // StartTurnSpan starts the root turn span and records turn-active.
-// Uses TracerFromContext (set ContextWithTracer first).
+// Uses the process-wide tracer from Init (TracerFromContext falls back to Tracer()).
 func StartTurnSpan(ctx context.Context, a TurnAttrs) (context.Context, *TurnSpan) {
 	if a.Kind == "" {
 		a.Kind = TurnKindPrompt

@@ -176,6 +176,25 @@ func TestInit_otlpPaths(t *testing.T) {
 	SetTracerProvider(nil)
 	SetMeterProvider(nil)
 
+	// gRPC + TLS ClientConn (lazy dial; no collector required).
+	shutdown, err = Init(ctx, Config{
+		OTLPEndpoint: "https://localhost:4317",
+		Protocol:     "grpc",
+		DisableLogs:  true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !IsReplaySafeProvider() {
+		t.Fatal("want ReplaySafe after OTLP Init")
+	}
+	if Tracer() == nil || Meter() == nil {
+		t.Fatal("process-wide tracer and meter")
+	}
+	_ = shutdown(ctx)
+	SetTracerProvider(nil)
+	SetMeterProvider(nil)
+
 	// Explicit empty after env clear.
 	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
 	shutdown, err = Init(ctx, Config{})

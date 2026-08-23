@@ -20,6 +20,18 @@ import (
 )
 
 func TestObservabilityPlugin_requiresReplaySafe(t *testing.T) {
+	prev := otel.GetTracerProvider()
+	telemetry.SetTracerProvider(nil)
+	t.Cleanup(func() {
+		otel.SetTracerProvider(prev)
+		telemetry.EnsureReplaySafeProvider()
+	})
+	if _, err := ObservabilityPlugin(); err == nil {
+		t.Fatal("want error when Init has not installed ReplaySafe")
+	}
+}
+
+func TestObservabilityPlugin_usesProcessProvider(t *testing.T) {
 	telemetry.EnsureReplaySafeProvider()
 	p, err := ObservabilityPlugin(nil)
 	if err != nil || p == nil {

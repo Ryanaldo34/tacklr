@@ -51,13 +51,17 @@ func startTurn(ctx workflow.Context, agentID string, sessionID durable.SessionID
 			span.SetStatus(codes.Ok, "")
 		}
 		span.SetAttributes(attribute.String(telemetry.AttrOutcome, outcome))
-		span.End()
-		if workflow.IsReplaying(ctx) {
-			return
+		if !workflow.IsReplaying(ctx) {
+			// Workflow context is not context.Context. Bind the OTel span onto a
+			// Go context so RecordTurnOutcome uses the SDK meter (exemplars)
+			// instead of a disconnected Background context. Replay is skipped
+			// because metric export is a side effect.
+			metricCtx := trace.ContextWithSpan(context.Background(), span)
+			telemetry.InstrumentsFromContext(metricCtx).RecordTurnOutcome(
+				metricCtx, agentCopy, kindCopy, outcome, workflow.Now(ctx).Sub(started),
+			)
 		}
-		telemetry.InstrumentsFromContext(context.Background()).RecordTurnOutcome(
-			context.Background(), agentCopy, kindCopy, outcome, workflow.Now(ctx).Sub(started),
-		)
+		span.End()
 	}
 }
 

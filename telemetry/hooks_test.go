@@ -65,6 +65,35 @@ func TestEnsureReplaySafeProvider(t *testing.T) {
 	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
 }
 
+func TestNewOTLPTransport_grpcConn(t *testing.T) {
+	if _, err := newOTLPTransport("localhost:4317", "ftp", true); err == nil {
+		t.Fatal("want unknown protocol")
+	}
+	tr, err := newOTLPTransport("localhost:4317", "grpc", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tr.conn == nil {
+		t.Fatal("shared ClientConn")
+	}
+	if err := tr.close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := (*otlpTransport)(nil).close(); err != nil {
+		t.Fatal(err)
+	}
+	httpTr, err := newOTLPTransport("localhost:4318", "http", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if httpTr.httpClient == nil {
+		t.Fatal("shared HTTP client")
+	}
+	if err := httpTr.close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestInit_emptyEndpoint_replaySafe(t *testing.T) {
 	shutdown, err := Init(context.Background(), Config{})
 	if err != nil {

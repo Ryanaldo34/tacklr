@@ -251,9 +251,9 @@ Default export is the **LGTM stack** via one OTLP endpoint: Grafana Alloy or the
 
 The durable **wait loop is the primary instrumentor**. One `tacklr.turn` span per prompt or resume. Child spans are only the key harness events (`tacklr.model`, `tacklr.tool`, `tacklr.plan.install`, `tacklr.context.handoff`, `tacklr.brain`). Span attributes are static (agent, session, turn kind, runtime, outcome) so they stay queryable for dashboards. Dynamic values (prompt length, retry attempt, error body) go on span-correlated logs at Info/Warn/Error.
 
-Temporal ships out of the box: `telemetry.Init` installs a replay-safe tracer provider, and `durable/temporal.Dial` attaches the [OpenTelemetry v2 plugin](https://docs.temporal.io/develop/go/integrations/opentelemetry-v2) for context propagation (no extra SDK auto-spans). Other durable backends implement `telemetry.Instrumentor` on their wait loop.
+Temporal ships out of the box: `telemetry.Init` installs the process-wide OpenTelemetry providers (replay-safe tracer, meter, logs) and one OTLP gRPC connection shared by traces, metrics, and logs. `durable/temporal.Dial` attaches the [OpenTelemetry v2 plugin](https://docs.temporal.io/develop/go/integrations/opentelemetry-v2) to those same globals — context propagation only, no extra SDK auto-spans, no second exporter. Call `Init` before `Dial`. Other durable backends implement `telemetry.Instrumentor` on their wait loop.
 
-Nothing configured still installs a replay-safe no-op exporter so Temporal workflows do not panic. Point `OTEL_EXPORTER_OTLP_ENDPOINT` at your collector when you want data.
+Nothing configured still installs a replay-safe no-op provider so Temporal workflows do not panic. Point `OTEL_EXPORTER_OTLP_ENDPOINT` at your collector when you want data.
 
 ---
 

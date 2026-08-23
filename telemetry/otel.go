@@ -2,7 +2,9 @@ package telemetry
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -25,6 +27,9 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
 	temporalotel "go.temporal.io/sdk/contrib/opentelemetry-v2"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 // InstrumentationName is the OpenTelemetry instrumentation library name for
@@ -32,12 +37,13 @@ import (
 // should use this name (or call TracerFromProvider / MeterFromProvider).
 const InstrumentationName = "github.com/ryanaldo34/tacklr"
 
-// tracerContextKey carries an optional per-request Tracer on context so child
-// spans (harness tools, handoff) use the same provider as the registry turn root.
+// tracerContextKey is a test-only override. Production spans use Tracer(),
+// which is otel.Tracer(InstrumentationName) on the process-wide provider.
 type tracerContextKey struct{}
 
 // ContextWithTracer returns a child context that causes TracerFromContext to
-// prefer t over the global provider. A nil t is ignored.
+// prefer t over the global provider. A nil t is ignored. Hosts should not need
+// this: call Init (or SetTracerProvider) once and use the global tracer.
 func ContextWithTracer(ctx context.Context, t trace.Tracer) context.Context {
 	if t == nil {
 		return ctx
@@ -86,14 +92,20 @@ type Config struct {
 	DisableLogs bool
 }
 
-// Init installs global TracerProvider, MeterProvider (unless DisableMetrics),
-// LoggerProvider (unless DisableLogs), and a W3C text-map propagator. One OTLP
-// endpoint serves traces, metrics, and logs so hosts can point a collector at a
-// single address (Tempo + Loki + Mimir/Prometheus — the LGTM stack).
+// Init installs the process-wide TracerProvider, MeterProvider (unless
+// DisableMetrics), LoggerProvider (unless DisableLogs), and a W3C text-map
+// propagator. Call it once per process, before durable/temporal.Dial.
 //
-// The tracer provider is Temporal's replay-safe implementation so the same
-// process can instrument SessionWorkflow without duplicate span IDs on replay.
-// Returns a shutdown that flushes exporters.
+// One OTLP endpoint serves traces, metrics, and logs (Tempo + Loki +
+// Mimir/Prometheus — the LGTM stack). For gRPC (the default) the three
+// exporters share a single grpc.ClientConn via the official WithGRPCConn
+// option. Workflow code (temporalotel.Tracer) and the harness (otel.Tracer)
+// both resolve from otel.GetTracerProvider(); Temporal SDK metrics resolve
+// from the same MeterProvider. There is no second exporter pipeline.
+//
+// The tracer provider is Temporal's ReplaySafe implementation so
+// SessionWorkflow can start spans without duplicate IDs on replay.
+// Returns a shutdown that flushes exporters then closes the shared connection.
 func Init(ctx context.Context, cfg Config) (shutdown func(context.Context) error, err error) {
 	endpoint := strings.TrimSpace(cfg.OTLPEndpoint)
 	if endpoint == "" {
@@ -104,6 +116,10 @@ func Init(ctx context.Context, cfg Config) (shutdown func(context.Context) error
 		otel.SetTracerProvider(tp)
 		SetMeterProvider(nil)
 		global.SetLoggerProvider(lognoop.NewLoggerProvider())
+		otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
+			propagation.TraceContext{},
+			propagation.Baggage{},
+		))
 		return func(ctx context.Context) error { return tp.Shutdown(ctx) }, nil
 	}
 
@@ -119,11 +135,17 @@ func Init(ctx context.Context, cfg Config) (shutdown func(context.Context) error
 	if protocol == "" {
 		protocol = "grpc"
 	}
-	insecure := cfg.Insecure || strings.HasPrefix(endpoint, "http://") || !strings.Contains(endpoint, "://")
+	insecureTLS := cfg.Insecure || strings.HasPrefix(endpoint, "http://") || !strings.Contains(endpoint, "://")
 	host := stripScheme(endpoint)
 
-	tp, err := newOTLPTracerProvider(ctx, host, protocol, insecure, cfg.SampleRatio, res)
+	transport, err := newOTLPTransport(host, protocol, insecureTLS)
 	if err != nil {
+		return nil, err
+	}
+
+	tp, err := newOTLPTracerProvider(ctx, transport, cfg.SampleRatio, res)
+	if err != nil {
+		_ = transport.close()
 		return nil, err
 	}
 	otel.SetTracerProvider(tp)
@@ -134,9 +156,10 @@ func Init(ctx context.Context, cfg Config) (shutdown func(context.Context) error
 
 	var mp *sdkmetric.MeterProvider
 	if !cfg.DisableMetrics {
-		mp, err = newOTLPMeterProvider(ctx, host, protocol, insecure, res)
+		mp, err = newOTLPMeterProvider(ctx, transport, res)
 		if err != nil {
 			_ = tp.Shutdown(ctx)
+			_ = transport.close()
 			return nil, err
 		}
 		SetMeterProvider(mp)
@@ -144,12 +167,13 @@ func Init(ctx context.Context, cfg Config) (shutdown func(context.Context) error
 
 	var lp *sdklog.LoggerProvider
 	if !cfg.DisableLogs {
-		lp, err = newOTLPLoggerProvider(ctx, host, protocol, insecure, res)
+		lp, err = newOTLPLoggerProvider(ctx, transport, res)
 		if err != nil {
 			if mp != nil {
 				_ = mp.Shutdown(ctx)
 			}
 			_ = tp.Shutdown(ctx)
+			_ = transport.close()
 			return nil, err
 		}
 		global.SetLoggerProvider(lp)
@@ -170,28 +194,73 @@ func Init(ctx context.Context, cfg Config) (shutdown func(context.Context) error
 		if err := tp.Shutdown(ctx); err != nil && first == nil {
 			first = err
 		}
+		if err := transport.close(); err != nil && first == nil {
+			first = err
+		}
 		return first
 	}, nil
 }
 
-func newOTLPLoggerProvider(ctx context.Context, host, protocol string, insecure bool, res *resource.Resource) (*sdklog.LoggerProvider, error) {
+// otlpTransport is the single collector client for this process. gRPC exporters
+// share conn; HTTP exporters share httpClient. Official OTel WithGRPCConn /
+// WithHTTPClient options — not a Tacklr-specific multiplexer.
+type otlpTransport struct {
+	protocol   string
+	host       string
+	insecure   bool
+	conn       *grpc.ClientConn
+	httpClient *http.Client
+}
+
+func newOTLPTransport(host, protocol string, insecureTLS bool) (*otlpTransport, error) {
+	t := &otlpTransport{protocol: protocol, host: host, insecure: insecureTLS}
+	switch protocol {
+	case "grpc":
+		var creds grpc.DialOption
+		if insecureTLS {
+			creds = grpc.WithTransportCredentials(insecure.NewCredentials())
+		} else {
+			creds = grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12}))
+		}
+		conn, err := grpc.NewClient(host, creds)
+		if err != nil {
+			return nil, fmt.Errorf("otel: dial OTLP gRPC %s: %w", host, err)
+		}
+		t.conn = conn
+	case "http", "http/protobuf":
+		t.httpClient = &http.Client{Timeout: 10 * time.Second}
+	default:
+		return nil, fmt.Errorf("otel: unknown protocol %q", protocol)
+	}
+	return t, nil
+}
+
+func (t *otlpTransport) close() error {
+	if t == nil || t.conn == nil {
+		return nil
+	}
+	err := t.conn.Close()
+	t.conn = nil
+	return err
+}
+
+func newOTLPLoggerProvider(ctx context.Context, t *otlpTransport, res *resource.Resource) (*sdklog.LoggerProvider, error) {
 	var exporter sdklog.Exporter
 	var err error
-	switch protocol {
+	switch t.protocol {
 	case "http", "http/protobuf":
-		opts := []otlploghttp.Option{otlploghttp.WithEndpoint(host)}
-		if insecure {
+		opts := []otlploghttp.Option{
+			otlploghttp.WithEndpoint(t.host),
+			otlploghttp.WithHTTPClient(t.httpClient),
+		}
+		if t.insecure {
 			opts = append(opts, otlploghttp.WithInsecure())
 		}
 		exporter, err = otlploghttp.New(ctx, opts...)
 	case "grpc":
-		opts := []otlploggrpc.Option{otlploggrpc.WithEndpoint(host)}
-		if insecure {
-			opts = append(opts, otlploggrpc.WithInsecure())
-		}
-		exporter, err = otlploggrpc.New(ctx, opts...)
+		exporter, err = otlploggrpc.New(ctx, otlploggrpc.WithGRPCConn(t.conn))
 	default:
-		return nil, fmt.Errorf("otel: unknown protocol %q", protocol)
+		return nil, fmt.Errorf("otel: unknown protocol %q", t.protocol)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("otel log exporter: %w", err)
@@ -202,24 +271,23 @@ func newOTLPLoggerProvider(ctx context.Context, host, protocol string, insecure 
 	), nil
 }
 
-func newOTLPTracerProvider(ctx context.Context, host, protocol string, insecure bool, sampleRatio float64, res *resource.Resource) (*temporalotel.ReplaySafeTracerProvider, error) {
+func newOTLPTracerProvider(ctx context.Context, t *otlpTransport, sampleRatio float64, res *resource.Resource) (*temporalotel.ReplaySafeTracerProvider, error) {
 	var exp *otlptrace.Exporter
 	var err error
-	switch protocol {
+	switch t.protocol {
 	case "http", "http/protobuf":
-		opts := []otlptracehttp.Option{otlptracehttp.WithEndpoint(host)}
-		if insecure {
+		opts := []otlptracehttp.Option{
+			otlptracehttp.WithEndpoint(t.host),
+			otlptracehttp.WithHTTPClient(t.httpClient),
+		}
+		if t.insecure {
 			opts = append(opts, otlptracehttp.WithInsecure())
 		}
 		exp, err = otlptracehttp.New(ctx, opts...)
 	case "grpc":
-		opts := []otlptracegrpc.Option{otlptracegrpc.WithEndpoint(host)}
-		if insecure {
-			opts = append(opts, otlptracegrpc.WithInsecure())
-		}
-		exp, err = otlptracegrpc.New(ctx, opts...)
+		exp, err = otlptracegrpc.New(ctx, otlptracegrpc.WithGRPCConn(t.conn))
 	default:
-		return nil, fmt.Errorf("otel: unknown protocol %q", protocol)
+		return nil, fmt.Errorf("otel: unknown protocol %q", t.protocol)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("otel trace exporter: %w", err)
@@ -251,8 +319,10 @@ func IsReplaySafeProvider() bool {
 }
 
 // EnsureReplaySafeProvider installs a no-exporter ReplaySafe tracer provider
-// when the global is not already one. Temporal ObservabilityPlugin and
-// workflow Tracer require this. Init already installs ReplaySafe.
+// when the global is not already one. Init already installs ReplaySafe.
+// Tests that skip Init can call this so Temporal's Tracer does not panic.
+// Do not call this after Init with an OTLP endpoint: it would replace the
+// exporting provider. Dial does not call this.
 func EnsureReplaySafeProvider() {
 	if IsReplaySafeProvider() {
 		return
@@ -260,12 +330,15 @@ func EnsureReplaySafeProvider() {
 	otel.SetTracerProvider(temporalotel.NewReplaySafeTracerProvider())
 }
 
-func newOTLPMeterProvider(ctx context.Context, host, protocol string, insecure bool, res *resource.Resource) (*sdkmetric.MeterProvider, error) {
+func newOTLPMeterProvider(ctx context.Context, t *otlpTransport, res *resource.Resource) (*sdkmetric.MeterProvider, error) {
 	var reader sdkmetric.Reader
-	switch protocol {
+	switch t.protocol {
 	case "http", "http/protobuf":
-		opts := []otlpmetrichttp.Option{otlpmetrichttp.WithEndpoint(host)}
-		if insecure {
+		opts := []otlpmetrichttp.Option{
+			otlpmetrichttp.WithEndpoint(t.host),
+			otlpmetrichttp.WithHTTPClient(t.httpClient),
+		}
+		if t.insecure {
 			opts = append(opts, otlpmetrichttp.WithInsecure())
 		}
 		exp, err := otlpmetrichttp.New(ctx, opts...)
@@ -274,17 +347,13 @@ func newOTLPMeterProvider(ctx context.Context, host, protocol string, insecure b
 		}
 		reader = sdkmetric.NewPeriodicReader(exp, sdkmetric.WithInterval(10*time.Second))
 	case "grpc":
-		opts := []otlpmetricgrpc.Option{otlpmetricgrpc.WithEndpoint(host)}
-		if insecure {
-			opts = append(opts, otlpmetricgrpc.WithInsecure())
-		}
-		exp, err := otlpmetricgrpc.New(ctx, opts...)
+		exp, err := otlpmetricgrpc.New(ctx, otlpmetricgrpc.WithGRPCConn(t.conn))
 		if err != nil {
 			return nil, fmt.Errorf("otel metric exporter: %w", err)
 		}
 		reader = sdkmetric.NewPeriodicReader(exp, sdkmetric.WithInterval(10*time.Second))
 	default:
-		return nil, fmt.Errorf("otel: unknown protocol %q", protocol)
+		return nil, fmt.Errorf("otel: unknown protocol %q", t.protocol)
 	}
 
 	return sdkmetric.NewMeterProvider(
