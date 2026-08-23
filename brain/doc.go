@@ -93,6 +93,10 @@
 //
 // # Boot sketch
 //
+//	cfg, err := pgxpool.ParseConfig(dsn)
+//	telemetry.InstrumentPgx(cfg.ConnConfig)
+//	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+//	_ = telemetry.RecordPgxPoolStats(pool)
 //	store, err := brain.NewPostgresStore(pool)
 //	g, err := helixgraph.New(helixURL)
 //	if err := g.Bootstrap(ctx, false); err != nil { return err }

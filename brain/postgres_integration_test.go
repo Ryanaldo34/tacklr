@@ -15,6 +15,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 
 	"github.com/ryanaldo34/tacklr/brain"
+	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
 // Pre-built via Makefile/CI: docker build -f brain/testdata/Dockerfile.postgres -t tacklr-pg-brain:test
@@ -285,9 +286,22 @@ func sharedPostgresPool(t *testing.T) *pgxpool.Pool {
 			_ = ctr.Terminate(ctx)
 			return
 		}
-		pool, err := pgxpool.New(ctx, connStr)
+		cfg, err := pgxpool.ParseConfig(connStr)
 		if err != nil {
 			pgStart = err
+			_ = ctr.Terminate(ctx)
+			return
+		}
+		telemetry.InstrumentPgx(cfg.ConnConfig)
+		pool, err := pgxpool.NewWithConfig(ctx, cfg)
+		if err != nil {
+			pgStart = err
+			_ = ctr.Terminate(ctx)
+			return
+		}
+		if err := telemetry.RecordPgxPoolStats(pool); err != nil {
+			pgStart = err
+			pool.Close()
 			_ = ctr.Terminate(ctx)
 			return
 		}

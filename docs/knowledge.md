@@ -643,6 +643,11 @@ eng, err := brain.NewEngine(store, brain.WithKinds(
 Production-shaped:
 
 ```go
+cfg, err := pgxpool.ParseConfig(dsn)
+telemetry.InstrumentPgx(cfg.ConnConfig) // after telemetry.Init; ConnConfig is already a pointer
+pool, err := pgxpool.NewWithConfig(ctx, cfg)
+_ = telemetry.RecordPgxPoolStats(pool)
+
 store, err := brain.NewPostgresStore(pool)
 g, err := helixgraph.New(helixURL)
 if err := g.Bootstrap(ctx, false); err != nil { /* ... */ }
