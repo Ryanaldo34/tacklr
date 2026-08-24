@@ -342,7 +342,7 @@ func (a *AgentHarness) workerOptsFromSpec(spec *SubAgent) AgentOptions {
 		Brain:                 a.brain,
 		BrainWriteKinds:       a.brainWriteKinds,
 		MountSession:          a.session.VFS,
-		RunCommandUnattended:  a.runCommandUnattended,
+		runCommandUnattended:  a.runCommandUnattended,
 		writeUnattended:       a.writeUnattended,
 		shareIndexBridge:      a.vfsBridge,
 		disablePlanningLock:   true,

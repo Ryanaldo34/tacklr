@@ -3,6 +3,7 @@ package interrupt
 import (
 	"encoding/json"
 	"fmt"
+	"sync"
 )
 
 // Interrupt represents a pending interrupt in an agent workflow requesting
@@ -226,7 +227,20 @@ func (p *ToolPermissionInterrupt) Error() string {
 
 // --- Interrupt registry ---
 
-var interruptFactories = map[string]func() Interrupt{}
+var (
+	interruptFactories = map[string]func() Interrupt{}
+	defaultsOnce       sync.Once
+)
+
+// RegisterDefaults registers the built-in interrupt types. Safe to call
+// more than once. tacklr.init calls this; New also ensures defaults so
+// checkpoint rehydrate works without importing the root package.
+func RegisterDefaults() {
+	defaultsOnce.Do(func() {
+		Register(func() Interrupt { return &UserSelectionInterrupt{} })
+		Register(func() Interrupt { return &ToolPermissionInterrupt{} })
+	})
+}
 
 // Register adds a factory for an Interrupt type under its TypeName.
 // Call at init for custom interrupts so checkpoints can rehydrate them.
@@ -241,6 +255,7 @@ func Register(factory func() Interrupt) {
 
 // New returns a fresh Interrupt for a registered type name.
 func New(typeName string) (Interrupt, bool) {
+	RegisterDefaults()
 	f, ok := interruptFactories[typeName]
 	if !ok {
 		return nil, false
@@ -266,11 +281,6 @@ func Clone(intr Interrupt) Interrupt {
 		}
 	}
 	return nil
-}
-
-func init() {
-	Register(func() Interrupt { return &UserSelectionInterrupt{} })
-	Register(func() Interrupt { return &ToolPermissionInterrupt{} })
 }
 
 // PayloadInitializer is an optional capability Interrupt types implement

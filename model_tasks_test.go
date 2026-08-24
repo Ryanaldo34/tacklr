@@ -45,7 +45,7 @@ func TestDefaultModelTasks_respectsCancelledContext(t *testing.T) {
 	// Arrange
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	tasks := newDefaultModelTasks(&mockStrategy{}, NewModelContextManager(), DefaultContextPolicy(), 100)
+	tasks := newDefaultModelTasks(&mockStrategy{}, newModelContextManager(), DefaultContextPolicy(), 100)
 
 	// Act
 	_, turnErr := tasks.Turn(ctx, nil, "")
@@ -65,8 +65,8 @@ func TestDefaultModelTasks_absorbFitReportsCountTokenErrors(t *testing.T) {
 			return 0, fmt.Errorf("count failed")
 		},
 	}
-	tasks := newDefaultModelTasks(model, NewModelContextManager(), DefaultContextPolicy(), 100)
-	ctxMgr := NewModelContextManager()
+	tasks := newDefaultModelTasks(model, newModelContextManager(), DefaultContextPolicy(), 100)
+	ctxMgr := newModelContextManager()
 	ctxMgr.Restore([]*Message{{Role: RoleUser, Content: "goal"}})
 	tasks.context = ctxMgr
 
@@ -86,11 +86,11 @@ func TestDefaultModelTasks_absorbFitSkipsCompressWhenOnlyProtectedPrefix(t *test
 			return len(msgs) * 50, nil
 		},
 	}
-	tasks := newDefaultModelTasks(model, NewModelContextManager(), ContextPolicy{
+	tasks := newDefaultModelTasks(model, newModelContextManager(), ContextPolicy{
 		PressureRatio:    0.5,
 		CompressFraction: 0.25,
 	}, 40)
-	ctxMgr := NewModelContextManager()
+	ctxMgr := newModelContextManager()
 	ctxMgr.Restore([]*Message{{Role: RoleUser, Content: strings.Repeat("x", 40)}})
 	tasks.context = ctxMgr
 
@@ -131,12 +131,12 @@ func TestDefaultModelTasks_absorbFitCompressesOverMaxWindow(t *testing.T) {
 			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "unexpected", IsComplete: true}
 		},
 	}
-	tasks := newDefaultModelTasks(model, NewModelContextManager(), ContextPolicy{
+	tasks := newDefaultModelTasks(model, newModelContextManager(), ContextPolicy{
 		PressureRatio:    0.5,
 		CompressFraction: 0.5,
 		StreamFitSummary: true,
 	}, 20)
-	ctxMgr := NewModelContextManager()
+	ctxMgr := newModelContextManager()
 	ctxMgr.Restore([]*Message{
 		{Role: RoleUser, Content: "goal"},
 		{Role: RoleAssistant, Content: strings.Repeat("a", 30)},
@@ -172,11 +172,11 @@ func TestDefaultModelTasks_absorbFitReturnsCompressStreamErrors(t *testing.T) {
 			ch <- LLMResponseChunk{Type: StreamEventError, Error: errors.New("compress stream failed")}
 		},
 	}
-	tasks := newDefaultModelTasks(model, NewModelContextManager(), ContextPolicy{
+	tasks := newDefaultModelTasks(model, newModelContextManager(), ContextPolicy{
 		PressureRatio:    0.5,
 		CompressFraction: 0.5,
 	}, 50)
-	ctxMgr := NewModelContextManager()
+	ctxMgr := newModelContextManager()
 	ctxMgr.Restore([]*Message{
 		{Role: RoleUser, Content: "goal"},
 		{Role: RoleAssistant, Content: strings.Repeat("x", 80)},
@@ -197,8 +197,8 @@ func TestDefaultModelTasks_handoffUsesFallbackWhenModelFails(t *testing.T) {
 	model := &mockStrategy{
 		invokeErr: errors.New("handoff invoke failed"),
 	}
-	tasks := newDefaultModelTasks(model, NewModelContextManager(), DefaultContextPolicy(), 8192)
-	ctxMgr := NewModelContextManager()
+	tasks := newDefaultModelTasks(model, newModelContextManager(), DefaultContextPolicy(), 8192)
+	ctxMgr := newModelContextManager()
 	ctxMgr.Restore([]*Message{{Role: RoleUser, Content: "goal"}})
 	tasks.context = ctxMgr
 	plan := []Todo{{Title: "Ship", Description: "finish", Status: streaming.TodoStatusPending}}
@@ -223,8 +223,8 @@ func TestDefaultModelTasks_handoffUsesFallbackOnEmptyStream(t *testing.T) {
 			// Leave the stream empty; mockStrategy closes the channel after invokeFn returns.
 		},
 	}
-	tasks := newDefaultModelTasks(model, NewModelContextManager(), DefaultContextPolicy(), 8192)
-	ctxMgr := NewModelContextManager()
+	tasks := newDefaultModelTasks(model, newModelContextManager(), DefaultContextPolicy(), 8192)
+	ctxMgr := newModelContextManager()
 	ctxMgr.Restore([]*Message{{Role: RoleUser, Content: "goal"}})
 	tasks.context = ctxMgr
 
@@ -292,8 +292,8 @@ func TestDefaultModelTasks_handoffUsesFallbackOnStreamContentError(t *testing.T)
 			ch <- LLMResponseChunk{Type: StreamEventError, Content: "handoff stream failed"}
 		},
 	}
-	tasks := newDefaultModelTasks(model, NewModelContextManager(), DefaultContextPolicy(), 8192)
-	ctxMgr := NewModelContextManager()
+	tasks := newDefaultModelTasks(model, newModelContextManager(), DefaultContextPolicy(), 8192)
+	ctxMgr := newModelContextManager()
 	ctxMgr.Restore([]*Message{{Role: RoleUser, Content: "goal"}})
 	tasks.context = ctxMgr
 
@@ -325,11 +325,11 @@ func TestDefaultModelTasks_absorbFitProgressiveCountFailure(t *testing.T) {
 			return total, nil
 		},
 	}
-	tasks := newDefaultModelTasks(model, NewModelContextManager(), ContextPolicy{
+	tasks := newDefaultModelTasks(model, newModelContextManager(), ContextPolicy{
 		PressureRatio:    0.5,
 		CompressFraction: 0.5,
 	}, 25)
-	ctxMgr := NewModelContextManager()
+	ctxMgr := newModelContextManager()
 	ctxMgr.Restore([]*Message{
 		{Role: RoleUser, Content: "goal"},
 		{Role: RoleAssistant, Content: strings.Repeat("x", 15)},

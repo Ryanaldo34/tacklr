@@ -15,7 +15,8 @@
 //   - Document / Textual / Structured / TextDocument — content IR
 //   - Block / StyleMeta / Span / FindBlock / BlockReplaceSpan — structured view
 //   - ContentRegistry + Codec + TextCodec + IdentityCodec — optional custom decode
-//   - DetectMediaType, size-cap constants, sentinel errors (including ErrFuseNotMounted, ErrAuthExpired, ErrAmbiguous, ErrPermission)
+//     (Register is first-wins; Lookup is exported; overwrite returns ErrAlreadyRegistered)
+//   - DetectMediaType, size-cap constants, sentinel errors (including ErrFuseNotMounted, ErrAuthExpired, ErrAmbiguous, ErrPermission, ErrAlreadyRegistered)
 //
 // Providers own IR translation and persist immediately on WriteDocument.
 // MountSession routes; it does not encode or hold a dirty document cache.

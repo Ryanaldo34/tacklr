@@ -39,7 +39,7 @@ func TestVFSTools_readWriteRev(t *testing.T) {
 	})
 	tools := map[string]*Tool{}
 	for _, tool := range h.tools {
-		tools[tool.Name] = tool
+		tools[tool.name] = tool
 	}
 	for _, name := range []string{"read", "write", "run_command"} {
 		if tools[name] == nil {
@@ -446,7 +446,7 @@ func TestVFSTools_projectedDocOutlineAndBlocks(t *testing.T) {
 	})
 	tools := map[string]*Tool{}
 	for _, tool := range h.tools {
-		tools[tool.Name] = tool
+		tools[tool.name] = tool
 	}
 	rt := turnRuntime(h)
 
@@ -788,7 +788,7 @@ func TestVFSTools_writeDocxBlocksAndInlineMarks(t *testing.T) {
 	})
 	tools := map[string]*Tool{}
 	for _, tool := range h.tools {
-		tools[tool.Name] = tool
+		tools[tool.name] = tool
 	}
 	rt := turnRuntime(h)
 	mt := "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -864,7 +864,7 @@ func TestVFSTools_projectedSheetReadWrite(t *testing.T) {
 	})
 	tools := map[string]*Tool{}
 	for _, tool := range h.tools {
-		tools[tool.Name] = tool
+		tools[tool.name] = tool
 	}
 	rt := turnRuntime(h)
 

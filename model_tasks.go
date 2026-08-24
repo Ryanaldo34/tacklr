@@ -70,7 +70,7 @@ type AbsorbResult struct {
 	SummaryChunks []LLMResponseChunk
 }
 
-// modelTasks is Turn, Absorb, and Handoff against InferenceStrategy and ContextManager.
+// modelTasks is Turn, Absorb, and Handoff against InferenceStrategy and contextManager.
 type modelTasks interface {
 	Turn(ctx context.Context, tools []*Tool, systemPrompt string) (<-chan LLMResponseChunk, error)
 	Absorb(ctx context.Context, msg *Message, tools []*Tool, systemPrompt string) (AbsorbResult, error)
@@ -82,7 +82,7 @@ type defaultModelTasks struct {
 	mu sync.Mutex // Absorb/Handoff/Turn snapshot; parallel tool results serialize here
 
 	model    InferenceStrategy
-	context  ContextManager
+	context  contextManager
 	policy   ContextPolicy
 	maxSize  int
 	modelSeq int // 1-based Invoke count for model span seq
@@ -90,7 +90,7 @@ type defaultModelTasks struct {
 	countScratch []*Message // reused for progressive token counts
 }
 
-func newDefaultModelTasks(model InferenceStrategy, ctx ContextManager, policy ContextPolicy, maxSize int) *defaultModelTasks {
+func newDefaultModelTasks(model InferenceStrategy, ctx contextManager, policy ContextPolicy, maxSize int) *defaultModelTasks {
 	return &defaultModelTasks{
 		model:   model,
 		context: ctx,

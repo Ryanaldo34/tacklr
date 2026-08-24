@@ -195,6 +195,8 @@ tool := tacklr.NewTool(tacklr.ToolConfig{
 })
 ```
 
+Construct with `NewTool(ToolConfig{...})`. After construction, read metadata through getters (`Name()`, `Access()`, and the rest). Importing `tacklr` registers built-in interrupts, Word/Excel codecs, and the durable driver adapter. VFS backend factories and brain kinds stay host-owned.
+
 ### Sessions
 
 ```go
@@ -218,7 +220,7 @@ That boundary exists so product code cannot accidentally trash planning.
 
 ### VFS
 
-Register backends, bootstrap mounts—[docs/vfs.md](docs/vfs.md). When VFS is wired, the harness injects file tools (`read`, `write`, `run_command`) over **virtual paths only**. The agent never gets a host path or a bucket key. Live names/grep/tree ops go through `run_command` (`ls` / `fd` / `rg` / `mkdir` / `rm`). With Brain + VFS + search namespace, the harness registers **`brain.BrainFactory`**, mounts **`/engram`** (prefix, `IndexPolicy=none`) unless the host already provided a brain-profile mount, and injects **`index_file` / `unindex`** for **artifact** mounts only. Indexed recall is brain `search`; objects without a file use `read_object`. Engrams are Markdown files on the brain Provider; `save_*` writes those paths (or `Engine.Put` if no brain mount). Path-native **link / unlink / expand / find_links**. Artifact → brain still uses one **IndexPath** pipeline (hash skip). Brain-profile mounts are never remirrored as Document/Chunk artifacts.
+Register backends, bootstrap mounts—[docs/vfs.md](docs/vfs.md). When VFS is wired, the harness injects file tools (`read`, `write`, `run_command`) over **virtual paths only**. `run_command` requires permission by default. The agent never gets a host path or a bucket key. Live names/grep/tree ops go through `run_command` (`ls` / `fd` / `rg` / `mkdir` / `rm`). With Brain + VFS + search namespace, the harness registers **`brain.BrainFactory`**, mounts **`/engram`** (prefix, `IndexPolicy=none`) unless the host already provided a brain-profile mount, and injects **`index_file` / `unindex`** for **artifact** mounts only. Indexed recall is brain `search`; objects without a file use `read_object`. Engrams are Markdown files on the brain Provider; `save_*` writes those paths (or `Engine.Put` if no brain mount). Path-native **link / unlink / expand / find_links**. Artifact → brain still uses one **IndexPath** pipeline (hash skip). Brain-profile mounts are never remirrored as Document/Chunk artifacts.
 
 ---
 

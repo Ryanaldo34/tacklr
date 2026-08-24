@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ryanaldo34/tacklr/streaming"
 )
 
 type BasicArgs struct {
@@ -248,6 +250,32 @@ func TestSchema(t *testing.T) {
 	})
 }
 
+func TestNewTool_exposesConfig(t *testing.T) {
+	tool := NewTool(ToolConfig{
+		Name:        "search_records",
+		DisplayName: "Search",
+		Description: "Search operational records.",
+		Namespace:   "ops",
+		Category:    streaming.ToolCategorySearch,
+		Access:      ToolReadAccess,
+		Timeout:     5 * time.Second,
+		OnCall:      []OnCallFunc{nil},
+		Handler:     zeroArgsStringHandler,
+	})
+	if tool.Name() != "search_records" || tool.DisplayName() != "Search" {
+		t.Fatalf("name=%q display=%q", tool.Name(), tool.DisplayName())
+	}
+	if tool.Description() != "Search operational records." || tool.Namespace() != "ops" {
+		t.Fatalf("desc=%q ns=%q", tool.Description(), tool.Namespace())
+	}
+	if tool.Category() != streaming.ToolCategorySearch || tool.Access() != ToolReadAccess {
+		t.Fatalf("category=%q access=%v", tool.Category(), tool.Access())
+	}
+	if tool.Timeout() != 5*time.Second {
+		t.Fatalf("timeout=%v", tool.Timeout())
+	}
+}
+
 func TestAsJson(t *testing.T) {
 	tool := NewTool(ToolConfig{
 		Name:        "get_weather",
@@ -272,7 +300,7 @@ func TestAsJson(t *testing.T) {
 		t.Error("parameters missing")
 	}
 	// Nil parameters map → default empty object schema (strict tool host shape).
-	empty := (&Tool{Name: "bare"}).AsJson()
+	empty := (&Tool{name: "bare"}).AsJson()
 	params, _ := empty["parameters"].(map[string]any)
 	if params == nil || params["type"] != "object" {
 		t.Fatalf("nil params default = %#v", empty["parameters"])

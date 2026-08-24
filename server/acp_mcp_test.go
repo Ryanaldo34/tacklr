@@ -42,7 +42,7 @@ type toolRecorder struct {
 func (tr *toolRecorder) record(tools []*tacklr.Tool) {
 	var names []string
 	for _, tool := range tools {
-		names = append(names, tool.Namespace+"/"+tool.Name)
+		names = append(names, tool.Namespace()+"/"+tool.Name())
 	}
 	tr.mu.Lock()
 	tr.seen = append(tr.seen, names)
@@ -95,7 +95,7 @@ func TestHandleRPC_sessionMCPServers_partialFailureStillExposesHealthyTools(t *t
 				// Assert healthy tool is present, dead server is not.
 				var names []string
 				for _, tool := range tools {
-					names = append(names, tool.Namespace+"/"+tool.Name)
+					names = append(names, tool.Namespace()+"/"+tool.Name())
 				}
 				if !slices.Contains(names, "good/ping") {
 					t.Errorf("expected good/ping in tools, got %v", names)

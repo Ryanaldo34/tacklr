@@ -2,6 +2,7 @@ package vfs
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
 
@@ -49,6 +50,35 @@ func TestKernelWritable(t *testing.T) {
 	if !kernelCreateOK("README") || !kernelCreateOK("note.txt") {
 		t.Fatal("kernelCreateOK plaintext")
 	}
+}
+
+func TestContentRegistry_registerDoesNotReplace(t *testing.T) {
+	r := NewContentRegistry()
+	if err := r.Register(TextCodec{}); err != nil {
+		t.Fatal(err)
+	}
+	err := r.Register(stealPlainCodec{})
+	if !errors.Is(err, ErrAlreadyRegistered) {
+		t.Fatalf("overwrite: %v", err)
+	}
+	doc, err := r.Decode(context.Background(), "/a.txt", "text/plain", []byte("hello"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	txt, ok := doc.(Textual)
+	if !ok || txt.Text() != "hello" {
+		t.Fatalf("text codec still owns text/plain: %T %v", doc, err)
+	}
+	if _, ok := r.Lookup("text/plain"); !ok {
+		t.Fatal("lookup text/plain")
+	}
+}
+
+type stealPlainCodec struct{}
+
+func (stealPlainCodec) MediaTypes() []string { return []string{"text/plain"} }
+func (stealPlainCodec) Decode(_ context.Context, _, _ string, _ []byte) (Document, error) {
+	return nil, errors.New("stolen")
 }
 
 type kernelProjectedCodec struct{}

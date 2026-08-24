@@ -376,7 +376,7 @@ func TestHarness_hostInterceptor_keepsPermissionGate(t *testing.T) {
 		disablePlanningLock: true,
 		ToolInterceptors: []ToolInterceptor{
 			func(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error) {
-				hostSaw = inv.Tool.Name
+				hostSaw = inv.Tool.name
 				return next(ctx, inv)
 			},
 		},

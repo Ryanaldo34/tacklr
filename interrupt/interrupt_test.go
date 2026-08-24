@@ -225,7 +225,8 @@ func TestRegister_New_Clone(t *testing.T) {
 			t.Fatal("want panic on double register")
 		}
 	}()
-	interrupt.Register(func() interrupt.Interrupt { return &interrupt.UserSelectionInterrupt{} })
+	interrupt.Register(func() interrupt.Interrupt { return fakeInterrupt{name: "dup_once"} })
+	interrupt.Register(func() interrupt.Interrupt { return fakeInterrupt{name: "dup_once"} })
 }
 
 type fakeInterrupt struct{ name string }

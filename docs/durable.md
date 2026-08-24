@@ -12,7 +12,7 @@ events, _ := h.Run(ctx, prompt)
 // HITL: read yield, then h.ReturnFromInterrupt
 ```
 
-Human-in-the-loop waits in-process on the same harness. Persistence is `h.Checkpoint` / `h.RestoreCheckpoint` (the same blob `durable.Runtime` writes to SnapshotStore). This path does not require Temporal.
+Human-in-the-loop waits in-process on the same harness. Persistence is `h.Checkpoint` / `h.RestoreCheckpoint` (the same blob `durable.Runtime` writes to SnapshotStore). This path does not require Temporal. Durable drivers call unexported harness steps through `internal/drive`; that adapter is not a host API.
 
 ## Path B — in-process Runtime
 

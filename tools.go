@@ -48,22 +48,46 @@ type toolCallResult struct {
 	disp   ToolOutcome
 }
 
+// Tool is a registered harness tool. Construct with NewTool(ToolConfig{...}).
+// Fields are unexported; hosts read metadata through the getters below.
 type Tool struct {
-	DisplayName string
-	Name        string
-	Description string
-	Namespace   string
-	Category    streaming.ToolCategory
-	Access      ToolAccess
-	// Timeout is an optional per-invocation deadline. Zero means none.
-	Timeout time.Duration
-	// OnCall is the pre-invoke middleware stack. Each constructor may park.
-	OnCall []OnCallFunc
+	displayName string
+	name        string
+	description string
+	namespace   string
+	category    streaming.ToolCategory
+	access      ToolAccess
+	// timeout is an optional per-invocation deadline. Zero means none.
+	timeout time.Duration
+	// onCall is the pre-invoke middleware stack. Each constructor may park.
+	onCall []OnCallFunc
 
 	handlerFunc func(ctx context.Context, args map[string]any, runtime HarnessRuntime) (toolCallResult, error)
 	parameters  map[string]any
 	strict      bool
 }
+
+// Name is the programmatic tool name presented to the model.
+func (t *Tool) Name() string { return t.name }
+
+// DisplayName is the optional human title from ToolConfig. Empty means unset;
+// stream titles fall back to Name via ResolveToolTitle.
+func (t *Tool) DisplayName() string { return t.displayName }
+
+// Description is the model-facing tool description.
+func (t *Tool) Description() string { return t.description }
+
+// Namespace is the optional tool namespace (MCP server name, host grouping).
+func (t *Tool) Namespace() string { return t.namespace }
+
+// Category is the coarse streaming category for client presentation.
+func (t *Tool) Category() streaming.ToolCategory { return t.category }
+
+// Access is the permission bitmask for this tool.
+func (t *Tool) Access() ToolAccess { return t.access }
+
+// Timeout is the optional per-invocation deadline. Zero means none.
+func (t *Tool) Timeout() time.Duration { return t.timeout }
 
 type ToolConfig struct {
 	Name        string
@@ -156,14 +180,14 @@ func NewTool(cfg ToolConfig) *Tool {
 	}
 
 	t := &Tool{
-		Name:        cfg.Name,
-		DisplayName: cfg.DisplayName,
-		Description: cfg.Description,
-		Namespace:   cfg.Namespace,
-		Category:    cfg.Category,
-		Access:      cfg.Access,
-		Timeout:     cfg.Timeout,
-		OnCall:      cfg.OnCall,
+		name:        cfg.Name,
+		displayName: cfg.DisplayName,
+		description: cfg.Description,
+		namespace:   cfg.Namespace,
+		category:    cfg.Category,
+		access:      cfg.Access,
+		timeout:     cfg.Timeout,
+		onCall:      cfg.OnCall,
 		strict:      true,
 	}
 	for _, ctor := range cfg.OnCall {
@@ -214,7 +238,7 @@ func NewTool(cfg ToolConfig) *Tool {
 
 		if hasRuntime {
 			if runtime == nil {
-				return toolCallResult{}, fmt.Errorf("%w: tool %q requires a HarnessRuntime", ErrFailed, t.Name)
+				return toolCallResult{}, fmt.Errorf("%w: tool %q requires a HarnessRuntime", ErrFailed, t.name)
 			}
 			callArgs = append(callArgs, reflect.ValueOf(runtime))
 		}
@@ -249,11 +273,11 @@ func newMCPTool(cfg mcpToolConfig) *Tool {
 		}
 	}
 	return &Tool{
-		Name:        cfg.Name,
-		DisplayName: cfg.DisplayName,
-		Description: cfg.Description,
-		Namespace:   cfg.Namespace,
-		Timeout:     cfg.Timeout,
+		name:        cfg.Name,
+		displayName: cfg.DisplayName,
+		description: cfg.Description,
+		namespace:   cfg.Namespace,
+		timeout:     cfg.Timeout,
 		strict:      false,
 		parameters:  params,
 		handlerFunc: func(ctx context.Context, args map[string]any, runtime HarnessRuntime) (toolCallResult, error) {
@@ -292,15 +316,15 @@ func (t *Tool) invoke(ctx context.Context, argsJson string, runtime HarnessRunti
 	var args map[string]any
 	if argsJson != "" {
 		if err := json.Unmarshal([]byte(argsJson), &args); err != nil {
-			return toolCallResult{}, fmt.Errorf("unmarshal args for tool %q: %w", t.Name, err)
+			return toolCallResult{}, fmt.Errorf("unmarshal args for tool %q: %w", t.name, err)
 		}
 	}
 
-	if t.Timeout <= 0 {
+	if t.timeout <= 0 {
 		return t.handlerFunc(ctx, args, runtime)
 	}
 
-	callCtx, cancel := context.WithTimeout(ctx, t.Timeout)
+	callCtx, cancel := context.WithTimeout(ctx, t.timeout)
 	defer cancel()
 
 	type outcome struct {
@@ -316,14 +340,14 @@ func (t *Tool) invoke(ctx context.Context, argsJson string, runtime HarnessRunti
 	select {
 	case res := <-done:
 		if res.err != nil && ctx.Err() == nil && errors.Is(res.err, context.DeadlineExceeded) {
-			return toolCallResult{}, fmt.Errorf("tool %q: %w", t.Name, ErrToolTimeout)
+			return toolCallResult{}, fmt.Errorf("tool %q: %w", t.name, ErrToolTimeout)
 		}
 		return res.res, res.err
 	case <-callCtx.Done():
 		if err := ctx.Err(); err != nil {
 			return toolCallResult{}, err
 		}
-		return toolCallResult{}, fmt.Errorf("tool %q: %w", t.Name, ErrToolTimeout)
+		return toolCallResult{}, fmt.Errorf("tool %q: %w", t.name, ErrToolTimeout)
 	}
 }
 
@@ -340,8 +364,8 @@ func (t *Tool) AsJson() map[string]any {
 	}
 	return map[string]any{
 		"type":        "function",
-		"name":        t.Name,
-		"description": t.Description,
+		"name":        t.name,
+		"description": t.description,
 		"strict":      t.strict,
 		"parameters":  params,
 	}
@@ -533,8 +557,8 @@ func ToolsAsJson(tools []*Tool) string {
 	defs := make([]map[string]any, 0, len(tools))
 	for _, t := range tools {
 		def := t.AsJson()
-		if t.Namespace != "" {
-			def["name"] = t.Namespace + "." + t.Name
+		if t.namespace != "" {
+			def["name"] = t.namespace + "." + t.name
 		}
 		defs = append(defs, def)
 	}

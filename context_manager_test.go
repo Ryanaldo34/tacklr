@@ -7,7 +7,7 @@ import (
 
 func TestModelContextManager_enforcesMessageInvariantsAtMutation(t *testing.T) {
 	// Arrange
-	manager := NewModelContextManager()
+	manager := newModelContextManager()
 	assertPanics := func(name string, fn func()) {
 		t.Helper()
 		t.Run(name, func(t *testing.T) {
@@ -49,7 +49,7 @@ func TestContextPolicy_validateRejectsInvalidRatios(t *testing.T) {
 }
 
 func TestModelContextManager_installPlanDocument(t *testing.T) {
-	manager := NewModelContextManager()
+	manager := newModelContextManager()
 
 	if err := manager.InstallPlanDocument(""); err == nil || !strings.Contains(err.Error(), "no plan document") {
 		t.Fatalf("empty plan error = %v", err)

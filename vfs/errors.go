@@ -22,13 +22,16 @@ var (
 	ErrPermission      = errors.New("vfs: permission denied")
 
 	// Content IR
-	ErrNoCodec        = errors.New("vfs: no codec for media type")
-	ErrNotTextual     = errors.New("vfs: not a textual document")
-	ErrLineOutOfRange = errors.New("vfs: line out of range")
-	ErrInvalidUTF8    = errors.New("vfs: invalid utf-8")
-	ErrInvalidLine    = errors.New("vfs: line contains newline")
-	ErrLineTooLong    = errors.New("vfs: line too long")
-	ErrTooLarge       = errors.New("vfs: file too large")
+	ErrNoCodec = errors.New("vfs: no codec for media type")
+	// ErrAlreadyRegistered is returned when Register is called for a media type
+	// that already has a codec. First registration wins.
+	ErrAlreadyRegistered = errors.New("vfs: media type already registered")
+	ErrNotTextual        = errors.New("vfs: not a textual document")
+	ErrLineOutOfRange    = errors.New("vfs: line out of range")
+	ErrInvalidUTF8       = errors.New("vfs: invalid utf-8")
+	ErrInvalidLine       = errors.New("vfs: line contains newline")
+	ErrLineTooLong       = errors.New("vfs: line too long")
+	ErrTooLarge          = errors.New("vfs: file too large")
 	// ErrProjected is returned when a line/HTML/SetText mutation is applied to a
 	// projected document. Agents must use block IR instead.
 	ErrProjected = errors.New("vfs: use block IR for this media type")

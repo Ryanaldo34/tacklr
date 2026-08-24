@@ -8,6 +8,7 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
+	"github.com/ryanaldo34/tacklr/internal/drive"
 	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/telemetry"
@@ -107,7 +108,8 @@ func (r *Runtime) driveTurn(ctx context.Context, p *sessionProc, user *tacklr.Me
 		durable.CloseTurnVFS(ms, string(p.id), "turn_end")
 	}()
 
-	out, stop := tacklr.PipeStreamEvents(func(ev streaming.StreamEvent) { r.emit(ctx, p, ev) })
+	eng := drive.EngineOf(h)
+	out, stop := drive.PipeStreamEvents(func(ev streaming.StreamEvent) { r.emit(ctx, p, ev) })
 	defer stop()
 
 	cancelled := func() turnOutcome {
@@ -119,11 +121,11 @@ func (r *Runtime) driveTurn(ctx context.Context, p *sessionProc, user *tacklr.Me
 	}
 
 	if len(resume) > 0 {
-		if err := h.ApplyResume(resume); err != nil {
+		if err := eng.ApplyResume(resume); err != nil {
 			return r.fail(ctx, p, err)
 		}
 	} else if user != nil {
-		if err := h.AbsorbUser(ctx, user, out); err != nil {
+		if err := eng.AbsorbUser(ctx, user, out); err != nil {
 			if ctx.Err() != nil {
 				return cancelled()
 			}
@@ -131,14 +133,14 @@ func (r *Runtime) driveTurn(ctx context.Context, p *sessionProc, user *tacklr.Me
 		}
 	}
 
-	st := &tacklr.TurnState{}
-	toolCalls := h.PendingToolCalls()
+	st := &drive.TurnState{}
+	toolCalls := eng.PendingToolCalls()
 	for {
 		if ctx.Err() != nil {
 			return cancelled()
 		}
 		if len(toolCalls) == 0 {
-			step, infErr := h.RunInference(ctx, st, out)
+			step, infErr := eng.RunInference(ctx, st, out)
 			if ctx.Err() != nil {
 				return cancelled()
 			}
@@ -163,7 +165,7 @@ func (r *Runtime) driveTurn(ctx context.Context, p *sessionProc, user *tacklr.Me
 			if ctx.Err() != nil {
 				return cancelled()
 			}
-			step, toolErr := h.RunToolCall(ctx, tc, out)
+			step, toolErr := eng.RunToolCall(ctx, tc, out)
 			if ctx.Err() != nil {
 				return cancelled()
 			}

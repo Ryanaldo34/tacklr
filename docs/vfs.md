@@ -237,7 +237,8 @@ Tool guidance:
 |------|------|
 | Read | `ReadFile` once (32 MiB cap) |
 | Detect | **Provider** sets `FileInfo.MediaType` on Stat (S3 Content-Type or key/name; local extension + peek). Session does not sniff. |
-| Lookup | `ContentRegistry` media type → `Codec` |
+| Lookup | `ContentRegistry` media type → `Codec` (`Lookup`) |
+| Register | First binding wins. A second `Register` for the same media type returns `ErrAlreadyRegistered`. `adapters.RegisterCommon` is idempotent (skips DOCX/XLSX when already bound). Importing `tacklr` registers Word/Excel on the process default registry. |
 | Fallback | Unregistered but text-like (`text/*`, JSON, YAML, …) → `TextCodec` |
 | Decode | `Codec.Decode(path, mediaType, data)` — no second read or re-sniff |
 | Else | `ErrNoCodec` (e.g. PNG) |
@@ -509,7 +510,7 @@ When the harness has **Brain + MountSession + search namespace**, it owns a
 |------|------|
 | `index_file` | Selective ingest of key virtual **files** (max 8); errors under `none` |
 | `unindex` | Soft-delete the brain mirror; drops selective track |
-| `run_command` | `/bin/sh -c` with cwd = FUSE root; relative paths (`work/foo`); `PermissionRequired` unless `RunCommandUnattended` |
+| `run_command` | `/bin/sh -c` with cwd = FUSE root; relative paths (`work/foo`); `PermissionRequired` by default |
 | `read` / `write` | File window / first page / block read; one mutation mode. Knowledge objects: `read_object`. |
 | `save_*` | Write the Engram file on the brain Provider (or `Engine.Put` if no brain mount) |
 | `link` / `expand` / `find_links` | Path-native graph (G1): prefer virtual paths; surface neighbor `vfs_path` |
