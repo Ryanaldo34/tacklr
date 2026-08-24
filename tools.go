@@ -70,7 +70,8 @@ type Tool struct {
 // Name is the programmatic tool name presented to the model.
 func (t *Tool) Name() string { return t.name }
 
-// DisplayName is the optional human title. Empty falls back to Name.
+// DisplayName is the optional human title from ToolConfig. Empty means unset;
+// stream titles fall back to Name via ResolveToolTitle.
 func (t *Tool) DisplayName() string { return t.displayName }
 
 // Description is the model-facing tool description.
