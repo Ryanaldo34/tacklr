@@ -6,6 +6,8 @@ import (
 
 // RegisterCommon registers Word and Excel. HTML stays a TextCodec type unless a
 // host registers adapters.HTML itself — stealing text/html makes .html EROFS.
+// Safe to call more than once on the same registry: existing DOCX/XLSX bindings
+// are left in place (first registration wins).
 func RegisterCommon(reg *vfs.ContentRegistry) error {
 	if _, ok := reg.Lookup(DOCXMediaType); !ok {
 		if err := reg.Register(vfs.BlockCodec{Types: []string{DOCXMediaType}, Normalizer: DOCX{}}); err != nil {

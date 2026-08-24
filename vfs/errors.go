@@ -22,7 +22,9 @@ var (
 	ErrPermission      = errors.New("vfs: permission denied")
 
 	// Content IR
-	ErrNoCodec           = errors.New("vfs: no codec for media type")
+	ErrNoCodec = errors.New("vfs: no codec for media type")
+	// ErrAlreadyRegistered is returned when Register is called for a media type
+	// that already has a codec. First registration wins.
 	ErrAlreadyRegistered = errors.New("vfs: media type already registered")
 	ErrNotTextual        = errors.New("vfs: not a textual document")
 	ErrLineOutOfRange    = errors.New("vfs: line out of range")

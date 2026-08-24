@@ -237,7 +237,8 @@ Tool guidance:
 |------|------|
 | Read | `ReadFile` once (32 MiB cap) |
 | Detect | **Provider** sets `FileInfo.MediaType` on Stat (S3 Content-Type or key/name; local extension + peek). Session does not sniff. |
-| Lookup | `ContentRegistry` media type → `Codec` |
+| Lookup | `ContentRegistry` media type → `Codec` (`Lookup`) |
+| Register | First binding wins. A second `Register` for the same media type returns `ErrAlreadyRegistered`. `adapters.RegisterCommon` is idempotent (skips DOCX/XLSX when already bound). Importing `tacklr` registers Word/Excel on the process default registry. |
 | Fallback | Unregistered but text-like (`text/*`, JSON, YAML, …) → `TextCodec` |
 | Decode | `Codec.Decode(path, mediaType, data)` — no second read or re-sniff |
 | Else | `ErrNoCodec` (e.g. PNG) |

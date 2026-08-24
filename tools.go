@@ -48,6 +48,8 @@ type toolCallResult struct {
 	disp   ToolOutcome
 }
 
+// Tool is a registered harness tool. Construct with NewTool(ToolConfig{...}).
+// Fields are unexported; hosts read metadata through the getters below.
 type Tool struct {
 	displayName string
 	name        string

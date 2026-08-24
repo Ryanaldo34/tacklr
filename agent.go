@@ -23,7 +23,9 @@ import (
 )
 
 // AgentHarness is the product agent. Create with NewAgent.
-// Fields are unexported. Session conversation is persisted by durable.Runtime
+// Hosts use Run / RunMessage / ReturnFromInterrupt, Checkpoint /
+// RestoreCheckpoint, Close, VFS, SessionID, and Messages. Fields are
+// unexported. Session conversation is persisted by durable.Runtime
 // via Checkpoint/RestoreCheckpoint, not by this type.
 type AgentHarness struct {
 	model                 InferenceStrategy
