@@ -104,6 +104,14 @@ func (a *AgentHarness) pendingSnapshot() map[string]stores.PendingToolCall {
 	return maps.Clone(a.pendingToolCalls)
 }
 
+func (a *AgentHarness) recordToolResult(tc ToolCall, output string) {
+	msg, _ := a.toolResultMessage(tc, output, "success")
+	a.context.Add(msg)
+	a.pendingMu.Lock()
+	delete(a.pendingToolCalls, tc.Key())
+	a.pendingMu.Unlock()
+}
+
 func (a *AgentHarness) constructSystemPrompt() string {
 	// Skills load once in finishInit / Run; do not re-init here (prompt caching).
 	var skillCatalog string

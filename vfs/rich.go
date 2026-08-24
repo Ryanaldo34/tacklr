@@ -85,6 +85,10 @@ func liftPlaintext(s string) []Block {
 		if para == "" {
 			continue
 		}
+		if grid, ok := parsePipeTable(para); ok {
+			out = append(out, tableBlock(grid))
+			continue
+		}
 		out = append(out, Block{Kind: BlockKindParagraph, Text: para})
 	}
 	if len(out) == 0 {
@@ -165,7 +169,7 @@ func (d *richBody) ReplaceBlock(id string, text string, includeHeading bool) err
 		if err != nil {
 			return err
 		}
-		got, err := parseTSV(text)
+		got, err := parseTableText(text)
 		if err != nil {
 			return err
 		}
@@ -390,24 +394,131 @@ func lineStartsOf(text string) []int {
 }
 
 func tableShape(b Block) (rows, cols int, err error) {
+	grid, perr := parseTableText(b.Text)
+	if perr == nil && len(grid) > 0 && len(grid[0]) > 0 {
+		return len(grid), len(grid[0]), nil
+	}
 	if b.Style.Attributes != nil {
 		rows, _ = strconv.Atoi(b.Style.Attributes["rows"])
 		cols, _ = strconv.Atoi(b.Style.Attributes["cols"])
 	}
 	if rows == 0 || cols == 0 {
-		grid, perr := parseTSV(b.Text)
 		if perr != nil {
 			return 0, 0, perr
 		}
-		rows = len(grid)
-		if rows > 0 {
-			cols = len(grid[0])
-		}
-	}
-	if rows == 0 || cols == 0 {
 		return 0, 0, fmt.Errorf("%w: table has no shape", ErrNotSupported)
 	}
 	return rows, cols, nil
+}
+
+func tableBlock(grid [][]string) Block {
+	rows, cols := len(grid), 0
+	if rows > 0 {
+		cols = len(grid[0])
+	}
+	return Block{
+		Kind: BlockKindTable,
+		Text: encodeTSV(grid),
+		Style: StyleMeta{Attributes: map[string]string{
+			"rows": strconv.Itoa(rows),
+			"cols": strconv.Itoa(cols),
+		}},
+	}
+}
+
+// parseTableText accepts TSV (tabs) or a GFM pipe table. Agents often write
+// kind=table with "| a | b |" markdown; treating that as TSV makes a 1-column
+// Docs table with the pipes still in the cell.
+func parseTableText(text string) ([][]string, error) {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.TrimRight(text, "\n")
+	if text == "" {
+		return nil, nil
+	}
+	if strings.Contains(text, "\t") {
+		return parseTSV(text)
+	}
+	if grid, ok := parsePipeTable(text); ok {
+		return grid, nil
+	}
+	return parseTSV(text)
+}
+
+func parsePipeTable(text string) ([][]string, bool) {
+	var rows [][]string
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if !strings.Contains(line, "|") {
+			return nil, false
+		}
+		cells := parsePipeRow(line)
+		if isPipeSeparatorRow(cells) {
+			continue
+		}
+		if len(cells) == 0 {
+			continue
+		}
+		rows = append(rows, cells)
+	}
+	if len(rows) == 0 {
+		return nil, false
+	}
+	cols := 0
+	for _, r := range rows {
+		if len(r) > cols {
+			cols = len(r)
+		}
+	}
+	if cols < 2 {
+		return nil, false
+	}
+	for i := range rows {
+		for len(rows[i]) < cols {
+			rows[i] = append(rows[i], "")
+		}
+	}
+	return rows, true
+}
+
+func parsePipeRow(line string) []string {
+	line = strings.TrimSpace(line)
+	line = strings.TrimPrefix(line, "|")
+	line = strings.TrimSuffix(line, "|")
+	parts := strings.Split(line, "|")
+	out := make([]string, len(parts))
+	for i, p := range parts {
+		out[i] = strings.TrimSpace(p)
+	}
+	return out
+}
+
+func isPipeSeparatorRow(cells []string) bool {
+	if len(cells) == 0 {
+		return false
+	}
+	for _, c := range cells {
+		t := strings.TrimSpace(c)
+		if t == "" {
+			return false
+		}
+		hasDash := false
+		for _, r := range t {
+			if r == '-' {
+				hasDash = true
+				continue
+			}
+			if r != ':' {
+				return false
+			}
+		}
+		if !hasDash {
+			return false
+		}
+	}
+	return true
 }
 
 func parseTSV(text string) ([][]string, error) {

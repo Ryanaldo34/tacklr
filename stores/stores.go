@@ -1,3 +1,6 @@
+// Package stores is the harness checkpoint blob (SessionCheckpoint).
+// Persistence I/O is durable.SnapshotStore. Wire session envelopes belong on
+// server.ProtocolWireStore, not here.
 package stores
 
 import (
@@ -8,8 +11,8 @@ import (
 )
 
 type PendingToolCall struct {
-	ToolCall        *streaming.ToolCall
-	InterruptActive bool
+	ToolCall        *streaming.ToolCall `json:"toolCall,omitempty"`
+	InterruptActive bool                `json:"interruptActive,omitempty"`
 }
 
 // sessionState is harness-owned durable agent state (not wire-protocol envelopes).

@@ -17,9 +17,10 @@ type WorkerOptions struct {
 	DisableStreams bool
 }
 
-// NewWorker returns a Temporal worker with EnableSessionWorker and the
-// Inference/Tool activities plus SessionWorkflow. Create the client with Dial
-// so Temporal's OTEL v2 plugin propagates trace context.
+// NewWorker returns a Temporal worker with EnableSessionWorker and
+// SessionWorkflow plus Inference, Tool, and CommitToolOutput activities.
+// Create the client with Dial so Temporal's OTEL v2 plugin propagates
+// trace context.
 func NewWorker(c client.Client, taskQueue string, opts WorkerOptions) worker.Worker {
 	w := worker.New(c, taskQueue, worker.Options{
 		EnableSessionWorker:               true,

@@ -527,6 +527,50 @@ func TestDrive_createAsDoc(t *testing.T) {
 	}
 }
 
+func TestDrive_createAsDoc_pipeMarkdownTableFillsCells(t *testing.T) {
+	ctx := t.Context()
+	api := driveTree()
+	docs := &memDocs{snaps: map[string]vfs.DocsSnapshot{}, rev: map[string]string{}}
+	ms := mountDrive(t, api, docs, true)
+	raw := "| Option | Cost |\n| --- | --- |\n| Public-only | $1,000 |\n| Hybrid | $8,000 |"
+	doc := vfs.NewRichDocument("/workspace/contracts/Compare", "application/vnd.google-apps.document", []vfs.Block{{
+		Kind: vfs.BlockKindTable, Text: raw,
+	}})
+	if err := ms.WriteDocument(ctx, doc); err != nil {
+		t.Fatal(err)
+	}
+	var insertCols int64
+	for _, batch := range docs.batches {
+		for _, r := range batch.Requests {
+			if r.InsertTable != nil {
+				insertCols = r.InsertTable.Columns
+			}
+		}
+	}
+	if insertCols != 2 {
+		t.Fatalf("InsertTable columns=%d, want 2 (pipe table, not 1-col markdown dump)", insertCols)
+	}
+	got, err := ms.ReadText(ctx, "/workspace/contracts/Compare")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var table vfs.Block
+	for _, b := range got.(vfs.Structured).Blocks() {
+		if b.Kind == vfs.BlockKindTable {
+			table = b
+		}
+	}
+	if table.Kind == "" {
+		t.Fatalf("no table block: %+v", got.(vfs.Structured).Blocks())
+	}
+	if strings.Contains(table.Text, "| Option") {
+		t.Fatalf("cell text still markdown pipes: %q", table.Text)
+	}
+	if !strings.Contains(table.Text, "Public-only") || !strings.Contains(table.Text, "$8,000") {
+		t.Fatalf("missing cells: %q", table.Text)
+	}
+}
+
 func TestDrive_createDocAppliesInlineMarksInFollowupBatch(t *testing.T) {
 	ctx := t.Context()
 	api := driveTree()

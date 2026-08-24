@@ -191,6 +191,102 @@ func TestRun_parallelToolResultsBothLandInWindow(t *testing.T) {
 	}
 }
 
+// TestRun_parallelHITLKeepsSiblingResults: the whole batch starts; siblings
+// finish while one parks; the next model turn sees every result (Azure pairing).
+func TestRun_parallelHITLKeepsSiblingResults(t *testing.T) {
+	var (
+		invokes int
+		second  []*Message
+	)
+	model := &mockStrategy{
+		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
+			invokes++
+			if invokes == 1 {
+				ch <- LLMResponseChunk{
+					Type: StreamEventFunctionCall,
+					ToolCalls: []ToolCall{
+						{ID: "fc_alpha", CallID: "call_alpha", Name: "alpha", Arguments: `{}`},
+						{ID: "fc_gate", CallID: "call_gate", Name: "gate", Arguments: `{}`},
+						{ID: "fc_beta", CallID: "call_beta", Name: "beta", Arguments: `{}`},
+					},
+					IsComplete: true,
+				}
+				return
+			}
+			second = append([]*Message(nil), msgs...)
+			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "all-three", IsComplete: true}
+		},
+	}
+	h := mustNewAgent(t, AgentOptions{
+		Config: Config{MaxWindowSize: 8192},
+		Model:  model,
+		Tools: []*Tool{
+			NewTool(ToolConfig{Name: "alpha", Handler: func(context.Context) (string, error) { return "from-alpha", nil }}),
+			NewTool(ToolConfig{
+				Name:    "gate",
+				OnCall:  []OnCallFunc{ToolPermissionOnCall},
+				Handler: func(context.Context) (string, error) { return "gate-ok", nil },
+			}),
+			NewTool(ToolConfig{Name: "beta", Handler: func(context.Context) (string, error) { return "from-beta", nil }}),
+		},
+	})
+	t.Cleanup(h.Close)
+
+	events, err := h.Run(context.Background(), "batch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var interruptID string
+	for _, ev := range drainEvents(events) {
+		if ev.Type == StreamEventInterrupt {
+			var payload struct {
+				InterruptId string `json:"interruptId"`
+			}
+			if err := json.Unmarshal(ev.Data, &payload); err == nil {
+				interruptID = payload.InterruptId
+			}
+		}
+	}
+	if interruptID == "" {
+		t.Fatal("expected permission park")
+	}
+	if invokes != 1 {
+		t.Fatalf("inferred while parked: invokes=%d", invokes)
+	}
+	sawParked := map[string]bool{}
+	for _, m := range h.Messages() {
+		if m != nil && m.Role == RoleTool {
+			sawParked[m.Content] = true
+		}
+	}
+	if !sawParked["from-alpha"] || !sawParked["from-beta"] {
+		t.Fatalf("siblings should finish during park: %v window=%+v", sawParked, h.Messages())
+	}
+	if sawParked["gate-ok"] {
+		t.Fatal("parked tool should not have a result yet")
+	}
+
+	resumed, err := h.ReturnFromInterrupt(context.Background(), map[string][]byte{
+		interruptID: []byte(`{"optionId":"allow-once"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := drainEvents(resumed)
+	if !hasEventType(got, StreamEventComplete) && !hasToolResultContent(got, "gate-ok") {
+		t.Fatalf("resume: %+v", summarizeEvents(got))
+	}
+	saw := map[string]bool{}
+	for _, m := range second {
+		if m != nil && m.Role == RoleTool {
+			saw[m.Content] = true
+		}
+	}
+	if !saw["from-alpha"] || !saw["gate-ok"] || !saw["from-beta"] {
+		t.Fatalf("flushed window missing results: %v msgs=%+v", saw, second)
+	}
+}
+
 // TestRun_uninitializedHarnessFails: Run without constructor setup is rejected.
 func TestRun_maxTurnRequests_emitsStopReason(t *testing.T) {
 	tool := NewTool(ToolConfig{

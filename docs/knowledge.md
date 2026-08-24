@@ -59,7 +59,7 @@ Almost every design mistake in this area comes from treating these as the same t
 | Job | What it is | Source of truth | How it becomes searchable | What the agent edits |
 |-----|------------|-----------------|---------------------------|----------------------|
 | **Engram** | A host-defined record: a Deal, Person, Fact, Memory, … | A row in the brain **store** | Writing the file *is* the object update (`Put`) | `/engram/deal/acme.md` (or a host root like `/deal/acme.md`) |
-| **Artifact** | A normal file the agent is working on | Bytes on local disk or S3 | **IndexPath** copies a Document + Chunks into the store | `/work/contract.md` — the real file |
+| **Artifact** | A normal file the agent is working on | Bytes on local disk, S3, or a bound Drive/Graph folder | **IndexPath** copies a Document + Chunks into the store | `/work/contract.md` or `/workspace/contracts/nda.pdf` — the real file |
 
 ```text
   Agent
@@ -70,8 +70,8 @@ Almost every design mistake in this area comes from treating these as the same t
          MountSession          ← the agent only sees virtual paths
     ┌─────────┼──────────────┐
     ▼         ▼              ▼
-  Local     S3           Brain Provider
-  /work     /docs        /engram/deal/acme.md
+  Local     S3 / Drive / Graph   Brain Provider
+  /work     /workspace/…         /engram/deal/acme.md
     │                        │
     │ IndexPath              │ parse Markdown + Put
     │ (optional, hash skip)  │

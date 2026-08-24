@@ -143,7 +143,7 @@ func mapReplaceBlock(loc blockLocation, b Block) ([]DocsRequest, error) {
 }
 
 func mapReplaceTable(loc blockLocation, b Block) ([]DocsRequest, error) {
-	grid, err := parseTSV(b.Text)
+	grid, err := parseTableText(b.Text)
 	if err != nil {
 		return nil, err
 	}
@@ -318,9 +318,12 @@ func mapInsertBlocks(blocks []Block, startIdx int, tabID string) (chunks []inser
 			if err != nil {
 				return nil, 0, err
 			}
-			grid, err := parseTSV(b.Text)
+			grid, err := parseTableText(b.Text)
 			if err != nil {
 				return nil, 0, err
+			}
+			if len(grid) > 0 {
+				rows, cols = len(grid), len(grid[0])
 			}
 			flush()
 			chunks = append(chunks, insertChunk{

@@ -196,7 +196,10 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 			next := pending
 			pending = nil
 			stopSlice := false
-			for _, tc := range next {
+			// Sequential Tool activities share SnapshotStore etag. Leftover
+			// calls after HITL stay in this workflow variable (history), not
+			// the snapshot. In-process runs the batch in parallel instead.
+			for i, tc := range next {
 				if tc.Name == spawnWorkerName {
 					var args struct {
 						Task string `json:"task_description_and_context"`
@@ -220,6 +223,22 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 						outcome, turnErr, stopSlice = telemetry.OutcomeError, err, true
 						break
 					}
+					var cout ToolOutput
+					err := waitAct("CommitToolOutput", CommitToolInput{
+						SessionID:  in.SessionID,
+						AgentID:    agentID,
+						MCPServers: mcp,
+						Etag:       etag,
+						Call:       tc,
+						Output:     "ok",
+						Auth:       lastAuth,
+						Mounts:     mounts,
+					}, &cout)
+					if err != nil {
+						outcome, turnErr, stopSlice = telemetry.OutcomeError, err, true
+						break
+					}
+					etag = cout.Etag
 					continue
 				}
 				var tout ToolOutput
@@ -245,6 +264,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 				if !tout.Interrupted {
 					continue
 				}
+				rest := append([]streaming.ToolCall(nil), next[i+1:]...)
 				if sessionCtx != ctx {
 					workflow.CompleteSession(sessionCtx)
 					sessionCtx = ctx
@@ -292,7 +312,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 							break
 						}
 						etag = iout.Etag
-						pending = iout.ToolCalls
+						pending = append(append([]streaming.ToolCall(nil), iout.ToolCalls...), rest...)
 					case signalClose:
 						closed = true
 						outcome = telemetry.OutcomeOK

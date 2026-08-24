@@ -23,11 +23,16 @@ type graphItem struct {
 
 // GraphFactory opens OneDrive / SharePoint library providers. Auth is session-scoped.
 // Base and HTTP are for tests: point the official client at testhttp.Server.
+//
+// Account is organization (default) or personal. Organization mounts require
+// siteId (SharePoint library) or driveId. Personal mounts use /me/drive when
+// those params are empty. A bind can override with params["account"].
 type GraphFactory struct {
-	ID   string
-	Auth *SessionAuth
-	Base string       // optional Graph root URL (tests)
-	HTTP *http.Client // optional; tests inject testhttp.Server.Client
+	ID      string
+	Auth    *SessionAuth
+	Account string       // organization (default) or personal
+	Base    string       // optional Graph root URL (tests)
+	HTTP    *http.Client // optional; tests inject testhttp.Server.Client
 }
 
 // Profile implements ProviderFactory.
@@ -57,10 +62,17 @@ func (f GraphFactory) Open(ctx context.Context, sessionID string, spec MountSpec
 	if err != nil {
 		return nil, err
 	}
-	driveID, itemID, err := sdk.resolveRoot(ctx,
-		strings.TrimSpace(spec.Params[ParamDriveID]),
-		strings.TrimSpace(spec.Params[ParamItemID]),
-		strings.TrimSpace(spec.Params[ParamSiteID]))
+	account, err := graphAccount(f.Account, spec.Params[ParamAccount])
+	if err != nil {
+		return nil, err
+	}
+	driveID := strings.TrimSpace(spec.Params[ParamDriveID])
+	itemID := strings.TrimSpace(spec.Params[ParamItemID])
+	siteID := strings.TrimSpace(spec.Params[ParamSiteID])
+	if account == AccountOrganization && driveID == "" && siteID == "" {
+		return nil, fmt.Errorf("vfs: msgraph organization account requires siteId or driveId")
+	}
+	driveID, itemID, err = sdk.resolveRoot(ctx, driveID, itemID, siteID, account)
 	if err != nil {
 		return nil, err
 	}
@@ -81,6 +93,21 @@ var (
 	_ documentBackend = (*graphProvider)(nil)
 	_ filePutter      = (*graphProvider)(nil)
 )
+
+func graphAccount(factory, param string) (string, error) {
+	raw := strings.ToLower(strings.TrimSpace(param))
+	if raw == "" {
+		raw = strings.ToLower(strings.TrimSpace(factory))
+	}
+	switch raw {
+	case "", AccountOrganization, "enterprise", "work", "tenant":
+		return AccountOrganization, nil
+	case AccountPersonal, "consumer", "msa":
+		return AccountPersonal, nil
+	default:
+		return "", fmt.Errorf("vfs: msgraph account %q is not organization or personal", raw)
+	}
+}
 
 func (p *graphProvider) call(ctx context.Context, fn func() error) error {
 	if err := p.holder.EnsureValid(ctx); err != nil {

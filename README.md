@@ -19,7 +19,7 @@ go get github.com/ryanaldo34/tacklr
 | Doc | What it covers |
 |-----|----------------|
 | [docs/knowledge.md](docs/knowledge.md) | **Canonical** knowledge system: Engrams, search, graph, tools |
-| [docs/durable.md](docs/durable.md) | Runtime kernel, Path A/B/C, Temporal, HITL |
+| [docs/durable.md](docs/durable.md) | Runtime kernel, embed / in-process / Temporal, HITL, tool batches |
 | [docs/vfs.md](docs/vfs.md) | Mounts, content IR, provider persist, lifecycle |
 | [pkg.go.dev/tacklr](https://pkg.go.dev/github.com/ryanaldo34/tacklr) | Harness, tools, types |
 | [pkg.go.dev/vfs](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfs) | Virtual filesystem API |
@@ -50,7 +50,7 @@ The model proposes. **Our runtime decides what is real, allowed, and durable.**
 | OS idea | What we do |
 |---------|------------|
 | Process address space | **Session mounts** — only the virtual paths you attach |
-| Filesystem | **[`vfs`](docs/vfs.md)** — local, S3, brain Engrams, later Drive/Docs behind one path API |
+| Filesystem | **[`vfs`](docs/vfs.md)** — local, S3, brain Engrams, Google Drive/Docs/Sheets, Microsoft Graph behind one path API |
 | File contents | **Content IR** — what the agent edits (lines + Markdown block outline when applicable; rich WYSIWYG later). Codecs turn that into storage bytes on persist |
 | Syscalls | **Tools**, and later a **custom agent shell** and script guests, all through a **capability broker** |
 | Kernel | **Eventually** Linux eBPF / cgroup / seccomp as the backstop when something tries to cheat |
@@ -83,7 +83,7 @@ Models will always be probabilistic. **The harness does not have to be.** We are
 | Context turns into sludge | Plans, todos, **handoffs**—only carry what the next work needs ([AGENTS.md](AGENTS.md)) |
 | Disk and “open buffer” disagree | Session-visible **IR**; the provider persists on **WriteDocument** ([docs/vfs.md](docs/vfs.md)) |
 | Edits clobber each other silently | Content **`rev`** (hash)—stale write fails closed, re-read and retry |
-| Crash mid-run, state evaporates | **Checkpoints** + [stores](https://pkg.go.dev/github.com/ryanaldo34/tacklr/stores) (memory or Postgres) |
+| Crash mid-run, state evaporates | **Checkpoints** + [SnapshotStore](docs/durable.md) (same blob as [`stores.SessionCheckpoint`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/stores)) |
 | Tools side-effect into the void | Structured results, plan effects, stream events—you can see what happened |
 | Knowledge goes stale in the window | **Brain** on demand; optional [vfsindex](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfsindex) to index mounts |
 
@@ -112,7 +112,7 @@ Security is a **platform property**. If it only lives in the system prompt, you 
 | **Harness** | Turn loop, tools, plan, context, save/load | [`tacklr`](https://pkg.go.dev/github.com/ryanaldo34/tacklr) |
 | **VFS** | Mounts, IR, provider persist | [docs/vfs.md](docs/vfs.md) · [`vfs`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfs) |
 | **Store** | Checkpoint blob types (`SessionCheckpoint`) | [`stores`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/stores) |
-| **Runtime** | Session kernel (in-process or Temporal) | [`durable`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/durable) |
+| **Runtime** | Session kernel (in-process or Temporal) | [docs/durable.md](docs/durable.md) · [`durable`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/durable) |
 | **Brain** | Knowledge (optional) | [`brain`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/brain) |
 | **Server** | `Protocol` interface over Runtime. ACP is the native option | [`server`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/server) |
 
@@ -121,6 +121,8 @@ A **turn** is one prompt (or resume after interrupt) until done, error, cancel, 
 ```text
 create_plan → tools → complete_todo → handoff → next work
 ```
+
+A model round may emit several tool calls. Embed and in-process run that **whole batch** (siblings finish even if one parks for HITL). Temporal runs Tool activities one SnapshotStore etag at a time and keeps leftover calls in **workflow history**. The next model request waits until every `function_call` has a `function_call_output` (or the call is still parked).
 
 ---
 
@@ -138,7 +140,6 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/inference"
-	"github.com/ryanaldo34/tacklr/stores"
 )
 
 func main() {
@@ -149,14 +150,16 @@ func main() {
 		WithApiKey(os.Getenv("OPENAI_API_KEY")).
 		WithModel(os.Getenv("OPENAI_MODEL"))
 
-	agent := tacklr.NewAgent(ctx, tacklr.AgentOptions{
+	agent, err := tacklr.NewAgent(ctx, tacklr.AgentOptions{
 		Config: tacklr.Config{
 			MaxWindowSize: 8192,
 			SystemPrompt:  "You are a concise assistant.",
 		},
 		Model: model,
-		Store: stores.NewInMemoryStore(),
 	})
+	if err != nil {
+		panic(err)
+	}
 	defer agent.Close()
 
 	events, err := agent.Run(ctx, "Outline three steps to organize a weekly operations review.")
@@ -200,13 +203,13 @@ Construct with `NewTool(ToolConfig{...})`. After construction, read metadata thr
 ### Sessions
 
 ```go
-agent := tacklr.NewAgent(ctx, opts)
+agent, _ := tacklr.NewAgent(ctx, opts)
 cp, _ := agent.Checkpoint()
 restored, _ := tacklr.NewAgent(ctx, opts)
 _ = restored.RestoreCheckpoint(*cp)
 ```
 
-Checkpoints cover conversation, plan, tool/user state, and pending interrupts. In-memory for throwaway runs; Postgres when you need durability. VFS writes persist immediately (write-through IR); checkpoints store mount specs, not a dirty document cache.
+Checkpoints cover conversation, plan, tool/user state, and pending interrupts. Embed (`NewAgent`) holds that in process memory unless you snapshot yourself. `durable.Runtime` writes the same blob to SnapshotStore (memory by default). Package [`stores`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/stores) is the blob type, not a session I/O driver. VFS writes persist immediately (write-through IR); checkpoints store mount recipes, not file bytes or tokens.
 
 ### Host tools vs plan system
 
@@ -257,7 +260,7 @@ Temporal ships out of the box: `telemetry.Init` installs the process-wide OpenTe
 
 Postgres Query/Exec on `brain.PostgresStore` and `server.PostgresWireStore` emit otelpgx client spans as children of the caller context, so they share the `tacklr.turn` / `tacklr.tool` trace after `Init`. Hosts pass the request `ctx` through; they do not configure pgx tracing.
 
-Nothing configured still installs a replay-safe no-op provider so Temporal workflows do not panic. Point `OTEL_EXPORTER_OTLP_ENDPOINT` at your collector when you want data.
+Nothing configured still installs a replay-safe no-op provider so Temporal workflows do not panic. Point `OTEL_EXPORTER_OTLP_ENDPOINT` at your collector when you want data. `OTEL_SDK_DISABLED=true` keeps the no-op provider. Hosts embedding the SDK pass `telemetry.Config{OTLPEndpoint: ...}` into `Init`.
 
 ---
 
@@ -271,8 +274,9 @@ Nothing configured still installs a replay-safe no-op provider so Temporal workf
 | `brain` | Knowledge engine | [docs](docs/knowledge.md) · [pkg](https://pkg.go.dev/github.com/ryanaldo34/tacklr/brain) |
 | `brain/helixgraph` | Optional graph adapter | [pkg](https://pkg.go.dev/github.com/ryanaldo34/tacklr/brain/helixgraph) |
 | `inference` | OpenAI-compatible model client | [pkg](https://pkg.go.dev/github.com/ryanaldo34/tacklr/inference) |
-| `server` | Multi-agent registry and protocol adapters | [pkg](https://pkg.go.dev/github.com/ryanaldo34/tacklr/server) |
-| `stores` | Session checkpoints | [pkg](https://pkg.go.dev/github.com/ryanaldo34/tacklr/stores) |
+| `server` | Protocol host over Runtime; ACP native (`NewACPProtocol`) | [pkg](https://pkg.go.dev/github.com/ryanaldo34/tacklr/server) |
+| `durable` | Session kernel (in-process or Temporal) | [docs](docs/durable.md) · [pkg](https://pkg.go.dev/github.com/ryanaldo34/tacklr/durable) |
+| `stores` | Checkpoint blob (`SessionCheckpoint`); I/O is SnapshotStore | [pkg](https://pkg.go.dev/github.com/ryanaldo34/tacklr/stores) |
 | `interrupt` | Pause/resume types | [pkg](https://pkg.go.dev/github.com/ryanaldo34/tacklr/interrupt) |
 | `streaming` | Shared messages and events | [pkg](https://pkg.go.dev/github.com/ryanaldo34/tacklr/streaming) |
 | `mcp` | MCP config types | [pkg](https://pkg.go.dev/github.com/ryanaldo34/tacklr/mcp) |
@@ -283,25 +287,28 @@ Nothing configured still installs a replay-safe no-op provider so Temporal workf
 
 ## Roadmap: finishing the agent OS
 
-We already have the harness, VFS, IR, brain hooks, and checkpoints. Next we close the loop on **execution**: FUSE (or projection), a **custom agent shell**, sandboxed **Python/JS**, a **capability broker** (approve what happens *during* a tool call), and eventually **eBPF** on Linux so the kernel agrees with the runtime.
+We already have the harness, VFS (including FUSE projection), IR, brain hooks, and checkpoints. Next we close the loop on **execution**: a **custom agent shell**, sandboxed **Python/JS**, a **capability broker** (approve what happens *during* a tool call), and eventually **eBPF** on Linux so the kernel agrees with the runtime.
 
 ### Feature status
 
 | Area | Status | Notes |
 |------|--------|--------|
 | Planning + handoffs (ACM) | **Shipped** | Plans, todos, context rebuild on complete |
-| Checkpoints / stores | **Shipped** | Conversation, plan, interrupts |
+| Checkpoints / stores | **Shipped** | `SessionCheckpoint` blob; Runtime persists via SnapshotStore |
 | Inference strategy | **Shipped** | OpenAI-compatible streams |
 | Brain | **Shipped** | Optional; tools only when wired |
-| VFS mounts (local, S3) | **Shipped** | [docs/vfs.md](docs/vfs.md) |
+| VFS mounts (local, S3, Drive, Graph) | **Shipped** | [docs/vfs.md](docs/vfs.md); Graph defaults to organization (`siteId`/`driveId`) |
 | Content IR (text) | **Shipped** | Provider translates IR and persists immediately |
 | Content `rev` + file tools | **Shipped** | When VFS is set |
 | Progressive line windows | **Shipped** | Large text without always full materialize |
 | Structured Markdown / `block_id` | **Shipped** | Projected heading blocks; outline + block replace; index props |
+| Google Docs / Sheets IR | **Shipped** | Native Docs/Sheets APIs; GFM pipe tables become real Docs grids |
+| Word / Excel file codecs | **Shipped** | `.docx` / `.xlsx` on local, S3, Drive files, Graph |
 | Mount → brain (`vfsindex`) | **Shipped** | Optional bridge; MD by blocks, other text by lines; async reindex later |
-| Unified `read` / `replace` for all media | **Planned** | One edit surface; codecs do the rest |
-| Rich document IR (WYSIWYG) | **Planned** | Word/Docs codecs → same Block schema + style metadata |
 | FUSE projection | **Shipped** | `MountSession.FuseMount` — `rg` / `fd` / `ls` on the session tree |
+| Tool batches + HITL | **Shipped** | Whole batch runs; never infer while pending; Temporal leftovers in workflow history |
+| Unified `read` / `replace` for all media | **Planned** | One edit surface; codecs do the rest |
+| Rich document IR (WYSIWYG UI) | **Planned** | Same Block schema + style metadata in an editor |
 | Custom agent shell | **Planned** | Our shell, VFS-backed—not raw host bash as the main path |
 | Sandboxed Python / JS | **Planned** | Guests with our APIs only |
 | Capability broker | **Planned** | Mid-flight allow / deny / ask |
@@ -341,7 +348,7 @@ flowchart TB
   subgraph backends [Opaque backends]
     Local[Local jail]
     S3[S3 / object]
-    Other[Drive / Docs / …]
+    Other[Drive / Graph / Docs]
   end
 
   subgraph kernel [Linux backstop eventually]

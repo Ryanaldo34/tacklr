@@ -35,6 +35,9 @@ type Engine interface {
 	RunInference(ctx context.Context, st *TurnState, out chan streaming.StreamEvent) (InferenceStep, error)
 	RunToolCall(ctx context.Context, tc streaming.ToolCall, out chan streaming.StreamEvent) (ToolStep, error)
 	ApplyResume(finishedInterrupts map[string][]byte) error
+	// RecordToolResult appends a RoleTool message without executing (Temporal
+	// spawn_worker after the child workflow already ran).
+	RecordToolResult(tc streaming.ToolCall, output string)
 }
 
 var bound func(any) Engine

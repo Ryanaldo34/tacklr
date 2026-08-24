@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
@@ -160,33 +161,37 @@ func (r *Runtime) driveTurn(ctx context.Context, p *sessionProc, user *tacklr.Me
 			continue
 		}
 		st.HadToolRound = true
-		interrupted := false
+		// One harness, one snapshot: run the whole batch like embed. Temporal
+		// cannot do this (activity etag chain); it keeps leftovers in history.
+		var (
+			mu          sync.Mutex
+			interrupted bool
+		)
+		var wg sync.WaitGroup
 		for _, tc := range toolCalls {
-			if ctx.Err() != nil {
-				return cancelled()
-			}
-			step, toolErr := eng.RunToolCall(ctx, tc, out)
-			if ctx.Err() != nil {
-				return cancelled()
-			}
-			if step.Interrupted {
-				if err := r.persistHarness(ctx, p, h); err != nil {
-					return r.fail(ctx, p, fmt.Errorf("persist interrupt: %w", err))
+			wg.Add(1)
+			go func(tc streaming.ToolCall) {
+				defer wg.Done()
+				if ctx.Err() != nil {
+					return
 				}
-				interrupted = true
-				break
-			}
-			if toolErr != nil {
-				if err := r.persistHarness(ctx, p, h); err != nil {
-					return r.fail(ctx, p, err)
+				step, _ := eng.RunToolCall(ctx, tc, out)
+				if step.Interrupted {
+					mu.Lock()
+					interrupted = true
+					mu.Unlock()
 				}
-			}
+			}(tc)
 		}
-		if interrupted {
-			return turnYield
+		wg.Wait()
+		if ctx.Err() != nil {
+			return cancelled()
 		}
 		if err := r.persistHarness(ctx, p, h); err != nil {
 			return r.fail(ctx, p, err)
+		}
+		if interrupted {
+			return turnYield
 		}
 		toolCalls = nil
 	}

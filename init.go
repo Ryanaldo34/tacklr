@@ -36,6 +36,10 @@ func (e harnessDrive) PendingToolCalls() []streaming.ToolCall {
 	return e.a.runnableToolCalls()
 }
 
+func (e harnessDrive) RecordToolResult(tc streaming.ToolCall, output string) {
+	e.a.recordToolResult(tc, output)
+}
+
 func (e harnessDrive) RunInference(ctx context.Context, st *drive.TurnState, out chan streaming.StreamEvent) (drive.InferenceStep, error) {
 	return e.a.runInference(ctx, st, out)
 }

@@ -264,6 +264,106 @@ func TestAskUserChoiceYieldsThenResumeCompletes(t *testing.T) {
 	}
 }
 
+// TestPrompt_parallelBatchHitlRunsRemainder: durable driver used to abort the
+// rest of a model tool batch when one call parked. Next inference then sent a
+// function_call without function_call_output (Azure 400). Resume must still
+// run the leftover tools so the following model turn sees every result.
+func TestPrompt_parallelBatchHitlRunsRemainder(t *testing.T) {
+	ctx := t.Context()
+	var (
+		invokes int
+		results []string
+	)
+	model := &testkit.ScriptedModel{
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			invokes++
+			if invokes == 1 {
+				ch <- tacklr.LLMResponseChunk{
+					Type: tacklr.StreamEventFunctionCall,
+					ToolCalls: []tacklr.ToolCall{
+						{ID: "fc_alpha", CallID: "call_alpha", Name: "alpha", Arguments: `{}`},
+						{ID: "fc_gate", CallID: "call_gate", Name: "gate", Arguments: `{}`},
+						{ID: "fc_beta", CallID: "call_beta", Name: "beta", Arguments: `{}`},
+					},
+					IsComplete: true,
+				}
+				return
+			}
+			for _, m := range msgs {
+				if m != nil && m.Role == tacklr.RoleTool {
+					results = append(results, m.Content)
+				}
+			}
+			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "all-three", IsComplete: true}
+		},
+	}
+	gate := tacklr.NewTool(tacklr.ToolConfig{
+		Name:   "gate",
+		OnCall: []tacklr.OnCallFunc{tacklr.ToolPermissionOnCall},
+		Handler: func(context.Context) (string, error) {
+			return "gate-ok", nil
+		},
+	})
+	rt := New(newCatalog(t, model, durable.AgentSpec{
+		Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{
+			tacklr.NewTool(tacklr.ToolConfig{Name: "alpha", Handler: func(context.Context) (string, error) { return "from-alpha", nil }}),
+			gate,
+			tacklr.NewTool(tacklr.ToolConfig{Name: "beta", Handler: func(context.Context) (string, error) { return "from-beta", nil }}),
+		}},
+	}), WithProjection(vfs.DirectProjection{}))
+	id, err := rt.CreateSession(ctx, durable.CreateSession{AgentID: "default"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rt.Prompt(ctx, id, durable.Prompt{Text: "batch"}); err != nil {
+		t.Fatal(err)
+	}
+	sub, err := rt.Subscribe(ctx, id, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sub.Close() })
+	got := waitEvents(t, sub, 8*time.Second)
+	var yielded bool
+	for _, ev := range got {
+		if ev.Type == streaming.StreamEventInterrupt {
+			yielded = true
+		}
+	}
+	if !yielded {
+		t.Fatalf("want HITL yield, got %+v", summarize(got))
+	}
+	payload, _ := json.Marshal(map[string]string{"optionId": "allow-once"})
+	if err := rt.Resume(ctx, id, durable.Resume{Responses: map[string][]byte{"fc_gate": payload}}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.After(8 * time.Second)
+	complete := false
+	for !complete {
+		select {
+		case ev, ok := <-sub.Events():
+			if !ok {
+				t.Fatal("subscription closed before complete")
+			}
+			if ev.Type == streaming.StreamEventComplete || (ev.Type == streaming.StreamEventMessage && ev.Content == "all-three") {
+				complete = true
+			}
+			if ev.Type == streaming.StreamEventError {
+				t.Fatalf("resume error: %v %s", ev.Error, ev.Content)
+			}
+		case <-deadline:
+			t.Fatal("timeout waiting for resume complete")
+		}
+	}
+	saw := map[string]bool{}
+	for _, c := range results {
+		saw[c] = true
+	}
+	if !saw["from-alpha"] || !saw["gate-ok"] || !saw["from-beta"] {
+		t.Fatalf("next model turn missing leftover tool results: %v", results)
+	}
+}
+
 func TestCancelWhileRunningEndsSubscriptionThenNextPromptRuns(t *testing.T) {
 	ctx := t.Context()
 	started := make(chan struct{}, 1)

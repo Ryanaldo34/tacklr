@@ -93,14 +93,16 @@ func (g *graphSDK) item(driveID, itemID string) *drives.ItemItemsDriveItemItemRe
 	return g.client.Drives().ByDriveId(driveID).Items().ByDriveItemId(itemID)
 }
 
-func (g *graphSDK) resolveRoot(ctx context.Context, driveID, itemID, siteID string) (string, string, error) {
+func (g *graphSDK) resolveRoot(ctx context.Context, driveID, itemID, siteID, account string) (string, string, error) {
 	if driveID == "" {
 		var drive models.Driveable
 		var err error
 		if siteID != "" {
 			drive, err = g.client.Sites().BySiteId(siteID).Drive().Get(ctx, nil)
-		} else {
+		} else if account == AccountPersonal {
 			drive, err = g.client.Me().Drive().Get(ctx, nil)
+		} else {
+			return "", "", fmt.Errorf("vfs: msgraph organization account requires siteId or driveId")
 		}
 		if err != nil {
 			return "", "", mapGraphError(err)

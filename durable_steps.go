@@ -27,9 +27,9 @@ func (a *AgentHarness) absorbUser(ctx context.Context, user *Message, out chan S
 func (a *AgentHarness) runnableToolCalls() []ToolCall {
 	pending := a.pendingSnapshot()
 	out := make([]ToolCall, 0, len(pending))
-	for _, tc := range pending {
-		if !tc.InterruptActive && tc.ToolCall != nil {
-			out = append(out, *tc.ToolCall)
+	for _, p := range pending {
+		if !p.InterruptActive && p.ToolCall != nil {
+			out = append(out, *p.ToolCall)
 		}
 	}
 	return out
@@ -60,6 +60,10 @@ func (a *AgentHarness) runInference(ctx context.Context, st *drive.TurnState, ou
 	if st == nil {
 		st = &drive.TurnState{}
 	}
+	// Pair any function_call still missing a tool message before the provider
+	// round. Durable HITL used to drop the rest of a parallel batch; Azure then
+	// 400s "No tool output found for function call".
+	a.pairOpenToolCalls("unpaired tool call")
 
 	if a.maxTurnRequests > 0 && st.ModelRequests >= a.maxTurnRequests {
 		err := fmt.Errorf("%w: limit %d", ErrMaxTurnRequests, a.maxTurnRequests)

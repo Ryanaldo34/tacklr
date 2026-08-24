@@ -256,6 +256,85 @@ func TestSessionWorkflow_askUserYieldThenResume(t *testing.T) {
 	}
 }
 
+// TestSessionWorkflow_parallelBatchHitlRunsRemainder: Temporal ran Tool
+// activities sequentially and broke the batch on HITL, so leftover function
+// calls never got outputs. Resume must still execute the rest of the batch.
+func TestSessionWorkflow_parallelBatchHitlRunsRemainder(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+	env.SetWorkerOptions(worker.Options{EnableSessionWorker: true})
+	var (
+		invokes int
+		results []string
+	)
+	cat := durable.NewCatalog("default")
+	model := &testkit.ScriptedModel{
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			invokes++
+			if invokes == 1 {
+				ch <- tacklr.LLMResponseChunk{
+					Type: tacklr.StreamEventFunctionCall,
+					ToolCalls: []tacklr.ToolCall{
+						{ID: "fc_alpha", CallID: "call_alpha", Name: "alpha", Arguments: `{}`},
+						{ID: "fc_gate", CallID: "call_gate", Name: "gate", Arguments: `{}`},
+						{ID: "fc_beta", CallID: "call_beta", Name: "beta", Arguments: `{}`},
+					},
+					IsComplete: true,
+				}
+				return
+			}
+			for _, m := range msgs {
+				if m != nil && m.Role == tacklr.RoleTool {
+					results = append(results, m.Content)
+				}
+			}
+			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "all-three", IsComplete: true}
+		},
+	}
+	cat.Register("default", durable.AgentSpec{
+		Options: tacklr.AgentOptions{
+			Config: tacklr.Config{MaxWindowSize: 8192},
+			Model:  model,
+			Tools: []*tacklr.Tool{
+				tacklr.NewTool(tacklr.ToolConfig{Name: "alpha", Handler: func(context.Context) (string, error) { return "from-alpha", nil }}),
+				tacklr.NewTool(tacklr.ToolConfig{
+					Name:    "gate",
+					OnCall:  []tacklr.OnCallFunc{tacklr.ToolPermissionOnCall},
+					Handler: func(context.Context) (string, error) { return "gate-ok", nil },
+				}),
+				tacklr.NewTool(tacklr.ToolConfig{Name: "beta", Handler: func(context.Context) (string, error) { return "from-beta", nil }}),
+			},
+		},
+	})
+	fallback := inprocess.NewMemoryEventLog()
+	env.RegisterWorkflow(SessionWorkflow)
+	env.RegisterActivity(newActs(cat, fallback, true))
+
+	id := durable.SessionID("sess-parallel-hitl")
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(signalPrompt, promptSignal{Text: "batch"})
+	}, time.Millisecond)
+	env.RegisterDelayedCallback(func() {
+		payload, _ := json.Marshal(map[string]string{"optionId": "allow-once"})
+		env.SignalWorkflow(signalResume, resumeSignal{Responses: map[string][]byte{"fc_gate": payload}})
+	}, 20*time.Millisecond)
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(signalClose, nil)
+	}, 80*time.Millisecond)
+
+	env.ExecuteWorkflow(SessionWorkflow, WorkflowInput{SessionID: id, AgentID: "default"})
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatal(err)
+	}
+	saw := map[string]bool{}
+	for _, c := range results {
+		saw[c] = true
+	}
+	if !saw["from-alpha"] || !saw["gate-ok"] || !saw["from-beta"] {
+		t.Fatalf("next model turn missing leftover tool results: %v", results)
+	}
+}
+
 func TestSessionWorkflow_hitlCancel(t *testing.T) {
 	var suite testsuite.WorkflowTestSuite
 	env := suite.NewTestWorkflowEnvironment()

@@ -27,6 +27,31 @@ func TestNewCheckpoint_marshalInterruptErrors(t *testing.T) {
 	}
 }
 
+func TestSessionCheckpoint_pendingToolCallRoundTrip(t *testing.T) {
+	ptc := map[string]PendingToolCall{
+		"fc_g": {
+			ToolCall:        &streaming.ToolCall{ID: "fc_g", CallID: "call_g", Name: "gate"},
+			InterruptActive: true,
+		},
+	}
+	cp, err := NewCheckpoint([]*streaming.Message{{Role: streaming.RoleUser, Content: "hi"}}, ptc, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(cp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got SessionCheckpoint
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	g := got.PendingToolCalls()["fc_g"]
+	if !g.InterruptActive || g.ToolCall == nil || g.ToolCall.Name != "gate" {
+		t.Fatalf("gate pending: %+v", g)
+	}
+}
+
 func TestSessionCheckpoint_copyHelpersAndJSON(t *testing.T) {
 	cp, err := NewCheckpoint([]*streaming.Message{{Role: streaming.RoleUser, Content: "hi"}}, nil, nil, nil, nil, nil)
 	if err != nil {
