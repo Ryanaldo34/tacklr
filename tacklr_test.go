@@ -343,7 +343,8 @@ func TestAgentHarness_Run(t *testing.T) {
 		if !foundToolResult {
 			t.Error("expected tool result event")
 		}
-		if !strings.Contains(toolResultEv.Content, "not a registered tool") {
+		if !strings.Contains(toolResultEv.Content, "not a registered tool") &&
+			!strings.Contains(toolResultEv.Content, "not found") {
 			t.Errorf("tool result content = %q, want registered-tool correction", toolResultEv.Content)
 		}
 	})

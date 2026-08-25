@@ -206,7 +206,7 @@ func (a *AgentHarness) runToolCall(ctx context.Context, tc ToolCall, out chan St
 	toolCtx, toolSpan := telemetry.StartToolSpan(ctx, tc.Name, tc.Namespace)
 	tool := a.findTool(tc.Name, tc.Namespace)
 	if tool == nil {
-		toolErr := AgentErrorf(ErrNotFound, "%s is not a registered tool. Use a name from the available tools", tc.Name)
+		toolErr := AgentErrorf(ErrNotFound, "%s: not found. That is not a registered tool. Use a name from the available tools", tc.Name)
 		toolSpan.Finish("error", toolErr)
 		msg := a.emitToolResult(out, tc, toolErr.Error(), "error")
 		_ = a.addToContext(ctx, msg, out)

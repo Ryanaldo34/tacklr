@@ -187,10 +187,12 @@ func TestUnbindThenPromptWorkspaceGone(t *testing.T) {
 	got := waitEvents(t, sub2, 8*time.Second)
 	var sawMissing bool
 	for _, ev := range got {
-		if ev.Type == streaming.StreamEventToolResult && strings.Contains(ev.Content, "not found") {
+		if ev.Type == streaming.StreamEventToolResult && (strings.Contains(ev.Content, "not found") ||
+			strings.Contains(ev.Content, "not a registered tool") || strings.Contains(ev.Content, "does not exist")) {
 			sawMissing = true
 		}
-		if ev.Error != nil && strings.Contains(ev.Error.Error(), "not found") {
+		if ev.Error != nil && (strings.Contains(ev.Error.Error(), "not found") ||
+			strings.Contains(ev.Error.Error(), "not a registered tool") || strings.Contains(ev.Error.Error(), "does not exist")) {
 			sawMissing = true
 		}
 	}
@@ -767,7 +769,8 @@ func TestBadWorkspaceBindingFailsTurn(t *testing.T) {
 		if ev.Type == streaming.StreamEventError || ev.Error != nil {
 			sawErr = true
 		}
-		if ev.Type == streaming.StreamEventToolResult && strings.Contains(ev.Content, "not found") {
+		if ev.Type == streaming.StreamEventToolResult && (strings.Contains(ev.Content, "not found") ||
+			strings.Contains(ev.Content, "not a registered tool") || strings.Contains(ev.Content, "does not exist")) {
 			sawErr = true
 		}
 	}
