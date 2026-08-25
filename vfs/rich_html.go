@@ -1,9 +1,23 @@
 package vfs
 
 import (
+	"html"
 	"strconv"
 	"strings"
 )
+
+// DecodeHTMLBlocks maps pretty HTML to Block IR (headings, paragraphs, lists,
+// tables, marks, existing images). It does not assign stable block IDs.
+func DecodeHTMLBlocks(data []byte) ([]Block, error) {
+	return decodeDocsHTML(data)
+}
+
+// EncodeHTMLBlocks writes pretty HTML: one heading, paragraph, list item, or
+// table per line. Color style is emitted only when stored on the IR.
+func EncodeHTMLBlocks(blocks []Block) string {
+	s, _ := projectHTMLSpans(blocks, nil)
+	return s
+}
 
 func projectHTMLSpans(blocks []Block, tabs []DocTab) (string, []Span) {
 	titleOf := map[string]string{}
@@ -39,10 +53,7 @@ func projectHTMLSpans(blocks []Block, tabs []DocTab) (string, []Span) {
 		}
 	}
 	writeEsc := func(s string) {
-		writeHTMLEscaped(&b, s)
-		if n := strings.Count(s, "\n"); n > 0 {
-			line += n
-		}
+		write(html.EscapeString(s))
 	}
 	write("<html><body>\n")
 
@@ -54,7 +65,7 @@ func projectHTMLSpans(blocks []Block, tabs []DocTab) (string, []Span) {
 		for len(openLists) > to {
 			write("</")
 			write(openLists[len(openLists)-1])
-			write(">")
+			write(">\n")
 			openLists = openLists[:len(openLists)-1]
 		}
 		if len(openLists) == 0 {
@@ -86,16 +97,11 @@ func projectHTMLSpans(blocks []Block, tabs []DocTab) (string, []Span) {
 		tabID := blockAttr(bl, "tab_id")
 		if useSections && (i == 0 || tabID != curTab) {
 			closeLists(0)
-			if len(openLists) == 0 {
-				write("\n")
-			}
-			// closeLists writes tags without newline; keep section on its own lines
 			openTab(tabID)
 		}
 		if bl.Kind != BlockKindListItem {
 			if len(openLists) > 0 {
 				closeLists(0)
-				write("\n")
 			}
 		}
 		start := line
@@ -132,14 +138,13 @@ func projectHTMLSpans(blocks []Block, tabs []DocTab) (string, []Span) {
 			}
 			if listID != curListID && curListID != "" {
 				closeLists(0)
-				write("\n")
 				start = line
 			}
 			curListID = listID
 			for len(openLists) < level {
 				write("<")
 				write(listType)
-				write(">")
+				write(">\n")
 				openLists = append(openLists, listType)
 			}
 			if len(openLists) > level {
@@ -155,11 +160,10 @@ func projectHTMLSpans(blocks []Block, tabs []DocTab) (string, []Span) {
 				}
 			}
 			if !nextNests {
-				write("</li>")
+				write("</li>\n")
 			}
 			if i+1 >= len(blocks) || blocks[i+1].Kind != BlockKindListItem || blockAttr(blocks[i+1], "list_id") != listID {
 				closeLists(0)
-				write("\n")
 			}
 		case BlockKindTable:
 			grid, err := parseTSV(bl.Text)
@@ -171,7 +175,11 @@ func projectHTMLSpans(blocks []Block, tabs []DocTab) (string, []Span) {
 				write("<tr>")
 				for _, cell := range row {
 					write("<td>")
-					writeInlineHTML(write, writeEsc, Block{Text: cell, Runs: ParseInline(cell)})
+					if strings.ContainsAny(cell, "\\*_~[]") {
+						writeInlineHTML(write, writeEsc, Block{Text: cell, Runs: ParseInline(cell)})
+					} else {
+						writeEsc(cell)
+					}
 					write("</td>")
 				}
 				write("</tr>")
@@ -207,39 +215,12 @@ func projectHTMLSpans(blocks []Block, tabs []DocTab) (string, []Span) {
 	}
 	if len(openLists) > 0 {
 		closeLists(0)
-		write("\n")
 	}
 	if useSections && curTab != "\x00" {
 		write("</section>\n")
 	}
 	write("</body></html>")
 	return b.String(), spans
-}
-
-// writeHTMLEscaped writes s with the same replacements as html.EscapeString.
-func writeHTMLEscaped(b *strings.Builder, s string) {
-	last := 0
-	for i := 0; i < len(s); i++ {
-		var esc string
-		switch s[i] {
-		case '&':
-			esc = "&amp;"
-		case '\'':
-			esc = "&#39;"
-		case '<':
-			esc = "&lt;"
-		case '>':
-			esc = "&gt;"
-		case '"':
-			esc = "&#34;"
-		default:
-			continue
-		}
-		b.WriteString(s[last:i])
-		b.WriteString(esc)
-		last = i + 1
-	}
-	b.WriteString(s[last:])
 }
 
 func writeInlineHTML(write, writeEsc func(string), bl Block) {

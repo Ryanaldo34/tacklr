@@ -163,8 +163,8 @@ func TestSpawnWorker_success(t *testing.T) {
 		t.Fatalf("turn error: %+v", summarizeEvents(got))
 	}
 	// Categories (ErrNotFound / ErrInvalid / ErrFailed) plus a specific wrap.
-	requireToolResult(t, got, `"nosuch": not found`)
-	requireToolResult(t, got, "empty task")
+	requireToolResult(t, got, "not registered")
+	requireToolResult(t, got, "task_description_and_context")
 	requireToolResult(t, got, "model down")
 	requireToolResult(t, got, "no output")
 	requireToolResult(t, got, "worker answer")

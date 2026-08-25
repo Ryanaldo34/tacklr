@@ -7,7 +7,7 @@ There are three ways to run an agent:
 ## Path A — embedder (`NewAgent` + `Run`)
 
 ```go
-h := tacklr.NewAgent(ctx, opts)
+h, _ := tacklr.NewAgent(ctx, opts)
 events, _ := h.Run(ctx, prompt)
 // HITL: read yield, then h.ReturnFromInterrupt
 ```
@@ -31,8 +31,8 @@ One goroutine per session runs the harness wait loop. HITL parks that goroutine 
 
 The host runs:
 
-1. A Tacklr Temporal worker (`EnableSessionWorker: true`) that registers `SessionWorkflow`, `Inference`, and `Tool`.
-2. A protocol process (optional) whose `durable.Runtime` is `temporal.New(client, taskQueue, catalog)`. Autonomous jobs skip the protocol and call Runtime (or start the workflow) with a payload.
+1. A Tacklr Temporal worker (`EnableSessionWorker: true`) that registers `SessionWorkflow` plus the `Inference`, `Tool`, and `CommitToolOutput` activities.
+2. A protocol process (optional) whose `durable.Runtime` is `temporal.New(client, taskQueue, catalog)`. Pass `WithWorkerSessionTimeout` to pin a turn to one worker; omit it to skip worker sessions. Autonomous jobs skip the protocol and call Runtime (or start the workflow) with a payload.
 
 | Tacklr concept | Temporal |
 |----------------|----------|
@@ -40,9 +40,27 @@ The host runs:
 | Harness loop | Workflow function |
 | Inference / tool | Activities (`Inference`, `Tool`) |
 | Subagent | Child workflow |
-| Sticky VFS locality | Worker Sessions (`CreateSession` while the turn runs; `CompleteSession` before HITL park) |
+| Worker locality | Optional Temporal worker session on `temporal.New` (`WithWorkerSessionTimeout`). Zero (default) skips `CreateSession`. Not a VFS setting. Session timeout and client cancel both cancel that context; the wait loop selects on it and ends the turn. |
 | Progress | Workflow Streams (`events`, `retry`, `close`) |
 | HITL | Signal `Resume` (never inside an activity) |
+| Leftover tools after HITL | Workflow variable (`rest`) replayed from history |
+| Spawn worker | Child `SessionWorkflow`, then `CommitToolOutput` to append the parent tool result |
+
+The worker registers `SessionWorkflow`, `Inference`, `Tool`, and `CommitToolOutput`.
+
+## Tool batches
+
+A model round can emit several tool calls. The wait loop **does not infer again** until every call in that batch has a result, or a call is parked for HITL.
+
+| Runtime | How the batch runs | Where leftovers live |
+|---------|--------------------|----------------------|
+| Path A embedder | Goroutines on one harness (`WaitGroup`) | Process memory (`pendingToolCalls`) |
+| Path B in-process | Same: parallel `RunToolCall` on one harness; snapshot once at join/yield | SnapshotStore (parked interrupt only) |
+| Path C Temporal | Sequential `Tool` activities (they share SnapshotStore etag) | Workflow history, not the snapshot |
+
+Conversation (window, plan, parked interrupt) is always SnapshotStore. Temporal history is the scheduler: which calls remain after HITL. Do not copy that leftover list into the snapshot.
+
+Azure/OpenAI Responses requires each `function_call` to be followed by a `function_call_output` with the same `call_id`. Pairing happens at marshal time. The invariant is: never start Inference with an open batch.
 
 ## Auth and VFS context
 
@@ -87,7 +105,7 @@ Kernel, harness, VFS, and Temporal files compile with no protocol imports.
 
 | Store | Lifetime | Contents |
 |-------|----------|----------|
-| SnapshotStore | One Runtime session | Window, plan, pending tools, interrupts, parked-worker checkpoints, VFS recipes (no tokens, no file bytes) |
+| SnapshotStore | One Runtime session | Window, plan, parked interrupts, parked-worker checkpoints, VFS recipes (no tokens, no file bytes). Temporal leftover tool calls are **not** stored here. |
 
 `Close` deletes the runtime snapshot. A new session id does not load a previous snapshot.
 

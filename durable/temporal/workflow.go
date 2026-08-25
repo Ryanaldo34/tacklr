@@ -3,6 +3,7 @@ package temporal
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"go.temporal.io/sdk/contrib/workflowstreams"
@@ -44,15 +45,18 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 		for cancelCh.ReceiveAsync(&ignored) {
 		}
 	}
-	emitCancel := func() {
-		if stream == nil {
+	emitStreamErr := func(msg string) {
+		if stream == nil || msg == "" {
 			return
 		}
 		_ = stream.Topic(durable.TopicEvents).Publish(streaming.StreamEvent{
 			Type:    streaming.StreamEventError,
-			Fail:    context.Canceled.Error(),
-			Content: context.Canceled.Error(),
+			Fail:    msg,
+			Content: msg,
 		})
+	}
+	emitCancel := func() {
+		emitStreamErr(context.Canceled.Error())
 	}
 
 	selectorWait := func() waitSignal {
@@ -97,21 +101,11 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 
 	runSlice := func(user *streaming.Message, resume map[string][]byte, auth durable.AuthContext, kind string) {
 		applyAuth(auth)
-		sessionCtx := ctx
-		if sctx, err := workflow.CreateSession(ctx, &workflow.SessionOptions{
-			CreationTimeout:  2 * time.Second,
-			ExecutionTimeout: 10 * time.Minute,
-		}); err != nil {
-			workflow.GetLogger(ctx).Error("worker session", "error", err)
-		} else {
-			sessionCtx = sctx
-		}
+		sessionCtx, hasSession := openWorkerSession(ctx, in.WorkerSessionTimeout, 2*time.Second)
 
 		var endTurn func(string, error)
 		openTurn := func(k string) {
-			var spanCtx workflow.Context
-			spanCtx, endTurn = startTurn(sessionCtx, agentID, in.SessionID, k)
-			sessionCtx = spanCtx
+			_, endTurn = startTurn(sessionCtx, agentID, in.SessionID, k)
 		}
 		closeTurn := func(outcome string, err error) {
 			if endTurn == nil {
@@ -134,8 +128,9 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 		var turnErr error
 		defer func() {
 			closeTurn(outcome, turnErr)
-			if sessionCtx != ctx {
+			if hasSession {
 				workflow.CompleteSession(sessionCtx)
+				hasSession = false
 			}
 		}()
 
@@ -146,14 +141,35 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 			var err error
 			s := workflow.NewSelector(ctx)
 			s.AddFuture(fut, func(f workflow.Future) { err = f.Get(ctx, result) })
-			s.AddReceive(cancelCh, func(c workflow.ReceiveChannel, more bool) {
-				c.Receive(ctx, nil)
+			abort := func() {
 				cancelAct()
 				err = fut.Get(ctx, result)
+			}
+			s.AddReceive(cancelCh, func(c workflow.ReceiveChannel, more bool) {
+				c.Receive(ctx, nil)
+				abort()
+			})
+			s.AddReceive(cctx.Done(), func(c workflow.ReceiveChannel, more bool) {
+				c.Receive(ctx, nil)
+				abort()
 			})
 			s.Select(ctx)
 			drainCancels()
 			return err
+		}
+		onActErr := func(err error) bool {
+			if err == nil {
+				return false
+			}
+			if turnCanceled(ctx, err) {
+				outcome = telemetry.OutcomeCancelled
+				emitCancel()
+				return true
+			}
+			outcome = telemetry.OutcomeError
+			turnErr = err
+			emitStreamErr(err.Error())
+			return true
 		}
 		hadTools := false
 		reqs := 0
@@ -175,13 +191,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 				}, &out)
 				user = nil
 				resume = nil
-				if err != nil {
-					if turnCanceled(ctx, err) {
-						outcome = telemetry.OutcomeCancelled
-					} else {
-						outcome = telemetry.OutcomeError
-						turnErr = err
-					}
+				if onActErr(err) {
 					break
 				}
 				etag = out.Etag
@@ -196,7 +206,10 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 			next := pending
 			pending = nil
 			stopSlice := false
-			for _, tc := range next {
+			// Sequential Tool activities share SnapshotStore etag. Leftover
+			// calls after HITL stay in this workflow variable (history), not
+			// the snapshot. In-process runs the batch in parallel instead.
+			for i, tc := range next {
 				if tc.Name == spawnWorkerName {
 					var args struct {
 						Task string `json:"task_description_and_context"`
@@ -210,16 +223,33 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 					)
 					cctx := workflow.WithChildOptions(sessionCtx, cwo)
 					if err := workflow.ExecuteChildWorkflow(cctx, SessionWorkflow, WorkflowInput{
-						SessionID: durable.SessionID(cwo.WorkflowID),
-						AgentID:   agentID,
-						Prompt:    args.Task,
-						Auth:      lastAuth,
-						Mounts:    mounts,
+						SessionID:            durable.SessionID(cwo.WorkflowID),
+						AgentID:              agentID,
+						Prompt:               args.Task,
+						Auth:                 lastAuth,
+						Mounts:               mounts,
+						WorkerSessionTimeout: in.WorkerSessionTimeout,
 					}).Get(ctx, nil); err != nil {
 						workflow.GetLogger(ctx).Error("child workflow", "error", err)
-						outcome, turnErr, stopSlice = telemetry.OutcomeError, err, true
+						stopSlice = onActErr(err)
 						break
 					}
+					var cout ToolOutput
+					err := waitAct("CommitToolOutput", CommitToolInput{
+						SessionID:  in.SessionID,
+						AgentID:    agentID,
+						MCPServers: mcp,
+						Etag:       etag,
+						Call:       tc,
+						Output:     "ok",
+						Auth:       lastAuth,
+						Mounts:     mounts,
+					}, &cout)
+					if onActErr(err) {
+						stopSlice = true
+						break
+					}
+					etag = cout.Etag
 					continue
 				}
 				var tout ToolOutput
@@ -232,12 +262,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 					Auth:       lastAuth,
 					Mounts:     mounts,
 				}, &tout)
-				if err != nil {
-					if turnCanceled(ctx, err) {
-						outcome = telemetry.OutcomeCancelled
-					} else {
-						outcome, turnErr = telemetry.OutcomeError, err
-					}
+				if onActErr(err) {
 					stopSlice = true
 					break
 				}
@@ -245,8 +270,10 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 				if !tout.Interrupted {
 					continue
 				}
-				if sessionCtx != ctx {
+				rest := append([]streaming.ToolCall(nil), next[i+1:]...)
+				if hasSession {
 					workflow.CompleteSession(sessionCtx)
+					hasSession = false
 					sessionCtx = ctx
 				}
 				logInfo(ctx, "turn yielded", "agent_id", agentID, "session_id", in.SessionID, "interrupt_id", tout.InterruptID)
@@ -258,13 +285,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 					case signalResume:
 						parked = false
 						applyAuth(ev.resume.Auth)
-						sessionCtx, err = workflow.CreateSession(ctx, &workflow.SessionOptions{
-							CreationTimeout:  time.Minute,
-							ExecutionTimeout: 10 * time.Minute,
-						})
-						if err != nil {
-							sessionCtx = ctx
-						}
+						sessionCtx, hasSession = openWorkerSession(ctx, in.WorkerSessionTimeout, time.Minute)
 						logInfo(ctx, "turn start",
 							"kind", telemetry.TurnKindResume, "agent_id", agentID,
 							"session_id", in.SessionID, "resume_count", len(ev.resume.Responses),
@@ -273,7 +294,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 						outcome, turnErr = telemetry.OutcomeOK, nil
 						actCtx = workflow.WithActivityOptions(sessionCtx, activityOpts)
 						var iout InferenceOutput
-						err = workflow.ExecuteActivity(actCtx, "Inference", InferenceInput{
+						err := waitAct("Inference", InferenceInput{
 							SessionID:  in.SessionID,
 							AgentID:    agentID,
 							MCPServers: mcp,
@@ -281,18 +302,13 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 							Resume:     ev.resume.Responses,
 							Auth:       lastAuth,
 							Mounts:     mounts,
-						}).Get(ctx, &iout)
-						if err != nil {
-							if turnCanceled(ctx, err) {
-								outcome = telemetry.OutcomeCancelled
-							} else {
-								outcome, turnErr = telemetry.OutcomeError, err
-							}
+						}, &iout)
+						if onActErr(err) {
 							stopSlice = true
 							break
 						}
 						etag = iout.Etag
-						pending = iout.ToolCalls
+						pending = append(append([]streaming.ToolCall(nil), iout.ToolCalls...), rest...)
 					case signalClose:
 						closed = true
 						outcome = telemetry.OutcomeOK
@@ -349,5 +365,25 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 }
 
 func turnCanceled(ctx workflow.Context, err error) bool {
-	return err != nil && (ctx.Err() != nil || temporal.IsCanceledError(err))
+	return err != nil && (ctx.Err() != nil || temporal.IsCanceledError(err) || errors.Is(err, workflow.ErrSessionFailed) || errors.Is(err, workflow.ErrCanceled))
+}
+
+// openWorkerSession pins activities to one worker when the host set a timeout.
+// Timeout <= 0 skips CreateSession (no hidden default).
+func openWorkerSession(ctx workflow.Context, timeout, creation time.Duration) (workflow.Context, bool) {
+	if timeout <= 0 {
+		return ctx, false
+	}
+	if creation <= 0 {
+		creation = 2 * time.Second
+	}
+	sctx, err := workflow.CreateSession(ctx, &workflow.SessionOptions{
+		CreationTimeout:  creation,
+		ExecutionTimeout: timeout,
+	})
+	if err != nil {
+		workflow.GetLogger(ctx).Error("worker session", "error", err)
+		return ctx, false
+	}
+	return sctx, true
 }

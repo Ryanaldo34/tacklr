@@ -182,11 +182,11 @@ func (a *AgentHarness) backgroundJobsNudge() string {
 
 func (a *AgentHarness) formatJob(jobID string) (string, error) {
 	if jobID == "" {
-		return "", fmt.Errorf("job_id is required: %w", ErrInvalid)
+		return "", fmt.Errorf("job_id is required; call list_jobs and pass a job_id from that list: %w", ErrInvalid)
 	}
 	j := a.getJob(jobID)
 	if j == nil {
-		return "", fmt.Errorf("job %q: %w", jobID, ErrNotFound)
+		return "", fmt.Errorf("job %q is unknown; call list_jobs and use an id from that list: %w", jobID, ErrNotFound)
 	}
 	status, _, _ := j.snapshot()
 	var b strings.Builder
@@ -355,11 +355,11 @@ func (a *AgentHarness) runBackgroundJob(ctx context.Context, j *workerRun) {
 
 func (a *AgentHarness) readJob(ctx context.Context, jobID string, block bool, runtime HarnessRuntime) (string, error) {
 	if jobID == "" {
-		return "", fmt.Errorf("job_id is required: %w", ErrInvalid)
+		return "", fmt.Errorf("job_id is required; call list_jobs and pass a job_id from that list: %w", ErrInvalid)
 	}
 	j := a.getJob(jobID)
 	if j == nil {
-		return "", fmt.Errorf("job %q: %w", jobID, ErrNotFound)
+		return "", fmt.Errorf("job %q is unknown; call list_jobs and use an id from that list: %w", jobID, ErrNotFound)
 	}
 
 	status, _, _ := j.snapshot()
@@ -491,11 +491,11 @@ func (a *AgentHarness) resumeInterruptedJob(ctx context.Context, j *workerRun, r
 
 func (a *AgentHarness) cancelJob(ctx context.Context, jobID string) (string, error) {
 	if jobID == "" {
-		return "", fmt.Errorf("job_id is required: %w", ErrInvalid)
+		return "", fmt.Errorf("job_id is required; call list_jobs and pass a job_id from that list: %w", ErrInvalid)
 	}
 	j := a.getJob(jobID)
 	if j == nil {
-		return "", fmt.Errorf("job %q: %w", jobID, ErrNotFound)
+		return "", fmt.Errorf("job %q is unknown; call list_jobs and use an id from that list: %w", jobID, ErrNotFound)
 	}
 
 	status, _, _ := j.snapshot()

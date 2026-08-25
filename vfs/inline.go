@@ -1,6 +1,7 @@
 package vfs
 
 import (
+	"maps"
 	"strings"
 )
 
@@ -32,7 +33,12 @@ func FormatInline(runs []Run) string {
 	if len(runs) == 0 {
 		return ""
 	}
+	n := 0
+	for _, r := range runs {
+		n += len(r.Text) + 16
+	}
 	var b strings.Builder
+	b.Grow(n)
 	for _, r := range runs {
 		b.WriteString(formatRun(r))
 	}
@@ -48,7 +54,12 @@ func runsPlain(runs []Run) string {
 	if len(runs) == 0 {
 		return ""
 	}
+	n := 0
+	for _, r := range runs {
+		n += len(r.Text)
+	}
 	var b strings.Builder
+	b.Grow(n)
 	for _, r := range runs {
 		b.WriteString(r.Text)
 	}
@@ -231,7 +242,11 @@ func formatRun(r Run) string {
 }
 
 func escapeInline(s string) string {
+	if !strings.ContainsAny(s, "\\*_~[]") {
+		return s
+	}
 	var b strings.Builder
+	b.Grow(len(s) + 4)
 	for i := 0; i < len(s); i++ {
 		switch s[i] {
 		case '\\', '*', '_', '~', '[', ']':
@@ -273,11 +288,7 @@ func cloneMarks(m map[string]string) map[string]string {
 	if len(m) == 0 {
 		return nil
 	}
-	out := make(map[string]string, len(m))
-	for k, v := range m {
-		out[k] = v
-	}
-	return out
+	return maps.Clone(m)
 }
 
 func cloneRuns(in []Run) []Run {

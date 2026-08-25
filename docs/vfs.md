@@ -27,13 +27,13 @@ Knowledge objects, search, and the graph are documented in **[docs/knowledge.md]
      └───────────┘
            │
            ▼
-     Provider (local disk / S3 / brain Engrams)
+     Provider (local / S3 / Drive / Graph / brain Engrams)
 ```
 
 | Layer | Role |
 |-------|------|
 | **MountSession** | Isolated tree of virtual mount points + path ops (injected per turn) |
-| **Provider** | Bytes for one backend (local jail, S3 prefix, …) |
+| **Provider** | Bytes for one backend (local jail, S3 prefix, Drive folder, Graph drive, brain Engrams) |
 | **Document IR** | Agent-facing view of a file (lines + optional structured blocks) |
 | **Codec** | Bytes ↔ Document by media type |
 
@@ -104,7 +104,8 @@ _tacklr/vfs/bind     { sessionId, backends: [{ provider, point, auth.token, para
                      provider is gdrive | msgraph
                      point is /workspace (or omit). Old /contracts → alias contracts (W2).
                      params.name is the alias (required when point is /workspace).
-                     gdrive: folderId. msgraph: driveId (empty → /me/drive), itemId (empty → root), siteId (optional).
+                     gdrive: folderId. msgraph: account (empty → organization), driveId, itemId, siteId.
+                     organization (default) requires siteId or driveId. personal uses /me/drive.
 session/prompt       → Runtime injects a tree from bootstrap + bind recipes; agent sees /workspace/contracts, /workspace/legal
 _tacklr/vfs/refresh  → new access token for a provider (gdrive and msgraph are different holders); next prompt
 _tacklr/vfs/token    ← agent asks the client after a 401 (if the client advertised tokenRefresh)
@@ -119,18 +120,22 @@ Go zero-value `Binding` and ACP `readOnly` omitted stay **read-only**. Writable 
 
 Drive scopes: read-only `drive.readonly` (export-only). Writable needs **`drive`**, **`documents`**, and **`spreadsheets`**. `drive` is a restricted (CASA) scope; the token is not folder-scoped.
 
-Graph (OneDrive and SharePoint libraries, one factory `msgraph`): read-only **`Files.Read`**; writable **`Files.ReadWrite`**. A SharePoint library also needs **`Sites.Read.All`** or **`Sites.ReadWrite.All`** as the **client** already consented. CASA: prefer `Files.ReadWrite` (user files) over `Files.ReadWrite.All` when it covers the bound drive. Graph files are real `.docx` / `.xlsx` (Word/Excel codecs). Native Google Docs/Sheets on a Drive member still use Docs/Sheets APIs.
+Graph (OneDrive and SharePoint libraries, one factory `msgraph`): **`account`** is `organization` (default) or `personal`. Organization Open without `siteId` or `driveId` fails (`vfs: msgraph organization account requires siteId or driveId`). Personal uses `/me/drive`. Aliases: `enterprise` / `work` / `tenant` → organization; `consumer` / `msa` → personal. Read-only **`Files.Read`**; writable **`Files.ReadWrite`**. A SharePoint library also needs **`Sites.Read.All`** or **`Sites.ReadWrite.All`** as the **client** already consented. CASA: prefer `Files.ReadWrite` (user files) over `Files.ReadWrite.All` when it covers the bound drive. Graph files are real `.docx` / `.xlsx` (Word/Excel codecs). Native Google Docs/Sheets on a Drive member still use Docs/Sheets APIs.
+
+`GraphFactory.Account` on the host factory is the same default when a bind omits `account`.
 
 Two surfaces, one document:
 
 | Surface | Behavior |
 |---------|----------|
 | FUSE / `open` / `rg` | Docs: HTML projection. Sheets: TSV of displayed values with `# Sheet: Title` headers (no bold/markdown/JSON/`#rrggbb`). Kernel writes stay `EROFS`. `ls` of a Doc or Sheet is size 0 (no export/Get on getattr). |
-| Agent `read` / `write` | Block / grid IR. Default `read` of a Doc or Sheet is an outline (must not dump HTML or TSV). Docs `write` uses `block_id` / `blocks`. Sheets `write` is one cell (`Sheet!A1`) plus optional `format`, or create via `content` / `blocks` on a new path. Range, row-window, and in-place sheet replace return `ErrNotSupported`. Line/HTML/`SetText` return `ErrProjected`. |
+| Agent `read` / `write` | Docs/Word: numbered pretty HTML (one heading, paragraph, list item, or table per line). `write` uses full `content` or a line range; the harness owns checkout (`rev` optional). Extensionless HTML create infers a native Doc on Drive, Word on Graph, or `text/html` locally. Sheets: path-only is outline; write is one cell (`Sheet!A1`) plus optional `format`. Range, row-window, and in-place sheet replace return `ErrNotSupported`. |
 
 `Stat.MediaType` is the real Drive MIME. Slides/Drawings/Forms stay listed and return `ErrNoCodec` / `ErrNotSupported`. Native `PutFile` / identity `WriteDocument` return `ErrNotSupported`. `Remove` is Drive trash (`trashed:true`), does not follow shortcuts, and refuses ambiguous names and the mount root. Agent delete is `rm` (FUSE Unlink) only.
 
 Read-only bind: official ZIP export (`application/zip`, 10 MiB). Writable bind: Docs `documents.get(includeTabsContent=true)` and Sheets `spreadsheets.get` with grid `userEnteredFormat` (skip Export); persist is `documents.batchUpdate` with checkout `requiredRevisionId`, or Sheets `values.batchUpdate` (`USER_ENTERED`) plus `spreadsheets.batchUpdate` `repeatCell`/`userEnteredFormat` after Drive `files.get(version)` CAS. Create-as-Doc / Create-as-Sheet requires `write` + the Google MIME on an **extensionless** path. Bare `/workspace/contracts/Spec` is plaintext. `Foo.md` is never a Doc. `Budget.xlsx` is never a Google Sheet (local/S3/Drive/Graph *file* `.xlsx` uses the Excel codec).
+
+Docs **tables**: `kind=table` body is TSV (`A\tB`) **or** a GFM pipe table (`| A | B |` plus optional `| --- | --- |` separator). Pipe markdown is split into real Docs cells; it is not inserted as a 1-column table with the pipes still in the cell. `content` lift on create does the same for a pipe-table paragraph.
 
 ```go
 auth := vfs.NewSessionAuth()
@@ -178,7 +183,7 @@ virtual path → Provider (bytes) → Codec → Document IR
 
 `FindBlock` is media-agnostic (id / heading_path). Sheet title and sheet_id lookup is `AsGrid` → sheet key.
 
-Create uses the codec registry (`Creator`). Path extension wins over a requested media type (`Foo.md` is never a Doc). Extensionless + `media_type` is how a codec is selected.
+Create uses the codec registry (`Creator`). Path extension wins over a requested media type (`Foo.md` is never a Doc). Extensionless HTML infers native rich media from the mount (Drive Doc, Graph docx, local `text/html`).
 
 **Grid format:** stored `CellFormat` is an absolute bag (number, bold/italic/strike/underline, fill/color, align/valign/wrap, border). Writes use `FormatPatch` so `bold=false` clears. `ParseCellFormat` reads the `String()` bag. Sheets persist uses `ColorStyle.RgbColor` and classifies number patterns (`CURRENCY`, `PERCENT`, `SCIENTIFIC`, `TIME`, `DATE`, `DATE_TIME`, `NUMBER`). Writes to a merge master are allowed; slave cells are refused. Theme colors stay empty (lossy). Native Google persist is a Drive concern; `.xlsx` uses the Excel codec. A native Sheet never round-trips through xlsx.
 
@@ -245,7 +250,7 @@ Tool guidance:
 
 `DetectMediaType` is a helper **providers** call when filling `MediaType`. Empty / missing type is treated as `application/octet-stream` (no IR).
 
-FUSE: hosts call `MountSession.FuseMount(dir)` for a kernel tree. **Every mount point must be a single path segment** (`/work`, `/engram`). Multi-segment points (`/tmp/tacklr`) fail `FuseMount`. If `ReadText` succeeds (`Textual`), `getattr`/`Read` use that plaintext (so `cat`/`rg` see the projection). Otherwise `Stat.Size` + `io.ReaderAt`. Kernel writes persist through `WriteFile` only when `KernelWritable` (`IdentityCodec`). Projected textual types (Word, Notion, Docs) are **read-only** on the kernel (`EROFS`); the agent `write` tool still uses `WriteDocument`. `session.Mount` attaches a provider; `FuseMount` is the host kernel mount. `HostDir()` is the last mount directory (host-facing only). `FuseAvailable()` probes `/dev/fuse` and `/dev/macfuse*`. `Close` unmounts.
+FUSE: hosts call `MountSession.FuseMount(dir)` for a kernel tree. **Every mount point must be a single path segment** (`/work`, `/engram`, `/workspace`). Multi-segment points (`/tmp/tacklr`) fail `FuseMount`. If `ReadText` succeeds (`Textual`), `getattr`/`Read` use that plaintext (so `cat`/`rg` see the projection). Otherwise `Stat.Size` + `io.ReaderAt`. Kernel writes persist through `WriteFile` only when `KernelWritable` (`IdentityCodec`). Projected textual types (Word, Notion, Docs) are **read-only** on the kernel (`EROFS`); the agent `write` tool still uses `WriteDocument`. `session.Mount` attaches a provider; `FuseMount` is the host kernel mount. `HostDir()` is the last mount directory (host-facing only). `FuseAvailable()` probes `/dev/fuse` and `/dev/macfuse*`. `Close` unmounts.
 
 `durable.Runtime` injects a **turn-scoped** `MountSession` in the inference/tool activity preamble (FSBootstrap + `/workspace` binds) and attaches FUSE for that slice: `$TMP/tacklr-fuse/<session>` mode `0700`. The activity (or in-process turn slice) closes the tree when the step ends. Bind/unbind only record credentials; they do not keep a live tree between prompts. Production without a device has **no** `MountSession` (no VFS tools, no `run_command`). Tests inject `vfs.DirectProjection` so `read`/`write` still work and `run_command` returns `ErrFuseNotMounted` until `HostDir` is set. Device present and mount fails after one suffix retry → fail-hard. Workers reconstruct a `MountSession` per activity; they do not hold a parent pointer.
 
@@ -373,7 +378,7 @@ The agent always uses `/data/app.go`. It never sees the bucket name.
 
 ## Structured view (blocks)
 
-Some media types project a **block outline** over the same textual body (shared schema for Markdown now; Word/Docs later).
+Some media types project a **block outline** over the same textual body (shared schema: Markdown headings; Word and native Google Docs paragraphs / lists / tables / images).
 
 | Type | Role |
 |------|------|
@@ -404,7 +409,7 @@ Full model, search, and graph: **[docs/knowledge.md](knowledge.md)**.
 
 | Job | Store | Sync |
 |-----|--------|------|
-| **Artifact file** (`/work`, S3, …) | Local/S3 bytes | **IndexPath** (hash, Document+Chunk) |
+| **Artifact file** (`/work`, `/workspace`, S3, …) | Local/S3/Drive/Graph bytes | **IndexPath** (hash, Document+Chunk) |
 | **Engram** | Engine object | **brain.Provider** read/write (Markdown + YAML) |
 
 `vfs` never imports `brain`. Brain implements `vfs.Provider`. Package
@@ -540,11 +545,11 @@ Indexed `search` hits are not a behavior-preserving stand-in for live `rg`.
 |-------|----------------|
 | `vfs.ContentHash` / `ContentRev` / `LineWindow.Rev` | Identity of session-visible body |
 | `ReadText`, `ReplaceLines`, `WriteDocument` | Low-level IR mutate + provider persist |
-| Harness `read`, `write` | Require `rev` on edits, reject stale, format numbered lines |
+| Harness `read`, `write` | Numbered HTML for Docs/Word; fill `rev` from last checkout; omit `rev` on write |
 
 ```text
-read   → path + rev + numbered window (first page when start/end omitted)
-write  → exactly one mode; pass rev from read; mismatch → ErrStaleContent
+read   → numbered window (first page when start/end omitted); Docs/Word are pretty HTML
+write  → exactly one mode; harness lastRev; mismatch → ErrStaleContent
 WriteDocument → provider translates IR and persists now
 ```
 
@@ -558,9 +563,11 @@ No FUSE and no shell are required for this IR edit path. `run_command` needs a l
 |-----------|----------|
 | Access token expired / missing refresh | `ErrAuthExpired` |
 | Two Drive children share a name | `ErrAmbiguous` |
-| Drive 403 | `ErrPermission` (Google message preserved) |
+| Drive 403 | `ErrPermission` |
 | Docs checkout CAS miss | `ErrConflict` (tools map to `ErrStaleContent`) |
-| Line/HTML write on a Doc or Sheet | `ErrProjected` |
+| Stale `rev` on read/write | `ErrStaleContent` — read again and pass that rev |
+| Docs insert/write location invalid | `ErrInvalidWrite` — read again and retry (no provider SDK text) |
+| Line/HTML write on a Sheet | `ErrProjected` |
 | Path not under a mount | `ErrNotMounted` |
 | `run_command` with no FUSE mount | `ErrFuseNotMounted` |
 | Write on read-only mount | `ErrReadOnly` |

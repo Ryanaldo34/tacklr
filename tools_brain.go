@@ -491,7 +491,7 @@ func edgeMetaFromLinkArgs(args linkArgs) (brain.EdgeMeta, error) {
 func (b brainTools) putFromArgs(ctx context.Context, kind string, args saveObjectArgs) (brain.Object, error) {
 	kind = strings.TrimSpace(kind)
 	if kind == "" {
-		return brain.Object{}, fmt.Errorf("kind is not configured")
+		return brain.Object{}, fmt.Errorf("kind is not configured for this tool; use the matching save_* tool")
 	}
 	obj := brain.Object{
 		Kind:        kind,
@@ -520,11 +520,11 @@ func (b brainTools) putFromArgs(ctx context.Context, kind string, args saveObjec
 func (b brainTools) saveAsFile(ctx context.Context, kind string, args saveObjectArgs) (saveFileResult, error) {
 	kind = strings.TrimSpace(kind)
 	if kind == "" {
-		return saveFileResult{}, fmt.Errorf("kind is not configured")
+		return saveFileResult{}, fmt.Errorf("kind is not configured for this tool; use the matching save_* tool")
 	}
 	title := strings.TrimSpace(args.Title)
 	if title == "" {
-		return saveFileResult{}, fmt.Errorf("title is required")
+		return saveFileResult{}, fmt.Errorf("title is required; pass a non-empty title")
 	}
 	body := args.Content
 	if body == "" {
@@ -571,7 +571,7 @@ func (b brainTools) saveAsFile(ctx context.Context, kind string, args saveObject
 func (b brainTools) resolveEngramSavePath(ctx context.Context, kind, title, objectID string) (string, error) {
 	spec, ok := b.brainMountForKind(kind)
 	if !ok {
-		return "", fmt.Errorf("brain provider is not mounted")
+		return "", fmt.Errorf("brain files are not mounted; save as a knowledge object instead of a file, or ask the host to mount the brain VFS")
 	}
 	if id, err := parseOptionalUUID(objectID, "object_id"); err != nil {
 		return "", err

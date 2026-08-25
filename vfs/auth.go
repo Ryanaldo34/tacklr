@@ -23,6 +23,15 @@ const (
 	ParamDriveID        = "driveId"
 	ParamItemID         = "itemId"
 	ParamSiteID         = "siteId"
+	// ParamAccount selects a Microsoft account kind on a bind ("organization" or "personal").
+	ParamAccount = "account"
+)
+
+// Microsoft account kinds for GraphFactory / ParamAccount.
+// Organization (SharePoint / OneDrive for Business) is the default.
+const (
+	AccountOrganization = "organization"
+	AccountPersonal     = "personal"
 )
 
 // Credential is a session-scoped access token. Never store this on MountSpec

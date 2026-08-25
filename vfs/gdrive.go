@@ -242,6 +242,14 @@ func escapeDriveQ(id string) string {
 	return strings.ReplaceAll(id, `'`, `\'`)
 }
 
+func googleHTTPErr(svc string, code int, msg string) error {
+	msg = strings.TrimSpace(msg)
+	if msg == "" {
+		return fmt.Errorf("vfs: %s HTTP %d", svc, code)
+	}
+	return fmt.Errorf("vfs: %s HTTP %d: %s", svc, code, msg)
+}
+
 func mapDriveError(err error) error {
 	if err == nil {
 		return nil
@@ -267,6 +275,9 @@ func mapDriveError(err error) error {
 			if strings.Contains(msg, "exportsizelimitexceeded") || strings.Contains(msg, "export size") {
 				return ErrTooLarge
 			}
+			return googleHTTPErr("drive", gerr.Code, gerr.Message)
+		default:
+			return googleHTTPErr("drive", gerr.Code, gerr.Message)
 		}
 	}
 	return err

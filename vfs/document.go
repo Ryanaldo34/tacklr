@@ -21,7 +21,7 @@ type Document interface {
 // Text() is that plaintext (FUSE / encode). Line numbers are
 // 1-based. Lines(start, end) is half-open [start, end).
 // SetText / SetLine / ReplaceLines mutate this value; persist with WriteDocument.
-// SetText returns ErrProjected on types whose Text() is a derived projection.
+// SetText on Docs/Word applies HTML then SetBlocks; spreadsheets return ErrProjected.
 type Textual interface {
 	Document
 	Encoding() string
@@ -317,24 +317,32 @@ func (b *textBody) setLine(n int, line string) error {
 }
 
 func (b *textBody) replaceLines(start, end int, replacement []string) error {
-	n := len(b.starts)
+	s, err := spliceLines(b.payload, b.starts, start, end, replacement)
+	if err != nil {
+		return err
+	}
+	return b.setText(s)
+}
+
+func spliceLines(text string, starts []int, start, end int, replacement []string) (string, error) {
+	n := len(starts)
 	if start < 1 || end < start || end > n+1 {
-		return ErrLineOutOfRange
+		return "", ErrLineOutOfRange
 	}
 	for _, line := range replacement {
 		if strings.Contains(line, "\n") {
-			return ErrInvalidLine
+			return "", ErrInvalidLine
 		}
 	}
 	if n == 0 {
-		return b.setText(strings.Join(replacement, "\n"))
+		return strings.Join(replacement, "\n"), nil
 	}
 
 	prefixLines := start - 1
 	suffixLines := n - (end - 1)
 	moreAfterPrefix := len(replacement) > 0 || suffixLines > 0
 
-	need := len(b.payload) + 1
+	need := len(text) + 1
 	for _, line := range replacement {
 		need += len(line) + 1
 	}
@@ -343,14 +351,14 @@ func (b *textBody) replaceLines(start, end int, replacement []string) error {
 
 	if prefixLines > 0 {
 		if prefixLines == n {
-			buf.WriteString(b.payload)
+			buf.WriteString(text)
 			if moreAfterPrefix {
 				buf.WriteByte('\n')
 			}
 		} else if moreAfterPrefix {
-			buf.WriteString(b.payload[:b.starts[prefixLines]])
+			buf.WriteString(text[:starts[prefixLines]])
 		} else {
-			buf.WriteString(b.payload[:b.starts[prefixLines]-1])
+			buf.WriteString(text[:starts[prefixLines]-1])
 		}
 	}
 	for i, line := range replacement {
@@ -363,9 +371,9 @@ func (b *textBody) replaceLines(start, end int, replacement []string) error {
 		if len(replacement) > 0 {
 			buf.WriteByte('\n')
 		}
-		buf.WriteString(b.payload[b.starts[end-1]:])
+		buf.WriteString(text[starts[end-1]:])
 	}
-	return b.setText(buf.String())
+	return buf.String(), nil
 }
 
 var (

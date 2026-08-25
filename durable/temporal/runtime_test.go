@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/mock"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/converter"
 	"go.temporal.io/sdk/testsuite"
@@ -194,6 +195,99 @@ func TestSessionWorkflow_promptCompletes(t *testing.T) {
 	}
 }
 
+func TestSessionWorkflow_workerSessionTimeoutCompletes(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+	env.SetWorkerOptions(worker.Options{EnableSessionWorker: true})
+	cat := durable.NewCatalog("default")
+	model := &testkit.ScriptedModel{
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "session-on", IsComplete: true}
+		},
+	}
+	cat.Register("default", durable.AgentSpec{
+		Options: tacklr.AgentOptions{Model: model, Config: tacklr.Config{MaxWindowSize: 8192}},
+	})
+	fallback := inprocess.NewMemoryEventLog()
+	env.RegisterWorkflow(SessionWorkflow)
+	env.RegisterActivity(newActs(cat, fallback, true))
+
+	id := durable.SessionID("sess-worker-session")
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(signalPrompt, promptSignal{Text: "hi"})
+	}, time.Millisecond)
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(signalClose, nil)
+	}, 50*time.Millisecond)
+
+	env.ExecuteWorkflow(SessionWorkflow, WorkflowInput{
+		SessionID:            id,
+		AgentID:              "default",
+		WorkerSessionTimeout: time.Minute,
+	})
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatal(err)
+	}
+	got := drainLog(t, fallback, id)
+	var sawMsg, sawComplete bool
+	for _, ev := range got {
+		if ev.Type == streaming.StreamEventMessage && strings.Contains(ev.Content, "session-on") {
+			sawMsg = true
+		}
+		if ev.Type == streaming.StreamEventComplete {
+			sawComplete = true
+		}
+	}
+	if !sawMsg || !sawComplete {
+		t.Fatalf("want session-on + complete, got %+v", got)
+	}
+}
+
+func TestSessionWorkflow_workerSessionFailedEndsTurn(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+	env.SetWorkerOptions(worker.Options{EnableSessionWorker: true})
+	cat := durable.NewCatalog("default")
+	model := &testkit.ScriptedModel{
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			ch <- tacklr.LLMResponseChunk{
+				Type: tacklr.StreamEventFunctionCall,
+				ToolCalls: []tacklr.ToolCall{
+					{ID: "fc_alpha", CallID: "call_alpha", Name: "alpha", Arguments: `{}`},
+				},
+				IsComplete: true,
+			}
+		},
+	}
+	cat.Register("default", durable.AgentSpec{
+		Options: tacklr.AgentOptions{
+			Config: tacklr.Config{MaxWindowSize: 8192},
+			Model:  model,
+			Tools: []*tacklr.Tool{
+				tacklr.NewTool(tacklr.ToolConfig{Name: "alpha", Handler: func(context.Context) (string, error) { return "from-alpha", nil }}),
+			},
+		},
+	})
+	fallback := inprocess.NewMemoryEventLog()
+	acts := newActs(cat, fallback, true)
+	env.RegisterWorkflow(SessionWorkflow)
+	env.RegisterActivity(acts)
+	env.OnActivity(acts.Tool, mock.Anything, mock.Anything).Return(ToolOutput{}, workflow.ErrSessionFailed)
+
+	id := durable.SessionID("sess-session-failed")
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(signalPrompt, promptSignal{Text: "go"})
+	}, time.Millisecond)
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(signalClose, nil)
+	}, 50*time.Millisecond)
+
+	env.ExecuteWorkflow(SessionWorkflow, WorkflowInput{SessionID: id, AgentID: "default"})
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSessionWorkflow_askUserYieldThenResume(t *testing.T) {
 	var suite testsuite.WorkflowTestSuite
 	env := suite.NewTestWorkflowEnvironment()
@@ -253,6 +347,85 @@ func TestSessionWorkflow_askUserYieldThenResume(t *testing.T) {
 	}
 	if !yielded || !chose || !complete {
 		t.Fatalf("want yield+chose+complete, got %+v", got)
+	}
+}
+
+// TestSessionWorkflow_parallelBatchHitlRunsRemainder: Temporal ran Tool
+// activities sequentially and broke the batch on HITL, so leftover function
+// calls never got outputs. Resume must still execute the rest of the batch.
+func TestSessionWorkflow_parallelBatchHitlRunsRemainder(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+	env.SetWorkerOptions(worker.Options{EnableSessionWorker: true})
+	var (
+		invokes int
+		results []string
+	)
+	cat := durable.NewCatalog("default")
+	model := &testkit.ScriptedModel{
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			invokes++
+			if invokes == 1 {
+				ch <- tacklr.LLMResponseChunk{
+					Type: tacklr.StreamEventFunctionCall,
+					ToolCalls: []tacklr.ToolCall{
+						{ID: "fc_alpha", CallID: "call_alpha", Name: "alpha", Arguments: `{}`},
+						{ID: "fc_gate", CallID: "call_gate", Name: "gate", Arguments: `{}`},
+						{ID: "fc_beta", CallID: "call_beta", Name: "beta", Arguments: `{}`},
+					},
+					IsComplete: true,
+				}
+				return
+			}
+			for _, m := range msgs {
+				if m != nil && m.Role == tacklr.RoleTool {
+					results = append(results, m.Content)
+				}
+			}
+			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "all-three", IsComplete: true}
+		},
+	}
+	cat.Register("default", durable.AgentSpec{
+		Options: tacklr.AgentOptions{
+			Config: tacklr.Config{MaxWindowSize: 8192},
+			Model:  model,
+			Tools: []*tacklr.Tool{
+				tacklr.NewTool(tacklr.ToolConfig{Name: "alpha", Handler: func(context.Context) (string, error) { return "from-alpha", nil }}),
+				tacklr.NewTool(tacklr.ToolConfig{
+					Name:    "gate",
+					OnCall:  []tacklr.OnCallFunc{tacklr.ToolPermissionOnCall},
+					Handler: func(context.Context) (string, error) { return "gate-ok", nil },
+				}),
+				tacklr.NewTool(tacklr.ToolConfig{Name: "beta", Handler: func(context.Context) (string, error) { return "from-beta", nil }}),
+			},
+		},
+	})
+	fallback := inprocess.NewMemoryEventLog()
+	env.RegisterWorkflow(SessionWorkflow)
+	env.RegisterActivity(newActs(cat, fallback, true))
+
+	id := durable.SessionID("sess-parallel-hitl")
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(signalPrompt, promptSignal{Text: "batch"})
+	}, time.Millisecond)
+	env.RegisterDelayedCallback(func() {
+		payload, _ := json.Marshal(map[string]string{"optionId": "allow-once"})
+		env.SignalWorkflow(signalResume, resumeSignal{Responses: map[string][]byte{"fc_gate": payload}})
+	}, 20*time.Millisecond)
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(signalClose, nil)
+	}, 80*time.Millisecond)
+
+	env.ExecuteWorkflow(SessionWorkflow, WorkflowInput{SessionID: id, AgentID: "default"})
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatal(err)
+	}
+	saw := map[string]bool{}
+	for _, c := range results {
+		saw[c] = true
+	}
+	if !saw["from-alpha"] || !saw["gate-ok"] || !saw["from-beta"] {
+		t.Fatalf("next model turn missing leftover tool results: %v", results)
 	}
 }
 

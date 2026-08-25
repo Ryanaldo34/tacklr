@@ -1,6 +1,7 @@
 package vfs_test
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/json"
@@ -224,8 +225,12 @@ func (g *graphFX) serveContent(w http.ResponseWriter, r *http.Request, itemID, r
 		}
 		if r.Method == http.MethodPut {
 			body := readGraphBody(r)
+			mime := "text/plain"
+			if bytes.Contains(body, []byte("word/document.xml")) {
+				mime = adapters.DOCXMediaType
+			}
 			id := "new-" + rel
-			created := &graphNode{id: id, name: rel, parent: parent, mime: "text/plain", body: append([]byte(nil), body...)}
+			created := &graphNode{id: id, name: rel, parent: parent, mime: mime, body: append([]byte(nil), body...)}
 			g.add(created)
 			writeGraphJSON(w, g.json(created))
 			return
@@ -333,7 +338,7 @@ func mountGraphHTTP(t *testing.T, srv *testhttp.Server, writable bool, members .
 	}
 	reg := vfs.NewBackendRegistry()
 	if err := reg.Register(vfs.GraphFactory{
-		ID: vfs.ProviderMicrosoft, Auth: auth, Base: srv.URL, HTTP: srv.Client(),
+		ID: vfs.ProviderMicrosoft, Auth: auth, Account: vfs.AccountPersonal, Base: srv.URL, HTTP: srv.Client(),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -446,6 +451,25 @@ func TestGraph_readWriteMkdirTrashRefreshAndErrors(t *testing.T) {
 	if err != nil || !strings.Contains(string(got), "# hi") {
 		t.Fatalf("WriteDocument = %q err=%v", got, err)
 	}
+	if err := adapters.RegisterCommon(vfs.DefaultContentRegistry()); err != nil {
+		t.Fatal(err)
+	}
+	html := "<h1>x</h1>"
+	if _, err := ms.Apply(ctx, "/workspace/legal/SPIKE", vfs.Mutation{Content: &html}); err != nil {
+		t.Fatal(err)
+	}
+	st, err = ms.Stat(ctx, "/workspace/legal/SPIKE")
+	if err != nil || st.MediaType != adapters.DOCXMediaType {
+		t.Fatalf("extensionless HTML graph Stat=%+v err=%v", st, err)
+	}
+	word, err := ms.ReadText(ctx, "/workspace/legal/SPIKE")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rd, ok := vfs.AsRich(word)
+	if !ok || len(rd.Blocks()) == 0 || rd.Blocks()[0].Text != "x" {
+		t.Fatalf("graph Word IR = %+v ok=%v", word, ok)
+	}
 	if err := ms.MkdirAll(ctx, "/workspace/legal/Budget.xlsx/nope"); err == nil || !errors.Is(err, vfs.ErrNotSupported) {
 		t.Fatalf("mkdir through file: %v", err)
 	}
@@ -531,7 +555,7 @@ func TestGraphAndDrive_writesStayOnMatchingProviders(t *testing.T) {
 	if err := reg.Register(vfs.DriveFactory{ID: "gdrive", Auth: auth, API: driveAPI}); err != nil {
 		t.Fatal(err)
 	}
-	if err := reg.Register(vfs.GraphFactory{ID: vfs.ProviderMicrosoft, Auth: auth, Base: srv.URL, HTTP: srv.Client()}); err != nil {
+	if err := reg.Register(vfs.GraphFactory{ID: vfs.ProviderMicrosoft, Auth: auth, Account: vfs.AccountPersonal, Base: srv.URL, HTTP: srv.Client()}); err != nil {
 		t.Fatal(err)
 	}
 	ms, err := vfs.NewMountSession("s", reg)
@@ -620,5 +644,34 @@ func TestGraphFactory_openRequiresFolderTokenAndId(t *testing.T) {
 	cancel()
 	if _, err := (vfs.GraphFactory{ID: "msgraph"}).Open(canceled, "s", vfs.MountSpec{}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled: %v", err)
+	}
+}
+
+func TestGraphFactory_organizationRequiresSiteOrDrive(t *testing.T) {
+	ctx := t.Context()
+	auth := vfs.NewSessionAuth()
+	if err := auth.Bind("s", vfs.Binding{
+		Provider: vfs.ProviderMicrosoft, Auth: vfs.Credential{Token: "tok"},
+		Params: map[string]string{vfs.ParamName: "lib"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f := vfs.GraphFactory{ID: vfs.ProviderMicrosoft, Auth: auth}
+	if _, err := f.Open(ctx, "s", vfs.MountSpec{Params: map[string]string{vfs.ParamName: "lib"}}); err == nil || !strings.Contains(err.Error(), "siteId or driveId") {
+		t.Fatalf("default organization: %v", err)
+	}
+	if _, err := f.Open(ctx, "s", vfs.MountSpec{Params: map[string]string{vfs.ParamAccount: "nope"}}); err == nil || !strings.Contains(err.Error(), "not organization or personal") {
+		t.Fatalf("bad account: %v", err)
+	}
+
+	fx := newGraphFX().legalTree()
+	srv := testhttp.New(t, fx)
+	personal := vfs.GraphFactory{ID: vfs.ProviderMicrosoft, Auth: auth, Account: vfs.AccountPersonal, Base: srv.URL, HTTP: srv.Client()}
+	got, err := personal.Open(ctx, "s", vfs.MountSpec{Params: map[string]string{vfs.ParamName: "lib"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil {
+		t.Fatal("personal /me/drive")
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"path"
 	"strings"
 )
@@ -33,6 +34,7 @@ type ApplyResult struct {
 	Rev          string
 	LineCount    int
 	Replacements int
+	Outline      []Block
 }
 
 func (r ApplyResult) String() string {
@@ -63,7 +65,7 @@ func (m Mutation) modeCount() (n int, full bool) {
 	return n, full
 }
 
-// Apply persists one mutation. Rev is required when the path exists.
+// Apply persists one mutation. Empty Rev uses the harness lastRev or a live read.
 func (ms *MountSession) Apply(ctx context.Context, virtualPath string, mut Mutation) (ApplyResult, error) {
 	p, err := CleanPath(virtualPath)
 	if err != nil {
@@ -72,9 +74,9 @@ func (ms *MountSession) Apply(ctx context.Context, virtualPath string, mut Mutat
 	n, full := mut.modeCount()
 	switch {
 	case n == 0:
-		return ApplyResult{}, fmt.Errorf("vfs: no mutation")
+		return ApplyResult{}, fmt.Errorf("write: nothing to change")
 	case n > 1:
-		return ApplyResult{}, fmt.Errorf("vfs: exactly one mutation mode")
+		return ApplyResult{}, fmt.Errorf("write: pass only one change: content, line range, old/new, or block_id")
 	}
 
 	fi, err := ms.Stat(ctx, p)
@@ -82,11 +84,7 @@ func (ms *MountSession) Apply(ctx context.Context, virtualPath string, mut Mutat
 	if err != nil && !errors.Is(err, ErrNotExist) {
 		return ApplyResult{}, err
 	}
-	if exists {
-		if strings.TrimSpace(mut.Rev) == "" {
-			return ApplyResult{}, fmt.Errorf("vfs: rev required when path exists")
-		}
-	} else if !full && mut.Blocks == nil {
+	if !exists && !full && mut.Blocks == nil {
 		return ApplyResult{}, ErrNotExist
 	}
 
@@ -109,26 +107,20 @@ func (ms *MountSession) applyFull(ctx context.Context, p string, exists bool, fi
 	if mut.Content != nil {
 		body = *mut.Content
 	}
-	if exists {
-		if IsProjected(fi.MediaType) {
-			return ApplyResult{}, ErrProjected
-		}
-		cur, err := ms.ContentRev(ctx, p)
-		if err != nil {
-			return ApplyResult{}, err
-		}
-		if cur.Hash != mut.Rev {
-			return ApplyResult{}, ErrStaleContent
-		}
-	}
 	if len(body) > MaxReadFileBytes {
 		return ApplyResult{}, ErrTooLarge
 	}
 	if exists {
+		if IsProjected(fi.MediaType) {
+			return ms.applyProjectedFull(ctx, p, mut, body)
+		}
+		if err := ms.matchRev(ctx, p, mut.Rev); err != nil {
+			return ApplyResult{}, err
+		}
 		return ms.stage(ctx, NewTextDocument(p, fi.MediaType, "utf-8", body))
 	}
 	n := min(len(body), 512)
-	mt := createMediaType(p, mut.MediaType, []byte(body[:n]))
+	mt := ms.createMediaType(p, mut.MediaType, []byte(body[:n]))
 	doc, err := createDocument(p, mt, mut)
 	if err != nil {
 		return ApplyResult{}, err
@@ -140,14 +132,79 @@ func (ms *MountSession) applyFull(ctx context.Context, p string, exists bool, fi
 	return ms.stage(ctx, text)
 }
 
-func createMediaType(p, requested string, sample []byte) string {
+func (ms *MountSession) applyProjectedFull(ctx context.Context, p string, mut Mutation, body string) (ApplyResult, error) {
+	doc, err := ms.checkout(ctx, p, mut.Rev)
+	if err != nil {
+		return ApplyResult{}, err
+	}
+	if _, ok := asGridBody(doc); ok {
+		return ApplyResult{}, ErrProjected
+	}
+	rd, ok := AsRich(doc)
+	if !ok {
+		return ApplyResult{}, ErrProjected
+	}
+	if !looksLikeHTML(body) {
+		return ApplyResult{}, ErrUseHTML
+	}
+	blocks, err := decodeDocsHTML([]byte(body))
+	if err != nil {
+		return ApplyResult{}, err
+	}
+	if len(blocks) == 0 {
+		return ApplyResult{}, ErrEmptyReplace
+	}
+	next, err := mergeTabBlocks(rd, blocks, mut.TabID)
+	if err != nil {
+		return ApplyResult{}, err
+	}
+	rd.SetBlocks(next)
+	d, _ := asIR(doc)
+	return ms.stage(ctx, d)
+}
+
+func (ms *MountSession) createMediaType(p, requested string, sample []byte) string {
 	if path.Ext(p) != "" {
 		return DetectMediaType(path.Base(p), sample)
 	}
 	if requested != "" {
 		return requested
 	}
+	if looksLikeHTML(string(sample)) {
+		if mt := ms.nativeRichMediaType(p); mt != "" {
+			return mt
+		}
+	}
 	return DetectMediaType(path.Base(p), sample)
+}
+
+func (ms *MountSession) nativeRichMediaType(p string) string {
+	e, _, rel, err := ms.table().resolveEntry(p)
+	if err != nil {
+		return ""
+	}
+	return nativeRichOf(e.provider, rel)
+}
+
+func nativeRichOf(p Provider, rel string) string {
+	switch t := p.(type) {
+	case *driveProvider:
+		return mimeGoogleDocument
+	case *graphProvider:
+		return extMediaTypes[".docx"]
+	case workspaceProvider:
+		alias, rest, err := splitAlias(rel)
+		if err != nil || alias == "" {
+			return ""
+		}
+		m, err := t.lookup(alias)
+		if err != nil {
+			return ""
+		}
+		return nativeRichOf(m.inner, rest)
+	default:
+		return ""
+	}
 }
 
 func looksLikeHTML(s string) bool {
@@ -157,9 +214,9 @@ func looksLikeHTML(s string) bool {
 
 func (ms *MountSession) applySubstring(ctx context.Context, p string, mut Mutation) (ApplyResult, error) {
 	if *mut.Old == "" {
-		return ApplyResult{}, fmt.Errorf("vfs: old is required")
+		return ApplyResult{}, fmt.Errorf("old is required; pass the exact unique substring to replace")
 	}
-	doc, err := ms.loadMatching(ctx, p, mut.Rev)
+	doc, err := ms.checkout(ctx, p, mut.Rev)
 	if err != nil {
 		return ApplyResult{}, err
 	}
@@ -174,9 +231,9 @@ func (ms *MountSession) applySubstring(ctx context.Context, p string, mut Mutati
 	n := strings.Count(body, *mut.Old)
 	switch {
 	case n == 0:
-		return ApplyResult{}, fmt.Errorf("vfs: old text not found")
+		return ApplyResult{}, fmt.Errorf("old text was not found; read the file and copy the exact substring into old")
 	case !mut.ReplaceAll && n != 1:
-		return ApplyResult{}, fmt.Errorf("vfs: old text occurs %d times (need unique match or replace_all)", n)
+		return ApplyResult{}, fmt.Errorf("old text occurs %d times; pass replace_all=true or a unique substring", n)
 	}
 	if mut.ReplaceAll {
 		if err := doc.SetText(strings.ReplaceAll(body, *mut.Old, repl)); err != nil {
@@ -194,7 +251,7 @@ func (ms *MountSession) applySubstring(ctx context.Context, p string, mut Mutati
 }
 
 func (ms *MountSession) applyBlock(ctx context.Context, p string, mut Mutation) (ApplyResult, error) {
-	doc, err := ms.loadMatching(ctx, p, mut.Rev)
+	doc, err := ms.checkout(ctx, p, mut.Rev)
 	if err != nil {
 		return ApplyResult{}, err
 	}
@@ -208,7 +265,7 @@ func (ms *MountSession) applyBlock(ctx context.Context, p string, mut Mutation) 
 	}
 	bl, ok := FindBlock(blocks, mut.BlockID)
 	if !ok {
-		return ApplyResult{}, fmt.Errorf("vfs: unknown block_id %q", mut.BlockID)
+		return ApplyResult{}, fmt.Errorf("unknown block_id %q; read with outline=true and use an id from that outline", mut.BlockID)
 	}
 	if mut.TabID != "" && bl.Style.Attributes != nil {
 		if got := bl.Style.Attributes["tab_id"]; got != "" && got != mut.TabID {
@@ -236,7 +293,7 @@ func (ms *MountSession) applyTabularBlock(ctx context.Context, td *IR, g *gridBo
 	sheetKey, a1 := SplitSheetAddr(mut.BlockID)
 	idx, ok := g.findSheet(sheetKey)
 	if !ok {
-		return ApplyResult{}, fmt.Errorf("vfs: unknown block_id %q", mut.BlockID)
+		return ApplyResult{}, fmt.Errorf("unknown block_id %q; read with outline=true and use an id from that outline", mut.BlockID)
 	}
 	if mut.TabID != "" && g.sheets[idx].ID != "" && g.sheets[idx].ID != mut.TabID {
 		return ApplyResult{}, fmt.Errorf("vfs: tab_id %q does not match block %q", mut.TabID, g.sheets[idx].ID)
@@ -247,7 +304,7 @@ func (ms *MountSession) applyTabularBlock(ctx context.Context, td *IR, g *gridBo
 		format = mut.Format
 	}
 	if !hasValue && format == nil {
-		return ApplyResult{}, fmt.Errorf("vfs: no mutation")
+		return ApplyResult{}, fmt.Errorf("write: sheet cell needs a value (body or lines) or a format patch")
 	}
 	if a1 == "" {
 		return ApplyResult{}, fmt.Errorf("%w: sheet write requires Sheet!A1", ErrNotSupported)
@@ -273,18 +330,18 @@ func (ms *MountSession) applyTabularBlock(ctx context.Context, td *IR, g *gridBo
 func (ms *MountSession) applyBlocks(ctx context.Context, p string, exists bool, fi FileInfo, mut Mutation) (ApplyResult, error) {
 	next := make([]Block, 0, len(mut.Blocks))
 	for _, b := range mut.Blocks {
-		attrs := map[string]string{}
-		for k, v := range b.Style.Attributes {
-			attrs[k] = v
-		}
+		attrs := maps.Clone(b.Style.Attributes)
 		if mut.TabID != "" {
+			if attrs == nil {
+				attrs = map[string]string{}
+			}
 			attrs["tab_id"] = mut.TabID
 		}
 		b.Style.Attributes = attrs
 		next = append(next, b)
 	}
 	if !exists {
-		mt := createMediaType(p, mut.MediaType, nil)
+		mt := ms.createMediaType(p, mut.MediaType, nil)
 		created := mut
 		created.Blocks = next
 		doc, err := createDocument(p, mt, created)
@@ -301,9 +358,9 @@ func (ms *MountSession) applyBlocks(ctx context.Context, p string, exists bool, 
 		return ApplyResult{}, ErrProjected
 	}
 	if len(next) == 0 {
-		return ApplyResult{}, fmt.Errorf("vfs: refusing empty IR replace")
+		return ApplyResult{}, ErrEmptyReplace
 	}
-	doc, err := ms.loadMatching(ctx, p, mut.Rev)
+	doc, err := ms.checkout(ctx, p, mut.Rev)
 	if err != nil {
 		return ApplyResult{}, err
 	}
@@ -314,37 +371,51 @@ func (ms *MountSession) applyBlocks(ctx context.Context, p string, exists bool, 
 	if !ok {
 		return ApplyResult{}, ErrProjected
 	}
-	d, _ := asIR(doc)
-	tabs := rd.Tabs()
-	if len(tabs) > 1 && mut.TabID == "" {
-		return ApplyResult{}, fmt.Errorf("vfs: tab_id required")
+	merged, err := mergeTabBlocks(rd, next, mut.TabID)
+	if err != nil {
+		return ApplyResult{}, err
 	}
-	if mut.TabID != "" && len(tabs) > 0 {
-		var keep []Block
-		for _, b := range rd.Blocks() {
-			tab := ""
-			if b.Style.Attributes != nil {
-				tab = b.Style.Attributes["tab_id"]
-			}
-			if tab != mut.TabID {
-				keep = append(keep, b)
+	rd.SetBlocks(merged)
+	d, _ := asIR(doc)
+	return ms.stage(ctx, d)
+}
+
+func mergeTabBlocks(rd Rich, next []Block, tabID string) ([]Block, error) {
+	tabs := rd.Tabs()
+	if len(tabs) > 1 && tabID == "" {
+		return nil, ErrTabIDRequired
+	}
+	if tabID == "" && len(tabs) == 1 {
+		tabID = tabs[0].ID
+	}
+	if tabID != "" {
+		for i := range next {
+			if blockAttr(next[i], "tab_id") == "" {
+				setAttr(&next[i], "tab_id", tabID)
 			}
 		}
-		next = append(next, keep...)
+		if len(tabs) > 0 {
+			var keep []Block
+			for _, b := range rd.Blocks() {
+				if blockAttr(b, "tab_id") != tabID {
+					keep = append(keep, b)
+				}
+			}
+			next = append(next, keep...)
+		}
 	}
-	rd.SetBlocks(next)
-	return ms.stage(ctx, d)
+	return next, nil
 }
 
 func (ms *MountSession) applyLines(ctx context.Context, p string, mut Mutation) (ApplyResult, error) {
 	if mut.End == nil || *mut.Start < 1 || *mut.End < *mut.Start {
-		return ApplyResult{}, fmt.Errorf("vfs: invalid range start=%d end=%v", *mut.Start, mut.End)
+		return ApplyResult{}, fmt.Errorf("invalid range start=%d end=%v; use 1-based half-open start/end, or omit them and pass content", *mut.Start, mut.End)
 	}
-	doc, err := ms.loadMatching(ctx, p, mut.Rev)
+	doc, err := ms.checkout(ctx, p, mut.Rev)
 	if err != nil {
 		return ApplyResult{}, err
 	}
-	if IsProjected(doc.MediaType()) {
+	if _, ok := asGridBody(doc); ok {
 		return ApplyResult{}, ErrProjected
 	}
 	if err := doc.ReplaceLines(*mut.Start, *mut.End, replacementLines(mut.Lines, mut.Body)); err != nil {
@@ -364,6 +435,35 @@ func replacementLines(lines []string, body *string) []string {
 	return out
 }
 
+func (ms *MountSession) matchRev(ctx context.Context, p, rev string) error {
+	expected := strings.TrimSpace(rev)
+	if expected == "" {
+		expected = ms.storedRev(p)
+	}
+	if expected == "" {
+		return nil
+	}
+	cur, err := ms.ContentRev(ctx, p)
+	if err != nil {
+		return err
+	}
+	if cur.Hash != expected {
+		return ErrStaleContent
+	}
+	return nil
+}
+
+func (ms *MountSession) checkout(ctx context.Context, p, rev string) (Textual, error) {
+	expected := strings.TrimSpace(rev)
+	if expected == "" {
+		expected = ms.storedRev(p)
+	}
+	if expected == "" {
+		return ms.ReadText(ctx, p)
+	}
+	return ms.loadMatching(ctx, p, expected)
+}
+
 func (ms *MountSession) loadMatching(ctx context.Context, p, expected string) (Textual, error) {
 	doc, err := ms.ReadText(ctx, p)
 	if err != nil {
@@ -378,9 +478,63 @@ func (ms *MountSession) loadMatching(ctx context.Context, p, expected string) (T
 func (ms *MountSession) stage(ctx context.Context, doc Textual) (ApplyResult, error) {
 	if err := ms.WriteDocument(ctx, doc); err != nil {
 		if errors.Is(err, ErrConflict) {
-			return ApplyResult{}, ErrStaleContent
+			retried, rerr := ms.retryRichPersist(ctx, doc)
+			if rerr != nil {
+				return ApplyResult{}, rerr
+			}
+			doc = retried
+		} else {
+			return ApplyResult{}, err
 		}
-		return ApplyResult{}, err
 	}
-	return ApplyResult{Path: doc.Path(), Rev: ContentToken(doc), LineCount: doc.LineCount()}, nil
+	token := ContentToken(doc)
+	ms.rememberRev(doc.Path(), token)
+	out := ApplyResult{Path: doc.Path(), Rev: token, LineCount: doc.LineCount()}
+	if rd, ok := AsRich(doc); ok {
+		out.Outline = rd.Blocks()
+	}
+	return out, nil
+}
+
+func (ms *MountSession) retryRichPersist(ctx context.Context, doc Textual) (Textual, error) {
+	if _, ok := AsRich(doc); !ok {
+		return nil, ErrStaleContent
+	}
+	fresh, err := ms.ReadText(ctx, doc.Path())
+	if err != nil {
+		return nil, persistWriteErr(err)
+	}
+	d, ok := asIR(doc)
+	f, fok := asIR(fresh)
+	if !ok || !fok {
+		return nil, persistWriteErr(ErrConflict)
+	}
+	d.hint = f.hint
+	if err := ms.WriteDocument(ctx, d); err != nil {
+		return nil, persistWriteErr(err)
+	}
+	return d, nil
+}
+
+func persistWriteErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	switch {
+	case errors.Is(err, ErrInvalidWrite),
+		errors.Is(err, ErrNotExist),
+		errors.Is(err, ErrAuthExpired),
+		errors.Is(err, ErrPermission),
+		errors.Is(err, ErrNotSupported),
+		errors.Is(err, ErrReadOnly),
+		errors.Is(err, ErrTooLarge),
+		errors.Is(err, ErrStaleContent),
+		errors.Is(err, ErrUseHTML),
+		errors.Is(err, ErrProjected):
+		return err
+	}
+	return ErrInvalidWrite
 }

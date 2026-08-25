@@ -67,12 +67,6 @@ func TestGrid_projectionA1AndFingerprint(t *testing.T) {
 	if _, ok := FindBlock(blocks, "budget"); !ok {
 		t.Fatal("FindBlock slug")
 	}
-	if err := d.SetText("nope"); !errors.Is(err, ErrProjected) {
-		t.Fatalf("SetText: %v", err)
-	}
-	if err := d.SetLine(1, "x"); !errors.Is(err, ErrProjected) {
-		t.Fatalf("SetLine: %v", err)
-	}
 	if err := d.ReplaceLines(1, 2, []string{"x"}); !errors.Is(err, ErrProjected) {
 		t.Fatalf("ReplaceLines: %v", err)
 	}
@@ -252,8 +246,13 @@ func TestCreator_liftsGridAndRich(t *testing.T) {
 	if !ok || len(r.Blocks()) != 2 || r.Blocks()[0].Text != "Hello" {
 		t.Fatalf("plaintext lift = %+v ok=%v", rich, ok)
 	}
-	if _, err := (DocsCodec{}).Create("/Spec", mimeGoogleDocument, Mutation{Content: &html}); err == nil {
-		t.Fatal("HTML content")
+	lifted, err := (DocsCodec{}).Create("/Spec", mimeGoogleDocument, Mutation{Content: &html})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lr, ok := AsRich(lifted)
+	if !ok || len(lr.Blocks()) != 1 || lr.Blocks()[0].Kind != BlockKindParagraph || lr.Blocks()[0].Text != "nope" {
+		t.Fatalf("HTML lift = %+v ok=%v", lifted, ok)
 	}
 }
 

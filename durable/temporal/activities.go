@@ -94,6 +94,19 @@ type ToolOutput struct {
 	InterruptID string
 }
 
+// CommitToolInput records a tool output on the staged batch without executing
+// the tool. SessionWorkflow uses this after spawn_worker child completion.
+type CommitToolInput struct {
+	SessionID  durable.SessionID
+	AgentID    string
+	MCPServers []mcp.MCPConfig
+	Etag       string
+	Call       streaming.ToolCall
+	Output     string
+	Auth       durable.AuthContext
+	Mounts     []durable.MountRecipe
+}
+
 func (a *Activities) Inference(ctx context.Context, in InferenceInput) (InferenceOutput, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -233,6 +246,23 @@ func (a *Activities) Tool(ctx context.Context, in ToolInput) (ToolOutput, error)
 	slog.InfoContext(ctx, "tool completed",
 		"area", telemetry.AreaHarness, "tool", in.Call.Name, "status", status)
 	return ToolOutput{Etag: etag, Interrupted: step.Interrupted, InterruptID: step.InterruptID}, nil
+}
+
+func (a *Activities) CommitToolOutput(ctx context.Context, in CommitToolInput) (ToolOutput, error) {
+	h, ms, etag, err := a.harness(ctx, in.SessionID, in.AgentID, in.MCPServers, in.Etag, in.Auth, in.Mounts)
+	if err != nil {
+		return ToolOutput{}, err
+	}
+	defer func() {
+		h.Close()
+		durable.CloseTurnVFS(ms, string(in.SessionID), "commit_tool")
+	}()
+	drive.EngineOf(h).RecordToolResult(in.Call, in.Output)
+	etag, err = a.save(ctx, in.SessionID, in.AgentID, h, etag, in.Mounts)
+	if err != nil {
+		return ToolOutput{}, err
+	}
+	return ToolOutput{Etag: etag}, nil
 }
 
 func (a *Activities) harness(ctx context.Context, id durable.SessionID, agentID string, extraMCP []mcp.MCPConfig, etag string, auth durable.AuthContext, mounts []durable.MountRecipe) (*tacklr.AgentHarness, *vfs.MountSession, string, error) {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -25,32 +26,26 @@ const (
 )
 
 // webSearchArgs is the agent-facing surface for the Exa-backed web_search tool.
-// Descriptions here are what the model sees in the tool schema — keep them
-// general guidance, not host allowlists.
+// Only query / include_domains / num_results are in the model schema. Exa
+// type, category, dates, and content mode are harness-owned (docs: type=auto,
+// highlights, includeDomains instead of site:).
 type webSearchArgs struct {
-	Query string `json:"query" desc:"Natural-language search query. Write a full sentence or question with the entities, place, and constraints you care about (not keyword soup). Put site constraints in include_domains, not as site: in the query."`
+	Query string `json:"query" desc:"Natural-language question or sentence naming the subject, place, and what you need. Do not use site: or keyword soup."`
 
-	Type string `json:"type,omitempty" enum:"auto,fast,instant,deep-lite,deep,deep-reasoning" desc:"Search mode. Prefer auto. fast/instant = lower latency. deep-lite/deep/deep-reasoning = multi-step research (slower, richer)."`
+	IncludeDomains []string `json:"include_domains,omitempty" desc:"Optional hostnames or path prefixes to restrict results (census.gov, learn.microsoft.com). Omit for the open web."`
 
-	NumResults int `json:"num_results,omitempty" desc:"How many results to return (1-10). Default 8. Prefer a sharper query over maxing this out."`
+	NumResults int `json:"num_results,omitempty" desc:"How many results to return (1-10). Default 8."`
 
-	Category string `json:"category,omitempty" enum:"company,people,news,publication,personal site,financial report" desc:"Optional specialized index — omit for general web search (most tasks). company=company profiles; people=person profiles; news=news articles; publication=scholarly papers/preprints/journals only (not general web or government pages); personal site=personal sites/blogs; financial report=filings and financial reports. company and people do not support exclude_domains or published-date filters. If category and include_domains conflict, omit category and search the open web."`
-
-	IncludeDomains []string `json:"include_domains,omitempty" desc:"Only these hostnames, path prefixes (exa.ai/blog), or wildcards (*.substack.com). Use instead of site: in the query. Works best without category, or with a category whose index actually includes those hosts."`
-	ExcludeDomains []string `json:"exclude_domains,omitempty" desc:"Drop these domains/paths. Not valid with category company or people."`
-
-	StartPublishedDate string `json:"start_published_date,omitempty" desc:"ISO-8601 lower bound on published date (e.g. 2024-01-01T00:00:00Z). Not valid with company/people."`
-	EndPublishedDate   string `json:"end_published_date,omitempty" desc:"ISO-8601 upper bound on published date."`
-
-	MaxAgeHours *int `json:"max_age_hours,omitempty" desc:"Content freshness in hours. Omit for Exa default. 0 = always livecrawl; -1 = cache only; positive = use cache if younger than N hours."`
-
-	ContentMode string `json:"content_mode,omitempty" enum:"highlights,text,both" desc:"What to extract per result. Prefer highlights (default) for multi-step agents. text = fuller page text. both = highlights plus capped text."`
-
-	MaxTextCharacters int `json:"max_text_characters,omitempty" desc:"When content_mode is text or both, cap full text characters per result (default 4000, max 10000)."`
-
-	SystemPrompt string `json:"system_prompt,omitempty" desc:"Optional guidance for synthesis/planning (e.g. prefer primary sources). Most useful with deep* types; leave empty otherwise."`
-
-	UserLocation string `json:"user_location,omitempty" desc:"Two-letter ISO country code for geo-biased results (e.g. US)."`
+	Type               string   `json:"type,omitempty" schema:"-"`
+	Category           string   `json:"category,omitempty" schema:"-"`
+	ExcludeDomains     []string `json:"exclude_domains,omitempty" schema:"-"`
+	StartPublishedDate string   `json:"start_published_date,omitempty" schema:"-"`
+	EndPublishedDate   string   `json:"end_published_date,omitempty" schema:"-"`
+	MaxAgeHours        *int     `json:"max_age_hours,omitempty" schema:"-"`
+	ContentMode        string   `json:"content_mode,omitempty" schema:"-"`
+	MaxTextCharacters  int      `json:"max_text_characters,omitempty" schema:"-"`
+	SystemPrompt       string   `json:"system_prompt,omitempty" schema:"-"`
+	UserLocation       string   `json:"user_location,omitempty" schema:"-"`
 }
 
 // resolveExaAPIKey returns the API key from options (if set) or EXA_API_KEY env.
@@ -62,19 +57,11 @@ func resolveExaAPIKey(optsKey string) string {
 }
 
 // Tool description is the primary guidance surface (not the system prompt).
-const webSearchToolDescription = `Search the live web (Exa) and return compact results for research.
+const webSearchToolDescription = `Search the live web and return compact result excerpts.
 
-Prefer natural-language queries: full sentences or questions that name the subject, place, and what you need — not bare keywords or site: operators.
+Pass a natural-language question. Optionally set include_domains to stay on specific hosts (census.gov, bls.gov). Do not use site: in the query.
 
-Default (most tasks): set query only; leave category unset; content_mode highlights. Use include_domains only when you must stay on specific hosts. For a full page body once you have a URL, use web_fetch instead of re-searching.
-
-category selects a specialized index, not a topic tag — omit it unless you specifically need that index:
-- company / people — profiles (no exclude_domains or published-date filters)
-- news — news articles
-- publication — scholarly papers and journals only, not general or government web pages
-- personal site — personal sites/blogs
-- financial report — filings and financial reports
-If a call fails because filters conflict, retry with a clearer query and omit category (and/or domain filters) rather than stacking more constraints.`
+Default: query only. For a known page URL, use web_fetch instead of searching again.`
 
 func newWebSearchTool(client *exa.Client) *Tool {
 	if client == nil {
@@ -93,23 +80,84 @@ func newWebSearchTool(client *exa.Client) *Tool {
 	})
 }
 
+var siteOperator = regexp.MustCompile(`(?i)\bsite:([^\s]+)`)
+
+type searchPrep struct {
+	req   exa.SearchRequest
+	notes []string
+}
+
 func runWebSearch(ctx context.Context, client *exa.Client, args webSearchArgs, runtime HarnessRuntime) (string, error) {
-	req, err := buildExaSearchRequest(args)
+	prep, err := buildExaSearchRequest(args)
 	if err != nil {
 		return "", err
 	}
 	runtime.EmitUpdate("Searching the web…")
-	resp, err := client.Search(ctx, req)
+	resp, err := client.Search(ctx, prep.req)
+	if retryExaConflict(err) {
+		prep.notes = append(prep.notes, "Provider rejected those filters; retried on the open web.")
+		prep.req.Category = ""
+		prep.req.IncludeDomains = nil
+		prep.req.ExcludeDomains = nil
+		resp, err = client.Search(ctx, prep.req)
+	}
 	if err != nil {
 		return "", err
 	}
-	return formatWebSearchResult(req.Query, req.Type, resp), nil
+	if emptySearch(resp) && hasSearchFilters(prep.req) {
+		prep.notes = append(prep.notes, "No hits with those filters; retried on the open web.")
+		prep.req.Category = ""
+		prep.req.IncludeDomains = nil
+		prep.req.ExcludeDomains = nil
+		retry, rerr := client.Search(ctx, prep.req)
+		if rerr != nil {
+			return "", rerr
+		}
+		resp = retry
+	}
+	return formatWebSearchResult(prep.req.Query, prep.req.Type, resp, prep.notes), nil
 }
 
-func buildExaSearchRequest(args webSearchArgs) (exa.SearchRequest, error) {
-	query := strings.TrimSpace(args.Query)
+func retryExaConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "UNSUPPORTED_PUBLICATION") ||
+		strings.Contains(strings.ToLower(msg), "not supported for category") ||
+		(strings.Contains(msg, "exa ") && strings.Contains(msg, "status 400"))
+}
+
+func emptySearch(resp *exa.SearchResponse) bool {
+	return resp == nil || len(resp.Results) == 0
+}
+
+func hasSearchFilters(req exa.SearchRequest) bool {
+	return req.Category != "" || len(req.IncludeDomains) > 0 || len(req.ExcludeDomains) > 0
+}
+
+func liftSiteOperators(q string) (query string, hosts []string) {
+	for _, m := range siteOperator.FindAllStringSubmatch(q, -1) {
+		host := strings.Trim(m[1], `"'`)
+		host = strings.TrimPrefix(host, "https://")
+		host = strings.TrimPrefix(host, "http://")
+		host = strings.TrimSuffix(host, "/")
+		if host != "" {
+			hosts = append(hosts, host)
+		}
+	}
+	query = strings.TrimSpace(siteOperator.ReplaceAllString(q, " "))
+	query = strings.Join(strings.Fields(query), " ")
+	if query == "" && len(hosts) > 0 {
+		query = hosts[0]
+	}
+	return query, hosts
+}
+
+func buildExaSearchRequest(args webSearchArgs) (searchPrep, error) {
+	query, sites := liftSiteOperators(strings.TrimSpace(args.Query))
 	if query == "" {
-		return exa.SearchRequest{}, fmt.Errorf("web_search: query is required")
+		return searchPrep{}, fmt.Errorf("web_search: query is required. Pass a natural-language question or sentence")
 	}
 
 	searchType := strings.TrimSpace(args.Type)
@@ -119,7 +167,15 @@ func buildExaSearchRequest(args webSearchArgs) (exa.SearchRequest, error) {
 	switch searchType {
 	case "auto", "fast", "instant", "deep-lite", "deep", "deep-reasoning":
 	default:
-		return exa.SearchRequest{}, fmt.Errorf("web_search: invalid type %q (use auto, fast, instant, deep-lite, deep, deep-reasoning)", searchType)
+		return searchPrep{}, fmt.Errorf("web_search: invalid type %q (use auto, fast, instant, deep-lite, deep, deep-reasoning)", searchType)
+	}
+
+	var notes []string
+	include := append([]string{}, args.IncludeDomains...)
+	exclude := append([]string{}, args.ExcludeDomains...)
+	if len(sites) > 0 {
+		include = append(include, sites...)
+		notes = append(notes, "Moved site: from the query into include_domains.")
 	}
 
 	category := strings.TrimSpace(args.Category)
@@ -127,17 +183,24 @@ func buildExaSearchRequest(args webSearchArgs) (exa.SearchRequest, error) {
 		switch category {
 		case "company", "people", "news", "publication", "personal site", "financial report":
 		default:
-			return exa.SearchRequest{}, fmt.Errorf("web_search: invalid category %q", category)
+			return searchPrep{}, fmt.Errorf("web_search: invalid category %q (use company, people, news, publication, personal site, financial report — or omit category)", category)
 		}
 	}
 
-	// Exa rejects exclude_domains / published dates for company and people.
+	if category == "publication" && (len(include) > 0 || len(exclude) > 0) {
+		notes = append(notes, "Dropped category=publication because it cannot filter by domain.")
+		category = ""
+	}
+	start := strings.TrimSpace(args.StartPublishedDate)
+	end := strings.TrimSpace(args.EndPublishedDate)
 	if category == "company" || category == "people" {
-		if len(args.ExcludeDomains) > 0 {
-			return exa.SearchRequest{}, fmt.Errorf("web_search: exclude_domains is not supported with category %q", category)
+		if len(exclude) > 0 {
+			notes = append(notes, "Dropped exclude_domains (not valid with category "+category+").")
+			exclude = nil
 		}
-		if strings.TrimSpace(args.StartPublishedDate) != "" || strings.TrimSpace(args.EndPublishedDate) != "" {
-			return exa.SearchRequest{}, fmt.Errorf("web_search: published date filters are not supported with category %q", category)
+		if start != "" || end != "" {
+			notes = append(notes, "Dropped published-date filters (not valid with category "+category+").")
+			start, end = "", ""
 		}
 	}
 
@@ -156,7 +219,7 @@ func buildExaSearchRequest(args webSearchArgs) (exa.SearchRequest, error) {
 	switch mode {
 	case "highlights", "text", "both":
 	default:
-		return exa.SearchRequest{}, fmt.Errorf("web_search: invalid content_mode %q (use highlights, text, both)", mode)
+		return searchPrep{}, fmt.Errorf("web_search: invalid content_mode %q (use highlights, text, both)", mode)
 	}
 
 	textCap := args.MaxTextCharacters
@@ -181,31 +244,38 @@ func buildExaSearchRequest(args webSearchArgs) (exa.SearchRequest, error) {
 		contents.MaxAgeHours = args.MaxAgeHours
 	}
 
-	return exa.SearchRequest{
-		Query:              query,
-		Type:               searchType,
-		NumResults:         n,
-		Category:           category,
-		IncludeDomains:     args.IncludeDomains,
-		ExcludeDomains:     args.ExcludeDomains,
-		StartPublishedDate: strings.TrimSpace(args.StartPublishedDate),
-		EndPublishedDate:   strings.TrimSpace(args.EndPublishedDate),
-		UserLocation:       strings.TrimSpace(args.UserLocation),
-		SystemPrompt:       strings.TrimSpace(args.SystemPrompt),
-		Contents:           contents,
+	return searchPrep{
+		req: exa.SearchRequest{
+			Query:              query,
+			Type:               searchType,
+			NumResults:         n,
+			Category:           category,
+			IncludeDomains:     include,
+			ExcludeDomains:     exclude,
+			StartPublishedDate: start,
+			EndPublishedDate:   end,
+			UserLocation:       strings.TrimSpace(args.UserLocation),
+			SystemPrompt:       strings.TrimSpace(args.SystemPrompt),
+			Contents:           contents,
+		},
+		notes: notes,
 	}, nil
 }
 
-func formatWebSearchResult(query, searchType string, resp *exa.SearchResponse) string {
+func formatWebSearchResult(query, searchType string, resp *exa.SearchResponse, notes []string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "# Web search results\nQuery: %s\n", query)
+	if len(notes) > 0 {
+		fmt.Fprintf(&b, "Adjusted: %s\n", strings.Join(notes, " "))
+	}
 	if resp == nil || len(resp.Results) == 0 {
-		return fmt.Sprintf("# Web search results\nQuery: %s\n\nNo results found. Try a more specific natural-language query, different domains, or another category.", query)
+		b.WriteString("\nNo results found. Try a more specific natural-language query, or fetch a known URL with web_fetch.")
+		return b.String()
 	}
 	if searchType == "" {
 		searchType = "auto"
 	}
-
-	var b strings.Builder
-	fmt.Fprintf(&b, "# Web search results\nQuery: %s\nMode: %s | Results: %d\n", query, searchType, len(resp.Results))
+	fmt.Fprintf(&b, "Mode: %s | Results: %d\n", searchType, len(resp.Results))
 	b.WriteString(formatExaResults(resp.Results, 2000))
 
 	if resp.Output != nil && len(resp.Output.Content) > 0 {
@@ -292,20 +362,17 @@ const (
 
 // webFetchArgs is the agent-facing surface for reading known URLs via Exa /contents.
 type webFetchArgs struct {
-	URLs []string `json:"urls" desc:"One or more full page URLs to read (1-5). Prefer https. Use after web_search or when the user/citation already gave a URL. Do not use for open-ended discovery."`
+	URLs []string `json:"urls" desc:"One or more https page URLs to read (1-5). Use after web_search or when a citation already gave a URL."`
 
-	ContentMode string `json:"content_mode,omitempty" enum:"text,highlights,both" desc:"What to extract. text (default) = page body for careful reading. highlights = short excerpts (optionally guided by highlight_query). both = highlights plus capped text."`
+	HighlightQuery string `json:"highlight_query,omitempty" desc:"Optional focus phrase to extract from long pages."`
 
-	MaxTextCharacters int `json:"max_text_characters,omitempty" desc:"When content_mode is text or both, cap characters per page (default 4000, max 10000)."`
-
-	HighlightQuery string `json:"highlight_query,omitempty" desc:"Optional focus phrase when content_mode is highlights or both (e.g. what to extract from a long page)."`
+	ContentMode       string `json:"content_mode,omitempty" schema:"-"`
+	MaxTextCharacters int    `json:"max_text_characters,omitempty" schema:"-"`
 }
 
-const webFetchToolDescription = `Fetch and extract content from known web page URLs (Exa contents API).
+const webFetchToolDescription = `Read the body of known web page URLs.
 
-Use this when you already have specific URLs (from web_search results, the user, or a citation) and need the page body or targeted excerpts. Do not use web_fetch for open-ended discovery — use web_search first.
-
-Default: content_mode text with a character cap for token efficiency. Prefer a small urls list (1-3) over fetching many pages at once.`
+Use when you already have URLs from web_search, the user, or a citation. Do not use for open-ended discovery — search first. Prefer 1–3 URLs per call.`
 
 func newWebFetchTool(client *exa.Client) *Tool {
 	if client == nil {
@@ -340,10 +407,10 @@ func runWebFetch(ctx context.Context, client *exa.Client, args webFetchArgs, run
 func buildExaContentsRequest(args webFetchArgs) (exa.ContentsRequest, error) {
 	urls := normalizeFetchURLs(args.URLs)
 	if len(urls) == 0 {
-		return exa.ContentsRequest{}, fmt.Errorf("web_fetch: at least one url is required")
+		return exa.ContentsRequest{}, fmt.Errorf("web_fetch: at least one http(s) url is required")
 	}
 	if len(urls) > webFetchMaxURLs {
-		return exa.ContentsRequest{}, fmt.Errorf("web_fetch: at most %d urls per call", webFetchMaxURLs)
+		return exa.ContentsRequest{}, fmt.Errorf("web_fetch: at most %d urls per call; fetch the most relevant pages first", webFetchMaxURLs)
 	}
 
 	mode := strings.TrimSpace(args.ContentMode)

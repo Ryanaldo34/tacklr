@@ -1,6 +1,8 @@
 package temporal
 
 import (
+	"time"
+
 	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/streaming"
@@ -20,6 +22,10 @@ type WorkflowInput struct {
 	MCPServers []mcp.MCPConfig
 	Mounts     []durable.MountRecipe
 	Auth       durable.AuthContext
+	// WorkerSessionTimeout, when > 0, pins the turn's activities to one worker
+	// (Temporal CreateSession). Zero skips worker sessions: activities can run
+	// on any worker. There is no default timeout.
+	WorkerSessionTimeout time.Duration
 	// Prompt, when set, runs one turn then completes the workflow (spawn_worker child).
 	Prompt string
 }

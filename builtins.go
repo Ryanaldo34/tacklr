@@ -146,7 +146,7 @@ func newListPlanTool(sm *session.SessionManager) *Tool {
 		Handler: func(ctx context.Context, _ HarnessRuntime) (string, error) {
 			plan := sm.Plan.Get()
 			if len(plan) == 0 {
-				return "", fmt.Errorf("no plan exists")
+				return "", fmt.Errorf("no plan exists yet; call create_plan first")
 			}
 			var b strings.Builder
 			fmt.Fprintf(&b, "Active plan (%d todos):\n", len(plan))
@@ -170,7 +170,7 @@ func newCompleteTodoTool(sm *session.SessionManager) *Tool {
 		Handler: func(ctx context.Context, args completeTodoArgs) (ToolOutcome, error) {
 			plan := sm.Plan.Get()
 			if plan == nil {
-				return ToolOutcome{}, fmt.Errorf("no plan exists")
+				return ToolOutcome{}, fmt.Errorf("no plan exists yet; call create_plan first")
 			}
 			// Handoff only when another open todo must be picked up. Completing the
 			// final item should leave context intact so the agent can wrap up.
@@ -183,7 +183,7 @@ func newCompleteTodoTool(sm *session.SessionManager) *Tool {
 			for i, todo := range plan {
 				if todo.Title == args.Title {
 					if todo.Status == streaming.TodoStatusCompleted {
-						return ToolOutcome{}, fmt.Errorf("todo %q is already completed", args.Title)
+						return ToolOutcome{}, fmt.Errorf("todo %q is already completed; call list_plan and pick a pending title", args.Title)
 					}
 					plan[i].Status = streaming.TodoStatusCompleted
 					if len(plan)-1 > i {
@@ -208,7 +208,7 @@ func newCompleteTodoTool(sm *session.SessionManager) *Tool {
 					return allDone("All todos completed successfully")
 				}
 			}
-			return ToolOutcome{}, fmt.Errorf("todo %q not found in plan", args.Title)
+			return ToolOutcome{}, fmt.Errorf("todo %q not found in plan; call list_plan and use an exact title", args.Title)
 		},
 	})
 }
@@ -222,7 +222,7 @@ func newEditPlanTool(sm *session.SessionManager) *Tool {
 		Handler: func(ctx context.Context, args editTodosArgs) (ToolOutcome, error) {
 			plan := sm.Plan.Get()
 			if plan == nil {
-				return ToolOutcome{}, fmt.Errorf("no plan exists")
+				return ToolOutcome{}, fmt.Errorf("no plan exists yet; call create_plan first")
 			}
 
 			trimmedPlan := strings.TrimSpace(args.Plan)

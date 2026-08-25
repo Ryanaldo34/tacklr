@@ -49,6 +49,7 @@ type MountSession struct {
 	afterPersist AfterPersistFunc
 	fuse         *gofuse.Server
 	hostDir      string
+	lastRev      map[string]string
 }
 
 // SetAfterPersist registers a hook after successful backend writes.
@@ -65,6 +66,24 @@ func (m *MountSession) GetAfterPersist() AfterPersistFunc {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.afterPersist
+}
+
+func (m *MountSession) rememberRev(virtualPath, hash string) {
+	if hash == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.lastRev == nil {
+		m.lastRev = map[string]string{}
+	}
+	m.lastRev[virtualPath] = hash
+}
+
+func (m *MountSession) storedRev(virtualPath string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastRev[virtualPath]
 }
 
 func (m *MountSession) fireAfterPersist(ctx context.Context, virtualPath string) error {

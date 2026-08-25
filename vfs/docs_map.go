@@ -143,7 +143,7 @@ func mapReplaceBlock(loc blockLocation, b Block) ([]DocsRequest, error) {
 }
 
 func mapReplaceTable(loc blockLocation, b Block) ([]DocsRequest, error) {
-	grid, err := parseTSV(b.Text)
+	grid, err := parseTableText(b.Text)
 	if err != nil {
 		return nil, err
 	}
@@ -293,8 +293,55 @@ type insertChunk struct {
 	tabID     string
 }
 
+// paragraphInsertIndex is a valid insertText Location: inside an existing
+// paragraph, never a section break (index 1 after a wipe). 1 if none found.
+func paragraphInsertIndex(spans []DocsSpan, tabID string) int {
+	for _, s := range spans {
+		if tabID != "" && s.TabID != "" && s.TabID != tabID {
+			continue
+		}
+		switch s.Kind {
+		case "paragraph", "heading", "list_item":
+			if s.StartIndex >= 1 {
+				return s.StartIndex
+			}
+		}
+	}
+	return 1
+}
+
+// paragraphAppendIndex is a valid insertText index at the end of the last
+// paragraph in the tab (inside its trailing newline). After a table, Google
+// leaves a paragraph; inserting there appends instead of clobbering earlier text.
+func paragraphAppendIndex(spans []DocsSpan, tabID string) int {
+	var last *DocsSpan
+	for i := range spans {
+		s := &spans[i]
+		if tabID != "" && s.TabID != "" && s.TabID != tabID {
+			continue
+		}
+		switch s.Kind {
+		case "paragraph", "heading", "list_item":
+			last = s
+		}
+	}
+	if last == nil {
+		return paragraphInsertIndex(spans, tabID)
+	}
+	if last.EndIndex > last.StartIndex {
+		return last.EndIndex - 1
+	}
+	if last.StartIndex >= 1 {
+		return last.StartIndex
+	}
+	return 1
+}
+
 func mapInsertBlocks(blocks []Block, startIdx int, tabID string) (chunks []insertChunk, endIdx int, err error) {
 	idx := startIdx
+	if idx < 1 {
+		idx = 1
+	}
 	var cur insertChunk
 	flush := func() {
 		if len(cur.reqs) > 0 || cur.tableFill {
@@ -318,9 +365,12 @@ func mapInsertBlocks(blocks []Block, startIdx int, tabID string) (chunks []inser
 			if err != nil {
 				return nil, 0, err
 			}
-			grid, err := parseTSV(b.Text)
+			grid, err := parseTableText(b.Text)
 			if err != nil {
 				return nil, 0, err
+			}
+			if len(grid) > 0 {
+				rows, cols = len(grid), len(grid[0])
 			}
 			flush()
 			chunks = append(chunks, insertChunk{

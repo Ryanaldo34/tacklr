@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"go.temporal.io/api/serviceerror"
@@ -21,12 +22,13 @@ import (
 
 // Runtime implements durable.Runtime with one Temporal workflow per session.
 type Runtime struct {
-	client         client.Client
-	taskQueue      string
-	catalog        durable.Catalog
-	fallback       *inprocess.MemoryEventLog
-	snapshots      durable.SnapshotStore
-	disableStreams bool
+	client               client.Client
+	taskQueue            string
+	catalog              durable.Catalog
+	fallback             *inprocess.MemoryEventLog
+	snapshots            durable.SnapshotStore
+	disableStreams       bool
+	workerSessionTimeout time.Duration
 
 	mu     sync.Mutex
 	closed map[durable.SessionID]struct{}
@@ -58,6 +60,17 @@ func WithEventLog(l *inprocess.MemoryEventLog) Option {
 // use this in unit tests. The dev-server integration test leaves streams on.
 func WithDisableStreams() Option {
 	return func(r *Runtime) { r.disableStreams = true }
+}
+
+// WithWorkerSessionTimeout pins each turn's activities to one worker for that
+// duration (Temporal worker session). Zero, the default, does not create a
+// session. Hosts that want sticky VFS locality must set this explicitly.
+func WithWorkerSessionTimeout(d time.Duration) Option {
+	return func(r *Runtime) {
+		if d > 0 {
+			r.workerSessionTimeout = d
+		}
+	}
 }
 
 // New constructs a Temporal Runtime. The host must also run Worker on the same
@@ -108,7 +121,13 @@ func (r *Runtime) CreateSession(ctx context.Context, req durable.CreateSession) 
 	_, err := r.client.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
 		ID:        r.workflowID(id),
 		TaskQueue: r.taskQueue,
-	}, SessionWorkflow, WorkflowInput{SessionID: id, AgentID: agentID, MCPServers: req.MCPServers, Mounts: req.Mounts})
+	}, SessionWorkflow, WorkflowInput{
+		SessionID:            id,
+		AgentID:              agentID,
+		MCPServers:           req.MCPServers,
+		Mounts:               req.Mounts,
+		WorkerSessionTimeout: r.workerSessionTimeout,
+	})
 	if err != nil {
 		var already *serviceerror.WorkflowExecutionAlreadyStarted
 		if errors.As(err, &already) {
