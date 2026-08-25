@@ -179,15 +179,18 @@ func (r *Runtime) send(ctx context.Context, id durable.SessionID, sig signal) er
 	}
 }
 
-func (r *Runtime) waitPriorTurn(ctx context.Context, p *sessionProc) error {
+// waitPriorTurn waits for the in-flight turn. abort cancels it first (Prompt,
+// Cancel, Close). Resume must not abort: HITL parks after leftover tools in
+// the same batch finish; canceling them emits context.Canceled and drops
+// function_call_output for the next model turn.
+func (r *Runtime) waitPriorTurn(ctx context.Context, p *sessionProc, abort bool) error {
 	p.mu.Lock()
 	cancel := p.cancelTurn
 	done := p.turnDone
 	p.mu.Unlock()
-	if cancel == nil {
-		return nil
+	if abort && cancel != nil {
+		cancel()
 	}
-	cancel()
 	if done == nil {
 		return nil
 	}
@@ -220,7 +223,7 @@ func (r *Runtime) Cancel(ctx context.Context, sessionID durable.SessionID) error
 		p.cancelTurn()
 	}
 	p.mu.Unlock()
-	_ = r.waitPriorTurn(ctx, p)
+	_ = r.waitPriorTurn(ctx, p, true)
 	r.events.EndSubscribers(sessionID)
 	return nil
 }
@@ -243,7 +246,7 @@ func (r *Runtime) Close(ctx context.Context, sessionID durable.SessionID) error 
 	if already {
 		return durable.ErrSessionNotFound
 	}
-	_ = r.waitPriorTurn(ctx, p)
+	_ = r.waitPriorTurn(ctx, p, true)
 	reply := make(chan error, 1)
 	select {
 	case p.signals <- signal{kind: sigClose, reply: reply}:
@@ -326,7 +329,7 @@ func (r *Runtime) loop(p *sessionProc) {
 		if parent == nil {
 			parent = context.Background()
 		}
-		if err := r.waitPriorTurn(parent, p); err != nil {
+		if err := r.waitPriorTurn(parent, p, sig.kind != sigResume); err != nil {
 			if sig.reply != nil {
 				sig.reply <- err
 			}

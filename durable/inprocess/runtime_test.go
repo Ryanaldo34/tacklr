@@ -299,6 +299,18 @@ func TestPrompt_parallelBatchHitlRunsRemainder(t *testing.T) {
 			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "all-three", IsComplete: true}
 		},
 	}
+	slow := func(out string) func(context.Context) (string, error) {
+		return func(ctx context.Context) (string, error) {
+			// Keep leftover calls in-flight when gate parks so Resume must wait,
+			// not cancel the batch (that used to emit context.Canceled).
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+			case <-time.After(25 * time.Millisecond):
+				return out, nil
+			}
+		}
+	}
 	gate := tacklr.NewTool(tacklr.ToolConfig{
 		Name:   "gate",
 		OnCall: []tacklr.OnCallFunc{tacklr.ToolPermissionOnCall},
@@ -308,9 +320,9 @@ func TestPrompt_parallelBatchHitlRunsRemainder(t *testing.T) {
 	})
 	rt := New(newCatalog(t, model, durable.AgentSpec{
 		Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{
-			tacklr.NewTool(tacklr.ToolConfig{Name: "alpha", Handler: func(context.Context) (string, error) { return "from-alpha", nil }}),
+			tacklr.NewTool(tacklr.ToolConfig{Name: "alpha", Handler: slow("from-alpha")}),
 			gate,
-			tacklr.NewTool(tacklr.ToolConfig{Name: "beta", Handler: func(context.Context) (string, error) { return "from-beta", nil }}),
+			tacklr.NewTool(tacklr.ToolConfig{Name: "beta", Handler: slow("from-beta")}),
 		}},
 	}), WithProjection(vfs.DirectProjection{}))
 	id, err := rt.CreateSession(ctx, durable.CreateSession{AgentID: "default"})
