@@ -77,11 +77,13 @@ func TestWebSearchTool_invokeAgainstServer(t *testing.T) {
 	if _, err := tool.invoke(ctx, `{"query":"q","category":"nope"}`, nopRuntime()); err == nil {
 		t.Fatal("invalid category")
 	}
-	if _, err := tool.invoke(ctx, `{"query":"q","category":"company","exclude_domains":["x.com"]}`, nopRuntime()); err == nil {
-		t.Fatal("company exclude")
+	res, err = tool.invoke(ctx, `{"query":"q","category":"company","exclude_domains":["x.com"]}`, nopRuntime())
+	if err != nil || !strings.Contains(res.output, "Hit") || !strings.Contains(res.output, "Dropped exclude_domains") {
+		t.Fatalf("company exclude coerced: %q err=%v", res.output, err)
 	}
-	if _, err := tool.invoke(ctx, `{"query":"q","category":"people","start_published_date":"2024-01-01T00:00:00Z"}`, nopRuntime()); err == nil {
-		t.Fatal("people dates")
+	res, err = tool.invoke(ctx, `{"query":"q","category":"people","start_published_date":"2024-01-01T00:00:00Z"}`, nopRuntime())
+	if err != nil || !strings.Contains(res.output, "Hit") || !strings.Contains(res.output, "Dropped published-date") {
+		t.Fatalf("people dates coerced: %q err=%v", res.output, err)
 	}
 	if _, err := tool.invoke(ctx, `{"query":"q","content_mode":"raw"}`, nopRuntime()); err == nil {
 		t.Fatal("invalid mode")
@@ -95,10 +97,72 @@ func TestWebSearchTool_invokeAgainstServer(t *testing.T) {
 		t.Fatalf("text mode: %q err=%v", res.output, err)
 	}
 
+	res, err = tool.invoke(ctx, `{"query":"ACS API","category":"publication","include_domains":["census.gov"]}`, nopRuntime())
+	if err != nil || !strings.Contains(res.output, "Hit") || !strings.Contains(res.output, "Dropped category=publication") {
+		t.Fatalf("publication+domain coerced: %q err=%v", res.output, err)
+	}
+	res, err = tool.invoke(ctx, `{"query":"site:census.gov ACS 5-year API"}`, nopRuntime())
+	if err != nil || !strings.Contains(res.output, "Hit") || !strings.Contains(res.output, "Moved site:") {
+		t.Fatalf("site: lift: %q err=%v", res.output, err)
+	}
+
 	h := mustNewAgent(t, AgentOptions{Model: &mockStrategy{}, ExaAPIKey: "from-opts"})
 	t.Cleanup(h.Close)
 	if h.findTool("web_search", "") == nil || h.findTool("web_fetch", "") == nil {
 		t.Fatal("ExaAPIKey should install web tools")
+	}
+}
+
+func TestWebSearch_schemaHidesExaKnobs(t *testing.T) {
+	search := newWebSearchTool(exa.NewClient("k")).AsJson()
+	params, _ := search["parameters"].(map[string]any)
+	props, _ := params["properties"].(map[string]any)
+	for _, hidden := range []string{"type", "category", "exclude_domains", "start_published_date", "end_published_date", "content_mode", "max_text_characters", "system_prompt", "user_location", "max_age_hours"} {
+		if _, ok := props[hidden]; ok {
+			t.Fatalf("web_search schema still exposes %s", hidden)
+		}
+	}
+	for _, want := range []string{"query", "include_domains", "num_results"} {
+		if _, ok := props[want]; !ok {
+			t.Fatalf("web_search schema missing %s", want)
+		}
+	}
+	fetch := newWebFetchTool(exa.NewClient("k")).AsJson()
+	fparams, _ := fetch["parameters"].(map[string]any)
+	fprops, _ := fparams["properties"].(map[string]any)
+	if _, ok := fprops["content_mode"]; ok {
+		t.Fatal("web_fetch schema still exposes content_mode")
+	}
+	if _, ok := fprops["urls"]; !ok {
+		t.Fatal("web_fetch schema missing urls")
+	}
+}
+
+func TestWebSearch_retriesEmptyFilteredSearch(t *testing.T) {
+	var n int
+	client := newExaTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		n++
+		b, _ := io.ReadAll(r.Body)
+		var body map[string]any
+		_ = json.Unmarshal(b, &body)
+		w.Header().Set("Content-Type", "application/json")
+		cat, _ := body["category"].(string)
+		if cat == "publication" {
+			_, _ = w.Write([]byte(`{"results":[]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"results":[{"title":"Census ACS","url":"https://www.census.gov/acs"}]}`))
+	})
+	res, err := newWebSearchTool(client).invoke(context.Background(),
+		`{"query":"ACS 5-year demographics","category":"publication"}`, nopRuntime())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("searches = %d, want 2 (empty then retry)", n)
+	}
+	if !strings.Contains(res.output, "Census ACS") || !strings.Contains(res.output, "No hits with those filters") {
+		t.Fatalf("retry output: %s", res.output)
 	}
 }
 

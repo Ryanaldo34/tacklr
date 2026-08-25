@@ -39,6 +39,15 @@ func TestMapDocsError(t *testing.T) {
 	if errors.Is(raw, ErrConflict) {
 		t.Fatal("structure 400 must not be conflict")
 	}
+	if !errors.Is(raw, ErrInvalidWrite) || strings.Contains(raw.Error(), "googleapi") {
+		t.Fatalf("structure 400: %v", raw)
+	}
+	ins := mapDocsError(&googleapi.Error{
+		Code: 400, Message: "Invalid requests[0].insertText: The insertion index must be inside the bounds of an existing paragraph.",
+	})
+	if !errors.Is(ins, ErrInvalidWrite) || strings.Contains(ins.Error(), "googleapi") || strings.Contains(ins.Error(), "insertText") {
+		t.Fatalf("insertText 400: %v", ins)
+	}
 	if mapDocsError(nil) != nil {
 		t.Fatal("nil")
 	}
@@ -48,8 +57,30 @@ func TestMapDocsError(t *testing.T) {
 	if !errors.Is(mapDocsError(&googleapi.Error{Code: 403}), ErrPermission) {
 		t.Fatal("403 empty")
 	}
-	if mapDocsError(&googleapi.Error{Code: 500, Message: "boom"}) == nil {
-		t.Fatal("500")
+	five := mapDocsError(&googleapi.Error{Code: 500, Message: "boom"})
+	if five == nil || errors.Is(five, ErrInvalidWrite) || !strings.Contains(five.Error(), "HTTP 500") || !strings.Contains(five.Error(), "boom") {
+		t.Fatalf("500: %v", five)
+	}
+}
+
+func TestMapDriveError(t *testing.T) {
+	if !errors.Is(mapDriveError(&googleapi.Error{Code: 404}), ErrNotExist) {
+		t.Fatal("404")
+	}
+	if !errors.Is(mapDriveError(&googleapi.Error{Code: 400, Message: "exportSizeLimitExceeded"}), ErrTooLarge) {
+		t.Fatal("export size")
+	}
+	bad := mapDriveError(&googleapi.Error{Code: 400, Message: "bad request"})
+	if errors.Is(bad, ErrInvalidWrite) || !strings.Contains(bad.Error(), "HTTP 400") {
+		t.Fatalf("400: %v", bad)
+	}
+	five := mapDriveError(&googleapi.Error{Code: 500, Message: "boom"})
+	if errors.Is(five, ErrInvalidWrite) || !strings.Contains(five.Error(), "HTTP 500") {
+		t.Fatalf("500: %v", five)
+	}
+	limited := mapDriveError(&googleapi.Error{Code: 429, Message: "slow down"})
+	if errors.Is(limited, ErrInvalidWrite) || !strings.Contains(limited.Error(), "HTTP 429") {
+		t.Fatalf("429: %v", limited)
 	}
 }
 

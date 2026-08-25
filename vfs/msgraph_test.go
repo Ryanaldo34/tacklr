@@ -1,6 +1,7 @@
 package vfs_test
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/json"
@@ -224,8 +225,12 @@ func (g *graphFX) serveContent(w http.ResponseWriter, r *http.Request, itemID, r
 		}
 		if r.Method == http.MethodPut {
 			body := readGraphBody(r)
+			mime := "text/plain"
+			if bytes.Contains(body, []byte("word/document.xml")) {
+				mime = adapters.DOCXMediaType
+			}
 			id := "new-" + rel
-			created := &graphNode{id: id, name: rel, parent: parent, mime: "text/plain", body: append([]byte(nil), body...)}
+			created := &graphNode{id: id, name: rel, parent: parent, mime: mime, body: append([]byte(nil), body...)}
 			g.add(created)
 			writeGraphJSON(w, g.json(created))
 			return
@@ -445,6 +450,25 @@ func TestGraph_readWriteMkdirTrashRefreshAndErrors(t *testing.T) {
 	got, err = ms.ReadFile(ctx, "/workspace/legal/note.md")
 	if err != nil || !strings.Contains(string(got), "# hi") {
 		t.Fatalf("WriteDocument = %q err=%v", got, err)
+	}
+	if err := adapters.RegisterCommon(vfs.DefaultContentRegistry()); err != nil {
+		t.Fatal(err)
+	}
+	html := "<h1>x</h1>"
+	if _, err := ms.Apply(ctx, "/workspace/legal/SPIKE", vfs.Mutation{Content: &html}); err != nil {
+		t.Fatal(err)
+	}
+	st, err = ms.Stat(ctx, "/workspace/legal/SPIKE")
+	if err != nil || st.MediaType != adapters.DOCXMediaType {
+		t.Fatalf("extensionless HTML graph Stat=%+v err=%v", st, err)
+	}
+	word, err := ms.ReadText(ctx, "/workspace/legal/SPIKE")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rd, ok := vfs.AsRich(word)
+	if !ok || len(rd.Blocks()) == 0 || rd.Blocks()[0].Text != "x" {
+		t.Fatalf("graph Word IR = %+v ok=%v", word, ok)
 	}
 	if err := ms.MkdirAll(ctx, "/workspace/legal/Budget.xlsx/nope"); err == nil || !errors.Is(err, vfs.ErrNotSupported) {
 		t.Fatalf("mkdir through file: %v", err)

@@ -313,10 +313,18 @@ func ResolveToolTitle(displayName, toolName, argsJSON string) string {
 // invoke runs the tool handler. Only the harness tool runner should call this
 // so interceptors, permissions, and effects apply.
 func (t *Tool) invoke(ctx context.Context, argsJson string, runtime HarnessRuntime) (toolCallResult, error) {
+	res, err := t.invokeRaw(ctx, argsJson, runtime)
+	if err != nil {
+		return res, presentToolError(t.name, err)
+	}
+	return res, nil
+}
+
+func (t *Tool) invokeRaw(ctx context.Context, argsJson string, runtime HarnessRuntime) (toolCallResult, error) {
 	var args map[string]any
 	if argsJson != "" {
 		if err := json.Unmarshal([]byte(argsJson), &args); err != nil {
-			return toolCallResult{}, fmt.Errorf("unmarshal args for tool %q: %w", t.name, err)
+			return toolCallResult{}, AgentErrorf(ErrInvalid, "%s: arguments were not valid JSON. Check the tool schema and retry with a JSON object", t.name)
 		}
 	}
 
@@ -411,6 +419,10 @@ func typeToJSONSchema(rt reflect.Type, depth int, strict bool, skipTypes ...refl
 				ft = ft.Elem()
 			}
 			if shouldSkip(ft) {
+				continue
+			}
+
+			if f.Tag.Get("schema") == "-" {
 				continue
 			}
 

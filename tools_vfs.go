@@ -2,6 +2,7 @@ package tacklr
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -44,8 +45,8 @@ type writeBlock struct {
 
 type writeArgs struct {
 	Path           string           `json:"path" desc:"Absolute virtual path to write."`
-	Rev            string           `json:"rev,omitempty" desc:"Required when path exists: hash from the latest read. Omit only to create (full mode)."`
-	Content        *string          `json:"content,omitempty" desc:"Full new file body (UTF-8). Creates or replaces the whole file. Empty creates or truncates. Create-only lift for Docs."`
+	Rev            string           `json:"rev,omitempty" schema:"-"`
+	Content        *string          `json:"content,omitempty" desc:"Full new file body (UTF-8 HTML for Docs/Word). Creates or replaces the whole file."`
 	IRText         *string          `json:"ir_text,omitempty" desc:"Full IR body. Same as content; if both are set they must match."`
 	Start          *int             `json:"start,omitempty" desc:"1-based start line (inclusive). Lines mode."`
 	End            *int             `json:"end,omitempty" desc:"1-based end line (exclusive). Required in lines mode."`
@@ -54,11 +55,11 @@ type writeArgs struct {
 	Old            *string          `json:"old,omitempty" desc:"Exact substring to find. Must be unique unless replace_all."`
 	New            *string          `json:"new,omitempty" desc:"Replacement text. Omitted treated as empty."`
 	ReplaceAll     bool             `json:"replace_all,omitempty" desc:"Replace every occurrence of old."`
-	BlockID        string           `json:"block_id,omitempty" desc:"Replace this structured block's body (or full span if include_heading)."`
-	IncludeHeading bool             `json:"include_heading,omitempty" desc:"When block_id is a heading, replace the heading line too."`
-	MediaType      string           `json:"media_type,omitempty" desc:"Create-as media type on an extensionless path. Ignored when the path exists or has an extension. Foo.md is never a Doc."`
-	Blocks         *[]writeBlock    `json:"blocks,omitempty" desc:"Replace a tab body (SetBlocks) or create a Doc/Word file from IR. text uses **bold** _italic_ ~~strike~~ [label](url)."`
-	TabID          string           `json:"tab_id,omitempty" desc:"Required for blocks when the Doc has more than one tab."`
+	BlockID        string           `json:"block_id,omitempty" desc:"Sheets: Sheet!A1. Host/test IR: replace this structured block."`
+	IncludeHeading bool             `json:"include_heading,omitempty" schema:"-"`
+	MediaType      string           `json:"media_type,omitempty" schema:"-"`
+	Blocks         *[]writeBlock    `json:"blocks,omitempty" schema:"-"`
+	TabID          string           `json:"tab_id,omitempty" desc:"Required for HTML/blocks when the Doc has more than one tab."`
 	Format         *vfs.FormatPatch `json:"format,omitempty" desc:"Optional cell format patch on the same block_id range (number, bold, italic, strike, underline, fill, color, align, valign, wrap, border). Omit a field to leave it; set bold=false to clear. Value-only writes leave format; format-only writes leave values."`
 }
 
@@ -68,10 +69,9 @@ func (v vfsTools) newRead() *Tool {
 		DisplayName: "Read {path}",
 		Description: `Read a virtual file (not a knowledge object). First page by default, or a line window / block.
 
-Path only on ordinary files → start=1 through 1+MaxLinesPerWindow plus rev (pass rev to write).
-Path only on Google Docs/Word (projected) → outline. Use rg on the FUSE tree for HTML hits, then read({block_id}) for IR text.
-start/end → half-open 1-based window (HTML lines on Docs). block_id → that region's IR text. outline=true → block list (text uses **bold** _italic_ ~~strike~~ [label](url); kind/level is structure). ir=true → media_type/encoding (no HTML dump on Docs).
-Sheets: block_id is a sheet (id, title, or slug) or Sheet!A1 / Sheet!A1:C3. start/end are 1-based rows of that sheet, not HTML lines. One-cell and small A1 reads print format when present; row windows stay TSV unless ir is set on a small range. Write is one cell (Sheet!A1) or create.
+Path only → numbered lines (start=1 through 1+MaxLinesPerWindow). Docs/Word are pretty HTML: one heading, paragraph, list item, or table per line. outline=true still returns the block list.
+start/end → half-open 1-based window. block_id → that region's IR text. ir=true → media_type/encoding.
+Sheets: path-only is outline. block_id is a sheet (id, title, or slug) or Sheet!A1 / Sheet!A1:C3. start/end are 1-based rows of that sheet, not HTML lines. One-cell and small A1 reads print format when present; row windows stay TSV unless ir is set on a small range. Write is one cell (Sheet!A1) or create.
 Knowledge objects with no file: read_object. Live names/grep: run_command → ls / rg.`,
 		Category: streaming.ToolCategoryRead,
 		Access:   ToolReadAccess,
@@ -91,7 +91,7 @@ Knowledge objects with no file: read_object. Live names/grep: run_command → ls
 
 			explicitWindow := args.Start > 0 || args.End > 0
 			pathOnly := !explicitWindow && args.BlockID == "" && !args.Outline && !args.IR
-			if pathOnly && projected {
+			if pathOnly && projected && isTabularMedia(fi.MediaType) {
 				args.Outline = true
 			} else if !explicitWindow && args.BlockID == "" && !args.Outline {
 				args.Start = 1
@@ -103,18 +103,12 @@ Knowledge objects with no file: read_object. Live names/grep: run_command → ls
 				return v.readStructured(ctx, p, args, explicitWindow)
 			}
 
-			if projected {
-				doc, err := v.ms.ReadText(ctx, p)
-				if err != nil {
-					return "", err
-				}
-				if _, ok := vfs.AsGrid(doc); ok {
-					return "", vfs.ErrProjected
-				}
+			if projected && isTabularMedia(fi.MediaType) {
+				return "", vfs.ErrProjected
 			}
 
 			if args.Start < 1 || args.End < args.Start {
-				return "", fmt.Errorf("invalid range start=%d end=%d (or set block_id / outline)", args.Start, args.End)
+				return "", fmt.Errorf("invalid range start=%d end=%d. Use 1-based half-open start/end, or omit them to read the first page, or pass block_id / outline", args.Start, args.End)
 			}
 			win, err := v.ms.ReadLines(ctx, p, args.Start, args.End)
 			if err != nil {
@@ -132,7 +126,7 @@ Knowledge objects with no file: read_object. Live names/grep: run_command → ls
 				}
 			}
 			if args.Rev != "" && args.Rev != rev.Hash {
-				return "", vfs.ErrStaleContent
+				return "", staleRevError(p)
 			}
 			var b strings.Builder
 			growLineWindow(&b, 96+len(win.Path)+len(rev.Hash), win.Lines)
@@ -153,7 +147,7 @@ func (v vfsTools) readStructured(ctx context.Context, p string, args readArgs, e
 	}
 	rev := vfs.ContentToken(doc)
 	if args.Rev != "" && args.Rev != rev {
-		return "", vfs.ErrStaleContent
+		return "", staleRevError(p)
 	}
 	projected := vfs.IsProjected(doc.MediaType())
 	var blocks []vfs.Block
@@ -213,11 +207,11 @@ func (v vfsTools) readStructured(ctx context.Context, p string, args readArgs, e
 	start, end := args.Start, args.End
 	if args.BlockID != "" {
 		if len(blocks) == 0 {
-			return "", fmt.Errorf("no structured blocks on this document")
+			return "", fmt.Errorf("read %s: this file has no structured blocks. Read the path without block_id (Docs/Word return numbered HTML lines)", p)
 		}
 		bl, ok := vfs.FindBlock(blocks, args.BlockID)
 		if !ok {
-			return "", fmt.Errorf("unknown block_id %q", args.BlockID)
+			return "", fmt.Errorf("unknown block_id %q. Read the path with outline=true and use an id from that outline", args.BlockID)
 		}
 		fmt.Fprintf(&b, "block_id=%s\n", bl.ID)
 		if projected {
@@ -334,10 +328,10 @@ func (v vfsTools) newWrite() *Tool {
 	cfg := ToolConfig{
 		Name:        "write",
 		DisplayName: "Write {path}",
-		Description: `Write a virtual file: full body, line span, substring, structured block, or Docs blocks. Exactly one mode per call.
+		Description: `Write a virtual file. Exactly one mode: full content, line span, substring, or block_id.
 
-Pass rev from read when the path exists. Create only via content or ir_text (empty content creates or truncates), or media_type+blocks for a Google Doc. Foo.md is never a Doc. Extensionless Spec without media_type is plaintext.
-Projected Docs/Word: use block_id or blocks. Inline marks in block text: **bold**, _italic_, ~~strike~~, [label](url). kind/level is structure (not # or -). No marks = plain replace (drops old marks). Line/HTML/SetText writes return an error. content lift is create-only. Persists immediately.
+Docs/Word are a text file of HTML. Read numbered lines, then write start/end/lines or full content. The harness owns checkout. Single-tab Docs do not need tab_id.
+Create: content on a new path. Extension wins (Foo.md is never a Doc; notes.html is a real HTML file). Extensionless HTML becomes a native Doc on Drive, Word on Graph, or a text/html file locally.
 Sheets: write block_id is Sheet!A1 (one cell). Optional format patches that cell (value-only leaves format; format-only leaves values). Range, row-window, and in-place sheet replace are not writes — create a new sheet with content or blocks.`,
 		Category: streaming.ToolCategoryEdit,
 		Access:   ToolWriteAccess,
@@ -350,9 +344,9 @@ Sheets: write block_id is Sheet!A1 (one cell). Optional format patches that cell
 			n, full := writeModeCount(args)
 			switch {
 			case n == 0:
-				return "", fmt.Errorf("write: no mutation")
+				return "", fmt.Errorf("write %s: nothing to change. Pass content (the new body), or start and end with lines, or old and new, or block_id", p)
 			case n > 1:
-				return "", fmt.Errorf("write: exactly one of content|ir_text, old, block_id, start, blocks")
+				return "", fmt.Errorf("write %s: pass only one change: content, or start/end lines, or old/new, or block_id", p)
 			}
 			mut := vfs.Mutation{
 				Rev:            args.Rev,
@@ -389,15 +383,61 @@ Sheets: write block_id is Sheet!A1 (one cell). Optional format patches that cell
 			rt.EmitUpdate("Writing " + p)
 			res, err := v.ms.Apply(ctx, p, mut)
 			if err != nil {
-				return "", err
+				return "", presentWriteError(p, err)
 			}
-			return res.String(), nil
+			return formatWriteResult(res), nil
 		},
 	}
 	if v.permissionRequired {
 		cfg.OnCall = []OnCallFunc{ToolPermissionOnCall}
 	}
 	return NewTool(cfg)
+}
+
+func staleRevError(path string) error {
+	return AgentErrorf(vfs.ErrStaleContent, "the file changed since that rev (%s). Omit rev, or read the file again before writing", path)
+}
+
+func presentWriteError(path string, err error) error {
+	if err == nil {
+		return nil
+	}
+	switch {
+	case errors.Is(err, vfs.ErrInvalidWrite), errors.Is(err, vfs.ErrConflict):
+		return AgentErrorf(vfs.ErrInvalidWrite, "%s was not saved. Some of the content may already be in the file. Read the file, then write the full HTML again", path)
+	case errors.Is(err, vfs.ErrStaleContent):
+		return staleRevError(path)
+	case errors.Is(err, vfs.ErrUseHTML):
+		return AgentErrorf(vfs.ErrUseHTML, "%s is a document. Pass content as HTML, for example <h1>Title</h1> and <p>paragraphs</p>", path)
+	case errors.Is(err, vfs.ErrEmptyReplace):
+		return AgentErrorf(vfs.ErrEmptyReplace, "%s: %s", path, vfs.ErrEmptyReplace.Error())
+	case errors.Is(err, vfs.ErrTabIDRequired):
+		return AgentErrorf(vfs.ErrTabIDRequired, "%s: %s", path, vfs.ErrTabIDRequired.Error())
+	case errors.Is(err, vfs.ErrProjected):
+		return AgentErrorf(vfs.ErrProjected, "%s: that write is not supported on this file type. For a document, write HTML content or a line range. For a sheet, write one cell as block_id Sheet!A1", path)
+	default:
+		return presentToolError("write", err)
+	}
+}
+
+func formatWriteResult(res vfs.ApplyResult) string {
+	s := res.String()
+	if len(res.Outline) == 0 {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + 32*len(res.Outline))
+	b.WriteString(s)
+	b.WriteString("\noutline:\n")
+	for _, bl := range res.Outline {
+		fmt.Fprintf(&b, "  %s kind=%s level=%d L%d-L%d %q\n",
+			bl.ID, bl.Kind, bl.Style.Level, bl.Style.Span.StartLine, bl.Style.Span.EndLine, bl.Text)
+	}
+	return b.String()
+}
+
+func isTabularMedia(mt string) bool {
+	return strings.Contains(mt, "spreadsheet")
 }
 
 func writeModeCount(args writeArgs) (n int, full bool) {
@@ -424,7 +464,7 @@ func fullWriteBody(args writeArgs) (string, error) {
 	switch {
 	case args.Content != nil && args.IRText != nil:
 		if *args.Content != *args.IRText {
-			return "", fmt.Errorf("write: content and ir_text disagree")
+			return "", fmt.Errorf("write: content and ir_text must be the same text")
 		}
 		return *args.Content, nil
 	case args.IRText != nil:
@@ -486,7 +526,7 @@ func newRunCommand(ms *vfs.MountSession, permissionRequired bool) *Tool {
 			}
 			cmdStr := strings.TrimSpace(args.Command)
 			if cmdStr == "" {
-				return "", fmt.Errorf("run_command: command is required: %w", ErrInvalid)
+				return "", fmt.Errorf("run_command: command is required. Pass a shell command string, for example ls work: %w", ErrInvalid)
 			}
 			rt.EmitUpdate("Running " + cmdStr)
 			return command.Run(ctx, dir, cmdStr)

@@ -45,6 +45,49 @@ func TestMapReplace_imageAndEmptyAndTableMarks(t *testing.T) {
 	}
 }
 
+func TestParagraphInsertIndex_skipsSectionBreak(t *testing.T) {
+	spans := []DocsSpan{
+		{StartIndex: 1, EndIndex: 2, Kind: "sectionBreak"},
+		{StartIndex: 2, EndIndex: 3, Kind: "paragraph"},
+	}
+	if got := paragraphInsertIndex(spans, ""); got != 2 {
+		t.Fatalf("got %d want 2", got)
+	}
+	if got := paragraphInsertIndex([]DocsSpan{{StartIndex: 1, EndIndex: 2, Kind: "sectionBreak"}}, ""); got != 1 {
+		t.Fatalf("fallback %d", got)
+	}
+	after := []DocsSpan{
+		{StartIndex: 1, EndIndex: 2, Kind: "sectionBreak"},
+		{StartIndex: 2, EndIndex: 10, Kind: "heading"},
+		{StartIndex: 10, EndIndex: 40, Kind: "table"},
+		{StartIndex: 40, EndIndex: 41, Kind: "paragraph"},
+	}
+	if got := paragraphAppendIndex(after, ""); got != 40 {
+		t.Fatalf("append after table %d", got)
+	}
+}
+
+func TestSplitInsertHead_tableBoundary(t *testing.T) {
+	blocks := []Block{
+		{Kind: BlockKindHeading, Text: "H"},
+		{Kind: BlockKindParagraph, Text: "P"},
+		{Kind: BlockKindTable, Text: "A\tB"},
+		{Kind: BlockKindParagraph, Text: "After"},
+	}
+	head, rest := splitInsertHead(blocks)
+	if len(head) != 2 || head[0].Text != "H" || len(rest) != 2 || rest[0].Kind != BlockKindTable {
+		t.Fatalf("prefix head=%+v rest=%+v", head, rest)
+	}
+	head, rest = splitInsertHead(rest)
+	if len(head) != 1 || head[0].Kind != BlockKindTable || len(rest) != 1 || rest[0].Text != "After" {
+		t.Fatalf("table head=%+v rest=%+v", head, rest)
+	}
+	head, rest = splitInsertHead(rest)
+	if len(head) != 1 || head[0].Text != "After" || rest != nil {
+		t.Fatalf("tail head=%+v rest=%+v", head, rest)
+	}
+}
+
 func TestMapInsertBlocks_stripsMarksAndEmitsTextStyle(t *testing.T) {
 	chunks, _, err := mapInsertBlocks([]Block{
 		{Kind: BlockKindParagraph, Text: "See **x** and [Maya](mailto:maya)"},

@@ -80,6 +80,7 @@ func (m *MountSession) ReadText(ctx context.Context, virtualPath string) (Textua
 	if !ok {
 		return nil, ErrNotTextual
 	}
+	m.rememberRev(t.Path(), ContentToken(t))
 	return t, nil
 }
 

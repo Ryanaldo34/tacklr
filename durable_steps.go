@@ -206,11 +206,11 @@ func (a *AgentHarness) runToolCall(ctx context.Context, tc ToolCall, out chan St
 	toolCtx, toolSpan := telemetry.StartToolSpan(ctx, tc.Name, tc.Namespace)
 	tool := a.findTool(tc.Name, tc.Namespace)
 	if tool == nil {
-		toolErr := fmt.Errorf("tool %q: %w", tc.Name, ErrNotFound)
+		toolErr := AgentErrorf(ErrNotFound, "%s is not a registered tool. Use a name from the available tools", tc.Name)
 		toolSpan.Finish("error", toolErr)
 		msg := a.emitToolResult(out, tc, toolErr.Error(), "error")
 		_ = a.addToContext(ctx, msg, out)
-		return drive.ToolStep{}, toolErr
+		return drive.ToolStep{}, nil
 	}
 	runtimeCopy := turnRT.WithToolCallID(tcKey)
 	output, toolDisp, err := a.toolRunner.Run(toolCtx, ToolInvocation{
@@ -255,9 +255,15 @@ func (a *AgentHarness) runToolCall(ctx context.Context, tc ToolCall, out chan St
 		content := err.Error()
 		if toolCtx.Err() != nil {
 			content = CancelledToolResultContent
+			msg := a.emitToolResult(out, tc, content, "error")
+			_ = a.addToContext(ctx, msg, out)
+			return drive.ToolStep{}, err
 		}
 		msg := a.emitToolResult(out, tc, content, "error")
 		_ = a.addToContext(ctx, msg, out)
+		if errors.Is(err, ErrAgent) {
+			return drive.ToolStep{}, nil
+		}
 		return drive.ToolStep{}, err
 	}
 	var effects batchToolResultEffects

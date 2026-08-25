@@ -247,6 +247,25 @@ func TestDrive_sheetOverlayFormatAndMerge(t *testing.T) {
 	}
 
 	rev := vfs.ContentToken(got)
+	html := "<p>nope</p>"
+	if _, err := ms.Apply(ctx, "/workspace/contracts/Budget", vfs.Mutation{Content: &html}); !errors.Is(err, vfs.ErrProjected) {
+		t.Fatalf("HTML content on sheet: %v", err)
+	}
+	start, end := 1, 2
+	if _, err := ms.Apply(ctx, "/workspace/contracts/Budget", vfs.Mutation{
+		Start: &start, End: &end, Lines: []string{"x"},
+	}); !errors.Is(err, vfs.ErrProjected) {
+		t.Fatalf("line write on sheet: %v", err)
+	}
+	stillSheet, err := ms.ReadText(ctx, "/workspace/contracts/Budget")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g, ok := vfs.AsGrid(stillSheet); !ok {
+		t.Fatalf("type %T", stillSheet)
+	} else if stillB2, err := g.ReadCell("Budget", "B2"); err != nil || stillB2 != "99" {
+		t.Fatalf("sheet B2 after projected writes = %q err=%v", stillB2, err)
+	}
 	if _, err := ms.Apply(ctx, "/workspace/contracts/Budget", vfs.Mutation{
 		Rev: rev, BlockID: "Budget!A1:C3", Body: strPtr("x"),
 	}); !errors.Is(err, vfs.ErrNotSupported) {

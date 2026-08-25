@@ -38,11 +38,11 @@ func TestBlockCodecProjectsAndEncodesEditedCanonicalDocument(t *testing.T) {
 	if !ok {
 		t.Fatalf("decoded document = %#v, want rich body", doc)
 	}
-	if err := doc.(vfs.Textual).SetText("nope"); !errors.Is(err, vfs.ErrProjected) {
-		t.Fatalf("SetText = %v, want ErrProjected", err)
+	if err := doc.(vfs.Textual).SetText("<p>edited</p>"); err != nil {
+		t.Fatalf("SetText HTML: %v", err)
 	}
-	if got := rd.Blocks(); len(got) != 1 || got[0].Kind != vfs.BlockKindParagraph || got[0].Text != "original" {
-		t.Fatalf("blocks = %#v", got)
+	if got := rd.Blocks(); len(got) != 1 || got[0].Kind != vfs.BlockKindParagraph || got[0].Text != "edited" {
+		t.Fatalf("blocks after SetText = %#v", rd.Blocks())
 	}
 
 	rd.SetBlocks([]vfs.Block{{ID: "intro", Kind: vfs.BlockKindParagraph, Text: "edited"}})

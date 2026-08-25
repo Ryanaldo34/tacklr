@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-func TestTextual_setTextReturnsError(t *testing.T) {
+func TestRichDocument_setTextAndReplaceLinesApplyHTML(t *testing.T) {
 	td := NewTextDocument("/n.txt", "text/plain", "utf-8", "old")
 	if err := td.SetText("new"); err != nil {
 		t.Fatalf("TextDocument.SetText: %v", err)
@@ -22,17 +22,45 @@ func TestTextual_setTextReturnsError(t *testing.T) {
 	rd := NewRichDocument("/Spec", mimeGoogleDocument, []Block{{
 		Kind: BlockKindParagraph, Text: "hello",
 	}})
-	if err := rd.SetText("<p>nope</p>"); !errors.Is(err, ErrProjected) {
+	if err := rd.SetText("<p>nope</p>"); err != nil {
 		t.Fatalf("RichDocument.SetText: %v", err)
 	}
-	if err := rd.SetLine(1, "x"); !errors.Is(err, ErrProjected) {
+	if !strings.Contains(rd.Text(), "<p>nope</p>") {
+		t.Fatalf("SetText HTML = %q", rd.Text())
+	}
+	paraLine := 0
+	lines, err := rd.Lines(1, rd.LineCount()+1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "<p>") {
+			paraLine = i + 1
+			break
+		}
+	}
+	if paraLine == 0 {
+		t.Fatalf("paragraph line missing: %v", lines)
+	}
+	if err := rd.SetLine(paraLine, "<p>one</p>"); err != nil {
 		t.Fatalf("SetLine: %v", err)
 	}
-	if err := rd.ReplaceLines(1, 2, []string{"x"}); !errors.Is(err, ErrProjected) {
+	if got := rd.Blocks(); len(got) != 1 || got[0].Kind != BlockKindParagraph || got[0].Text != "one" {
+		t.Fatalf("SetLine blocks = %+v", got)
+	}
+	if err := rd.SetText("<div></div>"); err == nil || !errors.Is(err, ErrEmptyReplace) {
+		t.Fatalf("empty HTML: %v", err)
+	}
+	if err := rd.ReplaceLines(paraLine, paraLine+1, []string{
+		"<h1>Title</h1>",
+		"<table><tr><td>A</td><td>B</td></tr></table>",
+	}); err != nil {
 		t.Fatalf("ReplaceLines: %v", err)
 	}
-	if rd.Text() == "<p>nope</p>" {
-		t.Fatal("SetText must not replace projection")
+	got := rd.Blocks()
+	if len(got) != 2 || got[0].Kind != BlockKindHeading || got[0].Text != "Title" ||
+		got[1].Kind != BlockKindTable || got[1].Text != "A\tB" {
+		t.Fatalf("after line splice = %+v", got)
 	}
 	if _, err := rd.Line(0); !errors.Is(err, ErrLineOutOfRange) {
 		t.Fatalf("Line(0): %v", err)

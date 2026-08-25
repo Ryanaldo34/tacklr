@@ -384,7 +384,7 @@ func TestBackgroundJobTools_reportEmptyAndInvalidRequests(t *testing.T) {
 			if strings.Contains(ev.Content, "required") {
 				invalid++
 			}
-			if strings.Contains(ev.Content, "not found") {
+			if strings.Contains(ev.Content, "unknown") {
 				missing++
 			}
 		}

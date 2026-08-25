@@ -138,10 +138,10 @@ func (a *AgentHarness) spawnTool() *Tool {
 func (a *AgentHarness) runWorker(ctx context.Context, workerName, task string, block bool, runtime HarnessRuntime) (string, error) {
 	spec, ok := a.subagents[workerName]
 	if !ok {
-		return "", fmt.Errorf("worker %q: %w", workerName, ErrNotFound)
+		return "", fmt.Errorf("worker %q is not registered. Pass a worker_name from the available sub-agents: %w", workerName, ErrNotFound)
 	}
 	if strings.TrimSpace(task) == "" && a.getParkMeta(runtime.CurrentToolCallID()) == nil {
-		return "", fmt.Errorf("worker %q: empty task: %w", workerName, ErrInvalid)
+		return "", fmt.Errorf("worker %q: empty task. Pass task_description_and_context with the goal and constraints: %w", workerName, ErrInvalid)
 	}
 
 	toolCallID := runtime.CurrentToolCallID()

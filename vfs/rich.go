@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -100,7 +101,11 @@ func liftPlaintext(s string) []Block {
 func createRichDocument(path, mediaType string, mut Mutation) (Document, error) {
 	if mut.Content != nil {
 		if looksLikeHTML(*mut.Content) {
-			return nil, fmt.Errorf("vfs: HTML content is not accepted; use blocks")
+			blocks, err := decodeDocsHTML([]byte(*mut.Content))
+			if err != nil {
+				return nil, err
+			}
+			return NewRichDocument(path, mediaType, blocks), nil
 		}
 		return NewRichDocument(path, mediaType, liftPlaintext(*mut.Content)), nil
 	}
@@ -121,12 +126,35 @@ func newRichDocument(path, mediaType string, blocks []Block, tabs []DocTab) *IR 
 	return newIR(path, mediaType, "utf-8", b)
 }
 
-func (d *richBody) text() string              { return d.html }
-func (d *richBody) lineStarts() []int         { return d.starts }
-func (d *richBody) setText(string) error      { return ErrProjected }
-func (d *richBody) setLine(int, string) error { return ErrProjected }
-func (d *richBody) replaceLines(int, int, []string) error {
-	return ErrProjected
+func (d *richBody) text() string      { return d.html }
+func (d *richBody) lineStarts() []int { return d.starts }
+
+func (d *richBody) setText(text string) error {
+	return d.setFromHTML(text)
+}
+
+func (d *richBody) setLine(n int, line string) error {
+	return d.replaceLines(n, n+1, []string{line})
+}
+
+func (d *richBody) replaceLines(start, end int, replacement []string) error {
+	s, err := spliceLines(d.html, d.starts, start, end, replacement)
+	if err != nil {
+		return err
+	}
+	return d.setFromHTML(s)
+}
+
+func (d *richBody) setFromHTML(html string) error {
+	blocks, err := decodeDocsHTML([]byte(html))
+	if err != nil {
+		return err
+	}
+	if len(blocks) == 0 {
+		return ErrEmptyReplace
+	}
+	d.SetBlocks(blocks)
+	return nil
 }
 func (d *richBody) blocks(_ string) []Block { return d.tree }
 func (d *richBody) Blocks() []Block         { return d.tree }
@@ -210,11 +238,7 @@ func (d *richBody) fingerprint() string {
 		_, _ = h.Write(strconv.AppendInt(level[:0], int64(bl.Style.Level), 10))
 		_, _ = h.Write(fingerprintSep)
 		if len(bl.Style.Attributes) > 0 {
-			keys := make([]string, 0, len(bl.Style.Attributes))
-			for k := range bl.Style.Attributes {
-				keys = append(keys, k)
-			}
-			slices.Sort(keys)
+			keys := slices.Sorted(maps.Keys(bl.Style.Attributes))
 			for _, k := range keys {
 				_, _ = h.Write(unsafeStringBytes(k))
 				_, _ = h.Write(fingerprintEq)
@@ -255,13 +279,7 @@ func cloneBlocks(in []Block) []Block {
 	out := make([]Block, len(in))
 	for i, b := range in {
 		out[i] = b
-		if b.Style.Attributes != nil {
-			attrs := make(map[string]string, len(b.Style.Attributes))
-			for k, v := range b.Style.Attributes {
-				attrs[k] = v
-			}
-			out[i].Style.Attributes = attrs
-		}
+		out[i].Style.Attributes = maps.Clone(b.Style.Attributes)
 		out[i].Runs = cloneRuns(b.Runs)
 		normalizeInline(&out[i])
 	}

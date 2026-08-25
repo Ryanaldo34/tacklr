@@ -12,25 +12,59 @@ import (
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
-func TestHTMLRoundTripPreservesBlocksAndMarks(t *testing.T) {
-	doc, err := (HTML{}).DecodeBlocks(context.Background(), "/x.html", HTMLMediaType, []byte(`<h1>Title</h1><p>Hello <strong>world</strong> <a href="https://example.com">link</a></p>`))
+func TestHTMLRoundTripPreservesKindsLevelsMarksTables(t *testing.T) {
+	src := []vfs.Block{
+		{Kind: vfs.BlockKindHeading, Text: "Title", Style: vfs.StyleMeta{Level: 1}},
+		{Kind: vfs.BlockKindParagraph, Text: "Hello **world** [link](https://example.com)"},
+		{Kind: vfs.BlockKindListItem, Text: "Item", Style: vfs.StyleMeta{Level: 1, Attributes: map[string]string{"list_type": "ul", "list_id": "l1"}}},
+		{Kind: vfs.BlockKindTable, Text: "A\tB\nC\tD", Style: vfs.StyleMeta{Attributes: map[string]string{"rows": "2", "cols": "2"}}},
+	}
+	out, err := (HTML{}).EncodeBlocks(context.Background(), src)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(doc) != 2 || doc[0].Kind != vfs.BlockKindHeading || doc[1].Runs[1].Marks[vfs.MarkBold] != "true" {
-		t.Fatalf("doc=%#v", doc)
+	html := string(out)
+	if !strings.Contains(html, "<h1>Title</h1>") || !strings.Contains(html, "<strong>world</strong>") ||
+		!strings.Contains(html, "https://example.com") || !strings.Contains(html, "<li>") ||
+		!strings.Contains(html, "<table>") {
+		t.Fatalf("encode=%q", html)
 	}
-	out, err := (HTML{}).EncodeBlocks(context.Background(), doc)
-	if err != nil || !strings.Contains(string(out), "<strong>world</strong>") || !strings.Contains(string(out), "https://example.com") {
-		t.Fatalf("out=%q err=%v", out, err)
+	h1Line, pLine, tableLine := -1, -1, -1
+	for i, line := range strings.Split(html, "\n") {
+		trim := strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(trim, "<h1>"):
+			h1Line = i
+		case strings.HasPrefix(trim, "<p>"):
+			pLine = i
+		case strings.HasPrefix(trim, "<table>"):
+			tableLine = i
+		}
 	}
-	more, err := (HTML{}).EncodeBlocks(context.Background(), []vfs.Block{
-		{Kind: vfs.BlockKindHeading, Style: vfs.StyleMeta{Level: 2}, Runs: []vfs.Run{{Text: "H"}}},
-		{Kind: vfs.BlockKindListItem, Runs: []vfs.Run{{Text: "L", Marks: map[string]string{vfs.MarkItalic: "true", vfs.MarkStrike: "true"}}}},
-		{Kind: "quote", Runs: []vfs.Run{{Text: "Q"}}},
-	})
-	if err != nil || !strings.Contains(string(more), "<h2>") || !strings.Contains(string(more), "<li>") || !strings.Contains(string(more), "<blockquote>") {
-		t.Fatalf("more=%q err=%v", more, err)
+	if h1Line < 0 || pLine < 0 || tableLine < 0 || h1Line == pLine || pLine == tableLine || h1Line == tableLine {
+		t.Fatalf("want distinct heading/paragraph/table lines: h1=%d p=%d table=%d html=%q", h1Line, pLine, tableLine, html)
+	}
+	got, err := (HTML{}).DecodeBlocks(context.Background(), "/x.html", HTMLMediaType, out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 4 || got[0].Kind != vfs.BlockKindHeading || got[0].Style.Level != 1 ||
+		got[1].Kind != vfs.BlockKindParagraph || got[2].Kind != vfs.BlockKindListItem ||
+		got[2].Style.Level != 1 || got[2].Style.Attributes["list_type"] != "ul" ||
+		got[3].Kind != vfs.BlockKindTable || got[3].Text != "A\tB\nC\tD" {
+		t.Fatalf("decode=%#v", got)
+	}
+	var sawBold, sawHref bool
+	for _, r := range got[1].Runs {
+		if r.Marks[vfs.MarkBold] == "true" {
+			sawBold = true
+		}
+		if r.Marks[vfs.MarkHref] != "" {
+			sawHref = true
+		}
+	}
+	if !sawBold || !sawHref {
+		t.Fatalf("marks=%#v", got[1].Runs)
 	}
 }
 
@@ -122,9 +156,6 @@ func TestRegisterCommon(t *testing.T) {
 	if err := RegisterCommon(reg); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := reg.Decode(context.Background(), "/x.html", HTMLMediaType, []byte("<p>x</p>")); err == nil {
-		t.Fatal("text/html must stay unregistered")
-	}
 	_, err := reg.Decode(context.Background(), "/x.xlsx", XLSXMediaType, []byte("not-zip"))
 	if err == nil || errors.Is(err, vfs.ErrNoCodec) {
 		t.Fatalf("xlsx must be registered: %v", err)
@@ -161,7 +192,7 @@ func TestMountSession_xlsxCreateFormatPersists(t *testing.T) {
 	}
 	if _, err := ms.Apply(ctx, "/work/Budget.xlsx", vfs.Mutation{
 		Rev: vfs.ContentToken(doc), BlockID: "Budget!B2",
-	}); err == nil || !strings.Contains(err.Error(), "no mutation") {
+	}); err == nil || !strings.Contains(err.Error(), "sheet cell needs a value") {
 		t.Fatalf("block_id without value or format: %v", err)
 	}
 	on := true
@@ -183,6 +214,29 @@ func TestMountSession_xlsxCreateFormatPersists(t *testing.T) {
 	cell, err := g.Cell("Budget", "B2")
 	if err != nil || cell.Display() != "ok" || !cell.Format.Bold || cell.Format.Number != "$#,##0.00" {
 		t.Fatalf("persisted B2 = %+v err=%v", cell, err)
+	}
+	html := "<h1>x</h1>"
+	if _, err := ms.Apply(ctx, "/work/notes.html", vfs.Mutation{Content: &html}); err != nil {
+		t.Fatal(err)
+	}
+	st, err := ms.Stat(ctx, "/work/notes.html")
+	if err != nil || st.MediaType != HTMLMediaType {
+		t.Fatalf("notes.html Stat=%+v err=%v", st, err)
+	}
+	raw, err := ms.ReadText(ctx, "/work/notes.html")
+	if err != nil || raw.Text() != html {
+		t.Fatalf("notes.html body=%q err=%v", raw.Text(), err)
+	}
+	if _, err := ms.Apply(ctx, "/work/SPIKE", vfs.Mutation{Content: &html}); err != nil {
+		t.Fatal(err)
+	}
+	st, err = ms.Stat(ctx, "/work/SPIKE")
+	if err != nil || st.MediaType != HTMLMediaType {
+		t.Fatalf("SPIKE Stat=%+v err=%v", st, err)
+	}
+	spike, err := ms.ReadText(ctx, "/work/SPIKE")
+	if err != nil || spike.Text() != html {
+		t.Fatalf("SPIKE body=%q err=%v", spike.Text(), err)
 	}
 }
 

@@ -621,13 +621,13 @@ func (p *driveProvider) writeGoogleDoc(ctx context.Context, name string, rd *IR)
 		return ErrConflict
 	}
 	if rb.mut == richSet {
-		if err := p.setBlocksDoc(ctx, meta.ID, rd, rb); err != nil {
-			return err
-		}
+		err = p.setBlocksDoc(ctx, meta.ID, rd, rb)
 	} else {
-		if err := p.replaceBlocksDoc(ctx, meta.ID, rd, rb); err != nil {
-			return err
-		}
+		err = p.replaceBlocksDoc(ctx, meta.ID, rd, rb)
+	}
+	if err != nil {
+		p.invalidate(meta.ID)
+		return err
 	}
 	p.invalidate(meta.ID)
 	return p.refreshHint(ctx, meta.ID, rd)
@@ -647,14 +647,14 @@ func (p *driveProvider) replaceBlocksDoc(ctx context.Context, id string, rd *IR,
 
 func (p *driveProvider) setBlocksDoc(ctx context.Context, id string, rd *IR, rb *richBody) error {
 	if len(rb.tree) == 0 {
-		return fmt.Errorf("write: refusing empty IR replace")
+		return ErrEmptyReplace
 	}
 	tabID := ""
 	tabs := uniqueTabIDs(rb.tree, rb.tabs)
 	if len(rb.tabs) > 1 || len(tabs) > 1 {
 		tabID = blockAttr(rb.tree[0], "tab_id")
 		if tabID == "" {
-			return fmt.Errorf("write: tab_id required")
+			return ErrTabIDRequired
 		}
 	} else if len(rb.tabs) == 1 {
 		tabID = rb.tabs[0].ID
@@ -663,12 +663,14 @@ func (p *driveProvider) setBlocksDoc(ctx context.Context, id string, rd *IR, rb 
 	}
 	tabBlocks := make([]Block, 0, len(rb.tree))
 	for _, b := range rb.tree {
-		if tabID == "" || blockAttr(b, "tab_id") == tabID {
+		id := blockAttr(b, "tab_id")
+		// HTML writes omit tab_id. A single-tab Doc still owns those blocks.
+		if tabID == "" || id == "" || id == tabID {
 			tabBlocks = append(tabBlocks, b)
 		}
 	}
 	if len(tabBlocks) == 0 {
-		return fmt.Errorf("write: refusing empty IR replace")
+		return ErrEmptyReplace
 	}
 	keep := keepImageObjectIDs(tabBlocks)
 	dels := mapSetBlocksDeletes(rd.hint, tabID, keep)
@@ -720,7 +722,7 @@ func (p *driveProvider) createGoogleDoc(ctx context.Context, name string, rd *IR
 		if !ok {
 			return ErrNotSupported
 		}
-		last = p.insertBlocks(ctx, created.ID, tabID, snap.RevisionID, rb.tree)
+		last = p.insertAt(ctx, created.ID, tabID, snap.RevisionID, rb.tree, snap)
 		if last == nil {
 			break
 		}
@@ -736,71 +738,128 @@ func (p *driveProvider) createGoogleDoc(ctx context.Context, name string, rd *IR
 }
 
 func (p *driveProvider) insertBlocks(ctx context.Context, id, tabID, cas string, blocks []Block) error {
-	chunks, _, err := mapInsertBlocks(blocks, 1, tabID)
+	snap, err := p.docsGet(ctx, id)
 	if err != nil {
 		return err
 	}
-	for _, ch := range chunks {
-		if len(ch.reqs) > 0 {
-			body, styles := splitTextStyles(ch.reqs)
-			if len(body) > 0 {
-				res, err := p.docsBatch(ctx, id, DocsBatch{RequiredRevisionID: cas, TabID: tabID, Requests: body})
-				if err != nil {
-					return err
-				}
-				if res.RevisionID != "" {
-					cas = res.RevisionID
-				}
+	return p.insertAt(ctx, id, tabID, cas, blocks, snap)
+}
+
+func (p *driveProvider) insertAt(ctx context.Context, id, tabID, cas string, blocks []Block, snap DocsSnapshot) error {
+	if snap.RevisionID != "" {
+		cas = snap.RevisionID
+	}
+	idx := paragraphInsertIndex(snap.Body, tabID)
+	remaining := blocks
+	for len(remaining) > 0 {
+		head, rest := splitInsertHead(remaining)
+		if len(head) == 0 {
+			return nil
+		}
+		chunks, endIdx, err := mapInsertBlocks(head, idx, tabID)
+		if err != nil {
+			return err
+		}
+		remaining = rest
+		table := false
+		for _, ch := range chunks {
+			if err := p.applyInsertChunk(ctx, id, tabID, &cas, ch); err != nil {
+				return err
 			}
-			if len(styles) > 0 {
-				res, err := p.docsBatch(ctx, id, DocsBatch{RequiredRevisionID: cas, TabID: tabID, Requests: styles})
-				if err != nil {
-					return err
-				}
-				if res.RevisionID != "" {
-					cas = res.RevisionID
-				}
+			if ch.tableFill {
+				table = true
 			}
 		}
-		if !ch.tableFill {
+		if table {
+			got, err := p.docsGet(ctx, id)
+			if err != nil {
+				return err
+			}
+			snap = got
+			if snap.RevisionID != "" {
+				cas = snap.RevisionID
+			}
+			idx = paragraphAppendIndex(snap.Body, tabID)
 			continue
 		}
-		snap, err := p.docsGet(ctx, id)
-		if err != nil {
-			return err
-		}
-		if snap.RevisionID != "" {
-			cas = snap.RevisionID
-		}
-		var table *DocsSpan
-		for i := range snap.Body {
-			if snap.Body[i].Kind == "table" && (tabID == "" || snap.Body[i].TabID == tabID) {
-				sp := snap.Body[i]
-				table = &sp
-			}
-		}
-		if table == nil {
-			return fmt.Errorf("%w: inserted table not found", ErrNotSupported)
-		}
-		fill := Block{
-			Kind:  BlockKindTable,
-			Text:  encodeTSV(ch.grid),
-			Style: StyleMeta{Attributes: map[string]string{"rows": strconv.Itoa(ch.rows), "cols": strconv.Itoa(ch.cols)}},
-		}
-		reqs, err := mapReplaceTable(spanToLocation(*table), fill)
-		if err != nil {
-			return err
-		}
-		if len(reqs) == 0 {
+		idx = endIdx
+	}
+	return nil
+}
+
+func splitInsertHead(blocks []Block) (head, rest []Block) {
+	for i, b := range blocks {
+		if b.Kind != BlockKindTable {
 			continue
 		}
-		res, err := p.docsBatch(ctx, id, DocsBatch{RequiredRevisionID: cas, TabID: tabID, Requests: reqs})
-		if err != nil {
-			return err
+		if i == 0 {
+			return blocks[:1], blocks[1:]
 		}
-		if res.RevisionID != "" {
-			cas = res.RevisionID
+		return blocks[:i], blocks[i:]
+	}
+	return blocks, nil
+}
+
+func (p *driveProvider) applyInsertChunk(ctx context.Context, id, tabID string, cas *string, ch insertChunk) error {
+	if len(ch.reqs) > 0 {
+		body, styles := splitTextStyles(ch.reqs)
+		if len(body) > 0 {
+			res, err := p.docsBatch(ctx, id, DocsBatch{RequiredRevisionID: *cas, TabID: tabID, Requests: body})
+			if err != nil {
+				return err
+			}
+			if res.RevisionID != "" {
+				*cas = res.RevisionID
+			}
 		}
+		if len(styles) > 0 {
+			res, err := p.docsBatch(ctx, id, DocsBatch{RequiredRevisionID: *cas, TabID: tabID, Requests: styles})
+			if err != nil {
+				return err
+			}
+			if res.RevisionID != "" {
+				*cas = res.RevisionID
+			}
+		}
+	}
+	if !ch.tableFill {
+		return nil
+	}
+	snap, err := p.docsGet(ctx, id)
+	if err != nil {
+		return err
+	}
+	if snap.RevisionID != "" {
+		*cas = snap.RevisionID
+	}
+	var table *DocsSpan
+	for i := range snap.Body {
+		if snap.Body[i].Kind == "table" && (tabID == "" || snap.Body[i].TabID == tabID) {
+			sp := snap.Body[i]
+			table = &sp
+		}
+	}
+	if table == nil {
+		return fmt.Errorf("%w: inserted table not found", ErrNotSupported)
+	}
+	fill := Block{
+		Kind:  BlockKindTable,
+		Text:  encodeTSV(ch.grid),
+		Style: StyleMeta{Attributes: map[string]string{"rows": strconv.Itoa(ch.rows), "cols": strconv.Itoa(ch.cols)}},
+	}
+	reqs, err := mapReplaceTable(spanToLocation(*table), fill)
+	if err != nil {
+		return err
+	}
+	if len(reqs) == 0 {
+		return nil
+	}
+	res, err := p.docsBatch(ctx, id, DocsBatch{RequiredRevisionID: *cas, TabID: tabID, Requests: reqs})
+	if err != nil {
+		return err
+	}
+	if res.RevisionID != "" {
+		*cas = res.RevisionID
 	}
 	return nil
 }

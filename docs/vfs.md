@@ -129,7 +129,7 @@ Two surfaces, one document:
 | Surface | Behavior |
 |---------|----------|
 | FUSE / `open` / `rg` | Docs: HTML projection. Sheets: TSV of displayed values with `# Sheet: Title` headers (no bold/markdown/JSON/`#rrggbb`). Kernel writes stay `EROFS`. `ls` of a Doc or Sheet is size 0 (no export/Get on getattr). |
-| Agent `read` / `write` | Block / grid IR. Default `read` of a Doc or Sheet is an outline (must not dump HTML or TSV). Docs `write` uses `block_id` / `blocks`. Sheets `write` is one cell (`Sheet!A1`) plus optional `format`, or create via `content` / `blocks` on a new path. Range, row-window, and in-place sheet replace return `ErrNotSupported`. Line/HTML/`SetText` return `ErrProjected`. |
+| Agent `read` / `write` | Docs/Word: numbered pretty HTML (one heading, paragraph, list item, or table per line). `write` uses full `content` or a line range; the harness owns checkout (`rev` optional). Extensionless HTML create infers a native Doc on Drive, Word on Graph, or `text/html` locally. Sheets: path-only is outline; write is one cell (`Sheet!A1`) plus optional `format`. Range, row-window, and in-place sheet replace return `ErrNotSupported`. |
 
 `Stat.MediaType` is the real Drive MIME. Slides/Drawings/Forms stay listed and return `ErrNoCodec` / `ErrNotSupported`. Native `PutFile` / identity `WriteDocument` return `ErrNotSupported`. `Remove` is Drive trash (`trashed:true`), does not follow shortcuts, and refuses ambiguous names and the mount root. Agent delete is `rm` (FUSE Unlink) only.
 
@@ -183,7 +183,7 @@ virtual path → Provider (bytes) → Codec → Document IR
 
 `FindBlock` is media-agnostic (id / heading_path). Sheet title and sheet_id lookup is `AsGrid` → sheet key.
 
-Create uses the codec registry (`Creator`). Path extension wins over a requested media type (`Foo.md` is never a Doc). Extensionless + `media_type` is how a codec is selected.
+Create uses the codec registry (`Creator`). Path extension wins over a requested media type (`Foo.md` is never a Doc). Extensionless HTML infers native rich media from the mount (Drive Doc, Graph docx, local `text/html`).
 
 **Grid format:** stored `CellFormat` is an absolute bag (number, bold/italic/strike/underline, fill/color, align/valign/wrap, border). Writes use `FormatPatch` so `bold=false` clears. `ParseCellFormat` reads the `String()` bag. Sheets persist uses `ColorStyle.RgbColor` and classifies number patterns (`CURRENCY`, `PERCENT`, `SCIENTIFIC`, `TIME`, `DATE`, `DATE_TIME`, `NUMBER`). Writes to a merge master are allowed; slave cells are refused. Theme colors stay empty (lossy). Native Google persist is a Drive concern; `.xlsx` uses the Excel codec. A native Sheet never round-trips through xlsx.
 
@@ -545,11 +545,11 @@ Indexed `search` hits are not a behavior-preserving stand-in for live `rg`.
 |-------|----------------|
 | `vfs.ContentHash` / `ContentRev` / `LineWindow.Rev` | Identity of session-visible body |
 | `ReadText`, `ReplaceLines`, `WriteDocument` | Low-level IR mutate + provider persist |
-| Harness `read`, `write` | Require `rev` on edits, reject stale, format numbered lines |
+| Harness `read`, `write` | Numbered HTML for Docs/Word; fill `rev` from last checkout; omit `rev` on write |
 
 ```text
-read   → path + rev + numbered window (first page when start/end omitted)
-write  → exactly one mode; pass rev from read; mismatch → ErrStaleContent
+read   → numbered window (first page when start/end omitted); Docs/Word are pretty HTML
+write  → exactly one mode; harness lastRev; mismatch → ErrStaleContent
 WriteDocument → provider translates IR and persists now
 ```
 
@@ -563,9 +563,11 @@ No FUSE and no shell are required for this IR edit path. `run_command` needs a l
 |-----------|----------|
 | Access token expired / missing refresh | `ErrAuthExpired` |
 | Two Drive children share a name | `ErrAmbiguous` |
-| Drive 403 | `ErrPermission` (Google message preserved) |
+| Drive 403 | `ErrPermission` |
 | Docs checkout CAS miss | `ErrConflict` (tools map to `ErrStaleContent`) |
-| Line/HTML write on a Doc or Sheet | `ErrProjected` |
+| Stale `rev` on read/write | `ErrStaleContent` — read again and pass that rev |
+| Docs insert/write location invalid | `ErrInvalidWrite` — read again and retry (no provider SDK text) |
+| Line/HTML write on a Sheet | `ErrProjected` |
 | Path not under a mount | `ErrNotMounted` |
 | `run_command` with no FUSE mount | `ErrFuseNotMounted` |
 | Write on read-only mount | `ErrReadOnly` |

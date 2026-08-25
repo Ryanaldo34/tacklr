@@ -126,6 +126,7 @@ func decodeDocsHTML(raw []byte) ([]Block, error) {
 		body = doc
 	}
 	var dec htmlDecoder
+	dec.blocks = make([]Block, 0, 16)
 	dec.walk(body, 0, "")
 	return dec.blocks, nil
 }
@@ -134,17 +135,45 @@ type htmlDecoder struct {
 	blocks  []Block
 	listSeq int
 	imgSeq  int
+	tabID   string
+}
+
+func (d *htmlDecoder) emit(b Block) {
+	if d.tabID != "" {
+		setAttr(&b, "tab_id", d.tabID)
+	}
+	d.blocks = append(d.blocks, b)
 }
 
 func (d *htmlDecoder) walk(n *html.Node, listDepth int, listID string) {
 	if n == nil {
 		return
 	}
+	if n.Type == html.TextNode {
+		if s := strings.TrimSpace(n.Data); s != "" {
+			d.emit(Block{
+				Kind:  BlockKindParagraph,
+				Text:  s,
+				Style: StyleMeta{Attributes: map[string]string{}},
+			})
+		}
+		return
+	}
 	if n.Type == html.ElementNode {
-		switch strings.ToLower(n.Data) {
+		switch n.Data {
 		case "script":
 			return
 		case "style", "head":
+			return
+		case "section":
+			prev := d.tabID
+			if id := attrVal(n, "data-tab-id"); id != "" {
+				d.tabID = id
+			}
+			for c := n.FirstChild; c != nil; c = c.NextSibling {
+				d.walk(c, listDepth, listID)
+			}
+			d.tabID = prev
 			return
 		case "h1", "h2", "h3", "h4", "h5", "h6":
 			if hasClass(n, "tacklr-tab") {
@@ -152,11 +181,10 @@ func (d *htmlDecoder) walk(n *html.Node, listDepth int, listID string) {
 			}
 			level := int(n.Data[1] - '0')
 			runs := collectInline(n, nil)
-			text := FormatInline(runs)
 			if strings.TrimSpace(runsPlain(runs)) != "" {
-				d.blocks = append(d.blocks, Block{
+				d.emit(Block{
 					Kind: BlockKindHeading,
-					Text: text,
+					Text: FormatInline(runs),
 					Runs: runs,
 					Style: StyleMeta{
 						Level:      level,
@@ -166,21 +194,18 @@ func (d *htmlDecoder) walk(n *html.Node, listDepth int, listID string) {
 			}
 			return
 		case "p", "div":
-			_, skipImgs, imgs := collectParagraph(n)
-			if len(imgs) > 0 && strings.TrimSpace(skipImgs) == "" {
-				d.blocks = append(d.blocks, imgs...)
-				return
-			}
-			runs := collectInline(n, nil)
-			if text := FormatInline(runs); strings.TrimSpace(runsPlain(runs)) != "" {
-				d.blocks = append(d.blocks, Block{
+			runs, imgs := collectInlineContent(n, nil, true)
+			if strings.TrimSpace(runsPlain(runs)) != "" {
+				d.emit(Block{
 					Kind:  BlockKindParagraph,
-					Text:  text,
+					Text:  FormatInline(runs),
 					Runs:  runs,
 					Style: StyleMeta{Attributes: map[string]string{}},
 				})
 			}
-			d.blocks = append(d.blocks, imgs...)
+			for _, img := range imgs {
+				d.emit(img)
+			}
 			return
 		case "li":
 			if listID == "" {
@@ -192,11 +217,11 @@ func (d *htmlDecoder) walk(n *html.Node, listDepth int, listID string) {
 				level = 1
 			}
 			listType := "ul"
-			if p := n.Parent; p != nil && strings.EqualFold(p.Data, "ol") {
+			if p := n.Parent; p != nil && p.Data == "ol" {
 				listType = "ol"
 			}
 			runs := collectItemInline(n)
-			d.blocks = append(d.blocks, Block{
+			d.emit(Block{
 				Kind: BlockKindListItem,
 				Text: FormatInline(runs),
 				Runs: runs,
@@ -209,11 +234,8 @@ func (d *htmlDecoder) walk(n *html.Node, listDepth int, listID string) {
 				},
 			})
 			for c := n.FirstChild; c != nil; c = c.NextSibling {
-				if c.Type == html.ElementNode {
-					switch strings.ToLower(c.Data) {
-					case "ul", "ol":
-						d.walk(c, level+1, listID)
-					}
+				if c.Type == html.ElementNode && (c.Data == "ul" || c.Data == "ol") {
+					d.walk(c, level+1, listID)
 				}
 			}
 			return
@@ -233,17 +255,17 @@ func (d *htmlDecoder) walk(n *html.Node, listDepth int, listID string) {
 			return
 		case "table":
 			if t, ok := decodeHTMLTable(n); ok {
-				d.blocks = append(d.blocks, t)
+				d.emit(t)
 			}
 			return
 		case "figure":
 			if img, ok := decodeHTMLImage(n, &d.imgSeq); ok {
-				d.blocks = append(d.blocks, img)
+				d.emit(img)
 			}
 			return
 		case "img":
 			if img, ok := decodeHTMLImage(n, &d.imgSeq); ok {
-				d.blocks = append(d.blocks, img)
+				d.emit(img)
 			}
 			return
 		}
@@ -254,16 +276,27 @@ func (d *htmlDecoder) walk(n *html.Node, listDepth int, listID string) {
 }
 
 func collectInline(n *html.Node, marks map[string]string) []Run {
+	runs, _ := collectInlineContent(n, marks, false)
+	return runs
+}
+
+func collectInlineContent(n *html.Node, marks map[string]string, keepImgs bool) ([]Run, []Block) {
 	var out []Run
+	var imgs []Block
+	seq := 0
 	var walk func(*html.Node, map[string]string)
 	walk = func(n *html.Node, marks map[string]string) {
 		if n == nil {
 			return
 		}
 		if n.Type == html.TextNode {
-			if n.Data != "" {
-				out = append(out, Run{Text: n.Data, Marks: cloneMarks(marks)})
+			if strings.TrimSpace(n.Data) == "" {
+				if strings.ContainsRune(n.Data, ' ') {
+					out = append(out, Run{Text: " ", Marks: marks})
+				}
+				return
 			}
+			out = append(out, Run{Text: n.Data, Marks: marks})
 			return
 		}
 		if n.Type != html.ElementNode {
@@ -272,42 +305,43 @@ func collectInline(n *html.Node, marks map[string]string) []Run {
 			}
 			return
 		}
-		switch strings.ToLower(n.Data) {
-		case "script", "style", "img", "figure":
+		switch n.Data {
+		case "script", "style":
+			return
+		case "img", "figure":
+			if keepImgs {
+				if img, ok := decodeHTMLImage(n, &seq); ok {
+					imgs = append(imgs, img)
+				}
+			}
 			return
 		case "br":
-			out = append(out, Run{Text: "\n", Marks: cloneMarks(marks)})
+			out = append(out, Run{Text: "\n", Marks: marks})
 			return
-		}
-		next := cloneMarks(marks)
-		switch strings.ToLower(n.Data) {
 		case "strong", "b":
-			next = withMark(next, MarkBold, "true")
+			marks = withMark(marks, MarkBold, "true")
 		case "em", "i":
-			next = withMark(next, MarkItalic, "true")
+			marks = withMark(marks, MarkItalic, "true")
 		case "s", "strike", "del":
-			next = withMark(next, MarkStrike, "true")
+			marks = withMark(marks, MarkStrike, "true")
 		case "a":
 			if href := attrVal(n, "href"); href != "" {
-				next = withMark(next, MarkHref, href)
+				marks = withMark(marks, MarkHref, href)
 			}
 		}
 		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			walk(c, next)
+			walk(c, marks)
 		}
 	}
 	walk(n, marks)
-	return mergeRuns(out)
+	return mergeRuns(out), imgs
 }
 
 func collectItemInline(n *html.Node) []Run {
 	var out []Run
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		if c.Type == html.ElementNode {
-			switch strings.ToLower(c.Data) {
-			case "ul", "ol":
-				continue
-			}
+		if c.Type == html.ElementNode && (c.Data == "ul" || c.Data == "ol") {
+			continue
 		}
 		out = append(out, collectInline(c, nil)...)
 	}
@@ -318,7 +352,7 @@ func findHTMLBody(n *html.Node) *html.Node {
 	if n == nil {
 		return nil
 	}
-	if n.Type == html.ElementNode && strings.EqualFold(n.Data, "body") {
+	if n.Type == html.ElementNode && n.Data == "body" {
 		return n
 	}
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
@@ -331,7 +365,7 @@ func findHTMLBody(n *html.Node) *html.Node {
 
 func hasClass(n *html.Node, class string) bool {
 	for _, a := range n.Attr {
-		if strings.EqualFold(a.Key, "class") {
+		if a.Key == "class" {
 			for _, c := range strings.Fields(a.Val) {
 				if c == class {
 					return true
@@ -344,67 +378,20 @@ func hasClass(n *html.Node, class string) bool {
 
 func attrVal(n *html.Node, key string) string {
 	for _, a := range n.Attr {
-		if strings.EqualFold(a.Key, key) {
+		if a.Key == key {
 			return a.Val
 		}
 	}
 	return ""
 }
 
-func collectParagraph(n *html.Node) (full, skipImgs string, imgs []Block) {
-	var fullB, skipB strings.Builder
-	seq := 0
-	var walk func(*html.Node, bool)
-	walk = func(n *html.Node, inSkip bool) {
-		if n == nil {
-			return
-		}
-		if n.Type == html.ElementNode {
-			switch strings.ToLower(n.Data) {
-			case "script", "style":
-				return
-			case "img", "figure":
-				if img, ok := decodeHTMLImage(n, &seq); ok {
-					imgs = append(imgs, img)
-				}
-				if strings.EqualFold(n.Data, "figure") {
-					for c := n.FirstChild; c != nil; c = c.NextSibling {
-						if c.Type == html.ElementNode {
-							switch strings.ToLower(c.Data) {
-							case "img", "figure":
-								continue
-							}
-						}
-						walk(c, true)
-					}
-				}
-				return
-			}
-		}
-		if n.Type == html.TextNode {
-			fullB.WriteString(n.Data)
-			if !inSkip {
-				skipB.WriteString(n.Data)
-			}
-		}
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			walk(c, inSkip)
-		}
-	}
-	walk(n, false)
-	return fullB.String(), skipB.String(), imgs
-}
-
 func decodeHTMLImage(n *html.Node, seq *int) (Block, bool) {
 	oid := attrVal(n, "data-object-id")
 	src := attrVal(n, "src")
 	alt := attrVal(n, "alt")
-	if strings.EqualFold(n.Data, "figure") {
-		if oid == "" {
-			oid = attrVal(n, "data-object-id")
-		}
+	if n.Data == "figure" {
 		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			if c.Type == html.ElementNode && strings.EqualFold(c.Data, "img") {
+			if c.Type == html.ElementNode && c.Data == "img" {
 				if src == "" {
 					src = attrVal(c, "src")
 				}
@@ -417,7 +404,7 @@ func decodeHTMLImage(n *html.Node, seq *int) (Block, bool) {
 			}
 		}
 	}
-	if oid == "" && src == "" && strings.EqualFold(n.Data, "figure") && n.FirstChild == nil {
+	if oid == "" && src == "" && n.Data == "figure" && n.FirstChild == nil {
 		*seq++
 		oid = "img-html-" + strconv.Itoa(*seq)
 	}
@@ -439,10 +426,10 @@ func decodeHTMLTable(n *html.Node) (Block, bool) {
 	var rows [][]string
 	var walk func(*html.Node)
 	walk = func(n *html.Node) {
-		if n.Type == html.ElementNode && strings.EqualFold(n.Data, "tr") {
+		if n.Type == html.ElementNode && n.Data == "tr" {
 			var cells []string
 			for c := n.FirstChild; c != nil; c = c.NextSibling {
-				if c.Type == html.ElementNode && (strings.EqualFold(c.Data, "td") || strings.EqualFold(c.Data, "th")) {
+				if c.Type == html.ElementNode && (c.Data == "td" || c.Data == "th") {
 					cells = append(cells, sanitizeCell(strings.TrimSpace(FormatInline(collectInline(c, nil)))))
 				}
 			}

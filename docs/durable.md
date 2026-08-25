@@ -32,7 +32,7 @@ One goroutine per session runs the harness wait loop. HITL parks that goroutine 
 The host runs:
 
 1. A Tacklr Temporal worker (`EnableSessionWorker: true`) that registers `SessionWorkflow` plus the `Inference`, `Tool`, and `CommitToolOutput` activities.
-2. A protocol process (optional) whose `durable.Runtime` is `temporal.New(client, taskQueue, catalog)`. Autonomous jobs skip the protocol and call Runtime (or start the workflow) with a payload.
+2. A protocol process (optional) whose `durable.Runtime` is `temporal.New(client, taskQueue, catalog)`. Pass `WithWorkerSessionTimeout` to pin a turn to one worker; omit it to skip worker sessions. Autonomous jobs skip the protocol and call Runtime (or start the workflow) with a payload.
 
 | Tacklr concept | Temporal |
 |----------------|----------|
@@ -40,7 +40,7 @@ The host runs:
 | Harness loop | Workflow function |
 | Inference / tool | Activities (`Inference`, `Tool`) |
 | Subagent | Child workflow |
-| Sticky VFS locality | Worker Sessions (`CreateSession` while the turn runs; `CompleteSession` before HITL park) |
+| Worker locality | Optional Temporal worker session on `temporal.New` (`WithWorkerSessionTimeout`). Zero (default) skips `CreateSession`. Not a VFS setting. Session timeout and client cancel both cancel that context; the wait loop selects on it and ends the turn. |
 | Progress | Workflow Streams (`events`, `retry`, `close`) |
 | HITL | Signal `Resume` (never inside an activity) |
 | Leftover tools after HITL | Workflow variable (`rest`) replayed from history |

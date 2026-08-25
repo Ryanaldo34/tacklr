@@ -196,9 +196,9 @@ func mapDocsError(err error) error {
 				strings.Contains(msg, "not the latest revision")) {
 			return ErrConflict
 		}
-		return err
+		return ErrInvalidWrite
 	default:
-		return err
+		return googleHTTPErr("docs", gerr.Code, gerr.Message)
 	}
 }
 

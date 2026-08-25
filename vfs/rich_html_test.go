@@ -46,3 +46,14 @@ func TestProjectHTMLSpans_tabsListsTablesMarks(t *testing.T) {
 		t.Fatalf("decode lost marks: %+v", blocks)
 	}
 }
+
+func TestDecodeDocsHTML_bareTextAndEmpty(t *testing.T) {
+	got, err := decodeDocsHTML([]byte("<html><body>hello from CRE</body></html>"))
+	if err != nil || len(got) != 1 || got[0].Kind != BlockKindParagraph || got[0].Text != "hello from CRE" {
+		t.Fatalf("bare text: %+v err=%v", got, err)
+	}
+	empty, err := decodeDocsHTML([]byte("<html><body><div></div></body></html>"))
+	if err != nil || len(empty) != 0 {
+		t.Fatalf("empty: %+v err=%v", empty, err)
+	}
+}

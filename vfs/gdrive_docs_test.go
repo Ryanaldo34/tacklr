@@ -7,17 +7,20 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
 type memDocs struct {
-	snaps    map[string]vfs.DocsSnapshot
-	rev      map[string]string
-	batches  []vfs.DocsBatch
-	fail     error
-	rejectIf string
+	snaps        map[string]vfs.DocsSnapshot
+	rev          map[string]string
+	batches      []vfs.DocsBatch
+	fail         error
+	rejectIf     string
+	conflictLeft int
 }
 
 func newMemDocs(id, rev string, spans []vfs.DocsSpan, tabs []vfs.DocTab) *memDocs {
@@ -59,6 +62,10 @@ func (m *memDocs) Get(ctx context.Context, documentID string) (vfs.DocsSnapshot,
 func (m *memDocs) BatchUpdate(ctx context.Context, documentID string, req vfs.DocsBatch) (vfs.DocsBatchResult, error) {
 	if err := ctx.Err(); err != nil {
 		return vfs.DocsBatchResult{}, err
+	}
+	if m.conflictLeft > 0 {
+		m.conflictLeft--
+		return vfs.DocsBatchResult{}, vfs.ErrConflict
 	}
 	if m.rejectIf != "" && req.RequiredRevisionID == m.rejectIf {
 		return vfs.DocsBatchResult{}, vfs.ErrConflict
@@ -207,9 +214,14 @@ func applyDocsBatch(s *vfs.DocsSnapshot, req vfs.DocsBatch) {
 					cells = append(cells, vfs.DocsCell{Row: row, Col: col, StartIndex: ci, EndIndex: ci + 2})
 				}
 			}
+			end := base + rows*cols*2
 			s.Body = append(s.Body, vfs.DocsSpan{
-				TabID: tab, StartIndex: idx, EndIndex: base + rows*cols*2,
+				TabID: tab, StartIndex: idx, EndIndex: end,
 				Kind: "table", Cells: cells,
+			})
+			s.Body = append(s.Body, vfs.DocsSpan{
+				TabID: tab, StartIndex: end, EndIndex: end + 1,
+				Kind: "paragraph",
 			})
 		}
 	}
@@ -310,6 +322,12 @@ func TestDrive_exportReadHonestStat(t *testing.T) {
 	got, err := os.ReadFile(host)
 	if err != nil || !strings.Contains(string(got), "<h1>Spec</h1>") {
 		t.Fatalf("FUSE cat = %q err=%v", got, err)
+	}
+	if err := os.WriteFile(host, []byte("nope"), 0o644); err == nil {
+		t.Fatal("projected Docs kernel write: want EROFS")
+	} else if !errors.Is(err, syscall.EROFS) && !errors.Is(err, os.ErrPermission) &&
+		!strings.Contains(err.Error(), "read-only") && !strings.Contains(err.Error(), "EROFS") {
+		t.Fatalf("projected Docs write err = %v", err)
 	}
 }
 
@@ -741,6 +759,163 @@ func TestDrive_docsSetBlocksNestedAndOmitImage(t *testing.T) {
 	joined := strings.Join(texts, " ")
 	if !strings.Contains(joined, "nested") || !strings.Contains(joined, "Title") || !strings.Contains(joined, "kept") {
 		t.Fatalf("texts = %v", texts)
+	}
+}
+
+func TestDrive_htmlLineFullCreateAndConflictRetry(t *testing.T) {
+	ctx := t.Context()
+	api := driveTree()
+	spans := []vfs.DocsSpan{
+		{StartIndex: 1, EndIndex: 2, Kind: "sectionBreak"},
+		{StartIndex: 2, EndIndex: 8, Kind: "heading", Level: 1, NamedStyle: "HEADING_1", Text: "Spec"},
+		{StartIndex: 8, EndIndex: 14, Kind: "paragraph", Text: "Hello"},
+	}
+	docs := newMemDocs("doc1", "R0", spans, nil)
+	ms := mountDrive(t, api, docs, true)
+
+	doc, err := ms.ReadText(ctx, "/workspace/contracts/Spec")
+	if err != nil {
+		t.Fatal(err)
+	}
+	start, end := 0, 0
+	lines, err := doc.Lines(1, doc.LineCount()+1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, line := range lines {
+		if strings.Contains(line, "<h1>Spec</h1>") {
+			start, end = i+1, i+2
+			break
+		}
+	}
+	if start == 0 {
+		t.Fatalf("heading line missing: %v", lines)
+	}
+	_, err = ms.Apply(ctx, "/workspace/contracts/Spec", vfs.Mutation{
+		Start: &start, End: &end,
+		Lines: []string{"<h1>SPIKE</h1>"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ms.ReadText(ctx, "/workspace/contracts/Spec")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !blockHasText(got, "SPIKE") || !blockHasText(got, "Hello") {
+		t.Fatalf("line write persist = %+v", got.(vfs.Structured).Blocks())
+	}
+
+	docs.snaps["doc1"] = vfs.DocsSnapshot{
+		DocumentID: "doc1", RevisionID: "R-out",
+		Body: []vfs.DocsSpan{
+			{StartIndex: 1, EndIndex: 2, Kind: "sectionBreak"},
+			{StartIndex: 2, EndIndex: 10, Kind: "heading", Level: 1, NamedStyle: "HEADING_1", Text: "Remote"},
+			{StartIndex: 10, EndIndex: 18, Kind: "paragraph", Text: "Changed"},
+		},
+	}
+	docs.rev["doc1"] = "R-out"
+	n := api.nodes["doc1"]
+	n.meta.Version = "out-of-band"
+	n.meta.ModTime = n.meta.ModTime.Add(time.Second)
+
+	stale := "<h1>Stale</h1>\n<p>write</p>"
+	_, err = ms.Apply(ctx, "/workspace/contracts/Spec", vfs.Mutation{Content: &stale})
+	if !errors.Is(err, vfs.ErrStaleContent) {
+		t.Fatalf("stored lastRev vs live: %v", err)
+	}
+
+	live, err := ms.ReadText(ctx, "/workspace/contracts/Spec")
+	if err != nil || !blockHasText(live, "Remote") {
+		t.Fatalf("live after out-of-band: err=%v", err)
+	}
+	full := "<h1>Whole</h1>\n<p>Body</p>"
+	_, err = ms.Apply(ctx, "/workspace/contracts/Spec", vfs.Mutation{Content: &full})
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := ms.ReadText(ctx, "/workspace/contracts/Spec")
+	if err != nil || !blockHasText(again, "Whole") || !blockHasText(again, "Body") {
+		t.Fatalf("full HTML after last read: err=%v blocks=%+v", err, again.(vfs.Structured).Blocks())
+	}
+
+	docs.conflictLeft = 1
+	retryBody := "<h1>Retried</h1>\n<p>Saved</p>"
+	prior := vfs.ContentToken(again)
+	_, err = ms.Apply(ctx, "/workspace/contracts/Spec", vfs.Mutation{Content: &retryBody})
+	if err != nil {
+		t.Fatal(err)
+	}
+	retried, err := ms.ReadText(ctx, "/workspace/contracts/Spec")
+	if err != nil || !blockHasText(retried, "Retried") || !blockHasText(retried, "Saved") {
+		t.Fatalf("persist retry success: err=%v", err)
+	}
+	if tok := vfs.ContentToken(retried); tok == "" || tok == prior {
+		t.Fatalf("retry hash: prior=%s got=%s", prior, tok)
+	}
+
+	docs.conflictLeft = 2
+	conflictBody := "<h1>Conflict</h1>\n<p>x</p>"
+	_, err = ms.Apply(ctx, "/workspace/contracts/Spec", vfs.Mutation{Content: &conflictBody})
+	if !errors.Is(err, vfs.ErrInvalidWrite) || !strings.Contains(err.Error(), "was not saved") {
+		t.Fatalf("conflict retry: %v", err)
+	}
+
+	html := "<h1>CRE SPIKE</h1>\n<table><tr><td>A</td><td>B</td></tr></table>"
+	_, err = ms.Apply(ctx, "/workspace/contracts/CRE SPIKE Public Data", vfs.Mutation{Content: &html})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := ms.Stat(ctx, "/workspace/contracts/CRE SPIKE Public Data")
+	if err != nil || st.MediaType != "application/vnd.google-apps.document" {
+		t.Fatalf("extensionless HTML create Stat=%+v err=%v", st, err)
+	}
+	created, err := ms.ReadText(ctx, "/workspace/contracts/CRE SPIKE Public Data")
+	if err != nil || !blockHasText(created, "CRE SPIKE") {
+		t.Fatalf("create body: %v", err)
+	}
+	var sawTable bool
+	for _, b := range created.(vfs.Structured).Blocks() {
+		if b.Kind == vfs.BlockKindTable && strings.Contains(b.Text, "A") && strings.Contains(b.Text, "B") {
+			sawTable = true
+		}
+	}
+	if !sawTable {
+		t.Fatalf("create table cells = %+v", created.(vfs.Structured).Blocks())
+	}
+}
+
+func TestDrive_htmlReplaceOnSingleTabOmitsTabID(t *testing.T) {
+	ctx := t.Context()
+	api := driveTree()
+	spans := []vfs.DocsSpan{
+		{TabID: "t.abc", StartIndex: 1, EndIndex: 2, Kind: "sectionBreak"},
+		{TabID: "t.abc", StartIndex: 2, EndIndex: 8, Kind: "heading", Level: 1, NamedStyle: "HEADING_1", Text: "Spec"},
+		{TabID: "t.abc", StartIndex: 8, EndIndex: 14, Kind: "paragraph", Text: "Hello"},
+	}
+	docs := newMemDocs("doc1", "R0", spans, []vfs.DocTab{{ID: "t.abc", Title: "Intro", Index: 0}})
+	ms := mountDrive(t, api, docs, true)
+
+	html := "<h1>CRE SPIKE</h1>\n<p>Public data options</p>\n<table><tr><td>A</td><td>B</td></tr></table>\n<p>After table</p>"
+	_, err := ms.Apply(ctx, "/workspace/contracts/Spec", vfs.Mutation{Content: &html})
+	if err != nil {
+		t.Fatalf("single-tab HTML replace without tab_id: %v", err)
+	}
+	got, err := ms.ReadText(ctx, "/workspace/contracts/Spec")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !blockHasText(got, "CRE SPIKE") || !blockHasText(got, "Public data options") || !blockHasText(got, "After table") {
+		t.Fatalf("replaced body = %+v", got.(vfs.Structured).Blocks())
+	}
+	var sawTable bool
+	for _, b := range got.(vfs.Structured).Blocks() {
+		if b.Kind == vfs.BlockKindTable && strings.Contains(b.Text, "A") && strings.Contains(b.Text, "B") {
+			sawTable = true
+		}
+	}
+	if !sawTable {
+		t.Fatalf("table missing after replace: %+v", got.(vfs.Structured).Blocks())
 	}
 }
 
