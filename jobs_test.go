@@ -109,21 +109,21 @@ func TestBackgroundJobs_schedulePollAwait(t *testing.T) {
 		switch step {
 		case 1:
 			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-				toolCall("bg1", "spawn_worker", `{"worker_name":"researcher","task_description_and_context":"dig","block":false}`),
+				toolCall("bg1", "spawn_specialist", `{"specialist":"researcher","task_description_and_context":"dig","block":false}`),
 			}, IsComplete: true}
 		case 2:
-			if run := h.getJob("bg1"); run == nil || run.mode != workerDeliveryAsync {
-				t.Errorf("background worker lifecycle = %#v", run)
+			if h.getJob("bg1") == nil {
+				t.Error("background worker not registered")
 			}
 			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
 				toolCall("p1", "ping", `{}`),
-				toolCall("l1", "list_jobs", `{}`),
-				toolCall("g_run", "get_job", `{"job_id":"bg1"}`),
+				toolCall("l1", "list_children", `{}`),
+				toolCall("g_run", "get_child", `{"child_id":"bg1"}`),
 			}, IsComplete: true}
 		case 3:
 			close(release)
 			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-				toolCall("g_done", "get_job", `{"job_id":"bg1","block":true}`),
+				toolCall("g_done", "get_child", `{"child_id":"bg1","block":true}`),
 			}, IsComplete: true}
 		default:
 			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "parent wrapped up", IsComplete: true}
@@ -134,25 +134,25 @@ func TestBackgroundJobs_schedulePollAwait(t *testing.T) {
 		Config: Config{MaxWindowSize: 8192},
 		Model:  parent,
 		Tools:  []*Tool{ping},
-		SubAgents: []*SubAgent{
-			{WorkerName: "researcher", Model: workerModel},
+		Specialists: []*Specialist{
+			{Name: "researcher", Model: workerModel},
 		},
 	})
 	defer h.Close()
 
 	got := drainEvents(mustRun(t, h, "background research while I ping"))
-	if !strings.Contains(toolResultByName(got, "spawn_worker"), "Job bg1 scheduled") {
-		t.Fatalf("spawn = %q", toolResultByName(got, "spawn_worker"))
+	if !strings.Contains(toolResultByName(got, "spawn_specialist"), "Child bg1 scheduled") {
+		t.Fatalf("spawn = %q", toolResultByName(got, "spawn_specialist"))
 	}
 	if toolResultByName(got, "ping") != "pong" {
 		t.Fatalf("ping = %q", toolResultByName(got, "ping"))
 	}
-	listOut := toolResultByName(got, "list_jobs")
-	if !strings.Contains(listOut, "id=bg1") || !strings.Contains(listOut, "worker=researcher") {
-		t.Fatalf("list_jobs = %q", listOut)
+	listOut := toolResultByName(got, "list_children")
+	if !strings.Contains(listOut, "id=bg1") || !strings.Contains(listOut, "specialist=researcher") {
+		t.Fatalf("list_children = %q", listOut)
 	}
-	if !strings.Contains(listOut, "get_job") {
-		t.Fatalf("list_jobs should point at get_job: %q", listOut)
+	if !strings.Contains(listOut, "get_child") {
+		t.Fatalf("list_children should point at get_child: %q", listOut)
 	}
 	var getRunning string
 	for _, ev := range got {
@@ -160,7 +160,7 @@ func TestBackgroundJobs_schedulePollAwait(t *testing.T) {
 			continue
 		}
 		for _, tc := range ev.ToolCalls {
-			if tc.Name != "get_job" {
+			if tc.Name != "get_child" {
 				continue
 			}
 			if strings.Contains(ev.Content, "status=running") {
@@ -169,10 +169,10 @@ func TestBackgroundJobs_schedulePollAwait(t *testing.T) {
 		}
 	}
 	if getRunning == "" || !strings.Contains(getRunning, "Still running") {
-		t.Fatalf("get_job while running = %q", getRunning)
+		t.Fatalf("get_child while running = %q", getRunning)
 	}
-	if lastToolResultByName(got, "get_job") != "bg research done" {
-		t.Fatalf("blocking get = %q", lastToolResultByName(got, "get_job"))
+	if lastToolResultByName(got, "get_child") != "bg research done" {
+		t.Fatalf("blocking get = %q", lastToolResultByName(got, "get_child"))
 	}
 	if hasEventType(got, StreamEventError) {
 		t.Fatalf("unexpected error: %+v", summarizeEvents(got))
@@ -185,7 +185,7 @@ func TestWorkerLifecycle_syncAndAsyncUseSharedRegistry(t *testing.T) {
 	sawSync := false
 	worker := &mockStrategy{
 		invokeFn: func(_ context.Context, _ []*Message, _ []*Tool, ch chan<- LLMResponseChunk) {
-			if run := harness.getJob("sync-worker"); run != nil && run.mode == workerDeliverySync {
+			if harness.getJob("sync-worker") != nil {
 				sawSync = true
 			}
 			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "worker complete", IsComplete: true}
@@ -197,7 +197,7 @@ func TestWorkerLifecycle_syncAndAsyncUseSharedRegistry(t *testing.T) {
 			step++
 			if step == 1 {
 				ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-					toolCall("sync-worker", "spawn_worker", `{"worker_name":"researcher","task_description_and_context":"work","block":true}`),
+					toolCall("sync-worker", "spawn_specialist", `{"specialist":"researcher","task_description_and_context":"work","block":true}`),
 				}, IsComplete: true}
 				return
 			}
@@ -205,8 +205,8 @@ func TestWorkerLifecycle_syncAndAsyncUseSharedRegistry(t *testing.T) {
 		},
 	}
 	harness = mustNewAgent(t, AgentOptions{
-		Model:     parent,
-		SubAgents: []*SubAgent{{WorkerName: "researcher", Model: worker}},
+		Model:       parent,
+		Specialists: []*Specialist{{Name: "researcher", Model: worker}},
 	})
 	t.Cleanup(harness.Close)
 
@@ -217,7 +217,7 @@ func TestWorkerLifecycle_syncAndAsyncUseSharedRegistry(t *testing.T) {
 	if !sawSync {
 		t.Fatal("synchronous worker did not use the shared lifecycle registry")
 	}
-	if result := toolResultByName(events, "spawn_worker"); result != "worker complete" {
+	if result := toolResultByName(events, "spawn_specialist"); result != "worker complete" {
 		t.Fatalf("spawn result = %q", result)
 	}
 	if harness.getJob("sync-worker") != nil {
@@ -241,12 +241,12 @@ func TestBackgroundJobs_awaitAlreadyComplete(t *testing.T) {
 		switch step {
 		case 1:
 			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-				toolCall("fast1", "spawn_worker", `{"worker_name":"researcher","task_description_and_context":"go","block":false}`),
+				toolCall("fast1", "spawn_specialist", `{"specialist":"researcher","task_description_and_context":"go","block":false}`),
 			}, IsComplete: true}
 		case 2:
 			waitJobStatus(t, h, "fast1", jobStatusCompleted)
 			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-				toolCall("a1", "get_job", `{"job_id":"fast1"}`),
+				toolCall("a1", "get_child", `{"child_id":"fast1"}`),
 			}, IsComplete: true}
 		default:
 			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
@@ -256,14 +256,14 @@ func TestBackgroundJobs_awaitAlreadyComplete(t *testing.T) {
 	h = mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  parent,
-		SubAgents: []*SubAgent{
-			{WorkerName: "researcher", Model: workerModel},
+		Specialists: []*Specialist{
+			{Name: "researcher", Model: workerModel},
 		},
 	})
 	defer h.Close()
 
 	got := drainEvents(mustRun(t, h, "await completed job"))
-	if out := toolResultByName(got, "get_job"); out != "fast result" {
+	if out := toolResultByName(got, "get_child"); out != "fast result" {
 		t.Fatalf("non-blocking completed get = %q, events=%v", out, summarizeEvents(got))
 	}
 }
@@ -290,15 +290,15 @@ func TestBackgroundJobs_failedWorkersAreCollectable(t *testing.T) {
 		switch step {
 		case 1:
 			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-				toolCall("failed_stream", "spawn_worker", `{"worker_name":"stream_failure","task_description_and_context":"fail","block":false}`),
-				toolCall("no_output", "spawn_worker", `{"worker_name":"no_output","task_description_and_context":"finish blank","block":false}`),
+				toolCall("failed_stream", "spawn_specialist", `{"specialist":"stream_failure","task_description_and_context":"fail","block":false}`),
+				toolCall("no_output", "spawn_specialist", `{"specialist":"no_output","task_description_and_context":"finish blank","block":false}`),
 			}, IsComplete: true}
 		case 2:
 			waitJobStatus(t, h, "failed_stream", jobStatusFailed)
 			waitJobStatus(t, h, "no_output", jobStatusFailed)
 			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-				toolCall("get_failed_stream", "get_job", `{"job_id":"failed_stream"}`),
-				toolCall("get_no_output", "get_job", `{"job_id":"no_output"}`),
+				toolCall("get_failed_stream", "get_child", `{"child_id":"failed_stream"}`),
+				toolCall("get_no_output", "get_child", `{"child_id":"no_output"}`),
 			}, IsComplete: true}
 		default:
 			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "failures handled", IsComplete: true}
@@ -308,9 +308,9 @@ func TestBackgroundJobs_failedWorkersAreCollectable(t *testing.T) {
 	h = mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  parent,
-		SubAgents: []*SubAgent{
-			{WorkerName: "stream_failure", Model: streamFailure},
-			{WorkerName: "no_output", Model: noOutput},
+		Specialists: []*Specialist{
+			{Name: "stream_failure", Model: streamFailure},
+			{Name: "no_output", Model: noOutput},
 		},
 	})
 	defer h.Close()
@@ -322,13 +322,13 @@ func TestBackgroundJobs_failedWorkersAreCollectable(t *testing.T) {
 			continue
 		}
 		for _, tc := range ev.ToolCalls {
-			if tc.Name == "get_job" && tc.Status == "error" {
+			if tc.Name == "get_child" && tc.Status == "error" {
 				errors = append(errors, ev.Content)
 			}
 		}
 	}
 	if len(errors) != 2 {
-		t.Fatalf("get_job errors = %v, want stream and empty-output failures", errors)
+		t.Fatalf("get_child errors = %v, want stream and empty-output failures", errors)
 	}
 	if !strings.Contains(strings.Join(errors, "\n"), "worker stream failed") {
 		t.Fatalf("missing stream failure: %v", errors)
@@ -348,11 +348,11 @@ func TestBackgroundJobTools_reportEmptyAndInvalidRequests(t *testing.T) {
 		step++
 		if step == 1 {
 			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-				toolCall("list", "list_jobs", `{}`),
-				toolCall("get_empty", "get_job", `{"job_id":""}`),
-				toolCall("get_missing", "get_job", `{"job_id":"missing"}`),
-				toolCall("cancel_empty", "cancel_job", `{"job_id":""}`),
-				toolCall("cancel_missing", "cancel_job", `{"job_id":"missing"}`),
+				toolCall("list", "list_children", `{}`),
+				toolCall("get_empty", "get_child", `{"child_id":""}`),
+				toolCall("get_missing", "get_child", `{"child_id":"missing"}`),
+				toolCall("cancel_empty", "cancel_child", `{"child_id":""}`),
+				toolCall("cancel_missing", "cancel_child", `{"child_id":"missing"}`),
 			}, IsComplete: true}
 			return
 		}
@@ -362,14 +362,14 @@ func TestBackgroundJobTools_reportEmptyAndInvalidRequests(t *testing.T) {
 	h := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  parent,
-		SubAgents: []*SubAgent{
-			{WorkerName: "researcher", Model: &mockStrategy{}},
+		Specialists: []*Specialist{
+			{Name: "researcher", Model: &mockStrategy{}},
 		},
 	})
 	defer h.Close()
 
 	got := drainEvents(mustRun(t, h, "inspect jobs"))
-	if out := toolResultByName(got, "list_jobs"); out != "No background jobs." {
+	if out := toolResultByName(got, "list_children"); out != "No child sessions." {
 		t.Fatalf("empty list = %q", out)
 	}
 	var invalid, missing int
@@ -378,7 +378,7 @@ func TestBackgroundJobTools_reportEmptyAndInvalidRequests(t *testing.T) {
 			continue
 		}
 		for _, tc := range ev.ToolCalls {
-			if tc.Name != "get_job" && tc.Name != "cancel_job" {
+			if tc.Name != "get_child" && tc.Name != "cancel_child" {
 				continue
 			}
 			if strings.Contains(ev.Content, "required") {
@@ -405,7 +405,7 @@ func TestBackgroundJobs_syncSpawnStillBlocks(t *testing.T) {
 		step++
 		if step == 1 {
 			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-				toolCall("s1", "spawn_worker", `{"worker_name":"researcher","task_description_and_context":"sync"}`),
+				toolCall("s1", "spawn_specialist", `{"specialist":"researcher","task_description_and_context":"sync"}`),
 			}, IsComplete: true}
 			return
 		}
@@ -414,13 +414,13 @@ func TestBackgroundJobs_syncSpawnStillBlocks(t *testing.T) {
 	h := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  parent,
-		SubAgents: []*SubAgent{
-			{WorkerName: "researcher", Model: workerModel},
+		Specialists: []*Specialist{
+			{Name: "researcher", Model: workerModel},
 		},
 	})
 	defer h.Close()
 	got := drainEvents(mustRun(t, h, "sync spawn"))
-	if out := toolResultByName(got, "spawn_worker"); out != "sync answer" {
+	if out := toolResultByName(got, "spawn_specialist"); out != "sync answer" {
 		t.Fatalf("sync spawn = %q", out)
 	}
 }
@@ -471,15 +471,15 @@ func TestBackgroundJobs_interruptsResumeAndCancel(t *testing.T) {
 		switch step {
 		case 1:
 			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-				toolCall("bg_intr", "spawn_worker", `{"worker_name":"researcher","task_description_and_context":"ask","block":false}`),
-				toolCall("cancel_intr", "spawn_worker", `{"worker_name":"disposable","task_description_and_context":"ask","block":false}`),
+				toolCall("bg_intr", "spawn_specialist", `{"specialist":"researcher","task_description_and_context":"ask","block":false}`),
+				toolCall("cancel_intr", "spawn_specialist", `{"specialist":"disposable","task_description_and_context":"ask","block":false}`),
 			}, IsComplete: true}
 		case 2:
 			waitJobStatus(t, h, "bg_intr", jobStatusInterrupted)
 			waitJobStatus(t, h, "cancel_intr", jobStatusInterrupted)
 			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-				toolCall("a1", "get_job", `{"job_id":"bg_intr","block":true}`),
-				toolCall("c1", "cancel_job", `{"job_id":"cancel_intr"}`),
+				toolCall("a1", "get_child", `{"child_id":"bg_intr","block":true}`),
+				toolCall("c1", "cancel_child", `{"child_id":"cancel_intr"}`),
 			}, IsComplete: true}
 		default:
 			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "parent done", IsComplete: true}
@@ -490,9 +490,9 @@ func TestBackgroundJobs_interruptsResumeAndCancel(t *testing.T) {
 		SessionID: "sess-bg-intr",
 		Config:    Config{MaxWindowSize: 8192},
 		Model:     parent,
-		SubAgents: []*SubAgent{
-			{WorkerName: "researcher", Model: workerModel, Tools: []*Tool{interruptTool}},
-			{WorkerName: "disposable", Model: cancelledWorkerModel, Tools: []*Tool{interruptTool}},
+		Specialists: []*Specialist{
+			{Name: "researcher", Model: workerModel, Tools: []*Tool{interruptTool}},
+			{Name: "disposable", Model: cancelledWorkerModel, Tools: []*Tool{interruptTool}},
 		},
 	})
 	defer h.Close()
@@ -514,19 +514,19 @@ func TestBackgroundJobs_interruptsResumeAndCancel(t *testing.T) {
 		}
 		if ev.Type == StreamEventToolResult {
 			for _, tc := range ev.ToolCalls {
-				if tc.Name == "get_job" {
+				if tc.Name == "get_child" {
 					t.Fatalf("blocking get should not complete before resolve, got %q", ev.Content)
 				}
-				if tc.Name == "cancel_job" {
+				if tc.Name == "cancel_child" {
 					cancelOut = ev.Content
 				}
 			}
 		}
 	}
 	if interruptID == "" {
-		t.Fatal("expected interrupt from blocking get_job")
+		t.Fatal("expected interrupt from blocking get_child")
 	}
-	if cancelOut != "Job cancel_intr cancelled and removed." {
+	if cancelOut != "Child cancel_intr cancelled and removed." {
 		t.Fatalf("interrupted cancellation = %q", cancelOut)
 	}
 
@@ -567,7 +567,7 @@ func TestBackgroundJobs_interruptsResumeAndCancel(t *testing.T) {
 	for ev := range resumed {
 		if ev.Type == StreamEventToolResult {
 			for _, tc := range ev.ToolCalls {
-				if tc.Name == "get_job" {
+				if tc.Name == "get_child" {
 					awaitOut = ev.Content
 				}
 			}
@@ -602,7 +602,7 @@ func TestBackgroundJobs_nudgesBeforeTurnCompletion(t *testing.T) {
 		switch step {
 		case 1:
 			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-				toolCall("nudge_job", "spawn_worker", `{"worker_name":"researcher","task_description_and_context":"work","block":false}`),
+				toolCall("nudge_job", "spawn_specialist", `{"specialist":"researcher","task_description_and_context":"work","block":false}`),
 			}, IsComplete: true}
 		case 2:
 			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "premature finish", IsComplete: true}
@@ -615,7 +615,7 @@ func TestBackgroundJobs_nudgesBeforeTurnCompletion(t *testing.T) {
 			}
 			close(release)
 			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-				toolCall("collect", "get_job", `{"job_id":"nudge_job","block":true}`),
+				toolCall("collect", "get_child", `{"child_id":"nudge_job","block":true}`),
 			}, IsComplete: true}
 		default:
 			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "finished with result", IsComplete: true}
@@ -625,8 +625,8 @@ func TestBackgroundJobs_nudgesBeforeTurnCompletion(t *testing.T) {
 	h := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  parent,
-		SubAgents: []*SubAgent{
-			{WorkerName: "researcher", Model: workerModel},
+		Specialists: []*Specialist{
+			{Name: "researcher", Model: workerModel},
 		},
 	})
 	defer h.Close()
@@ -635,7 +635,7 @@ func TestBackgroundJobs_nudgesBeforeTurnCompletion(t *testing.T) {
 	if !sawNudge {
 		t.Fatal("model did not receive the automated background-jobs nudge")
 	}
-	if out := toolResultByName(got, "get_job"); out != "nudged result" {
+	if out := toolResultByName(got, "get_child"); out != "nudged result" {
 		t.Fatalf("collected result = %q", out)
 	}
 	completes := 0
@@ -666,7 +666,7 @@ func TestBackgroundJobs_cancelJob(t *testing.T) {
 		switch step {
 		case 1:
 			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-				toolCall("cancel_me", "spawn_worker", `{"worker_name":"researcher","task_description_and_context":"work","block":false}`),
+				toolCall("cancel_me", "spawn_specialist", `{"specialist":"researcher","task_description_and_context":"work","block":false}`),
 			}, IsComplete: true}
 		case 2:
 			select {
@@ -675,7 +675,7 @@ func TestBackgroundJobs_cancelJob(t *testing.T) {
 				return
 			}
 			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-				toolCall("cancel", "cancel_job", `{"job_id":"cancel_me"}`),
+				toolCall("cancel", "cancel_child", `{"child_id":"cancel_me"}`),
 			}, IsComplete: true}
 		default:
 			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "cancelled", IsComplete: true}
@@ -685,20 +685,20 @@ func TestBackgroundJobs_cancelJob(t *testing.T) {
 	h := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  parent,
-		SubAgents: []*SubAgent{
-			{WorkerName: "researcher", Model: workerModel},
+		Specialists: []*Specialist{
+			{Name: "researcher", Model: workerModel},
 		},
 	})
 	defer h.Close()
 
 	got := drainEvents(mustRun(t, h, "cancel background work"))
-	if out := toolResultByName(got, "cancel_job"); out != "Job cancel_me cancelled and removed." {
+	if out := toolResultByName(got, "cancel_child"); out != "Child cancel_me cancelled and removed." {
 		t.Fatalf("cancel result = %q", out)
 	}
 	select {
 	case <-stopped:
 	case <-time.After(2 * time.Second):
-		t.Fatal("cancel_job did not stop worker")
+		t.Fatal("cancel_child did not stop worker")
 	}
 	if h.getJob("cancel_me") != nil {
 		t.Fatal("cancelled job remains registered")
@@ -720,7 +720,7 @@ func TestBackgroundJobs_closeCancelsRunning(t *testing.T) {
 	parent.invokeFn = func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
 		if parent.callNum.Load() == 1 {
 			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-				toolCall("bg_close", "spawn_worker", `{"worker_name":"researcher","task_description_and_context":"hang","block":false}`),
+				toolCall("bg_close", "spawn_specialist", `{"specialist":"researcher","task_description_and_context":"hang","block":false}`),
 			}, IsComplete: true}
 			return
 		}
@@ -730,8 +730,8 @@ func TestBackgroundJobs_closeCancelsRunning(t *testing.T) {
 	h := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  parent,
-		SubAgents: []*SubAgent{
-			{WorkerName: "researcher", Model: workerModel},
+		Specialists: []*Specialist{
+			{Name: "researcher", Model: workerModel},
 		},
 	})
 
@@ -749,6 +749,18 @@ func TestBackgroundJobs_closeCancelsRunning(t *testing.T) {
 	cancel()
 	_ = drainEvents(events)
 
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run context cancel must stop background children")
+	}
+	if j := h.getJob("bg_close"); j != nil {
+		status, _, _ := j.snapshot()
+		if status == jobStatusRunning {
+			t.Fatalf("job still running after request cancel: %s", status)
+		}
+	}
+
 	done := make(chan struct{})
 	go func() {
 		h.Close()
@@ -759,11 +771,6 @@ func TestBackgroundJobs_closeCancelsRunning(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Close hung with running background job")
 	}
-	select {
-	case <-stopped:
-	case <-time.After(2 * time.Second):
-		t.Fatal("background worker was not cancelled by Close")
-	}
 }
 
 func TestBackgroundJobs_scheduleValidatesInputAndDuplicateIDs(t *testing.T) {
@@ -771,8 +778,8 @@ func TestBackgroundJobs_scheduleValidatesInputAndDuplicateIDs(t *testing.T) {
 	h := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  &mockStrategy{},
-		SubAgents: []*SubAgent{
-			{WorkerName: "researcher", Model: &mockStrategy{}},
+		Specialists: []*Specialist{
+			{Name: "researcher", Model: &mockStrategy{}},
 		},
 	})
 	t.Cleanup(h.Close)
@@ -817,15 +824,15 @@ func TestBackgroundJobs_nonBlockingGetReportsRunningStatus(t *testing.T) {
 		switch step {
 		case 1:
 			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-				toolCall("running_job", "spawn_worker", `{"worker_name":"researcher","task_description_and_context":"work","block":false}`),
+				toolCall("running_job", "spawn_specialist", `{"specialist":"researcher","task_description_and_context":"work","block":false}`),
 			}, IsComplete: true}
 		case 2:
 			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-				toolCall("poll", "get_job", `{"job_id":"running_job"}`),
+				toolCall("poll", "get_child", `{"child_id":"running_job"}`),
 			}, IsComplete: true}
 		case 3:
 			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-				toolCall("collect", "get_job", `{"job_id":"running_job","block":true}`),
+				toolCall("collect", "get_child", `{"child_id":"running_job","block":true}`),
 			}, IsComplete: true}
 		default:
 			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "finished", IsComplete: true}
@@ -834,15 +841,15 @@ func TestBackgroundJobs_nonBlockingGetReportsRunningStatus(t *testing.T) {
 	h = mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  parent,
-		SubAgents: []*SubAgent{
-			{WorkerName: "researcher", Model: workerModel},
+		Specialists: []*Specialist{
+			{Name: "researcher", Model: workerModel},
 		},
 	})
 	t.Cleanup(h.Close)
 
 	// Act
 	got := drainEvents(mustRun(t, h, "poll running job"))
-	runningOut := toolResultByName(got, "get_job")
+	runningOut := toolResultByName(got, "get_child")
 
 	// Assert
 	if !strings.Contains(runningOut, "Still running") {
@@ -861,8 +868,8 @@ func TestBackgroundJobs_listJobsIncludesRunningWorker(t *testing.T) {
 	h := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  &mockStrategy{},
-		SubAgents: []*SubAgent{
-			{WorkerName: "researcher", Model: workerModel},
+		Specialists: []*Specialist{
+			{Name: "researcher", Model: workerModel},
 		},
 	})
 	t.Cleanup(h.Close)
@@ -881,7 +888,7 @@ func TestBackgroundJobs_listJobsIncludesRunningWorker(t *testing.T) {
 	}
 }
 
-func TestBackgroundJobs_backgroundJobsNudgeAndFormatJobErrors(t *testing.T) {
+func TestBackgroundJobs_backgroundChildrenNudgeAndFormatChildErrors(t *testing.T) {
 	// Arrange
 	started := make(chan struct{})
 	workerModel := &mockStrategy{
@@ -893,8 +900,8 @@ func TestBackgroundJobs_backgroundJobsNudgeAndFormatJobErrors(t *testing.T) {
 	h := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  &mockStrategy{},
-		SubAgents: []*SubAgent{
-			{WorkerName: "researcher", Model: workerModel},
+		Specialists: []*Specialist{
+			{Name: "researcher", Model: workerModel},
 		},
 	})
 	t.Cleanup(h.Close)
@@ -909,7 +916,7 @@ func TestBackgroundJobs_backgroundJobsNudgeAndFormatJobErrors(t *testing.T) {
 	}
 
 	// Act
-	nudge := h.backgroundJobsNudge()
+	nudge := h.backgroundChildrenNudge()
 	_, emptyErr := h.formatJob("")
 	_, missingErr := h.formatJob("missing")
 	formatted, formatErr := h.formatJob("nudge-me")
@@ -929,14 +936,14 @@ func TestBackgroundJobs_backgroundJobsNudgeAndFormatJobErrors(t *testing.T) {
 
 func TestWorkerRun_terminalHelpersAreIdempotent(t *testing.T) {
 	completed := &workerRun{
-		id: "done", workerName: "researcher", status: jobStatusRunning,
+		id: "done", specialist: "researcher", status: jobStatusRunning,
 		done: make(chan struct{}),
 	}
 	completed.setTerminal(jobStatusCompleted, "finished", nil)
 	completed.setTerminal(jobStatusFailed, "", fmt.Errorf("ignored"))
 
 	interrupted := &workerRun{
-		id: "intr", workerName: "researcher", status: jobStatusCompleted,
+		id: "intr", specialist: "researcher", status: jobStatusCompleted,
 		done: make(chan struct{}),
 	}
 	close(interrupted.done)
@@ -959,7 +966,7 @@ func TestBackgroundJobs_registerJobInitializesNilMap(t *testing.T) {
 	t.Cleanup(h.Close)
 	h.jobs = nil
 	h.registerJob(&workerRun{
-		id: "listed", workerName: "researcher", status: jobStatusRunning,
+		id: "listed", specialist: "researcher", status: jobStatusRunning,
 		done: make(chan struct{}),
 	})
 	if h.jobs == nil || h.jobs["listed"] == nil {
@@ -976,14 +983,14 @@ func TestBackgroundJobs_readJobInterruptedAndCancelledPaths(t *testing.T) {
 	rt := turnRuntime(h)
 
 	interruptedJob := &workerRun{
-		id: "paused", workerName: "researcher", status: jobStatusInterrupted,
+		id: "paused", specialist: "researcher", status: jobStatusInterrupted,
 		done: make(chan struct{}),
 	}
 	close(interruptedJob.done)
 	h.registerJob(interruptedJob)
 
 	blockingJob := &workerRun{
-		id: "block", workerName: "researcher", status: jobStatusRunning,
+		id: "block", specialist: "researcher", status: jobStatusRunning,
 		done: make(chan struct{}),
 	}
 	h.registerJob(blockingJob)
@@ -998,7 +1005,7 @@ func TestBackgroundJobs_readJobInterruptedAndCancelledPaths(t *testing.T) {
 	_, blockErr := h.readJob(ctx, "block", true, rt)
 	_, resumeErr := h.readJob(t.Context(), "paused", true, rt)
 
-	if intrErr != nil || !strings.Contains(intrOut, "Interrupted awaiting") {
+	if intrErr != nil || !strings.Contains(intrOut, "Still running") {
 		t.Fatalf("interrupted format = %q err = %v", intrOut, intrErr)
 	}
 	if !errors.Is(blockErr, context.Canceled) {
@@ -1020,8 +1027,8 @@ func TestBackgroundJobs_blockingGetAwaitCompletion(t *testing.T) {
 	h := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  &mockStrategy{},
-		SubAgents: []*SubAgent{
-			{WorkerName: "researcher", Model: workerModel},
+		Specialists: []*Specialist{
+			{Name: "researcher", Model: workerModel},
 		},
 	})
 	t.Cleanup(h.Close)
@@ -1051,8 +1058,8 @@ func TestBackgroundJobs_incompleteWorkerWithoutInterruptFails(t *testing.T) {
 	h := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  &mockStrategy{},
-		SubAgents: []*SubAgent{
-			{WorkerName: "researcher", Model: workerModel},
+		Specialists: []*Specialist{
+			{Name: "researcher", Model: workerModel},
 		},
 	})
 	t.Cleanup(h.Close)
@@ -1068,8 +1075,8 @@ func TestBackgroundJobs_workerStartFailureMarksJobFailed(t *testing.T) {
 	h := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  &mockStrategy{},
-		SubAgents: []*SubAgent{
-			{WorkerName: "researcher", Model: workerModel},
+		Specialists: []*Specialist{
+			{Name: "researcher", Model: workerModel},
 		},
 	})
 	t.Cleanup(h.Close)
@@ -1084,15 +1091,15 @@ func TestBackgroundJobs_resumeInterruptedJobReportsMissingParkState(t *testing.T
 	h := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  &mockStrategy{},
-		SubAgents: []*SubAgent{
-			{WorkerName: "researcher", Model: &mockStrategy{}},
+		Specialists: []*Specialist{
+			{Name: "researcher", Model: &mockStrategy{}},
 		},
 	})
 	t.Cleanup(h.Close)
 	rt := resolvedToolPermissionRuntime(h, "collect_job")
 	j := &workerRun{
 		id:         "paused",
-		workerName: "researcher",
+		specialist: "researcher",
 		status:     jobStatusInterrupted,
 		childIntr:  mustTestToolPermissionInterrupt(),
 		done:       make(chan struct{}),
@@ -1110,27 +1117,27 @@ func TestBackgroundJobs_resumeInterruptedJobReportsMissingWorkerSpec(t *testing.
 	h := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  &mockStrategy{},
-		SubAgents: []*SubAgent{
-			{WorkerName: "researcher", Model: &mockStrategy{}},
+		Specialists: []*Specialist{
+			{Name: "researcher", Model: &mockStrategy{}},
 		},
 	})
 	t.Cleanup(h.Close)
 	rt := resolvedToolPermissionRuntime(h, "collect_job")
 	h.session.SetParkedWorker("paused", session.ParkedWorkerMeta{
-		WorkerName:      "researcher",
+		Specialist:      "researcher",
 		WorkerSessionID: "sess/w/researcher/paused",
 		Task:            "work",
 	})
 	j := &workerRun{
 		id:         "paused",
-		workerName: "researcher",
+		specialist: "researcher",
 		status:     jobStatusInterrupted,
 		childIntr:  mustTestToolPermissionInterrupt(),
 		done:       make(chan struct{}),
 	}
 	close(j.done)
 	h.registerJob(j)
-	delete(h.subagents, "researcher")
+	delete(h.specialists, "researcher")
 
 	_, err := h.readJob(t.Context(), "paused", true, rt)
 	if err == nil || !errors.Is(err, ErrNotFound) {

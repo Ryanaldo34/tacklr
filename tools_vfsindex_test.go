@@ -601,7 +601,7 @@ func TestRun_workspaceResearchTurn(t *testing.T) {
 			}, IsComplete: true}
 		case 10:
 			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-				toolCall("sp1", "spawn_worker", `{"worker_name":"researcher","task_description_and_context":"summarize unique-research-token"}`),
+				toolCall("sp1", "spawn_specialist", `{"specialist":"researcher","task_description_and_context":"summarize unique-research-token"}`),
 			}, IsComplete: true}
 		default:
 			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "indexed the note and saved a discovery", IsComplete: true}
@@ -623,8 +623,8 @@ func TestRun_workspaceResearchTurn(t *testing.T) {
 		BrainWriteKinds: brain.WriteKinds{Discovery: "Discovery"},
 		writeUnattended: true,
 		Model:           strategy,
-		SubAgents: []*SubAgent{{
-			WorkerName:  "researcher",
+		Specialists: []*Specialist{{
+			Name:        "researcher",
 			Description: "summarize findings",
 			Model: &mockStrategy{
 				invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {

@@ -6,11 +6,11 @@ import (
 	"github.com/ryanaldo34/tacklr/stores"
 )
 
-// ParkedWorkerMeta is durable park metadata for a spawn_worker tool call.
+// ParkedWorkerMeta is durable park metadata for a spawn_specialist tool call.
 // Live harness pointers are not stored here. Checkpoint is the child's
 // SnapshotStore blob so a reconstructed parent can restore the worker.
 type ParkedWorkerMeta struct {
-	WorkerName        string                    `json:"workerName"`
+	Specialist        string                    `json:"specialist"`
 	WorkerSessionID   string                    `json:"workerSessionId"`
 	Task              string                    `json:"task"`
 	ChildInterruptIDs []string                  `json:"childInterruptIds"`
@@ -45,7 +45,7 @@ func (p *parkBag) replace(m map[string]ParkedWorkerMeta) {
 	}
 }
 
-// ParkedWorker returns durable park metadata for a spawn_worker tool call.
+// ParkedWorker returns durable park metadata for a spawn_specialist tool call.
 func (s *SessionManager) ParkedWorker(toolCallID string) (ParkedWorkerMeta, bool) {
 	s.parks.mu.RLock()
 	defer s.parks.mu.RUnlock()
@@ -53,14 +53,14 @@ func (s *SessionManager) ParkedWorker(toolCallID string) (ParkedWorkerMeta, bool
 	return m, ok
 }
 
-// SetParkedWorker stores durable park metadata for a spawn_worker tool call.
+// SetParkedWorker stores durable park metadata for a spawn_specialist tool call.
 func (s *SessionManager) SetParkedWorker(toolCallID string, meta ParkedWorkerMeta) {
 	s.parks.mu.Lock()
 	s.parks.byID[toolCallID] = meta
 	s.parks.mu.Unlock()
 }
 
-// DeleteParkedWorker removes durable park metadata for a spawn_worker tool call.
+// DeleteParkedWorker removes durable park metadata for a spawn_specialist tool call.
 func (s *SessionManager) DeleteParkedWorker(toolCallID string) {
 	s.parks.mu.Lock()
 	delete(s.parks.byID, toolCallID)

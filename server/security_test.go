@@ -41,7 +41,7 @@ func TestACPAuthentication_ownsSessionsByGenericPrincipal(t *testing.T) {
 		Description: "Authenticate with the host",
 		Scheme:      "host-login",
 	}}, true)
-	k := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	k := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
 	connection := &Conn{}
 	env := ProtocolEnv{Runtime: k.Runtime, Catalog: k.Catalog, Conn: connection, Security: service}
 	call := func(body string) map[string]any {
@@ -197,7 +197,7 @@ func TestServer_WithSecurity_authenticatesHTTPRequests(t *testing.T) {
 			return tacklrsecurity.NewPrincipal(string(attempt.Credential.Bytes()))
 		}),
 	}
-	k := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	k := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
 	srv := NewServer(k.Runtime, k.Catalog, healthProtocol{}).WithSecurity(service, func(r *http.Request) (tacklrsecurity.Attempt, bool) {
 		if token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "); token != r.Header.Get("Authorization") {
 			return tacklrsecurity.Attempt{Scheme: "bearer", Credential: tacklrsecurity.NewSecret([]byte(token))}, true
@@ -238,7 +238,7 @@ func TestACP_sessionLoad_authorizerDeniesAndUnauthenticated(t *testing.T) {
 		}),
 	}
 	protocol := NewACPProtocolWithAuth(nil, []ACPAuthMethod{{ID: "login", Name: "Login", Scheme: "host"}}, false)
-	k := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	k := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
 	aliceContext := tacklrsecurity.Context{Principal: alice}
 	conn := &Conn{Security: &aliceContext}
 	env := ProtocolEnv{Runtime: k.Runtime, Catalog: k.Catalog, Conn: conn, Security: service}
@@ -290,7 +290,7 @@ func TestServer_securityBuildersPanicOnInvalidReceiverOrService(t *testing.T) {
 		(*Server)(nil).WithSecurity(&tacklrsecurity.Service{}, nil)
 	})
 	assertPanics("WithSecurity nil service", func() {
-		k := newEmptyKernel()
+		k := newEmptyRuntime()
 		NewServer(k.Runtime, k.Catalog, NewACPProtocol(nil)).WithSecurity(nil, nil)
 	})
 	assertPanics("AllowAnonymousNetwork nil server", func() {
@@ -299,7 +299,7 @@ func TestServer_securityBuildersPanicOnInvalidReceiverOrService(t *testing.T) {
 }
 
 func TestConnectionRemoval_unregistersConnection(t *testing.T) {
-	k := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	k := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
 	server := NewServer(k.Runtime, k.Catalog, NewACPProtocol(nil))
 	connection := server.Connections.Create(nil, nil)
 	connection.noteSession("session")

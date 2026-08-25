@@ -11,10 +11,10 @@ import (
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
-func TestAgentError_isAgentAndCause(t *testing.T) {
-	err := AgentError(vfs.ErrNotExist, "read: that path does not exist. List the parent with run_command (ls)")
-	if !errors.Is(err, ErrAgent) {
-		t.Fatal("Is ErrAgent")
+func TestCorrection_isAgentAndCause(t *testing.T) {
+	err := Correction(vfs.ErrNotExist, "read: that path does not exist. List the parent with run_command (ls)")
+	if !errors.Is(err, ErrCorrection) {
+		t.Fatal("Is ErrCorrection")
 	}
 	if !errors.Is(err, vfs.ErrNotExist) {
 		t.Fatal("Is cause")
@@ -22,7 +22,7 @@ func TestAgentError_isAgentAndCause(t *testing.T) {
 	if errors.Is(err, ErrFailed) {
 		t.Fatal("must not be harness ErrFailed")
 	}
-	if strings.Contains(err.Error(), "vfs:") || err.Error() == ErrAgent.Error() {
+	if strings.Contains(err.Error(), "vfs:") || err.Error() == ErrCorrection.Error() {
 		t.Fatalf("model text: %q", err.Error())
 	}
 	if !strings.Contains(err.Error(), "does not exist") || !strings.Contains(err.Error(), "ls") {
@@ -30,27 +30,27 @@ func TestAgentError_isAgentAndCause(t *testing.T) {
 	}
 }
 
-func TestAgentError_emptyMsgAndAlreadyWrapped(t *testing.T) {
-	if got := AgentError(nil, "  "); !errors.Is(got, ErrAgent) || got.Error() != ErrAgent.Error() {
+func TestCorrection_emptyMsgAndAlreadyWrapped(t *testing.T) {
+	if got := Correction(nil, "  "); !errors.Is(got, ErrCorrection) || got.Error() != ErrCorrection.Error() {
 		t.Fatalf("empty: %v", got)
 	}
-	fromCause := AgentError(vfs.ErrNotExist, "")
-	if !errors.Is(fromCause, ErrAgent) || !errors.Is(fromCause, vfs.ErrNotExist) {
+	fromCause := Correction(vfs.ErrNotExist, "")
+	if !errors.Is(fromCause, ErrCorrection) || !errors.Is(fromCause, vfs.ErrNotExist) {
 		t.Fatalf("cause: %v", fromCause)
 	}
 	if strings.Contains(fromCause.Error(), "vfs:") || fromCause.Error() != "not found" {
 		t.Fatalf("stripped: %q", fromCause.Error())
 	}
-	first := AgentErrorf(vfs.ErrUseHTML, "write HTML, not plain text")
-	again := AgentError(first, "other")
+	first := Correctionf(vfs.ErrUseHTML, "write HTML, not plain text")
+	again := Correction(first, "other")
 	if again.Error() != first.Error() || !errors.Is(again, vfs.ErrUseHTML) {
 		t.Fatalf("already wrapped: %v", again)
 	}
-	var nilAE *agentError
-	if nilAE.Error() != ErrAgent.Error() {
+	var nilAE *correctionError
+	if nilAE.Error() != ErrCorrection.Error() {
 		t.Fatal("nil receiver")
 	}
-	if (&agentError{}).Error() != ErrAgent.Error() {
+	if (&correctionError{}).Error() != ErrCorrection.Error() {
 		t.Fatal("empty msg")
 	}
 }
@@ -83,10 +83,10 @@ func TestPresentToolError_vfsSentinelsTellHowToFix(t *testing.T) {
 		{"not textual", vfs.ErrNotTextual, vfs.ErrNotTextual, []string{"not text"}, []string{"vfs:"}},
 		{"timeout", fmt.Errorf("tool %q: %w", "web_search", ErrToolTimeout), ErrToolTimeout, []string{"timed out", "smaller"}, nil},
 		{"permission denied", ErrToolPermissionDenied, ErrToolPermissionDenied, []string{"rejected by the user", "Do not retry"}, nil},
-		{"not found worker", fmt.Errorf("spawn: %w: worker missing", ErrNotFound), ErrNotFound, []string{"worker is not registered", "worker_name"}, nil},
-		{"not found job", fmt.Errorf("get_job: %w: unknown job", ErrNotFound), ErrNotFound, []string{"job_id is unknown", "list_jobs"}, nil},
+		{"not found specialist", fmt.Errorf("spawn: %w: specialist missing", ErrNotFound), ErrNotFound, []string{"specialist is not registered"}, nil},
+		{"not found job", fmt.Errorf("get_child: %w: unknown job", ErrNotFound), ErrNotFound, []string{"child_id is unknown", "list_children"}, nil},
 		{"not found other", ErrNotFound, ErrNotFound, []string{"not found", "id or path"}, nil},
-		{"invalid job_id", fmt.Errorf("get_job: %w: job_id missing", ErrInvalid), ErrInvalid, []string{"job_id is required", "list_jobs"}, nil},
+		{"invalid child_id", fmt.Errorf("get_child: %w: child_id missing", ErrInvalid), ErrInvalid, []string{"child_id is required", "list_children"}, nil},
 		{"invalid command", fmt.Errorf("run_command: %w: command is required", ErrInvalid), ErrInvalid, []string{"command is required", "ls work"}, nil},
 		{"invalid empty task", fmt.Errorf("spawn: %w: empty task", ErrInvalid), ErrInvalid, []string{"task_description_and_context is required"}, nil},
 		{"invalid required", fmt.Errorf("write: %w: path is required", ErrInvalid), ErrInvalid, []string{"path is required"}, []string{"invalid arguments"}},
@@ -103,8 +103,8 @@ func TestPresentToolError_vfsSentinelsTellHowToFix(t *testing.T) {
 		if got == nil {
 			t.Fatalf("%s: nil", tc.name)
 		}
-		if !errors.Is(got, ErrAgent) {
-			t.Fatalf("%s: want ErrAgent, got %v", tc.name, got)
+		if !errors.Is(got, ErrCorrection) {
+			t.Fatalf("%s: want ErrCorrection, got %v", tc.name, got)
 		}
 		if tc.is != nil && !errors.Is(got, tc.is) {
 			t.Fatalf("%s: want Is %v", tc.name, tc.is)
@@ -131,12 +131,12 @@ func TestPresentToolError_passesInterruptCancelAndFailed(t *testing.T) {
 	if got := presentToolError("write", intr); !errors.Is(got, intr) {
 		t.Fatalf("interrupt rewritten: %v", got)
 	}
-	if got := presentToolError("write", context.Canceled); !errors.Is(got, context.Canceled) || errors.Is(got, ErrAgent) {
+	if got := presentToolError("write", context.Canceled); !errors.Is(got, context.Canceled) || errors.Is(got, ErrCorrection) {
 		t.Fatalf("cancel: %v", got)
 	}
 	harness := fmt.Errorf("worker panic: %w", ErrFailed)
-	got := presentToolError("spawn_worker", harness)
-	if !errors.Is(got, ErrFailed) || errors.Is(got, ErrAgent) {
+	got := presentToolError("spawn_specialist", harness)
+	if !errors.Is(got, ErrFailed) || errors.Is(got, ErrCorrection) {
 		t.Fatalf("ErrFailed became agent: %v", got)
 	}
 	named := errors.New("read: already prefixed")
@@ -151,7 +151,7 @@ func TestPresentToolError_doesNotDoubleWrap(t *testing.T) {
 	if second.Error() != first.Error() {
 		t.Fatalf("double wrap:\n%s\n%s", first, second)
 	}
-	if !errors.Is(second, vfs.ErrInvalidWrite) || !errors.Is(second, ErrAgent) {
+	if !errors.Is(second, vfs.ErrInvalidWrite) || !errors.Is(second, ErrCorrection) {
 		t.Fatal("Is")
 	}
 }

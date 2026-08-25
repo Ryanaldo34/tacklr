@@ -542,12 +542,12 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 		Model:           &mockStrategy{},
 		Brain:           eng,
 		SearchNamespace: &ns,
-		SubAgents: []*SubAgent{
-			{WorkerName: "researcher", Model: workerModel},
+		Specialists: []*Specialist{
+			{Name: "researcher", Model: workerModel},
 		},
 	})
 
-	worker, err := parentH.newWorkerHarness(ctx, "researcher", "spawn_tc1", parentH.subagents["researcher"])
+	worker, err := parentH.newWorkerHarness(ctx, "researcher", "spawn_tc1", parentH.specialists["researcher"])
 	if err != nil {
 		t.Fatal(err)
 	}

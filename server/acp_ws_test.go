@@ -36,7 +36,7 @@ func dialACPWebSocket(t *testing.T, hs *httptest.Server) (*websocket.Conn, strin
 	return conn, connID
 }
 
-func startACPWSServer(t *testing.T, r *testKernel) (*httptest.Server, *Server) {
+func startACPWSServer(t *testing.T, r *testRuntime) (*httptest.Server, *Server) {
 	t.Helper()
 	srv := NewServer(r.Runtime, r.Catalog, NewACPProtocol(NewMemoryWireStore()))
 	hs := httptest.NewServer(srv.HTTPMux())
@@ -97,7 +97,7 @@ func TestACP_WS_permissionMidTurn(t *testing.T) {
 			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "done", IsComplete: true}
 		},
 	}
-	r := newTestKernel(t, strategy, durable.AgentSpec{Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{sensitive}}})
+	r := newTestRuntime(t, strategy, durable.AgentSpec{Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{sensitive}}})
 	hs, srv := startACPWSServer(t, r)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

@@ -268,7 +268,7 @@ Nothing configured still installs a replay-safe no-op provider so Temporal workf
 
 | Package | Role | Link |
 |---------|------|------|
-| `tacklr` | Harness, tools, plan loop, subagents | [pkg](https://pkg.go.dev/github.com/ryanaldo34/tacklr) |
+| `tacklr` | Harness, tools, plan loop, specialists | [pkg](https://pkg.go.dev/github.com/ryanaldo34/tacklr) |
 | `vfs` | Virtual filesystem, mounts, content IR | [docs](docs/vfs.md) · [pkg](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfs) |
 | `vfsindex` | Optional mount → brain ingest (VFS and brain stay independent) | [pkg](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfsindex) |
 | `brain` | Knowledge engine | [docs](docs/knowledge.md) · [pkg](https://pkg.go.dev/github.com/ryanaldo34/tacklr/brain) |

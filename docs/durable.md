@@ -1,6 +1,20 @@
 # Durable runtime
 
-Tacklr’s session kernel is `durable.Runtime`. A `server.Protocol` maps wire frames to Runtime calls. ACP is the native implementation (`NewACPProtocol`); hosts implement `Protocol` for their own streaming and delivery. The kernel does not import protocol types. Autonomous workflows call Runtime directly.
+Tacklr’s session API is `durable.Runtime`. A `server.Protocol` maps wire frames to Runtime calls. ACP is the native implementation (`NewACPProtocol`); hosts implement `Protocol` for their own streaming and delivery. Runtime does not import protocol types. Autonomous workflows call Runtime directly.
+
+## Vocabulary
+
+| Word | Meaning |
+|------|---------|
+| **Session** | Long-lived wait loop (`CreateSession` … `Close`) |
+| **Turn** | One `Prompt` or `Resume` until complete or park |
+| **AgentHarness** | Per-turn mind: infer, short tools, snapshot. Runtime constructs it; hosts using Path A hold one for the whole conversation |
+| **Specialist** | Catalog nested agent (`spawn_specialist`). Not a Temporal worker process |
+| **Child** | Nested session. Agent tools `list_children` / `get_child` / `cancel_child` |
+| **Park** | Session idle waiting for `Resume`. Parent-facing `Status` stays `running`; `Waiting` is true until the interrupt is resolved. Parent park does not stop children |
+| **Cancel** | Abort the in-flight turn and stop child sessions (`Runtime.Cancel`, original Prompt/Resume context cancel, client stop). The parent session stays open for a later Prompt |
+| **Close** | Destroy the session and recursively stop children |
+| **Turn locality** | Optional: keep a turn’s Temporal activities on one process (`WithTurnLocality`) so VFS stays put |
 
 There are three ways to run an agent:
 
@@ -32,19 +46,19 @@ One goroutine per session runs the harness wait loop. HITL parks that goroutine 
 The host runs:
 
 1. A Tacklr Temporal worker (`EnableSessionWorker: true`) that registers `SessionWorkflow` plus the `Inference`, `Tool`, and `CommitToolOutput` activities.
-2. A protocol process (optional) whose `durable.Runtime` is `temporal.New(client, taskQueue, catalog)`. Pass `WithWorkerSessionTimeout` to pin a turn to one worker; omit it to skip worker sessions. Autonomous jobs skip the protocol and call Runtime (or start the workflow) with a payload.
+2. A protocol process (optional) whose `durable.Runtime` is `temporal.New(client, taskQueue, catalog)`. Pass `WithTurnLocality` to keep a turn on one Temporal worker; omit it to let activities run anywhere. Autonomous work skips the protocol and calls Runtime (or starts the workflow) with a payload.
 
 | Tacklr concept | Temporal |
 |----------------|----------|
 | Agent session | One workflow (`SessionWorkflow`) |
 | Harness loop | Workflow function |
 | Inference / tool | Activities (`Inference`, `Tool`) |
-| Subagent | Child workflow |
-| Worker locality | Optional Temporal worker session on `temporal.New` (`WithWorkerSessionTimeout`). Zero (default) skips `CreateSession`. Not a VFS setting. Session timeout and client cancel both cancel that context; the wait loop selects on it and ends the turn. |
+| Specialist | Child workflow |
+| Turn locality | Optional: `WithTurnLocality` keeps the turn’s activities on one Temporal worker. Zero (default) does not pin them. |
 | Progress | Workflow Streams (`events`, `retry`, `close`) |
 | HITL | Signal `Resume` (never inside an activity) |
 | Leftover tools after HITL | Workflow variable (`rest`) replayed from history |
-| Spawn worker | Child `SessionWorkflow`, then `CommitToolOutput` to append the parent tool result |
+| Spawn specialist | Child `SessionWorkflow`, then `CommitToolOutput` to append the parent tool result |
 
 The worker registers `SessionWorkflow`, `Inference`, `Tool`, and `CommitToolOutput`.
 
@@ -99,7 +113,7 @@ A protocol is the handshake: create a session, start a turn, stream `StreamEvent
 | `Close` | `session/close` | host close |
 | `Prompt.Auth` | `_tacklr/vfs/bind` stash → BindTurn | payload field |
 
-Kernel, harness, VFS, and Temporal files compile with no protocol imports.
+Runtime, harness, VFS, and Temporal files compile with no protocol imports.
 
 ## SnapshotStore
 

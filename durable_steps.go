@@ -183,7 +183,7 @@ func (a *AgentHarness) runInference(ctx context.Context, st *drive.TurnState, ou
 		}
 	}
 	if len(toolCalls) == 0 {
-		if nudge := a.backgroundJobsNudge(); nudge != "" {
+		if nudge := a.backgroundChildrenNudge(); nudge != "" {
 			if err := a.addToContext(ctx, &Message{Role: RoleUser, Content: nudge}, out); err != nil {
 				return drive.InferenceStep{}, err
 			}
@@ -206,7 +206,7 @@ func (a *AgentHarness) runToolCall(ctx context.Context, tc ToolCall, out chan St
 	toolCtx, toolSpan := telemetry.StartToolSpan(ctx, tc.Name, tc.Namespace)
 	tool := a.findTool(tc.Name, tc.Namespace)
 	if tool == nil {
-		toolErr := AgentErrorf(ErrNotFound, "%s: not found. That is not a registered tool. Use a name from the available tools", tc.Name)
+		toolErr := Correctionf(ErrNotFound, "%s: not found. That is not a registered tool. Use a name from the available tools", tc.Name)
 		toolSpan.Finish("error", toolErr)
 		msg := a.emitToolResult(out, tc, toolErr.Error(), "error")
 		_ = a.addToContext(ctx, msg, out)
@@ -261,7 +261,7 @@ func (a *AgentHarness) runToolCall(ctx context.Context, tc ToolCall, out chan St
 		}
 		msg := a.emitToolResult(out, tc, content, "error")
 		_ = a.addToContext(ctx, msg, out)
-		if errors.Is(err, ErrAgent) {
+		if errors.Is(err, ErrCorrection) {
 			return drive.ToolStep{}, nil
 		}
 		return drive.ToolStep{}, err
@@ -292,6 +292,13 @@ func (a *AgentHarness) runToolCall(ctx context.Context, tc ToolCall, out chan St
 	return drive.ToolStep{}, nil
 }
 
-// SpawnWorkerName is the tool the durable driver maps to a nested run
-// (child workflow on Temporal).
-const SpawnWorkerName = "spawn_worker"
+// SpawnSpecialistName is the tool the durable driver maps to a nested run
+// (child session / child workflow).
+const SpawnSpecialistName = "spawn_specialist"
+
+// ListChildrenName, GetChildName, and CancelChildName are Runtime views of children.
+const (
+	ListChildrenName = "list_children"
+	GetChildName     = "get_child"
+	CancelChildName  = "cancel_child"
+)

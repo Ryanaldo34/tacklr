@@ -13,6 +13,9 @@ const (
 	signalResume = "Resume"
 	signalCancel = "Cancel"
 	signalClose  = "Close"
+
+	queryStatus   = "tacklr_status"
+	queryChildren = "tacklr_children"
 )
 
 // WorkflowInput is the typed start payload (no interface{}).
@@ -22,12 +25,14 @@ type WorkflowInput struct {
 	MCPServers []mcp.MCPConfig
 	Mounts     []durable.MountRecipe
 	Auth       durable.AuthContext
-	// WorkerSessionTimeout, when > 0, pins the turn's activities to one worker
+	// TurnLocalityTimeout, when > 0, pins the turn's activities to one worker
 	// (Temporal CreateSession). Zero skips worker sessions: activities can run
 	// on any worker. There is no default timeout.
-	WorkerSessionTimeout time.Duration
-	// Prompt, when set, runs one turn then completes the workflow (spawn_worker child).
-	Prompt string
+	TurnLocalityTimeout time.Duration
+	// Prompt, when set, runs one turn then completes the workflow (spawn_specialist child).
+	Prompt     string
+	Parent     durable.SessionID
+	Specialist string
 }
 
 type promptSignal struct {

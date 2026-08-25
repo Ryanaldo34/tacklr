@@ -36,7 +36,7 @@ func TestNewACPProtocolWithAuth_rejectsBadMethods(t *testing.T) {
 }
 
 func TestHandleInbound_canceledContext(t *testing.T) {
-	k := newTestKernel(t, nil, durable.AgentSpec{})
+	k := newTestRuntime(t, nil, durable.AgentSpec{})
 	p := NewACPProtocol(NewMemoryWireStore())
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
@@ -48,7 +48,7 @@ func TestHandleInbound_canceledContext(t *testing.T) {
 }
 
 func TestACP_handleInbound_notificationsAndUnknown(t *testing.T) {
-	k := newTestKernel(t, nil, durable.AgentSpec{})
+	k := newTestRuntime(t, nil, durable.AgentSpec{})
 	p := NewACPProtocol(NewMemoryWireStore())
 	rec := &recordingMessageWriter{}
 	env := ProtocolEnv{Runtime: k.Runtime, Catalog: k.Catalog, Conn: &Conn{Writer: rec, RPC: NewClientBridge(rec)}}
@@ -76,7 +76,7 @@ func TestACP_handleInbound_sessionAndAuthOutcomes(t *testing.T) {
 	if err := reg.Register(vfs.LocalFactory{ID: "local", Base: dir}); err != nil {
 		t.Fatal(err)
 	}
-	k := newTestKernel(t, nil, durable.AgentSpec{FSRegistry: reg})
+	k := newTestRuntime(t, nil, durable.AgentSpec{FSRegistry: reg})
 	ctx := t.Context()
 
 	authRec := &recordingMessageWriter{}
@@ -146,7 +146,7 @@ func TestACP_handleInbound_sessionAndAuthOutcomes(t *testing.T) {
 }
 
 func TestACP_httpPost_readBodyError(t *testing.T) {
-	k := newTestKernel(t, nil, durable.AgentSpec{})
+	k := newTestRuntime(t, nil, durable.AgentSpec{})
 	mux := NewServer(k.Runtime, k.Catalog, NewACPProtocol(nil)).AllowAnonymousNetwork().HTTPMux()
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/acp", nil)
@@ -164,7 +164,7 @@ func (errReadCloser) Read([]byte) (int, error) { return 0, errors.New("read") }
 func (errReadCloser) Close() error             { return nil }
 
 func TestACP_authenticate_mapsHostErrors(t *testing.T) {
-	k := newTestKernel(t, nil, durable.AgentSpec{})
+	k := newTestRuntime(t, nil, durable.AgentSpec{})
 	p := NewACPProtocolWithAuth(nil, []ACPAuthMethod{{ID: "tok", Name: "Token", Scheme: "host"}}, false)
 	failing := &tacklrsecurity.Service{
 		Authenticator: testAuthenticator(func(context.Context, tacklrsecurity.Attempt) (tacklrsecurity.Principal, error) {
@@ -219,7 +219,7 @@ func TestACP_RunTurn_unknownEventAndParkWithoutRPC(t *testing.T) {
 }
 
 func TestACP_handleInbound_turnAndConfigEdges(t *testing.T) {
-	k := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	k := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
 	ctx := t.Context()
 
 	nilCat := NewACPProtocol(NewMemoryWireStore())
@@ -307,7 +307,7 @@ func TestACP_handleInbound_turnAndConfigEdges(t *testing.T) {
 }
 
 func TestACP_httpGet_websocketAcceptFailure(t *testing.T) {
-	k := newTestKernel(t, nil, durable.AgentSpec{})
+	k := newTestRuntime(t, nil, durable.AgentSpec{})
 	mux := NewServer(k.Runtime, k.Catalog, NewACPProtocol(nil)).AllowAnonymousNetwork().HTTPMux()
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/acp", nil)

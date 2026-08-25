@@ -44,7 +44,7 @@ func (healthProtocol) OnStreamClosed(ctx context.Context, env ProtocolEnv, threa
 }
 
 func TestServer_mountsHostProtocolBesideACP(t *testing.T) {
-	k := newTestKernel(t, nil, durable.AgentSpec{})
+	k := newTestRuntime(t, nil, durable.AgentSpec{})
 	srv := NewServer(k.Runtime, k.Catalog, NewACPProtocol(nil), healthProtocol{}).AllowAnonymousNetwork()
 	mux := srv.HTTPMux()
 
@@ -153,6 +153,14 @@ func (s *stubRT) Subscribe(context.Context, durable.SessionID, durable.Seq) (dur
 		}()
 	}
 	return stubSub{ch: ch}, nil
+}
+
+func (s *stubRT) Children(context.Context, durable.SessionID) ([]durable.SessionID, error) {
+	return nil, nil
+}
+
+func (s *stubRT) Status(_ context.Context, id durable.SessionID) (durable.SessionStatus, error) {
+	return durable.SessionStatus{ID: id, State: durable.SessionUnknown}, durable.ErrSessionNotFound
 }
 
 type pumpProto struct {
@@ -333,7 +341,7 @@ func TestRunTurn_midPromptCancelThenNextPrompt(t *testing.T) {
 			}
 		},
 	}
-	k := newTestKernel(t, strategy, durable.AgentSpec{})
+	k := newTestRuntime(t, strategy, durable.AgentSpec{})
 	ctx := t.Context()
 	id, err := k.Runtime.CreateSession(ctx, durable.CreateSession{AgentID: "default"})
 	if err != nil {

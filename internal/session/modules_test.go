@@ -50,13 +50,13 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 	}
 
 	sm.SetParkedWorker("spawn_1", session.ParkedWorkerMeta{
-		WorkerName:        "researcher",
+		Specialist:        "researcher",
 		WorkerSessionID:   "sess/w/researcher/spawn_1",
 		Task:              "summarize the deal",
 		ChildInterruptIDs: []string{"child-1"},
 	})
 	meta, ok := sm.ParkedWorker("spawn_1")
-	if !ok || meta.WorkerName != "researcher" || meta.Task != "summarize the deal" {
+	if !ok || meta.Specialist != "researcher" || meta.Task != "summarize the deal" {
 		t.Fatalf("parked = %+v ok=%v", meta, ok)
 	}
 
@@ -111,7 +111,7 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 	assertModules(t, sm2, ns, "spawn_1", "researcher")
 
 	sm2.DeleteParkedWorker("spawn_1")
-	sm2.SetParkedWorker("spawn_2", session.ParkedWorkerMeta{WorkerName: "writer", Task: "draft"})
+	sm2.SetParkedWorker("spawn_2", session.ParkedWorkerMeta{Specialist: "writer", Task: "draft"})
 	cp2, err := session.CaptureCheckpoint(nil, sm2, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -124,7 +124,7 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 		t.Fatal("deleted park must not reload")
 	}
 	got2, ok := sm3.ParkedWorker("spawn_2")
-	if !ok || got2.WorkerName != "writer" {
+	if !ok || got2.Specialist != "writer" {
 		t.Fatalf("replacement park = %+v ok=%v", got2, ok)
 	}
 
@@ -233,7 +233,7 @@ func assertModules(t *testing.T, sm *session.SessionManager, ns uuid.UUID, parkI
 		t.Fatalf("on-call stage reload args=%q denied=%v ok=%v", layer.Args, layer.Denied, ok)
 	}
 	got, ok := sm.ParkedWorker(parkID)
-	if !ok || got.WorkerName != worker || got.WorkerSessionID != "sess/w/researcher/spawn_1" {
+	if !ok || got.Specialist != worker || got.WorkerSessionID != "sess/w/researcher/spawn_1" {
 		t.Fatalf("park reload = %+v ok=%v", got, ok)
 	}
 	gotNS, ok := sm.Search.Namespace()

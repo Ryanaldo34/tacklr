@@ -42,18 +42,18 @@ func parseACPFrames(t *testing.T, body io.Reader) []map[string]any {
 // acpTestServer is an isolated ACP server (own ProtocolWireStore) for multi-step RPC tests.
 type acpTestServer struct {
 	t     *testing.T
-	r     *testKernel
+	r     *testRuntime
 	proto Protocol
 	wire  ProtocolWireStore
 }
 
-func newACPTestServer(t *testing.T, r *testKernel) *acpTestServer {
+func newACPTestServer(t *testing.T, r *testRuntime) *acpTestServer {
 	t.Helper()
 	wire := NewMemoryWireStore()
 	return &acpTestServer{t: t, r: r, proto: NewACPProtocol(wire), wire: wire}
 }
 
-func newACPTestServerWithWire(t *testing.T, r *testKernel, wire ProtocolWireStore) *acpTestServer {
+func newACPTestServerWithWire(t *testing.T, r *testRuntime, wire ProtocolWireStore) *acpTestServer {
 	t.Helper()
 	return &acpTestServer{t: t, r: r, proto: NewACPProtocol(wire), wire: wire}
 }
@@ -63,23 +63,23 @@ func (s *acpTestServer) rpc(body string) *httptest.ResponseRecorder {
 	return serveACPInbound(s.t, s.r, s.proto, body)
 }
 
-// acpByKernel returns a stable ACP protocol per kernel so multi-step
+// acpByRuntime returns a stable ACP protocol per kernel so multi-step
 // serveACPRaw calls share wire state.
-var acpByKernel sync.Map // *testKernel → Protocol
+var acpByRuntime sync.Map // *testRuntime → Protocol
 
-func acpProtocolFor(r *testKernel) Protocol {
+func acpProtocolFor(r *testRuntime) Protocol {
 	if r == nil {
 		return NewACPProtocol(NewMemoryWireStore())
 	}
-	if v, ok := acpByKernel.Load(r); ok {
+	if v, ok := acpByRuntime.Load(r); ok {
 		return v.(Protocol)
 	}
 	p := NewACPProtocol(NewMemoryWireStore())
-	actual, _ := acpByKernel.LoadOrStore(r, p)
+	actual, _ := acpByRuntime.LoadOrStore(r, p)
 	return actual.(Protocol)
 }
 
-func serveACPInbound(t *testing.T, r *testKernel, proto Protocol, body string) *httptest.ResponseRecorder {
+func serveACPInbound(t *testing.T, r *testRuntime, proto Protocol, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	rec := httptest.NewRecorder()
 	mw := &jsonRPCMessageWriter{w: rec}
@@ -89,7 +89,7 @@ func serveACPInbound(t *testing.T, r *testKernel, proto Protocol, body string) *
 }
 
 // serveACPRaw runs one RPC against a per-kernel isolated ACP protocol.
-func serveACPRaw(t *testing.T, r *testKernel, body string) *httptest.ResponseRecorder {
+func serveACPRaw(t *testing.T, r *testRuntime, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	return serveACPInbound(t, r, acpProtocolFor(r), body)
 }
@@ -529,7 +529,7 @@ func TestInjectReqID_nonJSONFrame(t *testing.T) {
 }
 
 func TestACP_handleInbound_initialize(t *testing.T) {
-	r := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	r := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
 	rec := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}`)
 	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "protocolVersion") {
 		t.Fatalf("%d %s", rec.Code, rec.Body.String())
@@ -541,7 +541,7 @@ func TestACP_handleInbound_initialize(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestHandleRPC_initialize(t *testing.T) {
-	r := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	r := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
 
 	rec := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}`)
 
@@ -576,7 +576,7 @@ func TestHandleRPC_initialize(t *testing.T) {
 }
 
 func TestHandleRPC_sessionNew(t *testing.T) {
-	r := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	r := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
 
 	rec := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp"}}`)
 
@@ -602,7 +602,7 @@ func TestHandleRPC_sessionNew(t *testing.T) {
 
 func TestHandleRPC_sessionNew_persistsWireEnvelope(t *testing.T) {
 	// Outcome: durable wire store holds cwd/mcp after session/new (not private map peeks).
-	r := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	r := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
 	srv := newACPTestServer(t, r)
 
 	rec := srv.rpc(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/home/user","mcpServers":[{"name":"fs","command":"npx","env":[{"name":"API_KEY","value":"never-store"}]}]}}`)
@@ -634,7 +634,7 @@ func TestHandleRPC_sessionNew_persistsWireEnvelope(t *testing.T) {
 }
 
 func TestHandleRPC_sessionClose_thenLoadNotFound(t *testing.T) {
-	r := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	r := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
 	srv := newACPTestServer(t, r)
 
 	rec1 := srv.rpc(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
@@ -653,7 +653,7 @@ func TestHandleRPC_sessionClose_thenLoadNotFound(t *testing.T) {
 }
 
 func TestHandleRPC_unknownMethod(t *testing.T) {
-	r := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	r := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
 
 	rec := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/foo","params":{"sessionId":"s1"}}`)
 
@@ -670,7 +670,7 @@ func TestHandleRPC_unknownMethod(t *testing.T) {
 }
 
 func TestHandleRPC_invalidRequest(t *testing.T) {
-	r := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	r := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
 
 	rec := serveACPRaw(t, r, `not json`)
 
@@ -682,7 +682,7 @@ func TestHandleRPC_invalidRequest(t *testing.T) {
 }
 
 func TestHandleRPC_sessionLoad(t *testing.T) {
-	r := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	r := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
 
 	rec1 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
 	var resp1 map[string]any
@@ -707,7 +707,7 @@ func TestHandleRPC_sessionLoad(t *testing.T) {
 
 func TestHandleRPC_sessionLoad_persistsOnlyMCPTopology(t *testing.T) {
 	// Outcome: durable wire state keeps topology/reference but not inline credentials.
-	r := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	r := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
 	srv := newACPTestServer(t, r)
 
 	rec1 := srv.rpc(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
@@ -739,7 +739,7 @@ func TestHandleRPC_sessionLoad_persistsOnlyMCPTopology(t *testing.T) {
 }
 
 func TestHandleRPC_sessionLoad_cwdMismatch(t *testing.T) {
-	r := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	r := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
 
 	rec1 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
 	var resp1 map[string]any
@@ -758,7 +758,7 @@ func TestHandleRPC_sessionLoad_cwdMismatch(t *testing.T) {
 }
 
 func TestHandleRPC_sessionLoad_notFound(t *testing.T) {
-	r := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	r := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
 
 	rec := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/load","params":{"sessionId":"missing"}}`)
 	var resp map[string]any
@@ -781,13 +781,13 @@ func TestHandleRPC_sessionLoad_fromStoreAfterRestart(t *testing.T) {
 	}
 
 	// Process 1: create session
-	r1 := newTestKernel(t, strategy, durable.AgentSpec{})
+	r1 := newTestRuntime(t, strategy, durable.AgentSpec{})
 	s1 := newACPTestServerWithWire(t, r1, wire)
 	rec1 := s1.rpc(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/proj","mcpServers":[{"type":"http","name":"api","url":"https://api.example.com/mcp","headers":[]}]}}`)
 	sessionID, _ := acpRPCResult(t, rec1)["sessionId"].(string)
 
 	// Process 2: load + prompt
-	r2 := newTestKernel(t, strategy, durable.AgentSpec{})
+	r2 := newTestRuntime(t, strategy, durable.AgentSpec{})
 	s2 := newACPTestServerWithWire(t, r2, wire)
 	rec2 := s2.rpc(`{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"` + sessionID + `","cwd":"/proj"}}`)
 	if acpRPCResult(t, rec2)["sessionId"] != sessionID {
@@ -822,7 +822,7 @@ func TestHandleRPC_sessionLoad_fromStoreAfterRestart(t *testing.T) {
 }
 
 func TestHandleRPC_noAgentConfigured_onPrompt(t *testing.T) {
-	r := newEmptyKernel() // no default agent
+	r := newEmptyRuntime() // no default agent
 
 	rec1 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
 	var resp1 map[string]any
@@ -852,7 +852,7 @@ func TestHandleRPC_sessionPrompt_streamsEvents(t *testing.T) {
 			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "hello", IsComplete: true}
 		},
 	}
-	r := newTestKernel(t, strategy, durable.AgentSpec{})
+	r := newTestRuntime(t, strategy, durable.AgentSpec{})
 
 	// Create session
 	rec1 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
@@ -902,7 +902,7 @@ func TestHandleRPC_sessionPrompt_clientTurnID(t *testing.T) {
 			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "ok", IsComplete: true}
 		},
 	}
-	r := newTestKernel(t, strategy, durable.AgentSpec{})
+	r := newTestRuntime(t, strategy, durable.AgentSpec{})
 
 	// Create session
 	rec1 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
@@ -938,7 +938,7 @@ func TestHandleRPC_sessionPrompt_stringTurnID(t *testing.T) {
 			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "ok", IsComplete: true}
 		},
 	}
-	r := newTestKernel(t, strategy, durable.AgentSpec{})
+	r := newTestRuntime(t, strategy, durable.AgentSpec{})
 
 	rec1 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
 	var resp1 map[string]any
@@ -994,7 +994,7 @@ func TestHandleRPC_sessionPrompt_toolTitleAndName(t *testing.T) {
 			}
 		},
 	}
-	r := newTestKernel(t, strategy, durable.AgentSpec{Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{mark}}})
+	r := newTestRuntime(t, strategy, durable.AgentSpec{Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{mark}}})
 	rec1 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
 	var resp1 map[string]any
 	_ = json.Unmarshal(rec1.Body.Bytes(), &resp1)
@@ -1054,7 +1054,7 @@ func TestHandleRPC_sessionPrompt_toolProgress(t *testing.T) {
 		},
 	}
 
-	r := newTestKernel(t, strategy, durable.AgentSpec{Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{progressTool}}})
+	r := newTestRuntime(t, strategy, durable.AgentSpec{Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{progressTool}}})
 
 	rec1 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
 	var resp1 map[string]any
@@ -1122,7 +1122,7 @@ func TestHandleRPC_configSet_agent(t *testing.T) {
 			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "ok", IsComplete: true}
 		},
 	}
-	r := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	r := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
 	r.Catalog.Register("default", durable.AgentSpec{
 		Options: tacklr.AgentOptions{
 			Config: tacklr.Config{MaxWindowSize: 8192, SystemPrompt: "default"},
@@ -1157,7 +1157,7 @@ func TestHandleRPC_configSet_agent(t *testing.T) {
 }
 
 func TestHandleRPC_configSet_unknownAgent(t *testing.T) {
-	r := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	r := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
 
 	rec1 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
 	var resp1 map[string]any
@@ -1174,7 +1174,7 @@ func TestHandleRPC_configSet_unknownAgent(t *testing.T) {
 }
 
 func TestHandleRPC_configSet_unknownConfigID(t *testing.T) {
-	r := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	r := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
 
 	rec1 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
 	var resp1 map[string]any
@@ -1192,7 +1192,7 @@ func TestHandleRPC_configSet_unknownConfigID(t *testing.T) {
 
 func TestHandleRPC_sessionPrompt_usesConfigAgent(t *testing.T) {
 	var customInvoked bool
-	r := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	r := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
 	r.Catalog.Register("default", durable.AgentSpec{
 		Options: tacklr.AgentOptions{
 			Config: tacklr.Config{MaxWindowSize: 8192, SystemPrompt: "default-prompt"},
@@ -1254,7 +1254,7 @@ func TestHandleRPC_sessionPrompt_usesConfigAgent(t *testing.T) {
 }
 
 func TestHandleInbound_initialize_recordingWriter(t *testing.T) {
-	r := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	r := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
 	srv := NewServer(r.Runtime, r.Catalog, NewACPProtocol(nil))
 	rec := &recordingMessageWriter{}
 

@@ -114,7 +114,7 @@ func TestPostgresWireStore_acpLoadAfterRestart(t *testing.T) {
 		},
 	}
 
-	r1 := newTestKernel(t, strategy, durable.AgentSpec{})
+	r1 := newTestRuntime(t, strategy, durable.AgentSpec{})
 	s1 := newACPTestServerWithWire(t, r1, wire)
 	rec1 := s1.rpc(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/proj"}}`)
 	sessionID, _ := acpRPCResult(t, rec1)["sessionId"].(string)
@@ -122,7 +122,7 @@ func TestPostgresWireStore_acpLoadAfterRestart(t *testing.T) {
 		t.Fatal("missing sessionId")
 	}
 
-	r2 := newTestKernel(t, strategy, durable.AgentSpec{})
+	r2 := newTestRuntime(t, strategy, durable.AgentSpec{})
 	s2 := newACPTestServerWithWire(t, r2, wire)
 	rec2 := s2.rpc(`{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"` + sessionID + `","cwd":"/proj"}}`)
 	if acpRPCResult(t, rec2)["sessionId"] != sessionID {

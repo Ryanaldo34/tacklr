@@ -791,6 +791,64 @@ func TestBadWorkspaceBindingFailsTurn(t *testing.T) {
 	}
 }
 
+func TestChildSession_inheritsAndStatusStaysRunning(t *testing.T) {
+	ctx := t.Context()
+	childModel := scriptedComplete("from-child")
+	cat := newCatalog(t, scriptedComplete("parent"), durable.AgentSpec{
+		Options: tacklr.AgentOptions{
+			Specialists: []*tacklr.Specialist{{
+				Name:         "researcher",
+				Model:        childModel,
+				Instructions: "research",
+			}},
+		},
+	})
+	rt := New(cat, WithProjection(vfs.DirectProjection{}))
+	parent, err := rt.CreateSession(ctx, durable.CreateSession{AgentID: "default"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	kids, err := rt.Children(ctx, parent)
+	if err != nil || len(kids) != 0 {
+		t.Fatalf("empty children: %v %v", kids, err)
+	}
+	child, err := rt.CreateSession(ctx, durable.CreateSession{
+		Parent:     parent,
+		Specialist: "researcher",
+		SessionID:  durable.ChildSessionID(parent, "researcher", "c1"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	kids, err = rt.Children(ctx, parent)
+	if err != nil || len(kids) != 1 || kids[0] != child {
+		t.Fatalf("children=%v err=%v", kids, err)
+	}
+	st, err := rt.Status(ctx, child)
+	if err != nil || st.State != durable.SessionRunning || st.Kind != durable.SessionKindSpecialist {
+		t.Fatalf("status=%+v err=%v", st, err)
+	}
+	if err := rt.Prompt(ctx, child, durable.Prompt{Text: "go"}); err != nil {
+		t.Fatal(err)
+	}
+	sub, err := rt.Subscribe(ctx, child, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sub.Close() })
+	waitEvents(t, sub, 8*time.Second)
+	st, err = rt.Status(ctx, child)
+	if err != nil || st.State != durable.SessionComplete || st.Result != "from-child" {
+		t.Fatalf("complete=%+v err=%v", st, err)
+	}
+	if err := rt.Close(ctx, parent); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rt.Status(ctx, child); !errors.Is(err, durable.ErrSessionNotFound) {
+		t.Fatalf("close parent should close child: %v", err)
+	}
+}
+
 func TestSpawnWorkerNestedDriverCompletes(t *testing.T) {
 	ctx := t.Context()
 	child := scriptedComplete("child-hello")
@@ -803,8 +861,8 @@ func TestSpawnWorkerNestedDriverCompletes(t *testing.T) {
 			ch <- tacklr.LLMResponseChunk{
 				Type: tacklr.StreamEventFunctionCall,
 				ToolCalls: []tacklr.ToolCall{{
-					ID: "sp1", CallID: "sp1", Name: "spawn_worker",
-					Arguments: `{"worker_name":"researcher","task_description_and_context":"do it"}`,
+					ID: "sp1", CallID: "sp1", Name: "spawn_specialist",
+					Arguments: `{"specialist":"researcher","task_description_and_context":"do it"}`,
 				}},
 				IsComplete: true,
 			}
@@ -812,8 +870,8 @@ func TestSpawnWorkerNestedDriverCompletes(t *testing.T) {
 	}
 	spec := durable.AgentSpec{
 		Options: tacklr.AgentOptions{
-			SubAgents: []*tacklr.SubAgent{{
-				WorkerName:   "researcher",
+			Specialists: []*tacklr.Specialist{{
+				Name:         "researcher",
 				Model:        child,
 				Instructions: "research",
 			}},

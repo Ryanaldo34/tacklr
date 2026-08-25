@@ -20,11 +20,11 @@ import (
 	"github.com/ryanaldo34/tacklr/vfsindex"
 )
 
-// TestSystemPrompt_listsSubAgentsSorted: registered workers appear in the
+// TestSystemPrompt_listsSpecialistsSorted: registered workers appear in the
 // system prompt catalog (stable lexical order is a product outcome for prompts).
-// TestNewAgent_rejectsInvalidSubAgents: a harness must not start with a
+// TestNewAgent_rejectsInvalidSpecialists: a harness must not start with a
 // broken worker catalog (nil spec, empty name, nil model, or duplicate name).
-func TestNewAgent_rejectsInvalidSubAgents(t *testing.T) {
+func TestNewAgent_rejectsInvalidSpecialists(t *testing.T) {
 	ok := &mockStrategy{}
 	t.Run("nil model", func(t *testing.T) {
 		if _, err := NewAgent(context.Background(), AgentOptions{Config: Config{MaxWindowSize: 8192}}); err == nil {
@@ -33,20 +33,20 @@ func TestNewAgent_rejectsInvalidSubAgents(t *testing.T) {
 	})
 	cases := []struct {
 		name  string
-		specs []*SubAgent
+		specs []*Specialist
 	}{
-		{"nil spec", []*SubAgent{nil}},
-		{"empty name", []*SubAgent{{WorkerName: "", Model: ok}}},
-		{"nil model", []*SubAgent{{WorkerName: "w", Model: nil}}},
-		{"duplicate name", []*SubAgent{
-			{WorkerName: "w", Model: ok},
-			{WorkerName: "w", Model: ok},
+		{"nil spec", []*Specialist{nil}},
+		{"empty name", []*Specialist{{Name: "", Model: ok}}},
+		{"nil model", []*Specialist{{Name: "w", Model: nil}}},
+		{"duplicate name", []*Specialist{
+			{Name: "w", Model: ok},
+			{Name: "w", Model: ok},
 		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := NewAgent(context.Background(), AgentOptions{
-				Config: Config{MaxWindowSize: 8192}, Model: ok, SubAgents: tc.specs,
+				Config: Config{MaxWindowSize: 8192}, Model: ok, Specialists: tc.specs,
 			}); err == nil {
 				t.Fatal("expected constructor error")
 			}
@@ -101,39 +101,39 @@ func TestSpawnWorker_success(t *testing.T) {
 		switch step {
 		case 1:
 			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-				toolCall("u1", "spawn_worker", `{"worker_name":"nosuch","task_description_and_context":"x"}`),
+				toolCall("u1", "spawn_specialist", `{"specialist":"nosuch","task_description_and_context":"x"}`),
 			}, IsComplete: true}
 		case 2:
 			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-				toolCall("e1", "spawn_worker", `{"worker_name":"researcher","task_description_and_context":"  "}`),
+				toolCall("e1", "spawn_specialist", `{"specialist":"researcher","task_description_and_context":"  "}`),
 			}, IsComplete: true}
 		case 3:
 			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-				toolCall("d1", "spawn_worker", `{"worker_name":"down","task_description_and_context":"fail"}`),
+				toolCall("d1", "spawn_specialist", `{"specialist":"down","task_description_and_context":"fail"}`),
 			}, IsComplete: true}
 		case 4:
 			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-				toolCall("s1", "spawn_worker", `{"worker_name":"silent","task_description_and_context":"quiet"}`),
+				toolCall("s1", "spawn_specialist", `{"specialist":"silent","task_description_and_context":"quiet"}`),
 			}, IsComplete: true}
 		case 5:
 			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-				toolCall("b1", "spawn_worker", `{"worker_name":"blank","task_description_and_context":"empty"}`),
+				toolCall("b1", "spawn_specialist", `{"specialist":"blank","task_description_and_context":"empty"}`),
 			}, IsComplete: true}
 		case 6:
 			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-				toolCall("ok", "spawn_worker", `{"worker_name":"researcher","task_description_and_context":"research topic X"}`),
+				toolCall("ok", "spawn_specialist", `{"specialist":"researcher","task_description_and_context":"research topic X"}`),
 			}, IsComplete: true}
 		case 7:
 			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-				toolCall("bm", "spawn_worker", `{"worker_name":"boom","task_description_and_context":"explode"}`),
+				toolCall("bm", "spawn_specialist", `{"specialist":"boom","task_description_and_context":"explode"}`),
 			}, IsComplete: true}
 		case 8:
 			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-				toolCall("bt", "spawn_worker", `{"worker_name":"boomtext","task_description_and_context":"explode"}`),
+				toolCall("bt", "spawn_specialist", `{"specialist":"boomtext","task_description_and_context":"explode"}`),
 			}, IsComplete: true}
 		case 9:
 			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-				toolCall("be", "spawn_worker", `{"worker_name":"boomempty","task_description_and_context":"explode"}`),
+				toolCall("be", "spawn_specialist", `{"specialist":"boomempty","task_description_and_context":"explode"}`),
 			}, IsComplete: true}
 		default:
 			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
@@ -143,14 +143,14 @@ func TestSpawnWorker_success(t *testing.T) {
 	h := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 8192, MaxTurnRequests: 16},
 		Model:  parent,
-		SubAgents: []*SubAgent{
-			{WorkerName: "researcher", Model: researcher, Description: "research", Tools: []*Tool{ping}},
-			{WorkerName: "down", Model: down},
-			{WorkerName: "silent", Model: silent},
-			{WorkerName: "blank", Model: blank},
-			{WorkerName: "boom", Model: boom},
-			{WorkerName: "boomtext", Model: boomText},
-			{WorkerName: "boomempty", Model: boomEmpty},
+		Specialists: []*Specialist{
+			{Name: "researcher", Model: researcher, Description: "research", Tools: []*Tool{ping}},
+			{Name: "down", Model: down},
+			{Name: "silent", Model: silent},
+			{Name: "blank", Model: blank},
+			{Name: "boom", Model: boom},
+			{Name: "boomtext", Model: boomText},
+			{Name: "boomempty", Model: boomEmpty},
 		},
 	})
 
@@ -176,7 +176,7 @@ func TestSpawnWorker_success(t *testing.T) {
 		if ev.Type != streaming.StreamEventToolUpdate {
 			continue
 		}
-		if strings.Contains(ev.Content, `Worker "researcher" started`) {
+		if strings.Contains(ev.Content, `Specialist "researcher" started`) {
 			sawStart = true
 		}
 		if strings.Contains(ev.Content, "thinking") {
@@ -215,14 +215,14 @@ func TestSpawnWorker_contextCancel(t *testing.T) {
 	parent := &mockStrategy{}
 	parent.invokeFn = func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
 		ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-			toolCall("c1", "spawn_worker", `{"worker_name":"researcher","task_description_and_context":"do work"}`),
+			toolCall("c1", "spawn_specialist", `{"specialist":"researcher","task_description_and_context":"do work"}`),
 		}, IsComplete: true}
 	}
 	h := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model:  parent,
-		SubAgents: []*SubAgent{
-			{WorkerName: "researcher", Model: workerModel},
+		Specialists: []*Specialist{
+			{Name: "researcher", Model: workerModel},
 		},
 	})
 	events, err := h.Run(ctx, "use worker")
@@ -271,13 +271,13 @@ func TestSpawnWorker_interruptPropagatesAndResumes(t *testing.T) {
 		n := parentModel.callNum.Load()
 		if n == 1 {
 			args, _ := json.Marshal(map[string]string{
-				"worker_name":                  "researcher",
+				"specialist":                   "researcher",
 				"task_description_and_context": "ask the user something",
 			})
 			ch <- LLMResponseChunk{
 				Type: StreamEventFunctionCall,
 				ToolCalls: []ToolCall{{
-					ID: "spawn_1", CallID: "spawn_call_1", Name: "spawn_worker", Arguments: string(args),
+					ID: "spawn_1", CallID: "spawn_call_1", Name: "spawn_specialist", Arguments: string(args),
 				}},
 				IsComplete: true,
 			}
@@ -291,8 +291,8 @@ func TestSpawnWorker_interruptPropagatesAndResumes(t *testing.T) {
 		SessionID: "sess-root",
 		Config:    Config{MaxWindowSize: 8192},
 		Model:     parentModel,
-		SubAgents: []*SubAgent{
-			{WorkerName: "researcher", Model: workerModel, Tools: []*Tool{interruptTool}},
+		Specialists: []*Specialist{
+			{Name: "researcher", Model: workerModel, Tools: []*Tool{interruptTool}},
 		},
 	})
 
@@ -352,8 +352,8 @@ func TestSpawnWorker_interruptPropagatesAndResumes(t *testing.T) {
 		SessionID: "sess-volatile",
 		Config:    Config{MaxWindowSize: 8192},
 		Model:     parentModel,
-		SubAgents: []*SubAgent{
-			{WorkerName: "researcher", Model: workerModel, Tools: []*Tool{interruptTool}},
+		Specialists: []*Specialist{
+			{Name: "researcher", Model: workerModel, Tools: []*Tool{interruptTool}},
 		},
 	})
 	ev2, err := volatile.Run(context.Background(), "park then close live")
@@ -377,8 +377,8 @@ func TestSpawnWorker_interruptPropagatesAndResumes(t *testing.T) {
 		SessionID: "sess-volatile",
 		Config:    Config{MaxWindowSize: 8192},
 		Model:     parentModel,
-		SubAgents: []*SubAgent{
-			{WorkerName: "researcher", Model: workerModel, Tools: []*Tool{interruptTool}},
+		Specialists: []*Specialist{
+			{Name: "researcher", Model: workerModel, Tools: []*Tool{interruptTool}},
 		},
 	})
 	resolution = fmt.Sprintf(`{"interruptId":%q,"selectionIdx":0}`, interruptID)
@@ -428,13 +428,13 @@ func TestSpawnWorker_nestedInterruptPropagates(t *testing.T) {
 	midModel.invokeFn = func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
 		if midModel.callNum.Load() == 1 {
 			args, _ := json.Marshal(map[string]string{
-				"worker_name":                  "leaf",
+				"specialist":                   "leaf",
 				"task_description_and_context": "leaf task",
 			})
 			ch <- LLMResponseChunk{
 				Type: StreamEventFunctionCall,
 				ToolCalls: []ToolCall{{
-					ID: "mid_spawn", CallID: "mid_spawn_call", Name: "spawn_worker", Arguments: string(args),
+					ID: "mid_spawn", CallID: "mid_spawn_call", Name: "spawn_specialist", Arguments: string(args),
 				}},
 				IsComplete: true,
 			}
@@ -447,13 +447,13 @@ func TestSpawnWorker_nestedInterruptPropagates(t *testing.T) {
 	rootModel.invokeFn = func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
 		if rootModel.callNum.Load() == 1 {
 			args, _ := json.Marshal(map[string]string{
-				"worker_name":                  "mid",
+				"specialist":                   "mid",
 				"task_description_and_context": "mid task",
 			})
 			ch <- LLMResponseChunk{
 				Type: StreamEventFunctionCall,
 				ToolCalls: []ToolCall{{
-					ID: "root_spawn", CallID: "root_spawn_call", Name: "spawn_worker", Arguments: string(args),
+					ID: "root_spawn", CallID: "root_spawn_call", Name: "spawn_specialist", Arguments: string(args),
 				}},
 				IsComplete: true,
 			}
@@ -466,12 +466,12 @@ func TestSpawnWorker_nestedInterruptPropagates(t *testing.T) {
 		SessionID: "sess-nested",
 		Config:    Config{MaxWindowSize: 8192},
 		Model:     rootModel,
-		SubAgents: []*SubAgent{
+		Specialists: []*Specialist{
 			{
-				WorkerName: "mid",
-				Model:      midModel,
-				SubAgents: []*SubAgent{
-					{WorkerName: "leaf", Model: leafModel, Tools: []*Tool{interruptTool}},
+				Name:  "mid",
+				Model: midModel,
+				Specialists: []*Specialist{
+					{Name: "leaf", Model: leafModel, Tools: []*Tool{interruptTool}},
 				},
 			},
 		},
@@ -550,13 +550,13 @@ func TestSpawnWorker_interruptSurvivesSessionReload(t *testing.T) {
 	parentModel.invokeFn = func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
 		if parentModel.callNum.Load() == 1 {
 			args, _ := json.Marshal(map[string]string{
-				"worker_name":                  "researcher",
+				"specialist":                   "researcher",
 				"task_description_and_context": "reload task",
 			})
 			ch <- LLMResponseChunk{
 				Type: StreamEventFunctionCall,
 				ToolCalls: []ToolCall{{
-					ID: "spawn_r", CallID: "spawn_call_r", Name: "spawn_worker", Arguments: string(args),
+					ID: "spawn_r", CallID: "spawn_call_r", Name: "spawn_specialist", Arguments: string(args),
 				}},
 				IsComplete: true,
 			}
@@ -569,8 +569,8 @@ func TestSpawnWorker_interruptSurvivesSessionReload(t *testing.T) {
 		SessionID: "sess-reload",
 		Config:    Config{MaxWindowSize: 8192},
 		Model:     parentModel,
-		SubAgents: []*SubAgent{
-			{WorkerName: "researcher", Model: workerModel, Tools: []*Tool{interruptTool}},
+		Specialists: []*Specialist{
+			{Name: "researcher", Model: workerModel, Tools: []*Tool{interruptTool}},
 		},
 	}
 	h := mustNewAgent(t, opts)
@@ -623,7 +623,7 @@ func TestSpawnWorker_interruptSurvivesSessionReload(t *testing.T) {
 func newWorkerHost(t *testing.T) (*AgentHarness, *AgentHarness, *vfs.MountSession, *brain.Engine, uuid.UUID) {
 	t.Helper()
 	parent, ms, eng, ns := vfsIndexHarness(t, true)
-	worker := mustNewAgent(t, parent.workerOptsFromSpec(&SubAgent{WorkerName: "researcher", Model: &mockStrategy{}}))
+	worker := mustNewAgent(t, parent.workerOptsFromSpec(&Specialist{Name: "researcher", Model: &mockStrategy{}}))
 	t.Cleanup(worker.Close)
 	return parent, worker, ms, eng, ns
 }
@@ -742,7 +742,7 @@ func TestSpawnWorker_inheritsParentSkills(t *testing.T) {
 	if parent.findTool("read_skill", "") == nil {
 		t.Fatal("parent missing read_skill")
 	}
-	inherited := parent.workerOptsFromSpec(&SubAgent{WorkerName: "researcher", Model: &mockStrategy{}})
+	inherited := parent.workerOptsFromSpec(&Specialist{Name: "researcher", Model: &mockStrategy{}})
 	if inherited.Config.MaxTurnRequests != 4 || inherited.MountSession != ms {
 		t.Fatalf("workerOptsFromSpec = %+v", inherited.Config)
 	}
@@ -791,13 +791,13 @@ func TestSpawnWorker_resumeKeepsParentVFS(t *testing.T) {
 	parentModel.invokeFn = func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
 		if parentModel.callNum.Load() == 1 {
 			args, _ := json.Marshal(map[string]string{
-				"worker_name":                  "researcher",
+				"specialist":                   "researcher",
 				"task_description_and_context": "ask",
 			})
 			ch <- LLMResponseChunk{
 				Type: StreamEventFunctionCall,
 				ToolCalls: []ToolCall{{
-					ID: "spawn_1", CallID: "spawn_call_1", Name: "spawn_worker", Arguments: string(args),
+					ID: "spawn_1", CallID: "spawn_call_1", Name: "spawn_specialist", Arguments: string(args),
 				}},
 				IsComplete: true,
 			}
@@ -847,8 +847,8 @@ func TestSpawnWorker_resumeKeepsParentVFS(t *testing.T) {
 		Brain:           eng,
 		SearchNamespace: &ns,
 		writeUnattended: true,
-		SubAgents: []*SubAgent{
-			{WorkerName: "researcher", Model: workerModel, Tools: []*Tool{interruptTool}},
+		Specialists: []*Specialist{
+			{Name: "researcher", Model: workerModel, Tools: []*Tool{interruptTool}},
 		},
 	}
 	parent := mustNewAgent(t, opts)
@@ -881,7 +881,7 @@ func TestSpawnWorker_resumeKeepsParentVFS(t *testing.T) {
 	if meta == nil {
 		t.Fatal("expected park metadata after session reload")
 	}
-	worker, err := reloaded.attachParkedWorker(ctx, spawnID, *meta, reloaded.subagents["researcher"])
+	worker, err := reloaded.attachParkedWorker(ctx, spawnID, *meta, reloaded.specialists["researcher"])
 	if err != nil {
 		t.Fatal(err)
 	}

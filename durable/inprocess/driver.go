@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 
 	"github.com/ryanaldo34/tacklr"
@@ -32,6 +33,13 @@ func (r *Runtime) constructHarness(ctx context.Context, p *sessionProc, load boo
 	spec, ok := r.catalog.Lookup(p.agentID)
 	if !ok {
 		return nil, nil, durable.ErrAgentNotFound
+	}
+	if p.specialist != "" {
+		over, err := durable.OverlaySpecialist(spec, p.specialist)
+		if err != nil {
+			return nil, nil, err
+		}
+		spec = over
 	}
 	threadID := string(p.id)
 	ms, err := durable.OpenTurnVFS(ctx, threadID, spec, bindings, r.projection)
@@ -78,7 +86,19 @@ func (r *Runtime) persistHarness(ctx context.Context, p *sessionProc, h *tacklr.
 		telemetry.RecordCheckpointAttempt(ctx, err)
 		return err
 	}
-	etag, err := r.snapshots.Save(ctx, p.id, durable.Snapshot{AgentID: p.agentID, Checkpoint: *cp, Mounts: p.mounts}, p.etag)
+	p.mu.Lock()
+	children := slices.Clone(p.children)
+	parent := p.parent
+	specialist := p.specialist
+	p.mu.Unlock()
+	etag, err := r.snapshots.Save(ctx, p.id, durable.Snapshot{
+		AgentID:    p.agentID,
+		Specialist: specialist,
+		Parent:     parent,
+		Children:   children,
+		Checkpoint: *cp,
+		Mounts:     p.mounts,
+	}, p.etag)
 	telemetry.RecordCheckpointAttempt(ctx, err)
 	if err != nil {
 		return err
@@ -94,11 +114,14 @@ func (r *Runtime) emit(ctx context.Context, p *sessionProc, ev streaming.StreamE
 }
 
 func (r *Runtime) fail(ctx context.Context, p *sessionProc, err error) turnOutcome {
+	p.mu.Lock()
+	p.termErr = err
+	p.mu.Unlock()
 	r.emit(ctx, p, streaming.StreamEvent{Type: streaming.StreamEventError, Error: err})
 	return turnError
 }
 
-func (r *Runtime) driveTurn(ctx context.Context, p *sessionProc, user *tacklr.Message, resume map[string][]byte, bindings []vfs.Binding) turnOutcome {
+func (r *Runtime) runTurn(ctx context.Context, p *sessionProc, user *tacklr.Message, resume map[string][]byte, bindings []vfs.Binding) turnOutcome {
 	load := resume != nil || p.etag != ""
 	h, ms, err := r.constructHarness(ctx, p, load, bindings)
 	if err != nil {
@@ -110,7 +133,12 @@ func (r *Runtime) driveTurn(ctx context.Context, p *sessionProc, user *tacklr.Me
 	}()
 
 	eng := drive.EngineOf(h)
-	out, stop := drive.PipeStreamEvents(func(ev streaming.StreamEvent) { r.emit(ctx, p, ev) })
+	out, stop := drive.PipeStreamEvents(func(ev streaming.StreamEvent) {
+		if ev.Type == streaming.StreamEventComplete && durable.ChildrenNudge(r.childStatuses(p)) != "" {
+			return
+		}
+		r.emit(ctx, p, ev)
+	})
 	defer stop()
 
 	cancelled := func() turnOutcome {
@@ -146,12 +174,23 @@ func (r *Runtime) driveTurn(ctx context.Context, p *sessionProc, user *tacklr.Me
 				return cancelled()
 			}
 			if infErr != nil {
+				p.mu.Lock()
+				p.termErr = infErr
+				p.mu.Unlock()
 				if err := r.persistHarness(ctx, p, h); err != nil {
 					r.emit(ctx, p, streaming.StreamEvent{Type: streaming.StreamEventError, Error: err})
 				}
 				return turnError
 			}
 			if step.Complete {
+				if nudge := durable.ChildrenNudge(r.childStatuses(p)); nudge != "" {
+					if err := eng.AbsorbUser(ctx, &tacklr.Message{Role: tacklr.RoleUser, Content: nudge}, out); err != nil {
+						return r.fail(ctx, p, err)
+					}
+					st.HadToolRound = true
+					continue
+				}
+				r.captureResult(p, h)
 				if err := r.persistHarness(ctx, p, h); err != nil {
 					return r.fail(ctx, p, err)
 				}
@@ -175,7 +214,13 @@ func (r *Runtime) driveTurn(ctx context.Context, p *sessionProc, user *tacklr.Me
 				if ctx.Err() != nil {
 					return
 				}
-				step, _ := eng.RunToolCall(ctx, tc, out)
+				var step drive.ToolStep
+				switch tc.Name {
+				case tacklr.SpawnSpecialistName, tacklr.ListChildrenName, tacklr.GetChildName, tacklr.CancelChildName:
+					step, _ = r.runSessionTool(ctx, p, eng, tc, out)
+				default:
+					step, _ = eng.RunToolCall(ctx, tc, out)
+				}
 				if step.Interrupted {
 					mu.Lock()
 					interrupted = true
@@ -194,6 +239,16 @@ func (r *Runtime) driveTurn(ctx context.Context, p *sessionProc, user *tacklr.Me
 			return turnYield
 		}
 		toolCalls = nil
+	}
+}
+
+func (r *Runtime) captureResult(p *sessionProc, h *tacklr.AgentHarness) {
+	for _, m := range h.Messages() {
+		if m != nil && m.Role == tacklr.RoleAssistant && m.Content != "" {
+			p.mu.Lock()
+			p.result = m.Content
+			p.mu.Unlock()
+		}
 	}
 }
 

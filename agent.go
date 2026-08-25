@@ -13,6 +13,7 @@ import (
 	"github.com/ryanaldo34/tacklr/brain"
 	mcpruntime "github.com/ryanaldo34/tacklr/internal/mcp"
 	session "github.com/ryanaldo34/tacklr/internal/session"
+	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/skills"
 	"github.com/ryanaldo34/tacklr/stores"
@@ -38,13 +39,13 @@ type AgentHarness struct {
 	maxWindowSize         int
 	maxTurnRequests       int // 0 = unlimited; from Config.MaxTurnRequests
 	session               *session.SessionManager
-	subagents             map[string]*SubAgent
+	specialists           map[string]*Specialist
 	// pendingToolCalls is keyed by tool call id, which is also the wire interrupt id.
 	pendingToolCalls map[string]stores.PendingToolCall
 	pendingMu        sync.Mutex
 	// interruptPayloads maps parent tool call id → resume payload for workers.
 	interruptPayloads map[string][]byte
-	// parkedWorkersLive maps spawn_worker tool call id → live child harness.
+	// parkedWorkersLive maps spawn_specialist tool call id → live child harness.
 	// Durable park metadata is in SessionManager state; this map is not checkpointed.
 	parkedWorkersLive map[string]*AgentHarness
 	parkMu            sync.Mutex
@@ -110,6 +111,35 @@ func (a *AgentHarness) recordToolResult(tc ToolCall, output string) {
 	a.pendingMu.Lock()
 	delete(a.pendingToolCalls, tc.Key())
 	a.pendingMu.Unlock()
+}
+
+func (a *AgentHarness) parkTool(tc ToolCall) error {
+	key := tc.Key()
+	intr := &interrupt.ChildWaiting{
+		Kind:    interrupt.TypeChildWaiting,
+		Message: "child session awaiting input",
+	}
+	resolved, err := a.session.AdoptInterrupt(key, intr)
+	var parked interrupt.Interrupt
+	if errors.As(err, &parked) {
+		err = nil
+	}
+	if err != nil {
+		return err
+	}
+	if resolved == nil && parked == nil {
+		return fmt.Errorf("park %s: adopt returned no interrupt", key)
+	}
+	if parked != nil {
+		a.pendingMu.Lock()
+		if a.pendingToolCalls == nil {
+			a.pendingToolCalls = make(map[string]stores.PendingToolCall)
+		}
+		cp := tc
+		a.pendingToolCalls[key] = stores.PendingToolCall{ToolCall: &cp, InterruptActive: true}
+		a.pendingMu.Unlock()
+	}
+	return nil
 }
 
 func (a *AgentHarness) constructSystemPrompt() string {
@@ -226,7 +256,7 @@ If receiving a handoff from another worker, assume a plan already exists unless 
 
 Simple follow-up questions that do not change project scope do **not** require creating a new plan.
 
-If an active to-do is sufficiently large and parallel work would improve efficiency, delegate portions of that to-do to available subagents and use their summarized results to complete the parent task.
+If an active to-do is sufficiently large and parallel work would improve efficiency, delegate portions of that to-do to available specialists and use their summarized results to complete the parent task.
 
 `
 	if skillCatalog != "" {
@@ -244,17 +274,17 @@ When solving a task:
 
 %s`, builtIn, skillCatalog)
 	}
-	if subList := a.formatSubAgentPromptList(); subList != "" {
+	if subList := a.formatSpecialistPromptList(); subList != "" {
 		builtIn = fmt.Sprintf(`%s
 
-AVAILABLE SUB-AGENTS:
-You can delegate tasks to specialized sub-agents using the spawn_worker tool. Each sub-agent has its own instructions, tools, and model — choose the one best suited for the task. Only spawn a worker if you are confident it will provide value in running several subtasks in parallel or a task requires significant research or analysis and you only want access to the final output. You may spawn multiple workers to run subtasks in parallel. Always prefer structuring a plan into smaller, more manageable steps rather than a single, complex task requiring several subagents to complete.
+AVAILABLE SPECIALISTS:
+You can delegate tasks to specialists using spawn_specialist. Each specialist has its own instructions, tools, and model — choose the one best suited to the task. Spawn a specialist when several subtasks can run in parallel, or when a task needs significant research or analysis and you only need the final output. Prefer a smaller plan over many specialists.
 
-spawn_worker has a block parameter which defaults to true. Set block=false to schedule the worker as a background job and continue other work. Tool roles:
-- list_jobs: non-blocking status overview of all background jobs.
-- get_job: non-blocking status/result collection by default; set block=true to wait for a running job or resolve an interrupted worker.
-- cancel_job: stop and remove a background job that is no longer needed.
-The harness prevents the turn from completing while background jobs remain. Collect every needed result with get_job or explicitly cancel unneeded work before finishing.
+spawn_specialist block defaults to true and waits for the result. Set block=false to start a child session and continue other work. Tool roles:
+- list_children: status of child sessions (running until complete, failed, or cancelled — including while waiting for user input).
+- get_child: status or result by default; block=true waits, and if the child needs user input this call parks until Resume.
+- cancel_child: stop a child that is no longer needed.
+The turn cannot finish while child sessions remain. Collect each result with get_child, or cancel_child when the work is not needed.
 
 %s`, builtIn, subList)
 	}
@@ -446,6 +476,7 @@ func (a *AgentHarness) hasOpenToolWork() bool {
 func (a *AgentHarness) finalizeCancelledWork(out chan<- StreamEvent) {
 	a.pairCancelledToolResults(out)
 	a.clearInterruptParkState()
+	a.cancelBackgroundJobs()
 }
 
 // openToolCalls returns assistant/pending tool_calls that have no RoleTool result yet.

@@ -57,14 +57,14 @@ type (
 // situation. Named sentinels below are distinct handling branches, not children
 // of these categories.
 //
-// ErrAgent is a model-facing tool failure: Error() is the correction the model
-// should follow. Construct with AgentError(cause, msg). Distinct from ErrFailed
-// (harness/runtime). errors.Is matches both ErrAgent and cause.
+// ErrCorrection is a model-facing tool failure: Error() is the correction the model
+// should follow. Construct with Correction(cause, msg). Distinct from ErrFailed
+// (harness/runtime). errors.Is matches both ErrCorrection and cause.
 var (
-	ErrNotFound = errors.New("not found")
-	ErrInvalid  = errors.New("invalid")
-	ErrFailed   = errors.New("failed")
-	ErrAgent    = errors.New("agent")
+	ErrNotFound   = errors.New("not found")
+	ErrInvalid    = errors.New("invalid")
+	ErrFailed     = errors.New("failed")
+	ErrCorrection = errors.New("correction")
 )
 
 var (

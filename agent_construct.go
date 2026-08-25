@@ -41,7 +41,7 @@ func (c Config) Validate() error {
 
 // AgentOptions configures NewAgent.
 //
-// Usual fields: Config, Model, Tools, MCPConfigs, SubAgents, SessionID.
+// Usual fields: Config, Model, Tools, MCPConfigs, Specialists, SessionID.
 // ContextPolicy knobs (ratios, stream-summary) stay host-settable. Adaptive
 // Case Management itself is harness-owned and cannot be replaced.
 //
@@ -59,7 +59,7 @@ type AgentOptions struct {
 	// MCPCredentialResolver resolves durable references immediately before
 	// connection. Inline client credentials remain session-scoped.
 	MCPCredentialResolver mcp.CredentialResolver
-	SubAgents             []*SubAgent
+	Specialists           []*Specialist
 	// ContextPolicy sets pressure/compress ratios when non-zero fields are set.
 	ContextPolicy ContextPolicy
 	// ToolInterceptors wrap each tool call (outermost first). Built-in
@@ -132,7 +132,7 @@ func NewAgent(ctx context.Context, opts AgentOptions) (*AgentHarness, error) {
 		brain:                 opts.Brain,
 		brainWriteKinds:       opts.BrainWriteKinds,
 		sessionId:             opts.SessionID,
-		subagents:             make(map[string]*SubAgent),
+		specialists:           make(map[string]*Specialist),
 		pendingToolCalls:      make(map[string]stores.PendingToolCall),
 		interruptPayloads:     make(map[string][]byte),
 		parkedWorkersLive:     make(map[string]*AgentHarness),
@@ -165,7 +165,7 @@ func NewAgent(ctx context.Context, opts AgentOptions) (*AgentHarness, error) {
 	chain = append(chain, onCallMiddleware(sm))
 	h.toolRunner = newToolRunner(chain...)
 	h.toolResultHooks = newToolResultHookRegistry(opts.ToolResultHooks)
-	if err := h.finishInit(ctx, opts.SubAgents); err != nil {
+	if err := h.finishInit(ctx, opts.Specialists); err != nil {
 		return nil, err
 	}
 	return h, nil
@@ -215,12 +215,12 @@ func (opts *AgentOptions) Validate() error {
 	return nil
 }
 
-func (h *AgentHarness) finishInit(ctx context.Context, subAgents []*SubAgent) error {
+func (h *AgentHarness) finishInit(ctx context.Context, subAgents []*Specialist) error {
 	if err := h.initSkills(ctx); err != nil {
 		return fmt.Errorf("initialize skills: %w", err)
 	}
 	h.initMCP(ctx)
-	if err := h.initSubAgentWorkers(subAgents); err != nil {
+	if err := h.initSpecialists(subAgents); err != nil {
 		return err
 	}
 	if h.vfsBridge == nil {
@@ -241,7 +241,7 @@ func (a *AgentHarness) ensureReady(ctx context.Context) error {
 	return nil
 }
 
-// injectBuiltinTools registers plan tools, optional web/brain/VFS/index tools, and spawn_worker once.
+// injectBuiltinTools registers plan tools, optional web/brain/VFS/index tools, and spawn_specialist once.
 func (a *AgentHarness) injectBuiltinTools() {
 	if a.builtinsInjected {
 		return
@@ -275,7 +275,7 @@ func (a *AgentHarness) injectBuiltinTools() {
 	if br != nil {
 		a.tools = append(a.tools, newVFSIndexTools(br)...)
 	}
-	if len(a.subagents) > 0 {
+	if len(a.specialists) > 0 {
 		a.tools = append(a.tools, a.spawnTool(), a.listJobsTool(), a.getJobTool(), a.cancelJobTool())
 	}
 	a.builtinsInjected = true

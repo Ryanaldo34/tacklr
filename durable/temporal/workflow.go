@@ -2,7 +2,6 @@ package temporal
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"time"
 
@@ -16,7 +15,7 @@ import (
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
-const spawnWorkerName = tacklr.SpawnWorkerName
+const spawnSpecialistName = tacklr.SpawnSpecialistName
 
 // SessionWorkflow is the harness wait loop: one Temporal workflow per agent session.
 // It is the primary OpenTelemetry instrumentor: one tacklr.turn span per prompt or
@@ -28,6 +27,10 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 		logger.Error("workflow stream", "error", err)
 	}
 
+	type spawnedChild struct {
+		id  durable.SessionID
+		fut workflow.ChildWorkflowFuture
+	}
 	var (
 		etag     string
 		closed   bool
@@ -35,11 +38,48 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 		mcp      = in.MCPServers
 		mounts   = durable.ApplyAuth(in.Mounts, in.Auth)
 		lastAuth = in.Auth
+		spawned  []spawnedChild
+		yielded  bool
 		promptCh = workflow.GetSignalChannel(ctx, signalPrompt)
 		resumeCh = workflow.GetSignalChannel(ctx, signalResume)
 		cancelCh = workflow.GetSignalChannel(ctx, signalCancel)
 		closeCh  = workflow.GetSignalChannel(ctx, signalClose)
 	)
+	_ = workflow.SetQueryHandler(ctx, queryStatus, func() (durable.SessionStatus, error) {
+		st := durable.SessionStatus{
+			ID:         in.SessionID,
+			Parent:     in.Parent,
+			Specialist: in.Specialist,
+			Kind:       "",
+			State:      durable.SessionRunning,
+			Waiting:    yielded,
+		}
+		if in.Specialist != "" {
+			st.Kind = durable.SessionKindSpecialist
+		}
+		if closed {
+			st.State = durable.SessionComplete
+			st.Waiting = false
+		}
+		return st, nil
+	})
+	_ = workflow.SetQueryHandler(ctx, queryChildren, func() ([]durable.SessionID, error) {
+		out := make([]durable.SessionID, len(spawned))
+		for i, c := range spawned {
+			out[i] = c.id
+		}
+		return out, nil
+	})
+	cancelSpawned := func() {
+		for _, c := range spawned {
+			var exec workflow.Execution
+			if err := c.fut.GetChildWorkflowExecution().Get(ctx, &exec); err != nil {
+				continue
+			}
+			_ = workflow.RequestCancelExternalWorkflow(ctx, exec.ID, exec.RunID).Get(ctx, nil)
+		}
+		spawned = nil
+	}
 	drainCancels := func() {
 		var ignored any
 		for cancelCh.ReceiveAsync(&ignored) {
@@ -101,7 +141,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 
 	runSlice := func(user *streaming.Message, resume map[string][]byte, auth durable.AuthContext, kind string) {
 		applyAuth(auth)
-		sessionCtx, hasSession := openWorkerSession(ctx, in.WorkerSessionTimeout, 2*time.Second)
+		sessionCtx, hasSession := openTurnLocality(ctx, in.TurnLocalityTimeout, 2*time.Second)
 
 		var endTurn func(string, error)
 		openTurn := func(k string) {
@@ -147,6 +187,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 			}
 			s.AddReceive(cancelCh, func(c workflow.ReceiveChannel, more bool) {
 				c.Receive(ctx, nil)
+				cancelSpawned()
 				abort()
 			})
 			s.AddReceive(cctx.Done(), func(c workflow.ReceiveChannel, more bool) {
@@ -188,6 +229,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 					Resume:        resume,
 					Auth:          lastAuth,
 					Mounts:        mounts,
+					Specialist:    in.Specialist,
 				}, &out)
 				user = nil
 				resume = nil
@@ -210,29 +252,48 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 			// calls after HITL stay in this workflow variable (history), not
 			// the snapshot. In-process runs the batch in parallel instead.
 			for i, tc := range next {
-				if tc.Name == spawnWorkerName {
-					var args struct {
-						Task string `json:"task_description_and_context"`
+				if tc.Name == spawnSpecialistName {
+					call, parseErr := durable.ParseSpawnCall(tc.Arguments)
+					if parseErr != nil {
+						stopSlice = onActErr(parseErr)
+						break
 					}
-					_ = json.Unmarshal([]byte(tc.Arguments), &args)
+					childID := durable.ChildSessionID(in.SessionID, call.Specialist, tc.Key())
 					cwo := workflow.ChildWorkflowOptions{
-						WorkflowID: string(in.SessionID) + "/worker/" + tc.Key(),
+						WorkflowID: string(childID),
 					}
 					logInfo(sessionCtx, "child workflow",
-						"workflow_id", cwo.WorkflowID, "agent_id", agentID,
+						"workflow_id", cwo.WorkflowID, "agent_id", agentID, "worker", call.Specialist,
 					)
 					cctx := workflow.WithChildOptions(sessionCtx, cwo)
-					if err := workflow.ExecuteChildWorkflow(cctx, SessionWorkflow, WorkflowInput{
-						SessionID:            durable.SessionID(cwo.WorkflowID),
-						AgentID:              agentID,
-						Prompt:               args.Task,
-						Auth:                 lastAuth,
-						Mounts:               mounts,
-						WorkerSessionTimeout: in.WorkerSessionTimeout,
-					}).Get(ctx, nil); err != nil {
-						workflow.GetLogger(ctx).Error("child workflow", "error", err)
-						stopSlice = onActErr(err)
-						break
+					fut := workflow.ExecuteChildWorkflow(cctx, SessionWorkflow, WorkflowInput{
+						SessionID:           childID,
+						AgentID:             agentID,
+						Parent:              in.SessionID,
+						Specialist:          call.Specialist,
+						Prompt:              call.Task,
+						Auth:                lastAuth,
+						Mounts:              mounts,
+						TurnLocalityTimeout: in.TurnLocalityTimeout,
+					})
+					spawned = append(spawned, spawnedChild{id: childID, fut: fut})
+					output := durable.ScheduledChildMessage(childID, call.Specialist)
+					if call.Block {
+						var waitErr error
+						ws := workflow.NewSelector(ctx)
+						ws.AddFuture(fut, func(f workflow.Future) { waitErr = f.Get(ctx, nil) })
+						ws.AddReceive(cancelCh, func(c workflow.ReceiveChannel, more bool) {
+							c.Receive(ctx, nil)
+							cancelSpawned()
+							waitErr = context.Canceled
+						})
+						ws.Select(ctx)
+						if waitErr != nil {
+							workflow.GetLogger(ctx).Error("child workflow", "error", waitErr)
+							stopSlice = onActErr(waitErr)
+							break
+						}
+						output = "ok"
 					}
 					var cout ToolOutput
 					err := waitAct("CommitToolOutput", CommitToolInput{
@@ -241,9 +302,10 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 						MCPServers: mcp,
 						Etag:       etag,
 						Call:       tc,
-						Output:     "ok",
+						Output:     output,
 						Auth:       lastAuth,
 						Mounts:     mounts,
+						Specialist: in.Specialist,
 					}, &cout)
 					if onActErr(err) {
 						stopSlice = true
@@ -261,6 +323,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 					Call:       tc,
 					Auth:       lastAuth,
 					Mounts:     mounts,
+					Specialist: in.Specialist,
 				}, &tout)
 				if onActErr(err) {
 					stopSlice = true
@@ -276,6 +339,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 					hasSession = false
 					sessionCtx = ctx
 				}
+				yielded = true
 				logInfo(ctx, "turn yielded", "agent_id", agentID, "session_id", in.SessionID, "interrupt_id", tout.InterruptID)
 				closeTurn(telemetry.OutcomeYield, nil)
 				parked := true
@@ -285,7 +349,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 					case signalResume:
 						parked = false
 						applyAuth(ev.resume.Auth)
-						sessionCtx, hasSession = openWorkerSession(ctx, in.WorkerSessionTimeout, time.Minute)
+						sessionCtx, hasSession = openTurnLocality(ctx, in.TurnLocalityTimeout, time.Minute)
 						logInfo(ctx, "turn start",
 							"kind", telemetry.TurnKindResume, "agent_id", agentID,
 							"session_id", in.SessionID, "resume_count", len(ev.resume.Responses),
@@ -315,6 +379,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 						stopSlice = true
 						parked = false
 					case signalCancel:
+						cancelSpawned()
 						emitCancel()
 						outcome = telemetry.OutcomeCancelled
 						stopSlice = true
@@ -342,8 +407,9 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 		case signalClose:
 			closed = true
 		case signalCancel:
-			// Idle cancel is a no-op. Emitting here poisons the next prompt's
-			// Subscribe(after Head) when Cancel raced with a just-finished turn.
+			// Idle cancel must still stop child sessions. Do not emit a stream
+			// error: that poisons the next prompt's Subscribe(after Head).
+			cancelSpawned()
 			continue
 		case signalPrompt:
 			if ev.prompt.AgentID != "" {
@@ -358,6 +424,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 			}
 			runSlice(user, nil, ev.prompt.Auth, telemetry.TurnKindPrompt)
 		case signalResume:
+			yielded = false
 			runSlice(nil, ev.resume.Responses, ev.resume.Auth, telemetry.TurnKindResume)
 		}
 	}
@@ -368,9 +435,9 @@ func turnCanceled(ctx workflow.Context, err error) bool {
 	return err != nil && (ctx.Err() != nil || temporal.IsCanceledError(err) || errors.Is(err, workflow.ErrSessionFailed) || errors.Is(err, workflow.ErrCanceled))
 }
 
-// openWorkerSession pins activities to one worker when the host set a timeout.
+// openTurnLocality pins activities to one worker when the host set a timeout.
 // Timeout <= 0 skips CreateSession (no hidden default).
-func openWorkerSession(ctx workflow.Context, timeout, creation time.Duration) (workflow.Context, bool) {
+func openTurnLocality(ctx workflow.Context, timeout, creation time.Duration) (workflow.Context, bool) {
 	if timeout <= 0 {
 		return ctx, false
 	}

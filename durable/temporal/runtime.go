@@ -22,13 +22,13 @@ import (
 
 // Runtime implements durable.Runtime with one Temporal workflow per session.
 type Runtime struct {
-	client               client.Client
-	taskQueue            string
-	catalog              durable.Catalog
-	fallback             *inprocess.MemoryEventLog
-	snapshots            durable.SnapshotStore
-	disableStreams       bool
-	workerSessionTimeout time.Duration
+	client              client.Client
+	taskQueue           string
+	catalog             durable.Catalog
+	fallback            *inprocess.MemoryEventLog
+	snapshots           durable.SnapshotStore
+	disableStreams      bool
+	turnLocalityTimeout time.Duration
 
 	mu     sync.Mutex
 	closed map[durable.SessionID]struct{}
@@ -62,13 +62,13 @@ func WithDisableStreams() Option {
 	return func(r *Runtime) { r.disableStreams = true }
 }
 
-// WithWorkerSessionTimeout pins each turn's activities to one worker for that
-// duration (Temporal worker session). Zero, the default, does not create a
-// session. Hosts that want sticky VFS locality must set this explicitly.
-func WithWorkerSessionTimeout(d time.Duration) Option {
+// WithTurnLocality keeps a turn's activities on one Temporal worker for that
+// duration so the turn's VFS stays on the same process. Zero (default) does
+// not pin activities; they may run on any worker.
+func WithTurnLocality(d time.Duration) Option {
 	return func(r *Runtime) {
 		if d > 0 {
-			r.workerSessionTimeout = d
+			r.turnLocalityTimeout = d
 		}
 	}
 }
@@ -122,11 +122,11 @@ func (r *Runtime) CreateSession(ctx context.Context, req durable.CreateSession) 
 		ID:        r.workflowID(id),
 		TaskQueue: r.taskQueue,
 	}, SessionWorkflow, WorkflowInput{
-		SessionID:            id,
-		AgentID:              agentID,
-		MCPServers:           req.MCPServers,
-		Mounts:               req.Mounts,
-		WorkerSessionTimeout: r.workerSessionTimeout,
+		SessionID:           id,
+		AgentID:             agentID,
+		MCPServers:          req.MCPServers,
+		Mounts:              req.Mounts,
+		TurnLocalityTimeout: r.turnLocalityTimeout,
 	})
 	if err != nil {
 		var already *serviceerror.WorkflowExecutionAlreadyStarted
@@ -293,6 +293,46 @@ func failFromWire(s string) error {
 	default:
 		return errors.New(s)
 	}
+}
+
+// Children implements durable.Runtime.
+func (r *Runtime) Children(ctx context.Context, parent durable.SessionID) ([]durable.SessionID, error) {
+	if r.isClosed(parent) {
+		return nil, durable.ErrSessionNotFound
+	}
+	val, err := r.client.QueryWorkflow(ctx, r.workflowID(parent), "", queryChildren)
+	if err != nil {
+		var nf *serviceerror.NotFound
+		if errors.As(err, &nf) {
+			return nil, durable.ErrSessionNotFound
+		}
+		return nil, err
+	}
+	var ids []durable.SessionID
+	if err := val.Get(&ids); err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
+// Status implements durable.Runtime.
+func (r *Runtime) Status(ctx context.Context, id durable.SessionID) (durable.SessionStatus, error) {
+	if r.isClosed(id) {
+		return durable.SessionStatus{ID: id, State: durable.SessionUnknown}, durable.ErrSessionNotFound
+	}
+	val, err := r.client.QueryWorkflow(ctx, r.workflowID(id), "", queryStatus)
+	if err != nil {
+		var nf *serviceerror.NotFound
+		if errors.As(err, &nf) {
+			return durable.SessionStatus{ID: id, State: durable.SessionUnknown}, durable.ErrSessionNotFound
+		}
+		return durable.SessionStatus{ID: id, State: durable.SessionUnknown}, err
+	}
+	var st durable.SessionStatus
+	if err := val.Get(&st); err != nil {
+		return durable.SessionStatus{ID: id, State: durable.SessionUnknown}, err
+	}
+	return st, nil
 }
 
 var _ durable.Runtime = (*Runtime)(nil)

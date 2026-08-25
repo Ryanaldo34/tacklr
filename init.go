@@ -40,6 +40,10 @@ func (e harnessDrive) RecordToolResult(tc streaming.ToolCall, output string) {
 	e.a.recordToolResult(tc, output)
 }
 
+func (e harnessDrive) ParkTool(tc streaming.ToolCall) error {
+	return e.a.parkTool(tc)
+}
+
 func (e harnessDrive) RunInference(ctx context.Context, st *drive.TurnState, out chan streaming.StreamEvent) (drive.InferenceStep, error) {
 	return e.a.runInference(ctx, st, out)
 }

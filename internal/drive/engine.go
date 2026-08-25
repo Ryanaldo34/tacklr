@@ -36,8 +36,11 @@ type Engine interface {
 	RunToolCall(ctx context.Context, tc streaming.ToolCall, out chan streaming.StreamEvent) (ToolStep, error)
 	ApplyResume(finishedInterrupts map[string][]byte) error
 	// RecordToolResult appends a RoleTool message without executing (Temporal
-	// spawn_worker after the child workflow already ran).
+	// spawn_specialist after the child workflow already ran).
 	RecordToolResult(tc streaming.ToolCall, output string)
+	// ParkTool marks tc as HITL on this harness so Resume can find it. Used
+	// when a child session yields and the parent spawn_specialist/get_child parks.
+	ParkTool(tc streaming.ToolCall) error
 }
 
 var bound func(any) Engine

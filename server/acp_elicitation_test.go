@@ -134,7 +134,7 @@ func TestACP_elicitationForm_resolvesInterruptAndCompletes(t *testing.T) {
 		},
 	}
 
-	r := newTestKernel(t, strategy, durable.AgentSpec{Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{interruptTool}}})
+	r := newTestRuntime(t, strategy, durable.AgentSpec{Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{interruptTool}}})
 	srv := NewServer(r.Runtime, r.Catalog, NewACPProtocol(NewMemoryWireStore()))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
@@ -271,7 +271,7 @@ func TestACP_requestPermission_allowsToolAndCompletes(t *testing.T) {
 		},
 	}
 
-	r := newTestKernel(t, strategy, durable.AgentSpec{Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{sensitive}}})
+	r := newTestRuntime(t, strategy, durable.AgentSpec{Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{sensitive}}})
 	srv := NewServer(r.Runtime, r.Catalog, NewACPProtocol(NewMemoryWireStore()))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
@@ -394,7 +394,7 @@ func TestACP_requestPermission_rejectFailsToolAndCompletes(t *testing.T) {
 		},
 	}
 
-	r := newTestKernel(t, strategy, durable.AgentSpec{Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{sensitive}}})
+	r := newTestRuntime(t, strategy, durable.AgentSpec{Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{sensitive}}})
 	srv := NewServer(r.Runtime, r.Catalog, NewACPProtocol(NewMemoryWireStore()))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
@@ -505,7 +505,7 @@ func TestACP_requestPermission_cancelledEndsPrompt(t *testing.T) {
 			ch <- tacklr.LLMResponseChunk{IsComplete: true}
 		},
 	}
-	r := newTestKernel(t, strategy, durable.AgentSpec{Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{sensitive}}})
+	r := newTestRuntime(t, strategy, durable.AgentSpec{Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{sensitive}}})
 	srv := NewServer(r.Runtime, r.Catalog, NewACPProtocol(NewMemoryWireStore()))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
@@ -573,7 +573,7 @@ func TestACP_elicitationForm_declineEndsPrompt(t *testing.T) {
 			ch <- tacklr.LLMResponseChunk{IsComplete: true}
 		},
 	}
-	r := newTestKernel(t, strategy, durable.AgentSpec{Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{interruptTool}}})
+	r := newTestRuntime(t, strategy, durable.AgentSpec{Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{interruptTool}}})
 	srv := NewServer(r.Runtime, r.Catalog, NewACPProtocol(NewMemoryWireStore()))
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()
@@ -644,7 +644,7 @@ func TestACP_elicitationForm_cancelEndsPrompt(t *testing.T) {
 			ch <- tacklr.LLMResponseChunk{IsComplete: true}
 		},
 	}
-	r := newTestKernel(t, strategy, durable.AgentSpec{Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{interruptTool}}})
+	r := newTestRuntime(t, strategy, durable.AgentSpec{Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{interruptTool}}})
 	srv := NewServer(r.Runtime, r.Catalog, NewACPProtocol(NewMemoryWireStore()))
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()
@@ -720,7 +720,7 @@ func TestACP_elicitation_malformedInterruptEndsTurn(t *testing.T) {
 			ch <- tacklr.LLMResponseChunk{IsComplete: true}
 		},
 	}
-	r := newTestKernel(t, strategy, durable.AgentSpec{Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{interruptTool}}})
+	r := newTestRuntime(t, strategy, durable.AgentSpec{Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{interruptTool}}})
 	srv := NewServer(r.Runtime, r.Catalog, NewACPProtocol(NewMemoryWireStore()))
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
@@ -769,7 +769,7 @@ func TestACP_createPlan_streamsPlanUpdate(t *testing.T) {
 			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "planned", IsComplete: true}
 		},
 	}
-	r := newTestKernel(t, strategy, durable.AgentSpec{})
+	r := newTestRuntime(t, strategy, durable.AgentSpec{})
 	recNew := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
 	sessionID := acpSessionID(t, recNew)
 	rec := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"`+sessionID+`","prompt":[{"type":"text","text":"plan it"}]}}`)
@@ -840,7 +840,7 @@ func TestACP_sessionCheckpoint_secondPromptContinuesPlan(t *testing.T) {
 		},
 	}
 
-	r := newTestKernel(t, strategy, durable.AgentSpec{})
+	r := newTestRuntime(t, strategy, durable.AgentSpec{})
 	srv := NewServer(r.Runtime, r.Catalog, NewACPProtocol(NewMemoryWireStore()))
 
 	recNew := &recordingMessageWriter{}

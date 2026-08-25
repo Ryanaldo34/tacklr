@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -21,21 +21,13 @@ const (
 	jobStatusInterrupted = "interrupted"
 )
 
-type workerDeliveryMode string
-
-const (
-	workerDeliverySync  workerDeliveryMode = "sync"
-	workerDeliveryAsync workerDeliveryMode = "async"
-)
-
 // workerRun is the single live lifecycle record for synchronous and
-// asynchronous spawn_worker execution. Durable interrupt state lives in the
+// asynchronous spawn_specialist execution. Durable interrupt state lives in the
 // typed session parks module; process handles remain intentionally ephemeral.
 type workerRun struct {
 	id         string
-	workerName string
+	specialist string
 	task       string
-	mode       workerDeliveryMode
 
 	mu           sync.Mutex
 	status       string
@@ -81,19 +73,19 @@ func (j *workerRun) setInterrupted(intr interrupt.Interrupt, ids []string) {
 type listJobsArgs struct{}
 
 type getJobArgs struct {
-	JobID string `json:"job_id" desc:"Job id returned by spawn_worker when block is false"`
-	Block bool   `json:"block" desc:"Wait for a running job before returning its result. Defaults to false."`
+	ChildID string `json:"child_id" desc:"Child session id returned by spawn_specialist when block is false"`
+	Block   bool   `json:"block" desc:"Wait for a running child before returning its result. Defaults to false."`
 }
 
 type cancelJobArgs struct {
-	JobID string `json:"job_id" desc:"Job id returned by spawn_worker when block is false"`
+	ChildID string `json:"child_id" desc:"Child session id returned by spawn_specialist when block is false"`
 }
 
 func (a *AgentHarness) listJobsTool() *Tool {
 	return NewTool(ToolConfig{
-		Name:        "list_jobs",
-		DisplayName: "List jobs",
-		Description: "Non-blocking overview of background worker jobs and their statuses (running, completed, failed, interrupted). Use get_job to collect one result or wait for it, and cancel_job to stop work that is no longer needed.",
+		Name:        "list_children",
+		DisplayName: "List children",
+		Description: "Non-blocking overview of child sessions (running, completed, failed). Status stays running while a child waits for user input. Use get_child to collect a result or wait, and cancel_child to stop work that is no longer needed.",
 		Category:    streaming.ToolCategoryExecute,
 		Handler: func(ctx context.Context, _ listJobsArgs, _ HarnessRuntime) (string, error) {
 			return a.formatJobList(), nil
@@ -103,99 +95,91 @@ func (a *AgentHarness) listJobsTool() *Tool {
 
 func (a *AgentHarness) getJobTool() *Tool {
 	return NewTool(ToolConfig{
-		Name:        "get_job",
-		DisplayName: "Get job {job_id}",
-		Description: "Get one background job. By default this is non-blocking: a running job returns its current status, while a terminal job returns and consumes its result. Set block=true to wait until a running job finishes and then return its result. Interrupted jobs request the required user input only when block=true.",
+		Name:        "get_child",
+		DisplayName: "Get child {child_id}",
+		Description: "Get one child session. By default this is non-blocking: a running child returns its current status (including while waiting for user input), while a terminal child returns and consumes its result. Set block=true to wait until it finishes, or to park this call if the child needs user input.",
 		Category:    streaming.ToolCategoryExecute,
 		Handler: func(ctx context.Context, args getJobArgs, runtime HarnessRuntime) (string, error) {
-			return a.readJob(ctx, strings.TrimSpace(args.JobID), args.Block, runtime)
+			return a.readJob(ctx, strings.TrimSpace(args.ChildID), args.Block, runtime)
 		},
 	})
 }
 
 func (a *AgentHarness) cancelJobTool() *Tool {
 	return NewTool(ToolConfig{
-		Name:        "cancel_job",
-		DisplayName: "Cancel job {job_id}",
-		Description: "Cancel and remove a background worker job that is no longer needed. Completed and failed jobs are discarded without returning their result.",
+		Name:        "cancel_child",
+		DisplayName: "Cancel child {child_id}",
+		Description: "Cancel and remove a child session that is no longer needed. Completed and failed children are discarded without returning their result.",
 		Category:    streaming.ToolCategoryExecute,
 		Handler: func(ctx context.Context, args cancelJobArgs, _ HarnessRuntime) (string, error) {
-			return a.cancelJob(ctx, strings.TrimSpace(args.JobID))
+			return a.cancelJob(ctx, strings.TrimSpace(args.ChildID))
 		},
 	})
 }
 
-func (a *AgentHarness) formatJobList() string {
+func (a *AgentHarness) copyJobs() []*workerRun {
 	a.jobsMu.Lock()
-	ids := make([]string, 0, len(a.jobs))
-	for id := range a.jobs {
-		ids = append(ids, id)
+	defer a.jobsMu.Unlock()
+	out := make([]*workerRun, 0, len(a.jobs))
+	for _, j := range a.jobs {
+		out = append(out, j)
 	}
-	sort.Strings(ids)
-	type row struct{ id, worker, status string }
-	rows := make([]row, 0, len(ids))
-	for _, id := range ids {
-		j := a.jobs[id]
-		status, _, _ := j.snapshot()
-		rows = append(rows, row{id: j.id, worker: j.workerName, status: status})
-	}
-	a.jobsMu.Unlock()
+	slices.SortFunc(out, func(a, b *workerRun) int { return strings.Compare(a.id, b.id) })
+	return out
+}
 
-	if len(rows) == 0 {
-		return "No background jobs."
+func jobFacingStatus(status string) string {
+	if status == jobStatusInterrupted {
+		return jobStatusRunning
+	}
+	return status
+}
+
+func (a *AgentHarness) formatJobList() string {
+	jobs := a.copyJobs()
+	if len(jobs) == 0 {
+		return "No child sessions."
 	}
 	var b strings.Builder
-	b.WriteString("Background jobs:\n")
-	for _, r := range rows {
-		fmt.Fprintf(&b, "- id=%s worker=%s status=%s\n", r.id, r.worker, r.status)
+	b.WriteString("Child sessions:\n")
+	for _, j := range jobs {
+		status, _, _ := j.snapshot()
+		fmt.Fprintf(&b, "- id=%s specialist=%s status=%s\n", j.id, j.specialist, jobFacingStatus(status))
 	}
-	b.WriteString("Use get_job to collect a result (block=true to wait), or cancel_job to stop a job.")
+	b.WriteString("Use get_child to collect a result (block=true to wait), or cancel_child to stop a child.")
 	return b.String()
 }
 
-func (a *AgentHarness) backgroundJobsNudge() string {
-	a.jobsMu.Lock()
-	ids := make([]string, 0, len(a.jobs))
-	for id := range a.jobs {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	type row struct{ id, status string }
-	rows := make([]row, 0, len(ids))
-	for _, id := range ids {
-		status, _, _ := a.jobs[id].snapshot()
-		rows = append(rows, row{id: id, status: status})
-	}
-	a.jobsMu.Unlock()
-
-	if len(rows) == 0 {
+func (a *AgentHarness) backgroundChildrenNudge() string {
+	jobs := a.copyJobs()
+	if len(jobs) == 0 {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString("Automated harness nudge: This turn still has background jobs whose results have not been collected:\n")
-	for _, r := range rows {
-		fmt.Fprintf(&b, "- id=%s status=%s\n", r.id, r.status)
+	b.WriteString("Automated harness nudge: This turn still has child sessions whose results have not been collected:\n")
+	for _, j := range jobs {
+		status, _, _ := j.snapshot()
+		fmt.Fprintf(&b, "- id=%s status=%s\n", j.id, jobFacingStatus(status))
 	}
-	b.WriteString("The turn cannot finish while jobs remain. Continue useful work if possible. Otherwise call get_job with block=true to wait for and collect each result. Use cancel_job only when a job is no longer needed.")
+	b.WriteString("The turn cannot finish while children remain. Continue useful work if possible. Otherwise call get_child with block=true to wait for and collect each result. Use cancel_child only when a child is no longer needed.")
 	return b.String()
 }
 
 func (a *AgentHarness) formatJob(jobID string) (string, error) {
 	if jobID == "" {
-		return "", fmt.Errorf("job_id is required; call list_jobs and pass a job_id from that list: %w", ErrInvalid)
+		return "", fmt.Errorf("child_id is required; call list_children and pass a child_id from that list: %w", ErrInvalid)
 	}
 	j := a.getJob(jobID)
 	if j == nil {
-		return "", fmt.Errorf("job %q is unknown; call list_jobs and use an id from that list: %w", jobID, ErrNotFound)
+		return "", fmt.Errorf("job %q is unknown; call list_children and use an id from that list: %w", jobID, ErrNotFound)
 	}
 	status, _, _ := j.snapshot()
+	status = jobFacingStatus(status)
 	var b strings.Builder
-	fmt.Fprintf(&b, "id=%s worker=%s status=%s\n", j.id, j.workerName, status)
+	fmt.Fprintf(&b, "id=%s specialist=%s status=%s\n", j.id, j.specialist, status)
 	switch status {
-	case jobStatusInterrupted:
-		b.WriteString("Interrupted awaiting user input. Call get_job with block=true to resolve and continue.")
 	case jobStatusRunning:
-		b.WriteString("Still running. Call get_job again later, or set block=true to wait until finished.")
+		b.WriteString("Still running. Call get_child again later, or set block=true to wait until finished.")
 	}
 	return strings.TrimSuffix(b.String(), "\n"), nil
 }
@@ -223,16 +207,16 @@ func (a *AgentHarness) removeJob(id string) {
 
 // scheduleBackgroundWorker starts a worker on the harness jobs context and
 // returns immediately with a schedule message.
-func (a *AgentHarness) scheduleBackgroundWorker(workerName, task, jobID string, runtime HarnessRuntime) (string, error) {
-	spec, ok := a.subagents[workerName]
+func (a *AgentHarness) scheduleBackgroundWorker(specialist, task, jobID string, runtime HarnessRuntime) (string, error) {
+	spec, ok := a.specialists[specialist]
 	if !ok {
-		return "", fmt.Errorf("worker %q: %w", workerName, ErrNotFound)
+		return "", fmt.Errorf("specialist %q: %w", specialist, ErrNotFound)
 	}
 	if strings.TrimSpace(task) == "" {
-		return "", fmt.Errorf("worker %q: empty task: %w", workerName, ErrInvalid)
+		return "", fmt.Errorf("worker %q: empty task: %w", specialist, ErrInvalid)
 	}
 	if jobID == "" {
-		return "", fmt.Errorf("worker %q: empty job id: %w", workerName, ErrInvalid)
+		return "", fmt.Errorf("worker %q: empty job id: %w", specialist, ErrInvalid)
 	}
 	if existing := a.getJob(jobID); existing != nil {
 		return "", fmt.Errorf("job %q: already exists: %w", jobID, ErrInvalid)
@@ -244,17 +228,16 @@ func (a *AgentHarness) scheduleBackgroundWorker(workerName, task, jobID string, 
 	}
 	workerCtx, cancel := context.WithCancel(parentCtx)
 
-	worker, err := a.newWorkerHarness(workerCtx, workerName, jobID, spec)
+	worker, err := a.newWorkerHarness(workerCtx, specialist, jobID, spec)
 	if err != nil {
 		cancel()
-		return "", fmt.Errorf("worker %q: %w", workerName, err)
+		return "", fmt.Errorf("worker %q: %w", specialist, err)
 	}
 
 	j := &workerRun{
 		id:         jobID,
-		workerName: workerName,
+		specialist: specialist,
 		task:       task,
-		mode:       workerDeliveryAsync,
 		status:     jobStatusRunning,
 		worker:     worker,
 		cancel:     cancel,
@@ -265,16 +248,16 @@ func (a *AgentHarness) scheduleBackgroundWorker(workerName, task, jobID string, 
 	logAttrs := []any{
 		"area", "subagent",
 		"session_id", a.sessionId,
-		"worker", workerName,
-		"job_id", jobID,
+		"worker", specialist,
+		"child_id", jobID,
 		"background", true,
 	}
 	slog.Info("scheduling background worker", logAttrs...)
-	runtime.EmitUpdate(fmt.Sprintf("Job %s scheduled (worker=%s)", jobID, workerName))
+	runtime.EmitUpdate(fmt.Sprintf("Child %s scheduled (specialist=%s)", jobID, specialist))
 
 	go a.runBackgroundJob(workerCtx, j)
 
-	return fmt.Sprintf("Job %s scheduled (worker=%s). Use list_jobs to poll, get_job to collect its result (block=true to wait), or cancel_job to stop it.", jobID, workerName), nil
+	return fmt.Sprintf("Child %s scheduled (specialist=%s). Use list_children to poll, get_child to collect its result (block=true to wait), or cancel_child to stop it.", jobID, specialist), nil
 }
 
 func (a *AgentHarness) runBackgroundJob(ctx context.Context, j *workerRun) {
@@ -282,13 +265,13 @@ func (a *AgentHarness) runBackgroundJob(ctx context.Context, j *workerRun) {
 	logAttrs := []any{
 		"area", "subagent",
 		"session_id", a.sessionId,
-		"worker", j.workerName,
-		"job_id", j.id,
+		"worker", j.specialist,
+		"child_id", j.id,
 		"background", true,
 	}
 	defer func() {
 		if r := recover(); r != nil {
-			j.setTerminal(jobStatusFailed, "", fmt.Errorf("worker %q panic: %v: %w", j.workerName, r, ErrFailed))
+			j.setTerminal(jobStatusFailed, "", fmt.Errorf("worker %q panic: %v: %w", j.specialist, r, ErrFailed))
 			j.cancel()
 			if j.worker != nil {
 				j.worker.Close()
@@ -298,13 +281,13 @@ func (a *AgentHarness) runBackgroundJob(ctx context.Context, j *workerRun) {
 
 	events, err := j.worker.Run(ctx, j.task)
 	if err != nil {
-		j.setTerminal(jobStatusFailed, "", fmt.Errorf("%w: starting worker %q: %w", ErrFailed, j.workerName, err))
+		j.setTerminal(jobStatusFailed, "", fmt.Errorf("%w: starting worker %q: %w", ErrFailed, j.specialist, err))
 		j.worker.Close()
 		slog.Error("failed to start background worker", append(logAttrs, "error", err)...)
 		return
 	}
 
-	drained, drainErr := drainWorkerEvents(ctx, j.workerName, events, nil)
+	drained, drainErr := drainWorkerEvents(ctx, j.specialist, events, nil)
 	elapsed := time.Since(start).Round(time.Millisecond)
 
 	if ctx.Err() != nil {
@@ -314,7 +297,7 @@ func (a *AgentHarness) runBackgroundJob(ctx context.Context, j *workerRun) {
 		return
 	}
 	if drainErr != nil {
-		j.setTerminal(jobStatusFailed, "", fmt.Errorf("%w: worker %q: %w", ErrFailed, j.workerName, drainErr))
+		j.setTerminal(jobStatusFailed, "", fmt.Errorf("%w: worker %q: %w", ErrFailed, j.specialist, drainErr))
 		j.worker.Close()
 		slog.Warn("background worker failed", append(logAttrs, "elapsed", elapsed, "error", drainErr)...)
 		return
@@ -322,7 +305,7 @@ func (a *AgentHarness) runBackgroundJob(ctx context.Context, j *workerRun) {
 	if drained.completed {
 		result := finalWorkerOutput(j.worker.Messages(), drained.lastAssistant)
 		if result == "" {
-			j.setTerminal(jobStatusFailed, "", fmt.Errorf("worker %q: no output: %w", j.workerName, ErrFailed))
+			j.setTerminal(jobStatusFailed, "", fmt.Errorf("worker %q: no output: %w", j.specialist, ErrFailed))
 			j.worker.Close()
 			slog.Warn("background worker produced no output", append(logAttrs, "elapsed", elapsed)...)
 			return
@@ -335,13 +318,13 @@ func (a *AgentHarness) runBackgroundJob(ctx context.Context, j *workerRun) {
 
 	childIntrIDs, childIntr := collectChildInterrupts(j.worker, drained.interruptIDs)
 	if childIntr == nil {
-		j.setTerminal(jobStatusFailed, "", fmt.Errorf("worker %q: incomplete: %w", j.workerName, ErrFailed))
+		j.setTerminal(jobStatusFailed, "", fmt.Errorf("worker %q: incomplete: %w", j.specialist, ErrFailed))
 		j.worker.Close()
 		slog.Warn("background worker incomplete", append(logAttrs, "elapsed", elapsed)...)
 		return
 	}
 
-	parkMeta, err := workerParkMeta(j.worker, j.workerName, j.task, childIntrIDs)
+	parkMeta, err := workerParkMeta(j.worker, j.specialist, j.task, childIntrIDs)
 	if err != nil {
 		slog.Error("failed to checkpoint background worker", append(logAttrs, "error", err)...)
 	}
@@ -355,18 +338,15 @@ func (a *AgentHarness) runBackgroundJob(ctx context.Context, j *workerRun) {
 
 func (a *AgentHarness) readJob(ctx context.Context, jobID string, block bool, runtime HarnessRuntime) (string, error) {
 	if jobID == "" {
-		return "", fmt.Errorf("job_id is required; call list_jobs and pass a job_id from that list: %w", ErrInvalid)
+		return "", fmt.Errorf("child_id is required; call list_children and pass a child_id from that list: %w", ErrInvalid)
 	}
 	j := a.getJob(jobID)
 	if j == nil {
-		return "", fmt.Errorf("job %q is unknown; call list_jobs and use an id from that list: %w", jobID, ErrNotFound)
+		return "", fmt.Errorf("job %q is unknown; call list_children and use an id from that list: %w", jobID, ErrNotFound)
 	}
 
 	status, _, _ := j.snapshot()
-	if status == jobStatusRunning && !block {
-		return a.formatJob(jobID)
-	}
-	if status == jobStatusInterrupted && !block {
+	if !block && (status == jobStatusRunning || status == jobStatusInterrupted) {
 		return a.formatJob(jobID)
 	}
 	if status == jobStatusRunning {
@@ -386,7 +366,7 @@ func (a *AgentHarness) readJob(ctx context.Context, jobID string, block bool, ru
 	case jobStatusFailed:
 		a.removeJob(jobID)
 		if jobErr == nil {
-			jobErr = fmt.Errorf("worker %q failed: %w", j.workerName, ErrFailed)
+			jobErr = fmt.Errorf("worker %q failed: %w", j.specialist, ErrFailed)
 		}
 		return "", jobErr
 	case jobStatusInterrupted:
@@ -400,7 +380,7 @@ func (a *AgentHarness) resumeInterruptedJob(ctx context.Context, j *workerRun, r
 	getID := runtime.CurrentToolCallID()
 	j.mu.Lock()
 	intr := j.childIntr
-	workerName := j.workerName
+	specialist := j.specialist
 	j.mu.Unlock()
 	if intr == nil {
 		a.removeJob(j.id)
@@ -415,11 +395,11 @@ func (a *AgentHarness) resumeInterruptedJob(ctx context.Context, j *workerRun, r
 		return "", fmt.Errorf("job %q: adopt returned nil: %w", j.id, ErrFailed)
 	}
 
-	spec, ok := a.subagents[workerName]
+	spec, ok := a.specialists[specialist]
 	if !ok {
 		a.clearPark(j.id)
 		a.removeJob(j.id)
-		return "", fmt.Errorf("worker %q: %w", workerName, ErrNotFound)
+		return "", fmt.Errorf("worker %q: %w", specialist, ErrNotFound)
 	}
 	meta := a.getParkMeta(j.id)
 	if meta == nil {
@@ -431,7 +411,7 @@ func (a *AgentHarness) resumeInterruptedJob(ctx context.Context, j *workerRun, r
 	if err != nil {
 		a.clearPark(j.id)
 		a.removeJob(j.id)
-		return "", fmt.Errorf("worker %q: %w", workerName, err)
+		return "", fmt.Errorf("worker %q: %w", specialist, err)
 	}
 
 	runtime.EmitUpdate(fmt.Sprintf("Job %s resumed", j.id))
@@ -439,10 +419,10 @@ func (a *AgentHarness) resumeInterruptedJob(ctx context.Context, j *workerRun, r
 	if err != nil {
 		a.clearPark(j.id)
 		a.removeJob(j.id)
-		return "", fmt.Errorf("%w: resuming worker %q: %w", ErrFailed, workerName, err)
+		return "", fmt.Errorf("%w: resuming worker %q: %w", ErrFailed, specialist, err)
 	}
 
-	drained, drainErr := drainWorkerEvents(ctx, workerName, events, runtime.EmitUpdate)
+	drained, drainErr := drainWorkerEvents(ctx, specialist, events, runtime.EmitUpdate)
 	if ctx.Err() != nil {
 		a.clearPark(j.id)
 		a.removeJob(j.id)
@@ -451,30 +431,30 @@ func (a *AgentHarness) resumeInterruptedJob(ctx context.Context, j *workerRun, r
 	if drainErr != nil {
 		a.clearPark(j.id)
 		a.removeJob(j.id)
-		return "", fmt.Errorf("%w: worker %q: %w", ErrFailed, workerName, drainErr)
+		return "", fmt.Errorf("%w: worker %q: %w", ErrFailed, specialist, drainErr)
 	}
 	if drained.completed {
 		result := finalWorkerOutput(worker.Messages(), drained.lastAssistant)
 		a.clearPark(j.id)
 		a.removeJob(j.id)
 		if result == "" {
-			return "", fmt.Errorf("worker %q: no output: %w", workerName, ErrFailed)
+			return "", fmt.Errorf("worker %q: no output: %w", specialist, ErrFailed)
 		}
 		return result, nil
 	}
 
-	// Re-interrupt: re-park under job id and bubble onto get_job again.
+	// Re-interrupt: re-park under job id and bubble onto get_child again.
 	childIntrIDs, childIntr := collectChildInterrupts(worker, drained.interruptIDs)
 	if childIntr == nil {
 		a.clearPark(j.id)
 		a.removeJob(j.id)
-		return "", fmt.Errorf("worker %q: incomplete: %w", workerName, ErrFailed)
+		return "", fmt.Errorf("worker %q: incomplete: %w", specialist, ErrFailed)
 	}
-	parkMeta, err := workerParkMeta(worker, workerName, j.task, childIntrIDs)
+	parkMeta, err := workerParkMeta(worker, specialist, j.task, childIntrIDs)
 	if err != nil {
 		a.clearPark(j.id)
 		a.removeJob(j.id)
-		return "", fmt.Errorf("checkpoint interrupted worker %q: %w", workerName, err)
+		return "", fmt.Errorf("checkpoint interrupted worker %q: %w", specialist, err)
 	}
 	a.setPark(j.id, parkMeta, worker)
 	j.mu.Lock()
@@ -491,11 +471,11 @@ func (a *AgentHarness) resumeInterruptedJob(ctx context.Context, j *workerRun, r
 
 func (a *AgentHarness) cancelJob(ctx context.Context, jobID string) (string, error) {
 	if jobID == "" {
-		return "", fmt.Errorf("job_id is required; call list_jobs and pass a job_id from that list: %w", ErrInvalid)
+		return "", fmt.Errorf("child_id is required; call list_children and pass a child_id from that list: %w", ErrInvalid)
 	}
 	j := a.getJob(jobID)
 	if j == nil {
-		return "", fmt.Errorf("job %q is unknown; call list_jobs and use an id from that list: %w", jobID, ErrNotFound)
+		return "", fmt.Errorf("job %q is unknown; call list_children and use an id from that list: %w", jobID, ErrNotFound)
 	}
 
 	status, _, _ := j.snapshot()
@@ -515,10 +495,11 @@ func (a *AgentHarness) cancelJob(ctx context.Context, jobID string) (string, err
 		j.worker.Close()
 	}
 	a.removeJob(jobID)
-	return fmt.Sprintf("Job %s cancelled and removed.", jobID), nil
+	return fmt.Sprintf("Child %s cancelled and removed.", jobID), nil
 }
 
-// cancelBackgroundJobs cancels detached workers. Called from Close.
+// cancelBackgroundJobs stops detached workers. Called from Close and when the
+// original Run/ReturnFromInterrupt context is cancelled (client stop).
 func (a *AgentHarness) cancelBackgroundJobs() {
 	if a.jobsCancel != nil {
 		a.jobsCancel()
@@ -536,7 +517,8 @@ func (a *AgentHarness) cancelBackgroundJobs() {
 		select {
 		case <-j.done:
 		case <-time.After(2 * time.Second):
-			slog.Warn("background job did not finish on Close", "job_id", j.id, "worker", j.workerName)
+			slog.Warn("background child did not finish on cancel", "child_id", j.id, "specialist", j.specialist)
 		}
 	}
+	a.jobsCtx, a.jobsCancel = context.WithCancel(context.Background())
 }
