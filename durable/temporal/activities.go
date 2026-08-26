@@ -413,7 +413,10 @@ func startHeartbeat(ctx context.Context) func() {
 		return func() {}
 	}
 	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		activity.RecordHeartbeat(ctx, "tick")
 		ticker := time.NewTicker(500 * time.Millisecond)
 		defer ticker.Stop()
@@ -428,7 +431,11 @@ func startHeartbeat(ctx context.Context) func() {
 			}
 		}
 	}()
-	return func() { close(done) }
+	return func() {
+		close(done)
+		// Wait so a retry cannot RecordHeartbeat on the next attempt's handle.
+		wg.Wait()
+	}
 }
 
 func publishContext(ctx context.Context) context.Context {
