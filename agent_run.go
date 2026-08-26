@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/ryanaldo34/tacklr/internal/drive"
 	"github.com/ryanaldo34/tacklr/interrupt"
@@ -29,16 +30,27 @@ func (a *AgentHarness) RunMessage(ctx context.Context, user *Message) (<-chan St
 	if bad := UnsupportedMIMEs(a.model, user.MIMETypes()); len(bad) > 0 {
 		return nil, fmt.Errorf("unsupported content type(s): %s", strings.Join(bad, ", "))
 	}
-	return a.startTurn(ctx, user)
+	return a.startTurn(ctx, user, nil)
 }
 
 // ReturnFromInterrupt applies host resolutions and resumes the parked tool batch.
 // Keys are tool call ids, which are also the wire interrupt ids.
 func (a *AgentHarness) ReturnFromInterrupt(ctx context.Context, finishedInterrupts map[string][]byte) (<-chan StreamEvent, error) {
-	if err := a.applyResume(finishedInterrupts); err != nil {
+	if err := a.resumeIDsExist(finishedInterrupts); err != nil {
 		return nil, err
 	}
-	return a.startTurn(ctx, nil)
+	return a.startTurn(ctx, nil, finishedInterrupts)
+}
+
+func (a *AgentHarness) resumeIDsExist(finishedInterrupts map[string][]byte) error {
+	a.pendingMu.Lock()
+	defer a.pendingMu.Unlock()
+	for id := range finishedInterrupts {
+		if _, ok := a.pendingToolCalls[id]; !ok {
+			return fmt.Errorf("no tool call id found for interrupt %s: %w", id, interrupt.ErrInterruptNotFound)
+		}
+	}
+	return nil
 }
 
 func (a *AgentHarness) applyResume(finishedInterrupts map[string][]byte) error {
@@ -61,7 +73,7 @@ func (a *AgentHarness) applyResume(finishedInterrupts map[string][]byte) error {
 	return nil
 }
 
-func (a *AgentHarness) startTurn(ctx context.Context, user *Message) (<-chan StreamEvent, error) {
+func (a *AgentHarness) startTurn(ctx context.Context, user *Message, resume map[string][]byte) (<-chan StreamEvent, error) {
 	if err := a.ensureReady(ctx); err != nil {
 		return nil, err
 	}
@@ -99,6 +111,14 @@ func (a *AgentHarness) startTurn(ctx context.Context, user *Message) (<-chan Str
 			outcome = telemetry.OutcomeCancelled
 			a.finalizeCancelledWork(out)
 			out <- StreamEvent{Type: StreamEventError, Error: fmt.Errorf("run: context cancelled: %w", ctx.Err())}
+		}
+
+		if len(resume) > 0 {
+			if err := a.applyResume(resume); err != nil {
+				outcome = telemetry.OutcomeError
+				out <- StreamEvent{Type: StreamEventError, Error: err}
+				return
+			}
 		}
 
 		if user != nil {
@@ -160,6 +180,7 @@ func (a *AgentHarness) runTurnLoop(ctx context.Context, out chan StreamEvent, em
 
 		st.HadToolRound = st.HadToolRound || len(toolCalls) > 0
 		var wg sync.WaitGroup
+		var parked atomic.Bool
 		for _, tc := range toolCalls {
 			wg.Add(1)
 			go func(tc ToolCall) {
@@ -167,7 +188,10 @@ func (a *AgentHarness) runTurnLoop(ctx context.Context, out chan StreamEvent, em
 				if ctx.Err() != nil {
 					return
 				}
-				_, _ = a.runToolCall(ctx, tc, out)
+				step, _ := a.runToolCall(ctx, tc, out)
+				if step.Interrupted {
+					parked.Store(true)
+				}
 			}(tc)
 		}
 		wg.Wait()
@@ -175,7 +199,8 @@ func (a *AgentHarness) runTurnLoop(ctx context.Context, out chan StreamEvent, em
 			emitCancelled()
 			return telemetry.OutcomeCancelled
 		}
-		if a.hasBlockingToolWork() {
+		// A park ends this slice even if Resume already resolved the interrupt.
+		if parked.Load() || a.hasBlockingToolWork() {
 			return telemetry.OutcomeYield
 		}
 	}

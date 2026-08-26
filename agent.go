@@ -85,8 +85,8 @@ type AgentHarness struct {
 	contextPolicy    ContextPolicy
 	toolRunner       *toolRunner
 	toolResultHooks  *toolResultHookRegistry
-	// runMu serializes Run bodies so mid-turn ReturnFromInterrupt cannot
-	// overlap the prior Run's park/exit path (two concurrent Run loops).
+	// runMu serializes Run bodies so ReturnFromInterrupt applies resume
+	// only after the prior Run has parked or exited.
 	runMu sync.Mutex
 }
 
