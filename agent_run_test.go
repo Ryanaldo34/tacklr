@@ -11,6 +11,7 @@ import (
 	"time"
 
 	mcpruntime "github.com/ryanaldo34/tacklr/internal/mcp"
+	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/mcp"
 )
 
@@ -409,11 +410,14 @@ func TestReturnFromInterrupt_rejectsUnknownInterrupt(t *testing.T) {
 	drainEvents(events)
 
 	// Act
-	_, err = h.ReturnFromInterrupt(context.Background(), map[string][]byte{"missing": []byte(`{"selectionIdx":0}`)})
+	ch, err := h.ReturnFromInterrupt(context.Background(), map[string][]byte{"missing": []byte(`{"selectionIdx":0}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Assert
-	if err == nil || !strings.Contains(err.Error(), "missing") {
-		t.Fatalf("error = %v", err)
+	if !hasErrorIs(drainEvents(ch), interrupt.ErrInterruptNotFound) {
+		t.Fatal("expected unknown interrupt on the resume stream")
 	}
 }
 

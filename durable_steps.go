@@ -42,6 +42,8 @@ func (a *AgentHarness) Checkpoint() (*stores.SessionCheckpoint, error) {
 
 // RestoreCheckpoint applies a SnapshotStore blob onto this harness.
 func (a *AgentHarness) RestoreCheckpoint(cp stores.SessionCheckpoint) error {
+	a.runMu.Lock()
+	defer a.runMu.Unlock()
 	applied, err := session.ApplyCheckpoint(cp, a.session)
 	if err != nil {
 		return err
@@ -224,7 +226,7 @@ func (a *AgentHarness) runToolCall(ctx context.Context, tc ToolCall, out chan St
 	if host == nil {
 		host = jobsHost{a}
 	}
-	a.liveOut.Store(out)
+	a.bindOut(out)
 	turnRT := newToolRuntime(out, a.session, host)
 	tcKey := tc.Key()
 	toolCtx, toolSpan := telemetry.StartToolSpan(ctx, tc.Name, tc.Namespace)

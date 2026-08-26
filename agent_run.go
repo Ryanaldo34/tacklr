@@ -33,24 +33,11 @@ func (a *AgentHarness) RunMessage(ctx context.Context, user *Message) (<-chan St
 	return a.startTurn(ctx, user, nil)
 }
 
-// ReturnFromInterrupt applies host resolutions and resumes the parked tool batch.
-// Keys are tool call ids, which are also the wire interrupt ids.
+// ReturnFromInterrupt resumes a parked tool batch. Resolutions are applied on
+// the serialized turn (after the prior Run has parked). Failures are
+// StreamEventError on the returned channel.
 func (a *AgentHarness) ReturnFromInterrupt(ctx context.Context, finishedInterrupts map[string][]byte) (<-chan StreamEvent, error) {
-	if err := a.resumeIDsExist(finishedInterrupts); err != nil {
-		return nil, err
-	}
 	return a.startTurn(ctx, nil, finishedInterrupts)
-}
-
-func (a *AgentHarness) resumeIDsExist(finishedInterrupts map[string][]byte) error {
-	a.pendingMu.Lock()
-	defer a.pendingMu.Unlock()
-	for id := range finishedInterrupts {
-		if _, ok := a.pendingToolCalls[id]; !ok {
-			return fmt.Errorf("no tool call id found for interrupt %s: %w", id, interrupt.ErrInterruptNotFound)
-		}
-	}
-	return nil
 }
 
 func (a *AgentHarness) applyResume(finishedInterrupts map[string][]byte) error {
@@ -82,7 +69,11 @@ func (a *AgentHarness) startTurn(ctx context.Context, user *Message, resume map[
 	go func() {
 		a.runMu.Lock()
 		defer a.runMu.Unlock()
-		defer close(out)
+		a.bindOut(out)
+		defer func() {
+			a.unbindOut(out)
+			close(out)
+		}()
 
 		kind := telemetry.TurnKindPrompt
 		promptLen := 0
@@ -171,6 +162,9 @@ func (a *AgentHarness) runTurnLoop(ctx context.Context, out chan StreamEvent, em
 					toolCalls = append(toolCalls, *tc.ToolCall)
 				}
 			}
+			if len(toolCalls) == 0 {
+				return telemetry.OutcomeYield
+			}
 		}
 
 		if ctx.Err() != nil {
@@ -199,8 +193,7 @@ func (a *AgentHarness) runTurnLoop(ctx context.Context, out chan StreamEvent, em
 			emitCancelled()
 			return telemetry.OutcomeCancelled
 		}
-		// A park ends this slice even if Resume already resolved the interrupt.
-		if parked.Load() || a.hasBlockingToolWork() {
+		if parked.Load() {
 			return telemetry.OutcomeYield
 		}
 	}

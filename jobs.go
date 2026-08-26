@@ -154,14 +154,7 @@ func (a *AgentHarness) toolUpdate(callID string) func(string) {
 		if msg == "" || callID == "" {
 			return
 		}
-		ch, _ := a.liveOut.Load().(chan StreamEvent)
-		if ch == nil {
-			return
-		}
-		select {
-		case ch <- StreamEvent{Type: streaming.StreamEventToolUpdate, Content: msg, MessageID: callID}:
-		default:
-		}
+		a.emitLive(StreamEvent{Type: streaming.StreamEventToolUpdate, Content: msg, MessageID: callID})
 	}
 }
 
@@ -538,18 +531,17 @@ func (a *AgentHarness) cancelJob(ctx context.Context, jobID string) (string, err
 // cancelBackgroundJobs stops detached workers. Called from Close and when the
 // original Run/ReturnFromInterrupt context is cancelled (client stop).
 func (a *AgentHarness) cancelBackgroundJobs() {
-	a.jobsCancelMu.Lock()
-	defer a.jobsCancelMu.Unlock()
-
 	a.jobsMu.Lock()
-	if a.jobsCancel != nil {
-		a.jobsCancel()
-	}
+	cancel := a.jobsCancel
 	jobs := make([]*workerRun, 0, len(a.jobs))
 	for _, j := range a.jobs {
 		jobs = append(jobs, j)
 	}
+	a.jobsCtx, a.jobsCancel = context.WithCancel(context.Background())
 	a.jobsMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	for _, j := range jobs {
 		if j.cancel != nil {
 			j.cancel()
@@ -560,7 +552,4 @@ func (a *AgentHarness) cancelBackgroundJobs() {
 			slog.Warn("background child did not finish on cancel", "child_id", j.id, "specialist", j.specialist)
 		}
 	}
-	a.jobsMu.Lock()
-	a.jobsCtx, a.jobsCancel = context.WithCancel(context.Background())
-	a.jobsMu.Unlock()
 }

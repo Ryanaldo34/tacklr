@@ -244,7 +244,9 @@ func (a *AgentHarness) childResolutionPayloads(parentToolCallID string, meta *pa
 	// One parent spawn_specialist interrupt maps to one consumer resolution.
 	// Forward the same payload bytes to every pending child interrupt id
 	// recorded at park time (typically one).
+	a.pendingMu.Lock()
 	payload := a.interruptPayloads[parentToolCallID]
+	a.pendingMu.Unlock()
 	out := make(map[string][]byte, len(meta.ChildInterruptIDs))
 	for _, id := range meta.ChildInterruptIDs {
 		out[id] = payload
@@ -298,9 +300,9 @@ func (a *AgentHarness) clearPark(toolCallID string) {
 	if live != nil {
 		live.Close()
 	}
-	if a.interruptPayloads != nil {
-		delete(a.interruptPayloads, toolCallID)
-	}
+	a.pendingMu.Lock()
+	delete(a.interruptPayloads, toolCallID)
+	a.pendingMu.Unlock()
 }
 
 // workerDrainResult is the outcome of draining a child event stream.

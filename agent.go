@@ -9,7 +9,6 @@ import (
 	"maps"
 	"slices"
 	"sync"
-	"sync/atomic"
 
 	"github.com/ryanaldo34/tacklr/brain"
 	mcpruntime "github.com/ryanaldo34/tacklr/internal/mcp"
@@ -41,25 +40,24 @@ type AgentHarness struct {
 	session               *session.SessionManager
 	specialists           map[string]*Specialist
 	// pendingToolCalls is keyed by tool call id, which is also the wire interrupt id.
-	pendingToolCalls map[string]stores.PendingToolCall
-	pendingMu        sync.Mutex
-	// interruptPayloads maps parent tool call id → resume payload for workers.
+	// pendingMu covers this map and interruptPayloads (parallel tools in one turn).
+	pendingToolCalls  map[string]stores.PendingToolCall
 	interruptPayloads map[string][]byte
+	pendingMu         sync.Mutex
 	// parkedWorkersLive maps spawn_specialist tool call id → live child harness.
 	// Durable park metadata is in SessionManager state; this map is not checkpointed.
 	parkedWorkersLive map[string]*AgentHarness
 	parkMu            sync.Mutex
 	// Worker runs share one live lifecycle registry across sync and async delivery.
-	jobs         map[string]*workerRun
-	jobsMu       sync.Mutex
-	jobsCancelMu sync.Mutex // serializes cancelBackgroundJobs
-	jobsCtx      context.Context
-	jobsCancel   context.CancelFunc
+	jobs       map[string]*workerRun
+	jobsMu     sync.Mutex
+	jobsCtx    context.Context
+	jobsCancel context.CancelFunc
 	// childHost, when set, is nested sessions (durable Runtime). Nil uses jobs.
 	childHost childHost
-	// liveOut is the current turn event channel so background workers can
-	// emit tool updates onto the spawn call. atomic.Value holds chan StreamEvent.
-	liveOut           atomic.Value
+	// live is the turn event channel for job progress. Unbind before close.
+	liveMu            sync.Mutex
+	live              chan StreamEvent
 	skillByName       map[string]skills.Skill
 	skillsLoader      skills.SkillLoader
 	skillsInitialized bool
@@ -85,9 +83,35 @@ type AgentHarness struct {
 	contextPolicy    ContextPolicy
 	toolRunner       *toolRunner
 	toolResultHooks  *toolResultHookRegistry
-	// runMu serializes Run bodies so ReturnFromInterrupt applies resume
-	// only after the prior Run has parked or exited.
+	// runMu: one embed turn. Run/Resume/Restore wait until the prior turn
+	// parks or exits. Tool goroutines in that turn write pending under pendingMu.
 	runMu sync.Mutex
+}
+
+func (a *AgentHarness) bindOut(ch chan StreamEvent) {
+	a.liveMu.Lock()
+	a.live = ch
+	a.liveMu.Unlock()
+}
+
+func (a *AgentHarness) unbindOut(ch chan StreamEvent) {
+	a.liveMu.Lock()
+	if a.live == ch {
+		a.live = nil
+	}
+	a.liveMu.Unlock()
+}
+
+func (a *AgentHarness) emitLive(ev StreamEvent) {
+	a.liveMu.Lock()
+	defer a.liveMu.Unlock()
+	if a.live == nil {
+		return
+	}
+	select {
+	case a.live <- ev:
+	default:
+	}
 }
 
 // VFS is the mount table injected for this turn, or nil.
@@ -449,21 +473,6 @@ func (a *AgentHarness) hasOpenToolWork() bool {
 		return true
 	}
 	return len(a.openToolCalls()) > 0
-}
-
-// hasBlockingToolWork is true while a tool in this batch still needs a result
-// (HITL park). In-flight blocking spawns stay pending until AwaitChild
-// writes the child output as the tool result.
-func (a *AgentHarness) hasBlockingToolWork() bool {
-	if a.session.HasPendingInterrupt() {
-		return true
-	}
-	for _, p := range a.pendingSnapshot() {
-		if p.InterruptActive {
-			return true
-		}
-	}
-	return false
 }
 
 func (a *AgentHarness) finalizeCancelledWork(out chan<- StreamEvent) {
