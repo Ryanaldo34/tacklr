@@ -176,8 +176,8 @@ func (r *Runtime) CreateSession(ctx context.Context, req durable.CreateSession) 
 		}
 	}
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	if _, exists := r.sessions[id]; exists {
-		r.mu.Unlock()
 		return "", fmt.Errorf("%w: %s", durable.ErrSessionExists, id)
 	}
 	p := &sessionProc{
@@ -200,7 +200,6 @@ func (r *Runtime) CreateSession(ctx context.Context, req durable.CreateSession) 
 		parent.children = append(parent.children, id)
 		parent.mu.Unlock()
 	}
-	r.mu.Unlock()
 	go r.loop(p) //nolint:gosec // G118: session wait loop outlives CreateSession
 	return id, nil
 }

@@ -2,6 +2,7 @@ package tacklr
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 
@@ -47,15 +48,7 @@ func (h *AgentHarness) initSpecialists(specs []*Specialist) error {
 
 // workerNames returns registered worker names in sorted order.
 func (a *AgentHarness) workerNames() []string {
-	if len(a.specialists) == 0 {
-		return nil
-	}
-	names := make([]string, 0, len(a.specialists))
-	for name := range a.specialists {
-		names = append(names, name)
-	}
-	slices.Sort(names)
-	return names
+	return slices.Sorted(maps.Keys(a.specialists))
 }
 
 // formatSpecialistPromptList builds the deterministic AVAILABLE SPECIALISTS list.
@@ -92,14 +85,14 @@ func (a *AgentHarness) spawnTool() *Tool {
 	})
 }
 
-type listJobsArgs struct{}
+type listChildrenArgs struct{}
 
-type getJobArgs struct {
+type getChildArgs struct {
 	ChildID string `json:"child_id" desc:"Child session id returned by spawn_specialist when block is false"`
 	Block   bool   `json:"block" desc:"Wait for a running child before returning its result. Defaults to false."`
 }
 
-type cancelJobArgs struct {
+type cancelChildArgs struct {
 	ChildID string `json:"child_id" desc:"Child session id returned by spawn_specialist when block is false"`
 }
 

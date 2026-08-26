@@ -28,14 +28,32 @@ func OverlaySpecialist(parent AgentSpec, specialist string) (AgentSpec, error) {
 	return out, nil
 }
 
-func parentFacingState(st SessionStatus) string {
-	if st.State == SessionComplete {
-		return "completed"
+// ChildState is the tool-facing running/completed/failed for a session.
+func ChildState(st SessionState) string {
+	switch st {
+	case SessionComplete:
+		return tacklr.ChildCompleted
+	case SessionFailed:
+		return tacklr.ChildFailed
+	default:
+		return tacklr.ChildRunning
 	}
-	if st.State == SessionFailed {
-		return "failed"
+}
+
+// NormalizeSpawn trims spawn_specialist arguments. Specialist is required;
+// an empty task is allowed so a retry of the same callID can be idempotent.
+func NormalizeSpawn(specialist, task string) (string, string, error) {
+	specialist = strings.TrimSpace(specialist)
+	task = strings.TrimSpace(task)
+	if specialist == "" {
+		return "", "", fmt.Errorf("specialist is required: %w", tacklr.ErrInvalid)
 	}
-	return "running"
+	return specialist, task, nil
+}
+
+// UnknownChild is get_child/cancel_child with an id that is not this session's child.
+func UnknownChild(id string) error {
+	return fmt.Errorf("job %q is unknown; call list_children and use an id from that list: %w", id, ErrSessionNotFound)
 }
 
 // ChildrenNudge is injected when inference would complete while children remain.
@@ -46,7 +64,7 @@ func ChildrenNudge(rows []SessionStatus) string {
 	var b strings.Builder
 	b.WriteString("Automated harness nudge: This turn still has child sessions whose results have not been collected:\n")
 	for _, r := range rows {
-		fmt.Fprintf(&b, "- id=%s status=%s\n", r.ID, parentFacingState(r))
+		fmt.Fprintf(&b, "- id=%s status=%s\n", r.ID, ChildState(r.State))
 	}
 	b.WriteString("The turn cannot finish while children remain. Continue useful work if possible. Otherwise call get_child with block=true to wait for and collect each result. Use cancel_child only when a child is no longer needed.")
 	return b.String()

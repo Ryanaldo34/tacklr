@@ -143,12 +143,7 @@ func (a *AgentHarness) runTurnLoop(ctx context.Context, out chan StreamEvent, em
 			}
 			toolCalls = step.ToolCalls
 		} else {
-			toolCalls = make([]ToolCall, 0, len(pending))
-			for _, tc := range pending {
-				if !tc.InterruptActive && tc.ToolCall != nil {
-					toolCalls = append(toolCalls, *tc.ToolCall)
-				}
-			}
+			toolCalls = a.runnableToolCalls()
 			if len(toolCalls) == 0 {
 				return telemetry.OutcomeYield
 			}

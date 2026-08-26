@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"slices"
 	"sync"
+	"sync/atomic"
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
@@ -208,10 +209,7 @@ func (r *Runtime) runTurn(ctx context.Context, p *sessionProc, user *tacklr.Mess
 		st.HadToolRound = true
 		// One harness, one snapshot: run the whole batch like embed. Temporal
 		// cannot do this (activity etag chain); it keeps leftovers in history.
-		var (
-			mu          sync.Mutex
-			interrupted bool
-		)
+		var parked atomic.Bool
 		var wg sync.WaitGroup
 		for _, tc := range toolCalls {
 			wg.Add(1)
@@ -222,9 +220,7 @@ func (r *Runtime) runTurn(ctx context.Context, p *sessionProc, user *tacklr.Mess
 				}
 				step, _ := eng.RunToolCall(ctx, tc, out)
 				if step.Interrupted {
-					mu.Lock()
-					interrupted = true
-					mu.Unlock()
+					parked.Store(true)
 				}
 			}(tc)
 		}
@@ -235,7 +231,7 @@ func (r *Runtime) runTurn(ctx context.Context, p *sessionProc, user *tacklr.Mess
 		if err := r.persistHarness(ctx, p, h); err != nil {
 			return r.fail(ctx, p, err)
 		}
-		if interrupted {
+		if parked.Load() {
 			return turnYield
 		}
 		toolCalls = nil

@@ -1,6 +1,7 @@
 package durable
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/ryanaldo34/tacklr"
@@ -36,5 +37,18 @@ func TestOverlaySpecialist_inheritsParentAndNests(t *testing.T) {
 	}
 	if _, err := OverlaySpecialist(parent, "missing"); err == nil {
 		t.Fatal("want missing worker")
+	}
+	spec, task, err := NormalizeSpawn("  researcher ", "  do it  ")
+	if err != nil || spec != "researcher" || task != "do it" {
+		t.Fatalf("normalize = %q %q %v", spec, task, err)
+	}
+	if _, _, err := NormalizeSpawn("", "x"); err == nil {
+		t.Fatal("want specialist required")
+	}
+	if err := UnknownChild("z"); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("unknown: %v", err)
+	}
+	if ChildState(SessionComplete) != tacklr.ChildCompleted || ChildState(SessionFailed) != tacklr.ChildFailed || ChildState(SessionRunning) != tacklr.ChildRunning {
+		t.Fatal(ChildState(SessionRunning))
 	}
 }

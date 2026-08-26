@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"slices"
-	"strings"
 	"time"
 
 	enumspb "go.temporal.io/api/enums/v1"
@@ -23,26 +22,6 @@ type childRun struct {
 	done    bool
 	result  string
 	err     string
-}
-
-func (c childRun) status() durable.SessionStatus {
-	st := durable.SessionStatus{
-		ID:         c.id,
-		Specialist: c.spec,
-		Kind:       durable.SessionKindSpecialist,
-		State:      durable.SessionRunning,
-		Waiting:    c.waiting,
-		Result:     c.result,
-	}
-	if c.done {
-		st.Waiting = false
-		if c.err != "" {
-			st.State = durable.SessionFailed
-		} else {
-			st.State = durable.SessionComplete
-		}
-	}
-	return st
 }
 
 func startChild(ctx, sessionCtx workflow.Context, parent durable.SessionID, agentID, specialist, task string, childID durable.SessionID, auth durable.AuthContext, mounts []durable.MountRecipe, locality time.Duration) (childRun, error) {
@@ -68,36 +47,25 @@ func startChild(ctx, sessionCtx workflow.Context, parent durable.SessionID, agen
 }
 
 func findChild(spawned []childRun, id durable.SessionID) int {
-	for i := range spawned {
-		if spawned[i].id == id {
-			return i
-		}
-	}
-	return -1
+	return slices.IndexFunc(spawned, func(c childRun) bool { return c.id == id })
 }
 
 func dropChild(spawned *[]childRun, id durable.SessionID) {
-	out := (*spawned)[:0]
-	for _, c := range *spawned {
-		if c.id != id {
-			out = append(out, c)
-		}
-	}
-	*spawned = out
+	*spawned = slices.DeleteFunc(*spawned, func(c childRun) bool { return c.id == id })
 }
 
 func childOps(spawned []childRun) []durable.ChildOp {
 	out := make([]durable.ChildOp, len(spawned))
 	for i, c := range spawned {
-		st := c.status()
-		state := tacklr.ChildRunning
-		switch st.State {
-		case durable.SessionComplete:
-			state = tacklr.ChildCompleted
-		case durable.SessionFailed:
-			state = tacklr.ChildFailed
+		st := durable.SessionRunning
+		if c.done {
+			if c.err != "" {
+				st = durable.SessionFailed
+			} else {
+				st = durable.SessionComplete
+			}
 		}
-		out[i] = durable.ChildOp{ID: c.id, Specialist: c.spec, State: state, Result: st.Result}
+		out[i] = durable.ChildOp{ID: c.id, Specialist: c.spec, State: durable.ChildState(st), Result: c.result}
 	}
 	return out
 }
@@ -142,11 +110,7 @@ func reconcileChildren(
 		}
 		*spawned = append(*spawned, c)
 	}
-	for _, c := range slices.Clone(*spawned) {
-		if !keep[c.id] {
-			dropChild(spawned, c.id)
-		}
-	}
+	*spawned = slices.DeleteFunc(*spawned, func(c childRun) bool { return !keep[c.id] })
 	return nil
 }
 
@@ -237,10 +201,9 @@ type activityChildren struct {
 }
 
 func (a *activityChildren) SpawnChild(_ context.Context, specialist, task, callID string) (string, error) {
-	specialist = strings.TrimSpace(specialist)
-	task = strings.TrimSpace(task)
-	if specialist == "" {
-		return "", fmt.Errorf("specialist is required: %w", tacklr.ErrInvalid)
+	specialist, task, err := durable.NormalizeSpawn(specialist, task)
+	if err != nil {
+		return "", err
 	}
 	id := durable.ChildSessionID(a.parent, specialist, callID)
 	if i := findOp(a.ops, id); i >= 0 {
@@ -274,7 +237,7 @@ func (a *activityChildren) CancelChild(_ context.Context, id string) error {
 	sid := durable.SessionID(id)
 	i := findOp(a.ops, sid)
 	if i < 0 {
-		return fmt.Errorf("job %q is unknown; call list_children and use an id from that list: %w", id, durable.ErrSessionNotFound)
+		return durable.UnknownChild(id)
 	}
 	a.ops[i].Cancel = true
 	return nil
@@ -284,7 +247,7 @@ func (a *activityChildren) AwaitChild(_ context.Context, id, _ string) (tacklr.C
 	sid := durable.SessionID(id)
 	i := findOp(a.ops, sid)
 	if i < 0 {
-		return tacklr.Child{}, false, fmt.Errorf("job %q is unknown; call list_children and use an id from that list: %w", id, durable.ErrSessionNotFound)
+		return tacklr.Child{}, false, durable.UnknownChild(id)
 	}
 	op := a.ops[i]
 	switch op.State {
@@ -304,10 +267,5 @@ func (a *activityChildren) AwaitChild(_ context.Context, id, _ string) (tacklr.C
 }
 
 func findOp(ops []durable.ChildOp, id durable.SessionID) int {
-	for i := range ops {
-		if ops[i].ID == id {
-			return i
-		}
-	}
-	return -1
+	return slices.IndexFunc(ops, func(op durable.ChildOp) bool { return op.ID == id })
 }

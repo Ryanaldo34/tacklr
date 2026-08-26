@@ -37,11 +37,19 @@ func (t toolRuntime) WithToolCallID(id string) toolRuntime {
 	return t
 }
 
-func (t toolRuntime) SpawnChild(ctx context.Context, specialist, task string) (string, error) {
+func (t toolRuntime) requireHost() (childHost, error) {
 	if t.host == nil {
-		return "", fmt.Errorf("child sessions are not available: %w", ErrFailed)
+		return nil, fmt.Errorf("child sessions are not available: %w", ErrFailed)
 	}
-	return t.host.SpawnChild(ctx, specialist, task, t.CurrentToolCallID())
+	return t.host, nil
+}
+
+func (t toolRuntime) SpawnChild(ctx context.Context, specialist, task string) (string, error) {
+	host, err := t.requireHost()
+	if err != nil {
+		return "", err
+	}
+	return host.SpawnChild(ctx, specialist, task, t.CurrentToolCallID())
 }
 
 func (t toolRuntime) Children() []Child {
@@ -52,17 +60,19 @@ func (t toolRuntime) Children() []Child {
 }
 
 func (t toolRuntime) CancelChild(ctx context.Context, id string) error {
-	if t.host == nil {
-		return fmt.Errorf("child sessions are not available: %w", ErrFailed)
+	host, err := t.requireHost()
+	if err != nil {
+		return err
 	}
-	return t.host.CancelChild(ctx, id)
+	return host.CancelChild(ctx, id)
 }
 
 func (t toolRuntime) AwaitChild(ctx context.Context, id string) (Child, error) {
-	if t.host == nil {
-		return Child{}, fmt.Errorf("child sessions are not available: %w", ErrFailed)
+	host, err := t.requireHost()
+	if err != nil {
+		return Child{}, err
 	}
-	child, park, err := t.host.AwaitChild(ctx, id, t.CurrentToolCallID())
+	child, park, err := host.AwaitChild(ctx, id, t.CurrentToolCallID())
 	if err != nil {
 		return child, err
 	}
@@ -106,14 +116,15 @@ func spawnSpecialist(ctx context.Context, args spawnSpecialistArgs, runtime Harn
 	if !block {
 		return scheduledChildMessage(id, spec), nil
 	}
-	return collectChild(runtime.AwaitChild(ctx, id))
+	child, err := runtime.AwaitChild(ctx, id)
+	return child.Result, err
 }
 
-func listChildren(_ context.Context, _ listJobsArgs, runtime HarnessRuntime) (string, error) {
+func listChildren(_ context.Context, _ listChildrenArgs, runtime HarnessRuntime) (string, error) {
 	return formatChildren(runtime.Children()), nil
 }
 
-func getChild(ctx context.Context, args getJobArgs, runtime HarnessRuntime) (string, error) {
+func getChild(ctx context.Context, args getChildArgs, runtime HarnessRuntime) (string, error) {
 	id := strings.TrimSpace(args.ChildID)
 	if id == "" {
 		return "", fmt.Errorf("child_id is required; call list_children and pass a child_id from that list: %w", ErrInvalid)
@@ -128,10 +139,11 @@ func getChild(ctx context.Context, args getJobArgs, runtime HarnessRuntime) (str
 			}
 		}
 	}
-	return collectChild(runtime.AwaitChild(ctx, id))
+	child, err := runtime.AwaitChild(ctx, id)
+	return child.Result, err
 }
 
-func cancelChild(ctx context.Context, args cancelJobArgs, runtime HarnessRuntime) (string, error) {
+func cancelChild(ctx context.Context, args cancelChildArgs, runtime HarnessRuntime) (string, error) {
 	id := strings.TrimSpace(args.ChildID)
 	if id == "" {
 		return "", fmt.Errorf("child_id is required; call list_children and pass a child_id from that list: %w", ErrInvalid)
@@ -140,14 +152,4 @@ func cancelChild(ctx context.Context, args cancelJobArgs, runtime HarnessRuntime
 		return "", err
 	}
 	return fmt.Sprintf("Child %s cancelled and removed.", id), nil
-}
-
-func collectChild(child Child, err error) (string, error) {
-	if err != nil {
-		if child.Result != "" {
-			return child.Result, err
-		}
-		return "", err
-	}
-	return child.Result, nil
 }

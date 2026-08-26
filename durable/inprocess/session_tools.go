@@ -3,8 +3,8 @@ package inprocess
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
-	"strings"
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
@@ -32,10 +32,9 @@ type sessionChildren struct {
 }
 
 func (s sessionChildren) SpawnChild(ctx context.Context, specialist, task, callID string) (string, error) {
-	specialist = strings.TrimSpace(specialist)
-	task = strings.TrimSpace(task)
-	if specialist == "" {
-		return "", fmt.Errorf("specialist is required: %w", tacklr.ErrInvalid)
+	specialist, task, err := durable.NormalizeSpawn(specialist, task)
+	if err != nil {
+		return "", err
 	}
 	childID := durable.ChildSessionID(s.p.id, specialist, callID)
 	if s.r.ownsChild(s.p, childID) {
@@ -78,7 +77,7 @@ func (s sessionChildren) Children() []tacklr.Child {
 func (s sessionChildren) CancelChild(ctx context.Context, id string) error {
 	sid := durable.SessionID(id)
 	if !s.r.ownsChild(s.p, sid) {
-		return fmt.Errorf("job %q is unknown; call list_children and use an id from that list: %w", id, durable.ErrSessionNotFound)
+		return durable.UnknownChild(id)
 	}
 	_ = s.r.Close(ctx, sid)
 	s.r.dropChild(s.p, sid)
@@ -88,21 +87,15 @@ func (s sessionChildren) CancelChild(ctx context.Context, id string) error {
 func (s sessionChildren) AwaitChild(ctx context.Context, id, callID string) (tacklr.Child, bool, error) {
 	sid := durable.SessionID(id)
 	if !s.r.ownsChild(s.p, sid) {
-		return tacklr.Child{}, false, fmt.Errorf("job %q is unknown; call list_children and use an id from that list: %w", id, durable.ErrSessionNotFound)
+		return tacklr.Child{}, false, durable.UnknownChild(id)
 	}
 	return s.r.waitChild(ctx, s.p, sid, callID)
 }
 
 func childFromStatus(st durable.SessionStatus) tacklr.Child {
-	c := tacklr.Child{ID: string(st.ID), Specialist: st.Specialist, State: tacklr.ChildRunning, Result: st.Result}
-	switch st.State {
-	case durable.SessionComplete:
-		c.State = tacklr.ChildCompleted
-	case durable.SessionFailed:
-		c.State = tacklr.ChildFailed
-		if c.Result == "" && st.Err != nil {
-			c.Result = st.Err.Error()
-		}
+	c := tacklr.Child{ID: string(st.ID), Specialist: st.Specialist, State: durable.ChildState(st.State), Result: st.Result}
+	if st.State == durable.SessionFailed && c.Result == "" && st.Err != nil {
+		c.Result = st.Err.Error()
 	}
 	return c
 }
@@ -132,9 +125,6 @@ func (r *Runtime) waitChild(ctx context.Context, p *sessionProc, child durable.S
 		}
 		if st.Waiting {
 			p.mu.Lock()
-			if p.childParks == nil {
-				p.childParks = make(map[string]durable.SessionID)
-			}
 			p.childParks[callID] = child
 			p.mu.Unlock()
 			return tacklr.Child{}, true, nil
@@ -172,10 +162,7 @@ func (r *Runtime) dropChild(p *sessionProc, id durable.SessionID) {
 
 func (r *Runtime) forwardChildResume(ctx context.Context, p *sessionProc, resume durable.Resume) {
 	p.mu.Lock()
-	parks := make(map[string]durable.SessionID, len(p.childParks))
-	for k, v := range p.childParks {
-		parks[k] = v
-	}
+	parks := maps.Clone(p.childParks)
 	p.mu.Unlock()
 	for callID, payload := range resume.Responses {
 		childID, ok := parks[callID]
