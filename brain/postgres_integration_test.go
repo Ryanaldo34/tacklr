@@ -3,8 +3,6 @@ package brain_test
 import (
 	"context"
 	"errors"
-	"path/filepath"
-	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -259,18 +257,10 @@ func sharedPostgresPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	ctx := context.Background()
 	pgOnce.Do(func() {
-		_, thisFile, _, ok := runtime.Caller(0)
-		if !ok {
-			pgStart = errors.New("runtime.Caller failed")
-			return
-		}
-		schemaPath := filepath.Join(filepath.Dir(thisFile), "testdata", "schema_pgvector.sql")
-
 		ctr, err := postgres.Run(ctx, brainPgImage,
 			postgres.WithDatabase("brain"),
 			postgres.WithUsername("brain"),
 			postgres.WithPassword("brain"),
-			postgres.WithInitScripts(schemaPath),
 			postgres.BasicWaitStrategies(),
 			postgres.WithSQLDriver("pgx"),
 		)
@@ -288,6 +278,20 @@ func sharedPostgresPool(t *testing.T) *pgxpool.Pool {
 		pool, err := pgxpool.New(ctx, connStr)
 		if err != nil {
 			pgStart = err
+			_ = ctr.Terminate(ctx)
+			return
+		}
+		store, err := brain.NewPostgresStore(pool)
+		if err != nil {
+			pgStart = err
+			pool.Close()
+			_ = ctr.Terminate(ctx)
+			return
+		}
+		store.EmbeddingDim = 3
+		if err := store.Setup(ctx); err != nil {
+			pgStart = err
+			pool.Close()
 			_ = ctr.Terminate(ctx)
 			return
 		}
@@ -669,5 +673,33 @@ func TestApplyKinds_livePostgresMigration(t *testing.T) {
 		"kind": "Document", "unknown": "x",
 	}, eng2.Catalog()); err == nil {
 		t.Fatal("want unknown property rejected after load")
+	}
+}
+
+// TestPostgresStore_setupRegistersKinds is the host boot path: Setup is
+// idempotent and upserts configured kinds into object_kinds.
+func TestPostgresStore_setupRegistersKinds(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping postgres integration test in -short mode")
+	}
+	ctx := context.Background()
+	pool := sharedPostgresPool(t)
+	mustExec(t, pool, `TRUNCATE objects, object_kinds CASCADE`)
+
+	store, err := brain.NewPostgresStore(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.EmbeddingDim = 3
+	deal := brain.KindSpec{Kind: "Deal", IsParent: true, Description: "sales"}
+	if err := store.Setup(ctx, deal); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Setup(ctx, deal); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetKind(ctx, "Deal")
+	if err != nil || got.Description != "sales" || !got.IsParent {
+		t.Fatalf("kind: %+v err=%v", got, err)
 	}
 }

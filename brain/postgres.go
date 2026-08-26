@@ -30,8 +30,11 @@ var (
 )
 
 // PostgresStore implements Store against the objects / object_kinds schema.
+// Call Setup once per database. Setup does not migrate an existing vector column.
 type PostgresStore struct {
-	db PgxDB
+	// EmbeddingDim is the pgvector size Setup uses. Zero means DefaultEmbeddingDim.
+	EmbeddingDim int
+	db           PgxDB
 }
 
 // NewPostgresStore wraps a pgx pool or connection. Query/Exec emit otelpgx

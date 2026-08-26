@@ -837,9 +837,11 @@ func TestChildSession_inheritsAndStatusStaysRunning(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = sub.Close() })
 	waitEvents(t, sub, 8*time.Second)
-	st, err = rt.Status(ctx, child)
-	if err != nil || st.State != durable.SessionComplete || st.Result != "from-child" {
-		t.Fatalf("complete=%+v err=%v", st, err)
+	st = waitStatus(t, rt, child, func(s durable.SessionStatus) bool {
+		return s.State == durable.SessionComplete
+	})
+	if st.Result != "from-child" {
+		t.Fatalf("complete=%+v", st)
 	}
 	if err := rt.Close(ctx, parent); err != nil {
 		t.Fatal(err)

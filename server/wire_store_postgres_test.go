@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"path/filepath"
-	"runtime"
 	"sync"
 	"testing"
 
@@ -97,6 +95,9 @@ func TestPostgresWireStore_putGetDelete(t *testing.T) {
 	if err := ws.Delete(ctx, "closed"); err == nil {
 		t.Fatal("delete on closed conn")
 	}
+	if err := ws.Setup(ctx); err == nil {
+		t.Fatal("setup on closed conn")
+	}
 }
 
 // TestPostgresWireStore_acpLoadAfterRestart: create via protocol, new protocol
@@ -148,17 +149,10 @@ func wireConn(t *testing.T) *pgx.Conn {
 	t.Helper()
 	ctx := context.Background()
 	wireOnce.Do(func() {
-		_, thisFile, _, ok := runtime.Caller(0)
-		if !ok {
-			wireErr = errors.New("runtime.Caller failed")
-			return
-		}
-		schema := filepath.Join(filepath.Dir(thisFile), "..", "stores", "testdata", "session_schema.sql")
 		ctr, err := postgres.Run(ctx, wirePgImage,
 			postgres.WithDatabase("wire"),
 			postgres.WithUsername("wire"),
 			postgres.WithPassword("wire"),
-			postgres.WithInitScripts(schema),
 			postgres.BasicWaitStrategies(),
 			postgres.WithSQLDriver("pgx"),
 		)
@@ -172,6 +166,19 @@ func wireConn(t *testing.T) *pgx.Conn {
 			_ = ctr.Terminate(ctx)
 			return
 		}
+		conn, err := pgx.Connect(ctx, url)
+		if err != nil {
+			wireErr = err
+			_ = ctr.Terminate(ctx)
+			return
+		}
+		if err := NewPostgresWireStore(conn, "acp").Setup(ctx); err != nil {
+			wireErr = err
+			_ = conn.Close(ctx)
+			_ = ctr.Terminate(ctx)
+			return
+		}
+		_ = conn.Close(ctx)
 		wireURL = url
 	})
 	if wireSkip != "" {

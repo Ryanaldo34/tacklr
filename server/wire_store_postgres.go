@@ -10,9 +10,8 @@ import (
 )
 
 // PostgresWireStore implements ProtocolWireStore against Postgres.
-// Table: public.protocol_wire_session (see stores/testdata/session_schema.sql).
-// Shares a *pgx.Conn with stores.PostgresStore when desired; schema is separate
-// from harness session checkpoints.
+// Call Setup once per database. Shares a *pgx.Conn with a brain store when
+// desired; the table is separate from harness session checkpoints.
 type PostgresWireStore struct {
 	conn     *pgx.Conn
 	protocol string // stored in protocol column; default "acp"
@@ -33,6 +32,24 @@ func NewPostgresWireStore(conn *pgx.Conn, protocolKey string) *PostgresWireStore
 			otelpgx.WithDisableAcquireTracer(),
 		),
 	}
+}
+
+// Setup creates public.protocol_wire_session (idempotent).
+func (s *PostgresWireStore) Setup(ctx context.Context) error {
+	const q = `
+		CREATE TABLE IF NOT EXISTS public.protocol_wire_session (
+			session_id   text PRIMARY KEY,
+			protocol     text NOT NULL DEFAULT 'acp',
+			payload      jsonb NOT NULL,
+			updated_at   timestamptz NOT NULL DEFAULT now()
+		)`
+	ctx = s.tr.TraceQueryStart(ctx, s.conn, pgx.TraceQueryStartData{SQL: q})
+	_, err := s.conn.Exec(ctx, q)
+	s.tr.TraceQueryEnd(ctx, s.conn, pgx.TraceQueryEndData{Err: err})
+	if err != nil {
+		return fmt.Errorf("wire setup: %w", err)
+	}
+	return nil
 }
 
 func (s *PostgresWireStore) Put(ctx context.Context, sessionID string, payload []byte) error {

@@ -382,6 +382,18 @@ func TestWithKinds_invalidFailsNewEngine(t *testing.T) {
 	}
 }
 
+func TestMemoryStore_setupRegistersKinds(t *testing.T) {
+	ctx := context.Background()
+	store := brain.NewMemoryStore()
+	if err := store.Setup(ctx, brain.KindSpec{Kind: "Deal", IsParent: true, Description: "sales"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetKind(ctx, "Deal")
+	if err != nil || got.Description != "sales" || !got.IsParent {
+		t.Fatalf("kind: %+v err=%v", got, err)
+	}
+}
+
 func TestObjectKindFromSpec_roundTrip(t *testing.T) {
 	row, err := brain.ObjectKindFromSpec(brain.KindSpec{
 		Kind: "Doc", IsParent: true, Description: "d",

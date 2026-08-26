@@ -33,22 +33,19 @@ engine those tools call.
 
 ---
 
-## Why this is not “RAG”
+## Four jobs, kept separate
 
-Classic RAG dumps the last *N* similar chunks into the prompt. That pollutes
-context, mixes stale index text with live files, and has no notion of “this Deal
-is linked to that Person.”
-
-Tacklr’s knowledge system does four different jobs and keeps them separate:
+The knowledge system does four different jobs on purpose:
 
 1. **First-class objects** (Engrams) live in a database and show up as Markdown files.
 2. **Workspace files** (artifacts) stay on disk or S3; a derived index makes them searchable.
 3. **Relationships** live in a graph. They are not files and `ls` never lists them.
-4. **Retrieval** lands on a parent object, then you open the *live* file — not a stale chunk body.
+4. **Retrieval** lands on a parent object, then you open the *live* file — not a stored chunk body.
 
-The ship of “stuff more chunks into the window” has sailed. Search here is
-hybrid (keyword + vector), temporally biased, graph-aware, and scoped to a
-namespace.
+Search is hybrid (keyword + vector), biased toward recently updated objects,
+graph-aware when a graph is attached, and scoped to a namespace. The agent
+queries when it needs a fact; the harness does not dump a static result list
+into every prompt.
 
 ---
 
@@ -640,21 +637,23 @@ eng, err := brain.NewEngine(store, brain.WithKinds(
 // AgentOptions{Brain: eng, ...}  → search / save_* / schema / read
 ```
 
-Production-shaped:
+Production-shaped. `PostgresStore.Setup` creates extensions, tables, and
+indexes, then upserts the kinds you pass. Set `EmbeddingDim` to match the
+embedder (zero means 1536). Setup does not change an existing vector column.
 
 ```go
 store, err := brain.NewPostgresStore(pool)
+store.EmbeddingDim = 1536
+kinds := append([]brain.KindSpec{dealSpec, personSpec}, vfsindex.MountIndexKinds()...)
+if err := store.Setup(ctx, kinds...); err != nil { /* ... */ }
 g, err := helixgraph.New(helixURL)
 if err := g.Bootstrap(ctx, false); err != nil { /* ... */ }
 
 eng, err := brain.NewEngine(store,
     brain.WithEmbedder(emb),          // hybrid search + Put embeddings
     brain.WithGraph(g),               // link / find_objects / named expand
-    brain.WithKinds(dealSpec, personSpec),
 )
-if err := eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...); err != nil {
-    // Document + Chunk field specs when the catalog is non-empty
-}
+if err := eng.LoadKindsFromStore(ctx); err != nil { /* ... */ }
 
 // AgentOptions:
 //   Brain:           eng
@@ -681,6 +680,7 @@ Optional knobs: `WithReranker` (post-hydrate product scoring),
 
 Integration tests that need real backends use Testcontainers (Postgres image
 under `brain/testdata`, Helix `enterprise-dev`). They skip under `-short`.
+Tests call `store.Setup` (embedding dim 3) instead of loading SQL files.
 
 ---
 
@@ -715,6 +715,7 @@ under `brain/testdata`, Helix `enterprise-dev`). They skip under `-short`.
 | Engram Markdown codec | `brain/engramfile.go` |
 | VFS Provider + factory | `brain/provider.go` |
 | Store ports | `brain/store.go` |
+| Postgres schema + kinds | `PostgresStore.Setup` (`brain/postgres_setup.go`) |
 | Graph ports + MemoryGraph | `brain/graph.go` |
 | Helix adapter | `brain/helixgraph/` |
 | Artifact indexer | `vfsindex/indexer.go` |

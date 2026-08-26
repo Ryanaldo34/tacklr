@@ -112,17 +112,19 @@ func specialistCatalog(t *testing.T, parent tacklr.InferenceStrategy, kids ...ta
 	})
 }
 
-func begin(t *testing.T, rt *Runtime, id *durable.SessionID, promptCtx context.Context) durable.Subscription {
+func begin(t *testing.T, rt *Runtime, id *durable.SessionID) durable.Subscription {
+	t.Helper()
+	return beginWithPrompt(t.Context(), t, rt, id)
+}
+
+func beginWithPrompt(ctx context.Context, t *testing.T, rt *Runtime, id *durable.SessionID) durable.Subscription {
 	t.Helper()
 	sid, err := rt.CreateSession(t.Context(), durable.CreateSession{AgentID: "default"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	*id = sid
-	if promptCtx == nil {
-		promptCtx = t.Context()
-	}
-	if err := rt.Prompt(promptCtx, sid, durable.Prompt{Text: "go"}); err != nil {
+	if err := rt.Prompt(ctx, sid, durable.Prompt{Text: "go"}); err != nil {
 		t.Fatal(err)
 	}
 	sub, err := rt.Subscribe(t.Context(), sid, 0)
@@ -183,7 +185,7 @@ func TestChildren_asyncSpawnThenCollect(t *testing.T) {
 		},
 	}
 	rt = New(specialistCatalog(t, parent, tacklr.Specialist{Name: "researcher", Model: child}), WithProjection(vfs.DirectProjection{}))
-	sub := begin(t, rt, &parentID, nil)
+	sub := begin(t, rt, &parentID)
 	childID := durable.ChildSessionID(parentID, "researcher", "sp1")
 	waitParentEvent(t, sub, 8*time.Second, func(ev streaming.StreamEvent) bool {
 		return ev.Type == streaming.StreamEventToolResult && strings.Contains(ev.Content, string(childID))
@@ -251,7 +253,7 @@ func TestChildren_waitingStaysRunningUntilHITLResolved(t *testing.T) {
 		},
 	}
 	rt = New(specialistCatalog(t, parent, tacklr.Specialist{Name: "researcher", Model: child, Tools: []*tacklr.Tool{askUserTool()}}), WithProjection(vfs.DirectProjection{}))
-	sub := begin(t, rt, &parentID, nil)
+	sub := begin(t, rt, &parentID)
 
 	var listOut, poll string
 	deadline := time.After(8 * time.Second)
@@ -355,7 +357,7 @@ func TestChildren_getChildParkAndSiblingCancel(t *testing.T) {
 		tacklr.Specialist{Name: "keeper", Model: keep, Tools: []*tacklr.Tool{askUserTool()}},
 		tacklr.Specialist{Name: "dropper", Model: drop, Tools: []*tacklr.Tool{askUserTool()}},
 	), WithProjection(vfs.DirectProjection{}))
-	sub := begin(t, rt, &parentID, nil)
+	sub := begin(t, rt, &parentID)
 
 	var cancelOut string
 	var parked bool
@@ -433,7 +435,7 @@ func TestChildren_stopKillsRunningChild(t *testing.T) {
 			var id durable.SessionID
 			promptCtx, cancelPrompt := context.WithCancel(t.Context())
 			t.Cleanup(cancelPrompt)
-			sub := begin(t, rt, &id, promptCtx)
+			sub := beginWithPrompt(promptCtx, t, rt, &id)
 			waitParentEvent(t, sub, 8*time.Second, func(ev streaming.StreamEvent) bool {
 				return ev.Type == streaming.StreamEventToolResult && strings.Contains(ev.Content, "/w/researcher/sp1")
 			})
@@ -474,7 +476,7 @@ func TestChildren_unknownSpecialistAndChild(t *testing.T) {
 	}
 	rt := New(specialistCatalog(t, parent, tacklr.Specialist{Name: "researcher", Model: scriptedComplete("x")}), WithProjection(vfs.DirectProjection{}))
 	var id durable.SessionID
-	sub := begin(t, rt, &id, nil)
+	sub := begin(t, rt, &id)
 	got := waitEvents(t, sub, 8*time.Second)
 	var texts []string
 	for _, ev := range got {
@@ -522,7 +524,7 @@ func TestChildren_nudgeUntilCollected(t *testing.T) {
 		},
 	}
 	rt = New(specialistCatalog(t, parent, tacklr.Specialist{Name: "researcher", Model: child}), WithProjection(vfs.DirectProjection{}))
-	sub := begin(t, rt, &parentID, nil)
+	sub := begin(t, rt, &parentID)
 	deadline := time.After(8 * time.Second)
 	for {
 		select {
@@ -563,7 +565,7 @@ func TestChildren_blockingSpawnParksOnChildHITL(t *testing.T) {
 	}
 	rt := New(specialistCatalog(t, parent, tacklr.Specialist{Name: "researcher", Model: child, Tools: []*tacklr.Tool{askUserTool()}}), WithProjection(vfs.DirectProjection{}))
 	var id durable.SessionID
-	sub := begin(t, rt, &id, nil)
+	sub := begin(t, rt, &id)
 	waitParentEvent(t, sub, 8*time.Second, func(ev streaming.StreamEvent) bool {
 		return ev.Type == streaming.StreamEventInterrupt && ev.MessageID == "sp1"
 	})
@@ -629,7 +631,7 @@ func TestChildren_parentHITLLeavesAsyncChildRunning(t *testing.T) {
 	}
 	rt := New(specialistCatalog(t, parent, tacklr.Specialist{Name: "researcher", Model: child}), WithProjection(vfs.DirectProjection{}))
 	var id durable.SessionID
-	sub := begin(t, rt, &id, nil)
+	sub := begin(t, rt, &id)
 	var spawned bool
 	deadline := time.After(8 * time.Second)
 	for {
@@ -692,7 +694,7 @@ func TestChildren_failedChildIsCollectable(t *testing.T) {
 		},
 	}
 	rt = New(specialistCatalog(t, parent, tacklr.Specialist{Name: "researcher", Model: failing}), WithProjection(vfs.DirectProjection{}))
-	sub := begin(t, rt, &parentID, nil)
+	sub := begin(t, rt, &parentID)
 	got := waitEvents(t, sub, 8*time.Second)
 	for _, ev := range got {
 		if ev.Type == streaming.StreamEventToolResult && strings.Contains(ev.Content, "boom-child") {
@@ -744,7 +746,7 @@ func TestChildren_nestedSpecialistCollectsGrandchild(t *testing.T) {
 		}},
 	}), WithProjection(vfs.DirectProjection{}))
 	var id durable.SessionID
-	sub := begin(t, rt, &id, nil)
+	sub := begin(t, rt, &id)
 	got := waitEvents(t, sub, 8*time.Second)
 	var sawNested, sawDone bool
 	for _, ev := range got {

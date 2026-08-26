@@ -222,7 +222,9 @@ func (a *AgentHarness) scheduleBackgroundWorker(specialist, task, jobID string, 
 		return "", fmt.Errorf("job %q: already exists: %w", jobID, ErrInvalid)
 	}
 
+	a.jobsMu.Lock()
 	parentCtx := a.jobsCtx
+	a.jobsMu.Unlock()
 	if parentCtx == nil {
 		parentCtx = context.Background()
 	}
@@ -501,10 +503,13 @@ func (a *AgentHarness) cancelJob(ctx context.Context, jobID string) (string, err
 // cancelBackgroundJobs stops detached workers. Called from Close and when the
 // original Run/ReturnFromInterrupt context is cancelled (client stop).
 func (a *AgentHarness) cancelBackgroundJobs() {
+	a.jobsCancelMu.Lock()
+	defer a.jobsCancelMu.Unlock()
+
+	a.jobsMu.Lock()
 	if a.jobsCancel != nil {
 		a.jobsCancel()
 	}
-	a.jobsMu.Lock()
 	jobs := make([]*workerRun, 0, len(a.jobs))
 	for _, j := range a.jobs {
 		jobs = append(jobs, j)
@@ -520,5 +525,7 @@ func (a *AgentHarness) cancelBackgroundJobs() {
 			slog.Warn("background child did not finish on cancel", "child_id", j.id, "specialist", j.specialist)
 		}
 	}
+	a.jobsMu.Lock()
 	a.jobsCtx, a.jobsCancel = context.WithCancel(context.Background())
+	a.jobsMu.Unlock()
 }

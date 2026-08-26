@@ -62,6 +62,39 @@ The host runs:
 
 The worker registers `SessionWorkflow`, `Inference`, `Tool`, and `CommitToolOutput`.
 
+## Child sessions
+
+A child is a nested Runtime session, not a host-owned supervisor. The id is `{parent}/w/{specialist}/{call}`. The same wait loop runs. The child inherits MCP, mount recipes, and auth from the parent, then overlays the named `Specialist` (`WithSpecialist` / `OverlaySpecialist`). Each child turn opens its own VFS (`OpenTurnVFS` on the child id). It does not reuse the parent’s live `MountSession`.
+
+Register specialists on `AgentOptions.Specialists`. The model sees four tools:
+
+| Tool | Job |
+|------|-----|
+| `spawn_specialist` | Start a child. `block` defaults to true (parent waits). `block=false` returns a scheduled message immediately |
+| `list_children` | Ids and parent-facing status. Interrupted children do not appear as a separate state; they stay `running` |
+| `get_child` | Collect one result. `block=true` parks the parent until the child finishes (or the child parks for HITL, then parent `Resume` forwards) |
+| `cancel_child` | Stop that child |
+
+Child HITL does not change parent-facing `Status.State` from `running`. `Waiting` is internal until the interrupt is resolved. The parent stays `running` while a child HITL is outstanding.
+
+### Park, cancel, close
+
+| Event | Children |
+|-------|----------|
+| Parent parks (HITL on the parent, or `get_child` wait) | Keep running. Child Prompt uses `context.WithoutCancel` of the parent turn so park does not cancel them |
+| `Runtime.Cancel`, original Prompt/Resume context cancel, client stop | Stop all children, then abort the parent turn. The parent session stays open for a later Prompt |
+| `Runtime.Close` | Recursively stop and destroy children |
+
+A later `Prompt` on a session that was cancelled does not resurrect killed children.
+
+### When a child fails
+
+The parent does not fail with the child. The child becomes `failed` and stays on the parent’s list until collected or the parent is closed.
+
+`get_child` (including `block=true`) returns the error as tool text, drops the child from the parent list, and the parent continues. Uncollected complete or failed children still count toward the “cannot finish while children remain” nudge; the parent must `get_child` or `cancel_child` before it can complete.
+
+Path A (`NewAgent` / `jobs.go`) recovers a panic in a worker and marks that job failed. Path B’s child turn goroutine does not recover a panic — a panic can leave the child `running`. Path C starts an async child without waiting; collecting a failed async child through `get_child` is not the same intercept path as Path B.
+
 ## Tool batches
 
 A model round can emit several tool calls. The wait loop **does not infer again** until every call in that batch has a result, or a call is parked for HITL.
@@ -78,7 +111,7 @@ Azure/OpenAI Responses requires each `function_call` to be followed by a `functi
 
 ## Auth and VFS context
 
-Credentials belong on the **work item**, not on a protocol-specific kernel API and not in process RAM as the source of truth.
+Credentials belong on the **work item**, not on a protocol-specific bind RPC and not in process RAM as the source of truth.
 
 ```text
 CreateSession.Mounts   secret-free recipes (provider, alias, folder/drive/item ids)
@@ -102,7 +135,7 @@ Encrypt work-item payloads at rest with a Temporal payload codec (or the equival
 srv := server.NewServer(rt, cat, server.NewACPProtocol(wire), myProtocol{})
 ```
 
-A protocol is the handshake: create a session, start a turn, stream `StreamEvent`, end a turn, return HITL answers. Map wire auth into `AuthContext`.
+A protocol is the handshake: create a session, start a turn, stream `StreamEvent`, end a turn, return HITL answers. Map wire auth into `AuthContext`. Hosts that persist ACP wire envelopes in Postgres call `PostgresWireStore.Setup`.
 
 | Runtime | ACP example | Host protocol / autonomous |
 |---------|-------------|----------------------------|
@@ -130,7 +163,7 @@ Runtime, harness, VFS, and Temporal files compile with no protocol imports.
 | Runtime | Client + worker | Same | Same |
 | Session workflow | Workflow | Orchestration | Durable execution |
 | Inference / tool | Activity | Activity | Invoke + heartbeat |
-| Subagent | Child workflow | Sub-orchestration | Nested execution |
+| Child / specialist | Child workflow | Sub-orchestration | Nested execution |
 | HITL | Signal Resume | WaitForExternalEvent | waitForEvent |
 | Progress | Workflow Streams | Event Hubs / queue | SQS / stream |
 | Auth | Prompt/Resume payload | orchestration input / event | invocation payload |

@@ -52,6 +52,7 @@ type AgentHarness struct {
 	// Worker runs share one live lifecycle registry across sync and async delivery.
 	jobs              map[string]*workerRun
 	jobsMu            sync.Mutex
+	jobsCancelMu      sync.Mutex // serializes cancelBackgroundJobs
 	jobsCtx           context.Context
 	jobsCancel        context.CancelFunc
 	skillByName       map[string]skills.Skill

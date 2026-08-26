@@ -39,6 +39,11 @@ func NewMemoryStore() *MemoryStore {
 	}
 }
 
+// Setup upserts kinds. There is no schema to apply.
+func (s *MemoryStore) Setup(ctx context.Context, kinds ...KindSpec) error {
+	return PersistKinds(ctx, s, kinds...)
+}
+
 // Put implements ObjectWriter. Soft-deleted rows may be stored; Get hides them.
 // Clones maps/slices so callers cannot mutate the store through shared references.
 func (s *MemoryStore) Put(_ context.Context, obj Object) error {
