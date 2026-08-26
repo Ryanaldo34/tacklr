@@ -10,12 +10,7 @@ import (
 // ChildSessionID is the stable id for a spawn_specialist child session.
 // Same shape as embed workerSessionID: {parent}/w/{worker}/{call}.
 func ChildSessionID(parent SessionID, specialist, callID string) SessionID {
-	specialist = strings.TrimSpace(specialist)
-	callID = strings.TrimSpace(callID)
-	if parent == "" {
-		return SessionID(fmt.Sprintf("w/%s/%s", specialist, callID))
-	}
-	return SessionID(fmt.Sprintf("%s/w/%s/%s", parent, specialist, callID))
+	return SessionID(fmt.Sprintf("%s/w/%s/%s", parent, strings.TrimSpace(specialist), strings.TrimSpace(callID)))
 }
 
 // OverlaySpecialist copies the parent catalog spec and applies the named Specialist.
@@ -34,16 +29,13 @@ func OverlaySpecialist(parent AgentSpec, specialist string) (AgentSpec, error) {
 }
 
 func parentFacingState(st SessionStatus) string {
-	switch st.State {
-	case SessionComplete:
+	if st.State == SessionComplete {
 		return "completed"
-	case SessionFailed:
-		return "failed"
-	case SessionUnknown:
-		return "unknown"
-	default:
-		return "running"
 	}
+	if st.State == SessionFailed {
+		return "failed"
+	}
+	return "running"
 }
 
 // ChildrenNudge is injected when inference would complete while children remain.

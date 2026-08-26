@@ -16,7 +16,7 @@ func TestOverlaySpecialist_inheritsParentAndNests(t *testing.T) {
 		Options: tacklr.AgentOptions{
 			Model:  parentModel,
 			Config: tacklr.Config{MaxWindowSize: 8192, SystemPrompt: "parent"},
-			Specialists: []*tacklr.Specialist{{
+			Specialists: []*tacklr.Specialist{nil, {
 				Name:         "researcher",
 				Instructions: "research",
 				Model:        childModel,

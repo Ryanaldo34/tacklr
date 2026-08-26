@@ -45,9 +45,24 @@ func TestNewAgent_rejectsInvalidSpecialists(t *testing.T) {
 }
 
 func TestSystemPrompt_listsSpecialistsSorted(t *testing.T) {
+	var n int
 	h := mustNewAgent(t, AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
-		Model:  &mockStrategy{},
+		Model: &mockStrategy{
+			invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
+				n++
+				if n == 1 {
+					ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
+						toolCall("sp1", "spawn_specialist", `{"specialist":"alpha","task_description_and_context":"x"}`),
+						toolCall("ls1", "list_children", `{}`),
+						toolCall("gc1", "get_child", `{"child_id":"missing"}`),
+						toolCall("cc1", "cancel_child", `{"child_id":"missing"}`),
+					}, IsComplete: true}
+					return
+				}
+				ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "done", IsComplete: true}
+			},
+		},
 		Specialists: []*Specialist{
 			{Name: "zebra", Model: &mockStrategy{}, Description: "last"},
 			{Name: "alpha", Model: &mockStrategy{}},
@@ -59,6 +74,23 @@ func TestSystemPrompt_listsSpecialistsSorted(t *testing.T) {
 	zi := strings.Index(prompt, " - zebra: last\n")
 	if ai < 0 || zi < 0 || ai > zi {
 		t.Fatalf("want alpha then zebra in prompt: %s", prompt)
+	}
+	ch, err := h.Run(context.Background(), "delegate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := drainEvents(ch)
+	var texts []string
+	for _, ev := range got {
+		if ev.Type == StreamEventToolResult {
+			texts = append(texts, ev.Content)
+		}
+	}
+	blob := strings.ToLower(strings.Join(texts, "\n"))
+	for _, want := range []string{"not available", "no child sessions"} {
+		if !strings.Contains(blob, want) {
+			t.Fatalf("want %q in child-tool results: %v", want, summarizeEvents(got))
+		}
 	}
 }
 

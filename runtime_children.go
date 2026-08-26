@@ -10,7 +10,7 @@ import (
 )
 
 // childHost is the session-side implementation of HarnessRuntime child methods.
-// Durable runtimes bind nested sessions; embed uses in-memory jobs.
+// Durable runtimes bind nested sessions; nil host means children are unavailable.
 // Method names are exported so other packages can implement this by duck typing.
 type childHost interface {
 	SpawnChild(ctx context.Context, specialist, task, callID string) (string, error)
@@ -87,15 +87,8 @@ func formatChildren(rows []Child) string {
 }
 
 func formatChild(c Child) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "id=%s specialist=%s status=%s\n", c.ID, c.Specialist, c.State)
-	switch c.State {
-	case ChildCompleted, ChildFailed:
-		b.WriteString(c.Result)
-	default:
-		b.WriteString("Still running. Call get_child again later, or set block=true to wait until finished.")
-	}
-	return strings.TrimSuffix(b.String(), "\n")
+	return fmt.Sprintf("id=%s specialist=%s status=%s\nStill running. Call get_child again later, or set block=true to wait until finished.",
+		c.ID, c.Specialist, c.State)
 }
 
 func scheduledChildMessage(id, specialist string) string {
@@ -155,12 +148,6 @@ func collectChild(child Child, err error) (string, error) {
 			return child.Result, err
 		}
 		return "", err
-	}
-	if child.State == ChildFailed {
-		if child.Result != "" {
-			return child.Result, fmt.Errorf("%s: %w", child.Result, ErrFailed)
-		}
-		return "", fmt.Errorf("child %s failed: %w", child.ID, ErrFailed)
 	}
 	return child.Result, nil
 }

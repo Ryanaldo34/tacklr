@@ -421,6 +421,56 @@ func TestReturnFromInterrupt_rejectsUnknownInterrupt(t *testing.T) {
 	}
 }
 
+func TestReturnFromInterrupt_rejectsInvalidPayload(t *testing.T) {
+	model := sequentialToolModel([]ToolCall{toolCall("ask1", "ask_user_choice",
+		`{"question":"Pick?","choices":[{"title":"A"},{"title":"B"}]}`)})
+	h := mustNewAgent(t, AgentOptions{
+		Model: model, Config: Config{MaxWindowSize: 8192},
+	})
+	t.Cleanup(h.Close)
+	events, err := h.Run(context.Background(), "ask")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var id string
+	for _, ev := range drainEvents(events) {
+		if ev.Type != StreamEventInterrupt {
+			continue
+		}
+		var payload struct {
+			InterruptId string `json:"interruptId"`
+		}
+		if err := json.Unmarshal(ev.Data, &payload); err != nil {
+			t.Fatal(err)
+		}
+		id = payload.InterruptId
+	}
+	if id == "" {
+		t.Fatal("expected interrupt yield")
+	}
+	ch, err := h.ReturnFromInterrupt(context.Background(), map[string][]byte{id: []byte(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasEventType(drainEvents(ch), StreamEventError) {
+		t.Fatal("want invalid payload on the resume stream")
+	}
+	next, err := h.Run(context.Background(), "new prompt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	drainEvents(next)
+	var closed bool
+	for _, m := range h.Messages() {
+		if m != nil && m.Role == RoleTool && (strings.Contains(m.Content, "cancelled") || strings.Contains(m.Content, "unpaired")) {
+			closed = true
+		}
+	}
+	if !closed {
+		t.Fatalf("new prompt should close the parked tool, window=%+v", h.Messages())
+	}
+}
+
 // TestRun_modelStreamError_afterToolAnnounce_emitsFailedToolResults: incomplete
 // tool announcements are closed with an error status when the model stream fails.
 func TestRun_modelStreamError_afterToolAnnounce_emitsFailedToolResults(t *testing.T) {

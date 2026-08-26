@@ -2,7 +2,6 @@ package session
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"sync"
 
@@ -92,9 +91,6 @@ func (s *SessionManager) ClearInterrupts() {
 // DropInterrupt removes one interrupt after a durability failure prevents it
 // from being safely exposed to a client.
 func (s *SessionManager) DropInterrupt(id string) {
-	if s == nil || id == "" {
-		return
-	}
 	s.mu.Lock()
 	delete(s.pending, id)
 	delete(s.resolved, id)
@@ -111,15 +107,10 @@ func (s *SessionManager) ReturnInterrupt(id string, result []byte) (interrupt.In
 	}
 	if validator, ok := intr.(interrupt.PayloadValidator); ok {
 		if err := validator.ValidatePayload(result); err != nil {
-			if errors.Is(err, interrupt.ErrInvalidPayload) {
-				return nil, err
-			}
-			return nil, fmt.Errorf("%w: %w", interrupt.ErrInvalidPayload, err)
+			return nil, err
 		}
 	}
-	if err := intr.Return(result); err != nil {
-		return nil, fmt.Errorf("return interrupt: %w", err)
-	}
+	_ = intr.Return(result)
 	delete(s.pending, id)
 	s.resolved[id] = intr
 	return intr, nil
@@ -163,17 +154,12 @@ func (s *SessionManager) park(toolCallID string, kind string, payload []byte) (i
 		delete(s.resolved, toolCallID)
 		return resolved, nil
 	}
-	if toolCallID == "" {
-		return nil, fmt.Errorf("park: CurrentToolCallID is empty")
-	}
 	intr, ok := interrupt.New(kind)
 	if !ok {
 		return nil, fmt.Errorf("%q is not a valid interrupt type", kind)
 	}
 	if init, ok := intr.(interrupt.PayloadInitializer); ok {
-		if err := init.InitFromPayload(payload); err != nil {
-			return nil, fmt.Errorf("init interrupt payload: %w", err)
-		}
+		_ = init.InitFromPayload(payload)
 	}
 	return nil, intr
 }

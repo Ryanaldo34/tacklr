@@ -20,14 +20,8 @@ type Runtime struct {
 	toolCallID string
 }
 
-// NewRuntime builds a turn-scoped Runtime. ch and sm must be non-nil.
+// NewRuntime builds a turn-scoped Runtime.
 func NewRuntime(ch chan streaming.StreamEvent, sm *SessionManager) Runtime {
-	if ch == nil {
-		panic("session.NewRuntime: nil event channel")
-	}
-	if sm == nil {
-		panic("session.NewRuntime: nil SessionManager")
-	}
 	return Runtime{
 		session: sm,
 		out:     ch,

@@ -495,6 +495,12 @@ func TestRun_askUserChoice_withoutDescription_formatsSelection(t *testing.T) {
 	if interruptID == "" {
 		t.Fatal("expected interrupt")
 	}
+	empty, err := h.ReturnFromInterrupt(context.Background(), map[string][]byte{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range empty {
+	}
 	resumed, err := h.ReturnFromInterrupt(context.Background(), map[string][]byte{
 		interruptID: []byte(`{"selectionIdx":0}`),
 	})

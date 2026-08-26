@@ -85,12 +85,7 @@ func (a *AgentHarness) startTurn(ctx context.Context, user *Message, resume map[
 		outcome := telemetry.OutcomeOK
 		defer func() { span.End(outcome) }()
 
-		cancelled := false
 		emitCancelled := func() {
-			if cancelled {
-				return
-			}
-			cancelled = true
 			outcome = telemetry.OutcomeCancelled
 			a.finalizeCancelledWork(out)
 			out <- StreamEvent{Type: StreamEventError, Error: fmt.Errorf("run: context cancelled: %w", ctx.Err())}
@@ -159,11 +154,6 @@ func (a *AgentHarness) runTurnLoop(ctx context.Context, out chan StreamEvent, em
 			}
 		}
 
-		if ctx.Err() != nil {
-			emitCancelled()
-			return telemetry.OutcomeCancelled
-		}
-
 		st.HadToolRound = st.HadToolRound || len(toolCalls) > 0
 		var wg sync.WaitGroup
 		var parked atomic.Bool
@@ -208,9 +198,6 @@ func (a *AgentHarness) pairOpenToolCalls(reason string) {
 			continue
 		}
 		for _, tc := range m.ToolCalls {
-			if tc.WireID() == "" {
-				continue
-			}
 			if toolCallHasResult(hasOutput, tc) || toolCallIsPending(pending, tc) {
 				continue
 			}

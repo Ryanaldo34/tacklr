@@ -564,7 +564,9 @@ func TestChildren_unknownSpecialistAndChild(t *testing.T) {
 				ToolCalls: []tacklr.ToolCall{
 					{ID: "sp1", CallID: "sp1", Name: "spawn_specialist", Arguments: `{"specialist":"ghost","task_description_and_context":"x"}`},
 					{ID: "gc1", CallID: "gc1", Name: "get_child", Arguments: `{"child_id":"missing"}`},
+					{ID: "gc0", CallID: "gc0", Name: "get_child", Arguments: `{}`},
 					{ID: "cc1", CallID: "cc1", Name: "cancel_child", Arguments: `{"child_id":"missing"}`},
+					{ID: "cc0", CallID: "cc0", Name: "cancel_child", Arguments: `{}`},
 					{ID: "bad", CallID: "bad", Name: "spawn_specialist", Arguments: `{}`},
 				},
 				IsComplete: true,
@@ -604,7 +606,6 @@ func TestChildren_nudgeUntilCollected(t *testing.T) {
 					Type: tacklr.StreamEventFunctionCall, ToolCalls: []tacklr.ToolCall{spawnAsync("researcher", "sp1")}, IsComplete: true,
 				}
 			case 2:
-				waitStatus(t, rt, id, func(st durable.SessionStatus) bool { return st.State == durable.SessionComplete })
 				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "too-soon", IsComplete: true}
 			case 3:
 				ch <- tacklr.LLMResponseChunk{
@@ -777,11 +778,13 @@ func TestChildren_failedChildIsCollectable(t *testing.T) {
 				}
 			case 2:
 				waitStatus(t, rt, id, func(st durable.SessionStatus) bool { return st.State == durable.SessionFailed })
+				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "too-soon", IsComplete: true}
+			case 3:
 				ch <- tacklr.LLMResponseChunk{
 					Type: tacklr.StreamEventFunctionCall,
 					ToolCalls: []tacklr.ToolCall{{
 						ID: "gc1", CallID: "gc1", Name: "get_child",
-						Arguments: `{"child_id":"` + string(id) + `","block":true}`,
+						Arguments: `{"child_id":"` + string(id) + `"}`,
 					}},
 					IsComplete: true,
 				}

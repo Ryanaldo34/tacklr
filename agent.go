@@ -277,28 +277,22 @@ func (a *AgentHarness) addToContext(ctx context.Context, newMsg *Message, out ch
 		return err
 	}
 	for _, chunk := range res.SummaryChunks {
-		if !a.streamChunk(ctx, chunk, out) {
-			return ctx.Err()
-		}
+		_ = a.streamChunk(ctx, chunk, out)
 	}
-	return nil
+	return ctx.Err()
 }
 
 func (a *AgentHarness) applyBatchToolResultEffect(ctx context.Context, effect ToolResultEffect) error {
-	switch effect {
-	case EffectInstallPlanDocument:
+	if effect == EffectInstallPlanDocument {
 		doc := a.session.Plan.Document()
 		_, span := telemetry.StartPlanInstallSpan(ctx, a.sessionId)
 		err := a.context.InstallPlanDocument(doc)
 		span.End(err)
 		return err
-	case EffectHandoff:
-		todos := a.session.Plan.Get()
-		doc := a.session.Plan.Document()
-		return a.tasks.Handoff(ctx, todos, doc, a.tools, a.constructSystemPrompt())
-	default:
-		return nil
 	}
+	todos := a.session.Plan.Get()
+	doc := a.session.Plan.Document()
+	return a.tasks.Handoff(ctx, todos, doc, a.tools, a.constructSystemPrompt())
 }
 
 func (a *AgentHarness) findTool(name, namespace string) *Tool {
@@ -373,17 +367,11 @@ func (a *AgentHarness) recordWatchdog(msg *Message) {
 	if a.watchDog == nil || msg == nil {
 		return
 	}
-	var err error
-	switch msg.Role {
-	case RoleTool:
-		err = a.watchDog.RecordToolResult(msg)
-	default:
-		err = a.watchDog.RecordOutput(msg)
+	if msg.Role == RoleTool {
+		_ = a.watchDog.RecordToolResult(msg)
+		return
 	}
-	if err != nil {
-		slog.WarnContext(context.Background(), "optional watchdog failed to record message",
-			"role", msg.Role, "error", err)
-	}
+	_ = a.watchDog.RecordOutput(msg)
 }
 
 // toolResultMessage builds a tool Message (presented tc for wire/stream).
@@ -548,13 +536,7 @@ func (a *AgentHarness) Close() {
 		a.mcpCleanup = nil
 	}
 	if a.ownsVFSBridge && a.vfsBridge != nil {
-		if err := a.vfsBridge.Close(); err != nil {
-			slog.Error("vfsindex bridge close failed",
-				"area", telemetry.AreaHarness,
-				"session_id", a.sessionId,
-				"error", err,
-			)
-		}
+		_ = a.vfsBridge.Close()
 		a.vfsBridge = nil
 	}
 }

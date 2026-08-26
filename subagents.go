@@ -136,9 +136,6 @@ func (a *AgentHarness) cancelChildTool() *Tool {
 // FindSpecialist returns the named worker from specs, including nested Specialists.
 func FindSpecialist(specs []*Specialist, name string) *Specialist {
 	name = strings.TrimSpace(name)
-	if name == "" {
-		return nil
-	}
 	for _, spec := range specs {
 		if spec == nil {
 			continue
@@ -159,9 +156,6 @@ func FindSpecialist(specs []*Specialist, name string) *Specialist {
 // MountSession and SessionID stay as the caller set them (Runtime injects a
 // child tree).
 func (o AgentOptions) WithSpecialist(spec *Specialist) AgentOptions {
-	if spec == nil {
-		return o
-	}
 	out := o
 	out.Config.SystemPrompt = spec.Instructions
 	if spec.Model != nil {
