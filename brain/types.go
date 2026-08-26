@@ -167,15 +167,51 @@ type ObjectKindInfo struct {
 	FilterableFields json.RawMessage `json:"filterable_fields,omitempty"`
 }
 
-// Filters narrows retrieval. Keys are field names; values are equality targets
-// (or a list for match-any). Special keys: kind, title, created_after,
-// created_before, updated_after, updated_before. Any other key matches properties.
-type Filters map[string]any
+// StringMatch is equality or match-any for a well-known string field.
+type StringMatch struct {
+	Eq string
+	In []string
+}
+
+func (s StringMatch) set() bool { return s.Eq != "" || len(s.In) > 0 }
+
+// PropFilter is equality or match-any for one property.
+type PropFilter struct {
+	Eq any
+	In []any
+}
+
+// Filter narrows retrieval. Well-known fields plus Props. Eq or list (In).
+type Filter struct {
+	Kind          StringMatch
+	Title         StringMatch
+	CreatedAfter  string
+	CreatedBefore string
+	UpdatedAfter  string
+	UpdatedBefore string
+	Props         map[string]PropFilter
+}
+
+func (f Filter) empty() bool {
+	return !f.Kind.set() && !f.Title.set() &&
+		f.CreatedAfter == "" && f.CreatedBefore == "" &&
+		f.UpdatedAfter == "" && f.UpdatedBefore == "" &&
+		len(f.Props) == 0
+}
+
+// MustFilter decodes a JSON-shaped map. Tests and tools use DecodeFilter for errors.
+func MustFilter(m map[string]any) Filter {
+	f, err := DecodeFilter(m)
+	if err != nil {
+		panic(err)
+	}
+	return f
+}
 
 // SearchRequest is the engine input for search and find_exact.
 type SearchRequest struct {
 	Query   string
-	Filters Filters
+	Filters Filter
 	Limit   int
 	// ScopeIDs, when non-empty, keeps only candidates whose id or parent_id is in the set.
 	// Use after expand/find_objects to restrict corpus search to a deal-local neighborhood.

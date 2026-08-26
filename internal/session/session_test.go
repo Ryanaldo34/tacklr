@@ -2,7 +2,6 @@ package session_test
 
 import (
 	"encoding/json"
-	"errors"
 	"strings"
 	"testing"
 
@@ -68,10 +67,10 @@ func TestCheckpointer_resolvedToolPermissionKeepsAllowed(t *testing.T) {
 		ToolName: "sensitive",
 		Options:  interrupt.DefaultPermissionOptions(),
 	}
-	if _, err := sm.AdoptInterrupt("call_sens", parked); err == nil {
-		t.Fatal("adopt should park")
+	if err := sm.Park("call_sens", parked); err == nil {
+		t.Fatal("park should return interrupt as error")
 	}
-	if _, err := sm.ReturnInterrupt("call_sens", []byte(`{"optionId":"allow-once"}`)); err != nil {
+	if _, err := sm.Resume("call_sens", []byte(`{"optionId":"allow-once"}`)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -94,9 +93,9 @@ func TestCheckpointer_resolvedToolPermissionKeepsAllowed(t *testing.T) {
 	if !ok || ptc.InterruptActive || ptc.ToolCall == nil {
 		t.Fatalf("pending after apply: %+v", applied.PendingToolCalls)
 	}
-	got, err := sm2.AdoptInterrupt("call_sens", &interrupt.ToolPermissionInterrupt{Options: interrupt.DefaultPermissionOptions()})
-	if err != nil {
-		t.Fatalf("re-entry adopt: %v", err)
+	got, ok := sm2.TakeResolved("call_sens")
+	if !ok {
+		t.Fatal("re-entry TakeResolved")
 	}
 	perm, ok := got.(*interrupt.ToolPermissionInterrupt)
 	if !ok || !perm.Allowed || perm.SelectedOptionID != "allow-once" {
@@ -273,20 +272,9 @@ func TestSessionManager_stateAndPlanAreIsolated(t *testing.T) {
 	}
 }
 
-func adoptPark(t *testing.T, sm *session.SessionManager, id string, err error) {
-	t.Helper()
-	var intr interrupt.Interrupt
-	if !errors.As(err, &intr) {
-		t.Fatalf("park: %v", err)
-	}
-	if _, aerr := sm.AdoptInterrupt(id, intr); aerr == nil {
-		t.Fatal("adopt should return park error")
-	}
-}
-
-// TestSession_interrupts_raiseReturnAdopt is the interrupt lifecycle:
-// tool Park returns an interrupt error; the harness AdoptInterrupt writes pending.
-func TestSession_interrupts_raiseReturnAdopt(t *testing.T) {
+// TestSession_interrupts_parkResumeReentry is the interrupt lifecycle:
+// Park writes pending; invalid payload leaves the park; Resume then TakeResolved.
+func TestSession_interrupts_parkResumeReentry(t *testing.T) {
 	sm := session.NewSessionManager()
 	ch := make(chan streaming.StreamEvent, 4)
 	rt := session.NewRuntime(ch, sm)
@@ -301,27 +289,29 @@ func TestSession_interrupts_raiseReturnAdopt(t *testing.T) {
 	if err == nil {
 		t.Fatal("park returns interrupt as error")
 	}
-	if sm.HasPendingInterrupt() {
-		t.Fatal("Park must not write pending")
-	}
-	adoptPark(t, sm, "tc1", err)
 	if !sm.HasPendingInterrupt() {
-		t.Fatal("pending")
+		t.Fatal("Park must write pending")
+	}
+	if len(sm.Pending()) != 1 {
+		t.Fatal("Pending()")
 	}
 	if _, ok := sm.PendingInterrupt("tc1"); !ok {
 		t.Fatal("pending by id")
 	}
 
-	// Invalid payload validation.
-	if _, err := sm.ReturnInterrupt("tc1", []byte(`{}`)); err == nil {
+	// Invalid payload leaves the park in place.
+	if _, err := sm.Resume("tc1", []byte(`{}`)); err == nil {
 		t.Fatal("want invalid payload")
 	}
-	if _, err := sm.ReturnInterrupt("missing", []byte(`{"selectionIdx":0}`)); err == nil {
+	if !sm.HasPendingInterrupt() {
+		t.Fatal("invalid payload must leave park")
+	}
+	if _, err := sm.Resume("missing", []byte(`{"selectionIdx":0}`)); err == nil {
 		t.Fatal("want not found")
 	}
 
-	// Valid return → resolved.
-	got, err := sm.ReturnInterrupt("tc1", []byte(`{"selectionIdx":1}`))
+	// Valid resume → resolved.
+	got, err := sm.Resume("tc1", []byte(`{"selectionIdx":1}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -329,73 +319,66 @@ func TestSession_interrupts_raiseReturnAdopt(t *testing.T) {
 	if !ok || usi.ConfirmedChoice == nil || usi.ConfirmedChoice.Title != "B" {
 		t.Fatalf("choice = %+v", got)
 	}
-	resolved, ok := sm.TakeResolvedInterrupt("tc1")
+	resolved, ok := sm.TakeResolved("tc1")
 	if !ok || resolved == nil {
 		t.Fatal("take resolved")
 	}
-	if _, ok := sm.TakeResolvedInterrupt("tc1"); ok {
+	if _, ok := sm.TakeResolved("tc1"); ok {
 		t.Fatal("already taken")
 	}
 
-	// Raise after resolve short-circuits with resolved value (second raise path).
+	// Park after resolve short-circuits with resolved value (re-entry).
 	rt = rt.WithToolCallID("tc2")
 	_, err = rt.Park("user_selection_choice", []byte(`[{"title":"X"}]`))
 	if err == nil {
 		t.Fatal("park")
 	}
-	adoptPark(t, sm, "tc2", err)
-	if _, err := sm.ReturnInterrupt("tc2", []byte(`{"selectionIdx":0}`)); err != nil {
+	if _, err := sm.Resume("tc2", []byte(`{"selectionIdx":0}`)); err != nil {
 		t.Fatal(err)
 	}
-	// Second raise with same tool call id returns resolved without re-parking.
 	intr, err := rt.Park("user_selection_choice", []byte(`[{"title":"Y"}]`))
 	if err != nil || intr == nil {
 		t.Fatalf("want resolved return, err=%v intr=%v", err, intr)
 	}
 
-	// Adopt: first parks, second after resolve returns resolved.
 	parked := &interrupt.UserSelectionInterrupt{Options: []interrupt.UserChoice{{Title: "Z"}}}
-	_, err = sm.AdoptInterrupt("tc3", parked)
-	if err == nil {
-		t.Fatal("adopt parks as error")
+	if err = sm.Park("tc3", parked); err == nil {
+		t.Fatal("Park returns interrupt as error")
 	}
-	if _, err := sm.AdoptInterrupt("tc3", nil); err == nil {
-		t.Fatal("nil adopt")
+	if err := sm.Park("tc3", nil); err == nil {
+		t.Fatal("nil park")
 	}
-	if _, err := sm.AdoptInterrupt("", parked); err == nil {
+	if err := sm.Park("", parked); err == nil {
 		t.Fatal("empty tool call id")
 	}
-	if _, err := sm.ReturnInterrupt("tc3", []byte(`{"selectionIdx":0}`)); err != nil {
+	if _, err := sm.Resume("tc3", []byte(`{"selectionIdx":0}`)); err != nil {
 		t.Fatal(err)
 	}
-	got, err = sm.AdoptInterrupt("tc3", &interrupt.UserSelectionInterrupt{Options: []interrupt.UserChoice{{Title: "again"}}})
-	if err != nil || got == nil {
-		t.Fatalf("adopt resolved path err=%v got=%v", err, got)
+	got, ok = sm.TakeResolved("tc3")
+	if !ok || got == nil {
+		t.Fatalf("TakeResolved after resume got=%v", got)
 	}
 
-	// Tool permission raise + resolve.
+	// Tool permission park + resume.
 	rt = rt.WithToolCallID("perm")
 	_, err = rt.Park("tool_permission", []byte(`{"toolName":"rm"}`))
 	if err == nil {
 		t.Fatal("park permission")
 	}
-	adoptPark(t, sm, "perm", err)
-	if _, err := sm.ReturnInterrupt("perm", []byte(`{"optionId":"allow-once"}`)); err != nil {
+	if _, err := sm.Resume("perm", []byte(`{"optionId":"allow-once"}`)); err != nil {
 		t.Fatal(err)
 	}
 
-	// SessionManager facade: clear, then pending → return without a turn bus.
 	sm.ClearInterrupts()
 	rt = rt.WithToolCallID("sm1")
 	_, err = rt.Park("tool_permission", []byte(`{"toolName":"ls"}`))
 	if err == nil {
 		t.Fatal("park after ClearInterrupts")
 	}
-	adoptPark(t, sm, "sm1", err)
 	if _, ok := sm.PendingInterrupt("sm1"); !ok {
-		t.Fatal("PendingInterrupt after adopt")
+		t.Fatal("PendingInterrupt after Park")
 	}
-	if _, err := sm.ReturnInterrupt("sm1", []byte(`{"optionId":"allow-once"}`)); err != nil {
+	if _, err := sm.Resume("sm1", []byte(`{"optionId":"allow-once"}`)); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -439,7 +422,9 @@ func TestSessionManager_checkpointInterruptsRoundTrip(t *testing.T) {
 	}(), sm)
 	rt = rt.WithToolCallID("c1")
 	_, parkErr := rt.Park("user_selection_choice", []byte(`[{"title":"A"}]`))
-	adoptPark(t, sm, "c1", parkErr)
+	if parkErr == nil {
+		t.Fatal("park")
+	}
 	rt.StateSet("u", "v")
 	sm.Plan.SetDocument("doc")
 	sm.Plan.Set([]streaming.Todo{{Title: "T", Status: streaming.TodoStatusPending}})
@@ -501,7 +486,9 @@ func TestInterruptMap_unknownType_errors(t *testing.T) {
 	}(), sm)
 	rt = rt.WithToolCallID("x")
 	_, parkErr := rt.Park("tool_permission", []byte(`{"toolName":"t"}`))
-	adoptPark(t, sm, "x", parkErr)
+	if parkErr == nil {
+		t.Fatal("park")
+	}
 	// Build envelope with unknown type.
 	bad, _ := json.Marshal(map[string]any{
 		"x": map[string]any{"type": "not_registered", "data": map[string]any{}},

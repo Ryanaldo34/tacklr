@@ -3,25 +3,45 @@ package tacklr
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/ryanaldo34/tacklr/internal/drive"
 	"github.com/ryanaldo34/tacklr/internal/session"
+	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/mcp"
+	"github.com/ryanaldo34/tacklr/skills"
 	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
+type stubSkills struct{}
+
+func (stubSkills) Load(context.Context) ([]skills.Skill, error) {
+	return []skills.Skill{{Name: "pack", Description: "research", Instructions: "read first"}}, nil
+}
+
+type failMCP struct{}
+
+func (failMCP) ResolveMCP(context.Context, string) (mcp.Credentials, error) {
+	return mcp.Credentials{}, errors.New("expired")
+}
+
 type zeroWindowStrategy struct{ mockStrategy }
 
 func (*zeroWindowStrategy) MaxContextWindow() (int, error) { return 0, nil }
 
-// TestNewAgent_constructFailClosed is the fail-closed construct surface:
+type errWindowStrategy struct{ mockStrategy }
+
+func (*errWindowStrategy) MaxContextWindow() (int, error) { return 0, errors.New("no window") }
+
+// TestNewTurnManager_constructFailClosed is the fail-closed construct surface:
 // broken /skills pack, missing session, and resume without a model.
-func TestNewAgent_constructFailClosed(t *testing.T) {
+func TestNewTurnManager_constructFailClosed(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Mkdir(filepath.Join(root, "empty"), 0o755); err != nil {
 		t.Fatal(err)
@@ -38,7 +58,7 @@ func TestNewAgent_constructFailClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ms.Close() })
-	_, err = NewAgent(context.Background(), AgentOptions{
+	_, err = NewTurnManager(context.Background(), AgentOptions{
 		Config:       Config{MaxWindowSize: 8192},
 		Model:        &mockStrategy{},
 		MountSession: ms,
@@ -48,7 +68,7 @@ func TestNewAgent_constructFailClosed(t *testing.T) {
 	}
 }
 
-func TestNewAgent_configurationInvariants(t *testing.T) {
+func TestNewTurnManager_configurationInvariants(t *testing.T) {
 	// Arrange
 	validModel := &mockStrategy{}
 	cases := []struct {
@@ -58,6 +78,10 @@ func TestNewAgent_configurationInvariants(t *testing.T) {
 		{
 			name: "model without context limit",
 			opts: AgentOptions{Model: &zeroWindowStrategy{}},
+		},
+		{
+			name: "model window lookup fails",
+			opts: AgentOptions{Model: &errWindowStrategy{}},
 		},
 		{
 			name: "negative max window",
@@ -106,13 +130,13 @@ func TestNewAgent_configurationInvariants(t *testing.T) {
 	// Act and assert
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := NewAgent(t.Context(), tc.opts); err == nil {
+			if _, err := NewTurnManager(t.Context(), tc.opts); err == nil {
 				t.Fatal("invalid configuration was accepted")
 			}
 		})
 	}
 
-	h, err := NewAgent(t.Context(), AgentOptions{Model: validModel})
+	h, err := NewTurnManager(t.Context(), AgentOptions{Model: validModel})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,33 +175,148 @@ func TestRestoreCheckpoint_rejectsCorruptModules(t *testing.T) {
 	if err := json.Unmarshal(raw, &checkpoint); err != nil {
 		t.Fatal(err)
 	}
-	h := mustNewAgent(t, AgentOptions{Model: &mockStrategy{}})
+	h := mustNewTurnManager(t, AgentOptions{Model: &mockStrategy{}})
 	if err := h.RestoreCheckpoint(checkpoint); err == nil {
 		t.Fatal("corrupt checkpoint was accepted")
 	}
 }
 
-func TestAgentHarness_checkpointAfterRun(t *testing.T) {
-	h, err := NewAgent(t.Context(), AgentOptions{
-		SessionID: "sess",
-		Model:     &mockStrategy{},
-		Config:    Config{MaxWindowSize: 8192},
+func TestTurnManager_checkpointAfterRun(t *testing.T) {
+	wd := &recordingWatchdog{}
+	mock := &mockStrategy{}
+	h, err := NewTurnManager(t.Context(), AgentOptions{
+		SessionID:    "sess",
+		Model:        mock,
+		WatchDog:     wd,
+		Config:       Config{MaxWindowSize: 8192, SystemPrompt: "be brief"},
+		SkillsLoader: stubSkills{},
+		Specialists: []*Specialist{{
+			Name:        "researcher",
+			Description: "Looks things up.",
+			Model:       mock,
+		}},
+		MCPConfigs: []mcp.MCPConfig{{
+			Name: "remote", Type: mcp.TransportHTTP, URL: "https://example.test", CredentialRef: "vault://remote",
+		}},
+		MCPCredentialResolver: failMCP{},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(h.Close)
-	events, err := h.Run(t.Context(), "hello")
-	if err != nil {
+	h.injectBuiltinTools() // already injected at construct
+	out := make(chan StreamEvent, 16)
+	go func() {
+		for range out {
+		}
+	}()
+	if err := h.absorbUser(t.Context(), &Message{Role: RoleUser, Content: "hello"}, out); err != nil {
 		t.Fatal(err)
 	}
-	for range events {
+	img := &Message{Role: RoleUser, ContentParts: []ContentPart{{
+		Type:     ContentTypeInputImage,
+		FileData: &FileData{MIMEType: "image/png"},
+	}}}
+	if err := h.absorbUser(t.Context(), img, out); err == nil {
+		t.Fatal("text-only model must reject image input")
 	}
+	write := NewTool(ToolConfig{
+		Name: "mutate", Access: ToolWriteAccess,
+		Handler: func(context.Context) (string, error) { return "ok", nil },
+	})
+	_, err = h.planningWriteLock(t.Context(), ToolInvocation{Tool: write}, func(context.Context, ToolInvocation) (string, error) {
+		return "ran", nil
+	})
+	if !errors.Is(err, ErrToolPermissionDenied) {
+		t.Fatalf("write locked until create_plan: %v", err)
+	}
+	if sk := h.findTool("read_skill", ""); sk != nil {
+		if _, err := sk.invoke(t.Context(), `{"name":"missing"}`, turnRuntime(h)); err == nil {
+			t.Fatal("unknown skill")
+		}
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := h.addToContext(ctx, &Message{Role: RoleUser, Content: "x"}, out); err == nil {
+		t.Fatal("cancelled absorb")
+	}
+
+	pendingID := "call_pending"
+	h.pendingToolCalls[pendingID] = stores.PendingToolCall{
+		ToolCall: &ToolCall{ID: pendingID, CallID: pendingID, Name: "x", Arguments: "{}"},
+	}
+	h.context.Add(&Message{Role: RoleAssistant, ToolCalls: []ToolCall{
+		{ID: pendingID, CallID: pendingID, Name: "x", Arguments: "{}"},
+		{ID: "fc_open", CallID: "call_open", Name: "y", Arguments: "{}"},
+	}})
+	h.pairOpenToolCalls("unpaired tool call")
+	openPaired := false
+	for _, m := range h.context.Messages() {
+		if m != nil && m.Role == RoleTool && m.ToolCallID == "call_open" {
+			openPaired = true
+		}
+		if m != nil && m.Role == RoleTool && m.ToolCallID == pendingID {
+			t.Fatal("pending call must not be paired")
+		}
+	}
+	if !openPaired {
+		t.Fatal("unpaired tool call must get a result before the next model turn")
+	}
+	if err := h.absorbUser(t.Context(), &Message{Role: RoleUser, Content: "steer"}, out); err != nil {
+		t.Fatal(err)
+	}
+	if h.hasOpenToolWork() {
+		t.Fatal("new prompt must clear leftover tool work")
+	}
+
+	if err := h.applyResume(map[string][]byte{"missing": []byte(`{}`)}); err == nil {
+		t.Fatal("unknown interrupt id")
+	}
+	parkID := "ask1"
+	_ = h.session.Park(parkID, &interrupt.UserSelectionInterrupt{
+		Options: []interrupt.UserChoice{{Title: "a"}, {Title: "b"}},
+	})
+	h.pendingToolCalls[parkID] = stores.PendingToolCall{
+		ToolCall: &ToolCall{ID: parkID, CallID: parkID, Name: "ask_user_choice"}, InterruptActive: true,
+	}
+	if err := h.applyResume(map[string][]byte{parkID: []byte(`{"selectionIdx":9}`)}); err == nil {
+		t.Fatal("invalid selection")
+	}
+
+	h.toolResultMessage(ToolCall{ID: "wd", CallID: "wd", Name: "x"}, "ok", "success")
+	mock.invokeFn = func(_ context.Context, _ []*Message, _ []*Tool, ch chan<- LLMResponseChunk) {
+		ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "hi", IsComplete: true}
+	}
+	if _, err := h.runInference(t.Context(), &drive.TurnState{}, out); err != nil {
+		t.Fatal(err)
+	}
+	if len(wd.toolResults) == 0 || len(wd.outputs) == 0 {
+		t.Fatalf("watchdog tool=%d out=%d", len(wd.toolResults), len(wd.outputs))
+	}
+	mock.invokeErr = errors.New("upstream")
+	if _, err := h.runInference(t.Context(), &drive.TurnState{HadToolRound: true}, out); err == nil || !errors.Is(err, ErrModelAfterTools) {
+		t.Fatalf("want ErrModelAfterTools, got %v", err)
+	}
+	mock.invokeErr = nil
+	mock.invokeFn = func(_ context.Context, _ []*Message, _ []*Tool, ch chan<- LLMResponseChunk) {
+		ch <- LLMResponseChunk{Type: StreamEventError, Error: errors.New("provider"), IsComplete: true}
+	}
+	if _, err := h.runInference(t.Context(), &drive.TurnState{HadToolRound: true}, out); err == nil {
+		t.Fatal("want after-tools stream error")
+	}
+	prompt := strings.Join(mock.systemPrompts, "\n")
+	if !strings.Contains(prompt, "pack") {
+		t.Fatal("system prompt missing skill catalog")
+	}
+	if !strings.Contains(prompt, "researcher") {
+		t.Fatal("system prompt missing specialists")
+	}
+
 	cp, err := h.Checkpoint()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(cp.ContextWindow) == 0 {
-		t.Fatal("Run must leave a conversation on Checkpoint")
+		t.Fatal("absorbUser must leave a conversation on Checkpoint")
 	}
 }

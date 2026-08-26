@@ -50,14 +50,14 @@ func TestFindObjects_multiTurnMemoryGraph(t *testing.T) {
 	// Stage property filter (same keys as schema filterable_fields / search).
 	byStage, err := eng.FindObjects(ctx, scope, brain.FindObjectsRequest{
 		Query: "Acme Renewal", Kinds: []string{"Deal"},
-		Filters: brain.Filters{"stage": "negotiation"},
+		Filters: brain.MustFilter(map[string]any{"stage": "negotiation"}),
 	}, sc)
 	if err != nil || len(byStage.Objects) != 1 || byStage.Objects[0].ID != deal.ID {
 		t.Fatalf("find_objects stage filter: %+v err=%v", byStage.Objects, err)
 	}
 	closed, err := eng.FindObjects(ctx, scope, brain.FindObjectsRequest{
 		Query: "Acme Renewal", Kinds: []string{"Deal"},
-		Filters: brain.Filters{"stage": "closed"},
+		Filters: brain.MustFilter(map[string]any{"stage": "closed"}),
 	}, sc)
 	if err != nil || len(closed.Objects) != 0 {
 		t.Fatalf("want empty for closed stage: %+v err=%v", closed.Objects, err)

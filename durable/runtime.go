@@ -9,6 +9,17 @@ import (
 // Runtime is the only session kernel API. Protocol handlers and hosts call it.
 // Backends: in-process (goroutine wait loop) or Temporal (one workflow per session).
 //
+// A later Restate/DBOS/custom-log adapter plugs in here. It must supply:
+//   - start a session process (workflow / durable handler)
+//   - signals: prompt, resume, cancel, close, child-waiting
+//   - named steps with heartbeat + retry: Inference; Tool (one call; the wait
+//     loop still schedules a batch)
+//   - start a child session process (same machine, overlay specialist)
+//   - query: status, children
+//   - append to EventLog (the adapter wakes the loop)
+//
+// Leftover-tool and HITL rules live in internal/drive.Next. Do not fork them.
+//
 // Prompt and Resume signal the session; they do not return a harness.
 // Subscribe yields StreamEvent values (message, tool, yield, error, complete).
 //

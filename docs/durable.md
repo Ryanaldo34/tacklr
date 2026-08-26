@@ -8,7 +8,7 @@ Tacklr’s session API is `durable.Runtime`. A `server.Protocol` maps wire frame
 |------|---------|
 | **Session** | Long-lived wait loop (`CreateSession` … `Close`) |
 | **Turn** | One `Prompt` or `Resume` until complete or park |
-| **AgentHarness** | Per-turn mind: infer, short tools, snapshot. Runtime constructs it for each Prompt/Resume |
+| **TurnManager** | Per-turn mind: infer, tool batch, snapshot. Runtime constructs it for each Prompt/Resume |
 | **Specialist** | Catalog nested agent (`spawn_specialist`). Not a Temporal worker process |
 | **Child** | Nested session. Agent tools `list_children` / `get_child` / `cancel_child` |
 | **Park** | Session idle waiting for `Resume`. Parent-facing `Status` stays `running`; `Waiting` is true until the interrupt is resolved. Parent park does not stop children |
@@ -16,7 +16,7 @@ Tacklr’s session API is `durable.Runtime`. A `server.Protocol` maps wire frame
 | **Close** | Destroy the session and recursively stop children |
 | **Turn locality** | Optional: keep a turn’s Temporal activities on one process (`WithTurnLocality`) so VFS stays put |
 
-There are two session runtimes. `AgentHarness.Run` is a turn helper for tests; it has no child sessions. Children require `durable.Runtime`.
+The host API is `durable.Runtime` (`inprocess.New` or `temporal.New`). Tests use the same API. `TurnManager` is not a host type.
 
 ## In-process Runtime
 

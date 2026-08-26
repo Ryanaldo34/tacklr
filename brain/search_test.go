@@ -134,7 +134,7 @@ func TestSearch_filtersProperty(t *testing.T) {
 	}
 	page, err := eng.Search(ctx, brain.Scope{Namespace: &ns}, brain.SearchRequest{
 		Query:   "pipeline revenue",
-		Filters: brain.Filters{"stage": "negotiation"},
+		Filters: brain.MustFilter(map[string]any{"stage": "negotiation"}),
 	}, brain.NewSearchContext())
 	if err != nil {
 		t.Fatal(err)
@@ -407,13 +407,13 @@ func TestSearch_rejectsBadFiltersAndEmptyQuery(t *testing.T) {
 		t.Fatal("empty query must fail")
 	}
 	_, err = eng.Search(ctx, brain.Scope{}, brain.SearchRequest{
-		Query: "q", Filters: brain.Filters{"updated_after": "not-a-date"},
+		Query: "q", Filters: brain.Filter{UpdatedAfter: "not-a-date"},
 	}, sc)
 	if err == nil {
 		t.Fatal("bad date filter must fail")
 	}
 	_, err = eng.Search(ctx, brain.Scope{}, brain.SearchRequest{
-		Query: "q", Filters: brain.Filters{"": "x"},
+		Query: "q", Filters: brain.Filter{Props: map[string]brain.PropFilter{"": {Eq: "x"}}},
 	}, sc)
 	if err == nil {
 		t.Fatal("empty filter key must fail")

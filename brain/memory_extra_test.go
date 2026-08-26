@@ -30,26 +30,26 @@ func TestMemoryStore_searchChannelsAndClone(t *testing.T) {
 	_ = s.PutKind(context.Background(), ObjectKind{Kind: "Chunk", IsPart: true})
 	_ = s.PutKind(context.Background(), ObjectKind{Kind: "Document", IsParent: true})
 
-	lex, err := s.SearchLexical(ctx, Scope{Namespace: &ns}, "oauth", nil, 5)
+	lex, err := s.SearchLexical(ctx, Scope{Namespace: &ns}, "oauth", Filter{}, 5)
 	if err != nil || len(lex) == 0 || lex[0].ID != p1 {
 		t.Fatalf("lex: %+v %v", lex, err)
 	}
-	vec, err := s.SearchVector(ctx, Scope{Namespace: &ns}, []float32{0.9, 0.1, 0}, nil, 5)
+	vec, err := s.SearchVector(ctx, Scope{Namespace: &ns}, []float32{0.9, 0.1, 0}, Filter{}, 5)
 	if err != nil || len(vec) == 0 || vec[0].ID != p1 {
 		t.Fatalf("vec: %+v %v", vec, err)
 	}
-	tri, err := s.SearchTrigram(ctx, Scope{Namespace: &ns}, "oauth pkce", nil, 5)
+	tri, err := s.SearchTrigram(ctx, Scope{Namespace: &ns}, "oauth pkce", Filter{}, 5)
 	if err != nil || len(tri) == 0 {
 		t.Fatalf("tri: %+v %v", tri, err)
 	}
 	// Empty channels
-	if got, _ := s.SearchVector(ctx, Scope{}, nil, nil, 5); got != nil {
+	if got, _ := s.SearchVector(ctx, Scope{}, nil, Filter{}, 5); got != nil {
 		t.Fatal(got)
 	}
-	if got, _ := s.SearchTrigram(ctx, Scope{}, "", nil, 5); got != nil {
+	if got, _ := s.SearchTrigram(ctx, Scope{}, "", Filter{}, 5); got != nil {
 		t.Fatal(got)
 	}
-	if got, _ := s.SearchLexical(ctx, Scope{}, "x", nil, 0); got != nil {
+	if got, _ := s.SearchLexical(ctx, Scope{}, "x", Filter{}, 0); got != nil {
 		t.Fatal(got)
 	}
 
@@ -73,13 +73,13 @@ func TestMemoryStore_searchChannelsAndClone(t *testing.T) {
 	}
 
 	// Invalid filters fail closed from search channels (compile once).
-	if _, err := s.SearchLexical(ctx, Scope{Namespace: &ns}, "oauth", Filters{"updated_after": "nope"}, 5); err == nil {
+	if _, err := s.SearchLexical(ctx, Scope{Namespace: &ns}, "oauth", Filter{UpdatedAfter: "nope"}, 5); err == nil {
 		t.Fatal("want filter compile error")
 	}
-	if _, err := s.SearchVector(ctx, Scope{Namespace: &ns}, []float32{1, 0, 0}, Filters{"": "x"}, 5); err == nil {
+	if _, err := s.SearchVector(ctx, Scope{Namespace: &ns}, []float32{1, 0, 0}, Filter{Props: map[string]PropFilter{"": {Eq: "x"}}}, 5); err == nil {
 		t.Fatal("want empty key error")
 	}
-	if _, err := s.SearchTrigram(ctx, Scope{Namespace: &ns}, "oauth", Filters{"stage": []any{}}, 5); err == nil {
+	if _, err := s.SearchTrigram(ctx, Scope{Namespace: &ns}, "oauth", Filter{Props: map[string]PropFilter{"stage": {In: []any{}}}}, 5); err == nil {
 		t.Fatal("want empty list error")
 	}
 }

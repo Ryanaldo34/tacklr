@@ -27,8 +27,7 @@ type TurnState struct {
 	HadToolRound  bool
 }
 
-// Engine is the durable-runtime view of a harness. Hosts use Run /
-// RunMessage / ReturnFromInterrupt; only in-repo drivers bind this.
+// Engine is the durable-runtime view of a TurnManager.
 type Engine interface {
 	AbsorbUser(ctx context.Context, user *streaming.Message, out chan streaming.StreamEvent) error
 	PendingToolCalls() []streaming.ToolCall
@@ -38,27 +37,7 @@ type Engine interface {
 	// RecordToolResult appends a RoleTool message without executing (Temporal
 	// after a child workflow already ran).
 	RecordToolResult(tc streaming.ToolCall, output string)
-	// SetChildHost installs nested-session child operations for tools.
-	// Nil: child methods fail. h must implement tacklr childHost.
-	SetChildHost(h any)
-}
-
-var bound func(any) Engine
-
-// Bind installs the root-package adapter. tacklr.init calls this once.
-func Bind(fn func(any) Engine) {
-	if bound != nil {
-		panic("drive: already bound")
-	}
-	bound = fn
-}
-
-// EngineOf returns the durable driver for a harness constructed by tacklr.
-func EngineOf(h any) Engine {
-	if bound == nil {
-		panic("drive: not bound")
-	}
-	return bound(h)
+	Messages() []*streaming.Message
 }
 
 const streamEventBuffer = 64

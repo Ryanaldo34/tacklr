@@ -442,7 +442,7 @@ func (s *PostgresStore) scanObject(row scannable) (Object, error) {
 }
 
 // SearchLexical implements PartSearcher using pg_textsearch BM25.
-func (s *PostgresStore) SearchLexical(ctx context.Context, scope Scope, query string, filters Filters, k int) ([]ScoredID, error) {
+func (s *PostgresStore) SearchLexical(ctx context.Context, scope Scope, query string, filters Filter, k int) ([]ScoredID, error) {
 	if k <= 0 || strings.TrimSpace(query) == "" {
 		return nil, nil
 	}
@@ -464,7 +464,7 @@ func (s *PostgresStore) SearchLexical(ctx context.Context, scope Scope, query st
 }
 
 // SearchVector implements PartSearcher using pgvector cosine distance.
-func (s *PostgresStore) SearchVector(ctx context.Context, scope Scope, embedding []float32, filters Filters, k int) ([]ScoredID, error) {
+func (s *PostgresStore) SearchVector(ctx context.Context, scope Scope, embedding []float32, filters Filter, k int) ([]ScoredID, error) {
 	if k <= 0 || len(embedding) == 0 {
 		return nil, nil
 	}
@@ -487,7 +487,7 @@ func (s *PostgresStore) SearchVector(ctx context.Context, scope Scope, embedding
 }
 
 // SearchTrigram implements PartSearcher using pg_trgm similarity.
-func (s *PostgresStore) SearchTrigram(ctx context.Context, scope Scope, query string, filters Filters, k int) ([]ScoredID, error) {
+func (s *PostgresStore) SearchTrigram(ctx context.Context, scope Scope, query string, filters Filter, k int) ([]ScoredID, error) {
 	if k <= 0 || strings.TrimSpace(query) == "" {
 		return nil, nil
 	}

@@ -163,7 +163,7 @@ func newRunCommandSession(t *testing.T) (*vfs.MountSession, HarnessRuntime) {
 	if err := ms.Mount(t.Context(), vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
 		t.Fatal(err)
 	}
-	h := mustNewAgent(t, AgentOptions{
+	h := mustNewTurnManager(t, AgentOptions{
 		SessionID:    t.Name(),
 		MountSession: ms,
 		Model:        &mockStrategy{},

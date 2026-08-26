@@ -3,13 +3,16 @@ package temporal
 import (
 	"context"
 	"errors"
+	"slices"
 	"time"
 
 	"go.temporal.io/sdk/contrib/workflowstreams"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
+	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
+	"github.com/ryanaldo34/tacklr/internal/drive"
 	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
@@ -223,9 +226,15 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 		}
 		hadTools := false
 		reqs := 0
-		pending := []streaming.ToolCall(nil)
-		for {
-			if len(pending) == 0 {
+		toolCalls := []streaming.ToolCall(nil)
+		leftover := []streaming.ToolCall(nil)
+		parked := false
+		inferComplete := false
+		interruptID := ""
+		stopSlice := false
+		for !stopSlice {
+			switch drive.Next(len(toolCalls), parked, inferComplete, len(spawned) > 0) {
+			case drive.ActionInfer:
 				var out InferenceOutput
 				err := waitAct("Inference", InferenceInput{
 					SessionID:     in.SessionID,
@@ -243,26 +252,23 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 				user = nil
 				resume = nil
 				if onActErr(err) {
+					stopSlice = true
 					break
 				}
 				etag = out.Etag
 				reqs++
 				if out.Complete {
+					inferComplete = true
 					result = out.Result
-					terminal = durable.SessionComplete
-					break
+					toolCalls = nil
+					continue
 				}
-				pending = out.ToolCalls
-				continue
-			}
-			hadTools = true
-			next := pending
-			pending = nil
-			stopSlice := false
-			// Sequential Tool activities share SnapshotStore etag. Leftover
-			// calls after HITL stay in this workflow variable (history), not
-			// the snapshot. In-process runs the batch in parallel instead.
-			for i, tc := range next {
+				inferComplete = false
+				toolCalls = out.ToolCalls
+			case drive.ActionRunTools:
+				hadTools = true
+				tc := toolCalls[0]
+				rest := toolCalls[1:]
 				var tout ToolOutput
 				err := waitAct("Tool", ToolInput{
 					SessionID:  in.SessionID,
@@ -273,19 +279,19 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 					Auth:       lastAuth,
 					Mounts:     mounts,
 					Specialist: in.Specialist,
-					Children:   childOps(spawned),
+					Known:      spawnedIDs(spawned),
 				}, &tout)
 				if onActErr(err) {
 					stopSlice = true
 					break
 				}
 				etag = tout.Etag
-				if herr := reconcileChildren(ctx, sessionCtx, &spawned, tout.Children, in, agentID, lastAuth, mounts); herr != nil {
+				if herr := applyChildIntent(ctx, sessionCtx, &spawned, tout, in, agentID, lastAuth, mounts); herr != nil {
 					stopSlice = onActErr(herr)
 					break
 				}
-				if aid := awaitID(tout.Children); aid != "" {
-					output, parkID, werr := waitChildTool(ctx, &spawned, &childParks, tc.Key(), aid, cancelCh, cancelSpawned)
+				if tout.AwaitID != "" {
+					output, parkID, werr := waitChildTool(ctx, &spawned, &childParks, tc.Key(), tout.AwaitID, cancelCh, cancelSpawned)
 					if onActErr(werr) {
 						stopSlice = true
 						break
@@ -316,10 +322,15 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 						}
 					}
 				}
-				if !tout.Interrupted {
+				if tout.Interrupted {
+					leftover = rest
+					interruptID = tout.InterruptID
+					parked = true
+					toolCalls = nil
 					continue
 				}
-				rest := append([]streaming.ToolCall(nil), next[i+1:]...)
+				toolCalls = rest
+			case drive.ActionYield:
 				if hasSession {
 					workflow.CompleteSession(sessionCtx)
 					hasSession = false
@@ -329,18 +340,20 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 				if in.Parent != "" {
 					_ = workflow.SignalExternalWorkflow(ctx, string(in.Parent), "", signalChildWaiting, in.SessionID).Get(ctx, nil)
 				}
-				logInfo(ctx, "turn yielded", "agent_id", agentID, "session_id", in.SessionID, "interrupt_id", tout.InterruptID)
+				logInfo(ctx, "turn yielded", "agent_id", agentID, "session_id", in.SessionID, "interrupt_id", interruptID)
 				closeTurn(telemetry.OutcomeYield, nil)
-				parked := true
-				for parked {
+				waiting := true
+				for waiting {
 					ev := selectorWait()
 					switch ev.kind {
 					case signalResume:
+						waiting = false
 						parked = false
+						yielded = false
 						applyAuth(ev.resume.Auth)
-						if cid, ok := childParks[tout.InterruptID]; ok {
+						if cid, ok := childParks[interruptID]; ok {
 							_ = workflow.SignalExternalWorkflow(ctx, string(cid), "", signalResume, resumeSignal{Responses: ev.resume.Responses, Auth: ev.resume.Auth}).Get(ctx, nil)
-							delete(childParks, tout.InterruptID)
+							delete(childParks, interruptID)
 						}
 						sessionCtx, hasSession = openTurnLocality(ctx, in.TurnLocalityTimeout, time.Minute)
 						logInfo(ctx, "turn start",
@@ -365,26 +378,56 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 							break
 						}
 						etag = iout.Etag
-						pending = append(append([]streaming.ToolCall(nil), iout.ToolCalls...), rest...)
+						toolCalls = slices.Concat(iout.ToolCalls, leftover)
+						leftover = nil
+						inferComplete = false
 					case signalClose:
 						closed = true
 						outcome = telemetry.OutcomeOK
 						stopSlice = true
-						parked = false
+						waiting = false
 					case signalCancel:
 						cancelSpawned()
 						emitCancel()
 						outcome = telemetry.OutcomeCancelled
 						stopSlice = true
-						parked = false
+						waiting = false
 					default:
-						// prompt while parked: ignore
 					}
 				}
-				break
-			}
-			if stopSlice {
-				break
+			case drive.ActionComplete:
+				terminal = durable.SessionComplete
+				stopSlice = true
+			case drive.ActionNudge:
+				nudgeMsg := &streaming.Message{Role: tacklr.RoleUser, Content: spawnedNudge(spawned)}
+				var out InferenceOutput
+				err := waitAct("Inference", InferenceInput{
+					SessionID:     in.SessionID,
+					AgentID:       agentID,
+					MCPServers:    mcp,
+					Etag:          etag,
+					User:          nudgeMsg,
+					HadToolRound:  true,
+					ModelRequests: reqs,
+					Auth:          lastAuth,
+					Mounts:        mounts,
+					Specialist:    in.Specialist,
+				}, &out)
+				if onActErr(err) {
+					stopSlice = true
+					break
+				}
+				etag = out.Etag
+				reqs++
+				hadTools = true
+				inferComplete = false
+				if out.Complete {
+					result = out.Result
+					inferComplete = true
+					toolCalls = nil
+					continue
+				}
+				toolCalls = out.ToolCalls
 			}
 		}
 	}

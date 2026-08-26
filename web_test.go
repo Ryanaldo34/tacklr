@@ -3,6 +3,7 @@ package tacklr
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -106,10 +107,36 @@ func TestWebSearchTool_invokeAgainstServer(t *testing.T) {
 		t.Fatalf("site: lift: %q err=%v", res.output, err)
 	}
 
-	h := mustNewAgent(t, AgentOptions{Model: &mockStrategy{}, ExaAPIKey: "from-opts"})
+	h := mustNewTurnManager(t, AgentOptions{Model: &mockStrategy{}, ExaAPIKey: "from-opts"})
 	t.Cleanup(h.Close)
 	if h.findTool("web_search", "") == nil || h.findTool("web_fetch", "") == nil {
 		t.Fatal("ExaAPIKey should install web tools")
+	}
+}
+
+func TestWebSearchTool_httpStatusCorrectionAndFailed(t *testing.T) {
+	ctx := context.Background()
+
+	fixable := newExaTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"bad query filters"}`))
+	})
+	_, err := newWebSearchTool(fixable).invoke(ctx, `{"query":"census ACS"}`, nopRuntime())
+	if err == nil || !errors.Is(err, ErrCorrection) || !strings.Contains(err.Error(), "Simplify filters") {
+		t.Fatalf("400: %v", err)
+	}
+
+	limited := newExaTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":"rate limited"}`))
+	})
+	_, err = newWebSearchTool(limited).invoke(ctx, `{"query":"census ACS"}`, nopRuntime())
+	if err == nil || !errors.Is(err, ErrFailed) || errors.Is(err, ErrCorrection) || !strings.Contains(err.Error(), "search provider failed") {
+		t.Fatalf("429: %v", err)
+	}
+	var st *exa.StatusError
+	if !errors.As(err, &st) || st.Status != http.StatusTooManyRequests {
+		t.Fatalf("429 cause: %v", err)
 	}
 }
 

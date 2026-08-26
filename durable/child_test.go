@@ -45,7 +45,7 @@ func TestOverlaySpecialist_inheritsParentAndNests(t *testing.T) {
 	if _, _, err := NormalizeSpawn("", "x"); err == nil {
 		t.Fatal("want specialist required")
 	}
-	if err := UnknownChild("z"); !errors.Is(err, ErrSessionNotFound) {
+	if err := UnknownChild("z"); !errors.Is(err, tacklr.ErrNotFound) {
 		t.Fatalf("unknown: %v", err)
 	}
 	if ChildState(SessionComplete) != tacklr.ChildCompleted || ChildState(SessionFailed) != tacklr.ChildFailed || ChildState(SessionRunning) != tacklr.ChildRunning {

@@ -95,12 +95,13 @@ func applyOnCallLayer(inv *ToolInvocation, ctor OnCallFunc, sm *session.SessionM
 		return nil
 	}
 	callID := inv.Runtime.CurrentToolCallID()
-	if layer, ok := sm.OnCall.Get(callID, intr.TypeName()); ok {
-		if layer.Denied {
-			return fmt.Errorf("%w: user rejected tool %q", ErrToolPermissionDenied, toolNameOf(*inv))
+	if resolved, ok := sm.TakeResolved(callID); ok {
+		denied := false
+		if perm, ok := resolved.(*interrupt.ToolPermissionInterrupt); ok {
+			rememberPermission(&sm.Permissions, perm)
+			denied = !perm.Allowed
 		}
-		inv.ArgsJSON = layer.Args
-		return nil
+		return finishOnCallLayer(inv, resolved.TypeName(), denied, sm)
 	}
 	if perm, ok := intr.(*interrupt.ToolPermissionInterrupt); ok {
 		switch sm.Permissions.Decision(perm.ToolName) {
@@ -110,16 +111,15 @@ func applyOnCallLayer(inv *ToolInvocation, ctor OnCallFunc, sm *session.SessionM
 			return finishOnCallLayer(inv, perm.TypeName(), false, sm)
 		}
 	}
-	resolved, err := sm.AdoptInterrupt(callID, intr)
-	if err != nil {
-		return err
+	if layer, ok := sm.OnCall.Get(callID, intr.TypeName()); ok {
+		if layer.Denied {
+			name := toolNameOf(*inv)
+			return Correctionf(ErrToolPermissionDenied, "%s was rejected by the user. Do not retry this tool unless the task can proceed another way", name)
+		}
+		inv.ArgsJSON = layer.Args
+		return nil
 	}
-	denied := false
-	if perm, ok := resolved.(*interrupt.ToolPermissionInterrupt); ok {
-		rememberPermission(&sm.Permissions, perm)
-		denied = !perm.Allowed
-	}
-	return finishOnCallLayer(inv, resolved.TypeName(), denied, sm)
+	return sm.Park(callID, intr)
 }
 
 func finishOnCallLayer(inv *ToolInvocation, typeName string, denied bool, sm *session.SessionManager) error {
@@ -128,7 +128,8 @@ func finishOnCallLayer(inv *ToolInvocation, typeName string, denied bool, sm *se
 		Denied: denied,
 	})
 	if denied {
-		return fmt.Errorf("%w: user rejected tool %q", ErrToolPermissionDenied, toolNameOf(*inv))
+		name := toolNameOf(*inv)
+		return Correctionf(ErrToolPermissionDenied, "%s was rejected by the user. Do not retry this tool unless the task can proceed another way", name)
 	}
 	return nil
 }

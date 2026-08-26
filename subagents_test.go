@@ -14,10 +14,10 @@ import (
 	"github.com/ryanaldo34/tacklr/vfsindex"
 )
 
-func TestNewAgent_rejectsInvalidSpecialists(t *testing.T) {
+func TestNewTurnManager_rejectsInvalidSpecialists(t *testing.T) {
 	ok := &mockStrategy{}
 	t.Run("nil model", func(t *testing.T) {
-		if _, err := NewAgent(context.Background(), AgentOptions{Config: Config{MaxWindowSize: 8192}}); err == nil {
+		if _, err := NewTurnManager(context.Background(), AgentOptions{Config: Config{MaxWindowSize: 8192}}); err == nil {
 			t.Fatal("expected constructor error")
 		}
 	})
@@ -35,7 +35,7 @@ func TestNewAgent_rejectsInvalidSpecialists(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := NewAgent(context.Background(), AgentOptions{
+			if _, err := NewTurnManager(context.Background(), AgentOptions{
 				Config: Config{MaxWindowSize: 8192}, Model: ok, Specialists: tc.specs,
 			}); err == nil {
 				t.Fatal("expected constructor error")
@@ -46,7 +46,7 @@ func TestNewAgent_rejectsInvalidSpecialists(t *testing.T) {
 
 func TestSystemPrompt_listsSpecialistsSorted(t *testing.T) {
 	var n int
-	h := mustNewAgent(t, AgentOptions{
+	h := mustNewTurnManager(t, AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
 		Model: &mockStrategy{
 			invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
@@ -75,29 +75,17 @@ func TestSystemPrompt_listsSpecialistsSorted(t *testing.T) {
 	if ai < 0 || zi < 0 || ai > zi {
 		t.Fatalf("want alpha then zebra in prompt: %s", prompt)
 	}
-	ch, err := h.Run(context.Background(), "delegate")
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := drainEvents(ch)
-	var texts []string
-	for _, ev := range got {
-		if ev.Type == StreamEventToolResult {
-			texts = append(texts, ev.Content)
-		}
-	}
-	blob := strings.ToLower(strings.Join(texts, "\n"))
-	for _, want := range []string{"not available", "no child sessions"} {
-		if !strings.Contains(blob, want) {
-			t.Fatalf("want %q in child-tool results: %v", want, summarizeEvents(got))
-		}
+	rt := turnRuntime(h)
+	res, err := h.findTool("list_children", "").invoke(t.Context(), `{}`, rt)
+	if err != nil || !strings.Contains(strings.ToLower(res.output), "no child sessions") {
+		t.Fatalf("list_children: %q %v", res.output, err)
 	}
 }
 
 func TestWithSpecialist_sharesHostMountWriteAndCatalog(t *testing.T) {
 	parent, ms, eng, ns := vfsIndexHarness(t, true)
 	_ = parent
-	worker := mustNewAgent(t, AgentOptions{
+	worker := mustNewTurnManager(t, AgentOptions{
 		MountSession:    ms,
 		Model:           &mockStrategy{},
 		Brain:           eng,
@@ -176,7 +164,7 @@ func TestWithSpecialist_inheritsParentSkills(t *testing.T) {
 		Model:        &mockStrategy{},
 		MountSession: ms,
 	}
-	parent := mustNewAgent(t, opts)
+	parent := mustNewTurnManager(t, opts)
 	t.Cleanup(parent.Close)
 	if parent.findTool("read_skill", "") == nil {
 		t.Fatal("parent missing read_skill")
@@ -186,7 +174,7 @@ func TestWithSpecialist_inheritsParentSkills(t *testing.T) {
 		t.Fatalf("WithSpecialist = %+v", inherited.Config)
 	}
 
-	worker := mustNewAgent(t, inherited)
+	worker := mustNewTurnManager(t, inherited)
 	t.Cleanup(worker.Close)
 	skill := worker.findTool("read_skill", "")
 	if skill == nil {

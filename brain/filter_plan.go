@@ -6,71 +6,82 @@ import (
 	"time"
 )
 
-// filterPlan is the single compiled form of Filters used by Memory and Postgres.
-// Compile once per query; Match for in-process stores, SQL for SQL stores.
+// filterPlan is the single compiled form of Filter used by Memory and Postgres.
 type filterPlan struct {
 	preds []filterPred
 }
 
 type filterPred struct {
-	field string // kind | title | created_at | updated_at | prop:<key>
-	op    string // eq | in | gte | lt
-	// eq/in use scalars as strings for SQL text equality; Match uses original any.
+	field   string // kind | title | created_at | updated_at | prop:<key>
+	op      string // eq | in | gte | lt
 	want    any
 	wantIn  []any
 	timeVal time.Time
 }
 
-// compileFilters validates and compiles filters. Empty/nil yields an empty plan.
-func compileFilters(f Filters) (filterPlan, error) {
+func compileFilters(f Filter) (filterPlan, error) {
 	if err := ValidateFilters(f); err != nil {
 		return filterPlan{}, err
 	}
-	if len(f) == 0 {
+	if f.empty() {
 		return filterPlan{}, nil
 	}
-	var preds []filterPred
-	for key, val := range f {
-		k := strings.TrimSpace(key)
-		switch k {
-		case filterCreatedAfter, filterUpdatedAfter:
-			t, err := parseFilterTime(val)
-			if err != nil {
-				return filterPlan{}, fmt.Errorf("brain: filter %q: %w", k, err)
-			}
-			field := "created_at"
-			if k == filterUpdatedAfter {
-				field = "updated_at"
-			}
-			preds = append(preds, filterPred{field: field, op: "gte", timeVal: t})
-		case filterCreatedBefore, filterUpdatedBefore:
-			t, err := parseFilterTime(val)
-			if err != nil {
-				return filterPlan{}, fmt.Errorf("brain: filter %q: %w", k, err)
-			}
-			field := "created_at"
-			if k == filterUpdatedBefore {
-				field = "updated_at"
-			}
-			preds = append(preds, filterPred{field: field, op: "lt", timeVal: t})
-		case filterKind, filterTitle:
-			preds = append(preds, eqOrInPred(k, val))
-		default:
-			col := sanitizeJSONKey(k)
-			if col == "" {
-				return filterPlan{}, fmt.Errorf("brain: filter %q is not a valid property key", k)
-			}
-			preds = append(preds, eqOrInPred("prop:"+col, val))
+	preds := make([]filterPred, 0, 6+len(f.Props))
+	if f.Kind.set() {
+		preds = append(preds, stringMatchPred(filterKind, f.Kind))
+	}
+	if f.Title.set() {
+		preds = append(preds, stringMatchPred(filterTitle, f.Title))
+	}
+	for _, bound := range []struct {
+		raw   string
+		after bool
+		field string
+	}{
+		{f.CreatedAfter, true, "created_at"},
+		{f.CreatedBefore, false, "created_at"},
+		{f.UpdatedAfter, true, "updated_at"},
+		{f.UpdatedBefore, false, "updated_at"},
+	} {
+		if strings.TrimSpace(bound.raw) == "" {
+			continue
 		}
+		t, err := parseFilterTime(bound.raw)
+		if err != nil {
+			return filterPlan{}, err
+		}
+		op := "lt"
+		if bound.after {
+			op = "gte"
+		}
+		preds = append(preds, filterPred{field: bound.field, op: op, timeVal: t})
+	}
+	for key, pf := range f.Props {
+		col := sanitizeJSONKey(key)
+		if col == "" {
+			return filterPlan{}, fmt.Errorf("brain: filter %q is not a valid property key", key)
+		}
+		preds = append(preds, propPred("prop:"+col, pf))
 	}
 	return filterPlan{preds: preds}, nil
 }
 
-func eqOrInPred(field string, val any) filterPred {
-	if items, ok := val.([]any); ok {
-		return filterPred{field: field, op: "in", wantIn: items}
+func stringMatchPred(field string, s StringMatch) filterPred {
+	if len(s.In) > 0 {
+		in := make([]any, len(s.In))
+		for i, v := range s.In {
+			in[i] = v
+		}
+		return filterPred{field: field, op: "in", wantIn: in}
 	}
-	return filterPred{field: field, op: "eq", want: val}
+	return filterPred{field: field, op: "eq", want: s.Eq}
+}
+
+func propPred(field string, pf PropFilter) filterPred {
+	if len(pf.In) > 0 {
+		return filterPred{field: field, op: "in", wantIn: pf.In}
+	}
+	return filterPred{field: field, op: "eq", want: pf.Eq}
 }
 
 func (p filterPlan) match(obj Object) bool {
@@ -120,8 +131,6 @@ func matchTime(got time.Time, p filterPred) bool {
 	}
 }
 
-// sql builds " AND ..." clauses with placeholders starting at startArg.
-// scope.Namespace is applied first when set.
 func (p filterPlan) sql(scope Scope, startArg int) (string, []any, error) {
 	var b strings.Builder
 	var args []any
@@ -187,14 +196,11 @@ func filterSQLValue(v any) any {
 	case string, bool:
 		return x
 	default:
-		// numbers and other scalars as text for JSONB ->> equality
 		return fmt.Sprint(v)
 	}
 }
 
-// objectMatchesFilters reports whether obj satisfies all filters (AND).
-// Compiles filters on each call; hot paths should compileFilters once and reuse plan.match.
-func objectMatchesFilters(obj Object, f Filters) bool {
+func objectMatchesFilters(obj Object, f Filter) bool {
 	plan, err := compileFilters(f)
 	if err != nil {
 		return false
@@ -202,8 +208,7 @@ func objectMatchesFilters(obj Object, f Filters) bool {
 	return plan.match(obj)
 }
 
-// filterSQL builds " AND ..." clauses with placeholders starting at startArg.
-func filterSQL(scope Scope, filters Filters, startArg int) (string, []any, error) {
+func filterSQL(scope Scope, filters Filter, startArg int) (string, []any, error) {
 	plan, err := compileFilters(filters)
 	if err != nil {
 		return "", nil, err

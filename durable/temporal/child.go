@@ -11,6 +11,7 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
+	"github.com/ryanaldo34/tacklr/interrupt"
 )
 
 // childRun is one child workflow tracked by the parent.
@@ -54,12 +55,23 @@ func dropChild(spawned *[]childRun, id durable.SessionID) {
 	*spawned = slices.DeleteFunc(*spawned, func(c childRun) bool { return c.id == id })
 }
 
-func childOps(spawned []childRun) []durable.ChildOp {
-	out := make([]durable.ChildOp, len(spawned))
+func spawnedIDs(spawned []childRun) []durable.SessionID {
+	out := make([]durable.SessionID, len(spawned))
 	for i, c := range spawned {
-		out[i] = durable.ChildOp{ID: c.id, Specialist: c.spec, State: tacklr.ChildRunning, Result: c.result}
+		out[i] = c.id
 	}
 	return out
+}
+
+func spawnedNudge(spawned []childRun) string {
+	if len(spawned) == 0 {
+		return ""
+	}
+	rows := make([]durable.SessionStatus, len(spawned))
+	for i, c := range spawned {
+		rows[i] = durable.SessionStatus{ID: c.id, Specialist: c.spec, State: durable.SessionRunning}
+	}
+	return durable.ChildrenNudge(rows)
 }
 
 func cancelOne(ctx workflow.Context, spawned *[]childRun, id durable.SessionID) {
@@ -74,45 +86,30 @@ func cancelOne(ctx workflow.Context, spawned *[]childRun, id durable.SessionID) 
 	dropChild(spawned, id)
 }
 
-func reconcileChildren(
+func applyChildIntent(
 	ctx, sessionCtx workflow.Context,
 	spawned *[]childRun,
-	ops []durable.ChildOp,
+	tout ToolOutput,
 	in WorkflowInput,
 	agentID string,
 	auth durable.AuthContext,
 	mounts []durable.MountRecipe,
 ) error {
-	keep := make(map[durable.SessionID]bool, len(ops))
-	for _, op := range ops {
-		if op.Cancel {
-			cancelOne(ctx, spawned, op.ID)
-			continue
-		}
-		keep[op.ID] = true
-		if findChild(*spawned, op.ID) >= 0 {
-			continue
-		}
-		if op.Task == "" || op.Specialist == "" {
-			continue
-		}
-		c, err := startChild(ctx, sessionCtx, in.SessionID, agentID, op.Specialist, op.Task, op.ID, auth, mounts, in.TurnLocalityTimeout)
-		if err != nil {
-			return err
-		}
-		*spawned = append(*spawned, c)
+	if tout.CancelID != "" {
+		cancelOne(ctx, spawned, tout.CancelID)
 	}
-	*spawned = slices.DeleteFunc(*spawned, func(c childRun) bool { return !keep[c.id] })
+	if tout.SpawnID == "" || tout.SpawnSpec == "" || tout.SpawnTask == "" {
+		return nil
+	}
+	if findChild(*spawned, tout.SpawnID) >= 0 {
+		return nil
+	}
+	c, err := startChild(ctx, sessionCtx, in.SessionID, agentID, tout.SpawnSpec, tout.SpawnTask, tout.SpawnID, auth, mounts, in.TurnLocalityTimeout)
+	if err != nil {
+		return err
+	}
+	*spawned = append(*spawned, c)
 	return nil
-}
-
-func awaitID(ops []durable.ChildOp) durable.SessionID {
-	for _, op := range ops {
-		if op.Await {
-			return op.ID
-		}
-	}
-	return ""
 }
 
 func waitChildTool(
@@ -185,11 +182,18 @@ func waitChildTool(
 	return c.result, "", nil
 }
 
-// activityChildren is the Tool-activity childHost. It records intent; the
-// workflow starts/cancels/waits after the activity returns.
+// activityChildren is the Tool-activity childHost. It records this call's
+// spawn/cancel/await; the workflow runs those on Runtime (ExecuteChildWorkflow).
 type activityChildren struct {
-	parent durable.SessionID
-	ops    []durable.ChildOp
+	parent    durable.SessionID
+	agentID   string
+	catalog   durable.Catalog
+	known     []durable.SessionID
+	spawnID   durable.SessionID
+	spawnSpec string
+	spawnTask string
+	cancelID  durable.SessionID
+	awaitID   durable.SessionID
 }
 
 func (a *activityChildren) SpawnChild(_ context.Context, specialist, task, callID string) (string, error) {
@@ -197,47 +201,53 @@ func (a *activityChildren) SpawnChild(_ context.Context, specialist, task, callI
 	if err != nil {
 		return "", err
 	}
+	if a.catalog != nil {
+		if spec, ok := a.catalog.Lookup(a.agentID); ok {
+			if _, err := durable.OverlaySpecialist(spec, specialist); err != nil {
+				return "", fmt.Errorf("%w: %w", tacklr.ErrNotFound, err)
+			}
+		}
+	}
 	id := durable.ChildSessionID(a.parent, specialist, callID)
-	if i := findOp(a.ops, id); i >= 0 {
+	if slices.Contains(a.known, id) || a.spawnID == id {
 		return string(id), nil
 	}
 	if task == "" {
 		return "", fmt.Errorf("task_description_and_context is required: %w", tacklr.ErrInvalid)
 	}
-	a.ops = append(a.ops, durable.ChildOp{
-		ID: id, Specialist: specialist, Task: task, State: tacklr.ChildRunning,
-	})
+	a.spawnID = id
+	a.spawnSpec = specialist
+	a.spawnTask = task
 	return string(id), nil
 }
 
 func (a *activityChildren) Children() []tacklr.Child {
-	out := make([]tacklr.Child, 0, len(a.ops))
-	for _, op := range a.ops {
-		out = append(out, tacklr.Child{ID: string(op.ID), Specialist: op.Specialist, State: op.State, Result: op.Result})
+	out := make([]tacklr.Child, 0, len(a.known)+1)
+	seen := map[durable.SessionID]bool{}
+	for _, id := range a.known {
+		seen[id] = true
+		out = append(out, tacklr.Child{ID: string(id), State: tacklr.ChildRunning})
+	}
+	if a.spawnID != "" && !seen[a.spawnID] {
+		out = append(out, tacklr.Child{ID: string(a.spawnID), Specialist: a.spawnSpec, State: tacklr.ChildRunning})
 	}
 	return out
 }
 
 func (a *activityChildren) CancelChild(_ context.Context, id string) error {
 	sid := durable.SessionID(id)
-	i := findOp(a.ops, sid)
-	if i < 0 {
+	if sid != a.spawnID && !slices.Contains(a.known, sid) {
 		return durable.UnknownChild(id)
 	}
-	a.ops[i].Cancel = true
+	a.cancelID = sid
 	return nil
 }
 
-func (a *activityChildren) AwaitChild(_ context.Context, id, _ string) (tacklr.Child, bool, error) {
+func (a *activityChildren) AwaitChild(_ context.Context, id, _ string) (tacklr.Child, error) {
 	sid := durable.SessionID(id)
-	i := findOp(a.ops, sid)
-	if i < 0 {
-		return tacklr.Child{}, false, durable.UnknownChild(id)
+	if sid != a.spawnID && !slices.Contains(a.known, sid) {
+		return tacklr.Child{}, durable.UnknownChild(id)
 	}
-	a.ops[i].Await = true
-	return tacklr.Child{}, true, nil
-}
-
-func findOp(ops []durable.ChildOp, id durable.SessionID) int {
-	return slices.IndexFunc(ops, func(op durable.ChildOp) bool { return op.ID == id })
+	a.awaitID = sid
+	return tacklr.Child{}, &interrupt.ChildWaiting{Kind: interrupt.TypeChildWaiting}
 }

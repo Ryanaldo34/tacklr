@@ -29,7 +29,7 @@ func TestRegisterInterrupt_customType(t *testing.T) {
 }
 
 // turnRuntime builds a turn-scoped Runtime for tests (events drained).
-func turnRuntime(h *AgentHarness) HarnessRuntime {
+func turnRuntime(h *TurnManager) HarnessRuntime {
 	ch := make(chan StreamEvent, 64)
 	go func() {
 		for range ch {
@@ -47,9 +47,9 @@ func nopRuntime() HarnessRuntime {
 	return newToolRuntime(ch, session.NewSessionManager(), nil)
 }
 
-func mustNewAgent(t testing.TB, opts AgentOptions) *AgentHarness {
+func mustNewTurnManager(t testing.TB, opts AgentOptions) *TurnManager {
 	t.Helper()
-	h, err := NewAgent(t.Context(), opts)
+	h, err := NewTurnManager(t.Context(), opts)
 	if err != nil {
 		t.Fatal(err)
 	}

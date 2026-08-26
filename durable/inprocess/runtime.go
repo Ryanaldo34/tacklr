@@ -121,9 +121,6 @@ func New(catalog durable.Catalog, opts ...Option) *Runtime {
 	return r
 }
 
-// Catalog returns the agent catalog.
-func (r *Runtime) Catalog() durable.Catalog { return r.catalog }
-
 // CreateSession implements durable.Runtime.
 func (r *Runtime) CreateSession(ctx context.Context, req durable.CreateSession) (durable.SessionID, error) {
 	if err := ctx.Err(); err != nil {

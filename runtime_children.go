@@ -2,6 +2,7 @@ package tacklr
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -9,26 +10,25 @@ import (
 	"github.com/ryanaldo34/tacklr/interrupt"
 )
 
-// childHost is the session-side implementation of HarnessRuntime child methods.
+// ChildHost is the session-side implementation of HarnessRuntime child methods.
 // Durable runtimes bind nested sessions; nil host means children are unavailable.
-// Method names are exported so other packages can implement this by duck typing.
-type childHost interface {
+type ChildHost interface {
 	SpawnChild(ctx context.Context, specialist, task, callID string) (string, error)
 	Children() []Child
 	CancelChild(ctx context.Context, id string) error
-	// AwaitChild waits or collects. park=true means the child needs input:
-	// the tool Parks child_waiting. An interrupt error parks as-is.
-	AwaitChild(ctx context.Context, id, callID string) (child Child, park bool, err error)
+	// AwaitChild waits or collects. A *interrupt.ChildWaiting error means the
+	// child needs input: the wrapper Parks it. Other errors pass through.
+	AwaitChild(ctx context.Context, id, callID string) (child Child, err error)
 }
 
 // toolRuntime is the HarnessRuntime passed to tools: session emit/state/interrupt
 // plus child operations. Durable drivers replace the host; nil host errors on spawn.
 type toolRuntime struct {
 	session.Runtime
-	host childHost
+	host ChildHost
 }
 
-func newToolRuntime(ch chan StreamEvent, sm *session.SessionManager, host childHost) toolRuntime {
+func newToolRuntime(ch chan StreamEvent, sm *session.SessionManager, host ChildHost) toolRuntime {
 	return toolRuntime{Runtime: session.NewRuntime(ch, sm), host: host}
 }
 
@@ -37,7 +37,7 @@ func (t toolRuntime) WithToolCallID(id string) toolRuntime {
 	return t
 }
 
-func (t toolRuntime) requireHost() (childHost, error) {
+func (t toolRuntime) requireHost() (ChildHost, error) {
 	if t.host == nil {
 		return nil, fmt.Errorf("child sessions are not available: %w", ErrFailed)
 	}
@@ -72,13 +72,14 @@ func (t toolRuntime) AwaitChild(ctx context.Context, id string) (Child, error) {
 	if err != nil {
 		return Child{}, err
 	}
-	child, park, err := host.AwaitChild(ctx, id, t.CurrentToolCallID())
+	child, err := host.AwaitChild(ctx, id, t.CurrentToolCallID())
 	if err != nil {
+		var waiting *interrupt.ChildWaiting
+		if errors.As(err, &waiting) {
+			_, err := t.Park(interrupt.TypeChildWaiting, []byte(`{}`))
+			return Child{}, err
+		}
 		return child, err
-	}
-	if park {
-		_, err := t.Park(interrupt.TypeChildWaiting, []byte(`{}`))
-		return Child{}, err
 	}
 	return child, nil
 }
@@ -88,6 +89,7 @@ func formatChildren(rows []Child) string {
 		return "No child sessions."
 	}
 	var b strings.Builder
+	b.Grow(80 + 64*len(rows))
 	b.WriteString("Child sessions:\n")
 	for _, c := range rows {
 		fmt.Fprintf(&b, "- id=%s specialist=%s status=%s\n", c.ID, c.Specialist, c.State)
@@ -101,6 +103,13 @@ func formatChild(c Child) string {
 		c.ID, c.Specialist, c.State)
 }
 
+func unknownChildErr(name string, err error) error {
+	if errors.Is(err, ErrNotFound) {
+		return Correctionf(ErrNotFound, "%s: that child_id is unknown. Call list_children, then get_child or cancel_child with an id from that list", name)
+	}
+	return err
+}
+
 func scheduledChildMessage(id, specialist string) string {
 	return fmt.Sprintf("Child %s scheduled (specialist=%s). Use list_children to poll, get_child to collect its result (block=true to wait), or cancel_child to stop it.", id, specialist)
 }
@@ -108,16 +117,28 @@ func scheduledChildMessage(id, specialist string) string {
 func spawnSpecialist(ctx context.Context, args spawnSpecialistArgs, runtime HarnessRuntime) (string, error) {
 	spec := strings.TrimSpace(args.Specialist)
 	task := strings.TrimSpace(args.TaskDescriptionAndContext)
+	if task == "" {
+		return "", Correctionf(ErrInvalid, "spawn_specialist: task_description_and_context is required. Describe the worker's goal and constraints")
+	}
 	block := args.Block == nil || *args.Block
 	id, err := runtime.SpawnChild(ctx, spec, task)
 	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return "", Correctionf(ErrNotFound, "spawn_specialist: that specialist is not registered. Pass a name from the available specialists")
+		}
+		if errors.Is(err, ErrInvalid) {
+			return "", Correctionf(ErrInvalid, "spawn_specialist: specialist is required. Pass a name from the available specialists")
+		}
 		return "", err
 	}
 	if !block {
 		return scheduledChildMessage(id, spec), nil
 	}
 	child, err := runtime.AwaitChild(ctx, id)
-	return child.Result, err
+	if err != nil {
+		return "", unknownChildErr("spawn_specialist", err)
+	}
+	return child.Result, nil
 }
 
 func listChildren(_ context.Context, _ listChildrenArgs, runtime HarnessRuntime) (string, error) {
@@ -127,7 +148,7 @@ func listChildren(_ context.Context, _ listChildrenArgs, runtime HarnessRuntime)
 func getChild(ctx context.Context, args getChildArgs, runtime HarnessRuntime) (string, error) {
 	id := strings.TrimSpace(args.ChildID)
 	if id == "" {
-		return "", fmt.Errorf("child_id is required; call list_children and pass a child_id from that list: %w", ErrInvalid)
+		return "", Correctionf(ErrInvalid, "get_child: child_id is required. Call list_children and pass a child_id from that list")
 	}
 	if !args.Block {
 		for _, c := range runtime.Children() {
@@ -140,16 +161,19 @@ func getChild(ctx context.Context, args getChildArgs, runtime HarnessRuntime) (s
 		}
 	}
 	child, err := runtime.AwaitChild(ctx, id)
-	return child.Result, err
+	if err != nil {
+		return "", unknownChildErr("get_child", err)
+	}
+	return child.Result, nil
 }
 
 func cancelChild(ctx context.Context, args cancelChildArgs, runtime HarnessRuntime) (string, error) {
 	id := strings.TrimSpace(args.ChildID)
 	if id == "" {
-		return "", fmt.Errorf("child_id is required; call list_children and pass a child_id from that list: %w", ErrInvalid)
+		return "", Correctionf(ErrInvalid, "cancel_child: child_id is required. Call list_children and pass a child_id from that list")
 	}
 	if err := runtime.CancelChild(ctx, id); err != nil {
-		return "", err
+		return "", unknownChildErr("cancel_child", err)
 	}
 	return fmt.Sprintf("Child %s cancelled and removed.", id), nil
 }

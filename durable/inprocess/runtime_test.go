@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -238,6 +239,9 @@ func TestAskUserChoiceYieldsThenResumeCompletes(t *testing.T) {
 		if ev.Type == streaming.StreamEventInterrupt {
 			yielded = true
 		}
+		if ev.Type == streaming.StreamEventToolResult {
+			t.Fatalf("park yielded a tool_result: %+v", summarize(got))
+		}
 	}
 	if !yielded {
 		t.Fatalf("want yield, got %+v", summarize(got))
@@ -410,20 +414,31 @@ func TestCancelWhileRunningEndsSubscriptionThenNextPromptRuns(t *testing.T) {
 	if err := rt.Cancel(ctx, id); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case _, ok := <-sub.Events():
-		if ok {
-			// drain until close
-			for range sub.Events() {
+	var sawCancel bool
+	deadline := time.After(5 * time.Second)
+drain:
+	for {
+		select {
+		case ev, ok := <-sub.Events():
+			if !ok {
+				break drain
 			}
+			if ev.Type == streaming.StreamEventError && (errors.Is(ev.Error, context.Canceled) ||
+				strings.Contains(ev.Content, "canceled") ||
+				strings.Contains(fmt.Sprint(ev.Error), "canceled")) {
+				sawCancel = true
+			}
+		case <-deadline:
+			t.Fatal("subscription did not end after cancel")
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("subscription did not end after cancel")
+	}
+	if !sawCancel {
+		t.Fatal("want canceled stream error")
 	}
 
 	model2 := scriptedComplete("after-cancel")
 	// Replace agent model by re-registering.
-	cat := rt.Catalog().(*durable.MemoryCatalog)
+	cat := rt.catalog.(*durable.MemoryCatalog)
 	cat.Register("default", durable.AgentSpec{
 		Options: tacklr.AgentOptions{Model: model2, Config: tacklr.Config{MaxWindowSize: 8192}},
 	})
@@ -564,6 +579,111 @@ func TestNewSessionDoesNotLoadPreviousSnapshot(t *testing.T) {
 	}
 	if len(users) != 1 || users[0] != "session-two" {
 		t.Fatalf("want window [session-two], got %v", users)
+	}
+}
+
+func TestPrompt_readMissingPathCorrection(t *testing.T) {
+	ctx := t.Context()
+	dir := t.TempDir()
+	fsReg := vfs.NewBackendRegistry()
+	if err := fsReg.Register(vfs.LocalFactory{ID: "local", Base: dir}); err != nil {
+		t.Fatal(err)
+	}
+	model := &testkit.ScriptedModel{
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			if last := lastMsg(msgs); last != nil && last.Role == tacklr.RoleTool {
+				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: last.Content, IsComplete: true}
+				return
+			}
+			ch <- tacklr.LLMResponseChunk{
+				Type: tacklr.StreamEventFunctionCall,
+				ToolCalls: []tacklr.ToolCall{{
+					ID: "r1", CallID: "r1", Name: "read",
+					Arguments: `{"path":"/workspace/docs/missing.txt"}`,
+				}},
+				IsComplete: true,
+			}
+		},
+	}
+	rt := New(newCatalog(t, model, durable.AgentSpec{FSRegistry: fsReg}), WithProjection(vfs.DirectProjection{}))
+	id, err := rt.CreateSession(ctx, durable.CreateSession{AgentID: "default"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rt.Prompt(ctx, id, durable.Prompt{
+		Text: "read missing",
+		Auth: durable.AuthContext{Bindings: []vfs.Binding{{
+			Provider: "local",
+			Params:   map[string]string{vfs.ParamName: "docs"},
+			Auth:     vfs.Credential{Token: "x"},
+		}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sub, err := rt.Subscribe(ctx, id, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sub.Close() })
+	got := waitEvents(t, sub, 8*time.Second)
+	var sentence string
+	for _, ev := range got {
+		if ev.Type == streaming.StreamEventToolResult && strings.Contains(ev.Content, "that path does not exist. List the parent") {
+			sentence = ev.Content
+		}
+	}
+	if sentence == "" {
+		t.Fatalf("want not-exist correction tool_result, got %+v", summarize(got))
+	}
+}
+
+func TestPrompt_toolFailedServiceString(t *testing.T) {
+	ctx := t.Context()
+	boom := tacklr.NewTool(tacklr.ToolConfig{
+		Name: "boom",
+		Handler: func(context.Context) (string, error) {
+			return "", fmt.Errorf("upstream: the search provider failed: %w", tacklr.ErrFailed)
+		},
+	})
+	model := &testkit.ScriptedModel{
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			if last := lastMsg(msgs); last != nil && last.Role == tacklr.RoleTool {
+				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: last.Content, IsComplete: true}
+				return
+			}
+			ch <- tacklr.LLMResponseChunk{
+				Type: tacklr.StreamEventFunctionCall,
+				ToolCalls: []tacklr.ToolCall{{
+					ID: "b1", CallID: "b1", Name: "boom", Arguments: `{}`,
+				}},
+				IsComplete: true,
+			}
+		},
+	}
+	rt := New(newCatalog(t, model, durable.AgentSpec{
+		Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{boom}},
+	}), WithProjection(vfs.DirectProjection{}))
+	id, err := rt.CreateSession(ctx, durable.CreateSession{AgentID: "default"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rt.Prompt(ctx, id, durable.Prompt{Text: "boom"}); err != nil {
+		t.Fatal(err)
+	}
+	sub, err := rt.Subscribe(ctx, id, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sub.Close() })
+	got := waitEvents(t, sub, 8*time.Second)
+	var sentence string
+	for _, ev := range got {
+		if ev.Type == streaming.StreamEventToolResult && strings.Contains(ev.Content, "search provider failed") {
+			sentence = ev.Content
+		}
+	}
+	if sentence == "" {
+		t.Fatalf("want service-failed tool_result, got %+v", summarize(got))
 	}
 }
 

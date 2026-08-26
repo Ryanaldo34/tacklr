@@ -14,7 +14,10 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/brain"
+	"github.com/ryanaldo34/tacklr/durable"
+	"github.com/ryanaldo34/tacklr/durable/inprocess"
 	"github.com/ryanaldo34/tacklr/inference"
+	"github.com/ryanaldo34/tacklr/vfs"
 )
 
 // Config configures a benchmark run.
@@ -195,49 +198,40 @@ func runCase(ctx context.Context, cfg Config, c Case, exa string) CaseResult {
 		}
 	}
 
-	agentOpts := func() tacklr.AgentOptions {
-		return tacklr.AgentOptions{
-			Config: tacklr.Config{
-				MaxWindowSize: maxWindow,
-				SystemPrompt:  SharedSystemPrompt,
-			},
-			SessionID:       sessionID,
-			Model:           model,
-			Brain:           eng,
-			BrainWriteKinds: brain.WriteKinds{Discovery: "Discovery", Fact: "Fact", Memory: "Memory"},
-			SearchNamespace: &ns,
-			ExaAPIKey:       exa,
-		}
+	harnessOpts := tacklr.AgentOptions{
+		Config: tacklr.Config{
+			MaxWindowSize: maxWindow,
+			SystemPrompt:  SharedSystemPrompt,
+		},
+		Model:           model,
+		Brain:           eng,
+		BrainWriteKinds: brain.WriteKinds{Discovery: "Discovery", Fact: "Fact", Memory: "Memory"},
+		SearchNamespace: &ns,
+		ExaAPIKey:       exa,
 	}
 
 	var turns []TurnTrace
-	agent, err := tacklr.NewAgent(caseCtx, agentOpts())
+	cat := durable.NewCatalog("bench")
+	cat.Register("bench", durable.AgentSpec{Options: harnessOpts})
+	rt := inprocess.New(cat, inprocess.WithProjection(vfs.DirectProjection{}))
+	id, err := rt.CreateSession(caseCtx, durable.CreateSession{AgentID: "bench", SessionID: durable.SessionID(sessionID)})
 	if err != nil {
-		return failResult(c, turns, "construct agent: "+err.Error())
+		return failResult(c, turns, "create session: "+err.Error())
 	}
+	defer func() { _ = rt.Close(context.Background(), id) }()
+	sub, err := rt.Subscribe(caseCtx, id, 0)
+	if err != nil {
+		return failResult(c, turns, "subscribe: "+err.Error())
+	}
+	defer func() { _ = sub.Close() }()
 	for i, prompt := range c.Turns {
-		if c.RestoreSession && i == len(c.Turns)-1 && i > 0 {
-			cp, err := agent.Checkpoint()
-			if err != nil {
-				return failResult(c, turns, "checkpoint: "+err.Error())
-			}
-			agent.Close()
-			loaded, err := tacklr.NewAgent(caseCtx, agentOpts())
-			if err != nil {
-				return failResult(c, turns, "restore session: "+err.Error())
-			}
-			if err := loaded.RestoreCheckpoint(*cp); err != nil {
-				return failResult(c, turns, "restore checkpoint: "+err.Error())
-			}
-			agent = loaded
-		}
-		tr, err := runTurn(caseCtx, agent, prompt, c)
+		tr, err := runTurn(caseCtx, rt, id, sub, prompt, c)
 		if err != nil {
 			tr.Error = err.Error()
 			turns = append(turns, tr)
 			return judgeCase(c, eng, scope, turns)
 		}
-		if c.RestoreSession && i == len(c.Turns)-1 {
+		if c.RestoreSession && i == len(c.Turns)-1 && i > 0 {
 			tr.RestoredSess = true
 		}
 		turns = append(turns, tr)
@@ -245,11 +239,10 @@ func runCase(ctx context.Context, cfg Config, c Case, exa string) CaseResult {
 	return judgeCase(c, eng, scope, turns)
 }
 
-func runTurn(ctx context.Context, agent *tacklr.AgentHarness, prompt string, c Case) (TurnTrace, error) {
+func runTurn(ctx context.Context, rt *inprocess.Runtime, id durable.SessionID, sub durable.Subscription, prompt string, c Case) (TurnTrace, error) {
 	start := time.Now()
 	tr := TurnTrace{Prompt: prompt}
-	ch, err := agent.Run(ctx, prompt)
-	if err != nil {
+	if err := rt.Prompt(ctx, id, durable.Prompt{Text: prompt}); err != nil {
 		tr.Duration = time.Since(start)
 		return tr, err
 	}
@@ -261,11 +254,10 @@ func runTurn(ctx context.Context, agent *tacklr.AgentHarness, prompt string, c C
 			tr.Duration = time.Since(start)
 			tr.Assistant = assistant.String()
 			return tr, ctx.Err()
-		case ev, ok := <-ch:
+		case ev, ok := <-sub.Events():
 			if !ok {
 				tr.Duration = time.Since(start)
 				tr.Assistant = assistant.String()
-				// Flatten tools
 				for _, rec := range toolByCallID {
 					tr.Tools = append(tr.Tools, *rec)
 				}
@@ -282,22 +274,28 @@ func runTurn(ctx context.Context, agent *tacklr.AgentHarness, prompt string, c C
 					if name == "" {
 						continue
 					}
-					id := tc.CallID
-					if id == "" {
-						id = tc.ID
+					callID := tc.CallID
+					if callID == "" {
+						callID = tc.ID
 					}
-					if id == "" {
-						id = name + fmt.Sprintf("-%d", len(toolByCallID))
+					if callID == "" {
+						callID = name + fmt.Sprintf("-%d", len(toolByCallID))
 					}
-					toolByCallID[id] = &ToolCallRecord{Name: name, Arguments: tc.Arguments}
+					toolByCallID[callID] = &ToolCallRecord{Name: name, Arguments: tc.Arguments}
 				}
 			case tacklr.StreamEventToolResult:
-				// Content often holds tool output; MessageID may be call id.
 				if rec, ok := toolByCallID[ev.MessageID]; ok {
 					rec.Result = ev.Content
 				} else if ev.Content != "" {
 					tr.Tools = append(tr.Tools, ToolCallRecord{Name: "?", Result: ev.Content})
 				}
+			case tacklr.StreamEventComplete:
+				tr.Duration = time.Since(start)
+				tr.Assistant = assistant.String()
+				for _, rec := range toolByCallID {
+					tr.Tools = append(tr.Tools, *rec)
+				}
+				return tr, nil
 			case tacklr.StreamEventInterrupt:
 				tr.Interrupts++
 				var payload struct {
@@ -309,17 +307,13 @@ func runTurn(ctx context.Context, agent *tacklr.AgentHarness, prompt string, c C
 					tr.Duration = time.Since(start)
 					return tr, fmt.Errorf("interrupt payload: %w", err)
 				}
-				// Drain rest of channel after interrupt park (channel closes).
-				drainEvents(ch)
 				resumeBody := buildInterruptResume(payload.InterruptId, payload.Type, payload.Data, c)
-				ch2, err := agent.ReturnFromInterrupt(ctx, map[string][]byte{
+				if err := rt.Resume(ctx, id, durable.Resume{Responses: map[string][]byte{
 					payload.InterruptId: resumeBody,
-				})
-				if err != nil {
+				}}); err != nil {
 					tr.Duration = time.Since(start)
 					return tr, fmt.Errorf("resume interrupt: %w", err)
 				}
-				ch = ch2
 			case tacklr.StreamEventError:
 				if ev.Error != nil {
 					tr.Duration = time.Since(start)
@@ -333,12 +327,6 @@ func runTurn(ctx context.Context, agent *tacklr.AgentHarness, prompt string, c C
 				}
 			}
 		}
-	}
-}
-
-func drainEvents(ch <-chan tacklr.StreamEvent) {
-	for ev := range ch {
-		_ = ev
 	}
 }
 

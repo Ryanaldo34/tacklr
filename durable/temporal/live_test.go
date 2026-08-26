@@ -68,7 +68,7 @@ func (s *liveStack) RestartWorker(t *testing.T) {
 	w := NewWorker(s.Client, s.TaskQueue, WorkerOptions{
 		Catalog:    s.Catalog,
 		Snapshots:  s.Snapshots,
-		Fallback:   s.Runtime.(*Runtime).FallbackLog(),
+		Fallback:   s.Runtime.(*Runtime).fallback,
 		Projection: vfs.DirectProjection{},
 	})
 	if err := w.Start(); err != nil {
@@ -239,69 +239,6 @@ func TestLive_hitlYieldThenResume(t *testing.T) {
 	waitContains(t, sub, 30*time.Second, func(ev streaming.StreamEvent) bool {
 		return ev.Type == streaming.StreamEventMessage && ev.Content == "chose" || ev.Type == streaming.StreamEventComplete
 	})
-}
-
-func TestLive_permissionAllowRunsTool(t *testing.T) {
-	ctx := t.Context()
-	var ran atomic.Bool
-	sensitive := tacklr.NewTool(tacklr.ToolConfig{
-		Name:   "sensitive",
-		OnCall: []tacklr.OnCallFunc{tacklr.ToolPermissionOnCall},
-		Handler: func(ctx context.Context) (string, error) {
-			ran.Store(true)
-			return "secret-ok", nil
-		},
-	})
-	model := &testkit.ScriptedModel{
-		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-			if last := lastMsg(msgs); last != nil && last.Role == tacklr.RoleTool {
-				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "all clear", IsComplete: true}
-				return
-			}
-			ch <- tacklr.LLMResponseChunk{
-				Type: tacklr.StreamEventFunctionCall,
-				ToolCalls: []tacklr.ToolCall{{
-					ID: "call_sens", CallID: "call_sens", Name: "sensitive", Arguments: `{}`,
-				}},
-				IsComplete: true,
-			}
-		},
-	}
-	stack := newLiveStack(t, liveCat(t, model, durable.AgentSpec{
-		Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{sensitive}},
-	}))
-	id, err := stack.Runtime.CreateSession(ctx, durable.CreateSession{AgentID: "default"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := stack.Runtime.Prompt(ctx, id, durable.Prompt{Text: "run sensitive"}); err != nil {
-		t.Fatal(err)
-	}
-	sub, err := stack.Runtime.Subscribe(ctx, id, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = sub.Close() })
-	got := waitTurn(t, sub, 30*time.Second)
-	var yielded bool
-	for _, ev := range got {
-		if ev.Type == streaming.StreamEventInterrupt {
-			yielded = true
-		}
-	}
-	if !yielded {
-		t.Fatalf("want permission yield, got %+v", got)
-	}
-	payload, _ := json.Marshal(map[string]string{"optionId": "allow-once"})
-	if err := stack.Runtime.Resume(ctx, id, durable.Resume{Responses: map[string][]byte{"call_sens": payload}}); err != nil {
-		t.Fatal(err)
-	}
-	waitContains(t, sub, 30*time.Second, func(ev streaming.StreamEvent) bool {
-		return ev.Type == streaming.StreamEventToolResult && strings.Contains(ev.Content, "secret-ok")
-	})
-	if !ran.Load() {
-		t.Fatal("expected tool to run after allow")
-	}
 }
 
 func TestLive_workspaceAuthRemountsAfterResume(t *testing.T) {

@@ -25,7 +25,7 @@ func TestNew_nilOptionAndNilProjection(t *testing.T) {
 	cat := newCatalog(t, scriptedComplete("x"), durable.AgentSpec{})
 	snaps := NewMemorySnapshot()
 	rt := New(cat, nil, WithSnapshotStore(nil), WithProjection(nil), WithSnapshotStore(snaps))
-	if rt.Catalog() != cat {
+	if rt.catalog != cat {
 		t.Fatal("catalog")
 	}
 }

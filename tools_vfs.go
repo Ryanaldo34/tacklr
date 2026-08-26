@@ -35,32 +35,20 @@ type readArgs struct {
 	IR      bool   `json:"ir,omitempty" desc:"If true, include media_type/encoding/line_count. Full text= only when no window or block."`
 }
 
-type writeBlock struct {
-	ID         string            `json:"id,omitempty"`
-	Kind       string            `json:"kind"`
-	Text       string            `json:"text" desc:"Block body. Docs/Word inline marks: **bold**, _italic_ (or *italic*), ~~strike~~, [label](url). Structure is kind/level — do not put # headings or - lists in text. No marks = plain text (old marks dropped)."`
-	Level      int               `json:"level,omitempty"`
-	Attributes map[string]string `json:"attributes,omitempty"`
-}
-
 type writeArgs struct {
-	Path           string           `json:"path" desc:"Absolute virtual path to write."`
-	Rev            string           `json:"rev,omitempty" schema:"-"`
-	Content        *string          `json:"content,omitempty" desc:"Full new file body (UTF-8 HTML for Docs/Word). Creates or replaces the whole file."`
-	IRText         *string          `json:"ir_text,omitempty" desc:"Full IR body. Same as content; if both are set they must match."`
-	Start          *int             `json:"start,omitempty" desc:"1-based start line (inclusive). Lines mode."`
-	End            *int             `json:"end,omitempty" desc:"1-based end line (exclusive). Required in lines mode."`
-	Lines          []string         `json:"lines,omitempty" desc:"Replacement lines (no embedded newlines). Empty deletes the span. Or use body."`
-	Body           *string          `json:"body,omitempty" desc:"Replacement body as one string (split on newlines). Used if lines is empty."`
-	Old            *string          `json:"old,omitempty" desc:"Exact substring to find. Must be unique unless replace_all."`
-	New            *string          `json:"new,omitempty" desc:"Replacement text. Omitted treated as empty."`
-	ReplaceAll     bool             `json:"replace_all,omitempty" desc:"Replace every occurrence of old."`
-	BlockID        string           `json:"block_id,omitempty" desc:"Sheets: Sheet!A1. Host/test IR: replace this structured block."`
-	IncludeHeading bool             `json:"include_heading,omitempty" schema:"-"`
-	MediaType      string           `json:"media_type,omitempty" schema:"-"`
-	Blocks         *[]writeBlock    `json:"blocks,omitempty" schema:"-"`
-	TabID          string           `json:"tab_id,omitempty" desc:"Required for HTML/blocks when the Doc has more than one tab."`
-	Format         *vfs.FormatPatch `json:"format,omitempty" desc:"Optional cell format patch on the same block_id range (number, bold, italic, strike, underline, fill, color, align, valign, wrap, border). Omit a field to leave it; set bold=false to clear. Value-only writes leave format; format-only writes leave values."`
+	Path       string           `json:"path" desc:"Absolute virtual path to write."`
+	Rev        string           `json:"rev,omitempty" schema:"-"`
+	Content    *string          `json:"content,omitempty" desc:"Full new file body (UTF-8 HTML for Docs/Word). Creates or replaces the whole file."`
+	Start      *int             `json:"start,omitempty" desc:"1-based start line (inclusive). Lines mode."`
+	End        *int             `json:"end,omitempty" desc:"1-based end line (exclusive). Required in lines mode."`
+	Lines      []string         `json:"lines,omitempty" desc:"Replacement lines (no embedded newlines). Empty deletes the span. Or use body."`
+	Body       *string          `json:"body,omitempty" desc:"Replacement body as one string (split on newlines). Used if lines is empty."`
+	Old        *string          `json:"old,omitempty" desc:"Exact substring to find. Must be unique unless replace_all."`
+	New        *string          `json:"new,omitempty" desc:"Replacement text. Omitted treated as empty."`
+	ReplaceAll bool             `json:"replace_all,omitempty" desc:"Replace every occurrence of old."`
+	BlockID    string           `json:"block_id,omitempty" desc:"Sheets: Sheet!A1. Host/test IR: replace this structured block."`
+	TabID      string           `json:"tab_id,omitempty" desc:"Required for HTML/blocks when the Doc has more than one tab."`
+	Format     *vfs.FormatPatch `json:"format,omitempty" desc:"Optional cell format patch on the same block_id range (number, bold, italic, strike, underline, fill, color, align, valign, wrap, border). Omit a field to leave it; set bold=false to clear. Value-only writes leave format; format-only writes leave values."`
 }
 
 func (v vfsTools) newRead() *Tool {
@@ -79,13 +67,13 @@ Knowledge objects with no file: read_object. Live names/grep: run_command → ls
 		Handler: func(ctx context.Context, args readArgs, rt HarnessRuntime) (string, error) {
 			p, err := vfs.CleanPath(args.Path)
 			if err != nil {
-				return "", err
+				return "", vfsToolErr("read", args.Path, err)
 			}
 			rt.EmitUpdate("Reading " + p)
 
 			fi, err := v.ms.Stat(ctx, p)
 			if err != nil {
-				return "", err
+				return "", vfsToolErr("read", p, err)
 			}
 			projected := vfs.IsProjected(fi.MediaType)
 
@@ -104,15 +92,15 @@ Knowledge objects with no file: read_object. Live names/grep: run_command → ls
 			}
 
 			if projected && isTabularMedia(fi.MediaType) {
-				return "", vfs.ErrProjected
+				return "", vfsToolErr("read", p, vfs.ErrProjected)
 			}
 
 			if args.Start < 1 || args.End < args.Start {
-				return "", fmt.Errorf("invalid range start=%d end=%d. Use 1-based half-open start/end, or omit them to read the first page, or pass block_id / outline", args.Start, args.End)
+				return "", Correctionf(vfs.ErrLineOutOfRange, "read: invalid range start=%d end=%d. Use 1-based half-open start/end, or omit them to read the first page, or pass block_id / outline", args.Start, args.End)
 			}
 			win, err := v.ms.ReadLines(ctx, p, args.Start, args.End)
 			if err != nil {
-				return "", err
+				return "", vfsToolErr("read", p, err)
 			}
 			rev := win.Rev
 			if rev.Hash == "" {
@@ -143,7 +131,7 @@ Knowledge objects with no file: read_object. Live names/grep: run_command → ls
 func (v vfsTools) readStructured(ctx context.Context, p string, args readArgs, explicitWindow bool) (string, error) {
 	doc, err := v.ms.ReadText(ctx, p)
 	if err != nil {
-		return "", err
+		return "", vfsToolErr("read", p, err)
 	}
 	rev := vfs.ContentToken(doc)
 	if args.Rev != "" && args.Rev != rev {
@@ -328,7 +316,7 @@ func (v vfsTools) newWrite() *Tool {
 	cfg := ToolConfig{
 		Name:        "write",
 		DisplayName: "Write {path}",
-		Description: `Write a virtual file. Exactly one mode: full content, line span, substring, or block_id.
+		Description: `Write a virtual file. Replace whole (content) or a span (line start/end, or block_id including Sheet!A1). old/new finds a unique span.
 
 Docs/Word are a text file of HTML. Read numbered lines, then write start/end/lines or full content. The harness owns checkout. Single-tab Docs do not need tab_id.
 Create: content on a new path. Extension wins (Foo.md is never a Doc; notes.html is a real HTML file). Extensionless HTML becomes a native Doc on Drive, Word on Graph, or a text/html file locally.
@@ -339,7 +327,7 @@ Sheets: write block_id is Sheet!A1 (one cell). Optional format patches that cell
 		Handler: func(ctx context.Context, args writeArgs, rt HarnessRuntime) (string, error) {
 			p, err := vfs.CleanPath(args.Path)
 			if err != nil {
-				return "", err
+				return "", vfsToolErr("write", args.Path, err)
 			}
 			n, full := writeModeCount(args)
 			switch {
@@ -349,41 +337,25 @@ Sheets: write block_id is Sheet!A1 (one cell). Optional format patches that cell
 				return "", fmt.Errorf("write %s: pass only one change: content, or start/end lines, or old/new, or block_id", p)
 			}
 			mut := vfs.Mutation{
-				Rev:            args.Rev,
-				Old:            args.Old,
-				New:            args.New,
-				ReplaceAll:     args.ReplaceAll,
-				Start:          args.Start,
-				End:            args.End,
-				Lines:          args.Lines,
-				Body:           args.Body,
-				BlockID:        args.BlockID,
-				IncludeHeading: args.IncludeHeading,
-				TabID:          args.TabID,
-				MediaType:      args.MediaType,
-				Format:         args.Format,
+				Rev:        args.Rev,
+				Old:        args.Old,
+				New:        args.New,
+				ReplaceAll: args.ReplaceAll,
+				Start:      args.Start,
+				End:        args.End,
+				Lines:      args.Lines,
+				Body:       args.Body,
+				BlockID:    args.BlockID,
+				TabID:      args.TabID,
+				Format:     args.Format,
 			}
 			if full {
-				body, err := fullWriteBody(args)
-				if err != nil {
-					return "", err
-				}
-				mut.Content = &body
-			}
-			if args.Blocks != nil {
-				next := make([]vfs.Block, 0, len(*args.Blocks))
-				for _, wb := range *args.Blocks {
-					next = append(next, vfs.Block{
-						ID: wb.ID, Kind: wb.Kind, Text: wb.Text,
-						Style: vfs.StyleMeta{Level: wb.Level, Attributes: wb.Attributes},
-					})
-				}
-				mut.Blocks = next
+				mut.Content = args.Content
 			}
 			rt.EmitUpdate("Writing " + p)
 			res, err := v.ms.Apply(ctx, p, mut)
 			if err != nil {
-				return "", presentWriteError(p, err)
+				return "", vfsToolErr("write", p, err)
 			}
 			return formatWriteResult(res), nil
 		},
@@ -398,7 +370,8 @@ func staleRevError(path string) error {
 	return Correctionf(vfs.ErrStaleContent, "the file changed since that rev (%s). Omit rev, or read the file again before writing", path)
 }
 
-func presentWriteError(path string, err error) error {
+// vfsToolErr maps usage mistakes at the VFS tool, not in the turn processor.
+func vfsToolErr(name, path string, err error) error {
 	if err == nil {
 		return nil
 	}
@@ -415,8 +388,32 @@ func presentWriteError(path string, err error) error {
 		return Correctionf(vfs.ErrTabIDRequired, "%s: %s", path, vfs.ErrTabIDRequired.Error())
 	case errors.Is(err, vfs.ErrProjected):
 		return Correctionf(vfs.ErrProjected, "%s: that write is not supported on this file type. For a document, write HTML content or a line range. For a sheet, write one cell as block_id Sheet!A1", path)
+	case errors.Is(err, vfs.ErrNotExist):
+		return Correctionf(vfs.ErrNotExist, "%s: that path does not exist. List the parent with run_command (ls) or read a known path, then retry", name)
+	case errors.Is(err, vfs.ErrInvalidPath):
+		return Correctionf(vfs.ErrInvalidPath, "%s: that path is not a valid virtual path. Use an absolute path under a mount (for example /workspace/documents/Name)", name)
+	case errors.Is(err, vfs.ErrIsDir):
+		return Correctionf(vfs.ErrIsDir, "%s: that path is a directory. Read a file inside it, or list it with run_command ls", name)
+	case errors.Is(err, vfs.ErrNotDir):
+		return Correctionf(vfs.ErrNotDir, "%s: that path is a file, not a directory", name)
+	case errors.Is(err, vfs.ErrAuthExpired):
+		return fmt.Errorf("%s: cloud credentials expired: %w", name, errors.Join(ErrFailed, err))
+	case errors.Is(err, vfs.ErrPermission):
+		return Correctionf(vfs.ErrPermission, "%s: permission denied on that path. Use a path the session is allowed to access", name)
+	case errors.Is(err, vfs.ErrReadOnly):
+		return Correctionf(vfs.ErrReadOnly, "%s: that mount is read-only. Read the file, or write under a writable mount", name)
+	case errors.Is(err, vfs.ErrLineOutOfRange):
+		return Correctionf(vfs.ErrLineOutOfRange, "%s: that line range is outside the file. Read the path without start/end to see line_count, then request a window that fits", name)
+	case errors.Is(err, vfs.ErrInvalidLine):
+		return Correctionf(vfs.ErrInvalidLine, "%s: a replacement line contained a newline. Pass each line as its own array entry, with no embedded \\n", name)
+	case errors.Is(err, vfs.ErrTooLarge):
+		return Correctionf(vfs.ErrTooLarge, "%s: that payload is too large. Write a smaller window or split the document", name)
+	case errors.Is(err, vfs.ErrFuseNotMounted):
+		return Correctionf(vfs.ErrFuseNotMounted, "%s: the host shell is not mounted. Use read/write on virtual paths instead of run_command", name)
+	case errors.Is(err, vfs.ErrNotTextual):
+		return Correctionf(vfs.ErrNotTextual, "%s: that file is not text. Use a different path, or write a text/HTML document", name)
 	default:
-		return presentToolError("write", err)
+		return err
 	}
 }
 
@@ -441,7 +438,7 @@ func isTabularMedia(mt string) bool {
 }
 
 func writeModeCount(args writeArgs) (n int, full bool) {
-	full = args.Content != nil || args.IRText != nil
+	full = args.Content != nil
 	if full {
 		n++
 	}
@@ -454,24 +451,7 @@ func writeModeCount(args writeArgs) (n int, full bool) {
 	if args.Start != nil && args.BlockID == "" {
 		n++
 	}
-	if args.Blocks != nil {
-		n++
-	}
 	return n, full
-}
-
-func fullWriteBody(args writeArgs) (string, error) {
-	switch {
-	case args.Content != nil && args.IRText != nil:
-		if *args.Content != *args.IRText {
-			return "", fmt.Errorf("write: content and ir_text must be the same text")
-		}
-		return *args.Content, nil
-	case args.IRText != nil:
-		return *args.IRText, nil
-	default:
-		return *args.Content, nil
-	}
 }
 
 func lineWindowFromTextDoc(doc vfs.Textual, start, end int) (vfs.LineWindow, error) {
@@ -522,11 +502,11 @@ func newRunCommand(ms *vfs.MountSession, permissionRequired bool) *Tool {
 		Handler: func(ctx context.Context, args runCommandArgs, rt HarnessRuntime) (string, error) {
 			dir := ms.HostDir()
 			if dir == "" {
-				return "", vfs.ErrFuseNotMounted
+				return "", vfsToolErr("run_command", "", vfs.ErrFuseNotMounted)
 			}
 			cmdStr := strings.TrimSpace(args.Command)
 			if cmdStr == "" {
-				return "", fmt.Errorf("run_command: command is required. Pass a shell command string, for example ls work: %w", ErrInvalid)
+				return "", Correctionf(ErrInvalid, "run_command: command is required. Pass a shell command string, for example ls work")
 			}
 			rt.EmitUpdate("Running " + cmdStr)
 			return command.Run(ctx, dir, cmdStr)

@@ -10,7 +10,7 @@ import (
 // TestAgent_HasOpenToolWorkAndFinalizeCancelled: parked/open tools → HasOpenToolWork;
 // FinalizeCancelledWork pairs cancelled results and clears park state.
 func TestAgent_HasOpenToolWorkAndFinalizeCancelled(t *testing.T) {
-	h := mustNewAgent(t, AgentOptions{
+	h := mustNewTurnManager(t, AgentOptions{
 		SessionID: "cancel-open-tools",
 		Model:     &mockStrategy{},
 	})
@@ -41,21 +41,22 @@ func TestAgent_HasOpenToolWorkAndFinalizeCancelled(t *testing.T) {
 		t.Fatal("pending tool call should count")
 	}
 
-	h.finalizeCancelledWork(nil)
+	h.pairCancelledToolResults(nil)
+	h.clearInterruptParkState()
 
 	if h.hasOpenToolWork() {
 		t.Fatal("after finalize, no open tool work")
 	}
 	// Window should include cancelled tool result
 	var sawCancelled bool
-	for _, m := range h.Messages() {
+	for _, m := range h.context.Messages() {
 		if m != nil && m.Role == RoleTool && m.ToolCallID == "c1" &&
 			strings.Contains(m.Content, "cancelled") {
 			sawCancelled = true
 		}
 	}
 	if !sawCancelled {
-		t.Fatalf("expected cancelled tool result in window: %+v", h.Messages())
+		t.Fatalf("expected cancelled tool result in window: %+v", h.context.Messages())
 	}
 
 	// Empty tool call id is ignored by openToolCalls
@@ -87,7 +88,7 @@ func TestAgent_HasOpenToolWorkAndFinalizeCancelled(t *testing.T) {
 		nEv++
 	}
 	var paired bool
-	for _, m := range h.Messages() {
+	for _, m := range h.context.Messages() {
 		if m != nil && m.Role == RoleTool && m.ToolCallID == "c3" &&
 			strings.Contains(m.Content, "cancelled") {
 			paired = true

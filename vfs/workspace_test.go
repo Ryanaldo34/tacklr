@@ -80,6 +80,16 @@ func TestWorkspace_duplicateAliasIsAmbiguous(t *testing.T) {
 	if err := ms.Mount(ctx, vfs.Workspace(dup, other)); !errors.Is(err, vfs.ErrAmbiguous) {
 		t.Fatalf("dup alias = %v", err)
 	}
+	nested := vfs.MountSpec{Profile: "a", Params: map[string]string{vfs.ParamName: "x"}, Members: []vfs.MountSpec{{Profile: "b"}}}
+	if err := ms.Mount(ctx, vfs.Workspace(nested)); err == nil {
+		t.Fatal("nested workspace members")
+	}
+	if err := ms.Mount(ctx, vfs.Workspace(vfs.MountSpec{Params: map[string]string{vfs.ParamName: "z"}})); err == nil {
+		t.Fatal("member profile required")
+	}
+	if err := ms.Mount(ctx, vfs.Workspace(vfs.MountSpec{Profile: "a"})); err == nil {
+		t.Fatal("member name required")
+	}
 }
 
 func TestWorkspace_writableMemberAndReadOnlyMember(t *testing.T) {
@@ -112,6 +122,15 @@ func TestWorkspace_writableMemberAndReadOnlyMember(t *testing.T) {
 	}
 	if err := ms.WriteFile(ctx, "/workspace/ro/a.txt", []byte("nope")); !errors.Is(err, vfs.ErrReadOnly) {
 		t.Fatalf("ro write = %v", err)
+	}
+	if err := ms.MkdirAll(ctx, "/workspace/ro/sub"); !errors.Is(err, vfs.ErrReadOnly) {
+		t.Fatalf("ro mkdir = %v", err)
+	}
+	if err := ms.Remove(ctx, "/workspace/ro/a.txt"); !errors.Is(err, vfs.ErrReadOnly) {
+		t.Fatalf("ro remove = %v", err)
+	}
+	if err := ms.MkdirAll(ctx, "/workspace"); err != nil {
+		t.Fatalf("mkdir workspace root: %v", err)
 	}
 	if err := ms.WriteFile(ctx, "/workspace/root.txt", []byte("x")); !errors.Is(err, vfs.ErrNotExist) && !errors.Is(err, vfs.ErrNotSupported) {
 		t.Fatalf("write at workspace file = %v", err)

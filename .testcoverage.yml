@@ -49,13 +49,14 @@ override:
 
 exclude:
   # Repo-relative paths (matched as regexes against file paths).
-  # cmd/*: mains / local harnesses. testkit: test doubles. agentbench: live
-  # multi-turn bench (exercised by agent-bench, not unit cover).
+  # cmd/*: mains / local harnesses. testkit/livesess: test doubles.
+  # agentbench: live multi-turn bench (exercised by agent-bench, not unit cover).
   paths:
     - cmd/
     - internal/testkit
     - internal/agentbench
     - internal/temporallive
+    - internal/livesess
     # Exporter constructors, not product outcomes.
     - telemetry/otel.go
 

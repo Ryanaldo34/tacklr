@@ -57,53 +57,44 @@ type IdentityCodec interface {
 	Identity()
 }
 
-// IsProjected reports whether mediaType is owned by a registered non-identity
-// codec (DocsCodec, SheetsCodec). PDF and unregistered types are not projected.
-func IsProjected(mediaType string) bool {
+// codecKind is one registry lookup. identity is true for IdentityCodec owners.
+// Empty, octet-stream, and unregistered types are neither identity nor projected.
+func codecKind(mediaType string) (identity, registered bool) {
 	mediaType = normalizeMediaType(mediaType)
 	if mediaType == "" || mediaType == "application/octet-stream" {
-		return false
+		return false, false
 	}
 	c, ok := defaultContentRegistry.codec(mediaType)
 	if !ok {
-		return false
+		return false, false
 	}
 	_, id := c.(IdentityCodec)
-	return !id
+	return id, true
 }
 
-// KernelWritable reports whether FUSE/host writes may persist raw bytes for
-// mediaType. True only when a registered IdentityCodec owns the type.
-// Providers must set FileInfo.MediaType; unregistered types are EROFS.
-func kernelWritable(mediaType string) bool {
-	mediaType = normalizeMediaType(mediaType)
-	if mediaType == "" || mediaType == "application/octet-stream" {
-		return false
-	}
-	c, ok := defaultContentRegistry.codec(mediaType)
-	if !ok {
-		return false
-	}
-	_, ok = c.(IdentityCodec)
-	return ok
+func identityBody(mediaType string) bool {
+	id, _ := codecKind(mediaType)
+	return id
 }
 
-// KernelWritableFile reports whether an existing file may take kernel writes.
-// Empty MediaType is not writable — providers classify at Stat.
+// IsProjected reports whether mediaType is a registered rich/grid codec.
+// Projected bodies are not FUSE raw-byte writes; identity/text bodies are.
+func IsProjected(mediaType string) bool {
+	id, ok := codecKind(mediaType)
+	return ok && !id
+}
+
+func kernelWritable(mediaType string) bool { return identityBody(mediaType) }
+
 func kernelWritableFile(st FileInfo) bool {
-	return kernelWritable(st.MediaType)
+	return identityBody(st.MediaType)
 }
 
 // KernelCreateOK reports whether a new name may be created via FUSE.
-// Unknown types (temps, README) are allowed; a registered non-identity codec is not.
+// Unknown types (temps, README) are allowed; projected codecs are not.
 func kernelCreateOK(name string) bool {
-	mt := DetectMediaType(name, nil)
-	c, ok := defaultContentRegistry.codec(mt)
-	if !ok {
-		return true
-	}
-	_, id := c.(IdentityCodec)
-	return id
+	id, ok := codecKind(DetectMediaType(name, nil))
+	return !ok || id
 }
 
 // ContentRegistry maps media type → Codec (process-scoped, like BackendRegistry).

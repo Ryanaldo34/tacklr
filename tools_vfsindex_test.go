@@ -15,7 +15,7 @@ import (
 	"github.com/ryanaldo34/tacklr/vfsindex"
 )
 
-func vfsIndexHarness(t *testing.T, withNS bool) (*AgentHarness, *vfs.MountSession, *brain.Engine, uuid.UUID) {
+func vfsIndexHarness(t *testing.T, withNS bool) (*TurnManager, *vfs.MountSession, *brain.Engine, uuid.UUID) {
 	t.Helper()
 	ctx := context.Background()
 	base := t.TempDir()
@@ -49,7 +49,7 @@ func vfsIndexHarness(t *testing.T, withNS bool) (*AgentHarness, *vfs.MountSessio
 	if withNS {
 		opts.SearchNamespace = &ns
 	}
-	h := mustNewAgent(t, opts)
+	h := mustNewTurnManager(t, opts)
 	t.Cleanup(h.Close)
 	return h, ms, eng, ns
 }
@@ -73,7 +73,7 @@ func mustMountBrain(ctx context.Context, t *testing.T, reg *vfs.BackendRegistry,
 	}
 }
 
-func activatePlan(t *testing.T, h *AgentHarness) {
+func activatePlan(t *testing.T, h *TurnManager) {
 	t.Helper()
 	h.session.Plan.Set([]Todo{{Title: "t", Description: "d", Status: streaming.TodoStatusPending}})
 	if !h.session.Plan.HasActive() {
@@ -81,7 +81,7 @@ func activatePlan(t *testing.T, h *AgentHarness) {
 	}
 }
 
-func runWriteTool(t *testing.T, h *AgentHarness, tool *Tool, argsJSON string) (string, error) {
+func runWriteTool(t *testing.T, h *TurnManager, tool *Tool, argsJSON string) (string, error) {
 	t.Helper()
 	out, _, err := h.toolRunner.Run(context.Background(), ToolInvocation{
 		Tool:     tool,
@@ -290,7 +290,7 @@ func TestVFSIndexTools_prefixAutoIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 	ns := uuid.New()
-	h := mustNewAgent(t, AgentOptions{
+	h := mustNewTurnManager(t, AgentOptions{
 		SessionID:    "policy-prefix",
 		MountSession: ms, Model: &mockStrategy{},
 		Brain: eng, SearchNamespace: &ns,
@@ -335,7 +335,7 @@ func TestKnowledgeSaveSearchRead(t *testing.T) {
 	}
 	ns := uuid.New()
 	mustMountBrain(ctx, t, reg, ms, eng, ns, vfs.MountSpec{})
-	h := mustNewAgent(t, AgentOptions{
+	h := mustNewTurnManager(t, AgentOptions{
 		SessionID:    "save-mem",
 		MountSession: ms, Model: &mockStrategy{},
 		Brain: eng, SearchNamespace: &ns,
@@ -466,7 +466,7 @@ func TestKnowledgeSave_rootsMount(t *testing.T) {
 		Point: "/discovery", Profile: brain.DefaultProfile,
 		Params: map[string]string{"mode": brain.ModeRoots, "kind": "Discovery"},
 	})
-	h := mustNewAgent(t, AgentOptions{
+	h := mustNewTurnManager(t, AgentOptions{
 		SessionID:    "save-roots",
 		MountSession: ms, Model: &mockStrategy{},
 		Brain: eng, SearchNamespace: &ns,
@@ -604,7 +604,7 @@ func TestRun_workspaceResearchTurn(t *testing.T) {
 		}
 	}
 
-	h := mustNewAgent(t, AgentOptions{
+	h := mustNewTurnManager(t, AgentOptions{
 		SessionID: "research-turn",
 		Config: Config{
 			MaxWindowSize:   400,
@@ -621,45 +621,52 @@ func TestRun_workspaceResearchTurn(t *testing.T) {
 		Model:           strategy,
 	})
 	t.Cleanup(h.Close)
-	if h.VFS() != ms {
-		t.Fatal("VFS() must be the host MountSession")
+	if h.session.VFS != ms {
+		t.Fatal("session VFS must be the host MountSession")
 	}
-	if _, ok := h.SearchNamespace(); !ok {
+	if _, ok := h.session.Search.Namespace(); !ok {
 		t.Fatal("SearchNamespace must be set")
 	}
 
-	events, err := h.Run(ctx, "research the note and save what you find")
-	if err != nil {
-		t.Fatal(err)
+	rt := turnRuntime(h)
+	mustInvoke := func(name, args string) string {
+		t.Helper()
+		tool := h.findTool(name, "")
+		if tool == nil {
+			t.Fatalf("missing tool %s", name)
+		}
+		res, err := tool.invoke(ctx, args, rt)
+		if err != nil && name != "index_file" {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if name == "index_file" && err != nil {
+			return err.Error()
+		}
+		return res.output
 	}
-	got := drainEvents(events)
-	if hasEventType(got, StreamEventError) {
-		t.Fatalf("turn error: %+v", summarizeEvents(got))
+	mustInvoke("create_plan", `{"plan":"index then wrap up","todos":[{"title":"index","status":"pending","description":"write and index"},{"title":"wrap-up","status":"pending","description":"report"}]}`)
+	mustInvoke("write", `{"path":"/work/research.md","content":"# Notes\n\nunique-research-token for later search\n"}`)
+	readOut := mustInvoke("read", `{"path":"/work/research.md","start":1,"end":10}`)
+	if !strings.Contains(readOut, "unique-research-token") {
+		t.Fatalf("read: %s", readOut)
 	}
-	requireToolResult(t, got, "path=/work/research.md")
-	requireToolResult(t, got, "unique-research-token")
-	requireToolResult(t, got, "indexed path=/work/research.md")
-	requireToolResult(t, got, "object_id")
-	requireToolResult(t, got, "now starting")
+	dirErr := mustInvoke("index_file", `{"path":"/work"}`)
+	if !strings.Contains(strings.ToLower(dirErr), "directory") {
+		t.Fatalf("expected directory error, got %q", dirErr)
+	}
+	idx := mustInvoke("index_file", `{"path":"/work/research.md"}`)
+	if !strings.Contains(idx, "indexed path=/work/research.md") {
+		t.Fatalf("index: %s", idx)
+	}
+	mustInvoke("search", `{"query":"unique-research-token"}`)
+	save := mustInvoke("save_discovery", `{"title":"research token","content":"unique-research-token lives in /work/research.md"}`)
+	if !strings.Contains(save, "object_id") {
+		t.Fatalf("save: %s", save)
+	}
 	if body, err := ms.ReadFile(ctx, "/work/research.md"); err != nil || !strings.Contains(string(body), "unique-research-token") {
 		t.Fatalf("vfs body: %s err=%v", body, err)
 	}
 	_ = waitSearchHit(t, eng, brain.Scope{Namespace: &ns}, "unique-research-token", 3*time.Second)
-	var sawDirErr bool
-	for _, ev := range got {
-		if ev.Type == StreamEventToolResult && strings.Contains(ev.Content, "directory") {
-			sawDirErr = true
-		}
-	}
-	if !sawDirErr {
-		t.Fatalf("expected index_file directory error, got %+v", summarizeEvents(got))
-	}
-	wd.mu.Lock()
-	nTools, nOut := len(wd.toolResults), len(wd.outputs)
-	wd.mu.Unlock()
-	if nTools == 0 || nOut == 0 {
-		t.Fatalf("watchdog: tools=%d outputs=%d", nTools, nOut)
-	}
 	if h.session.Plan.Document() != "index then wrap up" {
 		t.Fatalf("plan doc: %q", h.session.Plan.Document())
 	}
@@ -694,7 +701,7 @@ func TestPathNativeGraphLinkExpand(t *testing.T) {
 		t.Fatal(err)
 	}
 	ns := uuid.New()
-	h := mustNewAgent(t, AgentOptions{
+	h := mustNewTurnManager(t, AgentOptions{
 		SessionID:    "path-graph",
 		MountSession: ms, Model: &mockStrategy{},
 		Brain: eng, SearchNamespace: &ns,
