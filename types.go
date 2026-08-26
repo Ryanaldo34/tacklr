@@ -126,9 +126,30 @@ type AgentWatchDog interface {
 	RecordToolResult(*Message) error
 }
 
+// Child is one child of the current session as tools may see it.
+// State is running, completed, or failed. A child waiting for input stays running.
+type Child struct {
+	ID         string
+	Specialist string
+	State      string
+	Result     string
+}
+
+// Parent-facing child states. Waiting for input is still running.
+const (
+	ChildRunning   = "running"
+	ChildCompleted = "completed"
+	ChildFailed    = "failed"
+)
+
 // HarnessRuntime is the tool-facing hook for one harness turn.
-// Tools emit progress, read/write user session state, and raise interrupts.
-// Session modules (plan, permissions, on-call, parks) are not on this interface.
+// Tools emit progress, read/write user session state, raise interrupts, and
+// spawn/list/await/cancel children of this session. Session modules (plan,
+// permissions, on-call, parks) are not on this interface.
+//
+// Child methods are the only way tools start nested agents. Built-in
+// spawn_specialist / list_children / get_child / cancel_child call these.
+// Host tools may call them too. The loop never matches those tool names.
 type HarnessRuntime interface {
 	EmitUpdate(message string)
 	StateGet(key string) (any, bool)
@@ -136,6 +157,19 @@ type HarnessRuntime interface {
 	StateDelete(key string)
 	RaiseInterrupt(kind string, payload []byte) (Interrupt, error)
 	CurrentToolCallID() string
+
+	// SpawnChild starts a child of this session. It does not wait.
+	// specialist must be registered on this session. The returned id is
+	// unique for this session; pass it to Children, AwaitChild, CancelChild.
+	SpawnChild(ctx context.Context, specialist, task string) (id string, err error)
+	// Children lists this session's children. Waiting children appear as running.
+	Children() []Child
+	// CancelChild stops one child of this session and drops it from Children.
+	CancelChild(ctx context.Context, id string) error
+	// AwaitChild waits until a child completes or fails, then collects it
+	// (it leaves Children). If the child needs user input, the call parks
+	// like RaiseInterrupt. Unknown ids return ErrNotFound.
+	AwaitChild(ctx context.Context, id string) (Child, error)
 }
 
 // Todo is one plan list item (also used in plan_update stream payloads).

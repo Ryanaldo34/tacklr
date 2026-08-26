@@ -75,6 +75,7 @@ type InferenceOutput struct {
 	Etag      string
 	Complete  bool
 	ToolCalls []streaming.ToolCall
+	Result    string
 }
 
 // ToolInput is the typed Tool activity argument.
@@ -87,6 +88,7 @@ type ToolInput struct {
 	Auth       durable.AuthContext
 	Mounts     []durable.MountRecipe
 	Specialist string
+	Children   []durable.ChildOp
 }
 
 // ToolOutput is the typed Tool activity result.
@@ -94,6 +96,7 @@ type ToolOutput struct {
 	Etag        string
 	Interrupted bool
 	InterruptID string
+	Children    []durable.ChildOp
 }
 
 // CommitToolInput records a tool output on the staged batch without executing
@@ -185,9 +188,17 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 		slog.ErrorContext(ctx, "inference persist", "area", telemetry.AreaRuntime, "error", err)
 		return InferenceOutput{}, err
 	}
+	result := ""
+	if step.Complete {
+		for _, m := range h.Messages() {
+			if m != nil && m.Role == tacklr.RoleAssistant && m.Content != "" {
+				result = m.Content
+			}
+		}
+	}
 	slog.InfoContext(ctx, "inference completed",
 		"area", telemetry.AreaRuntime, "complete", step.Complete, "tool_calls", len(step.ToolCalls))
-	return InferenceOutput{Etag: etag, Complete: step.Complete, ToolCalls: step.ToolCalls}, nil
+	return InferenceOutput{Etag: etag, Complete: step.Complete, ToolCalls: step.ToolCalls, Result: result}, nil
 }
 
 func (a *Activities) Tool(ctx context.Context, in ToolInput) (ToolOutput, error) {
@@ -223,7 +234,9 @@ func (a *Activities) Tool(ctx context.Context, in ToolInput) (ToolOutput, error)
 		h.Close()
 		durable.CloseTurnVFS(ms, string(in.SessionID), "tool")
 	}()
+	kids := &activityChildren{parent: in.SessionID, ops: append([]durable.ChildOp(nil), in.Children...)}
 	eng := drive.EngineOf(h)
+	eng.SetChildHost(kids)
 	out, stop := drive.PipeStreamEvents(a.emitter(ctx, stream, in.SessionID))
 	defer stop()
 	step, runErr := eng.RunToolCall(ctx, in.Call, out)
@@ -249,7 +262,7 @@ func (a *Activities) Tool(ctx context.Context, in ToolInput) (ToolOutput, error)
 	}
 	slog.InfoContext(ctx, "tool completed",
 		"area", telemetry.AreaHarness, "tool", in.Call.Name, "status", status)
-	return ToolOutput{Etag: etag, Interrupted: step.Interrupted, InterruptID: step.InterruptID}, nil
+	return ToolOutput{Etag: etag, Interrupted: step.Interrupted, InterruptID: step.InterruptID, Children: kids.ops}, nil
 }
 
 func (a *Activities) CommitToolOutput(ctx context.Context, in CommitToolInput) (ToolOutput, error) {
@@ -266,6 +279,16 @@ func (a *Activities) CommitToolOutput(ctx context.Context, in CommitToolInput) (
 	if err != nil {
 		return ToolOutput{}, err
 	}
+	presented := in.Call
+	presented.Status = "success"
+	stream := a.openStream(ctx)
+	defer closeStream(ctx, stream)
+	_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, streaming.StreamEvent{
+		Type:      streaming.StreamEventToolResult,
+		MessageID: in.Call.Key(),
+		Content:   in.Output,
+		ToolCalls: []streaming.ToolCall{presented},
+	}, true)
 	return ToolOutput{Etag: etag}, nil
 }
 

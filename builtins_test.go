@@ -41,7 +41,7 @@ func drainEventCh() chan streaming.StreamEvent {
 
 // planRT is a turn Runtime for plan/ask tool unit tests (events drained).
 func planRT() HarnessRuntime {
-	return session.NewRuntime(drainEventCh(), session.NewSessionManager())
+	return newToolRuntime(drainEventCh(), session.NewSessionManager(), nil)
 }
 
 // TestCreatePlanTool covers create_plan success and rejection return paths.
@@ -332,8 +332,7 @@ func TestEditPlanTool(t *testing.T) {
 
 func TestAskUserChoiceTool_raiseAndResume(t *testing.T) {
 	sm := session.NewSessionManager()
-	rt := session.NewRuntime(make(chan streaming.StreamEvent, 4), sm)
-	rt = rt.WithToolCallID("tc_ask")
+	rt := newToolRuntime(make(chan streaming.StreamEvent, 4), sm, nil).WithToolCallID("tc_ask")
 
 	args, _ := json.Marshal(map[string]any{
 		"question": "Which approach?",

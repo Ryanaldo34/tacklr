@@ -9,11 +9,11 @@ import (
 	"maps"
 	"slices"
 	"sync"
+	"sync/atomic"
 
 	"github.com/ryanaldo34/tacklr/brain"
 	mcpruntime "github.com/ryanaldo34/tacklr/internal/mcp"
 	session "github.com/ryanaldo34/tacklr/internal/session"
-	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/skills"
 	"github.com/ryanaldo34/tacklr/stores"
@@ -50,11 +50,16 @@ type AgentHarness struct {
 	parkedWorkersLive map[string]*AgentHarness
 	parkMu            sync.Mutex
 	// Worker runs share one live lifecycle registry across sync and async delivery.
-	jobs              map[string]*workerRun
-	jobsMu            sync.Mutex
-	jobsCancelMu      sync.Mutex // serializes cancelBackgroundJobs
-	jobsCtx           context.Context
-	jobsCancel        context.CancelFunc
+	jobs         map[string]*workerRun
+	jobsMu       sync.Mutex
+	jobsCancelMu sync.Mutex // serializes cancelBackgroundJobs
+	jobsCtx      context.Context
+	jobsCancel   context.CancelFunc
+	// childHost, when set, is nested sessions (durable Runtime). Nil uses jobs.
+	childHost childHost
+	// liveOut is the current turn event channel so background workers can
+	// emit tool updates onto the spawn call. atomic.Value holds chan StreamEvent.
+	liveOut           atomic.Value
 	skillByName       map[string]skills.Skill
 	skillsLoader      skills.SkillLoader
 	skillsInitialized bool
@@ -107,40 +112,12 @@ func (a *AgentHarness) pendingSnapshot() map[string]stores.PendingToolCall {
 }
 
 func (a *AgentHarness) recordToolResult(tc ToolCall, output string) {
+	a.session.DropInterrupt(tc.Key())
 	msg, _ := a.toolResultMessage(tc, output, "success")
 	a.context.Add(msg)
 	a.pendingMu.Lock()
 	delete(a.pendingToolCalls, tc.Key())
 	a.pendingMu.Unlock()
-}
-
-func (a *AgentHarness) parkTool(tc ToolCall) error {
-	key := tc.Key()
-	intr := &interrupt.ChildWaiting{
-		Kind:    interrupt.TypeChildWaiting,
-		Message: "child session awaiting input",
-	}
-	resolved, err := a.session.AdoptInterrupt(key, intr)
-	var parked interrupt.Interrupt
-	if errors.As(err, &parked) {
-		err = nil
-	}
-	if err != nil {
-		return err
-	}
-	if resolved == nil && parked == nil {
-		return fmt.Errorf("park %s: adopt returned no interrupt", key)
-	}
-	if parked != nil {
-		a.pendingMu.Lock()
-		if a.pendingToolCalls == nil {
-			a.pendingToolCalls = make(map[string]stores.PendingToolCall)
-		}
-		cp := tc
-		a.pendingToolCalls[key] = stores.PendingToolCall{ToolCall: &cp, InterruptActive: true}
-		a.pendingMu.Unlock()
-	}
-	return nil
 }
 
 func (a *AgentHarness) constructSystemPrompt() string {
@@ -472,6 +449,21 @@ func (a *AgentHarness) hasOpenToolWork() bool {
 		return true
 	}
 	return len(a.openToolCalls()) > 0
+}
+
+// hasBlockingToolWork is true while a tool in this batch still needs a result
+// (HITL park). In-flight blocking spawns stay pending until AwaitChild
+// writes the child output as the tool result.
+func (a *AgentHarness) hasBlockingToolWork() bool {
+	if a.session.HasPendingInterrupt() {
+		return true
+	}
+	for _, p := range a.pendingSnapshot() {
+		if p.InterruptActive {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *AgentHarness) finalizeCancelledWork(out chan<- StreamEvent) {

@@ -547,16 +547,9 @@ func TestSessionWorkflow_spawnWorker(t *testing.T) {
 				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "child-hello", IsComplete: true}
 				return
 			}
-			for _, m := range msgs {
-				if m == nil {
-					continue
-				}
-				for _, tc := range m.ToolCalls {
-					if tc.Name == "spawn_specialist" {
-						ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "parent-after-spawn", IsComplete: true}
-						return
-					}
-				}
+			if last != nil && last.Role == tacklr.RoleTool && last.Content == "child-hello" {
+				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "parent-after-spawn", IsComplete: true}
+				return
 			}
 			ch <- tacklr.LLMResponseChunk{
 				Type: tacklr.StreamEventFunctionCall,
@@ -602,13 +595,16 @@ func TestSessionWorkflow_spawnWorker(t *testing.T) {
 		t.Fatal("want child SessionWorkflow started")
 	}
 	got := drainLog(t, fallback, id)
-	var sawParent, sawChild bool
+	var sawParent, sawChild, sawSpawnResult bool
 	for _, ev := range got {
 		if ev.Type == streaming.StreamEventMessage && strings.Contains(ev.Content, "parent-after-spawn") {
 			sawParent = true
 		}
 		if ev.Type == streaming.StreamEventMessage && strings.Contains(ev.Content, "child-hello") {
 			sawChild = true
+		}
+		if ev.Type == streaming.StreamEventToolResult && ev.Content == "child-hello" {
+			sawSpawnResult = true
 		}
 	}
 	childGot := drainLog(t, fallback, durable.ChildSessionID(id, "researcher", "sp1"))
@@ -622,6 +618,84 @@ func TestSessionWorkflow_spawnWorker(t *testing.T) {
 	}
 	if !sawChild {
 		t.Fatalf("want child complete event, parent=%+v child=%+v", got, childGot)
+	}
+	if !sawSpawnResult {
+		t.Fatalf("want spawn_specialist tool result paired with child output, got %+v", got)
+	}
+}
+
+func TestSessionWorkflow_mixedBatchPairsBeforeNextRound(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+	env.SetWorkerOptions(worker.Options{EnableSessionWorker: true})
+	cat := durable.NewCatalog("default")
+	model := &testkit.ScriptedModel{
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			last := lastMsg(msgs)
+			if last != nil && last.Role == tacklr.RoleUser && last.Content == "block-task" {
+				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "block-result", IsComplete: true}
+				return
+			}
+			var sawBlock, sawList bool
+			for _, m := range msgs {
+				if m == nil || m.Role != tacklr.RoleTool {
+					continue
+				}
+				if m.Content == "block-result" {
+					sawBlock = true
+				}
+				if strings.Contains(m.Content, "Child sessions:") || m.Content == "No child sessions." {
+					sawList = true
+				}
+			}
+			if sawBlock && sawList {
+				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "second-round", IsComplete: true}
+				return
+			}
+			ch <- tacklr.LLMResponseChunk{
+				Type: tacklr.StreamEventFunctionCall,
+				ToolCalls: []tacklr.ToolCall{
+					{ID: "b1", CallID: "b1", Name: "spawn_specialist", Arguments: `{"specialist":"blocker","task_description_and_context":"block-task","block":true}`},
+					{ID: "l1", CallID: "l1", Name: "list_children", Arguments: `{}`},
+				},
+				IsComplete: true,
+			}
+		},
+	}
+	cat.Register("default", durable.AgentSpec{
+		Options: tacklr.AgentOptions{
+			Model:  model,
+			Config: tacklr.Config{MaxWindowSize: 8192},
+			Specialists: []*tacklr.Specialist{
+				{Name: "blocker", Model: model},
+			},
+		},
+	})
+	fallback := inprocess.NewMemoryEventLog()
+	env.RegisterWorkflow(SessionWorkflow)
+	env.RegisterActivity(newActs(cat, fallback, true))
+	id := durable.SessionID("sess-mixed-spawn")
+	env.RegisterDelayedCallback(func() { env.SignalWorkflow(signalPrompt, promptSignal{Text: "go"}) }, time.Millisecond)
+	env.RegisterDelayedCallback(func() { env.SignalWorkflow(signalClose, nil) }, 120*time.Millisecond)
+	env.ExecuteWorkflow(SessionWorkflow, WorkflowInput{SessionID: id, AgentID: "default"})
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatal(err)
+	}
+	got := drainLog(t, fallback, id)
+	var sawBlock, sawList, sawSecond bool
+	for _, ev := range got {
+		if ev.Type == streaming.StreamEventToolResult && ev.Content == "block-result" {
+			sawBlock = true
+		}
+		if ev.Type == streaming.StreamEventToolResult && (strings.Contains(ev.Content, "Child sessions:") || ev.Content == "No child sessions.") {
+			sawList = true
+		}
+		if ev.Type == streaming.StreamEventMessage && ev.Content == "second-round" {
+			sawSecond = true
+		}
+	}
+	if !sawBlock || !sawList || !sawSecond {
+		t.Fatalf("pairing block=%v list=%v second=%v events=%+v", sawBlock, sawList, sawSecond, got)
 	}
 }
 
@@ -708,6 +782,72 @@ func TestSessionWorkflow_asyncSpawnDoesNotWaitForChild(t *testing.T) {
 	}
 	if !sawParent || !sawChild {
 		t.Fatalf("parent=%v child=%v scheduled=%v parentEv=%+v childEv=%+v", sawParent, sawChild, sawScheduled, got, childGot)
+	}
+}
+
+func TestSessionWorkflow_listChildren(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+	env.SetWorkerOptions(worker.Options{EnableSessionWorker: true})
+	cat := durable.NewCatalog("default")
+	model := &testkit.ScriptedModel{
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			last := lastMsg(msgs)
+			if last != nil && last.Role == tacklr.RoleUser && last.Content == "child-task" {
+				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "from-child", IsComplete: true}
+				return
+			}
+			if last != nil && last.Role == tacklr.RoleTool {
+				if strings.Contains(last.Content, "Child sessions:") {
+					ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "listed", IsComplete: true}
+					return
+				}
+				ch <- tacklr.LLMResponseChunk{
+					Type: tacklr.StreamEventFunctionCall,
+					ToolCalls: []tacklr.ToolCall{{
+						ID: "ls1", CallID: "ls1", Name: "list_children", Arguments: `{}`,
+					}},
+					IsComplete: true,
+				}
+				return
+			}
+			ch <- tacklr.LLMResponseChunk{
+				Type: tacklr.StreamEventFunctionCall,
+				ToolCalls: []tacklr.ToolCall{{
+					ID: "sp1", CallID: "sp1", Name: "spawn_specialist",
+					Arguments: `{"specialist":"researcher","task_description_and_context":"child-task","block":false}`,
+				}},
+				IsComplete: true,
+			}
+		},
+	}
+	cat.Register("default", durable.AgentSpec{
+		Options: tacklr.AgentOptions{
+			Model:  model,
+			Config: tacklr.Config{MaxWindowSize: 8192},
+			Specialists: []*tacklr.Specialist{{
+				Name: "researcher", Model: model,
+			}},
+		},
+	})
+	fallback := inprocess.NewMemoryEventLog()
+	env.RegisterWorkflow(SessionWorkflow)
+	env.RegisterActivity(newActs(cat, fallback, true))
+	id := durable.SessionID("sess-list-children")
+	env.RegisterDelayedCallback(func() { env.SignalWorkflow(signalPrompt, promptSignal{Text: "go"}) }, time.Millisecond)
+	env.RegisterDelayedCallback(func() { env.SignalWorkflow(signalClose, nil) }, 80*time.Millisecond)
+	env.ExecuteWorkflow(SessionWorkflow, WorkflowInput{SessionID: id, AgentID: "default"})
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatal(err)
+	}
+	var listed bool
+	for _, ev := range drainLog(t, fallback, id) {
+		if ev.Type == streaming.StreamEventMessage && ev.Content == "listed" {
+			listed = true
+		}
+	}
+	if !listed {
+		t.Fatalf("want listed after list_children, got %+v", drainLog(t, fallback, id))
 	}
 }
 

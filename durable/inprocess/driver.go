@@ -59,6 +59,7 @@ func (r *Runtime) constructHarness(ctx context.Context, p *sessionProc, load boo
 		durable.CloseTurnVFS(ms, threadID, "construct")
 		return nil, nil, err
 	}
+	drive.EngineOf(h).SetChildHost(sessionChildren{r: r, p: p})
 	if load {
 		snap, etag, loadErr := r.snapshots.Load(ctx, p.id)
 		switch {
@@ -219,13 +220,7 @@ func (r *Runtime) runTurn(ctx context.Context, p *sessionProc, user *tacklr.Mess
 				if ctx.Err() != nil {
 					return
 				}
-				var step drive.ToolStep
-				switch tc.Name {
-				case tacklr.SpawnSpecialistName, tacklr.ListChildrenName, tacklr.GetChildName, tacklr.CancelChildName:
-					step, _ = r.runSessionTool(ctx, p, eng, tc, out)
-				default:
-					step, _ = eng.RunToolCall(ctx, tc, out)
-				}
+				step, _ := eng.RunToolCall(ctx, tc, out)
 				if step.Interrupted {
 					mu.Lock()
 					interrupted = true

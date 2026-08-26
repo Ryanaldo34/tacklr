@@ -468,14 +468,14 @@ func drainYield(t *testing.T, ch <-chan StreamEvent) (id, kind string) {
 	return "", ""
 }
 
-func onCallRuntime() (session.Runtime, *session.SessionManager) {
+func onCallRuntime() (toolRuntime, *session.SessionManager) {
 	sm := session.NewSessionManager()
 	ch := make(chan streaming.StreamEvent, 8)
 	go func() {
 		for range ch {
 		}
 	}()
-	return session.NewRuntime(ch, sm).WithToolCallID("c1"), sm
+	return newToolRuntime(ch, sm, nil).WithToolCallID("c1"), sm
 }
 
 func requireParked(t *testing.T, err error, kind string) {

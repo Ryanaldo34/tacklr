@@ -197,15 +197,40 @@ func (a *AgentHarness) runInference(ctx context.Context, st *drive.TurnState, ou
 		Role:      RoleAssistant,
 		ToolCalls: append([]ToolCall(nil), toolCalls...),
 	})
+	a.pendingMu.Lock()
+	if a.pendingToolCalls == nil {
+		a.pendingToolCalls = make(map[string]stores.PendingToolCall)
+	}
+	for i := range toolCalls {
+		key := toolCalls[i].Key()
+		if key == "" {
+			continue
+		}
+		cp := toolCalls[i]
+		a.pendingToolCalls[key] = stores.PendingToolCall{ToolCall: &cp, InterruptActive: false}
+	}
+	a.pendingMu.Unlock()
 	return drive.InferenceStep{ToolCalls: toolCalls}, nil
 }
 
+func (a *AgentHarness) finishToolCall(key string) {
+	a.pendingMu.Lock()
+	delete(a.pendingToolCalls, key)
+	a.pendingMu.Unlock()
+}
+
 func (a *AgentHarness) runToolCall(ctx context.Context, tc ToolCall, out chan StreamEvent) (drive.ToolStep, error) {
-	turnRT := session.NewRuntime(out, a.session)
+	host := a.childHost
+	if host == nil {
+		host = jobsHost{a}
+	}
+	a.liveOut.Store(out)
+	turnRT := newToolRuntime(out, a.session, host)
 	tcKey := tc.Key()
 	toolCtx, toolSpan := telemetry.StartToolSpan(ctx, tc.Name, tc.Namespace)
 	tool := a.findTool(tc.Name, tc.Namespace)
 	if tool == nil {
+		a.finishToolCall(tcKey)
 		toolErr := Correctionf(ErrNotFound, "%s: not found. That is not a registered tool. Use a name from the available tools", tc.Name)
 		toolSpan.Finish("error", toolErr)
 		msg := a.emitToolResult(out, tc, toolErr.Error(), "error")
@@ -222,6 +247,7 @@ func (a *AgentHarness) runToolCall(ctx context.Context, tc ToolCall, out chan St
 	if errors.As(err, &parked) {
 		serialized, serErr := parked.Serialize()
 		if serErr != nil {
+			a.finishToolCall(tcKey)
 			toolSpan.Finish("error", serErr)
 			out <- StreamEvent{Type: StreamEventError, Error: fmt.Errorf("serialize interrupt: %w", serErr)}
 			return drive.ToolStep{}, serErr
@@ -233,6 +259,7 @@ func (a *AgentHarness) runToolCall(ctx context.Context, tc ToolCall, out chan St
 		}
 		data, marErr := json.Marshal(payload)
 		if marErr != nil {
+			a.finishToolCall(tcKey)
 			toolSpan.Finish("error", marErr)
 			out <- StreamEvent{Type: StreamEventError, Error: fmt.Errorf("marshal interrupt: %w", marErr)}
 			return drive.ToolStep{}, marErr
@@ -247,9 +274,7 @@ func (a *AgentHarness) runToolCall(ctx context.Context, tc ToolCall, out chan St
 		out <- StreamEvent{Type: StreamEventInterrupt, MessageID: tcKey, Data: data}
 		return drive.ToolStep{Interrupted: true, InterruptID: tcKey, InterruptData: data}, nil
 	}
-	a.pendingMu.Lock()
-	delete(a.pendingToolCalls, tcKey)
-	a.pendingMu.Unlock()
+	a.finishToolCall(tcKey)
 	if err != nil {
 		toolSpan.Finish("error", err)
 		content := err.Error()
@@ -292,11 +317,10 @@ func (a *AgentHarness) runToolCall(ctx context.Context, tc ToolCall, out chan St
 	return drive.ToolStep{}, nil
 }
 
-// SpawnSpecialistName is the tool the durable driver maps to a nested run
-// (child session / child workflow).
+// SpawnSpecialistName is the built-in that calls HarnessRuntime.SpawnChild.
 const SpawnSpecialistName = "spawn_specialist"
 
-// ListChildrenName, GetChildName, and CancelChildName are Runtime views of children.
+// ListChildrenName, GetChildName, and CancelChildName are built-ins on HarnessRuntime.Children / AwaitChild / CancelChild.
 const (
 	ListChildrenName = "list_children"
 	GetChildName     = "get_child"

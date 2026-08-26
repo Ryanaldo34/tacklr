@@ -211,6 +211,103 @@ func TestChildren_asyncSpawnThenCollect(t *testing.T) {
 	}
 }
 
+func TestChildren_mixedBlockingPairsBeforeNextRound(t *testing.T) {
+	release := make(chan struct{})
+	var blockingStarted, released atomic.Bool
+	blocker := &testkit.ScriptedModel{
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			blockingStarted.Store(true)
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return
+			}
+			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "block-result", IsComplete: true}
+		},
+	}
+	async := scriptedComplete("async-result")
+	var step atomic.Int32
+	var tooEarly atomic.Bool
+	var sawBlock, sawAsync atomic.Bool
+	var parentID durable.SessionID
+	parent := &testkit.ScriptedModel{
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			n := step.Add(1)
+			switch n {
+			case 1:
+				ch <- tacklr.LLMResponseChunk{
+					Type: tacklr.StreamEventFunctionCall,
+					ToolCalls: []tacklr.ToolCall{
+						{ID: "b1", CallID: "b1", Name: "spawn_specialist", Arguments: `{"specialist":"blocker","task_description_and_context":"wait","block":true}`},
+						spawnAsync("async", "a1"),
+					},
+					IsComplete: true,
+				}
+			case 2:
+				if !released.Load() {
+					tooEarly.Store(true)
+				}
+				for _, m := range msgs {
+					if m == nil || m.Role != tacklr.RoleTool {
+						continue
+					}
+					if m.Content == "block-result" {
+						sawBlock.Store(true)
+					}
+					if strings.Contains(m.Content, "Child ") && strings.Contains(m.Content, "scheduled") {
+						sawAsync.Store(true)
+					}
+				}
+				asyncID := durable.ChildSessionID(parentID, "async", "a1")
+				ch <- tacklr.LLMResponseChunk{
+					Type: tacklr.StreamEventFunctionCall,
+					ToolCalls: []tacklr.ToolCall{{
+						ID: "c1", CallID: "c1", Name: "cancel_child",
+						Arguments: `{"child_id":"` + string(asyncID) + `"}`,
+					}},
+					IsComplete: true,
+				}
+			default:
+				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "second-round", IsComplete: true}
+			}
+		},
+	}
+	rt := New(specialistCatalog(t, parent,
+		tacklr.Specialist{Name: "blocker", Model: blocker},
+		tacklr.Specialist{Name: "async", Model: async},
+	), WithProjection(vfs.DirectProjection{}))
+	sub := begin(t, rt, &parentID)
+	go func() {
+		for !blockingStarted.Load() {
+			time.Sleep(5 * time.Millisecond)
+		}
+		released.Store(true)
+		close(release)
+	}()
+	got := waitEvents(t, sub, 8*time.Second)
+	if tooEarly.Load() {
+		t.Fatal("next model round started before blocking child finished")
+	}
+	if !sawBlock.Load() || !sawAsync.Load() {
+		t.Fatalf("second round missing pairs block=%v async=%v events=%v", sawBlock.Load(), sawAsync.Load(), summarize(got))
+	}
+	var blockOut, asyncOut, second bool
+	for _, ev := range got {
+		if ev.Type == streaming.StreamEventToolResult && ev.Content == "block-result" {
+			blockOut = true
+		}
+		if ev.Type == streaming.StreamEventToolResult && strings.Contains(ev.Content, "scheduled") {
+			asyncOut = true
+		}
+		if ev.Type == streaming.StreamEventMessage && ev.Content == "second-round" {
+			second = true
+		}
+	}
+	if !blockOut || !asyncOut || !second {
+		t.Fatalf("stream pairing block=%v async=%v second=%v events=%v", blockOut, asyncOut, second, summarize(got))
+	}
+}
+
 func TestChildren_waitingStaysRunningUntilHITLResolved(t *testing.T) {
 	child := interruptChildModel("chose-A")
 	var step atomic.Int32
@@ -632,7 +729,7 @@ func TestChildren_parentHITLLeavesAsyncChildRunning(t *testing.T) {
 	rt := New(specialistCatalog(t, parent, tacklr.Specialist{Name: "researcher", Model: child}), WithProjection(vfs.DirectProjection{}))
 	var id durable.SessionID
 	sub := begin(t, rt, &id)
-	var spawned bool
+	var spawned, parked bool
 	deadline := time.After(8 * time.Second)
 	for {
 		select {
@@ -644,9 +741,9 @@ func TestChildren_parentHITLLeavesAsyncChildRunning(t *testing.T) {
 				spawned = true
 			}
 			if ev.Type == streaming.StreamEventInterrupt && ev.MessageID == "ask1" {
-				if !spawned {
-					t.Fatal("spawn leftover must finish before parent HITL yield")
-				}
+				parked = true
+			}
+			if spawned && parked {
 				st, err := rt.Status(t.Context(), durable.ChildSessionID(id, "researcher", "sp1"))
 				if err != nil || st.State != durable.SessionRunning {
 					t.Fatalf("child during parent HITL: %+v %v", st, err)
@@ -655,7 +752,7 @@ func TestChildren_parentHITLLeavesAsyncChildRunning(t *testing.T) {
 				return
 			}
 		case <-deadline:
-			t.Fatal("parent did not park")
+			t.Fatalf("parent did not park with child running spawned=%v parked=%v", spawned, parked)
 		}
 	}
 }

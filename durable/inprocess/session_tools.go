@@ -2,33 +2,13 @@ package inprocess
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"slices"
-	"time"
+	"strings"
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
-	"github.com/ryanaldo34/tacklr/internal/drive"
-	"github.com/ryanaldo34/tacklr/streaming"
 )
-
-func (r *Runtime) noteOutcome(p *sessionProc, o turnOutcome) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	switch o {
-	case turnComplete:
-		p.terminal = durable.SessionComplete
-		p.yielded = false
-	case turnError, turnCancelled:
-		p.terminal = durable.SessionFailed
-		p.yielded = false
-	case turnYield:
-		p.yielded = true
-		p.terminal = ""
-	}
-}
 
 func (r *Runtime) childStatuses(p *sessionProc) []durable.SessionStatus {
 	p.mu.Lock()
@@ -45,172 +25,137 @@ func (r *Runtime) childStatuses(p *sessionProc) []durable.SessionStatus {
 	return out
 }
 
-func (r *Runtime) runSessionTool(ctx context.Context, p *sessionProc, eng drive.Engine, tc streaming.ToolCall, out chan streaming.StreamEvent) (drive.ToolStep, error) {
-	switch tc.Name {
-	case tacklr.SpawnSpecialistName:
-		return r.spawnChild(ctx, p, eng, tc, out)
-	case tacklr.ListChildrenName:
-		return r.commitSessionTool(eng, tc, out, durable.FormatChildList(r.childStatuses(p)), nil)
-	case tacklr.GetChildName:
-		return r.getChild(ctx, p, eng, tc, out)
-	case tacklr.CancelChildName:
-		return r.cancelChild(ctx, p, eng, tc, out)
-	default:
-		return eng.RunToolCall(ctx, tc, out)
-	}
+// sessionChildren is the nested-session childHost for one parent session.
+type sessionChildren struct {
+	r *Runtime
+	p *sessionProc
 }
 
-func (r *Runtime) spawnChild(ctx context.Context, p *sessionProc, eng drive.Engine, tc streaming.ToolCall, out chan streaming.StreamEvent) (drive.ToolStep, error) {
-	call, err := durable.ParseSpawnCall(tc.Arguments)
-	if err != nil {
-		return r.commitSessionTool(eng, tc, out, err.Error(), err)
+func (s sessionChildren) SpawnChild(ctx context.Context, specialist, task, callID string) (string, error) {
+	specialist = strings.TrimSpace(specialist)
+	task = strings.TrimSpace(task)
+	if specialist == "" {
+		return "", fmt.Errorf("specialist is required: %w", tacklr.ErrInvalid)
 	}
-	childID := durable.ChildSessionID(p.id, call.Specialist, tc.Key())
-	if r.ownsChild(p, childID) {
-		if !call.Block {
-			st, err := r.Status(ctx, childID)
-			if err != nil {
-				return r.commitSessionTool(eng, tc, out, err.Error(), err)
-			}
-			return r.commitSessionTool(eng, tc, out, durable.FormatChild(st), nil)
-		}
-		return r.waitChild(ctx, p, eng, tc, out, childID)
+	childID := durable.ChildSessionID(s.p.id, specialist, callID)
+	if s.r.ownsChild(s.p, childID) {
+		return string(childID), nil
 	}
-	id, err := r.CreateSession(ctx, durable.CreateSession{
+	if task == "" {
+		return "", fmt.Errorf("task_description_and_context is required: %w", tacklr.ErrInvalid)
+	}
+	id, err := s.r.CreateSession(ctx, durable.CreateSession{
 		SessionID:  childID,
-		Parent:     p.id,
-		AgentID:    p.agentID,
-		Specialist: call.Specialist,
-		MCPServers: p.mcp,
-		Mounts:     p.mounts,
+		Parent:     s.p.id,
+		AgentID:    s.p.agentID,
+		Specialist: specialist,
+		MCPServers: s.p.mcp,
+		Mounts:     s.p.mounts,
 	})
 	if err != nil {
-		return r.commitSessionTool(eng, tc, out, err.Error(), err)
+		return "", err
 	}
 	if err := ctx.Err(); err != nil {
-		_ = r.Close(context.WithoutCancel(ctx), id)
-		r.dropChild(p, id)
-		return r.commitSessionTool(eng, tc, out, err.Error(), err)
+		_ = s.r.Close(context.WithoutCancel(ctx), id)
+		s.r.dropChild(s.p, id)
+		return "", err
 	}
-	if err := r.Prompt(p.childCtx(), id, durable.Prompt{Text: call.Task, Auth: p.auth}); err != nil {
-		return r.commitSessionTool(eng, tc, out, err.Error(), err)
+	if err := s.r.Prompt(s.p.childCtx(), id, durable.Prompt{Text: task, Auth: s.p.auth}); err != nil {
+		return "", err
 	}
-	if !call.Block {
-		msg := durable.ScheduledChildMessage(id, call.Specialist)
-		return r.commitSessionTool(eng, tc, out, msg, nil)
-	}
-	return r.waitChild(ctx, p, eng, tc, out, id)
+	return string(id), nil
 }
 
-func (r *Runtime) getChild(ctx context.Context, p *sessionProc, eng drive.Engine, tc streaming.ToolCall, out chan streaming.StreamEvent) (drive.ToolStep, error) {
-	jobID, block, err := durable.ParseChildCall(tc.Arguments)
-	if err != nil {
-		return r.commitSessionTool(eng, tc, out, err.Error(), err)
+func (s sessionChildren) Children() []tacklr.Child {
+	rows := s.r.childStatuses(s.p)
+	out := make([]tacklr.Child, 0, len(rows))
+	for _, st := range rows {
+		out = append(out, childFromStatus(st))
 	}
-	id := durable.SessionID(jobID)
-	if !r.ownsChild(p, id) {
-		return r.commitSessionTool(eng, tc, out, fmt.Sprintf("job %q is unknown; call list_children and use an id from that list", jobID), durable.ErrSessionNotFound)
+	return out
+}
+
+func (s sessionChildren) CancelChild(ctx context.Context, id string) error {
+	sid := durable.SessionID(id)
+	if !s.r.ownsChild(s.p, sid) {
+		return fmt.Errorf("job %q is unknown; call list_children and use an id from that list: %w", id, durable.ErrSessionNotFound)
 	}
-	if !block {
-		st, err := r.Status(ctx, id)
-		if err != nil {
-			return r.commitSessionTool(eng, tc, out, err.Error(), err)
+	_ = s.r.Close(ctx, sid)
+	s.r.dropChild(s.p, sid)
+	return nil
+}
+
+func (s sessionChildren) AwaitChild(ctx context.Context, id, callID string) (tacklr.Child, bool, error) {
+	sid := durable.SessionID(id)
+	if !s.r.ownsChild(s.p, sid) {
+		return tacklr.Child{}, false, fmt.Errorf("job %q is unknown; call list_children and use an id from that list: %w", id, durable.ErrSessionNotFound)
+	}
+	return s.r.waitChild(ctx, s.p, sid, callID)
+}
+
+func childFromStatus(st durable.SessionStatus) tacklr.Child {
+	c := tacklr.Child{ID: string(st.ID), Specialist: st.Specialist, State: tacklr.ChildRunning, Result: st.Result}
+	switch st.State {
+	case durable.SessionComplete:
+		c.State = tacklr.ChildCompleted
+	case durable.SessionFailed:
+		c.State = tacklr.ChildFailed
+		if c.Result == "" && st.Err != nil {
+			c.Result = st.Err.Error()
 		}
-		if st.State == durable.SessionComplete {
-			_ = r.Close(ctx, id)
-			r.dropChild(p, id)
-			return r.commitSessionTool(eng, tc, out, st.Result, nil)
-		}
-		return r.commitSessionTool(eng, tc, out, durable.FormatChild(st), nil)
 	}
-	return r.waitChild(ctx, p, eng, tc, out, id)
+	return c
 }
 
-func (r *Runtime) cancelChild(ctx context.Context, p *sessionProc, eng drive.Engine, tc streaming.ToolCall, out chan streaming.StreamEvent) (drive.ToolStep, error) {
-	jobID, _, err := durable.ParseChildCall(tc.Arguments)
-	if err != nil {
-		return r.commitSessionTool(eng, tc, out, err.Error(), err)
-	}
-	id := durable.SessionID(jobID)
-	if !r.ownsChild(p, id) {
-		return r.commitSessionTool(eng, tc, out, fmt.Sprintf("job %q is unknown; call list_children and use an id from that list", jobID), durable.ErrSessionNotFound)
-	}
-	_ = r.Close(ctx, id)
-	r.dropChild(p, id)
-	msg := fmt.Sprintf("Child %s cancelled and removed.", id)
-	return r.commitSessionTool(eng, tc, out, msg, nil)
-}
-
-func (r *Runtime) waitChild(ctx context.Context, p *sessionProc, eng drive.Engine, tc streaming.ToolCall, out chan streaming.StreamEvent, child durable.SessionID) (drive.ToolStep, error) {
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
-	defer cancel()
+func (r *Runtime) waitChild(ctx context.Context, p *sessionProc, child durable.SessionID, callID string) (tacklr.Child, bool, error) {
 	for {
+		if err := ctx.Err(); err != nil {
+			return tacklr.Child{}, false, err
+		}
 		st, err := r.Status(ctx, child)
 		if err != nil {
-			return r.commitSessionTool(eng, tc, out, err.Error(), err)
+			return tacklr.Child{}, false, err
 		}
 		switch st.State {
-		case durable.SessionComplete:
+		case durable.SessionComplete, durable.SessionFailed:
 			_ = r.Close(ctx, child)
 			r.dropChild(p, child)
-			return r.commitSessionTool(eng, tc, out, st.Result, nil)
-		case durable.SessionFailed:
-			r.dropChild(p, child)
-			msg := "failed"
-			if st.Err != nil {
-				msg = st.Err.Error()
+			c := childFromStatus(st)
+			if st.State == durable.SessionFailed {
+				err = st.Err
+				if err == nil {
+					err = fmt.Errorf("failed: %w", tacklr.ErrFailed)
+				}
+				return c, false, err
 			}
-			return r.commitSessionTool(eng, tc, out, msg, st.Err)
+			return c, false, nil
 		}
 		if st.Waiting {
-			return r.parkOnChild(p, eng, tc, out, child)
+			p.mu.Lock()
+			if p.childParks == nil {
+				p.childParks = make(map[string]durable.SessionID)
+			}
+			p.childParks[callID] = child
+			p.mu.Unlock()
+			return tacklr.Child{}, true, nil
+		}
+		cp, err := r.get(child)
+		if err != nil {
+			return tacklr.Child{}, false, err
+		}
+		cp.mu.Lock()
+		done := cp.turnDone
+		cp.mu.Unlock()
+		if done == nil {
+			<-ctx.Done()
+			return tacklr.Child{}, false, ctx.Err()
 		}
 		select {
 		case <-ctx.Done():
-			if err := ctx.Err(); errors.Is(err, context.DeadlineExceeded) {
-				return r.commitSessionTool(eng, tc, out, "job wait timed out", err)
-			}
-			return drive.ToolStep{}, ctx.Err()
-		case <-time.After(20 * time.Millisecond):
+			return tacklr.Child{}, false, ctx.Err()
+		case <-done:
 		}
 	}
-}
-
-func (r *Runtime) parkOnChild(p *sessionProc, eng drive.Engine, tc streaming.ToolCall, out chan streaming.StreamEvent, child durable.SessionID) (drive.ToolStep, error) {
-	key := tc.Key()
-	p.mu.Lock()
-	if p.childParks == nil {
-		p.childParks = make(map[string]durable.SessionID)
-	}
-	p.childParks[key] = child
-	p.mu.Unlock()
-	if err := eng.ParkTool(tc); err != nil {
-		return drive.ToolStep{}, err
-	}
-	payload, _ := json.Marshal(map[string]any{
-		"interruptId": key,
-		"type":        "child_waiting",
-		"data":        json.RawMessage(`{}`),
-	})
-	out <- streaming.StreamEvent{Type: streaming.StreamEventInterrupt, MessageID: key, Data: payload}
-	return drive.ToolStep{Interrupted: true, InterruptID: key, InterruptData: payload}, nil
-}
-
-func (r *Runtime) commitSessionTool(eng drive.Engine, tc streaming.ToolCall, out chan streaming.StreamEvent, output string, err error) (drive.ToolStep, error) {
-	status := "success"
-	if err != nil {
-		status = "error"
-	}
-	presented := tc
-	presented.Status = status
-	out <- streaming.StreamEvent{
-		Type:      streaming.StreamEventToolResult,
-		MessageID: tc.Key(),
-		Content:   output,
-		ToolCalls: []streaming.ToolCall{presented},
-	}
-	eng.RecordToolResult(tc, output)
-	return drive.ToolStep{}, err
 }
 
 func (r *Runtime) ownsChild(p *sessionProc, id durable.SessionID) bool {

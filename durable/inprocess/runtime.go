@@ -520,6 +520,22 @@ func (r *Runtime) loop(p *sessionProc) {
 	}
 }
 
+func (r *Runtime) noteOutcome(p *sessionProc, o turnOutcome) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	switch o {
+	case turnComplete:
+		p.terminal = durable.SessionComplete
+		p.yielded = false
+	case turnError, turnCancelled:
+		p.terminal = durable.SessionFailed
+		p.yielded = false
+	case turnYield:
+		p.yielded = true
+		p.terminal = ""
+	}
+}
+
 func promptMessage(msg durable.Prompt) *tacklr.Message {
 	if msg.UserMessage != nil {
 		return msg.UserMessage

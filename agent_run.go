@@ -175,7 +175,7 @@ func (a *AgentHarness) runTurnLoop(ctx context.Context, out chan StreamEvent, em
 			emitCancelled()
 			return telemetry.OutcomeCancelled
 		}
-		if len(a.pendingSnapshot()) > 0 {
+		if a.hasBlockingToolWork() {
 			return telemetry.OutcomeYield
 		}
 	}

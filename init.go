@@ -40,10 +40,6 @@ func (e harnessDrive) RecordToolResult(tc streaming.ToolCall, output string) {
 	e.a.recordToolResult(tc, output)
 }
 
-func (e harnessDrive) ParkTool(tc streaming.ToolCall) error {
-	return e.a.parkTool(tc)
-}
-
 func (e harnessDrive) RunInference(ctx context.Context, st *drive.TurnState, out chan streaming.StreamEvent) (drive.InferenceStep, error) {
 	return e.a.runInference(ctx, st, out)
 }
@@ -54,4 +50,16 @@ func (e harnessDrive) RunToolCall(ctx context.Context, tc streaming.ToolCall, ou
 
 func (e harnessDrive) ApplyResume(finishedInterrupts map[string][]byte) error {
 	return e.a.applyResume(finishedInterrupts)
+}
+
+func (e harnessDrive) SetChildHost(h any) {
+	if h == nil {
+		e.a.childHost = nil
+		return
+	}
+	host, ok := h.(childHost)
+	if !ok {
+		panic("drive: child host")
+	}
+	e.a.childHost = host
 }

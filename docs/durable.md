@@ -58,7 +58,7 @@ The host runs:
 | Progress | Workflow Streams (`events`, `retry`, `close`) |
 | HITL | Signal `Resume` (never inside an activity) |
 | Leftover tools after HITL | Workflow variable (`rest`) replayed from history |
-| Spawn specialist | Child `SessionWorkflow`, then `CommitToolOutput` to append the parent tool result |
+| Spawn specialist | Child `SessionWorkflow` (wait for started). `ParentClosePolicy` is request-cancel. Tools call `HarnessRuntime` child methods; the workflow reconciles the child ledger after each Tool activity (start, cancel, wait). Child HITL signals the parent (`ChildWaiting`) then parent `Resume` signals the child. |
 
 The worker registers `SessionWorkflow`, `Inference`, `Tool`, and `CommitToolOutput`.
 
@@ -97,7 +97,9 @@ Path A (`NewAgent` / `jobs.go`) recovers a panic in a worker and marks that job 
 
 ## Tool batches
 
-A model round can emit several tool calls. The wait loop **does not infer again** until every call in that batch has a result, or a call is parked for HITL.
+A model round can emit several tool calls. Each `function_call` is pending until a matching tool result is appended (`function_call_output` / `RoleTool`). The wait loop **does not infer again** until every call in that batch has a result, or a call is parked for HITL.
+
+`spawn_specialist` is the same pairing. `block=false` appends a scheduled message immediately. `block=true` (the default) waits for that child; the child’s output **is** the tool result. A mixed batch (some blocking, some not) still waits for every blocking call to return before the next model round. Non-blocking results may already be in the window; blocking results must be too. The next round starts only when the batch has no open tool calls.
 
 | Runtime | How the batch runs | Where leftovers live |
 |---------|--------------------|----------------------|

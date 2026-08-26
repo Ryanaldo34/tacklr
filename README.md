@@ -150,7 +150,7 @@ Temporal is the same `Runtime` interface with a worker. See [docs/durable.md](do
 
 ### Specialists
 
-Register nested agents on `AgentOptions.Specialists`. The model gets `spawn_specialist`, `list_children`, `get_child`, and `cancel_child`. A child is a nested session with the parent’s MCP, mounts, and auth, overlaid with the specialist’s model, tools, and instructions. `block=false` starts the child and returns; `get_child(block=true)` waits. Parent park does not stop children. Cancel (including the original Prompt context) and Close do.
+Register nested agents on `AgentOptions.Specialists`. Tools start them through `HarnessRuntime`: `SpawnChild`, `Children`, `AwaitChild`, `CancelChild`. The stock tools `spawn_specialist`, `list_children`, `get_child`, and `cancel_child` call those methods; host tools can too. A child is a nested session with the parent’s MCP, mounts, and auth, overlaid with the specialist’s model, tools, and instructions. `block=false` starts the child and returns; `get_child(block=true)` waits. Parent park does not stop children. Cancel (including the original Prompt context) and Close do.
 
 ```go
 opts.Specialists = []*tacklr.Specialist{{

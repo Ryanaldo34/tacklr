@@ -16,6 +16,8 @@ const (
 
 	queryStatus   = "tacklr_status"
 	queryChildren = "tacklr_children"
+
+	signalChildWaiting = "ChildWaiting"
 )
 
 // WorkflowInput is the typed start payload (no interface{}).
