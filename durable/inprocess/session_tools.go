@@ -3,6 +3,7 @@ package inprocess
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"time"
@@ -91,11 +92,7 @@ func (r *Runtime) spawnChild(ctx context.Context, p *sessionProc, eng drive.Engi
 		r.dropChild(p, id)
 		return r.commitSessionTool(eng, tc, out, err.Error(), err)
 	}
-	// Child turns must not share the parent turn context: parent park/complete
-	// cancels that context, and parked children have to keep running. Client
-	// stop uses Runtime.Cancel / the original Prompt context, which Close the
-	// children explicitly.
-	if err := r.Prompt(context.WithoutCancel(ctx), id, durable.Prompt{Text: call.Task, Auth: p.auth}); err != nil {
+	if err := r.Prompt(p.childCtx(), id, durable.Prompt{Text: call.Task, Auth: p.auth}); err != nil {
 		return r.commitSessionTool(eng, tc, out, err.Error(), err)
 	}
 	if !call.Block {
@@ -145,14 +142,9 @@ func (r *Runtime) cancelChild(ctx context.Context, p *sessionProc, eng drive.Eng
 }
 
 func (r *Runtime) waitChild(ctx context.Context, p *sessionProc, eng drive.Engine, tc streaming.ToolCall, out chan streaming.StreamEvent, child durable.SessionID) (drive.ToolStep, error) {
-	deadline := time.Now().Add(10 * time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
 	for {
-		if err := ctx.Err(); err != nil {
-			return drive.ToolStep{}, err
-		}
-		if time.Now().After(deadline) {
-			return r.commitSessionTool(eng, tc, out, "job wait timed out", ctx.Err())
-		}
 		st, err := r.Status(ctx, child)
 		if err != nil {
 			return r.commitSessionTool(eng, tc, out, err.Error(), err)
@@ -175,6 +167,9 @@ func (r *Runtime) waitChild(ctx context.Context, p *sessionProc, eng drive.Engin
 		}
 		select {
 		case <-ctx.Done():
+			if err := ctx.Err(); errors.Is(err, context.DeadlineExceeded) {
+				return r.commitSessionTool(eng, tc, out, "job wait timed out", err)
+			}
 			return drive.ToolStep{}, ctx.Err()
 		case <-time.After(20 * time.Millisecond):
 		}

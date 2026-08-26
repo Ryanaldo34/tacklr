@@ -225,9 +225,6 @@ func (a *AgentHarness) scheduleBackgroundWorker(specialist, task, jobID string, 
 	a.jobsMu.Lock()
 	parentCtx := a.jobsCtx
 	a.jobsMu.Unlock()
-	if parentCtx == nil {
-		parentCtx = context.Background()
-	}
 	workerCtx, cancel := context.WithCancel(parentCtx)
 
 	worker, err := a.newWorkerHarness(workerCtx, specialist, jobID, spec)

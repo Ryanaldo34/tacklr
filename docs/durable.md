@@ -81,7 +81,7 @@ Child HITL does not change parent-facing `Status.State` from `running`. `Waiting
 
 | Event | Children |
 |-------|----------|
-| Parent parks (HITL on the parent, or `get_child` wait) | Keep running. Child Prompt uses `context.WithoutCancel` of the parent turn so park does not cancel them |
+| Parent parks (HITL on the parent, or `get_child` wait) | Keep running. Child Prompt uses the session kids context, not the parent turn |
 | `Runtime.Cancel`, original Prompt/Resume context cancel, client stop | Stop all children, then abort the parent turn. The parent session stays open for a later Prompt |
 | `Runtime.Close` | Recursively stop and destroy children |
 

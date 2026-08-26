@@ -142,10 +142,15 @@ func (r *Runtime) runTurn(ctx context.Context, p *sessionProc, user *tacklr.Mess
 	defer stop()
 
 	cancelled := func() turnOutcome {
-		if err := r.persistHarness(context.Background(), p, h); err != nil {
-			r.emit(context.Background(), p, streaming.StreamEvent{Type: streaming.StreamEventError, Error: err})
+		persist := context.WithoutCancel(ctx)
+		if err := r.persistHarness(persist, p, h); err != nil {
+			r.emit(persist, p, streaming.StreamEvent{Type: streaming.StreamEventError, Error: err})
 		}
-		r.emit(context.Background(), p, streaming.StreamEvent{Type: streaming.StreamEventError, Error: context.Canceled})
+		err := ctx.Err()
+		if err == nil {
+			err = context.Canceled
+		}
+		r.emit(persist, p, streaming.StreamEvent{Type: streaming.StreamEventError, Error: err})
 		return turnCancelled
 	}
 

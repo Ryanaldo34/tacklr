@@ -40,8 +40,8 @@ func cancelLiveTurn(id durable.SessionID) {
 }
 
 func canceledIf(ctx context.Context, err error) error {
-	if ctx.Err() != nil {
-		return temporal.NewCanceledError("turn cancelled")
+	if err := ctx.Err(); err != nil {
+		return temporal.NewCanceledError(err.Error())
 	}
 	return err
 }
@@ -137,8 +137,8 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 	h, ms, etag, err := a.harness(ctx, in.SessionID, in.AgentID, in.MCPServers, in.Etag, in.Auth, in.Mounts, in.Specialist)
 	if err != nil {
 		pub := err
-		if ctx.Err() != nil {
-			pub = context.Canceled
+		if err := ctx.Err(); err != nil {
+			pub = err
 		}
 		slog.ErrorContext(ctx, "inference harness", "area", telemetry.AreaRuntime, "error", pub)
 		_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, streaming.StreamEvent{Type: streaming.StreamEventError, Error: pub, Content: pub.Error()}, true)
@@ -171,8 +171,8 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 	step, err := eng.RunInference(ctx, st, out)
 	if err != nil {
 		pub := err
-		if ctx.Err() != nil {
-			pub = context.Canceled
+		if err := ctx.Err(); err != nil {
+			pub = err
 			slog.WarnContext(ctx, "inference cancelled", "area", telemetry.AreaRuntime)
 		} else {
 			slog.ErrorContext(ctx, "inference failed", "area", telemetry.AreaRuntime, "error", err)
@@ -227,11 +227,12 @@ func (a *Activities) Tool(ctx context.Context, in ToolInput) (ToolOutput, error)
 	out, stop := drive.PipeStreamEvents(a.emitter(ctx, stream, in.SessionID))
 	defer stop()
 	step, runErr := eng.RunToolCall(ctx, in.Call, out)
-	if runErr != nil && ctx.Err() != nil {
-		slog.WarnContext(ctx, "tool cancelled", "area", telemetry.AreaHarness, "tool", in.Call.Name)
-		_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, streaming.StreamEvent{Type: streaming.StreamEventError, Error: context.Canceled, Content: context.Canceled.Error()}, true)
-		return ToolOutput{}, temporal.NewCanceledError("turn cancelled")
-	} else if runErr != nil {
+	if runErr != nil {
+		if err := ctx.Err(); err != nil {
+			slog.WarnContext(ctx, "tool cancelled", "area", telemetry.AreaHarness, "tool", in.Call.Name)
+			_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, streaming.StreamEvent{Type: streaming.StreamEventError, Error: err, Content: err.Error()}, true)
+			return ToolOutput{}, canceledIf(ctx, runErr)
+		}
 		slog.ErrorContext(ctx, "tool failed", "area", telemetry.AreaHarness, "tool", in.Call.Name, "error", runErr)
 	}
 	etag, saveErr := a.save(ctx, in.SessionID, in.AgentID, h, etag, in.Mounts)

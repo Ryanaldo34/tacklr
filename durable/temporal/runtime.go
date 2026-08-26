@@ -281,18 +281,20 @@ func (r *Runtime) Subscribe(ctx context.Context, sessionID durable.SessionID, af
 func (r *Runtime) FallbackLog() durable.EventLog { return r.fallback }
 
 func failFromWire(s string) error {
-	switch {
-	case strings.Contains(s, tacklr.ErrModelRefused.Error()):
-		return tacklr.ErrModelRefused
-	case strings.Contains(s, tacklr.ErrMaxTokens.Error()):
-		return tacklr.ErrMaxTokens
-	case strings.Contains(s, tacklr.ErrMaxTurnRequests.Error()):
-		return tacklr.ErrMaxTurnRequests
-	case strings.Contains(s, context.Canceled.Error()), strings.Contains(s, "context cancelled"):
-		return context.Canceled
-	default:
-		return errors.New(s)
+	for _, sent := range []error{
+		tacklr.ErrModelRefused,
+		tacklr.ErrMaxTokens,
+		tacklr.ErrMaxTurnRequests,
+		context.Canceled,
+	} {
+		if strings.Contains(s, sent.Error()) {
+			return sent
+		}
 	}
+	if strings.Contains(s, "context cancelled") {
+		return context.Canceled
+	}
+	return errors.New(s)
 }
 
 // Children implements durable.Runtime.

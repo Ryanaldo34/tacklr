@@ -432,7 +432,13 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) error {
 }
 
 func turnCanceled(ctx workflow.Context, err error) bool {
-	return err != nil && (ctx.Err() != nil || temporal.IsCanceledError(err) || errors.Is(err, workflow.ErrSessionFailed) || errors.Is(err, workflow.ErrCanceled))
+	if err == nil {
+		return false
+	}
+	if ctx.Err() != nil {
+		return true
+	}
+	return temporal.IsCanceledError(err) || errors.Is(err, workflow.ErrCanceled) || errors.Is(err, workflow.ErrSessionFailed)
 }
 
 // openTurnLocality pins activities to one worker when the host set a timeout.

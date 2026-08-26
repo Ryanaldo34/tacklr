@@ -58,6 +58,11 @@ type sessionProc struct {
 	// childParks maps a parent tool call id (get_child / blocking spawn) to the
 	// child session that should receive the next Resume payload.
 	childParks map[string]durable.SessionID
+
+	// kids is the parent context for child Prompt. Canceled by stopChildren
+	// (Cancel, Close, client-stopped turn). Not canceled when a turn parks.
+	kids     context.Context
+	stopKids context.CancelFunc
 }
 
 // Runtime is the in-process durable.Runtime: one goroutine per session.
@@ -185,6 +190,7 @@ func (r *Runtime) CreateSession(ctx context.Context, req durable.CreateSession) 
 		signals:    make(chan signal, 8),
 		childParks: make(map[string]durable.SessionID),
 	}
+	p.kids, p.stopKids = context.WithCancel(context.Background())
 	if parent != nil {
 		p.auth = parent.auth
 	}
@@ -275,15 +281,24 @@ func (r *Runtime) stopChildren(ctx context.Context, p *sessionProc) {
 	p.mu.Lock()
 	kids := slices.Clone(p.children)
 	p.children = nil
+	if p.stopKids != nil {
+		p.stopKids()
+		p.kids, p.stopKids = context.WithCancel(context.Background())
+	}
 	p.mu.Unlock()
 	for _, child := range kids {
 		_ = r.Close(ctx, child)
 	}
 }
 
+func (p *sessionProc) childCtx() context.Context {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.kids
+}
+
 // Cancel implements durable.Runtime. It aborts the in-flight turn and stops
-// child sessions started from this session. The parent session stays open for
-// a later Prompt. Client stop (session/cancel, Prompt context cancel) uses this.
+// child sessions. The parent session stays open for a later Prompt.
 func (r *Runtime) Cancel(ctx context.Context, sessionID durable.SessionID) error {
 	p, err := r.get(sessionID)
 	if err != nil {
@@ -494,8 +509,10 @@ func (r *Runtime) loop(p *sessionProc) {
 			defer cancel()
 			ctx, end := r.recordTurn(turnCtx, p.agentID, string(p.id), kind, promptLen, resumeCount)
 			outcome := r.runTurn(ctx, p, user, resume, bindings)
-			if outcome == turnCancelled && parent.Err() != nil {
-				r.stopChildren(context.Background(), p)
+			if outcome == turnCancelled {
+				if err := parent.Err(); err != nil {
+					r.stopChildren(context.WithoutCancel(parent), p)
+				}
 			}
 			r.noteOutcome(p, outcome)
 			end(outcome)
