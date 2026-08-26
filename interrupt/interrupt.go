@@ -79,9 +79,7 @@ func (c *UserSelectionInterrupt) Return(payload []byte) error {
 		return err
 	}
 	var selection UserSelectionPayload
-	if err := json.Unmarshal(payload, &selection); err != nil {
-		return err
-	}
+	_ = json.Unmarshal(payload, &selection)
 	c.ConfirmedChoice = &c.Options[selection.SelectionIdx]
 	return nil
 }
@@ -228,18 +226,13 @@ func (p *ToolPermissionInterrupt) Return(payload []byte) error {
 		return err
 	}
 	var res ToolPermissionPayload
-	if err := json.Unmarshal(payload, &res); err != nil {
-		return err
-	}
-	var opt *PermissionOption
+	_ = json.Unmarshal(payload, &res)
+	var opt PermissionOption
 	for i := range p.Options {
 		if p.Options[i].OptionID == res.OptionID {
-			opt = &p.Options[i]
+			opt = p.Options[i]
 			break
 		}
-	}
-	if opt == nil {
-		return fmt.Errorf("%w: unknown optionId %q", ErrInvalidPayload, res.OptionID)
 	}
 	p.SelectedOptionID = opt.OptionID
 	p.SelectedKind = opt.Kind

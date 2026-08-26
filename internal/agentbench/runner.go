@@ -172,16 +172,6 @@ func runCase(ctx context.Context, cfg Config, c Case, exa string) CaseResult {
 
 	model := inference.NewOpenAIInferenceStrategy(httpClient)
 	model.WithURL(cfg.ModelURL).WithApiKey(cfg.ModelAPIKey).WithModel(cfg.ModelName)
-	// Cap completion size (reasoning + visible text). Context window is separate (MaxWindowSize).
-	maxOut := 32_768
-	if v := strings.TrimSpace(os.Getenv("MAX_OUTPUT_TOKENS")); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
-			maxOut = n
-		}
-	}
-	if maxOut > 0 {
-		model.WithMaxOutputTokens(maxOut)
-	}
 	if effort := strings.TrimSpace(os.Getenv("OPENAI_REASONING_EFFORT")); effort != "" {
 		model.WithReasoningLevel(effort)
 	}

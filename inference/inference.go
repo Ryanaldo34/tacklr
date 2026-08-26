@@ -30,10 +30,8 @@ type OpenAIInferenceStrategy struct {
 	// reasoningSummary: "auto" | "concise" | "detailed". Empty omits the field.
 	// Required for Azure OpenAI/Foundry to stream response.reasoning_summary_text.delta.
 	reasoningSummary string
-	// maxOutputTokens is sent as max_output_tokens when > 0 (Azure/OpenAI Responses).
-	maxOutputTokens int
-	httpClient      *http.Client
-	baseURL         string
+	httpClient       *http.Client
+	baseURL          string
 
 	structuredOutputSchema map[string]any
 	structuredOutputName   string
@@ -110,17 +108,6 @@ func (s *OpenAIInferenceStrategy) WithReasoningLevel(level string) *OpenAIInfere
 // ("auto", "concise", "detailed"). Empty clears it.
 func (s *OpenAIInferenceStrategy) WithReasoningSummary(summary string) *OpenAIInferenceStrategy {
 	s.reasoningSummary = summary
-	return s
-}
-
-// WithMaxOutputTokens sets Responses API max_output_tokens (0 omits the field).
-// Raise this for Azure reasoning models after large tool results (e.g. web_search)
-// so streams do not end as bare response.incomplete.
-func (s *OpenAIInferenceStrategy) WithMaxOutputTokens(n int) *OpenAIInferenceStrategy {
-	if n < 0 {
-		n = 0
-	}
-	s.maxOutputTokens = n
 	return s
 }
 
@@ -294,9 +281,6 @@ func (s *OpenAIInferenceStrategy) Invoke(ctx context.Context, messages []*tacklr
 		Tools:   toolsJSON,
 		Stream:  true,
 		Include: []string{"reasoning.encrypted_content"},
-	}
-	if s.maxOutputTokens > 0 {
-		reqBody.MaxOutputTokens = s.maxOutputTokens
 	}
 
 	prompt := systemPrompt

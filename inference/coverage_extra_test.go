@@ -47,7 +47,7 @@ func TestAPIStatusError_andUsageParse(t *testing.T) {
 	}
 }
 
-func TestOpenAIStrategy_telemetryAndMaxTokens(t *testing.T) {
+func TestOpenAIStrategy_telemetryIdentity(t *testing.T) {
 	var nilS *OpenAIInferenceStrategy
 	if id := nilS.ModelTelemetryIdentity(); id != (telemetry.ModelIdentity{}) {
 		t.Fatalf("%+v", id)
@@ -57,13 +57,5 @@ func TestOpenAIStrategy_telemetryAndMaxTokens(t *testing.T) {
 	id := s.ModelTelemetryIdentity()
 	if id.Model != "gpt-test" || id.Provider != telemetry.GenAIProviderOpenAI {
 		t.Fatalf("%+v", id)
-	}
-	s.WithMaxOutputTokens(-5)
-	if s.maxOutputTokens != 0 {
-		t.Fatal(s.maxOutputTokens)
-	}
-	s.WithMaxOutputTokens(4096)
-	if s.maxOutputTokens != 4096 {
-		t.Fatal(s.maxOutputTokens)
 	}
 }

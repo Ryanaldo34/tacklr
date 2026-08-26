@@ -23,6 +23,26 @@ func TestRRF_fusesRanks(t *testing.T) {
 		t.Fatalf("want a first, got %v order=%v", fused[0].ID, idsOf(fused))
 	}
 
+	// Later lists fill missing metadata and take a newer UpdatedAt.
+	parent := uuid.New()
+	pos := 3
+	tOld := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	tNew := tOld.Add(time.Hour)
+	id := uuid.New()
+	filled := rrfFuse([][]ScoredID{
+		{{ID: id, Score: 1, UpdatedAt: tOld}},
+		{{ID: id, Score: 1, UpdatedAt: tNew, ParentID: &parent, Title: "t", Content: "c", Position: &pos, Properties: map[string]any{"k": 1}}},
+	}, 60)
+	if len(filled) != 1 {
+		t.Fatalf("fill len=%d", len(filled))
+	}
+	got := filled[0]
+	if !got.UpdatedAt.Equal(tNew) || got.ParentID == nil || *got.ParentID != parent ||
+		got.Title != "t" || got.Content != "c" || got.Position == nil || *got.Position != 3 ||
+		got.Properties["k"] != 1 {
+		t.Fatalf("fill: %+v", got)
+	}
+
 	// Empty / nil lists and k<=0 defaults.
 	if got := rrfFuse(nil, 0); len(got) != 0 {
 		t.Fatalf("nil: %+v", got)
@@ -119,6 +139,18 @@ func TestPromote_multipleEvidenceAndParentHit(t *testing.T) {
 	out2 := promoteParents([]ScoredID{long}, 1)
 	if len(out2) != 1 || !strings.HasSuffix(out2[0].Evidence[0].Snippet, "…") {
 		t.Fatalf("snippet truncate: %+v", out2)
+	}
+	if snippet("  ", 10) != "" || snippet("keep", 0) != "keep" {
+		t.Fatal("snippet empty/cap")
+	}
+	def := promoteParents([]ScoredID{
+		{ID: p1, Score: 1, ParentID: &parent, Title: "a"},
+		{ID: p2, Score: 2, ParentID: &parent, Title: "b"},
+		{ID: p3, Score: 3, ParentID: &parent, Title: "c"},
+		{ID: uuid.New(), Score: 4, ParentID: &parent, Title: "d"},
+	}, 0)
+	if len(def) != 1 || len(def[0].Evidence) != 3 {
+		t.Fatalf("default evidenceN: %+v", def)
 	}
 }
 

@@ -236,6 +236,41 @@ func (f fakeInterrupt) Serialize() ([]byte, error) { return []byte(`{}`), nil }
 func (f fakeInterrupt) Return([]byte) error        { return nil }
 func (f fakeInterrupt) Error() string              { return f.name }
 
+func TestChildWaiting_typeNameAndError(t *testing.T) {
+	empty := &interrupt.ChildWaiting{}
+	if empty.TypeName() != interrupt.TypeChildWaiting {
+		t.Fatalf("default type: %s", empty.TypeName())
+	}
+	if empty.Error() != "child session awaiting input" {
+		t.Fatalf("default error: %s", empty.Error())
+	}
+	if err := empty.ValidatePayload(nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := empty.Return([]byte(`anything`)); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := empty.Serialize()
+	if err != nil || len(raw) == 0 {
+		t.Fatalf("serialize: %v %s", err, raw)
+	}
+
+	named := &interrupt.ChildWaiting{Kind: "spawn_wait", Message: "waiting on researcher"}
+	if named.TypeName() != "spawn_wait" {
+		t.Fatalf("kind: %s", named.TypeName())
+	}
+	if named.Error() != "waiting on researcher" {
+		t.Fatalf("message: %s", named.Error())
+	}
+	got, ok := interrupt.New(interrupt.TypeChildWaiting)
+	if !ok {
+		t.Fatal("child_waiting not registered")
+	}
+	if got.TypeName() != interrupt.TypeChildWaiting {
+		t.Fatalf("new: %s", got.TypeName())
+	}
+}
+
 // TestInterrupt_asError confirms errors.As works for tool return paths.
 func TestInterrupt_asError(t *testing.T) {
 	var err error = &interrupt.UserSelectionInterrupt{Options: []interrupt.UserChoice{{Title: "A"}}}

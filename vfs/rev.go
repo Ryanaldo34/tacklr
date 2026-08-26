@@ -31,8 +31,8 @@ func hashSHA256(b []byte) string {
 }
 
 // ContentToken is the single rev helper. Used by ContentRev, lineWindowFromDoc,
-// readStructured, loadMatching, and stage. RichDocument uses the IR fingerprint
-// so HTML reproject does not change the token.
+// readStructured, loadMatching, and stage. IR uses the representation
+// fingerprint so HTML reproject does not change the token.
 func ContentToken(t Textual) string {
 	if d, ok := t.(*IR); ok {
 		return d.ContentFingerprint()
