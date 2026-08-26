@@ -354,6 +354,9 @@ func TestAskUserChoiceTool_raiseAndResume(t *testing.T) {
 	if !errors.As(err, &usi) || usi.Question != "Which approach?" {
 		t.Errorf("interrupt question = %+v", usi)
 	}
+	if _, adoptErr := sm.AdoptInterrupt("tc_ask", intr); adoptErr == nil {
+		t.Fatal("adopt should park")
+	}
 
 	// Resolve and re-invoke (harness re-execution pattern).
 	if _, err := sm.ReturnInterrupt("tc_ask", []byte(`{"selectionIdx":1}`)); err != nil {

@@ -17,8 +17,7 @@ type childHost interface {
 	Children() []Child
 	CancelChild(ctx context.Context, id string) error
 	// AwaitChild waits or collects. park=true means the child needs input:
-	// HarnessRuntime raises child_waiting. An interrupt error parks as-is
-	// (embed adopts the child's interrupt onto this call).
+	// the tool Parks child_waiting. An interrupt error parks as-is.
 	AwaitChild(ctx context.Context, id, callID string) (child Child, park bool, err error)
 }
 
@@ -68,7 +67,7 @@ func (t toolRuntime) AwaitChild(ctx context.Context, id string) (Child, error) {
 		return child, err
 	}
 	if park {
-		_, err := t.RaiseInterrupt(interrupt.TypeChildWaiting, []byte(`{}`))
+		_, err := t.Park(interrupt.TypeChildWaiting, []byte(`{}`))
 		return Child{}, err
 	}
 	return child, nil

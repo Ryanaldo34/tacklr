@@ -537,7 +537,7 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "ok", IsComplete: true}
 		},
 	}
-	parentH := mustNewAgent(t, AgentOptions{
+	parentOpts := AgentOptions{
 		Config:          Config{MaxWindowSize: 1024},
 		Model:           &mockStrategy{},
 		Brain:           eng,
@@ -545,12 +545,14 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 		Specialists: []*Specialist{
 			{Name: "researcher", Model: workerModel},
 		},
-	})
-
-	worker, err := parentH.newWorkerHarness(ctx, "researcher", "spawn_tc1", parentH.specialists["researcher"])
-	if err != nil {
-		t.Fatal(err)
 	}
+	parentH := mustNewAgent(t, parentOpts)
+	t.Cleanup(parentH.Close)
+	workerOpts := parentOpts.WithSpecialist(parentH.specialists["researcher"])
+	workerOpts.SearchNamespace = &ns
+	workerOpts.SessionID = "w/researcher/spawn_tc1"
+	worker := mustNewAgent(t, workerOpts)
+	t.Cleanup(worker.Close)
 
 	gotNS, ok := worker.SearchNamespace()
 	if !ok || gotNS != ns {

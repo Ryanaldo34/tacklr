@@ -93,7 +93,7 @@ The parent does not fail with the child. The child becomes `failed` and stays on
 
 `get_child` (including `block=true`) returns the error as tool text, drops the child from the parent list, and the parent continues. Uncollected complete or failed children still count toward the “cannot finish while children remain” nudge; the parent must `get_child` or `cancel_child` before it can complete.
 
-Path A (`NewAgent` / `jobs.go`) recovers a panic in a worker and marks that job failed. Path B’s child turn goroutine does not recover a panic — a panic can leave the child `running`. Path C starts an async child without waiting; collecting a failed async child through `get_child` is not the same intercept path as Path B.
+Child sessions are nested Runtime sessions (in-process or Temporal). A panic in an in-process child turn goroutine is not recovered and can leave the child `running`. Temporal starts an async child without waiting; collect a failed async child with `get_child`.
 
 ## Tool batches
 
@@ -103,9 +103,8 @@ A model round can emit several tool calls. Each `function_call` is pending until
 
 | Runtime | How the batch runs | Where leftovers live |
 |---------|--------------------|----------------------|
-| Path A embedder | Goroutines on one harness (`WaitGroup`) | Process memory (`pendingToolCalls`) |
-| Path B in-process | Same: parallel `RunToolCall` on one harness; snapshot once at join/yield | SnapshotStore (parked interrupt only) |
-| Path C Temporal | Sequential `Tool` activities (they share SnapshotStore etag) | Workflow history, not the snapshot |
+| In-process | Parallel `RunToolCall` on one harness; snapshot once at join/yield | SnapshotStore (parked interrupt only) |
+| Temporal | Sequential `Tool` activities (they share SnapshotStore etag) | Workflow history, not the snapshot |
 
 Conversation (window, plan, parked interrupt) is always SnapshotStore. Temporal history is the scheduler: which calls remain after HITL. Do not copy that leftover list into the snapshot.
 

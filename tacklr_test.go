@@ -147,7 +147,7 @@ func TestAgentHarness_Run(t *testing.T) {
 	interruptTool := NewTool(ToolConfig{
 		Name: "ask_user",
 		Handler: func(ctx context.Context, _ struct{}, runtime HarnessRuntime) (string, error) {
-			intr, err := runtime.RaiseInterrupt("user_selection_choice", []byte(optionsJSON))
+			intr, err := runtime.Park("user_selection_choice", []byte(optionsJSON))
 			if err != nil {
 				return "", err
 			}
@@ -1372,7 +1372,7 @@ func TestRestoreCheckpoint_resumesPendingToolInterrupt(t *testing.T) {
 	interruptTool := NewTool(ToolConfig{
 		Name: "ask_user",
 		Handler: func(ctx context.Context, _ struct{}, runtime HarnessRuntime) (string, error) {
-			intr, err := runtime.RaiseInterrupt("user_selection_choice", []byte(
+			intr, err := runtime.Park("user_selection_choice", []byte(
 				`[{"title":"Yes","description":"","isRecommended":true},{"title":"No","description":"","isRecommended":false}]`,
 			))
 			if err != nil {

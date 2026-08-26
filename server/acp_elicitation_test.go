@@ -110,7 +110,7 @@ func TestACP_elicitationForm_resolvesInterruptAndCompletes(t *testing.T) {
 	interruptTool := tacklr.NewTool(tacklr.ToolConfig{
 		Name: "ask_user",
 		Handler: func(ctx context.Context, _ struct{}, runtime tacklr.HarnessRuntime) (string, error) {
-			intr, err := runtime.RaiseInterrupt("user_selection_choice", []byte(optionsJSON))
+			intr, err := runtime.Park("user_selection_choice", []byte(optionsJSON))
 			if err != nil {
 				return "", err
 			}
@@ -559,7 +559,7 @@ func TestACP_elicitationForm_declineEndsPrompt(t *testing.T) {
 	interruptTool := tacklr.NewTool(tacklr.ToolConfig{
 		Name: "ask_user",
 		Handler: func(ctx context.Context, _ struct{}, runtime tacklr.HarnessRuntime) (string, error) {
-			_, err := runtime.RaiseInterrupt("user_selection_choice", []byte(optionsJSON))
+			_, err := runtime.Park("user_selection_choice", []byte(optionsJSON))
 			return "", err
 		},
 	})
@@ -632,7 +632,7 @@ func TestACP_elicitationForm_cancelEndsPrompt(t *testing.T) {
 	interruptTool := tacklr.NewTool(tacklr.ToolConfig{
 		Name: "ask_user",
 		Handler: func(ctx context.Context, _ struct{}, runtime tacklr.HarnessRuntime) (string, error) {
-			_, err := runtime.RaiseInterrupt("user_selection_choice", []byte(optionsJSON))
+			_, err := runtime.Park("user_selection_choice", []byte(optionsJSON))
 			return "", err
 		},
 	})
@@ -708,7 +708,7 @@ func TestACP_elicitation_malformedInterruptEndsTurn(t *testing.T) {
 	interruptTool := tacklr.NewTool(tacklr.ToolConfig{
 		Name: "ask_user",
 		Handler: func(ctx context.Context, _ struct{}, runtime tacklr.HarnessRuntime) (string, error) {
-			_, err := runtime.RaiseInterrupt("user_selection_choice", []byte(optionsJSON))
+			_, err := runtime.Park("user_selection_choice", []byte(optionsJSON))
 			return "", err
 		},
 	})

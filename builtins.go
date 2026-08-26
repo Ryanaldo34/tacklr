@@ -80,7 +80,7 @@ var askUserChoiceTool = NewTool(ToolConfig{
 			return "", fmt.Errorf("marshal choices: %w", err)
 		}
 
-		intr, err := runtime.RaiseInterrupt("user_selection_choice", payload)
+		intr, err := runtime.Park("user_selection_choice", payload)
 		if err != nil {
 			return "", err
 		}

@@ -236,7 +236,7 @@ Where to look:
 | Area | Start here |
 |------|------------|
 | Turn loop, tools, plan | `agent.go`, `agent_run.go`, `tools.go` |
-| Specialists / children | `subagents.go`, `jobs.go`, `durable/child.go`, `durable/inprocess/` |
+| Specialists / children | `subagents.go`, `durable/child.go`, `durable/inprocess/` |
 | Runtime | `durable/runtime.go`, `docs/durable.md` |
 | VFS | `vfs/`, `docs/vfs.md` |
 | Knowledge | `brain/`, `docs/knowledge.md` |

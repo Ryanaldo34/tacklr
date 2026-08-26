@@ -6,9 +6,9 @@ import (
 )
 
 // Runtime is the tool-facing hook for one harness turn:
-// EmitUpdate, StateGet/Set/Delete, RaiseInterrupt, CurrentToolCallID.
+// EmitUpdate, StateGet/Set/Delete, Park, CurrentToolCallID.
 //
-// Session modules (plan, permissions, on-call, parks) are not on this type.
+// Session modules (plan, permissions, on-call) are not on this type.
 // Lifetime: create with NewRuntime at Run start (with the turn event channel);
 // discard when the turn ends. Session state lives on SessionManager and outlives
 // the turn. Value copies share the same channel and session pointers.
@@ -72,7 +72,9 @@ func (rt Runtime) StateDelete(key string) {
 	rt.session.StateDelete(key)
 }
 
-// RaiseInterrupt parks the current tool until the host resumes with a payload.
-func (rt Runtime) RaiseInterrupt(kind string, payload []byte) (interrupt.Interrupt, error) {
-	return rt.session.raiseInterrupt(rt.toolCallID, kind, payload)
+// Park constructs an interrupt for this tool call. It does not write session
+// pending: the harness adopts the returned error in runToolCall. After Resume
+// it returns the resolved interrupt.
+func (rt Runtime) Park(kind string, payload []byte) (interrupt.Interrupt, error) {
+	return rt.session.park(rt.toolCallID, kind, payload)
 }

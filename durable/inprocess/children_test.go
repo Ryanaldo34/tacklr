@@ -41,7 +41,7 @@ func askUserTool() *tacklr.Tool {
 	return tacklr.NewTool(tacklr.ToolConfig{
 		Name: "ask_user",
 		Handler: func(ctx context.Context, _ struct{}, runtime tacklr.HarnessRuntime) (string, error) {
-			intr, err := runtime.RaiseInterrupt("user_selection_choice", []byte(options))
+			intr, err := runtime.Park("user_selection_choice", []byte(options))
 			if err != nil {
 				return "", err
 			}
@@ -856,5 +856,62 @@ func TestChildren_nestedSpecialistCollectsGrandchild(t *testing.T) {
 	}
 	if !sawNested || !sawDone {
 		t.Fatalf("nested=%v done=%v events=%v", sawNested, sawDone, summarize(got))
+	}
+}
+
+func TestChildren_customToolSpawnsChild(t *testing.T) {
+	delegate := tacklr.NewTool(tacklr.ToolConfig{
+		Name: "delegate",
+		Handler: func(ctx context.Context, args struct {
+			Specialist string `json:"specialist"`
+			Task       string `json:"task"`
+		}, runtime tacklr.HarnessRuntime) (string, error) {
+			id, err := runtime.SpawnChild(ctx, args.Specialist, args.Task)
+			if err != nil {
+				return "", err
+			}
+			child, err := runtime.AwaitChild(ctx, id)
+			if err != nil {
+				return "", err
+			}
+			return child.Result, nil
+		},
+	})
+	parent := &testkit.ScriptedModel{
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			if last := lastMsg(msgs); last != nil && last.Role == tacklr.RoleTool {
+				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "done", IsComplete: true}
+				return
+			}
+			ch <- tacklr.LLMResponseChunk{
+				Type: tacklr.StreamEventFunctionCall,
+				ToolCalls: []tacklr.ToolCall{{
+					ID: "c1", CallID: "c1", Name: "delegate",
+					Arguments: `{"specialist":"researcher","task":"dig"}`,
+				}},
+				IsComplete: true,
+			}
+		},
+	}
+	rt := New(newCatalog(t, parent, durable.AgentSpec{
+		Options: tacklr.AgentOptions{
+			Tools: []*tacklr.Tool{delegate},
+			Specialists: []*tacklr.Specialist{{
+				Name:  "researcher",
+				Model: scriptedComplete("research result"),
+			}},
+		},
+	}), WithProjection(vfs.DirectProjection{}))
+	var id durable.SessionID
+	sub := begin(t, rt, &id)
+	got := waitEvents(t, sub, 8*time.Second)
+	var saw bool
+	for _, ev := range got {
+		if ev.Type == streaming.StreamEventToolResult && strings.Contains(ev.Content, "research result") {
+			saw = true
+		}
+	}
+	if !saw {
+		t.Fatalf("want custom tool child result, got %v", summarize(got))
 	}
 }

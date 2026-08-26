@@ -185,13 +185,6 @@ func (a *AgentHarness) runInference(ctx context.Context, st *drive.TurnState, ou
 		}
 	}
 	if len(toolCalls) == 0 {
-		if nudge := a.backgroundChildrenNudge(); nudge != "" {
-			if err := a.addToContext(ctx, &Message{Role: RoleUser, Content: nudge}, out); err != nil {
-				return drive.InferenceStep{}, err
-			}
-			st.HadToolRound = true
-			return a.runInference(ctx, st, out)
-		}
 		out <- StreamEvent{Type: StreamEventComplete}
 		return drive.InferenceStep{Complete: true}, nil
 	}
@@ -222,12 +215,7 @@ func (a *AgentHarness) finishToolCall(key string) {
 }
 
 func (a *AgentHarness) runToolCall(ctx context.Context, tc ToolCall, out chan StreamEvent) (drive.ToolStep, error) {
-	host := a.childHost
-	if host == nil {
-		host = jobsHost{a}
-	}
-	a.bindOut(out)
-	turnRT := newToolRuntime(out, a.session, host)
+	turnRT := newToolRuntime(out, a.session, a.childHost)
 	tcKey := tc.Key()
 	toolCtx, toolSpan := telemetry.StartToolSpan(ctx, tc.Name, tc.Namespace)
 	tool := a.findTool(tc.Name, tc.Namespace)
@@ -247,6 +235,16 @@ func (a *AgentHarness) runToolCall(ctx context.Context, tc ToolCall, out chan St
 	})
 	var parked interrupt.Interrupt
 	if errors.As(err, &parked) {
+		if _, adoptErr := a.session.AdoptInterrupt(tcKey, parked); adoptErr != nil {
+			var adopted interrupt.Interrupt
+			if !errors.As(adoptErr, &adopted) {
+				a.finishToolCall(tcKey)
+				toolSpan.Finish("error", adoptErr)
+				out <- StreamEvent{Type: StreamEventError, Error: adoptErr}
+				return drive.ToolStep{}, adoptErr
+			}
+			parked = adopted
+		}
 		serialized, serErr := parked.Serialize()
 		if serErr != nil {
 			a.finishToolCall(tcKey)

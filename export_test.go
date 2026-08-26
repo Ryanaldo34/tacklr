@@ -35,7 +35,7 @@ func turnRuntime(h *AgentHarness) HarnessRuntime {
 		for range ch {
 		}
 	}()
-	return newToolRuntime(ch, h.session, jobsHost{h})
+	return newToolRuntime(ch, h.session, h.childHost)
 }
 
 func nopRuntime() HarnessRuntime {

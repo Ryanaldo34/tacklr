@@ -39,7 +39,7 @@ type Engine interface {
 	// after a child workflow already ran).
 	RecordToolResult(tc streaming.ToolCall, output string)
 	// SetChildHost installs nested-session child operations for tools.
-	// Nil uses the harness in-memory jobs. h must implement tacklr childHost.
+	// Nil: child methods fail. h must implement tacklr childHost.
 	SetChildHost(h any)
 }
 

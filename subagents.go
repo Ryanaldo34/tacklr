@@ -1,30 +1,17 @@
 package tacklr
 
 import (
-	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"log/slog"
-	"maps"
 	"slices"
 	"strings"
 
-	"github.com/ryanaldo34/tacklr/internal/session"
-	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
-// Worker failures wrap the package categories (ErrNotFound, ErrInvalid, ErrFailed).
-
-// Specialist describes a specialized worker that a harness can spawn via the
-// spawn_specialist tool. Specs may nest via Specialists so interrupt propagation
-// and orchestration stay self-similar at any depth.
-//
-// Workers inherit the parent session world via workerOptsFromSpec (VFS including
-// /skills, brain, index bridge, MCP, web, policy, watchdog, interceptors).
-// Spec fields replace model, instructions, tools, and nested Specialists.
-// They skip planningWriteLock. They do not get a second FUSE.
+// Specialist describes a nested session a harness can spawn via spawn_specialist.
+// Specs may nest via Specialists. Child sessions inherit the parent world through
+// AgentOptions.WithSpecialist (VFS, brain, MCP, interceptors). Spec fields replace
+// model, instructions, tools, and nested Specialists. They skip planningWriteLock.
 type Specialist struct {
 	Tools        []*Tool
 	Instructions string
@@ -35,30 +22,9 @@ type Specialist struct {
 	Specialists []*Specialist
 }
 
-// parkedWorkerMeta is durable park metadata. Live harness pointers live in parkedWorkersLive.
-type parkedWorkerMeta = session.ParkedWorkerMeta
-
-func workerParkMeta(worker *AgentHarness, name, task string, childIDs []string) (parkedWorkerMeta, error) {
-	meta := parkedWorkerMeta{
-		Specialist:        name,
-		Task:              task,
-		ChildInterruptIDs: childIDs,
-	}
-	if worker == nil {
-		return meta, nil
-	}
-	meta.WorkerSessionID = worker.sessionId
-	cp, err := worker.Checkpoint()
-	if err != nil {
-		return parkedWorkerMeta{}, err
-	}
-	meta.Checkpoint = cp
-	return meta, nil
-}
-
 // initSpecialists registers worker specs. Invalid or duplicate specs are
-// constructor errors (panic): a misconfigured host must not start a harness
-// that silently drops workers.
+// constructor errors: a misconfigured host must not start a harness that
+// silently drops workers.
 func (h *AgentHarness) initSpecialists(specs []*Specialist) error {
 	for _, spec := range specs {
 		if spec == nil {
@@ -113,39 +79,58 @@ func (a *AgentHarness) formatSpecialistPromptList() string {
 type spawnSpecialistArgs struct {
 	TaskDescriptionAndContext string `json:"task_description_and_context" desc:"Clear task goal, acceptance criteria, and helpful context for the worker"`
 	Specialist                string `json:"specialist" desc:"Name of a registered specialist to spawn"`
-	Block                     *bool  `json:"block" desc:"Wait for the worker and return its result. Defaults to true. Set false to schedule a background job and continue the turn."`
+	Block                     *bool  `json:"block" desc:"Wait for the worker and return its result. Defaults to true. Set false to start a child session and continue the turn."`
 }
 
 func (a *AgentHarness) spawnTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "spawn_specialist",
 		DisplayName: "Spawn {specialist}",
-		Description: "Spawn a specialist. block defaults to true and returns the worker result before continuing. Set block=false to schedule a background job, continue other work, then use list_children, get_child, or cancel_child.",
+		Description: "Spawn a specialist as a child session. block defaults to true and returns the worker result before continuing. Set block=false to start the child and continue other work, then use list_children, get_child, or cancel_child.",
 		Category:    streaming.ToolCategoryExecute,
 		Handler:     spawnSpecialist,
 	})
 }
 
-func (a *AgentHarness) newWorkerHarness(ctx context.Context, specialist, parentToolCallID string, spec *Specialist) (*AgentHarness, error) {
-	opts := a.workerOptsFromSpec(spec)
-	if id, ok := a.session.Search.Namespace(); ok {
-		cp := id
-		opts.SearchNamespace = &cp
-	}
-	sessionID := workerSessionID(a.sessionId, specialist, parentToolCallID)
-	worker, err := NewAgent(ctx, opts)
-	if err != nil {
-		return nil, err
-	}
-	worker.sessionId = sessionID
-	return worker, nil
+type listJobsArgs struct{}
+
+type getJobArgs struct {
+	ChildID string `json:"child_id" desc:"Child session id returned by spawn_specialist when block is false"`
+	Block   bool   `json:"block" desc:"Wait for a running child before returning its result. Defaults to false."`
 }
 
-func workerSessionID(parentSessionID, specialist, parentToolCallID string) string {
-	if parentSessionID == "" {
-		return fmt.Sprintf("w/%s/%s", specialist, parentToolCallID)
-	}
-	return fmt.Sprintf("%s/w/%s/%s", parentSessionID, specialist, parentToolCallID)
+type cancelJobArgs struct {
+	ChildID string `json:"child_id" desc:"Child session id returned by spawn_specialist when block is false"`
+}
+
+func (a *AgentHarness) listChildrenTool() *Tool {
+	return NewTool(ToolConfig{
+		Name:        "list_children",
+		DisplayName: "List children",
+		Description: "Non-blocking overview of child sessions (running, completed, failed). Status stays running while a child waits for user input. Use get_child to collect a result or wait, and cancel_child to stop work that is no longer needed.",
+		Category:    streaming.ToolCategoryExecute,
+		Handler:     listChildren,
+	})
+}
+
+func (a *AgentHarness) getChildTool() *Tool {
+	return NewTool(ToolConfig{
+		Name:        "get_child",
+		DisplayName: "Get child {child_id}",
+		Description: "Get one child session. By default this is non-blocking: a running child returns its current status (including while waiting for user input), while a terminal child returns and consumes its result. Set block=true to wait until it finishes, or to park this call if the child needs user input.",
+		Category:    streaming.ToolCategoryExecute,
+		Handler:     getChild,
+	})
+}
+
+func (a *AgentHarness) cancelChildTool() *Tool {
+	return NewTool(ToolConfig{
+		Name:        "cancel_child",
+		DisplayName: "Cancel child {child_id}",
+		Description: "Cancel and remove a child session that is no longer needed. Completed and failed children are discarded without returning their result.",
+		Category:    streaming.ToolCategoryExecute,
+		Handler:     cancelChild,
+	})
 }
 
 // FindSpecialist returns the named worker from specs, including nested Specialists.
@@ -171,8 +156,8 @@ func FindSpecialist(specs []*Specialist, name string) *Specialist {
 // WithSpecialist overlays a worker spec onto the parent session world. The child
 // keeps parent MCP, brain, interceptors, and skills. Model, tools, nested
 // workers, and instructions come from spec. Planning write lock is off.
-// MountSession and SessionID stay as the caller set them (Runtime injects
-// a child tree; embed still passes the parent pointer).
+// MountSession and SessionID stay as the caller set them (Runtime injects a
+// child tree).
 func (o AgentOptions) WithSpecialist(spec *Specialist) AgentOptions {
 	if spec == nil {
 		return o
@@ -186,214 +171,4 @@ func (o AgentOptions) WithSpecialist(spec *Specialist) AgentOptions {
 	out.Specialists = spec.Specialists
 	out.disablePlanningLock = true
 	return out
-}
-
-// workerOptsFromSpec is the parent session world with worker spec fields overlaid.
-// Omits SearchNamespace so resume keeps the checkpointed worker session value.
-func (a *AgentHarness) workerOptsFromSpec(spec *Specialist) AgentOptions {
-	return AgentOptions{
-		Config: Config{
-			MaxWindowSize:   a.maxWindowSize,
-			MaxTurnRequests: a.maxTurnRequests,
-		},
-		WatchDog:              a.watchDog,
-		MCPConfigs:            slices.Clone(a.mcpConfigs),
-		MCPCredentialResolver: a.mcpCredentialResolver,
-		ContextPolicy:         a.contextPolicy,
-		ToolInterceptors:      slices.Clone(a.hostInterceptors),
-		ToolResultHooks:       maps.Clone(a.hostResultHooks),
-		SkillsLoader:          a.skillsLoader,
-		ExaAPIKey:             a.exaAPIKey,
-		Brain:                 a.brain,
-		BrainWriteKinds:       a.brainWriteKinds,
-		MountSession:          a.session.VFS,
-		runCommandUnattended:  a.runCommandUnattended,
-		writeUnattended:       a.writeUnattended,
-		shareIndexBridge:      a.vfsBridge,
-	}.WithSpecialist(spec)
-}
-
-func (a *AgentHarness) attachParkedWorker(ctx context.Context, toolCallID string, meta parkedWorkerMeta, spec *Specialist) (*AgentHarness, error) {
-	a.parkMu.Lock()
-	if live, ok := a.parkedWorkersLive[toolCallID]; ok && live != nil {
-		a.parkMu.Unlock()
-		return live, nil
-	}
-	a.parkMu.Unlock()
-
-	if meta.Checkpoint == nil {
-		return nil, fmt.Errorf("parked worker state is missing: %w", ErrNotFound)
-	}
-	opts := a.workerOptsFromSpec(spec)
-	opts.SessionID = meta.WorkerSessionID
-	worker, err := NewAgent(ctx, opts)
-	if err != nil {
-		return nil, fmt.Errorf("parked worker state is missing: %w: %w", ErrNotFound, err)
-	}
-	if err := worker.RestoreCheckpoint(*meta.Checkpoint); err != nil {
-		worker.Close()
-		return nil, fmt.Errorf("parked worker state is missing: restore %q: %w: %w", meta.WorkerSessionID, ErrNotFound, err)
-	}
-	a.parkMu.Lock()
-	a.parkedWorkersLive[toolCallID] = worker
-	a.parkMu.Unlock()
-	return worker, nil
-}
-
-func (a *AgentHarness) childResolutionPayloads(parentToolCallID string, meta *parkedWorkerMeta) map[string][]byte {
-	// One parent spawn_specialist interrupt maps to one consumer resolution.
-	// Forward the same payload bytes to every pending child interrupt id
-	// recorded at park time (typically one).
-	a.pendingMu.Lock()
-	payload := a.interruptPayloads[parentToolCallID]
-	a.pendingMu.Unlock()
-	out := make(map[string][]byte, len(meta.ChildInterruptIDs))
-	for _, id := range meta.ChildInterruptIDs {
-		out[id] = payload
-	}
-	return out
-}
-
-// collectChildInterrupts resolves the primary interrupt from ids observed on
-// the worker event stream. Interrupts always arrive as stream events; if none
-// map to a pending interrupt the caller treats the worker as incomplete.
-func collectChildInterrupts(worker *AgentHarness, drainedIDs []string) (ids []string, primary interrupt.Interrupt) {
-	ids = drainedIDs
-	for _, id := range ids {
-		if intr, ok := worker.session.PendingInterrupt(id); ok {
-			return ids, intr
-		}
-	}
-	return ids, nil
-}
-
-func (a *AgentHarness) getParkMeta(toolCallID string) *parkedWorkerMeta {
-	if toolCallID == "" {
-		return nil
-	}
-	meta, ok := a.session.ParkedWorker(toolCallID)
-	if !ok {
-		return nil
-	}
-	cp := meta
-	return &cp
-}
-
-func (a *AgentHarness) setPark(toolCallID string, meta parkedWorkerMeta, worker *AgentHarness) {
-	a.session.SetParkedWorker(toolCallID, meta)
-	a.parkMu.Lock()
-	if worker != nil {
-		a.parkedWorkersLive[toolCallID] = worker
-	}
-	a.parkMu.Unlock()
-}
-
-func (a *AgentHarness) clearPark(toolCallID string) {
-	if toolCallID == "" {
-		return
-	}
-	a.session.DeleteParkedWorker(toolCallID)
-	a.parkMu.Lock()
-	live := a.parkedWorkersLive[toolCallID]
-	delete(a.parkedWorkersLive, toolCallID)
-	a.parkMu.Unlock()
-	if live != nil {
-		live.Close()
-	}
-	a.pendingMu.Lock()
-	delete(a.interruptPayloads, toolCallID)
-	a.pendingMu.Unlock()
-}
-
-// workerDrainResult is the outcome of draining a child event stream.
-type workerDrainResult struct {
-	lastAssistant string
-	completed     bool
-	interruptIDs  []string
-}
-
-// drainWorkerEvents consumes a worker event stream, forwarding progress via
-// emit. Interrupts are recorded (not treated as hard errors) so the caller
-// can park and bubble them.
-func drainWorkerEvents(
-	ctx context.Context,
-	specialist string,
-	events <-chan StreamEvent,
-	emit func(string),
-) (workerDrainResult, error) {
-	var result workerDrainResult
-	for {
-		select {
-		case <-ctx.Done():
-			return result, ctx.Err()
-		case ev, ok := <-events:
-			if !ok {
-				return result, nil
-			}
-			switch ev.Type {
-			case StreamEventError:
-				if ev.Error != nil {
-					return result, ev.Error
-				}
-				if ev.Content != "" {
-					return result, errors.New(ev.Content)
-				}
-				return result, errors.New("worker stream error with no details")
-			case StreamEventComplete:
-				result.completed = true
-			case StreamEventInterrupt:
-				id := parseInterruptID(ev.Data)
-				if id != "" {
-					result.interruptIDs = append(result.interruptIDs, id)
-				}
-				if emit != nil {
-					emit(fmt.Sprintf("[%s] awaiting user input", specialist))
-				}
-			case StreamEventMessage:
-				if ev.Content != "" {
-					result.lastAssistant = ev.Content
-					if emit != nil {
-						emit(fmt.Sprintf("[%s] %s", specialist, ev.Content))
-					}
-				}
-			case StreamEventReasoning:
-				if ev.Content != "" && emit != nil {
-					slog.Debug("specialist reasoning", "area", "specialist", "specialist", specialist)
-					emit(fmt.Sprintf("[%s thinking] %s", specialist, ev.Content))
-				}
-			case StreamEventFunctionCall:
-				if emit != nil {
-					for _, tc := range ev.ToolCalls {
-						slog.Debug("worker tool call", "area", "subagent", "worker", specialist, "tool", tc.Name)
-						emit(fmt.Sprintf("[%s] tool call: %s", specialist, tc.Name))
-					}
-				}
-			}
-		}
-	}
-}
-
-func parseInterruptID(data []byte) string {
-	if len(data) == 0 {
-		return ""
-	}
-	var payload struct {
-		InterruptId string `json:"interruptId"`
-	}
-	if err := json.Unmarshal(data, &payload); err != nil {
-		return ""
-	}
-	return payload.InterruptId
-}
-
-// finalWorkerOutput prefers the last non-empty assistant/reasoning message
-// in the worker context window, falling back to streamed assistant content.
-func finalWorkerOutput(window []*Message, streamed string) string {
-	for i := len(window) - 1; i >= 0; i-- {
-		msg := window[i]
-		if (msg.Role == RoleAssistant || msg.Role == RoleReasoning) && msg.Content != "" {
-			return msg.Content
-		}
-	}
-	return streamed
 }

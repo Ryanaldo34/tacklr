@@ -40,24 +40,10 @@ type AgentHarness struct {
 	session               *session.SessionManager
 	specialists           map[string]*Specialist
 	// pendingToolCalls is keyed by tool call id, which is also the wire interrupt id.
-	// pendingMu covers this map and interruptPayloads (parallel tools in one turn).
-	pendingToolCalls  map[string]stores.PendingToolCall
-	interruptPayloads map[string][]byte
-	pendingMu         sync.Mutex
-	// parkedWorkersLive maps spawn_specialist tool call id → live child harness.
-	// Durable park metadata is in SessionManager state; this map is not checkpointed.
-	parkedWorkersLive map[string]*AgentHarness
-	parkMu            sync.Mutex
-	// Worker runs share one live lifecycle registry across sync and async delivery.
-	jobs       map[string]*workerRun
-	jobsMu     sync.Mutex
-	jobsCtx    context.Context
-	jobsCancel context.CancelFunc
-	// childHost, when set, is nested sessions (durable Runtime). Nil uses jobs.
-	childHost childHost
-	// live is the turn event channel for job progress. Unbind before close.
-	liveMu            sync.Mutex
-	live              chan StreamEvent
+	pendingToolCalls map[string]stores.PendingToolCall
+	pendingMu        sync.Mutex
+	// childHost, when set, is nested Runtime sessions. Nil: child methods fail.
+	childHost         childHost
 	skillByName       map[string]skills.Skill
 	skillsLoader      skills.SkillLoader
 	skillsInitialized bool
@@ -86,32 +72,6 @@ type AgentHarness struct {
 	// runMu: one embed turn. Run/Resume/Restore wait until the prior turn
 	// parks or exits. Tool goroutines in that turn write pending under pendingMu.
 	runMu sync.Mutex
-}
-
-func (a *AgentHarness) bindOut(ch chan StreamEvent) {
-	a.liveMu.Lock()
-	a.live = ch
-	a.liveMu.Unlock()
-}
-
-func (a *AgentHarness) unbindOut(ch chan StreamEvent) {
-	a.liveMu.Lock()
-	if a.live == ch {
-		a.live = nil
-	}
-	a.liveMu.Unlock()
-}
-
-func (a *AgentHarness) emitLive(ev StreamEvent) {
-	a.liveMu.Lock()
-	defer a.liveMu.Unlock()
-	if a.live == nil {
-		return
-	}
-	select {
-	case a.live <- ev:
-	default:
-	}
 }
 
 // VFS is the mount table injected for this turn, or nil.
@@ -478,7 +438,6 @@ func (a *AgentHarness) hasOpenToolWork() bool {
 func (a *AgentHarness) finalizeCancelledWork(out chan<- StreamEvent) {
 	a.pairCancelledToolResults(out)
 	a.clearInterruptParkState()
-	a.cancelBackgroundJobs()
 }
 
 // openToolCalls returns assistant/pending tool_calls that have no RoleTool result yet.
@@ -534,7 +493,6 @@ func (a *AgentHarness) pairCancelledToolResults(out chan<- StreamEvent) {
 func (a *AgentHarness) clearInterruptParkState() {
 	a.pendingMu.Lock()
 	a.pendingToolCalls = make(map[string]stores.PendingToolCall)
-	a.interruptPayloads = make(map[string][]byte)
 	a.pendingMu.Unlock()
 	a.session.ClearInterrupts()
 }
@@ -585,15 +543,6 @@ func (a *AgentHarness) initMCP(ctx context.Context) {
 // owner (durable.Runtime activity preamble), not here — workers inherit the same tree.
 // Call after the Run events channel is drained, or when construct/runHarness fails.
 func (a *AgentHarness) Close() {
-	a.cancelBackgroundJobs()
-	a.parkMu.Lock()
-	for id, w := range a.parkedWorkersLive {
-		if w != nil {
-			w.Close()
-		}
-		delete(a.parkedWorkersLive, id)
-	}
-	a.parkMu.Unlock()
 	if a.mcpCleanup != nil {
 		a.mcpCleanup()
 		a.mcpCleanup = nil

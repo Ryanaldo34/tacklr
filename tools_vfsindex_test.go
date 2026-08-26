@@ -599,10 +599,6 @@ func TestRun_workspaceResearchTurn(t *testing.T) {
 			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
 				toolCall("t1", "complete_todo", `{"title":"index"}`),
 			}, IsComplete: true}
-		case 10:
-			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-				toolCall("sp1", "spawn_specialist", `{"specialist":"researcher","task_description_and_context":"summarize unique-research-token"}`),
-			}, IsComplete: true}
 		default:
 			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "indexed the note and saved a discovery", IsComplete: true}
 		}
@@ -623,15 +619,6 @@ func TestRun_workspaceResearchTurn(t *testing.T) {
 		BrainWriteKinds: brain.WriteKinds{Discovery: "Discovery"},
 		writeUnattended: true,
 		Model:           strategy,
-		Specialists: []*Specialist{{
-			Name:        "researcher",
-			Description: "summarize findings",
-			Model: &mockStrategy{
-				invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
-					ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "worker: token is in research.md", IsComplete: true}
-				},
-			},
-		}},
 	})
 	t.Cleanup(h.Close)
 	if h.VFS() != ms {
@@ -654,7 +641,6 @@ func TestRun_workspaceResearchTurn(t *testing.T) {
 	requireToolResult(t, got, "indexed path=/work/research.md")
 	requireToolResult(t, got, "object_id")
 	requireToolResult(t, got, "now starting")
-	requireToolResult(t, got, "worker: token is in research.md")
 	if body, err := ms.ReadFile(ctx, "/work/research.md"); err != nil || !strings.Contains(string(body), "unique-research-token") {
 		t.Fatalf("vfs body: %s err=%v", body, err)
 	}

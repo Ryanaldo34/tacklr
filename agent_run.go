@@ -43,15 +43,11 @@ func (a *AgentHarness) ReturnFromInterrupt(ctx context.Context, finishedInterrup
 func (a *AgentHarness) applyResume(finishedInterrupts map[string][]byte) error {
 	a.pendingMu.Lock()
 	defer a.pendingMu.Unlock()
-	if a.interruptPayloads == nil {
-		a.interruptPayloads = make(map[string][]byte)
-	}
 	for id, payload := range finishedInterrupts {
 		tc, ok := a.pendingToolCalls[id]
 		if !ok {
 			return fmt.Errorf("no tool call id found for interrupt %s: %w", id, interrupt.ErrInterruptNotFound)
 		}
-		a.interruptPayloads[id] = payload
 		if _, err := a.session.ReturnInterrupt(id, payload); err != nil {
 			return fmt.Errorf("return from interrupt %q: %w", id, err)
 		}
@@ -69,11 +65,7 @@ func (a *AgentHarness) startTurn(ctx context.Context, user *Message, resume map[
 	go func() {
 		a.runMu.Lock()
 		defer a.runMu.Unlock()
-		a.bindOut(out)
-		defer func() {
-			a.unbindOut(out)
-			close(out)
-		}()
+		defer close(out)
 
 		kind := telemetry.TurnKindPrompt
 		promptLen := 0

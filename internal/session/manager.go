@@ -13,8 +13,8 @@ import (
 
 // SessionManager owns durable and live data for one agent harness thread
 // (checkpoint id), not an ACP client session id: plan, user tool state,
-// permission memory, on-call stages, parked workers,
-// search context, interrupts, and the optional virtual filesystem mount table.
+// permission memory, on-call stages, search context, interrupts, and the
+// optional virtual filesystem mount table.
 //
 // VFS is host-owned and attached by assigning SessionManager.VFS. Knowledge
 // namespace + ResultSet live on Search. Builtins close over the manager; user
@@ -26,7 +26,6 @@ type SessionManager struct {
 	pending     interruptMap
 	resolved    interruptMap
 	Permissions Permissions
-	parks       parkBag
 	OnCall      OnCallStore
 	Search      *brain.SearchContext
 	VFS         *vfs.MountSession
@@ -40,7 +39,6 @@ func NewSessionManager() *SessionManager {
 		pending:     interruptMap{},
 		resolved:    interruptMap{},
 		Permissions: NewPermissions(),
-		parks:       newParkBag(),
 		Search:      brain.NewSearchContext(),
 	}
 }
@@ -158,12 +156,15 @@ func (s *SessionManager) TakeResolvedInterrupt(id string) (interrupt.Interrupt, 
 	return intr, true
 }
 
-func (s *SessionManager) raiseInterrupt(toolCallID string, kind string, payload []byte) (interrupt.Interrupt, error) {
+func (s *SessionManager) park(toolCallID string, kind string, payload []byte) (interrupt.Interrupt, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if resolved, ok := s.resolved[toolCallID]; ok {
 		delete(s.resolved, toolCallID)
 		return resolved, nil
+	}
+	if toolCallID == "" {
+		return nil, fmt.Errorf("park: CurrentToolCallID is empty")
 	}
 	intr, ok := interrupt.New(kind)
 	if !ok {
@@ -174,7 +175,6 @@ func (s *SessionManager) raiseInterrupt(toolCallID string, kind string, payload 
 			return nil, fmt.Errorf("init interrupt payload: %w", err)
 		}
 	}
-	s.pending[toolCallID] = intr
 	return nil, intr
 }
 

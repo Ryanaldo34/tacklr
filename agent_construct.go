@@ -134,16 +134,12 @@ func NewAgent(ctx context.Context, opts AgentOptions) (*AgentHarness, error) {
 		sessionId:             opts.SessionID,
 		specialists:           make(map[string]*Specialist),
 		pendingToolCalls:      make(map[string]stores.PendingToolCall),
-		interruptPayloads:     make(map[string][]byte),
-		parkedWorkersLive:     make(map[string]*AgentHarness),
-		jobs:                  make(map[string]*workerRun),
 		context:               newModelContextManager(),
 		contextPolicy:         opts.ContextPolicy,
 		runCommandUnattended:  opts.runCommandUnattended,
 		writeUnattended:       opts.writeUnattended,
 		vfsBridge:             opts.shareIndexBridge,
 	}
-	h.jobsCtx, h.jobsCancel = context.WithCancel(context.Background())
 	if opts.MountSession != nil {
 		sm.VFS = opts.MountSession
 	}
@@ -276,7 +272,7 @@ func (a *AgentHarness) injectBuiltinTools() {
 		a.tools = append(a.tools, newVFSIndexTools(br)...)
 	}
 	if len(a.specialists) > 0 {
-		a.tools = append(a.tools, a.spawnTool(), a.listJobsTool(), a.getJobTool(), a.cancelJobTool())
+		a.tools = append(a.tools, a.spawnTool(), a.listChildrenTool(), a.getChildTool(), a.cancelChildTool())
 	}
 	a.builtinsInjected = true
 }

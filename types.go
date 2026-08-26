@@ -143,9 +143,9 @@ const (
 )
 
 // HarnessRuntime is the tool-facing hook for one harness turn.
-// Tools emit progress, read/write user session state, raise interrupts, and
+// Tools emit progress, read/write user session state, Park, and
 // spawn/list/await/cancel children of this session. Session modules (plan,
-// permissions, on-call, parks) are not on this interface.
+// permissions, on-call) are not on this interface.
 //
 // Child methods are the only way tools start nested agents. Built-in
 // spawn_specialist / list_children / get_child / cancel_child call these.
@@ -155,7 +155,9 @@ type HarnessRuntime interface {
 	StateGet(key string) (any, bool)
 	StateSet(key string, value any) error
 	StateDelete(key string)
-	RaiseInterrupt(kind string, payload []byte) (Interrupt, error)
+	// Park parks this tool call. Return the error from the handler. After
+	// Resume it returns the resolved interrupt and a nil error.
+	Park(kind string, payload []byte) (Interrupt, error)
 	CurrentToolCallID() string
 
 	// SpawnChild starts a child of this session. It does not wait.
@@ -168,7 +170,7 @@ type HarnessRuntime interface {
 	CancelChild(ctx context.Context, id string) error
 	// AwaitChild waits until a child completes or fails, then collects it
 	// (it leaves Children). If the child needs user input, the call parks
-	// like RaiseInterrupt. Unknown ids return ErrNotFound.
+	// like Park. Unknown ids return ErrNotFound.
 	AwaitChild(ctx context.Context, id string) (Child, error)
 }
 

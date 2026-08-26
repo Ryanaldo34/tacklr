@@ -318,7 +318,7 @@ func Clone(intr Interrupt) Interrupt {
 }
 
 // PayloadInitializer is an optional capability Interrupt types implement
-// to populate themselves from the raw payload provided to RaiseInterrupt.
+// to populate themselves from the raw payload provided to Park.
 type PayloadInitializer interface {
 	InitFromPayload([]byte) error
 }
