@@ -8,7 +8,7 @@ Tacklr’s session API is `durable.Runtime`. A `server.Protocol` maps wire frame
 |------|---------|
 | **Session** | Long-lived wait loop (`CreateSession` … `Close`) |
 | **Turn** | One `Prompt` or `Resume` until complete or park |
-| **AgentHarness** | Per-turn mind: infer, short tools, snapshot. Runtime constructs it; hosts using Path A hold one for the whole conversation |
+| **AgentHarness** | Per-turn mind: infer, short tools, snapshot. Runtime constructs it for each Prompt/Resume |
 | **Specialist** | Catalog nested agent (`spawn_specialist`). Not a Temporal worker process |
 | **Child** | Nested session. Agent tools `list_children` / `get_child` / `cancel_child` |
 | **Park** | Session idle waiting for `Resume`. Parent-facing `Status` stays `running`; `Waiting` is true until the interrupt is resolved. Parent park does not stop children |
@@ -16,19 +16,9 @@ Tacklr’s session API is `durable.Runtime`. A `server.Protocol` maps wire frame
 | **Close** | Destroy the session and recursively stop children |
 | **Turn locality** | Optional: keep a turn’s Temporal activities on one process (`WithTurnLocality`) so VFS stays put |
 
-There are three ways to run an agent:
+There are two session runtimes. `AgentHarness.Run` is a turn helper for tests; it has no child sessions. Children require `durable.Runtime`.
 
-## Path A — embedder (`NewAgent` + `Run`)
-
-```go
-h, _ := tacklr.NewAgent(ctx, opts)
-events, _ := h.Run(ctx, prompt)
-// HITL: read yield, then h.ReturnFromInterrupt
-```
-
-Human-in-the-loop waits in-process on the same harness. Persistence is `h.Checkpoint` / `h.RestoreCheckpoint` (the same blob `durable.Runtime` writes to SnapshotStore). This path does not require Temporal. Durable drivers call unexported harness steps through `internal/drive`; that adapter is not a host API.
-
-## Path B — in-process Runtime
+## In-process Runtime
 
 ```go
 cat := durable.NewCatalog("agent")
@@ -41,7 +31,7 @@ sub, _ := rt.Subscribe(ctx, id, 0)
 
 One goroutine per session runs the harness wait loop. HITL parks that goroutine and waits for `Runtime.Resume`. Session conversation lives in `SnapshotStore`.
 
-## Path C — Temporal
+## Temporal
 
 The host runs:
 
@@ -177,9 +167,8 @@ The wait loop (in-process goroutine or `SessionWorkflow`) starts `tacklr.turn`. 
 
 | Runtime | How the turn span starts |
 |---------|--------------------------|
-| Path A embedder | `AgentHarness.Run` / `ReturnFromInterrupt` |
-| Path B in-process | wait loop calls `telemetry.StartTurnSpan` |
-| Path C Temporal | `temporalotel.Tracer` inside `SessionWorkflow` |
+| In-process | wait loop calls `telemetry.StartTurnSpan` |
+| Temporal | `temporalotel.Tracer` inside `SessionWorkflow` |
 
 Host setup: `telemetry.Init` installs the process-wide ReplaySafe tracer (and OTLP exporters when an endpoint is set). `Dial` prepends Temporal’s official OpenTelemetry v2 plugin onto that global provider. Postgres Query/Exec spans join that same trace because `PostgresStore` / `PostgresWireStore` run otelpgx against the caller context.
 
