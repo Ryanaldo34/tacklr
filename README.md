@@ -181,7 +181,7 @@ opts.Specialists = []*tacklr.Specialist{{
 | MCP | External tool servers | [`mcp`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/mcp) |
 | Skills | `SKILL.md` catalogs from VFS mounts | [`skills`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/skills) |
 | Web | Search and fetch when Exa is configured | [`tacklr`](https://pkg.go.dev/github.com/ryanaldo34/tacklr) |
-| Email | `read_inbox` and permission-gated `send_email`; structured filters hide Gmail and Graph query languages | [`email`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/email) |
+| Email | `read_inbox` and permission-gated `send_email`; structured filters hide Gmail and Graph query languages | [`email`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/email) · [`email/gmail`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/email/gmail) · [`email/outlook`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/email/outlook) |
 | Server | `Protocol` over Runtime; ACP is the native option | [`server`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/server) |
 | Telemetry | One `tacklr.turn` span per prompt or resume; OTLP | [`telemetry`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/telemetry) |
 
