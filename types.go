@@ -155,8 +155,8 @@ type HarnessRuntime interface {
 	StateGet(key string) (any, bool)
 	StateSet(key string, value any) error
 	StateDelete(key string)
-	// Park parks this tool call. Return the error from the handler. After
-	// Resume it returns the resolved interrupt and a nil error.
+	// Park writes pending for this tool call and returns the interrupt as
+	// error. After Resume it returns the resolved interrupt and a nil error.
 	Park(kind string, payload []byte) (Interrupt, error)
 	CurrentToolCallID() string
 

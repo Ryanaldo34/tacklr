@@ -3,13 +3,11 @@ package temporal
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
-	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/contrib/workflowstreams"
 	"go.temporal.io/sdk/converter"
@@ -66,11 +64,7 @@ func WithDisableStreams() Option {
 // duration so the turn's VFS stays on the same process. Zero (default) does
 // not pin activities; they may run on any worker.
 func WithTurnLocality(d time.Duration) Option {
-	return func(r *Runtime) {
-		if d > 0 {
-			r.turnLocalityTimeout = d
-		}
-	}
+	return func(r *Runtime) { r.turnLocalityTimeout = d }
 }
 
 // New constructs a Temporal Runtime. The host must also run Worker on the same
@@ -101,25 +95,21 @@ func New(c client.Client, taskQueue string, catalog durable.Catalog, opts ...Opt
 	return r
 }
 
-func (r *Runtime) workflowID(id durable.SessionID) string { return string(id) }
-
 // CreateSession implements durable.Runtime.
 func (r *Runtime) CreateSession(ctx context.Context, req durable.CreateSession) (durable.SessionID, error) {
 	agentID := req.AgentID
 	if agentID == "" {
 		agentID = r.catalog.DefaultID()
 	}
-	if agentID != "" {
-		if _, ok := r.catalog.Lookup(agentID); !ok {
-			return "", durable.ErrAgentNotFound
-		}
+	if _, ok := r.catalog.Lookup(agentID); !ok {
+		return "", durable.ErrAgentNotFound
 	}
 	id := req.SessionID
 	if id == "" {
 		id = durable.SessionID(uuid.NewString())
 	}
 	_, err := r.client.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
-		ID:        r.workflowID(id),
+		ID:        string(id),
 		TaskQueue: r.taskQueue,
 	}, SessionWorkflow, WorkflowInput{
 		SessionID:           id,
@@ -129,10 +119,6 @@ func (r *Runtime) CreateSession(ctx context.Context, req durable.CreateSession) 
 		TurnLocalityTimeout: r.turnLocalityTimeout,
 	})
 	if err != nil {
-		var already *serviceerror.WorkflowExecutionAlreadyStarted
-		if errors.As(err, &already) {
-			return "", fmt.Errorf("%w: %s", durable.ErrSessionExists, id)
-		}
 		return "", err
 	}
 	return id, nil
@@ -155,15 +141,10 @@ func (r *Runtime) signal(ctx context.Context, id durable.SessionID, name string,
 	if name != signalClose && r.isClosed(id) {
 		return durable.ErrSessionNotFound
 	}
-	err := r.client.SignalWorkflow(ctx, r.workflowID(id), "", name, arg)
-	if err == nil {
-		return nil
-	}
-	var nf *serviceerror.NotFound
-	if errors.As(err, &nf) {
+	if err := r.client.SignalWorkflow(ctx, string(id), "", name, arg); err != nil {
 		return durable.ErrSessionNotFound
 	}
-	return err
+	return nil
 }
 
 // Prompt implements durable.Runtime.
@@ -197,13 +178,10 @@ func (r *Runtime) Cancel(ctx context.Context, sessionID durable.SessionID) error
 // Close implements durable.Runtime.
 func (r *Runtime) Close(ctx context.Context, sessionID durable.SessionID) error {
 	r.markClosed(sessionID)
-	sigErr := r.signal(ctx, sessionID, signalClose, nil)
+	_ = r.signal(ctx, sessionID, signalClose, nil)
 	_ = r.snapshots.Delete(ctx, sessionID)
 	_ = r.fallback.CloseSession(ctx, sessionID)
 	durable.ClearSessionVFS(r.catalog, sessionID)
-	if sigErr != nil && !errors.Is(sigErr, durable.ErrSessionNotFound) {
-		return sigErr
-	}
 	return nil
 }
 
@@ -224,7 +202,7 @@ func (s *sub) Close() error {
 // stream's next offset so Subscribe(after Head) skips prior-turn events.
 func (r *Runtime) Head(ctx context.Context, sessionID durable.SessionID) (durable.Seq, error) {
 	if !r.disableStreams {
-		val, err := r.client.QueryWorkflow(ctx, r.workflowID(sessionID), "", workflowstreams.OffsetQueryName)
+		val, err := r.client.QueryWorkflow(ctx, string(sessionID), "", workflowstreams.OffsetQueryName)
 		if err == nil {
 			var n int64
 			if err := val.Get(&n); err == nil && n >= 0 {
@@ -246,7 +224,7 @@ func (r *Runtime) Subscribe(ctx context.Context, sessionID durable.SessionID, af
 		}
 		return &sub{ch: ch, cancel: cancel}, nil
 	}
-	c := workflowstreams.NewClient(r.client, r.workflowID(sessionID), workflowstreams.Options{})
+	c := workflowstreams.NewClient(r.client, string(sessionID), workflowstreams.Options{})
 	ch := make(chan streaming.StreamEvent, 64)
 	dc := converter.GetDefaultDataConverter()
 	go func() {
@@ -277,9 +255,6 @@ func (r *Runtime) Subscribe(ctx context.Context, sessionID durable.SessionID, af
 	return &sub{ch: ch, cancel: cancel}, nil
 }
 
-// FallbackLog is the in-process EventLog used when Workflow Streams is unavailable (tests).
-func (r *Runtime) FallbackLog() durable.EventLog { return r.fallback }
-
 func failFromWire(s string) error {
 	for _, sent := range []error{
 		tacklr.ErrModelRefused,
@@ -291,9 +266,6 @@ func failFromWire(s string) error {
 			return sent
 		}
 	}
-	if strings.Contains(s, "context cancelled") {
-		return context.Canceled
-	}
 	return errors.New(s)
 }
 
@@ -302,38 +274,26 @@ func (r *Runtime) Children(ctx context.Context, parent durable.SessionID) ([]dur
 	if r.isClosed(parent) {
 		return nil, durable.ErrSessionNotFound
 	}
-	val, err := r.client.QueryWorkflow(ctx, r.workflowID(parent), "", queryChildren)
+	val, err := r.client.QueryWorkflow(ctx, string(parent), "", queryChildren)
 	if err != nil {
-		var nf *serviceerror.NotFound
-		if errors.As(err, &nf) {
-			return nil, durable.ErrSessionNotFound
-		}
-		return nil, err
+		return nil, durable.ErrSessionNotFound
 	}
 	var ids []durable.SessionID
-	if err := val.Get(&ids); err != nil {
-		return nil, err
-	}
+	_ = val.Get(&ids)
 	return ids, nil
 }
 
 // Status implements durable.Runtime.
 func (r *Runtime) Status(ctx context.Context, id durable.SessionID) (durable.SessionStatus, error) {
+	st := durable.SessionStatus{ID: id, State: durable.SessionUnknown}
 	if r.isClosed(id) {
-		return durable.SessionStatus{ID: id, State: durable.SessionUnknown}, durable.ErrSessionNotFound
+		return st, durable.ErrSessionNotFound
 	}
-	val, err := r.client.QueryWorkflow(ctx, r.workflowID(id), "", queryStatus)
+	val, err := r.client.QueryWorkflow(ctx, string(id), "", queryStatus)
 	if err != nil {
-		var nf *serviceerror.NotFound
-		if errors.As(err, &nf) {
-			return durable.SessionStatus{ID: id, State: durable.SessionUnknown}, durable.ErrSessionNotFound
-		}
-		return durable.SessionStatus{ID: id, State: durable.SessionUnknown}, err
+		return st, durable.ErrSessionNotFound
 	}
-	var st durable.SessionStatus
-	if err := val.Get(&st); err != nil {
-		return durable.SessionStatus{ID: id, State: durable.SessionUnknown}, err
-	}
+	_ = val.Get(&st)
 	return st, nil
 }
 

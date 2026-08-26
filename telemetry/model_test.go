@@ -117,4 +117,25 @@ func TestMeterContext_helpers(t *testing.T) {
 
 	EmitEvent(context.Background(), "") // no-op empty name
 	EmitEventSeverity(context.Background(), EventTurnEnded, log.SeverityError)
+
+	if ContextWithSessionID(context.Background(), "") != context.Background() {
+		t.Fatal("empty session id must be a no-op")
+	}
+	RecordCheckpointAttempt(context.Background(), errors.New("save failed"))
+
+	_, turn := StartTurnSpan(context.Background(), TurnAttrs{AgentID: "a", SessionID: "s", Kind: TurnKindPrompt})
+	turn.End(OutcomeCancelled)
+	turn.End(OutcomeCancelled)
+
+	_, tool := StartToolSpan(context.Background(), "grep", "vfs")
+	tool.Finish("error", errors.New("boom"))
+	tool.Finish("error", errors.New("boom"))
+
+	_, plan := StartPlanInstallSpan(context.Background(), "s")
+	plan.End(errors.New("install"))
+	plan.End(nil)
+
+	_, handoff := StartHandoffSpan(context.Background(), 2)
+	handoff.End(HandoffOutcomeError, errors.New("handoff"))
+	handoff.End(HandoffOutcomeOK, nil)
 }

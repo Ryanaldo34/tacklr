@@ -3,6 +3,7 @@ package tacklr
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -102,7 +103,7 @@ func runWebSearch(ctx context.Context, client *exa.Client, args webSearchArgs, r
 		resp, err = client.Search(ctx, prep.req)
 	}
 	if err != nil {
-		return "", err
+		return "", mapExaErr("web_search", err)
 	}
 	if emptySearch(resp) && hasSearchFilters(prep.req) {
 		prep.notes = append(prep.notes, "No hits with those filters; retried on the open web.")
@@ -111,7 +112,7 @@ func runWebSearch(ctx context.Context, client *exa.Client, args webSearchArgs, r
 		prep.req.ExcludeDomains = nil
 		retry, rerr := client.Search(ctx, prep.req)
 		if rerr != nil {
-			return "", rerr
+			return "", mapExaErr("web_search", rerr)
 		}
 		resp = retry
 	}
@@ -119,13 +120,31 @@ func runWebSearch(ctx context.Context, client *exa.Client, args webSearchArgs, r
 }
 
 func retryExaConflict(err error) bool {
-	if err == nil {
-		return false
+	var st *exa.StatusError
+	if errors.As(err, &st) {
+		return st.PublicationDomain() || st.QueryFixable()
 	}
-	msg := err.Error()
-	return strings.Contains(msg, "UNSUPPORTED_PUBLICATION") ||
-		strings.Contains(strings.ToLower(msg), "not supported for category") ||
-		(strings.Contains(msg, "exa ") && strings.Contains(msg, "status 400"))
+	return false
+}
+
+func mapExaErr(name string, err error) error {
+	if err == nil {
+		return nil
+	}
+	var st *exa.StatusError
+	if errors.As(err, &st) {
+		if st.PublicationDomain() {
+			return Correction(err, name+": category=publication cannot filter by domain. Omit category, or drop include_domains/exclude_domains, then search again")
+		}
+		if st.QueryFixable() {
+			return Correction(err, name+": the search provider rejected that request. Simplify filters (omit category or domain lists) and retry")
+		}
+		return fmt.Errorf("%s: the search provider failed: %w", name, errors.Join(ErrFailed, err))
+	}
+	if errors.Is(err, exa.ErrService) {
+		return fmt.Errorf("%s: the search provider failed: %w", name, errors.Join(ErrFailed, err))
+	}
+	return err
 }
 
 func emptySearch(resp *exa.SearchResponse) bool {
@@ -399,7 +418,7 @@ func runWebFetch(ctx context.Context, client *exa.Client, args webFetchArgs, run
 	runtime.EmitUpdate("Fetching page content…")
 	resp, err := client.Contents(ctx, req)
 	if err != nil {
-		return "", err
+		return "", mapExaErr("web_fetch", err)
 	}
 	return formatWebFetchResult(req.URLs, resp), nil
 }

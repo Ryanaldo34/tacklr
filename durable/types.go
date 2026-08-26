@@ -72,18 +72,6 @@ type Resume struct {
 	Auth      AuthContext
 }
 
-// ChildOp is one child ledger entry passed through Temporal Tool activities.
-// Tools mutate this via HarnessRuntime; the workflow reconciles after the tool.
-type ChildOp struct {
-	ID         SessionID
-	Specialist string
-	Task       string
-	State      string
-	Result     string
-	Cancel     bool
-	Await      bool
-}
-
 // Snapshot is one session's harness checkpoint plus VFS recipes (no tokens).
 type Snapshot struct {
 	AgentID    string

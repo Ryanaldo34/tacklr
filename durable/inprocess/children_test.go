@@ -584,8 +584,13 @@ func TestChildren_unknownSpecialistAndChild(t *testing.T) {
 		}
 	}
 	blob := strings.Join(texts, "\n")
-	for _, want := range []string{"specialist", "missing", "required"} {
-		if !strings.Contains(strings.ToLower(blob), want) {
+	for _, want := range []string{
+		"that specialist is not registered",
+		"that child_id is unknown",
+		"child_id is required",
+		"task_description_and_context is required",
+	} {
+		if !strings.Contains(blob, want) {
 			t.Fatalf("want %q in invalid-tool results: %v", want, texts)
 		}
 	}

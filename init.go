@@ -13,46 +13,41 @@ import (
 func init() {
 	interrupt.RegisterDefaults()
 	_ = adapters.RegisterCommon(vfs.DefaultContentRegistry())
-	drive.Bind(func(h any) drive.Engine {
-		ah, ok := h.(*AgentHarness)
-		if !ok {
-			panic("drive: harness is not *AgentHarness")
-		}
-		return harnessDrive{ah}
-	})
 }
 
-// harnessDrive is the durable-runtime adapter. It lives here so driver
-// methods can stay unexported on AgentHarness.
-type harnessDrive struct{ a *AgentHarness }
+// Drive is the turn-step API in-process and Temporal adapters call after
+// NewTurnManager.
+func (a *TurnManager) Drive() drive.Engine { return turnDrive{a} }
 
-func (e harnessDrive) AbsorbUser(ctx context.Context, user *streaming.Message, out chan streaming.StreamEvent) error {
+// turnDrive lives here so driver methods can stay unexported on TurnManager.
+type turnDrive struct{ a *TurnManager }
+
+func (e turnDrive) AbsorbUser(ctx context.Context, user *streaming.Message, out chan streaming.StreamEvent) error {
 	return e.a.absorbUser(ctx, user, out)
 }
 
-func (e harnessDrive) PendingToolCalls() []streaming.ToolCall {
+func (e turnDrive) PendingToolCalls() []streaming.ToolCall {
 	return e.a.runnableToolCalls()
 }
 
-func (e harnessDrive) RecordToolResult(tc streaming.ToolCall, output string) {
+func (e turnDrive) RecordToolResult(tc streaming.ToolCall, output string) {
 	e.a.recordToolResult(tc, output)
 }
 
-func (e harnessDrive) RunInference(ctx context.Context, st *drive.TurnState, out chan streaming.StreamEvent) (drive.InferenceStep, error) {
+func (e turnDrive) RunInference(ctx context.Context, st *drive.TurnState, out chan streaming.StreamEvent) (drive.InferenceStep, error) {
 	return e.a.runInference(ctx, st, out)
 }
 
-func (e harnessDrive) RunToolCall(ctx context.Context, tc streaming.ToolCall, out chan streaming.StreamEvent) (drive.ToolStep, error) {
+func (e turnDrive) RunToolCall(ctx context.Context, tc streaming.ToolCall, out chan streaming.StreamEvent) (drive.ToolStep, error) {
 	return e.a.runToolCall(ctx, tc, out)
 }
 
-func (e harnessDrive) ApplyResume(finishedInterrupts map[string][]byte) error {
+func (e turnDrive) ApplyResume(finishedInterrupts map[string][]byte) error {
 	e.a.runMu.Lock()
 	defer e.a.runMu.Unlock()
 	return e.a.applyResume(finishedInterrupts)
 }
 
-func (e harnessDrive) SetChildHost(h any) {
-	host, _ := h.(childHost)
-	e.a.childHost = host
+func (e turnDrive) Messages() []*streaming.Message {
+	return e.a.context.Messages()
 }

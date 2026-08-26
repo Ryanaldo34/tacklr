@@ -72,6 +72,9 @@ func TestMemoryFactory_fileAndDirOps(t *testing.T) {
 	if _, err := p.OpenFile(ctx, "nope", os.O_RDONLY, 0); !errors.Is(err, vfs.ErrNotExist) {
 		t.Fatalf("open missing: %v", err)
 	}
+	if _, err := p.Stat(ctx, "nope"); !errors.Is(err, vfs.ErrNotExist) {
+		t.Fatalf("stat missing: %v", err)
+	}
 	wf, err := p.OpenFile(ctx, "w.txt", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		t.Fatal(err)

@@ -158,9 +158,6 @@ type responsesRequest struct {
 	// Include asks the provider for extra output fields. reasoning.encrypted_content
 	// is required to replay reasoning items statelessly (OpenAI ZDR / Azure store=false).
 	Include []string `json:"include,omitempty"`
-	// MaxOutputTokens caps completion size (reasoning + visible text). Omit when 0.
-	// Azure often ends streams as response.incomplete with empty details when this is too low.
-	MaxOutputTokens int `json:"max_output_tokens,omitempty"`
 }
 
 type textFormat struct {

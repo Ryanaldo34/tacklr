@@ -16,7 +16,7 @@ func TestFilterPlan_listAndSQLParity(t *testing.T) {
 		NamespaceID: ns, CreatedAt: now, UpdatedAt: now,
 		Properties: map[string]any{"stage": "open"},
 	}
-	f := Filters{"kind": []any{"Chunk", "Doc"}, "stage": []any{"open", "closed"}}
+	f := MustFilter(map[string]any{"kind": []any{"Chunk", "Doc"}, "stage": []any{"open", "closed"}})
 	plan, err := compileFilters(f)
 	if err != nil {
 		t.Fatal(err)

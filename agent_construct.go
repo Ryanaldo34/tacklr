@@ -39,7 +39,7 @@ func (c Config) Validate() error {
 	return nil
 }
 
-// AgentOptions configures NewAgent.
+// AgentOptions configures NewTurnManager.
 //
 // Usual fields: Config, Model, Tools, MCPConfigs, Specialists, SessionID.
 // ContextPolicy knobs (ratios, stream-summary) stay host-settable. Adaptive
@@ -82,7 +82,7 @@ type AgentOptions struct {
 	ExaAPIKey string
 	// Brain enables knowledge builtins when non-nil. Workers inherit the same engine.
 	// Configure Store, optional QueryEmbedder, and optional GraphReader/GraphWriter on the Engine
-	// before NewAgent (e.g. brain.WithGraph(helixgraph.New(...))). The harness does
+	// before NewTurnManager (e.g. brain.WithGraph(helixgraph.New(...))). The harness does
 	// not construct graph backends.
 	Brain *brain.Engine
 	// BrainWriteKinds maps save_discovery / save_fact / save_memory to host kind names.
@@ -105,17 +105,14 @@ type AgentOptions struct {
 	shareIndexBridge *vfsindex.Bridge
 }
 
-// streamEventBuffer is the harness event channel size so EmitUpdate is not dropped
-// when the consumer lags briefly.
-const streamEventBuffer = 64
-
-// NewAgent builds a session-scoped harness. Turn-scoped Runtime is created in Run.
-func NewAgent(ctx context.Context, opts AgentOptions) (*AgentHarness, error) {
+// NewTurnManager builds a TurnManager for one turn slice.
+// Durable runtimes call this; hosts use durable.Runtime.
+func NewTurnManager(ctx context.Context, opts AgentOptions) (*TurnManager, error) {
 	if err := opts.Validate(); err != nil {
 		return nil, err
 	}
 	sm := session.NewSessionManager()
-	h := &AgentHarness{
+	h := &TurnManager{
 		model:                 opts.Model,
 		maxWindowSize:         opts.Config.MaxWindowSize,
 		maxTurnRequests:       opts.Config.MaxTurnRequests,
@@ -211,7 +208,7 @@ func (opts *AgentOptions) Validate() error {
 	return nil
 }
 
-func (h *AgentHarness) finishInit(ctx context.Context, subAgents []*Specialist) error {
+func (h *TurnManager) finishInit(ctx context.Context, subAgents []*Specialist) error {
 	if err := h.initSkills(ctx); err != nil {
 		return fmt.Errorf("initialize skills: %w", err)
 	}
@@ -220,25 +217,14 @@ func (h *AgentHarness) finishInit(ctx context.Context, subAgents []*Specialist) 
 		return err
 	}
 	if h.vfsBridge == nil {
-		if err := h.initVFSIndexBridge(); err != nil {
-			return err
-		}
+		h.initVFSIndexBridge()
 	}
 	h.injectBuiltinTools()
 	return nil
 }
 
-func (a *AgentHarness) ensureReady(ctx context.Context) error {
-	if err := a.initSkills(ctx); err != nil {
-		return fmt.Errorf("load skills: %w", err)
-	}
-	a.initMCP(ctx)
-	a.injectBuiltinTools()
-	return nil
-}
-
 // injectBuiltinTools registers plan tools, optional web/brain/VFS/index tools, and spawn_specialist once.
-func (a *AgentHarness) injectBuiltinTools() {
+func (a *TurnManager) injectBuiltinTools() {
 	if a.builtinsInjected {
 		return
 	}
@@ -254,7 +240,7 @@ func (a *AgentHarness) injectBuiltinTools() {
 		a.tools = append(a.tools, newWebSearchTool(client), newWebFetchTool(client))
 	}
 	br := a.vfsBridge
-	if ms := a.VFS(); ms != nil {
+	if ms := a.session.VFS; ms != nil {
 		a.tools = append(a.tools, newVFSTools(ms, !a.writeUnattended)...)
 		a.tools = append(a.tools, newRunCommand(ms, !a.runCommandUnattended))
 	}
@@ -264,7 +250,7 @@ func (a *AgentHarness) injectBuiltinTools() {
 			idx = br.Indexer
 		}
 		a.tools = append(a.tools, newBrainTools(a.brain, a.session.Search, a.brainWriteKinds, brainToolDeps{
-			VFS:     a.VFS(),
+			VFS:     a.session.VFS,
 			Indexer: idx,
 		})...)
 	}
@@ -280,48 +266,32 @@ func (a *AgentHarness) injectBuiltinTools() {
 // initVFSIndexBridge starts a new vfsindex.Bridge when Brain + VFS + namespace
 // are set. Call only when vfsBridge is nil (this harness owns the lifecycle).
 // Hosts with a non-empty kind catalog should register vfsindex.MountIndexKinds().
-func (a *AgentHarness) initVFSIndexBridge() error {
-	if a.brain == nil || a.VFS() == nil {
-		return nil
+func (a *TurnManager) initVFSIndexBridge() {
+	if a.brain == nil || a.session.VFS == nil {
+		return
 	}
 	ns, ok := a.session.Search.Namespace()
 	if !ok {
-		return nil
+		return
 	}
 	nsCopy := ns
 	attachMemory := true
-	for _, s := range a.VFS().Specs() {
+	for _, s := range a.session.VFS.Specs() {
 		if s.Profile == brain.DefaultProfile {
 			attachMemory = false
 			break
 		}
 	}
-	br, err := vfsindex.Start(a.VFS(), a.brain, brain.Scope{Namespace: &nsCopy}, attachMemory)
+	br, err := vfsindex.Start(a.session.VFS, a.brain, brain.Scope{Namespace: &nsCopy}, attachMemory)
 	if err != nil {
-		return fmt.Errorf("vfsindex: start bridge: %w", err)
+		return
 	}
 	a.vfsBridge = br
 	a.ownsVFSBridge = true
-	return nil
-}
-
-// SetSearchNamespace sets retrieval isolation for knowledge tools.
-func (a *AgentHarness) SetSearchNamespace(id uuid.UUID) {
-	a.session.Search.SetNamespace(id)
-}
-
-// ClearSearchNamespace clears retrieval isolation for knowledge tools.
-func (a *AgentHarness) ClearSearchNamespace() {
-	a.session.Search.ClearNamespace()
-}
-
-// SearchNamespace returns the host-set search namespace, if any.
-func (a *AgentHarness) SearchNamespace() (uuid.UUID, bool) {
-	return a.session.Search.Namespace()
 }
 
 // planningWriteLock blocks write tools until create_plan has set a plan.
-func (a *AgentHarness) planningWriteLock(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error) {
+func (a *TurnManager) planningWriteLock(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error) {
 	if inv.Tool != nil && inv.Tool.access.Allows(WritePermission) &&
 		!a.session.Plan.HasActive() {
 		return "", fmt.Errorf("%w: write tools are locked until create_plan establishes a todo list", ErrToolPermissionDenied)
@@ -329,13 +299,10 @@ func (a *AgentHarness) planningWriteLock(ctx context.Context, inv ToolInvocation
 	return next(ctx, inv)
 }
 
-func (a *AgentHarness) initSkills(ctx context.Context) error {
-	if a.skillsInitialized {
-		return nil
-	}
+func (a *TurnManager) initSkills(ctx context.Context) error {
 	loader := a.skillsLoader
 	if loader == nil {
-		loader = skills.Loader{Session: a.VFS()}
+		loader = skills.Loader{Session: a.session.VFS}
 	}
 	loaded, err := loader.Load(ctx)
 	if err != nil {
@@ -348,11 +315,10 @@ func (a *AgentHarness) initSkills(ctx context.Context) error {
 	if len(loaded) > 0 {
 		a.tools = append(a.tools, a.skillTool())
 	}
-	a.skillsInitialized = true
 	return nil
 }
 
-func (a *AgentHarness) skillTool() *Tool {
+func (a *TurnManager) skillTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "read_skill",
 		Description: "Load the full instructions for an available skill.",

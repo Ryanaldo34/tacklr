@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 	"time"
 )
@@ -17,29 +18,152 @@ const (
 	filterUpdatedBefore = "updated_before"
 )
 
-// ValidateFilters checks filter keys and value shapes. Empty/nil is valid.
-func ValidateFilters(f Filters) error {
-	for key, val := range f {
+// DecodeFilter maps a JSON object (tool boundary) onto Filter.
+func DecodeFilter(m map[string]any) (Filter, error) {
+	if len(m) == 0 {
+		return Filter{}, nil
+	}
+	var f Filter
+	for key, val := range m {
+		k := strings.TrimSpace(key)
+		if k == "" {
+			return Filter{}, fmt.Errorf("brain: filter key is required")
+		}
+		switch k {
+		case filterKind:
+			sm, err := decodeStringMatch(k, val)
+			if err != nil {
+				return Filter{}, err
+			}
+			f.Kind = sm
+		case filterTitle:
+			sm, err := decodeStringMatch(k, val)
+			if err != nil {
+				return Filter{}, err
+			}
+			f.Title = sm
+		case filterCreatedAfter, filterCreatedBefore, filterUpdatedAfter, filterUpdatedBefore:
+			s, ok := val.(string)
+			if !ok {
+				return Filter{}, fmt.Errorf("brain: filter %q: want RFC3339 string, got %T", k, val)
+			}
+			if _, err := parseFilterTime(s); err != nil {
+				return Filter{}, fmt.Errorf("brain: filter %q: %w", k, err)
+			}
+			switch k {
+			case filterCreatedAfter:
+				f.CreatedAfter = s
+			case filterCreatedBefore:
+				f.CreatedBefore = s
+			case filterUpdatedAfter:
+				f.UpdatedAfter = s
+			case filterUpdatedBefore:
+				f.UpdatedBefore = s
+			}
+		default:
+			pf, err := decodePropFilter(k, val)
+			if err != nil {
+				return Filter{}, err
+			}
+			if f.Props == nil {
+				f.Props = map[string]PropFilter{}
+			}
+			f.Props[k] = pf
+		}
+	}
+	return f, nil
+}
+
+func decodeStringMatch(key string, val any) (StringMatch, error) {
+	if err := validateEqValue(key, val); err != nil {
+		return StringMatch{}, err
+	}
+	switch v := val.(type) {
+	case string:
+		return StringMatch{Eq: v}, nil
+	case []any:
+		out := make([]string, len(v))
+		for i, item := range v {
+			s, ok := item.(string)
+			if !ok || s == "" {
+				return StringMatch{}, fmt.Errorf("brain: filter %q list[%d] must be a non-empty string", key, i)
+			}
+			out[i] = s
+		}
+		return StringMatch{In: out}, nil
+	default:
+		return StringMatch{}, fmt.Errorf("brain: filter %q must be a string or list of strings", key)
+	}
+}
+
+func decodePropFilter(key string, val any) (PropFilter, error) {
+	if err := validateEqValue(key, val); err != nil {
+		return PropFilter{}, err
+	}
+	if items, ok := val.([]any); ok {
+		return PropFilter{In: items}, nil
+	}
+	return PropFilter{Eq: val}, nil
+}
+
+// ValidateFilters checks well-known fields and property value shapes. Empty is valid.
+func ValidateFilters(f Filter) error {
+	if err := validateStringMatch(filterKind, f.Kind); err != nil {
+		return err
+	}
+	if err := validateStringMatch(filterTitle, f.Title); err != nil {
+		return err
+	}
+	for _, pair := range []struct {
+		key string
+		val string
+	}{
+		{filterCreatedAfter, f.CreatedAfter},
+		{filterCreatedBefore, f.CreatedBefore},
+		{filterUpdatedAfter, f.UpdatedAfter},
+		{filterUpdatedBefore, f.UpdatedBefore},
+	} {
+		if strings.TrimSpace(pair.val) == "" {
+			continue
+		}
+		if _, err := parseFilterTime(pair.val); err != nil {
+			return fmt.Errorf("brain: filter %q: %w", pair.key, err)
+		}
+	}
+	for key, pf := range f.Props {
 		k := strings.TrimSpace(key)
 		if k == "" {
 			return fmt.Errorf("brain: filter key is required")
 		}
-		switch k {
-		case filterCreatedAfter, filterCreatedBefore, filterUpdatedAfter, filterUpdatedBefore:
-			if _, err := parseFilterTime(val); err != nil {
-				return fmt.Errorf("brain: filter %q: %w", k, err)
-			}
-		default:
-			if err := validateEqValue(k, val); err != nil {
+		if len(pf.In) > 0 {
+			if err := validateEqValue(k, any(pf.In)); err != nil {
 				return err
 			}
+			continue
+		}
+		if err := validateEqValue(k, pf.Eq); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
+func validateStringMatch(key string, s StringMatch) error {
+	if !s.set() {
+		return nil
+	}
+	if len(s.In) > 0 {
+		list := make([]any, len(s.In))
+		for i, v := range s.In {
+			list[i] = v
+		}
+		return validateEqValue(key, list)
+	}
+	return validateEqValue(key, s.Eq)
+}
+
 // ValidateFiltersAgainst runs structural validation, then catalog rules when non-empty.
-func ValidateFiltersAgainst(f Filters, cat *KindCatalog) error {
+func ValidateFiltersAgainst(f Filter, cat *KindCatalog) error {
 	if err := ValidateFilters(f); err != nil {
 		return err
 	}
@@ -51,7 +175,6 @@ func ValidateFiltersAgainst(f Filters, cat *KindCatalog) error {
 	if err != nil {
 		return err
 	}
-	// Resolve kinds once (avoid repeated catalog Get under property loops).
 	var specs []KindSpec
 	if len(kinds) > 0 {
 		specs = make([]KindSpec, len(kinds))
@@ -64,13 +187,11 @@ func ValidateFiltersAgainst(f Filters, cat *KindCatalog) error {
 		}
 	}
 
-	for key, val := range f {
-		if isCoreFilterKey(key) {
-			continue
-		}
+	for key, pf := range f.Props {
 		if len(specs) == 0 {
 			return fmt.Errorf("brain: property filters require a kind filter when kinds are registered")
 		}
+		val := propFilterValue(pf)
 		for _, spec := range specs {
 			fs, ok := spec.Field(key)
 			if !ok {
@@ -84,33 +205,24 @@ func ValidateFiltersAgainst(f Filters, cat *KindCatalog) error {
 	return nil
 }
 
-func kindFilterValues(f Filters) ([]string, error) {
-	raw, ok := f[filterKind]
-	if !ok {
+func propFilterValue(pf PropFilter) any {
+	if len(pf.In) > 0 {
+		return pf.In
+	}
+	return pf.Eq
+}
+
+func kindFilterValues(f Filter) ([]string, error) {
+	if !f.Kind.set() {
 		return nil, nil
 	}
-	switch v := raw.(type) {
-	case string:
-		if v == "" {
-			return nil, fmt.Errorf("brain: filter %q value is required", filterKind)
-		}
-		return []string{v}, nil
-	case []any:
-		if len(v) == 0 {
-			return nil, fmt.Errorf("brain: filter %q list is empty", filterKind)
-		}
-		out := make([]string, len(v))
-		for i, item := range v {
-			s, ok := item.(string)
-			if !ok || s == "" {
-				return nil, fmt.Errorf("brain: filter %q list[%d] must be a non-empty string", filterKind, i)
-			}
-			out[i] = s
-		}
-		return out, nil
-	default:
-		return nil, fmt.Errorf("brain: filter %q must be a string or list of strings", filterKind)
+	if len(f.Kind.In) > 0 {
+		return f.Kind.In, nil
 	}
+	if f.Kind.Eq == "" {
+		return nil, fmt.Errorf("brain: filter %q value is required", filterKind)
+	}
+	return []string{f.Kind.Eq}, nil
 }
 
 func checkFilterField(key string, val any, fs FieldSpec) error {
@@ -131,24 +243,12 @@ func checkFilterField(key string, val any, fs FieldSpec) error {
 	return nil
 }
 
-// injectKindAllowList returns filters restricted to registered kinds when kind is absent.
-// If kind is already set, f is returned as-is (no clone).
-func injectKindAllowList(f Filters, cat *KindCatalog) Filters {
-	if f != nil {
-		if _, ok := f[filterKind]; ok {
-			return f
-		}
+func injectKindAllowList(f Filter, cat *KindCatalog) Filter {
+	if f.Kind.set() {
+		return f
 	}
-	out := maps.Clone(f)
-	if out == nil {
-		out = Filters{}
-	}
-	names := cat.Names()
-	list := make([]any, len(names))
-	for i, n := range names {
-		list[i] = n
-	}
-	out[filterKind] = list
+	out := f
+	out.Kind = StringMatch{In: cat.Names()}
 	return out
 }
 
@@ -183,11 +283,7 @@ func isFilterScalar(v any) bool {
 	}
 }
 
-func parseFilterTime(val any) (time.Time, error) {
-	s, ok := val.(string)
-	if !ok {
-		return time.Time{}, fmt.Errorf("want RFC3339 string, got %T", val)
-	}
+func parseFilterTime(s string) (time.Time, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return time.Time{}, fmt.Errorf("empty time")
@@ -202,7 +298,6 @@ func parseFilterTime(val any) (time.Time, error) {
 	return t.UTC(), nil
 }
 
-// matchFilterValue reports whether got equals want, or is any element when want is a list.
 func matchFilterValue(got, want any) bool {
 	if items, ok := want.([]any); ok {
 		for _, item := range items {
@@ -235,7 +330,6 @@ func valuesEqual(a, b any) bool {
 	return ok && fa == fb
 }
 
-// asFloat64 normalizes JSON/Go numeric literals for equality (int vs float64).
 func asFloat64(v any) (float64, bool) {
 	switch n := v.(type) {
 	case float64:
@@ -286,4 +380,14 @@ func checkFieldValue(val any, t FieldType) error {
 		return fmt.Errorf("unknown type %q", t)
 	}
 	return nil
+}
+
+func cloneFilter(f Filter) Filter {
+	out := f
+	out.Kind.In = slices.Clone(f.Kind.In)
+	out.Title.In = slices.Clone(f.Title.In)
+	if f.Props != nil {
+		out.Props = maps.Clone(f.Props)
+	}
+	return out
 }

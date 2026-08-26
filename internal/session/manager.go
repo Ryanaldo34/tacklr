@@ -97,46 +97,40 @@ func (s *SessionManager) DropInterrupt(id string) {
 	s.mu.Unlock()
 }
 
-// ReturnInterrupt resolves a parked interrupt (session-scoped; no turn bus needed).
-func (s *SessionManager) ReturnInterrupt(id string, result []byte) (interrupt.Interrupt, error) {
+// Park is the only writer of pending. It stores intr under callID and returns
+// that interrupt as the error tools propagate (`return "", err`).
+func (s *SessionManager) Park(callID string, intr interrupt.Interrupt) error {
+	if intr == nil {
+		return fmt.Errorf("park: interrupt is nil")
+	}
+	if callID == "" {
+		return fmt.Errorf("park: CurrentToolCallID is empty")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	intr, ok := s.pending[id]
+	s.pending[callID] = intr
+	return intr
+}
+
+// Resume validates via Interrupt.Return, then moves pending → resolved.
+// An invalid payload leaves the park in place.
+func (s *SessionManager) Resume(callID string, payload []byte) (interrupt.Interrupt, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	intr, ok := s.pending[callID]
 	if !ok {
-		return nil, fmt.Errorf("interrupt %q: %w", id, interrupt.ErrInterruptNotFound)
+		return nil, fmt.Errorf("interrupt %q: %w", callID, interrupt.ErrInterruptNotFound)
 	}
-	if validator, ok := intr.(interrupt.PayloadValidator); ok {
-		if err := validator.ValidatePayload(result); err != nil {
-			return nil, err
-		}
+	if err := intr.Return(payload); err != nil {
+		return nil, err
 	}
-	_ = intr.Return(result)
-	delete(s.pending, id)
-	s.resolved[id] = intr
+	delete(s.pending, callID)
+	s.resolved[callID] = intr
 	return intr, nil
 }
 
-// AdoptInterrupt attaches an interrupt to toolCallID. Parks when none is
-// resolved yet; returns the resolved interrupt on re-entry.
-func (s *SessionManager) AdoptInterrupt(toolCallID string, intr interrupt.Interrupt) (interrupt.Interrupt, error) {
-	if intr == nil {
-		return nil, fmt.Errorf("adopt interrupt: interrupt is nil")
-	}
-	if toolCallID == "" {
-		return nil, fmt.Errorf("adopt interrupt: CurrentToolCallID is empty")
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if resolved, ok := s.resolved[toolCallID]; ok {
-		delete(s.resolved, toolCallID)
-		return resolved, nil
-	}
-	s.pending[toolCallID] = intr
-	return nil, intr
-}
-
-// TakeResolvedInterrupt removes and returns a resolved interrupt if present.
-func (s *SessionManager) TakeResolvedInterrupt(id string) (interrupt.Interrupt, bool) {
+// TakeResolved removes and returns a resolved interrupt if present (re-entry after Resume).
+func (s *SessionManager) TakeResolved(id string) (interrupt.Interrupt, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	intr, ok := s.resolved[id]
@@ -147,21 +141,11 @@ func (s *SessionManager) TakeResolvedInterrupt(id string) (interrupt.Interrupt, 
 	return intr, true
 }
 
-func (s *SessionManager) park(toolCallID string, kind string, payload []byte) (interrupt.Interrupt, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if resolved, ok := s.resolved[toolCallID]; ok {
-		delete(s.resolved, toolCallID)
-		return resolved, nil
-	}
-	intr, ok := interrupt.New(kind)
-	if !ok {
-		return nil, fmt.Errorf("%q is not a valid interrupt type", kind)
-	}
-	if init, ok := intr.(interrupt.PayloadInitializer); ok {
-		_ = init.InitFromPayload(payload)
-	}
-	return nil, intr
+// Pending returns a clone of open interrupts (checkpoint / ACP translators).
+func (s *SessionManager) Pending() map[string]interrupt.Interrupt {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return cloneInterruptMap(s.pending)
 }
 
 // LoadInterruptsJSON restores interrupt maps from checkpoint JSON blobs.

@@ -23,7 +23,7 @@ The **agent file catalog** is collapsed. Discovery (`find_files`, `find_content`
 
 ```text
   Model
-    → AgentHarness (one turn: tools, plan, checkpoint)
+    → TurnManager (one turn: tools, plan, checkpoint)
          → MountSession (injected; closed with the turn)
               → providers (local / S3 / brain)     persist immediately
               → FuseMount (read-only kernel tree)  HostDir = cwd for run_command
@@ -38,7 +38,7 @@ The **agent file catalog** is collapsed. Discovery (`find_files`, `find_content`
 |-------|--------|------|
 | `MountSession` | Injector (`openTurnVFS`, or embedder) | Fresh tree each turn from `FSBootstrap` + bind recipes |
 | FUSE | Runtime via `vfs.Projection.Attach` | Attach after construct; skip if `HostDir() != ""` |
-| Harness | Turn | `NewAgent` with `MountSession` set; `Close` parks MCP/vfsindex — **does not** unmount FUSE (workers inherit) |
+| TurnManager | Turn | `NewTurnManager` with `MountSession` set; `Close` parks MCP/vfsindex — **does not** unmount FUSE (workers inherit) |
 | IR | Provider | `WriteDocument` / `WriteFile` persist now. There is no session dirty cache (`vfs/cache.go` is gone). `ReadText` is provider plaintext. |
 | Tests without `/dev/fuse` | `DirectProjection` | `Available()==true`, `Attach` is a no-op; VFS tools work; `run_command` still needs `HostDir` |
 
@@ -60,7 +60,7 @@ The **agent file catalog** is collapsed. Discovery (`find_files`, `find_content`
 | Kernel identity smoke (skip without device) | `vfs/fuse_test.go` |
 | `VFSProjection` / `FuseProjection` / `DirectProjection` | `server/projection.go` |
 | FUSE attach; fail-hard on device + mount fail; skip remount if `HostDir` set | `durable.OpenTurnVFS` |
-| Turn-scoped mounts; harness Close does not unmount | `openTurnVFS`, `EventStream.Close`, `AgentHarness.Close` |
+| Turn-scoped mounts; TurnManager Close does not unmount | `openTurnVFS`, `EventStream.Close`, `TurnManager.Close` |
 | host `/work` | Runtime `FSBootstrap` `Point: /work` |
 | `run_command` | `tools_vfs.go` |
 | Fuse mount metrics / events | `telemetry` + Registry |
@@ -181,7 +181,7 @@ Update `docs/vfs.md`, `docs/knowledge.md`, `README.md`, `vfs/doc.go` so they mat
 | Writable FUSE | Next plan so bash can `mkdir` / `rm` / `echo >` |
 | Jail, broker, eBPF, custom shell | After this train |
 | Auto `FuseMount` in `NewMountSession` | Host starts it |
-| FUSE methods on `AgentHarness` | Host owns projection |
+| FUSE methods on `TurnManager` | Host owns projection |
 | Path rewrite | Kernel tree is the identity |
 | Worker / subagent FUSE | `workerOptsFromSpec` still omits `MountSession` |
 | Windows / WinFsp | Unix `/bin/sh` + `/dev/fuse` only |

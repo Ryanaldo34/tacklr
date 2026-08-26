@@ -26,7 +26,7 @@ type Specialist struct {
 // initSpecialists registers worker specs. Invalid or duplicate specs are
 // constructor errors: a misconfigured host must not start a harness that
 // silently drops workers.
-func (h *AgentHarness) initSpecialists(specs []*Specialist) error {
+func (h *TurnManager) initSpecialists(specs []*Specialist) error {
 	for _, spec := range specs {
 		if spec == nil {
 			return fmt.Errorf("tacklr: Specialist must not be nil")
@@ -46,14 +46,9 @@ func (h *AgentHarness) initSpecialists(specs []*Specialist) error {
 	return nil
 }
 
-// workerNames returns registered worker names in sorted order.
-func (a *AgentHarness) workerNames() []string {
-	return slices.Sorted(maps.Keys(a.specialists))
-}
-
 // formatSpecialistPromptList builds the deterministic AVAILABLE SPECIALISTS list.
-func (a *AgentHarness) formatSpecialistPromptList() string {
-	names := a.workerNames()
+func (a *TurnManager) formatSpecialistPromptList() string {
+	names := slices.Sorted(maps.Keys(a.specialists))
 	if len(names) == 0 {
 		return ""
 	}
@@ -75,7 +70,7 @@ type spawnSpecialistArgs struct {
 	Block                     *bool  `json:"block" desc:"Wait for the worker and return its result. Defaults to true. Set false to start a child session and continue the turn."`
 }
 
-func (a *AgentHarness) spawnTool() *Tool {
+func (a *TurnManager) spawnTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "spawn_specialist",
 		DisplayName: "Spawn {specialist}",
@@ -96,7 +91,7 @@ type cancelChildArgs struct {
 	ChildID string `json:"child_id" desc:"Child session id returned by spawn_specialist when block is false"`
 }
 
-func (a *AgentHarness) listChildrenTool() *Tool {
+func (a *TurnManager) listChildrenTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "list_children",
 		DisplayName: "List children",
@@ -106,7 +101,7 @@ func (a *AgentHarness) listChildrenTool() *Tool {
 	})
 }
 
-func (a *AgentHarness) getChildTool() *Tool {
+func (a *TurnManager) getChildTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "get_child",
 		DisplayName: "Get child {child_id}",
@@ -116,7 +111,7 @@ func (a *AgentHarness) getChildTool() *Tool {
 	})
 }
 
-func (a *AgentHarness) cancelChildTool() *Tool {
+func (a *TurnManager) cancelChildTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "cancel_child",
 		DisplayName: "Cancel child {child_id}",

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,6 +17,44 @@ const (
 	defaultTimeout = 45 * time.Second
 	maxErrorBody   = 512
 )
+
+// ErrService is a host/network/auth/rate-limit failure (not a model-fixable query).
+var ErrService = errors.New("service failed")
+
+// StatusError is an Exa HTTP status. QueryFixable is a 4xx the model can correct
+// (not 401/403/429). Those plus 5xx unwrap as ErrService.
+type StatusError struct {
+	Op     string
+	Status int
+	Body   string
+}
+
+func (e *StatusError) Error() string {
+	if e == nil {
+		return "exa: status error"
+	}
+	return fmt.Sprintf("exa %s: status %d: %s", e.Op, e.Status, e.Body)
+}
+
+func (e *StatusError) Unwrap() error {
+	if e != nil && (e.Status == 401 || e.Status == 403 || e.Status == 429 || e.Status >= 500) {
+		return ErrService
+	}
+	return nil
+}
+
+func (e *StatusError) QueryFixable() bool {
+	return e != nil && e.Status >= 400 && e.Status < 500 && e.Status != 401 && e.Status != 403 && e.Status != 429
+}
+
+func (e *StatusError) PublicationDomain() bool {
+	if e == nil {
+		return false
+	}
+	low := strings.ToLower(e.Body)
+	return strings.Contains(e.Body, "UNSUPPORTED_PUBLICATION") ||
+		strings.Contains(low, "not supported for category=publication")
+}
 
 // Client calls Exa’s Search and Contents APIs.
 type Client struct {
@@ -111,15 +150,15 @@ func (c *Client) postJSON(ctx context.Context, path string, req any, out any) er
 
 	resp, err := hc.Do(httpReq)
 	if err != nil {
-		return fmt.Errorf("exa %s: %w", op, err)
+		return fmt.Errorf("exa %s: %w", op, errors.Join(ErrService, err))
 	}
 	defer resp.Body.Close()
 
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20)) // 8 MiB safety cap
-	if err != nil {
-		return fmt.Errorf("exa %s: read body: %w", op, err)
-	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		raw, err := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody+1))
+		if err != nil {
+			return fmt.Errorf("exa %s: read body: %w", op, errors.Join(ErrService, err))
+		}
 		msg := strings.TrimSpace(string(raw))
 		if len(msg) > maxErrorBody {
 			msg = msg[:maxErrorBody] + "…"
@@ -127,13 +166,15 @@ func (c *Client) postJSON(ctx context.Context, path string, req any, out any) er
 		if msg == "" {
 			msg = resp.Status
 		}
-		return fmt.Errorf("exa %s: status %d: %s", op, resp.StatusCode, msg)
+		return &StatusError{Op: op, Status: resp.StatusCode, Body: msg}
 	}
 
+	limited := io.LimitReader(resp.Body, 8<<20) // 8 MiB safety cap
 	if out == nil {
+		_, _ = io.Copy(io.Discard, limited)
 		return nil
 	}
-	if err := json.Unmarshal(raw, out); err != nil {
+	if err := json.NewDecoder(limited).Decode(out); err != nil {
 		return fmt.Errorf("exa %s: decode response: %w", op, err)
 	}
 	return nil

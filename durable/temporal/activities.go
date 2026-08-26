@@ -88,15 +88,21 @@ type ToolInput struct {
 	Auth       durable.AuthContext
 	Mounts     []durable.MountRecipe
 	Specialist string
-	Children   []durable.ChildOp
+	// Known is this session's child ids for list_children (not a ChildOp ledger).
+	Known []durable.SessionID
 }
 
-// ToolOutput is the typed Tool activity result.
+// ToolOutput is the typed Tool activity result. Spawn/cancel/await are this
+// call's Runtime intent; the workflow starts, cancels, or waits via ExecuteChildWorkflow.
 type ToolOutput struct {
 	Etag        string
 	Interrupted bool
 	InterruptID string
-	Children    []durable.ChildOp
+	SpawnID     durable.SessionID
+	SpawnSpec   string
+	SpawnTask   string
+	CancelID    durable.SessionID
+	AwaitID     durable.SessionID
 }
 
 // CommitToolInput records a tool output on the staged batch without executing
@@ -151,7 +157,7 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 		h.Close()
 		durable.CloseTurnVFS(ms, string(in.SessionID), "inference")
 	}()
-	eng := drive.EngineOf(h)
+	eng := h.Drive()
 	out, stop := drive.PipeStreamEvents(a.emitter(ctx, stream, in.SessionID))
 	defer stop()
 	if len(in.Resume) > 0 {
@@ -190,7 +196,7 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 	}
 	result := ""
 	if step.Complete {
-		for _, m := range h.Messages() {
+		for _, m := range h.Drive().Messages() {
 			if m != nil && m.Role == tacklr.RoleAssistant && m.Content != "" {
 				result = m.Content
 			}
@@ -234,9 +240,14 @@ func (a *Activities) Tool(ctx context.Context, in ToolInput) (ToolOutput, error)
 		h.Close()
 		durable.CloseTurnVFS(ms, string(in.SessionID), "tool")
 	}()
-	kids := &activityChildren{parent: in.SessionID, ops: append([]durable.ChildOp(nil), in.Children...)}
-	eng := drive.EngineOf(h)
-	eng.SetChildHost(kids)
+	kids := &activityChildren{
+		parent:  in.SessionID,
+		agentID: in.AgentID,
+		catalog: a.Catalog,
+		known:   append([]durable.SessionID(nil), in.Known...),
+	}
+	h.BindChildHost(kids)
+	eng := h.Drive()
 	out, stop := drive.PipeStreamEvents(a.emitter(ctx, stream, in.SessionID))
 	defer stop()
 	step, runErr := eng.RunToolCall(ctx, in.Call, out)
@@ -262,7 +273,16 @@ func (a *Activities) Tool(ctx context.Context, in ToolInput) (ToolOutput, error)
 	}
 	slog.InfoContext(ctx, "tool completed",
 		"area", telemetry.AreaHarness, "tool", in.Call.Name, "status", status)
-	return ToolOutput{Etag: etag, Interrupted: step.Interrupted, InterruptID: step.InterruptID, Children: kids.ops}, nil
+	return ToolOutput{
+		Etag:        etag,
+		Interrupted: step.Interrupted,
+		InterruptID: step.InterruptID,
+		SpawnID:     kids.spawnID,
+		SpawnSpec:   kids.spawnSpec,
+		SpawnTask:   kids.spawnTask,
+		CancelID:    kids.cancelID,
+		AwaitID:     kids.awaitID,
+	}, nil
 }
 
 func (a *Activities) CommitToolOutput(ctx context.Context, in CommitToolInput) (ToolOutput, error) {
@@ -274,7 +294,7 @@ func (a *Activities) CommitToolOutput(ctx context.Context, in CommitToolInput) (
 		h.Close()
 		durable.CloseTurnVFS(ms, string(in.SessionID), "commit_tool")
 	}()
-	drive.EngineOf(h).RecordToolResult(in.Call, in.Output)
+	h.Drive().RecordToolResult(in.Call, in.Output)
 	etag, err = a.save(ctx, in.SessionID, in.AgentID, h, etag, in.Mounts)
 	if err != nil {
 		return ToolOutput{}, err
@@ -292,7 +312,7 @@ func (a *Activities) CommitToolOutput(ctx context.Context, in CommitToolInput) (
 	return ToolOutput{Etag: etag}, nil
 }
 
-func (a *Activities) harness(ctx context.Context, id durable.SessionID, agentID string, extraMCP []mcp.MCPConfig, etag string, auth durable.AuthContext, mounts []durable.MountRecipe, specialist string) (*tacklr.AgentHarness, *vfs.MountSession, string, error) {
+func (a *Activities) harness(ctx context.Context, id durable.SessionID, agentID string, extraMCP []mcp.MCPConfig, etag string, auth durable.AuthContext, mounts []durable.MountRecipe, specialist string) (*tacklr.TurnManager, *vfs.MountSession, string, error) {
 	spec, ok := a.Catalog.Lookup(agentID)
 	if !ok {
 		return nil, nil, "", durable.ErrAgentNotFound
@@ -321,7 +341,7 @@ func (a *Activities) harness(ctx context.Context, id durable.SessionID, agentID 
 		mcpConfigs = append(mcpConfigs, extraMCP...)
 		opts.MCPConfigs = mcpConfigs
 	}
-	h, err := tacklr.NewAgent(ctx, opts)
+	h, err := tacklr.NewTurnManager(ctx, opts)
 	if err != nil {
 		durable.CloseTurnVFS(ms, string(id), "construct")
 		return nil, nil, "", err
@@ -344,7 +364,7 @@ func (a *Activities) harness(ctx context.Context, id durable.SessionID, agentID 
 	return h, ms, etag, nil
 }
 
-func (a *Activities) save(ctx context.Context, id durable.SessionID, agentID string, h *tacklr.AgentHarness, etag string, mounts []durable.MountRecipe) (string, error) {
+func (a *Activities) save(ctx context.Context, id durable.SessionID, agentID string, h *tacklr.TurnManager, etag string, mounts []durable.MountRecipe) (string, error) {
 	cp, err := h.Checkpoint()
 	if err != nil {
 		telemetry.RecordCheckpointAttempt(ctx, err)
@@ -393,7 +413,10 @@ func startHeartbeat(ctx context.Context) func() {
 		return func() {}
 	}
 	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		activity.RecordHeartbeat(ctx, "tick")
 		ticker := time.NewTicker(500 * time.Millisecond)
 		defer ticker.Stop()
@@ -408,7 +431,11 @@ func startHeartbeat(ctx context.Context) func() {
 			}
 		}
 	}()
-	return func() { close(done) }
+	return func() {
+		close(done)
+		// Wait so a retry cannot RecordHeartbeat on the next attempt's handle.
+		wg.Wait()
+	}
 }
 
 func publishContext(ctx context.Context) context.Context {

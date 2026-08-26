@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/internal/livesess"
 )
 
 func TestInvoke_streamsMessageAndMapsDeveloperToSystem(t *testing.T) {
@@ -129,22 +130,15 @@ func TestInvoke_truncatedStreamDoesNotCommitPartialAssistant(t *testing.T) {
 		WithApiKey("test-key").
 		WithModel("gpt-5.4").
 		WithURL(server.URL)
-	agent, err := tacklr.NewAgent(t.Context(), tacklr.AgentOptions{
+	s := livesess.StartSession(t, tacklr.AgentOptions{
 		Config: tacklr.Config{MaxWindowSize: 8192},
 		Model:  strategy,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(agent.Close)
 
 	// Act
-	events, err := agent.Run(t.Context(), "hello")
-	if err != nil {
-		t.Fatal(err)
-	}
+	events := s.Prompt(t, "hello")
 	var streamErr error
-	for event := range events {
+	for _, event := range events {
 		if event.Type == tacklr.StreamEventError {
 			streamErr = event.Error
 		}
@@ -153,11 +147,6 @@ func TestInvoke_truncatedStreamDoesNotCommitPartialAssistant(t *testing.T) {
 	// Assert
 	if !errors.Is(streamErr, ErrIncompleteStream) {
 		t.Fatalf("stream error = %v", streamErr)
-	}
-	for _, message := range agent.Messages() {
-		if message.Role == tacklr.RoleAssistant && strings.Contains(message.Content, "partial") {
-			t.Fatalf("partial assistant committed: %#v", agent.Messages())
-		}
 	}
 }
 

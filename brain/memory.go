@@ -281,7 +281,7 @@ func (s *MemoryStore) ListKinds(_ context.Context) ([]ObjectKind, error) {
 
 // SearchLexical implements PartSearcher with a deterministic TF×IDF-style score.
 // Only content-bearing parts (parent_id set) are candidates.
-func (s *MemoryStore) SearchLexical(_ context.Context, scope Scope, query string, filters Filters, k int) ([]ScoredID, error) {
+func (s *MemoryStore) SearchLexical(_ context.Context, scope Scope, query string, filters Filter, k int) ([]ScoredID, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	qTokens := tokenize(query)
@@ -337,7 +337,7 @@ func (s *MemoryStore) SearchLexical(_ context.Context, scope Scope, query string
 }
 
 // SearchVector implements PartSearcher via cosine similarity on Object.Embedding.
-func (s *MemoryStore) SearchVector(_ context.Context, scope Scope, embedding []float32, filters Filters, k int) ([]ScoredID, error) {
+func (s *MemoryStore) SearchVector(_ context.Context, scope Scope, embedding []float32, filters Filter, k int) ([]ScoredID, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if len(embedding) == 0 || k <= 0 {
@@ -362,7 +362,7 @@ func (s *MemoryStore) SearchVector(_ context.Context, scope Scope, embedding []f
 }
 
 // SearchTrigram implements PartSearcher with case-fold substring / trigram overlap.
-func (s *MemoryStore) SearchTrigram(_ context.Context, scope Scope, query string, filters Filters, k int) ([]ScoredID, error) {
+func (s *MemoryStore) SearchTrigram(_ context.Context, scope Scope, query string, filters Filter, k int) ([]ScoredID, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	q := strings.ToLower(strings.TrimSpace(query))
@@ -395,7 +395,7 @@ func (s *MemoryStore) SearchTrigram(_ context.Context, scope Scope, query string
 }
 
 // candidateParts returns live store values under the caller's lock; do not retain across unlock.
-func (s *MemoryStore) candidateParts(scope Scope, filters Filters) ([]Object, error) {
+func (s *MemoryStore) candidateParts(scope Scope, filters Filter) ([]Object, error) {
 	plan, err := compileFilters(filters)
 	if err != nil {
 		return nil, err

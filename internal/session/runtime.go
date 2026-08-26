@@ -1,6 +1,8 @@
 package session
 
 import (
+	"fmt"
+
 	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/streaming"
 )
@@ -66,9 +68,18 @@ func (rt Runtime) StateDelete(key string) {
 	rt.session.StateDelete(key)
 }
 
-// Park constructs an interrupt for this tool call. It does not write session
-// pending: the harness adopts the returned error in runToolCall. After Resume
-// it returns the resolved interrupt.
+// Park writes pending for this tool call and returns the interrupt as error.
+// After Resume, re-entry returns the resolved interrupt with a nil error.
 func (rt Runtime) Park(kind string, payload []byte) (interrupt.Interrupt, error) {
-	return rt.session.park(rt.toolCallID, kind, payload)
+	if resolved, ok := rt.session.TakeResolved(rt.toolCallID); ok {
+		return resolved, nil
+	}
+	intr, ok := interrupt.New(kind)
+	if !ok {
+		return nil, fmt.Errorf("%q is not a valid interrupt type", kind)
+	}
+	if init, ok := intr.(interrupt.PayloadInitializer); ok {
+		_ = init.InitFromPayload(payload)
+	}
+	return nil, rt.session.Park(rt.toolCallID, intr)
 }

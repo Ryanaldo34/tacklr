@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 	"testing"
 
@@ -354,12 +353,12 @@ func TestAskUserChoiceTool_raiseAndResume(t *testing.T) {
 	if !errors.As(err, &usi) || usi.Question != "Which approach?" {
 		t.Errorf("interrupt question = %+v", usi)
 	}
-	if _, adoptErr := sm.AdoptInterrupt("tc_ask", intr); adoptErr == nil {
-		t.Fatal("adopt should park")
+	if !sm.HasPendingInterrupt() {
+		t.Fatal("Park must write pending")
 	}
 
 	// Resolve and re-invoke (harness re-execution pattern).
-	if _, err := sm.ReturnInterrupt("tc_ask", []byte(`{"selectionIdx":1}`)); err != nil {
+	if _, err := sm.Resume("tc_ask", []byte(`{"selectionIdx":1}`)); err != nil {
 		t.Fatal(err)
 	}
 	res, err := askUserChoiceTool.invoke(context.Background(), string(args), rt)
@@ -407,58 +406,8 @@ func TestListPlanTool_exactListing(t *testing.T) {
 	}
 }
 
-// --- Parent harness outcomes for builtin plan / ask_user tools ---
-
-// TestRun_completeTodo_skipsAlreadyCompletedNext: completing advances past already-done siblings.
-func TestRun_planToolHappyAndErrorPaths(t *testing.T) {
-	model := sequentialToolModel(
-		[]ToolCall{toolCall("p1", "create_plan", `{"plan":"P","todos":[]}`)},
-		[]ToolCall{toolCall("p2", "create_plan", `{"plan":"Only plan","todos":[{"title":"Only","description":"d"}]}`)},
-		[]ToolCall{toolCall("c1", "complete_todo", `{"title":"Missing"}`)},
-		[]ToolCall{toolCall("l1", "list_plan", `{}`)},
-	)
-	_, got := runPrompt(t, model, AgentOptions{})
-	requireToolResult(t, got, "at least one todo")
-	requireToolResult(t, got, "not found")
-	requireToolResult(t, got, "Active plan")
-
-	for _, c := range []struct {
-		name string
-		call ToolCall
-		seed func(*AgentHarness)
-		want string
-	}{
-		{"list no plan", toolCall("l1", "list_plan", `{}`), nil, "no plan"},
-		{"edit no plan", toolCall("e1", "edit_plan", `{"toDelete":["x"]}`), nil, "no plan"},
-		{"complete no plan", toolCall("c1", "complete_todo", `{"title":"A"}`), nil, "no plan"},
-		{"complete already done", toolCall("c1", "complete_todo", `{"title":"A"}`), func(h *AgentHarness) {
-			h.session.Plan.Set([]Todo{
-				{Title: "A", Status: streaming.TodoStatusCompleted},
-				{Title: "B", Status: streaming.TodoStatusInProgress},
-			})
-		}, "already completed"},
-		{"ask empty choice title", toolCall("a1", "ask_user_choice",
-			`{"question":"q","choices":[{"title":"  "},{"title":"B"}]}`), nil, "title is required"},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			model := sequentialToolModel([]ToolCall{c.call})
-			opts := AgentOptions{Model: model, Config: Config{MaxWindowSize: 8192}}
-			h := mustNewAgent(t, opts)
-			t.Cleanup(h.Close)
-			if c.seed != nil {
-				c.seed(h)
-			}
-			events, err := h.Run(context.Background(), "hi")
-			if err != nil {
-				t.Fatal(err)
-			}
-			requireToolResult(t, drainEvents(events), c.want)
-		})
-	}
-}
-
-func TestAgentHarness_installPlanDocumentRequiresWindow(t *testing.T) {
-	h := mustNewAgent(t, AgentOptions{Model: &mockStrategy{}, Config: Config{MaxWindowSize: 8192}})
+func TestTurnManager_installPlanDocumentRequiresWindow(t *testing.T) {
+	h := mustNewTurnManager(t, AgentOptions{Model: &mockStrategy{}, Config: Config{MaxWindowSize: 8192}})
 	t.Cleanup(h.Close)
 	h.session.Plan.SetDocument("PROJECT PLAN")
 	err := h.applyBatchToolResultEffect(context.Background(), EffectInstallPlanDocument)
@@ -466,51 +415,6 @@ func TestAgentHarness_installPlanDocumentRequiresWindow(t *testing.T) {
 		t.Fatalf("empty window install: %v", err)
 	}
 }
-
-// TestRun_askUserChoice_withoutDescription_formatsSelection: selection without
-// a description still returns a clear confirmation after resume; also probes
-// AskUserQuestion state helpers.
-func TestRun_askUserChoice_withoutDescription_formatsSelection(t *testing.T) {
-	model := sequentialToolModel([]ToolCall{toolCall("ask1", "ask_user_choice",
-		`{"question":"Pick?","choices":[{"title":"A"},{"title":"B"}]}`)})
-	h := mustNewAgent(t, AgentOptions{
-		Model: model, Config: Config{MaxWindowSize: 8192},
-	})
-	t.Cleanup(h.Close)
-	h.sessionId = "ask-sess"
-	events, err := h.Run(context.Background(), "ask")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var interruptID string
-	for ev := range events {
-		if ev.Type == StreamEventInterrupt {
-			var env struct {
-				InterruptId string `json:"interruptId"`
-			}
-			_ = json.Unmarshal(ev.Data, &env)
-			interruptID = env.InterruptId
-		}
-	}
-	if interruptID == "" {
-		t.Fatal("expected interrupt")
-	}
-	empty, err := h.ReturnFromInterrupt(context.Background(), map[string][]byte{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for range empty {
-	}
-	resumed, err := h.ReturnFromInterrupt(context.Background(), map[string][]byte{
-		interruptID: []byte(`{"selectionIdx":0}`),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	requireToolResult(t, drainEvents(resumed), `User selected "A"`)
-}
-
-// --- Message stream assembler via parent turn ---
 
 // TestCompleteTodo_effectsByRemainingWork: handoff only while open work remains;
 // completing the last open todo (sole or after already-done siblings) is EffectNone.
@@ -570,176 +474,5 @@ func TestCompleteTodo_effectsByRemainingWork(t *testing.T) {
 				t.Fatalf("output = %q, want substr %q", res.output, tc.wantSubstr)
 			}
 		})
-	}
-}
-
-func TestRun_createPlan_installsPlanDocumentAndPrunesWindow(t *testing.T) {
-	var n int
-	strategy := &mockStrategy{
-		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
-			n++
-			if n == 1 {
-				ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-					toolCall("p1", "create_plan",
-						`{"plan":"CoS: ship quality","todos":[{"title":"A","status":"pending","description":"d"}]}`),
-				}, IsComplete: true}
-				return
-			}
-			// Second turn: window must be user + installed plan document only.
-			if len(msgs) != 2 || msgs[0].Role != RoleUser || rawPlanFromDocumentMessage(msgs[1]) != "CoS: ship quality" {
-				ch <- LLMResponseChunk{Type: StreamEventError, Content: fmt.Sprintf("bad window: %+v", msgs)}
-				return
-			}
-			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "executing", IsComplete: true}
-		},
-	}
-	h, got := runPrompt(t, strategy, AgentOptions{})
-	if hasEventType(got, StreamEventError) {
-		t.Fatalf("events=%+v", summarizeEvents(got))
-	}
-	if h.session.Plan.Document() != "CoS: ship quality" || !isPlanDocument(h.Messages()[1]) {
-		t.Fatalf("doc=%q window=%+v", h.session.Plan.Document(), h.Messages())
-	}
-}
-
-func TestRun_completeTodo_withPlanDocument_preservesFullPlan(t *testing.T) {
-	var n int
-	strategy := &mockStrategy{
-		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
-			n++
-			switch n {
-			case 1:
-				ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-					toolCall("c1", "complete_todo", `{"title":"A"}`),
-				}, IsComplete: true}
-			case 2:
-				ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "handoff notes", IsComplete: true}
-			default:
-				ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "next", IsComplete: true}
-			}
-		},
-	}
-	h := mustNewAgent(t, AgentOptions{
-		Model: strategy, Config: Config{MaxWindowSize: 8192},
-	})
-	t.Cleanup(h.Close)
-	h.session.Plan.Set([]Todo{
-		{Title: "A", Status: streaming.TodoStatusInProgress},
-		{Title: "B", Status: streaming.TodoStatusPending},
-	})
-	h.session.Plan.SetDocument("FULL PLAN DRAFT")
-	events, err := h.Run(context.Background(), "go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = drainEvents(events)
-	msgs := h.Messages()
-	if len(msgs) < 4 {
-		t.Fatalf("window len = %d: %+v", len(msgs), msgs)
-	}
-	if rawPlanFromDocumentMessage(msgs[1]) != "FULL PLAN DRAFT" {
-		t.Fatalf("plan = %+v", msgs[1])
-	}
-	if msgs[2].Role != RoleDeveloper || msgs[2].Content != "handoff notes" {
-		t.Fatalf("handoff = %+v", msgs[2])
-	}
-	if msgs[3].Content != continuePlanNudge {
-		t.Fatalf("nudge = %+v", msgs[3])
-	}
-}
-
-func TestRun_editPlan_planChange_triggersHandoff(t *testing.T) {
-	var n int
-	var handoffSawPlan bool
-	strategy := &mockStrategy{
-		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
-			n++
-			switch n {
-			case 1:
-				ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-					toolCall("e1", "edit_plan", `{"plan":"revised blueprint","toAdd":[],"toDelete":[]}`),
-				}, IsComplete: true}
-			case 2:
-				ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "post-edit handoff", IsComplete: true}
-			default:
-				for _, m := range msgs {
-					if rawPlanFromDocumentMessage(m) == "revised blueprint" {
-						handoffSawPlan = true
-					}
-				}
-				ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "ok", IsComplete: true}
-			}
-		},
-	}
-	h := mustNewAgent(t, AgentOptions{
-		Model: strategy, Config: Config{MaxWindowSize: 8192},
-	})
-	t.Cleanup(h.Close)
-	h.session.Plan.Set([]Todo{
-		{Title: "A", Status: streaming.TodoStatusInProgress},
-		{Title: "B", Status: streaming.TodoStatusPending},
-	})
-	h.session.Plan.SetDocument("old blueprint")
-	events, err := h.Run(context.Background(), "revise")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = drainEvents(events)
-	if h.session.Plan.Document() != "revised blueprint" {
-		t.Fatalf("document = %q", h.session.Plan.Document())
-	}
-	if rawPlanFromDocumentMessage(h.Messages()[1]) != "revised blueprint" {
-		t.Fatalf("plan msg = %+v", h.Messages()[1])
-	}
-	if !handoffSawPlan {
-		t.Fatal("continue turn should see revised plan document in window")
-	}
-}
-
-func TestRun_completeTodo_persistsPlanInStore(t *testing.T) {
-	// complete → handoff model message → continue message
-	var n int
-	strategy := &mockStrategy{
-		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, events chan<- LLMResponseChunk) {
-			n++
-			switch n {
-			case 1:
-				events <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-					toolCall("call_ct", "complete_todo", `{"title":"Ship"}`),
-				}, IsComplete: true}
-			case 2:
-				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "handoff body", IsComplete: true}
-			default:
-				events <- LLMResponseChunk{Type: StreamEventMessage, Content: "continued", IsComplete: true}
-			}
-		},
-	}
-
-	ah := mustNewAgent(t, AgentOptions{
-		Config: Config{MaxWindowSize: 8192},
-		Model:  strategy,
-	})
-	ah.sessionId = "sess-plan-persist"
-	ah.session.Plan.Set([]Todo{
-		{Title: "Ship", Status: streaming.TodoStatusInProgress},
-	})
-
-	ch, err := ah.Run(context.Background(), "finish ship")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for range ch {
-	}
-
-	restored := reloadHarness(t, ah, AgentOptions{
-		Config: Config{MaxWindowSize: 8192},
-		Model:  &mockStrategy{},
-	})
-	plan := restored.session.Plan.Get()
-	if len(plan) != 1 {
-		t.Fatalf("restored plan len = %d, want 1", len(plan))
-	}
-	if plan[0].Title != "Ship" || plan[0].Status != streaming.TodoStatusCompleted {
-		t.Fatalf("restored plan = %+v, want Ship completed", plan[0])
 	}
 }

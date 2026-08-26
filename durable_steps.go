@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/ryanaldo34/tacklr/internal/drive"
 	"github.com/ryanaldo34/tacklr/internal/session"
@@ -13,15 +14,21 @@ import (
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
-func (a *AgentHarness) absorbUser(ctx context.Context, user *Message, out chan StreamEvent) error {
+func (a *TurnManager) absorbUser(ctx context.Context, user *Message, out chan StreamEvent) error {
+	if user != nil {
+		if bad := UnsupportedMIMEs(a.model, user.MIMETypes()); len(bad) > 0 {
+			return fmt.Errorf("unsupported content type(s): %s", strings.Join(bad, ", "))
+		}
+	}
 	a.pairOpenToolCalls("unpaired tool call")
 	if a.hasOpenToolWork() {
-		a.finalizeCancelledWork(nil)
+		a.pairCancelledToolResults(nil)
+		a.clearInterruptParkState()
 	}
 	return a.addToContext(ctx, user, out)
 }
 
-func (a *AgentHarness) runnableToolCalls() []ToolCall {
+func (a *TurnManager) runnableToolCalls() []ToolCall {
 	pending := a.pendingSnapshot()
 	out := make([]ToolCall, 0, len(pending))
 	for _, p := range pending {
@@ -33,12 +40,12 @@ func (a *AgentHarness) runnableToolCalls() []ToolCall {
 }
 
 // Checkpoint captures the session blob for SnapshotStore.
-func (a *AgentHarness) Checkpoint() (*stores.SessionCheckpoint, error) {
+func (a *TurnManager) Checkpoint() (*stores.SessionCheckpoint, error) {
 	return session.CaptureCheckpoint(a.context.Messages(), a.session, a.pendingSnapshot())
 }
 
 // RestoreCheckpoint applies a SnapshotStore blob onto this harness.
-func (a *AgentHarness) RestoreCheckpoint(cp stores.SessionCheckpoint) error {
+func (a *TurnManager) RestoreCheckpoint(cp stores.SessionCheckpoint) error {
 	a.runMu.Lock()
 	defer a.runMu.Unlock()
 	applied, err := session.ApplyCheckpoint(cp, a.session)
@@ -52,7 +59,7 @@ func (a *AgentHarness) RestoreCheckpoint(cp stores.SessionCheckpoint) error {
 	return nil
 }
 
-func (a *AgentHarness) runInference(ctx context.Context, st *drive.TurnState, out chan StreamEvent) (drive.InferenceStep, error) {
+func (a *TurnManager) runInference(ctx context.Context, st *drive.TurnState, out chan StreamEvent) (drive.InferenceStep, error) {
 	// Pair any function_call still missing a tool message before the provider
 	// round. Durable HITL used to drop the rest of a parallel batch; Azure then
 	// 400s "No tool output found for function call".
@@ -69,47 +76,21 @@ func (a *AgentHarness) runInference(ctx context.Context, st *drive.TurnState, ou
 	}
 	events, err := a.tasks.Turn(turnCtx, a.tools, a.constructSystemPrompt())
 	if err != nil {
-		if ctx.Err() != nil {
-			return drive.InferenceStep{}, ctx.Err()
-		}
-		var outErr error
+		outErr := fmt.Errorf("model request failed: %w", err)
 		if st.HadToolRound {
 			outErr = fmt.Errorf("%w: %w", ErrModelAfterTools, err)
-		} else {
-			outErr = fmt.Errorf("model request failed: %w", err)
 		}
 		out <- StreamEvent{Type: StreamEventError, Error: outErr}
 		return drive.InferenceStep{}, outErr
 	}
 	st.ModelRequests++
 	asm := newStreamAssembler()
-	announced := make(map[string]ToolCall)
-	announceOrder := make([]string, 0)
-	failAnnounced := func(reason string) {
-		for _, id := range announceOrder {
-			tc := a.withToolPresentation(announced[id])
-			tc.Status = "error"
-			out <- StreamEvent{
-				Type:      StreamEventToolResult,
-				MessageID: tc.Key(),
-				Content:   reason,
-				ToolCalls: []ToolCall{tc},
-			}
-		}
-		announceOrder = nil
-		announced = make(map[string]ToolCall)
-	}
 	var toolCalls []ToolCall
 	for {
-		if err := ctx.Err(); err != nil {
-			failAnnounced("tool call cancelled")
-			return drive.InferenceStep{}, err
-		}
 		var chunk LLMResponseChunk
 		var ok bool
 		select {
 		case <-ctx.Done():
-			failAnnounced("tool call cancelled")
 			return drive.InferenceStep{}, ctx.Err()
 		case chunk, ok = <-events:
 		}
@@ -119,28 +100,12 @@ func (a *AgentHarness) runInference(ctx context.Context, st *drive.TurnState, ou
 		if st.HadToolRound && (chunk.Type == StreamEventError || chunk.Error != nil) {
 			chunk = tagModelAfterToolsError(chunk)
 		}
-		if !a.streamChunk(ctx, chunk, out) {
-			failAnnounced("tool call cancelled")
-			return drive.InferenceStep{}, ctx.Err()
-		}
+		a.streamChunk(chunk, out)
 		if chunk.Type == StreamEventError || chunk.Error != nil {
-			failAnnounced("model error")
 			if chunk.Error != nil {
 				return drive.InferenceStep{}, chunk.Error
 			}
 			return drive.InferenceStep{}, errors.New(chunk.Content)
-		}
-		if chunk.Type == StreamEventFunctionCall {
-			for _, tc := range chunk.ToolCalls {
-				key := tc.Key()
-				if key == "" {
-					continue
-				}
-				if _, seen := announced[key]; !seen {
-					announceOrder = append(announceOrder, key)
-				}
-				announced[key] = tc
-			}
 		}
 		asm.AddDelta(chunk)
 		if chunk.IsComplete {
@@ -148,31 +113,10 @@ func (a *AgentHarness) runInference(ctx context.Context, st *drive.TurnState, ou
 			if chunk.Type == StreamEventMessage || chunk.Type == StreamEventReasoning {
 				msg := asm.MessageFromComplete(chunk)
 				a.context.Add(msg)
-				a.recordWatchdog(msg)
+				if a.watchDog != nil {
+					_ = a.watchDog.RecordOutput(msg)
+				}
 			}
-		}
-	}
-	if ctx.Err() != nil {
-		failAnnounced("tool call cancelled")
-		return drive.InferenceStep{}, ctx.Err()
-	}
-	executable := make(map[string]struct{}, len(toolCalls))
-	for _, tc := range toolCalls {
-		if key := tc.Key(); key != "" {
-			executable[key] = struct{}{}
-		}
-	}
-	for _, id := range announceOrder {
-		if _, ok := executable[id]; ok {
-			continue
-		}
-		tc := a.withToolPresentation(announced[id])
-		tc.Status = "error"
-		out <- StreamEvent{
-			Type:      StreamEventToolResult,
-			MessageID: tc.Key(),
-			Content:   "tool call incomplete",
-			ToolCalls: []ToolCall{tc},
 		}
 	}
 	if len(toolCalls) == 0 {
@@ -193,19 +137,15 @@ func (a *AgentHarness) runInference(ctx context.Context, st *drive.TurnState, ou
 	return drive.InferenceStep{ToolCalls: toolCalls}, nil
 }
 
-func (a *AgentHarness) finishToolCall(key string) {
-	a.pendingMu.Lock()
-	delete(a.pendingToolCalls, key)
-	a.pendingMu.Unlock()
-}
-
-func (a *AgentHarness) runToolCall(ctx context.Context, tc ToolCall, out chan StreamEvent) (drive.ToolStep, error) {
+func (a *TurnManager) runToolCall(ctx context.Context, tc ToolCall, out chan StreamEvent) (drive.ToolStep, error) {
 	turnRT := newToolRuntime(out, a.session, a.childHost)
 	tcKey := tc.Key()
 	toolCtx, toolSpan := telemetry.StartToolSpan(ctx, tc.Name, tc.Namespace)
 	tool := a.findTool(tc.Name, tc.Namespace)
 	if tool == nil {
-		a.finishToolCall(tcKey)
+		a.pendingMu.Lock()
+		delete(a.pendingToolCalls, tcKey)
+		a.pendingMu.Unlock()
 		toolErr := Correctionf(ErrNotFound, "%s: not found. That is not a registered tool. Use a name from the available tools", tc.Name)
 		toolSpan.Finish("error", toolErr)
 		msg := a.emitToolResult(out, tc, toolErr.Error(), "error")
@@ -220,12 +160,6 @@ func (a *AgentHarness) runToolCall(ctx context.Context, tc ToolCall, out chan St
 	})
 	var parked interrupt.Interrupt
 	if errors.As(err, &parked) {
-		if _, adoptErr := a.session.AdoptInterrupt(tcKey, parked); adoptErr != nil {
-			var adopted interrupt.Interrupt
-			if errors.As(adoptErr, &adopted) {
-				parked = adopted
-			}
-		}
 		serialized, _ := parked.Serialize()
 		data, _ := json.Marshal(map[string]any{
 			"interruptId": tcKey,
@@ -242,19 +176,14 @@ func (a *AgentHarness) runToolCall(ctx context.Context, tc ToolCall, out chan St
 		out <- StreamEvent{Type: StreamEventInterrupt, MessageID: tcKey, Data: data}
 		return drive.ToolStep{Interrupted: true, InterruptID: tcKey, InterruptData: data}, nil
 	}
-	a.finishToolCall(tcKey)
+	a.pendingMu.Lock()
+	delete(a.pendingToolCalls, tcKey)
+	a.pendingMu.Unlock()
 	if err != nil {
 		toolSpan.Finish("error", err)
-		content := err.Error()
-		if toolCtx.Err() != nil {
-			content = CancelledToolResultContent
-			msg := a.emitToolResult(out, tc, content, "error")
-			_ = a.addToContext(ctx, msg, out)
-			return drive.ToolStep{}, err
-		}
-		msg := a.emitToolResult(out, tc, content, "error")
+		msg := a.emitToolResult(out, tc, err.Error(), "error")
 		_ = a.addToContext(ctx, msg, out)
-		if errors.Is(err, ErrCorrection) {
+		if errors.Is(err, ErrCorrection) || errors.Is(err, context.Canceled) {
 			return drive.ToolStep{}, nil
 		}
 		return drive.ToolStep{}, err
@@ -272,15 +201,10 @@ func (a *AgentHarness) runToolCall(ctx context.Context, tc ToolCall, out chan St
 	a.emitPlanUpdate(out)
 	msg := a.emitToolResult(out, tc, output, "success")
 	if !toolDisp.SuppressWindowMessage && !hookDisp.SuppressWindowMessage {
-		if err := a.addToContext(ctx, msg, out); err != nil {
-			return drive.ToolStep{}, err
-		}
+		_ = a.addToContext(ctx, msg, out)
 	}
 	if effect := effects.resolved(); effect != EffectNone {
-		if err := a.applyBatchToolResultEffect(ctx, effect); err != nil {
-			out <- StreamEvent{Type: StreamEventError, Error: err, Content: err.Error()}
-			return drive.ToolStep{}, err
-		}
+		_ = a.applyBatchToolResultEffect(ctx, effect)
 	}
 	return drive.ToolStep{}, nil
 }
@@ -294,3 +218,63 @@ const (
 	GetChildName     = "get_child"
 	CancelChildName  = "cancel_child"
 )
+
+func (a *TurnManager) applyResume(finishedInterrupts map[string][]byte) error {
+	a.pendingMu.Lock()
+	defer a.pendingMu.Unlock()
+	for id, payload := range finishedInterrupts {
+		tc, ok := a.pendingToolCalls[id]
+		if !ok {
+			return fmt.Errorf("no tool call id found for interrupt %s: %w", id, interrupt.ErrInterruptNotFound)
+		}
+		if _, err := a.session.Resume(id, payload); err != nil {
+			return fmt.Errorf("return from interrupt %q: %w", id, err)
+		}
+		a.pendingToolCalls[id] = stores.PendingToolCall{ToolCall: tc.ToolCall, InterruptActive: false}
+	}
+	return nil
+}
+
+// pairOpenToolCalls appends error tool results for assistant tool_calls that
+// have no matching tool message. Restored dirty windows become valid before
+// the next model turn; new turns never commit unpaired calls.
+//
+// Pair on WireID (Responses call_id), matching toolResultMessage. Do not
+// invent a result for a still-pending call — Resume re-runs those, and a
+// Key()-keyed phantom (fc_ item id) is rejected by Azure as
+// "No tool call found for function call output".
+func (a *TurnManager) pairOpenToolCalls(reason string) {
+	hasOutput := toolOutputIDs(a.context.Messages())
+	pending := a.pendingSnapshot()
+	for _, m := range a.context.Messages() {
+		if m == nil || m.Role != RoleAssistant {
+			continue
+		}
+		for _, tc := range m.ToolCalls {
+			if _, ok := hasOutput[tc.WireID()]; ok {
+				continue
+			}
+			if _, ok := pending[tc.Key()]; ok {
+				continue
+			}
+			msg, _ := a.toolResultMessage(tc, reason, "error")
+			a.context.Add(msg)
+			hasOutput[msg.ToolCallID] = struct{}{}
+		}
+	}
+}
+
+func tagModelAfterToolsError(chunk LLMResponseChunk) LLMResponseChunk {
+	if chunk.Error != nil {
+		if !errors.Is(chunk.Error, ErrModelAfterTools) {
+			chunk.Error = fmt.Errorf("%w: %w", ErrModelAfterTools, chunk.Error)
+		}
+		chunk.Content = chunk.Error.Error()
+		return chunk
+	}
+	if chunk.Content != "" {
+		chunk.Error = fmt.Errorf("%w: %s", ErrModelAfterTools, chunk.Content)
+		chunk.Content = chunk.Error.Error()
+	}
+	return chunk
+}

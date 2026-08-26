@@ -10,35 +10,38 @@ import (
 )
 
 func TestValidateFilters_andMatch(t *testing.T) {
-	if err := ValidateFilters(nil); err != nil {
+	if err := ValidateFilters(Filter{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidateFilters(Filters{"kind": "Document", "stage": "open"}); err != nil {
+	if err := ValidateFilters(MustFilter(map[string]any{"kind": "Document", "stage": "open"})); err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidateFilters(Filters{"updated_after": "2024-01-01T00:00:00Z"}); err != nil {
+	if err := ValidateFilters(MustFilter(map[string]any{"updated_after": "2024-01-01T00:00:00Z"})); err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidateFilters(Filters{"created_before": "2024-06-01"}); err != nil {
+	if err := ValidateFilters(MustFilter(map[string]any{"created_before": "2024-06-01"})); err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidateFilters(Filters{"tags": []any{"a", "b"}}); err != nil {
+	if err := ValidateFilters(MustFilter(map[string]any{"tags": []any{"a", "b"}})); err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidateFilters(Filters{"updated_after": "nope"}); err == nil {
+	if err := ValidateFilters(Filter{UpdatedAfter: "nope"}); err == nil {
 		t.Fatal("bad time")
 	}
-	if err := ValidateFilters(Filters{"": "x"}); err == nil {
+	if _, err := DecodeFilter(map[string]any{"": "x"}); err == nil {
 		t.Fatal("empty key")
 	}
-	if err := ValidateFilters(Filters{"x": map[string]any{"nested": 1}}); err == nil {
+	if _, err := DecodeFilter(map[string]any{"x": map[string]any{"nested": 1}}); err == nil {
 		t.Fatal("nested map")
 	}
-	if err := ValidateFilters(Filters{"kind": nil}); err == nil {
+	if _, err := DecodeFilter(map[string]any{"kind": nil}); err == nil {
 		t.Fatal("nil value")
 	}
-	if err := ValidateFilters(Filters{"kind": []any{}}); err == nil {
+	if _, err := DecodeFilter(map[string]any{"kind": []any{}}); err == nil {
 		t.Fatal("empty list validate")
+	}
+	if _, err := DecodeFilter(map[string]any{"kind": []any{1}}); err == nil {
+		t.Fatal("kind list non-string")
 	}
 	if _, err := parseFilterTime(""); err == nil {
 		t.Fatal("empty time")
@@ -51,50 +54,50 @@ func TestValidateFilters_andMatch(t *testing.T) {
 		NamespaceID: ns, UpdatedAt: now, CreatedAt: now,
 		Properties: map[string]any{"stage": "negotiation", "amount": 10.0},
 	}
-	if !objectMatchesFilters(obj, Filters{"kind": "Document", "stage": "negotiation"}) {
+	if !objectMatchesFilters(obj, MustFilter(map[string]any{"kind": "Document", "stage": "negotiation"})) {
 		t.Fatal("should match")
 	}
-	if objectMatchesFilters(obj, Filters{"stage": "closed"}) {
+	if objectMatchesFilters(obj, MustFilter(map[string]any{"stage": "closed"})) {
 		t.Fatal("should not match stage")
 	}
-	if !objectMatchesFilters(obj, Filters{"updated_after": "2024-01-01T00:00:00Z"}) {
+	if !objectMatchesFilters(obj, MustFilter(map[string]any{"updated_after": "2024-01-01T00:00:00Z"})) {
 		t.Fatal("updated_after")
 	}
-	if objectMatchesFilters(obj, Filters{"updated_before": "2024-01-01T00:00:00Z"}) {
+	if objectMatchesFilters(obj, MustFilter(map[string]any{"updated_before": "2024-01-01T00:00:00Z"})) {
 		t.Fatal("updated_before")
 	}
-	if !objectMatchesFilters(obj, Filters{"amount": []any{10, 20}}) {
+	if !objectMatchesFilters(obj, MustFilter(map[string]any{"amount": []any{10, 20}})) {
 		t.Fatal("list match")
 	}
-	if objectMatchesFilters(obj, Filters{"title": "Other"}) {
+	if objectMatchesFilters(obj, MustFilter(map[string]any{"title": "Other"})) {
 		t.Fatal("title mismatch")
 	}
-	if !objectMatchesFilters(obj, Filters{"created_after": "2024-01-01", "created_before": "2025-01-01"}) {
+	if !objectMatchesFilters(obj, MustFilter(map[string]any{"created_after": "2024-01-01", "created_before": "2025-01-01"})) {
 		t.Fatal("created bounds")
 	}
-	if objectMatchesFilters(obj, Filters{"missing": "x"}) {
+	if objectMatchesFilters(obj, MustFilter(map[string]any{"missing": "x"})) {
 		t.Fatal("missing property")
 	}
 
 	obj.Properties["n"] = 3
 	obj.Properties["b"] = true
 	obj.Properties["s"] = "hi"
-	if !objectMatchesFilters(obj, Filters{"n": 3, "b": true, "s": "hi"}) {
+	if !objectMatchesFilters(obj, MustFilter(map[string]any{"n": 3, "b": true, "s": "hi"})) {
 		t.Fatal("scalar eq")
 	}
-	if !objectMatchesFilters(obj, Filters{"n": int64(3)}) {
+	if !objectMatchesFilters(obj, MustFilter(map[string]any{"n": int64(3)})) {
 		t.Fatal("int64 eq")
 	}
-	if !objectMatchesFilters(obj, Filters{"n": float32(3)}) {
+	if !objectMatchesFilters(obj, MustFilter(map[string]any{"n": float32(3)})) {
 		t.Fatal("float32 eq")
 	}
-	if objectMatchesFilters(obj, Filters{"n": "nope"}) {
+	if objectMatchesFilters(obj, MustFilter(map[string]any{"n": "nope"})) {
 		t.Fatal("type mismatch")
 	}
-	if objectMatchesFilters(obj, Filters{"stage": []any{}}) {
+	if objectMatchesFilters(obj, Filter{Props: map[string]PropFilter{"stage": {In: []any{}}}}) {
 		t.Fatal("empty list")
 	}
-	if objectMatchesFilters(obj, Filters{"updated_after": "bogus"}) {
+	if objectMatchesFilters(obj, Filter{UpdatedAfter: "bogus"}) {
 		t.Fatal("bad date match")
 	}
 }

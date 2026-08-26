@@ -3,6 +3,7 @@ package exa_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -86,6 +87,9 @@ func TestClient_Search_httpError(t *testing.T) {
 	_, err := c.Search(context.Background(), exa.SearchRequest{Query: "q"})
 	if err == nil || !strings.Contains(err.Error(), "401") {
 		t.Fatalf("err = %v", err)
+	}
+	if !errors.Is(err, exa.ErrService) {
+		t.Fatalf("401 must be service failed: %v", err)
 	}
 }
 

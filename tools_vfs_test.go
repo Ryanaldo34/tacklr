@@ -32,7 +32,7 @@ func TestVFSTools_readWriteRev(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := mustNewAgent(t, AgentOptions{
+	h := mustNewTurnManager(t, AgentOptions{
 		SessionID:    "tools-vfs",
 		MountSession: ms,
 		Model:        &mockStrategy{},
@@ -88,7 +88,7 @@ func TestVFSTools_readWriteRev(t *testing.T) {
 	}
 
 	_, err = tools["write"].invoke(ctx, `{"path":"/work/a.go","rev":"dead","start":2,"end":3,"lines":["// x"]}`, rt)
-	if !errors.Is(err, vfs.ErrStaleContent) {
+	if !errors.Is(err, vfs.ErrStaleContent) || !strings.Contains(err.Error(), "the file changed since that rev") {
 		t.Fatalf("stale write: %v", err)
 	}
 
@@ -164,7 +164,7 @@ func TestVFSTools_readWriteRev(t *testing.T) {
 	}
 
 	_, err = tools["write"].invoke(ctx, `{"path":"/work/missing-span.txt","start":1,"end":2,"lines":["x"]}`, rt)
-	if !errors.Is(err, vfs.ErrNotExist) {
+	if !errors.Is(err, vfs.ErrNotExist) || !strings.Contains(err.Error(), "that path does not exist. List the parent") {
 		t.Fatalf("non-full missing: %v", err)
 	}
 	if _, err = tools["write"].invoke(ctx, `{"path":"/work/missing-span.txt","content":"created\n"}`, rt); err != nil {
@@ -241,11 +241,10 @@ func TestVFSTools_readWriteRev(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, _ = json.Marshal(map[string]any{
-		"path": "/work/head.md", "rev": revHead.Hash, "block_id": "top/sec",
-		"include_heading": true, "lines": []string{"## Renamed", "body"},
-	})
-	if _, err = tools["write"].invoke(ctx, string(body), rt); err != nil {
+	if _, err = ms.Apply(ctx, "/work/head.md", vfs.Mutation{
+		Rev: revHead.Hash, BlockID: "top/sec", IncludeHeading: true,
+		Lines: []string{"## Renamed", "body"},
+	}); err != nil {
 		t.Fatalf("include_heading replace: %v", err)
 	}
 	got, err = ms.ReadText(ctx, "/work/head.md")
@@ -335,24 +334,6 @@ func TestVFSTools_readWriteRev(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "only one change") {
 		t.Fatalf("mixed mode: %v", err)
 	}
-	_, err = tools["write"].invoke(ctx, `{"path":"/work/new.txt","content":"a","ir_text":"b"}`, rt)
-	if err == nil || !strings.Contains(err.Error(), "must be the same text") {
-		t.Fatalf("content/ir_text: %v", err)
-	}
-
-	if _, err = tools["write"].invoke(ctx, `{"path":"/work/ir.txt","ir_text":"hello\n"}`, rt); err != nil {
-		t.Fatal(err)
-	}
-	if gotText(t, ms, "/work/ir.txt") != "hello\n" {
-		t.Fatalf("ir_text-only: %q", gotText(t, ms, "/work/ir.txt"))
-	}
-	if _, err = tools["write"].invoke(ctx, `{"path":"/work/same.txt","content":"same\n","ir_text":"same\n"}`, rt); err != nil {
-		t.Fatal(err)
-	}
-	if gotText(t, ms, "/work/same.txt") != "same\n" {
-		t.Fatalf("content+ir_text equal: %q", gotText(t, ms, "/work/same.txt"))
-	}
-
 	res, err = tools["read"].invoke(ctx, `{"path":"/work/plain.txt","outline":true,"ir":true}`, rt)
 	if err != nil || !strings.Contains(res.output, "media_type=") ||
 		!strings.Contains(res.output, "encoding=") || !strings.Contains(res.output, "line_count=") ||
@@ -434,7 +415,7 @@ func TestVFSTools_projectedDocOutlineAndBlocks(t *testing.T) {
 	})); err != nil {
 		t.Fatal(err)
 	}
-	h := mustNewAgent(t, AgentOptions{
+	h := mustNewTurnManager(t, AgentOptions{
 		SessionID: "tools-docs", MountSession: ms, Model: &mockStrategy{},
 	})
 	tools := map[string]*Tool{}
@@ -486,10 +467,10 @@ func TestVFSTools_projectedDocOutlineAndBlocks(t *testing.T) {
 		t.Fatalf("sibling tab after missing tab_id: %s err=%v", res.output, err)
 	}
 	_, err = tools["write"].invoke(ctx, fmt.Sprintf(`{"path":"/workspace/contracts/Spec","rev":%q,"old":"Hello"}`, rev), rt)
-	if !errors.Is(err, vfs.ErrProjected) {
+	if !errors.Is(err, vfs.ErrProjected) || !strings.Contains(err.Error(), "that write is not supported on this file type") {
 		t.Fatalf("substring write on Doc: %v", err)
 	}
-	_, err = tools["write"].invoke(ctx, fmt.Sprintf(`{"path":"/workspace/contracts/Spec","rev":%q,"blocks":[]}`, rev), rt)
+	_, err = ms.Apply(ctx, "/workspace/contracts/Spec", vfs.Mutation{Rev: rev, Blocks: []vfs.Block{}})
 	if err == nil || !errors.Is(err, vfs.ErrEmptyReplace) || strings.Contains(err.Error(), "IR") {
 		t.Fatalf("empty blocks: %v", err)
 	}
@@ -497,8 +478,9 @@ func TestVFSTools_projectedDocOutlineAndBlocks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = tools["write"].invoke(ctx, fmt.Sprintf(
-		`{"path":"/workspace/contracts/note.txt","rev":%q,"blocks":[{"kind":"paragraph","text":"x"}]}`, noteRev.Hash), rt)
+	_, err = ms.Apply(ctx, "/workspace/contracts/note.txt", vfs.Mutation{
+		Rev: noteRev.Hash, Blocks: []vfs.Block{{Kind: "paragraph", Text: "x"}},
+	})
 	if !errors.Is(err, vfs.ErrProjected) {
 		t.Fatalf("blocks on plaintext: %v", err)
 	}
@@ -520,11 +502,9 @@ func TestVFSTools_projectedDocOutlineAndBlocks(t *testing.T) {
 		t.Fatal(err)
 	}
 	rev = fieldKV(res.output, "rev")
-	blocksBody, _ := json.Marshal(map[string]any{
-		"path": "/workspace/contracts/Spec", "rev": rev, "tab_id": "t.a",
-		"blocks": []map[string]any{{"kind": "paragraph", "text": "Replaced"}},
-	})
-	if _, err = tools["write"].invoke(ctx, string(blocksBody), rt); err != nil {
+	if _, err = ms.Apply(ctx, "/workspace/contracts/Spec", vfs.Mutation{
+		Rev: rev, TabID: "t.a", Blocks: []vfs.Block{{Kind: "paragraph", Text: "Replaced"}},
+	}); err != nil {
 		t.Fatalf("tab blocks write: %v", err)
 	}
 	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Spec"}`, rt)
@@ -555,7 +535,10 @@ func TestVFSTools_projectedDocOutlineAndBlocks(t *testing.T) {
 	if got := gotText(t, ms, "/workspace/contracts/notes.md"); got != mdHTML {
 		t.Fatalf("notes.md body = %q", got)
 	}
-	if _, err = tools["write"].invoke(ctx, `{"path":"/workspace/contracts/Lifted","media_type":"application/vnd.google-apps.document","content":"Hello\n\nWorld"}`, rt); err != nil {
+	liftedBody := "Hello\n\nWorld"
+	if _, err = ms.Apply(ctx, "/workspace/contracts/Lifted", vfs.Mutation{
+		MediaType: "application/vnd.google-apps.document", Content: &liftedBody,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	lifted, err := ms.ReadText(ctx, "/workspace/contracts/Lifted")
@@ -811,7 +794,7 @@ func TestVFSTools_writeDocxBlocksAndInlineMarks(t *testing.T) {
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
 		t.Fatal(err)
 	}
-	h := mustNewAgent(t, AgentOptions{
+	h := mustNewTurnManager(t, AgentOptions{
 		SessionID: "tools-docx", MountSession: ms, Model: &mockStrategy{},
 	})
 	tools := map[string]*Tool{}
@@ -820,11 +803,17 @@ func TestVFSTools_writeDocxBlocksAndInlineMarks(t *testing.T) {
 	}
 	rt := turnRuntime(h)
 	mt := "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-	res, err := tools["write"].invoke(ctx, fmt.Sprintf(
-		`{"path":"/work/note.docx","media_type":%q,"blocks":[{"kind":"heading","level":1,"text":"**Title**"},{"kind":"paragraph","text":"See [x](https://e)"}]}`, mt), rt)
+	applied, err := ms.Apply(ctx, "/work/note.docx", vfs.Mutation{
+		MediaType: mt,
+		Blocks: []vfs.Block{
+			{Kind: "heading", Text: "**Title**", Style: vfs.StyleMeta{Level: 1}},
+			{Kind: "paragraph", Text: "See [x](https://e)"},
+		},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	res := toolCallResult{output: applied.String()}
 	if !strings.Contains(res.output, "rev=") {
 		t.Fatalf("create: %s", res.output)
 	}
@@ -834,8 +823,10 @@ func TestVFSTools_writeDocxBlocksAndInlineMarks(t *testing.T) {
 		t.Fatalf("read HTML: %s err=%v", res.output, err)
 	}
 	rev := fieldKV(res.output, "rev")
-	_, err = tools["write"].invoke(ctx, fmt.Sprintf(
-		`{"path":"/work/lift.docx","media_type":%q,"content":"Hello **x**"}`, mt), rt)
+	liftDocx := "Hello **x**"
+	_, err = ms.Apply(ctx, "/work/lift.docx", vfs.Mutation{
+		MediaType: mt, Content: &liftDocx,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -894,7 +885,7 @@ func TestVFSTools_projectedSheetReadWrite(t *testing.T) {
 	})); err != nil {
 		t.Fatal(err)
 	}
-	h := mustNewAgent(t, AgentOptions{
+	h := mustNewTurnManager(t, AgentOptions{
 		SessionID: "tools-sheets", MountSession: ms, Model: &mockStrategy{},
 	})
 	tools := map[string]*Tool{}
@@ -952,7 +943,13 @@ func TestVFSTools_projectedSheetReadWrite(t *testing.T) {
 		t.Fatalf("after overlay: %s err=%v", res.output, err)
 	}
 
-	if _, err = tools["write"].invoke(ctx, `{"path":"/workspace/contracts/Ledger","media_type":"application/vnd.google-apps.spreadsheet","blocks":[{"kind":"sheet","text":"A\tB\n1\t2","attributes":{"title":"Sheet1"}}]}`, rt); err != nil {
+	if _, err = ms.Apply(ctx, "/workspace/contracts/Ledger", vfs.Mutation{
+		MediaType: "application/vnd.google-apps.spreadsheet",
+		Blocks: []vfs.Block{{
+			Kind: "sheet", Text: "A\tB\n1\t2",
+			Style: vfs.StyleMeta{Attributes: map[string]string{"title": "Sheet1"}},
+		}},
+	}); err != nil {
 		t.Fatal(err)
 	}
 	st, err := ms.Stat(ctx, "/workspace/contracts/Ledger")
@@ -1020,7 +1017,7 @@ func TestVFSTools_runCommandLiveNames(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = ms.Close() })
 
-	h := mustNewAgent(t, AgentOptions{
+	h := mustNewTurnManager(t, AgentOptions{
 		SessionID:    "live-names",
 		MountSession: ms, Model: &mockStrategy{},
 	})

@@ -1,7 +1,7 @@
 // Package skills discovers and parses application-owned SKILL.md files.
 //
 // Discovery walks /skills on a vfs.MountSession. Hosts mark backends with
-// LocalFactory.Skills / S3Factory.Skills; the session attaches the union.
+// LocalFactory.Skills / S3Factory.Skills / BlobFactory.Skills; the session attaches the union.
 package skills
 
 import (

@@ -138,9 +138,13 @@ func (b brainTools) newQueryTool(
 		if err != nil {
 			return "", fmt.Errorf("%s: %w", name, err)
 		}
+		filters, err := brain.DecodeFilter(args.Filters)
+		if err != nil {
+			return "", fmt.Errorf("%s: %w", name, err)
+		}
 		page, err := query(ctx, b.sc.Scope(), brain.SearchRequest{
 			Query:    args.Query,
-			Filters:  brain.Filters(args.Filters),
+			Filters:  filters,
 			Limit:    args.Limit,
 			ScopeIDs: scopeIDs,
 		}, b.sc)
@@ -334,10 +338,14 @@ Use to resolve which tracked entity matches the ask. Evidence in notes/files: se
 		Timeout:  30 * time.Second,
 		Handler: func(ctx context.Context, args findObjectsArgs, runtime HarnessRuntime) (string, error) {
 			runtime.EmitUpdate("Finding knowledge objects…")
+			filters, err := brain.DecodeFilter(args.Filters)
+			if err != nil {
+				return "", fmt.Errorf("find_objects: %w", err)
+			}
 			page, err := b.engine.FindObjects(ctx, b.sc.Scope(), brain.FindObjectsRequest{
 				Query:   args.Query,
 				Kinds:   args.Kinds,
-				Filters: brain.Filters(args.Filters),
+				Filters: filters,
 				Limit:   args.Limit,
 			}, b.sc)
 			if err != nil {

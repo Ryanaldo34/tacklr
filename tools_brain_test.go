@@ -27,7 +27,7 @@ func TestBrainTools_saveDiscoveryAndLink(t *testing.T) {
 		t.Fatal(err)
 	}
 	ns := uuid.New()
-	h := mustNewAgent(t, AgentOptions{
+	h := mustNewTurnManager(t, AgentOptions{
 		Config: Config{MaxWindowSize: 1024},
 		Model:  &mockStrategy{},
 		Brain:  eng,
@@ -167,13 +167,13 @@ func TestBrainTools_hostNamespaceScopedRead(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := mustNewAgent(t, AgentOptions{
+	h := mustNewTurnManager(t, AgentOptions{
 		Config:          Config{MaxWindowSize: 1024},
 		Model:           &mockStrategy{},
 		Brain:           eng,
 		SearchNamespace: &ns,
 	})
-	gotNS, ok := h.SearchNamespace()
+	gotNS, ok := h.session.Search.Namespace()
 	if !ok || gotNS != ns {
 		t.Fatalf("SearchNamespace from options: %v %v", gotNS, ok)
 	}
@@ -196,13 +196,13 @@ func TestBrainTools_hostNamespaceScopedRead(t *testing.T) {
 		t.Fatalf("rich object: %+v", rich)
 	}
 
-	h.SetSearchNamespace(other)
+	h.session.Search.SetNamespace(other)
 	_, err = readTool.invoke(ctx, `{"object_id":"`+docID.String()+`"}`, turnRuntime(h))
 	if err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("want not found under other namespace, got %v", err)
 	}
 
-	h.ClearSearchNamespace()
+	h.session.Search.ClearNamespace()
 	out, err = readTool.invoke(ctx, `{"object_id":"`+docID.String()+`"}`, turnRuntime(h))
 	if err != nil {
 		t.Fatal(err)
@@ -260,7 +260,7 @@ func TestBrainTools_searchFindExactContinueAndCheckpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := mustNewAgent(t, AgentOptions{
+	h := mustNewTurnManager(t, AgentOptions{
 		Config:          Config{MaxWindowSize: 1024},
 		Model:           &mockStrategy{},
 		Brain:           eng,
@@ -366,7 +366,7 @@ func TestBrainTools_expandChildren(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := mustNewAgent(t, AgentOptions{
+	h := mustNewTurnManager(t, AgentOptions{
 		Config: Config{MaxWindowSize: 1024}, Model: &mockStrategy{},
 		Brain: eng, SearchNamespace: &ns,
 	})
@@ -421,7 +421,7 @@ func TestBrainTools_expandMultiHopAndFindLinks(t *testing.T) {
 	if !eng.HasEdgeSearch() {
 		t.Fatal("MemoryGraph must enable edge search")
 	}
-	h := mustNewAgent(t, AgentOptions{
+	h := mustNewTurnManager(t, AgentOptions{
 		Config: Config{MaxWindowSize: 1024}, Model: &mockStrategy{},
 		Brain: eng, SearchNamespace: &ns,
 	})
@@ -484,7 +484,7 @@ func TestBrainTools_searchNamespaceIsolation(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Agent scoped to nsB only.
-	h := mustNewAgent(t, AgentOptions{
+	h := mustNewTurnManager(t, AgentOptions{
 		Config: Config{MaxWindowSize: 1024}, Model: &mockStrategy{},
 		Brain: eng, SearchNamespace: &nsB,
 	})
@@ -546,15 +546,15 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 			{Name: "researcher", Model: workerModel},
 		},
 	}
-	parentH := mustNewAgent(t, parentOpts)
+	parentH := mustNewTurnManager(t, parentOpts)
 	t.Cleanup(parentH.Close)
 	workerOpts := parentOpts.WithSpecialist(parentH.specialists["researcher"])
 	workerOpts.SearchNamespace = &ns
 	workerOpts.SessionID = "w/researcher/spawn_tc1"
-	worker := mustNewAgent(t, workerOpts)
+	worker := mustNewTurnManager(t, workerOpts)
 	t.Cleanup(worker.Close)
 
-	gotNS, ok := worker.SearchNamespace()
+	gotNS, ok := worker.session.Search.Namespace()
 	if !ok || gotNS != ns {
 		t.Fatalf("worker namespace %v %v, want %v", gotNS, ok, ns)
 	}
@@ -579,8 +579,8 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 		t.Fatalf("worker search: %s", sout.output)
 	}
 
-	parentH.ClearSearchNamespace()
-	gotNS, ok = worker.SearchNamespace()
+	parentH.session.Search.ClearNamespace()
+	gotNS, ok = worker.session.Search.Namespace()
 	if !ok || gotNS != ns {
 		t.Fatalf("worker namespace after parent clear: %v %v", gotNS, ok)
 	}
@@ -617,7 +617,7 @@ func TestBrainTools_engramPathGraph(t *testing.T) {
 	}
 	ns := uuid.New()
 	mustMountBrain(ctx, t, reg, ms, eng, ns, vfs.MountSpec{})
-	h := mustNewAgent(t, AgentOptions{
+	h := mustNewTurnManager(t, AgentOptions{
 		SessionID:    "engram-graph",
 		MountSession: ms, Model: &mockStrategy{},
 		Brain: eng, SearchNamespace: &ns,
@@ -705,7 +705,7 @@ func TestBrainTools_expandAndUnlinkValidationErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := mustNewAgent(t, AgentOptions{
+	h := mustNewTurnManager(t, AgentOptions{
 		Config: Config{MaxWindowSize: 1024},
 		Model:  &mockStrategy{},
 		Brain:  eng,
@@ -756,7 +756,7 @@ func TestBrainTools_resolveFileRefPropagatesStoreFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := mustNewAgent(t, AgentOptions{
+	h := mustNewTurnManager(t, AgentOptions{
 		Config:          Config{MaxWindowSize: 1024},
 		Model:           &mockStrategy{},
 		Brain:           eng,

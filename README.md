@@ -22,9 +22,9 @@ Work spans many model calls, tools hit real systems, and the window fills with t
 
 **Context is structured around the current work.** The harness runs planning cycles (Adaptive Case Management): the agent writes a plan, works a to-do, and on `complete_todo` the window is rebuilt as a hand-off for what comes next. Unused history does not stay in the prompt just because it happened earlier. Specialists are the same idea at a larger grain — a nested session that returns only what the parent asked for.
 
-**The agent’s world is bounded.** A virtual filesystem gives one path API over the mounts you attach: local disk, S3, Google Drive and Docs, Microsoft Graph, and knowledge objects. The agent sees `/work/notes.md`, not a host path or a bucket key. Credentials live on the turn (`Prompt.Auth` / `Resume.Auth`), not in checkpoints.
+**The agent’s world is bounded.** A virtual filesystem gives one path API over the mounts you attach: local disk, S3, Azure Blob, Google Drive and Docs, Microsoft Graph, and knowledge objects. The agent sees `/work/notes.md`, not a host path or a bucket key. Credentials live on the turn (`Prompt.Auth` / `Resume.Auth`), not in checkpoints.
 
-**Sessions are meant to live in the cloud.** The same harness runs in-process or behind `durable.Runtime` (a goroutine wait loop, or Temporal). Human-in-the-loop parks a session until `Resume`. JSON-RPC protocols (ACP is the native one) map to that Runtime; autonomous hosts call it directly.
+**Sessions are meant to live in the cloud.** Hosts call `durable.Runtime` (in-process goroutine wait loop, or Temporal). Human-in-the-loop parks a session until `Resume`. JSON-RPC protocols (ACP is the native one) map to that Runtime; autonomous hosts call it directly.
 
 **Knowledge is queried, not stuffed into the window.** The optional brain is a host-owned store: first-class objects as Markdown files, hybrid search, an optional graph for relationships, and namespaces so retrieval stays scoped. The agent asks when it needs a fact.
 
@@ -34,7 +34,7 @@ Those four are the ethos. If a change fights them, it does not belong.
 
 ## A turn
 
-One `Run` (or `Prompt` / `Resume`) is a turn: infer, run tools, maybe park for the user, then complete, error, or cancel.
+One `Prompt` or `Resume` is a turn: infer, run tools, maybe park for the user, then complete, error, or cancel.
 
 ```text
 create_plan → tools → complete_todo → handoff → next work
@@ -59,7 +59,10 @@ import (
 	"time"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/durable"
+	"github.com/ryanaldo34/tacklr/durable/inprocess"
 	"github.com/ryanaldo34/tacklr/inference"
+	"github.com/ryanaldo34/tacklr/vfs"
 )
 
 func main() {
@@ -70,23 +73,32 @@ func main() {
 		WithApiKey(os.Getenv("OPENAI_API_KEY")).
 		WithModel(os.Getenv("OPENAI_MODEL"))
 
-	agent, err := tacklr.NewAgent(ctx, tacklr.AgentOptions{
+	opts := tacklr.AgentOptions{
 		Config: tacklr.Config{
 			MaxWindowSize: 8192,
 			SystemPrompt:  "You are a concise assistant.",
 		},
 		Model: model,
-	})
+	}
+	cat := durable.NewCatalog("agent")
+	cat.Register("agent", durable.AgentSpec{Options: opts})
+	rt := inprocess.New(cat, inprocess.WithProjection(vfs.DirectProjection{}))
+	id, err := rt.CreateSession(ctx, durable.CreateSession{AgentID: "agent"})
 	if err != nil {
 		panic(err)
 	}
-	defer agent.Close()
+	defer rt.Close(ctx, id)
 
-	events, err := agent.Run(ctx, "Outline three steps to organize a weekly operations review.")
+	sub, err := rt.Subscribe(ctx, id, 0)
 	if err != nil {
 		panic(err)
 	}
-	for ev := range events {
+	defer sub.Close()
+
+	if err := rt.Prompt(ctx, id, durable.Prompt{Text: "Outline three steps to organize a weekly operations review."}); err != nil {
+		panic(err)
+	}
+	for ev := range sub.Events() {
 		switch ev.Type {
 		case tacklr.StreamEventMessage:
 			fmt.Print(ev.Content)
@@ -94,6 +106,7 @@ func main() {
 			fmt.Println("error:", ev.Error, ev.Content)
 		case tacklr.StreamEventComplete:
 			fmt.Println()
+			return
 		}
 	}
 }
@@ -124,18 +137,11 @@ Construct with `NewTool(ToolConfig{...})`. After construction, read metadata thr
 
 ### Checkpoints
 
-```go
-agent, _ := tacklr.NewAgent(ctx, opts)
-cp, _ := agent.Checkpoint()
-restored, _ := tacklr.NewAgent(ctx, opts)
-_ = restored.RestoreCheckpoint(*cp)
-```
+`durable.Runtime` writes the session blob to SnapshotStore on each turn. A checkpoint is conversation, plan, tool/user state, and pending interrupts. Package [`stores`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/stores) is the blob type, not an I/O driver. Checkpoints store mount recipes, not file bytes or tokens. VFS writes persist as they happen.
 
-A checkpoint is conversation, plan, tool/user state, and pending interrupts. Embed (`NewAgent`) keeps that in process memory unless you snapshot it. `durable.Runtime` writes the same blob to SnapshotStore. Package [`stores`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/stores) is the blob type, not an I/O driver. Checkpoints store mount recipes, not file bytes or tokens. VFS writes persist as they happen.
+### Sessions
 
-### Sessions (optional)
-
-For a long-lived wait loop — park, resume, child sessions — use `durable.Runtime` instead of holding one `AgentHarness` yourself:
+Hosts always use `durable.Runtime`. In-process:
 
 ```go
 cat := durable.NewCatalog("agent")
@@ -146,7 +152,7 @@ _ = rt.Prompt(ctx, id, durable.Prompt{Text: prompt, Auth: auth})
 sub, _ := rt.Subscribe(ctx, id, 0)
 ```
 
-Temporal is the same `Runtime` interface with a worker. See [docs/durable.md](docs/durable.md).
+Temporal is the same `Runtime` interface with a worker. See [docs/durable.md](docs/durable.md). `TurnManager` is the per-turn infer/tools/checkpoint object the runtime constructs; hosts do not call it.
 
 ### Specialists
 
@@ -186,7 +192,7 @@ When VFS is wired, the harness injects file tools over virtual paths only. `run_
 
 | Doc | What it covers |
 |-----|----------------|
-| [docs/durable.md](docs/durable.md) | Runtime: embed, in-process, Temporal; HITL; children; auth |
+| [docs/durable.md](docs/durable.md) | Runtime: in-process, Temporal; HITL; children; auth |
 | [docs/vfs.md](docs/vfs.md) | Mounts, content IR, providers, FUSE |
 | [docs/knowledge.md](docs/knowledge.md) | Brain: Engrams, search, graph, tools |
 | [docs/fuse-vfs-run-command.md](docs/fuse-vfs-run-command.md) | How `run_command` and the FUSE projection fit |

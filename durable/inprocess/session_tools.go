@@ -2,17 +2,19 @@ package inprocess
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
+	"github.com/ryanaldo34/tacklr/interrupt"
 )
 
 func (r *Runtime) childStatuses(p *sessionProc) []durable.SessionStatus {
 	p.mu.Lock()
-	ids := append([]durable.SessionID(nil), p.children...)
+	ids := slices.Clone(p.children)
 	p.mu.Unlock()
 	out := make([]durable.SessionStatus, 0, len(ids))
 	for _, id := range ids {
@@ -52,6 +54,9 @@ func (s sessionChildren) SpawnChild(ctx context.Context, specialist, task, callI
 		Mounts:     s.p.mounts,
 	})
 	if err != nil {
+		if errors.Is(err, durable.ErrAgentNotFound) {
+			return "", fmt.Errorf("%w: %w", tacklr.ErrNotFound, err)
+		}
 		return "", err
 	}
 	if err := ctx.Err(); err != nil {
@@ -84,10 +89,10 @@ func (s sessionChildren) CancelChild(ctx context.Context, id string) error {
 	return nil
 }
 
-func (s sessionChildren) AwaitChild(ctx context.Context, id, callID string) (tacklr.Child, bool, error) {
+func (s sessionChildren) AwaitChild(ctx context.Context, id, callID string) (tacklr.Child, error) {
 	sid := durable.SessionID(id)
 	if !s.r.ownsChild(s.p, sid) {
-		return tacklr.Child{}, false, durable.UnknownChild(id)
+		return tacklr.Child{}, durable.UnknownChild(id)
 	}
 	return s.r.waitChild(ctx, s.p, sid, callID)
 }
@@ -100,14 +105,14 @@ func childFromStatus(st durable.SessionStatus) tacklr.Child {
 	return c
 }
 
-func (r *Runtime) waitChild(ctx context.Context, p *sessionProc, child durable.SessionID, callID string) (tacklr.Child, bool, error) {
+func (r *Runtime) waitChild(ctx context.Context, p *sessionProc, child durable.SessionID, callID string) (tacklr.Child, error) {
 	for {
 		if err := ctx.Err(); err != nil {
-			return tacklr.Child{}, false, err
+			return tacklr.Child{}, err
 		}
 		st, err := r.Status(ctx, child)
 		if err != nil {
-			return tacklr.Child{}, false, err
+			return tacklr.Child{}, err
 		}
 		switch st.State {
 		case durable.SessionComplete, durable.SessionFailed:
@@ -119,30 +124,30 @@ func (r *Runtime) waitChild(ctx context.Context, p *sessionProc, child durable.S
 				if err == nil {
 					err = fmt.Errorf("failed: %w", tacklr.ErrFailed)
 				}
-				return c, false, err
+				return c, err
 			}
-			return c, false, nil
+			return c, nil
 		}
 		if st.Waiting {
 			p.mu.Lock()
 			p.childParks[callID] = child
 			p.mu.Unlock()
-			return tacklr.Child{}, true, nil
+			return tacklr.Child{}, &interrupt.ChildWaiting{Kind: interrupt.TypeChildWaiting}
 		}
 		cp, err := r.get(child)
 		if err != nil {
-			return tacklr.Child{}, false, err
+			return tacklr.Child{}, err
 		}
 		cp.mu.Lock()
 		done := cp.turnDone
 		cp.mu.Unlock()
 		if done == nil {
 			<-ctx.Done()
-			return tacklr.Child{}, false, ctx.Err()
+			return tacklr.Child{}, ctx.Err()
 		}
 		select {
 		case <-ctx.Done():
-			return tacklr.Child{}, false, ctx.Err()
+			return tacklr.Child{}, ctx.Err()
 		case <-done:
 		}
 	}

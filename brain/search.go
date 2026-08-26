@@ -121,22 +121,21 @@ func (e *Engine) materialize(ctx context.Context, scope Scope, ranked []ScoredID
 // prepareSearch validates the query/filters and returns effective filters for the store.
 // When the catalog is non-empty, property filters require kind, unregistered kinds are
 // rejected, and missing kind filters are expanded to all registered kinds.
-func (e *Engine) prepareSearch(req SearchRequest) (Filters, error) {
+func (e *Engine) prepareSearch(req SearchRequest) (Filter, error) {
 	if strings.TrimSpace(req.Query) == "" {
-		return nil, fmt.Errorf("%w: query is required", ErrInvalid)
+		return Filter{}, fmt.Errorf("%w: query is required", ErrInvalid)
 	}
 	return e.effectiveFilters(req.Filters)
 }
 
-func (e *Engine) effectiveFilters(f Filters) (Filters, error) {
+func (e *Engine) effectiveFilters(f Filter) (Filter, error) {
 	if err := ValidateFiltersAgainst(f, e.catalog); err != nil {
-		return nil, err
+		return Filter{}, err
 	}
 	if e.catalog.Empty() {
 		return f, nil
 	}
 	e.catalog.Freeze()
-	// injectKindAllowList returns f unchanged when kind is already set (no clone).
 	return injectKindAllowList(f, e.catalog), nil
 }
 

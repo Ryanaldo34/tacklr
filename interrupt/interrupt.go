@@ -24,11 +24,9 @@ type Interrupt interface {
 	Error() string
 }
 
-// PayloadValidator is an optional capability for Interrupt types that want
-// to pre-validate the consumer's response payload before it is passed to
-// Return(). Implementations should check field presence, types, and bounds
-// without mutating the Interrupt's internal state (that happens in Return).
-// Detected via type assertion in ReturnInterrupt.
+// PayloadValidator is an optional capability Interrupt types may implement
+// for standalone payload checks. Session Resume calls Return only; types that
+// still need field-presence checks do that inside Return.
 type PayloadValidator interface {
 	ValidatePayload([]byte) error
 }
@@ -77,13 +75,11 @@ func (c *UserSelectionInterrupt) ValidatePayload(payload []byte) error {
 }
 
 func (c *UserSelectionInterrupt) Return(payload []byte) error {
-	var selection UserSelectionPayload
-	if err := json.Unmarshal(payload, &selection); err != nil {
+	if err := c.ValidatePayload(payload); err != nil {
 		return err
 	}
-	if selection.SelectionIdx < 0 || selection.SelectionIdx >= len(c.Options) {
-		return fmt.Errorf("selectionIdx %d out of range [0, %d)", selection.SelectionIdx, len(c.Options))
-	}
+	var selection UserSelectionPayload
+	_ = json.Unmarshal(payload, &selection)
 	c.ConfirmedChoice = &c.Options[selection.SelectionIdx]
 	return nil
 }
@@ -165,7 +161,7 @@ type ToolPermissionInterrupt struct {
 	Options  []PermissionOption `json:"options"`
 
 	// Set by Return after the consumer selects an option. Checkpointed so a
-	// later activity can AdoptInterrupt and see the decision. Serialize omits
+	// later activity can TakeResolved and see the decision. Serialize omits
 	// these so the client park payload stays unresolved.
 	SelectedOptionID string `json:"selectedOptionId,omitempty"`
 	SelectedKind     string `json:"selectedKind,omitempty"`
@@ -226,19 +222,17 @@ func (p *ToolPermissionInterrupt) ValidatePayload(payload []byte) error {
 }
 
 func (p *ToolPermissionInterrupt) Return(payload []byte) error {
-	var res ToolPermissionPayload
-	if err := json.Unmarshal(payload, &res); err != nil {
+	if err := p.ValidatePayload(payload); err != nil {
 		return err
 	}
-	var opt *PermissionOption
+	var res ToolPermissionPayload
+	_ = json.Unmarshal(payload, &res)
+	var opt PermissionOption
 	for i := range p.Options {
 		if p.Options[i].OptionID == res.OptionID {
-			opt = &p.Options[i]
+			opt = p.Options[i]
 			break
 		}
-	}
-	if opt == nil {
-		return fmt.Errorf("unknown optionId %q", res.OptionID)
 	}
 	p.SelectedOptionID = opt.OptionID
 	p.SelectedKind = opt.Kind

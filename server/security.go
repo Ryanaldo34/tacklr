@@ -62,10 +62,7 @@ func (s *Server) networkContext(ctx context.Context, r *http.Request, allowUnaut
 		return nil, http.StatusUnauthorized
 	}
 	if s.allowAnonymousNetwork || !s.networkPolicyConfigured {
-		principal, err := tacklrsecurity.NewPrincipal("anonymous")
-		if err != nil {
-			panic(err)
-		}
+		principal, _ := tacklrsecurity.NewPrincipal("anonymous")
 		return &tacklrsecurity.Context{
 			Principal: principal,
 			Binding: tacklrsecurity.ChannelBinding{

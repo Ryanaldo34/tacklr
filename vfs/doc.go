@@ -5,12 +5,12 @@
 //   - MountSession — mounts, path I/O, ReadText / WriteDocument, ReadLines, FuseMount / Close, HostDir
 //   - FuseAvailable — process can mount a kernel tree (/dev/fuse or /dev/macfuse*)
 //   - ContentRev / ContentHash — session-visible content identity (for tools)
-//   - BackendRegistry + LocalFactory / S3Factory / DriveFactory / GraphFactory + AWSS3 — process profiles
+//   - BackendRegistry + LocalFactory / S3Factory / BlobFactory / DriveFactory / GraphFactory + AWSS3 / AzureBlob — process profiles
 //   - SessionAuth + TokenHolder + Binding — session-scoped user-owned credentials (never on MountSpec)
 //   - MountSpec — durable mount description (checkpoint-safe; Members = skills or /workspace union)
 //   - Skills / SkillsPoint — /skills flat read-only union from SkillSource factories
 //   - Workspace / WorkspacePoint — /workspace named writable union (cloud aliases)
-//   - Provider / ProviderFactory / S3API / DriveAPI — custom backends
+//   - Provider / ProviderFactory / S3API / DriveAPI — custom backends (BlobFactory uses S3API)
 //   - File, FileInfo, DirEntry — I/O types (File is Close+Stat; io.Reader / io.ReaderAt / io.Writer via comma-ok)
 //   - Document / Textual / Structured / TextDocument — content IR
 //   - Block / StyleMeta / Span / FindBlock / BlockReplaceSpan — structured view
@@ -45,8 +45,8 @@
 //	unmounts. HostDir is the last FuseMount directory.
 //
 // Read-only mounts reject mutating ops with ErrReadOnly. Local paths are jailed
-// under the provider root (including symlink evaluation). S3 uses key prefixes
-// and delimiter listing for virtual directories (MinIO/AWS compatible).
+// under the provider root (including symlink evaluation). S3 and Azure Blob use
+// key prefixes and delimiter listing for virtual directories (MinIO/AWS/Azurite).
 //
 // # Content IR
 //

@@ -43,6 +43,12 @@ func TestClassifyProviderFailure_unmapped(t *testing.T) {
 	}
 }
 
+func TestClassifyAPIStatus_nilError(t *testing.T) {
+	if err := classifyAPIStatus(nil, ""); err != nil {
+		t.Fatalf("nil api error: %v", err)
+	}
+}
+
 func TestClassifyIncompleteReason_allOutcomes(t *testing.T) {
 	if err := classifyIncompleteReason(""); err != nil {
 		t.Fatalf("empty: %v", err)

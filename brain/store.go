@@ -46,9 +46,9 @@ type ObjectLister interface {
 
 // PartSearcher is the candidate retrieval port for hybrid / exact search.
 type PartSearcher interface {
-	SearchLexical(ctx context.Context, scope Scope, query string, filters Filters, k int) ([]ScoredID, error)
-	SearchVector(ctx context.Context, scope Scope, embedding []float32, filters Filters, k int) ([]ScoredID, error)
-	SearchTrigram(ctx context.Context, scope Scope, query string, filters Filters, k int) ([]ScoredID, error)
+	SearchLexical(ctx context.Context, scope Scope, query string, filters Filter, k int) ([]ScoredID, error)
+	SearchVector(ctx context.Context, scope Scope, embedding []float32, filters Filter, k int) ([]ScoredID, error)
+	SearchTrigram(ctx context.Context, scope Scope, query string, filters Filter, k int) ([]ScoredID, error)
 }
 
 // Store is the full read + search surface required by Engine.

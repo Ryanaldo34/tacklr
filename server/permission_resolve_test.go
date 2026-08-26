@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/internal/livesess"
 	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/streaming"
 )
@@ -182,21 +183,15 @@ func TestResolvePermissionViaRequest_outcomes(t *testing.T) {
 				ch <- tacklr.LLMResponseChunk{IsComplete: true}
 			},
 		}
-		h, err := tacklr.NewAgent(context.Background(), tacklr.AgentOptions{
+		s := livesess.StartSession(t, tacklr.AgentOptions{
 			Config:    tacklr.Config{MaxWindowSize: 8192},
 			SessionID: "sess-perm-resolve",
 			Model:     ms,
 			Tools:     []*tacklr.Tool{sensitive},
 		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		events, err := h.Run(context.Background(), "go")
-		if err != nil {
-			t.Fatal(err)
-		}
+		events := s.Prompt(t, "go")
 		var interruptEv streaming.StreamEvent
-		for ev := range events {
+		for _, ev := range events {
 			if ev.Type == streaming.StreamEventInterrupt {
 				interruptEv = ev
 			}

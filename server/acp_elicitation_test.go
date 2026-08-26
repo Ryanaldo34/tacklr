@@ -457,7 +457,7 @@ func TestACP_requestPermission_rejectFailsToolAndCompletes(t *testing.T) {
 			switch update["sessionUpdate"] {
 			case "tool_call_update":
 				blob, _ := json.Marshal(update)
-				if strings.Contains(string(blob), "permission denied") {
+				if strings.Contains(string(blob), "rejected by the user") {
 					sawDenied = true
 				}
 			case "agent_message_chunk":
@@ -477,7 +477,7 @@ func TestACP_requestPermission_rejectFailsToolAndCompletes(t *testing.T) {
 		t.Fatal("expected session/request_permission")
 	}
 	if !sawDenied {
-		t.Error("expected failed tool update with permission denied")
+		t.Error("expected failed tool update with rejected by the user")
 	}
 	if ran {
 		t.Error("handler must not run on reject")

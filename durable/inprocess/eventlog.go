@@ -19,6 +19,8 @@ type sessionLog struct {
 	entries []logEntry
 	subs    map[chan streaming.StreamEvent]durable.Seq
 	closed  bool
+	// kick is closed to end live tails. Subscribe owns each subscriber channel.
+	kick chan struct{}
 }
 
 // MemoryEventLog is a channel EventLog with topics events/retry/close.
@@ -48,7 +50,10 @@ func (l *MemoryEventLog) session(id durable.SessionID) *sessionLog {
 	if s, ok := l.sessions[id]; ok {
 		return s
 	}
-	s := &sessionLog{subs: make(map[chan streaming.StreamEvent]durable.Seq)}
+	s := &sessionLog{
+		subs: make(map[chan streaming.StreamEvent]durable.Seq),
+		kick: make(chan struct{}),
+	}
 	l.sessions[id] = s
 	return s
 }
@@ -104,13 +109,17 @@ func (s *sessionLog) visibleAfter(after durable.Seq) ([]streaming.StreamEvent, d
 	return out, after
 }
 
-func (s *sessionLog) dropSub(ch chan streaming.StreamEvent) {
+func (s *sessionLog) unregister(ch chan streaming.StreamEvent) {
 	s.mu.Lock()
-	if _, ok := s.subs[ch]; ok {
-		delete(s.subs, ch)
-		close(ch)
-	}
+	delete(s.subs, ch)
 	s.mu.Unlock()
+}
+
+// kickSubs ends live tails. Caller holds s.mu. Subscriber goroutines close their channels.
+func (s *sessionLog) kickSubs() {
+	close(s.kick)
+	s.kick = make(chan struct{})
+	clear(s.subs)
 }
 
 // Subscribe implements durable.EventLog. It replays seq > after then tails.
@@ -124,22 +133,24 @@ func (l *MemoryEventLog) Subscribe(ctx context.Context, sessionID durable.Sessio
 		close(ch)
 		return ch, nil
 	}
+	kick := s.kick
 	replay, after := s.visibleAfter(after)
 	s.mu.Unlock()
 
 	go func() {
+		defer close(ch)
 		for _, ev := range replay {
 			select {
 			case ch <- ev:
 			case <-ctx.Done():
-				s.dropSub(ch)
+				return
+			case <-kick:
 				return
 			}
 		}
 		s.mu.Lock()
-		if s.closed {
+		if s.closed || s.kick != kick {
 			s.mu.Unlock()
-			close(ch)
 			return
 		}
 		extra, after := s.visibleAfter(after)
@@ -149,12 +160,18 @@ func (l *MemoryEventLog) Subscribe(ctx context.Context, sessionID durable.Sessio
 			select {
 			case ch <- ev:
 			case <-ctx.Done():
-				s.dropSub(ch)
+				s.unregister(ch)
+				return
+			case <-kick:
+				s.unregister(ch)
 				return
 			}
 		}
-		<-ctx.Done()
-		s.dropSub(ch)
+		select {
+		case <-ctx.Done():
+		case <-kick:
+		}
+		s.unregister(ch)
 	}()
 	return ch, nil
 }
@@ -178,10 +195,7 @@ func (l *MemoryEventLog) EndSubscribers(sessionID durable.SessionID) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for ch := range s.subs {
-		close(ch)
-		delete(s.subs, ch)
-	}
+	s.kickSubs()
 }
 
 // CloseSession implements durable.EventLog. It drops the log so a later session
@@ -200,10 +214,7 @@ func (l *MemoryEventLog) CloseSession(_ context.Context, sessionID durable.Sessi
 	defer s.mu.Unlock()
 	s.closed = true
 	s.entries = nil
-	for ch := range s.subs {
-		close(ch)
-		delete(s.subs, ch)
-	}
+	s.kickSubs()
 	return nil
 }
 

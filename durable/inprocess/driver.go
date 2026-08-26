@@ -27,7 +27,7 @@ const (
 	turnError
 )
 
-func (r *Runtime) constructHarness(ctx context.Context, p *sessionProc, load bool, bindings []vfs.Binding) (*tacklr.AgentHarness, *vfs.MountSession, error) {
+func (r *Runtime) constructHarness(ctx context.Context, p *sessionProc, load bool, bindings []vfs.Binding) (*tacklr.TurnManager, *vfs.MountSession, error) {
 	if p.agentID == "" {
 		return nil, nil, fmt.Errorf("no agent configured for session")
 	}
@@ -47,20 +47,22 @@ func (r *Runtime) constructHarness(ctx context.Context, p *sessionProc, load boo
 	if err != nil {
 		return nil, nil, err
 	}
-	mcpConfigs := make([]mcp.MCPConfig, 0, len(spec.Options.MCPConfigs)+len(p.mcp))
-	mcpConfigs = append(mcpConfigs, spec.Options.MCPConfigs...)
-	mcpConfigs = append(mcpConfigs, p.mcp...)
 	opts := spec.Options
 	opts.SessionID = threadID
-	opts.MCPConfigs = mcpConfigs
 	opts.MountSession = ms
+	if len(p.mcp) > 0 {
+		mcpConfigs := make([]mcp.MCPConfig, 0, len(spec.Options.MCPConfigs)+len(p.mcp))
+		mcpConfigs = append(mcpConfigs, spec.Options.MCPConfigs...)
+		mcpConfigs = append(mcpConfigs, p.mcp...)
+		opts.MCPConfigs = mcpConfigs
+	}
 
-	h, err := tacklr.NewAgent(ctx, opts)
+	h, err := tacklr.NewTurnManager(ctx, opts)
 	if err != nil {
 		durable.CloseTurnVFS(ms, threadID, "construct")
 		return nil, nil, err
 	}
-	drive.EngineOf(h).SetChildHost(sessionChildren{r: r, p: p})
+	h.BindChildHost(sessionChildren{r: r, p: p})
 	if load {
 		snap, etag, loadErr := r.snapshots.Load(ctx, p.id)
 		switch {
@@ -82,7 +84,7 @@ func (r *Runtime) constructHarness(ctx context.Context, p *sessionProc, load boo
 	return h, ms, nil
 }
 
-func (r *Runtime) persistHarness(ctx context.Context, p *sessionProc, h *tacklr.AgentHarness) error {
+func (r *Runtime) persistHarness(ctx context.Context, p *sessionProc, h *tacklr.TurnManager) error {
 	cp, err := h.Checkpoint()
 	if err != nil {
 		telemetry.RecordCheckpointAttempt(ctx, err)
@@ -134,10 +136,15 @@ func (r *Runtime) runTurn(ctx context.Context, p *sessionProc, user *tacklr.Mess
 		durable.CloseTurnVFS(ms, string(p.id), "turn_end")
 	}()
 
-	eng := drive.EngineOf(h)
+	eng := h.Drive()
 	out, stop := drive.PipeStreamEvents(func(ev streaming.StreamEvent) {
-		if ev.Type == streaming.StreamEventComplete && durable.ChildrenNudge(r.childStatuses(p)) != "" {
-			return
+		if ev.Type == streaming.StreamEventComplete {
+			p.mu.Lock()
+			n := len(p.children)
+			p.mu.Unlock()
+			if n > 0 {
+				return
+			}
 		}
 		r.emit(ctx, p, ev)
 	})
@@ -171,11 +178,18 @@ func (r *Runtime) runTurn(ctx context.Context, p *sessionProc, user *tacklr.Mess
 
 	st := &drive.TurnState{}
 	toolCalls := eng.PendingToolCalls()
+	parked := false
+	inferComplete := false
 	for {
 		if ctx.Err() != nil {
 			return cancelled()
 		}
-		if len(toolCalls) == 0 {
+		nudge := ""
+		if len(toolCalls) == 0 && !parked && inferComplete {
+			nudge = durable.ChildrenNudge(r.childStatuses(p))
+		}
+		switch drive.Next(len(toolCalls), parked, inferComplete, nudge != "") {
+		case drive.ActionInfer:
 			step, infErr := eng.RunInference(ctx, st, out)
 			if ctx.Err() != nil {
 				return cancelled()
@@ -190,62 +204,68 @@ func (r *Runtime) runTurn(ctx context.Context, p *sessionProc, user *tacklr.Mess
 				return turnError
 			}
 			if step.Complete {
-				if nudge := durable.ChildrenNudge(r.childStatuses(p)); nudge != "" {
-					if err := eng.AbsorbUser(ctx, &tacklr.Message{Role: tacklr.RoleUser, Content: nudge}, out); err != nil {
-						return r.fail(ctx, p, err)
-					}
-					st.HadToolRound = true
-					continue
-				}
-				r.captureResult(p, h)
-				if err := r.persistHarness(ctx, p, h); err != nil {
-					return r.fail(ctx, p, err)
-				}
-				return turnComplete
+				inferComplete = true
+				toolCalls = nil
+				continue
 			}
 			toolCalls = step.ToolCalls
-			continue
-		}
-		st.HadToolRound = true
-		// One harness, one snapshot: run the whole batch like embed. Temporal
-		// cannot do this (activity etag chain); it keeps leftovers in history.
-		var parked atomic.Bool
-		var wg sync.WaitGroup
-		for _, tc := range toolCalls {
-			wg.Add(1)
-			go func(tc streaming.ToolCall) {
-				defer wg.Done()
-				if ctx.Err() != nil {
-					return
-				}
-				step, _ := eng.RunToolCall(ctx, tc, out)
-				if step.Interrupted {
-					parked.Store(true)
-				}
-			}(tc)
-		}
-		wg.Wait()
-		if ctx.Err() != nil {
-			return cancelled()
-		}
-		if err := r.persistHarness(ctx, p, h); err != nil {
-			return r.fail(ctx, p, err)
-		}
-		if parked.Load() {
+		case drive.ActionRunTools:
+			st.HadToolRound = true
+			var hit atomic.Bool
+			var wg sync.WaitGroup
+			for _, tc := range toolCalls {
+				wg.Add(1)
+				go func(tc streaming.ToolCall) {
+					defer wg.Done()
+					if ctx.Err() != nil {
+						return
+					}
+					step, _ := eng.RunToolCall(ctx, tc, out)
+					if step.Interrupted {
+						hit.Store(true)
+					}
+				}(tc)
+			}
+			wg.Wait()
+			if ctx.Err() != nil {
+				return cancelled()
+			}
+			if err := r.persistHarness(ctx, p, h); err != nil {
+				return r.fail(ctx, p, err)
+			}
+			parked = hit.Load()
+			toolCalls = nil
+		case drive.ActionYield:
 			return turnYield
+		case drive.ActionComplete:
+			r.captureResult(p, h)
+			if err := r.persistHarness(ctx, p, h); err != nil {
+				return r.fail(ctx, p, err)
+			}
+			return turnComplete
+		case drive.ActionNudge:
+			if err := eng.AbsorbUser(ctx, &tacklr.Message{Role: tacklr.RoleUser, Content: nudge}, out); err != nil {
+				return r.fail(ctx, p, err)
+			}
+			st.HadToolRound = true
+			inferComplete = false
 		}
-		toolCalls = nil
 	}
 }
 
-func (r *Runtime) captureResult(p *sessionProc, h *tacklr.AgentHarness) {
-	for _, m := range h.Messages() {
+func (r *Runtime) captureResult(p *sessionProc, h *tacklr.TurnManager) {
+	var result string
+	for _, m := range h.Drive().Messages() {
 		if m != nil && m.Role == tacklr.RoleAssistant && m.Content != "" {
-			p.mu.Lock()
-			p.result = m.Content
-			p.mu.Unlock()
+			result = m.Content
 		}
 	}
+	if result == "" {
+		return
+	}
+	p.mu.Lock()
+	p.result = result
+	p.mu.Unlock()
 }
 
 func (r *Runtime) recordTurn(ctx context.Context, agentID, threadID, kind string, promptLen, resumeCount int) (context.Context, func(turnOutcome)) {

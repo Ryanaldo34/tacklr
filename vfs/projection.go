@@ -23,19 +23,15 @@ type FuseProjection struct{}
 // Available reports whether this process can mount a FUSE tree.
 func (FuseProjection) Available() bool { return FuseAvailable() }
 
-// Attach projects ms under /tmp/tacklr-fuse/<sessionID>, retrying once with a -1 suffix.
+// Attach projects ms under /tmp/tacklr-fuse/<sessionID>.
 func (FuseProjection) Attach(ms *MountSession, sessionID string) error {
-	base := filepath.Join(os.TempDir(), "tacklr-fuse", sanitizeFuseSessionID(sessionID))
-	attempted := make([]string, 0, 2)
-	err := mountFuseAt(ms, base, &attempted)
-	if err != nil {
-		_ = syscall.Unmount(base, 0)
-		err = mountFuseAt(ms, base+"-1", &attempted)
+	dir := filepath.Join(os.TempDir(), "tacklr-fuse", sanitizeFuseSessionID(sessionID))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
 	}
-	if err != nil {
-		for _, d := range attempted {
-			_ = os.Remove(d)
-		}
+	_ = syscall.Unmount(dir, 0)
+	if err := ms.FuseMount(dir); err != nil {
+		_ = os.Remove(dir)
 		return err
 	}
 	return nil
@@ -50,22 +46,7 @@ func (DirectProjection) Available() bool { return true }
 // Attach is a no-op: the MountSession is already the agent-facing tree.
 func (DirectProjection) Attach(*MountSession, string) error { return nil }
 
-func mountFuseAt(ms *MountSession, dir string, attempted *[]string) error {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	*attempted = append(*attempted, dir)
-	_ = syscall.Unmount(dir, 0)
-	return ms.FuseMount(dir)
-}
-
 func sanitizeFuseSessionID(id string) string {
-	if id == "" || id == "." || id == ".." {
-		return "session"
-	}
-	if !strings.ContainsAny(id, `/\`) {
-		return id
-	}
 	return strings.Map(func(r rune) rune {
 		if r == '/' || r == '\\' {
 			return '_'

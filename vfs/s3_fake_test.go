@@ -557,6 +557,33 @@ func TestS3Provider_openWriteClose(t *testing.T) {
 	_ = p2
 }
 
+func TestBlobFactory_containerParam(t *testing.T) {
+	ctx := context.Background()
+	api := newMemS3()
+	factory := vfs.BlobFactory{ID: "blob", Client: api, DefaultContainer: "def"}
+	reg := vfs.NewBackendRegistry()
+	if err := reg.Register(factory); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := vfs.NewMountSession("blob-mem", reg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.Mount(ctx, vfs.MountSpec{
+		Point: "/data", Profile: "blob",
+		Params: map[string]string{"container": "c1", "prefix": "runs/1"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.WriteFile(ctx, "/data/hello.go", []byte("package main\n")); err != nil {
+		t.Fatal(err)
+	}
+	b, err := ms.ReadFile(ctx, "/data/hello.go")
+	if err != nil || string(b) != "package main\n" {
+		t.Fatalf("ReadFile=%q err=%v", b, err)
+	}
+}
+
 // TestOpenDocument_providerMediaType: specific S3 Content-Type wins; octet-stream does not.
 func TestOpenDocument_providerMediaType(t *testing.T) {
 	ctx := context.Background()

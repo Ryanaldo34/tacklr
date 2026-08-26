@@ -348,14 +348,14 @@ func (t *Tool) invokeRaw(ctx context.Context, argsJson string, runtime HarnessRu
 	select {
 	case res := <-done:
 		if res.err != nil && ctx.Err() == nil && errors.Is(res.err, context.DeadlineExceeded) {
-			return toolCallResult{}, fmt.Errorf("tool %q: %w", t.name, ErrToolTimeout)
+			return toolCallResult{}, Correctionf(ErrToolTimeout, "%s timed out. Retry with a smaller request, fewer URLs, or a narrower search", t.name)
 		}
 		return res.res, res.err
 	case <-callCtx.Done():
 		if err := ctx.Err(); err != nil {
 			return toolCallResult{}, err
 		}
-		return toolCallResult{}, fmt.Errorf("tool %q: %w", t.name, ErrToolTimeout)
+		return toolCallResult{}, Correctionf(ErrToolTimeout, "%s timed out. Retry with a smaller request, fewer URLs, or a narrower search", t.name)
 	}
 }
 

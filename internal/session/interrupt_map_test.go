@@ -65,3 +65,10 @@ func TestInterruptMap_unmarshalEmptyBytes(t *testing.T) {
 		t.Fatalf("decoded = %#v", decoded)
 	}
 }
+
+func TestInterruptMap_unmarshalInvalidJSON(t *testing.T) {
+	var decoded interruptMap
+	if err := decoded.UnmarshalJSON([]byte(`{`)); err == nil {
+		t.Fatal("want invalid JSON")
+	}
+}

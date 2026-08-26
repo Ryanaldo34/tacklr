@@ -9,8 +9,9 @@ import (
 	"strings"
 )
 
-// Mutation is one write against a virtual path. Exactly one mode must be set:
-// Content, Old, BlockID, Start, or Blocks.
+// Mutation is one write against a virtual path. Addresses are replace-whole
+// (Content) or replace-span (line Start/End, or BlockID including Sheet!A1).
+// Old/New finds a span; Blocks is create/replace of structured IR on Apply.
 type Mutation struct {
 	Rev            string
 	Content        *string
@@ -76,7 +77,7 @@ func (ms *MountSession) Apply(ctx context.Context, virtualPath string, mut Mutat
 	case n == 0:
 		return ApplyResult{}, fmt.Errorf("write: nothing to change")
 	case n > 1:
-		return ApplyResult{}, fmt.Errorf("write: pass only one change: content, line range, old/new, or block_id")
+		return ApplyResult{}, fmt.Errorf("write: pass only one change: content, line range, or block_id")
 	}
 
 	fi, err := ms.Stat(ctx, p)
@@ -213,7 +214,7 @@ func looksLikeHTML(s string) bool {
 }
 
 func (ms *MountSession) applySubstring(ctx context.Context, p string, mut Mutation) (ApplyResult, error) {
-	if *mut.Old == "" {
+	if mut.Old == nil || *mut.Old == "" {
 		return ApplyResult{}, fmt.Errorf("old is required; pass the exact unique substring to replace")
 	}
 	doc, err := ms.checkout(ctx, p, mut.Rev)
@@ -235,11 +236,11 @@ func (ms *MountSession) applySubstring(ctx context.Context, p string, mut Mutati
 	case !mut.ReplaceAll && n != 1:
 		return ApplyResult{}, fmt.Errorf("old text occurs %d times; pass replace_all=true or a unique substring", n)
 	}
+	limit := 1
 	if mut.ReplaceAll {
-		if err := doc.SetText(strings.ReplaceAll(body, *mut.Old, repl)); err != nil {
-			return ApplyResult{}, err
-		}
-	} else if err := doc.SetText(strings.Replace(body, *mut.Old, repl, 1)); err != nil {
+		limit = n
+	}
+	if err := doc.SetText(strings.Replace(body, *mut.Old, repl, limit)); err != nil {
 		return ApplyResult{}, err
 	}
 	out, err := ms.stage(ctx, doc)
@@ -395,8 +396,9 @@ func mergeTabBlocks(rd Rich, next []Block, tabID string) ([]Block, error) {
 			}
 		}
 		if len(tabs) > 0 {
-			var keep []Block
-			for _, b := range rd.Blocks() {
+			existing := rd.Blocks()
+			keep := make([]Block, 0, len(existing))
+			for _, b := range existing {
 				if blockAttr(b, "tab_id") != tabID {
 					keep = append(keep, b)
 				}

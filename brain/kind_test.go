@@ -75,20 +75,18 @@ func TestValidateFiltersAgainst_catalogRules(t *testing.T) {
 	// Each case is a distinct return path under a non-empty catalog.
 	cases := []struct {
 		name    string
-		filters brain.Filters
+		filters brain.Filter
 		wantErr string // empty ⇒ expect success
 	}{
-		{"property requires kind", brain.Filters{"stage": "open"}, "require a kind"},
-		{"unregistered kind", brain.Filters{"kind": "Orphan"}, "not registered"},
-		{"unknown property", brain.Filters{"kind": "Document", "unknown": "x"}, "not filterable"},
-		{"wrong type", brain.Filters{"kind": "Document", "stage": 1}, "want string"},
-		{"kind list intersection", brain.Filters{"kind": []any{"Document", "Deal"}, "stage": "open"}, "not filterable"},
-		{"valid single kind", brain.Filters{"kind": "Document", "stage": "open"}, ""},
-		{"valid list filter", brain.Filters{"kind": "Document", "stage": []any{"open", "closed"}}, ""},
-		{"valid shared field on one kind", brain.Filters{"kind": "Deal", "amount": 42}, ""},
-		{"valid multi-kind shared field", brain.Filters{"kind": []any{"Document", "Deal"}, "amount": 1.5}, ""},
-		{"kind list empty", brain.Filters{"kind": []any{}}, "list is empty"},
-		{"kind list non-string", brain.Filters{"kind": []any{1}}, "non-empty string"},
+		{"property requires kind", brain.MustFilter(map[string]any{"stage": "open"}), "require a kind"},
+		{"unregistered kind", brain.MustFilter(map[string]any{"kind": "Orphan"}), "not registered"},
+		{"unknown property", brain.MustFilter(map[string]any{"kind": "Document", "unknown": "x"}), "not filterable"},
+		{"wrong type", brain.MustFilter(map[string]any{"kind": "Document", "stage": 1}), "want string"},
+		{"kind list intersection", brain.MustFilter(map[string]any{"kind": []any{"Document", "Deal"}, "stage": "open"}), "not filterable"},
+		{"valid single kind", brain.MustFilter(map[string]any{"kind": "Document", "stage": "open"}), ""},
+		{"valid list filter", brain.MustFilter(map[string]any{"kind": "Document", "stage": []any{"open", "closed"}}), ""},
+		{"valid shared field on one kind", brain.MustFilter(map[string]any{"kind": "Deal", "amount": 42}), ""},
+		{"valid multi-kind shared field", brain.MustFilter(map[string]any{"kind": []any{"Document", "Deal"}, "amount": 1.5}), ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -126,7 +124,7 @@ func TestEmptyCatalog_openFiltersAndStoreSchema(t *testing.T) {
 	if err != nil || len(res.Kinds) != 1 || res.Kinds[0].Description != "from store" {
 		t.Fatalf("store schema: %+v err=%v", res, err)
 	}
-	if err := brain.ValidateFiltersAgainst(brain.Filters{"stage": "open"}, eng.Catalog()); err != nil {
+	if err := brain.ValidateFiltersAgainst(brain.MustFilter(map[string]any{"stage": "open"}), eng.Catalog()); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -223,7 +221,7 @@ func TestSearch_catalogRestrictsKindsAndAllowsFilteredHit(t *testing.T) {
 	scope := brain.Scope{Namespace: &ns}
 
 	page, err := eng.Search(ctx, scope, brain.SearchRequest{
-		Query: "negotiation", Filters: brain.Filters{"kind": "Chunk"},
+		Query: "negotiation", Filters: brain.MustFilter(map[string]any{"kind": "Chunk"}),
 	}, sc)
 	if err != nil {
 		t.Fatal(err)

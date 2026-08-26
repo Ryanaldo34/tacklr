@@ -121,12 +121,14 @@ func TestTextDocument_markdownStructureEdges(t *testing.T) {
 		"#   \n\n" + // empty title after strip → section
 		"## Child\n\n" +
 		"# Root\n\n" + // collision at root → root-2
+		"# Closed ##\n\n" + // ATX closing hashes with space are stripped
+		"# Tight##\n\n" + // no space before closing hashes: kept
 		"body under second root\n"
 	doc := vfs.NewTextDocument("/work/edges.md", "text/markdown", "utf-8", md)
 	blocks := doc.Blocks()
 	ids := blockIDs(blocks)
-	// Expect: root, section (empty title), section/child, root-2
-	want := []string{"root", "section", "section/child", "root-2"}
+	// Expect: root, section (empty title), section/child, root-2, closed, tight
+	want := []string{"root", "section", "section/child", "root-2", "closed", "tight"}
 	if len(ids) != len(want) {
 		t.Fatalf("ids=%v want %v\ntext:\n%s", ids, want, md)
 	}

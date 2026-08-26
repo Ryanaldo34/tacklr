@@ -3,7 +3,6 @@ package brain
 import (
 	"context"
 	"fmt"
-	"maps"
 	"strings"
 
 	"github.com/google/uuid"
@@ -13,7 +12,7 @@ import (
 type FindObjectsRequest struct {
 	Query   string
 	Kinds   []string // optional host kind names; empty = all kinds
-	Filters Filters  // same property keys as search; see schema filterable_fields
+	Filters Filter   // same property keys as search; see schema filterable_fields
 	Limit   int
 }
 
@@ -33,6 +32,10 @@ func (e *Engine) FindObjects(ctx context.Context, scope Scope, req FindObjectsRe
 		return page, fmt.Errorf("%w: query is required", ErrInvalid)
 	}
 	filters, err := e.prepareFindObjectFilters(req)
+	if err != nil {
+		return page, err
+	}
+	plan, err := compileFilters(filters)
 	if err != nil {
 		return page, err
 	}
@@ -99,7 +102,7 @@ func (e *Engine) FindObjects(ctx context.Context, scope Scope, req FindObjectsRe
 				continue
 			}
 		}
-		if len(filters) > 0 && !objectMatchesFilters(o, filters) {
+		if !plan.match(o) {
 			continue
 		}
 		r := RichFromObject(o, false)
@@ -153,33 +156,26 @@ func (e *Engine) applyRerank(ctx context.Context, objects []RichObject) ([]RichO
 }
 
 // prepareFindObjectFilters merges request kinds into filters and validates against catalog.
-func (e *Engine) prepareFindObjectFilters(req FindObjectsRequest) (Filters, error) {
-	f := Filters(nil)
-	if len(req.Filters) > 0 {
-		f = maps.Clone(req.Filters)
-	}
+func (e *Engine) prepareFindObjectFilters(req FindObjectsRequest) (Filter, error) {
+	f := cloneFilter(req.Filters)
 	if len(req.Kinds) > 0 {
-		if f == nil {
-			f = Filters{}
-		}
-		// Explicit kinds win over a conflicting kind key in Filters.
-		list := make([]any, 0, len(req.Kinds))
+		names := make([]string, 0, len(req.Kinds))
 		for _, k := range req.Kinds {
 			if k = strings.TrimSpace(k); k != "" {
-				list = append(list, k)
+				names = append(names, k)
 			}
 		}
-		if len(list) == 1 {
-			f[filterKind] = list[0]
-		} else if len(list) > 1 {
-			f[filterKind] = list
+		if len(names) == 1 {
+			f.Kind = StringMatch{Eq: names[0]}
+		} else if len(names) > 1 {
+			f.Kind = StringMatch{In: names}
 		}
 	}
-	if len(f) == 0 {
-		return nil, nil
+	if f.empty() {
+		return Filter{}, nil
 	}
 	if err := ValidateFiltersAgainst(f, e.catalog); err != nil {
-		return nil, err
+		return Filter{}, err
 	}
 	if !e.catalog.Empty() {
 		e.catalog.Freeze()

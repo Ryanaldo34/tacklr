@@ -129,7 +129,7 @@ func TestPostgresStore_liveRetrievalChannels(t *testing.T) {
 	}
 
 	// BM25 lexical: oauth terms should rank the oauth chunk over pasta.
-	lex, err := store.SearchLexical(ctx, scopeA, "oauth pkce", brain.Filters{"kind": "Chunk"}, 5)
+	lex, err := store.SearchLexical(ctx, scopeA, "oauth pkce", brain.MustFilter(map[string]any{"kind": "Chunk"}), 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +145,7 @@ func TestPostgresStore_liveRetrievalChannels(t *testing.T) {
 	}
 
 	// Property filter on lexical channel.
-	lexOpen, err := store.SearchLexical(ctx, scopeA, "oauth", brain.Filters{"stage": "open"}, 5)
+	lexOpen, err := store.SearchLexical(ctx, scopeA, "oauth", brain.MustFilter(map[string]any{"stage": "open"}), 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +154,7 @@ func TestPostgresStore_liveRetrievalChannels(t *testing.T) {
 	}
 
 	// Vector: query near [1,0,0] should rank oauth chunk first.
-	vec, err := store.SearchVector(ctx, scopeA, []float32{0.95, 0.05, 0}, brain.Filters{"kind": "Chunk"}, 5)
+	vec, err := store.SearchVector(ctx, scopeA, []float32{0.95, 0.05, 0}, brain.MustFilter(map[string]any{"kind": "Chunk"}), 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +165,7 @@ func TestPostgresStore_liveRetrievalChannels(t *testing.T) {
 		t.Fatalf("vector parent: %+v", vec[0])
 	}
 
-	vecOpen, err := store.SearchVector(ctx, scopeA, []float32{0.5, 0.5, 0}, brain.Filters{"stage": "open"}, 5)
+	vecOpen, err := store.SearchVector(ctx, scopeA, []float32{0.5, 0.5, 0}, brain.MustFilter(map[string]any{"stage": "open"}), 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +173,7 @@ func TestPostgresStore_liveRetrievalChannels(t *testing.T) {
 		t.Fatalf("vector property filter: %+v", vecOpen)
 	}
 
-	tri, err := store.SearchTrigram(ctx, scopeA, "pkce flow", nil, 5)
+	tri, err := store.SearchTrigram(ctx, scopeA, "pkce flow", brain.Filter{}, 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,14 +181,14 @@ func TestPostgresStore_liveRetrievalChannels(t *testing.T) {
 		t.Fatalf("trigram top hit: %+v", tri)
 	}
 
-	vecB, err := store.SearchVector(ctx, brain.Scope{Namespace: &nsB}, []float32{1, 0, 0}, nil, 5)
+	vecB, err := store.SearchVector(ctx, brain.Scope{Namespace: &nsB}, []float32{1, 0, 0}, brain.Filter{}, 5)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(vecB) != 0 {
 		t.Fatalf("nsB must have no vector parts: %+v", vecB)
 	}
-	lexB, err := store.SearchLexical(ctx, brain.Scope{Namespace: &nsB}, "oauth", nil, 5)
+	lexB, err := store.SearchLexical(ctx, brain.Scope{Namespace: &nsB}, "oauth", brain.Filter{}, 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,22 +199,22 @@ func TestPostgresStore_liveRetrievalChannels(t *testing.T) {
 	// Date / title / list filters on live SQL (same FilterPlan as Memory).
 	after := now.Add(-time.Hour).Format(time.RFC3339)
 	before := now.Add(time.Hour).Format(time.RFC3339)
-	lexDate, err := store.SearchLexical(ctx, scopeA, "oauth", brain.Filters{
+	lexDate, err := store.SearchLexical(ctx, scopeA, "oauth", brain.MustFilter(map[string]any{
 		"updated_after":  after,
 		"updated_before": before,
 		"created_after":  after,
 		"created_before": before,
 		"title":          "pkce flow",
-	}, 5)
+	}), 5)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(lexDate) != 1 || lexDate[0].ID != chunkOAuth {
 		t.Fatalf("date/title filters: %+v", lexDate)
 	}
-	lexList, err := store.SearchLexical(ctx, scopeA, "oauth", brain.Filters{
+	lexList, err := store.SearchLexical(ctx, scopeA, "oauth", brain.MustFilter(map[string]any{
 		"stage": []any{"open", "closed"},
-	}, 5)
+	}), 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,16 +236,16 @@ func TestPostgresStore_liveEmptyChannels(t *testing.T) {
 		t.Fatal(err)
 	}
 	scope := brain.Scope{}
-	if got, err := store.SearchVector(ctx, scope, nil, nil, 10); err != nil || got != nil {
+	if got, err := store.SearchVector(ctx, scope, nil, brain.Filter{}, 10); err != nil || got != nil {
 		t.Fatalf("empty embedding: got=%v err=%v", got, err)
 	}
-	if got, err := store.SearchTrigram(ctx, scope, "", nil, 10); err != nil || got != nil {
+	if got, err := store.SearchTrigram(ctx, scope, "", brain.Filter{}, 10); err != nil || got != nil {
 		t.Fatalf("empty query: got=%v err=%v", got, err)
 	}
-	if got, err := store.SearchLexical(ctx, scope, "x", nil, 0); err != nil || got != nil {
+	if got, err := store.SearchLexical(ctx, scope, "x", brain.Filter{}, 0); err != nil || got != nil {
 		t.Fatalf("k=0 lexical: got=%v err=%v", got, err)
 	}
-	if got, err := store.SearchLexical(ctx, scope, "", nil, 10); err != nil || got != nil {
+	if got, err := store.SearchLexical(ctx, scope, "", brain.Filter{}, 10); err != nil || got != nil {
 		t.Fatalf("empty lexical query: got=%v err=%v", got, err)
 	}
 }
@@ -390,7 +390,7 @@ func TestPut_livePostgresUpsertAndSoftDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lex, err := store.SearchLexical(ctx, scope, "oauth", brain.Filters{"kind": "Chunk"}, 5)
+	lex, err := store.SearchLexical(ctx, scope, "oauth", brain.MustFilter(map[string]any{"kind": "Chunk"}), 5)
 	if err != nil || len(lex) == 0 || lex[0].ID != chunk.ID {
 		t.Fatalf("lexical after put: %+v err=%v", lex, err)
 	}
@@ -401,7 +401,7 @@ func TestPut_livePostgresUpsertAndSoftDelete(t *testing.T) {
 	if _, err := store.Get(ctx, scope, chunk.ID); !errors.Is(err, brain.ErrNotFound) {
 		t.Fatalf("soft-deleted chunk: %v", err)
 	}
-	lex, err = store.SearchLexical(ctx, scope, "oauth", brain.Filters{"kind": "Chunk"}, 5)
+	lex, err = store.SearchLexical(ctx, scope, "oauth", brain.MustFilter(map[string]any{"kind": "Chunk"}), 5)
 	if err != nil || len(lex) != 0 {
 		t.Fatalf("search excludes soft-deleted: %+v err=%v", lex, err)
 	}
@@ -549,7 +549,7 @@ func TestEngine_livePostgresMultiTurnWriteSearch(t *testing.T) {
 	if _, err := store.Get(ctx, scope, c1.ID); !errors.Is(err, brain.ErrNotFound) {
 		t.Fatalf("soft-deleted get: %v", err)
 	}
-	lex, err := store.SearchLexical(ctx, scope, "oauth", brain.Filters{"kind": "Chunk"}, 10)
+	lex, err := store.SearchLexical(ctx, scope, "oauth", brain.MustFilter(map[string]any{"kind": "Chunk"}), 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -664,14 +664,14 @@ func TestApplyKinds_livePostgresMigration(t *testing.T) {
 	if err != nil || len(schema.Kinds) != 1 || schema.Kinds[0].Description != "parent docs v2" {
 		t.Fatalf("schema after load: %+v err=%v", schema, err)
 	}
-	if err := brain.ValidateFiltersAgainst(brain.Filters{
+	if err := brain.ValidateFiltersAgainst(brain.MustFilter(map[string]any{
 		"kind": "Document", "stage": "open",
-	}, eng2.Catalog()); err != nil {
+	}), eng2.Catalog()); err != nil {
 		t.Fatal(err)
 	}
-	if err := brain.ValidateFiltersAgainst(brain.Filters{
+	if err := brain.ValidateFiltersAgainst(brain.MustFilter(map[string]any{
 		"kind": "Document", "unknown": "x",
-	}, eng2.Catalog()); err == nil {
+	}), eng2.Catalog()); err == nil {
 		t.Fatal("want unknown property rejected after load")
 	}
 }
