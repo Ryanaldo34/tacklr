@@ -798,8 +798,20 @@ func TestSessionWorkflow_listChildren(t *testing.T) {
 				return
 			}
 			if last != nil && last.Role == tacklr.RoleTool {
-				if strings.Contains(last.Content, "Child sessions:") {
+				if strings.Contains(last.Content, "cancelled and removed") {
 					ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "listed", IsComplete: true}
+					return
+				}
+				if strings.Contains(last.Content, "Child sessions:") {
+					childID := string(durable.ChildSessionID("sess-list-children", "researcher", "sp1"))
+					ch <- tacklr.LLMResponseChunk{
+						Type: tacklr.StreamEventFunctionCall,
+						ToolCalls: []tacklr.ToolCall{{
+							ID: "cc1", CallID: "cc1", Name: "cancel_child",
+							Arguments: `{"child_id":"` + childID + `"}`,
+						}},
+						IsComplete: true,
+					}
 					return
 				}
 				ch <- tacklr.LLMResponseChunk{
@@ -833,21 +845,25 @@ func TestSessionWorkflow_listChildren(t *testing.T) {
 	fallback := inprocess.NewMemoryEventLog()
 	env.RegisterWorkflow(SessionWorkflow)
 	env.RegisterActivity(newActs(cat, fallback, true))
+	env.OnRequestCancelExternalWorkflow(mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	id := durable.SessionID("sess-list-children")
 	env.RegisterDelayedCallback(func() { env.SignalWorkflow(signalPrompt, promptSignal{Text: "go"}) }, time.Millisecond)
-	env.RegisterDelayedCallback(func() { env.SignalWorkflow(signalClose, nil) }, 80*time.Millisecond)
+	env.RegisterDelayedCallback(func() { env.SignalWorkflow(signalClose, nil) }, 120*time.Millisecond)
 	env.ExecuteWorkflow(SessionWorkflow, WorkflowInput{SessionID: id, AgentID: "default"})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
-	var listed bool
+	var listed, cancelled bool
 	for _, ev := range drainLog(t, fallback, id) {
 		if ev.Type == streaming.StreamEventMessage && ev.Content == "listed" {
 			listed = true
 		}
+		if ev.Type == streaming.StreamEventToolResult && strings.Contains(ev.Content, "cancelled and removed") {
+			cancelled = true
+		}
 	}
-	if !listed {
-		t.Fatalf("want listed after list_children, got %+v", drainLog(t, fallback, id))
+	if !listed || !cancelled {
+		t.Fatalf("want listed after cancel_child, listed=%v cancelled=%v got %+v", listed, cancelled, drainLog(t, fallback, id))
 	}
 }
 

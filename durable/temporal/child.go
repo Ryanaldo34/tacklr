@@ -57,15 +57,7 @@ func dropChild(spawned *[]childRun, id durable.SessionID) {
 func childOps(spawned []childRun) []durable.ChildOp {
 	out := make([]durable.ChildOp, len(spawned))
 	for i, c := range spawned {
-		st := durable.SessionRunning
-		if c.done {
-			if c.err != "" {
-				st = durable.SessionFailed
-			} else {
-				st = durable.SessionComplete
-			}
-		}
-		out[i] = durable.ChildOp{ID: c.id, Specialist: c.spec, State: durable.ChildState(st), Result: c.result}
+		out[i] = durable.ChildOp{ID: c.id, Specialist: c.spec, State: tacklr.ChildRunning, Result: c.result}
 	}
 	return out
 }
@@ -221,14 +213,7 @@ func (a *activityChildren) SpawnChild(_ context.Context, specialist, task, callI
 func (a *activityChildren) Children() []tacklr.Child {
 	out := make([]tacklr.Child, 0, len(a.ops))
 	for _, op := range a.ops {
-		if op.Cancel {
-			continue
-		}
-		state := op.State
-		if state == "" {
-			state = tacklr.ChildRunning
-		}
-		out = append(out, tacklr.Child{ID: string(op.ID), Specialist: op.Specialist, State: state, Result: op.Result})
+		out = append(out, tacklr.Child{ID: string(op.ID), Specialist: op.Specialist, State: op.State, Result: op.Result})
 	}
 	return out
 }
@@ -248,19 +233,6 @@ func (a *activityChildren) AwaitChild(_ context.Context, id, _ string) (tacklr.C
 	i := findOp(a.ops, sid)
 	if i < 0 {
 		return tacklr.Child{}, false, durable.UnknownChild(id)
-	}
-	op := a.ops[i]
-	switch op.State {
-	case tacklr.ChildCompleted:
-		a.ops = append(a.ops[:i], a.ops[i+1:]...)
-		return tacklr.Child{ID: id, Specialist: op.Specialist, State: tacklr.ChildCompleted, Result: op.Result}, false, nil
-	case tacklr.ChildFailed:
-		a.ops = append(a.ops[:i], a.ops[i+1:]...)
-		err := fmt.Errorf("%s: %w", op.Result, tacklr.ErrFailed)
-		if op.Result == "" {
-			err = fmt.Errorf("failed: %w", tacklr.ErrFailed)
-		}
-		return tacklr.Child{ID: id, Specialist: op.Specialist, State: tacklr.ChildFailed, Result: op.Result}, false, err
 	}
 	a.ops[i].Await = true
 	return tacklr.Child{}, true, nil
