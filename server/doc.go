@@ -9,5 +9,5 @@
 //
 // RunTurn pumps Runtime.Prompt/Resume/Subscribe through Protocol.OnStreamEvent
 // and OnStreamClosed. Map wire credentials into durable.AuthContext on the work
-// item. Kernel, harness, VFS, and Temporal do not import this package.
+// item. Runtime, harness, VFS, and Temporal do not import this package.
 package server

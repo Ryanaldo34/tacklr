@@ -19,8 +19,8 @@ type WorkerOptions struct {
 
 // NewWorker returns a Temporal worker with EnableSessionWorker and
 // SessionWorkflow plus Inference, Tool, and CommitToolOutput activities.
-// Worker sessions are created only when WorkflowInput.WorkerSessionTimeout
-// is set (Runtime option WithWorkerSessionTimeout). Create the client with
+// Worker sessions are created only when WorkflowInput.TurnLocalityTimeout
+// is set (Runtime option WithTurnLocality). Create the client with
 // Dial so Temporal's OTEL v2 plugin propagates trace context.
 func NewWorker(c client.Client, taskQueue string, opts WorkerOptions) worker.Worker {
 	w := worker.New(c, taskQueue, worker.Options{

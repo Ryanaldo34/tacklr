@@ -117,8 +117,8 @@ func TestInvoke(t *testing.T) {
 	t.Run("propagates handler error", func(t *testing.T) {
 		tool := NewTool(ToolConfig{Name: "err", Handler: errHandler})
 		_, err := tool.invoke(context.Background(), `{"name":"x","age":1}`, nil)
-		if err == nil || !errors.Is(err, ErrAgent) || !strings.Contains(err.Error(), "boom") {
-			t.Fatalf("got %v, want ErrAgent wrapping boom", err)
+		if err == nil || !errors.Is(err, ErrCorrection) || !strings.Contains(err.Error(), "boom") {
+			t.Fatalf("got %v, want ErrCorrection wrapping boom", err)
 		}
 	})
 

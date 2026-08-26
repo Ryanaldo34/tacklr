@@ -56,7 +56,7 @@ func (f *failWire) Delete(ctx context.Context, sessionID string) error {
 // TestWireAndConstruct_outcomes covers wire-store / construct / streamable edge
 // paths in few high-value cases (no permission/prompt suite duplication).
 func TestWireAndConstruct_outcomes(t *testing.T) {
-	r := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	r := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
 
 	if p := NewACPProtocol(nil); p == nil {
 		t.Fatal("NewACPProtocol")
@@ -265,7 +265,7 @@ func TestWireAndConstruct_outcomes(t *testing.T) {
 }
 
 func TestHandleInbound_wireStoreFailures(t *testing.T) {
-	k := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	k := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
 	inbound := func(proto Protocol, body string) *httptest.ResponseRecorder {
 		t.Helper()
 		return serveACPInbound(t, k, proto, body)
@@ -357,7 +357,7 @@ func TestJSONRPCWSMessageWriter_error(t *testing.T) {
 // TestStreamable_promptOnSessionSSE is a single happy-path streamable outcome:
 // initialize → dual SSE → session/new → prompt → end_turn on session stream.
 func TestStreamable_promptOnSessionSSE(t *testing.T) {
-	r := newTestKernel(t, &mockInferenceStrategy{
+	r := newTestRuntime(t, &mockInferenceStrategy{
 		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "hi", IsComplete: true}
 		},

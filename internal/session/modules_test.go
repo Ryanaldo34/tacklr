@@ -23,8 +23,8 @@ func drainRuntime(sm *session.SessionManager) session.Runtime {
 }
 
 // TestSessionModules_surviveCheckpoint is the durable-module outcome: permission
-// memory, parked workers, search namespace, and a host VFS pointer survive
-// Capture → JSON wire → Apply on a fresh manager.
+// memory, search namespace, and a host VFS pointer survive Capture → JSON wire
+// → Apply on a fresh manager.
 func TestSessionModules_surviveCheckpoint(t *testing.T) {
 	sm := session.NewSessionManager()
 	if err := sm.StateSet("keep", "user"); err != nil {
@@ -47,17 +47,6 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 	}
 	if sm.Permissions.Decision("deny_tool") != session.PermissionDenyAlways {
 		t.Fatal("deny-always not stored")
-	}
-
-	sm.SetParkedWorker("spawn_1", session.ParkedWorkerMeta{
-		WorkerName:        "researcher",
-		WorkerSessionID:   "sess/w/researcher/spawn_1",
-		Task:              "summarize the deal",
-		ChildInterruptIDs: []string{"child-1"},
-	})
-	meta, ok := sm.ParkedWorker("spawn_1")
-	if !ok || meta.WorkerName != "researcher" || meta.Task != "summarize the deal" {
-		t.Fatalf("parked = %+v ok=%v", meta, ok)
 	}
 
 	ns := uuid.New()
@@ -92,7 +81,7 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 	if _, err := session.ApplyCheckpoint(*cp, smTyped); err != nil {
 		t.Fatal(err)
 	}
-	assertModules(t, smTyped, ns, "spawn_1", "researcher")
+	assertModules(t, smTyped, ns)
 
 	// JSON wire preserves typed module sections.
 	rawState, err := json.Marshal(cp)
@@ -108,25 +97,7 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 	if _, err := session.ApplyCheckpoint(wire, sm2); err != nil {
 		t.Fatal(err)
 	}
-	assertModules(t, sm2, ns, "spawn_1", "researcher")
-
-	sm2.DeleteParkedWorker("spawn_1")
-	sm2.SetParkedWorker("spawn_2", session.ParkedWorkerMeta{WorkerName: "writer", Task: "draft"})
-	cp2, err := session.CaptureCheckpoint(nil, sm2, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sm3 := session.NewSessionManager()
-	if _, err := session.ApplyCheckpoint(*cp2, sm3); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := sm3.ParkedWorker("spawn_1"); ok {
-		t.Fatal("deleted park must not reload")
-	}
-	got2, ok := sm3.ParkedWorker("spawn_2")
-	if !ok || got2.WorkerName != "writer" {
-		t.Fatalf("replacement park = %+v ok=%v", got2, ok)
-	}
+	assertModules(t, sm2, ns)
 
 	fresh := uuid.New()
 	sm2.Search = brain.NewSearchContext()
@@ -177,7 +148,6 @@ func TestTypedCheckpoint_rejectsCorruptModuleSections(t *testing.T) {
 	cases := map[string]json.RawMessage{
 		"plan":        json.RawMessage(`{"todos":`),
 		"permissions": json.RawMessage(`{"allow":`),
-		"parks":       json.RawMessage(`{"workers":`),
 		"onCall":      json.RawMessage(`{"stages":`),
 		"search":      json.RawMessage(`{`),
 	}
@@ -222,7 +192,7 @@ func TestTypedCheckpoint_rejectsCorruptUserState(t *testing.T) {
 	}
 }
 
-func assertModules(t *testing.T, sm *session.SessionManager, ns uuid.UUID, parkID, worker string) {
+func assertModules(t *testing.T, sm *session.SessionManager, ns uuid.UUID) {
 	t.Helper()
 	if sm.Permissions.Decision("allow_tool") != session.PermissionAllowAlways ||
 		sm.Permissions.Decision("deny_tool") != session.PermissionDenyAlways {
@@ -231,10 +201,6 @@ func assertModules(t *testing.T, sm *session.SessionManager, ns uuid.UUID, parkI
 	layer, ok := sm.OnCall.Get("w1", "tool_permission")
 	if !ok || layer.Denied || layer.Args != `{"path":"/a"}` {
 		t.Fatalf("on-call stage reload args=%q denied=%v ok=%v", layer.Args, layer.Denied, ok)
-	}
-	got, ok := sm.ParkedWorker(parkID)
-	if !ok || got.WorkerName != worker || got.WorkerSessionID != "sess/w/researcher/spawn_1" {
-		t.Fatalf("park reload = %+v ok=%v", got, ok)
 	}
 	gotNS, ok := sm.Search.Namespace()
 	if !ok || gotNS != ns {

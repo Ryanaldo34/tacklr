@@ -324,7 +324,7 @@ func (t *Tool) invokeRaw(ctx context.Context, argsJson string, runtime HarnessRu
 	var args map[string]any
 	if argsJson != "" {
 		if err := json.Unmarshal([]byte(argsJson), &args); err != nil {
-			return toolCallResult{}, AgentErrorf(ErrInvalid, "%s: arguments were not valid JSON. Check the tool schema and retry with a JSON object", t.name)
+			return toolCallResult{}, Correctionf(ErrInvalid, "%s: arguments were not valid JSON. Check the tool schema and retry with a JSON object", t.name)
 		}
 	}
 

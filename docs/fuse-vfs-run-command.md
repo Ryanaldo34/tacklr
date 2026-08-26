@@ -5,7 +5,7 @@
 | **Author** | Tacklr engineering |
 | **Date** | 2026-08-15 |
 | **Product** | Tacklr — opinionated Go agent harness SDK |
-| **Repo** | `/Users/ryan/development/tacklr` |
+| **Repo** | `github.com/ryanaldo34/tacklr` |
 | **Status** | Complete — Phases 0–5 shipped. Agent catalog is `read`, `write`, `run_command` (plus index tools when Brain is wired). |
 | **Depends on** | host-owned `vfs.MountSession`, `VFSProjection`, `run_command`, write-through IR |
 

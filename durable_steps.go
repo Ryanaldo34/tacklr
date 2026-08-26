@@ -14,9 +14,6 @@ import (
 )
 
 func (a *AgentHarness) absorbUser(ctx context.Context, user *Message, out chan StreamEvent) error {
-	if user == nil {
-		return nil
-	}
 	a.pairOpenToolCalls("unpaired tool call")
 	if a.hasOpenToolWork() {
 		a.finalizeCancelledWork(nil)
@@ -42,6 +39,8 @@ func (a *AgentHarness) Checkpoint() (*stores.SessionCheckpoint, error) {
 
 // RestoreCheckpoint applies a SnapshotStore blob onto this harness.
 func (a *AgentHarness) RestoreCheckpoint(cp stores.SessionCheckpoint) error {
+	a.runMu.Lock()
+	defer a.runMu.Unlock()
 	applied, err := session.ApplyCheckpoint(cp, a.session)
 	if err != nil {
 		return err
@@ -49,17 +48,11 @@ func (a *AgentHarness) RestoreCheckpoint(cp stores.SessionCheckpoint) error {
 	a.context.Restore(applied.Window)
 	a.pendingMu.Lock()
 	a.pendingToolCalls = applied.PendingToolCalls
-	if a.pendingToolCalls == nil {
-		a.pendingToolCalls = make(map[string]stores.PendingToolCall)
-	}
 	a.pendingMu.Unlock()
 	return nil
 }
 
 func (a *AgentHarness) runInference(ctx context.Context, st *drive.TurnState, out chan StreamEvent) (drive.InferenceStep, error) {
-	if st == nil {
-		st = &drive.TurnState{}
-	}
 	// Pair any function_call still missing a tool message before the provider
 	// round. Durable HITL used to drop the rest of a parallel batch; Azure then
 	// 400s "No tool output found for function call".
@@ -183,13 +176,6 @@ func (a *AgentHarness) runInference(ctx context.Context, st *drive.TurnState, ou
 		}
 	}
 	if len(toolCalls) == 0 {
-		if nudge := a.backgroundJobsNudge(); nudge != "" {
-			if err := a.addToContext(ctx, &Message{Role: RoleUser, Content: nudge}, out); err != nil {
-				return drive.InferenceStep{}, err
-			}
-			st.HadToolRound = true
-			return a.runInference(ctx, st, out)
-		}
 		out <- StreamEvent{Type: StreamEventComplete}
 		return drive.InferenceStep{Complete: true}, nil
 	}
@@ -197,16 +183,30 @@ func (a *AgentHarness) runInference(ctx context.Context, st *drive.TurnState, ou
 		Role:      RoleAssistant,
 		ToolCalls: append([]ToolCall(nil), toolCalls...),
 	})
+	a.pendingMu.Lock()
+	for i := range toolCalls {
+		key := toolCalls[i].Key()
+		cp := toolCalls[i]
+		a.pendingToolCalls[key] = stores.PendingToolCall{ToolCall: &cp, InterruptActive: false}
+	}
+	a.pendingMu.Unlock()
 	return drive.InferenceStep{ToolCalls: toolCalls}, nil
 }
 
+func (a *AgentHarness) finishToolCall(key string) {
+	a.pendingMu.Lock()
+	delete(a.pendingToolCalls, key)
+	a.pendingMu.Unlock()
+}
+
 func (a *AgentHarness) runToolCall(ctx context.Context, tc ToolCall, out chan StreamEvent) (drive.ToolStep, error) {
-	turnRT := session.NewRuntime(out, a.session)
+	turnRT := newToolRuntime(out, a.session, a.childHost)
 	tcKey := tc.Key()
 	toolCtx, toolSpan := telemetry.StartToolSpan(ctx, tc.Name, tc.Namespace)
 	tool := a.findTool(tc.Name, tc.Namespace)
 	if tool == nil {
-		toolErr := AgentErrorf(ErrNotFound, "%s: not found. That is not a registered tool. Use a name from the available tools", tc.Name)
+		a.finishToolCall(tcKey)
+		toolErr := Correctionf(ErrNotFound, "%s: not found. That is not a registered tool. Use a name from the available tools", tc.Name)
 		toolSpan.Finish("error", toolErr)
 		msg := a.emitToolResult(out, tc, toolErr.Error(), "error")
 		_ = a.addToContext(ctx, msg, out)
@@ -220,23 +220,18 @@ func (a *AgentHarness) runToolCall(ctx context.Context, tc ToolCall, out chan St
 	})
 	var parked interrupt.Interrupt
 	if errors.As(err, &parked) {
-		serialized, serErr := parked.Serialize()
-		if serErr != nil {
-			toolSpan.Finish("error", serErr)
-			out <- StreamEvent{Type: StreamEventError, Error: fmt.Errorf("serialize interrupt: %w", serErr)}
-			return drive.ToolStep{}, serErr
+		if _, adoptErr := a.session.AdoptInterrupt(tcKey, parked); adoptErr != nil {
+			var adopted interrupt.Interrupt
+			if errors.As(adoptErr, &adopted) {
+				parked = adopted
+			}
 		}
-		payload := map[string]any{
+		serialized, _ := parked.Serialize()
+		data, _ := json.Marshal(map[string]any{
 			"interruptId": tcKey,
 			"type":        parked.TypeName(),
 			"data":        json.RawMessage(serialized),
-		}
-		data, marErr := json.Marshal(payload)
-		if marErr != nil {
-			toolSpan.Finish("error", marErr)
-			out <- StreamEvent{Type: StreamEventError, Error: fmt.Errorf("marshal interrupt: %w", marErr)}
-			return drive.ToolStep{}, marErr
-		}
+		})
 		telemetry.InstrumentsFromContext(ctx).RecordInterrupt(
 			toolCtx, telemetry.AgentIDFromContext(ctx), parked.TypeName(),
 		)
@@ -247,9 +242,7 @@ func (a *AgentHarness) runToolCall(ctx context.Context, tc ToolCall, out chan St
 		out <- StreamEvent{Type: StreamEventInterrupt, MessageID: tcKey, Data: data}
 		return drive.ToolStep{Interrupted: true, InterruptID: tcKey, InterruptData: data}, nil
 	}
-	a.pendingMu.Lock()
-	delete(a.pendingToolCalls, tcKey)
-	a.pendingMu.Unlock()
+	a.finishToolCall(tcKey)
 	if err != nil {
 		toolSpan.Finish("error", err)
 		content := err.Error()
@@ -261,7 +254,7 @@ func (a *AgentHarness) runToolCall(ctx context.Context, tc ToolCall, out chan St
 		}
 		msg := a.emitToolResult(out, tc, content, "error")
 		_ = a.addToContext(ctx, msg, out)
-		if errors.Is(err, ErrAgent) {
+		if errors.Is(err, ErrCorrection) {
 			return drive.ToolStep{}, nil
 		}
 		return drive.ToolStep{}, err
@@ -292,6 +285,12 @@ func (a *AgentHarness) runToolCall(ctx context.Context, tc ToolCall, out chan St
 	return drive.ToolStep{}, nil
 }
 
-// SpawnWorkerName is the tool the durable driver maps to a nested run
-// (child workflow on Temporal).
-const SpawnWorkerName = "spawn_worker"
+// SpawnSpecialistName is the built-in that calls HarnessRuntime.SpawnChild.
+const SpawnSpecialistName = "spawn_specialist"
+
+// ListChildrenName, GetChildName, and CancelChildName are built-ins on HarnessRuntime.Children / AwaitChild / CancelChild.
+const (
+	ListChildrenName = "list_children"
+	GetChildName     = "get_child"
+	CancelChildName  = "cancel_child"
+)

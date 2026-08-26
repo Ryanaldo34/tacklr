@@ -16,7 +16,7 @@ import (
 	"github.com/ryanaldo34/tacklr/durable"
 )
 
-func startACPStreamServer(t *testing.T, r *testKernel) (*httptest.Server, *Server) {
+func startACPStreamServer(t *testing.T, r *testRuntime) (*httptest.Server, *Server) {
 	t.Helper()
 	// Fresh ACP protocol per server.
 	srv := NewServer(r.Runtime, r.Catalog, NewACPProtocol(NewMemoryWireStore()))
@@ -184,7 +184,7 @@ func TestACP_Streamable_permissionMidTurn(t *testing.T) {
 			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "done", IsComplete: true}
 		},
 	}
-	r := newTestKernel(t, strategy, durable.AgentSpec{Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{sensitive}}})
+	r := newTestRuntime(t, strategy, durable.AgentSpec{Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{sensitive}}})
 	hs, _ := startACPStreamServer(t, r)
 
 	connID, initBody := acpInitialize(t, hs)
@@ -240,7 +240,7 @@ func TestACP_Streamable_permissionMidTurn(t *testing.T) {
 // over Streamable HTTP.
 // TestACP_Streamable_deleteConnection: DELETE removes connection; further POST → 404.
 func TestACP_Streamable_deleteConnection(t *testing.T) {
-	r := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	r := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
 	hs, srv := startACPStreamServer(t, r)
 	connID, _ := acpInitialize(t, hs)
 	if srv.Connections.Get(connID) == nil {
@@ -272,7 +272,7 @@ func TestACP_Streamable_deleteConnection(t *testing.T) {
 
 // TestACP_Streamable_contentNegotiation: 415 / 406 / 501 / 400 / 404 paths.
 func TestACP_Streamable_contentNegotiation(t *testing.T) {
-	r := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	r := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
 	hs, _ := startACPStreamServer(t, r)
 
 	req, _ := http.NewRequest(http.MethodPost, hs.URL+"/acp", strings.NewReader(`{}`))

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/ryanaldo34/tacklr/internal/drive"
 	"github.com/ryanaldo34/tacklr/interrupt"
@@ -29,30 +30,24 @@ func (a *AgentHarness) RunMessage(ctx context.Context, user *Message) (<-chan St
 	if bad := UnsupportedMIMEs(a.model, user.MIMETypes()); len(bad) > 0 {
 		return nil, fmt.Errorf("unsupported content type(s): %s", strings.Join(bad, ", "))
 	}
-	return a.startTurn(ctx, user)
+	return a.startTurn(ctx, user, nil)
 }
 
-// ReturnFromInterrupt applies host resolutions and resumes the parked tool batch.
-// Keys are tool call ids, which are also the wire interrupt ids.
+// ReturnFromInterrupt resumes a parked tool batch. Resolutions are applied on
+// the serialized turn (after the prior Run has parked). Failures are
+// StreamEventError on the returned channel.
 func (a *AgentHarness) ReturnFromInterrupt(ctx context.Context, finishedInterrupts map[string][]byte) (<-chan StreamEvent, error) {
-	if err := a.applyResume(finishedInterrupts); err != nil {
-		return nil, err
-	}
-	return a.startTurn(ctx, nil)
+	return a.startTurn(ctx, nil, finishedInterrupts)
 }
 
 func (a *AgentHarness) applyResume(finishedInterrupts map[string][]byte) error {
 	a.pendingMu.Lock()
 	defer a.pendingMu.Unlock()
-	if a.interruptPayloads == nil {
-		a.interruptPayloads = make(map[string][]byte)
-	}
 	for id, payload := range finishedInterrupts {
 		tc, ok := a.pendingToolCalls[id]
 		if !ok {
 			return fmt.Errorf("no tool call id found for interrupt %s: %w", id, interrupt.ErrInterruptNotFound)
 		}
-		a.interruptPayloads[id] = payload
 		if _, err := a.session.ReturnInterrupt(id, payload); err != nil {
 			return fmt.Errorf("return from interrupt %q: %w", id, err)
 		}
@@ -61,7 +56,7 @@ func (a *AgentHarness) applyResume(finishedInterrupts map[string][]byte) error {
 	return nil
 }
 
-func (a *AgentHarness) startTurn(ctx context.Context, user *Message) (<-chan StreamEvent, error) {
+func (a *AgentHarness) startTurn(ctx context.Context, user *Message, resume map[string][]byte) (<-chan StreamEvent, error) {
 	if err := a.ensureReady(ctx); err != nil {
 		return nil, err
 	}
@@ -90,15 +85,18 @@ func (a *AgentHarness) startTurn(ctx context.Context, user *Message) (<-chan Str
 		outcome := telemetry.OutcomeOK
 		defer func() { span.End(outcome) }()
 
-		cancelled := false
 		emitCancelled := func() {
-			if cancelled {
-				return
-			}
-			cancelled = true
 			outcome = telemetry.OutcomeCancelled
 			a.finalizeCancelledWork(out)
 			out <- StreamEvent{Type: StreamEventError, Error: fmt.Errorf("run: context cancelled: %w", ctx.Err())}
+		}
+
+		if len(resume) > 0 {
+			if err := a.applyResume(resume); err != nil {
+				outcome = telemetry.OutcomeError
+				out <- StreamEvent{Type: StreamEventError, Error: err}
+				return
+			}
 		}
 
 		if user != nil {
@@ -145,21 +143,15 @@ func (a *AgentHarness) runTurnLoop(ctx context.Context, out chan StreamEvent, em
 			}
 			toolCalls = step.ToolCalls
 		} else {
-			toolCalls = make([]ToolCall, 0, len(pending))
-			for _, tc := range pending {
-				if !tc.InterruptActive && tc.ToolCall != nil {
-					toolCalls = append(toolCalls, *tc.ToolCall)
-				}
+			toolCalls = a.runnableToolCalls()
+			if len(toolCalls) == 0 {
+				return telemetry.OutcomeYield
 			}
-		}
-
-		if ctx.Err() != nil {
-			emitCancelled()
-			return telemetry.OutcomeCancelled
 		}
 
 		st.HadToolRound = st.HadToolRound || len(toolCalls) > 0
 		var wg sync.WaitGroup
+		var parked atomic.Bool
 		for _, tc := range toolCalls {
 			wg.Add(1)
 			go func(tc ToolCall) {
@@ -167,7 +159,10 @@ func (a *AgentHarness) runTurnLoop(ctx context.Context, out chan StreamEvent, em
 				if ctx.Err() != nil {
 					return
 				}
-				_, _ = a.runToolCall(ctx, tc, out)
+				step, _ := a.runToolCall(ctx, tc, out)
+				if step.Interrupted {
+					parked.Store(true)
+				}
 			}(tc)
 		}
 		wg.Wait()
@@ -175,7 +170,7 @@ func (a *AgentHarness) runTurnLoop(ctx context.Context, out chan StreamEvent, em
 			emitCancelled()
 			return telemetry.OutcomeCancelled
 		}
-		if len(a.pendingSnapshot()) > 0 {
+		if parked.Load() {
 			return telemetry.OutcomeYield
 		}
 	}
@@ -198,9 +193,6 @@ func (a *AgentHarness) pairOpenToolCalls(reason string) {
 			continue
 		}
 		for _, tc := range m.ToolCalls {
-			if tc.WireID() == "" {
-				continue
-			}
 			if toolCallHasResult(hasOutput, tc) || toolCallIsPending(pending, tc) {
 				continue
 			}

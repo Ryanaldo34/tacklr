@@ -647,7 +647,7 @@ func TestLive_spawnWorker(t *testing.T) {
 					continue
 				}
 				for _, tc := range m.ToolCalls {
-					if tc.Name == "spawn_worker" {
+					if tc.Name == "spawn_specialist" {
 						ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "parent-after-spawn", IsComplete: true}
 						return
 					}
@@ -656,14 +656,21 @@ func TestLive_spawnWorker(t *testing.T) {
 			ch <- tacklr.LLMResponseChunk{
 				Type: tacklr.StreamEventFunctionCall,
 				ToolCalls: []tacklr.ToolCall{{
-					ID: "sp1", CallID: "sp1", Name: "spawn_worker",
-					Arguments: `{"worker_name":"researcher","task_description_and_context":"child-task"}`,
+					ID: "sp1", CallID: "sp1", Name: "spawn_specialist",
+					Arguments: `{"specialist":"researcher","task_description_and_context":"child-task"}`,
 				}},
 				IsComplete: true,
 			}
 		},
 	}
-	stack := newLiveStack(t, liveCat(t, model, durable.AgentSpec{}))
+	stack := newLiveStack(t, liveCat(t, model, durable.AgentSpec{
+		Options: tacklr.AgentOptions{
+			Specialists: []*tacklr.Specialist{{
+				Name:  "researcher",
+				Model: model,
+			}},
+		},
+	}))
 	id, err := stack.Runtime.CreateSession(ctx, durable.CreateSession{AgentID: "default"})
 	if err != nil {
 		t.Fatal(err)

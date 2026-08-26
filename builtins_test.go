@@ -41,7 +41,7 @@ func drainEventCh() chan streaming.StreamEvent {
 
 // planRT is a turn Runtime for plan/ask tool unit tests (events drained).
 func planRT() HarnessRuntime {
-	return session.NewRuntime(drainEventCh(), session.NewSessionManager())
+	return newToolRuntime(drainEventCh(), session.NewSessionManager(), nil)
 }
 
 // TestCreatePlanTool covers create_plan success and rejection return paths.
@@ -332,8 +332,7 @@ func TestEditPlanTool(t *testing.T) {
 
 func TestAskUserChoiceTool_raiseAndResume(t *testing.T) {
 	sm := session.NewSessionManager()
-	rt := session.NewRuntime(make(chan streaming.StreamEvent, 4), sm)
-	rt = rt.WithToolCallID("tc_ask")
+	rt := newToolRuntime(make(chan streaming.StreamEvent, 4), sm, nil).WithToolCallID("tc_ask")
 
 	args, _ := json.Marshal(map[string]any{
 		"question": "Which approach?",
@@ -354,6 +353,9 @@ func TestAskUserChoiceTool_raiseAndResume(t *testing.T) {
 	var usi *interrupt.UserSelectionInterrupt
 	if !errors.As(err, &usi) || usi.Question != "Which approach?" {
 		t.Errorf("interrupt question = %+v", usi)
+	}
+	if _, adoptErr := sm.AdoptInterrupt("tc_ask", intr); adoptErr == nil {
+		t.Fatal("adopt should park")
 	}
 
 	// Resolve and re-invoke (harness re-execution pattern).
@@ -492,6 +494,12 @@ func TestRun_askUserChoice_withoutDescription_formatsSelection(t *testing.T) {
 	}
 	if interruptID == "" {
 		t.Fatal("expected interrupt")
+	}
+	empty, err := h.ReturnFromInterrupt(context.Background(), map[string][]byte{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range empty {
 	}
 	resumed, err := h.ReturnFromInterrupt(context.Background(), map[string][]byte{
 		interruptID: []byte(`{"selectionIdx":0}`),

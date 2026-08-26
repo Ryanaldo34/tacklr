@@ -6,7 +6,9 @@
 [![Go Version](https://img.shields.io/github/go-mod/go-version/Ryanaldo34/tacklr)](https://github.com/Ryanaldo34/tacklr/blob/main/go.mod)
 [![License](https://img.shields.io/github/license/Ryanaldo34/tacklr)](https://github.com/Ryanaldo34/tacklr/blob/main/LICENSE)
 
-**The enterprise agent operating system.** Tacklr is built for long-running research and operations workflows. We ship an **extensible Go SDK** for building agents, and plan a **CLI/TUI** that runs our default builtins. This is not another thin chat wrapper. It is a **secure execution environment**, a **company brain**, and an **efficient orchestrator**—one deterministic system instead of hope and prompts.
+Tacklr is an opinionated Go SDK for building agent harnesses. It is a framework: it says how a turn should run, how tools execute, how context is structured around a plan, and how a session survives interrupts and restarts.
+
+You bring a model, tools, and the storage you already use. Tacklr sits in the middle of that stack and keeps the run deterministic from the harness’s point of view — even though the model is not.
 
 ```bash
 go get github.com/ryanaldo34/tacklr
@@ -14,119 +16,37 @@ go get github.com/ryanaldo34/tacklr
 
 ---
 
-## Documentation
+## Why it exists
 
-| Doc | What it covers |
-|-----|----------------|
-| [docs/knowledge.md](docs/knowledge.md) | **Canonical** knowledge system: Engrams, search, graph, tools |
-| [docs/durable.md](docs/durable.md) | Runtime kernel, embed / in-process / Temporal, HITL, tool batches |
-| [docs/vfs.md](docs/vfs.md) | Mounts, content IR, provider persist, lifecycle |
-| [pkg.go.dev/tacklr](https://pkg.go.dev/github.com/ryanaldo34/tacklr) | Harness, tools, types |
-| [pkg.go.dev/vfs](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfs) | Virtual filesystem API |
-| [pkg.go.dev/brain](https://pkg.go.dev/github.com/ryanaldo34/tacklr/brain) | Knowledge engine API |
-| [AGENTS.md](AGENTS.md) | Project goals and coding standards |
-| This README | Why we exist, how the OS fits, quick start, roadmap |
+Work spans many model calls, tools hit real systems, and the window fills with things that no longer matter. Tacklr is built around four ideas that show up in every design choice.
 
----
+**Context is structured around the current work.** The harness runs planning cycles (Adaptive Case Management): the agent writes a plan, works a to-do, and on `complete_todo` the window is rebuilt as a hand-off for what comes next. Unused history does not stay in the prompt just because it happened earlier. Specialists are the same idea at a larger grain — a nested session that returns only what the parent asked for.
 
-## Why Tacklr exists
+**The agent’s world is bounded.** A virtual filesystem gives one path API over the mounts you attach: local disk, S3, Google Drive and Docs, Microsoft Graph, and knowledge objects. The agent sees `/work/notes.md`, not a host path or a bucket key. Credentials live on the turn (`Prompt.Auth` / `Resume.Auth`), not in checkpoints.
 
-AI agents may be the most revolutionary technology in history—but between non-determinism and naivety, they are a security nightmare. Letting them run wild off the leash has not gone well. Tacklr attacks those reliability and security risks head-on:
+**Sessions are meant to live in the cloud.** The same harness runs in-process or behind `durable.Runtime` (a goroutine wait loop, or Temporal). Human-in-the-loop parks a session until `Resume`. JSON-RPC protocols (ACP is the native one) map to that Runtime; autonomous hosts call it directly.
 
-1. **Virtualization** — With our [virtual filesystem](docs/vfs.md) and execution environment, the agent only sees what it is given access to—nothing else on the host. Like OS memory virtualization: each process has its own space and no knowledge of other programs.
-2. **System monitoring** — Gating only on the tool *name* is naive. What matters is what happens *inside* the tool. We monitor agent activity at a system level and surface configurable alerts and approvals as needed.
-3. **Observability** — Watchdog and observability layers show what the agent does each turn. Reproducible state (planned to deepen) lets you step back, reassemble context before a wrong turn, and debug prompts, tools, and workflows.
-4. **Efficient context management** — Work is structured around *Adaptive Case Management*: advanced planning cycles that adapt as needed. When a subtask or milestone completes, a **handoff** carries only the context still required for the goal—cutting tokens and stopping the “dumber over time” effect of a polluted window.
-5. **Cloud-native** — Built for the cloud and compatible with existing cloud infrastructure and security tools out of the box.
+**Knowledge is queried, not stuffed into the window.** The optional brain is a host-owned store: first-class objects as Markdown files, hybrid search, an optional graph for relationships, and namespaces so retrieval stays scoped. The agent asks when it needs a fact.
+
+Those four are the ethos. If a change fights them, it does not belong.
 
 ---
 
-## An agent operating system
+## A turn
 
-A normal OS virtualizes CPU, memory, and devices and mediates syscalls. We do the same for agents: **virtualize the world they can see, and mediate every action they take.**
-
-The model proposes. **Our runtime decides what is real, allowed, and durable.**
-
-| OS idea | What we do |
-|---------|------------|
-| Process address space | **Session mounts** — only the virtual paths you attach |
-| Filesystem | **[`vfs`](docs/vfs.md)** — local, S3, brain Engrams, Google Drive/Docs/Sheets, Microsoft Graph behind one path API |
-| File contents | **Content IR** — what the agent edits (lines + Markdown block outline when applicable; rich WYSIWYG later). Codecs turn that into storage bytes on persist |
-| Syscalls | **Tools**, and later a **custom agent shell** and script guests, all through a **capability broker** |
-| Kernel | **Eventually** Linux eBPF / cgroup / seccomp as the backstop when something tries to cheat |
-| Save process image | **Checkpoints** — conversation, plan, interrupts, mounts |
-| Shared knowledge | **Optional [brain](https://pkg.go.dev/github.com/ryanaldo34/tacklr/brain)** — query when you need it, not a static RAG dump rotting in context |
-
-```text
-  Model
-    │
-    ▼
-  Harness          turns · plan · handoff · tools · checkpoints
-    │
-    ▼
-  Agent world      VFS + IR · shell/scripts (roadmap) · brain
-    │
-    ▼
-  Your product     workers, CLI, protocol adapters ([server](https://pkg.go.dev/github.com/ryanaldo34/tacklr/server))
-```
-
----
-
-## Determinism and security
-
-Models will always be probabilistic. **The harness does not have to be.** We are not promising identical token streams. We are promising a **closed, mediated, replayable world**—so the agent cannot wander into host chaos and you can actually operate the thing.
-
-### Determinism (where it matters)
-
-| What goes wrong elsewhere | What we do |
-|---------------------------|------------|
-| Context turns into sludge | Plans, todos, **handoffs**—only carry what the next work needs ([AGENTS.md](AGENTS.md)) |
-| Disk and “open buffer” disagree | Session-visible **IR**; the provider persists on **WriteDocument** ([docs/vfs.md](docs/vfs.md)) |
-| Edits clobber each other silently | Content **`rev`** (hash)—stale write fails closed, re-read and retry |
-| Crash mid-run, state evaporates | **Checkpoints** + [SnapshotStore](docs/durable.md) (same blob as [`stores.SessionCheckpoint`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/stores)) |
-| Tools side-effect into the void | Structured results, plan effects, stream events—you can see what happened |
-| Knowledge goes stale in the window | **Brain** on demand; optional [vfsindex](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfsindex) to index mounts |
-
-**Closed world · mediated ops · one IR · rev’d writes · checkpointed truth.**
-
-### Security (not a system-prompt prayer)
-
-| What goes wrong elsewhere | What we do |
-|---------------------------|------------|
-| Agent can see the whole machine | **Mount jail**—virtual paths only; secrets stay on host factories |
-| “Allow the `run` tool?” and hope | **Mid-flight gates** on real ops (`fs`, `net`, `proc`)—capability broker on the roadmap; eBPF later on Linux |
-| Unscoped bash | We will not make raw host bash the main path. Planned: **custom agent shell** + allowlisted binaries on a projected VFS |
-| Scripts with god-mode imports | Planned **sandboxed Python/JS** that only get our runtime APIs |
-| One accidental `rm -rf` | Opaque data is not mounted. Discovery shell can be read-only; hard deletes go through policy |
-| Multi-tenant cloud mess | Session-scoped mounts and namespaces; kernel backstops when you run this as infrastructure |
-
-Security is a **platform property**. If it only lives in the system prompt, you already lost.
-
----
-
-## How the framework is shaped
-
-| Piece | Job | Docs |
-|-------|-----|------|
-| **Inference** | Talk to the model, nothing else | [`inference`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/inference) |
-| **Harness** | Turn loop, tools, plan, context, save/load | [`tacklr`](https://pkg.go.dev/github.com/ryanaldo34/tacklr) |
-| **VFS** | Mounts, IR, provider persist | [docs/vfs.md](docs/vfs.md) · [`vfs`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfs) |
-| **Store** | Checkpoint blob types (`SessionCheckpoint`) | [`stores`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/stores) |
-| **Runtime** | Session kernel (in-process or Temporal) | [docs/durable.md](docs/durable.md) · [`durable`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/durable) |
-| **Brain** | Knowledge (optional) | [`brain`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/brain) |
-| **Server** | `Protocol` interface over Runtime. ACP is the native option | [`server`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/server) |
-
-A **turn** is one prompt (or resume after interrupt) until done, error, cancel, or a deliberate wait for the user:
+One `Run` (or `Prompt` / `Resume`) is a turn: infer, run tools, maybe park for the user, then complete, error, or cancel.
 
 ```text
 create_plan → tools → complete_todo → handoff → next work
 ```
 
-A model round may emit several tool calls. Embed and in-process run that **whole batch** (siblings finish even if one parks for HITL). Temporal runs Tool activities one SnapshotStore etag at a time and keeps leftover calls in **workflow history**. The next model request waits until every `function_call` has a `function_call_output` (or the call is still parked).
+A model round may emit several tool calls. The harness does not infer again until every call in that batch has a result, or a call is parked. Planning builtins (`create_plan`, `list_plan`, `edit_plan`, `complete_todo`) are harness-owned. Your tools cannot rewrite the plan store.
 
 ---
 
-## Quick start
+## Get started
+
+A model client and a prompt are enough to run a turn.
 
 ```go
 package main
@@ -179,9 +99,11 @@ func main() {
 }
 ```
 
+Importing `tacklr` registers built-in interrupts, Word/Excel codecs, and the durable driver adapter. You register VFS backends and brain kinds yourself.
+
 ### Tools
 
-Tools are ordinary Go functions. `HarnessRuntime` is for host state, progress, and interrupts—not for rewriting the plan store behind the harness’s back.
+Tools are ordinary Go functions. `HarnessRuntime` is for host state, progress, and interrupts.
 
 ```go
 type SearchArgs struct {
@@ -198,9 +120,9 @@ tool := tacklr.NewTool(tacklr.ToolConfig{
 })
 ```
 
-Construct with `NewTool(ToolConfig{...})`. After construction, read metadata through getters (`Name()`, `Access()`, and the rest). Importing `tacklr` registers built-in interrupts, Word/Excel codecs, and the durable driver adapter. VFS backend factories and brain kinds stay host-owned.
+Construct with `NewTool(ToolConfig{...})`. After construction, read metadata through getters (`Name()`, `Access()`, and the rest).
 
-### Sessions
+### Checkpoints
 
 ```go
 agent, _ := tacklr.NewAgent(ctx, opts)
@@ -209,225 +131,121 @@ restored, _ := tacklr.NewAgent(ctx, opts)
 _ = restored.RestoreCheckpoint(*cp)
 ```
 
-Checkpoints cover conversation, plan, tool/user state, and pending interrupts. Embed (`NewAgent`) holds that in process memory unless you snapshot yourself. `durable.Runtime` writes the same blob to SnapshotStore (memory by default). Package [`stores`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/stores) is the blob type, not a session I/O driver. VFS writes persist immediately (write-through IR); checkpoints store mount recipes, not file bytes or tokens.
+A checkpoint is conversation, plan, tool/user state, and pending interrupts. Embed (`NewAgent`) keeps that in process memory unless you snapshot it. `durable.Runtime` writes the same blob to SnapshotStore. Package [`stores`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/stores) is the blob type, not an I/O driver. Checkpoints store mount recipes, not file bytes or tokens. VFS writes persist as they happen.
 
-### Host tools vs plan system
+### Sessions (optional)
 
-| | Your tools | Plan builtins |
-|--|------------|----------------|
-| API | `HarnessRuntime` | Internal session (not on host tools) |
-| May | State, interrupts, progress | Plan document and todos |
-| May not | Rewrite the plan store | — |
+For a long-lived wait loop — park, resume, child sessions — use `durable.Runtime` instead of holding one `AgentHarness` yourself:
 
-That boundary exists so product code cannot accidentally trash planning.
+```go
+cat := durable.NewCatalog("agent")
+cat.Register("agent", durable.AgentSpec{Options: opts})
+rt := inprocess.New(cat, inprocess.WithProjection(vfs.DirectProjection{}))
+id, _ := rt.CreateSession(ctx, durable.CreateSession{AgentID: "agent"})
+_ = rt.Prompt(ctx, id, durable.Prompt{Text: prompt, Auth: auth})
+sub, _ := rt.Subscribe(ctx, id, 0)
+```
 
-### VFS
+Temporal is the same `Runtime` interface with a worker. See [docs/durable.md](docs/durable.md).
 
-Register backends, bootstrap mounts—[docs/vfs.md](docs/vfs.md). When VFS is wired, the harness injects file tools (`read`, `write`, `run_command`) over **virtual paths only**. `run_command` requires permission by default. The agent never gets a host path or a bucket key. Live names/grep/tree ops go through `run_command` (`ls` / `fd` / `rg` / `mkdir` / `rm`). With Brain + VFS + search namespace, the harness registers **`brain.BrainFactory`**, mounts **`/engram`** (prefix, `IndexPolicy=none`) unless the host already provided a brain-profile mount, and injects **`index_file` / `unindex`** for **artifact** mounts only. Indexed recall is brain `search`; objects without a file use `read_object`. Engrams are Markdown files on the brain Provider; `save_*` writes those paths (or `Engine.Put` if no brain mount). Path-native **link / unlink / expand / find_links**. Artifact → brain still uses one **IndexPath** pipeline (hash skip). Brain-profile mounts are never remirrored as Document/Chunk artifacts.
+### Specialists
+
+Register nested agents on `AgentOptions.Specialists`. Tools start them through `HarnessRuntime`: `SpawnChild`, `Children`, `AwaitChild`, `CancelChild`. The stock tools `spawn_specialist`, `list_children`, `get_child`, and `cancel_child` call those methods; host tools can too. A child is a nested session with the parent’s MCP, mounts, and auth, overlaid with the specialist’s model, tools, and instructions. `block=false` starts the child and returns; `get_child(block=true)` waits. Parent park does not stop children. Cancel (including the original Prompt context) and Close do.
+
+```go
+opts.Specialists = []*tacklr.Specialist{{
+	Name:         "researcher",
+	Description:  "Looks things up and returns a short brief.",
+	Model:        model,
+	Instructions: "Research the task. Return only the brief.",
+}}
+```
 
 ---
 
-## Capabilities you can wire in
+## What you can wire in
 
-- **Planning** — `create_plan`, `list_plan`, `edit_plan`, `complete_todo` with install and handoff effects  
-- **Interrupts** — pause a tool, get structured user input, resume  
-- **MCP** — external tool servers ([`mcp`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/mcp))  
-- **Skills** — `SKILL.md` catalogs loaded from VFS mounts ([`skills`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/skills))  
-- **Web** — search/fetch when Exa is configured  
-- **VFS** — mounts + IR ([docs/vfs.md](docs/vfs.md)); optional artifact index via [`vfsindex`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfsindex) (`index_file` / `unindex` / IndexPolicy when Brain + namespace too); live names/grep via `run_command`  
-- **Brain** — knowledge system when you set `AgentOptions.Brain`; host `KindSpec`s appear as Engram Markdown files (`/engram/…` or host roots) via `brain.Provider`. Full guide: [docs/knowledge.md](docs/knowledge.md)  
+| Piece | What it does | Where to read |
+|-------|----------------|---------------|
+| Planning | `create_plan`, todos, hand-off on complete | this README · [`tacklr`](https://pkg.go.dev/github.com/ryanaldo34/tacklr) |
+| Interrupts | Park a tool, collect structured input, `Resume` | [`interrupt`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/interrupt) · [docs/durable.md](docs/durable.md) |
+| Specialists | Nested sessions (`spawn_specialist` and children) | [docs/durable.md](docs/durable.md) |
+| VFS | Mounts and content IR; file tools `read` / `write` / `run_command` | [docs/vfs.md](docs/vfs.md) |
+| Brain | Host-owned knowledge: Engrams, search, optional graph | [docs/knowledge.md](docs/knowledge.md) |
+| MCP | External tool servers | [`mcp`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/mcp) |
+| Skills | `SKILL.md` catalogs from VFS mounts | [`skills`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/skills) |
+| Web | Search and fetch when Exa is configured | [`tacklr`](https://pkg.go.dev/github.com/ryanaldo34/tacklr) |
+| Server | `Protocol` over Runtime; ACP is the native option | [`server`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/server) |
+| Telemetry | One `tacklr.turn` span per prompt or resume; OTLP | [`telemetry`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/telemetry) |
 
+When VFS is wired, the harness injects file tools over virtual paths only. `run_command` requires permission by default. Live names and grep go through `run_command` (`ls` / `fd` / `rg`). With Brain + VFS + a search namespace, the harness mounts `/engram` and injects knowledge tools. Details: [docs/vfs.md](docs/vfs.md) and [docs/knowledge.md](docs/knowledge.md).
 
-### Knowledge (brain)
+---
 
-This is not “stuff the last N chunks into the prompt and pray.” The brain is a host-owned engine:
+## Documentation
 
-- **Engrams** — first-class objects as Markdown files on a brain VFS mount  
-- **Artifacts** — live files on local/S3, optionally indexed as Document + Chunks  
-- **Postgres** (or memory) as source of truth — objects, hybrid search, filters, soft-delete  
-- **Optional graph** (Helix or in-memory) for entities and links — `ls` never lists edges  
-- **Namespaces** for isolation; path-native `link` / `expand` / `find_links`  
-
-Canonical write-up: [docs/knowledge.md](docs/knowledge.md). API: [`brain`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/brain).
-
-### Observability
-
-Default export is the **LGTM stack** via one OTLP endpoint: Grafana Alloy or the OpenTelemetry Collector in front of **Tempo** (traces), **Loki** (logs), **Mimir**/Prometheus (metrics), and **Grafana**.
-
-The durable **wait loop is the primary instrumentor**. One `tacklr.turn` span per prompt or resume. Child spans are only the key harness events (`tacklr.model`, `tacklr.tool`, `tacklr.plan.install`, `tacklr.context.handoff`). Span attributes are static (agent, session, turn kind, runtime, outcome) so they stay queryable for dashboards. Dynamic values (prompt length, retry attempt, error body) go on span-correlated logs at Info/Warn/Error.
-
-Temporal ships out of the box: `telemetry.Init` installs the process-wide OpenTelemetry providers (ReplaySafe tracer so workflow spans replay cleanly). `durable/temporal.Dial` prepends the [OpenTelemetry v2 plugin](https://docs.temporal.io/develop/go/integrations/opentelemetry-v2) for context propagation (no extra SDK auto-spans). Call `Init` before `Dial`.
-
-Postgres Query/Exec on `brain.PostgresStore` and `server.PostgresWireStore` emit otelpgx client spans as children of the caller context, so they share the `tacklr.turn` / `tacklr.tool` trace after `Init`. Hosts pass the request `ctx` through; they do not configure pgx tracing.
-
-Nothing configured still installs a replay-safe no-op provider so Temporal workflows do not panic. Point `OTEL_EXPORTER_OTLP_ENDPOINT` at your collector when you want data. `OTEL_SDK_DISABLED=true` keeps the no-op provider. Hosts embedding the SDK pass `telemetry.Config{OTLPEndpoint: ...}` into `Init`.
+| Doc | What it covers |
+|-----|----------------|
+| [docs/durable.md](docs/durable.md) | Runtime: embed, in-process, Temporal; HITL; children; auth |
+| [docs/vfs.md](docs/vfs.md) | Mounts, content IR, providers, FUSE |
+| [docs/knowledge.md](docs/knowledge.md) | Brain: Engrams, search, graph, tools |
+| [docs/fuse-vfs-run-command.md](docs/fuse-vfs-run-command.md) | How `run_command` and the FUSE projection fit |
+| [pkg.go.dev/tacklr](https://pkg.go.dev/github.com/ryanaldo34/tacklr) | Harness, tools, types |
+| [AGENTS.md](AGENTS.md) | Goals, coding standards, how we test |
 
 ---
 
 ## Packages
 
-| Package | Role | Link |
-|---------|------|------|
-| `tacklr` | Harness, tools, plan loop, subagents | [pkg](https://pkg.go.dev/github.com/ryanaldo34/tacklr) |
-| `vfs` | Virtual filesystem, mounts, content IR | [docs](docs/vfs.md) · [pkg](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfs) |
-| `vfsindex` | Optional mount → brain ingest (VFS and brain stay independent) | [pkg](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfsindex) |
-| `brain` | Knowledge engine | [docs](docs/knowledge.md) · [pkg](https://pkg.go.dev/github.com/ryanaldo34/tacklr/brain) |
-| `brain/helixgraph` | Optional graph adapter | [pkg](https://pkg.go.dev/github.com/ryanaldo34/tacklr/brain/helixgraph) |
-| `inference` | OpenAI-compatible model client | [pkg](https://pkg.go.dev/github.com/ryanaldo34/tacklr/inference) |
-| `server` | Protocol host over Runtime; ACP native (`NewACPProtocol`) | [pkg](https://pkg.go.dev/github.com/ryanaldo34/tacklr/server) |
-| `durable` | Session kernel (in-process or Temporal) | [docs](docs/durable.md) · [pkg](https://pkg.go.dev/github.com/ryanaldo34/tacklr/durable) |
-| `stores` | Checkpoint blob (`SessionCheckpoint`); I/O is SnapshotStore | [pkg](https://pkg.go.dev/github.com/ryanaldo34/tacklr/stores) |
-| `interrupt` | Pause/resume types | [pkg](https://pkg.go.dev/github.com/ryanaldo34/tacklr/interrupt) |
-| `streaming` | Shared messages and events | [pkg](https://pkg.go.dev/github.com/ryanaldo34/tacklr/streaming) |
-| `mcp` | MCP config types | [pkg](https://pkg.go.dev/github.com/ryanaldo34/tacklr/mcp) |
-| `skills` | Skill loading from VFS mounts | [pkg](https://pkg.go.dev/github.com/ryanaldo34/tacklr/skills) |
-| `telemetry` | OTEL helpers | [pkg](https://pkg.go.dev/github.com/ryanaldo34/tacklr/telemetry) |
+| Package | Role |
+|---------|------|
+| `tacklr` | Harness, tools, plan loop, specialists |
+| `vfs` | Virtual filesystem, mounts, content IR |
+| `vfsindex` | Optional mount → brain ingest |
+| `brain` | Knowledge engine |
+| `brain/helixgraph` | Optional graph adapter |
+| `inference` | OpenAI-compatible model client |
+| `server` | Protocol host over Runtime |
+| `durable` | Session Runtime (in-process or Temporal) |
+| `stores` | Checkpoint blob (`SessionCheckpoint`) |
+| `interrupt` | Pause / resume types |
+| `streaming` | Shared messages and events |
+| `mcp` | MCP config types |
+| `skills` | Skill loading from VFS mounts |
+| `telemetry` | OpenTelemetry helpers |
 
 ---
 
-## Roadmap: finishing the agent OS
+## Contributing
 
-We already have the harness, VFS (including FUSE projection), IR, brain hooks, and checkpoints. Next we close the loop on **execution**: a **custom agent shell**, sandboxed **Python/JS**, a **capability broker** (approve what happens *during* a tool call), and eventually **eBPF** on Linux so the kernel agrees with the runtime.
+This repo is a Go module. Start with [`AGENTS.md`](AGENTS.md) for goals and coding standards. Short version:
 
-### Feature status
-
-| Area | Status | Notes |
-|------|--------|--------|
-| Planning + handoffs (ACM) | **Shipped** | Plans, todos, context rebuild on complete |
-| Checkpoints / stores | **Shipped** | `SessionCheckpoint` blob; Runtime persists via SnapshotStore |
-| Inference strategy | **Shipped** | OpenAI-compatible streams |
-| Brain | **Shipped** | Optional; tools only when wired |
-| VFS mounts (local, S3, Drive, Graph) | **Shipped** | [docs/vfs.md](docs/vfs.md); Graph defaults to organization (`siteId`/`driveId`) |
-| Content IR (text) | **Shipped** | Provider translates IR and persists immediately |
-| Content `rev` + file tools | **Shipped** | When VFS is set |
-| Progressive line windows | **Shipped** | Large text without always full materialize |
-| Structured Markdown / `block_id` | **Shipped** | Projected heading blocks; outline + block replace; index props |
-| Google Docs / Sheets IR | **Shipped** | Native Docs/Sheets APIs; GFM pipe tables become real Docs grids |
-| Word / Excel file codecs | **Shipped** | `.docx` / `.xlsx` on local, S3, Drive files, Graph |
-| Mount → brain (`vfsindex`) | **Shipped** | Optional bridge; MD by blocks, other text by lines; async reindex later |
-| FUSE projection | **Shipped** | `MountSession.FuseMount` — `rg` / `fd` / `ls` on the session tree |
-| Tool batches + HITL | **Shipped** | Whole batch runs; never infer while pending; Temporal leftovers in workflow history |
-| Unified `read` / `replace` for all media | **Planned** | One edit surface; codecs do the rest |
-| Rich document IR (WYSIWYG UI) | **Planned** | Same Block schema + style metadata in an editor |
-| Custom agent shell | **Planned** | Our shell, VFS-backed—not raw host bash as the main path |
-| Sandboxed Python / JS | **Planned** | Guests with our APIs only |
-| Capability broker | **Planned** | Mid-flight allow / deny / ask |
-| Linux eBPF / cgroup | **Eventually** | Backstop when something tries to leave the box |
-| Materialize tree (no FUSE) | **Eventually** | Same idea without kernel FS glue |
-
-### Target architecture
-
-```mermaid
-flowchart TB
-  subgraph harness [Agent harness]
-    Plan[Plan / todos / handoff]
-    Tools[Hard tools: read · write]
-    Ctx[Structured context]
-    CP[Checkpoint]
-  end
-
-  subgraph runtime [Agent runtime]
-    Shell[Custom agent shell]
-    Py[Python guest]
-    JS[JS guest]
-    Broker[Capability broker<br/>allow · deny · ask · limit]
-  end
-
-  subgraph vfs_layer [Virtual filesystem]
-    MS[MountSession]
-    IR[Content IR<br/>text lines · rich blocks + styles]
-    Overlay[Provider IR + persist]
-    Codec[Codecs bytes ↔ IR]
-  end
-
-  subgraph project [Host projection optional]
-    FUSE[FUSE / FSKit mount]
-    HostCLIs[rg · fd · ls · find]
-  end
-
-  subgraph backends [Opaque backends]
-    Local[Local jail]
-    S3[S3 / object]
-    Other[Drive / Graph / Docs]
-  end
-
-  subgraph kernel [Linux backstop eventually]
-    eBPF[eBPF / cgroup / seccomp]
-  end
-
-  Plan --> Tools
-  Plan --> Ctx
-  Tools --> Broker
-  Shell --> Broker
-  Py --> Broker
-  JS --> Broker
-  Broker --> MS
-  MS --> Overlay
-  Overlay --> IR
-  IR --> Codec
-  Codec --> Local
-  Codec --> S3
-  Codec --> Other
-  MS --> FUSE
-  FUSE --> HostCLIs
-  HostCLIs -.->|allowlisted exec| Broker
-  CP --> MS
-  eBPF -.->|observe / enforce| Broker
-  eBPF -.->|jail| backends
-```
-
-### What happens *during* a tool call
-
-```mermaid
-sequenceDiagram
-  participant Agent
-  participant Harness
-  participant Broker as Capability broker
-  participant VFS as MountSession + IR
-  participant Backend
-
-  Agent->>Harness: tool / shell / python session
-  Harness->>Broker: session open
-  loop Each privileged op
-    Agent->>Broker: fs.read / net.http / proc.exec / …
-    Broker->>Broker: policy allow · deny · ask
-    alt allowed
-      Broker->>VFS: session-visible I/O
-      VFS->>Backend: provider translates IR and persists now
-      Broker-->>Agent: result
-    else deny or human gate
-      Broker-->>Harness: block / interrupt
-    end
-  end
-  Note over Harness,Backend: Harness does not flush VFS
-```
-
-### Agent-facing surface (where we are going)
-
-| Job | How |
-|-----|-----|
-| Discover / search | Restricted shell and/or `rg`·`fd` on FUSE |
-| Read (+ `rev`) | One **`read`**—lines or rich doc IR |
-| Edit | **`replace`** / **`write`** with `rev` (plain and WYSIWYG) |
-| Tree ops | Shell under policy, or thin tools if you refuse shell |
-| Scripts / scrape | Sandboxed **python** / **js** with our APIs only |
-| Knowledge | Brain tools when you attach an engine |
-
-Mounts and IR in depth: [docs/vfs.md](docs/vfs.md).
-
----
-
-## Develop
+- Prefer the standard library. Third-party packages are a last resort.
+- Prefer small, explicit pieces over hidden abstractions.
+- Tests are outcome-oriented integration tests. Assert what should happen, not that a private helper ran. Avoid duplicate coverage of the same return path.
 
 ```bash
-make test
+make test-short   # no Docker
+make test         # includes brain Postgres + Helix (Docker)
 make vet
+make lint
 ```
 
-How we work on this repo: [`AGENTS.md`](AGENTS.md).
+Where to look:
+
+| Area | Start here |
+|------|------------|
+| Turn loop, tools, plan | `agent.go`, `agent_run.go`, `tools.go` |
+| Specialists / children | `subagents.go`, `durable/child.go`, `durable/inprocess/` |
+| Runtime | `durable/runtime.go`, `docs/durable.md` |
+| VFS | `vfs/`, `docs/vfs.md` |
+| Knowledge | `brain/`, `docs/knowledge.md` |
+| ACP / protocols | `server/` |
+
+Issues and pull requests are welcome. Match the surrounding code: `gofmt`, `go vet`, `golangci-lint`.
 
 ---
 
 ## License
 
-See [LICENSE](LICENSE).
+Apache 2.0. See [LICENSE](LICENSE).

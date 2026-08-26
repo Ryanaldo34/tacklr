@@ -57,7 +57,7 @@ ReadText → provider OpenDocument (service is source of truth)
 
 ## Mounts
 
-Hosts register factories on a process-scoped `BackendRegistry`, then attach mounts on a `MountSession`.
+Hosts register factories on a process-scoped `BackendRegistry`, then attach mounts on a `MountSession`. Durable child sessions open their own `MountSession` each turn from the same recipes; they do not share the parent’s live tree.
 
 ```go
 reg := vfs.NewBackendRegistry()

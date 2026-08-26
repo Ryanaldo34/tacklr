@@ -418,7 +418,7 @@ func (s *OpenAIInferenceStrategy) parseSSEResponse(ctx context.Context, body io.
 	// the full summary on output_item.done (would duplicate ACP thought chunks).
 	reasoningStreamed := make(map[string]struct{})
 	for scanner.Scan() {
-		if ctx != nil && ctx.Err() != nil {
+		if err := ctx.Err(); err != nil {
 			return
 		}
 		line := scanner.Text()
@@ -528,7 +528,7 @@ func (s *OpenAIInferenceStrategy) parseSSEResponse(ctx context.Context, body io.
 			}
 		}
 	}
-	if ctx != nil && ctx.Err() != nil {
+	if err := ctx.Err(); err != nil {
 		return
 	}
 	if err := scanner.Err(); err != nil {

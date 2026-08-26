@@ -1,26 +1,26 @@
 # What is Tacklr
 
-Tacklr is a publicly distributed, open source agent harness SDK. The SDK is opinionated, meaning it is a framework not a library. Tacklr defines how we think agents *should* be built and how the harness should be structured.
+Tacklr is an opinionated Go agent harness SDK. It is a framework, not a bag of helpers. It defines how a turn should run and how the harness is structured.
 
- ## Goals of the Project
+## Goals of the Project
 
- Tacklr was built for a few core reasons and all design decisions should be made with our ethos in mind.
+Design decisions should follow these four ideas.
 
- ### A Better Way of Context Structuring
+### Structured context
 
- Rather than just summarizing the context window generally when it gets close to filling up or naively trimming / summarizing the oldest messages in the context window to make room, Tacklr takes a structured approach to context management. Context is structured & optimized for the current task at hand. Our advanced planning cycles rooted in Adaptive Case Management force the agent to build detail plans for each task in the form of a "to-do list" of subtasks to complete the task or project given. Upon completion of a to-do, the agent marks it complete and the context is updated to produce a "hand-off" of context structured for the next to-do(s) to be completed. This way, it optimizes cost, context structure, and performance as needless bloat & irrelevant context does not need to be kept in the context window. Think of it like subagents being spawned and only returning the necessary information requested by the orchestrator.
+Context is built for the work in front of the agent, not for everything that has ever been said. Planning cycles (Adaptive Case Management) produce a to-do list. Completing a to-do rebuilds a hand-off for the next work. Unused history does not stay in the window. Specialists are the same idea at a larger grain: a nested session that returns only what the parent asked for.
 
- ### Cloud-Native Design
+### Cloud-native
 
- Tacklr is designed to run natively in the cloud, leveraging cloud-native technologies and services. It is built to be scalable, fault-tolerant, and easy to deploy. This is why we've chosen to build Tacklr using Go and why we support a variety of JSON-RPC based protocols for communication with the agent.
+Tacklr is meant to run in the cloud: Go, JSON-RPC protocols, optional Temporal for durable sessions. The same harness should embed in-process or sit behind `durable.Runtime`.
 
- ### Security
+### A bounded agent world
 
- Security is horrendous when it comes to AI agents. Our state-of-the-art virtual execution environment & filesystem (eventually will be implemented) allow for the agent to only have access to what it should, and not know about anything else outside of its scope. No more `rm -rf /`, unexpected tool/process running, or prompt injection attack oopsies! And thanks to the virtual filesystem, the agent doesn't know where files are coming from because to it, it all looks the same with one single read/write interface across cloud buckets, local filesystems, google drive, sharepoint, dropbox, and more. Think how virtual memory works in operating systems -- the running process has no idea where the memory is coming from or what other processes are doing, it just knows it has access to it.
+The virtual filesystem gives the agent one read/write interface over the mounts the host chose (local disk, object storage, Drive, Graph, knowledge objects). The agent sees virtual paths. It does not see host paths, other sessions, or credentials. Checkpoints store mount recipes, not tokens or file bytes.
 
-### The Knowledge Base or "Brain"
+### Knowledge base
 
-The ship of tradiional RAG has sailed long ago. Temporal & graph-based semantic search has proven much more effective in the age of AI. That is why we will be offering these search utilities natively in Tacklr. The agent will have access to a self-maintained knowledge base that can be queried for information and memory efficiently and accurately. Never let out-of-date information pollute your agent's context.
+The brain is a host-owned store the agent can query: hybrid search, an optional graph, and namespaces. Retrieval is on demand so the window is not a dump of stale text.
 
 # Coding Standards
 

@@ -93,6 +93,39 @@ func (c *UserSelectionInterrupt) Error() string {
 	return string(b)
 }
 
+// TypeChildWaiting parks a parent spawn_specialist/get_child until the host resumes.
+// The payload is forwarded to the child session; Return is a no-op.
+const TypeChildWaiting = "child_waiting"
+
+// ChildWaiting accepts any resume payload (child HITL forwarded
+// through the parent session).
+type ChildWaiting struct {
+	Kind    string `json:"kind"`
+	Message string `json:"message,omitempty"`
+}
+
+func (p *ChildWaiting) TypeName() string {
+	if p != nil && p.Kind != "" {
+		return p.Kind
+	}
+	return TypeChildWaiting
+}
+
+func (p *ChildWaiting) Serialize() ([]byte, error) {
+	return json.Marshal(p)
+}
+
+func (p *ChildWaiting) ValidatePayload([]byte) error { return nil }
+
+func (p *ChildWaiting) Return([]byte) error { return nil }
+
+func (p *ChildWaiting) Error() string {
+	if p != nil && p.Message != "" {
+		return p.Message
+	}
+	return "child session awaiting input"
+}
+
 // ACP PermissionOptionKind values.
 const (
 	PermissionAllowOnce    = "allow_once"
@@ -239,6 +272,7 @@ func RegisterDefaults() {
 	defaultsOnce.Do(func() {
 		Register(func() Interrupt { return &UserSelectionInterrupt{} })
 		Register(func() Interrupt { return &ToolPermissionInterrupt{} })
+		Register(func() Interrupt { return &ChildWaiting{Kind: TypeChildWaiting} })
 	})
 }
 
@@ -284,7 +318,7 @@ func Clone(intr Interrupt) Interrupt {
 }
 
 // PayloadInitializer is an optional capability Interrupt types implement
-// to populate themselves from the raw payload provided to RaiseInterrupt.
+// to populate themselves from the raw payload provided to Park.
 type PayloadInitializer interface {
 	InitFromPayload([]byte) error
 }

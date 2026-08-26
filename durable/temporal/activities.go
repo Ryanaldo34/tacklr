@@ -40,8 +40,8 @@ func cancelLiveTurn(id durable.SessionID) {
 }
 
 func canceledIf(ctx context.Context, err error) error {
-	if ctx.Err() != nil {
-		return temporal.NewCanceledError("turn cancelled")
+	if err := ctx.Err(); err != nil {
+		return temporal.NewCanceledError(err.Error())
 	}
 	return err
 }
@@ -67,6 +67,7 @@ type InferenceInput struct {
 	Resume        map[string][]byte
 	Auth          durable.AuthContext
 	Mounts        []durable.MountRecipe
+	Specialist    string
 }
 
 // InferenceOutput is the typed Inference activity result.
@@ -74,6 +75,7 @@ type InferenceOutput struct {
 	Etag      string
 	Complete  bool
 	ToolCalls []streaming.ToolCall
+	Result    string
 }
 
 // ToolInput is the typed Tool activity argument.
@@ -85,6 +87,8 @@ type ToolInput struct {
 	Call       streaming.ToolCall
 	Auth       durable.AuthContext
 	Mounts     []durable.MountRecipe
+	Specialist string
+	Children   []durable.ChildOp
 }
 
 // ToolOutput is the typed Tool activity result.
@@ -92,10 +96,11 @@ type ToolOutput struct {
 	Etag        string
 	Interrupted bool
 	InterruptID string
+	Children    []durable.ChildOp
 }
 
 // CommitToolInput records a tool output on the staged batch without executing
-// the tool. SessionWorkflow uses this after spawn_worker child completion.
+// the tool. SessionWorkflow uses this after spawn_specialist child completion.
 type CommitToolInput struct {
 	SessionID  durable.SessionID
 	AgentID    string
@@ -105,6 +110,7 @@ type CommitToolInput struct {
 	Output     string
 	Auth       durable.AuthContext
 	Mounts     []durable.MountRecipe
+	Specialist string
 }
 
 func (a *Activities) Inference(ctx context.Context, in InferenceInput) (InferenceOutput, error) {
@@ -131,11 +137,11 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 	if attempt > 1 {
 		_ = a.publish(ctx, stream, in.SessionID, durable.TopicRetry, streaming.StreamEvent{Type: streaming.StreamEventError, Content: "retry"}, true)
 	}
-	h, ms, etag, err := a.harness(ctx, in.SessionID, in.AgentID, in.MCPServers, in.Etag, in.Auth, in.Mounts)
+	h, ms, etag, err := a.harness(ctx, in.SessionID, in.AgentID, in.MCPServers, in.Etag, in.Auth, in.Mounts, in.Specialist)
 	if err != nil {
 		pub := err
-		if ctx.Err() != nil {
-			pub = context.Canceled
+		if err := ctx.Err(); err != nil {
+			pub = err
 		}
 		slog.ErrorContext(ctx, "inference harness", "area", telemetry.AreaRuntime, "error", pub)
 		_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, streaming.StreamEvent{Type: streaming.StreamEventError, Error: pub, Content: pub.Error()}, true)
@@ -168,8 +174,8 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 	step, err := eng.RunInference(ctx, st, out)
 	if err != nil {
 		pub := err
-		if ctx.Err() != nil {
-			pub = context.Canceled
+		if err := ctx.Err(); err != nil {
+			pub = err
 			slog.WarnContext(ctx, "inference cancelled", "area", telemetry.AreaRuntime)
 		} else {
 			slog.ErrorContext(ctx, "inference failed", "area", telemetry.AreaRuntime, "error", err)
@@ -182,9 +188,17 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 		slog.ErrorContext(ctx, "inference persist", "area", telemetry.AreaRuntime, "error", err)
 		return InferenceOutput{}, err
 	}
+	result := ""
+	if step.Complete {
+		for _, m := range h.Messages() {
+			if m != nil && m.Role == tacklr.RoleAssistant && m.Content != "" {
+				result = m.Content
+			}
+		}
+	}
 	slog.InfoContext(ctx, "inference completed",
 		"area", telemetry.AreaRuntime, "complete", step.Complete, "tool_calls", len(step.ToolCalls))
-	return InferenceOutput{Etag: etag, Complete: step.Complete, ToolCalls: step.ToolCalls}, nil
+	return InferenceOutput{Etag: etag, Complete: step.Complete, ToolCalls: step.ToolCalls, Result: result}, nil
 }
 
 func (a *Activities) Tool(ctx context.Context, in ToolInput) (ToolOutput, error) {
@@ -211,7 +225,7 @@ func (a *Activities) Tool(ctx context.Context, in ToolInput) (ToolOutput, error)
 	if attempt > 1 {
 		_ = a.publish(ctx, stream, in.SessionID, durable.TopicRetry, streaming.StreamEvent{Type: streaming.StreamEventError, Content: "retry"}, true)
 	}
-	h, ms, etag, err := a.harness(ctx, in.SessionID, in.AgentID, in.MCPServers, in.Etag, in.Auth, in.Mounts)
+	h, ms, etag, err := a.harness(ctx, in.SessionID, in.AgentID, in.MCPServers, in.Etag, in.Auth, in.Mounts, in.Specialist)
 	if err != nil {
 		slog.ErrorContext(ctx, "tool harness", "area", telemetry.AreaHarness, "error", err)
 		return ToolOutput{}, err
@@ -220,15 +234,18 @@ func (a *Activities) Tool(ctx context.Context, in ToolInput) (ToolOutput, error)
 		h.Close()
 		durable.CloseTurnVFS(ms, string(in.SessionID), "tool")
 	}()
+	kids := &activityChildren{parent: in.SessionID, ops: append([]durable.ChildOp(nil), in.Children...)}
 	eng := drive.EngineOf(h)
+	eng.SetChildHost(kids)
 	out, stop := drive.PipeStreamEvents(a.emitter(ctx, stream, in.SessionID))
 	defer stop()
 	step, runErr := eng.RunToolCall(ctx, in.Call, out)
-	if runErr != nil && ctx.Err() != nil {
-		slog.WarnContext(ctx, "tool cancelled", "area", telemetry.AreaHarness, "tool", in.Call.Name)
-		_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, streaming.StreamEvent{Type: streaming.StreamEventError, Error: context.Canceled, Content: context.Canceled.Error()}, true)
-		return ToolOutput{}, temporal.NewCanceledError("turn cancelled")
-	} else if runErr != nil {
+	if runErr != nil {
+		if err := ctx.Err(); err != nil {
+			slog.WarnContext(ctx, "tool cancelled", "area", telemetry.AreaHarness, "tool", in.Call.Name)
+			_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, streaming.StreamEvent{Type: streaming.StreamEventError, Error: err, Content: err.Error()}, true)
+			return ToolOutput{}, canceledIf(ctx, runErr)
+		}
 		slog.ErrorContext(ctx, "tool failed", "area", telemetry.AreaHarness, "tool", in.Call.Name, "error", runErr)
 	}
 	etag, saveErr := a.save(ctx, in.SessionID, in.AgentID, h, etag, in.Mounts)
@@ -245,11 +262,11 @@ func (a *Activities) Tool(ctx context.Context, in ToolInput) (ToolOutput, error)
 	}
 	slog.InfoContext(ctx, "tool completed",
 		"area", telemetry.AreaHarness, "tool", in.Call.Name, "status", status)
-	return ToolOutput{Etag: etag, Interrupted: step.Interrupted, InterruptID: step.InterruptID}, nil
+	return ToolOutput{Etag: etag, Interrupted: step.Interrupted, InterruptID: step.InterruptID, Children: kids.ops}, nil
 }
 
 func (a *Activities) CommitToolOutput(ctx context.Context, in CommitToolInput) (ToolOutput, error) {
-	h, ms, etag, err := a.harness(ctx, in.SessionID, in.AgentID, in.MCPServers, in.Etag, in.Auth, in.Mounts)
+	h, ms, etag, err := a.harness(ctx, in.SessionID, in.AgentID, in.MCPServers, in.Etag, in.Auth, in.Mounts, in.Specialist)
 	if err != nil {
 		return ToolOutput{}, err
 	}
@@ -262,13 +279,30 @@ func (a *Activities) CommitToolOutput(ctx context.Context, in CommitToolInput) (
 	if err != nil {
 		return ToolOutput{}, err
 	}
+	presented := in.Call
+	presented.Status = "success"
+	stream := a.openStream(ctx)
+	defer closeStream(ctx, stream)
+	_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, streaming.StreamEvent{
+		Type:      streaming.StreamEventToolResult,
+		MessageID: in.Call.Key(),
+		Content:   in.Output,
+		ToolCalls: []streaming.ToolCall{presented},
+	}, true)
 	return ToolOutput{Etag: etag}, nil
 }
 
-func (a *Activities) harness(ctx context.Context, id durable.SessionID, agentID string, extraMCP []mcp.MCPConfig, etag string, auth durable.AuthContext, mounts []durable.MountRecipe) (*tacklr.AgentHarness, *vfs.MountSession, string, error) {
+func (a *Activities) harness(ctx context.Context, id durable.SessionID, agentID string, extraMCP []mcp.MCPConfig, etag string, auth durable.AuthContext, mounts []durable.MountRecipe, specialist string) (*tacklr.AgentHarness, *vfs.MountSession, string, error) {
 	spec, ok := a.Catalog.Lookup(agentID)
 	if !ok {
 		return nil, nil, "", durable.ErrAgentNotFound
+	}
+	if specialist != "" {
+		over, err := durable.OverlaySpecialist(spec, specialist)
+		if err != nil {
+			return nil, nil, "", err
+		}
+		spec = over
 	}
 	proj := a.Projection
 	if proj == nil {

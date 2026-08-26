@@ -36,8 +36,11 @@ type Engine interface {
 	RunToolCall(ctx context.Context, tc streaming.ToolCall, out chan streaming.StreamEvent) (ToolStep, error)
 	ApplyResume(finishedInterrupts map[string][]byte) error
 	// RecordToolResult appends a RoleTool message without executing (Temporal
-	// spawn_worker after the child workflow already ran).
+	// after a child workflow already ran).
 	RecordToolResult(tc streaming.ToolCall, output string)
+	// SetChildHost installs nested-session child operations for tools.
+	// Nil: child methods fail. h must implement tacklr childHost.
+	SetChildHost(h any)
 }
 
 var bound func(any) Engine

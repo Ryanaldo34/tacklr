@@ -395,7 +395,7 @@ Sheets: write block_id is Sheet!A1 (one cell). Optional format patches that cell
 }
 
 func staleRevError(path string) error {
-	return AgentErrorf(vfs.ErrStaleContent, "the file changed since that rev (%s). Omit rev, or read the file again before writing", path)
+	return Correctionf(vfs.ErrStaleContent, "the file changed since that rev (%s). Omit rev, or read the file again before writing", path)
 }
 
 func presentWriteError(path string, err error) error {
@@ -404,17 +404,17 @@ func presentWriteError(path string, err error) error {
 	}
 	switch {
 	case errors.Is(err, vfs.ErrInvalidWrite), errors.Is(err, vfs.ErrConflict):
-		return AgentErrorf(vfs.ErrInvalidWrite, "%s was not saved. Some of the content may already be in the file. Read the file, then write the full HTML again", path)
+		return Correctionf(vfs.ErrInvalidWrite, "%s was not saved. Some of the content may already be in the file. Read the file, then write the full HTML again", path)
 	case errors.Is(err, vfs.ErrStaleContent):
 		return staleRevError(path)
 	case errors.Is(err, vfs.ErrUseHTML):
-		return AgentErrorf(vfs.ErrUseHTML, "%s is a document. Pass content as HTML, for example <h1>Title</h1> and <p>paragraphs</p>", path)
+		return Correctionf(vfs.ErrUseHTML, "%s is a document. Pass content as HTML, for example <h1>Title</h1> and <p>paragraphs</p>", path)
 	case errors.Is(err, vfs.ErrEmptyReplace):
-		return AgentErrorf(vfs.ErrEmptyReplace, "%s: %s", path, vfs.ErrEmptyReplace.Error())
+		return Correctionf(vfs.ErrEmptyReplace, "%s: %s", path, vfs.ErrEmptyReplace.Error())
 	case errors.Is(err, vfs.ErrTabIDRequired):
-		return AgentErrorf(vfs.ErrTabIDRequired, "%s: %s", path, vfs.ErrTabIDRequired.Error())
+		return Correctionf(vfs.ErrTabIDRequired, "%s: %s", path, vfs.ErrTabIDRequired.Error())
 	case errors.Is(err, vfs.ErrProjected):
-		return AgentErrorf(vfs.ErrProjected, "%s: that write is not supported on this file type. For a document, write HTML content or a line range. For a sheet, write one cell as block_id Sheet!A1", path)
+		return Correctionf(vfs.ErrProjected, "%s: that write is not supported on this file type. For a document, write HTML content or a line range. For a sheet, write one cell as block_id Sheet!A1", path)
 	default:
 		return presentToolError("write", err)
 	}

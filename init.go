@@ -12,9 +12,7 @@ import (
 
 func init() {
 	interrupt.RegisterDefaults()
-	if err := adapters.RegisterCommon(vfs.DefaultContentRegistry()); err != nil {
-		panic("tacklr: register common content codecs: " + err.Error())
-	}
+	_ = adapters.RegisterCommon(vfs.DefaultContentRegistry())
 	drive.Bind(func(h any) drive.Engine {
 		ah, ok := h.(*AgentHarness)
 		if !ok {
@@ -49,5 +47,12 @@ func (e harnessDrive) RunToolCall(ctx context.Context, tc streaming.ToolCall, ou
 }
 
 func (e harnessDrive) ApplyResume(finishedInterrupts map[string][]byte) error {
+	e.a.runMu.Lock()
+	defer e.a.runMu.Unlock()
 	return e.a.applyResume(finishedInterrupts)
+}
+
+func (e harnessDrive) SetChildHost(h any) {
+	host, _ := h.(childHost)
+	e.a.childHost = host
 }

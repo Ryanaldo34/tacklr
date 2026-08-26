@@ -16,7 +16,7 @@ import (
 )
 
 func TestServeHTTP_listenCancelAndMountedHandlers(t *testing.T) {
-	r := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	r := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
 	srv := NewServer(r.Runtime, r.Catalog, NewACPProtocol(nil)).AllowAnonymousNetwork()
 
 	rec := serveACPInbound(t, r, srv.Protocols[0], `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}`)
@@ -75,7 +75,7 @@ func TestWaitHTTPServer_listenAndCancel(t *testing.T) {
 }
 
 func TestHTTPMux_unregisteredProtocolPaths(t *testing.T) {
-	r := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	r := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
 	acpOnly := NewServer(r.Runtime, r.Catalog, NewACPProtocol(nil)).AllowAnonymousNetwork()
 	rec := httptest.NewRecorder()
 	acpOnly.HTTPMux().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/", bytes.NewReader([]byte(`{}`))))
@@ -99,7 +99,7 @@ func TestNewServer_panicsWithoutRuntimeOrProtocol(t *testing.T) {
 				t.Fatal("expected panic")
 			}
 		}()
-		k := newEmptyKernel()
+		k := newEmptyRuntime()
 		_ = NewServer(k.Runtime, k.Catalog, nil)
 	})
 	t.Run("no protocols", func(t *testing.T) {
@@ -108,7 +108,7 @@ func TestNewServer_panicsWithoutRuntimeOrProtocol(t *testing.T) {
 				t.Fatal("expected panic")
 			}
 		}()
-		k := newEmptyKernel()
+		k := newEmptyRuntime()
 		_ = NewServer(k.Runtime, k.Catalog)
 	})
 }
@@ -121,7 +121,7 @@ func TestLogTurnError(t *testing.T) {
 // TestHandleInbound_lifecycleMethods exercises initialize, session CRUD/config,
 // authenticate, and unknown method.
 func TestHandleInbound_lifecycleMethods(t *testing.T) {
-	r := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	r := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
 	srv := NewServer(r.Runtime, r.Catalog, NewACPProtocol(nil))
 	w := &recordingMessageWriter{}
 	bridge := NewClientBridge(w)
@@ -160,7 +160,7 @@ func TestHandleInbound_lifecycleMethods(t *testing.T) {
 }
 
 func TestServeHTTP_listenError(t *testing.T) {
-	r := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	r := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
 	err := NewServer(r.Runtime, r.Catalog, NewACPProtocol(nil)).AllowAnonymousNetwork().ServeHTTP(context.Background(), "127.0.0.1:99999x")
 	if err == nil {
 		t.Fatal("expected listen error")
@@ -168,7 +168,7 @@ func TestServeHTTP_listenError(t *testing.T) {
 }
 
 func TestACP_handleInbound_invalidJSON(t *testing.T) {
-	r := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	r := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
 	rec := serveACPRaw(t, r, `{`)
 	if rec.Body.Len() == 0 {
 		t.Fatal("expected error body")

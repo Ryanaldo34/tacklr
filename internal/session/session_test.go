@@ -273,8 +273,19 @@ func TestSessionManager_stateAndPlanAreIsolated(t *testing.T) {
 	}
 }
 
+func adoptPark(t *testing.T, sm *session.SessionManager, id string, err error) {
+	t.Helper()
+	var intr interrupt.Interrupt
+	if !errors.As(err, &intr) {
+		t.Fatalf("park: %v", err)
+	}
+	if _, aerr := sm.AdoptInterrupt(id, intr); aerr == nil {
+		t.Fatal("adopt should return park error")
+	}
+}
+
 // TestSession_interrupts_raiseReturnAdopt is the interrupt lifecycle:
-// tool RaiseInterrupt, then SessionManager pending → return → take / adopt.
+// tool Park returns an interrupt error; the harness AdoptInterrupt writes pending.
 func TestSession_interrupts_raiseReturnAdopt(t *testing.T) {
 	sm := session.NewSessionManager()
 	ch := make(chan streaming.StreamEvent, 4)
@@ -282,19 +293,18 @@ func TestSession_interrupts_raiseReturnAdopt(t *testing.T) {
 	rt = rt.WithToolCallID("tc1")
 
 	// Unknown type.
-	if _, err := rt.RaiseInterrupt("nope", nil); err == nil {
+	if _, err := rt.Park("nope", nil); err == nil {
 		t.Fatal("want unknown type error")
 	}
 
-	// Raise parks as error; pending true.
-	_, err := rt.RaiseInterrupt("user_selection_choice", []byte(`[{"title":"A"},{"title":"B"}]`))
+	_, err := rt.Park("user_selection_choice", []byte(`[{"title":"A"},{"title":"B"}]`))
 	if err == nil {
-		t.Fatal("raise returns interrupt as error")
+		t.Fatal("park returns interrupt as error")
 	}
-	var asIntr interrupt.Interrupt
-	if !errors.As(err, &asIntr) {
-		t.Fatalf("want interrupt error, got %v", err)
+	if sm.HasPendingInterrupt() {
+		t.Fatal("Park must not write pending")
 	}
+	adoptPark(t, sm, "tc1", err)
 	if !sm.HasPendingInterrupt() {
 		t.Fatal("pending")
 	}
@@ -329,15 +339,16 @@ func TestSession_interrupts_raiseReturnAdopt(t *testing.T) {
 
 	// Raise after resolve short-circuits with resolved value (second raise path).
 	rt = rt.WithToolCallID("tc2")
-	_, err = rt.RaiseInterrupt("user_selection_choice", []byte(`[{"title":"X"}]`))
+	_, err = rt.Park("user_selection_choice", []byte(`[{"title":"X"}]`))
 	if err == nil {
 		t.Fatal("park")
 	}
+	adoptPark(t, sm, "tc2", err)
 	if _, err := sm.ReturnInterrupt("tc2", []byte(`{"selectionIdx":0}`)); err != nil {
 		t.Fatal(err)
 	}
 	// Second raise with same tool call id returns resolved without re-parking.
-	intr, err := rt.RaiseInterrupt("user_selection_choice", []byte(`[{"title":"Y"}]`))
+	intr, err := rt.Park("user_selection_choice", []byte(`[{"title":"Y"}]`))
 	if err != nil || intr == nil {
 		t.Fatalf("want resolved return, err=%v intr=%v", err, intr)
 	}
@@ -364,10 +375,11 @@ func TestSession_interrupts_raiseReturnAdopt(t *testing.T) {
 
 	// Tool permission raise + resolve.
 	rt = rt.WithToolCallID("perm")
-	_, err = rt.RaiseInterrupt("tool_permission", []byte(`{"toolName":"rm"}`))
+	_, err = rt.Park("tool_permission", []byte(`{"toolName":"rm"}`))
 	if err == nil {
 		t.Fatal("park permission")
 	}
+	adoptPark(t, sm, "perm", err)
 	if _, err := sm.ReturnInterrupt("perm", []byte(`{"optionId":"allow-once"}`)); err != nil {
 		t.Fatal(err)
 	}
@@ -375,12 +387,13 @@ func TestSession_interrupts_raiseReturnAdopt(t *testing.T) {
 	// SessionManager facade: clear, then pending → return without a turn bus.
 	sm.ClearInterrupts()
 	rt = rt.WithToolCallID("sm1")
-	_, err = rt.RaiseInterrupt("tool_permission", []byte(`{"toolName":"ls"}`))
+	_, err = rt.Park("tool_permission", []byte(`{"toolName":"ls"}`))
 	if err == nil {
 		t.Fatal("park after ClearInterrupts")
 	}
+	adoptPark(t, sm, "sm1", err)
 	if _, ok := sm.PendingInterrupt("sm1"); !ok {
-		t.Fatal("PendingInterrupt after raise")
+		t.Fatal("PendingInterrupt after adopt")
 	}
 	if _, err := sm.ReturnInterrupt("sm1", []byte(`{"optionId":"allow-once"}`)); err != nil {
 		t.Fatal(err)
@@ -425,7 +438,8 @@ func TestSessionManager_checkpointInterruptsRoundTrip(t *testing.T) {
 		return c
 	}(), sm)
 	rt = rt.WithToolCallID("c1")
-	_, _ = rt.RaiseInterrupt("user_selection_choice", []byte(`[{"title":"A"}]`))
+	_, parkErr := rt.Park("user_selection_choice", []byte(`[{"title":"A"}]`))
+	adoptPark(t, sm, "c1", parkErr)
 	rt.StateSet("u", "v")
 	sm.Plan.SetDocument("doc")
 	sm.Plan.Set([]streaming.Todo{{Title: "T", Status: streaming.TodoStatusPending}})
@@ -486,7 +500,8 @@ func TestInterruptMap_unknownType_errors(t *testing.T) {
 		return c
 	}(), sm)
 	rt = rt.WithToolCallID("x")
-	_, _ = rt.RaiseInterrupt("tool_permission", []byte(`{"toolName":"t"}`))
+	_, parkErr := rt.Park("tool_permission", []byte(`{"toolName":"t"}`))
+	adoptPark(t, sm, "x", parkErr)
 	// Build envelope with unknown type.
 	bad, _ := json.Marshal(map[string]any{
 		"x": map[string]any{"type": "not_registered", "data": map[string]any{}},

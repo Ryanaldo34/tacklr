@@ -46,6 +46,13 @@ type CreateSession struct {
 	MCPServers []mcp.MCPConfig
 	// Mounts seeds the session recipe cache (no secrets). Tokens arrive on Prompt.
 	Mounts []MountRecipe
+	// Parent, when set, makes this a child session of that parent. The child
+	// reuses the same wait loop. Empty MCPServers/Mounts inherit from parent.
+	Parent SessionID
+	// Specialist selects a Specialist from the parent's catalog spec. Required
+	// with Parent for spawn_specialist children. The host does not register the
+	// worker as a top-level catalog agent.
+	Specialist string
 }
 
 // Prompt is the typed input for Runtime.Prompt.
@@ -65,11 +72,56 @@ type Resume struct {
 	Auth      AuthContext
 }
 
+// ChildOp is one child ledger entry passed through Temporal Tool activities.
+// Tools mutate this via HarnessRuntime; the workflow reconciles after the tool.
+type ChildOp struct {
+	ID         SessionID
+	Specialist string
+	Task       string
+	State      string
+	Result     string
+	Cancel     bool
+	Await      bool
+}
+
 // Snapshot is one session's harness checkpoint plus VFS recipes (no tokens).
 type Snapshot struct {
 	AgentID    string
+	Specialist string
+	Parent     SessionID
+	// Children are child session ids in start order (no handles, no tokens).
+	Children   []SessionID
 	Checkpoint stores.SessionCheckpoint
 	Mounts     []MountRecipe
+}
+
+// SessionState is parent-facing session/job state. Child HITL does not change
+// this from running until the interrupt is resolved and the child completes,
+// fails, or is cancelled.
+type SessionState string
+
+const (
+	SessionRunning  SessionState = "running"
+	SessionComplete SessionState = "complete"
+	SessionFailed   SessionState = "failed"
+	SessionUnknown  SessionState = "unknown"
+)
+
+// SessionKindSpecialist is Status.Kind for spawn_specialist children.
+const SessionKindSpecialist = "specialist"
+
+// SessionStatus is a value type returned by Runtime.Status. Not an interface.
+type SessionStatus struct {
+	ID         SessionID
+	Parent     SessionID
+	State      SessionState
+	Specialist string
+	Kind       string
+	Result     string
+	Err        error
+	// Waiting is true while the session is parked for HITL. Parent-facing
+	// State stays running until that interrupt is resolved.
+	Waiting bool
 }
 
 // EventLog topics. Temporal Workflow Streams uses the same names.

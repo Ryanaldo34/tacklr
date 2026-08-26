@@ -63,12 +63,12 @@ func (m *mockInferenceStrategy) Invoke(ctx context.Context, msgs []*tacklr.Messa
 	return ch, nil
 }
 
-type testKernel struct {
+type testRuntime struct {
 	Runtime durable.Runtime
 	Catalog *durable.MemoryCatalog
 }
 
-func newTestKernel(t *testing.T, model tacklr.InferenceStrategy, spec durable.AgentSpec) *testKernel {
+func newTestRuntime(t *testing.T, model tacklr.InferenceStrategy, spec durable.AgentSpec) *testRuntime {
 	t.Helper()
 	if spec.Options.Model == nil {
 		spec.Options.Model = model
@@ -85,7 +85,7 @@ func newTestKernel(t *testing.T, model tacklr.InferenceStrategy, spec durable.Ag
 	cat := durable.NewCatalog("default")
 	cat.Register("default", spec)
 	if testing.Short() || !temporallive.Available() {
-		return &testKernel{
+		return &testRuntime{
 			Runtime: inprocess.New(cat, inprocess.WithProjection(vfs.DirectProjection{})),
 			Catalog: cat,
 		}
@@ -112,12 +112,12 @@ func newTestKernel(t *testing.T, model tacklr.InferenceStrategy, spec durable.Ag
 		t.Fatal(err)
 	}
 	t.Cleanup(w.Stop)
-	return &testKernel{Runtime: rt, Catalog: cat}
+	return &testRuntime{Runtime: rt, Catalog: cat}
 }
 
-func newEmptyKernel() *testKernel {
+func newEmptyRuntime() *testRuntime {
 	cat := durable.NewCatalog("")
-	return &testKernel{
+	return &testRuntime{
 		Runtime: inprocess.New(cat, inprocess.WithProjection(vfs.DirectProjection{})),
 		Catalog: cat,
 	}
@@ -125,7 +125,7 @@ func newEmptyKernel() *testKernel {
 
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
-	k := newTestKernel(t, nil, durable.AgentSpec{})
+	k := newTestRuntime(t, nil, durable.AgentSpec{})
 	return NewServer(k.Runtime, k.Catalog, NewACPProtocol(nil))
 }
 

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	mcpruntime "github.com/ryanaldo34/tacklr/internal/mcp"
+	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/mcp"
 )
 
@@ -409,11 +410,64 @@ func TestReturnFromInterrupt_rejectsUnknownInterrupt(t *testing.T) {
 	drainEvents(events)
 
 	// Act
-	_, err = h.ReturnFromInterrupt(context.Background(), map[string][]byte{"missing": []byte(`{"selectionIdx":0}`)})
+	ch, err := h.ReturnFromInterrupt(context.Background(), map[string][]byte{"missing": []byte(`{"selectionIdx":0}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Assert
-	if err == nil || !strings.Contains(err.Error(), "missing") {
-		t.Fatalf("error = %v", err)
+	if !hasErrorIs(drainEvents(ch), interrupt.ErrInterruptNotFound) {
+		t.Fatal("expected unknown interrupt on the resume stream")
+	}
+}
+
+func TestReturnFromInterrupt_rejectsInvalidPayload(t *testing.T) {
+	model := sequentialToolModel([]ToolCall{toolCall("ask1", "ask_user_choice",
+		`{"question":"Pick?","choices":[{"title":"A"},{"title":"B"}]}`)})
+	h := mustNewAgent(t, AgentOptions{
+		Model: model, Config: Config{MaxWindowSize: 8192},
+	})
+	t.Cleanup(h.Close)
+	events, err := h.Run(context.Background(), "ask")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var id string
+	for _, ev := range drainEvents(events) {
+		if ev.Type != StreamEventInterrupt {
+			continue
+		}
+		var payload struct {
+			InterruptId string `json:"interruptId"`
+		}
+		if err := json.Unmarshal(ev.Data, &payload); err != nil {
+			t.Fatal(err)
+		}
+		id = payload.InterruptId
+	}
+	if id == "" {
+		t.Fatal("expected interrupt yield")
+	}
+	ch, err := h.ReturnFromInterrupt(context.Background(), map[string][]byte{id: []byte(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasEventType(drainEvents(ch), StreamEventError) {
+		t.Fatal("want invalid payload on the resume stream")
+	}
+	next, err := h.Run(context.Background(), "new prompt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	drainEvents(next)
+	var closed bool
+	for _, m := range h.Messages() {
+		if m != nil && m.Role == RoleTool && (strings.Contains(m.Content, "cancelled") || strings.Contains(m.Content, "unpaired")) {
+			closed = true
+		}
+	}
+	if !closed {
+		t.Fatalf("new prompt should close the parked tool, window=%+v", h.Messages())
 	}
 }
 

@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
+	"sync/atomic"
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
@@ -33,6 +35,13 @@ func (r *Runtime) constructHarness(ctx context.Context, p *sessionProc, load boo
 	if !ok {
 		return nil, nil, durable.ErrAgentNotFound
 	}
+	if p.specialist != "" {
+		over, err := durable.OverlaySpecialist(spec, p.specialist)
+		if err != nil {
+			return nil, nil, err
+		}
+		spec = over
+	}
 	threadID := string(p.id)
 	ms, err := durable.OpenTurnVFS(ctx, threadID, spec, bindings, r.projection)
 	if err != nil {
@@ -51,6 +60,7 @@ func (r *Runtime) constructHarness(ctx context.Context, p *sessionProc, load boo
 		durable.CloseTurnVFS(ms, threadID, "construct")
 		return nil, nil, err
 	}
+	drive.EngineOf(h).SetChildHost(sessionChildren{r: r, p: p})
 	if load {
 		snap, etag, loadErr := r.snapshots.Load(ctx, p.id)
 		switch {
@@ -78,7 +88,19 @@ func (r *Runtime) persistHarness(ctx context.Context, p *sessionProc, h *tacklr.
 		telemetry.RecordCheckpointAttempt(ctx, err)
 		return err
 	}
-	etag, err := r.snapshots.Save(ctx, p.id, durable.Snapshot{AgentID: p.agentID, Checkpoint: *cp, Mounts: p.mounts}, p.etag)
+	p.mu.Lock()
+	children := slices.Clone(p.children)
+	parent := p.parent
+	specialist := p.specialist
+	p.mu.Unlock()
+	etag, err := r.snapshots.Save(ctx, p.id, durable.Snapshot{
+		AgentID:    p.agentID,
+		Specialist: specialist,
+		Parent:     parent,
+		Children:   children,
+		Checkpoint: *cp,
+		Mounts:     p.mounts,
+	}, p.etag)
 	telemetry.RecordCheckpointAttempt(ctx, err)
 	if err != nil {
 		return err
@@ -94,11 +116,14 @@ func (r *Runtime) emit(ctx context.Context, p *sessionProc, ev streaming.StreamE
 }
 
 func (r *Runtime) fail(ctx context.Context, p *sessionProc, err error) turnOutcome {
+	p.mu.Lock()
+	p.termErr = err
+	p.mu.Unlock()
 	r.emit(ctx, p, streaming.StreamEvent{Type: streaming.StreamEventError, Error: err})
 	return turnError
 }
 
-func (r *Runtime) driveTurn(ctx context.Context, p *sessionProc, user *tacklr.Message, resume map[string][]byte, bindings []vfs.Binding) turnOutcome {
+func (r *Runtime) runTurn(ctx context.Context, p *sessionProc, user *tacklr.Message, resume map[string][]byte, bindings []vfs.Binding) turnOutcome {
 	load := resume != nil || p.etag != ""
 	h, ms, err := r.constructHarness(ctx, p, load, bindings)
 	if err != nil {
@@ -110,14 +135,24 @@ func (r *Runtime) driveTurn(ctx context.Context, p *sessionProc, user *tacklr.Me
 	}()
 
 	eng := drive.EngineOf(h)
-	out, stop := drive.PipeStreamEvents(func(ev streaming.StreamEvent) { r.emit(ctx, p, ev) })
+	out, stop := drive.PipeStreamEvents(func(ev streaming.StreamEvent) {
+		if ev.Type == streaming.StreamEventComplete && durable.ChildrenNudge(r.childStatuses(p)) != "" {
+			return
+		}
+		r.emit(ctx, p, ev)
+	})
 	defer stop()
 
 	cancelled := func() turnOutcome {
-		if err := r.persistHarness(context.Background(), p, h); err != nil {
-			r.emit(context.Background(), p, streaming.StreamEvent{Type: streaming.StreamEventError, Error: err})
+		persist := context.WithoutCancel(ctx)
+		if err := r.persistHarness(persist, p, h); err != nil {
+			r.emit(persist, p, streaming.StreamEvent{Type: streaming.StreamEventError, Error: err})
 		}
-		r.emit(context.Background(), p, streaming.StreamEvent{Type: streaming.StreamEventError, Error: context.Canceled})
+		err := ctx.Err()
+		if err == nil {
+			err = context.Canceled
+		}
+		r.emit(persist, p, streaming.StreamEvent{Type: streaming.StreamEventError, Error: err})
 		return turnCancelled
 	}
 
@@ -146,12 +181,23 @@ func (r *Runtime) driveTurn(ctx context.Context, p *sessionProc, user *tacklr.Me
 				return cancelled()
 			}
 			if infErr != nil {
+				p.mu.Lock()
+				p.termErr = infErr
+				p.mu.Unlock()
 				if err := r.persistHarness(ctx, p, h); err != nil {
 					r.emit(ctx, p, streaming.StreamEvent{Type: streaming.StreamEventError, Error: err})
 				}
 				return turnError
 			}
 			if step.Complete {
+				if nudge := durable.ChildrenNudge(r.childStatuses(p)); nudge != "" {
+					if err := eng.AbsorbUser(ctx, &tacklr.Message{Role: tacklr.RoleUser, Content: nudge}, out); err != nil {
+						return r.fail(ctx, p, err)
+					}
+					st.HadToolRound = true
+					continue
+				}
+				r.captureResult(p, h)
 				if err := r.persistHarness(ctx, p, h); err != nil {
 					return r.fail(ctx, p, err)
 				}
@@ -163,10 +209,7 @@ func (r *Runtime) driveTurn(ctx context.Context, p *sessionProc, user *tacklr.Me
 		st.HadToolRound = true
 		// One harness, one snapshot: run the whole batch like embed. Temporal
 		// cannot do this (activity etag chain); it keeps leftovers in history.
-		var (
-			mu          sync.Mutex
-			interrupted bool
-		)
+		var parked atomic.Bool
 		var wg sync.WaitGroup
 		for _, tc := range toolCalls {
 			wg.Add(1)
@@ -177,9 +220,7 @@ func (r *Runtime) driveTurn(ctx context.Context, p *sessionProc, user *tacklr.Me
 				}
 				step, _ := eng.RunToolCall(ctx, tc, out)
 				if step.Interrupted {
-					mu.Lock()
-					interrupted = true
-					mu.Unlock()
+					parked.Store(true)
 				}
 			}(tc)
 		}
@@ -190,10 +231,20 @@ func (r *Runtime) driveTurn(ctx context.Context, p *sessionProc, user *tacklr.Me
 		if err := r.persistHarness(ctx, p, h); err != nil {
 			return r.fail(ctx, p, err)
 		}
-		if interrupted {
+		if parked.Load() {
 			return turnYield
 		}
 		toolCalls = nil
+	}
+}
+
+func (r *Runtime) captureResult(p *sessionProc, h *tacklr.AgentHarness) {
+	for _, m := range h.Messages() {
+		if m != nil && m.Role == tacklr.RoleAssistant && m.Content != "" {
+			p.mu.Lock()
+			p.result = m.Content
+			p.mu.Unlock()
+		}
 	}
 }
 

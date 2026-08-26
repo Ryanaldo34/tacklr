@@ -43,7 +43,7 @@ func TestACP_vfsBindRefreshUnbind(t *testing.T) {
 			}
 		},
 	}
-	r := newTestKernel(t, strategy, durable.AgentSpec{FSRegistry: fsReg})
+	r := newTestRuntime(t, strategy, durable.AgentSpec{FSRegistry: fsReg})
 
 	recNew := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
 	sessionID := acpRPCResult(t, recNew)["sessionId"].(string)
@@ -96,7 +96,7 @@ func TestACP_vfsBindRefreshUnbind(t *testing.T) {
 }
 
 func TestACP_vfsBindRefreshUnbind_errorPaths(t *testing.T) {
-	r := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	r := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
 	recNew := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
 	sessionID := acpRPCResult(t, recNew)["sessionId"].(string)
 

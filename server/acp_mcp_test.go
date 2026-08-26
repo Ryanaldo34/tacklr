@@ -112,7 +112,7 @@ func TestHandleRPC_sessionMCPServers_partialFailureStillExposesHealthyTools(t *t
 			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "partial ok", IsComplete: true}
 		},
 	}
-	r := newTestKernel(t, strategy, durable.AgentSpec{})
+	r := newTestRuntime(t, strategy, durable.AgentSpec{})
 
 	// dead URL: nothing listening
 	body := `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[` +
@@ -151,7 +151,7 @@ func TestHandleRPC_sessionMCPServers_toolCallReturnsResult(t *testing.T) {
 			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "mcp done", IsComplete: true}
 		},
 	}
-	r := newTestKernel(t, strategy, durable.AgentSpec{})
+	r := newTestRuntime(t, strategy, durable.AgentSpec{})
 
 	rec1 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[{"type":"http","name":"testmcp","url":"`+mcpHTTP.URL+`","headers":[]}]}}`)
 	sessionID := acpSessionID(t, rec1)
@@ -218,7 +218,7 @@ func TestHandleRPC_sessionMCPServers_toolCallReturnsResult(t *testing.T) {
 func TestHandleRPC_sessionMCPServers_toolsDiscovered(t *testing.T) {
 	mcpHTTP := newTestMCPServer(t, "greet")
 	recorder := &toolRecorder{}
-	r := newTestKernel(t, recordingStrategy(recorder), durable.AgentSpec{})
+	r := newTestRuntime(t, recordingStrategy(recorder), durable.AgentSpec{})
 
 	rec1 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[{"type":"http","name":"testmcp","url":"`+mcpHTTP.URL+`","headers":[{"name":"X-Key","value":"k"}]}]}}`)
 	sessionID := acpSessionID(t, rec1)
@@ -244,7 +244,7 @@ func TestHandleRPC_sessionResume_overridesMCPServers(t *testing.T) {
 	serverA := newTestMCPServer(t, "tool_a")
 	serverB := newTestMCPServer(t, "tool_b")
 	recorder := &toolRecorder{}
-	r := newTestKernel(t, recordingStrategy(recorder), durable.AgentSpec{})
+	r := newTestRuntime(t, recordingStrategy(recorder), durable.AgentSpec{})
 
 	rec1 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[{"type":"http","name":"a","url":"`+serverA.URL+`","headers":[]}]}}`)
 	sessionID := acpSessionID(t, rec1)

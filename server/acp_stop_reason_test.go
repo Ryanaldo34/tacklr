@@ -61,7 +61,7 @@ func TestACP_prompt_stopReason_maxTurnRequests(t *testing.T) {
 			ch <- tacklr.LLMResponseChunk{IsComplete: true}
 		},
 	}
-	r := newTestKernel(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	r := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
 	r.Catalog.Register("default", durable.AgentSpec{
 		Options: tacklr.AgentOptions{
 			Config: tacklr.Config{
@@ -87,7 +87,7 @@ func TestACP_prompt_stopReason_maxTurnRequests(t *testing.T) {
 
 func assertACPStopReason(t *testing.T, strategy *mockInferenceStrategy, tools []*tacklr.Tool, want string) {
 	t.Helper()
-	r := newTestKernel(t, strategy, durable.AgentSpec{Options: tacklr.AgentOptions{Tools: tools}})
+	r := newTestRuntime(t, strategy, durable.AgentSpec{Options: tacklr.AgentOptions{Tools: tools}})
 	recNew := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
 	sessionID := acpSessionID(t, recNew)
 	rec := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"`+sessionID+`","prompt":[{"type":"text","text":"hi"}]}}`)

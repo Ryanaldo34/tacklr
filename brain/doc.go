@@ -94,10 +94,12 @@
 // # Boot sketch
 //
 //	store, err := brain.NewPostgresStore(pool)
+//	store.EmbeddingDim = 1536 // optional; default 1536
+//	if err := store.Setup(ctx, specs...); err != nil { return err }
 //	g, err := helixgraph.New(helixURL)
 //	if err := g.Bootstrap(ctx, false); err != nil { return err }
 //	eng, err := brain.NewEngine(store, brain.WithEmbedder(emb), brain.WithGraph(g))
-//	if err := eng.ApplyKinds(ctx, specs...); err != nil { return err }
+//	if err := eng.LoadKindsFromStore(ctx); err != nil { return err }
 //
 // Integration tests (skipped under -short / without Docker):
 //   - PostgresStore: Testcontainers + brain/testdata/Dockerfile.postgres

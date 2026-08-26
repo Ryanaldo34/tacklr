@@ -14,7 +14,6 @@ import (
 const (
 	modulePlan        = "plan"
 	modulePermissions = "permissions"
-	moduleParks       = "parks"
 	moduleOnCall      = "onCall"
 	moduleSearch      = "search"
 )
@@ -28,10 +27,6 @@ type planCheckpoint struct {
 type permissionsCheckpoint struct {
 	Allow map[string]bool `json:"allow,omitempty"`
 	Deny  map[string]bool `json:"deny,omitempty"`
-}
-
-type parksCheckpoint struct {
-	Workers map[string]ParkedWorkerMeta `json:"workers,omitempty"`
 }
 
 type onCallCheckpoint struct {
@@ -59,7 +54,7 @@ func (s *SessionManager) snapshotCheckpoint() (
 		userState[key] = raw
 	}
 
-	modules = make(map[string]json.RawMessage, 5)
+	modules = make(map[string]json.RawMessage, 4)
 	s.Plan.mu.RLock()
 	plan := planCheckpoint{
 		Todos:           slices.Clone(s.Plan.todos),
@@ -79,11 +74,6 @@ func (s *SessionManager) snapshotCheckpoint() (
 	s.Permissions.mu.RUnlock()
 	if modules[modulePermissions], err = json.Marshal(permissions); err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("checkpoint permissions: %w", err)
-	}
-
-	parks := parksCheckpoint{Workers: s.parks.clone()}
-	if modules[moduleParks], err = json.Marshal(parks); err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("checkpoint parks: %w", err)
 	}
 
 	s.OnCall.mu.RLock()
@@ -108,10 +98,6 @@ func (s *SessionManager) applyCheckpoint(userState, modules map[string]json.RawM
 	}
 	var permissions permissionsCheckpoint
 	if err := decodeModule(modules, modulePermissions, &permissions); err != nil {
-		return err
-	}
-	var parks parksCheckpoint
-	if err := decodeModule(modules, moduleParks, &parks); err != nil {
 		return err
 	}
 	var onCall onCallCheckpoint
@@ -157,7 +143,6 @@ func (s *SessionManager) applyCheckpoint(userState, modules map[string]json.RawM
 	}
 	s.Permissions.mu.Unlock()
 
-	s.parks.replace(parks.Workers)
 	s.OnCall.mu.Lock()
 	s.OnCall.stages = slices.Clone(onCall.Stages)
 	s.OnCall.mu.Unlock()
