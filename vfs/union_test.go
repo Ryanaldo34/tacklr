@@ -323,4 +323,7 @@ func TestSkillSource_memberSpecs(t *testing.T) {
 	if !ok || spec.Params != nil {
 		t.Fatalf("s3 . = %+v", spec)
 	}
+	if spec, ok = (vfs.BlobFactory{ID: "b", Skills: "org/"}).SkillMember(); !ok || spec.Params["prefix"] != "org" {
+		t.Fatalf("blob prefix = %+v ok=%v", spec, ok)
+	}
 }

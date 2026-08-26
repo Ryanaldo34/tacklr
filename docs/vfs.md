@@ -62,7 +62,8 @@ Hosts register factories on a process-scoped `BackendRegistry`, then attach moun
 ```go
 reg := vfs.NewBackendRegistry()
 _ = reg.Register(vfs.LocalFactory{ID: "scratch", Base: "/var/agent/scratch"})
-// S3: reg.Register(vfs.S3Factory{ID: "docs", Client: vfs.AWSS3{Client: s3c}, DefaultBucket: "my-bucket"})
+// S3:   reg.Register(vfs.S3Factory{ID: "docs", Client: vfs.AWSS3{Client: s3c}, DefaultBucket: "my-bucket"})
+// Blob: reg.Register(vfs.BlobFactory{ID: "docs", Client: vfs.AzureBlob{Client: blobc}, DefaultContainer: "my-container"})
 
 ms, err := vfs.NewMountSession("sess-1", reg)
 if err != nil {
@@ -74,7 +75,7 @@ _ = ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"})
 | Type | Meaning |
 |------|---------|
 | `MountSpec` | Durable mount description (point, profile, read-only, params, **indexPolicy**). Checkpoint-safe; no secrets. |
-| `Params` | Backend options (`subpath`, `bucket`, `prefix`, …) |
+| `Params` | Backend options (`subpath`, `bucket`, `container`, `prefix`, …) |
 | `Members` | Optional member `MountSpec`s. Non-empty → a union at `Point`. Use `vfs.Skills(...)` for the flat read-only `/skills` pack. Use `vfs.Workspace(...)` for named writable `/workspace` aliases (`params.name`). Duplicate aliases / first-level names → `ErrAmbiguous`. |
 | `IndexPolicy` | Optional string: `none` \| `selective` \| `prefix` \| `watch` (empty → selective when the index bridge is on) |
 
@@ -82,18 +83,19 @@ _ = ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"})
 
 ### Skills
 
-Set `Skills` on a factory to mark that backend as a skill pack. `Mount` / `Materialize` attach a read-only `/skills` union (`vfs.Skills`). `"."` means the whole provider root; any other value is a relative subpath (local) or key prefix (S3).
+Set `Skills` on a factory to mark that backend as a skill pack. `Mount` / `Materialize` attach a read-only `/skills` union (`vfs.Skills`). `"."` means the whole provider root; any other value is a relative subpath (local) or key prefix (S3 / Azure Blob).
 
 ```go
 _ = reg.Register(vfs.LocalFactory{ID: "team", Base: "/var/agent/skills", Skills: "."})
 _ = reg.Register(vfs.S3Factory{ID: "docs", Client: vfs.AWSS3{Client: s3c}, DefaultBucket: "work", Skills: "skills"})
+_ = reg.Register(vfs.BlobFactory{ID: "blobs", Client: vfs.AzureBlob{Client: blobc}, DefaultContainer: "work", Skills: "skills"})
 _ = ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "docs"})
 // /skills is now team ∪ docs/skills, IndexPolicy none, read-only
 ```
 
 The harness loads the catalog from `/skills` when that mount exists. Overlapping first-level names are `ErrAmbiguous`.
 
-Host-owned roots and secrets (local jail, S3 client) live on factories, not on mounts or checkpoints.
+Host-owned roots and secrets (local jail, S3 / Azure Blob client) live on factories, not on mounts or checkpoints.
 
 User-owned cloud folders (Google Drive, OneDrive, SharePoint libraries) attach under one mount **`/workspace/<alias>`**. The **client** does OAuth (PKCE). It sends only a short-lived access token over ACP extension methods. Tokens live in `vfs.SessionAuth` (process memory), keyed by `(session, provider)`. They are never written to `MountSpec`, session checkpoints, or the ACP wire store. After `session/load` or process restart the client must bind again. `/work` and `/engram` stay host scratch/knowledge. `/skills` stays a flat read-only union.
 
@@ -349,7 +351,7 @@ Lifecycle as a diagram:
 
 ```text
 1. Mount     BackendRegistry + MountSession.Mount
-             /work → local folder (or S3 prefix)
+             /work → local folder (or S3 / Azure Blob prefix)
 
 2. Read      ReadText / OpenDocument
              bytes → DetectMediaType → TextCodec → *TextDocument
@@ -363,16 +365,16 @@ Lifecycle as a diagram:
 5. Next open reads disk again → fresh IR
 ```
 
-### Same paths on S3
+### Same paths on S3 and Azure Blob
 
 ```text
-Mount:  /data  →  S3Factory (bucket + prefix)
-Read:   ReadText("/data/app.go")   // GetObject → TextDocument
+Mount:  /data  →  S3Factory (bucket + prefix) or BlobFactory (container + prefix)
+Read:   ReadText("/data/app.go")   // GetObject / DownloadStream → TextDocument
 Edit:   SetLine / ReplaceLines
-Write:  WriteDocument              // PutObject with Text() bytes
+Write:  WriteDocument              // PutObject / UploadStream with Text() bytes
 ```
 
-The agent always uses `/data/app.go`. It never sees the bucket name.
+The agent always uses `/data/app.go`. It never sees the bucket or container name.
 
 ---
 

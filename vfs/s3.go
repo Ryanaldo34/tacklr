@@ -467,11 +467,15 @@ func (f S3Factory) Profile() string { return f.ID }
 
 // SkillMember implements SkillSource.
 func (f S3Factory) SkillMember() (MountSpec, bool) {
-	root := strings.TrimSpace(f.Skills)
+	return objectSkillMember(f.ID, f.Skills)
+}
+
+func objectSkillMember(id, skills string) (MountSpec, bool) {
+	root := strings.TrimSpace(skills)
 	if root == "" {
 		return MountSpec{}, false
 	}
-	spec := MountSpec{Profile: f.ID}
+	spec := MountSpec{Profile: id}
 	if root != "." {
 		spec.Params = map[string]string{"prefix": strings.Trim(root, "/")}
 	}

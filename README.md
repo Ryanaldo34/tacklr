@@ -22,7 +22,7 @@ Work spans many model calls, tools hit real systems, and the window fills with t
 
 **Context is structured around the current work.** The harness runs planning cycles (Adaptive Case Management): the agent writes a plan, works a to-do, and on `complete_todo` the window is rebuilt as a hand-off for what comes next. Unused history does not stay in the prompt just because it happened earlier. Specialists are the same idea at a larger grain — a nested session that returns only what the parent asked for.
 
-**The agent’s world is bounded.** A virtual filesystem gives one path API over the mounts you attach: local disk, S3, Google Drive and Docs, Microsoft Graph, and knowledge objects. The agent sees `/work/notes.md`, not a host path or a bucket key. Credentials live on the turn (`Prompt.Auth` / `Resume.Auth`), not in checkpoints.
+**The agent’s world is bounded.** A virtual filesystem gives one path API over the mounts you attach: local disk, S3, Azure Blob, Google Drive and Docs, Microsoft Graph, and knowledge objects. The agent sees `/work/notes.md`, not a host path or a bucket key. Credentials live on the turn (`Prompt.Auth` / `Resume.Auth`), not in checkpoints.
 
 **Sessions are meant to live in the cloud.** The same harness runs in-process or behind `durable.Runtime` (a goroutine wait loop, or Temporal). Human-in-the-loop parks a session until `Resume`. JSON-RPC protocols (ACP is the native one) map to that Runtime; autonomous hosts call it directly.
 

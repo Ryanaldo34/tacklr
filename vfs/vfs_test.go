@@ -744,6 +744,45 @@ func TestS3Factory_rejectsBadConfig(t *testing.T) {
 	}
 }
 
+func TestBlobFactory_rejectsBadConfig(t *testing.T) {
+	ctx := t.Context()
+	if _, err := (vfs.BlobFactory{ID: "blob"}).Open(ctx, "s", vfs.MountSpec{}); err == nil {
+		t.Fatal("nil client")
+	}
+	if _, err := (vfs.BlobFactory{ID: "blob", Client: vfs.AzureBlob{}}).Open(ctx, "s", vfs.MountSpec{}); err == nil {
+		t.Fatal("missing container")
+	}
+	if _, err := (vfs.BlobFactory{ID: "blob", Client: vfs.AzureBlob{}, DefaultContainer: "c"}).Open(ctx, "s", vfs.MountSpec{
+		Params: map[string]string{"prefix": "a/../b"},
+	}); err == nil {
+		t.Fatal("bad prefix")
+	}
+	var azure vfs.AzureBlob
+	if _, _, _, err := azure.Head(ctx, "c", "k"); err == nil {
+		t.Fatal("nil Azure Head")
+	}
+	if _, _, _, err := azure.Get(ctx, "c", "k"); err == nil {
+		t.Fatal("nil Azure Get")
+	}
+	if err := azure.Put(ctx, "c", "k", bytes.NewReader(nil), 0); err == nil {
+		t.Fatal("nil Azure Put")
+	}
+	if err := azure.Delete(ctx, "c", "k"); err == nil {
+		t.Fatal("nil Azure Delete")
+	}
+	if _, _, err := azure.List(ctx, "c", ""); err == nil {
+		t.Fatal("nil Azure List")
+	}
+	if _, err := (vfs.BlobFactory{Client: vfs.AzureBlob{}, DefaultContainer: "c"}).Open(ctx, "s", vfs.MountSpec{}); err == nil {
+		t.Fatal("empty factory id")
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := (vfs.BlobFactory{ID: "blob", Client: vfs.AzureBlob{}, DefaultContainer: "c"}).Open(canceled, "s", vfs.MountSpec{}); !errors.Is(err, context.Canceled) {
+		t.Fatal("Open canceled")
+	}
+}
+
 // TestLocalFactory_rejectsUnsafeConfig covers unsafe roots and jail.
 func TestLocalFactory_rejectsUnsafeConfig(t *testing.T) {
 	ctx := t.Context()
