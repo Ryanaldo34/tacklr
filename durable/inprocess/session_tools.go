@@ -116,7 +116,6 @@ func (r *Runtime) waitChild(ctx context.Context, p *sessionProc, child durable.S
 		}
 		switch st.State {
 		case durable.SessionComplete, durable.SessionFailed:
-			_ = r.Close(ctx, child)
 			r.dropChild(p, child)
 			c := childFromStatus(st)
 			if st.State == durable.SessionFailed {

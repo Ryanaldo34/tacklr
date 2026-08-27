@@ -81,7 +81,7 @@ A later `Prompt` on a session that was cancelled does not resurrect killed child
 
 The parent does not fail with the child. The child becomes `failed` and stays on the parent’s list until collected or the parent is closed.
 
-`get_child` (including `block=true`) returns the error as tool text, drops the child from the parent list, and the parent continues. Uncollected complete or failed children still count toward the “cannot finish while children remain” nudge; the parent must `get_child` or `cancel_child` before it can complete.
+`get_child` (including `block=true`) returns the error as tool text, drops the child from the parent list, and the parent continues. The child session stays Status-able until the parent is closed or the child is cancelled. Uncollected complete or failed children still count toward the “cannot finish while children remain” nudge; the parent must `get_child` or `cancel_child` before it can complete.
 
 Child sessions are nested Runtime sessions (in-process or Temporal). A panic in an in-process child turn goroutine is not recovered and can leave the child `running`. Temporal starts an async child without waiting; collect a failed async child with `get_child`.
 

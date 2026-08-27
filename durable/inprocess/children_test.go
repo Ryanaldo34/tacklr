@@ -206,8 +206,17 @@ func TestChildren_asyncSpawnThenCollect(t *testing.T) {
 	if !sawCollect || !sawDone {
 		t.Fatalf("collect=%v done=%v events=%v", sawCollect, sawDone, summarize(got))
 	}
-	if _, err := rt.Status(t.Context(), childID); !errors.Is(err, durable.ErrSessionNotFound) {
-		t.Fatalf("collected child should be closed: %v", err)
+	kids, err := rt.Children(t.Context(), parentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range kids {
+		if id == childID {
+			t.Fatalf("collected child still on parent list: %v", kids)
+		}
+	}
+	if st, err := rt.Status(t.Context(), childID); err != nil || st.State != durable.SessionComplete {
+		t.Fatalf("collected child should remain status-able: %+v %v", st, err)
 	}
 }
 
