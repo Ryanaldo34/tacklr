@@ -144,7 +144,6 @@ type countTokensRequest struct {
 	Input        json.RawMessage `json:"input"`
 	Instructions *string         `json:"instructions,omitempty"`
 	Tools        json.RawMessage `json:"tools,omitempty"`
-	Text         *textFormat     `json:"text,omitempty"`
 }
 
 type responsesRequest struct {
@@ -154,21 +153,9 @@ type responsesRequest struct {
 	Tools        json.RawMessage  `json:"tools,omitempty"`
 	Stream       bool             `json:"stream,omitempty"`
 	Reasoning    *reasoningDetail `json:"reasoning,omitempty"`
-	Text         *textFormat      `json:"text,omitempty"`
 	// Include asks the provider for extra output fields. reasoning.encrypted_content
 	// is required to replay reasoning items statelessly (OpenAI ZDR / Azure store=false).
 	Include []string `json:"include,omitempty"`
-}
-
-type textFormat struct {
-	Format *jsonSchemaFormat `json:"format,omitempty"`
-}
-
-type jsonSchemaFormat struct {
-	Type   string         `json:"type"`
-	Name   string         `json:"name"`
-	Schema map[string]any `json:"schema"`
-	Strict bool           `json:"strict"`
 }
 
 // reasoningDetail is the Responses API reasoning config.

@@ -450,8 +450,7 @@ func (a *TurnManager) clearInterruptParkState() {
 // discoverAllTools is the MCP discovery entry. Tests may replace it.
 var discoverAllTools = mcpruntime.DiscoverAllTools
 
-// initMCP discovers MCP tools once and appends them. Skips unreachable servers.
-// No-op when already initialized or when no configs are set.
+// initMCP discovers MCP tools and appends them. Skips unreachable servers.
 func (a *TurnManager) initMCP(ctx context.Context) {
 	if len(a.mcpConfigs) == 0 {
 		return

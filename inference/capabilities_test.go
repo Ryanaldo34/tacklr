@@ -1,10 +1,12 @@
 package inference
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
 func TestSupportsMIME_visionAndPDF(t *testing.T) {
@@ -28,15 +30,36 @@ func TestSupportsMIME_visionAndPDF(t *testing.T) {
 	if !s2.SupportsMIME("text/markdown") {
 		t.Fatal("text/* always true")
 	}
-	// Empty model id: no binary.
 	s3 := NewOpenAIInferenceStrategy(nil)
 	if s3.SupportsMIME("image/png") {
 		t.Fatal("empty model rejects image")
 	}
-	// Nil receiver path via interface still text-safe.
-	var nilS *OpenAIInferenceStrategy
-	if !nilS.SupportsMIME("text/plain") || nilS.SupportsMIME("image/png") {
-		t.Fatal("nil strategy text only")
+}
+
+func TestMaxContextWindow_knownPrefixAndUnknown(t *testing.T) {
+	s := NewOpenAIInferenceStrategy(nil).WithModel("gpt-5.4")
+	n, err := s.MaxContextWindow()
+	if err != nil || n != 1000000 {
+		t.Fatalf("gpt-5.4: n=%d err=%v", n, err)
+	}
+	n, err = NewOpenAIInferenceStrategy(nil).WithModel("o3-custom").MaxContextWindow()
+	if err != nil || n != 200000 {
+		t.Fatalf("o3 prefix: n=%d err=%v", n, err)
+	}
+	n, err = NewOpenAIInferenceStrategy(nil).WithModel("gpt-5-preview").MaxContextWindow()
+	if err != nil || n != 1000000 {
+		t.Fatalf("gpt-5 prefix: n=%d err=%v", n, err)
+	}
+	_, err = NewOpenAIInferenceStrategy(nil).WithModel("mystery-model").MaxContextWindow()
+	if err == nil || !errors.Is(err, tacklr.ErrUnknownModel) {
+		t.Fatalf("unknown: err=%v", err)
+	}
+}
+
+func TestModelTelemetryIdentity_openaiURL(t *testing.T) {
+	id := NewOpenAIInferenceStrategy(nil).WithModel("gpt-test").WithURL("https://api.openai.com/v1").ModelTelemetryIdentity()
+	if id.Model != "gpt-test" || id.Provider != telemetry.GenAIProviderOpenAI {
+		t.Fatalf("%+v", id)
 	}
 }
 

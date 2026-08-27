@@ -10,7 +10,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"reflect"
 	"strings"
 
 	"github.com/pkoukk/tiktoken-go"
@@ -32,10 +31,6 @@ type OpenAIInferenceStrategy struct {
 	reasoningSummary string
 	httpClient       *http.Client
 	baseURL          string
-
-	structuredOutputSchema map[string]any
-	structuredOutputName   string
-	structuredOutputType   reflect.Type
 	// localTokenFallback uses tiktoken when the provider has no input_tokens endpoint.
 	localTokenFallback bool
 }
@@ -76,9 +71,6 @@ func (s *OpenAIInferenceStrategy) WithModel(model string) *OpenAIInferenceStrate
 // ModelTelemetryIdentity implements the optional harness hook so model spans
 // get GenAI provider/model attrs without exporting raw config fields.
 func (s *OpenAIInferenceStrategy) ModelTelemetryIdentity() telemetry.ModelIdentity {
-	if s == nil {
-		return telemetry.ModelIdentity{}
-	}
 	return telemetry.NewModelIdentity(s.model, s.baseURL)
 }
 
@@ -111,30 +103,8 @@ func (s *OpenAIInferenceStrategy) WithReasoningSummary(summary string) *OpenAIIn
 	return s
 }
 
-func (s *OpenAIInferenceStrategy) WithStructuredOutput(v any) *OpenAIInferenceStrategy {
-	if v == nil {
-		s.structuredOutputSchema = nil
-		s.structuredOutputName = ""
-		s.structuredOutputType = nil
-		return s
-	}
-	t := reflect.TypeOf(v)
-	if t.Kind() == reflect.Ptr {
-		t = t.Elem()
-	}
-	// TypeToJSONSchema only fails for nil types; value types always succeed.
-	schema, _ := tacklr.TypeToJSONSchema(reflect.New(t).Elem().Interface())
-	s.structuredOutputSchema = schema
-	s.structuredOutputName = t.Name()
-	s.structuredOutputType = t
-	return s
-}
-
 // SupportsMIME implements tacklr.InferenceStrategy for the selected model id.
 func (s *OpenAIInferenceStrategy) SupportsMIME(mimeType string) bool {
-	if s == nil {
-		return streaming.IsTextMIME(mimeType)
-	}
 	return modelSupportsMIME(s.model, mimeType)
 }
 
@@ -160,9 +130,6 @@ func (s *OpenAIInferenceStrategy) MaxContextWindow() (int, error) {
 	}
 	return 0, fmt.Errorf("max context window: unknown model %q: %w", s.model, tacklr.ErrUnknownModel)
 }
-
-// getEncoding is tiktoken.GetEncoding; overridden in tests for the rare failure path.
-var getEncoding = tiktoken.GetEncoding
 
 func (s *OpenAIInferenceStrategy) CountTokens(ctx context.Context, messages []*tacklr.Message, tools []*tacklr.Tool) (int, error) {
 	if s.apiKey == "" {
@@ -194,17 +161,6 @@ func (s *OpenAIInferenceStrategy) CountTokens(ctx context.Context, messages []*t
 		reqBody.Instructions = &s.instructions
 	}
 
-	if s.structuredOutputSchema != nil {
-		reqBody.Text = &textFormat{
-			Format: &jsonSchemaFormat{
-				Type:   "json_schema",
-				Name:   s.structuredOutputName,
-				Schema: s.structuredOutputSchema,
-				Strict: true,
-			},
-		}
-	}
-
 	body, err := json.Marshal(reqBody)
 	if err != nil {
 		return 0, fmt.Errorf("marshal token-count request: %w", err)
@@ -230,7 +186,7 @@ func (s *OpenAIInferenceStrategy) CountTokens(ctx context.Context, messages []*t
 
 	if httpResp.StatusCode != http.StatusOK {
 		if s.localTokenFallback && (httpResp.StatusCode == http.StatusNotFound || httpResp.StatusCode == http.StatusBadRequest || httpResp.StatusCode == http.StatusUnprocessableEntity) {
-			tke, err := getEncoding("o200k_base")
+			tke, err := tiktoken.GetEncoding("o200k_base")
 			if err != nil {
 				return 0, fmt.Errorf("tiktoken count tokens: %w", err)
 			}
@@ -295,17 +251,6 @@ func (s *OpenAIInferenceStrategy) Invoke(ctx context.Context, messages []*tacklr
 		reqBody.Reasoning = &reasoningDetail{
 			Effort:  s.reasoning,
 			Summary: s.reasoningSummary,
-		}
-	}
-
-	if s.structuredOutputSchema != nil {
-		reqBody.Text = &textFormat{
-			Format: &jsonSchemaFormat{
-				Type:   "json_schema",
-				Name:   s.structuredOutputName,
-				Schema: s.structuredOutputSchema,
-				Strict: true,
-			},
 		}
 	}
 
@@ -557,11 +502,8 @@ func parseResponseUsage(data string) (responseUsage, bool) {
 	}
 	if u.OutputTokensDetails != nil && u.OutputTokensDetails.ReasoningTokens > 0 {
 		out.Reasoning = u.OutputTokensDetails.ReasoningTokens
-	} else if u.ReasoningTokens > 0 {
+	} else {
 		out.Reasoning = u.ReasoningTokens
-	}
-	if out.Input == 0 && out.Output == 0 && out.Reasoning == 0 {
-		return responseUsage{}, false
 	}
 	return out, true
 }
@@ -776,17 +718,15 @@ func (s *OpenAIInferenceStrategy) emitFunctionCallChunk(raw json.RawMessage, eve
 		ID        string `json:"id"`
 		CallID    string `json:"call_id"`
 		Name      string `json:"name"`
-		Namespace string `json:"namespace"`
 		Arguments string `json:"arguments"`
 		Status    string `json:"status"`
 	}
 	if err := json.Unmarshal(raw, &fc); err != nil {
 		return
 	}
-	name := fc.Name
-	namespace := fc.Namespace
-	if namespace == "" {
-		namespace, name = tacklr.SplitModelToolName(name)
+	namespace, name := "", fc.Name
+	if ns, n, ok := strings.Cut(fc.Name, "__"); ok {
+		namespace, name = ns, n
 	}
 	// llama.cpp (and some local servers) only set call_id; OpenAI often sets both.
 	// Normalize so ACP toolCallId / harness CurrentToolCallID are never empty when
@@ -911,7 +851,10 @@ func marshalMessagesToInput(messages []*tacklr.Message) []json.RawMessage {
 
 	appendFunctionCall := func(tc tacklr.ToolCall) {
 		callID := tc.WireID()
-		name := tacklr.ModelToolName(tc.Namespace, tc.Name)
+		name := tc.Name
+		if tc.Namespace != "" {
+			name = tc.Namespace + "__" + tc.Name
+		}
 		args := tc.Arguments
 		if args == "" {
 			args = "{}"
