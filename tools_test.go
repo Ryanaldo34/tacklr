@@ -385,8 +385,8 @@ func TestToolsAsJsonWithNamespaces(t *testing.T) {
 	if parsed[1]["type"] != "function" {
 		t.Errorf("second item type = %v", parsed[1]["type"])
 	}
-	if parsed[1]["name"] != "crm.get_customer" {
-		t.Errorf("second item name = %v, want crm.get_customer", parsed[1]["name"])
+	if parsed[1]["name"] != "crm__get_customer" {
+		t.Errorf("second item name = %v, want crm__get_customer", parsed[1]["name"])
 	}
 }
 

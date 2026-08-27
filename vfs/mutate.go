@@ -46,9 +46,9 @@ func (r ApplyResult) String() string {
 	return s
 }
 
-func (m Mutation) modeCount() (n int, full bool) {
-	full = m.Content != nil
-	if full {
+func (m Mutation) modeCount() int {
+	n := 0
+	if m.Content != nil {
 		n++
 	}
 	if m.Old != nil {
@@ -57,13 +57,13 @@ func (m Mutation) modeCount() (n int, full bool) {
 	if m.BlockID != "" {
 		n++
 	}
-	if m.Start != nil && m.BlockID == "" {
+	if m.Start != nil {
 		n++
 	}
 	if m.Blocks != nil {
 		n++
 	}
-	return n, full
+	return n
 }
 
 // Apply persists one mutation. Empty Rev uses the harness lastRev or a live read.
@@ -72,7 +72,7 @@ func (ms *MountSession) Apply(ctx context.Context, virtualPath string, mut Mutat
 	if err != nil {
 		return ApplyResult{}, err
 	}
-	n, full := mut.modeCount()
+	n := mut.modeCount()
 	switch {
 	case n == 0:
 		return ApplyResult{}, fmt.Errorf("write: nothing to change")
@@ -85,12 +85,12 @@ func (ms *MountSession) Apply(ctx context.Context, virtualPath string, mut Mutat
 	if err != nil && !errors.Is(err, ErrNotExist) {
 		return ApplyResult{}, err
 	}
-	if !exists && !full && mut.Blocks == nil {
+	if !exists && mut.Content == nil && mut.Blocks == nil {
 		return ApplyResult{}, ErrNotExist
 	}
 
 	switch {
-	case full:
+	case mut.Content != nil:
 		return ms.applyFull(ctx, p, exists, fi, mut)
 	case mut.Blocks != nil:
 		return ms.applyBlocks(ctx, p, exists, fi, mut)
@@ -114,9 +114,6 @@ func (ms *MountSession) applyFull(ctx context.Context, p string, exists bool, fi
 	if exists {
 		if IsProjected(fi.MediaType) {
 			return ms.applyProjectedFull(ctx, p, mut, body)
-		}
-		if err := ms.matchRev(ctx, p, mut.Rev); err != nil {
-			return ApplyResult{}, err
 		}
 		return ms.stage(ctx, NewTextDocument(p, fi.MediaType, "utf-8", body))
 	}
@@ -217,7 +214,13 @@ func (ms *MountSession) applySubstring(ctx context.Context, p string, mut Mutati
 	if mut.Old == nil || *mut.Old == "" {
 		return ApplyResult{}, fmt.Errorf("old is required; pass the exact unique substring to replace")
 	}
-	doc, err := ms.checkout(ctx, p, mut.Rev)
+	var doc Textual
+	var err error
+	if strings.TrimSpace(mut.Rev) != "" {
+		doc, err = ms.checkout(ctx, p, mut.Rev)
+	} else {
+		doc, err = ms.ReadText(ctx, p)
+	}
 	if err != nil {
 		return ApplyResult{}, err
 	}
@@ -437,24 +440,6 @@ func replacementLines(lines []string, body *string) []string {
 	return out
 }
 
-func (ms *MountSession) matchRev(ctx context.Context, p, rev string) error {
-	expected := strings.TrimSpace(rev)
-	if expected == "" {
-		expected = ms.storedRev(p)
-	}
-	if expected == "" {
-		return nil
-	}
-	cur, err := ms.ContentRev(ctx, p)
-	if err != nil {
-		return err
-	}
-	if cur.Hash != expected {
-		return ErrStaleContent
-	}
-	return nil
-}
-
 func (ms *MountSession) checkout(ctx context.Context, p, rev string) (Textual, error) {
 	expected := strings.TrimSpace(rev)
 	if expected == "" {
@@ -467,14 +452,19 @@ func (ms *MountSession) checkout(ctx context.Context, p, rev string) (Textual, e
 }
 
 func (ms *MountSession) loadMatching(ctx context.Context, p, expected string) (Textual, error) {
-	doc, err := ms.ReadText(ctx, p)
+	doc, err := ms.OpenDocument(ctx, p, nil)
 	if err != nil {
 		return nil, err
 	}
-	if ContentToken(doc) != expected {
+	t, ok := doc.(Textual)
+	if !ok {
+		return nil, ErrNotTextual
+	}
+	if ContentToken(t) != expected {
 		return nil, ErrStaleContent
 	}
-	return doc, nil
+	ms.rememberRev(t.Path(), expected)
+	return t, nil
 }
 
 func (ms *MountSession) stage(ctx context.Context, doc Textual) (ApplyResult, error) {

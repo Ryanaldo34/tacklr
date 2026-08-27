@@ -559,8 +559,31 @@ type ToolNamespace struct {
 	Description string
 }
 
+// modelToolNamespaceSep joins MCP/host namespace and tool name for providers
+// that require ^[a-zA-Z0-9_-]+$ (OpenAI rejects '.').
+const modelToolNamespaceSep = "__"
+
+// ModelToolName is the function name sent to the model.
+func ModelToolName(namespace, name string) string {
+	if namespace == "" {
+		return name
+	}
+	return namespace + modelToolNamespaceSep + name
+}
+
+// SplitModelToolName parses a model function name into namespace and tool name.
+func SplitModelToolName(qualified string) (namespace, name string) {
+	if ns, n, ok := strings.Cut(qualified, modelToolNamespaceSep); ok {
+		return ns, n
+	}
+	if ns, n, ok := strings.Cut(qualified, "."); ok {
+		return ns, n
+	}
+	return "", qualified
+}
+
 // ToolsAsJson serializes tool definitions for model requests. An empty catalog
-// is "[]". Namespace-qualified names use "namespace.name".
+// is "[]". Namespace-qualified names use "namespace__name".
 func ToolsAsJson(tools []*Tool) string {
 	if len(tools) == 0 {
 		return "[]"
@@ -570,7 +593,7 @@ func ToolsAsJson(tools []*Tool) string {
 	for _, t := range tools {
 		def := t.AsJson()
 		if t.namespace != "" {
-			def["name"] = t.namespace + "." + t.name
+			def["name"] = ModelToolName(t.namespace, t.name)
 		}
 		defs = append(defs, def)
 	}

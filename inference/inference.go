@@ -785,10 +785,8 @@ func (s *OpenAIInferenceStrategy) emitFunctionCallChunk(raw json.RawMessage, eve
 	}
 	name := fc.Name
 	namespace := fc.Namespace
-	if namespace == "" && strings.Contains(name, ".") {
-		parts := strings.SplitN(name, ".", 2)
-		namespace = parts[0]
-		name = parts[1]
+	if namespace == "" {
+		namespace, name = tacklr.SplitModelToolName(name)
 	}
 	// llama.cpp (and some local servers) only set call_id; OpenAI often sets both.
 	// Normalize so ACP toolCallId / harness CurrentToolCallID are never empty when
@@ -913,10 +911,7 @@ func marshalMessagesToInput(messages []*tacklr.Message) []json.RawMessage {
 
 	appendFunctionCall := func(tc tacklr.ToolCall) {
 		callID := tc.WireID()
-		name := tc.Name
-		if tc.Namespace != "" && name != "" && !strings.Contains(name, ".") {
-			name = tc.Namespace + "." + name
-		}
+		name := tacklr.ModelToolName(tc.Namespace, tc.Name)
 		args := tc.Arguments
 		if args == "" {
 			args = "{}"

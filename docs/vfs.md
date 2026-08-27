@@ -106,7 +106,8 @@ _tacklr/vfs/bind     { sessionId, backends: [{ provider, point, auth.token, para
                      provider is gdrive | msgraph
                      point is /workspace (or omit). Old /contracts → alias contracts (W2).
                      params.name is the alias (required when point is /workspace).
-                     gdrive: folderId. msgraph: account (empty → organization), driveId, itemId, siteId.
+                     gdrive: omit folderId for My Drive; folders are path names under /workspace/<alias>.
+                     msgraph: account (empty → organization), driveId, itemId, siteId.
                      organization (default) requires siteId or driveId. personal uses /me/drive.
 session/prompt       → Runtime injects a tree from bootstrap + bind recipes; agent sees /workspace/contracts, /workspace/legal
 _tacklr/vfs/refresh  → new access token for a provider (gdrive and msgraph are different holders); next prompt

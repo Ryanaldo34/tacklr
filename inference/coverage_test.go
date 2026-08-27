@@ -243,7 +243,7 @@ func TestExtractErrorMessage_rawBodyFallback(t *testing.T) {
 
 func TestParseSSE_functionCallWithNamespaceAndIDOnly(t *testing.T) {
 	body := strings.Join([]string{
-		`data: {"type":"response.output_item.done","item":{"type":"function_call","status":"completed","arguments":"{}","id":"only_id","name":"crm.get_customer"}}`,
+		`data: {"type":"response.output_item.done","item":{"type":"function_call","status":"completed","arguments":"{}","id":"only_id","name":"crm__get_customer"}}`,
 		`data: {"type":"response.output_item.done","item":{"type":"function_call","status":"completed","arguments":"{}","call_id":"cid","name":"echo","namespace":"ns"}}`,
 		`data: {"type":"response.output_item.done","item":{"type":"reasoning","id":"rs_done"}}`,
 		`data: [DONE]`,
@@ -263,7 +263,7 @@ func TestParseSSE_functionCallWithNamespaceAndIDOnly(t *testing.T) {
 	if len(fcs) != 2 {
 		t.Fatalf("function calls = %d", len(fcs))
 	}
-	// name with dot splits to namespace when namespace empty.
+	// namespace__name splits when namespace empty.
 	if fcs[0].ToolCalls[0].Namespace != "crm" || fcs[0].ToolCalls[0].Name != "get_customer" {
 		t.Errorf("first = %+v", fcs[0].ToolCalls[0])
 	}
