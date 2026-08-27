@@ -36,7 +36,7 @@ func TestInvoke_streamsMessageAndMapsDeveloperToSystem(t *testing.T) {
 			`data: {"type":"response.output_item.added","item":{"id":"msg_1","type":"message"}}`,
 			`data: {"type":"response.output_text.delta","item_id":"msg_1","delta":"hello"}`,
 			`data: {"type":"response.output_item.done","item":{"id":"msg_1","type":"message"}}`,
-			`data: {"type":"response.completed","response":{"status":"completed"}}`,
+			`data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":3,"output_tokens":2,"output_tokens_details":{"reasoning_tokens":1}}}}`,
 			`data: [DONE]`,
 			"",
 		}, "\n"))
@@ -67,6 +67,7 @@ func TestInvoke_streamsMessageAndMapsDeveloperToSystem(t *testing.T) {
 		t.Fatalf("Invoke: %v", err)
 	}
 	var text strings.Builder
+	var usage tacklr.LLMResponseChunk
 	for chunk := range ch {
 		if chunk.Type == tacklr.StreamEventError {
 			t.Fatalf("stream error: %s", chunk.Content)
@@ -74,9 +75,15 @@ func TestInvoke_streamsMessageAndMapsDeveloperToSystem(t *testing.T) {
 		if chunk.Type == tacklr.StreamEventMessage && chunk.Content != "" {
 			text.WriteString(chunk.Content)
 		}
+		if chunk.Type == tacklr.StreamEventComplete {
+			usage = chunk
+		}
 	}
 	if text.String() != "hello" {
 		t.Fatalf("streamed = %q, want hello", text.String())
+	}
+	if usage.InputTokens != 3 || usage.OutputTokens != 2 || usage.ReasoningTokens != 1 {
+		t.Fatalf("usage = in=%d out=%d reason=%d", usage.InputTokens, usage.OutputTokens, usage.ReasoningTokens)
 	}
 
 	if sawBody == nil {
@@ -151,11 +158,14 @@ func TestInvoke_truncatedStreamDoesNotCommitPartialAssistant(t *testing.T) {
 }
 
 func TestCountTokens_usesAPIWhenAvailable(t *testing.T) {
+	var saw map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/responses/input_tokens" {
 			http.NotFound(w, r)
 			return
 		}
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &saw)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"object":"response.input_tokens","input_tokens":42}`)
 	}))
@@ -165,15 +175,24 @@ func TestCountTokens_usesAPIWhenAvailable(t *testing.T) {
 		WithApiKey("k").
 		WithModel("m").
 		WithURL(srv.URL)
+	s.SetSystemPrompt("count me")
+	tool := tacklr.NewTool(tacklr.ToolConfig{Name: "t", Handler: func(ctx context.Context) (string, error) { return "", nil }})
 
 	n, err := s.CountTokens(context.Background(), []*tacklr.Message{
 		{Role: tacklr.RoleUser, Content: "hello world"},
-	}, nil)
+	}, []*tacklr.Tool{tool})
 	if err != nil {
 		t.Fatalf("CountTokens: %v", err)
 	}
 	if n != 42 {
 		t.Fatalf("tokens = %d, want 42", n)
+	}
+	if saw["instructions"] != "count me" {
+		t.Errorf("instructions = %v", saw["instructions"])
+	}
+	toolsRaw, _ := json.Marshal(saw["tools"])
+	if !strings.Contains(string(toolsRaw), `"name":"t"`) {
+		t.Errorf("tools = %s", toolsRaw)
 	}
 }
 
@@ -309,3 +328,110 @@ func TestInvoke_apiError_emitsErrorChunk(t *testing.T) {
 		t.Fatalf("error content = %q, want model overloaded", saw)
 	}
 }
+
+func TestInvoke_namespacedToolCallOnTheWire(t *testing.T) {
+	var saw map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &saw)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, strings.Join([]string{
+			`data: {"type":"response.completed","response":{"status":"completed"}}`,
+			`data: [DONE]`,
+			"",
+		}, "\n"))
+	}))
+	t.Cleanup(srv.Close)
+
+	s := NewOpenAIInferenceStrategy(srv.Client()).WithApiKey("k").WithModel("m").WithURL(srv.URL)
+	s.WithReasoningLevel("high")
+	tool := tacklr.NewTool(tacklr.ToolConfig{
+		Name: "greet", Namespace: "ado",
+		Handler: func(ctx context.Context) (string, error) { return "", nil },
+	})
+	ch, err := s.Invoke(context.Background(), []*tacklr.Message{
+		{Role: tacklr.RoleUser, Content: "hi"},
+		{Role: tacklr.RoleAssistant, ToolCalls: []tacklr.ToolCall{
+			{CallID: "call_1", Name: "greet", Namespace: "ado"},
+			{ID: "fc_item", CallID: "call_2", Name: "greet", Namespace: "ado", Arguments: `{}`},
+		}},
+		{Role: tacklr.RoleTool, ToolCallID: "call_1", Content: "ok"},
+		{Role: tacklr.RoleTool, ToolCallID: "call_2", Content: "ok2"},
+		{Role: tacklr.RoleTool, ToolCallID: "fc_ghost", Content: "nope"},
+		{
+			Role:             tacklr.RoleReasoning,
+			MessageID:        "rs_store",
+			EncryptedContent: "gAAAAABcipher",
+			Content:          "plan",
+		},
+		{Role: tacklr.RoleReasoning, MessageID: "rs_orphan", Content: "after"},
+	}, []*tacklr.Tool{tool}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range ch {
+	}
+
+	toolsRaw, _ := json.Marshal(saw["tools"])
+	if !strings.Contains(string(toolsRaw), `"name":"ado__greet"`) {
+		t.Fatalf("tools = %s", toolsRaw)
+	}
+	inRaw, _ := json.Marshal(saw["input"])
+	inStr := string(inRaw)
+	if !strings.Contains(inStr, `"name":"ado__greet"`) || !strings.Contains(inStr, `"arguments":"{}"`) {
+		t.Fatalf("input missing namespaced call: %s", inStr)
+	}
+	if strings.Contains(inStr, `"id":"fc_item"`) || strings.Contains(inStr, "fc_ghost") || strings.Contains(inStr, "nope") {
+		t.Fatalf("must not emit item id or orphan output: %s", inStr)
+	}
+	if !strings.Contains(inStr, `"encrypted_content":"gAAAAABcipher"`) {
+		t.Fatalf("missing ciphertext: %s", inStr)
+	}
+	if strings.Contains(inStr, "rs_orphan") {
+		t.Fatalf("orphan reasoning must omit id: %s", inStr)
+	}
+	reasoning, _ := saw["reasoning"].(map[string]any)
+	if reasoning["effort"] != "high" || reasoning["summary"] != "auto" {
+		t.Fatalf("reasoning = %v", saw["reasoning"])
+	}
+}
+
+func TestInvoke_requiresKeyAndModel(t *testing.T) {
+	s := NewOpenAIInferenceStrategy(http.DefaultClient)
+	if _, err := s.Invoke(context.Background(), nil, nil, ""); !errors.Is(err, tacklr.ErrApiKeyNotSet) {
+		t.Fatalf("%v", err)
+	}
+	s.WithApiKey("k")
+	if _, err := s.Invoke(context.Background(), nil, nil, ""); !errors.Is(err, tacklr.ErrModelNotSet) {
+		t.Fatalf("%v", err)
+	}
+	if _, err := s.CountTokens(context.Background(), nil, nil); !errors.Is(err, tacklr.ErrModelNotSet) {
+		t.Fatalf("count: %v", err)
+	}
+}
+
+func TestInvoke_transportErrorClosesStream(t *testing.T) {
+	s := NewOpenAIInferenceStrategy(&http.Client{
+		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("network down")
+		}),
+	})
+	s.WithApiKey("k").WithModel("m").WithURL("http://example.invalid")
+	ch, err := s.Invoke(context.Background(), []*tacklr.Message{{Role: tacklr.RoleUser, Content: "x"}}, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawErr bool
+	for c := range ch {
+		if c.Type == tacklr.StreamEventError && strings.Contains(c.Content, "network down") {
+			sawErr = true
+		}
+	}
+	if !sawErr {
+		t.Fatal("want StreamEventError")
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

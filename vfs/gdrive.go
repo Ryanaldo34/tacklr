@@ -18,8 +18,9 @@ import (
 )
 
 const (
-	driveMetaFields = "id,name,mimeType,modifiedTime,size,shortcutDetails,version"
-	driveListFields = "nextPageToken,files(" + driveMetaFields + ")"
+	driveMetaFields  = "id,name,mimeType,modifiedTime,size,shortcutDetails,version"
+	driveListFields  = "nextPageToken,files(" + driveMetaFields + ")"
+	driveMyDriveRoot = "root" // Google Drive alias for the caller's My Drive.
 )
 
 // DriveMeta is one Drive file or folder (IDs stay inside the provider).
@@ -310,7 +311,7 @@ func (f DriveFactory) Open(ctx context.Context, sessionID string, spec MountSpec
 	}
 	folderID := strings.TrimSpace(spec.Params[ParamFolderID])
 	if folderID == "" {
-		return nil, fmt.Errorf("vfs: gdrive folderId required")
+		folderID = driveMyDriveRoot
 	}
 	var holder *TokenHolder
 	if f.Auth != nil {

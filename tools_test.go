@@ -344,49 +344,19 @@ func TestTypeToJSONSchema_structuredOutput(t *testing.T) {
 }
 
 func TestToolsAsJson(t *testing.T) {
-	tools := []*Tool{
-		NewTool(ToolConfig{Name: "a", Handler: zeroArgsStringHandler}),
-		NewTool(ToolConfig{Name: "b", Handler: basicHandler}),
+	if ToolsAsJson(nil) != "[]" {
+		t.Fatalf("empty = %s", ToolsAsJson(nil))
 	}
-	raw := ToolsAsJson(tools)
-
-	var parsed []map[string]any
-	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
-		t.Fatal(err)
-	}
-	if len(parsed) != 2 {
-		t.Errorf("got %d tools, want 2", len(parsed))
-	}
-}
-
-func TestToolsAsJsonWithNamespaces(t *testing.T) {
-	tools := []*Tool{
+	raw := ToolsAsJson([]*Tool{
 		NewTool(ToolConfig{Name: "standalone", Handler: zeroArgsStringHandler}),
-		NewTool(ToolConfig{Name: "get_customer", Namespace: "crm", Handler: func(ctx context.Context) (string, error) {
-			return "", nil
-		}}),
-	}
-
-	raw := ToolsAsJson(tools)
-
+		NewTool(ToolConfig{Name: "greet", Namespace: "ado", Handler: zeroArgsStringHandler}),
+	})
 	var parsed []map[string]any
 	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
 		t.Fatal(err)
 	}
-	if len(parsed) != 2 {
-		t.Fatalf("got %d items, want 2", len(parsed))
-	}
-	if parsed[0]["type"] != "function" {
-		t.Errorf("first item type = %v", parsed[0]["type"])
-	}
-	if parsed[0]["name"] != "standalone" {
-		t.Errorf("first item name = %v, want standalone", parsed[0]["name"])
-	}
-	if parsed[1]["type"] != "function" {
-		t.Errorf("second item type = %v", parsed[1]["type"])
-	}
-	if parsed[1]["name"] != "crm.get_customer" {
-		t.Errorf("second item name = %v, want crm.get_customer", parsed[1]["name"])
+	if len(parsed) != 2 || parsed[0]["name"] != "standalone" || parsed[1]["name"] != "ado__greet" {
+		t.Fatalf("%s", raw)
 	}
 }
 

@@ -76,8 +76,9 @@ func BindingSpec(b Binding) MountSpec {
 	return Workspace(BindingMember(b))
 }
 
-// ValidateBinding checks provider, alias, and access token. folderId and other
-// backend params are validated when the factory opens. Point may be empty when
+// ValidateBinding checks provider, alias, and access token. Optional backend
+// params (gdrive folderId, Graph site/drive) are applied when the factory
+// opens; omitted gdrive folderId is My Drive. Point may be empty when
 // params["name"] is set; leftover "/contracts" becomes alias contracts.
 func ValidateBinding(b Binding) error {
 	if strings.TrimSpace(b.Provider) == "" {

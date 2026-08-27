@@ -271,17 +271,26 @@ func (r *Runtime) Resume(ctx context.Context, sessionID durable.SessionID, resum
 	return r.send(ctx, sessionID, signal{kind: sigResume, resume: resume, turnCtx: ctx})
 }
 
-// stopChildren Closes every child of p. Used by Close, Cancel, and when the
-// original Prompt/Resume context is cancelled (client stop).
+// stopChildren Closes every nested session of p, including children already
+// collected (dropped from p.children but still Status-able). Used by Close,
+// Cancel, and when the original Prompt/Resume context is cancelled.
 func (r *Runtime) stopChildren(ctx context.Context, p *sessionProc) {
 	p.mu.Lock()
-	kids := slices.Clone(p.children)
 	p.children = nil
 	if p.stopKids != nil {
 		p.stopKids()
 		p.kids, p.stopKids = context.WithCancel(context.Background())
 	}
+	parentID := p.id
 	p.mu.Unlock()
+	r.mu.RLock()
+	var kids []durable.SessionID
+	for id, child := range r.sessions {
+		if child.parent == parentID {
+			kids = append(kids, id)
+		}
+	}
+	r.mu.RUnlock()
 	for _, child := range kids {
 		_ = r.Close(ctx, child)
 	}

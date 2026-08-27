@@ -22,45 +22,59 @@ type vfsTools struct {
 
 func newVFSTools(ms *vfs.MountSession, permissionRequired bool) []*Tool {
 	v := vfsTools{ms: ms, permissionRequired: permissionRequired}
-	return []*Tool{v.newRead(), v.newWrite()}
+	return []*Tool{v.newRead(), v.newWrite(), v.newWriteDocument(), v.newWriteSpreadsheet()}
 }
 
 type readArgs struct {
-	Path    string `json:"path" desc:"Absolute virtual path to read."`
-	Rev     string `json:"rev,omitempty" desc:"Optional expected content hash from a prior read or write. Mismatch returns stale content."`
-	Start   int    `json:"start,omitempty" desc:"1-based start line (inclusive). Ignored when block_id is set."`
-	End     int    `json:"end,omitempty" desc:"1-based end line (exclusive). Ignored when block_id is set."`
-	BlockID string `json:"block_id,omitempty" desc:"Structured block id (e.g. heading path installation or api/errors). Media-agnostic."`
-	Outline bool   `json:"outline,omitempty" desc:"If true, include structured block outline when available."`
-	IR      bool   `json:"ir,omitempty" desc:"If true, include media_type/encoding/line_count. Full text= only when no window or block."`
+	Path    string `json:"path" desc:"Absolute virtual path."`
+	Start   int    `json:"start,omitempty" desc:"1-based first line (inclusive). Sheets: first row of the sheet in block_id. Ignored when block_id is a cell or A1 range."`
+	End     int    `json:"end,omitempty" desc:"1-based last line (exclusive). Sheets: last row (exclusive). Ignored when block_id is a cell or A1 range."`
+	BlockID string `json:"block_id,omitempty" desc:"Markdown heading path, Docs/Word block id, sheet name, Sheet!A1, or Sheet!A1:C3."`
+	Outline bool   `json:"outline,omitempty" desc:"List headings, Docs/Word blocks and tabs, or sheets and named ranges."`
 }
 
-type writeArgs struct {
-	Path       string           `json:"path" desc:"Absolute virtual path to write."`
-	Rev        string           `json:"rev,omitempty" schema:"-"`
-	Content    *string          `json:"content,omitempty" desc:"Full new file body (UTF-8 HTML for Docs/Word). Creates or replaces the whole file."`
-	Start      *int             `json:"start,omitempty" desc:"1-based start line (inclusive). Lines mode."`
-	End        *int             `json:"end,omitempty" desc:"1-based end line (exclusive). Required in lines mode."`
-	Lines      []string         `json:"lines,omitempty" desc:"Replacement lines (no embedded newlines). Empty deletes the span. Or use body."`
-	Body       *string          `json:"body,omitempty" desc:"Replacement body as one string (split on newlines). Used if lines is empty."`
-	Old        *string          `json:"old,omitempty" desc:"Exact substring to find. Must be unique unless replace_all."`
-	New        *string          `json:"new,omitempty" desc:"Replacement text. Omitted treated as empty."`
-	ReplaceAll bool             `json:"replace_all,omitempty" desc:"Replace every occurrence of old."`
-	BlockID    string           `json:"block_id,omitempty" desc:"Sheets: Sheet!A1. Host/test IR: replace this structured block."`
-	TabID      string           `json:"tab_id,omitempty" desc:"Required for HTML/blocks when the Doc has more than one tab."`
-	Format     *vfs.FormatPatch `json:"format,omitempty" desc:"Optional cell format patch on the same block_id range (number, bold, italic, strike, underline, fill, color, align, valign, wrap, border). Omit a field to leave it; set bold=false to clear. Value-only writes leave format; format-only writes leave values."`
+type writeTextArgs struct {
+	Path       string   `json:"path" desc:"Absolute virtual path."`
+	Content    *string  `json:"content,omitempty" desc:"Full file body. Creates the path if missing."`
+	Start      *int     `json:"start,omitempty" desc:"1-based first line to replace (inclusive). Use with end and lines or body."`
+	End        *int     `json:"end,omitempty" desc:"1-based last line to replace (exclusive)."`
+	Lines      []string `json:"lines,omitempty" desc:"Replacement lines with no embedded newlines. Empty deletes the span."`
+	Body       *string  `json:"body,omitempty" desc:"Replacement text split on newlines when lines is empty."`
+	Old        *string  `json:"old,omitempty" desc:"Exact substring that must still be in the current file. Must be unique unless replace_all."`
+	New        *string  `json:"new,omitempty" desc:"Replacement for old. Omit to delete the substring."`
+	ReplaceAll bool     `json:"replace_all,omitempty" desc:"Replace every old match. Default is one unique match."`
+}
+
+type writeDocumentArgs struct {
+	Path    string   `json:"path" desc:"Absolute virtual path."`
+	Content *string  `json:"content,omitempty" desc:"Full UTF-8 HTML body. Creates the path if missing. Extensionless HTML becomes a native Doc/Word on Drive/Graph."`
+	Start   *int     `json:"start,omitempty" desc:"1-based first HTML line to replace (inclusive). Use with end and lines or body."`
+	End     *int     `json:"end,omitempty" desc:"1-based last HTML line to replace (exclusive)."`
+	Lines   []string `json:"lines,omitempty" desc:"Replacement HTML lines with no embedded newlines. Empty deletes the span."`
+	Body    *string  `json:"body,omitempty" desc:"Replacement text split on newlines when lines is empty."`
+	BlockID string   `json:"block_id,omitempty" desc:"Block id from read outline=true."`
+	TabID   string   `json:"tab_id,omitempty" desc:"Required when the document has more than one tab."`
+}
+
+type writeSpreadsheetArgs struct {
+	Path    string           `json:"path" desc:"Absolute virtual path."`
+	BlockID string           `json:"block_id,omitempty" desc:"Existing spreadsheet: Sheet!A1 (one cell)."`
+	Body    *string          `json:"body,omitempty" desc:"Cell value for block_id Sheet!A1."`
+	Lines   []string         `json:"lines,omitempty" desc:"Cell value as lines when body is empty."`
+	Format  *vfs.FormatPatch `json:"format,omitempty" desc:"Cell format on Sheet!A1. Omit a field to leave it. Value-only writes leave format; format-only writes leave the value."`
+	Content *string          `json:"content,omitempty" desc:"Create a new spreadsheet only. TSV/CSV body on a path that does not exist yet."`
 }
 
 func (v vfsTools) newRead() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "read",
 		DisplayName: "Read {path}",
-		Description: `Read a virtual file (not a knowledge object). First page by default, or a line window / block.
+		Description: `Read a virtual file. Use media_type in the result to choose write, write_document, or write_spreadsheet. Path-only returns the first page of numbered lines (Docs/Word as HTML: one block per line). The N| prefix is display only — it is not in the file.
 
-Path only → numbered lines (start=1 through 1+MaxLinesPerWindow). Docs/Word are pretty HTML: one heading, paragraph, list item, or table per line. outline=true still returns the block list.
-start/end → half-open 1-based window. block_id → that region's IR text. ir=true → media_type/encoding.
-Sheets: path-only is outline. block_id is a sheet (id, title, or slug) or Sheet!A1 / Sheet!A1:C3. start/end are 1-based rows of that sheet, not HTML lines. One-cell and small A1 reads print format when present; row windows stay TSV unless ir is set on a small range. Write is one cell (Sheet!A1) or create.
-Knowledge objects with no file: read_object. Live names/grep: run_command → ls / rg.`,
+start/end: 1-based half-open window. Sheets: rows of the sheet named in block_id.
+block_id: markdown heading, Docs/Word block, sheet, Sheet!A1, or Sheet!A1:C3. One cell and small A1 ranges include format when set; sheet row windows are TSV.
+outline: headings, Doc tabs/blocks, or sheets. Sheets path-only is outline.
+Knowledge objects: read_object. Names/grep: run_command → ls / rg.`,
 		Category: streaming.ToolCategoryRead,
 		Access:   ToolReadAccess,
 		Timeout:  60 * time.Second,
@@ -78,17 +92,16 @@ Knowledge objects with no file: read_object. Live names/grep: run_command → ls
 			projected := vfs.IsProjected(fi.MediaType)
 
 			explicitWindow := args.Start > 0 || args.End > 0
-			pathOnly := !explicitWindow && args.BlockID == "" && !args.Outline && !args.IR
+			pathOnly := !explicitWindow && args.BlockID == "" && !args.Outline
 			if pathOnly && projected && isTabularMedia(fi.MediaType) {
 				args.Outline = true
 			} else if !explicitWindow && args.BlockID == "" && !args.Outline {
 				args.Start = 1
 				args.End = 1 + vfs.MaxLinesPerWindow
-				explicitWindow = true
 			}
 
-			if args.BlockID != "" || args.Outline || args.IR {
-				return v.readStructured(ctx, p, args, explicitWindow)
+			if args.BlockID != "" || args.Outline {
+				return v.readStructured(ctx, p, args)
 			}
 
 			if projected && isTabularMedia(fi.MediaType) {
@@ -102,24 +115,10 @@ Knowledge objects with no file: read_object. Live names/grep: run_command → ls
 			if err != nil {
 				return "", vfsToolErr("read", p, err)
 			}
-			rev := win.Rev
-			if rev.Hash == "" {
-				r, rerr := v.ms.ContentRev(ctx, p)
-				if rerr != nil {
-					if args.Rev != "" {
-						return "", fmt.Errorf("read: %w", rerr)
-					}
-				} else {
-					rev = r
-				}
-			}
-			if args.Rev != "" && args.Rev != rev.Hash {
-				return "", staleRevError(p)
-			}
 			var b strings.Builder
-			growLineWindow(&b, 96+len(win.Path)+len(rev.Hash), win.Lines)
-			fmt.Fprintf(&b, "path=%s rev=%s start=%d end=%d returned=%d eof=%v next_start=%d\n",
-				win.Path, rev.Hash, win.Start, win.End, win.Returned, win.EOF, win.NextStart)
+			growLineWindow(&b, 96+len(win.Path)+len(fi.MediaType), win.Lines)
+			fmt.Fprintf(&b, "path=%s media_type=%s start=%d end=%d returned=%d eof=%v next_start=%d\n",
+				win.Path, fi.MediaType, win.Start, win.End, win.Returned, win.EOF, win.NextStart)
 			for i, line := range win.Lines {
 				fmt.Fprintf(&b, "%6d|%s\n", win.Start+i, line)
 			}
@@ -128,14 +127,10 @@ Knowledge objects with no file: read_object. Live names/grep: run_command → ls
 	})
 }
 
-func (v vfsTools) readStructured(ctx context.Context, p string, args readArgs, explicitWindow bool) (string, error) {
+func (v vfsTools) readStructured(ctx context.Context, p string, args readArgs) (string, error) {
 	doc, err := v.ms.ReadText(ctx, p)
 	if err != nil {
 		return "", vfsToolErr("read", p, err)
-	}
-	rev := vfs.ContentToken(doc)
-	if args.Rev != "" && args.Rev != rev {
-		return "", staleRevError(p)
 	}
 	projected := vfs.IsProjected(doc.MediaType())
 	var blocks []vfs.Block
@@ -143,19 +138,14 @@ func (v vfsTools) readStructured(ctx context.Context, p string, args readArgs, e
 		blocks = s.Blocks()
 	}
 	var b strings.Builder
-	b.Grow(128 + len(p) + len(rev) + len(doc.MediaType()))
+	b.Grow(128 + len(p) + len(doc.MediaType()))
 	td, tabular := vfs.AsGrid(doc)
-	if args.IR {
-		if tabular {
-			fmt.Fprintf(&b, "path=%s rev=%s media_type=%s encoding=%s line_count=%d sheet_count=%d\n",
-				p, rev, doc.MediaType(), doc.Encoding(), doc.LineCount(), len(td.Sheets()))
-		} else {
-			fmt.Fprintf(&b, "path=%s rev=%s media_type=%s encoding=%s line_count=%d\n",
-				p, rev, doc.MediaType(), doc.Encoding(), doc.LineCount())
-		}
+	if tabular {
+		fmt.Fprintf(&b, "path=%s media_type=%s line_count=%d sheet_count=%d\n",
+			p, doc.MediaType(), doc.LineCount(), len(td.Sheets()))
 	} else {
-		fmt.Fprintf(&b, "path=%s rev=%s media_type=%s line_count=%d\n",
-			p, rev, doc.MediaType(), doc.LineCount())
+		fmt.Fprintf(&b, "path=%s media_type=%s line_count=%d\n",
+			p, doc.MediaType(), doc.LineCount())
 	}
 	if rd, ok := vfs.AsRich(doc); ok && args.Outline {
 		if tabs := rd.Tabs(); len(tabs) > 0 {
@@ -220,9 +210,6 @@ func (v vfsTools) readStructured(ctx context.Context, p string, args readArgs, e
 			fmt.Fprintf(&b, "%6d|%s\n", win.Start+i, line)
 		}
 	}
-	if args.IR && args.BlockID == "" && !explicitWindow && !projected {
-		fmt.Fprintf(&b, "text=%s\n", doc.Text())
-	}
 	return b.String(), nil
 }
 
@@ -277,14 +264,6 @@ func (v vfsTools) readTabular(td vfs.Grid, args readArgs, b *strings.Builder) (s
 	for i, line := range lines {
 		fmt.Fprintf(b, "%6d|%s\n", start+i, line)
 	}
-	if args.IR {
-		endRow := start + len(lines) - 1
-		if sh.Cols > 0 && len(lines)*sh.Cols <= smallFormatCells {
-			if err := writeRangeFormats(b, td, sheetKey, start, 1, endRow, sh.Cols); err != nil {
-				return "", err
-			}
-		}
-	}
 	return b.String(), nil
 }
 
@@ -312,32 +291,46 @@ func writeRangeFormats(b *strings.Builder, td vfs.Grid, sheet string, r1, c1, r2
 	return nil
 }
 
+const (
+	writeToolName            = "write"
+	writeDocumentToolName    = "write_document"
+	writeSpreadsheetToolName = "write_spreadsheet"
+)
+
 func (v vfsTools) newWrite() *Tool {
 	cfg := ToolConfig{
-		Name:        "write",
+		Name:        writeToolName,
 		DisplayName: "Write {path}",
-		Description: `Write a virtual file. Replace whole (content) or a span (line start/end, or block_id including Sheet!A1). old/new finds a unique span.
-
-Docs/Word are a text file of HTML. Read numbered lines, then write start/end/lines or full content. The harness owns checkout. Single-tab Docs do not need tab_id.
-Create: content on a new path. Extension wins (Foo.md is never a Doc; notes.html is a real HTML file). Extensionless HTML becomes a native Doc on Drive, Word on Graph, or a text/html file locally.
-Sheets: write block_id is Sheet!A1 (one cell). Optional format patches that cell (value-only leaves format; format-only leaves values). Range, row-window, and in-place sheet replace are not writes — create a new sheet with content or blocks.`,
-		Category: streaming.ToolCategoryEdit,
-		Access:   ToolWriteAccess,
-		Timeout:  60 * time.Second,
-		Handler: func(ctx context.Context, args writeArgs, rt HarnessRuntime) (string, error) {
+		Description: `Edit a plaintext or source file (not Docs/Word/Sheets). Use after read when media_type is text or code. Exactly one of content, old, or start. old must still be in the file. Do not copy the N| prefix.`,
+		Category:    streaming.ToolCategoryEdit,
+		Access:      ToolWriteAccess,
+		Timeout:     60 * time.Second,
+		Handler: func(ctx context.Context, args writeTextArgs, rt HarnessRuntime) (string, error) {
 			p, err := vfs.CleanPath(args.Path)
 			if err != nil {
-				return "", vfsToolErr("write", args.Path, err)
+				return "", vfsToolErr(writeToolName, args.Path, err)
 			}
-			n, full := writeModeCount(args)
+			if _, err := v.requireWriteFamily(ctx, p, writeToolName); err != nil {
+				return "", err
+			}
+			n := 0
+			if args.Content != nil {
+				n++
+			}
+			if args.Old != nil {
+				n++
+			}
+			if args.Start != nil {
+				n++
+			}
 			switch {
 			case n == 0:
-				return "", fmt.Errorf("write %s: nothing to change. Pass content (the new body), or start and end with lines, or old and new, or block_id", p)
+				return "", fmt.Errorf("write %s: nothing to change. Pass content, or old and new, or start and end with lines", p)
 			case n > 1:
-				return "", fmt.Errorf("write %s: pass only one change: content, or start/end lines, or old/new, or block_id", p)
+				return "", fmt.Errorf("write %s: pass only one change: content, or old/new, or start/end lines", p)
 			}
-			mut := vfs.Mutation{
-				Rev:        args.Rev,
+			return v.applyWrite(ctx, writeToolName, p, vfs.Mutation{
+				Content:    args.Content,
 				Old:        args.Old,
 				New:        args.New,
 				ReplaceAll: args.ReplaceAll,
@@ -345,29 +338,135 @@ Sheets: write block_id is Sheet!A1 (one cell). Optional format patches that cell
 				End:        args.End,
 				Lines:      args.Lines,
 				Body:       args.Body,
-				BlockID:    args.BlockID,
-				TabID:      args.TabID,
-				Format:     args.Format,
-			}
-			if full {
-				mut.Content = args.Content
-			}
-			rt.EmitUpdate("Writing " + p)
-			res, err := v.ms.Apply(ctx, p, mut)
-			if err != nil {
-				return "", vfsToolErr("write", p, err)
-			}
-			return formatWriteResult(res), nil
+			}, rt)
 		},
 	}
+	return v.withWritePermission(cfg)
+}
+
+func (v vfsTools) newWriteDocument() *Tool {
+	cfg := ToolConfig{
+		Name:        writeDocumentToolName,
+		DisplayName: "Write document {path}",
+		Description: `Edit a Google Doc or Word file. Use when media_type is a document. Exactly one of content (HTML), start/end lines, or block_id. Multi-tab requires tab_id. Not for .md or spreadsheets.`,
+		Category:    streaming.ToolCategoryEdit,
+		Access:      ToolWriteAccess,
+		Timeout:     60 * time.Second,
+		Handler: func(ctx context.Context, args writeDocumentArgs, rt HarnessRuntime) (string, error) {
+			p, err := vfs.CleanPath(args.Path)
+			if err != nil {
+				return "", vfsToolErr(writeDocumentToolName, args.Path, err)
+			}
+			if _, err := v.requireWriteFamily(ctx, p, writeDocumentToolName); err != nil {
+				return "", err
+			}
+			n := 0
+			if args.Content != nil {
+				n++
+			}
+			if args.Start != nil {
+				n++
+			}
+			if args.BlockID != "" {
+				n++
+			}
+			switch {
+			case n == 0:
+				return "", fmt.Errorf("write_document %s: nothing to change. Pass content (HTML), or start and end with lines, or block_id", p)
+			case n > 1:
+				return "", fmt.Errorf("write_document %s: pass only one change: content, or start/end lines, or block_id", p)
+			}
+			return v.applyWrite(ctx, writeDocumentToolName, p, vfs.Mutation{
+				Content: args.Content,
+				Start:   args.Start,
+				End:     args.End,
+				Lines:   args.Lines,
+				Body:    args.Body,
+				BlockID: args.BlockID,
+				TabID:   args.TabID,
+			}, rt)
+		},
+	}
+	return v.withWritePermission(cfg)
+}
+
+func (v vfsTools) newWriteSpreadsheet() *Tool {
+	cfg := ToolConfig{
+		Name:        writeSpreadsheetToolName,
+		DisplayName: "Write spreadsheet {path}",
+		Description: `Edit one spreadsheet cell. Use when media_type is a spreadsheet. block_id is Sheet!A1. Optional format. Create a new sheet with content on a new path only.`,
+		Category:    streaming.ToolCategoryEdit,
+		Access:      ToolWriteAccess,
+		Timeout:     60 * time.Second,
+		Handler: func(ctx context.Context, args writeSpreadsheetArgs, rt HarnessRuntime) (string, error) {
+			p, err := vfs.CleanPath(args.Path)
+			if err != nil {
+				return "", vfsToolErr(writeSpreadsheetToolName, args.Path, err)
+			}
+			exists, err := v.requireWriteFamily(ctx, p, writeSpreadsheetToolName)
+			if err != nil {
+				return "", err
+			}
+			hasContent := args.Content != nil
+			hasCell := args.BlockID != ""
+			switch {
+			case hasContent && hasCell:
+				return "", fmt.Errorf("write_spreadsheet %s: pass only one change: content on a new path, or block_id Sheet!A1 on an existing sheet", p)
+			case !exists && !hasContent:
+				return "", fmt.Errorf("write_spreadsheet %s: create a new spreadsheet with content, or write an existing sheet cell with block_id Sheet!A1", p)
+			case exists && hasContent:
+				return "", Correctionf(vfs.ErrProjected, "%s already exists. write_spreadsheet edits one cell with block_id Sheet!A1; it cannot replace an existing sheet in place", p)
+			case exists && !hasCell:
+				return "", fmt.Errorf("write_spreadsheet %s: nothing to change. Pass block_id Sheet!A1 with body and/or format", p)
+			}
+			return v.applyWrite(ctx, writeSpreadsheetToolName, p, vfs.Mutation{
+				Content: args.Content,
+				BlockID: args.BlockID,
+				Body:    args.Body,
+				Lines:   args.Lines,
+				Format:  args.Format,
+			}, rt)
+		},
+	}
+	return v.withWritePermission(cfg)
+}
+
+func (v vfsTools) withWritePermission(cfg ToolConfig) *Tool {
 	if v.permissionRequired {
 		cfg.OnCall = []OnCallFunc{ToolPermissionOnCall}
 	}
 	return NewTool(cfg)
 }
 
-func staleRevError(path string) error {
-	return Correctionf(vfs.ErrStaleContent, "the file changed since that rev (%s). Omit rev, or read the file again before writing", path)
+func (v vfsTools) applyWrite(ctx context.Context, tool, p string, mut vfs.Mutation, rt HarnessRuntime) (string, error) {
+	rt.EmitUpdate("Writing " + p)
+	res, err := v.ms.Apply(ctx, p, mut)
+	if err != nil {
+		return "", vfsToolErr(tool, p, err)
+	}
+	return formatWriteResult(res), nil
+}
+
+// requireWriteFamily allows create (path missing). An existing file must match tool.
+func (v vfsTools) requireWriteFamily(ctx context.Context, p, tool string) (exists bool, err error) {
+	fi, err := v.ms.Stat(ctx, p)
+	if errors.Is(err, vfs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, vfsToolErr(tool, p, err)
+	}
+	want := writeToolName
+	switch {
+	case isTabularMedia(fi.MediaType):
+		want = writeSpreadsheetToolName
+	case vfs.IsProjected(fi.MediaType):
+		want = writeDocumentToolName
+	}
+	if want != tool {
+		return true, Correctionf(vfs.ErrProjected, "%s is %s. Use %s, not %s", p, fi.MediaType, want, tool)
+	}
+	return true, nil
 }
 
 // vfsToolErr maps usage mistakes at the VFS tool, not in the turn processor.
@@ -379,7 +478,7 @@ func vfsToolErr(name, path string, err error) error {
 	case errors.Is(err, vfs.ErrInvalidWrite), errors.Is(err, vfs.ErrConflict):
 		return Correctionf(vfs.ErrInvalidWrite, "%s was not saved. Some of the content may already be in the file. Read the file, then write the full HTML again", path)
 	case errors.Is(err, vfs.ErrStaleContent):
-		return staleRevError(path)
+		return Correctionf(vfs.ErrStaleContent, "%s changed since you last read it. Read the file again, then write", path)
 	case errors.Is(err, vfs.ErrUseHTML):
 		return Correctionf(vfs.ErrUseHTML, "%s is a document. Pass content as HTML, for example <h1>Title</h1> and <p>paragraphs</p>", path)
 	case errors.Is(err, vfs.ErrEmptyReplace):
@@ -387,7 +486,7 @@ func vfsToolErr(name, path string, err error) error {
 	case errors.Is(err, vfs.ErrTabIDRequired):
 		return Correctionf(vfs.ErrTabIDRequired, "%s: %s", path, vfs.ErrTabIDRequired.Error())
 	case errors.Is(err, vfs.ErrProjected):
-		return Correctionf(vfs.ErrProjected, "%s: that write is not supported on this file type. For a document, write HTML content or a line range. For a sheet, write one cell as block_id Sheet!A1", path)
+		return Correctionf(vfs.ErrProjected, "%s: that write is not supported on this file type. Use write for plaintext, write_document for Docs/Word, write_spreadsheet for Sheet!A1", path)
 	case errors.Is(err, vfs.ErrNotExist):
 		return Correctionf(vfs.ErrNotExist, "%s: that path does not exist. List the parent with run_command (ls) or read a known path, then retry", name)
 	case errors.Is(err, vfs.ErrInvalidPath):
@@ -418,7 +517,10 @@ func vfsToolErr(name, path string, err error) error {
 }
 
 func formatWriteResult(res vfs.ApplyResult) string {
-	s := res.String()
+	s := fmt.Sprintf("path=%s line_count=%d", res.Path, res.LineCount)
+	if res.Replacements > 0 {
+		s += fmt.Sprintf(" replacements=%d", res.Replacements)
+	}
 	if len(res.Outline) == 0 {
 		return s
 	}
@@ -435,23 +537,6 @@ func formatWriteResult(res vfs.ApplyResult) string {
 
 func isTabularMedia(mt string) bool {
 	return strings.Contains(mt, "spreadsheet")
-}
-
-func writeModeCount(args writeArgs) (n int, full bool) {
-	full = args.Content != nil
-	if full {
-		n++
-	}
-	if args.Old != nil {
-		n++
-	}
-	if args.BlockID != "" {
-		n++
-	}
-	if args.Start != nil && args.BlockID == "" {
-		n++
-	}
-	return n, full
 }
 
 func lineWindowFromTextDoc(doc vfs.Textual, start, end int) (vfs.LineWindow, error) {

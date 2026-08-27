@@ -554,13 +554,8 @@ func TypeToJSONSchema(v any) (map[string]any, error) {
 	return typeToJSONSchema(rt, 0, false), nil
 }
 
-type ToolNamespace struct {
-	Name        string
-	Description string
-}
-
 // ToolsAsJson serializes tool definitions for model requests. An empty catalog
-// is "[]". Namespace-qualified names use "namespace.name".
+// is "[]". Namespaced tools are "namespace__name" (OpenAI rejects '.').
 func ToolsAsJson(tools []*Tool) string {
 	if len(tools) == 0 {
 		return "[]"
@@ -570,7 +565,7 @@ func ToolsAsJson(tools []*Tool) string {
 	for _, t := range tools {
 		def := t.AsJson()
 		if t.namespace != "" {
-			def["name"] = t.namespace + "." + t.name
+			def["name"] = t.namespace + "__" + t.name
 		}
 		defs = append(defs, def)
 	}

@@ -165,7 +165,7 @@ func TestMountSession_gdriveReadOnlySession(t *testing.T) {
 	}
 }
 
-func TestDriveFactory_openRequiresFolderAndToken(t *testing.T) {
+func TestDriveFactory_openRequiresToken(t *testing.T) {
 	ctx := t.Context()
 	auth := vfs.NewSessionAuth()
 	reg := vfs.NewBackendRegistry()
@@ -177,7 +177,7 @@ func TestDriveFactory_openRequiresFolderAndToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/d", Profile: "gdrive"}); err == nil {
-		t.Fatal("want folderId error")
+		t.Fatal("want token error for My Drive bind")
 	}
 	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/d", Profile: "gdrive", Params: map[string]string{vfs.ParamFolderID: "x"}}); err == nil {
 		t.Fatal("want token error")

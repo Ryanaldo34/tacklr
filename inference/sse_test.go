@@ -76,6 +76,11 @@ func TestParseSSE_requiresTerminalResponseEvent(t *testing.T) {
 			t.Fatalf("%s chunks = %#v", name, chunks)
 		}
 	}
+
+	malformed := collectSSE(t, "data: not-json\ndata: [DONE]\n\n")
+	if len(malformed) != 1 || !errors.Is(malformed[0].Error, ErrMalformedStream) {
+		t.Fatalf("malformed = %#v", malformed)
+	}
 }
 
 func TestParseSSE_outputTextAlwaysMessage_likeMain(t *testing.T) {
@@ -157,11 +162,11 @@ func TestParseSSE_reasoningThoughtChunks(t *testing.T) {
 }
 
 func TestParseSSE_functionCall_llamaShape_normalizesIDs(t *testing.T) {
-	// llama.cpp: call_id only, no id field (matches live gemma server).
+	// llama.cpp: call_id only, no id field. Namespaced MCP tools use namespace__name.
 	body := strings.Join([]string{
-		`data: {"type":"response.output_item.added","item":{"arguments":"","call_id":"fc_abc","name":"echo","type":"function_call","status":"in_progress"}}`,
+		`data: {"type":"response.output_item.added","item":{"arguments":"","call_id":"fc_abc","name":"ado__wit_work_item","type":"function_call","status":"in_progress"}}`,
 		`data: {"type":"response.function_call_arguments.delta","delta":"{}","item_id":"fc_abc"}`,
-		`data: {"type":"response.output_item.done","item":{"type":"function_call","status":"completed","arguments":"{\"message\":\"hi\"}","call_id":"fc_abc","name":"echo"}}`,
+		`data: {"type":"response.output_item.done","item":{"type":"function_call","status":"completed","arguments":"{\"id\":1}","call_id":"fc_abc","name":"ado__wit_work_item"}}`,
 		`data: [DONE]`,
 		"",
 	}, "\n")
@@ -189,10 +194,10 @@ func TestParseSSE_functionCall_llamaShape_normalizesIDs(t *testing.T) {
 	if tc.CallID != "fc_abc" {
 		t.Errorf("CallID = %q, want fc_abc", tc.CallID)
 	}
-	if tc.Name != "echo" {
-		t.Errorf("Name = %q", tc.Name)
+	if tc.Namespace != "ado" || tc.Name != "wit_work_item" {
+		t.Errorf("tool = %s/%s, want ado/wit_work_item", tc.Namespace, tc.Name)
 	}
-	if tc.Arguments != `{"message":"hi"}` {
+	if tc.Arguments != `{"id":1}` {
 		t.Errorf("Arguments = %q", tc.Arguments)
 	}
 }
