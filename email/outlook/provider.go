@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 
 	msgraphsdk "github.com/microsoftgraph/msgraph-sdk-go"
 	"github.com/microsoftgraph/msgraph-sdk-go/models"
@@ -38,11 +39,11 @@ func (p *Provider) ReadInbox(ctx context.Context, req provider.ReadInboxRequest)
 	if err := p.Validate(ctx); err != nil {
 		return provider.Inbox{}, err
 	}
-	top := int32(req.Limit)
-	filter := ""
-	if req.UnreadOnly {
-		filter = "isRead eq false"
+	if err := req.Validate(); err != nil {
+		return provider.Inbox{}, err
 	}
+	top := int32(req.Limit)
+	filter := odataFilter(req)
 	if req.Cursor != "" {
 		if err := p.validCursor(req.Cursor); err != nil {
 			return provider.Inbox{}, err
@@ -54,13 +55,13 @@ func (p *Provider) ReadInbox(ctx context.Context, req provider.ReadInboxRequest)
 		return inboxFromPage(page), nil
 	}
 	if req.Mailbox == "" {
-		page, err := p.client.Me().Messages().Get(ctx, messageConfig(top, req.Query, filter))
+		page, err := p.client.Me().Messages().Get(ctx, messageConfig(top, filter))
 		if err != nil {
 			return provider.Inbox{}, fmt.Errorf("email/outlook: list messages: %w", err)
 		}
 		return inboxFromPage(page), nil
 	}
-	page, err := p.client.Me().MailFolders().ByMailFolderId(req.Mailbox).Messages().Get(ctx, folderMessageConfig(top, req.Query, filter))
+	page, err := p.client.Me().MailFolders().ByMailFolderId(req.Mailbox).Messages().Get(ctx, folderMessageConfig(top, filter))
 	if err != nil {
 		return provider.Inbox{}, fmt.Errorf("email/outlook: list mailbox %q: %w", req.Mailbox, err)
 	}
@@ -111,21 +112,44 @@ func (p *Provider) SendEmail(ctx context.Context, req provider.SendEmailRequest)
 	return provider.SentEmail{}, nil
 }
 
-func messageConfig(top int32, search, filter string) *users.ItemMessagesRequestBuilderGetRequestConfiguration {
+func messageConfig(top int32, filter string) *users.ItemMessagesRequestBuilderGetRequestConfiguration {
 	query := &users.ItemMessagesRequestBuilderGetQueryParameters{Top: &top, Filter: stringPtr(filter), Orderby: []string{"receivedDateTime DESC"}, Select: selectedFields}
-	if strings.TrimSpace(search) != "" {
-		query.Search = stringPtr(search)
-	}
 	return &users.ItemMessagesRequestBuilderGetRequestConfiguration{QueryParameters: query}
 }
 
-func folderMessageConfig(top int32, search, filter string) *users.ItemMailFoldersItemMessagesRequestBuilderGetRequestConfiguration {
+func folderMessageConfig(top int32, filter string) *users.ItemMailFoldersItemMessagesRequestBuilderGetRequestConfiguration {
 	query := &users.ItemMailFoldersItemMessagesRequestBuilderGetQueryParameters{Top: &top, Filter: stringPtr(filter), Orderby: []string{"receivedDateTime DESC"}, Select: selectedFields}
-	if strings.TrimSpace(search) != "" {
-		query.Search = stringPtr(search)
-	}
 	return &users.ItemMailFoldersItemMessagesRequestBuilderGetRequestConfiguration{QueryParameters: query}
 }
+
+func odataFilter(req provider.ReadInboxRequest) string {
+	filters := make([]string, 0, 7)
+	if req.From != "" {
+		filters = append(filters, "from/emailAddress/address eq '"+odataString(req.From)+"'")
+	}
+	if req.To != "" {
+		filters = append(filters, "toRecipients/any(r:r/emailAddress/address eq '"+odataString(req.To)+"')")
+	}
+	if req.Subject != "" {
+		filters = append(filters, "contains(subject, '"+odataString(req.Subject)+"')")
+	}
+	if req.ReceivedAfter != "" {
+		filters = append(filters, "receivedDateTime ge "+req.ReceivedAfter+"T00:00:00Z")
+	}
+	if req.ReceivedBefore != "" {
+		before, _ := time.Parse(time.DateOnly, req.ReceivedBefore)
+		filters = append(filters, "receivedDateTime lt "+before.AddDate(0, 0, 1).Format(time.RFC3339))
+	}
+	if req.HasAttachment != nil {
+		filters = append(filters, fmt.Sprintf("hasAttachments eq %t", *req.HasAttachment))
+	}
+	if req.UnreadOnly {
+		filters = append(filters, "isRead eq false")
+	}
+	return strings.Join(filters, " and ")
+}
+
+func odataString(value string) string { return strings.ReplaceAll(value, "'", "''") }
 
 var selectedFields = []string{"id", "conversationId", "from", "toRecipients", "ccRecipients", "subject", "body", "receivedDateTime", "isRead"}
 

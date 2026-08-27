@@ -11,11 +11,16 @@ import (
 const maxInboxMessages = 100
 
 type readInboxArgs struct {
-	Query      string `json:"query,omitempty" desc:"Optional provider search query."`
-	Mailbox    string `json:"mailbox,omitempty" desc:"Optional mailbox or folder. Omit to use the provider inbox."`
-	UnreadOnly bool   `json:"unread_only,omitempty" desc:"Return only unread messages when true."`
-	Limit      int    `json:"limit,omitempty" desc:"Maximum messages to return. Default 20, maximum 100."`
-	Cursor     string `json:"cursor,omitempty" desc:"Provider cursor returned by a previous read_inbox call."`
+	From           string `json:"from,omitempty" desc:"Optional sender email address."`
+	To             string `json:"to,omitempty" desc:"Optional recipient email address."`
+	Subject        string `json:"subject,omitempty" desc:"Optional text that must occur in the subject."`
+	ReceivedAfter  string `json:"received_after,omitempty" desc:"Optional inclusive earliest received date in YYYY-MM-DD format."`
+	ReceivedBefore string `json:"received_before,omitempty" desc:"Optional inclusive latest received date in YYYY-MM-DD format."`
+	HasAttachment  *bool  `json:"has_attachment,omitempty" desc:"Optional attachment filter. null means do not filter by attachments."`
+	Mailbox        string `json:"mailbox,omitempty" desc:"Optional mailbox or folder. Omit to use the provider inbox."`
+	UnreadOnly     bool   `json:"unread_only,omitempty" desc:"Return only unread messages when true."`
+	Limit          int    `json:"limit,omitempty" desc:"Maximum messages to return. Default 20, maximum 100."`
+	Cursor         string `json:"cursor,omitempty" desc:"Provider cursor returned by a previous read_inbox call."`
 }
 
 type sendEmailArgs struct {
@@ -43,13 +48,16 @@ func newEmailTools(provider mail.Provider) []*Tool {
 				if limit < 1 || limit > maxInboxMessages {
 					return mail.Inbox{}, fmt.Errorf("read_inbox: limit must be between 1 and %d", maxInboxMessages)
 				}
-				return provider.ReadInbox(ctx, mail.ReadInboxRequest{
-					Query:      args.Query,
-					Mailbox:    args.Mailbox,
-					UnreadOnly: args.UnreadOnly,
-					Limit:      limit,
-					Cursor:     args.Cursor,
-				})
+				req := mail.ReadInboxRequest{
+					From: args.From, To: args.To, Subject: args.Subject,
+					ReceivedAfter: args.ReceivedAfter, ReceivedBefore: args.ReceivedBefore,
+					HasAttachment: args.HasAttachment, Mailbox: args.Mailbox,
+					UnreadOnly: args.UnreadOnly, Limit: limit, Cursor: args.Cursor,
+				}
+				if err := req.Validate(); err != nil {
+					return mail.Inbox{}, fmt.Errorf("read_inbox: %w", err)
+				}
+				return provider.ReadInbox(ctx, req)
 			},
 		}),
 		NewTool(ToolConfig{

@@ -59,11 +59,38 @@ func ValidateProvider(p Provider) error {
 
 // ReadInboxRequest selects messages from the configured inbox.
 type ReadInboxRequest struct {
-	Query      string `json:"query,omitempty"`
-	Mailbox    string `json:"mailbox,omitempty"`
-	UnreadOnly bool   `json:"unread_only,omitempty"`
-	Limit      int    `json:"limit,omitempty"`
-	Cursor     string `json:"cursor,omitempty"`
+	From           string `json:"from,omitempty"`
+	To             string `json:"to,omitempty"`
+	Subject        string `json:"subject,omitempty"`
+	ReceivedAfter  string `json:"received_after,omitempty"`
+	ReceivedBefore string `json:"received_before,omitempty"`
+	HasAttachment  *bool  `json:"has_attachment,omitempty"`
+	Mailbox        string `json:"mailbox,omitempty"`
+	UnreadOnly     bool   `json:"unread_only,omitempty"`
+	Limit          int    `json:"limit,omitempty"`
+	Cursor         string `json:"cursor,omitempty"`
+}
+
+// Validate checks portable inbox filter values. Dates use YYYY-MM-DD.
+func (r ReadInboxRequest) Validate() error {
+	var after, before time.Time
+	for _, filter := range []struct {
+		name, value string
+		target      *time.Time
+	}{{"received_after", r.ReceivedAfter, &after}, {"received_before", r.ReceivedBefore, &before}} {
+		if filter.value == "" {
+			continue
+		}
+		parsed, err := time.Parse(time.DateOnly, filter.value)
+		if err != nil {
+			return fmt.Errorf("email: %s must use YYYY-MM-DD", filter.name)
+		}
+		*filter.target = parsed
+	}
+	if !after.IsZero() && !before.IsZero() && after.After(before) {
+		return fmt.Errorf("email: received_after must not be after received_before")
+	}
+	return nil
 }
 
 // Inbox is one provider page of messages.

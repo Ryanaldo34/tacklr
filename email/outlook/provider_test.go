@@ -46,11 +46,13 @@ func TestMessageFromSDK_mapsGraphMessage(t *testing.T) {
 func TestProvider_usesOfficialGraphSDKForInboxAndSend(t *testing.T) {
 	// Arrange
 	var sent map[string]any
+	var listFilter string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		path := strings.TrimSuffix(r.URL.Path, "/")
 		switch {
 		case r.Method == http.MethodGet && path == "/users/me-token-to-replace/messages":
+			listFilter = r.URL.Query().Get("$filter")
 			_ = json.NewEncoder(w).Encode(map[string]any{"value": []map[string]any{{
 				"id": "message", "conversationId": "thread", "subject": "Status", "isRead": false,
 				"from":         map[string]any{"emailAddress": map[string]string{"address": "sender@example.com"}},
@@ -73,16 +75,31 @@ func TestProvider_usesOfficialGraphSDKForInboxAndSend(t *testing.T) {
 	p := New(msgraphsdk.NewGraphServiceClient(adapter))
 
 	// Act
-	inbox, readErr := p.ReadInbox(t.Context(), provider.ReadInboxRequest{Limit: 5})
+	hasAttachment := true
+	inbox, readErr := p.ReadInbox(t.Context(), provider.ReadInboxRequest{From: "sender@example.com", To: "recipient@example.com", Subject: "Status", ReceivedAfter: "2026-08-01", ReceivedBefore: "2026-08-31", HasAttachment: &hasAttachment, UnreadOnly: true, Limit: 5})
 	_, sendErr := p.SendEmail(t.Context(), provider.SendEmailRequest{To: []string{"recipient@example.com"}, Subject: "Status", Body: "ready"})
 
 	// Assert
 	if readErr != nil || len(inbox.Messages) != 1 || inbox.Messages[0].ID != "message" || inbox.Messages[0].Body != "hello" || !inbox.Messages[0].Unread {
 		t.Fatalf("inbox = %+v, err = %v", inbox, readErr)
 	}
+	for _, want := range []string{"from/emailAddress/address eq 'sender@example.com'", "toRecipients/any(r:r/emailAddress/address eq 'recipient@example.com')", "contains(subject, 'Status')", "receivedDateTime ge 2026-08-01T00:00:00Z", "receivedDateTime lt 2026-09-01T00:00:00Z", "hasAttachments eq true", "isRead eq false"} {
+		if !strings.Contains(listFilter, want) {
+			t.Fatalf("filter = %q, want %q", listFilter, want)
+		}
+	}
 	message, ok := sent["Message"].(map[string]any)
 	if sendErr != nil || !ok || message["subject"] != "Status" {
 		t.Fatalf("send payload = %+v, err = %v", sent, sendErr)
+	}
+}
+
+func TestODataFilter_escapesStructuredFilters(t *testing.T) {
+	got := odataFilter(provider.ReadInboxRequest{From: "o'hara@example.com", Subject: "status's update"})
+	for _, want := range []string{"from/emailAddress/address eq 'o''hara@example.com'", "contains(subject, 'status''s update')"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("filter = %q, want %q", got, want)
+		}
 	}
 }
 

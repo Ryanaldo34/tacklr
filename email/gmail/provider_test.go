@@ -50,14 +50,15 @@ func TestProvider_usesOfficialGmailSDKForInboxAndSend(t *testing.T) {
 	p := New(service)
 
 	// Act
-	inbox, err := p.ReadInbox(t.Context(), provider.ReadInboxRequest{Query: "from:sender", Mailbox: "INBOX", UnreadOnly: true, Limit: 5, Cursor: "cursor"})
+	hasAttachment := true
+	inbox, err := p.ReadInbox(t.Context(), provider.ReadInboxRequest{From: "sender@example.com", To: "recipient@example.com", Subject: "Status", ReceivedAfter: "2026-08-01", ReceivedBefore: "2026-08-31", HasAttachment: &hasAttachment, Mailbox: "INBOX", UnreadOnly: true, Limit: 5, Cursor: "cursor"})
 	sent, sendErr := p.SendEmail(t.Context(), provider.SendEmailRequest{To: []string{"recipient@example.com"}, Subject: "Status", Body: "ready"})
 
 	// Assert
 	if err != nil || len(inbox.Messages) != 1 || inbox.Messages[0].Body != "hello" || !inbox.Messages[0].Unread || inbox.NextCursor != "next" {
 		t.Fatalf("inbox = %+v, err = %v", inbox, err)
 	}
-	for _, want := range []string{"q=from%3Asender+is%3Aunread", "labelIds=INBOX", "maxResults=5", "pageToken=cursor"} {
+	for _, want := range []string{"from%3A%22sender%40example.com%22", "to%3A%22recipient%40example.com%22", "subject%3A%22Status%22", "after%3A2026%2F08%2F01", "before%3A2026%2F08%2F31", "has%3Aattachment", "is%3Aunread", "labelIds=INBOX", "maxResults=5", "pageToken=cursor"} {
 		if !strings.Contains(listQuery, want) {
 			t.Fatalf("list query = %q, want %q", listQuery, want)
 		}
@@ -65,6 +66,16 @@ func TestProvider_usesOfficialGmailSDKForInboxAndSend(t *testing.T) {
 	raw, decodeErr := base64.RawURLEncoding.DecodeString(sentRaw)
 	if sendErr != nil || decodeErr != nil || sent.ID != "sent" || !strings.Contains(string(raw), "To: recipient@example.com") || !strings.Contains(string(raw), "Subject: Status") {
 		t.Fatalf("send = %+v, raw = %q, err = %v decode = %v", sent, raw, sendErr, decodeErr)
+	}
+}
+
+func TestGmailQuery_escapesStructuredFilters(t *testing.T) {
+	hasAttachment := false
+	got := gmailQuery(provider.ReadInboxRequest{From: "a'@example.com", Subject: `weekly "review"`, HasAttachment: &hasAttachment})
+	for _, want := range []string{`from:"a'@example.com"`, `subject:"weekly \"review\""`, "-has:attachment"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("query = %q, want %q", got, want)
+		}
 	}
 }
 

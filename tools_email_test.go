@@ -61,7 +61,7 @@ func TestEmailProvider_injectsAndDelegatesBuiltins(t *testing.T) {
 	}
 
 	// Act
-	readResult, readErr := readTool.invoke(t.Context(), `{"query":"from:sender","unread_only":true}`, nopRuntime())
+	readResult, readErr := readTool.invoke(t.Context(), `{"from":"sender@example.com","to":"owner@example.com","subject":"Status","received_after":"2026-08-01","received_before":"2026-08-31","has_attachment":true,"unread_only":true}`, nopRuntime())
 	sendResult, sendErr := sendTool.invoke(t.Context(), `{
 		"to":["owner@example.com"],"cc":[],"bcc":[],"subject":"Status","body":"Ready",
 		"reply_to_message_id":"message-1"
@@ -75,7 +75,7 @@ func TestEmailProvider_injectsAndDelegatesBuiltins(t *testing.T) {
 	if readErr != nil || !strings.Contains(readResult.output, `"id":"message-1"`) || !strings.Contains(readResult.output, `"next_cursor":"page-2"`) {
 		t.Fatalf("read result = %q, err = %v", readResult.output, readErr)
 	}
-	if provider.readRequest.Query != "from:sender" || !provider.readRequest.UnreadOnly || provider.readRequest.Limit != 20 {
+	if provider.readRequest.From != "sender@example.com" || provider.readRequest.To != "owner@example.com" || provider.readRequest.Subject != "Status" || provider.readRequest.ReceivedAfter != "2026-08-01" || provider.readRequest.HasAttachment == nil || !*provider.readRequest.HasAttachment || !provider.readRequest.UnreadOnly || provider.readRequest.Limit != 20 {
 		t.Fatalf("read request = %+v", provider.readRequest)
 	}
 	if sendErr != nil || !strings.Contains(sendResult.output, `"id":"sent-1"`) {
@@ -89,6 +89,18 @@ func TestEmailProvider_injectsAndDelegatesBuiltins(t *testing.T) {
 	}
 	if !strings.Contains(catalog, `"name":"read_inbox"`) || !strings.Contains(catalog, `"name":"send_email"`) {
 		t.Fatalf("model tool catalog missing email tools: %s", catalog)
+	}
+	properties, ok := readTool.parameters["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("read_inbox schema properties = %#v", readTool.parameters)
+	}
+	if _, exists := properties["query"]; exists {
+		t.Fatal("read_inbox schema exposes a provider query parameter")
+	}
+	for _, name := range []string{"from", "to", "subject", "received_after", "received_before", "has_attachment"} {
+		if _, exists := properties[name]; !exists {
+			t.Fatalf("read_inbox schema missing %q", name)
+		}
 	}
 }
 
@@ -132,6 +144,9 @@ func TestEmailTools_validateRequestsAndPropagateToWorkers(t *testing.T) {
 	readTool := parent.findTool("read_inbox", "")
 	if _, err := readTool.invoke(t.Context(), `{"limit":101}`, nopRuntime()); err == nil || !strings.Contains(err.Error(), "between 1 and 100") {
 		t.Fatalf("read limit error = %v", err)
+	}
+	if _, err := readTool.invoke(t.Context(), `{"received_after":"not-a-date"}`, nopRuntime()); err == nil || !strings.Contains(err.Error(), "YYYY-MM-DD") {
+		t.Fatalf("read filter validation error = %v", err)
 	}
 	sendTool := parent.findTool("send_email", "")
 	if _, err := sendTool.invoke(t.Context(), `{"to":[],"cc":[],"bcc":[],"subject":"","body":"","reply_to_message_id":""}`, nopRuntime()); err == nil || !strings.Contains(err.Error(), "recipient") {

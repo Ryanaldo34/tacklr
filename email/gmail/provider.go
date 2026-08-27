@@ -38,15 +38,15 @@ func (p *Provider) ReadInbox(ctx context.Context, req provider.ReadInboxRequest)
 	if err := p.Validate(ctx); err != nil {
 		return provider.Inbox{}, err
 	}
+	if err := req.Validate(); err != nil {
+		return provider.Inbox{}, err
+	}
 	call := p.service.Users.Messages.List("me").MaxResults(int64(req.Limit)).Context(ctx)
-	if req.Query != "" {
-		call.Q(req.Query)
+	if query := gmailQuery(req); query != "" {
+		call.Q(query)
 	}
 	if req.Mailbox != "" {
 		call.LabelIds(req.Mailbox)
-	}
-	if req.UnreadOnly {
-		call.Q(joinQuery(req.Query, "is:unread"))
 	}
 	if req.Cursor != "" {
 		call.PageToken(req.Cursor)
@@ -87,11 +87,38 @@ func (p *Provider) SendEmail(ctx context.Context, req provider.SendEmailRequest)
 	return provider.SentEmail{ID: sent.Id, ThreadID: sent.ThreadId}, nil
 }
 
-func joinQuery(query, extra string) string {
-	if strings.TrimSpace(query) == "" {
-		return extra
+func gmailQuery(req provider.ReadInboxRequest) string {
+	terms := make([]string, 0, 7)
+	if req.From != "" {
+		terms = append(terms, "from:"+gmailQuoted(req.From))
 	}
-	return query + " " + extra
+	if req.To != "" {
+		terms = append(terms, "to:"+gmailQuoted(req.To))
+	}
+	if req.Subject != "" {
+		terms = append(terms, "subject:"+gmailQuoted(req.Subject))
+	}
+	if req.ReceivedAfter != "" {
+		terms = append(terms, "after:"+strings.ReplaceAll(req.ReceivedAfter, "-", "/"))
+	}
+	if req.ReceivedBefore != "" {
+		terms = append(terms, "before:"+strings.ReplaceAll(req.ReceivedBefore, "-", "/"))
+	}
+	if req.HasAttachment != nil {
+		if *req.HasAttachment {
+			terms = append(terms, "has:attachment")
+		} else {
+			terms = append(terms, "-has:attachment")
+		}
+	}
+	if req.UnreadOnly {
+		terms = append(terms, "is:unread")
+	}
+	return strings.Join(terms, " ")
+}
+
+func gmailQuoted(value string) string {
+	return `"` + strings.ReplaceAll(strings.ReplaceAll(value, `\`, `\\`), `"`, `\"`) + `"`
 }
 
 func messageFromSDK(message *googlemail.Message) provider.Message {

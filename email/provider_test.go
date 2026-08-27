@@ -71,3 +71,28 @@ func TestSendEmailRequest_validateRequiredContent(t *testing.T) {
 		})
 	}
 }
+
+func TestReadInboxRequest_validateDates(t *testing.T) {
+	cases := []struct {
+		name string
+		req  ReadInboxRequest
+		want string
+	}{
+		{name: "valid range", req: ReadInboxRequest{ReceivedAfter: "2026-08-01", ReceivedBefore: "2026-08-31"}},
+		{name: "invalid after", req: ReadInboxRequest{ReceivedAfter: "08/01/2026"}, want: "received_after"},
+		{name: "invalid before", req: ReadInboxRequest{ReceivedBefore: "2026-08"}, want: "received_before"},
+		{name: "reversed range", req: ReadInboxRequest{ReceivedAfter: "2026-08-31", ReceivedBefore: "2026-08-01"}, want: "must not be after"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.req.Validate()
+			if tc.want == "" && err != nil {
+				t.Fatal(err)
+			}
+			if tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
