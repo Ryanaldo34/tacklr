@@ -133,7 +133,7 @@ func TestTree_unionSkills(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(b, "two.md"), []byte("2"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	ms, err := vfs.Tree(vfs.At("skills", builtins.Union(builtins.Local(a), builtins.Local(b))))(ctx, t.Name(), vfs.Request{})
+	ms, err := vfs.Tree(vfs.At("skills", vfs.Union(builtins.Local(a), builtins.Local(b))))(ctx, t.Name(), vfs.Request{})
 	if err != nil {
 		t.Fatal(err)
 	}

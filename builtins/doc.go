@@ -6,6 +6,6 @@
 // fields. Planning and child-session tools stay harness-owned.
 //
 // VFS backend constructors live here so a host builds a /workspace tree from
-// one import. Tree, At, MountSession, and Provider stay in package vfs.
+// one import. Tree, At, Union, MountSession, and Provider stay in package vfs.
 // brain.Open stays in package brain.
 package builtins

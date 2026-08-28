@@ -99,7 +99,7 @@ Tests inject fakes into the same constructors: `builtins.Drive(fakeAPI)`, `built
 
 ### Skills
 
-Playbooks are **not** on the agent `/workspace` tree. Hosts set `AgentSpec.OpenSkills` to a separate `vfs.Tree` (often `At("skills", builtins.Union(...))`). Overlapping first-level names in a Union are `ErrAmbiguous`. The loader walks `SkillsRoot` (empty means `/workspace/skills` on that host-only session). The agent never sees those paths. Full instructions load only through `read_skill`.
+Playbooks are **not** on the agent `/workspace` tree. Hosts set `AgentSpec.OpenSkills` to a separate `vfs.Tree` (often `At("skills", vfs.Union(...))`). Overlapping first-level names in a Union are `ErrAmbiguous`. The loader walks `SkillsRoot` (empty means `/workspace/skills` on that host-only session). The agent never sees those paths. Full instructions load only through `read_skill`.
 
 Host-owned roots and secrets (local jail, S3 / Azure Blob client) live in the Open closures, not on mounts or checkpoints.
 

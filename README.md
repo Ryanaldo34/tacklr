@@ -123,7 +123,7 @@ func main() {
 			},
 		},
 		OpenVFS:    openVFS(jail, eng, ns),
-		OpenSkills: vfs.Tree(vfs.At("skills", builtins.Union(builtins.Local(filepath.Join(jail, "skills"))))),
+		OpenSkills: vfs.Tree(vfs.At("skills", vfs.Union(builtins.Local(filepath.Join(jail, "skills"))))),
 	})
 
 	rt := inprocess.New(cat, inprocess.WithProjection(vfs.DirectProjection{}))

@@ -13,7 +13,6 @@ var (
 	Drive           = vfs.Drive
 	DriveWith       = vfs.DriveWith
 	Graph           = vfs.Graph
-	Union           = vfs.Union
 	NewGoogleDrive  = vfs.NewGoogleDrive
 	NewGoogleDocs   = vfs.NewGoogleDocs
 	NewGoogleSheets = vfs.NewGoogleSheets

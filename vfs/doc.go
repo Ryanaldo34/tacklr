@@ -2,9 +2,9 @@
 //
 // # Public surface (hosts)
 //
-//   - Tree / At / OpenVFS — host builds one /workspace tree per turn
-//     (agent-visible). Skill catalogs use a second host-only Tree
-//     (AgentSpec.OpenSkills); they are not a workspace member.
+//   - Tree / At / Union / OpenVFS — host builds one /workspace tree per turn
+//     (agent-visible). Union merges Opens at one alias. Skill catalogs use a
+//     second host-only Tree (AgentSpec.OpenSkills); they are not a workspace member.
 //   - MountSession — path I/O, ReadText / WriteDocument, ReadLines, FuseMount / Close, HostDir
 //   - FuseAvailable — process can mount a kernel tree (/dev/fuse or /dev/macfuse*)
 //   - ContentRev / ContentHash — session-visible content identity (for tools)
@@ -13,7 +13,7 @@
 //   - WorkspacePoint — /workspace (the only top-level mount)
 //   - Provider / Open / S3API / DriveAPI / GraphAPI — custom backends (Blob uses S3API).
 //     Hosts construct default backends from package builtins (Local, S3, Blob,
-//     Drive, Graph, Memory, Union, NewGoogleDrive, NewGraph).
+//     Drive, Graph, Memory, NewGoogleDrive, NewGraph).
 //   - File, FileInfo, DirEntry — I/O types (File is Close+Stat; io.Reader / io.ReaderAt / io.Writer via comma-ok)
 //   - Document / Textual / Structured / TextDocument — content IR
 //   - Block / StyleMeta / Span / FindBlock / BlockReplaceSpan — structured view

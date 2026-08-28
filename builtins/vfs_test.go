@@ -6,13 +6,12 @@ import (
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
-func TestVFSConstructors_openLocalMemoryAndUnion(t *testing.T) {
+func TestVFSConstructors_openLocalAndMemory(t *testing.T) {
 	ctx := t.Context()
 	dir := t.TempDir()
 	ms, err := vfs.Tree(
 		vfs.At("work", Local(dir)),
 		vfs.At("mem", Memory()),
-		vfs.At("skills", Union(Local(dir))),
 	)(ctx, "sess", vfs.Request{})
 	if err != nil {
 		t.Fatal(err)
