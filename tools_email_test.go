@@ -52,7 +52,7 @@ func (p *fakeEmailProvider) SendEmail(_ context.Context, req mail.SendEmailReque
 func TestEmailProvider_injectsAndDelegatesBuiltins(t *testing.T) {
 	// Arrange
 	provider := &fakeEmailProvider{kind: mail.ProviderGmail}
-	h := mustNewAgent(t, AgentOptions{Model: &mockStrategy{}, EmailProvider: provider})
+	h := mustNewTurnManager(t, AgentOptions{Model: &mockStrategy{}, EmailProvider: provider})
 	t.Cleanup(h.Close)
 	readTool := h.findTool("read_inbox", "")
 	sendTool := h.findTool("send_email", "")
@@ -84,8 +84,8 @@ func TestEmailProvider_injectsAndDelegatesBuiltins(t *testing.T) {
 	if len(provider.sendRequest.To) != 1 || provider.sendRequest.Subject != "Status" || provider.sendRequest.ReplyToMessageID != "message-1" {
 		t.Fatalf("send request = %+v", provider.sendRequest)
 	}
-	if sendTool.Access != ToolWriteAccess || len(sendTool.OnCall) != 1 {
-		t.Fatalf("send tool access = %v, on-call layers = %d", sendTool.Access, len(sendTool.OnCall))
+	if sendTool.access != ToolWriteAccess || len(sendTool.onCall) != 1 {
+		t.Fatalf("send tool access = %v, on-call layers = %d", sendTool.access, len(sendTool.onCall))
 	}
 	if !strings.Contains(catalog, `"name":"read_inbox"`) || !strings.Contains(catalog, `"name":"send_email"`) {
 		t.Fatalf("model tool catalog missing email tools: %s", catalog)
@@ -121,7 +121,7 @@ func TestEmailProvider_rejectsInvalidConfiguration(t *testing.T) {
 	// Act and assert
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := NewAgent(t.Context(), AgentOptions{Model: &mockStrategy{}, EmailProvider: tc.provider})
+			_, err := NewTurnManager(t.Context(), AgentOptions{Model: &mockStrategy{}, EmailProvider: tc.provider})
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("error = %v, want %q", err, tc.want)
 			}
@@ -132,9 +132,10 @@ func TestEmailProvider_rejectsInvalidConfiguration(t *testing.T) {
 func TestEmailTools_validateRequestsAndPropagateToWorkers(t *testing.T) {
 	// Arrange
 	provider := &fakeEmailProvider{kind: mail.ProviderOutlook}
-	parent := mustNewAgent(t, AgentOptions{Model: &mockStrategy{}, EmailProvider: provider})
+	parentOpts := AgentOptions{Model: &mockStrategy{}, EmailProvider: provider}
+	parent := mustNewTurnManager(t, parentOpts)
 	t.Cleanup(parent.Close)
-	worker := mustNewAgent(t, parent.workerOptsFromSpec(&SubAgent{WorkerName: "mail", Model: &mockStrategy{}}))
+	worker := mustNewTurnManager(t, parentOpts.WithSpecialist(&Specialist{Name: "mail", Model: &mockStrategy{}}))
 	t.Cleanup(worker.Close)
 
 	// Act and assert
@@ -161,7 +162,7 @@ func TestEmailTools_validateRequestsAndPropagateToWorkers(t *testing.T) {
 		t.Fatalf("send provider error = %v", err)
 	}
 
-	withoutEmail := mustNewAgent(t, AgentOptions{Model: &mockStrategy{}})
+	withoutEmail := mustNewTurnManager(t, AgentOptions{Model: &mockStrategy{}})
 	t.Cleanup(withoutEmail.Close)
 	if withoutEmail.findTool("read_inbox", "") != nil || withoutEmail.findTool("send_email", "") != nil {
 		t.Fatal("email tools were injected without a provider")
