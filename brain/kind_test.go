@@ -181,31 +181,31 @@ func TestSchema_prefersCatalog(t *testing.T) {
 func TestSearch_catalogRestrictsKindsAndAllowsFilteredHit(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	ns := uuid.New()
+	ns := brain.MustNamespace("id", uuid.NewString())
 	now := time.Now().UTC()
 	docID := uuid.New()
 	orphanParent := uuid.New()
 	pos := 1
 
 	if err := store.Put(context.Background(), brain.Object{
-		ID: docID, Kind: "Document", Title: "Deal memo", NamespaceID: ns, UpdatedAt: now,
+		ID: docID, Kind: "Document", Title: "Deal memo", Namespace: ns, UpdatedAt: now,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Put(context.Background(), brain.Object{
 		ID: uuid.New(), Kind: "Chunk", Title: "chunk", Content: "negotiation terms",
-		NamespaceID: ns, UpdatedAt: now, ParentID: &docID, Position: &pos,
+		Namespace: ns, UpdatedAt: now, ParentID: &docID, Position: &pos,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Put(context.Background(), brain.Object{
-		ID: orphanParent, Kind: "OrphanKind", Title: "orphan parent", NamespaceID: ns, UpdatedAt: now,
+		ID: orphanParent, Kind: "OrphanKind", Title: "orphan parent", Namespace: ns, UpdatedAt: now,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Put(context.Background(), brain.Object{
 		ID: uuid.New(), Kind: "OrphanKind", Title: "orphan part", Content: "zzzxorphanonlyphrase",
-		NamespaceID: ns, UpdatedAt: now, ParentID: &orphanParent, Position: &pos,
+		Namespace: ns, UpdatedAt: now, ParentID: &orphanParent, Position: &pos,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +218,7 @@ func TestSearch_catalogRestrictsKindsAndAllowsFilteredHit(t *testing.T) {
 		t.Fatal(err)
 	}
 	sc := brain.NewSearchContext()
-	scope := brain.Scope{Namespace: &ns}
+	scope := brain.Scope{Namespace: ns}
 
 	page, err := eng.Search(ctx, scope, brain.SearchRequest{
 		Query: "negotiation", Filters: brain.MustFilter(map[string]any{"kind": "Chunk"}),

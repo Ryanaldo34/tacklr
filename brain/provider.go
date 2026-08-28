@@ -91,13 +91,12 @@ func newEngramProvider(f BrainFactory, spec vfs.MountSpec) (*engramProvider, err
 	if f.Engine == nil {
 		return nil, fmt.Errorf("brain: engine is required")
 	}
-	if f.Scope.Namespace == nil || *f.Scope.Namespace == uuid.Nil {
-		return nil, fmt.Errorf("brain: namespace is required")
+	if err := f.Scope.Namespace.Validate(); err != nil {
+		return nil, err
 	}
-	ns := *f.Scope.Namespace
 	p := &engramProvider{
 		eng:   f.Engine,
-		scope: Scope{Namespace: &ns},
+		scope: Scope{Namespace: f.Scope.Namespace.Clone()},
 		point: spec.Point,
 		mode:  strings.ToLower(strings.TrimSpace(paramOr(spec.Params, "mode", f.Mode))),
 	}
@@ -555,7 +554,7 @@ func (p *engramProvider) commit(ctx context.Context, rel string, data []byte) er
 		return fmt.Errorf("brain: kind %q is not allowed on this mount", f.Kind)
 	}
 	obj := ObjectFromEngram(f)
-	obj.NamespaceID = *p.scope.Namespace
+	obj.Namespace = p.scope.Namespace.Clone()
 	vpath := EngramPath(p.point, p.mode, obj.Kind, f.Slug)
 	if obj.Properties == nil {
 		obj.Properties = map[string]any{}

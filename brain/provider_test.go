@@ -15,7 +15,7 @@ import (
 
 func TestBrainProvider_prefixWriteReadDirRemoveAndIR(t *testing.T) {
 	ctx := context.Background()
-	ns := uuid.New()
+	ns := brain.MustNamespace("id", uuid.NewString())
 	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithKinds(
 		brain.KindSpec{
 			Kind: "Deal", IsParent: true,
@@ -30,7 +30,7 @@ func TestBrainProvider_prefixWriteReadDirRemoveAndIR(t *testing.T) {
 	}
 	reg := vfs.NewBackendRegistry()
 	if err := reg.Register(brain.BrainFactory{
-		ID: "brain", Engine: eng, Scope: brain.Scope{Namespace: &ns},
+		ID: "brain", Engine: eng, Scope: brain.Scope{Namespace: ns},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestBrainProvider_prefixWriteReadDirRemoveAndIR(t *testing.T) {
 		t.Fatalf("props:\n%s", got)
 	}
 
-	obj, err := eng.GetByProperty(ctx, brain.Scope{Namespace: &ns}, brain.PropVFSPath, "/engram/deal/acme.md")
+	obj, err := eng.GetByProperty(ctx, brain.Scope{Namespace: ns}, brain.PropVFSPath, "/engram/deal/acme.md")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +150,7 @@ func TestBrainProvider_prefixWriteReadDirRemoveAndIR(t *testing.T) {
 	if err := ms.WriteFile(ctx, "/engram/deal/acme.md", rewrite); err != nil {
 		t.Fatal(err)
 	}
-	rewritten, err := eng.GetByProperty(ctx, brain.Scope{Namespace: &ns}, brain.PropVFSPath, "/engram/deal/acme.md")
+	rewritten, err := eng.GetByProperty(ctx, brain.Scope{Namespace: ns}, brain.PropVFSPath, "/engram/deal/acme.md")
 	if err != nil || rewritten.ID != obj.ID || !strings.Contains(rewritten.Content, "Updated Acme.") {
 		t.Fatalf("overwrite without id: %+v err=%v", rewritten, err)
 	}
@@ -176,7 +176,7 @@ func TestBrainProvider_prefixWriteReadDirRemoveAndIR(t *testing.T) {
 	if err := ms.WriteFile(ctx, "/engram/deal/leftover.md", bad); err == nil || !strings.Contains(err.Error(), "required") {
 		t.Fatalf("want required-field error, got %v", err)
 	}
-	if _, err := eng.GetByProperty(ctx, brain.Scope{Namespace: &ns}, brain.PropVFSPath, "/engram/deal/leftover.md"); !errors.Is(err, brain.ErrNotFound) {
+	if _, err := eng.GetByProperty(ctx, brain.Scope{Namespace: ns}, brain.PropVFSPath, "/engram/deal/leftover.md"); !errors.Is(err, brain.ErrNotFound) {
 		t.Fatalf("leftover object: %v", err)
 	}
 	ents, err = ms.ReadDir(ctx, "/engram/deal")
@@ -188,13 +188,13 @@ func TestBrainProvider_prefixWriteReadDirRemoveAndIR(t *testing.T) {
 	if err := ms.WriteFile(ctx, "/engram/deal/x.md", mismatch); err == nil || !strings.Contains(err.Error(), "does not match path kind") {
 		t.Fatalf("kind mismatch: %v", err)
 	}
-	if _, err := eng.GetByProperty(ctx, brain.Scope{Namespace: &ns}, brain.PropVFSPath, "/engram/deal/x.md"); !errors.Is(err, brain.ErrNotFound) {
+	if _, err := eng.GetByProperty(ctx, brain.Scope{Namespace: ns}, brain.PropVFSPath, "/engram/deal/x.md"); !errors.Is(err, brain.ErrNotFound) {
 		t.Fatalf("mismatch leftover: %v", err)
 	}
 	if err := ms.WriteFile(ctx, "/engram/unknown/y.md", []byte("---\ndomain: Unknown\nslug: y\n---\n\nnope\n")); err == nil || !strings.Contains(err.Error(), "not allowed") {
 		t.Fatalf("unknown kind: %v", err)
 	}
-	if _, err := eng.GetByProperty(ctx, brain.Scope{Namespace: &ns}, brain.PropVFSPath, "/engram/unknown/y.md"); !errors.Is(err, brain.ErrNotFound) {
+	if _, err := eng.GetByProperty(ctx, brain.Scope{Namespace: ns}, brain.PropVFSPath, "/engram/unknown/y.md"); !errors.Is(err, brain.ErrNotFound) {
 		t.Fatalf("unknown leftover: %v", err)
 	}
 
@@ -210,7 +210,7 @@ func TestBrainProvider_prefixWriteReadDirRemoveAndIR(t *testing.T) {
 		if err := ms.WriteFile(ctx, tc.path, tc.raw); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Fatalf("%s: got %v, want containing %q", tc.name, err, tc.want)
 		}
-		if _, err := eng.GetByProperty(ctx, brain.Scope{Namespace: &ns}, brain.PropVFSPath, tc.path); !errors.Is(err, brain.ErrNotFound) {
+		if _, err := eng.GetByProperty(ctx, brain.Scope{Namespace: ns}, brain.PropVFSPath, tc.path); !errors.Is(err, brain.ErrNotFound) {
 			t.Fatalf("%s leftover: %v", tc.name, err)
 		}
 	}
@@ -225,7 +225,7 @@ func TestBrainProvider_prefixWriteReadDirRemoveAndIR(t *testing.T) {
 	if err := ms.WriteDocument(ctx, edited); err != nil {
 		t.Fatal(err)
 	}
-	obj2, err := eng.Get(ctx, brain.Scope{Namespace: &ns}, obj.ID)
+	obj2, err := eng.Get(ctx, brain.Scope{Namespace: ns}, obj.ID)
 	if err != nil || !strings.Contains(obj2.Content, "Hello IR.") {
 		t.Fatalf("after IR sync: %+v err=%v", obj2, err)
 	}
@@ -233,7 +233,7 @@ func TestBrainProvider_prefixWriteReadDirRemoveAndIR(t *testing.T) {
 	if err := ms.Remove(ctx, "/engram/deal/acme.md"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := eng.Get(ctx, brain.Scope{Namespace: &ns}, obj.ID); !errors.Is(err, brain.ErrNotFound) {
+	if _, err := eng.Get(ctx, brain.Scope{Namespace: ns}, obj.ID); !errors.Is(err, brain.ErrNotFound) {
 		t.Fatalf("soft-delete: %v", err)
 	}
 	if _, err := ms.ReadFile(ctx, "/engram/deal/acme.md"); !errors.Is(err, vfs.ErrNotExist) {
@@ -248,7 +248,7 @@ func (b bareDoc) MediaType() string { return "text/markdown" }
 
 func TestBrainProvider_rootsLayout(t *testing.T) {
 	ctx := context.Background()
-	ns := uuid.New()
+	ns := brain.MustNamespace("id", uuid.NewString())
 	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithKinds(
 		brain.KindSpec{Kind: "Person", IsParent: true},
 	))
@@ -257,7 +257,7 @@ func TestBrainProvider_rootsLayout(t *testing.T) {
 	}
 	reg := vfs.NewBackendRegistry()
 	if err := reg.Register(brain.BrainFactory{
-		Engine: eng, Scope: brain.Scope{Namespace: &ns},
+		Engine: eng, Scope: brain.Scope{Namespace: ns},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -282,7 +282,7 @@ func TestBrainProvider_rootsLayout(t *testing.T) {
 	if err != nil || len(ents) != 1 || ents[0].Name != "sam.md" {
 		t.Fatalf("roots listing: %+v err=%v", ents, err)
 	}
-	obj, err := eng.GetByProperty(ctx, brain.Scope{Namespace: &ns}, brain.PropVFSPath, "/person/sam.md")
+	obj, err := eng.GetByProperty(ctx, brain.Scope{Namespace: ns}, brain.PropVFSPath, "/person/sam.md")
 	if err != nil || obj.Kind != "Person" || obj.Content != "Buyer.\n" {
 		t.Fatalf("roots object: %+v err=%v", obj, err)
 	}
@@ -303,14 +303,14 @@ func TestBrainProvider_rootsLayout(t *testing.T) {
 
 func TestBrainProvider_openCatalogListsKindsInUseAndMkdir(t *testing.T) {
 	ctx := context.Background()
-	ns := uuid.New()
+	ns := brain.MustNamespace("id", uuid.NewString())
 	eng, err := brain.NewEngine(brain.NewMemoryStore())
 	if err != nil {
 		t.Fatal(err)
 	}
 	reg := vfs.NewBackendRegistry()
 	if err := reg.Register(brain.BrainFactory{
-		Engine: eng, Scope: brain.Scope{Namespace: &ns},
+		Engine: eng, Scope: brain.Scope{Namespace: ns},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -330,7 +330,7 @@ func TestBrainProvider_openCatalogListsKindsInUseAndMkdir(t *testing.T) {
 	if err := ms.WriteFile(ctx, "/engram/note/hello.md", []byte("hello body\n")); err != nil {
 		t.Fatal(err)
 	}
-	kinds, err := eng.KindsWithObjects(ctx, brain.Scope{Namespace: &ns})
+	kinds, err := eng.KindsWithObjects(ctx, brain.Scope{Namespace: ns})
 	if err != nil || len(kinds) != 1 || kinds[0] != "note" {
 		t.Fatalf("kinds in use: %v err=%v", kinds, err)
 	}
@@ -338,7 +338,7 @@ func TestBrainProvider_openCatalogListsKindsInUseAndMkdir(t *testing.T) {
 	if err != nil || len(ents) != 1 || ents[0].Name != "note" || !ents[0].IsDir {
 		t.Fatalf("open catalog dirs: %+v err=%v", ents, err)
 	}
-	obj, err := eng.GetByProperty(ctx, brain.Scope{Namespace: &ns}, brain.PropVFSPath, "/engram/note/hello.md")
+	obj, err := eng.GetByProperty(ctx, brain.Scope{Namespace: ns}, brain.PropVFSPath, "/engram/note/hello.md")
 	if err != nil || !strings.Contains(obj.Content, "hello body") {
 		t.Fatalf("open write: %+v err=%v", obj, err)
 	}
@@ -346,7 +346,7 @@ func TestBrainProvider_openCatalogListsKindsInUseAndMkdir(t *testing.T) {
 
 func TestBrainFactory_openRejectsInvalidConfig(t *testing.T) {
 	ctx := context.Background()
-	ns := uuid.New()
+	ns := brain.MustNamespace("id", uuid.NewString())
 	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithKinds(
 		brain.KindSpec{Kind: "Note", IsParent: true},
 		brain.KindSpec{Kind: "Deal", IsParent: true},
@@ -354,7 +354,7 @@ func TestBrainFactory_openRejectsInvalidConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	valid := brain.BrainFactory{Engine: eng, Scope: brain.Scope{Namespace: &ns}}
+	valid := brain.BrainFactory{Engine: eng, Scope: brain.Scope{Namespace: ns}}
 
 	cases := []struct {
 		name string
@@ -364,7 +364,7 @@ func TestBrainFactory_openRejectsInvalidConfig(t *testing.T) {
 	}{
 		{
 			name: "nil engine",
-			f:    brain.BrainFactory{Scope: brain.Scope{Namespace: &ns}},
+			f:    brain.BrainFactory{Scope: brain.Scope{Namespace: ns}},
 			spec: vfs.MountSpec{Point: "/engram"},
 			want: "engine is required",
 		},
@@ -414,7 +414,7 @@ func TestBrainFactory_openRejectsInvalidConfig(t *testing.T) {
 	if err := ms.WriteFile(ctx, "/person/hello.md", []byte("---\ntitle: Hello\n---\n\nNote body.\n")); err != nil {
 		t.Fatal(err)
 	}
-	obj, err := eng.GetByProperty(ctx, brain.Scope{Namespace: &ns}, brain.PropVFSPath, "/person/hello.md")
+	obj, err := eng.GetByProperty(ctx, brain.Scope{Namespace: ns}, brain.PropVFSPath, "/person/hello.md")
 	if err != nil || obj.Kind != "Note" || !strings.Contains(obj.Content, "Note body.") {
 		t.Fatalf("roots kinds= inference: %+v err=%v", obj, err)
 	}

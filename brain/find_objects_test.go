@@ -36,8 +36,8 @@ func TestFindObjects_multiTurnMemoryGraph(t *testing.T) {
 	if _, err := eng.FindObjects(ctx, brain.Scope{}, brain.FindObjectsRequest{}, brain.NewSearchContext()); err == nil {
 		t.Fatal("FindObjects requires query")
 	}
-	ns := uuid.New()
-	scope := brain.Scope{Namespace: &ns}
+	ns := brain.MustNamespace("id", uuid.NewString())
+	scope := brain.Scope{Namespace: ns}
 	sc := brain.NewSearchContext()
 
 	deal, err := eng.Put(ctx, scope, brain.Object{
@@ -160,8 +160,8 @@ func TestFindObjects_multiTurnMemoryGraph(t *testing.T) {
 		t.Fatal("continue result set id")
 	}
 	// Namespace isolation.
-	other := uuid.New()
-	miss, err := eng.FindObjects(ctx, brain.Scope{Namespace: &other}, brain.FindObjectsRequest{
+	other := brain.MustNamespace("org", "other")
+	miss, err := eng.FindObjects(ctx, brain.Scope{Namespace: other}, brain.FindObjectsRequest{
 		Query: "Acme Enterprise", Kinds: []string{"Deal"},
 	}, brain.NewSearchContext())
 	if err != nil {
@@ -169,6 +169,23 @@ func TestFindObjects_multiTurnMemoryGraph(t *testing.T) {
 	}
 	if len(miss.Objects) != 0 {
 		t.Fatalf("other ns: %+v", miss.Objects)
+	}
+	nestedNS := brain.MustNamespace("org", "acme", "workspace", "west")
+	nested, err := eng.Put(ctx, brain.Scope{Namespace: nestedNS}, brain.Object{
+		Kind: "Deal", Title: "Nested Acme Workspace Deal", Summary: "workspace scoped",
+		Properties: map[string]any{"stage": "negotiation"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pageOrg, err := eng.FindObjects(ctx, brain.Scope{Namespace: brain.MustNamespace("org", "acme")}, brain.FindObjectsRequest{
+		Query: "Nested Acme Workspace", Kinds: []string{"Deal"},
+	}, brain.NewSearchContext())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsID(pageOrg.Objects, nested.ID) {
+		t.Fatalf("org scope should see workspace graph node: %+v", pageOrg.Objects)
 	}
 	// Without object searcher.
 	engNo, err := brain.NewEngine(store)

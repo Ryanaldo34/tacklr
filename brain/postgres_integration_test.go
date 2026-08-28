@@ -40,8 +40,8 @@ func TestPostgresStore_liveRetrievalChannels(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	nsA := uuid.New()
-	nsB := uuid.New()
+	nsA := brain.MustNamespace("org", "a")
+	nsB := brain.MustNamespace("org", "b")
 	parentID := uuid.New()
 	chunkOAuth := uuid.New()
 	chunkOther := uuid.New()
@@ -55,7 +55,7 @@ func TestPostgresStore_liveRetrievalChannels(t *testing.T) {
 			('Chunk', 'parts', true, false, '[{"name":"stage"}]')
 	`)
 	mustExec(t, pool, `
-		INSERT INTO objects (id, kind, title, summary, properties, content, parent_id, position, embedding, namespace_id, created_at, updated_at)
+		INSERT INTO objects (id, kind, title, summary, properties, content, parent_id, position, embedding, namespace, created_at, updated_at)
 		VALUES
 			($1, 'Document', 'OAuth Guide', 'parent', '{"vfs_path":"/engram/document/oauth.md"}', NULL, NULL, NULL, NULL, $2, $3, $3),
 			($4, 'Chunk', 'pkce flow', '', '{"stage":"open"}', 'oauth pkce implementation details', $1, 1, '[1,0,0]'::vector, $2, $3, $3),
@@ -65,11 +65,11 @@ func TestPostgresStore_liveRetrievalChannels(t *testing.T) {
 	mustExec(t, pool, `UPDATE objects SET deleted_at = $1 WHERE id = $2`, now, chunkDeleted)
 	docB := uuid.New()
 	mustExec(t, pool, `
-		INSERT INTO objects (id, kind, title, namespace_id, created_at, updated_at)
+		INSERT INTO objects (id, kind, title, namespace, created_at, updated_at)
 		VALUES ($1, 'Document', 'other ns', $2, $3, $3)
 	`, docB, nsB, now)
 
-	scopeA := brain.Scope{Namespace: &nsA}
+	scopeA := brain.Scope{Namespace: nsA}
 
 	listed, err := store.ListByKind(ctx, scopeA, "Document", 10)
 	if err != nil || len(listed) != 1 || listed[0].ID != parentID {
@@ -88,7 +88,7 @@ func TestPostgresStore_liveRetrievalChannels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.ID != parentID || got.Title != "OAuth Guide" || got.NamespaceID != nsA {
+	if got.ID != parentID || got.Title != "OAuth Guide" || !got.Namespace.Equal(nsA) {
 		t.Fatalf("get parent: %+v", got)
 	}
 
@@ -96,9 +96,24 @@ func TestPostgresStore_liveRetrievalChannels(t *testing.T) {
 	if !errors.Is(err, brain.ErrNotFound) {
 		t.Fatalf("docB must be invisible under nsA: %v", err)
 	}
-	_, err = store.Get(ctx, brain.Scope{Namespace: &nsB}, chunkOAuth)
+	_, err = store.Get(ctx, brain.Scope{Namespace: nsB}, chunkOAuth)
 	if !errors.Is(err, brain.ErrNotFound) {
 		t.Fatalf("chunk must be invisible outside its namespace: %v", err)
+	}
+	nestedID := uuid.New()
+	if err := store.Put(ctx, brain.Object{
+		ID: nestedID, Kind: "Document", Title: "nested",
+		Namespace: brain.MustNamespace("org", "a", "workspace", "west"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	gotNested, err := store.Get(ctx, scopeA, nestedID)
+	if err != nil || gotNested.ID != nestedID {
+		t.Fatalf("org scope should see workspace row: %v %+v", err, gotNested)
+	}
+	_, err = store.Get(ctx, brain.Scope{Namespace: brain.MustNamespace("org", "a", "workspace", "east")}, nestedID)
+	if !errors.Is(err, brain.ErrNotFound) {
+		t.Fatalf("other workspace: %v", err)
 	}
 	_, err = store.Get(ctx, scopeA, chunkDeleted)
 	if !errors.Is(err, brain.ErrNotFound) {
@@ -181,14 +196,14 @@ func TestPostgresStore_liveRetrievalChannels(t *testing.T) {
 		t.Fatalf("trigram top hit: %+v", tri)
 	}
 
-	vecB, err := store.SearchVector(ctx, brain.Scope{Namespace: &nsB}, []float32{1, 0, 0}, brain.Filter{}, 5)
+	vecB, err := store.SearchVector(ctx, brain.Scope{Namespace: nsB}, []float32{1, 0, 0}, brain.Filter{}, 5)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(vecB) != 0 {
 		t.Fatalf("nsB must have no vector parts: %+v", vecB)
 	}
-	lexB, err := store.SearchLexical(ctx, brain.Scope{Namespace: &nsB}, "oauth", brain.Filter{}, 5)
+	lexB, err := store.SearchLexical(ctx, brain.Scope{Namespace: nsB}, "oauth", brain.Filter{}, 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -356,8 +371,8 @@ func TestPut_livePostgresUpsertAndSoftDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ns := uuid.New()
-	scope := brain.Scope{Namespace: &ns}
+	ns := brain.MustNamespace("id", uuid.NewString())
+	scope := brain.Scope{Namespace: ns}
 
 	doc, err := eng.Put(ctx, scope, brain.Object{
 		Kind: "Document", Title: "live memo",
@@ -447,9 +462,9 @@ func TestEngine_livePostgresMultiTurnWriteSearch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ns := uuid.New()
-	otherNS := uuid.New()
-	scope := brain.Scope{Namespace: &ns}
+	ns := brain.MustNamespace("id", uuid.NewString())
+	otherNS := brain.MustNamespace("org", "other")
+	scope := brain.Scope{Namespace: ns}
 	sc := brain.NewSearchContext()
 
 	// Turn 1: create parent + two searchable parts.
@@ -576,7 +591,7 @@ func TestEngine_livePostgresMultiTurnWriteSearch(t *testing.T) {
 	if _, err := eng.Put(ctx, scope, brain.Object{Kind: "Document", Title: "no stage"}); err == nil {
 		t.Fatal("want required property failure")
 	}
-	if err := eng.SoftDelete(ctx, brain.Scope{Namespace: &otherNS}, doc.ID); !errors.Is(err, brain.ErrNotFound) {
+	if err := eng.SoftDelete(ctx, brain.Scope{Namespace: otherNS}, doc.ID); !errors.Is(err, brain.ErrNotFound) {
 		t.Fatalf("soft-delete other ns: %v", err)
 	}
 	if _, err := store.Get(ctx, scope, doc.ID); err != nil {

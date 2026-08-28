@@ -34,7 +34,7 @@ var (
 type Graph struct {
 	client        *helix.Client
 	searchReady   bool // true after successful Bootstrap / EnsureSearchIndexes
-	tenantEnabled bool // true when indexes were created with namespace_id tenant
+	tenantEnabled bool // true when indexes were created with namespace tenant
 }
 
 // New builds a client. Empty baseURL defaults to http://localhost:6969.
@@ -64,13 +64,13 @@ const nodeLabel = "Object"
 
 // Dual-written Helix property keys (package-private schema; hosts use Engine + Bootstrap).
 const (
-	propObjectID    = "object_id"
-	propSearchText  = "search_text"
-	propEmbedding   = "embedding"
-	propNamespaceID = "namespace_id"
-	propKind        = "kind"
-	propTitle       = "title"
-	propSummary     = "summary"
+	propObjectID   = "object_id"
+	propSearchText = "search_text"
+	propEmbedding  = "embedding"
+	propNamespace  = "namespace"
+	propKind       = "kind"
+	propTitle      = "title"
+	propSummary    = "summary"
 )
 
 // Edge property keys written on AddE (relationship metadata Helix stores natively).
@@ -98,7 +98,7 @@ func (g *Graph) ensureObjectIndex(ctx context.Context) error {
 }
 
 // Bootstrap prepares Helix native indexes for entity search and marks the graph ready.
-// withNamespaceTenant enables Helix tenant-scoped text/vector indexes on namespace_id
+// withNamespaceTenant enables Helix tenant-scoped text/vector indexes on namespace
 // (prefer this when the Helix image supports it so Search* filters in-engine).
 // Call once at process start when using Helix.
 func (g *Graph) Bootstrap(ctx context.Context, withNamespaceTenant bool) error {
@@ -128,8 +128,8 @@ func (g *Graph) EnsureSearchIndexes(ctx context.Context, withNamespaceTenant boo
 	}
 	var textIdx, vecIdx helix.IndexSpec
 	if withNamespaceTenant {
-		textIdx = helix.NodeTextIndex(nodeLabel, propSearchText, propNamespaceID)
-		vecIdx = helix.NodeVectorIndex(nodeLabel, propEmbedding, propNamespaceID)
+		textIdx = helix.NodeTextIndex(nodeLabel, propSearchText, propNamespace)
+		vecIdx = helix.NodeVectorIndex(nodeLabel, propEmbedding, propNamespace)
 	} else {
 		textIdx = helix.NodeTextIndex(nodeLabel, propSearchText)
 		vecIdx = helix.NodeVectorIndex(nodeLabel, propEmbedding)
@@ -191,8 +191,8 @@ func (g *Graph) RemoveObject(ctx context.Context, id uuid.UUID) error {
 }
 
 // SearchText implements brain.GraphObjectSearcher via Helix TextSearchNodes.
-// When tenant indexes are enabled and namespace is set, Helix filters by tenant natively.
-func (g *Graph) SearchText(ctx context.Context, query string, limit int, namespace *uuid.UUID) ([]brain.ScoredID, error) {
+// Helix is unscoped; Engine hydrates under Scope (Namespace.Covers).
+func (g *Graph) SearchText(ctx context.Context, query string, limit int, namespace brain.Namespace) ([]brain.ScoredID, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -203,13 +203,13 @@ func (g *Graph) SearchText(ctx context.Context, query string, limit int, namespa
 	q := helix.ReadQuery("brain_text_search_nodes")
 	qt := q.ParamString("query", query)
 	lim := q.ParamI64("limit", int64(limit))
-	trav := g.textSearchTrav(qt, lim, namespace)
+	trav := g.textSearchTrav(qt, lim)
 	req := q.VarAs("hits", trav.ValueMap(propObjectID, "$distance")).Returning("hits")
 	return g.execSearchHits(ctx, req, "text search")
 }
 
 // SearchVector implements brain.GraphObjectSearcher via Helix VectorSearchNodes.
-func (g *Graph) SearchVector(ctx context.Context, embedding []float32, limit int, namespace *uuid.UUID) ([]brain.ScoredID, error) {
+func (g *Graph) SearchVector(ctx context.Context, embedding []float32, limit int, namespace brain.Namespace) ([]brain.ScoredID, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -218,7 +218,7 @@ func (g *Graph) SearchVector(ctx context.Context, embedding []float32, limit int
 	}
 	q := helix.ReadQuery("brain_vector_search_nodes")
 	lim := q.ParamI64("limit", int64(limit))
-	trav := g.vectorSearchTrav(embedding, lim, namespace)
+	trav := g.vectorSearchTrav(embedding, lim)
 	req := q.VarAs("hits", trav.ValueMap(propObjectID, "$distance")).Returning("hits")
 	return g.execSearchHits(ctx, req, "vector search")
 }
@@ -291,17 +291,11 @@ func (g *Graph) SearchEdgesText(ctx context.Context, relationLabel, query string
 	return out, nil
 }
 
-func (g *Graph) textSearchTrav(query helix.ParamRef, lim helix.ParamRef, namespace *uuid.UUID) *helix.Traversal {
-	if g.tenantEnabled && namespace != nil && *namespace != uuid.Nil {
-		return helix.G().TextSearchNodes(nodeLabel, propSearchText, query, lim, namespace.String())
-	}
+func (g *Graph) textSearchTrav(query helix.ParamRef, lim helix.ParamRef) *helix.Traversal {
 	return helix.G().TextSearchNodes(nodeLabel, propSearchText, query, lim)
 }
 
-func (g *Graph) vectorSearchTrav(embedding []float32, lim helix.ParamRef, namespace *uuid.UUID) *helix.Traversal {
-	if g.tenantEnabled && namespace != nil && *namespace != uuid.Nil {
-		return helix.G().VectorSearchNodes(nodeLabel, propEmbedding, embedding, lim, namespace.String())
-	}
+func (g *Graph) vectorSearchTrav(embedding []float32, lim helix.ParamRef) *helix.Traversal {
 	return helix.G().VectorSearchNodes(nodeLabel, propEmbedding, embedding, lim)
 }
 
@@ -496,8 +490,8 @@ func objectPropPairs(obj brain.Object) []namedProp {
 	if st := brain.EntityIndexText(obj); st != "" {
 		props = append(props, namedProp{propSearchText, st})
 	}
-	if obj.NamespaceID != uuid.Nil {
-		props = append(props, namedProp{propNamespaceID, obj.NamespaceID.String()})
+	if !obj.Namespace.Empty() {
+		props = append(props, namedProp{propNamespace, obj.Namespace.String()})
 	}
 	if !obj.CreatedAt.IsZero() {
 		props = append(props, namedProp{"created_at", obj.CreatedAt.UTC().Format(time.RFC3339Nano)})
@@ -743,10 +737,3 @@ func (g *Graph) neighborEdgeProps(ctx context.Context, objectID uuid.UUID, label
 	}
 	return raw.Neighbors.Properties, nil
 }
-
-var (
-	_ brain.GraphReader         = (*Graph)(nil)
-	_ brain.GraphWriter         = (*Graph)(nil)
-	_ brain.GraphObjectSearcher = (*Graph)(nil)
-	_ brain.GraphEdgeSearcher   = (*Graph)(nil)
-)

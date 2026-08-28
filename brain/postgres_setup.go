@@ -58,12 +58,12 @@ func schemaStatements(dim int) []string {
 									 coalesce(summary, '') || ' ' ||
 									 coalesce(content, '')
 								 ) STORED,
-			namespace_id         uuid NOT NULL,
+			namespace            jsonb NOT NULL,
 			created_at           timestamptz NOT NULL DEFAULT now(),
 			updated_at           timestamptz NOT NULL DEFAULT now(),
 			deleted_at           timestamptz
 		)`,
-		`CREATE INDEX IF NOT EXISTS idx_objects_namespace_kind ON objects (namespace_id, kind) WHERE deleted_at IS NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_objects_namespace ON objects USING GIN (namespace jsonb_path_ops)`,
 		`CREATE INDEX IF NOT EXISTS idx_objects_parent ON objects (parent_id, position) WHERE parent_id IS NOT NULL AND deleted_at IS NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_objects_kind ON objects (kind) WHERE deleted_at IS NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_objects_properties ON objects USING GIN (properties jsonb_path_ops)`,
@@ -73,8 +73,8 @@ func schemaStatements(dim int) []string {
 			USING hnsw (embedding vector_cosine_ops)
 			WITH (m = 16, ef_construction = 64)
 			WHERE embedding IS NOT NULL AND deleted_at IS NULL`,
-		`CREATE INDEX IF NOT EXISTS idx_objects_updated_at ON objects (namespace_id, updated_at DESC) WHERE deleted_at IS NULL`,
-		`CREATE INDEX IF NOT EXISTS idx_objects_created_at ON objects (namespace_id, created_at DESC) WHERE deleted_at IS NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_objects_updated_at ON objects (updated_at DESC) WHERE deleted_at IS NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_objects_created_at ON objects (created_at DESC) WHERE deleted_at IS NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_objects_bm25 ON objects
 			USING bm25 (search_text)
 			WITH (text_config = 'english')`,

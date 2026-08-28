@@ -55,19 +55,19 @@ func TestGraph_ensureObjectAndAddEdgeRequestShape(t *testing.T) {
 	}
 
 	pid := uuid.New()
-	ns := uuid.New()
+	ns := brain.MustNamespace("id", uuid.NewString())
 	now := time.Date(2024, 6, 1, 12, 0, 0, 0, time.UTC)
 	obj := brain.Object{
-		ID:          uuid.New(),
-		Kind:        "Document",
-		Title:       "memo",
-		Summary:     "sum",
-		Content:     "body text",
-		NamespaceID: ns,
-		ParentID:    &pid,
-		CreatedAt:   now,
-		UpdatedAt:   now,
-		Embedding:   []float32{0.1, 0.2},
+		ID:        uuid.New(),
+		Kind:      "Document",
+		Title:     "memo",
+		Summary:   "sum",
+		Content:   "body text",
+		Namespace: ns,
+		ParentID:  &pid,
+		CreatedAt: now,
+		UpdatedAt: now,
+		Embedding: []float32{0.1, 0.2},
 	}
 	if err := g.EnsureObject(ctx, obj); err != nil {
 		t.Fatal(err)
@@ -332,14 +332,13 @@ func TestGraph_searchTextAndVectorRequestShape(t *testing.T) {
 	if !g.TenantEnabled() {
 		t.Fatal("tenant indexes should be enabled")
 	}
-	// With tenant enabled, SearchText must pass namespace into Helix.
-	ns := uuid.New()
+	// Tenant indexes may exist; search stays unscoped so hydrate can apply Covers.
 	nBefore := len(bodies)
-	if _, err := g.SearchText(ctx, "risk", 3, &ns); err != nil {
+	if _, err := g.SearchText(ctx, "risk", 3, brain.MustNamespace("id", uuid.NewString())); err != nil {
 		t.Fatal(err)
 	}
-	if len(bodies) != nBefore+1 || !strings.Contains(bodies[len(bodies)-1], ns.String()) {
-		t.Fatalf("tenant search body: %v", bodies[nBefore:])
+	if len(bodies) != nBefore+1 {
+		t.Fatalf("search RPCs: %v", bodies[nBefore:])
 	}
 	if err := g.EnsureEdgeTextIndex(ctx, "about"); err != nil {
 		t.Fatal(err)

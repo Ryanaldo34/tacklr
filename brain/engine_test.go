@@ -15,12 +15,12 @@ import (
 func TestEngine_ReadRichObjectInScope(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	ns := uuid.New()
+	ns := brain.MustNamespace("id", uuid.NewString())
 	id := uuid.New()
 	if err := store.Put(context.Background(), brain.Object{
 		ID: id, Kind: "Document", Title: "Deal memo", Summary: "Q3",
 		Content: "full body", ContentType: "text/plain",
-		NamespaceID: ns, Properties: map[string]any{"stage": "negotiation"},
+		Namespace: ns, Properties: map[string]any{"stage": "negotiation"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -29,7 +29,7 @@ func TestEngine_ReadRichObjectInScope(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := eng.Read(ctx, brain.Scope{Namespace: &ns}, id)
+	got, err := eng.Read(ctx, brain.Scope{Namespace: ns}, id)
 
 	if err != nil {
 		t.Fatal(err)
@@ -51,10 +51,10 @@ func TestEngine_ReadRichObjectInScope(t *testing.T) {
 func TestEngine_ReadRejectsOutsideScope(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	nsA, nsB := uuid.New(), uuid.New()
+	nsA, nsB := brain.MustNamespace("org", "a"), brain.MustNamespace("org", "b")
 	id := uuid.New()
 	if err := store.Put(context.Background(), brain.Object{
-		ID: id, Kind: "Document", Content: "secret", NamespaceID: nsA,
+		ID: id, Kind: "Document", Content: "secret", Namespace: nsA,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -63,20 +63,36 @@ func TestEngine_ReadRejectsOutsideScope(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = eng.Read(ctx, brain.Scope{Namespace: &nsB}, id)
+	_, err = eng.Read(ctx, brain.Scope{Namespace: nsB}, id)
 	if !errors.Is(err, brain.ErrNotFound) {
 		t.Fatalf("wrong namespace: %v", err)
 	}
 
 	deleted := time.Now().UTC()
 	if err := store.Put(context.Background(), brain.Object{
-		ID: id, Kind: "Document", NamespaceID: nsA, DeletedAt: &deleted,
+		ID: id, Kind: "Document", Namespace: nsA, DeletedAt: &deleted,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	_, err = eng.Read(ctx, brain.Scope{}, id)
 	if !errors.Is(err, brain.ErrNotFound) {
 		t.Fatalf("soft-deleted: %v", err)
+	}
+
+	objNS := brain.MustNamespace("org", "acme", "workspace", "west")
+	hid := uuid.New()
+	if err := store.Put(context.Background(), brain.Object{
+		ID: hid, Kind: "Document", Content: "nested", Namespace: objNS,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := eng.Read(ctx, brain.Scope{Namespace: brain.MustNamespace("org", "acme")}, hid)
+	if err != nil || got.Content != "nested" {
+		t.Fatalf("org scope should see workspace object: %v %+v", err, got)
+	}
+	_, err = eng.Read(ctx, brain.Scope{Namespace: brain.MustNamespace("org", "acme", "workspace", "east")}, hid)
+	if !errors.Is(err, brain.ErrNotFound) {
+		t.Fatalf("other workspace: %v", err)
 	}
 
 	_, err = eng.Read(ctx, brain.Scope{}, uuid.Nil)
@@ -88,7 +104,7 @@ func TestEngine_ReadRejectsOutsideScope(t *testing.T) {
 func TestEngine_SchemaAndOrderedChildren(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	ns := uuid.New()
+	ns := brain.MustNamespace("id", uuid.NewString())
 	parentID := uuid.New()
 	c1, c2 := uuid.New(), uuid.New()
 	pos1, pos2 := 1, 2
@@ -105,31 +121,31 @@ func TestEngine_SchemaAndOrderedChildren(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := store.Put(context.Background(), brain.Object{
-		ID: parentID, Kind: "Document", Title: "Parent", NamespaceID: ns,
+		ID: parentID, Kind: "Document", Title: "Parent", Namespace: ns,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Put(context.Background(), brain.Object{
-		ID: c2, Kind: "Chunk", Title: "second", NamespaceID: ns,
+		ID: c2, Kind: "Chunk", Title: "second", Namespace: ns,
 		ParentID: &parentID, Position: &pos2, Content: "c2-body",
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Put(context.Background(), brain.Object{
-		ID: c1, Kind: "Chunk", Title: "first", NamespaceID: ns,
+		ID: c1, Kind: "Chunk", Title: "first", Namespace: ns,
 		ParentID: &parentID, Position: &pos1, Content: "c1-body",
 	}); err != nil {
 		t.Fatal(err)
 	}
 	deleted := time.Now().UTC()
 	if err := store.Put(context.Background(), brain.Object{
-		ID: uuid.New(), Kind: "Chunk", Title: "gone", NamespaceID: ns,
+		ID: uuid.New(), Kind: "Chunk", Title: "gone", Namespace: ns,
 		ParentID: &parentID, Position: &pos1, DeletedAt: &deleted,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Put(context.Background(), brain.Object{
-		ID: uuid.New(), Kind: "Chunk", Title: "other-ns", NamespaceID: uuid.New(),
+		ID: uuid.New(), Kind: "Chunk", Title: "other-ns", Namespace: brain.MustNamespace("id", uuid.NewString()),
 		ParentID: &parentID, Position: &pos1,
 	}); err != nil {
 		t.Fatal(err)
@@ -159,7 +175,7 @@ func TestEngine_SchemaAndOrderedChildren(t *testing.T) {
 		t.Fatal("filterable fields required on Document")
 	}
 
-	children, err := eng.ListChildren(ctx, brain.Scope{Namespace: &ns}, parentID)
+	children, err := eng.ListChildren(ctx, brain.Scope{Namespace: ns}, parentID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,10 +208,10 @@ func TestEngine_SchemaUnknownKind(t *testing.T) {
 func TestEngine_ListChildrenRequiresVisibleParent(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	ns := uuid.New()
+	ns := brain.MustNamespace("id", uuid.NewString())
 	parentID := uuid.New()
 	if err := store.Put(context.Background(), brain.Object{
-		ID: parentID, Kind: "Document", NamespaceID: ns,
+		ID: parentID, Kind: "Document", Namespace: ns,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -204,8 +220,8 @@ func TestEngine_ListChildrenRequiresVisibleParent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	other := uuid.New()
-	_, err = eng.ListChildren(ctx, brain.Scope{Namespace: &other}, parentID)
+	other := brain.MustNamespace("org", "other")
+	_, err = eng.ListChildren(ctx, brain.Scope{Namespace: other}, parentID)
 	if !errors.Is(err, brain.ErrNotFound) {
 		t.Fatalf("got %v", err)
 	}

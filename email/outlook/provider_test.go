@@ -106,6 +106,9 @@ func TestProvider_usesOfficialGraphSDKForInboxAndSend(t *testing.T) {
 	if sendErr != nil || !ok || message["subject"] != "Status" {
 		t.Fatalf("send payload = %+v, err = %v", sent, sendErr)
 	}
+	if _, err := p.SendEmail(t.Context(), provider.SendEmailRequest{To: []string{"recipient@example.com"}, Subject: "Status", Body: "ready", ReplyToMessageID: "m1"}); err == nil || !strings.Contains(err.Error(), "replies are not supported") {
+		t.Fatalf("reply: %v", err)
+	}
 }
 
 func TestODataFilter_escapesStructuredFilters(t *testing.T) {

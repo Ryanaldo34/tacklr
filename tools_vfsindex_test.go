@@ -15,7 +15,7 @@ import (
 	"github.com/ryanaldo34/tacklr/vfsindex"
 )
 
-func vfsIndexHarness(t *testing.T, withNS bool) (*TurnManager, *vfs.MountSession, *brain.Engine, uuid.UUID) {
+func vfsIndexHarness(t *testing.T, withNS bool) (*TurnManager, *vfs.MountSession, *brain.Engine, brain.Namespace) {
 	t.Helper()
 	ctx := context.Background()
 	base := t.TempDir()
@@ -38,7 +38,7 @@ func vfsIndexHarness(t *testing.T, withNS bool) (*TurnManager, *vfs.MountSession
 	if err := eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...); err != nil {
 		t.Fatal(err)
 	}
-	ns := uuid.New()
+	ns := brain.MustNamespace("id", uuid.NewString())
 	opts := AgentOptions{
 		SessionID:       "vfs-idx-tools",
 		MountSession:    ms,
@@ -47,14 +47,14 @@ func vfsIndexHarness(t *testing.T, withNS bool) (*TurnManager, *vfs.MountSession
 		writeUnattended: true,
 	}
 	if withNS {
-		opts.SearchNamespace = &ns
+		opts.SearchNamespace = ns
 	}
 	h := mustNewTurnManager(t, opts)
 	t.Cleanup(h.Close)
 	return h, ms, eng, ns
 }
 
-func mustMountBrain(ctx context.Context, t *testing.T, reg *vfs.BackendRegistry, ms *vfs.MountSession, eng *brain.Engine, ns uuid.UUID, spec vfs.MountSpec) {
+func mustMountBrain(ctx context.Context, t *testing.T, reg *vfs.BackendRegistry, ms *vfs.MountSession, eng *brain.Engine, ns brain.Namespace, spec vfs.MountSpec) {
 	t.Helper()
 	if spec.Profile == "" {
 		spec.Profile = brain.DefaultProfile
@@ -65,7 +65,7 @@ func mustMountBrain(ctx context.Context, t *testing.T, reg *vfs.BackendRegistry,
 	if spec.IndexPolicy == "" {
 		spec.IndexPolicy = vfsindex.PolicyNone
 	}
-	if err := reg.Register(brain.BrainFactory{Engine: eng, Scope: brain.Scope{Namespace: &ns}}); err != nil {
+	if err := reg.Register(brain.BrainFactory{Engine: eng, Scope: brain.Scope{Namespace: ns}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := ms.Mount(ctx, spec); err != nil {
@@ -117,7 +117,7 @@ func TestVFSIndexTools_indexSearchUnindex(t *testing.T) {
 	h, ms, eng, ns := vfsIndexHarness(t, true)
 	activatePlan(t, h)
 	ctx := context.Background()
-	scope := brain.Scope{Namespace: &ns}
+	scope := brain.Scope{Namespace: ns}
 
 	indexTool := h.findTool("index_file", "")
 	unindexTool := h.findTool("unindex", "")
@@ -214,7 +214,7 @@ func TestVFSIndexTools_selectiveIndexSearchReadAndTrack(t *testing.T) {
 	h, ms, eng, ns := vfsIndexHarness(t, true)
 	activatePlan(t, h)
 	ctx := context.Background()
-	scope := brain.Scope{Namespace: &ns}
+	scope := brain.Scope{Namespace: ns}
 
 	spec, err := ms.SpecAt("/work/x")
 	if err != nil {
@@ -289,18 +289,18 @@ func TestVFSIndexTools_prefixAutoIndex(t *testing.T) {
 	if err := eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...); err != nil {
 		t.Fatal(err)
 	}
-	ns := uuid.New()
+	ns := brain.MustNamespace("id", uuid.NewString())
 	h := mustNewTurnManager(t, AgentOptions{
 		SessionID:    "policy-prefix",
 		MountSession: ms, Model: &mockStrategy{},
-		Brain: eng, SearchNamespace: &ns,
+		Brain: eng, SearchNamespace: ns,
 	})
 	t.Cleanup(h.Close)
 
 	if err := ms.WriteFile(ctx, "/work/auto.txt", []byte("prefix-auto-phrase-xyz\n")); err != nil {
 		t.Fatal(err)
 	}
-	_ = waitSearchHit(t, eng, brain.Scope{Namespace: &ns}, "prefix-auto-phrase-xyz", 3*time.Second)
+	_ = waitSearchHit(t, eng, brain.Scope{Namespace: ns}, "prefix-auto-phrase-xyz", 3*time.Second)
 }
 
 // TestKnowledgeSaveSearchRead: save_* writes an Engram on the brain Provider
@@ -333,12 +333,12 @@ func TestKnowledgeSaveSearchRead(t *testing.T) {
 	)...); err != nil {
 		t.Fatal(err)
 	}
-	ns := uuid.New()
+	ns := brain.MustNamespace("id", uuid.NewString())
 	mustMountBrain(ctx, t, reg, ms, eng, ns, vfs.MountSpec{})
 	h := mustNewTurnManager(t, AgentOptions{
 		SessionID:    "save-mem",
 		MountSession: ms, Model: &mockStrategy{},
-		Brain: eng, SearchNamespace: &ns,
+		Brain: eng, SearchNamespace: ns,
 		BrainWriteKinds: brain.WriteKinds{Discovery: "Discovery", Fact: "Fact"},
 	})
 	t.Cleanup(h.Close)
@@ -378,7 +378,7 @@ func TestKnowledgeSaveSearchRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	obj, err := eng.Get(ctx, brain.Scope{Namespace: &ns}, id)
+	obj, err := eng.Get(ctx, brain.Scope{Namespace: ns}, id)
 	if err != nil || !strings.Contains(obj.Content, "p99 under 40ms in canary") || obj.Kind != "Discovery" {
 		t.Fatalf("engine object: %+v err=%v", obj, err)
 	}
@@ -421,7 +421,7 @@ func TestKnowledgeSaveSearchRead(t *testing.T) {
 	if !strings.Contains(string(body2), "p95 under 20ms") {
 		t.Fatalf("updated VFS body: %s", body2)
 	}
-	obj2, err := eng.Get(ctx, brain.Scope{Namespace: &ns}, id)
+	obj2, err := eng.Get(ctx, brain.Scope{Namespace: ns}, id)
 	if err != nil || !strings.Contains(obj2.Content, "p95 under 20ms") {
 		t.Fatalf("updated engine: %+v err=%v", obj2, err)
 	}
@@ -461,7 +461,7 @@ func TestKnowledgeSave_rootsMount(t *testing.T) {
 	)...); err != nil {
 		t.Fatal(err)
 	}
-	ns := uuid.New()
+	ns := brain.MustNamespace("id", uuid.NewString())
 	mustMountBrain(ctx, t, reg, ms, eng, ns, vfs.MountSpec{
 		Point: "/discovery", Profile: brain.DefaultProfile,
 		Params: map[string]string{"mode": brain.ModeRoots, "kind": "Discovery"},
@@ -469,7 +469,7 @@ func TestKnowledgeSave_rootsMount(t *testing.T) {
 	h := mustNewTurnManager(t, AgentOptions{
 		SessionID:    "save-roots",
 		MountSession: ms, Model: &mockStrategy{},
-		Brain: eng, SearchNamespace: &ns,
+		Brain: eng, SearchNamespace: ns,
 		BrainWriteKinds: brain.WriteKinds{Discovery: "Discovery"},
 	})
 	t.Cleanup(h.Close)
@@ -501,7 +501,7 @@ func TestKnowledgeSave_rootsMount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	obj, err := eng.Get(ctx, brain.Scope{Namespace: &ns}, id)
+	obj, err := eng.Get(ctx, brain.Scope{Namespace: ns}, id)
 	if err != nil || !strings.Contains(obj.Content, "p99 under 40ms") || obj.Kind != "Discovery" {
 		t.Fatalf("engine object: %+v err=%v", obj, err)
 	}
@@ -535,7 +535,7 @@ func TestRun_workspaceResearchTurn(t *testing.T) {
 	)...); err != nil {
 		t.Fatal(err)
 	}
-	ns := uuid.New()
+	ns := brain.MustNamespace("id", uuid.NewString())
 	mustMountBrain(ctx, t, reg, ms, eng, ns, vfs.MountSpec{})
 
 	wd := &recordingWatchdog{}
@@ -615,7 +615,7 @@ func TestRun_workspaceResearchTurn(t *testing.T) {
 		WatchDog:        wd,
 		MountSession:    ms,
 		Brain:           eng,
-		SearchNamespace: &ns,
+		SearchNamespace: ns,
 		BrainWriteKinds: brain.WriteKinds{Discovery: "Discovery"},
 		writeUnattended: true,
 		Model:           strategy,
@@ -666,7 +666,7 @@ func TestRun_workspaceResearchTurn(t *testing.T) {
 	if body, err := ms.ReadFile(ctx, "/work/research.md"); err != nil || !strings.Contains(string(body), "unique-research-token") {
 		t.Fatalf("vfs body: %s err=%v", body, err)
 	}
-	_ = waitSearchHit(t, eng, brain.Scope{Namespace: &ns}, "unique-research-token", 3*time.Second)
+	_ = waitSearchHit(t, eng, brain.Scope{Namespace: ns}, "unique-research-token", 3*time.Second)
 	if h.session.Plan.Document() != "index then wrap up" {
 		t.Fatalf("plan doc: %q", h.session.Plan.Document())
 	}
@@ -700,11 +700,11 @@ func TestPathNativeGraphLinkExpand(t *testing.T) {
 	if err := eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...); err != nil {
 		t.Fatal(err)
 	}
-	ns := uuid.New()
+	ns := brain.MustNamespace("id", uuid.NewString())
 	h := mustNewTurnManager(t, AgentOptions{
 		SessionID:    "path-graph",
 		MountSession: ms, Model: &mockStrategy{},
-		Brain: eng, SearchNamespace: &ns,
+		Brain: eng, SearchNamespace: ns,
 	})
 	t.Cleanup(h.Close)
 	activatePlan(t, h)

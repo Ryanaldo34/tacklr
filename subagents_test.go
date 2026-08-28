@@ -89,12 +89,12 @@ func TestWithSpecialist_sharesHostMountWriteAndCatalog(t *testing.T) {
 		MountSession:    ms,
 		Model:           &mockStrategy{},
 		Brain:           eng,
-		SearchNamespace: &ns,
+		SearchNamespace: ns,
 		writeUnattended: true,
 	}.WithSpecialist(&Specialist{Name: "researcher", Model: &mockStrategy{}}))
 	t.Cleanup(worker.Close)
 	ctx := context.Background()
-	scope := brain.Scope{Namespace: &ns}
+	scope := brain.Scope{Namespace: ns}
 
 	for _, name := range []string{"read", "write", "run_command", "read_object", "search", "index_file"} {
 		if worker.findTool(name, "") == nil {

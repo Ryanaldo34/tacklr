@@ -95,6 +95,9 @@ func (p *Provider) SendEmail(ctx context.Context, req provider.SendEmailRequest)
 	if err := p.Validate(ctx); err != nil {
 		return provider.SentEmail{}, err
 	}
+	if strings.TrimSpace(req.ReplyToMessageID) != "" {
+		return provider.SentEmail{}, fmt.Errorf("email/outlook: replies are not supported")
+	}
 	message := models.NewMessage()
 	message.SetToRecipients(recipients(req.To))
 	message.SetCcRecipients(recipients(req.CC))

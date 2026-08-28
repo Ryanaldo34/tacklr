@@ -137,7 +137,7 @@ classDiagram
         +string Content
         +UUID ParentID
         +float32[] Embedding
-        +UUID NamespaceID
+        +Namespace Namespace
         +time DeletedAt
     }
 
@@ -178,9 +178,13 @@ and examples are sample product types, not SDK types. You register them with
 Kind names must be path-safe: no `/` and no `..`. Only **parent** kinds become
 directories.
 
-Every durable object belongs to a **namespace** (a UUID the host sets on the
-session). Retrieval never crosses namespaces. Wrong-namespace looks like
-not-found.
+Every durable object belongs to a **namespace**: ordered named attributes the
+host sets on the session (for example `org=acme`, `workspace=west`). Values join
+on `.` to form the key (`acme.west`). Retrieval applies application RLS: a scope
+matches an object when every scope attribute is present on the object with the
+same value, so a broader scope sees more-specific rows. Graph node search uses
+the same `Covers` check (MemoryGraph, store, and hydrate after Helix). Wrong-namespace
+looks like not-found.
 
 ---
 
@@ -660,7 +664,7 @@ if err := eng.LoadKindsFromStore(ctx); err != nil { /* ... */ }
 // AgentOptions:
 //   Brain:           eng
 //   VFS:             registry + mounts (including /work)
-//   SearchNamespace: tenant UUID
+//   SearchNamespace: brain.MustNamespace("org", orgID, "workspace", wsID)
 //
 // Harness then:
 //   registers BrainFactory (profile "brain")
@@ -690,7 +694,7 @@ Tests call `store.Setup` (embedding dim 3) instead of loading SQL files.
 
 | Situation | Behavior |
 |-----------|----------|
-| Wrong namespace | `Get` / search look like not found. Graph ids that fail hydrate are dropped. |
+| Wrong namespace | `Get` / search look like not found. Graph ids that fail hydrate are dropped. A coarser scope (fewer attrs) sees objects with extra attrs. |
 | Soft-deleted object | Hidden from Get and search. Graph node is already gone. |
 | Embedder down at **query** time | `search` / `find_objects` can run lexical-only (default). Set `FailOnEmbedderError` to surface the error. |
 | Embedder down at **Put** time | **Fail closed.** An unindexed parent is not persisted. |
@@ -757,7 +761,7 @@ returns paths), not that a private helper was called.
 | **Document / Chunk** | Default kinds for an indexed artifact (`vfsindex.MountIndexKinds`) |
 | **VFS** | Virtual filesystem: one path tree over several backends |
 | **Provider** | Bytes (or Engram parse/format) behind one mount |
-| **Namespace** | Host UUID that isolates all retrieval and writes |
+| **Namespace** | Ordered named attrs (`org`, `workspace`, …) joined on `.`; application RLS via `Covers` |
 | **Scope** | The engine’s view of that namespace on a call |
 | **`vfs_path`** | Absolute virtual path stored on an object so tools can speak paths |
 | **Evidence** | Chunks that justified a parent `search` hit |

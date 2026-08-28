@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/google/uuid"
-
 	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/internal/session"
 	"github.com/ryanaldo34/tacklr/stores"
@@ -49,7 +47,7 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 		t.Fatal("deny-always not stored")
 	}
 
-	ns := uuid.New()
+	ns := brain.MustNamespace("org", "acme")
 	sm.Search.SetNamespace(ns)
 
 	reg := vfs.NewBackendRegistry()
@@ -99,11 +97,11 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 	}
 	assertModules(t, sm2, ns)
 
-	fresh := uuid.New()
+	fresh := brain.MustNamespace("org", "other")
 	sm2.Search = brain.NewSearchContext()
 	sm2.Search.SetNamespace(fresh)
 	gotFresh, ok := sm2.Search.Namespace()
-	if !ok || gotFresh != fresh {
+	if !ok || !gotFresh.Equal(fresh) {
 		t.Fatalf("replacement Search must be usable, got %v ok=%v", gotFresh, ok)
 	}
 }
@@ -192,7 +190,7 @@ func TestTypedCheckpoint_rejectsCorruptUserState(t *testing.T) {
 	}
 }
 
-func assertModules(t *testing.T, sm *session.SessionManager, ns uuid.UUID) {
+func assertModules(t *testing.T, sm *session.SessionManager, ns brain.Namespace) {
 	t.Helper()
 	if sm.Permissions.Decision("allow_tool") != session.PermissionAllowAlways ||
 		sm.Permissions.Decision("deny_tool") != session.PermissionDenyAlways {
@@ -203,7 +201,7 @@ func assertModules(t *testing.T, sm *session.SessionManager, ns uuid.UUID) {
 		t.Fatalf("on-call stage reload args=%q denied=%v ok=%v", layer.Args, layer.Denied, ok)
 	}
 	gotNS, ok := sm.Search.Namespace()
-	if !ok || gotNS != ns {
+	if !ok || !gotNS.Equal(ns) {
 		t.Fatalf("search namespace %v ok=%v want %v", gotNS, ok, ns)
 	}
 }

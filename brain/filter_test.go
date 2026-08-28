@@ -47,11 +47,11 @@ func TestValidateFilters_andMatch(t *testing.T) {
 		t.Fatal("empty time")
 	}
 
-	ns := uuid.New()
+	ns := MustNamespace("id", uuid.NewString())
 	now := time.Date(2024, 6, 15, 0, 0, 0, 0, time.UTC)
 	obj := Object{
 		ID: uuid.New(), Kind: "Document", Title: "T",
-		NamespaceID: ns, UpdatedAt: now, CreatedAt: now,
+		Namespace: ns, UpdatedAt: now, CreatedAt: now,
 		Properties: map[string]any{"stage": "negotiation", "amount": 10.0},
 	}
 	if !objectMatchesFilters(obj, MustFilter(map[string]any{"kind": "Document", "stage": "negotiation"})) {

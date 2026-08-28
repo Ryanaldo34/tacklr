@@ -12,7 +12,7 @@ threshold:
   # Root-package files (agent.go, tools_brain.go, …) are each a "package" to the
   # coverage tool. Floor 70% covers tools_brain/web without live backends.
   package: 70
-  # Library total after excludes (cmd/, testkit, agentbench only).
+  # Library total after excludes (cmd/, testkit, live helpers).
   # Helixgraph is included: CI runs Testcontainers Helix (enterprise-dev) without -short.
   total: 90
 
@@ -50,11 +50,9 @@ override:
 exclude:
   # Repo-relative paths (matched as regexes against file paths).
   # cmd/*: mains / local harnesses. testkit/livesess: test doubles.
-  # agentbench: live multi-turn bench (exercised by agent-bench, not unit cover).
   paths:
     - cmd/
     - internal/testkit
-    - internal/agentbench
     - internal/temporallive
     - internal/livesess
     # Exporter constructors, not product outcomes.

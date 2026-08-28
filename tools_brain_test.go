@@ -26,7 +26,7 @@ func TestBrainTools_saveDiscoveryAndLink(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ns := uuid.New()
+	ns := brain.MustNamespace("id", uuid.NewString())
 	h := mustNewTurnManager(t, AgentOptions{
 		Config: Config{MaxWindowSize: 1024},
 		Model:  &mockStrategy{},
@@ -36,7 +36,7 @@ func TestBrainTools_saveDiscoveryAndLink(t *testing.T) {
 			Fact:      "Fact",
 			// Memory empty → tool not registered
 		},
-		SearchNamespace: &ns,
+		SearchNamespace: ns,
 	})
 
 	saveDisc := h.findTool("save_discovery", "")
@@ -145,14 +145,14 @@ func TestBrainTools_saveDiscoveryAndLink(t *testing.T) {
 func TestBrainTools_hostNamespaceScopedRead(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	ns := uuid.New()
-	other := uuid.New()
+	ns := brain.MustNamespace("id", uuid.NewString())
+	other := brain.MustNamespace("org", "other")
 	docID := uuid.New()
 
 	if err := store.Put(context.Background(), brain.Object{
 		ID: docID, Kind: "Document", Title: "Deal memo",
 		Summary: "Q3", Content: "full body", ContentType: "text/plain",
-		NamespaceID: ns, Properties: map[string]any{"stage": "negotiation"},
+		Namespace: ns, Properties: map[string]any{"stage": "negotiation"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -171,10 +171,10 @@ func TestBrainTools_hostNamespaceScopedRead(t *testing.T) {
 		Config:          Config{MaxWindowSize: 1024},
 		Model:           &mockStrategy{},
 		Brain:           eng,
-		SearchNamespace: &ns,
+		SearchNamespace: ns,
 	})
 	gotNS, ok := h.session.Search.Namespace()
-	if !ok || gotNS != ns {
+	if !ok || !gotNS.Equal(ns) {
 		t.Fatalf("SearchNamespace from options: %v %v", gotNS, ok)
 	}
 
@@ -232,7 +232,7 @@ func TestBrainTools_hostNamespaceScopedRead(t *testing.T) {
 func TestBrainTools_searchFindExactContinueAndCheckpoint(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	ns := uuid.New()
+	ns := brain.MustNamespace("id", uuid.NewString())
 	now := time.Now().UTC()
 	var firstParent uuid.UUID
 	for i := 0; i < 4; i++ {
@@ -243,13 +243,13 @@ func TestBrainTools_searchFindExactContinueAndCheckpoint(t *testing.T) {
 		part := uuid.New()
 		pos := 1
 		if err := store.Put(context.Background(), brain.Object{
-			ID: parent, Kind: "Document", Title: "Doc", NamespaceID: ns, UpdatedAt: now,
+			ID: parent, Kind: "Document", Title: "Doc", Namespace: ns, UpdatedAt: now,
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if err := store.Put(context.Background(), brain.Object{
 			ID: part, Kind: "Chunk", Title: "knowledge-chunk", Content: "shared knowledge base retrieval material item",
-			ParentID: &parent, Position: &pos, NamespaceID: ns, UpdatedAt: now,
+			ParentID: &parent, Position: &pos, Namespace: ns, UpdatedAt: now,
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -264,7 +264,7 @@ func TestBrainTools_searchFindExactContinueAndCheckpoint(t *testing.T) {
 		Config:          Config{MaxWindowSize: 1024},
 		Model:           &mockStrategy{},
 		Brain:           eng,
-		SearchNamespace: &ns,
+		SearchNamespace: ns,
 		SessionID:       "brain-sc-1",
 	})
 
@@ -291,7 +291,7 @@ func TestBrainTools_searchFindExactContinueAndCheckpoint(t *testing.T) {
 		Config:          Config{MaxWindowSize: 1024},
 		Model:           &mockStrategy{},
 		Brain:           eng,
-		SearchNamespace: &ns,
+		SearchNamespace: ns,
 		SessionID:       "brain-sc-1",
 	})
 	out2, err := h2.findTool("continue", "").invoke(ctx, `{"result_set_id":"`+page.ResultSetID.String()+`","limit":2}`, turnRuntime(h2))
@@ -352,15 +352,15 @@ func TestBrainTools_searchFindExactContinueAndCheckpoint(t *testing.T) {
 func TestBrainTools_expandChildren(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	ns := uuid.New()
+	ns := brain.MustNamespace("id", uuid.NewString())
 	now := time.Now().UTC()
 	parent := uuid.New()
 	child := uuid.New()
 	pos := 1
-	_ = store.Put(context.Background(), brain.Object{ID: parent, Kind: "Document", Title: "P", NamespaceID: ns, UpdatedAt: now})
+	_ = store.Put(context.Background(), brain.Object{ID: parent, Kind: "Document", Title: "P", Namespace: ns, UpdatedAt: now})
 	_ = store.Put(context.Background(), brain.Object{
 		ID: child, Kind: "Chunk", Title: "C", Content: "secret",
-		ParentID: &parent, Position: &pos, NamespaceID: ns, UpdatedAt: now,
+		ParentID: &parent, Position: &pos, Namespace: ns, UpdatedAt: now,
 	})
 	eng, err := brain.NewEngine(store)
 	if err != nil {
@@ -368,7 +368,7 @@ func TestBrainTools_expandChildren(t *testing.T) {
 	}
 	h := mustNewTurnManager(t, AgentOptions{
 		Config: Config{MaxWindowSize: 1024}, Model: &mockStrategy{},
-		Brain: eng, SearchNamespace: &ns,
+		Brain: eng, SearchNamespace: ns,
 	})
 	tool := h.findTool("expand", "")
 	if tool == nil {
@@ -396,13 +396,13 @@ func TestBrainTools_expandMultiHopAndFindLinks(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
 	g := brain.NewMemoryGraph()
-	ns := uuid.New()
+	ns := brain.MustNamespace("id", uuid.NewString())
 	now := time.Now().UTC()
 	factID, dealID, buyerID := uuid.New(), uuid.New(), uuid.New()
 	for _, o := range []brain.Object{
-		{ID: factID, Kind: "Fact", Title: "Risk note", NamespaceID: ns, UpdatedAt: now},
-		{ID: dealID, Kind: "Deal", Title: "Acme", NamespaceID: ns, UpdatedAt: now},
-		{ID: buyerID, Kind: "Person", Title: "Pat Buyer", NamespaceID: ns, UpdatedAt: now},
+		{ID: factID, Kind: "Fact", Title: "Risk note", Namespace: ns, UpdatedAt: now},
+		{ID: dealID, Kind: "Deal", Title: "Acme", Namespace: ns, UpdatedAt: now},
+		{ID: buyerID, Kind: "Person", Title: "Pat Buyer", Namespace: ns, UpdatedAt: now},
 	} {
 		if err := store.Put(ctx, o); err != nil {
 			t.Fatal(err)
@@ -423,7 +423,7 @@ func TestBrainTools_expandMultiHopAndFindLinks(t *testing.T) {
 	}
 	h := mustNewTurnManager(t, AgentOptions{
 		Config: Config{MaxWindowSize: 1024}, Model: &mockStrategy{},
-		Brain: eng, SearchNamespace: &ns,
+		Brain: eng, SearchNamespace: ns,
 	})
 	expand := h.findTool("expand", "")
 	findLinks := h.findTool("find_links", "")
@@ -469,15 +469,15 @@ func TestBrainTools_expandMultiHopAndFindLinks(t *testing.T) {
 func TestBrainTools_searchNamespaceIsolation(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	nsA, nsB := uuid.New(), uuid.New()
+	nsA, nsB := brain.MustNamespace("org", "a"), brain.MustNamespace("org", "b")
 	now := time.Now().UTC()
 	secretParent := uuid.New()
 	secretPart := uuid.New()
 	pos := 1
-	_ = store.Put(ctx, brain.Object{ID: secretParent, Kind: "Document", Title: "Secret deal", NamespaceID: nsA, UpdatedAt: now})
+	_ = store.Put(ctx, brain.Object{ID: secretParent, Kind: "Document", Title: "Secret deal", Namespace: nsA, UpdatedAt: now})
 	_ = store.Put(ctx, brain.Object{
 		ID: secretPart, Kind: "Chunk", Title: "chunk", Content: "namespace isolation secret token xyzzy",
-		ParentID: &secretParent, Position: &pos, NamespaceID: nsA, UpdatedAt: now,
+		ParentID: &secretParent, Position: &pos, Namespace: nsA, UpdatedAt: now,
 	})
 	eng, err := brain.NewEngine(store)
 	if err != nil {
@@ -486,7 +486,7 @@ func TestBrainTools_searchNamespaceIsolation(t *testing.T) {
 	// Agent scoped to nsB only.
 	h := mustNewTurnManager(t, AgentOptions{
 		Config: Config{MaxWindowSize: 1024}, Model: &mockStrategy{},
-		Brain: eng, SearchNamespace: &nsB,
+		Brain: eng, SearchNamespace: nsB,
 	})
 	search := h.findTool("search", "")
 	read := h.findTool("read_object", "")
@@ -509,11 +509,11 @@ func TestBrainTools_searchNamespaceIsolation(t *testing.T) {
 func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	ns := uuid.New()
+	ns := brain.MustNamespace("id", uuid.NewString())
 	docID := uuid.New()
 	if err := store.Put(context.Background(), brain.Object{
 		ID: docID, Kind: "Document", Title: "Shared", Content: "worker-visible",
-		NamespaceID: ns,
+		Namespace: ns,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -521,10 +521,10 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 	parent := uuid.New()
 	part := uuid.New()
 	pos := 1
-	_ = store.Put(context.Background(), brain.Object{ID: parent, Kind: "Document", Title: "P", NamespaceID: ns})
+	_ = store.Put(context.Background(), brain.Object{ID: parent, Kind: "Document", Title: "P", Namespace: ns})
 	_ = store.Put(context.Background(), brain.Object{
 		ID: part, Kind: "Chunk", Content: "worker search isolation token",
-		ParentID: &parent, Position: &pos, NamespaceID: ns,
+		ParentID: &parent, Position: &pos, Namespace: ns,
 	})
 
 	eng, err := brain.NewEngine(store)
@@ -541,7 +541,7 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 		Config:          Config{MaxWindowSize: 1024},
 		Model:           &mockStrategy{},
 		Brain:           eng,
-		SearchNamespace: &ns,
+		SearchNamespace: ns,
 		Specialists: []*Specialist{
 			{Name: "researcher", Model: workerModel},
 		},
@@ -549,13 +549,13 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 	parentH := mustNewTurnManager(t, parentOpts)
 	t.Cleanup(parentH.Close)
 	workerOpts := parentOpts.WithSpecialist(parentH.specialists["researcher"])
-	workerOpts.SearchNamespace = &ns
+	workerOpts.SearchNamespace = ns
 	workerOpts.SessionID = "w/researcher/spawn_tc1"
 	worker := mustNewTurnManager(t, workerOpts)
 	t.Cleanup(worker.Close)
 
 	gotNS, ok := worker.session.Search.Namespace()
-	if !ok || gotNS != ns {
+	if !ok || !gotNS.Equal(ns) {
 		t.Fatalf("worker namespace %v %v, want %v", gotNS, ok, ns)
 	}
 
@@ -581,7 +581,7 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 
 	parentH.session.Search.ClearNamespace()
 	gotNS, ok = worker.session.Search.Namespace()
-	if !ok || gotNS != ns {
+	if !ok || !gotNS.Equal(ns) {
 		t.Fatalf("worker namespace after parent clear: %v %v", gotNS, ok)
 	}
 }
@@ -615,12 +615,12 @@ func TestBrainTools_engramPathGraph(t *testing.T) {
 	)...); err != nil {
 		t.Fatal(err)
 	}
-	ns := uuid.New()
+	ns := brain.MustNamespace("id", uuid.NewString())
 	mustMountBrain(ctx, t, reg, ms, eng, ns, vfs.MountSpec{})
 	h := mustNewTurnManager(t, AgentOptions{
 		SessionID:    "engram-graph",
 		MountSession: ms, Model: &mockStrategy{},
-		Brain: eng, SearchNamespace: &ns,
+		Brain: eng, SearchNamespace: ns,
 	})
 	t.Cleanup(h.Close)
 	activatePlan(t, h)
@@ -745,10 +745,10 @@ func (s failGetStore) Get(ctx context.Context, scope brain.Scope, id uuid.UUID) 
 func TestBrainTools_resolveFileRefPropagatesStoreFailure(t *testing.T) {
 	ctx := context.Background()
 	mem := brain.NewMemoryStore()
-	ns := uuid.New()
+	ns := brain.MustNamespace("id", uuid.NewString())
 	id := uuid.New()
 	if err := mem.Put(ctx, brain.Object{
-		ID: id, Kind: "Document", Title: "memo", NamespaceID: ns, UpdatedAt: time.Now().UTC(),
+		ID: id, Kind: "Document", Title: "memo", Namespace: ns, UpdatedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -760,7 +760,7 @@ func TestBrainTools_resolveFileRefPropagatesStoreFailure(t *testing.T) {
 		Config:          Config{MaxWindowSize: 1024},
 		Model:           &mockStrategy{},
 		Brain:           eng,
-		SearchNamespace: &ns,
+		SearchNamespace: ns,
 	})
 	expand := h.findTool("expand", "")
 	if expand == nil {

@@ -64,9 +64,3 @@ check: vet lint cover
 		echo "gofmt needed on:"; echo "$$unformatted"; exit 1; \
 	fi
 
-# Multi-turn agent harness benchmarks (OPENAI_*; optional EXA_API_KEY). See cmd/agent-bench.
-agent-bench:
-	go run ./cmd/agent-bench -suite all
-
-agent-bench-dry:
-	go run ./cmd/agent-bench -dry-run -list

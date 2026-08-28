@@ -37,8 +37,8 @@ func TestAsyncScheduler_notifyCoalesceAndEventualIndex(t *testing.T) {
 	if err := eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...); err != nil {
 		t.Fatal(err)
 	}
-	ns := uuid.New()
-	idx, err := vfsindex.NewMountIndexer(ms, eng, brain.Scope{Namespace: &ns})
+	ns := brain.MustNamespace("id", uuid.NewString())
+	idx, err := vfsindex.NewMountIndexer(ms, eng, brain.Scope{Namespace: ns})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func TestAsyncScheduler_notifyCoalesceAndEventualIndex(t *testing.T) {
 	deadline := time.Now().Add(3 * time.Second)
 	var found bool
 	for time.Now().Before(deadline) {
-		page, err := eng.Search(ctx, brain.Scope{Namespace: &ns}, brain.SearchRequest{Query: "uniquephrase"}, brain.NewSearchContext())
+		page, err := eng.Search(ctx, brain.Scope{Namespace: ns}, brain.SearchRequest{Query: "uniquephrase"}, brain.NewSearchContext())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -100,8 +100,8 @@ func TestIndexPathResult_andUnindex(t *testing.T) {
 	if err := eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...); err != nil {
 		t.Fatal(err)
 	}
-	ns := uuid.New()
-	scope := brain.Scope{Namespace: &ns}
+	ns := brain.MustNamespace("id", uuid.NewString())
+	scope := brain.Scope{Namespace: ns}
 	idx, err := vfsindex.NewMountIndexer(ms, eng, scope)
 	if err != nil {
 		t.Fatal(err)

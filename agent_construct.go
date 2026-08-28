@@ -7,8 +7,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/google/uuid"
-
 	"github.com/ryanaldo34/tacklr/brain"
 	mail "github.com/ryanaldo34/tacklr/email"
 	"github.com/ryanaldo34/tacklr/internal/exa"
@@ -98,8 +96,8 @@ type AgentOptions struct {
 	// Ignored when Brain is nil.
 	BrainWriteKinds brain.WriteKinds
 	// SearchNamespace isolates brain retrieval when set (session-owned, checkpointed).
-	// Nil leaves a loaded session value unchanged. Workers get a copy at spawn.
-	SearchNamespace *uuid.UUID
+	// Empty leaves a loaded session value unchanged. Workers get a copy at spawn.
+	SearchNamespace brain.Namespace
 	// MountSession is the VFS tree injected for this turn, or nil (no VFS tools).
 	// Runtime builds one from FSBootstrap plus Prompt.Auth bindings when a
 	// projection is available. Embedders pass their own. The injector Closes
@@ -149,8 +147,8 @@ func NewTurnManager(ctx context.Context, opts AgentOptions) (*TurnManager, error
 	if opts.MountSession != nil {
 		sm.VFS = opts.MountSession
 	}
-	if opts.SearchNamespace != nil {
-		sm.Search.SetNamespace(*opts.SearchNamespace)
+	if !opts.SearchNamespace.Empty() {
+		sm.Search.SetNamespace(opts.SearchNamespace)
 	}
 	def := DefaultContextPolicy()
 	if h.contextPolicy.PressureRatio <= 0 {
@@ -241,7 +239,6 @@ func (h *TurnManager) finishInit(ctx context.Context, specialists []*Specialist)
 }
 
 // injectBuiltinTools registers plan tools, optional web/brain/VFS/index tools, and spawn_specialist once.
-// Client-backed builtins close over the client at construction (email provider, Exa client, MountSession, brain engine, index bridge).
 func (a *TurnManager) injectBuiltinTools() {
 	if a.builtinsInjected {
 		return
@@ -295,7 +292,6 @@ func (a *TurnManager) initVFSIndexBridge() {
 	if !ok {
 		return
 	}
-	nsCopy := ns
 	attachMemory := true
 	for _, s := range a.session.VFS.Specs() {
 		if s.Profile == brain.DefaultProfile {
@@ -303,7 +299,7 @@ func (a *TurnManager) initVFSIndexBridge() {
 			break
 		}
 	}
-	br, err := vfsindex.Start(a.session.VFS, a.brain, brain.Scope{Namespace: &nsCopy}, attachMemory)
+	br, err := vfsindex.Start(a.session.VFS, a.brain, brain.Scope{Namespace: ns}, attachMemory)
 	if err != nil {
 		return
 	}

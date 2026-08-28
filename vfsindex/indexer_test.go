@@ -40,8 +40,8 @@ func TestMountIndexer_indexSearchAndNotify(t *testing.T) {
 	if err := eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...); err != nil {
 		t.Fatal(err)
 	}
-	ns := uuid.New()
-	scope := brain.Scope{Namespace: &ns}
+	ns := brain.MustNamespace("id", uuid.NewString())
+	scope := brain.Scope{Namespace: ns}
 
 	idx, err := vfsindex.NewMountIndexer(ms, eng, scope)
 	if err != nil {
@@ -201,8 +201,8 @@ func TestMountIndexer_markdownBlocksChunks(t *testing.T) {
 	if err := eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...); err != nil {
 		t.Fatal(err)
 	}
-	ns := uuid.New()
-	scope := brain.Scope{Namespace: &ns}
+	ns := brain.MustNamespace("id", uuid.NewString())
+	scope := brain.Scope{Namespace: ns}
 	idx, err := vfsindex.NewMountIndexer(ms, eng, scope)
 	if err != nil {
 		t.Fatal(err)
@@ -329,8 +329,8 @@ func TestMountIndexer_emptyMarkdownLineChunks(t *testing.T) {
 	if err := eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...); err != nil {
 		t.Fatal(err)
 	}
-	ns := uuid.New()
-	scope := brain.Scope{Namespace: &ns}
+	ns := brain.MustNamespace("id", uuid.NewString())
+	scope := brain.Scope{Namespace: ns}
 	idx, err := vfsindex.NewMountIndexer(ms, eng, scope)
 	if err != nil {
 		t.Fatal(err)
@@ -416,8 +416,8 @@ func TestMountIndexer_IndexFileResultAndDefaults(t *testing.T) {
 	if err := eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...); err != nil {
 		t.Fatal(err)
 	}
-	ns := uuid.New()
-	scope := brain.Scope{Namespace: &ns}
+	ns := brain.MustNamespace("id", uuid.NewString())
+	scope := brain.Scope{Namespace: ns}
 	idx, err := vfsindex.NewMountIndexer(ms, eng, scope)
 	if err != nil {
 		t.Fatal(err)
@@ -678,8 +678,8 @@ func TestMountIndexer_docsBlockText(t *testing.T) {
 	if err := eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...); err != nil {
 		t.Fatal(err)
 	}
-	ns := uuid.New()
-	idx, err := vfsindex.NewMountIndexer(ms, eng, brain.Scope{Namespace: &ns})
+	ns := brain.MustNamespace("id", uuid.NewString())
+	idx, err := vfsindex.NewMountIndexer(ms, eng, brain.Scope{Namespace: ns})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -692,13 +692,13 @@ func TestMountIndexer_docsBlockText(t *testing.T) {
 		t.Fatalf("index: %q err=%v", res, err)
 	}
 	parent := idx.DocumentID("/docs/Spec")
-	children, err := eng.ListChildren(ctx, brain.Scope{Namespace: &ns}, parent)
+	children, err := eng.ListChildren(ctx, brain.Scope{Namespace: ns}, parent)
 	if err != nil || len(children) != 2 {
 		t.Fatalf("chunks=%d err=%v", len(children), err)
 	}
 	var sawPhrase bool
 	for _, c := range children {
-		obj, err := eng.Read(ctx, brain.Scope{Namespace: &ns}, c.ID)
+		obj, err := eng.Read(ctx, brain.Scope{Namespace: ns}, c.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
