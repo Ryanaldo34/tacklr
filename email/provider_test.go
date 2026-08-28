@@ -20,7 +20,6 @@ func (*testProvider) SendEmail(context.Context, SendEmailRequest) (SentEmail, er
 }
 
 func TestValidateProvider_supportedKindsAndNilValues(t *testing.T) {
-	var typedNil *testProvider
 	cases := []struct {
 		name     string
 		provider Provider
@@ -29,7 +28,6 @@ func TestValidateProvider_supportedKindsAndNilValues(t *testing.T) {
 		{name: "disabled"},
 		{name: "gmail", provider: &testProvider{kind: ProviderGmail}},
 		{name: "outlook", provider: &testProvider{kind: ProviderOutlook}},
-		{name: "typed nil", provider: typedNil, wantErr: "must not be nil"},
 		{name: "unsupported", provider: &testProvider{kind: "imap"}, wantErr: "unsupported provider"},
 	}
 

@@ -9,14 +9,14 @@ import (
 	"strings"
 	"testing"
 
-	provider "github.com/ryanaldo34/tacklr/email"
 	"golang.org/x/oauth2"
 	googlemail "google.golang.org/api/gmail/v1"
 	"google.golang.org/api/option"
+
+	provider "github.com/ryanaldo34/tacklr/email"
 )
 
 func TestProvider_usesOfficialGmailSDKForInboxAndSend(t *testing.T) {
-	// Arrange
 	var listQuery string
 	var sentRaw string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -27,11 +27,18 @@ func TestProvider_usesOfficialGmailSDKForInboxAndSend(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"messages": []map[string]string{{"id": "m1"}}, "nextPageToken": "next"})
 		case r.Method == http.MethodGet && r.URL.Path == "/gmail/v1/users/me/messages/m1":
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"id": "m1", "threadId": "t1", "labelIds": []string{"UNREAD"}, "internalDate": "1760000000000",
-				"payload": map[string]any{"mimeType": "text/plain", "headers": []map[string]string{
-					{"name": "From", "value": "sender@example.com"}, {"name": "To", "value": "recipient@example.com"},
-					{"name": "Subject", "value": "Status"}, {"name": "Date", "value": "Thu, 9 Oct 2025 08:53:20 +0000"},
-				}, "body": map[string]string{"data": base64.RawURLEncoding.EncodeToString([]byte("hello"))}},
+				"id": "m1", "threadId": "t1", "labelIds": []string{"UNREAD"},
+				"payload": map[string]any{
+					"mimeType": "multipart/alternative",
+					"headers": []map[string]string{
+						{"name": "From", "value": "sender@example.com"}, {"name": "To", "value": "recipient@example.com"},
+						{"name": "Subject", "value": "Status"}, {"name": "Date", "value": "Thu, 9 Oct 2025 08:53:20 +0000"},
+					},
+					"parts": []map[string]any{{
+						"mimeType": "text/plain",
+						"body":     map[string]string{"data": base64.RawURLEncoding.EncodeToString([]byte("hello"))},
+					}},
+				},
 			})
 		case r.Method == http.MethodPost && r.URL.Path == "/gmail/v1/users/me/messages/send":
 			var body map[string]string
@@ -49,12 +56,13 @@ func TestProvider_usesOfficialGmailSDKForInboxAndSend(t *testing.T) {
 	}
 	p := New(service)
 
-	// Act
 	hasAttachment := true
 	inbox, err := p.ReadInbox(t.Context(), provider.ReadInboxRequest{From: "sender@example.com", To: "recipient@example.com", Subject: "Status", ReceivedAfter: "2026-08-01", ReceivedBefore: "2026-08-31", HasAttachment: &hasAttachment, Mailbox: "INBOX", UnreadOnly: true, Limit: 5, Cursor: "cursor"})
-	sent, sendErr := p.SendEmail(t.Context(), provider.SendEmailRequest{To: []string{"recipient@example.com"}, Subject: "Status", Body: "ready"})
+	sent, sendErr := p.SendEmail(t.Context(), provider.SendEmailRequest{
+		To: []string{"recipient@example.com"}, CC: []string{"cc@example.com"}, BCC: []string{"bcc@example.com"},
+		Subject: "Status", Body: "ready", ReplyToMessageID: "m1",
+	})
 
-	// Assert
 	if err != nil || len(inbox.Messages) != 1 || inbox.Messages[0].Body != "hello" || !inbox.Messages[0].Unread || inbox.NextCursor != "next" {
 		t.Fatalf("inbox = %+v, err = %v", inbox, err)
 	}
@@ -64,8 +72,12 @@ func TestProvider_usesOfficialGmailSDKForInboxAndSend(t *testing.T) {
 		}
 	}
 	raw, decodeErr := base64.RawURLEncoding.DecodeString(sentRaw)
-	if sendErr != nil || decodeErr != nil || sent.ID != "sent" || !strings.Contains(string(raw), "To: recipient@example.com") || !strings.Contains(string(raw), "Subject: Status") {
+	rfc := string(raw)
+	if sendErr != nil || decodeErr != nil || sent.ID != "sent" || !strings.Contains(rfc, "To: recipient@example.com") || !strings.Contains(rfc, "Cc: cc@example.com") || !strings.Contains(rfc, "Bcc: bcc@example.com") || !strings.Contains(rfc, "In-Reply-To: m1") || !strings.Contains(rfc, "Subject: Status") {
 		t.Fatalf("send = %+v, raw = %q, err = %v decode = %v", sent, raw, sendErr, decodeErr)
+	}
+	if _, err := p.ReadInbox(t.Context(), provider.ReadInboxRequest{ReceivedAfter: "nope"}); err == nil {
+		t.Fatal("invalid date was accepted")
 	}
 }
 
@@ -80,7 +92,14 @@ func TestGmailQuery_escapesStructuredFilters(t *testing.T) {
 }
 
 func TestProvider_rejectsMissingSDKService(t *testing.T) {
-	if err := New(nil).Validate(context.Background()); err == nil {
+	p := New(nil)
+	if err := p.Validate(context.Background()); err == nil {
 		t.Fatal("nil service was accepted")
+	}
+	if _, err := p.ReadInbox(context.Background(), provider.ReadInboxRequest{}); err == nil {
+		t.Fatal("nil service listed mail")
+	}
+	if _, err := p.SendEmail(context.Background(), provider.SendEmailRequest{To: []string{"a@b.c"}, Subject: "s", Body: "b"}); err == nil {
+		t.Fatal("nil service sent mail")
 	}
 }

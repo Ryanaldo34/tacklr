@@ -12,11 +12,11 @@ import (
 	abstractions "github.com/microsoft/kiota-abstractions-go"
 	msgraphsdk "github.com/microsoftgraph/msgraph-sdk-go"
 	"github.com/microsoftgraph/msgraph-sdk-go/models"
+
 	provider "github.com/ryanaldo34/tacklr/email"
 )
 
 func TestMessageFromSDK_mapsGraphMessage(t *testing.T) {
-	// Arrange
 	message := models.NewMessage()
 	id, thread, subject := "id", "thread", "subject"
 	message.SetId(&id)
@@ -34,31 +34,32 @@ func TestMessageFromSDK_mapsGraphMessage(t *testing.T) {
 	message.SetToRecipients([]models.Recipientable{newRecipient("to@example.com")})
 	message.SetCcRecipients([]models.Recipientable{newRecipient("cc@example.com")})
 
-	// Act
 	got := messageFromSDK(message)
-
-	// Assert
 	if got.ID != id || got.ThreadID != thread || got.From != "sender@example.com" || len(got.To) != 1 || len(got.CC) != 1 || got.Subject != subject || got.Body != bodyText || got.Unread != true || !got.ReceivedAt.Equal(received) {
 		t.Fatalf("message = %+v", got)
 	}
 }
 
 func TestProvider_usesOfficialGraphSDKForInboxAndSend(t *testing.T) {
-	// Arrange
 	var sent map[string]any
-	var listFilter string
+	var listFilter, lastPath string
+	page := map[string]any{
+		"@odata.nextLink": "https://placeholder/next",
+		"value": []map[string]any{{
+			"id": "message", "conversationId": "thread", "subject": "Status", "isRead": false,
+			"from":         map[string]any{"emailAddress": map[string]string{"address": "sender@example.com"}},
+			"toRecipients": []map[string]any{{"emailAddress": map[string]string{"address": "recipient@example.com"}}},
+			"body":         map[string]string{"content": "hello", "contentType": "text"},
+		}},
+	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		path := strings.TrimSuffix(r.URL.Path, "/")
+		lastPath = path
 		switch {
-		case r.Method == http.MethodGet && path == "/users/me-token-to-replace/messages":
+		case r.Method == http.MethodGet && strings.HasSuffix(path, "/messages"):
 			listFilter = r.URL.Query().Get("$filter")
-			_ = json.NewEncoder(w).Encode(map[string]any{"value": []map[string]any{{
-				"id": "message", "conversationId": "thread", "subject": "Status", "isRead": false,
-				"from":         map[string]any{"emailAddress": map[string]string{"address": "sender@example.com"}},
-				"toRecipients": []map[string]any{{"emailAddress": map[string]string{"address": "recipient@example.com"}}},
-				"body":         map[string]string{"content": "hello", "contentType": "text"},
-			}}})
+			_ = json.NewEncoder(w).Encode(page)
 		case r.Method == http.MethodPost && path == "/users/me-token-to-replace/sendMail":
 			_ = json.NewDecoder(r.Body).Decode(&sent)
 			w.WriteHeader(http.StatusAccepted)
@@ -73,14 +74,11 @@ func TestProvider_usesOfficialGraphSDKForInboxAndSend(t *testing.T) {
 	}
 	adapter.SetBaseUrl(server.URL)
 	p := New(msgraphsdk.NewGraphServiceClient(adapter))
+	page["@odata.nextLink"] = server.URL + "/users/me-token-to-replace/messages?$skiptoken=n"
 
-	// Act
 	hasAttachment := true
 	inbox, readErr := p.ReadInbox(t.Context(), provider.ReadInboxRequest{From: "sender@example.com", To: "recipient@example.com", Subject: "Status", ReceivedAfter: "2026-08-01", ReceivedBefore: "2026-08-31", HasAttachment: &hasAttachment, UnreadOnly: true, Limit: 5})
-	_, sendErr := p.SendEmail(t.Context(), provider.SendEmailRequest{To: []string{"recipient@example.com"}, Subject: "Status", Body: "ready"})
-
-	// Assert
-	if readErr != nil || len(inbox.Messages) != 1 || inbox.Messages[0].ID != "message" || inbox.Messages[0].Body != "hello" || !inbox.Messages[0].Unread {
+	if readErr != nil || len(inbox.Messages) != 1 || inbox.Messages[0].ID != "message" || inbox.Messages[0].Body != "hello" || !inbox.Messages[0].Unread || inbox.NextCursor == "" {
 		t.Fatalf("inbox = %+v, err = %v", inbox, readErr)
 	}
 	for _, want := range []string{"from/emailAddress/address eq 'sender@example.com'", "toRecipients/any(r:r/emailAddress/address eq 'recipient@example.com')", "contains(subject, 'Status')", "receivedDateTime ge 2026-08-01T00:00:00Z", "receivedDateTime lt 2026-09-01T00:00:00Z", "hasAttachments eq true", "isRead eq false"} {
@@ -88,6 +86,22 @@ func TestProvider_usesOfficialGraphSDKForInboxAndSend(t *testing.T) {
 			t.Fatalf("filter = %q, want %q", listFilter, want)
 		}
 	}
+
+	folder, folderErr := p.ReadInbox(t.Context(), provider.ReadInboxRequest{Mailbox: "inbox", Limit: 1})
+	if folderErr != nil || len(folder.Messages) != 1 || !strings.Contains(lastPath, "/mailFolders/inbox/messages") {
+		t.Fatalf("mailbox inbox = %+v path = %s err = %v", folder, lastPath, folderErr)
+	}
+	if _, err := p.ReadInbox(t.Context(), provider.ReadInboxRequest{Cursor: inbox.NextCursor}); err != nil {
+		t.Fatalf("cursor page: %v", err)
+	}
+	if _, err := p.ReadInbox(t.Context(), provider.ReadInboxRequest{Limit: 101}); err != nil {
+		t.Fatalf("unfiltered inbox: %v", err)
+	}
+	if _, err := p.ReadInbox(t.Context(), provider.ReadInboxRequest{Cursor: "https://example.com/next"}); err == nil {
+		t.Fatal("foreign cursor was accepted")
+	}
+
+	_, sendErr := p.SendEmail(t.Context(), provider.SendEmailRequest{To: []string{"recipient@example.com"}, Subject: "Status", Body: "ready"})
 	message, ok := sent["Message"].(map[string]any)
 	if sendErr != nil || !ok || message["subject"] != "Status" {
 		t.Fatalf("send payload = %+v, err = %v", sent, sendErr)
@@ -103,13 +117,16 @@ func TestODataFilter_escapesStructuredFilters(t *testing.T) {
 	}
 }
 
-func TestProvider_rejectsMissingGraphClientAndInvalidCursor(t *testing.T) {
+func TestProvider_rejectsMissingGraphClient(t *testing.T) {
 	p := New(nil)
 	if err := p.Validate(context.Background()); err == nil {
 		t.Fatal("nil client was accepted")
 	}
-	if err := p.validCursor("https://example.com/next"); err == nil {
-		t.Fatal("foreign cursor was accepted")
+	if _, err := p.ReadInbox(context.Background(), provider.ReadInboxRequest{}); err == nil {
+		t.Fatal("nil client listed mail")
+	}
+	if _, err := p.SendEmail(context.Background(), provider.SendEmailRequest{To: []string{"a@b.c"}, Subject: "s", Body: "b"}); err == nil {
+		t.Fatal("nil client sent mail")
 	}
 }
 

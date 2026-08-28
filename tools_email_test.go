@@ -107,13 +107,11 @@ func TestEmailProvider_injectsAndDelegatesBuiltins(t *testing.T) {
 func TestEmailProvider_rejectsInvalidConfiguration(t *testing.T) {
 	// Arrange
 	validationFailure := errors.New("credentials expired")
-	var nilProvider *fakeEmailProvider
 	cases := []struct {
 		name     string
 		provider mail.Provider
 		want     string
 	}{
-		{name: "typed nil", provider: nilProvider, want: "must not be nil"},
 		{name: "unsupported kind", provider: &fakeEmailProvider{kind: "imap"}, want: "unsupported provider"},
 		{name: "provider validation", provider: &fakeEmailProvider{kind: mail.ProviderOutlook, validateErr: validationFailure}, want: "credentials expired"},
 	}

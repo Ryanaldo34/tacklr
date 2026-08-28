@@ -11,8 +11,11 @@ import (
 	msgraphsdk "github.com/microsoftgraph/msgraph-sdk-go"
 	"github.com/microsoftgraph/msgraph-sdk-go/models"
 	"github.com/microsoftgraph/msgraph-sdk-go/users"
+
 	provider "github.com/ryanaldo34/tacklr/email"
 )
+
+const maxPage = 100
 
 // Provider implements email.Provider with msgraph-sdk-go. The host constructs
 // the Graph client with the scopes and authentication flow it permits.
@@ -23,12 +26,12 @@ type Provider struct {
 // New returns an Outlook provider backed by client.
 func New(client *msgraphsdk.GraphServiceClient) *Provider { return &Provider{client: client} }
 
-func (*Provider) Kind() provider.ProviderKind { return provider.ProviderOutlook }
+func (p *Provider) Kind() provider.ProviderKind { return provider.ProviderOutlook }
 
 // Validate checks that the official Graph SDK client is present.
 func (p *Provider) Validate(context.Context) error {
 	if p == nil || p.client == nil {
-		return fmt.Errorf("email/outlook: Graph client is required")
+		return fmt.Errorf("email/%s: Graph client is required", p.Kind())
 	}
 	return nil
 }
@@ -42,42 +45,45 @@ func (p *Provider) ReadInbox(ctx context.Context, req provider.ReadInboxRequest)
 	if err := req.Validate(); err != nil {
 		return provider.Inbox{}, err
 	}
-	top := int32(req.Limit)
-	filter := odataFilter(req)
-	if req.Cursor != "" {
-		if err := p.validCursor(req.Cursor); err != nil {
-			return provider.Inbox{}, err
-		}
-		page, err := p.client.Me().Messages().WithUrl(req.Cursor).Get(ctx, nil)
-		if err != nil {
-			return provider.Inbox{}, fmt.Errorf("email/outlook: list next page: %w", err)
-		}
-		return inboxFromPage(page), nil
-	}
-	if req.Mailbox == "" {
-		page, err := p.client.Me().Messages().Get(ctx, messageConfig(top, filter))
-		if err != nil {
-			return provider.Inbox{}, fmt.Errorf("email/outlook: list messages: %w", err)
-		}
-		return inboxFromPage(page), nil
-	}
-	page, err := p.client.Me().MailFolders().ByMailFolderId(req.Mailbox).Messages().Get(ctx, folderMessageConfig(top, filter))
+	page, err := p.listMessages(ctx, req)
 	if err != nil {
-		return provider.Inbox{}, fmt.Errorf("email/outlook: list mailbox %q: %w", req.Mailbox, err)
+		return provider.Inbox{}, fmt.Errorf("email/outlook: list messages: %w", err)
 	}
 	return inboxFromPage(page), nil
 }
 
-func (p *Provider) validCursor(cursor string) error {
-	if p == nil || p.client == nil {
-		return fmt.Errorf("email/outlook: Graph client is required")
+func (p *Provider) listMessages(ctx context.Context, req provider.ReadInboxRequest) (models.MessageCollectionResponseable, error) {
+	if req.Cursor != "" {
+		if err := validGraphCursor(req.Cursor, p.client.GetAdapter().GetBaseUrl()); err != nil {
+			return nil, err
+		}
+		return p.client.Me().Messages().WithUrl(req.Cursor).Get(ctx, nil)
 	}
+	top := pageSize(req.Limit)
+	filter := odataFilter(req)
+	if req.Mailbox != "" {
+		return p.client.Me().MailFolders().ByMailFolderId(req.Mailbox).Messages().Get(ctx, folderMessageConfig(top, filter))
+	}
+	return p.client.Me().Messages().Get(ctx, messageConfig(top, filter))
+}
+
+func pageSize(limit int) int32 {
+	if limit < 1 {
+		return 20
+	}
+	if limit > maxPage {
+		return maxPage
+	}
+	return int32(limit) //nolint:gosec // G115: clamped to maxPage
+}
+
+func validGraphCursor(cursor, base string) error {
 	next, err := url.Parse(cursor)
 	if err != nil || next.Scheme == "" || next.Host == "" {
 		return fmt.Errorf("email/outlook: invalid pagination cursor")
 	}
-	base, err := url.Parse(p.client.GetAdapter().GetBaseUrl())
-	if err != nil || !strings.EqualFold(next.Scheme, base.Scheme) || !strings.EqualFold(next.Host, base.Host) {
+	u, err := url.Parse(base)
+	if err != nil || !strings.EqualFold(next.Scheme, u.Scheme) || !strings.EqualFold(next.Host, u.Host) {
 		return fmt.Errorf("email/outlook: pagination cursor is outside the Graph API")
 	}
 	return nil
@@ -88,9 +94,6 @@ func (p *Provider) validCursor(cursor string) error {
 func (p *Provider) SendEmail(ctx context.Context, req provider.SendEmailRequest) (provider.SentEmail, error) {
 	if err := p.Validate(ctx); err != nil {
 		return provider.SentEmail{}, err
-	}
-	if req.ReplyToMessageID != "" {
-		return provider.SentEmail{}, fmt.Errorf("email/outlook: replies are not supported")
 	}
 	message := models.NewMessage()
 	message.SetToRecipients(recipients(req.To))
@@ -154,9 +157,6 @@ func odataString(value string) string { return strings.ReplaceAll(value, "'", "'
 var selectedFields = []string{"id", "conversationId", "from", "toRecipients", "ccRecipients", "subject", "body", "receivedDateTime", "isRead"}
 
 func inboxFromPage(page models.MessageCollectionResponseable) provider.Inbox {
-	if page == nil {
-		return provider.Inbox{}
-	}
 	out := provider.Inbox{}
 	if next := page.GetOdataNextLink(); next != nil {
 		out.NextCursor = *next
@@ -168,9 +168,6 @@ func inboxFromPage(page models.MessageCollectionResponseable) provider.Inbox {
 }
 
 func messageFromSDK(message models.Messageable) provider.Message {
-	if message == nil {
-		return provider.Message{}
-	}
 	out := provider.Message{ID: value(message.GetId()), ThreadID: value(message.GetConversationId()), From: recipient(message.GetFrom()), To: recipientList(message.GetToRecipients()), CC: recipientList(message.GetCcRecipients()), Subject: value(message.GetSubject()), Unread: !boolValue(message.GetIsRead())}
 	if body := message.GetBody(); body != nil {
 		out.Body = value(body.GetContent())
@@ -210,18 +207,18 @@ func recipient(item models.Recipientable) string {
 	return value(item.GetEmailAddress().GetAddress())
 }
 
-func stringPtr(value string) *string {
-	if value == "" {
+func stringPtr(s string) *string {
+	if s == "" {
 		return nil
 	}
-	return &value
+	return &s
 }
 
-func value(value *string) string {
-	if value == nil {
+func value(s *string) string {
+	if s == nil {
 		return ""
 	}
-	return *value
+	return *s
 }
 
-func boolValue(value *bool) bool { return value != nil && *value }
+func boolValue(v *bool) bool { return v != nil && *v }

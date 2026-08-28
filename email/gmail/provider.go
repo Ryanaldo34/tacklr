@@ -7,11 +7,12 @@ import (
 	"fmt"
 	"mime"
 	"net/mail"
+	"slices"
 	"strings"
-	"time"
+
+	googlemail "google.golang.org/api/gmail/v1"
 
 	provider "github.com/ryanaldo34/tacklr/email"
-	googlemail "google.golang.org/api/gmail/v1"
 )
 
 // Provider implements email.Provider with google.golang.org/api/gmail/v1.
@@ -23,12 +24,12 @@ type Provider struct {
 // New returns a Gmail provider backed by service.
 func New(service *googlemail.Service) *Provider { return &Provider{service: service} }
 
-func (*Provider) Kind() provider.ProviderKind { return provider.ProviderGmail }
+func (p *Provider) Kind() provider.ProviderKind { return provider.ProviderGmail }
 
 // Validate checks that the official Gmail SDK client is present.
 func (p *Provider) Validate(context.Context) error {
 	if p == nil || p.service == nil {
-		return fmt.Errorf("email/gmail: service is required")
+		return fmt.Errorf("email/%s: service is required", p.Kind())
 	}
 	return nil
 }
@@ -71,16 +72,9 @@ func (p *Provider) SendEmail(ctx context.Context, req provider.SendEmailRequest)
 	if err := p.Validate(ctx); err != nil {
 		return provider.SentEmail{}, err
 	}
-	raw := buildMessage(req)
-	message := &googlemail.Message{Raw: base64.RawURLEncoding.EncodeToString([]byte(raw))}
-	if req.ReplyToMessageID != "" {
-		original, err := p.service.Users.Messages.Get("me", req.ReplyToMessageID).Format("metadata").Context(ctx).Do()
-		if err != nil {
-			return provider.SentEmail{}, fmt.Errorf("email/gmail: get reply message %q: %w", req.ReplyToMessageID, err)
-		}
-		message.ThreadId = original.ThreadId
-	}
-	sent, err := p.service.Users.Messages.Send("me", message).Context(ctx).Do()
+	sent, err := p.service.Users.Messages.Send("me", &googlemail.Message{
+		Raw: base64.RawURLEncoding.EncodeToString([]byte(buildMessage(req))),
+	}).Context(ctx).Do()
 	if err != nil {
 		return provider.SentEmail{}, fmt.Errorf("email/gmail: send message: %w", err)
 	}
@@ -129,14 +123,11 @@ func messageFromSDK(message *googlemail.Message) provider.Message {
 		}
 	}
 	received, _ := mail.ParseDate(headers["date"])
-	if received.IsZero() && message.InternalDate > 0 {
-		received = time.UnixMilli(message.InternalDate).UTC()
-	}
 	return provider.Message{
 		ID: message.Id, ThreadID: message.ThreadId, From: headers["from"],
 		To: splitAddresses(headers["to"]), CC: splitAddresses(headers["cc"]),
 		Subject: headers["subject"], Body: payloadText(message.Payload), ReceivedAt: received,
-		Unread: hasLabel(message.LabelIds, "UNREAD"),
+		Unread: slices.Contains(message.LabelIds, "UNREAD"),
 	}
 }
 
@@ -152,24 +143,13 @@ func splitAddresses(value string) []string {
 	return out
 }
 
-func hasLabel(labels []string, want string) bool {
-	for _, label := range labels {
-		if label == want {
-			return true
-		}
-	}
-	return false
-}
-
 func payloadText(part *googlemail.MessagePart) string {
 	if part == nil {
 		return ""
 	}
 	if strings.HasPrefix(part.MimeType, "text/plain") && part.Body != nil {
-		body, err := base64.RawURLEncoding.DecodeString(part.Body.Data)
-		if err == nil {
-			return string(body)
-		}
+		body, _ := base64.RawURLEncoding.DecodeString(part.Body.Data)
+		return string(body)
 	}
 	for _, child := range part.Parts {
 		if body := payloadText(child); body != "" {
@@ -192,6 +172,11 @@ func buildMessage(req provider.SendEmailRequest) string {
 	if len(req.BCC) > 0 {
 		b.WriteString("Bcc: ")
 		b.WriteString(strings.Join(req.BCC, ", "))
+		b.WriteString("\r\n")
+	}
+	if req.ReplyToMessageID != "" {
+		b.WriteString("In-Reply-To: ")
+		b.WriteString(req.ReplyToMessageID)
 		b.WriteString("\r\n")
 	}
 	b.WriteString("Subject: ")

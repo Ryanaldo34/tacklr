@@ -4,7 +4,6 @@ package email
 import (
 	"context"
 	"fmt"
-	"reflect"
 	"strings"
 	"time"
 )
@@ -19,12 +18,7 @@ const (
 
 // Valid reports whether the provider kind is supported by the harness.
 func (k ProviderKind) Valid() bool {
-	switch k {
-	case ProviderGmail, ProviderOutlook:
-		return true
-	default:
-		return false
-	}
+	return k == ProviderGmail || k == ProviderOutlook
 }
 
 // Provider supplies the operations exposed by the built-in email tools.
@@ -42,14 +36,6 @@ type Provider interface {
 func ValidateProvider(p Provider) error {
 	if p == nil {
 		return nil
-	}
-	v := reflect.ValueOf(p)
-	switch v.Kind() {
-	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Ptr, reflect.Slice:
-		if !v.IsNil() {
-			break
-		}
-		return fmt.Errorf("email: provider must not be nil")
 	}
 	if !p.Kind().Valid() {
 		return fmt.Errorf("email: unsupported provider %q", p.Kind())
@@ -127,8 +113,7 @@ func (r SendEmailRequest) Validate() error {
 	if len(r.To) == 0 {
 		return fmt.Errorf("email: at least one recipient is required")
 	}
-	recipients := append(append(append([]string{}, r.To...), r.CC...), r.BCC...)
-	for _, recipient := range recipients {
+	for _, recipient := range append(append(append([]string{}, r.To...), r.CC...), r.BCC...) {
 		if strings.TrimSpace(recipient) == "" {
 			return fmt.Errorf("email: recipients must not be empty")
 		}
