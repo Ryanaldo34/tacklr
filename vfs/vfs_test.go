@@ -850,7 +850,7 @@ type memFactory struct {
 }
 
 func (f memFactory) Open(context.Context, string, vfs.Binding) (vfs.Provider, error) {
-	return memProvider{store: f.store}, nil
+	return memProvider(f), nil
 }
 
 type memProvider struct{ store *memStore }

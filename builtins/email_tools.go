@@ -94,14 +94,7 @@ func runSendEmail(ctx context.Context, provider EmailProvider, args sendEmailArg
 	if provider == nil {
 		return SentEmail{}, fmt.Errorf("builtins: email provider is required")
 	}
-	req := SendEmailRequest{
-		To:               args.To,
-		CC:               args.CC,
-		BCC:              args.BCC,
-		Subject:          args.Subject,
-		Body:             args.Body,
-		ReplyToMessageID: args.ReplyToMessageID,
-	}
+	req := SendEmailRequest(args)
 	if err := req.Validate(); err != nil {
 		return SentEmail{}, fmt.Errorf("send_email: %w", err)
 	}

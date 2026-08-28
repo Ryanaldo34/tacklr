@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/ryanaldo34/tacklr/brain"
-	"github.com/ryanaldo34/tacklr/internal/session"
 	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
@@ -38,15 +37,6 @@ func turnRuntime(h *TurnManager) HarnessRuntime {
 		}
 	}()
 	return newToolRuntime(ch, h.session, h.childHost)
-}
-
-func nopRuntime() HarnessRuntime {
-	ch := make(chan StreamEvent, 8)
-	go func() {
-		for range ch {
-		}
-	}()
-	return newToolRuntime(ch, session.NewSessionManager(), nil)
 }
 
 func mustNewTurnManager(t testing.TB, opts AgentOptions) *TurnManager {
