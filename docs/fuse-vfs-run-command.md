@@ -62,6 +62,7 @@ The **agent file catalog** is collapsed. Discovery (`find_files`, `find_content`
 | FUSE attach; fail-hard on device + mount fail; skip remount if `HostDir` set | `durable.OpenTurnVFS` |
 | Turn-scoped mounts; TurnManager Close does not unmount | `openTurnVFS`, `EventStream.Close`, `TurnManager.Close` |
 | host `/workspace/work` | `OpenVFS` `At("work", Local(jail))` |
+| host skills packs | `OpenSkills` (host-only Tree; not on the agent `/workspace`) |
 | `run_command` | `tools_vfs.go` |
 | Fuse mount metrics / events | `telemetry` + Registry |
 | go-fuse as a direct module | `go.mod` |

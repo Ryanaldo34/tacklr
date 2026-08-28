@@ -65,6 +65,7 @@ These still inject when the turn’s world is present. They close over per-turn 
 | You set | Tools that close over it |
 |---------|--------------------------|
 | `MountSession` | `read`, `write`, `write_document`, `write_spreadsheet`, `run_command` |
+| `SkillsSession` (`AgentSpec.OpenSkills`) | `read_skill` |
 | `Brain` | `search`, `find_exact`, `read_object`, `schema`, `save_*`, `link`, `expand`, … |
 | Brain + VFS + namespace (index bridge) | `index_file`, `unindex` |
 

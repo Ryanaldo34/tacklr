@@ -27,29 +27,31 @@ const (
 	turnError
 )
 
-func (r *Runtime) constructHarness(ctx context.Context, p *sessionProc, bindings []vfs.Binding, state map[string]any) (*tacklr.TurnManager, *vfs.MountSession, error) {
+func (r *Runtime) constructHarness(ctx context.Context, p *sessionProc, bindings []vfs.Binding, state map[string]any) (*tacklr.TurnManager, *vfs.MountSession, *vfs.MountSession, error) {
 	if p.agentID == "" {
-		return nil, nil, fmt.Errorf("no agent configured for session")
+		return nil, nil, nil, fmt.Errorf("no agent configured for session")
 	}
 	spec, ok := r.catalog.Lookup(p.agentID)
 	if !ok {
-		return nil, nil, durable.ErrAgentNotFound
+		return nil, nil, nil, durable.ErrAgentNotFound
 	}
 	if p.specialist != "" {
 		over, err := durable.OverlaySpecialist(spec, p.specialist)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		spec = over
 	}
 	threadID := string(p.id)
-	ms, err := durable.OpenTurnVFS(ctx, threadID, spec, bindings, r.projection)
+	ms, skillsMS, err := durable.OpenTurnSessions(ctx, threadID, spec, bindings, r.projection)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	opts := spec.Options
 	opts.SessionID = threadID
 	opts.MountSession = ms
+	opts.SkillsSession = skillsMS
+	opts.SkillsRoot = spec.SkillsRoot
 	if len(p.mcp) > 0 {
 		mcpConfigs := make([]mcp.MCPConfig, 0, len(spec.Options.MCPConfigs)+len(p.mcp))
 		mcpConfigs = append(mcpConfigs, spec.Options.MCPConfigs...)
@@ -59,8 +61,8 @@ func (r *Runtime) constructHarness(ctx context.Context, p *sessionProc, bindings
 
 	h, err := tacklr.NewTurnManager(ctx, opts)
 	if err != nil {
-		durable.CloseTurnVFS(ms, threadID, "construct")
-		return nil, nil, err
+		durable.CloseTurnTrees(ms, skillsMS, threadID, "construct")
+		return nil, nil, nil, err
 	}
 	h.BindChildHost(sessionChildren{r: r, p: p})
 	snap, rev, loadErr := r.snapshots.Load(ctx, p.id)
@@ -69,21 +71,21 @@ func (r *Runtime) constructHarness(ctx context.Context, p *sessionProc, bindings
 		p.revision = rev
 		if err := h.RestoreCheckpoint(snap.Checkpoint); err != nil {
 			h.Close()
-			durable.CloseTurnVFS(ms, threadID, "restore")
-			return nil, nil, err
+			durable.CloseTurnTrees(ms, skillsMS, threadID, "restore")
+			return nil, nil, nil, err
 		}
 	case errors.Is(loadErr, durable.ErrSessionNotFound):
 	default:
 		h.Close()
-		durable.CloseTurnVFS(ms, threadID, "load")
-		return nil, nil, loadErr
+		durable.CloseTurnTrees(ms, skillsMS, threadID, "load")
+		return nil, nil, nil, loadErr
 	}
 	if err := h.ApplySessionState(state); err != nil {
 		h.Close()
-		durable.CloseTurnVFS(ms, threadID, "state")
-		return nil, nil, err
+		durable.CloseTurnTrees(ms, skillsMS, threadID, "state")
+		return nil, nil, nil, err
 	}
-	return h, ms, nil
+	return h, ms, skillsMS, nil
 }
 
 func (r *Runtime) persistHarness(ctx context.Context, p *sessionProc, h *tacklr.TurnManager) error {
@@ -131,13 +133,13 @@ func (r *Runtime) fail(ctx context.Context, p *sessionProc, err error) turnOutco
 }
 
 func (r *Runtime) runTurn(ctx context.Context, p *sessionProc, user *tacklr.Message, resume map[string][]byte, bindings []vfs.Binding, state map[string]any) turnOutcome {
-	h, ms, err := r.constructHarness(ctx, p, bindings, state)
+	h, ms, skillsMS, err := r.constructHarness(ctx, p, bindings, state)
 	if err != nil {
 		return r.fail(ctx, p, err)
 	}
 	defer func() {
 		h.Close()
-		durable.CloseTurnVFS(ms, string(p.id), "turn_end")
+		durable.CloseTurnTrees(ms, skillsMS, string(p.id), "turn_end")
 	}()
 
 	eng := h.Drive()

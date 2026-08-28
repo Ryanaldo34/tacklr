@@ -32,6 +32,36 @@ func CloseTurnVFS(ms *vfs.MountSession, sessionID, reason string) {
 	}
 }
 
+// CloseTurnTrees closes the agent workspace tree and the host-only skills tree.
+func CloseTurnTrees(workspace, skills *vfs.MountSession, sessionID, reason string) {
+	CloseTurnVFS(workspace, sessionID, reason)
+	CloseTurnVFS(skills, sessionID, reason+"-skills")
+}
+
+// OpenSkillsVFS builds the host-only skills MountSession from AgentSpec.OpenSkills.
+// It does not attach a FUSE projection. The agent never receives this session.
+func OpenSkillsVFS(ctx context.Context, threadID string, spec AgentSpec) (*vfs.MountSession, error) {
+	if spec.OpenSkills == nil {
+		return nil, nil
+	}
+	return spec.OpenSkills(ctx, threadID, vfs.Request{})
+}
+
+// OpenTurnSessions opens the agent workspace and the host-only skills tree.
+// On OpenSkills failure the workspace session is closed.
+func OpenTurnSessions(ctx context.Context, threadID string, spec AgentSpec, bindings []vfs.Binding, proj vfs.Projection) (workspace, skills *vfs.MountSession, err error) {
+	workspace, err = OpenTurnVFS(ctx, threadID, spec, bindings, proj)
+	if err != nil {
+		return nil, nil, err
+	}
+	skills, err = OpenSkillsVFS(ctx, threadID, spec)
+	if err != nil {
+		CloseTurnVFS(workspace, threadID, "skills_open")
+		return nil, nil, err
+	}
+	return workspace, skills, nil
+}
+
 // OpenTurnVFS builds the turn-scoped MountSession from AgentSpec.OpenVFS.
 // Nil when OpenVFS is nil or the projection is unavailable.
 func OpenTurnVFS(ctx context.Context, threadID string, spec AgentSpec, bindings []vfs.Binding, proj vfs.Projection) (*vfs.MountSession, error) {

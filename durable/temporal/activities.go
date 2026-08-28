@@ -142,7 +142,7 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 	if attempt > 1 {
 		_ = a.publish(ctx, stream, in.SessionID, durable.TopicRetry, streaming.StreamEvent{Type: streaming.StreamEventError, Content: "retry"}, true)
 	}
-	h, ms, rev, err := a.harness(ctx, in.SessionID, in.AgentID, in.MCPServers, in.Auth, in.Mounts, in.Specialist, in.State)
+	h, ms, skillsMS, rev, err := a.harness(ctx, in.SessionID, in.AgentID, in.MCPServers, in.Auth, in.Mounts, in.Specialist, in.State)
 	if err != nil {
 		pub := err
 		if err := ctx.Err(); err != nil {
@@ -154,7 +154,7 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 	}
 	defer func() {
 		h.Close()
-		durable.CloseTurnVFS(ms, string(in.SessionID), "inference")
+		durable.CloseTurnTrees(ms, skillsMS, string(in.SessionID), "inference")
 	}()
 	eng := h.Drive()
 	out, stop := drive.PipeStreamEvents(a.emitter(ctx, stream, in.SessionID))
@@ -229,14 +229,14 @@ func (a *Activities) Tool(ctx context.Context, in ToolInput) (ToolOutput, error)
 	if attempt > 1 {
 		_ = a.publish(ctx, stream, in.SessionID, durable.TopicRetry, streaming.StreamEvent{Type: streaming.StreamEventError, Content: "retry"}, true)
 	}
-	h, ms, rev, err := a.harness(ctx, in.SessionID, in.AgentID, in.MCPServers, in.Auth, in.Mounts, in.Specialist, in.State)
+	h, ms, skillsMS, rev, err := a.harness(ctx, in.SessionID, in.AgentID, in.MCPServers, in.Auth, in.Mounts, in.Specialist, in.State)
 	if err != nil {
 		slog.ErrorContext(ctx, "tool harness", "area", telemetry.AreaHarness, "error", err)
 		return ToolOutput{}, err
 	}
 	defer func() {
 		h.Close()
-		durable.CloseTurnVFS(ms, string(in.SessionID), "tool")
+		durable.CloseTurnTrees(ms, skillsMS, string(in.SessionID), "tool")
 	}()
 	kids := &activityChildren{
 		parent:  in.SessionID,
@@ -283,13 +283,13 @@ func (a *Activities) Tool(ctx context.Context, in ToolInput) (ToolOutput, error)
 }
 
 func (a *Activities) CommitToolOutput(ctx context.Context, in CommitToolInput) (ToolOutput, error) {
-	h, ms, rev, err := a.harness(ctx, in.SessionID, in.AgentID, in.MCPServers, in.Auth, in.Mounts, in.Specialist, in.State)
+	h, ms, skillsMS, rev, err := a.harness(ctx, in.SessionID, in.AgentID, in.MCPServers, in.Auth, in.Mounts, in.Specialist, in.State)
 	if err != nil {
 		return ToolOutput{}, err
 	}
 	defer func() {
 		h.Close()
-		durable.CloseTurnVFS(ms, string(in.SessionID), "commit_tool")
+		durable.CloseTurnTrees(ms, skillsMS, string(in.SessionID), "commit_tool")
 	}()
 	h.Drive().RecordToolResult(in.Call, in.Output)
 	if _, err = a.save(ctx, in.SessionID, in.AgentID, h, rev, in.Mounts); err != nil {
@@ -308,15 +308,15 @@ func (a *Activities) CommitToolOutput(ctx context.Context, in CommitToolInput) (
 	return ToolOutput{}, nil
 }
 
-func (a *Activities) harness(ctx context.Context, id durable.SessionID, agentID string, extraMCP []mcp.MCPConfig, auth durable.AuthContext, mounts []durable.MountRecipe, specialist string, state map[string]any) (*tacklr.TurnManager, *vfs.MountSession, durable.Revision, error) {
+func (a *Activities) harness(ctx context.Context, id durable.SessionID, agentID string, extraMCP []mcp.MCPConfig, auth durable.AuthContext, mounts []durable.MountRecipe, specialist string, state map[string]any) (*tacklr.TurnManager, *vfs.MountSession, *vfs.MountSession, durable.Revision, error) {
 	spec, ok := a.Catalog.Lookup(agentID)
 	if !ok {
-		return nil, nil, "", durable.ErrAgentNotFound
+		return nil, nil, nil, "", durable.ErrAgentNotFound
 	}
 	if specialist != "" {
 		over, err := durable.OverlaySpecialist(spec, specialist)
 		if err != nil {
-			return nil, nil, "", err
+			return nil, nil, nil, "", err
 		}
 		spec = over
 	}
@@ -324,13 +324,15 @@ func (a *Activities) harness(ctx context.Context, id durable.SessionID, agentID 
 	if proj == nil {
 		proj = vfs.DirectProjection{}
 	}
-	ms, err := durable.OpenTurnVFS(ctx, string(id), spec, durable.BindingsForTurn(mounts, auth), proj)
+	ms, skillsMS, err := durable.OpenTurnSessions(ctx, string(id), spec, durable.BindingsForTurn(mounts, auth), proj)
 	if err != nil {
-		return nil, nil, "", err
+		return nil, nil, nil, "", err
 	}
 	opts := spec.Options
 	opts.SessionID = string(id)
 	opts.MountSession = ms
+	opts.SkillsSession = skillsMS
+	opts.SkillsRoot = spec.SkillsRoot
 	if len(extraMCP) > 0 {
 		mcpConfigs := make([]mcp.MCPConfig, 0, len(opts.MCPConfigs)+len(extraMCP))
 		mcpConfigs = append(mcpConfigs, opts.MCPConfigs...)
@@ -339,8 +341,8 @@ func (a *Activities) harness(ctx context.Context, id durable.SessionID, agentID 
 	}
 	h, err := tacklr.NewTurnManager(ctx, opts)
 	if err != nil {
-		durable.CloseTurnVFS(ms, string(id), "construct")
-		return nil, nil, "", err
+		durable.CloseTurnTrees(ms, skillsMS, string(id), "construct")
+		return nil, nil, nil, "", err
 	}
 	var rev durable.Revision
 	snap, loaded, loadErr := a.Snapshots.Load(ctx, id)
@@ -348,22 +350,22 @@ func (a *Activities) harness(ctx context.Context, id durable.SessionID, agentID 
 	case loadErr == nil:
 		if err := h.RestoreCheckpoint(snap.Checkpoint); err != nil {
 			h.Close()
-			durable.CloseTurnVFS(ms, string(id), "restore")
-			return nil, nil, "", err
+			durable.CloseTurnTrees(ms, skillsMS, string(id), "restore")
+			return nil, nil, nil, "", err
 		}
 		rev = loaded
 	case errors.Is(loadErr, durable.ErrSessionNotFound):
 	default:
 		h.Close()
-		durable.CloseTurnVFS(ms, string(id), "load")
-		return nil, nil, "", loadErr
+		durable.CloseTurnTrees(ms, skillsMS, string(id), "load")
+		return nil, nil, nil, "", loadErr
 	}
 	if err := h.ApplySessionState(state); err != nil {
 		h.Close()
-		durable.CloseTurnVFS(ms, string(id), "state")
-		return nil, nil, "", err
+		durable.CloseTurnTrees(ms, skillsMS, string(id), "state")
+		return nil, nil, nil, "", err
 	}
-	return h, ms, rev, nil
+	return h, ms, skillsMS, rev, nil
 }
 
 func (a *Activities) save(ctx context.Context, id durable.SessionID, agentID string, h *tacklr.TurnManager, expected durable.Revision, mounts []durable.MountRecipe) (durable.Revision, error) {

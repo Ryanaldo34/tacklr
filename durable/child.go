@@ -25,6 +25,7 @@ func OverlaySpecialist(parent AgentSpec, specialist string) (AgentSpec, error) {
 	out.Options = parent.Options.WithSpecialist(spec)
 	out.Options.SessionID = ""
 	out.Options.MountSession = nil
+	out.Options.SkillsSession = nil
 	return out, nil
 }
 

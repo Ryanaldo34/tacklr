@@ -150,6 +150,61 @@ func TestBindThenPromptReadsWorkspace(t *testing.T) {
 	}
 }
 
+func TestPrompt_readSkillFromOpenSkills(t *testing.T) {
+	ctx := t.Context()
+	pack := t.TempDir()
+	d := filepath.Join(pack, "research")
+	if err := os.MkdirAll(d, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(d, "SKILL.md"), []byte("---\nname: research\ndescription: Research carefully\n---\n\nAlways verify claims.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	model := &testkit.ScriptedModel{
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			if last := lastMsg(msgs); last != nil && last.Role == tacklr.RoleTool {
+				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: last.Content, IsComplete: true}
+				return
+			}
+			id := "skill-" + itoa(len(msgs))
+			ch <- tacklr.LLMResponseChunk{
+				Type: tacklr.StreamEventFunctionCall,
+				ToolCalls: []tacklr.ToolCall{{
+					ID: id, CallID: id, Name: "read_skill",
+					Arguments: `{"name":"research"}`,
+				}},
+				IsComplete: true,
+			}
+		},
+	}
+	rt := New(newCatalog(t, model, durable.AgentSpec{
+		OpenVFS:    vfs.Tree(vfs.At("work", builtins.Local(t.TempDir()))),
+		OpenSkills: vfs.Tree(vfs.At("skills", builtins.Local(pack))),
+	}), WithProjection(vfs.DirectProjection{}))
+	id, err := rt.CreateSession(ctx, durable.CreateSession{AgentID: "default"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rt.Prompt(ctx, id, durable.Prompt{Text: "use research"}); err != nil {
+		t.Fatal(err)
+	}
+	sub, err := rt.Subscribe(ctx, id, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sub.Close() })
+	got := waitEvents(t, sub, 8*time.Second)
+	var body string
+	for _, ev := range got {
+		if ev.Type == streaming.StreamEventMessage {
+			body = ev.Content
+		}
+	}
+	if !strings.Contains(body, "Always verify claims") {
+		t.Fatalf("want skill instructions, got %q events=%+v", body, summarize(got))
+	}
+}
+
 func TestUnbindThenPromptWorkspaceGone(t *testing.T) {
 	ctx := t.Context()
 	dir := t.TempDir()

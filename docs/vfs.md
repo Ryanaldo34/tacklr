@@ -10,6 +10,7 @@ Knowledge objects, search, and the graph are documented in **[docs/knowledge.md]
 
 ```text
   Host OpenVFS (Tree/At); client binds credentials before the turn
+  Host OpenSkills (separate Tree); loader only — never session.VFS
            │
            ▼
   MountSession (injected if configured)  ── /workspace/work/main.go
@@ -62,7 +63,6 @@ The only top-level mount is **`/workspace`**. Hosts close over clients in `vfs.O
 ```go
 open := vfs.Tree(
 	vfs.At("work", builtins.Local("/var/agent/scratch")),
-	vfs.At("skills", builtins.Local("/var/agent/skills")),
 	vfs.At("engram", brain.Open(eng, scope)),
 )
 ms, err := open(ctx, "sess-1", vfs.Request{})
@@ -91,7 +91,7 @@ Tests inject fakes into the same constructors: `builtins.Drive(fakeAPI)`, `built
 |------|---------|
 | `At(name, open)` | One `/workspace/<name>` backend |
 | `Tree(...)` | One `/workspace` mount whose members are the At list |
-| `Union(...)` | Read-only merge of Opens (skill packs: `At("skills", builtins.Union(builtins.Local(a), builtins.Local(b)))`) |
+| `Union(...)` | Read-only merge of Opens (skill packs on `OpenSkills`: `Tree(At("skills", Union(Local(a), Local(b))))`) |
 | `MountSpec` | Durable description (point `/workspace`, members, **indexPolicy**). Checkpoint-safe; no secrets. |
 | `IndexPolicy` | `none` \| `selective` \| `prefix` \| `watch` (empty → selective when the index bridge is on) |
 
@@ -99,7 +99,7 @@ Tests inject fakes into the same constructors: `builtins.Drive(fakeAPI)`, `built
 
 ### Skills
 
-Playbooks live at **`/workspace/skills`**. Hosts pass `At("skills", builtins.Local(dir))` or `At("skills", builtins.Union(...))`. The harness loads that directory. Overlapping first-level names in a Union are `ErrAmbiguous`. IndexPolicy is `none`.
+Playbooks are **not** on the agent `/workspace` tree. Hosts set `AgentSpec.OpenSkills` to a separate `vfs.Tree` (often `At("skills", builtins.Union(...))`). Overlapping first-level names in a Union are `ErrAmbiguous`. The loader walks `SkillsRoot` (empty means `/workspace/skills` on that host-only session). The agent never sees those paths. Full instructions load only through `read_skill`.
 
 Host-owned roots and secrets (local jail, S3 / Azure Blob client) live in the Open closures, not on mounts or checkpoints.
 
@@ -258,7 +258,7 @@ Tool guidance:
 
 FUSE: hosts call `MountSession.FuseMount(dir)` for a kernel tree. **The only mount point is `/workspace`**. Multi-segment points (`/tmp/tacklr`) fail `FuseMount`. If `ReadText` succeeds (`Textual`), `getattr`/`Read` use that plaintext (so `cat`/`rg` see the projection). Otherwise `Stat.Size` + `io.ReaderAt`. Kernel writes persist through `WriteFile` only when `KernelWritable` (`IdentityCodec`). Projected textual types (Word, Notion, Docs) are **read-only** on the kernel (`EROFS`); the agent `write` tool still uses `WriteDocument`. `Tree` attaches `/workspace`; `FuseMount` is the host kernel mount. `HostDir()` is the last mount directory (host-facing only). `FuseAvailable()` probes `/dev/fuse` and `/dev/macfuse*`. `Close` unmounts. Host `ls`/`rg` from HostDir see `workspace/work/…`.
 
-`durable.Runtime` injects a **turn-scoped** `MountSession` from `AgentSpec.OpenVFS` and attaches FUSE for that slice: `$TMP/tacklr-fuse/<session>` mode `0700`. The activity (or in-process turn slice) closes the tree when the step ends. Bind/unbind only record credentials; they do not keep a live tree between prompts. Production without a device has **no** `MountSession` (no VFS tools, no `run_command`). Tests inject `vfs.DirectProjection` so `read`/`write` still work and `run_command` returns `ErrFuseNotMounted` until `HostDir` is set. Device present and mount fails after one suffix retry → fail-hard. Workers reconstruct a `MountSession` per activity; they do not hold a parent pointer.
+`durable.Runtime` injects a **turn-scoped** `MountSession` from `AgentSpec.OpenVFS` and attaches FUSE for that slice: `$TMP/tacklr-fuse/<session>` mode `0700`. `OpenSkills` is a second session with no FUSE projection; the agent never receives it. The activity (or in-process turn slice) closes both trees when the step ends. Bind/unbind only record credentials; they do not keep a live tree between prompts. Production without a device has **no** `MountSession` (no VFS tools, no `run_command`). Tests inject `vfs.DirectProjection` so `read`/`write` still work and `run_command` returns `ErrFuseNotMounted` until `HostDir` is set. Device present and mount fails after one suffix retry → fail-hard. Workers reconstruct a `MountSession` per activity; they do not hold a parent pointer.
 
 `TextCodec` requires valid UTF-8 and builds a `TextDocument` labeled with the caller’s media type.
 

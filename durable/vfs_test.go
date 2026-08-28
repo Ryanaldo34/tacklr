@@ -1,8 +1,11 @@
 package durable
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ryanaldo34/tacklr"
@@ -27,6 +30,42 @@ func TestOpenTurnVFS_nilWhenNoOpenOrProjection(t *testing.T) {
 	}
 	CloseTurnVFS(nil, "s", "test")
 	ClearSessionVFS(nil, "s")
+}
+
+func TestOpenTurnSessions_skillsWithoutProjection(t *testing.T) {
+	ctx := t.Context()
+	pack := t.TempDir()
+	d := filepath.Join(pack, "research")
+	if err := os.MkdirAll(d, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(d, "SKILL.md"), []byte("---\nname: research\ndescription: d\n---\n\nbody\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ws, skills, err := OpenTurnSessions(ctx, "s", AgentSpec{
+		OpenVFS:    vfs.Tree(vfs.At("work", builtins.Local(t.TempDir()))),
+		OpenSkills: vfs.Tree(vfs.At("skills", builtins.Local(pack))),
+	}, nil, downProjection{})
+	if err != nil || ws != nil || skills == nil {
+		t.Fatalf("workspace=%v skills=%v err=%v", ws, skills, err)
+	}
+	t.Cleanup(func() { CloseTurnTrees(ws, skills, "s", "test") })
+	got, err := skills.ReadFile(ctx, "/workspace/skills/research/SKILL.md")
+	if err != nil || !strings.Contains(string(got), "body") {
+		t.Fatalf("skills read: %q %v", got, err)
+	}
+}
+
+func TestOpenTurnSessions_skillsError(t *testing.T) {
+	_, _, err := OpenTurnSessions(t.Context(), "s", AgentSpec{
+		OpenVFS: vfs.Tree(vfs.At("work", builtins.Local(t.TempDir()))),
+		OpenSkills: func(context.Context, string, vfs.Request) (*vfs.MountSession, error) {
+			return nil, os.ErrPermission
+		},
+	}, nil, vfs.DirectProjection{})
+	if !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("err=%v", err)
+	}
 }
 
 func TestOpenTurnVFS_treeUnderWorkspace(t *testing.T) {

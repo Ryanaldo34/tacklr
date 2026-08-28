@@ -48,12 +48,53 @@ func TestNewTurnManager_constructFailClosed(t *testing.T) {
 	}
 	ms := mustMountTree(t, t.Name(), vfs.At("skills", vfs.Local(root)))
 	_, err := NewTurnManager(context.Background(), AgentOptions{
-		Config:       Config{MaxWindowSize: 8192},
-		Model:        &mockStrategy{},
-		MountSession: ms,
+		Config:        Config{MaxWindowSize: 8192},
+		Model:         &mockStrategy{},
+		SkillsSession: ms,
 	})
 	if err == nil || !strings.Contains(err.Error(), "initialize skills") {
 		t.Fatalf("want skills construct error, got %v", err)
+	}
+}
+
+func TestNewTurnManager_skillsIsolatedFromWorkspace(t *testing.T) {
+	ctx := t.Context()
+	pack := t.TempDir()
+	d := filepath.Join(pack, "research")
+	if err := os.MkdirAll(d, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "---\nname: research\ndescription: Research carefully\n---\n\nAlways verify claims.\n"
+	if err := os.WriteFile(filepath.Join(d, "SKILL.md"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ms := mustMountTree(t, t.Name(), vfs.At("work", vfs.Local(t.TempDir())))
+	skillsMS := mustMountTree(t, t.Name()+"-skills", vfs.At("skills", vfs.Local(pack)))
+
+	h := mustNewTurnManager(t, AgentOptions{
+		Config:        Config{MaxWindowSize: 8192},
+		Model:         &mockStrategy{},
+		MountSession:  ms,
+		SkillsSession: skillsMS,
+	})
+	t.Cleanup(h.Close)
+
+	skill := h.findTool("read_skill", "")
+	if skill == nil {
+		t.Fatal("read_skill missing")
+	}
+	res, err := skill.invoke(ctx, `{"name":"research"}`, turnRuntime(h))
+	if err != nil || !strings.Contains(res.output, "Always verify claims") {
+		t.Fatalf("read_skill: %v %s", err, res.output)
+	}
+
+	read := h.findTool("read", "")
+	if read == nil {
+		t.Fatal("read missing")
+	}
+	_, err = read.invoke(ctx, `{"path":"/workspace/skills/research/SKILL.md"}`, turnRuntime(h))
+	if !errors.Is(err, vfs.ErrNotExist) {
+		t.Fatalf("workspace read of skill path: %v", err)
 	}
 }
 

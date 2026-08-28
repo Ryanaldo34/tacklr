@@ -143,15 +143,14 @@ func TestWithSpecialist_inheritsParentSkills(t *testing.T) {
 		t.Fatal(err)
 	}
 	work := t.TempDir()
-	ms := mustMountTree(t, t.Name(),
-		vfs.At("work", vfs.Local(work)),
-		vfs.At("skills", vfs.Local(pack)),
-	)
+	ms := mustMountTree(t, t.Name(), vfs.At("work", vfs.Local(work)))
+	skillsMS := mustMountTree(t, t.Name()+"-skills", vfs.At("skills", vfs.Local(pack)))
 
 	opts := AgentOptions{
-		Config:       Config{MaxWindowSize: 8192, MaxTurnRequests: 4},
-		Model:        &mockStrategy{},
-		MountSession: ms,
+		Config:        Config{MaxWindowSize: 8192, MaxTurnRequests: 4},
+		Model:         &mockStrategy{},
+		MountSession:  ms,
+		SkillsSession: skillsMS,
 	}
 	parent := mustNewTurnManager(t, opts)
 	t.Cleanup(parent.Close)

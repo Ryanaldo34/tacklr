@@ -3,6 +3,8 @@
 // # Public surface (hosts)
 //
 //   - Tree / At / OpenVFS — host builds one /workspace tree per turn
+//     (agent-visible). Skill catalogs use a second host-only Tree
+//     (AgentSpec.OpenSkills); they are not a workspace member.
 //   - MountSession — path I/O, ReadText / WriteDocument, ReadLines, FuseMount / Close, HostDir
 //   - FuseAvailable — process can mount a kernel tree (/dev/fuse or /dev/macfuse*)
 //   - ContentRev / ContentHash — session-visible content identity (for tools)

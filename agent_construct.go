@@ -74,9 +74,16 @@ type AgentOptions struct {
 	// ToolResultHooks map tool name → post-success window effects for host tools.
 	// Plan builtins use ToolOutcome instead.
 	ToolResultHooks map[string]ToolResultHook
-	// SkillsLoader loads skills. Nil uses skills.Loader on the /skills mount
-	// when MountSession has one (typically /workspace/skills).
+	// SkillsLoader loads skills. When nil, SkillsSession is walked with
+	// skills.Loader. MountSession is never used for skills.
 	SkillsLoader skills.SkillLoader
+	// SkillsSession is the host-only skills tree for this turn. Runtime
+	// builds it from AgentSpec.OpenSkills. It is not session.VFS; VFS tools
+	// do not see it. Nil and a nil SkillsLoader means no skills.
+	SkillsSession *vfs.MountSession
+	// SkillsRoot is the virtual directory skills.Loader walks on
+	// SkillsSession. Empty means skills.DefaultRoot (/workspace/skills).
+	SkillsRoot string
 	// Brain enables knowledge builtins when non-nil. Workers inherit the same engine.
 	// Configure Store, optional QueryEmbedder, and optional GraphReader/GraphWriter on the Engine
 	// before NewTurnManager (e.g. brain.WithGraph(helixgraph.New(...))). The harness does
@@ -90,10 +97,11 @@ type AgentOptions struct {
 	// Each tool call may add attrs to narrow the search; it cannot change ceiling values.
 	// Empty means no ceiling. Workers get a copy at spawn.
 	SearchNamespace brain.Namespace
-	// MountSession is the VFS tree injected for this turn, or nil (no VFS tools).
+	// MountSession is the agent /workspace tree for this turn, or nil (no VFS tools).
 	// Runtime builds one from OpenVFS plus Prompt.Auth bindings when a
 	// projection is available. Embedders pass their own. The injector Closes
 	// it after the turn; the harness never does (workers inherit the pointer).
+	// Do not mount skills here; use SkillsSession.
 	MountSession *vfs.MountSession
 	// runCommandUnattended injects run_command without ToolPermissionOnCall.
 	// Zero value parks run_command for permission. Unexported so hosts cannot
@@ -120,7 +128,7 @@ func NewTurnManager(ctx context.Context, opts AgentOptions) (*TurnManager, error
 		tools:                 opts.Tools,
 		mcpConfigs:            opts.MCPConfigs,
 		mcpCredentialResolver: opts.MCPCredentialResolver,
-		skillsLoader:          opts.SkillsLoader,
+		skillsLoader:          skillsSource(opts),
 		hostInterceptors:      slices.Clone(opts.ToolInterceptors),
 		hostResultHooks:       maps.Clone(opts.ToolResultHooks),
 		brain:                 opts.Brain,
@@ -284,12 +292,21 @@ func (a *TurnManager) planningWriteLock(ctx context.Context, inv ToolInvocation,
 	return next(ctx, inv)
 }
 
-func (a *TurnManager) initSkills(ctx context.Context) error {
-	loader := a.skillsLoader
-	if loader == nil {
-		loader = skills.Loader{Session: a.session.VFS}
+func skillsSource(opts AgentOptions) skills.SkillLoader {
+	if opts.SkillsLoader != nil {
+		return opts.SkillsLoader
 	}
-	loaded, err := loader.Load(ctx)
+	if opts.SkillsSession == nil {
+		return nil
+	}
+	return skills.Loader{Session: opts.SkillsSession, Root: opts.SkillsRoot}
+}
+
+func (a *TurnManager) initSkills(ctx context.Context) error {
+	if a.skillsLoader == nil {
+		return nil
+	}
+	loaded, err := a.skillsLoader.Load(ctx)
 	if err != nil {
 		return err
 	}

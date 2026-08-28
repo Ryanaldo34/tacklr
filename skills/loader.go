@@ -1,6 +1,8 @@
 // Package skills discovers and parses application-owned SKILL.md files.
 //
-// Discovery walks /workspace/skills on a vfs.MountSession.
+// Discovery walks a host-only MountSession (AgentSpec.OpenSkills). That
+// session is not the agent /workspace tree. The agent reads instructions
+// only through read_skill.
 package skills
 
 import (
@@ -18,6 +20,9 @@ import (
 
 const maxSkillFileSize = 1024 * 1024
 
+// DefaultRoot is the virtual directory the loader walks when Root is empty.
+const DefaultRoot = vfs.WorkspacePoint + "/skills"
+
 type Skill struct {
 	Name         string
 	Description  string
@@ -34,10 +39,13 @@ type SkillLoader interface {
 
 var _ SkillLoader = Loader{}
 
-// Loader loads one skill per immediate child of /skills.
-// A nil session or missing /skills mount loads nothing.
+// Loader loads one skill per immediate child of Root.
+// A nil session or missing Root directory loads nothing.
 type Loader struct {
 	Session *vfs.MountSession
+	// Root is the virtual directory that holds one child folder per skill.
+	// Empty means DefaultRoot (/workspace/skills).
+	Root string
 }
 
 // Load implements SkillLoader.
@@ -48,7 +56,10 @@ func (l Loader) Load(ctx context.Context) ([]Skill, error) {
 	if l.Session == nil {
 		return nil, nil
 	}
-	dir := path.Join(vfs.WorkspacePoint, "skills")
+	dir := strings.TrimSpace(l.Root)
+	if dir == "" {
+		dir = DefaultRoot
+	}
 	entries, err := l.Session.ReadDir(ctx, dir)
 	if err != nil {
 		if errors.Is(err, vfs.ErrNotMounted) || errors.Is(err, vfs.ErrNotExist) {

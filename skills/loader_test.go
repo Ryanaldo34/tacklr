@@ -188,6 +188,27 @@ func TestLoader_catalogAndFailurePaths(t *testing.T) {
 	})
 }
 
+func TestLoader_customRoot(t *testing.T) {
+	root := t.TempDir()
+	writeSkill(t, root, "alpha", "alpha", "Alpha skill", "Do alpha things.")
+	ms, err := vfs.Tree(vfs.At("packs", vfs.Local(root)))(t.Context(), t.Name(), vfs.Request{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ms.Close() })
+
+	loaded, err := (Loader{Session: ms, Root: "/workspace/packs"}).Load(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded) != 1 || loaded[0].Name != "alpha" || loaded[0].Path != "/workspace/packs/alpha/SKILL.md" {
+		t.Fatalf("loaded = %#v", loaded)
+	}
+	if loaded[0].Instructions != "Do alpha things." {
+		t.Fatalf("instructions = %q", loaded[0].Instructions)
+	}
+}
+
 func TestParse_returnPaths(t *testing.T) {
 	cases := []struct {
 		name    string

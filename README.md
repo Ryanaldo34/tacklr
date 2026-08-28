@@ -122,7 +122,8 @@ func main() {
 				builtins.WebFetch(exa),
 			},
 		},
-		OpenVFS: openVFS(jail, eng, ns),
+		OpenVFS:    openVFS(jail, eng, ns),
+		OpenSkills: vfs.Tree(vfs.At("skills", builtins.Union(builtins.Local(filepath.Join(jail, "skills"))))),
 	})
 
 	rt := inprocess.New(cat, inprocess.WithProjection(vfs.DirectProjection{}))
@@ -137,7 +138,6 @@ func openVFS(jail string, eng *brain.Engine, ns brain.Namespace) vfs.OpenVFS {
 	return func(ctx context.Context, sessionID string, req vfs.Request) (*vfs.MountSession, error) {
 		members := []vfs.Member{
 			vfs.At("work", builtins.Local(jail)),
-			vfs.At("skills", builtins.Local(filepath.Join(jail, "skills"))),
 			vfs.At("engram", brain.Open(eng, brain.Scope{Namespace: ns})),
 			vfs.At("memory", builtins.Memory()),
 		}
@@ -162,7 +162,7 @@ func openVFS(jail string, eng *brain.Engine, ns brain.Namespace) vfs.OpenVFS {
 }
 ```
 
-Importing `tacklr` registers built-in interrupts, Word/Excel codecs, and the durable driver adapter. The agent sees `/workspace/work`, `/workspace/skills`, `/workspace/engram`. A Drive or SharePoint bind on the prompt adds `/workspace/drive` or `/workspace/sharepoint` for that turn. Tests pass a fake `DriveAPI` / `GraphAPI` into the same `builtins.Drive` / `builtins.Graph` constructors.
+Importing `tacklr` registers built-in interrupts, Word/Excel codecs, and the durable driver adapter. The agent sees `/workspace/work`, `/workspace/engram`. Skills load from `OpenSkills` and reach the model only through `read_skill`. A Drive or SharePoint bind on the prompt adds `/workspace/drive` or `/workspace/sharepoint` for that turn. Tests pass a fake `DriveAPI` / `GraphAPI` into the same `builtins.Drive` / `builtins.Graph` constructors.
 
 ### Tools
 
@@ -177,6 +177,7 @@ Built-in tools that need a client use the same pattern. You construct them and p
 | `builtins.ReadInbox` / `builtins.SendEmail` | `read_inbox`, `send_email` |
 | `builtins.WebSearch` / `builtins.WebFetch` | `web_search`, `web_fetch` |
 | `MountSession` | `read`, `write`, `write_document`, `write_spreadsheet`, `run_command` |
+| `SkillsSession` (`OpenSkills`) | `read_skill` |
 | `Brain` | knowledge tools (`search`, `save_*`, …) |
 | index bridge (from Brain + VFS) | `index_file`, `unindex` |
 
@@ -207,7 +208,7 @@ Register nested agents on `AgentOptions.Specialists`. Tools start them through `
 | Brain | Host-owned knowledge: Engrams, search, optional graph | [docs/knowledge.md](docs/knowledge.md) |
 | Host tools | Your functions; close over clients in the constructor | [docs/tools.md](docs/tools.md) |
 | MCP | External tool servers | [`mcp`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/mcp) |
-| Skills | `SKILL.md` catalogs from VFS mounts | [`skills`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/skills) |
+| Skills | `SKILL.md` catalogs from `OpenSkills`; the model reads them only through `read_skill` | [`skills`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/skills) |
 | Web | `web_search` and `web_fetch` via `builtins.WebSearch` / `builtins.WebFetch` | [`builtins`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/builtins) |
 | Email | `read_inbox` and permission-gated `send_email` via `builtins.ReadInbox` / `builtins.SendEmail` | [`builtins`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/builtins) |
 | Server | `Protocol` over Runtime; ACP is the native option | [`server`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/server) |
@@ -248,7 +249,7 @@ When VFS is wired, the harness injects file tools over virtual paths only. `run_
 | `interrupt` | Pause / resume types |
 | `streaming` | Shared messages and events |
 | `mcp` | MCP config types |
-| `skills` | Skill loading from VFS mounts |
+| `skills` | Skill loading from the host-only `OpenSkills` tree |
 | `telemetry` | OpenTelemetry helpers |
 
 ---
