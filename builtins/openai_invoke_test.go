@@ -431,7 +431,3 @@ func TestInvoke_transportErrorClosesStream(t *testing.T) {
 		t.Fatal("want StreamEventError")
 	}
 }
-
-type roundTripFunc func(*http.Request) (*http.Response, error)
-
-func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
