@@ -26,10 +26,15 @@ Host tools on `AgentSpec.Options.Tools` close over their clients at catalog regi
 cat := durable.NewCatalog("agent")
 cat.Register("agent", durable.AgentSpec{Options: opts})
 rt := inprocess.New(cat, inprocess.WithProjection(vfs.DirectProjection{}))
-id, _ := rt.CreateSession(ctx, durable.CreateSession{AgentID: "agent"})
+id, _ := rt.CreateSession(ctx, durable.CreateSession{
+	AgentID: "agent",
+	State:   map[string]any{"user": "Ada", "company": "Acme"},
+})
 _ = rt.Prompt(ctx, id, durable.Prompt{Text: prompt, Auth: auth})
 sub, _ := rt.Subscribe(ctx, id, 0)
 ```
+
+`State` is session facts tools read with `StateGet`. Update it on a later `Prompt` or `Resume`.
 
 One goroutine per session runs the harness wait loop. HITL parks that goroutine and waits for `Runtime.Resume`. Session conversation lives in `SnapshotStore`.
 

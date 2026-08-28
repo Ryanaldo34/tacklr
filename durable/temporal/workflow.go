@@ -39,6 +39,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 		result     string
 		terminal   durable.SessionState
 		childParks map[string]durable.SessionID
+		seed       = in.State
 		promptCh   = workflow.GetSignalChannel(ctx, signalPrompt)
 		resumeCh   = workflow.GetSignalChannel(ctx, signalResume)
 		cancelCh   = workflow.GetSignalChannel(ctx, signalCancel)
@@ -149,7 +150,8 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 		}
 	}
 
-	runSlice := func(user *streaming.Message, resume map[string][]byte, auth durable.AuthContext, kind string) {
+	runSlice := func(user *streaming.Message, resume map[string][]byte, auth durable.AuthContext, kind string, extra map[string]any) {
+		turnState := durable.MergeUserState(seed, extra)
 		applyAuth(auth)
 		sessionCtx, hasSession := openTurnLocality(ctx, in.TurnLocalityTimeout, 2*time.Second)
 
@@ -248,6 +250,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 					Auth:          lastAuth,
 					Mounts:        mounts,
 					Specialist:    in.Specialist,
+					State:         turnState,
 				}, &out)
 				user = nil
 				resume = nil
@@ -256,6 +259,9 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 					break
 				}
 				etag = out.Etag
+				if etag != "" {
+					seed = nil
+				}
 				reqs++
 				if out.Complete {
 					inferComplete = true
@@ -280,12 +286,16 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 					Mounts:     mounts,
 					Specialist: in.Specialist,
 					Known:      spawnedIDs(spawned),
+					State:      turnState,
 				}, &tout)
 				if onActErr(err) {
 					stopSlice = true
 					break
 				}
 				etag = tout.Etag
+				if etag != "" {
+					seed = nil
+				}
 				if herr := applyChildIntent(ctx, sessionCtx, &spawned, tout, in, agentID, lastAuth, mounts); herr != nil {
 					stopSlice = onActErr(herr)
 					break
@@ -308,12 +318,16 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 							Auth:       lastAuth,
 							Mounts:     mounts,
 							Specialist: in.Specialist,
+							State:      turnState,
 						}, &cout)
 						if onActErr(cerr) {
 							stopSlice = true
 							break
 						}
 						etag = cout.Etag
+						if etag != "" {
+							seed = nil
+						}
 						tout.Interrupted = false
 					} else {
 						tout.Interrupted = true
@@ -351,8 +365,9 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 						parked = false
 						yielded = false
 						applyAuth(ev.resume.Auth)
+						turnState = durable.MergeUserState(turnState, ev.resume.State)
 						if cid, ok := childParks[interruptID]; ok {
-							_ = workflow.SignalExternalWorkflow(ctx, string(cid), "", signalResume, resumeSignal{Responses: ev.resume.Responses, Auth: ev.resume.Auth}).Get(ctx, nil)
+							_ = workflow.SignalExternalWorkflow(ctx, string(cid), "", signalResume, resumeSignal{Responses: ev.resume.Responses, Auth: ev.resume.Auth, State: ev.resume.State}).Get(ctx, nil)
 							delete(childParks, interruptID)
 						}
 						sessionCtx, hasSession = openTurnLocality(ctx, in.TurnLocalityTimeout, time.Minute)
@@ -372,12 +387,16 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 							Resume:     ev.resume.Responses,
 							Auth:       lastAuth,
 							Mounts:     mounts,
+							State:      turnState,
 						}, &iout)
 						if onActErr(err) {
 							stopSlice = true
 							break
 						}
 						etag = iout.Etag
+						if etag != "" {
+							seed = nil
+						}
 						toolCalls = slices.Concat(iout.ToolCalls, leftover)
 						leftover = nil
 						inferComplete = false
@@ -392,7 +411,6 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 						outcome = telemetry.OutcomeCancelled
 						stopSlice = true
 						waiting = false
-					default:
 					}
 				}
 			case drive.ActionComplete:
@@ -412,12 +430,16 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 					Auth:          lastAuth,
 					Mounts:        mounts,
 					Specialist:    in.Specialist,
+					State:         turnState,
 				}, &out)
 				if onActErr(err) {
 					stopSlice = true
 					break
 				}
 				etag = out.Etag
+				if etag != "" {
+					seed = nil
+				}
 				reqs++
 				hadTools = true
 				inferComplete = false
@@ -433,7 +455,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 	}
 
 	if in.Prompt != "" {
-		runSlice(&streaming.Message{Role: streaming.RoleUser, Content: in.Prompt}, nil, in.Auth, telemetry.TurnKindPrompt)
+		runSlice(&streaming.Message{Role: streaming.RoleUser, Content: in.Prompt}, nil, in.Auth, telemetry.TurnKindPrompt, nil)
 		return result, nil
 	}
 
@@ -458,10 +480,10 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 			if user == nil && ev.prompt.Text != "" {
 				user = &streaming.Message{Role: streaming.RoleUser, Content: ev.prompt.Text}
 			}
-			runSlice(user, nil, ev.prompt.Auth, telemetry.TurnKindPrompt)
+			runSlice(user, nil, ev.prompt.Auth, telemetry.TurnKindPrompt, ev.prompt.State)
 		case signalResume:
 			yielded = false
-			runSlice(nil, ev.resume.Responses, ev.resume.Auth, telemetry.TurnKindResume)
+			runSlice(nil, ev.resume.Responses, ev.resume.Auth, telemetry.TurnKindResume, ev.resume.State)
 		}
 	}
 	return result, nil

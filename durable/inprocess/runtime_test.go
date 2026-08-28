@@ -45,6 +45,17 @@ func newCatalog(t *testing.T, model tacklr.InferenceStrategy, extra durable.Agen
 	return cat
 }
 
+func waitTurnPersisted(t *testing.T, rt *Runtime, id durable.SessionID) {
+	t.Helper()
+	p, err := rt.get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rt.waitPriorTurn(t.Context(), p, false); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func waitEvents(t *testing.T, sub durable.Subscription, timeout time.Duration) []streaming.StreamEvent {
 	t.Helper()
 	deadline := time.After(timeout)
@@ -248,7 +259,10 @@ func TestAskUserChoiceYieldsThenResumeCompletes(t *testing.T) {
 	}
 
 	payload, _ := json.Marshal(map[string]any{"selectionIdx": 0})
-	if err := rt.Resume(ctx, id, durable.Resume{Responses: map[string][]byte{"ask1": payload}}); err != nil {
+	if err := rt.Resume(ctx, id, durable.Resume{
+		Responses: map[string][]byte{"ask1": payload},
+		State:     map[string]any{"user": "Ryan"},
+	}); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.After(8 * time.Second)
@@ -258,10 +272,15 @@ func TestAskUserChoiceYieldsThenResumeCompletes(t *testing.T) {
 			if !ok {
 				t.Fatal("subscription closed before complete")
 			}
-			if ev.Type == streaming.StreamEventComplete {
-				return
-			}
-			if ev.Type == streaming.StreamEventMessage && ev.Content == "chose" {
+			if ev.Type == streaming.StreamEventComplete || (ev.Type == streaming.StreamEventMessage && ev.Content == "chose") {
+				waitTurnPersisted(t, rt, id)
+				snap, _, err := rt.snapshots.Load(ctx, id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(snap.Checkpoint.UserState()["user"]) != `"Ryan"` {
+					t.Fatalf("resume state: %s", snap.Checkpoint.UserState()["user"])
+				}
 				return
 			}
 		case <-deadline:
@@ -499,7 +518,10 @@ func TestTwoPromptsShareSnapshot(t *testing.T) {
 		},
 	}
 	rt := New(newCatalog(t, model, durable.AgentSpec{}), WithProjection(vfs.DirectProjection{}))
-	id, err := rt.CreateSession(ctx, durable.CreateSession{AgentID: "default"})
+	id, err := rt.CreateSession(ctx, durable.CreateSession{
+		AgentID: "default",
+		State:   map[string]any{"user": "Ryan"},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -514,7 +536,7 @@ func TestTwoPromptsShareSnapshot(t *testing.T) {
 	_ = sub.Close()
 
 	head, _ := rt.events.Head(ctx, id)
-	if err := rt.Prompt(ctx, id, durable.Prompt{Text: "second"}); err != nil {
+	if err := rt.Prompt(ctx, id, durable.Prompt{Text: "second", State: map[string]any{"company": "Acme"}}); err != nil {
 		t.Fatal(err)
 	}
 	sub2, err := rt.Subscribe(ctx, id, head)
@@ -532,6 +554,15 @@ func TestTwoPromptsShareSnapshot(t *testing.T) {
 	}
 	if !sawFirst {
 		t.Fatalf("second prompt must see first snapshot messages, last=%+v", contents(model.LastInvokeMsgs))
+	}
+	waitTurnPersisted(t, rt, id)
+	snap, _, err := rt.snapshots.Load(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	us := snap.Checkpoint.UserState()
+	if string(us["user"]) != `"Ryan"` || string(us["company"]) != `"Acme"` {
+		t.Fatalf("prompt state: user=%s company=%s", us["user"], us["company"])
 	}
 }
 

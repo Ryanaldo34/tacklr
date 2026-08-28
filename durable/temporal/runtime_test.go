@@ -35,8 +35,9 @@ func TestActivities_unknownAgentAndDirectCall(t *testing.T) {
 			},
 		}, Config: tacklr.Config{MaxWindowSize: 8192}},
 	})
+	snaps := inprocess.NewMemorySnapshot()
 	log := inprocess.NewMemoryEventLog()
-	acts := &Activities{Catalog: cat, Snapshots: inprocess.NewMemorySnapshot(), Fallback: log, DisableStreams: true}
+	acts := &Activities{Catalog: cat, Snapshots: snaps, Fallback: log, DisableStreams: true}
 	_, err := acts.Inference(t.Context(), InferenceInput{SessionID: "s", AgentID: "nope"})
 	if !errors.Is(err, durable.ErrAgentNotFound) {
 		t.Fatalf("missing agent: %v", err)
@@ -47,10 +48,18 @@ func TestActivities_unknownAgentAndDirectCall(t *testing.T) {
 	}
 	out, err := acts.Inference(t.Context(), InferenceInput{
 		SessionID: "s", AgentID: "default",
-		User: &streaming.Message{Role: streaming.RoleUser, Content: "hi"},
+		User:  &streaming.Message{Role: streaming.RoleUser, Content: "hi"},
+		State: map[string]any{"user": "Ryan"},
 	})
 	if err != nil || !out.Complete {
 		t.Fatalf("direct inference: %+v %v", out, err)
+	}
+	snap, _, err := snaps.Load(t.Context(), "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(snap.Checkpoint.UserState()["user"]) != `"Ryan"` {
+		t.Fatalf("userState=%s", snap.Checkpoint.UserState()["user"])
 	}
 }
 

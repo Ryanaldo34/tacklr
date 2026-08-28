@@ -27,7 +27,7 @@ const (
 	turnError
 )
 
-func (r *Runtime) constructHarness(ctx context.Context, p *sessionProc, load bool, bindings []vfs.Binding) (*tacklr.TurnManager, *vfs.MountSession, error) {
+func (r *Runtime) constructHarness(ctx context.Context, p *sessionProc, load bool, bindings []vfs.Binding, state map[string]any) (*tacklr.TurnManager, *vfs.MountSession, error) {
 	if p.agentID == "" {
 		return nil, nil, fmt.Errorf("no agent configured for session")
 	}
@@ -81,6 +81,11 @@ func (r *Runtime) constructHarness(ctx context.Context, p *sessionProc, load boo
 			return nil, nil, loadErr
 		}
 	}
+	if err := h.ApplySessionState(state); err != nil {
+		h.Close()
+		durable.CloseTurnVFS(ms, threadID, "state")
+		return nil, nil, err
+	}
 	return h, ms, nil
 }
 
@@ -108,6 +113,9 @@ func (r *Runtime) persistHarness(ctx context.Context, p *sessionProc, h *tacklr.
 		return err
 	}
 	p.etag = etag
+	p.mu.Lock()
+	p.state = nil
+	p.mu.Unlock()
 	return nil
 }
 
@@ -125,9 +133,9 @@ func (r *Runtime) fail(ctx context.Context, p *sessionProc, err error) turnOutco
 	return turnError
 }
 
-func (r *Runtime) runTurn(ctx context.Context, p *sessionProc, user *tacklr.Message, resume map[string][]byte, bindings []vfs.Binding) turnOutcome {
+func (r *Runtime) runTurn(ctx context.Context, p *sessionProc, user *tacklr.Message, resume map[string][]byte, bindings []vfs.Binding, state map[string]any) turnOutcome {
 	load := resume != nil || p.etag != ""
-	h, ms, err := r.constructHarness(ctx, p, load, bindings)
+	h, ms, err := r.constructHarness(ctx, p, load, bindings, state)
 	if err != nil {
 		return r.fail(ctx, p, err)
 	}

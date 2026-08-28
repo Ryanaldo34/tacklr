@@ -35,7 +35,7 @@ Or invoke the tool directly with that constructor. You do not mock `HarnessRunti
 
 ### What `HarnessRuntime` is for
 
-Progress (`EmitUpdate`), park (`Park`), children (`SpawnChild` and friends), and **session** state (`StateGet` / `StateSet`). Session state is checkpointed. Clients are not session state. Do not store them there.
+Progress (`EmitUpdate`), park (`Park`), children (`SpawnChild` and friends), and session key-values (`StateGet` / `StateSet` / `StateDelete`). Hosts set those values on `CreateSession.State`, `Prompt.State`, or `Resume.State`. Close over clients in the constructor.
 
 ## Built-in tools
 

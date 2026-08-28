@@ -68,6 +68,8 @@ type InferenceInput struct {
 	Auth          durable.AuthContext
 	Mounts        []durable.MountRecipe
 	Specialist    string
+	// State is host userState merged after checkpoint restore.
+	State map[string]any
 }
 
 // InferenceOutput is the typed Inference activity result.
@@ -90,6 +92,7 @@ type ToolInput struct {
 	Specialist string
 	// Known is this session's child ids for list_children (not a ChildOp ledger).
 	Known []durable.SessionID
+	State map[string]any
 }
 
 // ToolOutput is the typed Tool activity result. Spawn/cancel/await are this
@@ -117,6 +120,7 @@ type CommitToolInput struct {
 	Auth       durable.AuthContext
 	Mounts     []durable.MountRecipe
 	Specialist string
+	State      map[string]any
 }
 
 func (a *Activities) Inference(ctx context.Context, in InferenceInput) (InferenceOutput, error) {
@@ -143,7 +147,7 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 	if attempt > 1 {
 		_ = a.publish(ctx, stream, in.SessionID, durable.TopicRetry, streaming.StreamEvent{Type: streaming.StreamEventError, Content: "retry"}, true)
 	}
-	h, ms, etag, err := a.harness(ctx, in.SessionID, in.AgentID, in.MCPServers, in.Etag, in.Auth, in.Mounts, in.Specialist)
+	h, ms, etag, err := a.harness(ctx, in.SessionID, in.AgentID, in.MCPServers, in.Etag, in.Auth, in.Mounts, in.Specialist, in.State)
 	if err != nil {
 		pub := err
 		if err := ctx.Err(); err != nil {
@@ -231,7 +235,7 @@ func (a *Activities) Tool(ctx context.Context, in ToolInput) (ToolOutput, error)
 	if attempt > 1 {
 		_ = a.publish(ctx, stream, in.SessionID, durable.TopicRetry, streaming.StreamEvent{Type: streaming.StreamEventError, Content: "retry"}, true)
 	}
-	h, ms, etag, err := a.harness(ctx, in.SessionID, in.AgentID, in.MCPServers, in.Etag, in.Auth, in.Mounts, in.Specialist)
+	h, ms, etag, err := a.harness(ctx, in.SessionID, in.AgentID, in.MCPServers, in.Etag, in.Auth, in.Mounts, in.Specialist, in.State)
 	if err != nil {
 		slog.ErrorContext(ctx, "tool harness", "area", telemetry.AreaHarness, "error", err)
 		return ToolOutput{}, err
@@ -286,7 +290,7 @@ func (a *Activities) Tool(ctx context.Context, in ToolInput) (ToolOutput, error)
 }
 
 func (a *Activities) CommitToolOutput(ctx context.Context, in CommitToolInput) (ToolOutput, error) {
-	h, ms, etag, err := a.harness(ctx, in.SessionID, in.AgentID, in.MCPServers, in.Etag, in.Auth, in.Mounts, in.Specialist)
+	h, ms, etag, err := a.harness(ctx, in.SessionID, in.AgentID, in.MCPServers, in.Etag, in.Auth, in.Mounts, in.Specialist, in.State)
 	if err != nil {
 		return ToolOutput{}, err
 	}
@@ -312,7 +316,7 @@ func (a *Activities) CommitToolOutput(ctx context.Context, in CommitToolInput) (
 	return ToolOutput{Etag: etag}, nil
 }
 
-func (a *Activities) harness(ctx context.Context, id durable.SessionID, agentID string, extraMCP []mcp.MCPConfig, etag string, auth durable.AuthContext, mounts []durable.MountRecipe, specialist string) (*tacklr.TurnManager, *vfs.MountSession, string, error) {
+func (a *Activities) harness(ctx context.Context, id durable.SessionID, agentID string, extraMCP []mcp.MCPConfig, etag string, auth durable.AuthContext, mounts []durable.MountRecipe, specialist string, state map[string]any) (*tacklr.TurnManager, *vfs.MountSession, string, error) {
 	spec, ok := a.Catalog.Lookup(agentID)
 	if !ok {
 		return nil, nil, "", durable.ErrAgentNotFound
@@ -360,6 +364,11 @@ func (a *Activities) harness(ctx context.Context, id durable.SessionID, agentID 
 			durable.CloseTurnVFS(ms, string(id), "load")
 			return nil, nil, "", loadErr
 		}
+	}
+	if err := h.ApplySessionState(state); err != nil {
+		h.Close()
+		durable.CloseTurnVFS(ms, string(id), "state")
+		return nil, nil, "", err
 	}
 	return h, ms, etag, nil
 }

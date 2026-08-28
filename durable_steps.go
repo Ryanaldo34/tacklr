@@ -44,6 +44,18 @@ func (a *TurnManager) Checkpoint() (*stores.SessionCheckpoint, error) {
 	return session.CaptureCheckpoint(a.context.Messages(), a.session, a.pendingSnapshot())
 }
 
+// ApplySessionState upserts host-owned userState after construct/restore.
+// Durable runtimes apply CreateSession/Prompt/Resume.State here so tools
+// see it via HarnessRuntime.StateGet.
+func (a *TurnManager) ApplySessionState(state map[string]any) error {
+	for key, value := range state {
+		if err := a.session.StateSet(key, value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // RestoreCheckpoint applies a SnapshotStore blob onto this harness.
 func (a *TurnManager) RestoreCheckpoint(cp stores.SessionCheckpoint) error {
 	a.runMu.Lock()

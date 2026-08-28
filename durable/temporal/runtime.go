@@ -108,7 +108,11 @@ func (r *Runtime) CreateSession(ctx context.Context, req durable.CreateSession) 
 	if id == "" {
 		id = durable.SessionID(uuid.NewString())
 	}
-	_, err := r.client.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
+	seed, err := durable.EncodeUserState(req.State)
+	if err != nil {
+		return "", err
+	}
+	_, err = r.client.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
 		ID:        string(id),
 		TaskQueue: r.taskQueue,
 	}, SessionWorkflow, WorkflowInput{
@@ -117,6 +121,7 @@ func (r *Runtime) CreateSession(ctx context.Context, req durable.CreateSession) 
 		MCPServers:          req.MCPServers,
 		Mounts:              req.Mounts,
 		TurnLocalityTimeout: r.turnLocalityTimeout,
+		State:               seed,
 	})
 	if err != nil {
 		return "", err
@@ -149,18 +154,31 @@ func (r *Runtime) signal(ctx context.Context, id durable.SessionID, name string,
 
 // Prompt implements durable.Runtime.
 func (r *Runtime) Prompt(ctx context.Context, sessionID durable.SessionID, msg durable.Prompt) error {
+	encoded, err := durable.EncodeUserState(msg.State)
+	if err != nil {
+		return err
+	}
 	return r.signal(ctx, sessionID, signalPrompt, promptSignal{
 		Text:        msg.Text,
 		UserMessage: msg.UserMessage,
 		AgentID:     msg.AgentID,
 		MCPServers:  msg.MCPServers,
 		Auth:        msg.Auth,
+		State:       encoded,
 	})
 }
 
 // Resume implements durable.Runtime.
 func (r *Runtime) Resume(ctx context.Context, sessionID durable.SessionID, resume durable.Resume) error {
-	return r.signal(ctx, sessionID, signalResume, resumeSignal{Responses: resume.Responses, Auth: resume.Auth})
+	encoded, err := durable.EncodeUserState(resume.State)
+	if err != nil {
+		return err
+	}
+	return r.signal(ctx, sessionID, signalResume, resumeSignal{
+		Responses: resume.Responses,
+		Auth:      resume.Auth,
+		State:     encoded,
+	})
 }
 
 // Cancel implements durable.Runtime.

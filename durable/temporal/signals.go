@@ -35,6 +35,8 @@ type WorkflowInput struct {
 	Prompt     string
 	Parent     durable.SessionID
 	Specialist string
+	// State is CreateSession.State, already JSON-roundtripped by Runtime.CreateSession.
+	State map[string]any
 }
 
 type promptSignal struct {
@@ -43,11 +45,13 @@ type promptSignal struct {
 	AgentID     string
 	MCPServers  []mcp.MCPConfig
 	Auth        durable.AuthContext
+	State       map[string]any
 }
 
 type resumeSignal struct {
 	Responses map[string][]byte
 	Auth      durable.AuthContext
+	State     map[string]any
 }
 
 type waitSignal struct {

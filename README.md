@@ -83,7 +83,10 @@ func main() {
 	cat := durable.NewCatalog("agent")
 	cat.Register("agent", durable.AgentSpec{Options: opts})
 	rt := inprocess.New(cat, inprocess.WithProjection(vfs.DirectProjection{}))
-	id, err := rt.CreateSession(ctx, durable.CreateSession{AgentID: "agent"})
+	id, err := rt.CreateSession(ctx, durable.CreateSession{
+		AgentID: "agent",
+		State:   map[string]any{"user": "Ada", "company": "Acme"},
+	})
 	if err != nil {
 		panic(err)
 	}
@@ -118,7 +121,7 @@ Importing `tacklr` registers built-in interrupts, Word/Excel codecs, and the dur
 
 Tools are ordinary Go functions. Give a tool a client by closing over it in the constructor. That is the dependency injection. Tests pass a fake into the same constructor.
 
-`HarnessRuntime` is park, progress, children, and session state. It is not a client bag. Do not put clients in `StateGet` — that map is checkpointed.
+`HarnessRuntime` is park, progress, children, and session key-values (`StateGet`). Put facts like the current user on `CreateSession.State` (also `Prompt.State` / `Resume.State`). Close over clients in the constructor.
 
 ```go
 type SearchArgs struct {

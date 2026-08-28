@@ -53,6 +53,10 @@ type CreateSession struct {
 	// with Parent for spawn_specialist children. The host does not register the
 	// worker as a top-level catalog agent.
 	Specialist string
+	// State seeds host-owned session userState (JSON-serializable values).
+	// Tools read it via HarnessRuntime.StateGet. It is checkpointed — do not
+	// store tokens or clients. Child sessions do not inherit this map.
+	State map[string]any
 }
 
 // Prompt is the typed input for Runtime.Prompt.
@@ -64,12 +68,17 @@ type Prompt struct {
 	// MCPServers, when non-nil, replaces session-scoped MCP configs for this turn.
 	MCPServers []mcp.MCPConfig
 	Auth       AuthContext
+	// State merges into session userState for this turn (after checkpoint restore).
+	// JSON-serializable values only. Checkpointed — no tokens or clients.
+	State map[string]any
 }
 
 // Resume is the typed input for Runtime.Resume (HITL answer plus optional auth).
 type Resume struct {
 	Responses map[string][]byte
 	Auth      AuthContext
+	// State merges into session userState when the parked turn continues.
+	State map[string]any
 }
 
 // Snapshot is one session's harness checkpoint plus VFS recipes (no tokens).
