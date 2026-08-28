@@ -95,8 +95,9 @@ type AgentOptions struct {
 	// Empty fields skip that tool. Kinds should be registered via brain.ApplyKinds / WithKinds.
 	// Ignored when Brain is nil.
 	BrainWriteKinds brain.WriteKinds
-	// SearchNamespace isolates brain retrieval when set (session-owned, checkpointed).
-	// Empty leaves a loaded session value unchanged. Workers get a copy at spawn.
+	// SearchNamespace is the host ceiling for brain tools (session-owned, checkpointed).
+	// Each tool call may add attrs to narrow the search; it cannot change ceiling values.
+	// Empty means no ceiling. Workers get a copy at spawn.
 	SearchNamespace brain.Namespace
 	// MountSession is the VFS tree injected for this turn, or nil (no VFS tools).
 	// Runtime builds one from FSBootstrap plus Prompt.Auth bindings when a

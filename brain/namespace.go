@@ -11,8 +11,8 @@ import (
 // Attr is one named isolation dimension (org, workspace, …).
 // Name and Value must be non-empty and must not contain '.'.
 type Attr struct {
-	Name  string `json:"name"`
-	Value string `json:"value"`
+	Name  string `json:"name" desc:"Attribute name (e.g. org, workspace)."`
+	Value string `json:"value" desc:"Attribute value. Must not contain '.'."`
 }
 
 // Namespace is ordered named isolation attrs. Empty Scope means no isolation.
@@ -56,6 +56,37 @@ func (scope Namespace) Covers(obj Namespace) bool {
 		}
 	}
 	return true
+}
+
+// Bind merges a per-call namespace onto this host ceiling.
+// Call may add attrs. A call value that disagrees with a ceiling attr is invalid.
+func (ceiling Namespace) Bind(call Namespace) (Namespace, error) {
+	if len(call) > 0 {
+		if err := call.Validate(); err != nil {
+			return nil, err
+		}
+	}
+	if ceiling.Empty() {
+		return call.Clone(), nil
+	}
+	if call.Empty() {
+		return ceiling.Clone(), nil
+	}
+	have := make(map[string]string, len(ceiling))
+	for _, a := range ceiling {
+		have[a.Name] = a.Value
+	}
+	out := ceiling.Clone()
+	for _, a := range call {
+		if v, ok := have[a.Name]; ok {
+			if v != a.Value {
+				return nil, fmt.Errorf("%w: namespace attr %q is outside host scope", ErrInvalid, a.Name)
+			}
+			continue
+		}
+		out = append(out, a)
+	}
+	return out, nil
 }
 
 // Validate checks names, values, uniqueness, and that n is non-empty.

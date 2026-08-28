@@ -504,6 +504,31 @@ func TestBrainTools_searchNamespaceIsolation(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("read foreign ns want not found, got %v", err)
 	}
+
+	westParent := uuid.New()
+	westPart := uuid.New()
+	_ = store.Put(ctx, brain.Object{ID: westParent, Kind: "Document", Title: "West deal", Namespace: brain.MustNamespace("org", "b", "workspace", "west"), UpdatedAt: now})
+	_ = store.Put(ctx, brain.Object{
+		ID: westPart, Kind: "Chunk", Title: "chunk", Content: "per-call workspace west token plugh",
+		ParentID: &westParent, Position: &pos, Namespace: brain.MustNamespace("org", "b", "workspace", "west"), UpdatedAt: now,
+	})
+	narrow, err := search.invoke(ctx, `{"query":"per-call workspace west token plugh","limit":10,"namespace":[{"name":"workspace","value":"west"}]}`, turnRuntime(h))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(narrow.output, westParent.String()) {
+		t.Fatalf("workspace=west search should hit west object: %s", narrow.output)
+	}
+	east, err := search.invoke(ctx, `{"query":"per-call workspace west token plugh","limit":10,"namespace":[{"name":"workspace","value":"east"}]}`, turnRuntime(h))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(east.output, westParent.String()) || strings.Contains(east.output, "plugh") {
+		t.Fatalf("workspace=east search leaked west object: %s", east.output)
+	}
+	if _, err := search.invoke(ctx, `{"query":"x","namespace":[{"name":"org","value":"a"}]}`, turnRuntime(h)); err == nil || !strings.Contains(err.Error(), "outside host scope") {
+		t.Fatalf("conflicting org: %v", err)
+	}
 }
 
 func TestWorkerInheritsBrainAndNamespace(t *testing.T) {

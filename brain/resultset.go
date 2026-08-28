@@ -14,6 +14,7 @@ type ResultSet struct {
 	// Relations carries expand hop metadata keyed by object id so continue
 	// re-attaches relation fields on later pages (JSON keys are UUID strings).
 	Relations map[uuid.UUID]Relation `json:"relations,omitempty"`
+	Namespace Namespace              `json:"namespace,omitempty"`
 	Offset    int                    `json:"offset"`
 	CreatedAt time.Time              `json:"created_at"`
 }

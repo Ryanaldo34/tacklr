@@ -127,6 +127,7 @@ func (e *Engine) FindObjects(ctx context.Context, scope Scope, req FindObjectsRe
 	set := ResultSet{
 		ID:        uuid.New(),
 		ObjectIDs: keptIDs,
+		Namespace: scope.Namespace.Clone(),
 		Offset:    end,
 		CreatedAt: e.cfg.Now(),
 	}

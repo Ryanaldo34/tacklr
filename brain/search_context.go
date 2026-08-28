@@ -90,6 +90,7 @@ func (c *SearchContext) Get(_ context.Context, id uuid.UUID) (ResultSet, error) 
 func cloneResultSet(set ResultSet) ResultSet {
 	cp := set
 	cp.ObjectIDs = slices.Clone(set.ObjectIDs)
+	cp.Namespace = set.Namespace.Clone()
 	if len(set.Relations) > 0 {
 		cp.Relations = maps.Clone(set.Relations)
 	}

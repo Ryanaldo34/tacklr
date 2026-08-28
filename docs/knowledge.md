@@ -178,13 +178,12 @@ and examples are sample product types, not SDK types. You register them with
 Kind names must be path-safe: no `/` and no `..`. Only **parent** kinds become
 directories.
 
-Every durable object belongs to a **namespace**: ordered named attributes the
-host sets on the session (for example `org=acme`, `workspace=west`). Values join
-on `.` to form the key (`acme.west`). Retrieval applies application RLS: a scope
-matches an object when every scope attribute is present on the object with the
-same value, so a broader scope sees more-specific rows. Graph node search uses
-the same `Covers` check (MemoryGraph, store, and hydrate after Helix). Wrong-namespace
-looks like not-found.
+Every durable object belongs to a **namespace**: ordered named attributes
+(for example `org=acme`, `workspace=west`). `AgentOptions.SearchNamespace` is the
+host ceiling. Each brain tool call may pass extra `namespace` attrs to narrow
+that search; it cannot change the host's values. Continue uses the namespace
+stamped on the result set. Retrieval keeps a row when every scope attr is on
+the object (`Covers`). Wrong-namespace looks like not-found.
 
 ---
 
@@ -664,7 +663,7 @@ if err := eng.LoadKindsFromStore(ctx); err != nil { /* ... */ }
 // AgentOptions:
 //   Brain:           eng
 //   VFS:             registry + mounts (including /work)
-//   SearchNamespace: brain.MustNamespace("org", orgID, "workspace", wsID)
+//   SearchNamespace: brain.MustNamespace("org", orgID) // host ceiling; tools may add workspace=…
 //
 // Harness then:
 //   registers BrainFactory (profile "brain")
@@ -761,7 +760,7 @@ returns paths), not that a private helper was called.
 | **Document / Chunk** | Default kinds for an indexed artifact (`vfsindex.MountIndexKinds`) |
 | **VFS** | Virtual filesystem: one path tree over several backends |
 | **Provider** | Bytes (or Engram parse/format) behind one mount |
-| **Namespace** | Ordered named attrs (`org`, `workspace`, …) joined on `.`; application RLS via `Covers` |
+| **Namespace** | Ordered named attrs. Host ceiling on options; tools pass extra attrs per call. `Covers` RLS |
 | **Scope** | The engine’s view of that namespace on a call |
 | **`vfs_path`** | Absolute virtual path stored on an object so tools can speak paths |
 | **Evidence** | Chunks that justified a parent `search` hit |

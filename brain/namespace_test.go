@@ -49,6 +49,18 @@ func TestNamespace_coversHierarchicalRLS(t *testing.T) {
 	if exact.Covers(org) {
 		t.Fatal("more-specific scope must not cover a coarser object")
 	}
+
+	got, err := org.Bind(MustNamespace("workspace", "west"))
+	if err != nil || !got.Equal(ws) {
+		t.Fatalf("bind extra: %v %v", got, err)
+	}
+	got, err = org.Bind(nil)
+	if err != nil || !got.Equal(org) {
+		t.Fatalf("bind empty call: %v %v", got, err)
+	}
+	if _, err := org.Bind(MustNamespace("org", "other")); err == nil {
+		t.Fatal("bind must reject a conflicting ceiling attr")
+	}
 }
 
 func TestParseNamespace_rejectsInvalid(t *testing.T) {

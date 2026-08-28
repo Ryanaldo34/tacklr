@@ -70,6 +70,9 @@ func (e *Engine) Continue(ctx context.Context, scope Scope, resultSetID uuid.UUI
 	if err != nil {
 		return page, err
 	}
+	if !set.Namespace.Empty() {
+		scope = Scope{Namespace: set.Namespace}
+	}
 	start, end := sliceBounds(set.Offset, limit, len(set.ObjectIDs))
 	objs, err := e.hydrateIDs(ctx, scope, set.ObjectIDs[start:end])
 	if err != nil {
@@ -267,6 +270,7 @@ func (e *Engine) pageIDs(ctx context.Context, scope Scope, ids []uuid.UUID, limi
 		ID:        uuid.New(),
 		ObjectIDs: slices.Clone(ids),
 		Relations: relations,
+		Namespace: scope.Namespace.Clone(),
 		Offset:    end,
 		CreatedAt: e.cfg.Now(),
 	}
