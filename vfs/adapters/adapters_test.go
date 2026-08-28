@@ -170,40 +170,34 @@ func TestMountSession_xlsxCreateFormatPersists(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := t.Context()
-	reg := vfs.NewBackendRegistry()
-	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: t.TempDir()}); err != nil {
-		t.Fatal(err)
-	}
-	ms, err := vfs.NewMountSession("xlsx-create", reg)
+	ms, err := vfs.Tree(vfs.At("work", vfs.Local(t.TempDir())))(ctx, "xlsx-create", vfs.Request{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
-		t.Fatal(err)
-	}
+	t.Cleanup(func() { _ = ms.Close() })
 	body := "Amount,Note\n42,ok"
-	_, err = ms.Apply(ctx, "/work/Budget.xlsx", vfs.Mutation{Content: &body})
+	_, err = ms.Apply(ctx, "/workspace/work/Budget.xlsx", vfs.Mutation{Content: &body})
 	if err != nil {
 		t.Fatal(err)
 	}
-	doc, err := ms.ReadText(ctx, "/work/Budget.xlsx")
+	doc, err := ms.ReadText(ctx, "/workspace/work/Budget.xlsx")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ms.Apply(ctx, "/work/Budget.xlsx", vfs.Mutation{
+	if _, err := ms.Apply(ctx, "/workspace/work/Budget.xlsx", vfs.Mutation{
 		Rev: vfs.ContentToken(doc), BlockID: "Budget!B2",
 	}); err == nil || !strings.Contains(err.Error(), "sheet cell needs a value") {
 		t.Fatalf("block_id without value or format: %v", err)
 	}
 	on := true
-	_, err = ms.Apply(ctx, "/work/Budget.xlsx", vfs.Mutation{
+	_, err = ms.Apply(ctx, "/workspace/work/Budget.xlsx", vfs.Mutation{
 		Rev: vfs.ContentToken(doc), BlockID: "Budget!B2",
 		Format: &vfs.FormatPatch{Bold: &on, Number: strPtr("$#,##0.00")},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := ms.ReadText(ctx, "/work/Budget.xlsx")
+	got, err := ms.ReadText(ctx, "/workspace/work/Budget.xlsx")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,25 +210,25 @@ func TestMountSession_xlsxCreateFormatPersists(t *testing.T) {
 		t.Fatalf("persisted B2 = %+v err=%v", cell, err)
 	}
 	html := "<h1>x</h1>"
-	if _, err := ms.Apply(ctx, "/work/notes.html", vfs.Mutation{Content: &html}); err != nil {
+	if _, err := ms.Apply(ctx, "/workspace/work/notes.html", vfs.Mutation{Content: &html}); err != nil {
 		t.Fatal(err)
 	}
-	st, err := ms.Stat(ctx, "/work/notes.html")
+	st, err := ms.Stat(ctx, "/workspace/work/notes.html")
 	if err != nil || st.MediaType != HTMLMediaType {
 		t.Fatalf("notes.html Stat=%+v err=%v", st, err)
 	}
-	raw, err := ms.ReadText(ctx, "/work/notes.html")
+	raw, err := ms.ReadText(ctx, "/workspace/work/notes.html")
 	if err != nil || raw.Text() != html {
 		t.Fatalf("notes.html body=%q err=%v", raw.Text(), err)
 	}
-	if _, err := ms.Apply(ctx, "/work/SPIKE", vfs.Mutation{Content: &html}); err != nil {
+	if _, err := ms.Apply(ctx, "/workspace/work/SPIKE", vfs.Mutation{Content: &html}); err != nil {
 		t.Fatal(err)
 	}
-	st, err = ms.Stat(ctx, "/work/SPIKE")
+	st, err = ms.Stat(ctx, "/workspace/work/SPIKE")
 	if err != nil || st.MediaType != HTMLMediaType {
 		t.Fatalf("SPIKE Stat=%+v err=%v", st, err)
 	}
-	spike, err := ms.ReadText(ctx, "/work/SPIKE")
+	spike, err := ms.ReadText(ctx, "/workspace/work/SPIKE")
 	if err != nil || spike.Text() != html {
 		t.Fatalf("SPIKE body=%q err=%v", spike.Text(), err)
 	}

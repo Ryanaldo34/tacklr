@@ -11,26 +11,26 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
+	"github.com/ryanaldo34/tacklr/builtins"
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfsindex"
 )
+
+func treeLocal(t *testing.T, members ...vfs.Member) *vfs.MountSession {
+	t.Helper()
+	ms, err := vfs.Tree(members...)(context.Background(), t.Name(), vfs.Request{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ms.Close() })
+	return ms
+}
 
 // TestMountIndexer_indexSearchAndNotify: VFS file → brain Document/Chunks →
 // search finds content; hash skip; re-index after write; missing path removes.
 func TestMountIndexer_indexSearchAndNotify(t *testing.T) {
 	ctx := context.Background()
-	base := t.TempDir()
-	reg := vfs.NewBackendRegistry()
-	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
-		t.Fatal(err)
-	}
-	ms, err := vfs.NewMountSession("idx", reg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
-		t.Fatal(err)
-	}
+	ms := treeLocal(t, vfs.At("work", builtins.Local(t.TempDir())))
 
 	store := brain.NewMemoryStore()
 	eng, err := brain.NewEngine(store)
@@ -40,8 +40,8 @@ func TestMountIndexer_indexSearchAndNotify(t *testing.T) {
 	if err := eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...); err != nil {
 		t.Fatal(err)
 	}
-	ns := uuid.New()
-	scope := brain.Scope{Namespace: &ns}
+	ns := mustNS(t, "id", uuid.NewString())
+	scope := brain.Scope{Namespace: ns}
 
 	idx, err := vfsindex.NewMountIndexer(ms, eng, scope)
 	if err != nil {
@@ -50,12 +50,12 @@ func TestMountIndexer_indexSearchAndNotify(t *testing.T) {
 	idx.LinesPerChunk = 2
 
 	body := "alpha line\nbeta TODO findme\ngamma line\ndelta line\n"
-	if err := ms.WriteFile(ctx, "/work/note.txt", []byte(body)); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/work/note.txt", []byte(body)); err != nil {
 		t.Fatal(err)
 	}
 
 	// IndexPrefix
-	stats, err := idx.IndexPrefix(ctx, "/work", vfsindex.IndexOpts{})
+	stats, err := idx.IndexPrefix(ctx, "/workspace/work", vfsindex.IndexOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,12 +63,12 @@ func TestMountIndexer_indexSearchAndNotify(t *testing.T) {
 		t.Fatalf("stats: %+v", stats)
 	}
 
-	parentID := idx.DocumentID("/work/note.txt")
+	parentID := idx.DocumentID("/workspace/work/note.txt")
 	doc, err := eng.Read(ctx, scope, parentID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if doc.Properties[vfsindex.PropVFSPath] != "/work/note.txt" {
+	if doc.Properties[vfsindex.PropVFSPath] != "/workspace/work/note.txt" {
 		t.Fatalf("vfs_path: %+v", doc.Properties)
 	}
 	children, err := eng.ListChildren(ctx, scope, parentID)
@@ -101,7 +101,7 @@ func TestMountIndexer_indexSearchAndNotify(t *testing.T) {
 	}
 
 	// Hash skip
-	stats, err = idx.IndexPrefix(ctx, "/work", vfsindex.IndexOpts{})
+	stats, err = idx.IndexPrefix(ctx, "/workspace/work", vfsindex.IndexOpts{})
 	if err != nil || stats.Skipped != 1 || stats.Indexed != 0 {
 		t.Fatalf("hash skip stats: %+v err=%v", stats, err)
 	}
@@ -111,7 +111,7 @@ func TestMountIndexer_indexSearchAndNotify(t *testing.T) {
 	ms.SetAfterPersist(func(ctx context.Context, path string) error {
 		return sched.Notify(ctx, path, vfsindex.ReasonSync)
 	})
-	if err := ms.WriteFile(ctx, "/work/note.txt", []byte("rewritten uniquephrase\n")); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/work/note.txt", []byte("rewritten uniquephrase\n")); err != nil {
 		t.Fatal(err)
 	}
 	page, err = eng.Search(ctx, scope, brain.SearchRequest{Query: "uniquephrase"}, brain.NewSearchContext())
@@ -131,10 +131,10 @@ func TestMountIndexer_indexSearchAndNotify(t *testing.T) {
 	}
 
 	// Remove file → soft-delete index
-	if err := ms.Remove(ctx, "/work/note.txt"); err != nil {
+	if err := ms.Remove(ctx, "/workspace/work/note.txt"); err != nil {
 		t.Fatal(err)
 	}
-	if err := idx.IndexPath(ctx, "/work/note.txt"); err != nil {
+	if err := idx.IndexPath(ctx, "/workspace/work/note.txt"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := eng.Read(ctx, scope, parentID); !errors.Is(err, brain.ErrNotFound) {
@@ -142,25 +142,25 @@ func TestMountIndexer_indexSearchAndNotify(t *testing.T) {
 	}
 
 	// Binary skip by extension
-	if err := ms.WriteFile(ctx, "/work/pic.png", []byte{0x89, 'P', 'N', 'G', 0, 1, 2}); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/work/pic.png", []byte{0x89, 'P', 'N', 'G', 0, 1, 2}); err != nil {
 		t.Fatal(err)
 	}
-	stats, err = idx.IndexPrefix(ctx, "/work", vfsindex.IndexOpts{})
+	stats, err = idx.IndexPrefix(ctx, "/workspace/work", vfsindex.IndexOpts{})
 	if err != nil || stats.Indexed != 0 {
 		t.Fatalf("png skip: %+v err=%v", stats, err)
 	}
 
 	// MaxFiles
-	if err := ms.WriteFile(ctx, "/work/c.txt", []byte("c\n")); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/work/c.txt", []byte("c\n")); err != nil {
 		t.Fatal(err)
 	}
-	stats, err = idx.IndexPrefix(ctx, "/work", vfsindex.IndexOpts{MaxFiles: 1})
+	stats, err = idx.IndexPrefix(ctx, "/workspace/work", vfsindex.IndexOpts{MaxFiles: 1})
 	if err != nil || stats.Indexed+stats.Skipped < 1 {
 		t.Fatalf("max files: %+v err=%v", stats, err)
 	}
 
 	// IndexPath on directory is a no-op
-	if err := idx.IndexPath(ctx, "/work"); err != nil {
+	if err := idx.IndexPath(ctx, "/workspace/work"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -180,18 +180,7 @@ func TestMountIndexer_indexSearchAndNotify(t *testing.T) {
 // heading/preamble blocks with stable block_id props.
 func TestMountIndexer_markdownBlocksChunks(t *testing.T) {
 	ctx := context.Background()
-	base := t.TempDir()
-	reg := vfs.NewBackendRegistry()
-	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
-		t.Fatal(err)
-	}
-	ms, err := vfs.NewMountSession("idx-md", reg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
-		t.Fatal(err)
-	}
+	ms := treeLocal(t, vfs.At("work", builtins.Local(t.TempDir())))
 
 	store := brain.NewMemoryStore()
 	eng, err := brain.NewEngine(store)
@@ -201,22 +190,22 @@ func TestMountIndexer_markdownBlocksChunks(t *testing.T) {
 	if err := eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...); err != nil {
 		t.Fatal(err)
 	}
-	ns := uuid.New()
-	scope := brain.Scope{Namespace: &ns}
+	ns := mustNS(t, "id", uuid.NewString())
+	scope := brain.Scope{Namespace: ns}
 	idx, err := vfsindex.NewMountIndexer(ms, eng, scope)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	md := "intro line\n\n# Title\n\n## Install\n\npip install x\n\n## API\n\ncall me\n"
-	if err := ms.WriteFile(ctx, "/work/guide.md", []byte(md)); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/work/guide.md", []byte(md)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := idx.IndexPrefix(ctx, "/work", vfsindex.IndexOpts{}); err != nil {
+	if _, err := idx.IndexPrefix(ctx, "/workspace/work", vfsindex.IndexOpts{}); err != nil {
 		t.Fatal(err)
 	}
 
-	parentID := idx.DocumentID("/work/guide.md")
+	parentID := idx.DocumentID("/workspace/work/guide.md")
 	children, err := eng.ListChildren(ctx, scope, parentID)
 	if err != nil {
 		t.Fatal(err)
@@ -260,7 +249,7 @@ func TestMountIndexer_markdownBlocksChunks(t *testing.T) {
 	}
 	// Stable id: re-index same content keeps same chunk UUIDs for block keys
 	installID := install.ID
-	if err := idx.IndexPath(ctx, "/work/guide.md"); err != nil {
+	if err := idx.IndexPath(ctx, "/workspace/work/guide.md"); err != nil {
 		t.Fatal(err)
 	}
 	again, err := eng.Read(ctx, scope, installID)
@@ -278,10 +267,10 @@ func TestMountIndexer_markdownBlocksChunks(t *testing.T) {
 	}
 	oldHash, _ := parent.Properties[vfsindex.PropContentHash].(string)
 	md2 := "intro line\n\n# Title\n\n## Install\n\npip install y\n\n## API\n\ncall me\n"
-	if err := ms.WriteFile(ctx, "/work/guide.md", []byte(md2)); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/work/guide.md", []byte(md2)); err != nil {
 		t.Fatal(err)
 	}
-	if err := idx.IndexPath(ctx, "/work/guide.md"); err != nil {
+	if err := idx.IndexPath(ctx, "/workspace/work/guide.md"); err != nil {
 		t.Fatal(err)
 	}
 	parent, err = eng.Read(ctx, scope, parentID)
@@ -308,18 +297,7 @@ func TestMountIndexer_markdownBlocksChunks(t *testing.T) {
 // index uses lineChunksFromText (not preamble-only structure).
 func TestMountIndexer_emptyMarkdownLineChunks(t *testing.T) {
 	ctx := context.Background()
-	base := t.TempDir()
-	reg := vfs.NewBackendRegistry()
-	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
-		t.Fatal(err)
-	}
-	ms, err := vfs.NewMountSession("idx-md-empty", reg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
-		t.Fatal(err)
-	}
+	ms := treeLocal(t, vfs.At("work", builtins.Local(t.TempDir())))
 
 	store := brain.NewMemoryStore()
 	eng, err := brain.NewEngine(store)
@@ -329,8 +307,8 @@ func TestMountIndexer_emptyMarkdownLineChunks(t *testing.T) {
 	if err := eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...); err != nil {
 		t.Fatal(err)
 	}
-	ns := uuid.New()
-	scope := brain.Scope{Namespace: &ns}
+	ns := mustNS(t, "id", uuid.NewString())
+	scope := brain.Scope{Namespace: ns}
 	idx, err := vfsindex.NewMountIndexer(ms, eng, scope)
 	if err != nil {
 		t.Fatal(err)
@@ -338,14 +316,14 @@ func TestMountIndexer_emptyMarkdownLineChunks(t *testing.T) {
 	idx.LinesPerChunk = 2
 
 	// Empty body → Blocks() nil → line-window path (no preamble block).
-	if err := ms.WriteFile(ctx, "/work/empty.md", nil); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/work/empty.md", nil); err != nil {
 		t.Fatal(err)
 	}
-	res, err := idx.IndexPathResult(ctx, "/work/empty.md")
+	res, err := idx.IndexPathResult(ctx, "/workspace/work/empty.md")
 	if err != nil || res != vfsindex.PathIndexed {
 		t.Fatalf("empty md index: res=%q err=%v", res, err)
 	}
-	parentID := idx.DocumentID("/work/empty.md")
+	parentID := idx.DocumentID("/workspace/work/empty.md")
 	children, err := eng.ListChildren(ctx, scope, parentID)
 	if err != nil {
 		t.Fatal(err)
@@ -366,13 +344,13 @@ func TestMountIndexer_emptyMarkdownLineChunks(t *testing.T) {
 	}
 
 	// Non-empty, no headings → single preamble block (structure path, not lineChunks).
-	if err := ms.WriteFile(ctx, "/work/plain.md", []byte("line one\nline two\nline three\n")); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/work/plain.md", []byte("line one\nline two\nline three\n")); err != nil {
 		t.Fatal(err)
 	}
-	if err := idx.IndexPath(ctx, "/work/plain.md"); err != nil {
+	if err := idx.IndexPath(ctx, "/workspace/work/plain.md"); err != nil {
 		t.Fatal(err)
 	}
-	plainID := idx.DocumentID("/work/plain.md")
+	plainID := idx.DocumentID("/workspace/work/plain.md")
 	children, err = eng.ListChildren(ctx, scope, plainID)
 	if err != nil {
 		t.Fatal(err)
@@ -396,18 +374,10 @@ func TestMountIndexer_emptyMarkdownLineChunks(t *testing.T) {
 // defaults for lines/bytes/kinds, and canceled context.
 func TestMountIndexer_IndexFileResultAndDefaults(t *testing.T) {
 	ctx := context.Background()
-	base := t.TempDir()
-	reg := vfs.NewBackendRegistry()
-	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
-		t.Fatal(err)
-	}
-	ms, err := vfs.NewMountSession("idx-file-result", reg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
-		t.Fatal(err)
-	}
+	ms := treeLocal(t,
+		vfs.At("work", builtins.Local(t.TempDir())),
+		vfs.At("off", builtins.Local(t.TempDir())).Indexed("none"),
+	)
 	store := brain.NewMemoryStore()
 	eng, err := brain.NewEngine(store)
 	if err != nil {
@@ -416,8 +386,8 @@ func TestMountIndexer_IndexFileResultAndDefaults(t *testing.T) {
 	if err := eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...); err != nil {
 		t.Fatal(err)
 	}
-	ns := uuid.New()
-	scope := brain.Scope{Namespace: &ns}
+	ns := mustNS(t, "id", uuid.NewString())
+	scope := brain.Scope{Namespace: ns}
 	idx, err := vfsindex.NewMountIndexer(ms, eng, scope)
 	if err != nil {
 		t.Fatal(err)
@@ -428,57 +398,57 @@ func TestMountIndexer_IndexFileResultAndDefaults(t *testing.T) {
 	idx.DocumentKind = ""
 	idx.ChunkKind = ""
 
-	if err := ms.WriteFile(ctx, "/work/a.txt", []byte("hello searchable-phrase\n")); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/work/a.txt", []byte("hello searchable-phrase\n")); err != nil {
 		t.Fatal(err)
 	}
-	st, err := ms.Stat(ctx, "/work/a.txt")
+	st, err := ms.Stat(ctx, "/workspace/work/a.txt")
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := idx.IndexFileResult(ctx, "/work/a.txt", st)
+	res, err := idx.IndexFileResult(ctx, "/workspace/work/a.txt", st)
 	if err != nil || res != vfsindex.PathIndexed {
 		t.Fatalf("IndexFileResult: res=%q err=%v", res, err)
 	}
-	res, err = idx.IndexFileResult(ctx, "/work/a.txt", st)
+	res, err = idx.IndexFileResult(ctx, "/workspace/work/a.txt", st)
 	if err != nil || res != vfsindex.PathSkipped {
 		t.Fatalf("hash skip via IndexFileResult: res=%q err=%v", res, err)
 	}
 
 	// Directory FileInfo
-	dst, err := ms.Stat(ctx, "/work")
+	dst, err := ms.Stat(ctx, "/workspace/work")
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err = idx.IndexFileResult(ctx, "/work", dst)
+	res, err = idx.IndexFileResult(ctx, "/workspace/work", dst)
 	if err != nil || res != vfsindex.PathDirectory {
 		t.Fatalf("dir IndexFileResult: res=%q err=%v", res, err)
 	}
 
-	if err := ms.WriteFile(ctx, "/work/pic.bin", []byte{0x00, 0x01, 0xff}); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/work/pic.bin", []byte{0x00, 0x01, 0xff}); err != nil {
 		t.Fatal(err)
 	}
 	// .bin may still be text-like via detect; use .png extension gate
-	if err := ms.WriteFile(ctx, "/work/x.png", []byte{0x89, 'P', 'N', 'G'}); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/work/x.png", []byte{0x89, 'P', 'N', 'G'}); err != nil {
 		t.Fatal(err)
 	}
-	pst, err := ms.Stat(ctx, "/work/x.png")
+	pst, err := ms.Stat(ctx, "/workspace/work/x.png")
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err = idx.IndexFileResult(ctx, "/work/x.png", pst)
+	res, err = idx.IndexFileResult(ctx, "/workspace/work/x.png", pst)
 	if err != nil || res != vfsindex.PathSkipped {
 		t.Fatalf("png skip: res=%q err=%v", res, err)
 	}
 
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
-	if _, err := idx.IndexFileResult(canceled, "/work/a.txt", st); err == nil {
+	if _, err := idx.IndexFileResult(canceled, "/workspace/work/a.txt", st); err == nil {
 		t.Fatal("want ctx canceled error")
 	}
-	if _, err := idx.UnindexPath(canceled, "/work/a.txt"); err == nil {
+	if _, err := idx.UnindexPath(canceled, "/workspace/work/a.txt"); err == nil {
 		t.Fatal("unindex want ctx canceled")
 	}
-	if _, err := idx.IndexPathResult(canceled, "/work/a.txt"); err == nil {
+	if _, err := idx.IndexPathResult(canceled, "/workspace/work/a.txt"); err == nil {
 		t.Fatal("IndexPathResult want ctx canceled")
 	}
 
@@ -497,13 +467,13 @@ func TestMountIndexer_IndexFileResultAndDefaults(t *testing.T) {
 	}
 
 	// Nested walk under prefix
-	if err := ms.MkdirAll(ctx, "/work/sub"); err != nil {
+	if err := ms.MkdirAll(ctx, "/workspace/work/sub"); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.WriteFile(ctx, "/work/sub/nested.txt", []byte("nested-unique-token\n")); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/work/sub/nested.txt", []byte("nested-unique-token\n")); err != nil {
 		t.Fatal(err)
 	}
-	stats, err := idx.IndexPrefix(ctx, "/work/sub", vfsindex.IndexOpts{})
+	stats, err := idx.IndexPrefix(ctx, "/workspace/work/sub", vfsindex.IndexOpts{})
 	if err != nil || stats.Indexed < 1 {
 		t.Fatalf("nested prefix: %+v err=%v", stats, err)
 	}
@@ -513,10 +483,10 @@ func TestMountIndexer_IndexFileResultAndDefaults(t *testing.T) {
 	}
 
 	// Null byte in a .txt file → stream binary skip (not indexed as text)
-	if err := ms.WriteFile(ctx, "/work/binlike.txt", []byte("ok\x00null")); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/work/binlike.txt", []byte("ok\x00null")); err != nil {
 		t.Fatal(err)
 	}
-	res, err = idx.IndexPathResult(ctx, "/work/binlike.txt")
+	res, err = idx.IndexPathResult(ctx, "/workspace/work/binlike.txt")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -529,53 +499,37 @@ func TestMountIndexer_IndexFileResultAndDefaults(t *testing.T) {
 	idx.MaxIndexBytes = 32
 	idx.LinesPerChunk = 2
 	long := strings.Repeat("wordline\n", 40)
-	if err := ms.WriteFile(ctx, "/work/long.txt", []byte(long)); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/work/long.txt", []byte(long)); err != nil {
 		t.Fatal(err)
 	}
-	res, err = idx.IndexPathResult(ctx, "/work/long.txt")
+	res, err = idx.IndexPathResult(ctx, "/workspace/work/long.txt")
 	if err != nil || (res != vfsindex.PathIndexed && res != vfsindex.PathSkipped) {
 		t.Fatalf("long file: res=%q err=%v", res, err)
 	}
 
-	// PolicyNone mount: IndexPath / IndexPrefix report skipped (no Document written).
-	if err := ms.Mount(ctx, vfs.MountSpec{
-		Point: "/off", Profile: "scratch", IndexPolicy: vfsindex.PolicyNone,
-		Params: map[string]string{"subpath": "off"},
-	}); err != nil {
+	// PolicyNone member: IndexPath / IndexPrefix report skipped (no Document written).
+	if err := ms.WriteFile(ctx, "/workspace/off/hidden.txt", []byte("hidden-none-token\n")); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.WriteFile(ctx, "/off/hidden.txt", []byte("hidden-none-token\n")); err != nil {
-		t.Fatal(err)
-	}
-	res, err = idx.IndexPathResult(ctx, "/off/hidden.txt")
+	res, err = idx.IndexPathResult(ctx, "/workspace/off/hidden.txt")
 	if err != nil || res != vfsindex.PathSkipped {
 		t.Fatalf("policy none: res=%q err=%v", res, err)
 	}
-	stats, err = idx.IndexPrefix(ctx, "/off", vfsindex.IndexOpts{})
+	stats, err = idx.IndexPrefix(ctx, "/workspace/off", vfsindex.IndexOpts{})
 	if err != nil || stats.Indexed != 0 {
 		t.Fatalf("prefix none: %+v err=%v", stats, err)
 	}
 
 	// Byte-only provider has no Document IR — indexer streams the UTF-8 body.
-	bytesReg := vfs.NewBackendRegistry()
-	if err := bytesReg.Register(streamFactory{files: map[string][]byte{
+	ms2 := treeLocal(t, vfs.At("raw", streamFactory{files: map[string][]byte{
 		"crlf.txt": []byte("alpha stream-unique\r\nbeta line\n"),
-	}}); err != nil {
-		t.Fatal(err)
-	}
-	ms2, err := vfs.NewMountSession("idx-stream", bytesReg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := ms2.Mount(ctx, vfs.MountSpec{Point: "/raw", Profile: "bytes"}); err != nil {
-		t.Fatal(err)
-	}
+	}}.Open))
 	idx2, err := vfsindex.NewMountIndexer(ms2, eng, scope)
 	if err != nil {
 		t.Fatal(err)
 	}
 	idx2.LinesPerChunk = 1
-	res, err = idx2.IndexPathResult(ctx, "/raw/crlf.txt")
+	res, err = idx2.IndexPathResult(ctx, "/workspace/raw/crlf.txt")
 	if err != nil || res != vfsindex.PathIndexed {
 		t.Fatalf("stream index: res=%q err=%v", res, err)
 	}
@@ -589,9 +543,7 @@ func TestMountIndexer_IndexFileResultAndDefaults(t *testing.T) {
 // Indexer must hash+chunk via the byte stream.
 type streamFactory struct{ files map[string][]byte }
 
-func (streamFactory) Profile() string { return "bytes" }
-
-func (f streamFactory) Open(context.Context, string, vfs.MountSpec) (vfs.Provider, error) {
+func (f streamFactory) Open(context.Context, string, vfs.Binding) (vfs.Provider, error) {
 	return streamProvider(f), nil
 }
 
@@ -655,21 +607,11 @@ func keys(m map[string]brain.RichObject) []string {
 
 func TestMountIndexer_docsBlockText(t *testing.T) {
 	ctx := context.Background()
-	reg := vfs.NewBackendRegistry()
-	doc := vfs.NewRichDocument("/docs/Spec", "application/vnd.google-apps.document", []vfs.Block{
+	doc := vfs.NewRichDocument("/workspace/docs/Spec", "application/vnd.google-apps.document", []vfs.Block{
 		{Kind: vfs.BlockKindHeading, Text: "Spec", Style: vfs.StyleMeta{Level: 1}},
 		{Kind: vfs.BlockKindParagraph, Text: "unique-doc-phrase"},
 	})
-	if err := reg.Register(richFactory{doc: doc}); err != nil {
-		t.Fatal(err)
-	}
-	ms, err := vfs.NewMountSession("idx-docs", reg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/docs", Profile: "rich"}); err != nil {
-		t.Fatal(err)
-	}
+	ms := treeLocal(t, vfs.At("docs", richFactory{doc: doc}.Open))
 	store := brain.NewMemoryStore()
 	eng, err := brain.NewEngine(store)
 	if err != nil {
@@ -678,27 +620,27 @@ func TestMountIndexer_docsBlockText(t *testing.T) {
 	if err := eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...); err != nil {
 		t.Fatal(err)
 	}
-	ns := uuid.New()
-	idx, err := vfsindex.NewMountIndexer(ms, eng, brain.Scope{Namespace: &ns})
+	ns := mustNS(t, "id", uuid.NewString())
+	idx, err := vfsindex.NewMountIndexer(ms, eng, brain.Scope{Namespace: ns})
 	if err != nil {
 		t.Fatal(err)
 	}
-	st, err := ms.Stat(ctx, "/docs/Spec")
+	st, err := ms.Stat(ctx, "/workspace/docs/Spec")
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := idx.IndexFileResult(ctx, "/docs/Spec", st)
+	res, err := idx.IndexFileResult(ctx, "/workspace/docs/Spec", st)
 	if err != nil || res != vfsindex.PathIndexed {
 		t.Fatalf("index: %q err=%v", res, err)
 	}
-	parent := idx.DocumentID("/docs/Spec")
-	children, err := eng.ListChildren(ctx, brain.Scope{Namespace: &ns}, parent)
+	parent := idx.DocumentID("/workspace/docs/Spec")
+	children, err := eng.ListChildren(ctx, brain.Scope{Namespace: ns}, parent)
 	if err != nil || len(children) != 2 {
 		t.Fatalf("chunks=%d err=%v", len(children), err)
 	}
 	var sawPhrase bool
 	for _, c := range children {
-		obj, err := eng.Read(ctx, brain.Scope{Namespace: &ns}, c.ID)
+		obj, err := eng.Read(ctx, brain.Scope{Namespace: ns}, c.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -709,7 +651,7 @@ func TestMountIndexer_docsBlockText(t *testing.T) {
 	if !sawPhrase {
 		t.Fatal("expected Block.Text chunk, not projected HTML")
 	}
-	res, err = idx.IndexFileResult(ctx, "/docs/Spec", st)
+	res, err = idx.IndexFileResult(ctx, "/workspace/docs/Spec", st)
 	if err != nil || res != vfsindex.PathSkipped {
 		t.Fatalf("hash skip: %q err=%v", res, err)
 	}
@@ -717,8 +659,7 @@ func TestMountIndexer_docsBlockText(t *testing.T) {
 
 type richFactory struct{ doc vfs.Document }
 
-func (richFactory) Profile() string { return "rich" }
-func (f richFactory) Open(context.Context, string, vfs.MountSpec) (vfs.Provider, error) {
+func (f richFactory) Open(context.Context, string, vfs.Binding) (vfs.Provider, error) {
 	return richProvider(f), nil
 }
 

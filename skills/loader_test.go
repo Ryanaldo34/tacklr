@@ -2,7 +2,6 @@ package skills
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,21 +24,19 @@ func writeSkill(t *testing.T, root, dir, name, desc, body string) {
 
 func mountSkills(t *testing.T, hosts ...string) *vfs.MountSession {
 	t.Helper()
-	reg := vfs.NewBackendRegistry()
-	for i, host := range hosts {
+	opens := make([]vfs.Open, 0, len(hosts))
+	for _, host := range hosts {
 		if err := os.MkdirAll(host, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		id := fmt.Sprintf("pack%d", i)
-		if err := reg.Register(vfs.LocalFactory{ID: id, Base: host, Skills: "."}); err != nil {
-			t.Fatal(err)
-		}
+		opens = append(opens, vfs.Local(host))
 	}
-	ms, err := vfs.NewMountSession(t.Name(), reg)
+	skills := opens[0]
+	if len(opens) > 1 {
+		skills = vfs.Union(opens...)
+	}
+	ms, err := vfs.Tree(vfs.At("skills", skills))(t.Context(), t.Name(), vfs.Request{})
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := ms.AttachSkills(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ms.Close() })
@@ -52,21 +49,14 @@ func TestLoader_emptySessionAndMissingMount(t *testing.T) {
 		t.Fatalf("nil session: loaded=%#v err=%v", loaded, err)
 	}
 
-	reg := vfs.NewBackendRegistry()
-	if err := reg.Register(vfs.LocalFactory{ID: "work", Base: t.TempDir()}); err != nil {
-		t.Fatal(err)
-	}
-	ms, err := vfs.NewMountSession(t.Name(), reg)
+	ms, err := vfs.Tree(vfs.At("work", vfs.Local(t.TempDir())))(t.Context(), t.Name(), vfs.Request{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ms.Close() })
-	if err := ms.Mount(t.Context(), vfs.MountSpec{Point: "/work", Profile: "work"}); err != nil {
-		t.Fatal(err)
-	}
 	loaded, err = (Loader{Session: ms}).Load(t.Context())
 	if err != nil || loaded != nil {
-		t.Fatalf("no /skills: loaded=%#v err=%v", loaded, err)
+		t.Fatalf("no /workspace/skills: loaded=%#v err=%v", loaded, err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -91,7 +81,7 @@ func TestLoader_catalogAndFailurePaths(t *testing.T) {
 	if len(loaded) != 2 || loaded[0].Name != "alpha" || loaded[1].Name != "beta" {
 		t.Fatalf("loaded = %#v (want alpha, beta sorted)", loaded)
 	}
-	if loaded[0].Path != "/skills/alpha/SKILL.md" {
+	if loaded[0].Path != "/workspace/skills/alpha/SKILL.md" {
 		t.Fatalf("path = %q", loaded[0].Path)
 	}
 	cat := Catalog(loaded)
@@ -196,6 +186,27 @@ func TestLoader_catalogAndFailurePaths(t *testing.T) {
 			t.Fatalf("err = %v", err)
 		}
 	})
+}
+
+func TestLoader_customRoot(t *testing.T) {
+	root := t.TempDir()
+	writeSkill(t, root, "alpha", "alpha", "Alpha skill", "Do alpha things.")
+	ms, err := vfs.Tree(vfs.At("packs", vfs.Local(root)))(t.Context(), t.Name(), vfs.Request{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ms.Close() })
+
+	loaded, err := (Loader{Session: ms, Root: "/workspace/packs"}).Load(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded) != 1 || loaded[0].Name != "alpha" || loaded[0].Path != "/workspace/packs/alpha/SKILL.md" {
+		t.Fatalf("loaded = %#v", loaded)
+	}
+	if loaded[0].Instructions != "Do alpha things." {
+		t.Fatalf("instructions = %q", loaded[0].Instructions)
+	}
 }
 
 func TestParse_returnPaths(t *testing.T) {

@@ -10,7 +10,7 @@ if [[ ! -f "$PROFILE" ]]; then
 fi
 
 # Keep in sync with exclude.paths in .testcoverage.yml / update-coverage-badge.sh
-EXCLUDE_REGEX='cmd/|internal/testkit|internal/agentbench|internal/temporallive|internal/livesess|telemetry/otel\.go'
+EXCLUDE_REGEX='cmd/|internal/testkit|internal/temporallive|internal/livesess|telemetry/otel\.go'
 
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
@@ -79,4 +79,4 @@ awk -v excl="$EXCLUDE_REGEX" '
 done
 
 echo
-echo "**Total (library statements, excludes cmd/testkit/agentbench/temporallive/otel):** ${total}"
+echo "**Total (library statements, excludes cmd/testkit/temporallive/otel):** ${total}"

@@ -1,6 +1,6 @@
 # Virtual filesystem (`vfs`)
 
-Tacklr’s virtual filesystem gives agents one path-based interface over storage backends (local disk, S3, **brain Engrams**, Google Drive / Docs, and Microsoft Graph files). Hosts register factories; the client supplies credentials before a turn; agents only see virtual paths like `/work/main.go`, `/engram/deal/acme.md`, or `/workspace/contracts/nda.pdf`.
+Tacklr’s virtual filesystem gives agents one path-based interface over storage backends (local disk, S3, **brain Engrams**, Google Drive / Docs, and Microsoft Graph files). Hosts build a turn tree with `vfs.Tree` / `vfs.At`; the client supplies credentials before a turn; agents only see virtual paths under `/workspace` (`/workspace/work/main.go`, `/workspace/engram/deal/acme.md`, `/workspace/contracts/nda.pdf`).
 
 Package: [`github.com/ryanaldo34/tacklr/vfs`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfs).
 
@@ -9,10 +9,11 @@ Knowledge objects, search, and the graph are documented in **[docs/knowledge.md]
 ## Big picture
 
 ```text
-  Host registers factories; client binds credentials before the turn
+  Host OpenVFS (Tree/At); client binds credentials before the turn
+  Host OpenSkills (separate Tree); loader only — never session.VFS
            │
            ▼
-  MountSession (injected if configured)  ── virtual paths like /work/main.go
+  MountSession (injected if configured)  ── /workspace/work/main.go
            │
      ┌─────┴─────┐
      │           │
@@ -57,50 +58,55 @@ ReadText → provider OpenDocument (service is source of truth)
 
 ## Mounts
 
-Hosts register factories on a process-scoped `BackendRegistry`, then attach mounts on a `MountSession`. Durable child sessions open their own `MountSession` each turn from the same recipes; they do not share the parent’s live tree.
+The only top-level mount is **`/workspace`**. Hosts close over clients in `vfs.Open` funcs and name each backend with `vfs.At`. `AgentSpec.OpenVFS` (usually `vfs.Tree`) builds a fresh `MountSession` each turn. Durable child sessions do not share the parent’s live tree.
 
 ```go
-reg := vfs.NewBackendRegistry()
-_ = reg.Register(vfs.LocalFactory{ID: "scratch", Base: "/var/agent/scratch"})
-// S3:   reg.Register(vfs.S3Factory{ID: "docs", Client: vfs.AWSS3{Client: s3c}, DefaultBucket: "my-bucket"})
-// Blob: reg.Register(vfs.BlobFactory{ID: "docs", Client: vfs.AzureBlob{Client: blobc}, DefaultContainer: "my-container"})
-
-ms, err := vfs.NewMountSession("sess-1", reg)
-if err != nil {
-	return err
-}
-_ = ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"})
+open := vfs.Tree(
+	vfs.At("work", builtins.Local("/var/agent/scratch")),
+	vfs.At("engram", brain.Open(eng, scope)),
+)
+ms, err := open(ctx, "sess-1", vfs.Request{})
 ```
+
+User-owned Drive/Graph members are constructed from this turn’s bind (injected client, not a hidden SDK):
+
+```go
+func openVFS(ctx context.Context, id string, req vfs.Request) (*vfs.MountSession, error) {
+	members := []vfs.Member{vfs.At("work", builtins.Local(jail))}
+	if b, ok := vfs.BindingByName(req.Bindings, "drive"); ok && b.Auth.Token != "" {
+		h := vfs.NewTokenHolder(b.Auth)
+		api, err := builtins.NewGoogleDrive(ctx, h)
+		if err != nil {
+			return nil, err
+		}
+		members = append(members, vfs.At("drive", builtins.Drive(api)))
+	}
+	return vfs.Tree(members...)(ctx, id, req)
+}
+```
+
+Tests inject fakes into the same constructors: `builtins.Drive(fakeAPI)`, `builtins.Graph(fakeAPI, holder, account)`.
 
 | Type | Meaning |
 |------|---------|
-| `MountSpec` | Durable mount description (point, profile, read-only, params, **indexPolicy**). Checkpoint-safe; no secrets. |
-| `Params` | Backend options (`subpath`, `bucket`, `container`, `prefix`, …) |
-| `Members` | Optional member `MountSpec`s. Non-empty → a union at `Point`. Use `vfs.Skills(...)` for the flat read-only `/skills` pack. Use `vfs.Workspace(...)` for named writable `/workspace` aliases (`params.name`). Duplicate aliases / first-level names → `ErrAmbiguous`. |
-| `IndexPolicy` | Optional string: `none` \| `selective` \| `prefix` \| `watch` (empty → selective when the index bridge is on) |
+| `At(name, open)` | One `/workspace/<name>` backend |
+| `Tree(...)` | One `/workspace` mount whose members are the At list |
+| `Union(...)` | Read-only merge of Opens (skill packs on `OpenSkills`: `Tree(At("skills", Union(Local(a), Local(b))))`) |
+| `MountSpec` | Durable description (point `/workspace`, members, **indexPolicy**). Checkpoint-safe; no secrets. |
+| `IndexPolicy` | `none` \| `selective` \| `prefix` \| `watch` (empty → selective when the index bridge is on) |
 
-`MountSession.SpecAt` returns the full durable `MountSpec` for a virtual path (for policy and host tooling).
+`MountSession.SpecAt` returns the **member** spec for a `/workspace/<alias>/…` path (so IndexPolicy is per backend).
 
 ### Skills
 
-Set `Skills` on a factory to mark that backend as a skill pack. `Mount` / `Materialize` attach a read-only `/skills` union (`vfs.Skills`). `"."` means the whole provider root; any other value is a relative subpath (local) or key prefix (S3 / Azure Blob).
+Playbooks are **not** on the agent `/workspace` tree. Hosts set `AgentSpec.OpenSkills` to a separate `vfs.Tree` (often `At("skills", vfs.Union(...))`). Overlapping first-level names in a Union are `ErrAmbiguous`. The loader walks `SkillsRoot` (empty means `/workspace/skills` on that host-only session). The agent never sees those paths. Full instructions load only through `read_skill`.
 
-```go
-_ = reg.Register(vfs.LocalFactory{ID: "team", Base: "/var/agent/skills", Skills: "."})
-_ = reg.Register(vfs.S3Factory{ID: "docs", Client: vfs.AWSS3{Client: s3c}, DefaultBucket: "work", Skills: "skills"})
-_ = reg.Register(vfs.BlobFactory{ID: "blobs", Client: vfs.AzureBlob{Client: blobc}, DefaultContainer: "work", Skills: "skills"})
-_ = ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "docs"})
-// /skills is now team ∪ docs/skills, IndexPolicy none, read-only
-```
+Host-owned roots and secrets (local jail, S3 / Azure Blob client) live in the Open closures, not on mounts or checkpoints.
 
-The harness loads the catalog from `/skills` when that mount exists. Overlapping first-level names are `ErrAmbiguous`.
-
-Host-owned roots and secrets (local jail, S3 / Azure Blob client) live on factories, not on mounts or checkpoints.
-
-User-owned cloud folders (Google Drive, OneDrive, SharePoint libraries) attach under one mount **`/workspace/<alias>`**. The **client** does OAuth (PKCE). It sends only a short-lived access token over ACP extension methods. Tokens live in `vfs.SessionAuth` (process memory), keyed by `(session, provider)`. They are never written to `MountSpec`, session checkpoints, or the ACP wire store. After `session/load` or process restart the client must bind again. `/work` and `/engram` stay host scratch/knowledge. `/skills` stays a flat read-only union.
+User-owned cloud folders (Google Drive, OneDrive, SharePoint libraries) are extra At members under **`/workspace/<alias>`**. The **client** does OAuth (PKCE). It sends only a short-lived access token over ACP extension methods. Tokens live on the work item (`Prompt.Auth`) and in `TokenHolder` (process memory). They are never written to `MountSpec`, session checkpoints, or the ACP wire store. After `session/load` or process restart the client must bind again.
 
 ```text
-initialize  →  agentCapabilities._meta.tacklr.vfs { credentials, providers, tokenRefresh }
+initialize  →  agentCapabilities._meta.tacklr.vfs { credentials, tokenRefresh, tokenExpiry, writable }
 session/new
 _tacklr/vfs/bind     { sessionId, backends: [{ provider, point, auth.token, params }] }
                      provider is gdrive | msgraph
@@ -109,7 +115,7 @@ _tacklr/vfs/bind     { sessionId, backends: [{ provider, point, auth.token, para
                      gdrive: omit folderId for My Drive; folders are path names under /workspace/<alias>.
                      msgraph: account (empty → organization), driveId, itemId, siteId.
                      organization (default) requires siteId or driveId. personal uses /me/drive.
-session/prompt       → Runtime injects a tree from bootstrap + bind recipes; agent sees /workspace/contracts, /workspace/legal
+session/prompt       → Runtime OpenVFS (Tree + this turn's binds); agent sees /workspace/work, /workspace/contracts
 _tacklr/vfs/refresh  → new access token for a provider (gdrive and msgraph are different holders); next prompt
 _tacklr/vfs/token    ← agent asks the client after a 401 (if the client advertised tokenRefresh)
 _tacklr/vfs/unbind   → by alias (point leftover /contracts, or point /workspace + name); next prompt
@@ -123,9 +129,7 @@ Go zero-value `Binding` and ACP `readOnly` omitted stay **read-only**. Writable 
 
 Drive scopes: read-only `drive.readonly` (export-only). Writable needs **`drive`**, **`documents`**, and **`spreadsheets`**. `drive` is a restricted (CASA) scope; the token is not folder-scoped.
 
-Graph (OneDrive and SharePoint libraries, one factory `msgraph`): **`account`** is `organization` (default) or `personal`. Organization Open without `siteId` or `driveId` fails (`vfs: msgraph organization account requires siteId or driveId`). Personal uses `/me/drive`. Aliases: `enterprise` / `work` / `tenant` → organization; `consumer` / `msa` → personal. Read-only **`Files.Read`**; writable **`Files.ReadWrite`**. A SharePoint library also needs **`Sites.Read.All`** or **`Sites.ReadWrite.All`** as the **client** already consented. CASA: prefer `Files.ReadWrite` (user files) over `Files.ReadWrite.All` when it covers the bound drive. Graph files are real `.docx` / `.xlsx` (Word/Excel codecs). Native Google Docs/Sheets on a Drive member still use Docs/Sheets APIs.
-
-`GraphFactory.Account` on the host factory is the same default when a bind omits `account`.
+Graph (OneDrive and SharePoint libraries): **`account`** is `organization` (default) or `personal`. Organization Open without `siteId` or `driveId` fails (`vfs: msgraph organization account requires siteId or driveId`). Personal uses `/me/drive`. Aliases: `enterprise` / `work` / `tenant` → organization; `consumer` / `msa` → personal. Read-only **`Files.Read`**; writable **`Files.ReadWrite`**. A SharePoint library also needs **`Sites.Read.All`** or **`Sites.ReadWrite.All`** as the **client** already consented. CASA: prefer `Files.ReadWrite` (user files) over `Files.ReadWrite.All` when it covers the bound drive. Graph files are real `.docx` / `.xlsx` (Word/Excel codecs). Native Google Docs/Sheets on a Drive member still use Docs/Sheets APIs. Hosts pass `builtins.Graph(api, holder, account)`; `account` on Graph is the default when a bind omits it.
 
 Two surfaces, one document:
 
@@ -141,11 +145,10 @@ Read-only bind: official ZIP export (`application/zip`, 10 MiB). Writable bind
 Docs **tables**: `kind=table` body is TSV (`A\tB`) **or** a GFM pipe table (`| A | B |` plus optional `| --- | --- |` separator). Pipe markdown is split into real Docs cells; it is not inserted as a 1-column table with the pipes still in the cell. `content` lift on create does the same for a pipe-table paragraph.
 
 ```go
-auth := vfs.NewSessionAuth()
-reg := vfs.NewBackendRegistry()
-_ = reg.Register(vfs.DriveFactory{ID: "gdrive", Auth: auth})
-_ = reg.Register(vfs.GraphFactory{ID: "msgraph", Auth: auth})
-// Work-item Prompt/Resume AuthContext tokens are bound onto this SessionAuth for the turn.
+// Host OpenVFS, after a drive bind:
+h := vfs.NewTokenHolder(b.Auth)
+api, err := builtins.NewGoogleDrive(ctx, h)
+members = append(members, vfs.At("drive", builtins.Drive(api)))
 ```
 
 Raw path I/O (absolute virtual paths only):
@@ -253,9 +256,9 @@ Tool guidance:
 
 `DetectMediaType` is a helper **providers** call when filling `MediaType`. Empty / missing type is treated as `application/octet-stream` (no IR).
 
-FUSE: hosts call `MountSession.FuseMount(dir)` for a kernel tree. **Every mount point must be a single path segment** (`/work`, `/engram`, `/workspace`). Multi-segment points (`/tmp/tacklr`) fail `FuseMount`. If `ReadText` succeeds (`Textual`), `getattr`/`Read` use that plaintext (so `cat`/`rg` see the projection). Otherwise `Stat.Size` + `io.ReaderAt`. Kernel writes persist through `WriteFile` only when `KernelWritable` (`IdentityCodec`). Projected textual types (Word, Notion, Docs) are **read-only** on the kernel (`EROFS`); the agent `write` tool still uses `WriteDocument`. `session.Mount` attaches a provider; `FuseMount` is the host kernel mount. `HostDir()` is the last mount directory (host-facing only). `FuseAvailable()` probes `/dev/fuse` and `/dev/macfuse*`. `Close` unmounts.
+FUSE: hosts call `MountSession.FuseMount(dir)` for a kernel tree. **The only mount point is `/workspace`**. Multi-segment points (`/tmp/tacklr`) fail `FuseMount`. If `ReadText` succeeds (`Textual`), `getattr`/`Read` use that plaintext (so `cat`/`rg` see the projection). Otherwise `Stat.Size` + `io.ReaderAt`. Kernel writes persist through `WriteFile` only when `KernelWritable` (`IdentityCodec`). Projected textual types (Word, Notion, Docs) are **read-only** on the kernel (`EROFS`); the agent `write` tool still uses `WriteDocument`. `Tree` attaches `/workspace`; `FuseMount` is the host kernel mount. `HostDir()` is the last mount directory (host-facing only). `FuseAvailable()` probes `/dev/fuse` and `/dev/macfuse*`. `Close` unmounts. Host `ls`/`rg` from HostDir see `workspace/work/…`.
 
-`durable.Runtime` injects a **turn-scoped** `MountSession` in the inference/tool activity preamble (FSBootstrap + `/workspace` binds) and attaches FUSE for that slice: `$TMP/tacklr-fuse/<session>` mode `0700`. The activity (or in-process turn slice) closes the tree when the step ends. Bind/unbind only record credentials; they do not keep a live tree between prompts. Production without a device has **no** `MountSession` (no VFS tools, no `run_command`). Tests inject `vfs.DirectProjection` so `read`/`write` still work and `run_command` returns `ErrFuseNotMounted` until `HostDir` is set. Device present and mount fails after one suffix retry → fail-hard. Workers reconstruct a `MountSession` per activity; they do not hold a parent pointer.
+`durable.Runtime` injects a **turn-scoped** `MountSession` from `AgentSpec.OpenVFS` and attaches FUSE for that slice: `$TMP/tacklr-fuse/<session>` mode `0700`. `OpenSkills` is a second session with no FUSE projection; the agent never receives it. The activity (or in-process turn slice) closes both trees when the step ends. Bind/unbind only record credentials; they do not keep a live tree between prompts. Production without a device has **no** `MountSession` (no VFS tools, no `run_command`). Tests inject `vfs.DirectProjection` so `read`/`write` still work and `run_command` returns `ErrFuseNotMounted` until `HostDir` is set. Device present and mount fails after one suffix retry → fail-hard. Workers reconstruct a `MountSession` per activity; they do not hold a parent pointer.
 
 `TextCodec` requires valid UTF-8 and builds a `TextDocument` labeled with the caller’s media type.
 
@@ -299,7 +302,7 @@ Examples starting from `"a\nb\nc\n"` → lines `[a, b, c, ""]`:
 ### Persist
 
 ```go
-text, _ := ms.ReadText(ctx, "/work/note.txt")
+text, _ := ms.ReadText(ctx, "/workspace/work/note.txt")
 _ = text.SetLine(2, "changed")
 _ = text.ReplaceLines(3, 4, []string{"C", "D"})
 _ = ms.WriteDocument(ctx, text)
@@ -318,41 +321,29 @@ _ = ms.WriteDocument(ctx, text)
 ```go
 ctx := context.Background()
 
-// --- Mount ---
-reg := vfs.NewBackendRegistry()
-_ = reg.Register(vfs.LocalFactory{ID: "scratch", Base: "/var/agent/scratch"})
-ms, _ := vfs.NewMountSession("sess-1", reg)
-_ = ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"})
+ms, _ := vfs.Tree(vfs.At("work", builtins.Local("/var/agent/scratch")))(ctx, "sess-1", vfs.Request{})
 
-// Optional seed via raw bytes
-_ = ms.WriteFile(ctx, "/work/note.txt", []byte("a\nb\nc\n"))
+_ = ms.WriteFile(ctx, "/workspace/work/note.txt", []byte("a\nb\nc\n"))
 
-// --- Read a window only (tools) ---
-win, _ := ms.ReadLines(ctx, "/work/note.txt", 1, 3) // win.Lines == ["a","b"]; check win.EOF
+win, _ := ms.ReadLines(ctx, "/workspace/work/note.txt", 1, 3) // win.Lines == ["a","b"]; check win.EOF
 
-// --- Full IR for edit ---
-text, err := ms.ReadText(ctx, "/work/note.txt")
+text, err := ms.ReadText(ctx, "/workspace/work/note.txt")
 // text.Line(1) == "a"
 // text.LineCount() == 4   // trailing \n → last empty line
 
-// --- Edit (memory only) ---
 _ = text.SetLine(2, "B")
 _ = text.ReplaceLines(3, 4, []string{"C", "D"})
-// body now: "a\nB\nC\nD\n"
-
-// --- Write-back (streamed PutFile) ---
 _ = ms.WriteDocument(ctx, text)
 
-// --- Verify ---
-raw, _ := ms.ReadFile(ctx, "/work/note.txt")
+raw, _ := ms.ReadFile(ctx, "/workspace/work/note.txt")
 // raw == []byte("a\nB\nC\nD\n")
 ```
 
 Lifecycle as a diagram:
 
 ```text
-1. Mount     BackendRegistry + MountSession.Mount
-             /work → local folder (or S3 / Azure Blob prefix)
+1. Tree      vfs.Tree(vfs.At("work", builtins.Local(jail)))
+             /workspace/work → local folder (or S3 / Azure Blob prefix)
 
 2. Read      ReadText / OpenDocument
              bytes → DetectMediaType → TextCodec → *TextDocument
@@ -369,7 +360,7 @@ Lifecycle as a diagram:
 ### Same paths on S3 and Azure Blob
 
 ```text
-Mount:  /data  →  S3Factory (bucket + prefix) or BlobFactory (container + prefix)
+Mount:  /data  →  builtins.S3 (bucket + prefix) or builtins.Blob (container + prefix)
 Read:   ReadText("/data/app.go")   // GetObject / DownloadStream → TextDocument
 Edit:   SetLine / ReplaceLines
 Write:  WriteDocument              // PutObject / UploadStream with Text() bytes
@@ -487,7 +478,7 @@ as Document/Chunk artifacts. Engram writes go through the Provider (`Put`), not 
 | `vfs` | Specs (incl. IndexPolicy string), `AfterPersist` hook only |
 | `brain` | Objects/props only; no VFS |
 | `vfsindex` | Both; owns `IndexPath` / `IndexPrefix` / schedulers / policy helpers |
-| harness (`tacklr`) | BrainFactory + `/engram` default, skip-index on brain profile, tools |
+| harness (`tacklr`) | brain.Open + `/engram` default, skip-index on brain profile, tools |
 
 ### Host wiring
 

@@ -15,7 +15,6 @@ import (
 	tacklrtemporal "github.com/ryanaldo34/tacklr/durable/temporal"
 	"github.com/ryanaldo34/tacklr/internal/temporallive"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
-	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/telemetry"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
@@ -43,7 +42,7 @@ func (m *mockInferenceStrategy) SupportsMIME(mimeType string) bool {
 	if m.supportsMIMEFn != nil {
 		return m.supportsMIMEFn(mimeType)
 	}
-	return streaming.IsTextMIME(mimeType)
+	return tacklr.IsTextMIME(mimeType)
 }
 func (m *mockInferenceStrategy) CountTokens(context.Context, []*tacklr.Message, []*tacklr.Tool) (int, error) {
 	return 0, nil

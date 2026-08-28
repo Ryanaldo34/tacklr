@@ -5,34 +5,34 @@ import (
 	"fmt"
 	"slices"
 
-	"github.com/ryanaldo34/tacklr/streaming"
+	"github.com/ryanaldo34/tacklr"
 )
 
 // presentationEvent is the protocol-neutral client-facing meaning of one
 // harness event. Protocol serializers may reshape it, but semantic conversion
-// from streaming.StreamEvent happens only in presentStreamEvent.
+// from tacklr.StreamEvent happens only in presentStreamEvent.
 type presentationEvent struct {
-	Type      string               `json:"type"`
-	TurnID    string               `json:"turn_id,omitempty"`
-	MessageID string               `json:"message_id,omitempty"`
-	Content   string               `json:"content,omitempty"`
-	Data      json.RawMessage      `json:"data,omitempty"`
-	ToolCalls []streaming.ToolCall `json:"tool_calls,omitempty"`
-	ErrorText string               `json:"error,omitempty"`
-	Error     error                `json:"-"`
+	Type      string            `json:"type"`
+	TurnID    string            `json:"turn_id,omitempty"`
+	MessageID string            `json:"message_id,omitempty"`
+	Content   string            `json:"content,omitempty"`
+	Data      json.RawMessage   `json:"data,omitempty"`
+	ToolCalls []tacklr.ToolCall `json:"tool_calls,omitempty"`
+	ErrorText string            `json:"error,omitempty"`
+	Error     error             `json:"-"`
 }
 
-func presentStreamEvent(event streaming.StreamEvent) (presentationEvent, error) {
+func presentStreamEvent(event tacklr.StreamEvent) (presentationEvent, error) {
 	switch event.Type {
-	case streaming.StreamEventMessage,
-		streaming.StreamEventReasoning,
-		streaming.StreamEventFunctionCall,
-		streaming.StreamEventToolResult,
-		streaming.StreamEventComplete,
-		streaming.StreamEventError,
-		streaming.StreamEventInterrupt,
-		streaming.StreamEventToolUpdate,
-		streaming.StreamEventPlanUpdate:
+	case tacklr.StreamEventMessage,
+		tacklr.StreamEventReasoning,
+		tacklr.StreamEventFunctionCall,
+		tacklr.StreamEventToolResult,
+		tacklr.StreamEventComplete,
+		tacklr.StreamEventError,
+		tacklr.StreamEventInterrupt,
+		tacklr.StreamEventToolUpdate,
+		tacklr.StreamEventPlanUpdate:
 	default:
 		return presentationEvent{}, fmt.Errorf("server: unsupported stream event type %q", event.Type)
 	}

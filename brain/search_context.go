@@ -16,13 +16,13 @@ import (
 // host namespace isolation + the active ResultSet for continue.
 type SearchContext struct {
 	mu        sync.Mutex
-	namespace *uuid.UUID
+	namespace Namespace
 	current   *ResultSet
 }
 
 // searchContextExport is the checkpoint envelope (namespace + optional result set).
 type searchContextExport struct {
-	Namespace *uuid.UUID `json:"namespace,omitempty"`
+	Namespace Namespace  `json:"namespace,omitempty"`
 	ResultSet *ResultSet `json:"result_set,omitempty"`
 }
 
@@ -35,19 +35,14 @@ func NewSearchContext() *SearchContext {
 func (c *SearchContext) Scope() Scope {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.namespace == nil {
-		return Scope{}
-	}
-	cp := *c.namespace
-	return Scope{Namespace: &cp}
+	return Scope{Namespace: c.namespace.Clone()}
 }
 
 // SetNamespace sets host retrieval isolation.
-func (c *SearchContext) SetNamespace(id uuid.UUID) {
+func (c *SearchContext) SetNamespace(ns Namespace) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	cp := id
-	c.namespace = &cp
+	c.namespace = ns.Clone()
 }
 
 // ClearNamespace clears retrieval isolation.
@@ -58,13 +53,13 @@ func (c *SearchContext) ClearNamespace() {
 }
 
 // Namespace returns the host-set search namespace, if any.
-func (c *SearchContext) Namespace() (uuid.UUID, bool) {
+func (c *SearchContext) Namespace() (Namespace, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.namespace == nil {
-		return uuid.UUID{}, false
+	if c.namespace.Empty() {
+		return nil, false
 	}
-	return *c.namespace, true
+	return c.namespace.Clone(), true
 }
 
 // Put implements ResultSetStore: stores set as the sole active ResultSet.
@@ -95,6 +90,7 @@ func (c *SearchContext) Get(_ context.Context, id uuid.UUID) (ResultSet, error) 
 func cloneResultSet(set ResultSet) ResultSet {
 	cp := set
 	cp.ObjectIDs = slices.Clone(set.ObjectIDs)
+	cp.Namespace = set.Namespace.Clone()
 	if len(set.Relations) > 0 {
 		cp.Relations = maps.Clone(set.Relations)
 	}
@@ -105,13 +101,12 @@ func cloneResultSet(set ResultSet) ResultSet {
 func (c *SearchContext) Export() ([]byte, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.namespace == nil && c.current == nil {
+	if c.namespace.Empty() && c.current == nil {
 		return nil, nil
 	}
 	env := searchContextExport{}
-	if c.namespace != nil {
-		cp := *c.namespace
-		env.Namespace = &cp
+	if !c.namespace.Empty() {
+		env.Namespace = c.namespace.Clone()
 	}
 	if c.current != nil {
 		rs := cloneResultSet(*c.current)

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ryanaldo34/tacklr/builtins"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -137,58 +138,46 @@ func (m *memS3) List(ctx context.Context, bucket, prefix string) (keys []string,
 func TestMountSession_s3MemAPI(t *testing.T) {
 	ctx := context.Background()
 	api := newMemS3()
-	reg := vfs.NewBackendRegistry()
-	if err := reg.Register(vfs.S3Factory{
-		ID: "s3", Client: api, DefaultBucket: "bkt",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	ms, err := vfs.NewMountSession("s3-mem", reg)
+	ms, err := vfs.Tree(
+		vfs.At("data", builtins.S3(api, "bkt")),
+		vfs.At("ro", builtins.S3(api, "bkt")).ReadOnly(),
+	)(ctx, "s3-mem", vfs.Request{Bindings: []vfs.Binding{
+		{Params: map[string]string{vfs.ParamName: "data", "prefix": "runs/1"}},
+		{Params: map[string]string{vfs.ParamName: "ro", "prefix": "readonly"}},
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.Mount(ctx, vfs.MountSpec{
-		Point: "/data", Profile: "s3",
-		Params: map[string]string{"prefix": "runs/1"},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	// read-only mount for ErrReadOnly
-	if err := ms.Mount(ctx, vfs.MountSpec{
-		Point: "/ro", Profile: "s3", ReadOnly: true,
-		Params: map[string]string{"prefix": "readonly"},
-	}); err != nil {
-		t.Fatal(err)
-	}
+	t.Cleanup(func() { _ = ms.Close() })
 
 	// Write + read + stat
-	if err := ms.WriteFile(ctx, "/data/hello.go", []byte("package main\n")); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/data/hello.go", []byte("package main\n")); err != nil {
 		t.Fatal(err)
 	}
-	b, err := ms.ReadFile(ctx, "/data/hello.go")
+	b, err := ms.ReadFile(ctx, "/workspace/data/hello.go")
 	if err != nil || string(b) != "package main\n" {
 		t.Fatalf("ReadFile=%q err=%v", b, err)
 	}
-	st, err := ms.Stat(ctx, "/data/hello.go")
+	st, err := ms.Stat(ctx, "/workspace/data/hello.go")
 	if err != nil || st.IsDir || st.Size != int64(len("package main\n")) {
 		t.Fatalf("Stat=%+v err=%v", st, err)
 	}
 
 	// Nested mkdir + list
-	if err := ms.MkdirAll(ctx, "/data/sub/dir"); err != nil {
+	if err := ms.MkdirAll(ctx, "/workspace/data/sub/dir"); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.WriteFile(ctx, "/data/sub/dir/a.txt", []byte("a")); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/data/sub/dir/a.txt", []byte("a")); err != nil {
 		t.Fatal(err)
 	}
-	ents, err := ms.ReadDir(ctx, "/data/sub/dir")
+	ents, err := ms.ReadDir(ctx, "/workspace/data/sub/dir")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(ents) != 1 || ents[0].Name != "a.txt" || ents[0].IsDir {
 		t.Fatalf("ReadDir dir=%+v", ents)
 	}
-	ents, err = ms.ReadDir(ctx, "/data/sub")
+	ents, err = ms.ReadDir(ctx, "/workspace/data/sub")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,13 +191,13 @@ func TestMountSession_s3MemAPI(t *testing.T) {
 		t.Fatalf("expected dir child: %+v", ents)
 	}
 	// Stat directory
-	dst, err := ms.Stat(ctx, "/data/sub/dir")
+	dst, err := ms.Stat(ctx, "/workspace/data/sub/dir")
 	if err != nil || !dst.IsDir {
 		t.Fatalf("Stat dir=%+v err=%v", dst, err)
 	}
 
 	// Open read path — readable, not writable
-	f, err := ms.Open(ctx, "/data/hello.go")
+	f, err := ms.Open(ctx, "/workspace/data/hello.go")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,27 +222,27 @@ func TestMountSession_s3MemAPI(t *testing.T) {
 	_ = f.Close()
 
 	// Remove file then missing
-	if err := ms.Remove(ctx, "/data/sub/dir/a.txt"); err != nil {
+	if err := ms.Remove(ctx, "/workspace/data/sub/dir/a.txt"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ms.Stat(ctx, "/data/sub/dir/a.txt"); !errors.Is(err, vfs.ErrNotExist) {
+	if _, err := ms.Stat(ctx, "/workspace/data/sub/dir/a.txt"); !errors.Is(err, vfs.ErrNotExist) {
 		t.Fatalf("want not exist after remove: %v", err)
 	}
 	// empty dir remove
-	if err := ms.Remove(ctx, "/data/sub/dir"); err != nil {
+	if err := ms.Remove(ctx, "/workspace/data/sub/dir"); err != nil {
 		t.Fatal(err)
 	}
 
 	// non-empty dir remove fails
-	if err := ms.WriteFile(ctx, "/data/sub/keep.txt", []byte("k")); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/data/sub/keep.txt", []byte("k")); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.Remove(ctx, "/data/sub"); err == nil {
+	if err := ms.Remove(ctx, "/workspace/data/sub"); err == nil {
 		t.Fatal("non-empty dir remove")
 	}
 
 	// read-only write
-	if err := ms.WriteFile(ctx, "/ro/x.txt", []byte("no")); !errors.Is(err, vfs.ErrReadOnly) {
+	if err := ms.WriteFile(ctx, "/workspace/ro/x.txt", []byte("no")); !errors.Is(err, vfs.ErrReadOnly) {
 		t.Fatalf("ro write: %v", err)
 	}
 
@@ -266,21 +255,21 @@ func TestMountSession_s3MemAPI(t *testing.T) {
 	if ms.GetAfterPersist() == nil {
 		t.Fatal("GetAfterPersist")
 	}
-	if err := ms.WriteFile(ctx, "/data/hook.txt", []byte("h\n")); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/data/hook.txt", []byte("h\n")); err != nil {
 		t.Fatal(err)
 	}
-	if saw != "/data/hook.txt" {
+	if saw != "/workspace/data/hook.txt" {
 		t.Fatalf("AfterPersist saw %q", saw)
 	}
 	hookErr := errors.New("index unavailable")
 	ms.SetAfterPersist(func(context.Context, string) error { return hookErr })
-	if err := ms.WriteFile(ctx, "/data/hook-error.txt", []byte("h\n")); !errors.Is(err, hookErr) {
+	if err := ms.WriteFile(ctx, "/workspace/data/hook-error.txt", []byte("h\n")); !errors.Is(err, hookErr) {
 		t.Fatalf("AfterPersist error = %v", err)
 	}
 	ms.SetAfterPersist(nil)
 
 	// Document IR over S3 + Sync
-	doc, err := ms.ReadText(ctx, "/data/hello.go")
+	doc, err := ms.ReadText(ctx, "/workspace/data/hello.go")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,7 +279,7 @@ func TestMountSession_s3MemAPI(t *testing.T) {
 	if err := ms.WriteDocument(ctx, doc); err != nil {
 		t.Fatal(err)
 	}
-	df, err := ms.Open(ctx, "/data/hello.go")
+	df, err := ms.Open(ctx, "/workspace/data/hello.go")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -298,25 +287,20 @@ func TestMountSession_s3MemAPI(t *testing.T) {
 		t.Fatalf("Stat after write: %+v err=%v", fi, err)
 	}
 	_ = df.Close()
-	body, err := ms.ReadFile(ctx, "/data/hello.go")
+	body, err := ms.ReadFile(ctx, "/workspace/data/hello.go")
 	if err != nil || !strings.Contains(string(body), "edited") {
 		t.Fatalf("ReadFile after WriteDocument: %q err=%v", body, err)
 	}
-	if mt, err := ms.Classify(ctx, "/data/hello.go", nil); err != nil || mt == "" {
+	if mt, err := ms.Classify(ctx, "/workspace/data/hello.go", nil); err != nil || mt == "" {
 		t.Fatalf("Classify: %q err=%v", mt, err)
 	}
-	if spec, err := ms.SpecAt("/data/hello.go"); err != nil || spec.Point != "/data" {
+	if spec, err := ms.SpecAt("/workspace/data/hello.go"); err != nil || spec.Point != "/workspace/data" {
 		t.Fatalf("SpecAt: %+v err=%v", spec, err)
-	}
-
-	// Unmount drops cache under point
-	if err := ms.Unmount("/ro"); err != nil {
-		t.Fatal(err)
 	}
 
 	// Backend API failures surface as session I/O errors (not silent success).
 	api.fail["Head"] = errors.New("s3 head down")
-	if _, err := ms.Stat(ctx, "/data/hello.go"); err == nil || !strings.Contains(err.Error(), "head down") {
+	if _, err := ms.Stat(ctx, "/workspace/data/hello.go"); err == nil || !strings.Contains(err.Error(), "head down") {
 		t.Fatalf("Head fail: %v", err)
 	}
 	api.fail["Head"] = nil
@@ -324,54 +308,54 @@ func TestMountSession_s3MemAPI(t *testing.T) {
 	api.objects["runs/1/onlykids/file.txt"] = []byte("x")
 	api.mu.Unlock()
 	api.fail["List"] = errors.New("s3 list down")
-	if _, err := ms.Stat(ctx, "/data/onlykids"); err == nil || !strings.Contains(err.Error(), "list down") {
+	if _, err := ms.Stat(ctx, "/workspace/data/onlykids"); err == nil || !strings.Contains(err.Error(), "list down") {
 		t.Fatalf("List fail Stat dir: %v", err)
 	}
-	if _, err := ms.ReadDir(ctx, "/data/sub"); err == nil || !strings.Contains(err.Error(), "list down") {
+	if _, err := ms.ReadDir(ctx, "/workspace/data/sub"); err == nil || !strings.Contains(err.Error(), "list down") {
 		t.Fatalf("List fail ReadDir: %v", err)
 	}
 	api.fail["List"] = nil
-	if _, err := ms.ReadDir(ctx, "/data/hello.go"); err == nil {
+	if _, err := ms.ReadDir(ctx, "/workspace/data/hello.go"); err == nil {
 		t.Fatal("ReadDir file")
 	}
-	if err := ms.MkdirAll(ctx, "/data/hello.go/nested"); err == nil {
+	if err := ms.MkdirAll(ctx, "/workspace/data/hello.go/nested"); err == nil {
 		t.Fatal("MkdirAll through file")
 	}
-	if _, err := ms.ReadText(ctx, "/data/sub"); err == nil {
+	if _, err := ms.ReadText(ctx, "/workspace/data/sub"); err == nil {
 		t.Fatal("OpenDocument dir")
 	}
 	api.fail["Get"] = errors.New("s3 get down")
-	if _, err := ms.Open(ctx, "/data/hello.go"); err == nil || !strings.Contains(err.Error(), "get down") {
+	if _, err := ms.Open(ctx, "/workspace/data/hello.go"); err == nil || !strings.Contains(err.Error(), "get down") {
 		t.Fatalf("Get fail: %v", err)
 	}
-	if _, err := ms.ReadText(ctx, "/data/hello.go"); err == nil || !strings.Contains(err.Error(), "get down") {
+	if _, err := ms.ReadText(ctx, "/workspace/data/hello.go"); err == nil || !strings.Contains(err.Error(), "get down") {
 		t.Fatalf("OpenDocument Get fail: %v", err)
 	}
 	api.fail["Get"] = nil
 	api.fail["Put"] = errors.New("s3 put down")
-	if err := ms.WriteFile(ctx, "/data/fail.txt", []byte("x")); err == nil || !strings.Contains(err.Error(), "put down") {
+	if err := ms.WriteFile(ctx, "/workspace/data/fail.txt", []byte("x")); err == nil || !strings.Contains(err.Error(), "put down") {
 		t.Fatalf("Put fail: %v", err)
 	}
 	api.fail["Put"] = nil
 
 	cctx, cancel := context.WithCancel(ctx)
 	cancel()
-	if _, err := ms.Stat(cctx, "/data/hello.go"); !errors.Is(err, context.Canceled) {
+	if _, err := ms.Stat(cctx, "/workspace/data/hello.go"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Stat cancel: %v", err)
 	}
-	if _, err := ms.Open(cctx, "/data/hello.go"); !errors.Is(err, context.Canceled) {
+	if _, err := ms.Open(cctx, "/workspace/data/hello.go"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Open cancel: %v", err)
 	}
-	if _, err := ms.ReadDir(cctx, "/data/sub"); !errors.Is(err, context.Canceled) {
+	if _, err := ms.ReadDir(cctx, "/workspace/data/sub"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("ReadDir cancel: %v", err)
 	}
-	if err := ms.Remove(cctx, "/data/hook.txt"); !errors.Is(err, context.Canceled) {
+	if err := ms.Remove(cctx, "/workspace/data/hook.txt"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Remove cancel: %v", err)
 	}
-	if err := ms.MkdirAll(cctx, "/data/newdir"); !errors.Is(err, context.Canceled) {
+	if err := ms.MkdirAll(cctx, "/workspace/data/newdir"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("MkdirAll cancel: %v", err)
 	}
-	if _, err := ms.ReadText(cctx, "/data/hello.go"); !errors.Is(err, context.Canceled) {
+	if _, err := ms.ReadText(cctx, "/workspace/data/hello.go"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("OpenDocument cancel: %v", err)
 	}
 }
@@ -381,53 +365,47 @@ func TestMountSession_s3MemAPI(t *testing.T) {
 func TestS3Provider_openWriteClose(t *testing.T) {
 	ctx := context.Background()
 	api := newMemS3()
-	factory := vfs.S3Factory{ID: "s3w", Client: api, DefaultBucket: "b"}
-	reg := vfs.NewBackendRegistry()
-	if err := reg.Register(factory); err != nil {
-		t.Fatal(err)
-	}
-	ms, err := vfs.NewMountSession("s3w", reg)
+	open := builtins.S3(api, "b")
+	ms, err := vfs.Tree(vfs.At("w", open))(ctx, "s3w", vfs.Request{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/w", Profile: "s3w"}); err != nil {
-		t.Fatal(err)
-	}
+	t.Cleanup(func() { _ = ms.Close() })
 	// Multiple writes / overwrite
-	if err := ms.WriteFile(ctx, "/w/a.txt", []byte("one")); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/w/a.txt", []byte("one")); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.WriteFile(ctx, "/w/a.txt", []byte("two")); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/w/a.txt", []byte("two")); err != nil {
 		t.Fatal(err)
 	}
-	b, err := ms.ReadFile(ctx, "/w/a.txt")
+	b, err := ms.ReadFile(ctx, "/workspace/w/a.txt")
 	if err != nil || string(b) != "two" {
 		t.Fatalf("got %q err=%v", b, err)
 	}
 	// mkdir through file fails
-	if err := ms.WriteFile(ctx, "/w/file", []byte("x")); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/w/file", []byte("x")); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.MkdirAll(ctx, "/w/file/child"); err == nil {
+	if err := ms.MkdirAll(ctx, "/workspace/w/file/child"); err == nil {
 		t.Fatal("mkdir through file")
 	}
 	// missing path remove
-	if err := ms.Remove(ctx, "/w/missing"); !errors.Is(err, vfs.ErrNotExist) {
+	if err := ms.Remove(ctx, "/workspace/w/missing"); !errors.Is(err, vfs.ErrNotExist) {
 		t.Fatalf("remove missing: %v", err)
 	}
 	// List root
-	ents, err := ms.ReadDir(ctx, "/w")
+	ents, err := ms.ReadDir(ctx, "/workspace/w")
 	if err != nil || len(ents) < 1 {
 		t.Fatalf("ReadDir root: %+v err=%v", ents, err)
 	}
 	// Stat mount root
-	st, err := ms.Stat(ctx, "/w")
+	st, err := ms.Stat(ctx, "/workspace/w")
 	if err != nil || !st.IsDir {
 		t.Fatalf("stat root: %+v err=%v", st, err)
 	}
 
 	// Direct provider OpenFile write/append/excl (covers s3WriteFile).
-	p, err := factory.Open(ctx, "sess", vfs.MountSpec{Params: map[string]string{"prefix": "p"}})
+	p, err := open(ctx, "sess", vfs.Binding{Params: map[string]string{"prefix": "p"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -545,12 +523,7 @@ func TestS3Provider_openWriteClose(t *testing.T) {
 	}
 	delete(api.fail, "Put")
 
-	// Factory Validate empty client already covered; empty id
-	if _, err := (vfs.S3Factory{Client: api, DefaultBucket: "b"}).Open(ctx, "s", vfs.MountSpec{}); err == nil {
-		t.Fatal("empty factory id")
-	}
-	// bucket from params
-	p2, err := factory.Open(ctx, "s", vfs.MountSpec{Params: map[string]string{"bucket": "other", "prefix": "x"}})
+	p2, err := open(ctx, "s", vfs.Binding{Params: map[string]string{"bucket": "other", "prefix": "x"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -560,25 +533,17 @@ func TestS3Provider_openWriteClose(t *testing.T) {
 func TestBlobFactory_containerParam(t *testing.T) {
 	ctx := context.Background()
 	api := newMemS3()
-	factory := vfs.BlobFactory{ID: "blob", Client: api, DefaultContainer: "def"}
-	reg := vfs.NewBackendRegistry()
-	if err := reg.Register(factory); err != nil {
-		t.Fatal(err)
-	}
-	ms, err := vfs.NewMountSession("blob-mem", reg)
+	ms, err := vfs.Tree(vfs.At("data", builtins.Blob(api, "def")))(ctx, "blob-mem", vfs.Request{Bindings: []vfs.Binding{{
+		Params: map[string]string{vfs.ParamName: "data", "container": "c1", "prefix": "runs/1"},
+	}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.Mount(ctx, vfs.MountSpec{
-		Point: "/data", Profile: "blob",
-		Params: map[string]string{"container": "c1", "prefix": "runs/1"},
-	}); err != nil {
+	t.Cleanup(func() { _ = ms.Close() })
+	if err := ms.WriteFile(ctx, "/workspace/data/hello.go", []byte("package main\n")); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.WriteFile(ctx, "/data/hello.go", []byte("package main\n")); err != nil {
-		t.Fatal(err)
-	}
-	b, err := ms.ReadFile(ctx, "/data/hello.go")
+	b, err := ms.ReadFile(ctx, "/workspace/data/hello.go")
 	if err != nil || string(b) != "package main\n" {
 		t.Fatalf("ReadFile=%q err=%v", b, err)
 	}
@@ -595,34 +560,28 @@ func TestOpenDocument_providerMediaType(t *testing.T) {
 	api.objects["main.go"] = []byte("package main\n")
 	api.types["main.go"] = "application/octet-stream"
 
-	reg := vfs.NewBackendRegistry()
-	if err := reg.Register(vfs.S3Factory{ID: "s3", Client: api, DefaultBucket: "bkt"}); err != nil {
-		t.Fatal(err)
-	}
-	ms, err := vfs.NewMountSession("s3-ctype", reg)
+	ms, err := vfs.Tree(vfs.At("data", builtins.S3(api, "bkt")))(ctx, "s3-ctype", vfs.Request{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/data", Profile: "s3"}); err != nil {
-		t.Fatal(err)
-	}
+	t.Cleanup(func() { _ = ms.Close() })
 
-	st, err := ms.Stat(ctx, "/data/notes")
+	st, err := ms.Stat(ctx, "/workspace/data/notes")
 	if err != nil || st.MediaType != "text/markdown" {
 		t.Fatalf("Stat MediaType=%q err=%v", st.MediaType, err)
 	}
-	doc, err := ms.ReadText(ctx, "/data/notes")
+	doc, err := ms.ReadText(ctx, "/workspace/data/notes")
 	if err != nil || doc.MediaType() != "text/markdown" {
 		t.Fatalf("hinted markdown: mt=%q err=%v", mediaOf(doc), err)
 	}
-	if _, err := ms.OpenDocument(ctx, "/data/blob", nil); !errors.Is(err, vfs.ErrNoCodec) {
+	if _, err := ms.OpenDocument(ctx, "/workspace/data/blob", nil); !errors.Is(err, vfs.ErrNoCodec) {
 		t.Fatalf("image/png hint should skip sniff: %v", err)
 	}
-	st, err = ms.Stat(ctx, "/data/main.go")
+	st, err = ms.Stat(ctx, "/workspace/data/main.go")
 	if err != nil || st.MediaType != "text/x-go" {
 		t.Fatalf("octet-stream + .go key: Stat MediaType=%q err=%v", st.MediaType, err)
 	}
-	goDoc, err := ms.ReadText(ctx, "/data/main.go")
+	goDoc, err := ms.ReadText(ctx, "/workspace/data/main.go")
 	if err != nil || goDoc.MediaType() != "text/x-go" {
 		t.Fatalf("provider-classified go: mt=%q err=%v", mediaOf(goDoc), err)
 	}

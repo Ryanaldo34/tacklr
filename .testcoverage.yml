@@ -12,7 +12,7 @@ threshold:
   # Root-package files (agent.go, tools_brain.go, …) are each a "package" to the
   # coverage tool. Floor 70% covers tools_brain/web without live backends.
   package: 70
-  # Library total after excludes (cmd/, testkit, agentbench only).
+  # Library total after excludes (cmd/, testkit, live helpers).
   # Helixgraph is included: CI runs Testcontainers Helix (enterprise-dev) without -short.
   total: 90
 
@@ -24,17 +24,9 @@ override:
     threshold: 100
   - path: github.com/ryanaldo34/tacklr/server$
     threshold: 95
-  - path: github.com/ryanaldo34/tacklr/streaming$
-    threshold: 100
-  - path: github.com/ryanaldo34/tacklr/inference$
-    threshold: 90
-  - path: github.com/ryanaldo34/tacklr/internal/session$
-    threshold: 90
-  - path: github.com/ryanaldo34/tacklr/internal/exa$
+  - path: github.com/ryanaldo34/tacklr/builtins$
     threshold: 90
   - path: github.com/ryanaldo34/tacklr/interrupt$
-    threshold: 90
-  - path: github.com/ryanaldo34/tacklr/stores$
     threshold: 90
   - path: github.com/ryanaldo34/tacklr/brain$
     threshold: 85
@@ -50,11 +42,9 @@ override:
 exclude:
   # Repo-relative paths (matched as regexes against file paths).
   # cmd/*: mains / local harnesses. testkit/livesess: test doubles.
-  # agentbench: live multi-turn bench (exercised by agent-bench, not unit cover).
   paths:
     - cmd/
     - internal/testkit
-    - internal/agentbench
     - internal/temporallive
     - internal/livesess
     # Exporter constructors, not product outcomes.

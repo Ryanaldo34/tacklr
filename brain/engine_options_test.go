@@ -46,12 +46,12 @@ func TestNewEngine_options(t *testing.T) {
 	// Register + expand containment kids
 	parent := uuid.New()
 	child := uuid.New()
-	ns := uuid.New()
+	ns := mustNS(t, "id", uuid.NewString())
 	now := time.Now().UTC()
 	pos := 1
-	_ = store.Put(ctx, brain.Object{ID: parent, Kind: "Document", Title: "p", NamespaceID: ns, UpdatedAt: now})
-	_ = store.Put(ctx, brain.Object{ID: child, Kind: "Chunk", Title: "c", ParentID: &parent, Position: &pos, NamespaceID: ns, UpdatedAt: now})
-	scope := brain.Scope{Namespace: &ns}
+	_ = store.Put(ctx, brain.Object{ID: parent, Kind: "Document", Title: "p", Namespace: ns, UpdatedAt: now})
+	_ = store.Put(ctx, brain.Object{ID: child, Kind: "Chunk", Title: "c", ParentID: &parent, Position: &pos, Namespace: ns, UpdatedAt: now})
+	scope := brain.Scope{Namespace: ns}
 	res, err := eng.ExpandByRecipe(ctx, scope, parent, "kids", brain.NewSearchContext())
 	if err != nil {
 		t.Fatal(err)

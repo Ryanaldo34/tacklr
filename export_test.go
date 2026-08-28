@@ -3,8 +3,9 @@ package tacklr
 import (
 	"testing"
 
-	"github.com/ryanaldo34/tacklr/internal/session"
+	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/interrupt"
+	"github.com/ryanaldo34/tacklr/vfs"
 )
 
 // customInterrupt is only for RegisterInterrupt coverage.
@@ -38,15 +39,6 @@ func turnRuntime(h *TurnManager) HarnessRuntime {
 	return newToolRuntime(ch, h.session, h.childHost)
 }
 
-func nopRuntime() HarnessRuntime {
-	ch := make(chan StreamEvent, 8)
-	go func() {
-		for range ch {
-		}
-	}()
-	return newToolRuntime(ch, session.NewSessionManager(), nil)
-}
-
 func mustNewTurnManager(t testing.TB, opts AgentOptions) *TurnManager {
 	t.Helper()
 	h, err := NewTurnManager(t.Context(), opts)
@@ -54,4 +46,28 @@ func mustNewTurnManager(t testing.TB, opts AgentOptions) *TurnManager {
 		t.Fatal(err)
 	}
 	return h
+}
+
+func mustMountTree(t testing.TB, sessionID string, members ...vfs.Member) *vfs.MountSession {
+	t.Helper()
+	return mustMountTreeReq(t, sessionID, vfs.Request{}, members...)
+}
+
+func mustNS(t testing.TB, nv ...string) brain.Namespace {
+	t.Helper()
+	ns, err := brain.ParseNamespace(nv...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ns
+}
+
+func mustMountTreeReq(t testing.TB, sessionID string, req vfs.Request, members ...vfs.Member) *vfs.MountSession {
+	t.Helper()
+	ms, err := vfs.Tree(members...)(t.Context(), sessionID, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ms.Close() })
+	return ms
 }

@@ -12,8 +12,6 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
-	"github.com/ryanaldo34/tacklr/internal/drive"
-	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
@@ -28,7 +26,6 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 	}
 
 	var (
-		etag       string
 		closed     bool
 		agentID    = in.AgentID
 		mcp        = in.MCPServers
@@ -39,6 +36,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 		result     string
 		terminal   durable.SessionState
 		childParks map[string]durable.SessionID
+		seed       = in.State
 		promptCh   = workflow.GetSignalChannel(ctx, signalPrompt)
 		resumeCh   = workflow.GetSignalChannel(ctx, signalResume)
 		cancelCh   = workflow.GetSignalChannel(ctx, signalCancel)
@@ -92,8 +90,8 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 		if stream == nil || msg == "" {
 			return
 		}
-		_ = stream.Topic(durable.TopicEvents).Publish(streaming.StreamEvent{
-			Type:    streaming.StreamEventError,
+		_ = stream.Topic(durable.TopicEvents).Publish(tacklr.StreamEvent{
+			Type:    tacklr.StreamEventError,
 			Fail:    msg,
 			Content: msg,
 		})
@@ -149,7 +147,9 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 		}
 	}
 
-	runSlice := func(user *streaming.Message, resume map[string][]byte, auth durable.AuthContext, kind string) {
+	runSlice := func(user *tacklr.Message, resume map[string][]byte, auth durable.AuthContext, kind string, extra map[string]any) {
+		turnState := durable.MergeUserState(seed, extra)
+		seed = nil
 		applyAuth(auth)
 		sessionCtx, hasSession := openTurnLocality(ctx, in.TurnLocalityTimeout, 2*time.Second)
 
@@ -226,21 +226,20 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 		}
 		hadTools := false
 		reqs := 0
-		toolCalls := []streaming.ToolCall(nil)
-		leftover := []streaming.ToolCall(nil)
+		toolCalls := []tacklr.ToolCall(nil)
+		leftover := []tacklr.ToolCall(nil)
 		parked := false
 		inferComplete := false
 		interruptID := ""
 		stopSlice := false
 		for !stopSlice {
-			switch drive.Next(len(toolCalls), parked, inferComplete, len(spawned) > 0) {
-			case drive.ActionInfer:
+			switch tacklr.Next(len(toolCalls), parked, inferComplete, len(spawned) > 0) {
+			case tacklr.ActionInfer:
 				var out InferenceOutput
 				err := waitAct("Inference", InferenceInput{
 					SessionID:     in.SessionID,
 					AgentID:       agentID,
 					MCPServers:    mcp,
-					Etag:          etag,
 					User:          user,
 					HadToolRound:  hadTools,
 					ModelRequests: reqs,
@@ -248,6 +247,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 					Auth:          lastAuth,
 					Mounts:        mounts,
 					Specialist:    in.Specialist,
+					State:         turnState,
 				}, &out)
 				user = nil
 				resume = nil
@@ -255,7 +255,6 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 					stopSlice = true
 					break
 				}
-				etag = out.Etag
 				reqs++
 				if out.Complete {
 					inferComplete = true
@@ -265,7 +264,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 				}
 				inferComplete = false
 				toolCalls = out.ToolCalls
-			case drive.ActionRunTools:
+			case tacklr.ActionRunTools:
 				hadTools = true
 				tc := toolCalls[0]
 				rest := toolCalls[1:]
@@ -274,18 +273,17 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 					SessionID:  in.SessionID,
 					AgentID:    agentID,
 					MCPServers: mcp,
-					Etag:       etag,
 					Call:       tc,
 					Auth:       lastAuth,
 					Mounts:     mounts,
 					Specialist: in.Specialist,
 					Known:      spawnedIDs(spawned),
+					State:      turnState,
 				}, &tout)
 				if onActErr(err) {
 					stopSlice = true
 					break
 				}
-				etag = tout.Etag
 				if herr := applyChildIntent(ctx, sessionCtx, &spawned, tout, in, agentID, lastAuth, mounts); herr != nil {
 					stopSlice = onActErr(herr)
 					break
@@ -302,18 +300,17 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 							SessionID:  in.SessionID,
 							AgentID:    agentID,
 							MCPServers: mcp,
-							Etag:       etag,
 							Call:       tc,
 							Output:     output,
 							Auth:       lastAuth,
 							Mounts:     mounts,
 							Specialist: in.Specialist,
+							State:      turnState,
 						}, &cout)
 						if onActErr(cerr) {
 							stopSlice = true
 							break
 						}
-						etag = cout.Etag
 						tout.Interrupted = false
 					} else {
 						tout.Interrupted = true
@@ -330,7 +327,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 					continue
 				}
 				toolCalls = rest
-			case drive.ActionYield:
+			case tacklr.ActionYield:
 				if hasSession {
 					workflow.CompleteSession(sessionCtx)
 					hasSession = false
@@ -351,8 +348,9 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 						parked = false
 						yielded = false
 						applyAuth(ev.resume.Auth)
+						turnState = durable.MergeUserState(turnState, ev.resume.State)
 						if cid, ok := childParks[interruptID]; ok {
-							_ = workflow.SignalExternalWorkflow(ctx, string(cid), "", signalResume, resumeSignal{Responses: ev.resume.Responses, Auth: ev.resume.Auth}).Get(ctx, nil)
+							_ = workflow.SignalExternalWorkflow(ctx, string(cid), "", signalResume, resumeSignal{Responses: ev.resume.Responses, Auth: ev.resume.Auth, State: ev.resume.State}).Get(ctx, nil)
 							delete(childParks, interruptID)
 						}
 						sessionCtx, hasSession = openTurnLocality(ctx, in.TurnLocalityTimeout, time.Minute)
@@ -368,16 +366,15 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 							SessionID:  in.SessionID,
 							AgentID:    agentID,
 							MCPServers: mcp,
-							Etag:       etag,
 							Resume:     ev.resume.Responses,
 							Auth:       lastAuth,
 							Mounts:     mounts,
+							State:      turnState,
 						}, &iout)
 						if onActErr(err) {
 							stopSlice = true
 							break
 						}
-						etag = iout.Etag
 						toolCalls = slices.Concat(iout.ToolCalls, leftover)
 						leftover = nil
 						inferComplete = false
@@ -392,32 +389,30 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 						outcome = telemetry.OutcomeCancelled
 						stopSlice = true
 						waiting = false
-					default:
 					}
 				}
-			case drive.ActionComplete:
+			case tacklr.ActionComplete:
 				terminal = durable.SessionComplete
 				stopSlice = true
-			case drive.ActionNudge:
-				nudgeMsg := &streaming.Message{Role: tacklr.RoleUser, Content: spawnedNudge(spawned)}
+			case tacklr.ActionNudge:
+				nudgeMsg := &tacklr.Message{Role: tacklr.RoleUser, Content: spawnedNudge(spawned)}
 				var out InferenceOutput
 				err := waitAct("Inference", InferenceInput{
 					SessionID:     in.SessionID,
 					AgentID:       agentID,
 					MCPServers:    mcp,
-					Etag:          etag,
 					User:          nudgeMsg,
 					HadToolRound:  true,
 					ModelRequests: reqs,
 					Auth:          lastAuth,
 					Mounts:        mounts,
 					Specialist:    in.Specialist,
+					State:         turnState,
 				}, &out)
 				if onActErr(err) {
 					stopSlice = true
 					break
 				}
-				etag = out.Etag
 				reqs++
 				hadTools = true
 				inferComplete = false
@@ -433,7 +428,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 	}
 
 	if in.Prompt != "" {
-		runSlice(&streaming.Message{Role: streaming.RoleUser, Content: in.Prompt}, nil, in.Auth, telemetry.TurnKindPrompt)
+		runSlice(&tacklr.Message{Role: tacklr.RoleUser, Content: in.Prompt}, nil, in.Auth, telemetry.TurnKindPrompt, nil)
 		return result, nil
 	}
 
@@ -456,12 +451,12 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 			}
 			user := ev.prompt.UserMessage
 			if user == nil && ev.prompt.Text != "" {
-				user = &streaming.Message{Role: streaming.RoleUser, Content: ev.prompt.Text}
+				user = &tacklr.Message{Role: tacklr.RoleUser, Content: ev.prompt.Text}
 			}
-			runSlice(user, nil, ev.prompt.Auth, telemetry.TurnKindPrompt)
+			runSlice(user, nil, ev.prompt.Auth, telemetry.TurnKindPrompt, ev.prompt.State)
 		case signalResume:
 			yielded = false
-			runSlice(nil, ev.resume.Responses, ev.resume.Auth, telemetry.TurnKindResume)
+			runSlice(nil, ev.resume.Responses, ev.resume.Auth, telemetry.TurnKindResume, ev.resume.State)
 		}
 	}
 	return result, nil

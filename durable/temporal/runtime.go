@@ -15,7 +15,6 @@ import (
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/durable/inprocess"
-	"github.com/ryanaldo34/tacklr/streaming"
 )
 
 // Runtime implements durable.Runtime with one Temporal workflow per session.
@@ -108,7 +107,11 @@ func (r *Runtime) CreateSession(ctx context.Context, req durable.CreateSession) 
 	if id == "" {
 		id = durable.SessionID(uuid.NewString())
 	}
-	_, err := r.client.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
+	seed, err := durable.EncodeUserState(req.State)
+	if err != nil {
+		return "", err
+	}
+	_, err = r.client.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
 		ID:        string(id),
 		TaskQueue: r.taskQueue,
 	}, SessionWorkflow, WorkflowInput{
@@ -117,6 +120,7 @@ func (r *Runtime) CreateSession(ctx context.Context, req durable.CreateSession) 
 		MCPServers:          req.MCPServers,
 		Mounts:              req.Mounts,
 		TurnLocalityTimeout: r.turnLocalityTimeout,
+		State:               seed,
 	})
 	if err != nil {
 		return "", err
@@ -149,25 +153,38 @@ func (r *Runtime) signal(ctx context.Context, id durable.SessionID, name string,
 
 // Prompt implements durable.Runtime.
 func (r *Runtime) Prompt(ctx context.Context, sessionID durable.SessionID, msg durable.Prompt) error {
+	encoded, err := durable.EncodeUserState(msg.State)
+	if err != nil {
+		return err
+	}
 	return r.signal(ctx, sessionID, signalPrompt, promptSignal{
 		Text:        msg.Text,
 		UserMessage: msg.UserMessage,
 		AgentID:     msg.AgentID,
 		MCPServers:  msg.MCPServers,
 		Auth:        msg.Auth,
+		State:       encoded,
 	})
 }
 
 // Resume implements durable.Runtime.
 func (r *Runtime) Resume(ctx context.Context, sessionID durable.SessionID, resume durable.Resume) error {
-	return r.signal(ctx, sessionID, signalResume, resumeSignal{Responses: resume.Responses, Auth: resume.Auth})
+	encoded, err := durable.EncodeUserState(resume.State)
+	if err != nil {
+		return err
+	}
+	return r.signal(ctx, sessionID, signalResume, resumeSignal{
+		Responses: resume.Responses,
+		Auth:      resume.Auth,
+		State:     encoded,
+	})
 }
 
 // Cancel implements durable.Runtime.
 func (r *Runtime) Cancel(ctx context.Context, sessionID durable.SessionID) error {
 	cancelLiveTurn(sessionID)
-	_ = r.fallback.Append(context.WithoutCancel(ctx), sessionID, durable.TopicEvents, streaming.StreamEvent{
-		Type:    streaming.StreamEventError,
+	_ = r.fallback.Append(context.WithoutCancel(ctx), sessionID, durable.TopicEvents, tacklr.StreamEvent{
+		Type:    tacklr.StreamEventError,
 		Error:   context.Canceled,
 		Fail:    context.Canceled.Error(),
 		Content: context.Canceled.Error(),
@@ -186,11 +203,11 @@ func (r *Runtime) Close(ctx context.Context, sessionID durable.SessionID) error 
 }
 
 type sub struct {
-	ch     <-chan streaming.StreamEvent
+	ch     <-chan tacklr.StreamEvent
 	cancel context.CancelFunc
 }
 
-func (s *sub) Events() <-chan streaming.StreamEvent { return s.ch }
+func (s *sub) Events() <-chan tacklr.StreamEvent { return s.ch }
 func (s *sub) Close() error {
 	if s.cancel != nil {
 		s.cancel()
@@ -225,7 +242,7 @@ func (r *Runtime) Subscribe(ctx context.Context, sessionID durable.SessionID, af
 		return &sub{ch: ch, cancel: cancel}, nil
 	}
 	c := workflowstreams.NewClient(r.client, string(sessionID), workflowstreams.Options{})
-	ch := make(chan streaming.StreamEvent, 64)
+	ch := make(chan tacklr.StreamEvent, 64)
 	dc := converter.GetDefaultDataConverter()
 	go func() {
 		defer close(ch)
@@ -238,7 +255,7 @@ func (r *Runtime) Subscribe(ctx context.Context, sessionID durable.SessionID, af
 			if err != nil {
 				return
 			}
-			var ev streaming.StreamEvent
+			var ev tacklr.StreamEvent
 			if err := dc.FromPayload(item.Data, &ev); err != nil {
 				return
 			}

@@ -58,8 +58,8 @@ type Stats struct {
 	Removed int // missing paths soft-deleted from brain
 }
 
-// NewMountIndexer validates required fields. Scope.Namespace must be non-nil
-// (brain Put requires namespace_id).
+// NewMountIndexer validates required fields. Scope.Namespace must be set
+// (brain Put requires namespace attrs).
 func NewMountIndexer(ms *vfs.MountSession, eng *brain.Engine, scope brain.Scope) (*MountIndexer, error) {
 	if ms == nil {
 		return nil, fmt.Errorf("vfsindex: MountSession required")
@@ -67,8 +67,8 @@ func NewMountIndexer(ms *vfs.MountSession, eng *brain.Engine, scope brain.Scope)
 	if eng == nil {
 		return nil, fmt.Errorf("vfsindex: brain Engine required")
 	}
-	if scope.Namespace == nil || *scope.Namespace == uuid.Nil {
-		return nil, fmt.Errorf("vfsindex: scope namespace required")
+	if err := scope.Namespace.Validate(); err != nil {
+		return nil, fmt.Errorf("vfsindex: scope namespace: %w", err)
 	}
 	return &MountIndexer{
 		VFS:           ms,

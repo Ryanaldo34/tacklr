@@ -97,7 +97,7 @@ The agent never sees a host filesystem path, a bucket key, or a SQL row.
 
 It sees:
 
-- **Virtual paths** such as `/work/main.go` or `/engram/deal/acme.md`
+- **Virtual paths** such as `/workspace/work/main.go` or `/workspace/engram/deal/acme.md`
 - **Tools** the harness injects when the host wired Brain (and, for file tools, VFS)
 - **Rich objects** from search: id, kind, title, score, optional evidence, optional `vfs_path`
 
@@ -137,7 +137,7 @@ classDiagram
         +string Content
         +UUID ParentID
         +float32[] Embedding
-        +UUID NamespaceID
+        +Namespace Namespace
         +time DeletedAt
     }
 
@@ -178,9 +178,12 @@ and examples are sample product types, not SDK types. You register them with
 Kind names must be path-safe: no `/` and no `..`. Only **parent** kinds become
 directories.
 
-Every durable object belongs to a **namespace** (a UUID the host sets on the
-session). Retrieval never crosses namespaces. Wrong-namespace looks like
-not-found.
+Every durable object belongs to a **namespace**: ordered named attributes
+(for example `org=acme`, `workspace=west`). `AgentOptions.SearchNamespace` is the
+host ceiling. Each brain tool call may pass extra `namespace` attrs to narrow
+that search; it cannot change the host's values. Continue uses the namespace
+stamped on the result set. Retrieval keeps a row when every scope attr is on
+the object (`Covers`). Wrong-namespace looks like not-found.
 
 ---
 
@@ -222,7 +225,7 @@ because it is the only package allowed to import both.
 
 ### Engrams — the file *is* the object
 
-`brain.BrainFactory` opens a `vfs.Provider`. A write to an Engram path parses
+`brain.Open` returns a `vfs.OpenFunc`. A write to an Engram path parses
 Markdown, validates, and `Put`s the object. A read serializes the object back
 to the same format.
 
@@ -564,7 +567,8 @@ can say “deal contacts” without baking that product into the SDK.
 ## Agent tools
 
 Injected when the host sets `AgentOptions.Brain` (file-backed tools also need
-VFS + a search namespace). Isolated VFS with no Brain: file tools only.
+VFS + a search namespace). The engine is closed into the handlers at construct,
+same as any other tool client. Isolated VFS with no Brain: file tools only.
 
 | Tool | Use it when | Backs onto |
 |------|-------------|------------|
@@ -634,7 +638,8 @@ eng, err := brain.NewEngine(store, brain.WithKinds(
         {Name: "topic", Type: brain.FieldTypeString},
     }},
 ))
-// AgentOptions{Brain: eng, ...}  → search / save_* / schema / read
+// AgentOptions{Brain: eng, ...}  → search / save_* / schema / read_object
+// The harness closes `eng` into those tool handlers (same pattern as host tools).
 ```
 
 Production-shaped. `PostgresStore.Setup` creates extensions, tables, and
@@ -658,10 +663,10 @@ if err := eng.LoadKindsFromStore(ctx); err != nil { /* ... */ }
 // AgentOptions:
 //   Brain:           eng
 //   VFS:             registry + mounts (including /work)
-//   SearchNamespace: tenant UUID
+//   SearchNamespace: from brain.ParseNamespace("org", orgID) // host ceiling; tools may add workspace=…
 //
 // Harness then:
-//   registers BrainFactory (profile "brain")
+//   registers brain.Open (profile "brain")
 //   mounts /engram (prefix, IndexPolicy=none) unless you already mounted one
 //   starts vfsindex.Bridge (skips profile "brain")
 //   injects file tools + knowledge tools
@@ -688,7 +693,7 @@ Tests call `store.Setup` (embedding dim 3) instead of loading SQL files.
 
 | Situation | Behavior |
 |-----------|----------|
-| Wrong namespace | `Get` / search look like not found. Graph ids that fail hydrate are dropped. |
+| Wrong namespace | `Get` / search look like not found. Graph ids that fail hydrate are dropped. A coarser scope (fewer attrs) sees objects with extra attrs. |
 | Soft-deleted object | Hidden from Get and search. Graph node is already gone. |
 | Embedder down at **query** time | `search` / `find_objects` can run lexical-only (default). Set `FailOnEmbedderError` to surface the error. |
 | Embedder down at **Put** time | **Fail closed.** An unindexed parent is not persisted. |
@@ -713,14 +718,14 @@ Tests call `store.Setup` (embedding dim 3) instead of loading SQL files.
 | Put / Link / embeddings | `brain/write.go` |
 | Kind catalog | `brain/kind.go` |
 | Engram Markdown codec | `brain/engramfile.go` |
-| VFS Provider + factory | `brain/provider.go` |
+| VFS Provider | `brain/provider.go` |
 | Store ports | `brain/store.go` |
 | Postgres schema + kinds | `PostgresStore.Setup` (`brain/postgres_setup.go`) |
 | Graph ports + MemoryGraph | `brain/graph.go` |
 | Helix adapter | `brain/helixgraph/` |
 | Artifact indexer | `vfsindex/indexer.go` |
 | Index policy + bridge | `vfsindex/policy.go`, `vfsindex/bridge.go` |
-| Default `/engram` + factory | `agent_construct.go` |
+| Default `/workspace/engram` | `vfs.At("engram", brain.Open(...))` |
 | Knowledge tools | `tools_brain.go` |
 | Index tools | `tools_vfsindex.go` |
 
@@ -755,7 +760,7 @@ returns paths), not that a private helper was called.
 | **Document / Chunk** | Default kinds for an indexed artifact (`vfsindex.MountIndexKinds`) |
 | **VFS** | Virtual filesystem: one path tree over several backends |
 | **Provider** | Bytes (or Engram parse/format) behind one mount |
-| **Namespace** | Host UUID that isolates all retrieval and writes |
+| **Namespace** | Ordered named attrs. Host ceiling on options; tools pass extra attrs per call. `Covers` RLS |
 | **Scope** | The engine’s view of that namespace on a call |
 | **`vfs_path`** | Absolute virtual path stored on an object so tools can speak paths |
 | **Evidence** | Chunks that justified a parent `search` hit |

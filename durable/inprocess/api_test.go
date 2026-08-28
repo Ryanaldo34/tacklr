@@ -8,7 +8,6 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
-	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -49,6 +48,18 @@ func TestCreateSession_errors(t *testing.T) {
 	if _, err := rt.CreateSession(ctx, durable.CreateSession{AgentID: "default", SessionID: "dup"}); !errors.Is(err, durable.ErrSessionExists) {
 		t.Fatalf("dup: %v", err)
 	}
+	if _, err := rt.CreateSession(ctx, durable.CreateSession{AgentID: "default", State: map[string]any{"": "x"}}); !errors.Is(err, tacklr.ErrInvalid) {
+		t.Fatalf("empty state key: %v", err)
+	}
+	if _, err := rt.CreateSession(ctx, durable.CreateSession{AgentID: "default", State: map[string]any{"ch": make(chan int)}}); !errors.Is(err, tacklr.ErrInvalid) {
+		t.Fatalf("bad state: %v", err)
+	}
+	if err := rt.Prompt(ctx, id, durable.Prompt{Text: "x", State: map[string]any{"ch": make(chan int)}}); !errors.Is(err, tacklr.ErrInvalid) {
+		t.Fatalf("prompt state: %v", err)
+	}
+	if err := rt.Resume(ctx, id, durable.Resume{State: map[string]any{"ch": make(chan int)}}); !errors.Is(err, tacklr.ErrInvalid) {
+		t.Fatalf("resume state: %v", err)
+	}
 	if err := rt.Prompt(ctx, "nope", durable.Prompt{Text: "x"}); !errors.Is(err, durable.ErrSessionNotFound) {
 		t.Fatalf("prompt missing: %v", err)
 	}
@@ -85,7 +96,7 @@ func TestPrompt_noAgentConfigured(t *testing.T) {
 			if !ok {
 				t.Fatal("closed")
 			}
-			if ev.Type == streaming.StreamEventError {
+			if ev.Type == tacklr.StreamEventError {
 				return
 			}
 		case <-deadline:

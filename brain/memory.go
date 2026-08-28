@@ -73,7 +73,7 @@ func (s *MemoryStore) SoftDelete(_ context.Context, scope Scope, id uuid.UUID) e
 	if !ok || obj.DeletedAt != nil {
 		return fmt.Errorf("%w: %s", ErrNotFound, id)
 	}
-	if scope.Namespace != nil && obj.NamespaceID != *scope.Namespace {
+	if !scope.Namespace.Covers(obj.Namespace) {
 		return fmt.Errorf("%w: %s", ErrNotFound, id)
 	}
 	now := time.Now().UTC()
@@ -127,7 +127,7 @@ func (s *MemoryStore) getLocked(scope Scope, id uuid.UUID) (Object, error) {
 	if !ok || obj.DeletedAt != nil {
 		return Object{}, fmt.Errorf("%w: %s", ErrNotFound, id)
 	}
-	if scope.Namespace != nil && obj.NamespaceID != *scope.Namespace {
+	if !scope.Namespace.Covers(obj.Namespace) {
 		return Object{}, fmt.Errorf("%w: %s", ErrNotFound, id)
 	}
 	return cloneObject(obj), nil
@@ -146,7 +146,7 @@ func (s *MemoryStore) ListByKind(_ context.Context, scope Scope, kind string, li
 		if obj.DeletedAt != nil || obj.ParentID != nil {
 			continue
 		}
-		if scope.Namespace != nil && obj.NamespaceID != *scope.Namespace {
+		if !scope.Namespace.Covers(obj.Namespace) {
 			continue
 		}
 		if obj.Kind != kind {
@@ -182,7 +182,7 @@ func (s *MemoryStore) GetByProperty(_ context.Context, scope Scope, key, value s
 		if obj.DeletedAt != nil {
 			continue
 		}
-		if scope.Namespace != nil && obj.NamespaceID != *scope.Namespace {
+		if !scope.Namespace.Covers(obj.Namespace) {
 			continue
 		}
 		if obj.Properties == nil {
@@ -210,7 +210,7 @@ func (s *MemoryStore) KindsWithObjects(_ context.Context, scope Scope) ([]string
 		if obj.DeletedAt != nil || obj.ParentID != nil {
 			continue
 		}
-		if scope.Namespace != nil && obj.NamespaceID != *scope.Namespace {
+		if !scope.Namespace.Covers(obj.Namespace) {
 			continue
 		}
 		if obj.Kind == "" {
@@ -233,7 +233,7 @@ func (s *MemoryStore) ListChildren(_ context.Context, scope Scope, parentID uuid
 		if obj.ParentID == nil || *obj.ParentID != parentID {
 			continue
 		}
-		if scope.Namespace != nil && obj.NamespaceID != *scope.Namespace {
+		if !scope.Namespace.Covers(obj.Namespace) {
 			continue
 		}
 		out = append(out, cloneObject(obj))
@@ -405,7 +405,7 @@ func (s *MemoryStore) candidateParts(scope Scope, filters Filter) ([]Object, err
 		if obj.DeletedAt != nil || obj.ParentID == nil {
 			continue
 		}
-		if scope.Namespace != nil && obj.NamespaceID != *scope.Namespace {
+		if !scope.Namespace.Covers(obj.Namespace) {
 			continue
 		}
 		if !plan.match(obj) {
@@ -516,5 +516,6 @@ func cloneObject(o Object) Object {
 	if o.Embedding != nil {
 		cp.Embedding = slices.Clone(o.Embedding)
 	}
+	cp.Namespace = o.Namespace.Clone()
 	return cp
 }

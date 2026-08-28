@@ -11,42 +11,38 @@ import (
 	"strings"
 )
 
-var (
-	_ Provider        = unionProvider{}
-	_ documentBackend = unionProvider{}
-)
-
-// unionProvider is a read-only merge of member providers at one mount point.
+// unionProvider is a read-only merge of member providers at one alias.
 // First-level names must be unique across members.
 type unionProvider struct {
 	members []Provider
 }
 
-func (r *BackendRegistry) openUnion(ctx context.Context, sessionID string, spec MountSpec) (Provider, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if spec.Profile == "" {
-		return nil, ErrInvalidProvider
-	}
-	members := make([]Provider, 0, len(spec.Members))
-	for i, member := range spec.Members {
-		if len(member.Members) > 0 {
-			return nil, fmt.Errorf("vfs: nested union mounts are not supported")
-		}
-		if strings.TrimSpace(member.Point) != "" {
-			return nil, fmt.Errorf("vfs: union member point must be empty")
-		}
-		if member.Profile == "" {
-			return nil, fmt.Errorf("vfs: union member[%d] profile required", i)
-		}
-		p, err := r.open(ctx, sessionID, member)
-		if err != nil {
+// Union merges backends into one read-only Open. Skill packs use
+// AgentSpec.OpenSkills: Tree(At("skills", Union(...))).
+func Union(opens ...Open) Open {
+	return func(ctx context.Context, sessionID string, b Binding) (Provider, error) {
+		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		members = append(members, p)
+		if len(opens) == 0 {
+			return nil, fmt.Errorf("vfs: Union requires members")
+		}
+		members := make([]Provider, 0, len(opens))
+		for _, open := range opens {
+			if open == nil {
+				return nil, fmt.Errorf("vfs: Union member open is required")
+			}
+			p, err := open(ctx, sessionID, b)
+			if err != nil {
+				return nil, err
+			}
+			if p == nil {
+				continue
+			}
+			members = append(members, p)
+		}
+		return unionProvider{members: members}, nil
 	}
-	return unionProvider{members: members}, nil
 }
 
 func (p unionProvider) Validate(ctx context.Context) error {

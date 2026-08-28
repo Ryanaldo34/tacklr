@@ -19,10 +19,10 @@ func TestRunCommand_catDirtyAndFalseExit(t *testing.T) {
 	ctx := context.Background()
 	ms, rt := newRunCommandSession(t)
 	const body = "dirty body unique phrase xyzzy-tacklr\n"
-	if err := ms.WriteFile(ctx, "/work/note.md", []byte("old\n")); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/work/note.md", []byte("old\n")); err != nil {
 		t.Fatal(err)
 	}
-	doc, err := ms.ReadText(ctx, "/work/note.md")
+	doc, err := ms.ReadText(ctx, "/workspace/work/note.md")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func TestRunCommand_catDirtyAndFalseExit(t *testing.T) {
 		t.Fatalf("pwd cwd: %s want %s", res.output, ms.HostDir())
 	}
 
-	res, err = tool.invoke(ctx, `{"command":"cat work/note.md"}`, rt)
+	res, err = tool.invoke(ctx, `{"command":"cat workspace/work/note.md"}`, rt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,11 +67,11 @@ func TestRunCommand_catDirtyAndFalseExit(t *testing.T) {
 		t.Fatal("empty command")
 	}
 
-	res, err = tool.invoke(ctx, `{"command":"mkdir -p work/fromsh && printf 'from-sh\n' > work/fromsh/x.txt"}`, rt)
+	res, err = tool.invoke(ctx, `{"command":"mkdir -p workspace/work/fromsh && printf 'from-sh\n' > workspace/work/fromsh/x.txt"}`, rt)
 	if err != nil || !strings.Contains(res.output, "exit=0") {
 		t.Fatalf("host write: %s err=%v", res.output, err)
 	}
-	got, err := ms.ReadText(ctx, "/work/fromsh/x.txt")
+	got, err := ms.ReadText(ctx, "/workspace/work/fromsh/x.txt")
 	if err != nil || got.Text() != "from-sh\n" {
 		body := ""
 		if got != nil {
@@ -81,7 +81,7 @@ func TestRunCommand_catDirtyAndFalseExit(t *testing.T) {
 	}
 
 	if _, err := exec.LookPath("rg"); err == nil {
-		res, err = tool.invoke(ctx, `{"command":"rg -F xyzzy-tacklr work"}`, rt)
+		res, err = tool.invoke(ctx, `{"command":"rg -F xyzzy-tacklr workspace/work"}`, rt)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -152,17 +152,7 @@ func TestRunCommand_cdIntoQuotedPath(t *testing.T) {
 
 func newRunCommandSession(t *testing.T) (*vfs.MountSession, HarnessRuntime) {
 	t.Helper()
-	reg := vfs.NewBackendRegistry()
-	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: t.TempDir()}); err != nil {
-		t.Fatal(err)
-	}
-	ms, err := vfs.NewMountSession(t.Name(), reg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := ms.Mount(t.Context(), vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
-		t.Fatal(err)
-	}
+	ms := mustMountTree(t, t.Name(), vfs.At("work", vfs.Local(t.TempDir())))
 	h := mustNewTurnManager(t, AgentOptions{
 		SessionID:    t.Name(),
 		MountSession: ms,

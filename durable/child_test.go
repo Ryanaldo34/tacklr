@@ -6,6 +6,7 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
+	"github.com/ryanaldo34/tacklr/vfs"
 )
 
 func TestOverlaySpecialist_inheritsParentAndNests(t *testing.T) {
@@ -15,8 +16,10 @@ func TestOverlaySpecialist_inheritsParentAndNests(t *testing.T) {
 	parent := AgentSpec{
 		Name: "parent",
 		Options: tacklr.AgentOptions{
-			Model:  parentModel,
-			Config: tacklr.Config{MaxWindowSize: 8192, SystemPrompt: "parent"},
+			Model:         parentModel,
+			Config:        tacklr.Config{MaxWindowSize: 8192, SystemPrompt: "parent"},
+			MountSession:  &vfs.MountSession{},
+			SkillsSession: &vfs.MountSession{},
 			Specialists: []*tacklr.Specialist{nil, {
 				Name:         "researcher",
 				Instructions: "research",
@@ -24,6 +27,7 @@ func TestOverlaySpecialist_inheritsParentAndNests(t *testing.T) {
 				Specialists:  []*tacklr.Specialist{grand},
 			}},
 		},
+		OpenSkills: vfs.Tree(),
 	}
 	got, err := OverlaySpecialist(parent, "researcher")
 	if err != nil {
@@ -31,6 +35,12 @@ func TestOverlaySpecialist_inheritsParentAndNests(t *testing.T) {
 	}
 	if got.Options.Model != childModel || got.Options.Config.SystemPrompt != "research" {
 		t.Fatalf("overlay: %+v", got.Options)
+	}
+	if got.Options.MountSession != nil || got.Options.SkillsSession != nil || got.Options.SessionID != "" {
+		t.Fatalf("overlay left injected sessions: %+v", got.Options)
+	}
+	if got.OpenSkills == nil {
+		t.Fatal("overlay dropped OpenSkills")
 	}
 	if tacklr.FindSpecialist(got.Options.Specialists, "grand") == nil {
 		t.Fatal("nested worker missing")

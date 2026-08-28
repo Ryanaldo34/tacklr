@@ -3,9 +3,10 @@ package temporal
 import (
 	"time"
 
+	"github.com/ryanaldo34/tacklr"
+
 	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/mcp"
-	"github.com/ryanaldo34/tacklr/streaming"
 )
 
 const (
@@ -35,19 +36,23 @@ type WorkflowInput struct {
 	Prompt     string
 	Parent     durable.SessionID
 	Specialist string
+	// State is CreateSession.State, already JSON-roundtripped by Runtime.CreateSession.
+	State map[string]any
 }
 
 type promptSignal struct {
 	Text        string
-	UserMessage *streaming.Message
+	UserMessage *tacklr.Message
 	AgentID     string
 	MCPServers  []mcp.MCPConfig
 	Auth        durable.AuthContext
+	State       map[string]any
 }
 
 type resumeSignal struct {
 	Responses map[string][]byte
 	Auth      durable.AuthContext
+	State     map[string]any
 }
 
 type waitSignal struct {

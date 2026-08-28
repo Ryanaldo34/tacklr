@@ -68,10 +68,10 @@ func TestSearchContext_putGetExportRestore(t *testing.T) {
 	}
 
 	// Namespace is part of the retrieval session surface.
-	ns := uuid.New()
+	ns := mustNS(t, "id", uuid.NewString())
 	sc.SetNamespace(ns)
 	gotNS, ok := sc.Namespace()
-	if !ok || gotNS != ns {
+	if !ok || !gotNS.Equal(ns) {
 		t.Fatal("namespace")
 	}
 	rawNS, err := sc.Export()
@@ -83,7 +83,7 @@ func TestSearchContext_putGetExportRestore(t *testing.T) {
 		t.Fatal(err)
 	}
 	gotNS, ok = sc3.Namespace()
-	if !ok || gotNS != ns {
+	if !ok || !gotNS.Equal(ns) {
 		t.Fatal("restore namespace")
 	}
 	sc3.ClearNamespace()

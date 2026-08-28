@@ -19,7 +19,7 @@
 //
 // # Engrams as files (vfs.Provider)
 //
-// BrainFactory opens a Provider so first-class objects appear as Markdown + YAML
+// brain.Open returns a vfs.OpenFunc so first-class objects appear as Markdown + YAML
 // files (vfs imports stay one-way: this package imports vfs). Layout is host-chosen:
 // mode=prefix (default /engram/<kind-slug>/<slug>.md) or mode=roots (/deal/acme.md).
 // Kind names are host KindSpecs and must be path-safe (no '/' or '..'). Only parent
@@ -56,7 +56,7 @@
 //
 // Helix holds first-class entity nodes and cross-object edges only (not chunks).
 // Helix owns: native text/vector indexes, $distance ranking, graph topology, edge
-// props, BothE neighbor walks, optional tenant indexes on namespace_id.
+// props, BothE neighbor walks, optional tenant indexes on namespace.
 // Tacklr does not reimplement BM25/HNSW or in-process neighbor indexes for Helix.
 // We dual-write searchable props (EntityIndexText + embedding), Link edges, fuse
 // Helix text+vector channels with RRF (Helix has no single hybrid op), then hydrate

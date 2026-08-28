@@ -7,24 +7,24 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/ryanaldo34/tacklr/streaming"
+	"github.com/ryanaldo34/tacklr"
 )
 
 func TestPresentStreamEvent_withError(t *testing.T) {
-	ev, err := presentStreamEvent(streaming.StreamEvent{Type: streaming.StreamEventError, Error: errors.New("e")})
+	ev, err := presentStreamEvent(tacklr.StreamEvent{Type: tacklr.StreamEventError, Error: errors.New("e")})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if ev.ErrorText != "e" {
 		t.Fatalf("%+v", ev)
 	}
-	if _, err := presentStreamEvent(streaming.StreamEvent{}); err == nil {
+	if _, err := presentStreamEvent(tacklr.StreamEvent{}); err == nil {
 		t.Fatal("unknown stream event type was silently accepted")
 	}
 }
 
 func TestPresentStreamEvent_message(t *testing.T) {
-	presented, err := presentStreamEvent(streaming.StreamEvent{Type: streaming.StreamEventMessage, Content: "x"})
+	presented, err := presentStreamEvent(tacklr.StreamEvent{Type: tacklr.StreamEventMessage, Content: "x"})
 	if err != nil {
 		t.Fatal(err)
 	}

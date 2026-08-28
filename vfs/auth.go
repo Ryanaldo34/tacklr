@@ -13,8 +13,8 @@ import (
 	"golang.org/x/oauth2"
 )
 
-// ProviderGoogleDrive is the factory / bind id for Drive.
-// ProviderMicrosoft is the factory / bind id for OneDrive and SharePoint libraries.
+// ProviderGoogleDrive is the bind kind for Drive.
+// ProviderMicrosoft is the bind kind for OneDrive and SharePoint libraries.
 const (
 	ProviderGoogleDrive = "gdrive"
 	ProviderMicrosoft   = "msgraph"
@@ -27,7 +27,7 @@ const (
 	ParamAccount = "account"
 )
 
-// Microsoft account kinds for GraphFactory / ParamAccount.
+// Microsoft account kinds for Graph / ParamAccount.
 // Organization (SharePoint / OneDrive for Business) is the default.
 const (
 	AccountOrganization = "organization"
@@ -44,36 +44,17 @@ type Credential struct {
 
 // Binding is one user-owned cloud folder under /workspace/<alias>.
 // Alias is params["name"] or a leftover single-segment Point (not /workspace).
-// Bind stores Point=/workspace. Provider is the factory / SessionAuth key.
-// Writable is opt-in; the Go zero value stays read-only.
+// Provider is the bind kind (gdrive, msgraph). Writable is opt-in; the Go
+// zero value stays read-only.
 type Binding struct {
 	Provider string            `json:"provider"`
 	Point    string            `json:"point,omitempty"`
 	Auth     Credential        `json:"auth,omitempty"`
 	Params   map[string]string `json:"params,omitempty"`
 	Writable bool              `json:"writable,omitempty"`
-}
-
-// BindingMember is the secret-free member MountSpec for a cloud bind.
-// Point is empty (members are not mount points). ReadOnly is !Writable.
-func BindingMember(b Binding) MountSpec {
-	params := maps.Clone(b.Params)
-	if alias, err := resolveBindingAlias(b); err == nil && alias != "" {
-		if params == nil {
-			params = make(map[string]string, 1)
-		}
-		params[ParamName] = alias
-	}
-	return MountSpec{
-		Profile:  b.Provider,
-		ReadOnly: !b.Writable,
-		Params:   params,
-	}
-}
-
-// BindingSpec is the /workspace MountSpec for a single binding.
-func BindingSpec(b Binding) MountSpec {
-	return Workspace(BindingMember(b))
+	// Live is the process token bag for this bind (not serialized). OpenVFS
+	// copies it so 401 refresh shares the holder.
+	Live *TokenHolder `json:"-"`
 }
 
 // ValidateBinding checks provider, alias, and access token. Optional backend
@@ -338,10 +319,17 @@ func (s *SessionAuth) Bind(sessionID string, b Binding) error {
 	if err := ValidateBinding(b); err != nil {
 		return err
 	}
-	member := BindingMember(b)
-	alias := member.Params[ParamName]
+	alias, err := resolveBindingAlias(b)
+	if err != nil {
+		return err
+	}
+	params := maps.Clone(b.Params)
+	if params == nil {
+		params = make(map[string]string, 1)
+	}
+	params[ParamName] = alias
 	b.Point = WorkspacePoint
-	b.Params = member.Params
+	b.Params = params
 	token := b.Auth
 	b.Auth = Credential{} // live token lives on the holder only
 

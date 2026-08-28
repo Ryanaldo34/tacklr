@@ -11,9 +11,7 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
-	"github.com/ryanaldo34/tacklr/internal/drive"
 	"github.com/ryanaldo34/tacklr/mcp"
-	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/telemetry"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
@@ -27,29 +25,31 @@ const (
 	turnError
 )
 
-func (r *Runtime) constructHarness(ctx context.Context, p *sessionProc, load bool, bindings []vfs.Binding) (*tacklr.TurnManager, *vfs.MountSession, error) {
+func (r *Runtime) constructHarness(ctx context.Context, p *sessionProc, bindings []vfs.Binding, state map[string]any) (*tacklr.TurnManager, *vfs.MountSession, *vfs.MountSession, error) {
 	if p.agentID == "" {
-		return nil, nil, fmt.Errorf("no agent configured for session")
+		return nil, nil, nil, fmt.Errorf("no agent configured for session")
 	}
 	spec, ok := r.catalog.Lookup(p.agentID)
 	if !ok {
-		return nil, nil, durable.ErrAgentNotFound
+		return nil, nil, nil, durable.ErrAgentNotFound
 	}
 	if p.specialist != "" {
 		over, err := durable.OverlaySpecialist(spec, p.specialist)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		spec = over
 	}
 	threadID := string(p.id)
-	ms, err := durable.OpenTurnVFS(ctx, threadID, spec, bindings, r.projection)
+	ms, skillsMS, err := durable.OpenTurnSessions(ctx, threadID, spec, bindings, r.projection)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	opts := spec.Options
 	opts.SessionID = threadID
 	opts.MountSession = ms
+	opts.SkillsSession = skillsMS
+	opts.SkillsRoot = spec.SkillsRoot
 	if len(p.mcp) > 0 {
 		mcpConfigs := make([]mcp.MCPConfig, 0, len(spec.Options.MCPConfigs)+len(p.mcp))
 		mcpConfigs = append(mcpConfigs, spec.Options.MCPConfigs...)
@@ -59,29 +59,31 @@ func (r *Runtime) constructHarness(ctx context.Context, p *sessionProc, load boo
 
 	h, err := tacklr.NewTurnManager(ctx, opts)
 	if err != nil {
-		durable.CloseTurnVFS(ms, threadID, "construct")
-		return nil, nil, err
+		durable.CloseTurnTrees(ms, skillsMS, threadID, "construct")
+		return nil, nil, nil, err
 	}
 	h.BindChildHost(sessionChildren{r: r, p: p})
-	if load {
-		snap, etag, loadErr := r.snapshots.Load(ctx, p.id)
-		switch {
-		case loadErr == nil:
-			p.etag = etag
-			if err := h.RestoreCheckpoint(snap.Checkpoint); err != nil {
-				h.Close()
-				durable.CloseTurnVFS(ms, threadID, "restore")
-				return nil, nil, err
-			}
-		case errors.Is(loadErr, durable.ErrSessionNotFound):
-			// first turn
-		default:
+	snap, rev, loadErr := r.snapshots.Load(ctx, p.id)
+	switch {
+	case loadErr == nil:
+		p.revision = rev
+		if err := h.RestoreCheckpoint(snap.Checkpoint); err != nil {
 			h.Close()
-			durable.CloseTurnVFS(ms, threadID, "load")
-			return nil, nil, loadErr
+			durable.CloseTurnTrees(ms, skillsMS, threadID, "restore")
+			return nil, nil, nil, err
 		}
+	case errors.Is(loadErr, durable.ErrSessionNotFound):
+	default:
+		h.Close()
+		durable.CloseTurnTrees(ms, skillsMS, threadID, "load")
+		return nil, nil, nil, loadErr
 	}
-	return h, ms, nil
+	if err := h.ApplySessionState(state); err != nil {
+		h.Close()
+		durable.CloseTurnTrees(ms, skillsMS, threadID, "state")
+		return nil, nil, nil, err
+	}
+	return h, ms, skillsMS, nil
 }
 
 func (r *Runtime) persistHarness(ctx context.Context, p *sessionProc, h *tacklr.TurnManager) error {
@@ -95,23 +97,26 @@ func (r *Runtime) persistHarness(ctx context.Context, p *sessionProc, h *tacklr.
 	parent := p.parent
 	specialist := p.specialist
 	p.mu.Unlock()
-	etag, err := r.snapshots.Save(ctx, p.id, durable.Snapshot{
+	rev, err := r.snapshots.Save(ctx, p.id, durable.Snapshot{
 		AgentID:    p.agentID,
 		Specialist: specialist,
 		Parent:     parent,
 		Children:   children,
 		Checkpoint: *cp,
 		Mounts:     p.mounts,
-	}, p.etag)
+	}, p.revision)
 	telemetry.RecordCheckpointAttempt(ctx, err)
 	if err != nil {
 		return err
 	}
-	p.etag = etag
+	p.revision = rev
+	p.mu.Lock()
+	p.state = nil
+	p.mu.Unlock()
 	return nil
 }
 
-func (r *Runtime) emit(ctx context.Context, p *sessionProc, ev streaming.StreamEvent) {
+func (r *Runtime) emit(ctx context.Context, p *sessionProc, ev tacklr.StreamEvent) {
 	if err := r.events.Append(ctx, p.id, durable.TopicEvents, ev); err != nil {
 		slog.Warn("eventlog append failed", "session_id", p.id, "error", err)
 	}
@@ -121,24 +126,23 @@ func (r *Runtime) fail(ctx context.Context, p *sessionProc, err error) turnOutco
 	p.mu.Lock()
 	p.termErr = err
 	p.mu.Unlock()
-	r.emit(ctx, p, streaming.StreamEvent{Type: streaming.StreamEventError, Error: err})
+	r.emit(ctx, p, tacklr.StreamEvent{Type: tacklr.StreamEventError, Error: err})
 	return turnError
 }
 
-func (r *Runtime) runTurn(ctx context.Context, p *sessionProc, user *tacklr.Message, resume map[string][]byte, bindings []vfs.Binding) turnOutcome {
-	load := resume != nil || p.etag != ""
-	h, ms, err := r.constructHarness(ctx, p, load, bindings)
+func (r *Runtime) runTurn(ctx context.Context, p *sessionProc, user *tacklr.Message, resume map[string][]byte, bindings []vfs.Binding, state map[string]any) turnOutcome {
+	h, ms, skillsMS, err := r.constructHarness(ctx, p, bindings, state)
 	if err != nil {
 		return r.fail(ctx, p, err)
 	}
 	defer func() {
 		h.Close()
-		durable.CloseTurnVFS(ms, string(p.id), "turn_end")
+		durable.CloseTurnTrees(ms, skillsMS, string(p.id), "turn_end")
 	}()
 
 	eng := h.Drive()
-	out, stop := drive.PipeStreamEvents(func(ev streaming.StreamEvent) {
-		if ev.Type == streaming.StreamEventComplete {
+	out, stop := tacklr.PipeStreamEvents(func(ev tacklr.StreamEvent) {
+		if ev.Type == tacklr.StreamEventComplete {
 			p.mu.Lock()
 			n := len(p.children)
 			p.mu.Unlock()
@@ -153,13 +157,13 @@ func (r *Runtime) runTurn(ctx context.Context, p *sessionProc, user *tacklr.Mess
 	cancelled := func() turnOutcome {
 		persist := context.WithoutCancel(ctx)
 		if err := r.persistHarness(persist, p, h); err != nil {
-			r.emit(persist, p, streaming.StreamEvent{Type: streaming.StreamEventError, Error: err})
+			r.emit(persist, p, tacklr.StreamEvent{Type: tacklr.StreamEventError, Error: err})
 		}
 		err := ctx.Err()
 		if err == nil {
 			err = context.Canceled
 		}
-		r.emit(persist, p, streaming.StreamEvent{Type: streaming.StreamEventError, Error: err})
+		r.emit(persist, p, tacklr.StreamEvent{Type: tacklr.StreamEventError, Error: err})
 		return turnCancelled
 	}
 
@@ -176,7 +180,7 @@ func (r *Runtime) runTurn(ctx context.Context, p *sessionProc, user *tacklr.Mess
 		}
 	}
 
-	st := &drive.TurnState{}
+	st := &tacklr.TurnState{}
 	toolCalls := eng.PendingToolCalls()
 	parked := false
 	inferComplete := false
@@ -188,8 +192,8 @@ func (r *Runtime) runTurn(ctx context.Context, p *sessionProc, user *tacklr.Mess
 		if len(toolCalls) == 0 && !parked && inferComplete {
 			nudge = durable.ChildrenNudge(r.childStatuses(p))
 		}
-		switch drive.Next(len(toolCalls), parked, inferComplete, nudge != "") {
-		case drive.ActionInfer:
+		switch tacklr.Next(len(toolCalls), parked, inferComplete, nudge != "") {
+		case tacklr.ActionInfer:
 			step, infErr := eng.RunInference(ctx, st, out)
 			if ctx.Err() != nil {
 				return cancelled()
@@ -199,7 +203,7 @@ func (r *Runtime) runTurn(ctx context.Context, p *sessionProc, user *tacklr.Mess
 				p.termErr = infErr
 				p.mu.Unlock()
 				if err := r.persistHarness(ctx, p, h); err != nil {
-					r.emit(ctx, p, streaming.StreamEvent{Type: streaming.StreamEventError, Error: err})
+					r.emit(ctx, p, tacklr.StreamEvent{Type: tacklr.StreamEventError, Error: err})
 				}
 				return turnError
 			}
@@ -209,13 +213,13 @@ func (r *Runtime) runTurn(ctx context.Context, p *sessionProc, user *tacklr.Mess
 				continue
 			}
 			toolCalls = step.ToolCalls
-		case drive.ActionRunTools:
+		case tacklr.ActionRunTools:
 			st.HadToolRound = true
 			var hit atomic.Bool
 			var wg sync.WaitGroup
 			for _, tc := range toolCalls {
 				wg.Add(1)
-				go func(tc streaming.ToolCall) {
+				go func(tc tacklr.ToolCall) {
 					defer wg.Done()
 					if ctx.Err() != nil {
 						return
@@ -235,15 +239,15 @@ func (r *Runtime) runTurn(ctx context.Context, p *sessionProc, user *tacklr.Mess
 			}
 			parked = hit.Load()
 			toolCalls = nil
-		case drive.ActionYield:
+		case tacklr.ActionYield:
 			return turnYield
-		case drive.ActionComplete:
+		case tacklr.ActionComplete:
 			r.captureResult(p, h)
 			if err := r.persistHarness(ctx, p, h); err != nil {
 				return r.fail(ctx, p, err)
 			}
 			return turnComplete
-		case drive.ActionNudge:
+		case tacklr.ActionNudge:
 			if err := eng.AbsorbUser(ctx, &tacklr.Message{Role: tacklr.RoleUser, Content: nudge}, out); err != nil {
 				return r.fail(ctx, p, err)
 			}

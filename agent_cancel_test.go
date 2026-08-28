@@ -3,8 +3,6 @@ package tacklr
 import (
 	"strings"
 	"testing"
-
-	"github.com/ryanaldo34/tacklr/stores"
 )
 
 // TestAgent_HasOpenToolWorkAndFinalizeCancelled: parked/open tools → HasOpenToolWork;
@@ -33,7 +31,7 @@ func TestAgent_HasOpenToolWorkAndFinalizeCancelled(t *testing.T) {
 
 	// Also pending map entry (same id seen once)
 	h.pendingMu.Lock()
-	h.pendingToolCalls["c1"] = stores.PendingToolCall{
+	h.pendingToolCalls["c1"] = PendingToolCall{
 		ToolCall: &ToolCall{ID: "c1", CallID: "c1", Name: "list", Arguments: `{}`},
 	}
 	h.pendingMu.Unlock()

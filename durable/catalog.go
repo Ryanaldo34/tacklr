@@ -18,11 +18,15 @@ type AgentSpec struct {
 	// Options is the canonical agent definition. SessionID and MountSession
 	// must be empty; the runtime injects those per turn.
 	Options tacklr.AgentOptions
-	// FSRegistry resolves MountSpec.Profile (process-scoped).
-	FSRegistry *vfs.BackendRegistry
-	// FSBootstrap mounts applied each inference/tool step when a projection
-	// is available.
-	FSBootstrap []vfs.MountSpec
+	// OpenVFS builds the agent /workspace tree (typically vfs.Tree). Nil means no VFS.
+	OpenVFS vfs.OpenVFS
+	// OpenSkills builds a host-only skills tree (typically vfs.Tree with
+	// Union of packs). The agent MountSession never includes this tree.
+	// Nil means no skills unless Options.SkillsLoader is set.
+	OpenSkills vfs.OpenVFS
+	// SkillsRoot is the virtual directory the loader walks on the skills
+	// session. Empty means /workspace/skills.
+	SkillsRoot string
 }
 
 // Catalog is the agent lookup table. Hosts construct it and pass it to
@@ -56,8 +60,8 @@ func (c *MemoryCatalog) Register(agentID string, spec AgentSpec) {
 	if strings.TrimSpace(agentID) == "" {
 		panic("durable: agent id is required")
 	}
-	if spec.Options.SessionID != "" || spec.Options.MountSession != nil {
-		panic("durable: AgentSpec.Options cannot set SessionID or MountSession; Runtime injects those per turn")
+	if spec.Options.SessionID != "" || spec.Options.MountSession != nil || spec.Options.SkillsSession != nil {
+		panic("durable: AgentSpec.Options cannot set SessionID, MountSession, or SkillsSession; Runtime injects those per turn")
 	}
 	if err := spec.Options.Validate(); err != nil {
 		panic(fmt.Sprintf("durable: register agent %q: %v", agentID, err))

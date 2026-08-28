@@ -5,17 +5,10 @@ import (
 	"fmt"
 	"maps"
 	"slices"
-	"strings"
-
-	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
-	mail "github.com/ryanaldo34/tacklr/email"
-	"github.com/ryanaldo34/tacklr/internal/exa"
-	session "github.com/ryanaldo34/tacklr/internal/session"
 	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/skills"
-	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfsindex"
 )
@@ -42,8 +35,7 @@ func (c Config) Validate() error {
 
 // AgentOptions configures NewTurnManager.
 //
-// Usual fields: Config, Model, Tools, MCPConfigs, EmailProvider, Specialists,
-// SessionID.
+// Usual fields: Config, Model, Tools, MCPConfigs, Specialists, SessionID.
 // ContextPolicy knobs (ratios, stream-summary) stay host-settable. Adaptive
 // Case Management itself is harness-owned and cannot be replaced.
 //
@@ -53,9 +45,13 @@ func (c Config) Validate() error {
 type AgentOptions struct {
 	Config Config
 	// SessionID is the durable thread id. Set at construction; do not change mid-turn.
-	SessionID  string
-	Model      InferenceStrategy
-	WatchDog   AgentWatchDog
+	SessionID string
+	Model     InferenceStrategy
+	WatchDog  AgentWatchDog
+	// Tools are host tools, including optional builtins from package
+	// builtins (email, Exa web). Give each tool its clients by closing
+	// over them in the constructor (see NewTool). Session-world tools
+	// (VFS, brain, index) still inject from the fields below.
 	Tools      []*Tool
 	MCPConfigs []mcp.MCPConfig
 	// MCPCredentialResolver resolves durable references immediately before
@@ -76,15 +72,16 @@ type AgentOptions struct {
 	// ToolResultHooks map tool name → post-success window effects for host tools.
 	// Plan builtins use ToolOutcome instead.
 	ToolResultHooks map[string]ToolResultHook
-	// SkillsLoader loads skills. Nil uses skills.Loader on the /skills mount
-	// when MountSession has one (from SkillSource factories).
+	// SkillsLoader loads skills. When nil, SkillsSession is walked with
+	// skills.Loader. MountSession is never used for skills.
 	SkillsLoader skills.SkillLoader
-	// ExaAPIKey enables web_search and web_fetch. Empty falls back to EXA_API_KEY.
-	// When both are empty, those tools are not registered.
-	ExaAPIKey string
-	// EmailProvider enables read_inbox and send_email for Gmail or Outlook.
-	// The host owns provider authentication and lifecycle.
-	EmailProvider mail.Provider
+	// SkillsSession is the host-only skills tree for this turn. Runtime
+	// builds it from AgentSpec.OpenSkills. It is not session.VFS; VFS tools
+	// do not see it. Nil and a nil SkillsLoader means no skills.
+	SkillsSession *vfs.MountSession
+	// SkillsRoot is the virtual directory skills.Loader walks on
+	// SkillsSession. Empty means skills.DefaultRoot (/workspace/skills).
+	SkillsRoot string
 	// Brain enables knowledge builtins when non-nil. Workers inherit the same engine.
 	// Configure Store, optional QueryEmbedder, and optional GraphReader/GraphWriter on the Engine
 	// before NewTurnManager (e.g. brain.WithGraph(helixgraph.New(...))). The harness does
@@ -94,13 +91,15 @@ type AgentOptions struct {
 	// Empty fields skip that tool. Kinds should be registered via brain.ApplyKinds / WithKinds.
 	// Ignored when Brain is nil.
 	BrainWriteKinds brain.WriteKinds
-	// SearchNamespace isolates brain retrieval when set (session-owned, checkpointed).
-	// Nil leaves a loaded session value unchanged. Workers get a copy at spawn.
-	SearchNamespace *uuid.UUID
-	// MountSession is the VFS tree injected for this turn, or nil (no VFS tools).
-	// Runtime builds one from FSBootstrap plus Prompt.Auth bindings when a
+	// SearchNamespace is the host ceiling for brain tools (session-owned, checkpointed).
+	// Each tool call may add attrs to narrow the search; it cannot change ceiling values.
+	// Empty means no ceiling. Workers get a copy at spawn.
+	SearchNamespace brain.Namespace
+	// MountSession is the agent /workspace tree for this turn, or nil (no VFS tools).
+	// Runtime builds one from OpenVFS plus Prompt.Auth bindings when a
 	// projection is available. Embedders pass their own. The injector Closes
 	// it after the turn; the harness never does (workers inherit the pointer).
+	// Do not mount skills here; use SkillsSession.
 	MountSession *vfs.MountSession
 	// runCommandUnattended injects run_command without ToolPermissionOnCall.
 	// Zero value parks run_command for permission. Unexported so hosts cannot
@@ -116,7 +115,7 @@ func NewTurnManager(ctx context.Context, opts AgentOptions) (*TurnManager, error
 	if err := opts.Validate(); err != nil {
 		return nil, err
 	}
-	sm := session.NewSessionManager()
+	sm := newSessionManager()
 	h := &TurnManager{
 		model:                 opts.Model,
 		maxWindowSize:         opts.Config.MaxWindowSize,
@@ -127,16 +126,14 @@ func NewTurnManager(ctx context.Context, opts AgentOptions) (*TurnManager, error
 		tools:                 opts.Tools,
 		mcpConfigs:            opts.MCPConfigs,
 		mcpCredentialResolver: opts.MCPCredentialResolver,
-		skillsLoader:          opts.SkillsLoader,
+		skillsLoader:          skillsSource(opts),
 		hostInterceptors:      slices.Clone(opts.ToolInterceptors),
 		hostResultHooks:       maps.Clone(opts.ToolResultHooks),
-		exaAPIKey:             resolveExaAPIKey(opts.ExaAPIKey),
-		emailProvider:         opts.EmailProvider,
 		brain:                 opts.Brain,
 		brainWriteKinds:       opts.BrainWriteKinds,
 		sessionId:             opts.SessionID,
 		specialists:           make(map[string]*Specialist),
-		pendingToolCalls:      make(map[string]stores.PendingToolCall),
+		pendingToolCalls:      make(map[string]PendingToolCall),
 		context:               newModelContextManager(),
 		contextPolicy:         opts.ContextPolicy,
 		runCommandUnattended:  opts.runCommandUnattended,
@@ -146,8 +143,8 @@ func NewTurnManager(ctx context.Context, opts AgentOptions) (*TurnManager, error
 	if opts.MountSession != nil {
 		sm.VFS = opts.MountSession
 	}
-	if opts.SearchNamespace != nil {
-		sm.Search.SetNamespace(*opts.SearchNamespace)
+	if !opts.SearchNamespace.Empty() {
+		sm.Search.SetNamespace(opts.SearchNamespace)
 	}
 	def := DefaultContextPolicy()
 	if h.contextPolicy.PressureRatio <= 0 {
@@ -197,9 +194,6 @@ func (opts *AgentOptions) Validate() error {
 			return fmt.Errorf("tacklr: AgentOptions.Tools[%d] is nil", i)
 		}
 	}
-	if err := mail.ValidateProvider(opts.EmailProvider); err != nil {
-		return fmt.Errorf("tacklr: EmailProvider: %w", err)
-	}
 	seenMCP := make(map[string]struct{}, len(opts.MCPConfigs))
 	for i := range opts.MCPConfigs {
 		config := opts.MCPConfigs[i]
@@ -218,11 +212,6 @@ func (opts *AgentOptions) Validate() error {
 }
 
 func (h *TurnManager) finishInit(ctx context.Context, specialists []*Specialist) error {
-	if h.emailProvider != nil {
-		if err := h.emailProvider.Validate(ctx); err != nil {
-			return fmt.Errorf("initialize email provider %q: %w", h.emailProvider.Kind(), err)
-		}
-	}
 	if err := h.initSkills(ctx); err != nil {
 		return fmt.Errorf("initialize skills: %w", err)
 	}
@@ -237,7 +226,7 @@ func (h *TurnManager) finishInit(ctx context.Context, specialists []*Specialist)
 	return nil
 }
 
-// injectBuiltinTools registers plan tools, optional web/brain/VFS/index tools, and spawn_specialist once.
+// injectBuiltinTools registers plan tools, session-world VFS/brain/index tools, and spawn_specialist once.
 func (a *TurnManager) injectBuiltinTools() {
 	if a.builtinsInjected {
 		return
@@ -249,13 +238,6 @@ func (a *TurnManager) injectBuiltinTools() {
 		newListPlanTool(a.session),
 		askUserChoiceTool,
 	)
-	if key := strings.TrimSpace(a.exaAPIKey); key != "" {
-		client := exa.NewClient(key)
-		a.tools = append(a.tools, newWebSearchTool(client), newWebFetchTool(client))
-	}
-	if a.emailProvider != nil {
-		a.tools = append(a.tools, newEmailTools(a.emailProvider)...)
-	}
 	br := a.vfsBridge
 	if ms := a.session.VFS; ms != nil {
 		a.tools = append(a.tools, newVFSTools(ms, !a.writeUnattended)...)
@@ -291,15 +273,7 @@ func (a *TurnManager) initVFSIndexBridge() {
 	if !ok {
 		return
 	}
-	nsCopy := ns
-	attachMemory := true
-	for _, s := range a.session.VFS.Specs() {
-		if s.Profile == brain.DefaultProfile {
-			attachMemory = false
-			break
-		}
-	}
-	br, err := vfsindex.Start(a.session.VFS, a.brain, brain.Scope{Namespace: &nsCopy}, attachMemory)
+	br, err := vfsindex.Start(a.session.VFS, a.brain, brain.Scope{Namespace: ns})
 	if err != nil {
 		return
 	}
@@ -316,12 +290,21 @@ func (a *TurnManager) planningWriteLock(ctx context.Context, inv ToolInvocation,
 	return next(ctx, inv)
 }
 
-func (a *TurnManager) initSkills(ctx context.Context) error {
-	loader := a.skillsLoader
-	if loader == nil {
-		loader = skills.Loader{Session: a.session.VFS}
+func skillsSource(opts AgentOptions) skills.SkillLoader {
+	if opts.SkillsLoader != nil {
+		return opts.SkillsLoader
 	}
-	loaded, err := loader.Load(ctx)
+	if opts.SkillsSession == nil {
+		return nil
+	}
+	return skills.Loader{Session: opts.SkillsSession, Root: opts.SkillsRoot}
+}
+
+func (a *TurnManager) initSkills(ctx context.Context) error {
+	if a.skillsLoader == nil {
+		return nil
+	}
+	loaded, err := a.skillsLoader.Load(ctx)
 	if err != nil {
 		return err
 	}

@@ -48,17 +48,14 @@ func NewPostgresStore(db PgxDB) (*PostgresStore, error) {
 
 const objectSelectCols = `
 	id, kind, title, summary, properties, content, content_type,
-	parent_id, position, namespace_id, created_at, updated_at, deleted_at
+	parent_id, position, namespace, created_at, updated_at, deleted_at
 `
 
 // Get implements ObjectReader.
 func (s *PostgresStore) Get(ctx context.Context, scope Scope, id uuid.UUID) (Object, error) {
 	q := `SELECT ` + objectSelectCols + ` FROM objects WHERE id = $1 AND deleted_at IS NULL`
 	args := []any{id}
-	if scope.Namespace != nil {
-		q += ` AND namespace_id = $2`
-		args = append(args, *scope.Namespace)
-	}
+	q, args = appendNamespaceSQL(q, args, scope)
 	return s.scanObject(s.db.QueryRow(ctx, q, args...))
 }
 
@@ -69,10 +66,7 @@ func (s *PostgresStore) GetMany(ctx context.Context, scope Scope, ids []uuid.UUI
 	}
 	q := `SELECT ` + objectSelectCols + ` FROM objects WHERE id = ANY($1) AND deleted_at IS NULL`
 	args := []any{ids}
-	if scope.Namespace != nil {
-		q += ` AND namespace_id = $2`
-		args = append(args, *scope.Namespace)
-	}
+	q, args = appendNamespaceSQL(q, args, scope)
 	rows, err := s.db.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("brain: get many: %w", err)
@@ -104,10 +98,7 @@ func (s *PostgresStore) ListChildren(ctx context.Context, scope Scope, parentID 
 		FROM objects
 		WHERE parent_id = $1 AND deleted_at IS NULL`
 	args := []any{parentID}
-	if scope.Namespace != nil {
-		q += ` AND namespace_id = $2`
-		args = append(args, *scope.Namespace)
-	}
+	q, args = appendNamespaceSQL(q, args, scope)
 	q += ` ORDER BY position ASC NULLS LAST, id ASC`
 
 	rows, err := s.db.Query(ctx, q, args...)
@@ -156,10 +147,10 @@ func (s *PostgresStore) Put(ctx context.Context, obj Object) error {
 	const q = `
 		INSERT INTO objects (
 			id, kind, title, summary, properties, content, content_type,
-			parent_id, position, embedding, namespace_id, created_at, updated_at, deleted_at
+			parent_id, position, embedding, namespace, created_at, updated_at, deleted_at
 		) VALUES (
 			$1, $2, $3, $4, $5::jsonb, $6, $7,
-			$8, $9, $10::vector, $11, $12, $13, NULL
+			$8, $9, $10::vector, $11::jsonb, $12, $13, NULL
 		)
 		ON CONFLICT (id) DO UPDATE SET
 			kind = EXCLUDED.kind,
@@ -171,12 +162,16 @@ func (s *PostgresStore) Put(ctx context.Context, obj Object) error {
 			parent_id = EXCLUDED.parent_id,
 			position = EXCLUDED.position,
 			embedding = EXCLUDED.embedding,
-			namespace_id = EXCLUDED.namespace_id,
+			namespace = EXCLUDED.namespace,
 			updated_at = EXCLUDED.updated_at,
 			deleted_at = NULL`
+	nsJSON, err := obj.Namespace.Value()
+	if err != nil {
+		return fmt.Errorf("brain: marshal namespace: %w", err)
+	}
 	if _, err := s.db.Exec(ctx, q,
 		obj.ID, obj.Kind, obj.Title, obj.Summary, propsJSON, obj.Content, obj.ContentType,
-		obj.ParentID, obj.Position, emb, obj.NamespaceID, obj.CreatedAt, obj.UpdatedAt,
+		obj.ParentID, obj.Position, emb, nsJSON, obj.CreatedAt, obj.UpdatedAt,
 	); err != nil {
 		return fmt.Errorf("brain: put object: %w", err)
 	}
@@ -190,10 +185,7 @@ func (s *PostgresStore) SoftDelete(ctx context.Context, scope Scope, id uuid.UUI
 	}
 	q := `UPDATE objects SET deleted_at = $1, updated_at = $1 WHERE id = $2 AND deleted_at IS NULL`
 	args := []any{time.Now().UTC(), id}
-	if scope.Namespace != nil {
-		q += ` AND namespace_id = $3`
-		args = append(args, *scope.Namespace)
-	}
+	q, args = appendNamespaceSQL(q, args, scope)
 	tag, err := s.db.Exec(ctx, q, args...)
 	if err != nil {
 		return fmt.Errorf("brain: soft delete: %w", err)
@@ -298,13 +290,8 @@ func (s *PostgresStore) ListByKind(ctx context.Context, scope Scope, kind string
 		FROM objects
 		WHERE kind = $1 AND deleted_at IS NULL AND parent_id IS NULL`
 	args := []any{kind}
-	n := 2
-	if scope.Namespace != nil {
-		q += fmt.Sprintf(` AND namespace_id = $%d`, n)
-		args = append(args, *scope.Namespace)
-		n++
-	}
-	q += fmt.Sprintf(` ORDER BY title ASC NULLS LAST, id ASC LIMIT $%d`, n)
+	q, args = appendNamespaceSQL(q, args, scope)
+	q += fmt.Sprintf(` ORDER BY title ASC NULLS LAST, id ASC LIMIT $%d`, len(args)+1)
 	args = append(args, limit)
 	return s.scanObjectRows(ctx, q, args, "list by kind", limit)
 }
@@ -319,10 +306,7 @@ func (s *PostgresStore) GetByProperty(ctx context.Context, scope Scope, key, val
 		FROM objects
 		WHERE deleted_at IS NULL AND properties->>$1 = $2`
 	args := []any{key, value}
-	if scope.Namespace != nil {
-		q += ` AND namespace_id = $3`
-		args = append(args, *scope.Namespace)
-	}
+	q, args = appendNamespaceSQL(q, args, scope)
 	q += ` LIMIT 1`
 	return s.scanObject(s.db.QueryRow(ctx, q, args...))
 }
@@ -331,10 +315,7 @@ func (s *PostgresStore) GetByProperty(ctx context.Context, scope Scope, key, val
 func (s *PostgresStore) KindsWithObjects(ctx context.Context, scope Scope) ([]string, error) {
 	q := `SELECT DISTINCT kind FROM objects WHERE deleted_at IS NULL AND parent_id IS NULL`
 	var args []any
-	if scope.Namespace != nil {
-		q += ` AND namespace_id = $1`
-		args = append(args, *scope.Namespace)
-	}
+	q, args = appendNamespaceSQL(q, args, scope)
 	q += ` ORDER BY kind ASC`
 	rows, err := s.db.Query(ctx, q, args...)
 	if err != nil {
@@ -403,7 +384,7 @@ func (s *PostgresStore) scanObject(row scannable) (Object, error) {
 		&contentType,
 		&parentID,
 		&position,
-		&o.NamespaceID,
+		&o.Namespace,
 		&o.CreatedAt,
 		&o.UpdatedAt,
 		&deletedAt,
@@ -561,6 +542,18 @@ func sanitizeJSONKey(k string) string {
 		}
 		return -1
 	}, k)
+}
+
+func appendNamespaceSQL(q string, args []any, scope Scope) (string, []any) {
+	if scope.Namespace.Empty() {
+		return q, args
+	}
+	raw, err := scope.Namespace.Value()
+	if err != nil {
+		return q, args
+	}
+	q += fmt.Sprintf(` AND namespace @> $%d::jsonb`, len(args)+1)
+	return q, append(args, raw)
 }
 
 func formatVectorLiteral(v []float32) string {

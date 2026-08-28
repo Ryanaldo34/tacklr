@@ -159,8 +159,8 @@ func TestEngine_liveFindObjectsTextSearch(t *testing.T) {
 	if !eng.HasObjectSearch() {
 		t.Fatal("HasObjectSearch")
 	}
-	ns := uuid.New()
-	scope := brain.Scope{Namespace: &ns}
+	ns := mustNS(t, "id", uuid.NewString())
+	scope := brain.Scope{Namespace: ns}
 	sc := brain.NewSearchContext()
 	fact, err := eng.Put(ctx, scope, brain.Object{
 		Kind: "Fact", Title: "MSA commercial liability risk",
@@ -231,8 +231,8 @@ func TestEngine_liveDualWriteLinkExpand(t *testing.T) {
 		t.Fatal("HasGraphWriter")
 	}
 
-	ns := uuid.New()
-	scope := brain.Scope{Namespace: &ns}
+	ns := mustNS(t, "id", uuid.NewString())
+	scope := brain.Scope{Namespace: ns}
 	sc := brain.NewSearchContext()
 
 	// Turn 1: put discovery-like objects (graph nodes + embeddings).
@@ -323,17 +323,17 @@ func TestGraph_liveEnsureObjectRichProps(t *testing.T) {
 	ctx := context.Background()
 	g := liveGraph(t)
 
-	nsID := uuid.New()
+	nsID := mustNS(t, "id", uuid.NewString())
 	// Helix vector index dim is process-global; match dual-write tests (2-d).
 	a := brain.Object{
 		ID: uuid.New(), Kind: "Document", Title: "Alpha", Summary: "sum-a",
-		Content: "alpha body", NamespaceID: nsID,
+		Content: "alpha body", Namespace: nsID,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 		Embedding: []float32{1, 0},
 	}
 	b := brain.Object{
 		ID: uuid.New(), Kind: "Document", Title: "Beta",
-		Content: "beta body", NamespaceID: nsID,
+		Content: "beta body", Namespace: nsID,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 		Embedding: []float32{0, 1},
 	}
@@ -410,12 +410,12 @@ func TestGraph_liveSearchEdgesTextVectorAndProps(t *testing.T) {
 	}
 
 	// Dual-write objects with custom scalar Properties (sortedPropKeys + scalarPropValue).
-	nsID := uuid.New()
+	nsID := mustNS(t, "id", uuid.NewString())
 	a := brain.Object{
 		ID: uuid.New(), Kind: "Document", Title: "EdgeSearchSource",
 		Summary: "sum-src", Content: "source body unique-helix-alpha",
-		NamespaceID: nsID,
-		CreatedAt:   time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+		Namespace: nsID,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 		Embedding: []float32{1, 0},
 		Properties: map[string]any{
 			"flag":    true,
@@ -432,7 +432,7 @@ func TestGraph_liveSearchEdgesTextVectorAndProps(t *testing.T) {
 	}
 	b := brain.Object{
 		ID: uuid.New(), Kind: "Document", Title: "EdgeSearchTarget",
-		Content: "target body unique-helix-beta", NamespaceID: nsID,
+		Content: "target body unique-helix-beta", Namespace: nsID,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 		Embedding: []float32{0, 1},
 	}
@@ -517,10 +517,10 @@ func TestGraph_liveSearchEdgesTextVectorAndProps(t *testing.T) {
 	if err := g.Bootstrap(ctx, true); err != nil {
 		t.Logf("Bootstrap tenant: %v", err)
 	} else if g.TenantEnabled() {
-		if _, err := g.SearchText(ctx, "unique-helix-alpha", 5, &nsID); err != nil {
+		if _, err := g.SearchText(ctx, "unique-helix-alpha", 5, nsID); err != nil {
 			t.Logf("tenant SearchText: %v", err)
 		}
-		if _, err := g.SearchVector(ctx, []float32{0, 1}, 5, &nsID); err != nil {
+		if _, err := g.SearchVector(ctx, []float32{0, 1}, 5, nsID); err != nil {
 			t.Logf("tenant SearchVector: %v", err)
 		}
 	}
@@ -577,8 +577,8 @@ func TestEngine_liveFindLinksSearchEdges(t *testing.T) {
 	if !eng.HasEdgeSearch() {
 		t.Fatal("HasEdgeSearch")
 	}
-	ns := uuid.New()
-	scope := brain.Scope{Namespace: &ns}
+	ns := mustNS(t, "id", uuid.NewString())
+	scope := brain.Scope{Namespace: ns}
 	doc, err := eng.Put(ctx, scope, brain.Object{
 		Kind: "Document", Title: "Contract", Content: "MSA body",
 	})

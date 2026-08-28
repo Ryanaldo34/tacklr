@@ -1,11 +1,15 @@
 package durable
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/builtins"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
@@ -15,38 +19,64 @@ type downProjection struct{}
 func (downProjection) Available() bool                        { return false }
 func (downProjection) Attach(*vfs.MountSession, string) error { return nil }
 
-func TestOpenTurnVFS_nilWhenNoRegistryOrProjection(t *testing.T) {
-	ctx := t.Context()
+func TestOpenTurnVFS_nilWhenNoOpenOrProjection(t *testing.T) {
 	ms, err := OpenTurnVFS(t.Context(), "s", AgentSpec{}, nil, vfs.DirectProjection{})
 	if err != nil || ms != nil {
-		t.Fatalf("no registry: %v %v", ms, err)
+		t.Fatalf("no OpenVFS: %v %v", ms, err)
 	}
-	reg := vfs.NewBackendRegistry()
-	ms, err = OpenTurnVFS(ctx, "s", AgentSpec{FSRegistry: reg, FSBootstrap: []vfs.MountSpec{{Point: "/work", Profile: "local"}}}, nil, downProjection{})
+	ms, err = OpenTurnVFS(t.Context(), "s", AgentSpec{OpenVFS: vfs.Tree(vfs.At("scratch", builtins.Local(t.TempDir())))}, nil, downProjection{})
 	if err != nil || ms != nil {
 		t.Fatalf("projection down: %v %v", ms, err)
 	}
 	CloseTurnVFS(nil, "s", "test")
 	ClearSessionVFS(nil, "s")
-	ClearSessionVFS(NewCatalog("x"), "")
 }
 
-func TestOpenTurnVFS_workspaceFromBindings(t *testing.T) {
+func TestOpenTurnSessions_skillsWithoutProjection(t *testing.T) {
+	ctx := t.Context()
+	pack := t.TempDir()
+	d := filepath.Join(pack, "research")
+	if err := os.MkdirAll(d, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(d, "SKILL.md"), []byte("---\nname: research\ndescription: d\n---\n\nbody\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ws, skills, err := OpenTurnSessions(ctx, "s", AgentSpec{
+		OpenVFS:    vfs.Tree(vfs.At("work", builtins.Local(t.TempDir()))),
+		OpenSkills: vfs.Tree(vfs.At("skills", builtins.Local(pack))),
+	}, nil, downProjection{})
+	if err != nil || ws != nil || skills == nil {
+		t.Fatalf("workspace=%v skills=%v err=%v", ws, skills, err)
+	}
+	t.Cleanup(func() { CloseTurnTrees(ws, skills, "s", "test") })
+	got, err := skills.ReadFile(ctx, "/workspace/skills/research/SKILL.md")
+	if err != nil || !strings.Contains(string(got), "body") {
+		t.Fatalf("skills read: %q %v", got, err)
+	}
+}
+
+func TestOpenTurnSessions_skillsError(t *testing.T) {
+	_, _, err := OpenTurnSessions(t.Context(), "s", AgentSpec{
+		OpenVFS: vfs.Tree(vfs.At("work", builtins.Local(t.TempDir()))),
+		OpenSkills: func(context.Context, string, vfs.Request) (*vfs.MountSession, error) {
+			return nil, os.ErrPermission
+		},
+	}, nil, vfs.DirectProjection{})
+	if !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestOpenTurnVFS_treeUnderWorkspace(t *testing.T) {
 	ctx := t.Context()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("hi"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	reg := vfs.NewBackendRegistry()
-	if err := reg.Register(vfs.LocalFactory{ID: "local", Base: dir}); err != nil {
-		t.Fatal(err)
-	}
-	binds := []vfs.Binding{{
-		Provider: "local",
-		Params:   map[string]string{vfs.ParamName: "docs"},
-		Auth:     vfs.Credential{Token: "tok"},
-	}}
-	ms, err := OpenTurnVFS(ctx, "sess", AgentSpec{FSRegistry: reg}, binds, vfs.DirectProjection{})
+	ms, err := OpenTurnVFS(ctx, "sess", AgentSpec{
+		OpenVFS: vfs.Tree(vfs.At("docs", builtins.Local(dir))),
+	}, nil, vfs.DirectProjection{})
 	if err != nil || ms == nil {
 		t.Fatalf("open: %v %v", ms, err)
 	}
@@ -57,19 +87,18 @@ func TestOpenTurnVFS_workspaceFromBindings(t *testing.T) {
 	}
 }
 
-func TestOpenTurnVFS_rejectsMultiSegmentPoint(t *testing.T) {
+func TestOpenTurnVFS_driveSkippedWithoutToken(t *testing.T) {
 	ctx := t.Context()
 	dir := t.TempDir()
-	reg := vfs.NewBackendRegistry()
-	if err := reg.Register(vfs.LocalFactory{ID: "local", Base: dir}); err != nil {
-		t.Fatal(err)
-	}
-	_, err := OpenTurnVFS(ctx, "sess", AgentSpec{
-		FSRegistry:  reg,
-		FSBootstrap: []vfs.MountSpec{{Point: "/work/nested", Profile: "local"}},
+	ms, err := OpenTurnVFS(ctx, "s", AgentSpec{
+		OpenVFS: vfs.Tree(vfs.At("scratch", builtins.Local(dir))),
 	}, nil, vfs.DirectProjection{})
-	if err == nil {
-		t.Fatal("want multi-segment point error")
+	if err != nil || ms == nil {
+		t.Fatalf("open: %v %v", ms, err)
+	}
+	t.Cleanup(func() { CloseTurnVFS(ms, "s", "test") })
+	if _, err := ms.Stat(ctx, "/workspace/drive"); err == nil {
+		t.Fatal("drive member should be absent")
 	}
 }
 
@@ -78,66 +107,31 @@ type failAttach struct{ err error }
 func (failAttach) Available() bool                          { return true }
 func (f failAttach) Attach(*vfs.MountSession, string) error { return f.err }
 
-func TestOpenTurnVFS_materializeAndAttachErrors(t *testing.T) {
-	ctx := t.Context()
-	reg := vfs.NewBackendRegistry()
-	if err := reg.Register(vfs.LocalFactory{ID: "local", Base: t.TempDir()}); err != nil {
-		t.Fatal(err)
-	}
-	_, err := OpenTurnVFS(ctx, "s", AgentSpec{
-		FSRegistry:  reg,
-		FSBootstrap: []vfs.MountSpec{{Point: "/work", Profile: "missing"}},
-	}, nil, vfs.DirectProjection{})
-	if err == nil {
-		t.Fatal("want materialize error for unknown profile")
-	}
-
-	_, err = OpenTurnVFS(ctx, "s", AgentSpec{
-		FSRegistry:  reg,
-		FSBootstrap: []vfs.MountSpec{{Point: "/work", Profile: "local"}},
+func TestOpenTurnVFS_attachError(t *testing.T) {
+	_, err := OpenTurnVFS(t.Context(), "s", AgentSpec{
+		OpenVFS: vfs.Tree(vfs.At("scratch", builtins.Local(t.TempDir()))),
 	}, nil, failAttach{err: os.ErrPermission})
 	if err == nil {
 		t.Fatal("want attach error")
 	}
 }
 
-func TestOpenTurnVFS_bindSessionError(t *testing.T) {
-	reg := vfs.NewBackendRegistry()
-	if err := reg.Register(vfs.LocalFactory{ID: "local", Base: t.TempDir()}); err != nil {
-		t.Fatal(err)
-	}
-	_, err := OpenTurnVFS(t.Context(), "s", AgentSpec{FSRegistry: reg}, []vfs.Binding{{
-		Provider: "",
-		Params:   map[string]string{vfs.ParamName: "docs"},
-		Auth:     vfs.Credential{Token: "tok"},
-	}}, vfs.DirectProjection{})
+func TestOpenTurnVFS_unknownAtName(t *testing.T) {
+	_, err := OpenTurnVFS(t.Context(), "s", AgentSpec{
+		OpenVFS: vfs.Tree(vfs.At("", builtins.Local(t.TempDir()))),
+	}, nil, vfs.DirectProjection{})
 	if err == nil {
-		t.Fatal("want bind error")
+		t.Fatal("want At name error")
 	}
 }
 
-func TestClearSessionVFS_clearsFactoryAuth(t *testing.T) {
-	auth := vfs.NewSessionAuth()
-	if err := auth.Bind("s1", vfs.Binding{
-		Provider: "gdrive",
-		Params:   map[string]string{vfs.ParamName: "docs", vfs.ParamFolderID: "fld"},
-		Auth:     vfs.Credential{Token: "secret"},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	reg := vfs.NewBackendRegistry()
-	if err := reg.Register(vfs.DriveFactory{ID: "gdrive", Auth: auth}); err != nil {
-		t.Fatal(err)
-	}
+func TestClearSessionVFS_noop(t *testing.T) {
 	cat := NewCatalog("default")
 	cat.Register("default", AgentSpec{
-		Options:    tacklr.AgentOptions{Model: &testkit.ScriptedModel{}, Config: tacklr.Config{MaxWindowSize: 8192}},
-		FSRegistry: reg,
+		Options: tacklr.AgentOptions{Model: &testkit.ScriptedModel{}, Config: tacklr.Config{MaxWindowSize: 8192}},
+		OpenVFS: vfs.Tree(vfs.At("scratch", builtins.Local(t.TempDir()))),
 	})
 	ClearSessionVFS(cat, "s1")
-	if auth.HasBindings("s1") {
-		t.Fatal("want factory tokens cleared")
-	}
 }
 
 func TestBindingsForTurn_skipsEmptyAliasAndEmptyToken(t *testing.T) {

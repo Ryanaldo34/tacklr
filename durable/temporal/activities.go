@@ -14,9 +14,7 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
-	"github.com/ryanaldo34/tacklr/internal/drive"
 	"github.com/ryanaldo34/tacklr/mcp"
-	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/telemetry"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
@@ -60,21 +58,21 @@ type InferenceInput struct {
 	SessionID     durable.SessionID
 	AgentID       string
 	MCPServers    []mcp.MCPConfig
-	Etag          string
-	User          *streaming.Message
+	User          *tacklr.Message
 	HadToolRound  bool
 	ModelRequests int
 	Resume        map[string][]byte
 	Auth          durable.AuthContext
 	Mounts        []durable.MountRecipe
 	Specialist    string
+	// State is host userState merged after checkpoint restore.
+	State map[string]any
 }
 
 // InferenceOutput is the typed Inference activity result.
 type InferenceOutput struct {
-	Etag      string
 	Complete  bool
-	ToolCalls []streaming.ToolCall
+	ToolCalls []tacklr.ToolCall
 	Result    string
 }
 
@@ -83,19 +81,18 @@ type ToolInput struct {
 	SessionID  durable.SessionID
 	AgentID    string
 	MCPServers []mcp.MCPConfig
-	Etag       string
-	Call       streaming.ToolCall
+	Call       tacklr.ToolCall
 	Auth       durable.AuthContext
 	Mounts     []durable.MountRecipe
 	Specialist string
 	// Known is this session's child ids for list_children (not a ChildOp ledger).
 	Known []durable.SessionID
+	State map[string]any
 }
 
 // ToolOutput is the typed Tool activity result. Spawn/cancel/await are this
 // call's Runtime intent; the workflow starts, cancels, or waits via ExecuteChildWorkflow.
 type ToolOutput struct {
-	Etag        string
 	Interrupted bool
 	InterruptID string
 	SpawnID     durable.SessionID
@@ -111,12 +108,12 @@ type CommitToolInput struct {
 	SessionID  durable.SessionID
 	AgentID    string
 	MCPServers []mcp.MCPConfig
-	Etag       string
-	Call       streaming.ToolCall
+	Call       tacklr.ToolCall
 	Output     string
 	Auth       durable.AuthContext
 	Mounts     []durable.MountRecipe
 	Specialist string
+	State      map[string]any
 }
 
 func (a *Activities) Inference(ctx context.Context, in InferenceInput) (InferenceOutput, error) {
@@ -141,33 +138,33 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 	stream := a.openStream(ctx)
 	defer closeStream(ctx, stream)
 	if attempt > 1 {
-		_ = a.publish(ctx, stream, in.SessionID, durable.TopicRetry, streaming.StreamEvent{Type: streaming.StreamEventError, Content: "retry"}, true)
+		_ = a.publish(ctx, stream, in.SessionID, durable.TopicRetry, tacklr.StreamEvent{Type: tacklr.StreamEventError, Content: "retry"}, true)
 	}
-	h, ms, etag, err := a.harness(ctx, in.SessionID, in.AgentID, in.MCPServers, in.Etag, in.Auth, in.Mounts, in.Specialist)
+	h, ms, skillsMS, rev, err := a.harness(ctx, in.SessionID, in.AgentID, in.MCPServers, in.Auth, in.Mounts, in.Specialist, in.State)
 	if err != nil {
 		pub := err
 		if err := ctx.Err(); err != nil {
 			pub = err
 		}
 		slog.ErrorContext(ctx, "inference harness", "area", telemetry.AreaRuntime, "error", pub)
-		_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, streaming.StreamEvent{Type: streaming.StreamEventError, Error: pub, Content: pub.Error()}, true)
+		_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, tacklr.StreamEvent{Type: tacklr.StreamEventError, Error: pub, Content: pub.Error()}, true)
 		return InferenceOutput{}, canceledIf(ctx, err)
 	}
 	defer func() {
 		h.Close()
-		durable.CloseTurnVFS(ms, string(in.SessionID), "inference")
+		durable.CloseTurnTrees(ms, skillsMS, string(in.SessionID), "inference")
 	}()
 	eng := h.Drive()
-	out, stop := drive.PipeStreamEvents(a.emitter(ctx, stream, in.SessionID))
+	out, stop := tacklr.PipeStreamEvents(a.emitter(ctx, stream, in.SessionID))
 	defer stop()
 	if len(in.Resume) > 0 {
 		if err := eng.ApplyResume(in.Resume); err != nil {
-			_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, streaming.StreamEvent{Type: streaming.StreamEventError, Error: err, Content: err.Error()}, true)
+			_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, tacklr.StreamEvent{Type: tacklr.StreamEventError, Error: err, Content: err.Error()}, true)
 			return InferenceOutput{}, canceledIf(ctx, err)
 		}
 		if pending := eng.PendingToolCalls(); len(pending) > 0 {
-			etag, err = a.save(ctx, in.SessionID, in.AgentID, h, etag, in.Mounts)
-			return InferenceOutput{Etag: etag, ToolCalls: pending}, err
+			_, err = a.save(ctx, in.SessionID, in.AgentID, h, rev, in.Mounts)
+			return InferenceOutput{ToolCalls: pending}, err
 		}
 	}
 	if in.User != nil {
@@ -176,7 +173,7 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 			return InferenceOutput{}, canceledIf(ctx, err)
 		}
 	}
-	st := &drive.TurnState{HadToolRound: in.HadToolRound, ModelRequests: in.ModelRequests}
+	st := &tacklr.TurnState{HadToolRound: in.HadToolRound, ModelRequests: in.ModelRequests}
 	step, err := eng.RunInference(ctx, st, out)
 	if err != nil {
 		pub := err
@@ -186,11 +183,10 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 		} else {
 			slog.ErrorContext(ctx, "inference failed", "area", telemetry.AreaRuntime, "error", err)
 		}
-		_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, streaming.StreamEvent{Type: streaming.StreamEventError, Error: pub, Content: pub.Error()}, true)
+		_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, tacklr.StreamEvent{Type: tacklr.StreamEventError, Error: pub, Content: pub.Error()}, true)
 		return InferenceOutput{}, canceledIf(ctx, err)
 	}
-	etag, err = a.save(ctx, in.SessionID, in.AgentID, h, etag, in.Mounts)
-	if err != nil {
+	if _, err = a.save(ctx, in.SessionID, in.AgentID, h, rev, in.Mounts); err != nil {
 		slog.ErrorContext(ctx, "inference persist", "area", telemetry.AreaRuntime, "error", err)
 		return InferenceOutput{}, err
 	}
@@ -204,7 +200,7 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 	}
 	slog.InfoContext(ctx, "inference completed",
 		"area", telemetry.AreaRuntime, "complete", step.Complete, "tool_calls", len(step.ToolCalls))
-	return InferenceOutput{Etag: etag, Complete: step.Complete, ToolCalls: step.ToolCalls, Result: result}, nil
+	return InferenceOutput{Complete: step.Complete, ToolCalls: step.ToolCalls, Result: result}, nil
 }
 
 func (a *Activities) Tool(ctx context.Context, in ToolInput) (ToolOutput, error) {
@@ -229,16 +225,16 @@ func (a *Activities) Tool(ctx context.Context, in ToolInput) (ToolOutput, error)
 	stream := a.openStream(ctx)
 	defer closeStream(ctx, stream)
 	if attempt > 1 {
-		_ = a.publish(ctx, stream, in.SessionID, durable.TopicRetry, streaming.StreamEvent{Type: streaming.StreamEventError, Content: "retry"}, true)
+		_ = a.publish(ctx, stream, in.SessionID, durable.TopicRetry, tacklr.StreamEvent{Type: tacklr.StreamEventError, Content: "retry"}, true)
 	}
-	h, ms, etag, err := a.harness(ctx, in.SessionID, in.AgentID, in.MCPServers, in.Etag, in.Auth, in.Mounts, in.Specialist)
+	h, ms, skillsMS, rev, err := a.harness(ctx, in.SessionID, in.AgentID, in.MCPServers, in.Auth, in.Mounts, in.Specialist, in.State)
 	if err != nil {
 		slog.ErrorContext(ctx, "tool harness", "area", telemetry.AreaHarness, "error", err)
 		return ToolOutput{}, err
 	}
 	defer func() {
 		h.Close()
-		durable.CloseTurnVFS(ms, string(in.SessionID), "tool")
+		durable.CloseTurnTrees(ms, skillsMS, string(in.SessionID), "tool")
 	}()
 	kids := &activityChildren{
 		parent:  in.SessionID,
@@ -248,18 +244,18 @@ func (a *Activities) Tool(ctx context.Context, in ToolInput) (ToolOutput, error)
 	}
 	h.BindChildHost(kids)
 	eng := h.Drive()
-	out, stop := drive.PipeStreamEvents(a.emitter(ctx, stream, in.SessionID))
+	out, stop := tacklr.PipeStreamEvents(a.emitter(ctx, stream, in.SessionID))
 	defer stop()
 	step, runErr := eng.RunToolCall(ctx, in.Call, out)
 	if runErr != nil {
 		if err := ctx.Err(); err != nil {
 			slog.WarnContext(ctx, "tool cancelled", "area", telemetry.AreaHarness, "tool", in.Call.Name)
-			_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, streaming.StreamEvent{Type: streaming.StreamEventError, Error: err, Content: err.Error()}, true)
+			_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, tacklr.StreamEvent{Type: tacklr.StreamEventError, Error: err, Content: err.Error()}, true)
 			return ToolOutput{}, canceledIf(ctx, runErr)
 		}
 		slog.ErrorContext(ctx, "tool failed", "area", telemetry.AreaHarness, "tool", in.Call.Name, "error", runErr)
 	}
-	etag, saveErr := a.save(ctx, in.SessionID, in.AgentID, h, etag, in.Mounts)
+	_, saveErr := a.save(ctx, in.SessionID, in.AgentID, h, rev, in.Mounts)
 	if saveErr != nil {
 		slog.ErrorContext(ctx, "tool persist", "area", telemetry.AreaHarness, "error", saveErr)
 		if runErr != nil {
@@ -274,7 +270,6 @@ func (a *Activities) Tool(ctx context.Context, in ToolInput) (ToolOutput, error)
 	slog.InfoContext(ctx, "tool completed",
 		"area", telemetry.AreaHarness, "tool", in.Call.Name, "status", status)
 	return ToolOutput{
-		Etag:        etag,
 		Interrupted: step.Interrupted,
 		InterruptID: step.InterruptID,
 		SpawnID:     kids.spawnID,
@@ -286,41 +281,40 @@ func (a *Activities) Tool(ctx context.Context, in ToolInput) (ToolOutput, error)
 }
 
 func (a *Activities) CommitToolOutput(ctx context.Context, in CommitToolInput) (ToolOutput, error) {
-	h, ms, etag, err := a.harness(ctx, in.SessionID, in.AgentID, in.MCPServers, in.Etag, in.Auth, in.Mounts, in.Specialist)
+	h, ms, skillsMS, rev, err := a.harness(ctx, in.SessionID, in.AgentID, in.MCPServers, in.Auth, in.Mounts, in.Specialist, in.State)
 	if err != nil {
 		return ToolOutput{}, err
 	}
 	defer func() {
 		h.Close()
-		durable.CloseTurnVFS(ms, string(in.SessionID), "commit_tool")
+		durable.CloseTurnTrees(ms, skillsMS, string(in.SessionID), "commit_tool")
 	}()
 	h.Drive().RecordToolResult(in.Call, in.Output)
-	etag, err = a.save(ctx, in.SessionID, in.AgentID, h, etag, in.Mounts)
-	if err != nil {
+	if _, err = a.save(ctx, in.SessionID, in.AgentID, h, rev, in.Mounts); err != nil {
 		return ToolOutput{}, err
 	}
 	presented := in.Call
 	presented.Status = "success"
 	stream := a.openStream(ctx)
 	defer closeStream(ctx, stream)
-	_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, streaming.StreamEvent{
-		Type:      streaming.StreamEventToolResult,
+	_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, tacklr.StreamEvent{
+		Type:      tacklr.StreamEventToolResult,
 		MessageID: in.Call.Key(),
 		Content:   in.Output,
-		ToolCalls: []streaming.ToolCall{presented},
+		ToolCalls: []tacklr.ToolCall{presented},
 	}, true)
-	return ToolOutput{Etag: etag}, nil
+	return ToolOutput{}, nil
 }
 
-func (a *Activities) harness(ctx context.Context, id durable.SessionID, agentID string, extraMCP []mcp.MCPConfig, etag string, auth durable.AuthContext, mounts []durable.MountRecipe, specialist string) (*tacklr.TurnManager, *vfs.MountSession, string, error) {
+func (a *Activities) harness(ctx context.Context, id durable.SessionID, agentID string, extraMCP []mcp.MCPConfig, auth durable.AuthContext, mounts []durable.MountRecipe, specialist string, state map[string]any) (*tacklr.TurnManager, *vfs.MountSession, *vfs.MountSession, durable.Revision, error) {
 	spec, ok := a.Catalog.Lookup(agentID)
 	if !ok {
-		return nil, nil, "", durable.ErrAgentNotFound
+		return nil, nil, nil, "", durable.ErrAgentNotFound
 	}
 	if specialist != "" {
 		over, err := durable.OverlaySpecialist(spec, specialist)
 		if err != nil {
-			return nil, nil, "", err
+			return nil, nil, nil, "", err
 		}
 		spec = over
 	}
@@ -328,13 +322,15 @@ func (a *Activities) harness(ctx context.Context, id durable.SessionID, agentID 
 	if proj == nil {
 		proj = vfs.DirectProjection{}
 	}
-	ms, err := durable.OpenTurnVFS(ctx, string(id), spec, durable.BindingsForTurn(mounts, auth), proj)
+	ms, skillsMS, err := durable.OpenTurnSessions(ctx, string(id), spec, durable.BindingsForTurn(mounts, auth), proj)
 	if err != nil {
-		return nil, nil, "", err
+		return nil, nil, nil, "", err
 	}
 	opts := spec.Options
 	opts.SessionID = string(id)
 	opts.MountSession = ms
+	opts.SkillsSession = skillsMS
+	opts.SkillsRoot = spec.SkillsRoot
 	if len(extraMCP) > 0 {
 		mcpConfigs := make([]mcp.MCPConfig, 0, len(opts.MCPConfigs)+len(extraMCP))
 		mcpConfigs = append(mcpConfigs, opts.MCPConfigs...)
@@ -343,36 +339,42 @@ func (a *Activities) harness(ctx context.Context, id durable.SessionID, agentID 
 	}
 	h, err := tacklr.NewTurnManager(ctx, opts)
 	if err != nil {
-		durable.CloseTurnVFS(ms, string(id), "construct")
-		return nil, nil, "", err
+		durable.CloseTurnTrees(ms, skillsMS, string(id), "construct")
+		return nil, nil, nil, "", err
 	}
-	if etag != "" {
-		snap, loaded, loadErr := a.Snapshots.Load(ctx, id)
-		if loadErr == nil {
-			if err := h.RestoreCheckpoint(snap.Checkpoint); err != nil {
-				h.Close()
-				durable.CloseTurnVFS(ms, string(id), "restore")
-				return nil, nil, "", err
-			}
-			etag = loaded
-		} else if !errors.Is(loadErr, durable.ErrSessionNotFound) {
+	var rev durable.Revision
+	snap, loaded, loadErr := a.Snapshots.Load(ctx, id)
+	switch {
+	case loadErr == nil:
+		if err := h.RestoreCheckpoint(snap.Checkpoint); err != nil {
 			h.Close()
-			durable.CloseTurnVFS(ms, string(id), "load")
-			return nil, nil, "", loadErr
+			durable.CloseTurnTrees(ms, skillsMS, string(id), "restore")
+			return nil, nil, nil, "", err
 		}
+		rev = loaded
+	case errors.Is(loadErr, durable.ErrSessionNotFound):
+	default:
+		h.Close()
+		durable.CloseTurnTrees(ms, skillsMS, string(id), "load")
+		return nil, nil, nil, "", loadErr
 	}
-	return h, ms, etag, nil
+	if err := h.ApplySessionState(state); err != nil {
+		h.Close()
+		durable.CloseTurnTrees(ms, skillsMS, string(id), "state")
+		return nil, nil, nil, "", err
+	}
+	return h, ms, skillsMS, rev, nil
 }
 
-func (a *Activities) save(ctx context.Context, id durable.SessionID, agentID string, h *tacklr.TurnManager, etag string, mounts []durable.MountRecipe) (string, error) {
+func (a *Activities) save(ctx context.Context, id durable.SessionID, agentID string, h *tacklr.TurnManager, expected durable.Revision, mounts []durable.MountRecipe) (durable.Revision, error) {
 	cp, err := h.Checkpoint()
 	if err != nil {
 		telemetry.RecordCheckpointAttempt(ctx, err)
 		return "", err
 	}
-	etag, err = a.Snapshots.Save(ctx, id, durable.Snapshot{AgentID: agentID, Checkpoint: *cp, Mounts: mounts}, etag)
+	rev, err := a.Snapshots.Save(ctx, id, durable.Snapshot{AgentID: agentID, Checkpoint: *cp, Mounts: mounts}, expected)
 	telemetry.RecordCheckpointAttempt(ctx, err)
-	return etag, err
+	return rev, err
 }
 
 const streamBatchInterval = 200 * time.Millisecond
@@ -396,13 +398,13 @@ func closeStream(ctx context.Context, c *workflowstreams.Client) {
 	}
 }
 
-func (a *Activities) emitter(ctx context.Context, stream *workflowstreams.Client, sessionID durable.SessionID) func(streaming.StreamEvent) {
+func (a *Activities) emitter(ctx context.Context, stream *workflowstreams.Client, sessionID durable.SessionID) func(tacklr.StreamEvent) {
 	first := true
-	return func(ev streaming.StreamEvent) {
-		if ctx.Err() != nil && ev.Type != streaming.StreamEventError && ev.Type != streaming.StreamEventComplete {
+	return func(ev tacklr.StreamEvent) {
+		if ctx.Err() != nil && ev.Type != tacklr.StreamEventError && ev.Type != tacklr.StreamEventComplete {
 			return
 		}
-		force := first || ev.Type == streaming.StreamEventComplete || ev.Type == streaming.StreamEventInterrupt || ev.Type == streaming.StreamEventError
+		force := first || ev.Type == tacklr.StreamEventComplete || ev.Type == tacklr.StreamEventInterrupt || ev.Type == tacklr.StreamEventError
 		first = false
 		_ = a.publish(ctx, stream, sessionID, durable.TopicEvents, ev, force)
 	}
@@ -445,7 +447,7 @@ func publishContext(ctx context.Context) context.Context {
 	return context.WithoutCancel(ctx)
 }
 
-func (a *Activities) publish(ctx context.Context, stream *workflowstreams.Client, sessionID durable.SessionID, topic string, ev streaming.StreamEvent, force bool) error {
+func (a *Activities) publish(ctx context.Context, stream *workflowstreams.Client, sessionID durable.SessionID, topic string, ev tacklr.StreamEvent, force bool) error {
 	if ev.Error != nil && ev.Fail == "" {
 		ev.Fail = ev.Error.Error()
 	}

@@ -16,46 +16,27 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
 )
 
-// BlobFactory opens Azure Blob providers that share one S3API client (HTTP pool).
+// Blob opens Azure Blob providers that share one S3API client (HTTP pool).
 // The object model matches S3: a container is the bucket, blob names are keys,
-// and delimiter "/" listing gives virtual directories. Client/DefaultContainer
-// stay on the factory (process secrets/config).
-type BlobFactory struct {
-	ID               string
-	Client           S3API
-	DefaultContainer string
-	// Skills is an optional key prefix (use "." for the container root).
-	// When set, MountSession attaches that prefix as a /skills union member.
-	Skills string
-}
-
-var _ SkillSource = BlobFactory{}
-
-// Profile implements ProviderFactory.
-func (f BlobFactory) Profile() string { return f.ID }
-
-// SkillMember implements SkillSource.
-func (f BlobFactory) SkillMember() (MountSpec, bool) {
-	return objectSkillMember(f.ID, f.Skills)
-}
-
-// Open implements ProviderFactory.
-func (f BlobFactory) Open(ctx context.Context, _ string, spec MountSpec) (Provider, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
+// and delimiter "/" listing gives virtual directories.
+func Blob(client S3API, defaultContainer string) Open {
+	return func(ctx context.Context, _ string, b Binding) (Provider, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if client == nil {
+			return nil, fmt.Errorf("vfs: blob client required")
+		}
+		name := cmp.Or(b.Params["container"], defaultContainer)
+		if name == "" {
+			return nil, fmt.Errorf("vfs: blob container required")
+		}
+		prefix := strings.Trim(b.Params["prefix"], "/")
+		if err := validateS3Prefix(prefix); err != nil {
+			return nil, err
+		}
+		return s3Provider{api: client, bucket: name, prefix: prefix}, nil
 	}
-	if f.ID == "" || f.Client == nil {
-		return nil, fmt.Errorf("vfs: blob factory needs id and client")
-	}
-	name := cmp.Or(spec.Params["container"], f.DefaultContainer)
-	if name == "" {
-		return nil, fmt.Errorf("vfs: blob container required")
-	}
-	prefix := strings.Trim(spec.Params["prefix"], "/")
-	if err := validateS3Prefix(prefix); err != nil {
-		return nil, err
-	}
-	return s3Provider{api: f.Client, bucket: name, prefix: prefix}, nil
 }
 
 // AzureBlob implements S3API with the Azure Blob SDK (Azurite and real Blob Storage).

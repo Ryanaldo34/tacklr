@@ -4,20 +4,21 @@ import (
 	"context"
 	"sync"
 
+	"github.com/ryanaldo34/tacklr"
+
 	"github.com/ryanaldo34/tacklr/durable"
-	"github.com/ryanaldo34/tacklr/streaming"
 )
 
 type logEntry struct {
 	seq   durable.Seq
 	topic string
-	ev    streaming.StreamEvent
+	ev    tacklr.StreamEvent
 }
 
 type sessionLog struct {
 	mu      sync.Mutex
 	entries []logEntry
-	subs    map[chan streaming.StreamEvent]durable.Seq
+	subs    map[chan tacklr.StreamEvent]durable.Seq
 	closed  bool
 	// kick is closed to end live tails. Subscribe owns each subscriber channel.
 	kick chan struct{}
@@ -51,7 +52,7 @@ func (l *MemoryEventLog) session(id durable.SessionID) *sessionLog {
 		return s
 	}
 	s := &sessionLog{
-		subs: make(map[chan streaming.StreamEvent]durable.Seq),
+		subs: make(map[chan tacklr.StreamEvent]durable.Seq),
 		kick: make(chan struct{}),
 	}
 	l.sessions[id] = s
@@ -59,7 +60,7 @@ func (l *MemoryEventLog) session(id durable.SessionID) *sessionLog {
 }
 
 // Append implements durable.EventLog.
-func (l *MemoryEventLog) Append(_ context.Context, sessionID durable.SessionID, topic string, ev streaming.StreamEvent) error {
+func (l *MemoryEventLog) Append(_ context.Context, sessionID durable.SessionID, topic string, ev tacklr.StreamEvent) error {
 	s := l.session(sessionID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -89,7 +90,7 @@ func visible(e logEntry) bool {
 }
 
 // seq is 1-based and equal to index in entries plus one. Caller holds s.mu.
-func (s *sessionLog) visibleAfter(after durable.Seq) ([]streaming.StreamEvent, durable.Seq) {
+func (s *sessionLog) visibleAfter(after durable.Seq) ([]tacklr.StreamEvent, durable.Seq) {
 	start := int(after) //nolint:gosec // G115: EventLog seq is well below MaxInt
 	if start > len(s.entries) {
 		start = len(s.entries)
@@ -98,7 +99,7 @@ func (s *sessionLog) visibleAfter(after durable.Seq) ([]streaming.StreamEvent, d
 	if n == 0 {
 		return nil, after
 	}
-	out := make([]streaming.StreamEvent, 0, n)
+	out := make([]tacklr.StreamEvent, 0, n)
 	for _, e := range s.entries[start:] {
 		if !visible(e) {
 			continue
@@ -109,7 +110,7 @@ func (s *sessionLog) visibleAfter(after durable.Seq) ([]streaming.StreamEvent, d
 	return out, after
 }
 
-func (s *sessionLog) unregister(ch chan streaming.StreamEvent) {
+func (s *sessionLog) unregister(ch chan tacklr.StreamEvent) {
 	s.mu.Lock()
 	delete(s.subs, ch)
 	s.mu.Unlock()
@@ -124,9 +125,9 @@ func (s *sessionLog) kickSubs() {
 
 // Subscribe implements durable.EventLog. It replays seq > after then tails.
 // Replay is sent after unlocking so a large log cannot deadlock Append.
-func (l *MemoryEventLog) Subscribe(ctx context.Context, sessionID durable.SessionID, after durable.Seq) (<-chan streaming.StreamEvent, error) {
+func (l *MemoryEventLog) Subscribe(ctx context.Context, sessionID durable.SessionID, after durable.Seq) (<-chan tacklr.StreamEvent, error) {
 	s := l.session(sessionID)
-	ch := make(chan streaming.StreamEvent, 64)
+	ch := make(chan tacklr.StreamEvent, 64)
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()

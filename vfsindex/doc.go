@@ -46,7 +46,7 @@
 // Hosts wire Notify after writes via vfs.MountSession.SetAfterPersist, gated by
 // policy:
 //
-//	br, err := vfsindex.Start(ms, eng, scope, false) // attachMemory when no brain mount
+//	br, err := vfsindex.Start(ms, eng, scope)
 //	defer br.Close()
 //	// Or wire by hand:
 //	idx, err := vfsindex.NewMountIndexer(ms, eng, scope)

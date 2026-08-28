@@ -3,9 +3,9 @@ package durable
 import (
 	"errors"
 
+	"github.com/ryanaldo34/tacklr"
+
 	"github.com/ryanaldo34/tacklr/mcp"
-	"github.com/ryanaldo34/tacklr/stores"
-	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -53,23 +53,32 @@ type CreateSession struct {
 	// with Parent for spawn_specialist children. The host does not register the
 	// worker as a top-level catalog agent.
 	Specialist string
+	// State seeds host-owned session userState (JSON-serializable values).
+	// Tools read it via HarnessRuntime.StateGet. It is checkpointed — do not
+	// store tokens or clients. Child sessions do not inherit this map.
+	State map[string]any
 }
 
 // Prompt is the typed input for Runtime.Prompt.
 type Prompt struct {
 	Text        string
-	UserMessage *streaming.Message
+	UserMessage *tacklr.Message
 	// AgentID, when set, selects the catalog agent for this turn slice.
 	AgentID string
 	// MCPServers, when non-nil, replaces session-scoped MCP configs for this turn.
 	MCPServers []mcp.MCPConfig
 	Auth       AuthContext
+	// State merges into session userState for this turn (after checkpoint restore).
+	// JSON-serializable values only. Checkpointed — no tokens or clients.
+	State map[string]any
 }
 
 // Resume is the typed input for Runtime.Resume (HITL answer plus optional auth).
 type Resume struct {
 	Responses map[string][]byte
 	Auth      AuthContext
+	// State merges into session userState when the parked turn continues.
+	State map[string]any
 }
 
 // Snapshot is one session's harness checkpoint plus VFS recipes (no tokens).
@@ -79,7 +88,7 @@ type Snapshot struct {
 	Parent     SessionID
 	// Children are child session ids in start order (no handles, no tokens).
 	Children   []SessionID
-	Checkpoint stores.SessionCheckpoint
+	Checkpoint tacklr.SessionCheckpoint
 	Mounts     []MountRecipe
 }
 
@@ -125,6 +134,7 @@ var (
 	ErrSessionExists = errors.New("session already exists")
 	// ErrAgentNotFound is Catalog miss.
 	ErrAgentNotFound = errors.New("agent not found")
-	// ErrEtagMismatch is SnapshotStore.Save with a stale etag (retry with Head).
-	ErrEtagMismatch = errors.New("snapshot: etag mismatch")
+	// ErrStaleCheckpoint is SnapshotStore.Save when expected Revision does not
+	// match the row (another writer already saved). Reload and retry.
+	ErrStaleCheckpoint = errors.New("stale checkpoint")
 )

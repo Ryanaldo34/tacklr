@@ -19,10 +19,10 @@ import (
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/builtins"
 	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/durable/inprocess"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
-	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -35,22 +35,31 @@ func TestActivities_unknownAgentAndDirectCall(t *testing.T) {
 			},
 		}, Config: tacklr.Config{MaxWindowSize: 8192}},
 	})
+	snaps := inprocess.NewMemorySnapshot()
 	log := inprocess.NewMemoryEventLog()
-	acts := &Activities{Catalog: cat, Snapshots: inprocess.NewMemorySnapshot(), Fallback: log, DisableStreams: true}
+	acts := &Activities{Catalog: cat, Snapshots: snaps, Fallback: log, DisableStreams: true}
 	_, err := acts.Inference(t.Context(), InferenceInput{SessionID: "s", AgentID: "nope"})
 	if !errors.Is(err, durable.ErrAgentNotFound) {
 		t.Fatalf("missing agent: %v", err)
 	}
-	_, err = acts.Tool(t.Context(), ToolInput{SessionID: "s", AgentID: "nope", Call: streaming.ToolCall{ID: "c", Name: "x"}})
+	_, err = acts.Tool(t.Context(), ToolInput{SessionID: "s", AgentID: "nope", Call: tacklr.ToolCall{ID: "c", Name: "x"}})
 	if !errors.Is(err, durable.ErrAgentNotFound) {
 		t.Fatalf("tool missing agent: %v", err)
 	}
 	out, err := acts.Inference(t.Context(), InferenceInput{
 		SessionID: "s", AgentID: "default",
-		User: &streaming.Message{Role: streaming.RoleUser, Content: "hi"},
+		User:  &tacklr.Message{Role: tacklr.RoleUser, Content: "hi"},
+		State: map[string]any{"user": "Ryan"},
 	})
 	if err != nil || !out.Complete {
 		t.Fatalf("direct inference: %+v %v", out, err)
+	}
+	snap, _, err := snaps.Load(t.Context(), "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(snap.Checkpoint.UserState()["user"]) != `"Ryan"` {
+		t.Fatalf("userState=%s", snap.Checkpoint.UserState()["user"])
 	}
 }
 
@@ -109,7 +118,7 @@ func lastMsg(msgs []*tacklr.Message) *tacklr.Message {
 	return nil
 }
 
-func drainLog(t *testing.T, log durable.EventLog, id durable.SessionID) []streaming.StreamEvent {
+func drainLog(t *testing.T, log durable.EventLog, id durable.SessionID) []tacklr.StreamEvent {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
 	defer cancel()
@@ -117,7 +126,7 @@ func drainLog(t *testing.T, log durable.EventLog, id durable.SessionID) []stream
 	if err != nil {
 		t.Fatal(err)
 	}
-	var got []streaming.StreamEvent
+	var got []tacklr.StreamEvent
 	for ev := range ch {
 		got = append(got, ev)
 	}
@@ -139,10 +148,10 @@ func querySession(t *testing.T, env *testsuite.TestWorkflowEnvironment) durable.
 
 type retryLog struct {
 	durable.EventLog
-	retry []streaming.StreamEvent
+	retry []tacklr.StreamEvent
 }
 
-func (l *retryLog) Append(ctx context.Context, id durable.SessionID, topic string, ev streaming.StreamEvent) error {
+func (l *retryLog) Append(ctx context.Context, id durable.SessionID, topic string, ev tacklr.StreamEvent) error {
 	if topic == durable.TopicRetry {
 		l.retry = append(l.retry, ev)
 	}
@@ -191,10 +200,10 @@ func TestSessionWorkflow_promptCompletes(t *testing.T) {
 	got := drainLog(t, fallback, id)
 	var sawMsg, sawComplete bool
 	for _, ev := range got {
-		if ev.Type == streaming.StreamEventMessage && strings.Contains(ev.Content, "hello-temporal") {
+		if ev.Type == tacklr.StreamEventMessage && strings.Contains(ev.Content, "hello-temporal") {
 			sawMsg = true
 		}
-		if ev.Type == streaming.StreamEventComplete {
+		if ev.Type == tacklr.StreamEventComplete {
 			sawComplete = true
 		}
 	}
@@ -285,7 +294,7 @@ func TestSessionWorkflow_inferenceRefusedFailsTurn(t *testing.T) {
 	}
 	var saw bool
 	for _, ev := range drainLog(t, fallback, id) {
-		if ev.Type == streaming.StreamEventError && (errors.Is(ev.Error, tacklr.ErrModelRefused) ||
+		if ev.Type == tacklr.StreamEventError && (errors.Is(ev.Error, tacklr.ErrModelRefused) ||
 			strings.Contains(ev.Content, tacklr.ErrModelRefused.Error()) ||
 			strings.Contains(ev.Fail, tacklr.ErrModelRefused.Error())) {
 			saw = true
@@ -338,10 +347,10 @@ func TestSessionWorkflow_activityRetryThenCompletes(t *testing.T) {
 	got := drainLog(t, fallback, id)
 	var sawMsg, sawComplete bool
 	for _, ev := range got {
-		if ev.Type == streaming.StreamEventMessage && strings.Contains(ev.Content, "after-retry") {
+		if ev.Type == tacklr.StreamEventMessage && strings.Contains(ev.Content, "after-retry") {
 			sawMsg = true
 		}
-		if ev.Type == streaming.StreamEventComplete {
+		if ev.Type == tacklr.StreamEventComplete {
 			sawComplete = true
 		}
 	}
@@ -397,13 +406,13 @@ func TestSessionWorkflow_askUserYieldThenResume(t *testing.T) {
 	got := drainLog(t, fallback, id)
 	var yielded, chose, complete bool
 	for _, ev := range got {
-		if ev.Type == streaming.StreamEventInterrupt {
+		if ev.Type == tacklr.StreamEventInterrupt {
 			yielded = true
 		}
-		if ev.Type == streaming.StreamEventMessage && ev.Content == "chose" {
+		if ev.Type == tacklr.StreamEventMessage && ev.Content == "chose" {
 			chose = true
 		}
-		if ev.Type == streaming.StreamEventComplete {
+		if ev.Type == tacklr.StreamEventComplete {
 			complete = true
 		}
 	}
@@ -533,7 +542,7 @@ func TestSessionWorkflow_hitlCancel(t *testing.T) {
 	got := drainLog(t, fallback, id)
 	var yielded bool
 	for _, ev := range got {
-		if ev.Type == streaming.StreamEventInterrupt {
+		if ev.Type == tacklr.StreamEventInterrupt {
 			yielded = true
 		}
 	}
@@ -585,10 +594,10 @@ func TestSessionWorkflow_cancelThenNextPromptCompletes(t *testing.T) {
 	got := drainLog(t, fallback, id)
 	var sawAfter, complete bool
 	for _, ev := range got {
-		if ev.Type == streaming.StreamEventMessage && strings.Contains(ev.Content, "after-cancel") {
+		if ev.Type == tacklr.StreamEventMessage && strings.Contains(ev.Content, "after-cancel") {
 			sawAfter = true
 		}
-		if ev.Type == streaming.StreamEventComplete {
+		if ev.Type == tacklr.StreamEventComplete {
 			complete = true
 		}
 	}
@@ -659,19 +668,19 @@ func TestSessionWorkflow_spawnWorker(t *testing.T) {
 	got := drainLog(t, fallback, id)
 	var sawParent, sawChild, sawSpawnResult bool
 	for _, ev := range got {
-		if ev.Type == streaming.StreamEventMessage && strings.Contains(ev.Content, "parent-after-spawn") {
+		if ev.Type == tacklr.StreamEventMessage && strings.Contains(ev.Content, "parent-after-spawn") {
 			sawParent = true
 		}
-		if ev.Type == streaming.StreamEventMessage && strings.Contains(ev.Content, "child-hello") {
+		if ev.Type == tacklr.StreamEventMessage && strings.Contains(ev.Content, "child-hello") {
 			sawChild = true
 		}
-		if ev.Type == streaming.StreamEventToolResult && ev.Content == "child-hello" {
+		if ev.Type == tacklr.StreamEventToolResult && ev.Content == "child-hello" {
 			sawSpawnResult = true
 		}
 	}
 	childGot := drainLog(t, fallback, durable.ChildSessionID(id, "researcher", "sp1"))
 	for _, ev := range childGot {
-		if ev.Type == streaming.StreamEventMessage && strings.Contains(ev.Content, "child-hello") {
+		if ev.Type == tacklr.StreamEventMessage && strings.Contains(ev.Content, "child-hello") {
 			sawChild = true
 		}
 	}
@@ -746,13 +755,13 @@ func TestSessionWorkflow_mixedBatchPairsBeforeNextRound(t *testing.T) {
 	got := drainLog(t, fallback, id)
 	var sawBlock, sawList, sawSecond bool
 	for _, ev := range got {
-		if ev.Type == streaming.StreamEventToolResult && ev.Content == "block-result" {
+		if ev.Type == tacklr.StreamEventToolResult && ev.Content == "block-result" {
 			sawBlock = true
 		}
-		if ev.Type == streaming.StreamEventToolResult && (strings.Contains(ev.Content, "Child sessions:") || ev.Content == "No child sessions.") {
+		if ev.Type == tacklr.StreamEventToolResult && (strings.Contains(ev.Content, "Child sessions:") || ev.Content == "No child sessions.") {
 			sawList = true
 		}
-		if ev.Type == streaming.StreamEventMessage && ev.Content == "second-round" {
+		if ev.Type == tacklr.StreamEventMessage && ev.Content == "second-round" {
 			sawSecond = true
 		}
 	}
@@ -844,17 +853,17 @@ func TestSessionWorkflow_asyncSpawnDoesNotWaitForChild(t *testing.T) {
 	got := drainLog(t, fallback, id)
 	var sawParent, sawScheduled bool
 	for _, ev := range got {
-		if ev.Type == streaming.StreamEventMessage && strings.Contains(ev.Content, "parent-continued") {
+		if ev.Type == tacklr.StreamEventMessage && strings.Contains(ev.Content, "parent-continued") {
 			sawParent = true
 		}
-		if ev.Type == streaming.StreamEventToolResult && strings.Contains(ev.Content, "scheduled") {
+		if ev.Type == tacklr.StreamEventToolResult && strings.Contains(ev.Content, "scheduled") {
 			sawScheduled = true
 		}
 	}
 	childGot := drainLog(t, fallback, durable.ChildSessionID(id, "researcher", "sp1"))
 	var sawChild bool
 	for _, ev := range childGot {
-		if ev.Type == streaming.StreamEventMessage && strings.Contains(ev.Content, "async-child") {
+		if ev.Type == tacklr.StreamEventMessage && strings.Contains(ev.Content, "async-child") {
 			sawChild = true
 		}
 	}
@@ -933,10 +942,10 @@ func TestSessionWorkflow_listChildren(t *testing.T) {
 	}
 	var listed, cancelled bool
 	for _, ev := range drainLog(t, fallback, id) {
-		if ev.Type == streaming.StreamEventMessage && ev.Content == "listed" {
+		if ev.Type == tacklr.StreamEventMessage && ev.Content == "listed" {
 			listed = true
 		}
-		if ev.Type == streaming.StreamEventToolResult && strings.Contains(ev.Content, "cancelled and removed") {
+		if ev.Type == tacklr.StreamEventToolResult && strings.Contains(ev.Content, "cancelled and removed") {
 			cancelled = true
 		}
 	}
@@ -1039,10 +1048,6 @@ func TestSessionWorkflow_resumeRemountsWorkspaceFromCachedRecipe(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("from-workspace"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	fsReg := vfs.NewBackendRegistry()
-	if err := fsReg.Register(vfs.LocalFactory{ID: "local", Base: dir}); err != nil {
-		t.Fatal(err)
-	}
 	var suite testsuite.WorkflowTestSuite
 	env := suite.NewTestWorkflowEnvironment()
 	env.SetWorkerOptions(worker.Options{EnableSessionWorker: true})
@@ -1075,8 +1080,8 @@ func TestSessionWorkflow_resumeRemountsWorkspaceFromCachedRecipe(t *testing.T) {
 		},
 	}
 	cat.Register("default", durable.AgentSpec{
-		Options:    tacklr.AgentOptions{Model: model, Config: tacklr.Config{MaxWindowSize: 8192}},
-		FSRegistry: fsReg,
+		Options: tacklr.AgentOptions{Model: model, Config: tacklr.Config{MaxWindowSize: 8192}},
+		OpenVFS: vfs.Tree(vfs.At("docs", builtins.Local(dir))),
 	})
 	fallback := inprocess.NewMemoryEventLog()
 	env.RegisterWorkflow(SessionWorkflow)
@@ -1114,13 +1119,13 @@ func TestSessionWorkflow_resumeRemountsWorkspaceFromCachedRecipe(t *testing.T) {
 	got := drainLog(t, fallback, id)
 	var yielded, sawFile, complete bool
 	for _, ev := range got {
-		if ev.Type == streaming.StreamEventInterrupt {
+		if ev.Type == tacklr.StreamEventInterrupt {
 			yielded = true
 		}
-		if ev.Type == streaming.StreamEventMessage && strings.Contains(ev.Content, "from-workspace") {
+		if ev.Type == tacklr.StreamEventMessage && strings.Contains(ev.Content, "from-workspace") {
 			sawFile = true
 		}
-		if ev.Type == streaming.StreamEventComplete {
+		if ev.Type == tacklr.StreamEventComplete {
 			complete = true
 		}
 	}

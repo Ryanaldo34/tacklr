@@ -6,40 +6,24 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/ryanaldo34/tacklr/builtins"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
 func TestWorkspace_namedUnionListsAndReadsAliases(t *testing.T) {
 	ctx := t.Context()
 	api := driveTree()
-	auth := vfs.NewSessionAuth()
-	if err := auth.Bind("sess-ws", vfs.Binding{
-		Provider: vfs.ProviderGoogleDrive, Point: "/contracts",
-		Auth: vfs.Credential{Token: "tok"}, Params: map[string]string{vfs.ParamFolderID: "root-a"},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := auth.Bind("sess-ws", vfs.Binding{
-		Provider: vfs.ProviderGoogleDrive, Point: "/notes",
-		Auth: vfs.Credential{Token: "tok"}, Params: map[string]string{vfs.ParamFolderID: "root-b"},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	reg := vfs.NewBackendRegistry()
-	if err := reg.Register(vfs.DriveFactory{ID: "gdrive", Auth: auth, API: api}); err != nil {
-		t.Fatal(err)
-	}
-	ms, err := vfs.NewMountSession("sess-ws", reg)
+	ms, err := vfs.Tree(
+		vfs.At("contracts", builtins.Drive(api)),
+		vfs.At("notes", builtins.Drive(api)),
+	)(ctx, "sess-ws", vfs.Request{Bindings: []vfs.Binding{
+		{Provider: vfs.ProviderGoogleDrive, Params: map[string]string{vfs.ParamName: "contracts", vfs.ParamFolderID: "root-a"}, Auth: vfs.Credential{Token: "tok"}},
+		{Provider: vfs.ProviderGoogleDrive, Params: map[string]string{vfs.ParamName: "notes", vfs.ParamFolderID: "root-b"}, Auth: vfs.Credential{Token: "tok"}},
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	members := []vfs.MountSpec{
-		vfs.BindingMember(vfs.Binding{Provider: "gdrive", Point: "/contracts", Params: map[string]string{vfs.ParamFolderID: "root-a"}}),
-		vfs.BindingMember(vfs.Binding{Provider: "gdrive", Point: "/notes", Params: map[string]string{vfs.ParamFolderID: "root-b"}}),
-	}
-	if err := ms.Mount(ctx, vfs.Workspace(members...)); err != nil {
-		t.Fatal(err)
-	}
+	t.Cleanup(func() { _ = ms.Close() })
 
 	ents, err := ms.ReadDir(ctx, vfs.WorkspacePoint)
 	if err != nil || len(ents) != 2 || ents[0].Name != "contracts" || ents[1].Name != "notes" || !ents[0].IsDir {
@@ -61,34 +45,10 @@ func TestWorkspace_namedUnionListsAndReadsAliases(t *testing.T) {
 }
 
 func TestWorkspace_duplicateAliasIsAmbiguous(t *testing.T) {
-	ctx := t.Context()
 	a, b := t.TempDir(), t.TempDir()
-	reg := vfs.NewBackendRegistry()
-	if err := reg.Register(vfs.LocalFactory{ID: "a", Base: a}); err != nil {
-		t.Fatal(err)
-	}
-	if err := reg.Register(vfs.LocalFactory{ID: "b", Base: b}); err != nil {
-		t.Fatal(err)
-	}
-	ms, err := vfs.NewMountSession(t.Name(), reg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = ms.Close() })
-	dup := vfs.MountSpec{Profile: "a", Params: map[string]string{vfs.ParamName: "legal"}}
-	other := vfs.MountSpec{Profile: "b", Params: map[string]string{vfs.ParamName: "legal"}}
-	if err := ms.Mount(ctx, vfs.Workspace(dup, other)); !errors.Is(err, vfs.ErrAmbiguous) {
+	_, err := vfs.Tree(vfs.At("legal", builtins.Local(a)), vfs.At("legal", builtins.Local(b)))(t.Context(), t.Name(), vfs.Request{})
+	if !errors.Is(err, vfs.ErrAmbiguous) {
 		t.Fatalf("dup alias = %v", err)
-	}
-	nested := vfs.MountSpec{Profile: "a", Params: map[string]string{vfs.ParamName: "x"}, Members: []vfs.MountSpec{{Profile: "b"}}}
-	if err := ms.Mount(ctx, vfs.Workspace(nested)); err == nil {
-		t.Fatal("nested workspace members")
-	}
-	if err := ms.Mount(ctx, vfs.Workspace(vfs.MountSpec{Params: map[string]string{vfs.ParamName: "z"}})); err == nil {
-		t.Fatal("member profile required")
-	}
-	if err := ms.Mount(ctx, vfs.Workspace(vfs.MountSpec{Profile: "a"})); err == nil {
-		t.Fatal("member name required")
 	}
 }
 
@@ -98,21 +58,14 @@ func TestWorkspace_writableMemberAndReadOnlyMember(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(host, "a.txt"), []byte("one"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	reg := vfs.NewBackendRegistry()
-	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: host}); err != nil {
-		t.Fatal(err)
-	}
-	ms, err := vfs.NewMountSession(t.Name(), reg)
+	ms, err := vfs.Tree(
+		vfs.At("legal", builtins.Local(host)),
+		vfs.At("ro", builtins.Local(host)).ReadOnly(),
+	)(ctx, t.Name(), vfs.Request{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ms.Close() })
-	if err := ms.Mount(ctx, vfs.Workspace(
-		vfs.MountSpec{Profile: "scratch", Params: map[string]string{vfs.ParamName: "legal"}},
-		vfs.MountSpec{Profile: "scratch", ReadOnly: true, Params: map[string]string{vfs.ParamName: "ro"}},
-	)); err != nil {
-		t.Fatal(err)
-	}
 	if err := ms.WriteFile(ctx, "/workspace/legal/b.txt", []byte("two")); err != nil {
 		t.Fatal(err)
 	}

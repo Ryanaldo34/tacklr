@@ -19,8 +19,8 @@ func TestPut_roundTripAndSoftDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ns := uuid.New()
-	scope := brain.Scope{Namespace: &ns}
+	ns := mustNS(t, "id", uuid.NewString())
+	scope := brain.Scope{Namespace: ns}
 
 	got, err := eng.Put(ctx, scope, brain.Object{
 		Kind: "Note", Title: "hello", Content: "body",
@@ -29,7 +29,7 @@ func TestPut_roundTripAndSoftDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.ID == uuid.Nil || got.NamespaceID != ns || len(got.Embedding) != 0 {
+	if got.ID == uuid.Nil || !got.Namespace.Equal(ns) || len(got.Embedding) != 0 {
 		t.Fatalf("put: %+v", got)
 	}
 	rich, err := eng.Read(ctx, scope, got.ID)
@@ -61,8 +61,8 @@ func TestPut_catalogEnforced(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ns := uuid.New()
-	scope := brain.Scope{Namespace: &ns}
+	ns := mustNS(t, "id", uuid.NewString())
+	scope := brain.Scope{Namespace: ns}
 	pid := uuid.New()
 
 	cases := []struct {
@@ -117,8 +117,8 @@ func TestPut_embedsAndSearchable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ns := uuid.New()
-	scope := brain.Scope{Namespace: &ns}
+	ns := mustNS(t, "id", uuid.NewString())
+	scope := brain.Scope{Namespace: ns}
 	parent, err := eng.Put(ctx, scope, brain.Object{Kind: "Document", Title: "Doc"})
 	if err != nil {
 		t.Fatal(err)
@@ -150,8 +150,8 @@ func TestPut_embedderError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ns := uuid.New()
-	_, err = eng.Put(ctx, brain.Scope{Namespace: &ns}, brain.Object{
+	ns := mustNS(t, "id", uuid.NewString())
+	_, err = eng.Put(ctx, brain.Scope{Namespace: ns}, brain.Object{
 		Kind: "Note", Title: "x", Content: "body",
 	})
 	if err == nil || !strings.Contains(err.Error(), "embed") {
@@ -206,8 +206,8 @@ func TestPut_partEmbedIncludesParentTitle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ns := uuid.New()
-	scope := brain.Scope{Namespace: &ns}
+	ns := mustNS(t, "id", uuid.NewString())
+	scope := brain.Scope{Namespace: ns}
 	parent, err := eng.Put(ctx, scope, brain.Object{Kind: "Document", Title: "Acme Deal Memo"})
 	if err != nil {
 		t.Fatal(err)
@@ -245,9 +245,9 @@ func TestPut_multiTurnMemoryGraph(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ns := uuid.New()
-	other := uuid.New()
-	scope := brain.Scope{Namespace: &ns}
+	ns := mustNS(t, "id", uuid.NewString())
+	other := mustNS(t, "org", "other")
+	scope := brain.Scope{Namespace: ns}
 	sc := brain.NewSearchContext()
 
 	a, err := eng.Put(ctx, scope, brain.Object{Kind: "Document", Title: "A", Content: "alpha"})
@@ -314,7 +314,7 @@ func TestPut_multiTurnMemoryGraph(t *testing.T) {
 		t.Fatalf("put soft-deleted: %v", err)
 	}
 	// SoftDelete wrong namespace / missing id.
-	if err := eng.SoftDelete(ctx, brain.Scope{Namespace: &other}, a.ID); !errors.Is(err, brain.ErrNotFound) {
+	if err := eng.SoftDelete(ctx, brain.Scope{Namespace: other}, a.ID); !errors.Is(err, brain.ErrNotFound) {
 		t.Fatalf("wrong ns: %v", err)
 	}
 	if err := eng.SoftDelete(ctx, scope, uuid.New()); !errors.Is(err, brain.ErrNotFound) {
@@ -341,8 +341,8 @@ func TestLink_expandFindsNeighbor(t *testing.T) {
 	if !eng.HasGraphWriter() {
 		t.Fatal("WithGraph(MemoryGraph) must report HasGraphWriter")
 	}
-	ns := uuid.New()
-	scope := brain.Scope{Namespace: &ns}
+	ns := mustNS(t, "id", uuid.NewString())
+	scope := brain.Scope{Namespace: ns}
 
 	a, err := eng.Put(ctx, scope, brain.Object{Kind: "Document", Title: "A"})
 	if err != nil {
@@ -411,8 +411,8 @@ func TestLinkWith_missingEndpointAndCancelled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ns := uuid.New()
-	scope := brain.Scope{Namespace: &ns}
+	ns := mustNS(t, "id", uuid.NewString())
+	scope := brain.Scope{Namespace: ns}
 	a, err := eng.Put(ctx, scope, brain.Object{Kind: "Document", Title: "A"})
 	if err != nil {
 		t.Fatal(err)
@@ -447,8 +447,8 @@ func TestSoftDelete_graphRemoveErrorSurfaces(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ns := uuid.New()
-	scope := brain.Scope{Namespace: &ns}
+	ns := mustNS(t, "id", uuid.NewString())
+	scope := brain.Scope{Namespace: ns}
 	obj, err := eng.Put(ctx, scope, brain.Object{Kind: "Document", Title: "doomed"})
 	if err != nil {
 		t.Fatal(err)
@@ -479,8 +479,8 @@ func TestLinkWith_expandAttachesMeta(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ns := uuid.New()
-	scope := brain.Scope{Namespace: &ns}
+	ns := mustNS(t, "id", uuid.NewString())
+	scope := brain.Scope{Namespace: ns}
 	sc := brain.NewSearchContext()
 
 	email, err := eng.Put(ctx, scope, brain.Object{Kind: "Email", Title: "RE: pricing"})
@@ -564,8 +564,8 @@ func TestLink_crossObjectEmailDealBuyer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ns := uuid.New()
-	scope := brain.Scope{Namespace: &ns}
+	ns := mustNS(t, "id", uuid.NewString())
+	scope := brain.Scope{Namespace: ns}
 	sc := brain.NewSearchContext()
 
 	email, err := eng.Put(ctx, scope, brain.Object{

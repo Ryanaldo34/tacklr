@@ -27,58 +27,62 @@ func CloseTurnVFS(ms *vfs.MountSession, sessionID, reason string) {
 	}
 	if dir != "" {
 		if err := os.Remove(dir); err != nil {
-			slog.Warn("turn vfs host dir remove failed", "session_id", sessionID, "dir", dir, "error", err)
+			slog.Warn("turn vfs host dir remove failed", "session_id", sessionID, "dir", dir, "reason", reason, "error", err)
 		}
 	}
 }
 
-func workspaceMembers(binds []vfs.Binding) []vfs.MountSpec {
-	members := make([]vfs.MountSpec, 0, len(binds))
-	for _, b := range binds {
-		members = append(members, vfs.BindingMember(b))
-	}
-	return members
+// CloseTurnTrees closes the agent workspace tree and the host-only skills tree.
+func CloseTurnTrees(workspace, skills *vfs.MountSession, sessionID, reason string) {
+	CloseTurnVFS(workspace, sessionID, reason)
+	CloseTurnVFS(skills, sessionID, reason+"-skills")
 }
 
-// OpenTurnVFS builds the turn-scoped MountSession from catalog bootstrap plus
-// this work item's bindings. Nil when the agent has no VFS or the projection
-// is unavailable. Tokens on bindings are applied to factories for this turn.
+// OpenSkillsVFS builds the host-only skills MountSession from AgentSpec.OpenSkills.
+// It does not attach a FUSE projection. The agent never receives this session.
+func OpenSkillsVFS(ctx context.Context, threadID string, spec AgentSpec) (*vfs.MountSession, error) {
+	if spec.OpenSkills == nil {
+		return nil, nil
+	}
+	return spec.OpenSkills(ctx, threadID, vfs.Request{})
+}
+
+// OpenTurnSessions opens the agent workspace and the host-only skills tree.
+// On OpenSkills failure the workspace session is closed.
+func OpenTurnSessions(ctx context.Context, threadID string, spec AgentSpec, bindings []vfs.Binding, proj vfs.Projection) (workspace, skills *vfs.MountSession, err error) {
+	workspace, err = OpenTurnVFS(ctx, threadID, spec, bindings, proj)
+	if err != nil {
+		return nil, nil, err
+	}
+	skills, err = OpenSkillsVFS(ctx, threadID, spec)
+	if err != nil {
+		CloseTurnVFS(workspace, threadID, "skills_open")
+		return nil, nil, err
+	}
+	return workspace, skills, nil
+}
+
+// OpenTurnVFS builds the turn-scoped MountSession from AgentSpec.OpenVFS.
+// Nil when OpenVFS is nil or the projection is unavailable.
 func OpenTurnVFS(ctx context.Context, threadID string, spec AgentSpec, bindings []vfs.Binding, proj vfs.Projection) (*vfs.MountSession, error) {
-	hasBindings := len(bindings) > 0
-	if spec.FSRegistry == nil || (len(spec.FSBootstrap) == 0 && !hasBindings) {
+	if spec.OpenVFS == nil {
 		return nil, nil
 	}
 	if proj == nil || !proj.Available() {
 		telemetry.InstrumentsFromContext(ctx).RecordFuseMount(ctx, telemetry.FuseMountOutcomeUnavailable)
 		return nil, nil
 	}
-	if hasBindings {
-		if err := spec.FSRegistry.BindSession(threadID, bindings); err != nil {
-			return nil, err
-		}
-	}
-	ms, err := vfs.NewMountSession(threadID, spec.FSRegistry)
+	ms, err := spec.OpenVFS(ctx, threadID, vfs.Request{Bindings: bindings})
 	if err != nil {
 		return nil, err
 	}
-	if err := ms.Materialize(ctx, spec.FSBootstrap); err != nil {
-		CloseTurnVFS(ms, threadID, "materialize")
-		return nil, err
-	}
-	if hasBindings {
-		if err := ms.Mount(ctx, vfs.Workspace(workspaceMembers(bindings)...)); err != nil {
-			CloseTurnVFS(ms, threadID, "workspace")
-			return nil, err
-		}
-		if err := ms.AttachSkills(ctx); err != nil {
-			CloseTurnVFS(ms, threadID, "attach_skills")
-			return nil, err
-		}
+	if ms == nil {
+		return nil, nil
 	}
 	for _, mount := range ms.Specs() {
 		name := strings.TrimPrefix(mount.Point, "/")
 		if name == "" || strings.Contains(name, "/") {
-			err := fmt.Errorf("vfs: fuse requires single-segment mount points (got %q); use /work and /engram", mount.Point)
+			err := fmt.Errorf("vfs: fuse requires a single-segment mount (got %q); Tree uses /workspace", mount.Point)
 			CloseTurnVFS(ms, threadID, "fuse_point")
 			return nil, err
 		}
@@ -97,16 +101,5 @@ func OpenTurnVFS(ctx context.Context, threadID string, spec AgentSpec, bindings 
 	return ms, nil
 }
 
-// ClearSessionVFS drops turn-local tokens from catalog factories.
-func ClearSessionVFS(cat Catalog, sessionID SessionID) {
-	if cat == nil || sessionID == "" {
-		return
-	}
-	for _, id := range cat.IDs() {
-		spec, ok := cat.Lookup(id)
-		if !ok || spec.FSRegistry == nil {
-			continue
-		}
-		spec.FSRegistry.ClearSession(string(sessionID))
-	}
-}
+// ClearSessionVFS is a no-op: user tokens live on the work item, not the catalog.
+func ClearSessionVFS(Catalog, SessionID) {}

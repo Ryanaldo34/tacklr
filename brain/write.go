@@ -159,8 +159,8 @@ func preparePut(scope Scope, obj Object, now time.Time) Object {
 	if obj.ID == uuid.Nil {
 		obj.ID = uuid.New()
 	}
-	if obj.NamespaceID == uuid.Nil && scope.Namespace != nil {
-		obj.NamespaceID = *scope.Namespace
+	if obj.Namespace.Empty() && !scope.Namespace.Empty() {
+		obj.Namespace = scope.Namespace.Clone()
 	}
 	if obj.Properties == nil {
 		obj.Properties = map[string]any{}
@@ -292,8 +292,8 @@ func ValidateObject(obj Object, cat *KindCatalog) error {
 	if kind == "" {
 		return fmt.Errorf("brain: object kind is required")
 	}
-	if obj.NamespaceID == uuid.Nil {
-		return fmt.Errorf("brain: object namespace_id is required")
+	if err := obj.Namespace.Validate(); err != nil {
+		return err
 	}
 	if obj.ParentID != nil && *obj.ParentID == uuid.Nil {
 		return fmt.Errorf("brain: parent_id must not be the nil UUID")
@@ -367,8 +367,8 @@ func requireObjectIdentity(obj Object) error {
 	if strings.TrimSpace(obj.Kind) == "" {
 		return fmt.Errorf("%w: object kind is required", ErrInvalid)
 	}
-	if obj.NamespaceID == uuid.Nil {
-		return fmt.Errorf("%w: object namespace_id is required", ErrInvalid)
+	if err := obj.Namespace.Validate(); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalid, err)
 	}
 	return nil
 }

@@ -10,7 +10,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
@@ -141,7 +140,7 @@ func (t *defaultModelTasks) Handoff(ctx context.Context, plan []Todo, planDoc st
 	defer t.mu.Unlock()
 	open := 0
 	for i := range plan {
-		if plan[i].Status != streaming.TodoStatusCompleted {
+		if plan[i].Status != TodoStatusCompleted {
 			open++
 		}
 	}

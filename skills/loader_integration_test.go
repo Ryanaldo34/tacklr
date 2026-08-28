@@ -39,20 +39,13 @@ func TestLoader_s3Mount(t *testing.T) {
 	put("pack/zeta/SKILL.md", "---\nname: zeta\ndescription: Z\n---\n\nZ body")
 	put("pack/alpha/readme", "ignored")
 
-	reg := vfs.NewBackendRegistry()
-	if err := reg.Register(vfs.S3Factory{
-		ID:            "s3",
-		Client:        vfs.AWSS3{Client: client},
-		DefaultBucket: bucket,
-		Skills:        "pack",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	ms, err := vfs.NewMountSession("skills-s3", reg)
+	s3 := vfs.S3(vfs.AWSS3{Client: client}, bucket)
+	ms, err := vfs.Tree(vfs.At("skills", s3))(ctx, "skills-s3", vfs.Request{
+		Bindings: []vfs.Binding{{
+			Params: map[string]string{vfs.ParamName: "skills", "prefix": "pack"},
+		}},
+	})
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := ms.AttachSkills(ctx); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ms.Close() })
@@ -64,7 +57,7 @@ func TestLoader_s3Mount(t *testing.T) {
 	if len(loaded) != 2 || loaded[0].Name != "alpha" || loaded[1].Name != "zeta" {
 		t.Fatalf("loaded = %#v", loaded)
 	}
-	if loaded[0].Path != "/skills/alpha/SKILL.md" || loaded[1].Instructions != "Z body" {
+	if loaded[0].Path != "/workspace/skills/alpha/SKILL.md" || loaded[1].Instructions != "Z body" {
 		t.Fatalf("loaded = %#v", loaded)
 	}
 }

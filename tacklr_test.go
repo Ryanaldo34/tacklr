@@ -6,7 +6,6 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
@@ -32,7 +31,7 @@ func (m *mockStrategy) SupportsMIME(mimeType string) bool {
 		return m.supportsMIMEFn(mimeType)
 	}
 	// Tests default to text-only models.
-	return streaming.IsTextMIME(mimeType)
+	return IsTextMIME(mimeType)
 }
 func (m *mockStrategy) MaxContextWindow() (int, error) {
 	return 8192, nil

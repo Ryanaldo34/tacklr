@@ -11,12 +11,12 @@ import (
 	"github.com/ryanaldo34/tacklr/brain"
 )
 
-func seedDocWithParts(t *testing.T, store *brain.MemoryStore, ns uuid.UUID, title string, partBodies []string, updated time.Time) (parentID uuid.UUID) {
+func seedDocWithParts(t *testing.T, store *brain.MemoryStore, ns brain.Namespace, title string, partBodies []string, updated time.Time) (parentID uuid.UUID) {
 	t.Helper()
 	parentID = uuid.New()
 	if err := store.Put(context.Background(), brain.Object{
 		ID: parentID, Kind: "Document", Title: title, Summary: title,
-		NamespaceID: ns, UpdatedAt: updated, CreatedAt: updated,
+		Namespace: ns, UpdatedAt: updated, CreatedAt: updated,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -26,7 +26,7 @@ func seedDocWithParts(t *testing.T, store *brain.MemoryStore, ns uuid.UUID, titl
 		if err := store.Put(context.Background(), brain.Object{
 			ID: pid, Kind: "Chunk", Title: title + " part", Content: body,
 			ParentID: &parentID, Position: &pos,
-			NamespaceID: ns, UpdatedAt: updated, CreatedAt: updated,
+			Namespace: ns, UpdatedAt: updated, CreatedAt: updated,
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -41,7 +41,7 @@ func fixedNow(t time.Time) brain.EngineConfig {
 func TestSearch_promotesParentWithEvidenceAndNamespace(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	nsA, nsB := uuid.New(), uuid.New()
+	nsA, nsB := mustNS(t, "org", "a"), mustNS(t, "org", "b")
 	now := time.Now().UTC()
 	parent := seedDocWithParts(t, store, nsA, "OAuth guide", []string{
 		"Implement OAuth PKCE for mobile clients with authorization code flow",
@@ -54,7 +54,7 @@ func TestSearch_promotesParentWithEvidenceAndNamespace(t *testing.T) {
 	}
 	sc := brain.NewSearchContext()
 
-	page, err := eng.Search(ctx, brain.Scope{Namespace: &nsA}, brain.SearchRequest{
+	page, err := eng.Search(ctx, brain.Scope{Namespace: nsA}, brain.SearchRequest{
 		Query: "oauth pkce implementation",
 	}, sc)
 	if err != nil {
@@ -73,7 +73,7 @@ func TestSearch_promotesParentWithEvidenceAndNamespace(t *testing.T) {
 		t.Fatal("result_set_id required")
 	}
 
-	empty, err := eng.Search(ctx, brain.Scope{Namespace: &nsB}, brain.SearchRequest{
+	empty, err := eng.Search(ctx, brain.Scope{Namespace: nsB}, brain.SearchRequest{
 		Query: "oauth pkce implementation",
 	}, sc)
 	if err != nil {
@@ -82,7 +82,7 @@ func TestSearch_promotesParentWithEvidenceAndNamespace(t *testing.T) {
 	// nsB has its own hit; ensure nsA parent not returned under wrong scope was already covered.
 	// Re-search nsA isolation: object only in nsA must not appear when scoped to empty other.
 	_ = empty
-	wrong, err := eng.Search(ctx, brain.Scope{Namespace: &nsB}, brain.SearchRequest{
+	wrong, err := eng.Search(ctx, brain.Scope{Namespace: nsB}, brain.SearchRequest{
 		Query: "authorization code flow mobile",
 	}, brain.NewSearchContext())
 	if err != nil {
@@ -94,7 +94,7 @@ func TestSearch_promotesParentWithEvidenceAndNamespace(t *testing.T) {
 		}
 	}
 
-	miss, err := eng.Search(ctx, brain.Scope{Namespace: &nsA}, brain.SearchRequest{
+	miss, err := eng.Search(ctx, brain.Scope{Namespace: nsA}, brain.SearchRequest{
 		Query: "quantum-chromodynamics-unrelated",
 	}, brain.NewSearchContext())
 	if err != nil {
@@ -108,7 +108,7 @@ func TestSearch_promotesParentWithEvidenceAndNamespace(t *testing.T) {
 func TestSearch_filtersProperty(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	ns := uuid.New()
+	ns := mustNS(t, "id", uuid.NewString())
 	now := time.Now().UTC()
 	seedDocWithParts(t, store, ns, "Deal A", []string{"pipeline revenue forecast"}, now)
 
@@ -116,13 +116,13 @@ func TestSearch_filtersProperty(t *testing.T) {
 	part := uuid.New()
 	pos := 1
 	if err := store.Put(context.Background(), brain.Object{
-		ID: p2, Kind: "Document", Title: "Deal B", NamespaceID: ns, UpdatedAt: now,
+		ID: p2, Kind: "Document", Title: "Deal B", Namespace: ns, UpdatedAt: now,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Put(context.Background(), brain.Object{
 		ID: part, Kind: "Chunk", Title: "chunk", Content: "pipeline revenue forecast",
-		ParentID: &p2, Position: &pos, NamespaceID: ns, UpdatedAt: now,
+		ParentID: &p2, Position: &pos, Namespace: ns, UpdatedAt: now,
 		Properties: map[string]any{"stage": "negotiation"},
 	}); err != nil {
 		t.Fatal(err)
@@ -132,9 +132,9 @@ func TestSearch_filtersProperty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	page, err := eng.Search(ctx, brain.Scope{Namespace: &ns}, brain.SearchRequest{
+	page, err := eng.Search(ctx, brain.Scope{Namespace: ns}, brain.SearchRequest{
 		Query:   "pipeline revenue",
-		Filters: brain.MustFilter(map[string]any{"stage": "negotiation"}),
+		Filters: mustFilter(t, map[string]any{"stage": "negotiation"}),
 	}, brain.NewSearchContext())
 	if err != nil {
 		t.Fatal(err)
@@ -147,23 +147,23 @@ func TestSearch_filtersProperty(t *testing.T) {
 func TestSearch_hybridWithStubEmbedder(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	ns := uuid.New()
+	ns := mustNS(t, "id", uuid.NewString())
 	now := time.Now().UTC()
 
 	lexParent, vecParent := uuid.New(), uuid.New()
 	lexPart, vecPart := uuid.New(), uuid.New()
 	pos := 1
 	for _, o := range []brain.Object{
-		{ID: lexParent, Kind: "Document", Title: "Lexical", NamespaceID: ns, UpdatedAt: now},
-		{ID: vecParent, Kind: "Document", Title: "Vector", NamespaceID: ns, UpdatedAt: now},
+		{ID: lexParent, Kind: "Document", Title: "Lexical", Namespace: ns, UpdatedAt: now},
+		{ID: vecParent, Kind: "Document", Title: "Vector", Namespace: ns, UpdatedAt: now},
 		{
 			ID: lexPart, Kind: "Chunk", Content: "banana banana banana unique-token-xyz",
-			ParentID: &lexParent, Position: &pos, NamespaceID: ns, UpdatedAt: now,
+			ParentID: &lexParent, Position: &pos, Namespace: ns, UpdatedAt: now,
 			Embedding: []float32{0, 1},
 		},
 		{
 			ID: vecPart, Kind: "Chunk", Content: "unrelated body text",
-			ParentID: &vecParent, Position: &pos, NamespaceID: ns, UpdatedAt: now,
+			ParentID: &vecParent, Position: &pos, Namespace: ns, UpdatedAt: now,
 			Embedding: []float32{1, 0},
 		},
 	} {
@@ -179,7 +179,7 @@ func TestSearch_hybridWithStubEmbedder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	page, err := eng.Search(ctx, brain.Scope{Namespace: &ns}, brain.SearchRequest{
+	page, err := eng.Search(ctx, brain.Scope{Namespace: ns}, brain.SearchRequest{
 		Query: "unique-token-xyz",
 	}, brain.NewSearchContext())
 	if err != nil {
@@ -204,26 +204,26 @@ func (s stubEmbedder) Embed(context.Context, string) ([]float32, error) { return
 func TestSearch_scopeIDsRestrictsHits(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	ns := uuid.New()
+	ns := mustNS(t, "id", uuid.NewString())
 	now := time.Now().UTC()
 	p1, p2 := uuid.New(), uuid.New()
 	c1, c2 := uuid.New(), uuid.New()
 	pos := 1
-	_ = store.Put(ctx, brain.Object{ID: p1, Kind: "Document", Title: "Deal A", NamespaceID: ns, UpdatedAt: now})
-	_ = store.Put(ctx, brain.Object{ID: p2, Kind: "Document", Title: "Deal B", NamespaceID: ns, UpdatedAt: now})
+	_ = store.Put(ctx, brain.Object{ID: p1, Kind: "Document", Title: "Deal A", Namespace: ns, UpdatedAt: now})
+	_ = store.Put(ctx, brain.Object{ID: p2, Kind: "Document", Title: "Deal B", Namespace: ns, UpdatedAt: now})
 	_ = store.Put(ctx, brain.Object{
 		ID: c1, Kind: "Chunk", Title: "oauth risk", Content: "oauth risk material shared",
-		ParentID: &p1, Position: &pos, NamespaceID: ns, UpdatedAt: now,
+		ParentID: &p1, Position: &pos, Namespace: ns, UpdatedAt: now,
 	})
 	_ = store.Put(ctx, brain.Object{
 		ID: c2, Kind: "Chunk", Title: "oauth other", Content: "oauth risk material shared",
-		ParentID: &p2, Position: &pos, NamespaceID: ns, UpdatedAt: now,
+		ParentID: &p2, Position: &pos, Namespace: ns, UpdatedAt: now,
 	})
 	eng, err := brain.NewEngine(store, brain.WithConfig(brain.EngineConfig{Now: func() time.Time { return now }}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	scope := brain.Scope{Namespace: &ns}
+	scope := brain.Scope{Namespace: ns}
 	sc := brain.NewSearchContext()
 	page, err := eng.Search(ctx, scope, brain.SearchRequest{
 		Query: "oauth risk material", ScopeIDs: []uuid.UUID{p1},
@@ -239,19 +239,19 @@ func TestSearch_scopeIDsRestrictsHits(t *testing.T) {
 func TestFindExact_uuidParentAndPart(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	ns := uuid.New()
+	ns := mustNS(t, "id", uuid.NewString())
 	now := time.Now().UTC()
 	parent := uuid.New()
 	part := uuid.New()
 	pos := 1
 	if err := store.Put(context.Background(), brain.Object{
-		ID: parent, Kind: "Document", Title: "Direct", NamespaceID: ns, UpdatedAt: now,
+		ID: parent, Kind: "Document", Title: "Direct", Namespace: ns, UpdatedAt: now,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Put(context.Background(), brain.Object{
 		ID: part, Kind: "Chunk", Title: "child", Content: "body",
-		ParentID: &parent, Position: &pos, NamespaceID: ns, UpdatedAt: now,
+		ParentID: &parent, Position: &pos, Namespace: ns, UpdatedAt: now,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -261,7 +261,7 @@ func TestFindExact_uuidParentAndPart(t *testing.T) {
 	}
 	sc := brain.NewSearchContext()
 
-	page, err := eng.FindExact(ctx, brain.Scope{Namespace: &ns}, brain.SearchRequest{
+	page, err := eng.FindExact(ctx, brain.Scope{Namespace: ns}, brain.SearchRequest{
 		Query: parent.String(),
 	}, sc)
 	if err != nil {
@@ -271,7 +271,7 @@ func TestFindExact_uuidParentAndPart(t *testing.T) {
 		t.Fatalf("parent uuid: %+v", page.Objects)
 	}
 
-	page2, err := eng.FindExact(ctx, brain.Scope{Namespace: &ns}, brain.SearchRequest{
+	page2, err := eng.FindExact(ctx, brain.Scope{Namespace: ns}, brain.SearchRequest{
 		Query: part.String(),
 	}, brain.NewSearchContext())
 	if err != nil {
@@ -288,19 +288,19 @@ func TestFindExact_uuidParentAndPart(t *testing.T) {
 func TestFindExact_titleMatch(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	ns := uuid.New()
+	ns := mustNS(t, "id", uuid.NewString())
 	now := time.Now().UTC()
 	parent := uuid.New()
 	part := uuid.New()
 	pos := 1
 	if err := store.Put(context.Background(), brain.Object{
-		ID: parent, Kind: "Document", Title: "Parent", NamespaceID: ns, UpdatedAt: now,
+		ID: parent, Kind: "Document", Title: "Parent", Namespace: ns, UpdatedAt: now,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Put(context.Background(), brain.Object{
 		ID: part, Kind: "Chunk", Title: "exact-filename.go", Content: "package main",
-		ParentID: &parent, Position: &pos, NamespaceID: ns, UpdatedAt: now,
+		ParentID: &parent, Position: &pos, Namespace: ns, UpdatedAt: now,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -308,7 +308,7 @@ func TestFindExact_titleMatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	page, err := eng.FindExact(ctx, brain.Scope{Namespace: &ns}, brain.SearchRequest{
+	page, err := eng.FindExact(ctx, brain.Scope{Namespace: ns}, brain.SearchRequest{
 		Query: "exact-filename.go",
 	}, brain.NewSearchContext())
 	if err != nil {
@@ -322,7 +322,7 @@ func TestFindExact_titleMatch(t *testing.T) {
 func TestContinue_andReplaceResultSet(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	ns := uuid.New()
+	ns := mustNS(t, "id", uuid.NewString())
 	now := time.Now().UTC()
 	for i := 0; i < 5; i++ {
 		seedDocWithParts(t, store, ns, "Topic shared", []string{
@@ -337,7 +337,7 @@ func TestContinue_andReplaceResultSet(t *testing.T) {
 		t.Fatal(err)
 	}
 	sc := brain.NewSearchContext()
-	page1, err := eng.Search(ctx, brain.Scope{Namespace: &ns}, brain.SearchRequest{
+	page1, err := eng.Search(ctx, brain.Scope{Namespace: ns}, brain.SearchRequest{
 		Query: "shared retrieval content", Limit: 2,
 	}, sc)
 	if err != nil {
@@ -348,7 +348,7 @@ func TestContinue_andReplaceResultSet(t *testing.T) {
 	}
 	oldID := page1.ResultSetID
 
-	page2, err := eng.Continue(ctx, brain.Scope{Namespace: &ns}, oldID, 2, sc)
+	page2, err := eng.Continue(ctx, brain.Scope{Namespace: ns}, oldID, 2, sc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -374,7 +374,7 @@ func TestContinue_andReplaceResultSet(t *testing.T) {
 	if err := sc2.Restore(raw); err != nil {
 		t.Fatal(err)
 	}
-	page3, err := eng.Continue(ctx, brain.Scope{Namespace: &ns}, oldID, 2, sc2)
+	page3, err := eng.Continue(ctx, brain.Scope{Namespace: ns}, oldID, 2, sc2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -383,12 +383,12 @@ func TestContinue_andReplaceResultSet(t *testing.T) {
 	}
 
 	// New search invalidates prior result set.
-	if _, err := eng.Search(ctx, brain.Scope{Namespace: &ns}, brain.SearchRequest{
+	if _, err := eng.Search(ctx, brain.Scope{Namespace: ns}, brain.SearchRequest{
 		Query: "shared retrieval content",
 	}, sc); err != nil {
 		t.Fatal(err)
 	}
-	_, err = eng.Continue(ctx, brain.Scope{Namespace: &ns}, oldID, 2, sc)
+	_, err = eng.Continue(ctx, brain.Scope{Namespace: ns}, oldID, 2, sc)
 	if !errors.Is(err, brain.ErrNotFound) {
 		t.Fatalf("want not found after replace, got %v", err)
 	}
@@ -423,13 +423,13 @@ func TestSearch_rejectsBadFiltersAndEmptyQuery(t *testing.T) {
 func TestFindExact_trigramFuzzy(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	ns := uuid.New()
+	ns := mustNS(t, "id", uuid.NewString())
 	now := time.Now().UTC()
 	parent := uuid.New()
 	part := uuid.New()
 	pos := 1
 	if err := store.Put(context.Background(), brain.Object{
-		ID: parent, Kind: "Document", Title: "P", NamespaceID: ns, UpdatedAt: now,
+		ID: parent, Kind: "Document", Title: "P", Namespace: ns, UpdatedAt: now,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -437,7 +437,7 @@ func TestFindExact_trigramFuzzy(t *testing.T) {
 	if err := store.Put(context.Background(), brain.Object{
 		ID: part, Kind: "Chunk", Title: "chunk-title",
 		Content:  "abcdefghijklmnopqrstuvwxyz",
-		ParentID: &parent, Position: &pos, NamespaceID: ns, UpdatedAt: now,
+		ParentID: &parent, Position: &pos, Namespace: ns, UpdatedAt: now,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -445,7 +445,7 @@ func TestFindExact_trigramFuzzy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	page, err := eng.FindExact(ctx, brain.Scope{Namespace: &ns}, brain.SearchRequest{
+	page, err := eng.FindExact(ctx, brain.Scope{Namespace: ns}, brain.SearchRequest{
 		Query: "xyzabc", // shares xyz/abc trigrams; not a contiguous substring of content
 	}, brain.NewSearchContext())
 	if err != nil {

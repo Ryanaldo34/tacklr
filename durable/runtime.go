@@ -3,7 +3,7 @@ package durable
 import (
 	"context"
 
-	"github.com/ryanaldo34/tacklr/streaming"
+	"github.com/ryanaldo34/tacklr"
 )
 
 // Runtime is the only session kernel API. Protocol handlers and hosts call it.
@@ -18,7 +18,7 @@ import (
 //   - query: status, children
 //   - append to EventLog (the adapter wakes the loop)
 //
-// Leftover-tool and HITL rules live in internal/drive.Next. Do not fork them.
+// Leftover-tool and HITL rules live in tacklr.Next. Do not fork them.
 //
 // Prompt and Resume signal the session; they do not return a harness.
 // Subscribe yields StreamEvent values (message, tool, yield, error, complete).
@@ -48,6 +48,6 @@ type Runtime interface {
 
 // Subscription is one consumer of a session EventLog.
 type Subscription interface {
-	Events() <-chan streaming.StreamEvent
+	Events() <-chan tacklr.StreamEvent
 	Close() error
 }

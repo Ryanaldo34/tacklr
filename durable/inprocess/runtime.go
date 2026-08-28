@@ -12,7 +12,6 @@ import (
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/mcp"
-	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/telemetry"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
@@ -39,7 +38,7 @@ type sessionProc struct {
 	specialist string
 	parent     durable.SessionID
 	mcp        []mcp.MCPConfig
-	etag       string
+	revision   durable.Revision
 	mounts     []durable.MountRecipe
 	auth       durable.AuthContext
 	children   []durable.SessionID
@@ -58,6 +57,8 @@ type sessionProc struct {
 	// childParks maps a parent tool call id (get_child / blocking spawn) to the
 	// child session that should receive the next Resume payload.
 	childParks map[string]durable.SessionID
+	// state is CreateSession.State until the first persist writes it into the checkpoint.
+	state map[string]any
 
 	// kids is the parent context for child Prompt. Canceled by stopChildren
 	// (Cancel, Close, client-stopped turn). Not canceled when a turn parks.
@@ -155,6 +156,10 @@ func (r *Runtime) CreateSession(ctx context.Context, req durable.CreateSession) 
 			return "", err
 		}
 	}
+	seed, err := durable.EncodeUserState(req.State)
+	if err != nil {
+		return "", err
+	}
 	id := req.SessionID
 	if id == "" {
 		id = durable.SessionID(uuid.NewString())
@@ -191,6 +196,7 @@ func (r *Runtime) CreateSession(ctx context.Context, req durable.CreateSession) 
 	if parent != nil {
 		p.auth = parent.auth
 	}
+	p.state = seed
 	r.sessions[id] = p
 	if parent != nil {
 		parent.mu.Lock()
@@ -263,11 +269,21 @@ func (r *Runtime) waitPriorTurn(ctx context.Context, p *sessionProc, abort bool)
 
 // Prompt implements durable.Runtime.
 func (r *Runtime) Prompt(ctx context.Context, sessionID durable.SessionID, msg durable.Prompt) error {
+	encoded, err := durable.EncodeUserState(msg.State)
+	if err != nil {
+		return err
+	}
+	msg.State = encoded
 	return r.send(ctx, sessionID, signal{kind: sigPrompt, prompt: msg, turnCtx: ctx})
 }
 
 // Resume implements durable.Runtime.
 func (r *Runtime) Resume(ctx context.Context, sessionID durable.SessionID, resume durable.Resume) error {
+	encoded, err := durable.EncodeUserState(resume.State)
+	if err != nil {
+		return err
+	}
+	resume.State = encoded
 	return r.send(ctx, sessionID, signal{kind: sigResume, resume: resume, turnCtx: ctx})
 }
 
@@ -418,11 +434,11 @@ func (r *Runtime) applyPromptMeta(p *sessionProc, msg durable.Prompt) error {
 }
 
 type subscription struct {
-	ch     <-chan streaming.StreamEvent
+	ch     <-chan tacklr.StreamEvent
 	cancel context.CancelFunc
 }
 
-func (s *subscription) Events() <-chan streaming.StreamEvent { return s.ch }
+func (s *subscription) Events() <-chan tacklr.StreamEvent { return s.ch }
 func (s *subscription) Close() error {
 	if s.cancel != nil {
 		s.cancel()
@@ -474,12 +490,14 @@ func (r *Runtime) loop(p *sessionProc) {
 		var user *tacklr.Message
 		var resume map[string][]byte
 		var auth durable.AuthContext
+		var turnState map[string]any
 		promptLen, resumeCount := 0, 0
 		if sig.kind == sigResume {
 			kind = telemetry.TurnKindResume
 			resume = sig.resume.Responses
 			resumeCount = len(resume)
 			auth = sig.resume.Auth
+			turnState = sig.resume.State
 			r.forwardChildResume(parent, p, sig.resume)
 		} else {
 			if err := r.applyPromptMeta(p, sig.prompt); err != nil {
@@ -490,6 +508,7 @@ func (r *Runtime) loop(p *sessionProc) {
 			}
 			user = promptMessage(sig.prompt)
 			auth = sig.prompt.Auth
+			turnState = sig.prompt.State
 			if user != nil {
 				promptLen = len(user.Content)
 			}
@@ -513,7 +532,10 @@ func (r *Runtime) loop(p *sessionProc) {
 			defer close(done)
 			defer cancel()
 			ctx, end := r.recordTurn(turnCtx, p.agentID, string(p.id), kind, promptLen, resumeCount)
-			outcome := r.runTurn(ctx, p, user, resume, bindings)
+			p.mu.Lock()
+			overlay := durable.MergeUserState(p.state, turnState)
+			p.mu.Unlock()
+			outcome := r.runTurn(ctx, p, user, resume, bindings, overlay)
 			if outcome == turnCancelled {
 				if err := parent.Err(); err != nil {
 					r.stopChildren(context.WithoutCancel(parent), p)

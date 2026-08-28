@@ -16,21 +16,14 @@ func TestFuseMount_hostSeesDirtyText(t *testing.T) {
 		t.Skip("no /dev/fuse or /dev/macfuse*")
 	}
 	ctx := t.Context()
-	reg := NewBackendRegistry()
-	if err := reg.Register(LocalFactory{ID: "scratch", Base: t.TempDir()}); err != nil {
+	ms := mustTree(t, At("work", Local(t.TempDir())))
+	if err := ms.WriteFile(ctx, "/workspace/work/note.md", []byte("old secret\n")); err != nil {
 		t.Fatal(err)
 	}
-	ms := MustNewMountSession(t.Name(), reg)
-	if err := ms.Mount(ctx, MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
+	if err := ms.MkdirAll(ctx, "/workspace/work/subdir"); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.WriteFile(ctx, "/work/note.md", []byte("old secret\n")); err != nil {
-		t.Fatal(err)
-	}
-	if err := ms.MkdirAll(ctx, "/work/subdir"); err != nil {
-		t.Fatal(err)
-	}
-	doc, err := ms.ReadText(ctx, "/work/note.md")
+	doc, err := ms.ReadText(ctx, "/workspace/work/note.md")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +34,7 @@ func TestFuseMount_hostSeesDirtyText(t *testing.T) {
 	if err := ms.WriteDocument(ctx, doc); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.WriteFile(ctx, "/work/pic.bin", []byte{0x89, 'P', 'N', 'G', 1, 2, 3, 4}); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/work/pic.bin", []byte{0x89, 'P', 'N', 'G', 1, 2, 3, 4}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -54,11 +47,11 @@ func TestFuseMount_hostSeesDirtyText(t *testing.T) {
 		t.Fatalf("HostDir = %q want %q", got, dir)
 	}
 
-	sessEnts, err := ms.ReadDir(ctx, "/work")
+	sessEnts, err := ms.ReadDir(ctx, "/workspace/work")
 	if err != nil {
 		t.Fatal(err)
 	}
-	hostEnts, err := os.ReadDir(filepath.Join(dir, "work"))
+	hostEnts, err := os.ReadDir(filepath.Join(dir, "workspace", "work"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,22 +69,22 @@ func TestFuseMount_hostSeesDirtyText(t *testing.T) {
 		}
 	}
 
-	got, err := os.ReadFile(filepath.Join(dir, "work", "note.md"))
+	got, err := os.ReadFile(filepath.Join(dir, "workspace", "work", "note.md"))
 	if err != nil || string(got) != want {
 		t.Fatalf("host read dirty IR: %q err=%v", got, err)
 	}
-	st, err := os.Stat(filepath.Join(dir, "work", "note.md"))
+	st, err := os.Stat(filepath.Join(dir, "workspace", "work", "note.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	dirty, err := ms.ReadText(ctx, "/work/note.md")
+	dirty, err := ms.ReadText(ctx, "/workspace/work/note.md")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if st.Size() != int64(len(dirty.Text())) {
 		t.Fatalf("host stat size=%d want %d", st.Size(), len(dirty.Text()))
 	}
-	raw, err := os.ReadFile(filepath.Join(dir, "work", "pic.bin"))
+	raw, err := os.ReadFile(filepath.Join(dir, "workspace", "work", "pic.bin"))
 	if err != nil || len(raw) != 8 || raw[1] != 'P' {
 		t.Fatalf("host binary: %x err=%v", raw, err)
 	}
@@ -112,18 +105,11 @@ func TestFuseMount_plaintextWritableProjectedEROFS(t *testing.T) {
 		t.Skip("no /dev/fuse or /dev/macfuse*")
 	}
 	ctx := t.Context()
-	reg := NewBackendRegistry()
-	if err := reg.Register(LocalFactory{ID: "scratch", Base: t.TempDir()}); err != nil {
+	ms := mustTree(t, At("work", Local(t.TempDir())))
+	if err := ms.WriteFile(ctx, "/workspace/work/note.txt", []byte("old\n")); err != nil {
 		t.Fatal(err)
 	}
-	ms := MustNewMountSession(t.Name(), reg)
-	if err := ms.Mount(ctx, MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := ms.WriteFile(ctx, "/work/note.txt", []byte("old\n")); err != nil {
-		t.Fatal(err)
-	}
-	if err := ms.WriteFile(ctx, "/work/pic.bin", []byte{0x89, 'P', 'N', 'G', 1, 2, 3, 4}); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/work/pic.bin", []byte{0x89, 'P', 'N', 'G', 1, 2, 3, 4}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -133,14 +119,14 @@ func TestFuseMount_plaintextWritableProjectedEROFS(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = ms.Close() })
 
-	work := filepath.Join(dir, "work")
+	work := filepath.Join(dir, "workspace", "work")
 	if err := os.MkdirAll(filepath.Join(work, "d"), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(work, "d", "a.txt"), []byte("hi from host\n"), 0o644); err != nil {
 		t.Fatalf("write plaintext: %v", err)
 	}
-	got, err := ms.ReadText(ctx, "/work/d/a.txt")
+	got, err := ms.ReadText(ctx, "/workspace/work/d/a.txt")
 	if err != nil || got.Text() != "hi from host\n" {
 		t.Fatalf("session after host write: %q err=%v", textOr(got), err)
 	}
@@ -155,7 +141,7 @@ func TestFuseMount_plaintextWritableProjectedEROFS(t *testing.T) {
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
-	got, err = ms.ReadText(ctx, "/work/note.txt")
+	got, err = ms.ReadText(ctx, "/workspace/work/note.txt")
 	if err != nil || !strings.Contains(got.Text(), "appended") {
 		t.Fatalf("append visible: %q err=%v", textOr(got), err)
 	}
@@ -177,24 +163,24 @@ func TestFuseMount_plaintextWritableProjectedEROFS(t *testing.T) {
 	if err := os.Remove(filepath.Join(work, "d", "a.txt")); err != nil {
 		t.Fatalf("rm: %v", err)
 	}
-	if _, err := ms.Stat(ctx, "/work/d/a.txt"); !errors.Is(err, ErrNotExist) {
+	if _, err := ms.Stat(ctx, "/workspace/work/d/a.txt"); !errors.Is(err, ErrNotExist) {
 		t.Fatalf("stat after rm: %v", err)
 	}
 	if err := os.Remove(filepath.Join(work, "d")); err != nil {
 		t.Fatalf("rmdir: %v", err)
 	}
-	if _, err := ms.Stat(ctx, "/work/d"); !errors.Is(err, ErrNotExist) {
+	if _, err := ms.Stat(ctx, "/workspace/work/d"); !errors.Is(err, ErrNotExist) {
 		t.Fatalf("stat after rmdir: %v", err)
 	}
 
 	if err := os.Rename(filepath.Join(work, "note.txt"), filepath.Join(work, "renamed.txt")); err != nil {
 		t.Fatalf("rename: %v", err)
 	}
-	got, err = ms.ReadText(ctx, "/work/renamed.txt")
+	got, err = ms.ReadText(ctx, "/workspace/work/renamed.txt")
 	if err != nil || !strings.Contains(got.Text(), "appended") {
 		t.Fatalf("rename visible: %q err=%v", textOr(got), err)
 	}
-	if _, err := ms.Stat(ctx, "/work/note.txt"); !errors.Is(err, ErrNotExist) {
+	if _, err := ms.Stat(ctx, "/workspace/work/note.txt"); !errors.Is(err, ErrNotExist) {
 		t.Fatalf("old name after rename: %v", err)
 	}
 
@@ -208,7 +194,7 @@ func TestFuseMount_plaintextWritableProjectedEROFS(t *testing.T) {
 	if err := tf.Close(); err != nil {
 		t.Fatal(err)
 	}
-	got, err = ms.ReadText(ctx, "/work/renamed.txt")
+	got, err = ms.ReadText(ctx, "/workspace/work/renamed.txt")
 	if err != nil || got.Text() != "old\n" {
 		t.Fatalf("truncate body: %q err=%v", textOr(got), err)
 	}
@@ -248,11 +234,11 @@ func TestFuseMount_plaintextWritableProjectedEROFS(t *testing.T) {
 	if got := ms.HostDir(); got != dir2 {
 		t.Fatalf("HostDir after remount = %q want %q", got, dir2)
 	}
-	got, err = ms.ReadText(ctx, "/work/renamed.txt")
+	got, err = ms.ReadText(ctx, "/workspace/work/renamed.txt")
 	if err != nil || !strings.Contains(got.Text(), "sync") {
 		t.Fatalf("session after remount: %q err=%v", textOr(got), err)
 	}
-	ents, err := os.ReadDir(filepath.Join(dir2, "work"))
+	ents, err := os.ReadDir(filepath.Join(dir2, "workspace", "work"))
 	if err != nil {
 		t.Fatalf("host readdir after remount: %v", err)
 	}
@@ -282,18 +268,11 @@ func TestFuseMount_projectedTextualReadOnly(t *testing.T) {
 	}
 
 	ctx := t.Context()
-	reg := NewBackendRegistry()
-	if err := reg.Register(LocalFactory{ID: "scratch", Base: t.TempDir()}); err != nil {
+	ms := mustTree(t, At("work", Local(t.TempDir())))
+	if err := ms.WriteFile(ctx, "/workspace/work/doc.proj", []byte("container-bytes")); err != nil {
 		t.Fatal(err)
 	}
-	ms := MustNewMountSession(t.Name(), reg)
-	if err := ms.Mount(ctx, MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := ms.WriteFile(ctx, "/work/doc.proj", []byte("container-bytes")); err != nil {
-		t.Fatal(err)
-	}
-	doc, err := ms.ReadText(ctx, "/work/doc.proj")
+	doc, err := ms.ReadText(ctx, "/workspace/work/doc.proj")
 	if err != nil || doc.Text() != "EXTRACTED:container-bytes" {
 		t.Fatalf("ReadText projection: %q err=%v", textOr(doc), err)
 	}
@@ -304,7 +283,7 @@ func TestFuseMount_projectedTextualReadOnly(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = ms.Close() })
 
-	host := filepath.Join(dir, "work", "doc.proj")
+	host := filepath.Join(dir, "workspace", "work", "doc.proj")
 	st, err := os.Stat(host)
 	if err != nil {
 		t.Fatal(err)
@@ -352,23 +331,28 @@ func textOr(t Textual) string {
 
 func TestFuseMount_rejectsMultiSegmentPoint(t *testing.T) {
 	ctx := t.Context()
-	reg := NewBackendRegistry()
-	if err := reg.Register(LocalFactory{ID: "scratch", Base: t.TempDir()}); err != nil {
+	p, err := Local(t.TempDir())(ctx, t.Name(), Binding{})
+	if err != nil {
 		t.Fatal(err)
 	}
-	ms := MustNewMountSession(t.Name(), reg)
-	if err := ms.Mount(ctx, MountSpec{Point: "/tmp/tacklr", Profile: "scratch"}); err != nil {
+	ms, err := NewMountSession(t.Name())
+	if err != nil {
 		t.Fatal(err)
 	}
-	err := ms.FuseMount(t.TempDir())
-	if err == nil || !strings.Contains(err.Error(), "/tmp/tacklr") {
+	if err := ms.Attach(ctx, MountSpec{Point: "/tmp/tacklr", Profile: "scratch"}, p); err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.FuseMount(t.TempDir()); err == nil || !strings.Contains(err.Error(), "/tmp/tacklr") {
 		t.Fatalf("want multi-segment error naming the point, got %v", err)
 	}
 	if err := ms.FuseMount(""); err == nil {
 		t.Fatal("empty FuseMount dir")
 	}
 	if FuseAvailable() {
-		empty := MustNewMountSession("empty-tree", reg)
+		empty, err := NewMountSession("empty-tree")
+		if err != nil {
+			t.Fatal(err)
+		}
 		dir := t.TempDir()
 		if err := empty.FuseMount(dir); err != nil {
 			t.Fatalf("empty specs FuseMount: %v", err)

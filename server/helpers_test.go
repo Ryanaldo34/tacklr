@@ -10,9 +10,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ryanaldo34/tacklr"
+
+	"github.com/ryanaldo34/tacklr/builtins"
 	"github.com/ryanaldo34/tacklr/durable"
 	tacklrsecurity "github.com/ryanaldo34/tacklr/security"
-	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -72,11 +74,7 @@ func TestACP_handleInbound_notificationsAndUnknown(t *testing.T) {
 
 func TestACP_handleInbound_sessionAndAuthOutcomes(t *testing.T) {
 	dir := t.TempDir()
-	reg := vfs.NewBackendRegistry()
-	if err := reg.Register(vfs.LocalFactory{ID: "local", Base: dir}); err != nil {
-		t.Fatal(err)
-	}
-	k := newTestRuntime(t, nil, durable.AgentSpec{FSRegistry: reg})
+	k := newTestRuntime(t, nil, durable.AgentSpec{OpenVFS: vfs.Tree(vfs.At("docs", builtins.Local(dir)))})
 	ctx := t.Context()
 
 	authRec := &recordingMessageWriter{}
@@ -102,8 +100,8 @@ func TestACP_handleInbound_sessionAndAuthOutcomes(t *testing.T) {
 	}
 	initBody := rec.Results[len(rec.Results)-1].Result
 	raw, _ := json.Marshal(initBody)
-	if !strings.Contains(string(raw), `"local"`) {
-		t.Fatalf("initialize vfs providers: %s", raw)
+	if !strings.Contains(string(raw), `"credentials":true`) || !strings.Contains(string(raw), `"tokenRefresh":true`) {
+		t.Fatalf("initialize vfs capability: %s", raw)
 	}
 
 	_ = p.HandleInbound(ctx, env, []byte(`{"jsonrpc":"2.0","id":4,"method":"session/new","params":"bad"}`))
@@ -193,7 +191,7 @@ func TestACP_authenticate_mapsHostErrors(t *testing.T) {
 func TestACP_RunTurn_unknownEventAndParkWithoutRPC(t *testing.T) {
 	p := NewACPProtocol(nil)
 	w := &recordingMessageWriter{}
-	env := ProtocolEnv{Runtime: &stubRT{events: []streaming.StreamEvent{{Type: "nope"}}}, Conn: &Conn{Writer: w}}
+	env := ProtocolEnv{Runtime: &stubRT{events: []tacklr.StreamEvent{{Type: "nope"}}}, Conn: &Conn{Writer: w}}
 	err := RunTurn(t.Context(), env, p, "t", json.RawMessage(`1`), PromptOrResume{})
 	if err == nil {
 		t.Fatal("unknown stream type")
@@ -201,7 +199,7 @@ func TestACP_RunTurn_unknownEventAndParkWithoutRPC(t *testing.T) {
 
 	parked := &recordingMessageWriter{}
 	parkEnv := ProtocolEnv{
-		Runtime: &stubRT{events: []streaming.StreamEvent{{Type: streaming.StreamEventInterrupt}}},
+		Runtime: &stubRT{events: []tacklr.StreamEvent{{Type: tacklr.StreamEventInterrupt}}},
 		Conn:    &Conn{Writer: parked},
 	}
 	if err := RunTurn(t.Context(), parkEnv, p, "t", json.RawMessage(`1`), PromptOrResume{}); err != nil {

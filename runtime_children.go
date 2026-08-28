@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ryanaldo34/tacklr/internal/session"
 	"github.com/ryanaldo34/tacklr/interrupt"
 )
 
@@ -24,16 +23,16 @@ type ChildHost interface {
 // toolRuntime is the HarnessRuntime passed to tools: session emit/state/interrupt
 // plus child operations. Durable drivers replace the host; nil host errors on spawn.
 type toolRuntime struct {
-	session.Runtime
+	sessionRuntime
 	host ChildHost
 }
 
-func newToolRuntime(ch chan StreamEvent, sm *session.SessionManager, host ChildHost) toolRuntime {
-	return toolRuntime{Runtime: session.NewRuntime(ch, sm), host: host}
+func newToolRuntime(ch chan StreamEvent, sm *sessionManager, host ChildHost) toolRuntime {
+	return toolRuntime{sessionRuntime: newSessionRuntime(ch, sm), host: host}
 }
 
 func (t toolRuntime) WithToolCallID(id string) toolRuntime {
-	t.Runtime = t.Runtime.WithToolCallID(id)
+	t.sessionRuntime = t.sessionRuntime.WithToolCallID(id)
 	return t
 }
 

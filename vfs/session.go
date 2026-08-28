@@ -38,13 +38,11 @@ type AfterPersistFunc func(ctx context.Context, virtualPath string) error
 
 // MountSession is one isolated virtual filesystem: mount table + path I/O.
 // It routes document I/O to the provider; it does not encode IR or cache dirty
-// documents. The injector (Registry per turn, or an embedder) creates, Mounts,
+// documents. Tree (or an embedder) creates it, Attachs /workspace, optionally
 // FuseMounts, and Closes it. The agent harness only borrows the pointer.
-// BackendRegistry is process-scoped.
 type MountSession struct {
 	mu           sync.Mutex
 	id           string
-	reg          *BackendRegistry
 	tab          *mountTable
 	afterPersist AfterPersistFunc
 	fuse         *gofuse.Server
@@ -96,16 +94,23 @@ func (m *MountSession) fireAfterPersist(ctx context.Context, virtualPath string)
 	return nil
 }
 
-// NewMountSession binds a session id to a process registry.
-// Hosts that want a kernel tree call FuseMount.
-func NewMountSession(sessionID string, reg *BackendRegistry) (*MountSession, error) {
+// NewMountSession binds a session id. Hosts use Tree; FuseMount is optional.
+func NewMountSession(sessionID string) (*MountSession, error) {
 	if strings.TrimSpace(sessionID) == "" {
 		return nil, fmt.Errorf("%w: session id is required", ErrInvalidPath)
 	}
-	if reg == nil {
-		panic("vfs: NewMountSession requires a backend registry")
+	return &MountSession{id: sessionID, tab: newMountTable()}, nil
+}
+
+// Attach puts an already-opened Provider at spec.Point. Tree uses this.
+func (m *MountSession) Attach(ctx context.Context, spec MountSpec, p Provider) error {
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	return &MountSession{id: sessionID, reg: reg, tab: newMountTable()}, nil
+	if p == nil {
+		return fmt.Errorf("vfs: provider required")
+	}
+	return m.table().mount(ctx, spec, p)
 }
 
 // HostDir is the directory last passed to FuseMount, or "".
@@ -124,60 +129,6 @@ func (m *MountSession) table() *mountTable {
 	return m.tab
 }
 
-// Materialize replaces the live tree from specs. On error the previous tree is kept.
-// Factories that implement SkillSource are then attached at /skills.
-func (m *MountSession) Materialize(ctx context.Context, specs []MountSpec) error {
-	if m.reg == nil {
-		panic("vfs: mount session has no registry")
-	}
-	var next *mountTable
-	var err error
-	if len(specs) == 0 {
-		next = newMountTable()
-	} else {
-		next, err = materialize(ctx, m.reg, m.id, specs)
-		if err != nil {
-			return err
-		}
-	}
-	if err := attachSkillsTo(ctx, m.reg, m.id, next); err != nil {
-		return err
-	}
-	m.mu.Lock()
-	m.tab = next
-	m.mu.Unlock()
-	return nil
-}
-
-// Mount attaches a backend at spec.Point for the rest of the session life.
-// Non-union mounts refresh /skills from SkillSource factories.
-func (m *MountSession) Mount(ctx context.Context, spec MountSpec) error {
-	if m.reg == nil {
-		panic("vfs: mount session has no registry")
-	}
-	p, err := m.reg.open(ctx, m.id, spec)
-	if err != nil {
-		return err
-	}
-	if err := m.table().mount(ctx, spec, p); err != nil {
-		return err
-	}
-	if spec.Point == SkillsPoint || len(spec.Members) > 0 {
-		return nil
-	}
-	return m.AttachSkills(ctx)
-}
-
-// AttachSkills mounts or replaces /skills from SkillSource factories.
-// No-op when no factory declares Skills. Hosts that bind session backends
-// (Drive) should call this after bind so new members are picked up.
-func (m *MountSession) AttachSkills(ctx context.Context) error {
-	if m.reg == nil {
-		panic("vfs: mount session has no registry")
-	}
-	return attachSkillsTo(ctx, m.reg, m.id, m.table())
-}
-
 // Unmount detaches the mount at point.
 func (m *MountSession) Unmount(point string) error {
 	return m.table().unmount(point)
@@ -189,13 +140,30 @@ func (m *MountSession) Specs() []MountSpec {
 }
 
 // SpecAt returns the durable MountSpec for the mount that owns virtualPath
-// (longest matching point). Clone is safe to retain; no secrets.
+// (longest matching point). Under /workspace, the alias member spec is
+// returned so IndexPolicy is per backend. Clone is safe to retain; no secrets.
 func (m *MountSession) SpecAt(virtualPath string) (MountSpec, error) {
-	e, _, _, err := m.table().resolveEntry(virtualPath)
+	e, point, rel, err := m.table().resolveEntry(virtualPath)
 	if err != nil {
 		return MountSpec{}, err
 	}
-	return cloneSpec(e.spec), nil
+	spec := cloneSpec(e.spec)
+	if len(spec.Members) == 0 || rel == "" {
+		return spec, nil
+	}
+	alias, _, _ := strings.Cut(rel, "/")
+	for _, mem := range spec.Members {
+		name := strings.TrimSpace(mem.Params[ParamName])
+		if name == "" {
+			name = strings.TrimSpace(mem.Profile)
+		}
+		if name == alias {
+			out := cloneSpec(mem)
+			out.Point = point + "/" + alias
+			return out, nil
+		}
+	}
+	return spec, nil
 }
 
 // Classify returns the media type for virtualPath.
@@ -483,33 +451,3 @@ func (t *mountTable) resolve(virtualPath string) (p Provider, point, rel string,
 }
 
 func cleanVirtualPath(s string) (string, error) { return CleanPath(s) }
-
-func attachSkillsTo(ctx context.Context, reg *BackendRegistry, sessionID string, tab *mountTable) error {
-	members := reg.skillMembers()
-	if len(members) == 0 {
-		return nil
-	}
-	if err := tab.unmount(SkillsPoint); err != nil && !errors.Is(err, ErrNotMounted) {
-		return err
-	}
-	spec := Skills(members...)
-	p, err := reg.open(ctx, sessionID, spec)
-	if err != nil {
-		return err
-	}
-	return tab.mount(ctx, spec, p)
-}
-
-func materialize(ctx context.Context, reg *BackendRegistry, sessionID string, specs []MountSpec) (*mountTable, error) {
-	t := newMountTable()
-	for _, spec := range specs {
-		p, err := reg.open(ctx, sessionID, spec)
-		if err != nil {
-			return nil, err
-		}
-		if err := t.mount(ctx, spec, p); err != nil {
-			return nil, err
-		}
-	}
-	return t, nil
-}

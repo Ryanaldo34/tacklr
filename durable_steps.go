@@ -7,10 +7,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ryanaldo34/tacklr/internal/drive"
-	"github.com/ryanaldo34/tacklr/internal/session"
 	"github.com/ryanaldo34/tacklr/interrupt"
-	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
@@ -40,15 +37,27 @@ func (a *TurnManager) runnableToolCalls() []ToolCall {
 }
 
 // Checkpoint captures the session blob for SnapshotStore.
-func (a *TurnManager) Checkpoint() (*stores.SessionCheckpoint, error) {
-	return session.CaptureCheckpoint(a.context.Messages(), a.session, a.pendingSnapshot())
+func (a *TurnManager) Checkpoint() (*SessionCheckpoint, error) {
+	return captureCheckpoint(a.context.Messages(), a.session, a.pendingSnapshot())
+}
+
+// ApplySessionState upserts host-owned userState after construct/restore.
+// Durable runtimes apply CreateSession/Prompt/Resume.State here so tools
+// see it via HarnessRuntime.StateGet.
+func (a *TurnManager) ApplySessionState(state map[string]any) error {
+	for key, value := range state {
+		if err := a.session.StateSet(key, value); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // RestoreCheckpoint applies a SnapshotStore blob onto this harness.
-func (a *TurnManager) RestoreCheckpoint(cp stores.SessionCheckpoint) error {
+func (a *TurnManager) RestoreCheckpoint(cp SessionCheckpoint) error {
 	a.runMu.Lock()
 	defer a.runMu.Unlock()
-	applied, err := session.ApplyCheckpoint(cp, a.session)
+	applied, err := applyCheckpoint(cp, a.session)
 	if err != nil {
 		return err
 	}
@@ -59,7 +68,7 @@ func (a *TurnManager) RestoreCheckpoint(cp stores.SessionCheckpoint) error {
 	return nil
 }
 
-func (a *TurnManager) runInference(ctx context.Context, st *drive.TurnState, out chan StreamEvent) (drive.InferenceStep, error) {
+func (a *TurnManager) runInference(ctx context.Context, st *TurnState, out chan StreamEvent) (InferenceStep, error) {
 	// Pair any function_call still missing a tool message before the provider
 	// round. Durable HITL used to drop the rest of a parallel batch; Azure then
 	// 400s "No tool output found for function call".
@@ -68,7 +77,7 @@ func (a *TurnManager) runInference(ctx context.Context, st *drive.TurnState, out
 	if a.maxTurnRequests > 0 && st.ModelRequests >= a.maxTurnRequests {
 		err := fmt.Errorf("%w: limit %d", ErrMaxTurnRequests, a.maxTurnRequests)
 		out <- StreamEvent{Type: StreamEventError, Error: err}
-		return drive.InferenceStep{}, err
+		return InferenceStep{}, err
 	}
 	turnCtx := ctx
 	if st.HadToolRound {
@@ -81,7 +90,7 @@ func (a *TurnManager) runInference(ctx context.Context, st *drive.TurnState, out
 			outErr = fmt.Errorf("%w: %w", ErrModelAfterTools, err)
 		}
 		out <- StreamEvent{Type: StreamEventError, Error: outErr}
-		return drive.InferenceStep{}, outErr
+		return InferenceStep{}, outErr
 	}
 	st.ModelRequests++
 	asm := newStreamAssembler()
@@ -91,7 +100,7 @@ func (a *TurnManager) runInference(ctx context.Context, st *drive.TurnState, out
 		var ok bool
 		select {
 		case <-ctx.Done():
-			return drive.InferenceStep{}, ctx.Err()
+			return InferenceStep{}, ctx.Err()
 		case chunk, ok = <-events:
 		}
 		if !ok {
@@ -103,9 +112,9 @@ func (a *TurnManager) runInference(ctx context.Context, st *drive.TurnState, out
 		a.streamChunk(chunk, out)
 		if chunk.Type == StreamEventError || chunk.Error != nil {
 			if chunk.Error != nil {
-				return drive.InferenceStep{}, chunk.Error
+				return InferenceStep{}, chunk.Error
 			}
-			return drive.InferenceStep{}, errors.New(chunk.Content)
+			return InferenceStep{}, errors.New(chunk.Content)
 		}
 		asm.AddDelta(chunk)
 		if chunk.IsComplete {
@@ -121,7 +130,7 @@ func (a *TurnManager) runInference(ctx context.Context, st *drive.TurnState, out
 	}
 	if len(toolCalls) == 0 {
 		out <- StreamEvent{Type: StreamEventComplete}
-		return drive.InferenceStep{Complete: true}, nil
+		return InferenceStep{Complete: true}, nil
 	}
 	a.context.Add(&Message{
 		Role:      RoleAssistant,
@@ -131,13 +140,13 @@ func (a *TurnManager) runInference(ctx context.Context, st *drive.TurnState, out
 	for i := range toolCalls {
 		key := toolCalls[i].Key()
 		cp := toolCalls[i]
-		a.pendingToolCalls[key] = stores.PendingToolCall{ToolCall: &cp, InterruptActive: false}
+		a.pendingToolCalls[key] = PendingToolCall{ToolCall: &cp, InterruptActive: false}
 	}
 	a.pendingMu.Unlock()
-	return drive.InferenceStep{ToolCalls: toolCalls}, nil
+	return InferenceStep{ToolCalls: toolCalls}, nil
 }
 
-func (a *TurnManager) runToolCall(ctx context.Context, tc ToolCall, out chan StreamEvent) (drive.ToolStep, error) {
+func (a *TurnManager) runToolCall(ctx context.Context, tc ToolCall, out chan StreamEvent) (ToolStep, error) {
 	turnRT := newToolRuntime(out, a.session, a.childHost)
 	tcKey := tc.Key()
 	toolCtx, toolSpan := telemetry.StartToolSpan(ctx, tc.Name, tc.Namespace)
@@ -150,7 +159,7 @@ func (a *TurnManager) runToolCall(ctx context.Context, tc ToolCall, out chan Str
 		toolSpan.Finish("error", toolErr)
 		msg := a.emitToolResult(out, tc, toolErr.Error(), "error")
 		_ = a.addToContext(ctx, msg, out)
-		return drive.ToolStep{}, nil
+		return ToolStep{}, nil
 	}
 	runtimeCopy := turnRT.WithToolCallID(tcKey)
 	output, toolDisp, err := a.toolRunner.Run(toolCtx, ToolInvocation{
@@ -171,10 +180,10 @@ func (a *TurnManager) runToolCall(ctx context.Context, tc ToolCall, out chan Str
 		)
 		toolSpan.Finish("interrupt", nil)
 		a.pendingMu.Lock()
-		a.pendingToolCalls[tcKey] = stores.PendingToolCall{ToolCall: &tc, InterruptActive: true}
+		a.pendingToolCalls[tcKey] = PendingToolCall{ToolCall: &tc, InterruptActive: true}
 		a.pendingMu.Unlock()
 		out <- StreamEvent{Type: StreamEventInterrupt, MessageID: tcKey, Data: data}
-		return drive.ToolStep{Interrupted: true, InterruptID: tcKey, InterruptData: data}, nil
+		return ToolStep{Interrupted: true, InterruptID: tcKey, InterruptData: data}, nil
 	}
 	a.pendingMu.Lock()
 	delete(a.pendingToolCalls, tcKey)
@@ -184,9 +193,9 @@ func (a *TurnManager) runToolCall(ctx context.Context, tc ToolCall, out chan Str
 		msg := a.emitToolResult(out, tc, err.Error(), "error")
 		_ = a.addToContext(ctx, msg, out)
 		if errors.Is(err, ErrCorrection) || errors.Is(err, context.Canceled) {
-			return drive.ToolStep{}, nil
+			return ToolStep{}, nil
 		}
-		return drive.ToolStep{}, err
+		return ToolStep{}, err
 	}
 	var effects batchToolResultEffects
 	effects.merge(toolDisp)
@@ -206,7 +215,7 @@ func (a *TurnManager) runToolCall(ctx context.Context, tc ToolCall, out chan Str
 	if effect := effects.resolved(); effect != EffectNone {
 		_ = a.applyBatchToolResultEffect(ctx, effect)
 	}
-	return drive.ToolStep{}, nil
+	return ToolStep{}, nil
 }
 
 // SpawnSpecialistName is the built-in that calls HarnessRuntime.SpawnChild.
@@ -230,7 +239,7 @@ func (a *TurnManager) applyResume(finishedInterrupts map[string][]byte) error {
 		if _, err := a.session.Resume(id, payload); err != nil {
 			return fmt.Errorf("return from interrupt %q: %w", id, err)
 		}
-		a.pendingToolCalls[id] = stores.PendingToolCall{ToolCall: tc.ToolCall, InterruptActive: false}
+		a.pendingToolCalls[id] = PendingToolCall{ToolCall: tc.ToolCall, InterruptActive: false}
 	}
 	return nil
 }

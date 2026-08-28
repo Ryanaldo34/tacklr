@@ -12,7 +12,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
-	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfsindex"
 )
@@ -23,11 +22,24 @@ type brainToolDeps struct {
 	Indexer *vfsindex.MountIndexer
 }
 
-// brainTools closes over the engine and SearchContext (namespace + result set).
+// brainTools closes over the engine and SearchContext (host ceiling + result set).
 type brainTools struct {
 	engine *brain.Engine
 	sc     *brain.SearchContext
 	deps   brainToolDeps
+}
+
+type namespaceArg struct {
+	Namespace []brain.Attr `json:"namespace,omitempty" desc:"Isolation attributes for this call. Extra attrs narrow the host SearchNamespace; host values cannot be changed."`
+}
+
+func (b brainTools) scope(call []brain.Attr) (brain.Scope, error) {
+	ceiling, _ := b.sc.Namespace()
+	ns, err := ceiling.Bind(call)
+	if err != nil {
+		return brain.Scope{}, err
+	}
+	return brain.Scope{Namespace: ns}, nil
 }
 
 func (b brainTools) brainMountForKind(kind string) (vfs.MountSpec, bool) {
@@ -38,6 +50,7 @@ func (b brainTools) brainMountForKind(kind string) (vfs.MountSpec, bool) {
 }
 
 type readObjectArgs struct {
+	namespaceArg
 	ObjectID string `json:"object_id" desc:"UUID of the object to read in full."`
 }
 
@@ -48,7 +61,7 @@ func (b brainTools) newReadObjectTool() *Tool {
 		Description: `Read a knowledge object by UUID (full stored body as JSON).
 
 Use after search, find_exact, find_objects, or expand when the hit has no vfs_path (Deal, Fact, Person, …). Pass object_id from that result. Do not invent ids. Files: use read on vfs_path instead.`,
-		Category: streaming.ToolCategoryRead,
+		Category: ToolCategoryRead,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
 		Handler: func(ctx context.Context, args readObjectArgs, runtime HarnessRuntime) (string, error) {
@@ -57,7 +70,11 @@ Use after search, find_exact, find_objects, or expand when the hit has no vfs_pa
 				return "", fmt.Errorf("read_object: %w", err)
 			}
 			runtime.EmitUpdate("Reading knowledge object…")
-			obj, err := b.engine.Read(ctx, b.sc.Scope(), id)
+			scope, err := b.scope(args.Namespace)
+			if err != nil {
+				return "", fmt.Errorf("read_object: %w", err)
+			}
+			obj, err := b.engine.Read(ctx, scope, id)
 			if err != nil {
 				return "", fmt.Errorf("read_object: object %s: %w", id, err)
 			}
@@ -77,7 +94,7 @@ func (b brainTools) newSchemaTool() *Tool {
 		Description: `Discover structured filter fields and kind documentation for the knowledge base.
 
 Call with a kind to see filterable_fields (name, type, operators) for that kind. Call with no kind to list registered kinds. filter_usage lists which tools accept those fields: search, find_exact, and find_objects share the same filter keys. Prefer schema() before inventing property names in filters. When kinds are registered, property filters require a kind key (or find_objects.kinds). Core keys: kind, title, created_after, created_before, updated_after, updated_before.`,
-		Category: streaming.ToolCategoryRead,
+		Category: ToolCategoryRead,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
 		Handler: func(ctx context.Context, args schemaArgs, runtime HarnessRuntime) (string, error) {
@@ -92,6 +109,7 @@ Call with a kind to see filterable_fields (name, type, operators) for that kind.
 }
 
 type queryArgs struct {
+	namespaceArg
 	Query    string         `json:"query" desc:"Search query text. Prefer a semantic rewrite of the user ask when helpful."`
 	Filters  map[string]any `json:"filters,omitempty" desc:"Optional field→value filters (kind, title, property keys, updated_after). Prefer schema() first. All content filters belong here."`
 	Limit    int            `json:"limit,omitempty" desc:"Max results for this page (default 10, max 50)."`
@@ -107,7 +125,7 @@ func (b brainTools) newSearchTool() *Tool {
 Hit has vfs_path → open the live file with read (path + start_line / block_id from evidence).
 No vfs_path → read_object with the id.
 Live grep is run_command → rg (not this tool). Relationships: expand, not search. More pages: continue. Prefer schema() before inventing filter keys.`,
-		Category: streaming.ToolCategorySearch,
+		Category: ToolCategorySearch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
 	}, "Searching knowledge base…", b.engine.Search)
@@ -120,7 +138,7 @@ func (b brainTools) newFindExactTool() *Tool {
 		Description: `Find an object by exact or near-exact string (UUID, title, path-like phrase).
 
 Prefer over search when you already have the identifier. File hits: read the vfs_path. Other objects: read_object. Meaning-based entity lookup: find_objects. More pages: continue.`,
-		Category: streaming.ToolCategorySearch,
+		Category: ToolCategorySearch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
 	}, "Finding exact matches…", b.engine.FindExact)
@@ -142,7 +160,11 @@ func (b brainTools) newQueryTool(
 		if err != nil {
 			return "", fmt.Errorf("%s: %w", name, err)
 		}
-		page, err := query(ctx, b.sc.Scope(), brain.SearchRequest{
+		scope, err := b.scope(args.Namespace)
+		if err != nil {
+			return "", fmt.Errorf("%s: %w", name, err)
+		}
+		page, err := query(ctx, scope, brain.SearchRequest{
 			Query:    args.Query,
 			Filters:  filters,
 			Limit:    args.Limit,
@@ -168,7 +190,7 @@ func (b brainTools) newContinueTool() *Tool {
 		Description: `Return the next page of a prior ranked result set from search, find_exact, find_objects, or large expand.
 
 Pass the result_set_id from the previous call. Each new search, find_exact, find_objects, or large expand replaces the active result set — older result_set_id values stop working.`,
-		Category: streaming.ToolCategorySearch,
+		Category: ToolCategorySearch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
 		Handler: func(ctx context.Context, args continueArgs, runtime HarnessRuntime) (string, error) {
@@ -190,6 +212,7 @@ Pass the result_set_id from the previous call. Each new search, find_exact, find
 }
 
 type expandArgs struct {
+	namespaceArg
 	Path          string   `json:"path,omitempty" desc:"Absolute virtual path of an indexed file to expand. Prefer path when the node is a file."`
 	ObjectID      string   `json:"object_id,omitempty" desc:"UUID of the object to expand when path is not used."`
 	RelationTypes []string `json:"relation_types,omitempty" desc:"Optional relation types. Omit for containment (children or parent+siblings). Named types use the graph backend (e.g. references)."`
@@ -205,16 +228,20 @@ func (b brainTools) newExpandTool() *Tool {
 		Description: `Neighbors of a known path or object_id — not a search.
 
 Prefer path for files. ls / rg do not list graph edges. Omit relation_types for containment only; named types need a graph backend. File neighbors: read. Other neighbors: read_object. Large pages: continue.`,
-		Category: streaming.ToolCategoryFetch,
+		Category: ToolCategoryFetch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
 		Handler: func(ctx context.Context, args expandArgs, runtime HarnessRuntime) (string, error) {
-			id, _, err := b.resolveFileRef(ctx, args.Path, args.ObjectID, "expand", false)
+			scope, err := b.scope(args.Namespace)
+			if err != nil {
+				return "", fmt.Errorf("expand: %w", err)
+			}
+			id, _, err := b.resolveFileRef(ctx, scope, args.Path, args.ObjectID, "expand", false)
 			if err != nil {
 				return "", err
 			}
 			runtime.EmitUpdate("Expanding knowledge object…")
-			res, err := b.engine.Expand(ctx, b.sc.Scope(), brain.ExpandRequest{
+			res, err := b.engine.Expand(ctx, scope, brain.ExpandRequest{
 				ObjectID:      id,
 				RelationTypes: args.RelationTypes,
 				MaxHops:       args.MaxHops,
@@ -230,6 +257,7 @@ Prefer path for files. ls / rg do not list graph edges. Omit relation_types for 
 }
 
 type saveObjectArgs struct {
+	namespaceArg
 	Title       string         `json:"title" desc:"Short title for the object."`
 	Summary     string         `json:"summary,omitempty" desc:"Optional short abstract."`
 	Content     string         `json:"content,omitempty" desc:"Optional full body text."`
@@ -254,7 +282,7 @@ Call schema() for this kind before inventing property keys. Pass object_id to up
 		Name:        name,
 		DisplayName: display,
 		Description: desc,
-		Category:    streaming.ToolCategoryEdit,
+		Category:    ToolCategoryEdit,
 		Access:      ToolWriteAccess,
 		Timeout:     30 * time.Second,
 		Handler: func(ctx context.Context, args saveObjectArgs, runtime HarnessRuntime) (string, error) {
@@ -276,6 +304,7 @@ Call schema() for this kind before inventing property keys. Pass object_id to up
 }
 
 type linkArgs struct {
+	namespaceArg
 	From         string  `json:"from,omitempty" desc:"Absolute virtual path of the source file (preferred when both ends are indexed files)."`
 	To           string  `json:"to,omitempty" desc:"Absolute virtual path of the target file."`
 	FromID       string  `json:"from_id,omitempty" desc:"UUID of the source object when path is not used."`
@@ -289,6 +318,7 @@ type linkArgs struct {
 }
 
 type findObjectsArgs struct {
+	namespaceArg
 	Query   string         `json:"query" desc:"Semantic or keyword query for whole knowledge objects (entities)."`
 	Kinds   []string       `json:"kinds,omitempty" desc:"Optional host kind names to restrict results (e.g. Deal, Fact). Prefer schema() for valid kinds."`
 	Filters map[string]any `json:"filters,omitempty" desc:"Optional field→value filters (same keys as search). Prefer schema() for filterable_fields. Property filters require kind when kinds are registered (or set kinds here)."`
@@ -296,6 +326,7 @@ type findObjectsArgs struct {
 }
 
 type findLinksArgs struct {
+	namespaceArg
 	RelationType string `json:"relation_type" desc:"Edge label to search (e.g. about, references). Host must ensure an edge text index for this label on Helix."`
 	Query        string `json:"query" desc:"Text query matched against edge note metadata."`
 	Limit        int    `json:"limit,omitempty" desc:"Max links for this page (default 10, max 50)."`
@@ -308,12 +339,16 @@ func (b brainTools) newFindLinksTool() *Tool {
 		Description: `Find relationships by text on the edge note, not document bodies.
 
 Returns from_path/to_path (and ids). ls never lists edges. Prefer expand from a known path. relation_type is required. Then read file ends with read, other ends with read_object.`,
-		Category: streaming.ToolCategorySearch,
+		Category: ToolCategorySearch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
 		Handler: func(ctx context.Context, args findLinksArgs, runtime HarnessRuntime) (string, error) {
 			runtime.EmitUpdate("Finding graph links…")
-			res, err := b.engine.FindLinks(ctx, b.sc.Scope(), brain.FindLinksRequest{
+			scope, err := b.scope(args.Namespace)
+			if err != nil {
+				return "", fmt.Errorf("find_links: %w", err)
+			}
+			res, err := b.engine.FindLinks(ctx, scope, brain.FindLinksRequest{
 				RelationType: args.RelationType,
 				Query:        args.Query,
 				Limit:        args.Limit,
@@ -333,7 +368,7 @@ func (b brainTools) newFindObjectsTool() *Tool {
 		Description: `Find whole knowledge objects (Deal, Fact, …), not ranked passages.
 
 Use to resolve which tracked entity matches the ask. Evidence in notes/files: search instead. Already have the id: expand or read_object. More pages: continue. Call schema() before inventing filter keys.`,
-		Category: streaming.ToolCategorySearch,
+		Category: ToolCategorySearch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
 		Handler: func(ctx context.Context, args findObjectsArgs, runtime HarnessRuntime) (string, error) {
@@ -342,7 +377,11 @@ Use to resolve which tracked entity matches the ask. Evidence in notes/files: se
 			if err != nil {
 				return "", fmt.Errorf("find_objects: %w", err)
 			}
-			page, err := b.engine.FindObjects(ctx, b.sc.Scope(), brain.FindObjectsRequest{
+			scope, err := b.scope(args.Namespace)
+			if err != nil {
+				return "", fmt.Errorf("find_objects: %w", err)
+			}
+			page, err := b.engine.FindObjects(ctx, scope, brain.FindObjectsRequest{
 				Query:   args.Query,
 				Kinds:   args.Kinds,
 				Filters: filters,
@@ -363,15 +402,19 @@ func (b brainTools) newLinkTool() *Tool {
 		Description: `Create a relationship between two first-class knowledge objects (graph edge). Prefer virtual paths. Engram paths resolve via vfs_path; artifact paths must already be indexed (index_file or mount policy). UUID from_id/to_id remain for non-file objects.
 
 Both ends must exist under the current search namespace, must not be soft-deleted, and must not be part/chunk objects. list/ls never lists edges. Optional note/status/role/confidence/evidence_id annotate why the link exists; expand returns that metadata. Re-linking the same pair updates metadata.`,
-		Category: streaming.ToolCategoryEdit,
+		Category: ToolCategoryEdit,
 		Access:   ToolWriteAccess,
 		Timeout:  30 * time.Second,
 		Handler: func(ctx context.Context, args linkArgs, runtime HarnessRuntime) (string, error) {
-			from, fromPath, err := b.resolveFileRef(ctx, args.From, args.FromID, "from", true)
+			scope, err := b.scope(args.Namespace)
 			if err != nil {
 				return "", fmt.Errorf("link: %w", err)
 			}
-			to, toPath, err := b.resolveFileRef(ctx, args.To, args.ToID, "to", true)
+			from, fromPath, err := b.resolveFileRef(ctx, scope, args.From, args.FromID, "from", true)
+			if err != nil {
+				return "", fmt.Errorf("link: %w", err)
+			}
+			to, toPath, err := b.resolveFileRef(ctx, scope, args.To, args.ToID, "to", true)
 			if err != nil {
 				return "", fmt.Errorf("link: %w", err)
 			}
@@ -380,7 +423,7 @@ Both ends must exist under the current search namespace, must not be soft-delete
 				return "", fmt.Errorf("link: %w", err)
 			}
 			runtime.EmitUpdate("Linking knowledge objects…")
-			if err := b.engine.LinkWith(ctx, b.sc.Scope(), from, to, args.RelationType, meta); err != nil {
+			if err := b.engine.LinkWith(ctx, scope, from, to, args.RelationType, meta); err != nil {
 				return "", fmt.Errorf("link: %w", err)
 			}
 			out := linkResult{
@@ -411,20 +454,24 @@ func (b brainTools) newUnlinkTool() *Tool {
 		Description: `Remove a relationship between two first-class knowledge objects. Prefer virtual paths (same resolution as link). list/ls never lists edges.
 
 Both ends must exist under the current search namespace and must not be parts. Idempotent if the edge is already gone.`,
-		Category: streaming.ToolCategoryEdit,
+		Category: ToolCategoryEdit,
 		Access:   ToolWriteAccess,
 		Timeout:  30 * time.Second,
 		Handler: func(ctx context.Context, args linkArgs, runtime HarnessRuntime) (string, error) {
-			from, fromPath, err := b.resolveFileRef(ctx, args.From, args.FromID, "from", true)
+			scope, err := b.scope(args.Namespace)
 			if err != nil {
 				return "", fmt.Errorf("unlink: %w", err)
 			}
-			to, toPath, err := b.resolveFileRef(ctx, args.To, args.ToID, "to", true)
+			from, fromPath, err := b.resolveFileRef(ctx, scope, args.From, args.FromID, "from", true)
+			if err != nil {
+				return "", fmt.Errorf("unlink: %w", err)
+			}
+			to, toPath, err := b.resolveFileRef(ctx, scope, args.To, args.ToID, "to", true)
 			if err != nil {
 				return "", fmt.Errorf("unlink: %w", err)
 			}
 			runtime.EmitUpdate("Unlinking knowledge objects…")
-			if err := b.engine.Unlink(ctx, b.sc.Scope(), from, to, args.RelationType); err != nil {
+			if err := b.engine.Unlink(ctx, scope, from, to, args.RelationType); err != nil {
 				return "", fmt.Errorf("unlink: %w", err)
 			}
 			return formatBrainJSON(linkResult{
@@ -521,7 +568,11 @@ func (b brainTools) putFromArgs(ctx context.Context, kind string, args saveObjec
 		return brain.Object{}, err
 	}
 	obj.ParentID = parent
-	return b.engine.Put(ctx, b.sc.Scope(), obj)
+	scope, err := b.scope(args.Namespace)
+	if err != nil {
+		return brain.Object{}, err
+	}
+	return b.engine.Put(ctx, scope, obj)
 }
 
 // saveAsFile writes an Engram Markdown file on the brain Provider mount.
@@ -538,7 +589,7 @@ func (b brainTools) saveAsFile(ctx context.Context, kind string, args saveObject
 	if body == "" {
 		body = args.Summary
 	}
-	vpath, err := b.resolveEngramSavePath(ctx, kind, title, args.ObjectID)
+	vpath, err := b.resolveEngramSavePath(ctx, kind, title, args.ObjectID, args.Namespace)
 	if err != nil {
 		return saveFileResult{}, err
 	}
@@ -576,7 +627,7 @@ func (b brainTools) saveAsFile(ctx context.Context, kind string, args saveObject
 	}, nil
 }
 
-func (b brainTools) resolveEngramSavePath(ctx context.Context, kind, title, objectID string) (string, error) {
+func (b brainTools) resolveEngramSavePath(ctx context.Context, kind, title, objectID string, ns []brain.Attr) (string, error) {
 	spec, ok := b.brainMountForKind(kind)
 	if !ok {
 		return "", fmt.Errorf("brain files are not mounted; save as a knowledge object instead of a file, or ask the host to mount the brain VFS")
@@ -584,7 +635,11 @@ func (b brainTools) resolveEngramSavePath(ctx context.Context, kind, title, obje
 	if id, err := parseOptionalUUID(objectID, "object_id"); err != nil {
 		return "", err
 	} else if id != nil {
-		obj, err := b.engine.Read(ctx, b.sc.Scope(), *id)
+		scope, err := b.scope(ns)
+		if err != nil {
+			return "", err
+		}
+		obj, err := b.engine.Read(ctx, scope, *id)
 		if err != nil {
 			return "", err
 		}
@@ -612,14 +667,14 @@ func (b brainTools) resolveEngramSavePath(ctx context.Context, kind, title, obje
 
 // resolveFileRef resolves path (preferred) or object_id to a first-class UUID.
 // Engram paths resolve via object vfs_path; artifact paths need an indexed Document.
-func (b brainTools) resolveFileRef(ctx context.Context, pathStr, idStr, field string, requireFirstClass bool) (uuid.UUID, string, error) {
+func (b brainTools) resolveFileRef(ctx context.Context, scope brain.Scope, pathStr, idStr, field string, requireFirstClass bool) (uuid.UUID, string, error) {
 	p := strings.TrimSpace(pathStr)
 	if p != "" {
 		abs, err := vfs.CleanPath(p)
 		if err != nil {
 			return uuid.Nil, "", err
 		}
-		obj, err := b.engine.GetByProperty(ctx, b.sc.Scope(), brain.PropVFSPath, abs)
+		obj, err := b.engine.GetByProperty(ctx, scope, brain.PropVFSPath, abs)
 		if err == nil {
 			if requireFirstClass && obj.ParentID != nil {
 				return uuid.Nil, "", fmt.Errorf("%s must be a first-class object (not a chunk)", field)
@@ -631,7 +686,7 @@ func (b brainTools) resolveFileRef(ctx context.Context, pathStr, idStr, field st
 		}
 		if b.deps.Indexer != nil {
 			id := b.deps.Indexer.DocumentID(abs)
-			obj, err := b.engine.Read(ctx, b.sc.Scope(), id)
+			obj, err := b.engine.Read(ctx, scope, id)
 			if err != nil {
 				if errors.Is(err, brain.ErrNotFound) {
 					return uuid.Nil, "", fmt.Errorf("%s path %s is not indexed (index_file first)", field, abs)
@@ -659,7 +714,7 @@ func (b brainTools) resolveFileRef(ctx context.Context, pathStr, idStr, field st
 	if err != nil {
 		return uuid.Nil, "", err
 	}
-	obj, err := b.engine.Read(ctx, b.sc.Scope(), id)
+	obj, err := b.engine.Read(ctx, scope, id)
 	if err != nil && !errors.Is(err, brain.ErrNotFound) {
 		return uuid.Nil, "", err
 	}

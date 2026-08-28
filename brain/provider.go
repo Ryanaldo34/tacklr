@@ -20,7 +20,7 @@ import (
 // Mount layout and factory defaults.
 const (
 	DefaultProfile    = "brain"
-	DefaultMountPoint = "/engram"
+	DefaultMountPoint = "/workspace/engram"
 	ModePrefix        = "prefix"
 	ModeRoots         = "roots"
 	// MaxEngramReadDir caps Provider ReadDir / ListByKind listings (paginate later).
@@ -30,6 +30,7 @@ const (
 // MountForKind selects the roots mount for kind, then a prefix mount, then any
 // brain mount. Harness tool adapters use this canonical layout resolver.
 func MountForKind(specs []vfs.MountSpec, kind string) (vfs.MountSpec, bool) {
+	specs = flattenMountSpecs(specs)
 	var prefix vfs.MountSpec
 	var hasPrefix bool
 	for _, spec := range specs {
@@ -55,27 +56,34 @@ func MountForKind(specs []vfs.MountSpec, kind string) (vfs.MountSpec, bool) {
 	return vfs.MountSpec{}, false
 }
 
-// BrainFactory opens a vfs.Provider over Engine objects (Engrams as Markdown files).
-// Profile() is ID or DefaultProfile ("brain"). vfs stays brain-free.
-type BrainFactory struct {
-	ID     string
-	Engine *Engine
-	Scope  Scope
-	Mode   string   // roots | prefix; MountSpec.Params["mode"] wins; default prefix
-	Kinds  []string // optional allow-list; Params["kinds"] wins
-}
-
-// Profile implements vfs.ProviderFactory.
-func (f BrainFactory) Profile() string {
-	if id := strings.TrimSpace(f.ID); id != "" {
-		return id
+func flattenMountSpecs(specs []vfs.MountSpec) []vfs.MountSpec {
+	var out []vfs.MountSpec
+	for _, spec := range specs {
+		if len(spec.Members) == 0 {
+			out = append(out, spec)
+			continue
+		}
+		for _, m := range spec.Members {
+			cp := m
+			if strings.TrimSpace(cp.Point) == "" {
+				name := strings.TrimSpace(m.Params[vfs.ParamName])
+				if name == "" {
+					name = strings.TrimSpace(m.Profile)
+				}
+				cp.Point = spec.Point + "/" + name
+			}
+			out = append(out, cp)
+		}
 	}
-	return DefaultProfile
+	return out
 }
 
-// Open implements vfs.ProviderFactory.
-func (f BrainFactory) Open(_ context.Context, _ string, spec vfs.MountSpec) (vfs.Provider, error) {
-	return newEngramProvider(f, spec)
+// Open returns a vfs.Open over Engine objects (Engrams as Markdown files).
+// Hosts pass At("engram", brain.Open(eng, scope)).
+func Open(eng *Engine, scope Scope) vfs.Open {
+	return func(_ context.Context, _ string, b vfs.Binding) (vfs.Provider, error) {
+		return newEngramProvider(eng, scope, vfs.MountSpec{Params: b.Params, Point: b.Point})
+	}
 }
 
 type engramProvider struct {
@@ -87,19 +95,18 @@ type engramProvider struct {
 	allow []string // allow-list (canonical kind names); empty = catalog parents / open
 }
 
-func newEngramProvider(f BrainFactory, spec vfs.MountSpec) (*engramProvider, error) {
-	if f.Engine == nil {
+func newEngramProvider(eng *Engine, scope Scope, spec vfs.MountSpec) (*engramProvider, error) {
+	if eng == nil {
 		return nil, fmt.Errorf("brain: engine is required")
 	}
-	if f.Scope.Namespace == nil || *f.Scope.Namespace == uuid.Nil {
-		return nil, fmt.Errorf("brain: namespace is required")
+	if err := scope.Namespace.Validate(); err != nil {
+		return nil, err
 	}
-	ns := *f.Scope.Namespace
 	p := &engramProvider{
-		eng:   f.Engine,
-		scope: Scope{Namespace: &ns},
+		eng:   eng,
+		scope: Scope{Namespace: scope.Namespace.Clone()},
 		point: spec.Point,
-		mode:  strings.ToLower(strings.TrimSpace(paramOr(spec.Params, "mode", f.Mode))),
+		mode:  strings.ToLower(strings.TrimSpace(paramOr(spec.Params, "mode", ""))),
 	}
 	if p.point == "" {
 		p.point = DefaultMountPoint
@@ -110,7 +117,7 @@ func newEngramProvider(f BrainFactory, spec vfs.MountSpec) (*engramProvider, err
 	if p.mode != ModePrefix && p.mode != ModeRoots {
 		return nil, fmt.Errorf("brain: mode must be %s or %s", ModePrefix, ModeRoots)
 	}
-	if kinds := paramOr(spec.Params, "kinds", strings.Join(f.Kinds, ",")); kinds != "" {
+	if kinds := paramOr(spec.Params, "kinds", ""); kinds != "" {
 		for _, k := range strings.Split(kinds, ",") {
 			k = strings.TrimSpace(k)
 			if k != "" {
@@ -555,7 +562,7 @@ func (p *engramProvider) commit(ctx context.Context, rel string, data []byte) er
 		return fmt.Errorf("brain: kind %q is not allowed on this mount", f.Kind)
 	}
 	obj := ObjectFromEngram(f)
-	obj.NamespaceID = *p.scope.Namespace
+	obj.Namespace = p.scope.Namespace.Clone()
 	vpath := EngramPath(p.point, p.mode, obj.Kind, f.Slug)
 	if obj.Properties == nil {
 		obj.Properties = map[string]any{}
@@ -611,8 +618,7 @@ func (f *engramWriteFile) Stat() (vfs.FileInfo, error) {
 }
 
 var (
-	_ vfs.Provider        = (*engramProvider)(nil)
-	_ vfs.ProviderFactory = BrainFactory{}
-	_ vfs.File            = (*engramReadFile)(nil)
-	_ vfs.File            = (*engramWriteFile)(nil)
+	_ vfs.Provider = (*engramProvider)(nil)
+	_ vfs.File     = (*engramReadFile)(nil)
+	_ vfs.File     = (*engramWriteFile)(nil)
 )

@@ -26,7 +26,7 @@ func TestBrainTools_saveDiscoveryAndLink(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ns := uuid.New()
+	ns := mustNS(t, "id", uuid.NewString())
 	h := mustNewTurnManager(t, AgentOptions{
 		Config: Config{MaxWindowSize: 1024},
 		Model:  &mockStrategy{},
@@ -36,7 +36,7 @@ func TestBrainTools_saveDiscoveryAndLink(t *testing.T) {
 			Fact:      "Fact",
 			// Memory empty → tool not registered
 		},
-		SearchNamespace: &ns,
+		SearchNamespace: ns,
 	})
 
 	saveDisc := h.findTool("save_discovery", "")
@@ -145,14 +145,14 @@ func TestBrainTools_saveDiscoveryAndLink(t *testing.T) {
 func TestBrainTools_hostNamespaceScopedRead(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	ns := uuid.New()
-	other := uuid.New()
+	ns := mustNS(t, "id", uuid.NewString())
+	other := mustNS(t, "org", "other")
 	docID := uuid.New()
 
 	if err := store.Put(context.Background(), brain.Object{
 		ID: docID, Kind: "Document", Title: "Deal memo",
 		Summary: "Q3", Content: "full body", ContentType: "text/plain",
-		NamespaceID: ns, Properties: map[string]any{"stage": "negotiation"},
+		Namespace: ns, Properties: map[string]any{"stage": "negotiation"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -171,10 +171,10 @@ func TestBrainTools_hostNamespaceScopedRead(t *testing.T) {
 		Config:          Config{MaxWindowSize: 1024},
 		Model:           &mockStrategy{},
 		Brain:           eng,
-		SearchNamespace: &ns,
+		SearchNamespace: ns,
 	})
 	gotNS, ok := h.session.Search.Namespace()
-	if !ok || gotNS != ns {
+	if !ok || !gotNS.Equal(ns) {
 		t.Fatalf("SearchNamespace from options: %v %v", gotNS, ok)
 	}
 
@@ -232,7 +232,7 @@ func TestBrainTools_hostNamespaceScopedRead(t *testing.T) {
 func TestBrainTools_searchFindExactContinueAndCheckpoint(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	ns := uuid.New()
+	ns := mustNS(t, "id", uuid.NewString())
 	now := time.Now().UTC()
 	var firstParent uuid.UUID
 	for i := 0; i < 4; i++ {
@@ -243,13 +243,13 @@ func TestBrainTools_searchFindExactContinueAndCheckpoint(t *testing.T) {
 		part := uuid.New()
 		pos := 1
 		if err := store.Put(context.Background(), brain.Object{
-			ID: parent, Kind: "Document", Title: "Doc", NamespaceID: ns, UpdatedAt: now,
+			ID: parent, Kind: "Document", Title: "Doc", Namespace: ns, UpdatedAt: now,
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if err := store.Put(context.Background(), brain.Object{
 			ID: part, Kind: "Chunk", Title: "knowledge-chunk", Content: "shared knowledge base retrieval material item",
-			ParentID: &parent, Position: &pos, NamespaceID: ns, UpdatedAt: now,
+			ParentID: &parent, Position: &pos, Namespace: ns, UpdatedAt: now,
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -264,7 +264,7 @@ func TestBrainTools_searchFindExactContinueAndCheckpoint(t *testing.T) {
 		Config:          Config{MaxWindowSize: 1024},
 		Model:           &mockStrategy{},
 		Brain:           eng,
-		SearchNamespace: &ns,
+		SearchNamespace: ns,
 		SessionID:       "brain-sc-1",
 	})
 
@@ -291,7 +291,7 @@ func TestBrainTools_searchFindExactContinueAndCheckpoint(t *testing.T) {
 		Config:          Config{MaxWindowSize: 1024},
 		Model:           &mockStrategy{},
 		Brain:           eng,
-		SearchNamespace: &ns,
+		SearchNamespace: ns,
 		SessionID:       "brain-sc-1",
 	})
 	out2, err := h2.findTool("continue", "").invoke(ctx, `{"result_set_id":"`+page.ResultSetID.String()+`","limit":2}`, turnRuntime(h2))
@@ -352,15 +352,15 @@ func TestBrainTools_searchFindExactContinueAndCheckpoint(t *testing.T) {
 func TestBrainTools_expandChildren(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	ns := uuid.New()
+	ns := mustNS(t, "id", uuid.NewString())
 	now := time.Now().UTC()
 	parent := uuid.New()
 	child := uuid.New()
 	pos := 1
-	_ = store.Put(context.Background(), brain.Object{ID: parent, Kind: "Document", Title: "P", NamespaceID: ns, UpdatedAt: now})
+	_ = store.Put(context.Background(), brain.Object{ID: parent, Kind: "Document", Title: "P", Namespace: ns, UpdatedAt: now})
 	_ = store.Put(context.Background(), brain.Object{
 		ID: child, Kind: "Chunk", Title: "C", Content: "secret",
-		ParentID: &parent, Position: &pos, NamespaceID: ns, UpdatedAt: now,
+		ParentID: &parent, Position: &pos, Namespace: ns, UpdatedAt: now,
 	})
 	eng, err := brain.NewEngine(store)
 	if err != nil {
@@ -368,7 +368,7 @@ func TestBrainTools_expandChildren(t *testing.T) {
 	}
 	h := mustNewTurnManager(t, AgentOptions{
 		Config: Config{MaxWindowSize: 1024}, Model: &mockStrategy{},
-		Brain: eng, SearchNamespace: &ns,
+		Brain: eng, SearchNamespace: ns,
 	})
 	tool := h.findTool("expand", "")
 	if tool == nil {
@@ -396,13 +396,13 @@ func TestBrainTools_expandMultiHopAndFindLinks(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
 	g := brain.NewMemoryGraph()
-	ns := uuid.New()
+	ns := mustNS(t, "id", uuid.NewString())
 	now := time.Now().UTC()
 	factID, dealID, buyerID := uuid.New(), uuid.New(), uuid.New()
 	for _, o := range []brain.Object{
-		{ID: factID, Kind: "Fact", Title: "Risk note", NamespaceID: ns, UpdatedAt: now},
-		{ID: dealID, Kind: "Deal", Title: "Acme", NamespaceID: ns, UpdatedAt: now},
-		{ID: buyerID, Kind: "Person", Title: "Pat Buyer", NamespaceID: ns, UpdatedAt: now},
+		{ID: factID, Kind: "Fact", Title: "Risk note", Namespace: ns, UpdatedAt: now},
+		{ID: dealID, Kind: "Deal", Title: "Acme", Namespace: ns, UpdatedAt: now},
+		{ID: buyerID, Kind: "Person", Title: "Pat Buyer", Namespace: ns, UpdatedAt: now},
 	} {
 		if err := store.Put(ctx, o); err != nil {
 			t.Fatal(err)
@@ -423,7 +423,7 @@ func TestBrainTools_expandMultiHopAndFindLinks(t *testing.T) {
 	}
 	h := mustNewTurnManager(t, AgentOptions{
 		Config: Config{MaxWindowSize: 1024}, Model: &mockStrategy{},
-		Brain: eng, SearchNamespace: &ns,
+		Brain: eng, SearchNamespace: ns,
 	})
 	expand := h.findTool("expand", "")
 	findLinks := h.findTool("find_links", "")
@@ -469,15 +469,15 @@ func TestBrainTools_expandMultiHopAndFindLinks(t *testing.T) {
 func TestBrainTools_searchNamespaceIsolation(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	nsA, nsB := uuid.New(), uuid.New()
+	nsA, nsB := mustNS(t, "org", "a"), mustNS(t, "org", "b")
 	now := time.Now().UTC()
 	secretParent := uuid.New()
 	secretPart := uuid.New()
 	pos := 1
-	_ = store.Put(ctx, brain.Object{ID: secretParent, Kind: "Document", Title: "Secret deal", NamespaceID: nsA, UpdatedAt: now})
+	_ = store.Put(ctx, brain.Object{ID: secretParent, Kind: "Document", Title: "Secret deal", Namespace: nsA, UpdatedAt: now})
 	_ = store.Put(ctx, brain.Object{
 		ID: secretPart, Kind: "Chunk", Title: "chunk", Content: "namespace isolation secret token xyzzy",
-		ParentID: &secretParent, Position: &pos, NamespaceID: nsA, UpdatedAt: now,
+		ParentID: &secretParent, Position: &pos, Namespace: nsA, UpdatedAt: now,
 	})
 	eng, err := brain.NewEngine(store)
 	if err != nil {
@@ -486,7 +486,7 @@ func TestBrainTools_searchNamespaceIsolation(t *testing.T) {
 	// Agent scoped to nsB only.
 	h := mustNewTurnManager(t, AgentOptions{
 		Config: Config{MaxWindowSize: 1024}, Model: &mockStrategy{},
-		Brain: eng, SearchNamespace: &nsB,
+		Brain: eng, SearchNamespace: nsB,
 	})
 	search := h.findTool("search", "")
 	read := h.findTool("read_object", "")
@@ -504,16 +504,41 @@ func TestBrainTools_searchNamespaceIsolation(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("read foreign ns want not found, got %v", err)
 	}
+
+	westParent := uuid.New()
+	westPart := uuid.New()
+	_ = store.Put(ctx, brain.Object{ID: westParent, Kind: "Document", Title: "West deal", Namespace: mustNS(t, "org", "b", "workspace", "west"), UpdatedAt: now})
+	_ = store.Put(ctx, brain.Object{
+		ID: westPart, Kind: "Chunk", Title: "chunk", Content: "per-call workspace west token plugh",
+		ParentID: &westParent, Position: &pos, Namespace: mustNS(t, "org", "b", "workspace", "west"), UpdatedAt: now,
+	})
+	narrow, err := search.invoke(ctx, `{"query":"per-call workspace west token plugh","limit":10,"namespace":[{"name":"workspace","value":"west"}]}`, turnRuntime(h))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(narrow.output, westParent.String()) {
+		t.Fatalf("workspace=west search should hit west object: %s", narrow.output)
+	}
+	east, err := search.invoke(ctx, `{"query":"per-call workspace west token plugh","limit":10,"namespace":[{"name":"workspace","value":"east"}]}`, turnRuntime(h))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(east.output, westParent.String()) || strings.Contains(east.output, "plugh") {
+		t.Fatalf("workspace=east search leaked west object: %s", east.output)
+	}
+	if _, err := search.invoke(ctx, `{"query":"x","namespace":[{"name":"org","value":"a"}]}`, turnRuntime(h)); err == nil || !strings.Contains(err.Error(), "outside host scope") {
+		t.Fatalf("conflicting org: %v", err)
+	}
 }
 
 func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	ns := uuid.New()
+	ns := mustNS(t, "id", uuid.NewString())
 	docID := uuid.New()
 	if err := store.Put(context.Background(), brain.Object{
 		ID: docID, Kind: "Document", Title: "Shared", Content: "worker-visible",
-		NamespaceID: ns,
+		Namespace: ns,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -521,10 +546,10 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 	parent := uuid.New()
 	part := uuid.New()
 	pos := 1
-	_ = store.Put(context.Background(), brain.Object{ID: parent, Kind: "Document", Title: "P", NamespaceID: ns})
+	_ = store.Put(context.Background(), brain.Object{ID: parent, Kind: "Document", Title: "P", Namespace: ns})
 	_ = store.Put(context.Background(), brain.Object{
 		ID: part, Kind: "Chunk", Content: "worker search isolation token",
-		ParentID: &parent, Position: &pos, NamespaceID: ns,
+		ParentID: &parent, Position: &pos, Namespace: ns,
 	})
 
 	eng, err := brain.NewEngine(store)
@@ -541,7 +566,7 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 		Config:          Config{MaxWindowSize: 1024},
 		Model:           &mockStrategy{},
 		Brain:           eng,
-		SearchNamespace: &ns,
+		SearchNamespace: ns,
 		Specialists: []*Specialist{
 			{Name: "researcher", Model: workerModel},
 		},
@@ -549,13 +574,13 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 	parentH := mustNewTurnManager(t, parentOpts)
 	t.Cleanup(parentH.Close)
 	workerOpts := parentOpts.WithSpecialist(parentH.specialists["researcher"])
-	workerOpts.SearchNamespace = &ns
+	workerOpts.SearchNamespace = ns
 	workerOpts.SessionID = "w/researcher/spawn_tc1"
 	worker := mustNewTurnManager(t, workerOpts)
 	t.Cleanup(worker.Close)
 
 	gotNS, ok := worker.session.Search.Namespace()
-	if !ok || gotNS != ns {
+	if !ok || !gotNS.Equal(ns) {
 		t.Fatalf("worker namespace %v %v, want %v", gotNS, ok, ns)
 	}
 
@@ -581,7 +606,7 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 
 	parentH.session.Search.ClearNamespace()
 	gotNS, ok = worker.session.Search.Namespace()
-	if !ok || gotNS != ns {
+	if !ok || !gotNS.Equal(ns) {
 		t.Fatalf("worker namespace after parent clear: %v %v", gotNS, ok)
 	}
 }
@@ -590,17 +615,6 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 // return neighbor paths; unindexed /work artifact fails until index_file.
 func TestBrainTools_engramPathGraph(t *testing.T) {
 	ctx := context.Background()
-	reg := vfs.NewBackendRegistry()
-	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: t.TempDir()}); err != nil {
-		t.Fatal(err)
-	}
-	ms, err := vfs.NewMountSession("engram-graph", reg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
-		t.Fatal(err)
-	}
 	g := brain.NewMemoryGraph()
 	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithGraph(g), brain.WithKinds(
 		brain.KindSpec{Kind: "Deal", IsParent: true},
@@ -615,20 +629,23 @@ func TestBrainTools_engramPathGraph(t *testing.T) {
 	)...); err != nil {
 		t.Fatal(err)
 	}
-	ns := uuid.New()
-	mustMountBrain(ctx, t, reg, ms, eng, ns, vfs.MountSpec{})
+	ns := mustNS(t, "id", uuid.NewString())
+	ms := mustMountTree(t, "engram-graph",
+		vfs.At("work", vfs.Local(t.TempDir())),
+		vfs.At("engram", brain.Open(eng, brain.Scope{Namespace: ns})),
+	)
 	h := mustNewTurnManager(t, AgentOptions{
 		SessionID:    "engram-graph",
 		MountSession: ms, Model: &mockStrategy{},
-		Brain: eng, SearchNamespace: &ns,
+		Brain: eng, SearchNamespace: ns,
 	})
 	t.Cleanup(h.Close)
 	activatePlan(t, h)
 
-	if err := ms.WriteFile(ctx, "/engram/deal/acme.md", []byte("---\ndomain: Deal\nslug: acme\n---\n\nDeal body.\n")); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/engram/deal/acme.md", []byte("---\ndomain: Deal\nslug: acme\n---\n\nDeal body.\n")); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.WriteFile(ctx, "/engram/person/sam.md", []byte("---\ndomain: Person\nslug: sam\n---\n\nBuyer.\n")); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/engram/person/sam.md", []byte("---\ndomain: Person\nslug: sam\n---\n\nBuyer.\n")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -639,18 +656,18 @@ func TestBrainTools_engramPathGraph(t *testing.T) {
 		t.Fatal("link/expand/find_links required")
 	}
 	lout, err := link.invoke(ctx, `{
-		"from":"/engram/deal/acme.md","to":"/engram/person/sam.md",
+		"from":"/workspace/engram/deal/acme.md","to":"/workspace/engram/person/sam.md",
 		"relation_type":"has_contact","role":"buyer","note":"primary buyer"
 	}`, turnRuntime(h))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(lout.output, "/engram/deal/acme.md") || !strings.Contains(lout.output, "/engram/person/sam.md") {
+	if !strings.Contains(lout.output, "/workspace/engram/deal/acme.md") || !strings.Contains(lout.output, "/workspace/engram/person/sam.md") {
 		t.Fatalf("link paths: %s", lout.output)
 	}
 
-	eout, err := expand.invoke(ctx, `{"path":"/engram/deal/acme.md","relation_types":["has_contact"]}`, turnRuntime(h))
-	if err != nil || !strings.Contains(eout.output, "/engram/person/sam.md") {
+	eout, err := expand.invoke(ctx, `{"path":"/workspace/engram/deal/acme.md","relation_types":["has_contact"]}`, turnRuntime(h))
+	if err != nil || !strings.Contains(eout.output, "/workspace/engram/person/sam.md") {
 		t.Fatalf("expand neighbor path: %v %s", err, eout.output)
 	}
 
@@ -661,25 +678,25 @@ func TestBrainTools_engramPathGraph(t *testing.T) {
 	if !strings.Contains(fout.output, "from_path") || !strings.Contains(fout.output, "to_path") {
 		t.Fatalf("find_links path fields: %s", fout.output)
 	}
-	if !strings.Contains(fout.output, "/engram/deal/acme.md") || !strings.Contains(fout.output, "/engram/person/sam.md") {
+	if !strings.Contains(fout.output, "/workspace/engram/deal/acme.md") || !strings.Contains(fout.output, "/workspace/engram/person/sam.md") {
 		t.Fatalf("find_links endpoints: %s", fout.output)
 	}
 
-	if err := ms.WriteFile(ctx, "/work/doc.md", []byte("# Doc\n\nartifact\n")); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/work/doc.md", []byte("# Doc\n\nartifact\n")); err != nil {
 		t.Fatal(err)
 	}
 	_, err = link.invoke(ctx, `{
-		"from":"/work/doc.md","to":"/engram/deal/acme.md","relation_type":"about"
+		"from":"/workspace/work/doc.md","to":"/workspace/engram/deal/acme.md","relation_type":"about"
 	}`, turnRuntime(h))
 	if err == nil || !strings.Contains(err.Error(), "not indexed") {
 		t.Fatalf("unindexed artifact: %v", err)
 	}
 	idx := h.findTool("index_file", "")
-	if _, err := runWriteTool(t, h, idx, `{"path":"/work/doc.md"}`); err != nil {
+	if _, err := runWriteTool(t, h, idx, `{"path":"/workspace/work/doc.md"}`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := link.invoke(ctx, `{
-		"from":"/work/doc.md","to":"/engram/deal/acme.md","relation_type":"about"
+		"from":"/workspace/work/doc.md","to":"/workspace/engram/deal/acme.md","relation_type":"about"
 	}`, turnRuntime(h)); err != nil {
 		t.Fatal(err)
 	}
@@ -689,12 +706,12 @@ func TestBrainTools_engramPathGraph(t *testing.T) {
 		t.Fatal("unlink required")
 	}
 	if _, err := unlink.invoke(ctx, `{
-		"from":"/engram/deal/acme.md","to":"/engram/person/sam.md","relation_type":"has_contact"
+		"from":"/workspace/engram/deal/acme.md","to":"/workspace/engram/person/sam.md","relation_type":"has_contact"
 	}`, turnRuntime(h)); err != nil {
 		t.Fatal(err)
 	}
-	eout2, err := expand.invoke(ctx, `{"path":"/engram/deal/acme.md","relation_types":["has_contact"]}`, turnRuntime(h))
-	if err != nil || strings.Contains(eout2.output, "/engram/person/sam.md") {
+	eout2, err := expand.invoke(ctx, `{"path":"/workspace/engram/deal/acme.md","relation_types":["has_contact"]}`, turnRuntime(h))
+	if err != nil || strings.Contains(eout2.output, "/workspace/engram/person/sam.md") {
 		t.Fatalf("after unlink: %v %s", err, eout2.output)
 	}
 }
@@ -745,10 +762,10 @@ func (s failGetStore) Get(ctx context.Context, scope brain.Scope, id uuid.UUID) 
 func TestBrainTools_resolveFileRefPropagatesStoreFailure(t *testing.T) {
 	ctx := context.Background()
 	mem := brain.NewMemoryStore()
-	ns := uuid.New()
+	ns := mustNS(t, "id", uuid.NewString())
 	id := uuid.New()
 	if err := mem.Put(ctx, brain.Object{
-		ID: id, Kind: "Document", Title: "memo", NamespaceID: ns, UpdatedAt: time.Now().UTC(),
+		ID: id, Kind: "Document", Title: "memo", Namespace: ns, UpdatedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -760,7 +777,7 @@ func TestBrainTools_resolveFileRefPropagatesStoreFailure(t *testing.T) {
 		Config:          Config{MaxWindowSize: 1024},
 		Model:           &mockStrategy{},
 		Brain:           eng,
-		SearchNamespace: &ns,
+		SearchNamespace: ns,
 	})
 	expand := h.findTool("expand", "")
 	if expand == nil {

@@ -11,8 +11,8 @@ import (
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
-// MemoryPoint is the default scratch knowledge mount when no brain Provider exists.
-const MemoryPoint = "/memory"
+// MemoryPoint is the scratch knowledge alias when no brain Provider exists.
+const MemoryPoint = "/workspace/memory"
 
 // Bridge owns mount→brain index lifecycle: indexer, async reindex, selective
 // track set, prefix/watch warm-up. Harness holds this; it is not the agent loop.
@@ -28,15 +28,11 @@ type Bridge struct {
 }
 
 // Start builds an indexer, wires AfterPersist (composing any existing hook),
-// and warms prefix/watch mounts. If attachMemory, mounts /memory (watch) when
-// a scratch profile can serve it (caller already checked).
-func Start(ms *vfs.MountSession, eng *brain.Engine, scope brain.Scope, attachMemory bool) (*Bridge, error) {
+// and warms prefix/watch members under /workspace.
+func Start(ms *vfs.MountSession, eng *brain.Engine, scope brain.Scope) (*Bridge, error) {
 	idx, err := NewMountIndexer(ms, eng, scope)
 	if err != nil {
 		return nil, err
-	}
-	if attachMemory {
-		attachMemoryMount(ms)
 	}
 	b := &Bridge{
 		Indexer: idx,
@@ -71,11 +67,7 @@ func Start(ms *vfs.MountSession, eng *brain.Engine, scope brain.Scope, attachMem
 	})
 	warmCtx, cancel := context.WithCancel(context.Background())
 	b.cancel = cancel
-	for _, spec := range ms.Specs() {
-		if !AutoIndex(spec.IndexPolicy) {
-			continue
-		}
-		point := spec.Point
+	for _, point := range autoIndexPoints(ms.Specs()) {
 		b.wg.Add(1)
 		go func() {
 			defer b.wg.Done()
@@ -162,18 +154,25 @@ func (b *Bridge) Untrack(virtualPath string) {
 	b.mu.Unlock()
 }
 
-func attachMemoryMount(ms *vfs.MountSession) {
-	for _, s := range ms.Specs() {
-		if s.Point == MemoryPoint {
-			return
+func autoIndexPoints(specs []vfs.MountSpec) []string {
+	var points []string
+	for _, spec := range specs {
+		if len(spec.Members) == 0 {
+			if AutoIndex(spec.IndexPolicy) {
+				points = append(points, spec.Point)
+			}
+			continue
+		}
+		for _, m := range spec.Members {
+			if !AutoIndex(m.IndexPolicy) {
+				continue
+			}
+			name := strings.TrimSpace(m.Params[vfs.ParamName])
+			if name == "" {
+				name = strings.TrimSpace(m.Profile)
+			}
+			points = append(points, spec.Point+"/"+name)
 		}
 	}
-	if err := ms.Mount(context.Background(), vfs.MountSpec{
-		Point:       MemoryPoint,
-		Profile:     "scratch",
-		IndexPolicy: PolicyWatch,
-		Params:      map[string]string{"subpath": "memory"},
-	}); err != nil {
-		slog.Debug("vfsindex: knowledge mount skipped", "point", MemoryPoint, "error", err)
-	}
+	return points
 }

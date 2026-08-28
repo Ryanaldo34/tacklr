@@ -18,16 +18,23 @@ Tacklr’s session API is `durable.Runtime`. A `server.Protocol` maps wire frame
 
 The host API is `durable.Runtime` (`inprocess.New` or `temporal.New`). Tests use the same API. `TurnManager` is not a host type.
 
+Host tools on `AgentSpec.Options.Tools` close over their clients at catalog register. That closure is the client for every later turn. Rebuild the tool if the client must change. See [tools.md](tools.md).
+
 ## In-process Runtime
 
 ```go
 cat := durable.NewCatalog("agent")
 cat.Register("agent", durable.AgentSpec{Options: opts})
 rt := inprocess.New(cat, inprocess.WithProjection(vfs.DirectProjection{}))
-id, _ := rt.CreateSession(ctx, durable.CreateSession{AgentID: "agent"})
+id, _ := rt.CreateSession(ctx, durable.CreateSession{
+	AgentID: "agent",
+	State:   map[string]any{"user": "Ada", "company": "Acme"},
+})
 _ = rt.Prompt(ctx, id, durable.Prompt{Text: prompt, Auth: auth})
 sub, _ := rt.Subscribe(ctx, id, 0)
 ```
+
+`State` is session facts tools read with `StateGet`. Update it on a later `Prompt` or `Resume`.
 
 One goroutine per session runs the harness wait loop. HITL parks that goroutine and waits for `Runtime.Resume`. Session conversation lives in `SnapshotStore`.
 
@@ -94,7 +101,7 @@ A model round can emit several tool calls. Each `function_call` is pending until
 | Runtime | How the batch runs | Where leftovers live |
 |---------|--------------------|----------------------|
 | In-process | Parallel `RunToolCall` on one harness; snapshot once at join/yield | SnapshotStore (parked interrupt only) |
-| Temporal | Sequential `Tool` activities (they share SnapshotStore etag) | Workflow history, not the snapshot |
+| Temporal | Sequential `Tool` activities (each loads/saves SnapshotStore) | Workflow history, not the snapshot |
 
 Conversation (window, plan, parked interrupt) is always SnapshotStore. Temporal history is the scheduler: which calls remain after HITL. Do not copy that leftover list into the snapshot.
 
@@ -145,7 +152,7 @@ Runtime, harness, VFS, and Temporal files compile with no protocol imports.
 |-------|----------|----------|
 | SnapshotStore | One Runtime session | Window, plan, parked interrupts, parked-worker checkpoints, VFS recipes (no tokens, no file bytes). Temporal leftover tool calls are **not** stored here. |
 
-`Close` deletes the runtime snapshot. A new session id does not load a previous snapshot.
+`Close` deletes the runtime snapshot. A new session id does not load a previous snapshot. `Save` takes the `Revision` from the last `Load` (zero on first write) so two workers cannot overwrite each other.
 
 ## Map to Azure / Lambda (later)
 

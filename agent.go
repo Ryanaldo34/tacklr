@@ -11,13 +11,9 @@ import (
 	"sync"
 
 	"github.com/ryanaldo34/tacklr/brain"
-	mail "github.com/ryanaldo34/tacklr/email"
 	mcpruntime "github.com/ryanaldo34/tacklr/internal/mcp"
-	session "github.com/ryanaldo34/tacklr/internal/session"
 	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/skills"
-	"github.com/ryanaldo34/tacklr/stores"
-	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/telemetry"
 	"github.com/ryanaldo34/tacklr/vfsindex"
 )
@@ -34,10 +30,10 @@ type TurnManager struct {
 	watchDog              AgentWatchDog
 	maxWindowSize         int
 	maxTurnRequests       int // 0 = unlimited; from Config.MaxTurnRequests
-	session               *session.SessionManager
+	session               *sessionManager
 	specialists           map[string]*Specialist
 	// pendingToolCalls is keyed by tool call id, which is also the wire interrupt id.
-	pendingToolCalls map[string]stores.PendingToolCall
+	pendingToolCalls map[string]PendingToolCall
 	pendingMu        sync.Mutex
 	// childHost, when set, is nested Runtime sessions. Nil: child methods fail.
 	childHost    ChildHost
@@ -47,8 +43,6 @@ type TurnManager struct {
 	// world copied to workers. Planning lock and OnCall are reinstalled.
 	hostInterceptors     []ToolInterceptor
 	hostResultHooks      map[string]ToolResultHook
-	exaAPIKey            string
-	emailProvider        mail.Provider
 	brain                *brain.Engine
 	brainWriteKinds      brain.WriteKinds
 	runCommandUnattended bool
@@ -75,7 +69,7 @@ func (a *TurnManager) BindChildHost(host ChildHost) {
 	a.childHost = host
 }
 
-func (a *TurnManager) pendingSnapshot() map[string]stores.PendingToolCall {
+func (a *TurnManager) pendingSnapshot() map[string]PendingToolCall {
 	a.pendingMu.Lock()
 	defer a.pendingMu.Unlock()
 	return maps.Clone(a.pendingToolCalls)
@@ -298,7 +292,7 @@ func (a *TurnManager) streamChunk(chunk LLMResponseChunk, out chan<- StreamEvent
 		return
 	}
 	toolCalls := chunk.ToolCalls
-	if chunk.Type == streaming.StreamEventFunctionCall && len(chunk.ToolCalls) > 0 {
+	if chunk.Type == StreamEventFunctionCall && len(chunk.ToolCalls) > 0 {
 		toolCalls = append([]ToolCall(nil), chunk.ToolCalls...)
 		for i := range toolCalls {
 			toolCalls[i] = a.withToolPresentation(toolCalls[i])
@@ -379,7 +373,7 @@ func (a *TurnManager) emitPlanUpdate(out chan<- StreamEvent) {
 		return
 	}
 	data, _ := json.Marshal(todos)
-	out <- StreamEvent{Type: streaming.StreamEventPlanUpdate, Data: data}
+	out <- StreamEvent{Type: StreamEventPlanUpdate, Data: data}
 }
 
 func (a *TurnManager) hasOpenToolWork() bool {
@@ -444,7 +438,7 @@ func (a *TurnManager) pairCancelledToolResults(out chan<- StreamEvent) {
 
 func (a *TurnManager) clearInterruptParkState() {
 	a.pendingMu.Lock()
-	a.pendingToolCalls = make(map[string]stores.PendingToolCall)
+	a.pendingToolCalls = make(map[string]PendingToolCall)
 	a.pendingMu.Unlock()
 	a.session.ClearInterrupts()
 }

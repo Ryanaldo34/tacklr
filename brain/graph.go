@@ -60,10 +60,11 @@ type GraphWriter interface {
 
 // GraphObjectSearcher finds entity nodes by text and/or vector (Helix native indexes
 // or MemoryGraph in-process). Results are ranked best-first; Engine hydrates under Scope.
-// Optional namespace isolates multi-tenant graphs when the backend supports it.
+// Namespace is applied by MemoryGraph via Covers; Helix returns unscoped candidates
+// and Engine hydrates under Scope.
 type GraphObjectSearcher interface {
-	SearchText(ctx context.Context, query string, limit int, namespace *uuid.UUID) ([]ScoredID, error)
-	SearchVector(ctx context.Context, embedding []float32, limit int, namespace *uuid.UUID) ([]ScoredID, error)
+	SearchText(ctx context.Context, query string, limit int, namespace Namespace) ([]ScoredID, error)
+	SearchVector(ctx context.Context, embedding []float32, limit int, namespace Namespace) ([]ScoredID, error)
 }
 
 // EdgeSearchHit is one graph edge search result (endpoints + meta + score).
@@ -106,7 +107,7 @@ type memGraphNode struct {
 	title      string
 	summary    string
 	searchText string
-	namespace  uuid.UUID
+	namespace  Namespace
 	embedding  []float32
 	updatedAt  time.Time
 }
@@ -135,7 +136,7 @@ func (g *MemoryGraph) EnsureObject(ctx context.Context, obj Object) error {
 		title:      obj.Title,
 		summary:    obj.Summary,
 		searchText: EntityIndexText(obj),
-		namespace:  obj.NamespaceID,
+		namespace:  obj.Namespace.Clone(),
 		updatedAt:  obj.UpdatedAt,
 	}
 	if len(obj.Embedding) > 0 {
@@ -165,7 +166,7 @@ func (g *MemoryGraph) RemoveObject(ctx context.Context, id uuid.UUID) error {
 }
 
 // SearchText implements GraphObjectSearcher (case-fold substring on entity index text).
-func (g *MemoryGraph) SearchText(ctx context.Context, query string, limit int, namespace *uuid.UUID) ([]ScoredID, error) {
+func (g *MemoryGraph) SearchText(ctx context.Context, query string, limit int, namespace Namespace) ([]ScoredID, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -177,7 +178,7 @@ func (g *MemoryGraph) SearchText(ctx context.Context, query string, limit int, n
 	defer g.mu.RUnlock()
 	var scored []ScoredID
 	for id, n := range g.nodes {
-		if namespace != nil && n.namespace != *namespace {
+		if !namespace.Covers(n.namespace) {
 			continue
 		}
 		text := strings.ToLower(n.searchText)
@@ -228,7 +229,7 @@ func (g *MemoryGraph) SearchEdgesText(ctx context.Context, relationType, query s
 }
 
 // SearchVector implements GraphObjectSearcher via cosine similarity on stored embeddings.
-func (g *MemoryGraph) SearchVector(ctx context.Context, embedding []float32, limit int, namespace *uuid.UUID) ([]ScoredID, error) {
+func (g *MemoryGraph) SearchVector(ctx context.Context, embedding []float32, limit int, namespace Namespace) ([]ScoredID, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -239,7 +240,7 @@ func (g *MemoryGraph) SearchVector(ctx context.Context, embedding []float32, lim
 	defer g.mu.RUnlock()
 	var scored []ScoredID
 	for id, n := range g.nodes {
-		if namespace != nil && n.namespace != *namespace {
+		if !namespace.Covers(n.namespace) {
 			continue
 		}
 		if len(n.embedding) != len(embedding) {

@@ -8,6 +8,7 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/ryanaldo34/tacklr/builtins"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -49,28 +50,15 @@ func exportBudgetZip(t *testing.T) []byte {
 
 func mountDriveSheets(t *testing.T, api *memDrive, docs vfs.DocsAPI, sheets vfs.SheetsAPI, writable bool) *vfs.MountSession {
 	t.Helper()
-	auth := vfs.NewSessionAuth()
-	if err := auth.Bind("s", vfs.Binding{
-		Provider: "gdrive", Point: "/contracts",
-		Auth: vfs.Credential{Token: "t"}, Writable: writable,
-		Params: map[string]string{vfs.ParamFolderID: "root-a"},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	reg := vfs.NewBackendRegistry()
-	if err := reg.Register(vfs.DriveFactory{ID: "gdrive", Auth: auth, API: api, Docs: docs, Sheets: sheets}); err != nil {
-		t.Fatal(err)
-	}
-	ms, err := vfs.NewMountSession("s", reg)
+	ms, err := vfs.Tree(vfs.At("contracts", builtins.DriveWith(api, docs, sheets)))(t.Context(), "s", vfs.Request{Bindings: []vfs.Binding{{
+		Provider: "gdrive", Writable: writable,
+		Params: map[string]string{vfs.ParamName: "contracts", vfs.ParamFolderID: "root-a"},
+		Auth:   vfs.Credential{Token: "t"},
+	}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.Mount(t.Context(), vfs.BindingSpec(vfs.Binding{
-		Provider: "gdrive", Point: "/contracts", Writable: writable,
-		Params: map[string]string{vfs.ParamFolderID: "root-a"},
-	})); err != nil {
-		t.Fatal(err)
-	}
+	t.Cleanup(func() { _ = ms.Close() })
 	return ms
 }
 

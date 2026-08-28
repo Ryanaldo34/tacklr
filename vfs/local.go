@@ -326,72 +326,43 @@ func (f *localFile) Stat() (FileInfo, error) {
 	return localFileInfo(f.Name(), info), nil
 }
 
-// LocalFactory opens LocalProviders under a fixed Base directory.
-// Params: "subpath" (optional), "session_scoped=true" (optional).
-// Base stays on the factory (process config); providers never expose host roots.
-//
-// Skills is an optional path relative to Base (use "." for the whole tree).
-// When set, MountSession attaches that tree as a /skills union member.
-type LocalFactory struct {
-	ID     string
-	Base   string
-	Skills string
-}
-
-var _ SkillSource = LocalFactory{}
-
-// Profile implements ProviderFactory.
-func (f LocalFactory) Profile() string { return f.ID }
-
-// SkillMember implements SkillSource.
-func (f LocalFactory) SkillMember() (MountSpec, bool) {
-	root := strings.TrimSpace(f.Skills)
-	if root == "" {
-		return MountSpec{}, false
-	}
-	spec := MountSpec{Profile: f.ID}
-	if root != "." {
-		spec.Params = map[string]string{"subpath": root}
-	}
-	return spec, true
-}
-
 var _ documentBackend = localProvider{}
 
-// Open implements ProviderFactory.
-func (f LocalFactory) Open(ctx context.Context, sessionID string, spec MountSpec) (Provider, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if f.ID == "" {
-		return nil, fmt.Errorf("vfs: local factory needs id and absolute base")
-	}
-	root, err := canonicalizeDir(f.Base)
-	if err != nil {
-		return nil, err
-	}
-	if sub := spec.Params["subpath"]; sub != "" {
-		if filepath.IsAbs(sub) {
-			return nil, fmt.Errorf("vfs: subpath must be relative")
+// Local opens providers under a fixed jail. Params: "subpath" (optional),
+// "session_scoped=true" (optional). The jail stays in the closure; providers
+// never expose host roots.
+func Local(base string) Open {
+	return func(ctx context.Context, sessionID string, b Binding) (Provider, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
-		cleaned := filepath.Clean(sub)
-		if cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
-			return nil, fmt.Errorf("vfs: subpath escapes base")
+		root, err := canonicalizeDir(base)
+		if err != nil {
+			return nil, err
 		}
-		joined := filepath.Join(root, cleaned)
-		if !within(root, joined) {
-			return nil, fmt.Errorf("vfs: subpath escapes base")
+		if sub := b.Params["subpath"]; sub != "" {
+			if filepath.IsAbs(sub) {
+				return nil, fmt.Errorf("vfs: subpath must be relative")
+			}
+			cleaned := filepath.Clean(sub)
+			if cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+				return nil, fmt.Errorf("vfs: subpath escapes base")
+			}
+			joined := filepath.Join(root, cleaned)
+			if !within(root, joined) {
+				return nil, fmt.Errorf("vfs: subpath escapes base")
+			}
+			root = joined
 		}
-		root = joined
-	}
-	if spec.Params["session_scoped"] == "true" && sessionID != "" {
-		if strings.ContainsAny(sessionID, `/\`) || sessionID == ".." || sessionID == "." {
-			return nil, fmt.Errorf("vfs: unsafe session id for path")
+		if b.Params["session_scoped"] == "true" && sessionID != "" {
+			if strings.ContainsAny(sessionID, `/\`) || sessionID == ".." || sessionID == "." {
+				return nil, fmt.Errorf("vfs: unsafe session id for path")
+			}
+			root = filepath.Join(root, sessionID)
 		}
-		root = filepath.Join(root, sessionID)
+		if err := os.MkdirAll(root, 0o750); err != nil {
+			return nil, fmt.Errorf("vfs: mkdir %q: %w", root, err)
+		}
+		return NewLocalProvider(root)
 	}
-	if err := os.MkdirAll(root, 0o750); err != nil {
-		return nil, fmt.Errorf("vfs: mkdir %q: %w", root, err)
-	}
-	return NewLocalProvider(root)
 }

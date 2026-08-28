@@ -159,8 +159,12 @@ func (p filterPlan) sql(scope Scope, startArg int) (string, []any, error) {
 		b.WriteString(")")
 	}
 
-	if scope.Namespace != nil {
-		add("namespace_id = $%d", *scope.Namespace)
+	if !scope.Namespace.Empty() {
+		raw, err := scope.Namespace.Value()
+		if err != nil {
+			return "", nil, fmt.Errorf("brain: marshal namespace: %w", err)
+		}
+		add("namespace @> $%d::jsonb", raw)
 	}
 	for _, pred := range p.preds {
 		switch pred.field {

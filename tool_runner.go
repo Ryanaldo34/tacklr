@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/ryanaldo34/tacklr/internal/session"
 	"github.com/ryanaldo34/tacklr/interrupt"
 )
 
@@ -71,8 +70,8 @@ func ToolPermissionOnCall(inv ToolInvocation) Interrupt {
 }
 
 // onCallMiddleware runs Tool.OnCall constructors in order. Permission memory
-// and interrupt adopt live on SessionManager, not Runtime.
-func onCallMiddleware(sm *session.SessionManager) ToolInterceptor {
+// and interrupt adopt live on sessionManager, not sessionRuntime.
+func onCallMiddleware(sm *sessionManager) ToolInterceptor {
 	return func(ctx context.Context, inv ToolInvocation, next ToolCallFunc) (string, error) {
 		if inv.Tool == nil || len(inv.Tool.onCall) == 0 {
 			return next(ctx, inv)
@@ -89,7 +88,7 @@ func onCallMiddleware(sm *session.SessionManager) ToolInterceptor {
 	}
 }
 
-func applyOnCallLayer(inv *ToolInvocation, ctor OnCallFunc, sm *session.SessionManager) error {
+func applyOnCallLayer(inv *ToolInvocation, ctor OnCallFunc, sm *sessionManager) error {
 	intr := ctor(*inv)
 	if intr == nil {
 		return nil
@@ -105,9 +104,9 @@ func applyOnCallLayer(inv *ToolInvocation, ctor OnCallFunc, sm *session.SessionM
 	}
 	if perm, ok := intr.(*interrupt.ToolPermissionInterrupt); ok {
 		switch sm.Permissions.Decision(perm.ToolName) {
-		case session.PermissionDenyAlways:
+		case permDenyAlways:
 			return finishOnCallLayer(inv, perm.TypeName(), true, sm)
-		case session.PermissionAllowAlways:
+		case permAllowAlways:
 			return finishOnCallLayer(inv, perm.TypeName(), false, sm)
 		}
 	}
@@ -122,8 +121,8 @@ func applyOnCallLayer(inv *ToolInvocation, ctor OnCallFunc, sm *session.SessionM
 	return sm.Park(callID, intr)
 }
 
-func finishOnCallLayer(inv *ToolInvocation, typeName string, denied bool, sm *session.SessionManager) error {
-	sm.OnCall.Record(inv.Runtime.CurrentToolCallID(), typeName, session.OnCallLayer{
+func finishOnCallLayer(inv *ToolInvocation, typeName string, denied bool, sm *sessionManager) error {
+	sm.OnCall.Record(inv.Runtime.CurrentToolCallID(), typeName, onCallLayer{
 		Args:   inv.ArgsJSON,
 		Denied: denied,
 	})
@@ -134,11 +133,11 @@ func finishOnCallLayer(inv *ToolInvocation, typeName string, denied bool, sm *se
 	return nil
 }
 
-func rememberPermission(perms *session.Permissions, perm *interrupt.ToolPermissionInterrupt) {
+func rememberPermission(perms *permissions, perm *interrupt.ToolPermissionInterrupt) {
 	switch perm.SelectedKind {
 	case interrupt.PermissionAllowAlways:
-		perms.Remember(perm.ToolName, session.PermissionAllowAlways)
+		perms.Remember(perm.ToolName, permAllowAlways)
 	case interrupt.PermissionRejectAlways:
-		perms.Remember(perm.ToolName, session.PermissionDenyAlways)
+		perms.Remember(perm.ToolName, permDenyAlways)
 	}
 }

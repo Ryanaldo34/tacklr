@@ -13,7 +13,6 @@ import (
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/mcp"
-	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/telemetry"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
@@ -312,8 +311,8 @@ func (p *acpProtocol) bindTurn(ctx context.Context, env ProtocolEnv, pr *parsedR
 				// No model: reject all non-text.
 				var bad []string
 				for _, m := range mimes {
-					if !streaming.IsTextMIME(m) {
-						bad = append(bad, streaming.NormalizeMIME(m))
+					if !tacklr.IsTextMIME(m) {
+						bad = append(bad, tacklr.NormalizeMIME(m))
 					}
 				}
 				if len(bad) > 0 {

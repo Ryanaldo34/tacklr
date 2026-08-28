@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/ryanaldo34/tacklr/interrupt"
-	"github.com/ryanaldo34/tacklr/streaming"
 )
 
 // Tool definitions, JSON schema, and post-tool ACM result hooks.
@@ -55,7 +54,7 @@ type Tool struct {
 	name        string
 	description string
 	namespace   string
-	category    streaming.ToolCategory
+	category    ToolCategory
 	access      ToolAccess
 	// timeout is an optional per-invocation deadline. Zero means none.
 	timeout time.Duration
@@ -81,7 +80,7 @@ func (t *Tool) Description() string { return t.description }
 func (t *Tool) Namespace() string { return t.namespace }
 
 // Category is the coarse streaming category for client presentation.
-func (t *Tool) Category() streaming.ToolCategory { return t.category }
+func (t *Tool) Category() ToolCategory { return t.category }
 
 // Access is the permission bitmask for this tool.
 func (t *Tool) Access() ToolAccess { return t.access }
@@ -94,13 +93,15 @@ type ToolConfig struct {
 	Description string
 	DisplayName string
 	Namespace   string
-	Category    streaming.ToolCategory
+	Category    ToolCategory
 	Access      ToolAccess
 	Timeout     time.Duration
 	// OnCall is the pre-invoke middleware stack. Each constructor may park.
 	// Return nil from a constructor to skip that layer. Types must be registered.
 	OnCall []OnCallFunc
 
+	// Handler is a Go function. Close over clients in the constructor that calls NewTool.
+	// Optional parameters: context.Context, an args struct, HarnessRuntime.
 	Handler any
 }
 

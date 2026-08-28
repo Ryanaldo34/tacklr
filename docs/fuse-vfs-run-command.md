@@ -36,7 +36,7 @@ The **agent file catalog** is collapsed. Discovery (`find_files`, `find_content`
 
 | Layer | Owner | Rule |
 |-------|--------|------|
-| `MountSession` | Injector (`openTurnVFS`, or embedder) | Fresh tree each turn from `FSBootstrap` + bind recipes |
+| `MountSession` | Injector (`OpenTurnVFS`, or embedder) | Fresh `/workspace` tree each turn from `OpenVFS` + bind tokens |
 | FUSE | Runtime via `vfs.Projection.Attach` | Attach after construct; skip if `HostDir() != ""` |
 | TurnManager | Turn | `NewTurnManager` with `MountSession` set; `Close` parks MCP/vfsindex — **does not** unmount FUSE (workers inherit) |
 | IR | Provider | `WriteDocument` / `WriteFile` persist now. There is no session dirty cache (`vfs/cache.go` is gone). `ReadText` is provider plaintext. |
@@ -44,7 +44,7 @@ The **agent file catalog** is collapsed. Discovery (`find_files`, `find_content`
 
 **Production without a FUSE device.** `OpenTurnVFS` returns nil when `!projection.Available()`. There is no MountSession, so no VFS tools and no `run_command`. Tests that need the tree inject `DirectProjection`. Embedders that want the same in-process tree pass a `MountSession` themselves.
 
-**Path identity (shipped).** FUSE root is virtual `/`. Every `Specs()` point is one segment (`/work`, `/engram`). `FuseMount` rejects multi-segment points. Hosts bootstrap `Point: "/work"` with `LocalFactory.Base` as the jail. Agent tools take `/work/note.md`. Host commands take `work/note.md` relative to `HostDir()`.
+**Path identity (shipped).** FUSE root is virtual `/`. The only `Specs()` point is `/workspace`. `FuseMount` rejects multi-segment points. Hosts `At("work", builtins.Local(jail))`. Agent tools take `/workspace/work/note.md`. Host commands take `workspace/work/note.md` relative to `HostDir()`.
 
 **Byte identity (shipped).** Textual FUSE `Read` / `getattr` use `ReadText`. Binaries use `Stat` + `io.ReaderAt`. Writes are write-through, so host `rg` sees the last persist, not a dirty IR buffer.
 
@@ -61,11 +61,12 @@ The **agent file catalog** is collapsed. Discovery (`find_files`, `find_content`
 | `VFSProjection` / `FuseProjection` / `DirectProjection` | `server/projection.go` |
 | FUSE attach; fail-hard on device + mount fail; skip remount if `HostDir` set | `durable.OpenTurnVFS` |
 | Turn-scoped mounts; TurnManager Close does not unmount | `openTurnVFS`, `EventStream.Close`, `TurnManager.Close` |
-| host `/work` | Runtime `FSBootstrap` `Point: /work` |
+| host `/workspace/work` | `OpenVFS` `At("work", Local(jail))` |
+| host skills packs | `OpenSkills` (host-only Tree; not on the agent `/workspace`) |
 | `run_command` | `tools_vfs.go` |
 | Fuse mount metrics / events | `telemetry` + Registry |
 | go-fuse as a direct module | `go.mod` |
-| Typed park / permission bags on `RestoreCheckpoint` | `session.ApplyCheckpoint` |
+| Typed park / permission bags on `RestoreCheckpoint` | `applyCheckpoint` |
 
 ---
 
@@ -269,7 +270,7 @@ Each PR is independently reviewable. Do not combine Phase 3 removal with the `wr
 - `tools_vfsindex.go` — `index_file` / `unindex` / `find_content` (until PR A)
 - `agent.go` — turn-scoped `Close` (does not close MountSession)
 - `agent_construct.go` — `injectBuiltinTools`
-- Runtime catalog `FSBootstrap` — `Point: /work`
+- Runtime catalog `OpenVFS` — `At("work", Local(jail))`
 - `docs/vfs.md`, `docs/knowledge.md`, `README.md` — update in PR D
 
 ---

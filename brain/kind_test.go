@@ -78,15 +78,15 @@ func TestValidateFiltersAgainst_catalogRules(t *testing.T) {
 		filters brain.Filter
 		wantErr string // empty ⇒ expect success
 	}{
-		{"property requires kind", brain.MustFilter(map[string]any{"stage": "open"}), "require a kind"},
-		{"unregistered kind", brain.MustFilter(map[string]any{"kind": "Orphan"}), "not registered"},
-		{"unknown property", brain.MustFilter(map[string]any{"kind": "Document", "unknown": "x"}), "not filterable"},
-		{"wrong type", brain.MustFilter(map[string]any{"kind": "Document", "stage": 1}), "want string"},
-		{"kind list intersection", brain.MustFilter(map[string]any{"kind": []any{"Document", "Deal"}, "stage": "open"}), "not filterable"},
-		{"valid single kind", brain.MustFilter(map[string]any{"kind": "Document", "stage": "open"}), ""},
-		{"valid list filter", brain.MustFilter(map[string]any{"kind": "Document", "stage": []any{"open", "closed"}}), ""},
-		{"valid shared field on one kind", brain.MustFilter(map[string]any{"kind": "Deal", "amount": 42}), ""},
-		{"valid multi-kind shared field", brain.MustFilter(map[string]any{"kind": []any{"Document", "Deal"}, "amount": 1.5}), ""},
+		{"property requires kind", mustFilter(t, map[string]any{"stage": "open"}), "require a kind"},
+		{"unregistered kind", mustFilter(t, map[string]any{"kind": "Orphan"}), "not registered"},
+		{"unknown property", mustFilter(t, map[string]any{"kind": "Document", "unknown": "x"}), "not filterable"},
+		{"wrong type", mustFilter(t, map[string]any{"kind": "Document", "stage": 1}), "want string"},
+		{"kind list intersection", mustFilter(t, map[string]any{"kind": []any{"Document", "Deal"}, "stage": "open"}), "not filterable"},
+		{"valid single kind", mustFilter(t, map[string]any{"kind": "Document", "stage": "open"}), ""},
+		{"valid list filter", mustFilter(t, map[string]any{"kind": "Document", "stage": []any{"open", "closed"}}), ""},
+		{"valid shared field on one kind", mustFilter(t, map[string]any{"kind": "Deal", "amount": 42}), ""},
+		{"valid multi-kind shared field", mustFilter(t, map[string]any{"kind": []any{"Document", "Deal"}, "amount": 1.5}), ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -124,7 +124,7 @@ func TestEmptyCatalog_openFiltersAndStoreSchema(t *testing.T) {
 	if err != nil || len(res.Kinds) != 1 || res.Kinds[0].Description != "from store" {
 		t.Fatalf("store schema: %+v err=%v", res, err)
 	}
-	if err := brain.ValidateFiltersAgainst(brain.MustFilter(map[string]any{"stage": "open"}), eng.Catalog()); err != nil {
+	if err := brain.ValidateFiltersAgainst(mustFilter(t, map[string]any{"stage": "open"}), eng.Catalog()); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -181,31 +181,31 @@ func TestSchema_prefersCatalog(t *testing.T) {
 func TestSearch_catalogRestrictsKindsAndAllowsFilteredHit(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	ns := uuid.New()
+	ns := mustNS(t, "id", uuid.NewString())
 	now := time.Now().UTC()
 	docID := uuid.New()
 	orphanParent := uuid.New()
 	pos := 1
 
 	if err := store.Put(context.Background(), brain.Object{
-		ID: docID, Kind: "Document", Title: "Deal memo", NamespaceID: ns, UpdatedAt: now,
+		ID: docID, Kind: "Document", Title: "Deal memo", Namespace: ns, UpdatedAt: now,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Put(context.Background(), brain.Object{
 		ID: uuid.New(), Kind: "Chunk", Title: "chunk", Content: "negotiation terms",
-		NamespaceID: ns, UpdatedAt: now, ParentID: &docID, Position: &pos,
+		Namespace: ns, UpdatedAt: now, ParentID: &docID, Position: &pos,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Put(context.Background(), brain.Object{
-		ID: orphanParent, Kind: "OrphanKind", Title: "orphan parent", NamespaceID: ns, UpdatedAt: now,
+		ID: orphanParent, Kind: "OrphanKind", Title: "orphan parent", Namespace: ns, UpdatedAt: now,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Put(context.Background(), brain.Object{
 		ID: uuid.New(), Kind: "OrphanKind", Title: "orphan part", Content: "zzzxorphanonlyphrase",
-		NamespaceID: ns, UpdatedAt: now, ParentID: &orphanParent, Position: &pos,
+		Namespace: ns, UpdatedAt: now, ParentID: &orphanParent, Position: &pos,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -218,10 +218,10 @@ func TestSearch_catalogRestrictsKindsAndAllowsFilteredHit(t *testing.T) {
 		t.Fatal(err)
 	}
 	sc := brain.NewSearchContext()
-	scope := brain.Scope{Namespace: &ns}
+	scope := brain.Scope{Namespace: ns}
 
 	page, err := eng.Search(ctx, scope, brain.SearchRequest{
-		Query: "negotiation", Filters: brain.MustFilter(map[string]any{"kind": "Chunk"}),
+		Query: "negotiation", Filters: mustFilter(t, map[string]any{"kind": "Chunk"}),
 	}, sc)
 	if err != nil {
 		t.Fatal(err)

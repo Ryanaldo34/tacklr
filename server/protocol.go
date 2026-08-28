@@ -6,9 +6,10 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/ryanaldo34/tacklr"
+
 	"github.com/ryanaldo34/tacklr/durable"
 	tacklrsecurity "github.com/ryanaldo34/tacklr/security"
-	"github.com/ryanaldo34/tacklr/streaming"
 )
 
 // Conn is one client connection (WebSocket session, or a logical HTTP request scope).
@@ -68,7 +69,7 @@ type Protocol interface {
 	HandleInbound(ctx context.Context, env ProtocolEnv, body []byte) error
 	HTTPRoutes() []HTTPRoute
 
-	OnStreamEvent(ctx context.Context, env ProtocolEnv, threadID string, ev streaming.StreamEvent, reqID json.RawMessage) StreamControl
+	OnStreamEvent(ctx context.Context, env ProtocolEnv, threadID string, ev tacklr.StreamEvent, reqID json.RawMessage) StreamControl
 	OnStreamClosed(ctx context.Context, env ProtocolEnv, threadID string, reqID json.RawMessage, cancelled bool) error
 }
 

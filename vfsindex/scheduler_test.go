@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
+	"github.com/ryanaldo34/tacklr/builtins"
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfsindex"
 )
@@ -17,18 +18,11 @@ import (
 // waiting on IndexPath, and content becomes searchable.
 func TestAsyncScheduler_notifyCoalesceAndEventualIndex(t *testing.T) {
 	ctx := context.Background()
-	base := t.TempDir()
-	reg := vfs.NewBackendRegistry()
-	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
-		t.Fatal(err)
-	}
-	ms, err := vfs.NewMountSession("async-sched", reg)
+	ms, err := vfs.Tree(vfs.At("work", builtins.Local(t.TempDir())))(ctx, "async-sched", vfs.Request{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
-		t.Fatal(err)
-	}
+	t.Cleanup(func() { _ = ms.Close() })
 	store := brain.NewMemoryStore()
 	eng, err := brain.NewEngine(store)
 	if err != nil {
@@ -37,14 +31,14 @@ func TestAsyncScheduler_notifyCoalesceAndEventualIndex(t *testing.T) {
 	if err := eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...); err != nil {
 		t.Fatal(err)
 	}
-	ns := uuid.New()
-	idx, err := vfsindex.NewMountIndexer(ms, eng, brain.Scope{Namespace: &ns})
+	ns := mustNS(t, "id", uuid.NewString())
+	idx, err := vfsindex.NewMountIndexer(ms, eng, brain.Scope{Namespace: ns})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	body := "async uniquephrase alpha\n"
-	if err := ms.WriteFile(ctx, "/work/a.txt", []byte(body)); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/work/a.txt", []byte(body)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -52,17 +46,17 @@ func TestAsyncScheduler_notifyCoalesceAndEventualIndex(t *testing.T) {
 	defer func() { _ = sched.Close() }()
 
 	// Notify returns without waiting on IndexPath (duplicates coalesce).
-	if err := sched.Notify(ctx, "/work/a.txt", vfsindex.ReasonSync); err != nil {
+	if err := sched.Notify(ctx, "/workspace/work/a.txt", vfsindex.ReasonSync); err != nil {
 		t.Fatal(err)
 	}
-	if err := sched.Notify(ctx, "/work/a.txt", vfsindex.ReasonExplicit); err != nil {
+	if err := sched.Notify(ctx, "/workspace/work/a.txt", vfsindex.ReasonExplicit); err != nil {
 		t.Fatal(err)
 	}
 
 	deadline := time.Now().Add(3 * time.Second)
 	var found bool
 	for time.Now().Before(deadline) {
-		page, err := eng.Search(ctx, brain.Scope{Namespace: &ns}, brain.SearchRequest{Query: "uniquephrase"}, brain.NewSearchContext())
+		page, err := eng.Search(ctx, brain.Scope{Namespace: ns}, brain.SearchRequest{Query: "uniquephrase"}, brain.NewSearchContext())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -80,18 +74,11 @@ func TestAsyncScheduler_notifyCoalesceAndEventualIndex(t *testing.T) {
 // TestIndexPathResult_andUnindex: public helpers return compact outcomes.
 func TestIndexPathResult_andUnindex(t *testing.T) {
 	ctx := context.Background()
-	base := t.TempDir()
-	reg := vfs.NewBackendRegistry()
-	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
-		t.Fatal(err)
-	}
-	ms, err := vfs.NewMountSession("result-unindex", reg)
+	ms, err := vfs.Tree(vfs.At("work", builtins.Local(t.TempDir())))(ctx, "result-unindex", vfs.Request{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
-		t.Fatal(err)
-	}
+	t.Cleanup(func() { _ = ms.Close() })
 	store := brain.NewMemoryStore()
 	eng, err := brain.NewEngine(store)
 	if err != nil {
@@ -100,56 +87,56 @@ func TestIndexPathResult_andUnindex(t *testing.T) {
 	if err := eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...); err != nil {
 		t.Fatal(err)
 	}
-	ns := uuid.New()
-	scope := brain.Scope{Namespace: &ns}
+	ns := mustNS(t, "id", uuid.NewString())
+	scope := brain.Scope{Namespace: ns}
 	idx, err := vfsindex.NewMountIndexer(ms, eng, scope)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if err := ms.WriteFile(ctx, "/work/x.txt", []byte("hello world\n")); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/work/x.txt", []byte("hello world\n")); err != nil {
 		t.Fatal(err)
 	}
-	res, err := idx.IndexPathResult(ctx, "/work/x.txt")
+	res, err := idx.IndexPathResult(ctx, "/workspace/work/x.txt")
 	if err != nil || res != vfsindex.PathIndexed {
 		t.Fatalf("indexed: res=%q err=%v", res, err)
 	}
-	res, err = idx.IndexPathResult(ctx, "/work/x.txt")
+	res, err = idx.IndexPathResult(ctx, "/workspace/work/x.txt")
 	if err != nil || res != vfsindex.PathSkipped {
 		t.Fatalf("skipped: res=%q err=%v", res, err)
 	}
-	res, err = idx.IndexPathResult(ctx, "/work")
+	res, err = idx.IndexPathResult(ctx, "/workspace/work")
 	if err != nil || res != vfsindex.PathDirectory {
 		t.Fatalf("directory: res=%q err=%v", res, err)
 	}
 
-	removed, err := idx.UnindexPath(ctx, "/work/x.txt")
+	removed, err := idx.UnindexPath(ctx, "/workspace/work/x.txt")
 	if err != nil || !removed {
 		t.Fatalf("unindex: removed=%v err=%v", removed, err)
 	}
-	if _, err := ms.Stat(ctx, "/work/x.txt"); err != nil {
+	if _, err := ms.Stat(ctx, "/workspace/work/x.txt"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := eng.Read(ctx, scope, idx.DocumentID("/work/x.txt")); !errors.Is(err, brain.ErrNotFound) {
+	if _, err := eng.Read(ctx, scope, idx.DocumentID("/workspace/work/x.txt")); !errors.Is(err, brain.ErrNotFound) {
 		t.Fatalf("expected soft-deleted parent, got %v", err)
 	}
-	removed, err = idx.UnindexPath(ctx, "/work/x.txt")
+	removed, err = idx.UnindexPath(ctx, "/workspace/work/x.txt")
 	if err != nil || removed {
 		t.Fatalf("noop unindex: removed=%v err=%v", removed, err)
 	}
 
 	// Missing path IndexPathResult → removed (no mirror left)
-	res, err = idx.IndexPathResult(ctx, "/work/missing.txt")
+	res, err = idx.IndexPathResult(ctx, "/workspace/work/missing.txt")
 	if err != nil || res != vfsindex.PathRemoved {
 		t.Fatalf("removed missing: res=%q err=%v", res, err)
 	}
 
 	// WriteDocument persists immediately; IndexPath sees the new body.
-	doc := vfs.NewTextDocument("/work/dirty.txt", "text/plain", "utf-8", "dirtyphrase-only-in-cache\n")
+	doc := vfs.NewTextDocument("/workspace/work/dirty.txt", "text/plain", "utf-8", "dirtyphrase-only-in-cache\n")
 	if err := ms.WriteDocument(ctx, doc); err != nil {
 		t.Fatal(err)
 	}
-	res, err = idx.IndexPathResult(ctx, "/work/dirty.txt")
+	res, err = idx.IndexPathResult(ctx, "/workspace/work/dirty.txt")
 	if err != nil || res != vfsindex.PathIndexed {
 		t.Fatalf("dirty index: res=%q err=%v", res, err)
 	}
@@ -160,7 +147,7 @@ func TestIndexPathResult_andUnindex(t *testing.T) {
 	if len(page.Objects) == 0 {
 		t.Fatal("IndexPath should use session-visible dirty body")
 	}
-	if page.Objects[0].Properties[vfsindex.PropVFSPath] != "/work/dirty.txt" {
+	if page.Objects[0].Properties[vfsindex.PropVFSPath] != "/workspace/work/dirty.txt" {
 		t.Fatalf("unexpected hit: %+v", page.Objects[0])
 	}
 }

@@ -53,6 +53,11 @@ func TestMemoryCatalog_registerPanics(t *testing.T) {
 			s.Options.MountSession = &vfs.MountSession{}
 			NewCatalog("").Register("a", s)
 		}},
+		{"skills session set", func() {
+			s := valid
+			s.Options.SkillsSession = &vfs.MountSession{}
+			NewCatalog("").Register("a", s)
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

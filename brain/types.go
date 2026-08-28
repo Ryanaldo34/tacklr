@@ -24,9 +24,10 @@ var (
 )
 
 // Scope is optional retrieval isolation for Engine methods.
-// When Namespace is non-nil, results are limited to that namespace.
+// Empty Namespace means no isolation. Non-empty applies application RLS
+// (Namespace.Covers) so a broader scope sees objects with extra attrs.
 type Scope struct {
-	Namespace *uuid.UUID
+	Namespace Namespace
 }
 
 // Object is one row from the generic objects store (parent or part).
@@ -41,11 +42,12 @@ type Object struct {
 	ParentID    *uuid.UUID
 	Position    *int
 	// Embedding is optional dense vector for hybrid search fixtures / stores.
-	Embedding   []float32
-	NamespaceID uuid.UUID
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
-	DeletedAt   *time.Time
+	Embedding []float32
+	// Namespace is the ordered named isolation attrs stored on the row.
+	Namespace Namespace
+	CreatedAt time.Time
+	UpdatedAt time.Time
+	DeletedAt *time.Time
 }
 
 // IsPart reports whether the object has a parent containment link.
@@ -197,15 +199,6 @@ func (f Filter) empty() bool {
 		f.CreatedAfter == "" && f.CreatedBefore == "" &&
 		f.UpdatedAfter == "" && f.UpdatedBefore == "" &&
 		len(f.Props) == 0
-}
-
-// MustFilter decodes a JSON-shaped map. Tests and tools use DecodeFilter for errors.
-func MustFilter(m map[string]any) Filter {
-	f, err := DecodeFilter(m)
-	if err != nil {
-		panic(err)
-	}
-	return f
 }
 
 // SearchRequest is the engine input for search and find_exact.
