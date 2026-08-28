@@ -68,7 +68,6 @@ import (
 	"github.com/ryanaldo34/tacklr/builtins"
 	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/durable/inprocess"
-	"github.com/ryanaldo34/tacklr/inference"
 	"github.com/ryanaldo34/tacklr/server"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
@@ -77,7 +76,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	model := inference.NewOpenAIInferenceStrategy(&http.Client{Timeout: 2 * time.Minute})
+	model := builtins.NewOpenAIInferenceStrategy(&http.Client{Timeout: 2 * time.Minute})
 	model.WithURL(os.Getenv("OPENAI_BASE_URL")).
 		WithApiKey(os.Getenv("OPENAI_API_KEY")).
 		WithModel(os.Getenv("OPENAI_MODEL"))
@@ -209,6 +208,7 @@ Register nested agents on `AgentOptions.Specialists`. Tools start them through `
 | Host tools | Your functions; close over clients in the constructor | [docs/tools.md](docs/tools.md) |
 | MCP | External tool servers | [`mcp`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/mcp) |
 | Skills | `SKILL.md` catalogs from `OpenSkills`; the model reads them only through `read_skill` | [`skills`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/skills) |
+| Model | `tacklr.InferenceStrategy`; OpenAI-compatible client is `builtins.NewOpenAIInferenceStrategy` | [`tacklr`](https://pkg.go.dev/github.com/ryanaldo34/tacklr) · [`builtins`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/builtins) |
 | Web | `web_search` and `web_fetch` via `builtins.WebSearch` / `builtins.WebFetch` | [`builtins`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/builtins) |
 | Email | `read_inbox` and permission-gated `send_email` via `builtins.ReadInbox` / `builtins.SendEmail` | [`builtins`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/builtins) |
 | Server | `Protocol` over Runtime; ACP is the native option | [`server`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/server) |
@@ -237,12 +237,11 @@ When VFS is wired, the harness injects file tools over virtual paths only. `run_
 | Package | Role |
 |---------|------|
 | `tacklr` | Harness, tools, plan loop, specialists |
-| `builtins` | Optional tools (email, Exa) and VFS backend constructors |
+| `builtins` | Optional tools (email, Exa), VFS constructors, OpenAI model client |
 | `vfs` | Virtual filesystem, mounts, content IR |
 | `vfsindex` | Optional mount → brain ingest |
 | `brain` | Knowledge engine |
 | `brain/helixgraph` | Optional graph adapter |
-| `inference` | OpenAI-compatible model client |
 | `server` | Protocol host over Runtime |
 | `durable` | Session Runtime (in-process or Temporal) |
 | `stores` | Checkpoint blob (`SessionCheckpoint`) |
@@ -277,6 +276,7 @@ Where to look:
 | Specialists / children | `subagents.go`, `durable/child.go`, `durable/inprocess/` |
 | Runtime | `durable/runtime.go`, `docs/durable.md` |
 | VFS | `vfs/`, `docs/vfs.md` |
+| Model client | `builtins/openai.go` (`tacklr.InferenceStrategy`) |
 | Knowledge | `brain/`, `docs/knowledge.md` |
 | ACP / protocols | `server/` |
 

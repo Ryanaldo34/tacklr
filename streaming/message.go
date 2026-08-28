@@ -1,8 +1,8 @@
 // Package streaming holds protocol-agnostic conversation and stream types
-// shared by inference, the agent harness, and server.Protocol implementations.
+// shared by the harness, builtins model clients, and server.Protocol.
 //
 // Layering:
-//   - inference: provider wire (e.g. OpenAI SSE) → LLMResponseChunk
+//   - builtins: provider wire (e.g. OpenAI SSE) → LLMResponseChunk
 //   - harness: agent loop → StreamEvent (tools, interrupts, complete, cancel)
 //   - server.Protocol: StreamEvent → client wire (ACP, or a host protocol)
 //

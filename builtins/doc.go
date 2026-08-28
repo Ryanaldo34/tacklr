@@ -5,6 +5,9 @@
 // AgentOptions.Tools. The harness does not inject them from AgentOptions
 // fields. Planning and child-session tools stay harness-owned.
 //
+// The OpenAI-compatible model client lives here and implements
+// tacklr.InferenceStrategy. The harness interface stays on package tacklr.
+//
 // VFS backend constructors live here so a host builds a /workspace tree from
 // one import. Tree, At, Union, MountSession, and Provider stay in package vfs.
 // brain.Open stays in package brain.

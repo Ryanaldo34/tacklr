@@ -88,7 +88,7 @@ type ProviderStatus interface {
 
 // InferenceStrategy is the model provider interface used by the harness.
 // Fluent With* builders and SetSystemPrompt live on concrete providers
-// (for example *inference.OpenAIInferenceStrategy), not this interface.
+// (for example *builtins.OpenAIInferenceStrategy), not this interface.
 type InferenceStrategy interface {
 	Invoke(ctx context.Context, messages []*Message, tools []*Tool, systemPrompt string) (chan LLMResponseChunk, error)
 	CountTokens(context.Context, []*Message, []*Tool) (int, error)

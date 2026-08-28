@@ -1,4 +1,4 @@
-package inference
+package builtins
 
 import (
 	"bufio"
@@ -817,7 +817,7 @@ func marshalMessagesToInput(messages []*tacklr.Message) []json.RawMessage {
 	appendJSON := func(v any) {
 		b, err := json.Marshal(v)
 		if err != nil {
-			panic(fmt.Sprintf("inference: marshal internally constructed model input: %v", err))
+			panic(fmt.Sprintf("builtins: marshal internally constructed model input: %v", err))
 		}
 		items = append(items, b)
 	}

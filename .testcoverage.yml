@@ -26,8 +26,6 @@ override:
     threshold: 95
   - path: github.com/ryanaldo34/tacklr/streaming$
     threshold: 100
-  - path: github.com/ryanaldo34/tacklr/inference$
-    threshold: 90
   - path: github.com/ryanaldo34/tacklr/internal/session$
     threshold: 90
   - path: github.com/ryanaldo34/tacklr/builtins$
