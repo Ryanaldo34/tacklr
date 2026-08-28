@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
+	mail "github.com/ryanaldo34/tacklr/email"
 	"github.com/ryanaldo34/tacklr/internal/exa"
 	session "github.com/ryanaldo34/tacklr/internal/session"
 	"github.com/ryanaldo34/tacklr/mcp"
@@ -41,7 +42,8 @@ func (c Config) Validate() error {
 
 // AgentOptions configures NewTurnManager.
 //
-// Usual fields: Config, Model, Tools, MCPConfigs, Specialists, SessionID.
+// Usual fields: Config, Model, Tools, MCPConfigs, EmailProvider, Specialists,
+// SessionID.
 // ContextPolicy knobs (ratios, stream-summary) stay host-settable. Adaptive
 // Case Management itself is harness-owned and cannot be replaced.
 //
@@ -80,6 +82,9 @@ type AgentOptions struct {
 	// ExaAPIKey enables web_search and web_fetch. Empty falls back to EXA_API_KEY.
 	// When both are empty, those tools are not registered.
 	ExaAPIKey string
+	// EmailProvider enables read_inbox and send_email for Gmail or Outlook.
+	// The host owns provider authentication and lifecycle.
+	EmailProvider mail.Provider
 	// Brain enables knowledge builtins when non-nil. Workers inherit the same engine.
 	// Configure Store, optional QueryEmbedder, and optional GraphReader/GraphWriter on the Engine
 	// before NewTurnManager (e.g. brain.WithGraph(helixgraph.New(...))). The harness does
@@ -126,6 +131,7 @@ func NewTurnManager(ctx context.Context, opts AgentOptions) (*TurnManager, error
 		hostInterceptors:      slices.Clone(opts.ToolInterceptors),
 		hostResultHooks:       maps.Clone(opts.ToolResultHooks),
 		exaAPIKey:             resolveExaAPIKey(opts.ExaAPIKey),
+		emailProvider:         opts.EmailProvider,
 		brain:                 opts.Brain,
 		brainWriteKinds:       opts.BrainWriteKinds,
 		sessionId:             opts.SessionID,
@@ -191,6 +197,9 @@ func (opts *AgentOptions) Validate() error {
 			return fmt.Errorf("tacklr: AgentOptions.Tools[%d] is nil", i)
 		}
 	}
+	if err := mail.ValidateProvider(opts.EmailProvider); err != nil {
+		return fmt.Errorf("tacklr: EmailProvider: %w", err)
+	}
 	seenMCP := make(map[string]struct{}, len(opts.MCPConfigs))
 	for i := range opts.MCPConfigs {
 		config := opts.MCPConfigs[i]
@@ -208,12 +217,17 @@ func (opts *AgentOptions) Validate() error {
 	return nil
 }
 
-func (h *TurnManager) finishInit(ctx context.Context, subAgents []*Specialist) error {
+func (h *TurnManager) finishInit(ctx context.Context, specialists []*Specialist) error {
+	if h.emailProvider != nil {
+		if err := h.emailProvider.Validate(ctx); err != nil {
+			return fmt.Errorf("initialize email provider %q: %w", h.emailProvider.Kind(), err)
+		}
+	}
 	if err := h.initSkills(ctx); err != nil {
 		return fmt.Errorf("initialize skills: %w", err)
 	}
 	h.initMCP(ctx)
-	if err := h.initSpecialists(subAgents); err != nil {
+	if err := h.initSpecialists(specialists); err != nil {
 		return err
 	}
 	if h.vfsBridge == nil {
@@ -238,6 +252,9 @@ func (a *TurnManager) injectBuiltinTools() {
 	if key := strings.TrimSpace(a.exaAPIKey); key != "" {
 		client := exa.NewClient(key)
 		a.tools = append(a.tools, newWebSearchTool(client), newWebFetchTool(client))
+	}
+	if a.emailProvider != nil {
+		a.tools = append(a.tools, newEmailTools(a.emailProvider)...)
 	}
 	br := a.vfsBridge
 	if ms := a.session.VFS; ms != nil {
