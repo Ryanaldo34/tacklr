@@ -1,4 +1,4 @@
-package tacklr
+package builtins
 
 import (
 	"context"
@@ -6,19 +6,17 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"os"
 	"regexp"
 	"strings"
 	"time"
 
-	"github.com/ryanaldo34/tacklr/internal/exa"
+	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/streaming"
 )
 
 // Web tools (Exa): web_search for discovery, web_fetch for known URLs.
 
 const (
-	envExaAPIKey            = "EXA_API_KEY"
 	webSearchDefaultResults = 8
 	webSearchMaxResults     = 10
 	webSearchDefaultTextCap = 4000
@@ -49,14 +47,6 @@ type webSearchArgs struct {
 	UserLocation       string   `json:"user_location,omitempty" schema:"-"`
 }
 
-// resolveExaAPIKey returns the API key from options (if set) or EXA_API_KEY env.
-func resolveExaAPIKey(optsKey string) string {
-	if k := strings.TrimSpace(optsKey); k != "" {
-		return k
-	}
-	return strings.TrimSpace(os.Getenv(envExaAPIKey))
-}
-
 // Tool description is the primary guidance surface (not the system prompt).
 const webSearchToolDescription = `Search the live web and return compact result excerpts.
 
@@ -64,18 +54,18 @@ Pass a natural-language question. Optionally set include_domains to stay on spec
 
 Default: query only. For a known page URL, use web_fetch instead of searching again.`
 
-func newWebSearchTool(client *exa.Client) *Tool {
+func WebSearch(client *Exa) *tacklr.Tool {
 	if client == nil {
-		panic("tacklr: web_search requires an Exa client")
+		panic("builtins: web_search requires an Exa client")
 	}
-	return NewTool(ToolConfig{
+	return tacklr.NewTool(tacklr.ToolConfig{
 		Name:        "web_search",
 		DisplayName: "Search: {query}",
 		Description: webSearchToolDescription,
 		Category:    streaming.ToolCategorySearch,
-		Access:      ToolReadAccess,
+		Access:      tacklr.ToolReadAccess,
 		Timeout:     webSearchToolTimeout,
-		Handler: func(ctx context.Context, args webSearchArgs, runtime HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, args webSearchArgs, runtime tacklr.HarnessRuntime) (string, error) {
 			return runWebSearch(ctx, client, args, runtime)
 		},
 	})
@@ -84,11 +74,11 @@ func newWebSearchTool(client *exa.Client) *Tool {
 var siteOperator = regexp.MustCompile(`(?i)\bsite:([^\s]+)`)
 
 type searchPrep struct {
-	req   exa.SearchRequest
+	req   SearchRequest
 	notes []string
 }
 
-func runWebSearch(ctx context.Context, client *exa.Client, args webSearchArgs, runtime HarnessRuntime) (string, error) {
+func runWebSearch(ctx context.Context, client *Exa, args webSearchArgs, runtime tacklr.HarnessRuntime) (string, error) {
 	prep, err := buildExaSearchRequest(args)
 	if err != nil {
 		return "", err
@@ -120,7 +110,7 @@ func runWebSearch(ctx context.Context, client *exa.Client, args webSearchArgs, r
 }
 
 func retryExaConflict(err error) bool {
-	var st *exa.StatusError
+	var st *StatusError
 	if errors.As(err, &st) {
 		return st.PublicationDomain() || st.QueryFixable()
 	}
@@ -131,27 +121,27 @@ func mapExaErr(name string, err error) error {
 	if err == nil {
 		return nil
 	}
-	var st *exa.StatusError
+	var st *StatusError
 	if errors.As(err, &st) {
 		if st.PublicationDomain() {
-			return Correction(err, name+": category=publication cannot filter by domain. Omit category, or drop include_domains/exclude_domains, then search again")
+			return tacklr.Correction(err, name+": category=publication cannot filter by domain. Omit category, or drop include_domains/exclude_domains, then search again")
 		}
 		if st.QueryFixable() {
-			return Correction(err, name+": the search provider rejected that request. Simplify filters (omit category or domain lists) and retry")
+			return tacklr.Correction(err, name+": the search provider rejected that request. Simplify filters (omit category or domain lists) and retry")
 		}
-		return fmt.Errorf("%s: the search provider failed: %w", name, errors.Join(ErrFailed, err))
+		return fmt.Errorf("%s: the search provider failed: %w", name, errors.Join(tacklr.ErrFailed, err))
 	}
-	if errors.Is(err, exa.ErrService) {
-		return fmt.Errorf("%s: the search provider failed: %w", name, errors.Join(ErrFailed, err))
+	if errors.Is(err, ErrService) {
+		return fmt.Errorf("%s: the search provider failed: %w", name, errors.Join(tacklr.ErrFailed, err))
 	}
 	return err
 }
 
-func emptySearch(resp *exa.SearchResponse) bool {
+func emptySearch(resp *SearchResponse) bool {
 	return resp == nil || len(resp.Results) == 0
 }
 
-func hasSearchFilters(req exa.SearchRequest) bool {
+func hasSearchFilters(req SearchRequest) bool {
 	return req.Category != "" || len(req.IncludeDomains) > 0 || len(req.ExcludeDomains) > 0
 }
 
@@ -249,22 +239,22 @@ func buildExaSearchRequest(args webSearchArgs) (searchPrep, error) {
 		textCap = webSearchMaxTextCap
 	}
 
-	contents := &exa.ContentsOptions{}
+	contents := &ContentsOptions{}
 	switch mode {
 	case "highlights":
 		contents.Highlights = true
 	case "text":
-		contents.Text = exa.TextOptions{MaxCharacters: textCap, Verbosity: "compact"}
+		contents.Text = TextOptions{MaxCharacters: textCap, Verbosity: "compact"}
 	case "both":
 		contents.Highlights = true
-		contents.Text = exa.TextOptions{MaxCharacters: textCap, Verbosity: "compact"}
+		contents.Text = TextOptions{MaxCharacters: textCap, Verbosity: "compact"}
 	}
 	if args.MaxAgeHours != nil {
 		contents.MaxAgeHours = args.MaxAgeHours
 	}
 
 	return searchPrep{
-		req: exa.SearchRequest{
+		req: SearchRequest{
 			Query:              query,
 			Type:               searchType,
 			NumResults:         n,
@@ -281,7 +271,7 @@ func buildExaSearchRequest(args webSearchArgs) (searchPrep, error) {
 	}, nil
 }
 
-func formatWebSearchResult(query, searchType string, resp *exa.SearchResponse, notes []string) string {
+func formatWebSearchResult(query, searchType string, resp *SearchResponse, notes []string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Web search results\nQuery: %s\n", query)
 	if len(notes) > 0 {
@@ -306,7 +296,7 @@ func formatWebSearchResult(query, searchType string, resp *exa.SearchResponse, n
 }
 
 // formatExaResults writes shared title/url/highlights/text blocks for search and fetch.
-func formatExaResults(results []exa.SearchResult, textCap int) string {
+func formatExaResults(results []SearchResult, textCap int) string {
 	var b strings.Builder
 	for i, r := range results {
 		title := strings.TrimSpace(r.Title)
@@ -393,24 +383,24 @@ const webFetchToolDescription = `Read the body of known web page URLs.
 
 Use when you already have URLs from web_search, the user, or a citation. Do not use for open-ended discovery — search first. Prefer 1–3 URLs per call.`
 
-func newWebFetchTool(client *exa.Client) *Tool {
+func WebFetch(client *Exa) *tacklr.Tool {
 	if client == nil {
-		panic("tacklr: web_fetch requires an Exa client")
+		panic("builtins: web_fetch requires an Exa client")
 	}
-	return NewTool(ToolConfig{
+	return tacklr.NewTool(tacklr.ToolConfig{
 		Name:        "web_fetch",
 		DisplayName: "Web Fetch",
 		Description: webFetchToolDescription,
 		Category:    streaming.ToolCategoryFetch,
-		Access:      ToolReadAccess,
+		Access:      tacklr.ToolReadAccess,
 		Timeout:     webFetchToolTimeout,
-		Handler: func(ctx context.Context, args webFetchArgs, runtime HarnessRuntime) (string, error) {
+		Handler: func(ctx context.Context, args webFetchArgs, runtime tacklr.HarnessRuntime) (string, error) {
 			return runWebFetch(ctx, client, args, runtime)
 		},
 	})
 }
 
-func runWebFetch(ctx context.Context, client *exa.Client, args webFetchArgs, runtime HarnessRuntime) (string, error) {
+func runWebFetch(ctx context.Context, client *Exa, args webFetchArgs, runtime tacklr.HarnessRuntime) (string, error) {
 	req, err := buildExaContentsRequest(args)
 	if err != nil {
 		return "", err
@@ -423,13 +413,13 @@ func runWebFetch(ctx context.Context, client *exa.Client, args webFetchArgs, run
 	return formatWebFetchResult(req.URLs, resp), nil
 }
 
-func buildExaContentsRequest(args webFetchArgs) (exa.ContentsRequest, error) {
+func buildExaContentsRequest(args webFetchArgs) (ContentsRequest, error) {
 	urls := normalizeFetchURLs(args.URLs)
 	if len(urls) == 0 {
-		return exa.ContentsRequest{}, fmt.Errorf("web_fetch: at least one http(s) url is required")
+		return ContentsRequest{}, fmt.Errorf("web_fetch: at least one http(s) url is required")
 	}
 	if len(urls) > webFetchMaxURLs {
-		return exa.ContentsRequest{}, fmt.Errorf("web_fetch: at most %d urls per call; fetch the most relevant pages first", webFetchMaxURLs)
+		return ContentsRequest{}, fmt.Errorf("web_fetch: at most %d urls per call; fetch the most relevant pages first", webFetchMaxURLs)
 	}
 
 	mode := strings.TrimSpace(args.ContentMode)
@@ -439,7 +429,7 @@ func buildExaContentsRequest(args webFetchArgs) (exa.ContentsRequest, error) {
 	switch mode {
 	case "text", "highlights", "both":
 	default:
-		return exa.ContentsRequest{}, fmt.Errorf("web_fetch: invalid content_mode %q (use text, highlights, both)", mode)
+		return ContentsRequest{}, fmt.Errorf("web_fetch: invalid content_mode %q (use text, highlights, both)", mode)
 	}
 
 	textCap := args.MaxTextCharacters
@@ -450,22 +440,22 @@ func buildExaContentsRequest(args webFetchArgs) (exa.ContentsRequest, error) {
 		textCap = webFetchMaxTextCap
 	}
 
-	req := exa.ContentsRequest{URLs: urls}
+	req := ContentsRequest{URLs: urls}
 	hq := strings.TrimSpace(args.HighlightQuery)
 
 	switch mode {
 	case "text":
-		req.Text = exa.TextOptions{MaxCharacters: textCap, Verbosity: "compact"}
+		req.Text = TextOptions{MaxCharacters: textCap, Verbosity: "compact"}
 	case "highlights":
 		if hq != "" {
-			req.Highlights = exa.HighlightsOptions{Query: hq}
+			req.Highlights = HighlightsOptions{Query: hq}
 		} else {
 			req.Highlights = true
 		}
 	case "both":
-		req.Text = exa.TextOptions{MaxCharacters: textCap, Verbosity: "compact"}
+		req.Text = TextOptions{MaxCharacters: textCap, Verbosity: "compact"}
 		if hq != "" {
-			req.Highlights = exa.HighlightsOptions{Query: hq}
+			req.Highlights = HighlightsOptions{Query: hq}
 		} else {
 			req.Highlights = true
 		}
@@ -504,7 +494,7 @@ func normalizeFetchURLs(in []string) []string {
 	return out
 }
 
-func formatWebFetchResult(requested []string, resp *exa.ContentsResponse) string {
+func formatWebFetchResult(requested []string, resp *ContentsResponse) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Web fetch results\nURLs requested: %d\n", len(requested))
 

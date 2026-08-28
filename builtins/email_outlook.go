@@ -1,5 +1,4 @@
-// Package outlook adapts the official Microsoft Graph SDK to email.Provider.
-package outlook
+package builtins
 
 import (
 	"context"
@@ -11,48 +10,48 @@ import (
 	msgraphsdk "github.com/microsoftgraph/msgraph-sdk-go"
 	"github.com/microsoftgraph/msgraph-sdk-go/models"
 	"github.com/microsoftgraph/msgraph-sdk-go/users"
-
-	provider "github.com/ryanaldo34/tacklr/email"
 )
 
 const maxPage = 100
 
-// Provider implements email.Provider with msgraph-sdk-go. The host constructs
-// the Graph client with the scopes and authentication flow it permits.
-type Provider struct {
+// outlookProvider implements EmailProvider with msgraph-sdk-go.
+type outlookProvider struct {
 	client *msgraphsdk.GraphServiceClient
 }
 
-// New returns an Outlook provider backed by client.
-func New(client *msgraphsdk.GraphServiceClient) *Provider { return &Provider{client: client} }
+// Outlook returns an EmailProvider backed by the official Graph SDK. The host
+// constructs the client with the scopes and authentication flow it permits.
+func Outlook(client *msgraphsdk.GraphServiceClient) EmailProvider {
+	return &outlookProvider{client: client}
+}
 
-func (p *Provider) Kind() provider.ProviderKind { return provider.ProviderOutlook }
+func (p *outlookProvider) Kind() ProviderKind { return ProviderOutlook }
 
 // Validate checks that the official Graph SDK client is present.
-func (p *Provider) Validate(context.Context) error {
+func (p *outlookProvider) Validate(context.Context) error {
 	if p == nil || p.client == nil {
-		return fmt.Errorf("email/%s: Graph client is required", p.Kind())
+		return fmt.Errorf("builtins: outlook Graph client is required")
 	}
 	return nil
 }
 
 // ReadInbox lists messages from the selected Graph mail folder. Mailbox accepts
 // Graph well-known folder names, such as inbox, or a Graph folder ID.
-func (p *Provider) ReadInbox(ctx context.Context, req provider.ReadInboxRequest) (provider.Inbox, error) {
+func (p *outlookProvider) ReadInbox(ctx context.Context, req ReadInboxRequest) (Inbox, error) {
 	if err := p.Validate(ctx); err != nil {
-		return provider.Inbox{}, err
+		return Inbox{}, err
 	}
 	if err := req.Validate(); err != nil {
-		return provider.Inbox{}, err
+		return Inbox{}, err
 	}
 	page, err := p.listMessages(ctx, req)
 	if err != nil {
-		return provider.Inbox{}, fmt.Errorf("email/outlook: list messages: %w", err)
+		return Inbox{}, fmt.Errorf("builtins: outlook: list messages: %w", err)
 	}
 	return inboxFromPage(page), nil
 }
 
-func (p *Provider) listMessages(ctx context.Context, req provider.ReadInboxRequest) (models.MessageCollectionResponseable, error) {
+func (p *outlookProvider) listMessages(ctx context.Context, req ReadInboxRequest) (models.MessageCollectionResponseable, error) {
 	if req.Cursor != "" {
 		if err := validGraphCursor(req.Cursor, p.client.GetAdapter().GetBaseUrl()); err != nil {
 			return nil, err
@@ -80,23 +79,23 @@ func pageSize(limit int) int32 {
 func validGraphCursor(cursor, base string) error {
 	next, err := url.Parse(cursor)
 	if err != nil || next.Scheme == "" || next.Host == "" {
-		return fmt.Errorf("email/outlook: invalid pagination cursor")
+		return fmt.Errorf("builtins: outlook: invalid pagination cursor")
 	}
 	u, err := url.Parse(base)
 	if err != nil || !strings.EqualFold(next.Scheme, u.Scheme) || !strings.EqualFold(next.Host, u.Host) {
-		return fmt.Errorf("email/outlook: pagination cursor is outside the Graph API")
+		return fmt.Errorf("builtins: outlook: pagination cursor is outside the Graph API")
 	}
 	return nil
 }
 
 // SendEmail sends a Graph message. Graph sendMail returns no message ID, so
 // SentEmail is empty after a successful accepted request.
-func (p *Provider) SendEmail(ctx context.Context, req provider.SendEmailRequest) (provider.SentEmail, error) {
+func (p *outlookProvider) SendEmail(ctx context.Context, req SendEmailRequest) (SentEmail, error) {
 	if err := p.Validate(ctx); err != nil {
-		return provider.SentEmail{}, err
+		return SentEmail{}, err
 	}
 	if strings.TrimSpace(req.ReplyToMessageID) != "" {
-		return provider.SentEmail{}, fmt.Errorf("email/outlook: replies are not supported")
+		return SentEmail{}, fmt.Errorf("builtins: outlook: replies are not supported")
 	}
 	message := models.NewMessage()
 	message.SetToRecipients(recipients(req.To))
@@ -113,9 +112,9 @@ func (p *Provider) SendEmail(ctx context.Context, req provider.SendEmailRequest)
 	save := true
 	payload.SetSaveToSentItems(&save)
 	if err := p.client.Me().SendMail().Post(ctx, payload, nil); err != nil {
-		return provider.SentEmail{}, fmt.Errorf("email/outlook: send message: %w", err)
+		return SentEmail{}, fmt.Errorf("builtins: outlook: send message: %w", err)
 	}
-	return provider.SentEmail{}, nil
+	return SentEmail{}, nil
 }
 
 func messageConfig(top int32, filter string) *users.ItemMessagesRequestBuilderGetRequestConfiguration {
@@ -128,7 +127,7 @@ func folderMessageConfig(top int32, filter string) *users.ItemMailFoldersItemMes
 	return &users.ItemMailFoldersItemMessagesRequestBuilderGetRequestConfiguration{QueryParameters: query}
 }
 
-func odataFilter(req provider.ReadInboxRequest) string {
+func odataFilter(req ReadInboxRequest) string {
 	filters := make([]string, 0, 7)
 	if req.From != "" {
 		filters = append(filters, "from/emailAddress/address eq '"+odataString(req.From)+"'")
@@ -159,19 +158,19 @@ func odataString(value string) string { return strings.ReplaceAll(value, "'", "'
 
 var selectedFields = []string{"id", "conversationId", "from", "toRecipients", "ccRecipients", "subject", "body", "receivedDateTime", "isRead"}
 
-func inboxFromPage(page models.MessageCollectionResponseable) provider.Inbox {
-	out := provider.Inbox{}
+func inboxFromPage(page models.MessageCollectionResponseable) Inbox {
+	out := Inbox{}
 	if next := page.GetOdataNextLink(); next != nil {
 		out.NextCursor = *next
 	}
 	for _, message := range page.GetValue() {
-		out.Messages = append(out.Messages, messageFromSDK(message))
+		out.Messages = append(out.Messages, messageFromOutlook(message))
 	}
 	return out
 }
 
-func messageFromSDK(message models.Messageable) provider.Message {
-	out := provider.Message{ID: value(message.GetId()), ThreadID: value(message.GetConversationId()), From: recipient(message.GetFrom()), To: recipientList(message.GetToRecipients()), CC: recipientList(message.GetCcRecipients()), Subject: value(message.GetSubject()), Unread: !boolValue(message.GetIsRead())}
+func messageFromOutlook(message models.Messageable) Message {
+	out := Message{ID: value(message.GetId()), ThreadID: value(message.GetConversationId()), From: recipient(message.GetFrom()), To: recipientList(message.GetToRecipients()), CC: recipientList(message.GetCcRecipients()), Subject: value(message.GetSubject()), Unread: !boolValue(message.GetIsRead())}
 	if body := message.GetBody(); body != nil {
 		out.Body = value(body.GetContent())
 	}

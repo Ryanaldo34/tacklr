@@ -7,6 +7,7 @@
 //   - FuseAvailable — process can mount a kernel tree (/dev/fuse or /dev/macfuse*)
 //   - ContentRev / ContentHash — session-visible content identity (for tools)
 //   - Local / S3 / Blob / Drive / Graph / Memory / Union + AWSS3 / AzureBlob — backends
+//     (also re-exported from package builtins for host construction)
 //   - NewGoogleDrive / NewGraph — SDK wrappers (hosts never import Google/MS SDKs)
 //   - SessionAuth + TokenHolder + Binding — session-scoped user-owned credentials (never on MountSpec)
 //   - MountSpec — durable mount description (checkpoint-safe; Members = /workspace aliases)

@@ -61,8 +61,8 @@ The only top-level mount is **`/workspace`**. Hosts close over clients in `vfs.O
 
 ```go
 open := vfs.Tree(
-	vfs.At("work", vfs.Local("/var/agent/scratch")),
-	vfs.At("skills", vfs.Local("/var/agent/skills")),
+	vfs.At("work", builtins.Local("/var/agent/scratch")),
+	vfs.At("skills", builtins.Local("/var/agent/skills")),
 	vfs.At("engram", brain.Open(eng, scope)),
 )
 ms, err := open(ctx, "sess-1", vfs.Request{})
@@ -72,20 +72,20 @@ User-owned Drive/Graph members are constructed from this turn’s bind (injected
 
 ```go
 func openVFS(ctx context.Context, id string, req vfs.Request) (*vfs.MountSession, error) {
-	members := []vfs.Member{vfs.At("work", vfs.Local(jail))}
+	members := []vfs.Member{vfs.At("work", builtins.Local(jail))}
 	if b, ok := vfs.BindingByName(req.Bindings, "drive"); ok && b.Auth.Token != "" {
 		h := vfs.NewTokenHolder(b.Auth)
-		api, err := vfs.NewGoogleDrive(ctx, h)
+		api, err := builtins.NewGoogleDrive(ctx, h)
 		if err != nil {
 			return nil, err
 		}
-		members = append(members, vfs.At("drive", vfs.Drive(api)))
+		members = append(members, vfs.At("drive", builtins.Drive(api)))
 	}
 	return vfs.Tree(members...)(ctx, id, req)
 }
 ```
 
-Tests inject fakes into the same constructors: `vfs.Drive(fakeAPI)`, `vfs.Graph(fakeAPI, holder, account)`.
+Tests inject fakes into the same constructors: `builtins.Drive(fakeAPI)`, `builtins.Graph(fakeAPI, holder, account)`. The constructors also remain on package `vfs`.
 
 | Type | Meaning |
 |------|---------|
@@ -99,7 +99,7 @@ Tests inject fakes into the same constructors: `vfs.Drive(fakeAPI)`, `vfs.Graph(
 
 ### Skills
 
-Playbooks live at **`/workspace/skills`**. Hosts pass `At("skills", vfs.Local(dir))` or `At("skills", vfs.Union(...))`. The harness loads that directory. Overlapping first-level names in a Union are `ErrAmbiguous`. IndexPolicy is `none`.
+Playbooks live at **`/workspace/skills`**. Hosts pass `At("skills", builtins.Local(dir))` or `At("skills", builtins.Union(...))`. The harness loads that directory. Overlapping first-level names in a Union are `ErrAmbiguous`. IndexPolicy is `none`.
 
 Host-owned roots and secrets (local jail, S3 / Azure Blob client) live in the Open closures, not on mounts or checkpoints.
 

@@ -1,4 +1,4 @@
-package exa
+package builtins
 
 import (
 	"bytes"
@@ -56,16 +56,16 @@ func (e *StatusError) PublicationDomain() bool {
 		strings.Contains(low, "not supported for category=publication")
 }
 
-// Client calls Exa’s Search and Contents APIs.
-type Client struct {
+// Exa calls Exa’s Search and Contents APIs.
+type Exa struct {
 	APIKey     string
 	BaseURL    string
 	HTTPClient *http.Client
 }
 
-// NewClient builds a client for the given API key.
-func NewClient(apiKey string) *Client {
-	return &Client{
+// NewExa builds a client for the given API key.
+func NewExa(apiKey string) *Exa {
+	return &Exa{
 		APIKey:  strings.TrimSpace(apiKey),
 		BaseURL: defaultBaseURL,
 		HTTPClient: &http.Client{
@@ -75,7 +75,7 @@ func NewClient(apiKey string) *Client {
 }
 
 // Search performs POST /search. req.Query must be non-empty.
-func (c *Client) Search(ctx context.Context, req SearchRequest) (*SearchResponse, error) {
+func (c *Exa) Search(ctx context.Context, req SearchRequest) (*SearchResponse, error) {
 	if err := c.requireKey(); err != nil {
 		return nil, err
 	}
@@ -91,7 +91,7 @@ func (c *Client) Search(ctx context.Context, req SearchRequest) (*SearchResponse
 
 // Contents performs POST /contents for known URLs (or prior result ids).
 // Provide at least one of URLs or IDs.
-func (c *Client) Contents(ctx context.Context, req ContentsRequest) (*ContentsResponse, error) {
+func (c *Exa) Contents(ctx context.Context, req ContentsRequest) (*ContentsResponse, error) {
 	if err := c.requireKey(); err != nil {
 		return nil, err
 	}
@@ -108,7 +108,7 @@ func (c *Client) Contents(ctx context.Context, req ContentsRequest) (*ContentsRe
 	return &out, nil
 }
 
-func (c *Client) requireKey() error {
+func (c *Exa) requireKey() error {
 	if c == nil {
 		return fmt.Errorf("exa: client is nil")
 	}
@@ -118,7 +118,7 @@ func (c *Client) requireKey() error {
 	return nil
 }
 
-func (c *Client) postJSON(ctx context.Context, path string, req any, out any) error {
+func (c *Exa) postJSON(ctx context.Context, path string, req any, out any) error {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return fmt.Errorf("exa: marshal request: %w", err)

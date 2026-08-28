@@ -30,7 +30,7 @@ override:
     threshold: 90
   - path: github.com/ryanaldo34/tacklr/internal/session$
     threshold: 90
-  - path: github.com/ryanaldo34/tacklr/internal/exa$
+  - path: github.com/ryanaldo34/tacklr/builtins$
     threshold: 90
   - path: github.com/ryanaldo34/tacklr/interrupt$
     threshold: 90

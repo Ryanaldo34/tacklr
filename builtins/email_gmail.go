@@ -1,5 +1,4 @@
-// Package gmail adapts the official Gmail SDK to email.Provider.
-package gmail
+package builtins
 
 import (
 	"context"
@@ -11,36 +10,36 @@ import (
 	"strings"
 
 	googlemail "google.golang.org/api/gmail/v1"
-
-	provider "github.com/ryanaldo34/tacklr/email"
 )
 
-// Provider implements email.Provider with google.golang.org/api/gmail/v1.
-// Construct the Gmail service with the OAuth scopes your host permits.
-type Provider struct {
+// gmailProvider implements EmailProvider with google.golang.org/api/gmail/v1.
+type gmailProvider struct {
 	service *googlemail.Service
 }
 
-// New returns a Gmail provider backed by service.
-func New(service *googlemail.Service) *Provider { return &Provider{service: service} }
+// Gmail returns an EmailProvider backed by the official Gmail SDK. Construct
+// the service with the OAuth scopes the host permits.
+func Gmail(service *googlemail.Service) EmailProvider {
+	return &gmailProvider{service: service}
+}
 
-func (p *Provider) Kind() provider.ProviderKind { return provider.ProviderGmail }
+func (p *gmailProvider) Kind() ProviderKind { return ProviderGmail }
 
 // Validate checks that the official Gmail SDK client is present.
-func (p *Provider) Validate(context.Context) error {
+func (p *gmailProvider) Validate(context.Context) error {
 	if p == nil || p.service == nil {
-		return fmt.Errorf("email/%s: service is required", p.Kind())
+		return fmt.Errorf("builtins: gmail service is required")
 	}
 	return nil
 }
 
 // ReadInbox lists full messages through the Gmail API.
-func (p *Provider) ReadInbox(ctx context.Context, req provider.ReadInboxRequest) (provider.Inbox, error) {
+func (p *gmailProvider) ReadInbox(ctx context.Context, req ReadInboxRequest) (Inbox, error) {
 	if err := p.Validate(ctx); err != nil {
-		return provider.Inbox{}, err
+		return Inbox{}, err
 	}
 	if err := req.Validate(); err != nil {
-		return provider.Inbox{}, err
+		return Inbox{}, err
 	}
 	call := p.service.Users.Messages.List("me").MaxResults(int64(req.Limit)).Context(ctx)
 	if query := gmailQuery(req); query != "" {
@@ -54,34 +53,34 @@ func (p *Provider) ReadInbox(ctx context.Context, req provider.ReadInboxRequest)
 	}
 	page, err := call.Do()
 	if err != nil {
-		return provider.Inbox{}, fmt.Errorf("email/gmail: list messages: %w", err)
+		return Inbox{}, fmt.Errorf("builtins: gmail list messages: %w", err)
 	}
-	out := provider.Inbox{NextCursor: page.NextPageToken}
+	out := Inbox{NextCursor: page.NextPageToken}
 	for _, item := range page.Messages {
 		message, err := p.service.Users.Messages.Get("me", item.Id).Format("full").Context(ctx).Do()
 		if err != nil {
-			return provider.Inbox{}, fmt.Errorf("email/gmail: get message %q: %w", item.Id, err)
+			return Inbox{}, fmt.Errorf("builtins: gmail get message %q: %w", item.Id, err)
 		}
-		out.Messages = append(out.Messages, messageFromSDK(message))
+		out.Messages = append(out.Messages, messageFromGmail(message))
 	}
 	return out, nil
 }
 
 // SendEmail sends a RFC 2822 message through the Gmail API.
-func (p *Provider) SendEmail(ctx context.Context, req provider.SendEmailRequest) (provider.SentEmail, error) {
+func (p *gmailProvider) SendEmail(ctx context.Context, req SendEmailRequest) (SentEmail, error) {
 	if err := p.Validate(ctx); err != nil {
-		return provider.SentEmail{}, err
+		return SentEmail{}, err
 	}
 	sent, err := p.service.Users.Messages.Send("me", &googlemail.Message{
-		Raw: base64.RawURLEncoding.EncodeToString([]byte(buildMessage(req))),
+		Raw: base64.RawURLEncoding.EncodeToString([]byte(buildGmailMessage(req))),
 	}).Context(ctx).Do()
 	if err != nil {
-		return provider.SentEmail{}, fmt.Errorf("email/gmail: send message: %w", err)
+		return SentEmail{}, fmt.Errorf("builtins: gmail send message: %w", err)
 	}
-	return provider.SentEmail{ID: sent.Id, ThreadID: sent.ThreadId}, nil
+	return SentEmail{ID: sent.Id, ThreadID: sent.ThreadId}, nil
 }
 
-func gmailQuery(req provider.ReadInboxRequest) string {
+func gmailQuery(req ReadInboxRequest) string {
 	terms := make([]string, 0, 7)
 	if req.From != "" {
 		terms = append(terms, "from:"+gmailQuoted(req.From))
@@ -115,7 +114,7 @@ func gmailQuoted(value string) string {
 	return `"` + strings.ReplaceAll(strings.ReplaceAll(value, `\`, `\\`), `"`, `\"`) + `"`
 }
 
-func messageFromSDK(message *googlemail.Message) provider.Message {
+func messageFromGmail(message *googlemail.Message) Message {
 	headers := map[string]string{}
 	if message.Payload != nil {
 		for _, header := range message.Payload.Headers {
@@ -123,7 +122,7 @@ func messageFromSDK(message *googlemail.Message) provider.Message {
 		}
 	}
 	received, _ := mail.ParseDate(headers["date"])
-	return provider.Message{
+	return Message{
 		ID: message.Id, ThreadID: message.ThreadId, From: headers["from"],
 		To: splitAddresses(headers["to"]), CC: splitAddresses(headers["cc"]),
 		Subject: headers["subject"], Body: payloadText(message.Payload), ReceivedAt: received,
@@ -159,7 +158,7 @@ func payloadText(part *googlemail.MessagePart) string {
 	return ""
 }
 
-func buildMessage(req provider.SendEmailRequest) string {
+func buildGmailMessage(req SendEmailRequest) string {
 	var b strings.Builder
 	b.WriteString("To: ")
 	b.WriteString(strings.Join(req.To, ", "))

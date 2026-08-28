@@ -5,11 +5,8 @@ import (
 	"fmt"
 	"maps"
 	"slices"
-	"strings"
 
 	"github.com/ryanaldo34/tacklr/brain"
-	mail "github.com/ryanaldo34/tacklr/email"
-	"github.com/ryanaldo34/tacklr/internal/exa"
 	session "github.com/ryanaldo34/tacklr/internal/session"
 	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/skills"
@@ -40,8 +37,7 @@ func (c Config) Validate() error {
 
 // AgentOptions configures NewTurnManager.
 //
-// Usual fields: Config, Model, Tools, MCPConfigs, EmailProvider, Specialists,
-// SessionID.
+// Usual fields: Config, Model, Tools, MCPConfigs, Specialists, SessionID.
 // ContextPolicy knobs (ratios, stream-summary) stay host-settable. Adaptive
 // Case Management itself is harness-owned and cannot be replaced.
 //
@@ -54,9 +50,10 @@ type AgentOptions struct {
 	SessionID string
 	Model     InferenceStrategy
 	WatchDog  AgentWatchDog
-	// Tools are host tools. Give each tool its clients by closing over them
-	// in the constructor (see NewTool). Built-ins do the same from the
-	// fields below (EmailProvider, ExaAPIKey, Brain, MountSession).
+	// Tools are host tools, including optional builtins from package
+	// builtins (email, Exa web). Give each tool its clients by closing
+	// over them in the constructor (see NewTool). Session-world tools
+	// (VFS, brain, index) still inject from the fields below.
 	Tools      []*Tool
 	MCPConfigs []mcp.MCPConfig
 	// MCPCredentialResolver resolves durable references immediately before
@@ -80,12 +77,6 @@ type AgentOptions struct {
 	// SkillsLoader loads skills. Nil uses skills.Loader on the /skills mount
 	// when MountSession has one (typically /workspace/skills).
 	SkillsLoader skills.SkillLoader
-	// ExaAPIKey enables web_search and web_fetch. Empty falls back to EXA_API_KEY.
-	// When both are empty, those tools are not registered.
-	ExaAPIKey string
-	// EmailProvider enables read_inbox and send_email for Gmail or Outlook.
-	// The host owns provider authentication and lifecycle.
-	EmailProvider mail.Provider
 	// Brain enables knowledge builtins when non-nil. Workers inherit the same engine.
 	// Configure Store, optional QueryEmbedder, and optional GraphReader/GraphWriter on the Engine
 	// before NewTurnManager (e.g. brain.WithGraph(helixgraph.New(...))). The harness does
@@ -132,8 +123,6 @@ func NewTurnManager(ctx context.Context, opts AgentOptions) (*TurnManager, error
 		skillsLoader:          opts.SkillsLoader,
 		hostInterceptors:      slices.Clone(opts.ToolInterceptors),
 		hostResultHooks:       maps.Clone(opts.ToolResultHooks),
-		exaAPIKey:             resolveExaAPIKey(opts.ExaAPIKey),
-		emailProvider:         opts.EmailProvider,
 		brain:                 opts.Brain,
 		brainWriteKinds:       opts.BrainWriteKinds,
 		sessionId:             opts.SessionID,
@@ -199,9 +188,6 @@ func (opts *AgentOptions) Validate() error {
 			return fmt.Errorf("tacklr: AgentOptions.Tools[%d] is nil", i)
 		}
 	}
-	if err := mail.ValidateProvider(opts.EmailProvider); err != nil {
-		return fmt.Errorf("tacklr: EmailProvider: %w", err)
-	}
 	seenMCP := make(map[string]struct{}, len(opts.MCPConfigs))
 	for i := range opts.MCPConfigs {
 		config := opts.MCPConfigs[i]
@@ -220,11 +206,6 @@ func (opts *AgentOptions) Validate() error {
 }
 
 func (h *TurnManager) finishInit(ctx context.Context, specialists []*Specialist) error {
-	if h.emailProvider != nil {
-		if err := h.emailProvider.Validate(ctx); err != nil {
-			return fmt.Errorf("initialize email provider %q: %w", h.emailProvider.Kind(), err)
-		}
-	}
 	if err := h.initSkills(ctx); err != nil {
 		return fmt.Errorf("initialize skills: %w", err)
 	}
@@ -239,7 +220,7 @@ func (h *TurnManager) finishInit(ctx context.Context, specialists []*Specialist)
 	return nil
 }
 
-// injectBuiltinTools registers plan tools, optional web/brain/VFS/index tools, and spawn_specialist once.
+// injectBuiltinTools registers plan tools, session-world VFS/brain/index tools, and spawn_specialist once.
 func (a *TurnManager) injectBuiltinTools() {
 	if a.builtinsInjected {
 		return
@@ -251,13 +232,6 @@ func (a *TurnManager) injectBuiltinTools() {
 		newListPlanTool(a.session),
 		askUserChoiceTool,
 	)
-	if key := strings.TrimSpace(a.exaAPIKey); key != "" {
-		client := exa.NewClient(key)
-		a.tools = append(a.tools, newWebSearchTool(client), newWebFetchTool(client))
-	}
-	if a.emailProvider != nil {
-		a.tools = append(a.tools, newEmailTools(a.emailProvider)...)
-	}
 	br := a.vfsBridge
 	if ms := a.session.VFS; ms != nil {
 		a.tools = append(a.tools, newVFSTools(ms, !a.writeUnattended)...)

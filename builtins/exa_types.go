@@ -1,6 +1,6 @@
-// Package exa is a minimal REST client for Exa Search (https://api.exa.ai).
-// No third-party SDK — stdlib HTTP only.
-package exa
+package builtins
+
+// Exa request and response types. No third-party SDK — stdlib HTTP only.
 
 import "encoding/json"
 
