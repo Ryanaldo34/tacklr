@@ -36,7 +36,7 @@ func TestFindObjects_multiTurnMemoryGraph(t *testing.T) {
 	if _, err := eng.FindObjects(ctx, brain.Scope{}, brain.FindObjectsRequest{}, brain.NewSearchContext()); err == nil {
 		t.Fatal("FindObjects requires query")
 	}
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	scope := brain.Scope{Namespace: ns}
 	sc := brain.NewSearchContext()
 
@@ -50,14 +50,14 @@ func TestFindObjects_multiTurnMemoryGraph(t *testing.T) {
 	// Stage property filter (same keys as schema filterable_fields / search).
 	byStage, err := eng.FindObjects(ctx, scope, brain.FindObjectsRequest{
 		Query: "Acme Renewal", Kinds: []string{"Deal"},
-		Filters: brain.MustFilter(map[string]any{"stage": "negotiation"}),
+		Filters: mustFilter(t, map[string]any{"stage": "negotiation"}),
 	}, sc)
 	if err != nil || len(byStage.Objects) != 1 || byStage.Objects[0].ID != deal.ID {
 		t.Fatalf("find_objects stage filter: %+v err=%v", byStage.Objects, err)
 	}
 	closed, err := eng.FindObjects(ctx, scope, brain.FindObjectsRequest{
 		Query: "Acme Renewal", Kinds: []string{"Deal"},
-		Filters: brain.MustFilter(map[string]any{"stage": "closed"}),
+		Filters: mustFilter(t, map[string]any{"stage": "closed"}),
 	}, sc)
 	if err != nil || len(closed.Objects) != 0 {
 		t.Fatalf("want empty for closed stage: %+v err=%v", closed.Objects, err)
@@ -160,7 +160,7 @@ func TestFindObjects_multiTurnMemoryGraph(t *testing.T) {
 		t.Fatal("continue result set id")
 	}
 	// Namespace isolation.
-	other := brain.MustNamespace("org", "other")
+	other := mustNS(t, "org", "other")
 	miss, err := eng.FindObjects(ctx, brain.Scope{Namespace: other}, brain.FindObjectsRequest{
 		Query: "Acme Enterprise", Kinds: []string{"Deal"},
 	}, brain.NewSearchContext())
@@ -170,7 +170,7 @@ func TestFindObjects_multiTurnMemoryGraph(t *testing.T) {
 	if len(miss.Objects) != 0 {
 		t.Fatalf("other ns: %+v", miss.Objects)
 	}
-	nestedNS := brain.MustNamespace("org", "acme", "workspace", "west")
+	nestedNS := mustNS(t, "org", "acme", "workspace", "west")
 	nested, err := eng.Put(ctx, brain.Scope{Namespace: nestedNS}, brain.Object{
 		Kind: "Deal", Title: "Nested Acme Workspace Deal", Summary: "workspace scoped",
 		Properties: map[string]any{"stage": "negotiation"},
@@ -178,7 +178,7 @@ func TestFindObjects_multiTurnMemoryGraph(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pageOrg, err := eng.FindObjects(ctx, brain.Scope{Namespace: brain.MustNamespace("org", "acme")}, brain.FindObjectsRequest{
+	pageOrg, err := eng.FindObjects(ctx, brain.Scope{Namespace: mustNS(t, "org", "acme")}, brain.FindObjectsRequest{
 		Query: "Nested Acme Workspace", Kinds: []string{"Deal"},
 	}, brain.NewSearchContext())
 	if err != nil {

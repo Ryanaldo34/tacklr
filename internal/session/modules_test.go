@@ -47,7 +47,7 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 		t.Fatal("deny-always not stored")
 	}
 
-	ns := brain.MustNamespace("org", "acme")
+	ns := mustNS(t, "org", "acme")
 	sm.Search.SetNamespace(ns)
 
 	ms, err := vfs.NewMountSession("sess-modules")
@@ -96,7 +96,7 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 	}
 	assertModules(t, sm2, ns)
 
-	fresh := brain.MustNamespace("org", "other")
+	fresh := mustNS(t, "org", "other")
 	sm2.Search = brain.NewSearchContext()
 	sm2.Search.SetNamespace(fresh)
 	gotFresh, ok := sm2.Search.Namespace()

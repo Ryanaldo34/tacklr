@@ -42,7 +42,7 @@ func TestBridge_policyAndTrack(t *testing.T) {
 	if err := eng.ApplyKinds(ctx, MountIndexKinds()...); err != nil {
 		t.Fatal(err)
 	}
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	scope := brain.Scope{Namespace: ns}
 	br, err := Start(ms, eng, scope)
 	if err != nil {

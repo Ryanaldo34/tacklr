@@ -9,14 +9,14 @@ import (
 )
 
 func TestFilterPlan_listAndSQLParity(t *testing.T) {
-	ns := MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	now := time.Date(2024, 6, 15, 0, 0, 0, 0, time.UTC)
 	obj := Object{
 		ID: uuid.New(), Kind: "Chunk", Title: "t",
 		Namespace: ns, CreatedAt: now, UpdatedAt: now,
 		Properties: map[string]any{"stage": "open"},
 	}
-	f := MustFilter(map[string]any{"kind": []any{"Chunk", "Doc"}, "stage": []any{"open", "closed"}})
+	f := mustFilter(t, map[string]any{"kind": []any{"Chunk", "Doc"}, "stage": []any{"open", "closed"}})
 	plan, err := compileFilters(f)
 	if err != nil {
 		t.Fatal(err)

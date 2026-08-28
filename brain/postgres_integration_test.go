@@ -40,8 +40,8 @@ func TestPostgresStore_liveRetrievalChannels(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	nsA := brain.MustNamespace("org", "a")
-	nsB := brain.MustNamespace("org", "b")
+	nsA := mustNS(t, "org", "a")
+	nsB := mustNS(t, "org", "b")
 	parentID := uuid.New()
 	chunkOAuth := uuid.New()
 	chunkOther := uuid.New()
@@ -103,7 +103,7 @@ func TestPostgresStore_liveRetrievalChannels(t *testing.T) {
 	nestedID := uuid.New()
 	if err := store.Put(ctx, brain.Object{
 		ID: nestedID, Kind: "Document", Title: "nested",
-		Namespace: brain.MustNamespace("org", "a", "workspace", "west"),
+		Namespace: mustNS(t, "org", "a", "workspace", "west"),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestPostgresStore_liveRetrievalChannels(t *testing.T) {
 	if err != nil || gotNested.ID != nestedID {
 		t.Fatalf("org scope should see workspace row: %v %+v", err, gotNested)
 	}
-	_, err = store.Get(ctx, brain.Scope{Namespace: brain.MustNamespace("org", "a", "workspace", "east")}, nestedID)
+	_, err = store.Get(ctx, brain.Scope{Namespace: mustNS(t, "org", "a", "workspace", "east")}, nestedID)
 	if !errors.Is(err, brain.ErrNotFound) {
 		t.Fatalf("other workspace: %v", err)
 	}
@@ -144,7 +144,7 @@ func TestPostgresStore_liveRetrievalChannels(t *testing.T) {
 	}
 
 	// BM25 lexical: oauth terms should rank the oauth chunk over pasta.
-	lex, err := store.SearchLexical(ctx, scopeA, "oauth pkce", brain.MustFilter(map[string]any{"kind": "Chunk"}), 5)
+	lex, err := store.SearchLexical(ctx, scopeA, "oauth pkce", mustFilter(t, map[string]any{"kind": "Chunk"}), 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +160,7 @@ func TestPostgresStore_liveRetrievalChannels(t *testing.T) {
 	}
 
 	// Property filter on lexical channel.
-	lexOpen, err := store.SearchLexical(ctx, scopeA, "oauth", brain.MustFilter(map[string]any{"stage": "open"}), 5)
+	lexOpen, err := store.SearchLexical(ctx, scopeA, "oauth", mustFilter(t, map[string]any{"stage": "open"}), 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +169,7 @@ func TestPostgresStore_liveRetrievalChannels(t *testing.T) {
 	}
 
 	// Vector: query near [1,0,0] should rank oauth chunk first.
-	vec, err := store.SearchVector(ctx, scopeA, []float32{0.95, 0.05, 0}, brain.MustFilter(map[string]any{"kind": "Chunk"}), 5)
+	vec, err := store.SearchVector(ctx, scopeA, []float32{0.95, 0.05, 0}, mustFilter(t, map[string]any{"kind": "Chunk"}), 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +180,7 @@ func TestPostgresStore_liveRetrievalChannels(t *testing.T) {
 		t.Fatalf("vector parent: %+v", vec[0])
 	}
 
-	vecOpen, err := store.SearchVector(ctx, scopeA, []float32{0.5, 0.5, 0}, brain.MustFilter(map[string]any{"stage": "open"}), 5)
+	vecOpen, err := store.SearchVector(ctx, scopeA, []float32{0.5, 0.5, 0}, mustFilter(t, map[string]any{"stage": "open"}), 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,7 +214,7 @@ func TestPostgresStore_liveRetrievalChannels(t *testing.T) {
 	// Date / title / list filters on live SQL (same FilterPlan as Memory).
 	after := now.Add(-time.Hour).Format(time.RFC3339)
 	before := now.Add(time.Hour).Format(time.RFC3339)
-	lexDate, err := store.SearchLexical(ctx, scopeA, "oauth", brain.MustFilter(map[string]any{
+	lexDate, err := store.SearchLexical(ctx, scopeA, "oauth", mustFilter(t, map[string]any{
 		"updated_after":  after,
 		"updated_before": before,
 		"created_after":  after,
@@ -227,7 +227,7 @@ func TestPostgresStore_liveRetrievalChannels(t *testing.T) {
 	if len(lexDate) != 1 || lexDate[0].ID != chunkOAuth {
 		t.Fatalf("date/title filters: %+v", lexDate)
 	}
-	lexList, err := store.SearchLexical(ctx, scopeA, "oauth", brain.MustFilter(map[string]any{
+	lexList, err := store.SearchLexical(ctx, scopeA, "oauth", mustFilter(t, map[string]any{
 		"stage": []any{"open", "closed"},
 	}), 5)
 	if err != nil {
@@ -371,7 +371,7 @@ func TestPut_livePostgresUpsertAndSoftDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	scope := brain.Scope{Namespace: ns}
 
 	doc, err := eng.Put(ctx, scope, brain.Object{
@@ -405,7 +405,7 @@ func TestPut_livePostgresUpsertAndSoftDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lex, err := store.SearchLexical(ctx, scope, "oauth", brain.MustFilter(map[string]any{"kind": "Chunk"}), 5)
+	lex, err := store.SearchLexical(ctx, scope, "oauth", mustFilter(t, map[string]any{"kind": "Chunk"}), 5)
 	if err != nil || len(lex) == 0 || lex[0].ID != chunk.ID {
 		t.Fatalf("lexical after put: %+v err=%v", lex, err)
 	}
@@ -416,7 +416,7 @@ func TestPut_livePostgresUpsertAndSoftDelete(t *testing.T) {
 	if _, err := store.Get(ctx, scope, chunk.ID); !errors.Is(err, brain.ErrNotFound) {
 		t.Fatalf("soft-deleted chunk: %v", err)
 	}
-	lex, err = store.SearchLexical(ctx, scope, "oauth", brain.MustFilter(map[string]any{"kind": "Chunk"}), 5)
+	lex, err = store.SearchLexical(ctx, scope, "oauth", mustFilter(t, map[string]any{"kind": "Chunk"}), 5)
 	if err != nil || len(lex) != 0 {
 		t.Fatalf("search excludes soft-deleted: %+v err=%v", lex, err)
 	}
@@ -462,8 +462,8 @@ func TestEngine_livePostgresMultiTurnWriteSearch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ns := brain.MustNamespace("id", uuid.NewString())
-	otherNS := brain.MustNamespace("org", "other")
+	ns := mustNS(t, "id", uuid.NewString())
+	otherNS := mustNS(t, "org", "other")
 	scope := brain.Scope{Namespace: ns}
 	sc := brain.NewSearchContext()
 
@@ -564,7 +564,7 @@ func TestEngine_livePostgresMultiTurnWriteSearch(t *testing.T) {
 	if _, err := store.Get(ctx, scope, c1.ID); !errors.Is(err, brain.ErrNotFound) {
 		t.Fatalf("soft-deleted get: %v", err)
 	}
-	lex, err := store.SearchLexical(ctx, scope, "oauth", brain.MustFilter(map[string]any{"kind": "Chunk"}), 10)
+	lex, err := store.SearchLexical(ctx, scope, "oauth", mustFilter(t, map[string]any{"kind": "Chunk"}), 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -679,12 +679,12 @@ func TestApplyKinds_livePostgresMigration(t *testing.T) {
 	if err != nil || len(schema.Kinds) != 1 || schema.Kinds[0].Description != "parent docs v2" {
 		t.Fatalf("schema after load: %+v err=%v", schema, err)
 	}
-	if err := brain.ValidateFiltersAgainst(brain.MustFilter(map[string]any{
+	if err := brain.ValidateFiltersAgainst(mustFilter(t, map[string]any{
 		"kind": "Document", "stage": "open",
 	}), eng2.Catalog()); err != nil {
 		t.Fatal(err)
 	}
-	if err := brain.ValidateFiltersAgainst(brain.MustFilter(map[string]any{
+	if err := brain.ValidateFiltersAgainst(mustFilter(t, map[string]any{
 		"kind": "Document", "unknown": "x",
 	}), eng2.Catalog()); err == nil {
 		t.Fatal("want unknown property rejected after load")

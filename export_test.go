@@ -3,6 +3,7 @@ package tacklr
 import (
 	"testing"
 
+	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/internal/session"
 	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/vfs"
@@ -60,6 +61,15 @@ func mustNewTurnManager(t testing.TB, opts AgentOptions) *TurnManager {
 func mustMountTree(t testing.TB, sessionID string, members ...vfs.Member) *vfs.MountSession {
 	t.Helper()
 	return mustMountTreeReq(t, sessionID, vfs.Request{}, members...)
+}
+
+func mustNS(t testing.TB, nv ...string) brain.Namespace {
+	t.Helper()
+	ns, err := brain.ParseNamespace(nv...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ns
 }
 
 func mustMountTreeReq(t testing.TB, sessionID string, req vfs.Request, members ...vfs.Member) *vfs.MountSession {

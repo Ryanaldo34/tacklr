@@ -663,7 +663,7 @@ if err := eng.LoadKindsFromStore(ctx); err != nil { /* ... */ }
 // AgentOptions:
 //   Brain:           eng
 //   VFS:             registry + mounts (including /work)
-//   SearchNamespace: brain.MustNamespace("org", orgID) // host ceiling; tools may add workspace=…
+//   SearchNamespace: from brain.ParseNamespace("org", orgID) // host ceiling; tools may add workspace=…
 //
 // Harness then:
 //   registers brain.Open (profile "brain")

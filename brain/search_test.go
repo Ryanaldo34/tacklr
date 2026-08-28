@@ -41,7 +41,7 @@ func fixedNow(t time.Time) brain.EngineConfig {
 func TestSearch_promotesParentWithEvidenceAndNamespace(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	nsA, nsB := brain.MustNamespace("org", "a"), brain.MustNamespace("org", "b")
+	nsA, nsB := mustNS(t, "org", "a"), mustNS(t, "org", "b")
 	now := time.Now().UTC()
 	parent := seedDocWithParts(t, store, nsA, "OAuth guide", []string{
 		"Implement OAuth PKCE for mobile clients with authorization code flow",
@@ -108,7 +108,7 @@ func TestSearch_promotesParentWithEvidenceAndNamespace(t *testing.T) {
 func TestSearch_filtersProperty(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	now := time.Now().UTC()
 	seedDocWithParts(t, store, ns, "Deal A", []string{"pipeline revenue forecast"}, now)
 
@@ -134,7 +134,7 @@ func TestSearch_filtersProperty(t *testing.T) {
 	}
 	page, err := eng.Search(ctx, brain.Scope{Namespace: ns}, brain.SearchRequest{
 		Query:   "pipeline revenue",
-		Filters: brain.MustFilter(map[string]any{"stage": "negotiation"}),
+		Filters: mustFilter(t, map[string]any{"stage": "negotiation"}),
 	}, brain.NewSearchContext())
 	if err != nil {
 		t.Fatal(err)
@@ -147,7 +147,7 @@ func TestSearch_filtersProperty(t *testing.T) {
 func TestSearch_hybridWithStubEmbedder(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	now := time.Now().UTC()
 
 	lexParent, vecParent := uuid.New(), uuid.New()
@@ -204,7 +204,7 @@ func (s stubEmbedder) Embed(context.Context, string) ([]float32, error) { return
 func TestSearch_scopeIDsRestrictsHits(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	now := time.Now().UTC()
 	p1, p2 := uuid.New(), uuid.New()
 	c1, c2 := uuid.New(), uuid.New()
@@ -239,7 +239,7 @@ func TestSearch_scopeIDsRestrictsHits(t *testing.T) {
 func TestFindExact_uuidParentAndPart(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	now := time.Now().UTC()
 	parent := uuid.New()
 	part := uuid.New()
@@ -288,7 +288,7 @@ func TestFindExact_uuidParentAndPart(t *testing.T) {
 func TestFindExact_titleMatch(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	now := time.Now().UTC()
 	parent := uuid.New()
 	part := uuid.New()
@@ -322,7 +322,7 @@ func TestFindExact_titleMatch(t *testing.T) {
 func TestContinue_andReplaceResultSet(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	now := time.Now().UTC()
 	for i := 0; i < 5; i++ {
 		seedDocWithParts(t, store, ns, "Topic shared", []string{
@@ -423,7 +423,7 @@ func TestSearch_rejectsBadFiltersAndEmptyQuery(t *testing.T) {
 func TestFindExact_trigramFuzzy(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	now := time.Now().UTC()
 	parent := uuid.New()
 	part := uuid.New()

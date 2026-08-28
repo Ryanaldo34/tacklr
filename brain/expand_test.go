@@ -29,7 +29,7 @@ func TestExpand_cancelledContextFailsClosed(t *testing.T) {
 func TestExpand_parentChildrenOrdered(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	now := time.Now().UTC()
 	parent := uuid.New()
 	c1, c2 := uuid.New(), uuid.New()
@@ -63,7 +63,7 @@ func TestExpand_parentChildrenOrdered(t *testing.T) {
 func TestExpand_partNeighborhoodWindow(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	now := time.Now().UTC()
 	parent := uuid.New()
 	_ = store.Put(context.Background(), brain.Object{ID: parent, Kind: "Document", Title: "Doc", Namespace: ns, UpdatedAt: now})
@@ -106,7 +106,7 @@ func TestExpand_partNeighborhoodWindow(t *testing.T) {
 func TestExpand_highCardinalityResultSetAndContinue(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	now := time.Now().UTC()
 	parent := uuid.New()
 	_ = store.Put(context.Background(), brain.Object{ID: parent, Kind: "Document", Namespace: ns, UpdatedAt: now})
@@ -154,7 +154,7 @@ func TestExpand_directionFiltersEdges(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
 	g := brain.NewMemoryGraph()
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	now := time.Now().UTC()
 	a, b, c := uuid.New(), uuid.New(), uuid.New()
 	for _, id := range []uuid.UUID{a, b, c} {
@@ -186,7 +186,7 @@ func TestExpand_graphContinuePreservesRelation(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
 	g := brain.NewMemoryGraph()
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	now := time.Now().UTC()
 	root := uuid.New()
 	_ = store.Put(ctx, brain.Object{ID: root, Kind: "Document", Title: "root", Namespace: ns, UpdatedAt: now})
@@ -236,7 +236,7 @@ func TestExpandMany_landingsAndBudget(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
 	g := brain.NewMemoryGraph()
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	now := time.Now().UTC()
 	p1, p2 := uuid.New(), uuid.New()
 	c1, c2, n1 := uuid.New(), uuid.New(), uuid.New()
@@ -308,7 +308,7 @@ func TestExpandMany_landingsAndBudget(t *testing.T) {
 func TestSearch_withReranker(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	now := time.Now().UTC()
 	parent, part := uuid.New(), uuid.New()
 	pos := 1
@@ -348,10 +348,10 @@ func (reverseRerank) Rerank(_ context.Context, objects []brain.RichObject) ([]br
 func TestExpand_graphNeighborsMemoryGraph(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	now := time.Now().UTC()
 	a, b, c := uuid.New(), uuid.New(), uuid.New()
-	otherNS := brain.MustNamespace("org", "other")
+	otherNS := mustNS(t, "org", "other")
 	for _, id := range []uuid.UUID{a, b, c} {
 		_ = store.Put(context.Background(), brain.Object{ID: id, Kind: "Document", Title: id.String()[:8], Namespace: ns, UpdatedAt: now})
 	}
@@ -391,7 +391,7 @@ func TestExpand_graphNeighborsMemoryGraph(t *testing.T) {
 func TestExpand_partMixedContainmentAndGraph(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	now := time.Now().UTC()
 	parent := uuid.New()
 	part := uuid.New()
@@ -437,7 +437,7 @@ func TestExpand_graphStoreErrorSurfaces(t *testing.T) {
 		ok:     brain.NewMemoryStore(),
 		failID: uuid.New(),
 	}
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	root := uuid.New()
 	_ = store.ok.Put(context.Background(), brain.Object{ID: root, Kind: "Document", Namespace: ns})
 
@@ -502,7 +502,7 @@ func (s *errAfterGetStore) GetMany(ctx context.Context, scope brain.Scope, ids [
 
 func TestExpand_graphRequiresBackend(t *testing.T) {
 	store := brain.NewMemoryStore()
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	id := uuid.New()
 	_ = store.Put(context.Background(), brain.Object{ID: id, Kind: "Document", Namespace: ns})
 	eng, err := brain.NewEngine(store)

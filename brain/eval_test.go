@@ -17,7 +17,7 @@ import (
 
 func TestEval_goldenSearchQueries(t *testing.T) {
 	ctx := context.Background()
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	now := time.Now().UTC()
 	store := brain.NewMemoryStore()
 
@@ -91,7 +91,7 @@ func TestEval_graphRAGComposition(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	scope := brain.Scope{Namespace: ns}
 	sc := brain.NewSearchContext()
 
@@ -325,7 +325,7 @@ func TestEval_graphRAGScopeSafeMultiHop(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
 	g := brain.NewMemoryGraph()
-	nsA, nsB := brain.MustNamespace("org", "a"), brain.MustNamespace("org", "b")
+	nsA, nsB := mustNS(t, "org", "a"), mustNS(t, "org", "b")
 	now := time.Now().UTC()
 	// a --refs--> bridge(nsB) --refs--> c(nsA). Hop-2 must not reach c via bridge.
 	a, bridge, c := uuid.New(), uuid.New(), uuid.New()
@@ -376,7 +376,7 @@ func TestEval_graphRAGScopeSafeMultiHop(t *testing.T) {
 func TestEval_degradeEmbedderKeepsLexical(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	now := time.Now().UTC()
 	parent, part := uuid.New(), uuid.New()
 	pos := 1
@@ -406,7 +406,7 @@ func TestEval_degradeEmbedderKeepsLexical(t *testing.T) {
 func TestEval_degradeGraphKeepsContainment(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	now := time.Now().UTC()
 	parent, child := uuid.New(), uuid.New()
 	pos := 1
@@ -438,7 +438,7 @@ func TestEval_degradeGraphKeepsContainment(t *testing.T) {
 func TestConcurrent_searchAndExpand(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	now := time.Now().UTC()
 	parent := uuid.New()
 	_ = store.Put(ctx, brain.Object{ID: parent, Kind: "Document", Title: "Doc", Namespace: ns, UpdatedAt: now})

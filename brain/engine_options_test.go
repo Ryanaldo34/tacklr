@@ -46,7 +46,7 @@ func TestNewEngine_options(t *testing.T) {
 	// Register + expand containment kids
 	parent := uuid.New()
 	child := uuid.New()
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	now := time.Now().UTC()
 	pos := 1
 	_ = store.Put(ctx, brain.Object{ID: parent, Kind: "Document", Title: "p", Namespace: ns, UpdatedAt: now})

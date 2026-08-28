@@ -159,7 +159,7 @@ func TestEngine_liveFindObjectsTextSearch(t *testing.T) {
 	if !eng.HasObjectSearch() {
 		t.Fatal("HasObjectSearch")
 	}
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	scope := brain.Scope{Namespace: ns}
 	sc := brain.NewSearchContext()
 	fact, err := eng.Put(ctx, scope, brain.Object{
@@ -231,7 +231,7 @@ func TestEngine_liveDualWriteLinkExpand(t *testing.T) {
 		t.Fatal("HasGraphWriter")
 	}
 
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	scope := brain.Scope{Namespace: ns}
 	sc := brain.NewSearchContext()
 
@@ -323,7 +323,7 @@ func TestGraph_liveEnsureObjectRichProps(t *testing.T) {
 	ctx := context.Background()
 	g := liveGraph(t)
 
-	nsID := brain.MustNamespace("id", uuid.NewString())
+	nsID := mustNS(t, "id", uuid.NewString())
 	// Helix vector index dim is process-global; match dual-write tests (2-d).
 	a := brain.Object{
 		ID: uuid.New(), Kind: "Document", Title: "Alpha", Summary: "sum-a",
@@ -410,7 +410,7 @@ func TestGraph_liveSearchEdgesTextVectorAndProps(t *testing.T) {
 	}
 
 	// Dual-write objects with custom scalar Properties (sortedPropKeys + scalarPropValue).
-	nsID := brain.MustNamespace("id", uuid.NewString())
+	nsID := mustNS(t, "id", uuid.NewString())
 	a := brain.Object{
 		ID: uuid.New(), Kind: "Document", Title: "EdgeSearchSource",
 		Summary: "sum-src", Content: "source body unique-helix-alpha",
@@ -577,7 +577,7 @@ func TestEngine_liveFindLinksSearchEdges(t *testing.T) {
 	if !eng.HasEdgeSearch() {
 		t.Fatal("HasEdgeSearch")
 	}
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	scope := brain.Scope{Namespace: ns}
 	doc, err := eng.Put(ctx, scope, brain.Object{
 		Kind: "Document", Title: "Contract", Content: "MSA body",

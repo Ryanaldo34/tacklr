@@ -42,7 +42,7 @@ func withParams(open vfs.Open, point string, params map[string]string) vfs.Open 
 
 func TestBrainProvider_prefixWriteReadDirRemoveAndIR(t *testing.T) {
 	ctx := context.Background()
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithKinds(
 		brain.KindSpec{
 			Kind: "Deal", IsParent: true,
@@ -264,7 +264,7 @@ func (b bareDoc) MediaType() string { return "text/markdown" }
 
 func TestBrainProvider_rootsLayout(t *testing.T) {
 	ctx := context.Background()
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithKinds(
 		brain.KindSpec{Kind: "Person", IsParent: true},
 	))
@@ -305,7 +305,7 @@ func TestBrainProvider_rootsLayout(t *testing.T) {
 
 func TestBrainProvider_openCatalogListsKindsInUseAndMkdir(t *testing.T) {
 	ctx := context.Background()
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	eng, err := brain.NewEngine(brain.NewMemoryStore())
 	if err != nil {
 		t.Fatal(err)
@@ -336,7 +336,7 @@ func TestBrainProvider_openCatalogListsKindsInUseAndMkdir(t *testing.T) {
 
 func TestBrainOpen_rejectsInvalidConfig(t *testing.T) {
 	ctx := context.Background()
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithKinds(
 		brain.KindSpec{Kind: "Note", IsParent: true},
 		brain.KindSpec{Kind: "Deal", IsParent: true},

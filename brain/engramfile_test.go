@@ -88,7 +88,7 @@ func TestValidateObject_engramReservedAndOpenCatalog(t *testing.T) {
 			{Name: "stage", Type: brain.FieldTypeString, Required: true},
 		},
 	})
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	ok := brain.Object{
 		Kind: "Deal", Namespace: ns,
 		Properties: map[string]any{

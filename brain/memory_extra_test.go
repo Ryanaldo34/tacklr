@@ -11,7 +11,7 @@ import (
 func TestMemoryStore_searchChannelsAndClone(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemoryStore()
-	ns := MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	now := time.Now().UTC()
 	parent := uuid.New()
 	_ = s.Put(context.Background(), Object{ID: parent, Kind: "Document", Title: "Doc", Namespace: ns, UpdatedAt: now})

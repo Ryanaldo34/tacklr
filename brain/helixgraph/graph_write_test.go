@@ -55,7 +55,7 @@ func TestGraph_ensureObjectAndAddEdgeRequestShape(t *testing.T) {
 	}
 
 	pid := uuid.New()
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	now := time.Date(2024, 6, 1, 12, 0, 0, 0, time.UTC)
 	obj := brain.Object{
 		ID:        uuid.New(),
@@ -334,7 +334,7 @@ func TestGraph_searchTextAndVectorRequestShape(t *testing.T) {
 	}
 	// Tenant indexes may exist; search stays unscoped so hydrate can apply Covers.
 	nBefore := len(bodies)
-	if _, err := g.SearchText(ctx, "risk", 3, brain.MustNamespace("id", uuid.NewString())); err != nil {
+	if _, err := g.SearchText(ctx, "risk", 3, mustNS(t, "id", uuid.NewString())); err != nil {
 		t.Fatal(err)
 	}
 	if len(bodies) != nBefore+1 {

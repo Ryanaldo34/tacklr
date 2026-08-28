@@ -139,15 +139,6 @@ func ParseNamespace(nameValues ...string) (Namespace, error) {
 	return ns, nil
 }
 
-// MustNamespace is ParseNamespace that panics. Tests and fixtures.
-func MustNamespace(nameValues ...string) Namespace {
-	ns, err := ParseNamespace(nameValues...)
-	if err != nil {
-		panic(err)
-	}
-	return ns
-}
-
 // Value implements driver.Valuer (jsonb array of {name,value}).
 func (n Namespace) Value() (driver.Value, error) {
 	if n == nil {

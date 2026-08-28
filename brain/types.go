@@ -201,15 +201,6 @@ func (f Filter) empty() bool {
 		len(f.Props) == 0
 }
 
-// MustFilter decodes a JSON-shaped map. Tests and tools use DecodeFilter for errors.
-func MustFilter(m map[string]any) Filter {
-	f, err := DecodeFilter(m)
-	if err != nil {
-		panic(err)
-	}
-	return f
-}
-
 // SearchRequest is the engine input for search and find_exact.
 type SearchRequest struct {
 	Query   string

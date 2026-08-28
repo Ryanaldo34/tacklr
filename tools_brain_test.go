@@ -26,7 +26,7 @@ func TestBrainTools_saveDiscoveryAndLink(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	h := mustNewTurnManager(t, AgentOptions{
 		Config: Config{MaxWindowSize: 1024},
 		Model:  &mockStrategy{},
@@ -145,8 +145,8 @@ func TestBrainTools_saveDiscoveryAndLink(t *testing.T) {
 func TestBrainTools_hostNamespaceScopedRead(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	ns := brain.MustNamespace("id", uuid.NewString())
-	other := brain.MustNamespace("org", "other")
+	ns := mustNS(t, "id", uuid.NewString())
+	other := mustNS(t, "org", "other")
 	docID := uuid.New()
 
 	if err := store.Put(context.Background(), brain.Object{
@@ -232,7 +232,7 @@ func TestBrainTools_hostNamespaceScopedRead(t *testing.T) {
 func TestBrainTools_searchFindExactContinueAndCheckpoint(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	now := time.Now().UTC()
 	var firstParent uuid.UUID
 	for i := 0; i < 4; i++ {
@@ -352,7 +352,7 @@ func TestBrainTools_searchFindExactContinueAndCheckpoint(t *testing.T) {
 func TestBrainTools_expandChildren(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	now := time.Now().UTC()
 	parent := uuid.New()
 	child := uuid.New()
@@ -396,7 +396,7 @@ func TestBrainTools_expandMultiHopAndFindLinks(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
 	g := brain.NewMemoryGraph()
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	now := time.Now().UTC()
 	factID, dealID, buyerID := uuid.New(), uuid.New(), uuid.New()
 	for _, o := range []brain.Object{
@@ -469,7 +469,7 @@ func TestBrainTools_expandMultiHopAndFindLinks(t *testing.T) {
 func TestBrainTools_searchNamespaceIsolation(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	nsA, nsB := brain.MustNamespace("org", "a"), brain.MustNamespace("org", "b")
+	nsA, nsB := mustNS(t, "org", "a"), mustNS(t, "org", "b")
 	now := time.Now().UTC()
 	secretParent := uuid.New()
 	secretPart := uuid.New()
@@ -507,10 +507,10 @@ func TestBrainTools_searchNamespaceIsolation(t *testing.T) {
 
 	westParent := uuid.New()
 	westPart := uuid.New()
-	_ = store.Put(ctx, brain.Object{ID: westParent, Kind: "Document", Title: "West deal", Namespace: brain.MustNamespace("org", "b", "workspace", "west"), UpdatedAt: now})
+	_ = store.Put(ctx, brain.Object{ID: westParent, Kind: "Document", Title: "West deal", Namespace: mustNS(t, "org", "b", "workspace", "west"), UpdatedAt: now})
 	_ = store.Put(ctx, brain.Object{
 		ID: westPart, Kind: "Chunk", Title: "chunk", Content: "per-call workspace west token plugh",
-		ParentID: &westParent, Position: &pos, Namespace: brain.MustNamespace("org", "b", "workspace", "west"), UpdatedAt: now,
+		ParentID: &westParent, Position: &pos, Namespace: mustNS(t, "org", "b", "workspace", "west"), UpdatedAt: now,
 	})
 	narrow, err := search.invoke(ctx, `{"query":"per-call workspace west token plugh","limit":10,"namespace":[{"name":"workspace","value":"west"}]}`, turnRuntime(h))
 	if err != nil {
@@ -534,7 +534,7 @@ func TestBrainTools_searchNamespaceIsolation(t *testing.T) {
 func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	docID := uuid.New()
 	if err := store.Put(context.Background(), brain.Object{
 		ID: docID, Kind: "Document", Title: "Shared", Content: "worker-visible",
@@ -629,7 +629,7 @@ func TestBrainTools_engramPathGraph(t *testing.T) {
 	)...); err != nil {
 		t.Fatal(err)
 	}
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	ms := mustMountTree(t, "engram-graph",
 		vfs.At("work", vfs.Local(t.TempDir())),
 		vfs.At("engram", brain.Open(eng, brain.Scope{Namespace: ns})),
@@ -762,7 +762,7 @@ func (s failGetStore) Get(ctx context.Context, scope brain.Scope, id uuid.UUID) 
 func TestBrainTools_resolveFileRefPropagatesStoreFailure(t *testing.T) {
 	ctx := context.Background()
 	mem := brain.NewMemoryStore()
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	id := uuid.New()
 	if err := mem.Put(ctx, brain.Object{
 		ID: id, Kind: "Document", Title: "memo", Namespace: ns, UpdatedAt: time.Now().UTC(),

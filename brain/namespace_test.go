@@ -6,7 +6,7 @@ import (
 )
 
 func TestNamespace_stringMapValidate(t *testing.T) {
-	ns := MustNamespace("org", "acme", "workspace", "west")
+	ns := mustNS(t, "org", "acme", "workspace", "west")
 	if ns.String() != "acme.west" {
 		t.Fatalf("String = %q", ns.String())
 	}
@@ -22,13 +22,13 @@ func TestNamespace_stringMapValidate(t *testing.T) {
 }
 
 func TestNamespace_coversHierarchicalRLS(t *testing.T) {
-	obj := MustNamespace("org", "acme", "workspace", "west", "project", "alpha")
-	org := MustNamespace("org", "acme")
-	ws := MustNamespace("org", "acme", "workspace", "west")
-	exact := MustNamespace("org", "acme", "workspace", "west", "project", "alpha")
-	otherOrg := MustNamespace("org", "other")
-	otherWS := MustNamespace("org", "acme", "workspace", "east")
-	wsOnly := MustNamespace("workspace", "west")
+	obj := mustNS(t, "org", "acme", "workspace", "west", "project", "alpha")
+	org := mustNS(t, "org", "acme")
+	ws := mustNS(t, "org", "acme", "workspace", "west")
+	exact := mustNS(t, "org", "acme", "workspace", "west", "project", "alpha")
+	otherOrg := mustNS(t, "org", "other")
+	otherWS := mustNS(t, "org", "acme", "workspace", "east")
+	wsOnly := mustNS(t, "workspace", "west")
 
 	var open Namespace
 	if !open.Covers(obj) {
@@ -43,14 +43,14 @@ func TestNamespace_coversHierarchicalRLS(t *testing.T) {
 	if !wsOnly.Covers(obj) {
 		t.Fatal("named subset (workspace only) must cover")
 	}
-	if org.Covers(MustNamespace("org", "acme2")) {
+	if org.Covers(mustNS(t, "org", "acme2")) {
 		t.Fatal("acme must not cover acme2")
 	}
 	if exact.Covers(org) {
 		t.Fatal("more-specific scope must not cover a coarser object")
 	}
 
-	got, err := org.Bind(MustNamespace("workspace", "west"))
+	got, err := org.Bind(mustNS(t, "workspace", "west"))
 	if err != nil || !got.Equal(ws) {
 		t.Fatalf("bind extra: %v %v", got, err)
 	}
@@ -58,7 +58,7 @@ func TestNamespace_coversHierarchicalRLS(t *testing.T) {
 	if err != nil || !got.Equal(org) {
 		t.Fatalf("bind empty call: %v %v", got, err)
 	}
-	if _, err := org.Bind(MustNamespace("org", "other")); err == nil {
+	if _, err := org.Bind(mustNS(t, "org", "other")); err == nil {
 		t.Fatal("bind must reject a conflicting ceiling attr")
 	}
 }
@@ -85,7 +85,7 @@ func TestParseNamespace_rejectsInvalid(t *testing.T) {
 }
 
 func TestNamespace_jsonSQLRoundTrip(t *testing.T) {
-	ns := MustNamespace("org", "acme", "workspace", "west")
+	ns := mustNS(t, "org", "acme", "workspace", "west")
 	raw, err := json.Marshal(ns)
 	if err != nil {
 		t.Fatal(err)

@@ -25,7 +25,7 @@ func vfsIndexHarness(t *testing.T, withNS bool) (*TurnManager, *vfs.MountSession
 	if err := eng.ApplyKinds(t.Context(), vfsindex.MountIndexKinds()...); err != nil {
 		t.Fatal(err)
 	}
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	ms := mustMountTree(t, "vfs-idx-tools", vfs.At("work", vfs.Local(t.TempDir())))
 	opts := AgentOptions{
 		SessionID:       "vfs-idx-tools",
@@ -242,7 +242,7 @@ func TestVFSIndexTools_prefixAutoIndex(t *testing.T) {
 	if err := eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...); err != nil {
 		t.Fatal(err)
 	}
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	h := mustNewTurnManager(t, AgentOptions{
 		SessionID:    "policy-prefix",
 		MountSession: ms, Model: &mockStrategy{},
@@ -274,7 +274,7 @@ func TestKnowledgeSaveSearchRead(t *testing.T) {
 	)...); err != nil {
 		t.Fatal(err)
 	}
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	ms := mustMountTree(t, "save-mem",
 		vfs.At("work", vfs.Local(t.TempDir())),
 		vfs.At("engram", brain.Open(eng, brain.Scope{Namespace: ns})),
@@ -393,7 +393,7 @@ func TestKnowledgeSave_rootsMount(t *testing.T) {
 	)...); err != nil {
 		t.Fatal(err)
 	}
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	ms := mustMountTreeReq(t, "save-roots", vfs.Request{Bindings: []vfs.Binding{{
 		Params: map[string]string{
 			vfs.ParamName: "discovery",
@@ -461,7 +461,7 @@ func TestRun_workspaceResearchTurn(t *testing.T) {
 	)...); err != nil {
 		t.Fatal(err)
 	}
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	ms := mustMountTree(t, "research-turn",
 		vfs.At("work", vfs.Local(t.TempDir())),
 		vfs.At("engram", brain.Open(eng, brain.Scope{Namespace: ns})),
@@ -618,7 +618,7 @@ func TestPathNativeGraphLinkExpand(t *testing.T) {
 	if err := eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...); err != nil {
 		t.Fatal(err)
 	}
-	ns := brain.MustNamespace("id", uuid.NewString())
+	ns := mustNS(t, "id", uuid.NewString())
 	h := mustNewTurnManager(t, AgentOptions{
 		SessionID:    "path-graph",
 		MountSession: ms, Model: &mockStrategy{},
