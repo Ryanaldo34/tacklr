@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -764,27 +766,77 @@ func contents(msgs []*tacklr.Message) []string {
 	return out
 }
 
-func TestSnapshotEtagMismatchRejectsStaleWrite(t *testing.T) {
+func TestSnapshotStore_concurrentFirstSaveOneWins(t *testing.T) {
 	ctx := t.Context()
 	s := NewMemorySnapshot()
-	id := durable.SessionID("s1")
-	etag, err := s.Save(ctx, id, durable.Snapshot{AgentID: "a"}, "")
+	id := durable.SessionID("create")
+	const n = 32
+	var wins, stale atomic.Int64
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := range n {
+		go func(i int) {
+			defer wg.Done()
+			_, err := s.Save(ctx, id, durable.Snapshot{AgentID: strconv.Itoa(i)}, "")
+			switch {
+			case err == nil:
+				wins.Add(1)
+			case errors.Is(err, durable.ErrStaleCheckpoint):
+				stale.Add(1)
+			default:
+				t.Errorf("save: %v", err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	if wins.Load() != 1 || wins.Load()+stale.Load() != n {
+		t.Fatalf("wins=%d stale=%d want 1 winner of %d", wins.Load(), stale.Load(), n)
+	}
+	got, _, err := s.Load(ctx, id)
+	if err != nil || got.AgentID == "" {
+		t.Fatalf("stored %+v err=%v", got, err)
+	}
+}
+
+func TestSnapshotStore_concurrentUpdateOneWins(t *testing.T) {
+	ctx := t.Context()
+	s := NewMemorySnapshot()
+	id := durable.SessionID("update")
+	if _, err := s.Save(ctx, id, durable.Snapshot{AgentID: "init"}, ""); err != nil {
+		t.Fatal(err)
+	}
+	_, expected, err := s.Load(ctx, id)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Save(ctx, id, durable.Snapshot{AgentID: "stale"}, "not-"+etag); !errors.Is(err, durable.ErrEtagMismatch) {
-		t.Fatalf("want etag mismatch, got %v", err)
+	const n = 32
+	var wins, stale atomic.Int64
+	var ready, wg sync.WaitGroup
+	ready.Add(1)
+	wg.Add(n)
+	for i := range n {
+		go func(i int) {
+			defer wg.Done()
+			ready.Wait()
+			_, err := s.Save(ctx, id, durable.Snapshot{AgentID: strconv.Itoa(i)}, expected)
+			switch {
+			case err == nil:
+				wins.Add(1)
+			case errors.Is(err, durable.ErrStaleCheckpoint):
+				stale.Add(1)
+			default:
+				t.Errorf("save: %v", err)
+			}
+		}(i)
 	}
-	newEtag, err := s.Save(ctx, id, durable.Snapshot{AgentID: "b"}, etag)
-	if err != nil {
-		t.Fatal(err)
+	ready.Done()
+	wg.Wait()
+	if wins.Load() != 1 || wins.Load()+stale.Load() != n {
+		t.Fatalf("wins=%d stale=%d want 1 winner of %d", wins.Load(), stale.Load(), n)
 	}
-	got, loaded, err := s.Load(ctx, id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if loaded != newEtag || got.AgentID != "b" {
-		t.Fatalf("load=%+v etag=%s want b/%s", got, loaded, newEtag)
+	got, _, err := s.Load(ctx, id)
+	if err != nil || got.AgentID == "init" {
+		t.Fatalf("stored %+v err=%v", got, err)
 	}
 }
 

@@ -27,7 +27,7 @@ const (
 	turnError
 )
 
-func (r *Runtime) constructHarness(ctx context.Context, p *sessionProc, load bool, bindings []vfs.Binding, state map[string]any) (*tacklr.TurnManager, *vfs.MountSession, error) {
+func (r *Runtime) constructHarness(ctx context.Context, p *sessionProc, bindings []vfs.Binding, state map[string]any) (*tacklr.TurnManager, *vfs.MountSession, error) {
 	if p.agentID == "" {
 		return nil, nil, fmt.Errorf("no agent configured for session")
 	}
@@ -63,23 +63,20 @@ func (r *Runtime) constructHarness(ctx context.Context, p *sessionProc, load boo
 		return nil, nil, err
 	}
 	h.BindChildHost(sessionChildren{r: r, p: p})
-	if load {
-		snap, etag, loadErr := r.snapshots.Load(ctx, p.id)
-		switch {
-		case loadErr == nil:
-			p.etag = etag
-			if err := h.RestoreCheckpoint(snap.Checkpoint); err != nil {
-				h.Close()
-				durable.CloseTurnVFS(ms, threadID, "restore")
-				return nil, nil, err
-			}
-		case errors.Is(loadErr, durable.ErrSessionNotFound):
-			// first turn
-		default:
+	snap, rev, loadErr := r.snapshots.Load(ctx, p.id)
+	switch {
+	case loadErr == nil:
+		p.revision = rev
+		if err := h.RestoreCheckpoint(snap.Checkpoint); err != nil {
 			h.Close()
-			durable.CloseTurnVFS(ms, threadID, "load")
-			return nil, nil, loadErr
+			durable.CloseTurnVFS(ms, threadID, "restore")
+			return nil, nil, err
 		}
+	case errors.Is(loadErr, durable.ErrSessionNotFound):
+	default:
+		h.Close()
+		durable.CloseTurnVFS(ms, threadID, "load")
+		return nil, nil, loadErr
 	}
 	if err := h.ApplySessionState(state); err != nil {
 		h.Close()
@@ -100,19 +97,19 @@ func (r *Runtime) persistHarness(ctx context.Context, p *sessionProc, h *tacklr.
 	parent := p.parent
 	specialist := p.specialist
 	p.mu.Unlock()
-	etag, err := r.snapshots.Save(ctx, p.id, durable.Snapshot{
+	rev, err := r.snapshots.Save(ctx, p.id, durable.Snapshot{
 		AgentID:    p.agentID,
 		Specialist: specialist,
 		Parent:     parent,
 		Children:   children,
 		Checkpoint: *cp,
 		Mounts:     p.mounts,
-	}, p.etag)
+	}, p.revision)
 	telemetry.RecordCheckpointAttempt(ctx, err)
 	if err != nil {
 		return err
 	}
-	p.etag = etag
+	p.revision = rev
 	p.mu.Lock()
 	p.state = nil
 	p.mu.Unlock()
@@ -134,8 +131,7 @@ func (r *Runtime) fail(ctx context.Context, p *sessionProc, err error) turnOutco
 }
 
 func (r *Runtime) runTurn(ctx context.Context, p *sessionProc, user *tacklr.Message, resume map[string][]byte, bindings []vfs.Binding, state map[string]any) turnOutcome {
-	load := resume != nil || p.etag != ""
-	h, ms, err := r.constructHarness(ctx, p, load, bindings, state)
+	h, ms, err := r.constructHarness(ctx, p, bindings, state)
 	if err != nil {
 		return r.fail(ctx, p, err)
 	}

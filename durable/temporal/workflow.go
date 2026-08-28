@@ -28,7 +28,6 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 	}
 
 	var (
-		etag       string
 		closed     bool
 		agentID    = in.AgentID
 		mcp        = in.MCPServers
@@ -152,6 +151,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 
 	runSlice := func(user *streaming.Message, resume map[string][]byte, auth durable.AuthContext, kind string, extra map[string]any) {
 		turnState := durable.MergeUserState(seed, extra)
+		seed = nil
 		applyAuth(auth)
 		sessionCtx, hasSession := openTurnLocality(ctx, in.TurnLocalityTimeout, 2*time.Second)
 
@@ -242,7 +242,6 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 					SessionID:     in.SessionID,
 					AgentID:       agentID,
 					MCPServers:    mcp,
-					Etag:          etag,
 					User:          user,
 					HadToolRound:  hadTools,
 					ModelRequests: reqs,
@@ -257,10 +256,6 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 				if onActErr(err) {
 					stopSlice = true
 					break
-				}
-				etag = out.Etag
-				if etag != "" {
-					seed = nil
 				}
 				reqs++
 				if out.Complete {
@@ -280,7 +275,6 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 					SessionID:  in.SessionID,
 					AgentID:    agentID,
 					MCPServers: mcp,
-					Etag:       etag,
 					Call:       tc,
 					Auth:       lastAuth,
 					Mounts:     mounts,
@@ -291,10 +285,6 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 				if onActErr(err) {
 					stopSlice = true
 					break
-				}
-				etag = tout.Etag
-				if etag != "" {
-					seed = nil
 				}
 				if herr := applyChildIntent(ctx, sessionCtx, &spawned, tout, in, agentID, lastAuth, mounts); herr != nil {
 					stopSlice = onActErr(herr)
@@ -312,7 +302,6 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 							SessionID:  in.SessionID,
 							AgentID:    agentID,
 							MCPServers: mcp,
-							Etag:       etag,
 							Call:       tc,
 							Output:     output,
 							Auth:       lastAuth,
@@ -323,10 +312,6 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 						if onActErr(cerr) {
 							stopSlice = true
 							break
-						}
-						etag = cout.Etag
-						if etag != "" {
-							seed = nil
 						}
 						tout.Interrupted = false
 					} else {
@@ -383,7 +368,6 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 							SessionID:  in.SessionID,
 							AgentID:    agentID,
 							MCPServers: mcp,
-							Etag:       etag,
 							Resume:     ev.resume.Responses,
 							Auth:       lastAuth,
 							Mounts:     mounts,
@@ -392,10 +376,6 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 						if onActErr(err) {
 							stopSlice = true
 							break
-						}
-						etag = iout.Etag
-						if etag != "" {
-							seed = nil
 						}
 						toolCalls = slices.Concat(iout.ToolCalls, leftover)
 						leftover = nil
@@ -423,7 +403,6 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 					SessionID:     in.SessionID,
 					AgentID:       agentID,
 					MCPServers:    mcp,
-					Etag:          etag,
 					User:          nudgeMsg,
 					HadToolRound:  true,
 					ModelRequests: reqs,
@@ -435,10 +414,6 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 				if onActErr(err) {
 					stopSlice = true
 					break
-				}
-				etag = out.Etag
-				if etag != "" {
-					seed = nil
 				}
 				reqs++
 				hadTools = true

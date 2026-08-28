@@ -134,6 +134,7 @@ var (
 	ErrSessionExists = errors.New("session already exists")
 	// ErrAgentNotFound is Catalog miss.
 	ErrAgentNotFound = errors.New("agent not found")
-	// ErrEtagMismatch is SnapshotStore.Save with a stale etag (retry with Head).
-	ErrEtagMismatch = errors.New("snapshot: etag mismatch")
+	// ErrStaleCheckpoint is SnapshotStore.Save when expected Revision does not
+	// match the row (another writer already saved). Reload and retry.
+	ErrStaleCheckpoint = errors.New("stale checkpoint")
 )

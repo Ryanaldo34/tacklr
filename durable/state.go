@@ -24,9 +24,7 @@ func EncodeUserState(state map[string]any) (map[string]any, error) {
 			return nil, fmt.Errorf("%w: session state %q: %w", tacklr.ErrInvalid, key, err)
 		}
 		var decoded any
-		if err := json.Unmarshal(raw, &decoded); err != nil {
-			return nil, fmt.Errorf("%w: session state %q: %w", tacklr.ErrInvalid, key, err)
-		}
+		_ = json.Unmarshal(raw, &decoded)
 		out[key] = decoded
 	}
 	return out, nil
@@ -37,10 +35,8 @@ func MergeUserState(base, overlay map[string]any) map[string]any {
 	if len(base) == 0 && len(overlay) == 0 {
 		return nil
 	}
-	out := maps.Clone(base)
-	if out == nil {
-		out = make(map[string]any, len(overlay))
-	}
+	out := make(map[string]any, len(base)+len(overlay))
+	maps.Copy(out, base)
 	maps.Copy(out, overlay)
 	return out
 }

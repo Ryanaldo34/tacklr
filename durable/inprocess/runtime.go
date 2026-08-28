@@ -39,7 +39,7 @@ type sessionProc struct {
 	specialist string
 	parent     durable.SessionID
 	mcp        []mcp.MCPConfig
-	etag       string
+	revision   durable.Revision
 	mounts     []durable.MountRecipe
 	auth       durable.AuthContext
 	children   []durable.SessionID

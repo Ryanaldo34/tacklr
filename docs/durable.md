@@ -101,7 +101,7 @@ A model round can emit several tool calls. Each `function_call` is pending until
 | Runtime | How the batch runs | Where leftovers live |
 |---------|--------------------|----------------------|
 | In-process | Parallel `RunToolCall` on one harness; snapshot once at join/yield | SnapshotStore (parked interrupt only) |
-| Temporal | Sequential `Tool` activities (they share SnapshotStore etag) | Workflow history, not the snapshot |
+| Temporal | Sequential `Tool` activities (each loads/saves SnapshotStore) | Workflow history, not the snapshot |
 
 Conversation (window, plan, parked interrupt) is always SnapshotStore. Temporal history is the scheduler: which calls remain after HITL. Do not copy that leftover list into the snapshot.
 
@@ -152,7 +152,7 @@ Runtime, harness, VFS, and Temporal files compile with no protocol imports.
 |-------|----------|----------|
 | SnapshotStore | One Runtime session | Window, plan, parked interrupts, parked-worker checkpoints, VFS recipes (no tokens, no file bytes). Temporal leftover tool calls are **not** stored here. |
 
-`Close` deletes the runtime snapshot. A new session id does not load a previous snapshot.
+`Close` deletes the runtime snapshot. A new session id does not load a previous snapshot. `Save` takes the `Revision` from the last `Load` (zero on first write) so two workers cannot overwrite each other.
 
 ## Map to Azure / Lambda (later)
 

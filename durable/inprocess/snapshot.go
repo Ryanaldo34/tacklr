@@ -9,7 +9,7 @@ import (
 	"github.com/ryanaldo34/tacklr/durable"
 )
 
-// MemorySnapshot is an in-memory SnapshotStore with etag concurrency.
+// MemorySnapshot is an in-memory SnapshotStore.
 type MemorySnapshot struct {
 	mu      sync.Mutex
 	records map[durable.SessionID]snapRecord
@@ -17,7 +17,6 @@ type MemorySnapshot struct {
 
 type snapRecord struct {
 	snap durable.Snapshot
-	etag string
 	gen  uint64
 }
 
@@ -26,34 +25,41 @@ func NewMemorySnapshot() *MemorySnapshot {
 	return &MemorySnapshot{records: make(map[durable.SessionID]snapRecord)}
 }
 
-// Save implements durable.SnapshotStore. Empty etag creates or overwrites.
-// A non-empty etag must match the stored value.
-func (s *MemorySnapshot) Save(_ context.Context, sessionID durable.SessionID, snap durable.Snapshot, etag string) (string, error) {
+func revisionOf(gen uint64) durable.Revision {
+	return durable.Revision(strconv.FormatUint(gen, 10))
+}
+
+// Save implements durable.SnapshotStore. expected must equal the revision
+// from the last Load (zero if the row does not exist).
+func (s *MemorySnapshot) Save(_ context.Context, sessionID durable.SessionID, snap durable.Snapshot, expected durable.Revision) (durable.Revision, error) {
 	if sessionID == "" {
 		return "", fmt.Errorf("snapshot: session id is required")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cur, ok := s.records[sessionID]
-	if ok && etag != "" && etag != cur.etag {
-		return "", durable.ErrEtagMismatch
+	var current durable.Revision
+	if ok {
+		current = revisionOf(cur.gen)
+	}
+	if expected != current {
+		return "", durable.ErrStaleCheckpoint
 	}
 	cur.gen++
 	cur.snap = snap
-	cur.etag = strconv.FormatUint(cur.gen, 10)
 	s.records[sessionID] = cur
-	return cur.etag, nil
+	return revisionOf(cur.gen), nil
 }
 
 // Load implements durable.SnapshotStore.
-func (s *MemorySnapshot) Load(_ context.Context, sessionID durable.SessionID) (durable.Snapshot, string, error) {
+func (s *MemorySnapshot) Load(_ context.Context, sessionID durable.SessionID) (durable.Snapshot, durable.Revision, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cur, ok := s.records[sessionID]
 	if !ok {
 		return durable.Snapshot{}, "", fmt.Errorf("load snapshot %q: %w", sessionID, durable.ErrSessionNotFound)
 	}
-	return cur.snap, cur.etag, nil
+	return cur.snap, revisionOf(cur.gen), nil
 }
 
 // Delete implements durable.SnapshotStore.

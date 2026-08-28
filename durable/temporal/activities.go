@@ -60,7 +60,6 @@ type InferenceInput struct {
 	SessionID     durable.SessionID
 	AgentID       string
 	MCPServers    []mcp.MCPConfig
-	Etag          string
 	User          *streaming.Message
 	HadToolRound  bool
 	ModelRequests int
@@ -74,7 +73,6 @@ type InferenceInput struct {
 
 // InferenceOutput is the typed Inference activity result.
 type InferenceOutput struct {
-	Etag      string
 	Complete  bool
 	ToolCalls []streaming.ToolCall
 	Result    string
@@ -85,7 +83,6 @@ type ToolInput struct {
 	SessionID  durable.SessionID
 	AgentID    string
 	MCPServers []mcp.MCPConfig
-	Etag       string
 	Call       streaming.ToolCall
 	Auth       durable.AuthContext
 	Mounts     []durable.MountRecipe
@@ -98,7 +95,6 @@ type ToolInput struct {
 // ToolOutput is the typed Tool activity result. Spawn/cancel/await are this
 // call's Runtime intent; the workflow starts, cancels, or waits via ExecuteChildWorkflow.
 type ToolOutput struct {
-	Etag        string
 	Interrupted bool
 	InterruptID string
 	SpawnID     durable.SessionID
@@ -114,7 +110,6 @@ type CommitToolInput struct {
 	SessionID  durable.SessionID
 	AgentID    string
 	MCPServers []mcp.MCPConfig
-	Etag       string
 	Call       streaming.ToolCall
 	Output     string
 	Auth       durable.AuthContext
@@ -147,7 +142,7 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 	if attempt > 1 {
 		_ = a.publish(ctx, stream, in.SessionID, durable.TopicRetry, streaming.StreamEvent{Type: streaming.StreamEventError, Content: "retry"}, true)
 	}
-	h, ms, etag, err := a.harness(ctx, in.SessionID, in.AgentID, in.MCPServers, in.Etag, in.Auth, in.Mounts, in.Specialist, in.State)
+	h, ms, rev, err := a.harness(ctx, in.SessionID, in.AgentID, in.MCPServers, in.Auth, in.Mounts, in.Specialist, in.State)
 	if err != nil {
 		pub := err
 		if err := ctx.Err(); err != nil {
@@ -170,8 +165,8 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 			return InferenceOutput{}, canceledIf(ctx, err)
 		}
 		if pending := eng.PendingToolCalls(); len(pending) > 0 {
-			etag, err = a.save(ctx, in.SessionID, in.AgentID, h, etag, in.Mounts)
-			return InferenceOutput{Etag: etag, ToolCalls: pending}, err
+			_, err = a.save(ctx, in.SessionID, in.AgentID, h, rev, in.Mounts)
+			return InferenceOutput{ToolCalls: pending}, err
 		}
 	}
 	if in.User != nil {
@@ -193,8 +188,7 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 		_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, streaming.StreamEvent{Type: streaming.StreamEventError, Error: pub, Content: pub.Error()}, true)
 		return InferenceOutput{}, canceledIf(ctx, err)
 	}
-	etag, err = a.save(ctx, in.SessionID, in.AgentID, h, etag, in.Mounts)
-	if err != nil {
+	if _, err = a.save(ctx, in.SessionID, in.AgentID, h, rev, in.Mounts); err != nil {
 		slog.ErrorContext(ctx, "inference persist", "area", telemetry.AreaRuntime, "error", err)
 		return InferenceOutput{}, err
 	}
@@ -208,7 +202,7 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 	}
 	slog.InfoContext(ctx, "inference completed",
 		"area", telemetry.AreaRuntime, "complete", step.Complete, "tool_calls", len(step.ToolCalls))
-	return InferenceOutput{Etag: etag, Complete: step.Complete, ToolCalls: step.ToolCalls, Result: result}, nil
+	return InferenceOutput{Complete: step.Complete, ToolCalls: step.ToolCalls, Result: result}, nil
 }
 
 func (a *Activities) Tool(ctx context.Context, in ToolInput) (ToolOutput, error) {
@@ -235,7 +229,7 @@ func (a *Activities) Tool(ctx context.Context, in ToolInput) (ToolOutput, error)
 	if attempt > 1 {
 		_ = a.publish(ctx, stream, in.SessionID, durable.TopicRetry, streaming.StreamEvent{Type: streaming.StreamEventError, Content: "retry"}, true)
 	}
-	h, ms, etag, err := a.harness(ctx, in.SessionID, in.AgentID, in.MCPServers, in.Etag, in.Auth, in.Mounts, in.Specialist, in.State)
+	h, ms, rev, err := a.harness(ctx, in.SessionID, in.AgentID, in.MCPServers, in.Auth, in.Mounts, in.Specialist, in.State)
 	if err != nil {
 		slog.ErrorContext(ctx, "tool harness", "area", telemetry.AreaHarness, "error", err)
 		return ToolOutput{}, err
@@ -263,7 +257,7 @@ func (a *Activities) Tool(ctx context.Context, in ToolInput) (ToolOutput, error)
 		}
 		slog.ErrorContext(ctx, "tool failed", "area", telemetry.AreaHarness, "tool", in.Call.Name, "error", runErr)
 	}
-	etag, saveErr := a.save(ctx, in.SessionID, in.AgentID, h, etag, in.Mounts)
+	_, saveErr := a.save(ctx, in.SessionID, in.AgentID, h, rev, in.Mounts)
 	if saveErr != nil {
 		slog.ErrorContext(ctx, "tool persist", "area", telemetry.AreaHarness, "error", saveErr)
 		if runErr != nil {
@@ -278,7 +272,6 @@ func (a *Activities) Tool(ctx context.Context, in ToolInput) (ToolOutput, error)
 	slog.InfoContext(ctx, "tool completed",
 		"area", telemetry.AreaHarness, "tool", in.Call.Name, "status", status)
 	return ToolOutput{
-		Etag:        etag,
 		Interrupted: step.Interrupted,
 		InterruptID: step.InterruptID,
 		SpawnID:     kids.spawnID,
@@ -290,7 +283,7 @@ func (a *Activities) Tool(ctx context.Context, in ToolInput) (ToolOutput, error)
 }
 
 func (a *Activities) CommitToolOutput(ctx context.Context, in CommitToolInput) (ToolOutput, error) {
-	h, ms, etag, err := a.harness(ctx, in.SessionID, in.AgentID, in.MCPServers, in.Etag, in.Auth, in.Mounts, in.Specialist, in.State)
+	h, ms, rev, err := a.harness(ctx, in.SessionID, in.AgentID, in.MCPServers, in.Auth, in.Mounts, in.Specialist, in.State)
 	if err != nil {
 		return ToolOutput{}, err
 	}
@@ -299,8 +292,7 @@ func (a *Activities) CommitToolOutput(ctx context.Context, in CommitToolInput) (
 		durable.CloseTurnVFS(ms, string(in.SessionID), "commit_tool")
 	}()
 	h.Drive().RecordToolResult(in.Call, in.Output)
-	etag, err = a.save(ctx, in.SessionID, in.AgentID, h, etag, in.Mounts)
-	if err != nil {
+	if _, err = a.save(ctx, in.SessionID, in.AgentID, h, rev, in.Mounts); err != nil {
 		return ToolOutput{}, err
 	}
 	presented := in.Call
@@ -313,10 +305,10 @@ func (a *Activities) CommitToolOutput(ctx context.Context, in CommitToolInput) (
 		Content:   in.Output,
 		ToolCalls: []streaming.ToolCall{presented},
 	}, true)
-	return ToolOutput{Etag: etag}, nil
+	return ToolOutput{}, nil
 }
 
-func (a *Activities) harness(ctx context.Context, id durable.SessionID, agentID string, extraMCP []mcp.MCPConfig, etag string, auth durable.AuthContext, mounts []durable.MountRecipe, specialist string, state map[string]any) (*tacklr.TurnManager, *vfs.MountSession, string, error) {
+func (a *Activities) harness(ctx context.Context, id durable.SessionID, agentID string, extraMCP []mcp.MCPConfig, auth durable.AuthContext, mounts []durable.MountRecipe, specialist string, state map[string]any) (*tacklr.TurnManager, *vfs.MountSession, durable.Revision, error) {
 	spec, ok := a.Catalog.Lookup(agentID)
 	if !ok {
 		return nil, nil, "", durable.ErrAgentNotFound
@@ -350,38 +342,39 @@ func (a *Activities) harness(ctx context.Context, id durable.SessionID, agentID 
 		durable.CloseTurnVFS(ms, string(id), "construct")
 		return nil, nil, "", err
 	}
-	if etag != "" {
-		snap, loaded, loadErr := a.Snapshots.Load(ctx, id)
-		if loadErr == nil {
-			if err := h.RestoreCheckpoint(snap.Checkpoint); err != nil {
-				h.Close()
-				durable.CloseTurnVFS(ms, string(id), "restore")
-				return nil, nil, "", err
-			}
-			etag = loaded
-		} else if !errors.Is(loadErr, durable.ErrSessionNotFound) {
+	var rev durable.Revision
+	snap, loaded, loadErr := a.Snapshots.Load(ctx, id)
+	switch {
+	case loadErr == nil:
+		if err := h.RestoreCheckpoint(snap.Checkpoint); err != nil {
 			h.Close()
-			durable.CloseTurnVFS(ms, string(id), "load")
-			return nil, nil, "", loadErr
+			durable.CloseTurnVFS(ms, string(id), "restore")
+			return nil, nil, "", err
 		}
+		rev = loaded
+	case errors.Is(loadErr, durable.ErrSessionNotFound):
+	default:
+		h.Close()
+		durable.CloseTurnVFS(ms, string(id), "load")
+		return nil, nil, "", loadErr
 	}
 	if err := h.ApplySessionState(state); err != nil {
 		h.Close()
 		durable.CloseTurnVFS(ms, string(id), "state")
 		return nil, nil, "", err
 	}
-	return h, ms, etag, nil
+	return h, ms, rev, nil
 }
 
-func (a *Activities) save(ctx context.Context, id durable.SessionID, agentID string, h *tacklr.TurnManager, etag string, mounts []durable.MountRecipe) (string, error) {
+func (a *Activities) save(ctx context.Context, id durable.SessionID, agentID string, h *tacklr.TurnManager, expected durable.Revision, mounts []durable.MountRecipe) (durable.Revision, error) {
 	cp, err := h.Checkpoint()
 	if err != nil {
 		telemetry.RecordCheckpointAttempt(ctx, err)
 		return "", err
 	}
-	etag, err = a.Snapshots.Save(ctx, id, durable.Snapshot{AgentID: agentID, Checkpoint: *cp, Mounts: mounts}, etag)
+	rev, err := a.Snapshots.Save(ctx, id, durable.Snapshot{AgentID: agentID, Checkpoint: *cp, Mounts: mounts}, expected)
 	telemetry.RecordCheckpointAttempt(ctx, err)
-	return etag, err
+	return rev, err
 }
 
 const streamBatchInterval = 200 * time.Millisecond
