@@ -564,7 +564,8 @@ can say “deal contacts” without baking that product into the SDK.
 ## Agent tools
 
 Injected when the host sets `AgentOptions.Brain` (file-backed tools also need
-VFS + a search namespace). Isolated VFS with no Brain: file tools only.
+VFS + a search namespace). The engine is closed into the handlers at construct,
+same as any other tool client. Isolated VFS with no Brain: file tools only.
 
 | Tool | Use it when | Backs onto |
 |------|-------------|------------|
@@ -634,7 +635,8 @@ eng, err := brain.NewEngine(store, brain.WithKinds(
         {Name: "topic", Type: brain.FieldTypeString},
     }},
 ))
-// AgentOptions{Brain: eng, ...}  → search / save_* / schema / read
+// AgentOptions{Brain: eng, ...}  → search / save_* / schema / read_object
+// The harness closes `eng` into those tool handlers (same pattern as host tools).
 ```
 
 Production-shaped. `PostgresStore.Setup` creates extensions, tables, and

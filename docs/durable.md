@@ -18,6 +18,8 @@ Tacklr’s session API is `durable.Runtime`. A `server.Protocol` maps wire frame
 
 The host API is `durable.Runtime` (`inprocess.New` or `temporal.New`). Tests use the same API. `TurnManager` is not a host type.
 
+Host tools on `AgentSpec.Options.Tools` close over their clients at catalog register. That closure is the client for every later turn. Rebuild the tool if the client must change. See [tools.md](tools.md).
+
 ## In-process Runtime
 
 ```go

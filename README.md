@@ -116,7 +116,9 @@ Importing `tacklr` registers built-in interrupts, Word/Excel codecs, and the dur
 
 ### Tools
 
-Tools are ordinary Go functions. `HarnessRuntime` is for host state, progress, and interrupts.
+Tools are ordinary Go functions. Give a tool a client by closing over it in the constructor. That is the dependency injection. Tests pass a fake into the same constructor.
+
+`HarnessRuntime` is park, progress, children, and session state. It is not a client bag. Do not put clients in `StateGet` — that map is checkpointed.
 
 ```go
 type SearchArgs struct {
@@ -124,16 +126,41 @@ type SearchArgs struct {
 	Limit int    `json:"limit,omitempty" desc:"Max results"`
 }
 
-tool := tacklr.NewTool(tacklr.ToolConfig{
-	Name:        "search_records",
-	Description: "Search operational records.",
-	Handler: func(ctx context.Context, args SearchArgs, rt tacklr.HarnessRuntime) (string, error) {
-		return doSearch(ctx, args.Query, args.Limit)
-	},
-})
+type RecordStore interface {
+	Search(ctx context.Context, query string, limit int) (string, error)
+}
+
+func NewSearchRecordsTool(store RecordStore) *tacklr.Tool {
+	return tacklr.NewTool(tacklr.ToolConfig{
+		Name:        "search_records",
+		Description: "Search operational records.",
+		Handler: func(ctx context.Context, args SearchArgs, rt tacklr.HarnessRuntime) (string, error) {
+			rt.EmitUpdate("Searching records…")
+			return store.Search(ctx, args.Query, args.Limit)
+		},
+	})
+}
+
+// Production: close over the live client.
+opts.Tools = []*tacklr.Tool{NewSearchRecordsTool(liveStore)}
+
+// Test: same constructor, fake client.
+opts.Tools = []*tacklr.Tool{NewSearchRecordsTool(fakeStore)}
 ```
 
 Construct with `NewTool(ToolConfig{...})`. After construction, read metadata through getters (`Name()`, `Access()`, and the rest).
+
+Built-in tools that need a client use the same pattern. You set the client on `AgentOptions`; the harness closes it into the handler:
+
+| Host field | Closed into |
+|------------|-------------|
+| `EmailProvider` | `read_inbox`, `send_email` |
+| `ExaAPIKey` (or `EXA_API_KEY`) | `web_search`, `web_fetch` |
+| `MountSession` | `read`, `write`, `write_document`, `write_spreadsheet`, `run_command` |
+| `Brain` | knowledge tools (`search`, `save_*`, …) |
+| index bridge (from Brain + VFS) | `index_file`, `unindex` |
+
+Swap the fake the same way: `EmailProvider: fakeMail`, `Brain: testEngine`, a temp `MountSession`. Details: [docs/tools.md](docs/tools.md).
 
 ### Checkpoints
 
@@ -178,6 +205,7 @@ opts.Specialists = []*tacklr.Specialist{{
 | Specialists | Nested sessions (`spawn_specialist` and children) | [docs/durable.md](docs/durable.md) |
 | VFS | Mounts and content IR; file tools `read` / `write` / `run_command` | [docs/vfs.md](docs/vfs.md) |
 | Brain | Host-owned knowledge: Engrams, search, optional graph | [docs/knowledge.md](docs/knowledge.md) |
+| Host tools | Your functions; close over clients in the constructor | [docs/tools.md](docs/tools.md) |
 | MCP | External tool servers | [`mcp`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/mcp) |
 | Skills | `SKILL.md` catalogs from VFS mounts | [`skills`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/skills) |
 | Web | Search and fetch when Exa is configured | [`tacklr`](https://pkg.go.dev/github.com/ryanaldo34/tacklr) |
@@ -194,6 +222,7 @@ When VFS is wired, the harness injects file tools over virtual paths only. `run_
 | Doc | What it covers |
 |-----|----------------|
 | [docs/durable.md](docs/durable.md) | Runtime: in-process, Temporal; HITL; children; auth |
+| [docs/tools.md](docs/tools.md) | Tool clients: constructor closures, tests, builtins |
 | [docs/vfs.md](docs/vfs.md) | Mounts, content IR, providers, FUSE |
 | [docs/knowledge.md](docs/knowledge.md) | Brain: Engrams, search, graph, tools |
 | [docs/fuse-vfs-run-command.md](docs/fuse-vfs-run-command.md) | How `run_command` and the FUSE projection fit |

@@ -101,6 +101,10 @@ type ToolConfig struct {
 	// Return nil from a constructor to skip that layer. Types must be registered.
 	OnCall []OnCallFunc
 
+	// Handler is a Go function. Close over clients in the constructor that
+	// calls NewTool; tests pass a fake into that same constructor.
+	// Optional parameters: context.Context, an args struct, HarnessRuntime.
+	// HarnessRuntime is park, progress, children, and session state — not clients.
 	Handler any
 }
 

@@ -53,9 +53,12 @@ func (c Config) Validate() error {
 type AgentOptions struct {
 	Config Config
 	// SessionID is the durable thread id. Set at construction; do not change mid-turn.
-	SessionID  string
-	Model      InferenceStrategy
-	WatchDog   AgentWatchDog
+	SessionID string
+	Model     InferenceStrategy
+	WatchDog  AgentWatchDog
+	// Tools are host tools. Give each tool its clients by closing over them
+	// in the constructor (see NewTool). Built-ins do the same from the
+	// fields below (EmailProvider, ExaAPIKey, Brain, MountSession).
 	Tools      []*Tool
 	MCPConfigs []mcp.MCPConfig
 	// MCPCredentialResolver resolves durable references immediately before
@@ -238,6 +241,7 @@ func (h *TurnManager) finishInit(ctx context.Context, specialists []*Specialist)
 }
 
 // injectBuiltinTools registers plan tools, optional web/brain/VFS/index tools, and spawn_specialist once.
+// Client-backed builtins close over the client at construction (email provider, Exa client, MountSession, brain engine, index bridge).
 func (a *TurnManager) injectBuiltinTools() {
 	if a.builtinsInjected {
 		return
