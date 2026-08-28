@@ -13,6 +13,7 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 
+	"github.com/ryanaldo34/tacklr/builtins"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -27,8 +28,8 @@ func TestMountSession_s3MinIO(t *testing.T) {
 	client, bucket := startMinIO(ctx, t)
 
 	ms, err := vfs.Tree(
-		vfs.At("data", vfs.S3(vfs.AWSS3{Client: client}, bucket)),
-		vfs.At("ro", vfs.S3(vfs.AWSS3{Client: client}, bucket)).ReadOnly(),
+		vfs.At("data", builtins.S3(builtins.AWSS3{Client: client}, bucket)),
+		vfs.At("ro", builtins.S3(builtins.AWSS3{Client: client}, bucket)).ReadOnly(),
 	)(ctx, "sess-s3", vfs.Request{Bindings: []vfs.Binding{
 		{Params: map[string]string{vfs.ParamName: "data", "prefix": "runs/1"}},
 		{Params: map[string]string{vfs.ParamName: "ro", "prefix": "readonly"}},

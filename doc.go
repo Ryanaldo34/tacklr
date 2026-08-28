@@ -4,7 +4,8 @@
 // registration. Domain data types have canonical packages:
 //   - streaming owns messages, events, tool calls, and todos.
 //   - brain owns knowledge retrieval and graph capabilities.
-//   - vfs owns virtual filesystem providers and mount sessions.
+//   - vfs owns virtual filesystem mounts, sessions, and provider interfaces.
+//   - builtins owns optional tool constructors (email, Exa) and VFS backend factories.
 //   - mcp owns MCP connection configuration.
 //
 // Process-wide registrations (built-in interrupts, common VFS codecs, the

@@ -65,6 +65,7 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/brain"
+	"github.com/ryanaldo34/tacklr/builtins"
 	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/durable/inprocess"
 	"github.com/ryanaldo34/tacklr/inference"
@@ -98,6 +99,7 @@ func main() {
 	if err := os.MkdirAll(filepath.Join(jail, "skills"), 0o750); err != nil {
 		log.Fatal(err)
 	}
+	exa := builtins.NewExa(os.Getenv("EXA_API_KEY"))
 
 	cat := durable.NewCatalog("agent")
 	cat.Register("agent", durable.AgentSpec{
@@ -115,6 +117,10 @@ func main() {
 				Fact:      "Fact",
 				Memory:    "Memory",
 			},
+			Tools: []*tacklr.Tool{
+				builtins.WebSearch(exa),
+				builtins.WebFetch(exa),
+			},
 		},
 		OpenVFS: openVFS(jail, eng, ns),
 	})
@@ -130,33 +136,33 @@ func main() {
 func openVFS(jail string, eng *brain.Engine, ns brain.Namespace) vfs.OpenVFS {
 	return func(ctx context.Context, sessionID string, req vfs.Request) (*vfs.MountSession, error) {
 		members := []vfs.Member{
-			vfs.At("work", vfs.Local(jail)),
-			vfs.At("skills", vfs.Local(filepath.Join(jail, "skills"))),
+			vfs.At("work", builtins.Local(jail)),
+			vfs.At("skills", builtins.Local(filepath.Join(jail, "skills"))),
 			vfs.At("engram", brain.Open(eng, brain.Scope{Namespace: ns})),
-			vfs.At("memory", vfs.Memory()),
+			vfs.At("memory", builtins.Memory()),
 		}
 		if b, ok := vfs.BindingByName(req.Bindings, "drive"); ok && strings.TrimSpace(b.Auth.Token) != "" {
 			h := vfs.NewTokenHolder(b.Auth)
-			api, err := vfs.NewGoogleDrive(ctx, h)
+			api, err := builtins.NewGoogleDrive(ctx, h)
 			if err != nil {
 				return nil, err
 			}
-			members = append(members, vfs.At("drive", vfs.Drive(api)))
+			members = append(members, vfs.At("drive", builtins.Drive(api)))
 		}
 		if b, ok := vfs.BindingByName(req.Bindings, "sharepoint"); ok && strings.TrimSpace(b.Auth.Token) != "" {
 			h := vfs.NewTokenHolder(b.Auth)
-			api, err := vfs.NewGraph(h, "", nil)
+			api, err := builtins.NewGraph(h, "", nil)
 			if err != nil {
 				return nil, err
 			}
-			members = append(members, vfs.At("sharepoint", vfs.Graph(api, h, b.Params[vfs.ParamAccount])))
+			members = append(members, vfs.At("sharepoint", builtins.Graph(api, h, b.Params[vfs.ParamAccount])))
 		}
 		return vfs.Tree(members...)(ctx, sessionID, req)
 	}
 }
 ```
 
-Importing `tacklr` registers built-in interrupts, Word/Excel codecs, and the durable driver adapter. The agent sees `/workspace/work`, `/workspace/skills`, `/workspace/engram`. A Drive or SharePoint bind on the prompt adds `/workspace/drive` or `/workspace/sharepoint` for that turn. Tests pass a fake `DriveAPI` / `GraphAPI` into the same `vfs.Drive` / `vfs.Graph` constructors.
+Importing `tacklr` registers built-in interrupts, Word/Excel codecs, and the durable driver adapter. The agent sees `/workspace/work`, `/workspace/skills`, `/workspace/engram`. A Drive or SharePoint bind on the prompt adds `/workspace/drive` or `/workspace/sharepoint` for that turn. Tests pass a fake `DriveAPI` / `GraphAPI` into the same `builtins.Drive` / `builtins.Graph` constructors.
 
 ### Tools
 
@@ -164,17 +170,17 @@ Tools are ordinary Go functions. Give a tool a client by closing over it in the 
 
 `HarnessRuntime` is park, progress, children, and session key-values (`StateGet`). Put facts like the current user on `CreateSession.State` (also `Prompt.State` / `Resume.State`). Close over clients in the constructor: `NewSearchRecordsTool(liveStore)` in production, `NewSearchRecordsTool(fakeStore)` in tests. Construct with `NewTool(ToolConfig{...})`. After construction, read metadata through getters (`Name()`, `Access()`, and the rest).
 
-Built-in tools that need a client use the same pattern. You set the client on `AgentOptions`; the harness closes it into the handler:
+Built-in tools that need a client use the same pattern. You construct them and put them on `AgentOptions.Tools`:
 
-| Host field | Closed into |
-|------------|-------------|
-| `EmailProvider` | `read_inbox`, `send_email` |
-| `ExaAPIKey` (or `EXA_API_KEY`) | `web_search`, `web_fetch` |
+| You construct | Closed into |
+|---------------|-------------|
+| `builtins.ReadInbox` / `builtins.SendEmail` | `read_inbox`, `send_email` |
+| `builtins.WebSearch` / `builtins.WebFetch` | `web_search`, `web_fetch` |
 | `MountSession` | `read`, `write`, `write_document`, `write_spreadsheet`, `run_command` |
 | `Brain` | knowledge tools (`search`, `save_*`, …) |
 | index bridge (from Brain + VFS) | `index_file`, `unindex` |
 
-Swap the fake the same way: `EmailProvider: fakeMail`, `Brain: testEngine`, a temp `MountSession`. Details: [docs/tools.md](docs/tools.md).
+Put optional builtins on `AgentOptions.Tools`. Swap the fake the same way: `Tools: []*tacklr.Tool{builtins.ReadInbox(fakeMail)}`, `Brain: testEngine`, a temp `MountSession`. Details: [docs/tools.md](docs/tools.md).
 
 ### Checkpoints
 
@@ -202,8 +208,8 @@ Register nested agents on `AgentOptions.Specialists`. Tools start them through `
 | Host tools | Your functions; close over clients in the constructor | [docs/tools.md](docs/tools.md) |
 | MCP | External tool servers | [`mcp`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/mcp) |
 | Skills | `SKILL.md` catalogs from VFS mounts | [`skills`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/skills) |
-| Web | Search and fetch when Exa is configured | [`tacklr`](https://pkg.go.dev/github.com/ryanaldo34/tacklr) |
-| Email | `read_inbox` and permission-gated `send_email`; structured filters hide Gmail and Graph query languages | [`email`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/email) · [`email/gmail`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/email/gmail) · [`email/outlook`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/email/outlook) |
+| Web | `web_search` and `web_fetch` via `builtins.WebSearch` / `builtins.WebFetch` | [`builtins`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/builtins) |
+| Email | `read_inbox` and permission-gated `send_email` via `builtins.ReadInbox` / `builtins.SendEmail` | [`builtins`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/builtins) |
 | Server | `Protocol` over Runtime; ACP is the native option | [`server`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/server) |
 | Telemetry | One `tacklr.turn` span per prompt or resume; OTLP | [`telemetry`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/telemetry) |
 
@@ -230,7 +236,7 @@ When VFS is wired, the harness injects file tools over virtual paths only. `run_
 | Package | Role |
 |---------|------|
 | `tacklr` | Harness, tools, plan loop, specialists |
-| `email` | Gmail and Outlook provider contract and SDK adapters |
+| `builtins` | Optional tools (email, Exa) and VFS backend constructors |
 | `vfs` | Virtual filesystem, mounts, content IR |
 | `vfsindex` | Optional mount → brain ingest |
 | `brain` | Knowledge engine |

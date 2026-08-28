@@ -6,12 +6,12 @@
 //   - MountSession — path I/O, ReadText / WriteDocument, ReadLines, FuseMount / Close, HostDir
 //   - FuseAvailable — process can mount a kernel tree (/dev/fuse or /dev/macfuse*)
 //   - ContentRev / ContentHash — session-visible content identity (for tools)
-//   - Local / S3 / Blob / Drive / Graph / Memory / Union + AWSS3 / AzureBlob — backends
-//   - NewGoogleDrive / NewGraph — SDK wrappers (hosts never import Google/MS SDKs)
 //   - SessionAuth + TokenHolder + Binding — session-scoped user-owned credentials (never on MountSpec)
 //   - MountSpec — durable mount description (checkpoint-safe; Members = /workspace aliases)
 //   - WorkspacePoint — /workspace (the only top-level mount)
-//   - Provider / Open / S3API / DriveAPI / GraphAPI — custom backends (Blob uses S3API)
+//   - Provider / Open / S3API / DriveAPI / GraphAPI — custom backends (Blob uses S3API).
+//     Hosts construct default backends from package builtins (Local, S3, Blob,
+//     Drive, Graph, Memory, Union, NewGoogleDrive, NewGraph).
 //   - File, FileInfo, DirEntry — I/O types (File is Close+Stat; io.Reader / io.ReaderAt / io.Writer via comma-ok)
 //   - Document / Textual / Structured / TextDocument — content IR
 //   - Block / StyleMeta / Span / FindBlock / BlockReplaceSpan — structured view

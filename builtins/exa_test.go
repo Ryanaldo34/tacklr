@@ -1,4 +1,4 @@
-package exa_test
+package builtins
 
 import (
 	"context"
@@ -10,8 +10,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/ryanaldo34/tacklr/internal/exa"
 )
 
 // TestClient_Search_success posts the request and parses results.
@@ -39,15 +37,15 @@ func TestClient_Search_success(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	c := exa.NewClient("test-key")
+	c := NewExa("test-key")
 	c.BaseURL = srv.URL
 	c.HTTPClient = srv.Client()
 
-	resp, err := c.Search(context.Background(), exa.SearchRequest{
+	resp, err := c.Search(context.Background(), SearchRequest{
 		Query:      "what is exa",
 		Type:       "auto",
 		NumResults: 5,
-		Contents: &exa.ContentsOptions{
+		Contents: &ContentsOptions{
 			Highlights: true,
 		},
 	})
@@ -80,27 +78,27 @@ func TestClient_Search_httpError(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	c := exa.NewClient("bad")
+	c := NewExa("bad")
 	c.BaseURL = srv.URL
 	c.HTTPClient = srv.Client()
 
-	_, err := c.Search(context.Background(), exa.SearchRequest{Query: "q"})
+	_, err := c.Search(context.Background(), SearchRequest{Query: "q"})
 	if err == nil || !strings.Contains(err.Error(), "401") {
 		t.Fatalf("err = %v", err)
 	}
-	if !errors.Is(err, exa.ErrService) {
+	if !errors.Is(err, ErrService) {
 		t.Fatalf("401 must be service failed: %v", err)
 	}
 }
 
 // TestClient_Search_validation rejects empty query and empty key.
 func TestClient_Search_validation(t *testing.T) {
-	c := exa.NewClient("")
-	if _, err := c.Search(context.Background(), exa.SearchRequest{Query: "q"}); err == nil {
+	c := NewExa("")
+	if _, err := c.Search(context.Background(), SearchRequest{Query: "q"}); err == nil {
 		t.Fatal("want missing key")
 	}
-	c = exa.NewClient("k")
-	if _, err := c.Search(context.Background(), exa.SearchRequest{}); err == nil {
+	c = NewExa("k")
+	if _, err := c.Search(context.Background(), SearchRequest{}); err == nil {
 		t.Fatal("want missing query")
 	}
 }
@@ -129,11 +127,11 @@ func TestClient_Contents_success(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	c := exa.NewClient("test-key")
+	c := NewExa("test-key")
 	c.BaseURL = srv.URL
 	c.HTTPClient = srv.Client()
 
-	resp, err := c.Contents(context.Background(), exa.ContentsRequest{
+	resp, err := c.Contents(context.Background(), ContentsRequest{
 		URLs: []string{"https://arxiv.org/abs/1"},
 		Text: true,
 	})
@@ -157,22 +155,22 @@ func TestClient_Contents_success(t *testing.T) {
 
 // TestClient_Contents_validation rejects empty urls and mixed urls+ids.
 func TestClient_Contents_validation(t *testing.T) {
-	c := exa.NewClient("k")
-	if _, err := c.Contents(context.Background(), exa.ContentsRequest{}); err == nil {
+	c := NewExa("k")
+	if _, err := c.Contents(context.Background(), ContentsRequest{}); err == nil {
 		t.Fatal("want missing urls")
 	}
-	if _, err := c.Contents(context.Background(), exa.ContentsRequest{
+	if _, err := c.Contents(context.Background(), ContentsRequest{
 		URLs: []string{"https://a.com"},
 		IDs:  []string{"id1"},
 	}); err == nil || !strings.Contains(err.Error(), "not both") {
 		t.Fatalf("want urls-or-ids: %v", err)
 	}
 	// Nil client / missing key.
-	var nilC *exa.Client
-	if _, err := nilC.Contents(context.Background(), exa.ContentsRequest{URLs: []string{"https://a.com"}}); err == nil {
+	var nilC *Exa
+	if _, err := nilC.Contents(context.Background(), ContentsRequest{URLs: []string{"https://a.com"}}); err == nil {
 		t.Fatal("want nil client error")
 	}
-	if _, err := exa.NewClient("").Contents(context.Background(), exa.ContentsRequest{IDs: []string{"id1"}}); err == nil {
+	if _, err := NewExa("").Contents(context.Background(), ContentsRequest{IDs: []string{"id1"}}); err == nil {
 		t.Fatal("want missing key")
 	}
 }
@@ -187,10 +185,10 @@ func TestClient_Contents_byIDs(t *testing.T) {
 		_, _ = w.Write([]byte(`{"results":[{"title":"T","url":"https://x","text":"body"}]}`))
 	}))
 	t.Cleanup(srv.Close)
-	c := exa.NewClient("k")
+	c := NewExa("k")
 	c.BaseURL = srv.URL
 	c.HTTPClient = srv.Client()
-	resp, err := c.Contents(context.Background(), exa.ContentsRequest{
+	resp, err := c.Contents(context.Background(), ContentsRequest{
 		IDs:  []string{"doc-1"},
 		Text: true,
 	})
@@ -216,10 +214,10 @@ func TestClient_Contents_httpErrorAndBadJSON(t *testing.T) {
 		_, _ = w.Write([]byte(`{"error":"nope"}`))
 	}))
 	t.Cleanup(srv.Close)
-	c := exa.NewClient("k")
+	c := NewExa("k")
 	c.BaseURL = srv.URL
 	c.HTTPClient = srv.Client()
-	if _, err := c.Contents(context.Background(), exa.ContentsRequest{URLs: []string{"https://a.com"}}); err == nil || !strings.Contains(err.Error(), "400") {
+	if _, err := c.Contents(context.Background(), ContentsRequest{URLs: []string{"https://a.com"}}); err == nil || !strings.Contains(err.Error(), "400") {
 		t.Fatalf("err = %v", err)
 	}
 
@@ -229,7 +227,7 @@ func TestClient_Contents_httpErrorAndBadJSON(t *testing.T) {
 	t.Cleanup(srv2.Close)
 	c.BaseURL = srv2.URL
 	c.HTTPClient = srv2.Client()
-	if _, err := c.Contents(context.Background(), exa.ContentsRequest{URLs: []string{"https://a.com"}}); err == nil || !strings.Contains(err.Error(), "decode") {
+	if _, err := c.Contents(context.Background(), ContentsRequest{URLs: []string{"https://a.com"}}); err == nil || !strings.Contains(err.Error(), "decode") {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -242,11 +240,11 @@ func TestClient_postJSON_edges(t *testing.T) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	t.Cleanup(srv.Close)
-	c := exa.NewClient("k")
+	c := NewExa("k")
 	c.BaseURL = srv.URL
 	c.HTTPClient = nil // use default client with srv — need srv.Client for host
 	c.HTTPClient = srv.Client()
-	if _, err := c.Search(context.Background(), exa.SearchRequest{Query: "q"}); err == nil || !strings.Contains(err.Error(), "500") {
+	if _, err := c.Search(context.Background(), SearchRequest{Query: "q"}); err == nil || !strings.Contains(err.Error(), "500") {
 		t.Fatalf("empty body: %v", err)
 	}
 
@@ -260,7 +258,7 @@ func TestClient_postJSON_edges(t *testing.T) {
 	c.BaseURL = srv2.URL
 	c.HTTPClient = srv2.Client()
 	err := func() error {
-		_, e := c.Search(context.Background(), exa.SearchRequest{Query: "q"})
+		_, e := c.Search(context.Background(), SearchRequest{Query: "q"})
 		return e
 	}()
 	if err == nil || !strings.Contains(err.Error(), "…") {
@@ -271,7 +269,7 @@ func TestClient_postJSON_edges(t *testing.T) {
 	// Cover default base + success with custom transport via BaseURL "" and absolute? Client concatenates base+path.
 	// Use a server and set BaseURL to "" but override HTTPClient to rewrite — simpler: set BaseURL "" and use RoundTripper.
 	// Just hit empty BaseURL path with a Transport that returns OK for any URL.
-	c3 := exa.NewClient("k")
+	c3 := NewExa("k")
 	c3.BaseURL = ""
 	c3.HTTPClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		if !strings.HasPrefix(r.URL.String(), "https://api.exa.ai/") {
@@ -283,10 +281,44 @@ func TestClient_postJSON_edges(t *testing.T) {
 			Header:     make(http.Header),
 		}, nil
 	})}
-	if _, err := c3.Search(context.Background(), exa.SearchRequest{Query: "q"}); err != nil {
+	if _, err := c3.Search(context.Background(), SearchRequest{Query: "q"}); err != nil {
 		t.Fatal(err)
 	}
 }
+
+func TestExaPostJSON_remainingBranches(t *testing.T) {
+	c := NewExa("k")
+	if err := c.postJSON(t.Context(), "/search", make(chan int), nil); err == nil || !strings.Contains(err.Error(), "marshal") {
+		t.Fatalf("marshal: %v", err)
+	}
+	c.BaseURL = "://bad"
+	if err := c.postJSON(t.Context(), "/search", SearchRequest{Query: "q"}, nil); err == nil || !strings.Contains(err.Error(), "build request") {
+		t.Fatalf("url: %v", err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"results":[]}`))
+	}))
+	t.Cleanup(srv.Close)
+	c.BaseURL = srv.URL
+	c.HTTPClient = nil
+	if err := c.postJSON(t.Context(), "/", SearchRequest{Query: "q"}, nil); err != nil {
+		t.Fatalf("nil client / empty op: %v", err)
+	}
+
+	c.HTTPClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 503, Body: errReadCloser{}, Header: make(http.Header)}, nil
+	})}
+	if err := c.postJSON(t.Context(), "/search", SearchRequest{Query: "q"}, &SearchResponse{}); err == nil || !strings.Contains(err.Error(), "read body") {
+		t.Fatalf("read body: %v", err)
+	}
+}
+
+type errReadCloser struct{}
+
+func (errReadCloser) Read([]byte) (int, error) { return 0, errors.New("read fail") }
+func (errReadCloser) Close() error             { return nil }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
@@ -303,7 +335,7 @@ func TestClient_Search_contextCancel(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	c := exa.NewClient("k")
+	c := NewExa("k")
 	c.BaseURL = srv.URL
 	c.HTTPClient = &http.Client{Timeout: 5 * time.Second}
 
@@ -312,7 +344,7 @@ func TestClient_Search_contextCancel(t *testing.T) {
 		<-started
 		cancel()
 	}()
-	_, err := c.Search(ctx, exa.SearchRequest{Query: "q"})
+	_, err := c.Search(ctx, SearchRequest{Query: "q"})
 	if err == nil {
 		t.Fatal("want cancel error")
 	}

@@ -8,6 +8,7 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/ryanaldo34/tacklr/builtins"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -49,7 +50,7 @@ func exportBudgetZip(t *testing.T) []byte {
 
 func mountDriveSheets(t *testing.T, api *memDrive, docs vfs.DocsAPI, sheets vfs.SheetsAPI, writable bool) *vfs.MountSession {
 	t.Helper()
-	ms, err := vfs.Tree(vfs.At("contracts", vfs.DriveWith(api, docs, sheets)))(t.Context(), "s", vfs.Request{Bindings: []vfs.Binding{{
+	ms, err := vfs.Tree(vfs.At("contracts", builtins.DriveWith(api, docs, sheets)))(t.Context(), "s", vfs.Request{Bindings: []vfs.Binding{{
 		Provider: "gdrive", Writable: writable,
 		Params: map[string]string{vfs.ParamName: "contracts", vfs.ParamFolderID: "root-a"},
 		Auth:   vfs.Credential{Token: "t"},

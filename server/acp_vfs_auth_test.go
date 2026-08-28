@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/builtins"
 	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
@@ -42,7 +43,7 @@ func TestACP_vfsBindRefreshUnbind(t *testing.T) {
 				return vfs.Tree()(ctx, sid, req)
 			}
 		}
-		return vfs.Tree(vfs.At("docs", vfs.Local(dir)))(ctx, sid, req)
+		return vfs.Tree(vfs.At("docs", builtins.Local(dir)))(ctx, sid, req)
 	}})
 
 	recNew := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)

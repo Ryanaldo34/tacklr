@@ -1,5 +1,4 @@
-// Package email defines provider-neutral email capabilities for Tacklr agents.
-package email
+package builtins
 
 import (
 	"context"
@@ -8,7 +7,7 @@ import (
 	"time"
 )
 
-// ProviderKind identifies an email service supported by the harness.
+// ProviderKind identifies an email service implemented by a battery adapter.
 type ProviderKind string
 
 const (
@@ -16,31 +15,14 @@ const (
 	ProviderOutlook ProviderKind = "outlook"
 )
 
-// Valid reports whether the provider kind is supported by the harness.
-func (k ProviderKind) Valid() bool {
-	return k == ProviderGmail || k == ProviderOutlook
-}
-
-// Provider supplies the operations exposed by the built-in email tools.
+// EmailProvider supplies the operations exposed by the built-in email tools.
 // Implementations own authentication and provider-specific API behavior and
 // must support concurrent calls when an agent uses workers.
-type Provider interface {
+type EmailProvider interface {
 	Kind() ProviderKind
 	Validate(context.Context) error
 	ReadInbox(context.Context, ReadInboxRequest) (Inbox, error)
 	SendEmail(context.Context, SendEmailRequest) (SentEmail, error)
-}
-
-// ValidateProvider checks that p is usable as a supported provider capability.
-// A nil interface means that email integration is disabled.
-func ValidateProvider(p Provider) error {
-	if p == nil {
-		return nil
-	}
-	if !p.Kind().Valid() {
-		return fmt.Errorf("email: unsupported provider %q", p.Kind())
-	}
-	return nil
 }
 
 // ReadInboxRequest selects messages from the configured inbox.
@@ -69,12 +51,12 @@ func (r ReadInboxRequest) Validate() error {
 		}
 		parsed, err := time.Parse(time.DateOnly, filter.value)
 		if err != nil {
-			return fmt.Errorf("email: %s must use YYYY-MM-DD", filter.name)
+			return fmt.Errorf("builtins: %s must use YYYY-MM-DD", filter.name)
 		}
 		*filter.target = parsed
 	}
 	if !after.IsZero() && !before.IsZero() && after.After(before) {
-		return fmt.Errorf("email: received_after must not be after received_before")
+		return fmt.Errorf("builtins: received_after must not be after received_before")
 	}
 	return nil
 }
@@ -111,18 +93,18 @@ type SendEmailRequest struct {
 // Validate checks the provider-neutral requirements for an outbound email.
 func (r SendEmailRequest) Validate() error {
 	if len(r.To) == 0 {
-		return fmt.Errorf("email: at least one recipient is required")
+		return fmt.Errorf("builtins: at least one recipient is required")
 	}
 	for _, recipient := range append(append(append([]string{}, r.To...), r.CC...), r.BCC...) {
 		if strings.TrimSpace(recipient) == "" {
-			return fmt.Errorf("email: recipients must not be empty")
+			return fmt.Errorf("builtins: recipients must not be empty")
 		}
 	}
 	if strings.TrimSpace(r.Subject) == "" {
-		return fmt.Errorf("email: subject is required")
+		return fmt.Errorf("builtins: subject is required")
 	}
 	if strings.TrimSpace(r.Body) == "" {
-		return fmt.Errorf("email: body is required")
+		return fmt.Errorf("builtins: body is required")
 	}
 	return nil
 }

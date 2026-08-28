@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ryanaldo34/tacklr/builtins"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -22,9 +23,9 @@ func TestMountSession_localSession(t *testing.T) {
 	ctx := t.Context()
 	base := t.TempDir()
 	ms, err := vfs.Tree(
-		vfs.At("work", vfs.Local(base)),
-		vfs.At("nested", vfs.Local(base)).ReadOnly(),
-		vfs.At("ab", vfs.Local(base)),
+		vfs.At("work", builtins.Local(base)),
+		vfs.At("nested", builtins.Local(base)).ReadOnly(),
+		vfs.At("ab", builtins.Local(base)),
 	)(ctx, "sess-1", vfs.Request{Bindings: []vfs.Binding{
 		{Params: map[string]string{vfs.ParamName: "nested", "subpath": "nested"}},
 		{Params: map[string]string{vfs.ParamName: "ab", "subpath": "ab"}},
@@ -143,7 +144,7 @@ func TestMountSession_localSession(t *testing.T) {
 		t.Fatalf("after unmount: %v", err)
 	}
 
-	ms2, err := vfs.Tree(vfs.At("work", vfs.Local(base)))(ctx, "sess-2", vfs.Request{})
+	ms2, err := vfs.Tree(vfs.At("work", builtins.Local(base)))(ctx, "sess-2", vfs.Request{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,8 +267,8 @@ func TestDocument_session(t *testing.T) {
 	ctx := t.Context()
 	base := t.TempDir()
 	ms, err := vfs.Tree(
-		vfs.At("work", vfs.Local(base)),
-		vfs.At("ro", vfs.Local(base)).ReadOnly(),
+		vfs.At("work", builtins.Local(base)),
+		vfs.At("ro", builtins.Local(base)).ReadOnly(),
 	)(ctx, "doc-sess", vfs.Request{Bindings: []vfs.Binding{{
 		Params: map[string]string{vfs.ParamName: "ro", "subpath": "ro"},
 	}}})
@@ -591,7 +592,7 @@ func TestTextDocument_lines(t *testing.T) {
 // TestMountSession_configErrors covers Attach, SpecAt, and codec registry.
 func TestMountSession_configErrors(t *testing.T) {
 	ctx := t.Context()
-	p, err := vfs.Local(t.TempDir())(ctx, "s", vfs.Binding{})
+	p, err := builtins.Local(t.TempDir())(ctx, "s", vfs.Binding{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -681,18 +682,18 @@ func (blankTypeCodec) Decode(context.Context, string, string, []byte) (vfs.Docum
 // TestMemProvider_limits covers size/line caps and write path without PutFile.
 func TestS3_rejectsBadConfig(t *testing.T) {
 	ctx := t.Context()
-	if _, err := vfs.S3(nil, "")(ctx, "s", vfs.Binding{}); err == nil {
+	if _, err := builtins.S3(nil, "")(ctx, "s", vfs.Binding{}); err == nil {
 		t.Fatal("nil client")
 	}
-	if _, err := vfs.S3(vfs.AWSS3{}, "")(ctx, "s", vfs.Binding{}); err == nil {
+	if _, err := builtins.S3(builtins.AWSS3{}, "")(ctx, "s", vfs.Binding{}); err == nil {
 		t.Fatal("missing bucket")
 	}
-	if _, err := vfs.S3(vfs.AWSS3{}, "b")(ctx, "s", vfs.Binding{
+	if _, err := builtins.S3(builtins.AWSS3{}, "b")(ctx, "s", vfs.Binding{
 		Params: map[string]string{"prefix": "a/../b"},
 	}); err == nil {
 		t.Fatal("bad prefix")
 	}
-	var aws vfs.AWSS3
+	var aws builtins.AWSS3
 	if _, _, _, err := aws.Head(ctx, "b", "k"); err == nil {
 		t.Fatal("nil AWS Head")
 	}
@@ -712,18 +713,18 @@ func TestS3_rejectsBadConfig(t *testing.T) {
 
 func TestBlob_rejectsBadConfig(t *testing.T) {
 	ctx := t.Context()
-	if _, err := vfs.Blob(nil, "")(ctx, "s", vfs.Binding{}); err == nil {
+	if _, err := builtins.Blob(nil, "")(ctx, "s", vfs.Binding{}); err == nil {
 		t.Fatal("nil client")
 	}
-	if _, err := vfs.Blob(vfs.AzureBlob{}, "")(ctx, "s", vfs.Binding{}); err == nil {
+	if _, err := builtins.Blob(builtins.AzureBlob{}, "")(ctx, "s", vfs.Binding{}); err == nil {
 		t.Fatal("missing container")
 	}
-	if _, err := vfs.Blob(vfs.AzureBlob{}, "c")(ctx, "s", vfs.Binding{
+	if _, err := builtins.Blob(builtins.AzureBlob{}, "c")(ctx, "s", vfs.Binding{
 		Params: map[string]string{"prefix": "a/../b"},
 	}); err == nil {
 		t.Fatal("bad prefix")
 	}
-	var azure vfs.AzureBlob
+	var azure builtins.AzureBlob
 	if _, _, _, err := azure.Head(ctx, "c", "k"); err == nil {
 		t.Fatal("nil Azure Head")
 	}
@@ -741,14 +742,14 @@ func TestBlob_rejectsBadConfig(t *testing.T) {
 	}
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
-	if _, err := vfs.Blob(vfs.AzureBlob{}, "c")(canceled, "s", vfs.Binding{}); !errors.Is(err, context.Canceled) {
+	if _, err := builtins.Blob(builtins.AzureBlob{}, "c")(canceled, "s", vfs.Binding{}); !errors.Is(err, context.Canceled) {
 		t.Fatal("Open canceled")
 	}
 }
 
 func TestLocal_rejectsUnsafeConfig(t *testing.T) {
 	ctx := t.Context()
-	open := vfs.Local(t.TempDir())
+	open := builtins.Local(t.TempDir())
 	if _, err := open(ctx, "s", vfs.Binding{Params: map[string]string{"subpath": ".."}}); err == nil {
 		t.Fatal("subpath ..")
 	}
@@ -761,7 +762,7 @@ func TestLocal_rejectsUnsafeConfig(t *testing.T) {
 	if _, err := open(ctx, "../bad", vfs.Binding{Params: map[string]string{"session_scoped": "true"}}); err == nil {
 		t.Fatal("unsafe session id")
 	}
-	if _, err := vfs.Local("rel")(ctx, "s", vfs.Binding{}); err == nil {
+	if _, err := builtins.Local("rel")(ctx, "s", vfs.Binding{}); err == nil {
 		t.Fatal("relative base")
 	}
 	file, err := os.CreateTemp(t.TempDir(), "notdir")
@@ -769,7 +770,7 @@ func TestLocal_rejectsUnsafeConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = file.Close()
-	if _, err := vfs.Local(file.Name())(ctx, "s", vfs.Binding{}); err == nil {
+	if _, err := builtins.Local(file.Name())(ctx, "s", vfs.Binding{}); err == nil {
 		t.Fatal("file as base")
 	}
 	if _, err := vfs.NewLocalProvider("relative"); err == nil {

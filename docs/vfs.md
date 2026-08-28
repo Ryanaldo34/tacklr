@@ -61,8 +61,8 @@ The only top-level mount is **`/workspace`**. Hosts close over clients in `vfs.O
 
 ```go
 open := vfs.Tree(
-	vfs.At("work", vfs.Local("/var/agent/scratch")),
-	vfs.At("skills", vfs.Local("/var/agent/skills")),
+	vfs.At("work", builtins.Local("/var/agent/scratch")),
+	vfs.At("skills", builtins.Local("/var/agent/skills")),
 	vfs.At("engram", brain.Open(eng, scope)),
 )
 ms, err := open(ctx, "sess-1", vfs.Request{})
@@ -72,26 +72,26 @@ User-owned Drive/Graph members are constructed from this turn’s bind (injected
 
 ```go
 func openVFS(ctx context.Context, id string, req vfs.Request) (*vfs.MountSession, error) {
-	members := []vfs.Member{vfs.At("work", vfs.Local(jail))}
+	members := []vfs.Member{vfs.At("work", builtins.Local(jail))}
 	if b, ok := vfs.BindingByName(req.Bindings, "drive"); ok && b.Auth.Token != "" {
 		h := vfs.NewTokenHolder(b.Auth)
-		api, err := vfs.NewGoogleDrive(ctx, h)
+		api, err := builtins.NewGoogleDrive(ctx, h)
 		if err != nil {
 			return nil, err
 		}
-		members = append(members, vfs.At("drive", vfs.Drive(api)))
+		members = append(members, vfs.At("drive", builtins.Drive(api)))
 	}
 	return vfs.Tree(members...)(ctx, id, req)
 }
 ```
 
-Tests inject fakes into the same constructors: `vfs.Drive(fakeAPI)`, `vfs.Graph(fakeAPI, holder, account)`.
+Tests inject fakes into the same constructors: `builtins.Drive(fakeAPI)`, `builtins.Graph(fakeAPI, holder, account)`.
 
 | Type | Meaning |
 |------|---------|
 | `At(name, open)` | One `/workspace/<name>` backend |
 | `Tree(...)` | One `/workspace` mount whose members are the At list |
-| `Union(...)` | Read-only merge of Opens (skill packs: `At("skills", Union(Local(a), Local(b)))`) |
+| `Union(...)` | Read-only merge of Opens (skill packs: `At("skills", builtins.Union(builtins.Local(a), builtins.Local(b)))`) |
 | `MountSpec` | Durable description (point `/workspace`, members, **indexPolicy**). Checkpoint-safe; no secrets. |
 | `IndexPolicy` | `none` \| `selective` \| `prefix` \| `watch` (empty → selective when the index bridge is on) |
 
@@ -99,7 +99,7 @@ Tests inject fakes into the same constructors: `vfs.Drive(fakeAPI)`, `vfs.Graph(
 
 ### Skills
 
-Playbooks live at **`/workspace/skills`**. Hosts pass `At("skills", vfs.Local(dir))` or `At("skills", vfs.Union(...))`. The harness loads that directory. Overlapping first-level names in a Union are `ErrAmbiguous`. IndexPolicy is `none`.
+Playbooks live at **`/workspace/skills`**. Hosts pass `At("skills", builtins.Local(dir))` or `At("skills", builtins.Union(...))`. The harness loads that directory. Overlapping first-level names in a Union are `ErrAmbiguous`. IndexPolicy is `none`.
 
 Host-owned roots and secrets (local jail, S3 / Azure Blob client) live in the Open closures, not on mounts or checkpoints.
 
@@ -129,7 +129,7 @@ Go zero-value `Binding` and ACP `readOnly` omitted stay **read-only**. Writable 
 
 Drive scopes: read-only `drive.readonly` (export-only). Writable needs **`drive`**, **`documents`**, and **`spreadsheets`**. `drive` is a restricted (CASA) scope; the token is not folder-scoped.
 
-Graph (OneDrive and SharePoint libraries): **`account`** is `organization` (default) or `personal`. Organization Open without `siteId` or `driveId` fails (`vfs: msgraph organization account requires siteId or driveId`). Personal uses `/me/drive`. Aliases: `enterprise` / `work` / `tenant` → organization; `consumer` / `msa` → personal. Read-only **`Files.Read`**; writable **`Files.ReadWrite`**. A SharePoint library also needs **`Sites.Read.All`** or **`Sites.ReadWrite.All`** as the **client** already consented. CASA: prefer `Files.ReadWrite` (user files) over `Files.ReadWrite.All` when it covers the bound drive. Graph files are real `.docx` / `.xlsx` (Word/Excel codecs). Native Google Docs/Sheets on a Drive member still use Docs/Sheets APIs. Hosts pass `vfs.Graph(api, holder, account)`; `account` on Graph is the default when a bind omits it.
+Graph (OneDrive and SharePoint libraries): **`account`** is `organization` (default) or `personal`. Organization Open without `siteId` or `driveId` fails (`vfs: msgraph organization account requires siteId or driveId`). Personal uses `/me/drive`. Aliases: `enterprise` / `work` / `tenant` → organization; `consumer` / `msa` → personal. Read-only **`Files.Read`**; writable **`Files.ReadWrite`**. A SharePoint library also needs **`Sites.Read.All`** or **`Sites.ReadWrite.All`** as the **client** already consented. CASA: prefer `Files.ReadWrite` (user files) over `Files.ReadWrite.All` when it covers the bound drive. Graph files are real `.docx` / `.xlsx` (Word/Excel codecs). Native Google Docs/Sheets on a Drive member still use Docs/Sheets APIs. Hosts pass `builtins.Graph(api, holder, account)`; `account` on Graph is the default when a bind omits it.
 
 Two surfaces, one document:
 
@@ -147,8 +147,8 @@ Docs **tables**: `kind=table` body is TSV (`A\tB`) **or** a GFM pipe table (`| A
 ```go
 // Host OpenVFS, after a drive bind:
 h := vfs.NewTokenHolder(b.Auth)
-api, err := vfs.NewGoogleDrive(ctx, h)
-members = append(members, vfs.At("drive", vfs.Drive(api)))
+api, err := builtins.NewGoogleDrive(ctx, h)
+members = append(members, vfs.At("drive", builtins.Drive(api)))
 ```
 
 Raw path I/O (absolute virtual paths only):
@@ -321,7 +321,7 @@ _ = ms.WriteDocument(ctx, text)
 ```go
 ctx := context.Background()
 
-ms, _ := vfs.Tree(vfs.At("work", vfs.Local("/var/agent/scratch")))(ctx, "sess-1", vfs.Request{})
+ms, _ := vfs.Tree(vfs.At("work", builtins.Local("/var/agent/scratch")))(ctx, "sess-1", vfs.Request{})
 
 _ = ms.WriteFile(ctx, "/workspace/work/note.txt", []byte("a\nb\nc\n"))
 
@@ -342,7 +342,7 @@ raw, _ := ms.ReadFile(ctx, "/workspace/work/note.txt")
 Lifecycle as a diagram:
 
 ```text
-1. Tree      vfs.Tree(vfs.At("work", vfs.Local(jail)))
+1. Tree      vfs.Tree(vfs.At("work", builtins.Local(jail)))
              /workspace/work → local folder (or S3 / Azure Blob prefix)
 
 2. Read      ReadText / OpenDocument
@@ -360,7 +360,7 @@ Lifecycle as a diagram:
 ### Same paths on S3 and Azure Blob
 
 ```text
-Mount:  /data  →  vfs.S3 (bucket + prefix) or vfs.Blob (container + prefix)
+Mount:  /data  →  builtins.S3 (bucket + prefix) or builtins.Blob (container + prefix)
 Read:   ReadText("/data/app.go")   // GetObject / DownloadStream → TextDocument
 Edit:   SetLine / ReplaceLines
 Write:  WriteDocument              // PutObject / UploadStream with Text() bytes

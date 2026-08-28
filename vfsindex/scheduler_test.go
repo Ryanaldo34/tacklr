@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
+	"github.com/ryanaldo34/tacklr/builtins"
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfsindex"
 )
@@ -17,7 +18,7 @@ import (
 // waiting on IndexPath, and content becomes searchable.
 func TestAsyncScheduler_notifyCoalesceAndEventualIndex(t *testing.T) {
 	ctx := context.Background()
-	ms, err := vfs.Tree(vfs.At("work", vfs.Local(t.TempDir())))(ctx, "async-sched", vfs.Request{})
+	ms, err := vfs.Tree(vfs.At("work", builtins.Local(t.TempDir())))(ctx, "async-sched", vfs.Request{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +74,7 @@ func TestAsyncScheduler_notifyCoalesceAndEventualIndex(t *testing.T) {
 // TestIndexPathResult_andUnindex: public helpers return compact outcomes.
 func TestIndexPathResult_andUnindex(t *testing.T) {
 	ctx := context.Background()
-	ms, err := vfs.Tree(vfs.At("work", vfs.Local(t.TempDir())))(ctx, "result-unindex", vfs.Request{})
+	ms, err := vfs.Tree(vfs.At("work", builtins.Local(t.TempDir())))(ctx, "result-unindex", vfs.Request{})
 	if err != nil {
 		t.Fatal(err)
 	}

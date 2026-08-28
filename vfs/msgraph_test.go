@@ -14,6 +14,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/ryanaldo34/tacklr/builtins"
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfs/adapters"
 	"github.com/ryanaldo34/tacklr/vfs/testhttp"
@@ -332,11 +333,11 @@ func mustGraph(t *testing.T, srv *testhttp.Server, holder *vfs.TokenHolder, acco
 	if holder == nil {
 		holder = vfs.NewTokenHolder(vfs.Credential{Token: "tok"})
 	}
-	api, err := vfs.NewGraph(holder, srv.URL, srv.Client())
+	api, err := builtins.NewGraph(holder, srv.URL, srv.Client())
 	if err != nil {
 		t.Fatal(err)
 	}
-	return vfs.Graph(api, holder, account)
+	return builtins.Graph(api, holder, account)
 }
 
 func mountGraphHTTP(t *testing.T, srv *testhttp.Server, writable bool) (*vfs.MountSession, *vfs.TokenHolder) {
@@ -551,7 +552,7 @@ func TestGraphAndDrive_writesStayOnMatchingProviders(t *testing.T) {
 	driveLive := auth.Holder("s", "gdrive")
 	graphLive := auth.Holder("s", vfs.ProviderMicrosoft)
 	ms, err := vfs.Tree(
-		vfs.At("contracts", vfs.Drive(driveAPI)),
+		vfs.At("contracts", builtins.Drive(driveAPI)),
 		vfs.At("legal", mustGraph(t, srv, graphLive, vfs.AccountPersonal)),
 	)(ctx, "s", vfs.Request{Bindings: []vfs.Binding{
 		{Provider: "gdrive", Writable: true, Auth: vfs.Credential{Token: "gd"}, Live: driveLive, Params: map[string]string{vfs.ParamName: "contracts", vfs.ParamFolderID: "root-a"}},
@@ -622,7 +623,7 @@ func TestGraph_requiresClient(t *testing.T) {
 			t.Fatal("want panic")
 		}
 	}()
-	_ = vfs.Graph(nil, nil, "")
+	_ = builtins.Graph(nil, nil, "")
 }
 
 func TestGraphFactory_organizationRequiresSiteOrDrive(t *testing.T) {

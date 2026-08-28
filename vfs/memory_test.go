@@ -8,12 +8,13 @@ import (
 	"os"
 	"testing"
 
+	"github.com/ryanaldo34/tacklr/builtins"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
 func TestMemoryFactory_fileAndDirOps(t *testing.T) {
 	ctx := context.Background()
-	ms, err := vfs.Tree(vfs.At("mem", vfs.Memory()))(ctx, "mem-1", vfs.Request{})
+	ms, err := vfs.Tree(vfs.At("mem", builtins.Memory()))(ctx, "mem-1", vfs.Request{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +48,7 @@ func TestMemoryFactory_fileAndDirOps(t *testing.T) {
 	}
 
 	// Same factory reuses the session provider.
-	p, err := vfs.Memory()(ctx, "s", vfs.Binding{})
+	p, err := builtins.Memory()(ctx, "s", vfs.Binding{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +116,7 @@ func TestMemoryFactory_fileAndDirOps(t *testing.T) {
 	if err := p.Remove(ctx, "dir"); err != nil {
 		t.Fatal(err)
 	}
-	open := vfs.Memory()
+	open := builtins.Memory()
 	p1, err := open(ctx, "s", vfs.Binding{})
 	if err != nil {
 		t.Fatal(err)

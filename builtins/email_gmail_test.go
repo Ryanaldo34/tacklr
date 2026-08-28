@@ -1,4 +1,4 @@
-package gmail
+package builtins
 
 import (
 	"context"
@@ -12,8 +12,6 @@ import (
 	"golang.org/x/oauth2"
 	googlemail "google.golang.org/api/gmail/v1"
 	"google.golang.org/api/option"
-
-	provider "github.com/ryanaldo34/tacklr/email"
 )
 
 func TestProvider_usesOfficialGmailSDKForInboxAndSend(t *testing.T) {
@@ -54,11 +52,14 @@ func TestProvider_usesOfficialGmailSDKForInboxAndSend(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := New(service)
+	p := Gmail(service)
+	if p.Kind() != ProviderGmail {
+		t.Fatal(p.Kind())
+	}
 
 	hasAttachment := true
-	inbox, err := p.ReadInbox(t.Context(), provider.ReadInboxRequest{From: "sender@example.com", To: "recipient@example.com", Subject: "Status", ReceivedAfter: "2026-08-01", ReceivedBefore: "2026-08-31", HasAttachment: &hasAttachment, Mailbox: "INBOX", UnreadOnly: true, Limit: 5, Cursor: "cursor"})
-	sent, sendErr := p.SendEmail(t.Context(), provider.SendEmailRequest{
+	inbox, err := p.ReadInbox(t.Context(), ReadInboxRequest{From: "sender@example.com", To: "recipient@example.com", Subject: "Status", ReceivedAfter: "2026-08-01", ReceivedBefore: "2026-08-31", HasAttachment: &hasAttachment, Mailbox: "INBOX", UnreadOnly: true, Limit: 5, Cursor: "cursor"})
+	sent, sendErr := p.SendEmail(t.Context(), SendEmailRequest{
 		To: []string{"recipient@example.com"}, CC: []string{"cc@example.com"}, BCC: []string{"bcc@example.com"},
 		Subject: "Status", Body: "ready", ReplyToMessageID: "m1",
 	})
@@ -76,14 +77,50 @@ func TestProvider_usesOfficialGmailSDKForInboxAndSend(t *testing.T) {
 	if sendErr != nil || decodeErr != nil || sent.ID != "sent" || !strings.Contains(rfc, "To: recipient@example.com") || !strings.Contains(rfc, "Cc: cc@example.com") || !strings.Contains(rfc, "Bcc: bcc@example.com") || !strings.Contains(rfc, "In-Reply-To: m1") || !strings.Contains(rfc, "Subject: Status") {
 		t.Fatalf("send = %+v, raw = %q, err = %v decode = %v", sent, raw, sendErr, decodeErr)
 	}
-	if _, err := p.ReadInbox(t.Context(), provider.ReadInboxRequest{ReceivedAfter: "nope"}); err == nil {
+	if _, err := p.ReadInbox(t.Context(), ReadInboxRequest{ReceivedAfter: "nope"}); err == nil {
 		t.Fatal("invalid date was accepted")
+	}
+	if _, err := p.ReadInbox(t.Context(), ReadInboxRequest{}); err != nil {
+		t.Fatalf("unfiltered inbox: %v", err)
+	}
+}
+
+func TestGmailProvider_surfacesSDKErrors(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/gmail/v1/users/me/messages" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"messages": []map[string]string{{"id": "m1"}}})
+			return
+		}
+		http.Error(w, "nope", http.StatusInternalServerError)
+	}))
+	t.Cleanup(server.Close)
+	service, err := googlemail.NewService(t.Context(), option.WithHTTPClient(oauth2.NewClient(t.Context(), oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "token"}))), option.WithEndpoint(server.URL+"/"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := Gmail(service)
+	if _, err := p.ReadInbox(t.Context(), ReadInboxRequest{}); err == nil || !strings.Contains(err.Error(), "get message") {
+		t.Fatalf("get: %v", err)
+	}
+	failList := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "nope", http.StatusInternalServerError)
+	}))
+	t.Cleanup(failList.Close)
+	listSvc, err := googlemail.NewService(t.Context(), option.WithHTTPClient(oauth2.NewClient(t.Context(), oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "token"}))), option.WithEndpoint(failList.URL+"/"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Gmail(listSvc).ReadInbox(t.Context(), ReadInboxRequest{}); err == nil || !strings.Contains(err.Error(), "list messages") {
+		t.Fatalf("list: %v", err)
+	}
+	if _, err := Gmail(listSvc).SendEmail(t.Context(), SendEmailRequest{To: []string{"a@b.c"}, Subject: "s", Body: "b"}); err == nil || !strings.Contains(err.Error(), "send message") {
+		t.Fatalf("send: %v", err)
 	}
 }
 
 func TestGmailQuery_escapesStructuredFilters(t *testing.T) {
 	hasAttachment := false
-	got := gmailQuery(provider.ReadInboxRequest{From: "a'@example.com", Subject: `weekly "review"`, HasAttachment: &hasAttachment})
+	got := gmailQuery(ReadInboxRequest{From: "a'@example.com", Subject: `weekly "review"`, HasAttachment: &hasAttachment})
 	for _, want := range []string{`from:"a'@example.com"`, `subject:"weekly \"review\""`, "-has:attachment"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("query = %q, want %q", got, want)
@@ -91,15 +128,24 @@ func TestGmailQuery_escapesStructuredFilters(t *testing.T) {
 	}
 }
 
+func TestPayloadText_walksPartsAndEmptyBodies(t *testing.T) {
+	if payloadText(nil) != "" {
+		t.Fatal("nil part")
+	}
+	if payloadText(&googlemail.MessagePart{MimeType: "text/html", Parts: []*googlemail.MessagePart{{MimeType: "application/octet-stream"}}}) != "" {
+		t.Fatal("no plaintext")
+	}
+}
+
 func TestProvider_rejectsMissingSDKService(t *testing.T) {
-	p := New(nil)
+	p := Gmail(nil)
 	if err := p.Validate(context.Background()); err == nil {
 		t.Fatal("nil service was accepted")
 	}
-	if _, err := p.ReadInbox(context.Background(), provider.ReadInboxRequest{}); err == nil {
+	if _, err := p.ReadInbox(context.Background(), ReadInboxRequest{}); err == nil {
 		t.Fatal("nil service listed mail")
 	}
-	if _, err := p.SendEmail(context.Background(), provider.SendEmailRequest{To: []string{"a@b.c"}, Subject: "s", Body: "b"}); err == nil {
+	if _, err := p.SendEmail(context.Background(), SendEmailRequest{To: []string{"a@b.c"}, Subject: "s", Body: "b"}); err == nil {
 		t.Fatal("nil service sent mail")
 	}
 }

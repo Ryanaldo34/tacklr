@@ -16,6 +16,7 @@ import (
 	"go.temporal.io/sdk/worker"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/builtins"
 	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/durable/inprocess"
 	"github.com/ryanaldo34/tacklr/internal/temporallive"
@@ -274,7 +275,7 @@ func TestLive_workspaceAuthRemountsAfterResume(t *testing.T) {
 			}
 		},
 	}
-	stack := newLiveStack(t, liveCat(t, model, durable.AgentSpec{OpenVFS: vfs.Tree(vfs.At("docs", vfs.Local(dir)))}))
+	stack := newLiveStack(t, liveCat(t, model, durable.AgentSpec{OpenVFS: vfs.Tree(vfs.At("docs", builtins.Local(dir)))}))
 	id, err := stack.Runtime.CreateSession(ctx, durable.CreateSession{AgentID: "default"})
 	if err != nil {
 		t.Fatal(err)
@@ -350,7 +351,7 @@ func TestLive_workerRestartWhileParkedThenResumeRemounts(t *testing.T) {
 			}
 		},
 	}
-	stack := newLiveStack(t, liveCat(t, model, durable.AgentSpec{OpenVFS: vfs.Tree(vfs.At("docs", vfs.Local(dir)))}))
+	stack := newLiveStack(t, liveCat(t, model, durable.AgentSpec{OpenVFS: vfs.Tree(vfs.At("docs", builtins.Local(dir)))}))
 	id, err := stack.Runtime.CreateSession(ctx, durable.CreateSession{AgentID: "default"})
 	if err != nil {
 		t.Fatal(err)
@@ -520,7 +521,7 @@ func TestLive_cachedRecipePlusTokenOnlyPrompt(t *testing.T) {
 			}
 		},
 	}
-	stack := newLiveStack(t, liveCat(t, model, durable.AgentSpec{OpenVFS: vfs.Tree(vfs.At("docs", vfs.Local(dir)))}))
+	stack := newLiveStack(t, liveCat(t, model, durable.AgentSpec{OpenVFS: vfs.Tree(vfs.At("docs", builtins.Local(dir)))}))
 	id, err := stack.Runtime.CreateSession(ctx, durable.CreateSession{
 		AgentID: "default",
 		Mounts: []durable.MountRecipe{{

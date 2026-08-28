@@ -44,7 +44,7 @@ The **agent file catalog** is collapsed. Discovery (`find_files`, `find_content`
 
 **Production without a FUSE device.** `OpenTurnVFS` returns nil when `!projection.Available()`. There is no MountSession, so no VFS tools and no `run_command`. Tests that need the tree inject `DirectProjection`. Embedders that want the same in-process tree pass a `MountSession` themselves.
 
-**Path identity (shipped).** FUSE root is virtual `/`. The only `Specs()` point is `/workspace`. `FuseMount` rejects multi-segment points. Hosts `At("work", vfs.Local(jail))`. Agent tools take `/workspace/work/note.md`. Host commands take `workspace/work/note.md` relative to `HostDir()`.
+**Path identity (shipped).** FUSE root is virtual `/`. The only `Specs()` point is `/workspace`. `FuseMount` rejects multi-segment points. Hosts `At("work", builtins.Local(jail))`. Agent tools take `/workspace/work/note.md`. Host commands take `workspace/work/note.md` relative to `HostDir()`.
 
 **Byte identity (shipped).** Textual FUSE `Read` / `getattr` use `ReadText`. Binaries use `Stat` + `io.ReaderAt`. Writes are write-through, so host `rg` sees the last persist, not a dirty IR buffer.
 
