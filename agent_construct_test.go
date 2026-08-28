@@ -9,13 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ryanaldo34/tacklr/internal/drive"
-	"github.com/ryanaldo34/tacklr/internal/session"
 	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/skills"
-	"github.com/ryanaldo34/tacklr/stores"
-	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -177,9 +173,9 @@ func TestNewTurnManager_configurationInvariants(t *testing.T) {
 }
 
 func TestRestoreCheckpoint_rejectsCorruptModules(t *testing.T) {
-	sm := session.NewSessionManager()
-	valid, err := session.CaptureCheckpoint(
-		[]*streaming.Message{{Role: streaming.RoleUser, Content: "go"}},
+	sm := newSessionManager()
+	valid, err := captureCheckpoint(
+		[]*Message{{Role: RoleUser, Content: "go"}},
 		sm,
 		nil,
 	)
@@ -201,7 +197,7 @@ func TestRestoreCheckpoint_rejectsCorruptModules(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var checkpoint stores.SessionCheckpoint
+	var checkpoint SessionCheckpoint
 	if err := json.Unmarshal(raw, &checkpoint); err != nil {
 		t.Fatal(err)
 	}
@@ -272,7 +268,7 @@ func TestTurnManager_checkpointAfterRun(t *testing.T) {
 	}
 
 	pendingID := "call_pending"
-	h.pendingToolCalls[pendingID] = stores.PendingToolCall{
+	h.pendingToolCalls[pendingID] = PendingToolCall{
 		ToolCall: &ToolCall{ID: pendingID, CallID: pendingID, Name: "x", Arguments: "{}"},
 	}
 	h.context.Add(&Message{Role: RoleAssistant, ToolCalls: []ToolCall{
@@ -306,7 +302,7 @@ func TestTurnManager_checkpointAfterRun(t *testing.T) {
 	_ = h.session.Park(parkID, &interrupt.UserSelectionInterrupt{
 		Options: []interrupt.UserChoice{{Title: "a"}, {Title: "b"}},
 	})
-	h.pendingToolCalls[parkID] = stores.PendingToolCall{
+	h.pendingToolCalls[parkID] = PendingToolCall{
 		ToolCall: &ToolCall{ID: parkID, CallID: parkID, Name: "ask_user_choice"}, InterruptActive: true,
 	}
 	if err := h.applyResume(map[string][]byte{parkID: []byte(`{"selectionIdx":9}`)}); err == nil {
@@ -317,21 +313,21 @@ func TestTurnManager_checkpointAfterRun(t *testing.T) {
 	mock.invokeFn = func(_ context.Context, _ []*Message, _ []*Tool, ch chan<- LLMResponseChunk) {
 		ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "hi", IsComplete: true}
 	}
-	if _, err := h.runInference(t.Context(), &drive.TurnState{}, out); err != nil {
+	if _, err := h.runInference(t.Context(), &TurnState{}, out); err != nil {
 		t.Fatal(err)
 	}
 	if len(wd.toolResults) == 0 || len(wd.outputs) == 0 {
 		t.Fatalf("watchdog tool=%d out=%d", len(wd.toolResults), len(wd.outputs))
 	}
 	mock.invokeErr = errors.New("upstream")
-	if _, err := h.runInference(t.Context(), &drive.TurnState{HadToolRound: true}, out); err == nil || !errors.Is(err, ErrModelAfterTools) {
+	if _, err := h.runInference(t.Context(), &TurnState{HadToolRound: true}, out); err == nil || !errors.Is(err, ErrModelAfterTools) {
 		t.Fatalf("want ErrModelAfterTools, got %v", err)
 	}
 	mock.invokeErr = nil
 	mock.invokeFn = func(_ context.Context, _ []*Message, _ []*Tool, ch chan<- LLMResponseChunk) {
 		ch <- LLMResponseChunk{Type: StreamEventError, Error: errors.New("provider"), IsComplete: true}
 	}
-	if _, err := h.runInference(t.Context(), &drive.TurnState{HadToolRound: true}, out); err == nil {
+	if _, err := h.runInference(t.Context(), &TurnState{HadToolRound: true}, out); err == nil {
 		t.Fatal("want after-tools stream error")
 	}
 	prompt := strings.Join(mock.systemPrompts, "\n")

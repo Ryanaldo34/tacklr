@@ -7,7 +7,6 @@ import (
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/durable/inprocess"
-	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -80,7 +79,7 @@ func (s *Session) Wait(t testing.TB) []tacklr.StreamEvent {
 				return got
 			}
 			got = append(got, ev)
-			if ev.Type == streaming.StreamEventComplete || ev.Type == streaming.StreamEventError || ev.Type == streaming.StreamEventInterrupt {
+			if ev.Type == tacklr.StreamEventComplete || ev.Type == tacklr.StreamEventError || ev.Type == tacklr.StreamEventInterrupt {
 				return got
 			}
 		case <-deadline:

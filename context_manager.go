@@ -5,8 +5,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-
-	"github.com/ryanaldo34/tacklr/streaming"
 )
 
 // ContextPolicy controls window compress under pressure (used by ModelTasks.Absorb).
@@ -93,7 +91,7 @@ func (m *modelContextManager) Replace(window []*Message) {
 }
 
 func (m *modelContextManager) Add(msg *Message) {
-	if err := streaming.ValidateMessages([]*Message{msg}); err != nil {
+	if err := ValidateMessages([]*Message{msg}); err != nil {
 		panic("tacklr: invalid context message: " + err.Error())
 	}
 	m.mu.Lock()
@@ -102,7 +100,7 @@ func (m *modelContextManager) Add(msg *Message) {
 }
 
 func assertValidContextWindow(window []*Message) {
-	if err := streaming.ValidateMessages(window); err != nil {
+	if err := ValidateMessages(window); err != nil {
 		panic("tacklr: invalid context window: " + err.Error())
 	}
 }
@@ -134,7 +132,7 @@ const continuePlanNudge = `The plan still has incomplete todos. Continue executi
 
 func planHasOpenTodos(plan []Todo) bool {
 	for i := range plan {
-		if plan[i].Status != streaming.TodoStatusCompleted {
+		if plan[i].Status != TodoStatusCompleted {
 			return true
 		}
 	}

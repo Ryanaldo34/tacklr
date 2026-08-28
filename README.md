@@ -46,7 +46,7 @@ A model round may emit several tool calls. The harness does not infer again unti
 
 ## Get started
 
-This is a host: a model, a brain, a `/workspace` tree, a durable runtime, and ACP on HTTP. The protocol never talks to Temporal (or the in-process loop) in their own dialect — it consumes `streaming.StreamEvent` from `Runtime`. Swap `inprocess.New` for `temporal.New` when you have a worker.
+This is a host: a model, a brain, a `/workspace` tree, a durable runtime, and ACP on HTTP. The protocol never talks to Temporal (or the in-process loop) in their own dialect — it consumes `tacklr.StreamEvent` from `Runtime`. Swap `inprocess.New` for `temporal.New` when you have a worker.
 
 ```go
 package main
@@ -184,7 +184,7 @@ Put optional builtins on `AgentOptions.Tools`. Swap the fake the same way: `Tool
 
 ### Checkpoints
 
-`durable.Runtime` writes the session blob to SnapshotStore on each turn. A checkpoint is conversation, plan, tool/user state, and pending interrupts. Package [`stores`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/stores) is the blob type, not an I/O driver. Checkpoints store mount recipes, not file bytes or tokens. VFS writes persist as they happen.
+`durable.Runtime` writes the session blob to SnapshotStore on each turn. A checkpoint is conversation, plan, tool/user state, and pending interrupts (`tacklr.SessionCheckpoint`). Persistence I/O is `durable.SnapshotStore`, not a separate blob package. Checkpoints store mount recipes, not file bytes or tokens. VFS writes persist as they happen.
 
 ### Sessions
 
@@ -236,7 +236,7 @@ When VFS is wired, the harness injects file tools over virtual paths only. `run_
 
 | Package | Role |
 |---------|------|
-| `tacklr` | Harness, tools, plan loop, specialists |
+| `tacklr` | Harness, tools, plan loop, specialists, messages, checkpoints |
 | `builtins` | Optional tools (email, Exa), VFS constructors, OpenAI model client |
 | `vfs` | Virtual filesystem, mounts, content IR |
 | `vfsindex` | Optional mount → brain ingest |
@@ -244,9 +244,7 @@ When VFS is wired, the harness injects file tools over virtual paths only. `run_
 | `brain/helixgraph` | Optional graph adapter |
 | `server` | Protocol host over Runtime |
 | `durable` | Session Runtime (in-process or Temporal) |
-| `stores` | Checkpoint blob (`SessionCheckpoint`) |
 | `interrupt` | Pause / resume types |
-| `streaming` | Shared messages and events |
 | `mcp` | MCP config types |
 | `skills` | Skill loading from the host-only `OpenSkills` tree |
 | `telemetry` | OpenTelemetry helpers |
@@ -273,6 +271,7 @@ Where to look:
 | Area | Start here |
 |------|------------|
 | Turn loop, tools, plan | `agent.go`, `agent_run.go`, `tools.go` |
+| Messages / checkpoints | `message.go`, `checkpoint.go` |
 | Specialists / children | `subagents.go`, `durable/child.go`, `durable/inprocess/` |
 | Runtime | `durable/runtime.go`, `docs/durable.md` |
 | VFS | `vfs/`, `docs/vfs.md` |

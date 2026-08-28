@@ -1,16 +1,14 @@
-package stores
+package tacklr
 
 import (
 	"encoding/json"
 	"strings"
 	"testing"
-
-	"github.com/ryanaldo34/tacklr/streaming"
 )
 
 func TestNewCheckpoint_rejectsInvalidContextWindow(t *testing.T) {
 	_, err := NewCheckpoint(
-		[]*streaming.Message{{Role: streaming.RoleTool, Content: "missing id"}},
+		[]*Message{{Role: RoleTool, Content: "missing id"}},
 		nil, nil, nil, nil, nil,
 	)
 	if err == nil || !strings.Contains(err.Error(), "invalid context window") {
@@ -30,11 +28,11 @@ func TestNewCheckpoint_marshalInterruptErrors(t *testing.T) {
 func TestSessionCheckpoint_pendingToolCallRoundTrip(t *testing.T) {
 	ptc := map[string]PendingToolCall{
 		"fc_g": {
-			ToolCall:        &streaming.ToolCall{ID: "fc_g", CallID: "call_g", Name: "gate"},
+			ToolCall:        &ToolCall{ID: "fc_g", CallID: "call_g", Name: "gate"},
 			InterruptActive: true,
 		},
 	}
-	cp, err := NewCheckpoint([]*streaming.Message{{Role: streaming.RoleUser, Content: "hi"}}, ptc, nil, nil, nil, nil)
+	cp, err := NewCheckpoint([]*Message{{Role: RoleUser, Content: "hi"}}, ptc, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +51,7 @@ func TestSessionCheckpoint_pendingToolCallRoundTrip(t *testing.T) {
 }
 
 func TestSessionCheckpoint_copyHelpersAndJSON(t *testing.T) {
-	cp, err := NewCheckpoint([]*streaming.Message{{Role: streaming.RoleUser, Content: "hi"}}, nil, nil, nil, nil, nil)
+	cp, err := NewCheckpoint([]*Message{{Role: RoleUser, Content: "hi"}}, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

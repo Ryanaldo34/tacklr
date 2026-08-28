@@ -66,7 +66,7 @@ The **agent file catalog** is collapsed. Discovery (`find_files`, `find_content`
 | `run_command` | `tools_vfs.go` |
 | Fuse mount metrics / events | `telemetry` + Registry |
 | go-fuse as a direct module | `go.mod` |
-| Typed park / permission bags on `RestoreCheckpoint` | `session.ApplyCheckpoint` |
+| Typed park / permission bags on `RestoreCheckpoint` | `applyCheckpoint` |
 
 ---
 

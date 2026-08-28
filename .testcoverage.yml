@@ -24,15 +24,9 @@ override:
     threshold: 100
   - path: github.com/ryanaldo34/tacklr/server$
     threshold: 95
-  - path: github.com/ryanaldo34/tacklr/streaming$
-    threshold: 100
-  - path: github.com/ryanaldo34/tacklr/internal/session$
-    threshold: 90
   - path: github.com/ryanaldo34/tacklr/builtins$
     threshold: 90
   - path: github.com/ryanaldo34/tacklr/interrupt$
-    threshold: 90
-  - path: github.com/ryanaldo34/tacklr/stores$
     threshold: 90
   - path: github.com/ryanaldo34/tacklr/brain$
     threshold: 85

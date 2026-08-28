@@ -1,14 +1,4 @@
-// Package streaming holds protocol-agnostic conversation and stream types
-// shared by the harness, builtins model clients, and server.Protocol.
-//
-// Layering:
-//   - builtins: provider wire (e.g. OpenAI SSE) → LLMResponseChunk
-//   - harness: agent loop → StreamEvent (tools, interrupts, complete, cancel)
-//   - server.Protocol: StreamEvent → client wire (ACP, or a host protocol)
-//
-// This package does not parse provider SSE and does not encode client protocols.
-// Client presentation belongs on server.Protocol.OnStreamEvent / OnStreamClosed.
-package streaming
+package tacklr
 
 import "strings"
 

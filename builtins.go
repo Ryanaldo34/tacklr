@@ -7,9 +7,7 @@ import (
 	"slices"
 	"strings"
 
-	session "github.com/ryanaldo34/tacklr/internal/session"
 	"github.com/ryanaldo34/tacklr/interrupt"
-	"github.com/ryanaldo34/tacklr/streaming"
 )
 
 type createTodosArgs struct {
@@ -47,7 +45,7 @@ var askUserChoiceTool = NewTool(ToolConfig{
 	Name:        "ask_user_choice",
 	DisplayName: "Ask: {question}",
 	Description: "Ask the user a multiple-choice clarification question and wait for their selection. Use when you need a discrete decision before continuing. Provide clear, mutually exclusive options.",
-	Category:    streaming.ToolCategoryThink,
+	Category:    ToolCategoryThink,
 	Handler: func(ctx context.Context, args askUserChoiceArgs, runtime HarnessRuntime) (string, error) {
 		if strings.TrimSpace(args.Question) == "" {
 			return "", fmt.Errorf("question is required")
@@ -96,12 +94,12 @@ var askUserChoiceTool = NewTool(ToolConfig{
 	},
 })
 
-func newCreatePlanTool(sm *session.SessionManager) *Tool {
+func newCreatePlanTool(sm *sessionManager) *Tool {
 	return NewTool(ToolConfig{
 		Name:        "create_plan",
 		DisplayName: "Create Plan",
 		Description: "Creates a project plan document and a linear todo list derived from it. Pass the full plaintext plan in plan and the derived todos in todos. Call only when no active plan exists. If a plan is already active, use edit_plan or complete_todo instead of create_plan.",
-		Category:    streaming.ToolCategoryThink,
+		Category:    ToolCategoryThink,
 		Handler: func(ctx context.Context, args createTodosArgs) (ToolOutcome, error) {
 			if existing := sm.Plan.Get(); len(existing) > 0 {
 				return ToolOutcome{}, fmt.Errorf("an active plan already exists (%d todos); use edit_plan to modify it or complete_todo to progress — do not call create_plan again", len(existing))
@@ -116,14 +114,14 @@ func newCreatePlanTool(sm *session.SessionManager) *Tool {
 			copy(todos, args.Todos)
 			started := false
 			for i := range todos {
-				if todos[i].Status == streaming.TodoStatusCompleted {
+				if todos[i].Status == TodoStatusCompleted {
 					continue
 				}
 				if !started {
-					todos[i].Status = streaming.TodoStatusInProgress
+					todos[i].Status = TodoStatusInProgress
 					started = true
 				} else if todos[i].Status == "" {
-					todos[i].Status = streaming.TodoStatusPending
+					todos[i].Status = TodoStatusPending
 				}
 			}
 			sm.Plan.SetDocument(args.Plan)
@@ -137,12 +135,12 @@ func newCreatePlanTool(sm *session.SessionManager) *Tool {
 	})
 }
 
-func newListPlanTool(sm *session.SessionManager) *Tool {
+func newListPlanTool(sm *sessionManager) *Tool {
 	return NewTool(ToolConfig{
 		Name:        "list_plan",
 		DisplayName: "List Plan",
 		Description: "Returns the active plan todo list exactly as stored (titles, statuses, descriptions, in order). Use before complete_todo or edit_plan so titles match exactly. Call after a handoff or whenever plan titles are unclear.",
-		Category:    streaming.ToolCategoryRead,
+		Category:    ToolCategoryRead,
 		Handler: func(ctx context.Context, _ HarnessRuntime) (string, error) {
 			plan := sm.Plan.Get()
 			if len(plan) == 0 {
@@ -161,12 +159,12 @@ func newListPlanTool(sm *session.SessionManager) *Tool {
 	})
 }
 
-func newCompleteTodoTool(sm *session.SessionManager) *Tool {
+func newCompleteTodoTool(sm *sessionManager) *Tool {
 	return NewTool(ToolConfig{
 		Name:        "complete_todo",
 		DisplayName: "Complete {title}",
 		Description: "Marks a todo as completed by exact title (must match list_plan / create_plan titles). Cannot complete a todo that is already completed or not found in the plan. When open work remains, advances the next todo and runs a context handoff. When the plan is fully done, returns success without a handoff so the agent can finish the user-facing answer.",
-		Category:    streaming.ToolCategoryEdit,
+		Category:    ToolCategoryEdit,
 		Handler: func(ctx context.Context, args completeTodoArgs) (ToolOutcome, error) {
 			plan := sm.Plan.Get()
 			if plan == nil {
@@ -182,16 +180,16 @@ func newCompleteTodoTool(sm *session.SessionManager) *Tool {
 			}
 			for i, todo := range plan {
 				if todo.Title == args.Title {
-					if todo.Status == streaming.TodoStatusCompleted {
+					if todo.Status == TodoStatusCompleted {
 						return ToolOutcome{}, fmt.Errorf("todo %q is already completed; call list_plan and pick a pending title", args.Title)
 					}
-					plan[i].Status = streaming.TodoStatusCompleted
+					plan[i].Status = TodoStatusCompleted
 					if len(plan)-1 > i {
-						if plan[i+1].Status == streaming.TodoStatusCompleted {
+						if plan[i+1].Status == TodoStatusCompleted {
 							j := i + 2
 							for j < len(plan) {
-								if plan[j].Status != streaming.TodoStatusCompleted {
-									plan[j].Status = streaming.TodoStatusInProgress
+								if plan[j].Status != TodoStatusCompleted {
+									plan[j].Status = TodoStatusInProgress
 									sm.Plan.Set(plan)
 									return handoff(fmt.Sprintf("Todo completed successfully, now starting %q with description: %q", plan[j].Title, plan[j].Description))
 								}
@@ -200,7 +198,7 @@ func newCompleteTodoTool(sm *session.SessionManager) *Tool {
 							sm.Plan.Set(plan)
 							return allDone("All todos completed successfully")
 						}
-						plan[i+1].Status = streaming.TodoStatusInProgress
+						plan[i+1].Status = TodoStatusInProgress
 						sm.Plan.Set(plan)
 						return handoff(fmt.Sprintf("Todo completed successfully, now starting %q with description: %q", plan[i+1].Title, plan[i+1].Description))
 					}
@@ -213,12 +211,12 @@ func newCompleteTodoTool(sm *session.SessionManager) *Tool {
 	})
 }
 
-func newEditPlanTool(sm *session.SessionManager) *Tool {
+func newEditPlanTool(sm *sessionManager) *Tool {
 	return NewTool(ToolConfig{
 		Name:        "edit_plan",
 		DisplayName: "Edit Plan",
 		Description: "Edits an existing plan by removing and/or adding todos. Optionally replace the full plaintext plan document via plan (must differ from the current document). Omit plan when only changing todos. Cannot delete completed todos.",
-		Category:    streaming.ToolCategoryEdit,
+		Category:    ToolCategoryEdit,
 		Handler: func(ctx context.Context, args editTodosArgs) (ToolOutcome, error) {
 			plan := sm.Plan.Get()
 			if plan == nil {
@@ -244,7 +242,7 @@ func newEditPlanTool(sm *session.SessionManager) *Tool {
 				found := false
 				for i, t := range plan {
 					if t.Title == title {
-						if t.Status == streaming.TodoStatusCompleted {
+						if t.Status == TodoStatusCompleted {
 							return ToolOutcome{}, fmt.Errorf("cannot delete completed todo: %q", title)
 						}
 						plan = slices.Delete(plan, i, i+1)

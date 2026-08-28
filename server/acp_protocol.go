@@ -11,11 +11,12 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/ryanaldo34/tacklr"
+
 	"github.com/coder/websocket"
 
 	"github.com/ryanaldo34/tacklr/durable"
 	tacklrsecurity "github.com/ryanaldo34/tacklr/security"
-	"github.com/ryanaldo34/tacklr/streaming"
 )
 
 // acpProtocol is the native Protocol implementation for the Agent Client Protocol.
@@ -324,13 +325,13 @@ func (p *acpProtocol) handleSessionTurn(ctx context.Context, env ProtocolEnv, pr
 	return err
 }
 
-func (p *acpProtocol) OnStreamEvent(ctx context.Context, env ProtocolEnv, threadID string, ev streaming.StreamEvent, reqID json.RawMessage) StreamControl {
-	if ev.Type == streaming.StreamEventInterrupt && env.Conn != nil && env.Conn.RPC != nil {
+func (p *acpProtocol) OnStreamEvent(ctx context.Context, env ProtocolEnv, threadID string, ev tacklr.StreamEvent, reqID json.RawMessage) StreamControl {
+	if ev.Type == tacklr.StreamEventInterrupt && env.Conn != nil && env.Conn.RPC != nil {
 		resume, err := resolveInterruptViaACP(ctx, env, threadID, &ev)
 		if err != nil {
 			slog.Warn("acp interrupt resolution failed", "error", err, "thread_id", threadID)
-			frames, _ := presentationToACP(threadID, streaming.StreamEvent{
-				Type:  streaming.StreamEventError,
+			frames, _ := presentationToACP(threadID, tacklr.StreamEvent{
+				Type:  tacklr.StreamEventError,
 				Error: err,
 			})
 			frames = injectReqID(frames, reqID, true)
@@ -341,7 +342,7 @@ func (p *acpProtocol) OnStreamEvent(ctx context.Context, env ProtocolEnv, thread
 		}
 	}
 
-	if ev.Type == streaming.StreamEventError && (errors.Is(ev.Error, context.Canceled) || errors.Is(ev.Error, ErrRequestCancelled)) {
+	if ev.Type == tacklr.StreamEventError && (errors.Is(ev.Error, context.Canceled) || errors.Is(ev.Error, ErrRequestCancelled)) {
 		if env.Conn != nil && env.Conn.Writer != nil && len(reqID) > 0 {
 			_ = env.Conn.Writer.WriteResult(reqID, acpPromptResult(stopReasonCancelled))
 		}
@@ -351,8 +352,8 @@ func (p *acpProtocol) OnStreamEvent(ctx context.Context, env ProtocolEnv, thread
 	if err != nil {
 		return StreamControl{Err: fmt.Errorf("protocol encode: %w", err)}
 	}
-	terminal := ev.Type == streaming.StreamEventComplete || ev.Type == streaming.StreamEventError
-	park := ev.Type == streaming.StreamEventInterrupt
+	terminal := ev.Type == tacklr.StreamEventComplete || ev.Type == tacklr.StreamEventError
+	park := ev.Type == tacklr.StreamEventInterrupt
 	frames = injectReqID(frames, reqID, terminal)
 	if park && len(reqID) > 0 && env.Conn != nil && env.Conn.Writer != nil {
 		_ = env.Conn.Writer.WriteError(reqID, clientErrorf(ErrInvalidRequest,
@@ -392,7 +393,7 @@ func injectReqID(frames [][]byte, reqID json.RawMessage, terminal bool) [][]byte
 // resolveInterruptViaACP handles mid-turn interrupts over client RPC.
 // Returns (nil, nil) when this interrupt kind cannot be resolved mid-turn
 // (caller parks the turn). Returns (events, nil) on successful resume.
-func resolveInterruptViaACP(ctx context.Context, env ProtocolEnv, threadID string, ev *streaming.StreamEvent) (map[string][]byte, error) {
+func resolveInterruptViaACP(ctx context.Context, env ProtocolEnv, threadID string, ev *tacklr.StreamEvent) (map[string][]byte, error) {
 	envl, err := ParseInterruptEnvelope(ev.Data)
 	if err != nil {
 		return nil, fmt.Errorf("parse interrupt envelope: %w", err)
@@ -420,7 +421,7 @@ func connElicitationForm(c *Conn) bool {
 	return c.RPC.GetCaps().ElicitationForm
 }
 
-func resolvePermissionViaRequest(ctx context.Context, env ProtocolEnv, threadID string, ev *streaming.StreamEvent) (map[string][]byte, error) {
+func resolvePermissionViaRequest(ctx context.Context, env ProtocolEnv, threadID string, ev *tacklr.StreamEvent) (map[string][]byte, error) {
 	interruptID, perm, err := ParseToolPermissionFromInterruptData(ev.Data)
 	if err != nil {
 		return nil, fmt.Errorf("parse permission interrupt: %w", err)
@@ -440,7 +441,7 @@ func resolvePermissionViaRequest(ctx context.Context, env ProtocolEnv, threadID 
 	return map[string][]byte{interruptID: resolution}, nil
 }
 
-func resolveSelectionViaElicitation(ctx context.Context, env ProtocolEnv, threadID string, ev *streaming.StreamEvent) (map[string][]byte, error) {
+func resolveSelectionViaElicitation(ctx context.Context, env ProtocolEnv, threadID string, ev *tacklr.StreamEvent) (map[string][]byte, error) {
 	interruptID, usi, err := ParseUserSelectionFromInterruptData(ev.Data)
 	if err != nil {
 		return nil, fmt.Errorf("parse selection interrupt: %w", err)

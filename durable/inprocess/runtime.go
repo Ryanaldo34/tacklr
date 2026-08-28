@@ -12,7 +12,6 @@ import (
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/mcp"
-	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/telemetry"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
@@ -435,11 +434,11 @@ func (r *Runtime) applyPromptMeta(p *sessionProc, msg durable.Prompt) error {
 }
 
 type subscription struct {
-	ch     <-chan streaming.StreamEvent
+	ch     <-chan tacklr.StreamEvent
 	cancel context.CancelFunc
 }
 
-func (s *subscription) Events() <-chan streaming.StreamEvent { return s.ch }
+func (s *subscription) Events() <-chan tacklr.StreamEvent { return s.ch }
 func (s *subscription) Close() error {
 	if s.cancel != nil {
 		s.cancel()

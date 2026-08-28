@@ -1,18 +1,14 @@
-// Package stores is the harness checkpoint blob (SessionCheckpoint).
-// Persistence I/O is durable.SnapshotStore. Wire session envelopes belong on
-// server.ProtocolWireStore, not here.
-package stores
+package tacklr
 
 import (
 	"encoding/json"
 	"fmt"
-
-	"github.com/ryanaldo34/tacklr/streaming"
 )
 
+// PendingToolCall is a parked or in-flight tool call in a checkpoint.
 type PendingToolCall struct {
-	ToolCall        *streaming.ToolCall `json:"toolCall,omitempty"`
-	InterruptActive bool                `json:"interruptActive,omitempty"`
+	ToolCall        *ToolCall `json:"toolCall,omitempty"`
+	InterruptActive bool      `json:"interruptActive,omitempty"`
 }
 
 // sessionState is harness-owned durable agent state (not wire-protocol envelopes).
@@ -35,13 +31,13 @@ const CheckpointVersion = 2
 // ProtocolWireStore (or equivalent) owned by the protocol.
 // Harness-owned module/interrupt bytes are opaque to store implementations.
 type SessionCheckpoint struct {
-	ContextWindow []*streaming.Message `json:"contextWindow"`
+	ContextWindow []*Message `json:"contextWindow"`
 	state         sessionState
 }
 
 type checkpointJSON struct {
-	ContextWindow []*streaming.Message `json:"contextWindow"`
-	State         sessionState         `json:"state"`
+	ContextWindow []*Message   `json:"contextWindow"`
+	State         sessionState `json:"state"`
 }
 
 func (c SessionCheckpoint) MarshalJSON() ([]byte, error) {
@@ -101,12 +97,12 @@ func (c SessionCheckpoint) WithUserStateKey(key string, raw json.RawMessage) Ses
 // NewCheckpoint builds the current checkpoint schema. modules contain
 // framework-owned typed JSON; userState contains host-owned arbitrary JSON.
 func NewCheckpoint(
-	contextWindow []*streaming.Message,
+	contextWindow []*Message,
 	pendingToolCalls map[string]PendingToolCall,
 	userState, modules map[string]json.RawMessage,
 	pendingInterrupts, resolvedInterrupts any,
 ) (*SessionCheckpoint, error) {
-	if err := streaming.ValidateMessages(contextWindow); err != nil {
+	if err := ValidateMessages(contextWindow); err != nil {
 		return nil, fmt.Errorf("invalid context window: %w", err)
 	}
 	pendingJSON, err := marshalOptional(pendingInterrupts)

@@ -15,7 +15,6 @@ import (
 	"github.com/ryanaldo34/tacklr/durable"
 
 	"github.com/ryanaldo34/tacklr"
-	"github.com/ryanaldo34/tacklr/streaming"
 )
 
 // ---------------------------------------------------------------------------
@@ -332,8 +331,8 @@ func TestPresentationToACP_outcomes(t *testing.T) {
 	}
 
 	// message
-	frames, err := presentationToACP("thread-1", streaming.StreamEvent{
-		Type: streaming.StreamEventMessage, MessageID: "msg-1", Content: "hello",
+	frames, err := presentationToACP("thread-1", tacklr.StreamEvent{
+		Type: tacklr.StreamEventMessage, MessageID: "msg-1", Content: "hello",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -341,22 +340,22 @@ func TestPresentationToACP_outcomes(t *testing.T) {
 	mustUpdate(t, frames, "agent_message_chunk")
 
 	// reasoning with content
-	frames, err = presentationToACP("thread-1", streaming.StreamEvent{
-		Type: streaming.StreamEventReasoning, Content: "thinking...",
+	frames, err = presentationToACP("thread-1", tacklr.StreamEvent{
+		Type: tacklr.StreamEventReasoning, Content: "thinking...",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	mustUpdate(t, frames, "agent_thought_chunk")
 	// empty reasoning skipped
-	frames, err = presentationToACP("s", streaming.StreamEvent{Type: streaming.StreamEventReasoning})
+	frames, err = presentationToACP("s", tacklr.StreamEvent{Type: tacklr.StreamEventReasoning})
 	if err != nil || frames != nil {
 		t.Fatalf("empty reasoning: %v %v", err, frames)
 	}
 
 	// function call + title/name/kind + CallID fallback
-	frames, err = presentationToACP("thread-1", streaming.StreamEvent{
-		Type:      streaming.StreamEventFunctionCall,
+	frames, err = presentationToACP("thread-1", tacklr.StreamEvent{
+		Type:      tacklr.StreamEventFunctionCall,
 		ToolCalls: []tacklr.ToolCall{{ID: "tc-1", Name: "complete_todo", Title: "Complete Ship", Category: "think"}},
 	})
 	if err != nil {
@@ -366,8 +365,8 @@ func TestPresentationToACP_outcomes(t *testing.T) {
 	if u["title"] != "Complete Ship" || u["name"] != "complete_todo" || u["kind"] != "think" {
 		t.Fatalf("tool_call fields: %#v", u)
 	}
-	frames, err = presentationToACP("thread-1", streaming.StreamEvent{
-		Type:      streaming.StreamEventFunctionCall,
+	frames, err = presentationToACP("thread-1", tacklr.StreamEvent{
+		Type:      tacklr.StreamEventFunctionCall,
 		ToolCalls: []tacklr.ToolCall{{CallID: "fc_only", Name: "echo"}},
 	})
 	if err != nil {
@@ -377,8 +376,8 @@ func TestPresentationToACP_outcomes(t *testing.T) {
 		t.Fatal("call id fallback")
 	}
 	// function call with assistant content
-	frames, err = presentationToACP("s", streaming.StreamEvent{
-		Type: streaming.StreamEventFunctionCall, Content: "thinking aloud",
+	frames, err = presentationToACP("s", tacklr.StreamEvent{
+		Type: tacklr.StreamEventFunctionCall, Content: "thinking aloud",
 		ToolCalls: []tacklr.ToolCall{{ID: "c1", CallID: "c1", Name: "echo", Category: "other"}},
 	})
 	if err != nil || len(frames) < 2 {
@@ -386,8 +385,8 @@ func TestPresentationToACP_outcomes(t *testing.T) {
 	}
 
 	// tool result success / failed / empty / CallID
-	frames, err = presentationToACP("thread-1", streaming.StreamEvent{
-		Type: streaming.StreamEventToolResult, Content: "file contents here",
+	frames, err = presentationToACP("thread-1", tacklr.StreamEvent{
+		Type: tacklr.StreamEventToolResult, Content: "file contents here",
 		ToolCalls: []tacklr.ToolCall{{ID: "tc-1", Name: "read_file"}},
 	})
 	if err != nil {
@@ -397,19 +396,19 @@ func TestPresentationToACP_outcomes(t *testing.T) {
 	if u["status"] != "completed" {
 		t.Fatalf("status=%v", u["status"])
 	}
-	frames, err = presentationToACP("s", streaming.StreamEvent{
-		Type: streaming.StreamEventToolResult, Content: "boom",
+	frames, err = presentationToACP("s", tacklr.StreamEvent{
+		Type: tacklr.StreamEventToolResult, Content: "boom",
 		ToolCalls: []tacklr.ToolCall{{ID: "c1", CallID: "c1", Name: "echo", Status: "error"}},
 	})
 	if err != nil || !strings.Contains(string(frames[0]), "failed") {
 		t.Fatalf("tool failed: %v %s", err, frames)
 	}
-	frames, err = presentationToACP("s", streaming.StreamEvent{Type: streaming.StreamEventToolResult})
+	frames, err = presentationToACP("s", tacklr.StreamEvent{Type: tacklr.StreamEventToolResult})
 	if err != nil || frames != nil {
 		t.Fatalf("empty tool result: %v %v", err, frames)
 	}
-	frames, err = presentationToACP("thread-1", streaming.StreamEvent{
-		Type: streaming.StreamEventToolResult, Content: "ok",
+	frames, err = presentationToACP("thread-1", tacklr.StreamEvent{
+		Type: tacklr.StreamEventToolResult, Content: "ok",
 		ToolCalls: []tacklr.ToolCall{{CallID: "fc_only", Name: "echo", Status: "success"}},
 	})
 	if err != nil {
@@ -420,8 +419,8 @@ func TestPresentationToACP_outcomes(t *testing.T) {
 	}
 
 	// tool update progress
-	frames, err = presentationToACP("thread-1", streaming.StreamEvent{
-		Type: streaming.StreamEventToolUpdate, MessageID: "tc-1", Content: "processing step 1...",
+	frames, err = presentationToACP("thread-1", tacklr.StreamEvent{
+		Type: tacklr.StreamEventToolUpdate, MessageID: "tc-1", Content: "processing step 1...",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -432,8 +431,8 @@ func TestPresentationToACP_outcomes(t *testing.T) {
 	}
 
 	// complete
-	frames, err = presentationToACP("thread-1", streaming.StreamEvent{
-		Type: streaming.StreamEventComplete, TurnID: "turn-abc",
+	frames, err = presentationToACP("thread-1", tacklr.StreamEvent{
+		Type: tacklr.StreamEventComplete, TurnID: "turn-abc",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -445,8 +444,8 @@ func TestPresentationToACP_outcomes(t *testing.T) {
 	}
 
 	// error internal + stop-reason outcomes + plain error field
-	frames, err = presentationToACP("thread-1", streaming.StreamEvent{
-		Type: streaming.StreamEventError, TurnID: "turn-err", Error: io.ErrUnexpectedEOF,
+	frames, err = presentationToACP("thread-1", tacklr.StreamEvent{
+		Type: tacklr.StreamEventError, TurnID: "turn-err", Error: io.ErrUnexpectedEOF,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -465,7 +464,7 @@ func TestPresentationToACP_outcomes(t *testing.T) {
 		{tacklr.ErrMaxTurnRequests, "max_turn_requests"},
 		{fmt.Errorf("run: context cancelled: %w", context.Canceled), "cancelled"},
 	} {
-		frames, err = presentationToACP("t", streaming.StreamEvent{Type: streaming.StreamEventError, Error: tc.err})
+		frames, err = presentationToACP("t", tacklr.StreamEvent{Type: tacklr.StreamEventError, Error: tc.err})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -475,16 +474,16 @@ func TestPresentationToACP_outcomes(t *testing.T) {
 			t.Fatalf("stopReason want %s got %v", tc.want, msg)
 		}
 	}
-	frames, err = presentationToACP("s1", streaming.StreamEvent{
-		Type: streaming.StreamEventError, Error: errors.New("explode"),
+	frames, err = presentationToACP("s1", tacklr.StreamEvent{
+		Type: tacklr.StreamEventError, Error: errors.New("explode"),
 	})
 	if err != nil || !strings.Contains(string(frames[0]), "explode") {
 		t.Fatalf("%v %v", err, frames)
 	}
 
 	// plan update
-	frames, err = presentationToACP("s", streaming.StreamEvent{
-		Type: streaming.StreamEventPlanUpdate,
+	frames, err = presentationToACP("s", tacklr.StreamEvent{
+		Type: tacklr.StreamEventPlanUpdate,
 		Data: []byte(`[{"title":"A","status":"pending","description":""}]`),
 	})
 	if err != nil || !strings.Contains(string(frames[0]), `"plan"`) {
@@ -492,7 +491,7 @@ func TestPresentationToACP_outcomes(t *testing.T) {
 	}
 
 	// interrupt skipped
-	frames, err = presentationToACP("thread-1", streaming.StreamEvent{Type: streaming.StreamEventInterrupt})
+	frames, err = presentationToACP("thread-1", tacklr.StreamEvent{Type: tacklr.StreamEventInterrupt})
 	if err != nil || len(frames) != 0 {
 		t.Fatalf("interrupt skip: %v n=%d", err, len(frames))
 	}

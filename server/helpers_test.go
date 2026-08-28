@@ -10,10 +10,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ryanaldo34/tacklr"
+
 	"github.com/ryanaldo34/tacklr/builtins"
 	"github.com/ryanaldo34/tacklr/durable"
 	tacklrsecurity "github.com/ryanaldo34/tacklr/security"
-	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -190,7 +191,7 @@ func TestACP_authenticate_mapsHostErrors(t *testing.T) {
 func TestACP_RunTurn_unknownEventAndParkWithoutRPC(t *testing.T) {
 	p := NewACPProtocol(nil)
 	w := &recordingMessageWriter{}
-	env := ProtocolEnv{Runtime: &stubRT{events: []streaming.StreamEvent{{Type: "nope"}}}, Conn: &Conn{Writer: w}}
+	env := ProtocolEnv{Runtime: &stubRT{events: []tacklr.StreamEvent{{Type: "nope"}}}, Conn: &Conn{Writer: w}}
 	err := RunTurn(t.Context(), env, p, "t", json.RawMessage(`1`), PromptOrResume{})
 	if err == nil {
 		t.Fatal("unknown stream type")
@@ -198,7 +199,7 @@ func TestACP_RunTurn_unknownEventAndParkWithoutRPC(t *testing.T) {
 
 	parked := &recordingMessageWriter{}
 	parkEnv := ProtocolEnv{
-		Runtime: &stubRT{events: []streaming.StreamEvent{{Type: streaming.StreamEventInterrupt}}},
+		Runtime: &stubRT{events: []tacklr.StreamEvent{{Type: tacklr.StreamEventInterrupt}}},
 		Conn:    &Conn{Writer: parked},
 	}
 	if err := RunTurn(t.Context(), parkEnv, p, "t", json.RawMessage(`1`), PromptOrResume{}); err != nil {

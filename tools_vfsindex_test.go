@@ -10,7 +10,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
-	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfsindex"
 )
@@ -44,7 +43,7 @@ func vfsIndexHarness(t *testing.T, withNS bool) (*TurnManager, *vfs.MountSession
 
 func activatePlan(t *testing.T, h *TurnManager) {
 	t.Helper()
-	h.session.Plan.Set([]Todo{{Title: "t", Description: "d", Status: streaming.TodoStatusPending}})
+	h.session.Plan.Set([]Todo{{Title: "t", Description: "d", Status: TodoStatusPending}})
 	if !h.session.Plan.HasActive() {
 		t.Fatal("plan not active")
 	}

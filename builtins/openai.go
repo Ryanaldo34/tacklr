@@ -16,7 +16,6 @@ import (
 	"go.opentelemetry.io/otel/log"
 
 	"github.com/ryanaldo34/tacklr"
-	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
@@ -974,7 +973,7 @@ func marshalRoleContent(role string, msg *tacklr.Message) any {
 			}
 			fileData := fd.Data
 			if !strings.HasPrefix(fileData, "data:") {
-				fileData = streaming.DataURL(fd.MIMEType, fileData)
+				fileData = tacklr.DataURL(fd.MIMEType, fileData)
 			}
 			parts = append(parts, inputFilePart{
 				Type:     "input_file",

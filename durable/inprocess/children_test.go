@@ -13,7 +13,6 @@ import (
 	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
 	"github.com/ryanaldo34/tacklr/interrupt"
-	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -80,10 +79,10 @@ func waitGone(t *testing.T, rt *Runtime, id durable.SessionID) {
 	t.Fatalf("session %s still present", id)
 }
 
-func waitParentEvent(t *testing.T, sub durable.Subscription, timeout time.Duration, pred func(streaming.StreamEvent) bool) streaming.StreamEvent {
+func waitParentEvent(t *testing.T, sub durable.Subscription, timeout time.Duration, pred func(tacklr.StreamEvent) bool) tacklr.StreamEvent {
 	t.Helper()
 	deadline := time.After(timeout)
-	var seen []streaming.StreamEvent
+	var seen []tacklr.StreamEvent
 	for {
 		select {
 		case ev, ok := <-sub.Events():
@@ -187,8 +186,8 @@ func TestChildren_asyncSpawnThenCollect(t *testing.T) {
 	rt = New(specialistCatalog(t, parent, tacklr.Specialist{Name: "researcher", Model: child}), WithProjection(vfs.DirectProjection{}))
 	sub := begin(t, rt, &parentID)
 	childID := durable.ChildSessionID(parentID, "researcher", "sp1")
-	waitParentEvent(t, sub, 8*time.Second, func(ev streaming.StreamEvent) bool {
-		return ev.Type == streaming.StreamEventToolResult && strings.Contains(ev.Content, string(childID))
+	waitParentEvent(t, sub, 8*time.Second, func(ev tacklr.StreamEvent) bool {
+		return ev.Type == tacklr.StreamEventToolResult && strings.Contains(ev.Content, string(childID))
 	})
 	if st, err := rt.Status(t.Context(), childID); err != nil || (st.State != durable.SessionRunning && st.State != durable.SessionComplete) {
 		t.Fatalf("child after async spawn: %+v %v", st, err)
@@ -196,10 +195,10 @@ func TestChildren_asyncSpawnThenCollect(t *testing.T) {
 	got := waitEvents(t, sub, 8*time.Second)
 	var sawCollect, sawDone bool
 	for _, ev := range got {
-		if ev.Type == streaming.StreamEventToolResult && strings.Contains(ev.Content, "from-research") {
+		if ev.Type == tacklr.StreamEventToolResult && strings.Contains(ev.Content, "from-research") {
 			sawCollect = true
 		}
-		if ev.Type == streaming.StreamEventMessage && ev.Content == "parent-done" {
+		if ev.Type == tacklr.StreamEventMessage && ev.Content == "parent-done" {
 			sawDone = true
 		}
 	}
@@ -302,13 +301,13 @@ func TestChildren_mixedBlockingPairsBeforeNextRound(t *testing.T) {
 	}
 	var blockOut, asyncOut, second bool
 	for _, ev := range got {
-		if ev.Type == streaming.StreamEventToolResult && ev.Content == "block-result" {
+		if ev.Type == tacklr.StreamEventToolResult && ev.Content == "block-result" {
 			blockOut = true
 		}
-		if ev.Type == streaming.StreamEventToolResult && strings.Contains(ev.Content, "scheduled") {
+		if ev.Type == tacklr.StreamEventToolResult && strings.Contains(ev.Content, "scheduled") {
 			asyncOut = true
 		}
-		if ev.Type == streaming.StreamEventMessage && ev.Content == "second-round" {
+		if ev.Type == tacklr.StreamEventMessage && ev.Content == "second-round" {
 			second = true
 		}
 	}
@@ -369,7 +368,7 @@ func TestChildren_waitingStaysRunningUntilHITLResolved(t *testing.T) {
 			if !ok {
 				t.Fatal("subscription closed")
 			}
-			if ev.Type != streaming.StreamEventToolResult {
+			if ev.Type != tacklr.StreamEventToolResult {
 				continue
 			}
 			if strings.Contains(ev.Content, "Child sessions:") {
@@ -389,8 +388,8 @@ func TestChildren_waitingStaysRunningUntilHITLResolved(t *testing.T) {
 		t.Fatalf("non-blocking get while HITL: %q", poll)
 	}
 
-	waitParentEvent(t, sub, 8*time.Second, func(ev streaming.StreamEvent) bool {
-		return ev.Type == streaming.StreamEventInterrupt && ev.MessageID == "gc2"
+	waitParentEvent(t, sub, 8*time.Second, func(ev tacklr.StreamEvent) bool {
+		return ev.Type == tacklr.StreamEventInterrupt && ev.MessageID == "gc2"
 	})
 	childID := durable.ChildSessionID(parentID, "researcher", "sp1")
 	st, err := rt.Status(t.Context(), childID)
@@ -410,13 +409,13 @@ func TestChildren_waitingStaysRunningUntilHITLResolved(t *testing.T) {
 			if !ok {
 				t.Fatal("closed")
 			}
-			if ev.Type == streaming.StreamEventToolResult && strings.Contains(ev.Content, "chose-A") {
+			if ev.Type == tacklr.StreamEventToolResult && strings.Contains(ev.Content, "chose-A") {
 				collected = true
 			}
-			if ev.Type == streaming.StreamEventMessage && ev.Content == "parent-done" {
+			if ev.Type == tacklr.StreamEventMessage && ev.Content == "parent-done" {
 				done = true
 			}
-			if ev.Type == streaming.StreamEventError {
+			if ev.Type == tacklr.StreamEventError {
 				t.Fatalf("error: %v %s", ev.Error, ev.Content)
 			}
 		case <-deadline:
@@ -474,10 +473,10 @@ func TestChildren_getChildParkAndSiblingCancel(t *testing.T) {
 			if !ok {
 				t.Fatal("closed")
 			}
-			if ev.Type == streaming.StreamEventInterrupt && ev.MessageID == "gc1" {
+			if ev.Type == tacklr.StreamEventInterrupt && ev.MessageID == "gc1" {
 				parked = true
 			}
-			if ev.Type == streaming.StreamEventToolResult {
+			if ev.Type == tacklr.StreamEventToolResult {
 				for _, tc := range ev.ToolCalls {
 					if tc.Name == "get_child" {
 						t.Fatalf("blocking get completed before resume: %q", ev.Content)
@@ -500,8 +499,8 @@ func TestChildren_getChildParkAndSiblingCancel(t *testing.T) {
 	if err := rt.Resume(t.Context(), parentID, durable.Resume{Responses: map[string][]byte{"gc1": payload}}); err != nil {
 		t.Fatal(err)
 	}
-	waitParentEvent(t, sub, 8*time.Second, func(ev streaming.StreamEvent) bool {
-		return ev.Type == streaming.StreamEventToolResult && strings.Contains(ev.Content, "kept-result")
+	waitParentEvent(t, sub, 8*time.Second, func(ev tacklr.StreamEvent) bool {
+		return ev.Type == tacklr.StreamEventToolResult && strings.Contains(ev.Content, "kept-result")
 	})
 }
 
@@ -542,8 +541,8 @@ func TestChildren_stopKillsRunningChild(t *testing.T) {
 			promptCtx, cancelPrompt := context.WithCancel(t.Context())
 			t.Cleanup(cancelPrompt)
 			sub := beginWithPrompt(promptCtx, t, rt, &id)
-			waitParentEvent(t, sub, 8*time.Second, func(ev streaming.StreamEvent) bool {
-				return ev.Type == streaming.StreamEventToolResult && strings.Contains(ev.Content, "/w/researcher/sp1")
+			waitParentEvent(t, sub, 8*time.Second, func(ev tacklr.StreamEvent) bool {
+				return ev.Type == tacklr.StreamEventToolResult && strings.Contains(ev.Content, "/w/researcher/sp1")
 			})
 			select {
 			case <-started:
@@ -588,7 +587,7 @@ func TestChildren_unknownSpecialistAndChild(t *testing.T) {
 	got := waitEvents(t, sub, 8*time.Second)
 	var texts []string
 	for _, ev := range got {
-		if ev.Type == streaming.StreamEventToolResult {
+		if ev.Type == tacklr.StreamEventToolResult {
 			texts = append(texts, ev.Content)
 		}
 	}
@@ -644,10 +643,10 @@ func TestChildren_nudgeUntilCollected(t *testing.T) {
 			if !ok {
 				t.Fatal("closed")
 			}
-			if ev.Type == streaming.StreamEventToolResult && strings.Contains(ev.Content, "nudge-result") {
+			if ev.Type == tacklr.StreamEventToolResult && strings.Contains(ev.Content, "nudge-result") {
 				return
 			}
-			if ev.Type == streaming.StreamEventComplete {
+			if ev.Type == tacklr.StreamEventComplete {
 				t.Fatal("parent completed before collecting child")
 			}
 		case <-deadline:
@@ -678,8 +677,8 @@ func TestChildren_blockingSpawnParksOnChildHITL(t *testing.T) {
 	rt := New(specialistCatalog(t, parent, tacklr.Specialist{Name: "researcher", Model: child, Tools: []*tacklr.Tool{askUserTool()}}), WithProjection(vfs.DirectProjection{}))
 	var id durable.SessionID
 	sub := begin(t, rt, &id)
-	waitParentEvent(t, sub, 8*time.Second, func(ev streaming.StreamEvent) bool {
-		return ev.Type == streaming.StreamEventInterrupt && ev.MessageID == "sp1"
+	waitParentEvent(t, sub, 8*time.Second, func(ev tacklr.StreamEvent) bool {
+		return ev.Type == tacklr.StreamEventInterrupt && ev.MessageID == "sp1"
 	})
 	payload, _ := json.Marshal(map[string]any{"selectionIdx": 1})
 	if err := rt.Resume(t.Context(), id, durable.Resume{Responses: map[string][]byte{"sp1": payload}}); err != nil {
@@ -693,13 +692,13 @@ func TestChildren_blockingSpawnParksOnChildHITL(t *testing.T) {
 			if !ok {
 				t.Fatal("closed")
 			}
-			if ev.Type == streaming.StreamEventToolResult && strings.Contains(ev.Content, "blocked-ok") {
+			if ev.Type == tacklr.StreamEventToolResult && strings.Contains(ev.Content, "blocked-ok") {
 				spawnOut = true
 			}
-			if ev.Type == streaming.StreamEventMessage && ev.Content == "parent-done" {
+			if ev.Type == tacklr.StreamEventMessage && ev.Content == "parent-done" {
 				done = true
 			}
-			if ev.Type == streaming.StreamEventError {
+			if ev.Type == tacklr.StreamEventError {
 				t.Fatalf("error: %v %s", ev.Error, ev.Content)
 			}
 		case <-deadline:
@@ -752,10 +751,10 @@ func TestChildren_parentHITLLeavesAsyncChildRunning(t *testing.T) {
 			if !ok {
 				t.Fatal("closed")
 			}
-			if ev.Type == streaming.StreamEventToolResult && strings.Contains(ev.Content, "scheduled") {
+			if ev.Type == tacklr.StreamEventToolResult && strings.Contains(ev.Content, "scheduled") {
 				spawned = true
 			}
-			if ev.Type == streaming.StreamEventInterrupt && ev.MessageID == "ask1" {
+			if ev.Type == tacklr.StreamEventInterrupt && ev.MessageID == "ask1" {
 				parked = true
 			}
 			if spawned && parked {
@@ -811,7 +810,7 @@ func TestChildren_failedChildIsCollectable(t *testing.T) {
 	sub := begin(t, rt, &parentID)
 	got := waitEvents(t, sub, 8*time.Second)
 	for _, ev := range got {
-		if ev.Type == streaming.StreamEventToolResult && strings.Contains(ev.Content, "boom-child") {
+		if ev.Type == tacklr.StreamEventToolResult && strings.Contains(ev.Content, "boom-child") {
 			return
 		}
 	}
@@ -864,10 +863,10 @@ func TestChildren_nestedSpecialistCollectsGrandchild(t *testing.T) {
 	got := waitEvents(t, sub, 8*time.Second)
 	var sawNested, sawDone bool
 	for _, ev := range got {
-		if ev.Type == streaming.StreamEventToolResult && strings.Contains(ev.Content, "from-digger") {
+		if ev.Type == tacklr.StreamEventToolResult && strings.Contains(ev.Content, "from-digger") {
 			sawNested = true
 		}
-		if ev.Type == streaming.StreamEventMessage && ev.Content == "parent-done" {
+		if ev.Type == tacklr.StreamEventMessage && ev.Content == "parent-done" {
 			sawDone = true
 		}
 	}
@@ -924,7 +923,7 @@ func TestChildren_customToolSpawnsChild(t *testing.T) {
 	got := waitEvents(t, sub, 8*time.Second)
 	var saw bool
 	for _, ev := range got {
-		if ev.Type == streaming.StreamEventToolResult && strings.Contains(ev.Content, "research result") {
+		if ev.Type == tacklr.StreamEventToolResult && strings.Contains(ev.Content, "research result") {
 			saw = true
 		}
 	}

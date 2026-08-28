@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/ryanaldo34/tacklr"
-	"github.com/ryanaldo34/tacklr/streaming"
 )
 
 const maxInboxMessages = 100
@@ -41,7 +40,7 @@ func ReadInbox(provider EmailProvider) *tacklr.Tool {
 		Name:        "read_inbox",
 		DisplayName: "Read Email Inbox",
 		Description: "Read and search messages in the configured email inbox.",
-		Category:    streaming.ToolCategoryRead,
+		Category:    tacklr.ToolCategoryRead,
 		Access:      tacklr.ToolReadAccess,
 		Handler: func(ctx context.Context, args readInboxArgs) (Inbox, error) {
 			return runReadInbox(ctx, provider, args)
@@ -58,7 +57,7 @@ func SendEmail(provider EmailProvider) *tacklr.Tool {
 		Name:        "send_email",
 		DisplayName: "Send Email: {subject}",
 		Description: "Send an email through the configured email account. Confirm recipients and content before sending.",
-		Category:    streaming.ToolCategoryEdit,
+		Category:    tacklr.ToolCategoryEdit,
 		Access:      tacklr.ToolWriteAccess,
 		OnCall:      []tacklr.OnCallFunc{tacklr.ToolPermissionOnCall},
 		Handler: func(ctx context.Context, args sendEmailArgs) (SentEmail, error) {

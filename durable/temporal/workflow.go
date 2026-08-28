@@ -12,8 +12,6 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
-	"github.com/ryanaldo34/tacklr/internal/drive"
-	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
@@ -92,8 +90,8 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 		if stream == nil || msg == "" {
 			return
 		}
-		_ = stream.Topic(durable.TopicEvents).Publish(streaming.StreamEvent{
-			Type:    streaming.StreamEventError,
+		_ = stream.Topic(durable.TopicEvents).Publish(tacklr.StreamEvent{
+			Type:    tacklr.StreamEventError,
 			Fail:    msg,
 			Content: msg,
 		})
@@ -149,7 +147,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 		}
 	}
 
-	runSlice := func(user *streaming.Message, resume map[string][]byte, auth durable.AuthContext, kind string, extra map[string]any) {
+	runSlice := func(user *tacklr.Message, resume map[string][]byte, auth durable.AuthContext, kind string, extra map[string]any) {
 		turnState := durable.MergeUserState(seed, extra)
 		seed = nil
 		applyAuth(auth)
@@ -228,15 +226,15 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 		}
 		hadTools := false
 		reqs := 0
-		toolCalls := []streaming.ToolCall(nil)
-		leftover := []streaming.ToolCall(nil)
+		toolCalls := []tacklr.ToolCall(nil)
+		leftover := []tacklr.ToolCall(nil)
 		parked := false
 		inferComplete := false
 		interruptID := ""
 		stopSlice := false
 		for !stopSlice {
-			switch drive.Next(len(toolCalls), parked, inferComplete, len(spawned) > 0) {
-			case drive.ActionInfer:
+			switch tacklr.Next(len(toolCalls), parked, inferComplete, len(spawned) > 0) {
+			case tacklr.ActionInfer:
 				var out InferenceOutput
 				err := waitAct("Inference", InferenceInput{
 					SessionID:     in.SessionID,
@@ -266,7 +264,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 				}
 				inferComplete = false
 				toolCalls = out.ToolCalls
-			case drive.ActionRunTools:
+			case tacklr.ActionRunTools:
 				hadTools = true
 				tc := toolCalls[0]
 				rest := toolCalls[1:]
@@ -329,7 +327,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 					continue
 				}
 				toolCalls = rest
-			case drive.ActionYield:
+			case tacklr.ActionYield:
 				if hasSession {
 					workflow.CompleteSession(sessionCtx)
 					hasSession = false
@@ -393,11 +391,11 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 						waiting = false
 					}
 				}
-			case drive.ActionComplete:
+			case tacklr.ActionComplete:
 				terminal = durable.SessionComplete
 				stopSlice = true
-			case drive.ActionNudge:
-				nudgeMsg := &streaming.Message{Role: tacklr.RoleUser, Content: spawnedNudge(spawned)}
+			case tacklr.ActionNudge:
+				nudgeMsg := &tacklr.Message{Role: tacklr.RoleUser, Content: spawnedNudge(spawned)}
 				var out InferenceOutput
 				err := waitAct("Inference", InferenceInput{
 					SessionID:     in.SessionID,
@@ -430,7 +428,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 	}
 
 	if in.Prompt != "" {
-		runSlice(&streaming.Message{Role: streaming.RoleUser, Content: in.Prompt}, nil, in.Auth, telemetry.TurnKindPrompt, nil)
+		runSlice(&tacklr.Message{Role: tacklr.RoleUser, Content: in.Prompt}, nil, in.Auth, telemetry.TurnKindPrompt, nil)
 		return result, nil
 	}
 
@@ -453,7 +451,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 			}
 			user := ev.prompt.UserMessage
 			if user == nil && ev.prompt.Text != "" {
-				user = &streaming.Message{Role: streaming.RoleUser, Content: ev.prompt.Text}
+				user = &tacklr.Message{Role: tacklr.RoleUser, Content: ev.prompt.Text}
 			}
 			runSlice(user, nil, ev.prompt.Auth, telemetry.TurnKindPrompt, ev.prompt.State)
 		case signalResume:

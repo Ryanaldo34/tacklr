@@ -1,4 +1,4 @@
-package session
+package tacklr
 
 import (
 	"encoding/json"
@@ -10,40 +10,40 @@ import (
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
-// SessionManager owns durable and live data for one agent harness thread
+// sessionManager owns durable and live data for one agent harness thread
 // (checkpoint id), not an ACP client session id: plan, user tool state,
 // permission memory, on-call stages, search context, interrupts, and the
 // optional virtual filesystem mount table.
 //
-// VFS is host-owned and attached by assigning SessionManager.VFS. Knowledge
+// VFS is host-owned and attached by assigning sessionManager.VFS. Knowledge
 // namespace + ResultSet live on Search. Builtins close over the manager; user
-// tools use Runtime.
-type SessionManager struct {
+// tools use sessionRuntime.
+type sessionManager struct {
 	mu          sync.RWMutex
-	Plan        *PlanStore
+	Plan        *planStore
 	userState   map[string]any
 	pending     interruptMap
 	resolved    interruptMap
-	Permissions Permissions
-	OnCall      OnCallStore
+	Permissions permissions
+	OnCall      onCallStore
 	Search      *brain.SearchContext
 	VFS         *vfs.MountSession
 }
 
-// NewSessionManager returns an empty manager ready for use.
-func NewSessionManager() *SessionManager {
-	return &SessionManager{
-		Plan:        NewPlanStore(),
+// newSessionManager returns an empty manager ready for use.
+func newSessionManager() *sessionManager {
+	return &sessionManager{
+		Plan:        newPlanStore(),
 		userState:   map[string]any{},
 		pending:     interruptMap{},
 		resolved:    interruptMap{},
-		Permissions: NewPermissions(),
+		Permissions: newPermissions(),
 		Search:      brain.NewSearchContext(),
 	}
 }
 
 // StateGet returns a host/tool state value without a turn Runtime.
-func (s *SessionManager) StateGet(key string) (any, bool) {
+func (s *sessionManager) StateGet(key string) (any, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	v, ok := s.userState[key]
@@ -51,7 +51,7 @@ func (s *SessionManager) StateGet(key string) (any, bool) {
 }
 
 // StateSet stores a host/tool state value without a turn Runtime.
-func (s *SessionManager) StateSet(key string, value any) error {
+func (s *sessionManager) StateSet(key string, value any) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.userState[key] = value
@@ -59,14 +59,14 @@ func (s *SessionManager) StateSet(key string, value any) error {
 }
 
 // StateDelete removes a host/tool state value without a turn Runtime.
-func (s *SessionManager) StateDelete(key string) {
+func (s *sessionManager) StateDelete(key string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.userState, key)
 }
 
 // PendingInterrupt returns an open interrupt for id if any.
-func (s *SessionManager) PendingInterrupt(id string) (interrupt.Interrupt, bool) {
+func (s *sessionManager) PendingInterrupt(id string) (interrupt.Interrupt, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	intr, ok := s.pending[id]
@@ -74,14 +74,14 @@ func (s *SessionManager) PendingInterrupt(id string) (interrupt.Interrupt, bool)
 }
 
 // HasPendingInterrupt reports whether any interrupt is still awaiting a client payload.
-func (s *SessionManager) HasPendingInterrupt() bool {
+func (s *sessionManager) HasPendingInterrupt() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.pending) > 0
 }
 
 // ClearInterrupts drops pending and resolved interrupt maps (steer / cancel finalize).
-func (s *SessionManager) ClearInterrupts() {
+func (s *sessionManager) ClearInterrupts() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.pending = interruptMap{}
@@ -90,7 +90,7 @@ func (s *SessionManager) ClearInterrupts() {
 
 // DropInterrupt removes one interrupt after a durability failure prevents it
 // from being safely exposed to a client.
-func (s *SessionManager) DropInterrupt(id string) {
+func (s *sessionManager) DropInterrupt(id string) {
 	s.mu.Lock()
 	delete(s.pending, id)
 	delete(s.resolved, id)
@@ -99,7 +99,7 @@ func (s *SessionManager) DropInterrupt(id string) {
 
 // Park is the only writer of pending. It stores intr under callID and returns
 // that interrupt as the error tools propagate (`return "", err`).
-func (s *SessionManager) Park(callID string, intr interrupt.Interrupt) error {
+func (s *sessionManager) Park(callID string, intr interrupt.Interrupt) error {
 	if intr == nil {
 		return fmt.Errorf("park: interrupt is nil")
 	}
@@ -114,7 +114,7 @@ func (s *SessionManager) Park(callID string, intr interrupt.Interrupt) error {
 
 // Resume validates via Interrupt.Return, then moves pending → resolved.
 // An invalid payload leaves the park in place.
-func (s *SessionManager) Resume(callID string, payload []byte) (interrupt.Interrupt, error) {
+func (s *sessionManager) Resume(callID string, payload []byte) (interrupt.Interrupt, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	intr, ok := s.pending[callID]
@@ -130,7 +130,7 @@ func (s *SessionManager) Resume(callID string, payload []byte) (interrupt.Interr
 }
 
 // TakeResolved removes and returns a resolved interrupt if present (re-entry after Resume).
-func (s *SessionManager) TakeResolved(id string) (interrupt.Interrupt, bool) {
+func (s *sessionManager) TakeResolved(id string) (interrupt.Interrupt, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	intr, ok := s.resolved[id]
@@ -142,14 +142,14 @@ func (s *SessionManager) TakeResolved(id string) (interrupt.Interrupt, bool) {
 }
 
 // Pending returns a clone of open interrupts (checkpoint / ACP translators).
-func (s *SessionManager) Pending() map[string]interrupt.Interrupt {
+func (s *sessionManager) Pending() map[string]interrupt.Interrupt {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return cloneInterruptMap(s.pending)
 }
 
 // LoadInterruptsJSON restores interrupt maps from checkpoint JSON blobs.
-func (s *SessionManager) LoadInterruptsJSON(pendingJSON, resolvedJSON []byte) error {
+func (s *sessionManager) LoadInterruptsJSON(pendingJSON, resolvedJSON []byte) error {
 	pending, resolved, err := decodeInterruptMaps(pendingJSON, resolvedJSON)
 	if err != nil {
 		return err
@@ -174,7 +174,7 @@ func decodeInterruptMaps(pendingJSON, resolvedJSON []byte) (interruptMap, interr
 	return pending, resolved, nil
 }
 
-func (s *SessionManager) replaceInterrupts(pending, resolved interruptMap) {
+func (s *sessionManager) replaceInterrupts(pending, resolved interruptMap) {
 	s.mu.Lock()
 	s.pending = pending
 	s.resolved = resolved

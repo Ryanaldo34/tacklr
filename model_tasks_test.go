@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
@@ -201,7 +200,7 @@ func TestDefaultModelTasks_handoffUsesFallbackWhenModelFails(t *testing.T) {
 	ctxMgr := newModelContextManager()
 	ctxMgr.Restore([]*Message{{Role: RoleUser, Content: "goal"}})
 	tasks.context = ctxMgr
-	plan := []Todo{{Title: "Ship", Description: "finish", Status: streaming.TodoStatusPending}}
+	plan := []Todo{{Title: "Ship", Description: "finish", Status: TodoStatusPending}}
 
 	// Act
 	err := tasks.Handoff(context.Background(), plan, "plan body", nil, "")
@@ -229,7 +228,7 @@ func TestDefaultModelTasks_handoffUsesFallbackOnEmptyStream(t *testing.T) {
 	tasks.context = ctxMgr
 
 	// Act
-	err := tasks.Handoff(context.Background(), []Todo{{Title: "T", Status: streaming.TodoStatusCompleted}}, "", nil, "")
+	err := tasks.Handoff(context.Background(), []Todo{{Title: "T", Status: TodoStatusCompleted}}, "", nil, "")
 
 	// Assert
 	if err != nil {
@@ -298,7 +297,7 @@ func TestDefaultModelTasks_handoffUsesFallbackOnStreamContentError(t *testing.T)
 	tasks.context = ctxMgr
 
 	// Act
-	err := tasks.Handoff(context.Background(), []Todo{{Title: "T", Status: streaming.TodoStatusPending}}, "", nil, "")
+	err := tasks.Handoff(context.Background(), []Todo{{Title: "T", Status: TodoStatusPending}}, "", nil, "")
 
 	// Assert
 	if err != nil {
@@ -349,7 +348,7 @@ func TestDefaultModelTasks_absorbFitProgressiveCountFailure(t *testing.T) {
 func TestFallbackHandoffContent_listsRemainingTodos(t *testing.T) {
 	// Act
 	content := fallbackHandoffContent([]Todo{
-		{Title: "A", Description: "alpha", Status: streaming.TodoStatusPending},
+		{Title: "A", Description: "alpha", Status: TodoStatusPending},
 	})
 
 	// Assert

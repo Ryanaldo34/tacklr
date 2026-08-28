@@ -3,9 +3,9 @@ package durable
 import (
 	"errors"
 
+	"github.com/ryanaldo34/tacklr"
+
 	"github.com/ryanaldo34/tacklr/mcp"
-	"github.com/ryanaldo34/tacklr/stores"
-	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -62,7 +62,7 @@ type CreateSession struct {
 // Prompt is the typed input for Runtime.Prompt.
 type Prompt struct {
 	Text        string
-	UserMessage *streaming.Message
+	UserMessage *tacklr.Message
 	// AgentID, when set, selects the catalog agent for this turn slice.
 	AgentID string
 	// MCPServers, when non-nil, replaces session-scoped MCP configs for this turn.
@@ -88,7 +88,7 @@ type Snapshot struct {
 	Parent     SessionID
 	// Children are child session ids in start order (no handles, no tokens).
 	Children   []SessionID
-	Checkpoint stores.SessionCheckpoint
+	Checkpoint tacklr.SessionCheckpoint
 	Mounts     []MountRecipe
 }
 

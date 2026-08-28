@@ -1,4 +1,4 @@
-package session
+package tacklr
 
 import (
 	"encoding/json"

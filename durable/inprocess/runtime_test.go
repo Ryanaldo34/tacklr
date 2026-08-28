@@ -18,7 +18,6 @@ import (
 	"github.com/ryanaldo34/tacklr/builtins"
 	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
-	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -59,10 +58,10 @@ func waitTurnPersisted(t *testing.T, rt *Runtime, id durable.SessionID) {
 	}
 }
 
-func waitEvents(t *testing.T, sub durable.Subscription, timeout time.Duration) []streaming.StreamEvent {
+func waitEvents(t *testing.T, sub durable.Subscription, timeout time.Duration) []tacklr.StreamEvent {
 	t.Helper()
 	deadline := time.After(timeout)
-	var got []streaming.StreamEvent
+	var got []tacklr.StreamEvent
 	for {
 		select {
 		case ev, ok := <-sub.Events():
@@ -70,7 +69,7 @@ func waitEvents(t *testing.T, sub durable.Subscription, timeout time.Duration) [
 				return got
 			}
 			got = append(got, ev)
-			if ev.Type == streaming.StreamEventComplete || ev.Type == streaming.StreamEventError || ev.Type == streaming.StreamEventInterrupt {
+			if ev.Type == tacklr.StreamEventComplete || ev.Type == tacklr.StreamEventError || ev.Type == tacklr.StreamEventInterrupt {
 				return got
 			}
 		case <-deadline:
@@ -99,7 +98,7 @@ func TestCreateSessionPromptCompletedMessage(t *testing.T) {
 	got := waitEvents(t, sub, 5*time.Second)
 	var saw bool
 	for _, ev := range got {
-		if ev.Type == streaming.StreamEventMessage && strings.Contains(ev.Content, "hello from agent") {
+		if ev.Type == tacklr.StreamEventMessage && strings.Contains(ev.Content, "hello from agent") {
 			saw = true
 		}
 	}
@@ -141,7 +140,7 @@ func TestBindThenPromptReadsWorkspace(t *testing.T) {
 	got := waitEvents(t, sub, 8*time.Second)
 	var body string
 	for _, ev := range got {
-		if ev.Type == streaming.StreamEventMessage {
+		if ev.Type == tacklr.StreamEventMessage {
 			body = ev.Content
 		}
 	}
@@ -196,7 +195,7 @@ func TestPrompt_readSkillFromOpenSkills(t *testing.T) {
 	got := waitEvents(t, sub, 8*time.Second)
 	var body string
 	for _, ev := range got {
-		if ev.Type == streaming.StreamEventMessage {
+		if ev.Type == tacklr.StreamEventMessage {
 			body = ev.Content
 		}
 	}
@@ -249,7 +248,7 @@ func TestUnbindThenPromptWorkspaceGone(t *testing.T) {
 	got := waitEvents(t, sub2, 8*time.Second)
 	var sawMissing bool
 	for _, ev := range got {
-		if ev.Type == streaming.StreamEventToolResult && (strings.Contains(ev.Content, "not found") ||
+		if ev.Type == tacklr.StreamEventToolResult && (strings.Contains(ev.Content, "not found") ||
 			strings.Contains(ev.Content, "not a registered tool") || strings.Contains(ev.Content, "does not exist")) {
 			sawMissing = true
 		}
@@ -297,10 +296,10 @@ func TestAskUserChoiceYieldsThenResumeCompletes(t *testing.T) {
 	got := waitEvents(t, sub, 8*time.Second)
 	var yielded bool
 	for _, ev := range got {
-		if ev.Type == streaming.StreamEventInterrupt {
+		if ev.Type == tacklr.StreamEventInterrupt {
 			yielded = true
 		}
-		if ev.Type == streaming.StreamEventToolResult {
+		if ev.Type == tacklr.StreamEventToolResult {
 			t.Fatalf("park yielded a tool_result: %+v", summarize(got))
 		}
 	}
@@ -322,7 +321,7 @@ func TestAskUserChoiceYieldsThenResumeCompletes(t *testing.T) {
 			if !ok {
 				t.Fatal("subscription closed before complete")
 			}
-			if ev.Type == streaming.StreamEventComplete || (ev.Type == streaming.StreamEventMessage && ev.Content == "chose") {
+			if ev.Type == tacklr.StreamEventComplete || (ev.Type == tacklr.StreamEventMessage && ev.Content == "chose") {
 				waitTurnPersisted(t, rt, id)
 				snap, _, err := rt.snapshots.Load(ctx, id)
 				if err != nil {
@@ -413,7 +412,7 @@ func TestPrompt_parallelBatchHitlRunsRemainder(t *testing.T) {
 	got := waitEvents(t, sub, 8*time.Second)
 	var yielded bool
 	for _, ev := range got {
-		if ev.Type == streaming.StreamEventInterrupt {
+		if ev.Type == tacklr.StreamEventInterrupt {
 			yielded = true
 		}
 	}
@@ -432,10 +431,10 @@ func TestPrompt_parallelBatchHitlRunsRemainder(t *testing.T) {
 			if !ok {
 				t.Fatal("subscription closed before complete")
 			}
-			if ev.Type == streaming.StreamEventComplete || (ev.Type == streaming.StreamEventMessage && ev.Content == "all-three") {
+			if ev.Type == tacklr.StreamEventComplete || (ev.Type == tacklr.StreamEventMessage && ev.Content == "all-three") {
 				complete = true
 			}
-			if ev.Type == streaming.StreamEventError {
+			if ev.Type == tacklr.StreamEventError {
 				t.Fatalf("resume error: %v %s", ev.Error, ev.Content)
 			}
 		case <-deadline:
@@ -492,7 +491,7 @@ drain:
 			if !ok {
 				break drain
 			}
-			if ev.Type == streaming.StreamEventError && (errors.Is(ev.Error, context.Canceled) ||
+			if ev.Type == tacklr.StreamEventError && (errors.Is(ev.Error, context.Canceled) ||
 				strings.Contains(ev.Content, "canceled") ||
 				strings.Contains(fmt.Sprint(ev.Error), "canceled")) {
 				sawCancel = true
@@ -523,7 +522,7 @@ drain:
 	got := waitEvents(t, sub2, 8*time.Second)
 	var saw bool
 	for _, ev := range got {
-		if ev.Type == streaming.StreamEventMessage && strings.Contains(ev.Content, "after-cancel") {
+		if ev.Type == tacklr.StreamEventMessage && strings.Contains(ev.Content, "after-cancel") {
 			saw = true
 		}
 	}
@@ -705,7 +704,7 @@ func TestPrompt_readMissingPathCorrection(t *testing.T) {
 	got := waitEvents(t, sub, 8*time.Second)
 	var sentence string
 	for _, ev := range got {
-		if ev.Type == streaming.StreamEventToolResult && strings.Contains(ev.Content, "that path does not exist. List the parent") {
+		if ev.Type == tacklr.StreamEventToolResult && strings.Contains(ev.Content, "that path does not exist. List the parent") {
 			sentence = ev.Content
 		}
 	}
@@ -755,7 +754,7 @@ func TestPrompt_toolFailedServiceString(t *testing.T) {
 	got := waitEvents(t, sub, 8*time.Second)
 	var sentence string
 	for _, ev := range got {
-		if ev.Type == streaming.StreamEventToolResult && strings.Contains(ev.Content, "search provider failed") {
+		if ev.Type == tacklr.StreamEventToolResult && strings.Contains(ev.Content, "search provider failed") {
 			sentence = ev.Content
 		}
 	}
@@ -802,7 +801,7 @@ func lastMsg(msgs []*tacklr.Message) *tacklr.Message {
 	return nil
 }
 
-func summarize(evs []streaming.StreamEvent) []string {
+func summarize(evs []tacklr.StreamEvent) []string {
 	out := make([]string, 0, len(evs))
 	for _, ev := range evs {
 		out = append(out, string(ev.Type)+":"+ev.Content)
@@ -901,8 +900,8 @@ func TestSubscribeReplaysPastBuffer(t *testing.T) {
 	log := NewMemoryEventLog()
 	id := durable.SessionID("busy")
 	for i := 0; i < 80; i++ {
-		if err := log.Append(ctx, id, durable.TopicEvents, streaming.StreamEvent{
-			Type:    streaming.StreamEventMessage,
+		if err := log.Append(ctx, id, durable.TopicEvents, tacklr.StreamEvent{
+			Type:    tacklr.StreamEventMessage,
 			Content: strconv.Itoa(i),
 		}); err != nil {
 			t.Fatal(err)
@@ -949,7 +948,7 @@ func TestInferenceErrorPublishesStreamEventError(t *testing.T) {
 	got := waitEvents(t, sub, 5*time.Second)
 	var sawErr bool
 	for _, ev := range got {
-		if ev.Type == streaming.StreamEventError {
+		if ev.Type == tacklr.StreamEventError {
 			sawErr = true
 		}
 	}
@@ -993,7 +992,7 @@ func TestCreateSessionMountsThenPromptTokensRemount(t *testing.T) {
 	got := waitEvents(t, sub, 8*time.Second)
 	var body string
 	for _, ev := range got {
-		if ev.Type == streaming.StreamEventMessage {
+		if ev.Type == tacklr.StreamEventMessage {
 			body = ev.Content
 		}
 	}
@@ -1029,10 +1028,10 @@ func TestBadWorkspaceBindingFailsTurn(t *testing.T) {
 	got := waitEvents(t, sub, 8*time.Second)
 	var sawErr bool
 	for _, ev := range got {
-		if ev.Type == streaming.StreamEventError || ev.Error != nil {
+		if ev.Type == tacklr.StreamEventError || ev.Error != nil {
 			sawErr = true
 		}
-		if ev.Type == streaming.StreamEventToolResult && (strings.Contains(ev.Content, "not found") ||
+		if ev.Type == tacklr.StreamEventToolResult && (strings.Contains(ev.Content, "not found") ||
 			strings.Contains(ev.Content, "not a registered tool") || strings.Contains(ev.Content, "does not exist")) {
 			sawErr = true
 		}
@@ -1151,13 +1150,13 @@ func TestSpawnWorkerNestedDriverCompletes(t *testing.T) {
 			if !ok {
 				t.Fatalf("closed child=%v parent=%v", sawChild, sawParent)
 			}
-			if ev.Type == streaming.StreamEventToolResult && strings.Contains(ev.Content, "child-hello") {
+			if ev.Type == tacklr.StreamEventToolResult && strings.Contains(ev.Content, "child-hello") {
 				sawChild = true
 			}
-			if ev.Type == streaming.StreamEventMessage && strings.Contains(ev.Content, "parent-after-spawn") {
+			if ev.Type == tacklr.StreamEventMessage && strings.Contains(ev.Content, "parent-after-spawn") {
 				sawParent = true
 			}
-			if ev.Type == streaming.StreamEventComplete && sawChild && sawParent {
+			if ev.Type == tacklr.StreamEventComplete && sawChild && sawParent {
 				return
 			}
 		case <-deadline:

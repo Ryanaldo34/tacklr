@@ -8,8 +8,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/ryanaldo34/tacklr/streaming"
 )
 
 type BasicArgs struct {
@@ -256,7 +254,7 @@ func TestNewTool_exposesConfig(t *testing.T) {
 		DisplayName: "Search",
 		Description: "Search operational records.",
 		Namespace:   "ops",
-		Category:    streaming.ToolCategorySearch,
+		Category:    ToolCategorySearch,
 		Access:      ToolReadAccess,
 		Timeout:     5 * time.Second,
 		OnCall:      []OnCallFunc{nil},
@@ -268,7 +266,7 @@ func TestNewTool_exposesConfig(t *testing.T) {
 	if tool.Description() != "Search operational records." || tool.Namespace() != "ops" {
 		t.Fatalf("desc=%q ns=%q", tool.Description(), tool.Namespace())
 	}
-	if tool.Category() != streaming.ToolCategorySearch || tool.Access() != ToolReadAccess {
+	if tool.Category() != ToolCategorySearch || tool.Access() != ToolReadAccess {
 		t.Fatalf("category=%q access=%v", tool.Category(), tool.Access())
 	}
 	if tool.Timeout() != 5*time.Second {

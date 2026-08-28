@@ -1,4 +1,4 @@
-package streaming
+package tacklr
 
 // Todo is one item in an agent plan list (create_plan / plan_update stream data).
 type Todo struct {

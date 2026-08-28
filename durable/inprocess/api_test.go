@@ -8,7 +8,6 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
-	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -97,7 +96,7 @@ func TestPrompt_noAgentConfigured(t *testing.T) {
 			if !ok {
 				t.Fatal("closed")
 			}
-			if ev.Type == streaming.StreamEventError {
+			if ev.Type == tacklr.StreamEventError {
 				return
 			}
 		case <-deadline:

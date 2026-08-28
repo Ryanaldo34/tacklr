@@ -1,24 +1,21 @@
-package session_test
+package tacklr
 
 import (
 	"encoding/json"
 	"strings"
 	"testing"
 
-	"github.com/ryanaldo34/tacklr/internal/session"
 	"github.com/ryanaldo34/tacklr/interrupt"
-	"github.com/ryanaldo34/tacklr/stores"
-	"github.com/ryanaldo34/tacklr/streaming"
 )
 
 // TestCheckpointer_roundTrip is the durable session outcome: plan, user state,
 // and window survive Capture → Apply on a fresh manager.
 func TestCheckpointer_roundTrip(t *testing.T) {
-	sm := session.NewSessionManager()
+	sm := newSessionManager()
 	sm.Plan.SetDocument("plan")
-	sm.Plan.Set([]streaming.Todo{{Title: "A", Status: streaming.TodoStatusPending}})
-	rt := session.NewRuntime(func() chan streaming.StreamEvent {
-		c := make(chan streaming.StreamEvent, 8)
+	sm.Plan.Set([]Todo{{Title: "A", Status: TodoStatusPending}})
+	rt := newSessionRuntime(func() chan StreamEvent {
+		c := make(chan StreamEvent, 8)
 		go func() {
 			for range c {
 			}
@@ -27,16 +24,16 @@ func TestCheckpointer_roundTrip(t *testing.T) {
 	}(), sm)
 	rt.StateSet("k", "v")
 
-	cp, err := session.CaptureCheckpoint(
-		[]*streaming.Message{{Role: streaming.RoleUser, Content: "hi"}},
+	cp, err := captureCheckpoint(
+		[]*Message{{Role: RoleUser, Content: "hi"}},
 		sm,
-		map[string]stores.PendingToolCall{},
+		map[string]PendingToolCall{},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sm2 := session.NewSessionManager()
-	applied, err := session.ApplyCheckpoint(*cp, sm2)
+	sm2 := newSessionManager()
+	applied, err := applyCheckpoint(*cp, sm2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,8 +43,8 @@ func TestCheckpointer_roundTrip(t *testing.T) {
 	if sm2.Plan.Document() != "plan" {
 		t.Fatal("plan doc")
 	}
-	rt2 := session.NewRuntime(func() chan streaming.StreamEvent {
-		c := make(chan streaming.StreamEvent, 8)
+	rt2 := newSessionRuntime(func() chan StreamEvent {
+		c := make(chan StreamEvent, 8)
 		go func() {
 			for range c {
 			}
@@ -62,7 +59,7 @@ func TestCheckpointer_roundTrip(t *testing.T) {
 // TestCheckpointer_resolvedToolPermissionKeepsAllowed: Temporal reconstructs
 // the harness between ApplyResume and RunToolCall; Allowed must survive.
 func TestCheckpointer_resolvedToolPermissionKeepsAllowed(t *testing.T) {
-	sm := session.NewSessionManager()
+	sm := newSessionManager()
 	parked := &interrupt.ToolPermissionInterrupt{
 		ToolName: "sensitive",
 		Options:  interrupt.DefaultPermissionOptions(),
@@ -74,18 +71,18 @@ func TestCheckpointer_resolvedToolPermissionKeepsAllowed(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cp, err := session.CaptureCheckpoint(
-		[]*streaming.Message{{Role: streaming.RoleUser, Content: "run"}},
+	cp, err := captureCheckpoint(
+		[]*Message{{Role: RoleUser, Content: "run"}},
 		sm,
-		map[string]stores.PendingToolCall{
-			"call_sens": {ToolCall: &streaming.ToolCall{ID: "call_sens", Name: "sensitive"}, InterruptActive: false},
+		map[string]PendingToolCall{
+			"call_sens": {ToolCall: &ToolCall{ID: "call_sens", Name: "sensitive"}, InterruptActive: false},
 		},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sm2 := session.NewSessionManager()
-	applied, err := session.ApplyCheckpoint(*cp, sm2)
+	sm2 := newSessionManager()
+	applied, err := applyCheckpoint(*cp, sm2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,16 +102,16 @@ func TestCheckpointer_resolvedToolPermissionKeepsAllowed(t *testing.T) {
 
 func TestCheckpointer_rejectsCorruptWindowBeforeApplyingState(t *testing.T) {
 	// Arrange
-	sm := session.NewSessionManager()
+	sm := newSessionManager()
 	if err := sm.StateSet("existing", "kept"); err != nil {
 		t.Fatal(err)
 	}
-	checkpoint := stores.SessionCheckpoint{
-		ContextWindow: []*streaming.Message{nil},
+	checkpoint := SessionCheckpoint{
+		ContextWindow: []*Message{nil},
 	}
 
 	// Act
-	_, err := session.ApplyCheckpoint(checkpoint, sm)
+	_, err := applyCheckpoint(checkpoint, sm)
 
 	// Assert
 	if err == nil || !strings.Contains(err.Error(), "invalid context window") {
@@ -127,21 +124,21 @@ func TestCheckpointer_rejectsCorruptWindowBeforeApplyingState(t *testing.T) {
 
 // TestCheckpointer_nilManager_errors is the Capture/Apply guard outcome.
 func TestCheckpointer_nilManager_errors(t *testing.T) {
-	if _, err := session.CaptureCheckpoint(nil, nil, nil); err == nil {
+	if _, err := captureCheckpoint(nil, nil, nil); err == nil {
 		t.Fatal("want capture error")
 	}
-	if _, err := session.ApplyCheckpoint(stores.SessionCheckpoint{}, nil); err == nil {
+	if _, err := applyCheckpoint(SessionCheckpoint{}, nil); err == nil {
 		t.Fatal("want apply error")
 	}
 }
 
 func TestCheckpointer_rejectsInvalidWindowOnCapture(t *testing.T) {
 	// Arrange
-	sm := session.NewSessionManager()
+	sm := newSessionManager()
 
 	// Act
-	_, err := session.CaptureCheckpoint(
-		[]*streaming.Message{nil},
+	_, err := captureCheckpoint(
+		[]*Message{nil},
 		sm,
 		nil,
 	)
@@ -153,12 +150,12 @@ func TestCheckpointer_rejectsInvalidWindowOnCapture(t *testing.T) {
 }
 
 func TestCheckpointer_captureRejectsUnmarshallableUserState(t *testing.T) {
-	sm := session.NewSessionManager()
+	sm := newSessionManager()
 	if err := sm.StateSet("bad", make(chan int)); err != nil {
 		t.Fatal(err)
 	}
-	_, err := session.CaptureCheckpoint(
-		[]*streaming.Message{{Role: streaming.RoleUser, Content: "go"}},
+	_, err := captureCheckpoint(
+		[]*Message{{Role: RoleUser, Content: "go"}},
 		sm,
 		nil,
 	)
@@ -169,13 +166,13 @@ func TestCheckpointer_captureRejectsUnmarshallableUserState(t *testing.T) {
 
 func TestCheckpointer_applyRejectsUnsupportedVersion(t *testing.T) {
 	// Arrange
-	sm := session.NewSessionManager()
-	checkpoint := stores.SessionCheckpoint{
-		ContextWindow: []*streaming.Message{{Role: streaming.RoleUser, Content: "x"}},
-	}.WithVersion(stores.CheckpointVersion + 1)
+	sm := newSessionManager()
+	checkpoint := SessionCheckpoint{
+		ContextWindow: []*Message{{Role: RoleUser, Content: "x"}},
+	}.WithVersion(CheckpointVersion + 1)
 
 	// Act
-	_, err := session.ApplyCheckpoint(checkpoint, sm)
+	_, err := applyCheckpoint(checkpoint, sm)
 
 	// Assert
 	if err == nil || !strings.Contains(err.Error(), "unsupported checkpoint version") {
@@ -185,11 +182,11 @@ func TestCheckpointer_applyRejectsUnsupportedVersion(t *testing.T) {
 
 // TestCheckpointer_applyNilMaps_defaults empty pending/interrupt maps.
 func TestCheckpointer_applyNilMaps_defaults(t *testing.T) {
-	sm := session.NewSessionManager()
-	checkpoint := stores.SessionCheckpoint{
-		ContextWindow: []*streaming.Message{{Role: streaming.RoleUser, Content: "x"}},
-	}.WithVersion(stores.CheckpointVersion)
-	applied, err := session.ApplyCheckpoint(checkpoint, sm)
+	sm := newSessionManager()
+	checkpoint := SessionCheckpoint{
+		ContextWindow: []*Message{{Role: RoleUser, Content: "x"}},
+	}.WithVersion(CheckpointVersion)
+	applied, err := applyCheckpoint(checkpoint, sm)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,11 +197,11 @@ func TestCheckpointer_applyNilMaps_defaults(t *testing.T) {
 
 // TestPlanStore_lifecycle covers set/get/document/updated/export/load outcomes.
 func TestPlanStore_lifecycle(t *testing.T) {
-	p := session.NewPlanStore()
+	p := newPlanStore()
 	if p.HasActive() {
 		t.Fatal("empty has active")
 	}
-	p.Set([]streaming.Todo{{Title: "t1", Status: streaming.TodoStatusPending}})
+	p.Set([]Todo{{Title: "t1", Status: TodoStatusPending}})
 	if !p.HasActive() || len(p.Get()) != 1 {
 		t.Fatal("set/get")
 	}
@@ -237,9 +234,9 @@ func TestPlanStore_lifecycle(t *testing.T) {
 }
 
 func TestSessionManager_stateAndPlanAreIsolated(t *testing.T) {
-	sm := session.NewSessionManager()
-	rt := session.NewRuntime(func() chan streaming.StreamEvent {
-		c := make(chan streaming.StreamEvent, 8)
+	sm := newSessionManager()
+	rt := newSessionRuntime(func() chan StreamEvent {
+		c := make(chan StreamEvent, 8)
 		go func() {
 			for range c {
 			}
@@ -266,7 +263,7 @@ func TestSessionManager_stateAndPlanAreIsolated(t *testing.T) {
 	if sm.Plan.HasActive() {
 		t.Fatal("no plan yet")
 	}
-	sm.Plan.Set([]streaming.Todo{{Title: "x", Status: streaming.TodoStatusPending}})
+	sm.Plan.Set([]Todo{{Title: "x", Status: TodoStatusPending}})
 	if !sm.Plan.HasActive() {
 		t.Fatal("active plan")
 	}
@@ -275,9 +272,9 @@ func TestSessionManager_stateAndPlanAreIsolated(t *testing.T) {
 // TestSession_interrupts_parkResumeReentry is the interrupt lifecycle:
 // Park writes pending; invalid payload leaves the park; Resume then TakeResolved.
 func TestSession_interrupts_parkResumeReentry(t *testing.T) {
-	sm := session.NewSessionManager()
-	ch := make(chan streaming.StreamEvent, 4)
-	rt := session.NewRuntime(ch, sm)
+	sm := newSessionManager()
+	ch := make(chan StreamEvent, 4)
+	rt := newSessionRuntime(ch, sm)
 	rt = rt.WithToolCallID("tc1")
 
 	// Unknown type.
@@ -385,19 +382,19 @@ func TestSession_interrupts_parkResumeReentry(t *testing.T) {
 
 // TestRuntime_emitAndState_channels covers EmitUpdate and session State.
 func TestRuntime_emitAndState_channels(t *testing.T) {
-	ch := make(chan streaming.StreamEvent, 2)
-	sm := session.NewSessionManager()
-	rt := session.NewRuntime(ch, sm)
+	ch := make(chan StreamEvent, 2)
+	sm := newSessionManager()
+	rt := newSessionRuntime(ch, sm)
 	rt = rt.WithToolCallID("id1")
 	rt.EmitUpdate("hello")
 	ev := <-ch
-	if ev.Type != streaming.StreamEventToolUpdate || ev.Content != "hello" || ev.MessageID != "id1" {
+	if ev.Type != StreamEventToolUpdate || ev.Content != "hello" || ev.MessageID != "id1" {
 		t.Fatalf("update = %+v", ev)
 	}
 
 	// Full channel drops non-blocking.
-	full := make(chan streaming.StreamEvent)
-	rtFull := session.NewRuntime(full, sm)
+	full := make(chan StreamEvent)
+	rtFull := newSessionRuntime(full, sm)
 	rtFull.EmitUpdate("drop")
 
 	// SessionManager state without a turn bus.
@@ -411,9 +408,9 @@ func TestRuntime_emitAndState_channels(t *testing.T) {
 }
 
 func TestSessionManager_checkpointInterruptsRoundTrip(t *testing.T) {
-	sm := session.NewSessionManager()
-	rt := session.NewRuntime(func() chan streaming.StreamEvent {
-		c := make(chan streaming.StreamEvent, 8)
+	sm := newSessionManager()
+	rt := newSessionRuntime(func() chan StreamEvent {
+		c := make(chan StreamEvent, 8)
 		go func() {
 			for range c {
 			}
@@ -427,10 +424,10 @@ func TestSessionManager_checkpointInterruptsRoundTrip(t *testing.T) {
 	}
 	rt.StateSet("u", "v")
 	sm.Plan.SetDocument("doc")
-	sm.Plan.Set([]streaming.Todo{{Title: "T", Status: streaming.TodoStatusPending}})
+	sm.Plan.Set([]Todo{{Title: "T", Status: TodoStatusPending}})
 
-	checkpoint, err := session.CaptureCheckpoint(
-		[]*streaming.Message{{Role: streaming.RoleUser, Content: "go"}},
+	checkpoint, err := captureCheckpoint(
+		[]*Message{{Role: RoleUser, Content: "go"}},
 		sm,
 		nil,
 	)
@@ -438,15 +435,15 @@ func TestSessionManager_checkpointInterruptsRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sm2 := session.NewSessionManager()
-	if _, err := session.ApplyCheckpoint(*checkpoint, sm2); err != nil {
+	sm2 := newSessionManager()
+	if _, err := applyCheckpoint(*checkpoint, sm2); err != nil {
 		t.Fatal(err)
 	}
 	if sm2.Plan.Document() != "doc" {
 		t.Fatal("plan doc reload")
 	}
-	rt2 := session.NewRuntime(func() chan streaming.StreamEvent {
-		c := make(chan streaming.StreamEvent, 8)
+	rt2 := newSessionRuntime(func() chan StreamEvent {
+		c := make(chan StreamEvent, 8)
 		go func() {
 			for range c {
 			}
@@ -475,9 +472,9 @@ func TestSessionManager_checkpointInterruptsRoundTrip(t *testing.T) {
 // TestInterruptMap_unknownType_errors on polymorphic unmarshal.
 func TestInterruptMap_unknownType_errors(t *testing.T) {
 	// Capture with a real interrupt then corrupt type via raw JSON.
-	sm := session.NewSessionManager()
-	rt := session.NewRuntime(func() chan streaming.StreamEvent {
-		c := make(chan streaming.StreamEvent, 8)
+	sm := newSessionManager()
+	rt := newSessionRuntime(func() chan StreamEvent {
+		c := make(chan StreamEvent, 8)
 		go func() {
 			for range c {
 			}
@@ -493,7 +490,7 @@ func TestInterruptMap_unknownType_errors(t *testing.T) {
 	bad, _ := json.Marshal(map[string]any{
 		"x": map[string]any{"type": "not_registered", "data": map[string]any{}},
 	})
-	sm3 := session.NewSessionManager()
+	sm3 := newSessionManager()
 	if err := sm3.LoadInterruptsJSON(bad, nil); err == nil {
 		t.Fatal("want unknown type")
 	}
@@ -508,16 +505,16 @@ func TestInterruptMap_unknownType_errors(t *testing.T) {
 
 // TestCheckpointer_withPendingToolMaps_roundTrip keeps park maps.
 func TestCheckpointer_withPendingToolMaps_roundTrip(t *testing.T) {
-	sm := session.NewSessionManager()
-	ptc := map[string]stores.PendingToolCall{
-		"t1": {ToolCall: &streaming.ToolCall{ID: "t1", Name: "x"}, InterruptActive: true},
+	sm := newSessionManager()
+	ptc := map[string]PendingToolCall{
+		"t1": {ToolCall: &ToolCall{ID: "t1", Name: "x"}, InterruptActive: true},
 	}
-	cp, err := session.CaptureCheckpoint(nil, sm, ptc)
+	cp, err := captureCheckpoint(nil, sm, ptc)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sm2 := session.NewSessionManager()
-	applied, err := session.ApplyCheckpoint(*cp, sm2)
+	sm2 := newSessionManager()
+	applied, err := applyCheckpoint(*cp, sm2)
 	if err != nil {
 		t.Fatal(err)
 	}

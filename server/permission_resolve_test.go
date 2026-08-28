@@ -10,7 +10,6 @@ import (
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/internal/livesess"
 	"github.com/ryanaldo34/tacklr/interrupt"
-	"github.com/ryanaldo34/tacklr/streaming"
 )
 
 func TestResolveInterruptViaACP_dispatchOutcomes(t *testing.T) {
@@ -20,13 +19,13 @@ func TestResolveInterruptViaACP_dispatchOutcomes(t *testing.T) {
 		"type":        "not_a_real_kind",
 		"data":        map[string]any{},
 	})
-	_, err := resolveInterruptViaACP(context.Background(), ProtocolEnv{Conn: &Conn{RPC: NewClientBridge(&recordingWriter{})}}, "s", &streaming.StreamEvent{Data: data})
+	_, err := resolveInterruptViaACP(context.Background(), ProtocolEnv{Conn: &Conn{RPC: NewClientBridge(&recordingWriter{})}}, "s", &tacklr.StreamEvent{Data: data})
 	if err == nil || !strings.Contains(err.Error(), "unsupported") {
 		t.Fatalf("unsupported: %v", err)
 	}
 
 	// Bad envelope.
-	_, err = resolveInterruptViaACP(context.Background(), ProtocolEnv{Conn: &Conn{RPC: NewClientBridge(&recordingWriter{})}}, "s", &streaming.StreamEvent{Data: []byte(`{`)})
+	_, err = resolveInterruptViaACP(context.Background(), ProtocolEnv{Conn: &Conn{RPC: NewClientBridge(&recordingWriter{})}}, "s", &tacklr.StreamEvent{Data: []byte(`{`)})
 	if err == nil {
 		t.Fatal("expected parse error")
 	}
@@ -41,7 +40,7 @@ func TestResolveInterruptViaACP_dispatchOutcomes(t *testing.T) {
 	})
 	ch, err := resolveInterruptViaACP(context.Background(), ProtocolEnv{Conn: &Conn{
 		RPC: NewClientBridge(&recordingWriter{}),
-	}}, "s", &streaming.StreamEvent{Data: selData, MessageID: "tc"})
+	}}, "s", &tacklr.StreamEvent{Data: selData, MessageID: "tc"})
 	if err != nil || ch != nil {
 		t.Fatalf("no-form park: ch=%v err=%v", ch, err)
 	}
@@ -53,7 +52,7 @@ func TestResolveInterruptViaACP_dispatchOutcomes(t *testing.T) {
 	})
 	_, err = resolveInterruptViaACP(context.Background(), ProtocolEnv{Conn: &Conn{
 		RPC: NewClientBridge(&recordingWriter{}),
-	}}, "s", &streaming.StreamEvent{Data: legacy})
+	}}, "s", &tacklr.StreamEvent{Data: legacy})
 	if err == nil || !strings.Contains(err.Error(), "missing type") {
 		t.Fatalf("missing type: %v", err)
 	}
@@ -67,7 +66,7 @@ func TestResolveInterruptViaACP_dispatchOutcomes(t *testing.T) {
 	defer cancel()
 	_, err = resolveInterruptViaACP(ctx, ProtocolEnv{Conn: &Conn{
 		RPC: bridge,
-	}}, "s", &streaming.StreamEvent{Data: selData, MessageID: "tc"})
+	}}, "s", &tacklr.StreamEvent{Data: selData, MessageID: "tc"})
 	// Must not park (nil, nil): should attempt elicitation and fail via ctx/call.
 	if err == nil {
 		t.Fatal("expected error from elicitation call, not silent park")
@@ -81,9 +80,9 @@ func TestResolveInterruptViaACP_dispatchOutcomes(t *testing.T) {
 // TestResolvePermissionViaRequest_outcomes exercises every return path of
 // resolvePermissionViaRequest through a real ClientBridge.
 func TestResolvePermissionViaRequest_outcomes(t *testing.T) {
-	mkEvent := func(data []byte) *streaming.StreamEvent {
-		return &streaming.StreamEvent{
-			Type:      streaming.StreamEventInterrupt,
+	mkEvent := func(data []byte) *tacklr.StreamEvent {
+		return &tacklr.StreamEvent{
+			Type:      tacklr.StreamEventInterrupt,
 			MessageID: "call_1",
 			Data:      data,
 		}
@@ -190,9 +189,9 @@ func TestResolvePermissionViaRequest_outcomes(t *testing.T) {
 			Tools:     []*tacklr.Tool{sensitive},
 		})
 		events := s.Prompt(t, "go")
-		var interruptEv streaming.StreamEvent
+		var interruptEv tacklr.StreamEvent
 		for _, ev := range events {
-			if ev.Type == streaming.StreamEventInterrupt {
+			if ev.Type == tacklr.StreamEventInterrupt {
 				interruptEv = ev
 			}
 		}

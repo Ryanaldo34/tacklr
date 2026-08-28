@@ -14,7 +14,6 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
-	"github.com/ryanaldo34/tacklr/streaming"
 )
 
 // healthProtocol is a host Protocol with one HTTP route (no Runtime turns).
@@ -35,7 +34,7 @@ func (healthProtocol) HTTPRoutes() []HTTPRoute {
 	}}
 }
 
-func (healthProtocol) OnStreamEvent(ctx context.Context, env ProtocolEnv, threadID string, ev streaming.StreamEvent, reqID json.RawMessage) StreamControl {
+func (healthProtocol) OnStreamEvent(ctx context.Context, env ProtocolEnv, threadID string, ev tacklr.StreamEvent, reqID json.RawMessage) StreamControl {
 	return StreamControl{Finished: true}
 }
 
@@ -99,14 +98,14 @@ func TestACPProtocol_initializeResultShape(t *testing.T) {
 	}
 }
 
-type stubSub struct{ ch <-chan streaming.StreamEvent }
+type stubSub struct{ ch <-chan tacklr.StreamEvent }
 
-func (s stubSub) Events() <-chan streaming.StreamEvent { return s.ch }
-func (s stubSub) Close() error                         { return nil }
+func (s stubSub) Events() <-chan tacklr.StreamEvent { return s.ch }
+func (s stubSub) Close() error                      { return nil }
 
 type stubRT struct {
 	headErr, promptErr, resumeErr, subErr, createErr error
-	events                                           []streaming.StreamEvent
+	events                                           []tacklr.StreamEvent
 	hold                                             chan struct{}
 	cancelled                                        atomic.Bool
 	resumes                                          int
@@ -140,7 +139,7 @@ func (s *stubRT) Subscribe(context.Context, durable.SessionID, durable.Seq) (dur
 	if s.subErr != nil {
 		return nil, s.subErr
 	}
-	ch := make(chan streaming.StreamEvent, len(s.events)+1)
+	ch := make(chan tacklr.StreamEvent, len(s.events)+1)
 	for _, ev := range s.events {
 		ch <- ev
 	}
@@ -164,7 +163,7 @@ func (s *stubRT) Status(_ context.Context, id durable.SessionID) (durable.Sessio
 }
 
 type pumpProto struct {
-	onEvent   func(streaming.StreamEvent) StreamControl
+	onEvent   func(tacklr.StreamEvent) StreamControl
 	onClosed  error
 	closed    *atomic.Bool
 	cancelled *atomic.Bool
@@ -174,7 +173,7 @@ func (pumpProto) HandleInbound(context.Context, ProtocolEnv, []byte) error {
 	return nil
 }
 func (pumpProto) HTTPRoutes() []HTTPRoute { return nil }
-func (p pumpProto) OnStreamEvent(ctx context.Context, env ProtocolEnv, threadID string, ev streaming.StreamEvent, reqID json.RawMessage) StreamControl {
+func (p pumpProto) OnStreamEvent(ctx context.Context, env ProtocolEnv, threadID string, ev tacklr.StreamEvent, reqID json.RawMessage) StreamControl {
 	if p.onEvent != nil {
 		return p.onEvent(ev)
 	}
@@ -199,7 +198,7 @@ func (f failWriter) WriteError(json.RawMessage, error) error {
 func (f failWriter) WriteFrame([]byte) error { return f.err }
 
 func TestRunTurn_outcomes(t *testing.T) {
-	complete := streaming.StreamEvent{Type: streaming.StreamEventComplete}
+	complete := tacklr.StreamEvent{Type: tacklr.StreamEventComplete}
 	t.Run("nil runtime", func(t *testing.T) {
 		err := RunTurn(t.Context(), ProtocolEnv{}, pumpProto{}, "s", nil, PromptOrResume{})
 		if err == nil || err.Error() != "server: Runtime is required" {
@@ -228,7 +227,7 @@ func TestRunTurn_outcomes(t *testing.T) {
 		}
 	})
 	t.Run("complete", func(t *testing.T) {
-		rt := &stubRT{events: []streaming.StreamEvent{complete}}
+		rt := &stubRT{events: []tacklr.StreamEvent{complete}}
 		var closed, cancelled atomic.Bool
 		if err := RunTurn(t.Context(), ProtocolEnv{Runtime: rt}, pumpProto{closed: &closed, cancelled: &cancelled}, "s", nil, PromptOrResume{}); err != nil {
 			t.Fatal(err)
@@ -238,8 +237,8 @@ func TestRunTurn_outcomes(t *testing.T) {
 		}
 	})
 	t.Run("event error cancels", func(t *testing.T) {
-		rt := &stubRT{events: []streaming.StreamEvent{{Type: streaming.StreamEventMessage}}}
-		err := RunTurn(t.Context(), ProtocolEnv{Runtime: rt}, pumpProto{onEvent: func(streaming.StreamEvent) StreamControl {
+		rt := &stubRT{events: []tacklr.StreamEvent{{Type: tacklr.StreamEventMessage}}}
+		err := RunTurn(t.Context(), ProtocolEnv{Runtime: rt}, pumpProto{onEvent: func(tacklr.StreamEvent) StreamControl {
 			return StreamControl{Err: errors.New("encode")}
 		}}, "s", nil, PromptOrResume{})
 		if err == nil || err.Error() != "encode" || !rt.cancelled.Load() {
@@ -247,8 +246,8 @@ func TestRunTurn_outcomes(t *testing.T) {
 		}
 	})
 	t.Run("write frame error", func(t *testing.T) {
-		rt := &stubRT{events: []streaming.StreamEvent{{Type: streaming.StreamEventMessage}}}
-		err := RunTurn(t.Context(), ProtocolEnv{Runtime: rt, Conn: &Conn{Writer: failWriter{err: errors.New("write")}}}, pumpProto{onEvent: func(streaming.StreamEvent) StreamControl {
+		rt := &stubRT{events: []tacklr.StreamEvent{{Type: tacklr.StreamEventMessage}}}
+		err := RunTurn(t.Context(), ProtocolEnv{Runtime: rt, Conn: &Conn{Writer: failWriter{err: errors.New("write")}}}, pumpProto{onEvent: func(tacklr.StreamEvent) StreamControl {
 			return StreamControl{Frames: [][]byte{[]byte(`x`)}}
 		}}, "s", nil, PromptOrResume{})
 		if err == nil || err.Error() != "write" {
@@ -256,14 +255,14 @@ func TestRunTurn_outcomes(t *testing.T) {
 		}
 	})
 	t.Run("mid-turn resume then complete", func(t *testing.T) {
-		rt := &stubRT{events: []streaming.StreamEvent{
-			{Type: streaming.StreamEventInterrupt},
+		rt := &stubRT{events: []tacklr.StreamEvent{
+			{Type: tacklr.StreamEventInterrupt},
 			complete,
 		}}
 		n := 0
-		err := RunTurn(t.Context(), ProtocolEnv{Runtime: rt}, pumpProto{onEvent: func(ev streaming.StreamEvent) StreamControl {
+		err := RunTurn(t.Context(), ProtocolEnv{Runtime: rt}, pumpProto{onEvent: func(ev tacklr.StreamEvent) StreamControl {
 			n++
-			if ev.Type == streaming.StreamEventInterrupt {
+			if ev.Type == tacklr.StreamEventInterrupt {
 				return StreamControl{Resume: map[string][]byte{"c1": []byte(`{}`)}}
 			}
 			return StreamControl{Finished: true}
@@ -273,8 +272,8 @@ func TestRunTurn_outcomes(t *testing.T) {
 		}
 	})
 	t.Run("mid-turn resume fails", func(t *testing.T) {
-		rt := &stubRT{events: []streaming.StreamEvent{{Type: streaming.StreamEventInterrupt}}, resumeErr: errors.New("resume later")}
-		err := RunTurn(t.Context(), ProtocolEnv{Runtime: rt}, pumpProto{onEvent: func(streaming.StreamEvent) StreamControl {
+		rt := &stubRT{events: []tacklr.StreamEvent{{Type: tacklr.StreamEventInterrupt}}, resumeErr: errors.New("resume later")}
+		err := RunTurn(t.Context(), ProtocolEnv{Runtime: rt}, pumpProto{onEvent: func(tacklr.StreamEvent) StreamControl {
 			return StreamControl{Resume: map[string][]byte{"c1": []byte(`{}`)}}
 		}}, "s", nil, PromptOrResume{})
 		if err == nil || err.Error() != "resume later" {
@@ -314,8 +313,8 @@ func TestRunTurn_outcomes(t *testing.T) {
 	})
 }
 
-func terminalControl(ev streaming.StreamEvent) StreamControl {
-	if ev.Type == streaming.StreamEventComplete || ev.Type == streaming.StreamEventError {
+func terminalControl(ev tacklr.StreamEvent) StreamControl {
+	if ev.Type == tacklr.StreamEventComplete || ev.Type == tacklr.StreamEventError {
 		return StreamControl{Finished: true}
 	}
 	return StreamControl{}
@@ -352,8 +351,8 @@ func TestRunTurn_midPromptCancelThenNextPrompt(t *testing.T) {
 	var sawStream atomic.Bool
 	firstDone := make(chan error, 1)
 	go func() {
-		firstDone <- RunTurn(ctx, env, pumpProto{onEvent: func(ev streaming.StreamEvent) StreamControl {
-			if ev.Type == streaming.StreamEventMessage {
+		firstDone <- RunTurn(ctx, env, pumpProto{onEvent: func(ev tacklr.StreamEvent) StreamControl {
+			if ev.Type == tacklr.StreamEventMessage {
 				sawStream.Store(true)
 			}
 			return terminalControl(ev)
@@ -389,8 +388,8 @@ func TestRunTurn_midPromptCancelThenNextPrompt(t *testing.T) {
 			Type: tacklr.StreamEventMessage, Content: "after-cancel", IsComplete: true,
 		}
 	}
-	var second []streaming.StreamEvent
-	if err := RunTurn(ctx, env, pumpProto{onEvent: func(ev streaming.StreamEvent) StreamControl {
+	var second []tacklr.StreamEvent
+	if err := RunTurn(ctx, env, pumpProto{onEvent: func(ev tacklr.StreamEvent) StreamControl {
 		second = append(second, ev)
 		return terminalControl(ev)
 	}}, string(id), nil, PromptOrResume{Prompt: durable.Prompt{Text: "again"}}); err != nil {
@@ -398,10 +397,10 @@ func TestRunTurn_midPromptCancelThenNextPrompt(t *testing.T) {
 	}
 	var sawAfter, complete bool
 	for _, ev := range second {
-		if ev.Type == streaming.StreamEventMessage && strings.Contains(ev.Content, "after-cancel") {
+		if ev.Type == tacklr.StreamEventMessage && strings.Contains(ev.Content, "after-cancel") {
 			sawAfter = true
 		}
-		if ev.Type == streaming.StreamEventComplete {
+		if ev.Type == tacklr.StreamEventComplete {
 			complete = true
 		}
 	}

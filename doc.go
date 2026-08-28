@@ -1,8 +1,8 @@
 // Package tacklr is the stable harness SDK facade.
 //
-// The root package owns agent construction, turn execution, and tool
-// registration. Domain data types have canonical packages:
-//   - streaming owns messages, events, tool calls, and todos.
+// The root package owns agent construction, turn execution, tool
+// registration, conversation types (Message, StreamEvent, Todo), and
+// the session checkpoint blob. Domain packages:
 //   - brain owns knowledge retrieval and graph capabilities.
 //   - vfs owns virtual filesystem mounts, sessions, and provider interfaces.
 //   - builtins owns optional tool constructors (email, Exa), VFS backend

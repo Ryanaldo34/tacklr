@@ -3,7 +3,7 @@ package builtins
 import (
 	"strings"
 
-	"github.com/ryanaldo34/tacklr/streaming"
+	"github.com/ryanaldo34/tacklr"
 )
 
 // Model media capability is prefix match against the selected model id.
@@ -47,8 +47,8 @@ func modelHasPrefix(model string, prefixes []string) bool {
 
 // modelSupportsMIME is the OpenAI-strategy capability matrix for a model id.
 func modelSupportsMIME(model, mimeType string) bool {
-	mime := streaming.NormalizeMIME(mimeType)
-	if streaming.IsTextMIME(mime) {
+	mime := tacklr.NormalizeMIME(mimeType)
+	if tacklr.IsTextMIME(mime) {
 		return true
 	}
 	if strings.HasPrefix(mime, "image/") {

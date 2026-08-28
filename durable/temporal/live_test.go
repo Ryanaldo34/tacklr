@@ -21,7 +21,6 @@ import (
 	"github.com/ryanaldo34/tacklr/durable/inprocess"
 	"github.com/ryanaldo34/tacklr/internal/temporallive"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
-	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/telemetry"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
@@ -104,10 +103,10 @@ func liveCat(t *testing.T, model tacklr.InferenceStrategy, extra durable.AgentSp
 	return cat
 }
 
-func waitTurn(t *testing.T, sub durable.Subscription, timeout time.Duration) []streaming.StreamEvent {
+func waitTurn(t *testing.T, sub durable.Subscription, timeout time.Duration) []tacklr.StreamEvent {
 	t.Helper()
 	deadline := time.After(timeout)
-	var got []streaming.StreamEvent
+	var got []tacklr.StreamEvent
 	for {
 		select {
 		case ev, ok := <-sub.Events():
@@ -115,7 +114,7 @@ func waitTurn(t *testing.T, sub durable.Subscription, timeout time.Duration) []s
 				return got
 			}
 			got = append(got, ev)
-			if ev.Type == streaming.StreamEventComplete || ev.Type == streaming.StreamEventError || ev.Type == streaming.StreamEventInterrupt {
+			if ev.Type == tacklr.StreamEventComplete || ev.Type == tacklr.StreamEventError || ev.Type == tacklr.StreamEventInterrupt {
 				return got
 			}
 		case <-deadline:
@@ -124,10 +123,10 @@ func waitTurn(t *testing.T, sub durable.Subscription, timeout time.Duration) []s
 	}
 }
 
-func waitContains(t *testing.T, sub durable.Subscription, timeout time.Duration, want func(streaming.StreamEvent) bool) []streaming.StreamEvent {
+func waitContains(t *testing.T, sub durable.Subscription, timeout time.Duration, want func(tacklr.StreamEvent) bool) []tacklr.StreamEvent {
 	t.Helper()
 	deadline := time.After(timeout)
-	var got []streaming.StreamEvent
+	var got []tacklr.StreamEvent
 	for {
 		select {
 		case ev, ok := <-sub.Events():
@@ -170,10 +169,10 @@ func TestLive_promptSubscribeComplete(t *testing.T) {
 	got := waitTurn(t, sub, 30*time.Second)
 	var sawMsg, sawComplete bool
 	for _, ev := range got {
-		if ev.Type == streaming.StreamEventMessage && strings.Contains(ev.Content, "hello-live") {
+		if ev.Type == tacklr.StreamEventMessage && strings.Contains(ev.Content, "hello-live") {
 			sawMsg = true
 		}
-		if ev.Type == streaming.StreamEventComplete {
+		if ev.Type == tacklr.StreamEventComplete {
 			sawComplete = true
 		}
 	}
@@ -226,7 +225,7 @@ func TestLive_hitlYieldThenResume(t *testing.T) {
 	got := waitTurn(t, sub, 30*time.Second)
 	var yielded bool
 	for _, ev := range got {
-		if ev.Type == streaming.StreamEventInterrupt {
+		if ev.Type == tacklr.StreamEventInterrupt {
 			yielded = true
 		}
 	}
@@ -237,8 +236,8 @@ func TestLive_hitlYieldThenResume(t *testing.T) {
 	if err := stack.Runtime.Resume(ctx, id, durable.Resume{Responses: map[string][]byte{"ask1": payload}}); err != nil {
 		t.Fatal(err)
 	}
-	waitContains(t, sub, 30*time.Second, func(ev streaming.StreamEvent) bool {
-		return ev.Type == streaming.StreamEventMessage && ev.Content == "chose" || ev.Type == streaming.StreamEventComplete
+	waitContains(t, sub, 30*time.Second, func(ev tacklr.StreamEvent) bool {
+		return ev.Type == tacklr.StreamEventMessage && ev.Content == "chose" || ev.Type == tacklr.StreamEventComplete
 	})
 }
 
@@ -296,7 +295,7 @@ func TestLive_workspaceAuthRemountsAfterResume(t *testing.T) {
 	got := waitTurn(t, sub, 30*time.Second)
 	var yielded bool
 	for _, ev := range got {
-		if ev.Type == streaming.StreamEventInterrupt {
+		if ev.Type == tacklr.StreamEventInterrupt {
 			yielded = true
 		}
 	}
@@ -313,8 +312,8 @@ func TestLive_workspaceAuthRemountsAfterResume(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	waitContains(t, sub, 30*time.Second, func(ev streaming.StreamEvent) bool {
-		return ev.Type == streaming.StreamEventMessage && strings.Contains(ev.Content, "from-workspace")
+	waitContains(t, sub, 30*time.Second, func(ev tacklr.StreamEvent) bool {
+		return ev.Type == tacklr.StreamEventMessage && strings.Contains(ev.Content, "from-workspace")
 	})
 }
 
@@ -374,7 +373,7 @@ func TestLive_workerRestartWhileParkedThenResumeRemounts(t *testing.T) {
 	got := waitTurn(t, sub, 30*time.Second)
 	var yielded bool
 	for _, ev := range got {
-		if ev.Type == streaming.StreamEventInterrupt {
+		if ev.Type == tacklr.StreamEventInterrupt {
 			yielded = true
 		}
 	}
@@ -392,8 +391,8 @@ func TestLive_workerRestartWhileParkedThenResumeRemounts(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	waitContains(t, sub, 30*time.Second, func(ev streaming.StreamEvent) bool {
-		return ev.Type == streaming.StreamEventMessage && strings.Contains(ev.Content, "from-workspace")
+	waitContains(t, sub, 30*time.Second, func(ev tacklr.StreamEvent) bool {
+		return ev.Type == tacklr.StreamEventMessage && strings.Contains(ev.Content, "from-workspace")
 	})
 }
 
@@ -431,8 +430,8 @@ func TestLive_cancelThenNextPrompt(t *testing.T) {
 	if err := stack.Runtime.Cancel(ctx, id); err != nil {
 		t.Fatal(err)
 	}
-	waitContains(t, subCancel, 15*time.Second, func(ev streaming.StreamEvent) bool {
-		return ev.Type == streaming.StreamEventError && errors.Is(ev.Error, context.Canceled)
+	waitContains(t, subCancel, 15*time.Second, func(ev tacklr.StreamEvent) bool {
+		return ev.Type == tacklr.StreamEventError && errors.Is(ev.Error, context.Canceled)
 	})
 	cat.Register("default", durable.AgentSpec{
 		Options: tacklr.AgentOptions{Model: &testkit.ScriptedModel{
@@ -453,8 +452,8 @@ func TestLive_cancelThenNextPrompt(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = sub.Close() })
-	waitContains(t, sub, 30*time.Second, func(ev streaming.StreamEvent) bool {
-		return ev.Type == streaming.StreamEventMessage && strings.Contains(ev.Content, "after-cancel")
+	waitContains(t, sub, 30*time.Second, func(ev tacklr.StreamEvent) bool {
+		return ev.Type == tacklr.StreamEventMessage && strings.Contains(ev.Content, "after-cancel")
 	})
 }
 
@@ -550,7 +549,7 @@ func TestLive_cachedRecipePlusTokenOnlyPrompt(t *testing.T) {
 	got := waitTurn(t, sub, 30*time.Second)
 	var body string
 	for _, ev := range got {
-		if ev.Type == streaming.StreamEventMessage {
+		if ev.Type == tacklr.StreamEventMessage {
 			body = ev.Content
 		}
 	}
@@ -609,7 +608,7 @@ func TestLive_spawnWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = sub.Close() })
-	waitContains(t, sub, 45*time.Second, func(ev streaming.StreamEvent) bool {
-		return ev.Type == streaming.StreamEventMessage && strings.Contains(ev.Content, "parent-after-spawn")
+	waitContains(t, sub, 45*time.Second, func(ev tacklr.StreamEvent) bool {
+		return ev.Type == tacklr.StreamEventMessage && strings.Contains(ev.Content, "parent-after-spawn")
 	})
 }

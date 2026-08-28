@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/ryanaldo34/tacklr"
-	"github.com/ryanaldo34/tacklr/streaming"
 )
 
 // Web tools (Exa): web_search for discovery, web_fetch for known URLs.
@@ -62,7 +61,7 @@ func WebSearch(client *Exa) *tacklr.Tool {
 		Name:        "web_search",
 		DisplayName: "Search: {query}",
 		Description: webSearchToolDescription,
-		Category:    streaming.ToolCategorySearch,
+		Category:    tacklr.ToolCategorySearch,
 		Access:      tacklr.ToolReadAccess,
 		Timeout:     webSearchToolTimeout,
 		Handler: func(ctx context.Context, args webSearchArgs, runtime tacklr.HarnessRuntime) (string, error) {
@@ -391,7 +390,7 @@ func WebFetch(client *Exa) *tacklr.Tool {
 		Name:        "web_fetch",
 		DisplayName: "Web Fetch",
 		Description: webFetchToolDescription,
-		Category:    streaming.ToolCategoryFetch,
+		Category:    tacklr.ToolCategoryFetch,
 		Access:      tacklr.ToolReadAccess,
 		Timeout:     webFetchToolTimeout,
 		Handler: func(ctx context.Context, args webFetchArgs, runtime tacklr.HarnessRuntime) (string, error) {

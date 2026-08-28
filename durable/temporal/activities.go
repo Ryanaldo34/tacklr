@@ -14,9 +14,7 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
-	"github.com/ryanaldo34/tacklr/internal/drive"
 	"github.com/ryanaldo34/tacklr/mcp"
-	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/telemetry"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
@@ -60,7 +58,7 @@ type InferenceInput struct {
 	SessionID     durable.SessionID
 	AgentID       string
 	MCPServers    []mcp.MCPConfig
-	User          *streaming.Message
+	User          *tacklr.Message
 	HadToolRound  bool
 	ModelRequests int
 	Resume        map[string][]byte
@@ -74,7 +72,7 @@ type InferenceInput struct {
 // InferenceOutput is the typed Inference activity result.
 type InferenceOutput struct {
 	Complete  bool
-	ToolCalls []streaming.ToolCall
+	ToolCalls []tacklr.ToolCall
 	Result    string
 }
 
@@ -83,7 +81,7 @@ type ToolInput struct {
 	SessionID  durable.SessionID
 	AgentID    string
 	MCPServers []mcp.MCPConfig
-	Call       streaming.ToolCall
+	Call       tacklr.ToolCall
 	Auth       durable.AuthContext
 	Mounts     []durable.MountRecipe
 	Specialist string
@@ -110,7 +108,7 @@ type CommitToolInput struct {
 	SessionID  durable.SessionID
 	AgentID    string
 	MCPServers []mcp.MCPConfig
-	Call       streaming.ToolCall
+	Call       tacklr.ToolCall
 	Output     string
 	Auth       durable.AuthContext
 	Mounts     []durable.MountRecipe
@@ -140,7 +138,7 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 	stream := a.openStream(ctx)
 	defer closeStream(ctx, stream)
 	if attempt > 1 {
-		_ = a.publish(ctx, stream, in.SessionID, durable.TopicRetry, streaming.StreamEvent{Type: streaming.StreamEventError, Content: "retry"}, true)
+		_ = a.publish(ctx, stream, in.SessionID, durable.TopicRetry, tacklr.StreamEvent{Type: tacklr.StreamEventError, Content: "retry"}, true)
 	}
 	h, ms, skillsMS, rev, err := a.harness(ctx, in.SessionID, in.AgentID, in.MCPServers, in.Auth, in.Mounts, in.Specialist, in.State)
 	if err != nil {
@@ -149,7 +147,7 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 			pub = err
 		}
 		slog.ErrorContext(ctx, "inference harness", "area", telemetry.AreaRuntime, "error", pub)
-		_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, streaming.StreamEvent{Type: streaming.StreamEventError, Error: pub, Content: pub.Error()}, true)
+		_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, tacklr.StreamEvent{Type: tacklr.StreamEventError, Error: pub, Content: pub.Error()}, true)
 		return InferenceOutput{}, canceledIf(ctx, err)
 	}
 	defer func() {
@@ -157,11 +155,11 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 		durable.CloseTurnTrees(ms, skillsMS, string(in.SessionID), "inference")
 	}()
 	eng := h.Drive()
-	out, stop := drive.PipeStreamEvents(a.emitter(ctx, stream, in.SessionID))
+	out, stop := tacklr.PipeStreamEvents(a.emitter(ctx, stream, in.SessionID))
 	defer stop()
 	if len(in.Resume) > 0 {
 		if err := eng.ApplyResume(in.Resume); err != nil {
-			_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, streaming.StreamEvent{Type: streaming.StreamEventError, Error: err, Content: err.Error()}, true)
+			_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, tacklr.StreamEvent{Type: tacklr.StreamEventError, Error: err, Content: err.Error()}, true)
 			return InferenceOutput{}, canceledIf(ctx, err)
 		}
 		if pending := eng.PendingToolCalls(); len(pending) > 0 {
@@ -175,7 +173,7 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 			return InferenceOutput{}, canceledIf(ctx, err)
 		}
 	}
-	st := &drive.TurnState{HadToolRound: in.HadToolRound, ModelRequests: in.ModelRequests}
+	st := &tacklr.TurnState{HadToolRound: in.HadToolRound, ModelRequests: in.ModelRequests}
 	step, err := eng.RunInference(ctx, st, out)
 	if err != nil {
 		pub := err
@@ -185,7 +183,7 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 		} else {
 			slog.ErrorContext(ctx, "inference failed", "area", telemetry.AreaRuntime, "error", err)
 		}
-		_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, streaming.StreamEvent{Type: streaming.StreamEventError, Error: pub, Content: pub.Error()}, true)
+		_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, tacklr.StreamEvent{Type: tacklr.StreamEventError, Error: pub, Content: pub.Error()}, true)
 		return InferenceOutput{}, canceledIf(ctx, err)
 	}
 	if _, err = a.save(ctx, in.SessionID, in.AgentID, h, rev, in.Mounts); err != nil {
@@ -227,7 +225,7 @@ func (a *Activities) Tool(ctx context.Context, in ToolInput) (ToolOutput, error)
 	stream := a.openStream(ctx)
 	defer closeStream(ctx, stream)
 	if attempt > 1 {
-		_ = a.publish(ctx, stream, in.SessionID, durable.TopicRetry, streaming.StreamEvent{Type: streaming.StreamEventError, Content: "retry"}, true)
+		_ = a.publish(ctx, stream, in.SessionID, durable.TopicRetry, tacklr.StreamEvent{Type: tacklr.StreamEventError, Content: "retry"}, true)
 	}
 	h, ms, skillsMS, rev, err := a.harness(ctx, in.SessionID, in.AgentID, in.MCPServers, in.Auth, in.Mounts, in.Specialist, in.State)
 	if err != nil {
@@ -246,13 +244,13 @@ func (a *Activities) Tool(ctx context.Context, in ToolInput) (ToolOutput, error)
 	}
 	h.BindChildHost(kids)
 	eng := h.Drive()
-	out, stop := drive.PipeStreamEvents(a.emitter(ctx, stream, in.SessionID))
+	out, stop := tacklr.PipeStreamEvents(a.emitter(ctx, stream, in.SessionID))
 	defer stop()
 	step, runErr := eng.RunToolCall(ctx, in.Call, out)
 	if runErr != nil {
 		if err := ctx.Err(); err != nil {
 			slog.WarnContext(ctx, "tool cancelled", "area", telemetry.AreaHarness, "tool", in.Call.Name)
-			_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, streaming.StreamEvent{Type: streaming.StreamEventError, Error: err, Content: err.Error()}, true)
+			_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, tacklr.StreamEvent{Type: tacklr.StreamEventError, Error: err, Content: err.Error()}, true)
 			return ToolOutput{}, canceledIf(ctx, runErr)
 		}
 		slog.ErrorContext(ctx, "tool failed", "area", telemetry.AreaHarness, "tool", in.Call.Name, "error", runErr)
@@ -299,11 +297,11 @@ func (a *Activities) CommitToolOutput(ctx context.Context, in CommitToolInput) (
 	presented.Status = "success"
 	stream := a.openStream(ctx)
 	defer closeStream(ctx, stream)
-	_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, streaming.StreamEvent{
-		Type:      streaming.StreamEventToolResult,
+	_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, tacklr.StreamEvent{
+		Type:      tacklr.StreamEventToolResult,
 		MessageID: in.Call.Key(),
 		Content:   in.Output,
-		ToolCalls: []streaming.ToolCall{presented},
+		ToolCalls: []tacklr.ToolCall{presented},
 	}, true)
 	return ToolOutput{}, nil
 }
@@ -400,13 +398,13 @@ func closeStream(ctx context.Context, c *workflowstreams.Client) {
 	}
 }
 
-func (a *Activities) emitter(ctx context.Context, stream *workflowstreams.Client, sessionID durable.SessionID) func(streaming.StreamEvent) {
+func (a *Activities) emitter(ctx context.Context, stream *workflowstreams.Client, sessionID durable.SessionID) func(tacklr.StreamEvent) {
 	first := true
-	return func(ev streaming.StreamEvent) {
-		if ctx.Err() != nil && ev.Type != streaming.StreamEventError && ev.Type != streaming.StreamEventComplete {
+	return func(ev tacklr.StreamEvent) {
+		if ctx.Err() != nil && ev.Type != tacklr.StreamEventError && ev.Type != tacklr.StreamEventComplete {
 			return
 		}
-		force := first || ev.Type == streaming.StreamEventComplete || ev.Type == streaming.StreamEventInterrupt || ev.Type == streaming.StreamEventError
+		force := first || ev.Type == tacklr.StreamEventComplete || ev.Type == tacklr.StreamEventInterrupt || ev.Type == tacklr.StreamEventError
 		first = false
 		_ = a.publish(ctx, stream, sessionID, durable.TopicEvents, ev, force)
 	}
@@ -449,7 +447,7 @@ func publishContext(ctx context.Context) context.Context {
 	return context.WithoutCancel(ctx)
 }
 
-func (a *Activities) publish(ctx context.Context, stream *workflowstreams.Client, sessionID durable.SessionID, topic string, ev streaming.StreamEvent, force bool) error {
+func (a *Activities) publish(ctx context.Context, stream *workflowstreams.Client, sessionID durable.SessionID, topic string, ev tacklr.StreamEvent, force bool) error {
 	if ev.Error != nil && ev.Fail == "" {
 		ev.Fail = ev.Error.Error()
 	}

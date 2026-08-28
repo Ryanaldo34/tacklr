@@ -12,7 +12,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
-	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfsindex"
 )
@@ -62,7 +61,7 @@ func (b brainTools) newReadObjectTool() *Tool {
 		Description: `Read a knowledge object by UUID (full stored body as JSON).
 
 Use after search, find_exact, find_objects, or expand when the hit has no vfs_path (Deal, Fact, Person, …). Pass object_id from that result. Do not invent ids. Files: use read on vfs_path instead.`,
-		Category: streaming.ToolCategoryRead,
+		Category: ToolCategoryRead,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
 		Handler: func(ctx context.Context, args readObjectArgs, runtime HarnessRuntime) (string, error) {
@@ -95,7 +94,7 @@ func (b brainTools) newSchemaTool() *Tool {
 		Description: `Discover structured filter fields and kind documentation for the knowledge base.
 
 Call with a kind to see filterable_fields (name, type, operators) for that kind. Call with no kind to list registered kinds. filter_usage lists which tools accept those fields: search, find_exact, and find_objects share the same filter keys. Prefer schema() before inventing property names in filters. When kinds are registered, property filters require a kind key (or find_objects.kinds). Core keys: kind, title, created_after, created_before, updated_after, updated_before.`,
-		Category: streaming.ToolCategoryRead,
+		Category: ToolCategoryRead,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
 		Handler: func(ctx context.Context, args schemaArgs, runtime HarnessRuntime) (string, error) {
@@ -126,7 +125,7 @@ func (b brainTools) newSearchTool() *Tool {
 Hit has vfs_path → open the live file with read (path + start_line / block_id from evidence).
 No vfs_path → read_object with the id.
 Live grep is run_command → rg (not this tool). Relationships: expand, not search. More pages: continue. Prefer schema() before inventing filter keys.`,
-		Category: streaming.ToolCategorySearch,
+		Category: ToolCategorySearch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
 	}, "Searching knowledge base…", b.engine.Search)
@@ -139,7 +138,7 @@ func (b brainTools) newFindExactTool() *Tool {
 		Description: `Find an object by exact or near-exact string (UUID, title, path-like phrase).
 
 Prefer over search when you already have the identifier. File hits: read the vfs_path. Other objects: read_object. Meaning-based entity lookup: find_objects. More pages: continue.`,
-		Category: streaming.ToolCategorySearch,
+		Category: ToolCategorySearch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
 	}, "Finding exact matches…", b.engine.FindExact)
@@ -191,7 +190,7 @@ func (b brainTools) newContinueTool() *Tool {
 		Description: `Return the next page of a prior ranked result set from search, find_exact, find_objects, or large expand.
 
 Pass the result_set_id from the previous call. Each new search, find_exact, find_objects, or large expand replaces the active result set — older result_set_id values stop working.`,
-		Category: streaming.ToolCategorySearch,
+		Category: ToolCategorySearch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
 		Handler: func(ctx context.Context, args continueArgs, runtime HarnessRuntime) (string, error) {
@@ -229,7 +228,7 @@ func (b brainTools) newExpandTool() *Tool {
 		Description: `Neighbors of a known path or object_id — not a search.
 
 Prefer path for files. ls / rg do not list graph edges. Omit relation_types for containment only; named types need a graph backend. File neighbors: read. Other neighbors: read_object. Large pages: continue.`,
-		Category: streaming.ToolCategoryFetch,
+		Category: ToolCategoryFetch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
 		Handler: func(ctx context.Context, args expandArgs, runtime HarnessRuntime) (string, error) {
@@ -283,7 +282,7 @@ Call schema() for this kind before inventing property keys. Pass object_id to up
 		Name:        name,
 		DisplayName: display,
 		Description: desc,
-		Category:    streaming.ToolCategoryEdit,
+		Category:    ToolCategoryEdit,
 		Access:      ToolWriteAccess,
 		Timeout:     30 * time.Second,
 		Handler: func(ctx context.Context, args saveObjectArgs, runtime HarnessRuntime) (string, error) {
@@ -340,7 +339,7 @@ func (b brainTools) newFindLinksTool() *Tool {
 		Description: `Find relationships by text on the edge note, not document bodies.
 
 Returns from_path/to_path (and ids). ls never lists edges. Prefer expand from a known path. relation_type is required. Then read file ends with read, other ends with read_object.`,
-		Category: streaming.ToolCategorySearch,
+		Category: ToolCategorySearch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
 		Handler: func(ctx context.Context, args findLinksArgs, runtime HarnessRuntime) (string, error) {
@@ -369,7 +368,7 @@ func (b brainTools) newFindObjectsTool() *Tool {
 		Description: `Find whole knowledge objects (Deal, Fact, …), not ranked passages.
 
 Use to resolve which tracked entity matches the ask. Evidence in notes/files: search instead. Already have the id: expand or read_object. More pages: continue. Call schema() before inventing filter keys.`,
-		Category: streaming.ToolCategorySearch,
+		Category: ToolCategorySearch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
 		Handler: func(ctx context.Context, args findObjectsArgs, runtime HarnessRuntime) (string, error) {
@@ -403,7 +402,7 @@ func (b brainTools) newLinkTool() *Tool {
 		Description: `Create a relationship between two first-class knowledge objects (graph edge). Prefer virtual paths. Engram paths resolve via vfs_path; artifact paths must already be indexed (index_file or mount policy). UUID from_id/to_id remain for non-file objects.
 
 Both ends must exist under the current search namespace, must not be soft-deleted, and must not be part/chunk objects. list/ls never lists edges. Optional note/status/role/confidence/evidence_id annotate why the link exists; expand returns that metadata. Re-linking the same pair updates metadata.`,
-		Category: streaming.ToolCategoryEdit,
+		Category: ToolCategoryEdit,
 		Access:   ToolWriteAccess,
 		Timeout:  30 * time.Second,
 		Handler: func(ctx context.Context, args linkArgs, runtime HarnessRuntime) (string, error) {
@@ -455,7 +454,7 @@ func (b brainTools) newUnlinkTool() *Tool {
 		Description: `Remove a relationship between two first-class knowledge objects. Prefer virtual paths (same resolution as link). list/ls never lists edges.
 
 Both ends must exist under the current search namespace and must not be parts. Idempotent if the edge is already gone.`,
-		Category: streaming.ToolCategoryEdit,
+		Category: ToolCategoryEdit,
 		Access:   ToolWriteAccess,
 		Timeout:  30 * time.Second,
 		Handler: func(ctx context.Context, args linkArgs, runtime HarnessRuntime) (string, error) {

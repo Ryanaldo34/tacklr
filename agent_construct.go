@@ -7,10 +7,8 @@ import (
 	"slices"
 
 	"github.com/ryanaldo34/tacklr/brain"
-	session "github.com/ryanaldo34/tacklr/internal/session"
 	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/skills"
-	"github.com/ryanaldo34/tacklr/stores"
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfsindex"
 )
@@ -117,7 +115,7 @@ func NewTurnManager(ctx context.Context, opts AgentOptions) (*TurnManager, error
 	if err := opts.Validate(); err != nil {
 		return nil, err
 	}
-	sm := session.NewSessionManager()
+	sm := newSessionManager()
 	h := &TurnManager{
 		model:                 opts.Model,
 		maxWindowSize:         opts.Config.MaxWindowSize,
@@ -135,7 +133,7 @@ func NewTurnManager(ctx context.Context, opts AgentOptions) (*TurnManager, error
 		brainWriteKinds:       opts.BrainWriteKinds,
 		sessionId:             opts.SessionID,
 		specialists:           make(map[string]*Specialist),
-		pendingToolCalls:      make(map[string]stores.PendingToolCall),
+		pendingToolCalls:      make(map[string]PendingToolCall),
 		context:               newModelContextManager(),
 		contextPolicy:         opts.ContextPolicy,
 		runCommandUnattended:  opts.runCommandUnattended,

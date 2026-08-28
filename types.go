@@ -5,52 +5,10 @@ import (
 	"errors"
 
 	"github.com/ryanaldo34/tacklr/interrupt"
-	"github.com/ryanaldo34/tacklr/streaming"
 )
 
-// Shared roles, stream event types, errors, and re-exports for harness hosts.
-
-const (
-	RoleUser      MessageRole = "user"
-	RoleAssistant MessageRole = "assistant"
-	RoleReasoning MessageRole = "reasoning"
-	RoleSystem    MessageRole = "system"
-	RoleDeveloper MessageRole = "developer"
-	RoleTool      MessageRole = "tool"
-
-	StatusInProgress ItemStatus = "in_progress"
-	StatusCompleted  ItemStatus = "completed"
-	StatusIncomplete ItemStatus = "incomplete"
-
-	ContentTypeOutputText = "output_text"
-	ContentTypeInputText  = "input_text"
-	ContentTypeInputImage = "input_image"
-	ContentTypeInputFile  = "input_file"
-	ContentTypeRefusal    = "refusal"
-
-	StreamEventMessage      StreamEventType = "message"
-	StreamEventReasoning    StreamEventType = "reasoning"
-	StreamEventFunctionCall StreamEventType = "function_call"
-	StreamEventToolResult   StreamEventType = "tool_result"
-	StreamEventComplete     StreamEventType = "complete"
-	StreamEventError        StreamEventType = "error"
-	StreamEventInterrupt    StreamEventType = "yield"
-)
-
-type (
-	MessageRole      = streaming.MessageRole
-	ItemStatus       = streaming.ItemStatus
-	ContentPart      = streaming.ContentPart
-	ImageURL         = streaming.ImageURL
-	FileData         = streaming.FileData
-	Annotation       = streaming.Annotation
-	URLAnnotation    = streaming.URLAnnotation
-	ToolCall         = streaming.ToolCall
-	StreamEventType  = streaming.StreamEventType
-	StreamEvent      = streaming.StreamEvent
-	LLMResponseChunk = streaming.LLMResponseChunk
-	Message          = streaming.Message
-)
+// Shared errors, inference contract, and interrupt re-exports for harness hosts.
+// Message, StreamEvent, Todo, and related conversation types live in this package.
 
 // Coarse categories for errors.Is. Wrap a specific message at the call site
 // (fmt.Errorf("tool %q: %w", name, ErrNotFound)) instead of a sentinel per
@@ -107,7 +65,7 @@ func UnsupportedMIMEs(s InferenceStrategy, mimes []string) []string {
 	var bad []string
 	seen := make(map[string]struct{}, len(mimes))
 	for _, m := range mimes {
-		m = streaming.NormalizeMIME(m)
+		m = NormalizeMIME(m)
 		if _, ok := seen[m]; ok {
 			continue
 		}
@@ -173,9 +131,6 @@ type HarnessRuntime interface {
 	// like Park. Unknown ids return ErrNotFound.
 	AwaitChild(ctx context.Context, id string) (Child, error)
 }
-
-// Todo is one plan list item (also used in plan_update stream payloads).
-type Todo = streaming.Todo
 
 // Interrupt types re-exported for tool authors.
 type (

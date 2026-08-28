@@ -15,7 +15,6 @@ import (
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/durable/inprocess"
-	"github.com/ryanaldo34/tacklr/streaming"
 )
 
 // Runtime implements durable.Runtime with one Temporal workflow per session.
@@ -184,8 +183,8 @@ func (r *Runtime) Resume(ctx context.Context, sessionID durable.SessionID, resum
 // Cancel implements durable.Runtime.
 func (r *Runtime) Cancel(ctx context.Context, sessionID durable.SessionID) error {
 	cancelLiveTurn(sessionID)
-	_ = r.fallback.Append(context.WithoutCancel(ctx), sessionID, durable.TopicEvents, streaming.StreamEvent{
-		Type:    streaming.StreamEventError,
+	_ = r.fallback.Append(context.WithoutCancel(ctx), sessionID, durable.TopicEvents, tacklr.StreamEvent{
+		Type:    tacklr.StreamEventError,
 		Error:   context.Canceled,
 		Fail:    context.Canceled.Error(),
 		Content: context.Canceled.Error(),
@@ -204,11 +203,11 @@ func (r *Runtime) Close(ctx context.Context, sessionID durable.SessionID) error 
 }
 
 type sub struct {
-	ch     <-chan streaming.StreamEvent
+	ch     <-chan tacklr.StreamEvent
 	cancel context.CancelFunc
 }
 
-func (s *sub) Events() <-chan streaming.StreamEvent { return s.ch }
+func (s *sub) Events() <-chan tacklr.StreamEvent { return s.ch }
 func (s *sub) Close() error {
 	if s.cancel != nil {
 		s.cancel()
@@ -243,7 +242,7 @@ func (r *Runtime) Subscribe(ctx context.Context, sessionID durable.SessionID, af
 		return &sub{ch: ch, cancel: cancel}, nil
 	}
 	c := workflowstreams.NewClient(r.client, string(sessionID), workflowstreams.Options{})
-	ch := make(chan streaming.StreamEvent, 64)
+	ch := make(chan tacklr.StreamEvent, 64)
 	dc := converter.GetDefaultDataConverter()
 	go func() {
 		defer close(ch)
@@ -256,7 +255,7 @@ func (r *Runtime) Subscribe(ctx context.Context, sessionID durable.SessionID, af
 			if err != nil {
 				return
 			}
-			var ev streaming.StreamEvent
+			var ev tacklr.StreamEvent
 			if err := dc.FromPayload(item.Data, &ev); err != nil {
 				return
 			}

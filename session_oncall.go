@@ -1,12 +1,12 @@
-package session
+package tacklr
 
 import (
 	"slices"
 	"sync"
 )
 
-// OnCallLayer is one completed OnCall middleware layer for a tool call.
-type OnCallLayer struct {
+// onCallLayer is one completed OnCall middleware layer for a tool call.
+type onCallLayer struct {
 	Args   string
 	Denied bool
 }
@@ -18,29 +18,29 @@ type onCallStage struct {
 	Args       string `json:"args"`
 }
 
-// OnCallStore holds completed OnCall layers so a parked tool can re-enter
-// without re-running constructors. It is a SessionManager module — not
+// onCallStore holds completed OnCall layers so a parked tool can re-enter
+// without re-running constructors. It is a sessionManager module — not
 // exposed on HarnessRuntime.
-type OnCallStore struct {
+type onCallStore struct {
 	mu     sync.RWMutex
 	stages []onCallStage
 }
 
 // Get returns the completed layer for toolCallID and typeName.
-func (s *OnCallStore) Get(toolCallID, typeName string) (OnCallLayer, bool) {
+func (s *onCallStore) Get(toolCallID, typeName string) (onCallLayer, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	i := slices.IndexFunc(s.stages, func(st onCallStage) bool {
 		return st.ToolCallID == toolCallID && st.TypeName == typeName
 	})
 	if i < 0 {
-		return OnCallLayer{}, false
+		return onCallLayer{}, false
 	}
-	return OnCallLayer{Args: s.stages[i].Args, Denied: s.stages[i].Denied}, true
+	return onCallLayer{Args: s.stages[i].Args, Denied: s.stages[i].Denied}, true
 }
 
 // Record stores a completed OnCall layer for later re-entry.
-func (s *OnCallStore) Record(toolCallID, typeName string, layer OnCallLayer) {
+func (s *onCallStore) Record(toolCallID, typeName string, layer onCallLayer) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.stages = append(s.stages, onCallStage{

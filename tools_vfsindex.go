@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfsindex"
 )
@@ -60,7 +59,7 @@ HOW TO USE
 3) Later: search for recall; open the live file with read (vfs_path + start_line / block_id). Not read_object.
 
 Requires an active plan (writes unlock after create_plan). Returns compact status only — not file contents. Under selective policy, a successful index tracks the path so later persists reindex it. Under prefix/watch, AfterPersist already reindexes.`,
-		Category: streaming.ToolCategoryExecute,
+		Category: ToolCategoryExecute,
 		Access:   ToolWriteAccess,
 		Timeout:  120 * time.Second,
 		Handler: func(ctx context.Context, args indexFileArgs, runtime HarnessRuntime) (string, error) {
@@ -121,7 +120,7 @@ func (v vfsIndexTools) newUnindex() *Tool {
 		Description: `Remove the brain mirror for a virtual path (soft-delete Document/Chunks for that vfs_path). Use when you indexed the wrong file or the path should no longer appear in search for this task.
 
 Does not delete the real VFS file. Idempotent if nothing was indexed. Requires an active plan. Prefer unindex over leaving misleading chunks for later todos. Also drops selective track for the path.`,
-		Category: streaming.ToolCategoryDelete,
+		Category: ToolCategoryDelete,
 		Access:   ToolWriteAccess,
 		Timeout:  30 * time.Second,
 		Handler: func(ctx context.Context, args unindexArgs, runtime HarnessRuntime) (string, error) {

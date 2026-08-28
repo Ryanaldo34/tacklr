@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/ryanaldo34/tacklr/internal/command"
-	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -75,7 +74,7 @@ start/end: 1-based half-open window. Sheets: rows of the sheet named in block_id
 block_id: markdown heading, Docs/Word block, sheet, Sheet!A1, or Sheet!A1:C3. One cell and small A1 ranges include format when set; sheet row windows are TSV.
 outline: headings, Doc tabs/blocks, or sheets. Sheets path-only is outline.
 Knowledge objects: read_object. Names/grep: run_command → ls / rg.`,
-		Category: streaming.ToolCategoryRead,
+		Category: ToolCategoryRead,
 		Access:   ToolReadAccess,
 		Timeout:  60 * time.Second,
 		Handler: func(ctx context.Context, args readArgs, rt HarnessRuntime) (string, error) {
@@ -302,7 +301,7 @@ func (v vfsTools) newWrite() *Tool {
 		Name:        writeToolName,
 		DisplayName: "Write {path}",
 		Description: `Edit a plaintext or source file (not Docs/Word/Sheets). Use after read when media_type is text or code. Exactly one of content, old, or start. old must still be in the file. Do not copy the N| prefix.`,
-		Category:    streaming.ToolCategoryEdit,
+		Category:    ToolCategoryEdit,
 		Access:      ToolWriteAccess,
 		Timeout:     60 * time.Second,
 		Handler: func(ctx context.Context, args writeTextArgs, rt HarnessRuntime) (string, error) {
@@ -349,7 +348,7 @@ func (v vfsTools) newWriteDocument() *Tool {
 		Name:        writeDocumentToolName,
 		DisplayName: "Write document {path}",
 		Description: `Edit a Google Doc or Word file. Use when media_type is a document. Exactly one of content (HTML), start/end lines, or block_id. Multi-tab requires tab_id. Not for .md or spreadsheets.`,
-		Category:    streaming.ToolCategoryEdit,
+		Category:    ToolCategoryEdit,
 		Access:      ToolWriteAccess,
 		Timeout:     60 * time.Second,
 		Handler: func(ctx context.Context, args writeDocumentArgs, rt HarnessRuntime) (string, error) {
@@ -395,7 +394,7 @@ func (v vfsTools) newWriteSpreadsheet() *Tool {
 		Name:        writeSpreadsheetToolName,
 		DisplayName: "Write spreadsheet {path}",
 		Description: `Edit one spreadsheet cell. Use when media_type is a spreadsheet. block_id is Sheet!A1. Optional format. Create a new sheet with content on a new path only.`,
-		Category:    streaming.ToolCategoryEdit,
+		Category:    ToolCategoryEdit,
 		Access:      ToolWriteAccess,
 		Timeout:     60 * time.Second,
 		Handler: func(ctx context.Context, args writeSpreadsheetArgs, rt HarnessRuntime) (string, error) {
@@ -581,7 +580,7 @@ func newRunCommand(ms *vfs.MountSession, permissionRequired bool) *Tool {
 		Name:        "run_command",
 		DisplayName: "Run {command}",
 		Description: `Run a host shell command as /bin/sh -c. cwd is the VFS root (FUSE mount). Use relative paths (work/foo, ./work/foo). Absolute /work is the host /work until a later jail. Non-zero exit is a successful tool result (exit=N).`,
-		Category:    streaming.ToolCategoryExecute,
+		Category:    ToolCategoryExecute,
 		Access:      ToolExecuteAccess,
 		Timeout:     runCommandTimeout,
 		Handler: func(ctx context.Context, args runCommandArgs, rt HarnessRuntime) (string, error) {

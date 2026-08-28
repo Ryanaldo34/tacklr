@@ -1,30 +1,27 @@
-package session_test
+package tacklr
 
 import (
 	"encoding/json"
 	"testing"
 
 	"github.com/ryanaldo34/tacklr/brain"
-	"github.com/ryanaldo34/tacklr/internal/session"
-	"github.com/ryanaldo34/tacklr/stores"
-	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
-func drainRuntime(sm *session.SessionManager) session.Runtime {
-	ch := make(chan streaming.StreamEvent, 8)
+func drainRuntime(sm *sessionManager) sessionRuntime {
+	ch := make(chan StreamEvent, 8)
 	go func() {
 		for range ch {
 		}
 	}()
-	return session.NewRuntime(ch, sm)
+	return newSessionRuntime(ch, sm)
 }
 
 // TestSessionModules_surviveCheckpoint is the durable-module outcome: permission
 // memory, search namespace, and a host VFS pointer survive Capture → JSON wire
 // → Apply on a fresh manager.
 func TestSessionModules_surviveCheckpoint(t *testing.T) {
-	sm := session.NewSessionManager()
+	sm := newSessionManager()
 	if err := sm.StateSet("keep", "user"); err != nil {
 		t.Fatal(err)
 	}
@@ -37,13 +34,13 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 		t.Fatalf("CurrentToolCallID=%q", rt.CurrentToolCallID())
 	}
 
-	sm.Permissions.Remember("allow_tool", session.PermissionAllowAlways)
-	sm.Permissions.Remember("deny_tool", session.PermissionDenyAlways)
-	sm.OnCall.Record("w1", "tool_permission", session.OnCallLayer{Args: `{"path":"/a"}`})
-	if sm.Permissions.Decision("allow_tool") != session.PermissionAllowAlways {
+	sm.Permissions.Remember("allow_tool", permAllowAlways)
+	sm.Permissions.Remember("deny_tool", permDenyAlways)
+	sm.OnCall.Record("w1", "tool_permission", onCallLayer{Args: `{"path":"/a"}`})
+	if sm.Permissions.Decision("allow_tool") != permAllowAlways {
 		t.Fatal("allow-always not stored")
 	}
-	if sm.Permissions.Decision("deny_tool") != session.PermissionDenyAlways {
+	if sm.Permissions.Decision("deny_tool") != permDenyAlways {
 		t.Fatal("deny-always not stored")
 	}
 
@@ -59,8 +56,8 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 		t.Fatal("VFS field must hold the host mount table")
 	}
 
-	cp, err := session.CaptureCheckpoint(
-		[]*streaming.Message{{Role: streaming.RoleUser, Content: "go"}},
+	cp, err := captureCheckpoint(
+		[]*Message{{Role: RoleUser, Content: "go"}},
 		sm, nil,
 	)
 	if err != nil {
@@ -69,13 +66,13 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 	if len(cp.Modules()["search"]) == 0 {
 		t.Fatal("checkpoint must include search context")
 	}
-	if cp.Version() != stores.CheckpointVersion {
+	if cp.Version() != CheckpointVersion {
 		t.Fatalf("checkpoint schema version = %d", cp.Version())
 	}
 
 	// In-process Apply: typed park/permission maps + SearchContext blob.
-	smTyped := session.NewSessionManager()
-	if _, err := session.ApplyCheckpoint(*cp, smTyped); err != nil {
+	smTyped := newSessionManager()
+	if _, err := applyCheckpoint(*cp, smTyped); err != nil {
 		t.Fatal(err)
 	}
 	assertModules(t, smTyped, ns)
@@ -85,13 +82,13 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var wire stores.SessionCheckpoint
+	var wire SessionCheckpoint
 	if err := json.Unmarshal(rawState, &wire); err != nil {
 		t.Fatal(err)
 	}
 
-	sm2 := session.NewSessionManager()
-	if _, err := session.ApplyCheckpoint(wire, sm2); err != nil {
+	sm2 := newSessionManager()
+	if _, err := applyCheckpoint(wire, sm2); err != nil {
 		t.Fatal(err)
 	}
 	assertModules(t, sm2, ns)
@@ -107,10 +104,10 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 
 func TestTypedCheckpoint_rejectsNamedModuleWithoutPartialApply(t *testing.T) {
 	// Arrange
-	source := session.NewSessionManager()
+	source := newSessionManager()
 	source.Plan.SetDocument("source")
-	checkpoint, err := session.CaptureCheckpoint(
-		[]*streaming.Message{{Role: streaming.RoleUser, Content: "go"}},
+	checkpoint, err := captureCheckpoint(
+		[]*Message{{Role: RoleUser, Content: "go"}},
 		source,
 		nil,
 	)
@@ -118,11 +115,11 @@ func TestTypedCheckpoint_rejectsNamedModuleWithoutPartialApply(t *testing.T) {
 		t.Fatal(err)
 	}
 	cp := checkpoint.WithModule("permissions", json.RawMessage(`{"allow":`))
-	target := session.NewSessionManager()
+	target := newSessionManager()
 	target.Plan.SetDocument("target")
 
 	// Act
-	_, err = session.ApplyCheckpoint(cp, target)
+	_, err = applyCheckpoint(cp, target)
 
 	// Assert
 	if err == nil || target.Plan.Document() != "target" {
@@ -132,9 +129,9 @@ func TestTypedCheckpoint_rejectsNamedModuleWithoutPartialApply(t *testing.T) {
 
 func TestTypedCheckpoint_rejectsCorruptModuleSections(t *testing.T) {
 	// Arrange
-	source := session.NewSessionManager()
-	checkpoint, err := session.CaptureCheckpoint(
-		[]*streaming.Message{{Role: streaming.RoleUser, Content: "go"}},
+	source := newSessionManager()
+	checkpoint, err := captureCheckpoint(
+		[]*Message{{Role: RoleUser, Content: "go"}},
 		source,
 		nil,
 	)
@@ -151,9 +148,9 @@ func TestTypedCheckpoint_rejectsCorruptModuleSections(t *testing.T) {
 	for module, raw := range cases {
 		t.Run(module, func(t *testing.T) {
 			wire := checkpoint.WithModule(module, raw)
-			target := session.NewSessionManager()
+			target := newSessionManager()
 			target.Plan.SetDocument("target")
-			if _, err := session.ApplyCheckpoint(wire, target); err == nil {
+			if _, err := applyCheckpoint(wire, target); err == nil {
 				t.Fatalf("module %q was accepted", module)
 			}
 			if target.Plan.Document() != "target" {
@@ -165,12 +162,12 @@ func TestTypedCheckpoint_rejectsCorruptModuleSections(t *testing.T) {
 
 func TestTypedCheckpoint_rejectsCorruptUserState(t *testing.T) {
 	// Arrange
-	source := session.NewSessionManager()
+	source := newSessionManager()
 	if err := source.StateSet("keep", "user"); err != nil {
 		t.Fatal(err)
 	}
-	checkpoint, err := session.CaptureCheckpoint(
-		[]*streaming.Message{{Role: streaming.RoleUser, Content: "go"}},
+	checkpoint, err := captureCheckpoint(
+		[]*Message{{Role: RoleUser, Content: "go"}},
 		source,
 		nil,
 	)
@@ -178,10 +175,10 @@ func TestTypedCheckpoint_rejectsCorruptUserState(t *testing.T) {
 		t.Fatal(err)
 	}
 	cp := checkpoint.WithUserStateKey("bad", json.RawMessage(`{`))
-	target := session.NewSessionManager()
+	target := newSessionManager()
 
 	// Act
-	_, err = session.ApplyCheckpoint(cp, target)
+	_, err = applyCheckpoint(cp, target)
 
 	// Assert
 	if err == nil {
@@ -189,10 +186,10 @@ func TestTypedCheckpoint_rejectsCorruptUserState(t *testing.T) {
 	}
 }
 
-func assertModules(t *testing.T, sm *session.SessionManager, ns brain.Namespace) {
+func assertModules(t *testing.T, sm *sessionManager, ns brain.Namespace) {
 	t.Helper()
-	if sm.Permissions.Decision("allow_tool") != session.PermissionAllowAlways ||
-		sm.Permissions.Decision("deny_tool") != session.PermissionDenyAlways {
+	if sm.Permissions.Decision("allow_tool") != permAllowAlways ||
+		sm.Permissions.Decision("deny_tool") != permDenyAlways {
 		t.Fatal("permission memory must reload")
 	}
 	layer, ok := sm.OnCall.Get("w1", "tool_permission")

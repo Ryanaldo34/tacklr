@@ -11,9 +11,7 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
-	"github.com/ryanaldo34/tacklr/internal/drive"
 	"github.com/ryanaldo34/tacklr/mcp"
-	"github.com/ryanaldo34/tacklr/streaming"
 	"github.com/ryanaldo34/tacklr/telemetry"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
@@ -118,7 +116,7 @@ func (r *Runtime) persistHarness(ctx context.Context, p *sessionProc, h *tacklr.
 	return nil
 }
 
-func (r *Runtime) emit(ctx context.Context, p *sessionProc, ev streaming.StreamEvent) {
+func (r *Runtime) emit(ctx context.Context, p *sessionProc, ev tacklr.StreamEvent) {
 	if err := r.events.Append(ctx, p.id, durable.TopicEvents, ev); err != nil {
 		slog.Warn("eventlog append failed", "session_id", p.id, "error", err)
 	}
@@ -128,7 +126,7 @@ func (r *Runtime) fail(ctx context.Context, p *sessionProc, err error) turnOutco
 	p.mu.Lock()
 	p.termErr = err
 	p.mu.Unlock()
-	r.emit(ctx, p, streaming.StreamEvent{Type: streaming.StreamEventError, Error: err})
+	r.emit(ctx, p, tacklr.StreamEvent{Type: tacklr.StreamEventError, Error: err})
 	return turnError
 }
 
@@ -143,8 +141,8 @@ func (r *Runtime) runTurn(ctx context.Context, p *sessionProc, user *tacklr.Mess
 	}()
 
 	eng := h.Drive()
-	out, stop := drive.PipeStreamEvents(func(ev streaming.StreamEvent) {
-		if ev.Type == streaming.StreamEventComplete {
+	out, stop := tacklr.PipeStreamEvents(func(ev tacklr.StreamEvent) {
+		if ev.Type == tacklr.StreamEventComplete {
 			p.mu.Lock()
 			n := len(p.children)
 			p.mu.Unlock()
@@ -159,13 +157,13 @@ func (r *Runtime) runTurn(ctx context.Context, p *sessionProc, user *tacklr.Mess
 	cancelled := func() turnOutcome {
 		persist := context.WithoutCancel(ctx)
 		if err := r.persistHarness(persist, p, h); err != nil {
-			r.emit(persist, p, streaming.StreamEvent{Type: streaming.StreamEventError, Error: err})
+			r.emit(persist, p, tacklr.StreamEvent{Type: tacklr.StreamEventError, Error: err})
 		}
 		err := ctx.Err()
 		if err == nil {
 			err = context.Canceled
 		}
-		r.emit(persist, p, streaming.StreamEvent{Type: streaming.StreamEventError, Error: err})
+		r.emit(persist, p, tacklr.StreamEvent{Type: tacklr.StreamEventError, Error: err})
 		return turnCancelled
 	}
 
@@ -182,7 +180,7 @@ func (r *Runtime) runTurn(ctx context.Context, p *sessionProc, user *tacklr.Mess
 		}
 	}
 
-	st := &drive.TurnState{}
+	st := &tacklr.TurnState{}
 	toolCalls := eng.PendingToolCalls()
 	parked := false
 	inferComplete := false
@@ -194,8 +192,8 @@ func (r *Runtime) runTurn(ctx context.Context, p *sessionProc, user *tacklr.Mess
 		if len(toolCalls) == 0 && !parked && inferComplete {
 			nudge = durable.ChildrenNudge(r.childStatuses(p))
 		}
-		switch drive.Next(len(toolCalls), parked, inferComplete, nudge != "") {
-		case drive.ActionInfer:
+		switch tacklr.Next(len(toolCalls), parked, inferComplete, nudge != "") {
+		case tacklr.ActionInfer:
 			step, infErr := eng.RunInference(ctx, st, out)
 			if ctx.Err() != nil {
 				return cancelled()
@@ -205,7 +203,7 @@ func (r *Runtime) runTurn(ctx context.Context, p *sessionProc, user *tacklr.Mess
 				p.termErr = infErr
 				p.mu.Unlock()
 				if err := r.persistHarness(ctx, p, h); err != nil {
-					r.emit(ctx, p, streaming.StreamEvent{Type: streaming.StreamEventError, Error: err})
+					r.emit(ctx, p, tacklr.StreamEvent{Type: tacklr.StreamEventError, Error: err})
 				}
 				return turnError
 			}
@@ -215,13 +213,13 @@ func (r *Runtime) runTurn(ctx context.Context, p *sessionProc, user *tacklr.Mess
 				continue
 			}
 			toolCalls = step.ToolCalls
-		case drive.ActionRunTools:
+		case tacklr.ActionRunTools:
 			st.HadToolRound = true
 			var hit atomic.Bool
 			var wg sync.WaitGroup
 			for _, tc := range toolCalls {
 				wg.Add(1)
-				go func(tc streaming.ToolCall) {
+				go func(tc tacklr.ToolCall) {
 					defer wg.Done()
 					if ctx.Err() != nil {
 						return
@@ -241,15 +239,15 @@ func (r *Runtime) runTurn(ctx context.Context, p *sessionProc, user *tacklr.Mess
 			}
 			parked = hit.Load()
 			toolCalls = nil
-		case drive.ActionYield:
+		case tacklr.ActionYield:
 			return turnYield
-		case drive.ActionComplete:
+		case tacklr.ActionComplete:
 			r.captureResult(p, h)
 			if err := r.persistHarness(ctx, p, h); err != nil {
 				return r.fail(ctx, p, err)
 			}
 			return turnComplete
-		case drive.ActionNudge:
+		case tacklr.ActionNudge:
 			if err := eng.AbsorbUser(ctx, &tacklr.Message{Role: tacklr.RoleUser, Content: nudge}, out); err != nil {
 				return r.fail(ctx, p, err)
 			}

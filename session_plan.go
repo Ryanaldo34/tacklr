@@ -1,30 +1,28 @@
-package session
+package tacklr
 
 import (
 	"strings"
 	"sync"
-
-	"github.com/ryanaldo34/tacklr/streaming"
 )
 
-// PlanStore holds the plan document and todo list for Adaptive Case Management.
-// It is a SessionManager module — not exposed on HarnessRuntime.
-// After NewPlanStore / NewSessionManager the receiver is never nil.
-type PlanStore struct {
+// planStore holds the plan document and todo list for Adaptive Case Management.
+// It is a sessionManager module — not exposed on HarnessRuntime.
+// After newPlanStore / newSessionManager the receiver is never nil.
+type planStore struct {
 	mu              sync.RWMutex
-	todos           []streaming.Todo
+	todos           []Todo
 	document        string
 	documentUpdated bool
 	todosUpdated    bool
 }
 
-// NewPlanStore returns an empty plan store.
-func NewPlanStore() *PlanStore {
-	return &PlanStore{}
+// newPlanStore returns an empty plan store.
+func newPlanStore() *planStore {
+	return &planStore{}
 }
 
 // HasActive reports whether a todo list is present (write-lock unlock condition).
-func (p *PlanStore) HasActive() bool {
+func (p *planStore) HasActive() bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return len(p.todos) > 0
@@ -32,20 +30,20 @@ func (p *PlanStore) HasActive() bool {
 
 // Get returns a shallow copy of the current todos, or nil if no plan was ever set.
 // An empty non-nil slice means an explicit empty plan (e.g. after deleting all todos).
-func (p *PlanStore) Get() []streaming.Todo {
+func (p *planStore) Get() []Todo {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	if p.todos == nil {
 		return nil
 	}
-	cp := make([]streaming.Todo, len(p.todos))
+	cp := make([]Todo, len(p.todos))
 	copy(cp, p.todos)
 	return cp
 }
 
 // Set replaces the todo list. The harness emits plan_update after ConsumeTodosUpdated.
 // Pass nil to clear the plan entirely; pass a non-nil empty slice for an empty plan.
-func (p *PlanStore) Set(todos []streaming.Todo) {
+func (p *planStore) Set(todos []Todo) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.todosUpdated = true
@@ -53,14 +51,14 @@ func (p *PlanStore) Set(todos []streaming.Todo) {
 		p.todos = nil
 		return
 	}
-	cp := make([]streaming.Todo, len(todos))
+	cp := make([]Todo, len(todos))
 	copy(cp, todos)
 	p.todos = cp
 }
 
 // ConsumeTodosUpdated returns the current todos when Set ran since the last
 // consume, and clears the flag. The harness streams plan_update from this.
-func (p *PlanStore) ConsumeTodosUpdated() ([]streaming.Todo, bool) {
+func (p *planStore) ConsumeTodosUpdated() ([]Todo, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if !p.todosUpdated {
@@ -70,13 +68,13 @@ func (p *PlanStore) ConsumeTodosUpdated() ([]streaming.Todo, bool) {
 	if p.todos == nil {
 		return nil, true
 	}
-	cp := make([]streaming.Todo, len(p.todos))
+	cp := make([]Todo, len(p.todos))
 	copy(cp, p.todos)
 	return cp, true
 }
 
 // Document returns the plaintext project plan draft.
-func (p *PlanStore) Document() string {
+func (p *planStore) Document() string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.document
@@ -85,7 +83,7 @@ func (p *PlanStore) Document() string {
 // SetDocument stores the plaintext project plan draft.
 // Marks the document updated only when replacing an existing draft with different
 // text (edits), not on the initial install from create_plan.
-func (p *PlanStore) SetDocument(plan string) {
+func (p *planStore) SetDocument(plan string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	prev := p.document
@@ -97,7 +95,7 @@ func (p *PlanStore) SetDocument(plan string) {
 
 // ConsumeDocumentUpdated returns whether the plan document was updated since the
 // last consume, and clears the flag.
-func (p *PlanStore) ConsumeDocumentUpdated() bool {
+func (p *planStore) ConsumeDocumentUpdated() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if !p.documentUpdated {

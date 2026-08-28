@@ -1,4 +1,4 @@
-package session
+package tacklr
 
 import (
 	"encoding/json"
@@ -8,7 +8,6 @@ import (
 
 	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/interrupt"
-	"github.com/ryanaldo34/tacklr/streaming"
 )
 
 const (
@@ -19,9 +18,9 @@ const (
 )
 
 type planCheckpoint struct {
-	Todos           []streaming.Todo `json:"todos"`
-	Document        string           `json:"document,omitempty"`
-	DocumentUpdated bool             `json:"documentUpdated,omitempty"`
+	Todos           []Todo `json:"todos"`
+	Document        string `json:"document,omitempty"`
+	DocumentUpdated bool   `json:"documentUpdated,omitempty"`
 }
 
 type permissionsCheckpoint struct {
@@ -33,7 +32,7 @@ type onCallCheckpoint struct {
 	Stages []onCallStage `json:"stages,omitempty"`
 }
 
-func (s *SessionManager) snapshotCheckpoint() (
+func (s *sessionManager) snapshotCheckpoint() (
 	userState map[string]json.RawMessage,
 	modules map[string]json.RawMessage,
 	pending, resolved interruptMap,
@@ -91,7 +90,7 @@ func (s *SessionManager) snapshotCheckpoint() (
 	return userState, modules, pending, resolved, nil
 }
 
-func (s *SessionManager) applyCheckpoint(userState, modules map[string]json.RawMessage) error {
+func (s *sessionManager) applyCheckpoint(userState, modules map[string]json.RawMessage) error {
 	var plan planCheckpoint
 	if err := decodeModule(modules, modulePlan, &plan); err != nil {
 		return err

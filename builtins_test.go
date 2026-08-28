@@ -7,19 +7,17 @@ import (
 	"strings"
 	"testing"
 
-	session "github.com/ryanaldo34/tacklr/internal/session"
 	"github.com/ryanaldo34/tacklr/interrupt"
-	"github.com/ryanaldo34/tacklr/streaming"
 )
 
 // planToolsFixture holds builtin plan tools sharing one PlanStore.
 type planToolsFixture struct {
 	create, edit, complete, list *Tool
-	store                        *session.PlanStore
+	store                        *planStore
 }
 
 func testPlanTools() planToolsFixture {
-	sm := session.NewSessionManager()
+	sm := newSessionManager()
 	return planToolsFixture{
 		create:   newCreatePlanTool(sm),
 		edit:     newEditPlanTool(sm),
@@ -29,8 +27,8 @@ func testPlanTools() planToolsFixture {
 	}
 }
 
-func drainEventCh() chan streaming.StreamEvent {
-	c := make(chan streaming.StreamEvent, 8)
+func drainEventCh() chan StreamEvent {
+	c := make(chan StreamEvent, 8)
 	go func() {
 		for range c {
 		}
@@ -40,7 +38,7 @@ func drainEventCh() chan streaming.StreamEvent {
 
 // planRT is a turn Runtime for plan/ask tool unit tests (events drained).
 func planRT() HarnessRuntime {
-	return newToolRuntime(drainEventCh(), session.NewSessionManager(), nil)
+	return newToolRuntime(drainEventCh(), newSessionManager(), nil)
 }
 
 // TestCreatePlanTool covers create_plan success and rejection return paths.
@@ -61,7 +59,7 @@ func TestCreatePlanTool(t *testing.T) {
 	})
 	t.Run("rejects active plan and empty document", func(t *testing.T) {
 		pt, rt := testPlanTools(), planRT()
-		pt.store.Set([]Todo{{Title: "existing", Status: streaming.TodoStatusInProgress}})
+		pt.store.Set([]Todo{{Title: "existing", Status: TodoStatusInProgress}})
 		_, err := pt.create.invoke(context.Background(),
 			`{"plan":"draft","todos":[{"title":"new","status":"pending","description":""}]}`, rt)
 		if err == nil || !strings.Contains(err.Error(), "active plan already exists") {
@@ -90,7 +88,7 @@ func TestCreatePlanTool(t *testing.T) {
 			t.Fatal(err)
 		}
 		plan := pt.store.Get()
-		if len(plan) != 2 || plan[0].Status != streaming.TodoStatusCompleted || plan[1].Status != streaming.TodoStatusInProgress {
+		if len(plan) != 2 || plan[0].Status != TodoStatusCompleted || plan[1].Status != TodoStatusInProgress {
 			t.Fatalf("plan = %+v", plan)
 		}
 	})
@@ -99,7 +97,7 @@ func TestCreatePlanTool(t *testing.T) {
 func TestEditPlanTool_documentEffects(t *testing.T) {
 	t.Run("identical rejected", func(t *testing.T) {
 		pt, rt := testPlanTools(), planRT()
-		pt.store.Set([]Todo{{Title: "a", Status: streaming.TodoStatusPending}})
+		pt.store.Set([]Todo{{Title: "a", Status: TodoStatusPending}})
 		pt.store.SetDocument("same plan")
 		_, err := pt.edit.invoke(context.Background(), `{"plan":"same plan","toAdd":[],"toDelete":[]}`, rt)
 		if err == nil || !strings.Contains(err.Error(), "unchanged") {
@@ -111,7 +109,7 @@ func TestEditPlanTool_documentEffects(t *testing.T) {
 	})
 	t.Run("revision handoff and consumes updated flag", func(t *testing.T) {
 		pt, rt := testPlanTools(), planRT()
-		pt.store.Set([]Todo{{Title: "a", Status: streaming.TodoStatusPending}})
+		pt.store.Set([]Todo{{Title: "a", Status: TodoStatusPending}})
 		pt.store.SetDocument("old")
 		res, err := pt.edit.invoke(context.Background(), `{"plan":"new full plan","toAdd":[],"toDelete":[]}`, rt)
 		if err != nil || res.output != "Plan edited successfully" || res.disp.Effect != EffectHandoff {
@@ -124,9 +122,9 @@ func TestEditPlanTool_documentEffects(t *testing.T) {
 }
 
 func TestEditPlanTool(t *testing.T) {
-	pending := Todo{Title: "pending", Status: streaming.TodoStatusPending}
-	completed := Todo{Title: "completed", Status: streaming.TodoStatusCompleted}
-	inProgress := Todo{Title: "in_progress", Status: streaming.TodoStatusInProgress}
+	pending := Todo{Title: "pending", Status: TodoStatusPending}
+	completed := Todo{Title: "completed", Status: TodoStatusCompleted}
+	inProgress := Todo{Title: "in_progress", Status: TodoStatusInProgress}
 
 	tests := []struct {
 		name    string
@@ -330,8 +328,8 @@ func TestEditPlanTool(t *testing.T) {
 }
 
 func TestAskUserChoiceTool_raiseAndResume(t *testing.T) {
-	sm := session.NewSessionManager()
-	rt := newToolRuntime(make(chan streaming.StreamEvent, 4), sm, nil).WithToolCallID("tc_ask")
+	sm := newSessionManager()
+	rt := newToolRuntime(make(chan StreamEvent, 4), sm, nil).WithToolCallID("tc_ask")
 
 	args, _ := json.Marshal(map[string]any{
 		"question": "Which approach?",
@@ -376,9 +374,9 @@ func TestListPlanTool_exactListing(t *testing.T) {
 	pt := testPlanTools()
 	rt := planRT()
 	pt.store.Set([]Todo{
-		{Title: "Exact Title One", Status: streaming.TodoStatusCompleted, Description: "done work"},
-		{Title: "Exact Title Two", Status: streaming.TodoStatusInProgress, Description: "now"},
-		{Title: "Exact Title Three", Status: streaming.TodoStatusPending},
+		{Title: "Exact Title One", Status: TodoStatusCompleted, Description: "done work"},
+		{Title: "Exact Title Two", Status: TodoStatusInProgress, Description: "now"},
+		{Title: "Exact Title Three", Status: TodoStatusPending},
 	})
 
 	res, err := pt.list.invoke(context.Background(), `{}`, rt)
@@ -430,8 +428,8 @@ func TestCompleteTodo_effectsByRemainingWork(t *testing.T) {
 		{
 			name: "mid-plan advances next",
 			plan: []Todo{
-				{Title: "A", Status: streaming.TodoStatusInProgress},
-				{Title: "B", Description: "next", Status: streaming.TodoStatusPending},
+				{Title: "A", Status: TodoStatusInProgress},
+				{Title: "B", Description: "next", Status: TodoStatusPending},
 			},
 			title:      "A",
 			wantEffect: EffectHandoff,
@@ -440,9 +438,9 @@ func TestCompleteTodo_effectsByRemainingWork(t *testing.T) {
 		{
 			name: "last open with completed siblings",
 			plan: []Todo{
-				{Title: "A", Status: streaming.TodoStatusInProgress},
-				{Title: "B", Status: streaming.TodoStatusCompleted},
-				{Title: "C", Status: streaming.TodoStatusCompleted},
+				{Title: "A", Status: TodoStatusInProgress},
+				{Title: "B", Status: TodoStatusCompleted},
+				{Title: "C", Status: TodoStatusCompleted},
 			},
 			title:      "A",
 			wantEffect: EffectNone,
@@ -451,7 +449,7 @@ func TestCompleteTodo_effectsByRemainingWork(t *testing.T) {
 		{
 			name: "sole item",
 			plan: []Todo{
-				{Title: "Only", Status: streaming.TodoStatusInProgress},
+				{Title: "Only", Status: TodoStatusInProgress},
 			},
 			title:      "Only",
 			wantEffect: EffectNone,

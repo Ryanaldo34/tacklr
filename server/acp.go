@@ -11,7 +11,6 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/mcp"
-	"github.com/ryanaldo34/tacklr/streaming"
 )
 
 // ACP stop reasons for session/prompt PromptResponse (spec Prompt Turn).
@@ -307,7 +306,7 @@ func parseACPPrompt(raw json.RawMessage) (*tacklr.Message, error) {
 			}
 			textParts = append(textParts, b.Text)
 		case "image":
-			mime := streaming.NormalizeMIME(b.MimeType)
+			mime := tacklr.NormalizeMIME(b.MimeType)
 			if mime == "" {
 				return nil, fmt.Errorf("image block %d requires mimeType", i)
 			}
@@ -334,7 +333,7 @@ func parseACPPrompt(raw json.RawMessage) (*tacklr.Message, error) {
 				return nil, fmt.Errorf("resource block %d requires text or blob", i)
 			}
 			if hasBlob {
-				mime := streaming.NormalizeMIME(r.MimeType)
+				mime := tacklr.NormalizeMIME(r.MimeType)
 				if mime == "" {
 					return nil, fmt.Errorf("resource blob block %d requires mimeType", i)
 				}
@@ -348,7 +347,7 @@ func parseACPPrompt(raw json.RawMessage) (*tacklr.Message, error) {
 				binary = append(binary, tacklr.ContentPart{
 					Type: tacklr.ContentTypeInputFile,
 					FileData: &tacklr.FileData{
-						Data:     streaming.DataURL(mime, r.Blob),
+						Data:     tacklr.DataURL(mime, r.Blob),
 						MIMEType: mime,
 						Filename: filename,
 					},
@@ -389,7 +388,7 @@ func resolveImageURL(mime, data, uri string) (string, error) {
 	data = strings.TrimSpace(data)
 	uri = strings.TrimSpace(uri)
 	if data != "" {
-		return streaming.DataURL(mime, data), nil
+		return tacklr.DataURL(mime, data), nil
 	}
 	if strings.HasPrefix(uri, "data:") || strings.HasPrefix(uri, "https://") || strings.HasPrefix(uri, "http://") {
 		return uri, nil
@@ -433,13 +432,13 @@ func formatResourceLink(b acpContentBlock) (string, error) {
 	return bld.String(), nil
 }
 
-func presentationToACP(threadID string, ev streaming.StreamEvent) ([][]byte, error) {
+func presentationToACP(threadID string, ev tacklr.StreamEvent) ([][]byte, error) {
 	presented, err := presentStreamEvent(ev)
 	if err != nil {
 		return nil, err
 	}
 	switch presented.Type {
-	case string(streaming.StreamEventMessage):
+	case string(tacklr.StreamEventMessage):
 		if presented.Content == "" {
 			return nil, nil
 		}
@@ -462,7 +461,7 @@ func presentationToACP(threadID string, ev streaming.StreamEvent) ([][]byte, err
 		bytes, _ := json.Marshal(data)
 		toStream = append(toStream, bytes)
 		return toStream, nil
-	case string(streaming.StreamEventReasoning):
+	case string(tacklr.StreamEventReasoning):
 		if presented.Content == "" {
 			return nil, nil
 		}
@@ -485,7 +484,7 @@ func presentationToACP(threadID string, ev streaming.StreamEvent) ([][]byte, err
 		bytes, _ := json.Marshal(data)
 		toStream = append(toStream, bytes)
 		return toStream, nil
-	case string(streaming.StreamEventFunctionCall):
+	case string(tacklr.StreamEventFunctionCall):
 		var toStream [][]byte
 		if presented.Content != "" {
 			data := map[string]any{
@@ -519,7 +518,7 @@ func presentationToACP(threadID string, ev streaming.StreamEvent) ([][]byte, err
 			toStream = append(toStream, bytes)
 		}
 		return toStream, nil
-	case string(streaming.StreamEventToolUpdate):
+	case string(tacklr.StreamEventToolUpdate):
 		var toStream [][]byte
 		data := map[string]any{
 			"jsonrpc": "2.0",
@@ -537,9 +536,9 @@ func presentationToACP(threadID string, ev streaming.StreamEvent) ([][]byte, err
 		bytes, _ := json.Marshal(data)
 		toStream = append(toStream, bytes)
 		return toStream, nil
-	case string(streaming.StreamEventPlanUpdate):
+	case string(tacklr.StreamEventPlanUpdate):
 		var toStream [][]byte
-		var todos []streaming.Todo
+		var todos []tacklr.Todo
 		err := json.Unmarshal(presented.Data, &todos)
 		if err != nil {
 			return nil, err
@@ -566,7 +565,7 @@ func presentationToACP(threadID string, ev streaming.StreamEvent) ([][]byte, err
 		bytes, _ := json.Marshal(data)
 		toStream = append(toStream, bytes)
 		return toStream, nil
-	case string(streaming.StreamEventToolResult):
+	case string(tacklr.StreamEventToolResult):
 		if len(presented.ToolCalls) == 0 {
 			slog.Warn("tool_result event missing ToolCalls")
 			return nil, nil
@@ -595,7 +594,7 @@ func presentationToACP(threadID string, ev streaming.StreamEvent) ([][]byte, err
 		bytes, _ := json.Marshal(data)
 		toStream = append(toStream, bytes)
 		return toStream, nil
-	case string(streaming.StreamEventComplete):
+	case string(tacklr.StreamEventComplete):
 		var toStream [][]byte
 		data := map[string]any{
 			"jsonrpc": "2.0",
@@ -605,7 +604,7 @@ func presentationToACP(threadID string, ev streaming.StreamEvent) ([][]byte, err
 		bytes, _ := json.Marshal(data)
 		toStream = append(toStream, bytes)
 		return toStream, nil
-	case string(streaming.StreamEventError):
+	case string(tacklr.StreamEventError):
 		var toStream [][]byte
 		// Semantic stop reasons are successful PromptResponse results, not RPC errors.
 		if reason, ok := stopReasonFromError(presented.Error); ok {
@@ -635,7 +634,7 @@ func presentationToACP(threadID string, ev streaming.StreamEvent) ([][]byte, err
 		bytes, _ := json.Marshal(data)
 		toStream = append(toStream, bytes)
 		return toStream, nil
-	case string(streaming.StreamEventInterrupt):
+	case string(tacklr.StreamEventInterrupt):
 		return nil, nil // interrupt events are handled in the harness, never encoded over ACP
 	default:
 		slog.Warn("unhandled event type", "type", presented.Type)
@@ -645,7 +644,7 @@ func presentationToACP(threadID string, ev streaming.StreamEvent) ([][]byte, err
 
 // acpToolCallUpdate builds the common tool_call / tool_call_update body.
 // Title is the human label; name is the programmatic tool id (ACP RFD-aligned).
-func acpToolCallUpdate(tc streaming.ToolCall, sessionUpdate, status, content string) map[string]any {
+func acpToolCallUpdate(tc tacklr.ToolCall, sessionUpdate, status, content string) map[string]any {
 	title := tc.Title
 	if title == "" {
 		title = tc.Name
