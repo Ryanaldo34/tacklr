@@ -19,6 +19,7 @@ import (
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/builtins"
 	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/durable/inprocess"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
@@ -1081,7 +1082,7 @@ func TestSessionWorkflow_resumeRemountsWorkspaceFromCachedRecipe(t *testing.T) {
 	}
 	cat.Register("default", durable.AgentSpec{
 		Options: tacklr.AgentOptions{Model: model, Config: tacklr.Config{MaxWindowSize: 8192}},
-		OpenVFS: vfs.Tree(vfs.At("docs", vfs.Local(dir))),
+		OpenVFS: vfs.Tree(vfs.At("docs", builtins.Local(dir))),
 	})
 	fallback := inprocess.NewMemoryEventLog()
 	env.RegisterWorkflow(SessionWorkflow)

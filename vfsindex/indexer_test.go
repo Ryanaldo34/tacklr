@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
+	"github.com/ryanaldo34/tacklr/builtins"
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfsindex"
 )
@@ -29,7 +30,7 @@ func treeLocal(t *testing.T, members ...vfs.Member) *vfs.MountSession {
 // search finds content; hash skip; re-index after write; missing path removes.
 func TestMountIndexer_indexSearchAndNotify(t *testing.T) {
 	ctx := context.Background()
-	ms := treeLocal(t, vfs.At("work", vfs.Local(t.TempDir())))
+	ms := treeLocal(t, vfs.At("work", builtins.Local(t.TempDir())))
 
 	store := brain.NewMemoryStore()
 	eng, err := brain.NewEngine(store)
@@ -179,7 +180,7 @@ func TestMountIndexer_indexSearchAndNotify(t *testing.T) {
 // heading/preamble blocks with stable block_id props.
 func TestMountIndexer_markdownBlocksChunks(t *testing.T) {
 	ctx := context.Background()
-	ms := treeLocal(t, vfs.At("work", vfs.Local(t.TempDir())))
+	ms := treeLocal(t, vfs.At("work", builtins.Local(t.TempDir())))
 
 	store := brain.NewMemoryStore()
 	eng, err := brain.NewEngine(store)
@@ -296,7 +297,7 @@ func TestMountIndexer_markdownBlocksChunks(t *testing.T) {
 // index uses lineChunksFromText (not preamble-only structure).
 func TestMountIndexer_emptyMarkdownLineChunks(t *testing.T) {
 	ctx := context.Background()
-	ms := treeLocal(t, vfs.At("work", vfs.Local(t.TempDir())))
+	ms := treeLocal(t, vfs.At("work", builtins.Local(t.TempDir())))
 
 	store := brain.NewMemoryStore()
 	eng, err := brain.NewEngine(store)
@@ -374,8 +375,8 @@ func TestMountIndexer_emptyMarkdownLineChunks(t *testing.T) {
 func TestMountIndexer_IndexFileResultAndDefaults(t *testing.T) {
 	ctx := context.Background()
 	ms := treeLocal(t,
-		vfs.At("work", vfs.Local(t.TempDir())),
-		vfs.At("off", vfs.Local(t.TempDir())).Indexed("none"),
+		vfs.At("work", builtins.Local(t.TempDir())),
+		vfs.At("off", builtins.Local(t.TempDir())).Indexed("none"),
 	)
 	store := brain.NewMemoryStore()
 	eng, err := brain.NewEngine(store)

@@ -99,6 +99,7 @@ func main() {
 	if err := os.MkdirAll(filepath.Join(jail, "skills"), 0o750); err != nil {
 		log.Fatal(err)
 	}
+	exa := builtins.NewExa(os.Getenv("EXA_API_KEY"))
 
 	cat := durable.NewCatalog("agent")
 	cat.Register("agent", durable.AgentSpec{
@@ -115,6 +116,10 @@ func main() {
 				Discovery: "Discovery",
 				Fact:      "Fact",
 				Memory:    "Memory",
+			},
+			Tools: []*tacklr.Tool{
+				builtins.WebSearch(exa),
+				builtins.WebFetch(exa),
 			},
 		},
 		OpenVFS: openVFS(jail, eng, ns),
@@ -165,7 +170,7 @@ Tools are ordinary Go functions. Give a tool a client by closing over it in the 
 
 `HarnessRuntime` is park, progress, children, and session key-values (`StateGet`). Put facts like the current user on `CreateSession.State` (also `Prompt.State` / `Resume.State`). Close over clients in the constructor: `NewSearchRecordsTool(liveStore)` in production, `NewSearchRecordsTool(fakeStore)` in tests. Construct with `NewTool(ToolConfig{...})`. After construction, read metadata through getters (`Name()`, `Access()`, and the rest).
 
-Built-in tools that need a client use the same pattern. You set the client on `AgentOptions`; the harness closes it into the handler:
+Built-in tools that need a client use the same pattern. You construct them and put them on `AgentOptions.Tools`:
 
 | You construct | Closed into |
 |---------------|-------------|

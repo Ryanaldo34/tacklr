@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ryanaldo34/tacklr/builtins"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -36,8 +37,8 @@ func TestMountSession_gdriveReadOnlySession(t *testing.T) {
 	api := driveTree()
 	holder := vfs.NewTokenHolder(vfs.Credential{Token: "tok"})
 	ms, err := vfs.Tree(
-		vfs.At("contracts", vfs.Drive(api)),
-		vfs.At("notes", vfs.Drive(api)),
+		vfs.At("contracts", builtins.Drive(api)),
+		vfs.At("notes", builtins.Drive(api)),
 	)(ctx, "sess-gd", vfs.Request{Bindings: []vfs.Binding{
 		{Provider: vfs.ProviderGoogleDrive, Params: map[string]string{vfs.ParamName: "contracts", vfs.ParamFolderID: "root-a"}, Auth: vfs.Credential{Token: "tok"}, Live: holder},
 		{Provider: vfs.ProviderGoogleDrive, Params: map[string]string{vfs.ParamName: "notes", vfs.ParamFolderID: "root-b"}, Auth: vfs.Credential{Token: "tok"}, Live: holder},
@@ -154,13 +155,13 @@ func TestDrive_requiresClient(t *testing.T) {
 			t.Fatal("want panic")
 		}
 	}()
-	_ = vfs.Drive(nil)
+	_ = builtins.Drive(nil)
 }
 
 func TestMountSession_gdriveDirectoryAndWriteDocument(t *testing.T) {
 	ctx := t.Context()
 	api := driveTree()
-	ms, err := vfs.Tree(vfs.At("contracts", vfs.Drive(api)))(ctx, "s", vfs.Request{Bindings: []vfs.Binding{{
+	ms, err := vfs.Tree(vfs.At("contracts", builtins.Drive(api)))(ctx, "s", vfs.Request{Bindings: []vfs.Binding{{
 		Provider: "gdrive",
 		Params:   map[string]string{vfs.ParamName: "contracts", vfs.ParamFolderID: "root-a"},
 		Auth:     vfs.Credential{Token: "t"},
@@ -190,7 +191,7 @@ func TestMountSession_gdriveDirectoryAndWriteDocument(t *testing.T) {
 func TestDrive_validateRejectsFileID(t *testing.T) {
 	ctx := t.Context()
 	api := driveTree()
-	open := vfs.Drive(api)
+	open := builtins.Drive(api)
 	folder, err := open(ctx, "s", vfs.Binding{
 		Auth: vfs.Credential{Token: "t"}, Params: map[string]string{vfs.ParamFolderID: "root-a"},
 	})

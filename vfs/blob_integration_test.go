@@ -10,6 +10,7 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 
+	"github.com/ryanaldo34/tacklr/builtins"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -28,8 +29,8 @@ func TestMountSession_azureBlobAzurite(t *testing.T) {
 	client, container := startAzurite(ctx, t)
 
 	ms, err := vfs.Tree(
-		vfs.At("data", vfs.Blob(vfs.AzureBlob{Client: client}, container)),
-		vfs.At("ro", vfs.Blob(vfs.AzureBlob{Client: client}, container)).ReadOnly(),
+		vfs.At("data", builtins.Blob(builtins.AzureBlob{Client: client}, container)),
+		vfs.At("ro", builtins.Blob(builtins.AzureBlob{Client: client}, container)).ReadOnly(),
 	)(ctx, "sess-blob", vfs.Request{Bindings: []vfs.Binding{
 		{Params: map[string]string{vfs.ParamName: "data", "prefix": "runs/1"}},
 		{Params: map[string]string{vfs.ParamName: "ro", "prefix": "readonly"}},

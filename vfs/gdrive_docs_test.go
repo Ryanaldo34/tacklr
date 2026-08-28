@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ryanaldo34/tacklr/builtins"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -921,7 +922,7 @@ func TestDrive_htmlReplaceOnSingleTabOmitsTabID(t *testing.T) {
 
 func mountDrive(t *testing.T, api *memDrive, docs vfs.DocsAPI, writable bool) *vfs.MountSession {
 	t.Helper()
-	ms, err := vfs.Tree(vfs.At("contracts", vfs.DriveWith(api, docs, nil)))(t.Context(), "s", vfs.Request{Bindings: []vfs.Binding{{
+	ms, err := vfs.Tree(vfs.At("contracts", builtins.DriveWith(api, docs, nil)))(t.Context(), "s", vfs.Request{Bindings: []vfs.Binding{{
 		Provider: "gdrive", Writable: writable,
 		Params: map[string]string{vfs.ParamName: "contracts", vfs.ParamFolderID: "root-a"},
 		Auth:   vfs.Credential{Token: "t"},

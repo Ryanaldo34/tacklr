@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ryanaldo34/tacklr/builtins"
 	"github.com/ryanaldo34/tacklr/durable"
 	tacklrsecurity "github.com/ryanaldo34/tacklr/security"
 	"github.com/ryanaldo34/tacklr/streaming"
@@ -72,7 +73,7 @@ func TestACP_handleInbound_notificationsAndUnknown(t *testing.T) {
 
 func TestACP_handleInbound_sessionAndAuthOutcomes(t *testing.T) {
 	dir := t.TempDir()
-	k := newTestRuntime(t, nil, durable.AgentSpec{OpenVFS: vfs.Tree(vfs.At("docs", vfs.Local(dir)))})
+	k := newTestRuntime(t, nil, durable.AgentSpec{OpenVFS: vfs.Tree(vfs.At("docs", builtins.Local(dir)))})
 	ctx := t.Context()
 
 	authRec := &recordingMessageWriter{}

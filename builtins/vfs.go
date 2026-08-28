@@ -2,8 +2,8 @@ package builtins
 
 import "github.com/ryanaldo34/tacklr/vfs"
 
-// Default VFS backend constructors. Implementations live in package vfs;
-// hosts construct them here.
+// Default VFS backend constructors. Hosts call these; implementations live
+// in package vfs.
 
 var (
 	Local           = vfs.Local

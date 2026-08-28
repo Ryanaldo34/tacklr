@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/builtins"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
@@ -20,7 +21,7 @@ func TestOpenTurnVFS_nilWhenNoOpenOrProjection(t *testing.T) {
 	if err != nil || ms != nil {
 		t.Fatalf("no OpenVFS: %v %v", ms, err)
 	}
-	ms, err = OpenTurnVFS(t.Context(), "s", AgentSpec{OpenVFS: vfs.Tree(vfs.At("scratch", vfs.Local(t.TempDir())))}, nil, downProjection{})
+	ms, err = OpenTurnVFS(t.Context(), "s", AgentSpec{OpenVFS: vfs.Tree(vfs.At("scratch", builtins.Local(t.TempDir())))}, nil, downProjection{})
 	if err != nil || ms != nil {
 		t.Fatalf("projection down: %v %v", ms, err)
 	}
@@ -35,7 +36,7 @@ func TestOpenTurnVFS_treeUnderWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	ms, err := OpenTurnVFS(ctx, "sess", AgentSpec{
-		OpenVFS: vfs.Tree(vfs.At("docs", vfs.Local(dir))),
+		OpenVFS: vfs.Tree(vfs.At("docs", builtins.Local(dir))),
 	}, nil, vfs.DirectProjection{})
 	if err != nil || ms == nil {
 		t.Fatalf("open: %v %v", ms, err)
@@ -51,7 +52,7 @@ func TestOpenTurnVFS_driveSkippedWithoutToken(t *testing.T) {
 	ctx := t.Context()
 	dir := t.TempDir()
 	ms, err := OpenTurnVFS(ctx, "s", AgentSpec{
-		OpenVFS: vfs.Tree(vfs.At("scratch", vfs.Local(dir))),
+		OpenVFS: vfs.Tree(vfs.At("scratch", builtins.Local(dir))),
 	}, nil, vfs.DirectProjection{})
 	if err != nil || ms == nil {
 		t.Fatalf("open: %v %v", ms, err)
@@ -69,7 +70,7 @@ func (f failAttach) Attach(*vfs.MountSession, string) error { return f.err }
 
 func TestOpenTurnVFS_attachError(t *testing.T) {
 	_, err := OpenTurnVFS(t.Context(), "s", AgentSpec{
-		OpenVFS: vfs.Tree(vfs.At("scratch", vfs.Local(t.TempDir()))),
+		OpenVFS: vfs.Tree(vfs.At("scratch", builtins.Local(t.TempDir()))),
 	}, nil, failAttach{err: os.ErrPermission})
 	if err == nil {
 		t.Fatal("want attach error")
@@ -78,7 +79,7 @@ func TestOpenTurnVFS_attachError(t *testing.T) {
 
 func TestOpenTurnVFS_unknownAtName(t *testing.T) {
 	_, err := OpenTurnVFS(t.Context(), "s", AgentSpec{
-		OpenVFS: vfs.Tree(vfs.At("", vfs.Local(t.TempDir()))),
+		OpenVFS: vfs.Tree(vfs.At("", builtins.Local(t.TempDir()))),
 	}, nil, vfs.DirectProjection{})
 	if err == nil {
 		t.Fatal("want At name error")
@@ -89,7 +90,7 @@ func TestClearSessionVFS_noop(t *testing.T) {
 	cat := NewCatalog("default")
 	cat.Register("default", AgentSpec{
 		Options: tacklr.AgentOptions{Model: &testkit.ScriptedModel{}, Config: tacklr.Config{MaxWindowSize: 8192}},
-		OpenVFS: vfs.Tree(vfs.At("scratch", vfs.Local(t.TempDir()))),
+		OpenVFS: vfs.Tree(vfs.At("scratch", builtins.Local(t.TempDir()))),
 	})
 	ClearSessionVFS(cat, "s1")
 }

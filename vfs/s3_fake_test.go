@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ryanaldo34/tacklr/builtins"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -138,8 +139,8 @@ func TestMountSession_s3MemAPI(t *testing.T) {
 	ctx := context.Background()
 	api := newMemS3()
 	ms, err := vfs.Tree(
-		vfs.At("data", vfs.S3(api, "bkt")),
-		vfs.At("ro", vfs.S3(api, "bkt")).ReadOnly(),
+		vfs.At("data", builtins.S3(api, "bkt")),
+		vfs.At("ro", builtins.S3(api, "bkt")).ReadOnly(),
 	)(ctx, "s3-mem", vfs.Request{Bindings: []vfs.Binding{
 		{Params: map[string]string{vfs.ParamName: "data", "prefix": "runs/1"}},
 		{Params: map[string]string{vfs.ParamName: "ro", "prefix": "readonly"}},
@@ -364,7 +365,7 @@ func TestMountSession_s3MemAPI(t *testing.T) {
 func TestS3Provider_openWriteClose(t *testing.T) {
 	ctx := context.Background()
 	api := newMemS3()
-	open := vfs.S3(api, "b")
+	open := builtins.S3(api, "b")
 	ms, err := vfs.Tree(vfs.At("w", open))(ctx, "s3w", vfs.Request{})
 	if err != nil {
 		t.Fatal(err)
@@ -532,7 +533,7 @@ func TestS3Provider_openWriteClose(t *testing.T) {
 func TestBlobFactory_containerParam(t *testing.T) {
 	ctx := context.Background()
 	api := newMemS3()
-	ms, err := vfs.Tree(vfs.At("data", vfs.Blob(api, "def")))(ctx, "blob-mem", vfs.Request{Bindings: []vfs.Binding{{
+	ms, err := vfs.Tree(vfs.At("data", builtins.Blob(api, "def")))(ctx, "blob-mem", vfs.Request{Bindings: []vfs.Binding{{
 		Params: map[string]string{vfs.ParamName: "data", "container": "c1", "prefix": "runs/1"},
 	}}})
 	if err != nil {
@@ -559,7 +560,7 @@ func TestOpenDocument_providerMediaType(t *testing.T) {
 	api.objects["main.go"] = []byte("package main\n")
 	api.types["main.go"] = "application/octet-stream"
 
-	ms, err := vfs.Tree(vfs.At("data", vfs.S3(api, "bkt")))(ctx, "s3-ctype", vfs.Request{})
+	ms, err := vfs.Tree(vfs.At("data", builtins.S3(api, "bkt")))(ctx, "s3-ctype", vfs.Request{})
 	if err != nil {
 		t.Fatal(err)
 	}
