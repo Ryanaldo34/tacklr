@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ryanaldo34/tacklr/builtins"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -171,7 +170,7 @@ func TestMountSession_xlsxCreateFormatPersists(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := t.Context()
-	ms, err := vfs.Tree(vfs.At("work", builtins.Local(t.TempDir())))(ctx, "xlsx-create", vfs.Request{})
+	ms, err := vfs.Tree(vfs.At("work", vfs.Local(t.TempDir())))(ctx, "xlsx-create", vfs.Request{})
 	if err != nil {
 		t.Fatal(err)
 	}

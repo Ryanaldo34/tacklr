@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ryanaldo34/tacklr/builtins"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -30,11 +29,11 @@ func mountSkills(t *testing.T, hosts ...string) *vfs.MountSession {
 		if err := os.MkdirAll(host, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		opens = append(opens, builtins.Local(host))
+		opens = append(opens, vfs.Local(host))
 	}
 	skills := opens[0]
 	if len(opens) > 1 {
-		skills = builtins.Union(opens...)
+		skills = vfs.Union(opens...)
 	}
 	ms, err := vfs.Tree(vfs.At("skills", skills))(t.Context(), t.Name(), vfs.Request{})
 	if err != nil {
@@ -50,7 +49,7 @@ func TestLoader_emptySessionAndMissingMount(t *testing.T) {
 		t.Fatalf("nil session: loaded=%#v err=%v", loaded, err)
 	}
 
-	ms, err := vfs.Tree(vfs.At("work", builtins.Local(t.TempDir())))(t.Context(), t.Name(), vfs.Request{})
+	ms, err := vfs.Tree(vfs.At("work", vfs.Local(t.TempDir())))(t.Context(), t.Name(), vfs.Request{})
 	if err != nil {
 		t.Fatal(err)
 	}

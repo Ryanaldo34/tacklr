@@ -13,7 +13,6 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 
-	"github.com/ryanaldo34/tacklr/builtins"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -40,7 +39,7 @@ func TestLoader_s3Mount(t *testing.T) {
 	put("pack/zeta/SKILL.md", "---\nname: zeta\ndescription: Z\n---\n\nZ body")
 	put("pack/alpha/readme", "ignored")
 
-	s3 := builtins.S3(builtins.AWSS3{Client: client}, bucket)
+	s3 := vfs.S3(vfs.AWSS3{Client: client}, bucket)
 	ms, err := vfs.Tree(vfs.At("skills", s3))(ctx, "skills-s3", vfs.Request{
 		Bindings: []vfs.Binding{{
 			Params: map[string]string{vfs.ParamName: "skills", "prefix": "pack"},

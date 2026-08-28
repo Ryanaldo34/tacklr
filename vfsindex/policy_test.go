@@ -8,7 +8,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
-	"github.com/ryanaldo34/tacklr/builtins"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -17,11 +16,11 @@ import (
 func TestBridge_policyAndTrack(t *testing.T) {
 	ctx := context.Background()
 	ms, err := vfs.Tree(
-		vfs.At("work", builtins.Local(t.TempDir())),
-		vfs.At("auto", builtins.Local(t.TempDir())).Indexed("prefix"),
-		vfs.At("off", builtins.Local(t.TempDir())).Indexed("none"),
-		vfs.At("odd", builtins.Local(t.TempDir())).Indexed("unknown-policy"),
-		vfs.At("memory", builtins.Memory()),
+		vfs.At("work", vfs.Local(t.TempDir())),
+		vfs.At("auto", vfs.Local(t.TempDir())).Indexed("prefix"),
+		vfs.At("off", vfs.Local(t.TempDir())).Indexed("none"),
+		vfs.At("odd", vfs.Local(t.TempDir())).Indexed("unknown-policy"),
+		vfs.At("memory", vfs.Memory()),
 	)(ctx, "br", vfs.Request{})
 	if err != nil {
 		t.Fatal(err)
