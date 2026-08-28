@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/ryanaldo34/tacklr/brain"
+	mail "github.com/ryanaldo34/tacklr/email"
 	mcpruntime "github.com/ryanaldo34/tacklr/internal/mcp"
 	session "github.com/ryanaldo34/tacklr/internal/session"
 	"github.com/ryanaldo34/tacklr/mcp"
@@ -47,6 +48,7 @@ type TurnManager struct {
 	hostInterceptors     []ToolInterceptor
 	hostResultHooks      map[string]ToolResultHook
 	exaAPIKey            string
+	emailProvider        mail.Provider
 	brain                *brain.Engine
 	brainWriteKinds      brain.WriteKinds
 	runCommandUnattended bool
