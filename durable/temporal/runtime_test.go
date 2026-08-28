@@ -1048,10 +1048,6 @@ func TestSessionWorkflow_resumeRemountsWorkspaceFromCachedRecipe(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("from-workspace"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	fsReg := vfs.NewBackendRegistry()
-	if err := fsReg.Register(vfs.LocalFactory{ID: "local", Base: dir}); err != nil {
-		t.Fatal(err)
-	}
 	var suite testsuite.WorkflowTestSuite
 	env := suite.NewTestWorkflowEnvironment()
 	env.SetWorkerOptions(worker.Options{EnableSessionWorker: true})
@@ -1084,8 +1080,8 @@ func TestSessionWorkflow_resumeRemountsWorkspaceFromCachedRecipe(t *testing.T) {
 		},
 	}
 	cat.Register("default", durable.AgentSpec{
-		Options:    tacklr.AgentOptions{Model: model, Config: tacklr.Config{MaxWindowSize: 8192}},
-		FSRegistry: fsReg,
+		Options: tacklr.AgentOptions{Model: model, Config: tacklr.Config{MaxWindowSize: 8192}},
+		OpenVFS: vfs.Tree(vfs.At("docs", vfs.Local(dir))),
 	})
 	fallback := inprocess.NewMemoryEventLog()
 	env.RegisterWorkflow(SessionWorkflow)

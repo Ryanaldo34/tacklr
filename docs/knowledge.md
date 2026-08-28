@@ -97,7 +97,7 @@ The agent never sees a host filesystem path, a bucket key, or a SQL row.
 
 It sees:
 
-- **Virtual paths** such as `/work/main.go` or `/engram/deal/acme.md`
+- **Virtual paths** such as `/workspace/work/main.go` or `/workspace/engram/deal/acme.md`
 - **Tools** the harness injects when the host wired Brain (and, for file tools, VFS)
 - **Rich objects** from search: id, kind, title, score, optional evidence, optional `vfs_path`
 
@@ -225,7 +225,7 @@ because it is the only package allowed to import both.
 
 ### Engrams — the file *is* the object
 
-`brain.BrainFactory` opens a `vfs.Provider`. A write to an Engram path parses
+`brain.Open` returns a `vfs.OpenFunc`. A write to an Engram path parses
 Markdown, validates, and `Put`s the object. A read serializes the object back
 to the same format.
 
@@ -666,7 +666,7 @@ if err := eng.LoadKindsFromStore(ctx); err != nil { /* ... */ }
 //   SearchNamespace: brain.MustNamespace("org", orgID) // host ceiling; tools may add workspace=…
 //
 // Harness then:
-//   registers BrainFactory (profile "brain")
+//   registers brain.Open (profile "brain")
 //   mounts /engram (prefix, IndexPolicy=none) unless you already mounted one
 //   starts vfsindex.Bridge (skips profile "brain")
 //   injects file tools + knowledge tools
@@ -718,14 +718,14 @@ Tests call `store.Setup` (embedding dim 3) instead of loading SQL files.
 | Put / Link / embeddings | `brain/write.go` |
 | Kind catalog | `brain/kind.go` |
 | Engram Markdown codec | `brain/engramfile.go` |
-| VFS Provider + factory | `brain/provider.go` |
+| VFS Provider | `brain/provider.go` |
 | Store ports | `brain/store.go` |
 | Postgres schema + kinds | `PostgresStore.Setup` (`brain/postgres_setup.go`) |
 | Graph ports + MemoryGraph | `brain/graph.go` |
 | Helix adapter | `brain/helixgraph/` |
 | Artifact indexer | `vfsindex/indexer.go` |
 | Index policy + bridge | `vfsindex/policy.go`, `vfsindex/bridge.go` |
-| Default `/engram` + factory | `agent_construct.go` |
+| Default `/workspace/engram` | `vfs.At("engram", brain.Open(...))` |
 | Knowledge tools | `tools_brain.go` |
 | Index tools | `tools_vfsindex.go` |
 

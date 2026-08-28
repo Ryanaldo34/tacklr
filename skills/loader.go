@@ -1,7 +1,6 @@
 // Package skills discovers and parses application-owned SKILL.md files.
 //
-// Discovery walks /skills on a vfs.MountSession. Hosts mark backends with
-// LocalFactory.Skills / S3Factory.Skills / BlobFactory.Skills; the session attaches the union.
+// Discovery walks /workspace/skills on a vfs.MountSession.
 package skills
 
 import (
@@ -49,12 +48,13 @@ func (l Loader) Load(ctx context.Context) ([]Skill, error) {
 	if l.Session == nil {
 		return nil, nil
 	}
-	entries, err := l.Session.ReadDir(ctx, vfs.SkillsPoint)
+	dir := path.Join(vfs.WorkspacePoint, "skills")
+	entries, err := l.Session.ReadDir(ctx, dir)
 	if err != nil {
-		if errors.Is(err, vfs.ErrNotMounted) {
+		if errors.Is(err, vfs.ErrNotMounted) || errors.Is(err, vfs.ErrNotExist) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("read skills directory %q: %w", vfs.SkillsPoint, err)
+		return nil, fmt.Errorf("read skills directory %q: %w", dir, err)
 	}
 	slices.SortFunc(entries, func(a, b vfs.DirEntry) int { return cmp.Compare(a.Name, b.Name) })
 	var loaded []Skill
@@ -63,7 +63,7 @@ func (l Loader) Load(ctx context.Context) ([]Skill, error) {
 		if !entry.IsDir || entry.Type&fs.ModeSymlink != 0 {
 			continue
 		}
-		skillPath := path.Join(vfs.SkillsPoint, entry.Name, "SKILL.md")
+		skillPath := path.Join(dir, entry.Name, "SKILL.md")
 		skill, err := readSkill(ctx, l.Session, skillPath, entry.Name)
 		if err != nil {
 			return nil, err

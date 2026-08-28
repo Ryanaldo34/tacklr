@@ -53,7 +53,12 @@ type googleDrive struct {
 	service *drive.Service
 }
 
-// newGoogleDrive builds a Drive service that reads the live TokenHolder.
+// NewGoogleDrive builds a DriveAPI from a user token holder. Call from OpenVFS
+// when a drive bind arrives, then pass the result to Drive.
+func NewGoogleDrive(ctx context.Context, holder *TokenHolder) (DriveAPI, error) {
+	return newGoogleDrive(ctx, holder)
+}
+
 func newGoogleDrive(ctx context.Context, holder *TokenHolder) (*googleDrive, error) {
 	if holder == nil {
 		return nil, fmt.Errorf("vfs: drive token required")
@@ -284,72 +289,35 @@ func mapDriveError(err error) error {
 	return err
 }
 
-// DriveFactory opens Drive folder providers. Auth is session-scoped.
-type DriveFactory struct {
-	ID     string
-	Auth   *SessionAuth
-	API    DriveAPI  // optional; nil → GoogleDrive from the session token
-	Docs   DocsAPI   // optional; nil on writable mounts → GoogleDocs from the session token
-	Sheets SheetsAPI // optional; nil on writable mounts → GoogleSheets from the session token
+// Drive opens a Google Drive folder. api is required (host-built SDK or a test
+// fake). folderId and writable come from this turn's Binding.
+func Drive(api DriveAPI) Open {
+	return DriveWith(api, nil, nil)
 }
 
-// Profile implements ProviderFactory.
-func (f DriveFactory) Profile() string { return f.ID }
-
-// TokenAuth implements TokenSource.
-func (f DriveFactory) TokenAuth() *SessionAuth { return f.Auth }
-
-var _ TokenSource = DriveFactory{}
-
-// Open implements ProviderFactory.
-func (f DriveFactory) Open(ctx context.Context, sessionID string, spec MountSpec) (Provider, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if f.ID == "" {
-		return nil, fmt.Errorf("vfs: gdrive factory needs id")
-	}
-	folderID := strings.TrimSpace(spec.Params[ParamFolderID])
-	if folderID == "" {
-		folderID = driveMyDriveRoot
-	}
-	var holder *TokenHolder
-	if f.Auth != nil {
-		holder = f.Auth.Holder(sessionID, f.ID)
-	}
-	api := f.API
+// DriveWith is Drive plus Docs/Sheets clients for native Google files.
+func DriveWith(api DriveAPI, docs DocsAPI, sheets SheetsAPI) Open {
 	if api == nil {
-		if holder == nil || holder.Current().Token == "" {
-			return nil, fmt.Errorf("vfs: gdrive access token required")
-		}
-		gd, err := newGoogleDrive(ctx, holder)
-		if err != nil {
+		panic("vfs: Drive requires a DriveAPI client")
+	}
+	return func(ctx context.Context, _ string, b Binding) (Provider, error) {
+		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		api = gd
-	}
-	docs := f.Docs
-	writable := !spec.ReadOnly
-	if docs == nil && writable && holder != nil && holder.Current().Token != "" {
-		gd, err := newGoogleDocs(ctx, holder)
-		if err != nil {
-			return nil, err
+		holder := b.Live
+		if holder == nil && strings.TrimSpace(b.Auth.Token) != "" {
+			holder = NewTokenHolder(b.Auth)
 		}
-		docs = gd
-	}
-	shAPI := f.Sheets
-	if shAPI == nil && writable && holder != nil && holder.Current().Token != "" {
-		gs, err := newGoogleSheets(ctx, holder)
-		if err != nil {
-			return nil, err
+		folderID := strings.TrimSpace(b.Params[ParamFolderID])
+		if folderID == "" {
+			folderID = driveMyDriveRoot
 		}
-		shAPI = gs
+		return &driveProvider{
+			api: api, docs: docs, sheets: sheets, rootID: folderID, holder: holder, writable: b.Writable,
+			zipCache: newFIFO[[]byte](32), getCache: newFIFO[DocsSnapshot](32),
+			sheetCache: newFIFO[SheetsSnapshot](32),
+		}, nil
 	}
-	return &driveProvider{
-		api: api, docs: docs, sheets: shAPI, rootID: folderID, holder: holder, writable: writable,
-		zipCache: newFIFO[[]byte](32), getCache: newFIFO[DocsSnapshot](32),
-		sheetCache: newFIFO[SheetsSnapshot](32),
-	}, nil
 }
 
 type driveProvider struct {

@@ -22,7 +22,7 @@ Work spans many model calls, tools hit real systems, and the window fills with t
 
 **Context is structured around the current work.** The harness runs planning cycles (Adaptive Case Management): the agent writes a plan, works a to-do, and on `complete_todo` the window is rebuilt as a hand-off for what comes next. Unused history does not stay in the prompt just because it happened earlier. Specialists are the same idea at a larger grain — a nested session that returns only what the parent asked for.
 
-**The agent’s world is bounded.** A virtual filesystem gives one path API over the mounts you attach: local disk, S3, Azure Blob, Google Drive and Docs, Microsoft Graph, and knowledge objects. The agent sees `/work/notes.md`, not a host path or a bucket key. Credentials live on the turn (`Prompt.Auth` / `Resume.Auth`), not in checkpoints.
+**The agent’s world is bounded.** A virtual filesystem gives one path API over the mounts you attach: local disk, S3, Azure Blob, Google Drive and Docs, Microsoft Graph, and knowledge objects. The agent sees `/workspace/work/notes.md`, not a host path or a bucket key. Credentials live on the turn (`Prompt.Auth` / `Resume.Auth`), not in checkpoints.
 
 **Sessions are meant to live in the cloud.** Hosts call `durable.Runtime` (in-process goroutine wait loop, or Temporal). Human-in-the-loop parks a session until `Resume`. JSON-RPC protocols (ACP is the native one) map to that Runtime; autonomous hosts call it directly.
 
@@ -46,112 +46,123 @@ A model round may emit several tool calls. The harness does not infer again unti
 
 ## Get started
 
-A model client and a prompt are enough to run a turn.
+This is a host: a model, a brain, a `/workspace` tree, a durable runtime, and ACP on HTTP. The protocol never talks to Temporal (or the in-process loop) in their own dialect — it consumes `streaming.StreamEvent` from `Runtime`. Swap `inprocess.New` for `temporal.New` when you have a worker.
 
 ```go
 package main
 
 import (
 	"context"
-	"fmt"
+	"errors"
+	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"path/filepath"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/durable/inprocess"
 	"github.com/ryanaldo34/tacklr/inference"
+	"github.com/ryanaldo34/tacklr/server"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
 func main() {
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	model := inference.NewOpenAIInferenceStrategy(&http.Client{Timeout: 2 * time.Minute})
 	model.WithURL(os.Getenv("OPENAI_BASE_URL")).
 		WithApiKey(os.Getenv("OPENAI_API_KEY")).
 		WithModel(os.Getenv("OPENAI_MODEL"))
 
-	opts := tacklr.AgentOptions{
-		Config: tacklr.Config{
-			MaxWindowSize: 8192,
-			SystemPrompt:  "You are a concise assistant.",
-		},
-		Model: model,
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithKinds(
+		brain.KindSpec{Kind: "Discovery", Description: "Research finding", IsParent: true},
+		brain.KindSpec{Kind: "Fact", Description: "Verified fact", IsParent: true},
+		brain.KindSpec{Kind: "Memory", Description: "Durable memory", IsParent: true},
+	))
+	if err != nil {
+		log.Fatal(err)
 	}
+	ns, err := brain.ParseNamespace("org", "acme")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	jail := filepath.Join(os.TempDir(), "tacklr-workspace")
+	if err := os.MkdirAll(filepath.Join(jail, "skills"), 0o750); err != nil {
+		log.Fatal(err)
+	}
+
 	cat := durable.NewCatalog("agent")
-	cat.Register("agent", durable.AgentSpec{Options: opts})
-	rt := inprocess.New(cat, inprocess.WithProjection(vfs.DirectProjection{}))
-	id, err := rt.CreateSession(ctx, durable.CreateSession{
-		AgentID: "agent",
-		State:   map[string]any{"user": "Ada", "company": "Acme"},
+	cat.Register("agent", durable.AgentSpec{
+		Name: "Agent",
+		Options: tacklr.AgentOptions{
+			Config: tacklr.Config{
+				MaxWindowSize: 8192,
+				SystemPrompt:  "You are a concise assistant.",
+			},
+			Model:           model,
+			Brain:           eng,
+			SearchNamespace: ns,
+			BrainWriteKinds: brain.WriteKinds{
+				Discovery: "Discovery",
+				Fact:      "Fact",
+				Memory:    "Memory",
+			},
+		},
+		OpenVFS: openVFS(jail, eng, ns),
 	})
-	if err != nil {
-		panic(err)
-	}
-	defer rt.Close(ctx, id)
 
-	sub, err := rt.Subscribe(ctx, id, 0)
-	if err != nil {
-		panic(err)
+	rt := inprocess.New(cat, inprocess.WithProjection(vfs.DirectProjection{}))
+	srv := server.NewServer(rt, cat, server.NewACPProtocol(nil)).AllowAnonymousNetwork()
+	log.Printf("ACP on http://127.0.0.1:8080/acp")
+	if err := srv.ServeHTTP(ctx, "127.0.0.1:8080"); err != nil && !errors.Is(err, context.Canceled) {
+		log.Fatal(err)
 	}
-	defer sub.Close()
+}
 
-	if err := rt.Prompt(ctx, id, durable.Prompt{Text: "Outline three steps to organize a weekly operations review."}); err != nil {
-		panic(err)
-	}
-	for ev := range sub.Events() {
-		switch ev.Type {
-		case tacklr.StreamEventMessage:
-			fmt.Print(ev.Content)
-		case tacklr.StreamEventError:
-			fmt.Println("error:", ev.Error, ev.Content)
-		case tacklr.StreamEventComplete:
-			fmt.Println()
-			return
+func openVFS(jail string, eng *brain.Engine, ns brain.Namespace) vfs.OpenVFS {
+	return func(ctx context.Context, sessionID string, req vfs.Request) (*vfs.MountSession, error) {
+		members := []vfs.Member{
+			vfs.At("work", vfs.Local(jail)),
+			vfs.At("skills", vfs.Local(filepath.Join(jail, "skills"))),
+			vfs.At("engram", brain.Open(eng, brain.Scope{Namespace: ns})),
+			vfs.At("memory", vfs.Memory()),
 		}
+		if b, ok := vfs.BindingByName(req.Bindings, "drive"); ok && strings.TrimSpace(b.Auth.Token) != "" {
+			h := vfs.NewTokenHolder(b.Auth)
+			api, err := vfs.NewGoogleDrive(ctx, h)
+			if err != nil {
+				return nil, err
+			}
+			members = append(members, vfs.At("drive", vfs.Drive(api)))
+		}
+		if b, ok := vfs.BindingByName(req.Bindings, "sharepoint"); ok && strings.TrimSpace(b.Auth.Token) != "" {
+			h := vfs.NewTokenHolder(b.Auth)
+			api, err := vfs.NewGraph(h, "", nil)
+			if err != nil {
+				return nil, err
+			}
+			members = append(members, vfs.At("sharepoint", vfs.Graph(api, h, b.Params[vfs.ParamAccount])))
+		}
+		return vfs.Tree(members...)(ctx, sessionID, req)
 	}
 }
 ```
 
-Importing `tacklr` registers built-in interrupts, Word/Excel codecs, and the durable driver adapter. You register VFS backends and brain kinds yourself.
+Importing `tacklr` registers built-in interrupts, Word/Excel codecs, and the durable driver adapter. The agent sees `/workspace/work`, `/workspace/skills`, `/workspace/engram`. A Drive or SharePoint bind on the prompt adds `/workspace/drive` or `/workspace/sharepoint` for that turn. Tests pass a fake `DriveAPI` / `GraphAPI` into the same `vfs.Drive` / `vfs.Graph` constructors.
 
 ### Tools
 
 Tools are ordinary Go functions. Give a tool a client by closing over it in the constructor. That is the dependency injection. Tests pass a fake into the same constructor.
 
-`HarnessRuntime` is park, progress, children, and session key-values (`StateGet`). Put facts like the current user on `CreateSession.State` (also `Prompt.State` / `Resume.State`). Close over clients in the constructor.
-
-```go
-type SearchArgs struct {
-	Query string `json:"query" desc:"The search query"`
-	Limit int    `json:"limit,omitempty" desc:"Max results"`
-}
-
-type RecordStore interface {
-	Search(ctx context.Context, query string, limit int) (string, error)
-}
-
-func NewSearchRecordsTool(store RecordStore) *tacklr.Tool {
-	return tacklr.NewTool(tacklr.ToolConfig{
-		Name:        "search_records",
-		Description: "Search operational records.",
-		Handler: func(ctx context.Context, args SearchArgs, rt tacklr.HarnessRuntime) (string, error) {
-			rt.EmitUpdate("Searching records…")
-			return store.Search(ctx, args.Query, args.Limit)
-		},
-	})
-}
-
-// Production: close over the live client.
-opts.Tools = []*tacklr.Tool{NewSearchRecordsTool(liveStore)}
-
-// Test: same constructor, fake client.
-opts.Tools = []*tacklr.Tool{NewSearchRecordsTool(fakeStore)}
-```
-
-Construct with `NewTool(ToolConfig{...})`. After construction, read metadata through getters (`Name()`, `Access()`, and the rest).
+`HarnessRuntime` is park, progress, children, and session key-values (`StateGet`). Put facts like the current user on `CreateSession.State` (also `Prompt.State` / `Resume.State`). Close over clients in the constructor: `NewSearchRecordsTool(liveStore)` in production, `NewSearchRecordsTool(fakeStore)` in tests. Construct with `NewTool(ToolConfig{...})`. After construction, read metadata through getters (`Name()`, `Access()`, and the rest).
 
 Built-in tools that need a client use the same pattern. You set the client on `AgentOptions`; the harness closes it into the handler:
 
@@ -171,31 +182,11 @@ Swap the fake the same way: `EmailProvider: fakeMail`, `Brain: testEngine`, a te
 
 ### Sessions
 
-Hosts always use `durable.Runtime`. In-process:
-
-```go
-cat := durable.NewCatalog("agent")
-cat.Register("agent", durable.AgentSpec{Options: opts})
-rt := inprocess.New(cat, inprocess.WithProjection(vfs.DirectProjection{}))
-id, _ := rt.CreateSession(ctx, durable.CreateSession{AgentID: "agent"})
-_ = rt.Prompt(ctx, id, durable.Prompt{Text: prompt, Auth: auth})
-sub, _ := rt.Subscribe(ctx, id, 0)
-```
-
-Temporal is the same `Runtime` interface with a worker. See [docs/durable.md](docs/durable.md). `TurnManager` is the per-turn infer/tools/checkpoint object the runtime constructs; hosts do not call it.
+Hosts always use `durable.Runtime` (the snippet above). Temporal is the same interface with a worker; see [docs/durable.md](docs/durable.md). `TurnManager` is the per-turn infer/tools/checkpoint object the runtime constructs; hosts do not call it.
 
 ### Specialists
 
 Register nested agents on `AgentOptions.Specialists`. Tools start them through `HarnessRuntime`: `SpawnChild`, `Children`, `AwaitChild`, `CancelChild`. The stock tools `spawn_specialist`, `list_children`, `get_child`, and `cancel_child` call those methods; host tools can too. A child is a nested session with the parent’s MCP, mounts, and auth, overlaid with the specialist’s model, tools, and instructions. `block=false` starts the child and returns; `get_child(block=true)` waits. Parent park does not stop children. Cancel (including the original Prompt context) and Close do.
-
-```go
-opts.Specialists = []*tacklr.Specialist{{
-	Name:         "researcher",
-	Description:  "Looks things up and returns a short brief.",
-	Model:        model,
-	Instructions: "Research the task. Return only the brief.",
-}}
-```
 
 ---
 
@@ -216,7 +207,7 @@ opts.Specialists = []*tacklr.Specialist{{
 | Server | `Protocol` over Runtime; ACP is the native option | [`server`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/server) |
 | Telemetry | One `tacklr.turn` span per prompt or resume; OTLP | [`telemetry`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/telemetry) |
 
-When VFS is wired, the harness injects file tools over virtual paths only. `run_command` requires permission by default. Live names and grep go through `run_command` (`ls` / `fd` / `rg`). With Brain + VFS + a search namespace, the harness mounts `/engram` and injects knowledge tools. Details: [docs/vfs.md](docs/vfs.md) and [docs/knowledge.md](docs/knowledge.md).
+When VFS is wired, the harness injects file tools over virtual paths only. `run_command` requires permission by default. Live names and grep go through `run_command` (`ls` / `fd` / `rg`). With Brain + VFS + a search namespace, knowledge tools attach to `/workspace/engram`. Details: [docs/vfs.md](docs/vfs.md) and [docs/knowledge.md](docs/knowledge.md).
 
 ---
 

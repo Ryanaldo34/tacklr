@@ -5,6 +5,7 @@ import (
 
 	"github.com/ryanaldo34/tacklr/internal/session"
 	"github.com/ryanaldo34/tacklr/interrupt"
+	"github.com/ryanaldo34/tacklr/vfs"
 )
 
 // customInterrupt is only for RegisterInterrupt coverage.
@@ -54,4 +55,19 @@ func mustNewTurnManager(t testing.TB, opts AgentOptions) *TurnManager {
 		t.Fatal(err)
 	}
 	return h
+}
+
+func mustMountTree(t testing.TB, sessionID string, members ...vfs.Member) *vfs.MountSession {
+	t.Helper()
+	return mustMountTreeReq(t, sessionID, vfs.Request{}, members...)
+}
+
+func mustMountTreeReq(t testing.TB, sessionID string, req vfs.Request, members ...vfs.Member) *vfs.MountSession {
+	t.Helper()
+	ms, err := vfs.Tree(members...)(t.Context(), sessionID, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ms.Close() })
+	return ms
 }

@@ -78,7 +78,7 @@ type AgentOptions struct {
 	// Plan builtins use ToolOutcome instead.
 	ToolResultHooks map[string]ToolResultHook
 	// SkillsLoader loads skills. Nil uses skills.Loader on the /skills mount
-	// when MountSession has one (from SkillSource factories).
+	// when MountSession has one (typically /workspace/skills).
 	SkillsLoader skills.SkillLoader
 	// ExaAPIKey enables web_search and web_fetch. Empty falls back to EXA_API_KEY.
 	// When both are empty, those tools are not registered.
@@ -100,7 +100,7 @@ type AgentOptions struct {
 	// Empty means no ceiling. Workers get a copy at spawn.
 	SearchNamespace brain.Namespace
 	// MountSession is the VFS tree injected for this turn, or nil (no VFS tools).
-	// Runtime builds one from FSBootstrap plus Prompt.Auth bindings when a
+	// Runtime builds one from OpenVFS plus Prompt.Auth bindings when a
 	// projection is available. Embedders pass their own. The injector Closes
 	// it after the turn; the harness never does (workers inherit the pointer).
 	MountSession *vfs.MountSession
@@ -293,14 +293,7 @@ func (a *TurnManager) initVFSIndexBridge() {
 	if !ok {
 		return
 	}
-	attachMemory := true
-	for _, s := range a.session.VFS.Specs() {
-		if s.Profile == brain.DefaultProfile {
-			attachMemory = false
-			break
-		}
-	}
-	br, err := vfsindex.Start(a.session.VFS, a.brain, brain.Scope{Namespace: ns}, attachMemory)
+	br, err := vfsindex.Start(a.session.VFS, a.brain, brain.Scope{Namespace: ns})
 	if err != nil {
 		return
 	}

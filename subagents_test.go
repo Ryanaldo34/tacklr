@@ -103,10 +103,10 @@ func TestWithSpecialist_sharesHostMountWriteAndCatalog(t *testing.T) {
 	}
 
 	const body = "from-worker-body\n"
-	if _, err := runWriteTool(t, worker, worker.findTool("write", ""), `{"path":"/work/from-worker.txt","content":`+jsonString(body)+`}`); err != nil {
+	if _, err := runWriteTool(t, worker, worker.findTool("write", ""), `{"path":"/workspace/work/from-worker.txt","content":`+jsonString(body)+`}`); err != nil {
 		t.Fatal(err)
 	}
-	got, err := ms.ReadText(ctx, "/work/from-worker.txt")
+	got, err := ms.ReadText(ctx, "/workspace/work/from-worker.txt")
 	if err != nil || got.Text() != body {
 		text := ""
 		if got != nil {
@@ -115,18 +115,18 @@ func TestWithSpecialist_sharesHostMountWriteAndCatalog(t *testing.T) {
 		t.Fatalf("parent ReadText after worker write: %q err=%v", text, err)
 	}
 
-	if _, err := worker.findTool("run_command", "").invoke(ctx, `{"command":"ls work"}`, turnRuntime(worker)); !errors.Is(err, vfs.ErrFuseNotMounted) {
+	if _, err := worker.findTool("run_command", "").invoke(ctx, `{"command":"ls workspace/work"}`, turnRuntime(worker)); !errors.Is(err, vfs.ErrFuseNotMounted) {
 		t.Fatalf("run_command without HostDir: %v", err)
 	}
 
 	const phraseA = "worker-index-share-aaa"
-	if err := ms.WriteFile(ctx, "/work/tracked.txt", []byte(phraseA+"\n")); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/work/tracked.txt", []byte(phraseA+"\n")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := runWriteTool(t, worker, worker.findTool("index_file", ""), `{"path":"/work/tracked.txt"}`); err != nil {
+	if _, err := runWriteTool(t, worker, worker.findTool("index_file", ""), `{"path":"/workspace/work/tracked.txt"}`); err != nil {
 		t.Fatal(err)
 	}
-	if hit := waitSearchHit(t, eng, scope, phraseA, 3*time.Second); hit.Properties[vfsindex.PropVFSPath] != "/work/tracked.txt" {
+	if hit := waitSearchHit(t, eng, scope, phraseA, 3*time.Second); hit.Properties[vfsindex.PropVFSPath] != "/workspace/work/tracked.txt" {
 		t.Fatalf("index vfs_path: %+v", hit.Properties)
 	}
 }
@@ -143,21 +143,10 @@ func TestWithSpecialist_inheritsParentSkills(t *testing.T) {
 		t.Fatal(err)
 	}
 	work := t.TempDir()
-	reg := vfs.NewBackendRegistry()
-	if err := reg.Register(vfs.LocalFactory{ID: "work", Base: work}); err != nil {
-		t.Fatal(err)
-	}
-	if err := reg.Register(vfs.LocalFactory{ID: "pack", Base: pack, Skills: "."}); err != nil {
-		t.Fatal(err)
-	}
-	ms, err := vfs.NewMountSession(t.Name(), reg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "work"}); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = ms.Close() })
+	ms := mustMountTree(t, t.Name(),
+		vfs.At("work", vfs.Local(work)),
+		vfs.At("skills", vfs.Local(pack)),
+	)
 
 	opts := AgentOptions{
 		Config:       Config{MaxWindowSize: 8192, MaxTurnRequests: 4},

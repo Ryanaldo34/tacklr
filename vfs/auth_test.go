@@ -51,15 +51,12 @@ func TestSessionAuth_bindRefreshUnbind(t *testing.T) {
 			t.Fatalf("point = %q", b.Point)
 		}
 		aliases[b.Params[vfs.ParamName]] = true
-		raw, err := json.Marshal(vfs.BindingSpec(b))
+		raw, err := json.Marshal(b)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if strings.Contains(string(raw), tok) {
-			t.Fatalf("MountSpec JSON contained token: %s", raw)
-		}
-		if len(vfs.BindingSpec(b).Members) != 1 || !vfs.BindingSpec(b).Members[0].ReadOnly {
-			t.Fatal("BindingSpec member must be read-only")
+			t.Fatalf("Binding JSON contained token: %s", raw)
 		}
 	}
 	if !aliases["contracts"] || !aliases["notes"] {

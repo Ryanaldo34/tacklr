@@ -1,10 +1,13 @@
 package vfs
 
-// MustNewMountSession is a test helper. Production callers use NewMountSession.
-func MustNewMountSession(sessionID string, reg *BackendRegistry) *MountSession {
-	ms, err := NewMountSession(sessionID, reg)
+import "testing"
+
+func mustTree(t *testing.T, members ...Member) *MountSession {
+	t.Helper()
+	ms, err := Tree(members...)(t.Context(), t.Name(), Request{})
 	if err != nil {
-		panic(err)
+		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = ms.Close() })
 	return ms
 }

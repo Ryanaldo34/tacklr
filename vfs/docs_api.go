@@ -83,7 +83,11 @@ type googleDocs struct {
 	service *docs.Service
 }
 
-// newGoogleDocs builds a Docs service that reads the live TokenHolder.
+// NewGoogleDocs builds a DocsAPI from a user token holder.
+func NewGoogleDocs(ctx context.Context, holder *TokenHolder) (DocsAPI, error) {
+	return newGoogleDocs(ctx, holder)
+}
+
 func newGoogleDocs(ctx context.Context, holder *TokenHolder) (*googleDocs, error) {
 	if holder == nil {
 		return nil, fmt.Errorf("vfs: docs token required")

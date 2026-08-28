@@ -7,14 +7,9 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"os"
 	"slices"
 	"strings"
-)
-
-var (
-	_ Provider        = workspaceProvider{}
-	_ documentBackend = workspaceProvider{}
-	_ filePutter      = workspaceProvider{}
 )
 
 // workspaceProvider is a named writable union. First path segment is the
@@ -27,51 +22,6 @@ type workspaceMember struct {
 	name     string
 	writable bool
 	inner    Provider
-}
-
-func (r *BackendRegistry) openWorkspace(ctx context.Context, sessionID string, spec MountSpec) (Provider, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if spec.Profile == "" {
-		return nil, ErrInvalidProvider
-	}
-	seen := make(map[string]struct{}, len(spec.Members))
-	for i, member := range spec.Members {
-		if len(member.Members) > 0 {
-			return nil, fmt.Errorf("vfs: nested union mounts are not supported")
-		}
-		if strings.TrimSpace(member.Point) != "" {
-			return nil, fmt.Errorf("vfs: union member point must be empty")
-		}
-		if member.Profile == "" {
-			return nil, fmt.Errorf("vfs: union member[%d] profile required", i)
-		}
-		name := strings.TrimSpace(member.Params[ParamName])
-		if name == "" {
-			return nil, fmt.Errorf("vfs: workspace member[%d] name required", i)
-		}
-		if err := validAlias(name); err != nil {
-			return nil, err
-		}
-		if _, ok := seen[name]; ok {
-			return nil, ErrAmbiguous
-		}
-		seen[name] = struct{}{}
-	}
-	members := make([]workspaceMember, 0, len(spec.Members))
-	for _, member := range spec.Members {
-		p, err := r.open(ctx, sessionID, member)
-		if err != nil {
-			return nil, err
-		}
-		members = append(members, workspaceMember{
-			name:     strings.TrimSpace(member.Params[ParamName]),
-			writable: !member.ReadOnly,
-			inner:    p,
-		})
-	}
-	return workspaceProvider{members: members}, nil
 }
 
 func (p workspaceProvider) Validate(ctx context.Context) error {
@@ -253,11 +203,23 @@ func (p workspaceProvider) PutFile(ctx context.Context, name string, r io.Reader
 	if !m.writable {
 		return ErrReadOnly
 	}
-	putter, ok := m.inner.(filePutter)
-	if !ok {
-		return ErrNotSupported
+	if putter, ok := m.inner.(filePutter); ok {
+		return putter.PutFile(ctx, rest, r, size)
 	}
-	return putter.PutFile(ctx, rest, r, size)
+	f, err := m.inner.OpenFile(ctx, rest, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if size == 0 {
+		return nil
+	}
+	w, ok := f.(io.Writer)
+	if !ok {
+		return ErrReadOnly
+	}
+	_, err = io.Copy(w, io.LimitReader(r, size))
+	return err
 }
 
 func (p workspaceProvider) lookup(alias string) (workspaceMember, error) {
@@ -278,8 +240,4 @@ func splitAlias(name string) (alias, rest string, err error) {
 	}
 	alias, rest, _ = strings.Cut(rel, "/")
 	return alias, rest, nil
-}
-
-func isWorkspaceSpec(spec MountSpec) bool {
-	return len(spec.Members) > 0 && (spec.Point == WorkspacePoint || spec.Profile == workspaceProfile)
 }

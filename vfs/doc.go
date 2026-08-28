@@ -2,15 +2,16 @@
 //
 // # Public surface (hosts)
 //
-//   - MountSession — mounts, path I/O, ReadText / WriteDocument, ReadLines, FuseMount / Close, HostDir
+//   - Tree / At / OpenVFS — host builds one /workspace tree per turn
+//   - MountSession — path I/O, ReadText / WriteDocument, ReadLines, FuseMount / Close, HostDir
 //   - FuseAvailable — process can mount a kernel tree (/dev/fuse or /dev/macfuse*)
 //   - ContentRev / ContentHash — session-visible content identity (for tools)
-//   - BackendRegistry + LocalFactory / S3Factory / BlobFactory / DriveFactory / GraphFactory + AWSS3 / AzureBlob — process profiles
+//   - Local / S3 / Blob / Drive / Graph / Memory / Union + AWSS3 / AzureBlob — backends
+//   - NewGoogleDrive / NewGraph — SDK wrappers (hosts never import Google/MS SDKs)
 //   - SessionAuth + TokenHolder + Binding — session-scoped user-owned credentials (never on MountSpec)
-//   - MountSpec — durable mount description (checkpoint-safe; Members = skills or /workspace union)
-//   - Skills / SkillsPoint — /skills flat read-only union from SkillSource factories
-//   - Workspace / WorkspacePoint — /workspace named writable union (cloud aliases)
-//   - Provider / ProviderFactory / S3API / DriveAPI — custom backends (BlobFactory uses S3API)
+//   - MountSpec — durable mount description (checkpoint-safe; Members = /workspace aliases)
+//   - WorkspacePoint — /workspace (the only top-level mount)
+//   - Provider / Open / S3API / DriveAPI / GraphAPI — custom backends (Blob uses S3API)
 //   - File, FileInfo, DirEntry — I/O types (File is Close+Stat; io.Reader / io.ReaderAt / io.Writer via comma-ok)
 //   - Document / Textual / Structured / TextDocument — content IR
 //   - Block / StyleMeta / Span / FindBlock / BlockReplaceSpan — structured view
@@ -39,8 +40,8 @@
 //
 //	Stat, Open, ReadFile, WriteFile, ReadDir, Remove, MkdirAll, FuseMount, Close
 //	File is Close + Stat. Read / ReadAt / Write are optional (comma-ok).
-//	FuseMount is explicit (host kernel tree). Mount points must be one segment
-//	(/work, /engram, /workspace). If ReadText succeeds, the kernel sees that plaintext
+//	FuseMount is explicit (host kernel tree). The only mount point is /workspace.
+//	If ReadText succeeds, the kernel sees that plaintext
 //	(read-only unless IdentityCodec). Otherwise Stat + io.ReaderAt. Close
 //	unmounts. HostDir is the last FuseMount directory.
 //
@@ -53,11 +54,11 @@
 // Raw ops stay byte-oriented. Content access:
 //
 //	// Progressive page (large files OK; EOF/NextStart for paging)
-//	win, err := ms.ReadLines(ctx, "/work/main.go", 1, 51)
+//	win, err := ms.ReadLines(ctx, "/workspace/work/main.go", 1, 51)
 //	// win.Rev.Hash is the session-visible content identity when available
 //
 //	// Full IR for edit; WriteDocument persists through the provider now
-//	text, err := ms.ReadText(ctx, "/work/main.go") // Textual
+//	text, err := ms.ReadText(ctx, "/workspace/work/main.go") // Textual
 //	rev := vfs.ContentRev{Path: text.Path(), Hash: vfs.ContentHash(text.Text())}
 //	_ = text.SetLine(2, "changed")
 //	_ = ms.WriteDocument(ctx, text)

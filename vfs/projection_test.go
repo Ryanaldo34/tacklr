@@ -17,15 +17,7 @@ func TestFuseProjection_availableAndAttachFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reg := NewBackendRegistry()
-	if err := reg.Register(LocalFactory{ID: "scratch", Base: t.TempDir()}); err != nil {
-		t.Fatal(err)
-	}
-	ms := MustNewMountSession(t.Name(), reg)
-	if err := ms.Mount(t.Context(), MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = ms.Close() })
+	ms := mustTree(t, At("work", Local(t.TempDir())))
 
 	err := FuseProjection{}.Attach(ms, `sess/with\slash`)
 	if FuseAvailable() {

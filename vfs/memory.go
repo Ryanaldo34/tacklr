@@ -12,29 +12,21 @@ import (
 	"time"
 )
 
-// MemoryFactory provides an ephemeral, session-scoped backend. Hosts Mount it
-// like any other backend; WriteFile stores bytes on that mount. It is not a
-// durable store for user files.
-type MemoryFactory struct {
-	ID        string
-	mu        sync.Mutex
-	bySession map[string]*memoryProvider
-}
-
-func (f *MemoryFactory) Profile() string { return f.ID }
-
-func (f *MemoryFactory) Open(_ context.Context, sessionID string, _ MountSpec) (Provider, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.bySession == nil {
-		f.bySession = make(map[string]*memoryProvider)
-	}
-	if p := f.bySession[sessionID]; p != nil {
+// Memory is an ephemeral, session-scoped backend. Hosts At("memory", Memory());
+// WriteFile stores bytes under /workspace/memory. It is not a durable store.
+func Memory() Open {
+	var mu sync.Mutex
+	bySession := map[string]*memoryProvider{}
+	return func(_ context.Context, sessionID string, _ Binding) (Provider, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if p := bySession[sessionID]; p != nil {
+			return p, nil
+		}
+		p := &memoryProvider{files: map[string][]byte{"": nil}, dirs: map[string]bool{"": true}}
+		bySession[sessionID] = p
 		return p, nil
 	}
-	p := &memoryProvider{files: map[string][]byte{"": nil}, dirs: map[string]bool{"": true}}
-	f.bySession[sessionID] = p
-	return p, nil
 }
 
 type memoryProvider struct {
@@ -55,7 +47,10 @@ func (p *memoryProvider) Stat(_ context.Context, name string) (FileInfo, error) 
 	if !ok {
 		return FileInfo{}, ErrNotExist
 	}
-	return FileInfo{Name: path.Base(name), Size: int64(len(b)), Mode: 0o644, ModTime: time.Time{}}, nil
+	return FileInfo{
+		Name: path.Base(name), Size: int64(len(b)), Mode: 0o644, ModTime: time.Time{},
+		MediaType: DetectMediaType(path.Base(name), b),
+	}, nil
 }
 
 func (p *memoryProvider) OpenFile(_ context.Context, name string, flag int, _ fs.FileMode) (File, error) {

@@ -112,11 +112,7 @@ func TestUnionProvider_invalidPath(t *testing.T) {
 
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
-	reg := NewBackendRegistry()
-	if err := reg.Register(LocalFactory{ID: "a", Base: t.TempDir()}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := reg.openUnion(canceled, "s", MountSpec{Profile: "skills", Members: []MountSpec{{Profile: "a"}}}); err == nil {
-		t.Fatal("openUnion canceled")
+	if _, err := Union(Local(t.TempDir()))(canceled, "s", Binding{}); err == nil {
+		t.Fatal("Union canceled")
 	}
 }

@@ -615,17 +615,6 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 // return neighbor paths; unindexed /work artifact fails until index_file.
 func TestBrainTools_engramPathGraph(t *testing.T) {
 	ctx := context.Background()
-	reg := vfs.NewBackendRegistry()
-	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: t.TempDir()}); err != nil {
-		t.Fatal(err)
-	}
-	ms, err := vfs.NewMountSession("engram-graph", reg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
-		t.Fatal(err)
-	}
 	g := brain.NewMemoryGraph()
 	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithGraph(g), brain.WithKinds(
 		brain.KindSpec{Kind: "Deal", IsParent: true},
@@ -641,7 +630,10 @@ func TestBrainTools_engramPathGraph(t *testing.T) {
 		t.Fatal(err)
 	}
 	ns := brain.MustNamespace("id", uuid.NewString())
-	mustMountBrain(ctx, t, reg, ms, eng, ns, vfs.MountSpec{})
+	ms := mustMountTree(t, "engram-graph",
+		vfs.At("work", vfs.Local(t.TempDir())),
+		vfs.At("engram", brain.Open(eng, brain.Scope{Namespace: ns})),
+	)
 	h := mustNewTurnManager(t, AgentOptions{
 		SessionID:    "engram-graph",
 		MountSession: ms, Model: &mockStrategy{},
@@ -650,10 +642,10 @@ func TestBrainTools_engramPathGraph(t *testing.T) {
 	t.Cleanup(h.Close)
 	activatePlan(t, h)
 
-	if err := ms.WriteFile(ctx, "/engram/deal/acme.md", []byte("---\ndomain: Deal\nslug: acme\n---\n\nDeal body.\n")); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/engram/deal/acme.md", []byte("---\ndomain: Deal\nslug: acme\n---\n\nDeal body.\n")); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.WriteFile(ctx, "/engram/person/sam.md", []byte("---\ndomain: Person\nslug: sam\n---\n\nBuyer.\n")); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/engram/person/sam.md", []byte("---\ndomain: Person\nslug: sam\n---\n\nBuyer.\n")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -664,18 +656,18 @@ func TestBrainTools_engramPathGraph(t *testing.T) {
 		t.Fatal("link/expand/find_links required")
 	}
 	lout, err := link.invoke(ctx, `{
-		"from":"/engram/deal/acme.md","to":"/engram/person/sam.md",
+		"from":"/workspace/engram/deal/acme.md","to":"/workspace/engram/person/sam.md",
 		"relation_type":"has_contact","role":"buyer","note":"primary buyer"
 	}`, turnRuntime(h))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(lout.output, "/engram/deal/acme.md") || !strings.Contains(lout.output, "/engram/person/sam.md") {
+	if !strings.Contains(lout.output, "/workspace/engram/deal/acme.md") || !strings.Contains(lout.output, "/workspace/engram/person/sam.md") {
 		t.Fatalf("link paths: %s", lout.output)
 	}
 
-	eout, err := expand.invoke(ctx, `{"path":"/engram/deal/acme.md","relation_types":["has_contact"]}`, turnRuntime(h))
-	if err != nil || !strings.Contains(eout.output, "/engram/person/sam.md") {
+	eout, err := expand.invoke(ctx, `{"path":"/workspace/engram/deal/acme.md","relation_types":["has_contact"]}`, turnRuntime(h))
+	if err != nil || !strings.Contains(eout.output, "/workspace/engram/person/sam.md") {
 		t.Fatalf("expand neighbor path: %v %s", err, eout.output)
 	}
 
@@ -686,25 +678,25 @@ func TestBrainTools_engramPathGraph(t *testing.T) {
 	if !strings.Contains(fout.output, "from_path") || !strings.Contains(fout.output, "to_path") {
 		t.Fatalf("find_links path fields: %s", fout.output)
 	}
-	if !strings.Contains(fout.output, "/engram/deal/acme.md") || !strings.Contains(fout.output, "/engram/person/sam.md") {
+	if !strings.Contains(fout.output, "/workspace/engram/deal/acme.md") || !strings.Contains(fout.output, "/workspace/engram/person/sam.md") {
 		t.Fatalf("find_links endpoints: %s", fout.output)
 	}
 
-	if err := ms.WriteFile(ctx, "/work/doc.md", []byte("# Doc\n\nartifact\n")); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/work/doc.md", []byte("# Doc\n\nartifact\n")); err != nil {
 		t.Fatal(err)
 	}
 	_, err = link.invoke(ctx, `{
-		"from":"/work/doc.md","to":"/engram/deal/acme.md","relation_type":"about"
+		"from":"/workspace/work/doc.md","to":"/workspace/engram/deal/acme.md","relation_type":"about"
 	}`, turnRuntime(h))
 	if err == nil || !strings.Contains(err.Error(), "not indexed") {
 		t.Fatalf("unindexed artifact: %v", err)
 	}
 	idx := h.findTool("index_file", "")
-	if _, err := runWriteTool(t, h, idx, `{"path":"/work/doc.md"}`); err != nil {
+	if _, err := runWriteTool(t, h, idx, `{"path":"/workspace/work/doc.md"}`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := link.invoke(ctx, `{
-		"from":"/work/doc.md","to":"/engram/deal/acme.md","relation_type":"about"
+		"from":"/workspace/work/doc.md","to":"/workspace/engram/deal/acme.md","relation_type":"about"
 	}`, turnRuntime(h)); err != nil {
 		t.Fatal(err)
 	}
@@ -714,12 +706,12 @@ func TestBrainTools_engramPathGraph(t *testing.T) {
 		t.Fatal("unlink required")
 	}
 	if _, err := unlink.invoke(ctx, `{
-		"from":"/engram/deal/acme.md","to":"/engram/person/sam.md","relation_type":"has_contact"
+		"from":"/workspace/engram/deal/acme.md","to":"/workspace/engram/person/sam.md","relation_type":"has_contact"
 	}`, turnRuntime(h)); err != nil {
 		t.Fatal(err)
 	}
-	eout2, err := expand.invoke(ctx, `{"path":"/engram/deal/acme.md","relation_types":["has_contact"]}`, turnRuntime(h))
-	if err != nil || strings.Contains(eout2.output, "/engram/person/sam.md") {
+	eout2, err := expand.invoke(ctx, `{"path":"/workspace/engram/deal/acme.md","relation_types":["has_contact"]}`, turnRuntime(h))
+	if err != nil || strings.Contains(eout2.output, "/workspace/engram/person/sam.md") {
 		t.Fatalf("after unlink: %v %s", err, eout2.output)
 	}
 }

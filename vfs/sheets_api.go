@@ -54,6 +54,11 @@ type googleSheets struct {
 	service *sheets.Service
 }
 
+// NewGoogleSheets builds a SheetsAPI from a user token holder.
+func NewGoogleSheets(ctx context.Context, holder *TokenHolder) (SheetsAPI, error) {
+	return newGoogleSheets(ctx, holder)
+}
+
 func newGoogleSheets(ctx context.Context, holder *TokenHolder) (*googleSheets, error) {
 	if holder == nil {
 		return nil, fmt.Errorf("vfs: sheets token required")

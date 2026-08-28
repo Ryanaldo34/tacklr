@@ -7,11 +7,23 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"net/http"
 	"path"
 	"strings"
 	"time"
 )
+
+// GraphAPI is the OneDrive/SharePoint subset. Tests inject a fake; hosts
+// call NewGraph (no Microsoft SDK import).
+type GraphAPI interface {
+	ResolveRoot(ctx context.Context, driveID, itemID, siteID, account string) (driveIDOut, itemIDOut string, err error)
+	GetItem(ctx context.Context, driveID, itemID string) (graphItem, error)
+	GetByPath(ctx context.Context, driveID, itemID, rel string) (graphItem, error)
+	ListChildren(ctx context.Context, driveID, itemID string) ([]graphItem, error)
+	GetContent(ctx context.Context, driveID, itemID string) (io.ReadCloser, int64, error)
+	PutContent(ctx context.Context, driveID, itemID, name, parentID string, r io.Reader, size int64) (graphItem, error)
+	CreateFolder(ctx context.Context, driveID, parentID, name string) (graphItem, error)
+	Delete(ctx context.Context, driveID, itemID string) error
+}
 
 // graphItem is one Graph file or folder (IDs stay inside the provider).
 type graphItem struct {
@@ -21,68 +33,47 @@ type graphItem struct {
 	LastModified             string
 }
 
-// GraphFactory opens OneDrive / SharePoint library providers. Auth is session-scoped.
-// Base and HTTP are for tests: point the official client at testhttp.Server.
-//
-// Account is organization (default) or personal. Organization mounts require
-// siteId (SharePoint library) or driveId. Personal mounts use /me/drive when
-// those params are empty. A bind can override with params["account"].
-type GraphFactory struct {
-	ID      string
-	Auth    *SessionAuth
-	Account string       // organization (default) or personal
-	Base    string       // optional Graph root URL (tests)
-	HTTP    *http.Client // optional; tests inject testhttp.Server.Client
-}
-
-// Profile implements ProviderFactory.
-func (f GraphFactory) Profile() string { return f.ID }
-
-// TokenAuth implements TokenSource.
-func (f GraphFactory) TokenAuth() *SessionAuth { return f.Auth }
-
-var _ TokenSource = GraphFactory{}
-
-// Open implements ProviderFactory.
-func (f GraphFactory) Open(ctx context.Context, sessionID string, spec MountSpec) (Provider, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
+// Graph opens OneDrive / SharePoint. api is a NewGraph result or a test fake.
+func Graph(api GraphAPI, holder *TokenHolder, account string) Open {
+	if api == nil {
+		panic("vfs: Graph requires a GraphAPI client")
 	}
-	if f.ID == "" {
-		return nil, fmt.Errorf("vfs: msgraph factory needs id")
+	return func(ctx context.Context, _ string, b Binding) (Provider, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		h := b.Live
+		if h == nil {
+			h = holder
+		}
+		if h == nil && strings.TrimSpace(b.Auth.Token) != "" {
+			h = NewTokenHolder(b.Auth)
+		}
+		if h == nil || h.Current().Token == "" {
+			return nil, fmt.Errorf("vfs: msgraph access token required")
+		}
+		acct, err := graphAccount(account, b.Params[ParamAccount])
+		if err != nil {
+			return nil, err
+		}
+		driveID := strings.TrimSpace(b.Params[ParamDriveID])
+		itemID := strings.TrimSpace(b.Params[ParamItemID])
+		siteID := strings.TrimSpace(b.Params[ParamSiteID])
+		if acct == AccountOrganization && driveID == "" && siteID == "" {
+			return nil, fmt.Errorf("vfs: msgraph organization account requires siteId or driveId")
+		}
+		driveID, itemID, err = api.ResolveRoot(ctx, driveID, itemID, siteID, acct)
+		if err != nil {
+			return nil, err
+		}
+		return &graphProvider{
+			api: api, driveID: driveID, rootID: itemID, holder: h, writable: b.Writable,
+		}, nil
 	}
-	var holder *TokenHolder
-	if f.Auth != nil {
-		holder = f.Auth.Holder(sessionID, f.ID)
-	}
-	if holder == nil || holder.Current().Token == "" {
-		return nil, fmt.Errorf("vfs: msgraph access token required")
-	}
-	sdk, err := newGraphSDK(holder, f.Base, f.HTTP)
-	if err != nil {
-		return nil, err
-	}
-	account, err := graphAccount(f.Account, spec.Params[ParamAccount])
-	if err != nil {
-		return nil, err
-	}
-	driveID := strings.TrimSpace(spec.Params[ParamDriveID])
-	itemID := strings.TrimSpace(spec.Params[ParamItemID])
-	siteID := strings.TrimSpace(spec.Params[ParamSiteID])
-	if account == AccountOrganization && driveID == "" && siteID == "" {
-		return nil, fmt.Errorf("vfs: msgraph organization account requires siteId or driveId")
-	}
-	driveID, itemID, err = sdk.resolveRoot(ctx, driveID, itemID, siteID, account)
-	if err != nil {
-		return nil, err
-	}
-	return &graphProvider{
-		api: sdk, driveID: driveID, rootID: itemID, holder: holder, writable: !spec.ReadOnly,
-	}, nil
 }
 
 type graphProvider struct {
-	api      *graphSDK
+	api      GraphAPI
 	driveID  string
 	rootID   string
 	holder   *TokenHolder

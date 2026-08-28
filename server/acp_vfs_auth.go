@@ -109,7 +109,7 @@ func (p *acpProtocol) handleVFSBind(ctx context.Context, env ProtocolEnv, pr *pa
 			errs = append(errs, itemErr{Point: item.Point, Error: err.Error()})
 			continue
 		}
-		if spec.FSRegistry != nil && !spec.FSRegistry.HasProfile(b.Provider) {
+		if spec.OpenVFS == nil {
 			errs = append(errs, itemErr{Point: item.Point, Error: "unknown vfs profile " + b.Provider})
 			continue
 		}

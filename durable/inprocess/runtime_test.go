@@ -113,14 +113,10 @@ func TestBindThenPromptReadsWorkspace(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("from-workspace"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	fsReg := vfs.NewBackendRegistry()
-	if err := fsReg.Register(vfs.LocalFactory{ID: "local", Base: dir}); err != nil {
-		t.Fatal(err)
-	}
 	model := &testkit.ScriptedModel{
 		InvokeFn: workspaceReadModel,
 	}
-	cat := newCatalog(t, model, durable.AgentSpec{FSRegistry: fsReg})
+	cat := newCatalog(t, model, durable.AgentSpec{OpenVFS: vfs.Tree(vfs.At("docs", vfs.Local(dir)))})
 	rt := New(cat, WithProjection(vfs.DirectProjection{}))
 	id, err := rt.CreateSession(ctx, durable.CreateSession{AgentID: "default"})
 	if err != nil {
@@ -159,14 +155,10 @@ func TestUnbindThenPromptWorkspaceGone(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("from-workspace"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	fsReg := vfs.NewBackendRegistry()
-	if err := fsReg.Register(vfs.LocalFactory{ID: "local", Base: dir}); err != nil {
-		t.Fatal(err)
-	}
 	model := &testkit.ScriptedModel{
 		InvokeFn: workspaceReadModel,
 	}
-	rt := New(newCatalog(t, model, durable.AgentSpec{FSRegistry: fsReg}), WithProjection(vfs.DirectProjection{}))
+	rt := New(newCatalog(t, model, durable.AgentSpec{OpenVFS: bindLocalDocs(dir)}), WithProjection(vfs.DirectProjection{}))
 	id, err := rt.CreateSession(ctx, durable.CreateSession{AgentID: "default"})
 	if err != nil {
 		t.Fatal(err)
@@ -618,10 +610,6 @@ func TestNewSessionDoesNotLoadPreviousSnapshot(t *testing.T) {
 func TestPrompt_readMissingPathCorrection(t *testing.T) {
 	ctx := t.Context()
 	dir := t.TempDir()
-	fsReg := vfs.NewBackendRegistry()
-	if err := fsReg.Register(vfs.LocalFactory{ID: "local", Base: dir}); err != nil {
-		t.Fatal(err)
-	}
 	model := &testkit.ScriptedModel{
 		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 			if last := lastMsg(msgs); last != nil && last.Role == tacklr.RoleTool {
@@ -638,7 +626,7 @@ func TestPrompt_readMissingPathCorrection(t *testing.T) {
 			}
 		},
 	}
-	rt := New(newCatalog(t, model, durable.AgentSpec{FSRegistry: fsReg}), WithProjection(vfs.DirectProjection{}))
+	rt := New(newCatalog(t, model, durable.AgentSpec{OpenVFS: vfs.Tree(vfs.At("docs", vfs.Local(dir)))}), WithProjection(vfs.DirectProjection{}))
 	id, err := rt.CreateSession(ctx, durable.CreateSession{AgentID: "default"})
 	if err != nil {
 		t.Fatal(err)
@@ -717,6 +705,17 @@ func TestPrompt_toolFailedServiceString(t *testing.T) {
 	}
 	if sentence == "" {
 		t.Fatalf("want service-failed tool_result, got %+v", summarize(got))
+	}
+}
+
+func bindLocalDocs(dir string) vfs.OpenVFS {
+	return func(ctx context.Context, sid string, req vfs.Request) (*vfs.MountSession, error) {
+		if _, ok := vfs.BindingByName(req.Bindings, "docs"); !ok {
+			if _, ok := vfs.BindingByName(req.Bindings, "local"); !ok {
+				return vfs.Tree()(ctx, sid, req)
+			}
+		}
+		return vfs.Tree(vfs.At("docs", vfs.Local(dir)))(ctx, sid, req)
 	}
 }
 
@@ -909,11 +908,7 @@ func TestCreateSessionMountsThenPromptTokensRemount(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("from-workspace"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	fsReg := vfs.NewBackendRegistry()
-	if err := fsReg.Register(vfs.LocalFactory{ID: "local", Base: dir}); err != nil {
-		t.Fatal(err)
-	}
-	rt := New(newCatalog(t, &testkit.ScriptedModel{InvokeFn: workspaceReadModel}, durable.AgentSpec{FSRegistry: fsReg}), WithProjection(vfs.DirectProjection{}))
+	rt := New(newCatalog(t, &testkit.ScriptedModel{InvokeFn: workspaceReadModel}, durable.AgentSpec{OpenVFS: vfs.Tree(vfs.At("docs", vfs.Local(dir)))}), WithProjection(vfs.DirectProjection{}))
 	id, err := rt.CreateSession(ctx, durable.CreateSession{
 		AgentID: "default",
 		Mounts: []durable.MountRecipe{{
@@ -953,12 +948,9 @@ func TestCreateSessionMountsThenPromptTokensRemount(t *testing.T) {
 
 func TestBadWorkspaceBindingFailsTurn(t *testing.T) {
 	ctx := t.Context()
-	fsReg := vfs.NewBackendRegistry()
-	if err := fsReg.Register(vfs.LocalFactory{ID: "local", Base: filepath.Join(t.TempDir(), "missing")}); err != nil {
-		t.Fatal(err)
-	}
+	missing := filepath.Join(t.TempDir(), "missing")
 	model := &testkit.ScriptedModel{InvokeFn: workspaceReadModel}
-	rt := New(newCatalog(t, model, durable.AgentSpec{FSRegistry: fsReg}), WithProjection(vfs.DirectProjection{}))
+	rt := New(newCatalog(t, model, durable.AgentSpec{OpenVFS: vfs.Tree(vfs.At("docs", vfs.Local(missing)))}), WithProjection(vfs.DirectProjection{}))
 	id, err := rt.CreateSession(ctx, durable.CreateSession{AgentID: "default"})
 	if err != nil {
 		t.Fatal(err)

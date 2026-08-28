@@ -72,11 +72,7 @@ func TestACP_handleInbound_notificationsAndUnknown(t *testing.T) {
 
 func TestACP_handleInbound_sessionAndAuthOutcomes(t *testing.T) {
 	dir := t.TempDir()
-	reg := vfs.NewBackendRegistry()
-	if err := reg.Register(vfs.LocalFactory{ID: "local", Base: dir}); err != nil {
-		t.Fatal(err)
-	}
-	k := newTestRuntime(t, nil, durable.AgentSpec{FSRegistry: reg})
+	k := newTestRuntime(t, nil, durable.AgentSpec{OpenVFS: vfs.Tree(vfs.At("docs", vfs.Local(dir)))})
 	ctx := t.Context()
 
 	authRec := &recordingMessageWriter{}
@@ -102,8 +98,8 @@ func TestACP_handleInbound_sessionAndAuthOutcomes(t *testing.T) {
 	}
 	initBody := rec.Results[len(rec.Results)-1].Result
 	raw, _ := json.Marshal(initBody)
-	if !strings.Contains(string(raw), `"local"`) {
-		t.Fatalf("initialize vfs providers: %s", raw)
+	if !strings.Contains(string(raw), `"credentials":true`) || !strings.Contains(string(raw), `"tokenRefresh":true`) {
+		t.Fatalf("initialize vfs capability: %s", raw)
 	}
 
 	_ = p.HandleInbound(ctx, env, []byte(`{"jsonrpc":"2.0","id":4,"method":"session/new","params":"bad"}`))

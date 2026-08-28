@@ -17,28 +17,16 @@ import (
 
 func vfsIndexHarness(t *testing.T, withNS bool) (*TurnManager, *vfs.MountSession, *brain.Engine, brain.Namespace) {
 	t.Helper()
-	ctx := context.Background()
-	base := t.TempDir()
-	reg := vfs.NewBackendRegistry()
-	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
-		t.Fatal(err)
-	}
-	ms, err := vfs.NewMountSession("vfs-idx-tools", reg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
-		t.Fatal(err)
-	}
 	store := brain.NewMemoryStore()
 	eng, err := brain.NewEngine(store)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...); err != nil {
+	if err := eng.ApplyKinds(t.Context(), vfsindex.MountIndexKinds()...); err != nil {
 		t.Fatal(err)
 	}
 	ns := brain.MustNamespace("id", uuid.NewString())
+	ms := mustMountTree(t, "vfs-idx-tools", vfs.At("work", vfs.Local(t.TempDir())))
 	opts := AgentOptions{
 		SessionID:       "vfs-idx-tools",
 		MountSession:    ms,
@@ -52,25 +40,6 @@ func vfsIndexHarness(t *testing.T, withNS bool) (*TurnManager, *vfs.MountSession
 	h := mustNewTurnManager(t, opts)
 	t.Cleanup(h.Close)
 	return h, ms, eng, ns
-}
-
-func mustMountBrain(ctx context.Context, t *testing.T, reg *vfs.BackendRegistry, ms *vfs.MountSession, eng *brain.Engine, ns brain.Namespace, spec vfs.MountSpec) {
-	t.Helper()
-	if spec.Profile == "" {
-		spec.Profile = brain.DefaultProfile
-	}
-	if spec.Point == "" {
-		spec.Point = brain.DefaultMountPoint
-	}
-	if spec.IndexPolicy == "" {
-		spec.IndexPolicy = vfsindex.PolicyNone
-	}
-	if err := reg.Register(brain.BrainFactory{Engine: eng, Scope: brain.Scope{Namespace: ns}}); err != nil {
-		t.Fatal(err)
-	}
-	if err := ms.Mount(ctx, spec); err != nil {
-		t.Fatal(err)
-	}
 }
 
 func activatePlan(t *testing.T, h *TurnManager) {
@@ -124,12 +93,9 @@ func TestVFSIndexTools_indexSearchUnindex(t *testing.T) {
 	if indexTool == nil || unindexTool == nil {
 		t.Fatal("index_file and unindex required when Brain+VFS+ns")
 	}
-	if _, err := ms.Stat(ctx, "/memory"); err != nil {
-		t.Fatalf("scratch /memory mount: %v", err)
-	}
 
 	body := "alpha line\nbeta TODO findme-xyz\ngamma\n"
-	if err := ms.WriteFile(ctx, "/work/note.txt", []byte(body)); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/work/note.txt", []byte(body)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -137,65 +103,65 @@ func TestVFSIndexTools_indexSearchUnindex(t *testing.T) {
 		t.Fatalf("index without path: %v", err)
 	}
 
-	out, err := runWriteTool(t, h, indexTool, `{"path":"/work/note.txt"}`)
+	out, err := runWriteTool(t, h, indexTool, `{"path":"/workspace/work/note.txt"}`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "indexed path=/work/note.txt") && !strings.Contains(out, "skipped path=/work/note.txt") {
+	if !strings.Contains(out, "indexed path=/workspace/work/note.txt") && !strings.Contains(out, "skipped path=/workspace/work/note.txt") {
 		t.Fatalf("index: %q", out)
 	}
 
 	hit := waitSearchHit(t, eng, scope, "findme-xyz", 3*time.Second)
-	if hit.Properties[vfsindex.PropVFSPath] != "/work/note.txt" {
+	if hit.Properties[vfsindex.PropVFSPath] != "/workspace/work/note.txt" {
 		t.Fatalf("vfs_path: %+v", hit.Properties)
 	}
 
 	// Second index same hash → skipped (async or explicit already wrote).
-	out, err = runWriteTool(t, h, indexTool, `{"path":"/work/note.txt"}`)
+	out, err = runWriteTool(t, h, indexTool, `{"path":"/workspace/work/note.txt"}`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "skipped path=/work/note.txt") {
+	if !strings.Contains(out, "skipped path=/workspace/work/note.txt") {
 		t.Fatalf("skip: %q", out)
 	}
 
-	out, err = runWriteTool(t, h, unindexTool, `{"path":"/work/note.txt"}`)
+	out, err = runWriteTool(t, h, unindexTool, `{"path":"/workspace/work/note.txt"}`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "unindexed path=/work/note.txt") {
+	if !strings.Contains(out, "unindexed path=/workspace/work/note.txt") {
 		t.Fatalf("unindex: %q", out)
 	}
-	if _, err := ms.Stat(ctx, "/work/note.txt"); err != nil {
+	if _, err := ms.Stat(ctx, "/workspace/work/note.txt"); err != nil {
 		t.Fatal("VFS file must remain after unindex")
 	}
 
-	out, err = runWriteTool(t, h, unindexTool, `{"path":"/work/note.txt"}`)
+	out, err = runWriteTool(t, h, unindexTool, `{"path":"/workspace/work/note.txt"}`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "noop path=/work/note.txt") {
+	if !strings.Contains(out, "noop path=/workspace/work/note.txt") {
 		t.Fatalf("noop: %q", out)
 	}
 
 	// Recovery: unindex resets hash-skip so the next index_file writes again.
-	out, err = runWriteTool(t, h, indexTool, `{"path":"/work/note.txt"}`)
+	out, err = runWriteTool(t, h, indexTool, `{"path":"/workspace/work/note.txt"}`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "indexed path=/work/note.txt") {
+	if !strings.Contains(out, "indexed path=/workspace/work/note.txt") {
 		t.Fatalf("reindex: %q", out)
 	}
 	hit2 := waitSearchHit(t, eng, scope, "findme-xyz", 3*time.Second)
-	if hit2.Properties[vfsindex.PropVFSPath] != "/work/note.txt" {
+	if hit2.Properties[vfsindex.PropVFSPath] != "/workspace/work/note.txt" {
 		t.Fatalf("reindex vfs_path: %+v", hit2.Properties)
 	}
 
 	// Directory in a batch rejects before any IndexPath (no partial index).
-	if err := ms.WriteFile(ctx, "/work/batch-only.txt", []byte("batch-unique-phrase-zzz\n")); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/work/batch-only.txt", []byte("batch-unique-phrase-zzz\n")); err != nil {
 		t.Fatal(err)
 	}
-	_, err = runWriteTool(t, h, indexTool, `{"paths":["/work/batch-only.txt","/work"]}`)
+	_, err = runWriteTool(t, h, indexTool, `{"paths":["/workspace/work/batch-only.txt","/workspace/work"]}`)
 	if err == nil || !strings.Contains(err.Error(), "directory") {
 		t.Fatalf("index_file directory in batch: %v", err)
 	}
@@ -216,7 +182,7 @@ func TestVFSIndexTools_selectiveIndexSearchReadAndTrack(t *testing.T) {
 	ctx := context.Background()
 	scope := brain.Scope{Namespace: ns}
 
-	spec, err := ms.SpecAt("/work/x")
+	spec, err := ms.SpecAt("/workspace/work/x")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,15 +191,15 @@ func TestVFSIndexTools_selectiveIndexSearchReadAndTrack(t *testing.T) {
 	}
 
 	body := "line one\nline two unique-phrase-selective-aaa\nline three\n"
-	if err := ms.WriteFile(ctx, "/work/sel.txt", []byte(body)); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/work/sel.txt", []byte(body)); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := runWriteTool(t, h, h.findTool("index_file", ""), `{"path":"/work/sel.txt"}`); err != nil {
+	if _, err := runWriteTool(t, h, h.findTool("index_file", ""), `{"path":"/workspace/work/sel.txt"}`); err != nil {
 		t.Fatal(err)
 	}
 	hit := waitSearchHit(t, eng, scope, "unique-phrase-selective-aaa", 3*time.Second)
-	if hit.Properties[vfsindex.PropVFSPath] != "/work/sel.txt" {
+	if hit.Properties[vfsindex.PropVFSPath] != "/workspace/work/sel.txt" {
 		t.Fatalf("search vfs_path: %+v", hit.Properties)
 	}
 	search := h.findTool("search", "")
@@ -241,7 +207,7 @@ func TestVFSIndexTools_selectiveIndexSearchReadAndTrack(t *testing.T) {
 		t.Fatal("search required")
 	}
 	sout, err := search.invoke(ctx, `{"query":"unique-phrase-selective-aaa"}`, turnRuntime(h))
-	if err != nil || !strings.Contains(sout.output, "/work/sel.txt") {
+	if err != nil || !strings.Contains(sout.output, "/workspace/work/sel.txt") {
 		t.Fatalf("search after index: %q err=%v", sout.output, err)
 	}
 	readTool := h.findTool("read", "")
@@ -251,7 +217,7 @@ func TestVFSIndexTools_selectiveIndexSearchReadAndTrack(t *testing.T) {
 	if h.findTool("read_object", "") == nil {
 		t.Fatal("read_object required when Brain is on")
 	}
-	readOut, err := readTool.invoke(ctx, `{"path":"/work/sel.txt","start":1,"end":10}`, turnRuntime(h))
+	readOut, err := readTool.invoke(ctx, `{"path":"/workspace/work/sel.txt","start":1,"end":10}`, turnRuntime(h))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -259,7 +225,7 @@ func TestVFSIndexTools_selectiveIndexSearchReadAndTrack(t *testing.T) {
 		t.Fatalf("read after search: %s", readOut.output)
 	}
 
-	if err := ms.WriteFile(ctx, "/work/sel.txt", []byte("unique-phrase-selective-bbb\n")); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/work/sel.txt", []byte("unique-phrase-selective-bbb\n")); err != nil {
 		t.Fatal(err)
 	}
 	_ = waitSearchHit(t, eng, scope, "unique-phrase-selective-bbb", 3*time.Second)
@@ -268,20 +234,7 @@ func TestVFSIndexTools_selectiveIndexSearchReadAndTrack(t *testing.T) {
 // TestVFSIndexTools_prefixAutoIndex: prefix policy indexes on persist without index_file.
 func TestVFSIndexTools_prefixAutoIndex(t *testing.T) {
 	ctx := context.Background()
-	base := t.TempDir()
-	reg := vfs.NewBackendRegistry()
-	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
-		t.Fatal(err)
-	}
-	ms, err := vfs.NewMountSession("policy-prefix", reg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := ms.Mount(ctx, vfs.MountSpec{
-		Point: "/work", Profile: "scratch", IndexPolicy: "  Prefix  ",
-	}); err != nil {
-		t.Fatal(err)
-	}
+	ms := mustMountTree(t, "policy-prefix", vfs.At("work", vfs.Local(t.TempDir())).Indexed("  Prefix  "))
 	eng, err := brain.NewEngine(brain.NewMemoryStore())
 	if err != nil {
 		t.Fatal(err)
@@ -297,7 +250,7 @@ func TestVFSIndexTools_prefixAutoIndex(t *testing.T) {
 	})
 	t.Cleanup(h.Close)
 
-	if err := ms.WriteFile(ctx, "/work/auto.txt", []byte("prefix-auto-phrase-xyz\n")); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/work/auto.txt", []byte("prefix-auto-phrase-xyz\n")); err != nil {
 		t.Fatal(err)
 	}
 	_ = waitSearchHit(t, eng, brain.Scope{Namespace: ns}, "prefix-auto-phrase-xyz", 3*time.Second)
@@ -307,18 +260,6 @@ func TestVFSIndexTools_prefixAutoIndex(t *testing.T) {
 // (not scratch /memory). Update-by-object_id rewrites the same path.
 func TestKnowledgeSaveSearchRead(t *testing.T) {
 	ctx := context.Background()
-	base := t.TempDir()
-	reg := vfs.NewBackendRegistry()
-	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
-		t.Fatal(err)
-	}
-	ms, err := vfs.NewMountSession("save-mem", reg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
-		t.Fatal(err)
-	}
 	g := brain.NewMemoryGraph()
 	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithGraph(g), brain.WithKinds(
 		brain.KindSpec{Kind: "Discovery", IsParent: true},
@@ -334,7 +275,10 @@ func TestKnowledgeSaveSearchRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	ns := brain.MustNamespace("id", uuid.NewString())
-	mustMountBrain(ctx, t, reg, ms, eng, ns, vfs.MountSpec{})
+	ms := mustMountTree(t, "save-mem",
+		vfs.At("work", vfs.Local(t.TempDir())),
+		vfs.At("engram", brain.Open(eng, brain.Scope{Namespace: ns})),
+	)
 	h := mustNewTurnManager(t, AgentOptions{
 		SessionID:    "save-mem",
 		MountSession: ms, Model: &mockStrategy{},
@@ -364,7 +308,7 @@ func TestKnowledgeSaveSearchRead(t *testing.T) {
 	if err := json.Unmarshal([]byte(out.output), &res); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(res.Path, "/engram/discovery/") || res.Rev == "" || res.ObjectID == "" || res.Kind != "Discovery" {
+	if !strings.HasPrefix(res.Path, "/workspace/engram/discovery/") || res.Rev == "" || res.ObjectID == "" || res.Kind != "Discovery" {
 		t.Fatalf("save result: %+v raw=%s", res, out.output)
 	}
 	body, err := ms.ReadFile(ctx, res.Path)
@@ -437,18 +381,6 @@ func TestKnowledgeSaveSearchRead(t *testing.T) {
 // TestKnowledgeSave_rootsMount: save_discovery writes /discovery/{slug}.md (ModeRoots).
 func TestKnowledgeSave_rootsMount(t *testing.T) {
 	ctx := context.Background()
-	base := t.TempDir()
-	reg := vfs.NewBackendRegistry()
-	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
-		t.Fatal(err)
-	}
-	ms, err := vfs.NewMountSession("save-roots", reg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
-		t.Fatal(err)
-	}
 	g := brain.NewMemoryGraph()
 	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithGraph(g), brain.WithKinds(
 		brain.KindSpec{Kind: "Discovery", IsParent: true},
@@ -462,10 +394,16 @@ func TestKnowledgeSave_rootsMount(t *testing.T) {
 		t.Fatal(err)
 	}
 	ns := brain.MustNamespace("id", uuid.NewString())
-	mustMountBrain(ctx, t, reg, ms, eng, ns, vfs.MountSpec{
-		Point: "/discovery", Profile: brain.DefaultProfile,
-		Params: map[string]string{"mode": brain.ModeRoots, "kind": "Discovery"},
-	})
+	ms := mustMountTreeReq(t, "save-roots", vfs.Request{Bindings: []vfs.Binding{{
+		Params: map[string]string{
+			vfs.ParamName: "discovery",
+			"mode":        brain.ModeRoots,
+			"kind":        "Discovery",
+		},
+	}}},
+		vfs.At("work", vfs.Local(t.TempDir())),
+		vfs.At("discovery", brain.Open(eng, brain.Scope{Namespace: ns})).Profile("brain").Indexed(vfsindex.PolicyNone),
+	)
 	h := mustNewTurnManager(t, AgentOptions{
 		SessionID:    "save-roots",
 		MountSession: ms, Model: &mockStrategy{},
@@ -490,7 +428,7 @@ func TestKnowledgeSave_rootsMount(t *testing.T) {
 	if err := json.Unmarshal([]byte(out.output), &res); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(res.Path, "/discovery/") || !strings.HasSuffix(res.Path, ".md") {
+	if !strings.HasPrefix(res.Path, "/workspace/discovery/") || !strings.HasSuffix(res.Path, ".md") {
 		t.Fatalf("roots save path: %+v", res)
 	}
 	body, err := ms.ReadFile(ctx, res.Path)
@@ -511,18 +449,6 @@ func TestKnowledgeSave_rootsMount(t *testing.T) {
 // VFS, brain, namespace) plus a model that decides the next tool from the window.
 func TestRun_workspaceResearchTurn(t *testing.T) {
 	ctx := context.Background()
-	base := t.TempDir()
-	reg := vfs.NewBackendRegistry()
-	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
-		t.Fatal(err)
-	}
-	ms, err := vfs.NewMountSession("research-turn", reg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
-		t.Fatal(err)
-	}
 	g := brain.NewMemoryGraph()
 	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithGraph(g), brain.WithKinds(
 		brain.KindSpec{Kind: "Discovery", IsParent: true},
@@ -536,7 +462,10 @@ func TestRun_workspaceResearchTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 	ns := brain.MustNamespace("id", uuid.NewString())
-	mustMountBrain(ctx, t, reg, ms, eng, ns, vfs.MountSpec{})
+	ms := mustMountTree(t, "research-turn",
+		vfs.At("work", vfs.Local(t.TempDir())),
+		vfs.At("engram", brain.Open(eng, brain.Scope{Namespace: ns})),
+	)
 
 	wd := &recordingWatchdog{}
 	strategy := &mockStrategy{
@@ -569,19 +498,19 @@ func TestRun_workspaceResearchTurn(t *testing.T) {
 			}, IsComplete: true}
 		case 2:
 			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-				toolCall("w1", "write", `{"path":"/work/research.md","content":"# Notes\n\nunique-research-token for later search\n"}`),
+				toolCall("w1", "write", `{"path":"/workspace/work/research.md","content":"# Notes\n\nunique-research-token for later search\n"}`),
 			}, IsComplete: true}
 		case 3:
 			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-				toolCall("r1", "read", `{"path":"/work/research.md","start":1,"end":10}`),
+				toolCall("r1", "read", `{"path":"/workspace/work/research.md","start":1,"end":10}`),
 			}, IsComplete: true}
 		case 4:
 			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-				toolCall("i0", "index_file", `{"path":"/work"}`),
+				toolCall("i0", "index_file", `{"path":"/workspace/work"}`),
 			}, IsComplete: true}
 		case 5:
 			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
-				toolCall("i1", "index_file", `{"path":"/work/research.md"}`),
+				toolCall("i1", "index_file", `{"path":"/workspace/work/research.md"}`),
 			}, IsComplete: true}
 		case 6:
 			ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
@@ -645,17 +574,17 @@ func TestRun_workspaceResearchTurn(t *testing.T) {
 		return res.output
 	}
 	mustInvoke("create_plan", `{"plan":"index then wrap up","todos":[{"title":"index","status":"pending","description":"write and index"},{"title":"wrap-up","status":"pending","description":"report"}]}`)
-	mustInvoke("write", `{"path":"/work/research.md","content":"# Notes\n\nunique-research-token for later search\n"}`)
-	readOut := mustInvoke("read", `{"path":"/work/research.md","start":1,"end":10}`)
+	mustInvoke("write", `{"path":"/workspace/work/research.md","content":"# Notes\n\nunique-research-token for later search\n"}`)
+	readOut := mustInvoke("read", `{"path":"/workspace/work/research.md","start":1,"end":10}`)
 	if !strings.Contains(readOut, "unique-research-token") {
 		t.Fatalf("read: %s", readOut)
 	}
-	dirErr := mustInvoke("index_file", `{"path":"/work"}`)
+	dirErr := mustInvoke("index_file", `{"path":"/workspace/work"}`)
 	if !strings.Contains(strings.ToLower(dirErr), "directory") {
 		t.Fatalf("expected directory error, got %q", dirErr)
 	}
-	idx := mustInvoke("index_file", `{"path":"/work/research.md"}`)
-	if !strings.Contains(idx, "indexed path=/work/research.md") {
+	idx := mustInvoke("index_file", `{"path":"/workspace/work/research.md"}`)
+	if !strings.Contains(idx, "indexed path=/workspace/work/research.md") {
 		t.Fatalf("index: %s", idx)
 	}
 	mustInvoke("search", `{"query":"unique-research-token"}`)
@@ -663,7 +592,7 @@ func TestRun_workspaceResearchTurn(t *testing.T) {
 	if !strings.Contains(save, "object_id") {
 		t.Fatalf("save: %s", save)
 	}
-	if body, err := ms.ReadFile(ctx, "/work/research.md"); err != nil || !strings.Contains(string(body), "unique-research-token") {
+	if body, err := ms.ReadFile(ctx, "/workspace/work/research.md"); err != nil || !strings.Contains(string(body), "unique-research-token") {
 		t.Fatalf("vfs body: %s err=%v", body, err)
 	}
 	_ = waitSearchHit(t, eng, brain.Scope{Namespace: ns}, "unique-research-token", 3*time.Second)
@@ -679,18 +608,7 @@ func jsonString(s string) string {
 
 func TestPathNativeGraphLinkExpand(t *testing.T) {
 	ctx := context.Background()
-	base := t.TempDir()
-	reg := vfs.NewBackendRegistry()
-	if err := reg.Register(vfs.LocalFactory{ID: "scratch", Base: base}); err != nil {
-		t.Fatal(err)
-	}
-	ms, err := vfs.NewMountSession("path-graph", reg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := ms.Mount(ctx, vfs.MountSpec{Point: "/work", Profile: "scratch"}); err != nil {
-		t.Fatal(err)
-	}
+	ms := mustMountTree(t, "path-graph", vfs.At("work", vfs.Local(t.TempDir())))
 	store := brain.NewMemoryStore()
 	g := brain.NewMemoryGraph()
 	eng, err := brain.NewEngine(store, brain.WithGraph(g))
@@ -709,14 +627,14 @@ func TestPathNativeGraphLinkExpand(t *testing.T) {
 	t.Cleanup(h.Close)
 	activatePlan(t, h)
 
-	if err := ms.WriteFile(ctx, "/work/a.md", []byte("# A\n\napi doc\n")); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/work/a.md", []byte("# A\n\napi doc\n")); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.WriteFile(ctx, "/work/b.md", []byte("# B\n\nauth fact\n")); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/work/b.md", []byte("# B\n\nauth fact\n")); err != nil {
 		t.Fatal(err)
 	}
 	idx := h.findTool("index_file", "")
-	if _, err := runWriteTool(t, h, idx, `{"paths":["/work/a.md","/work/b.md"]}`); err != nil {
+	if _, err := runWriteTool(t, h, idx, `{"paths":["/workspace/work/a.md","/workspace/work/b.md"]}`); err != nil {
 		t.Fatal(err)
 	}
 
@@ -725,22 +643,22 @@ func TestPathNativeGraphLinkExpand(t *testing.T) {
 		t.Fatal("link required")
 	}
 	lout, err := link.invoke(ctx, `{
-		"from":"/work/a.md","to":"/work/b.md",
+		"from":"/workspace/work/a.md","to":"/workspace/work/b.md",
 		"relation_type":"references","note":"JWT section"
 	}`, turnRuntime(h))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(lout.output, `/work/a.md`) || !strings.Contains(lout.output, `/work/b.md`) {
+	if !strings.Contains(lout.output, `/workspace/work/a.md`) || !strings.Contains(lout.output, `/workspace/work/b.md`) {
 		t.Fatalf("link paths: %s", lout.output)
 	}
 
 	expand := h.findTool("expand", "")
-	eout, err := expand.invoke(ctx, `{"path":"/work/a.md","relation_types":["references"]}`, turnRuntime(h))
+	eout, err := expand.invoke(ctx, `{"path":"/workspace/work/a.md","relation_types":["references"]}`, turnRuntime(h))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(eout.output, "/work/b.md") || !strings.Contains(eout.output, "JWT section") {
+	if !strings.Contains(eout.output, "/workspace/work/b.md") || !strings.Contains(eout.output, "JWT section") {
 		t.Fatalf("expand path neighbor: %s", eout.output)
 	}
 
@@ -755,7 +673,7 @@ func TestPathNativeGraphLinkExpand(t *testing.T) {
 	if !strings.Contains(fout.output, "from_path") || !strings.Contains(fout.output, "to_path") {
 		t.Fatalf("find_links path fields: %s", fout.output)
 	}
-	if !strings.Contains(fout.output, "/work/a.md") || !strings.Contains(fout.output, "/work/b.md") {
+	if !strings.Contains(fout.output, "/workspace/work/a.md") || !strings.Contains(fout.output, "/workspace/work/b.md") {
 		t.Fatalf("find_links endpoints: %s", fout.output)
 	}
 	if _, err := fl.invoke(ctx, `{"relation_type":"","query":"JWT"}`, turnRuntime(h)); err == nil {

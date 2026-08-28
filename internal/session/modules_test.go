@@ -50,8 +50,7 @@ func TestSessionModules_surviveCheckpoint(t *testing.T) {
 	ns := brain.MustNamespace("org", "acme")
 	sm.Search.SetNamespace(ns)
 
-	reg := vfs.NewBackendRegistry()
-	ms, err := vfs.NewMountSession("sess-modules", reg)
+	ms, err := vfs.NewMountSession("sess-modules")
 	if err != nil {
 		t.Fatal(err)
 	}

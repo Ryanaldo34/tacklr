@@ -17,13 +17,6 @@ func TestACP_vfsBindRefreshUnbind(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("from-workspace"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	fsReg := vfs.NewBackendRegistry()
-	if err := fsReg.Register(vfs.LocalFactory{ID: "local", Base: dir}); err != nil {
-		t.Fatal(err)
-	}
-	if err := fsReg.Register(vfs.LocalFactory{ID: "other", Base: t.TempDir()}); err != nil {
-		t.Fatal(err)
-	}
 	strategy := &mockInferenceStrategy{
 		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 			if n := len(msgs); n > 0 {
@@ -43,7 +36,14 @@ func TestACP_vfsBindRefreshUnbind(t *testing.T) {
 			}
 		},
 	}
-	r := newTestRuntime(t, strategy, durable.AgentSpec{FSRegistry: fsReg})
+	r := newTestRuntime(t, strategy, durable.AgentSpec{OpenVFS: func(ctx context.Context, sid string, req vfs.Request) (*vfs.MountSession, error) {
+		if _, ok := vfs.BindingByName(req.Bindings, "docs"); !ok {
+			if _, ok := vfs.BindingByName(req.Bindings, "local"); !ok {
+				return vfs.Tree()(ctx, sid, req)
+			}
+		}
+		return vfs.Tree(vfs.At("docs", vfs.Local(dir)))(ctx, sid, req)
+	}})
 
 	recNew := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
 	sessionID := acpRPCResult(t, recNew)["sessionId"].(string)

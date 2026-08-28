@@ -90,9 +90,9 @@ func TestGraphSDK_adapterMapsStatusesTokenAndRedirect(t *testing.T) {
 		t.Fatalf("default base = %q err=%v", prod.adapter().GetBaseUrl(), err)
 	}
 
-	drive, item, err := api.resolveRoot(ctx, "", "", "", AccountPersonal)
+	drive, item, err := api.ResolveRoot(ctx, "", "", "", AccountPersonal)
 	if err != nil || drive != "drv" || item != "root" {
-		t.Fatalf("resolveRoot = %s %s err=%v", drive, item, err)
+		t.Fatalf("ResolveRoot = %s %s err=%v", drive, item, err)
 	}
 	note, err := api.GetItem(ctx, "drv", "note1")
 	if err != nil || note.Mime != "oneNote" || note.IsDir {
@@ -156,7 +156,7 @@ func TestGraphSDK_adapterMapsStatusesTokenAndRedirect(t *testing.T) {
 	}
 }
 
-func TestGraphSDK_resolveRootRejectsFileAndMissingDrive(t *testing.T) {
+func TestGraphSDK_ResolveRootRejectsFileAndMissingDrive(t *testing.T) {
 	ctx := t.Context()
 	writeJSON := func(w http.ResponseWriter, body any) {
 		w.Header().Set("Content-Type", "application/json")
@@ -185,16 +185,16 @@ func TestGraphSDK_resolveRootRejectsFileAndMissingDrive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := api.resolveRoot(ctx, "", "", "", AccountPersonal); !strings.Contains(err.Error(), "drive id missing") {
+	if _, _, err := api.ResolveRoot(ctx, "", "", "", AccountPersonal); !strings.Contains(err.Error(), "drive id missing") {
 		t.Fatalf("missing drive: %v", err)
 	}
-	if _, _, err := api.resolveRoot(ctx, "file-drv", "txt1", "", AccountOrganization); err == nil || !strings.Contains(err.Error(), "not a folder") {
+	if _, _, err := api.ResolveRoot(ctx, "file-drv", "txt1", "", AccountOrganization); err == nil || !strings.Contains(err.Error(), "not a folder") {
 		t.Fatalf("file root: %v", err)
 	}
-	if _, _, err := api.resolveRoot(ctx, "", "txt1", "site-1", AccountOrganization); err == nil || !strings.Contains(err.Error(), "not a folder") {
+	if _, _, err := api.ResolveRoot(ctx, "", "txt1", "site-1", AccountOrganization); err == nil || !strings.Contains(err.Error(), "not a folder") {
 		t.Fatalf("site file root: %v", err)
 	}
-	if _, _, err := api.resolveRoot(ctx, "", "", "bad", AccountOrganization); !errors.Is(err, ErrPermission) {
+	if _, _, err := api.ResolveRoot(ctx, "", "", "bad", AccountOrganization); !errors.Is(err, ErrPermission) {
 		t.Fatalf("site drive denied: %v", err)
 	}
 	canceled, cancel := context.WithCancel(ctx)
@@ -205,7 +205,7 @@ func TestGraphSDK_resolveRootRejectsFileAndMissingDrive(t *testing.T) {
 	if _, err := api.PutContent(ctx, "drv", "id", "n", "p", errReader{}, 1); err == nil {
 		t.Fatal("reader error")
 	}
-	if _, _, err := api.resolveRoot(ctx, "missing-drv", "root", "", AccountOrganization); !errors.Is(err, ErrNotExist) {
+	if _, _, err := api.ResolveRoot(ctx, "missing-drv", "root", "", AccountOrganization); !errors.Is(err, ErrNotExist) {
 		t.Fatalf("missing item: %v", err)
 	}
 	if api.absURL("https://example.test/x") != "https://example.test/x" {

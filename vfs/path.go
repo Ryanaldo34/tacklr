@@ -29,10 +29,17 @@ func ValidMountPoint(point string) error {
 	return nil
 }
 
-func validAlias(name string) error {
+func validMemberName(name string) error {
 	name = strings.TrimSpace(name)
 	if name == "" || strings.ContainsAny(name, "/\\\x00") || name == "." || name == ".." {
 		return fmt.Errorf("%w: alias must be one path segment", ErrInvalidPath)
+	}
+	return nil
+}
+
+func validAlias(name string) error {
+	if err := validMemberName(name); err != nil {
+		return err
 	}
 	switch name {
 	case "work", "engram", "skills", "workspace":

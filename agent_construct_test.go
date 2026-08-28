@@ -46,19 +46,8 @@ func TestNewTurnManager_constructFailClosed(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(root, "empty"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	reg := vfs.NewBackendRegistry()
-	if err := reg.Register(vfs.LocalFactory{ID: "skills", Base: root, Skills: "."}); err != nil {
-		t.Fatal(err)
-	}
-	ms, err := vfs.NewMountSession(t.Name(), reg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := ms.AttachSkills(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = ms.Close() })
-	_, err = NewTurnManager(context.Background(), AgentOptions{
+	ms := mustMountTree(t, t.Name(), vfs.At("skills", vfs.Local(root)))
+	_, err := NewTurnManager(context.Background(), AgentOptions{
 		Config:       Config{MaxWindowSize: 8192},
 		Model:        &mockStrategy{},
 		MountSession: ms,

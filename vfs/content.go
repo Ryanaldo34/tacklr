@@ -97,7 +97,7 @@ func kernelCreateOK(name string) bool {
 	return !ok || id
 }
 
-// ContentRegistry maps media type → Codec (process-scoped, like BackendRegistry).
+// ContentRegistry maps media type → Codec (process-scoped).
 type ContentRegistry struct {
 	mu     sync.RWMutex
 	codecs map[string]Codec

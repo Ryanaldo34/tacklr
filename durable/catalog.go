@@ -18,11 +18,8 @@ type AgentSpec struct {
 	// Options is the canonical agent definition. SessionID and MountSession
 	// must be empty; the runtime injects those per turn.
 	Options tacklr.AgentOptions
-	// FSRegistry resolves MountSpec.Profile (process-scoped).
-	FSRegistry *vfs.BackendRegistry
-	// FSBootstrap mounts applied each inference/tool step when a projection
-	// is available.
-	FSBootstrap []vfs.MountSpec
+	// OpenVFS builds the turn tree (typically vfs.Tree). Nil means no VFS.
+	OpenVFS vfs.OpenVFS
 }
 
 // Catalog is the agent lookup table. Hosts construct it and pass it to

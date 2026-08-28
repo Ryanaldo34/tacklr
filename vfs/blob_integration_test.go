@@ -27,52 +27,44 @@ func TestMountSession_azureBlobAzurite(t *testing.T) {
 	ctx := t.Context()
 	client, container := startAzurite(ctx, t)
 
-	reg := vfs.NewBackendRegistry()
-	if err := reg.Register(vfs.BlobFactory{
-		ID:               "blob",
-		Client:           vfs.AzureBlob{Client: client},
-		DefaultContainer: container,
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	ms, err := vfs.NewMountSession("sess-blob", reg)
+	ms, err := vfs.Tree(
+		vfs.At("data", vfs.Blob(vfs.AzureBlob{Client: client}, container)),
+		vfs.At("ro", vfs.Blob(vfs.AzureBlob{Client: client}, container)).ReadOnly(),
+	)(ctx, "sess-blob", vfs.Request{Bindings: []vfs.Binding{
+		{Params: map[string]string{vfs.ParamName: "data", "prefix": "runs/1"}},
+		{Params: map[string]string{vfs.ParamName: "ro", "prefix": "readonly"}},
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.Materialize(ctx, []vfs.MountSpec{
-		{Point: "/data", Profile: "blob", Params: map[string]string{"prefix": "runs/1"}},
-		{Point: "/ro", Profile: "blob", ReadOnly: true, Params: map[string]string{"prefix": "readonly"}},
-	}); err != nil {
-		t.Fatal(err)
-	}
+	t.Cleanup(func() { _ = ms.Close() })
 
-	if err := ms.WriteFile(ctx, "/data/hello.go", []byte("package main\n")); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/data/hello.go", []byte("package main\n")); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	b, err := ms.ReadFile(ctx, "/data/hello.go")
+	b, err := ms.ReadFile(ctx, "/workspace/data/hello.go")
 	if err != nil || string(b) != "package main\n" {
 		t.Fatalf("ReadFile = %q err=%v", b, err)
 	}
-	st, err := ms.Stat(ctx, "/data/hello.go")
+	st, err := ms.Stat(ctx, "/workspace/data/hello.go")
 	if err != nil || st.IsDir || st.Size != int64(len("package main\n")) {
 		t.Fatalf("Stat file = %+v err=%v", st, err)
 	}
 
-	if err := ms.MkdirAll(ctx, "/data/sub/dir"); err != nil {
+	if err := ms.MkdirAll(ctx, "/workspace/data/sub/dir"); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
-	if err := ms.WriteFile(ctx, "/data/sub/dir/a.txt", []byte("a")); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/data/sub/dir/a.txt", []byte("a")); err != nil {
 		t.Fatalf("WriteFile nested: %v", err)
 	}
-	ents, err := ms.ReadDir(ctx, "/data/sub/dir")
+	ents, err := ms.ReadDir(ctx, "/workspace/data/sub/dir")
 	if err != nil {
 		t.Fatalf("ReadDir: %v", err)
 	}
 	if len(ents) != 1 || ents[0].Name != "a.txt" || ents[0].IsDir {
 		t.Fatalf("ReadDir = %+v", ents)
 	}
-	ents, err = ms.ReadDir(ctx, "/data/sub")
+	ents, err = ms.ReadDir(ctx, "/workspace/data/sub")
 	if err != nil {
 		t.Fatalf("ReadDir sub: %v", err)
 	}
@@ -86,29 +78,29 @@ func TestMountSession_azureBlobAzurite(t *testing.T) {
 		t.Fatalf("expected dir in /data/sub: %+v", ents)
 	}
 
-	if err := ms.Remove(ctx, "/data/sub/dir/a.txt"); err != nil {
+	if err := ms.Remove(ctx, "/workspace/data/sub/dir/a.txt"); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
-	if _, err := ms.Stat(ctx, "/data/sub/dir/a.txt"); !errors.Is(err, vfs.ErrNotExist) {
+	if _, err := ms.Stat(ctx, "/workspace/data/sub/dir/a.txt"); !errors.Is(err, vfs.ErrNotExist) {
 		t.Fatalf("after remove: %v", err)
 	}
 
-	if err := ms.WriteFile(ctx, "/ro/x.txt", []byte("no")); !errors.Is(err, vfs.ErrReadOnly) {
+	if err := ms.WriteFile(ctx, "/workspace/ro/x.txt", []byte("no")); !errors.Is(err, vfs.ErrReadOnly) {
 		t.Fatalf("ro write: %v", err)
 	}
 
-	if err := ms.WriteFile(ctx, "/data/excl.txt", []byte("1")); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/data/excl.txt", []byte("1")); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.WriteFile(ctx, "/data/excl.txt", []byte("2")); err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/data/excl.txt", []byte("2")); err != nil {
 		t.Fatal(err)
 	}
-	b, err = ms.ReadFile(ctx, "/data/excl.txt")
+	b, err = ms.ReadFile(ctx, "/workspace/data/excl.txt")
 	if err != nil || string(b) != "2" {
 		t.Fatalf("overwrite: %q %v", b, err)
 	}
 
-	st, err = ms.Stat(ctx, "/data/sub/dir")
+	st, err = ms.Stat(ctx, "/workspace/data/sub/dir")
 	if err != nil || !st.IsDir {
 		t.Fatalf("Stat dir = %+v err=%v", st, err)
 	}

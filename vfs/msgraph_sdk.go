@@ -46,6 +46,12 @@ func (a *graphTokenAuth) AuthenticateRequest(ctx context.Context, request *abstr
 	return nil
 }
 
+// NewGraph builds a GraphAPI from a user token holder. Hosts pass the result
+// to Graph. base and httpClient are for tests; production: NewGraph(holder, "", nil).
+func NewGraph(holder *TokenHolder, base string, httpClient *http.Client) (GraphAPI, error) {
+	return newGraphSDK(holder, base, httpClient)
+}
+
 func newGraphSDK(holder *TokenHolder, base string, httpClient *http.Client) (*graphSDK, error) {
 	opts := msgraphsdk.GetDefaultClientOptions()
 	var parent http.RoundTripper
@@ -93,7 +99,7 @@ func (g *graphSDK) item(driveID, itemID string) *drives.ItemItemsDriveItemItemRe
 	return g.client.Drives().ByDriveId(driveID).Items().ByDriveItemId(itemID)
 }
 
-func (g *graphSDK) resolveRoot(ctx context.Context, driveID, itemID, siteID, account string) (string, string, error) {
+func (g *graphSDK) ResolveRoot(ctx context.Context, driveID, itemID, siteID, account string) (string, string, error) {
 	if driveID == "" {
 		var drive models.Driveable
 		var err error

@@ -449,59 +449,29 @@ func (f *s3WriteFile) Stat() (FileInfo, error) {
 	return FileInfo{Name: path.Base(f.key), Size: int64(f.buf.Len()), Mode: 0o644}, nil
 }
 
-// S3Factory opens S3 providers that share one S3API client (HTTP pool).
-// Client/DefaultBucket stay on the factory (process secrets/config).
-type S3Factory struct {
-	ID            string
-	Client        S3API
-	DefaultBucket string
-	// Skills is an optional key prefix (use "." for the bucket root).
-	// When set, MountSession attaches that prefix as a /skills union member.
-	Skills string
-}
-
-var _ SkillSource = S3Factory{}
-
-// Profile implements ProviderFactory.
-func (f S3Factory) Profile() string { return f.ID }
-
-// SkillMember implements SkillSource.
-func (f S3Factory) SkillMember() (MountSpec, bool) {
-	return objectSkillMember(f.ID, f.Skills)
-}
-
-func objectSkillMember(id, skills string) (MountSpec, bool) {
-	root := strings.TrimSpace(skills)
-	if root == "" {
-		return MountSpec{}, false
+// S3 opens providers that share one S3API client (HTTP pool).
+// defaultBucket is used when the spec omits params["bucket"].
+func S3(client S3API, defaultBucket string) Open {
+	return func(ctx context.Context, _ string, b Binding) (Provider, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if client == nil {
+			return nil, fmt.Errorf("vfs: s3 client required")
+		}
+		bucket := b.Params["bucket"]
+		if bucket == "" {
+			bucket = defaultBucket
+		}
+		if bucket == "" {
+			return nil, fmt.Errorf("vfs: s3 bucket required")
+		}
+		prefix := strings.Trim(b.Params["prefix"], "/")
+		if err := validateS3Prefix(prefix); err != nil {
+			return nil, err
+		}
+		return s3Provider{api: client, bucket: bucket, prefix: prefix}, nil
 	}
-	spec := MountSpec{Profile: id}
-	if root != "." {
-		spec.Params = map[string]string{"prefix": strings.Trim(root, "/")}
-	}
-	return spec, true
-}
-
-// Open implements ProviderFactory.
-func (f S3Factory) Open(ctx context.Context, _ string, spec MountSpec) (Provider, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if f.ID == "" || f.Client == nil {
-		return nil, fmt.Errorf("vfs: s3 factory needs id and client")
-	}
-	bucket := spec.Params["bucket"]
-	if bucket == "" {
-		bucket = f.DefaultBucket
-	}
-	if bucket == "" {
-		return nil, fmt.Errorf("vfs: s3 bucket required")
-	}
-	prefix := strings.Trim(spec.Params["prefix"], "/")
-	if err := validateS3Prefix(prefix); err != nil {
-		return nil, err
-	}
-	return s3Provider{api: f.Client, bucket: bucket, prefix: prefix}, nil
 }
 
 // s3KnownType keeps Head Content-Type only when S3 actually declared a type.

@@ -247,10 +247,6 @@ func TestLive_workspaceAuthRemountsAfterResume(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("from-workspace"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	fsReg := vfs.NewBackendRegistry()
-	if err := fsReg.Register(vfs.LocalFactory{ID: "local", Base: dir}); err != nil {
-		t.Fatal(err)
-	}
 	model := &testkit.ScriptedModel{
 		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 			if last := lastMsg(msgs); last != nil && last.Role == tacklr.RoleTool {
@@ -278,7 +274,7 @@ func TestLive_workspaceAuthRemountsAfterResume(t *testing.T) {
 			}
 		},
 	}
-	stack := newLiveStack(t, liveCat(t, model, durable.AgentSpec{FSRegistry: fsReg}))
+	stack := newLiveStack(t, liveCat(t, model, durable.AgentSpec{OpenVFS: vfs.Tree(vfs.At("docs", vfs.Local(dir)))}))
 	id, err := stack.Runtime.CreateSession(ctx, durable.CreateSession{AgentID: "default"})
 	if err != nil {
 		t.Fatal(err)
@@ -327,10 +323,6 @@ func TestLive_workerRestartWhileParkedThenResumeRemounts(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("from-workspace"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	fsReg := vfs.NewBackendRegistry()
-	if err := fsReg.Register(vfs.LocalFactory{ID: "local", Base: dir}); err != nil {
-		t.Fatal(err)
-	}
 	model := &testkit.ScriptedModel{
 		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 			if last := lastMsg(msgs); last != nil && last.Role == tacklr.RoleTool {
@@ -358,7 +350,7 @@ func TestLive_workerRestartWhileParkedThenResumeRemounts(t *testing.T) {
 			}
 		},
 	}
-	stack := newLiveStack(t, liveCat(t, model, durable.AgentSpec{FSRegistry: fsReg}))
+	stack := newLiveStack(t, liveCat(t, model, durable.AgentSpec{OpenVFS: vfs.Tree(vfs.At("docs", vfs.Local(dir)))}))
 	id, err := stack.Runtime.CreateSession(ctx, durable.CreateSession{AgentID: "default"})
 	if err != nil {
 		t.Fatal(err)
@@ -512,10 +504,6 @@ func TestLive_cachedRecipePlusTokenOnlyPrompt(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("from-workspace"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	fsReg := vfs.NewBackendRegistry()
-	if err := fsReg.Register(vfs.LocalFactory{ID: "local", Base: dir}); err != nil {
-		t.Fatal(err)
-	}
 	model := &testkit.ScriptedModel{
 		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 			if last := lastMsg(msgs); last != nil && last.Role == tacklr.RoleTool {
@@ -532,7 +520,7 @@ func TestLive_cachedRecipePlusTokenOnlyPrompt(t *testing.T) {
 			}
 		},
 	}
-	stack := newLiveStack(t, liveCat(t, model, durable.AgentSpec{FSRegistry: fsReg}))
+	stack := newLiveStack(t, liveCat(t, model, durable.AgentSpec{OpenVFS: vfs.Tree(vfs.At("docs", vfs.Local(dir)))}))
 	id, err := stack.Runtime.CreateSession(ctx, durable.CreateSession{
 		AgentID: "default",
 		Mounts: []durable.MountRecipe{{

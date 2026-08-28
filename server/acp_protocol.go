@@ -515,7 +515,7 @@ func acpInitializeResultWithAuth(cat durable.Catalog, clientProtocolVersion int,
 		},
 		"_meta": map[string]any{
 			"tacklr": map[string]any{
-				"vfs": acpVFSCapability(cat),
+				"vfs": acpVFSCapability(),
 			},
 		},
 	}
@@ -537,22 +537,15 @@ func acpInitializeResultWithAuth(cat durable.Catalog, clientProtocolVersion int,
 		"_meta": map[string]any{
 			"tacklr": map[string]any{
 				"transports": []string{"websocket", "streamable_http"},
-				"vfs":        acpVFSCapability(cat),
+				"vfs":        acpVFSCapability(),
 			},
 		},
 	}
 }
 
-func acpVFSCapability(cat durable.Catalog) map[string]any {
-	providers := []string{}
-	if cat != nil {
-		if spec, ok := cat.Lookup(cat.DefaultID()); ok && spec.FSRegistry != nil {
-			providers = spec.FSRegistry.Profiles()
-		}
-	}
+func acpVFSCapability() map[string]any {
 	return map[string]any{
 		"credentials":  true,
-		"providers":    providers,
 		"tokenRefresh": true,
 		"tokenExpiry":  true,
 		"writable":     true,

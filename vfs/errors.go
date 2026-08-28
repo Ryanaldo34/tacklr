@@ -9,7 +9,6 @@ var (
 	ErrAlreadyMounted  = errors.New("vfs: already mounted")
 	ErrNotMounted      = errors.New("vfs: not mounted")
 	ErrInvalidProvider = errors.New("vfs: invalid provider")
-	ErrUnknownProfile  = errors.New("vfs: unknown profile")
 	ErrNotSupported    = errors.New("vfs: not supported")
 	ErrReadOnly        = errors.New("vfs: read-only mount")
 	ErrNotExist        = errors.New("vfs: not found")
