@@ -177,7 +177,7 @@ The wait loop (in-process goroutine or `SessionWorkflow`) starts `tacklr.turn`. 
 | In-process | wait loop calls `telemetry.StartTurnSpan` |
 | Temporal | `temporalotel.Tracer` inside `SessionWorkflow` |
 
-Host setup: `telemetry.Init` installs the process-wide ReplaySafe tracer (and OTLP exporters when an endpoint is set). `Dial` prepends Temporal’s official OpenTelemetry v2 plugin onto that global provider. Postgres Query/Exec spans join that same trace because `PostgresStore` / `PostgresWireStore` run otelpgx against the caller context.
+Host setup: `telemetry.Init` installs the process-wide ReplaySafe tracer (and OTLP exporters when an endpoint is set). `Dial` prepends Temporal’s official OpenTelemetry v2 plugin onto that global provider. Postgres Query/Exec spans join that same trace because `postgres.Store` / `PostgresWireStore` run otelpgx against the caller context.
 
 ```go
 shutdown, err := telemetry.Init(ctx, telemetry.Config{

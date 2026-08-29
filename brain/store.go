@@ -29,8 +29,8 @@ type KindWriter interface {
 }
 
 // ObjectWriter persists knowledge objects (Engine.Put / SoftDelete).
-// PostgresStore and MemoryStore implement it. Custom backends implement for
-// non-Postgres deployments. Not required for read-only engines.
+// MemoryStore and postgres.Store implement it. Custom backends implement
+// ObjectWriter for other deployments. Not required for read-only engines.
 type ObjectWriter interface {
 	Put(ctx context.Context, obj Object) error
 	SoftDelete(ctx context.Context, scope Scope, id uuid.UUID) error

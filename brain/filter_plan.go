@@ -6,7 +6,8 @@ import (
 	"time"
 )
 
-// filterPlan is the single compiled form of Filter used by Memory and Postgres.
+// filterPlan is the single compiled form of Filter used by MemoryStore and
+// relational stores (via FilterSQL).
 type filterPlan struct {
 	preds []filterPred
 }
@@ -212,7 +213,19 @@ func objectMatchesFilters(obj Object, f Filter) bool {
 	return plan.match(obj)
 }
 
-func filterSQL(scope Scope, filters Filter, startArg int) (string, []any, error) {
+func sanitizeJSONKey(k string) string {
+	return strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' {
+			return r
+		}
+		return -1
+	}, k)
+}
+
+// FilterSQL compiles filters into a WHERE fragment and bound args for a
+// relational store. startArg is the first $N placeholder (usually 2 when $1
+// is the query). The fragment begins with AND when non-empty.
+func FilterSQL(scope Scope, filters Filter, startArg int) (string, []any, error) {
 	plan, err := compileFilters(filters)
 	if err != nil {
 		return "", nil, err

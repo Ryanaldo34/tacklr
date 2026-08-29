@@ -1,4 +1,4 @@
-package brain
+package postgres
 
 import (
 	"context"

@@ -42,7 +42,7 @@ func NewMemoryStore() *MemoryStore {
 // Put implements ObjectWriter. Soft-deleted rows may be stored; Get hides them.
 // Clones maps/slices so callers cannot mutate the store through shared references.
 func (s *MemoryStore) Put(_ context.Context, obj Object) error {
-	if err := requireObjectIdentity(obj); err != nil {
+	if err := ValidateObjectIdentity(obj); err != nil {
 		return err
 	}
 	obj = cloneObject(obj)

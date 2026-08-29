@@ -1,28 +1,30 @@
-package brain
+package postgres
 
 import (
 	"context"
 	"fmt"
 	"strconv"
+
+	"github.com/ryanaldo34/tacklr/brain"
 )
 
-// DefaultEmbeddingDim is the pgvector column size when PostgresStore.EmbeddingDim is 0.
+// DefaultEmbeddingDim is the pgvector column size when Store.EmbeddingDim is 0.
 const DefaultEmbeddingDim = 1536
 
 // Setup creates extensions, tables, and indexes (idempotent), then upserts kinds
 // into object_kinds. EmbeddingDim is the pgvector size and must match the embedder;
 // zero uses DefaultEmbeddingDim. This does not migrate an existing column to a new size.
-func (s *PostgresStore) Setup(ctx context.Context, kinds ...KindSpec) error {
+func (s *Store) Setup(ctx context.Context, kinds ...brain.KindSpec) error {
 	dim := s.EmbeddingDim
 	if dim <= 0 {
 		dim = DefaultEmbeddingDim
 	}
 	for _, q := range schemaStatements(dim) {
 		if _, err := s.db.Exec(ctx, q); err != nil {
-			return fmt.Errorf("brain: setup: %w", err)
+			return fmt.Errorf("postgres: setup: %w", err)
 		}
 	}
-	return PersistKinds(ctx, s, kinds...)
+	return brain.PersistKinds(ctx, s, kinds...)
 }
 
 func schemaStatements(dim int) []string {
