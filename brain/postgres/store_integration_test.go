@@ -1,4 +1,4 @@
-package brain_test
+package postgres_test
 
 import (
 	"context"
@@ -10,9 +10,10 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib"
-	"github.com/testcontainers/testcontainers-go/modules/postgres"
+	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 
 	"github.com/ryanaldo34/tacklr/brain"
+	"github.com/ryanaldo34/tacklr/brain/postgres"
 )
 
 // Pre-built via Makefile/CI: docker build -f brain/testdata/Dockerfile.postgres -t tacklr-pg-brain:test
@@ -35,7 +36,7 @@ func TestPostgresStore_liveRetrievalChannels(t *testing.T) {
 	ctx := context.Background()
 	pool := sharedPostgresPool(t)
 	mustExec(t, pool, `TRUNCATE objects, object_kinds CASCADE`)
-	store, err := brain.NewPostgresStore(pool)
+	store, err := postgres.New(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +247,7 @@ func TestPostgresStore_liveEmptyChannels(t *testing.T) {
 	}
 	ctx := context.Background()
 	pool := sharedPostgresPool(t)
-	store, err := brain.NewPostgresStore(pool)
+	store, err := postgres.New(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,12 +273,12 @@ func sharedPostgresPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	ctx := context.Background()
 	pgOnce.Do(func() {
-		ctr, err := postgres.Run(ctx, brainPgImage,
-			postgres.WithDatabase("brain"),
-			postgres.WithUsername("brain"),
-			postgres.WithPassword("brain"),
-			postgres.BasicWaitStrategies(),
-			postgres.WithSQLDriver("pgx"),
+		ctr, err := tcpostgres.Run(ctx, brainPgImage,
+			tcpostgres.WithDatabase("brain"),
+			tcpostgres.WithUsername("brain"),
+			tcpostgres.WithPassword("brain"),
+			tcpostgres.BasicWaitStrategies(),
+			tcpostgres.WithSQLDriver("pgx"),
 		)
 		if err != nil {
 			pgSkip = err.Error() + " (build image: make brain-pg-image)"
@@ -296,7 +297,7 @@ func sharedPostgresPool(t *testing.T) *pgxpool.Pool {
 			_ = ctr.Terminate(ctx)
 			return
 		}
-		store, err := brain.NewPostgresStore(pool)
+		store, err := postgres.New(pool)
 		if err != nil {
 			pgStart = err
 			pool.Close()
@@ -339,6 +340,24 @@ func sharedPostgresPool(t *testing.T) *pgxpool.Pool {
 	return pgPool
 }
 
+func mustNS(t testing.TB, nv ...string) brain.Namespace {
+	t.Helper()
+	ns, err := brain.ParseNamespace(nv...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ns
+}
+
+func mustFilter(t testing.TB, m map[string]any) brain.Filter {
+	t.Helper()
+	f, err := brain.DecodeFilter(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
 func mustExec(t *testing.T, pool *pgxpool.Pool, sql string, args ...any) {
 	t.Helper()
 	if _, err := pool.Exec(context.Background(), sql, args...); err != nil {
@@ -355,7 +374,7 @@ func TestPut_livePostgresUpsertAndSoftDelete(t *testing.T) {
 	pool := sharedPostgresPool(t)
 	mustExec(t, pool, `TRUNCATE objects, object_kinds CASCADE`)
 
-	store, err := brain.NewPostgresStore(pool)
+	store, err := postgres.New(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -433,7 +452,7 @@ func TestEngine_livePostgresMultiTurnWriteSearch(t *testing.T) {
 	pool := sharedPostgresPool(t)
 	mustExec(t, pool, `TRUNCATE objects, object_kinds CASCADE`)
 
-	store, err := brain.NewPostgresStore(pool)
+	store, err := postgres.New(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -621,11 +640,11 @@ func TestApplyKinds_livePostgresMigration(t *testing.T) {
 	pool := sharedPostgresPool(t)
 	mustExec(t, pool, `TRUNCATE objects, object_kinds CASCADE`)
 
-	store, err := brain.NewPostgresStore(pool)
+	store, err := postgres.New(pool)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Compile-time / runtime: PostgresStore is a KindRegistry.
+	// Compile-time / runtime: postgres.Store is a KindRegistry.
 	var _ brain.KindRegistry = store
 
 	eng, err := brain.NewEngine(store)
@@ -701,7 +720,7 @@ func TestPostgresStore_setupRegistersKinds(t *testing.T) {
 	pool := sharedPostgresPool(t)
 	mustExec(t, pool, `TRUNCATE objects, object_kinds CASCADE`)
 
-	store, err := brain.NewPostgresStore(pool)
+	store, err := postgres.New(pool)
 	if err != nil {
 		t.Fatal(err)
 	}

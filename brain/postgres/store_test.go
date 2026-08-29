@@ -1,4 +1,4 @@
-package brain_test
+package postgres_test
 
 import (
 	"context"
@@ -8,11 +8,11 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
-	"github.com/ryanaldo34/tacklr/brain"
+	"github.com/ryanaldo34/tacklr/brain/postgres"
 )
 
-func TestNewPostgresStore_requiresDB(t *testing.T) {
-	if _, err := brain.NewPostgresStore(nil); err == nil {
+func TestNew_requiresDB(t *testing.T) {
+	if _, err := postgres.New(nil); err == nil {
 		t.Fatal("want error")
 	}
 }
@@ -31,8 +31,8 @@ type execErrRow struct{}
 
 func (execErrRow) Scan(...any) error { return pgx.ErrNoRows }
 
-func TestPostgresStore_setupReportsExecError(t *testing.T) {
-	store, err := brain.NewPostgresStore(execErrDB{})
+func TestStore_setupReportsExecError(t *testing.T) {
+	store, err := postgres.New(execErrDB{})
 	if err != nil {
 		t.Fatal(err)
 	}

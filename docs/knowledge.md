@@ -2,7 +2,8 @@
 
 This is the canonical guide to Tacklr’s knowledge base: how objects are stored, how
 they appear as files, how search and the graph work, and how an agent is supposed
-to use them.
+to use them. The engine is generic: inject a `brain.Store` and optional graph.
+`brain/postgres` and `brain/helixgraph` are optional backends.
 
 You do not need to have read the rest of the Tacklr codebase first. Terms are
 defined as they appear, and again in the [glossary](#glossary).
@@ -22,7 +23,7 @@ defined as they appear, and again in the [glossary](#glossary).
 
 | Reader | What you should take away |
 |--------|---------------------------|
-| **Host / product engineer** | How to register kinds, wire Postgres (and optional Helix), mount `/engram`, and decide index policy |
+| **Host / product engineer** | How to register kinds, inject `postgres.Store` and optional `helixgraph.Graph`, mount `/engram`, and decide index policy |
 | **Agent author / tool designer** | Which tool to call for which question; why `ls` never shows relationships |
 | **Contributor** | Which package owns which job; what must not import what |
 
@@ -642,12 +643,13 @@ eng, err := brain.NewEngine(store, brain.WithKinds(
 // The harness closes `eng` into those tool handlers (same pattern as host tools).
 ```
 
-Production-shaped. `PostgresStore.Setup` creates extensions, tables, and
+Production-shaped. `postgres.Store.Setup` creates extensions, tables, and
 indexes, then upserts the kinds you pass. Set `EmbeddingDim` to match the
 embedder (zero means 1536). Setup does not change an existing vector column.
+Helix is an optional graph. Inject both; `brain` does not import either package.
 
 ```go
-store, err := brain.NewPostgresStore(pool)
+store, err := postgres.New(pool)
 store.EmbeddingDim = 1536
 kinds := append([]brain.KindSpec{dealSpec, personSpec}, vfsindex.MountIndexKinds()...)
 if err := store.Setup(ctx, kinds...); err != nil { /* ... */ }
@@ -720,7 +722,7 @@ Tests call `store.Setup` (embedding dim 3) instead of loading SQL files.
 | Engram Markdown codec | `brain/engramfile.go` |
 | VFS Provider | `brain/provider.go` |
 | Store ports | `brain/store.go` |
-| Postgres schema + kinds | `PostgresStore.Setup` (`brain/postgres_setup.go`) |
+| Postgres store | `brain/postgres` (`postgres.New`, `Store.Setup`) |
 | Graph ports + MemoryGraph | `brain/graph.go` |
 | Helix adapter | `brain/helixgraph/` |
 | Artifact indexer | `vfsindex/indexer.go` |

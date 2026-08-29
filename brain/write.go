@@ -360,7 +360,8 @@ func isReservedStoreProp(name string) bool {
 	}
 }
 
-func requireObjectIdentity(obj Object) error {
+// ValidateObjectIdentity checks id, kind, and namespace before a store Put.
+func ValidateObjectIdentity(obj Object) error {
 	if obj.ID == uuid.Nil {
 		return fmt.Errorf("%w: object id is required", ErrInvalid)
 	}

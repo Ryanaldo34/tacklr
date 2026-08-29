@@ -63,12 +63,17 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/brain"
+	"github.com/ryanaldo34/tacklr/brain/helixgraph"
+	"github.com/ryanaldo34/tacklr/brain/postgres"
 	"github.com/ryanaldo34/tacklr/builtins"
 	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/durable/inprocess"
 	"github.com/ryanaldo34/tacklr/server"
+	"github.com/ryanaldo34/tacklr/telemetry"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -76,17 +81,50 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	shutdown, err := telemetry.Init(ctx, telemetry.Config{
+		ServiceName:  "tacklr-host",
+		OTLPEndpoint: os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+		Insecure:     true,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer func() { _ = shutdown(context.Background()) }()
+
 	model := builtins.NewOpenAIInferenceStrategy(&http.Client{Timeout: 2 * time.Minute})
 	model.WithURL(os.Getenv("OPENAI_BASE_URL")).
 		WithApiKey(os.Getenv("OPENAI_API_KEY")).
 		WithModel(os.Getenv("OPENAI_MODEL"))
 
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithKinds(
-		brain.KindSpec{Kind: "Discovery", Description: "Research finding", IsParent: true},
-		brain.KindSpec{Kind: "Fact", Description: "Verified fact", IsParent: true},
-		brain.KindSpec{Kind: "Memory", Description: "Durable memory", IsParent: true},
-	))
+	pool, err := pgxpool.New(ctx, os.Getenv("DATABASE_URL"))
 	if err != nil {
+		log.Fatal(err)
+	}
+	defer pool.Close()
+	kinds := []brain.KindSpec{
+		{Kind: "Discovery", Description: "Research finding", IsParent: true},
+		{Kind: "Fact", Description: "Verified fact", IsParent: true},
+		{Kind: "Memory", Description: "Durable memory", IsParent: true},
+	}
+	store, err := postgres.New(pool)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := store.Setup(ctx, kinds...); err != nil {
+		log.Fatal(err)
+	}
+	g, err := helixgraph.New(os.Getenv("HELIX_URL"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := g.Bootstrap(ctx, false); err != nil {
+		log.Fatal(err)
+	}
+	eng, err := brain.NewEngine(store, brain.WithGraph(g))
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := eng.LoadKindsFromStore(ctx); err != nil {
 		log.Fatal(err)
 	}
 	ns, err := brain.ParseNamespace("org", "acme")
@@ -163,6 +201,8 @@ func openVFS(jail string, eng *brain.Engine, ns brain.Namespace) vfs.OpenVFS {
 
 Importing `tacklr` registers built-in interrupts, Word/Excel codecs, and the durable driver adapter. The agent sees `/workspace/work`, `/workspace/engram`. Skills load from `OpenSkills` and reach the model only through `read_skill`. A Drive or SharePoint bind on the prompt adds `/workspace/drive` or `/workspace/sharepoint` for that turn. Tests pass a fake `DriveAPI` / `GraphAPI` into the same `builtins.Drive` / `builtins.Graph` constructors.
 
+`telemetry.Init` installs the process-wide OpenTelemetry providers. With `OTLPEndpoint` (or `OTEL_EXPORTER_OTLP_ENDPOINT`) it exports traces, metrics, and logs over OTLP (gRPC by default, or HTTP). Without an endpoint it still installs Temporal’s ReplaySafe tracer so workflow replay does not leak spans. Each Prompt or Resume is one `tacklr.turn` span; inference, tools, hand-off, and compress nest under it. `postgres.Store` Query/Exec spans join that same trace. Hosts must not start `tacklr.*` spans themselves. Metrics include turn duration and count, tool calls, model tokens, interrupts, hand-offs, compress, sessions, and checkpoints. Call `Init` before `durable/temporal.Dial`. Details: [`telemetry`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/telemetry).
+
 ### Tools
 
 Tools are ordinary Go functions. Give a tool a client by closing over it in the constructor. That is the dependency injection. Tests pass a fake into the same constructor.
@@ -212,7 +252,7 @@ Register nested agents on `AgentOptions.Specialists`. Tools start them through `
 | Web | `web_search` and `web_fetch` via `builtins.WebSearch` / `builtins.WebFetch` | [`builtins`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/builtins) |
 | Email | `read_inbox` and permission-gated `send_email` via `builtins.ReadInbox` / `builtins.SendEmail` | [`builtins`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/builtins) |
 | Server | `Protocol` over Runtime; ACP is the native option | [`server`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/server) |
-| Telemetry | One `tacklr.turn` span per prompt or resume; OTLP | [`telemetry`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/telemetry) |
+| Telemetry | `telemetry.Init`: OTLP traces/metrics/logs; one `tacklr.turn` span per prompt or resume | [`telemetry`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/telemetry) |
 
 When VFS is wired, the harness injects file tools over virtual paths only. `run_command` requires permission by default. Live names and grep go through `run_command` (`ls` / `fd` / `rg`). With Brain + VFS + a search namespace, knowledge tools attach to `/workspace/engram`. Details: [docs/vfs.md](docs/vfs.md) and [docs/knowledge.md](docs/knowledge.md).
 
@@ -240,8 +280,9 @@ When VFS is wired, the harness injects file tools over virtual paths only. `run_
 | `builtins` | Optional tools (email, Exa), VFS constructors, OpenAI model client |
 | `vfs` | Virtual filesystem, mounts, content IR |
 | `vfsindex` | Optional mount → brain ingest |
-| `brain` | Knowledge engine |
-| `brain/helixgraph` | Optional graph adapter |
+| `brain` | Knowledge engine, store/graph interfaces, in-memory backends |
+| `brain/postgres` | Optional Postgres `brain.Store` |
+| `brain/helixgraph` | Optional Helix graph adapter |
 | `server` | Protocol host over Runtime |
 | `durable` | Session Runtime (in-process or Temporal) |
 | `interrupt` | Pause / resume types |
@@ -276,7 +317,7 @@ Where to look:
 | Runtime | `durable/runtime.go`, `docs/durable.md` |
 | VFS | `vfs/`, `docs/vfs.md` |
 | Model client | `builtins/openai.go` (`tacklr.InferenceStrategy`) |
-| Knowledge | `brain/`, `docs/knowledge.md` |
+| Knowledge | `brain/`, `brain/postgres/`, `brain/helixgraph/`, `docs/knowledge.md` |
 | ACP / protocols | `server/` |
 
 Issues and pull requests are welcome. Match the surrounding code: `gofmt`, `go vet`, `golangci-lint`.

@@ -24,7 +24,7 @@ func TestFilterPlan_listAndSQLParity(t *testing.T) {
 	if !plan.match(obj) {
 		t.Fatal("memory match list")
 	}
-	sql, args, err := plan.sql(Scope{Namespace: ns}, 1)
+	sql, args, err := FilterSQL(Scope{Namespace: ns}, f, 1)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -4,18 +4,21 @@
 //
 // # Public surface
 //
-// Hosts use Engine (NewEngine + options), Store implementations (MemoryStore /
-// PostgresStore), graph backends via WithGraph, kind registration (ApplyKinds /
-// WithKinds), and composition helpers (LandingIDs, ExpandMany, ExpandByRecipe,
-// SortRichObjects). Agent tools are registered by the harness when
+// Hosts use Engine (NewEngine + options), a Store implementation, an optional
+// graph via WithGraph, kind registration (ApplyKinds / WithKinds), and
+// composition helpers (LandingIDs, ExpandMany, ExpandByRecipe, SortRichObjects).
+// MemoryStore and MemoryGraph are in-process backends for tests and offline
+// hosts. Durable backends are injected: brain/postgres.Store and
+// brain/helixgraph.Graph. Agent tools are registered by the harness when
 // AgentOptions.Brain is set — they call Engine methods only.
 //
-// Graph backend packages (e.g. helixgraph) implement GraphReader / GraphWriter /
+// Graph backend packages implement GraphReader / GraphWriter /
 // GraphObjectSearcher / GraphEdgeSearcher. Dual-write property keys and Helix
 // schema details stay inside those packages.
 //
 // Hosts attach an Engine via AgentOptions.Brain. This package does not import
-// the harness, session, or telemetry packages; Scope is passed in by the caller.
+// postgres, helixgraph, the harness, session, or telemetry; Scope is passed
+// in by the caller.
 //
 // # Engrams as files (vfs.Provider)
 //
@@ -25,7 +28,8 @@
 // Kind names are host KindSpecs and must be path-safe (no '/' or '..'). Only parent
 // kinds are directories; parts/chunks are not files. Write/Close/PutFile parse,
 // validate, and Put (fail closed). Rename is delete+create. Graph edges stay in
-// Helix and show up through path-native link/expand/find_links — not sidecar files.
+// the graph backend and show up through path-native link/expand/find_links — not
+// sidecar files.
 //
 // SearchContext is the retrieval session surface: host namespace + active ResultSet
 // for continue (replaced on each search, find_exact, find_objects, or large expand).
@@ -47,22 +51,22 @@
 // (edges preserved). SoftDelete removes the graph node first, then soft-deletes the
 // store row. Revive via Put recreates the graph node.
 //
-// # Postgres vs Helix (complementary)
+// # Store vs graph (complementary)
 //
-// Postgres is the source of truth and document corpus:
+// The Store is the source of truth and document corpus:
 // full rows, parts/chunks, BM25 + dense hybrid search, property filters, soft-delete,
 // containment (parent_id). Tools: search, find_exact, read; expand children.
 // search may pass ScopeIDs to limit hits to a parent neighborhood.
 //
-// Helix holds first-class entity nodes and cross-object edges only (not chunks).
+// The graph holds first-class entity nodes and cross-object edges only (not chunks).
 // Helix owns: native text/vector indexes, $distance ranking, graph topology, edge
 // props, BothE neighbor walks, optional tenant indexes on namespace.
 // Tacklr does not reimplement BM25/HNSW or in-process neighbor indexes for Helix.
 // We dual-write searchable props (EntityIndexText + embedding), Link edges, fuse
-// Helix text+vector channels with RRF (Helix has no single hybrid op), then hydrate
-// full rows from Postgres under Scope.
+// graph text+vector channels with RRF, then hydrate full rows from the Store
+// under Scope.
 //
-// Tools: find_objects (after Bootstrap), expand with relation_types, link.
+// Tools: find_objects (after graph Bootstrap), expand with relation_types, link.
 // Optional: helixgraph.EnsureEdgeTextIndex(rel) + SearchEdgesText for note search
 // on a known relation label.
 //
@@ -71,16 +75,16 @@
 //	find_objects (entity land; filters via schema filterable_fields)
 //	  or search/find_exact (corpus) → LandingIDs (parent promote)
 //	→ expand / ExpandMany (max_hops, direction, WantContainment)
-//	  or ExpandByRecipe (host-named ExpandRequest template) → hydrate Postgres
+//	  or ExpandByRecipe (host-named ExpandRequest template) → hydrate Store
 //	→ optional find_links (edge text) for relationship-first land
 //	→ search(scope_ids=…) for neighborhood corpus
 //	→ optional host Reranker after hydrate; SortRichObjects for peer ordering
 //
-// Graph-first then Postgres drill-down:
+// Graph-first then store drill-down:
 //
-//	find_objects / expand(graph) → Helix ids → hydrate from Postgres
-//	expand() containment → Postgres ListChildren (chunks)
-//	read / search → Postgres
+//	find_objects / expand(graph) → graph ids → hydrate from Store
+//	expand() containment → Store.ListChildren (chunks)
+//	read / search → Store
 //
 // schema() returns filter_usage.tools listing search, find_exact, and find_objects
 // so agents know filterable_fields apply to entity find as well as corpus search.
@@ -93,7 +97,7 @@
 //
 // # Boot sketch
 //
-//	store, err := brain.NewPostgresStore(pool)
+//	store, err := postgres.New(pool)
 //	store.EmbeddingDim = 1536 // optional; default 1536
 //	if err := store.Setup(ctx, specs...); err != nil { return err }
 //	g, err := helixgraph.New(helixURL)
@@ -102,6 +106,6 @@
 //	if err := eng.LoadKindsFromStore(ctx); err != nil { return err }
 //
 // Integration tests (skipped under -short / without Docker):
-//   - PostgresStore: Testcontainers + brain/testdata/Dockerfile.postgres
+//   - postgres.Store: Testcontainers + brain/testdata/Dockerfile.postgres
 //   - helixgraph: Testcontainers + ghcr.io/helixdb/enterprise-dev (in-memory)
 package brain

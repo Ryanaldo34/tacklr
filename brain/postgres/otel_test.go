@@ -1,4 +1,4 @@
-package brain_test
+package postgres_test
 
 import (
 	"context"
@@ -12,6 +12,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"github.com/ryanaldo34/tacklr/brain"
+	"github.com/ryanaldo34/tacklr/brain/postgres"
 )
 
 type traceStubDB struct{}
@@ -44,9 +45,7 @@ func (emptyRows) Values() ([]any, error)                       { return nil, nil
 func (emptyRows) RawValues() [][]byte                          { return nil }
 func (emptyRows) Conn() *pgx.Conn                              { return nil }
 
-// TestPostgresStore_sqlSpansParentUnderCallerSpan: Query/Exec client spans
-// join the caller trace (tacklr.tool) rather than opening a new one.
-func TestPostgresStore_sqlSpansParentUnderCallerSpan(t *testing.T) {
+func TestStore_sqlSpansParentUnderCallerSpan(t *testing.T) {
 	sr := tracetest.NewSpanRecorder()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sr))
 	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
@@ -54,7 +53,7 @@ func TestPostgresStore_sqlSpansParentUnderCallerSpan(t *testing.T) {
 	otel.SetTracerProvider(tp)
 	t.Cleanup(func() { otel.SetTracerProvider(prev) })
 
-	store, err := brain.NewPostgresStore(traceStubDB{})
+	store, err := postgres.New(traceStubDB{})
 	if err != nil {
 		t.Fatal(err)
 	}

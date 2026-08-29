@@ -17,7 +17,7 @@ test: brain-pg-image helix-image
 test-short:
 	go test -short -race -count=1 -covermode=atomic ./...
 
-# pgvector + pg_textsearch image used by brain PostgresStore integration tests.
+# pgvector + pg_textsearch image used by brain/postgres integration tests.
 brain-pg-image: require-docker
 	$(DOCKER) build -f brain/testdata/Dockerfile.postgres -t tacklr-pg-brain:test brain/testdata
 

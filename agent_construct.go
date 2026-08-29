@@ -84,8 +84,8 @@ type AgentOptions struct {
 	SkillsRoot string
 	// Brain enables knowledge builtins when non-nil. Workers inherit the same engine.
 	// Configure Store, optional QueryEmbedder, and optional GraphReader/GraphWriter on the Engine
-	// before NewTurnManager (e.g. brain.WithGraph(helixgraph.New(...))). The harness does
-	// not construct graph backends.
+	// before NewTurnManager (e.g. brain.WithGraph(g) after helixgraph.New). The harness
+	// does not construct store or graph backends.
 	Brain *brain.Engine
 	// BrainWriteKinds maps save_discovery / save_fact / save_memory to host kind names.
 	// Empty fields skip that tool. Kinds should be registered via brain.ApplyKinds / WithKinds.

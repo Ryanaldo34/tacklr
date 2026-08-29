@@ -111,7 +111,7 @@ func WithConfig(cfg EngineConfig) EngineOption {
 	return func(eng *Engine) { eng.cfg = cfg }
 }
 
-// WithGraph sets the optional non-containment graph backend (Helix or MemoryGraph).
+// WithGraph sets the optional non-containment graph backend (helixgraph or MemoryGraph).
 // Writer and object-search capabilities are resolved once here (not re-asserted per call).
 func WithGraph(g GraphReader) EngineOption {
 	return func(eng *Engine) {

@@ -13,7 +13,7 @@ import (
 )
 
 // EdgeMeta is optional metadata on a non-containment relationship (why/how/when linked).
-// Kept short and relational — full bodies stay on objects in Postgres.
+// Kept short and relational — full bodies stay on objects in the Store.
 type EdgeMeta struct {
 	Note       string     `json:"note,omitempty"`
 	Status     string     `json:"status,omitempty"`     // e.g. active, resolved
@@ -50,7 +50,7 @@ type GraphWriter interface {
 	// EnsureObject upserts a graph node for obj.ID (searchable props when available).
 	// Must preserve incident edges (update in place, not drop+recreate).
 	EnsureObject(ctx context.Context, obj Object) error
-	// RemoveObject drops the node (and incident edges) after/with Postgres soft-delete.
+	// RemoveObject drops the node (and incident edges) after/with store soft-delete.
 	RemoveObject(ctx context.Context, id uuid.UUID) error
 	// AddEdge creates a directed edge from→to with optional relationship metadata.
 	AddEdge(ctx context.Context, from, to uuid.UUID, relationType string, meta EdgeMeta) error

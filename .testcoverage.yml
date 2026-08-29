@@ -33,6 +33,9 @@ override:
   # Live Testcontainers Helix (CI pulls enterprise-dev; never -short in CI).
   - path: github.com/ryanaldo34/tacklr/brain/helixgraph$
     threshold: 90
+  # Live Testcontainers Postgres (CI builds tacklr-pg-brain; never -short in CI).
+  - path: github.com/ryanaldo34/tacklr/brain/postgres$
+    threshold: 90
   # VFS/S3 unit surface + fake API; integration (MinIO) is separate.
   - path: github.com/ryanaldo34/tacklr/vfs$
     threshold: 85
