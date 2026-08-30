@@ -8,7 +8,7 @@ import (
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/durable/inprocess"
-	"github.com/ryanaldo34/tacklr/internal/testkit"
+	"github.com/ryanaldo34/tacklr/internal/durtest"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -83,7 +83,7 @@ func (s *Session) Wait(t testing.TB) []tacklr.StreamEvent {
 			}
 			got = append(got, ev)
 			if ev.Type == tacklr.StreamEventComplete || ev.Type == tacklr.StreamEventError || ev.Type == tacklr.StreamEventInterrupt {
-				testkit.AssertStatusMatchesEvent(t, s.Runtime, s.ID, ev)
+				durtest.AssertStatusMatchesEvent(t, s.Runtime, s.ID, ev)
 				return got
 			}
 		case <-ctx.Done():

@@ -11,6 +11,7 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
+	"github.com/ryanaldo34/tacklr/internal/durtest"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
 	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/vfs"
@@ -103,7 +104,7 @@ func waitParentEvent(t *testing.T, rt *Runtime, id durable.SessionID, sub durabl
 			}
 			seen = append(seen, ev)
 			if pred(ev) {
-				testkit.AssertStatusMatchesEvent(t, rt, id, ev)
+				durtest.AssertStatusMatchesEvent(t, rt, id, ev)
 				return ev
 			}
 		case <-ctx.Done():

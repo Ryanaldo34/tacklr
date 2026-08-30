@@ -19,6 +19,7 @@ import (
 	"github.com/ryanaldo34/tacklr/builtins"
 	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/durable/inprocess"
+	"github.com/ryanaldo34/tacklr/internal/durtest"
 	"github.com/ryanaldo34/tacklr/internal/temporallive"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
 	"github.com/ryanaldo34/tacklr/telemetry"
@@ -113,7 +114,7 @@ func waitTurn(t *testing.T, rt durable.Runtime, id durable.SessionID, sub durabl
 			}
 			got = append(got, ev)
 			if ev.Type == tacklr.StreamEventComplete || ev.Type == tacklr.StreamEventError || ev.Type == tacklr.StreamEventInterrupt {
-				testkit.AssertStatusMatchesEvent(t, rt, id, ev)
+				durtest.AssertStatusMatchesEvent(t, rt, id, ev)
 				return got
 			}
 		case <-ctx.Done():

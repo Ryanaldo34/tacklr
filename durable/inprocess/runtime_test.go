@@ -17,6 +17,7 @@ import (
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/builtins"
 	"github.com/ryanaldo34/tacklr/durable"
+	"github.com/ryanaldo34/tacklr/internal/durtest"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
@@ -71,7 +72,7 @@ func waitEvents(t *testing.T, rt *Runtime, id durable.SessionID, sub durable.Sub
 			}
 			got = append(got, ev)
 			if ev.Type == tacklr.StreamEventComplete || ev.Type == tacklr.StreamEventError || ev.Type == tacklr.StreamEventInterrupt {
-				testkit.AssertStatusMatchesEvent(t, rt, id, ev)
+				durtest.AssertStatusMatchesEvent(t, rt, id, ev)
 				return got
 			}
 		case <-ctx.Done():
@@ -1134,7 +1135,7 @@ func TestSpawnWorkerNestedDriverCompletes(t *testing.T) {
 				sawParent = true
 			}
 			if ev.Type == tacklr.StreamEventComplete && sawChild && sawParent {
-				testkit.AssertStatusMatchesEvent(t, rt, id, ev)
+				durtest.AssertStatusMatchesEvent(t, rt, id, ev)
 				return
 			}
 		case <-wait.Done():
