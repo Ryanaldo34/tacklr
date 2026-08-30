@@ -26,8 +26,10 @@ type FieldSpec struct {
 	Type        FieldType `json:"type"`
 	Description string    `json:"description,omitempty"`
 	Required    bool      `json:"required,omitempty"`
-	Operators   []string  `json:"operators,omitempty"` // always eq, or eq+in (see NormalizeKindSpec)
-	Examples    []string  `json:"examples,omitempty"`
+	Operators   []string  `json:"operators,omitempty"`  // always eq, or eq+in (see NormalizeKindSpec)
+	Examples    []string  `json:"examples,omitempty"`   // documentation only; not enforced
+	Enum        []string  `json:"enum,omitempty"`       // closed set for string fields; enforced on Put
+	SkipIndex   bool      `json:"skip_index,omitempty"` // omit from entity index text; still stored and filterable
 }
 
 // KindSpec is the host-facing definition of a knowledge object kind.
@@ -174,6 +176,9 @@ func NormalizeKindSpec(spec KindSpec) (KindSpec, error) {
 		if f.Name == "" {
 			return KindSpec{}, fmt.Errorf("brain: kind %q field: name is required", spec.Kind)
 		}
+		if isObjectColumn(f.Name) {
+			return KindSpec{}, fmt.Errorf("brain: kind %q field: %q collides with an object column", spec.Kind, f.Name)
+		}
 		if isCoreFilterKey(f.Name) {
 			return KindSpec{}, fmt.Errorf("brain: kind %q field: %q collides with a core filter key", spec.Kind, f.Name)
 		}
@@ -191,6 +196,11 @@ func NormalizeKindSpec(spec KindSpec) (KindSpec, error) {
 			return KindSpec{}, fmt.Errorf("brain: kind %q: duplicate field %q", spec.Kind, f.Name)
 		}
 		seen[f.Name] = struct{}{}
+		enum, err := normalizeFieldEnum(spec.Kind, f)
+		if err != nil {
+			return KindSpec{}, err
+		}
+		f.Enum = enum
 		// Operators are documentation for schema(); always the closed set we implement.
 		if f.Type == FieldTypeBoolean {
 			f.Operators = []string{"eq"}
@@ -201,6 +211,38 @@ func NormalizeKindSpec(spec KindSpec) (KindSpec, error) {
 	}
 	spec.Fields = fields
 	return spec, nil
+}
+
+func normalizeFieldEnum(kind string, f FieldSpec) ([]string, error) {
+	if len(f.Enum) == 0 {
+		return nil, nil
+	}
+	if f.Type != FieldTypeString {
+		return nil, fmt.Errorf("brain: kind %q field %q: enum is only valid on string fields", kind, f.Name)
+	}
+	out := make([]string, 0, len(f.Enum))
+	seen := make(map[string]struct{}, len(f.Enum))
+	for _, v := range f.Enum {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return nil, fmt.Errorf("brain: kind %q field %q: enum value is required", kind, f.Name)
+		}
+		if _, dup := seen[v]; dup {
+			return nil, fmt.Errorf("brain: kind %q field %q: duplicate enum value %q", kind, f.Name, v)
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	return out, nil
+}
+
+func isObjectColumn(k string) bool {
+	switch k {
+	case "title", "summary", "content":
+		return true
+	default:
+		return false
+	}
 }
 
 func isCoreFilterKey(k string) bool {
@@ -248,7 +290,18 @@ func KindSpecFromObjectKind(k ObjectKind) (KindSpec, error) {
 
 // KindInfoFromSpec builds the agent-facing schema payload for one kind.
 func KindInfoFromSpec(spec KindSpec) ObjectKindInfo {
-	return ObjectKindInfo(objectKindFromNormalized(spec))
+	return kindInfoFromObjectKind(objectKindFromNormalized(spec))
+}
+
+func kindInfoFromObjectKind(k ObjectKind) ObjectKindInfo {
+	return ObjectKindInfo{
+		Kind:             k.Kind,
+		Description:      k.Description,
+		IsPart:           k.IsPart,
+		IsParent:         k.IsParent,
+		Columns:          CoreColumns(),
+		FilterableFields: k.FilterableFields,
+	}
 }
 
 // KindRegistry is KindReader + KindWriter for durable kind schemas.

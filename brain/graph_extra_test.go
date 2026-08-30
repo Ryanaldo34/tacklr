@@ -91,7 +91,7 @@ func TestMemoryGraph_cancelledContextFailsClosed(t *testing.T) {
 	if err := g.AddEdge(ctx, a, uuid.New(), "about", EdgeMeta{}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("AddEdge: %v", err)
 	}
-	if err := g.EnsureObject(ctx, Object{ID: a, Kind: "Document"}); !errors.Is(err, context.Canceled) {
+	if err := g.EnsureObject(ctx, Object{ID: a, Kind: "Document"}, ""); !errors.Is(err, context.Canceled) {
 		t.Fatalf("EnsureObject: %v", err)
 	}
 	if err := g.RemoveObject(ctx, a); !errors.Is(err, context.Canceled) {
@@ -145,5 +145,27 @@ func TestEdgeMeta_IsZero(t *testing.T) {
 func TestMemoryGraph_removeObjectNilID(t *testing.T) {
 	if err := NewMemoryGraph().RemoveObject(context.Background(), uuid.Nil); err == nil {
 		t.Fatal("want error")
+	}
+}
+
+// TestMemoryGraph_searchUsesEnsureObjectText: FindObjects text is the string
+// passed to EnsureObject, not a recompute from the object.
+func TestMemoryGraph_searchUsesEnsureObjectText(t *testing.T) {
+	ctx := context.Background()
+	g := NewMemoryGraph()
+	id := uuid.New()
+	if err := g.EnsureObject(ctx, Object{ID: id, Title: "Acme renewal", Kind: "Deal"}, "custom retrieval document"); err != nil {
+		t.Fatal(err)
+	}
+	hit, err := g.SearchText(ctx, "custom retrieval", 5, nil)
+	if err != nil || len(hit) != 1 || hit[0].ID != id {
+		t.Fatalf("searchText: %+v err=%v", hit, err)
+	}
+	miss, err := g.SearchText(ctx, "Acme renewal", 5, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(miss) != 0 {
+		t.Fatalf("title must not be indexed unless it was in searchText: %+v", miss)
 	}
 }

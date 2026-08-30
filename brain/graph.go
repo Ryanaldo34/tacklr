@@ -47,9 +47,10 @@ type GraphReader interface {
 // Embeds GraphReader so a single WithGraph value can satisfy both read and write.
 type GraphWriter interface {
 	GraphReader
-	// EnsureObject upserts a graph node for obj.ID (searchable props when available).
+	// EnsureObject upserts a graph node for a first-class object (parents only).
+	// searchText is the entity document Engine computed (FindObjects text/vector).
 	// Must preserve incident edges (update in place, not drop+recreate).
-	EnsureObject(ctx context.Context, obj Object) error
+	EnsureObject(ctx context.Context, obj Object, searchText string) error
 	// RemoveObject drops the node (and incident edges) after/with store soft-delete.
 	RemoveObject(ctx context.Context, id uuid.UUID) error
 	// AddEdge creates a directed edge from→to with optional relationship metadata.
@@ -58,10 +59,10 @@ type GraphWriter interface {
 	RemoveEdge(ctx context.Context, from, to uuid.UUID, relationType string) error
 }
 
-// GraphObjectSearcher finds entity nodes by text and/or vector (Helix native indexes
-// or MemoryGraph in-process). Results are ranked best-first; Engine hydrates under Scope.
-// Namespace is applied by MemoryGraph via Covers; Helix returns unscoped candidates
-// and Engine hydrates under Scope.
+// GraphObjectSearcher is entity retrieval over parent nodes (find_objects).
+// It does not search chunks. Corpus retrieval is PartSearcher on the store.
+// Results are ranked best-first; Engine hydrates under Scope.
+// Namespace: MemoryGraph uses Covers; Helix returns unscoped candidates.
 type GraphObjectSearcher interface {
 	SearchText(ctx context.Context, query string, limit int, namespace Namespace) ([]ScoredID, error)
 	SearchVector(ctx context.Context, embedding []float32, limit int, namespace Namespace) ([]ScoredID, error)
@@ -122,7 +123,7 @@ func NewMemoryGraph() *MemoryGraph {
 
 // EnsureObject implements GraphWriter and stores searchable props for FindObjects.
 // Replaces any prior node for the same id (live update; edges are independent).
-func (g *MemoryGraph) EnsureObject(ctx context.Context, obj Object) error {
+func (g *MemoryGraph) EnsureObject(ctx context.Context, obj Object, searchText string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -135,7 +136,7 @@ func (g *MemoryGraph) EnsureObject(ctx context.Context, obj Object) error {
 		kind:       obj.Kind,
 		title:      obj.Title,
 		summary:    obj.Summary,
-		searchText: EntityIndexText(obj),
+		searchText: searchText,
 		namespace:  obj.Namespace.Clone(),
 		updatedAt:  obj.UpdatedAt,
 	}

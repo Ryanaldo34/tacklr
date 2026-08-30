@@ -11,7 +11,7 @@ import (
 )
 
 // QueryEmbedder embeds a query string for the dense search channel.
-// When nil on the Engine, search runs lexical-only.
+// NewEngine requires WithEmbedder or WithLexicalOnly.
 type QueryEmbedder interface {
 	Embed(ctx context.Context, text string) ([]float32, error)
 }
@@ -101,9 +101,28 @@ func (c EngineConfig) lambdaValue() float64 {
 // EngineOption configures NewEngine.
 type EngineOption func(*Engine)
 
-// WithEmbedder sets the optional query embedder for hybrid search.
+// WithEmbedder sets the query embedder for hybrid search and Put embeddings.
 func WithEmbedder(e QueryEmbedder) EngineOption {
 	return func(eng *Engine) { eng.embedder = e }
+}
+
+// WithLexicalOnly opts out of embeddings: Search is lexical-only and Put stores
+// no vector. Required when the host does not pass WithEmbedder.
+func WithLexicalOnly() EngineOption {
+	return func(eng *Engine) { eng.lexicalOnly = true }
+}
+
+// IndexTextFunc returns the document to embed and to write as graph search_text.
+// defaultText is Engine's index text for this object (SkipIndex already applied).
+// Return defaultText to keep it, or any rewrite that should occupy the vector
+// space (prefix, replace, drop the body, join related titles, …). Empty means
+// do not embed. Title, Summary, Content, and Properties on the stored object
+// are not modified.
+type IndexTextFunc func(obj Object, defaultText string) string
+
+// WithIndexText sets how Put builds embedding / graph search text.
+func WithIndexText(fn IndexTextFunc) EngineOption {
+	return func(eng *Engine) { eng.indexTextFn = fn }
 }
 
 // WithConfig sets ranking configuration (normalized by NewEngine).
@@ -153,18 +172,20 @@ func WithKinds(specs ...KindSpec) EngineOption {
 
 // Engine is the retrieval facade over a Store.
 type Engine struct {
-	store    Store
-	embedder QueryEmbedder
-	graph    GraphReader         // optional expand Neighbors
-	graphW   GraphWriter         // optional dual-write / Link (resolved in WithGraph)
-	graphS   GraphObjectSearcher // optional find_objects (resolved in WithGraph)
-	graphE   GraphEdgeSearcher   // optional edge text search (resolved in WithGraph)
-	reranker Reranker
-	recipeMu sync.RWMutex
-	recipes  map[string]ExpandRecipe // guarded by recipeMu
-	cfg      EngineConfig
-	catalog  *KindCatalog // always non-nil; empty ⇒ open mode
-	bootErr  error        // set by WithKinds when registration fails
+	store       Store
+	embedder    QueryEmbedder
+	graph       GraphReader         // optional expand Neighbors
+	graphW      GraphWriter         // optional dual-write / Link (resolved in WithGraph)
+	graphS      GraphObjectSearcher // optional find_objects (resolved in WithGraph)
+	graphE      GraphEdgeSearcher   // optional edge text search (resolved in WithGraph)
+	reranker    Reranker
+	recipeMu    sync.RWMutex
+	recipes     map[string]ExpandRecipe // guarded by recipeMu
+	cfg         EngineConfig
+	catalog     *KindCatalog // always non-nil; empty ⇒ open mode
+	bootErr     error        // set by WithKinds when registration fails
+	lexicalOnly bool
+	indexTextFn IndexTextFunc
 }
 
 // NewEngine builds an Engine over a Store. store must be non-nil.
@@ -184,6 +205,12 @@ func NewEngine(store Store, opts ...EngineOption) (*Engine, error) {
 	}
 	if e.bootErr != nil {
 		return nil, e.bootErr
+	}
+	if e.embedder != nil && e.lexicalOnly {
+		return nil, fmt.Errorf("%w: WithEmbedder and WithLexicalOnly are mutually exclusive", ErrInvalid)
+	}
+	if e.embedder == nil && !e.lexicalOnly {
+		return nil, fmt.Errorf("%w: WithEmbedder is required (or WithLexicalOnly to opt out)", ErrInvalid)
 	}
 	e.cfg = e.cfg.withDefaults()
 	return e, nil
@@ -254,7 +281,7 @@ func schemaFromStore(ctx context.Context, store KindReader, kind string) (Schema
 		if err != nil {
 			return SchemaResult{}, err
 		}
-		return SchemaResult{Kinds: []ObjectKindInfo{ObjectKindInfo(k)}, FilterUsage: fu}, nil
+		return SchemaResult{Kinds: []ObjectKindInfo{kindInfoFromObjectKind(k)}, FilterUsage: fu}, nil
 	}
 	kinds, err := store.ListKinds(ctx)
 	if err != nil {
@@ -262,7 +289,7 @@ func schemaFromStore(ctx context.Context, store KindReader, kind string) (Schema
 	}
 	out := make([]ObjectKindInfo, len(kinds))
 	for i, k := range kinds {
-		out[i] = ObjectKindInfo(k)
+		out[i] = kindInfoFromObjectKind(k)
 	}
 	return SchemaResult{Kinds: out, FilterUsage: fu}, nil
 }

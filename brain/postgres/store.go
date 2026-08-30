@@ -424,7 +424,8 @@ func (s *Store) scanObject(row scannable) (brain.Object, error) {
 	return o, nil
 }
 
-// SearchLexical implements PartSearcher using pg_textsearch BM25.
+// SearchLexical implements PartSearcher using pg_textsearch BM25 over parts
+// (parent_id set). search_text is title, summary, and content.
 func (s *Store) SearchLexical(ctx context.Context, scope brain.Scope, query string, filters brain.Filter, k int) ([]brain.ScoredID, error) {
 	if k <= 0 || strings.TrimSpace(query) == "" {
 		return nil, nil
@@ -446,7 +447,7 @@ func (s *Store) SearchLexical(ctx context.Context, scope brain.Scope, query stri
 	return s.queryScored(ctx, q, args, true)
 }
 
-// SearchVector implements PartSearcher using pgvector cosine distance.
+// SearchVector implements PartSearcher using pgvector cosine distance over parts.
 func (s *Store) SearchVector(ctx context.Context, scope brain.Scope, embedding []float32, filters brain.Filter, k int) ([]brain.ScoredID, error) {
 	if k <= 0 || len(embedding) == 0 {
 		return nil, nil
@@ -469,7 +470,7 @@ func (s *Store) SearchVector(ctx context.Context, scope brain.Scope, embedding [
 	return s.queryScored(ctx, q, args, false)
 }
 
-// SearchTrigram implements PartSearcher using pg_trgm similarity.
+// SearchTrigram implements PartSearcher using pg_trgm similarity over parts.
 func (s *Store) SearchTrigram(ctx context.Context, scope brain.Scope, query string, filters brain.Filter, k int) ([]brain.ScoredID, error) {
 	if k <= 0 || strings.TrimSpace(query) == "" {
 		return nil, nil

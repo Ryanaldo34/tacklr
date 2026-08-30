@@ -168,6 +168,10 @@ classDiagram
 | **Parent / Engram** | `parent_id` is empty | Yes — `{slug}.md` | Yes (dual-written on `Put`) |
 | **Part / Chunk** | `parent_id` is set | Never | Never |
 
+Parts are not files. `search` looks at parts (indexed workspace files, or
+chunks the host writes with `ReplaceParts`). The Engram Markdown body lives
+on the parent and is found with `find_objects` until parts exist.
+
 **Kinds** are defined by the **host**, not by Tacklr. `Deal` and `Person` in tests
 and examples are sample product types, not SDK types. You register them with
 `ApplyKinds` / `WithKinds`.
@@ -350,7 +354,9 @@ not `IndexPath`.
 
 ## Two backends: store and graph
 
-They are complementary. Do not treat Helix as a second document database.
+They are complementary. The store is the document corpus and the source of
+truth. The graph is tracked records and how they relate. Do not treat Helix as
+a second document database.
 
 ```mermaid
 flowchart TB
@@ -384,6 +390,19 @@ flowchart TB
 | **Holds** | Full rows, chunks, embeddings, filters | Parent nodes + edges |
 | **Answers** | `search`, `find_exact`, `read_object`, expand-children | `find_objects`, `link`, expand-relations, `find_links` |
 | **Required?** | Yes | Optional. Without it: no `link` / `find_objects` / named-relation expand |
+| **What the query matches** | Parts (chunks of notes and indexed files) | Parent records (a Deal, a Person, …) |
+
+`search` and `find_exact` look at **parts** (`parent_id` set): title, summary,
+and body. Hits promote to the parent with evidence. An Engram that has no
+parts does not appear there — use `find_objects`, or add chunks (host ingest).
+
+`find_objects` looks at **parent** nodes in the graph: the record’s title,
+summary, body, and indexed properties. Structured fields belong in **filters**,
+not in the query string. The same filter keys work on corpus search, but they
+apply to the part row, not the parent.
+
+Exact lookups (`Get`, `GetByProperty`, `ListByKind`, `find_exact` with a UUID)
+always go to the store.
 
 **Write rules**
 
@@ -400,11 +419,16 @@ flowchart TB
 
 | Object | Text that is embedded |
 |--------|------------------------|
-| Parent / Engram | `EntityIndexText`: title, summary, scalar properties (sorted keys), full body |
+| Parent / Engram | `EntityIndexText`: title, summary, indexed scalar properties, full body |
 | Part / Chunk | `IndexText` (title + summary + content), prefixed with the parent title |
 
+`WithIndexText` can rewrite that document at Put (prefix, replace, or drop
+fields) without changing the stored object. The same string is embedded and
+written as graph search text.
+
 So `find_objects "open renewal"` can match a Deal whose `stage` property is
-`open`, not only the narrative body.
+`open`, not only the narrative body. Corpus `search` still matches chunk text,
+not those parent fields.
 
 A host that uses Helix must `Bootstrap` (or `EnsureSearchIndexes`) so object
 search is actually on. `MemoryGraph` is always ready and is what tests use.
@@ -438,6 +462,10 @@ Use for “what in the notes or indexed files supports this?”
 Hits are often **chunks**. The engine does **not** return those chunks as the
 primary result. It **promotes** them to their parent and attaches the best
 chunks as **evidence** (snippet, score, `start_line`, `block_id`).
+
+The query is free text against that chunk body. Structured fields on the parent
+record (stage, status, …) are filters on `find_objects`, not keywords for
+`search`.
 
 ```mermaid
 sequenceDiagram
@@ -660,6 +688,7 @@ eng, err := brain.NewEngine(store,
     brain.WithEmbedder(emb),          // hybrid search + Put embeddings
     brain.WithGraph(g),               // link / find_objects / named expand
 )
+// Pass WithLexicalOnly() instead of WithEmbedder when you want keyword search only.
 if err := eng.LoadKindsFromStore(ctx); err != nil { /* ... */ }
 
 // AgentOptions:
@@ -697,6 +726,7 @@ Tests call `store.Setup` (embedding dim 3) instead of loading SQL files.
 |-----------|----------|
 | Wrong namespace | `Get` / search look like not found. Graph ids that fail hydrate are dropped. A coarser scope (fewer attrs) sees objects with extra attrs. |
 | Soft-deleted object | Hidden from Get and search. Graph node is already gone. |
+| No embedder at construct | `NewEngine` fails unless you pass `WithEmbedder` or `WithLexicalOnly`. |
 | Embedder down at **query** time | `search` / `find_objects` can run lexical-only (default). Set `FailOnEmbedderError` to surface the error. |
 | Embedder down at **Put** time | **Fail closed.** An unindexed parent is not persisted. |
 | Graph down at expand | Can degrade to containment if containment was requested. |

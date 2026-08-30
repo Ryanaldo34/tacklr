@@ -380,7 +380,7 @@ func TestPut_livePostgresUpsertAndSoftDelete(t *testing.T) {
 	}
 	var _ brain.ObjectWriter = store
 
-	eng, err := brain.NewEngine(store, brain.WithKinds(
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithKinds(
 		brain.KindSpec{
 			Kind: "Document", IsParent: true,
 			Fields: []brain.FieldSpec{{Name: "stage", Type: brain.FieldTypeString}},
@@ -647,7 +647,7 @@ func TestApplyKinds_livePostgresMigration(t *testing.T) {
 	// Compile-time / runtime: postgres.Store is a KindRegistry.
 	var _ brain.KindRegistry = store
 
-	eng, err := brain.NewEngine(store)
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -687,7 +687,7 @@ func TestApplyKinds_livePostgresMigration(t *testing.T) {
 	}
 
 	// Fresh process: load durable kinds (no hard-coded WithKinds).
-	eng2, err := brain.NewEngine(store)
+	eng2, err := brain.NewEngine(store, brain.WithLexicalOnly())
 	if err != nil {
 		t.Fatal(err)
 	}

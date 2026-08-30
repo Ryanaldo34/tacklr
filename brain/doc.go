@@ -41,8 +41,10 @@
 //
 // # Explicit writes (no handoff side effects)
 //
-// Durable objects are written only via Engine.Put / SoftDelete (host SDK) or
-// kind-scoped agent tools. Context handoff never writes the knowledge base.
+// Durable objects are written only via Engine.Put / SoftDelete / ReplaceParts
+// (host SDK) or kind-scoped agent tools. Context handoff never writes the
+// knowledge base. ReplaceParts is how a host attaches corpus chunks under a
+// parent; Engram files stay parent-only.
 //
 // Hosts map save_* tools via AgentOptions.BrainWriteKinds. Write for retrieval:
 // fill title and summary (and useful properties) so search and find_objects work.
@@ -51,24 +53,30 @@
 // (edges preserved). SoftDelete removes the graph node first, then soft-deletes the
 // store row. Revive via Put recreates the graph node.
 //
-// # Store vs graph (complementary)
+// # Store vs graph
 //
-// The Store is the source of truth and document corpus:
-// full rows, parts/chunks, BM25 + dense hybrid search, property filters, soft-delete,
-// containment (parent_id). Tools: search, find_exact, read; expand children.
-// search may pass ScopeIDs to limit hits to a parent neighborhood.
+// The Store is the source of truth and the document corpus: full rows,
+// parts/chunks, BM25 + dense hybrid search, property filters, soft-delete,
+// containment (parent_id). Search and FindExact query parts (title, summary,
+// content) and promote hits to the parent. Tools: search, find_exact, read;
+// expand children. search may pass ScopeIDs to limit hits to a neighborhood.
 //
-// The graph holds first-class entity nodes and cross-object edges only (not chunks).
-// Helix owns: native text/vector indexes, $distance ranking, graph topology, edge
-// props, BothE neighbor walks, optional tenant indexes on namespace.
+// The graph holds first-class parent nodes and cross-object edges only (not
+// chunks). FindObjects queries that entity index (title, summary, indexed
+// properties, body). Tools: find_objects (after graph Bootstrap), expand with
+// relation_types, link. Optional: helixgraph.EnsureEdgeTextIndex(rel) +
+// SearchEdgesText for note search on a known relation label.
+//
+// Helix owns native text/vector indexes, $distance ranking, graph topology,
+// edge props, BothE neighbor walks, optional tenant indexes on namespace.
 // Tacklr does not reimplement BM25/HNSW or in-process neighbor indexes for Helix.
-// We dual-write searchable props (EntityIndexText + embedding), Link edges, fuse
+// Dual-write searchable props (EntityIndexText + embedding), Link edges, fuse
 // graph text+vector channels with RRF, then hydrate full rows from the Store
 // under Scope.
 //
-// Tools: find_objects (after graph Bootstrap), expand with relation_types, link.
-// Optional: helixgraph.EnsureEdgeTextIndex(rel) + SearchEdgesText for note search
-// on a known relation label.
+// Query strings are free text. Structured fields go in Filters. The same
+// filter keys work on search and find_objects; search applies them to the
+// part row, find_objects to the parent.
 //
 // GraphRAG-style composition (host-agnostic):
 //
@@ -89,8 +97,10 @@
 // schema() returns filter_usage.tools listing search, find_exact, and find_objects
 // so agents know filterable_fields apply to entity find as well as corpus search.
 //
-// Embeddings: WithEmbedder on NewEngine. Parents embed EntityIndexText; parts embed
-// IndexText with parent title prefix (corpus only). One embedding dimension per process.
+// Embeddings: NewEngine requires WithEmbedder or WithLexicalOnly. Parents embed
+// EntityIndexText; parts embed IndexText with parent title prefix (corpus only).
+// WithIndexText rewrites that document at Put without changing the stored object.
+// One embedding dimension per process.
 // Helix hosts must call helixgraph.Graph.Bootstrap (or EnsureSearchIndexes) so
 // HasObjectSearch is true; MemoryGraph is always ready when attached.
 // Bootstrap(true) enables Helix tenant filtering when the image supports it.

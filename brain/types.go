@@ -41,7 +41,8 @@ type Object struct {
 	ContentType string
 	ParentID    *uuid.UUID
 	Position    *int
-	// Embedding is optional dense vector for hybrid search fixtures / stores.
+	// Embedding is the dense vector stored on the row. Store search reads it
+	// on parts. Parent embeddings are copied to the graph for FindObjects.
 	Embedding []float32
 	// Namespace is the ordered named isolation attrs stored on the row.
 	Namespace Namespace
@@ -152,11 +153,29 @@ type FilterUsage struct {
 func DefaultFilterUsage() FilterUsage {
 	return FilterUsage{
 		Tools: []string{"search", "find_exact", "find_objects"},
-		Note: "Each kind's filterable_fields lists property keys, types, and operators allowed in filters. " +
-			"Use those keys on search, find_exact, and find_objects (not invented names). " +
-			"When kinds are registered, property filters require a kind filter (or find_objects.kinds). " +
-			"Core keys: kind, title, created_after, created_before, updated_after, updated_before. " +
+		Note: "Each kind lists columns (title, summary, content) and filterable_fields (host properties). " +
+			"search and find_exact take a free-text query over chunk title, summary, and content; " +
+			"put structured fields in filters. find_objects searches parent records; the same " +
+			"filterable_fields apply to the parent. When kinds are registered, property filters " +
+			"require a kind filter (or find_objects.kinds). Core filter keys: kind, title, " +
+			"created_after, created_before, updated_after, updated_before. Field examples are " +
+			"illustrations, not a closed set; enum on a string field is enforced on write. " +
 			"Call schema with a kind before filtering.",
+	}
+}
+
+// CoreColumn is a built-in object field shown next to filterable_fields in schema().
+type CoreColumn struct {
+	Name   string `json:"name"`
+	Filter bool   `json:"filter,omitempty"`
+}
+
+// CoreColumns is title, summary, and content — always present on every object.
+func CoreColumns() []CoreColumn {
+	return []CoreColumn{
+		{Name: "title", Filter: true},
+		{Name: "summary"},
+		{Name: "content"},
 	}
 }
 
@@ -166,6 +185,7 @@ type ObjectKindInfo struct {
 	Description      string          `json:"description,omitempty"`
 	IsPart           bool            `json:"is_part"`
 	IsParent         bool            `json:"is_parent"`
+	Columns          []CoreColumn    `json:"columns"`
 	FilterableFields json.RawMessage `json:"filterable_fields,omitempty"`
 }
 
@@ -202,6 +222,10 @@ func (f Filter) empty() bool {
 }
 
 // SearchRequest is the engine input for search and find_exact.
+// SearchRequest is corpus retrieval over store parts (Search / FindExact).
+// Query is free text against part title, summary, and content. Structured
+// fields belong in Filters on the part row, or in FindObjectsRequest when
+// they live on the parent.
 type SearchRequest struct {
 	Query   string
 	Filters Filter

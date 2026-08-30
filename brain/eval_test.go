@@ -38,7 +38,7 @@ func TestEval_goldenSearchQueries(t *testing.T) {
 		})
 	}
 
-	eng, err := brain.NewEngine(store, brain.WithConfig(brain.EngineConfig{
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithConfig(brain.EngineConfig{
 		Now: func() time.Time { return now },
 	}))
 	if err != nil {
@@ -80,7 +80,7 @@ func TestEval_graphRAGComposition(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
 	g := brain.NewMemoryGraph()
-	eng, err := brain.NewEngine(store, brain.WithGraph(g), brain.WithKinds(
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithGraph(g), brain.WithKinds(
 		brain.KindSpec{Kind: "Deal", IsParent: true, Fields: []brain.FieldSpec{
 			{Name: "stage", Type: brain.FieldTypeString},
 		}},
@@ -341,7 +341,7 @@ func TestEval_graphRAGScopeSafeMultiHop(t *testing.T) {
 	_ = g.AddEdge(ctx, a, mid, "references", brain.EdgeMeta{})
 	_ = g.AddEdge(ctx, mid, leaf, "references", brain.EdgeMeta{})
 
-	eng, err := brain.NewEngine(store, brain.WithGraph(g))
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithGraph(g))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -415,7 +415,7 @@ func TestEval_degradeGraphKeepsContainment(t *testing.T) {
 		ID: child, Kind: "Chunk", Content: "c", ParentID: &parent, Position: &pos,
 		Namespace: ns, UpdatedAt: now,
 	})
-	eng, err := brain.NewEngine(store, brain.WithGraph(failGraph{}))
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithGraph(failGraph{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -450,7 +450,7 @@ func TestConcurrent_searchAndExpand(t *testing.T) {
 			ParentID: &parent, Position: &pos, Namespace: ns, UpdatedAt: now,
 		})
 	}
-	eng, err := brain.NewEngine(store, brain.WithConfig(brain.EngineConfig{
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithConfig(brain.EngineConfig{
 		Now: func() time.Time { return now },
 	}))
 	if err != nil {

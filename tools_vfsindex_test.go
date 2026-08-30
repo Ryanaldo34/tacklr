@@ -17,7 +17,7 @@ import (
 func vfsIndexHarness(t *testing.T, withNS bool) (*TurnManager, *vfs.MountSession, *brain.Engine, brain.Namespace) {
 	t.Helper()
 	store := brain.NewMemoryStore()
-	eng, err := brain.NewEngine(store)
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,7 +234,7 @@ func TestVFSIndexTools_selectiveIndexSearchReadAndTrack(t *testing.T) {
 func TestVFSIndexTools_prefixAutoIndex(t *testing.T) {
 	ctx := context.Background()
 	ms := mustMountTree(t, "policy-prefix", vfs.At("work", vfs.Local(t.TempDir())).Indexed("  Prefix  "))
-	eng, err := brain.NewEngine(brain.NewMemoryStore())
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,7 +260,7 @@ func TestVFSIndexTools_prefixAutoIndex(t *testing.T) {
 func TestKnowledgeSaveSearchRead(t *testing.T) {
 	ctx := context.Background()
 	g := brain.NewMemoryGraph()
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithGraph(g), brain.WithKinds(
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly(), brain.WithGraph(g), brain.WithKinds(
 		brain.KindSpec{Kind: "Discovery", IsParent: true},
 		brain.KindSpec{Kind: "Fact", IsParent: true},
 	))
@@ -381,7 +381,7 @@ func TestKnowledgeSaveSearchRead(t *testing.T) {
 func TestKnowledgeSave_rootsMount(t *testing.T) {
 	ctx := context.Background()
 	g := brain.NewMemoryGraph()
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithGraph(g), brain.WithKinds(
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly(), brain.WithGraph(g), brain.WithKinds(
 		brain.KindSpec{Kind: "Discovery", IsParent: true},
 	))
 	if err != nil {
@@ -449,7 +449,7 @@ func TestKnowledgeSave_rootsMount(t *testing.T) {
 func TestRun_workspaceResearchTurn(t *testing.T) {
 	ctx := context.Background()
 	g := brain.NewMemoryGraph()
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithGraph(g), brain.WithKinds(
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly(), brain.WithGraph(g), brain.WithKinds(
 		brain.KindSpec{Kind: "Discovery", IsParent: true},
 	))
 	if err != nil {
@@ -610,7 +610,7 @@ func TestPathNativeGraphLinkExpand(t *testing.T) {
 	ms := mustMountTree(t, "path-graph", vfs.At("work", vfs.Local(t.TempDir())))
 	store := brain.NewMemoryStore()
 	g := brain.NewMemoryGraph()
-	eng, err := brain.NewEngine(store, brain.WithGraph(g))
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithGraph(g))
 	if err != nil {
 		t.Fatal(err)
 	}

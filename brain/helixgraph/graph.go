@@ -403,7 +403,7 @@ func (g *Graph) resolveNodeObjectIDs(ctx context.Context, internal []uint64) (ma
 
 // EnsureObject implements brain.GraphWriter: insert if missing, else update props in place.
 // Incident edges are preserved (never drop+recreate the node identity).
-func (g *Graph) EnsureObject(ctx context.Context, obj brain.Object) error {
+func (g *Graph) EnsureObject(ctx context.Context, obj brain.Object, searchText string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -415,9 +415,9 @@ func (g *Graph) EnsureObject(ctx context.Context, obj brain.Object) error {
 		return err
 	}
 	if exists {
-		return g.updateObjectProps(ctx, obj)
+		return g.updateObjectProps(ctx, obj, searchText)
 	}
-	return g.insertObject(ctx, obj)
+	return g.insertObject(ctx, obj, searchText)
 }
 
 func (g *Graph) objectExists(ctx context.Context, id uuid.UUID) (bool, error) {
@@ -439,10 +439,10 @@ func (g *Graph) objectExists(ctx context.Context, id uuid.UUID) (bool, error) {
 	return raw.N.Count > 0, nil
 }
 
-func (g *Graph) insertObject(ctx context.Context, obj brain.Object) error {
+func (g *Graph) insertObject(ctx context.Context, obj brain.Object, searchText string) error {
 	q := helix.WriteQuery("brain_insert_object")
 	oid := q.ParamString("object_id", obj.ID.String())
-	props := objectProps(oid, obj)
+	props := objectProps(oid, obj, searchText)
 	req := q.
 		VarAs("n", helix.G().AddN(nodeLabel, props)).
 		Returning("n")
@@ -452,10 +452,10 @@ func (g *Graph) insertObject(ctx context.Context, obj brain.Object) error {
 	return nil
 }
 
-func (g *Graph) updateObjectProps(ctx context.Context, obj brain.Object) error {
+func (g *Graph) updateObjectProps(ctx context.Context, obj brain.Object, searchText string) error {
 	q := helix.WriteQuery("brain_update_object")
 	oid := q.ParamString("object_id", obj.ID.String())
-	pairs := objectPropPairs(obj)
+	pairs := objectPropPairs(obj, searchText)
 	if len(pairs) == 0 {
 		return nil
 	}
@@ -476,7 +476,7 @@ type namedProp struct {
 }
 
 // objectPropPairs returns updatable node properties (excludes object_id identity).
-func objectPropPairs(obj brain.Object) []namedProp {
+func objectPropPairs(obj brain.Object, searchText string) []namedProp {
 	var props []namedProp
 	if obj.Kind != "" {
 		props = append(props, namedProp{propKind, obj.Kind})
@@ -487,7 +487,7 @@ func objectPropPairs(obj brain.Object) []namedProp {
 	if obj.Summary != "" {
 		props = append(props, namedProp{propSummary, obj.Summary})
 	}
-	if st := brain.EntityIndexText(obj); st != "" {
+	if st := strings.TrimSpace(searchText); st != "" {
 		props = append(props, namedProp{propSearchText, st})
 	}
 	if !obj.Namespace.Empty() {
@@ -541,8 +541,8 @@ func scalarPropValue(v any) (any, bool) {
 	}
 }
 
-func objectProps(oid helix.ParamRef, obj brain.Object) helix.Props {
-	pairs := objectPropPairs(obj)
+func objectProps(oid helix.ParamRef, obj brain.Object, searchText string) helix.Props {
+	pairs := objectPropPairs(obj, searchText)
 	props := make(helix.Props, 0, len(pairs)+1)
 	props = append(props, helix.Prop(propObjectID, oid))
 	for _, p := range pairs {

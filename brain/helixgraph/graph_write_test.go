@@ -69,7 +69,7 @@ func TestGraph_ensureObjectAndAddEdgeRequestShape(t *testing.T) {
 		UpdatedAt: now,
 		Embedding: []float32{0.1, 0.2},
 	}
-	if err := g.EnsureObject(ctx, obj); err != nil {
+	if err := g.EnsureObject(ctx, obj, brain.EntityIndexText(obj)); err != nil {
 		t.Fatal(err)
 	}
 	// First EnsureObject: exists-check then insert (AddN, no node Drop).
@@ -98,7 +98,7 @@ func TestGraph_ensureObjectAndAddEdgeRequestShape(t *testing.T) {
 	// Second EnsureObject updates in place (SetProperty), no AddN / node Drop.
 	nBeforeUpdate := len(bodies)
 	obj.Title = "memo-v2"
-	if err := g.EnsureObject(ctx, obj); err != nil {
+	if err := g.EnsureObject(ctx, obj, brain.EntityIndexText(obj)); err != nil {
 		t.Fatal(err)
 	}
 	updateBodies := bodies[nBeforeUpdate:]
@@ -174,7 +174,7 @@ func TestGraph_writeValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := g.EnsureObject(ctx, brain.Object{}); err == nil {
+	if err := g.EnsureObject(ctx, brain.Object{}, ""); err == nil {
 		t.Fatal("nil object id")
 	}
 	if err := g.AddEdge(ctx, uuid.New(), uuid.Nil, "r", brain.EdgeMeta{}); err == nil {
@@ -197,7 +197,7 @@ func TestGraph_writeValidation(t *testing.T) {
 	if err := g.RemoveObject(cctx, uuid.New()); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled RemoveObject: %v", err)
 	}
-	if err := g.EnsureObject(cctx, brain.Object{ID: uuid.New()}); !errors.Is(err, context.Canceled) {
+	if err := g.EnsureObject(cctx, brain.Object{ID: uuid.New()}, ""); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled EnsureObject: %v", err)
 	}
 	if err := g.Bootstrap(cctx, false); !errors.Is(err, context.Canceled) {

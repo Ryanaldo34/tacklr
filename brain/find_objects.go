@@ -8,18 +8,21 @@ import (
 	"github.com/google/uuid"
 )
 
-// FindObjectsRequest is the engine input for entity/object find (graph node search).
+// FindObjectsRequest is entity retrieval (graph parent nodes).
+// Query matches entity index text (title, summary, indexed properties, body).
+// Filters apply to the hydrated parent row (same keys as schema filterable_fields).
+// Corpus retrieval is SearchRequest (store parts).
 type FindObjectsRequest struct {
 	Query   string
 	Kinds   []string // optional host kind names; empty = all kinds
-	Filters Filter   // same property keys as search; see schema filterable_fields
+	Filters Filter
 	Limit   int
 }
 
-// FindObjects ranks knowledge objects as entities via GraphObjectSearcher
-// (Helix text/vector or MemoryGraph), then hydrates under Scope from the store.
-// Filters use the same catalog rules as search/find_exact (schema filterable_fields).
-// Not a substitute for corpus Search: no part promotion evidence path.
+// FindObjects ranks first-class objects via GraphObjectSearcher (Helix or
+// MemoryGraph), then hydrates under Scope from the store and applies Filters
+// on parent rows. Requires a graph. Not corpus Search: no part evidence path.
+// A parent with no parts is visible here and invisible to Search.
 func (e *Engine) FindObjects(ctx context.Context, scope Scope, req FindObjectsRequest, results ResultSetStore) (page SearchPage, err error) {
 	if e.graphS == nil {
 		return page, fmt.Errorf("%w: graph object search is not available", ErrUnsupported)

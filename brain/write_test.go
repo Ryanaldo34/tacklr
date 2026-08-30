@@ -15,7 +15,7 @@ import (
 // TestPut_roundTripAndSoftDelete: open-catalog Put is readable, soft-delete hides the object.
 func TestPut_roundTripAndSoftDelete(t *testing.T) {
 	ctx := context.Background()
-	eng, err := brain.NewEngine(brain.NewMemoryStore())
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func TestPut_roundTripAndSoftDelete(t *testing.T) {
 // TestPut_catalogEnforced: each case is a distinct ValidateObject return path; success path writes parent+part.
 func TestPut_catalogEnforced(t *testing.T) {
 	ctx := context.Background()
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithKinds(
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly(), brain.WithKinds(
 		brain.KindSpec{
 			Kind: "Document", IsParent: true,
 			Fields: []brain.FieldSpec{
@@ -191,6 +191,193 @@ func TestEntityIndexText_includesSummaryAndProperties(t *testing.T) {
 			t.Fatalf("missing %q in %q", want, got)
 		}
 	}
+	withSlug := brain.EntityIndexText(brain.Object{
+		Title: "Acme", Properties: map[string]any{brain.PropSlug: "acme", "stage": "open"},
+	})
+	if strings.Contains(withSlug, "slug:") || !strings.Contains(withSlug, "stage: open") {
+		t.Fatalf("slug must be omitted: %q", withSlug)
+	}
+}
+
+// TestPut_skipIndexKeepsPropertyOffEntityText: SkipIndex fields stay on the
+// object and remain filterable, but they are not in embed or find_objects text.
+func TestPut_skipIndexKeepsPropertyOffEntityText(t *testing.T) {
+	ctx := context.Background()
+	var gotEmbed string
+	emb := captureEmbedder{fn: func(text string) []float32 {
+		gotEmbed = text
+		return []float32{1, 0, 0}
+	}}
+	store := brain.NewMemoryStore()
+	g := brain.NewMemoryGraph()
+	eng, err := brain.NewEngine(store, brain.WithEmbedder(emb), brain.WithGraph(g), brain.WithKinds(
+		brain.KindSpec{Kind: "Deal", IsParent: true, Fields: []brain.FieldSpec{
+			{Name: "stage", Type: brain.FieldTypeString},
+			{Name: "message_id", Type: brain.FieldTypeString, SkipIndex: true},
+		}},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ns := mustNS(t, "id", uuid.NewString())
+	scope := brain.Scope{Namespace: ns}
+	const msgID = "msg-skip-index-token"
+	deal, err := eng.Put(ctx, scope, brain.Object{
+		Kind: "Deal", Title: "Acme renewal",
+		Properties: map[string]any{"stage": "open", "message_id": msgID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(gotEmbed, msgID) {
+		t.Fatalf("skip-index field in embed text: %q", gotEmbed)
+	}
+	if !strings.Contains(gotEmbed, "stage: open") {
+		t.Fatalf("indexed field missing from embed: %q", gotEmbed)
+	}
+	got, err := eng.GetByProperty(ctx, scope, "message_id", msgID)
+	if err != nil || got.ID != deal.ID {
+		t.Fatalf("GetByProperty: %+v err=%v", got, err)
+	}
+	rich, err := eng.Read(ctx, scope, deal.ID)
+	if err != nil || rich.Properties["message_id"] != msgID {
+		t.Fatalf("read still has property: %+v err=%v", rich, err)
+	}
+	miss, err := g.SearchText(ctx, msgID, 5, ns)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(miss) != 0 {
+		t.Fatalf("graph search text must not contain skip-index value: %+v", miss)
+	}
+	hit, err := g.SearchText(ctx, "Acme renewal", 5, ns)
+	if err != nil || len(hit) != 1 || hit[0].ID != deal.ID {
+		t.Fatalf("graph search title: %+v err=%v", hit, err)
+	}
+}
+
+func TestPut_enumRejectsUnknownString(t *testing.T) {
+	ctx := context.Background()
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly(), brain.WithKinds(
+		brain.KindSpec{Kind: "Deal", IsParent: true, Fields: []brain.FieldSpec{
+			{Name: "stage", Type: brain.FieldTypeString, Enum: []string{"open", "closed"}},
+			{Name: "note", Type: brain.FieldTypeString, Examples: []string{"hello"}},
+		}},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ns := mustNS(t, "id", uuid.NewString())
+	scope := brain.Scope{Namespace: ns}
+	_, err = eng.Put(ctx, scope, brain.Object{
+		Kind: "Deal", Title: "x", Properties: map[string]any{"stage": "Yellowish"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "enum") {
+		t.Fatalf("want enum error, got %v", err)
+	}
+	if _, err := eng.Put(ctx, scope, brain.Object{
+		Kind: "Deal", Title: "x", Properties: map[string]any{"stage": "open", "note": "Yellowish"},
+	}); err != nil {
+		t.Fatalf("examples are not closed: %v", err)
+	}
+}
+
+func TestPut_indexTextFuncShapesEmbedAndGraph(t *testing.T) {
+	ctx := context.Background()
+	var gotEmbed string
+	emb := captureEmbedder{fn: func(text string) []float32 {
+		gotEmbed = text
+		return []float32{1, 0, 0}
+	}}
+	store := brain.NewMemoryStore()
+	g := brain.NewMemoryGraph()
+	eng, err := brain.NewEngine(store, brain.WithEmbedder(emb), brain.WithGraph(g),
+		brain.WithIndexText(func(obj brain.Object, defaultText string) string {
+			return "related: neighbor record\n" + defaultText
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ns := mustNS(t, "id", uuid.NewString())
+	scope := brain.Scope{Namespace: ns}
+	obj, err := eng.Put(ctx, scope, brain.Object{
+		Kind: "Note", Title: "invoice", Content: "amount due Friday",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obj.Content != "amount due Friday" {
+		t.Fatalf("content must stay on the object: %q", obj.Content)
+	}
+	if !strings.Contains(gotEmbed, "related: neighbor record") || !strings.Contains(gotEmbed, "invoice") {
+		t.Fatalf("embed text: %q", gotEmbed)
+	}
+	hit, err := g.SearchText(ctx, "neighbor record", 5, ns)
+	if err != nil || len(hit) != 1 || hit[0].ID != obj.ID {
+		t.Fatalf("graph search extra text: %+v err=%v", hit, err)
+	}
+}
+
+func TestPut_indexTextFuncEmptySkipsEmbed(t *testing.T) {
+	ctx := context.Background()
+	emb := captureEmbedder{fn: func(string) []float32 {
+		t.Fatal("embedder must not run on empty index text")
+		return nil
+	}}
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithEmbedder(emb),
+		brain.WithIndexText(func(brain.Object, string) string { return "  " }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ns := mustNS(t, "id", uuid.NewString())
+	got, err := eng.Put(ctx, brain.Scope{Namespace: ns}, brain.Object{
+		Kind: "Note", Title: "x", Content: "body",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Embedding) != 0 {
+		t.Fatalf("empty index text must not embed: %+v", got.Embedding)
+	}
+}
+
+func TestApplyKinds_roundTripSkipIndexAndEnum(t *testing.T) {
+	ctx := context.Background()
+	store := brain.NewMemoryStore()
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.ApplyKinds(ctx, brain.KindSpec{
+		Kind: "Deal", IsParent: true,
+		Fields: []brain.FieldSpec{
+			{Name: "stage", Type: brain.FieldTypeString, Enum: []string{"open", "closed"}},
+			{Name: "message_id", Type: brain.FieldTypeString, SkipIndex: true},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	eng2, err := brain.NewEngine(store, brain.WithLexicalOnly())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng2.LoadKindsFromStore(ctx); err != nil {
+		t.Fatal(err)
+	}
+	spec, ok := eng2.Catalog().Get("Deal")
+	if !ok {
+		t.Fatal("missing Deal")
+	}
+	stage, _ := spec.Field("stage")
+	if len(stage.Enum) != 2 || stage.Enum[0] != "open" {
+		t.Fatalf("enum: %+v", stage)
+	}
+	mid, _ := spec.Field("message_id")
+	if !mid.SkipIndex {
+		t.Fatalf("skip_index: %+v", mid)
+	}
 }
 
 // TestPut_partEmbedIncludesParentTitle: part embeddings / graph index text get parent context.
@@ -239,7 +426,7 @@ func TestPut_multiTurnMemoryGraph(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
 	g := brain.NewMemoryGraph()
-	eng, err := brain.NewEngine(store, brain.WithGraph(g), brain.WithKinds(
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithGraph(g), brain.WithKinds(
 		brain.KindSpec{Kind: "Document", IsParent: true},
 		brain.KindSpec{Kind: "Chunk", IsPart: true},
 	))
@@ -326,7 +513,7 @@ func TestPut_multiTurnMemoryGraph(t *testing.T) {
 	}
 
 	// Graph EnsureObject rejects nil id.
-	if err := g.EnsureObject(ctx, brain.Object{}); err == nil {
+	if err := g.EnsureObject(ctx, brain.Object{}, ""); err == nil {
 		t.Fatal("nil ensure")
 	}
 }
@@ -335,7 +522,7 @@ func TestPut_multiTurnMemoryGraph(t *testing.T) {
 func TestLink_expandFindsNeighbor(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	eng, err := brain.NewEngine(store, brain.WithGraph(brain.NewMemoryGraph()))
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithGraph(brain.NewMemoryGraph()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -389,7 +576,7 @@ func TestLink_expandFindsNeighbor(t *testing.T) {
 	if err := eng.Link(ctx, scope, a.ID, b.ID, ""); !errors.Is(err, brain.ErrInvalid) {
 		t.Fatalf("want ErrInvalid for incomplete link: %v", err)
 	}
-	engNoGraph, err := brain.NewEngine(store)
+	engNoGraph, err := brain.NewEngine(store, brain.WithLexicalOnly())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -408,7 +595,7 @@ func TestLink_expandFindsNeighbor(t *testing.T) {
 func TestLinkWith_missingEndpointAndCancelled(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	eng, err := brain.NewEngine(store, brain.WithGraph(brain.NewMemoryGraph()))
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithGraph(brain.NewMemoryGraph()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -444,7 +631,7 @@ func TestSoftDelete_graphRemoveErrorSurfaces(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
 	g := &failRemoveGraph{MemoryGraph: brain.NewMemoryGraph()}
-	eng, err := brain.NewEngine(store, brain.WithGraph(g))
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithGraph(g))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -476,7 +663,7 @@ func TestLinkWith_expandAttachesMeta(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
 	g := brain.NewMemoryGraph()
-	eng, err := brain.NewEngine(store, brain.WithGraph(g))
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithGraph(g))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -555,7 +742,7 @@ func TestLink_crossObjectEmailDealBuyer(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
 	g := brain.NewMemoryGraph()
-	eng, err := brain.NewEngine(store, brain.WithGraph(g), brain.WithKinds(
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithGraph(g), brain.WithKinds(
 		brain.KindSpec{Kind: "Email", IsParent: true},
 		brain.KindSpec{Kind: "Deal", IsParent: true, Fields: []brain.FieldSpec{
 			{Name: "stage", Type: brain.FieldTypeString},
@@ -626,5 +813,89 @@ func TestLink_crossObjectEmailDealBuyer(t *testing.T) {
 	kids, err := eng.Expand(ctx, scope, brain.ExpandRequest{ObjectID: email.ID}, sc)
 	if err != nil || kids.Mode != "children" {
 		t.Fatalf("containment expand: %+v err=%v", kids, err)
+	}
+}
+
+func TestReplaceParts_searchHitsNewChunks(t *testing.T) {
+	ctx := context.Background()
+	store := brain.NewMemoryStore()
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithKinds(
+		brain.KindSpec{Kind: "Document", IsParent: true},
+		brain.KindSpec{Kind: "Chunk", IsPart: true},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ns := mustNS(t, "id", uuid.NewString())
+	scope := brain.Scope{Namespace: ns}
+	parent, err := eng.Put(ctx, scope, brain.Object{Kind: "Document", Title: "Memo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.ReplaceParts(ctx, scope, parent.ID, []brain.Object{
+		{Kind: "Chunk", Title: "a", Content: "pkceflow"},
+		{Kind: "Chunk", Title: "b", Content: "neighbor"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	kids, err := eng.ListChildren(ctx, scope, parent.ID)
+	if err != nil || len(kids) != 2 || kids[0].Title != "a" || kids[1].Title != "b" {
+		t.Fatalf("children: %+v err=%v", kids, err)
+	}
+	sc := brain.NewSearchContext()
+	page, err := eng.Search(ctx, scope, brain.SearchRequest{Query: "pkceflow"}, sc)
+	if err != nil || len(page.Objects) != 1 || page.Objects[0].ID != parent.ID {
+		t.Fatalf("search new chunk: %+v err=%v", page.Objects, err)
+	}
+	if err := eng.ReplaceParts(ctx, scope, parent.ID, []brain.Object{
+		{Kind: "Chunk", Title: "c", Content: "indemnityclause"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	kids, err = eng.ListChildren(ctx, scope, parent.ID)
+	if err != nil || len(kids) != 1 || kids[0].Title != "c" {
+		t.Fatalf("replaced children: %+v err=%v", kids, err)
+	}
+	miss, err := eng.Search(ctx, scope, brain.SearchRequest{Query: "pkceflow"}, sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(miss.Objects) != 0 {
+		t.Fatalf("old chunk must be gone: %+v", miss.Objects)
+	}
+	hit, err := eng.Search(ctx, scope, brain.SearchRequest{Query: "indemnityclause"}, sc)
+	if err != nil || len(hit.Objects) != 1 || hit.Objects[0].ID != parent.ID {
+		t.Fatalf("search replacement: %+v err=%v", hit.Objects, err)
+	}
+}
+
+func TestReplaceParts_rejectsPartParent(t *testing.T) {
+	ctx := context.Background()
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly(), brain.WithKinds(
+		brain.KindSpec{Kind: "Document", IsParent: true},
+		brain.KindSpec{Kind: "Chunk", IsPart: true},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ns := mustNS(t, "id", uuid.NewString())
+	scope := brain.Scope{Namespace: ns}
+	parent, err := eng.Put(ctx, scope, brain.Object{Kind: "Document", Title: "Memo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pos := 0
+	part, err := eng.Put(ctx, scope, brain.Object{
+		Kind: "Chunk", Title: "c", ParentID: &parent.ID, Position: &pos,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = eng.ReplaceParts(ctx, scope, part.ID, nil)
+	if err == nil || !strings.Contains(err.Error(), "first-class") {
+		t.Fatalf("got %v", err)
+	}
+	if err := eng.ReplaceParts(ctx, scope, uuid.Nil, nil); err == nil {
+		t.Fatal("nil parent")
 	}
 }

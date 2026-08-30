@@ -9,8 +9,12 @@ import (
 	"github.com/google/uuid"
 )
 
-// Search runs hybrid retrieval (BM25 + optional vector), RRF, temporal decay,
-// parent promotion, and materializes a ResultSet into results.
+// Search is corpus retrieval: hybrid BM25 + optional vector over store parts,
+// RRF, temporal decay, parent promotion, then a ResultSet page.
+// Query text matches part title, summary, and content. Structured fields on
+// the parent belong in FindObjects filters (or here only if the part row
+// carries them). A parent with no parts does not appear. Entity search is
+// FindObjects.
 func (e *Engine) Search(ctx context.Context, scope Scope, req SearchRequest, results ResultSetStore) (SearchPage, error) {
 	ranked, err := e.hybridCandidates(ctx, scope, req)
 	if err != nil {
@@ -20,8 +24,9 @@ func (e *Engine) Search(ctx context.Context, scope Scope, req SearchRequest, res
 	return e.materialize(ctx, scope, ranked, req.Limit, results)
 }
 
-// FindExact runs equality-first exact retrieval (no dense channel), then
+// FindExact is corpus retrieval without the dense channel: UUID Get, else
 // lexical + trigram fusion, promotion, and ResultSet materialization.
+// Same part-only candidate rule as Search. UUID lookup may return a parent.
 func (e *Engine) FindExact(ctx context.Context, scope Scope, req SearchRequest, results ResultSetStore) (SearchPage, error) {
 	ranked, err := e.exactCandidates(ctx, scope, req)
 	if err != nil {

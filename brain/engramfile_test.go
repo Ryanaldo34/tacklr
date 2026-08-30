@@ -112,7 +112,7 @@ func TestValidateObject_engramReservedAndOpenCatalog(t *testing.T) {
 
 func mustCatalog(t *testing.T, specs ...brain.KindSpec) *brain.KindCatalog {
 	t.Helper()
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithKinds(specs...))
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly(), brain.WithKinds(specs...))
 	if err != nil {
 		t.Fatal(err)
 	}

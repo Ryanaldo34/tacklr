@@ -49,11 +49,53 @@ func (e *Engine) Put(ctx context.Context, scope Scope, obj Object) (Object, erro
 	}
 	// Dual-write first-class objects only (no parent_id). Each Put refreshes node props.
 	if obj.ParentID == nil && e.graphW != nil {
-		if err := e.graphW.EnsureObject(ctx, obj); err != nil {
+		if err := e.graphW.EnsureObject(ctx, obj, indexText); err != nil {
 			return Object{}, fmt.Errorf("%w: %w", ErrGraphEnsure, err)
 		}
 	}
 	return obj, nil
+}
+
+// ReplaceParts replaces all children of a first-class parent.
+// Existing parts are soft-deleted, then each item is Put with ParentID set
+// (Position defaults to the slice index). Search looks at these parts; the
+// parent Engram body is not a corpus document. vfsindex remains the path for
+// workspace files.
+func (e *Engine) ReplaceParts(ctx context.Context, scope Scope, parentID uuid.UUID, parts []Object) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if parentID == uuid.Nil {
+		return fmt.Errorf("%w: parent id is required", ErrInvalid)
+	}
+	parent, err := e.store.Get(ctx, scope, parentID)
+	if err != nil {
+		return err
+	}
+	if parent.ParentID != nil {
+		return fmt.Errorf("%w: parent must be a first-class object", ErrInvalid)
+	}
+	old, err := e.store.ListChildren(ctx, scope, parentID)
+	if err != nil {
+		return err
+	}
+	for _, c := range old {
+		if err := e.SoftDelete(ctx, scope, c.ID); err != nil {
+			return err
+		}
+	}
+	for i, p := range parts {
+		pid := parentID
+		p.ParentID = &pid
+		if p.Position == nil {
+			pos := i
+			p.Position = &pos
+		}
+		if _, err := e.Put(ctx, scope, p); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // SoftDelete removes the graph node first (when present), then marks the store row deleted.
@@ -177,7 +219,13 @@ func IndexText(obj Object) string {
 
 // EntityIndexText builds text for first-class graph nodes and parent embeddings:
 // title, summary, scalar properties (sorted keys), and full content.
+// Reserved store props (slug, vfs_path) are omitted. Callers with a kind catalog
+// should prefer Engine.Put, which also honors FieldSpec.SkipIndex.
 func EntityIndexText(obj Object) string {
+	return entityIndexText(obj, KindSpec{}, false)
+}
+
+func entityIndexText(obj Object, spec KindSpec, haveSpec bool) string {
 	parts := make([]string, 0, 8)
 	if t := strings.TrimSpace(obj.Title); t != "" {
 		parts = append(parts, t)
@@ -188,6 +236,9 @@ func EntityIndexText(obj Object) string {
 	if len(obj.Properties) > 0 {
 		keys := slices.Sorted(maps.Keys(obj.Properties))
 		for _, k := range keys {
+			if skipIndexProperty(k, spec, haveSpec) {
+				continue
+			}
 			line := formatPropertyLine(k, obj.Properties[k])
 			if line != "" {
 				parts = append(parts, line)
@@ -198,6 +249,17 @@ func EntityIndexText(obj Object) string {
 		parts = append(parts, c)
 	}
 	return strings.Join(parts, "\n")
+}
+
+func skipIndexProperty(name string, spec KindSpec, haveSpec bool) bool {
+	if isReservedStoreProp(name) {
+		return true
+	}
+	if !haveSpec {
+		return false
+	}
+	f, ok := spec.Field(name)
+	return ok && f.SkipIndex
 }
 
 func formatPropertyLine(key string, v any) string {
@@ -270,16 +332,27 @@ func capRunes(s string, maxRunes int) string {
 	return s
 }
 
-// indexTextForEmbed: parents use EntityIndexText; parts use parent-prefixed corpus IndexText.
+// indexTextForEmbed: parents use entity index text; parts use parent-prefixed corpus IndexText.
 func (e *Engine) indexTextForEmbed(ctx context.Context, scope Scope, obj Object) string {
+	var text string
 	if obj.ParentID == nil {
-		return EntityIndexText(obj)
+		spec, ok := KindSpec{}, false
+		if e.catalog != nil {
+			spec, ok = e.catalog.Get(obj.Kind)
+		}
+		text = entityIndexText(obj, spec, ok)
+	} else {
+		parent, err := e.store.Get(ctx, scope, *obj.ParentID)
+		if err != nil {
+			text = IndexText(obj)
+		} else {
+			text = IndexTextWithParent(obj, parent.Title)
+		}
 	}
-	parent, err := e.store.Get(ctx, scope, *obj.ParentID)
-	if err != nil {
-		return IndexText(obj)
+	if e.indexTextFn != nil {
+		text = strings.TrimSpace(e.indexTextFn(obj, text))
 	}
-	return IndexTextWithParent(obj, parent.Title)
+	return text
 }
 
 // ValidateObject checks an object against the kind catalog when non-empty.
@@ -335,8 +408,26 @@ func ValidateObject(obj Object, cat *KindCatalog) error {
 		if err := checkFieldValue(v, f.Type); err != nil {
 			return fmt.Errorf("brain: property %q: %w", name, err)
 		}
+		if err := checkFieldEnum(v, f); err != nil {
+			return fmt.Errorf("brain: property %q: %w", name, err)
+		}
 	}
 	return nil
+}
+
+func checkFieldEnum(v any, f FieldSpec) error {
+	if len(f.Enum) == 0 {
+		return nil
+	}
+	s, ok := v.(string)
+	if !ok {
+		return nil
+	}
+	s = strings.TrimSpace(s)
+	if slices.Contains(f.Enum, s) {
+		return nil
+	}
+	return fmt.Errorf("value %q is not in enum", s)
 }
 
 // Reserved store properties persisted on objects without a KindSpec field.
