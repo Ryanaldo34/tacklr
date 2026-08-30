@@ -51,24 +51,30 @@
 // (edges preserved). SoftDelete removes the graph node first, then soft-deletes the
 // store row. Revive via Put recreates the graph node.
 //
-// # Store vs graph (complementary)
+// # Store vs graph
 //
-// The Store is the source of truth and document corpus:
-// full rows, parts/chunks, BM25 + dense hybrid search, property filters, soft-delete,
-// containment (parent_id). Tools: search, find_exact, read; expand children.
-// search may pass ScopeIDs to limit hits to a parent neighborhood.
+// The Store is the source of truth and the document corpus: full rows,
+// parts/chunks, BM25 + dense hybrid search, property filters, soft-delete,
+// containment (parent_id). Search and FindExact query parts (title, summary,
+// content) and promote hits to the parent. Tools: search, find_exact, read;
+// expand children. search may pass ScopeIDs to limit hits to a neighborhood.
 //
-// The graph holds first-class entity nodes and cross-object edges only (not chunks).
-// Helix owns: native text/vector indexes, $distance ranking, graph topology, edge
-// props, BothE neighbor walks, optional tenant indexes on namespace.
+// The graph holds first-class parent nodes and cross-object edges only (not
+// chunks). FindObjects queries that entity index (title, summary, indexed
+// properties, body). Tools: find_objects (after graph Bootstrap), expand with
+// relation_types, link. Optional: helixgraph.EnsureEdgeTextIndex(rel) +
+// SearchEdgesText for note search on a known relation label.
+//
+// Helix owns native text/vector indexes, $distance ranking, graph topology,
+// edge props, BothE neighbor walks, optional tenant indexes on namespace.
 // Tacklr does not reimplement BM25/HNSW or in-process neighbor indexes for Helix.
-// We dual-write searchable props (EntityIndexText + embedding), Link edges, fuse
+// Dual-write searchable props (EntityIndexText + embedding), Link edges, fuse
 // graph text+vector channels with RRF, then hydrate full rows from the Store
 // under Scope.
 //
-// Tools: find_objects (after graph Bootstrap), expand with relation_types, link.
-// Optional: helixgraph.EnsureEdgeTextIndex(rel) + SearchEdgesText for note search
-// on a known relation label.
+// Query strings are free text. Structured fields go in Filters. The same
+// filter keys work on search and find_objects; search applies them to the
+// part row, find_objects to the parent.
 //
 // GraphRAG-style composition (host-agnostic):
 //

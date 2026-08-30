@@ -41,7 +41,8 @@ type Object struct {
 	ContentType string
 	ParentID    *uuid.UUID
 	Position    *int
-	// Embedding is optional dense vector for hybrid search fixtures / stores.
+	// Embedding is the dense vector stored on the row. Store search reads it
+	// on parts. Parent embeddings are copied to the graph for FindObjects.
 	Embedding []float32
 	// Namespace is the ordered named isolation attrs stored on the row.
 	Namespace Namespace
@@ -202,6 +203,10 @@ func (f Filter) empty() bool {
 }
 
 // SearchRequest is the engine input for search and find_exact.
+// SearchRequest is corpus retrieval over store parts (Search / FindExact).
+// Query is free text against part title, summary, and content. Structured
+// fields belong in Filters on the part row, or in FindObjectsRequest when
+// they live on the parent.
 type SearchRequest struct {
 	Query   string
 	Filters Filter

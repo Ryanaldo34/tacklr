@@ -280,7 +280,7 @@ func (s *MemoryStore) ListKinds(_ context.Context) ([]ObjectKind, error) {
 }
 
 // SearchLexical implements PartSearcher with a deterministic TF×IDF-style score.
-// Only content-bearing parts (parent_id set) are candidates.
+// Only parts (parent_id set) are candidates.
 func (s *MemoryStore) SearchLexical(_ context.Context, scope Scope, query string, filters Filter, k int) ([]ScoredID, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -336,7 +336,7 @@ func (s *MemoryStore) SearchLexical(_ context.Context, scope Scope, query string
 	return topKScored(scored, k), nil
 }
 
-// SearchVector implements PartSearcher via cosine similarity on Object.Embedding.
+// SearchVector implements PartSearcher over part embeddings only.
 func (s *MemoryStore) SearchVector(_ context.Context, scope Scope, embedding []float32, filters Filter, k int) ([]ScoredID, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -394,7 +394,8 @@ func (s *MemoryStore) SearchTrigram(_ context.Context, scope Scope, query string
 	return topKScored(scored, k), nil
 }
 
-// candidateParts returns live store values under the caller's lock; do not retain across unlock.
+// candidateParts returns live parts (parent_id set) under the caller's lock.
+// Do not retain the slice across unlock.
 func (s *MemoryStore) candidateParts(scope Scope, filters Filter) ([]Object, error) {
 	plan, err := compileFilters(filters)
 	if err != nil {

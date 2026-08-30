@@ -350,7 +350,9 @@ not `IndexPath`.
 
 ## Two backends: store and graph
 
-They are complementary. Do not treat Helix as a second document database.
+They are complementary. The store is the document corpus and the source of
+truth. The graph is tracked records and how they relate. Do not treat Helix as
+a second document database.
 
 ```mermaid
 flowchart TB
@@ -384,6 +386,19 @@ flowchart TB
 | **Holds** | Full rows, chunks, embeddings, filters | Parent nodes + edges |
 | **Answers** | `search`, `find_exact`, `read_object`, expand-children | `find_objects`, `link`, expand-relations, `find_links` |
 | **Required?** | Yes | Optional. Without it: no `link` / `find_objects` / named-relation expand |
+| **What the query matches** | Parts (chunks of notes and indexed files) | Parent records (a Deal, a Person, …) |
+
+`search` and `find_exact` look at **parts** (`parent_id` set): title, summary,
+and body. Hits promote to the parent with evidence. An Engram that has no
+parts does not appear there — use `find_objects`, or add chunks (host ingest).
+
+`find_objects` looks at **parent** nodes in the graph: the record’s title,
+summary, body, and indexed properties. Structured fields belong in **filters**,
+not in the query string. The same filter keys work on corpus search, but they
+apply to the part row, not the parent.
+
+Exact lookups (`Get`, `GetByProperty`, `ListByKind`, `find_exact` with a UUID)
+always go to the store.
 
 **Write rules**
 
@@ -404,7 +419,8 @@ flowchart TB
 | Part / Chunk | `IndexText` (title + summary + content), prefixed with the parent title |
 
 So `find_objects "open renewal"` can match a Deal whose `stage` property is
-`open`, not only the narrative body.
+`open`, not only the narrative body. Corpus `search` still matches chunk text,
+not those parent fields.
 
 A host that uses Helix must `Bootstrap` (or `EnsureSearchIndexes`) so object
 search is actually on. `MemoryGraph` is always ready and is what tests use.
@@ -438,6 +454,10 @@ Use for “what in the notes or indexed files supports this?”
 Hits are often **chunks**. The engine does **not** return those chunks as the
 primary result. It **promotes** them to their parent and attaches the best
 chunks as **evidence** (snippet, score, `start_line`, `block_id`).
+
+The query is free text against that chunk body. Structured fields on the parent
+record (stage, status, …) are filters on `find_objects`, not keywords for
+`search`.
 
 ```mermaid
 sequenceDiagram

@@ -44,7 +44,10 @@ type ObjectLister interface {
 	KindsWithObjects(ctx context.Context, scope Scope) ([]string, error)
 }
 
-// PartSearcher is the candidate retrieval port for hybrid / exact search.
+// PartSearcher is corpus retrieval over the store: parts only (parent_id set).
+// Query text matches part title, summary, and content. Filters apply to the
+// part row. Engine.Search promotes hits to the parent. Entity search over
+// parent records is GraphObjectSearcher (FindObjects), not this port.
 type PartSearcher interface {
 	SearchLexical(ctx context.Context, scope Scope, query string, filters Filter, k int) ([]ScoredID, error)
 	SearchVector(ctx context.Context, scope Scope, embedding []float32, filters Filter, k int) ([]ScoredID, error)

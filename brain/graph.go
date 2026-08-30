@@ -47,7 +47,8 @@ type GraphReader interface {
 // Embeds GraphReader so a single WithGraph value can satisfy both read and write.
 type GraphWriter interface {
 	GraphReader
-	// EnsureObject upserts a graph node for obj.ID (searchable props when available).
+	// EnsureObject upserts a graph node for a first-class object (parents only).
+	// Node text and vector are what FindObjects searches.
 	// Must preserve incident edges (update in place, not drop+recreate).
 	EnsureObject(ctx context.Context, obj Object) error
 	// RemoveObject drops the node (and incident edges) after/with store soft-delete.
@@ -58,10 +59,10 @@ type GraphWriter interface {
 	RemoveEdge(ctx context.Context, from, to uuid.UUID, relationType string) error
 }
 
-// GraphObjectSearcher finds entity nodes by text and/or vector (Helix native indexes
-// or MemoryGraph in-process). Results are ranked best-first; Engine hydrates under Scope.
-// Namespace is applied by MemoryGraph via Covers; Helix returns unscoped candidates
-// and Engine hydrates under Scope.
+// GraphObjectSearcher is entity retrieval over parent nodes (find_objects).
+// It does not search chunks. Corpus retrieval is PartSearcher on the store.
+// Results are ranked best-first; Engine hydrates under Scope.
+// Namespace: MemoryGraph uses Covers; Helix returns unscoped candidates.
 type GraphObjectSearcher interface {
 	SearchText(ctx context.Context, query string, limit int, namespace Namespace) ([]ScoredID, error)
 	SearchVector(ctx context.Context, embedding []float32, limit int, namespace Namespace) ([]ScoredID, error)
