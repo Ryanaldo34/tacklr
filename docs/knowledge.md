@@ -168,6 +168,10 @@ classDiagram
 | **Parent / Engram** | `parent_id` is empty | Yes — `{slug}.md` | Yes (dual-written on `Put`) |
 | **Part / Chunk** | `parent_id` is set | Never | Never |
 
+Parts are not files. `search` looks at parts (indexed workspace files, or
+chunks the host writes with `ReplaceParts`). The Engram Markdown body lives
+on the parent and is found with `find_objects` until parts exist.
+
 **Kinds** are defined by the **host**, not by Tacklr. `Deal` and `Person` in tests
 and examples are sample product types, not SDK types. You register them with
 `ApplyKinds` / `WithKinds`.

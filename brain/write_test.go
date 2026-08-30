@@ -815,3 +815,87 @@ func TestLink_crossObjectEmailDealBuyer(t *testing.T) {
 		t.Fatalf("containment expand: %+v err=%v", kids, err)
 	}
 }
+
+func TestReplaceParts_searchHitsNewChunks(t *testing.T) {
+	ctx := context.Background()
+	store := brain.NewMemoryStore()
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithKinds(
+		brain.KindSpec{Kind: "Document", IsParent: true},
+		brain.KindSpec{Kind: "Chunk", IsPart: true},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ns := mustNS(t, "id", uuid.NewString())
+	scope := brain.Scope{Namespace: ns}
+	parent, err := eng.Put(ctx, scope, brain.Object{Kind: "Document", Title: "Memo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.ReplaceParts(ctx, scope, parent.ID, []brain.Object{
+		{Kind: "Chunk", Title: "a", Content: "pkceflow"},
+		{Kind: "Chunk", Title: "b", Content: "neighbor"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	kids, err := eng.ListChildren(ctx, scope, parent.ID)
+	if err != nil || len(kids) != 2 || kids[0].Title != "a" || kids[1].Title != "b" {
+		t.Fatalf("children: %+v err=%v", kids, err)
+	}
+	sc := brain.NewSearchContext()
+	page, err := eng.Search(ctx, scope, brain.SearchRequest{Query: "pkceflow"}, sc)
+	if err != nil || len(page.Objects) != 1 || page.Objects[0].ID != parent.ID {
+		t.Fatalf("search new chunk: %+v err=%v", page.Objects, err)
+	}
+	if err := eng.ReplaceParts(ctx, scope, parent.ID, []brain.Object{
+		{Kind: "Chunk", Title: "c", Content: "indemnityclause"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	kids, err = eng.ListChildren(ctx, scope, parent.ID)
+	if err != nil || len(kids) != 1 || kids[0].Title != "c" {
+		t.Fatalf("replaced children: %+v err=%v", kids, err)
+	}
+	miss, err := eng.Search(ctx, scope, brain.SearchRequest{Query: "pkceflow"}, sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(miss.Objects) != 0 {
+		t.Fatalf("old chunk must be gone: %+v", miss.Objects)
+	}
+	hit, err := eng.Search(ctx, scope, brain.SearchRequest{Query: "indemnityclause"}, sc)
+	if err != nil || len(hit.Objects) != 1 || hit.Objects[0].ID != parent.ID {
+		t.Fatalf("search replacement: %+v err=%v", hit.Objects, err)
+	}
+}
+
+func TestReplaceParts_rejectsPartParent(t *testing.T) {
+	ctx := context.Background()
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly(), brain.WithKinds(
+		brain.KindSpec{Kind: "Document", IsParent: true},
+		brain.KindSpec{Kind: "Chunk", IsPart: true},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ns := mustNS(t, "id", uuid.NewString())
+	scope := brain.Scope{Namespace: ns}
+	parent, err := eng.Put(ctx, scope, brain.Object{Kind: "Document", Title: "Memo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pos := 0
+	part, err := eng.Put(ctx, scope, brain.Object{
+		Kind: "Chunk", Title: "c", ParentID: &parent.ID, Position: &pos,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = eng.ReplaceParts(ctx, scope, part.ID, nil)
+	if err == nil || !strings.Contains(err.Error(), "first-class") {
+		t.Fatalf("got %v", err)
+	}
+	if err := eng.ReplaceParts(ctx, scope, uuid.Nil, nil); err == nil {
+		t.Fatal("nil parent")
+	}
+}

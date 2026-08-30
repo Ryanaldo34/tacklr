@@ -56,6 +56,48 @@ func (e *Engine) Put(ctx context.Context, scope Scope, obj Object) (Object, erro
 	return obj, nil
 }
 
+// ReplaceParts replaces all children of a first-class parent.
+// Existing parts are soft-deleted, then each item is Put with ParentID set
+// (Position defaults to the slice index). Search looks at these parts; the
+// parent Engram body is not a corpus document. vfsindex remains the path for
+// workspace files.
+func (e *Engine) ReplaceParts(ctx context.Context, scope Scope, parentID uuid.UUID, parts []Object) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if parentID == uuid.Nil {
+		return fmt.Errorf("%w: parent id is required", ErrInvalid)
+	}
+	parent, err := e.store.Get(ctx, scope, parentID)
+	if err != nil {
+		return err
+	}
+	if parent.ParentID != nil {
+		return fmt.Errorf("%w: parent must be a first-class object", ErrInvalid)
+	}
+	old, err := e.store.ListChildren(ctx, scope, parentID)
+	if err != nil {
+		return err
+	}
+	for _, c := range old {
+		if err := e.SoftDelete(ctx, scope, c.ID); err != nil {
+			return err
+		}
+	}
+	for i, p := range parts {
+		pid := parentID
+		p.ParentID = &pid
+		if p.Position == nil {
+			pos := i
+			p.Position = &pos
+		}
+		if _, err := e.Put(ctx, scope, p); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // SoftDelete removes the graph node first (when present), then marks the store row deleted.
 // Graph-first keeps store intact if graph removal fails. If store SoftDelete fails after a
 // successful graph remove, re-Put re-creates the graph node.

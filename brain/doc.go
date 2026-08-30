@@ -41,8 +41,10 @@
 //
 // # Explicit writes (no handoff side effects)
 //
-// Durable objects are written only via Engine.Put / SoftDelete (host SDK) or
-// kind-scoped agent tools. Context handoff never writes the knowledge base.
+// Durable objects are written only via Engine.Put / SoftDelete / ReplaceParts
+// (host SDK) or kind-scoped agent tools. Context handoff never writes the
+// knowledge base. ReplaceParts is how a host attaches corpus chunks under a
+// parent; Engram files stay parent-only.
 //
 // Hosts map save_* tools via AgentOptions.BrainWriteKinds. Write for retrieval:
 // fill title and summary (and useful properties) so search and find_objects work.
