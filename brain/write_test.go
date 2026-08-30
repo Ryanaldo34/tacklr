@@ -191,6 +191,132 @@ func TestEntityIndexText_includesSummaryAndProperties(t *testing.T) {
 			t.Fatalf("missing %q in %q", want, got)
 		}
 	}
+	withSlug := brain.EntityIndexText(brain.Object{
+		Title: "Acme", Properties: map[string]any{brain.PropSlug: "acme", "stage": "open"},
+	})
+	if strings.Contains(withSlug, "slug:") || !strings.Contains(withSlug, "stage: open") {
+		t.Fatalf("slug must be omitted: %q", withSlug)
+	}
+}
+
+// TestPut_skipIndexKeepsPropertyOffEntityText: SkipIndex fields stay on the
+// object and remain filterable, but they are not in embed or find_objects text.
+func TestPut_skipIndexKeepsPropertyOffEntityText(t *testing.T) {
+	ctx := context.Background()
+	var gotEmbed string
+	emb := captureEmbedder{fn: func(text string) []float32 {
+		gotEmbed = text
+		return []float32{1, 0, 0}
+	}}
+	store := brain.NewMemoryStore()
+	g := brain.NewMemoryGraph()
+	eng, err := brain.NewEngine(store, brain.WithEmbedder(emb), brain.WithGraph(g), brain.WithKinds(
+		brain.KindSpec{Kind: "Deal", IsParent: true, Fields: []brain.FieldSpec{
+			{Name: "stage", Type: brain.FieldTypeString},
+			{Name: "message_id", Type: brain.FieldTypeString, SkipIndex: true},
+		}},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ns := mustNS(t, "id", uuid.NewString())
+	scope := brain.Scope{Namespace: ns}
+	const msgID = "msg-skip-index-token"
+	deal, err := eng.Put(ctx, scope, brain.Object{
+		Kind: "Deal", Title: "Acme renewal",
+		Properties: map[string]any{"stage": "open", "message_id": msgID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(gotEmbed, msgID) {
+		t.Fatalf("skip-index field in embed text: %q", gotEmbed)
+	}
+	if !strings.Contains(gotEmbed, "stage: open") {
+		t.Fatalf("indexed field missing from embed: %q", gotEmbed)
+	}
+	got, err := eng.GetByProperty(ctx, scope, "message_id", msgID)
+	if err != nil || got.ID != deal.ID {
+		t.Fatalf("GetByProperty: %+v err=%v", got, err)
+	}
+	rich, err := eng.Read(ctx, scope, deal.ID)
+	if err != nil || rich.Properties["message_id"] != msgID {
+		t.Fatalf("read still has property: %+v err=%v", rich, err)
+	}
+	miss, err := g.SearchText(ctx, msgID, 5, ns)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(miss) != 0 {
+		t.Fatalf("graph search text must not contain skip-index value: %+v", miss)
+	}
+	hit, err := g.SearchText(ctx, "Acme renewal", 5, ns)
+	if err != nil || len(hit) != 1 || hit[0].ID != deal.ID {
+		t.Fatalf("graph search title: %+v err=%v", hit, err)
+	}
+}
+
+func TestPut_enumRejectsUnknownString(t *testing.T) {
+	ctx := context.Background()
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithKinds(
+		brain.KindSpec{Kind: "Deal", IsParent: true, Fields: []brain.FieldSpec{
+			{Name: "stage", Type: brain.FieldTypeString, Enum: []string{"open", "closed"}},
+			{Name: "note", Type: brain.FieldTypeString, Examples: []string{"hello"}},
+		}},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ns := mustNS(t, "id", uuid.NewString())
+	scope := brain.Scope{Namespace: ns}
+	_, err = eng.Put(ctx, scope, brain.Object{
+		Kind: "Deal", Title: "x", Properties: map[string]any{"stage": "Yellowish"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "enum") {
+		t.Fatalf("want enum error, got %v", err)
+	}
+	if _, err := eng.Put(ctx, scope, brain.Object{
+		Kind: "Deal", Title: "x", Properties: map[string]any{"stage": "open", "note": "Yellowish"},
+	}); err != nil {
+		t.Fatalf("examples are not closed: %v", err)
+	}
+}
+
+func TestApplyKinds_roundTripSkipIndexAndEnum(t *testing.T) {
+	ctx := context.Background()
+	store := brain.NewMemoryStore()
+	eng, err := brain.NewEngine(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.ApplyKinds(ctx, brain.KindSpec{
+		Kind: "Deal", IsParent: true,
+		Fields: []brain.FieldSpec{
+			{Name: "stage", Type: brain.FieldTypeString, Enum: []string{"open", "closed"}},
+			{Name: "message_id", Type: brain.FieldTypeString, SkipIndex: true},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	eng2, err := brain.NewEngine(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng2.LoadKindsFromStore(ctx); err != nil {
+		t.Fatal(err)
+	}
+	spec, ok := eng2.Catalog().Get("Deal")
+	if !ok {
+		t.Fatal("missing Deal")
+	}
+	stage, _ := spec.Field("stage")
+	if len(stage.Enum) != 2 || stage.Enum[0] != "open" {
+		t.Fatalf("enum: %+v", stage)
+	}
+	mid, _ := spec.Field("message_id")
+	if !mid.SkipIndex {
+		t.Fatalf("skip_index: %+v", mid)
+	}
 }
 
 // TestPut_partEmbedIncludesParentTitle: part embeddings / graph index text get parent context.

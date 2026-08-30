@@ -159,7 +159,8 @@ func DefaultFilterUsage() FilterUsage {
 			"filterable_fields apply to the parent. When kinds are registered, property filters " +
 			"require a kind filter (or find_objects.kinds). Core filter keys: kind, title, " +
 			"created_after, created_before, updated_after, updated_before. Field examples are " +
-			"illustrations, not a closed set. Call schema with a kind before filtering.",
+			"illustrations, not a closed set; enum on a string field is enforced on write. " +
+			"Call schema with a kind before filtering.",
 	}
 }
 

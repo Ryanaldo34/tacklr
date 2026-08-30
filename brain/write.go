@@ -177,7 +177,13 @@ func IndexText(obj Object) string {
 
 // EntityIndexText builds text for first-class graph nodes and parent embeddings:
 // title, summary, scalar properties (sorted keys), and full content.
+// Reserved store props (slug, vfs_path) are omitted. Callers with a kind catalog
+// should prefer Engine.Put, which also honors FieldSpec.SkipIndex.
 func EntityIndexText(obj Object) string {
+	return entityIndexText(obj, KindSpec{}, false)
+}
+
+func entityIndexText(obj Object, spec KindSpec, haveSpec bool) string {
 	parts := make([]string, 0, 8)
 	if t := strings.TrimSpace(obj.Title); t != "" {
 		parts = append(parts, t)
@@ -188,6 +194,9 @@ func EntityIndexText(obj Object) string {
 	if len(obj.Properties) > 0 {
 		keys := slices.Sorted(maps.Keys(obj.Properties))
 		for _, k := range keys {
+			if skipIndexProperty(k, spec, haveSpec) {
+				continue
+			}
 			line := formatPropertyLine(k, obj.Properties[k])
 			if line != "" {
 				parts = append(parts, line)
@@ -198,6 +207,17 @@ func EntityIndexText(obj Object) string {
 		parts = append(parts, c)
 	}
 	return strings.Join(parts, "\n")
+}
+
+func skipIndexProperty(name string, spec KindSpec, haveSpec bool) bool {
+	if isReservedStoreProp(name) {
+		return true
+	}
+	if !haveSpec {
+		return false
+	}
+	f, ok := spec.Field(name)
+	return ok && f.SkipIndex
 }
 
 func formatPropertyLine(key string, v any) string {
@@ -270,10 +290,14 @@ func capRunes(s string, maxRunes int) string {
 	return s
 }
 
-// indexTextForEmbed: parents use EntityIndexText; parts use parent-prefixed corpus IndexText.
+// indexTextForEmbed: parents use entity index text; parts use parent-prefixed corpus IndexText.
 func (e *Engine) indexTextForEmbed(ctx context.Context, scope Scope, obj Object) string {
 	if obj.ParentID == nil {
-		return EntityIndexText(obj)
+		spec, ok := KindSpec{}, false
+		if e.catalog != nil {
+			spec, ok = e.catalog.Get(obj.Kind)
+		}
+		return entityIndexText(obj, spec, ok)
 	}
 	parent, err := e.store.Get(ctx, scope, *obj.ParentID)
 	if err != nil {
@@ -335,8 +359,26 @@ func ValidateObject(obj Object, cat *KindCatalog) error {
 		if err := checkFieldValue(v, f.Type); err != nil {
 			return fmt.Errorf("brain: property %q: %w", name, err)
 		}
+		if err := checkFieldEnum(v, f); err != nil {
+			return fmt.Errorf("brain: property %q: %w", name, err)
+		}
 	}
 	return nil
+}
+
+func checkFieldEnum(v any, f FieldSpec) error {
+	if len(f.Enum) == 0 {
+		return nil
+	}
+	s, ok := v.(string)
+	if !ok {
+		return nil
+	}
+	s = strings.TrimSpace(s)
+	if slices.Contains(f.Enum, s) {
+		return nil
+	}
+	return fmt.Errorf("value %q is not in enum", s)
 }
 
 // Reserved store properties persisted on objects without a KindSpec field.

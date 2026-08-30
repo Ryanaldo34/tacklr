@@ -30,6 +30,14 @@ func TestNormalizeKindSpec_rejectsInvalidFields(t *testing.T) {
 			Kind:   "Document",
 			Fields: []brain.FieldSpec{{Name: "content", Type: brain.FieldTypeString}},
 		}, "object column"},
+		{"enum on number", brain.KindSpec{
+			Kind:   "Document",
+			Fields: []brain.FieldSpec{{Name: "stage", Type: brain.FieldTypeNumber, Enum: []string{"1"}}},
+		}, "enum is only valid on string"},
+		{"empty enum value", brain.KindSpec{
+			Kind:   "Document",
+			Fields: []brain.FieldSpec{{Name: "stage", Type: brain.FieldTypeString, Enum: []string{"open", " "}}},
+		}, "enum value is required"},
 		{"duplicate field", brain.KindSpec{
 			Kind: "Document",
 			Fields: []brain.FieldSpec{
@@ -172,6 +180,9 @@ func TestSchema_prefersCatalog(t *testing.T) {
 	}
 	if got := one.Kinds[0].Columns; len(got) != 3 || got[0].Name != "title" || !got[0].Filter || got[1].Name != "summary" || got[2].Name != "content" {
 		t.Fatalf("columns: %+v", got)
+	}
+	if !strings.Contains(one.FilterUsage.Note, "enum") {
+		t.Fatalf("filter_usage.note should mention enum: %s", one.FilterUsage.Note)
 	}
 	var fields []brain.FieldSpec
 	if err := json.Unmarshal(one.Kinds[0].FilterableFields, &fields); err != nil {
