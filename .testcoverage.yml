@@ -44,10 +44,11 @@ override:
 
 exclude:
   # Repo-relative paths (matched as regexes against file paths).
-  # cmd/*: mains / local harnesses. testkit/livesess: test doubles.
+  # cmd/*: mains / local harnesses. testkit/durtest/livesess: test doubles.
   paths:
     - cmd/
     - internal/testkit
+    - internal/durtest
     - internal/temporallive
     - internal/livesess
     # Exporter constructors, not product outcomes.
