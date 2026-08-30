@@ -49,7 +49,7 @@ func (e *Engine) Put(ctx context.Context, scope Scope, obj Object) (Object, erro
 	}
 	// Dual-write first-class objects only (no parent_id). Each Put refreshes node props.
 	if obj.ParentID == nil && e.graphW != nil {
-		if err := e.graphW.EnsureObject(ctx, obj); err != nil {
+		if err := e.graphW.EnsureObject(ctx, obj, indexText); err != nil {
 			return Object{}, fmt.Errorf("%w: %w", ErrGraphEnsure, err)
 		}
 	}

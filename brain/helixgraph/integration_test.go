@@ -37,7 +37,7 @@ func TestGraph_liveNeighborsBoth(t *testing.T) {
 
 	a, b, c := uuid.New(), uuid.New(), uuid.New()
 	for _, id := range []uuid.UUID{a, b, c} {
-		if err := g.EnsureObject(ctx, brain.Object{ID: id}); err != nil {
+		if err := g.EnsureObject(ctx, brain.Object{ID: id}, ""); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -115,17 +115,17 @@ func TestGraph_liveEnsureObjectIdempotent(t *testing.T) {
 	g := liveGraph(t)
 	id := uuid.New()
 	other := uuid.New()
-	if err := g.EnsureObject(ctx, brain.Object{ID: id, Title: "a"}); err != nil {
+	if err := g.EnsureObject(ctx, brain.Object{ID: id, Title: "a"}, "a"); err != nil {
 		t.Fatal(err)
 	}
-	if err := g.EnsureObject(ctx, brain.Object{ID: other, Title: "b"}); err != nil {
+	if err := g.EnsureObject(ctx, brain.Object{ID: other, Title: "b"}, "b"); err != nil {
 		t.Fatal(err)
 	}
 	if err := g.AddEdge(ctx, id, other, "references", brain.EdgeMeta{Note: "keep"}); err != nil {
 		t.Fatal(err)
 	}
 	// Re-ensure without re-link: edges must survive.
-	if err := g.EnsureObject(ctx, brain.Object{ID: id, Title: "a-v2"}); err != nil {
+	if err := g.EnsureObject(ctx, brain.Object{ID: id, Title: "a-v2"}, "a-v2"); err != nil {
 		t.Fatal(err)
 	}
 	ns, err := g.Neighbors(ctx, id, []string{"references"}, 5)
@@ -337,10 +337,10 @@ func TestGraph_liveEnsureObjectRichProps(t *testing.T) {
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 		Embedding: []float32{0, 1},
 	}
-	if err := g.EnsureObject(ctx, a); err != nil {
+	if err := g.EnsureObject(ctx, a, brain.EntityIndexText(a)); err != nil {
 		t.Fatal(err)
 	}
-	if err := g.EnsureObject(ctx, b); err != nil {
+	if err := g.EnsureObject(ctx, b, brain.EntityIndexText(b)); err != nil {
 		t.Fatal(err)
 	}
 	if err := g.AddEdge(ctx, a.ID, b.ID, "references", brain.EdgeMeta{}); err != nil {
@@ -350,7 +350,7 @@ func TestGraph_liveEnsureObjectRichProps(t *testing.T) {
 	// Turn 2: re-ensure A with new title (in-place); edge to B must remain without re-link.
 	a.Title = "Alpha-v2"
 	a.Content = "updated alpha"
-	if err := g.EnsureObject(ctx, a); err != nil {
+	if err := g.EnsureObject(ctx, a, brain.EntityIndexText(a)); err != nil {
 		t.Fatal(err)
 	}
 	ns, err := g.Neighbors(ctx, a.ID, []string{"references"}, 10)
@@ -436,10 +436,10 @@ func TestGraph_liveSearchEdgesTextVectorAndProps(t *testing.T) {
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 		Embedding: []float32{0, 1},
 	}
-	if err := g.EnsureObject(ctx, a); err != nil {
+	if err := g.EnsureObject(ctx, a, brain.EntityIndexText(a)); err != nil {
 		t.Fatal(err)
 	}
-	if err := g.EnsureObject(ctx, b); err != nil {
+	if err := g.EnsureObject(ctx, b, brain.EntityIndexText(b)); err != nil {
 		t.Fatal(err)
 	}
 	// Full edge meta for AddEdge prop dual-write.

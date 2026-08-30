@@ -326,7 +326,7 @@ func TestPut_multiTurnMemoryGraph(t *testing.T) {
 	}
 
 	// Graph EnsureObject rejects nil id.
-	if err := g.EnsureObject(ctx, brain.Object{}); err == nil {
+	if err := g.EnsureObject(ctx, brain.Object{}, ""); err == nil {
 		t.Fatal("nil ensure")
 	}
 }

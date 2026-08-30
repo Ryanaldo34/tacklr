@@ -48,9 +48,9 @@ type GraphReader interface {
 type GraphWriter interface {
 	GraphReader
 	// EnsureObject upserts a graph node for a first-class object (parents only).
-	// Node text and vector are what FindObjects searches.
+	// searchText is the entity document Engine computed (FindObjects text/vector).
 	// Must preserve incident edges (update in place, not drop+recreate).
-	EnsureObject(ctx context.Context, obj Object) error
+	EnsureObject(ctx context.Context, obj Object, searchText string) error
 	// RemoveObject drops the node (and incident edges) after/with store soft-delete.
 	RemoveObject(ctx context.Context, id uuid.UUID) error
 	// AddEdge creates a directed edge from→to with optional relationship metadata.
@@ -123,7 +123,7 @@ func NewMemoryGraph() *MemoryGraph {
 
 // EnsureObject implements GraphWriter and stores searchable props for FindObjects.
 // Replaces any prior node for the same id (live update; edges are independent).
-func (g *MemoryGraph) EnsureObject(ctx context.Context, obj Object) error {
+func (g *MemoryGraph) EnsureObject(ctx context.Context, obj Object, searchText string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -136,7 +136,7 @@ func (g *MemoryGraph) EnsureObject(ctx context.Context, obj Object) error {
 		kind:       obj.Kind,
 		title:      obj.Title,
 		summary:    obj.Summary,
-		searchText: EntityIndexText(obj),
+		searchText: searchText,
 		namespace:  obj.Namespace.Clone(),
 		updatedAt:  obj.UpdatedAt,
 	}
