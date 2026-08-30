@@ -112,6 +112,19 @@ func WithLexicalOnly() EngineOption {
 	return func(eng *Engine) { eng.lexicalOnly = true }
 }
 
+// IndexTextFunc returns the document to embed and to write as graph search_text.
+// defaultText is Engine's index text for this object (SkipIndex already applied).
+// Return defaultText to keep it, or any rewrite that should occupy the vector
+// space (prefix, replace, drop the body, join related titles, …). Empty means
+// do not embed. Title, Summary, Content, and Properties on the stored object
+// are not modified.
+type IndexTextFunc func(obj Object, defaultText string) string
+
+// WithIndexText sets how Put builds embedding / graph search text.
+func WithIndexText(fn IndexTextFunc) EngineOption {
+	return func(eng *Engine) { eng.indexTextFn = fn }
+}
+
 // WithConfig sets ranking configuration (normalized by NewEngine).
 func WithConfig(cfg EngineConfig) EngineOption {
 	return func(eng *Engine) { eng.cfg = cfg }
@@ -172,6 +185,7 @@ type Engine struct {
 	catalog     *KindCatalog // always non-nil; empty ⇒ open mode
 	bootErr     error        // set by WithKinds when registration fails
 	lexicalOnly bool
+	indexTextFn IndexTextFunc
 }
 
 // NewEngine builds an Engine over a Store. store must be non-nil.

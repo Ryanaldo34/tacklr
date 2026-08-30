@@ -415,8 +415,12 @@ always go to the store.
 
 | Object | Text that is embedded |
 |--------|------------------------|
-| Parent / Engram | `EntityIndexText`: title, summary, scalar properties (sorted keys), full body |
+| Parent / Engram | `EntityIndexText`: title, summary, indexed scalar properties, full body |
 | Part / Chunk | `IndexText` (title + summary + content), prefixed with the parent title |
+
+`WithIndexText` can rewrite that document at Put (prefix, replace, or drop
+fields) without changing the stored object. The same string is embedded and
+written as graph search text.
 
 So `find_objects "open renewal"` can match a Deal whose `stage` property is
 `open`, not only the narrative body. Corpus `search` still matches chunk text,

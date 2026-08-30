@@ -282,6 +282,67 @@ func TestPut_enumRejectsUnknownString(t *testing.T) {
 	}
 }
 
+func TestPut_indexTextFuncShapesEmbedAndGraph(t *testing.T) {
+	ctx := context.Background()
+	var gotEmbed string
+	emb := captureEmbedder{fn: func(text string) []float32 {
+		gotEmbed = text
+		return []float32{1, 0, 0}
+	}}
+	store := brain.NewMemoryStore()
+	g := brain.NewMemoryGraph()
+	eng, err := brain.NewEngine(store, brain.WithEmbedder(emb), brain.WithGraph(g),
+		brain.WithIndexText(func(obj brain.Object, defaultText string) string {
+			return "related: neighbor record\n" + defaultText
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ns := mustNS(t, "id", uuid.NewString())
+	scope := brain.Scope{Namespace: ns}
+	obj, err := eng.Put(ctx, scope, brain.Object{
+		Kind: "Note", Title: "invoice", Content: "amount due Friday",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obj.Content != "amount due Friday" {
+		t.Fatalf("content must stay on the object: %q", obj.Content)
+	}
+	if !strings.Contains(gotEmbed, "related: neighbor record") || !strings.Contains(gotEmbed, "invoice") {
+		t.Fatalf("embed text: %q", gotEmbed)
+	}
+	hit, err := g.SearchText(ctx, "neighbor record", 5, ns)
+	if err != nil || len(hit) != 1 || hit[0].ID != obj.ID {
+		t.Fatalf("graph search extra text: %+v err=%v", hit, err)
+	}
+}
+
+func TestPut_indexTextFuncEmptySkipsEmbed(t *testing.T) {
+	ctx := context.Background()
+	emb := captureEmbedder{fn: func(string) []float32 {
+		t.Fatal("embedder must not run on empty index text")
+		return nil
+	}}
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithEmbedder(emb),
+		brain.WithIndexText(func(brain.Object, string) string { return "  " }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ns := mustNS(t, "id", uuid.NewString())
+	got, err := eng.Put(ctx, brain.Scope{Namespace: ns}, brain.Object{
+		Kind: "Note", Title: "x", Content: "body",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Embedding) != 0 {
+		t.Fatalf("empty index text must not embed: %+v", got.Embedding)
+	}
+}
+
 func TestApplyKinds_roundTripSkipIndexAndEnum(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()

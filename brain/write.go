@@ -292,18 +292,25 @@ func capRunes(s string, maxRunes int) string {
 
 // indexTextForEmbed: parents use entity index text; parts use parent-prefixed corpus IndexText.
 func (e *Engine) indexTextForEmbed(ctx context.Context, scope Scope, obj Object) string {
+	var text string
 	if obj.ParentID == nil {
 		spec, ok := KindSpec{}, false
 		if e.catalog != nil {
 			spec, ok = e.catalog.Get(obj.Kind)
 		}
-		return entityIndexText(obj, spec, ok)
+		text = entityIndexText(obj, spec, ok)
+	} else {
+		parent, err := e.store.Get(ctx, scope, *obj.ParentID)
+		if err != nil {
+			text = IndexText(obj)
+		} else {
+			text = IndexTextWithParent(obj, parent.Title)
+		}
 	}
-	parent, err := e.store.Get(ctx, scope, *obj.ParentID)
-	if err != nil {
-		return IndexText(obj)
+	if e.indexTextFn != nil {
+		text = strings.TrimSpace(e.indexTextFn(obj, text))
 	}
-	return IndexTextWithParent(obj, parent.Title)
+	return text
 }
 
 // ValidateObject checks an object against the kind catalog when non-empty.

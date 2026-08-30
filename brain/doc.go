@@ -97,6 +97,7 @@
 //
 // Embeddings: NewEngine requires WithEmbedder or WithLexicalOnly. Parents embed
 // EntityIndexText; parts embed IndexText with parent title prefix (corpus only).
+// WithIndexText rewrites that document at Put without changing the stored object.
 // One embedding dimension per process.
 // Helix hosts must call helixgraph.Graph.Bootstrap (or EnsureSearchIndexes) so
 // HasObjectSearch is true; MemoryGraph is always ready when attached.
