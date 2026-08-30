@@ -457,27 +457,23 @@ func TestCancelWhileRunningEndsSubscriptionThenNextPromptRuns(t *testing.T) {
 	if err := rt.Cancel(ctx, id); err != nil {
 		t.Fatal(err)
 	}
+	_ = sub.Close()
+	subCancel, err := rt.Subscribe(ctx, id, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = subCancel.Close() })
+	gotCancel := waitEvents(t, rt, id, subCancel, 5*time.Second)
 	var sawCancel bool
-	drainCtx, stopDrain := context.WithTimeout(t.Context(), 5*time.Second)
-	defer stopDrain()
-drain:
-	for {
-		select {
-		case ev, ok := <-sub.Events():
-			if !ok {
-				break drain
-			}
-			if ev.Type == tacklr.StreamEventError && (errors.Is(ev.Error, context.Canceled) ||
-				strings.Contains(ev.Content, "canceled") ||
-				strings.Contains(fmt.Sprint(ev.Error), "canceled")) {
-				sawCancel = true
-			}
-		case <-drainCtx.Done():
-			t.Fatal("subscription did not end after cancel")
+	for _, ev := range gotCancel {
+		if ev.Type == tacklr.StreamEventError && (errors.Is(ev.Error, context.Canceled) ||
+			strings.Contains(ev.Content, "canceled") ||
+			strings.Contains(fmt.Sprint(ev.Error), "canceled")) {
+			sawCancel = true
 		}
 	}
 	if !sawCancel {
-		t.Fatal("want canceled stream error")
+		t.Fatalf("want canceled stream error, got %+v", summarize(gotCancel))
 	}
 
 	model2 := scriptedComplete("after-cancel")
