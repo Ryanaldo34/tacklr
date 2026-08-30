@@ -149,6 +149,6 @@ func (o AgentOptions) WithSpecialist(spec *Specialist) AgentOptions {
 	}
 	out.Tools = slices.Clone(spec.Tools)
 	out.Specialists = spec.Specialists
-	out.disablePlanningLock = true
+	out.skipPlanningLock = true
 	return out
 }

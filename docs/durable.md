@@ -14,7 +14,7 @@ Tacklr’s session API is `durable.Runtime`. A `server.Protocol` maps wire frame
 | **Park** | Session idle waiting for `Resume`. Parent-facing `Status` stays `running`; `Waiting` is true until the interrupt is resolved. Parent park does not stop children |
 | **Cancel** | Abort the in-flight turn and stop child sessions (`Runtime.Cancel`, original Prompt/Resume context cancel, client stop). The parent session stays open for a later Prompt |
 | **Close** | Destroy the session and recursively stop children |
-| **Turn locality** | Optional: keep a turn’s Temporal activities on one process (`WithTurnLocality`) so VFS stays put |
+| **Turn locality** | Optional: keep a turn’s Temporal activities on one process (`Config.TurnLocality`) so VFS stays put |
 
 The host API is `durable.Runtime` (`inprocess.New` or `temporal.New`). Tests use the same API. `TurnManager` is not a host type.
 
@@ -25,7 +25,7 @@ Host tools on `AgentSpec.Options.Tools` close over their clients at catalog regi
 ```go
 cat := durable.NewCatalog("agent")
 cat.Register("agent", durable.AgentSpec{Options: opts})
-rt := inprocess.New(cat, inprocess.WithProjection(vfs.DirectProjection{}))
+rt := inprocess.New(inprocess.Config{Catalog: cat, Projection: vfs.DirectProjection{}})
 id, _ := rt.CreateSession(ctx, durable.CreateSession{
 	AgentID: "agent",
 	State:   map[string]any{"user": "Ada", "company": "Acme"},
@@ -38,12 +38,14 @@ sub, _ := rt.Subscribe(ctx, id, 0)
 
 One goroutine per session runs the harness wait loop. HITL parks that goroutine and waits for `Runtime.Resume`. Session conversation lives in `SnapshotStore`.
 
+`Status` and the stream agree on when a turn finished. `StreamEventComplete` is published only after the checkpoint is saved and `Status` is already `complete`. `StreamEventError` that ends the turn is the same for `failed`. Park publishes `yield`; `Status` stays `running` with `Waiting` true. A later `Prompt` on a completed session starts a new turn: when `Prompt` returns, `Status` is `running` again.
+
 ## Temporal
 
 The host runs:
 
-1. A Tacklr Temporal worker (`EnableSessionWorker: true`) that registers `SessionWorkflow` plus the `Inference`, `Tool`, and `CommitToolOutput` activities.
-2. A protocol process (optional) whose `durable.Runtime` is `temporal.New(client, taskQueue, catalog)`. Pass `WithTurnLocality` to keep a turn on one Temporal worker; omit it to let activities run anywhere. Autonomous work skips the protocol and calls Runtime (or starts the workflow) with a payload.
+1. A Tacklr Temporal worker (`EnableSessionWorker: true`) that registers `SessionWorkflow` plus the `Inference`, `Tool`, `CommitToolOutput`, and `EmitEvent` activities.
+2. A protocol process (optional) whose `durable.Runtime` is `temporal.New(client, cfg)`. `temporal.Config` is the single host config for both `New` and `NewWorker` (catalog, queue, snapshots, projection, locality, activity timeout, heartbeat, retries). Autonomous work skips the protocol and calls Runtime (or starts the workflow) with a payload.
 
 | Tacklr concept | Temporal |
 |----------------|----------|
@@ -51,13 +53,16 @@ The host runs:
 | Harness loop | Workflow function |
 | Inference / tool | Activities (`Inference`, `Tool`) |
 | Specialist | Child workflow |
-| Turn locality | Optional: `WithTurnLocality` keeps the turn’s activities on one Temporal worker. Zero (default) does not pin them. |
+| Turn locality | `Config.TurnLocality` keeps the turn’s activities on one Temporal worker. Zero (default) does not pin them. |
+| Activity timeout | `Config.ActivityTimeout` is StartToCloseTimeout for Inference/Tool. Zero is 10 minutes. |
+| Heartbeat | `Config.HeartbeatTimeout`. Zero is 30 seconds. |
+| Activity retries | `Config.ActivityAttempts` is Temporal MaximumAttempts. Zero is 3. 1 means no retry. |
 | Progress | Workflow Streams (`events`, `retry`, `close`) |
 | HITL | Signal `Resume` (never inside an activity) |
 | Leftover tools after HITL | Workflow variable (`rest`) replayed from history |
 | Spawn specialist | Child `SessionWorkflow` (wait for started). `ParentClosePolicy` is request-cancel. Tools call `HarnessRuntime` child methods; the workflow reconciles the child ledger after each Tool activity (start, cancel, wait). Child HITL signals the parent (`ChildWaiting`) then parent `Resume` signals the child. |
 
-The worker registers `SessionWorkflow`, `Inference`, `Tool`, and `CommitToolOutput`.
+The worker registers `SessionWorkflow`, `Inference`, `Tool`, `CommitToolOutput`, and `EmitEvent`. Inference and Tool do not publish complete, yield, or turn-ending error. The workflow commits `Status`, then `EmitEvent` publishes the matching stream event.
 
 ## Child sessions
 

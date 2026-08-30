@@ -85,7 +85,7 @@ func newTestRuntime(t *testing.T, model tacklr.InferenceStrategy, spec durable.A
 	cat.Register("default", spec)
 	if testing.Short() || !temporallive.Available() {
 		return &testRuntime{
-			Runtime: inprocess.New(cat, inprocess.WithProjection(vfs.DirectProjection{})),
+			Runtime: inprocess.New(inprocess.Config{Catalog: cat, Projection: vfs.DirectProjection{}}),
 			Catalog: cat,
 		}
 	}
@@ -97,16 +97,12 @@ func newTestRuntime(t *testing.T, model tacklr.InferenceStrategy, spec durable.A
 	tq := "tacklr-server-" + uuid.NewString()
 	snaps := inprocess.NewMemorySnapshot()
 	log := inprocess.NewMemoryEventLog()
-	rt := tacklrtemporal.New(c, tq, cat,
-		tacklrtemporal.WithSnapshotStore(snaps),
-		tacklrtemporal.WithEventLog(log),
-	)
-	w := tacklrtemporal.NewWorker(c, tq, tacklrtemporal.WorkerOptions{
-		Catalog:    cat,
-		Snapshots:  snaps,
-		Fallback:   log,
+	tcfg := tacklrtemporal.Config{
+		Catalog: cat, TaskQueue: tq, Snapshots: snaps, Fallback: log,
 		Projection: vfs.DirectProjection{},
-	})
+	}
+	rt := tacklrtemporal.New(c, tcfg)
+	w := tacklrtemporal.NewWorker(c, tcfg)
 	if err := w.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +113,7 @@ func newTestRuntime(t *testing.T, model tacklr.InferenceStrategy, spec durable.A
 func newEmptyRuntime() *testRuntime {
 	cat := durable.NewCatalog("")
 	return &testRuntime{
-		Runtime: inprocess.New(cat, inprocess.WithProjection(vfs.DirectProjection{})),
+		Runtime: inprocess.New(inprocess.Config{Catalog: cat, Projection: vfs.DirectProjection{}}),
 		Catalog: cat,
 	}
 }

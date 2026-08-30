@@ -176,16 +176,17 @@ func TestIndexText_skipsEmptyParts(t *testing.T) {
 
 // TestEntityIndexText_includesSummaryAndProperties: entity find text packs attributes.
 func TestEntityIndexText_includesSummaryAndProperties(t *testing.T) {
+	body := strings.Repeat("long body ", 300)
 	got := brain.EntityIndexText(brain.Object{
 		Title: "Acme renewal", Summary: "enterprise opportunity",
-		Content: "long body",
+		Content: body,
 		Properties: map[string]any{
 			"stage":  "negotiation",
 			"amount": 120000.0,
 			"hot":    true,
 		},
 	})
-	for _, want := range []string{"Acme renewal", "enterprise opportunity", "stage: negotiation", "amount: 120000", "hot: true", "long body"} {
+	for _, want := range []string{"Acme renewal", "enterprise opportunity", "stage: negotiation", "amount: 120000", "hot: true", strings.TrimSpace(body)} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("missing %q in %q", want, got)
 		}

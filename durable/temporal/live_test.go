@@ -48,13 +48,9 @@ func newLiveStack(t *testing.T, cat durable.Catalog) *liveStack {
 	tq := fmt.Sprintf("tacklr-live-%d", n)
 	snaps := inprocess.NewMemorySnapshot()
 	log := inprocess.NewMemoryEventLog()
-	rt := New(c, tq, cat, WithSnapshotStore(snaps), WithEventLog(log))
-	w := NewWorker(c, tq, WorkerOptions{
-		Catalog:    cat,
-		Snapshots:  snaps,
-		Fallback:   log,
-		Projection: vfs.DirectProjection{},
-	})
+	cfg := Config{Catalog: cat, TaskQueue: tq, Snapshots: snaps, Fallback: log, Projection: vfs.DirectProjection{}}
+	rt := New(c, cfg)
+	w := NewWorker(c, cfg)
 	if err := w.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -65,8 +61,9 @@ func newLiveStack(t *testing.T, cat durable.Catalog) *liveStack {
 func (s *liveStack) RestartWorker(t *testing.T) {
 	t.Helper()
 	s.Worker.Stop()
-	w := NewWorker(s.Client, s.TaskQueue, WorkerOptions{
+	w := NewWorker(s.Client, Config{
 		Catalog:    s.Catalog,
+		TaskQueue:  s.TaskQueue,
 		Snapshots:  s.Snapshots,
 		Fallback:   s.Runtime.(*Runtime).fallback,
 		Projection: vfs.DirectProjection{},
@@ -103,9 +100,10 @@ func liveCat(t *testing.T, model tacklr.InferenceStrategy, extra durable.AgentSp
 	return cat
 }
 
-func waitTurn(t *testing.T, sub durable.Subscription, timeout time.Duration) []tacklr.StreamEvent {
+func waitTurn(t *testing.T, rt durable.Runtime, id durable.SessionID, sub durable.Subscription, timeout time.Duration) []tacklr.StreamEvent {
 	t.Helper()
-	deadline := time.After(timeout)
+	ctx, cancel := context.WithTimeout(t.Context(), timeout)
+	defer cancel()
 	var got []tacklr.StreamEvent
 	for {
 		select {
@@ -115,9 +113,10 @@ func waitTurn(t *testing.T, sub durable.Subscription, timeout time.Duration) []t
 			}
 			got = append(got, ev)
 			if ev.Type == tacklr.StreamEventComplete || ev.Type == tacklr.StreamEventError || ev.Type == tacklr.StreamEventInterrupt {
+				testkit.AssertStatusMatchesEvent(t, rt, id, ev)
 				return got
 			}
-		case <-deadline:
+		case <-ctx.Done():
 			t.Fatalf("timeout waiting for turn events, got %d %+v", len(got), got)
 		}
 	}
@@ -125,7 +124,8 @@ func waitTurn(t *testing.T, sub durable.Subscription, timeout time.Duration) []t
 
 func waitContains(t *testing.T, sub durable.Subscription, timeout time.Duration, want func(tacklr.StreamEvent) bool) []tacklr.StreamEvent {
 	t.Helper()
-	deadline := time.After(timeout)
+	ctx, cancel := context.WithTimeout(t.Context(), timeout)
+	defer cancel()
 	var got []tacklr.StreamEvent
 	for {
 		select {
@@ -137,7 +137,7 @@ func waitContains(t *testing.T, sub durable.Subscription, timeout time.Duration,
 			if want(ev) {
 				return got
 			}
-		case <-deadline:
+		case <-ctx.Done():
 			t.Fatalf("timeout, got %+v", got)
 		}
 	}
@@ -166,7 +166,7 @@ func TestLive_promptSubscribeComplete(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = sub.Close() })
-	got := waitTurn(t, sub, 30*time.Second)
+	got := waitTurn(t, stack.Runtime, id, sub, 30*time.Second)
 	var sawMsg, sawComplete bool
 	for _, ev := range got {
 		if ev.Type == tacklr.StreamEventMessage && strings.Contains(ev.Content, "hello-live") {
@@ -222,7 +222,7 @@ func TestLive_hitlYieldThenResume(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = sub.Close() })
-	got := waitTurn(t, sub, 30*time.Second)
+	got := waitTurn(t, stack.Runtime, id, sub, 30*time.Second)
 	var yielded bool
 	for _, ev := range got {
 		if ev.Type == tacklr.StreamEventInterrupt {
@@ -292,7 +292,7 @@ func TestLive_workspaceAuthRemountsAfterResume(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = sub.Close() })
-	got := waitTurn(t, sub, 30*time.Second)
+	got := waitTurn(t, stack.Runtime, id, sub, 30*time.Second)
 	var yielded bool
 	for _, ev := range got {
 		if ev.Type == tacklr.StreamEventInterrupt {
@@ -370,7 +370,7 @@ func TestLive_workerRestartWhileParkedThenResumeRemounts(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = sub.Close() })
-	got := waitTurn(t, sub, 30*time.Second)
+	got := waitTurn(t, stack.Runtime, id, sub, 30*time.Second)
 	var yielded bool
 	for _, ev := range got {
 		if ev.Type == tacklr.StreamEventInterrupt {
@@ -417,9 +417,11 @@ func TestLive_cancelThenNextPrompt(t *testing.T) {
 	if err := stack.Runtime.Prompt(ctx, id, durable.Prompt{Text: "slow"}); err != nil {
 		t.Fatal(err)
 	}
+	waitStart, stopWait := context.WithTimeout(t.Context(), 20*time.Second)
+	defer stopWait()
 	select {
 	case <-started:
-	case <-time.After(20 * time.Second):
+	case <-waitStart.Done():
 		t.Fatal("model did not start")
 	}
 	subCancel, err := stack.Runtime.Subscribe(ctx, id, 0)
@@ -476,17 +478,21 @@ func TestLive_twoPromptsShareSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = waitTurn(t, sub, 30*time.Second)
+	_ = waitTurn(t, stack.Runtime, id, sub, 30*time.Second)
 	_ = sub.Close()
+	head, err := stack.Runtime.Head(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := stack.Runtime.Prompt(ctx, id, durable.Prompt{Text: "second"}); err != nil {
 		t.Fatal(err)
 	}
-	sub2, err := stack.Runtime.Subscribe(ctx, id, 0)
+	sub2, err := stack.Runtime.Subscribe(ctx, id, head)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = sub2.Close() })
-	_ = waitTurn(t, sub2, 30*time.Second)
+	_ = waitTurn(t, stack.Runtime, id, sub2, 30*time.Second)
 	var sawFirst bool
 	for _, m := range model.LastInvokeMsgs {
 		if m != nil && m.Role == tacklr.RoleUser && m.Content == "first" {
@@ -546,7 +552,7 @@ func TestLive_cachedRecipePlusTokenOnlyPrompt(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = sub.Close() })
-	got := waitTurn(t, sub, 30*time.Second)
+	got := waitTurn(t, stack.Runtime, id, sub, 30*time.Second)
 	var body string
 	for _, ev := range got {
 		if ev.Type == tacklr.StreamEventMessage {

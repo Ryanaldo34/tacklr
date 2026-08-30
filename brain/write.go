@@ -13,9 +13,6 @@ import (
 	"github.com/google/uuid"
 )
 
-// maxEntityContentRunes caps full content included in entity index text for graph nodes.
-const maxEntityContentRunes = 2000
-
 // Put upserts a knowledge object under scope.
 // Catalog non-empty → ValidateObject. Namespace filled from scope when missing.
 // ID generated when nil. Put refuses objects that already have DeletedAt set.
@@ -179,8 +176,7 @@ func IndexText(obj Object) string {
 }
 
 // EntityIndexText builds text for first-class graph nodes and parent embeddings:
-// title, summary, scalar properties (sorted keys), and capped content.
-// Keeps entity find sensitive to attributes (stage, amount, …) without dumping huge bodies.
+// title, summary, scalar properties (sorted keys), and full content.
 func EntityIndexText(obj Object) string {
 	parts := make([]string, 0, 8)
 	if t := strings.TrimSpace(obj.Title); t != "" {
@@ -198,7 +194,7 @@ func EntityIndexText(obj Object) string {
 			}
 		}
 	}
-	if c := capRunes(strings.TrimSpace(obj.Content), maxEntityContentRunes); c != "" {
+	if c := strings.TrimSpace(obj.Content); c != "" {
 		parts = append(parts, c)
 	}
 	return strings.Join(parts, "\n")

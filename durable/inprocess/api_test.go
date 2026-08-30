@@ -17,13 +17,13 @@ func TestNew_requiresCatalog(t *testing.T) {
 			t.Fatal("want panic on nil catalog")
 		}
 	}()
-	New(nil)
+	New(Config{})
 }
 
 func TestNew_nilOptionAndNilProjection(t *testing.T) {
 	cat := newCatalog(t, scriptedComplete("x"), durable.AgentSpec{})
 	snaps := NewMemorySnapshot()
-	rt := New(cat, nil, WithSnapshotStore(nil), WithProjection(nil), WithSnapshotStore(snaps))
+	rt := New(Config{Catalog: cat, Snapshots: snaps})
 	if rt.catalog != cat {
 		t.Fatal("catalog")
 	}
@@ -32,7 +32,7 @@ func TestNew_nilOptionAndNilProjection(t *testing.T) {
 func TestCreateSession_errors(t *testing.T) {
 	ctx := t.Context()
 	cat := newCatalog(t, scriptedComplete("x"), durable.AgentSpec{})
-	rt := New(cat, WithProjection(vfs.DirectProjection{}))
+	rt := New(Config{Catalog: cat, Projection: vfs.DirectProjection{}})
 	ctxDone, cancel := context.WithCancel(ctx)
 	cancel()
 	if _, err := rt.CreateSession(ctxDone, durable.CreateSession{AgentID: "default"}); err == nil {
@@ -76,7 +76,7 @@ func TestCreateSession_errors(t *testing.T) {
 
 func TestPrompt_noAgentConfigured(t *testing.T) {
 	ctx := t.Context()
-	rt := New(durable.NewCatalog(""), WithProjection(vfs.DirectProjection{}))
+	rt := New(Config{Catalog: durable.NewCatalog(""), Projection: vfs.DirectProjection{}})
 	id, err := rt.CreateSession(ctx, durable.CreateSession{})
 	if err != nil {
 		t.Fatal(err)
@@ -89,25 +89,12 @@ func TestPrompt_noAgentConfigured(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = sub.Close() })
-	deadline := time.After(2 * time.Second)
-	for {
-		select {
-		case ev, ok := <-sub.Events():
-			if !ok {
-				t.Fatal("closed")
-			}
-			if ev.Type == tacklr.StreamEventError {
-				return
-			}
-		case <-deadline:
-			t.Fatal("want error event")
-		}
-	}
+	waitEvents(t, rt, id, sub, 2*time.Second)
 }
 
 func TestPrompt_userMessageAndUnknownAgent(t *testing.T) {
 	ctx := t.Context()
-	rt := New(newCatalog(t, scriptedComplete("ok"), durable.AgentSpec{}), WithProjection(vfs.DirectProjection{}))
+	rt := New(Config{Catalog: newCatalog(t, scriptedComplete("ok"), durable.AgentSpec{}), Projection: vfs.DirectProjection{}})
 	id, err := rt.CreateSession(ctx, durable.CreateSession{AgentID: "default"})
 	if err != nil {
 		t.Fatal(err)
@@ -123,7 +110,7 @@ func TestPrompt_userMessageAndUnknownAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = sub.Close() })
-	got := waitEvents(t, sub, 5*time.Second)
+	got := waitEvents(t, rt, id, sub, 5*time.Second)
 	var saw bool
 	for _, ev := range got {
 		if ev.Content == "ok" {
@@ -154,7 +141,7 @@ func TestNew_usesDefaultAgentWhenEmpty(t *testing.T) {
 	cat.Register("default", durable.AgentSpec{
 		Options: tacklr.AgentOptions{Model: scriptedComplete("hi"), Config: tacklr.Config{MaxWindowSize: 8192}},
 	})
-	rt := New(cat, WithProjection(vfs.DirectProjection{}))
+	rt := New(Config{Catalog: cat, Projection: vfs.DirectProjection{}})
 	id, err := rt.CreateSession(ctx, durable.CreateSession{})
 	if err != nil || id == "" {
 		t.Fatal(err)

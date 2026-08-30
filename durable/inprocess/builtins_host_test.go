@@ -46,7 +46,7 @@ func TestPrompt_hostPickedBuiltinToolsReachTheModel(t *testing.T) {
 			}
 		},
 	}
-	rt := New(newCatalog(t, model, durable.AgentSpec{
+	rt := New(Config{Catalog: newCatalog(t, model, durable.AgentSpec{
 		Options: tacklr.AgentOptions{
 			Tools: []*tacklr.Tool{
 				builtins.ReadInbox(mail),
@@ -55,7 +55,7 @@ func TestPrompt_hostPickedBuiltinToolsReachTheModel(t *testing.T) {
 				builtins.WebFetch(exa),
 			},
 		},
-	}), WithProjection(vfs.DirectProjection{}))
+	}), Projection: vfs.DirectProjection{}})
 
 	id, err := rt.CreateSession(ctx, durable.CreateSession{AgentID: "default"})
 	if err != nil {
@@ -69,7 +69,7 @@ func TestPrompt_hostPickedBuiltinToolsReachTheModel(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = sub.Close() })
-	_ = waitEvents(t, sub, 5*time.Second)
+	_ = waitEvents(t, rt, id, sub, 5*time.Second)
 
 	for _, want := range []string{"read_inbox", "send_email", "web_search", "web_fetch"} {
 		if !slices.Contains(names, want) {

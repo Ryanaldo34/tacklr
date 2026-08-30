@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"slices"
-	"time"
 
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/workflow"
@@ -25,7 +24,7 @@ type childRun struct {
 	err     string
 }
 
-func startChild(ctx, sessionCtx workflow.Context, parent durable.SessionID, agentID, specialist, task string, childID durable.SessionID, auth durable.AuthContext, mounts []durable.MountRecipe, locality time.Duration) (childRun, error) {
+func startChild(ctx, sessionCtx workflow.Context, parent durable.SessionID, agentID, specialist, task string, childID durable.SessionID, auth durable.AuthContext, mounts []durable.MountRecipe, in WorkflowInput) (childRun, error) {
 	cctx := workflow.WithChildOptions(sessionCtx, workflow.ChildWorkflowOptions{
 		WorkflowID:        string(childID),
 		ParentClosePolicy: enumspb.PARENT_CLOSE_POLICY_REQUEST_CANCEL,
@@ -38,7 +37,10 @@ func startChild(ctx, sessionCtx workflow.Context, parent durable.SessionID, agen
 		Prompt:              task,
 		Auth:                auth,
 		Mounts:              mounts,
-		TurnLocalityTimeout: locality,
+		TurnLocalityTimeout: in.TurnLocalityTimeout,
+		ActivityTimeout:     in.ActivityTimeout,
+		HeartbeatTimeout:    in.HeartbeatTimeout,
+		ActivityAttempts:    in.ActivityAttempts,
 	})
 	var exec workflow.Execution
 	if err := fut.GetChildWorkflowExecution().Get(ctx, &exec); err != nil {
@@ -104,7 +106,7 @@ func applyChildIntent(
 	if findChild(*spawned, tout.SpawnID) >= 0 {
 		return nil
 	}
-	c, err := startChild(ctx, sessionCtx, in.SessionID, agentID, tout.SpawnSpec, tout.SpawnTask, tout.SpawnID, auth, mounts, in.TurnLocalityTimeout)
+	c, err := startChild(ctx, sessionCtx, in.SessionID, agentID, tout.SpawnSpec, tout.SpawnTask, tout.SpawnID, auth, mounts, in)
 	if err != nil {
 		return err
 	}

@@ -69,6 +69,8 @@ These still inject when the turn’s world is present. They close over per-turn 
 | `Brain` | `search`, `find_exact`, `read_object`, `schema`, `save_*`, `link`, `expand`, … |
 | Brain + VFS + namespace (index bridge) | `index_file`, `unindex` |
 
+Write tools need an active plan (`create_plan`). That lock is a product rule: hosts cannot turn it off. Specialists skip it. `write` / `run_command` park for permission unless the host sets `UnattendedWrite` / `UnattendedRunCommand` on `AgentOptions`.
+
 Plan tools close over the session plan store (harness state, not a host client). Child-session tools inject when `Specialists` is set. MCP tools close over the live MCP connection created at discover time.
 
 ## Why not a map of clients

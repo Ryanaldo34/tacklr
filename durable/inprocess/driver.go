@@ -122,12 +122,26 @@ func (r *Runtime) emit(ctx context.Context, p *sessionProc, ev tacklr.StreamEven
 	}
 }
 
+// commitTurn writes Status first, then the matching stream event. Subscribe
+// Complete/Error/yield is not a second source of truth: callers who see those
+// events must already observe the same outcome from Status.
+func (r *Runtime) commitTurn(ctx context.Context, p *sessionProc, o turnOutcome, ev *tacklr.StreamEvent) turnOutcome {
+	r.noteOutcome(p, o)
+	if ev != nil {
+		r.emit(ctx, p, *ev)
+	}
+	return o
+}
+
 func (r *Runtime) fail(ctx context.Context, p *sessionProc, err error) turnOutcome {
 	p.mu.Lock()
+	already := p.terminal == durable.SessionFailed
 	p.termErr = err
 	p.mu.Unlock()
-	r.emit(ctx, p, tacklr.StreamEvent{Type: tacklr.StreamEventError, Error: err})
-	return turnError
+	if already {
+		return turnError
+	}
+	return r.commitTurn(ctx, p, turnError, &tacklr.StreamEvent{Type: tacklr.StreamEventError, Error: err})
 }
 
 func (r *Runtime) runTurn(ctx context.Context, p *sessionProc, user *tacklr.Message, resume map[string][]byte, bindings []vfs.Binding, state map[string]any) turnOutcome {
@@ -141,18 +155,36 @@ func (r *Runtime) runTurn(ctx context.Context, p *sessionProc, user *tacklr.Mess
 	}()
 
 	eng := h.Drive()
-	out, stop := tacklr.PipeStreamEvents(func(ev tacklr.StreamEvent) {
-		if ev.Type == tacklr.StreamEventComplete {
-			p.mu.Lock()
-			n := len(p.children)
-			p.mu.Unlock()
-			if n > 0 {
-				return
+	// Unbuffered: RunInference returns only after every prior event is in the
+	// log. Harness Complete is inference-end, not session-end — drop it here
+	// and publish StreamEventComplete after persist + Status in ActionComplete.
+	out := make(chan tacklr.StreamEvent)
+	var pipe sync.WaitGroup
+	pipe.Add(1)
+	go func() {
+		defer pipe.Done()
+		for ev := range out {
+			switch ev.Type {
+			case tacklr.StreamEventComplete:
+				continue
+			case tacklr.StreamEventInterrupt:
+				r.commitTurn(ctx, p, turnYield, &ev)
+			case tacklr.StreamEventError:
+				p.mu.Lock()
+				if ev.Error != nil {
+					p.termErr = ev.Error
+				}
+				p.mu.Unlock()
+				r.commitTurn(ctx, p, turnError, &ev)
+			default:
+				r.emit(ctx, p, ev)
 			}
 		}
-		r.emit(ctx, p, ev)
-	})
-	defer stop()
+	}()
+	defer func() {
+		close(out)
+		pipe.Wait()
+	}()
 
 	cancelled := func() turnOutcome {
 		persist := context.WithoutCancel(ctx)
@@ -163,8 +195,10 @@ func (r *Runtime) runTurn(ctx context.Context, p *sessionProc, user *tacklr.Mess
 		if err == nil {
 			err = context.Canceled
 		}
-		r.emit(persist, p, tacklr.StreamEvent{Type: tacklr.StreamEventError, Error: err})
-		return turnCancelled
+		p.mu.Lock()
+		p.termErr = err
+		p.mu.Unlock()
+		return r.commitTurn(persist, p, turnCancelled, &tacklr.StreamEvent{Type: tacklr.StreamEventError, Error: err})
 	}
 
 	if len(resume) > 0 {
@@ -199,13 +233,10 @@ func (r *Runtime) runTurn(ctx context.Context, p *sessionProc, user *tacklr.Mess
 				return cancelled()
 			}
 			if infErr != nil {
-				p.mu.Lock()
-				p.termErr = infErr
-				p.mu.Unlock()
 				if err := r.persistHarness(ctx, p, h); err != nil {
-					r.emit(ctx, p, tacklr.StreamEvent{Type: tacklr.StreamEventError, Error: err})
+					infErr = fmt.Errorf("%w: persist: %w", infErr, err)
 				}
-				return turnError
+				return r.fail(ctx, p, infErr)
 			}
 			if step.Complete {
 				inferComplete = true
@@ -240,13 +271,13 @@ func (r *Runtime) runTurn(ctx context.Context, p *sessionProc, user *tacklr.Mess
 			parked = hit.Load()
 			toolCalls = nil
 		case tacklr.ActionYield:
-			return turnYield
+			return r.commitTurn(ctx, p, turnYield, nil)
 		case tacklr.ActionComplete:
 			r.captureResult(p, h)
 			if err := r.persistHarness(ctx, p, h); err != nil {
 				return r.fail(ctx, p, err)
 			}
-			return turnComplete
+			return r.commitTurn(ctx, p, turnComplete, &tacklr.StreamEvent{Type: tacklr.StreamEventComplete})
 		case tacklr.ActionNudge:
 			if err := eng.AbsorbUser(ctx, &tacklr.Message{Role: tacklr.RoleUser, Content: nudge}, out); err != nil {
 				return r.fail(ctx, p, err)
