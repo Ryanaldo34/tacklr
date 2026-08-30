@@ -174,6 +174,9 @@ func NormalizeKindSpec(spec KindSpec) (KindSpec, error) {
 		if f.Name == "" {
 			return KindSpec{}, fmt.Errorf("brain: kind %q field: name is required", spec.Kind)
 		}
+		if isObjectColumn(f.Name) {
+			return KindSpec{}, fmt.Errorf("brain: kind %q field: %q collides with an object column", spec.Kind, f.Name)
+		}
 		if isCoreFilterKey(f.Name) {
 			return KindSpec{}, fmt.Errorf("brain: kind %q field: %q collides with a core filter key", spec.Kind, f.Name)
 		}
@@ -201,6 +204,15 @@ func NormalizeKindSpec(spec KindSpec) (KindSpec, error) {
 	}
 	spec.Fields = fields
 	return spec, nil
+}
+
+func isObjectColumn(k string) bool {
+	switch k {
+	case "title", "summary", "content":
+		return true
+	default:
+		return false
+	}
 }
 
 func isCoreFilterKey(k string) bool {
@@ -248,7 +260,18 @@ func KindSpecFromObjectKind(k ObjectKind) (KindSpec, error) {
 
 // KindInfoFromSpec builds the agent-facing schema payload for one kind.
 func KindInfoFromSpec(spec KindSpec) ObjectKindInfo {
-	return ObjectKindInfo(objectKindFromNormalized(spec))
+	return kindInfoFromObjectKind(objectKindFromNormalized(spec))
+}
+
+func kindInfoFromObjectKind(k ObjectKind) ObjectKindInfo {
+	return ObjectKindInfo{
+		Kind:             k.Kind,
+		Description:      k.Description,
+		IsPart:           k.IsPart,
+		IsParent:         k.IsParent,
+		Columns:          CoreColumns(),
+		FilterableFields: k.FilterableFields,
+	}
 }
 
 // KindRegistry is KindReader + KindWriter for durable kind schemas.

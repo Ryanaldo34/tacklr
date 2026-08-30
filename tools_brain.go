@@ -91,9 +91,9 @@ func (b brainTools) newSchemaTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "schema",
 		DisplayName: "Schema {kind}",
-		Description: `Discover structured filter fields and kind documentation for the knowledge base.
+		Description: `Discover kind documentation, object columns, and filterable fields.
 
-Call with a kind to see filterable_fields (name, type, operators) for that kind. Call with no kind to list registered kinds. filter_usage lists which tools accept those fields: search, find_exact, and find_objects share the same filter keys. Prefer schema() before inventing property names in filters. When kinds are registered, property filters require a kind key (or find_objects.kinds). Core keys: kind, title, created_after, created_before, updated_after, updated_before.`,
+Call with a kind to see columns (title, summary, content) and filterable_fields for that kind. Call with no kind to list registered kinds. Query text on search/find_exact matches chunk title/summary/content; structured fields go in filters. find_objects searches parent records with the same filter keys. Prefer schema() before inventing property names. When kinds are registered, property filters require a kind key (or find_objects.kinds). Core filter keys: kind, title, created_after, created_before, updated_after, updated_before.`,
 		Category: ToolCategoryRead,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
@@ -120,11 +120,12 @@ func (b brainTools) newSearchTool() *Tool {
 	return b.newQueryTool(ToolConfig{
 		Name:        "search",
 		DisplayName: "Search knowledge: {query}",
-		Description: `Search indexed knowledge (notes, Engrams, files you indexed). Returns ranked parents with evidence snippets.
+		Description: `Search notes and indexed files. Query is free text over chunk bodies. Returns ranked parents with evidence snippets.
 
+Structured fields on a record (stage, status, …) belong in filters — see schema() — or use find_objects for the record itself.
 Hit has vfs_path → open the live file with read (path + start_line / block_id from evidence).
 No vfs_path → read_object with the id.
-Live grep is run_command → rg (not this tool). Relationships: expand, not search. More pages: continue. Prefer schema() before inventing filter keys.`,
+Live grep is run_command → rg (not this tool). Relationships: expand, not search. More pages: continue.`,
 		Category: ToolCategorySearch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,

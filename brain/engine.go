@@ -254,7 +254,7 @@ func schemaFromStore(ctx context.Context, store KindReader, kind string) (Schema
 		if err != nil {
 			return SchemaResult{}, err
 		}
-		return SchemaResult{Kinds: []ObjectKindInfo{ObjectKindInfo(k)}, FilterUsage: fu}, nil
+		return SchemaResult{Kinds: []ObjectKindInfo{kindInfoFromObjectKind(k)}, FilterUsage: fu}, nil
 	}
 	kinds, err := store.ListKinds(ctx)
 	if err != nil {
@@ -262,7 +262,7 @@ func schemaFromStore(ctx context.Context, store KindReader, kind string) (Schema
 	}
 	out := make([]ObjectKindInfo, len(kinds))
 	for i, k := range kinds {
-		out[i] = ObjectKindInfo(k)
+		out[i] = kindInfoFromObjectKind(k)
 	}
 	return SchemaResult{Kinds: out, FilterUsage: fu}, nil
 }

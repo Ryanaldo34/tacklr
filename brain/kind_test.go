@@ -26,6 +26,10 @@ func TestNormalizeKindSpec_rejectsInvalidFields(t *testing.T) {
 			Kind:   "Document",
 			Fields: []brain.FieldSpec{{Name: "created_after", Type: brain.FieldTypeString}},
 		}, "core filter"},
+		{"object column collision", brain.KindSpec{
+			Kind:   "Document",
+			Fields: []brain.FieldSpec{{Name: "content", Type: brain.FieldTypeString}},
+		}, "object column"},
 		{"duplicate field", brain.KindSpec{
 			Kind: "Document",
 			Fields: []brain.FieldSpec{
@@ -163,8 +167,11 @@ func TestSchema_prefersCatalog(t *testing.T) {
 	if len(one.FilterUsage.Tools) < 3 || !strings.Contains(strings.Join(one.FilterUsage.Tools, ","), "find_objects") {
 		t.Fatalf("filter_usage.tools: %+v", one.FilterUsage)
 	}
-	if !strings.Contains(one.FilterUsage.Note, "filterable_fields") {
+	if !strings.Contains(one.FilterUsage.Note, "filterable_fields") || !strings.Contains(one.FilterUsage.Note, "columns") {
 		t.Fatalf("filter_usage.note: %s", one.FilterUsage.Note)
+	}
+	if got := one.Kinds[0].Columns; len(got) != 3 || got[0].Name != "title" || !got[0].Filter || got[1].Name != "summary" || got[2].Name != "content" {
+		t.Fatalf("columns: %+v", got)
 	}
 	var fields []brain.FieldSpec
 	if err := json.Unmarshal(one.Kinds[0].FilterableFields, &fields); err != nil {

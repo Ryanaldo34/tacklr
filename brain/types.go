@@ -153,11 +153,28 @@ type FilterUsage struct {
 func DefaultFilterUsage() FilterUsage {
 	return FilterUsage{
 		Tools: []string{"search", "find_exact", "find_objects"},
-		Note: "Each kind's filterable_fields lists property keys, types, and operators allowed in filters. " +
-			"Use those keys on search, find_exact, and find_objects (not invented names). " +
-			"When kinds are registered, property filters require a kind filter (or find_objects.kinds). " +
-			"Core keys: kind, title, created_after, created_before, updated_after, updated_before. " +
-			"Call schema with a kind before filtering.",
+		Note: "Each kind lists columns (title, summary, content) and filterable_fields (host properties). " +
+			"search and find_exact take a free-text query over chunk title, summary, and content; " +
+			"put structured fields in filters. find_objects searches parent records; the same " +
+			"filterable_fields apply to the parent. When kinds are registered, property filters " +
+			"require a kind filter (or find_objects.kinds). Core filter keys: kind, title, " +
+			"created_after, created_before, updated_after, updated_before. Field examples are " +
+			"illustrations, not a closed set. Call schema with a kind before filtering.",
+	}
+}
+
+// CoreColumn is a built-in object field shown next to filterable_fields in schema().
+type CoreColumn struct {
+	Name   string `json:"name"`
+	Filter bool   `json:"filter,omitempty"`
+}
+
+// CoreColumns is title, summary, and content — always present on every object.
+func CoreColumns() []CoreColumn {
+	return []CoreColumn{
+		{Name: "title", Filter: true},
+		{Name: "summary"},
+		{Name: "content"},
 	}
 }
 
@@ -167,6 +184,7 @@ type ObjectKindInfo struct {
 	Description      string          `json:"description,omitempty"`
 	IsPart           bool            `json:"is_part"`
 	IsParent         bool            `json:"is_parent"`
+	Columns          []CoreColumn    `json:"columns"`
 	FilterableFields json.RawMessage `json:"filterable_fields,omitempty"`
 }
 
