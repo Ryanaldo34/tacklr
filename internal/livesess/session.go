@@ -1,12 +1,14 @@
 package livesess
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/durable/inprocess"
+	"github.com/ryanaldo34/tacklr/internal/durtest"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -28,7 +30,7 @@ func StartSession(t testing.TB, opts tacklr.AgentOptions) *Session {
 	opts.MountSession = nil
 	cat := durable.NewCatalog("default")
 	cat.Register("default", durable.AgentSpec{Options: opts})
-	rt := inprocess.New(cat, inprocess.WithProjection(vfs.DirectProjection{}))
+	rt := inprocess.New(inprocess.Config{Catalog: cat, Projection: vfs.DirectProjection{}})
 	id, err := rt.CreateSession(t.Context(), durable.CreateSession{AgentID: "default", SessionID: sessionID})
 	if err != nil {
 		t.Fatal(err)
@@ -70,7 +72,8 @@ func (s *Session) Resume(t testing.TB, responses map[string][]byte) []tacklr.Str
 
 func (s *Session) Wait(t testing.TB) []tacklr.StreamEvent {
 	t.Helper()
-	deadline := time.After(8 * time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
+	defer cancel()
 	var got []tacklr.StreamEvent
 	for {
 		select {
@@ -80,9 +83,10 @@ func (s *Session) Wait(t testing.TB) []tacklr.StreamEvent {
 			}
 			got = append(got, ev)
 			if ev.Type == tacklr.StreamEventComplete || ev.Type == tacklr.StreamEventError || ev.Type == tacklr.StreamEventInterrupt {
+				durtest.AssertStatusMatchesEvent(t, s.Runtime, s.ID, ev)
 				return got
 			}
-		case <-deadline:
+		case <-ctx.Done():
 			t.Fatalf("timeout waiting for turn events, got %d", len(got))
 		}
 	}

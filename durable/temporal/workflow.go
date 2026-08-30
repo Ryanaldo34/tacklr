@@ -20,8 +20,7 @@ import (
 // resume, with Inference/Tool activities as children via OTEL v2 propagation.
 func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 	logger := workflow.GetLogger(ctx)
-	stream, err := workflowstreams.NewWorkflowStream(ctx, nil)
-	if err != nil {
+	if _, err := workflowstreams.NewWorkflowStream(ctx, nil); err != nil {
 		logger.Error("workflow stream", "error", err)
 	}
 
@@ -86,20 +85,6 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 		for cancelCh.ReceiveAsync(&ignored) {
 		}
 	}
-	emitStreamErr := func(msg string) {
-		if stream == nil || msg == "" {
-			return
-		}
-		_ = stream.Topic(durable.TopicEvents).Publish(tacklr.StreamEvent{
-			Type:    tacklr.StreamEventError,
-			Fail:    msg,
-			Content: msg,
-		})
-	}
-	emitCancel := func() {
-		emitStreamErr(context.Canceled.Error())
-	}
-
 	selectorWait := func() waitSignal {
 		var out waitSignal
 		s := workflow.NewSelector(ctx)
@@ -133,10 +118,10 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 	}
 
 	activityOpts := workflow.ActivityOptions{
-		StartToCloseTimeout: 10 * time.Minute,
-		HeartbeatTimeout:    30 * time.Second,
+		StartToCloseTimeout: resolveActivityTimeout(in.ActivityTimeout),
+		HeartbeatTimeout:    resolveHeartbeatTimeout(in.HeartbeatTimeout),
 		RetryPolicy: &temporal.RetryPolicy{
-			MaximumAttempts: 3,
+			MaximumAttempts: resolveActivityAttempts(in.ActivityAttempts),
 		},
 	}
 
@@ -151,6 +136,9 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 		turnState := durable.MergeUserState(seed, extra)
 		seed = nil
 		applyAuth(auth)
+		terminal = ""
+		yielded = false
+		result = ""
 		sessionCtx, hasSession := openTurnLocality(ctx, in.TurnLocalityTimeout, 2*time.Second)
 
 		var endTurn func(string, error)
@@ -208,20 +196,25 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 			drainCancels()
 			return err
 		}
+		emitEvent := func(ev tacklr.StreamEvent) {
+			_ = waitAct("EmitEvent", EmitEventInput{SessionID: in.SessionID, Event: ev}, nil)
+		}
 		onActErr := func(err error) bool {
 			if err == nil {
 				return false
 			}
+			msg := err.Error()
 			if turnCanceled(ctx, err) {
 				outcome = telemetry.OutcomeCancelled
 				terminal = durable.SessionFailed
-				emitCancel()
+				msg = context.Canceled.Error()
+				emitEvent(tacklr.StreamEvent{Type: tacklr.StreamEventError, Fail: msg, Content: msg})
 				return true
 			}
 			outcome = telemetry.OutcomeError
 			terminal = durable.SessionFailed
 			turnErr = err
-			emitStreamErr(err.Error())
+			emitEvent(tacklr.StreamEvent{Type: tacklr.StreamEventError, Fail: msg, Content: msg})
 			return true
 		}
 		hadTools := false
@@ -231,6 +224,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 		parked := false
 		inferComplete := false
 		interruptID := ""
+		interruptData := []byte(nil)
 		stopSlice := false
 		for !stopSlice {
 			switch tacklr.Next(len(toolCalls), parked, inferComplete, len(spawned) > 0) {
@@ -322,18 +316,25 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 				if tout.Interrupted {
 					leftover = rest
 					interruptID = tout.InterruptID
+					interruptData = tout.InterruptData
 					parked = true
 					toolCalls = nil
 					continue
 				}
 				toolCalls = rest
 			case tacklr.ActionYield:
+				yielded = true
+				emitEvent(tacklr.StreamEvent{
+					Type:      tacklr.StreamEventInterrupt,
+					MessageID: interruptID,
+					Data:      interruptData,
+				})
 				if hasSession {
 					workflow.CompleteSession(sessionCtx)
 					hasSession = false
 					sessionCtx = ctx
+					actCtx = workflow.WithActivityOptions(sessionCtx, activityOpts)
 				}
-				yielded = true
 				if in.Parent != "" {
 					_ = workflow.SignalExternalWorkflow(ctx, string(in.Parent), "", signalChildWaiting, in.SessionID).Get(ctx, nil)
 				}
@@ -385,7 +386,10 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 						waiting = false
 					case signalCancel:
 						cancelSpawned()
-						emitCancel()
+						terminal = durable.SessionFailed
+						yielded = false
+						msg := context.Canceled.Error()
+						emitEvent(tacklr.StreamEvent{Type: tacklr.StreamEventError, Fail: msg, Content: msg})
 						outcome = telemetry.OutcomeCancelled
 						stopSlice = true
 						waiting = false
@@ -393,6 +397,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 				}
 			case tacklr.ActionComplete:
 				terminal = durable.SessionComplete
+				emitEvent(tacklr.StreamEvent{Type: tacklr.StreamEventComplete})
 				stopSlice = true
 			case tacklr.ActionNudge:
 				nudgeMsg := &tacklr.Message{Role: tacklr.RoleUser, Content: spawnedNudge(spawned)}

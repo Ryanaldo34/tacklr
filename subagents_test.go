@@ -90,7 +90,7 @@ func TestWithSpecialist_sharesHostMountWriteAndCatalog(t *testing.T) {
 		Model:           &mockStrategy{},
 		Brain:           eng,
 		SearchNamespace: ns,
-		writeUnattended: true,
+		UnattendedWrite: true,
 	}.WithSpecialist(&Specialist{Name: "researcher", Model: &mockStrategy{}}))
 	t.Cleanup(worker.Close)
 	ctx := context.Background()

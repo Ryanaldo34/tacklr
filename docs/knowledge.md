@@ -400,7 +400,7 @@ flowchart TB
 
 | Object | Text that is embedded |
 |--------|------------------------|
-| Parent / Engram | `EntityIndexText`: title, summary, scalar properties (sorted keys), body capped at 2 000 runes |
+| Parent / Engram | `EntityIndexText`: title, summary, scalar properties (sorted keys), full body |
 | Part / Chunk | `IndexText` (title + summary + content), prefixed with the parent title |
 
 So `find_objects "open renewal"` can match a Deal whose `stage` property is

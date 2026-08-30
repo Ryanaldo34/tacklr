@@ -163,7 +163,7 @@ func main() {
 		OpenSkills: vfs.Tree(vfs.At("skills", vfs.Union(builtins.Local(filepath.Join(jail, "skills"))))),
 	})
 
-	rt := inprocess.New(cat, inprocess.WithProjection(vfs.DirectProjection{}))
+	rt := inprocess.New(inprocess.Config{Catalog: cat, Projection: vfs.DirectProjection{}})
 	srv := server.NewServer(rt, cat, server.NewACPProtocol(nil)).AllowAnonymousNetwork()
 	log.Printf("ACP on http://127.0.0.1:8080/acp")
 	if err := srv.ServeHTTP(ctx, "127.0.0.1:8080"); err != nil && !errors.Is(err, context.Canceled) {

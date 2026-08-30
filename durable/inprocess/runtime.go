@@ -48,7 +48,9 @@ type sessionProc struct {
 	cancelTurn context.CancelFunc
 	turnDone   chan struct{}
 	closed     bool
-	// terminal is complete/failed when the session will not run again.
+	// terminal is the last committed turn outcome. Status reads only this.
+	// A new Prompt/Resume clears it before the caller’s Prompt returns so a
+	// completed session that is prompted again is running, not stale-complete.
 	// HITL yield is not terminal; Status stays running until Resume resolves it.
 	terminal durable.SessionState
 	result   string
@@ -77,49 +79,33 @@ type Runtime struct {
 	sessions map[durable.SessionID]*sessionProc
 }
 
-// Option configures New.
-type Option func(*Runtime)
-
-// WithSnapshotStore replaces the memory SnapshotStore.
-func WithSnapshotStore(s durable.SnapshotStore) Option {
-	return func(r *Runtime) {
-		if s != nil {
-			r.snapshots = s
-		}
-	}
+// Config is the single in-process host config for New.
+type Config struct {
+	Catalog    durable.Catalog
+	Snapshots  durable.SnapshotStore
+	Projection vfs.Projection
 }
 
-// WithProjection sets how a turn tree is published. Nil is ignored (Fuse stays).
-func WithProjection(p vfs.Projection) Option {
-	return func(r *Runtime) {
-		if p != nil {
-			r.projection = p
-		}
-	}
-}
-
-// New constructs an in-process Runtime. Hosts pass a Catalog; there is no
-// backend plugin registry.
-func New(catalog durable.Catalog, opts ...Option) *Runtime {
-	if catalog == nil {
+// New constructs an in-process Runtime.
+func New(cfg Config) *Runtime {
+	if cfg.Catalog == nil {
 		panic("inprocess: Catalog is required")
 	}
-	r := &Runtime{
-		catalog:    catalog,
-		snapshots:  NewMemorySnapshot(),
+	proj := cfg.Projection
+	if proj == nil {
+		proj = vfs.FuseProjection{}
+	}
+	snaps := cfg.Snapshots
+	if snaps == nil {
+		snaps = NewMemorySnapshot()
+	}
+	return &Runtime{
+		catalog:    cfg.Catalog,
+		snapshots:  snaps,
 		events:     NewMemoryEventLog(),
-		projection: vfs.FuseProjection{},
+		projection: proj,
 		sessions:   make(map[durable.SessionID]*sessionProc),
 	}
-	for _, opt := range opts {
-		if opt != nil {
-			opt(r)
-		}
-	}
-	if r.snapshots == nil {
-		r.snapshots = NewMemorySnapshot()
-	}
-	return r
 }
 
 // CreateSession implements durable.Runtime.
@@ -517,6 +503,9 @@ func (r *Runtime) loop(p *sessionProc) {
 		p.auth = auth
 		p.mu.Lock()
 		p.yielded = false
+		p.terminal = ""
+		p.result = ""
+		p.termErr = nil
 		p.mu.Unlock()
 		bindings := durable.BindingsForTurn(p.mounts, auth)
 		turnCtx, cancel := context.WithCancel(parent)
@@ -541,7 +530,6 @@ func (r *Runtime) loop(p *sessionProc) {
 					r.stopChildren(context.WithoutCancel(parent), p)
 				}
 			}
-			r.noteOutcome(p, outcome)
 			end(outcome)
 		}()
 	}

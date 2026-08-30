@@ -68,12 +68,20 @@ func TestNew_panicsWithoutClientOrCatalog(t *testing.T) {
 	cat.Register("default", durable.AgentSpec{
 		Options: tacklr.AgentOptions{Model: &testkit.ScriptedModel{}, Config: tacklr.Config{MaxWindowSize: 8192}},
 	})
-	mustPanic(t, func() { New(nil, "q", cat) })
-	mustPanic(t, func() { New(&struct{ client.Client }{}, "q", nil) })
+	mustPanic(t, func() { New(nil, Config{Catalog: cat}) })
+	mustPanic(t, func() { New(&struct{ client.Client }{}, Config{}) })
 	log := inprocess.NewMemoryEventLog()
-	rt := New(&struct{ client.Client }{}, "", cat, nil, WithDisableStreams(), WithTurnLocality(time.Minute), WithSnapshotStore(nil), WithEventLog(nil), WithEventLog(log))
+	stub := &struct{ client.Client }{}
+	rt := New(stub, Config{Catalog: cat, DisableStreams: true, TurnLocality: time.Minute, Fallback: log})
 	if rt.taskQueue != "tacklr" || !rt.disableStreams {
 		t.Fatalf("defaults tq=%q streams=%v", rt.taskQueue, rt.disableStreams)
+	}
+	if rt.activityTimeout != 10*time.Minute || rt.heartbeatTimeout != 30*time.Second || rt.activityAttempts != 3 {
+		t.Fatalf("activity defaults timeout=%v heartbeat=%v attempts=%d", rt.activityTimeout, rt.heartbeatTimeout, rt.activityAttempts)
+	}
+	hour := New(stub, Config{Catalog: cat, TaskQueue: "q", ActivityTimeout: time.Hour, HeartbeatTimeout: time.Minute, ActivityAttempts: 1})
+	if hour.activityTimeout != time.Hour || hour.heartbeatTimeout != time.Minute || hour.activityAttempts != 1 {
+		t.Fatalf("cfg timeout=%v heartbeat=%v attempts=%d", hour.activityTimeout, hour.heartbeatTimeout, hour.activityAttempts)
 	}
 	ctx := t.Context()
 	if _, err := rt.Head(ctx, "gone"); err != nil {
@@ -198,17 +206,17 @@ func TestSessionWorkflow_promptCompletes(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := drainLog(t, fallback, id)
-	var sawMsg, sawComplete bool
+	var sawMsg bool
 	for _, ev := range got {
 		if ev.Type == tacklr.StreamEventMessage && strings.Contains(ev.Content, "hello-temporal") {
 			sawMsg = true
 		}
-		if ev.Type == tacklr.StreamEventComplete {
-			sawComplete = true
-		}
 	}
-	if !sawMsg || !sawComplete {
-		t.Fatalf("want hello-temporal + complete, got %+v", got)
+	if !sawMsg {
+		t.Fatalf("want hello-temporal, got %+v", got)
+	}
+	if st := querySession(t, env); st.State != durable.SessionComplete {
+		t.Fatalf("Status after prompt: %+v", st)
 	}
 }
 
@@ -345,17 +353,17 @@ func TestSessionWorkflow_activityRetryThenCompletes(t *testing.T) {
 		t.Fatalf("want retry event, got %+v", fallback.retry)
 	}
 	got := drainLog(t, fallback, id)
-	var sawMsg, sawComplete bool
+	var sawMsg bool
 	for _, ev := range got {
 		if ev.Type == tacklr.StreamEventMessage && strings.Contains(ev.Content, "after-retry") {
 			sawMsg = true
 		}
-		if ev.Type == tacklr.StreamEventComplete {
-			sawComplete = true
-		}
 	}
-	if !sawMsg || !sawComplete {
-		t.Fatalf("want after-retry + complete, got %+v", got)
+	if !sawMsg {
+		t.Fatalf("want after-retry, got %+v", got)
+	}
+	if st := querySession(t, env); st.State != durable.SessionComplete {
+		t.Fatalf("Status after retry: %+v", st)
 	}
 }
 
@@ -404,7 +412,7 @@ func TestSessionWorkflow_askUserYieldThenResume(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := drainLog(t, fallback, id)
-	var yielded, chose, complete bool
+	var yielded, chose bool
 	for _, ev := range got {
 		if ev.Type == tacklr.StreamEventInterrupt {
 			yielded = true
@@ -412,12 +420,12 @@ func TestSessionWorkflow_askUserYieldThenResume(t *testing.T) {
 		if ev.Type == tacklr.StreamEventMessage && ev.Content == "chose" {
 			chose = true
 		}
-		if ev.Type == tacklr.StreamEventComplete {
-			complete = true
-		}
 	}
-	if !yielded || !chose || !complete {
-		t.Fatalf("want yield+chose+complete, got %+v", got)
+	if !yielded || !chose {
+		t.Fatalf("want yield+chose, got %+v", got)
+	}
+	if st := querySession(t, env); st.State != durable.SessionComplete {
+		t.Fatalf("Status after resume: %+v", st)
 	}
 }
 
@@ -592,17 +600,17 @@ func TestSessionWorkflow_cancelThenNextPromptCompletes(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := drainLog(t, fallback, id)
-	var sawAfter, complete bool
+	var sawAfter bool
 	for _, ev := range got {
 		if ev.Type == tacklr.StreamEventMessage && strings.Contains(ev.Content, "after-cancel") {
 			sawAfter = true
 		}
-		if ev.Type == tacklr.StreamEventComplete {
-			complete = true
-		}
 	}
-	if !sawAfter || !complete {
-		t.Fatalf("want after-cancel + complete, got %+v", got)
+	if !sawAfter {
+		t.Fatalf("want after-cancel, got %+v", got)
+	}
+	if st := querySession(t, env); st.State != durable.SessionComplete {
+		t.Fatalf("Status after cancel+prompt: %+v", st)
 	}
 }
 
@@ -1117,7 +1125,7 @@ func TestSessionWorkflow_resumeRemountsWorkspaceFromCachedRecipe(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := drainLog(t, fallback, id)
-	var yielded, sawFile, complete bool
+	var yielded, sawFile bool
 	for _, ev := range got {
 		if ev.Type == tacklr.StreamEventInterrupt {
 			yielded = true
@@ -1125,11 +1133,11 @@ func TestSessionWorkflow_resumeRemountsWorkspaceFromCachedRecipe(t *testing.T) {
 		if ev.Type == tacklr.StreamEventMessage && strings.Contains(ev.Content, "from-workspace") {
 			sawFile = true
 		}
-		if ev.Type == tacklr.StreamEventComplete {
-			complete = true
-		}
 	}
-	if !yielded || !sawFile || !complete {
-		t.Fatalf("want yield + remounted workspace + complete, got %+v", got)
+	if !yielded || !sawFile {
+		t.Fatalf("want yield + remounted workspace, got %+v", got)
+	}
+	if st := querySession(t, env); st.State != durable.SessionComplete {
+		t.Fatalf("Status after remount: %+v", st)
 	}
 }

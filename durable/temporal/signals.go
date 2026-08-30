@@ -32,6 +32,13 @@ type WorkflowInput struct {
 	// (Temporal CreateSession). Zero skips worker sessions: activities can run
 	// on any worker. There is no default timeout.
 	TurnLocalityTimeout time.Duration
+	// ActivityTimeout is StartToCloseTimeout for Inference/Tool activities.
+	// Zero means 10 minutes (resolveActivityTimeout).
+	ActivityTimeout time.Duration
+	// HeartbeatTimeout is the activity heartbeat timeout. Zero means 30 seconds.
+	HeartbeatTimeout time.Duration
+	// ActivityAttempts is Temporal MaximumAttempts. Zero means 3.
+	ActivityAttempts int32
 	// Prompt, when set, runs one turn then completes the workflow (spawn_specialist child).
 	Prompt     string
 	Parent     durable.SessionID

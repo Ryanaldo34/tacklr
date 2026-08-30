@@ -17,6 +17,7 @@ import (
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/builtins"
 	"github.com/ryanaldo34/tacklr/durable"
+	"github.com/ryanaldo34/tacklr/internal/durtest"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
@@ -58,9 +59,10 @@ func waitTurnPersisted(t *testing.T, rt *Runtime, id durable.SessionID) {
 	}
 }
 
-func waitEvents(t *testing.T, sub durable.Subscription, timeout time.Duration) []tacklr.StreamEvent {
+func waitEvents(t *testing.T, rt *Runtime, id durable.SessionID, sub durable.Subscription, timeout time.Duration) []tacklr.StreamEvent {
 	t.Helper()
-	deadline := time.After(timeout)
+	ctx, cancel := context.WithTimeout(t.Context(), timeout)
+	defer cancel()
 	var got []tacklr.StreamEvent
 	for {
 		select {
@@ -70,9 +72,10 @@ func waitEvents(t *testing.T, sub durable.Subscription, timeout time.Duration) [
 			}
 			got = append(got, ev)
 			if ev.Type == tacklr.StreamEventComplete || ev.Type == tacklr.StreamEventError || ev.Type == tacklr.StreamEventInterrupt {
+				durtest.AssertStatusMatchesEvent(t, rt, id, ev)
 				return got
 			}
-		case <-deadline:
+		case <-ctx.Done():
 			t.Fatalf("timeout waiting for events, got %d", len(got))
 		}
 	}
@@ -81,7 +84,7 @@ func waitEvents(t *testing.T, sub durable.Subscription, timeout time.Duration) [
 func TestCreateSessionPromptCompletedMessage(t *testing.T) {
 	ctx := t.Context()
 	model := scriptedComplete("hello from agent")
-	rt := New(newCatalog(t, model, durable.AgentSpec{}), WithProjection(vfs.DirectProjection{}))
+	rt := New(Config{Catalog: newCatalog(t, model, durable.AgentSpec{}), Projection: vfs.DirectProjection{}})
 
 	id, err := rt.CreateSession(ctx, durable.CreateSession{AgentID: "default"})
 	if err != nil {
@@ -95,7 +98,7 @@ func TestCreateSessionPromptCompletedMessage(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = sub.Close() })
-	got := waitEvents(t, sub, 5*time.Second)
+	got := waitEvents(t, rt, id, sub, 5*time.Second)
 	var saw bool
 	for _, ev := range got {
 		if ev.Type == tacklr.StreamEventMessage && strings.Contains(ev.Content, "hello from agent") {
@@ -117,7 +120,7 @@ func TestBindThenPromptReadsWorkspace(t *testing.T) {
 		InvokeFn: workspaceReadModel,
 	}
 	cat := newCatalog(t, model, durable.AgentSpec{OpenVFS: vfs.Tree(vfs.At("docs", builtins.Local(dir)))})
-	rt := New(cat, WithProjection(vfs.DirectProjection{}))
+	rt := New(Config{Catalog: cat, Projection: vfs.DirectProjection{}})
 	id, err := rt.CreateSession(ctx, durable.CreateSession{AgentID: "default"})
 	if err != nil {
 		t.Fatal(err)
@@ -137,7 +140,7 @@ func TestBindThenPromptReadsWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = sub.Close() })
-	got := waitEvents(t, sub, 8*time.Second)
+	got := waitEvents(t, rt, id, sub, 8*time.Second)
 	var body string
 	for _, ev := range got {
 		if ev.Type == tacklr.StreamEventMessage {
@@ -176,10 +179,10 @@ func TestPrompt_readSkillFromOpenSkills(t *testing.T) {
 			}
 		},
 	}
-	rt := New(newCatalog(t, model, durable.AgentSpec{
+	rt := New(Config{Catalog: newCatalog(t, model, durable.AgentSpec{
 		OpenVFS:    vfs.Tree(vfs.At("work", builtins.Local(t.TempDir()))),
 		OpenSkills: vfs.Tree(vfs.At("skills", builtins.Local(pack))),
-	}), WithProjection(vfs.DirectProjection{}))
+	}), Projection: vfs.DirectProjection{}})
 	id, err := rt.CreateSession(ctx, durable.CreateSession{AgentID: "default"})
 	if err != nil {
 		t.Fatal(err)
@@ -192,7 +195,7 @@ func TestPrompt_readSkillFromOpenSkills(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = sub.Close() })
-	got := waitEvents(t, sub, 8*time.Second)
+	got := waitEvents(t, rt, id, sub, 8*time.Second)
 	var body string
 	for _, ev := range got {
 		if ev.Type == tacklr.StreamEventMessage {
@@ -213,7 +216,7 @@ func TestUnbindThenPromptWorkspaceGone(t *testing.T) {
 	model := &testkit.ScriptedModel{
 		InvokeFn: workspaceReadModel,
 	}
-	rt := New(newCatalog(t, model, durable.AgentSpec{OpenVFS: bindLocalDocs(dir)}), WithProjection(vfs.DirectProjection{}))
+	rt := New(Config{Catalog: newCatalog(t, model, durable.AgentSpec{OpenVFS: bindLocalDocs(dir)}), Projection: vfs.DirectProjection{}})
 	id, err := rt.CreateSession(ctx, durable.CreateSession{AgentID: "default"})
 	if err != nil {
 		t.Fatal(err)
@@ -230,7 +233,7 @@ func TestUnbindThenPromptWorkspaceGone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = waitEvents(t, sub, 8*time.Second)
+	_ = waitEvents(t, rt, id, sub, 8*time.Second)
 	_ = sub.Close()
 
 	head, _ := rt.events.Head(ctx, id)
@@ -245,7 +248,7 @@ func TestUnbindThenPromptWorkspaceGone(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = sub2.Close() })
-	got := waitEvents(t, sub2, 8*time.Second)
+	got := waitEvents(t, rt, id, sub2, 8*time.Second)
 	var sawMissing bool
 	for _, ev := range got {
 		if ev.Type == tacklr.StreamEventToolResult && (strings.Contains(ev.Content, "not found") ||
@@ -280,7 +283,7 @@ func TestAskUserChoiceYieldsThenResumeCompletes(t *testing.T) {
 			}
 		},
 	}
-	rt := New(newCatalog(t, model, durable.AgentSpec{}), WithProjection(vfs.DirectProjection{}))
+	rt := New(Config{Catalog: newCatalog(t, model, durable.AgentSpec{}), Projection: vfs.DirectProjection{}})
 	id, err := rt.CreateSession(ctx, durable.CreateSession{AgentID: "default"})
 	if err != nil {
 		t.Fatal(err)
@@ -293,7 +296,7 @@ func TestAskUserChoiceYieldsThenResumeCompletes(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = sub.Close() })
-	got := waitEvents(t, sub, 8*time.Second)
+	got := waitEvents(t, rt, id, sub, 8*time.Second)
 	var yielded bool
 	for _, ev := range got {
 		if ev.Type == tacklr.StreamEventInterrupt {
@@ -314,27 +317,14 @@ func TestAskUserChoiceYieldsThenResumeCompletes(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.After(8 * time.Second)
-	for {
-		select {
-		case ev, ok := <-sub.Events():
-			if !ok {
-				t.Fatal("subscription closed before complete")
-			}
-			if ev.Type == tacklr.StreamEventComplete || (ev.Type == tacklr.StreamEventMessage && ev.Content == "chose") {
-				waitTurnPersisted(t, rt, id)
-				snap, _, err := rt.snapshots.Load(ctx, id)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if string(snap.Checkpoint.UserState()["user"]) != `"Ryan"` {
-					t.Fatalf("resume state: %s", snap.Checkpoint.UserState()["user"])
-				}
-				return
-			}
-		case <-deadline:
-			t.Fatal("timeout waiting for resume complete")
-		}
+	waitEvents(t, rt, id, sub, 8*time.Second)
+	waitTurnPersisted(t, rt, id)
+	snap, _, err := rt.snapshots.Load(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(snap.Checkpoint.UserState()["user"]) != `"Ryan"` {
+		t.Fatalf("resume state: %s", snap.Checkpoint.UserState()["user"])
 	}
 }
 
@@ -390,13 +380,13 @@ func TestPrompt_parallelBatchHitlRunsRemainder(t *testing.T) {
 			return "gate-ok", nil
 		},
 	})
-	rt := New(newCatalog(t, model, durable.AgentSpec{
+	rt := New(Config{Catalog: newCatalog(t, model, durable.AgentSpec{
 		Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{
 			tacklr.NewTool(tacklr.ToolConfig{Name: "alpha", Handler: slow("from-alpha")}),
 			gate,
 			tacklr.NewTool(tacklr.ToolConfig{Name: "beta", Handler: slow("from-beta")}),
 		}},
-	}), WithProjection(vfs.DirectProjection{}))
+	}), Projection: vfs.DirectProjection{}})
 	id, err := rt.CreateSession(ctx, durable.CreateSession{AgentID: "default"})
 	if err != nil {
 		t.Fatal(err)
@@ -409,7 +399,7 @@ func TestPrompt_parallelBatchHitlRunsRemainder(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = sub.Close() })
-	got := waitEvents(t, sub, 8*time.Second)
+	got := waitEvents(t, rt, id, sub, 8*time.Second)
 	var yielded bool
 	for _, ev := range got {
 		if ev.Type == tacklr.StreamEventInterrupt {
@@ -423,24 +413,7 @@ func TestPrompt_parallelBatchHitlRunsRemainder(t *testing.T) {
 	if err := rt.Resume(ctx, id, durable.Resume{Responses: map[string][]byte{"fc_gate": payload}}); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.After(8 * time.Second)
-	complete := false
-	for !complete {
-		select {
-		case ev, ok := <-sub.Events():
-			if !ok {
-				t.Fatal("subscription closed before complete")
-			}
-			if ev.Type == tacklr.StreamEventComplete || (ev.Type == tacklr.StreamEventMessage && ev.Content == "all-three") {
-				complete = true
-			}
-			if ev.Type == tacklr.StreamEventError {
-				t.Fatalf("resume error: %v %s", ev.Error, ev.Content)
-			}
-		case <-deadline:
-			t.Fatal("timeout waiting for resume complete")
-		}
-	}
+	waitEvents(t, rt, id, sub, 8*time.Second)
 	saw := map[string]bool{}
 	for _, c := range results {
 		saw[c] = true
@@ -462,7 +435,7 @@ func TestCancelWhileRunningEndsSubscriptionThenNextPromptRuns(t *testing.T) {
 			<-ctx.Done()
 		},
 	}
-	rt := New(newCatalog(t, model, durable.AgentSpec{}), WithProjection(vfs.DirectProjection{}))
+	rt := New(Config{Catalog: newCatalog(t, model, durable.AgentSpec{}), Projection: vfs.DirectProjection{}})
 	id, err := rt.CreateSession(ctx, durable.CreateSession{AgentID: "default"})
 	if err != nil {
 		t.Fatal(err)
@@ -474,34 +447,33 @@ func TestCancelWhileRunningEndsSubscriptionThenNextPromptRuns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	waitStart, stopWait := context.WithTimeout(t.Context(), 5*time.Second)
+	defer stopWait()
 	select {
 	case <-started:
-	case <-time.After(5 * time.Second):
+	case <-waitStart.Done():
 		t.Fatal("model did not start")
 	}
 	if err := rt.Cancel(ctx, id); err != nil {
 		t.Fatal(err)
 	}
+	_ = sub.Close()
+	subCancel, err := rt.Subscribe(ctx, id, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = subCancel.Close() })
+	gotCancel := waitEvents(t, rt, id, subCancel, 5*time.Second)
 	var sawCancel bool
-	deadline := time.After(5 * time.Second)
-drain:
-	for {
-		select {
-		case ev, ok := <-sub.Events():
-			if !ok {
-				break drain
-			}
-			if ev.Type == tacklr.StreamEventError && (errors.Is(ev.Error, context.Canceled) ||
-				strings.Contains(ev.Content, "canceled") ||
-				strings.Contains(fmt.Sprint(ev.Error), "canceled")) {
-				sawCancel = true
-			}
-		case <-deadline:
-			t.Fatal("subscription did not end after cancel")
+	for _, ev := range gotCancel {
+		if ev.Type == tacklr.StreamEventError && (errors.Is(ev.Error, context.Canceled) ||
+			strings.Contains(ev.Content, "canceled") ||
+			strings.Contains(fmt.Sprint(ev.Error), "canceled")) {
+			sawCancel = true
 		}
 	}
 	if !sawCancel {
-		t.Fatal("want canceled stream error")
+		t.Fatalf("want canceled stream error, got %+v", summarize(gotCancel))
 	}
 
 	model2 := scriptedComplete("after-cancel")
@@ -519,7 +491,7 @@ drain:
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = sub2.Close() })
-	got := waitEvents(t, sub2, 8*time.Second)
+	got := waitEvents(t, rt, id, sub2, 8*time.Second)
 	var saw bool
 	for _, ev := range got {
 		if ev.Type == tacklr.StreamEventMessage && strings.Contains(ev.Content, "after-cancel") {
@@ -533,7 +505,7 @@ drain:
 
 func TestCloseDeletesSnapshotPromptNotFound(t *testing.T) {
 	ctx := t.Context()
-	rt := New(newCatalog(t, scriptedComplete("x"), durable.AgentSpec{}), WithProjection(vfs.DirectProjection{}))
+	rt := New(Config{Catalog: newCatalog(t, scriptedComplete("x"), durable.AgentSpec{}), Projection: vfs.DirectProjection{}})
 	id, err := rt.CreateSession(ctx, durable.CreateSession{AgentID: "default"})
 	if err != nil {
 		t.Fatal(err)
@@ -545,7 +517,7 @@ func TestCloseDeletesSnapshotPromptNotFound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = waitEvents(t, sub, 5*time.Second)
+	_ = waitEvents(t, rt, id, sub, 5*time.Second)
 	if err := rt.Close(ctx, id); err != nil {
 		t.Fatal(err)
 	}
@@ -566,7 +538,7 @@ func TestTwoPromptsShareSnapshot(t *testing.T) {
 			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "ok", IsComplete: true}
 		},
 	}
-	rt := New(newCatalog(t, model, durable.AgentSpec{}), WithProjection(vfs.DirectProjection{}))
+	rt := New(Config{Catalog: newCatalog(t, model, durable.AgentSpec{}), Projection: vfs.DirectProjection{}})
 	id, err := rt.CreateSession(ctx, durable.CreateSession{
 		AgentID: "default",
 		State:   map[string]any{"user": "Ryan"},
@@ -581,7 +553,7 @@ func TestTwoPromptsShareSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = waitEvents(t, sub, 5*time.Second)
+	_ = waitEvents(t, rt, id, sub, 5*time.Second)
 	_ = sub.Close()
 
 	head, _ := rt.events.Head(ctx, id)
@@ -593,7 +565,7 @@ func TestTwoPromptsShareSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = sub2.Close() })
-	_ = waitEvents(t, sub2, 5*time.Second)
+	_ = waitEvents(t, rt, id, sub2, 5*time.Second)
 
 	var sawFirst bool
 	for _, m := range model.LastInvokeMsgs {
@@ -622,7 +594,7 @@ func TestNewSessionDoesNotLoadPreviousSnapshot(t *testing.T) {
 			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "ok", IsComplete: true}
 		},
 	}
-	rt := New(newCatalog(t, model, durable.AgentSpec{}), WithProjection(vfs.DirectProjection{}))
+	rt := New(Config{Catalog: newCatalog(t, model, durable.AgentSpec{}), Projection: vfs.DirectProjection{}})
 	id1, err := rt.CreateSession(ctx, durable.CreateSession{AgentID: "default"})
 	if err != nil {
 		t.Fatal(err)
@@ -634,7 +606,7 @@ func TestNewSessionDoesNotLoadPreviousSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = waitEvents(t, sub, 5*time.Second)
+	_ = waitEvents(t, rt, id1, sub, 5*time.Second)
 	_ = sub.Close()
 
 	id2, err := rt.CreateSession(ctx, durable.CreateSession{AgentID: "default"})
@@ -649,7 +621,7 @@ func TestNewSessionDoesNotLoadPreviousSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = sub2.Close() })
-	_ = waitEvents(t, sub2, 5*time.Second)
+	_ = waitEvents(t, rt, id2, sub2, 5*time.Second)
 
 	var users []string
 	for _, m := range model.LastInvokeMsgs {
@@ -681,7 +653,7 @@ func TestPrompt_readMissingPathCorrection(t *testing.T) {
 			}
 		},
 	}
-	rt := New(newCatalog(t, model, durable.AgentSpec{OpenVFS: vfs.Tree(vfs.At("docs", builtins.Local(dir)))}), WithProjection(vfs.DirectProjection{}))
+	rt := New(Config{Catalog: newCatalog(t, model, durable.AgentSpec{OpenVFS: vfs.Tree(vfs.At("docs", builtins.Local(dir)))}), Projection: vfs.DirectProjection{}})
 	id, err := rt.CreateSession(ctx, durable.CreateSession{AgentID: "default"})
 	if err != nil {
 		t.Fatal(err)
@@ -701,7 +673,7 @@ func TestPrompt_readMissingPathCorrection(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = sub.Close() })
-	got := waitEvents(t, sub, 8*time.Second)
+	got := waitEvents(t, rt, id, sub, 8*time.Second)
 	var sentence string
 	for _, ev := range got {
 		if ev.Type == tacklr.StreamEventToolResult && strings.Contains(ev.Content, "that path does not exist. List the parent") {
@@ -736,9 +708,9 @@ func TestPrompt_toolFailedServiceString(t *testing.T) {
 			}
 		},
 	}
-	rt := New(newCatalog(t, model, durable.AgentSpec{
+	rt := New(Config{Catalog: newCatalog(t, model, durable.AgentSpec{
 		Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{boom}},
-	}), WithProjection(vfs.DirectProjection{}))
+	}), Projection: vfs.DirectProjection{}})
 	id, err := rt.CreateSession(ctx, durable.CreateSession{AgentID: "default"})
 	if err != nil {
 		t.Fatal(err)
@@ -751,7 +723,7 @@ func TestPrompt_toolFailedServiceString(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = sub.Close() })
-	got := waitEvents(t, sub, 8*time.Second)
+	got := waitEvents(t, rt, id, sub, 8*time.Second)
 	var sentence string
 	for _, ev := range got {
 		if ev.Type == tacklr.StreamEventToolResult && strings.Contains(ev.Content, "search provider failed") {
@@ -912,7 +884,8 @@ func TestSubscribeReplaysPastBuffer(t *testing.T) {
 		t.Fatal(err)
 	}
 	var n int
-	deadline := time.After(5 * time.Second)
+	wait, stopWait := context.WithTimeout(t.Context(), 5*time.Second)
+	defer stopWait()
 	for n < 80 {
 		select {
 		case ev, ok := <-ch:
@@ -923,7 +896,7 @@ func TestSubscribeReplaysPastBuffer(t *testing.T) {
 				t.Fatalf("event %d content=%q", n, ev.Content)
 			}
 			n++
-		case <-deadline:
+		case <-wait.Done():
 			t.Fatalf("timeout after %d events", n)
 		}
 	}
@@ -932,7 +905,7 @@ func TestSubscribeReplaysPastBuffer(t *testing.T) {
 func TestInferenceErrorPublishesStreamEventError(t *testing.T) {
 	ctx := t.Context()
 	model := &testkit.ScriptedModel{InvokeErr: errors.New("model down")}
-	rt := New(newCatalog(t, model, durable.AgentSpec{}), WithProjection(vfs.DirectProjection{}))
+	rt := New(Config{Catalog: newCatalog(t, model, durable.AgentSpec{}), Projection: vfs.DirectProjection{}})
 	id, err := rt.CreateSession(ctx, durable.CreateSession{AgentID: "default"})
 	if err != nil {
 		t.Fatal(err)
@@ -945,7 +918,7 @@ func TestInferenceErrorPublishesStreamEventError(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = sub.Close() })
-	got := waitEvents(t, sub, 5*time.Second)
+	got := waitEvents(t, rt, id, sub, 5*time.Second)
 	var sawErr bool
 	for _, ev := range got {
 		if ev.Type == tacklr.StreamEventError {
@@ -963,7 +936,7 @@ func TestCreateSessionMountsThenPromptTokensRemount(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("from-workspace"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	rt := New(newCatalog(t, &testkit.ScriptedModel{InvokeFn: workspaceReadModel}, durable.AgentSpec{OpenVFS: vfs.Tree(vfs.At("docs", builtins.Local(dir)))}), WithProjection(vfs.DirectProjection{}))
+	rt := New(Config{Catalog: newCatalog(t, &testkit.ScriptedModel{InvokeFn: workspaceReadModel}, durable.AgentSpec{OpenVFS: vfs.Tree(vfs.At("docs", builtins.Local(dir)))}), Projection: vfs.DirectProjection{}})
 	id, err := rt.CreateSession(ctx, durable.CreateSession{
 		AgentID: "default",
 		Mounts: []durable.MountRecipe{{
@@ -989,7 +962,7 @@ func TestCreateSessionMountsThenPromptTokensRemount(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = sub.Close() })
-	got := waitEvents(t, sub, 8*time.Second)
+	got := waitEvents(t, rt, id, sub, 8*time.Second)
 	var body string
 	for _, ev := range got {
 		if ev.Type == tacklr.StreamEventMessage {
@@ -1005,7 +978,7 @@ func TestBadWorkspaceBindingFailsTurn(t *testing.T) {
 	ctx := t.Context()
 	missing := filepath.Join(t.TempDir(), "missing")
 	model := &testkit.ScriptedModel{InvokeFn: workspaceReadModel}
-	rt := New(newCatalog(t, model, durable.AgentSpec{OpenVFS: vfs.Tree(vfs.At("docs", builtins.Local(missing)))}), WithProjection(vfs.DirectProjection{}))
+	rt := New(Config{Catalog: newCatalog(t, model, durable.AgentSpec{OpenVFS: vfs.Tree(vfs.At("docs", builtins.Local(missing)))}), Projection: vfs.DirectProjection{}})
 	id, err := rt.CreateSession(ctx, durable.CreateSession{AgentID: "default"})
 	if err != nil {
 		t.Fatal(err)
@@ -1025,7 +998,7 @@ func TestBadWorkspaceBindingFailsTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = sub.Close() })
-	got := waitEvents(t, sub, 8*time.Second)
+	got := waitEvents(t, rt, id, sub, 8*time.Second)
 	var sawErr bool
 	for _, ev := range got {
 		if ev.Type == tacklr.StreamEventError || ev.Error != nil {
@@ -1053,7 +1026,7 @@ func TestChildSession_inheritsAndStatusStaysRunning(t *testing.T) {
 			}},
 		},
 	})
-	rt := New(cat, WithProjection(vfs.DirectProjection{}))
+	rt := New(Config{Catalog: cat, Projection: vfs.DirectProjection{}})
 	parent, err := rt.CreateSession(ctx, durable.CreateSession{AgentID: "default"})
 	if err != nil {
 		t.Fatal(err)
@@ -1086,7 +1059,7 @@ func TestChildSession_inheritsAndStatusStaysRunning(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = sub.Close() })
-	waitEvents(t, sub, 8*time.Second)
+	waitEvents(t, rt, child, sub, 8*time.Second)
 	st = waitStatus(t, rt, child, func(s durable.SessionStatus) bool {
 		return s.State == durable.SessionComplete
 	})
@@ -1129,7 +1102,7 @@ func TestSpawnWorkerNestedDriverCompletes(t *testing.T) {
 			}},
 		},
 	}
-	rt := New(newCatalog(t, model, spec), WithProjection(vfs.DirectProjection{}))
+	rt := New(Config{Catalog: newCatalog(t, model, spec), Projection: vfs.DirectProjection{}})
 	id, err := rt.CreateSession(ctx, durable.CreateSession{AgentID: "default"})
 	if err != nil {
 		t.Fatal(err)
@@ -1142,7 +1115,8 @@ func TestSpawnWorkerNestedDriverCompletes(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = sub.Close() })
-	deadline := time.After(8 * time.Second)
+	wait, stopWait := context.WithTimeout(t.Context(), 8*time.Second)
+	defer stopWait()
 	var sawChild, sawParent bool
 	for !sawChild || !sawParent {
 		select {
@@ -1157,9 +1131,10 @@ func TestSpawnWorkerNestedDriverCompletes(t *testing.T) {
 				sawParent = true
 			}
 			if ev.Type == tacklr.StreamEventComplete && sawChild && sawParent {
+				durtest.AssertStatusMatchesEvent(t, rt, id, ev)
 				return
 			}
-		case <-deadline:
+		case <-wait.Done():
 			t.Fatalf("timeout child=%v parent=%v", sawChild, sawParent)
 		}
 	}

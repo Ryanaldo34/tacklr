@@ -15,6 +15,7 @@ import (
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/durable/inprocess"
+	"github.com/ryanaldo34/tacklr/vfs"
 )
 
 // Runtime implements durable.Runtime with one Temporal workflow per session.
@@ -26,72 +27,104 @@ type Runtime struct {
 	snapshots           durable.SnapshotStore
 	disableStreams      bool
 	turnLocalityTimeout time.Duration
+	activityTimeout     time.Duration
+	heartbeatTimeout    time.Duration
+	activityAttempts    int32
 
 	mu     sync.Mutex
 	closed map[durable.SessionID]struct{}
 }
 
-// Option configures New.
-type Option func(*Runtime)
+const (
+	defaultActivityTimeout  = 10 * time.Minute
+	defaultHeartbeatTimeout = 30 * time.Second
+	defaultActivityAttempts = 3
+)
 
-// WithSnapshotStore replaces the memory SnapshotStore.
-func WithSnapshotStore(s durable.SnapshotStore) Option {
-	return func(r *Runtime) {
-		if s != nil {
-			r.snapshots = s
-		}
+func resolveActivityTimeout(d time.Duration) time.Duration {
+	if d <= 0 {
+		return defaultActivityTimeout
 	}
+	return d
 }
 
-// WithEventLog sets the fallback EventLog used when Workflow Streams is disabled.
-func WithEventLog(l *inprocess.MemoryEventLog) Option {
-	return func(r *Runtime) {
-		if l != nil {
-			r.fallback = l
-		}
+func resolveHeartbeatTimeout(d time.Duration) time.Duration {
+	if d <= 0 {
+		return defaultHeartbeatTimeout
 	}
+	return d
 }
 
-// WithDisableStreams publishes and subscribes only via the fallback EventLog.
-// The Temporal testsuite mock cannot serve Workflow Streams (GetSystemInfo);
-// use this in unit tests. The dev-server integration test leaves streams on.
-func WithDisableStreams() Option {
-	return func(r *Runtime) { r.disableStreams = true }
+func resolveActivityAttempts(n int32) int32 {
+	if n <= 0 {
+		return defaultActivityAttempts
+	}
+	return n
 }
 
-// WithTurnLocality keeps a turn's activities on one Temporal worker for that
-// duration so the turn's VFS stays on the same process. Zero (default) does
-// not pin activities; they may run on any worker.
-func WithTurnLocality(d time.Duration) Option {
-	return func(r *Runtime) { r.turnLocalityTimeout = d }
+// Config is the single Temporal host config for New and NewWorker.
+type Config struct {
+	Catalog    durable.Catalog
+	TaskQueue  string
+	Snapshots  durable.SnapshotStore
+	Fallback   durable.EventLog
+	Projection vfs.Projection
+	// DisableStreams uses the fallback EventLog instead of Workflow Streams.
+	// Tests that use the Temporal testsuite mock must set this.
+	DisableStreams bool
+	// TurnLocality, when > 0, pins a turn's activities to one worker.
+	TurnLocality time.Duration
+	// ActivityTimeout is Inference/Tool StartToCloseTimeout. Zero is 10 minutes.
+	ActivityTimeout time.Duration
+	// HeartbeatTimeout is the activity heartbeat timeout. Zero is 30 seconds.
+	HeartbeatTimeout time.Duration
+	// ActivityAttempts is Temporal MaximumAttempts. Zero is 3. 1 means no retry.
+	ActivityAttempts int32
 }
 
-// New constructs a Temporal Runtime. The host must also run Worker on the same
-// task queue with EnableSessionWorker. Tokens travel on Prompt/Resume payloads.
-func New(c client.Client, taskQueue string, catalog durable.Catalog, opts ...Option) *Runtime {
+func (c Config) queue() string {
+	if c.TaskQueue == "" {
+		return "tacklr"
+	}
+	return c.TaskQueue
+}
+
+func (c Config) snaps() durable.SnapshotStore {
+	if c.Snapshots != nil {
+		return c.Snapshots
+	}
+	return inprocess.NewMemorySnapshot()
+}
+
+func (c Config) memoryLog() *inprocess.MemoryEventLog {
+	if m, ok := c.Fallback.(*inprocess.MemoryEventLog); ok && m != nil {
+		return m
+	}
+	return inprocess.NewMemoryEventLog()
+}
+
+// New constructs a Temporal Runtime. The host must also run NewWorker on the
+// same Config. Tokens travel on Prompt/Resume payloads.
+func New(c client.Client, cfg Config) *Runtime {
 	if c == nil {
 		panic("temporal: Client is required")
 	}
-	if catalog == nil {
+	if cfg.Catalog == nil {
 		panic("temporal: Catalog is required")
 	}
-	if taskQueue == "" {
-		taskQueue = "tacklr"
+	return &Runtime{
+		client:              c,
+		taskQueue:           cfg.queue(),
+		catalog:             cfg.Catalog,
+		fallback:            cfg.memoryLog(),
+		snapshots:           cfg.snaps(),
+		disableStreams:      cfg.DisableStreams,
+		turnLocalityTimeout: cfg.TurnLocality,
+		activityTimeout:     resolveActivityTimeout(cfg.ActivityTimeout),
+		heartbeatTimeout:    resolveHeartbeatTimeout(cfg.HeartbeatTimeout),
+		activityAttempts:    resolveActivityAttempts(cfg.ActivityAttempts),
+		closed:              make(map[durable.SessionID]struct{}),
 	}
-	r := &Runtime{
-		client:    c,
-		taskQueue: taskQueue,
-		catalog:   catalog,
-		fallback:  inprocess.NewMemoryEventLog(),
-		snapshots: inprocess.NewMemorySnapshot(),
-		closed:    make(map[durable.SessionID]struct{}),
-	}
-	for _, opt := range opts {
-		if opt != nil {
-			opt(r)
-		}
-	}
-	return r
 }
 
 // CreateSession implements durable.Runtime.
@@ -120,6 +153,9 @@ func (r *Runtime) CreateSession(ctx context.Context, req durable.CreateSession) 
 		MCPServers:          req.MCPServers,
 		Mounts:              req.Mounts,
 		TurnLocalityTimeout: r.turnLocalityTimeout,
+		ActivityTimeout:     r.activityTimeout,
+		HeartbeatTimeout:    r.heartbeatTimeout,
+		ActivityAttempts:    r.activityAttempts,
 		State:               seed,
 	})
 	if err != nil {

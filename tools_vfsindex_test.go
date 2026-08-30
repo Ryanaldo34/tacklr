@@ -31,7 +31,7 @@ func vfsIndexHarness(t *testing.T, withNS bool) (*TurnManager, *vfs.MountSession
 		MountSession:    ms,
 		Model:           &mockStrategy{},
 		Brain:           eng,
-		writeUnattended: true,
+		UnattendedWrite: true,
 	}
 	if withNS {
 		opts.SearchNamespace = ns
@@ -545,7 +545,7 @@ func TestRun_workspaceResearchTurn(t *testing.T) {
 		Brain:           eng,
 		SearchNamespace: ns,
 		BrainWriteKinds: brain.WriteKinds{Discovery: "Discovery"},
-		writeUnattended: true,
+		UnattendedWrite: true,
 		Model:           strategy,
 	})
 	t.Cleanup(h.Close)

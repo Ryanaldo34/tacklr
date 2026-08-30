@@ -93,13 +93,14 @@ type ToolInput struct {
 // ToolOutput is the typed Tool activity result. Spawn/cancel/await are this
 // call's Runtime intent; the workflow starts, cancels, or waits via ExecuteChildWorkflow.
 type ToolOutput struct {
-	Interrupted bool
-	InterruptID string
-	SpawnID     durable.SessionID
-	SpawnSpec   string
-	SpawnTask   string
-	CancelID    durable.SessionID
-	AwaitID     durable.SessionID
+	Interrupted   bool
+	InterruptID   string
+	InterruptData []byte
+	SpawnID       durable.SessionID
+	SpawnSpec     string
+	SpawnTask     string
+	CancelID      durable.SessionID
+	AwaitID       durable.SessionID
 }
 
 // CommitToolInput records a tool output on the staged batch without executing
@@ -147,7 +148,6 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 			pub = err
 		}
 		slog.ErrorContext(ctx, "inference harness", "area", telemetry.AreaRuntime, "error", pub)
-		_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, tacklr.StreamEvent{Type: tacklr.StreamEventError, Error: pub, Content: pub.Error()}, true)
 		return InferenceOutput{}, canceledIf(ctx, err)
 	}
 	defer func() {
@@ -159,7 +159,6 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 	defer stop()
 	if len(in.Resume) > 0 {
 		if err := eng.ApplyResume(in.Resume); err != nil {
-			_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, tacklr.StreamEvent{Type: tacklr.StreamEventError, Error: err, Content: err.Error()}, true)
 			return InferenceOutput{}, canceledIf(ctx, err)
 		}
 		if pending := eng.PendingToolCalls(); len(pending) > 0 {
@@ -176,14 +175,11 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 	st := &tacklr.TurnState{HadToolRound: in.HadToolRound, ModelRequests: in.ModelRequests}
 	step, err := eng.RunInference(ctx, st, out)
 	if err != nil {
-		pub := err
-		if err := ctx.Err(); err != nil {
-			pub = err
+		if ctx.Err() != nil {
 			slog.WarnContext(ctx, "inference cancelled", "area", telemetry.AreaRuntime)
 		} else {
 			slog.ErrorContext(ctx, "inference failed", "area", telemetry.AreaRuntime, "error", err)
 		}
-		_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, tacklr.StreamEvent{Type: tacklr.StreamEventError, Error: pub, Content: pub.Error()}, true)
 		return InferenceOutput{}, canceledIf(ctx, err)
 	}
 	if _, err = a.save(ctx, in.SessionID, in.AgentID, h, rev, in.Mounts); err != nil {
@@ -250,7 +246,6 @@ func (a *Activities) Tool(ctx context.Context, in ToolInput) (ToolOutput, error)
 	if runErr != nil {
 		if err := ctx.Err(); err != nil {
 			slog.WarnContext(ctx, "tool cancelled", "area", telemetry.AreaHarness, "tool", in.Call.Name)
-			_ = a.publish(ctx, stream, in.SessionID, durable.TopicEvents, tacklr.StreamEvent{Type: tacklr.StreamEventError, Error: err, Content: err.Error()}, true)
 			return ToolOutput{}, canceledIf(ctx, runErr)
 		}
 		slog.ErrorContext(ctx, "tool failed", "area", telemetry.AreaHarness, "tool", in.Call.Name, "error", runErr)
@@ -270,13 +265,14 @@ func (a *Activities) Tool(ctx context.Context, in ToolInput) (ToolOutput, error)
 	slog.InfoContext(ctx, "tool completed",
 		"area", telemetry.AreaHarness, "tool", in.Call.Name, "status", status)
 	return ToolOutput{
-		Interrupted: step.Interrupted,
-		InterruptID: step.InterruptID,
-		SpawnID:     kids.spawnID,
-		SpawnSpec:   kids.spawnSpec,
-		SpawnTask:   kids.spawnTask,
-		CancelID:    kids.cancelID,
-		AwaitID:     kids.awaitID,
+		Interrupted:   step.Interrupted,
+		InterruptID:   step.InterruptID,
+		InterruptData: step.InterruptData,
+		SpawnID:       kids.spawnID,
+		SpawnSpec:     kids.spawnSpec,
+		SpawnTask:     kids.spawnTask,
+		CancelID:      kids.cancelID,
+		AwaitID:       kids.awaitID,
 	}, nil
 }
 
@@ -401,13 +397,32 @@ func closeStream(ctx context.Context, c *workflowstreams.Client) {
 func (a *Activities) emitter(ctx context.Context, stream *workflowstreams.Client, sessionID durable.SessionID) func(tacklr.StreamEvent) {
 	first := true
 	return func(ev tacklr.StreamEvent) {
-		if ctx.Err() != nil && ev.Type != tacklr.StreamEventError && ev.Type != tacklr.StreamEventComplete {
+		switch ev.Type {
+		case tacklr.StreamEventComplete, tacklr.StreamEventInterrupt, tacklr.StreamEventError:
+			// Turn-finished signals. SessionWorkflow commits Status, then EmitEvent.
 			return
 		}
-		force := first || ev.Type == tacklr.StreamEventComplete || ev.Type == tacklr.StreamEventInterrupt || ev.Type == tacklr.StreamEventError
+		if ctx.Err() != nil {
+			return
+		}
+		force := first
 		first = false
 		_ = a.publish(ctx, stream, sessionID, durable.TopicEvents, ev, force)
 	}
+}
+
+// EmitEventInput is the typed EmitEvent activity argument.
+type EmitEventInput struct {
+	SessionID durable.SessionID
+	Event     tacklr.StreamEvent
+}
+
+// EmitEvent publishes a turn-finished stream event after SessionWorkflow has
+// committed Status (complete, failed, or yield).
+func (a *Activities) EmitEvent(ctx context.Context, in EmitEventInput) error {
+	stream := a.openStream(ctx)
+	defer closeStream(ctx, stream)
+	return a.publish(ctx, stream, in.SessionID, durable.TopicEvents, in.Event, true)
 }
 
 func startHeartbeat(ctx context.Context) func() {

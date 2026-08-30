@@ -62,13 +62,11 @@ type AgentOptions struct {
 	ContextPolicy ContextPolicy
 	// ToolInterceptors wrap each tool call (outermost first). Built-in
 	// planning lock and OnCall middleware are installed after these.
+	// Hosts cannot omit the planning lock; specialists skip it via WithSpecialist.
 	ToolInterceptors []ToolInterceptor
-	// disablePlanningLock omits planningWriteLock (workers and tests).
-	// The permission gate is still always installed.
-	disablePlanningLock bool
-	// writeUnattended injects write without ToolPermissionOnCall.
-	// Write-mechanic tests use this so persist/index paths do not park.
-	writeUnattended bool
+	// UnattendedWrite injects write without ToolPermissionOnCall.
+	// Default false: write parks for permission.
+	UnattendedWrite bool
 	// ToolResultHooks map tool name → post-success window effects for host tools.
 	// Plan builtins use ToolOutcome instead.
 	ToolResultHooks map[string]ToolResultHook
@@ -101,12 +99,14 @@ type AgentOptions struct {
 	// it after the turn; the harness never does (workers inherit the pointer).
 	// Do not mount skills here; use SkillsSession.
 	MountSession *vfs.MountSession
-	// runCommandUnattended injects run_command without ToolPermissionOnCall.
-	// Zero value parks run_command for permission. Unexported so hosts cannot
-	// disable the permission park from AgentOptions.
-	runCommandUnattended bool
+	// UnattendedRunCommand injects run_command without ToolPermissionOnCall.
+	// Default false: run_command parks for permission.
+	UnattendedRunCommand bool
 	// shareIndexBridge is the parent index bridge. Nil means Start a new bridge.
 	shareIndexBridge *vfsindex.Bridge
+	// skipPlanningLock is set only by WithSpecialist. The parent session always
+	// gates write tools on an active plan.
+	skipPlanningLock bool
 }
 
 // NewTurnManager builds a TurnManager for one turn slice.
@@ -136,8 +136,8 @@ func NewTurnManager(ctx context.Context, opts AgentOptions) (*TurnManager, error
 		pendingToolCalls:      make(map[string]PendingToolCall),
 		context:               newModelContextManager(),
 		contextPolicy:         opts.ContextPolicy,
-		runCommandUnattended:  opts.runCommandUnattended,
-		writeUnattended:       opts.writeUnattended,
+		runCommandUnattended:  opts.UnattendedRunCommand,
+		writeUnattended:       opts.UnattendedWrite,
 		vfsBridge:             opts.shareIndexBridge,
 	}
 	if opts.MountSession != nil {
@@ -155,7 +155,7 @@ func NewTurnManager(ctx context.Context, opts AgentOptions) (*TurnManager, error
 	}
 	h.tasks = newDefaultModelTasks(h.model, h.context, h.contextPolicy, h.maxWindowSize)
 	chain := append([]ToolInterceptor{}, opts.ToolInterceptors...)
-	if !opts.disablePlanningLock {
+	if !opts.skipPlanningLock {
 		chain = append(chain, h.planningWriteLock)
 	}
 	chain = append(chain, onCallMiddleware(sm))
