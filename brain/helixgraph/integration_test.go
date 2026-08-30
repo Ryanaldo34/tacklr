@@ -149,7 +149,7 @@ func TestEngine_liveFindObjectsTextSearch(t *testing.T) {
 		t.Fatalf("Bootstrap: %v", err)
 	}
 	store := brain.NewMemoryStore()
-	eng, err := brain.NewEngine(store, brain.WithGraph(g), brain.WithKinds(
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithGraph(g), brain.WithKinds(
 		brain.KindSpec{Kind: "Fact", IsParent: true},
 		brain.KindSpec{Kind: "Deal", IsParent: true},
 	))
@@ -567,7 +567,7 @@ func TestEngine_liveFindLinksSearchEdges(t *testing.T) {
 		t.Skipf("edge text index: %v", err)
 	}
 	store := brain.NewMemoryStore()
-	eng, err := brain.NewEngine(store, brain.WithGraph(g), brain.WithKinds(
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithGraph(g), brain.WithKinds(
 		brain.KindSpec{Kind: "Document", IsParent: true},
 		brain.KindSpec{Kind: "Fact", IsParent: true},
 	))

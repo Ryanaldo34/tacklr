@@ -24,7 +24,7 @@ func TestEngine_ReadRichObjectInScope(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	eng, err := brain.NewEngine(store)
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +58,7 @@ func TestEngine_ReadRejectsOutsideScope(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	eng, err := brain.NewEngine(store)
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +151,7 @@ func TestEngine_SchemaAndOrderedChildren(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	eng, err := brain.NewEngine(store)
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +191,7 @@ func TestEngine_SchemaAndOrderedChildren(t *testing.T) {
 }
 
 func TestEngine_SchemaUnknownKind(t *testing.T) {
-	eng, err := brain.NewEngine(brain.NewMemoryStore())
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,7 +215,7 @@ func TestEngine_ListChildrenRequiresVisibleParent(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	eng, err := brain.NewEngine(store)
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
 	if err != nil {
 		t.Fatal(err)
 	}

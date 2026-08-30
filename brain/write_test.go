@@ -15,7 +15,7 @@ import (
 // TestPut_roundTripAndSoftDelete: open-catalog Put is readable, soft-delete hides the object.
 func TestPut_roundTripAndSoftDelete(t *testing.T) {
 	ctx := context.Background()
-	eng, err := brain.NewEngine(brain.NewMemoryStore())
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func TestPut_roundTripAndSoftDelete(t *testing.T) {
 // TestPut_catalogEnforced: each case is a distinct ValidateObject return path; success path writes parent+part.
 func TestPut_catalogEnforced(t *testing.T) {
 	ctx := context.Background()
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithKinds(
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly(), brain.WithKinds(
 		brain.KindSpec{
 			Kind: "Document", IsParent: true,
 			Fields: []brain.FieldSpec{
@@ -258,7 +258,7 @@ func TestPut_skipIndexKeepsPropertyOffEntityText(t *testing.T) {
 
 func TestPut_enumRejectsUnknownString(t *testing.T) {
 	ctx := context.Background()
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithKinds(
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly(), brain.WithKinds(
 		brain.KindSpec{Kind: "Deal", IsParent: true, Fields: []brain.FieldSpec{
 			{Name: "stage", Type: brain.FieldTypeString, Enum: []string{"open", "closed"}},
 			{Name: "note", Type: brain.FieldTypeString, Examples: []string{"hello"}},
@@ -285,7 +285,7 @@ func TestPut_enumRejectsUnknownString(t *testing.T) {
 func TestApplyKinds_roundTripSkipIndexAndEnum(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	eng, err := brain.NewEngine(store)
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -298,7 +298,7 @@ func TestApplyKinds_roundTripSkipIndexAndEnum(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	eng2, err := brain.NewEngine(store)
+	eng2, err := brain.NewEngine(store, brain.WithLexicalOnly())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -365,7 +365,7 @@ func TestPut_multiTurnMemoryGraph(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
 	g := brain.NewMemoryGraph()
-	eng, err := brain.NewEngine(store, brain.WithGraph(g), brain.WithKinds(
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithGraph(g), brain.WithKinds(
 		brain.KindSpec{Kind: "Document", IsParent: true},
 		brain.KindSpec{Kind: "Chunk", IsPart: true},
 	))
@@ -461,7 +461,7 @@ func TestPut_multiTurnMemoryGraph(t *testing.T) {
 func TestLink_expandFindsNeighbor(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	eng, err := brain.NewEngine(store, brain.WithGraph(brain.NewMemoryGraph()))
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithGraph(brain.NewMemoryGraph()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -515,7 +515,7 @@ func TestLink_expandFindsNeighbor(t *testing.T) {
 	if err := eng.Link(ctx, scope, a.ID, b.ID, ""); !errors.Is(err, brain.ErrInvalid) {
 		t.Fatalf("want ErrInvalid for incomplete link: %v", err)
 	}
-	engNoGraph, err := brain.NewEngine(store)
+	engNoGraph, err := brain.NewEngine(store, brain.WithLexicalOnly())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -534,7 +534,7 @@ func TestLink_expandFindsNeighbor(t *testing.T) {
 func TestLinkWith_missingEndpointAndCancelled(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	eng, err := brain.NewEngine(store, brain.WithGraph(brain.NewMemoryGraph()))
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithGraph(brain.NewMemoryGraph()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -570,7 +570,7 @@ func TestSoftDelete_graphRemoveErrorSurfaces(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
 	g := &failRemoveGraph{MemoryGraph: brain.NewMemoryGraph()}
-	eng, err := brain.NewEngine(store, brain.WithGraph(g))
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithGraph(g))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -602,7 +602,7 @@ func TestLinkWith_expandAttachesMeta(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
 	g := brain.NewMemoryGraph()
-	eng, err := brain.NewEngine(store, brain.WithGraph(g))
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithGraph(g))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -681,7 +681,7 @@ func TestLink_crossObjectEmailDealBuyer(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
 	g := brain.NewMemoryGraph()
-	eng, err := brain.NewEngine(store, brain.WithGraph(g), brain.WithKinds(
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithGraph(g), brain.WithKinds(
 		brain.KindSpec{Kind: "Email", IsParent: true},
 		brain.KindSpec{Kind: "Deal", IsParent: true, Fields: []brain.FieldSpec{
 			{Name: "stage", Type: brain.FieldTypeString},

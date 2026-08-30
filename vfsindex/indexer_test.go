@@ -33,7 +33,7 @@ func TestMountIndexer_indexSearchAndNotify(t *testing.T) {
 	ms := treeLocal(t, vfs.At("work", builtins.Local(t.TempDir())))
 
 	store := brain.NewMemoryStore()
-	eng, err := brain.NewEngine(store)
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +183,7 @@ func TestMountIndexer_markdownBlocksChunks(t *testing.T) {
 	ms := treeLocal(t, vfs.At("work", builtins.Local(t.TempDir())))
 
 	store := brain.NewMemoryStore()
-	eng, err := brain.NewEngine(store)
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,7 +300,7 @@ func TestMountIndexer_emptyMarkdownLineChunks(t *testing.T) {
 	ms := treeLocal(t, vfs.At("work", builtins.Local(t.TempDir())))
 
 	store := brain.NewMemoryStore()
-	eng, err := brain.NewEngine(store)
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -379,7 +379,7 @@ func TestMountIndexer_IndexFileResultAndDefaults(t *testing.T) {
 		vfs.At("off", builtins.Local(t.TempDir())).Indexed("none"),
 	)
 	store := brain.NewMemoryStore()
-	eng, err := brain.NewEngine(store)
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -613,7 +613,7 @@ func TestMountIndexer_docsBlockText(t *testing.T) {
 	})
 	ms := treeLocal(t, vfs.At("docs", richFactory{doc: doc}.Open))
 	store := brain.NewMemoryStore()
-	eng, err := brain.NewEngine(store)
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
 	if err != nil {
 		t.Fatal(err)
 	}

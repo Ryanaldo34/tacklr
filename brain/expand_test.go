@@ -14,7 +14,7 @@ import (
 
 // TestExpand_cancelledContextFailsClosed before store work.
 func TestExpand_cancelledContextFailsClosed(t *testing.T) {
-	eng, err := brain.NewEngine(brain.NewMemoryStore())
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +38,7 @@ func TestExpand_parentChildrenOrdered(t *testing.T) {
 	_ = store.Put(context.Background(), brain.Object{ID: c2, Kind: "Chunk", Title: "second", Content: "body2", ParentID: &parent, Position: &pos2, Namespace: ns, UpdatedAt: now})
 	_ = store.Put(context.Background(), brain.Object{ID: c1, Kind: "Chunk", Title: "first", Content: "body1", ParentID: &parent, Position: &pos1, Namespace: ns, UpdatedAt: now})
 
-	eng, err := brain.NewEngine(store)
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestExpand_partNeighborhoodWindow(t *testing.T) {
 			ParentID: &parent, Position: &pos, Namespace: ns, UpdatedAt: now,
 		})
 	}
-	eng, err := brain.NewEngine(store, brain.WithConfig(brain.EngineConfig{SiblingRadius: 1}))
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithConfig(brain.EngineConfig{SiblingRadius: 1}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +118,7 @@ func TestExpand_highCardinalityResultSetAndContinue(t *testing.T) {
 			Namespace: ns, UpdatedAt: now,
 		})
 	}
-	eng, err := brain.NewEngine(store, brain.WithConfig(brain.EngineConfig{
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithConfig(brain.EngineConfig{
 		ExpandInlineMax: 5, MaxResultSetSize: 10, DefaultLimit: 3, MaxLimit: 50,
 		Now: func() time.Time { return now },
 	}))
@@ -162,7 +162,7 @@ func TestExpand_directionFiltersEdges(t *testing.T) {
 	}
 	_ = g.AddEdge(ctx, a, b, "references", brain.EdgeMeta{})
 	_ = g.AddEdge(ctx, b, c, "references", brain.EdgeMeta{})
-	eng, err := brain.NewEngine(store, brain.WithGraph(g))
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithGraph(g))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +195,7 @@ func TestExpand_graphContinuePreservesRelation(t *testing.T) {
 		_ = store.Put(ctx, brain.Object{ID: id, Kind: "Document", Title: id.String()[:8], Namespace: ns, UpdatedAt: now})
 		_ = g.AddEdge(ctx, root, id, "references", brain.EdgeMeta{Note: "hop-" + id.String()[:4]})
 	}
-	eng, err := brain.NewEngine(store, brain.WithGraph(g), brain.WithConfig(brain.EngineConfig{
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithGraph(g), brain.WithConfig(brain.EngineConfig{
 		ExpandInlineMax: 2, DefaultLimit: 2, MaxLimit: 50, GraphNeighborK: 50,
 		Now: func() time.Time { return now },
 	}))
@@ -252,7 +252,7 @@ func TestExpandMany_landingsAndBudget(t *testing.T) {
 		}
 	}
 	_ = g.AddEdge(ctx, p1, n1, "references", brain.EdgeMeta{Note: "edge"})
-	eng, err := brain.NewEngine(store, brain.WithGraph(g), brain.WithConfig(brain.EngineConfig{
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithGraph(g), brain.WithConfig(brain.EngineConfig{
 		MaxResultSetSize: 2, Now: func() time.Time { return now },
 	}))
 	if err != nil {
@@ -264,7 +264,7 @@ func TestExpandMany_landingsAndBudget(t *testing.T) {
 		t.Fatalf("empty: %+v err=%v", empty, err)
 	}
 	// graph required without graph engine
-	engNoG, err := brain.NewEngine(store)
+	engNoG, err := brain.NewEngine(store, brain.WithLexicalOnly())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -319,7 +319,7 @@ func TestSearch_withReranker(t *testing.T) {
 		ID: part, Kind: "Chunk", Title: "chunk", Content: "unique rerank phrase alpha",
 		ParentID: &parent, Position: &pos, Namespace: ns, UpdatedAt: now,
 	})
-	eng, err := brain.NewEngine(store,
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(),
 		brain.WithReranker(reverseRerank{}),
 		brain.WithConfig(brain.EngineConfig{Now: func() time.Time { return now }}),
 	)
@@ -363,7 +363,7 @@ func TestExpand_graphNeighborsMemoryGraph(t *testing.T) {
 	_ = g.AddEdge(context.Background(), c, a, "references", brain.EdgeMeta{})
 	_ = g.AddEdge(context.Background(), a, hidden, "references", brain.EdgeMeta{})
 
-	eng, err := brain.NewEngine(store, brain.WithGraph(g))
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithGraph(g))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -407,7 +407,7 @@ func TestExpand_partMixedContainmentAndGraph(t *testing.T) {
 	g := brain.NewMemoryGraph()
 	_ = g.AddEdge(context.Background(), part, linked, "references", brain.EdgeMeta{})
 
-	eng, err := brain.NewEngine(store, brain.WithGraph(g), brain.WithConfig(brain.EngineConfig{SiblingRadius: 1}))
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithGraph(g), brain.WithConfig(brain.EngineConfig{SiblingRadius: 1}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -444,7 +444,7 @@ func TestExpand_graphStoreErrorSurfaces(t *testing.T) {
 	g := brain.NewMemoryGraph()
 	_ = g.AddEdge(context.Background(), root, store.failID, "references", brain.EdgeMeta{})
 
-	eng, err := brain.NewEngine(store, brain.WithGraph(g))
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithGraph(g))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -505,7 +505,7 @@ func TestExpand_graphRequiresBackend(t *testing.T) {
 	ns := mustNS(t, "id", uuid.NewString())
 	id := uuid.New()
 	_ = store.Put(context.Background(), brain.Object{ID: id, Kind: "Document", Namespace: ns})
-	eng, err := brain.NewEngine(store)
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -518,7 +518,7 @@ func TestExpand_graphRequiresBackend(t *testing.T) {
 }
 
 func TestExpand_missingObject(t *testing.T) {
-	eng, err := brain.NewEngine(brain.NewMemoryStore())
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly())
 	if err != nil {
 		t.Fatal(err)
 	}

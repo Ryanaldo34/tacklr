@@ -188,7 +188,7 @@ func TestFindObjects_multiTurnMemoryGraph(t *testing.T) {
 		t.Fatalf("org scope should see workspace graph node: %+v", pageOrg.Objects)
 	}
 	// Without object searcher.
-	engNo, err := brain.NewEngine(store)
+	engNo, err := brain.NewEngine(store, brain.WithLexicalOnly())
 	if err != nil {
 		t.Fatal(err)
 	}

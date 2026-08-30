@@ -66,7 +66,7 @@ func TestNormalizeKindSpec_rejectsInvalidFields(t *testing.T) {
 
 func TestValidateFiltersAgainst_catalogRules(t *testing.T) {
 	store := brain.NewMemoryStore()
-	eng, err := brain.NewEngine(store, brain.WithKinds(
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithKinds(
 		brain.KindSpec{
 			Kind: "Document", IsParent: true,
 			Fields: []brain.FieldSpec{
@@ -125,7 +125,7 @@ func TestEmptyCatalog_openFiltersAndStoreSchema(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	eng, err := brain.NewEngine(store)
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +146,7 @@ func TestSchema_prefersCatalog(t *testing.T) {
 	store := brain.NewMemoryStore()
 	// Store has different description; catalog wins when non-empty.
 	_ = store.PutKind(ctx, brain.ObjectKind{Kind: "Document", Description: "store copy", IsParent: true})
-	eng, err := brain.NewEngine(store, brain.WithKinds(
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithKinds(
 		brain.KindSpec{
 			Kind: "Document", Description: "catalog copy", IsParent: true,
 			Fields: []brain.FieldSpec{{Name: "stage", Type: brain.FieldTypeString}},
@@ -228,7 +228,7 @@ func TestSearch_catalogRestrictsKindsAndAllowsFilteredHit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	eng, err := brain.NewEngine(store, brain.WithKinds(
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithKinds(
 		brain.KindSpec{Kind: "Document", IsParent: true},
 		brain.KindSpec{Kind: "Chunk", IsPart: true},
 	))
@@ -266,7 +266,7 @@ func TestSearch_catalogRestrictsKindsAndAllowsFilteredHit(t *testing.T) {
 func TestApplyKinds_migrationAddAndModify(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	eng, err := brain.NewEngine(store)
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -322,7 +322,7 @@ func TestApplyKinds_migrationAddAndModify(t *testing.T) {
 	}
 
 	// New process adopts durable state via LoadKindsFromStore.
-	eng2, err := brain.NewEngine(store)
+	eng2, err := brain.NewEngine(store, brain.WithLexicalOnly())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -346,7 +346,7 @@ func TestApplyKinds_migrationAddAndModify(t *testing.T) {
 
 	// SyncKindsToStore flushes WithKinds catalog to a durable writer.
 	mem := brain.NewMemoryStore()
-	engSync, err := brain.NewEngine(mem, brain.WithKinds(
+	engSync, err := brain.NewEngine(mem, brain.WithLexicalOnly(), brain.WithKinds(
 		brain.KindSpec{Kind: "Synced", IsParent: true, Description: "via sync"},
 	))
 	if err != nil {
@@ -372,7 +372,7 @@ func TestApplyKinds_migrationAddAndModify(t *testing.T) {
 func TestApplyKinds_invalidBatchFailsClosed(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	eng, err := brain.NewEngine(store)
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -392,7 +392,7 @@ func TestApplyKinds_invalidBatchFailsClosed(t *testing.T) {
 }
 
 func TestWithKinds_invalidFailsNewEngine(t *testing.T) {
-	_, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithKinds(brain.KindSpec{}))
+	_, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly(), brain.WithKinds(brain.KindSpec{}))
 	if err == nil {
 		t.Fatal("want error")
 	}

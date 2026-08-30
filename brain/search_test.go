@@ -48,7 +48,7 @@ func TestSearch_promotesParentWithEvidenceAndNamespace(t *testing.T) {
 	}, now)
 	seedDocWithParts(t, store, nsB, "Other ns", []string{"OAuth PKCE elsewhere"}, now)
 
-	eng, err := brain.NewEngine(store, brain.WithConfig(fixedNow(now)))
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithConfig(fixedNow(now)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func TestSearch_filtersProperty(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	eng, err := brain.NewEngine(store, brain.WithConfig(fixedNow(now)))
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithConfig(fixedNow(now)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +219,7 @@ func TestSearch_scopeIDsRestrictsHits(t *testing.T) {
 		ID: c2, Kind: "Chunk", Title: "oauth other", Content: "oauth risk material shared",
 		ParentID: &p2, Position: &pos, Namespace: ns, UpdatedAt: now,
 	})
-	eng, err := brain.NewEngine(store, brain.WithConfig(brain.EngineConfig{Now: func() time.Time { return now }}))
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithConfig(brain.EngineConfig{Now: func() time.Time { return now }}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,7 +255,7 @@ func TestFindExact_uuidParentAndPart(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	eng, err := brain.NewEngine(store, brain.WithConfig(fixedNow(now)))
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithConfig(fixedNow(now)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -304,7 +304,7 @@ func TestFindExact_titleMatch(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	eng, err := brain.NewEngine(store, brain.WithConfig(fixedNow(now)))
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithConfig(fixedNow(now)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -329,7 +329,7 @@ func TestContinue_andReplaceResultSet(t *testing.T) {
 			"shared retrieval content alpha beta gamma " + string(rune('a'+i)),
 		}, now)
 	}
-	eng, err := brain.NewEngine(store, brain.WithConfig(brain.EngineConfig{
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithConfig(brain.EngineConfig{
 		DefaultLimit: 2, MaxLimit: 50,
 		Now: func() time.Time { return now },
 	}))
@@ -395,7 +395,7 @@ func TestContinue_andReplaceResultSet(t *testing.T) {
 }
 
 func TestSearch_rejectsBadFiltersAndEmptyQuery(t *testing.T) {
-	eng, err := brain.NewEngine(brain.NewMemoryStore())
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -441,7 +441,7 @@ func TestFindExact_trigramFuzzy(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	eng, err := brain.NewEngine(store, brain.WithConfig(fixedNow(now)))
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithConfig(fixedNow(now)))
 	if err != nil {
 		t.Fatal(err)
 	}

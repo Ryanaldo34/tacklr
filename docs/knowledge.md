@@ -680,6 +680,7 @@ eng, err := brain.NewEngine(store,
     brain.WithEmbedder(emb),          // hybrid search + Put embeddings
     brain.WithGraph(g),               // link / find_objects / named expand
 )
+// Pass WithLexicalOnly() instead of WithEmbedder when you want keyword search only.
 if err := eng.LoadKindsFromStore(ctx); err != nil { /* ... */ }
 
 // AgentOptions:
@@ -717,6 +718,7 @@ Tests call `store.Setup` (embedding dim 3) instead of loading SQL files.
 |-----------|----------|
 | Wrong namespace | `Get` / search look like not found. Graph ids that fail hydrate are dropped. A coarser scope (fewer attrs) sees objects with extra attrs. |
 | Soft-deleted object | Hidden from Get and search. Graph node is already gone. |
+| No embedder at construct | `NewEngine` fails unless you pass `WithEmbedder` or `WithLexicalOnly`. |
 | Embedder down at **query** time | `search` / `find_objects` can run lexical-only (default). Set `FailOnEmbedderError` to surface the error. |
 | Embedder down at **Put** time | **Fail closed.** An unindexed parent is not persisted. |
 | Graph down at expand | Can degrade to containment if containment was requested. |

@@ -19,7 +19,7 @@ func TestBrainTools_saveDiscoveryAndLink(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
 	g := brain.NewMemoryGraph()
-	eng, err := brain.NewEngine(store, brain.WithGraph(g), brain.WithKinds(
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithGraph(g), brain.WithKinds(
 		brain.KindSpec{Kind: "Discovery", IsParent: true},
 		brain.KindSpec{Kind: "Fact", IsParent: true},
 	))
@@ -162,7 +162,7 @@ func TestBrainTools_hostNamespaceScopedRead(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	eng, err := brain.NewEngine(store)
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,7 +254,7 @@ func TestBrainTools_searchFindExactContinueAndCheckpoint(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	eng, err := brain.NewEngine(store, brain.WithConfig(brain.EngineConfig{
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithConfig(brain.EngineConfig{
 		DefaultLimit: 2, MaxLimit: 50, Now: func() time.Time { return now },
 	}))
 	if err != nil {
@@ -362,7 +362,7 @@ func TestBrainTools_expandChildren(t *testing.T) {
 		ID: child, Kind: "Chunk", Title: "C", Content: "secret",
 		ParentID: &parent, Position: &pos, Namespace: ns, UpdatedAt: now,
 	})
-	eng, err := brain.NewEngine(store)
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -414,7 +414,7 @@ func TestBrainTools_expandMultiHopAndFindLinks(t *testing.T) {
 	if err := g.AddEdge(ctx, dealID, buyerID, "has_buyer", brain.EdgeMeta{Note: "economic buyer primary"}); err != nil {
 		t.Fatal(err)
 	}
-	eng, err := brain.NewEngine(store, brain.WithGraph(g))
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithGraph(g))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -479,7 +479,7 @@ func TestBrainTools_searchNamespaceIsolation(t *testing.T) {
 		ID: secretPart, Kind: "Chunk", Title: "chunk", Content: "namespace isolation secret token xyzzy",
 		ParentID: &secretParent, Position: &pos, Namespace: nsA, UpdatedAt: now,
 	})
-	eng, err := brain.NewEngine(store)
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -552,7 +552,7 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 		ParentID: &parent, Position: &pos, Namespace: ns,
 	})
 
-	eng, err := brain.NewEngine(store)
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -616,7 +616,7 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 func TestBrainTools_engramPathGraph(t *testing.T) {
 	ctx := context.Background()
 	g := brain.NewMemoryGraph()
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithGraph(g), brain.WithKinds(
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly(), brain.WithGraph(g), brain.WithKinds(
 		brain.KindSpec{Kind: "Deal", IsParent: true},
 		brain.KindSpec{Kind: "Person", IsParent: true},
 	))
@@ -718,7 +718,7 @@ func TestBrainTools_engramPathGraph(t *testing.T) {
 
 func TestBrainTools_expandAndUnlinkValidationErrors(t *testing.T) {
 	ctx := context.Background()
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithGraph(brain.NewMemoryGraph()))
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly(), brain.WithGraph(brain.NewMemoryGraph()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -769,7 +769,7 @@ func TestBrainTools_resolveFileRefPropagatesStoreFailure(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	eng, err := brain.NewEngine(failGetStore{MemoryStore: mem, err: errors.New("brain store down")})
+	eng, err := brain.NewEngine(failGetStore{MemoryStore: mem, err: errors.New("brain store down")}, brain.WithLexicalOnly())
 	if err != nil {
 		t.Fatal(err)
 	}

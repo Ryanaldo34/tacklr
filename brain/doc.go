@@ -95,8 +95,9 @@
 // schema() returns filter_usage.tools listing search, find_exact, and find_objects
 // so agents know filterable_fields apply to entity find as well as corpus search.
 //
-// Embeddings: WithEmbedder on NewEngine. Parents embed EntityIndexText; parts embed
-// IndexText with parent title prefix (corpus only). One embedding dimension per process.
+// Embeddings: NewEngine requires WithEmbedder or WithLexicalOnly. Parents embed
+// EntityIndexText; parts embed IndexText with parent title prefix (corpus only).
+// One embedding dimension per process.
 // Helix hosts must call helixgraph.Graph.Bootstrap (or EnsureSearchIndexes) so
 // HasObjectSearch is true; MemoryGraph is always ready when attached.
 // Bootstrap(true) enables Helix tenant filtering when the image supports it.

@@ -3,6 +3,7 @@ package brain_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,14 +18,44 @@ func (nopRerank) Rerank(context.Context, []brain.RichObject) ([]brain.RichObject
 	return nil, nil
 }
 
+func TestNewEngine_embedderOrLexicalOnly(t *testing.T) {
+	store := brain.NewMemoryStore()
+	_, err := brain.NewEngine(store)
+	if err == nil || !errors.Is(err, brain.ErrInvalid) || !strings.Contains(err.Error(), "WithEmbedder") || !strings.Contains(err.Error(), "WithLexicalOnly") {
+		t.Fatalf("neither option: %v", err)
+	}
+	_, err = brain.NewEngine(store, brain.WithEmbedder(nopEmbed{}), brain.WithLexicalOnly())
+	if err == nil || !errors.Is(err, brain.ErrInvalid) || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("both options: %v", err)
+	}
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ns := mustNS(t, "id", uuid.NewString())
+	got, err := eng.Put(context.Background(), brain.Scope{Namespace: ns}, brain.Object{
+		Kind: "Note", Title: "hello", Content: "body",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Embedding) != 0 {
+		t.Fatalf("lexical-only put must not embed: %+v", got.Embedding)
+	}
+}
+
+type nopEmbed struct{}
+
+func (nopEmbed) Embed(context.Context, string) ([]float32, error) { return []float32{1}, nil }
+
 // TestNewEngine_options: WithReranker/ExpandRecipes/Kinds construct path.
 func TestNewEngine_options(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	if _, err := brain.NewEngine(store, brain.WithExpandRecipes(brain.ExpandRecipe{Name: ""})); err == nil || !errors.Is(err, brain.ErrInvalid) {
+	if _, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithExpandRecipes(brain.ExpandRecipe{Name: ""})); err == nil || !errors.Is(err, brain.ErrInvalid) {
 		t.Fatalf("empty expand recipe name must fail construct: %v", err)
 	}
-	eng, err := brain.NewEngine(store,
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(),
 		brain.WithReranker(nopRerank{}),
 		brain.WithExpandRecipes(
 			brain.ExpandRecipe{Name: "kids", MaxHops: 1, WantContainment: true},
