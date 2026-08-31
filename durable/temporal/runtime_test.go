@@ -654,8 +654,9 @@ func TestSessionWorkflow_spawnWorker(t *testing.T) {
 		},
 	})
 	fallback := inprocess.NewMemoryEventLog()
+	acts := newActs(cat, fallback, true)
 	env.RegisterWorkflow(SessionWorkflow)
-	env.RegisterActivity(newActs(cat, fallback, true))
+	env.RegisterActivity(acts)
 	var childStarted atomic.Bool
 	env.SetOnChildWorkflowStartedListener(func(info *workflow.Info, ctx workflow.Context, args converter.EncodedValues) {
 		childStarted.Store(true)
@@ -703,6 +704,19 @@ func TestSessionWorkflow_spawnWorker(t *testing.T) {
 	}
 	if !sawSpawnResult {
 		t.Fatalf("want spawn_specialist tool result paired with child output, got %+v", got)
+	}
+	if snap, _, err := acts.Snapshots.Load(t.Context(), id); err != nil {
+		t.Fatal(err)
+	} else if snap.AgentID != "default" {
+		t.Fatalf("parent snapshot agent=%q", snap.AgentID)
+	}
+	wantChild := durable.ChildSessionID(id, "researcher", "sp1")
+	csnap, _, err := acts.Snapshots.Load(t.Context(), wantChild)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if csnap.AgentID != "default" || csnap.Parent != id || csnap.Specialist != "researcher" {
+		t.Fatalf("child snapshot identity=%+v", csnap)
 	}
 }
 

@@ -21,8 +21,9 @@ const (
 	signalChildWaiting = "ChildWaiting"
 )
 
-// WorkflowInput is the typed start payload (no interface{}). Auth is
-// secret-free on the wire; credentials live in SecretStorage.
+// WorkflowInput is wait-loop start state (scheduler), not a Snapshot.
+// Auth is secret-free; credentials live in SecretStorage. userState seed
+// merges into the checkpoint on the first activity save.
 type WorkflowInput struct {
 	SessionID  durable.SessionID
 	AgentID    string
@@ -44,7 +45,8 @@ type WorkflowInput struct {
 	Prompt     string
 	Parent     durable.SessionID
 	Specialist string
-	// State is CreateSession.State, already JSON-roundtripped by Runtime.CreateSession.
+	// State is CreateSession.State, already JSON-roundtripped. Overlay onto
+	// the checkpoint; not a durable workflow copy of userState.
 	State map[string]any
 }
 

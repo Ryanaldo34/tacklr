@@ -59,7 +59,7 @@ The host runs:
 | Activity retries | `Config.ActivityAttempts` is Temporal MaximumAttempts. Zero is 3. 1 means no retry. |
 | Progress | Workflow Streams (`events`, `retry`, `close`) |
 | HITL | Signal `Resume` (never inside an activity) |
-| Leftover tools after HITL | Workflow variable (`rest`) replayed from history |
+| Leftover tools after HITL | Workflow variable (`rest`) replayed from history; not SnapshotStore |
 | Spawn specialist | Child `SessionWorkflow` (wait for started). `ParentClosePolicy` is request-cancel. Tools call `HarnessRuntime` child methods; the workflow reconciles the child ledger after each Tool activity (start, cancel, wait). Child HITL signals the parent (`ChildWaiting`) then parent `Resume` signals the child. |
 
 The worker registers `SessionWorkflow`, `Inference`, `Tool`, `CommitToolOutput`, and `EmitEvent`. Inference and Tool do not publish complete, yield, or turn-ending error. The workflow commits `Status`, then `EmitEvent` publishes the matching stream event.
@@ -157,13 +157,21 @@ A protocol is the handshake: create a session, start a turn, stream `StreamEvent
 
 Runtime, harness, VFS, and Temporal files compile with no protocol imports.
 
-## SnapshotStore
+## Session data planes (frozen)
 
-| Store | Lifetime | Contents |
-|-------|----------|----------|
-| SnapshotStore | One Runtime session | Window, plan, parked interrupts, parked-worker checkpoints, VFS recipes (no tokens, no file bytes). Temporal leftover tool calls are **not** stored here. |
+Three stores. Do not add a fourth. Do not copy a field from one into another except as a turn-scoped cache that the canonical store then owns.
 
-`Close` deletes the runtime snapshot. A new session id does not load a previous snapshot. `Save` takes the `Revision` from the last `Load` (zero on first write) so two workers cannot overwrite each other.
+| Plane | Lifetime | Owns | Never |
+|-------|----------|------|-------|
+| **SnapshotStore** | One Runtime session | Window, plan, parked interrupt, host `userState`, VFS recipes, identity (`AgentID`, `Parent`, `Specialist`, child ids) | Tokens, file bytes, leftover unstarted Temporal tool calls, MCP env/headers, child workflow futures |
+| **Wait loop** | In-process `sessionProc` / Temporal workflow replay | Leftover unstarted Temporal batch calls, MCP Durable topology, child futures, secret-free `ApplyAuth` on the current signal, `Status` | Window, plan, tokens, file bytes. `userState` after the first snapshot save of the slice |
+| **SecretStorage** | Session, deleted on Close | VFS credentials | Snapshot rows, Temporal payloads |
+
+`Prompt.State` / `Resume.State` / `CreateSession.State` merge into checkpoint `userState`. They are not a second Temporal copy of that map.
+
+In-process leftover tools stay in the checkpoint (one harness, one batch). Temporal leftover tools stay on the workflow (`rest`) because later calls in the batch have not run yet. Conversation is always SnapshotStore.
+
+`Close` deletes the snapshot and the secret bag. A new session id does not load a previous snapshot. `Save` takes the `Revision` from the last `Load` (zero on first write) so two workers cannot overwrite each other.
 
 ## Map to Azure / Lambda (later)
 
@@ -175,7 +183,8 @@ Runtime, harness, VFS, and Temporal files compile with no protocol imports.
 | Child / specialist | Child workflow | Sub-orchestration | Nested execution |
 | HITL | Signal Resume | WaitForExternalEvent | waitForEvent |
 | Progress | Workflow Streams | Event Hubs / queue | SQS / stream |
-| Auth | Prompt/Resume payload | orchestration input / event | invocation payload |
+| Auth | SecretStorage + secret-free signal | orchestration input / event | invocation payload |
+| Session record | SnapshotStore | Same | Same |
 
 Do not put Temporal `workflow.Context` on `durable.Runtime`.
 

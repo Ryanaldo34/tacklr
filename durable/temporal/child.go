@@ -24,7 +24,7 @@ type childRun struct {
 	err     string
 }
 
-func startChild(ctx, sessionCtx workflow.Context, parent durable.SessionID, agentID, specialist, task string, childID durable.SessionID, auth durable.AuthContext, mounts []durable.MountRecipe, in WorkflowInput) (childRun, error) {
+func startChild(ctx, sessionCtx workflow.Context, parent durable.SessionID, agentID, specialist, task string, childID durable.SessionID, mounts []durable.MountRecipe, in WorkflowInput) (childRun, error) {
 	cctx := workflow.WithChildOptions(sessionCtx, workflow.ChildWorkflowOptions{
 		WorkflowID:        string(childID),
 		ParentClosePolicy: enumspb.PARENT_CLOSE_POLICY_REQUEST_CANCEL,
@@ -35,7 +35,6 @@ func startChild(ctx, sessionCtx workflow.Context, parent durable.SessionID, agen
 		Parent:              parent,
 		Specialist:          specialist,
 		Prompt:              task,
-		Auth:                auth,
 		Mounts:              mounts,
 		TurnLocalityTimeout: in.TurnLocalityTimeout,
 		ActivityTimeout:     in.ActivityTimeout,
@@ -94,7 +93,6 @@ func applyChildIntent(
 	tout ToolOutput,
 	in WorkflowInput,
 	agentID string,
-	auth durable.AuthContext,
 	mounts []durable.MountRecipe,
 ) error {
 	if tout.CancelID != "" {
@@ -106,7 +104,7 @@ func applyChildIntent(
 	if findChild(*spawned, tout.SpawnID) >= 0 {
 		return nil
 	}
-	c, err := startChild(ctx, sessionCtx, in.SessionID, agentID, tout.SpawnSpec, tout.SpawnTask, tout.SpawnID, auth, mounts, in)
+	c, err := startChild(ctx, sessionCtx, in.SessionID, agentID, tout.SpawnSpec, tout.SpawnTask, tout.SpawnID, mounts, in)
 	if err != nil {
 		return err
 	}

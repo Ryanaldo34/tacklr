@@ -55,7 +55,9 @@ type Activities struct {
 	Secrets        durable.SecretStorage
 }
 
-// InferenceInput is the typed Inference activity argument.
+// InferenceInput is one Inference step. Mounts and identity are the Snapshot
+// row this activity will save. State is the Prompt/Resume overlay, not a
+// Temporal copy of userState. Auth is ignored when Secrets is set.
 type InferenceInput struct {
 	SessionID     durable.SessionID
 	Parent        durable.SessionID
@@ -68,8 +70,8 @@ type InferenceInput struct {
 	Auth          durable.AuthContext
 	Mounts        []durable.MountRecipe
 	Specialist    string
-	// State is host userState merged after checkpoint restore.
-	State map[string]any
+	Children      []durable.SessionID
+	State         map[string]any
 }
 
 // InferenceOutput is the typed Inference activity result.
@@ -89,9 +91,9 @@ type ToolInput struct {
 	Auth       durable.AuthContext
 	Mounts     []durable.MountRecipe
 	Specialist string
-	// Known is this session's child ids for list_children (not a ChildOp ledger).
-	Known []durable.SessionID
-	State map[string]any
+	// Children are this session's child ids (snapshot identity and list_children).
+	Children []durable.SessionID
+	State    map[string]any
 }
 
 // ToolOutput is the typed Tool activity result. Spawn/cancel/await are this
@@ -119,6 +121,7 @@ type CommitToolInput struct {
 	Auth       durable.AuthContext
 	Mounts     []durable.MountRecipe
 	Specialist string
+	Children   []durable.SessionID
 	State      map[string]any
 }
 
@@ -167,7 +170,10 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 			return InferenceOutput{}, canceledIf(ctx, err)
 		}
 		if pending := eng.PendingToolCalls(); len(pending) > 0 {
-			_, err = a.save(ctx, in.SessionID, in.AgentID, h, rev, in.Mounts)
+			_, err = a.save(ctx, in.SessionID, h, rev, durable.Snapshot{
+				AgentID: in.AgentID, Specialist: in.Specialist, Parent: in.Parent,
+				Children: in.Children, Mounts: in.Mounts,
+			})
 			return InferenceOutput{ToolCalls: pending}, err
 		}
 	}
@@ -187,7 +193,10 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 		}
 		return InferenceOutput{}, canceledIf(ctx, err)
 	}
-	if _, err = a.save(ctx, in.SessionID, in.AgentID, h, rev, in.Mounts); err != nil {
+	if _, err = a.save(ctx, in.SessionID, h, rev, durable.Snapshot{
+		AgentID: in.AgentID, Specialist: in.Specialist, Parent: in.Parent,
+		Children: in.Children, Mounts: in.Mounts,
+	}); err != nil {
 		slog.ErrorContext(ctx, "inference persist", "area", telemetry.AreaRuntime, "error", err)
 		return InferenceOutput{}, err
 	}
@@ -241,7 +250,7 @@ func (a *Activities) Tool(ctx context.Context, in ToolInput) (ToolOutput, error)
 		parent:  in.SessionID,
 		agentID: in.AgentID,
 		catalog: a.Catalog,
-		known:   append([]durable.SessionID(nil), in.Known...),
+		known:   append([]durable.SessionID(nil), in.Children...),
 	}
 	h.BindChildHost(kids)
 	eng := h.Drive()
@@ -255,7 +264,10 @@ func (a *Activities) Tool(ctx context.Context, in ToolInput) (ToolOutput, error)
 		}
 		slog.ErrorContext(ctx, "tool failed", "area", telemetry.AreaHarness, "tool", in.Call.Name, "error", runErr)
 	}
-	_, saveErr := a.save(ctx, in.SessionID, in.AgentID, h, rev, in.Mounts)
+	_, saveErr := a.save(ctx, in.SessionID, h, rev, durable.Snapshot{
+		AgentID: in.AgentID, Specialist: in.Specialist, Parent: in.Parent,
+		Children: in.Children, Mounts: in.Mounts,
+	})
 	if saveErr != nil {
 		slog.ErrorContext(ctx, "tool persist", "area", telemetry.AreaHarness, "error", saveErr)
 		if runErr != nil {
@@ -291,7 +303,10 @@ func (a *Activities) CommitToolOutput(ctx context.Context, in CommitToolInput) (
 		durable.CloseTurnTrees(ms, skillsMS, string(in.SessionID), "commit_tool")
 	}()
 	h.Drive().RecordToolResult(in.Call, in.Output)
-	if _, err = a.save(ctx, in.SessionID, in.AgentID, h, rev, in.Mounts); err != nil {
+	if _, err = a.save(ctx, in.SessionID, h, rev, durable.Snapshot{
+		AgentID: in.AgentID, Specialist: in.Specialist, Parent: in.Parent,
+		Children: in.Children, Mounts: in.Mounts,
+	}); err != nil {
 		return ToolOutput{}, err
 	}
 	presented := in.Call
@@ -387,13 +402,14 @@ func (a *Activities) harness(ctx context.Context, id, parent durable.SessionID, 
 	return h, ms, skillsMS, rev, nil
 }
 
-func (a *Activities) save(ctx context.Context, id durable.SessionID, agentID string, h *tacklr.TurnManager, expected durable.Revision, mounts []durable.MountRecipe) (durable.Revision, error) {
+func (a *Activities) save(ctx context.Context, id durable.SessionID, h *tacklr.TurnManager, expected durable.Revision, rec durable.Snapshot) (durable.Revision, error) {
 	cp, err := h.Checkpoint()
 	if err != nil {
 		telemetry.RecordCheckpointAttempt(ctx, err)
 		return "", err
 	}
-	rev, err := a.Snapshots.Save(ctx, id, durable.Snapshot{AgentID: agentID, Checkpoint: *cp, Mounts: mounts}, expected)
+	rec.Checkpoint = *cp
+	rev, err := a.Snapshots.Save(ctx, id, rec, expected)
 	telemetry.RecordCheckpointAttempt(ctx, err)
 	return rev, err
 }

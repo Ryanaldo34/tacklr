@@ -29,7 +29,6 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 		agentID    = in.AgentID
 		mcp        = in.MCPServers
 		mounts     = durable.ApplyAuth(in.Mounts, in.Auth)
-		lastAuth   = in.Auth.WithoutSecrets()
 		spawned    []childRun
 		yielded    bool
 		result     string
@@ -127,9 +126,6 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 
 	applyAuth := func(auth durable.AuthContext) {
 		mounts = durable.ApplyAuth(mounts, auth)
-		if len(auth.Bindings) > 0 {
-			lastAuth = auth.WithoutSecrets()
-		}
 	}
 
 	runSlice := func(user *tacklr.Message, resume map[string][]byte, auth durable.AuthContext, kind string, extra map[string]any) {
@@ -239,9 +235,9 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 					HadToolRound:  hadTools,
 					ModelRequests: reqs,
 					Resume:        resume,
-					Auth:          lastAuth,
 					Mounts:        mounts,
 					Specialist:    in.Specialist,
+					Children:      spawnedIDs(spawned),
 					State:         turnState,
 				}, &out)
 				user = nil
@@ -270,17 +266,16 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 					AgentID:    agentID,
 					MCPServers: mcp,
 					Call:       tc,
-					Auth:       lastAuth,
 					Mounts:     mounts,
 					Specialist: in.Specialist,
-					Known:      spawnedIDs(spawned),
+					Children:   spawnedIDs(spawned),
 					State:      turnState,
 				}, &tout)
 				if onActErr(err) {
 					stopSlice = true
 					break
 				}
-				if herr := applyChildIntent(ctx, sessionCtx, &spawned, tout, in, agentID, lastAuth, mounts); herr != nil {
+				if herr := applyChildIntent(ctx, sessionCtx, &spawned, tout, in, agentID, mounts); herr != nil {
 					stopSlice = onActErr(herr)
 					break
 				}
@@ -299,9 +294,9 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 							MCPServers: mcp,
 							Call:       tc,
 							Output:     output,
-							Auth:       lastAuth,
 							Mounts:     mounts,
 							Specialist: in.Specialist,
+							Children:   spawnedIDs(spawned),
 							State:      turnState,
 						}, &cout)
 						if onActErr(cerr) {
@@ -372,9 +367,9 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 							AgentID:    agentID,
 							MCPServers: mcp,
 							Resume:     ev.resume.Responses,
-							Auth:       lastAuth,
 							Mounts:     mounts,
 							Specialist: in.Specialist,
+							Children:   spawnedIDs(spawned),
 							State:      turnState,
 						}, &iout)
 						if onActErr(err) {
@@ -415,9 +410,9 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 					User:          nudgeMsg,
 					HadToolRound:  true,
 					ModelRequests: reqs,
-					Auth:          lastAuth,
 					Mounts:        mounts,
 					Specialist:    in.Specialist,
+					Children:      spawnedIDs(spawned),
 					State:         turnState,
 				}, &out)
 				if onActErr(err) {
