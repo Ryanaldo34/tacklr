@@ -45,7 +45,7 @@ One goroutine per session runs the harness wait loop. HITL parks that goroutine 
 The host runs:
 
 1. A Tacklr Temporal worker (`EnableSessionWorker: true`) that registers `SessionWorkflow` plus the `Inference`, `Tool`, `CommitToolOutput`, and `EmitEvent` activities.
-2. A protocol process (optional) whose `durable.Runtime` is `temporal.New(client, cfg)`. `temporal.Config` is the single host config for both `New` and `NewWorker` (catalog, queue, snapshots, projection, locality, activity timeout, heartbeat, retries). Autonomous work skips the protocol and calls Runtime (or starts the workflow) with a payload.
+2. A protocol process (optional) whose `durable.Runtime` is `temporal.New(client, cfg)`. `temporal.Config` is the single host config for both `New` and `NewWorker` (catalog, queue, snapshots, projection, locality, activity timeout, heartbeat, retries, **Secrets**). `New` and `NewWorker` must share the same `SecretStorage`. Autonomous work skips the protocol and calls Runtime (or starts the workflow) with a payload.
 
 | Tacklr concept | Temporal |
 |----------------|----------|
@@ -124,11 +124,17 @@ Resume.Auth            tokens for remount after park or worker recycle
 
 `AuthContext` is protocol-neutral. ACP `_tacklr/vfs/bind` only stashes on the ACP wire session; `BindTurn` copies that stash onto `Prompt.Auth`. An autonomous host sets `Prompt.Auth` (and optional `CreateSession.Mounts`) when it queues the workflow. No protocol is required.
 
-Recipes are cached on the session snapshot (`Snapshot.Mounts`): where a mount came from, not file contents. Providers lazy-load bytes on open/read. Tokens are not snapshotted. After HITL or a worker restart, the next Prompt/Resume supplies tokens; cached recipes remount the same folders.
+Recipes are cached on the session snapshot (`Snapshot.Mounts`): where a mount came from, not file contents. Providers lazy-load bytes on open/read. Tokens are not snapshotted and are not written to Temporal event history. The Temporal adapter puts them in `Config.Secrets` (`durable.SecretStorage`) before signaling a secret-free `AuthContext`. Activities load the bag at harness time (child sessions fall back to the parent id). Close deletes the session’s secrets.
+
+`SecretStorage` is not `SnapshotStore`. Client and worker must share one instance (Redis, Postgres, Vault, or `MemorySecretStorage` when they share a process). There is no default: a private memory map per process looks like a successful Prompt and then remounts nothing.
+
+After HITL or a worker restart, the next Prompt/Resume supplies tokens and they are Put again. A retry on another worker remounts only if that worker can `Get` the same store.
 
 A 401 during a turn ends the activity. The client (or host) `Resume`s with a new token. There is no live callback from an activity into ACP.
 
-Encrypt work-item payloads at rest with a Temporal payload codec (or the equivalent on Azure/Lambda) if the store is untrusted.
+MCP `Env`/`Headers` are stripped with `DurableConfigs` before Temporal payloads. `CredentialRef` stays and is resolved at activity time.
+
+Encrypt remaining work-item payloads (prompt text, tool args, HITL bytes) at rest with a Temporal payload codec if the store is untrusted. That is defense in depth for non-token data, not the token control.
 
 ## Protocol contract
 

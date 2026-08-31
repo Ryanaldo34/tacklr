@@ -99,7 +99,7 @@ func newTestRuntime(t *testing.T, model tacklr.InferenceStrategy, spec durable.A
 	log := inprocess.NewMemoryEventLog()
 	tcfg := tacklrtemporal.Config{
 		Catalog: cat, TaskQueue: tq, Snapshots: snaps, Fallback: log,
-		Projection: vfs.DirectProjection{},
+		Projection: vfs.DirectProjection{}, Secrets: durable.NewMemorySecretStorage(),
 	}
 	rt := tacklrtemporal.New(c, tcfg)
 	w := tacklrtemporal.NewWorker(c, tcfg)

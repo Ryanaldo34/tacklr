@@ -10,7 +10,7 @@
 version: "2"
 
 run:
-  # Go version comes from the toolchain on PATH / go.mod (CI installs go1.26.x).
+  go: "1.27"
   timeout: 5m
   tests: true
 

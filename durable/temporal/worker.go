@@ -13,6 +13,9 @@ import (
 // Pass the same Config as New. Worker sessions exist only when
 // Config.TurnLocality > 0.
 func NewWorker(c client.Client, cfg Config) worker.Worker {
+	if cfg.Secrets == nil {
+		panic("temporal: Secrets is required")
+	}
 	w := worker.New(c, cfg.queue(), worker.Options{
 		EnableSessionWorker:               true,
 		MaxConcurrentSessionExecutionSize: 1000,
@@ -31,6 +34,7 @@ func NewWorker(c client.Client, cfg Config) worker.Worker {
 		Projection:     proj,
 		Fallback:       fallback,
 		DisableStreams: cfg.DisableStreams,
+		Secrets:        cfg.Secrets,
 	}
 	w.RegisterWorkflow(SessionWorkflow)
 	w.RegisterActivity(acts)

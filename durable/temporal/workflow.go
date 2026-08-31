@@ -29,7 +29,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 		agentID    = in.AgentID
 		mcp        = in.MCPServers
 		mounts     = durable.ApplyAuth(in.Mounts, in.Auth)
-		lastAuth   = in.Auth
+		lastAuth   = in.Auth.WithoutSecrets()
 		spawned    []childRun
 		yielded    bool
 		result     string
@@ -128,7 +128,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 	applyAuth := func(auth durable.AuthContext) {
 		mounts = durable.ApplyAuth(mounts, auth)
 		if len(auth.Bindings) > 0 {
-			lastAuth = auth
+			lastAuth = auth.WithoutSecrets()
 		}
 	}
 
@@ -232,6 +232,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 				var out InferenceOutput
 				err := waitAct("Inference", InferenceInput{
 					SessionID:     in.SessionID,
+					Parent:        in.Parent,
 					AgentID:       agentID,
 					MCPServers:    mcp,
 					User:          user,
@@ -265,6 +266,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 				var tout ToolOutput
 				err := waitAct("Tool", ToolInput{
 					SessionID:  in.SessionID,
+					Parent:     in.Parent,
 					AgentID:    agentID,
 					MCPServers: mcp,
 					Call:       tc,
@@ -292,6 +294,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 						var cout ToolOutput
 						cerr := waitAct("CommitToolOutput", CommitToolInput{
 							SessionID:  in.SessionID,
+							Parent:     in.Parent,
 							AgentID:    agentID,
 							MCPServers: mcp,
 							Call:       tc,
@@ -351,7 +354,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 						applyAuth(ev.resume.Auth)
 						turnState = durable.MergeUserState(turnState, ev.resume.State)
 						if cid, ok := childParks[interruptID]; ok {
-							_ = workflow.SignalExternalWorkflow(ctx, string(cid), "", signalResume, resumeSignal{Responses: ev.resume.Responses, Auth: ev.resume.Auth, State: ev.resume.State}).Get(ctx, nil)
+							_ = workflow.SignalExternalWorkflow(ctx, string(cid), "", signalResume, resumeSignal{Responses: ev.resume.Responses, Auth: ev.resume.Auth.WithoutSecrets(), State: ev.resume.State}).Get(ctx, nil)
 							delete(childParks, interruptID)
 						}
 						sessionCtx, hasSession = openTurnLocality(ctx, in.TurnLocalityTimeout, time.Minute)
@@ -365,11 +368,13 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 						var iout InferenceOutput
 						err := waitAct("Inference", InferenceInput{
 							SessionID:  in.SessionID,
+							Parent:     in.Parent,
 							AgentID:    agentID,
 							MCPServers: mcp,
 							Resume:     ev.resume.Responses,
 							Auth:       lastAuth,
 							Mounts:     mounts,
+							Specialist: in.Specialist,
 							State:      turnState,
 						}, &iout)
 						if onActErr(err) {
@@ -404,6 +409,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 				var out InferenceOutput
 				err := waitAct("Inference", InferenceInput{
 					SessionID:     in.SessionID,
+					Parent:        in.Parent,
 					AgentID:       agentID,
 					MCPServers:    mcp,
 					User:          nudgeMsg,

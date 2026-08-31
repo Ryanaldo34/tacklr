@@ -21,7 +21,8 @@ const (
 	signalChildWaiting = "ChildWaiting"
 )
 
-// WorkflowInput is the typed start payload (no interface{}).
+// WorkflowInput is the typed start payload (no interface{}). Auth is
+// secret-free on the wire; credentials live in SecretStorage.
 type WorkflowInput struct {
 	SessionID  durable.SessionID
 	AgentID    string
@@ -47,6 +48,7 @@ type WorkflowInput struct {
 	State map[string]any
 }
 
+// promptSignal is the Prompt signal. Auth is secret-free on the wire.
 type promptSignal struct {
 	Text        string
 	UserMessage *tacklr.Message
@@ -56,6 +58,7 @@ type promptSignal struct {
 	State       map[string]any
 }
 
+// resumeSignal is the Resume signal. Auth is secret-free on the wire.
 type resumeSignal struct {
 	Responses map[string][]byte
 	Auth      durable.AuthContext

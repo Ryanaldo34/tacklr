@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -51,11 +52,13 @@ type Activities struct {
 	Projection     vfs.Projection
 	Fallback       durable.EventLog
 	DisableStreams bool
+	Secrets        durable.SecretStorage
 }
 
 // InferenceInput is the typed Inference activity argument.
 type InferenceInput struct {
 	SessionID     durable.SessionID
+	Parent        durable.SessionID
 	AgentID       string
 	MCPServers    []mcp.MCPConfig
 	User          *tacklr.Message
@@ -79,6 +82,7 @@ type InferenceOutput struct {
 // ToolInput is the typed Tool activity argument.
 type ToolInput struct {
 	SessionID  durable.SessionID
+	Parent     durable.SessionID
 	AgentID    string
 	MCPServers []mcp.MCPConfig
 	Call       tacklr.ToolCall
@@ -107,6 +111,7 @@ type ToolOutput struct {
 // the tool. SessionWorkflow uses this after spawn_specialist child completion.
 type CommitToolInput struct {
 	SessionID  durable.SessionID
+	Parent     durable.SessionID
 	AgentID    string
 	MCPServers []mcp.MCPConfig
 	Call       tacklr.ToolCall
@@ -141,7 +146,7 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 	if attempt > 1 {
 		_ = a.publish(ctx, stream, in.SessionID, durable.TopicRetry, tacklr.StreamEvent{Type: tacklr.StreamEventError, Content: "retry"}, true)
 	}
-	h, ms, skillsMS, rev, err := a.harness(ctx, in.SessionID, in.AgentID, in.MCPServers, in.Auth, in.Mounts, in.Specialist, in.State)
+	h, ms, skillsMS, rev, err := a.harness(ctx, in.SessionID, in.Parent, in.AgentID, in.MCPServers, in.Auth, in.Mounts, in.Specialist, in.State)
 	if err != nil {
 		pub := err
 		if err := ctx.Err(); err != nil {
@@ -223,7 +228,7 @@ func (a *Activities) Tool(ctx context.Context, in ToolInput) (ToolOutput, error)
 	if attempt > 1 {
 		_ = a.publish(ctx, stream, in.SessionID, durable.TopicRetry, tacklr.StreamEvent{Type: tacklr.StreamEventError, Content: "retry"}, true)
 	}
-	h, ms, skillsMS, rev, err := a.harness(ctx, in.SessionID, in.AgentID, in.MCPServers, in.Auth, in.Mounts, in.Specialist, in.State)
+	h, ms, skillsMS, rev, err := a.harness(ctx, in.SessionID, in.Parent, in.AgentID, in.MCPServers, in.Auth, in.Mounts, in.Specialist, in.State)
 	if err != nil {
 		slog.ErrorContext(ctx, "tool harness", "area", telemetry.AreaHarness, "error", err)
 		return ToolOutput{}, err
@@ -277,7 +282,7 @@ func (a *Activities) Tool(ctx context.Context, in ToolInput) (ToolOutput, error)
 }
 
 func (a *Activities) CommitToolOutput(ctx context.Context, in CommitToolInput) (ToolOutput, error) {
-	h, ms, skillsMS, rev, err := a.harness(ctx, in.SessionID, in.AgentID, in.MCPServers, in.Auth, in.Mounts, in.Specialist, in.State)
+	h, ms, skillsMS, rev, err := a.harness(ctx, in.SessionID, in.Parent, in.AgentID, in.MCPServers, in.Auth, in.Mounts, in.Specialist, in.State)
 	if err != nil {
 		return ToolOutput{}, err
 	}
@@ -302,7 +307,27 @@ func (a *Activities) CommitToolOutput(ctx context.Context, in CommitToolInput) (
 	return ToolOutput{}, nil
 }
 
-func (a *Activities) harness(ctx context.Context, id durable.SessionID, agentID string, extraMCP []mcp.MCPConfig, auth durable.AuthContext, mounts []durable.MountRecipe, specialist string, state map[string]any) (*tacklr.TurnManager, *vfs.MountSession, *vfs.MountSession, durable.Revision, error) {
+func (a *Activities) harness(ctx context.Context, id, parent durable.SessionID, agentID string, extraMCP []mcp.MCPConfig, auth durable.AuthContext, mounts []durable.MountRecipe, specialist string, state map[string]any) (*tacklr.TurnManager, *vfs.MountSession, *vfs.MountSession, durable.Revision, error) {
+	if a.Secrets != nil {
+		sec, err := a.Secrets.Get(ctx, id)
+		if err != nil {
+			return nil, nil, nil, "", err
+		}
+		hasTok := false
+		for _, b := range sec.Auth.Bindings {
+			if strings.TrimSpace(b.Auth.Token) != "" {
+				hasTok = true
+				break
+			}
+		}
+		if !hasTok && parent != "" {
+			sec, err = a.Secrets.Get(ctx, parent)
+			if err != nil {
+				return nil, nil, nil, "", err
+			}
+		}
+		auth = sec.Auth
+	}
 	spec, ok := a.Catalog.Lookup(agentID)
 	if !ok {
 		return nil, nil, nil, "", durable.ErrAgentNotFound

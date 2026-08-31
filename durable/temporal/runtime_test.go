@@ -70,16 +70,19 @@ func TestNew_panicsWithoutClientOrCatalog(t *testing.T) {
 	})
 	mustPanic(t, func() { New(nil, Config{Catalog: cat}) })
 	mustPanic(t, func() { New(&struct{ client.Client }{}, Config{}) })
+	mustPanic(t, func() { New(&struct{ client.Client }{}, Config{Catalog: cat}) })
+	mustPanic(t, func() { NewWorker(&struct{ client.Client }{}, Config{Catalog: cat}) })
 	log := inprocess.NewMemoryEventLog()
 	stub := &struct{ client.Client }{}
-	rt := New(stub, Config{Catalog: cat, DisableStreams: true, TurnLocality: time.Minute, Fallback: log})
+	secrets := durable.NewMemorySecretStorage()
+	rt := New(stub, Config{Catalog: cat, Secrets: secrets, DisableStreams: true, TurnLocality: time.Minute, Fallback: log})
 	if rt.taskQueue != "tacklr" || !rt.disableStreams {
 		t.Fatalf("defaults tq=%q streams=%v", rt.taskQueue, rt.disableStreams)
 	}
 	if rt.activityTimeout != 10*time.Minute || rt.heartbeatTimeout != 30*time.Second || rt.activityAttempts != 3 {
 		t.Fatalf("activity defaults timeout=%v heartbeat=%v attempts=%d", rt.activityTimeout, rt.heartbeatTimeout, rt.activityAttempts)
 	}
-	hour := New(stub, Config{Catalog: cat, TaskQueue: "q", ActivityTimeout: time.Hour, HeartbeatTimeout: time.Minute, ActivityAttempts: 1})
+	hour := New(stub, Config{Catalog: cat, Secrets: secrets, TaskQueue: "q", ActivityTimeout: time.Hour, HeartbeatTimeout: time.Minute, ActivityAttempts: 1})
 	if hour.activityTimeout != time.Hour || hour.heartbeatTimeout != time.Minute || hour.activityAttempts != 1 {
 		t.Fatalf("cfg timeout=%v heartbeat=%v attempts=%d", hour.activityTimeout, hour.heartbeatTimeout, hour.activityAttempts)
 	}
@@ -1092,28 +1095,32 @@ func TestSessionWorkflow_resumeRemountsWorkspaceFromCachedRecipe(t *testing.T) {
 		OpenVFS: vfs.Tree(vfs.At("docs", builtins.Local(dir))),
 	})
 	fallback := inprocess.NewMemoryEventLog()
+	secrets := durable.NewMemorySecretStorage()
+	acts := newActs(cat, fallback, true)
+	acts.Secrets = secrets
 	env.RegisterWorkflow(SessionWorkflow)
-	env.RegisterActivity(newActs(cat, fallback, true))
+	env.RegisterActivity(acts)
 
 	id := durable.SessionID("sess-remount")
+	auth1 := durable.AuthContext{Bindings: []vfs.Binding{{
+		Provider: "local",
+		Params:   map[string]string{vfs.ParamName: "docs"},
+		Auth:     vfs.Credential{Token: "tok-1"},
+	}}}
+	auth2 := durable.AuthContext{Bindings: []vfs.Binding{{
+		Provider: "local",
+		Auth:     vfs.Credential{Token: "tok-2"},
+	}}}
 	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(signalPrompt, promptSignal{
-			Text: "ask then read",
-			Auth: durable.AuthContext{Bindings: []vfs.Binding{{
-				Provider: "local",
-				Params:   map[string]string{vfs.ParamName: "docs"},
-				Auth:     vfs.Credential{Token: "tok-1"},
-			}}},
-		})
+		_ = secrets.Put(context.Background(), id, durable.Secrets{Auth: auth1})
+		env.SignalWorkflow(signalPrompt, promptSignal{Text: "ask then read", Auth: auth1.WithoutSecrets()})
 	}, time.Millisecond)
 	env.RegisterDelayedCallback(func() {
 		payload, _ := json.Marshal(map[string]any{"selectionIdx": 0})
+		_ = secrets.Put(context.Background(), id, durable.Secrets{Auth: auth2})
 		env.SignalWorkflow(signalResume, resumeSignal{
 			Responses: map[string][]byte{"ask1": payload},
-			Auth: durable.AuthContext{Bindings: []vfs.Binding{{
-				Provider: "local",
-				Auth:     vfs.Credential{Token: "tok-2"},
-			}}},
+			Auth:      auth2.WithoutSecrets(),
 		})
 	}, 30*time.Millisecond)
 	env.RegisterDelayedCallback(func() {
@@ -1139,5 +1146,114 @@ func TestSessionWorkflow_resumeRemountsWorkspaceFromCachedRecipe(t *testing.T) {
 	}
 	if st := querySession(t, env); st.State != durable.SessionComplete {
 		t.Fatalf("Status after remount: %+v", st)
+	}
+}
+
+type failPutSecrets struct{}
+
+func (failPutSecrets) Put(context.Context, durable.SessionID, durable.Secrets) error {
+	return errors.New("vault sealed")
+}
+func (failPutSecrets) Get(context.Context, durable.SessionID) (durable.Secrets, error) {
+	return durable.Secrets{}, nil
+}
+func (failPutSecrets) Delete(context.Context, durable.SessionID) error { return nil }
+
+type nopWorkflowClient struct{ client.Client }
+
+func (nopWorkflowClient) SignalWorkflow(context.Context, string, string, string, any) error {
+	return nil
+}
+func (nopWorkflowClient) QueryWorkflow(context.Context, string, string, string, ...any) (converter.EncodedValue, error) {
+	return nil, errors.New("no query")
+}
+
+func TestRuntime_promptPutFailureDoesNotSignal(t *testing.T) {
+	cat := durable.NewCatalog("default")
+	cat.Register("default", durable.AgentSpec{
+		Options: tacklr.AgentOptions{Model: &testkit.ScriptedModel{}, Config: tacklr.Config{MaxWindowSize: 8192}},
+	})
+	rt := New(nopWorkflowClient{}, Config{
+		Catalog: cat, Secrets: failPutSecrets{}, DisableStreams: true,
+		Fallback: inprocess.NewMemoryEventLog(),
+	})
+	err := rt.Prompt(t.Context(), "s", durable.Prompt{
+		Text: "x",
+		Auth: durable.AuthContext{Bindings: []vfs.Binding{{
+			Provider: "gdrive", Auth: vfs.Credential{Token: "tok"},
+		}}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "vault sealed") {
+		t.Fatalf("put fail: %v", err)
+	}
+}
+
+func TestRuntime_closeDeletesSecrets(t *testing.T) {
+	cat := durable.NewCatalog("default")
+	cat.Register("default", durable.AgentSpec{
+		Options: tacklr.AgentOptions{Model: &testkit.ScriptedModel{}, Config: tacklr.Config{MaxWindowSize: 8192}},
+	})
+	store := durable.NewMemorySecretStorage()
+	if err := store.Put(t.Context(), "s", durable.Secrets{Auth: durable.AuthContext{Bindings: []vfs.Binding{{
+		Provider: "gdrive", Auth: vfs.Credential{Token: "tok"},
+	}}}}); err != nil {
+		t.Fatal(err)
+	}
+	rt := New(nopWorkflowClient{}, Config{
+		Catalog: cat, Secrets: store, DisableStreams: true,
+		Fallback: inprocess.NewMemoryEventLog(),
+	})
+	if err := rt.Close(t.Context(), "s"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Get(t.Context(), "s")
+	if err != nil || len(got.Auth.Bindings) != 0 {
+		t.Fatalf("close left secrets: %+v %v", got, err)
+	}
+}
+
+func TestActivities_harnessFallsBackToParentSecrets(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("from-parent"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var gotToken string
+	open := vfs.Tree(vfs.At("docs", builtins.Local(dir)))
+	cat := durable.NewCatalog("default")
+	cat.Register("default", durable.AgentSpec{
+		Options: tacklr.AgentOptions{Model: &testkit.ScriptedModel{
+			InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "ok", IsComplete: true}
+			},
+		}, Config: tacklr.Config{MaxWindowSize: 8192}},
+		OpenVFS: func(ctx context.Context, sessionID string, req vfs.Request) (*vfs.MountSession, error) {
+			if len(req.Bindings) > 0 {
+				gotToken = req.Bindings[0].Auth.Token
+			}
+			return open(ctx, sessionID, req)
+		},
+	})
+	store := durable.NewMemorySecretStorage()
+	parentAuth := durable.AuthContext{Bindings: []vfs.Binding{{
+		Provider: "local",
+		Params:   map[string]string{vfs.ParamName: "docs"},
+		Auth:     vfs.Credential{Token: "parent-tok"},
+	}}}
+	if err := store.Put(t.Context(), "parent", durable.Secrets{Auth: parentAuth}); err != nil {
+		t.Fatal(err)
+	}
+	acts := newActs(cat, inprocess.NewMemoryEventLog(), true)
+	acts.Secrets = store
+	mounts := durable.ApplyAuth(nil, parentAuth)
+	if _, err := acts.Inference(t.Context(), InferenceInput{
+		SessionID: "child", Parent: "parent", AgentID: "default",
+		User:   &tacklr.Message{Role: tacklr.RoleUser, Content: "hi"},
+		Auth:   parentAuth.WithoutSecrets(),
+		Mounts: mounts,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if gotToken != "parent-tok" {
+		t.Fatalf("OpenVFS token=%q", gotToken)
 	}
 }
