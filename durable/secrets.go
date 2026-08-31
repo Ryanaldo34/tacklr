@@ -17,7 +17,7 @@ type Secrets struct {
 // Runtime client and worker must share one instance. It is not SnapshotStore.
 type SecretStorage interface {
 	// Put replaces Auth when secrets.Auth.Bindings is non-empty.
-	// Drop-only Auth is a no-op on the bag (recipes drop in the workflow).
+	// Empty Bindings (including drop-only) is a no-op on the bag.
 	Put(ctx context.Context, sessionID SessionID, secrets Secrets) error
 	// Get returns the last Put bag. Missing session: zero Secrets, nil error.
 	Get(ctx context.Context, sessionID SessionID) (Secrets, error)

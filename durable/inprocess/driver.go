@@ -11,6 +11,7 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
+	adapter "github.com/ryanaldo34/tacklr/durable/internal"
 	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/telemetry"
 	"github.com/ryanaldo34/tacklr/vfs"
@@ -34,14 +35,14 @@ func (r *Runtime) constructHarness(ctx context.Context, p *sessionProc, bindings
 		return nil, nil, nil, durable.ErrAgentNotFound
 	}
 	if p.specialist != "" {
-		over, err := durable.OverlaySpecialist(spec, p.specialist)
+		over, err := adapter.OverlaySpecialist(spec, p.specialist)
 		if err != nil {
 			return nil, nil, nil, err
 		}
 		spec = over
 	}
 	threadID := string(p.id)
-	ms, skillsMS, err := durable.OpenTurnSessions(ctx, threadID, spec, bindings, r.projection)
+	ms, skillsMS, err := adapter.OpenTurnSessions(ctx, threadID, spec, bindings, r.projection)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -59,7 +60,7 @@ func (r *Runtime) constructHarness(ctx context.Context, p *sessionProc, bindings
 
 	h, err := tacklr.NewTurnManager(ctx, opts)
 	if err != nil {
-		durable.CloseTurnTrees(ms, skillsMS, threadID, "construct")
+		adapter.CloseTurnTrees(ms, skillsMS, threadID, "construct")
 		return nil, nil, nil, err
 	}
 	h.BindChildHost(sessionChildren{r: r, p: p})
@@ -69,18 +70,18 @@ func (r *Runtime) constructHarness(ctx context.Context, p *sessionProc, bindings
 		p.revision = rev
 		if err := h.RestoreCheckpoint(snap.Checkpoint); err != nil {
 			h.Close()
-			durable.CloseTurnTrees(ms, skillsMS, threadID, "restore")
+			adapter.CloseTurnTrees(ms, skillsMS, threadID, "restore")
 			return nil, nil, nil, err
 		}
 	case errors.Is(loadErr, durable.ErrSessionNotFound):
 	default:
 		h.Close()
-		durable.CloseTurnTrees(ms, skillsMS, threadID, "load")
+		adapter.CloseTurnTrees(ms, skillsMS, threadID, "load")
 		return nil, nil, nil, loadErr
 	}
 	if err := h.ApplySessionState(state); err != nil {
 		h.Close()
-		durable.CloseTurnTrees(ms, skillsMS, threadID, "state")
+		adapter.CloseTurnTrees(ms, skillsMS, threadID, "state")
 		return nil, nil, nil, err
 	}
 	return h, ms, skillsMS, nil
@@ -151,7 +152,7 @@ func (r *Runtime) runTurn(ctx context.Context, p *sessionProc, user *tacklr.Mess
 	}
 	defer func() {
 		h.Close()
-		durable.CloseTurnTrees(ms, skillsMS, string(p.id), "turn_end")
+		adapter.CloseTurnTrees(ms, skillsMS, string(p.id), "turn_end")
 	}()
 
 	eng := h.Drive()
@@ -224,7 +225,7 @@ func (r *Runtime) runTurn(ctx context.Context, p *sessionProc, user *tacklr.Mess
 		}
 		nudge := ""
 		if len(toolCalls) == 0 && !parked && inferComplete {
-			nudge = durable.ChildrenNudge(r.childStatuses(p))
+			nudge = adapter.ChildrenNudge(r.childStatuses(p))
 		}
 		switch tacklr.Next(len(toolCalls), parked, inferComplete, nudge != "") {
 		case tacklr.ActionInfer:

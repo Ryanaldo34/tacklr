@@ -50,7 +50,7 @@ One goroutine per session runs the harness wait loop. HITL parks that goroutine 
 The host runs:
 
 1. A Tacklr Temporal worker (`NewWorker`) that registers `SessionWorkflow` and the turn activities. Do not register those yourself.
-2. A protocol process (optional) whose `durable.Runtime` is `temporal.New(client, cfg)`. `temporal.Config` is the single host config for both `New` and `NewWorker`. **Secrets** is required and must be the same instance on both. Autonomous work skips the protocol and calls Runtime.
+2. A protocol process (optional) whose `durable.Runtime` is `temporal.New(client, cfg)`. `temporal.Config` is the single host config for both `New` and `NewWorker`. **Snapshots** and **Secrets** are required and must be the same instances on both. Autonomous work skips the protocol and calls Runtime.
 
 ```go
 c, err := tacklrtemporal.Dial(client.Options{HostPort: temporalHost})

@@ -1,10 +1,11 @@
-package durable
+package adapter
 
 import (
 	"errors"
 	"testing"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
@@ -13,7 +14,7 @@ func TestOverlaySpecialist_inheritsParentAndNests(t *testing.T) {
 	parentModel := &testkit.ScriptedModel{}
 	childModel := &testkit.ScriptedModel{}
 	grand := &tacklr.Specialist{Name: "grand", Instructions: "g"}
-	parent := AgentSpec{
+	parent := durable.AgentSpec{
 		Name: "parent",
 		Options: tacklr.AgentOptions{
 			Model:         parentModel,
@@ -58,7 +59,7 @@ func TestOverlaySpecialist_inheritsParentAndNests(t *testing.T) {
 	if err := UnknownChild("z"); !errors.Is(err, tacklr.ErrNotFound) {
 		t.Fatalf("unknown: %v", err)
 	}
-	if ChildState(SessionComplete) != tacklr.ChildCompleted || ChildState(SessionFailed) != tacklr.ChildFailed || ChildState(SessionRunning) != tacklr.ChildRunning {
-		t.Fatal(ChildState(SessionRunning))
+	if ChildState(durable.SessionComplete) != tacklr.ChildCompleted || ChildState(durable.SessionFailed) != tacklr.ChildFailed || ChildState(durable.SessionRunning) != tacklr.ChildRunning {
+		t.Fatal(ChildState(durable.SessionRunning))
 	}
 }

@@ -10,12 +10,10 @@ import (
 // NewWorker returns a Temporal worker with EnableSessionWorker and
 // SessionWorkflow plus Inference, Tool, CommitToolOutput, and EmitEvent
 // activities.
-// Pass the same Config as New. Worker sessions exist only when
-// Config.TurnLocality > 0.
+// Pass the same Config as New, including Snapshots and Secrets.
+// Worker sessions exist only when Config.TurnLocality > 0.
 func NewWorker(c client.Client, cfg Config) worker.Worker {
-	if cfg.Secrets == nil {
-		panic("temporal: Secrets is required")
-	}
+	requireCfg(cfg)
 	w := worker.New(c, cfg.queue(), worker.Options{
 		EnableSessionWorker:               true,
 		MaxConcurrentSessionExecutionSize: 1000,
@@ -30,7 +28,7 @@ func NewWorker(c client.Client, cfg Config) worker.Worker {
 	}
 	acts := &activities{
 		Catalog:        cfg.Catalog,
-		Snapshots:      cfg.snaps(),
+		Snapshots:      cfg.Snapshots,
 		Projection:     proj,
 		Fallback:       fallback,
 		DisableStreams: cfg.DisableStreams,

@@ -12,6 +12,7 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
+	adapter "github.com/ryanaldo34/tacklr/durable/internal"
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
@@ -27,7 +28,7 @@ func SessionWorkflow(ctx workflow.Context, in workflowInput) (string, error) {
 		closed     bool
 		agentID    = in.AgentID
 		mcp        = in.MCPServers
-		mounts     = durable.ApplyAuth(in.Mounts, durable.AuthContext{})
+		mounts     = adapter.ApplyAuth(in.Mounts, durable.AuthContext{})
 		spawned    []childRun
 		yielded    bool
 		result     string
@@ -62,11 +63,7 @@ func SessionWorkflow(ctx workflow.Context, in workflowInput) (string, error) {
 		return st, nil
 	})
 	_ = workflow.SetQueryHandler(ctx, queryChildren, func() ([]durable.SessionID, error) {
-		out := make([]durable.SessionID, len(spawned))
-		for i, c := range spawned {
-			out[i] = c.id
-		}
-		return out, nil
+		return spawnedIDs(spawned), nil
 	})
 	cancelSpawned := func() {
 		for _, c := range spawned {
@@ -123,14 +120,20 @@ func SessionWorkflow(ctx workflow.Context, in workflowInput) (string, error) {
 		},
 	}
 
-	applyAuth := func(auth durable.AuthContext) {
-		mounts = durable.ApplyAuth(mounts, auth)
+	rec := func() durable.Snapshot {
+		return durable.Snapshot{
+			AgentID:    agentID,
+			Specialist: in.Specialist,
+			Parent:     in.Parent,
+			Children:   spawnedIDs(spawned),
+			Mounts:     mounts,
+		}
 	}
 
 	runSlice := func(user *tacklr.Message, resume map[string][]byte, auth durable.AuthContext, kind string, extra map[string]any) {
-		turnState := durable.MergeUserState(seed, extra)
+		turnState := adapter.MergeUserState(seed, extra)
 		seed = nil
-		applyAuth(auth)
+		mounts = adapter.ApplyAuth(mounts, auth)
 		terminal = ""
 		yielded = false
 		result = ""
@@ -227,16 +230,12 @@ func SessionWorkflow(ctx workflow.Context, in workflowInput) (string, error) {
 				var out inferenceOutput
 				err := waitAct("Inference", inferenceInput{
 					SessionID:     in.SessionID,
-					Parent:        in.Parent,
-					AgentID:       agentID,
+					Rec:           rec(),
 					MCPServers:    mcp,
 					User:          user,
 					HadToolRound:  hadTools,
 					ModelRequests: reqs,
 					Resume:        resume,
-					Mounts:        mounts,
-					Specialist:    in.Specialist,
-					Children:      spawnedIDs(spawned),
 					State:         turnState,
 				}, &out)
 				user = nil
@@ -261,13 +260,9 @@ func SessionWorkflow(ctx workflow.Context, in workflowInput) (string, error) {
 				var tout toolOutput
 				err := waitAct("Tool", toolInput{
 					SessionID:  in.SessionID,
-					Parent:     in.Parent,
-					AgentID:    agentID,
+					Rec:        rec(),
 					MCPServers: mcp,
 					Call:       tc,
-					Mounts:     mounts,
-					Specialist: in.Specialist,
-					Children:   spawnedIDs(spawned),
 					State:      turnState,
 				}, &tout)
 				if onActErr(err) {
@@ -288,14 +283,10 @@ func SessionWorkflow(ctx workflow.Context, in workflowInput) (string, error) {
 						var cout toolOutput
 						cerr := waitAct("CommitToolOutput", commitToolInput{
 							SessionID:  in.SessionID,
-							Parent:     in.Parent,
-							AgentID:    agentID,
+							Rec:        rec(),
 							MCPServers: mcp,
 							Call:       tc,
 							Output:     output,
-							Mounts:     mounts,
-							Specialist: in.Specialist,
-							Children:   spawnedIDs(spawned),
 							State:      turnState,
 						}, &cout)
 						if onActErr(cerr) {
@@ -345,8 +336,8 @@ func SessionWorkflow(ctx workflow.Context, in workflowInput) (string, error) {
 						waiting = false
 						parked = false
 						yielded = false
-						applyAuth(ev.resume.Auth)
-						turnState = durable.MergeUserState(turnState, ev.resume.State)
+						mounts = adapter.ApplyAuth(mounts, ev.resume.Auth)
+						turnState = adapter.MergeUserState(turnState, ev.resume.State)
 						if cid, ok := childParks[interruptID]; ok {
 							_ = workflow.SignalExternalWorkflow(ctx, string(cid), "", signalResume, resumeSignal{Responses: ev.resume.Responses, Auth: ev.resume.Auth.WithoutSecrets(), State: ev.resume.State}).Get(ctx, nil)
 							delete(childParks, interruptID)
@@ -362,13 +353,9 @@ func SessionWorkflow(ctx workflow.Context, in workflowInput) (string, error) {
 						var iout inferenceOutput
 						err := waitAct("Inference", inferenceInput{
 							SessionID:  in.SessionID,
-							Parent:     in.Parent,
-							AgentID:    agentID,
+							Rec:        rec(),
 							MCPServers: mcp,
 							Resume:     ev.resume.Responses,
-							Mounts:     mounts,
-							Specialist: in.Specialist,
-							Children:   spawnedIDs(spawned),
 							State:      turnState,
 						}, &iout)
 						if onActErr(err) {
@@ -403,15 +390,11 @@ func SessionWorkflow(ctx workflow.Context, in workflowInput) (string, error) {
 				var out inferenceOutput
 				err := waitAct("Inference", inferenceInput{
 					SessionID:     in.SessionID,
-					Parent:        in.Parent,
-					AgentID:       agentID,
+					Rec:           rec(),
 					MCPServers:    mcp,
 					User:          nudgeMsg,
 					HadToolRound:  true,
 					ModelRequests: reqs,
-					Mounts:        mounts,
-					Specialist:    in.Specialist,
-					Children:      spawnedIDs(spawned),
 					State:         turnState,
 				}, &out)
 				if onActErr(err) {

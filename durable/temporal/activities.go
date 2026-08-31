@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"sync"
 	"time"
 
@@ -15,6 +14,7 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
+	adapter "github.com/ryanaldo34/tacklr/durable/internal"
 	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/telemetry"
 	"github.com/ryanaldo34/tacklr/vfs"
@@ -55,22 +55,18 @@ type activities struct {
 	Secrets        durable.SecretStorage
 }
 
-// inferenceInput is one Inference step. Mounts and identity are the Snapshot
-// row this activity will save. State is the Prompt/Resume overlay. Tokens
-// come from SecretStorage, not this struct.
+// inferenceInput is one Inference step. Rec is the Snapshot row to persist
+// (checkpoint filled at save). State is the Prompt/Resume overlay. Tokens
+// come from SecretStorage.
 type inferenceInput struct {
 	SessionID     durable.SessionID
-	Parent        durable.SessionID
-	AgentID       string
+	Rec           durable.Snapshot
 	MCPServers    []mcp.MCPConfig
+	State         map[string]any
 	User          *tacklr.Message
 	HadToolRound  bool
 	ModelRequests int
 	Resume        map[string][]byte
-	Mounts        []durable.MountRecipe
-	Specialist    string
-	Children      []durable.SessionID
-	State         map[string]any
 }
 
 // inferenceOutput is the typed Inference activity result.
@@ -83,15 +79,10 @@ type inferenceOutput struct {
 // toolInput is the typed Tool activity argument.
 type toolInput struct {
 	SessionID  durable.SessionID
-	Parent     durable.SessionID
-	AgentID    string
+	Rec        durable.Snapshot
 	MCPServers []mcp.MCPConfig
+	State      map[string]any
 	Call       tacklr.ToolCall
-	Mounts     []durable.MountRecipe
-	Specialist string
-	// Children are this session's child ids (snapshot identity and list_children).
-	Children []durable.SessionID
-	State    map[string]any
 }
 
 // toolOutput is the typed Tool activity result. Spawn/cancel/await are this
@@ -111,15 +102,11 @@ type toolOutput struct {
 // the tool. SessionWorkflow uses this after spawn_specialist child completion.
 type commitToolInput struct {
 	SessionID  durable.SessionID
-	Parent     durable.SessionID
-	AgentID    string
+	Rec        durable.Snapshot
 	MCPServers []mcp.MCPConfig
+	State      map[string]any
 	Call       tacklr.ToolCall
 	Output     string
-	Mounts     []durable.MountRecipe
-	Specialist string
-	Children   []durable.SessionID
-	State      map[string]any
 }
 
 func (a *activities) Inference(ctx context.Context, in inferenceInput) (inferenceOutput, error) {
@@ -127,7 +114,7 @@ func (a *activities) Inference(ctx context.Context, in inferenceInput) (inferenc
 	defer cancel()
 	defer bindLiveTurn(in.SessionID, cancel)()
 	defer startHeartbeat(ctx)()
-	ctx = telemetry.BindTurnContext(ctx, in.AgentID, string(in.SessionID))
+	ctx = telemetry.BindTurnContext(ctx, in.Rec.AgentID, string(in.SessionID))
 	attempt := int32(1)
 	if activity.IsActivity(ctx) {
 		attempt = activity.GetInfo(ctx).Attempt
@@ -135,18 +122,18 @@ func (a *activities) Inference(ctx context.Context, in inferenceInput) (inferenc
 	if attempt > 1 {
 		slog.WarnContext(ctx, "inference retry",
 			"area", telemetry.AreaRuntime, "session_id", in.SessionID,
-			"agent_id", in.AgentID, "attempt", attempt)
+			"agent_id", in.Rec.AgentID, "attempt", attempt)
 	} else {
 		slog.InfoContext(ctx, "inference started",
 			"area", telemetry.AreaRuntime, "session_id", in.SessionID,
-			"agent_id", in.AgentID, "had_tools", in.HadToolRound)
+			"agent_id", in.Rec.AgentID, "had_tools", in.HadToolRound)
 	}
 	stream := a.openStream(ctx)
 	defer closeStream(ctx, stream)
 	if attempt > 1 {
 		_ = a.publish(ctx, stream, in.SessionID, durable.TopicRetry, tacklr.StreamEvent{Type: tacklr.StreamEventError, Content: "retry"}, true)
 	}
-	h, ms, skillsMS, rev, err := a.harness(ctx, in.SessionID, in.Parent, in.AgentID, in.MCPServers, in.Mounts, in.Specialist, in.State)
+	h, ms, skillsMS, rev, err := a.harness(ctx, in.SessionID, in.Rec, in.MCPServers, in.State)
 	if err != nil {
 		pub := err
 		if err := ctx.Err(); err != nil {
@@ -157,7 +144,7 @@ func (a *activities) Inference(ctx context.Context, in inferenceInput) (inferenc
 	}
 	defer func() {
 		h.Close()
-		durable.CloseTurnTrees(ms, skillsMS, string(in.SessionID), "inference")
+		adapter.CloseTurnTrees(ms, skillsMS, string(in.SessionID), "inference")
 	}()
 	eng := h.Drive()
 	out, stop := tacklr.PipeStreamEvents(a.emitter(ctx, stream, in.SessionID))
@@ -167,10 +154,7 @@ func (a *activities) Inference(ctx context.Context, in inferenceInput) (inferenc
 			return inferenceOutput{}, canceledIf(ctx, err)
 		}
 		if pending := eng.PendingToolCalls(); len(pending) > 0 {
-			_, err = a.save(ctx, in.SessionID, h, rev, durable.Snapshot{
-				AgentID: in.AgentID, Specialist: in.Specialist, Parent: in.Parent,
-				Children: in.Children, Mounts: in.Mounts,
-			})
+			_, err = a.save(ctx, in.SessionID, h, rev, in.Rec)
 			return inferenceOutput{ToolCalls: pending}, err
 		}
 	}
@@ -190,10 +174,7 @@ func (a *activities) Inference(ctx context.Context, in inferenceInput) (inferenc
 		}
 		return inferenceOutput{}, canceledIf(ctx, err)
 	}
-	if _, err = a.save(ctx, in.SessionID, h, rev, durable.Snapshot{
-		AgentID: in.AgentID, Specialist: in.Specialist, Parent: in.Parent,
-		Children: in.Children, Mounts: in.Mounts,
-	}); err != nil {
+	if _, err = a.save(ctx, in.SessionID, h, rev, in.Rec); err != nil {
 		slog.ErrorContext(ctx, "inference persist", "area", telemetry.AreaRuntime, "error", err)
 		return inferenceOutput{}, err
 	}
@@ -215,7 +196,7 @@ func (a *activities) Tool(ctx context.Context, in toolInput) (toolOutput, error)
 	defer cancel()
 	defer bindLiveTurn(in.SessionID, cancel)()
 	defer startHeartbeat(ctx)()
-	ctx = telemetry.BindTurnContext(ctx, in.AgentID, string(in.SessionID))
+	ctx = telemetry.BindTurnContext(ctx, in.Rec.AgentID, string(in.SessionID))
 	attempt := int32(1)
 	if activity.IsActivity(ctx) {
 		attempt = activity.GetInfo(ctx).Attempt
@@ -223,31 +204,31 @@ func (a *activities) Tool(ctx context.Context, in toolInput) (toolOutput, error)
 	if attempt > 1 {
 		slog.WarnContext(ctx, "tool retry",
 			"area", telemetry.AreaHarness, "session_id", in.SessionID,
-			"agent_id", in.AgentID, "tool", in.Call.Name, "attempt", attempt)
+			"agent_id", in.Rec.AgentID, "tool", in.Call.Name, "attempt", attempt)
 	} else {
 		slog.InfoContext(ctx, "tool started",
 			"area", telemetry.AreaHarness, "session_id", in.SessionID,
-			"agent_id", in.AgentID, "tool", in.Call.Name, "namespace", in.Call.Namespace)
+			"agent_id", in.Rec.AgentID, "tool", in.Call.Name, "namespace", in.Call.Namespace)
 	}
 	stream := a.openStream(ctx)
 	defer closeStream(ctx, stream)
 	if attempt > 1 {
 		_ = a.publish(ctx, stream, in.SessionID, durable.TopicRetry, tacklr.StreamEvent{Type: tacklr.StreamEventError, Content: "retry"}, true)
 	}
-	h, ms, skillsMS, rev, err := a.harness(ctx, in.SessionID, in.Parent, in.AgentID, in.MCPServers, in.Mounts, in.Specialist, in.State)
+	h, ms, skillsMS, rev, err := a.harness(ctx, in.SessionID, in.Rec, in.MCPServers, in.State)
 	if err != nil {
 		slog.ErrorContext(ctx, "tool harness", "area", telemetry.AreaHarness, "error", err)
 		return toolOutput{}, err
 	}
 	defer func() {
 		h.Close()
-		durable.CloseTurnTrees(ms, skillsMS, string(in.SessionID), "tool")
+		adapter.CloseTurnTrees(ms, skillsMS, string(in.SessionID), "tool")
 	}()
 	kids := &activityChildren{
 		parent:  in.SessionID,
-		agentID: in.AgentID,
+		agentID: in.Rec.AgentID,
 		catalog: a.Catalog,
-		known:   append([]durable.SessionID(nil), in.Children...),
+		known:   append([]durable.SessionID(nil), in.Rec.Children...),
 	}
 	h.BindChildHost(kids)
 	eng := h.Drive()
@@ -261,10 +242,7 @@ func (a *activities) Tool(ctx context.Context, in toolInput) (toolOutput, error)
 		}
 		slog.ErrorContext(ctx, "tool failed", "area", telemetry.AreaHarness, "tool", in.Call.Name, "error", runErr)
 	}
-	_, saveErr := a.save(ctx, in.SessionID, h, rev, durable.Snapshot{
-		AgentID: in.AgentID, Specialist: in.Specialist, Parent: in.Parent,
-		Children: in.Children, Mounts: in.Mounts,
-	})
+	_, saveErr := a.save(ctx, in.SessionID, h, rev, in.Rec)
 	if saveErr != nil {
 		slog.ErrorContext(ctx, "tool persist", "area", telemetry.AreaHarness, "error", saveErr)
 		if runErr != nil {
@@ -291,19 +269,16 @@ func (a *activities) Tool(ctx context.Context, in toolInput) (toolOutput, error)
 }
 
 func (a *activities) CommitToolOutput(ctx context.Context, in commitToolInput) (toolOutput, error) {
-	h, ms, skillsMS, rev, err := a.harness(ctx, in.SessionID, in.Parent, in.AgentID, in.MCPServers, in.Mounts, in.Specialist, in.State)
+	h, ms, skillsMS, rev, err := a.harness(ctx, in.SessionID, in.Rec, in.MCPServers, in.State)
 	if err != nil {
 		return toolOutput{}, err
 	}
 	defer func() {
 		h.Close()
-		durable.CloseTurnTrees(ms, skillsMS, string(in.SessionID), "commit_tool")
+		adapter.CloseTurnTrees(ms, skillsMS, string(in.SessionID), "commit_tool")
 	}()
 	h.Drive().RecordToolResult(in.Call, in.Output)
-	if _, err = a.save(ctx, in.SessionID, h, rev, durable.Snapshot{
-		AgentID: in.AgentID, Specialist: in.Specialist, Parent: in.Parent,
-		Children: in.Children, Mounts: in.Mounts,
-	}); err != nil {
+	if _, err = a.save(ctx, in.SessionID, h, rev, in.Rec); err != nil {
 		return toolOutput{}, err
 	}
 	presented := in.Call
@@ -319,30 +294,23 @@ func (a *activities) CommitToolOutput(ctx context.Context, in commitToolInput) (
 	return toolOutput{}, nil
 }
 
-func (a *activities) harness(ctx context.Context, id, parent durable.SessionID, agentID string, extraMCP []mcp.MCPConfig, mounts []durable.MountRecipe, specialist string, state map[string]any) (*tacklr.TurnManager, *vfs.MountSession, *vfs.MountSession, durable.Revision, error) {
+func (a *activities) harness(ctx context.Context, id durable.SessionID, rec durable.Snapshot, extraMCP []mcp.MCPConfig, state map[string]any) (*tacklr.TurnManager, *vfs.MountSession, *vfs.MountSession, durable.Revision, error) {
 	sec, err := a.Secrets.Get(ctx, id)
 	if err != nil {
 		return nil, nil, nil, "", err
 	}
-	hasTok := false
-	for _, b := range sec.Auth.Bindings {
-		if strings.TrimSpace(b.Auth.Token) != "" {
-			hasTok = true
-			break
-		}
-	}
-	if !hasTok && parent != "" {
-		sec, err = a.Secrets.Get(ctx, parent)
+	if len(sec.Auth.Bindings) == 0 && rec.Parent != "" {
+		sec, err = a.Secrets.Get(ctx, rec.Parent)
 		if err != nil {
 			return nil, nil, nil, "", err
 		}
 	}
-	spec, ok := a.Catalog.Lookup(agentID)
+	spec, ok := a.Catalog.Lookup(rec.AgentID)
 	if !ok {
 		return nil, nil, nil, "", durable.ErrAgentNotFound
 	}
-	if specialist != "" {
-		over, err := durable.OverlaySpecialist(spec, specialist)
+	if rec.Specialist != "" {
+		over, err := adapter.OverlaySpecialist(spec, rec.Specialist)
 		if err != nil {
 			return nil, nil, nil, "", err
 		}
@@ -352,7 +320,7 @@ func (a *activities) harness(ctx context.Context, id, parent durable.SessionID, 
 	if proj == nil {
 		proj = vfs.DirectProjection{}
 	}
-	ms, skillsMS, err := durable.OpenTurnSessions(ctx, string(id), spec, durable.BindingsForTurn(mounts, sec.Auth), proj)
+	ms, skillsMS, err := adapter.OpenTurnSessions(ctx, string(id), spec, adapter.BindingsForTurn(rec.Mounts, sec.Auth), proj)
 	if err != nil {
 		return nil, nil, nil, "", err
 	}
@@ -369,7 +337,7 @@ func (a *activities) harness(ctx context.Context, id, parent durable.SessionID, 
 	}
 	h, err := tacklr.NewTurnManager(ctx, opts)
 	if err != nil {
-		durable.CloseTurnTrees(ms, skillsMS, string(id), "construct")
+		adapter.CloseTurnTrees(ms, skillsMS, string(id), "construct")
 		return nil, nil, nil, "", err
 	}
 	var rev durable.Revision
@@ -378,19 +346,19 @@ func (a *activities) harness(ctx context.Context, id, parent durable.SessionID, 
 	case loadErr == nil:
 		if err := h.RestoreCheckpoint(snap.Checkpoint); err != nil {
 			h.Close()
-			durable.CloseTurnTrees(ms, skillsMS, string(id), "restore")
+			adapter.CloseTurnTrees(ms, skillsMS, string(id), "restore")
 			return nil, nil, nil, "", err
 		}
 		rev = loaded
 	case errors.Is(loadErr, durable.ErrSessionNotFound):
 	default:
 		h.Close()
-		durable.CloseTurnTrees(ms, skillsMS, string(id), "load")
+		adapter.CloseTurnTrees(ms, skillsMS, string(id), "load")
 		return nil, nil, nil, "", loadErr
 	}
 	if err := h.ApplySessionState(state); err != nil {
 		h.Close()
-		durable.CloseTurnTrees(ms, skillsMS, string(id), "state")
+		adapter.CloseTurnTrees(ms, skillsMS, string(id), "state")
 		return nil, nil, nil, "", err
 	}
 	return h, ms, skillsMS, rev, nil

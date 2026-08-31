@@ -52,7 +52,7 @@ Session data is three frozen planes. Do not mix them:
 
 | Plane | You pass | Holds |
 |-------|----------|--------|
-| **SnapshotStore** | `Config.Snapshots` | Window, plan, parked interrupt, `userState`, VFS recipes, session identity |
+| **SnapshotStore** | `Config.Snapshots` (Temporal: required, same instance on New and NewWorker) | Window, plan, parked interrupt, `userState`, VFS recipes, session identity |
 | **Wait loop** | `inprocess.New` or `temporal.New` + `NewWorker` | Scheduler: leftover Temporal tool calls, MCP Durable topology, child futures, Status |
 | **SecretStorage** | `temporal.Config.Secrets` (required; same instance on New and NewWorker) | VFS tokens. Not in snapshots. Not in Temporal history |
 
@@ -214,7 +214,7 @@ func openVFS(jail string, eng *brain.Engine, ns brain.Namespace) vfs.OpenVFS {
 }
 ```
 
-Same Catalog and SnapshotStore on Temporal. `Secrets` is required and must be one instance both processes can `Get`:
+Same Catalog, SnapshotStore, and SecretStorage on Temporal. `Snapshots` and `Secrets` are required and must be one instance both processes share:
 
 ```go
 import (

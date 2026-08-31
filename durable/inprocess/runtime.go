@@ -11,6 +11,7 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
+	adapter "github.com/ryanaldo34/tacklr/durable/internal"
 	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/telemetry"
 	"github.com/ryanaldo34/tacklr/vfs"
@@ -81,7 +82,8 @@ type Runtime struct {
 
 // Config is the single in-process host config for New.
 type Config struct {
-	Catalog    durable.Catalog
+	Catalog durable.Catalog
+	// Snapshots is the session record. Nil uses MemorySnapshot.
 	Snapshots  durable.SnapshotStore
 	Projection vfs.Projection
 }
@@ -138,11 +140,11 @@ func (r *Runtime) CreateSession(ctx context.Context, req durable.CreateSession) 
 		if !ok {
 			return "", fmt.Errorf("%w: %s", durable.ErrAgentNotFound, agentID)
 		}
-		if _, err := durable.OverlaySpecialist(spec, req.Specialist); err != nil {
+		if _, err := adapter.OverlaySpecialist(spec, req.Specialist); err != nil {
 			return "", err
 		}
 	}
-	seed, err := durable.EncodeUserState(req.State)
+	seed, err := adapter.EncodeUserState(req.State)
 	if err != nil {
 		return "", err
 	}
@@ -151,7 +153,7 @@ func (r *Runtime) CreateSession(ctx context.Context, req durable.CreateSession) 
 		id = durable.SessionID(uuid.NewString())
 	}
 	mcp := slices.Clone(req.MCPServers)
-	mounts := durable.ApplyAuth(req.Mounts, durable.AuthContext{})
+	mounts := adapter.ApplyAuth(req.Mounts, durable.AuthContext{})
 	if parent != nil {
 		if len(mcp) == 0 {
 			mcp = slices.Clone(parent.mcp)
@@ -255,7 +257,7 @@ func (r *Runtime) waitPriorTurn(ctx context.Context, p *sessionProc, abort bool)
 
 // Prompt implements durable.Runtime.
 func (r *Runtime) Prompt(ctx context.Context, sessionID durable.SessionID, msg durable.Prompt) error {
-	encoded, err := durable.EncodeUserState(msg.State)
+	encoded, err := adapter.EncodeUserState(msg.State)
 	if err != nil {
 		return err
 	}
@@ -265,7 +267,7 @@ func (r *Runtime) Prompt(ctx context.Context, sessionID durable.SessionID, msg d
 
 // Resume implements durable.Runtime.
 func (r *Runtime) Resume(ctx context.Context, sessionID durable.SessionID, resume durable.Resume) error {
-	encoded, err := durable.EncodeUserState(resume.State)
+	encoded, err := adapter.EncodeUserState(resume.State)
 	if err != nil {
 		return err
 	}
@@ -353,7 +355,6 @@ func (r *Runtime) Close(ctx context.Context, sessionID durable.SessionID) error 
 	}
 	_ = r.snapshots.Delete(ctx, sessionID)
 	_ = r.events.CloseSession(ctx, sessionID)
-	durable.ClearSessionVFS(r.catalog, sessionID)
 	r.mu.Lock()
 	delete(r.sessions, sessionID)
 	r.mu.Unlock()
@@ -499,7 +500,7 @@ func (r *Runtime) loop(p *sessionProc) {
 				promptLen = len(user.Content)
 			}
 		}
-		p.mounts = durable.ApplyAuth(p.mounts, auth)
+		p.mounts = adapter.ApplyAuth(p.mounts, auth)
 		p.auth = auth
 		p.mu.Lock()
 		p.yielded = false
@@ -507,7 +508,7 @@ func (r *Runtime) loop(p *sessionProc) {
 		p.result = ""
 		p.termErr = nil
 		p.mu.Unlock()
-		bindings := durable.BindingsForTurn(p.mounts, auth)
+		bindings := adapter.BindingsForTurn(p.mounts, auth)
 		turnCtx, cancel := context.WithCancel(parent)
 		done := make(chan struct{})
 		p.mu.Lock()
@@ -522,7 +523,7 @@ func (r *Runtime) loop(p *sessionProc) {
 			defer cancel()
 			ctx, end := r.recordTurn(turnCtx, p.agentID, string(p.id), kind, promptLen, resumeCount)
 			p.mu.Lock()
-			overlay := durable.MergeUserState(p.state, turnState)
+			overlay := adapter.MergeUserState(p.state, turnState)
 			p.mu.Unlock()
 			outcome := r.runTurn(ctx, p, user, resume, bindings, overlay)
 			if outcome == turnCancelled {
@@ -557,5 +558,3 @@ func promptMessage(msg durable.Prompt) *tacklr.Message {
 	}
 	return &tacklr.Message{Role: tacklr.RoleUser, Content: msg.Text}
 }
-
-var _ durable.Runtime = (*Runtime)(nil)

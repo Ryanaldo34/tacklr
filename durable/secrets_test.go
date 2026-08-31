@@ -7,30 +7,51 @@ import (
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
-func TestMemorySecretStorage_putGetReplaceDelete(t *testing.T) {
+func TestMemorySecretStorage(t *testing.T) {
 	s := NewMemorySecretStorage()
+	if err := s.Put(t.Context(), "", Secrets{Auth: AuthContext{Bindings: []vfs.Binding{{
+		Auth: vfs.Credential{Token: "x"},
+	}}}}); err == nil {
+		t.Fatal("empty session id")
+	}
+
 	id := SessionID("sess")
-	first := Secrets{Auth: AuthContext{Bindings: []vfs.Binding{{
+	in := Secrets{Auth: AuthContext{Bindings: []vfs.Binding{{
 		Provider: "gdrive",
-		Auth:     vfs.Credential{Token: "tok-1"},
+		Params:   map[string]string{vfs.ParamName: "docs"},
+		Auth:     vfs.Credential{Token: "tok-1", ExpiresAt: time.Now()},
 	}}}}
-	if err := s.Put(t.Context(), id, first); err != nil {
+	if err := s.Put(t.Context(), id, in); err != nil {
 		t.Fatal(err)
 	}
+	in.Auth.Bindings[0].Auth.Token = "mutated"
+	in.Auth.Bindings[0].Params[vfs.ParamName] = "other"
 	got, err := s.Get(t.Context(), id)
 	if err != nil || len(got.Auth.Bindings) != 1 || got.Auth.Bindings[0].Auth.Token != "tok-1" {
 		t.Fatalf("get after put: %+v %v", got, err)
 	}
-	second := Secrets{Auth: AuthContext{Bindings: []vfs.Binding{{
+	got.Auth.Bindings[0].Auth.Token = "from-get"
+	again, _ := s.Get(t.Context(), id)
+	if again.Auth.Bindings[0].Auth.Token != "tok-1" {
+		t.Fatalf("store aliased get: %q", again.Auth.Bindings[0].Auth.Token)
+	}
+
+	if err := s.Put(t.Context(), id, Secrets{Auth: AuthContext{Bindings: []vfs.Binding{{
 		Provider: "gdrive",
 		Auth:     vfs.Credential{Token: "tok-2"},
-	}}}}
-	if err := s.Put(t.Context(), id, second); err != nil {
+	}}}}); err != nil {
 		t.Fatal(err)
 	}
 	got, err = s.Get(t.Context(), id)
 	if err != nil || got.Auth.Bindings[0].Auth.Token != "tok-2" {
 		t.Fatalf("replace: %+v %v", got, err)
+	}
+	if err := s.Put(t.Context(), id, Secrets{Auth: AuthContext{Drop: []string{"docs"}}}); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.Get(t.Context(), id)
+	if err != nil || got.Auth.Bindings[0].Auth.Token != "tok-2" {
+		t.Fatalf("drop-only wiped bag: %+v %v", got, err)
 	}
 	if err := s.Delete(t.Context(), id); err != nil {
 		t.Fatal(err)
@@ -38,65 +59,6 @@ func TestMemorySecretStorage_putGetReplaceDelete(t *testing.T) {
 	got, err = s.Get(t.Context(), id)
 	if err != nil || len(got.Auth.Bindings) != 0 {
 		t.Fatalf("after delete: %+v %v", got, err)
-	}
-}
-
-func TestMemorySecretStorage_dropOnlyLeavesBag(t *testing.T) {
-	s := NewMemorySecretStorage()
-	id := SessionID("sess")
-	if err := s.Put(t.Context(), id, Secrets{Auth: AuthContext{Bindings: []vfs.Binding{{
-		Provider: "gdrive", Auth: vfs.Credential{Token: "keep"},
-	}}}}); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Put(t.Context(), id, Secrets{Auth: AuthContext{Drop: []string{"docs"}}}); err != nil {
-		t.Fatal(err)
-	}
-	got, err := s.Get(t.Context(), id)
-	if err != nil || len(got.Auth.Bindings) != 1 || got.Auth.Bindings[0].Auth.Token != "keep" {
-		t.Fatalf("drop-only wiped bag: %+v %v", got, err)
-	}
-}
-
-func TestMemorySecretStorage_getMissAndEmptyID(t *testing.T) {
-	s := NewMemorySecretStorage()
-	got, err := s.Get(t.Context(), "missing")
-	if err != nil || len(got.Auth.Bindings) != 0 {
-		t.Fatalf("miss: %+v %v", got, err)
-	}
-	if err := s.Put(t.Context(), "", Secrets{Auth: AuthContext{Bindings: []vfs.Binding{{
-		Auth: vfs.Credential{Token: "x"},
-	}}}}); err == nil {
-		t.Fatal("empty session id")
-	}
-	if err := s.Delete(t.Context(), ""); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestMemorySecretStorage_putDoesNotAliasInput(t *testing.T) {
-	s := NewMemorySecretStorage()
-	in := Secrets{Auth: AuthContext{Bindings: []vfs.Binding{{
-		Provider: "gdrive",
-		Params:   map[string]string{vfs.ParamName: "docs"},
-		Auth:     vfs.Credential{Token: "tok", ExpiresAt: time.Now()},
-	}}}}
-	if err := s.Put(t.Context(), "s", in); err != nil {
-		t.Fatal(err)
-	}
-	in.Auth.Bindings[0].Auth.Token = "mutated"
-	in.Auth.Bindings[0].Params[vfs.ParamName] = "other"
-	got, err := s.Get(t.Context(), "s")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Auth.Bindings[0].Auth.Token != "tok" {
-		t.Fatalf("store aliased put: %q", got.Auth.Bindings[0].Auth.Token)
-	}
-	got.Auth.Bindings[0].Auth.Token = "from-get"
-	again, _ := s.Get(t.Context(), "s")
-	if again.Auth.Bindings[0].Auth.Token != "tok" {
-		t.Fatalf("store aliased get: %q", again.Auth.Bindings[0].Auth.Token)
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
+	adapter "github.com/ryanaldo34/tacklr/durable/internal"
 	"github.com/ryanaldo34/tacklr/interrupt"
 )
 
@@ -34,7 +35,7 @@ type sessionChildren struct {
 }
 
 func (s sessionChildren) SpawnChild(ctx context.Context, specialist, task, callID string) (string, error) {
-	specialist, task, err := durable.NormalizeSpawn(specialist, task)
+	specialist, task, err := adapter.NormalizeSpawn(specialist, task)
 	if err != nil {
 		return "", err
 	}
@@ -82,7 +83,7 @@ func (s sessionChildren) Children() []tacklr.Child {
 func (s sessionChildren) CancelChild(ctx context.Context, id string) error {
 	sid := durable.SessionID(id)
 	if !s.r.ownsChild(s.p, sid) {
-		return durable.UnknownChild(id)
+		return adapter.UnknownChild(id)
 	}
 	_ = s.r.Close(ctx, sid)
 	s.r.dropChild(s.p, sid)
@@ -92,13 +93,13 @@ func (s sessionChildren) CancelChild(ctx context.Context, id string) error {
 func (s sessionChildren) AwaitChild(ctx context.Context, id, callID string) (tacklr.Child, error) {
 	sid := durable.SessionID(id)
 	if !s.r.ownsChild(s.p, sid) {
-		return tacklr.Child{}, durable.UnknownChild(id)
+		return tacklr.Child{}, adapter.UnknownChild(id)
 	}
 	return s.r.waitChild(ctx, s.p, sid, callID)
 }
 
 func childFromStatus(st durable.SessionStatus) tacklr.Child {
-	c := tacklr.Child{ID: string(st.ID), Specialist: st.Specialist, State: durable.ChildState(st.State), Result: st.Result}
+	c := tacklr.Child{ID: string(st.ID), Specialist: st.Specialist, State: adapter.ChildState(st.State), Result: st.Result}
 	if st.State == durable.SessionFailed && c.Result == "" && st.Err != nil {
 		c.Result = st.Err.Error()
 	}
