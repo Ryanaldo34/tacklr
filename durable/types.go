@@ -18,7 +18,8 @@ type Seq uint64
 // AuthContext is credentials and mount intent for one work item (Prompt, Resume,
 // or a one-shot child workflow). Protocols map their wire auth into this type.
 // Autonomous hosts set it on the payload that queues the work. Tokens are not
-// stored in SnapshotStore.
+// stored in SnapshotStore or Temporal event history. The Temporal adapter
+// writes them to SecretStorage before signaling.
 type AuthContext struct {
 	// Bindings are this slice's mounts and/or provider tokens. A binding with
 	// an alias upserts the recipe. A binding with only provider+token refreshes
