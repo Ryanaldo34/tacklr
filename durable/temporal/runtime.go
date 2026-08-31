@@ -1,3 +1,6 @@
+// Package temporal is the Temporal adapter for durable.Runtime.
+// Hosts use Dial, New, and NewWorker with the same Config (including Secrets).
+// NewWorker registers SessionWorkflow and the turn activities.
 package temporal
 
 import (
@@ -156,7 +159,7 @@ func (r *Runtime) CreateSession(ctx context.Context, req durable.CreateSession) 
 	_, err = r.client.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
 		ID:        string(id),
 		TaskQueue: r.taskQueue,
-	}, SessionWorkflow, WorkflowInput{
+	}, SessionWorkflow, workflowInput{
 		SessionID:           id,
 		AgentID:             agentID,
 		MCPServers:          mcp.DurableConfigs(req.MCPServers),

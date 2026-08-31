@@ -14,6 +14,7 @@ import (
 )
 
 // CloseTurnVFS unmounts a turn-scoped MountSession (FUSE telemetry, Close, host dir).
+// Runtime adapters only.
 func CloseTurnVFS(ms *vfs.MountSession, sessionID, reason string) {
 	if ms == nil {
 		return

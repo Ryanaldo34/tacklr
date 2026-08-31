@@ -24,12 +24,12 @@ type childRun struct {
 	err     string
 }
 
-func startChild(ctx, sessionCtx workflow.Context, parent durable.SessionID, agentID, specialist, task string, childID durable.SessionID, mounts []durable.MountRecipe, in WorkflowInput) (childRun, error) {
+func startChild(ctx, sessionCtx workflow.Context, parent durable.SessionID, agentID, specialist, task string, childID durable.SessionID, mounts []durable.MountRecipe, in workflowInput) (childRun, error) {
 	cctx := workflow.WithChildOptions(sessionCtx, workflow.ChildWorkflowOptions{
 		WorkflowID:        string(childID),
 		ParentClosePolicy: enumspb.PARENT_CLOSE_POLICY_REQUEST_CANCEL,
 	})
-	fut := workflow.ExecuteChildWorkflow(cctx, SessionWorkflow, WorkflowInput{
+	fut := workflow.ExecuteChildWorkflow(cctx, SessionWorkflow, workflowInput{
 		SessionID:           childID,
 		AgentID:             agentID,
 		Parent:              parent,
@@ -90,8 +90,8 @@ func cancelOne(ctx workflow.Context, spawned *[]childRun, id durable.SessionID) 
 func applyChildIntent(
 	ctx, sessionCtx workflow.Context,
 	spawned *[]childRun,
-	tout ToolOutput,
-	in WorkflowInput,
+	tout toolOutput,
+	in workflowInput,
 	agentID string,
 	mounts []durable.MountRecipe,
 ) error {

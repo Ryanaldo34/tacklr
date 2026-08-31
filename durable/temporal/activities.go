@@ -45,8 +45,8 @@ func canceledIf(ctx context.Context, err error) error {
 	return err
 }
 
-// Activities are the Inference and Tool bodies registered on the worker.
-type Activities struct {
+// activities are the Inference and Tool bodies registered on the worker.
+type activities struct {
 	Catalog        durable.Catalog
 	Snapshots      durable.SnapshotStore
 	Projection     vfs.Projection
@@ -55,10 +55,10 @@ type Activities struct {
 	Secrets        durable.SecretStorage
 }
 
-// InferenceInput is one Inference step. Mounts and identity are the Snapshot
+// inferenceInput is one Inference step. Mounts and identity are the Snapshot
 // row this activity will save. State is the Prompt/Resume overlay, not a
 // Temporal copy of userState. Auth is ignored when Secrets is set.
-type InferenceInput struct {
+type inferenceInput struct {
 	SessionID     durable.SessionID
 	Parent        durable.SessionID
 	AgentID       string
@@ -74,15 +74,15 @@ type InferenceInput struct {
 	State         map[string]any
 }
 
-// InferenceOutput is the typed Inference activity result.
-type InferenceOutput struct {
+// inferenceOutput is the typed Inference activity result.
+type inferenceOutput struct {
 	Complete  bool
 	ToolCalls []tacklr.ToolCall
 	Result    string
 }
 
-// ToolInput is the typed Tool activity argument.
-type ToolInput struct {
+// toolInput is the typed Tool activity argument.
+type toolInput struct {
 	SessionID  durable.SessionID
 	Parent     durable.SessionID
 	AgentID    string
@@ -96,9 +96,9 @@ type ToolInput struct {
 	State    map[string]any
 }
 
-// ToolOutput is the typed Tool activity result. Spawn/cancel/await are this
+// toolOutput is the typed Tool activity result. Spawn/cancel/await are this
 // call's Runtime intent; the workflow starts, cancels, or waits via ExecuteChildWorkflow.
-type ToolOutput struct {
+type toolOutput struct {
 	Interrupted   bool
 	InterruptID   string
 	InterruptData []byte
@@ -109,9 +109,9 @@ type ToolOutput struct {
 	AwaitID       durable.SessionID
 }
 
-// CommitToolInput records a tool output on the staged batch without executing
+// commitToolInput records a tool output on the staged batch without executing
 // the tool. SessionWorkflow uses this after spawn_specialist child completion.
-type CommitToolInput struct {
+type commitToolInput struct {
 	SessionID  durable.SessionID
 	Parent     durable.SessionID
 	AgentID    string
@@ -125,7 +125,7 @@ type CommitToolInput struct {
 	State      map[string]any
 }
 
-func (a *Activities) Inference(ctx context.Context, in InferenceInput) (InferenceOutput, error) {
+func (a *activities) Inference(ctx context.Context, in inferenceInput) (inferenceOutput, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	defer bindLiveTurn(in.SessionID, cancel)()
@@ -156,7 +156,7 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 			pub = err
 		}
 		slog.ErrorContext(ctx, "inference harness", "area", telemetry.AreaRuntime, "error", pub)
-		return InferenceOutput{}, canceledIf(ctx, err)
+		return inferenceOutput{}, canceledIf(ctx, err)
 	}
 	defer func() {
 		h.Close()
@@ -167,20 +167,20 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 	defer stop()
 	if len(in.Resume) > 0 {
 		if err := eng.ApplyResume(in.Resume); err != nil {
-			return InferenceOutput{}, canceledIf(ctx, err)
+			return inferenceOutput{}, canceledIf(ctx, err)
 		}
 		if pending := eng.PendingToolCalls(); len(pending) > 0 {
 			_, err = a.save(ctx, in.SessionID, h, rev, durable.Snapshot{
 				AgentID: in.AgentID, Specialist: in.Specialist, Parent: in.Parent,
 				Children: in.Children, Mounts: in.Mounts,
 			})
-			return InferenceOutput{ToolCalls: pending}, err
+			return inferenceOutput{ToolCalls: pending}, err
 		}
 	}
 	if in.User != nil {
 		if err := eng.AbsorbUser(ctx, in.User, out); err != nil {
 			slog.ErrorContext(ctx, "inference absorb", "area", telemetry.AreaRuntime, "error", err)
-			return InferenceOutput{}, canceledIf(ctx, err)
+			return inferenceOutput{}, canceledIf(ctx, err)
 		}
 	}
 	st := &tacklr.TurnState{HadToolRound: in.HadToolRound, ModelRequests: in.ModelRequests}
@@ -191,14 +191,14 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 		} else {
 			slog.ErrorContext(ctx, "inference failed", "area", telemetry.AreaRuntime, "error", err)
 		}
-		return InferenceOutput{}, canceledIf(ctx, err)
+		return inferenceOutput{}, canceledIf(ctx, err)
 	}
 	if _, err = a.save(ctx, in.SessionID, h, rev, durable.Snapshot{
 		AgentID: in.AgentID, Specialist: in.Specialist, Parent: in.Parent,
 		Children: in.Children, Mounts: in.Mounts,
 	}); err != nil {
 		slog.ErrorContext(ctx, "inference persist", "area", telemetry.AreaRuntime, "error", err)
-		return InferenceOutput{}, err
+		return inferenceOutput{}, err
 	}
 	result := ""
 	if step.Complete {
@@ -210,10 +210,10 @@ func (a *Activities) Inference(ctx context.Context, in InferenceInput) (Inferenc
 	}
 	slog.InfoContext(ctx, "inference completed",
 		"area", telemetry.AreaRuntime, "complete", step.Complete, "tool_calls", len(step.ToolCalls))
-	return InferenceOutput{Complete: step.Complete, ToolCalls: step.ToolCalls, Result: result}, nil
+	return inferenceOutput{Complete: step.Complete, ToolCalls: step.ToolCalls, Result: result}, nil
 }
 
-func (a *Activities) Tool(ctx context.Context, in ToolInput) (ToolOutput, error) {
+func (a *activities) Tool(ctx context.Context, in toolInput) (toolOutput, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	defer bindLiveTurn(in.SessionID, cancel)()
@@ -240,7 +240,7 @@ func (a *Activities) Tool(ctx context.Context, in ToolInput) (ToolOutput, error)
 	h, ms, skillsMS, rev, err := a.harness(ctx, in.SessionID, in.Parent, in.AgentID, in.MCPServers, in.Auth, in.Mounts, in.Specialist, in.State)
 	if err != nil {
 		slog.ErrorContext(ctx, "tool harness", "area", telemetry.AreaHarness, "error", err)
-		return ToolOutput{}, err
+		return toolOutput{}, err
 	}
 	defer func() {
 		h.Close()
@@ -260,7 +260,7 @@ func (a *Activities) Tool(ctx context.Context, in ToolInput) (ToolOutput, error)
 	if runErr != nil {
 		if err := ctx.Err(); err != nil {
 			slog.WarnContext(ctx, "tool cancelled", "area", telemetry.AreaHarness, "tool", in.Call.Name)
-			return ToolOutput{}, canceledIf(ctx, runErr)
+			return toolOutput{}, canceledIf(ctx, runErr)
 		}
 		slog.ErrorContext(ctx, "tool failed", "area", telemetry.AreaHarness, "tool", in.Call.Name, "error", runErr)
 	}
@@ -271,9 +271,9 @@ func (a *Activities) Tool(ctx context.Context, in ToolInput) (ToolOutput, error)
 	if saveErr != nil {
 		slog.ErrorContext(ctx, "tool persist", "area", telemetry.AreaHarness, "error", saveErr)
 		if runErr != nil {
-			return ToolOutput{}, fmt.Errorf("tool: %w: persist: %w", runErr, saveErr)
+			return toolOutput{}, fmt.Errorf("tool: %w: persist: %w", runErr, saveErr)
 		}
-		return ToolOutput{}, saveErr
+		return toolOutput{}, saveErr
 	}
 	status := "success"
 	if step.Interrupted {
@@ -281,7 +281,7 @@ func (a *Activities) Tool(ctx context.Context, in ToolInput) (ToolOutput, error)
 	}
 	slog.InfoContext(ctx, "tool completed",
 		"area", telemetry.AreaHarness, "tool", in.Call.Name, "status", status)
-	return ToolOutput{
+	return toolOutput{
 		Interrupted:   step.Interrupted,
 		InterruptID:   step.InterruptID,
 		InterruptData: step.InterruptData,
@@ -293,10 +293,10 @@ func (a *Activities) Tool(ctx context.Context, in ToolInput) (ToolOutput, error)
 	}, nil
 }
 
-func (a *Activities) CommitToolOutput(ctx context.Context, in CommitToolInput) (ToolOutput, error) {
+func (a *activities) CommitToolOutput(ctx context.Context, in commitToolInput) (toolOutput, error) {
 	h, ms, skillsMS, rev, err := a.harness(ctx, in.SessionID, in.Parent, in.AgentID, in.MCPServers, in.Auth, in.Mounts, in.Specialist, in.State)
 	if err != nil {
-		return ToolOutput{}, err
+		return toolOutput{}, err
 	}
 	defer func() {
 		h.Close()
@@ -307,7 +307,7 @@ func (a *Activities) CommitToolOutput(ctx context.Context, in CommitToolInput) (
 		AgentID: in.AgentID, Specialist: in.Specialist, Parent: in.Parent,
 		Children: in.Children, Mounts: in.Mounts,
 	}); err != nil {
-		return ToolOutput{}, err
+		return toolOutput{}, err
 	}
 	presented := in.Call
 	presented.Status = "success"
@@ -319,10 +319,10 @@ func (a *Activities) CommitToolOutput(ctx context.Context, in CommitToolInput) (
 		Content:   in.Output,
 		ToolCalls: []tacklr.ToolCall{presented},
 	}, true)
-	return ToolOutput{}, nil
+	return toolOutput{}, nil
 }
 
-func (a *Activities) harness(ctx context.Context, id, parent durable.SessionID, agentID string, extraMCP []mcp.MCPConfig, auth durable.AuthContext, mounts []durable.MountRecipe, specialist string, state map[string]any) (*tacklr.TurnManager, *vfs.MountSession, *vfs.MountSession, durable.Revision, error) {
+func (a *activities) harness(ctx context.Context, id, parent durable.SessionID, agentID string, extraMCP []mcp.MCPConfig, auth durable.AuthContext, mounts []durable.MountRecipe, specialist string, state map[string]any) (*tacklr.TurnManager, *vfs.MountSession, *vfs.MountSession, durable.Revision, error) {
 	if a.Secrets != nil {
 		sec, err := a.Secrets.Get(ctx, id)
 		if err != nil {
@@ -402,7 +402,7 @@ func (a *Activities) harness(ctx context.Context, id, parent durable.SessionID, 
 	return h, ms, skillsMS, rev, nil
 }
 
-func (a *Activities) save(ctx context.Context, id durable.SessionID, h *tacklr.TurnManager, expected durable.Revision, rec durable.Snapshot) (durable.Revision, error) {
+func (a *activities) save(ctx context.Context, id durable.SessionID, h *tacklr.TurnManager, expected durable.Revision, rec durable.Snapshot) (durable.Revision, error) {
 	cp, err := h.Checkpoint()
 	if err != nil {
 		telemetry.RecordCheckpointAttempt(ctx, err)
@@ -416,7 +416,7 @@ func (a *Activities) save(ctx context.Context, id durable.SessionID, h *tacklr.T
 
 const streamBatchInterval = 200 * time.Millisecond
 
-func (a *Activities) openStream(ctx context.Context) *workflowstreams.Client {
+func (a *activities) openStream(ctx context.Context) *workflowstreams.Client {
 	if a.DisableStreams || !activity.IsActivity(ctx) {
 		return nil
 	}
@@ -435,7 +435,7 @@ func closeStream(ctx context.Context, c *workflowstreams.Client) {
 	}
 }
 
-func (a *Activities) emitter(ctx context.Context, stream *workflowstreams.Client, sessionID durable.SessionID) func(tacklr.StreamEvent) {
+func (a *activities) emitter(ctx context.Context, stream *workflowstreams.Client, sessionID durable.SessionID) func(tacklr.StreamEvent) {
 	first := true
 	return func(ev tacklr.StreamEvent) {
 		switch ev.Type {
@@ -452,15 +452,15 @@ func (a *Activities) emitter(ctx context.Context, stream *workflowstreams.Client
 	}
 }
 
-// EmitEventInput is the typed EmitEvent activity argument.
-type EmitEventInput struct {
+// emitEventInput is the typed EmitEvent activity argument.
+type emitEventInput struct {
 	SessionID durable.SessionID
 	Event     tacklr.StreamEvent
 }
 
 // EmitEvent publishes a turn-finished stream event after SessionWorkflow has
 // committed Status (complete, failed, or yield).
-func (a *Activities) EmitEvent(ctx context.Context, in EmitEventInput) error {
+func (a *activities) EmitEvent(ctx context.Context, in emitEventInput) error {
 	stream := a.openStream(ctx)
 	defer closeStream(ctx, stream)
 	return a.publish(ctx, stream, in.SessionID, durable.TopicEvents, in.Event, true)
@@ -503,7 +503,7 @@ func publishContext(ctx context.Context) context.Context {
 	return context.WithoutCancel(ctx)
 }
 
-func (a *Activities) publish(ctx context.Context, stream *workflowstreams.Client, sessionID durable.SessionID, topic string, ev tacklr.StreamEvent, force bool) error {
+func (a *activities) publish(ctx context.Context, stream *workflowstreams.Client, sessionID durable.SessionID, topic string, ev tacklr.StreamEvent, force bool) error {
 	if ev.Error != nil && ev.Fail == "" {
 		ev.Fail = ev.Error.Error()
 	}

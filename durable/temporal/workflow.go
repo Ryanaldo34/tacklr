@@ -15,10 +15,9 @@ import (
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
-// SessionWorkflow is the harness wait loop: one Temporal workflow per agent session.
-// It is the primary OpenTelemetry instrumentor: one tacklr.turn span per prompt or
-// resume, with Inference/Tool activities as children via OTEL v2 propagation.
-func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
+// SessionWorkflow is the Temporal type name for the session wait loop.
+// NewWorker registers it. Hosts call durable.Runtime, not this function.
+func SessionWorkflow(ctx workflow.Context, in workflowInput) (string, error) {
 	logger := workflow.GetLogger(ctx)
 	if _, err := workflowstreams.NewWorkflowStream(ctx, nil); err != nil {
 		logger.Error("workflow stream", "error", err)
@@ -193,7 +192,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 			return err
 		}
 		emitEvent := func(ev tacklr.StreamEvent) {
-			_ = waitAct("EmitEvent", EmitEventInput{SessionID: in.SessionID, Event: ev}, nil)
+			_ = waitAct("EmitEvent", emitEventInput{SessionID: in.SessionID, Event: ev}, nil)
 		}
 		onActErr := func(err error) bool {
 			if err == nil {
@@ -225,8 +224,8 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 		for !stopSlice {
 			switch tacklr.Next(len(toolCalls), parked, inferComplete, len(spawned) > 0) {
 			case tacklr.ActionInfer:
-				var out InferenceOutput
-				err := waitAct("Inference", InferenceInput{
+				var out inferenceOutput
+				err := waitAct("Inference", inferenceInput{
 					SessionID:     in.SessionID,
 					Parent:        in.Parent,
 					AgentID:       agentID,
@@ -259,8 +258,8 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 				hadTools = true
 				tc := toolCalls[0]
 				rest := toolCalls[1:]
-				var tout ToolOutput
-				err := waitAct("Tool", ToolInput{
+				var tout toolOutput
+				err := waitAct("Tool", toolInput{
 					SessionID:  in.SessionID,
 					Parent:     in.Parent,
 					AgentID:    agentID,
@@ -286,8 +285,8 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 						break
 					}
 					if parkID == "" {
-						var cout ToolOutput
-						cerr := waitAct("CommitToolOutput", CommitToolInput{
+						var cout toolOutput
+						cerr := waitAct("CommitToolOutput", commitToolInput{
 							SessionID:  in.SessionID,
 							Parent:     in.Parent,
 							AgentID:    agentID,
@@ -360,8 +359,8 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 						openTurn(telemetry.TurnKindResume)
 						outcome, turnErr = telemetry.OutcomeOK, nil
 						actCtx = workflow.WithActivityOptions(sessionCtx, activityOpts)
-						var iout InferenceOutput
-						err := waitAct("Inference", InferenceInput{
+						var iout inferenceOutput
+						err := waitAct("Inference", inferenceInput{
 							SessionID:  in.SessionID,
 							Parent:     in.Parent,
 							AgentID:    agentID,
@@ -401,8 +400,8 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 				stopSlice = true
 			case tacklr.ActionNudge:
 				nudgeMsg := &tacklr.Message{Role: tacklr.RoleUser, Content: spawnedNudge(spawned)}
-				var out InferenceOutput
-				err := waitAct("Inference", InferenceInput{
+				var out inferenceOutput
+				err := waitAct("Inference", inferenceInput{
 					SessionID:     in.SessionID,
 					Parent:        in.Parent,
 					AgentID:       agentID,

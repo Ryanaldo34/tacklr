@@ -14,7 +14,8 @@ func ChildSessionID(parent SessionID, specialist, callID string) SessionID {
 }
 
 // OverlaySpecialist copies the parent catalog spec and applies the named Specialist.
-// Nested specialists stay on the child spec so grandchild spawn is the same path.
+// Runtime adapters only. Nested specialists stay on the child spec so grandchild
+// spawn is the same path.
 func OverlaySpecialist(parent AgentSpec, specialist string) (AgentSpec, error) {
 	spec := tacklr.FindSpecialist(parent.Options.Specialists, specialist)
 	if spec == nil {
@@ -30,6 +31,7 @@ func OverlaySpecialist(parent AgentSpec, specialist string) (AgentSpec, error) {
 }
 
 // ChildState is the tool-facing running/completed/failed for a session.
+// Runtime adapters only.
 func ChildState(st SessionState) string {
 	switch st {
 	case SessionComplete:
@@ -41,8 +43,9 @@ func ChildState(st SessionState) string {
 	}
 }
 
-// NormalizeSpawn trims spawn_specialist arguments. Specialist is required;
-// an empty task is allowed so a retry of the same callID can be idempotent.
+// NormalizeSpawn trims spawn_specialist arguments. Runtime adapters only.
+// Specialist is required; an empty task is allowed so a retry of the same
+// callID can be idempotent.
 func NormalizeSpawn(specialist, task string) (string, string, error) {
 	specialist = strings.TrimSpace(specialist)
 	task = strings.TrimSpace(task)
@@ -53,11 +56,13 @@ func NormalizeSpawn(specialist, task string) (string, string, error) {
 }
 
 // UnknownChild is get_child/cancel_child with an id that is not this session's child.
+// Runtime adapters only.
 func UnknownChild(id string) error {
 	return fmt.Errorf("job %q is unknown; call list_children and use an id from that list: %w", id, tacklr.ErrNotFound)
 }
 
 // ChildrenNudge is injected when inference would complete while children remain.
+// Runtime adapters only.
 func ChildrenNudge(rows []SessionStatus) string {
 	if len(rows) == 0 {
 		return ""

@@ -37,16 +37,16 @@ func TestActivities_unknownAgentAndDirectCall(t *testing.T) {
 	})
 	snaps := inprocess.NewMemorySnapshot()
 	log := inprocess.NewMemoryEventLog()
-	acts := &Activities{Catalog: cat, Snapshots: snaps, Fallback: log, DisableStreams: true}
-	_, err := acts.Inference(t.Context(), InferenceInput{SessionID: "s", AgentID: "nope"})
+	acts := &activities{Catalog: cat, Snapshots: snaps, Fallback: log, DisableStreams: true}
+	_, err := acts.Inference(t.Context(), inferenceInput{SessionID: "s", AgentID: "nope"})
 	if !errors.Is(err, durable.ErrAgentNotFound) {
 		t.Fatalf("missing agent: %v", err)
 	}
-	_, err = acts.Tool(t.Context(), ToolInput{SessionID: "s", AgentID: "nope", Call: tacklr.ToolCall{ID: "c", Name: "x"}})
+	_, err = acts.Tool(t.Context(), toolInput{SessionID: "s", AgentID: "nope", Call: tacklr.ToolCall{ID: "c", Name: "x"}})
 	if !errors.Is(err, durable.ErrAgentNotFound) {
 		t.Fatalf("tool missing agent: %v", err)
 	}
-	out, err := acts.Inference(t.Context(), InferenceInput{
+	out, err := acts.Inference(t.Context(), inferenceInput{
 		SessionID: "s", AgentID: "default",
 		User:  &tacklr.Message{Role: tacklr.RoleUser, Content: "hi"},
 		State: map[string]any{"user": "Ryan"},
@@ -169,8 +169,8 @@ func (l *retryLog) Append(ctx context.Context, id durable.SessionID, topic strin
 	return l.EventLog.Append(ctx, id, topic, ev)
 }
 
-func newActs(cat *durable.MemoryCatalog, log durable.EventLog, disableStreams bool) *Activities {
-	return &Activities{
+func newActs(cat *durable.MemoryCatalog, log durable.EventLog, disableStreams bool) *activities {
+	return &activities{
 		Catalog:        cat,
 		Snapshots:      inprocess.NewMemorySnapshot(),
 		Projection:     vfs.DirectProjection{},
@@ -204,7 +204,7 @@ func TestSessionWorkflow_promptCompletes(t *testing.T) {
 		env.SignalWorkflow(signalClose, nil)
 	}, 50*time.Millisecond)
 
-	env.ExecuteWorkflow(SessionWorkflow, WorkflowInput{SessionID: id, AgentID: "default"})
+	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id, AgentID: "default"})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
@@ -252,7 +252,7 @@ func TestSessionWorkflow_workerSessionFailedEndsTurn(t *testing.T) {
 	acts := newActs(cat, fallback, true)
 	env.RegisterWorkflow(SessionWorkflow)
 	env.RegisterActivity(acts)
-	env.OnActivity(acts.Tool, mock.Anything, mock.Anything).Return(ToolOutput{}, workflow.ErrSessionFailed)
+	env.OnActivity(acts.Tool, mock.Anything, mock.Anything).Return(toolOutput{}, workflow.ErrSessionFailed)
 
 	id := durable.SessionID("sess-session-failed")
 	env.RegisterDelayedCallback(func() {
@@ -262,7 +262,7 @@ func TestSessionWorkflow_workerSessionFailedEndsTurn(t *testing.T) {
 		env.SignalWorkflow(signalClose, nil)
 	}, 50*time.Millisecond)
 
-	env.ExecuteWorkflow(SessionWorkflow, WorkflowInput{SessionID: id, AgentID: "default"})
+	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id, AgentID: "default"})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
@@ -295,7 +295,7 @@ func TestSessionWorkflow_inferenceRefusedFailsTurn(t *testing.T) {
 		env.SignalWorkflow(signalClose, nil)
 	}, 50*time.Millisecond)
 
-	env.ExecuteWorkflow(SessionWorkflow, WorkflowInput{SessionID: id, AgentID: "default"})
+	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id, AgentID: "default"})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
@@ -348,7 +348,7 @@ func TestSessionWorkflow_activityRetryThenCompletes(t *testing.T) {
 		env.SignalWorkflow(signalClose, nil)
 	}, 80*time.Millisecond)
 
-	env.ExecuteWorkflow(SessionWorkflow, WorkflowInput{SessionID: id, AgentID: "default"})
+	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id, AgentID: "default"})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
@@ -410,7 +410,7 @@ func TestSessionWorkflow_askUserYieldThenResume(t *testing.T) {
 		env.SignalWorkflow(signalClose, nil)
 	}, 80*time.Millisecond)
 
-	env.ExecuteWorkflow(SessionWorkflow, WorkflowInput{SessionID: id, AgentID: "default"})
+	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id, AgentID: "default"})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
@@ -498,7 +498,7 @@ func TestSessionWorkflow_parallelBatchHitlRunsRemainder(t *testing.T) {
 		env.SignalWorkflow(signalClose, nil)
 	}, 80*time.Millisecond)
 
-	env.ExecuteWorkflow(SessionWorkflow, WorkflowInput{SessionID: id, AgentID: "default"})
+	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id, AgentID: "default"})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
@@ -546,7 +546,7 @@ func TestSessionWorkflow_hitlCancel(t *testing.T) {
 		env.SignalWorkflow(signalClose, nil)
 	}, 50*time.Millisecond)
 
-	env.ExecuteWorkflow(SessionWorkflow, WorkflowInput{SessionID: id, AgentID: "default"})
+	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id, AgentID: "default"})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
@@ -598,7 +598,7 @@ func TestSessionWorkflow_cancelThenNextPromptCompletes(t *testing.T) {
 		env.SignalWorkflow(signalClose, nil)
 	}, 80*time.Millisecond)
 
-	env.ExecuteWorkflow(SessionWorkflow, WorkflowInput{SessionID: id, AgentID: "default"})
+	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id, AgentID: "default"})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
@@ -670,7 +670,7 @@ func TestSessionWorkflow_spawnWorker(t *testing.T) {
 		env.SignalWorkflow(signalClose, nil)
 	}, 80*time.Millisecond)
 
-	env.ExecuteWorkflow(SessionWorkflow, WorkflowInput{SessionID: id, AgentID: "default"})
+	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id, AgentID: "default"})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
@@ -773,7 +773,7 @@ func TestSessionWorkflow_mixedBatchPairsBeforeNextRound(t *testing.T) {
 	id := durable.SessionID("sess-mixed-spawn")
 	env.RegisterDelayedCallback(func() { env.SignalWorkflow(signalPrompt, promptSignal{Text: "go"}) }, time.Millisecond)
 	env.RegisterDelayedCallback(func() { env.SignalWorkflow(signalClose, nil) }, 120*time.Millisecond)
-	env.ExecuteWorkflow(SessionWorkflow, WorkflowInput{SessionID: id, AgentID: "default"})
+	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id, AgentID: "default"})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
@@ -868,7 +868,7 @@ func TestSessionWorkflow_asyncSpawnDoesNotWaitForChild(t *testing.T) {
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow(signalClose, nil)
 	}, 80*time.Millisecond)
-	env.ExecuteWorkflow(SessionWorkflow, WorkflowInput{SessionID: id, AgentID: "default"})
+	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id, AgentID: "default"})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
@@ -961,7 +961,7 @@ func TestSessionWorkflow_listChildren(t *testing.T) {
 	id := durable.SessionID("sess-list-children")
 	env.RegisterDelayedCallback(func() { env.SignalWorkflow(signalPrompt, promptSignal{Text: "go"}) }, time.Millisecond)
 	env.RegisterDelayedCallback(func() { env.SignalWorkflow(signalClose, nil) }, 120*time.Millisecond)
-	env.ExecuteWorkflow(SessionWorkflow, WorkflowInput{SessionID: id, AgentID: "default"})
+	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id, AgentID: "default"})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
@@ -1046,7 +1046,7 @@ func TestSessionWorkflow_cancelStopsAsyncChild(t *testing.T) {
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow(signalClose, nil)
 	}, 80*time.Millisecond)
-	env.ExecuteWorkflow(SessionWorkflow, WorkflowInput{SessionID: id, AgentID: "default"})
+	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id, AgentID: "default"})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
@@ -1141,7 +1141,7 @@ func TestSessionWorkflow_resumeRemountsWorkspaceFromCachedRecipe(t *testing.T) {
 		env.SignalWorkflow(signalClose, nil)
 	}, 120*time.Millisecond)
 
-	env.ExecuteWorkflow(SessionWorkflow, WorkflowInput{SessionID: id, AgentID: "default"})
+	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id, AgentID: "default"})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
 	}
@@ -1259,7 +1259,7 @@ func TestActivities_harnessFallsBackToParentSecrets(t *testing.T) {
 	acts := newActs(cat, inprocess.NewMemoryEventLog(), true)
 	acts.Secrets = store
 	mounts := durable.ApplyAuth(nil, parentAuth)
-	if _, err := acts.Inference(t.Context(), InferenceInput{
+	if _, err := acts.Inference(t.Context(), inferenceInput{
 		SessionID: "child", Parent: "parent", AgentID: "default",
 		User:   &tacklr.Message{Role: tacklr.RoleUser, Content: "hi"},
 		Auth:   parentAuth.WithoutSecrets(),

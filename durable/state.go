@@ -10,6 +10,7 @@ import (
 
 // EncodeUserState JSON-roundtrips host session state so checkpoint types are
 // stable (numbers become float64) and non-serializable values fail now.
+// Runtime adapters only.
 func EncodeUserState(state map[string]any) (map[string]any, error) {
 	if len(state) == 0 {
 		return nil, nil
@@ -31,6 +32,7 @@ func EncodeUserState(state map[string]any) (map[string]any, error) {
 }
 
 // MergeUserState copies overlay onto a clone of base. Overlay wins on conflict.
+// Runtime adapters only.
 func MergeUserState(base, overlay map[string]any) map[string]any {
 	if len(base) == 0 && len(overlay) == 0 {
 		return nil

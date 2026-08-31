@@ -28,7 +28,7 @@ func NewWorker(c client.Client, cfg Config) worker.Worker {
 	if fallback == nil {
 		fallback = cfg.memoryLog()
 	}
-	acts := &Activities{
+	acts := &activities{
 		Catalog:        cfg.Catalog,
 		Snapshots:      cfg.snaps(),
 		Projection:     proj,

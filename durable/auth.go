@@ -41,8 +41,8 @@ func cloneAuth(a AuthContext) AuthContext {
 }
 
 // ApplyAuth updates cached recipes from a work-item AuthContext.
-// Drop is applied first. Bindings with an alias upsert that recipe.
-// Tokens are not stored on the returned recipes.
+// Runtime adapters only. Drop is applied first. Bindings with an alias
+// upsert that recipe. Tokens are not stored on the returned recipes.
 func ApplyAuth(recipes []MountRecipe, auth AuthContext) []MountRecipe {
 	out := cloneRecipes(recipes)
 	if len(auth.Drop) > 0 {
@@ -78,7 +78,8 @@ func ApplyAuth(recipes []MountRecipe, auth AuthContext) []MountRecipe {
 }
 
 // BindingsForTurn builds the secret-bearing mounts for one activity/turn.
-// Each cached recipe is included when a token for its provider is on auth.
+// Runtime adapters only. Each cached recipe is included when a token for
+// its provider is on auth.
 func BindingsForTurn(recipes []MountRecipe, auth AuthContext) []vfs.Binding {
 	tokens := tokensByProvider(auth)
 	aliasToken := tokensByAlias(auth)
