@@ -37,7 +37,7 @@ func TestActivities_unknownAgentAndDirectCall(t *testing.T) {
 	})
 	snaps := inprocess.NewMemorySnapshot()
 	log := inprocess.NewMemoryEventLog()
-	acts := &activities{Catalog: cat, Snapshots: snaps, Fallback: log, DisableStreams: true}
+	acts := &activities{Catalog: cat, Snapshots: snaps, Fallback: log, DisableStreams: true, Secrets: durable.NewMemorySecretStorage()}
 	_, err := acts.Inference(t.Context(), inferenceInput{SessionID: "s", AgentID: "nope"})
 	if !errors.Is(err, durable.ErrAgentNotFound) {
 		t.Fatalf("missing agent: %v", err)
@@ -176,6 +176,7 @@ func newActs(cat *durable.MemoryCatalog, log durable.EventLog, disableStreams bo
 		Projection:     vfs.DirectProjection{},
 		Fallback:       log,
 		DisableStreams: disableStreams,
+		Secrets:        durable.NewMemorySecretStorage(),
 	}
 }
 
@@ -1262,7 +1263,6 @@ func TestActivities_harnessFallsBackToParentSecrets(t *testing.T) {
 	if _, err := acts.Inference(t.Context(), inferenceInput{
 		SessionID: "child", Parent: "parent", AgentID: "default",
 		User:   &tacklr.Message{Role: tacklr.RoleUser, Content: "hi"},
-		Auth:   parentAuth.WithoutSecrets(),
 		Mounts: mounts,
 	}); err != nil {
 		t.Fatal(err)

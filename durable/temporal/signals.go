@@ -22,14 +22,13 @@ const (
 )
 
 // workflowInput is wait-loop start state (scheduler), not a Snapshot.
-// Auth is secret-free; credentials live in SecretStorage. userState seed
-// merges into the checkpoint on the first activity save.
+// Credentials live in SecretStorage. userState seed merges into the
+// checkpoint on the first activity save.
 type workflowInput struct {
 	SessionID  durable.SessionID
 	AgentID    string
 	MCPServers []mcp.MCPConfig
 	Mounts     []durable.MountRecipe
-	Auth       durable.AuthContext
 	// TurnLocalityTimeout, when > 0, pins the turn's activities to one worker
 	// (Temporal CreateSession). Zero skips worker sessions: activities can run
 	// on any worker. There is no default timeout.

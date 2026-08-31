@@ -56,8 +56,8 @@ type activities struct {
 }
 
 // inferenceInput is one Inference step. Mounts and identity are the Snapshot
-// row this activity will save. State is the Prompt/Resume overlay, not a
-// Temporal copy of userState. Auth is ignored when Secrets is set.
+// row this activity will save. State is the Prompt/Resume overlay. Tokens
+// come from SecretStorage, not this struct.
 type inferenceInput struct {
 	SessionID     durable.SessionID
 	Parent        durable.SessionID
@@ -67,7 +67,6 @@ type inferenceInput struct {
 	HadToolRound  bool
 	ModelRequests int
 	Resume        map[string][]byte
-	Auth          durable.AuthContext
 	Mounts        []durable.MountRecipe
 	Specialist    string
 	Children      []durable.SessionID
@@ -88,7 +87,6 @@ type toolInput struct {
 	AgentID    string
 	MCPServers []mcp.MCPConfig
 	Call       tacklr.ToolCall
-	Auth       durable.AuthContext
 	Mounts     []durable.MountRecipe
 	Specialist string
 	// Children are this session's child ids (snapshot identity and list_children).
@@ -118,7 +116,6 @@ type commitToolInput struct {
 	MCPServers []mcp.MCPConfig
 	Call       tacklr.ToolCall
 	Output     string
-	Auth       durable.AuthContext
 	Mounts     []durable.MountRecipe
 	Specialist string
 	Children   []durable.SessionID
@@ -149,7 +146,7 @@ func (a *activities) Inference(ctx context.Context, in inferenceInput) (inferenc
 	if attempt > 1 {
 		_ = a.publish(ctx, stream, in.SessionID, durable.TopicRetry, tacklr.StreamEvent{Type: tacklr.StreamEventError, Content: "retry"}, true)
 	}
-	h, ms, skillsMS, rev, err := a.harness(ctx, in.SessionID, in.Parent, in.AgentID, in.MCPServers, in.Auth, in.Mounts, in.Specialist, in.State)
+	h, ms, skillsMS, rev, err := a.harness(ctx, in.SessionID, in.Parent, in.AgentID, in.MCPServers, in.Mounts, in.Specialist, in.State)
 	if err != nil {
 		pub := err
 		if err := ctx.Err(); err != nil {
@@ -237,7 +234,7 @@ func (a *activities) Tool(ctx context.Context, in toolInput) (toolOutput, error)
 	if attempt > 1 {
 		_ = a.publish(ctx, stream, in.SessionID, durable.TopicRetry, tacklr.StreamEvent{Type: tacklr.StreamEventError, Content: "retry"}, true)
 	}
-	h, ms, skillsMS, rev, err := a.harness(ctx, in.SessionID, in.Parent, in.AgentID, in.MCPServers, in.Auth, in.Mounts, in.Specialist, in.State)
+	h, ms, skillsMS, rev, err := a.harness(ctx, in.SessionID, in.Parent, in.AgentID, in.MCPServers, in.Mounts, in.Specialist, in.State)
 	if err != nil {
 		slog.ErrorContext(ctx, "tool harness", "area", telemetry.AreaHarness, "error", err)
 		return toolOutput{}, err
@@ -294,7 +291,7 @@ func (a *activities) Tool(ctx context.Context, in toolInput) (toolOutput, error)
 }
 
 func (a *activities) CommitToolOutput(ctx context.Context, in commitToolInput) (toolOutput, error) {
-	h, ms, skillsMS, rev, err := a.harness(ctx, in.SessionID, in.Parent, in.AgentID, in.MCPServers, in.Auth, in.Mounts, in.Specialist, in.State)
+	h, ms, skillsMS, rev, err := a.harness(ctx, in.SessionID, in.Parent, in.AgentID, in.MCPServers, in.Mounts, in.Specialist, in.State)
 	if err != nil {
 		return toolOutput{}, err
 	}
@@ -322,26 +319,23 @@ func (a *activities) CommitToolOutput(ctx context.Context, in commitToolInput) (
 	return toolOutput{}, nil
 }
 
-func (a *activities) harness(ctx context.Context, id, parent durable.SessionID, agentID string, extraMCP []mcp.MCPConfig, auth durable.AuthContext, mounts []durable.MountRecipe, specialist string, state map[string]any) (*tacklr.TurnManager, *vfs.MountSession, *vfs.MountSession, durable.Revision, error) {
-	if a.Secrets != nil {
-		sec, err := a.Secrets.Get(ctx, id)
+func (a *activities) harness(ctx context.Context, id, parent durable.SessionID, agentID string, extraMCP []mcp.MCPConfig, mounts []durable.MountRecipe, specialist string, state map[string]any) (*tacklr.TurnManager, *vfs.MountSession, *vfs.MountSession, durable.Revision, error) {
+	sec, err := a.Secrets.Get(ctx, id)
+	if err != nil {
+		return nil, nil, nil, "", err
+	}
+	hasTok := false
+	for _, b := range sec.Auth.Bindings {
+		if strings.TrimSpace(b.Auth.Token) != "" {
+			hasTok = true
+			break
+		}
+	}
+	if !hasTok && parent != "" {
+		sec, err = a.Secrets.Get(ctx, parent)
 		if err != nil {
 			return nil, nil, nil, "", err
 		}
-		hasTok := false
-		for _, b := range sec.Auth.Bindings {
-			if strings.TrimSpace(b.Auth.Token) != "" {
-				hasTok = true
-				break
-			}
-		}
-		if !hasTok && parent != "" {
-			sec, err = a.Secrets.Get(ctx, parent)
-			if err != nil {
-				return nil, nil, nil, "", err
-			}
-		}
-		auth = sec.Auth
 	}
 	spec, ok := a.Catalog.Lookup(agentID)
 	if !ok {
@@ -358,7 +352,7 @@ func (a *activities) harness(ctx context.Context, id, parent durable.SessionID, 
 	if proj == nil {
 		proj = vfs.DirectProjection{}
 	}
-	ms, skillsMS, err := durable.OpenTurnSessions(ctx, string(id), spec, durable.BindingsForTurn(mounts, auth), proj)
+	ms, skillsMS, err := durable.OpenTurnSessions(ctx, string(id), spec, durable.BindingsForTurn(mounts, sec.Auth), proj)
 	if err != nil {
 		return nil, nil, nil, "", err
 	}

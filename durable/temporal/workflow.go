@@ -27,7 +27,7 @@ func SessionWorkflow(ctx workflow.Context, in workflowInput) (string, error) {
 		closed     bool
 		agentID    = in.AgentID
 		mcp        = in.MCPServers
-		mounts     = durable.ApplyAuth(in.Mounts, in.Auth)
+		mounts     = durable.ApplyAuth(in.Mounts, durable.AuthContext{})
 		spawned    []childRun
 		yielded    bool
 		result     string
@@ -433,7 +433,7 @@ func SessionWorkflow(ctx workflow.Context, in workflowInput) (string, error) {
 	}
 
 	if in.Prompt != "" {
-		runSlice(&tacklr.Message{Role: tacklr.RoleUser, Content: in.Prompt}, nil, in.Auth, telemetry.TurnKindPrompt, nil)
+		runSlice(&tacklr.Message{Role: tacklr.RoleUser, Content: in.Prompt}, nil, durable.AuthContext{}, telemetry.TurnKindPrompt, nil)
 		return result, nil
 	}
 
