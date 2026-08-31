@@ -29,6 +29,7 @@ The **agent file catalog** is collapsed. Discovery (`find_files`, `find_content`
               → FuseMount (read-only kernel tree)  HostDir = cwd for run_command
     → durable.Runtime
          Prompt/Resume.Auth    work-item tokens + bindings (next turn)
+         SecretStorage         Temporal: those tokens (not history, not snapshot)
          Snapshot.Mounts       secret-free recipes (source ids, no bytes)
          VFSProjection         FuseProjection | DirectProjection
          turn end              Close harness + MountSession + HostDir

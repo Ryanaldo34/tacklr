@@ -46,7 +46,17 @@ A model round may emit several tool calls. The harness does not infer again unti
 
 ## Get started
 
-This is a host: a model, a brain, a `/workspace` tree, a durable runtime, and ACP on HTTP. The protocol never talks to Temporal (or the in-process loop) in their own dialect — it consumes `tacklr.StreamEvent` from `Runtime`. Swap `inprocess.New` for `temporal.New` when you have a worker.
+This is a host: a model, a brain, a `/workspace` tree, a durable runtime, and ACP on HTTP. The protocol never talks to Temporal (or the in-process loop) in their own dialect — it consumes `tacklr.StreamEvent` from `Runtime`.
+
+Session data is three frozen planes. Do not mix them:
+
+| Plane | You pass | Holds |
+|-------|----------|--------|
+| **SnapshotStore** | `Config.Snapshots` | Window, plan, parked interrupt, `userState`, VFS recipes, session identity |
+| **Wait loop** | `inprocess.New` or `temporal.New` + `NewWorker` | Scheduler: leftover Temporal tool calls, MCP Durable topology, child futures, Status |
+| **SecretStorage** | `temporal.Config.Secrets` (required; same instance on New and NewWorker) | VFS tokens. Not in snapshots. Not in Temporal history |
+
+In-process keeps work-item tokens in RAM for the turn. Temporal puts them in `Secrets` before signaling. `Prompt.Auth` / `Resume.Auth` is still how the host hands tokens in.
 
 ```go
 package main
@@ -120,7 +130,7 @@ func main() {
 	if err := g.Bootstrap(ctx, false); err != nil {
 		log.Fatal(err)
 	}
-	eng, err := brain.NewEngine(store, brain.WithGraph(g))
+	eng, err := brain.NewEngine(store, brain.WithGraph(g), brain.WithLexicalOnly())
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -163,7 +173,12 @@ func main() {
 		OpenSkills: vfs.Tree(vfs.At("skills", vfs.Union(builtins.Local(filepath.Join(jail, "skills"))))),
 	})
 
-	rt := inprocess.New(inprocess.Config{Catalog: cat, Projection: vfs.DirectProjection{}})
+	snaps := inprocess.NewMemorySnapshot()
+	rt := inprocess.New(inprocess.Config{
+		Catalog:    cat,
+		Snapshots:  snaps,
+		Projection: vfs.DirectProjection{},
+	})
 	srv := server.NewServer(rt, cat, server.NewACPProtocol(nil)).AllowAnonymousNetwork()
 	log.Printf("ACP on http://127.0.0.1:8080/acp")
 	if err := srv.ServeHTTP(ctx, "127.0.0.1:8080"); err != nil && !errors.Is(err, context.Canceled) {
@@ -199,7 +214,37 @@ func openVFS(jail string, eng *brain.Engine, ns brain.Namespace) vfs.OpenVFS {
 }
 ```
 
-Importing `tacklr` registers built-in interrupts, Word/Excel codecs, and the durable driver adapter. The agent sees `/workspace/work`, `/workspace/engram`. Skills load from `OpenSkills` and reach the model only through `read_skill`. A Drive or SharePoint bind on the prompt adds `/workspace/drive` or `/workspace/sharepoint` for that turn. Tests pass a fake `DriveAPI` / `GraphAPI` into the same `builtins.Drive` / `builtins.Graph` constructors.
+Same Catalog and SnapshotStore on Temporal. `Secrets` is required and must be one instance both processes can `Get`:
+
+```go
+import (
+	"go.temporal.io/sdk/client"
+
+	tacklrtemporal "github.com/ryanaldo34/tacklr/durable/temporal"
+)
+
+c, err := tacklrtemporal.Dial(client.Options{HostPort: os.Getenv("TEMPORAL_HOST")})
+if err != nil {
+	log.Fatal(err)
+}
+secrets := durable.NewMemorySecretStorage() // production: Redis / Postgres / Vault
+cfg := tacklrtemporal.Config{
+	Catalog:    cat,
+	Snapshots:  snaps,
+	Secrets:    secrets,
+	Projection: vfs.DirectProjection{},
+}
+w := tacklrtemporal.NewWorker(c, cfg)
+if err := w.Start(); err != nil {
+	log.Fatal(err)
+}
+defer w.Stop()
+rt := tacklrtemporal.New(c, cfg)
+```
+
+ACP `_tacklr/vfs/bind` still maps onto `Prompt.Auth`. The worker never sees those tokens in workflow history.
+
+Importing `tacklr` registers built-in interrupts, Word/Excel codecs, and the durable driver adapter. The agent sees `/workspace/work`, `/workspace/engram`. Skills load from `OpenSkills` and reach the model only through `read_skill`. A Drive or SharePoint bind on the prompt adds `/workspace/drive` or `/workspace/sharepoint` for that turn. Tests pass a fake `DriveAPI` / `GraphAPI` into the same `builtins.Drive` / `builtins.Graph` constructors. `WithLexicalOnly` is the explicit no-embedder choice; production hosts pass `brain.WithEmbedder`.
 
 `telemetry.Init` installs the process-wide OpenTelemetry providers. With `OTLPEndpoint` (or `OTEL_EXPORTER_OTLP_ENDPOINT`) it exports traces, metrics, and logs over OTLP (gRPC by default, or HTTP). Without an endpoint it still installs Temporal’s ReplaySafe tracer so workflow replay does not leak spans. Each Prompt or Resume is one `tacklr.turn` span; inference, tools, hand-off, and compress nest under it. `postgres.Store` Query/Exec spans join that same trace. Hosts must not start `tacklr.*` spans themselves. Metrics include turn duration and count, tool calls, model tokens, interrupts, hand-offs, compress, sessions, and checkpoints. Call `Init` before `durable/temporal.Dial`. Details: [`telemetry`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/telemetry).
 
@@ -222,17 +267,21 @@ Built-in tools that need a client use the same pattern. You construct them and p
 
 Put optional builtins on `AgentOptions.Tools`. Swap the fake the same way: `Tools: []*tacklr.Tool{builtins.ReadInbox(fakeMail)}`, `Brain: testEngine`, a temp `MountSession`. Details: [docs/tools.md](docs/tools.md).
 
-### Checkpoints
+### Session data
 
-`durable.Runtime` writes the session blob to SnapshotStore on each turn. A checkpoint is conversation, plan, tool/user state, and pending interrupts (`tacklr.SessionCheckpoint`). Persistence I/O is `durable.SnapshotStore`, not a separate blob package. Checkpoints store mount recipes, not file bytes or tokens. VFS writes persist as they happen.
+`durable.Runtime` is the host API (the snippets above). `TurnManager` is the per-turn infer/tools/checkpoint object the runtime constructs; hosts do not call it.
 
-### Sessions
+| Plane | Canonical store |
+|-------|-----------------|
+| Conversation, plan, parked interrupt, `userState`, VFS recipes, identity | `durable.SnapshotStore` (`tacklr.SessionCheckpoint` plus `Snapshot.Mounts`) |
+| Leftover unstarted Temporal tool calls, MCP Durable topology, child futures, Status | Wait loop (in-process goroutine or Temporal workflow replay) |
+| VFS tokens | `durable.SecretStorage` on Temporal; process RAM on in-process |
 
-Hosts always use `durable.Runtime` (the snippet above). Temporal is the same interface with a worker; see [docs/durable.md](docs/durable.md). `TurnManager` is the per-turn infer/tools/checkpoint object the runtime constructs; hosts do not call it.
+`CreateSession.State` / `Prompt.State` / `Resume.State` merge into checkpoint `userState`. They are not a second Temporal copy of that map. File bytes are never snapshotted; VFS writes persist as they happen. Close deletes the snapshot and the secret bag. Details: [docs/durable.md](docs/durable.md).
 
 ### Specialists
 
-Register nested agents on `AgentOptions.Specialists`. Tools start them through `HarnessRuntime`: `SpawnChild`, `Children`, `AwaitChild`, `CancelChild`. The stock tools `spawn_specialist`, `list_children`, `get_child`, and `cancel_child` call those methods; host tools can too. A child is a nested session with the parent’s MCP, mounts, and auth, overlaid with the specialist’s model, tools, and instructions. `block=false` starts the child and returns; `get_child(block=true)` waits. Parent park does not stop children. Cancel (including the original Prompt context) and Close do.
+Register nested agents on `AgentOptions.Specialists`. Tools start them through `HarnessRuntime`: `SpawnChild`, `Children`, `AwaitChild`, `CancelChild`. The stock tools `spawn_specialist`, `list_children`, `get_child`, and `cancel_child` call those methods; host tools can too. A child is a nested session with the parent’s MCP Durable topology and mount recipes, overlaid with the specialist’s model, tools, and instructions. Tokens come from `SecretStorage` (child, then parent). `block=false` starts the child and returns; `get_child(block=true)` waits. Parent park does not stop children. Cancel (including the original Prompt context) and Close do.
 
 ---
 
@@ -262,7 +311,7 @@ When VFS is wired, the harness injects file tools over virtual paths only. `run_
 
 | Doc | What it covers |
 |-----|----------------|
-| [docs/durable.md](docs/durable.md) | Runtime: in-process, Temporal; HITL; children; auth |
+| [docs/durable.md](docs/durable.md) | Runtime: in-process, Temporal; three data planes; HITL; children; auth |
 | [docs/tools.md](docs/tools.md) | Tool clients: constructor closures, tests, builtins |
 | [docs/vfs.md](docs/vfs.md) | Mounts, content IR, providers, FUSE |
 | [docs/knowledge.md](docs/knowledge.md) | Brain: Engrams, search, graph, tools |
@@ -284,7 +333,7 @@ When VFS is wired, the harness injects file tools over virtual paths only. `run_
 | `brain/postgres` | Optional Postgres `brain.Store` |
 | `brain/helixgraph` | Optional Helix graph adapter |
 | `server` | Protocol host over Runtime |
-| `durable` | Session Runtime (in-process or Temporal) |
+| `durable` | Session Runtime, SnapshotStore, SecretStorage |
 | `interrupt` | Pause / resume types |
 | `mcp` | MCP config types |
 | `skills` | Skill loading from the host-only `OpenSkills` tree |

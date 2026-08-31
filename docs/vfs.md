@@ -103,7 +103,7 @@ Playbooks are **not** on the agent `/workspace` tree. Hosts set `AgentSpec.OpenS
 
 Host-owned roots and secrets (local jail, S3 / Azure Blob client) live in the Open closures, not on mounts or checkpoints.
 
-User-owned cloud folders (Google Drive, OneDrive, SharePoint libraries) are extra At members under **`/workspace/<alias>`**. The **client** does OAuth (PKCE). It sends only a short-lived access token over ACP extension methods. Tokens live on the work item (`Prompt.Auth`) and in `TokenHolder` (process memory). They are never written to `MountSpec`, session checkpoints, or the ACP wire store. After `session/load` or process restart the client must bind again.
+User-owned cloud folders (Google Drive, OneDrive, SharePoint libraries) are extra At members under **`/workspace/<alias>`**. The **client** does OAuth (PKCE). It sends only a short-lived access token over ACP extension methods. Tokens live on the work item (`Prompt.Auth` / `Resume.Auth`). In-process they stay in `TokenHolder` for the turn. Temporal writes them to `SecretStorage` (same instance on `New` and `NewWorker`) and never to `MountSpec`, `SnapshotStore`, Temporal event history, or the ACP wire store. After `session/load` or process restart the client must bind again.
 
 ```text
 initialize  →  agentCapabilities._meta.tacklr.vfs { credentials, tokenRefresh, tokenExpiry, writable }

@@ -25,7 +25,12 @@ Host tools on `AgentSpec.Options.Tools` close over their clients at catalog regi
 ```go
 cat := durable.NewCatalog("agent")
 cat.Register("agent", durable.AgentSpec{Options: opts})
-rt := inprocess.New(inprocess.Config{Catalog: cat, Projection: vfs.DirectProjection{}})
+snaps := inprocess.NewMemorySnapshot()
+rt := inprocess.New(inprocess.Config{
+	Catalog:    cat,
+	Snapshots:  snaps,
+	Projection: vfs.DirectProjection{},
+})
 id, _ := rt.CreateSession(ctx, durable.CreateSession{
 	AgentID: "agent",
 	State:   map[string]any{"user": "Ada", "company": "Acme"},
@@ -34,9 +39,9 @@ _ = rt.Prompt(ctx, id, durable.Prompt{Text: prompt, Auth: auth})
 sub, _ := rt.Subscribe(ctx, id, 0)
 ```
 
-`State` is session facts tools read with `StateGet`. Update it on a later `Prompt` or `Resume`.
+`State` merges into checkpoint `userState` (tools read it with `StateGet`). Update it on a later `Prompt` or `Resume`. Tokens on `Auth` stay in process RAM for the turn; recipes land on `Snapshot.Mounts`.
 
-One goroutine per session runs the harness wait loop. HITL parks that goroutine and waits for `Runtime.Resume`. Session conversation lives in `SnapshotStore`.
+One goroutine per session runs the harness wait loop. HITL parks that goroutine and waits for `Runtime.Resume`. The session record lives in `SnapshotStore`.
 
 `Status` and the stream agree on when a turn finished. `StreamEventComplete` is published only after the checkpoint is saved and `Status` is already `complete`. `StreamEventError` that ends the turn is the same for `failed`. Park publishes `yield`; `Status` stays `running` with `Waiting` true. A later `Prompt` on a completed session starts a new turn: when `Prompt` returns, `Status` is `running` again.
 
@@ -44,8 +49,21 @@ One goroutine per session runs the harness wait loop. HITL parks that goroutine 
 
 The host runs:
 
-1. A Tacklr Temporal worker (`EnableSessionWorker: true`) that registers `SessionWorkflow` plus the `Inference`, `Tool`, `CommitToolOutput`, and `EmitEvent` activities.
-2. A protocol process (optional) whose `durable.Runtime` is `temporal.New(client, cfg)`. `temporal.Config` is the single host config for both `New` and `NewWorker` (catalog, queue, snapshots, projection, locality, activity timeout, heartbeat, retries, **Secrets**). `New` and `NewWorker` must share the same `SecretStorage`. Autonomous work skips the protocol and calls Runtime (or starts the workflow) with a payload.
+1. A Tacklr Temporal worker (`NewWorker`) that registers `SessionWorkflow` and the turn activities. Do not register those yourself.
+2. A protocol process (optional) whose `durable.Runtime` is `temporal.New(client, cfg)`. `temporal.Config` is the single host config for both `New` and `NewWorker`. **Secrets** is required and must be the same instance on both. Autonomous work skips the protocol and calls Runtime.
+
+```go
+c, err := tacklrtemporal.Dial(client.Options{HostPort: temporalHost})
+cfg := tacklrtemporal.Config{
+	Catalog:    cat,
+	Snapshots:  snaps,   // session record
+	Secrets:    secrets, // VFS tokens; shared with the worker
+	Projection: vfs.DirectProjection{},
+}
+w := tacklrtemporal.NewWorker(c, cfg)
+_ = w.Start()
+rt := tacklrtemporal.New(c, cfg)
+```
 
 | Tacklr concept | Temporal |
 |----------------|----------|
@@ -66,7 +84,7 @@ The worker registers `SessionWorkflow`, `Inference`, `Tool`, `CommitToolOutput`,
 
 ## Child sessions
 
-A child is a nested Runtime session, not a host-owned supervisor. The id is `{parent}/w/{specialist}/{call}`. The same wait loop runs. The child inherits MCP, mount recipes, and auth from the parent, then overlays the named `Specialist` (`WithSpecialist` / `OverlaySpecialist`). Each child turn opens its own VFS (`OpenTurnVFS` on the child id). It does not reuse the parent’s live `MountSession`.
+A child is a nested Runtime session, not a host-owned supervisor. The id is `{parent}/w/{specialist}/{call}`. The same wait loop runs. The child inherits MCP Durable topology and mount recipes from the parent, then overlays the named `Specialist`. Tokens come from `SecretStorage` (child id, then parent id). Each child turn opens its own VFS (`OpenTurnVFS` on the child id). It does not reuse the parent’s live `MountSession`.
 
 Register specialists on `AgentOptions.Specialists`. The model sees four tools:
 
@@ -206,7 +224,7 @@ shutdown, err := telemetry.Init(ctx, telemetry.Config{
     Insecure:     true, // local
 })
 c, err := tacklrtemporal.Dial(client.Options{HostPort: temporalHost})
-w := tacklrtemporal.NewWorker(c, taskQueue, opts)
+w := tacklrtemporal.NewWorker(c, cfg) // same Config as temporal.New, including Secrets
 ```
 
 Span attributes are closed enums and ids (`tacklr.runtime`, `tacklr.turn.kind`, `tacklr.agent_id`, `tacklr.outcome`). Logs carry prompt length, resume counts, retries, and error text.
