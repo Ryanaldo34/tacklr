@@ -83,7 +83,7 @@ type Runtime struct {
 // Config is the single in-process host config for New.
 type Config struct {
 	Catalog durable.Catalog
-	// Snapshots is the session record. Nil uses MemorySnapshot.
+	// Snapshots is the session record. Required.
 	Snapshots  durable.SnapshotStore
 	Projection vfs.Projection
 }
@@ -93,17 +93,16 @@ func New(cfg Config) *Runtime {
 	if cfg.Catalog == nil {
 		panic("inprocess: Catalog is required")
 	}
+	if cfg.Snapshots == nil {
+		panic("inprocess: Snapshots is required")
+	}
 	proj := cfg.Projection
 	if proj == nil {
 		proj = vfs.FuseProjection{}
 	}
-	snaps := cfg.Snapshots
-	if snaps == nil {
-		snaps = NewMemorySnapshot()
-	}
 	return &Runtime{
 		catalog:    cfg.Catalog,
-		snapshots:  snaps,
+		snapshots:  cfg.Snapshots,
 		events:     NewMemoryEventLog(),
 		projection: proj,
 		sessions:   make(map[durable.SessionID]*sessionProc),

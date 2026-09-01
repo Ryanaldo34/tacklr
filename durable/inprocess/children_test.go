@@ -197,7 +197,7 @@ func TestChildren_asyncSpawnThenCollect(t *testing.T) {
 			}
 		},
 	}
-	rt = New(Config{Catalog: specialistCatalog(t, parent, tacklr.Specialist{Name: "researcher", Model: child}), Projection: vfs.DirectProjection{}})
+	rt = New(Config{Catalog: specialistCatalog(t, parent, tacklr.Specialist{Name: "researcher", Model: child}), Snapshots: NewMemorySnapshot(), Projection: vfs.DirectProjection{}})
 	sub := begin(t, rt, &parentID)
 	childID := durable.ChildSessionID(parentID, "researcher", "sp1")
 	waitParentEvent(t, rt, parentID, sub, 8*time.Second, func(ev tacklr.StreamEvent) bool {
@@ -297,7 +297,7 @@ func TestChildren_mixedBlockingPairsBeforeNextRound(t *testing.T) {
 	rt := New(Config{Catalog: specialistCatalog(t, parent,
 		tacklr.Specialist{Name: "blocker", Model: blocker},
 		tacklr.Specialist{Name: "async", Model: async},
-	), Projection: vfs.DirectProjection{}})
+	), Snapshots: NewMemorySnapshot(), Projection: vfs.DirectProjection{}})
 	sub := begin(t, rt, &parentID)
 	go func() {
 		for !blockingStarted.Load() {
@@ -371,7 +371,7 @@ func TestChildren_waitingStaysRunningUntilHITLResolved(t *testing.T) {
 			}
 		},
 	}
-	rt = New(Config{Catalog: specialistCatalog(t, parent, tacklr.Specialist{Name: "researcher", Model: child, Tools: []*tacklr.Tool{askUserTool()}}), Projection: vfs.DirectProjection{}})
+	rt = New(Config{Catalog: specialistCatalog(t, parent, tacklr.Specialist{Name: "researcher", Model: child, Tools: []*tacklr.Tool{askUserTool()}}), Snapshots: NewMemorySnapshot(), Projection: vfs.DirectProjection{}})
 	sub := begin(t, rt, &parentID)
 
 	var listOut, poll string
@@ -477,7 +477,7 @@ func TestChildren_getChildParkAndSiblingCancel(t *testing.T) {
 	rt = New(Config{Catalog: specialistCatalog(t, parent,
 		tacklr.Specialist{Name: "keeper", Model: keep, Tools: []*tacklr.Tool{askUserTool()}},
 		tacklr.Specialist{Name: "dropper", Model: drop, Tools: []*tacklr.Tool{askUserTool()}},
-	), Projection: vfs.DirectProjection{}})
+	), Snapshots: NewMemorySnapshot(), Projection: vfs.DirectProjection{}})
 	sub := begin(t, rt, &parentID)
 
 	var cancelOut string
@@ -553,7 +553,7 @@ func TestChildren_stopKillsRunningChild(t *testing.T) {
 			}
 			rt := New(Config{Catalog: specialistCatalog(t, parent, tacklr.Specialist{
 				Name: "researcher", Model: hangUntilCancel(started, stopped),
-			}), Projection: vfs.DirectProjection{}})
+			}), Snapshots: NewMemorySnapshot(), Projection: vfs.DirectProjection{}})
 			var id durable.SessionID
 			promptCtx, cancelPrompt := context.WithCancel(t.Context())
 			t.Cleanup(cancelPrompt)
@@ -602,7 +602,7 @@ func TestChildren_unknownSpecialistAndChild(t *testing.T) {
 			}
 		},
 	}
-	rt := New(Config{Catalog: specialistCatalog(t, parent, tacklr.Specialist{Name: "researcher", Model: scriptedComplete("x")}), Projection: vfs.DirectProjection{}})
+	rt := New(Config{Catalog: specialistCatalog(t, parent, tacklr.Specialist{Name: "researcher", Model: scriptedComplete("x")}), Snapshots: NewMemorySnapshot(), Projection: vfs.DirectProjection{}})
 	var id durable.SessionID
 	sub := begin(t, rt, &id)
 	got := waitEvents(t, rt, id, sub, 8*time.Second)
@@ -655,7 +655,7 @@ func TestChildren_nudgeUntilCollected(t *testing.T) {
 			}
 		},
 	}
-	rt = New(Config{Catalog: specialistCatalog(t, parent, tacklr.Specialist{Name: "researcher", Model: child}), Projection: vfs.DirectProjection{}})
+	rt = New(Config{Catalog: specialistCatalog(t, parent, tacklr.Specialist{Name: "researcher", Model: child}), Snapshots: NewMemorySnapshot(), Projection: vfs.DirectProjection{}})
 	sub := begin(t, rt, &parentID)
 	wait, stopWait := context.WithTimeout(t.Context(), 8*time.Second)
 	defer stopWait()
@@ -696,7 +696,7 @@ func TestChildren_blockingSpawnParksOnChildHITL(t *testing.T) {
 			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "parent-done", IsComplete: true}
 		},
 	}
-	rt := New(Config{Catalog: specialistCatalog(t, parent, tacklr.Specialist{Name: "researcher", Model: child, Tools: []*tacklr.Tool{askUserTool()}}), Projection: vfs.DirectProjection{}})
+	rt := New(Config{Catalog: specialistCatalog(t, parent, tacklr.Specialist{Name: "researcher", Model: child, Tools: []*tacklr.Tool{askUserTool()}}), Snapshots: NewMemorySnapshot(), Projection: vfs.DirectProjection{}})
 	var id durable.SessionID
 	sub := begin(t, rt, &id)
 	waitParentEvent(t, rt, id, sub, 8*time.Second, func(ev tacklr.StreamEvent) bool {
@@ -763,7 +763,7 @@ func TestChildren_parentHITLLeavesAsyncChildRunning(t *testing.T) {
 			}
 		},
 	}
-	rt := New(Config{Catalog: specialistCatalog(t, parent, tacklr.Specialist{Name: "researcher", Model: child}), Projection: vfs.DirectProjection{}})
+	rt := New(Config{Catalog: specialistCatalog(t, parent, tacklr.Specialist{Name: "researcher", Model: child}), Snapshots: NewMemorySnapshot(), Projection: vfs.DirectProjection{}})
 	var id durable.SessionID
 	sub := begin(t, rt, &id)
 	var spawned, parked bool
@@ -830,7 +830,7 @@ func TestChildren_failedChildIsCollectable(t *testing.T) {
 			}
 		},
 	}
-	rt = New(Config{Catalog: specialistCatalog(t, parent, tacklr.Specialist{Name: "researcher", Model: failing}), Projection: vfs.DirectProjection{}})
+	rt = New(Config{Catalog: specialistCatalog(t, parent, tacklr.Specialist{Name: "researcher", Model: failing}), Snapshots: NewMemorySnapshot(), Projection: vfs.DirectProjection{}})
 	sub := begin(t, rt, &parentID)
 	got := waitEvents(t, rt, parentID, sub, 8*time.Second)
 	for _, ev := range got {
@@ -881,7 +881,7 @@ func TestChildren_nestedSpecialistCollectsGrandchild(t *testing.T) {
 			Name:  "digger",
 			Model: scriptedComplete("from-digger"),
 		}},
-	}), Projection: vfs.DirectProjection{}})
+	}), Snapshots: NewMemorySnapshot(), Projection: vfs.DirectProjection{}})
 	var id durable.SessionID
 	sub := begin(t, rt, &id)
 	got := waitEvents(t, rt, id, sub, 8*time.Second)
@@ -941,7 +941,7 @@ func TestChildren_customToolSpawnsChild(t *testing.T) {
 				Model: scriptedComplete("research result"),
 			}},
 		},
-	}), Projection: vfs.DirectProjection{}})
+	}), Snapshots: NewMemorySnapshot(), Projection: vfs.DirectProjection{}})
 	var id durable.SessionID
 	sub := begin(t, rt, &id)
 	got := waitEvents(t, rt, id, sub, 8*time.Second)

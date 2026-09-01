@@ -85,7 +85,7 @@ func newTestRuntime(t *testing.T, model tacklr.InferenceStrategy, spec durable.A
 	cat.Register("default", spec)
 	if testing.Short() || !temporallive.Available() {
 		return &testRuntime{
-			Runtime: inprocess.New(inprocess.Config{Catalog: cat, Projection: vfs.DirectProjection{}}),
+			Runtime: inprocess.New(inprocess.Config{Catalog: cat, Snapshots: inprocess.NewMemorySnapshot(), Projection: vfs.DirectProjection{}}),
 			Catalog: cat,
 		}
 	}
@@ -113,7 +113,7 @@ func newTestRuntime(t *testing.T, model tacklr.InferenceStrategy, spec durable.A
 func newEmptyRuntime() *testRuntime {
 	cat := durable.NewCatalog("")
 	return &testRuntime{
-		Runtime: inprocess.New(inprocess.Config{Catalog: cat, Projection: vfs.DirectProjection{}}),
+		Runtime: inprocess.New(inprocess.Config{Catalog: cat, Snapshots: inprocess.NewMemorySnapshot(), Projection: vfs.DirectProjection{}}),
 		Catalog: cat,
 	}
 }

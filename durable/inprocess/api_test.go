@@ -20,6 +20,15 @@ func TestNew_requiresCatalog(t *testing.T) {
 	New(Config{})
 }
 
+func TestNew_requiresSnapshots(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("want panic on nil snapshots")
+		}
+	}()
+	New(Config{Catalog: newCatalog(t, scriptedComplete("x"), durable.AgentSpec{})})
+}
+
 func TestNew_nilOptionAndNilProjection(t *testing.T) {
 	cat := newCatalog(t, scriptedComplete("x"), durable.AgentSpec{})
 	snaps := NewMemorySnapshot()
@@ -32,7 +41,7 @@ func TestNew_nilOptionAndNilProjection(t *testing.T) {
 func TestCreateSession_errors(t *testing.T) {
 	ctx := t.Context()
 	cat := newCatalog(t, scriptedComplete("x"), durable.AgentSpec{})
-	rt := New(Config{Catalog: cat, Projection: vfs.DirectProjection{}})
+	rt := New(Config{Catalog: cat, Snapshots: NewMemorySnapshot(), Projection: vfs.DirectProjection{}})
 	ctxDone, cancel := context.WithCancel(ctx)
 	cancel()
 	if _, err := rt.CreateSession(ctxDone, durable.CreateSession{AgentID: "default"}); err == nil {
@@ -76,7 +85,7 @@ func TestCreateSession_errors(t *testing.T) {
 
 func TestPrompt_noAgentConfigured(t *testing.T) {
 	ctx := t.Context()
-	rt := New(Config{Catalog: durable.NewCatalog(""), Projection: vfs.DirectProjection{}})
+	rt := New(Config{Catalog: durable.NewCatalog(""), Snapshots: NewMemorySnapshot(), Projection: vfs.DirectProjection{}})
 	id, err := rt.CreateSession(ctx, durable.CreateSession{})
 	if err != nil {
 		t.Fatal(err)
@@ -94,7 +103,7 @@ func TestPrompt_noAgentConfigured(t *testing.T) {
 
 func TestPrompt_userMessageAndUnknownAgent(t *testing.T) {
 	ctx := t.Context()
-	rt := New(Config{Catalog: newCatalog(t, scriptedComplete("ok"), durable.AgentSpec{}), Projection: vfs.DirectProjection{}})
+	rt := New(Config{Catalog: newCatalog(t, scriptedComplete("ok"), durable.AgentSpec{}), Snapshots: NewMemorySnapshot(), Projection: vfs.DirectProjection{}})
 	id, err := rt.CreateSession(ctx, durable.CreateSession{AgentID: "default"})
 	if err != nil {
 		t.Fatal(err)
@@ -141,7 +150,7 @@ func TestNew_usesDefaultAgentWhenEmpty(t *testing.T) {
 	cat.Register("default", durable.AgentSpec{
 		Options: tacklr.AgentOptions{Model: scriptedComplete("hi"), Config: tacklr.Config{MaxWindowSize: 8192}},
 	})
-	rt := New(Config{Catalog: cat, Projection: vfs.DirectProjection{}})
+	rt := New(Config{Catalog: cat, Snapshots: NewMemorySnapshot(), Projection: vfs.DirectProjection{}})
 	id, err := rt.CreateSession(ctx, durable.CreateSession{})
 	if err != nil || id == "" {
 		t.Fatal(err)

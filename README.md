@@ -52,7 +52,7 @@ Session data is three frozen planes. Do not mix them:
 
 | Plane | You pass | Holds |
 |-------|----------|--------|
-| **SnapshotStore** | `Config.Snapshots` (Temporal: required, same instance on New and NewWorker) | Window, plan, parked interrupt, `userState`, VFS recipes, session identity |
+| **SnapshotStore** | `Config.Snapshots` (required; Temporal: same instance on New and NewWorker) | Window, plan, parked interrupt, `userState`, VFS recipes, session identity |
 | **Wait loop** | `inprocess.New` or `temporal.New` + `NewWorker` | Scheduler: leftover Temporal tool calls, MCP Durable topology, child futures, Status |
 | **SecretStorage** | `temporal.Config.Secrets` (required; same instance on New and NewWorker) | VFS tokens. Not in snapshots. Not in Temporal history |
 
