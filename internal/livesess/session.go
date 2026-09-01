@@ -30,7 +30,7 @@ func StartSession(t testing.TB, opts tacklr.AgentOptions) *Session {
 	opts.MountSession = nil
 	cat := durable.NewCatalog("default")
 	cat.Register("default", durable.AgentSpec{Options: opts})
-	rt := inprocess.New(inprocess.Config{Catalog: cat, Projection: vfs.DirectProjection{}})
+	rt := inprocess.New(inprocess.Config{Catalog: cat, Snapshots: inprocess.NewMemorySnapshot(), Projection: vfs.DirectProjection{}})
 	id, err := rt.CreateSession(t.Context(), durable.CreateSession{AgentID: "default", SessionID: sessionID})
 	if err != nil {
 		t.Fatal(err)

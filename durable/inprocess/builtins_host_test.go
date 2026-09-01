@@ -55,7 +55,7 @@ func TestPrompt_hostPickedBuiltinToolsReachTheModel(t *testing.T) {
 				builtins.WebFetch(exa),
 			},
 		},
-	}), Projection: vfs.DirectProjection{}})
+	}), Snapshots: NewMemorySnapshot(), Projection: vfs.DirectProjection{}})
 
 	id, err := rt.CreateSession(ctx, durable.CreateSession{AgentID: "default"})
 	if err != nil {

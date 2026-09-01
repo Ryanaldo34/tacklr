@@ -21,13 +21,14 @@ const (
 	signalChildWaiting = "ChildWaiting"
 )
 
-// WorkflowInput is the typed start payload (no interface{}).
-type WorkflowInput struct {
+// workflowInput is wait-loop start state (scheduler), not a Snapshot.
+// Credentials live in SecretStorage. userState seed merges into the
+// checkpoint on the first activity save.
+type workflowInput struct {
 	SessionID  durable.SessionID
 	AgentID    string
 	MCPServers []mcp.MCPConfig
 	Mounts     []durable.MountRecipe
-	Auth       durable.AuthContext
 	// TurnLocalityTimeout, when > 0, pins the turn's activities to one worker
 	// (Temporal CreateSession). Zero skips worker sessions: activities can run
 	// on any worker. There is no default timeout.
@@ -43,10 +44,12 @@ type WorkflowInput struct {
 	Prompt     string
 	Parent     durable.SessionID
 	Specialist string
-	// State is CreateSession.State, already JSON-roundtripped by Runtime.CreateSession.
+	// State is CreateSession.State, already JSON-roundtripped. Overlay onto
+	// the checkpoint; not a durable workflow copy of userState.
 	State map[string]any
 }
 
+// promptSignal is the Prompt signal. Auth is secret-free on the wire.
 type promptSignal struct {
 	Text        string
 	UserMessage *tacklr.Message
@@ -56,6 +59,7 @@ type promptSignal struct {
 	State       map[string]any
 }
 
+// resumeSignal is the Resume signal. Auth is secret-free on the wire.
 type resumeSignal struct {
 	Responses map[string][]byte
 	Auth      durable.AuthContext

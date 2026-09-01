@@ -18,7 +18,8 @@ type Seq uint64
 // AuthContext is credentials and mount intent for one work item (Prompt, Resume,
 // or a one-shot child workflow). Protocols map their wire auth into this type.
 // Autonomous hosts set it on the payload that queues the work. Tokens are not
-// stored in SnapshotStore.
+// stored in SnapshotStore or Temporal event history. The Temporal adapter
+// writes them to SecretStorage before signaling.
 type AuthContext struct {
 	// Bindings are this slice's mounts and/or provider tokens. A binding with
 	// an alias upserts the recipe. A binding with only provider+token refreshes
@@ -53,9 +54,10 @@ type CreateSession struct {
 	// with Parent for spawn_specialist children. The host does not register the
 	// worker as a top-level catalog agent.
 	Specialist string
-	// State seeds host-owned session userState (JSON-serializable values).
-	// Tools read it via HarnessRuntime.StateGet. It is checkpointed — do not
-	// store tokens or clients. Child sessions do not inherit this map.
+	// State seeds checkpoint userState (JSON-serializable values).
+	// Tools read it via HarnessRuntime.StateGet. Canonical copy is
+	// Snapshot.Checkpoint, not Temporal workflow variables. No tokens or clients.
+	// Child sessions do not inherit this map.
 	State map[string]any
 }
 
@@ -68,8 +70,8 @@ type Prompt struct {
 	// MCPServers, when non-nil, replaces session-scoped MCP configs for this turn.
 	MCPServers []mcp.MCPConfig
 	Auth       AuthContext
-	// State merges into session userState for this turn (after checkpoint restore).
-	// JSON-serializable values only. Checkpointed — no tokens or clients.
+	// State merges into checkpoint userState for this turn after restore.
+	// JSON-serializable values only. No tokens or clients.
 	State map[string]any
 }
 
@@ -77,11 +79,13 @@ type Prompt struct {
 type Resume struct {
 	Responses map[string][]byte
 	Auth      AuthContext
-	// State merges into session userState when the parked turn continues.
+	// State merges into checkpoint userState when the parked turn continues.
 	State map[string]any
 }
 
-// Snapshot is one session's harness checkpoint plus VFS recipes (no tokens).
+// Snapshot is the session record in SnapshotStore. Both runtimes write the
+// same shape. Wait-loop fields (leftover Temporal tool calls, MCP overlay,
+// child futures) stay on the loop, not here.
 type Snapshot struct {
 	AgentID    string
 	Specialist string

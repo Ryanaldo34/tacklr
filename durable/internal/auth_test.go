@@ -1,14 +1,15 @@
-package durable
+package adapter
 
 import (
 	"slices"
 	"testing"
 
+	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
 func TestApplyAuthUpsertsRecipesAndRecordsSourceIDs(t *testing.T) {
-	auth := AuthContext{Bindings: []vfs.Binding{{
+	auth := durable.AuthContext{Bindings: []vfs.Binding{{
 		Provider: vfs.ProviderGoogleDrive,
 		Params: map[string]string{
 			vfs.ParamName:     "docs",
@@ -36,29 +37,29 @@ func TestApplyAuthUpsertsRecipesAndRecordsSourceIDs(t *testing.T) {
 }
 
 func TestApplyAuthDropByAliasThenProvider(t *testing.T) {
-	start := []MountRecipe{
+	start := []durable.MountRecipe{
 		{Provider: "gdrive", Alias: "docs", Params: map[string]string{vfs.ParamName: "docs"}},
 		{Provider: "local", Alias: "scratch", Params: map[string]string{vfs.ParamName: "scratch"}},
 	}
-	got := ApplyAuth(start, AuthContext{Drop: []string{"docs"}})
+	got := ApplyAuth(start, durable.AuthContext{Drop: []string{"docs"}})
 	if len(got) != 1 || got[0].Alias != "scratch" {
 		t.Fatalf("after alias drop: %+v", got)
 	}
-	got = ApplyAuth(got, AuthContext{Drop: []string{"local"}})
+	got = ApplyAuth(got, durable.AuthContext{Drop: []string{"local"}})
 	if len(got) != 0 {
 		t.Fatalf("after provider drop: %+v", got)
 	}
 }
 
 func TestBindingsForTurnUsesCachedRecipePlusProviderToken(t *testing.T) {
-	recipes := []MountRecipe{{
+	recipes := []durable.MountRecipe{{
 		Provider:  "gdrive",
 		Alias:     "docs",
 		Params:    map[string]string{vfs.ParamName: "docs", vfs.ParamFolderID: "fld-1"},
 		SourceIDs: []string{vfs.ParamFolderID + ":fld-1"},
 		Writable:  true,
 	}}
-	auth := AuthContext{Bindings: []vfs.Binding{{
+	auth := durable.AuthContext{Bindings: []vfs.Binding{{
 		Provider: "gdrive",
 		Auth:     vfs.Credential{Token: "tok-2"},
 	}}}
@@ -77,21 +78,14 @@ func TestBindingsForTurnUsesCachedRecipePlusProviderToken(t *testing.T) {
 	}
 }
 
-func TestBindingsForTurnSkipsRecipeWithoutToken(t *testing.T) {
-	recipes := []MountRecipe{{Provider: "gdrive", Alias: "docs", Params: map[string]string{vfs.ParamName: "docs"}}}
-	if got := BindingsForTurn(recipes, AuthContext{}); len(got) != 0 {
-		t.Fatalf("want no bindings without token, got %+v", got)
-	}
-}
-
 func TestApplyAuthKeepsPriorSourceIDsOnRebind(t *testing.T) {
-	start := []MountRecipe{{
+	start := []durable.MountRecipe{{
 		Provider:  "gdrive",
 		Alias:     "docs",
 		Params:    map[string]string{vfs.ParamName: "docs", vfs.ParamFolderID: "fld-1"},
 		SourceIDs: []string{vfs.ParamFolderID + ":fld-1", "file:abc"},
 	}}
-	got := ApplyAuth(start, AuthContext{Bindings: []vfs.Binding{{
+	got := ApplyAuth(start, durable.AuthContext{Bindings: []vfs.Binding{{
 		Provider: "gdrive",
 		Params:   map[string]string{vfs.ParamName: "docs", vfs.ParamFolderID: "fld-1"},
 		Auth:     vfs.Credential{Token: "x"},

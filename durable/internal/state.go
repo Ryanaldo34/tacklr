@@ -1,4 +1,4 @@
-package durable
+package adapter
 
 import (
 	"encoding/json"

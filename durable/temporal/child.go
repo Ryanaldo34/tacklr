@@ -10,6 +10,7 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
+	adapter "github.com/ryanaldo34/tacklr/durable/internal"
 	"github.com/ryanaldo34/tacklr/interrupt"
 )
 
@@ -24,18 +25,17 @@ type childRun struct {
 	err     string
 }
 
-func startChild(ctx, sessionCtx workflow.Context, parent durable.SessionID, agentID, specialist, task string, childID durable.SessionID, auth durable.AuthContext, mounts []durable.MountRecipe, in WorkflowInput) (childRun, error) {
+func startChild(ctx, sessionCtx workflow.Context, parent durable.SessionID, agentID, specialist, task string, childID durable.SessionID, mounts []durable.MountRecipe, in workflowInput) (childRun, error) {
 	cctx := workflow.WithChildOptions(sessionCtx, workflow.ChildWorkflowOptions{
 		WorkflowID:        string(childID),
 		ParentClosePolicy: enumspb.PARENT_CLOSE_POLICY_REQUEST_CANCEL,
 	})
-	fut := workflow.ExecuteChildWorkflow(cctx, SessionWorkflow, WorkflowInput{
+	fut := workflow.ExecuteChildWorkflow(cctx, SessionWorkflow, workflowInput{
 		SessionID:           childID,
 		AgentID:             agentID,
 		Parent:              parent,
 		Specialist:          specialist,
 		Prompt:              task,
-		Auth:                auth,
 		Mounts:              mounts,
 		TurnLocalityTimeout: in.TurnLocalityTimeout,
 		ActivityTimeout:     in.ActivityTimeout,
@@ -73,7 +73,7 @@ func spawnedNudge(spawned []childRun) string {
 	for i, c := range spawned {
 		rows[i] = durable.SessionStatus{ID: c.id, Specialist: c.spec, State: durable.SessionRunning}
 	}
-	return durable.ChildrenNudge(rows)
+	return adapter.ChildrenNudge(rows)
 }
 
 func cancelOne(ctx workflow.Context, spawned *[]childRun, id durable.SessionID) {
@@ -91,10 +91,9 @@ func cancelOne(ctx workflow.Context, spawned *[]childRun, id durable.SessionID) 
 func applyChildIntent(
 	ctx, sessionCtx workflow.Context,
 	spawned *[]childRun,
-	tout ToolOutput,
-	in WorkflowInput,
+	tout toolOutput,
+	in workflowInput,
 	agentID string,
-	auth durable.AuthContext,
 	mounts []durable.MountRecipe,
 ) error {
 	if tout.CancelID != "" {
@@ -106,7 +105,7 @@ func applyChildIntent(
 	if findChild(*spawned, tout.SpawnID) >= 0 {
 		return nil
 	}
-	c, err := startChild(ctx, sessionCtx, in.SessionID, agentID, tout.SpawnSpec, tout.SpawnTask, tout.SpawnID, auth, mounts, in)
+	c, err := startChild(ctx, sessionCtx, in.SessionID, agentID, tout.SpawnSpec, tout.SpawnTask, tout.SpawnID, mounts, in)
 	if err != nil {
 		return err
 	}
@@ -199,13 +198,13 @@ type activityChildren struct {
 }
 
 func (a *activityChildren) SpawnChild(_ context.Context, specialist, task, callID string) (string, error) {
-	specialist, task, err := durable.NormalizeSpawn(specialist, task)
+	specialist, task, err := adapter.NormalizeSpawn(specialist, task)
 	if err != nil {
 		return "", err
 	}
 	if a.catalog != nil {
 		if spec, ok := a.catalog.Lookup(a.agentID); ok {
-			if _, err := durable.OverlaySpecialist(spec, specialist); err != nil {
+			if _, err := adapter.OverlaySpecialist(spec, specialist); err != nil {
 				return "", fmt.Errorf("%w: %w", tacklr.ErrNotFound, err)
 			}
 		}
@@ -239,7 +238,7 @@ func (a *activityChildren) Children() []tacklr.Child {
 func (a *activityChildren) CancelChild(_ context.Context, id string) error {
 	sid := durable.SessionID(id)
 	if sid != a.spawnID && !slices.Contains(a.known, sid) {
-		return durable.UnknownChild(id)
+		return adapter.UnknownChild(id)
 	}
 	a.cancelID = sid
 	return nil
@@ -248,7 +247,7 @@ func (a *activityChildren) CancelChild(_ context.Context, id string) error {
 func (a *activityChildren) AwaitChild(_ context.Context, id, _ string) (tacklr.Child, error) {
 	sid := durable.SessionID(id)
 	if sid != a.spawnID && !slices.Contains(a.known, sid) {
-		return tacklr.Child{}, durable.UnknownChild(id)
+		return tacklr.Child{}, adapter.UnknownChild(id)
 	}
 	a.awaitID = sid
 	return tacklr.Child{}, &interrupt.ChildWaiting{Kind: interrupt.TypeChildWaiting}

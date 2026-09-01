@@ -145,7 +145,7 @@ func TestPrompt_nextTurnIsRunningUntilItsComplete(t *testing.T) {
 			}
 		},
 	}
-	rt := New(Config{Catalog: newCatalog(t, model, durable.AgentSpec{}), Projection: vfs.DirectProjection{}})
+	rt := New(Config{Catalog: newCatalog(t, model, durable.AgentSpec{}), Snapshots: NewMemorySnapshot(), Projection: vfs.DirectProjection{}})
 	id, err := rt.CreateSession(ctx, durable.CreateSession{AgentID: "default"})
 	if err != nil {
 		t.Fatal(err)
@@ -202,7 +202,7 @@ func TestPrompt_yieldKeepsStatusRunningAndWaiting(t *testing.T) {
 			}
 		},
 	}
-	rt := New(Config{Catalog: newCatalog(t, model, durable.AgentSpec{}), Projection: vfs.DirectProjection{}})
+	rt := New(Config{Catalog: newCatalog(t, model, durable.AgentSpec{}), Snapshots: NewMemorySnapshot(), Projection: vfs.DirectProjection{}})
 	id, err := rt.CreateSession(ctx, durable.CreateSession{AgentID: "default"})
 	if err != nil {
 		t.Fatal(err)
@@ -240,7 +240,7 @@ func TestPrompt_errorMeansStatusIsFailed(t *testing.T) {
 			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventError, Content: boom.Error(), Error: boom}
 		},
 	}
-	rt := New(Config{Catalog: newCatalog(t, model, durable.AgentSpec{}), Projection: vfs.DirectProjection{}})
+	rt := New(Config{Catalog: newCatalog(t, model, durable.AgentSpec{}), Snapshots: NewMemorySnapshot(), Projection: vfs.DirectProjection{}})
 	id, err := rt.CreateSession(ctx, durable.CreateSession{AgentID: "default"})
 	if err != nil {
 		t.Fatal(err)

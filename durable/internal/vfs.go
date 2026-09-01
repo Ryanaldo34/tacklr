@@ -1,4 +1,4 @@
-package durable
+package adapter
 
 import (
 	"context"
@@ -9,6 +9,7 @@ import (
 
 	"go.opentelemetry.io/otel/log"
 
+	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/telemetry"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
@@ -40,7 +41,7 @@ func CloseTurnTrees(workspace, skills *vfs.MountSession, sessionID, reason strin
 
 // OpenSkillsVFS builds the host-only skills MountSession from AgentSpec.OpenSkills.
 // It does not attach a FUSE projection. The agent never receives this session.
-func OpenSkillsVFS(ctx context.Context, threadID string, spec AgentSpec) (*vfs.MountSession, error) {
+func OpenSkillsVFS(ctx context.Context, threadID string, spec durable.AgentSpec) (*vfs.MountSession, error) {
 	if spec.OpenSkills == nil {
 		return nil, nil
 	}
@@ -49,7 +50,7 @@ func OpenSkillsVFS(ctx context.Context, threadID string, spec AgentSpec) (*vfs.M
 
 // OpenTurnSessions opens the agent workspace and the host-only skills tree.
 // On OpenSkills failure the workspace session is closed.
-func OpenTurnSessions(ctx context.Context, threadID string, spec AgentSpec, bindings []vfs.Binding, proj vfs.Projection) (workspace, skills *vfs.MountSession, err error) {
+func OpenTurnSessions(ctx context.Context, threadID string, spec durable.AgentSpec, bindings []vfs.Binding, proj vfs.Projection) (workspace, skills *vfs.MountSession, err error) {
 	workspace, err = OpenTurnVFS(ctx, threadID, spec, bindings, proj)
 	if err != nil {
 		return nil, nil, err
@@ -64,7 +65,7 @@ func OpenTurnSessions(ctx context.Context, threadID string, spec AgentSpec, bind
 
 // OpenTurnVFS builds the turn-scoped MountSession from AgentSpec.OpenVFS.
 // Nil when OpenVFS is nil or the projection is unavailable.
-func OpenTurnVFS(ctx context.Context, threadID string, spec AgentSpec, bindings []vfs.Binding, proj vfs.Projection) (*vfs.MountSession, error) {
+func OpenTurnVFS(ctx context.Context, threadID string, spec durable.AgentSpec, bindings []vfs.Binding, proj vfs.Projection) (*vfs.MountSession, error) {
 	if spec.OpenVFS == nil {
 		return nil, nil
 	}
@@ -100,6 +101,3 @@ func OpenTurnVFS(ctx context.Context, threadID string, spec AgentSpec, bindings 
 	}
 	return ms, nil
 }
-
-// ClearSessionVFS is a no-op: user tokens live on the work item, not the catalog.
-func ClearSessionVFS(Catalog, SessionID) {}

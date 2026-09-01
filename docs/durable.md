@@ -25,7 +25,12 @@ Host tools on `AgentSpec.Options.Tools` close over their clients at catalog regi
 ```go
 cat := durable.NewCatalog("agent")
 cat.Register("agent", durable.AgentSpec{Options: opts})
-rt := inprocess.New(inprocess.Config{Catalog: cat, Projection: vfs.DirectProjection{}})
+snaps := inprocess.NewMemorySnapshot()
+rt := inprocess.New(inprocess.Config{
+	Catalog:    cat,
+	Snapshots:  snaps,
+	Projection: vfs.DirectProjection{},
+})
 id, _ := rt.CreateSession(ctx, durable.CreateSession{
 	AgentID: "agent",
 	State:   map[string]any{"user": "Ada", "company": "Acme"},
@@ -34,9 +39,9 @@ _ = rt.Prompt(ctx, id, durable.Prompt{Text: prompt, Auth: auth})
 sub, _ := rt.Subscribe(ctx, id, 0)
 ```
 
-`State` is session facts tools read with `StateGet`. Update it on a later `Prompt` or `Resume`.
+`State` merges into checkpoint `userState` (tools read it with `StateGet`). Update it on a later `Prompt` or `Resume`. Tokens on `Auth` stay in process RAM for the turn; recipes land on `Snapshot.Mounts`.
 
-One goroutine per session runs the harness wait loop. HITL parks that goroutine and waits for `Runtime.Resume`. Session conversation lives in `SnapshotStore`.
+One goroutine per session runs the harness wait loop. HITL parks that goroutine and waits for `Runtime.Resume`. The session record lives in `SnapshotStore`.
 
 `Status` and the stream agree on when a turn finished. `StreamEventComplete` is published only after the checkpoint is saved and `Status` is already `complete`. `StreamEventError` that ends the turn is the same for `failed`. Park publishes `yield`; `Status` stays `running` with `Waiting` true. A later `Prompt` on a completed session starts a new turn: when `Prompt` returns, `Status` is `running` again.
 
@@ -44,8 +49,21 @@ One goroutine per session runs the harness wait loop. HITL parks that goroutine 
 
 The host runs:
 
-1. A Tacklr Temporal worker (`EnableSessionWorker: true`) that registers `SessionWorkflow` plus the `Inference`, `Tool`, `CommitToolOutput`, and `EmitEvent` activities.
-2. A protocol process (optional) whose `durable.Runtime` is `temporal.New(client, cfg)`. `temporal.Config` is the single host config for both `New` and `NewWorker` (catalog, queue, snapshots, projection, locality, activity timeout, heartbeat, retries). Autonomous work skips the protocol and calls Runtime (or starts the workflow) with a payload.
+1. A Tacklr Temporal worker (`NewWorker`) that registers `SessionWorkflow` and the turn activities. Do not register those yourself.
+2. A protocol process (optional) whose `durable.Runtime` is `temporal.New(client, cfg)`. `temporal.Config` is the single host config for both `New` and `NewWorker`. **Snapshots** and **Secrets** are required and must be the same instances on both. Autonomous work skips the protocol and calls Runtime.
+
+```go
+c, err := tacklrtemporal.Dial(client.Options{HostPort: temporalHost})
+cfg := tacklrtemporal.Config{
+	Catalog:    cat,
+	Snapshots:  snaps,   // session record
+	Secrets:    secrets, // VFS tokens; shared with the worker
+	Projection: vfs.DirectProjection{},
+}
+w := tacklrtemporal.NewWorker(c, cfg)
+_ = w.Start()
+rt := tacklrtemporal.New(c, cfg)
+```
 
 | Tacklr concept | Temporal |
 |----------------|----------|
@@ -59,14 +77,14 @@ The host runs:
 | Activity retries | `Config.ActivityAttempts` is Temporal MaximumAttempts. Zero is 3. 1 means no retry. |
 | Progress | Workflow Streams (`events`, `retry`, `close`) |
 | HITL | Signal `Resume` (never inside an activity) |
-| Leftover tools after HITL | Workflow variable (`rest`) replayed from history |
+| Leftover tools after HITL | Workflow variable (`rest`) replayed from history; not SnapshotStore |
 | Spawn specialist | Child `SessionWorkflow` (wait for started). `ParentClosePolicy` is request-cancel. Tools call `HarnessRuntime` child methods; the workflow reconciles the child ledger after each Tool activity (start, cancel, wait). Child HITL signals the parent (`ChildWaiting`) then parent `Resume` signals the child. |
 
 The worker registers `SessionWorkflow`, `Inference`, `Tool`, `CommitToolOutput`, and `EmitEvent`. Inference and Tool do not publish complete, yield, or turn-ending error. The workflow commits `Status`, then `EmitEvent` publishes the matching stream event.
 
 ## Child sessions
 
-A child is a nested Runtime session, not a host-owned supervisor. The id is `{parent}/w/{specialist}/{call}`. The same wait loop runs. The child inherits MCP, mount recipes, and auth from the parent, then overlays the named `Specialist` (`WithSpecialist` / `OverlaySpecialist`). Each child turn opens its own VFS (`OpenTurnVFS` on the child id). It does not reuse the parent’s live `MountSession`.
+A child is a nested Runtime session, not a host-owned supervisor. The id is `{parent}/w/{specialist}/{call}`. The same wait loop runs. The child inherits MCP Durable topology and mount recipes from the parent, then overlays the named `Specialist`. Tokens come from `SecretStorage` (child id, then parent id). Each child turn opens its own VFS (`OpenTurnVFS` on the child id). It does not reuse the parent’s live `MountSession`.
 
 Register specialists on `AgentOptions.Specialists`. The model sees four tools:
 
@@ -124,11 +142,17 @@ Resume.Auth            tokens for remount after park or worker recycle
 
 `AuthContext` is protocol-neutral. ACP `_tacklr/vfs/bind` only stashes on the ACP wire session; `BindTurn` copies that stash onto `Prompt.Auth`. An autonomous host sets `Prompt.Auth` (and optional `CreateSession.Mounts`) when it queues the workflow. No protocol is required.
 
-Recipes are cached on the session snapshot (`Snapshot.Mounts`): where a mount came from, not file contents. Providers lazy-load bytes on open/read. Tokens are not snapshotted. After HITL or a worker restart, the next Prompt/Resume supplies tokens; cached recipes remount the same folders.
+Recipes are cached on the session snapshot (`Snapshot.Mounts`): where a mount came from, not file contents. Providers lazy-load bytes on open/read. Tokens are not snapshotted and are not written to Temporal event history. The Temporal adapter puts them in `Config.Secrets` (`durable.SecretStorage`) before signaling a secret-free `AuthContext`. Activities load the bag at harness time (child sessions fall back to the parent id). Close deletes the session’s secrets.
+
+`SecretStorage` is not `SnapshotStore`. Client and worker must share one instance (Redis, Postgres, Vault, or `MemorySecretStorage` when they share a process). There is no default: a private memory map per process looks like a successful Prompt and then remounts nothing.
+
+After HITL or a worker restart, the next Prompt/Resume supplies tokens and they are Put again. A retry on another worker remounts only if that worker can `Get` the same store.
 
 A 401 during a turn ends the activity. The client (or host) `Resume`s with a new token. There is no live callback from an activity into ACP.
 
-Encrypt work-item payloads at rest with a Temporal payload codec (or the equivalent on Azure/Lambda) if the store is untrusted.
+MCP `Env`/`Headers` are stripped with `DurableConfigs` before Temporal payloads. `CredentialRef` stays and is resolved at activity time.
+
+Encrypt remaining work-item payloads (prompt text, tool args, HITL bytes) at rest with a Temporal payload codec if the store is untrusted. That is defense in depth for non-token data, not the token control.
 
 ## Protocol contract
 
@@ -151,13 +175,21 @@ A protocol is the handshake: create a session, start a turn, stream `StreamEvent
 
 Runtime, harness, VFS, and Temporal files compile with no protocol imports.
 
-## SnapshotStore
+## Session data planes (frozen)
 
-| Store | Lifetime | Contents |
-|-------|----------|----------|
-| SnapshotStore | One Runtime session | Window, plan, parked interrupts, parked-worker checkpoints, VFS recipes (no tokens, no file bytes). Temporal leftover tool calls are **not** stored here. |
+Three stores. Do not add a fourth. Do not copy a field from one into another except as a turn-scoped cache that the canonical store then owns.
 
-`Close` deletes the runtime snapshot. A new session id does not load a previous snapshot. `Save` takes the `Revision` from the last `Load` (zero on first write) so two workers cannot overwrite each other.
+| Plane | Lifetime | Owns | Never |
+|-------|----------|------|-------|
+| **SnapshotStore** | One Runtime session | Window, plan, parked interrupt, host `userState`, VFS recipes, identity (`AgentID`, `Parent`, `Specialist`, child ids) | Tokens, file bytes, leftover unstarted Temporal tool calls, MCP env/headers, child workflow futures |
+| **Wait loop** | In-process `sessionProc` / Temporal workflow replay | Leftover unstarted Temporal batch calls, MCP Durable topology, child futures, secret-free `ApplyAuth` on the current signal, `Status` | Window, plan, tokens, file bytes. `userState` after the first snapshot save of the slice |
+| **SecretStorage** | Session, deleted on Close | VFS credentials | Snapshot rows, Temporal payloads |
+
+`Prompt.State` / `Resume.State` / `CreateSession.State` merge into checkpoint `userState`. They are not a second Temporal copy of that map.
+
+In-process leftover tools stay in the checkpoint (one harness, one batch). Temporal leftover tools stay on the workflow (`rest`) because later calls in the batch have not run yet. Conversation is always SnapshotStore.
+
+`Close` deletes the snapshot and the secret bag. A new session id does not load a previous snapshot. `Save` takes the `Revision` from the last `Load` (zero on first write) so two workers cannot overwrite each other.
 
 ## Map to Azure / Lambda (later)
 
@@ -169,7 +201,8 @@ Runtime, harness, VFS, and Temporal files compile with no protocol imports.
 | Child / specialist | Child workflow | Sub-orchestration | Nested execution |
 | HITL | Signal Resume | WaitForExternalEvent | waitForEvent |
 | Progress | Workflow Streams | Event Hubs / queue | SQS / stream |
-| Auth | Prompt/Resume payload | orchestration input / event | invocation payload |
+| Auth | SecretStorage + secret-free signal | orchestration input / event | invocation payload |
+| Session record | SnapshotStore | Same | Same |
 
 Do not put Temporal `workflow.Context` on `durable.Runtime`.
 
@@ -191,7 +224,7 @@ shutdown, err := telemetry.Init(ctx, telemetry.Config{
     Insecure:     true, // local
 })
 c, err := tacklrtemporal.Dial(client.Options{HostPort: temporalHost})
-w := tacklrtemporal.NewWorker(c, taskQueue, opts)
+w := tacklrtemporal.NewWorker(c, cfg) // same Config as temporal.New, including Secrets
 ```
 
 Span attributes are closed enums and ids (`tacklr.runtime`, `tacklr.turn.kind`, `tacklr.agent_id`, `tacklr.outcome`). Logs carry prompt length, resume counts, retries, and error text.

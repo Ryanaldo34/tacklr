@@ -1,3 +1,4 @@
+# Requires Go 1.27 (go.mod).
 .PHONY: test test-short brain-pg-image helix-image require-docker vet lint fmt cover coverage check
 
 # Docker CLI is often missing from PATH when Docker Desktop is installed via the

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
 
@@ -22,6 +23,7 @@ import (
 	"github.com/ryanaldo34/tacklr/internal/durtest"
 	"github.com/ryanaldo34/tacklr/internal/temporallive"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
+	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/telemetry"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
@@ -35,6 +37,7 @@ type liveStack struct {
 	Client    client.Client
 	TaskQueue string
 	Worker    worker.Worker
+	Secrets   durable.SecretStorage
 }
 
 func newLiveStack(t *testing.T, cat durable.Catalog) *liveStack {
@@ -49,14 +52,15 @@ func newLiveStack(t *testing.T, cat durable.Catalog) *liveStack {
 	tq := fmt.Sprintf("tacklr-live-%d", n)
 	snaps := inprocess.NewMemorySnapshot()
 	log := inprocess.NewMemoryEventLog()
-	cfg := Config{Catalog: cat, TaskQueue: tq, Snapshots: snaps, Fallback: log, Projection: vfs.DirectProjection{}}
+	secrets := durable.NewMemorySecretStorage()
+	cfg := Config{Catalog: cat, TaskQueue: tq, Snapshots: snaps, Fallback: log, Projection: vfs.DirectProjection{}, Secrets: secrets}
 	rt := New(c, cfg)
 	w := NewWorker(c, cfg)
 	if err := w.Start(); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(w.Stop)
-	return &liveStack{Runtime: rt, Snapshots: snaps, Catalog: cat, Client: c, TaskQueue: tq, Worker: w}
+	return &liveStack{Runtime: rt, Snapshots: snaps, Catalog: cat, Client: c, TaskQueue: tq, Worker: w, Secrets: secrets}
 }
 
 func (s *liveStack) RestartWorker(t *testing.T) {
@@ -68,6 +72,7 @@ func (s *liveStack) RestartWorker(t *testing.T) {
 		Snapshots:  s.Snapshots,
 		Fallback:   s.Runtime.(*Runtime).fallback,
 		Projection: vfs.DirectProjection{},
+		Secrets:    s.Secrets,
 	})
 	if err := w.Start(); err != nil {
 		t.Fatal(err)
@@ -562,6 +567,57 @@ func TestLive_cachedRecipePlusTokenOnlyPrompt(t *testing.T) {
 	}
 	if !strings.Contains(body, "from-workspace") {
 		t.Fatalf("want workspace from cached recipe + prompt token, got %q %+v", body, got)
+	}
+}
+
+func TestLive_secretsNotInHistory(t *testing.T) {
+	ctx := t.Context()
+	token := "tok-history-secret-7f3a"
+	header := "Bearer mcp-secret-9c1e"
+	model := &testkit.ScriptedModel{
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "ok", IsComplete: true}
+		},
+	}
+	stack := newLiveStack(t, liveCat(t, model, durable.AgentSpec{}))
+	id, err := stack.Runtime.CreateSession(ctx, durable.CreateSession{
+		AgentID: "default",
+		MCPServers: []mcp.MCPConfig{{
+			Name: "remote", Type: mcp.TransportHTTP, URL: "https://example.test/mcp",
+			Headers:       []mcp.HTTPHeader{{Name: "Authorization", Value: header}},
+			CredentialRef: "vault://mcp",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stack.Runtime.Prompt(ctx, id, durable.Prompt{
+		Text: "hi",
+		Auth: durable.AuthContext{Bindings: []vfs.Binding{{
+			Provider: "local",
+			Params:   map[string]string{vfs.ParamName: "docs"},
+			Auth:     vfs.Credential{Token: token},
+		}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sub, err := stack.Runtime.Subscribe(ctx, id, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sub.Close() })
+	waitTurn(t, stack.Runtime, id, sub, 30*time.Second)
+
+	iter := stack.Client.GetWorkflowHistory(ctx, string(id), "", false, enumspb.HISTORY_EVENT_FILTER_TYPE_ALL_EVENT)
+	for iter.HasNext() {
+		ev, err := iter.Next()
+		if err != nil {
+			t.Fatal(err)
+		}
+		blob := ev.String()
+		if strings.Contains(blob, token) || strings.Contains(blob, header) {
+			t.Fatalf("secret in history event %s", ev.GetEventType())
+		}
 	}
 }
 

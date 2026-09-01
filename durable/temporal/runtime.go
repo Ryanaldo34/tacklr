@@ -1,3 +1,7 @@
+// Package temporal is the Temporal adapter for durable.Runtime.
+// Hosts use Dial, New, and NewWorker with the same Config (including
+// Snapshots and Secrets). NewWorker registers SessionWorkflow and the
+// turn activities.
 package temporal
 
 import (
@@ -15,6 +19,8 @@ import (
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/durable/inprocess"
+	adapter "github.com/ryanaldo34/tacklr/durable/internal"
+	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -30,6 +36,7 @@ type Runtime struct {
 	activityTimeout     time.Duration
 	heartbeatTimeout    time.Duration
 	activityAttempts    int32
+	secrets             durable.SecretStorage
 
 	mu     sync.Mutex
 	closed map[durable.SessionID]struct{}
@@ -64,8 +71,10 @@ func resolveActivityAttempts(n int32) int32 {
 
 // Config is the single Temporal host config for New and NewWorker.
 type Config struct {
-	Catalog    durable.Catalog
-	TaskQueue  string
+	Catalog   durable.Catalog
+	TaskQueue string
+	// Snapshots is the session record. Required. New and NewWorker must share
+	// the same instance. Tokens never go here.
 	Snapshots  durable.SnapshotStore
 	Fallback   durable.EventLog
 	Projection vfs.Projection
@@ -80,6 +89,9 @@ type Config struct {
 	HeartbeatTimeout time.Duration
 	// ActivityAttempts is Temporal MaximumAttempts. Zero is 3. 1 means no retry.
 	ActivityAttempts int32
+	// Secrets holds work-item credentials for activities. Required. New and
+	// NewWorker must share the same instance. Tokens never enter event history.
+	Secrets durable.SecretStorage
 }
 
 func (c Config) queue() string {
@@ -89,11 +101,16 @@ func (c Config) queue() string {
 	return c.TaskQueue
 }
 
-func (c Config) snaps() durable.SnapshotStore {
-	if c.Snapshots != nil {
-		return c.Snapshots
+func requireCfg(cfg Config) {
+	if cfg.Catalog == nil {
+		panic("temporal: Catalog is required")
 	}
-	return inprocess.NewMemorySnapshot()
+	if cfg.Snapshots == nil {
+		panic("temporal: Snapshots is required")
+	}
+	if cfg.Secrets == nil {
+		panic("temporal: Secrets is required")
+	}
 }
 
 func (c Config) memoryLog() *inprocess.MemoryEventLog {
@@ -104,25 +121,24 @@ func (c Config) memoryLog() *inprocess.MemoryEventLog {
 }
 
 // New constructs a Temporal Runtime. The host must also run NewWorker on the
-// same Config. Tokens travel on Prompt/Resume payloads.
+// same Config, including the same Snapshots and Secrets stores.
 func New(c client.Client, cfg Config) *Runtime {
 	if c == nil {
 		panic("temporal: Client is required")
 	}
-	if cfg.Catalog == nil {
-		panic("temporal: Catalog is required")
-	}
+	requireCfg(cfg)
 	return &Runtime{
 		client:              c,
 		taskQueue:           cfg.queue(),
 		catalog:             cfg.Catalog,
 		fallback:            cfg.memoryLog(),
-		snapshots:           cfg.snaps(),
+		snapshots:           cfg.Snapshots,
 		disableStreams:      cfg.DisableStreams,
 		turnLocalityTimeout: cfg.TurnLocality,
 		activityTimeout:     resolveActivityTimeout(cfg.ActivityTimeout),
 		heartbeatTimeout:    resolveHeartbeatTimeout(cfg.HeartbeatTimeout),
 		activityAttempts:    resolveActivityAttempts(cfg.ActivityAttempts),
+		secrets:             cfg.Secrets,
 		closed:              make(map[durable.SessionID]struct{}),
 	}
 }
@@ -140,17 +156,17 @@ func (r *Runtime) CreateSession(ctx context.Context, req durable.CreateSession) 
 	if id == "" {
 		id = durable.SessionID(uuid.NewString())
 	}
-	seed, err := durable.EncodeUserState(req.State)
+	seed, err := adapter.EncodeUserState(req.State)
 	if err != nil {
 		return "", err
 	}
 	_, err = r.client.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
 		ID:        string(id),
 		TaskQueue: r.taskQueue,
-	}, SessionWorkflow, WorkflowInput{
+	}, SessionWorkflow, workflowInput{
 		SessionID:           id,
 		AgentID:             agentID,
-		MCPServers:          req.MCPServers,
+		MCPServers:          mcp.DurableConfigs(req.MCPServers),
 		Mounts:              req.Mounts,
 		TurnLocalityTimeout: r.turnLocalityTimeout,
 		ActivityTimeout:     r.activityTimeout,
@@ -187,31 +203,35 @@ func (r *Runtime) signal(ctx context.Context, id durable.SessionID, name string,
 	return nil
 }
 
-// Prompt implements durable.Runtime.
 func (r *Runtime) Prompt(ctx context.Context, sessionID durable.SessionID, msg durable.Prompt) error {
-	encoded, err := durable.EncodeUserState(msg.State)
+	encoded, err := adapter.EncodeUserState(msg.State)
 	if err != nil {
+		return err
+	}
+	if err := r.secrets.Put(ctx, sessionID, durable.Secrets{Auth: msg.Auth}); err != nil {
 		return err
 	}
 	return r.signal(ctx, sessionID, signalPrompt, promptSignal{
 		Text:        msg.Text,
 		UserMessage: msg.UserMessage,
 		AgentID:     msg.AgentID,
-		MCPServers:  msg.MCPServers,
-		Auth:        msg.Auth,
+		MCPServers:  mcp.DurableConfigs(msg.MCPServers),
+		Auth:        msg.Auth.WithoutSecrets(),
 		State:       encoded,
 	})
 }
 
-// Resume implements durable.Runtime.
 func (r *Runtime) Resume(ctx context.Context, sessionID durable.SessionID, resume durable.Resume) error {
-	encoded, err := durable.EncodeUserState(resume.State)
+	encoded, err := adapter.EncodeUserState(resume.State)
 	if err != nil {
+		return err
+	}
+	if err := r.secrets.Put(ctx, sessionID, durable.Secrets{Auth: resume.Auth}); err != nil {
 		return err
 	}
 	return r.signal(ctx, sessionID, signalResume, resumeSignal{
 		Responses: resume.Responses,
-		Auth:      resume.Auth,
+		Auth:      resume.Auth.WithoutSecrets(),
 		State:     encoded,
 	})
 }
@@ -230,11 +250,15 @@ func (r *Runtime) Cancel(ctx context.Context, sessionID durable.SessionID) error
 
 // Close implements durable.Runtime.
 func (r *Runtime) Close(ctx context.Context, sessionID durable.SessionID) error {
+	kids, _ := r.Children(ctx, sessionID)
 	r.markClosed(sessionID)
 	_ = r.signal(ctx, sessionID, signalClose, nil)
+	for _, k := range kids {
+		_ = r.secrets.Delete(ctx, k)
+	}
+	_ = r.secrets.Delete(ctx, sessionID)
 	_ = r.snapshots.Delete(ctx, sessionID)
 	_ = r.fallback.CloseSession(ctx, sessionID)
-	durable.ClearSessionVFS(r.catalog, sessionID)
 	return nil
 }
 
@@ -349,5 +373,3 @@ func (r *Runtime) Status(ctx context.Context, id durable.SessionID) (durable.Ses
 	_ = val.Get(&st)
 	return st, nil
 }
-
-var _ durable.Runtime = (*Runtime)(nil)

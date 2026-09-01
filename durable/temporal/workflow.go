@@ -12,13 +12,13 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
+	adapter "github.com/ryanaldo34/tacklr/durable/internal"
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
-// SessionWorkflow is the harness wait loop: one Temporal workflow per agent session.
-// It is the primary OpenTelemetry instrumentor: one tacklr.turn span per prompt or
-// resume, with Inference/Tool activities as children via OTEL v2 propagation.
-func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
+// SessionWorkflow is the Temporal type name for the session wait loop.
+// NewWorker registers it. Hosts call durable.Runtime, not this function.
+func SessionWorkflow(ctx workflow.Context, in workflowInput) (string, error) {
 	logger := workflow.GetLogger(ctx)
 	if _, err := workflowstreams.NewWorkflowStream(ctx, nil); err != nil {
 		logger.Error("workflow stream", "error", err)
@@ -28,8 +28,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 		closed     bool
 		agentID    = in.AgentID
 		mcp        = in.MCPServers
-		mounts     = durable.ApplyAuth(in.Mounts, in.Auth)
-		lastAuth   = in.Auth
+		mounts     = adapter.ApplyAuth(in.Mounts, durable.AuthContext{})
 		spawned    []childRun
 		yielded    bool
 		result     string
@@ -64,11 +63,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 		return st, nil
 	})
 	_ = workflow.SetQueryHandler(ctx, queryChildren, func() ([]durable.SessionID, error) {
-		out := make([]durable.SessionID, len(spawned))
-		for i, c := range spawned {
-			out[i] = c.id
-		}
-		return out, nil
+		return spawnedIDs(spawned), nil
 	})
 	cancelSpawned := func() {
 		for _, c := range spawned {
@@ -125,17 +120,20 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 		},
 	}
 
-	applyAuth := func(auth durable.AuthContext) {
-		mounts = durable.ApplyAuth(mounts, auth)
-		if len(auth.Bindings) > 0 {
-			lastAuth = auth
+	rec := func() durable.Snapshot {
+		return durable.Snapshot{
+			AgentID:    agentID,
+			Specialist: in.Specialist,
+			Parent:     in.Parent,
+			Children:   spawnedIDs(spawned),
+			Mounts:     mounts,
 		}
 	}
 
 	runSlice := func(user *tacklr.Message, resume map[string][]byte, auth durable.AuthContext, kind string, extra map[string]any) {
-		turnState := durable.MergeUserState(seed, extra)
+		turnState := adapter.MergeUserState(seed, extra)
 		seed = nil
-		applyAuth(auth)
+		mounts = adapter.ApplyAuth(mounts, auth)
 		terminal = ""
 		yielded = false
 		result = ""
@@ -197,7 +195,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 			return err
 		}
 		emitEvent := func(ev tacklr.StreamEvent) {
-			_ = waitAct("EmitEvent", EmitEventInput{SessionID: in.SessionID, Event: ev}, nil)
+			_ = waitAct("EmitEvent", emitEventInput{SessionID: in.SessionID, Event: ev}, nil)
 		}
 		onActErr := func(err error) bool {
 			if err == nil {
@@ -229,18 +227,15 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 		for !stopSlice {
 			switch tacklr.Next(len(toolCalls), parked, inferComplete, len(spawned) > 0) {
 			case tacklr.ActionInfer:
-				var out InferenceOutput
-				err := waitAct("Inference", InferenceInput{
+				var out inferenceOutput
+				err := waitAct("Inference", inferenceInput{
 					SessionID:     in.SessionID,
-					AgentID:       agentID,
+					Rec:           rec(),
 					MCPServers:    mcp,
 					User:          user,
 					HadToolRound:  hadTools,
 					ModelRequests: reqs,
 					Resume:        resume,
-					Auth:          lastAuth,
-					Mounts:        mounts,
-					Specialist:    in.Specialist,
 					State:         turnState,
 				}, &out)
 				user = nil
@@ -262,23 +257,19 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 				hadTools = true
 				tc := toolCalls[0]
 				rest := toolCalls[1:]
-				var tout ToolOutput
-				err := waitAct("Tool", ToolInput{
+				var tout toolOutput
+				err := waitAct("Tool", toolInput{
 					SessionID:  in.SessionID,
-					AgentID:    agentID,
+					Rec:        rec(),
 					MCPServers: mcp,
 					Call:       tc,
-					Auth:       lastAuth,
-					Mounts:     mounts,
-					Specialist: in.Specialist,
-					Known:      spawnedIDs(spawned),
 					State:      turnState,
 				}, &tout)
 				if onActErr(err) {
 					stopSlice = true
 					break
 				}
-				if herr := applyChildIntent(ctx, sessionCtx, &spawned, tout, in, agentID, lastAuth, mounts); herr != nil {
+				if herr := applyChildIntent(ctx, sessionCtx, &spawned, tout, in, agentID, mounts); herr != nil {
 					stopSlice = onActErr(herr)
 					break
 				}
@@ -289,16 +280,13 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 						break
 					}
 					if parkID == "" {
-						var cout ToolOutput
-						cerr := waitAct("CommitToolOutput", CommitToolInput{
+						var cout toolOutput
+						cerr := waitAct("CommitToolOutput", commitToolInput{
 							SessionID:  in.SessionID,
-							AgentID:    agentID,
+							Rec:        rec(),
 							MCPServers: mcp,
 							Call:       tc,
 							Output:     output,
-							Auth:       lastAuth,
-							Mounts:     mounts,
-							Specialist: in.Specialist,
 							State:      turnState,
 						}, &cout)
 						if onActErr(cerr) {
@@ -348,10 +336,10 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 						waiting = false
 						parked = false
 						yielded = false
-						applyAuth(ev.resume.Auth)
-						turnState = durable.MergeUserState(turnState, ev.resume.State)
+						mounts = adapter.ApplyAuth(mounts, ev.resume.Auth)
+						turnState = adapter.MergeUserState(turnState, ev.resume.State)
 						if cid, ok := childParks[interruptID]; ok {
-							_ = workflow.SignalExternalWorkflow(ctx, string(cid), "", signalResume, resumeSignal{Responses: ev.resume.Responses, Auth: ev.resume.Auth, State: ev.resume.State}).Get(ctx, nil)
+							_ = workflow.SignalExternalWorkflow(ctx, string(cid), "", signalResume, resumeSignal{Responses: ev.resume.Responses, Auth: ev.resume.Auth.WithoutSecrets(), State: ev.resume.State}).Get(ctx, nil)
 							delete(childParks, interruptID)
 						}
 						sessionCtx, hasSession = openTurnLocality(ctx, in.TurnLocalityTimeout, time.Minute)
@@ -362,14 +350,12 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 						openTurn(telemetry.TurnKindResume)
 						outcome, turnErr = telemetry.OutcomeOK, nil
 						actCtx = workflow.WithActivityOptions(sessionCtx, activityOpts)
-						var iout InferenceOutput
-						err := waitAct("Inference", InferenceInput{
+						var iout inferenceOutput
+						err := waitAct("Inference", inferenceInput{
 							SessionID:  in.SessionID,
-							AgentID:    agentID,
+							Rec:        rec(),
 							MCPServers: mcp,
 							Resume:     ev.resume.Responses,
-							Auth:       lastAuth,
-							Mounts:     mounts,
 							State:      turnState,
 						}, &iout)
 						if onActErr(err) {
@@ -401,17 +387,14 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 				stopSlice = true
 			case tacklr.ActionNudge:
 				nudgeMsg := &tacklr.Message{Role: tacklr.RoleUser, Content: spawnedNudge(spawned)}
-				var out InferenceOutput
-				err := waitAct("Inference", InferenceInput{
+				var out inferenceOutput
+				err := waitAct("Inference", inferenceInput{
 					SessionID:     in.SessionID,
-					AgentID:       agentID,
+					Rec:           rec(),
 					MCPServers:    mcp,
 					User:          nudgeMsg,
 					HadToolRound:  true,
 					ModelRequests: reqs,
-					Auth:          lastAuth,
-					Mounts:        mounts,
-					Specialist:    in.Specialist,
 					State:         turnState,
 				}, &out)
 				if onActErr(err) {
@@ -433,7 +416,7 @@ func SessionWorkflow(ctx workflow.Context, in WorkflowInput) (string, error) {
 	}
 
 	if in.Prompt != "" {
-		runSlice(&tacklr.Message{Role: tacklr.RoleUser, Content: in.Prompt}, nil, in.Auth, telemetry.TurnKindPrompt, nil)
+		runSlice(&tacklr.Message{Role: tacklr.RoleUser, Content: in.Prompt}, nil, durable.AuthContext{}, telemetry.TurnKindPrompt, nil)
 		return result, nil
 	}
 

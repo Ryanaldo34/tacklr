@@ -36,7 +36,8 @@ const (
 
 // Credential is a session-scoped access token. Never store this on MountSpec
 // or in a checkpoint / SnapshotStore. Work-item payloads (Prompt/Resume) may
-// carry it; backends must not persist it with recipes.
+// carry it; backends must not persist it with recipes. Temporal event history
+// must not contain Token; the adapter keeps it in SecretStorage.
 type Credential struct {
 	Token     string    `json:"token,omitempty"`
 	ExpiresAt time.Time `json:"expiresAt,omitempty"`
