@@ -122,6 +122,33 @@ func (p *ChildWaiting) Error() string {
 	return "child session awaiting input"
 }
 
+// TypeAuthExpired parks a tool call until the host rebinds credentials on Resume.Auth.
+const TypeAuthExpired = "auth_expired"
+
+// AuthExpired is raised when a tool or VFS mount unwraps to expired credentials.
+// Return is a no-op; tokens travel on Resume.Auth, not the interrupt payload.
+type AuthExpired struct {
+	Tool     string `json:"tool,omitempty"`
+	Provider string `json:"provider,omitempty"`
+}
+
+func (p *AuthExpired) TypeName() string { return TypeAuthExpired }
+
+func (p *AuthExpired) Serialize() ([]byte, error) {
+	return json.Marshal(p)
+}
+
+func (p *AuthExpired) ValidatePayload([]byte) error { return nil }
+
+func (p *AuthExpired) Return([]byte) error { return nil }
+
+func (p *AuthExpired) Error() string {
+	if p != nil && p.Tool != "" {
+		return p.Tool + ": credentials expired"
+	}
+	return "credentials expired"
+}
+
 // ACP PermissionOptionKind values.
 const (
 	PermissionAllowOnce    = "allow_once"
@@ -267,6 +294,7 @@ func RegisterDefaults() {
 		Register(func() Interrupt { return &UserSelectionInterrupt{} })
 		Register(func() Interrupt { return &ToolPermissionInterrupt{} })
 		Register(func() Interrupt { return &ChildWaiting{Kind: TypeChildWaiting} })
+		Register(func() Interrupt { return &AuthExpired{} })
 	})
 }
 

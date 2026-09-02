@@ -9,6 +9,7 @@ import (
 
 	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/telemetry"
+	"github.com/ryanaldo34/tacklr/vfs"
 )
 
 func (a *TurnManager) absorbUser(ctx context.Context, user *Message, out chan StreamEvent) error {
@@ -168,6 +169,9 @@ func (a *TurnManager) runToolCall(ctx context.Context, tc ToolCall, out chan Str
 		Runtime:  runtimeCopy,
 	})
 	var parked interrupt.Interrupt
+	if err != nil && !errors.As(err, &parked) && (errors.Is(err, ErrAuthExpired) || errors.Is(err, vfs.ErrAuthExpired)) {
+		err = a.session.Park(tcKey, &interrupt.AuthExpired{Tool: tc.Name})
+	}
 	if errors.As(err, &parked) {
 		serialized, _ := parked.Serialize()
 		data, _ := json.Marshal(map[string]any{

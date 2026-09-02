@@ -19,10 +19,11 @@ import (
 // should follow. Construct with Correction(cause, msg). Distinct from ErrFailed
 // (harness/runtime). errors.Is matches both ErrCorrection and cause.
 var (
-	ErrNotFound   = errors.New("not found")
-	ErrInvalid    = errors.New("invalid")
-	ErrFailed     = errors.New("failed")
-	ErrCorrection = errors.New("correction")
+	ErrNotFound    = errors.New("not found")
+	ErrInvalid     = errors.New("invalid")
+	ErrFailed      = errors.New("failed")
+	ErrCorrection  = errors.New("correction")
+	ErrAuthExpired = errors.New("auth expired")
 )
 
 var (
@@ -140,6 +141,7 @@ type (
 	UserSelectionInterrupt  = interrupt.UserSelectionInterrupt
 	ToolPermissionInterrupt = interrupt.ToolPermissionInterrupt
 	PermissionOption        = interrupt.PermissionOption
+	AuthExpired             = interrupt.AuthExpired
 )
 
 var (
@@ -153,6 +155,7 @@ const (
 	PermissionAllowAlways  = interrupt.PermissionAllowAlways
 	PermissionRejectOnce   = interrupt.PermissionRejectOnce
 	PermissionRejectAlways = interrupt.PermissionRejectAlways
+	TypeAuthExpired        = interrupt.TypeAuthExpired
 )
 
 // RegisterInterrupt registers a custom interrupt factory for session rehydrate.

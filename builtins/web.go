@@ -128,6 +128,9 @@ func mapExaErr(name string, err error) error {
 		if st.QueryFixable() {
 			return tacklr.Correction(err, name+": the search provider rejected that request. Simplify filters (omit category or domain lists) and retry")
 		}
+		if st.Status == 401 {
+			return fmt.Errorf("%s: credentials expired: %w", name, errors.Join(tacklr.ErrAuthExpired, err))
+		}
 		return fmt.Errorf("%s: the search provider failed: %w", name, errors.Join(tacklr.ErrFailed, err))
 	}
 	if errors.Is(err, ErrService) {
