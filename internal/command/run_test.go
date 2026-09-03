@@ -10,6 +10,7 @@ import (
 )
 
 func TestRun_truncatesOversizedOutput(t *testing.T) {
+	skipWithoutJail(t)
 	dir := t.TempDir()
 	big := bytes.Repeat([]byte("a"), outputCap+64)
 	if err := os.WriteFile(filepath.Join(dir, "big.txt"), big, 0o644); err != nil {

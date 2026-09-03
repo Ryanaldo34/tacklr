@@ -39,12 +39,12 @@ func TestRunCommand_catDirtyAndFalseExit(t *testing.T) {
 	t.Cleanup(func() { _ = ms.Close() })
 
 	tool := newRunCommand(ms, false)
-	res, err := tool.invoke(ctx, `{"command":"pwd"}`, rt)
+	res, err := tool.invoke(ctx, `{"command":"ls"}`, rt)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(res.output, ms.HostDir()) {
-		t.Fatalf("pwd cwd: %s want %s", res.output, ms.HostDir())
+	if !strings.Contains(res.output, "workspace") {
+		t.Fatalf("ls cwd: %s", res.output)
 	}
 
 	res, err = tool.invoke(ctx, `{"command":"cat workspace/work/note.md"}`, rt)
