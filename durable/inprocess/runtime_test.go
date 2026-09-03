@@ -328,6 +328,134 @@ func TestAskUserChoiceYieldsThenResumeCompletes(t *testing.T) {
 	}
 }
 
+func TestPrompt_authExpiredYieldsThenResumeCompletes(t *testing.T) {
+	ctx := t.Context()
+	var calls atomic.Int32
+	cloud := tacklr.NewTool(tacklr.ToolConfig{
+		Name: "cloud_read",
+		Handler: func(context.Context) (string, error) {
+			if calls.Add(1) == 1 {
+				return "", fmt.Errorf("gdrive: %w", vfs.ErrAuthExpired)
+			}
+			return "from-cloud", nil
+		},
+	})
+	model := &testkit.ScriptedModel{
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			if last := lastMsg(msgs); last != nil && last.Role == tacklr.RoleTool {
+				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: last.Content, IsComplete: true}
+				return
+			}
+			ch <- tacklr.LLMResponseChunk{
+				Type: tacklr.StreamEventFunctionCall,
+				ToolCalls: []tacklr.ToolCall{{
+					ID: "c1", CallID: "c1", Name: "cloud_read", Arguments: `{}`,
+				}},
+				IsComplete: true,
+			}
+		},
+	}
+	rt := New(Config{Catalog: newCatalog(t, model, durable.AgentSpec{
+		Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{cloud}},
+	}), Snapshots: NewMemorySnapshot(), Projection: vfs.DirectProjection{}})
+	id, err := rt.CreateSession(ctx, durable.CreateSession{AgentID: "default"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rt.Prompt(ctx, id, durable.Prompt{Text: "read cloud"}); err != nil {
+		t.Fatal(err)
+	}
+	sub, err := rt.Subscribe(ctx, id, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sub.Close() })
+	got := waitEvents(t, rt, id, sub, 8*time.Second)
+	var yielded bool
+	for _, ev := range got {
+		if ev.Type == tacklr.StreamEventInterrupt {
+			yielded = true
+		}
+		if ev.Type == tacklr.StreamEventToolResult {
+			t.Fatalf("auth park yielded a tool_result: %+v", summarize(got))
+		}
+	}
+	if !yielded {
+		t.Fatalf("want yield, got %+v", summarize(got))
+	}
+	if err := rt.Resume(ctx, id, durable.Resume{
+		Responses: map[string][]byte{"c1": []byte(`{}`)},
+		Auth: durable.AuthContext{Bindings: []vfs.Binding{{
+			Provider: "gdrive", Auth: vfs.Credential{Token: "tok-2"},
+		}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got = waitEvents(t, rt, id, sub, 8*time.Second)
+	var saw bool
+	for _, ev := range got {
+		if ev.Type == tacklr.StreamEventMessage && strings.Contains(ev.Content, "from-cloud") {
+			saw = true
+		}
+	}
+	if !saw {
+		t.Fatalf("want retried read, got %+v", summarize(got))
+	}
+}
+
+func TestPrompt_permissionDeniedCorrects(t *testing.T) {
+	ctx := t.Context()
+	denied := tacklr.NewTool(tacklr.ToolConfig{
+		Name: "cloud_read",
+		Handler: func(context.Context) (string, error) {
+			return "", fmt.Errorf("share: %w", vfs.ErrPermission)
+		},
+	})
+	model := &testkit.ScriptedModel{
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			if last := lastMsg(msgs); last != nil && last.Role == tacklr.RoleTool {
+				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "ok", IsComplete: true}
+				return
+			}
+			ch <- tacklr.LLMResponseChunk{
+				Type: tacklr.StreamEventFunctionCall,
+				ToolCalls: []tacklr.ToolCall{{
+					ID: "c1", CallID: "c1", Name: "cloud_read", Arguments: `{}`,
+				}},
+				IsComplete: true,
+			}
+		},
+	}
+	rt := New(Config{Catalog: newCatalog(t, model, durable.AgentSpec{
+		Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{denied}},
+	}), Snapshots: NewMemorySnapshot(), Projection: vfs.DirectProjection{}})
+	id, err := rt.CreateSession(ctx, durable.CreateSession{AgentID: "default"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rt.Prompt(ctx, id, durable.Prompt{Text: "read"}); err != nil {
+		t.Fatal(err)
+	}
+	sub, err := rt.Subscribe(ctx, id, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sub.Close() })
+	got := waitEvents(t, rt, id, sub, 8*time.Second)
+	var sawCorrection bool
+	for _, ev := range got {
+		if ev.Type == tacklr.StreamEventInterrupt {
+			t.Fatalf("permission parked: %+v", summarize(got))
+		}
+		if ev.Type == tacklr.StreamEventToolResult && strings.Contains(ev.Content, "permission denied") {
+			sawCorrection = true
+		}
+	}
+	if !sawCorrection {
+		t.Fatalf("want permission correction, got %+v", summarize(got))
+	}
+}
+
 // TestPrompt_parallelBatchHitlRunsRemainder: durable driver used to abort the
 // rest of a model tool batch when one call parked. Next inference then sent a
 // function_call without function_call_output (Azure 400). Resume must still

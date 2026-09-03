@@ -280,6 +280,9 @@ func TestMapExaErr_andStatusErrorEdges(t *testing.T) {
 	if err := mapExaErr("web_search", ErrService); err == nil || !errors.Is(err, tacklr.ErrFailed) {
 		t.Fatalf("service: %v", err)
 	}
+	if err := mapExaErr("web_search", &StatusError{Status: 401, Body: "no"}); err == nil || !errors.Is(err, tacklr.ErrAuthExpired) {
+		t.Fatalf("401: %v", err)
+	}
 	if err := mapExaErr("web_search", errors.New("plain")); err == nil || err.Error() != "plain" {
 		t.Fatalf("plain: %v", err)
 	}

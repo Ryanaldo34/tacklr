@@ -271,6 +271,30 @@ func TestChildWaiting_typeNameAndError(t *testing.T) {
 	}
 }
 
+func TestAuthExpired_typeNameAndResume(t *testing.T) {
+	empty := &interrupt.AuthExpired{}
+	if empty.TypeName() != interrupt.TypeAuthExpired {
+		t.Fatalf("type: %s", empty.TypeName())
+	}
+	if empty.Error() != "credentials expired" {
+		t.Fatalf("error: %s", empty.Error())
+	}
+	if err := empty.Return([]byte(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	named := &interrupt.AuthExpired{Tool: "read"}
+	if named.Error() != "read: credentials expired" {
+		t.Fatalf("named: %s", named.Error())
+	}
+	got, ok := interrupt.New(interrupt.TypeAuthExpired)
+	if !ok {
+		t.Fatal("auth_expired not registered")
+	}
+	if got.TypeName() != interrupt.TypeAuthExpired {
+		t.Fatalf("new: %s", got.TypeName())
+	}
+}
+
 // TestInterrupt_asError confirms errors.As works for tool return paths.
 func TestInterrupt_asError(t *testing.T) {
 	var err error = &interrupt.UserSelectionInterrupt{Options: []interrupt.UserChoice{{Title: "A"}}}

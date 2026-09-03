@@ -53,16 +53,7 @@ func Correctionf(cause error, format string, args ...any) error {
 // already Correction, ErrFailed (service), else Correction(err, err.Error()).
 func presentToolError(name string, err error) error {
 	var intr interrupt.Interrupt
-	if errors.As(err, &intr) {
-		return err
-	}
-	if errors.Is(err, context.Canceled) {
-		return err
-	}
-	if errors.Is(err, ErrCorrection) {
-		return err
-	}
-	if errors.Is(err, ErrFailed) {
+	if errors.As(err, &intr) || errors.Is(err, context.Canceled) || errors.Is(err, ErrCorrection) || errors.Is(err, ErrFailed) {
 		return err
 	}
 	msg := strings.TrimPrefix(err.Error(), "vfs: ")

@@ -24,6 +24,16 @@ func TestResolveInterruptViaACP_dispatchOutcomes(t *testing.T) {
 		t.Fatalf("unsupported: %v", err)
 	}
 
+	authData, _ := json.Marshal(map[string]any{
+		"interruptId": "i-auth",
+		"type":        tacklr.TypeAuthExpired,
+		"data":        map[string]any{"tool": "read"},
+	})
+	park, parkErr := resolveInterruptViaACP(context.Background(), ProtocolEnv{Conn: &Conn{RPC: NewClientBridge(&recordingWriter{})}}, "s", &tacklr.StreamEvent{Data: authData})
+	if parkErr != nil || park != nil {
+		t.Fatalf("auth_expired park: ch=%v err=%v", park, parkErr)
+	}
+
 	// Bad envelope.
 	_, err = resolveInterruptViaACP(context.Background(), ProtocolEnv{Conn: &Conn{RPC: NewClientBridge(&recordingWriter{})}}, "s", &tacklr.StreamEvent{Data: []byte(`{`)})
 	if err == nil {

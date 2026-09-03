@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -213,6 +214,76 @@ func TestSessionWorkflow_activityRetryThenCompletes(t *testing.T) {
 	}
 	if st := querySession(t, env); st.State != durable.SessionComplete {
 		t.Fatalf("Status after retry: %+v", st)
+	}
+}
+
+func TestSessionWorkflow_authExpiredYieldThenResume(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+	env.SetWorkerOptions(worker.Options{EnableSessionWorker: true})
+	var calls atomic.Int32
+	cloud := tacklr.NewTool(tacklr.ToolConfig{
+		Name: "cloud_read",
+		Handler: func(context.Context) (string, error) {
+			if calls.Add(1) == 1 {
+				return "", fmt.Errorf("gdrive: %w", vfs.ErrAuthExpired)
+			}
+			return "from-cloud", nil
+		},
+	})
+	cat := durable.NewCatalog("default")
+	model := &testkit.ScriptedModel{
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			if last := lastMsg(msgs); last != nil && last.Role == tacklr.RoleTool {
+				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: last.Content, IsComplete: true}
+				return
+			}
+			ch <- tacklr.LLMResponseChunk{
+				Type: tacklr.StreamEventFunctionCall,
+				ToolCalls: []tacklr.ToolCall{{
+					ID: "c1", CallID: "c1", Name: "cloud_read", Arguments: `{}`,
+				}},
+				IsComplete: true,
+			}
+		},
+	}
+	cat.Register("default", durable.AgentSpec{
+		Options: tacklr.AgentOptions{Model: model, Config: tacklr.Config{MaxWindowSize: 8192}, Tools: []*tacklr.Tool{cloud}},
+	})
+	fallback := inprocess.NewMemoryEventLog()
+	env.RegisterWorkflow(SessionWorkflow)
+	env.RegisterActivity(newActs(cat, fallback, true))
+
+	id := durable.SessionID("sess-auth")
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(signalPrompt, promptSignal{Text: "read"})
+	}, time.Millisecond)
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(signalResume, resumeSignal{Responses: map[string][]byte{"c1": []byte(`{}`)}})
+	}, 20*time.Millisecond)
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(signalClose, nil)
+	}, 80*time.Millisecond)
+
+	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id, AgentID: "default"})
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatal(err)
+	}
+	got := drainLog(t, fallback, id)
+	var yielded, saw bool
+	for _, ev := range got {
+		if ev.Type == tacklr.StreamEventInterrupt {
+			yielded = true
+		}
+		if ev.Type == tacklr.StreamEventMessage && strings.Contains(ev.Content, "from-cloud") {
+			saw = true
+		}
+	}
+	if !yielded || !saw {
+		t.Fatalf("want yield + retried read, got %+v", got)
+	}
+	if st := querySession(t, env); st.State != durable.SessionComplete {
+		t.Fatalf("Status after auth resume: %+v", st)
 	}
 }
 

@@ -410,6 +410,8 @@ func resolveInterruptViaACP(ctx context.Context, env ProtocolEnv, threadID strin
 			return nil, nil
 		}
 		return resolveSelectionViaElicitation(ctx, env, threadID, ev)
+	case tacklr.TypeAuthExpired:
+		return nil, nil
 	default:
 		return nil, fmt.Errorf("unsupported interrupt type %q", kind)
 	}

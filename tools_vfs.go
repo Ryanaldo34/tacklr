@@ -495,7 +495,7 @@ func vfsToolErr(name, path string, err error) error {
 	case errors.Is(err, vfs.ErrNotDir):
 		return Correctionf(vfs.ErrNotDir, "%s: that path is a file, not a directory", name)
 	case errors.Is(err, vfs.ErrAuthExpired):
-		return fmt.Errorf("%s: cloud credentials expired: %w", name, errors.Join(ErrFailed, err))
+		return fmt.Errorf("%s: cloud credentials expired: %w", name, err)
 	case errors.Is(err, vfs.ErrPermission):
 		return Correctionf(vfs.ErrPermission, "%s: permission denied on that path. Use a path the session is allowed to access", name)
 	case errors.Is(err, vfs.ErrReadOnly):
