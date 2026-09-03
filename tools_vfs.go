@@ -572,14 +572,15 @@ func growLineWindow(b *strings.Builder, extra int, lines []string) {
 const runCommandTimeout = 60 * time.Second
 
 type runCommandArgs struct {
-	Command string `json:"command" desc:"Host shell command. Runs as /bin/sh -c. cwd is the VFS root. Use relative paths (work/foo). Absolute /work is the host /work until a later jail."`
+	Command string `json:"command" desc:"Host shell command. Runs as /bin/sh -c. cwd is the VFS root. Use relative paths (workspace/work/foo). On Linux the shell is jailed to this mount."`
 }
 
 func newRunCommand(ms *vfs.MountSession, permissionRequired bool) *Tool {
+	command.RequireJail()
 	cfg := ToolConfig{
 		Name:        "run_command",
 		DisplayName: "Run {command}",
-		Description: `Run a host shell command as /bin/sh -c. cwd is the VFS root (FUSE mount). Use relative paths (work/foo, ./work/foo). Absolute /work is the host /work until a later jail. Non-zero exit is a successful tool result (exit=N).`,
+		Description: `Run a host shell command as /bin/sh -c. cwd is the VFS root (FUSE mount). Use relative paths (workspace/work/foo). On Linux the shell cannot see other session mounts. Non-zero exit is a successful tool result (exit=N).`,
 		Category:    ToolCategoryExecute,
 		Access:      ToolExecuteAccess,
 		Timeout:     runCommandTimeout,

@@ -195,8 +195,8 @@ Update `docs/vfs.md`, `docs/knowledge.md`, `README.md`, `vfs/doc.go` so they mat
 ## Decisions that still hold
 
 1. FUSE root is virtual `/`. Single-segment points only.
-2. Harness tools, `MountInfo`, `Specs`, and checkpoints never print `HostDir`. The child may `pwd` it.
-3. `run_command` is cwd-only `/bin/sh -c`. No chroot in this train. Residual escape risk is documented, not tested as a negative.
+2. Harness tools, `MountInfo`, `Specs`, and checkpoints never print `HostDir`. Linux child `pwd` is `/session`; macOS/Windows child `pwd` is HostDir.
+3. `run_command` is `/bin/sh -c` with cwd at the FUSE root. On Linux the child is jailed there (user+mount+pid namespace + chroot). Missing user namespaces panic when `run_command` is registered, not when the model first calls it. macOS/Windows stay cwd-only.
 4. Registry `run_command` is `PermissionRequired: true` by default.
 5. `list` / `stat` stay whenever a `MountSession` exists. Do not gate them on `FuseAvailable()`.
 6. `write` modes are counted by field presence. IR body field is `ir_text`.
@@ -209,10 +209,10 @@ Update `docs/vfs.md`, `docs/knowledge.md`, `README.md`, `vfs/doc.go` so they mat
 
 | Risk | Notes |
 |------|--------|
-| `run_command` is a full host shell as the process user | Permission gate is not a jail |
-| `ls /` and `echo x > /tmp/pwn` leave the tree | cwd-only; writable FUSE does not fix this |
-| Child `pwd` shows `HostDir` | Do not redact stdout |
-| Read-only FUSE does not stop writes **outside** the mount | Next jail plan |
+| `run_command` is a full host shell as the process user | Linux: jailed to this session’s HostDir. macOS/Windows: cwd-only |
+| Child `pwd` on Linux is `/session`, not HostDir | Do not redact stdout |
+| macOS/Windows `ls ..` can leave the tree | No user namespaces |
+| Linux without user namespaces panics on `run_command` | Fail closed. Ubuntu 24.04 AppArmor may block unprivileged user ns. |
 | Production without `/dev/fuse` has no VFS tools | Use `DirectProjection` in tests; embedders pass a session |
 
 ---

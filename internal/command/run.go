@@ -7,23 +7,27 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 	"sync"
 	"syscall"
 )
 
-const outputCap = 1 << 20
+const (
+	outputCap      = 1 << 20
+	jailSetupExit  = 125
+	jailFailMarker = "tacklr-jail-setup-failed"
+)
 
 // Run executes command in the projected VFS directory and returns a bounded,
 // structured stdout/stderr result. Non-zero process exits are successful
 // outcomes; startup and context failures are errors.
+//
+// On Linux the shell is jailed to dir with a user+mount+pid namespace so it
+// cannot see sibling session mounts.
 func Run(ctx context.Context, dir, command string) (string, error) {
-	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", `cd "$1" && eval "$2"`, "run_command", dir, command)
-	cmd.Dir = os.TempDir()
+	cmd := jailCommand(ctx, dir, command)
 	cmd.Stdin = bytes.NewReader(nil)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
 			return nil
@@ -45,8 +49,14 @@ func Run(ctx context.Context, dir, command string) (string, error) {
 	if err != nil {
 		var exitError *exec.ExitError
 		if errors.As(err, &exitError) {
+			if exitError.ExitCode() == jailSetupExit && strings.Contains(stderr.buf.String(), jailFailMarker) {
+				panic("run_command: session jail requires Linux user namespaces")
+			}
 			exit = exitError.ExitCode()
 		} else {
+			if jailRequired {
+				panic("run_command: session jail requires Linux user namespaces: " + err.Error())
+			}
 			return "", fmt.Errorf("run_command: %w", err)
 		}
 	}
