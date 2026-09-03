@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"runtime"
 	"sync"
 	"syscall"
 )
@@ -39,7 +40,12 @@ const jailRequired = true
 var jailOnce sync.Once
 
 func userNSAvailable() bool {
-	cmd := exec.Command("/bin/true")
+	dir, err := os.MkdirTemp("", "tacklr-jail-probe-")
+	if err != nil {
+		return false
+	}
+	defer os.RemoveAll(dir)
+	cmd := exec.Command("/bin/sh", "-c", `mount --make-rprivate / && mount --bind "$1" "$1"`, "probe", dir)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags:                 syscall.CLONE_NEWUSER | syscall.CLONE_NEWNS | syscall.CLONE_NEWPID,
 		GidMappingsEnableSetgroups: false,
@@ -57,11 +63,18 @@ func RequireJail() {
 	})
 }
 
+func startCmd(cmd *exec.Cmd) error {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	return cmd.Start()
+}
+
 func jailCommand(ctx context.Context, dir, command string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", jailScript, "run_command", dir, command)
 	cmd.Dir = os.TempDir()
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setpgid:                    true,
+		Pdeathsig:                  syscall.SIGKILL,
 		Cloneflags:                 syscall.CLONE_NEWUSER | syscall.CLONE_NEWNS | syscall.CLONE_NEWPID,
 		GidMappingsEnableSetgroups: false,
 		UidMappings: []syscall.SysProcIDMap{{

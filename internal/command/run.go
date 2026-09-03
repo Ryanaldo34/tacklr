@@ -41,7 +41,10 @@ func Run(ctx context.Context, dir, command string) (string, error) {
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
-	err := cmd.Run()
+	err := startCmd(cmd)
+	if err == nil {
+		err = cmd.Wait()
+	}
 	if ctx.Err() != nil {
 		return "", ctx.Err()
 	}
@@ -50,7 +53,7 @@ func Run(ctx context.Context, dir, command string) (string, error) {
 		var exitError *exec.ExitError
 		if errors.As(err, &exitError) {
 			if exitError.ExitCode() == jailSetupExit && strings.Contains(stderr.buf.String(), jailFailMarker) {
-				panic("run_command: session jail requires Linux user namespaces")
+				panic("run_command: session jail requires Linux user namespaces: " + strings.TrimSpace(stderr.buf.String()))
 			}
 			exit = exitError.ExitCode()
 		} else {
