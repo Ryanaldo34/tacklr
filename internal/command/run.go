@@ -41,10 +41,7 @@ func Run(ctx context.Context, dir, command string) (string, error) {
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 
-	err := startCmd(cmd)
-	if err == nil {
-		err = cmd.Wait()
-	}
+	err := cmd.Run()
 	if ctx.Err() != nil {
 		return "", ctx.Err()
 	}

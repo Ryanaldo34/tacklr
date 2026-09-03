@@ -6,7 +6,6 @@ import (
 	"context"
 	"os"
 	"os/exec"
-	"runtime"
 	"sync"
 	"syscall"
 )
@@ -61,12 +60,6 @@ func RequireJail() {
 			panic("run_command: session jail requires Linux user namespaces")
 		}
 	})
-}
-
-func startCmd(cmd *exec.Cmd) error {
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-	return cmd.Start()
 }
 
 func jailCommand(ctx context.Context, dir, command string) *exec.Cmd {
