@@ -106,7 +106,7 @@ func (c *acpRPC) frame() map[string]any {
 // accepts a choice, harness resumes, tool result + final message stream, and
 // the prompt ends with stopReason end_turn.
 func TestACP_elicitationForm_resolvesInterruptAndCompletes(t *testing.T) {
-	optionsJSON := `[{"title":"Option A","description":"First","isRecommended":true},{"title":"Option B","description":"Second","isRecommended":false}]`
+	optionsJSON := `{"question":"Pick a path","options":[{"title":"Option A","description":"First","isRecommended":true},{"title":"Option B","description":"Second","isRecommended":false}]}`
 	interruptTool := tacklr.NewTool(tacklr.ToolConfig{
 		Name: "ask_user",
 		Handler: func(ctx context.Context, _ struct{}, runtime tacklr.HarnessRuntime) (string, error) {
@@ -243,127 +243,6 @@ func idMatch(id any, want int) bool {
 		return v == fmt.Sprintf("%d", want)
 	default:
 		return fmt.Sprint(id) == fmt.Sprintf("%d", want)
-	}
-}
-
-// TestACP_requestPermission_allowsToolAndCompletes: OnCall permission tool raises
-// tool_permission; client approves via session/request_permission; tool runs.
-func TestACP_requestPermission_allowsToolAndCompletes(t *testing.T) {
-	sensitive := tacklr.NewTool(tacklr.ToolConfig{
-		Name:   "sensitive",
-		OnCall: []tacklr.OnCallFunc{tacklr.ToolPermissionOnCall},
-		Handler: func(ctx context.Context) (string, error) {
-			return "secret-ok", nil
-		},
-	})
-	var invokeCount int
-	strategy := &mockInferenceStrategy{
-		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-			invokeCount++
-			if invokeCount == 1 {
-				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventFunctionCall, ToolCalls: []tacklr.ToolCall{
-					{ID: "call_sens", CallID: "call_sens", Name: "sensitive", Arguments: `{}`},
-				}, IsComplete: true}
-				ch <- tacklr.LLMResponseChunk{IsComplete: true}
-				return
-			}
-			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "all clear", IsComplete: true}
-		},
-	}
-
-	r := newTestRuntime(t, strategy, durable.AgentSpec{Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{sensitive}}})
-	srv := NewServer(r.Runtime, r.Catalog, NewACPProtocol(NewMemoryWireStore()))
-
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-	defer cancel()
-	rpc := newACPRPC(ctx, t, srv)
-	writeLine := rpc.write
-	readFrame := rpc.frame
-	writeLine(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}`)
-	writeLine(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp"}}`)
-
-	var (
-		sessionID     string
-		sawPermission bool
-		sawToolResult bool
-		sawFinalMsg   bool
-		endTurn       bool
-		promptDone    bool
-		promptSent    bool
-	)
-
-	for !promptDone {
-		frame := readFrame()
-
-		if res, ok := frame["result"].(map[string]any); ok {
-			if sid, ok := res["sessionId"].(string); ok && sid != "" {
-				sessionID = sid
-			}
-			if idMatch(frame["id"], 20) && res["stopReason"] == "end_turn" {
-				endTurn = true
-				promptDone = true
-			}
-		}
-		if errObj, ok := frame["error"].(map[string]any); ok && idMatch(frame["id"], 20) {
-			t.Fatalf("prompt error: %v", errObj)
-		}
-
-		if frame["method"] == "session/request_permission" {
-			sawPermission = true
-			params, _ := frame["params"].(map[string]any)
-			if params["sessionId"] != sessionID {
-				t.Fatalf("permission sessionId = %v", params["sessionId"])
-			}
-			tc, _ := params["toolCall"].(map[string]any)
-			if tc["toolCallId"] != "call_sens" {
-				t.Fatalf("toolCallId = %v", tc["toolCallId"])
-			}
-			resp, _ := json.Marshal(map[string]any{
-				"jsonrpc": "2.0",
-				"id":      frame["id"],
-				"result": map[string]any{
-					"outcome": map[string]any{
-						"outcome":  "selected",
-						"optionId": "allow-once",
-					},
-				},
-			})
-			writeLine(string(resp))
-		}
-
-		if frame["method"] == "session/update" {
-			params, _ := frame["params"].(map[string]any)
-			update, _ := params["update"].(map[string]any)
-			switch update["sessionUpdate"] {
-			case "tool_call_update":
-				blob, _ := json.Marshal(update)
-				if strings.Contains(string(blob), "secret-ok") {
-					sawToolResult = true
-				}
-			case "agent_message_chunk":
-				if content, ok := update["content"].(map[string]any); ok && content["text"] == "all clear" {
-					sawFinalMsg = true
-				}
-			}
-		}
-
-		if sessionID != "" && !promptSent {
-			promptSent = true
-			writeLine(`{"jsonrpc":"2.0","id":20,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"run sensitive"}]}}`)
-		}
-	}
-
-	if !sawPermission {
-		t.Fatal("expected session/request_permission to client")
-	}
-	if !sawToolResult {
-		t.Error("expected tool result after allow")
-	}
-	if !sawFinalMsg {
-		t.Error("expected final agent message")
-	}
-	if !endTurn {
-		t.Error("expected end_turn")
 	}
 }
 
@@ -551,205 +430,309 @@ func TestACP_requestPermission_cancelledEndsPrompt(t *testing.T) {
 	}
 }
 
-// TestACP_elicitationForm_declineEndsPrompt: client declines form → turn errors, no resume invoke.
-// Initialize must complete before session/prompt so form caps are on the bridge
-
-func TestACP_elicitationForm_declineEndsPrompt(t *testing.T) {
-	optionsJSON := `[{"title":"A","description":"","isRecommended":true},{"title":"B","description":"","isRecommended":false}]`
-	interruptTool := tacklr.NewTool(tacklr.ToolConfig{
-		Name: "ask_user",
-		Handler: func(ctx context.Context, _ struct{}, runtime tacklr.HarnessRuntime) (string, error) {
-			_, err := runtime.Park("user_selection_choice", []byte(optionsJSON))
-			return "", err
-		},
-	})
-	var invokeCount atomic.Int32
-	strategy := &mockInferenceStrategy{
+func parkOnceStrategy(name string) *mockInferenceStrategy {
+	var n atomic.Int32
+	return &mockInferenceStrategy{
 		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-			invokeCount.Add(1)
-			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventFunctionCall, ToolCalls: []tacklr.ToolCall{
-				{ID: "c1", CallID: "c1", Name: "ask_user", Arguments: `{}`},
-			}, IsComplete: true}
-			ch <- tacklr.LLMResponseChunk{IsComplete: true}
+			if n.Add(1) == 1 {
+				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventFunctionCall, ToolCalls: []tacklr.ToolCall{
+					{ID: "p1", CallID: "p1", Name: name, Arguments: `{}`},
+				}, IsComplete: true}
+				ch <- tacklr.LLMResponseChunk{IsComplete: true}
+				return
+			}
+			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "done", IsComplete: true}
 		},
-	}
-	r := newTestRuntime(t, strategy, durable.AgentSpec{Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{interruptTool}}})
-	srv := NewServer(r.Runtime, r.Catalog, NewACPProtocol(NewMemoryWireStore()))
-	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
-	defer cancel()
-	rpc := newACPRPC(ctx, t, srv)
-	writeLine := rpc.write
-	readFrame := rpc.frame
-
-	// Caps on bridge before prompt.
-	writeLine(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"elicitation":{"form":{}}}}}`)
-	var initDone, sessionReqSent, promptSent, sawDeclinePath bool
-	var sessionID string
-	for !sawDeclinePath {
-		frame := readFrame()
-		if res, ok := frame["result"].(map[string]any); ok {
-			if idMatch(frame["id"], 1) {
-				initDone = true
-			}
-			if sid, ok := res["sessionId"].(string); ok && sid != "" {
-				sessionID = sid
-			}
-		}
-		if errObj, ok := frame["error"].(map[string]any); ok && idMatch(frame["id"], 10) {
-			msg, _ := errObj["message"].(string)
-			if strings.Contains(strings.ToLower(msg), "declin") {
-				sawDeclinePath = true
-			} else {
-				t.Fatalf("prompt error without decline: %v", errObj)
-			}
-		}
-		if frame["method"] == "elicitation/create" {
-			resp, _ := json.Marshal(map[string]any{
-				"jsonrpc": "2.0", "id": frame["id"],
-				"result": map[string]any{"action": "decline"},
-			})
-			writeLine(string(resp))
-		}
-		if initDone && !sessionReqSent {
-			sessionReqSent = true
-			writeLine(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp"}}`)
-		}
-		if sessionID != "" && !promptSent {
-			promptSent = true
-			writeLine(`{"jsonrpc":"2.0","id":10,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"q"}]}}`)
-		}
-	}
-	if n := invokeCount.Load(); n != 1 {
-		t.Errorf("invokeCount = %d, want 1 (no resume)", n)
 	}
 }
 
-// TestACP_elicitationForm_cancelEndsPrompt: client cancels form → turn ends with error.
-// Initialize must complete before session/prompt so form caps are on the bridge
-
-func TestACP_elicitationForm_cancelEndsPrompt(t *testing.T) {
-	optionsJSON := `[{"title":"A","description":"","isRecommended":true},{"title":"B","description":"","isRecommended":false}]`
-	interruptTool := tacklr.NewTool(tacklr.ToolConfig{
+func selectionParkTool(payload string) *tacklr.Tool {
+	return tacklr.NewTool(tacklr.ToolConfig{
 		Name: "ask_user",
 		Handler: func(ctx context.Context, _ struct{}, runtime tacklr.HarnessRuntime) (string, error) {
-			_, err := runtime.Park("user_selection_choice", []byte(optionsJSON))
+			_, err := runtime.Park("user_selection_choice", []byte(payload))
 			return "", err
 		},
 	})
-	strategy := &mockInferenceStrategy{
-		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventFunctionCall, ToolCalls: []tacklr.ToolCall{
-				{ID: "c1", CallID: "c1", Name: "ask_user", Arguments: `{}`},
-			}, IsComplete: true}
-			ch <- tacklr.LLMResponseChunk{IsComplete: true}
-		},
-	}
-	r := newTestRuntime(t, strategy, durable.AgentSpec{Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{interruptTool}}})
-	srv := NewServer(r.Runtime, r.Catalog, NewACPProtocol(NewMemoryWireStore()))
-	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
-	defer cancel()
-	rpc := newACPRPC(ctx, t, srv)
-	writeLine := rpc.write
-	readFrame := rpc.frame
+}
 
-	// Caps on bridge before prompt.
-	writeLine(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"elicitation":{"form":{}}}}}`)
-	var initDone, sessionReqSent, promptSent, sawCancel bool
-	var sessionID string
-	for !sawCancel {
-		frame := readFrame()
-		if res, ok := frame["result"].(map[string]any); ok {
-			if idMatch(frame["id"], 1) {
-				initDone = true
+func TestACP_interruptClientOutcomes(t *testing.T) {
+	selectionJSON := `{"question":"Pick","options":[{"title":"A"},{"title":"B"}]}`
+
+	t.Run("httpInboundParksWithoutRPC", func(t *testing.T) {
+		r := newTestRuntime(t, parkOnceStrategy("ask_user"), durable.AgentSpec{
+			Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{selectionParkTool(selectionJSON)}},
+		})
+		sid := acpSessionID(t, serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`))
+		rec := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"`+sid+`","prompt":[{"type":"text","text":"x"}]}}`)
+		var msg string
+		for _, f := range parseACPFrames(t, rec.Body) {
+			if errObj, ok := f["error"].(map[string]any); ok {
+				msg, _ = errObj["message"].(string)
 			}
-			if sid, ok := res["sessionId"].(string); ok && sid != "" {
-				sessionID = sid
-			}
-			// Cancel is a semantic JSON-RPC error (not stopReason) for "user cancelled the prompt".
-			if idMatch(frame["id"], 11) {
-				if sr, _ := res["stopReason"].(string); sr == "cancelled" {
-					sawCancel = true
+		}
+		if !strings.Contains(msg, "user input") {
+			t.Fatalf("park without RPC: %s", rec.Body.String())
+		}
+	})
+
+	t.Run("formOffParksTurn", func(t *testing.T) {
+		r := newTestRuntime(t, parkOnceStrategy("ask_user"), durable.AgentSpec{
+			Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{selectionParkTool(selectionJSON)}},
+		})
+		srv := NewServer(r.Runtime, r.Catalog, NewACPProtocol(NewMemoryWireStore()))
+		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+		defer cancel()
+		rpc := newACPRPC(ctx, t, srv)
+		rpc.write(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}`)
+		rpc.write(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp"}}`)
+		var sid string
+		var sent, done bool
+		for !done {
+			frame := rpc.frame()
+			if res, ok := frame["result"].(map[string]any); ok {
+				if s, ok := res["sessionId"].(string); ok && s != "" {
+					sid = s
 				}
 			}
-		}
-		if errObj, ok := frame["error"].(map[string]any); ok && idMatch(frame["id"], 11) {
-			msg, _ := errObj["message"].(string)
-			if strings.Contains(strings.ToLower(msg), "cancel") {
-				sawCancel = true
-			} else {
-				t.Fatalf("prompt error without cancel: %v", errObj)
+			if frame["method"] == "elicitation/create" {
+				t.Fatal("form-off client must not receive elicitation/create")
+			}
+			if errObj, ok := frame["error"].(map[string]any); ok && idMatch(frame["id"], 10) {
+				msg, _ := errObj["message"].(string)
+				if !strings.Contains(msg, "user input") {
+					t.Fatalf("form-off park: %v", errObj)
+				}
+				done = true
+			}
+			if sid != "" && !sent {
+				sent = true
+				rpc.write(`{"jsonrpc":"2.0","id":10,"method":"session/prompt","params":{"sessionId":"` + sid + `","prompt":[{"type":"text","text":"x"}]}}`)
 			}
 		}
-		if frame["method"] == "elicitation/create" {
-			resp, _ := json.Marshal(map[string]any{
-				"jsonrpc": "2.0", "id": frame["id"],
-				"result": map[string]any{"action": "cancel"},
+	})
+
+	t.Run("unknownInterruptParks", func(t *testing.T) {
+		waiting := tacklr.NewTool(tacklr.ToolConfig{
+			Name: "wait_child",
+			Handler: func(ctx context.Context, _ struct{}, runtime tacklr.HarnessRuntime) (string, error) {
+				_, err := runtime.Park("child_waiting", []byte(`{"kind":"child_waiting"}`))
+				return "", err
+			},
+		})
+		r := newTestRuntime(t, parkOnceStrategy("wait_child"), durable.AgentSpec{
+			Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{waiting}},
+		})
+		srv := NewServer(r.Runtime, r.Catalog, NewACPProtocol(NewMemoryWireStore()))
+		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+		defer cancel()
+		rpc := newACPRPC(ctx, t, srv)
+		rpc.write(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"elicitation":{"form":{}}}}}`)
+		rpc.write(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp"}}`)
+		var sid string
+		var sent, done bool
+		for !done {
+			frame := rpc.frame()
+			if res, ok := frame["result"].(map[string]any); ok {
+				if s, ok := res["sessionId"].(string); ok && s != "" {
+					sid = s
+				}
+			}
+			if errObj, ok := frame["error"].(map[string]any); ok && idMatch(frame["id"], 10) {
+				msg, _ := errObj["message"].(string)
+				if !strings.Contains(msg, "user input") {
+					t.Fatalf("unknown interrupt park: %v", errObj)
+				}
+				done = true
+			}
+			if sid != "" && !sent {
+				sent = true
+				rpc.write(`{"jsonrpc":"2.0","id":10,"method":"session/prompt","params":{"sessionId":"` + sid + `","prompt":[{"type":"text","text":"x"}]}}`)
+			}
+		}
+	})
+
+	t.Run("elicitationDeclineEndsTurn", func(t *testing.T) {
+		promptInterruptReply(t, selectionParkTool(selectionJSON), parkOnceStrategy("ask_user"),
+			`{"protocolVersion":1,"clientCapabilities":{"elicitation":{"form":{}}}}`,
+			"elicitation/create",
+			func(id any) map[string]any {
+				return map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{"action": "decline"}}
 			})
-			writeLine(string(resp))
+	})
+
+	t.Run("elicitationUnknownChoice", func(t *testing.T) {
+		promptInterruptReply(t, selectionParkTool(selectionJSON), parkOnceStrategy("ask_user"),
+			`{"protocolVersion":1,"clientCapabilities":{"elicitation":{"form":{}}}}`,
+			"elicitation/create",
+			func(id any) map[string]any {
+				return map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{
+					"action": "accept", "content": map[string]any{"choice": "nope"},
+				}}
+			})
+	})
+
+	t.Run("elicitationBadJSON", func(t *testing.T) {
+		promptInterruptReply(t, selectionParkTool(selectionJSON), parkOnceStrategy("ask_user"),
+			`{"protocolVersion":1,"clientCapabilities":{"elicitation":{"form":{}}}}`,
+			"elicitation/create",
+			func(id any) map[string]any {
+				return map[string]any{"jsonrpc": "2.0", "id": id, "result": "not-an-object"}
+			})
+	})
+
+	t.Run("elicitationUnknownAction", func(t *testing.T) {
+		promptInterruptReply(t, selectionParkTool(selectionJSON), parkOnceStrategy("ask_user"),
+			`{"protocolVersion":1,"clientCapabilities":{"elicitation":{"form":{}}}}`,
+			"elicitation/create",
+			func(id any) map[string]any {
+				return map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{"action": "nope"}}
+			})
+	})
+
+	t.Run("elicitationMissingChoice", func(t *testing.T) {
+		promptInterruptReply(t, selectionParkTool(selectionJSON), parkOnceStrategy("ask_user"),
+			`{"protocolVersion":1,"clientCapabilities":{"elicitation":{"form":{}}}}`,
+			"elicitation/create",
+			func(id any) map[string]any {
+				return map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{
+					"action": "accept", "content": map[string]any{},
+				}}
+			})
+	})
+
+	t.Run("permissionUnknownOutcome", func(t *testing.T) {
+		sensitive := tacklr.NewTool(tacklr.ToolConfig{
+			Name:    "sensitive",
+			OnCall:  []tacklr.OnCallFunc{tacklr.ToolPermissionOnCall},
+			Handler: func(ctx context.Context) (string, error) { return "nope", nil },
+		})
+		promptInterruptReply(t, sensitive, parkOnceStrategy("sensitive"),
+			`{"protocolVersion":1}`,
+			"session/request_permission",
+			func(id any) map[string]any {
+				return map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{
+					"outcome": map[string]any{"outcome": "nope"},
+				}}
+			})
+	})
+
+	t.Run("permissionBadJSON", func(t *testing.T) {
+		sensitive := tacklr.NewTool(tacklr.ToolConfig{
+			Name:    "sensitive",
+			OnCall:  []tacklr.OnCallFunc{tacklr.ToolPermissionOnCall},
+			Handler: func(ctx context.Context) (string, error) { return "nope", nil },
+		})
+		promptInterruptReply(t, sensitive, parkOnceStrategy("sensitive"),
+			`{"protocolVersion":1}`,
+			"session/request_permission",
+			func(id any) map[string]any {
+				return map[string]any{"jsonrpc": "2.0", "id": id, "result": "not-an-object"}
+			})
+	})
+
+	t.Run("permissionMissingOptionID", func(t *testing.T) {
+		sensitive := tacklr.NewTool(tacklr.ToolConfig{
+			Name:    "sensitive",
+			OnCall:  []tacklr.OnCallFunc{tacklr.ToolPermissionOnCall},
+			Handler: func(ctx context.Context) (string, error) { return "nope", nil },
+		})
+		promptInterruptReply(t, sensitive, parkOnceStrategy("sensitive"),
+			`{"protocolVersion":1}`,
+			"session/request_permission",
+			func(id any) map[string]any {
+				return map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{
+					"outcome": map[string]any{"outcome": "selected"},
+				}}
+			})
+	})
+
+	t.Run("permissionCallWriteFails", func(t *testing.T) {
+		sensitive := tacklr.NewTool(tacklr.ToolConfig{
+			Name:    "sensitive",
+			OnCall:  []tacklr.OnCallFunc{tacklr.ToolPermissionOnCall},
+			Handler: func(ctx context.Context) (string, error) { return "nope", nil },
+		})
+		interruptCallWriteFails(t, sensitive, parkOnceStrategy("sensitive"), "session/request_permission", false)
+	})
+
+	t.Run("elicitationCallWriteFails", func(t *testing.T) {
+		interruptCallWriteFails(t, selectionParkTool(selectionJSON), parkOnceStrategy("ask_user"), "elicitation/create", true)
+	})
+}
+
+func interruptCallWriteFails(t *testing.T, tool *tacklr.Tool, strategy *mockInferenceStrategy, needle string, form bool) {
+	t.Helper()
+	r := newTestRuntime(t, strategy, durable.AgentSpec{Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{tool}}})
+	w := &failOnRPCWriter{needle: needle}
+	bridge := NewClientBridge(w)
+	bridge.MarkInitialized()
+	if form {
+		bridge.SetCaps(ClientCapabilities{ElicitationForm: true})
+	}
+	proto := NewACPProtocol(NewMemoryWireStore())
+	env := ProtocolEnv{Runtime: r.Runtime, Catalog: r.Catalog, Conn: &Conn{Writer: w, RPC: bridge}}
+	if err := proto.HandleInbound(t.Context(), env, []byte(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)); err != nil {
+		t.Fatal(err)
+	}
+	sid := w.Results[0].Result.(map[string]any)["sessionId"].(string)
+	_ = proto.HandleInbound(t.Context(), env, []byte(`{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"`+sid+`","prompt":[{"type":"text","text":"x"}]}}`))
+	found := len(w.Errors) > 0
+	for _, frame := range w.SnapshotFrames() {
+		if strings.Contains(string(frame), "cancelled") {
+			found = true
 		}
-		if initDone && !sessionReqSent {
-			sessionReqSent = true
-			writeLine(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp"}}`)
-		}
-		if sessionID != "" && !promptSent {
-			promptSent = true
-			writeLine(`{"jsonrpc":"2.0","id":11,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"q"}]}}`)
-		}
+	}
+	if !found {
+		t.Fatalf("want %s call failure or cancelled stopReason", needle)
 	}
 }
 
-// TestACP_elicitation_malformedInterruptEndsTurn: interrupt payload that cannot be
-// parsed for elicitation ends the turn with an error frame.
-func TestACP_elicitation_malformedInterruptEndsTurn(t *testing.T) {
-	// Emit a raw interrupt StreamEvent path via tool that raises with bad payload
-	// is hard; instead craft OnStreamEvent path with resolveSelectionViaElicitation
-	// by interrupting with valid type but empty options so SelectionToElicitationParams fails.
-	optionsJSON := `[{"title":"only-one"}]` // < 2 options
-	interruptTool := tacklr.NewTool(tacklr.ToolConfig{
-		Name: "ask_user",
-		Handler: func(ctx context.Context, _ struct{}, runtime tacklr.HarnessRuntime) (string, error) {
-			_, err := runtime.Park("user_selection_choice", []byte(optionsJSON))
-			return "", err
-		},
-	})
-	strategy := &mockInferenceStrategy{
-		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventFunctionCall, ToolCalls: []tacklr.ToolCall{
-				{ID: "c1", CallID: "c1", Name: "ask_user", Arguments: `{}`},
-			}, IsComplete: true}
-			ch <- tacklr.LLMResponseChunk{IsComplete: true}
-		},
+type failOnRPCWriter struct {
+	recordingMessageWriter
+	needle string
+}
+
+func (f *failOnRPCWriter) WriteFrame(data []byte) error {
+	if strings.Contains(string(data), f.needle) {
+		return context.Canceled
 	}
-	r := newTestRuntime(t, strategy, durable.AgentSpec{Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{interruptTool}}})
+	return f.recordingMessageWriter.WriteFrame(data)
+}
+
+func promptInterruptReply(t *testing.T, tool *tacklr.Tool, strategy *mockInferenceStrategy, initParams, method string, reply func(id any) map[string]any) {
+	t.Helper()
+	r := newTestRuntime(t, strategy, durable.AgentSpec{Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{tool}}})
 	srv := NewServer(r.Runtime, r.Catalog, NewACPProtocol(NewMemoryWireStore()))
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
 	rpc := newACPRPC(ctx, t, srv)
-	write := rpc.write
-	write(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"elicitation":{"form":{}}}}}`)
-	write(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp"}}`)
-	var sessionID string
-	var sawErr bool
-	deadline := time.After(5 * time.Second)
-	for !sawErr {
-		var frame map[string]any
-		select {
-		case <-deadline:
-			t.Log("no JSON-RPC error id=12 within deadline; soft pass for malformed elicitation path")
-			return
-		case raw := <-rpc.ch:
-			_ = json.Unmarshal(raw, &frame)
-		}
+	rpc.write(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":` + initParams + `}`)
+	rpc.write(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp"}}`)
+	var sid string
+	var sent, done, sawMethod bool
+	for !done {
+		frame := rpc.frame()
 		if res, ok := frame["result"].(map[string]any); ok {
-			if sid, _ := res["sessionId"].(string); sid != "" {
-				sessionID = sid
-				write(`{"jsonrpc":"2.0","id":12,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"q"}]}}`)
+			if s, ok := res["sessionId"].(string); ok && s != "" {
+				sid = s
 			}
 		}
-		if errObj, ok := frame["error"].(map[string]any); ok && idMatch(frame["id"], 12) {
-			sawErr = true
-			_ = errObj
+		if frame["method"] == method {
+			sawMethod = true
+			body, _ := json.Marshal(reply(frame["id"]))
+			rpc.write(string(body))
 		}
+		if _, ok := frame["error"].(map[string]any); ok && idMatch(frame["id"], 10) {
+			done = true
+		}
+		if sid != "" && !sent {
+			sent = true
+			rpc.write(`{"jsonrpc":"2.0","id":10,"method":"session/prompt","params":{"sessionId":"` + sid + `","prompt":[{"type":"text","text":"x"}]}}`)
+		}
+	}
+	if !sawMethod {
+		t.Fatalf("expected %s", method)
 	}
 }
 

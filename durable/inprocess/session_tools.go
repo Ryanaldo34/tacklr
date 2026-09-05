@@ -28,6 +28,41 @@ func (r *Runtime) childStatuses(p *sessionProc) []durable.SessionStatus {
 	return out
 }
 
+func (r *Runtime) harvestJobs(p *sessionProc) []durable.SessionStatus {
+	rows := r.childStatuses(p)
+	if len(rows) == 0 {
+		return nil
+	}
+	live := make([]durable.SessionStatus, 0, len(rows))
+	var jobs []*tacklr.Message
+	var drop []durable.SessionID
+	for _, st := range rows {
+		if st.State != durable.SessionComplete && st.State != durable.SessionFailed {
+			live = append(live, st)
+			continue
+		}
+		jobs = append(jobs, adapter.ChildJobMessage(st))
+		drop = append(drop, st.ID)
+	}
+	if len(jobs) == 0 {
+		return live
+	}
+	p.mu.Lock()
+	p.inbox.Push(jobs...)
+	p.children = slices.DeleteFunc(p.children, func(c durable.SessionID) bool {
+		return slices.Contains(drop, c)
+	})
+	p.mu.Unlock()
+	return live
+}
+
+func (r *Runtime) drainInbox(ctx context.Context, p *sessionProc, eng tacklr.Engine, out chan tacklr.StreamEvent) (int, []durable.SessionStatus, error) {
+	live := r.harvestJobs(p)
+	msgs := p.inbox.Take()
+	n, err := adapter.AbsorbAll(ctx, eng.AbsorbUser, msgs, out)
+	return n, live, err
+}
+
 // sessionChildren is the nested-session childHost for one parent session.
 type sessionChildren struct {
 	r *Runtime
@@ -46,13 +81,20 @@ func (s sessionChildren) SpawnChild(ctx context.Context, specialist, task, callI
 	if task == "" {
 		return "", fmt.Errorf("task_description_and_context is required: %w", tacklr.ErrInvalid)
 	}
+	s.p.mu.Lock()
+	agentID := s.p.agentID
+	mcp := slices.Clone(s.p.mcp)
+	mounts := slices.Clone(s.p.mounts)
+	auth := s.p.auth
+	parent := s.p.id
+	s.p.mu.Unlock()
 	id, err := s.r.CreateSession(ctx, durable.CreateSession{
 		SessionID:  childID,
-		Parent:     s.p.id,
-		AgentID:    s.p.agentID,
+		Parent:     parent,
+		AgentID:    agentID,
 		Specialist: specialist,
-		MCPServers: s.p.mcp,
-		Mounts:     s.p.mounts,
+		MCPServers: mcp,
+		Mounts:     mounts,
 	})
 	if err != nil {
 		if errors.Is(err, durable.ErrAgentNotFound) {
@@ -65,7 +107,7 @@ func (s sessionChildren) SpawnChild(ctx context.Context, specialist, task, callI
 		s.r.dropChild(s.p, id)
 		return "", err
 	}
-	if err := s.r.Prompt(s.p.childCtx(), id, durable.Prompt{Text: task, Auth: s.p.auth}); err != nil {
+	if err := s.r.Prompt(s.p.childCtx(), id, durable.Prompt{Text: task, Auth: auth}); err != nil {
 		return "", err
 	}
 	return string(id), nil

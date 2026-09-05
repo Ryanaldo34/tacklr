@@ -19,12 +19,7 @@ func securitySubject(env ProtocolEnv) string {
 	if env.Conn != nil && env.Conn.Security != nil && env.Conn.Security.Authenticated() {
 		return env.Conn.Security.Principal.Subject
 	}
-	// Direct protocol use without a configured host security service
-	// uses one process-local principal.
-	if env.Security == nil {
-		return "local"
-	}
-	return ""
+	return "local"
 }
 
 func authorizeOperation(ctx context.Context, env ProtocolEnv, action, resource string) error {
@@ -48,19 +43,15 @@ func (p *acpProtocol) resolveOwnedWireSession(ctx context.Context, env ProtocolE
 	if err != nil {
 		return nil, err
 	}
-	subject := securitySubject(env)
-	if subject == "" {
-		return nil, clientErrorf(ErrAuthenticationRequired, "authentication required")
+	if err := authorizeOperation(ctx, env, action, sessionID); err != nil {
+		return nil, err
 	}
-
+	subject := securitySubject(env)
 	sess.mu.Lock()
 	owner := sess.owner
 	sess.mu.Unlock()
 	if owner != subject {
 		return nil, clientErrorf(ErrAuthorizationDenied, "session is owned by another principal")
-	}
-	if err := authorizeOperation(ctx, env, action, sessionID); err != nil {
-		return nil, err
 	}
 	return sess, nil
 }

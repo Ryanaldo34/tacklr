@@ -13,6 +13,7 @@ import (
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
 	adapter "github.com/ryanaldo34/tacklr/durable/internal"
+	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
@@ -25,20 +26,24 @@ func SessionWorkflow(ctx workflow.Context, in workflowInput) (string, error) {
 	}
 
 	var (
-		closed     bool
-		agentID    = in.AgentID
-		mcp        = in.MCPServers
-		mounts     = adapter.ApplyAuth(in.Mounts, durable.AuthContext{})
-		spawned    []childRun
-		yielded    bool
-		result     string
-		terminal   durable.SessionState
-		childParks map[string]durable.SessionID
-		seed       = in.State
-		promptCh   = workflow.GetSignalChannel(ctx, signalPrompt)
-		resumeCh   = workflow.GetSignalChannel(ctx, signalResume)
-		cancelCh   = workflow.GetSignalChannel(ctx, signalCancel)
-		closeCh    = workflow.GetSignalChannel(ctx, signalClose)
+		closed      bool
+		agentID     = in.AgentID
+		mcpServers  = in.MCPServers
+		mounts      = adapter.ApplyAuth(in.Mounts, durable.AuthContext{})
+		spawned     []childRun
+		inbox       []*tacklr.Message
+		nextAgentID string
+		nextMCP     []mcp.MCPConfig
+		yielded     bool
+		result      string
+		terminal    durable.SessionState
+		childParks  map[string]durable.SessionID
+		seed        = in.State
+		promptCh    = workflow.GetSignalChannel(ctx, signalPrompt)
+		resumeCh    = workflow.GetSignalChannel(ctx, signalResume)
+		cancelCh    = workflow.GetSignalChannel(ctx, signalCancel)
+		closeCh     = workflow.GetSignalChannel(ctx, signalClose)
+		childWaitCh = workflow.GetSignalChannel(ctx, signalChildWaiting)
 	)
 	_ = workflow.SetQueryHandler(ctx, queryStatus, func() (durable.SessionStatus, error) {
 		st := durable.SessionStatus{
@@ -74,42 +79,17 @@ func SessionWorkflow(ctx workflow.Context, in workflowInput) (string, error) {
 			_ = workflow.RequestCancelExternalWorkflow(ctx, exec.ID, exec.RunID).Get(ctx, nil)
 		}
 		spawned = nil
+		inbox = nil
+		nextAgentID = ""
+		nextMCP = nil
 	}
 	drainCancels := func() {
 		var ignored any
 		for cancelCh.ReceiveAsync(&ignored) {
 		}
 	}
-	selectorWait := func() waitSignal {
-		var out waitSignal
-		s := workflow.NewSelector(ctx)
-		s.AddReceive(promptCh, func(c workflow.ReceiveChannel, more bool) {
-			var p promptSignal
-			c.Receive(ctx, &p)
-			out.kind, out.prompt = signalPrompt, p
-		})
-		s.AddReceive(resumeCh, func(c workflow.ReceiveChannel, more bool) {
-			var p resumeSignal
-			c.Receive(ctx, &p)
-			out.kind, out.resume = signalResume, p
-		})
-		s.AddReceive(cancelCh, func(c workflow.ReceiveChannel, more bool) {
-			c.Receive(ctx, nil)
-			out.kind = signalCancel
-		})
-		s.AddReceive(closeCh, func(c workflow.ReceiveChannel, more bool) {
-			c.Receive(ctx, nil)
-			out.kind = signalClose
-		})
-		s.AddReceive(workflow.GetSignalChannel(ctx, signalChildWaiting), func(c workflow.ReceiveChannel, more bool) {
-			var id durable.SessionID
-			c.Receive(ctx, &id)
-			if i := findChild(spawned, id); i >= 0 {
-				spawned[i].waiting = true
-			}
-		})
-		s.Select(ctx)
-		return out
+	wait := func() waitSignal {
+		return waitSession(ctx, promptCh, resumeCh, cancelCh, closeCh, childWaitCh, spawned)
 	}
 
 	activityOpts := workflow.ActivityOptions{
@@ -171,6 +151,8 @@ func SessionWorkflow(ctx workflow.Context, in workflowInput) (string, error) {
 		}()
 
 		actCtx := workflow.WithActivityOptions(sessionCtx, activityOpts)
+		// Cancel is a separate mailbox so this wait can abort without
+		// receiving Prompt (Prompt stays queued until InboxSafe drain).
 		waitAct := func(name string, arg any, result any) error {
 			cctx, cancelAct := workflow.WithCancel(actCtx)
 			fut := workflow.ExecuteActivity(cctx, name, arg)
@@ -196,6 +178,12 @@ func SessionWorkflow(ctx workflow.Context, in workflowInput) (string, error) {
 		}
 		emitEvent := func(ev tacklr.StreamEvent) {
 			_ = waitAct("EmitEvent", emitEventInput{SessionID: in.SessionID, Event: ev}, nil)
+		}
+		drainBufferedPrompts := func() {
+			var p promptSignal
+			for promptCh.ReceiveAsync(&p) {
+				enqueueSteer(p, &inbox, &mounts, &turnState, &nextAgentID, &nextMCP)
+			}
 		}
 		onActErr := func(err error) bool {
 			if err == nil {
@@ -224,15 +212,27 @@ func SessionWorkflow(ctx workflow.Context, in workflowInput) (string, error) {
 		interruptID := ""
 		interruptData := []byte(nil)
 		stopSlice := false
+		extraUsers := []*tacklr.Message(nil)
 		for !stopSlice {
+			if adapter.InboxSafe(len(toolCalls)+len(leftover), parked) {
+				harvestReadyChildren(ctx, &spawned, &inbox)
+				if user == nil {
+					drainBufferedPrompts()
+				}
+				if extra := adapter.TakeMessages(&inbox); len(extra) > 0 {
+					extraUsers = append(extraUsers, extra...)
+					inferComplete = false
+				}
+			}
 			switch tacklr.Next(len(toolCalls), parked, inferComplete, len(spawned) > 0) {
 			case tacklr.ActionInfer:
 				var out inferenceOutput
 				err := waitAct("Inference", inferenceInput{
 					SessionID:     in.SessionID,
 					Rec:           rec(),
-					MCPServers:    mcp,
+					MCPServers:    mcpServers,
 					User:          user,
+					Extra:         extraUsers,
 					HadToolRound:  hadTools,
 					ModelRequests: reqs,
 					Resume:        resume,
@@ -240,6 +240,7 @@ func SessionWorkflow(ctx workflow.Context, in workflowInput) (string, error) {
 				}, &out)
 				user = nil
 				resume = nil
+				extraUsers = nil
 				if onActErr(err) {
 					stopSlice = true
 					break
@@ -261,7 +262,7 @@ func SessionWorkflow(ctx workflow.Context, in workflowInput) (string, error) {
 				err := waitAct("Tool", toolInput{
 					SessionID:  in.SessionID,
 					Rec:        rec(),
-					MCPServers: mcp,
+					MCPServers: mcpServers,
 					Call:       tc,
 					State:      turnState,
 				}, &tout)
@@ -274,7 +275,7 @@ func SessionWorkflow(ctx workflow.Context, in workflowInput) (string, error) {
 					break
 				}
 				if tout.AwaitID != "" {
-					output, parkID, werr := waitChildTool(ctx, &spawned, &childParks, tc.Key(), tout.AwaitID, cancelCh, cancelSpawned)
+					output, parkID, werr := waitChildTool(ctx, &spawned, &childParks, tc.Key(), tout.AwaitID, cancelCh, childWaitCh, cancelSpawned)
 					if onActErr(werr) {
 						stopSlice = true
 						break
@@ -284,7 +285,7 @@ func SessionWorkflow(ctx workflow.Context, in workflowInput) (string, error) {
 						cerr := waitAct("CommitToolOutput", commitToolInput{
 							SessionID:  in.SessionID,
 							Rec:        rec(),
-							MCPServers: mcp,
+							MCPServers: mcpServers,
 							Call:       tc,
 							Output:     output,
 							State:      turnState,
@@ -330,8 +331,10 @@ func SessionWorkflow(ctx workflow.Context, in workflowInput) (string, error) {
 				closeTurn(telemetry.OutcomeYield, nil)
 				waiting := true
 				for waiting {
-					ev := selectorWait()
+					ev := wait()
 					switch ev.kind {
+					case signalPrompt:
+						enqueueSteer(ev.prompt, &inbox, &mounts, &turnState, &nextAgentID, &nextMCP)
 					case signalResume:
 						waiting = false
 						parked = false
@@ -354,7 +357,7 @@ func SessionWorkflow(ctx workflow.Context, in workflowInput) (string, error) {
 						err := waitAct("Inference", inferenceInput{
 							SessionID:  in.SessionID,
 							Rec:        rec(),
-							MCPServers: mcp,
+							MCPServers: mcpServers,
 							Resume:     ev.resume.Responses,
 							State:      turnState,
 						}, &iout)
@@ -391,12 +394,14 @@ func SessionWorkflow(ctx workflow.Context, in workflowInput) (string, error) {
 				err := waitAct("Inference", inferenceInput{
 					SessionID:     in.SessionID,
 					Rec:           rec(),
-					MCPServers:    mcp,
+					MCPServers:    mcpServers,
 					User:          nudgeMsg,
+					Extra:         extraUsers,
 					HadToolRound:  true,
 					ModelRequests: reqs,
 					State:         turnState,
 				}, &out)
+				extraUsers = nil
 				if onActErr(err) {
 					stopSlice = true
 					break
@@ -417,11 +422,17 @@ func SessionWorkflow(ctx workflow.Context, in workflowInput) (string, error) {
 
 	if in.Prompt != "" {
 		runSlice(&tacklr.Message{Role: tacklr.RoleUser, Content: in.Prompt}, nil, durable.AuthContext{}, telemetry.TurnKindPrompt, nil)
+		if terminal == durable.SessionFailed {
+			if result != "" {
+				return result, errors.New(result)
+			}
+			return "", errors.New("child failed")
+		}
 		return result, nil
 	}
 
 	for !closed {
-		ev := selectorWait()
+		ev := wait()
 		switch ev.kind {
 		case signalClose:
 			closed = true
@@ -433,14 +444,17 @@ func SessionWorkflow(ctx workflow.Context, in workflowInput) (string, error) {
 		case signalPrompt:
 			if ev.prompt.AgentID != "" {
 				agentID = ev.prompt.AgentID
+			} else if nextAgentID != "" {
+				agentID = nextAgentID
 			}
+			nextAgentID = ""
 			if ev.prompt.MCPServers != nil {
-				mcp = ev.prompt.MCPServers
+				mcpServers = ev.prompt.MCPServers
+			} else if nextMCP != nil {
+				mcpServers = nextMCP
 			}
-			user := ev.prompt.UserMessage
-			if user == nil && ev.prompt.Text != "" {
-				user = &tacklr.Message{Role: tacklr.RoleUser, Content: ev.prompt.Text}
-			}
+			nextMCP = nil
+			user := adapter.UserFromPrompt(ev.prompt.Text, ev.prompt.UserMessage)
 			runSlice(user, nil, ev.prompt.Auth, telemetry.TurnKindPrompt, ev.prompt.State)
 		case signalResume:
 			yielded = false
@@ -448,6 +462,67 @@ func SessionWorkflow(ctx workflow.Context, in workflowInput) (string, error) {
 		}
 	}
 	return result, nil
+}
+
+func enqueueSteer(
+	p promptSignal,
+	inbox *[]*tacklr.Message,
+	mounts *[]durable.MountRecipe,
+	turnState *map[string]any,
+	nextAgentID *string,
+	nextMCP *[]mcp.MCPConfig,
+) {
+	*inbox = adapter.AppendMessages(*inbox, adapter.UserFromPrompt(p.Text, p.UserMessage))
+	*mounts = adapter.ApplyAuth(*mounts, p.Auth)
+	*turnState = adapter.MergeUserState(*turnState, p.State)
+	if p.AgentID != "" {
+		*nextAgentID = p.AgentID
+	}
+	if p.MCPServers != nil {
+		*nextMCP = p.MCPServers
+	}
+}
+
+// waitSession is the idle/park demux. Temporal signal channels are named
+// mailboxes (not opened/closed). ChildWaiting only updates spawned and loops.
+func waitSession(
+	ctx workflow.Context,
+	promptCh, resumeCh, cancelCh, closeCh, childWaitCh workflow.ReceiveChannel,
+	spawned []childRun,
+) waitSignal {
+	for {
+		var out waitSignal
+		s := workflow.NewSelector(ctx)
+		s.AddReceive(promptCh, func(c workflow.ReceiveChannel, more bool) {
+			var p promptSignal
+			c.Receive(ctx, &p)
+			out.kind, out.prompt = signalPrompt, p
+		})
+		s.AddReceive(resumeCh, func(c workflow.ReceiveChannel, more bool) {
+			var p resumeSignal
+			c.Receive(ctx, &p)
+			out.kind, out.resume = signalResume, p
+		})
+		s.AddReceive(cancelCh, func(c workflow.ReceiveChannel, more bool) {
+			c.Receive(ctx, nil)
+			out.kind = signalCancel
+		})
+		s.AddReceive(closeCh, func(c workflow.ReceiveChannel, more bool) {
+			c.Receive(ctx, nil)
+			out.kind = signalClose
+		})
+		s.AddReceive(childWaitCh, func(c workflow.ReceiveChannel, more bool) {
+			var id durable.SessionID
+			c.Receive(ctx, &id)
+			if i := findChild(spawned, id); i >= 0 {
+				spawned[i].waiting = true
+			}
+		})
+		s.Select(ctx)
+		if out.kind != "" {
+			return out
+		}
+	}
 }
 
 func turnCanceled(ctx workflow.Context, err error) bool {

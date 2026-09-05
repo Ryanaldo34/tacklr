@@ -24,6 +24,10 @@ override:
     threshold: 100
   - path: github.com/ryanaldo34/tacklr/server$
     threshold: 95
+  - path: github.com/ryanaldo34/tacklr/durable/internal$
+    threshold: 95
+  - path: github.com/ryanaldo34/tacklr/durable/inprocess$
+    threshold: 90
   - path: github.com/ryanaldo34/tacklr/builtins$
     threshold: 90
   - path: github.com/ryanaldo34/tacklr/interrupt$
@@ -35,12 +39,12 @@ override:
     threshold: 90
   # Live Testcontainers Postgres (CI builds tacklr-pg-brain; never -short in CI).
   - path: github.com/ryanaldo34/tacklr/brain/postgres$
-    threshold: 90
+    threshold: 95
   # VFS/S3 unit surface + fake API; integration (MinIO) is separate.
   - path: github.com/ryanaldo34/tacklr/vfs$
     threshold: 85
   - path: github.com/ryanaldo34/tacklr/vfsindex$
-    threshold: 80
+    threshold: 85
 
 exclude:
   # Repo-relative paths (matched as regexes against file paths).

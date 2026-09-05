@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -110,6 +111,9 @@ func TestACP_WS_permissionMidTurn(t *testing.T) {
 		t.Fatal("connection should be registered while socket is open")
 	}
 
+	if err := conn.Write(ctx, websocket.MessageText, nil); err != nil {
+		t.Fatalf("empty frame: %v", err)
+	}
 	wsWriteJSONRPC(ctx, t, conn, map[string]any{
 		"jsonrpc": "2.0", "id": 1, "method": "initialize",
 		"params": map[string]any{"protocolVersion": 1},
@@ -178,4 +182,58 @@ func TestACP_WS_permissionMidTurn(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal("connection still in registry after close")
+}
+
+func TestACP_WS_disconnectCancelsInFlightTurn(t *testing.T) {
+	started := make(chan struct{})
+	cancelled := make(chan struct{})
+	var once sync.Once
+	strategy := &mockInferenceStrategy{
+		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			once.Do(func() { close(started) })
+			<-ctx.Done()
+			close(cancelled)
+		},
+	}
+	r := newTestRuntime(t, strategy, durable.AgentSpec{})
+	hs, _ := startACPWSServer(t, r)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	conn, _ := dialACPWebSocket(t, hs)
+
+	wsWriteJSONRPC(ctx, t, conn, map[string]any{
+		"jsonrpc": "2.0", "id": 1, "method": "initialize",
+		"params": map[string]any{"protocolVersion": 1},
+	})
+	wsWriteJSONRPC(ctx, t, conn, map[string]any{
+		"jsonrpc": "2.0", "id": 2, "method": "session/new",
+		"params": map[string]any{"cwd": "/tmp"},
+	})
+	var sessionID string
+	for sessionID == "" {
+		frame := wsReadFrame(ctx, t, conn)
+		if res, ok := frame["result"].(map[string]any); ok {
+			if sid, ok := res["sessionId"].(string); ok && sid != "" {
+				sessionID = sid
+			}
+		}
+	}
+	wsWriteJSONRPC(ctx, t, conn, map[string]any{
+		"jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+		"params": map[string]any{
+			"sessionId": sessionID,
+			"prompt":    []map[string]string{{"type": "text", "text": "hi"}},
+		},
+	})
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("prompt did not start")
+	}
+	_ = conn.Close(websocket.StatusNormalClosure, "")
+	select {
+	case <-cancelled:
+	case <-time.After(8 * time.Second):
+		t.Fatal("disconnect did not cancel in-flight inference")
+	}
 }

@@ -349,6 +349,105 @@ func mustNS(t testing.TB, nv ...string) brain.Namespace {
 	return ns
 }
 
+func TestPostgresStore_notFoundAndCorruptProperties(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping postgres integration test in -short mode")
+	}
+	ctx := context.Background()
+	pool := sharedPostgresPool(t)
+	mustExec(t, pool, `TRUNCATE objects, object_kinds CASCADE`)
+	store, err := postgres.New(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ns := mustNS(t, "org", "a")
+	scope := brain.Scope{Namespace: ns}
+	id := uuid.New()
+	if err := store.Put(ctx, brain.Object{ID: id, Kind: "Document", Title: "doc", Namespace: ns}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SoftDelete(ctx, scope, uuid.New()); !errors.Is(err, brain.ErrNotFound) {
+		t.Fatalf("soft delete missing: %v", err)
+	}
+	if _, err := store.GetKind(ctx, "ghost"); !errors.Is(err, brain.ErrNotFound) {
+		t.Fatalf("get kind missing: %v", err)
+	}
+	many, err := store.GetMany(ctx, scope, []uuid.UUID{id, uuid.New()})
+	if err != nil || len(many) != 1 || many[0].ID != id {
+		t.Fatalf("get many mixed: %+v err=%v", many, err)
+	}
+	if err := store.SoftDelete(ctx, scope, id); err != nil {
+		t.Fatal(err)
+	}
+	revived := brain.Object{ID: id, Kind: "Document", Title: "revived", Namespace: ns}
+	if err := store.Put(ctx, revived); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Get(ctx, scope, id)
+	if err != nil || got.Title != "revived" {
+		t.Fatalf("revive: %+v err=%v", got, err)
+	}
+
+	nsJSON, err := ns.Value()
+	if err != nil {
+		t.Fatal(err)
+	}
+	badID := uuid.New()
+	mustExec(t, pool, `INSERT INTO objects (id, kind, title, properties, namespace) VALUES ($1, 'Document', 'bad', '"not-object"'::jsonb, $2::jsonb)`,
+		badID, nsJSON)
+	if _, err := store.Get(ctx, scope, badID); err == nil {
+		t.Fatal("want corrupt properties error")
+	}
+}
+
+func TestPostgresStore_canceledContext(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping postgres integration test in -short mode")
+	}
+	pool := sharedPostgresPool(t)
+	store, err := postgres.New(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	scope := brain.Scope{Namespace: mustNS(t, "org", "a")}
+	id := uuid.New()
+	if _, err := store.GetMany(ctx, scope, []uuid.UUID{id}); err == nil {
+		t.Fatal("get many")
+	}
+	if _, err := store.ListChildren(ctx, scope, id); err == nil {
+		t.Fatal("list children")
+	}
+	if _, err := store.ListKinds(ctx); err == nil {
+		t.Fatal("list kinds")
+	}
+	if _, err := store.KindsWithObjects(ctx, scope); err == nil {
+		t.Fatal("kinds with objects")
+	}
+	if _, err := store.ListByKind(ctx, scope, "Document", 10); err == nil {
+		t.Fatal("list by kind")
+	}
+	if _, err := store.GetKind(ctx, "Document"); err == nil {
+		t.Fatal("get kind")
+	}
+	if _, err := store.Get(ctx, scope, id); err == nil {
+		t.Fatal("get")
+	}
+	if err := store.Put(ctx, brain.Object{ID: id, Kind: "Document", Namespace: scope.Namespace}); err == nil {
+		t.Fatal("put")
+	}
+	if err := store.PutKind(ctx, brain.ObjectKind{Kind: "Document"}); err == nil {
+		t.Fatal("put kind")
+	}
+	if err := store.SoftDelete(ctx, scope, id); err == nil {
+		t.Fatal("soft delete")
+	}
+	if _, err := store.SearchLexical(ctx, scope, "q", brain.Filter{}, 5); err == nil {
+		t.Fatal("search")
+	}
+}
+
 func mustFilter(t testing.TB, m map[string]any) brain.Filter {
 	t.Helper()
 	f, err := brain.DecodeFilter(m)

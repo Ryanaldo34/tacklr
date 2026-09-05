@@ -2,6 +2,7 @@ package inprocess
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -62,6 +63,17 @@ type sessionProc struct {
 	childParks map[string]durable.SessionID
 	// state is CreateSession.State until the first persist writes it into the checkpoint.
 	state map[string]any
+	// stateGen increments whenever state is replaced so persist can detect a concurrent merge.
+	stateGen uint64
+
+	// inbox is the wait-loop FIFO for Prompt-during-turn steers and auto-collected
+	// job results. Not SnapshotStore. Dropped on Cancel/Close. Methods are
+	// mutex-safe; hold mu around terminal checks plus Push so Cancel Drop
+	// cannot race a live Queue.
+	inbox adapter.Inbox
+	// nextAgentID / nextMCP apply on the next idle construct, not the live harness.
+	nextAgentID string
+	nextMCP     []mcp.MCPConfig
 
 	// kids is the parent context for child Prompt. Canceled by stopChildren
 	// (Cancel, Close, client-stopped turn). Not canceled when a turn parks.
@@ -134,12 +146,12 @@ func (r *Runtime) CreateSession(ctx context.Context, req durable.CreateSession) 
 			return "", fmt.Errorf("%w: %s", durable.ErrAgentNotFound, agentID)
 		}
 	}
-	if parent != nil && req.Specialist != "" {
+	if specName := strings.TrimSpace(req.Specialist); specName != "" {
 		spec, ok := r.catalog.Lookup(agentID)
 		if !ok {
 			return "", fmt.Errorf("%w: %s", durable.ErrAgentNotFound, agentID)
 		}
-		if _, err := adapter.OverlaySpecialist(spec, req.Specialist); err != nil {
+		if _, err := adapter.OverlaySpecialist(spec, specName); err != nil {
 			return "", err
 		}
 	}
@@ -159,9 +171,6 @@ func (r *Runtime) CreateSession(ctx context.Context, req durable.CreateSession) 
 		}
 		if len(mounts) == 0 {
 			mounts = slices.Clone(parent.mounts)
-		}
-		if agentID == "" {
-			agentID = parent.agentID
 		}
 	}
 	r.mu.Lock()
@@ -231,10 +240,11 @@ func (r *Runtime) send(ctx context.Context, id durable.SessionID, sig signal) er
 	}
 }
 
-// waitPriorTurn waits for the in-flight turn. abort cancels it first (Prompt,
-// Cancel, Close). Resume must not abort: HITL parks after leftover tools in
-// the same batch finish; canceling them emits context.Canceled and drops
-// function_call_output for the next model turn.
+// waitPriorTurn waits for the in-flight turn. abort cancels it first (Cancel,
+// Close). Prompt queues while a turn is live or parked; idle Prompt still
+// waits so the previous goroutine has exited. Resume must not abort: HITL
+// parks after leftover tools in the same batch finish; canceling them emits
+// context.Canceled and drops function_call_output for the next model turn.
 func (r *Runtime) waitPriorTurn(ctx context.Context, p *sessionProc, abort bool) error {
 	p.mu.Lock()
 	cancel := p.cancelTurn
@@ -313,6 +323,9 @@ func (r *Runtime) Cancel(ctx context.Context, sessionID durable.SessionID) error
 		return err
 	}
 	p.mu.Lock()
+	p.inbox.Drop()
+	p.nextAgentID = ""
+	p.nextMCP = nil
 	if p.cancelTurn != nil {
 		p.cancelTurn()
 	}
@@ -334,6 +347,9 @@ func (r *Runtime) Close(ctx context.Context, sessionID durable.SessionID) error 
 	p.mu.Lock()
 	already := p.closed
 	p.closed = true
+	p.inbox.Drop()
+	p.nextAgentID = ""
+	p.nextMCP = nil
 	if p.cancelTurn != nil {
 		p.cancelTurn()
 	}
@@ -403,19 +419,88 @@ func (r *Runtime) Status(_ context.Context, id durable.SessionID) (durable.Sessi
 }
 
 func (r *Runtime) applyPromptMeta(p *sessionProc, msg durable.Prompt) error {
+	p.mu.Lock()
+	if msg.AgentID == "" {
+		msg.AgentID = p.nextAgentID
+	}
+	if msg.MCPServers == nil {
+		msg.MCPServers = p.nextMCP
+	}
+	p.nextAgentID = ""
+	p.nextMCP = nil
+	p.mu.Unlock()
 	if msg.AgentID != "" {
 		if _, ok := r.catalog.Lookup(msg.AgentID); !ok {
 			return durable.ErrAgentNotFound
 		}
-		p.mu.Lock()
+	}
+	if msg.AgentID == "" && msg.MCPServers == nil {
+		return nil
+	}
+	p.mu.Lock()
+	if msg.AgentID != "" {
 		p.agentID = msg.AgentID
-		p.mu.Unlock()
 	}
 	if msg.MCPServers != nil {
-		p.mu.Lock()
 		p.mcp = slices.Clone(msg.MCPServers)
-		p.mu.Unlock()
 	}
+	p.mu.Unlock()
+	return nil
+}
+
+func (p *sessionProc) busy() bool {
+	p.mu.Lock()
+	yielded := p.yielded
+	done := p.turnDone
+	p.mu.Unlock()
+	if yielded {
+		return true
+	}
+	if done == nil {
+		return false
+	}
+	select {
+	case <-done:
+		return false
+	default:
+		return true
+	}
+}
+
+func (p *sessionProc) dropInbox() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.inbox.Drop()
+	p.nextAgentID = ""
+	p.nextMCP = nil
+}
+
+// errPromptIdle means the turn already committed complete/failed, so this
+// Prompt must wait and start an idle turn instead of joining the inbox.
+var errPromptIdle = errors.New("prompt idle")
+
+func (r *Runtime) queuePrompt(p *sessionProc, msg durable.Prompt) error {
+	if msg.AgentID != "" {
+		if _, ok := r.catalog.Lookup(msg.AgentID); !ok {
+			return durable.ErrAgentNotFound
+		}
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.terminal == durable.SessionComplete || p.terminal == durable.SessionFailed {
+		return errPromptIdle
+	}
+	if msg.AgentID != "" {
+		p.nextAgentID = msg.AgentID
+	}
+	if msg.MCPServers != nil {
+		p.nextMCP = slices.Clone(msg.MCPServers)
+	}
+	p.mounts = adapter.ApplyAuth(p.mounts, msg.Auth)
+	p.auth = msg.Auth
+	p.state = adapter.MergeUserState(p.state, msg.State)
+	p.stateGen++
+	p.inbox.Push(adapter.UserFromPrompt(msg.Text, msg.UserMessage))
 	return nil
 }
 
@@ -446,17 +531,14 @@ func (r *Runtime) Subscribe(ctx context.Context, sessionID durable.SessionID, af
 		return nil, err
 	}
 	subCtx, cancel := context.WithCancel(ctx)
-	ch, err := r.events.Subscribe(subCtx, sessionID, after)
-	if err != nil {
-		cancel()
-		return nil, err
-	}
+	ch, _ := r.events.Subscribe(subCtx, sessionID, after)
 	return &subscription{ch: ch, cancel: cancel}, nil
 }
 
 func (r *Runtime) loop(p *sessionProc) {
 	for sig := range p.signals {
 		if sig.kind == sigClose {
+			p.dropInbox()
 			if sig.reply != nil {
 				sig.reply <- nil
 			}
@@ -466,7 +548,21 @@ func (r *Runtime) loop(p *sessionProc) {
 		if parent == nil {
 			parent = context.Background()
 		}
-		if err := r.waitPriorTurn(parent, p, sig.kind != sigResume); err != nil {
+		if sig.kind == sigPrompt && p.busy() {
+			err := r.queuePrompt(p, sig.prompt)
+			if !errors.Is(err, errPromptIdle) {
+				if sig.reply != nil {
+					sig.reply <- err
+				}
+				continue
+			}
+			if err := r.waitPriorTurn(parent, p, false); err != nil {
+				if sig.reply != nil {
+					sig.reply <- err
+				}
+				continue
+			}
+		} else if err := r.waitPriorTurn(parent, p, sig.kind != sigResume); err != nil {
 			if sig.reply != nil {
 				sig.reply <- err
 			}
@@ -492,22 +588,22 @@ func (r *Runtime) loop(p *sessionProc) {
 				}
 				continue
 			}
-			user = promptMessage(sig.prompt)
+			user = adapter.UserFromPrompt(sig.prompt.Text, sig.prompt.UserMessage)
 			auth = sig.prompt.Auth
 			turnState = sig.prompt.State
 			if user != nil {
 				promptLen = len(user.Content)
 			}
 		}
+		p.mu.Lock()
 		p.mounts = adapter.ApplyAuth(p.mounts, auth)
 		p.auth = auth
-		p.mu.Lock()
 		p.yielded = false
 		p.terminal = ""
 		p.result = ""
 		p.termErr = nil
-		p.mu.Unlock()
 		bindings := adapter.BindingsForTurn(p.mounts, auth)
+		p.mu.Unlock()
 		turnCtx, cancel := context.WithCancel(parent)
 		done := make(chan struct{})
 		p.mu.Lock()
@@ -549,11 +645,4 @@ func (r *Runtime) noteOutcome(p *sessionProc, o turnOutcome) {
 		p.yielded = true
 		p.terminal = ""
 	}
-}
-
-func promptMessage(msg durable.Prompt) *tacklr.Message {
-	if msg.UserMessage != nil {
-		return msg.UserMessage
-	}
-	return &tacklr.Message{Role: tacklr.RoleUser, Content: msg.Text}
 }

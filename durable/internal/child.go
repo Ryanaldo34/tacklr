@@ -65,3 +65,21 @@ func ChildrenNudge(rows []durable.SessionStatus) string {
 	b.WriteString("The turn cannot finish while children remain. Continue useful work if possible. Otherwise call get_child with block=true to wait for and collect each result. Use cancel_child only when a child is no longer needed.")
 	return b.String()
 }
+
+// ChildJobMessage is the RoleUser window text when a non-blocking child
+// reaches complete or failed. It is a new message, not a second RoleTool
+// for the spawn call_id.
+func ChildJobMessage(st durable.SessionStatus) *tacklr.Message {
+	body := st.Result
+	verb := "completed"
+	if st.State == durable.SessionFailed {
+		verb = "failed"
+		if body == "" && st.Err != nil {
+			body = st.Err.Error()
+		}
+	}
+	return &tacklr.Message{
+		Role:    tacklr.RoleUser,
+		Content: fmt.Sprintf("Child %s (%s) %s:\n%s", st.ID, st.Specialist, verb, body),
+	}
+}

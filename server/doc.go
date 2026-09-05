@@ -1,6 +1,6 @@
 // Package server serves a durable.Runtime over host-defined wire protocols.
 //
-// Protocol is the extension point. Implement it to own HTTP/WebSocket routes,
+// Protocol is the extension point. Implement it to own HTTP routes and WebSocket,
 // stream framing, and HITL resume. ACP is the native option (NewACPProtocol);
 // more protocols can be mounted on the same Server:
 //

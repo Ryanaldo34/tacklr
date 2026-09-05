@@ -18,11 +18,17 @@ func (a *TurnManager) absorbUser(ctx context.Context, user *Message, out chan St
 			return fmt.Errorf("unsupported content type(s): %s", strings.Join(bad, ", "))
 		}
 	}
-	a.pairOpenToolCalls("unpaired tool call")
-	if a.hasOpenToolWork() {
-		a.pairCancelledToolResults(nil)
-		a.clearInterruptParkState()
+	if open := a.openToolCalls(); len(open) > 0 || a.session.HasPendingInterrupt() {
+		for _, tc := range open {
+			msg, _ := a.toolResultMessage(tc, CancelledToolResultContent, "error")
+			a.context.Add(msg)
+		}
+		a.pendingMu.Lock()
+		clear(a.pendingToolCalls)
+		a.pendingMu.Unlock()
+		a.session.ClearInterrupts()
 	}
+	a.pairOpenToolCalls("unpaired tool call")
 	return a.addToContext(ctx, user, out)
 }
 
@@ -257,9 +263,10 @@ func (a *TurnManager) applyResume(finishedInterrupts map[string][]byte) error {
 // Key()-keyed phantom (fc_ item id) is rejected by Azure as
 // "No tool call found for function call output".
 func (a *TurnManager) pairOpenToolCalls(reason string) {
-	hasOutput := toolOutputIDs(a.context.Messages())
+	window := a.context.Messages()
+	hasOutput := toolOutputIDs(window)
 	pending := a.pendingSnapshot()
-	for _, m := range a.context.Messages() {
+	for _, m := range window {
 		if m == nil || m.Role != RoleAssistant {
 			continue
 		}

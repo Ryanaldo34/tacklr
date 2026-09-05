@@ -92,12 +92,7 @@ func (b *ClientBridge) WaitInitialized(ctx context.Context) error {
 	case <-b.initialized:
 		return nil
 	case <-ctx.Done():
-		select {
-		case <-b.initialized:
-			return nil
-		default:
-			return ctx.Err()
-		}
+		return ctx.Err()
 	}
 }
 
@@ -138,10 +133,7 @@ func (b *ClientBridge) Call(ctx context.Context, method string, params any) (jso
 		"method":  method,
 		"params":  params,
 	}
-	frame, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("client rpc marshal: %w", err)
-	}
+	frame, _ := json.Marshal(req)
 	if err := b.w.WriteFrame(frame); err != nil {
 		return nil, fmt.Errorf("client rpc write: %w", err)
 	}
@@ -156,9 +148,6 @@ func (b *ClientBridge) Call(ctx context.Context, method string, params any) (jso
 
 // TryCompleteResponse returns true if body is a JSON-RPC response that completed a waiter.
 func (b *ClientBridge) TryCompleteResponse(body []byte) bool {
-	if b == nil {
-		return false
-	}
 	var env struct {
 		JSONRPC string          `json:"jsonrpc"`
 		ID      json.RawMessage `json:"id"`

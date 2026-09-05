@@ -46,29 +46,24 @@ func (s *Server) AllowAnonymousNetwork() *Server {
 }
 
 func (s *Server) networkContext(ctx context.Context, r *http.Request, allowUnauthenticated bool) (*tacklrsecurity.Context, int) {
-	if s.Security != nil {
-		if s.HTTPAttempt != nil {
-			if attempt, ok := s.HTTPAttempt(r); ok {
-				securityContext, err := s.Security.Authenticate(ctx, attempt)
-				if err != nil {
-					return nil, http.StatusUnauthorized
-				}
-				return &securityContext, 0
-			}
-		}
-		if allowUnauthenticated {
-			return new(tacklrsecurity.Context), 0
-		}
-		return nil, http.StatusUnauthorized
-	}
-	if s.allowAnonymousNetwork || !s.networkPolicyConfigured {
+	if s.Security == nil {
 		principal, _ := tacklrsecurity.NewPrincipal("anonymous")
 		return &tacklrsecurity.Context{
 			Principal: principal,
-			Binding: tacklrsecurity.ChannelBinding{
-				Kind: "network",
-			},
+			Binding:   tacklrsecurity.ChannelBinding{Kind: "network"},
 		}, 0
 	}
-	return nil, http.StatusServiceUnavailable
+	if s.HTTPAttempt != nil {
+		if attempt, ok := s.HTTPAttempt(r); ok {
+			securityContext, err := s.Security.Authenticate(ctx, attempt)
+			if err != nil {
+				return nil, http.StatusUnauthorized
+			}
+			return &securityContext, 0
+		}
+	}
+	if allowUnauthenticated {
+		return new(tacklrsecurity.Context), 0
+	}
+	return nil, http.StatusUnauthorized
 }

@@ -12,7 +12,7 @@ import (
 	tacklrsecurity "github.com/ryanaldo34/tacklr/security"
 )
 
-// Conn is one client connection (WebSocket session, or a logical HTTP request scope).
+// Conn is one client connection (WebSocket session).
 type Conn struct {
 	Writer   MessageWriter
 	RPC      *ClientBridge
@@ -36,7 +36,7 @@ type ProtocolEnv struct {
 	// Security is protocol-neutral. Implementations map wire credentials into
 	// this service and store the resulting Context on Conn.
 	Security *tacklrsecurity.Service
-	// Connections is optional connection tracking (ACP Streamable HTTP uses it).
+	// Connections is optional connection tracking (ACP WebSocket uses it).
 	// Custom protocols may leave it unused.
 	Connections *ConnectionRegistry
 }
@@ -64,7 +64,7 @@ type HTTPRoute struct {
 // The kernel does not import protocol types. Map wire auth into durable.AuthContext
 // on Prompt/Resume; call RunTurn to pump Runtime.Subscribe through OnStreamEvent.
 type Protocol interface {
-	// HandleInbound decodes one connection-oriented body (WebSocket or unary HTTP).
+	// HandleInbound decodes one connection-oriented body (WebSocket).
 	// HTTP-route-only protocols may return nil.
 	HandleInbound(ctx context.Context, env ProtocolEnv, body []byte) error
 	HTTPRoutes() []HTTPRoute
@@ -82,9 +82,6 @@ func RunTurn(
 	reqID json.RawMessage,
 	prompt PromptOrResume,
 ) error {
-	if env.Runtime == nil {
-		return errors.New("server: Runtime is required")
-	}
 	id := durable.SessionID(threadID)
 	after := prompt.After
 	if seq, err := env.Runtime.Head(ctx, id); err == nil {
@@ -103,6 +100,14 @@ func RunTurn(
 		return nil
 	}
 
+	// Subscribe before Prompt/Resume so a fast-finishing turn cannot land in
+	// the log before the pump is attached.
+	sub, err := env.Runtime.Subscribe(ctx, id, after)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = sub.Close() }()
+
 	if prompt.Resume != nil {
 		if err := env.Runtime.Resume(ctx, id, *prompt.Resume); err != nil {
 			return err
@@ -113,16 +118,8 @@ func RunTurn(
 		}
 	}
 
-	sub, err := env.Runtime.Subscribe(ctx, id, after)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = sub.Close() }()
-
 	end := func(cancelled bool) error {
-		if err := proto.OnStreamClosed(ctx, env, threadID, reqID, cancelled); err != nil && !cancelled {
-			return err
-		}
+		_ = proto.OnStreamClosed(ctx, env, threadID, reqID, cancelled)
 		if cancelled {
 			return context.Canceled
 		}
@@ -136,7 +133,10 @@ func RunTurn(
 			return end(true)
 		case ev, ok := <-sub.Events():
 			if !ok {
-				return end(ctx.Err() != nil)
+				if ctx.Err() != nil {
+					return end(true)
+				}
+				return errors.New("server: turn stream ended without a result")
 			}
 			ctrl := proto.OnStreamEvent(ctx, env, threadID, ev, reqID)
 			if err := writeFrames(ctrl.Frames); err != nil {

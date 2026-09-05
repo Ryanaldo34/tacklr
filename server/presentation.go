@@ -2,7 +2,6 @@ package server
 
 import (
 	"encoding/json"
-	"fmt"
 	"slices"
 
 	"github.com/ryanaldo34/tacklr"
@@ -22,20 +21,7 @@ type presentationEvent struct {
 	Error     error             `json:"-"`
 }
 
-func presentStreamEvent(event tacklr.StreamEvent) (presentationEvent, error) {
-	switch event.Type {
-	case tacklr.StreamEventMessage,
-		tacklr.StreamEventReasoning,
-		tacklr.StreamEventFunctionCall,
-		tacklr.StreamEventToolResult,
-		tacklr.StreamEventComplete,
-		tacklr.StreamEventError,
-		tacklr.StreamEventInterrupt,
-		tacklr.StreamEventToolUpdate,
-		tacklr.StreamEventPlanUpdate:
-	default:
-		return presentationEvent{}, fmt.Errorf("server: unsupported stream event type %q", event.Type)
-	}
+func presentStreamEvent(event tacklr.StreamEvent) presentationEvent {
 	presented := presentationEvent{
 		Type:      string(event.Type),
 		TurnID:    event.TurnID,
@@ -48,5 +34,5 @@ func presentStreamEvent(event tacklr.StreamEvent) (presentationEvent, error) {
 	if event.Error != nil {
 		presented.ErrorText = event.Error.Error()
 	}
-	return presented, nil
+	return presented
 }

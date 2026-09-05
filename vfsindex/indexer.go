@@ -120,16 +120,27 @@ func (x *MountIndexer) IndexPathResult(ctx context.Context, virtualPath string) 
 // IndexFileResult indexes a path already known to be an existing file (caller Stat'd).
 // Skips a second Stat round-trip — useful for remote mounts and batch tools that
 // pre-validate paths before any write work.
-func (x *MountIndexer) IndexFileResult(ctx context.Context, virtualPath string, st vfs.FileInfo) (PathIndexResult, error) {
+func (x *MountIndexer) readyPath(ctx context.Context, virtualPath string) (string, PathIndexResult, error) {
 	if err := ctx.Err(); err != nil {
-		return "", err
+		return "", "", err
 	}
 	cleaned, err := vfs.CleanPath(virtualPath)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if x.skipIndex(cleaned) {
-		return PathSkipped, nil
+		return cleaned, PathSkipped, nil
+	}
+	return cleaned, "", nil
+}
+
+func (x *MountIndexer) IndexFileResult(ctx context.Context, virtualPath string, st vfs.FileInfo) (PathIndexResult, error) {
+	cleaned, skip, err := x.readyPath(ctx, virtualPath)
+	if err != nil {
+		return "", err
+	}
+	if skip != "" {
+		return skip, nil
 	}
 	if st.IsDir {
 		return PathDirectory, nil
@@ -167,15 +178,12 @@ func (x *MountIndexer) skipIndex(virtualPath string) bool {
 }
 
 func (x *MountIndexer) indexPath(ctx context.Context, virtualPath string) (PathIndexResult, error) {
-	if err := ctx.Err(); err != nil {
-		return "", err
-	}
-	cleaned, err := vfs.CleanPath(virtualPath)
+	cleaned, skip, err := x.readyPath(ctx, virtualPath)
 	if err != nil {
 		return "", err
 	}
-	if x.skipIndex(cleaned) {
-		return PathSkipped, nil
+	if skip != "" {
+		return skip, nil
 	}
 	st, err := x.VFS.Stat(ctx, cleaned)
 	if err != nil {
@@ -196,11 +204,11 @@ func (x *MountIndexer) indexPath(ctx context.Context, virtualPath string) (PathI
 // IndexPrefix walks a directory (or single file) and indexes text-like files.
 func (x *MountIndexer) IndexPrefix(ctx context.Context, prefix string, opts IndexOpts) (Stats, error) {
 	var stats Stats
-	cleaned, err := vfs.CleanPath(prefix)
+	cleaned, skip, err := x.readyPath(ctx, prefix)
 	if err != nil {
 		return stats, err
 	}
-	if x.skipIndex(cleaned) {
+	if skip != "" {
 		return stats, nil
 	}
 	files := 0

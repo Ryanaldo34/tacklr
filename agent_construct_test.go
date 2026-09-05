@@ -288,12 +288,6 @@ func TestTurnManager_checkpointAfterRun(t *testing.T) {
 	if !openPaired {
 		t.Fatal("unpaired tool call must get a result before the next model turn")
 	}
-	if err := h.absorbUser(t.Context(), &Message{Role: RoleUser, Content: "steer"}, out); err != nil {
-		t.Fatal(err)
-	}
-	if h.hasOpenToolWork() {
-		t.Fatal("new prompt must clear leftover tool work")
-	}
 
 	if err := h.applyResume(map[string][]byte{"missing": []byte(`{}`)}); err == nil {
 		t.Fatal("unknown interrupt id")

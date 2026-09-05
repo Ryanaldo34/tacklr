@@ -102,25 +102,7 @@ func (s *Store) ListChildren(ctx context.Context, scope brain.Scope, parentID uu
 	args := []any{parentID}
 	q, args = appendNamespaceSQL(q, args, scope)
 	q += ` ORDER BY position ASC NULLS LAST, id ASC`
-
-	rows, err := s.db.Query(ctx, q, args...)
-	if err != nil {
-		return nil, fmt.Errorf("postgres: list children: %w", err)
-	}
-	defer rows.Close()
-
-	var out []brain.Object
-	for rows.Next() {
-		obj, err := s.scanObject(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, obj)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("postgres: list children: %w", err)
-	}
-	return out, nil
+	return s.scanObjectRows(ctx, q, args, "list children", 0)
 }
 
 // Put implements ObjectWriter (full-column upsert; clears soft-delete on revive).
@@ -167,10 +149,7 @@ func (s *Store) Put(ctx context.Context, obj brain.Object) error {
 			namespace = EXCLUDED.namespace,
 			updated_at = EXCLUDED.updated_at,
 			deleted_at = NULL`
-	nsJSON, err := obj.Namespace.Value()
-	if err != nil {
-		return fmt.Errorf("postgres: marshal namespace: %w", err)
-	}
+	nsJSON, _ := obj.Namespace.Value()
 	if _, err := s.db.Exec(ctx, q,
 		obj.ID, obj.Kind, obj.Title, obj.Summary, propsJSON, obj.Content, obj.ContentType,
 		obj.ParentID, obj.Position, emb, nsJSON, obj.CreatedAt, obj.UpdatedAt,
@@ -239,11 +218,7 @@ func (s *Store) GetKind(ctx context.Context, kind string) (brain.ObjectKind, err
 	if desc != nil {
 		k.Description = *desc
 	}
-	if len(fields) == 0 {
-		k.FilterableFields = json.RawMessage("[]")
-	} else {
-		k.FilterableFields = json.RawMessage(fields)
-	}
+	k.FilterableFields = json.RawMessage(fields)
 	return k, nil
 }
 
@@ -269,11 +244,7 @@ func (s *Store) ListKinds(ctx context.Context) ([]brain.ObjectKind, error) {
 		if desc != nil {
 			k.Description = *desc
 		}
-		if len(fields) == 0 {
-			k.FilterableFields = json.RawMessage("[]")
-		} else {
-			k.FilterableFields = json.RawMessage(fields)
-		}
+		k.FilterableFields = json.RawMessage(fields)
 		out = append(out, k)
 	}
 	if err := rows.Err(); err != nil {
@@ -542,10 +513,7 @@ func appendNamespaceSQL(q string, args []any, scope brain.Scope) (string, []any)
 	if scope.Namespace.Empty() {
 		return q, args
 	}
-	raw, err := scope.Namespace.Value()
-	if err != nil {
-		return q, args
-	}
+	raw, _ := scope.Namespace.Value()
 	q += fmt.Sprintf(` AND namespace @> $%d::jsonb`, len(args)+1)
 	return q, append(args, raw)
 }

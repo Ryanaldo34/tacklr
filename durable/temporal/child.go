@@ -76,6 +76,58 @@ func spawnedNudge(spawned []childRun) string {
 	return adapter.ChildrenNudge(rows)
 }
 
+func markChildDone(spawned *[]childRun, id durable.SessionID, result string, err error) *tacklr.Message {
+	i := findChild(*spawned, id)
+	if i < 0 {
+		return nil
+	}
+	c := (*spawned)[i]
+	dropChild(spawned, id)
+	st := durable.SessionStatus{ID: c.id, Specialist: c.spec, Result: result, State: durable.SessionComplete}
+	if err != nil {
+		st.State = durable.SessionFailed
+		st.Result = err.Error()
+	}
+	return adapter.ChildJobMessage(st)
+}
+
+func harvestReadyChildren(ctx workflow.Context, spawned *[]childRun, inbox *[]*tacklr.Message) {
+	for {
+		if len(*spawned) == 0 {
+			return
+		}
+		var gotID durable.SessionID
+		var gotResult string
+		var gotErr error
+		ready := false
+		pending := 0
+		s := workflow.NewSelector(ctx)
+		for _, c := range *spawned {
+			if c.done {
+				continue
+			}
+			pending++
+			id := c.id
+			s.AddFuture(c.fut, func(f workflow.Future) {
+				var result string
+				err := f.Get(ctx, &result)
+				gotID, gotResult, gotErr, ready = id, result, err, true
+			})
+		}
+		if pending == 0 {
+			return
+		}
+		s.AddDefault(func() {})
+		s.Select(ctx)
+		if !ready {
+			return
+		}
+		if msg := markChildDone(spawned, gotID, gotResult, gotErr); msg != nil {
+			*inbox = adapter.AppendMessages(*inbox, msg)
+		}
+	}
+}
+
 func cancelOne(ctx workflow.Context, spawned *[]childRun, id durable.SessionID) {
 	i := findChild(*spawned, id)
 	if i < 0 {
@@ -119,10 +171,9 @@ func waitChildTool(
 	parks *map[string]durable.SessionID,
 	callID string,
 	id durable.SessionID,
-	cancelCh workflow.ReceiveChannel,
+	cancelCh, childWaitCh workflow.ReceiveChannel,
 	cancelSpawned func(),
 ) (string, string, error) {
-	waitCh := workflow.GetSignalChannel(ctx, signalChildWaiting)
 	for {
 		i := findChild(*spawned, id)
 		if i < 0 {
@@ -152,7 +203,7 @@ func waitChildTool(
 			cancelSpawned()
 			cancelled = true
 		})
-		s.AddReceive(waitCh, func(c workflow.ReceiveChannel, more bool) {
+		s.AddReceive(childWaitCh, func(c workflow.ReceiveChannel, more bool) {
 			var w durable.SessionID
 			c.Receive(ctx, &w)
 			if j := findChild(*spawned, w); j >= 0 {

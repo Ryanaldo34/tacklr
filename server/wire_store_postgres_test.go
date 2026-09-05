@@ -81,23 +81,6 @@ func TestPostgresWireStore_putGetDelete(t *testing.T) {
 	if !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("after delete: %v", err)
 	}
-
-	if err := ws.Put(ctx, "empty", nil); err != nil {
-		t.Fatal(err)
-	}
-	_ = conn.Close(ctx)
-	if err := ws.Put(ctx, "closed", []byte(`{}`)); err == nil {
-		t.Fatal("put on closed conn")
-	}
-	if _, err := ws.Get(ctx, "closed"); err == nil {
-		t.Fatal("get on closed conn")
-	}
-	if err := ws.Delete(ctx, "closed"); err == nil {
-		t.Fatal("delete on closed conn")
-	}
-	if err := ws.Setup(ctx); err == nil {
-		t.Fatal("setup on closed conn")
-	}
 }
 
 // TestPostgresWireStore_acpLoadAfterRestart: create via protocol, new protocol

@@ -65,22 +65,24 @@ func (item vfsBindItem) binding() vfs.Binding {
 	}
 }
 
+func (p *acpProtocol) ownedVFSSession(ctx context.Context, env ProtocolEnv, sessionID string) (*acpWireSession, error) {
+	if sessionID == "" {
+		return nil, clientErrorf(ErrInvalidRequest, "sessionId is required")
+	}
+	return p.resolveOwnedWireSession(ctx, env, sessionID, actionVFSCredentials)
+}
+
 // handleVFSBind stashes credentials on the ACP wire session. They are copied
 // onto Prompt/Resume AuthContext in bindTurn. This is protocol state, not kernel.
-func (p *acpProtocol) handleVFSBind(ctx context.Context, env ProtocolEnv, pr *parsedRequest) error {
+func (p *acpProtocol) handleVFSBind(ctx context.Context, env ProtocolEnv, pr *parsedRequest) (any, error) {
 	var params vfsBindParams
-	if err := json.Unmarshal(pr.Params, &params); err != nil {
-		return env.Conn.Writer.WriteError(pr.ID, clientErrorf(ErrInvalidRequest, "invalid bind params: %v", err))
-	}
-	if params.SessionID == "" {
-		return env.Conn.Writer.WriteError(pr.ID, clientErrorf(ErrInvalidRequest, "sessionId is required"))
-	}
-	sess, err := p.resolveOwnedWireSession(ctx, env, params.SessionID, actionVFSCredentials)
+	_ = json.Unmarshal(pr.Params, &params)
+	sess, err := p.ownedVFSSession(ctx, env, params.SessionID)
 	if err != nil {
-		return env.Conn.Writer.WriteError(pr.ID, err)
+		return nil, err
 	}
 	if len(params.Backends) == 0 {
-		return env.Conn.Writer.WriteError(pr.ID, clientErrorf(ErrInvalidRequest, "backends is required"))
+		return nil, clientErrorf(ErrInvalidRequest, "backends is required")
 	}
 	sess.mu.Lock()
 	agentID := sess.configValues["agent"]
@@ -116,46 +118,39 @@ func (p *acpProtocol) handleVFSBind(ctx context.Context, env ProtocolEnv, pr *pa
 		sess.stashBind(b)
 		okItems = append(okItems, mounted{Point: vfs.WorkspacePoint, Provider: b.Provider})
 	}
-	return env.Conn.Writer.WriteResult(pr.ID, map[string]any{
+	return map[string]any{
 		"mounted": okItems,
 		"errors":  errs,
-	})
+	}, nil
 }
 
-func (p *acpProtocol) handleVFSRefresh(ctx context.Context, env ProtocolEnv, pr *parsedRequest) error {
+func (p *acpProtocol) handleVFSRefresh(ctx context.Context, env ProtocolEnv, pr *parsedRequest) (any, error) {
 	var params vfsRefreshParams
-	if err := json.Unmarshal(pr.Params, &params); err != nil {
-		return env.Conn.Writer.WriteError(pr.ID, clientErrorf(ErrInvalidRequest, "invalid refresh params: %v", err))
+	_ = json.Unmarshal(pr.Params, &params)
+	if params.Provider == "" {
+		return nil, clientErrorf(ErrInvalidRequest, "sessionId and provider are required")
 	}
-	if params.SessionID == "" || params.Provider == "" {
-		return env.Conn.Writer.WriteError(pr.ID, clientErrorf(ErrInvalidRequest, "sessionId and provider are required"))
-	}
-	sess, err := p.resolveOwnedWireSession(ctx, env, params.SessionID, actionVFSCredentials)
+	sess, err := p.ownedVFSSession(ctx, env, params.SessionID)
 	if err != nil {
-		return env.Conn.Writer.WriteError(pr.ID, err)
+		return nil, err
 	}
 	if !sess.stashRefresh(params.Provider, params.Auth.credential()) {
-		return env.Conn.Writer.WriteError(pr.ID, clientErrorf(ErrInvalidRequest, "no vfs binding for provider"))
+		return nil, clientErrorf(ErrInvalidRequest, "no vfs binding for provider")
 	}
-	return env.Conn.Writer.WriteResult(pr.ID, map[string]any{})
+	return map[string]any{}, nil
 }
 
-func (p *acpProtocol) handleVFSUnbind(ctx context.Context, env ProtocolEnv, pr *parsedRequest) error {
+func (p *acpProtocol) handleVFSUnbind(ctx context.Context, env ProtocolEnv, pr *parsedRequest) (any, error) {
 	var params vfsUnbindParams
-	if err := json.Unmarshal(pr.Params, &params); err != nil {
-		return env.Conn.Writer.WriteError(pr.ID, clientErrorf(ErrInvalidRequest, "invalid unbind params: %v", err))
-	}
-	if params.SessionID == "" {
-		return env.Conn.Writer.WriteError(pr.ID, clientErrorf(ErrInvalidRequest, "sessionId is required"))
-	}
-	sess, err := p.resolveOwnedWireSession(ctx, env, params.SessionID, actionVFSCredentials)
+	_ = json.Unmarshal(pr.Params, &params)
+	sess, err := p.ownedVFSSession(ctx, env, params.SessionID)
 	if err != nil {
-		return env.Conn.Writer.WriteError(pr.ID, err)
+		return nil, err
 	}
 	point := params.Point
 	if name := strings.TrimSpace(params.Name); name != "" {
 		point = name
 	}
 	sess.stashUnbind(point, params.Provider)
-	return env.Conn.Writer.WriteResult(pr.ID, map[string]any{})
+	return map[string]any{}, nil
 }

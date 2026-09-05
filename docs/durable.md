@@ -45,6 +45,18 @@ One goroutine per session runs the harness wait loop. HITL parks that goroutine 
 
 `Status` and the stream agree on when a turn finished. `StreamEventComplete` is published only after the checkpoint is saved and `Status` is already `complete`. `StreamEventError` that ends the turn is the same for `failed`. Park publishes `yield`; `Status` stays `running` with `Waiting` true. A later `Prompt` on a completed session starts a new turn: when `Prompt` returns, `Status` is `running` again.
 
+### Prompt during a live turn
+
+`Runtime.Prompt` while a turn is live or parked **queues**. It does not cancel in-flight `Invoke` or blocking tools. `Prompt` returns when the session accepted the work (queued, not yet in the window). `Subscribe` still delivers the same turn’s completion. A second concurrent `session/prompt` / `RunTurn` subscriber may see that same completion. No new ACP method.
+
+Queued messages are appended only when the window is safe: no unpaired (including leftover) tool calls and not parked. Both wait loops use that gate, then `tacklr.Next`. They never append while `Invoke` is running or between a `function_call` and its result. A drain that writes messages forces another inference instead of complete.
+
+`Prompt.Auth` and `Prompt.State` apply immediately (tokens and `userState` must not wait). `AgentID` / `MCPServers` apply on the next idle construct, not the live harness.
+
+`session/cancel` (`Runtime.Cancel`) remains the abort path: it cancels the turn, stops children, and **drops unread inbox items**. Close drops the inbox. Resume does not start from a queued Prompt; HITL stays parked until Resume leftover tools finish, then the inbox drains.
+
+Residual: an in-process process crash loses inbox items not yet absorbed. Temporal keeps them in workflow history (same class as leftover Temporal tool calls).
+
 ## Temporal
 
 The host runs:
@@ -111,15 +123,19 @@ A later `Prompt` on a session that was cancelled does not resurrect killed child
 
 The parent does not fail with the child. The child becomes `failed` and stays on the parent’s list until collected or the parent is closed.
 
-`get_child` (including `block=true`) returns the error as tool text, drops the child from the parent list, and the parent continues. The child session stays Status-able until the parent is closed or the child is cancelled. Uncollected complete or failed children still count toward the “cannot finish while children remain” nudge; the parent must `get_child` or `cancel_child` before it can complete.
+`get_child` (including `block=true`) returns the error as tool text, drops the child from the parent list, and the parent continues. The child session stays Status-able until the parent is closed or the child is cancelled.
 
-Child sessions are nested Runtime sessions (in-process or Temporal). A panic in an in-process child turn goroutine is not recovered and can leave the child `running`. Temporal starts an async child without waiting; collect a failed async child with `get_child`.
+Drain auto-collects terminal `block=false` children at the next safe window point: a `RoleUser` job message (`Child {id} ({specialist}) completed|failed`) is appended, and the child is dropped from `Children`, so `ActionNudge` / `get_child` is not required for that id. `block=true` spawn still uses `AwaitChild` as the tool result and never the inbox. A later job result is a new `RoleUser` message, never a second `RoleTool` for the spawn `call_id`.
+
+Still-running children count toward the “cannot finish while children remain” nudge; the parent must wait (`get_child` with `block=true`) or `cancel_child` before it can complete.
+
+Child sessions are nested Runtime sessions (in-process or Temporal). A panic in an in-process child turn goroutine is not recovered and can leave the child `running`. Temporal starts an async child without waiting; a terminal async child is auto-collected as a job message.
 
 ## Tool batches
 
 A model round can emit several tool calls. Each `function_call` is pending until a matching tool result is appended (`function_call_output` / `RoleTool`). The wait loop **does not infer again** until every call in that batch has a result, or a call is parked for HITL.
 
-`spawn_specialist` is the same pairing. `block=false` appends a scheduled message immediately. `block=true` (the default) waits for that child; the child’s output **is** the tool result. A mixed batch (some blocking, some not) still waits for every blocking call to return before the next model round. Non-blocking results may already be in the window; blocking results must be too. The next round starts only when the batch has no open tool calls.
+`spawn_specialist` is the same pairing. `block=false` appends a scheduled message immediately. `block=true` (the default) waits for that child; the child’s output **is** the tool result. A mixed batch (some blocking, some not) still waits for every blocking call to return before the next model round. Non-blocking results may already be in the window; blocking results must be too. The next round starts only when the batch has no open tool calls. When a `block=false` child later completes, the drain appends a separate `RoleUser` job result (not another `RoleTool` for that `call_id`).
 
 | Runtime | How the batch runs | Where leftovers live |
 |---------|--------------------|----------------------|
@@ -156,7 +172,7 @@ Encrypt remaining work-item payloads (prompt text, tool args, HITL bytes) at res
 
 ## Protocol contract
 
-`server.Protocol` is the host extension point. Implement HTTP/WebSocket routes, map each `StreamEvent` to wire frames in `OnStreamEvent`, and call `server.RunTurn` to pump `Runtime.Subscribe`. ACP is one implementation:
+`server.Protocol` is the host extension point. ACP’s built-in remote transport is WebSocket on `GET /acp` (JSON-RPC both ways). Hosts may add their own HTTP routes. Map each `StreamEvent` to wire frames in `OnStreamEvent`, and call `server.RunTurn` to pump `Runtime.Subscribe`:
 
 ```go
 srv := server.NewServer(rt, cat, server.NewACPProtocol(wire), myProtocol{})
@@ -182,7 +198,7 @@ Three stores. Do not add a fourth. Do not copy a field from one into another exc
 | Plane | Lifetime | Owns | Never |
 |-------|----------|------|-------|
 | **SnapshotStore** | One Runtime session | Window, plan, parked interrupt, host `userState`, VFS recipes, identity (`AgentID`, `Parent`, `Specialist`, child ids) | Tokens, file bytes, leftover unstarted Temporal tool calls, MCP env/headers, child workflow futures |
-| **Wait loop** | In-process `sessionProc` / Temporal workflow replay | Leftover unstarted Temporal batch calls, MCP Durable topology, child futures, secret-free `ApplyAuth` on the current signal, `Status` | Window, plan, tokens, file bytes. `userState` after the first snapshot save of the slice |
+| **Wait loop** | In-process `sessionProc` / Temporal workflow replay | Leftover unstarted Temporal batch calls, MCP Durable topology, child futures, Prompt/job inbox (steer + auto-collected jobs), secret-free `ApplyAuth` on the current signal, `Status` | Window, plan, tokens, file bytes. `userState` after the first snapshot save of the slice. Inbox is not SnapshotStore. |
 | **SecretStorage** | Session, deleted on Close | VFS credentials | Snapshot rows, Temporal payloads |
 
 `Prompt.State` / `Resume.State` / `CreateSession.State` merge into checkpoint `userState`. They are not a second Temporal copy of that map.

@@ -18,7 +18,7 @@ type Server struct {
 	Runtime   durable.Runtime
 	Catalog   durable.Catalog
 	Protocols []Protocol
-	// Connections tracks ACP Streamable HTTP / WebSocket connections.
+	// Connections tracks ACP WebSocket connections.
 	// Custom protocols may ignore it.
 	Connections *ConnectionRegistry
 	// Security is protocol-neutral authentication and authorization supplied by the host.
@@ -33,16 +33,8 @@ type Server struct {
 // NewServer wraps a Runtime and one or more Protocols. ACP is NewACPProtocol;
 // pass additional implementations to mount their HTTPRoutes on the same mux.
 func NewServer(rt durable.Runtime, cat durable.Catalog, protocols ...Protocol) *Server {
-	if rt == nil {
-		panic("server: Runtime is required")
-	}
-	if len(protocols) == 0 {
-		panic("server: at least one Protocol is required")
-	}
-	for _, p := range protocols {
-		if p == nil {
-			panic("server: Protocol is required")
-		}
+	if rt == nil || len(protocols) == 0 {
+		panic("server: Runtime and at least one Protocol are required")
 	}
 	return &Server{
 		Runtime:     rt,
@@ -87,17 +79,11 @@ func (s *Server) ServeHTTP(ctx context.Context, addr string) error {
 	go func() {
 		errCh <- hs.ListenAndServe()
 	}()
-	return waitHTTPServer(ctx, hs.Shutdown, errCh)
-}
-
-// waitHTTPServer waits for ListenAndServe to exit or ctx cancel, then maps
-// shutdown/listen errors to the ServeHTTP return value. Extracted for tests.
-func waitHTTPServer(ctx context.Context, shutdown func(context.Context) error, errCh <-chan error) error {
 	select {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), defaultHTTPShutdown)
 		defer cancel()
-		_ = shutdown(shutdownCtx)
+		_ = hs.Shutdown(shutdownCtx)
 		err := <-errCh
 		if err == nil || errors.Is(err, http.ErrServerClosed) {
 			return ctx.Err()

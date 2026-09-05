@@ -53,6 +53,13 @@ func (s *acpWireSession) envelope() acpWireEnvelope {
 	}
 }
 
+func (s *acpWireSession) cwdMismatch(cwd string) error {
+	if cwd != "" && s.cwd != "" && cwd != s.cwd {
+		return clientErrorf(ErrInvalidRequest, "cwd does not match session cwd")
+	}
+	return nil
+}
+
 func (s *acpWireSession) takeAuth() durable.AuthContext {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -115,11 +122,7 @@ func (s *acpWireSession) stashUnbind(point, provider string) {
 			drop = true
 		}
 		if drop {
-			if alias != "" {
-				s.vfsDrop = append(s.vfsDrop, alias)
-			} else {
-				s.vfsDrop = append(s.vfsDrop, existing.Provider)
-			}
+			s.vfsDrop = append(s.vfsDrop, alias)
 			continue
 		}
 		kept = append(kept, existing)
@@ -223,9 +226,9 @@ func (p *acpProtocol) loadSession(ctx context.Context, env ProtocolEnv, pr *pars
 		return nil, err
 	}
 	sess.mu.Lock()
-	if pr.CWD != "" && sess.cwd != "" && pr.CWD != sess.cwd {
+	if err := sess.cwdMismatch(pr.CWD); err != nil {
 		sess.mu.Unlock()
-		return nil, clientErrorf(ErrInvalidRequest, "cwd %q does not match session cwd %q", pr.CWD, sess.cwd)
+		return nil, err
 	}
 	if pr.CWD != "" && sess.cwd == "" {
 		sess.cwd = pr.CWD
@@ -275,9 +278,9 @@ func (p *acpProtocol) bindTurn(ctx context.Context, env ProtocolEnv, pr *parsedR
 	}
 
 	sess.mu.Lock()
-	if pr.CWD != "" && sess.cwd != "" && pr.CWD != sess.cwd {
+	if err := sess.cwdMismatch(pr.CWD); err != nil {
 		sess.mu.Unlock()
-		return turnRequest{}, clientErrorf(ErrInvalidRequest, "cwd does not match session cwd")
+		return turnRequest{}, err
 	}
 	mcpServers := pr.MCPServers
 	if len(mcpServers) > 0 {
@@ -305,17 +308,6 @@ func (p *acpProtocol) bindTurn(ctx context.Context, env ProtocolEnv, pr *parsedR
 			}
 			if model != nil {
 				if bad := tacklr.UnsupportedMIMEs(model, mimes); len(bad) > 0 {
-					return turnRequest{}, clientErrorf(ErrInvalidRequest, "unsupported content type(s): %s", strings.Join(bad, ", "))
-				}
-			} else {
-				// No model: reject all non-text.
-				var bad []string
-				for _, m := range mimes {
-					if !tacklr.IsTextMIME(m) {
-						bad = append(bad, tacklr.NormalizeMIME(m))
-					}
-				}
-				if len(bad) > 0 {
 					return turnRequest{}, clientErrorf(ErrInvalidRequest, "unsupported content type(s): %s", strings.Join(bad, ", "))
 				}
 			}
@@ -356,21 +348,19 @@ func (p *acpProtocol) setConfig(ctx context.Context, env ProtocolEnv, sessionID,
 		return nil, err
 	}
 	sess.mu.Lock()
-	switch configID {
-	case "model":
-		if env.Catalog == nil {
-			sess.mu.Unlock()
-			return nil, clientErrorf(ErrAgentNotFound, "agent %q not found", value)
-		}
-		if _, ok := env.Catalog.Lookup(value); !ok {
-			sess.mu.Unlock()
-			return nil, clientErrorf(ErrAgentNotFound, "agent %q not found", value)
-		}
-		sess.configValues["agent"] = value
-	default:
+	if configID != "model" {
 		sess.mu.Unlock()
 		return nil, clientErrorf(ErrInvalidRequest, "unknown configId %q", configID)
 	}
+	ok := env.Catalog != nil
+	if ok {
+		_, ok = env.Catalog.Lookup(value)
+	}
+	if !ok {
+		sess.mu.Unlock()
+		return nil, clientErrorf(ErrAgentNotFound, "agent %q not found", value)
+	}
+	sess.configValues["agent"] = value
 	agent := sess.configValues["agent"]
 	sess.mu.Unlock()
 	if err := p.persistWire(ctx, sessionID, sess); err != nil {

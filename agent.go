@@ -280,7 +280,7 @@ func (a *TurnManager) findTool(name, namespace string) *Tool {
 }
 
 // CancelledToolResultContent is written into the context window for tool calls
-// aborted by session cancel or mid-turn steer (user interrupt).
+// aborted by session cancel.
 const CancelledToolResultContent = "cancelled: user interrupted the agent"
 
 // streamChunk maps a model chunk to a harness StreamEvent.
@@ -326,7 +326,7 @@ func (a *TurnManager) withToolPresentation(tc ToolCall) ToolCall {
 
 // toolOutputIDs returns RoleTool call ids present in the window.
 func toolOutputIDs(window []*Message) map[string]struct{} {
-	hasOutput := make(map[string]struct{})
+	hasOutput := make(map[string]struct{}, len(window))
 	for _, m := range window {
 		if m != nil && m.Role == RoleTool && m.ToolCallID != "" {
 			hasOutput[m.ToolCallID] = struct{}{}
@@ -376,19 +376,10 @@ func (a *TurnManager) emitPlanUpdate(out chan<- StreamEvent) {
 	out <- StreamEvent{Type: StreamEventPlanUpdate, Data: data}
 }
 
-func (a *TurnManager) hasOpenToolWork() bool {
-	a.pendingMu.Lock()
-	nPending := len(a.pendingToolCalls)
-	a.pendingMu.Unlock()
-	if nPending > 0 || a.session.HasPendingInterrupt() {
-		return true
-	}
-	return len(a.openToolCalls()) > 0
-}
-
 // openToolCalls returns assistant/pending tool_calls that have no RoleTool result yet.
 func (a *TurnManager) openToolCalls() []ToolCall {
-	hasOutput := toolOutputIDs(a.context.Messages())
+	window := a.context.Messages()
+	hasOutput := toolOutputIDs(window)
 	seen := make(map[string]struct{})
 	var open []ToolCall
 	add := func(tc ToolCall) {
@@ -405,7 +396,7 @@ func (a *TurnManager) openToolCalls() []ToolCall {
 		seen[id] = struct{}{}
 		open = append(open, tc)
 	}
-	for _, m := range a.context.Messages() {
+	for _, m := range window {
 		if m == nil || m.Role != RoleAssistant {
 			continue
 		}
@@ -421,26 +412,6 @@ func (a *TurnManager) openToolCalls() []ToolCall {
 	}
 	a.pendingMu.Unlock()
 	return open
-}
-
-// pairCancelledToolResults pairs cancelled results for open tools into the window.
-// When out is non-nil, also streams tool_result events (live turn cancel path).
-func (a *TurnManager) pairCancelledToolResults(out chan<- StreamEvent) {
-	for _, tc := range a.openToolCalls() {
-		if out != nil {
-			a.context.Add(a.emitToolResult(out, tc, CancelledToolResultContent, "error"))
-			continue
-		}
-		msg, _ := a.toolResultMessage(tc, CancelledToolResultContent, "error")
-		a.context.Add(msg)
-	}
-}
-
-func (a *TurnManager) clearInterruptParkState() {
-	a.pendingMu.Lock()
-	a.pendingToolCalls = make(map[string]PendingToolCall)
-	a.pendingMu.Unlock()
-	a.session.ClearInterrupts()
 }
 
 // discoverAllTools is the MCP discovery entry. Tests may replace it.

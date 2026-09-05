@@ -5,12 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"path"
 	"strings"
 
 	"github.com/ryanaldo34/tacklr"
-	"github.com/ryanaldo34/tacklr/mcp"
 )
 
 // ACP stop reasons for session/prompt PromptResponse (spec Prompt Turn).
@@ -25,11 +23,8 @@ const (
 // stopReasonFromError maps harness terminal errors to ACP stopReason values.
 // ok is false when the error is not a semantic turn stop (use JSON-RPC error).
 func stopReasonFromError(err error) (reason string, ok bool) {
-	if err == nil {
-		return "", false
-	}
 	switch {
-	case errors.Is(err, context.Canceled), errors.Is(err, ErrRequestCancelled):
+	case errors.Is(err, context.Canceled):
 		return stopReasonCancelled, true
 	case errors.Is(err, tacklr.ErrModelRefused):
 		return stopReasonRefusal, true
@@ -81,208 +76,79 @@ type acpResource struct {
 	Blob     string `json:"blob,omitempty"`
 }
 
-// acpSessionParams holds params for session/new, session/load, session/resume.
-type acpSessionParams struct {
-	Cwd        string          `json:"cwd"`
-	SessionID  string          `json:"sessionId"`
-	MCPServers []mcp.MCPConfig `json:"mcpServers,omitempty"`
+func requireSessionID(method, id string) error {
+	if id == "" {
+		return clientErrorf(ErrInvalidRequest, "sessionId is required for %s", method)
+	}
+	return nil
 }
 
-// acpPromptParams holds params for session/prompt.
-type acpPromptParams struct {
-	SessionID  string          `json:"sessionId"`
-	Prompt     json.RawMessage `json:"prompt"`
-	Cwd        string          `json:"cwd"`
-	MCPServers []mcp.MCPConfig `json:"mcpServers,omitempty"`
+func rawObject(raw json.RawMessage) map[string]json.RawMessage {
+	var m map[string]json.RawMessage
+	_ = json.Unmarshal(raw, &m)
+	return m
 }
 
-// acpSessionIDParams holds params for methods that only need a session ID.
-type acpSessionIDParams struct {
-	SessionID string `json:"sessionId"`
+func jsonString(m map[string]json.RawMessage, key string) string {
+	var s string
+	_ = json.Unmarshal(m[key], &s)
+	return s
 }
 
-// acpConfigSetParams holds params for session/set_config_option.
-type acpConfigSetParams struct {
-	SessionID string `json:"sessionId"`
-	ConfigID  string `json:"configId"`
-	Value     string `json:"value"`
+func jsonInt(m map[string]json.RawMessage, key string) int {
+	var n int
+	_ = json.Unmarshal(m[key], &n)
+	return n
 }
 
 func validateACPRequest(body []byte) (*parsedRequest, error) {
 	var env acpRequest
-	if err := json.Unmarshal(body, &env); err != nil {
-		return nil, clientErrorf(ErrInvalidRequest, "invalid JSON-RPC: %v", err)
+	if json.Unmarshal(body, &env) != nil || env.JSONRPC != "2.0" || env.Method == "" {
+		return nil, clientErrorf(ErrInvalidRequest, "invalid JSON-RPC")
 	}
-	if env.JSONRPC != "2.0" {
-		return nil, clientErrorf(ErrInvalidRequest, "jsonrpc version must be \"2.0\"")
-	}
-	if env.Method == "" {
-		return nil, clientErrorf(ErrInvalidRequest, "method is required")
-	}
-
+	params := rawObject(env.Params)
 	pr := &parsedRequest{
-		ID:           env.ID,
-		Method:       env.Method,
-		Meta:         env.Meta,
-		Notification: env.ID == nil,
-		Params:       env.Params,
+		ID:              env.ID,
+		Method:          env.Method,
+		Meta:            env.Meta,
+		Notification:    env.ID == nil,
+		Params:          env.Params,
+		ThreadID:        jsonString(params, "sessionId"),
+		CWD:             jsonString(params, "cwd"),
+		ConfigID:        jsonString(params, "configId"),
+		ConfigValue:     jsonString(params, "value"),
+		AuthMethodID:    strings.TrimSpace(jsonString(params, "methodId")),
+		ProtocolVersion: jsonInt(params, "protocolVersion"),
+		ClientCapsRaw:   env.Params,
 	}
+	_ = json.Unmarshal(params["mcpServers"], &pr.MCPServers)
+	_ = json.Unmarshal(params["responses"], &pr.Responses)
 
-	// JSON-RPC notifications have no id and must not receive a response.
 	if pr.Notification {
-		if env.Method == "session/cancel" && env.Params != nil {
-			var p acpSessionIDParams
-			if err := json.Unmarshal(env.Params, &p); err == nil {
-				pr.ThreadID = p.SessionID
-			}
-		}
 		return pr, nil
 	}
-
 	switch env.Method {
 	case "initialize":
-		if env.Params == nil {
-			return nil, clientErrorf(ErrInvalidRequest, "params is required for initialize")
+		if pr.ProtocolVersion < 1 {
+			return nil, clientErrorf(ErrInvalidRequest, "unsupported protocol version %d", pr.ProtocolVersion)
 		}
-		var p struct {
-			ProtocolVersion int `json:"protocolVersion"`
+	case "session/load", "session/resume", "session/prompt", "session/set_config_option", "session/close", "session/cancel":
+		if err := requireSessionID(env.Method, pr.ThreadID); err != nil {
+			return nil, err
 		}
-		if err := json.Unmarshal(env.Params, &p); err != nil {
-			return nil, clientErrorf(ErrInvalidRequest, "invalid initialize params: %v", err)
+		if env.Method == "session/prompt" {
+			msg, err := parseACPPrompt(params["prompt"])
+			if err != nil {
+				return nil, clientErrorf(ErrInvalidRequest, "invalid prompt content: %v", err)
+			}
+			pr.Prompt, pr.UserMessage = msg.Content, msg
 		}
-		// Client MUST send a positive major version; we negotiate in the result.
-		if p.ProtocolVersion < 1 {
-			return nil, clientErrorf(ErrInvalidRequest, "unsupported protocol version %d", p.ProtocolVersion)
-		}
-		pr.ProtocolVersion = p.ProtocolVersion
-		pr.ClientCapsRaw = env.Params
-		return pr, nil
-	case "session/new":
-		if env.Params == nil {
-			return nil, clientErrorf(ErrInvalidRequest, "params is required for session/new")
-		}
-		var p acpSessionParams
-		if err := json.Unmarshal(env.Params, &p); err != nil {
-			return nil, clientErrorf(ErrInvalidRequest, "invalid session/new params: %v", err)
-		}
-		pr.CWD = p.Cwd
-		pr.MCPServers = p.MCPServers
-		return pr, nil
-	case "session/load":
-		if env.Params == nil {
-			return nil, clientErrorf(ErrInvalidRequest, "params is required for session/load")
-		}
-		var p acpSessionParams
-		if err := json.Unmarshal(env.Params, &p); err != nil {
-			return nil, clientErrorf(ErrInvalidRequest, "invalid session/load params: %v", err)
-		}
-		if p.SessionID == "" {
-			return nil, clientErrorf(ErrInvalidRequest, "sessionId is required for session/load")
-		}
-		pr.ThreadID = p.SessionID
-		pr.CWD = p.Cwd
-		pr.MCPServers = p.MCPServers
-		return pr, nil
-	case "session/resume":
-		if env.Params == nil {
-			return nil, clientErrorf(ErrInvalidRequest, "params is required for session/resume")
-		}
-		var p acpSessionParams
-		if err := json.Unmarshal(env.Params, &p); err != nil {
-			return nil, clientErrorf(ErrInvalidRequest, "invalid session/resume params: %v", err)
-		}
-		if p.SessionID == "" {
-			return nil, clientErrorf(ErrInvalidRequest, "sessionId is required for session/resume")
-		}
-		pr.ThreadID = p.SessionID
-		pr.CWD = p.Cwd
-		pr.MCPServers = p.MCPServers
-		var withResp struct {
-			Responses map[string]json.RawMessage `json:"responses"`
-		}
-		if json.Unmarshal(env.Params, &withResp) == nil {
-			pr.Responses = withResp.Responses
-		}
-		return pr, nil
-	case "session/prompt":
-		if env.Params == nil {
-			return nil, clientErrorf(ErrInvalidRequest, "params is required for session/prompt")
-		}
-		var p acpPromptParams
-		if err := json.Unmarshal(env.Params, &p); err != nil {
-			return nil, clientErrorf(ErrInvalidRequest, "invalid session/prompt params: %v", err)
-		}
-		if p.SessionID == "" {
-			return nil, clientErrorf(ErrInvalidRequest, "sessionId is required for session/prompt")
-		}
-		if len(p.Prompt) == 0 {
-			return nil, clientErrorf(ErrInvalidRequest, "prompt must not be empty")
-		}
-		msg, err := parseACPPrompt(p.Prompt)
-		if err != nil {
-			return nil, clientErrorf(ErrInvalidRequest, "invalid prompt content: %v", err)
-		}
-		pr.ThreadID = p.SessionID
-		pr.Prompt = msg.Content
-		pr.UserMessage = msg
-		pr.CWD = p.Cwd
-		pr.MCPServers = p.MCPServers
-		return pr, nil
-	case "session/set_config_option":
-		if env.Params == nil {
-			return nil, clientErrorf(ErrInvalidRequest, "params is required for session/set_config_option")
-		}
-		var p acpConfigSetParams
-		if err := json.Unmarshal(env.Params, &p); err != nil {
-			return nil, clientErrorf(ErrInvalidRequest, "invalid session/set_config_option params: %v", err)
-		}
-		if p.SessionID == "" {
-			return nil, clientErrorf(ErrInvalidRequest, "sessionId is required for session/set_config_option")
-		}
-		if p.ConfigID == "" {
-			return nil, clientErrorf(ErrInvalidRequest, "configId is required for session/set_config_option")
-		}
-		pr.ThreadID = p.SessionID
-		pr.ConfigID = p.ConfigID
-		pr.ConfigValue = p.Value
-		return pr, nil
-	case "session/close", "session/cancel":
-		if env.Params == nil {
-			return nil, clientErrorf(ErrInvalidRequest, "params is required for %s", env.Method)
-		}
-		var p acpSessionIDParams
-		if err := json.Unmarshal(env.Params, &p); err != nil {
-			return nil, clientErrorf(ErrInvalidRequest, "invalid %s params: %v", env.Method, err)
-		}
-		if p.SessionID == "" {
-			return nil, clientErrorf(ErrInvalidRequest, "sessionId is required for %s", env.Method)
-		}
-		pr.ThreadID = p.SessionID
-		return pr, nil
 	case "authenticate":
-		if env.Params == nil {
-			return nil, clientErrorf(ErrInvalidRequest, "params is required for authenticate")
-		}
-		var p struct {
-			MethodID string `json:"methodId"`
-		}
-		if err := json.Unmarshal(env.Params, &p); err != nil {
-			return nil, clientErrorf(ErrInvalidRequest, "invalid authenticate params: %v", err)
-		}
-		if strings.TrimSpace(p.MethodID) == "" {
+		if pr.AuthMethodID == "" {
 			return nil, clientErrorf(ErrInvalidRequest, "methodId is required for authenticate")
 		}
-		pr.AuthMethodID = p.MethodID
-		return pr, nil
-	case "logout":
-		if env.Params == nil {
-			return nil, clientErrorf(ErrInvalidRequest, "params is required for logout")
-		}
-		return pr, nil
-	default:
-		// Admit unknown methods so HandleInbound can return JSON-RPC MethodNotFound.
-		return pr, nil
 	}
+	return pr, nil
 }
 
 // parseACPPrompt maps an ACP content-block array into a user Message
@@ -307,54 +173,25 @@ func parseACPPrompt(raw json.RawMessage) (*tacklr.Message, error) {
 			textParts = append(textParts, b.Text)
 		case "image":
 			mime := tacklr.NormalizeMIME(b.MimeType)
-			if mime == "" {
-				return nil, fmt.Errorf("image block %d requires mimeType", i)
-			}
-			if !strings.HasPrefix(mime, "image/") {
-				return nil, fmt.Errorf("image block %d mimeType must be image/*, got %q", i, mime)
-			}
 			url, err := resolveImageURL(mime, b.Data, b.URI)
-			if err != nil {
-				return nil, fmt.Errorf("image block %d: %w", i, err)
+			if !strings.HasPrefix(mime, "image/") || err != nil {
+				return nil, fmt.Errorf("image block %d is invalid", i)
 			}
 			binary = append(binary, tacklr.ContentPart{
 				Type:     tacklr.ContentTypeInputImage,
 				ImageURL: &tacklr.ImageURL{URL: url},
-				FileData: &tacklr.FileData{MIMEType: mime}, // MIME for capability checks
+				FileData: &tacklr.FileData{MIMEType: mime},
 			})
 		case "resource":
-			if b.Resource == nil {
-				return nil, fmt.Errorf("resource block %d must have a resource field", i)
+			part, text, err := parseACPResource(i, b.Resource)
+			if err != nil {
+				return nil, err
 			}
-			r := b.Resource
-			hasBlob := strings.TrimSpace(r.Blob) != ""
-			hasText := strings.TrimSpace(r.Text) != ""
-			if !hasBlob && !hasText {
-				return nil, fmt.Errorf("resource block %d requires text or blob", i)
+			if part != nil {
+				binary = append(binary, *part)
 			}
-			if hasBlob {
-				mime := tacklr.NormalizeMIME(r.MimeType)
-				if mime == "" {
-					return nil, fmt.Errorf("resource blob block %d requires mimeType", i)
-				}
-				if mime != "application/pdf" {
-					return nil, fmt.Errorf("resource blob block %d: only application/pdf is supported, got %q", i, mime)
-				}
-				filename := "document.pdf"
-				if base := path.Base(strings.TrimSpace(r.URI)); base != "" && base != "." && base != "/" {
-					filename = base
-				}
-				binary = append(binary, tacklr.ContentPart{
-					Type: tacklr.ContentTypeInputFile,
-					FileData: &tacklr.FileData{
-						Data:     tacklr.DataURL(mime, r.Blob),
-						MIMEType: mime,
-						Filename: filename,
-					},
-				})
-			}
-			if hasText {
-				textParts = append(textParts, r.Text)
+			if text != "" {
+				textParts = append(textParts, text)
 			}
 		case "resource_link":
 			// Baseline MUST: accept resource links. We do not fetch; surface a
@@ -371,9 +208,6 @@ func parseACPPrompt(raw json.RawMessage) (*tacklr.Message, error) {
 			return nil, fmt.Errorf("unsupported content block type %q at index %d", b.Type, i)
 		}
 	}
-	if len(textParts) == 0 && len(binary) == 0 {
-		return nil, fmt.Errorf("prompt must not be empty")
-	}
 	msg := &tacklr.Message{
 		Role:    tacklr.RoleUser,
 		Content: strings.Join(textParts, "\n\n"),
@@ -382,6 +216,37 @@ func parseACPPrompt(raw json.RawMessage) (*tacklr.Message, error) {
 		msg.ContentParts = binary
 	}
 	return msg, nil
+}
+
+func parseACPResource(i int, r *acpResource) (*tacklr.ContentPart, string, error) {
+	if r == nil {
+		return nil, "", fmt.Errorf("resource block %d is invalid", i)
+	}
+	hasBlob := strings.TrimSpace(r.Blob) != ""
+	hasText := strings.TrimSpace(r.Text) != ""
+	if !hasBlob && !hasText {
+		return nil, "", fmt.Errorf("resource block %d is invalid", i)
+	}
+	var part *tacklr.ContentPart
+	if hasBlob {
+		mime := tacklr.NormalizeMIME(r.MimeType)
+		if mime != "application/pdf" {
+			return nil, "", fmt.Errorf("resource block %d is invalid", i)
+		}
+		filename := "document.pdf"
+		if base := path.Base(strings.TrimSpace(r.URI)); base != "" && base != "." && base != "/" {
+			filename = base
+		}
+		part = &tacklr.ContentPart{
+			Type: tacklr.ContentTypeInputFile,
+			FileData: &tacklr.FileData{
+				Data:     tacklr.DataURL(mime, r.Blob),
+				MIMEType: mime,
+				Filename: filename,
+			},
+		}
+	}
+	return part, r.Text, nil
 }
 
 func resolveImageURL(mime, data, uri string) (string, error) {
@@ -393,21 +258,15 @@ func resolveImageURL(mime, data, uri string) (string, error) {
 	if strings.HasPrefix(uri, "data:") || strings.HasPrefix(uri, "https://") || strings.HasPrefix(uri, "http://") {
 		return uri, nil
 	}
-	if uri == "" {
-		return "", fmt.Errorf("requires data or uri")
-	}
-	return "", fmt.Errorf("uri must be data: or http(s) URL when data is empty")
+	return "", fmt.Errorf("requires data or http(s) uri")
 }
 
 // formatResourceLink builds a text stand-in for ContentBlock::ResourceLink (ACP baseline).
 func formatResourceLink(b acpContentBlock) (string, error) {
 	uri := strings.TrimSpace(b.URI)
 	name := strings.TrimSpace(b.Name)
-	if uri == "" {
-		return "", fmt.Errorf("uri is required")
-	}
-	if name == "" {
-		return "", fmt.Errorf("name is required")
+	if uri == "" || name == "" {
+		return "", fmt.Errorf("resource_link requires name and uri")
 	}
 	var bld strings.Builder
 	bld.WriteString("[Resource link] name=")
@@ -432,118 +291,56 @@ func formatResourceLink(b acpContentBlock) (string, error) {
 	return bld.String(), nil
 }
 
-func presentationToACP(threadID string, ev tacklr.StreamEvent) ([][]byte, error) {
-	presented, err := presentStreamEvent(ev)
-	if err != nil {
-		return nil, err
-	}
+func acpUpdateFrame(threadID string, update map[string]any) []byte {
+	b, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"method":  "session/update",
+		"params":  map[string]any{"sessionId": threadID, "update": update},
+	})
+	return b
+}
+
+func acpTextChunk(threadID, messageID, sessionUpdate, text string) []byte {
+	return acpUpdateFrame(threadID, map[string]any{
+		"messageId":     messageID,
+		"sessionUpdate": sessionUpdate,
+		"content":       map[string]string{"type": "text", "text": text},
+	})
+}
+
+func presentationToACP(threadID string, ev tacklr.StreamEvent) [][]byte {
+	presented := presentStreamEvent(ev)
 	switch presented.Type {
 	case string(tacklr.StreamEventMessage):
 		if presented.Content == "" {
-			return nil, nil
+			return nil
 		}
-		var toStream [][]byte
-		data := map[string]any{
-			"jsonrpc": "2.0",
-			"method":  "session/update",
-			"params": map[string]any{
-				"sessionId": threadID,
-				"update": map[string]any{
-					"messageId":     presented.MessageID,
-					"sessionUpdate": "agent_message_chunk",
-					"content": map[string]string{
-						"type": "text",
-						"text": presented.Content,
-					},
-				},
-			},
-		}
-		bytes, _ := json.Marshal(data)
-		toStream = append(toStream, bytes)
-		return toStream, nil
+		return [][]byte{acpTextChunk(threadID, presented.MessageID, "agent_message_chunk", presented.Content)}
 	case string(tacklr.StreamEventReasoning):
 		if presented.Content == "" {
-			return nil, nil
+			return nil
 		}
-		var toStream [][]byte
-		data := map[string]any{
-			"jsonrpc": "2.0",
-			"method":  "session/update",
-			"params": map[string]any{
-				"sessionId": threadID,
-				"update": map[string]any{
-					"messageId":     presented.MessageID,
-					"sessionUpdate": "agent_thought_chunk",
-					"content": map[string]string{
-						"type": "text",
-						"text": presented.Content,
-					},
-				},
-			},
-		}
-		bytes, _ := json.Marshal(data)
-		toStream = append(toStream, bytes)
-		return toStream, nil
+		return [][]byte{acpTextChunk(threadID, presented.MessageID, "agent_thought_chunk", presented.Content)}
 	case string(tacklr.StreamEventFunctionCall):
 		var toStream [][]byte
 		if presented.Content != "" {
-			data := map[string]any{
-				"jsonrpc": "2.0",
-				"method":  "session/update",
-				"params": map[string]any{
-					"sessionId": threadID,
-					"update": map[string]any{
-						"messageId":     presented.MessageID,
-						"sessionUpdate": "agent_message_chunk",
-						"content": map[string]string{
-							"type": "text",
-							"text": presented.Content,
-						},
-					},
-				},
-			}
-			bytes, _ := json.Marshal(data)
-			toStream = append(toStream, bytes)
+			toStream = append(toStream, acpTextChunk(threadID, presented.MessageID, "agent_message_chunk", presented.Content))
 		}
 		for _, toolCall := range presented.ToolCalls {
-			data := map[string]any{
-				"jsonrpc": "2.0",
-				"method":  "session/update",
-				"params": map[string]any{
-					"sessionId": threadID,
-					"update":    acpToolCallUpdate(toolCall, "tool_call", "in_progress", ""),
-				},
-			}
-			bytes, _ := json.Marshal(data)
-			toStream = append(toStream, bytes)
+			toStream = append(toStream, acpUpdateFrame(threadID, acpToolCallUpdate(toolCall, "tool_call", "in_progress", "")))
 		}
-		return toStream, nil
+		return toStream
 	case string(tacklr.StreamEventToolUpdate):
-		var toStream [][]byte
-		data := map[string]any{
-			"jsonrpc": "2.0",
-			"method":  "session/update",
-			"params": map[string]any{
-				"sessionId": threadID,
-				"update": map[string]any{
-					"sessionUpdate": "tool_call_update",
-					"toolCallId":    presented.MessageID,
-					"status":        "in_progress",
-					"content":       acpToolCallContent(presented.Content),
-				},
-			},
-		}
-		bytes, _ := json.Marshal(data)
-		toStream = append(toStream, bytes)
-		return toStream, nil
+		return [][]byte{acpUpdateFrame(threadID, map[string]any{
+			"sessionUpdate": "tool_call_update",
+			"toolCallId":    presented.MessageID,
+			"status":        "in_progress",
+			"content":       acpToolCallContent(presented.Content),
+		})}
 	case string(tacklr.StreamEventPlanUpdate):
-		var toStream [][]byte
 		var todos []tacklr.Todo
-		err := json.Unmarshal(presented.Data, &todos)
-		if err != nil {
-			return nil, err
-		}
-		var entries = make([]map[string]any, 0, len(todos))
+		_ = json.Unmarshal(presented.Data, &todos)
+		entries := make([]map[string]any, 0, len(todos))
 		for _, todo := range todos {
 			entries = append(entries, map[string]any{
 				"content":  todo.Title,
@@ -551,94 +348,41 @@ func presentationToACP(threadID string, ev tacklr.StreamEvent) ([][]byte, error)
 				"priority": "medium",
 			})
 		}
-		data := map[string]any{
-			"jsonrpc": "2.0",
-			"method":  "session/update",
-			"params": map[string]any{
-				"sessionId": threadID,
-				"update": map[string]any{
-					"sessionUpdate": "plan",
-					"entries":       entries,
-				},
-			},
-		}
-		bytes, _ := json.Marshal(data)
-		toStream = append(toStream, bytes)
-		return toStream, nil
+		return [][]byte{acpUpdateFrame(threadID, map[string]any{"sessionUpdate": "plan", "entries": entries})}
 	case string(tacklr.StreamEventToolResult):
-		if len(presented.ToolCalls) == 0 {
-			slog.Warn("tool_result event missing ToolCalls")
-			return nil, nil
-		}
-		var toStream [][]byte
 		tc := presented.ToolCalls[0]
-		var status string
+		status := "completed"
 		if tc.Status == "error" {
 			status = "failed"
-		} else {
-			status = "completed"
 		}
-		// Terminal status uses tool_call_update with ACP ToolCallContent[] (not a bare string).
 		update := acpToolCallUpdate(tc, "tool_call_update", status, presented.Content)
 		if presented.Content != "" {
 			update["rawOutput"] = map[string]any{"output": presented.Content}
 		}
-		data := map[string]any{
-			"jsonrpc": "2.0",
-			"method":  "session/update",
-			"params": map[string]any{
-				"sessionId": threadID,
-				"update":    update,
-			},
-		}
-		bytes, _ := json.Marshal(data)
-		toStream = append(toStream, bytes)
-		return toStream, nil
+		return [][]byte{acpUpdateFrame(threadID, update)}
 	case string(tacklr.StreamEventComplete):
-		var toStream [][]byte
-		data := map[string]any{
-			"jsonrpc": "2.0",
-			"id":      presented.TurnID,
-			"result":  acpPromptResult(stopReasonEndTurn),
-		}
-		bytes, _ := json.Marshal(data)
-		toStream = append(toStream, bytes)
-		return toStream, nil
+		b, _ := json.Marshal(map[string]any{
+			"jsonrpc": "2.0", "id": presented.TurnID, "result": acpPromptResult(stopReasonEndTurn),
+		})
+		return [][]byte{b}
 	case string(tacklr.StreamEventError):
-		var toStream [][]byte
-		// Semantic stop reasons are successful PromptResponse results, not RPC errors.
 		if reason, ok := stopReasonFromError(presented.Error); ok {
-			data := map[string]any{
-				"jsonrpc": "2.0",
-				"id":      presented.TurnID,
-				"result":  acpPromptResult(reason),
-			}
-			bytes, _ := json.Marshal(data)
-			toStream = append(toStream, bytes)
-			return toStream, nil
+			b, _ := json.Marshal(map[string]any{
+				"jsonrpc": "2.0", "id": presented.TurnID, "result": acpPromptResult(reason),
+			})
+			return [][]byte{b}
 		}
 		msg := "internal error"
 		if presented.Error != nil {
 			msg = presented.Error.Error()
-		} else if presented.Content != "" {
-			msg = presented.Content
 		}
-		data := map[string]any{
-			"jsonrpc": "2.0",
-			"id":      presented.TurnID,
-			"error": map[string]any{
-				"code":    jsonRPCCodeInternal,
-				"message": msg,
-			},
-		}
-		bytes, _ := json.Marshal(data)
-		toStream = append(toStream, bytes)
-		return toStream, nil
-	case string(tacklr.StreamEventInterrupt):
-		return nil, nil // interrupt events are handled in the harness, never encoded over ACP
+		b, _ := json.Marshal(map[string]any{
+			"jsonrpc": "2.0", "id": presented.TurnID,
+			"error": map[string]any{"code": jsonRPCCodeInternal, "message": msg},
+		})
+		return [][]byte{b}
 	default:
-		slog.Warn("unhandled event type", "type", presented.Type)
-		return nil, nil
+		return nil
 	}
 }
 

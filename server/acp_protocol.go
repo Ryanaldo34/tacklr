@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -16,6 +15,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/ryanaldo34/tacklr/durable"
+	"github.com/ryanaldo34/tacklr/interrupt"
 	tacklrsecurity "github.com/ryanaldo34/tacklr/security"
 )
 
@@ -76,10 +76,7 @@ func NewACPProtocolWithAuth(wire ProtocolWireStore, methods []ACPAuthMethod, log
 
 func (p *acpProtocol) HTTPRoutes() []HTTPRoute {
 	return []HTTPRoute{
-		// ACP remote transport (RFD Streamable HTTP + WebSocket).
-		{Method: http.MethodPost, Pattern: "/acp", AllowUnauthenticated: true, Handler: p.handleACPPost},
 		{Method: http.MethodGet, Pattern: "/acp", AllowUnauthenticated: true, Handler: p.handleACPGet},
-		{Method: http.MethodDelete, Pattern: "/acp", AllowUnauthenticated: true, Handler: p.handleACPDelete},
 	}
 }
 
@@ -87,8 +84,15 @@ func isWebSocketUpgrade(r *http.Request) bool {
 	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket")
 }
 
+func (p *acpProtocol) handleACPGet(env ProtocolEnv, w http.ResponseWriter, r *http.Request) {
+	if !isWebSocketUpgrade(r) {
+		http.Error(w, "WebSocket upgrade required", http.StatusUpgradeRequired)
+		return
+	}
+	p.handleACPWebSocket(env, w, r)
+}
+
 // handleACPWebSocket serves a full-duplex ACP JSON-RPC connection over WebSocket.
-// Same ClientBridge demux as Streamable HTTP.
 func (p *acpProtocol) handleACPWebSocket(env ProtocolEnv, w http.ResponseWriter, r *http.Request) {
 	// Register before Accept so Acp-Connection-Id is on the 101 response (RFD).
 	// Bridge/writer are filled in after the socket is open.
@@ -106,7 +110,7 @@ func (p *acpProtocol) handleACPWebSocket(env ProtocolEnv, w http.ResponseWriter,
 	}
 	defer c.Close(websocket.StatusNormalClosure, "")
 
-	ctx := r.Context()
+	ctx := acpConn.Context()
 	mw := &jsonRPCWSMessageWriter{ctx: ctx, c: c}
 	bridge := NewClientBridge(mw)
 	acpConn.Bridge = bridge
@@ -140,7 +144,7 @@ func (p *acpProtocol) handleACPWebSocket(env ProtocolEnv, w http.ResponseWriter,
 
 	// Read loop: demux client RPC responses vs agent method requests.
 	for {
-		_, data, err := c.Read(ctx)
+		_, data, err := c.Read(r.Context())
 		if err != nil {
 			break
 		}
@@ -152,88 +156,78 @@ func (p *acpProtocol) handleACPWebSocket(env ProtocolEnv, w http.ResponseWriter,
 		}
 		dispatch(data)
 	}
+	// Socket is gone: cancel in-flight Prompt/Resume before waiting for them.
+	env.Connections.Remove(acpConn.ID)
 	wg.Wait()
 }
 
 func (p *acpProtocol) HandleInbound(ctx context.Context, env ProtocolEnv, body []byte) error {
 	if err := ctx.Err(); err != nil {
-		writeWireError(env.Conn.Writer, nil, err)
-		return err
+		return reply(env.Conn.Writer, nil, nil, err)
 	}
-
 	pr, err := validateACPRequest(body)
 	if err != nil {
-		// validateACPRequest always returns a nil *parsedRequest on error.
-		slog.Debug("client error", "error", err)
-		writeWireError(env.Conn.Writer, nil, err)
-		return err
+		return reply(env.Conn.Writer, nil, nil, err)
 	}
-
 	if pr.Notification {
-		if pr.Method == "session/cancel" && pr.ThreadID != "" {
-			if _, err := p.resolveOwnedWireSession(ctx, env, pr.ThreadID, actionSessionPrompt); err == nil {
-				_ = env.Runtime.Cancel(ctx, durable.SessionID(pr.ThreadID))
-			}
-		} else {
-			slog.Debug("ignored notification", "method", pr.Method)
-		}
+		p.handleNotification(ctx, env, pr)
 		return nil
 	}
-
-	switch pr.Method {
-	case "session/prompt", "session/resume":
+	if pr.Method == "session/prompt" || pr.Method == "session/resume" {
 		return p.handleSessionTurn(ctx, env, pr)
+	}
+	result, err := p.dispatch(ctx, env, pr)
+	return reply(env.Conn.Writer, pr.ID, result, err)
+}
+
+func (p *acpProtocol) handleNotification(ctx context.Context, env ProtocolEnv, pr *parsedRequest) {
+	if pr.Method != "session/cancel" || pr.ThreadID == "" {
+		return
+	}
+	if _, err := p.resolveOwnedWireSession(ctx, env, pr.ThreadID, actionSessionPrompt); err == nil {
+		_ = env.Runtime.Cancel(ctx, durable.SessionID(pr.ThreadID))
+	}
+}
+
+func (p *acpProtocol) dispatch(ctx context.Context, env ProtocolEnv, pr *parsedRequest) (any, error) {
+	switch pr.Method {
 	case "initialize":
-		if env.Conn != nil && env.Conn.RPC != nil {
+		if env.Conn.RPC != nil {
 			if len(pr.ClientCapsRaw) > 0 {
 				env.Conn.RPC.SetCaps(ParseClientCapabilities(pr.ClientCapsRaw))
 			}
 			env.Conn.RPC.MarkInitialized()
 		}
-		return env.Conn.Writer.WriteResult(pr.ID, acpInitializeResultWithAuth(env.Catalog, pr.ProtocolVersion, p.authMethods, p.logout))
+		return acpInitializeResultWithAuth(env.Catalog, pr.ProtocolVersion, p.authMethods, p.logout), nil
 	case "authenticate":
 		if err := p.authenticate(ctx, env, pr.AuthMethodID); err != nil {
-			return env.Conn.Writer.WriteError(pr.ID, err)
+			return nil, err
 		}
-		return env.Conn.Writer.WriteResult(pr.ID, map[string]any{})
+		return map[string]any{}, nil
 	case "logout":
-		if !p.logout {
-			return env.Conn.Writer.WriteError(pr.ID, clientErrorf(ErrMethodNotFound, "method not found"))
-		}
 		env.Conn.establishSecurity(tacklrsecurity.Context{})
-		return env.Conn.Writer.WriteResult(pr.ID, map[string]any{})
+		return map[string]any{}, nil
 	case "session/new":
 		if err := p.requireAuthentication(env); err != nil {
-			return env.Conn.Writer.WriteError(pr.ID, err)
+			return nil, err
 		}
 		_, result, err := p.createSession(ctx, env, pr)
-		if err != nil {
-			return env.Conn.Writer.WriteError(pr.ID, err)
-		}
-		return env.Conn.Writer.WriteResult(pr.ID, result)
+		return result, err
 	case "session/load":
-		result, err := p.loadSession(ctx, env, pr)
-		if err != nil {
-			return env.Conn.Writer.WriteError(pr.ID, err)
-		}
-		return env.Conn.Writer.WriteResult(pr.ID, result)
+		return p.loadSession(ctx, env, pr)
 	case "session/set_config_option":
-		result, err := p.setConfig(ctx, env, pr.ThreadID, pr.ConfigID, pr.ConfigValue)
-		if err != nil {
-			return env.Conn.Writer.WriteError(pr.ID, err)
-		}
-		return env.Conn.Writer.WriteResult(pr.ID, result)
+		return p.setConfig(ctx, env, pr.ThreadID, pr.ConfigID, pr.ConfigValue)
 	case "session/close":
 		if err := p.closeSession(ctx, env, pr.ThreadID); err != nil {
-			return env.Conn.Writer.WriteError(pr.ID, err)
+			return nil, err
 		}
-		return env.Conn.Writer.WriteResult(pr.ID, map[string]any{})
+		return map[string]any{}, nil
 	case "session/cancel":
 		if _, err := p.resolveOwnedWireSession(ctx, env, pr.ThreadID, actionSessionPrompt); err != nil {
-			return env.Conn.Writer.WriteError(pr.ID, err)
+			return nil, err
 		}
 		_ = env.Runtime.Cancel(ctx, durable.SessionID(pr.ThreadID))
-		return env.Conn.Writer.WriteResult(pr.ID, map[string]any{})
+		return map[string]any{}, nil
 	case methodVFSBind:
 		return p.handleVFSBind(ctx, env, pr)
 	case methodVFSRefresh:
@@ -241,7 +235,7 @@ func (p *acpProtocol) HandleInbound(ctx context.Context, env ProtocolEnv, body [
 	case methodVFSUnbind:
 		return p.handleVFSUnbind(ctx, env, pr)
 	default:
-		return env.Conn.Writer.WriteError(pr.ID, clientErrorf(ErrMethodNotFound, "method not found"))
+		return nil, clientErrorf(ErrMethodNotFound, "method not found")
 	}
 }
 
@@ -260,7 +254,7 @@ func (p *acpProtocol) authenticate(ctx context.Context, env ProtocolEnv, methodI
 		return clientErrorf(ErrAuthenticationRequired, "authentication required")
 	}
 	binding := tacklrsecurity.ChannelBinding{Kind: "acp"}
-	if env.Conn != nil && env.Conn.Security != nil {
+	if env.Conn.Security != nil {
 		binding = env.Conn.Security.Binding
 		if binding.Kind == "" {
 			binding.Kind = "acp"
@@ -271,10 +265,11 @@ func (p *acpProtocol) authenticate(ctx context.Context, env ProtocolEnv, methodI
 		Binding: binding,
 	})
 	if err != nil {
+		sent := ErrAuthenticationRequired
 		if errors.Is(err, tacklrsecurity.ErrAuthenticationFailed) {
-			return clientErrorCause(ErrAuthenticationFailed, err, "authentication failed")
+			sent = ErrAuthenticationFailed
 		}
-		return clientErrorCause(ErrAuthenticationRequired, err, "authentication required")
+		return clientErrorCause(sent, err, "%s", sent.Error())
 	}
 	env.Conn.establishSecurity(securityContext)
 	return nil
@@ -284,25 +279,22 @@ func (p *acpProtocol) requireAuthentication(env ProtocolEnv) error {
 	if len(p.authMethods) == 0 {
 		return nil
 	}
-	if env.Conn != nil && env.Conn.Security != nil && env.Conn.Security.Authenticated() {
+	if env.Conn.Security != nil && env.Conn.Security.Authenticated() {
 		return nil
 	}
 	return clientErrorf(ErrAuthenticationRequired, "authentication required")
 }
 
 func (p *acpProtocol) handleSessionTurn(ctx context.Context, env ProtocolEnv, pr *parsedRequest) error {
-	if env.Conn != nil && env.Conn.RPC != nil {
+	if env.Conn.RPC != nil {
 		if err := env.Conn.RPC.WaitInitialized(ctx); err != nil {
-			writeWireError(env.Conn.Writer, pr.ID, err)
-			return err
+			return reply(env.Conn.Writer, pr.ID, nil, err)
 		}
 	}
 	req, err := p.bindTurn(ctx, env, pr)
 	if err != nil {
-		writeWireError(env.Conn.Writer, pr.ID, err)
-		return err
+		return reply(env.Conn.Writer, pr.ID, nil, err)
 	}
-	threadID := req.ThreadID
 	turn := PromptOrResume{Prompt: durable.Prompt{
 		Text:        req.Prompt,
 		UserMessage: req.UserMessage,
@@ -317,41 +309,35 @@ func (p *acpProtocol) handleSessionTurn(ctx context.Context, env ProtocolEnv, pr
 		}
 		turn.Resume = resume
 	}
-	err = RunTurn(ctx, env, p, threadID, pr.ID, turn)
-	if err != nil && !IsClientError(err) {
-		logTurnError(err, req.AgentID, threadID)
-		slog.Debug("acp turn stream ended", "error", err, "thread_id", threadID)
+	err = RunTurn(ctx, env, p, req.ThreadID, pr.ID, turn)
+	if err == nil || errors.Is(err, context.Canceled) {
+		return err
 	}
-	return err
+	return reply(env.Conn.Writer, pr.ID, nil, err)
 }
 
 func (p *acpProtocol) OnStreamEvent(ctx context.Context, env ProtocolEnv, threadID string, ev tacklr.StreamEvent, reqID json.RawMessage) StreamControl {
 	if ev.Type == tacklr.StreamEventInterrupt && env.Conn != nil && env.Conn.RPC != nil {
 		resume, err := resolveInterruptViaACP(ctx, env, threadID, &ev)
 		if err != nil {
-			slog.Warn("acp interrupt resolution failed", "error", err, "thread_id", threadID)
-			frames, _ := presentationToACP(threadID, tacklr.StreamEvent{
+			frames := injectReqID(presentationToACP(threadID, tacklr.StreamEvent{
 				Type:  tacklr.StreamEventError,
 				Error: err,
-			})
-			frames = injectReqID(frames, reqID, true)
-			return StreamControl{Frames: frames, Finished: true, Err: err}
+			}), reqID, true)
+			return StreamControl{Frames: frames, Finished: true}
 		}
 		if resume != nil {
 			return StreamControl{Resume: resume}
 		}
 	}
 
-	if ev.Type == tacklr.StreamEventError && (errors.Is(ev.Error, context.Canceled) || errors.Is(ev.Error, ErrRequestCancelled)) {
+	if ev.Type == tacklr.StreamEventError && errors.Is(ev.Error, context.Canceled) {
 		if env.Conn != nil && env.Conn.Writer != nil && len(reqID) > 0 {
 			_ = env.Conn.Writer.WriteResult(reqID, acpPromptResult(stopReasonCancelled))
 		}
 		return StreamControl{Finished: true}
 	}
-	frames, err := presentationToACP(threadID, ev)
-	if err != nil {
-		return StreamControl{Err: fmt.Errorf("protocol encode: %w", err)}
-	}
+	frames := presentationToACP(threadID, ev)
 	terminal := ev.Type == tacklr.StreamEventComplete || ev.Type == tacklr.StreamEventError
 	park := ev.Type == tacklr.StreamEventInterrupt
 	frames = injectReqID(frames, reqID, terminal)
@@ -363,11 +349,7 @@ func (p *acpProtocol) OnStreamEvent(ctx context.Context, env ProtocolEnv, thread
 }
 
 func (p *acpProtocol) OnStreamClosed(ctx context.Context, env ProtocolEnv, threadID string, reqID json.RawMessage, cancelled bool) error {
-	if !cancelled {
-		// Complete and park already wrote the JSON-RPC result from OnStreamEvent.
-		return nil
-	}
-	if len(reqID) == 0 || env.Conn == nil || env.Conn.Writer == nil {
+	if !cancelled || env.Conn == nil || env.Conn.Writer == nil {
 		return nil
 	}
 	return env.Conn.Writer.WriteResult(reqID, acpPromptResult(stopReasonCancelled))
@@ -380,12 +362,9 @@ func injectReqID(frames [][]byte, reqID json.RawMessage, terminal bool) [][]byte
 	out := make([][]byte, len(frames))
 	for i, frame := range frames {
 		var msg map[string]any
-		if json.Unmarshal(frame, &msg) == nil {
-			msg["id"] = reqID
-			out[i], _ = json.Marshal(msg)
-		} else {
-			out[i] = frame
-		}
+		_ = json.Unmarshal(frame, &msg)
+		msg["id"] = reqID
+		out[i], _ = json.Marshal(msg)
 	}
 	return out
 }
@@ -394,26 +373,18 @@ func injectReqID(frames [][]byte, reqID json.RawMessage, terminal bool) [][]byte
 // Returns (nil, nil) when this interrupt kind cannot be resolved mid-turn
 // (caller parks the turn). Returns (events, nil) on successful resume.
 func resolveInterruptViaACP(ctx context.Context, env ProtocolEnv, threadID string, ev *tacklr.StreamEvent) (map[string][]byte, error) {
-	envl, err := ParseInterruptEnvelope(ev.Data)
-	if err != nil {
-		return nil, fmt.Errorf("parse interrupt envelope: %w", err)
-	}
-	kind := envl.Type
-	if kind == "" {
-		return nil, fmt.Errorf("interrupt envelope missing type")
-	}
-	switch kind {
+	var envl InterruptEventEnvelope
+	_ = json.Unmarshal(ev.Data, &envl)
+	switch envl.Type {
 	case "tool_permission":
-		return resolvePermissionViaRequest(ctx, env, threadID, ev)
+		return resolvePermissionViaRequest(ctx, env, threadID, envl, ev.MessageID)
 	case "user_selection_choice":
 		if !connElicitationForm(env.Conn) {
 			return nil, nil
 		}
-		return resolveSelectionViaElicitation(ctx, env, threadID, ev)
-	case tacklr.TypeAuthExpired:
-		return nil, nil
+		return resolveSelectionViaElicitation(ctx, env, threadID, envl, ev.MessageID)
 	default:
-		return nil, fmt.Errorf("unsupported interrupt type %q", kind)
+		return nil, nil
 	}
 }
 
@@ -423,13 +394,10 @@ func connElicitationForm(c *Conn) bool {
 	return c.RPC.GetCaps().ElicitationForm
 }
 
-func resolvePermissionViaRequest(ctx context.Context, env ProtocolEnv, threadID string, ev *tacklr.StreamEvent) (map[string][]byte, error) {
-	interruptID, perm, err := ParseToolPermissionFromInterruptData(ev.Data)
-	if err != nil {
-		return nil, fmt.Errorf("parse permission interrupt: %w", err)
-	}
-	params := PermissionToACPParams(threadID, ev.MessageID, perm)
-	raw, err := env.Conn.RPC.Call(ctx, "session/request_permission", params)
+func resolvePermissionViaRequest(ctx context.Context, env ProtocolEnv, threadID string, envl InterruptEventEnvelope, messageID string) (map[string][]byte, error) {
+	var perm interrupt.ToolPermissionInterrupt
+	_ = json.Unmarshal(envl.Data, &perm)
+	raw, err := env.Conn.RPC.Call(ctx, "session/request_permission", PermissionToACPParams(threadID, messageID, perm))
 	if err != nil {
 		return nil, fmt.Errorf("session/request_permission: %w", err)
 	}
@@ -440,19 +408,13 @@ func resolvePermissionViaRequest(ctx context.Context, env ProtocolEnv, threadID 
 	if cancelled {
 		return nil, fmt.Errorf("permission request cancelled")
 	}
-	return map[string][]byte{interruptID: resolution}, nil
+	return map[string][]byte{envl.InterruptId: resolution}, nil
 }
 
-func resolveSelectionViaElicitation(ctx context.Context, env ProtocolEnv, threadID string, ev *tacklr.StreamEvent) (map[string][]byte, error) {
-	interruptID, usi, err := ParseUserSelectionFromInterruptData(ev.Data)
-	if err != nil {
-		return nil, fmt.Errorf("parse selection interrupt: %w", err)
-	}
-	params, err := SelectionToElicitationParams(threadID, ev.MessageID, usi.Question, usi.Options)
-	if err != nil {
-		return nil, err
-	}
-	raw, err := env.Conn.RPC.Call(ctx, "elicitation/create", params)
+func resolveSelectionViaElicitation(ctx context.Context, env ProtocolEnv, threadID string, envl InterruptEventEnvelope, messageID string) (map[string][]byte, error) {
+	var usi interrupt.UserSelectionInterrupt
+	_ = json.Unmarshal(envl.Data, &usi)
+	raw, err := env.Conn.RPC.Call(ctx, "elicitation/create", SelectionToElicitationParams(threadID, messageID, usi.Question, usi.Options))
 	if err != nil {
 		return nil, fmt.Errorf("elicitation/create: %w", err)
 	}
@@ -460,21 +422,10 @@ func resolveSelectionViaElicitation(ctx context.Context, env ProtocolEnv, thread
 	if err != nil {
 		return nil, err
 	}
-	return resumeElicitation(interruptID, action, resolution,
-		fmt.Errorf("user declined to answer"),
-		fmt.Errorf("user cancelled the prompt"),
-	)
-}
-
-func resumeElicitation(interruptID, action string, resolution []byte, declined, cancelled error) (map[string][]byte, error) {
-	switch action {
-	case "accept":
-		return map[string][]byte{interruptID: resolution}, nil
-	case "decline":
-		return nil, declined
-	default:
-		return nil, cancelled
+	if action != "accept" {
+		return nil, fmt.Errorf("elicitation %s", action)
 	}
+	return map[string][]byte{envl.InterruptId: resolution}, nil
 }
 
 // Prompt baseline (no capability bits): Text + ResourceLink are always accepted.
@@ -539,7 +490,7 @@ func acpInitializeResultWithAuth(cat durable.Catalog, clientProtocolVersion int,
 		// Non-standard transport hint for operators (not part of ACP schema).
 		"_meta": map[string]any{
 			"tacklr": map[string]any{
-				"transports": []string{"websocket", "streamable_http"},
+				"transports": []string{"websocket"},
 				"vfs":        acpVFSCapability(),
 			},
 		},
@@ -553,9 +504,4 @@ func acpVFSCapability() map[string]any {
 		"tokenExpiry":  true,
 		"writable":     true,
 	}
-}
-
-func readHTTPBody(r *http.Request) ([]byte, error) {
-	defer r.Body.Close()
-	return io.ReadAll(io.LimitReader(r.Body, 16<<20))
 }

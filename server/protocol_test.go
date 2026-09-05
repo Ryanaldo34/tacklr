@@ -54,11 +54,9 @@ func TestServer_mountsHostProtocolBesideACP(t *testing.T) {
 	}
 
 	acpRec := httptest.NewRecorder()
-	acpReq := httptest.NewRequest(http.MethodPost, "/acp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}`))
-	acpReq.Header.Set("Content-Type", "application/json")
-	mux.ServeHTTP(acpRec, acpReq)
-	if acpRec.Code != http.StatusOK || !strings.Contains(acpRec.Body.String(), "protocolVersion") {
-		t.Fatalf("acp = %d %s", acpRec.Code, acpRec.Body.String())
+	mux.ServeHTTP(acpRec, httptest.NewRequest(http.MethodGet, "/acp", nil))
+	if acpRec.Code != http.StatusUpgradeRequired {
+		t.Fatalf("acp GET without upgrade = %d %s", acpRec.Code, acpRec.Body.String())
 	}
 }
 
@@ -96,77 +94,16 @@ func TestACPProtocol_initializeResultShape(t *testing.T) {
 	if !ok || info["name"] == "" {
 		t.Fatalf("agentInfo = %v", result["agentInfo"])
 	}
-}
-
-type stubSub struct{ ch <-chan tacklr.StreamEvent }
-
-func (s stubSub) Events() <-chan tacklr.StreamEvent { return s.ch }
-func (s stubSub) Close() error                      { return nil }
-
-type stubRT struct {
-	headErr, promptErr, resumeErr, subErr, createErr error
-	events                                           []tacklr.StreamEvent
-	hold                                             chan struct{}
-	cancelled                                        atomic.Bool
-	resumes                                          int
-}
-
-func (s *stubRT) CreateSession(context.Context, durable.CreateSession) (durable.SessionID, error) {
-	if s.createErr != nil {
-		return "", s.createErr
+	meta, _ := result["_meta"].(map[string]any)
+	tacklrMeta, _ := meta["tacklr"].(map[string]any)
+	transports, _ := tacklrMeta["transports"].([]string)
+	if len(transports) != 1 || transports[0] != "websocket" {
+		t.Fatalf("transports = %v, want [websocket]", transports)
 	}
-	return "s", nil
-}
-func (s *stubRT) Prompt(context.Context, durable.SessionID, durable.Prompt) error {
-	return s.promptErr
-}
-func (s *stubRT) Resume(context.Context, durable.SessionID, durable.Resume) error {
-	s.resumes++
-	return s.resumeErr
-}
-func (s *stubRT) Cancel(context.Context, durable.SessionID) error {
-	s.cancelled.Store(true)
-	return nil
-}
-func (s *stubRT) Close(context.Context, durable.SessionID) error { return nil }
-func (s *stubRT) Head(context.Context, durable.SessionID) (durable.Seq, error) {
-	if s.headErr != nil {
-		return 0, s.headErr
-	}
-	return 3, nil
-}
-func (s *stubRT) Subscribe(context.Context, durable.SessionID, durable.Seq) (durable.Subscription, error) {
-	if s.subErr != nil {
-		return nil, s.subErr
-	}
-	ch := make(chan tacklr.StreamEvent, len(s.events)+1)
-	for _, ev := range s.events {
-		ch <- ev
-	}
-	if s.hold == nil {
-		close(ch)
-	} else {
-		go func() {
-			<-s.hold
-			close(ch)
-		}()
-	}
-	return stubSub{ch: ch}, nil
-}
-
-func (s *stubRT) Children(context.Context, durable.SessionID) ([]durable.SessionID, error) {
-	return nil, nil
-}
-
-func (s *stubRT) Status(_ context.Context, id durable.SessionID) (durable.SessionStatus, error) {
-	return durable.SessionStatus{ID: id, State: durable.SessionUnknown}, durable.ErrSessionNotFound
 }
 
 type pumpProto struct {
-	onEvent   func(tacklr.StreamEvent) StreamControl
-	onClosed  error
-	closed    *atomic.Bool
-	cancelled *atomic.Bool
+	onEvent func(tacklr.StreamEvent) StreamControl
 }
 
 func (pumpProto) HandleInbound(context.Context, ProtocolEnv, []byte) error {
@@ -179,138 +116,8 @@ func (p pumpProto) OnStreamEvent(ctx context.Context, env ProtocolEnv, threadID 
 	}
 	return StreamControl{Finished: true}
 }
-func (p pumpProto) OnStreamClosed(_ context.Context, _ ProtocolEnv, _ string, _ json.RawMessage, cancelled bool) error {
-	if p.closed != nil {
-		p.closed.Store(true)
-	}
-	if p.cancelled != nil {
-		p.cancelled.Store(cancelled)
-	}
-	return p.onClosed
-}
-
-type failWriter struct{ err error }
-
-func (f failWriter) WriteResult(json.RawMessage, any) error { return nil }
-func (f failWriter) WriteError(json.RawMessage, error) error {
+func (pumpProto) OnStreamClosed(context.Context, ProtocolEnv, string, json.RawMessage, bool) error {
 	return nil
-}
-func (f failWriter) WriteFrame([]byte) error { return f.err }
-
-func TestRunTurn_outcomes(t *testing.T) {
-	complete := tacklr.StreamEvent{Type: tacklr.StreamEventComplete}
-	t.Run("nil runtime", func(t *testing.T) {
-		err := RunTurn(t.Context(), ProtocolEnv{}, pumpProto{}, "s", nil, PromptOrResume{})
-		if err == nil || err.Error() != "server: Runtime is required" {
-			t.Fatalf("err = %v", err)
-		}
-	})
-	t.Run("prompt error", func(t *testing.T) {
-		rt := &stubRT{promptErr: errors.New("prompt boom")}
-		err := RunTurn(t.Context(), ProtocolEnv{Runtime: rt}, pumpProto{}, "s", nil, PromptOrResume{})
-		if err == nil || err.Error() != "prompt boom" {
-			t.Fatalf("err = %v", err)
-		}
-	})
-	t.Run("resume error", func(t *testing.T) {
-		rt := &stubRT{resumeErr: errors.New("resume boom")}
-		err := RunTurn(t.Context(), ProtocolEnv{Runtime: rt}, pumpProto{}, "s", nil, PromptOrResume{Resume: &durable.Resume{}})
-		if err == nil || err.Error() != "resume boom" {
-			t.Fatalf("err = %v", err)
-		}
-	})
-	t.Run("subscribe error", func(t *testing.T) {
-		rt := &stubRT{subErr: errors.New("sub boom"), headErr: errors.New("no head")}
-		err := RunTurn(t.Context(), ProtocolEnv{Runtime: rt}, pumpProto{}, "s", nil, PromptOrResume{})
-		if err == nil || err.Error() != "sub boom" {
-			t.Fatalf("err = %v", err)
-		}
-	})
-	t.Run("complete", func(t *testing.T) {
-		rt := &stubRT{events: []tacklr.StreamEvent{complete}}
-		var closed, cancelled atomic.Bool
-		if err := RunTurn(t.Context(), ProtocolEnv{Runtime: rt}, pumpProto{closed: &closed, cancelled: &cancelled}, "s", nil, PromptOrResume{}); err != nil {
-			t.Fatal(err)
-		}
-		if !closed.Load() || cancelled.Load() {
-			t.Fatalf("OnStreamClosed closed=%v cancelled=%v", closed.Load(), cancelled.Load())
-		}
-	})
-	t.Run("event error cancels", func(t *testing.T) {
-		rt := &stubRT{events: []tacklr.StreamEvent{{Type: tacklr.StreamEventMessage}}}
-		err := RunTurn(t.Context(), ProtocolEnv{Runtime: rt}, pumpProto{onEvent: func(tacklr.StreamEvent) StreamControl {
-			return StreamControl{Err: errors.New("encode")}
-		}}, "s", nil, PromptOrResume{})
-		if err == nil || err.Error() != "encode" || !rt.cancelled.Load() {
-			t.Fatalf("err=%v cancelled=%v", err, rt.cancelled.Load())
-		}
-	})
-	t.Run("write frame error", func(t *testing.T) {
-		rt := &stubRT{events: []tacklr.StreamEvent{{Type: tacklr.StreamEventMessage}}}
-		err := RunTurn(t.Context(), ProtocolEnv{Runtime: rt, Conn: &Conn{Writer: failWriter{err: errors.New("write")}}}, pumpProto{onEvent: func(tacklr.StreamEvent) StreamControl {
-			return StreamControl{Frames: [][]byte{[]byte(`x`)}}
-		}}, "s", nil, PromptOrResume{})
-		if err == nil || err.Error() != "write" {
-			t.Fatalf("err = %v", err)
-		}
-	})
-	t.Run("mid-turn resume then complete", func(t *testing.T) {
-		rt := &stubRT{events: []tacklr.StreamEvent{
-			{Type: tacklr.StreamEventInterrupt},
-			complete,
-		}}
-		n := 0
-		err := RunTurn(t.Context(), ProtocolEnv{Runtime: rt}, pumpProto{onEvent: func(ev tacklr.StreamEvent) StreamControl {
-			n++
-			if ev.Type == tacklr.StreamEventInterrupt {
-				return StreamControl{Resume: map[string][]byte{"c1": []byte(`{}`)}}
-			}
-			return StreamControl{Finished: true}
-		}}, "s", nil, PromptOrResume{})
-		if err != nil || rt.resumes != 1 {
-			t.Fatalf("err=%v resumes=%d n=%d", err, rt.resumes, n)
-		}
-	})
-	t.Run("mid-turn resume fails", func(t *testing.T) {
-		rt := &stubRT{events: []tacklr.StreamEvent{{Type: tacklr.StreamEventInterrupt}}, resumeErr: errors.New("resume later")}
-		err := RunTurn(t.Context(), ProtocolEnv{Runtime: rt}, pumpProto{onEvent: func(tacklr.StreamEvent) StreamControl {
-			return StreamControl{Resume: map[string][]byte{"c1": []byte(`{}`)}}
-		}}, "s", nil, PromptOrResume{})
-		if err == nil || err.Error() != "resume later" {
-			t.Fatalf("err = %v", err)
-		}
-	})
-	t.Run("ctx cancel", func(t *testing.T) {
-		rt := &stubRT{hold: make(chan struct{})}
-		t.Cleanup(func() { close(rt.hold) })
-		ctx, cancel := context.WithCancel(t.Context())
-		errCh := make(chan error, 1)
-		go func() {
-			errCh <- RunTurn(ctx, ProtocolEnv{Runtime: rt}, pumpProto{}, "s", nil, PromptOrResume{})
-		}()
-		time.Sleep(20 * time.Millisecond)
-		cancel()
-		select {
-		case err := <-errCh:
-			if !errors.Is(err, context.Canceled) {
-				t.Fatalf("err = %v", err)
-			}
-		case <-time.After(2 * time.Second):
-			t.Fatal("turn did not return")
-		}
-	})
-	t.Run("subscription closed", func(t *testing.T) {
-		rt := &stubRT{}
-		if err := RunTurn(t.Context(), ProtocolEnv{Runtime: rt}, pumpProto{onClosed: errors.New("closed bad")}, "s", nil, PromptOrResume{}); err == nil || err.Error() != "closed bad" {
-			t.Fatalf("err = %v", err)
-		}
-	})
-	t.Run("subscription closed cleanly", func(t *testing.T) {
-		rt := &stubRT{}
-		if err := RunTurn(t.Context(), ProtocolEnv{Runtime: rt}, pumpProto{}, "s", nil, PromptOrResume{}); err != nil {
-			t.Fatal(err)
-		}
-	})
 }
 
 func terminalControl(ev tacklr.StreamEvent) StreamControl {
@@ -406,5 +213,59 @@ func TestRunTurn_midPromptCancelThenNextPrompt(t *testing.T) {
 	}
 	if !sawAfter || !complete {
 		t.Fatalf("want after-cancel + complete, got %+v", second)
+	}
+}
+
+func TestRunTurn_runtimeErrors(t *testing.T) {
+	k := newTestRuntime(t, &mockInferenceStrategy{
+		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "x", IsComplete: true}
+		},
+	}, durable.AgentSpec{})
+	env := ProtocolEnv{Runtime: k.Runtime, Catalog: k.Catalog}
+	if err := RunTurn(t.Context(), env, pumpProto{}, "missing", nil, PromptOrResume{Prompt: durable.Prompt{Text: "hi"}}); err == nil {
+		t.Fatal("want subscribe missing session")
+	}
+	id, err := k.Runtime.CreateSession(t.Context(), durable.CreateSession{AgentID: "default"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := RunTurn(t.Context(), env, pumpProto{}, string(id), nil, PromptOrResume{
+		Prompt: durable.Prompt{Text: "hi", State: map[string]any{"ch": make(chan int)}},
+	}); err == nil {
+		t.Fatal("want prompt encode failure")
+	}
+	if err := RunTurn(t.Context(), env, pumpProto{}, string(id), nil, PromptOrResume{
+		Resume: &durable.Resume{State: map[string]any{"ch": make(chan int)}},
+	}); err == nil {
+		t.Fatal("want resume encode failure")
+	}
+	id2, err := k.Runtime.CreateSession(t.Context(), durable.CreateSession{AgentID: "default"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := RunTurn(t.Context(), env, pumpProto{onEvent: func(tacklr.StreamEvent) StreamControl {
+		_ = k.Runtime.Close(t.Context(), id2)
+		return StreamControl{Resume: map[string][]byte{"nope": []byte(`{}`)}}
+	}}, string(id2), nil, PromptOrResume{Prompt: durable.Prompt{Text: "hi"}}); err == nil {
+		t.Fatal("want resume-after-close failure")
+	}
+}
+
+func TestRunTurn_protocolErrorStopsTurn(t *testing.T) {
+	k := newTestRuntime(t, &mockInferenceStrategy{
+		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "x", IsComplete: true}
+		},
+	}, durable.AgentSpec{})
+	id, err := k.Runtime.CreateSession(t.Context(), durable.CreateSession{AgentID: "default"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = RunTurn(t.Context(), ProtocolEnv{Runtime: k.Runtime, Catalog: k.Catalog}, pumpProto{onEvent: func(tacklr.StreamEvent) StreamControl {
+		return StreamControl{Err: errors.New("encode")}
+	}}, string(id), nil, PromptOrResume{Prompt: durable.Prompt{Text: "hi"}})
+	if err == nil {
+		t.Fatal("want protocol error")
 	}
 }

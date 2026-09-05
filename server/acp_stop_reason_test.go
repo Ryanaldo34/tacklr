@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"net/http/httptest"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/ryanaldo34/tacklr/durable"
 
@@ -96,6 +98,49 @@ func assertACPStopReason(t *testing.T, strategy *mockInferenceStrategy, tools []
 		blob, _ := json.Marshal(parseACPFrames(t, rec.Body))
 		t.Fatalf("stopReason = %q, want %q frames=%s", got, want, blob)
 	}
+}
+
+func TestACP_sessionCancel_stopReasonCancelled(t *testing.T) {
+	started := make(chan struct{})
+	var once sync.Once
+	strategy := &mockInferenceStrategy{
+		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			once.Do(func() { close(started) })
+			<-ctx.Done()
+		},
+	}
+	r := newTestRuntime(t, strategy, durable.AgentSpec{})
+	srv := NewServer(r.Runtime, r.Catalog, NewACPProtocol(NewMemoryWireStore()))
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	rpc := newACPRPC(ctx, t, srv)
+	rpc.write(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}`)
+	rpc.write(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp"}}`)
+
+	var sessionID string
+	for sessionID == "" {
+		frame := rpc.frame()
+		if res, ok := frame["result"].(map[string]any); ok {
+			if sid, ok := res["sessionId"].(string); ok && sid != "" {
+				sessionID = sid
+			}
+		}
+	}
+	rpc.write(`{"jsonrpc":"2.0","id":10,"method":"session/prompt","params":{"sessionId":"` + sessionID + `","prompt":[{"type":"text","text":"hi"}]}}`)
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("prompt did not start")
+	}
+	rpc.write(`{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"` + sessionID + `"}}`)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		frame := rpc.frame()
+		if res, ok := frame["result"].(map[string]any); ok && idMatch(frame["id"], 10) && res["stopReason"] == "cancelled" {
+			return
+		}
+	}
+	t.Fatal("expected prompt stopReason cancelled after session/cancel")
 }
 
 func promptStopReason(t *testing.T, rec *httptest.ResponseRecorder) string {

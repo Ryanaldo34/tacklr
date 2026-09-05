@@ -14,47 +14,6 @@ type InterruptEventEnvelope struct {
 	Data        json.RawMessage `json:"data"`
 }
 
-// ParseInterruptEnvelope extracts interrupt id, type, and raw data from a yield event.
-func ParseInterruptEnvelope(data []byte) (InterruptEventEnvelope, error) {
-	var env InterruptEventEnvelope
-	if err := json.Unmarshal(data, &env); err != nil {
-		return env, err
-	}
-	if env.InterruptId == "" {
-		return env, fmt.Errorf("interrupt envelope missing interruptId")
-	}
-	return env, nil
-}
-
-func unmarshalInterruptData[T any](data []byte) (interruptID string, v T, err error) {
-	env, err := ParseInterruptEnvelope(data)
-	if err != nil {
-		return "", v, err
-	}
-	if err := json.Unmarshal(env.Data, &v); err != nil {
-		return "", v, fmt.Errorf("unmarshal interrupt data: %w", err)
-	}
-	return env.InterruptId, v, nil
-}
-
-// ParseUserSelectionFromInterruptData extracts options from StreamEventInterrupt Data
-// payload shape {"interruptId":"...","data":<serialized UserSelectionInterrupt>}.
-func ParseUserSelectionFromInterruptData(data []byte) (interruptID string, usi interrupt.UserSelectionInterrupt, err error) {
-	return unmarshalInterruptData[interrupt.UserSelectionInterrupt](data)
-}
-
-// ParseToolPermissionFromInterruptData extracts a tool permission interrupt from yield data.
-func ParseToolPermissionFromInterruptData(data []byte) (interruptID string, perm interrupt.ToolPermissionInterrupt, err error) {
-	id, perm, err := unmarshalInterruptData[interrupt.ToolPermissionInterrupt](data)
-	if err != nil {
-		return "", perm, err
-	}
-	if len(perm.Options) == 0 {
-		perm.Options = interrupt.DefaultPermissionOptions()
-	}
-	return id, perm, nil
-}
-
 // PermissionToACPParams builds session/request_permission params.
 func PermissionToACPParams(sessionID, toolCallID string, perm interrupt.ToolPermissionInterrupt) map[string]any {
 	options := make([]map[string]any, 0, len(perm.Options))
@@ -68,9 +27,6 @@ func PermissionToACPParams(sessionID, toolCallID string, perm interrupt.ToolPerm
 	title := perm.Title
 	if title == "" {
 		title = perm.ToolName
-	}
-	if title == "" {
-		title = "Tool call"
 	}
 	toolCall := map[string]any{
 		"toolCallId": toolCallID,

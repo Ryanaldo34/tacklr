@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/builtins"
@@ -78,14 +79,37 @@ func TestACP_vfsBindRefreshUnbind(t *testing.T) {
 		t.Fatalf("want workspace file in prompt stream, got %s", body)
 	}
 
+	expires := time.Now().Add(time.Hour).UTC()
+	withExpiry := `{"jsonrpc":"2.0","id":31,"method":"_tacklr/vfs/bind","params":{"sessionId":"` + sessionID + `","backends":[{"profile":"local","params":{"name":"docs"},"auth":{"token":"tok-exp","expiresAt":"` + expires.Format(time.RFC3339Nano) + `"},"readOnly":false}]}}`
+	if err := proto.HandleInbound(t.Context(), env, []byte(withExpiry)); err != nil {
+		t.Fatal(err)
+	}
+	emptyBackends := inboundWrittenError(t, proto, env, `{"jsonrpc":"2.0","id":32,"method":"_tacklr/vfs/bind","params":{"sessionId":"`+sessionID+`","backends":[]}}`)
+	if emptyBackends == nil {
+		t.Fatal("want backends required")
+	}
+	missingRefresh := inboundWrittenError(t, proto, env, `{"jsonrpc":"2.0","id":33,"method":"_tacklr/vfs/refresh","params":{"sessionId":"`+sessionID+`","provider":"ghost","auth":{"token":"x"}}}`)
+	if missingRefresh == nil {
+		t.Fatal("want no vfs binding")
+	}
+	noProvider := inboundWrittenError(t, proto, env, `{"jsonrpc":"2.0","id":34,"method":"_tacklr/vfs/refresh","params":{"sessionId":"`+sessionID+`"}}`)
+	if noProvider == nil {
+		t.Fatal("want provider required")
+	}
+	noSession := inboundWrittenError(t, proto, env, `{"jsonrpc":"2.0","id":35,"method":"_tacklr/vfs/unbind","params":{}}`)
+	if noSession == nil {
+		t.Fatal("want sessionId required")
+	}
+
 	refresh := `{"jsonrpc":"2.0","id":4,"method":"_tacklr/vfs/refresh","params":{"sessionId":"` + sessionID + `","provider":"local","auth":{"token":"tok2"}}}`
 	recRef := serveACPRaw(t, r, refresh)
 	if recRef.Body.Len() == 0 {
 		t.Fatal("refresh returned empty")
 	}
-
+	_ = proto.HandleInbound(t.Context(), env, []byte(`{"jsonrpc":"2.0","id":36,"method":"_tacklr/vfs/unbind","params":{"sessionId":"`+sessionID+`","point":"/other"}}`))
 	unbindProvider := `{"jsonrpc":"2.0","id":5,"method":"_tacklr/vfs/unbind","params":{"sessionId":"` + sessionID + `","provider":"local"}}`
 	_ = serveACPRaw(t, r, unbindProvider)
+	_ = proto.HandleInbound(t.Context(), env, []byte(`{"jsonrpc":"2.0","id":37,"method":"_tacklr/vfs/unbind","params":{"sessionId":"`+sessionID+`","name":"docs"}}`))
 	rec2 := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":6,"method":"session/prompt","params":{"sessionId":"`+sessionID+`","prompt":[{"type":"text","text":"again"}]}}`)
 	out := rec2.Body.String()
 	if strings.Contains(out, "from-workspace") {
@@ -93,41 +117,5 @@ func TestACP_vfsBindRefreshUnbind(t *testing.T) {
 	}
 	if !strings.Contains(out, "not found") && !strings.Contains(out, "tool") {
 		t.Fatalf("want missing workspace after unbind, got %s", out)
-	}
-}
-
-func TestACP_vfsBindRefreshUnbind_errorPaths(t *testing.T) {
-	r := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
-	recNew := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
-	sessionID := acpRPCResult(t, recNew)["sessionId"].(string)
-
-	assertErr := func(body, want string) {
-		t.Helper()
-		rec := serveACPRaw(t, r, body)
-		if !strings.Contains(rec.Body.String(), want) {
-			t.Fatalf("got %s want %q", rec.Body.String(), want)
-		}
-	}
-	assertErr(`{"jsonrpc":"2.0","id":2,"method":"_tacklr/vfs/bind","params":[]}`, "invalid bind params")
-	assertErr(`{"jsonrpc":"2.0","id":3,"method":"_tacklr/vfs/bind","params":{"backends":[{"provider":"local"}]}}`, "sessionId is required")
-	assertErr(`{"jsonrpc":"2.0","id":4,"method":"_tacklr/vfs/bind","params":{"sessionId":"`+sessionID+`"}}`, "backends is required")
-	assertErr(`{"jsonrpc":"2.0","id":5,"method":"_tacklr/vfs/refresh","params":[]}`, "invalid refresh params")
-	assertErr(`{"jsonrpc":"2.0","id":6,"method":"_tacklr/vfs/refresh","params":{"sessionId":"`+sessionID+`"}}`, "sessionId and provider are required")
-	assertErr(`{"jsonrpc":"2.0","id":7,"method":"_tacklr/vfs/refresh","params":{"sessionId":"`+sessionID+`","provider":"missing"}}`, "no vfs binding")
-	assertErr(`{"jsonrpc":"2.0","id":8,"method":"_tacklr/vfs/unbind","params":[]}`, "invalid unbind params")
-	assertErr(`{"jsonrpc":"2.0","id":9,"method":"_tacklr/vfs/unbind","params":{}}`, "sessionId is required")
-
-	exp := `{"jsonrpc":"2.0","id":10,"method":"_tacklr/vfs/bind","params":{"sessionId":"` + sessionID + `","backends":[{"profile":"local","params":{"name":"docs"},"readOnly":false,"auth":{"token":"tok","expiresAt":"2030-01-01T00:00:00Z"}}]}}`
-	rec := serveACPRaw(t, r, exp)
-	if strings.Contains(rec.Body.String(), `"error"`) && !strings.Contains(rec.Body.String(), `"mounted"`) {
-		t.Fatalf("bind with profile/expires: %s", rec.Body.String())
-	}
-	unbindNamed := `{"jsonrpc":"2.0","id":11,"method":"_tacklr/vfs/unbind","params":{"sessionId":"` + sessionID + `","name":"docs"}}`
-	_ = serveACPRaw(t, r, unbindNamed)
-
-	bad := `{"jsonrpc":"2.0","id":12,"method":"_tacklr/vfs/bind","params":{"sessionId":"` + sessionID + `","backends":[{"provider":""}]}}`
-	recBad := serveACPRaw(t, r, bad)
-	if !strings.Contains(recBad.Body.String(), "errors") && !strings.Contains(recBad.Body.String(), "error") {
-		t.Fatalf("invalid binding: %s", recBad.Body.String())
 	}
 }

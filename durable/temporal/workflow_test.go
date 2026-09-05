@@ -23,6 +23,7 @@ import (
 	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/durable/inprocess"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
+	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -718,7 +719,6 @@ func TestSessionWorkflow_asyncSpawnDoesNotWaitForChild(t *testing.T) {
 	env.SetWorkerOptions(worker.Options{EnableSessionWorker: true})
 	cat := durable.NewCatalog("default")
 	id := durable.SessionID("sess-async-spawn")
-	childID := durable.ChildSessionID(id, "researcher", "sp1")
 	model := &testkit.ScriptedModel{
 		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 			last := lastMsg(msgs)
@@ -728,13 +728,13 @@ func TestSessionWorkflow_asyncSpawnDoesNotWaitForChild(t *testing.T) {
 			}
 			var scheduled, collected bool
 			for _, m := range msgs {
-				if m == nil || m.Role != tacklr.RoleTool {
+				if m == nil {
 					continue
 				}
-				if strings.Contains(m.Content, "scheduled") {
+				if m.Role == tacklr.RoleTool && strings.Contains(m.Content, "scheduled") {
 					scheduled = true
 				}
-				if strings.Contains(m.Content, "async-child") {
+				if m.Role == tacklr.RoleUser && strings.Contains(m.Content, "completed:") && strings.Contains(m.Content, "async-child") {
 					collected = true
 				}
 			}
@@ -742,14 +742,7 @@ func TestSessionWorkflow_asyncSpawnDoesNotWaitForChild(t *testing.T) {
 			case collected:
 				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "parent-continued", IsComplete: true}
 			case scheduled:
-				ch <- tacklr.LLMResponseChunk{
-					Type: tacklr.StreamEventFunctionCall,
-					ToolCalls: []tacklr.ToolCall{{
-						ID: "gc1", CallID: "gc1", Name: "get_child",
-						Arguments: `{"child_id":"` + string(childID) + `","block":true}`,
-					}},
-					IsComplete: true,
-				}
+				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "waiting", IsComplete: true}
 			default:
 				ch <- tacklr.LLMResponseChunk{
 					Type: tacklr.StreamEventFunctionCall,
@@ -823,7 +816,7 @@ func TestSessionWorkflow_listChildren(t *testing.T) {
 		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 			last := lastMsg(msgs)
 			if last != nil && last.Role == tacklr.RoleUser && last.Content == "child-task" {
-				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "from-child", IsComplete: true}
+				<-ctx.Done()
 				return
 			}
 			if last != nil && last.Role == tacklr.RoleTool {
@@ -1077,5 +1070,294 @@ func TestSessionWorkflow_resumeRemountsWorkspaceFromCachedRecipe(t *testing.T) {
 	}
 	if st := querySession(t, env); st.State != durable.SessionComplete {
 		t.Fatalf("Status after remount: %+v", st)
+	}
+}
+
+func TestSessionWorkflow_steerDuringYieldKeepsPark(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+	env.SetWorkerOptions(worker.Options{EnableSessionWorker: true})
+	cat := durable.NewCatalog("default")
+	var n atomic.Int32
+	var resumed, invoke2BeforeResume, sawSteer, toolThenSteer atomic.Bool
+	model := &testkit.ScriptedModel{
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			i := n.Add(1)
+			if i == 1 {
+				ch <- tacklr.LLMResponseChunk{
+					Type: tacklr.StreamEventFunctionCall,
+					ToolCalls: []tacklr.ToolCall{{
+						ID: "ask1", CallID: "ask1", Name: "ask_user_choice",
+						Arguments: `{"question":"Pick?","choices":[{"title":"A"},{"title":"B"}]}`,
+					}},
+					IsComplete: true,
+				}
+				return
+			}
+			if !resumed.Load() {
+				invoke2BeforeResume.Store(true)
+			}
+			var seq []string
+			for _, m := range msgs {
+				if m == nil {
+					continue
+				}
+				if m.Role == tacklr.RoleTool && m.ToolCallID == "ask1" {
+					seq = append(seq, "result")
+				}
+				if m.Role == tacklr.RoleUser && m.Content == "steer" {
+					seq = append(seq, "steer")
+					sawSteer.Store(true)
+				}
+			}
+			if i == 2 && strings.Contains(strings.Join(seq, ","), "result,steer") {
+				toolThenSteer.Store(true)
+			}
+			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "chose", IsComplete: true}
+		},
+	}
+	cat.Register("default", durable.AgentSpec{
+		Options: tacklr.AgentOptions{Model: model, Config: tacklr.Config{MaxWindowSize: 8192}},
+	})
+	fallback := inprocess.NewMemoryEventLog()
+	env.RegisterWorkflow(SessionWorkflow)
+	env.RegisterActivity(newActs(cat, fallback, true))
+	id := durable.SessionID("sess-steer-yield")
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(signalPrompt, promptSignal{Text: "ask"})
+	}, time.Millisecond)
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(signalPrompt, promptSignal{Text: "steer"})
+		st := querySession(t, env)
+		if !st.Waiting {
+			t.Error("steer must keep the park")
+		}
+		if n.Load() != 1 {
+			t.Errorf("Invoke 2 must not run before Resume, got %d", n.Load())
+		}
+	}, 20*time.Millisecond)
+	env.RegisterDelayedCallback(func() {
+		resumed.Store(true)
+		payload, _ := json.Marshal(map[string]any{"selectionIdx": 0})
+		env.SignalWorkflow(signalResume, resumeSignal{Responses: map[string][]byte{"ask1": payload}})
+	}, 40*time.Millisecond)
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(signalClose, nil)
+	}, 80*time.Millisecond)
+	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id, AgentID: "default"})
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatal(err)
+	}
+	if invoke2BeforeResume.Load() {
+		t.Fatal("park was cleared; Invoke 2 ran before Resume")
+	}
+	if !sawSteer.Load() || !toolThenSteer.Load() {
+		t.Fatal("Invoke 2 must see ask_user tool result then steer")
+	}
+	got := drainLog(t, fallback, id)
+	var yielded bool
+	for _, ev := range got {
+		if ev.Type == tacklr.StreamEventInterrupt {
+			yielded = true
+		}
+	}
+	if !yielded {
+		t.Fatalf("want park kept through steer, got %+v", got)
+	}
+}
+
+func TestSessionWorkflow_failedAsyncChildJobAbsorbed(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+	env.SetWorkerOptions(worker.Options{EnableSessionWorker: true})
+	cat := durable.NewCatalog("default")
+	id := durable.SessionID("sess-async-fail")
+	childID := durable.ChildSessionID(id, "researcher", "sp1")
+	model := &testkit.ScriptedModel{
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			last := lastMsg(msgs)
+			if last != nil && last.Role == tacklr.RoleUser && last.Content == "child-task" {
+				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventError, Content: "boom-child", IsComplete: true}
+				return
+			}
+			var scheduled, collected bool
+			for _, m := range msgs {
+				if m == nil {
+					continue
+				}
+				if m.Role == tacklr.RoleTool && strings.Contains(m.Content, "scheduled") {
+					scheduled = true
+				}
+				if m.Role == tacklr.RoleUser && strings.Contains(m.Content, "failed:") && strings.Contains(m.Content, string(childID)) {
+					collected = true
+				}
+			}
+			switch {
+			case collected:
+				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "parent-continued", IsComplete: true}
+			case scheduled:
+				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "waiting", IsComplete: true}
+			default:
+				ch <- tacklr.LLMResponseChunk{
+					Type: tacklr.StreamEventFunctionCall,
+					ToolCalls: []tacklr.ToolCall{{
+						ID: "sp1", CallID: "sp1", Name: "spawn_specialist",
+						Arguments: `{"specialist":"researcher","task_description_and_context":"child-task","block":false}`,
+					}},
+					IsComplete: true,
+				}
+			}
+		},
+	}
+	cat.Register("default", durable.AgentSpec{
+		Options: tacklr.AgentOptions{
+			Model:  model,
+			Config: tacklr.Config{MaxWindowSize: 8192},
+			Specialists: []*tacklr.Specialist{{
+				Name:  "researcher",
+				Model: model,
+			}},
+		},
+	})
+	fallback := inprocess.NewMemoryEventLog()
+	env.RegisterWorkflow(SessionWorkflow)
+	env.RegisterActivity(newActs(cat, fallback, true))
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(signalPrompt, promptSignal{Text: "go"})
+	}, time.Millisecond)
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(signalClose, nil)
+	}, 80*time.Millisecond)
+	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id, AgentID: "default"})
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatal(err)
+	}
+	got := drainLog(t, fallback, id)
+	var sawParent bool
+	for _, ev := range got {
+		if ev.Type == tacklr.StreamEventMessage && ev.Content == "parent-continued" {
+			sawParent = true
+		}
+	}
+	if !sawParent {
+		t.Fatalf("parent must absorb failed job RoleUser, events=%+v", got)
+	}
+	val, err := env.QueryWorkflow(queryChildren)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kids []durable.SessionID
+	if err := val.Get(&kids); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range kids {
+		if k == childID {
+			t.Fatalf("failed child still listed: %v", kids)
+		}
+	}
+}
+
+func TestSessionWorkflow_queuedAgentIDAppliesOnIdleConstruct(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+	env.SetWorkerOptions(worker.Options{EnableSessionWorker: true})
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var defaultN, otherN atomic.Int32
+	var liveSawOther, idleSawOther, sawSteer atomic.Bool
+	otherTool := tacklr.NewTool(tacklr.ToolConfig{
+		Name:    "other_only",
+		Handler: func(ctx context.Context) (string, error) { return "x", nil },
+	})
+	defaultModel := &testkit.ScriptedModel{
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			i := defaultN.Add(1)
+			for _, tool := range tools {
+				if tool != nil && tool.Name() == "other_only" {
+					liveSawOther.Store(true)
+				}
+			}
+			if i == 1 {
+				close(started)
+				select {
+				case <-release:
+				case <-ctx.Done():
+					return
+				}
+				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "first-round", IsComplete: true}
+				return
+			}
+			for _, m := range msgs {
+				if m != nil && m.Role == tacklr.RoleUser && m.Content == "steer" {
+					sawSteer.Store(true)
+				}
+			}
+			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "second-round", IsComplete: true}
+		},
+	}
+	otherModel := &testkit.ScriptedModel{
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			otherN.Add(1)
+			for _, tool := range tools {
+				if tool != nil && tool.Name() == "other_only" {
+					idleSawOther.Store(true)
+				}
+			}
+			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "from-other", IsComplete: true}
+		},
+	}
+	cat := durable.NewCatalog("default")
+	cat.Register("default", durable.AgentSpec{
+		Options: tacklr.AgentOptions{Model: defaultModel, Config: tacklr.Config{MaxWindowSize: 8192}},
+	})
+	cat.Register("other", durable.AgentSpec{
+		Options: tacklr.AgentOptions{Model: otherModel, Config: tacklr.Config{MaxWindowSize: 8192}, Tools: []*tacklr.Tool{otherTool}},
+	})
+	fallback := inprocess.NewMemoryEventLog()
+	env.RegisterWorkflow(SessionWorkflow)
+	env.RegisterActivity(newActs(cat, fallback, true))
+	id := durable.SessionID("sess-queued-agent")
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(signalPrompt, promptSignal{Text: "hi"})
+	}, time.Millisecond)
+	env.RegisterDelayedCallback(func() {
+		select {
+		case <-started:
+		case <-time.After(5 * time.Second):
+			t.Error("inference did not start")
+			return
+		}
+		env.SignalWorkflow(signalPrompt, promptSignal{
+			AgentID:    "other",
+			MCPServers: []mcp.MCPConfig{},
+			Text:       "steer",
+		})
+		close(release)
+	}, 5*time.Millisecond)
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(signalPrompt, promptSignal{Text: "next"})
+	}, 40*time.Millisecond)
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(signalClose, nil)
+	}, 90*time.Millisecond)
+	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id, AgentID: "default"})
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatal(err)
+	}
+	if liveSawOther.Load() {
+		t.Fatal("live Inference used the queued agent")
+	}
+	if !sawSteer.Load() {
+		t.Fatal("steer must land on the live agent")
+	}
+	got := drainLog(t, fallback, id)
+	var sawOther bool
+	for _, ev := range got {
+		if ev.Type == tacklr.StreamEventMessage && ev.Content == "from-other" {
+			sawOther = true
+		}
+	}
+	if !sawOther || !idleSawOther.Load() || otherN.Load() == 0 {
+		t.Fatalf("idle Prompt must construct queued agent other=%v tool=%v invokes=%d events=%+v", sawOther, idleSawOther.Load(), otherN.Load(), got)
 	}
 }

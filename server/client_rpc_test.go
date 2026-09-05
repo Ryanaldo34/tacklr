@@ -4,12 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"strings"
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/ryanaldo34/tacklr/interrupt"
 )
 
 type recordingWriter struct {
@@ -41,7 +38,6 @@ func TestClientBridge_CallAndResponse(t *testing.T) {
 		got, callErr = b.Call(ctx, "elicitation/create", map[string]any{"mode": "form"})
 	}()
 
-	// Wait for request frame
 	deadline := time.Now().Add(time.Second)
 	for {
 		w.mu.Lock()
@@ -92,102 +88,65 @@ func TestClientBridge_CallAndResponse(t *testing.T) {
 	}
 }
 
-func TestClientBridge_noBridgeAndMarshal(t *testing.T) {
-	w := &recordingWriter{}
-	b := NewClientBridge(w)
-	if _, err := b.Call(context.Background(), "m", make(chan int)); err == nil {
-		t.Fatal("want marshal error")
+func TestClientBridge_callOutcomes(t *testing.T) {
+	if NewClientBridge(&failRPCWriter{}).TryCompleteResponse([]byte(`{`)) {
+		t.Fatal("invalid JSON is not a client response")
 	}
-}
+	if NewClientBridge(&failRPCWriter{}).TryCompleteResponse([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}`)) {
+		t.Fatal("unknown id is not a waiter")
+	}
 
-func TestClientBridge_errorResponseAndConcurrent(t *testing.T) {
+	fail := NewClientBridge(&failRPCWriter{})
+	if _, err := fail.Call(t.Context(), "x", nil); err == nil {
+		t.Fatal("want write failure")
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := NewClientBridge(&recordingWriter{}).Call(ctx, "x", nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled call: %v", err)
+	}
+
 	w := &recordingWriter{}
 	b := NewClientBridge(w)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	done := make(chan struct{})
-	var callErr error
-	go func() {
-		defer close(done)
-		_, callErr = b.Call(ctx, "ping", nil)
-	}()
+	done := make(chan error, 1)
+	go func() { _, err := b.Call(t.Context(), "x", nil); done <- err }()
 	deadline := time.Now().Add(time.Second)
-	for {
+	var id int64
+	for time.Now().Before(deadline) && id == 0 {
 		w.mu.Lock()
-		n := len(w.frames)
-		w.mu.Unlock()
-		if n > 0 || time.Now().After(deadline) {
-			break
+		if len(w.frames) > 0 {
+			var req struct {
+				ID int64 `json:"id"`
+			}
+			_ = json.Unmarshal(w.frames[0], &req)
+			id = req.ID
 		}
+		w.mu.Unlock()
 		time.Sleep(5 * time.Millisecond)
 	}
-	w.mu.Lock()
-	frame := w.frames[0]
-	w.mu.Unlock()
-	var req struct {
-		ID int64 `json:"id"`
-	}
-	_ = json.Unmarshal(frame, &req)
-	resp, _ := json.Marshal(map[string]any{
-		"jsonrpc": "2.0",
-		"id":      req.ID,
-		"error":   map[string]any{"code": -32000, "message": "nope"},
+	errBody, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": id,
+		"error": map[string]any{"code": -32000, "message": "nope"},
 	})
-	if !b.TryCompleteResponse(resp) {
-		t.Fatal("TryCompleteResponse failed")
+	if !b.TryCompleteResponse(errBody) {
+		t.Fatal("error result should complete waiter")
 	}
-	<-done
-	if callErr == nil || !strings.Contains(callErr.Error(), "nope") {
-		t.Fatalf("callErr = %v", callErr)
-	}
-	if b.TryCompleteResponse([]byte(`{"jsonrpc":"2.0","method":"x"}`)) {
-		t.Fatal("request should not complete waiter")
-	}
-
-	// Concurrent calls should not panic.
-	var wg sync.WaitGroup
-	for i := 0; i < 5; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			cctx, ccancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
-			defer ccancel()
-			_, _ = b.Call(cctx, "m", map[string]int{"i": i})
-		}(i)
-	}
-	time.Sleep(15 * time.Millisecond)
-	w.mu.Lock()
-	frames := append([][]byte(nil), w.frames...)
-	w.mu.Unlock()
-	for _, f := range frames {
-		var r struct {
-			ID int64 `json:"id"`
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("want client rpc error")
 		}
-		if json.Unmarshal(f, &r) == nil && r.ID > 0 {
-			okResp, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": r.ID, "result": map[string]any{}})
-			b.TryCompleteResponse(okResp)
-		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("call did not return")
 	}
-	wg.Wait()
 }
 
-func TestClientBridge_WaitInitialized(t *testing.T) {
-	b := NewClientBridge(&recordingWriter{})
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-	if err := b.WaitInitialized(ctx); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("before initialize: %v", err)
-	}
-	b.MarkInitialized()
-	if err := b.WaitInitialized(context.Background()); err != nil {
-		t.Fatalf("after initialize: %v", err)
-	}
-	canceled, cancelInit := context.WithCancel(context.Background())
-	cancelInit()
-	if err := b.WaitInitialized(canceled); err != nil {
-		t.Fatalf("initialized with canceled ctx: %v", err)
-	}
-}
+type failRPCWriter struct{}
+
+func (failRPCWriter) WriteResult(json.RawMessage, any) error  { return nil }
+func (failRPCWriter) WriteError(json.RawMessage, error) error { return nil }
+func (failRPCWriter) WriteFrame([]byte) error                 { return errors.New("write down") }
 
 func TestParseClientCapabilities(t *testing.T) {
 	caps := ParseClientCapabilities([]byte(`{
@@ -215,42 +174,5 @@ func TestParseClientCapabilities(t *testing.T) {
 	}`))
 	if !caps3.VFSTokenRefresh {
 		t.Error("expected vfs tokenRefresh")
-	}
-}
-
-func TestParseUserSelectionFromInterruptData(t *testing.T) {
-	usi := interrupt.UserSelectionInterrupt{
-		Options: []interrupt.UserChoice{{Title: "A"}, {Title: "B"}},
-	}
-	serialized, err := usi.Serialize()
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Correct shape: nested object via json.RawMessage (what the harness emits).
-	envelope, err := json.Marshal(map[string]any{
-		"interruptId": "intr-1",
-		"data":        json.RawMessage(serialized),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	id, usiOut, err := ParseUserSelectionFromInterruptData(envelope)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if id != "intr-1" {
-		t.Errorf("id = %q, want intr-1", id)
-	}
-	if len(usiOut.Options) != 2 || usiOut.Options[0].Title != "A" {
-		t.Fatalf("opts = %#v", usiOut.Options)
-	}
-
-	// Regression: []byte in map becomes a JSON string and must not be accepted as-is.
-	bad, _ := json.Marshal(map[string]any{
-		"interruptId": "intr-2",
-		"data":        serialized, // []byte → base64 string
-	})
-	if _, _, err := ParseUserSelectionFromInterruptData(bad); err == nil {
-		t.Fatal("expected error when data is a JSON string (base64 []byte), got nil")
 	}
 }

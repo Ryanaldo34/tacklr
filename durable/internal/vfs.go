@@ -2,10 +2,7 @@ package adapter
 
 import (
 	"context"
-	"fmt"
-	"log/slog"
 	"os"
-	"strings"
 
 	"go.opentelemetry.io/otel/log"
 
@@ -15,7 +12,7 @@ import (
 )
 
 // CloseTurnVFS unmounts a turn-scoped MountSession (FUSE telemetry, Close, host dir).
-func CloseTurnVFS(ms *vfs.MountSession, sessionID, reason string) {
+func CloseTurnVFS(ms *vfs.MountSession) {
 	if ms == nil {
 		return
 	}
@@ -23,20 +20,16 @@ func CloseTurnVFS(ms *vfs.MountSession, sessionID, reason string) {
 	if dir != "" {
 		telemetry.EmitEvent(context.Background(), telemetry.EventFuseUnmount)
 	}
-	if err := ms.Close(); err != nil {
-		slog.Warn("turn vfs close failed", "session_id", sessionID, "reason", reason, "error", err)
-	}
+	_ = ms.Close()
 	if dir != "" {
-		if err := os.Remove(dir); err != nil {
-			slog.Warn("turn vfs host dir remove failed", "session_id", sessionID, "dir", dir, "reason", reason, "error", err)
-		}
+		_ = os.Remove(dir)
 	}
 }
 
 // CloseTurnTrees closes the agent workspace tree and the host-only skills tree.
-func CloseTurnTrees(workspace, skills *vfs.MountSession, sessionID, reason string) {
-	CloseTurnVFS(workspace, sessionID, reason)
-	CloseTurnVFS(skills, sessionID, reason+"-skills")
+func CloseTurnTrees(workspace, skills *vfs.MountSession) {
+	CloseTurnVFS(workspace)
+	CloseTurnVFS(skills)
 }
 
 // OpenSkillsVFS builds the host-only skills MountSession from AgentSpec.OpenSkills.
@@ -57,7 +50,7 @@ func OpenTurnSessions(ctx context.Context, threadID string, spec durable.AgentSp
 	}
 	skills, err = OpenSkillsVFS(ctx, threadID, spec)
 	if err != nil {
-		CloseTurnVFS(workspace, threadID, "skills_open")
+		CloseTurnVFS(workspace)
 		return nil, nil, err
 	}
 	return workspace, skills, nil
@@ -77,21 +70,10 @@ func OpenTurnVFS(ctx context.Context, threadID string, spec durable.AgentSpec, b
 	if err != nil {
 		return nil, err
 	}
-	if ms == nil {
-		return nil, nil
-	}
-	for _, mount := range ms.Specs() {
-		name := strings.TrimPrefix(mount.Point, "/")
-		if name == "" || strings.Contains(name, "/") {
-			err := fmt.Errorf("vfs: fuse requires a single-segment mount (got %q); Tree uses /workspace", mount.Point)
-			CloseTurnVFS(ms, threadID, "fuse_point")
-			return nil, err
-		}
-	}
 	if ms.HostDir() == "" {
 		if err := proj.Attach(ms, threadID); err != nil {
 			telemetry.InstrumentsFromContext(ctx).RecordFuseMount(ctx, telemetry.FuseMountOutcomeError)
-			CloseTurnVFS(ms, threadID, "fuse_attach")
+			CloseTurnVFS(ms)
 			return nil, err
 		}
 		telemetry.EmitEvent(ctx, telemetry.EventFuseMount,

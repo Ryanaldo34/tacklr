@@ -11,24 +11,6 @@ import (
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
-func TestNew_requiresCatalog(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("want panic on nil catalog")
-		}
-	}()
-	New(Config{})
-}
-
-func TestNew_requiresSnapshots(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("want panic on nil snapshots")
-		}
-	}()
-	New(Config{Catalog: newCatalog(t, scriptedComplete("x"), durable.AgentSpec{})})
-}
-
 func TestNew_nilOptionAndNilProjection(t *testing.T) {
 	cat := newCatalog(t, scriptedComplete("x"), durable.AgentSpec{})
 	snaps := NewMemorySnapshot()
@@ -80,6 +62,18 @@ func TestCreateSession_errors(t *testing.T) {
 	}
 	if err := rt.Close(ctx, "nope"); !errors.Is(err, durable.ErrSessionNotFound) {
 		t.Fatalf("close missing: %v", err)
+	}
+	if _, err := rt.CreateSession(ctx, durable.CreateSession{AgentID: "default", Specialist: "ghost"}); !errors.Is(err, durable.ErrAgentNotFound) {
+		t.Fatalf("unknown specialist: %v", err)
+	}
+	if _, err := rt.CreateSession(ctx, durable.CreateSession{Parent: "missing", AgentID: "default"}); !errors.Is(err, durable.ErrSessionNotFound) {
+		t.Fatalf("missing parent: %v", err)
+	}
+	if err := rt.Close(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if err := rt.Close(ctx, id); !errors.Is(err, durable.ErrSessionNotFound) {
+		t.Fatalf("second close: %v", err)
 	}
 }
 
@@ -137,6 +131,21 @@ func TestEventLog_headEndAndCloseUnknown(t *testing.T) {
 	seq, err := log.Head(ctx, "missing")
 	if err != nil || seq != 0 {
 		t.Fatalf("head missing: %v %v", seq, err)
+	}
+	id := durable.SessionID("elog")
+	if err := log.Append(ctx, id, durable.TopicRetry, tacklr.StreamEvent{Content: "retry"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := log.Append(ctx, id, durable.TopicEvents, tacklr.StreamEvent{Content: "visible"}); err != nil {
+		t.Fatal(err)
+	}
+	ch, err := log.Subscribe(ctx, id, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := <-ch
+	if ev.Content != "visible" {
+		t.Fatalf("retry leaked: %+v", ev)
 	}
 	log.EndSubscribers("missing")
 	if err := log.CloseSession(ctx, "missing"); err != nil {

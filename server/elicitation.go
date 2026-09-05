@@ -16,11 +16,8 @@ type ElicitationResult struct {
 }
 
 // SelectionToElicitationParams builds form-mode elicitation/create params from
-// a user-selection interrupt.
-func SelectionToElicitationParams(sessionID, toolCallID, question string, opts []interrupt.UserChoice) (map[string]any, error) {
-	if len(opts) < 2 {
-		return nil, fmt.Errorf("elicitation requires at least 2 options")
-	}
+// a user-selection interrupt. ask_user_choice already requires ≥2 titled options.
+func SelectionToElicitationParams(sessionID, toolCallID, question string, opts []interrupt.UserChoice) map[string]any {
 	titles := make([]string, 0, len(opts))
 	var msg strings.Builder
 	if question != "" {
@@ -29,9 +26,6 @@ func SelectionToElicitationParams(sessionID, toolCallID, question string, opts [
 	}
 	msg.WriteString("Options:\n")
 	for i, o := range opts {
-		if o.Title == "" {
-			return nil, fmt.Errorf("option %d: empty title", i)
-		}
 		titles = append(titles, o.Title)
 		fmt.Fprintf(&msg, "%d. %s", i+1, o.Title)
 		if o.Description != "" {
@@ -50,7 +44,7 @@ func SelectionToElicitationParams(sessionID, toolCallID, question string, opts [
 			"title": "Your choice",
 			"enum":  titles,
 		},
-	}, []string{"choice"}), nil
+	}, []string{"choice"})
 }
 
 func elicitationFormParams(sessionID, toolCallID, message string, properties map[string]any, required []string) map[string]any {

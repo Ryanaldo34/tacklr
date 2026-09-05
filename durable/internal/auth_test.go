@@ -11,8 +11,8 @@ import (
 func TestApplyAuthUpsertsRecipesAndRecordsSourceIDs(t *testing.T) {
 	auth := durable.AuthContext{Bindings: []vfs.Binding{{
 		Provider: vfs.ProviderGoogleDrive,
+		Point:    "/docs",
 		Params: map[string]string{
-			vfs.ParamName:     "docs",
 			vfs.ParamFolderID: "fld-1",
 		},
 		Auth:     vfs.Credential{Token: "secret"},
@@ -75,6 +75,9 @@ func TestBindingsForTurnUsesCachedRecipePlusProviderToken(t *testing.T) {
 	}
 	if !binds[0].Writable {
 		t.Fatal("want writable from recipe")
+	}
+	if got := BindingsForTurn(recipes, durable.AuthContext{}); len(got) != 0 {
+		t.Fatalf("want no bindings without token, got %+v", got)
 	}
 }
 

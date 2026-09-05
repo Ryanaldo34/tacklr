@@ -2,7 +2,6 @@ package temporal
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -64,6 +63,7 @@ type inferenceInput struct {
 	MCPServers    []mcp.MCPConfig
 	State         map[string]any
 	User          *tacklr.Message
+	Extra         []*tacklr.Message
 	HadToolRound  bool
 	ModelRequests int
 	Resume        map[string][]byte
@@ -144,7 +144,7 @@ func (a *activities) Inference(ctx context.Context, in inferenceInput) (inferenc
 	}
 	defer func() {
 		h.Close()
-		adapter.CloseTurnTrees(ms, skillsMS, string(in.SessionID), "inference")
+		adapter.CloseTurnTrees(ms, skillsMS)
 	}()
 	eng := h.Drive()
 	out, stop := tacklr.PipeStreamEvents(a.emitter(ctx, stream, in.SessionID))
@@ -158,11 +158,13 @@ func (a *activities) Inference(ctx context.Context, in inferenceInput) (inferenc
 			return inferenceOutput{ToolCalls: pending}, err
 		}
 	}
+	extra := in.Extra
 	if in.User != nil {
-		if err := eng.AbsorbUser(ctx, in.User, out); err != nil {
-			slog.ErrorContext(ctx, "inference absorb", "area", telemetry.AreaRuntime, "error", err)
-			return inferenceOutput{}, canceledIf(ctx, err)
-		}
+		extra = append(extra, in.User)
+	}
+	if _, err := adapter.AbsorbAll(ctx, eng.AbsorbUser, extra, out); err != nil {
+		slog.ErrorContext(ctx, "inference absorb", "area", telemetry.AreaRuntime, "error", err)
+		return inferenceOutput{}, canceledIf(ctx, err)
 	}
 	st := &tacklr.TurnState{HadToolRound: in.HadToolRound, ModelRequests: in.ModelRequests}
 	step, err := eng.RunInference(ctx, st, out)
@@ -180,9 +182,11 @@ func (a *activities) Inference(ctx context.Context, in inferenceInput) (inferenc
 	}
 	result := ""
 	if step.Complete {
-		for _, m := range h.Drive().Messages() {
-			if m != nil && m.Role == tacklr.RoleAssistant && m.Content != "" {
+		msgs := h.Drive().Messages()
+		for i := len(msgs) - 1; i >= 0; i-- {
+			if m := msgs[i]; m != nil && m.Role == tacklr.RoleAssistant && m.Content != "" {
 				result = m.Content
+				break
 			}
 		}
 	}
@@ -222,7 +226,7 @@ func (a *activities) Tool(ctx context.Context, in toolInput) (toolOutput, error)
 	}
 	defer func() {
 		h.Close()
-		adapter.CloseTurnTrees(ms, skillsMS, string(in.SessionID), "tool")
+		adapter.CloseTurnTrees(ms, skillsMS)
 	}()
 	kids := &activityChildren{
 		parent:  in.SessionID,
@@ -275,7 +279,7 @@ func (a *activities) CommitToolOutput(ctx context.Context, in commitToolInput) (
 	}
 	defer func() {
 		h.Close()
-		adapter.CloseTurnTrees(ms, skillsMS, string(in.SessionID), "commit_tool")
+		adapter.CloseTurnTrees(ms, skillsMS)
 	}()
 	h.Drive().RecordToolResult(in.Call, in.Output)
 	if _, err = a.save(ctx, in.SessionID, h, rev, in.Rec); err != nil {
@@ -320,45 +324,13 @@ func (a *activities) harness(ctx context.Context, id durable.SessionID, rec dura
 	if proj == nil {
 		proj = vfs.DirectProjection{}
 	}
-	ms, skillsMS, err := adapter.OpenTurnSessions(ctx, string(id), spec, adapter.BindingsForTurn(rec.Mounts, sec.Auth), proj)
+	h, ms, skillsMS, err := adapter.ConstructTurn(ctx, spec, string(id), adapter.BindingsForTurn(rec.Mounts, sec.Auth), proj, extraMCP)
 	if err != nil {
 		return nil, nil, nil, "", err
 	}
-	opts := spec.Options
-	opts.SessionID = string(id)
-	opts.MountSession = ms
-	opts.SkillsSession = skillsMS
-	opts.SkillsRoot = spec.SkillsRoot
-	if len(extraMCP) > 0 {
-		mcpConfigs := make([]mcp.MCPConfig, 0, len(opts.MCPConfigs)+len(extraMCP))
-		mcpConfigs = append(mcpConfigs, opts.MCPConfigs...)
-		mcpConfigs = append(mcpConfigs, extraMCP...)
-		opts.MCPConfigs = mcpConfigs
-	}
-	h, err := tacklr.NewTurnManager(ctx, opts)
+	rev, err := adapter.RestoreTurn(ctx, a.Snapshots, id, h, state)
 	if err != nil {
-		adapter.CloseTurnTrees(ms, skillsMS, string(id), "construct")
-		return nil, nil, nil, "", err
-	}
-	var rev durable.Revision
-	snap, loaded, loadErr := a.Snapshots.Load(ctx, id)
-	switch {
-	case loadErr == nil:
-		if err := h.RestoreCheckpoint(snap.Checkpoint); err != nil {
-			h.Close()
-			adapter.CloseTurnTrees(ms, skillsMS, string(id), "restore")
-			return nil, nil, nil, "", err
-		}
-		rev = loaded
-	case errors.Is(loadErr, durable.ErrSessionNotFound):
-	default:
-		h.Close()
-		adapter.CloseTurnTrees(ms, skillsMS, string(id), "load")
-		return nil, nil, nil, "", loadErr
-	}
-	if err := h.ApplySessionState(state); err != nil {
-		h.Close()
-		adapter.CloseTurnTrees(ms, skillsMS, string(id), "state")
+		adapter.AbandonTurn(h, ms, skillsMS)
 		return nil, nil, nil, "", err
 	}
 	return h, ms, skillsMS, rev, nil
