@@ -54,7 +54,10 @@ func SessionWorkflow(ctx workflow.Context, in workflowInput) (string, error) {
 			Waiting:    yielded,
 			Result:     result,
 		}
-		if in.Specialist != "" {
+		if in.Worker != "" {
+			st.Kind = durable.SessionKindWorker
+			st.Specialist = in.Worker
+		} else if in.Specialist != "" {
 			st.Kind = durable.SessionKindSpecialist
 		}
 		if terminal != "" {
@@ -107,10 +110,38 @@ func SessionWorkflow(ctx workflow.Context, in workflowInput) (string, error) {
 		return durable.Snapshot{
 			AgentID:    agentID,
 			Specialist: in.Specialist,
+			Worker:     in.Worker,
 			Parent:     in.Parent,
 			Children:   spawnedIDs(spawned),
 			Mounts:     mounts,
 		}
+	}
+
+	runWorker := func(task string) error {
+		actCtx := workflow.WithActivityOptions(ctx, activityOpts)
+		var out string
+		err := workflow.ExecuteActivity(actCtx, "RunJob", runJobInput{Name: in.Worker, Task: task}).Get(ctx, &out)
+		if err != nil {
+			terminal = durable.SessionFailed
+			msg := err.Error()
+			result = msg
+			_ = workflow.ExecuteActivity(actCtx, "EmitEvent", emitEventInput{
+				SessionID: in.SessionID,
+				Event:     tacklr.StreamEvent{Type: tacklr.StreamEventError, Fail: msg, Content: msg},
+			}).Get(ctx, nil)
+			return err
+		}
+		result = out
+		terminal = durable.SessionComplete
+		_ = workflow.ExecuteActivity(actCtx, "EmitEvent", emitEventInput{
+			SessionID: in.SessionID,
+			Event:     tacklr.StreamEvent{Type: tacklr.StreamEventComplete},
+		}).Get(ctx, nil)
+		return nil
+	}
+	if in.Worker != "" && in.Prompt != "" {
+		err := runWorker(in.Prompt)
+		return result, err
 	}
 
 	runSlice := func(user *tacklr.Message, resume map[string][]byte, auth durable.AuthContext, kind string, extra map[string]any) {
@@ -273,7 +304,7 @@ func SessionWorkflow(ctx workflow.Context, in workflowInput) (string, error) {
 					stopSlice = true
 					break
 				}
-				if herr := applyChildIntent(ctx, sessionCtx, actCtx, &spawned, tout, in, agentID, mounts); herr != nil {
+				if herr := applyChildIntent(ctx, sessionCtx, &spawned, tout, in, agentID, mounts); herr != nil {
 					stopSlice = onActErr(herr)
 					break
 				}
@@ -423,6 +454,15 @@ func SessionWorkflow(ctx workflow.Context, in workflowInput) (string, error) {
 			cancelSpawned()
 			continue
 		case signalPrompt:
+			if in.Worker != "" {
+				user := adapter.UserFromPrompt(ev.prompt.Text, ev.prompt.UserMessage)
+				task := ""
+				if user != nil {
+					task = user.Content
+				}
+				_ = runWorker(task)
+				continue
+			}
 			if ev.prompt.AgentID != "" {
 				agentID = ev.prompt.AgentID
 			} else if nextAgentID != "" {

@@ -72,7 +72,7 @@ func (a *TurnManager) spawnTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "spawn_specialist",
 		DisplayName: "Spawn {specialist}",
-		Description: "Spawn a specialist as a child session job. block defaults to true and returns the worker result before continuing. Set block=false to start the job and continue other work; the result arrives as a later message. Use list_children or cancel_child to inspect or stop jobs.",
+		Description: "Spawn a specialist as a nested session. block defaults to true and runs it in line: this tool returns the specialist result. Set block=false to schedule it as a job and continue other work; the result arrives as a later message. Use list_children or cancel_child to inspect or stop jobs.",
 		Category:    ToolCategoryExecute,
 		Handler:     spawnSpecialist,
 	})

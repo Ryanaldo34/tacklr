@@ -35,7 +35,7 @@ Or invoke the tool directly with that constructor. You do not mock `HarnessRunti
 
 ### What `HarnessRuntime` is for
 
-Progress (`EmitUpdate`), park (`Park`), jobs (`Schedule` / `Jobs` / `CancelJob` / `WaitJob`), and session key-values (`StateGet` / `StateSet` / `StateDelete`). Hosts set those values on `CreateSession.State`, `Prompt.State`, or `Resume.State`. Close over clients in the constructor. Register named workers on in-process / Temporal `Config.Jobs`.
+Progress (`EmitUpdate`), park (`Park`), specialists (`RunSpecialist`), jobs (`Schedule` / `Jobs` / `CancelJob`), and session key-values (`StateGet` / `StateSet` / `StateDelete`). Hosts set those values on `CreateSession.State`, `Prompt.State`, or `Resume.State`. Close over clients in the constructor. Register named workers on in-process / Temporal `Config.Jobs`. Tools do not wait on jobs; a tool call already blocks the next model turn.
 
 ## Optional builtins
 

@@ -5,20 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-
-	"github.com/ryanaldo34/tacklr/interrupt"
 )
 
 // JobHost is the session-side implementation of HarnessRuntime job methods.
 // Durable runtimes bind nested sessions and named workers; nil host means
 // jobs are unavailable.
 type JobHost interface {
+	RunSpecialist(ctx context.Context, name, task, callID string) (string, error)
 	Schedule(ctx context.Context, job JobRequest, callID string) (Job, error)
 	Jobs() []Job
 	CancelJob(ctx context.Context, id string) error
-	// WaitJob waits until the job is terminal. A *interrupt.ChildWaiting error
-	// is the Temporal unpaired-tool seam (workflow waits; parent does not yield).
-	WaitJob(ctx context.Context, id string) (Job, error)
 }
 
 // toolRuntime is the HarnessRuntime passed to tools: session emit/state/interrupt
@@ -67,21 +63,12 @@ func (t toolRuntime) CancelJob(ctx context.Context, id string) error {
 	return host.CancelJob(ctx, id)
 }
 
-func (t toolRuntime) WaitJob(ctx context.Context, id string) (Job, error) {
+func (t toolRuntime) RunSpecialist(ctx context.Context, name, task string) (string, error) {
 	host, err := t.requireHost()
 	if err != nil {
-		return Job{}, err
+		return "", err
 	}
-	job, err := host.WaitJob(ctx, id)
-	if err != nil {
-		var waiting *interrupt.ChildWaiting
-		if errors.As(err, &waiting) {
-			_, err := t.Park(interrupt.TypeChildWaiting, []byte(`{}`))
-			return Job{}, err
-		}
-		return job, err
-	}
-	return job, nil
+	return host.RunSpecialist(ctx, name, task, t.CurrentToolCallID())
 }
 
 func formatJobs(rows []Job) string {
@@ -111,25 +98,32 @@ func spawnSpecialist(ctx context.Context, args spawnSpecialistArgs, runtime Harn
 	if task == "" {
 		return "", Correctionf(ErrInvalid, "spawn_specialist: task_description_and_context is required. Describe the worker's goal and constraints")
 	}
-	block := args.Block == nil || *args.Block
-	job, err := runtime.Schedule(ctx, JobRequest{Name: spec, Task: task})
-	if err != nil {
-		if errors.Is(err, ErrNotFound) {
-			return "", Correctionf(ErrNotFound, "spawn_specialist: that specialist is not registered. Pass a name from the available specialists")
-		}
-		if errors.Is(err, ErrInvalid) {
-			return "", Correctionf(ErrInvalid, "spawn_specialist: specialist is required. Pass a name from the available specialists")
-		}
-		return "", err
+	if spec == "" {
+		return "", Correctionf(ErrInvalid, "spawn_specialist: specialist is required. Pass a name from the available specialists")
 	}
+	block := args.Block == nil || *args.Block
 	if !block {
+		job, err := runtime.Schedule(ctx, JobRequest{Name: spec, Task: task})
+		if err != nil {
+			return "", spawnSpecialistErr(err)
+		}
 		return fmt.Sprintf("Job %s scheduled (name=%s). The result arrives as a later message. Use list_children to inspect, or cancel_child to stop it.", job.ID, job.Name), nil
 	}
-	job, err = runtime.WaitJob(ctx, job.ID)
+	out, err := runtime.RunSpecialist(ctx, spec, task)
 	if err != nil {
-		return "", unknownJobErr("spawn_specialist", err)
+		return "", spawnSpecialistErr(err)
 	}
-	return job.Result, nil
+	return out, nil
+}
+
+func spawnSpecialistErr(err error) error {
+	if errors.Is(err, ErrNotFound) {
+		return Correctionf(ErrNotFound, "spawn_specialist: that specialist is not registered. Pass a name from the available specialists")
+	}
+	if errors.Is(err, ErrInvalid) {
+		return Correctionf(ErrInvalid, "spawn_specialist: specialist is required. Pass a name from the available specialists")
+	}
+	return unknownJobErr("spawn_specialist", err)
 }
 
 func listChildren(_ context.Context, _ listChildrenArgs, runtime HarnessRuntime) (string, error) {

@@ -222,7 +222,7 @@ When solving a task:
 AVAILABLE SPECIALISTS:
 You can delegate tasks to specialists using spawn_specialist. Each specialist has its own instructions, tools, and model — choose the one best suited to the task. Spawn a specialist when several subtasks can run in parallel, or when a task needs significant research or analysis and you only need the final output. Prefer a smaller plan over many specialists.
 
-spawn_specialist block defaults to true and waits for the result. Set block=false to start a job and continue other work; the result arrives as a later message. Tool roles:
+spawn_specialist block defaults to true and runs the specialist in line (this tool returns its result). Set block=false to start a job and continue other work; the result arrives as a later message. Tool roles:
 - list_children: status of jobs (running until complete, failed, or cancelled).
 - cancel_child: stop a job that is no longer needed.
 The turn stays open while jobs remain. Finished jobs arrive as messages. Use cancel_child when the work is not needed.

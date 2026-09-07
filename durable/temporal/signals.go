@@ -44,6 +44,7 @@ type workflowInput struct {
 	Prompt     string
 	Parent     durable.SessionID
 	Specialist string
+	Worker     string
 	// State is CreateSession.State, already JSON-roundtripped. Overlay onto
 	// the checkpoint; not a durable workflow copy of userState.
 	State map[string]any

@@ -40,7 +40,10 @@ type Runtime interface {
 	Head(ctx context.Context, sessionID SessionID) (Seq, error)
 	Subscribe(ctx context.Context, sessionID SessionID, after Seq) (Subscription, error)
 	// Children returns child session ids of parent, in start order.
+	// Specialists and named workers are both child sessions.
 	Children(ctx context.Context, parent SessionID) ([]SessionID, error)
+	// Jobs returns Status for each child of parent, in start order.
+	Jobs(ctx context.Context, parent SessionID) ([]SessionStatus, error)
 	// Status is running, complete, failed, or unknown. A child waiting on HITL
 	// stays running until that interrupt is resolved.
 	Status(ctx context.Context, id SessionID) (SessionStatus, error)

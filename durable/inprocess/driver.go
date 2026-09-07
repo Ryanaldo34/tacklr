@@ -77,11 +77,13 @@ func (r *Runtime) persistHarness(ctx context.Context, p *sessionProc, h *tacklr.
 	children := slices.Clone(p.children)
 	parent := p.parent
 	specialist := p.specialist
+	worker := p.worker
 	agentID := p.agentID
 	p.mu.Unlock()
 	rev, err := r.snapshots.Save(ctx, p.id, durable.Snapshot{
 		AgentID:    agentID,
 		Specialist: specialist,
+		Worker:     worker,
 		Parent:     parent,
 		Children:   children,
 		Checkpoint: *cp,
@@ -129,6 +131,12 @@ func (r *Runtime) fail(ctx context.Context, p *sessionProc, err error) turnOutco
 }
 
 func (r *Runtime) runTurn(ctx context.Context, p *sessionProc, user *tacklr.Message, resume map[string][]byte, bindings []vfs.Binding, state map[string]any) turnOutcome {
+	p.mu.Lock()
+	worker := p.worker
+	p.mu.Unlock()
+	if worker != "" {
+		return r.runWorkerTurn(ctx, p, user)
+	}
 	h, ms, skillsMS, err := r.constructHarness(ctx, p, bindings, state)
 	if err != nil {
 		return r.fail(ctx, p, err)
@@ -296,6 +304,71 @@ func (r *Runtime) runTurn(ctx context.Context, p *sessionProc, user *tacklr.Mess
 			}
 		}
 	}
+}
+
+func (r *Runtime) runWorkerTurn(ctx context.Context, p *sessionProc, user *tacklr.Message) turnOutcome {
+	p.mu.Lock()
+	name := p.worker
+	p.mu.Unlock()
+	fn, ok := r.jobs[name]
+	if !ok {
+		return r.fail(ctx, p, fmt.Errorf("%w: %s", tacklr.ErrNotFound, name))
+	}
+	if err := r.persistWorker(ctx, p); err != nil {
+		return r.fail(ctx, p, err)
+	}
+	task := ""
+	if user != nil {
+		task = user.Content
+	}
+	res, err := fn(ctx, task)
+	if err := ctx.Err(); err != nil {
+		p.mu.Lock()
+		p.termErr = err
+		p.mu.Unlock()
+		_ = r.persistWorker(context.WithoutCancel(ctx), p)
+		return r.commitTurn(context.WithoutCancel(ctx), p, turnCancelled, &tacklr.StreamEvent{Type: tacklr.StreamEventError, Error: err})
+	}
+	if err != nil {
+		p.mu.Lock()
+		p.termErr = err
+		if res == "" {
+			p.result = err.Error()
+		} else {
+			p.result = res
+		}
+		p.mu.Unlock()
+		if perr := r.persistWorker(ctx, p); perr != nil {
+			err = fmt.Errorf("%w: persist: %w", err, perr)
+		}
+		return r.fail(ctx, p, err)
+	}
+	p.mu.Lock()
+	p.result = res
+	p.mu.Unlock()
+	if err := r.persistWorker(ctx, p); err != nil {
+		return r.fail(ctx, p, err)
+	}
+	return r.commitTurn(ctx, p, turnComplete, &tacklr.StreamEvent{Type: tacklr.StreamEventComplete})
+}
+
+func (r *Runtime) persistWorker(ctx context.Context, p *sessionProc) error {
+	p.mu.Lock()
+	snap := durable.Snapshot{
+		AgentID:    p.agentID,
+		Parent:     p.parent,
+		Specialist: p.specialist,
+		Worker:     p.worker,
+		Mounts:     slices.Clone(p.mounts),
+	}
+	rev := p.revision
+	p.mu.Unlock()
+	nrev, err := r.snapshots.Save(ctx, p.id, snap, rev)
+	if err != nil {
+		return err
+	}
+	p.revision = nrev
+	return nil
 }
 
 func (r *Runtime) captureResult(p *sessionProc, h *tacklr.TurnManager) {

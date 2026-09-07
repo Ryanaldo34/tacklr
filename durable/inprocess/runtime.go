@@ -77,10 +77,11 @@ type sessionProc struct {
 	kids     context.Context
 	stopKids context.CancelFunc
 
-	// wake unblocks ActionWait / WaitJob. Buffered so a job finish is not lost.
+	// wake unblocks ActionWait and inline specialist waits. Buffered so a
+	// child finish is not lost.
 	wake chan struct{}
-	// runners are named background jobs that are not child sessions.
-	runners []*runnerJob
+	// worker is a Config.Jobs name. Exclusive with specialist.
+	worker string
 }
 
 func (p *sessionProc) ping() {
@@ -163,13 +164,21 @@ func (r *Runtime) CreateSession(ctx context.Context, req durable.CreateSession) 
 			return "", fmt.Errorf("%w: %s", durable.ErrAgentNotFound, agentID)
 		}
 	}
+	workerName := strings.TrimSpace(req.Worker)
 	if specName := strings.TrimSpace(req.Specialist); specName != "" {
+		if workerName != "" {
+			return "", fmt.Errorf("specialist and worker are exclusive: %w", tacklr.ErrInvalid)
+		}
 		spec, ok := r.catalog.Lookup(agentID)
 		if !ok {
 			return "", fmt.Errorf("%w: %s", durable.ErrAgentNotFound, agentID)
 		}
 		if _, err := adapter.OverlaySpecialist(spec, specName); err != nil {
 			return "", err
+		}
+	} else if workerName != "" {
+		if _, ok := r.jobs[workerName]; !ok {
+			return "", fmt.Errorf("%w: %s", tacklr.ErrNotFound, workerName)
 		}
 	}
 	seed, err := adapter.EncodeUserState(req.State)
@@ -199,6 +208,7 @@ func (r *Runtime) CreateSession(ctx context.Context, req durable.CreateSession) 
 		id:         id,
 		agentID:    agentID,
 		specialist: strings.TrimSpace(req.Specialist),
+		worker:     workerName,
 		parent:     req.Parent,
 		mcp:        mcp,
 		mounts:     mounts,
@@ -307,19 +317,12 @@ func (r *Runtime) Resume(ctx context.Context, sessionID durable.SessionID, resum
 func (r *Runtime) stopChildren(ctx context.Context, p *sessionProc) {
 	p.mu.Lock()
 	p.children = nil
-	runners := p.runners
-	p.runners = nil
 	if p.stopKids != nil {
 		p.stopKids()
 		p.kids, p.stopKids = context.WithCancel(context.Background())
 	}
 	parentID := p.id
 	p.mu.Unlock()
-	for _, j := range runners {
-		if j.cancel != nil {
-			j.cancel()
-		}
-	}
 	r.mu.RLock()
 	var kids []durable.SessionID
 	for id, child := range r.sessions {
@@ -411,6 +414,23 @@ func (r *Runtime) Children(_ context.Context, parent durable.SessionID) ([]durab
 	return slices.Clone(p.children), nil
 }
 
+// Jobs implements durable.Runtime.
+func (r *Runtime) Jobs(ctx context.Context, parent durable.SessionID) ([]durable.SessionStatus, error) {
+	ids, err := r.Children(ctx, parent)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]durable.SessionStatus, 0, len(ids))
+	for _, id := range ids {
+		st, err := r.Status(ctx, id)
+		if err != nil {
+			continue
+		}
+		out = append(out, st)
+	}
+	return out, nil
+}
+
 // Status implements durable.Runtime. Yielded children stay running until HITL
 // is resolved (parent-facing in-progress).
 func (r *Runtime) Status(_ context.Context, id durable.SessionID) (durable.SessionStatus, error) {
@@ -429,7 +449,10 @@ func (r *Runtime) Status(_ context.Context, id durable.SessionID) (durable.Sessi
 		Result:     p.result,
 		Err:        p.termErr,
 	}
-	if p.specialist != "" {
+	if p.worker != "" {
+		st.Kind = durable.SessionKindWorker
+		st.Specialist = p.worker
+	} else if p.specialist != "" {
 		st.Kind = durable.SessionKindSpecialist
 	}
 	switch p.terminal {

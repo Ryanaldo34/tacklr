@@ -858,15 +858,7 @@ func TestChildren_customToolSpawnsChild(t *testing.T) {
 			Specialist string `json:"specialist"`
 			Task       string `json:"task"`
 		}, runtime tacklr.HarnessRuntime) (string, error) {
-			job, err := runtime.Schedule(ctx, tacklr.JobRequest{Name: args.Specialist, Task: args.Task})
-			if err != nil {
-				return "", err
-			}
-			job, err = runtime.WaitJob(ctx, job.ID)
-			if err != nil {
-				return "", err
-			}
-			return job.Result, nil
+			return runtime.RunSpecialist(ctx, args.Specialist, args.Task)
 		},
 	})
 	parent := &testkit.ScriptedModel{
@@ -905,80 +897,5 @@ func TestChildren_customToolSpawnsChild(t *testing.T) {
 	}
 	if !saw {
 		t.Fatalf("want custom tool child result, got %v", summarize(got))
-	}
-}
-
-func TestJobs_runnerSteerWakesParent(t *testing.T) {
-	started := make(chan struct{})
-	release := make(chan struct{})
-	schedule := tacklr.NewTool(tacklr.ToolConfig{
-		Name: "watch_ci",
-		Handler: func(ctx context.Context, _ struct{}, runtime tacklr.HarnessRuntime) (string, error) {
-			job, err := runtime.Schedule(ctx, tacklr.JobRequest{Name: "ci", Task: "pipe-1"})
-			if err != nil {
-				return "", err
-			}
-			return "Job " + job.ID + " scheduled (name=ci).", nil
-		},
-	})
-	var sawJob atomic.Bool
-	parent := &testkit.ScriptedModel{
-		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-			for _, m := range msgs {
-				if m != nil && m.Role == tacklr.RoleUser && strings.Contains(m.Content, "completed:") && strings.Contains(m.Content, "green") {
-					sawJob.Store(true)
-				}
-			}
-			if sawJob.Load() {
-				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "parent-done", IsComplete: true}
-				return
-			}
-			if last := lastMsg(msgs); last != nil && last.Role == tacklr.RoleTool && strings.Contains(last.Content, "scheduled") {
-				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "too-soon", IsComplete: true}
-				return
-			}
-			ch <- tacklr.LLMResponseChunk{
-				Type: tacklr.StreamEventFunctionCall,
-				ToolCalls: []tacklr.ToolCall{{
-					ID: "ci1", CallID: "ci1", Name: "watch_ci", Arguments: `{}`,
-				}},
-				IsComplete: true,
-			}
-		},
-	}
-	rt := New(Config{
-		Catalog: newCatalog(t, parent, durable.AgentSpec{
-			Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{schedule}},
-		}),
-		Snapshots:  NewMemorySnapshot(),
-		Projection: vfs.DirectProjection{},
-		Jobs: map[string]durable.JobHandler{
-			"ci": func(ctx context.Context, task string) (string, error) {
-				close(started)
-				select {
-				case <-release:
-				case <-ctx.Done():
-					return "", ctx.Err()
-				}
-				return "green", nil
-			},
-		},
-	})
-	var id durable.SessionID
-	sub := begin(t, rt, &id)
-	waitParentEvent(t, rt, id, sub, 8*time.Second, func(ev tacklr.StreamEvent) bool {
-		return ev.Type == tacklr.StreamEventMessage && ev.Content == "too-soon"
-	})
-	select {
-	case <-started:
-	case <-time.After(5 * time.Second):
-		t.Fatal("runner did not start")
-	}
-	close(release)
-	waitParentEvent(t, rt, id, sub, 8*time.Second, func(ev tacklr.StreamEvent) bool {
-		return ev.Type == tacklr.StreamEventMessage && ev.Content == "parent-done"
-	})
-	if !sawJob.Load() {
-		t.Fatal("parent did not see job steer")
 	}
 }

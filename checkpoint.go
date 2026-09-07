@@ -9,6 +9,9 @@ import (
 type PendingToolCall struct {
 	ToolCall        *ToolCall `json:"toolCall,omitempty"`
 	InterruptActive bool      `json:"interruptActive,omitempty"`
+	// AwaitJob is true while the durable loop waits on an inline specialist.
+	// The call is not runnable and is not a human interrupt.
+	AwaitJob bool `json:"awaitJob,omitempty"`
 }
 
 // sessionState is harness-owned durable agent state (not wire-protocol envelopes).

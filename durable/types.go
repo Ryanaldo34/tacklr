@@ -54,6 +54,9 @@ type CreateSession struct {
 	// with Parent for spawn_specialist children. The host does not register the
 	// worker as a top-level catalog agent.
 	Specialist string
+	// Worker selects a named JobHandler on Runtime Config.Jobs. Exclusive
+	// with Specialist. The child session runs that handler instead of a model.
+	Worker string
 	// State seeds checkpoint userState (JSON-serializable values).
 	// Tools read it via HarnessRuntime.StateGet. Canonical copy is
 	// Snapshot.Checkpoint, not Temporal workflow variables. No tokens or clients.
@@ -94,6 +97,8 @@ type Snapshot struct {
 	Children   []SessionID
 	Checkpoint tacklr.SessionCheckpoint
 	Mounts     []MountRecipe
+	// Worker, when set, means this session is a named JobHandler child.
+	Worker string
 }
 
 // SessionState is parent-facing session/job state. Child HITL does not change
@@ -108,8 +113,12 @@ const (
 	SessionUnknown  SessionState = "unknown"
 )
 
-// SessionKindSpecialist is Status.Kind for spawn_specialist children.
-const SessionKindSpecialist = "specialist"
+const (
+	// SessionKindSpecialist is Status.Kind for spawn_specialist children.
+	SessionKindSpecialist = "specialist"
+	// SessionKindWorker is Status.Kind for Config.Jobs children.
+	SessionKindWorker = "worker"
+)
 
 // SessionStatus is a value type returned by Runtime.Status. Not an interface.
 type SessionStatus struct {

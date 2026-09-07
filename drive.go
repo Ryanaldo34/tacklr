@@ -12,11 +12,14 @@ type InferenceStep struct {
 
 // ToolStep is the result of one tool invocation for the durable driver.
 // Interrupted means the tool parked; the driver must persist, publish yield,
-// and wait for Resume. It must not block inside the tool function.
+// and wait for Resume. AwaitJobID means the tool is still open: the durable
+// loop waits for that job, then RecordToolResult. It must not block inside
+// the Temporal Tool activity.
 type ToolStep struct {
 	Interrupted   bool
 	InterruptID   string
 	InterruptData []byte
+	AwaitJobID    string
 }
 
 // TurnState is per-slice counters for the durable inference loop.

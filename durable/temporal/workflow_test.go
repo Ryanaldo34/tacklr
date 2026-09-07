@@ -1361,3 +1361,92 @@ func TestSessionWorkflow_queuedAgentIDAppliesOnIdleConstruct(t *testing.T) {
 		t.Fatalf("idle Prompt must construct queued agent other=%v tool=%v invokes=%d events=%+v", sawOther, idleSawOther.Load(), otherN.Load(), got)
 	}
 }
+
+func TestSessionWorkflow_workerChildCompletesParent(t *testing.T) {
+	var suite testsuite.WorkflowTestSuite
+	env := suite.NewTestWorkflowEnvironment()
+	env.SetWorkerOptions(worker.Options{EnableSessionWorker: true})
+	cat := durable.NewCatalog("default")
+	id := durable.SessionID("sess-worker")
+	model := &testkit.ScriptedModel{
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			var scheduled, collected bool
+			for _, m := range msgs {
+				if m == nil {
+					continue
+				}
+				if m.Role == tacklr.RoleTool && strings.Contains(m.Content, "scheduled") {
+					scheduled = true
+				}
+				if m.Role == tacklr.RoleUser && strings.Contains(m.Content, "completed:") && strings.Contains(m.Content, "green") {
+					collected = true
+				}
+			}
+			switch {
+			case collected:
+				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "parent-done", IsComplete: true}
+			case scheduled:
+				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "waiting", IsComplete: true}
+			default:
+				ch <- tacklr.LLMResponseChunk{
+					Type: tacklr.StreamEventFunctionCall,
+					ToolCalls: []tacklr.ToolCall{{
+						ID: "ci1", CallID: "ci1", Name: "watch_ci", Arguments: `{}`,
+					}},
+					IsComplete: true,
+				}
+			}
+		},
+	}
+	watch := tacklr.NewTool(tacklr.ToolConfig{
+		Name: "watch_ci",
+		Handler: func(ctx context.Context, _ struct{}, runtime tacklr.HarnessRuntime) (string, error) {
+			job, err := runtime.Schedule(ctx, tacklr.JobRequest{Name: "ci", Task: "pipe"})
+			if err != nil {
+				return "", err
+			}
+			return "Job " + job.ID + " scheduled (name=ci).", nil
+		},
+	})
+	cat.Register("default", durable.AgentSpec{
+		Options: tacklr.AgentOptions{
+			Model:  model,
+			Config: tacklr.Config{MaxWindowSize: 8192},
+			Tools:  []*tacklr.Tool{watch},
+		},
+	})
+	fallback := inprocess.NewMemoryEventLog()
+	acts := newActs(cat, fallback, true)
+	acts.Jobs = map[string]durable.JobHandler{
+		"ci": func(ctx context.Context, task string) (string, error) { return "green", nil },
+	}
+	env.RegisterWorkflow(SessionWorkflow)
+	env.RegisterActivity(acts)
+	var childStarted atomic.Bool
+	env.SetOnChildWorkflowStartedListener(func(info *workflow.Info, ctx workflow.Context, args converter.EncodedValues) {
+		childStarted.Store(true)
+	})
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(signalPrompt, promptSignal{Text: "go"})
+	}, time.Millisecond)
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(signalClose, nil)
+	}, 80*time.Millisecond)
+	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id, AgentID: "default"})
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatal(err)
+	}
+	if !childStarted.Load() {
+		t.Fatal("want worker child SessionWorkflow")
+	}
+	got := drainLog(t, fallback, id)
+	var sawDone bool
+	for _, ev := range got {
+		if ev.Type == tacklr.StreamEventMessage && ev.Content == "parent-done" {
+			sawDone = true
+		}
+	}
+	if !sawDone {
+		t.Fatalf("want parent-done after worker job, events=%+v", got)
+	}
+}

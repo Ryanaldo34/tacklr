@@ -268,12 +268,16 @@ func (a *activities) Tool(ctx context.Context, in toolInput) (toolOutput, error)
 	}
 	slog.InfoContext(ctx, "tool completed",
 		"area", telemetry.AreaHarness, "tool", in.Call.Name, "status", status)
+	await := kids.awaitID
+	if await == "" && step.AwaitJobID != "" {
+		await = durable.SessionID(step.AwaitJobID)
+	}
 	return toolOutput{
 		Interrupted:   step.Interrupted,
 		InterruptID:   step.InterruptID,
 		InterruptData: step.InterruptData,
 		CancelID:      kids.cancelID,
-		AwaitID:       kids.awaitID,
+		AwaitID:       await,
 		JobID:         kids.jobID,
 		JobName:       kids.jobName,
 		JobTask:       kids.jobTask,

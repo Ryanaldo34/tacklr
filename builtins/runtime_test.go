@@ -24,6 +24,6 @@ func (stubRuntime) Jobs() []tacklr.Job { return nil }
 func (stubRuntime) CancelJob(context.Context, string) error {
 	return tacklr.ErrFailed
 }
-func (stubRuntime) WaitJob(context.Context, string) (tacklr.Job, error) {
-	return tacklr.Job{}, tacklr.ErrNotFound
+func (stubRuntime) RunSpecialist(context.Context, string, string) (string, error) {
+	return "", tacklr.ErrNotFound
 }

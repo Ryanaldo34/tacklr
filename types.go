@@ -113,10 +113,9 @@ const (
 
 // HarnessRuntime is the tool-facing hook for one harness turn.
 // Tools emit progress, read/write user session state, Park, and
-// schedule/list/cancel/wait jobs of this session. Session modules (plan,
+// run specialists or schedule jobs of this session. Session modules (plan,
 // permissions, on-call) are not on this interface.
 //
-// Job methods are the only way tools start nested agents or host workers.
 // Built-in spawn_specialist / list_children / cancel_child call these.
 // Host tools may call them too. The loop never matches those tool names.
 type HarnessRuntime interface {
@@ -129,18 +128,30 @@ type HarnessRuntime interface {
 	Park(kind string, payload []byte) (Interrupt, error)
 	CurrentToolCallID() string
 
+	// RunSpecialist starts a nested specialist session and returns its result.
+	// The tool call stays open until the child completes. This is not a job:
+	// no inbox message, and the child is dropped when this returns.
+	RunSpecialist(ctx context.Context, name, task string) (string, error)
 	// Schedule starts a job of this session. It does not wait.
-	// Name is a registered specialist or Runtime job worker. The returned
-	// id is unique for this session; pass it to Jobs, WaitJob, CancelJob.
+	// Name is a registered specialist or Runtime job worker. The result
+	// arrives later as an inbox message. Pass the id to Jobs or CancelJob.
 	Schedule(ctx context.Context, job JobRequest) (Job, error)
 	// Jobs lists this session's jobs. Waiting specialist children appear as running.
 	Jobs() []Job
 	// CancelJob stops one job of this session and drops it from Jobs.
 	CancelJob(ctx context.Context, id string) error
-	// WaitJob blocks this tool call until the job is terminal, then collects
-	// it (it leaves Jobs). Unknown ids return ErrNotFound. It does not park
-	// the parent session if a specialist child needs input.
-	WaitJob(ctx context.Context, id string) (Job, error)
+}
+
+// JobWaitError is returned by the Temporal JobHost so the Tool activity can
+// return without writing a tool result. The workflow waits on the child, then
+// RecordToolResult. In-process RunSpecialist blocks and never returns this.
+type JobWaitError struct{ ID string }
+
+func (e *JobWaitError) Error() string {
+	if e == nil || e.ID == "" {
+		return "wait for child"
+	}
+	return "wait for child " + e.ID
 }
 
 // Interrupt types re-exported for tool authors.
