@@ -92,6 +92,9 @@ type Config struct {
 	// Secrets holds work-item credentials for activities. Required. New and
 	// NewWorker must share the same instance. Tokens never enter event history.
 	Secrets durable.SecretStorage
+	// Jobs are named background workers Schedule can start. Specialist
+	// names on the catalog take precedence.
+	Jobs map[string]durable.JobHandler
 }
 
 func (c Config) queue() string {

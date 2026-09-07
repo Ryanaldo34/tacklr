@@ -281,7 +281,7 @@ Put optional builtins on `AgentOptions.Tools`. Swap the fake the same way: `Tool
 
 ### Specialists
 
-Register nested agents on `AgentOptions.Specialists`. Tools start them through `HarnessRuntime`: `SpawnChild`, `Children`, `AwaitChild`, `CancelChild`. The stock tools `spawn_specialist`, `list_children`, `get_child`, and `cancel_child` call those methods; host tools can too. A child is a nested session with the parent’s MCP Durable topology and mount recipes, overlaid with the specialist’s model, tools, and instructions. Tokens come from `SecretStorage` (child, then parent). `block=false` starts the child and returns; `get_child(block=true)` waits. Parent park does not stop children. Cancel (including the original Prompt context) and Close do.
+Register nested agents on `AgentOptions.Specialists`. Tools start jobs through `HarnessRuntime`: `Schedule`, `Jobs`, `WaitJob`, `CancelJob`. The stock tools `spawn_specialist`, `list_children`, and `cancel_child` call those methods; host tools can too. A specialist job is a nested session with the parent’s MCP Durable topology and mount recipes, overlaid with the specialist’s model, tools, and instructions. Named workers register on Runtime `Config.Jobs`. Tokens come from `SecretStorage` (child, then parent). `block=false` starts the job and returns; the result arrives as an inbox steer. `block=true` waits in the tool call. Parent park does not stop jobs. Cancel (including the original Prompt context) and Close do.
 
 ---
 

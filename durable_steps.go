@@ -154,7 +154,7 @@ func (a *TurnManager) runInference(ctx context.Context, st *TurnState, out chan 
 }
 
 func (a *TurnManager) runToolCall(ctx context.Context, tc ToolCall, out chan StreamEvent) (ToolStep, error) {
-	turnRT := newToolRuntime(out, a.session, a.childHost)
+	turnRT := newToolRuntime(out, a.session, a.jobHost)
 	tcKey := tc.Key()
 	toolCtx, toolSpan := telemetry.StartToolSpan(ctx, tc.Name, tc.Namespace)
 	tool := a.findTool(tc.Name, tc.Namespace)
@@ -228,13 +228,12 @@ func (a *TurnManager) runToolCall(ctx context.Context, tc ToolCall, out chan Str
 	return ToolStep{}, nil
 }
 
-// SpawnSpecialistName is the built-in that calls HarnessRuntime.SpawnChild.
+// SpawnSpecialistName is the built-in that calls HarnessRuntime.Schedule.
 const SpawnSpecialistName = "spawn_specialist"
 
-// ListChildrenName, GetChildName, and CancelChildName are built-ins on HarnessRuntime.Children / AwaitChild / CancelChild.
+// ListChildrenName and CancelChildName are built-ins on HarnessRuntime.Jobs / CancelJob.
 const (
 	ListChildrenName = "list_children"
-	GetChildName     = "get_child"
 	CancelChildName  = "cancel_child"
 )
 

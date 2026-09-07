@@ -65,14 +65,14 @@ func (a *TurnManager) formatSpecialistPromptList() string {
 type spawnSpecialistArgs struct {
 	TaskDescriptionAndContext string `json:"task_description_and_context" desc:"Clear task goal, acceptance criteria, and helpful context for the worker"`
 	Specialist                string `json:"specialist" desc:"Name of a registered specialist to spawn"`
-	Block                     *bool  `json:"block" desc:"Wait for the worker and return its result. Defaults to true. Set false to start a child session and continue the turn."`
+	Block                     *bool  `json:"block" desc:"Wait for the worker and return its result. Defaults to true. Set false to start a job and continue the turn; the result arrives as a later message."`
 }
 
 func (a *TurnManager) spawnTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "spawn_specialist",
 		DisplayName: "Spawn {specialist}",
-		Description: "Spawn a specialist as a child session. block defaults to true and returns the worker result before continuing. Set block=false to start the child and continue other work, then use list_children, get_child, or cancel_child.",
+		Description: "Spawn a specialist as a child session job. block defaults to true and returns the worker result before continuing. Set block=false to start the job and continue other work; the result arrives as a later message. Use list_children or cancel_child to inspect or stop jobs.",
 		Category:    ToolCategoryExecute,
 		Handler:     spawnSpecialist,
 	})
@@ -80,40 +80,25 @@ func (a *TurnManager) spawnTool() *Tool {
 
 type listChildrenArgs struct{}
 
-type getChildArgs struct {
-	ChildID string `json:"child_id" desc:"Child session id returned by spawn_specialist when block is false"`
-	Block   bool   `json:"block" desc:"Wait for a running child before returning its result. Defaults to false."`
-}
-
 type cancelChildArgs struct {
-	ChildID string `json:"child_id" desc:"Child session id returned by spawn_specialist when block is false"`
+	ChildID string `json:"child_id" desc:"Job id returned by spawn_specialist when block is false"`
 }
 
 func (a *TurnManager) listChildrenTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "list_children",
-		DisplayName: "List children",
-		Description: "Non-blocking overview of child sessions (running, completed, failed). Status stays running while a child waits for user input. Use get_child to collect a result or wait, and cancel_child to stop work that is no longer needed.",
+		DisplayName: "List jobs",
+		Description: "Non-blocking overview of jobs (running, completed, failed). Status stays running while a specialist child waits for user input. Finished jobs arrive as messages. Use cancel_child to stop work that is no longer needed.",
 		Category:    ToolCategoryExecute,
 		Handler:     listChildren,
-	})
-}
-
-func (a *TurnManager) getChildTool() *Tool {
-	return NewTool(ToolConfig{
-		Name:        "get_child",
-		DisplayName: "Get child {child_id}",
-		Description: "Get one child session. By default this is non-blocking: a running child returns its current status (including while waiting for user input), while a terminal child returns and consumes its result. Set block=true to wait until it finishes, or to park this call if the child needs user input.",
-		Category:    ToolCategoryExecute,
-		Handler:     getChild,
 	})
 }
 
 func (a *TurnManager) cancelChildTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "cancel_child",
-		DisplayName: "Cancel child {child_id}",
-		Description: "Cancel and remove a child session that is no longer needed. Completed and failed children are discarded without returning their result.",
+		DisplayName: "Cancel job {child_id}",
+		Description: "Cancel and remove a job that is no longer needed. Completed and failed jobs are discarded without returning their result.",
 		Category:    ToolCategoryExecute,
 		Handler:     cancelChild,
 	})

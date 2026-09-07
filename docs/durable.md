@@ -10,7 +10,7 @@ Tacklr’s session API is `durable.Runtime`. A `server.Protocol` maps wire frame
 | **Turn** | One `Prompt` or `Resume` until complete or park |
 | **TurnManager** | Per-turn mind: infer, tool batch, snapshot. Runtime constructs it for each Prompt/Resume |
 | **Specialist** | Catalog nested agent (`spawn_specialist`). Not a Temporal worker process |
-| **Child** | Nested session. Agent tools `list_children` / `get_child` / `cancel_child` |
+| **Child** | Nested session job. Agent tools `list_children` / `cancel_child` |
 | **Park** | Session idle waiting for `Resume`. Parent-facing `Status` stays `running`; `Waiting` is true until the interrupt is resolved. Parent park does not stop children |
 | **Cancel** | Abort the in-flight turn and stop child sessions (`Runtime.Cancel`, original Prompt/Resume context cancel, client stop). The parent session stays open for a later Prompt |
 | **Close** | Destroy the session and recursively stop children |
@@ -98,14 +98,13 @@ The worker registers `SessionWorkflow`, `Inference`, `Tool`, `CommitToolOutput`,
 
 A child is a nested Runtime session, not a host-owned supervisor. The id is `{parent}/w/{specialist}/{call}`. The same wait loop runs. The child inherits MCP Durable topology and mount recipes from the parent, then overlays the named `Specialist`. Tokens come from `SecretStorage` (child id, then parent id). Each child turn opens its own VFS (`OpenTurnVFS` on the child id). It does not reuse the parent’s live `MountSession`.
 
-Register specialists on `AgentOptions.Specialists`. The model sees four tools:
+Register specialists on `AgentOptions.Specialists`. The model sees three tools. Host tools schedule the same jobs through `HarnessRuntime.Schedule` / `Jobs` / `CancelJob`.
 
 | Tool | Job |
 |------|-----|
-| `spawn_specialist` | Start a child. `block` defaults to true (parent waits). `block=false` returns a scheduled message immediately |
+| `spawn_specialist` | Start a specialist job. `block` defaults to true (parent tool waits). `block=false` returns a scheduled message immediately |
 | `list_children` | Ids and parent-facing status. Interrupted children do not appear as a separate state; they stay `running` |
-| `get_child` | Collect one result. `block=true` parks the parent until the child finishes (or the child parks for HITL, then parent `Resume` forwards) |
-| `cancel_child` | Stop that child |
+| `cancel_child` | Stop that job |
 
 Child HITL does not change parent-facing `Status.State` from `running`. `Waiting` is internal until the interrupt is resolved. The parent stays `running` while a child HITL is outstanding.
 
@@ -113,7 +112,7 @@ Child HITL does not change parent-facing `Status.State` from `running`. `Waiting
 
 | Event | Children |
 |-------|----------|
-| Parent parks (HITL on the parent, or `get_child` wait) | Keep running. Child Prompt uses the session kids context, not the parent turn |
+| Parent parks (HITL on the parent) | Keep running. Child Prompt uses the session kids context, not the parent turn |
 | `Runtime.Cancel`, original Prompt/Resume context cancel, client stop | Stop all children, then abort the parent turn. The parent session stays open for a later Prompt |
 | `Runtime.Close` | Recursively stop and destroy children |
 
@@ -123,11 +122,9 @@ A later `Prompt` on a session that was cancelled does not resurrect killed child
 
 The parent does not fail with the child. The child becomes `failed` and stays on the parent’s list until collected or the parent is closed.
 
-`get_child` (including `block=true`) returns the error as tool text, drops the child from the parent list, and the parent continues. The child session stays Status-able until the parent is closed or the child is cancelled.
+Drain auto-collects terminal `block=false` jobs at the next safe window point: a `RoleUser` steer (`Job {id} ({name}) completed|failed`) is appended, and the job is dropped from `Jobs`. `block=true` spawn still uses `WaitJob` as the tool result and never the inbox. A later job result is a new `RoleUser` message, never a second `RoleTool` for the schedule `call_id`.
 
-Drain auto-collects terminal `block=false` children at the next safe window point: a `RoleUser` job message (`Child {id} ({specialist}) completed|failed`) is appended, and the child is dropped from `Children`, so `ActionNudge` / `get_child` is not required for that id. `block=true` spawn still uses `AwaitChild` as the tool result and never the inbox. A later job result is a new `RoleUser` message, never a second `RoleTool` for the spawn `call_id`.
-
-Still-running children count toward the “cannot finish while children remain” nudge; the parent must wait (`get_child` with `block=true`) or `cancel_child` before it can complete.
+The turn does not complete while jobs remain. The wait-loop blocks without parent park and without another parent model call. A finished job or a human `Prompt` wakes it through the inbox. Specialist child HITL is resumed on the **child** session.
 
 Child sessions are nested Runtime sessions (in-process or Temporal). A panic in an in-process child turn goroutine is not recovered and can leave the child `running`. Temporal starts an async child without waiting; a terminal async child is auto-collected as a job message.
 
@@ -135,7 +132,7 @@ Child sessions are nested Runtime sessions (in-process or Temporal). A panic in 
 
 A model round can emit several tool calls. Each `function_call` is pending until a matching tool result is appended (`function_call_output` / `RoleTool`). The wait loop **does not infer again** until every call in that batch has a result, or a call is parked for HITL.
 
-`spawn_specialist` is the same pairing. `block=false` appends a scheduled message immediately. `block=true` (the default) waits for that child; the child’s output **is** the tool result. A mixed batch (some blocking, some not) still waits for every blocking call to return before the next model round. Non-blocking results may already be in the window; blocking results must be too. The next round starts only when the batch has no open tool calls. When a `block=false` child later completes, the drain appends a separate `RoleUser` job result (not another `RoleTool` for that `call_id`).
+`spawn_specialist` is the same pairing. `block=false` appends a scheduled message immediately. `block=true` (the default) waits for that job; the output **is** the tool result. A mixed batch (some blocking, some not) still waits for every blocking call to return before the next model round. Non-blocking results may already be in the window; blocking results must be too. The next round starts only when the batch has no open tool calls. When a `block=false` job later completes, the drain appends a separate `RoleUser` job result (not another `RoleTool` for that `call_id`).
 
 | Runtime | How the batch runs | Where leftovers live |
 |---------|--------------------|----------------------|

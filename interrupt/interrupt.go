@@ -89,7 +89,7 @@ func (c *UserSelectionInterrupt) Error() string {
 	return string(b)
 }
 
-// TypeChildWaiting parks a parent spawn_specialist/get_child until the host resumes.
+// TypeChildWaiting is the Temporal unpaired-tool seam for WaitJob.
 // The payload is forwarded to the child session; Return is a no-op.
 const TypeChildWaiting = "child_waiting"
 

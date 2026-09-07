@@ -9,13 +9,13 @@ const (
 	ActionRunTools
 	ActionYield
 	ActionComplete
-	ActionNudge
+	ActionWait
 )
 
 // Next chooses the next wait-loop step from leftover tools, park, inference
-// completion, and remaining children. A later Restate/DBOS adapter must use
+// completion, and remaining jobs. A later Restate/DBOS adapter must use
 // this same decision so HITL and leftovers stay consistent.
-func Next(runnable int, parked bool, inferComplete bool, childrenRemain bool) Action {
+func Next(runnable int, parked bool, inferComplete bool, jobsRemain bool) Action {
 	if runnable > 0 {
 		return ActionRunTools
 	}
@@ -23,8 +23,8 @@ func Next(runnable int, parked bool, inferComplete bool, childrenRemain bool) Ac
 		return ActionYield
 	}
 	if inferComplete {
-		if childrenRemain {
-			return ActionNudge
+		if jobsRemain {
+			return ActionWait
 		}
 		return ActionComplete
 	}

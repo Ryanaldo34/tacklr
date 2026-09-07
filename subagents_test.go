@@ -55,7 +55,6 @@ func TestSystemPrompt_listsSpecialistsSorted(t *testing.T) {
 					ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
 						toolCall("sp1", "spawn_specialist", `{"specialist":"alpha","task_description_and_context":"x"}`),
 						toolCall("ls1", "list_children", `{}`),
-						toolCall("gc1", "get_child", `{"child_id":"missing"}`),
 						toolCall("cc1", "cancel_child", `{"child_id":"missing"}`),
 					}, IsComplete: true}
 					return
@@ -77,7 +76,7 @@ func TestSystemPrompt_listsSpecialistsSorted(t *testing.T) {
 	}
 	rt := turnRuntime(h)
 	res, err := h.findTool("list_children", "").invoke(t.Context(), `{}`, rt)
-	if err != nil || !strings.Contains(strings.ToLower(res.output), "no child sessions") {
+	if err != nil || !strings.Contains(strings.ToLower(res.output), "no jobs") {
 		t.Fatalf("list_children: %q %v", res.output, err)
 	}
 }

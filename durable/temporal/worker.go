@@ -33,6 +33,7 @@ func NewWorker(c client.Client, cfg Config) worker.Worker {
 		Fallback:       fallback,
 		DisableStreams: cfg.DisableStreams,
 		Secrets:        cfg.Secrets,
+		Jobs:           cfg.Jobs,
 	}
 	w.RegisterWorkflow(SessionWorkflow)
 	w.RegisterActivity(acts)

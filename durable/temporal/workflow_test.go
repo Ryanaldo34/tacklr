@@ -658,7 +658,7 @@ func TestSessionWorkflow_mixedBatchPairsBeforeNextRound(t *testing.T) {
 				if m.Content == "block-result" {
 					sawBlock = true
 				}
-				if strings.Contains(m.Content, "Child sessions:") || m.Content == "No child sessions." {
+				if strings.Contains(m.Content, "Jobs:") || m.Content == "No jobs." {
 					sawList = true
 				}
 			}
@@ -701,7 +701,7 @@ func TestSessionWorkflow_mixedBatchPairsBeforeNextRound(t *testing.T) {
 		if ev.Type == tacklr.StreamEventToolResult && ev.Content == "block-result" {
 			sawBlock = true
 		}
-		if ev.Type == tacklr.StreamEventToolResult && (strings.Contains(ev.Content, "Child sessions:") || ev.Content == "No child sessions.") {
+		if ev.Type == tacklr.StreamEventToolResult && (strings.Contains(ev.Content, "Jobs:") || ev.Content == "No jobs.") {
 			sawList = true
 		}
 		if ev.Type == tacklr.StreamEventMessage && ev.Content == "second-round" {
@@ -824,7 +824,7 @@ func TestSessionWorkflow_listChildren(t *testing.T) {
 					ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "listed", IsComplete: true}
 					return
 				}
-				if strings.Contains(last.Content, "Child sessions:") {
+				if strings.Contains(last.Content, "Jobs:") {
 					childID := string(durable.ChildSessionID("sess-list-children", "researcher", "sp1"))
 					ch <- tacklr.LLMResponseChunk{
 						Type: tacklr.StreamEventFunctionCall,

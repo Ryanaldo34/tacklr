@@ -275,7 +275,7 @@ func TestChildren_mixedBlockingPairsBeforeNextRound(t *testing.T) {
 					if m.Content == "block-result" {
 						sawBlock.Store(true)
 					}
-					if strings.Contains(m.Content, "Child ") && strings.Contains(m.Content, "scheduled") {
+					if strings.Contains(m.Content, "scheduled") {
 						sawAsync.Store(true)
 					}
 				}
@@ -344,91 +344,55 @@ func TestChildren_waitingStaysRunningUntilHITLResolved(t *testing.T) {
 					Type: tacklr.StreamEventFunctionCall,
 					ToolCalls: []tacklr.ToolCall{
 						{ID: "lc1", CallID: "lc1", Name: "list_children", Arguments: `{}`},
-						{ID: "gc1", CallID: "gc1", Name: "get_child", Arguments: `{"child_id":"` + string(id) + `"}`},
 					},
 					IsComplete: true,
 				}
-			case 3:
-				ch <- tacklr.LLMResponseChunk{
-					Type: tacklr.StreamEventFunctionCall,
-					ToolCalls: []tacklr.ToolCall{{
-						ID: "gc2", CallID: "gc2", Name: "get_child",
-						Arguments: `{"child_id":"` + string(id) + `","block":true}`,
-					}},
-					IsComplete: true,
-				}
 			default:
-				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "parent-done", IsComplete: true}
+				for _, m := range msgs {
+					if m != nil && m.Role == tacklr.RoleUser && strings.Contains(m.Content, "completed:") && strings.Contains(m.Content, "chose-A") {
+						ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "parent-done", IsComplete: true}
+						return
+					}
+				}
+				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "waiting", IsComplete: true}
 			}
 		},
 	}
 	rt = New(Config{Catalog: specialistCatalog(t, parent, tacklr.Specialist{Name: "researcher", Model: child, Tools: []*tacklr.Tool{askUserTool()}}), Snapshots: NewMemorySnapshot(), Projection: vfs.DirectProjection{}})
 	sub := begin(t, rt, &parentID)
 
-	var listOut, poll string
+	var listOut string
 	wait, stopWait := context.WithTimeout(t.Context(), 8*time.Second)
 	defer stopWait()
-	for listOut == "" || poll == "" {
+	for listOut == "" {
 		select {
 		case ev, ok := <-sub.Events():
 			if !ok {
 				t.Fatal("subscription closed")
 			}
-			if ev.Type != tacklr.StreamEventToolResult {
-				continue
-			}
-			if strings.Contains(ev.Content, "Child sessions:") {
+			if ev.Type == tacklr.StreamEventToolResult && strings.Contains(ev.Content, "Jobs:") {
 				listOut = ev.Content
 			}
-			if strings.Contains(ev.Content, "Still running") {
-				poll = ev.Content
-			}
 		case <-wait.Done():
-			t.Fatalf("list=%q poll=%q", listOut, poll)
+			t.Fatalf("list=%q", listOut)
 		}
 	}
 	if strings.Contains(listOut, "interrupted") || !strings.Contains(listOut, "status=running") {
 		t.Fatalf("list_children HITL: %q", listOut)
 	}
-	if !strings.Contains(poll, "status=running") {
-		t.Fatalf("non-blocking get while HITL: %q", poll)
-	}
 
-	waitParentEvent(t, rt, parentID, sub, 8*time.Second, func(ev tacklr.StreamEvent) bool {
-		return ev.Type == tacklr.StreamEventInterrupt && ev.MessageID == "gc2"
-	})
 	childID := durable.ChildSessionID(parentID, "researcher", "sp1")
-	st, err := rt.Status(t.Context(), childID)
-	if err != nil || st.State != durable.SessionRunning || !st.Waiting {
-		t.Fatalf("child after parent park: %+v %v", st, err)
+	st, err := rt.Status(t.Context(), parentID)
+	if err != nil || st.Waiting {
+		t.Fatalf("parent must not park for child HITL: %+v %v", st, err)
 	}
-
 	payload, _ := json.Marshal(map[string]any{"selectionIdx": 0})
-	if err := rt.Resume(t.Context(), parentID, durable.Resume{Responses: map[string][]byte{"gc2": payload}}); err != nil {
+	if err := rt.Resume(t.Context(), childID, durable.Resume{Responses: map[string][]byte{"ask1": payload}}); err != nil {
 		t.Fatal(err)
 	}
-	wait, stopWait = context.WithTimeout(t.Context(), 8*time.Second)
-	defer stopWait()
-	var collected, done bool
-	for !collected || !done {
-		select {
-		case ev, ok := <-sub.Events():
-			if !ok {
-				t.Fatal("closed")
-			}
-			if ev.Type == tacklr.StreamEventToolResult && strings.Contains(ev.Content, "chose-A") {
-				collected = true
-			}
-			if ev.Type == tacklr.StreamEventMessage && ev.Content == "parent-done" {
-				done = true
-			}
-			if ev.Type == tacklr.StreamEventError {
-				t.Fatalf("error: %v %s", ev.Error, ev.Content)
-			}
-		case <-wait.Done():
-			t.Fatalf("resume collect=%v done=%v", collected, done)
-		}
-	}
+	waitParentEvent(t, rt, parentID, sub, 8*time.Second, func(ev tacklr.StreamEvent) bool {
+		return ev.Type == tacklr.StreamEventMessage && ev.Content == "parent-done"
+	})
 }
 
 func TestChildren_getChildParkAndSiblingCancel(t *testing.T) {
@@ -455,13 +419,18 @@ func TestChildren_getChildParkAndSiblingCancel(t *testing.T) {
 				ch <- tacklr.LLMResponseChunk{
 					Type: tacklr.StreamEventFunctionCall,
 					ToolCalls: []tacklr.ToolCall{
-						{ID: "gc1", CallID: "gc1", Name: "get_child", Arguments: `{"child_id":"` + string(keepID) + `","block":true}`},
 						{ID: "cc1", CallID: "cc1", Name: "cancel_child", Arguments: `{"child_id":"` + string(dropID) + `"}`},
 					},
 					IsComplete: true,
 				}
 			default:
-				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "parent-done", IsComplete: true}
+				for _, m := range msgs {
+					if m != nil && m.Role == tacklr.RoleUser && strings.Contains(m.Content, "kept-result") {
+						ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "parent-done", IsComplete: true}
+						return
+					}
+				}
+				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "waiting", IsComplete: true}
 			}
 		},
 	}
@@ -471,44 +440,18 @@ func TestChildren_getChildParkAndSiblingCancel(t *testing.T) {
 	), Snapshots: NewMemorySnapshot(), Projection: vfs.DirectProjection{}})
 	sub := begin(t, rt, &parentID)
 
-	var cancelOut string
-	var parked bool
-	wait, stopWait := context.WithTimeout(t.Context(), 8*time.Second)
-	defer stopWait()
-	for !parked || cancelOut == "" {
-		select {
-		case ev, ok := <-sub.Events():
-			if !ok {
-				t.Fatal("closed")
-			}
-			if ev.Type == tacklr.StreamEventInterrupt && ev.MessageID == "gc1" {
-				parked = true
-			}
-			if ev.Type == tacklr.StreamEventToolResult {
-				for _, tc := range ev.ToolCalls {
-					if tc.Name == "get_child" {
-						t.Fatalf("blocking get completed before resume: %q", ev.Content)
-					}
-					if tc.Name == "cancel_child" {
-						cancelOut = ev.Content
-					}
-				}
-			}
-		case <-wait.Done():
-			t.Fatalf("park=%v cancel=%q", parked, cancelOut)
-		}
-	}
-	if !strings.Contains(cancelOut, "cancelled") {
-		t.Fatalf("cancel leftover: %q", cancelOut)
-	}
+	waitParentEvent(t, rt, parentID, sub, 8*time.Second, func(ev tacklr.StreamEvent) bool {
+		return ev.Type == tacklr.StreamEventToolResult && strings.Contains(ev.Content, "cancelled")
+	})
 	waitGone(t, rt, durable.ChildSessionID(parentID, "dropper", "sp_drop"))
 
 	payload, _ := json.Marshal(map[string]any{"selectionIdx": 0})
-	if err := rt.Resume(t.Context(), parentID, durable.Resume{Responses: map[string][]byte{"gc1": payload}}); err != nil {
+	keepID := durable.ChildSessionID(parentID, "keeper", "sp_keep")
+	if err := rt.Resume(t.Context(), keepID, durable.Resume{Responses: map[string][]byte{"ask1": payload}}); err != nil {
 		t.Fatal(err)
 	}
 	waitParentEvent(t, rt, parentID, sub, 8*time.Second, func(ev tacklr.StreamEvent) bool {
-		return ev.Type == tacklr.StreamEventToolResult && strings.Contains(ev.Content, "kept-result")
+		return ev.Type == tacklr.StreamEventMessage && ev.Content == "parent-done"
 	})
 }
 
@@ -583,8 +526,6 @@ func TestChildren_unknownSpecialistAndChild(t *testing.T) {
 				Type: tacklr.StreamEventFunctionCall,
 				ToolCalls: []tacklr.ToolCall{
 					{ID: "sp1", CallID: "sp1", Name: "spawn_specialist", Arguments: `{"specialist":"ghost","task_description_and_context":"x"}`},
-					{ID: "gc1", CallID: "gc1", Name: "get_child", Arguments: `{"child_id":"missing"}`},
-					{ID: "gc0", CallID: "gc0", Name: "get_child", Arguments: `{}`},
 					{ID: "cc1", CallID: "cc1", Name: "cancel_child", Arguments: `{"child_id":"missing"}`},
 					{ID: "cc0", CallID: "cc0", Name: "cancel_child", Arguments: `{}`},
 					{ID: "bad", CallID: "bad", Name: "spawn_specialist", Arguments: `{}`},
@@ -607,7 +548,7 @@ func TestChildren_unknownSpecialistAndChild(t *testing.T) {
 	blob := strings.Join(texts, "\n")
 	for _, want := range []string{
 		"that specialist is not registered",
-		"that child_id is unknown",
+		"that job is unknown",
 		"child_id is required",
 		"task_description_and_context is required",
 		"specialist is required",
@@ -618,7 +559,7 @@ func TestChildren_unknownSpecialistAndChild(t *testing.T) {
 	}
 }
 
-func TestChildren_nudgeUntilCollected(t *testing.T) {
+func TestChildren_waitUntilJobSteer(t *testing.T) {
 	release := make(chan struct{})
 	child := &testkit.ScriptedModel{
 		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
@@ -627,16 +568,23 @@ func TestChildren_nudgeUntilCollected(t *testing.T) {
 			case <-ctx.Done():
 				return
 			}
-			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "nudge-result", IsComplete: true}
+			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "job-result", IsComplete: true}
 		},
 	}
 	var step atomic.Int32
-	var sawNudge atomic.Bool
+	var sawNudge, sawJob atomic.Bool
 	var parentID durable.SessionID
 	parent := &testkit.ScriptedModel{
 		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 			n := step.Add(1)
-			id := durable.ChildSessionID(parentID, "researcher", "sp1")
+			for _, m := range msgs {
+				if m != nil && m.Role == tacklr.RoleUser && strings.Contains(m.Content, "Automated harness nudge") {
+					sawNudge.Store(true)
+				}
+				if m != nil && m.Role == tacklr.RoleUser && strings.Contains(m.Content, "completed:") && strings.Contains(m.Content, "job-result") {
+					sawJob.Store(true)
+				}
+			}
 			switch n {
 			case 1:
 				ch <- tacklr.LLMResponseChunk{
@@ -644,44 +592,38 @@ func TestChildren_nudgeUntilCollected(t *testing.T) {
 				}
 			case 2:
 				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "too-soon", IsComplete: true}
-			case 3:
-				for _, m := range msgs {
-					if m != nil && m.Role == tacklr.RoleUser && strings.Contains(m.Content, "Automated harness nudge") {
-						sawNudge.Store(true)
-					}
-				}
-				close(release)
-				ch <- tacklr.LLMResponseChunk{
-					Type: tacklr.StreamEventFunctionCall,
-					ToolCalls: []tacklr.ToolCall{{
-						ID: "gc1", CallID: "gc1", Name: "get_child",
-						Arguments: `{"child_id":"` + string(id) + `","block":true}`,
-					}},
-					IsComplete: true,
-				}
 			default:
-				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "parent-done", IsComplete: true}
+				if sawJob.Load() {
+					ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "parent-done", IsComplete: true}
+					return
+				}
+				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "waiting", IsComplete: true}
 			}
 		},
 	}
 	rt := New(Config{Catalog: specialistCatalog(t, parent, tacklr.Specialist{Name: "researcher", Model: child}), Snapshots: NewMemorySnapshot(), Projection: vfs.DirectProjection{}})
 	sub := begin(t, rt, &parentID)
+	waitParentEvent(t, rt, parentID, sub, 8*time.Second, func(ev tacklr.StreamEvent) bool {
+		return ev.Type == tacklr.StreamEventMessage && ev.Content == "too-soon"
+	})
+	pst, err := rt.Status(t.Context(), parentID)
+	if err != nil || pst.State != durable.SessionRunning || pst.Waiting {
+		t.Fatalf("parent should wait without parking: %+v %v", pst, err)
+	}
+	close(release)
 	got := waitEvents(t, rt, parentID, sub, 8*time.Second)
-	var sawCollect, sawDone bool
+	var sawDone bool
 	for _, ev := range got {
-		if ev.Type == tacklr.StreamEventToolResult && strings.Contains(ev.Content, "nudge-result") {
-			sawCollect = true
-		}
 		if ev.Type == tacklr.StreamEventMessage && ev.Content == "parent-done" {
 			sawDone = true
 		}
 	}
-	if !sawNudge.Load() || !sawCollect || !sawDone {
-		t.Fatalf("nudge=%v collect=%v done=%v events=%v", sawNudge.Load(), sawCollect, sawDone, summarize(got))
+	if sawNudge.Load() || !sawJob.Load() || !sawDone {
+		t.Fatalf("nudge=%v job=%v done=%v events=%v", sawNudge.Load(), sawJob.Load(), sawDone, summarize(got))
 	}
 }
 
-func TestChildren_blockingSpawnParksOnChildHITL(t *testing.T) {
+func TestChildren_blockingSpawnWaitsWithoutParentPark(t *testing.T) {
 	child := interruptChildModel("blocked-ok")
 	var step atomic.Int32
 	parent := &testkit.ScriptedModel{
@@ -703,11 +645,14 @@ func TestChildren_blockingSpawnParksOnChildHITL(t *testing.T) {
 	rt := New(Config{Catalog: specialistCatalog(t, parent, tacklr.Specialist{Name: "researcher", Model: child, Tools: []*tacklr.Tool{askUserTool()}}), Snapshots: NewMemorySnapshot(), Projection: vfs.DirectProjection{}})
 	var id durable.SessionID
 	sub := begin(t, rt, &id)
-	waitParentEvent(t, rt, id, sub, 8*time.Second, func(ev tacklr.StreamEvent) bool {
-		return ev.Type == tacklr.StreamEventInterrupt && ev.MessageID == "sp1"
-	})
+	childID := durable.ChildSessionID(id, "researcher", "sp1")
+	waitStatus(t, rt, childID, func(st durable.SessionStatus) bool { return st.Waiting })
+	pst, err := rt.Status(t.Context(), id)
+	if err != nil || pst.Waiting {
+		t.Fatalf("parent must not park: %+v %v", pst, err)
+	}
 	payload, _ := json.Marshal(map[string]any{"selectionIdx": 1})
-	if err := rt.Resume(t.Context(), id, durable.Resume{Responses: map[string][]byte{"sp1": payload}}); err != nil {
+	if err := rt.Resume(t.Context(), childID, durable.Resume{Responses: map[string][]byte{"ask1": payload}}); err != nil {
 		t.Fatal(err)
 	}
 	wait, stopWait := context.WithTimeout(t.Context(), 8*time.Second)
@@ -913,15 +858,15 @@ func TestChildren_customToolSpawnsChild(t *testing.T) {
 			Specialist string `json:"specialist"`
 			Task       string `json:"task"`
 		}, runtime tacklr.HarnessRuntime) (string, error) {
-			id, err := runtime.SpawnChild(ctx, args.Specialist, args.Task)
+			job, err := runtime.Schedule(ctx, tacklr.JobRequest{Name: args.Specialist, Task: args.Task})
 			if err != nil {
 				return "", err
 			}
-			child, err := runtime.AwaitChild(ctx, id)
+			job, err = runtime.WaitJob(ctx, job.ID)
 			if err != nil {
 				return "", err
 			}
-			return child.Result, nil
+			return job.Result, nil
 		},
 	})
 	parent := &testkit.ScriptedModel{
@@ -960,5 +905,80 @@ func TestChildren_customToolSpawnsChild(t *testing.T) {
 	}
 	if !saw {
 		t.Fatalf("want custom tool child result, got %v", summarize(got))
+	}
+}
+
+func TestJobs_runnerSteerWakesParent(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	schedule := tacklr.NewTool(tacklr.ToolConfig{
+		Name: "watch_ci",
+		Handler: func(ctx context.Context, _ struct{}, runtime tacklr.HarnessRuntime) (string, error) {
+			job, err := runtime.Schedule(ctx, tacklr.JobRequest{Name: "ci", Task: "pipe-1"})
+			if err != nil {
+				return "", err
+			}
+			return "Job " + job.ID + " scheduled (name=ci).", nil
+		},
+	})
+	var sawJob atomic.Bool
+	parent := &testkit.ScriptedModel{
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			for _, m := range msgs {
+				if m != nil && m.Role == tacklr.RoleUser && strings.Contains(m.Content, "completed:") && strings.Contains(m.Content, "green") {
+					sawJob.Store(true)
+				}
+			}
+			if sawJob.Load() {
+				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "parent-done", IsComplete: true}
+				return
+			}
+			if last := lastMsg(msgs); last != nil && last.Role == tacklr.RoleTool && strings.Contains(last.Content, "scheduled") {
+				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "too-soon", IsComplete: true}
+				return
+			}
+			ch <- tacklr.LLMResponseChunk{
+				Type: tacklr.StreamEventFunctionCall,
+				ToolCalls: []tacklr.ToolCall{{
+					ID: "ci1", CallID: "ci1", Name: "watch_ci", Arguments: `{}`,
+				}},
+				IsComplete: true,
+			}
+		},
+	}
+	rt := New(Config{
+		Catalog: newCatalog(t, parent, durable.AgentSpec{
+			Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{schedule}},
+		}),
+		Snapshots:  NewMemorySnapshot(),
+		Projection: vfs.DirectProjection{},
+		Jobs: map[string]durable.JobHandler{
+			"ci": func(ctx context.Context, task string) (string, error) {
+				close(started)
+				select {
+				case <-release:
+				case <-ctx.Done():
+					return "", ctx.Err()
+				}
+				return "green", nil
+			},
+		},
+	})
+	var id durable.SessionID
+	sub := begin(t, rt, &id)
+	waitParentEvent(t, rt, id, sub, 8*time.Second, func(ev tacklr.StreamEvent) bool {
+		return ev.Type == tacklr.StreamEventMessage && ev.Content == "too-soon"
+	})
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runner did not start")
+	}
+	close(release)
+	waitParentEvent(t, rt, id, sub, 8*time.Second, func(ev tacklr.StreamEvent) bool {
+		return ev.Type == tacklr.StreamEventMessage && ev.Content == "parent-done"
+	})
+	if !sawJob.Load() {
+		t.Fatal("parent did not see job steer")
 	}
 }

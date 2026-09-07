@@ -257,7 +257,7 @@ func (a *TurnManager) injectBuiltinTools() {
 		a.tools = append(a.tools, newVFSIndexTools(br)...)
 	}
 	if len(a.specialists) > 0 {
-		a.tools = append(a.tools, a.spawnTool(), a.listChildrenTool(), a.getChildTool(), a.cancelChildTool())
+		a.tools = append(a.tools, a.spawnTool(), a.listChildrenTool(), a.cancelChildTool())
 	}
 	a.builtinsInjected = true
 }

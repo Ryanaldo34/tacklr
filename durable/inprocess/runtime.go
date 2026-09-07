@@ -58,9 +58,6 @@ type sessionProc struct {
 	result   string
 	termErr  error
 	yielded  bool
-	// childParks maps a parent tool call id (get_child / blocking spawn) to the
-	// child session that should receive the next Resume payload.
-	childParks map[string]durable.SessionID
 	// state is CreateSession.State until the first persist writes it into the checkpoint.
 	state map[string]any
 	// stateGen increments whenever state is replaced so persist can detect a concurrent merge.
@@ -79,6 +76,21 @@ type sessionProc struct {
 	// (Cancel, Close, client-stopped turn). Not canceled when a turn parks.
 	kids     context.Context
 	stopKids context.CancelFunc
+
+	// wake unblocks ActionWait / WaitJob. Buffered so a job finish is not lost.
+	wake chan struct{}
+	// runners are named background jobs that are not child sessions.
+	runners []*runnerJob
+}
+
+func (p *sessionProc) ping() {
+	if p == nil || p.wake == nil {
+		return
+	}
+	select {
+	case p.wake <- struct{}{}:
+	default:
+	}
 }
 
 // Runtime is the in-process durable.Runtime: one goroutine per session.
@@ -87,6 +99,7 @@ type Runtime struct {
 	snapshots  durable.SnapshotStore
 	events     *MemoryEventLog
 	projection vfs.Projection
+	jobs       map[string]durable.JobHandler
 
 	mu       sync.RWMutex
 	sessions map[durable.SessionID]*sessionProc
@@ -98,6 +111,9 @@ type Config struct {
 	// Snapshots is the session record. Required.
 	Snapshots  durable.SnapshotStore
 	Projection vfs.Projection
+	// Jobs are named background workers Schedule can start. Specialist
+	// names on the catalog take precedence.
+	Jobs map[string]durable.JobHandler
 }
 
 // New constructs an in-process Runtime.
@@ -117,6 +133,7 @@ func New(cfg Config) *Runtime {
 		snapshots:  cfg.Snapshots,
 		events:     NewMemoryEventLog(),
 		projection: proj,
+		jobs:       cfg.Jobs,
 		sessions:   make(map[durable.SessionID]*sessionProc),
 	}
 }
@@ -186,7 +203,7 @@ func (r *Runtime) CreateSession(ctx context.Context, req durable.CreateSession) 
 		mcp:        mcp,
 		mounts:     mounts,
 		signals:    make(chan signal, 8),
-		childParks: make(map[string]durable.SessionID),
+		wake:       make(chan struct{}, 1),
 	}
 	p.kids, p.stopKids = context.WithCancel(context.Background())
 	if parent != nil {
@@ -290,12 +307,19 @@ func (r *Runtime) Resume(ctx context.Context, sessionID durable.SessionID, resum
 func (r *Runtime) stopChildren(ctx context.Context, p *sessionProc) {
 	p.mu.Lock()
 	p.children = nil
+	runners := p.runners
+	p.runners = nil
 	if p.stopKids != nil {
 		p.stopKids()
 		p.kids, p.stopKids = context.WithCancel(context.Background())
 	}
 	parentID := p.id
 	p.mu.Unlock()
+	for _, j := range runners {
+		if j.cancel != nil {
+			j.cancel()
+		}
+	}
 	r.mu.RLock()
 	var kids []durable.SessionID
 	for id, child := range r.sessions {
@@ -501,6 +525,7 @@ func (r *Runtime) queuePrompt(p *sessionProc, msg durable.Prompt) error {
 	p.state = adapter.MergeUserState(p.state, msg.State)
 	p.stateGen++
 	p.inbox.Push(adapter.UserFromPrompt(msg.Text, msg.UserMessage))
+	p.ping()
 	return nil
 }
 
@@ -580,7 +605,6 @@ func (r *Runtime) loop(p *sessionProc) {
 			resumeCount = len(resume)
 			auth = sig.resume.Auth
 			turnState = sig.resume.State
-			r.forwardChildResume(parent, p, sig.resume)
 		} else {
 			if err := r.applyPromptMeta(p, sig.prompt); err != nil {
 				if sig.reply != nil {
@@ -610,6 +634,7 @@ func (r *Runtime) loop(p *sessionProc) {
 		p.cancelTurn = cancel
 		p.turnDone = done
 		p.mu.Unlock()
+		p.ping()
 		if sig.reply != nil {
 			sig.reply <- nil
 		}
@@ -633,7 +658,6 @@ func (r *Runtime) loop(p *sessionProc) {
 
 func (r *Runtime) noteOutcome(p *sessionProc, o turnOutcome) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	switch o {
 	case turnComplete:
 		p.terminal = durable.SessionComplete
@@ -644,5 +668,13 @@ func (r *Runtime) noteOutcome(p *sessionProc, o turnOutcome) {
 	case turnYield:
 		p.yielded = true
 		p.terminal = ""
+	}
+	parent := p.parent
+	p.mu.Unlock()
+	p.ping()
+	if parent != "" {
+		if par, err := r.get(parent); err == nil && par != nil {
+			par.ping()
+		}
 	}
 }

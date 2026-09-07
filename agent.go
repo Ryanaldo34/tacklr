@@ -35,8 +35,8 @@ type TurnManager struct {
 	// pendingToolCalls is keyed by tool call id, which is also the wire interrupt id.
 	pendingToolCalls map[string]PendingToolCall
 	pendingMu        sync.Mutex
-	// childHost, when set, is nested Runtime sessions. Nil: child methods fail.
-	childHost    ChildHost
+	// jobHost, when set, is nested sessions and named workers. Nil: job methods fail.
+	jobHost      JobHost
 	skillByName  map[string]skills.Skill
 	skillsLoader skills.SkillLoader
 	// hostInterceptors and hostResultHooks are the host-supplied session
@@ -63,10 +63,10 @@ type TurnManager struct {
 	runMu sync.Mutex
 }
 
-// BindChildHost installs nested-session operations. Durable runtimes call this
-// after NewTurnManager. Nil: child methods fail.
-func (a *TurnManager) BindChildHost(host ChildHost) {
-	a.childHost = host
+// BindJobHost installs job operations. Durable runtimes call this after
+// NewTurnManager. Nil: job methods fail.
+func (a *TurnManager) BindJobHost(host JobHost) {
+	a.jobHost = host
 }
 
 func (a *TurnManager) pendingSnapshot() map[string]PendingToolCall {
@@ -222,11 +222,10 @@ When solving a task:
 AVAILABLE SPECIALISTS:
 You can delegate tasks to specialists using spawn_specialist. Each specialist has its own instructions, tools, and model — choose the one best suited to the task. Spawn a specialist when several subtasks can run in parallel, or when a task needs significant research or analysis and you only need the final output. Prefer a smaller plan over many specialists.
 
-spawn_specialist block defaults to true and waits for the result. Set block=false to start a child session and continue other work. Tool roles:
-- list_children: status of child sessions (running until complete, failed, or cancelled — including while waiting for user input).
-- get_child: status or result by default; block=true waits, and if the child needs user input this call parks until Resume.
-- cancel_child: stop a child that is no longer needed.
-The turn cannot finish while child sessions remain. Collect each result with get_child, or cancel_child when the work is not needed.
+spawn_specialist block defaults to true and waits for the result. Set block=false to start a job and continue other work; the result arrives as a later message. Tool roles:
+- list_children: status of jobs (running until complete, failed, or cancelled).
+- cancel_child: stop a job that is no longer needed.
+The turn stays open while jobs remain. Finished jobs arrive as messages. Use cancel_child when the work is not needed.
 
 %s`, builtIn, subList)
 	}

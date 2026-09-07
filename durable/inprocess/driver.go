@@ -45,7 +45,7 @@ func (r *Runtime) constructHarness(ctx context.Context, p *sessionProc, bindings
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	h.BindChildHost(sessionChildren{r: r, p: p})
+	h.BindJobHost(sessionJobs{r: r, p: p})
 	rev, err := adapter.RestoreTurn(ctx, r.snapshots, p.id, h, state)
 	if err != nil {
 		adapter.AbandonTurn(h, ms, skillsMS)
@@ -218,7 +218,7 @@ func (r *Runtime) runTurn(ctx context.Context, p *sessionProc, user *tacklr.Mess
 		if ctx.Err() != nil {
 			return cancelled()
 		}
-		nudge := ""
+		jobsRemain := false
 		if adapter.InboxSafe(len(toolCalls), parked) {
 			n, live, err := r.drainInbox(ctx, p, eng, out)
 			if err != nil {
@@ -227,17 +227,15 @@ func (r *Runtime) runTurn(ctx context.Context, p *sessionProc, user *tacklr.Mess
 				}
 				return r.fail(ctx, p, err)
 			}
+			jobsRemain = live > 0
 			if n > 0 {
 				inferComplete = false
 				if err := r.persistHarness(ctx, p, h); err != nil {
 					return r.fail(ctx, p, err)
 				}
 			}
-			if inferComplete {
-				nudge = adapter.ChildrenNudge(live)
-			}
 		}
-		switch tacklr.Next(len(toolCalls), parked, inferComplete, nudge != "") {
+		switch tacklr.Next(len(toolCalls), parked, inferComplete, jobsRemain) {
 		case tacklr.ActionInfer:
 			step, infErr := eng.RunInference(ctx, st, out)
 			if ctx.Err() != nil {
@@ -289,12 +287,13 @@ func (r *Runtime) runTurn(ctx context.Context, p *sessionProc, user *tacklr.Mess
 				return r.fail(ctx, p, err)
 			}
 			return r.commitTurn(ctx, p, turnComplete, &tacklr.StreamEvent{Type: tacklr.StreamEventComplete})
-		case tacklr.ActionNudge:
-			if err := eng.AbsorbUser(ctx, &tacklr.Message{Role: tacklr.RoleUser, Content: nudge}, out); err != nil {
+		case tacklr.ActionWait:
+			if err := r.waitJobs(ctx, p); err != nil {
+				if ctx.Err() != nil {
+					return cancelled()
+				}
 				return r.fail(ctx, p, err)
 			}
-			st.HadToolRound = true
-			inferComplete = false
 		}
 	}
 }

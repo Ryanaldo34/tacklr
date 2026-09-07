@@ -17,13 +17,13 @@ func (stubRuntime) Park(string, []byte) (tacklr.Interrupt, error) {
 	return nil, interrupt.ErrInterruptNotFound
 }
 func (stubRuntime) CurrentToolCallID() string { return "" }
-func (stubRuntime) SpawnChild(context.Context, string, string) (string, error) {
-	return "", tacklr.ErrFailed
+func (stubRuntime) Schedule(context.Context, tacklr.JobRequest) (tacklr.Job, error) {
+	return tacklr.Job{}, tacklr.ErrFailed
 }
-func (stubRuntime) Children() []tacklr.Child { return nil }
-func (stubRuntime) CancelChild(context.Context, string) error {
+func (stubRuntime) Jobs() []tacklr.Job { return nil }
+func (stubRuntime) CancelJob(context.Context, string) error {
 	return tacklr.ErrFailed
 }
-func (stubRuntime) AwaitChild(context.Context, string) (tacklr.Child, error) {
-	return tacklr.Child{}, tacklr.ErrNotFound
+func (stubRuntime) WaitJob(context.Context, string) (tacklr.Job, error) {
+	return tacklr.Job{}, tacklr.ErrNotFound
 }

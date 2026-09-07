@@ -52,6 +52,7 @@ type activities struct {
 	Fallback       durable.EventLog
 	DisableStreams bool
 	Secrets        durable.SecretStorage
+	Jobs           map[string]durable.JobHandler
 }
 
 // inferenceInput is one Inference step. Rec is the Snapshot row to persist
@@ -91,11 +92,17 @@ type toolOutput struct {
 	Interrupted   bool
 	InterruptID   string
 	InterruptData []byte
-	SpawnID       durable.SessionID
-	SpawnSpec     string
-	SpawnTask     string
 	CancelID      durable.SessionID
 	AwaitID       durable.SessionID
+	JobID         durable.SessionID
+	JobName       string
+	JobTask       string
+	Child         bool
+}
+
+type runJobInput struct {
+	Name string
+	Task string
 }
 
 // commitToolInput records a tool output on the staged batch without executing
@@ -232,9 +239,10 @@ func (a *activities) Tool(ctx context.Context, in toolInput) (toolOutput, error)
 		parent:  in.SessionID,
 		agentID: in.Rec.AgentID,
 		catalog: a.Catalog,
+		jobs:    a.Jobs,
 		known:   append([]durable.SessionID(nil), in.Rec.Children...),
 	}
-	h.BindChildHost(kids)
+	h.BindJobHost(kids)
 	eng := h.Drive()
 	out, stop := tacklr.PipeStreamEvents(a.emitter(ctx, stream, in.SessionID))
 	defer stop()
@@ -264,12 +272,24 @@ func (a *activities) Tool(ctx context.Context, in toolInput) (toolOutput, error)
 		Interrupted:   step.Interrupted,
 		InterruptID:   step.InterruptID,
 		InterruptData: step.InterruptData,
-		SpawnID:       kids.spawnID,
-		SpawnSpec:     kids.spawnSpec,
-		SpawnTask:     kids.spawnTask,
 		CancelID:      kids.cancelID,
 		AwaitID:       kids.awaitID,
+		JobID:         kids.jobID,
+		JobName:       kids.jobName,
+		JobTask:       kids.jobTask,
+		Child:         kids.child,
 	}, nil
+}
+
+func (a *activities) RunJob(ctx context.Context, in runJobInput) (string, error) {
+	if a.Jobs == nil {
+		return "", fmt.Errorf("%w: %s", tacklr.ErrNotFound, in.Name)
+	}
+	fn, ok := a.Jobs[in.Name]
+	if !ok {
+		return "", fmt.Errorf("%w: %s", tacklr.ErrNotFound, in.Name)
+	}
+	return fn(ctx, in.Task)
 }
 
 func (a *activities) CommitToolOutput(ctx context.Context, in commitToolInput) (toolOutput, error) {

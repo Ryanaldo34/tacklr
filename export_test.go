@@ -36,7 +36,7 @@ func turnRuntime(h *TurnManager) HarnessRuntime {
 		for range ch {
 		}
 	}()
-	return newToolRuntime(ch, h.session, h.childHost)
+	return newToolRuntime(ch, h.session, h.jobHost)
 }
 
 func mustNewTurnManager(t testing.TB, opts AgentOptions) *TurnManager {

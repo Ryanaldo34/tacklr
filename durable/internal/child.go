@@ -27,11 +27,11 @@ func OverlaySpecialist(parent durable.AgentSpec, specialist string) (durable.Age
 func ChildState(st durable.SessionState) string {
 	switch st {
 	case durable.SessionComplete:
-		return tacklr.ChildCompleted
+		return tacklr.JobCompleted
 	case durable.SessionFailed:
-		return tacklr.ChildFailed
+		return tacklr.JobFailed
 	default:
-		return tacklr.ChildRunning
+		return tacklr.JobRunning
 	}
 }
 
@@ -46,40 +46,40 @@ func NormalizeSpawn(specialist, task string) (string, string, error) {
 	return specialist, task, nil
 }
 
-// UnknownChild is get_child/cancel_child with an id that is not this session's child.
+// HasSpecialist reports whether agentID's catalog spec names a specialist.
+func HasSpecialist(cat durable.Catalog, agentID, name string) bool {
+	if cat == nil {
+		return false
+	}
+	spec, ok := cat.Lookup(agentID)
+	return ok && tacklr.FindSpecialist(spec.Options.Specialists, name) != nil
+}
+
+// UnknownChild is cancel/wait with an id that is not this session's job.
 func UnknownChild(id string) error {
 	return fmt.Errorf("job %q is unknown; call list_children and use an id from that list: %w", id, tacklr.ErrNotFound)
 }
 
-// ChildrenNudge is injected when inference would complete while children remain.
-func ChildrenNudge(rows []durable.SessionStatus) string {
-	if len(rows) == 0 {
-		return ""
-	}
-	var b strings.Builder
-	b.Grow(280 + 48*len(rows))
-	b.WriteString("Automated harness nudge: This turn still has child sessions whose results have not been collected:\n")
-	for _, r := range rows {
-		fmt.Fprintf(&b, "- id=%s status=%s\n", r.ID, ChildState(r.State))
-	}
-	b.WriteString("The turn cannot finish while children remain. Continue useful work if possible. Otherwise call get_child with block=true to wait for and collect each result. Use cancel_child only when a child is no longer needed.")
-	return b.String()
-}
-
-// ChildJobMessage is the RoleUser window text when a non-blocking child
-// reaches complete or failed. It is a new message, not a second RoleTool
-// for the spawn call_id.
-func ChildJobMessage(st durable.SessionStatus) *tacklr.Message {
-	body := st.Result
+// JobSteer is the RoleUser inbox text when a non-blocking job reaches
+// complete or failed. It is a new message, not a second RoleTool for the
+// schedule call_id.
+func JobSteer(id, name, body string, failed bool) *tacklr.Message {
 	verb := "completed"
-	if st.State == durable.SessionFailed {
+	if failed {
 		verb = "failed"
-		if body == "" && st.Err != nil {
-			body = st.Err.Error()
-		}
 	}
 	return &tacklr.Message{
 		Role:    tacklr.RoleUser,
-		Content: fmt.Sprintf("Child %s (%s) %s:\n%s", st.ID, st.Specialist, verb, body),
+		Content: fmt.Sprintf("Job %s (%s) %s:\n%s", id, name, verb, body),
 	}
+}
+
+// ChildJobMessage is JobSteer for a nested session job.
+func ChildJobMessage(st durable.SessionStatus) *tacklr.Message {
+	body := st.Result
+	failed := st.State == durable.SessionFailed
+	if failed && body == "" && st.Err != nil {
+		body = st.Err.Error()
+	}
+	return JobSteer(string(st.ID), st.Specialist, body, failed)
 }
