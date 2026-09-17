@@ -1,6 +1,7 @@
 package tacklr
 
 import (
+	"context"
 	"fmt"
 	"maps"
 	"slices"
@@ -72,9 +73,15 @@ func (a *TurnManager) spawnTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "spawn_specialist",
 		DisplayName: "Spawn {specialist}",
-		Description: "Spawn a specialist as a nested session. block defaults to true and runs it in line: this tool returns the specialist result. Set block=false to schedule it as a job and continue other work; the result arrives as a later message. Use list_children or cancel_child to inspect or stop jobs.",
+		Description: "Start a specialist for a focused subtask. Use when several subtasks can run in parallel, or when a task needs substantial research or analysis and you only need the final output. Prefer a smaller plan over many specialists. block defaults to true and waits for the result. Set block=false to start a job and continue other work; the result arrives as a later message. Use list_children to inspect jobs, or cancel_child to stop a job that is no longer needed.",
 		Category:    ToolCategoryExecute,
-		Handler:     spawnSpecialist,
+		Handler: func(ctx context.Context, args spawnSpecialistArgs, runtime HarnessRuntime) (string, error) {
+			out, err := spawnSpecialist(ctx, args, runtime)
+			if err == nil {
+				a.retainCollapse(ctx, collapseEvent{Trigger: triggerSpecialist, Body: out})
+			}
+			return out, err
+		},
 	})
 }
 
@@ -88,7 +95,7 @@ func (a *TurnManager) listChildrenTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "list_children",
 		DisplayName: "List jobs",
-		Description: "Non-blocking overview of jobs (running, completed, failed). Status stays running while a specialist child waits for user input. Finished jobs arrive as messages. Use cancel_child to stop work that is no longer needed.",
+		Description: "List jobs (running, completed, failed) without waiting. Status stays running while a specialist is waiting for user input. Finished jobs arrive as later messages. Use cancel_child to stop work that is no longer needed.",
 		Category:    ToolCategoryExecute,
 		Handler:     listChildren,
 	})

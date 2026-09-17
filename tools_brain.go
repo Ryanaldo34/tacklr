@@ -58,9 +58,9 @@ func (b brainTools) newReadObjectTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "read_object",
 		DisplayName: "Read object {object_id}",
-		Description: `Read a knowledge object by UUID (full stored body as JSON).
+		Description: `Read a knowledge record by id (full body).
 
-Use after search, find_exact, find_objects, or expand when the hit has no vfs_path (Deal, Fact, Person, …). Pass object_id from that result. Do not invent ids. Files: use read on vfs_path instead.`,
+Use when a search hit has no file path. Pass object_id from that result. Do not invent ids. Files: use read on the path instead.`,
 		Category: ToolCategoryRead,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
@@ -91,9 +91,9 @@ func (b brainTools) newSchemaTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "schema",
 		DisplayName: "Schema {kind}",
-		Description: `Discover kind documentation, object columns, and filterable fields.
+		Description: `List kinds and their fields.
 
-Call with a kind to see columns (title, summary, content) and filterable_fields for that kind. Call with no kind to list registered kinds. Query text on search/find_exact matches chunk title/summary/content; structured fields go in filters. find_objects searches parent records with the same filter keys. Prefer schema() before inventing property names. When kinds are registered, property filters require a kind key (or find_objects.kinds). Core filter keys: kind, title, created_after, created_before, updated_after, updated_before.`,
+Call with a kind for columns and filterable_fields. Call with no kind to list kinds. Use before inventing property names. Query text on search/find_exact matches note and file bodies; structured fields go in filters. find_objects searches whole records with the same filter keys. When kinds are registered, property filters require a kind (or find_objects.kinds). Core filter keys: kind, title, created_after, created_before, updated_after, updated_before.`,
 		Category: ToolCategoryRead,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
@@ -120,12 +120,12 @@ func (b brainTools) newSearchTool() *Tool {
 	return b.newQueryTool(ToolConfig{
 		Name:        "search",
 		DisplayName: "Search knowledge: {query}",
-		Description: `Search notes and indexed files. Query is free text over chunk bodies. Returns ranked parents with evidence snippets.
+		Description: `Search notes and indexed files. Free-text query; returns ranked records with short snippets.
 
-Structured fields on a record (stage, status, …) belong in filters — see schema() — or use find_objects for the record itself.
-Hit has vfs_path → open the live file with read (path + start_line / block_id from evidence).
-No vfs_path → read_object with the id.
-Live grep is run_command → rg (not this tool). Relationships: expand, not search. More pages: continue.`,
+Use when starting a new plan to find durable facts related to the task, and after a handoff if a needed detail is missing from the current notes rather than reconstructing it. Structured fields (stage, status, …) belong in filters — see schema() — or use find_objects for the record itself.
+Hit has a file path → open the live file with read (path + start_line / block_id from evidence).
+Otherwise → read_object with the id.
+Live grep is run_command → rg. Relationships: expand. More pages: continue.`,
 		Category: ToolCategorySearch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
@@ -226,9 +226,9 @@ func (b brainTools) newExpandTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "expand",
 		DisplayName: "Expand {path}",
-		Description: `Neighbors of a known path or object_id — not a search.
+		Description: `List neighbors of a known path or id — not a search.
 
-Prefer path for files. ls / rg do not list graph edges. Omit relation_types for containment only; named types need a graph backend. File neighbors: read. Other neighbors: read_object. Large pages: continue.`,
+Prefer path for files. Omit relation_types for parent/child only; pass named types to follow relationships. File neighbors: read. Other neighbors: read_object. Large pages: continue.`,
 		Category: ToolCategoryFetch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
@@ -271,13 +271,13 @@ type saveObjectArgs struct {
 func (b brainTools) newSaveTool(name, display, kind, roleDesc string) *Tool {
 	desc := `Save a ` + roleDesc + ` as kind ` + kind + `.`
 	if _, ok := b.brainMountForKind(""); ok {
-		desc = `Write the Engram Markdown for a ` + roleDesc + ` (kind ` + kind + `) on the brain mount.
+		desc = `Save a ` + roleDesc + ` (kind ` + kind + `) as a Markdown file.
 
-Prefer write on that path. Thin write: YAML front matter + body under /engram/{kind}/ (or a roots mount). Returns path + id. Re-open the file with read; pass object_id to update.`
+Call when a finding should survive later steps as a durable record. Returns path and id. Re-open with read; pass object_id to update.`
 	} else {
 		desc += `
 
-Call schema() for this kind before inventing property keys. Pass object_id to update. Re-open with read_object.`
+Call when a finding should survive later steps as a durable record. Call schema() for this kind before inventing property keys. Pass object_id to update. Re-open with read_object.`
 	}
 	return NewTool(ToolConfig{
 		Name:        name,
@@ -321,14 +321,14 @@ type linkArgs struct {
 type findObjectsArgs struct {
 	namespaceArg
 	Query   string         `json:"query" desc:"Semantic or keyword query for whole knowledge objects (entities)."`
-	Kinds   []string       `json:"kinds,omitempty" desc:"Optional host kind names to restrict results (e.g. Deal, Fact). Prefer schema() for valid kinds."`
+	Kinds   []string       `json:"kinds,omitempty" desc:"Optional kind names to restrict results. Prefer schema() for valid kinds."`
 	Filters map[string]any `json:"filters,omitempty" desc:"Optional field→value filters (same keys as search). Prefer schema() for filterable_fields. Property filters require kind when kinds are registered (or set kinds here)."`
 	Limit   int            `json:"limit,omitempty" desc:"Max results for this page (default 10, max 50)."`
 }
 
 type findLinksArgs struct {
 	namespaceArg
-	RelationType string `json:"relation_type" desc:"Edge label to search (e.g. about, references). Host must ensure an edge text index for this label on Helix."`
+	RelationType string `json:"relation_type" desc:"Relation label to search (e.g. about, references)."`
 	Query        string `json:"query" desc:"Text query matched against edge note metadata."`
 	Limit        int    `json:"limit,omitempty" desc:"Max links for this page (default 10, max 50)."`
 }
@@ -366,9 +366,9 @@ func (b brainTools) newFindObjectsTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "find_objects",
 		DisplayName: "Find objects: {query}",
-		Description: `Find whole knowledge objects (Deal, Fact, …), not ranked passages.
+		Description: `Find a named record (a paper, person, experiment, fact, or earlier session note), not a passage.
 
-Use to resolve which tracked entity matches the ask. Evidence in notes/files: search instead. Already have the id: expand or read_object. More pages: continue. Call schema() before inventing filter keys.`,
+Use to resolve which record matches the ask. When starting a new plan, look up durable facts related to the task. After a handoff, look up findings that may have been saved. Passages in notes or files: search. Already have the id: read_object. More pages: continue. Call schema() before inventing filter keys.`,
 		Category: ToolCategorySearch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
@@ -400,12 +400,10 @@ func (b brainTools) newLinkTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "link",
 		DisplayName: "Link {from} → {to}",
-		Description: `Create a relationship between two first-class knowledge objects (graph edge). Prefer virtual paths. Engram paths resolve via vfs_path; artifact paths must already be indexed (index_file or mount policy). UUID from_id/to_id remain for non-file objects.
-
-Both ends must exist under the current search namespace, must not be soft-deleted, and must not be part/chunk objects. list/ls never lists edges. Optional note/status/role/confidence/evidence_id annotate why the link exists; expand returns that metadata. Re-linking the same pair updates metadata.`,
-		Category: ToolCategoryEdit,
-		Access:   ToolWriteAccess,
-		Timeout:  30 * time.Second,
+		Description: `Create a relationship between two records. Prefer file paths; use from_id/to_id when there is no path. Files must already be indexed. Both ends must exist. Optional note/status/role/confidence/evidence_id explain the link; expand returns that metadata. Re-linking the same pair updates metadata.`,
+		Category:    ToolCategoryEdit,
+		Access:      ToolWriteAccess,
+		Timeout:     30 * time.Second,
 		Handler: func(ctx context.Context, args linkArgs, runtime HarnessRuntime) (string, error) {
 			scope, err := b.scope(args.Namespace)
 			if err != nil {
@@ -452,12 +450,10 @@ func (b brainTools) newUnlinkTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "unlink",
 		DisplayName: "Unlink {from} → {to}",
-		Description: `Remove a relationship between two first-class knowledge objects. Prefer virtual paths (same resolution as link). list/ls never lists edges.
-
-Both ends must exist under the current search namespace and must not be parts. Idempotent if the edge is already gone.`,
-		Category: ToolCategoryEdit,
-		Access:   ToolWriteAccess,
-		Timeout:  30 * time.Second,
+		Description: `Remove a relationship between two records. Prefer file paths (same as link). Safe to call if the relationship is already gone.`,
+		Category:    ToolCategoryEdit,
+		Access:      ToolWriteAccess,
+		Timeout:     30 * time.Second,
 		Handler: func(ctx context.Context, args linkArgs, runtime HarnessRuntime) (string, error) {
 			scope, err := b.scope(args.Namespace)
 			if err != nil {

@@ -67,6 +67,9 @@ type modelIdentityProvider interface {
 type AbsorbResult struct {
 	// SummaryChunks are compress summaries to stream when StreamFitSummary is true.
 	SummaryChunks []LLMResponseChunk
+	Compressed    bool
+	Summary       string
+	Discarded     []*Message
 }
 
 // modelTasks is Turn, Absorb, and Handoff against InferenceStrategy and contextManager.
@@ -127,12 +130,12 @@ func (t *defaultModelTasks) Absorb(ctx context.Context, msg *Message, tools []*T
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	window, chunks, _, err := t.absorbFit(ctx, t.context.Messages(), msg, tools)
+	window, chunks, compressed, discarded, summary, err := t.absorbFit(ctx, t.context.Messages(), msg, tools)
 	if err != nil {
 		return AbsorbResult{}, err
 	}
 	t.context.Replace(window)
-	return AbsorbResult{SummaryChunks: chunks}, nil
+	return AbsorbResult{SummaryChunks: chunks, Compressed: compressed, Summary: summary, Discarded: discarded}, nil
 }
 
 func (t *defaultModelTasks) Handoff(ctx context.Context, plan []Todo, planDoc string, tools []*Tool, systemPrompt string) error {
@@ -167,7 +170,7 @@ func (t *defaultModelTasks) absorbFit(
 	window []*Message,
 	newMsg *Message,
 	tools []*Tool,
-) (out []*Message, chunks []LLMResponseChunk, compressed bool, err error) {
+) (out []*Message, chunks []LLMResponseChunk, compressed bool, discarded []*Message, summary string, err error) {
 	model := t.model
 	policy := t.policy
 	maxSize := t.maxSize
@@ -181,10 +184,10 @@ func (t *defaultModelTasks) absorbFit(
 	currSize, err := model.CountTokens(ctx, countView, tools)
 	if err != nil {
 		slog.ErrorContext(ctx, "failed to count tokens while absorbing message", "area", telemetry.AreaModelTasks, "error", err)
-		return nil, nil, false, fmt.Errorf("count tokens: %w", err)
+		return nil, nil, false, nil, "", fmt.Errorf("count tokens: %w", err)
 	}
 	if len(window) == 0 || float64(currSize) <= float64(maxSize)*policy.PressureRatio {
-		return slices.Clone(countView), nil, false, nil
+		return slices.Clone(countView), nil, false, nil, "", nil
 	}
 
 	slog.InfoContext(ctx, "max context window size exceeded or approaching, compressing context window",
@@ -192,14 +195,15 @@ func (t *defaultModelTasks) absorbFit(
 	telemetry.InstrumentsFromContext(ctx).RecordCompress(ctx, telemetry.AgentIDFromContext(ctx))
 
 	var sumPrompt strings.Builder
-	sumPrompt.Grow(280 + len(newMsg.Content))
-	sumPrompt.WriteString("Please summarize the entire message history into a single, concise summary including key items for your current and past tasks with a primary focus on your current task. Current task or follow-up question to answer: ")
+	sumPrompt.Grow(360 + len(newMsg.Content))
+	sumPrompt.WriteString("<instructions>\nSummarize the entire message history into a single, concise summary including key items for your current and past tasks with a primary focus on your current task.\n</instructions>\n<current_task>\n")
 	sumPrompt.WriteString(newMsg.Content)
+	sumPrompt.WriteString("\n</current_task>")
 	anchorLen := protectedPrefixLen(window)
 	anchors := window[:anchorLen]
 	unprotected := window[anchorLen:]
 	if len(unprotected) == 0 {
-		return slices.Clone(countView), nil, false, nil
+		return slices.Clone(countView), nil, false, nil, "", nil
 	}
 
 	// Progressive CountTokens probes reuse countScratch (no alloc per step).
@@ -225,7 +229,7 @@ func (t *defaultModelTasks) absorbFit(
 		for start < len(unprotected) {
 			count, err := model.CountTokens(ctx, stageCount(start), tools)
 			if err != nil {
-				return nil, nil, true, fmt.Errorf("count tokens: %w", err)
+				return nil, nil, true, nil, "", fmt.Errorf("count tokens: %w", err)
 			}
 			if float64(count) <= float64(maxSize)*policy.PressureRatio {
 				break
@@ -252,11 +256,11 @@ func (t *defaultModelTasks) absorbFit(
 	events, err := model.Invoke(mctx, compressSrc, nil, sumPrompt.String())
 	if err != nil {
 		mspan.End(err, telemetry.TokenUsage{})
-		return nil, nil, true, fmt.Errorf("context compress invoke failed: %w", err)
+		return nil, nil, true, nil, "", fmt.Errorf("context compress invoke failed: %w", err)
 	}
 
 	summaryMsg := &Message{Role: RoleAssistant}
-	var summary strings.Builder
+	var body strings.Builder
 	var outChunks []LLMResponseChunk
 	var streamErr error
 	var usage telemetry.TokenUsage
@@ -273,13 +277,14 @@ func (t *defaultModelTasks) absorbFit(
 		if policy.StreamFitSummary {
 			outChunks = append(outChunks, chunk)
 		}
-		summary.WriteString(chunk.Content)
+		body.WriteString(chunk.Content)
 	}
 	mspan.End(streamErr, usage)
 	if streamErr != nil {
-		return nil, nil, true, streamErr
+		return nil, nil, true, nil, "", streamErr
 	}
-	summaryMsg.Content = summary.String()
+	summaryText := body.String()
+	summaryMsg.Content = summaryText
 
 	// Single final allocation: anchors + summary + remaining unprotected + newMsg.
 	rest := unprotected[numMessagesToCompress:]
@@ -289,7 +294,7 @@ func (t *defaultModelTasks) absorbFit(
 	out = append(out, rest...)
 	out = append(out, newMsg)
 
-	return out, outChunks, true, nil
+	return out, outChunks, true, slices.Clone(compressSrc), summaryText, nil
 }
 
 // stageMessages returns t.countScratch resized to n (grows capacity when needed).
@@ -324,23 +329,27 @@ func handoffGenerate(
 		fmt.Fprintf(&planB, "- %s: %s\nStatus: %s\n", todo.Title, todo.Description, todo.Status)
 	}
 
-	const handoffPreamble = `Your task is to produce a handoff for someone to complete the remaining todo items in the plan, not a summary of the completed work, but rather, an informative overview of the process that has completed the work so far. You will ensure to inform the handoff recipient that this is a work in progress and that they should expect to complete the remaining todo items. This is your only task, and you will not add any additional commentary, thoughts, etc. This is not a generic summary as the handoff needs to include the following sections:
-	Objective: Overall mission and success criteria (brief; a durable PROJECT PLAN document will remain in context — do not restate the full blueprint).
-	Completed Work: What is now true because of the completed todo(s) and an overview of the current state of the plan & implementation. Someone should know exactly what was done & what work is remaining and be able to pick up the remaining work seamlessly.
-	Key Decisions: Architectural or implementation choices that should not be revisited.
-	State Changes: Files changed, APIs added/removed, new abstractions, configuration changes, etc.
-	Discoveries: Facts learned that affect remaining work (including anything that forced a plan revision).
-	Constraints: Requirements, assumptions, and invariants that future todos must respect.
-	Remaining Work: Newly discovered tasks, blockers, or dependencies.
-	Validation: What was verified and what still requires verification.
-	Relevant Context for Remaining Todos: Only information the next todos are likely to need which was gathered or observed in the completed work.
-
-Current plan todos:
+	const handoffPreamble = `<instructions>
+Your task is to produce a handoff for someone to complete the remaining todo items in the plan, not a summary of the completed work, but rather, an informative overview of the process that has completed the work so far. You will ensure to inform the handoff recipient that this is a work in progress and that they should expect to complete the remaining todo items. This is your only task, and you will not add any additional commentary, thoughts, etc. This is not a generic summary.
+</instructions>
+<required_sections>
+Objective: Overall mission and success criteria (brief; a durable PROJECT PLAN document will remain in context — do not restate the full blueprint).
+Completed Work: What is now true because of the completed todo(s) and an overview of the current state of the plan & implementation. Someone should know exactly what was done & what work is remaining and be able to pick up the remaining work seamlessly.
+Key Decisions: Architectural or implementation choices that should not be revisited.
+State Changes: Files changed, APIs added/removed, new abstractions, configuration changes, etc.
+Discoveries: Facts learned that affect remaining work (including anything that forced a plan revision).
+Constraints: Requirements, assumptions, and invariants that future todos must respect.
+Remaining Work: Newly discovered tasks, blockers, or dependencies.
+Validation: What was verified and what still requires verification.
+Relevant Context for Remaining Todos: Only information the next todos are likely to need which was gathered or observed in the completed work.
+</required_sections>
+<current_plan>
 `
 	var prompt strings.Builder
 	prompt.Grow(len(handoffPreamble) + planB.Len())
 	prompt.WriteString(handoffPreamble)
 	prompt.WriteString(planB.String())
+	prompt.WriteString("</current_plan>")
 
 	// Handoff is a pure writing task — no tools. On model failure, install a
 	// plan-derived handoff so ACM still rebuilds context.

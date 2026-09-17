@@ -321,7 +321,7 @@ func (a *TurnManager) initSkills(ctx context.Context) error {
 func (a *TurnManager) skillTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "read_skill",
-		Description: "Load the full instructions for an available skill.",
+		Description: "Load the full instructions for an available skill listed in the skills catalog. Call with the skill name when that skill is relevant to the current work.",
 		Handler: func(ctx context.Context, args struct {
 			Name string `json:"name" desc:"Skill name from the available skills catalog"`
 		}) (string, error) {

@@ -98,7 +98,7 @@ func newCreatePlanTool(sm *sessionManager) *Tool {
 	return NewTool(ToolConfig{
 		Name:        "create_plan",
 		DisplayName: "Create Plan",
-		Description: "Creates a project plan document and a linear todo list derived from it. Pass the full plaintext plan in plan and the derived todos in todos. Call only when no active plan exists. If a plan is already active, use edit_plan or complete_todo instead of create_plan.",
+		Description: "Create the plan document and a linear todo list derived from it. Pass the full plan in plan and the derived todos in todos. Call only when no plan exists yet. If a plan is already active, use edit_plan or complete_todo instead. After this succeeds, write and command tools become available, and the plan stays in view as the working blueprint.",
 		Category:    ToolCategoryThink,
 		Handler: func(ctx context.Context, args createTodosArgs) (ToolOutcome, error) {
 			if existing := sm.Plan.Get(); len(existing) > 0 {
@@ -139,7 +139,7 @@ func newListPlanTool(sm *sessionManager) *Tool {
 	return NewTool(ToolConfig{
 		Name:        "list_plan",
 		DisplayName: "List Plan",
-		Description: "Returns the active plan todo list exactly as stored (titles, statuses, descriptions, in order). Use before complete_todo or edit_plan so titles match exactly. Call after a handoff or whenever plan titles are unclear.",
+		Description: "Return the current todo list (titles, statuses, descriptions, in order). Use before complete_todo or edit_plan so titles match exactly. Call after a handoff or whenever plan titles are unclear.",
 		Category:    ToolCategoryRead,
 		Handler: func(ctx context.Context, _ HarnessRuntime) (string, error) {
 			plan := sm.Plan.Get()
@@ -163,7 +163,7 @@ func newCompleteTodoTool(sm *sessionManager) *Tool {
 	return NewTool(ToolConfig{
 		Name:        "complete_todo",
 		DisplayName: "Complete {title}",
-		Description: "Marks a todo as completed by exact title (must match list_plan / create_plan titles). Cannot complete a todo that is already completed or not found in the plan. When open work remains, advances the next todo and runs a context handoff. When the plan is fully done, returns success without a handoff so the agent can finish the user-facing answer.",
+		Description: "Mark a todo completed by exact title (must match the plan list). Cannot complete a missing or already completed todo. If work remains, the next todo starts and a handoff is written so you can continue without restating the plan. If the plan is finished, give the user-facing answer. Before closing a research or discovery todo, save durable findings and index key files that later todos will need.",
 		Category:    ToolCategoryEdit,
 		Handler: func(ctx context.Context, args completeTodoArgs) (ToolOutcome, error) {
 			plan := sm.Plan.Get()
@@ -215,7 +215,7 @@ func newEditPlanTool(sm *sessionManager) *Tool {
 	return NewTool(ToolConfig{
 		Name:        "edit_plan",
 		DisplayName: "Edit Plan",
-		Description: "Edits an existing plan by removing and/or adding todos. Optionally replace the full plaintext plan document via plan (must differ from the current document). Omit plan when only changing todos. Cannot delete completed todos.",
+		Description: "Edits an existing plan by removing and/or adding todos. Optionally replace the full plaintext plan document via plan (must differ from the current document). Omit plan when only changing todos. Do not resubmit an identical plan document. Cannot delete completed todos.",
 		Category:    ToolCategoryEdit,
 		Handler: func(ctx context.Context, args editTodosArgs) (ToolOutcome, error) {
 			plan := sm.Plan.Get()

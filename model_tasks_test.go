@@ -155,6 +155,9 @@ func TestDefaultModelTasks_absorbFitCompressesOverMaxWindow(t *testing.T) {
 	if len(result.SummaryChunks) == 0 {
 		t.Fatal("expected streamed summary chunks")
 	}
+	if !result.Compressed || result.Summary == "" || len(result.Discarded) == 0 {
+		t.Fatalf("absorb residue = compressed=%v summary=%q discarded=%d", result.Compressed, result.Summary, len(result.Discarded))
+	}
 	window := tasks.context.Messages()
 	if len(window) < 3 || !strings.Contains(window[1].Content, "summary") {
 		t.Fatalf("compressed window = %+v", window)

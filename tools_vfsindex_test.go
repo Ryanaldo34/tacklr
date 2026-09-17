@@ -481,7 +481,7 @@ func TestRun_workspaceResearchTurn(t *testing.T) {
 			prompt = strategy.systemPrompts[n-1]
 		}
 		strategy.mu.Unlock()
-		if strings.Contains(prompt, "summarize the entire message history") {
+		if strings.Contains(strings.ToLower(prompt), "summarize the entire message history") {
 			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "WINDOW_SUMMARY", IsComplete: true}
 			return
 		}

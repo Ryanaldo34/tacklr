@@ -39,26 +39,23 @@ func (v vfsIndexTools) newIndexFile() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "index_file",
 		DisplayName: "Index {path}",
-		Description: `Index one or more key virtual files into the knowledge brain as Document + Chunks with vfs_path (and line/block anchors). Enables later brain search instead of re-reading large files into context across planning handoffs. Indexed hits are not a behavior-preserving stand-in for live grep.
+		Description: `Index a file so it can be found later by search instead of re-reading the whole file.
 
 WHEN TO USE
-- You found a file that matters for THIS plan or later open todos (specs, README, API docs, behavior-defining config).
-- Near the end of a research/discovery todo, before complete_todo, when the next handoff should not carry the full file body.
-- To seed search for a path under selective index policy (index_file is the promote step).
+- A file matters for this plan or later todos (papers, protocols, notes, specs).
+- Near the end of a research or discovery todo, before completing it, so the next step does not need the full file body.
 
 WHEN NOT TO USE
-- Do not index entire mounts, vendor trees, or "everything under /work".
-- Do not index binaries, generated noise, or secret dumps.
-- Do not index a one-off read for the current turn only — use read.
-- Prefer few paths (max 8 per call); select high-value files only.
-- Under mount IndexPolicy=none, this tool errors (indexing disabled).
+- Entire directory trees, binaries, generated files, or secrets.
+- A one-off read for the current step only — use read.
+- Prefer few paths (max 8 per call).
 
 HOW TO USE
-1) read (or outline) to confirm the right file. Live names/grep: run_command → fd / find / rg.
-2) index_file with path or a short paths list.
-3) Later: search for recall; open the live file with read (vfs_path + start_line / block_id). Not read_object.
+1) Confirm the file with read (live names/grep: run_command → fd / find / rg).
+2) Index the path, or a short paths list.
+3) Later: search to recall; open the live file with read using the path and line/block from the hit.
 
-Requires an active plan (writes unlock after create_plan). Returns compact status only — not file contents. Under selective policy, a successful index tracks the path so later persists reindex it. Under prefix/watch, AfterPersist already reindexes.`,
+Requires an active plan. Returns status only, not file contents.`,
 		Category: ToolCategoryExecute,
 		Access:   ToolWriteAccess,
 		Timeout:  120 * time.Second,
@@ -117,12 +114,10 @@ func (v vfsIndexTools) newUnindex() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "unindex",
 		DisplayName: "Unindex {path}",
-		Description: `Remove the brain mirror for a virtual path (soft-delete Document/Chunks for that vfs_path). Use when you indexed the wrong file or the path should no longer appear in search for this task.
-
-Does not delete the real VFS file. Idempotent if nothing was indexed. Requires an active plan. Prefer unindex over leaving misleading chunks for later todos. Also drops selective track for the path.`,
-		Category: ToolCategoryDelete,
-		Access:   ToolWriteAccess,
-		Timeout:  30 * time.Second,
+		Description: `Stop indexing a file so it no longer appears in search. Use when you indexed the wrong file. Does not delete the file. Requires an active plan.`,
+		Category:    ToolCategoryDelete,
+		Access:      ToolWriteAccess,
+		Timeout:     30 * time.Second,
 		Handler: func(ctx context.Context, args unindexArgs, runtime HarnessRuntime) (string, error) {
 			p, err := vfs.CleanPath(args.Path)
 			if err != nil {
