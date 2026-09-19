@@ -12,22 +12,22 @@ import (
 
 type createTodosArgs struct {
 	Plan  string `json:"plan" desc:"Full plaintext project plan (CoS, POS, WBS, scope, requirements). Required."`
-	Todos []Todo `json:"todos"`
+	Todos []Todo `json:"todos" desc:"Linear todo list derived from the plan. At least one item."`
 }
 
 type todoEdit struct {
-	Todo  Todo `json:"todo"`
-	Order int  `json:"order"`
+	Todo  Todo `json:"todo" desc:"Todo to insert."`
+	Order int  `json:"order" desc:"0-based insertion index (0..len(plan))."`
 }
 
 type editTodosArgs struct {
-	ToDelete []string   `json:"toDelete"`
-	ToAdd    []todoEdit `json:"toAdd"`
+	ToDelete []string   `json:"toDelete" desc:"Titles of incomplete todos to remove."`
+	ToAdd    []todoEdit `json:"toAdd" desc:"Todos to insert at the given order."`
 	Plan     string     `json:"plan" desc:"Optional. Full revised plaintext project plan. Omit or empty to leave the plan document unchanged. Must differ from the current plan when provided."`
 }
 
 type completeTodoArgs struct {
-	Title string `json:"title"`
+	Title string `json:"title" desc:"Exact todo title as stored in the plan list."`
 }
 
 type askUserChoiceOption struct {
@@ -44,7 +44,7 @@ type askUserChoiceArgs struct {
 var askUserChoiceTool = NewTool(ToolConfig{
 	Name:        "ask_user_choice",
 	DisplayName: "Ask: {question}",
-	Description: "Ask the user a multiple-choice clarification question and wait for their selection. Use when you need a discrete decision before continuing. Provide clear, mutually exclusive options.",
+	Description: "Park the turn and ask the user a multiple-choice question when you need a discrete decision before continuing. Returns the selected title (and description when one was given) after the user answers. Fails if the question is empty or fewer than two distinct choice titles are provided.",
 	Category:    ToolCategoryThink,
 	Handler: func(ctx context.Context, args askUserChoiceArgs, runtime HarnessRuntime) (string, error) {
 		if strings.TrimSpace(args.Question) == "" {
@@ -98,7 +98,7 @@ func newCreatePlanTool(sm *sessionManager) *Tool {
 	return NewTool(ToolConfig{
 		Name:        "create_plan",
 		DisplayName: "Create Plan",
-		Description: "Create the plan document and a linear todo list derived from it. Pass the full plan in plan and the derived todos in todos. Call only when no plan exists yet. If a plan is already active, use edit_plan or complete_todo instead. After this succeeds, write and command tools become available, and the plan stays in view as the working blueprint.",
+		Description: "Install the project's plan and the linear todo list derived from it. Call once at the start of multi-step work. On success returns \"Plan created successfully\", installs the plan in context, marks the first incomplete todo in-progress, and unlocks write and command tools. Fails if a plan already exists, plan text is empty, or todos is empty.",
 		Category:    ToolCategoryThink,
 		Handler: func(ctx context.Context, args createTodosArgs) (ToolOutcome, error) {
 			if existing := sm.Plan.Get(); len(existing) > 0 {
@@ -139,7 +139,7 @@ func newListPlanTool(sm *sessionManager) *Tool {
 	return NewTool(ToolConfig{
 		Name:        "list_plan",
 		DisplayName: "List Plan",
-		Description: "Return the current todo list (titles, statuses, descriptions, in order). Use before complete_todo or edit_plan so titles match exactly. Call after a handoff or whenever plan titles are unclear.",
+		Description: "Return the active todo list exactly as stored: titles, statuses, and descriptions, in order. Call after a handoff or whenever titles or statuses are unclear so later plan edits match exactly. Returns the numbered list. Fails if no plan exists yet.",
 		Category:    ToolCategoryRead,
 		Handler: func(ctx context.Context, _ HarnessRuntime) (string, error) {
 			plan := sm.Plan.Get()
@@ -163,7 +163,7 @@ func newCompleteTodoTool(sm *sessionManager) *Tool {
 	return NewTool(ToolConfig{
 		Name:        "complete_todo",
 		DisplayName: "Complete {title}",
-		Description: "Mark a todo completed by exact title (must match the plan list). Cannot complete a missing or already completed todo. If work remains, the next todo starts and a handoff is written so you can continue without restating the plan. If the plan is finished, give the user-facing answer. Before closing a research or discovery todo, save durable findings and index key files that later todos will need.",
+		Description: "Mark a todo completed when its acceptance criteria are met. Before closing a research or discovery todo, durable findings and indexed files should already be saved so later work can find them. If open todos remain, the next incomplete item is marked in-progress, a handoff is written into context, and the return names the todo now starting. If this was the last open todo, returns that all todos completed and leaves context intact so you can give the user-facing answer. Fails if no plan exists, the title is missing from the plan, or the todo is already completed.",
 		Category:    ToolCategoryEdit,
 		Handler: func(ctx context.Context, args completeTodoArgs) (ToolOutcome, error) {
 			plan := sm.Plan.Get()
@@ -215,7 +215,7 @@ func newEditPlanTool(sm *sessionManager) *Tool {
 	return NewTool(ToolConfig{
 		Name:        "edit_plan",
 		DisplayName: "Edit Plan",
-		Description: "Edits an existing plan by removing and/or adding todos. Optionally replace the full plaintext plan document via plan (must differ from the current document). Omit plan when only changing todos. Do not resubmit an identical plan document. Cannot delete completed todos.",
+		Description: "Change an existing plan's todos and, when needed, the plan document. On success returns \"Plan edited successfully\". If the plan document text changed, a handoff is written into context for remaining work. Fails if no plan exists, the plan document is unchanged, a delete title is missing, a completed todo is deleted, or order is out of bounds.",
 		Category:    ToolCategoryEdit,
 		Handler: func(ctx context.Context, args editTodosArgs) (ToolOutcome, error) {
 			plan := sm.Plan.Get()

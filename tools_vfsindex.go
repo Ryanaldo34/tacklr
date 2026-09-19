@@ -32,30 +32,16 @@ type indexFileArgs struct {
 }
 
 type unindexArgs struct {
-	Path string `json:"path" desc:"Absolute virtual path whose brain mirror should be soft-deleted. Does not delete the VFS file."`
+	Path string `json:"path" desc:"Absolute virtual path to remove from the search index. Does not delete the file."`
 }
 
 func (v vfsIndexTools) newIndexFile() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "index_file",
 		DisplayName: "Index {path}",
-		Description: `Index a file so it can be found later by search instead of re-reading the whole file.
+		Description: `Index one or more files into the knowledge store so later search can find them without carrying the full file body. Call for papers, protocols, notes, or specs that this plan or later todos will need, typically near the end of a research or discovery todo.
 
-WHEN TO USE
-- A file matters for this plan or later todos (papers, protocols, notes, specs).
-- Near the end of a research or discovery todo, before completing it, so the next step does not need the full file body.
-
-WHEN NOT TO USE
-- Entire directory trees, binaries, generated files, or secrets.
-- A one-off read for the current step only — use read.
-- Prefer few paths (max 8 per call).
-
-HOW TO USE
-1) Confirm the file with read (live names/grep: run_command → fd / find / rg).
-2) Index the path, or a short paths list.
-3) Later: search to recall; open the live file with read using the path and line/block from the hit.
-
-Requires an active plan. Returns status only, not file contents.`,
+Requires an active plan. Returns one status line per path: indexed, skipped (unchanged, binary, or empty), or error. Does not return file contents. The whole call fails (nothing indexed) if more than 8 paths are passed, a path is a directory, a path is missing, or indexing is disabled on that mount.`,
 		Category: ToolCategoryExecute,
 		Access:   ToolWriteAccess,
 		Timeout:  120 * time.Second,
@@ -114,7 +100,7 @@ func (v vfsIndexTools) newUnindex() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "unindex",
 		DisplayName: "Unindex {path}",
-		Description: `Stop indexing a file so it no longer appears in search. Use when you indexed the wrong file. Does not delete the file. Requires an active plan.`,
+		Description: `Remove a file from the knowledge index so it no longer appears in search. Call when the wrong file was indexed or it should no longer be found for this task. Does not delete the file on disk. Requires an active plan. Returns unindexed path=… when a record was removed, or noop path=… when nothing was indexed.`,
 		Category:    ToolCategoryDelete,
 		Access:      ToolWriteAccess,
 		Timeout:     30 * time.Second,

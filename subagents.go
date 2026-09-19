@@ -73,7 +73,7 @@ func (a *TurnManager) spawnTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "spawn_specialist",
 		DisplayName: "Spawn {specialist}",
-		Description: "Start a specialist for a focused subtask. Use when several subtasks can run in parallel, or when a task needs substantial research or analysis and you only need the final output. Prefer a smaller plan over many specialists. block defaults to true and waits for the result. Set block=false to start a job and continue other work; the result arrives as a later message. Use list_children to inspect jobs, or cancel_child to stop a job that is no longer needed.",
+		Description: "Run a named specialist on a focused subtask when work can proceed in parallel or needs substantial research or analysis and you only need the final output. When block is true (the default), waits and returns the specialist's result. When block is false, schedules a job and returns a job id; the result arrives later as a message and the current turn can continue. Fails if the specialist is unknown or the task is empty.",
 		Category:    ToolCategoryExecute,
 		Handler: func(ctx context.Context, args spawnSpecialistArgs, runtime HarnessRuntime) (string, error) {
 			out, err := spawnSpecialist(ctx, args, runtime)
@@ -95,7 +95,7 @@ func (a *TurnManager) listChildrenTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "list_children",
 		DisplayName: "List jobs",
-		Description: "List jobs (running, completed, failed) without waiting. Status stays running while a specialist is waiting for user input. Finished jobs arrive as later messages. Use cancel_child to stop work that is no longer needed.",
+		Description: "Return the current jobs (id, name, status) without waiting. Status stays running while a specialist is waiting for user input. Returns \"No jobs.\" when none exist, otherwise a list. Finished job results arrive as later messages; this call does not return those bodies.",
 		Category:    ToolCategoryExecute,
 		Handler:     listChildren,
 	})
@@ -105,7 +105,7 @@ func (a *TurnManager) cancelChildTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "cancel_child",
 		DisplayName: "Cancel job {child_id}",
-		Description: "Cancel and remove a job that is no longer needed. Completed and failed jobs are discarded without returning their result.",
+		Description: "Cancel a job and remove it. Call when that work is no longer needed. Returns that the job was cancelled and removed. Completed and failed jobs are discarded without returning their result. Fails if child_id is empty or unknown.",
 		Category:    ToolCategoryExecute,
 		Handler:     cancelChild,
 	})
