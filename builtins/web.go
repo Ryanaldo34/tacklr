@@ -65,7 +65,8 @@ func WebSearch(client *Exa) *tacklr.Tool {
 		Access:      tacklr.ToolReadAccess,
 		Timeout:     webSearchToolTimeout,
 		Handler: func(ctx context.Context, args webSearchArgs, runtime tacklr.HarnessRuntime) (string, error) {
-			return runWebSearch(ctx, client, args, runtime)
+			runtime.EmitUpdate("Searching the web…")
+			return runWebSearch(ctx, client, args)
 		},
 	})
 }
@@ -77,12 +78,11 @@ type searchPrep struct {
 	notes []string
 }
 
-func runWebSearch(ctx context.Context, client *Exa, args webSearchArgs, runtime tacklr.HarnessRuntime) (string, error) {
+func runWebSearch(ctx context.Context, client *Exa, args webSearchArgs) (string, error) {
 	prep, err := buildExaSearchRequest(args)
 	if err != nil {
 		return "", err
 	}
-	runtime.EmitUpdate("Searching the web…")
 	resp, err := client.Search(ctx, prep.req)
 	if retryExaConflict(err) {
 		prep.notes = append(prep.notes, "Provider rejected those filters; retried on the open web.")
@@ -397,17 +397,17 @@ func WebFetch(client *Exa) *tacklr.Tool {
 		Access:      tacklr.ToolReadAccess,
 		Timeout:     webFetchToolTimeout,
 		Handler: func(ctx context.Context, args webFetchArgs, runtime tacklr.HarnessRuntime) (string, error) {
-			return runWebFetch(ctx, client, args, runtime)
+			runtime.EmitUpdate("Fetching page content…")
+			return runWebFetch(ctx, client, args)
 		},
 	})
 }
 
-func runWebFetch(ctx context.Context, client *Exa, args webFetchArgs, runtime tacklr.HarnessRuntime) (string, error) {
+func runWebFetch(ctx context.Context, client *Exa, args webFetchArgs) (string, error) {
 	req, err := buildExaContentsRequest(args)
 	if err != nil {
 		return "", err
 	}
-	runtime.EmitUpdate("Fetching page content…")
 	resp, err := client.Contents(ctx, req)
 	if err != nil {
 		return "", mapExaErr("web_fetch", err)

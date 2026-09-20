@@ -156,7 +156,7 @@ func newRunCommandSession(t *testing.T) (*vfs.MountSession, HarnessRuntime) {
 	h := mustNewTurnManager(t, AgentOptions{
 		SessionID:    t.Name(),
 		MountSession: ms,
-		Model:        &mockStrategy{},
+		Model:        &scriptedModel{},
 	})
 	return ms, turnRuntime(h)
 }

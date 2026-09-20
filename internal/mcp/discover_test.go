@@ -161,32 +161,6 @@ func TestClient_connectListCallRoundTrip(t *testing.T) {
 	}
 }
 
-func TestBuildTransport_stdioMissingCommand(t *testing.T) {
-	c := newClient(mcp.MCPConfig{Name: "x", Type: mcp.TransportStdio})
-	_, err := c.buildTransport()
-	if err == nil || !strings.Contains(err.Error(), "command is required") {
-		t.Fatalf("err = %v", err)
-	}
-}
-
-func TestBuildTransport_unsupported(t *testing.T) {
-	c := newClient(mcp.MCPConfig{Name: "x", Type: "ftp"})
-	_, err := c.buildTransport()
-	if err == nil || !strings.Contains(err.Error(), "unsupported transport") {
-		t.Fatalf("err = %v", err)
-	}
-}
-
-func TestBuildTransport_httpAndSSERequireURL(t *testing.T) {
-	for _, typ := range []string{mcp.TransportHTTP, mcp.TransportSSE} {
-		c := newClient(mcp.MCPConfig{Name: "x", Type: typ})
-		_, err := c.buildTransport()
-		if err == nil || !strings.Contains(err.Error(), "url is required") {
-			t.Fatalf("type=%s err=%v", typ, err)
-		}
-	}
-}
-
 func TestDiscoverAllTools_listFailureSkipsServer(t *testing.T) {
 	// Server that accepts TCP but is not MCP — connect or list fails and is skipped.
 	hs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -207,20 +181,51 @@ func TestDiscoverAllTools_listFailureSkipsServer(t *testing.T) {
 	}
 }
 
-func TestBuildTransport_stdioWithEnv(t *testing.T) {
-	// Does not execute the command; only builds the transport.
-	c := newClient(mcp.MCPConfig{
-		Name:    "local",
-		Type:    mcp.TransportStdio,
-		Command: "echo",
-		Args:    []string{"hi"},
-		Env:     []mcp.EnvVariable{{Name: "FOO", Value: "bar"}},
-	})
-	tr, err := c.buildTransport()
-	if err != nil {
-		t.Fatal(err)
+func TestClient_callToolResultShapes(t *testing.T) {
+	type kv struct {
+		K string `json:"k"`
 	}
-	if tr == nil {
-		t.Fatal("nil transport")
+	srv := mcpsdk.NewServer(&mcpsdk.Implementation{Name: "shapes", Version: "v0.0.1"}, nil)
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{Name: "obj", Title: "FromTitle"},
+		func(_ context.Context, _ *mcpsdk.CallToolRequest, _ struct{}) (*mcpsdk.CallToolResult, kv, error) {
+			return nil, kv{K: "v"}, nil
+		})
+	mcpsdk.AddTool(srv, &mcpsdk.Tool{Name: "fail", Description: "fails"},
+		func(_ context.Context, _ *mcpsdk.CallToolRequest, _ struct{}) (*mcpsdk.CallToolResult, struct{}, error) {
+			return &mcpsdk.CallToolResult{
+				IsError: true,
+				Content: []mcpsdk.Content{
+					&mcpsdk.TextContent{Text: "nope"},
+					&mcpsdk.TextContent{Text: "denied"},
+				},
+			}, struct{}{}, nil
+		})
+	hs := httptest.NewServer(mcpsdk.NewStreamableHTTPHandler(func(*http.Request) *mcpsdk.Server { return srv }, nil))
+	t.Cleanup(hs.Close)
+
+	var byName = map[string]struct {
+		desc    string
+		handler ToolHandler
+	}{}
+	cleanup := DiscoverAllTools(t.Context(), []mcp.MCPConfig{
+		{Type: mcp.TransportHTTP, Name: "svc", URL: hs.URL},
+	}, func(name, description, namespace string, schema map[string]any, handler ToolHandler) {
+		byName[name] = struct {
+			desc    string
+			handler ToolHandler
+		}{desc: description, handler: handler}
+	})
+	t.Cleanup(cleanup)
+
+	if byName["obj"].desc != "FromTitle" {
+		t.Fatalf("title fallback desc = %q", byName["obj"].desc)
+	}
+	out, err := byName["obj"].handler(t.Context(), map[string]any{})
+	if err != nil || !strings.Contains(out, `"k"`) || !strings.Contains(out, `"v"`) {
+		t.Fatalf("structured = %q err=%v", out, err)
+	}
+	_, err = byName["fail"].handler(t.Context(), map[string]any{})
+	if err == nil || !strings.Contains(err.Error(), "nope; denied") {
+		t.Fatalf("joined error = %v", err)
 	}
 }

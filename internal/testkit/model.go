@@ -85,6 +85,16 @@ func (m *ScriptedModel) Invoke(ctx context.Context, msgs []*tacklr.Message, tool
 	return ch, nil
 }
 
+// LastSystemPrompt is the most recent non-empty system prompt passed to Invoke.
+func (m *ScriptedModel) LastSystemPrompt() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if n := len(m.SystemPrompts); n > 0 {
+		return m.SystemPrompts[n-1]
+	}
+	return ""
+}
+
 // ContentTokenEstimate is a shared length-based token stand-in for pressure tests.
 func ContentTokenEstimate(msgs []*tacklr.Message) int {
 	n := 0

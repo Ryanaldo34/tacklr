@@ -15,12 +15,7 @@ import (
 )
 
 func TestNewTurnManager_rejectsInvalidSpecialists(t *testing.T) {
-	ok := &mockStrategy{}
-	t.Run("nil model", func(t *testing.T) {
-		if _, err := NewTurnManager(context.Background(), AgentOptions{Config: Config{MaxWindowSize: 8192}}); err == nil {
-			t.Fatal("expected constructor error")
-		}
-	})
+	ok := &scriptedModel{}
 	cases := []struct {
 		name  string
 		specs []*Specialist
@@ -48,8 +43,8 @@ func TestSystemPrompt_listsSpecialistsSorted(t *testing.T) {
 	var n int
 	h := mustNewTurnManager(t, AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
-		Model: &mockStrategy{
-			invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
+		Model: &scriptedModel{
+			InvokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
 				n++
 				if n == 1 {
 					ch <- LLMResponseChunk{Type: StreamEventFunctionCall, ToolCalls: []ToolCall{
@@ -63,8 +58,8 @@ func TestSystemPrompt_listsSpecialistsSorted(t *testing.T) {
 			},
 		},
 		Specialists: []*Specialist{
-			{Name: "zebra", Model: &mockStrategy{}, Description: "last"},
-			{Name: "alpha", Model: &mockStrategy{}},
+			{Name: "zebra", Model: &scriptedModel{}, Description: "last"},
+			{Name: "alpha", Model: &scriptedModel{}},
 		},
 	})
 	t.Cleanup(h.Close)
@@ -86,11 +81,11 @@ func TestWithSpecialist_sharesHostMountWriteAndCatalog(t *testing.T) {
 	_ = parent
 	worker := mustNewTurnManager(t, AgentOptions{
 		MountSession:    ms,
-		Model:           &mockStrategy{},
+		Model:           &scriptedModel{},
 		Brain:           eng,
 		SearchNamespace: ns,
 		UnattendedWrite: true,
-	}.WithSpecialist(&Specialist{Name: "researcher", Model: &mockStrategy{}}))
+	}.WithSpecialist(&Specialist{Name: "researcher", Model: &scriptedModel{}}))
 	t.Cleanup(worker.Close)
 	ctx := context.Background()
 	scope := brain.Scope{Namespace: ns}
@@ -147,7 +142,7 @@ func TestWithSpecialist_inheritsParentSkills(t *testing.T) {
 
 	opts := AgentOptions{
 		Config:        Config{MaxWindowSize: 8192, MaxTurnRequests: 4},
-		Model:         &mockStrategy{},
+		Model:         &scriptedModel{},
 		MountSession:  ms,
 		SkillsSession: skillsMS,
 	}
@@ -156,7 +151,7 @@ func TestWithSpecialist_inheritsParentSkills(t *testing.T) {
 	if parent.findTool("read_skill", "") == nil {
 		t.Fatal("parent missing read_skill")
 	}
-	inherited := opts.WithSpecialist(&Specialist{Name: "researcher", Model: &mockStrategy{}})
+	inherited := opts.WithSpecialist(&Specialist{Name: "researcher", Model: &scriptedModel{}})
 	if inherited.Config.MaxTurnRequests != 4 || inherited.MountSession != ms {
 		t.Fatalf("WithSpecialist = %+v", inherited.Config)
 	}

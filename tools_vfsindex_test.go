@@ -29,7 +29,7 @@ func vfsIndexHarness(t *testing.T, withNS bool) (*TurnManager, *vfs.MountSession
 	opts := AgentOptions{
 		SessionID:       "vfs-idx-tools",
 		MountSession:    ms,
-		Model:           &mockStrategy{},
+		Model:           &scriptedModel{},
 		Brain:           eng,
 		UnattendedWrite: true,
 	}
@@ -243,7 +243,7 @@ func TestVFSIndexTools_prefixAutoIndex(t *testing.T) {
 	ns := mustNS(t, "id", uuid.NewString())
 	h := mustNewTurnManager(t, AgentOptions{
 		SessionID:    "policy-prefix",
-		MountSession: ms, Model: &mockStrategy{},
+		MountSession: ms, Model: &scriptedModel{},
 		Brain: eng, SearchNamespace: ns,
 	})
 	t.Cleanup(h.Close)
@@ -279,7 +279,7 @@ func TestKnowledgeSaveSearchRead(t *testing.T) {
 	)
 	h := mustNewTurnManager(t, AgentOptions{
 		SessionID:    "save-mem",
-		MountSession: ms, Model: &mockStrategy{},
+		MountSession: ms, Model: &scriptedModel{},
 		Brain: eng, SearchNamespace: ns,
 		BrainWriteKinds: brain.WriteKinds{Discovery: "Discovery", Fact: "Fact"},
 	})
@@ -404,7 +404,7 @@ func TestKnowledgeSave_rootsMount(t *testing.T) {
 	)
 	h := mustNewTurnManager(t, AgentOptions{
 		SessionID:    "save-roots",
-		MountSession: ms, Model: &mockStrategy{},
+		MountSession: ms, Model: &scriptedModel{},
 		Brain: eng, SearchNamespace: ns,
 		BrainWriteKinds: brain.WriteKinds{Discovery: "Discovery"},
 	})
@@ -466,20 +466,11 @@ func TestRun_workspaceResearchTurn(t *testing.T) {
 	)
 
 	wd := &recordingWatchdog{}
-	strategy := &mockStrategy{
-		countTokensFn: func(_ context.Context, msgs []*Message, _ []*Tool) (int, error) {
-			return contentTokenEstimate(msgs), nil
-		},
-	}
+	strategy := &scriptedModel{}
 	// The model keeps its own next-action (window pressure may drop tool text).
 	var next int
-	strategy.invokeFn = func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
-		strategy.mu.Lock()
-		prompt := ""
-		if n := len(strategy.systemPrompts); n > 0 {
-			prompt = strategy.systemPrompts[n-1]
-		}
-		strategy.mu.Unlock()
+	strategy.InvokeFn = func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
+		prompt := strategy.LastSystemPrompt()
 		if strings.Contains(strings.ToLower(prompt), "summarize the entire message history") {
 			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "WINDOW_SUMMARY", IsComplete: true}
 			return
@@ -619,7 +610,7 @@ func TestPathNativeGraphLinkExpand(t *testing.T) {
 	ns := mustNS(t, "id", uuid.NewString())
 	h := mustNewTurnManager(t, AgentOptions{
 		SessionID:    "path-graph",
-		MountSession: ms, Model: &mockStrategy{},
+		MountSession: ms, Model: &scriptedModel{},
 		Brain: eng, SearchNamespace: ns,
 	})
 	t.Cleanup(h.Close)

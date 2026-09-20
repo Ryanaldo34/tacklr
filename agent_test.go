@@ -2,6 +2,8 @@ package tacklr
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -15,7 +17,7 @@ func TestSystemPrompt_knowledgeGuidanceWhenBrainSet(t *testing.T) {
 	}
 	h := mustNewTurnManager(t, AgentOptions{
 		Config: Config{MaxWindowSize: 8192},
-		Model:  &mockStrategy{},
+		Model:  &scriptedModel{},
 		Brain:  eng,
 	})
 	t.Cleanup(h.Close)
@@ -40,8 +42,8 @@ func TestHandoff_retainsSearchableEpisode(t *testing.T) {
 		Config:          Config{MaxWindowSize: 8192},
 		SearchNamespace: ns,
 		Brain:           eng,
-		Model: &mockStrategy{
-			invokeFn: func(_ context.Context, _ []*Message, _ []*Tool, ch chan<- LLMResponseChunk) {
+		Model: &scriptedModel{
+			InvokeFn: func(_ context.Context, _ []*Message, _ []*Tool, ch chan<- LLMResponseChunk) {
 				ch <- LLMResponseChunk{
 					Type:       StreamEventMessage,
 					Content:    "Objective: ship\nDiscoveries: " + token + " was learned.\n",
@@ -85,11 +87,8 @@ func TestAbsorb_retainsCompressedEpisode(t *testing.T) {
 		ContextPolicy:   ContextPolicy{PressureRatio: 0.5, CompressFraction: 0.5},
 		SearchNamespace: ns,
 		Brain:           eng,
-		Model: &mockStrategy{
-			countTokensFn: func(_ context.Context, msgs []*Message, _ []*Tool) (int, error) {
-				return contentTokenEstimate(msgs), nil
-			},
-			invokeFn: func(_ context.Context, _ []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
+		Model: &scriptedModel{
+			InvokeFn: func(_ context.Context, _ []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
 				if tools == nil {
 					ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "summary of " + token, IsComplete: true}
 					return
@@ -121,7 +120,7 @@ func TestHandoff_retainFailureLeavesWindowRebuilt(t *testing.T) {
 		SessionID: "sess-failopen",
 		Config:    Config{MaxWindowSize: 8192},
 		Brain:     eng,
-		Model:     &mockStrategy{},
+		Model:     &scriptedModel{},
 	})
 	t.Cleanup(h.Close)
 	h.context.Restore([]*Message{{Role: RoleUser, Content: "do the work"}})
@@ -154,10 +153,10 @@ func TestSpecialist_retainsResultEpisode(t *testing.T) {
 		Config:          Config{MaxWindowSize: 8192},
 		SearchNamespace: ns,
 		Brain:           eng,
-		Model:           &mockStrategy{},
+		Model:           &scriptedModel{},
 		Specialists: []*Specialist{
-			{Name: "researcher", Model: &mockStrategy{
-				invokeFn: func(_ context.Context, _ []*Message, _ []*Tool, ch chan<- LLMResponseChunk) {
+			{Name: "researcher", Model: &scriptedModel{
+				InvokeFn: func(_ context.Context, _ []*Message, _ []*Tool, ch chan<- LLMResponseChunk) {
 					ch <- LLMResponseChunk{Type: StreamEventMessage, Content: token, IsComplete: true}
 				},
 			}},
@@ -207,3 +206,26 @@ func (stubJobHost) Schedule(context.Context, JobRequest, string) (Job, error) {
 }
 func (stubJobHost) Jobs() []Job                             { return nil }
 func (stubJobHost) CancelJob(context.Context, string) error { return nil }
+
+func toolCall(id, name, args string) ToolCall {
+	return ToolCall{ID: id, CallID: id, Name: name, Arguments: args}
+}
+
+func TestTagModelAfterToolsError_wrapsProviderFailures(t *testing.T) {
+	base := errors.New("upstream failed")
+	wrapped := fmt.Errorf("%w: already", ErrModelAfterTools)
+
+	fromError := tagModelAfterToolsError(LLMResponseChunk{Error: base})
+	fromWrapped := tagModelAfterToolsError(LLMResponseChunk{Error: wrapped})
+	fromContent := tagModelAfterToolsError(LLMResponseChunk{Content: "provider said no"})
+
+	if !errors.Is(fromError.Error, ErrModelAfterTools) || fromError.Content == "" {
+		t.Fatalf("from error = %+v", fromError)
+	}
+	if !errors.Is(fromWrapped.Error, ErrModelAfterTools) || strings.Count(fromWrapped.Error.Error(), "model request failed") != 1 {
+		t.Fatalf("double wrap = %v", fromWrapped.Error)
+	}
+	if !errors.Is(fromContent.Error, ErrModelAfterTools) || !strings.Contains(fromContent.Content, "provider said no") {
+		t.Fatalf("from content = %+v", fromContent)
+	}
+}

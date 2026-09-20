@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/internal/testdrive"
+	"github.com/ryanaldo34/tacklr/vfs"
 )
 
 // TestVFSTools_readWrite: read/write outcomes over a DirectProjection mount.
@@ -25,7 +25,7 @@ func TestVFSTools_readWrite(t *testing.T) {
 	h := mustNewTurnManager(t, AgentOptions{
 		SessionID:    "tools-vfs",
 		MountSession: ms,
-		Model:        &mockStrategy{},
+		Model:        &scriptedModel{},
 	})
 	tools := map[string]*Tool{}
 	for _, tool := range h.tools {
@@ -372,7 +372,7 @@ func TestVFSTools_projectedDocOutlineAndBlocks(t *testing.T) {
 		Params: map[string]string{vfs.ParamName: "contracts", vfs.ParamFolderID: "root"},
 	}}}, vfs.At("contracts", testdrive.Open(t, api, nil)))
 	h := mustNewTurnManager(t, AgentOptions{
-		SessionID: "tools-docs", MountSession: ms, Model: &mockStrategy{},
+		SessionID: "tools-docs", MountSession: ms, Model: &scriptedModel{},
 	})
 	tools := map[string]*Tool{}
 	for _, tool := range h.tools {
@@ -566,7 +566,7 @@ func TestVFSTools_writeDocxBlocksAndInlineMarks(t *testing.T) {
 	base := t.TempDir()
 	ms := mustMountTree(t, "tools-docx", vfs.At("work", vfs.Local(base)))
 	h := mustNewTurnManager(t, AgentOptions{
-		SessionID: "tools-docx", MountSession: ms, Model: &mockStrategy{},
+		SessionID: "tools-docx", MountSession: ms, Model: &scriptedModel{},
 	})
 	tools := map[string]*Tool{}
 	for _, tool := range h.tools {
@@ -639,7 +639,7 @@ func TestVFSTools_projectedSheetReadWrite(t *testing.T) {
 		Params: map[string]string{vfs.ParamName: "contracts", vfs.ParamFolderID: "root"},
 	}}}, vfs.At("contracts", testdrive.Open(t, api, nil)))
 	h := mustNewTurnManager(t, AgentOptions{
-		SessionID: "tools-sheets", MountSession: ms, Model: &mockStrategy{},
+		SessionID: "tools-sheets", MountSession: ms, Model: &scriptedModel{},
 	})
 	tools := map[string]*Tool{}
 	for _, tool := range h.tools {
@@ -768,7 +768,7 @@ func TestVFSTools_runCommandLiveNames(t *testing.T) {
 
 	h := mustNewTurnManager(t, AgentOptions{
 		SessionID:    "live-names",
-		MountSession: ms, Model: &mockStrategy{},
+		MountSession: ms, Model: &scriptedModel{},
 	})
 	tool := h.findTool("run_command", "")
 	if tool == nil {

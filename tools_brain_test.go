@@ -29,7 +29,7 @@ func TestBrainTools_saveDiscoveryAndLink(t *testing.T) {
 	ns := mustNS(t, "id", uuid.NewString())
 	h := mustNewTurnManager(t, AgentOptions{
 		Config: Config{MaxWindowSize: 1024},
-		Model:  &mockStrategy{},
+		Model:  &scriptedModel{},
 		Brain:  eng,
 		BrainWriteKinds: brain.WriteKinds{
 			Discovery: "Discovery",
@@ -169,7 +169,7 @@ func TestBrainTools_hostNamespaceScopedRead(t *testing.T) {
 
 	h := mustNewTurnManager(t, AgentOptions{
 		Config:          Config{MaxWindowSize: 1024},
-		Model:           &mockStrategy{},
+		Model:           &scriptedModel{},
 		Brain:           eng,
 		SearchNamespace: ns,
 	})
@@ -262,7 +262,7 @@ func TestBrainTools_searchFindExactContinueAndCheckpoint(t *testing.T) {
 	}
 	h := mustNewTurnManager(t, AgentOptions{
 		Config:          Config{MaxWindowSize: 1024},
-		Model:           &mockStrategy{},
+		Model:           &scriptedModel{},
 		Brain:           eng,
 		SearchNamespace: ns,
 		SessionID:       "brain-sc-1",
@@ -289,7 +289,7 @@ func TestBrainTools_searchFindExactContinueAndCheckpoint(t *testing.T) {
 
 	h2 := reloadHarness(t, h, AgentOptions{
 		Config:          Config{MaxWindowSize: 1024},
-		Model:           &mockStrategy{},
+		Model:           &scriptedModel{},
 		Brain:           eng,
 		SearchNamespace: ns,
 		SessionID:       "brain-sc-1",
@@ -367,7 +367,7 @@ func TestBrainTools_expandChildren(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := mustNewTurnManager(t, AgentOptions{
-		Config: Config{MaxWindowSize: 1024}, Model: &mockStrategy{},
+		Config: Config{MaxWindowSize: 1024}, Model: &scriptedModel{},
 		Brain: eng, SearchNamespace: ns,
 	})
 	tool := h.findTool("expand", "")
@@ -422,7 +422,7 @@ func TestBrainTools_expandMultiHopAndFindLinks(t *testing.T) {
 		t.Fatal("MemoryGraph must enable edge search")
 	}
 	h := mustNewTurnManager(t, AgentOptions{
-		Config: Config{MaxWindowSize: 1024}, Model: &mockStrategy{},
+		Config: Config{MaxWindowSize: 1024}, Model: &scriptedModel{},
 		Brain: eng, SearchNamespace: ns,
 	})
 	expand := h.findTool("expand", "")
@@ -485,7 +485,7 @@ func TestBrainTools_searchNamespaceIsolation(t *testing.T) {
 	}
 	// Agent scoped to nsB only.
 	h := mustNewTurnManager(t, AgentOptions{
-		Config: Config{MaxWindowSize: 1024}, Model: &mockStrategy{},
+		Config: Config{MaxWindowSize: 1024}, Model: &scriptedModel{},
 		Brain: eng, SearchNamespace: nsB,
 	})
 	search := h.findTool("search", "")
@@ -557,14 +557,14 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	workerModel := &mockStrategy{
-		invokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
+	workerModel := &scriptedModel{
+		InvokeFn: func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
 			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "ok", IsComplete: true}
 		},
 	}
 	parentOpts := AgentOptions{
 		Config:          Config{MaxWindowSize: 1024},
-		Model:           &mockStrategy{},
+		Model:           &scriptedModel{},
 		Brain:           eng,
 		SearchNamespace: ns,
 		Specialists: []*Specialist{
@@ -636,7 +636,7 @@ func TestBrainTools_engramPathGraph(t *testing.T) {
 	)
 	h := mustNewTurnManager(t, AgentOptions{
 		SessionID:    "engram-graph",
-		MountSession: ms, Model: &mockStrategy{},
+		MountSession: ms, Model: &scriptedModel{},
 		Brain: eng, SearchNamespace: ns,
 	})
 	t.Cleanup(h.Close)
@@ -724,7 +724,7 @@ func TestBrainTools_expandAndUnlinkValidationErrors(t *testing.T) {
 	}
 	h := mustNewTurnManager(t, AgentOptions{
 		Config: Config{MaxWindowSize: 1024},
-		Model:  &mockStrategy{},
+		Model:  &scriptedModel{},
 		Brain:  eng,
 	})
 	expand := h.findTool("expand", "")
@@ -775,7 +775,7 @@ func TestBrainTools_resolveFileRefPropagatesStoreFailure(t *testing.T) {
 	}
 	h := mustNewTurnManager(t, AgentOptions{
 		Config:          Config{MaxWindowSize: 1024},
-		Model:           &mockStrategy{},
+		Model:           &scriptedModel{},
 		Brain:           eng,
 		SearchNamespace: ns,
 	})

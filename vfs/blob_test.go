@@ -1,6 +1,7 @@
 package vfs_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -19,6 +20,42 @@ const (
 	azuriteKey   = "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
 	azuriteAcct  = "devstoreaccount1"
 )
+
+func TestBlob_rejectsBadConfig(t *testing.T) {
+	ctx := t.Context()
+	if _, err := builtins.Blob(nil, "")(ctx, "s", vfs.Binding{}); err == nil {
+		t.Fatal("nil client")
+	}
+	if _, err := builtins.Blob(builtins.AzureBlob{}, "")(ctx, "s", vfs.Binding{}); err == nil {
+		t.Fatal("missing container")
+	}
+	if _, err := builtins.Blob(builtins.AzureBlob{}, "c")(ctx, "s", vfs.Binding{
+		Params: map[string]string{"prefix": "a/../b"},
+	}); err == nil {
+		t.Fatal("bad prefix")
+	}
+	var azure builtins.AzureBlob
+	if _, _, _, err := azure.Head(ctx, "c", "k"); err == nil {
+		t.Fatal("nil Azure Head")
+	}
+	if _, _, _, err := azure.Get(ctx, "c", "k"); err == nil {
+		t.Fatal("nil Azure Get")
+	}
+	if err := azure.Put(ctx, "c", "k", bytes.NewReader(nil), 0); err == nil {
+		t.Fatal("nil Azure Put")
+	}
+	if err := azure.Delete(ctx, "c", "k"); err == nil {
+		t.Fatal("nil Azure Delete")
+	}
+	if _, _, err := azure.List(ctx, "c", ""); err == nil {
+		t.Fatal("nil Azure List")
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := builtins.Blob(builtins.AzureBlob{}, "c")(canceled, "s", vfs.Binding{}); !errors.Is(err, context.Canceled) {
+		t.Fatal("Open canceled")
+	}
+}
 
 // TestMountSession_azureBlobAzurite exercises real Blob path I/O against Azurite (no mocks).
 func TestMountSession_azureBlobAzurite(t *testing.T) {

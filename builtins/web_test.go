@@ -47,48 +47,48 @@ func TestWebSearch_searchesAndCoercesFilters(t *testing.T) {
 	got, err := runWebSearch(ctx, client, webSearchArgs{
 		Query: "capital of France", NumResults: 20, Type: "fast", ContentMode: "both",
 		MaxTextCharacters: 20000, UserLocation: "US", SystemPrompt: "prefer primary sources", MaxAgeHours: &age,
-	}, stubRuntime{})
+	})
 	if err != nil || !strings.Contains(got, "Paris") || !strings.Contains(got, "capital") {
 		t.Fatalf("search: %q err=%v", got, err)
 	}
 
-	got, err = runWebSearch(ctx, client, webSearchArgs{Query: "empty-results"}, stubRuntime{})
+	got, err = runWebSearch(ctx, client, webSearchArgs{Query: "empty-results"})
 	if err != nil || !strings.Contains(got, "No results found") {
 		t.Fatalf("empty: %q err=%v", got, err)
 	}
-	got, err = runWebSearch(ctx, client, webSearchArgs{Query: "untitled", ContentMode: "highlights"}, stubRuntime{})
+	got, err = runWebSearch(ctx, client, webSearchArgs{Query: "untitled", ContentMode: "highlights"})
 	if err != nil || !strings.Contains(got, "(untitled)") || !strings.Contains(got, `"answer"`) {
 		t.Fatalf("untitled/synth: %q err=%v", got, err)
 	}
-	if _, err := runWebSearch(ctx, client, webSearchArgs{Query: "  "}, stubRuntime{}); err == nil || !strings.Contains(err.Error(), "query is required") {
+	if _, err := runWebSearch(ctx, client, webSearchArgs{Query: "  "}); err == nil || !strings.Contains(err.Error(), "query is required") {
 		t.Fatalf("empty query: %v", err)
 	}
-	if _, err := runWebSearch(ctx, client, webSearchArgs{Query: "q", Type: "nope"}, stubRuntime{}); err == nil {
+	if _, err := runWebSearch(ctx, client, webSearchArgs{Query: "q", Type: "nope"}); err == nil {
 		t.Fatal("invalid type")
 	}
-	if _, err := runWebSearch(ctx, client, webSearchArgs{Query: "q", Category: "nope"}, stubRuntime{}); err == nil {
+	if _, err := runWebSearch(ctx, client, webSearchArgs{Query: "q", Category: "nope"}); err == nil {
 		t.Fatal("invalid category")
 	}
-	got, err = runWebSearch(ctx, client, webSearchArgs{Query: "q", Category: "company", ExcludeDomains: []string{"x.com"}}, stubRuntime{})
+	got, err = runWebSearch(ctx, client, webSearchArgs{Query: "q", Category: "company", ExcludeDomains: []string{"x.com"}})
 	if err != nil || !strings.Contains(got, "Hit") || !strings.Contains(got, "Dropped exclude_domains") {
 		t.Fatalf("company exclude coerced: %q err=%v", got, err)
 	}
-	got, err = runWebSearch(ctx, client, webSearchArgs{Query: "q", Category: "people", StartPublishedDate: "2024-01-01T00:00:00Z"}, stubRuntime{})
+	got, err = runWebSearch(ctx, client, webSearchArgs{Query: "q", Category: "people", StartPublishedDate: "2024-01-01T00:00:00Z"})
 	if err != nil || !strings.Contains(got, "Hit") || !strings.Contains(got, "Dropped published-date") {
 		t.Fatalf("people dates coerced: %q err=%v", got, err)
 	}
-	if _, err := runWebSearch(ctx, client, webSearchArgs{Query: "q", ContentMode: "raw"}, stubRuntime{}); err == nil {
+	if _, err := runWebSearch(ctx, client, webSearchArgs{Query: "q", ContentMode: "raw"}); err == nil {
 		t.Fatal("invalid mode")
 	}
-	got, err = runWebSearch(ctx, client, webSearchArgs{Query: "news-q", Type: "auto", ContentMode: "text", Category: "news"}, stubRuntime{})
+	got, err = runWebSearch(ctx, client, webSearchArgs{Query: "news-q", Type: "auto", ContentMode: "text", Category: "news"})
 	if err != nil || !strings.Contains(got, "Hit") {
 		t.Fatalf("text mode: %q err=%v", got, err)
 	}
-	got, err = runWebSearch(ctx, client, webSearchArgs{Query: "ACS API", Category: "publication", IncludeDomains: []string{"census.gov"}}, stubRuntime{})
+	got, err = runWebSearch(ctx, client, webSearchArgs{Query: "ACS API", Category: "publication", IncludeDomains: []string{"census.gov"}})
 	if err != nil || !strings.Contains(got, "Hit") || !strings.Contains(got, "Dropped category=publication") {
 		t.Fatalf("publication+domain coerced: %q err=%v", got, err)
 	}
-	got, err = runWebSearch(ctx, client, webSearchArgs{Query: "site:census.gov ACS 5-year API"}, stubRuntime{})
+	got, err = runWebSearch(ctx, client, webSearchArgs{Query: "site:census.gov ACS 5-year API"})
 	if err != nil || !strings.Contains(got, "Hit") || !strings.Contains(got, "Moved site:") {
 		t.Fatalf("site: lift: %q err=%v", got, err)
 	}
@@ -104,7 +104,7 @@ func TestWebSearch_httpStatusCorrectionAndFailed(t *testing.T) {
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = w.Write([]byte(`{"error":"bad query filters"}`))
 	})
-	_, err := runWebSearch(ctx, fixable, webSearchArgs{Query: "census ACS"}, stubRuntime{})
+	_, err := runWebSearch(ctx, fixable, webSearchArgs{Query: "census ACS"})
 	if err == nil || !errors.Is(err, tacklr.ErrCorrection) || !strings.Contains(err.Error(), "Simplify filters") {
 		t.Fatalf("400: %v", err)
 	}
@@ -113,7 +113,7 @@ func TestWebSearch_httpStatusCorrectionAndFailed(t *testing.T) {
 		w.WriteHeader(http.StatusTooManyRequests)
 		_, _ = w.Write([]byte(`{"error":"rate limited"}`))
 	})
-	_, err = runWebSearch(ctx, limited, webSearchArgs{Query: "census ACS"}, stubRuntime{})
+	_, err = runWebSearch(ctx, limited, webSearchArgs{Query: "census ACS"})
 	if err == nil || !errors.Is(err, tacklr.ErrFailed) || errors.Is(err, tacklr.ErrCorrection) || !strings.Contains(err.Error(), "search provider failed") {
 		t.Fatalf("429: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestWebSearch_httpStatusCorrectionAndFailed(t *testing.T) {
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = w.Write([]byte(`UNSUPPORTED_PUBLICATION`))
 	})
-	_, err = runWebSearch(ctx, pub, webSearchArgs{Query: "paper"}, stubRuntime{})
+	_, err = runWebSearch(ctx, pub, webSearchArgs{Query: "paper"})
 	if err == nil || !errors.Is(err, tacklr.ErrCorrection) || !strings.Contains(err.Error(), "category=publication") {
 		t.Fatalf("publication: %v", err)
 	}
@@ -172,7 +172,7 @@ func TestWebSearch_retriesEmptyFilteredSearch(t *testing.T) {
 		}
 		_, _ = w.Write([]byte(`{"results":[{"title":"Census ACS","url":"https://www.census.gov/acs"}]}`))
 	})
-	got, err := runWebSearch(context.Background(), client, webSearchArgs{Query: "ACS 5-year demographics", Category: "publication"}, stubRuntime{})
+	got, err := runWebSearch(context.Background(), client, webSearchArgs{Query: "ACS 5-year demographics", Category: "publication"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +207,7 @@ func TestWebFetch_readsKnownURLs(t *testing.T) {
 	})
 	ctx := context.Background()
 
-	got, err := runWebFetch(ctx, client, webFetchArgs{URLs: []string{"https://example.gov/code"}}, stubRuntime{})
+	got, err := runWebFetch(ctx, client, webFetchArgs{URLs: []string{"https://example.gov/code"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,34 +217,34 @@ func TestWebFetch_readsKnownURLs(t *testing.T) {
 
 	got, err = runWebFetch(ctx, client, webFetchArgs{
 		URLs: []string{"  ", "ftp://x", "example.gov/code", "https://example.gov/code", "not a host"},
-	}, stubRuntime{})
+	})
 	if err != nil || !strings.Contains(got, "City Code") {
 		t.Fatalf("normalize: %q err=%v", got, err)
 	}
 
 	got, err = runWebFetch(ctx, client, webFetchArgs{
 		URLs: []string{"https://example.gov/missing"}, ContentMode: "highlights", HighlightQuery: "setbacks",
-	}, stubRuntime{})
+	})
 	if err != nil || !strings.Contains(got, "error") || !strings.Contains(got, "not_found") {
 		t.Fatalf("status: %q err=%v", got, err)
 	}
 
-	if _, err := runWebFetch(ctx, client, webFetchArgs{}, nil); err == nil {
+	if _, err := runWebFetch(ctx, client, webFetchArgs{}); err == nil {
 		t.Fatal("no urls")
 	}
 	if _, err := runWebFetch(ctx, client, webFetchArgs{
 		URLs: []string{"https://a", "https://b", "https://c", "https://d", "https://e", "https://f"},
-	}, stubRuntime{}); err == nil {
+	}); err == nil {
 		t.Fatal("too many urls")
 	}
 	if _, err := runWebFetch(ctx, client, webFetchArgs{
 		URLs: []string{"https://example.gov/code"}, ContentMode: "raw",
-	}, stubRuntime{}); err == nil {
+	}); err == nil {
 		t.Fatal("invalid mode")
 	}
 	got, err = runWebFetch(ctx, client, webFetchArgs{
 		URLs: []string{"https://example.gov/code"}, ContentMode: "both", MaxTextCharacters: 20000,
-	}, stubRuntime{})
+	})
 	if err != nil || !strings.Contains(got, "City Code") {
 		t.Fatalf("both: %q err=%v", got, err)
 	}
@@ -326,7 +326,7 @@ func TestWebSearch_retriesProviderConflictThenSucceeds(t *testing.T) {
 		}
 		_, _ = w.Write([]byte(`{"results":[{"title":"Open","url":"https://example.com"}]}`))
 	})
-	got, err := runWebSearch(t.Context(), client, webSearchArgs{Query: "paper", IncludeDomains: []string{"arxiv.org"}}, stubRuntime{})
+	got, err := runWebSearch(t.Context(), client, webSearchArgs{Query: "paper", IncludeDomains: []string{"arxiv.org"}})
 	if err != nil || n != 2 || !strings.Contains(got, "Open") || !strings.Contains(got, "retried on the open web") {
 		t.Fatalf("retry: n=%d out=%q err=%v", n, got, err)
 	}
@@ -341,7 +341,7 @@ func TestWebSearch_retriesProviderConflictThenSucceeds(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusBadGateway)
 	})
-	if _, err := runWebSearch(t.Context(), failRetry, webSearchArgs{Query: "q", Category: "news"}, stubRuntime{}); err == nil || !errors.Is(err, tacklr.ErrFailed) {
+	if _, err := runWebSearch(t.Context(), failRetry, webSearchArgs{Query: "q", Category: "news"}); err == nil || !errors.Is(err, tacklr.ErrFailed) {
 		t.Fatalf("retry fail: %v", err)
 	}
 }
@@ -362,7 +362,7 @@ func TestWebFetch_highlightsAndProviderFailure(t *testing.T) {
 	fail := newExaTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)
 	})
-	if _, err := runWebFetch(t.Context(), fail, webFetchArgs{URLs: []string{"https://example.com"}}, stubRuntime{}); err == nil || !errors.Is(err, tacklr.ErrFailed) {
+	if _, err := runWebFetch(t.Context(), fail, webFetchArgs{URLs: []string{"https://example.com"}}); err == nil || !errors.Is(err, tacklr.ErrFailed) {
 		t.Fatalf("fetch fail: %v", err)
 	}
 }

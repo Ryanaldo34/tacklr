@@ -1,6 +1,7 @@
 package vfs_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -21,6 +22,37 @@ import (
 )
 
 const minioImage = "minio/minio:RELEASE.2024-06-13T22-53-53Z"
+
+func TestS3_rejectsBadConfig(t *testing.T) {
+	ctx := t.Context()
+	if _, err := builtins.S3(nil, "")(ctx, "s", vfs.Binding{}); err == nil {
+		t.Fatal("nil client")
+	}
+	if _, err := builtins.S3(builtins.AWSS3{}, "")(ctx, "s", vfs.Binding{}); err == nil {
+		t.Fatal("missing bucket")
+	}
+	if _, err := builtins.S3(builtins.AWSS3{}, "b")(ctx, "s", vfs.Binding{
+		Params: map[string]string{"prefix": "a/../b"},
+	}); err == nil {
+		t.Fatal("bad prefix")
+	}
+	var aws builtins.AWSS3
+	if _, _, _, err := aws.Head(ctx, "b", "k"); err == nil {
+		t.Fatal("nil AWS Head")
+	}
+	if _, _, _, err := aws.Get(ctx, "b", "k"); err == nil {
+		t.Fatal("nil AWS Get")
+	}
+	if err := aws.Put(ctx, "b", "k", bytes.NewReader(nil), 0); err == nil {
+		t.Fatal("nil AWS Put")
+	}
+	if err := aws.Delete(ctx, "b", "k"); err == nil {
+		t.Fatal("nil AWS Delete")
+	}
+	if _, _, err := aws.List(ctx, "b", ""); err == nil {
+		t.Fatal("nil AWS List")
+	}
+}
 
 // TestMountSession_s3MinIO exercises real S3 path I/O against MinIO (no mocks).
 func TestMountSession_s3MinIO(t *testing.T) {
