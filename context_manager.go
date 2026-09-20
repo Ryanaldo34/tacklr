@@ -120,7 +120,7 @@ func (m *modelContextManager) InstallPlanDocument(planRaw string) error {
 
 // protectedPrefixLen is the Absorb keep-prefix: [0] user; [1] plan document if present.
 func protectedPrefixLen(window []*Message) int {
-	if len(window) > 1 && isPlanDocument(window[1]) {
+	if len(window) > 1 && IsPlanDocument(window[1]) {
 		return 2
 	}
 	return 1
@@ -142,7 +142,8 @@ func planHasOpenTodos(plan []Todo) bool {
 // planDocumentPrefix identifies durable plan messages so Absorb can protect them.
 const planDocumentPrefix = "PROJECT PLAN\n────────────\n"
 
-func isPlanDocument(m *Message) bool {
+// IsPlanDocument reports the durable PROJECT PLAN developer message.
+func IsPlanDocument(m *Message) bool {
 	return m != nil && strings.HasPrefix(m.Content, planDocumentPrefix)
 }
 

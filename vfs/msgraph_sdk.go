@@ -58,8 +58,8 @@ func newGraphSDK(holder *TokenHolder, base string, httpClient *http.Client) (*gr
 	if httpClient != nil {
 		parent = httpClient.Transport
 	}
-	// Official middleware (URL rewrite /me, compression, redirects). Tests
-	// inject testhttp.Server.Client so only the parent transport is replaced.
+	// Official middleware (URL rewrite /me, compression, redirects).
+	// httpClient.Transport is the parent when a custom client is passed.
 	client := &http.Client{
 		Transport: khttp.NewCustomTransportWithParentTransport(parent, msgraphgocore.GetDefaultMiddlewaresWithOptions(&opts)...),
 		Timeout:   httpClientTimeout(httpClient),

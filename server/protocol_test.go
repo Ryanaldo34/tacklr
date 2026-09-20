@@ -14,6 +14,7 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
+	"github.com/ryanaldo34/tacklr/internal/testkit"
 )
 
 // healthProtocol is a host Protocol with one HTTP route (no Runtime turns).
@@ -133,8 +134,8 @@ func terminalControl(ev tacklr.StreamEvent) StreamControl {
 func TestRunTurn_midPromptCancelThenNextPrompt(t *testing.T) {
 	started := make(chan struct{})
 	var startedOnce sync.Once
-	strategy := &mockInferenceStrategy{
-		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+	strategy := &testkit.ScriptedModel{
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 			startedOnce.Do(func() { close(started) })
 			for {
 				select {
@@ -190,7 +191,7 @@ func TestRunTurn_midPromptCancelThenNextPrompt(t *testing.T) {
 		t.Fatal("first turn did not finish after cancel")
 	}
 
-	strategy.invokeFn = func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+	strategy.InvokeFn = func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 		ch <- tacklr.LLMResponseChunk{
 			Type: tacklr.StreamEventMessage, Content: "after-cancel", IsComplete: true,
 		}
@@ -217,8 +218,8 @@ func TestRunTurn_midPromptCancelThenNextPrompt(t *testing.T) {
 }
 
 func TestRunTurn_runtimeErrors(t *testing.T) {
-	k := newTestRuntime(t, &mockInferenceStrategy{
-		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+	k := newTestRuntime(t, &testkit.ScriptedModel{
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "x", IsComplete: true}
 		},
 	}, durable.AgentSpec{})
@@ -253,8 +254,8 @@ func TestRunTurn_runtimeErrors(t *testing.T) {
 }
 
 func TestRunTurn_protocolErrorStopsTurn(t *testing.T) {
-	k := newTestRuntime(t, &mockInferenceStrategy{
-		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+	k := newTestRuntime(t, &testkit.ScriptedModel{
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "x", IsComplete: true}
 		},
 	}, durable.AgentSpec{})
@@ -267,5 +268,24 @@ func TestRunTurn_protocolErrorStopsTurn(t *testing.T) {
 	}}, string(id), nil, PromptOrResume{Prompt: durable.Prompt{Text: "hi"}})
 	if err == nil {
 		t.Fatal("want protocol error")
+	}
+}
+
+func TestServeHTTP_respectsContextCancel(t *testing.T) {
+	r := newTestRuntime(t, &testkit.ScriptedModel{}, durable.AgentSpec{})
+	srv := NewServer(r.Runtime, r.Catalog, NewACPProtocol(nil)).AllowAnonymousNetwork()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.ServeHTTP(ctx, "127.0.0.1:0") }()
+	time.Sleep(40 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, http.ErrServerClosed) {
+			t.Fatalf("shutdown: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("ServeHTTP did not exit")
 	}
 }

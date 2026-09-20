@@ -111,9 +111,11 @@ func ClassifyErrorClass(err error, httpStatus int) string {
 
 // TokenUsage is provider-reported token consumption for one model invoke.
 type TokenUsage struct {
-	Input     int
-	Output    int
-	Reasoning int
+	Input      int
+	Output     int
+	Reasoning  int
+	Cached     int
+	CacheWrite int
 }
 
 // ModelSpan is an in-flight tacklr.model span. Call End once.
@@ -210,6 +212,12 @@ func (m *ModelSpan) End(err error, usage TokenUsage) {
 	}
 	if usage.Output > 0 {
 		endAttrs = append(endAttrs, attribute.Int(AttrGenAIOutputTokens, usage.Output))
+	}
+	if usage.Cached > 0 {
+		endAttrs = append(endAttrs, attribute.Int(AttrGenAICachedTokens, usage.Cached))
+	}
+	if usage.CacheWrite > 0 {
+		endAttrs = append(endAttrs, attribute.Int(AttrGenAICacheWriteTokens, usage.CacheWrite))
 	}
 	m.span.SetAttributes(endAttrs...)
 	m.span.End()

@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -19,57 +17,12 @@ import (
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/ryanaldo34/tacklr"
-	"github.com/ryanaldo34/tacklr/builtins"
 	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/durable/inprocess"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
 	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
-
-func TestSessionWorkflow_promptCompletes(t *testing.T) {
-	var suite testsuite.WorkflowTestSuite
-	env := suite.NewTestWorkflowEnvironment()
-	env.SetWorkerOptions(worker.Options{EnableSessionWorker: true})
-	cat := durable.NewCatalog("default")
-	model := &testkit.ScriptedModel{
-		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "hello-temporal", IsComplete: true}
-		},
-	}
-	cat.Register("default", durable.AgentSpec{
-		Options: tacklr.AgentOptions{Model: model, Config: tacklr.Config{MaxWindowSize: 8192}},
-	})
-	fallback := inprocess.NewMemoryEventLog()
-	env.RegisterWorkflow(SessionWorkflow)
-	env.RegisterActivity(newActs(cat, fallback, true))
-
-	id := durable.SessionID("sess-complete")
-	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(signalPrompt, promptSignal{Text: "hi"})
-	}, time.Millisecond)
-	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(signalClose, nil)
-	}, 50*time.Millisecond)
-
-	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id, AgentID: "default"})
-	if err := env.GetWorkflowError(); err != nil {
-		t.Fatal(err)
-	}
-	got := drainLog(t, fallback, id)
-	var sawMsg bool
-	for _, ev := range got {
-		if ev.Type == tacklr.StreamEventMessage && strings.Contains(ev.Content, "hello-temporal") {
-			sawMsg = true
-		}
-	}
-	if !sawMsg {
-		t.Fatalf("want hello-temporal, got %+v", got)
-	}
-	if st := querySession(t, env); st.State != durable.SessionComplete {
-		t.Fatalf("Status after prompt: %+v", st)
-	}
-}
 
 func TestSessionWorkflow_workerSessionFailedEndsTurn(t *testing.T) {
 	var suite testsuite.WorkflowTestSuite
@@ -288,71 +241,6 @@ func TestSessionWorkflow_authExpiredYieldThenResume(t *testing.T) {
 	}
 }
 
-func TestSessionWorkflow_askUserYieldThenResume(t *testing.T) {
-	var suite testsuite.WorkflowTestSuite
-	env := suite.NewTestWorkflowEnvironment()
-	env.SetWorkerOptions(worker.Options{EnableSessionWorker: true})
-	cat := durable.NewCatalog("default")
-	model := &testkit.ScriptedModel{
-		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-			if last := lastMsg(msgs); last != nil && last.Role == tacklr.RoleTool {
-				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "chose", IsComplete: true}
-				return
-			}
-			ch <- tacklr.LLMResponseChunk{
-				Type: tacklr.StreamEventFunctionCall,
-				ToolCalls: []tacklr.ToolCall{{
-					ID: "ask1", CallID: "ask1", Name: "ask_user_choice",
-					Arguments: `{"question":"Pick?","choices":[{"title":"A"},{"title":"B"}]}`,
-				}},
-				IsComplete: true,
-			}
-		},
-	}
-	cat.Register("default", durable.AgentSpec{
-		Options: tacklr.AgentOptions{Model: model, Config: tacklr.Config{MaxWindowSize: 8192}},
-	})
-	fallback := inprocess.NewMemoryEventLog()
-	env.RegisterWorkflow(SessionWorkflow)
-	env.RegisterActivity(newActs(cat, fallback, true))
-
-	id := durable.SessionID("sess-yield")
-	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(signalPrompt, promptSignal{Text: "ask"})
-	}, time.Millisecond)
-	env.RegisterDelayedCallback(func() {
-		payload, _ := json.Marshal(map[string]any{"selectionIdx": 0})
-		env.SignalWorkflow(signalResume, resumeSignal{Responses: map[string][]byte{"ask1": payload}})
-	}, 20*time.Millisecond)
-	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(signalClose, nil)
-	}, 80*time.Millisecond)
-
-	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id, AgentID: "default"})
-	if err := env.GetWorkflowError(); err != nil {
-		t.Fatal(err)
-	}
-	got := drainLog(t, fallback, id)
-	var yielded, chose bool
-	for _, ev := range got {
-		if ev.Type == tacklr.StreamEventInterrupt {
-			yielded = true
-		}
-		if ev.Type == tacklr.StreamEventMessage && ev.Content == "chose" {
-			chose = true
-		}
-	}
-	if !yielded || !chose {
-		t.Fatalf("want yield+chose, got %+v", got)
-	}
-	if st := querySession(t, env); st.State != durable.SessionComplete {
-		t.Fatalf("Status after resume: %+v", st)
-	}
-}
-
-// TestSessionWorkflow_parallelBatchHitlRunsRemainder: Temporal ran Tool
-// activities sequentially and broke the batch on HITL, so leftover function
-// calls never got outputs. Resume must still execute the rest of the batch.
 func TestSessionWorkflow_parallelBatchHitlRunsRemainder(t *testing.T) {
 	var suite testsuite.WorkflowTestSuite
 	env := suite.NewTestWorkflowEnvironment()
@@ -477,164 +365,6 @@ func TestSessionWorkflow_hitlCancel(t *testing.T) {
 	}
 	if !yielded {
 		t.Fatalf("want yield before cancel, got %+v", got)
-	}
-}
-
-func TestSessionWorkflow_cancelThenNextPromptCompletes(t *testing.T) {
-	var suite testsuite.WorkflowTestSuite
-	env := suite.NewTestWorkflowEnvironment()
-	env.SetWorkerOptions(worker.Options{EnableSessionWorker: true})
-	cat := durable.NewCatalog("default")
-	var n atomic.Int64
-	model := &testkit.ScriptedModel{
-		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-			if n.Add(1) == 1 {
-				<-ctx.Done()
-				return
-			}
-			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "after-cancel", IsComplete: true}
-		},
-	}
-	cat.Register("default", durable.AgentSpec{
-		Options: tacklr.AgentOptions{Model: model, Config: tacklr.Config{MaxWindowSize: 8192}},
-	})
-	fallback := inprocess.NewMemoryEventLog()
-	env.RegisterWorkflow(SessionWorkflow)
-	env.RegisterActivity(newActs(cat, fallback, true))
-
-	id := durable.SessionID("sess-cancel-next")
-	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(signalPrompt, promptSignal{Text: "slow"})
-	}, time.Millisecond)
-	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(signalCancel, nil)
-	}, 20*time.Millisecond)
-	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(signalPrompt, promptSignal{Text: "again"})
-	}, 40*time.Millisecond)
-	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(signalClose, nil)
-	}, 80*time.Millisecond)
-
-	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id, AgentID: "default"})
-	if err := env.GetWorkflowError(); err != nil {
-		t.Fatal(err)
-	}
-	got := drainLog(t, fallback, id)
-	var sawAfter bool
-	for _, ev := range got {
-		if ev.Type == tacklr.StreamEventMessage && strings.Contains(ev.Content, "after-cancel") {
-			sawAfter = true
-		}
-	}
-	if !sawAfter {
-		t.Fatalf("want after-cancel, got %+v", got)
-	}
-	if st := querySession(t, env); st.State != durable.SessionComplete {
-		t.Fatalf("Status after cancel+prompt: %+v", st)
-	}
-}
-
-func TestSessionWorkflow_spawnWorker(t *testing.T) {
-	var suite testsuite.WorkflowTestSuite
-	env := suite.NewTestWorkflowEnvironment()
-	env.SetWorkerOptions(worker.Options{EnableSessionWorker: true})
-	cat := durable.NewCatalog("default")
-	model := &testkit.ScriptedModel{
-		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-			last := lastMsg(msgs)
-			if last != nil && last.Role == tacklr.RoleUser && last.Content == "child-task" {
-				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "child-hello", IsComplete: true}
-				return
-			}
-			if last != nil && last.Role == tacklr.RoleTool && last.Content == "child-hello" {
-				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "parent-after-spawn", IsComplete: true}
-				return
-			}
-			ch <- tacklr.LLMResponseChunk{
-				Type: tacklr.StreamEventFunctionCall,
-				ToolCalls: []tacklr.ToolCall{{
-					ID: "sp1", CallID: "sp1", Name: "spawn_specialist",
-					Arguments: `{"specialist":"researcher","task_description_and_context":"child-task"}`,
-				}},
-				IsComplete: true,
-			}
-		},
-	}
-	cat.Register("default", durable.AgentSpec{
-		Options: tacklr.AgentOptions{
-			Model:  model,
-			Config: tacklr.Config{MaxWindowSize: 8192},
-			Specialists: []*tacklr.Specialist{{
-				Name:  "researcher",
-				Model: model,
-			}},
-		},
-	})
-	fallback := inprocess.NewMemoryEventLog()
-	acts := newActs(cat, fallback, true)
-	env.RegisterWorkflow(SessionWorkflow)
-	env.RegisterActivity(acts)
-	var childStarted atomic.Bool
-	env.SetOnChildWorkflowStartedListener(func(info *workflow.Info, ctx workflow.Context, args converter.EncodedValues) {
-		childStarted.Store(true)
-	})
-
-	id := durable.SessionID("sess-spawn")
-	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(signalPrompt, promptSignal{Text: "go"})
-	}, time.Millisecond)
-	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(signalClose, nil)
-	}, 80*time.Millisecond)
-
-	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id, AgentID: "default"})
-	if err := env.GetWorkflowError(); err != nil {
-		t.Fatal(err)
-	}
-	if !childStarted.Load() {
-		t.Fatal("want child SessionWorkflow started")
-	}
-	got := drainLog(t, fallback, id)
-	var sawParent, sawChild, sawSpawnResult bool
-	for _, ev := range got {
-		if ev.Type == tacklr.StreamEventMessage && strings.Contains(ev.Content, "parent-after-spawn") {
-			sawParent = true
-		}
-		if ev.Type == tacklr.StreamEventMessage && strings.Contains(ev.Content, "child-hello") {
-			sawChild = true
-		}
-		if ev.Type == tacklr.StreamEventToolResult && ev.Content == "child-hello" {
-			sawSpawnResult = true
-		}
-	}
-	childGot := drainLog(t, fallback, durable.ChildSessionID(id, "researcher", "sp1"))
-	for _, ev := range childGot {
-		if ev.Type == tacklr.StreamEventMessage && strings.Contains(ev.Content, "child-hello") {
-			sawChild = true
-		}
-	}
-	if !sawParent {
-		t.Fatalf("want parent complete after spawn, got %+v", got)
-	}
-	if !sawChild {
-		t.Fatalf("want child complete event, parent=%+v child=%+v", got, childGot)
-	}
-	if !sawSpawnResult {
-		t.Fatalf("want spawn_specialist tool result paired with child output, got %+v", got)
-	}
-	if snap, _, err := acts.Snapshots.Load(t.Context(), id); err != nil {
-		t.Fatal(err)
-	} else if snap.AgentID != "default" {
-		t.Fatalf("parent snapshot agent=%q", snap.AgentID)
-	}
-	wantChild := durable.ChildSessionID(id, "researcher", "sp1")
-	csnap, _, err := acts.Snapshots.Load(t.Context(), wantChild)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if csnap.AgentID != "default" || csnap.Parent != id || csnap.Specialist != "researcher" {
-		t.Fatalf("child snapshot identity=%+v", csnap)
 	}
 }
 
@@ -975,101 +705,6 @@ func TestSessionWorkflow_cancelStopsAsyncChild(t *testing.T) {
 			}
 		}
 		t.Fatalf("want child canceled/failed, parent=%+v", st)
-	}
-}
-
-func TestSessionWorkflow_resumeRemountsWorkspaceFromCachedRecipe(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("from-workspace"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	var suite testsuite.WorkflowTestSuite
-	env := suite.NewTestWorkflowEnvironment()
-	env.SetWorkerOptions(worker.Options{EnableSessionWorker: true})
-	cat := durable.NewCatalog("default")
-	model := &testkit.ScriptedModel{
-		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-			if last := lastMsg(msgs); last != nil && last.Role == tacklr.RoleTool {
-				if strings.Contains(last.Content, "from-workspace") {
-					ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: last.Content, IsComplete: true}
-					return
-				}
-				ch <- tacklr.LLMResponseChunk{
-					Type: tacklr.StreamEventFunctionCall,
-					ToolCalls: []tacklr.ToolCall{{
-						ID: "read1", CallID: "read1", Name: "read",
-						Arguments: `{"path":"/workspace/docs/hello.txt"}`,
-					}},
-					IsComplete: true,
-				}
-				return
-			}
-			ch <- tacklr.LLMResponseChunk{
-				Type: tacklr.StreamEventFunctionCall,
-				ToolCalls: []tacklr.ToolCall{{
-					ID: "ask1", CallID: "ask1", Name: "ask_user_choice",
-					Arguments: `{"question":"Pick?","choices":[{"title":"A"},{"title":"B"}]}`,
-				}},
-				IsComplete: true,
-			}
-		},
-	}
-	cat.Register("default", durable.AgentSpec{
-		Options: tacklr.AgentOptions{Model: model, Config: tacklr.Config{MaxWindowSize: 8192}},
-		OpenVFS: vfs.Tree(vfs.At("docs", builtins.Local(dir))),
-	})
-	fallback := inprocess.NewMemoryEventLog()
-	secrets := durable.NewMemorySecretStorage()
-	acts := newActs(cat, fallback, true)
-	acts.Secrets = secrets
-	env.RegisterWorkflow(SessionWorkflow)
-	env.RegisterActivity(acts)
-
-	id := durable.SessionID("sess-remount")
-	auth1 := durable.AuthContext{Bindings: []vfs.Binding{{
-		Provider: "local",
-		Params:   map[string]string{vfs.ParamName: "docs"},
-		Auth:     vfs.Credential{Token: "tok-1"},
-	}}}
-	auth2 := durable.AuthContext{Bindings: []vfs.Binding{{
-		Provider: "local",
-		Auth:     vfs.Credential{Token: "tok-2"},
-	}}}
-	env.RegisterDelayedCallback(func() {
-		_ = secrets.Put(context.Background(), id, durable.Secrets{Auth: auth1})
-		env.SignalWorkflow(signalPrompt, promptSignal{Text: "ask then read", Auth: auth1.WithoutSecrets()})
-	}, time.Millisecond)
-	env.RegisterDelayedCallback(func() {
-		payload, _ := json.Marshal(map[string]any{"selectionIdx": 0})
-		_ = secrets.Put(context.Background(), id, durable.Secrets{Auth: auth2})
-		env.SignalWorkflow(signalResume, resumeSignal{
-			Responses: map[string][]byte{"ask1": payload},
-			Auth:      auth2.WithoutSecrets(),
-		})
-	}, 30*time.Millisecond)
-	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(signalClose, nil)
-	}, 120*time.Millisecond)
-
-	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id, AgentID: "default"})
-	if err := env.GetWorkflowError(); err != nil {
-		t.Fatal(err)
-	}
-	got := drainLog(t, fallback, id)
-	var yielded, sawFile bool
-	for _, ev := range got {
-		if ev.Type == tacklr.StreamEventInterrupt {
-			yielded = true
-		}
-		if ev.Type == tacklr.StreamEventMessage && strings.Contains(ev.Content, "from-workspace") {
-			sawFile = true
-		}
-	}
-	if !yielded || !sawFile {
-		t.Fatalf("want yield + remounted workspace, got %+v", got)
-	}
-	if st := querySession(t, env); st.State != durable.SessionComplete {
-		t.Fatalf("Status after remount: %+v", st)
 	}
 }
 

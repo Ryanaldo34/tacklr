@@ -14,6 +14,7 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
+	"github.com/ryanaldo34/tacklr/internal/testkit"
 )
 
 // newTestMCPServer stands up a real in-process MCP server over streamable
@@ -58,9 +59,9 @@ func (tr *toolRecorder) call(i int) []string {
 	return tr.seen[i]
 }
 
-func recordingStrategy(tr *toolRecorder) *mockInferenceStrategy {
-	return &mockInferenceStrategy{
-		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+func recordingStrategy(tr *toolRecorder) *testkit.ScriptedModel {
+	return &testkit.ScriptedModel{
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 			tr.record(tools)
 			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "done", IsComplete: true}
 		},
@@ -88,8 +89,8 @@ func acpSessionID(t *testing.T, rec *httptest.ResponseRecorder) string {
 func TestHandleRPC_sessionMCPServers_toolCallReturnsResult(t *testing.T) {
 	mcpHTTP := newTestMCPServer(t, "greet")
 	var invokeCount int
-	strategy := &mockInferenceStrategy{
-		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+	strategy := &testkit.ScriptedModel{
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 			invokeCount++
 			if invokeCount == 1 {
 				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventFunctionCall, ToolCalls: []tacklr.ToolCall{

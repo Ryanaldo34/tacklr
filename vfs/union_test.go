@@ -92,6 +92,9 @@ func TestMountSession_unionMergesBackends(t *testing.T) {
 	if st, err = ms.Stat(ctx, "/workspace/skills/alpha/SKILL.md"); err != nil || st.IsDir {
 		t.Fatalf("Stat file = %+v err=%v", st, err)
 	}
+	if _, err := ms.OpenDocument(ctx, "/workspace/skills/alpha/SKILL.md", nil); err != nil {
+		t.Fatalf("OpenDocument local = %v", err)
+	}
 	if err := ms.WriteDocument(ctx, text); !errors.Is(err, vfs.ErrReadOnly) {
 		t.Fatalf("WriteDocument = %v", err)
 	}
@@ -144,6 +147,13 @@ func TestUnion_constructErrors(t *testing.T) {
 	if _, err := vfs.Union(boom)(ctx, t.Name(), vfs.Binding{}); err == nil {
 		t.Fatal("member open error")
 	}
+	skip := vfs.Open(func(context.Context, string, vfs.Binding) (vfs.Provider, error) {
+		return nil, nil
+	})
+	p, err := vfs.Union(builtins.Local(t.TempDir()), skip)(ctx, t.Name(), vfs.Binding{})
+	if err != nil || p == nil {
+		t.Fatalf("nil member skipped: p=%v err=%v", p, err)
+	}
 }
 
 func TestMountSession_unionMissingAndCanceled(t *testing.T) {
@@ -157,6 +167,9 @@ func TestMountSession_unionMissingAndCanceled(t *testing.T) {
 	}
 	if _, err := ms.Open(ctx, "/workspace/skills"); err == nil {
 		t.Fatal("open root")
+	}
+	if _, err := ms.OpenDocument(ctx, "/workspace/skills/nope.md", nil); err == nil {
+		t.Fatal("OpenDocument missing")
 	}
 	if _, err := ms.Open(ctx, "/workspace/skills/nope"); !errors.Is(err, vfs.ErrNotExist) {
 		t.Fatalf("Open missing = %v", err)
@@ -209,5 +222,31 @@ func TestMountSession_workAndSkills(t *testing.T) {
 	}
 	if err := ms.WriteFile(ctx, "/workspace/work/note.txt", []byte("ok")); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestUnion_providerRejectsWritesAndInvalidPaths(t *testing.T) {
+	ctx := t.Context()
+	p, err := vfs.Union(builtins.Local(t.TempDir()))(ctx, t.Name(), vfs.Binding{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Remove(ctx, "x"); !errors.Is(err, vfs.ErrReadOnly) {
+		t.Fatalf("Remove = %v", err)
+	}
+	if err := p.MkdirAll(ctx, "x", 0o755); !errors.Is(err, vfs.ErrReadOnly) {
+		t.Fatalf("MkdirAll = %v", err)
+	}
+	if _, err := p.OpenFile(ctx, "x", os.O_WRONLY, 0); !errors.Is(err, vfs.ErrReadOnly) {
+		t.Fatalf("OpenFile write = %v", err)
+	}
+	if _, err := p.Stat(ctx, ".."); err == nil {
+		t.Fatal("Stat invalid")
+	}
+	if _, err := p.OpenFile(ctx, "..", os.O_RDONLY, 0); err == nil {
+		t.Fatal("OpenFile invalid")
+	}
+	if _, err := p.ReadDir(ctx, ".."); err == nil {
+		t.Fatal("ReadDir invalid")
 	}
 }

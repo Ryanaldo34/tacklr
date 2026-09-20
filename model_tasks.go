@@ -67,6 +67,9 @@ type modelIdentityProvider interface {
 type AbsorbResult struct {
 	// SummaryChunks are compress summaries to stream when StreamFitSummary is true.
 	SummaryChunks []LLMResponseChunk
+	Compressed    bool
+	Summary       string
+	Discarded     []*Message
 }
 
 // modelTasks is Turn, Absorb, and Handoff against InferenceStrategy and contextManager.
@@ -127,12 +130,12 @@ func (t *defaultModelTasks) Absorb(ctx context.Context, msg *Message, tools []*T
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	window, chunks, _, err := t.absorbFit(ctx, t.context.Messages(), msg, tools)
+	window, chunks, compressed, discarded, summary, err := t.absorbFit(ctx, t.context.Messages(), msg, tools, systemPrompt)
 	if err != nil {
 		return AbsorbResult{}, err
 	}
 	t.context.Replace(window)
-	return AbsorbResult{SummaryChunks: chunks}, nil
+	return AbsorbResult{SummaryChunks: chunks, Compressed: compressed, Summary: summary, Discarded: discarded}, nil
 }
 
 func (t *defaultModelTasks) Handoff(ctx context.Context, plan []Todo, planDoc string, tools []*Tool, systemPrompt string) error {
@@ -146,7 +149,7 @@ func (t *defaultModelTasks) Handoff(ctx context.Context, plan []Todo, planDoc st
 	}
 	ctx, span := telemetry.StartHandoffSpan(ctx, open)
 
-	window, usedFallback, err := handoffGenerate(ctx, t.context.Messages(), plan, planDoc, t.model, tools)
+	window, usedFallback, err := handoffGenerate(ctx, t.context.Messages(), plan, planDoc, t.model, tools, systemPrompt)
 	if err != nil {
 		span.End(telemetry.HandoffOutcomeError, err)
 		return err
@@ -167,7 +170,8 @@ func (t *defaultModelTasks) absorbFit(
 	window []*Message,
 	newMsg *Message,
 	tools []*Tool,
-) (out []*Message, chunks []LLMResponseChunk, compressed bool, err error) {
+	systemPrompt string,
+) (out []*Message, chunks []LLMResponseChunk, compressed bool, discarded []*Message, summary string, err error) {
 	model := t.model
 	policy := t.policy
 	maxSize := t.maxSize
@@ -181,10 +185,10 @@ func (t *defaultModelTasks) absorbFit(
 	currSize, err := model.CountTokens(ctx, countView, tools)
 	if err != nil {
 		slog.ErrorContext(ctx, "failed to count tokens while absorbing message", "area", telemetry.AreaModelTasks, "error", err)
-		return nil, nil, false, fmt.Errorf("count tokens: %w", err)
+		return nil, nil, false, nil, "", fmt.Errorf("count tokens: %w", err)
 	}
 	if len(window) == 0 || float64(currSize) <= float64(maxSize)*policy.PressureRatio {
-		return slices.Clone(countView), nil, false, nil
+		return slices.Clone(countView), nil, false, nil, "", nil
 	}
 
 	slog.InfoContext(ctx, "max context window size exceeded or approaching, compressing context window",
@@ -192,14 +196,15 @@ func (t *defaultModelTasks) absorbFit(
 	telemetry.InstrumentsFromContext(ctx).RecordCompress(ctx, telemetry.AgentIDFromContext(ctx))
 
 	var sumPrompt strings.Builder
-	sumPrompt.Grow(280 + len(newMsg.Content))
-	sumPrompt.WriteString("Please summarize the entire message history into a single, concise summary including key items for your current and past tasks with a primary focus on your current task. Current task or follow-up question to answer: ")
+	sumPrompt.Grow(360 + len(newMsg.Content))
+	sumPrompt.WriteString("<instructions>\nSummarize the entire message history into a single, concise summary including key items for your current and past tasks with a primary focus on your current task.\n</instructions>\n<current_task>\n")
 	sumPrompt.WriteString(newMsg.Content)
+	sumPrompt.WriteString("\n</current_task>")
 	anchorLen := protectedPrefixLen(window)
 	anchors := window[:anchorLen]
 	unprotected := window[anchorLen:]
 	if len(unprotected) == 0 {
-		return slices.Clone(countView), nil, false, nil
+		return slices.Clone(countView), nil, false, nil, "", nil
 	}
 
 	// Progressive CountTokens probes reuse countScratch (no alloc per step).
@@ -225,7 +230,7 @@ func (t *defaultModelTasks) absorbFit(
 		for start < len(unprotected) {
 			count, err := model.CountTokens(ctx, stageCount(start), tools)
 			if err != nil {
-				return nil, nil, true, fmt.Errorf("count tokens: %w", err)
+				return nil, nil, true, nil, "", fmt.Errorf("count tokens: %w", err)
 			}
 			if float64(count) <= float64(maxSize)*policy.PressureRatio {
 				break
@@ -241,22 +246,28 @@ func (t *defaultModelTasks) absorbFit(
 		numMessagesToCompress = len(unprotected)
 	}
 
-	// Compress unprotected history only; no tools on the summarize call.
+	// Compress unprotected history. Keep tools and the live system prompt so
+	// the request prefix matches a normal turn; tool_choice=none prevents calls.
 	compressSrc := unprotected[:numMessagesToCompress]
 	t.modelSeq++
 	mctx := ctx
 	if src, ok := model.(modelIdentityProvider); ok {
 		mctx = telemetry.ContextWithModelIdentity(ctx, src.ModelTelemetryIdentity())
 	}
-	mctx, mspan := telemetry.StartModelSpan(mctx, telemetry.ModelPhaseCompress, t.modelSeq, windowShape(compressSrc))
-	events, err := model.Invoke(mctx, compressSrc, nil, sumPrompt.String())
+	task := &Message{Role: RoleDeveloper, Content: sumPrompt.String()}
+	invokeMsgs := make([]*Message, 0, len(anchors)+len(compressSrc)+1)
+	invokeMsgs = append(invokeMsgs, anchors...)
+	invokeMsgs = append(invokeMsgs, compressSrc...)
+	invokeMsgs = append(invokeMsgs, task)
+	mctx, mspan := telemetry.StartModelSpan(mctx, telemetry.ModelPhaseCompress, t.modelSeq, windowShape(invokeMsgs))
+	events, err := model.Invoke(ContextWithToolChoiceNone(mctx), invokeMsgs, tools, systemPrompt)
 	if err != nil {
 		mspan.End(err, telemetry.TokenUsage{})
-		return nil, nil, true, fmt.Errorf("context compress invoke failed: %w", err)
+		return nil, nil, true, nil, "", fmt.Errorf("context compress invoke failed: %w", err)
 	}
 
 	summaryMsg := &Message{Role: RoleAssistant}
-	var summary strings.Builder
+	var body strings.Builder
 	var outChunks []LLMResponseChunk
 	var streamErr error
 	var usage telemetry.TokenUsage
@@ -273,13 +284,14 @@ func (t *defaultModelTasks) absorbFit(
 		if policy.StreamFitSummary {
 			outChunks = append(outChunks, chunk)
 		}
-		summary.WriteString(chunk.Content)
+		body.WriteString(chunk.Content)
 	}
 	mspan.End(streamErr, usage)
 	if streamErr != nil {
-		return nil, nil, true, streamErr
+		return nil, nil, true, nil, "", streamErr
 	}
-	summaryMsg.Content = summary.String()
+	summaryText := body.String()
+	summaryMsg.Content = summaryText
 
 	// Single final allocation: anchors + summary + remaining unprotected + newMsg.
 	rest := unprotected[numMessagesToCompress:]
@@ -289,7 +301,7 @@ func (t *defaultModelTasks) absorbFit(
 	out = append(out, rest...)
 	out = append(out, newMsg)
 
-	return out, outChunks, true, nil
+	return out, outChunks, true, slices.Clone(compressSrc), summaryText, nil
 }
 
 // stageMessages returns t.countScratch resized to n (grows capacity when needed).
@@ -309,6 +321,7 @@ func handoffGenerate(
 	planDoc string,
 	model InferenceStrategy,
 	tools []*Tool,
+	systemPrompt string,
 ) ([]*Message, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, false, err
@@ -324,32 +337,38 @@ func handoffGenerate(
 		fmt.Fprintf(&planB, "- %s: %s\nStatus: %s\n", todo.Title, todo.Description, todo.Status)
 	}
 
-	const handoffPreamble = `Your task is to produce a handoff for someone to complete the remaining todo items in the plan, not a summary of the completed work, but rather, an informative overview of the process that has completed the work so far. You will ensure to inform the handoff recipient that this is a work in progress and that they should expect to complete the remaining todo items. This is your only task, and you will not add any additional commentary, thoughts, etc. This is not a generic summary as the handoff needs to include the following sections:
-	Objective: Overall mission and success criteria (brief; a durable PROJECT PLAN document will remain in context — do not restate the full blueprint).
-	Completed Work: What is now true because of the completed todo(s) and an overview of the current state of the plan & implementation. Someone should know exactly what was done & what work is remaining and be able to pick up the remaining work seamlessly.
-	Key Decisions: Architectural or implementation choices that should not be revisited.
-	State Changes: Files changed, APIs added/removed, new abstractions, configuration changes, etc.
-	Discoveries: Facts learned that affect remaining work (including anything that forced a plan revision).
-	Constraints: Requirements, assumptions, and invariants that future todos must respect.
-	Remaining Work: Newly discovered tasks, blockers, or dependencies.
-	Validation: What was verified and what still requires verification.
-	Relevant Context for Remaining Todos: Only information the next todos are likely to need which was gathered or observed in the completed work.
-
-Current plan todos:
+	const handoffPreamble = `<instructions>
+Your task is to produce a handoff for someone to complete the remaining todo items in the plan, not a summary of the completed work, but rather, an informative overview of the process that has completed the work so far. You will ensure to inform the handoff recipient that this is a work in progress and that they should expect to complete the remaining todo items. This is your only task, and you will not add any additional commentary, thoughts, etc. This is not a generic summary.
+</instructions>
+<required_sections>
+Objective: Overall mission and success criteria (brief; a durable PROJECT PLAN document will remain in context — do not restate the full blueprint).
+Completed Work: What is now true because of the completed todo(s) and an overview of the current state of the plan & implementation. Someone should know exactly what was done & what work is remaining and be able to pick up the remaining work seamlessly.
+Key Decisions: Architectural or implementation choices that should not be revisited.
+State Changes: Files changed, APIs added/removed, new abstractions, configuration changes, etc.
+Discoveries: Facts learned that affect remaining work (including anything that forced a plan revision).
+Constraints: Requirements, assumptions, and invariants that future todos must respect.
+Remaining Work: Newly discovered tasks, blockers, or dependencies.
+Validation: What was verified and what still requires verification.
+Relevant Context for Remaining Todos: Only information the next todos are likely to need which was gathered or observed in the completed work.
+</required_sections>
+<current_plan>
 `
 	var prompt strings.Builder
 	prompt.Grow(len(handoffPreamble) + planB.Len())
 	prompt.WriteString(handoffPreamble)
 	prompt.WriteString(planB.String())
+	prompt.WriteString("</current_plan>")
 
-	// Handoff is a pure writing task — no tools. On model failure, install a
-	// plan-derived handoff so ACM still rebuilds context.
+	// Keep tools and the live system prompt so the cached prefix matches a
+	// normal turn. The handoff task is an extra developer message; tool_choice
+	// none prevents calls. On model failure, install a plan-derived handoff.
 	mctx := ctx
 	if src, ok := model.(modelIdentityProvider); ok {
 		mctx = telemetry.ContextWithModelIdentity(ctx, src.ModelTelemetryIdentity())
 	}
-	mctx, mspan := telemetry.StartModelSpan(mctx, telemetry.ModelPhaseHandoff, 0, windowShape(window))
-	events, err := model.Invoke(mctx, window, nil, prompt.String())
+	invokeWindow := append(slices.Clone(window), &Message{Role: RoleDeveloper, Content: prompt.String()})
+	mctx, mspan := telemetry.StartModelSpan(mctx, telemetry.ModelPhaseHandoff, 0, windowShape(invokeWindow))
+	events, err := model.Invoke(ContextWithToolChoiceNone(mctx), invokeWindow, tools, systemPrompt)
 	var lastCompletedMessage string
 	usedFallback := false
 	if err != nil {
@@ -391,7 +410,8 @@ Current plan todos:
 		}
 	}
 
-	// Reuse window[0] pointer (original user). Cap 4: user, plan?, handoff, nudge?
+	// Keep window[0] (the original user message), then plan document, handoff,
+	// and a continue nudge when open todos remain.
 	out := make([]*Message, 0, 4)
 	out = append(out, window[0])
 	if planDoc != "" {
@@ -426,6 +446,12 @@ func mergeTokenUsage(u *telemetry.TokenUsage, chunk LLMResponseChunk) {
 	}
 	if chunk.ReasoningTokens > 0 {
 		u.Reasoning = chunk.ReasoningTokens
+	}
+	if chunk.CachedTokens > 0 {
+		u.Cached = chunk.CachedTokens
+	}
+	if chunk.CacheWriteTokens > 0 {
+		u.CacheWrite = chunk.CacheWriteTokens
 	}
 }
 

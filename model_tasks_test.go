@@ -44,7 +44,7 @@ func TestDefaultModelTasks_respectsCancelledContext(t *testing.T) {
 	// Arrange
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	tasks := newDefaultModelTasks(&mockStrategy{}, newModelContextManager(), DefaultContextPolicy(), 100)
+	tasks := newDefaultModelTasks(&scriptedModel{}, newModelContextManager(), DefaultContextPolicy(), 100)
 
 	// Act
 	_, turnErr := tasks.Turn(ctx, nil, "")
@@ -59,8 +59,8 @@ func TestDefaultModelTasks_respectsCancelledContext(t *testing.T) {
 
 func TestDefaultModelTasks_absorbFitReportsCountTokenErrors(t *testing.T) {
 	// Arrange
-	model := &mockStrategy{
-		countTokensFn: func(context.Context, []*Message, []*Tool) (int, error) {
+	model := &scriptedModel{
+		CountTokensFn: func(context.Context, []*Message, []*Tool) (int, error) {
 			return 0, fmt.Errorf("count failed")
 		},
 	}
@@ -80,8 +80,8 @@ func TestDefaultModelTasks_absorbFitReportsCountTokenErrors(t *testing.T) {
 
 func TestDefaultModelTasks_absorbFitSkipsCompressWhenOnlyProtectedPrefix(t *testing.T) {
 	// Arrange
-	model := &mockStrategy{
-		countTokensFn: func(_ context.Context, msgs []*Message, _ []*Tool) (int, error) {
+	model := &scriptedModel{
+		CountTokensFn: func(_ context.Context, msgs []*Message, _ []*Tool) (int, error) {
 			return len(msgs) * 50, nil
 		},
 	}
@@ -111,8 +111,8 @@ func TestDefaultModelTasks_absorbFitSkipsCompressWhenOnlyProtectedPrefix(t *test
 func TestDefaultModelTasks_absorbFitCompressesOverMaxWindow(t *testing.T) {
 	// Arrange
 	var compressInvoked bool
-	model := &mockStrategy{
-		countTokensFn: func(_ context.Context, msgs []*Message, _ []*Tool) (int, error) {
+	model := &scriptedModel{
+		CountTokensFn: func(_ context.Context, msgs []*Message, _ []*Tool) (int, error) {
 			total := 0
 			for _, msg := range msgs {
 				if msg != nil {
@@ -121,8 +121,8 @@ func TestDefaultModelTasks_absorbFitCompressesOverMaxWindow(t *testing.T) {
 			}
 			return total, nil
 		},
-		invokeFn: func(_ context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
-			if tools == nil {
+		InvokeFn: func(_ context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
+			if len(msgs) > 0 && msgs[len(msgs)-1] != nil && strings.Contains(msgs[len(msgs)-1].Content, "Summarize the entire message history") {
 				compressInvoked = true
 				ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "summary", IsComplete: true}
 				return
@@ -155,6 +155,9 @@ func TestDefaultModelTasks_absorbFitCompressesOverMaxWindow(t *testing.T) {
 	if len(result.SummaryChunks) == 0 {
 		t.Fatal("expected streamed summary chunks")
 	}
+	if !result.Compressed || result.Summary == "" || len(result.Discarded) == 0 {
+		t.Fatalf("absorb residue = compressed=%v summary=%q discarded=%d", result.Compressed, result.Summary, len(result.Discarded))
+	}
 	window := tasks.context.Messages()
 	if len(window) < 3 || !strings.Contains(window[1].Content, "summary") {
 		t.Fatalf("compressed window = %+v", window)
@@ -163,11 +166,11 @@ func TestDefaultModelTasks_absorbFitCompressesOverMaxWindow(t *testing.T) {
 
 func TestDefaultModelTasks_absorbFitReturnsCompressStreamErrors(t *testing.T) {
 	// Arrange
-	model := &mockStrategy{
-		countTokensFn: func(_ context.Context, msgs []*Message, _ []*Tool) (int, error) {
+	model := &scriptedModel{
+		CountTokensFn: func(_ context.Context, msgs []*Message, _ []*Tool) (int, error) {
 			return len(msgs) * 100, nil
 		},
-		invokeFn: func(_ context.Context, _ []*Message, _ []*Tool, ch chan<- LLMResponseChunk) {
+		InvokeFn: func(_ context.Context, _ []*Message, _ []*Tool, ch chan<- LLMResponseChunk) {
 			ch <- LLMResponseChunk{Type: StreamEventError, Error: errors.New("compress stream failed")}
 		},
 	}
@@ -193,8 +196,8 @@ func TestDefaultModelTasks_absorbFitReturnsCompressStreamErrors(t *testing.T) {
 
 func TestDefaultModelTasks_handoffUsesFallbackWhenModelFails(t *testing.T) {
 	// Arrange
-	model := &mockStrategy{
-		invokeErr: errors.New("handoff invoke failed"),
+	model := &scriptedModel{
+		InvokeErr: errors.New("handoff invoke failed"),
 	}
 	tasks := newDefaultModelTasks(model, newModelContextManager(), DefaultContextPolicy(), 8192)
 	ctxMgr := newModelContextManager()
@@ -217,9 +220,9 @@ func TestDefaultModelTasks_handoffUsesFallbackWhenModelFails(t *testing.T) {
 
 func TestDefaultModelTasks_handoffUsesFallbackOnEmptyStream(t *testing.T) {
 	// Arrange
-	model := &mockStrategy{
-		invokeFn: func(_ context.Context, _ []*Message, _ []*Tool, _ chan<- LLMResponseChunk) {
-			// Leave the stream empty; mockStrategy closes the channel after invokeFn returns.
+	model := &scriptedModel{
+		InvokeFn: func(_ context.Context, _ []*Message, _ []*Tool, _ chan<- LLMResponseChunk) {
+			// Leave the stream empty; ScriptedModel closes the channel after InvokeFn returns.
 		},
 	}
 	tasks := newDefaultModelTasks(model, newModelContextManager(), DefaultContextPolicy(), 8192)
@@ -241,7 +244,7 @@ func TestDefaultModelTasks_handoffUsesFallbackOnEmptyStream(t *testing.T) {
 
 func TestHandoffGenerate_rejectsEmptyWindow(t *testing.T) {
 	// Act
-	_, _, err := handoffGenerate(context.Background(), nil, nil, "", &mockStrategy{}, nil)
+	_, _, err := handoffGenerate(context.Background(), nil, nil, "", &scriptedModel{}, nil, "")
 
 	// Assert
 	if err == nil || !strings.Contains(err.Error(), "empty window") {
@@ -286,8 +289,8 @@ func TestWatchModelStream_forwardBlockedByCancelledContext(t *testing.T) {
 
 func TestDefaultModelTasks_handoffUsesFallbackOnStreamContentError(t *testing.T) {
 	// Arrange
-	model := &mockStrategy{
-		invokeFn: func(_ context.Context, _ []*Message, _ []*Tool, ch chan<- LLMResponseChunk) {
+	model := &scriptedModel{
+		InvokeFn: func(_ context.Context, _ []*Message, _ []*Tool, ch chan<- LLMResponseChunk) {
 			ch <- LLMResponseChunk{Type: StreamEventError, Content: "handoff stream failed"}
 		},
 	}
@@ -310,8 +313,8 @@ func TestDefaultModelTasks_handoffUsesFallbackOnStreamContentError(t *testing.T)
 
 func TestDefaultModelTasks_absorbFitProgressiveCountFailure(t *testing.T) {
 	// Arrange
-	model := &mockStrategy{
-		countTokensFn: func(_ context.Context, msgs []*Message, _ []*Tool) (int, error) {
+	model := &scriptedModel{
+		CountTokensFn: func(_ context.Context, msgs []*Message, _ []*Tool) (int, error) {
 			if len(msgs) > 3 {
 				return 0, fmt.Errorf("count failed")
 			}

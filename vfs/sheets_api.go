@@ -3,10 +3,10 @@ package vfs
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 
-	"google.golang.org/api/option"
 	"google.golang.org/api/sheets/v4"
 )
 
@@ -56,14 +56,20 @@ type googleSheets struct {
 
 // NewGoogleSheets builds a SheetsAPI from a user token holder.
 func NewGoogleSheets(ctx context.Context, holder *TokenHolder) (SheetsAPI, error) {
-	return newGoogleSheets(ctx, holder)
+	return newGoogleSheets(ctx, holder, "", nil)
 }
 
-func newGoogleSheets(ctx context.Context, holder *TokenHolder) (*googleSheets, error) {
-	if holder == nil {
+// NewGoogleSheetsHTTP points the Sheets SDK at base with httpClient (custom endpoint).
+func NewGoogleSheetsHTTP(ctx context.Context, holder *TokenHolder, base string, httpClient *http.Client) (SheetsAPI, error) {
+	return newGoogleSheets(ctx, holder, base, httpClient)
+}
+
+func newGoogleSheets(ctx context.Context, holder *TokenHolder, base string, httpClient *http.Client) (*googleSheets, error) {
+	opts, err := googleAPIOptions(holder, base, httpClient)
+	if err != nil {
 		return nil, fmt.Errorf("vfs: sheets token required")
 	}
-	svc, err := sheets.NewService(ctx, option.WithTokenSource(holder))
+	svc, err := sheets.NewService(ctx, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("vfs: sheets service: %w", err)
 	}

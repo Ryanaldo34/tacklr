@@ -85,7 +85,7 @@ func openVFS(ctx context.Context, id string, req vfs.Request) (*vfs.MountSession
 }
 ```
 
-Tests inject fakes into the same constructors: `builtins.Drive(fakeAPI)`, `builtins.Graph(fakeAPI, holder, account)`.
+Tests point the official SDKs at httptest: `NewGoogleDriveHTTP` and `NewGraph(holder, srv.URL, srv.Client())`.
 
 | Type | Meaning |
 |------|---------|

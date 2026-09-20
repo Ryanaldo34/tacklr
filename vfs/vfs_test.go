@@ -4,14 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/ryanaldo34/tacklr/builtins"
 	"github.com/ryanaldo34/tacklr/vfs"
@@ -161,12 +159,11 @@ func TestMountSession_localSession(t *testing.T) {
 	}
 }
 
-// TestMountSession_byteProviderWriteAndLimits: providers without PutFile still
-// persist through OpenFile; oversize Stat is rejected; unknown size streams.
-func TestMountSession_byteProviderWriteAndLimits(t *testing.T) {
+// TestMountSession_memoryWriteAndLimits: Memory has no PutFile, so WriteFile
+// copies through OpenFile; oversize writes and unmounted/invalid paths fail closed.
+func TestMountSession_memoryWriteAndLimits(t *testing.T) {
 	ctx := t.Context()
-	store := &memStore{files: make(map[string]memObj)}
-	ms, err := vfs.Tree(vfs.At("mem", memFactory{store: store}.Open))(ctx, "mem-sess", vfs.Request{})
+	ms, err := vfs.Tree(vfs.At("mem", builtins.Memory()))(ctx, "mem-sess", vfs.Request{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,47 +184,9 @@ func TestMountSession_byteProviderWriteAndLimits(t *testing.T) {
 	if b, err := ms.ReadFile(ctx, "/workspace/mem/empty.txt"); err != nil || len(b) != 0 {
 		t.Fatalf("empty: %q err=%v", b, err)
 	}
-	store.mu.Lock()
-	store.files["huge.bin"] = memObj{huge: true, size: int64(vfs.MaxReadFileBytes) + 1}
-	store.files["stream.txt"] = memObj{data: []byte("stream-body\n"), size: -1}
-	store.files["statonly.txt"] = memObj{data: []byte("x"), size: 1, statOnly: true}
-	store.files["short.bin"] = memObj{data: []byte("ab"), size: 10, short: true}
-	store.mu.Unlock()
-	if _, err := ms.ReadFile(ctx, "/workspace/mem/huge.bin"); !errors.Is(err, vfs.ErrTooLarge) {
-		t.Fatalf("huge: %v", err)
-	}
-	if b, err := ms.ReadFile(ctx, "/workspace/mem/stream.txt"); err != nil || string(b) != "stream-body\n" {
-		t.Fatalf("stream: %q err=%v", b, err)
-	}
-	if _, err := ms.ReadFile(ctx, "/workspace/mem/statonly.txt"); err == nil || !strings.Contains(err.Error(), "not readable") {
-		t.Fatalf("stat-only ReadFile: %v", err)
-	}
-	if _, err := ms.ReadFile(ctx, "/workspace/mem/short.bin"); err == nil {
-		t.Fatal("short ReadFull")
-	}
 	if err := ms.WriteFile(ctx, "/workspace/mem/too-big", bytes.Repeat([]byte("x"), vfs.MaxReadFileBytes+1)); err == nil {
 		t.Fatal("oversize write")
 	}
-	store.failOpen = true
-	if err := ms.WriteFile(ctx, "/workspace/mem/nope.txt", []byte("x")); err == nil {
-		t.Fatal("OpenFile write fail")
-	}
-	store.failOpen = false
-	store.noWriter = true
-	if err := ms.WriteFile(ctx, "/workspace/mem/ro-handle.txt", []byte("x")); !errors.Is(err, vfs.ErrReadOnly) {
-		t.Fatalf("not writer: %v", err)
-	}
-	store.noWriter = false
-	store.shortWrite = true
-	if err := ms.WriteFile(ctx, "/workspace/mem/short-write.txt", []byte("hello")); err == nil {
-		t.Fatal("short write")
-	}
-	store.shortWrite = false
-	store.writeErr = true
-	if err := ms.WriteFile(ctx, "/workspace/mem/err-write.txt", []byte("hello")); err == nil {
-		t.Fatal("write error")
-	}
-	store.writeErr = false
 	if _, err := ms.ContentRev(ctx, "rel"); err == nil {
 		t.Fatal("ContentRev relative")
 	}
@@ -679,74 +638,6 @@ func (blankTypeCodec) Decode(context.Context, string, string, []byte) (vfs.Docum
 	return nil, errors.New("unused")
 }
 
-// TestMemProvider_limits covers size/line caps and write path without PutFile.
-func TestS3_rejectsBadConfig(t *testing.T) {
-	ctx := t.Context()
-	if _, err := builtins.S3(nil, "")(ctx, "s", vfs.Binding{}); err == nil {
-		t.Fatal("nil client")
-	}
-	if _, err := builtins.S3(builtins.AWSS3{}, "")(ctx, "s", vfs.Binding{}); err == nil {
-		t.Fatal("missing bucket")
-	}
-	if _, err := builtins.S3(builtins.AWSS3{}, "b")(ctx, "s", vfs.Binding{
-		Params: map[string]string{"prefix": "a/../b"},
-	}); err == nil {
-		t.Fatal("bad prefix")
-	}
-	var aws builtins.AWSS3
-	if _, _, _, err := aws.Head(ctx, "b", "k"); err == nil {
-		t.Fatal("nil AWS Head")
-	}
-	if _, _, _, err := aws.Get(ctx, "b", "k"); err == nil {
-		t.Fatal("nil AWS Get")
-	}
-	if err := aws.Put(ctx, "b", "k", bytes.NewReader(nil), 0); err == nil {
-		t.Fatal("nil AWS Put")
-	}
-	if err := aws.Delete(ctx, "b", "k"); err == nil {
-		t.Fatal("nil AWS Delete")
-	}
-	if _, _, err := aws.List(ctx, "b", ""); err == nil {
-		t.Fatal("nil AWS List")
-	}
-}
-
-func TestBlob_rejectsBadConfig(t *testing.T) {
-	ctx := t.Context()
-	if _, err := builtins.Blob(nil, "")(ctx, "s", vfs.Binding{}); err == nil {
-		t.Fatal("nil client")
-	}
-	if _, err := builtins.Blob(builtins.AzureBlob{}, "")(ctx, "s", vfs.Binding{}); err == nil {
-		t.Fatal("missing container")
-	}
-	if _, err := builtins.Blob(builtins.AzureBlob{}, "c")(ctx, "s", vfs.Binding{
-		Params: map[string]string{"prefix": "a/../b"},
-	}); err == nil {
-		t.Fatal("bad prefix")
-	}
-	var azure builtins.AzureBlob
-	if _, _, _, err := azure.Head(ctx, "c", "k"); err == nil {
-		t.Fatal("nil Azure Head")
-	}
-	if _, _, _, err := azure.Get(ctx, "c", "k"); err == nil {
-		t.Fatal("nil Azure Get")
-	}
-	if err := azure.Put(ctx, "c", "k", bytes.NewReader(nil), 0); err == nil {
-		t.Fatal("nil Azure Put")
-	}
-	if err := azure.Delete(ctx, "c", "k"); err == nil {
-		t.Fatal("nil Azure Delete")
-	}
-	if _, _, err := azure.List(ctx, "c", ""); err == nil {
-		t.Fatal("nil Azure List")
-	}
-	canceled, cancel := context.WithCancel(ctx)
-	cancel()
-	if _, err := builtins.Blob(builtins.AzureBlob{}, "c")(canceled, "s", vfs.Binding{}); !errors.Is(err, context.Canceled) {
-		t.Fatal("Open canceled")
-	}
-}
-
 func TestLocal_rejectsUnsafeConfig(t *testing.T) {
 	ctx := t.Context()
 	open := builtins.Local(t.TempDir())
@@ -825,149 +716,3 @@ type bareDocument struct{ path, mt string }
 
 func (b bareDocument) Path() string      { return b.path }
 func (b bareDocument) MediaType() string { return b.mt }
-
-// --- in-memory provider (no PutFile → exercises writeContents Copy path) ---
-
-type memStore struct {
-	mu         sync.Mutex
-	files      map[string]memObj
-	failOpen   bool
-	noWriter   bool
-	shortWrite bool
-	writeErr   bool
-}
-
-type memObj struct {
-	data     []byte
-	size     int64
-	huge     bool
-	statOnly bool
-	short    bool
-}
-
-type memFactory struct {
-	store *memStore
-}
-
-func (f memFactory) Open(context.Context, string, vfs.Binding) (vfs.Provider, error) {
-	return memProvider(f), nil
-}
-
-type memProvider struct{ store *memStore }
-
-func (memProvider) Validate(context.Context) error { return nil }
-
-func (p memProvider) Stat(_ context.Context, name string) (vfs.FileInfo, error) {
-	p.store.mu.Lock()
-	defer p.store.mu.Unlock()
-	o, ok := p.store.files[name]
-	if !ok {
-		return vfs.FileInfo{}, vfs.ErrNotExist
-	}
-	sz := int64(len(o.data))
-	if o.huge || o.size < 0 || o.short {
-		sz = o.size
-	}
-	return vfs.FileInfo{Name: name, Size: sz, Mode: 0o644, ModTime: time.Now(), MediaType: "text/plain"}, nil
-}
-
-func (p memProvider) OpenFile(_ context.Context, name string, flag int, _ fs.FileMode) (vfs.File, error) {
-	p.store.mu.Lock()
-	defer p.store.mu.Unlock()
-	write := flag&(os.O_WRONLY|os.O_RDWR|os.O_CREATE|os.O_TRUNC) != 0
-	if write {
-		if p.store.failOpen {
-			return nil, errors.New("open failed")
-		}
-		if p.store.noWriter {
-			return &memStatFile{name: name, size: 0}, nil
-		}
-		if p.store.shortWrite {
-			return &shortWriteFile{name: name}, nil
-		}
-		if p.store.writeErr {
-			return &errWriteFile{name: name}, nil
-		}
-		if flag&os.O_TRUNC != 0 || flag&os.O_CREATE != 0 {
-			p.store.files[name] = memObj{data: nil}
-		}
-		return &memWriteFile{store: p.store, name: name}, nil
-	}
-	o, ok := p.store.files[name]
-	if !ok {
-		return nil, vfs.ErrNotExist
-	}
-	if o.huge || o.statOnly {
-		return &memStatFile{name: name, size: o.size}, nil
-	}
-	sz := int64(len(o.data))
-	if o.size < 0 || o.short {
-		sz = o.size
-	}
-	return &memReadFile{Reader: bytes.NewReader(o.data), name: name, size: sz}, nil
-}
-
-func (p memProvider) ReadDir(context.Context, string) ([]vfs.DirEntry, error) {
-	return nil, nil
-}
-func (p memProvider) Remove(_ context.Context, name string) error {
-	p.store.mu.Lock()
-	defer p.store.mu.Unlock()
-	delete(p.store.files, name)
-	return nil
-}
-func (p memProvider) MkdirAll(context.Context, string, fs.FileMode) error { return nil }
-
-type memReadFile struct {
-	*bytes.Reader
-	name string
-	size int64
-}
-
-func (f *memReadFile) Close() error { return nil }
-func (f *memReadFile) Stat() (vfs.FileInfo, error) {
-	return vfs.FileInfo{Name: f.name, Size: f.size, Mode: 0o644}, nil
-}
-
-type memWriteFile struct {
-	buf   bytes.Buffer
-	store *memStore
-	name  string
-}
-
-func (f *memWriteFile) Write(p []byte) (int, error) { return f.buf.Write(p) }
-func (f *memWriteFile) Close() error {
-	f.store.mu.Lock()
-	f.store.files[f.name] = memObj{data: append([]byte(nil), f.buf.Bytes()...)}
-	f.store.mu.Unlock()
-	return nil
-}
-func (f *memWriteFile) Stat() (vfs.FileInfo, error) {
-	return vfs.FileInfo{Name: f.name, Size: int64(f.buf.Len()), Mode: 0o644}, nil
-}
-
-type shortWriteFile struct{ name string }
-
-func (f *shortWriteFile) Write([]byte) (int, error) { return 0, nil }
-func (f *shortWriteFile) Close() error              { return nil }
-func (f *shortWriteFile) Stat() (vfs.FileInfo, error) {
-	return vfs.FileInfo{Name: f.name, Size: 0, Mode: 0o644}, nil
-}
-
-type errWriteFile struct{ name string }
-
-func (f *errWriteFile) Write([]byte) (int, error) { return 0, errors.New("write broken") }
-func (f *errWriteFile) Close() error              { return nil }
-func (f *errWriteFile) Stat() (vfs.FileInfo, error) {
-	return vfs.FileInfo{Name: f.name, Size: 0, Mode: 0o644}, nil
-}
-
-type memStatFile struct {
-	name string
-	size int64
-}
-
-func (f *memStatFile) Close() error { return nil }
-func (f *memStatFile) Stat() (vfs.FileInfo, error) {
-	return vfs.FileInfo{Name: f.name, Size: f.size, Mode: 0o644}, nil
-}

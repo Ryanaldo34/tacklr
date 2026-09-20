@@ -134,3 +134,49 @@ func TestCheckFieldValue_types(t *testing.T) {
 		t.Fatal("unknown type")
 	}
 }
+
+func mustNS(t testing.TB, nv ...string) Namespace {
+	t.Helper()
+	ns, err := ParseNamespace(nv...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ns
+}
+
+func mustFilter(t testing.TB, m map[string]any) Filter {
+	t.Helper()
+	f, err := DecodeFilter(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+func TestFilterPlan_listAndSQLParity(t *testing.T) {
+	ns := mustNS(t, "id", uuid.NewString())
+	now := time.Date(2024, 6, 15, 0, 0, 0, 0, time.UTC)
+	obj := Object{
+		ID: uuid.New(), Kind: "Chunk", Title: "t",
+		Namespace: ns, CreatedAt: now, UpdatedAt: now,
+		Properties: map[string]any{"stage": "open"},
+	}
+	f := mustFilter(t, map[string]any{"kind": []any{"Chunk", "Doc"}, "stage": []any{"open", "closed"}})
+	plan, err := compileFilters(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.match(obj) {
+		t.Fatal("memory match list")
+	}
+	sql, args, err := FilterSQL(Scope{Namespace: ns}, f, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(sql, "kind IN") || !strings.Contains(sql, "properties->>'stage' IN") || !strings.Contains(sql, "namespace @>") {
+		t.Fatalf("sql: %s", sql)
+	}
+	if len(args) < 3 {
+		t.Fatalf("args: %v", args)
+	}
+}

@@ -18,19 +18,13 @@ import (
 	"github.com/ryanaldo34/tacklr/mcp"
 )
 
-// toolSession is the subset of MCP session methods used after connect.
-// Tests inject fakes for pagination, structured content, and close behavior.
-type toolSession interface {
-	ListTools(ctx context.Context, params *mcpsdk.ListToolsParams) (*mcpsdk.ListToolsResult, error)
-	CallTool(ctx context.Context, params *mcpsdk.CallToolParams) (*mcpsdk.CallToolResult, error)
-	Close() error
-}
+var errTransportNotSupported = errors.New("mcp transport not supported")
 
 // client wraps a connection to a single MCP server.
 type client struct {
 	config  mcp.MCPConfig
 	sdk     *mcpsdk.Client
-	session toolSession
+	session *mcpsdk.ClientSession
 }
 
 func newClient(cfg mcp.MCPConfig) *client {

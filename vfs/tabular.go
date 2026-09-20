@@ -984,6 +984,15 @@ func (sh Sheet) mergeSlave(r, c int) bool {
 	return false
 }
 
+// MergeBounds is 0-based half-open [r1,c1,r2,c2) rectangles from checkout.
+func (sh Sheet) MergeBounds() [][4]int {
+	out := make([][4]int, len(sh.merges))
+	for i, m := range sh.merges {
+		out[i] = [4]int{m.r1, m.c1, m.r2, m.c2}
+	}
+	return out
+}
+
 // WithMerge records a 0-based half-open merge rectangle from a provider checkout.
 func WithMerge(sh Sheet, startRow, startCol, endRow, endCol int) Sheet {
 	sh.merges = append(slices.Clone(sh.merges), gridMerge{

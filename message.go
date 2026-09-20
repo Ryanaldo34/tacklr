@@ -168,9 +168,11 @@ type LLMResponseChunk struct {
 
 	// Token usage when the provider reports it (typically on StreamEventComplete
 	// after response.completed). Zero means unknown / not reported.
-	InputTokens     int
-	OutputTokens    int
-	ReasoningTokens int
+	InputTokens      int
+	OutputTokens     int
+	ReasoningTokens  int
+	CachedTokens     int
+	CacheWriteTokens int
 
 	// EncryptedContent is Responses reasoning.encrypted_content. Provider parse
 	// only; copied onto Message so the next turn can replay the item statelessly.
@@ -285,4 +287,11 @@ func DataURL(mime, data string) string {
 		mime = "application/octet-stream"
 	}
 	return "data:" + mime + ";base64," + strings.TrimSpace(data)
+}
+
+// Todo is one item in an agent plan list (create_plan / plan_update stream data).
+type Todo struct {
+	Title       string     `json:"title" desc:"Todo title. Must be unique in the list."`
+	Status      TodoStatus `json:"status" desc:"pending, in_progress, or completed."`
+	Description string     `json:"description" desc:"Objective, expected outcomes, and acceptance criteria."`
 }

@@ -20,7 +20,7 @@ const (
 	FieldTypeDateTime FieldType = "datetime"
 )
 
-// FieldSpec describes one filterable (and later writable) property on a kind.
+// FieldSpec describes one property on a kind (filters and Put validation).
 type FieldSpec struct {
 	Name        string    `json:"name"`
 	Type        FieldType `json:"type"`

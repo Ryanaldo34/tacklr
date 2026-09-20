@@ -40,8 +40,16 @@ func (s *sessionManager) snapshotCheckpoint() (
 ) {
 	s.mu.RLock()
 	userValues := maps.Clone(s.userState)
-	pending = cloneInterruptMap(s.pending)
-	resolved = cloneInterruptMap(s.resolved)
+	pending, err = cloneInterruptMap(s.pending)
+	if err != nil {
+		s.mu.RUnlock()
+		return nil, nil, nil, nil, fmt.Errorf("checkpoint pending interrupts: %w", err)
+	}
+	resolved, err = cloneInterruptMap(s.resolved)
+	if err != nil {
+		s.mu.RUnlock()
+		return nil, nil, nil, nil, fmt.Errorf("checkpoint resolved interrupts: %w", err)
+	}
 	s.mu.RUnlock()
 
 	userState = make(map[string]json.RawMessage, len(userValues))
@@ -163,12 +171,16 @@ func decodeModule(modules map[string]json.RawMessage, name string, target any) e
 	return nil
 }
 
-func cloneInterruptMap(values interruptMap) interruptMap {
+func cloneInterruptMap(values interruptMap) (interruptMap, error) {
 	out := make(interruptMap, len(values))
 	for key, value := range values {
-		if cloned := interrupt.Clone(value); cloned != nil {
+		cloned, err := interrupt.Clone(value)
+		if err != nil {
+			return nil, err
+		}
+		if cloned != nil {
 			out[key] = cloned
 		}
 	}
-	return out
+	return out, nil
 }

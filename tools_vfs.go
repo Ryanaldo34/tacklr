@@ -68,12 +68,11 @@ func (v vfsTools) newRead() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "read",
 		DisplayName: "Read {path}",
-		Description: `Read a virtual file. Use media_type in the result to choose write, write_document, or write_spreadsheet. Path-only returns the first page of numbered lines (Docs/Word as HTML: one block per line). The N| prefix is display only — it is not in the file.
+		Description: `Read a virtual file. Call to inspect contents, headings, or a cell range before editing.
 
-start/end: 1-based half-open window. Sheets: rows of the sheet named in block_id.
-block_id: markdown heading, Docs/Word block, sheet, Sheet!A1, or Sheet!A1:C3. One cell and small A1 ranges include format when set; sheet row windows are TSV.
-outline: headings, Doc tabs/blocks, or sheets. Sheets path-only is outline.
-Knowledge objects: read_object. Names/grep: run_command → ls / rg.`,
+Path-only returns the first page of numbered lines (Docs/Word as HTML: one block per line) plus media_type, start, end, eof, and next_start. The N| prefix is display only — it is not in the file. Spreadsheets with no window default to outline.
+
+Fails if the path is missing, the range is invalid, or block_id is unknown.`,
 		Category: ToolCategoryRead,
 		Access:   ToolReadAccess,
 		Timeout:  60 * time.Second,
@@ -300,10 +299,12 @@ func (v vfsTools) newWrite() *Tool {
 	cfg := ToolConfig{
 		Name:        writeToolName,
 		DisplayName: "Write {path}",
-		Description: `Edit a plaintext or source file (not Docs/Word/Sheets). Use after read when media_type is text or code. Exactly one of content, old, or start. old must still be in the file. Do not copy the N| prefix.`,
-		Category:    ToolCategoryEdit,
-		Access:      ToolWriteAccess,
-		Timeout:     60 * time.Second,
+		Description: `Create or edit a plaintext or source file. Call when the path is new or its media_type is text or code. Pass exactly one change (content, old/new, or start/end). Do not copy the N| prefix from a prior read.
+
+May pause for write permission. On success returns path, line_count, and replacements when a substitution ran. Fails if nothing to change, more than one change is passed, old is missing, or the existing file is a document or spreadsheet.`,
+		Category: ToolCategoryEdit,
+		Access:   ToolWriteAccess,
+		Timeout:  60 * time.Second,
 		Handler: func(ctx context.Context, args writeTextArgs, rt HarnessRuntime) (string, error) {
 			p, err := vfs.CleanPath(args.Path)
 			if err != nil {
@@ -347,10 +348,12 @@ func (v vfsTools) newWriteDocument() *Tool {
 	cfg := ToolConfig{
 		Name:        writeDocumentToolName,
 		DisplayName: "Write document {path}",
-		Description: `Edit a Google Doc or Word file. Use when media_type is a document. Exactly one of content (HTML), start/end lines, or block_id. Multi-tab requires tab_id. Not for .md or spreadsheets.`,
-		Category:    ToolCategoryEdit,
-		Access:      ToolWriteAccess,
-		Timeout:     60 * time.Second,
+		Description: `Create or edit a Google Doc or Word file. Call when the path is new or its media_type is a document. Pass exactly one change.
+
+May pause for write permission. On success returns path, line_count, and an outline of blocks. Fails if nothing to change, more than one change is passed, or the existing file is plaintext or a spreadsheet.`,
+		Category: ToolCategoryEdit,
+		Access:   ToolWriteAccess,
+		Timeout:  60 * time.Second,
 		Handler: func(ctx context.Context, args writeDocumentArgs, rt HarnessRuntime) (string, error) {
 			p, err := vfs.CleanPath(args.Path)
 			if err != nil {
@@ -393,10 +396,12 @@ func (v vfsTools) newWriteSpreadsheet() *Tool {
 	cfg := ToolConfig{
 		Name:        writeSpreadsheetToolName,
 		DisplayName: "Write spreadsheet {path}",
-		Description: `Edit one spreadsheet cell. Use when media_type is a spreadsheet. block_id is Sheet!A1. Optional format. Create a new sheet with content on a new path only.`,
-		Category:    ToolCategoryEdit,
-		Access:      ToolWriteAccess,
-		Timeout:     60 * time.Second,
+		Description: `Create a spreadsheet or edit one cell of an existing sheet.
+
+May pause for write permission. On success returns path and line_count. Fails if content is passed for an existing sheet, block_id is missing on an existing sheet, or the existing file is not a spreadsheet.`,
+		Category: ToolCategoryEdit,
+		Access:   ToolWriteAccess,
+		Timeout:  60 * time.Second,
 		Handler: func(ctx context.Context, args writeSpreadsheetArgs, rt HarnessRuntime) (string, error) {
 			p, err := vfs.CleanPath(args.Path)
 			if err != nil {
@@ -580,10 +585,12 @@ func newRunCommand(ms *vfs.MountSession, permissionRequired bool) *Tool {
 	cfg := ToolConfig{
 		Name:        "run_command",
 		DisplayName: "Run {command}",
-		Description: `Run a host shell command as /bin/sh -c. cwd is the VFS root (FUSE mount). Use relative paths (workspace/work/foo). On Linux the shell cannot see other session mounts. Non-zero exit is a successful tool result (exit=N).`,
-		Category:    ToolCategoryExecute,
-		Access:      ToolExecuteAccess,
-		Timeout:     runCommandTimeout,
+		Description: `Run a host shell command as /bin/sh -c with cwd at this session's workspace root. Call for directory listings, grep, and other shell work. On Linux the shell cannot see other session mounts.
+
+May pause for execute permission. Returns stdout/stderr. A non-zero process exit is still a successful tool result (exit=N in the output). Fails if no command is given or the workspace is not mounted.`,
+		Category: ToolCategoryExecute,
+		Access:   ToolExecuteAccess,
+		Timeout:  runCommandTimeout,
 		Handler: func(ctx context.Context, args runCommandArgs, rt HarnessRuntime) (string, error) {
 			dir := ms.HostDir()
 			if dir == "" {

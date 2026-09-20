@@ -1,7 +1,12 @@
 package durable
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"maps"
+	"slices"
+	"strings"
 
 	"github.com/ryanaldo34/tacklr"
 
@@ -151,3 +156,71 @@ var (
 	// match the row (another writer already saved). Reload and retry.
 	ErrStaleCheckpoint = errors.New("stale checkpoint")
 )
+
+// JobHandler runs a named background job. Register on inprocess/temporal Config.Jobs.
+type JobHandler func(ctx context.Context, task string) (string, error)
+
+// ChildSessionID is the stable id for a spawn_specialist child session.
+func ChildSessionID(parent SessionID, specialist, callID string) SessionID {
+	return SessionID(fmt.Sprintf("%s/w/%s/%s", parent, strings.TrimSpace(specialist), strings.TrimSpace(callID)))
+}
+
+// JobID is the stable id for a named background job (not a child session).
+func JobID(parent SessionID, name, callID string) SessionID {
+	return SessionID(fmt.Sprintf("%s/j/%s/%s", parent, strings.TrimSpace(name), strings.TrimSpace(callID)))
+}
+
+// EventLog is the portable progress stream. Temporal implements it with
+// Workflow Streams. In-process uses a memory channel. Topics are TopicEvents
+// and TopicRetry (activity attempt > 1).
+type EventLog interface {
+	Append(ctx context.Context, sessionID SessionID, topic string, ev tacklr.StreamEvent) error
+	Subscribe(ctx context.Context, sessionID SessionID, after Seq) (<-chan tacklr.StreamEvent, error)
+	Head(ctx context.Context, sessionID SessionID) (Seq, error)
+	CloseSession(ctx context.Context, sessionID SessionID) error
+}
+
+// Revision is the SnapshotStore compare-and-swap token for one session row.
+// The zero value means no row exists yet; the next Save creates it.
+type Revision string
+
+// SnapshotStore is the session record: what the harness needs to think again
+// after HITL or a worker recycle. It is not the wait loop and not credentials.
+//
+// Frozen contents: SessionCheckpoint (window, plan, parked interrupt, userState),
+// MountRecipe topology, and session identity (agent, parent, specialist, child
+// ids). Tokens, file bytes, leftover unstarted Temporal tool calls, MCP env
+// and headers, and child workflow futures never go here.
+//
+// Save's expected Revision must match the last Load (zero if no row).
+// Mismatch means another writer already saved — reload and retry.
+type SnapshotStore interface {
+	Save(ctx context.Context, sessionID SessionID, snap Snapshot, expected Revision) (Revision, error)
+	Load(ctx context.Context, sessionID SessionID) (Snapshot, Revision, error)
+	Delete(ctx context.Context, sessionID SessionID) error
+}
+
+// WithoutSecrets returns a copy with Credential Token and ExpiresAt cleared.
+// Binding metadata (provider, alias, params, writable) is kept. The input is
+// not modified.
+func (a AuthContext) WithoutSecrets() AuthContext {
+	out := cloneAuth(a)
+	for i := range out.Bindings {
+		out.Bindings[i].Auth = vfs.Credential{}
+	}
+	return out
+}
+
+func cloneAuth(a AuthContext) AuthContext {
+	out := AuthContext{Drop: slices.Clone(a.Drop)}
+	if len(a.Bindings) == 0 {
+		return out
+	}
+	out.Bindings = make([]vfs.Binding, len(a.Bindings))
+	for i, b := range a.Bindings {
+		b.Params = maps.Clone(b.Params)
+		b.Live = nil
+		out.Bindings[i] = b
+	}
+	return out
+}

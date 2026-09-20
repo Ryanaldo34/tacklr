@@ -58,12 +58,10 @@ func (b brainTools) newReadObjectTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "read_object",
 		DisplayName: "Read object {object_id}",
-		Description: `Read a knowledge object by UUID (full stored body as JSON).
-
-Use after search, find_exact, find_objects, or expand when the hit has no vfs_path (Deal, Fact, Person, …). Pass object_id from that result. Do not invent ids. Files: use read on vfs_path instead.`,
-		Category: ToolCategoryRead,
-		Access:   ToolReadAccess,
-		Timeout:  30 * time.Second,
+		Description: `Read a knowledge record by UUID and return its full stored body as JSON (id, kind, title, summary, content, properties). Call when you have an id from a prior knowledge result and need the complete record. Fails if object_id is missing, invalid, or not visible in the current namespace.`,
+		Category:    ToolCategoryRead,
+		Access:      ToolReadAccess,
+		Timeout:     30 * time.Second,
 		Handler: func(ctx context.Context, args readObjectArgs, runtime HarnessRuntime) (string, error) {
 			id, err := parseUUID(args.ObjectID, "object_id")
 			if err != nil {
@@ -91,12 +89,10 @@ func (b brainTools) newSchemaTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "schema",
 		DisplayName: "Schema {kind}",
-		Description: `Discover kind documentation, object columns, and filterable fields.
-
-Call with a kind to see columns (title, summary, content) and filterable_fields for that kind. Call with no kind to list registered kinds. Query text on search/find_exact matches chunk title/summary/content; structured fields go in filters. find_objects searches parent records with the same filter keys. Prefer schema() before inventing property names. When kinds are registered, property filters require a kind key (or find_objects.kinds). Core filter keys: kind, title, created_after, created_before, updated_after, updated_before.`,
-		Category: ToolCategoryRead,
-		Access:   ToolReadAccess,
-		Timeout:  30 * time.Second,
+		Description: `Return kind documentation, columns, and filterable_fields. Call before inventing property names. Core filter keys are kind, title, created_after, created_before, updated_after, updated_before; other keys are kind properties. When kinds are registered, property filters require a kind. Fails if the named kind is unknown.`,
+		Category:    ToolCategoryRead,
+		Access:      ToolReadAccess,
+		Timeout:     30 * time.Second,
 		Handler: func(ctx context.Context, args schemaArgs, runtime HarnessRuntime) (string, error) {
 			runtime.EmitUpdate("Loading knowledge schema…")
 			res, err := b.engine.Schema(ctx, args.Kind)
@@ -110,8 +106,8 @@ Call with a kind to see columns (title, summary, content) and filterable_fields 
 
 type queryArgs struct {
 	namespaceArg
-	Query    string         `json:"query" desc:"Search query text. Prefer a semantic rewrite of the user ask when helpful."`
-	Filters  map[string]any `json:"filters,omitempty" desc:"Optional field→value filters (kind, title, property keys, updated_after). Prefer schema() first. All content filters belong here."`
+	Query    string         `json:"query" desc:"Query text. Semantic rewrite of the ask for search; UUID, title, or path-like phrase for find_exact."`
+	Filters  map[string]any `json:"filters,omitempty" desc:"Optional field→value filters (kind, title, property keys, updated_after). All content filters belong here."`
 	Limit    int            `json:"limit,omitempty" desc:"Max results for this page (default 10, max 50)."`
 	ScopeIDs []string       `json:"scope_ids,omitempty" desc:"Optional UUIDs of parents (or objects) to restrict hits to this neighborhood after expand/find_objects."`
 }
@@ -120,12 +116,9 @@ func (b brainTools) newSearchTool() *Tool {
 	return b.newQueryTool(ToolConfig{
 		Name:        "search",
 		DisplayName: "Search knowledge: {query}",
-		Description: `Search notes and indexed files. Query is free text over chunk bodies. Returns ranked parents with evidence snippets.
+		Description: `Search notes and indexed files by meaning. Call when starting a new plan to find durable facts related to the task, and after a handoff when a needed detail is missing from the current notes.
 
-Structured fields on a record (stage, status, …) belong in filters — see schema() — or use find_objects for the record itself.
-Hit has vfs_path → open the live file with read (path + start_line / block_id from evidence).
-No vfs_path → read_object with the id.
-Live grep is run_command → rg (not this tool). Relationships: expand, not search. More pages: continue.`,
+Returns a page of ranked parent records with evidence snippets (optional vfs_path, start_line, block_id), a result_set_id, and has_more. Replaces the active result set. Fails on invalid filters or namespace.`,
 		Category: ToolCategorySearch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
@@ -136,9 +129,9 @@ func (b brainTools) newFindExactTool() *Tool {
 	return b.newQueryTool(ToolConfig{
 		Name:        "find_exact",
 		DisplayName: "Find exact: {query}",
-		Description: `Find an object by exact or near-exact string (UUID, title, path-like phrase).
+		Description: `Find a record by exact or near-exact string. Call when you already have the identifier or a precise phrase.
 
-Prefer over search when you already have the identifier. File hits: read the vfs_path. Other objects: read_object. Meaning-based entity lookup: find_objects. More pages: continue.`,
+Returns a page of ranked parent records with evidence, a result_set_id, and has_more. A UUID query loads that object directly. Replaces the active result set. Fails on invalid filters or namespace.`,
 		Category: ToolCategorySearch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
@@ -180,7 +173,7 @@ func (b brainTools) newQueryTool(
 }
 
 type continueArgs struct {
-	ResultSetID string `json:"result_set_id" desc:"Result set id from a prior search, find_exact, or expand."`
+	ResultSetID string `json:"result_set_id" desc:"Result set id from a prior search, find_exact, find_objects, or expand."`
 	Limit       int    `json:"limit,omitempty" desc:"Max results for this page (default 10, max 50)."`
 }
 
@@ -188,9 +181,9 @@ func (b brainTools) newContinueTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "continue",
 		DisplayName: "Continue results",
-		Description: `Return the next page of a prior ranked result set from search, find_exact, find_objects, or large expand.
+		Description: `Return the next page of the active ranked result set. Call when a prior ranking result has_more.
 
-Pass the result_set_id from the previous call. Each new search, find_exact, find_objects, or large expand replaces the active result set — older result_set_id values stop working.`,
+Returns the next page of records, has_more, and the same result_set_id. Fails if result_set_id is missing, invalid, or no longer active because a newer ranking call replaced it.`,
 		Category: ToolCategorySearch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
@@ -216,7 +209,7 @@ type expandArgs struct {
 	namespaceArg
 	Path          string   `json:"path,omitempty" desc:"Absolute virtual path of an indexed file to expand. Prefer path when the node is a file."`
 	ObjectID      string   `json:"object_id,omitempty" desc:"UUID of the object to expand when path is not used."`
-	RelationTypes []string `json:"relation_types,omitempty" desc:"Optional relation types. Omit for containment (children or parent+siblings). Named types use the graph backend (e.g. references)."`
+	RelationTypes []string `json:"relation_types,omitempty" desc:"Optional relation types. Omit for parent/child containment; named types follow relationships (e.g. references)."`
 	MaxHops       int      `json:"max_hops,omitempty" desc:"Graph hop depth (default 1, capped by host). Use 2+ to walk paths like entity→related→aggregate."`
 	Direction     string   `json:"direction,omitempty" desc:"Graph edge direction: out, in, or both (default both)."`
 	Limit         int      `json:"limit,omitempty" desc:"Page size when results are paginated (default 10, max 50)."`
@@ -226,9 +219,9 @@ func (b brainTools) newExpandTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "expand",
 		DisplayName: "Expand {path}",
-		Description: `Neighbors of a known path or object_id — not a search.
+		Description: `List neighbors of a known path or object_id. Call when you already have a record and need its children, siblings, or related records.
 
-Prefer path for files. ls / rg do not list graph edges. Omit relation_types for containment only; named types need a graph backend. File neighbors: read. Other neighbors: read_object. Large pages: continue.`,
+Returns neighboring records (with vfs_path when set, and relation metadata on graph hops). Large results are paged with result_set_id and has_more, and replace the active result set. Fails if path/id is missing, not visible, or named relations are requested without a graph.`,
 		Category: ToolCategoryFetch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
@@ -263,7 +256,7 @@ type saveObjectArgs struct {
 	Summary     string         `json:"summary,omitempty" desc:"Optional short abstract."`
 	Content     string         `json:"content,omitempty" desc:"Optional full body text."`
 	ContentType string         `json:"content_type,omitempty" desc:"Optional MIME type (e.g. text/plain, text/markdown)."`
-	Properties  map[string]any `json:"properties,omitempty" desc:"Kind-defined fields from schema(). Prefer schema() first."`
+	Properties  map[string]any `json:"properties,omitempty" desc:"Kind-defined fields. Discover names from schema."`
 	ParentID    string         `json:"parent_id,omitempty" desc:"Optional parent UUID when this is a part object."`
 	ObjectID    string         `json:"object_id,omitempty" desc:"Optional existing UUID to update; omit to create."`
 }
@@ -271,13 +264,13 @@ type saveObjectArgs struct {
 func (b brainTools) newSaveTool(name, display, kind, roleDesc string) *Tool {
 	desc := `Save a ` + roleDesc + ` as kind ` + kind + `.`
 	if _, ok := b.brainMountForKind(""); ok {
-		desc = `Write the Engram Markdown for a ` + roleDesc + ` (kind ` + kind + `) on the brain mount.
+		desc = `Save a ` + roleDesc + ` (kind ` + kind + `) as a Markdown file so it survives later steps as a durable record.
 
-Prefer write on that path. Thin write: YAML front matter + body under /engram/{kind}/ (or a roots mount). Returns path + id. Re-open the file with read; pass object_id to update.`
+On success returns path, id, kind, and title. Fails if title is empty, the kind is invalid, or required properties are missing.`
 	} else {
-		desc += `
+		desc += ` Call when a finding should survive later steps as a durable record.
 
-Call schema() for this kind before inventing property keys. Pass object_id to update. Re-open with read_object.`
+On success returns the full record (id, kind, title, summary, content, properties). Fails if the kind is invalid or required properties are missing.`
 	}
 	return NewTool(ToolConfig{
 		Name:        name,
@@ -321,14 +314,14 @@ type linkArgs struct {
 type findObjectsArgs struct {
 	namespaceArg
 	Query   string         `json:"query" desc:"Semantic or keyword query for whole knowledge objects (entities)."`
-	Kinds   []string       `json:"kinds,omitempty" desc:"Optional host kind names to restrict results (e.g. Deal, Fact). Prefer schema() for valid kinds."`
-	Filters map[string]any `json:"filters,omitempty" desc:"Optional field→value filters (same keys as search). Prefer schema() for filterable_fields. Property filters require kind when kinds are registered (or set kinds here)."`
+	Kinds   []string       `json:"kinds,omitempty" desc:"Optional kind names to restrict results."`
+	Filters map[string]any `json:"filters,omitempty" desc:"Optional field→value filters (same keys as search). Property filters require a kind when kinds are registered (or set kinds here)."`
 	Limit   int            `json:"limit,omitempty" desc:"Max results for this page (default 10, max 50)."`
 }
 
 type findLinksArgs struct {
 	namespaceArg
-	RelationType string `json:"relation_type" desc:"Edge label to search (e.g. about, references). Host must ensure an edge text index for this label on Helix."`
+	RelationType string `json:"relation_type" desc:"Relation label to search (e.g. about, references)."`
 	Query        string `json:"query" desc:"Text query matched against edge note metadata."`
 	Limit        int    `json:"limit,omitempty" desc:"Max links for this page (default 10, max 50)."`
 }
@@ -337,9 +330,9 @@ func (b brainTools) newFindLinksTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "find_links",
 		DisplayName: "Find links: {query}",
-		Description: `Find relationships by text on the edge note, not document bodies.
+		Description: `Find relationships by text on the relationship note. Call when you know the relation label and want pairs whose note matches the query.
 
-Returns from_path/to_path (and ids). ls never lists edges. Prefer expand from a known path. relation_type is required. Then read file ends with read, other ends with read_object.`,
+Returns each link's endpoints (ids and paths when set), relation_type, and optional metadata. Fails if relation_type is empty, edge search is unavailable, or the namespace is invalid.`,
 		Category: ToolCategorySearch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
@@ -366,9 +359,9 @@ func (b brainTools) newFindObjectsTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "find_objects",
 		DisplayName: "Find objects: {query}",
-		Description: `Find whole knowledge objects (Deal, Fact, …), not ranked passages.
+		Description: `Find a named record (a paper, person, experiment, fact, or earlier session note) rather than a passage. Call when starting a new plan to look up durable facts related to the task, and after a handoff to recover findings that may have been saved.
 
-Use to resolve which tracked entity matches the ask. Evidence in notes/files: search instead. Already have the id: expand or read_object. More pages: continue. Call schema() before inventing filter keys.`,
+Returns a page of ranked records, a result_set_id, and has_more. Replaces the active result set. Fails if object search is unavailable, filters are invalid, or the namespace is invalid.`,
 		Category: ToolCategorySearch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
@@ -400,9 +393,9 @@ func (b brainTools) newLinkTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "link",
 		DisplayName: "Link {from} → {to}",
-		Description: `Create a relationship between two first-class knowledge objects (graph edge). Prefer virtual paths. Engram paths resolve via vfs_path; artifact paths must already be indexed (index_file or mount policy). UUID from_id/to_id remain for non-file objects.
+		Description: `Create or update a relationship between two existing records. Call to assert how they relate.
 
-Both ends must exist under the current search namespace, must not be soft-deleted, and must not be part/chunk objects. list/ls never lists edges. Optional note/status/role/confidence/evidence_id annotate why the link exists; expand returns that metadata. Re-linking the same pair updates metadata.`,
+On success returns the endpoint ids/paths, relation_type, and metadata. Re-linking the same pair updates metadata. Fails if an endpoint is missing, is a part rather than a record, or a graph is not available.`,
 		Category: ToolCategoryEdit,
 		Access:   ToolWriteAccess,
 		Timeout:  30 * time.Second,
@@ -452,9 +445,9 @@ func (b brainTools) newUnlinkTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "unlink",
 		DisplayName: "Unlink {from} → {to}",
-		Description: `Remove a relationship between two first-class knowledge objects. Prefer virtual paths (same resolution as link). list/ls never lists edges.
+		Description: `Remove a relationship between two records. Call when that relationship should no longer hold.
 
-Both ends must exist under the current search namespace and must not be parts. Idempotent if the edge is already gone.`,
+On success the edge is gone. If the relationship was already absent, the call still succeeds. Fails if an endpoint is missing, is a part rather than a record, or a graph is not available.`,
 		Category: ToolCategoryEdit,
 		Access:   ToolWriteAccess,
 		Timeout:  30 * time.Second,

@@ -14,127 +14,88 @@ import (
 	"github.com/ryanaldo34/tacklr/mcp"
 )
 
-func TestInterpretErrorJSONRPC(t *testing.T) {
+func TestInterpretError_surfacesRPCHTTPAndSessionCauses(t *testing.T) {
 	c := &client{config: mcp.MCPConfig{Name: "test"}}
+	rpcWithData := &mcpjsonrpc.Error{Code: -32602, Message: "invalid params", Data: []byte(`{"detail":"missing field"}`)}
+	rpcNoData := &mcpjsonrpc.Error{Code: -32601, Message: "method not found"}
+	forbidden := &httpError{Status: http.StatusForbidden, Body: "insufficient authentication scopes"}
+	internal := &httpError{Status: http.StatusInternalServerError, Body: "server exploded"}
 
-	rpcErr := &mcpjsonrpc.Error{
-		Code:    -32602,
-		Message: "invalid params",
-		Data:    []byte(`{"detail":"missing field"}`),
+	cases := []struct {
+		name   string
+		op     string
+		in     error
+		want   []string
+		unwant string
+		is     error
+	}{
+		{
+			name: "jsonrpc with data",
+			op:   `call tool "foo"`,
+			in:   fmt.Errorf("calling %q: %w", "tools/call", rpcWithData),
+			want: []string{"JSON-RPC error -32602", "invalid params", `{"detail":"missing field"}`},
+		},
+		{
+			name:   "jsonrpc without data",
+			op:     "list tools",
+			in:     fmt.Errorf("calling %q: %w", "tools/call", rpcNoData),
+			want:   []string{"JSON-RPC error -32601"},
+			unwant: "data:",
+		},
+		{
+			name: "http 403",
+			op:   `call tool "gmail"`,
+			in:   fmt.Errorf("mcp server %q: call tool %q: %w", "google", "gmail", forbidden),
+			want: []string{"HTTP error (status 403)", "insufficient authentication scopes"},
+		},
+		{
+			name: "http 500",
+			op:   `call tool "foo"`,
+			in:   fmt.Errorf("call failed: %w", internal),
+			want: []string{"HTTP error (status 500)"},
+		},
+		{
+			name: "session missing",
+			op:   "list tools",
+			in:   fmt.Errorf("calling %q: %w", "tools/list", mcpsdk.ErrSessionMissing),
+			want: []string{"session missing"},
+			is:   mcpsdk.ErrSessionMissing,
+		},
+		{
+			name: "connection closed",
+			op:   `call tool "foo"`,
+			in:   fmt.Errorf("calling %q: %w", "tools/call", mcpsdk.ErrConnectionClosed),
+			want: []string{"connection closed"},
+			is:   mcpsdk.ErrConnectionClosed,
+		},
+		{
+			name: "fallback",
+			op:   `call tool "foo"`,
+			in:   errors.New("something weird"),
+			want: []string{"something weird", `mcp server "test"`},
+		},
+		{
+			name: "connect 403",
+			op:   "connect",
+			in:   fmt.Errorf("connect: %w", forbidden),
+			want: []string{"connect", "HTTP error (status 403)"},
+		},
 	}
-	wrapped := fmt.Errorf("calling %q: %w", "tools/call", rpcErr)
-
-	err := c.interpretError("call tool \"foo\"", wrapped)
-	if !errors.As(err, &rpcErr) {
-		t.Errorf("expected errors.As to find *jsonrpc.Error, got %v", err)
-	}
-	if !strings.Contains(err.Error(), "JSON-RPC error -32602") {
-		t.Errorf("expected error to mention JSON-RPC code, got %q", err.Error())
-	}
-	if !strings.Contains(err.Error(), "invalid params") {
-		t.Errorf("expected error to mention message, got %q", err.Error())
-	}
-	if !strings.Contains(err.Error(), `{"detail":"missing field"}`) {
-		t.Errorf("expected error to include data, got %q", err.Error())
-	}
-}
-
-func TestInterpretErrorJSONRPCNoData(t *testing.T) {
-	c := &client{config: mcp.MCPConfig{Name: "test"}}
-
-	rpcErr := &mcpjsonrpc.Error{Code: -32601, Message: "method not found"}
-	wrapped := fmt.Errorf("calling %q: %w", "tools/call", rpcErr)
-
-	err := c.interpretError("list tools", wrapped)
-	if !strings.Contains(err.Error(), "JSON-RPC error -32601") {
-		t.Errorf("expected error to mention JSON-RPC code, got %q", err.Error())
-	}
-	if strings.Contains(err.Error(), "data:") {
-		t.Errorf("expected no data suffix when Data is empty, got %q", err.Error())
-	}
-}
-
-func TestInterpretErrorHTTPForbidden(t *testing.T) {
-	c := &client{config: mcp.MCPConfig{Name: "google"}}
-
-	httpErr := &httpError{Status: http.StatusForbidden, Body: "Request had insufficient authentication scopes."}
-	wrapped := fmt.Errorf("mcp server %q: call tool %q: %w", "google", "gmail", httpErr)
-
-	err := c.interpretError("call tool \"gmail\"", wrapped)
-
-	var got *httpError
-	if !errors.As(err, &got) {
-		t.Errorf("expected errors.As to find *httpError, got %v", err)
-	}
-	if !strings.Contains(err.Error(), "HTTP error (status 403)") {
-		t.Errorf("expected HTTP status mention, got %q", err.Error())
-	}
-	if !strings.Contains(err.Error(), "insufficient authentication scopes") {
-		t.Errorf("expected response body in error, got %q", err.Error())
-	}
-}
-
-func TestInterpretErrorHTTPNonForbidden(t *testing.T) {
-	c := &client{config: mcp.MCPConfig{Name: "test"}}
-
-	httpErr := &httpError{Status: http.StatusInternalServerError, Body: "server exploded"}
-	wrapped := fmt.Errorf("call failed: %w", httpErr)
-
-	err := c.interpretError("call tool \"foo\"", wrapped)
-	if !strings.Contains(err.Error(), "HTTP error (status 500)") {
-		t.Errorf("expected HTTP status mention, got %q", err.Error())
-	}
-}
-
-func TestInterpretErrorSessionMissing(t *testing.T) {
-	c := &client{config: mcp.MCPConfig{Name: "test"}}
-
-	err := c.interpretError("list tools", fmt.Errorf("calling %q: %w", "tools/list", mcpsdk.ErrSessionMissing))
-	if !errors.Is(err, mcpsdk.ErrSessionMissing) {
-		t.Errorf("expected errors.Is ErrSessionMissing, got %v", err)
-	}
-	if !strings.Contains(err.Error(), "session missing") {
-		t.Errorf("expected session missing mention, got %q", err.Error())
-	}
-}
-
-func TestInterpretErrorConnectionClosed(t *testing.T) {
-	c := &client{config: mcp.MCPConfig{Name: "test"}}
-
-	err := c.interpretError("call tool \"foo\"", fmt.Errorf("calling %q: %w", "tools/call", mcpsdk.ErrConnectionClosed))
-	if !errors.Is(err, mcpsdk.ErrConnectionClosed) {
-		t.Errorf("expected errors.Is ErrConnectionClosed, got %v", err)
-	}
-	if !strings.Contains(err.Error(), "connection closed") {
-		t.Errorf("expected connection closed mention, got %q", err.Error())
-	}
-}
-
-func TestInterpretErrorFallback(t *testing.T) {
-	c := &client{config: mcp.MCPConfig{Name: "test"}}
-
-	orig := errors.New("something weird")
-	err := c.interpretError("call tool \"foo\"", orig)
-	if !strings.Contains(err.Error(), "something weird") {
-		t.Errorf("expected original error message preserved, got %q", err.Error())
-	}
-	if !strings.Contains(err.Error(), "mcp server \"test\"") {
-		t.Errorf("expected server name in fallback, got %q", err.Error())
-	}
-}
-
-func TestInterpretErrorConnect(t *testing.T) {
-	c := &client{config: mcp.MCPConfig{Name: "gmail"}}
-
-	httpErr := &httpError{Status: http.StatusForbidden, Body: "insufficient authentication scopes"}
-	wrapped := fmt.Errorf("connect: %w", httpErr)
-
-	err := c.interpretError("connect", wrapped)
-	if !strings.Contains(err.Error(), "connect") {
-		t.Errorf("expected operation 'connect' in error, got %q", err.Error())
-	}
-	if !strings.Contains(err.Error(), "HTTP error (status 403)") {
-		t.Errorf("expected HTTP status mention for connect 403, got %q", err.Error())
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := c.interpretError(tc.op, tc.in)
+			for _, want := range tc.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("error = %q, want %q", err, want)
+				}
+			}
+			if tc.unwant != "" && strings.Contains(err.Error(), tc.unwant) {
+				t.Fatalf("error = %q, did not want %q", err, tc.unwant)
+			}
+			if tc.is != nil && !errors.Is(err, tc.is) {
+				t.Fatalf("unwrap = %v, want %v", err, tc.is)
+			}
+		})
 	}
 }
 
@@ -218,8 +179,16 @@ func TestBuildTransportStdioDefaultWhenTypeEmpty(t *testing.T) {
 		if err != nil {
 			t.Fatalf("buildTransport(type=%q): %v", typ, err)
 		}
-		if _, ok := transport.(*mcpsdk.CommandTransport); !ok {
-			t.Errorf("type=%q: expected *CommandTransport, got %T", typ, transport)
+		ct, ok := transport.(*mcpsdk.CommandTransport)
+		if !ok || ct.Command == nil {
+			t.Fatalf("type=%q: got %T", typ, transport)
+		}
+		cmd := ct.Command.Path
+		if len(ct.Command.Args) > 0 {
+			cmd = ct.Command.Args[0]
+		}
+		if !strings.Contains(cmd, "server") {
+			t.Fatalf("type=%q command = %q args=%v", typ, ct.Command.Path, ct.Command.Args)
 		}
 	}
 }

@@ -14,8 +14,10 @@ import (
 
 	"github.com/google/uuid"
 	"go.temporal.io/sdk/client"
+	temporalotel "go.temporal.io/sdk/contrib/opentelemetry-v2"
 	"go.temporal.io/sdk/contrib/workflowstreams"
 	"go.temporal.io/sdk/converter"
+	"go.temporal.io/sdk/worker"
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
@@ -81,7 +83,6 @@ type Config struct {
 	Fallback   durable.EventLog
 	Projection vfs.Projection
 	// DisableStreams uses the fallback EventLog instead of Workflow Streams.
-	// Tests that use the Temporal testsuite mock must set this.
 	DisableStreams bool
 	// TurnLocality, when > 0, pins a turn's activities to one worker.
 	TurnLocality time.Duration
@@ -406,4 +407,43 @@ func (r *Runtime) Status(ctx context.Context, id durable.SessionID) (durable.Ses
 	}
 	_ = val.Get(&st)
 	return st, nil
+}
+
+// Dial is client.Dial with Temporal's OpenTelemetry v2 plugin prepended.
+// Call telemetry.Init first so the global TracerProvider is ReplaySafe.
+func Dial(opts client.Options) (client.Client, error) {
+	plugin, _ := temporalotel.NewPlugin(temporalotel.PluginOptions{})
+	opts.Plugins = append([]client.Plugin{plugin}, opts.Plugins...)
+	return client.Dial(opts)
+}
+
+// NewWorker returns a Temporal worker with EnableSessionWorker and
+// SessionWorkflow plus Inference, Tool, CommitToolOutput, and EmitEvent
+// activities. Pass the same Config as New, including Snapshots and Secrets.
+func NewWorker(c client.Client, cfg Config) worker.Worker {
+	requireCfg(cfg)
+	w := worker.New(c, cfg.queue(), worker.Options{
+		EnableSessionWorker:               true,
+		MaxConcurrentSessionExecutionSize: 1000,
+	})
+	proj := cfg.Projection
+	if proj == nil {
+		proj = vfs.FuseProjection{}
+	}
+	fallback := cfg.Fallback
+	if fallback == nil {
+		fallback = cfg.memoryLog()
+	}
+	acts := &activities{
+		Catalog:        cfg.Catalog,
+		Snapshots:      cfg.Snapshots,
+		Projection:     proj,
+		Fallback:       fallback,
+		DisableStreams: cfg.DisableStreams,
+		Secrets:        cfg.Secrets,
+		Jobs:           cfg.Jobs,
+	}
+	w.RegisterWorkflow(SessionWorkflow)
+	w.RegisterActivity(acts)
+	return w
 }

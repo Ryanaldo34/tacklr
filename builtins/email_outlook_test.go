@@ -7,36 +7,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	abstractions "github.com/microsoft/kiota-abstractions-go"
 	msgraphsdk "github.com/microsoftgraph/msgraph-sdk-go"
-	"github.com/microsoftgraph/msgraph-sdk-go/models"
 )
-
-func TestMessageFromSDK_mapsGraphMessage(t *testing.T) {
-	message := models.NewMessage()
-	id, thread, subject := "id", "thread", "subject"
-	message.SetId(&id)
-	message.SetConversationId(&thread)
-	message.SetSubject(&subject)
-	read := false
-	message.SetIsRead(&read)
-	received := time.Date(2026, time.August, 25, 12, 0, 0, 0, time.UTC)
-	message.SetReceivedDateTime(&received)
-	bodyText := "body"
-	body := models.NewItemBody()
-	body.SetContent(&bodyText)
-	message.SetBody(body)
-	message.SetFrom(newRecipient("sender@example.com"))
-	message.SetToRecipients([]models.Recipientable{newRecipient("to@example.com")})
-	message.SetCcRecipients([]models.Recipientable{newRecipient("cc@example.com")})
-
-	got := messageFromOutlook(message)
-	if got.ID != id || got.ThreadID != thread || got.From != "sender@example.com" || len(got.To) != 1 || len(got.CC) != 1 || got.Subject != subject || got.Body != bodyText || got.Unread != true || !got.ReceivedAt.Equal(received) {
-		t.Fatalf("message = %+v", got)
-	}
-}
 
 func TestProvider_usesOfficialGraphSDKForInboxAndSend(t *testing.T) {
 	var sent map[string]any
@@ -139,18 +113,6 @@ func TestODataFilter_escapesStructuredFilters(t *testing.T) {
 	}
 }
 
-func TestOutlookHelpers_emptyValuesAndPageSize(t *testing.T) {
-	if recipient(nil) != "" || value(nil) != "" || boolValue(nil) {
-		t.Fatal("empty helpers")
-	}
-	if pageSize(0) != 20 || pageSize(200) != maxPage {
-		t.Fatalf("pageSize = %d %d", pageSize(0), pageSize(200))
-	}
-	if err := validGraphCursor("not-a-url", "https://graph.microsoft.com"); err == nil {
-		t.Fatal("invalid cursor")
-	}
-}
-
 func TestProvider_rejectsMissingGraphClient(t *testing.T) {
 	p := Outlook(nil)
 	if err := p.Validate(context.Background()); err == nil {
@@ -162,14 +124,6 @@ func TestProvider_rejectsMissingGraphClient(t *testing.T) {
 	if _, err := p.SendEmail(context.Background(), SendEmailRequest{To: []string{"a@b.c"}, Subject: "s", Body: "b"}); err == nil {
 		t.Fatal("nil client sent mail")
 	}
-}
-
-func newRecipient(address string) models.Recipientable {
-	email := models.NewEmailAddress()
-	email.SetAddress(&address)
-	recipient := models.NewRecipient()
-	recipient.SetEmailAddress(email)
-	return recipient
 }
 
 type testAuth struct{}

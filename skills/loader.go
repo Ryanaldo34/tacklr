@@ -139,7 +139,7 @@ func parse(document string) (Skill, error) {
 // Full instructions are intentionally omitted to preserve context window.
 func Catalog(loaded []Skill) string {
 	var b strings.Builder
-	b.WriteString("Available skills (use read_skill to load instructions):\n")
+	b.WriteString("Available skills:\n")
 	for _, skill := range loaded {
 		fmt.Fprintf(&b, "- %s: %s\n", skill.Name, skill.Description)
 	}

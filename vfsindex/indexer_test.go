@@ -482,29 +482,27 @@ func TestMountIndexer_IndexFileResultAndDefaults(t *testing.T) {
 		t.Fatalf("nested search: %+v err=%v", page.Objects, err)
 	}
 
-	// Null byte in a .txt file → stream binary skip (not indexed as text)
 	if err := ms.WriteFile(ctx, "/workspace/work/binlike.txt", []byte("ok\x00null")); err != nil {
 		t.Fatal(err)
 	}
 	res, err = idx.IndexPathResult(ctx, "/workspace/work/binlike.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	// skipped or indexed empty — either way no crash; prefer skipped
-	if res != vfsindex.PathSkipped && res != vfsindex.PathIndexed {
-		t.Fatalf("binary-ish: %q", res)
+	if err != nil || res != vfsindex.PathSkipped {
+		t.Fatalf("NUL in text-like file: res=%q err=%v", res, err)
 	}
 
-	// MaxIndexBytes truncates stream chunking
 	idx.MaxIndexBytes = 32
 	idx.LinesPerChunk = 2
-	long := strings.Repeat("wordline\n", 40)
+	long := "head-unique-token\n" + strings.Repeat("wordline\n", 40) + "tail-unique-token\n"
 	if err := ms.WriteFile(ctx, "/workspace/work/long.txt", []byte(long)); err != nil {
 		t.Fatal(err)
 	}
 	res, err = idx.IndexPathResult(ctx, "/workspace/work/long.txt")
-	if err != nil || (res != vfsindex.PathIndexed && res != vfsindex.PathSkipped) {
+	if err != nil || res != vfsindex.PathIndexed {
 		t.Fatalf("long file: res=%q err=%v", res, err)
+	}
+	page, err = eng.Search(ctx, scope, brain.SearchRequest{Query: "head-unique-token"}, brain.NewSearchContext())
+	if err != nil || len(page.Objects) == 0 {
+		t.Fatalf("truncated file should still index the prefix: %+v err=%v", page.Objects, err)
 	}
 
 	// PolicyNone member: IndexPath / IndexPrefix report skipped (no Document written).
@@ -657,6 +655,83 @@ func TestMountIndexer_docsBlockText(t *testing.T) {
 	}
 }
 
+func TestMountIndexer_unindexLeavesFileThenReindexRecovers(t *testing.T) {
+	ctx := t.Context()
+	ms := treeLocal(t, vfs.At("work", builtins.Local(t.TempDir())))
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...); err != nil {
+		t.Fatal(err)
+	}
+	scope := brain.Scope{Namespace: mustNS(t, "id", uuid.NewString())}
+	idx, err := vfsindex.NewMountIndexer(ms, eng, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.WriteFile(ctx, "/workspace/work/a.txt", []byte("recoverable-phrase\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.IndexPath(ctx, "/workspace/work/a.txt"); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := idx.UnindexPath(ctx, "/workspace/work/a.txt")
+	if err != nil || !removed {
+		t.Fatalf("unindex: removed=%v err=%v", removed, err)
+	}
+	if _, err := ms.ReadFile(ctx, "/workspace/work/a.txt"); err != nil {
+		t.Fatalf("vfs file must remain: %v", err)
+	}
+	page, err := eng.Search(ctx, scope, brain.SearchRequest{Query: "recoverable-phrase"}, brain.NewSearchContext())
+	if err != nil || len(page.Objects) != 0 {
+		t.Fatalf("search after unindex: %+v err=%v", page, err)
+	}
+	if err := idx.IndexPath(ctx, "/workspace/work/a.txt"); err != nil {
+		t.Fatal(err)
+	}
+	page, err = eng.Search(ctx, scope, brain.SearchRequest{Query: "recoverable-phrase"}, brain.NewSearchContext())
+	if err != nil || len(page.Objects) == 0 {
+		t.Fatalf("reindex recovery: %+v err=%v", page, err)
+	}
+}
+
+func TestMountIndexer_nonePolicySkippedAndMaxFilesStops(t *testing.T) {
+	ctx := t.Context()
+	ms := treeLocal(t,
+		vfs.At("work", builtins.Local(t.TempDir())),
+		vfs.At("off", builtins.Local(t.TempDir())).Indexed("none"),
+	)
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...); err != nil {
+		t.Fatal(err)
+	}
+	idx, err := vfsindex.NewMountIndexer(ms, eng, brain.Scope{Namespace: mustNS(t, "id", uuid.NewString())})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.WriteFile(ctx, "/workspace/work/a.txt", []byte("one\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.WriteFile(ctx, "/workspace/work/b.txt", []byte("two\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.WriteFile(ctx, "/workspace/off/x.txt", []byte("hidden\n")); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := idx.IndexPrefix(ctx, "/workspace/off", vfsindex.IndexOpts{})
+	if err != nil || stats.Indexed != 0 {
+		t.Fatalf("none prefix: %+v err=%v", stats, err)
+	}
+	stats, err = idx.IndexPrefix(ctx, "/workspace/work", vfsindex.IndexOpts{MaxFiles: 1})
+	if err != nil || stats.Indexed != 1 {
+		t.Fatalf("max files: %+v err=%v", stats, err)
+	}
+}
+
 type richFactory struct{ doc vfs.Document }
 
 func (f richFactory) Open(context.Context, string, vfs.Binding) (vfs.Provider, error) {
@@ -688,4 +763,13 @@ func (p richProvider) OpenDocument(_ context.Context, _ string, _ *vfs.ContentRe
 }
 func (richProvider) WriteDocument(context.Context, string, vfs.Document) error {
 	return vfs.ErrNotSupported
+}
+
+func mustNS(t testing.TB, nv ...string) brain.Namespace {
+	t.Helper()
+	ns, err := brain.ParseNamespace(nv...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ns
 }

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"slices"
 	"strings"
@@ -15,9 +16,10 @@ import (
 	"testing"
 
 	"github.com/ryanaldo34/tacklr/builtins"
+	"github.com/ryanaldo34/tacklr/internal/testdrive"
+	"github.com/ryanaldo34/tacklr/internal/testhttp"
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfs/adapters"
-	"github.com/ryanaldo34/tacklr/vfs/testhttp"
 )
 
 type graphNode struct {
@@ -328,7 +330,7 @@ func unescapeGraphRel(rel string) string {
 	return strings.Join(parts, "/")
 }
 
-func mustGraph(t *testing.T, srv *testhttp.Server, holder *vfs.TokenHolder, account string) vfs.Open {
+func mustGraph(t *testing.T, srv *httptest.Server, holder *vfs.TokenHolder, account string) vfs.Open {
 	t.Helper()
 	if holder == nil {
 		holder = vfs.NewTokenHolder(vfs.Credential{Token: "tok"})
@@ -340,7 +342,7 @@ func mustGraph(t *testing.T, srv *testhttp.Server, holder *vfs.TokenHolder, acco
 	return builtins.Graph(api, holder, account)
 }
 
-func mountGraphHTTP(t *testing.T, srv *testhttp.Server, writable bool) (*vfs.MountSession, *vfs.TokenHolder) {
+func mountGraphHTTP(t *testing.T, srv *httptest.Server, writable bool) (*vfs.MountSession, *vfs.TokenHolder) {
 	t.Helper()
 	holder := vfs.NewTokenHolder(vfs.Credential{Token: "tok"})
 	open := mustGraph(t, srv, holder, vfs.AccountPersonal)
@@ -535,7 +537,7 @@ func TestGraphAndDrive_writesStayOnMatchingProviders(t *testing.T) {
 	fx := newGraphFX().legalTree()
 	srv := testhttp.New(t, fx)
 	fx.base = srv.URL
-	driveAPI := driveTree()
+	driveAPI := testdrive.Tree()
 	auth := vfs.NewSessionAuth()
 	if err := auth.Bind("s", vfs.Binding{
 		Provider: "gdrive", Writable: true, Auth: vfs.Credential{Token: "gd"},
@@ -552,7 +554,7 @@ func TestGraphAndDrive_writesStayOnMatchingProviders(t *testing.T) {
 	driveLive := auth.Holder("s", "gdrive")
 	graphLive := auth.Holder("s", vfs.ProviderMicrosoft)
 	ms, err := vfs.Tree(
-		vfs.At("contracts", builtins.Drive(driveAPI)),
+		vfs.At("contracts", testdrive.Open(t, driveAPI, driveLive)),
 		vfs.At("legal", mustGraph(t, srv, graphLive, vfs.AccountPersonal)),
 	)(ctx, "s", vfs.Request{Bindings: []vfs.Binding{
 		{Provider: "gdrive", Writable: true, Auth: vfs.Credential{Token: "gd"}, Live: driveLive, Params: map[string]string{vfs.ParamName: "contracts", vfs.ParamFolderID: "root-a"}},

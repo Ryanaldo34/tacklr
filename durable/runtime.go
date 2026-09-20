@@ -9,7 +9,7 @@ import (
 // Runtime is the only session kernel API. Protocol handlers and hosts call it.
 // Backends: in-process (goroutine wait loop) or Temporal (one workflow per session).
 //
-// A later Restate/DBOS/custom-log adapter plugs in here. It must supply:
+// Each backend supplies:
 //   - start a session process (workflow / durable handler)
 //   - signals: prompt, resume, cancel, close, child-waiting
 //   - named steps with heartbeat + retry: Inference; Tool (one call; the wait

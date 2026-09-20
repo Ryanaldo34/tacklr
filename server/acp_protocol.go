@@ -19,6 +19,12 @@ import (
 	tacklrsecurity "github.com/ryanaldo34/tacklr/security"
 )
 
+const (
+	methodVFSBind    = "_tacklr/vfs/bind"
+	methodVFSRefresh = "_tacklr/vfs/refresh"
+	methodVFSUnbind  = "_tacklr/vfs/unbind"
+)
+
 // acpProtocol is the native Protocol implementation for the Agent Client Protocol.
 // Wire session state (cwd, mcp, config) lives here — not on SnapshotStore.
 type acpProtocol struct {
@@ -454,10 +460,8 @@ func acpInitializeResultWithAuth(cat durable.Catalog, clientProtocolVersion int,
 		"promptCapabilities": map[string]any{
 			// image: ContentBlock::Image when the default agent model accepts vision.
 			"image": image,
-			// audio: not implemented.
 			"audio": false,
 			// embeddedContext: ContentBlock::Resource (text + PDF blob).
-			// Text and ResourceLink need no capability flags (ACP baseline).
 			"embeddedContext": true,
 		},
 		"mcpCapabilities": map[string]any{

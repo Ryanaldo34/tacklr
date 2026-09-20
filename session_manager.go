@@ -3,6 +3,7 @@ package tacklr
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"sync"
 
 	"github.com/ryanaldo34/tacklr/brain"
@@ -145,7 +146,11 @@ func (s *sessionManager) TakeResolved(id string) (interrupt.Interrupt, bool) {
 func (s *sessionManager) Pending() map[string]interrupt.Interrupt {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return cloneInterruptMap(s.pending)
+	out, err := cloneInterruptMap(s.pending)
+	if err != nil {
+		return maps.Clone(s.pending)
+	}
+	return out
 }
 
 // LoadInterruptsJSON restores interrupt maps from checkpoint JSON blobs.

@@ -63,7 +63,7 @@ func TestModelContextManager_installPlanDocument(t *testing.T) {
 		t.Fatal(err)
 	}
 	window := manager.Messages()
-	if len(window) != 2 || !isPlanDocument(window[1]) || rawPlanFromDocumentMessage(window[1]) != "Ship the release" {
+	if len(window) != 2 || !IsPlanDocument(window[1]) || rawPlanFromDocumentMessage(window[1]) != "Ship the release" {
 		t.Fatalf("window = %+v", window)
 	}
 }

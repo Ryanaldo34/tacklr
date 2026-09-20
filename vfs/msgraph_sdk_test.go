@@ -8,12 +8,13 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/ryanaldo34/tacklr/vfs/testhttp"
+	"github.com/ryanaldo34/tacklr/internal/testhttp"
 )
 
 func TestGraphSDK_adapterMapsStatusesTokenAndRedirect(t *testing.T) {
@@ -39,7 +40,7 @@ func TestGraphSDK_adapterMapsStatusesTokenAndRedirect(t *testing.T) {
 		}
 		return it
 	}
-	var srv *testhttp.Server
+	var srv *httptest.Server
 	srv = testhttp.New(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sawAuth = append(sawAuth, r.Header.Get("Authorization"))
 		p := r.URL.Path

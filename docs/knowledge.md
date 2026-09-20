@@ -48,6 +48,12 @@ graph-aware when a graph is attached, and scoped to a namespace. The agent
 queries when it needs a fact; the harness does not dump a static result list
 into every prompt.
 
+Context handoff and compress may write **Episode** objects (session residue:
+the handoff text, compress summary, and capped discarded messages). Those are
+not product kinds (Fact, Memory, Discovery). Hosts with a non-empty catalog
+should register `EpisodeKinds()` alongside `vfsindex.MountIndexKinds()`.
+A failed Episode write does not block the window rebuild.
+
 ---
 
 ## The two jobs (do not mix)
@@ -715,8 +721,9 @@ Optional knobs: `WithReranker` (post-hydrate product scoring),
 `WithExpandRecipes` (named expand templates), `WithConfig` (candidate *k*, decay, limits).
 
 Integration tests that need real backends use Testcontainers (Postgres image
-under `brain/testdata`, Helix `enterprise-dev`). They skip under `-short`.
-Tests call `store.Setup` (embedding dim 3) instead of loading SQL files.
+under `brain/testdata`, Helix `enterprise-dev`). They skip when Docker is
+unavailable. Tests call `store.Setup` (embedding dim 3) instead of loading SQL
+files.
 
 ---
 

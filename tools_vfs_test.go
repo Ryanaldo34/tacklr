@@ -5,11 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/ryanaldo34/tacklr/internal/testdrive"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -25,7 +25,7 @@ func TestVFSTools_readWrite(t *testing.T) {
 	h := mustNewTurnManager(t, AgentOptions{
 		SessionID:    "tools-vfs",
 		MountSession: ms,
-		Model:        &mockStrategy{},
+		Model:        &scriptedModel{},
 	})
 	tools := map[string]*Tool{}
 	for _, tool := range h.tools {
@@ -358,8 +358,8 @@ func requireWriteUnchanged(t *testing.T, ms *vfs.MountSession, write *Tool, rt H
 
 func TestVFSTools_projectedDocOutlineAndBlocks(t *testing.T) {
 	ctx := context.Background()
-	api := newToolMemDrive()
-	docsAPI := newToolMemDocs("doc1", "R0", []vfs.DocsSpan{
+	api := toolDriveFX(t)
+	api.SeedDoc("doc1", "R0", []vfs.DocsSpan{
 		{TabID: "t.a", StartIndex: 1, EndIndex: 2, Kind: "sectionBreak"},
 		{TabID: "t.a", StartIndex: 2, EndIndex: 8, Kind: "heading", Level: 1, Text: "Spec"},
 		{TabID: "t.a", StartIndex: 8, EndIndex: 14, Kind: "paragraph", Text: "Hello"},
@@ -370,9 +370,9 @@ func TestVFSTools_projectedDocOutlineAndBlocks(t *testing.T) {
 		Provider: vfs.ProviderGoogleDrive, Writable: true,
 		Auth:   vfs.Credential{Token: "t"},
 		Params: map[string]string{vfs.ParamName: "contracts", vfs.ParamFolderID: "root"},
-	}}}, vfs.At("contracts", vfs.DriveWith(api, docsAPI, nil)))
+	}}}, vfs.At("contracts", testdrive.Open(t, api, nil)))
 	h := mustNewTurnManager(t, AgentOptions{
-		SessionID: "tools-docs", MountSession: ms, Model: &mockStrategy{},
+		SessionID: "tools-docs", MountSession: ms, Model: &scriptedModel{},
 	})
 	tools := map[string]*Tool{}
 	for _, tool := range h.tools {
@@ -475,7 +475,7 @@ func TestVFSTools_projectedDocOutlineAndBlocks(t *testing.T) {
 	if !strings.Contains(res.output, "Replaced") || !strings.Contains(res.output, "Other") {
 		t.Fatalf("tab merge outline: %s", res.output)
 	}
-	docsAPI.conflictLeft = 1
+	api.FailNextDocWrites(1)
 	if _, err = tools["write_document"].invoke(ctx, `{"path":"/workspace/contracts/Spec","tab_id":"t.a","content":"<h1>Retry</h1>\n<p>Ok</p>"}`, rt); err != nil {
 		t.Fatalf("persist retry: %v", err)
 	}
@@ -526,7 +526,7 @@ func TestVFSTools_projectedDocOutlineAndBlocks(t *testing.T) {
 	if err != nil || st.MediaType != "application/vnd.google-apps.document" {
 		t.Fatalf("CRESPIKE Stat = %+v err=%v", st, err)
 	}
-	docsAPI.batchErr = vfs.ErrInvalidWrite
+	api.FailDocBatch()
 	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/contracts/Spec"}`, rt)
 	if err != nil {
 		t.Fatal(err)
@@ -541,193 +541,13 @@ func TestVFSTools_projectedDocOutlineAndBlocks(t *testing.T) {
 	}
 }
 
-type toolMemDrive struct {
-	files map[string]toolFile
-}
-
-type toolFile struct {
-	meta vfs.DriveMeta
-	body []byte
-}
-
-func newToolMemDrive() *toolMemDrive {
-	return &toolMemDrive{files: map[string]toolFile{
-		"root": {meta: vfs.DriveMeta{ID: "root", Name: ".", MimeType: "application/vnd.google-apps.folder", IsDir: true}},
-		"doc1": {meta: vfs.DriveMeta{ID: "doc1", Name: "Spec", MimeType: "application/vnd.google-apps.document"}},
-		"txt1": {meta: vfs.DriveMeta{ID: "txt1", Name: "note.txt", MimeType: "text/plain", Size: 3}, body: []byte("hi\n")},
-	}}
-}
-
-func (d *toolMemDrive) GetMeta(_ context.Context, id string) (vfs.DriveMeta, error) {
-	f, ok := d.files[id]
-	if !ok {
-		return vfs.DriveMeta{}, vfs.ErrNotExist
-	}
-	return f.meta, nil
-}
-func (d *toolMemDrive) GetMedia(_ context.Context, id string) (io.ReadCloser, int64, error) {
-	f, ok := d.files[id]
-	if !ok {
-		return nil, 0, vfs.ErrNotExist
-	}
-	return io.NopCloser(strings.NewReader(string(f.body))), int64(len(f.body)), nil
-}
-func (d *toolMemDrive) List(_ context.Context, folderID string) ([]vfs.DriveMeta, error) {
-	var out []vfs.DriveMeta
-	for id, f := range d.files {
-		if id != "root" && folderID == "root" {
-			out = append(out, f.meta)
-		}
-	}
-	return out, nil
-}
-func (d *toolMemDrive) Export(context.Context, string, string) (io.ReadCloser, int64, error) {
-	return nil, 0, vfs.ErrNotSupported
-}
-func (d *toolMemDrive) PutMedia(context.Context, string, string, io.Reader, int64) (vfs.DriveMeta, error) {
-	return vfs.DriveMeta{}, vfs.ErrNotSupported
-}
-func (d *toolMemDrive) Create(_ context.Context, parentID, name, metadataMIME, mediaMIME string, r io.Reader, size int64) (vfs.DriveMeta, error) {
-	id := "new-" + name
-	meta := vfs.DriveMeta{ID: id, Name: name, MimeType: metadataMIME, Version: "1"}
-	var body []byte
-	if r != nil && mediaMIME != "" {
-		body, _ = io.ReadAll(io.LimitReader(r, size+1))
-	}
-	d.files[id] = toolFile{meta: meta, body: body}
-	_ = parentID
-	return meta, nil
-}
-func (d *toolMemDrive) Trash(context.Context, string) error { return nil }
-func (d *toolMemDrive) Mkdir(context.Context, string, string) (vfs.DriveMeta, error) {
-	return vfs.DriveMeta{}, vfs.ErrNotSupported
-}
-
-type toolMemDocs struct {
-	snaps        map[string]vfs.DocsSnapshot
-	rev          map[string]string
-	batchErr     error
-	conflictLeft int
-}
-
-func newToolMemDocs(id, rev string, spans []vfs.DocsSpan, tabs []vfs.DocTab) *toolMemDocs {
-	return &toolMemDocs{
-		snaps: map[string]vfs.DocsSnapshot{
-			id: {DocumentID: id, RevisionID: rev, Tabs: tabs, Body: spans, Lists: map[string]vfs.DocsListProps{}},
-		},
-		rev: map[string]string{id: rev},
-	}
-}
-
-func (d *toolMemDocs) Get(_ context.Context, documentID string) (vfs.DocsSnapshot, error) {
-	s, ok := d.snaps[documentID]
-	if !ok {
-		s = vfs.DocsSnapshot{
-			DocumentID: documentID, RevisionID: "R0",
-			Body: []vfs.DocsSpan{{StartIndex: 1, EndIndex: 2, Kind: "sectionBreak"}},
-		}
-		if d.snaps == nil {
-			d.snaps = map[string]vfs.DocsSnapshot{}
-		}
-		if d.rev == nil {
-			d.rev = map[string]string{}
-		}
-		d.snaps[documentID] = s
-		d.rev[documentID] = "R0"
-		return s, nil
-	}
-	s.RevisionID = d.rev[documentID]
-	return s, nil
-}
-
-func (d *toolMemDocs) BatchUpdate(_ context.Context, documentID string, req vfs.DocsBatch) (vfs.DocsBatchResult, error) {
-	if d.conflictLeft > 0 {
-		d.conflictLeft--
-		return vfs.DocsBatchResult{}, vfs.ErrConflict
-	}
-	if d.batchErr != nil {
-		return vfs.DocsBatchResult{}, d.batchErr
-	}
-	if cur := d.rev[documentID]; req.RequiredRevisionID != "" && cur != "" && req.RequiredRevisionID != cur {
-		return vfs.DocsBatchResult{}, vfs.ErrConflict
-	}
-	s := d.snaps[documentID]
-	applyToolDocsBatch(&s, req)
-	next := d.rev[documentID] + "+1"
-	if d.rev[documentID] == "" {
-		next = "R1"
-	}
-	d.rev[documentID] = next
-	s.RevisionID = next
-	if d.snaps == nil {
-		d.snaps = map[string]vfs.DocsSnapshot{}
-	}
-	d.snaps[documentID] = s
-	return vfs.DocsBatchResult{RevisionID: next}, nil
-}
-
-func applyToolDocsBatch(s *vfs.DocsSnapshot, req vfs.DocsBatch) {
-	tabOf := func(tab string) string {
-		if tab != "" {
-			return tab
-		}
-		return req.TabID
-	}
-	sameTab := func(spTab, reqTab string) bool {
-		if reqTab == "" {
-			return true
-		}
-		return spTab == reqTab || spTab == ""
-	}
-	for _, r := range req.Requests {
-		if del := r.DeleteContentRange; del != nil && del.Range != nil {
-			start, end := int(del.Range.StartIndex), int(del.Range.EndIndex)
-			tab := tabOf(del.Range.TabId)
-			var next []vfs.DocsSpan
-			for _, sp := range s.Body {
-				if !sameTab(sp.TabID, tab) {
-					next = append(next, sp)
-					continue
-				}
-				if sp.Kind == "sectionBreak" && sp.StartIndex == 1 {
-					next = append(next, sp)
-					continue
-				}
-				if sp.StartIndex < end && sp.EndIndex > start {
-					continue
-				}
-				next = append(next, sp)
-			}
-			s.Body = next
-		}
-		if ins := r.InsertText; ins != nil && ins.Location != nil {
-			idx := int(ins.Location.Index)
-			tab := tabOf(ins.Location.TabId)
-			raw := strings.TrimSuffix(ins.Text, "\n")
-			level := 1
-			if trimmed := strings.TrimLeft(raw, "\t"); trimmed != raw {
-				level = len(raw) - len(trimmed) + 1
-				raw = trimmed
-			}
-			s.Body = append(s.Body, vfs.DocsSpan{
-				TabID: tab, StartIndex: idx, EndIndex: idx + 1 + len(ins.Text),
-				Kind: "paragraph", Text: raw, Level: level,
-			})
-		}
-		if st := r.UpdateParagraphStyle; st != nil && st.ParagraphStyle != nil && st.Range != nil {
-			named := st.ParagraphStyle.NamedStyleType
-			start := int(st.Range.StartIndex)
-			tab := tabOf(st.Range.TabId)
-			if strings.HasPrefix(named, "HEADING_") {
-				for i := range s.Body {
-					if s.Body[i].StartIndex == start && sameTab(s.Body[i].TabID, tab) {
-						s.Body[i].Kind = "heading"
-						s.Body[i].NamedStyle = named
-					}
-				}
-			}
-		}
-	}
+func toolDriveFX(t *testing.T) *testdrive.FX {
+	t.Helper()
+	fx := testdrive.New()
+	fx.Add("", vfs.DriveMeta{ID: "root", Name: ".", MimeType: "application/vnd.google-apps.folder"}, nil)
+	fx.Add("root", vfs.DriveMeta{ID: "doc1", Name: "Spec", MimeType: "application/vnd.google-apps.document"}, nil)
+	fx.Add("root", vfs.DriveMeta{ID: "txt1", Name: "note.txt", MimeType: "text/plain", Size: 3}, []byte("hi\n"))
+	return fx
 }
 
 func fieldKV(s, key string) string {
@@ -746,7 +566,7 @@ func TestVFSTools_writeDocxBlocksAndInlineMarks(t *testing.T) {
 	base := t.TempDir()
 	ms := mustMountTree(t, "tools-docx", vfs.At("work", vfs.Local(base)))
 	h := mustNewTurnManager(t, AgentOptions{
-		SessionID: "tools-docx", MountSession: ms, Model: &mockStrategy{},
+		SessionID: "tools-docx", MountSession: ms, Model: &scriptedModel{},
 	})
 	tools := map[string]*Tool{}
 	for _, tool := range h.tools {
@@ -796,12 +616,10 @@ func TestVFSTools_writeDocxBlocksAndInlineMarks(t *testing.T) {
 
 func TestVFSTools_projectedSheetReadWrite(t *testing.T) {
 	ctx := context.Background()
-	api := &toolMemDrive{files: map[string]toolFile{
-		"root":   {meta: vfs.DriveMeta{ID: "root", Name: ".", MimeType: "application/vnd.google-apps.folder", IsDir: true}},
-		"sheet1": {meta: vfs.DriveMeta{ID: "sheet1", Name: "Budget", MimeType: "application/vnd.google-apps.spreadsheet", Version: "1"}},
-	}}
-	sheetsAPI := vfs.NewMemorySheets()
-	sheetsAPI.Seed("sheet1", vfs.SheetsSnapshot{
+	api := testdrive.New()
+	api.Add("", vfs.DriveMeta{ID: "root", Name: ".", MimeType: "application/vnd.google-apps.folder"}, nil)
+	api.Add("root", vfs.DriveMeta{ID: "sheet1", Name: "Budget", MimeType: "application/vnd.google-apps.spreadsheet", Version: "1"}, nil)
+	api.SeedSheet("sheet1", vfs.SheetsSnapshot{
 		SpreadsheetID: "sheet1", RevisionID: "1",
 		Named: []vfs.NamedRange{{Name: "Total", SheetID: "1", A1: "B2"}},
 		Sheets: []vfs.Sheet{
@@ -819,9 +637,9 @@ func TestVFSTools_projectedSheetReadWrite(t *testing.T) {
 		Provider: vfs.ProviderGoogleDrive, Writable: true,
 		Auth:   vfs.Credential{Token: "t"},
 		Params: map[string]string{vfs.ParamName: "contracts", vfs.ParamFolderID: "root"},
-	}}}, vfs.At("contracts", vfs.DriveWith(api, nil, sheetsAPI)))
+	}}}, vfs.At("contracts", testdrive.Open(t, api, nil)))
 	h := mustNewTurnManager(t, AgentOptions{
-		SessionID: "tools-sheets", MountSession: ms, Model: &mockStrategy{},
+		SessionID: "tools-sheets", MountSession: ms, Model: &scriptedModel{},
 	})
 	tools := map[string]*Tool{}
 	for _, tool := range h.tools {
@@ -899,15 +717,11 @@ func TestVFSTools_projectedSheetReadWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := api.files["sheet1"]
-	f.meta.ModTime = time.Now().UTC()
-	api.files["sheet1"] = f
-	snap, err := sheetsAPI.Get(ctx, "sheet1")
-	if err != nil {
-		t.Fatal(err)
-	}
+	api.Nodes["sheet1"].Meta.ModTime = api.Nodes["sheet1"].Meta.ModTime.Add(time.Second)
+	api.Nodes["sheet1"].Meta.Version = "2"
+	snap := api.SheetSnap("sheet1")
 	snap.Sheets[0].Cells[0][0] = vfs.Cell{Input: "Changed", Value: "Changed"}
-	sheetsAPI.Seed("sheet1", snap)
+	api.SeedSheet("sheet1", snap)
 	_, err = tools["write"].invoke(ctx, `{"path":"/workspace/contracts/Budget","content":"x"}`, rt)
 	if err == nil || !strings.Contains(err.Error(), "write_spreadsheet") {
 		t.Fatalf("write on sheet: %v", err)
@@ -954,7 +768,7 @@ func TestVFSTools_runCommandLiveNames(t *testing.T) {
 
 	h := mustNewTurnManager(t, AgentOptions{
 		SessionID:    "live-names",
-		MountSession: ms, Model: &mockStrategy{},
+		MountSession: ms, Model: &scriptedModel{},
 	})
 	tool := h.findTool("run_command", "")
 	if tool == nil {

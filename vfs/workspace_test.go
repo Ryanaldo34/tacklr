@@ -7,15 +7,17 @@ import (
 	"testing"
 
 	"github.com/ryanaldo34/tacklr/builtins"
+	"github.com/ryanaldo34/tacklr/internal/testdrive"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
 func TestWorkspace_namedUnionListsAndReadsAliases(t *testing.T) {
 	ctx := t.Context()
-	api := driveTree()
+	api := testdrive.Tree()
+	open := testdrive.Open(t, api, nil)
 	ms, err := vfs.Tree(
-		vfs.At("contracts", builtins.Drive(api)),
-		vfs.At("notes", builtins.Drive(api)),
+		vfs.At("contracts", open),
+		vfs.At("notes", open),
 	)(ctx, "sess-ws", vfs.Request{Bindings: []vfs.Binding{
 		{Provider: vfs.ProviderGoogleDrive, Params: map[string]string{vfs.ParamName: "contracts", vfs.ParamFolderID: "root-a"}, Auth: vfs.Credential{Token: "tok"}},
 		{Provider: vfs.ProviderGoogleDrive, Params: map[string]string{vfs.ParamName: "notes", vfs.ParamFolderID: "root-b"}, Auth: vfs.Credential{Token: "tok"}},

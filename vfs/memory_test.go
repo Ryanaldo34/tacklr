@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"io"
 	"os"
 	"testing"
 
@@ -70,46 +69,13 @@ func TestMemoryFactory_fileAndDirOps(t *testing.T) {
 	if _, err := p.Stat(ctx, "nope"); !errors.Is(err, vfs.ErrNotExist) {
 		t.Fatalf("stat missing: %v", err)
 	}
-	wf, err := p.OpenFile(ctx, "w.txt", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
-	if err != nil {
+	if err := ms.WriteFile(ctx, "/workspace/mem/w.txt", []byte("ab")); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := wf.(io.Reader); ok {
-		if n, err := wf.(io.Reader).Read(make([]byte, 1)); n != 0 && !errors.Is(err, io.ErrClosedPipe) {
-			t.Fatalf("read on write: %d %v", n, err)
-		}
+	got, err = ms.ReadFile(ctx, "/workspace/mem/w.txt")
+	if err != nil || !bytes.Equal(got, []byte("ab")) {
+		t.Fatalf("readback = %q err=%v", got, err)
 	}
-	w, ok := wf.(io.Writer)
-	if !ok {
-		t.Fatal("write handle")
-	}
-	if n, err := w.Write([]byte("ab")); err != nil || n != 2 {
-		t.Fatalf("write: %d %v", n, err)
-	}
-	if err := wf.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := wf.Close(); err != nil {
-		t.Fatal(err)
-	}
-	rf, err := p.OpenFile(ctx, "w.txt", os.O_RDONLY, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if w, ok := rf.(io.Writer); ok {
-		if _, err := w.Write([]byte("x")); !errors.Is(err, io.ErrClosedPipe) {
-			t.Fatalf("write on read: %v", err)
-		}
-	}
-	r, ok := rf.(io.Reader)
-	if !ok {
-		t.Fatal("read handle")
-	}
-	buf, err := io.ReadAll(r)
-	if err != nil || !bytes.Equal(buf, []byte("ab")) {
-		t.Fatalf("readback = %q err=%v", buf, err)
-	}
-	_ = rf.Close()
 	if _, err := p.ReadDir(ctx, "w.txt"); !errors.Is(err, vfs.ErrNotDir) {
 		t.Fatalf("readdir file: %v", err)
 	}

@@ -32,33 +32,16 @@ type indexFileArgs struct {
 }
 
 type unindexArgs struct {
-	Path string `json:"path" desc:"Absolute virtual path whose brain mirror should be soft-deleted. Does not delete the VFS file."`
+	Path string `json:"path" desc:"Absolute virtual path to remove from the search index. Does not delete the file."`
 }
 
 func (v vfsIndexTools) newIndexFile() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "index_file",
 		DisplayName: "Index {path}",
-		Description: `Index one or more key virtual files into the knowledge brain as Document + Chunks with vfs_path (and line/block anchors). Enables later brain search instead of re-reading large files into context across planning handoffs. Indexed hits are not a behavior-preserving stand-in for live grep.
+		Description: `Index one or more files into the knowledge store so later search can find them without carrying the full file body. Call for papers, protocols, notes, or specs that this plan or later todos will need, typically near the end of a research or discovery todo.
 
-WHEN TO USE
-- You found a file that matters for THIS plan or later open todos (specs, README, API docs, behavior-defining config).
-- Near the end of a research/discovery todo, before complete_todo, when the next handoff should not carry the full file body.
-- To seed search for a path under selective index policy (index_file is the promote step).
-
-WHEN NOT TO USE
-- Do not index entire mounts, vendor trees, or "everything under /work".
-- Do not index binaries, generated noise, or secret dumps.
-- Do not index a one-off read for the current turn only — use read.
-- Prefer few paths (max 8 per call); select high-value files only.
-- Under mount IndexPolicy=none, this tool errors (indexing disabled).
-
-HOW TO USE
-1) read (or outline) to confirm the right file. Live names/grep: run_command → fd / find / rg.
-2) index_file with path or a short paths list.
-3) Later: search for recall; open the live file with read (vfs_path + start_line / block_id). Not read_object.
-
-Requires an active plan (writes unlock after create_plan). Returns compact status only — not file contents. Under selective policy, a successful index tracks the path so later persists reindex it. Under prefix/watch, AfterPersist already reindexes.`,
+Requires an active plan. Returns one status line per path: indexed, skipped (unchanged, binary, or empty), or error. Does not return file contents. The whole call fails (nothing indexed) if more than 8 paths are passed, a path is a directory, a path is missing, or indexing is disabled on that mount.`,
 		Category: ToolCategoryExecute,
 		Access:   ToolWriteAccess,
 		Timeout:  120 * time.Second,
@@ -117,12 +100,10 @@ func (v vfsIndexTools) newUnindex() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "unindex",
 		DisplayName: "Unindex {path}",
-		Description: `Remove the brain mirror for a virtual path (soft-delete Document/Chunks for that vfs_path). Use when you indexed the wrong file or the path should no longer appear in search for this task.
-
-Does not delete the real VFS file. Idempotent if nothing was indexed. Requires an active plan. Prefer unindex over leaving misleading chunks for later todos. Also drops selective track for the path.`,
-		Category: ToolCategoryDelete,
-		Access:   ToolWriteAccess,
-		Timeout:  30 * time.Second,
+		Description: `Remove a file from the knowledge index so it no longer appears in search. Call when the wrong file was indexed or it should no longer be found for this task. Does not delete the file on disk. Requires an active plan. Returns unindexed path=… when a record was removed, or noop path=… when nothing was indexed.`,
+		Category:    ToolCategoryDelete,
+		Access:      ToolWriteAccess,
+		Timeout:     30 * time.Second,
 		Handler: func(ctx context.Context, args unindexArgs, runtime HarnessRuntime) (string, error) {
 			p, err := vfs.CleanPath(args.Path)
 			if err != nil {

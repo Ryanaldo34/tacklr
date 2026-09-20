@@ -23,6 +23,8 @@ type OpenAIInferenceStrategy struct {
 	instructions string
 	apiKey       string
 	model        string
+	// CacheKey is prompt_cache_key (and x-grok-conv-id on xAI). Durable session id.
+	CacheKey string
 	// reasoning effort: "low" | "medium" | "high" (provider-specific).
 	reasoning string
 	// reasoningSummary: "auto" | "concise" | "detailed". Empty omits the field.
@@ -45,6 +47,11 @@ var (
 
 func (s *OpenAIInferenceStrategy) SetSystemPrompt(prompt string) {
 	s.instructions = prompt
+}
+
+// SetPromptCacheKey is the harness hook (tacklr cannot import this package).
+func (s *OpenAIInferenceStrategy) SetPromptCacheKey(key string) {
+	s.CacheKey = strings.TrimSpace(key)
 }
 
 func NewOpenAIInferenceStrategy(client *http.Client) *OpenAIInferenceStrategy {
@@ -138,7 +145,8 @@ func (s *OpenAIInferenceStrategy) CountTokens(ctx context.Context, messages []*t
 		return 0, tacklr.ErrModelNotSet
 	}
 
-	items := marshalMessagesToInput(messages)
+	cache := newPromptCache(s.model, s.baseURL, s.CacheKey)
+	items := marshalMessagesToInput(messages, s.instructions, cache.breakpoints())
 	inputJSON, err := json.Marshal(items)
 	if err != nil {
 		return 0, fmt.Errorf("marshal token-count input: %w", err)
@@ -154,10 +162,6 @@ func (s *OpenAIInferenceStrategy) CountTokens(ctx context.Context, messages []*t
 		Model: s.model,
 		Input: inputJSON,
 		Tools: toolsJSON,
-	}
-
-	if s.instructions != "" {
-		reqBody.Instructions = &s.instructions
 	}
 
 	body, err := json.Marshal(reqBody)
@@ -217,7 +221,12 @@ func (s *OpenAIInferenceStrategy) Invoke(ctx context.Context, messages []*tacklr
 		return nil, tacklr.ErrModelNotSet
 	}
 
-	items := marshalMessagesToInput(messages)
+	prompt := systemPrompt
+	if prompt == "" {
+		prompt = s.instructions
+	}
+	cache := newPromptCache(s.model, s.baseURL, s.CacheKey)
+	items := marshalMessagesToInput(messages, prompt, cache.breakpoints())
 
 	var toolsJSON json.RawMessage
 	if len(tools) > 0 {
@@ -237,14 +246,10 @@ func (s *OpenAIInferenceStrategy) Invoke(ctx context.Context, messages []*tacklr
 		Stream:  true,
 		Include: []string{"reasoning.encrypted_content"},
 	}
-
-	prompt := systemPrompt
-	if prompt == "" {
-		prompt = s.instructions
+	if tacklr.ToolChoiceNone(ctx) {
+		reqBody.ToolChoice = "none"
 	}
-	if prompt != "" {
-		reqBody.Instructions = &prompt
-	}
+	cache.apply(&reqBody)
 
 	if s.reasoning != "" || s.reasoningSummary != "" {
 		reqBody.Reasoning = &reasoningDetail{
@@ -296,6 +301,7 @@ func (s *OpenAIInferenceStrategy) Invoke(ctx context.Context, messages []*tacklr
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("Authorization", "Bearer "+s.apiKey)
+		cache.headers(httpReq.Header)
 
 		httpResp, err := s.httpClient.Do(httpReq)
 		if err != nil {
@@ -446,11 +452,13 @@ func (s *OpenAIInferenceStrategy) parseSSEResponse(ctx context.Context, body io.
 				terminal = true
 				if u, ok := parseResponseUsage(data); ok {
 					events <- tacklr.LLMResponseChunk{
-						Type:            tacklr.StreamEventComplete,
-						IsComplete:      true,
-						InputTokens:     u.Input,
-						OutputTokens:    u.Output,
-						ReasoningTokens: u.Reasoning,
+						Type:             tacklr.StreamEventComplete,
+						IsComplete:       true,
+						InputTokens:      u.Input,
+						OutputTokens:     u.Output,
+						ReasoningTokens:  u.Reasoning,
+						CachedTokens:     u.Cached,
+						CacheWriteTokens: u.CacheWrite,
 					}
 				}
 			}
@@ -470,9 +478,11 @@ func (s *OpenAIInferenceStrategy) parseSSEResponse(ctx context.Context, body io.
 
 // responseUsage is the token counts we care about from Responses API usage.
 type responseUsage struct {
-	Input     int
-	Output    int
-	Reasoning int
+	Input      int
+	Output     int
+	Reasoning  int
+	Cached     int
+	CacheWrite int
 }
 
 // parseResponseUsage extracts usage from a response.completed SSE payload.
@@ -480,8 +490,12 @@ func parseResponseUsage(data string) (responseUsage, bool) {
 	var payload struct {
 		Response struct {
 			Usage *struct {
-				InputTokens  int `json:"input_tokens"`
-				OutputTokens int `json:"output_tokens"`
+				InputTokens        int `json:"input_tokens"`
+				OutputTokens       int `json:"output_tokens"`
+				InputTokensDetails *struct {
+					CachedTokens     int `json:"cached_tokens"`
+					CacheWriteTokens int `json:"cache_write_tokens"`
+				} `json:"input_tokens_details"`
 				// Nested details (OpenAI / Azure Responses).
 				OutputTokensDetails *struct {
 					ReasoningTokens int `json:"reasoning_tokens"`
@@ -503,6 +517,10 @@ func parseResponseUsage(data string) (responseUsage, bool) {
 		out.Reasoning = u.OutputTokensDetails.ReasoningTokens
 	} else {
 		out.Reasoning = u.ReasoningTokens
+	}
+	if u.InputTokensDetails != nil {
+		out.Cached = u.InputTokensDetails.CachedTokens
+		out.CacheWrite = u.InputTokensDetails.CacheWriteTokens
 	}
 	return out, true
 }
@@ -806,12 +824,13 @@ func (s *OpenAIInferenceStrategy) emitReasoningChunk(raw json.RawMessage, events
 	}
 }
 
-func marshalMessagesToInput(messages []*tacklr.Message) []json.RawMessage {
+func marshalMessagesToInput(messages []*tacklr.Message, systemPrompt string, stampBreakpoints bool) []json.RawMessage {
 	// Responses API requires each function_call to be immediately followed by its
 	// function_call_output (same call_id). Parallel tool batches must interleave
 	// call→output, not emit all calls then all outputs.
 	paired := make(map[*tacklr.Message]bool)
 	var items []json.RawMessage
+	lastToolOut := -1
 
 	appendJSON := func(v any) {
 		b, err := json.Marshal(v)
@@ -819,6 +838,20 @@ func marshalMessagesToInput(messages []*tacklr.Message) []json.RawMessage {
 			panic(fmt.Sprintf("builtins: marshal internally constructed model input: %v", err))
 		}
 		items = append(items, b)
+	}
+
+	if text := strings.TrimSpace(systemPrompt); text != "" {
+		if stampBreakpoints {
+			appendJSON(multiInputRequest{
+				Role: string(tacklr.RoleDeveloper),
+				Content: []any{inputTextPart{
+					Type: "input_text", Text: text,
+					PromptCacheBreakpoint: &promptCacheBreakpoint{Mode: "explicit"},
+				}},
+			})
+		} else {
+			appendJSON(easyInputRequest{Role: string(tacklr.RoleDeveloper), Content: text})
+		}
 	}
 
 	takeToolOutput := func(tc tacklr.ToolCall) *tacklr.Message {
@@ -876,6 +909,7 @@ func marshalMessagesToInput(messages []*tacklr.Message) []json.RawMessage {
 				Output: out.Content,
 				Status: string(tacklr.StatusCompleted),
 			})
+			lastToolOut = len(items) - 1
 		}
 	}
 
@@ -895,10 +929,17 @@ func marshalMessagesToInput(messages []*tacklr.Message) []json.RawMessage {
 			appendJSON(marshalRoleContent(string(msg.Role), msg))
 
 		case tacklr.RoleDeveloper:
-			// Wire as system so models treat handoff/plan as instructions, not a
-			// conversational turn to answer (Foundry/DeepSeek was echoing
-			// developer-role handoff text into agent_message_chunk).
-			appendJSON(marshalRoleContent(string(tacklr.RoleSystem), msg))
+			if stampBreakpoints && tacklr.IsPlanDocument(msg) {
+				appendJSON(multiInputRequest{
+					Role: string(tacklr.RoleDeveloper),
+					Content: []any{inputTextPart{
+						Type: "input_text", Text: msg.Content,
+						PromptCacheBreakpoint: &promptCacheBreakpoint{Mode: "explicit"},
+					}},
+				})
+			} else {
+				appendJSON(marshalRoleContent(string(tacklr.RoleDeveloper), msg))
+			}
 
 		case tacklr.RoleReasoning:
 			// Responses multi-turn: pass prior reasoning items back with the tool
@@ -931,6 +972,21 @@ func marshalMessagesToInput(messages []*tacklr.Message) []json.RawMessage {
 			}
 			for _, tc := range msg.ToolCalls {
 				appendFunctionCall(tc)
+			}
+		}
+	}
+
+	if stampBreakpoints && lastToolOut >= 0 {
+		var out functionCallOutputRequest
+		if err := json.Unmarshal(items[lastToolOut], &out); err == nil {
+			text, _ := out.Output.(string)
+			out.Output = []inputTextPart{{
+				Type: "input_text", Text: text,
+				PromptCacheBreakpoint: &promptCacheBreakpoint{Mode: "explicit"},
+			}}
+			b, err := json.Marshal(out)
+			if err == nil {
+				items[lastToolOut] = b
 			}
 		}
 	}

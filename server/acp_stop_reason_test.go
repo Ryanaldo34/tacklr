@@ -11,12 +11,13 @@ import (
 	"github.com/ryanaldo34/tacklr/durable"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/internal/testkit"
 )
 
 // TestACP_prompt_stopReason_refusal: model terminal ErrModelRefused → PromptResponse refusal.
 func TestACP_prompt_stopReason_refusal(t *testing.T) {
-	strategy := &mockInferenceStrategy{
-		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+	strategy := &testkit.ScriptedModel{
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 			ch <- tacklr.LLMResponseChunk{
 				Type:       tacklr.StreamEventError,
 				Error:      tacklr.ErrModelRefused,
@@ -29,8 +30,8 @@ func TestACP_prompt_stopReason_refusal(t *testing.T) {
 }
 
 func TestACP_prompt_stopReason_maxTokens(t *testing.T) {
-	strategy := &mockInferenceStrategy{
-		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+	strategy := &testkit.ScriptedModel{
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 			ch <- tacklr.LLMResponseChunk{
 				Type:       tacklr.StreamEventError,
 				Error:      tacklr.ErrMaxTokens,
@@ -50,8 +51,8 @@ func TestACP_prompt_stopReason_maxTurnRequests(t *testing.T) {
 		},
 	})
 	var n int
-	strategy := &mockInferenceStrategy{
-		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+	strategy := &testkit.ScriptedModel{
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 			n++
 			ch <- tacklr.LLMResponseChunk{
 				Type: tacklr.StreamEventFunctionCall,
@@ -63,7 +64,7 @@ func TestACP_prompt_stopReason_maxTurnRequests(t *testing.T) {
 			ch <- tacklr.LLMResponseChunk{IsComplete: true}
 		},
 	}
-	r := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	r := newTestRuntime(t, &testkit.ScriptedModel{}, durable.AgentSpec{})
 	r.Catalog.Register("default", durable.AgentSpec{
 		Options: tacklr.AgentOptions{
 			Config: tacklr.Config{
@@ -87,7 +88,7 @@ func TestACP_prompt_stopReason_maxTurnRequests(t *testing.T) {
 	}
 }
 
-func assertACPStopReason(t *testing.T, strategy *mockInferenceStrategy, tools []*tacklr.Tool, want string) {
+func assertACPStopReason(t *testing.T, strategy *testkit.ScriptedModel, tools []*tacklr.Tool, want string) {
 	t.Helper()
 	r := newTestRuntime(t, strategy, durable.AgentSpec{Options: tacklr.AgentOptions{Tools: tools}})
 	recNew := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
@@ -103,8 +104,8 @@ func assertACPStopReason(t *testing.T, strategy *mockInferenceStrategy, tools []
 func TestACP_sessionCancel_stopReasonCancelled(t *testing.T) {
 	started := make(chan struct{})
 	var once sync.Once
-	strategy := &mockInferenceStrategy{
-		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+	strategy := &testkit.ScriptedModel{
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 			once.Do(func() { close(started) })
 			<-ctx.Done()
 		},

@@ -194,8 +194,7 @@ func parseACPPrompt(raw json.RawMessage) (*tacklr.Message, error) {
 				textParts = append(textParts, text)
 			}
 		case "resource_link":
-			// Baseline MUST: accept resource links. We do not fetch; surface a
-			// stable text descriptor so the model sees the reference (no resource_link resolution).
+			// Accept the link as a text descriptor; do not fetch the resource.
 			link, err := formatResourceLink(b)
 			if err != nil {
 				return nil, fmt.Errorf("resource_link block %d: %w", i, err)

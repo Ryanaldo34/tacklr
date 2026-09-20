@@ -522,3 +522,36 @@ func TestCheckpointer_withPendingToolMaps_roundTrip(t *testing.T) {
 		t.Fatalf("%+v", applied)
 	}
 }
+
+type ghostInterrupt struct{}
+
+func (ghostInterrupt) TypeName() string           { return "not_registered_ghost" }
+func (ghostInterrupt) Serialize() ([]byte, error) { return []byte(`{}`), nil }
+func (ghostInterrupt) Return([]byte) error        { return nil }
+func (ghostInterrupt) Error() string              { return "ghost" }
+
+func TestCheckpointer_uncloneableInterruptFailsSnapshot(t *testing.T) {
+	window := []*Message{{Role: RoleUser, Content: "hi"}}
+
+	pending := newSessionManager()
+	if err := pending.Park("tc1", ghostInterrupt{}); err == nil {
+		t.Fatal("park returns the interrupt")
+	}
+	if len(pending.Pending()) != 1 {
+		t.Fatal("Pending still lists a park JSON clone cannot copy")
+	}
+	if _, err := captureCheckpoint(window, pending, nil); err == nil || !strings.Contains(err.Error(), "pending interrupts") {
+		t.Fatalf("pending clone: %v", err)
+	}
+
+	resolved := newSessionManager()
+	if err := resolved.Park("tc1", ghostInterrupt{}); err == nil {
+		t.Fatal("park returns the interrupt")
+	}
+	if _, err := resolved.Resume("tc1", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := captureCheckpoint(window, resolved, nil); err == nil || !strings.Contains(err.Error(), "resolved interrupts") {
+		t.Fatalf("resolved clone: %v", err)
+	}
+}

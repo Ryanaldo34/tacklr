@@ -13,6 +13,7 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
+	"github.com/ryanaldo34/tacklr/internal/testkit"
 )
 
 // dialACPWebSocket opens a WebSocket to GET /acp and returns the connection
@@ -85,8 +86,8 @@ func TestACP_WS_permissionMidTurn(t *testing.T) {
 		},
 	})
 	var invokeCount int
-	strategy := &mockInferenceStrategy{
-		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+	strategy := &testkit.ScriptedModel{
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 			invokeCount++
 			if invokeCount == 1 {
 				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventFunctionCall, ToolCalls: []tacklr.ToolCall{
@@ -188,8 +189,8 @@ func TestACP_WS_disconnectCancelsInFlightTurn(t *testing.T) {
 	started := make(chan struct{})
 	cancelled := make(chan struct{})
 	var once sync.Once
-	strategy := &mockInferenceStrategy{
-		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+	strategy := &testkit.ScriptedModel{
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 			once.Do(func() { close(started) })
 			<-ctx.Done()
 			close(cancelled)

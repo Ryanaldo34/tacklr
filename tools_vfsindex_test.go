@@ -29,7 +29,7 @@ func vfsIndexHarness(t *testing.T, withNS bool) (*TurnManager, *vfs.MountSession
 	opts := AgentOptions{
 		SessionID:       "vfs-idx-tools",
 		MountSession:    ms,
-		Model:           &mockStrategy{},
+		Model:           &scriptedModel{},
 		Brain:           eng,
 		UnattendedWrite: true,
 	}
@@ -79,8 +79,8 @@ func waitSearchHit(t *testing.T, eng *brain.Engine, scope brain.Scope, query str
 
 // TestVFSIndexTools_indexSearchUnindex: index_file → searchable vfs_path;
 // hash skip; unindex soft-deletes mirror; VFS file remains.
-// WriteFile may race with AfterPersist async index, so index_file may return
-// indexed or skipped; search + unindex outcomes are the contract.
+// The work mount is selective (empty IndexPolicy), so WriteFile does not
+// auto-index; the first index_file writes, the second is a hash skip.
 func TestVFSIndexTools_indexSearchUnindex(t *testing.T) {
 	h, ms, eng, ns := vfsIndexHarness(t, true)
 	activatePlan(t, h)
@@ -106,7 +106,7 @@ func TestVFSIndexTools_indexSearchUnindex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "indexed path=/workspace/work/note.txt") && !strings.Contains(out, "skipped path=/workspace/work/note.txt") {
+	if !strings.Contains(out, "indexed path=/workspace/work/note.txt") {
 		t.Fatalf("index: %q", out)
 	}
 
@@ -115,7 +115,6 @@ func TestVFSIndexTools_indexSearchUnindex(t *testing.T) {
 		t.Fatalf("vfs_path: %+v", hit.Properties)
 	}
 
-	// Second index same hash → skipped (async or explicit already wrote).
 	out, err = runWriteTool(t, h, indexTool, `{"path":"/workspace/work/note.txt"}`)
 	if err != nil {
 		t.Fatal(err)
@@ -244,7 +243,7 @@ func TestVFSIndexTools_prefixAutoIndex(t *testing.T) {
 	ns := mustNS(t, "id", uuid.NewString())
 	h := mustNewTurnManager(t, AgentOptions{
 		SessionID:    "policy-prefix",
-		MountSession: ms, Model: &mockStrategy{},
+		MountSession: ms, Model: &scriptedModel{},
 		Brain: eng, SearchNamespace: ns,
 	})
 	t.Cleanup(h.Close)
@@ -280,7 +279,7 @@ func TestKnowledgeSaveSearchRead(t *testing.T) {
 	)
 	h := mustNewTurnManager(t, AgentOptions{
 		SessionID:    "save-mem",
-		MountSession: ms, Model: &mockStrategy{},
+		MountSession: ms, Model: &scriptedModel{},
 		Brain: eng, SearchNamespace: ns,
 		BrainWriteKinds: brain.WriteKinds{Discovery: "Discovery", Fact: "Fact"},
 	})
@@ -405,7 +404,7 @@ func TestKnowledgeSave_rootsMount(t *testing.T) {
 	)
 	h := mustNewTurnManager(t, AgentOptions{
 		SessionID:    "save-roots",
-		MountSession: ms, Model: &mockStrategy{},
+		MountSession: ms, Model: &scriptedModel{},
 		Brain: eng, SearchNamespace: ns,
 		BrainWriteKinds: brain.WriteKinds{Discovery: "Discovery"},
 	})
@@ -467,21 +466,12 @@ func TestRun_workspaceResearchTurn(t *testing.T) {
 	)
 
 	wd := &recordingWatchdog{}
-	strategy := &mockStrategy{
-		countTokensFn: func(_ context.Context, msgs []*Message, _ []*Tool) (int, error) {
-			return contentTokenEstimate(msgs), nil
-		},
-	}
+	strategy := &scriptedModel{}
 	// The model keeps its own next-action (window pressure may drop tool text).
 	var next int
-	strategy.invokeFn = func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
-		strategy.mu.Lock()
-		prompt := ""
-		if n := len(strategy.systemPrompts); n > 0 {
-			prompt = strategy.systemPrompts[n-1]
-		}
-		strategy.mu.Unlock()
-		if strings.Contains(prompt, "summarize the entire message history") {
+	strategy.InvokeFn = func(ctx context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
+		prompt := strategy.LastSystemPrompt()
+		if strings.Contains(strings.ToLower(prompt), "summarize the entire message history") {
 			ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "WINDOW_SUMMARY", IsComplete: true}
 			return
 		}
@@ -620,7 +610,7 @@ func TestPathNativeGraphLinkExpand(t *testing.T) {
 	ns := mustNS(t, "id", uuid.NewString())
 	h := mustNewTurnManager(t, AgentOptions{
 		SessionID:    "path-graph",
-		MountSession: ms, Model: &mockStrategy{},
+		MountSession: ms, Model: &scriptedModel{},
 		Brain: eng, SearchNamespace: ns,
 	})
 	t.Cleanup(h.Close)

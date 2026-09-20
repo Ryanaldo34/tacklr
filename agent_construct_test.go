@@ -27,11 +27,11 @@ func (failMCP) ResolveMCP(context.Context, string) (mcp.Credentials, error) {
 	return mcp.Credentials{}, errors.New("expired")
 }
 
-type zeroWindowStrategy struct{ mockStrategy }
+type zeroWindowStrategy struct{ scriptedModel }
 
 func (*zeroWindowStrategy) MaxContextWindow() (int, error) { return 0, nil }
 
-type errWindowStrategy struct{ mockStrategy }
+type errWindowStrategy struct{ scriptedModel }
 
 func (*errWindowStrategy) MaxContextWindow() (int, error) { return 0, errors.New("no window") }
 
@@ -45,7 +45,7 @@ func TestNewTurnManager_constructFailClosed(t *testing.T) {
 	ms := mustMountTree(t, t.Name(), vfs.At("skills", vfs.Local(root)))
 	_, err := NewTurnManager(context.Background(), AgentOptions{
 		Config:        Config{MaxWindowSize: 8192},
-		Model:         &mockStrategy{},
+		Model:         &scriptedModel{},
 		SkillsSession: ms,
 	})
 	if err == nil || !strings.Contains(err.Error(), "initialize skills") {
@@ -69,7 +69,7 @@ func TestNewTurnManager_skillsIsolatedFromWorkspace(t *testing.T) {
 
 	h := mustNewTurnManager(t, AgentOptions{
 		Config:        Config{MaxWindowSize: 8192},
-		Model:         &mockStrategy{},
+		Model:         &scriptedModel{},
 		MountSession:  ms,
 		SkillsSession: skillsMS,
 	})
@@ -96,11 +96,15 @@ func TestNewTurnManager_skillsIsolatedFromWorkspace(t *testing.T) {
 
 func TestNewTurnManager_configurationInvariants(t *testing.T) {
 	// Arrange
-	validModel := &mockStrategy{}
+	validModel := &scriptedModel{}
 	cases := []struct {
 		name string
 		opts AgentOptions
 	}{
+		{
+			name: "nil model",
+			opts: AgentOptions{},
+		},
 		{
 			name: "model without context limit",
 			opts: AgentOptions{Model: &zeroWindowStrategy{}},
@@ -201,7 +205,7 @@ func TestRestoreCheckpoint_rejectsCorruptModules(t *testing.T) {
 	if err := json.Unmarshal(raw, &checkpoint); err != nil {
 		t.Fatal(err)
 	}
-	h := mustNewTurnManager(t, AgentOptions{Model: &mockStrategy{}})
+	h := mustNewTurnManager(t, AgentOptions{Model: &scriptedModel{}})
 	if err := h.RestoreCheckpoint(checkpoint); err == nil {
 		t.Fatal("corrupt checkpoint was accepted")
 	}
@@ -209,7 +213,7 @@ func TestRestoreCheckpoint_rejectsCorruptModules(t *testing.T) {
 
 func TestTurnManager_checkpointAfterRun(t *testing.T) {
 	wd := &recordingWatchdog{}
-	mock := &mockStrategy{}
+	mock := &scriptedModel{SupportsMIMEFn: IsTextMIME}
 	h, err := NewTurnManager(t.Context(), AgentOptions{
 		SessionID:    "sess",
 		Model:        mock,
@@ -304,7 +308,7 @@ func TestTurnManager_checkpointAfterRun(t *testing.T) {
 	}
 
 	h.toolResultMessage(ToolCall{ID: "wd", CallID: "wd", Name: "x"}, "ok", "success")
-	mock.invokeFn = func(_ context.Context, _ []*Message, _ []*Tool, ch chan<- LLMResponseChunk) {
+	mock.InvokeFn = func(_ context.Context, _ []*Message, _ []*Tool, ch chan<- LLMResponseChunk) {
 		ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "hi", IsComplete: true}
 	}
 	if _, err := h.runInference(t.Context(), &TurnState{}, out); err != nil {
@@ -313,18 +317,18 @@ func TestTurnManager_checkpointAfterRun(t *testing.T) {
 	if len(wd.toolResults) == 0 || len(wd.outputs) == 0 {
 		t.Fatalf("watchdog tool=%d out=%d", len(wd.toolResults), len(wd.outputs))
 	}
-	mock.invokeErr = errors.New("upstream")
+	mock.InvokeErr = errors.New("upstream")
 	if _, err := h.runInference(t.Context(), &TurnState{HadToolRound: true}, out); err == nil || !errors.Is(err, ErrModelAfterTools) {
 		t.Fatalf("want ErrModelAfterTools, got %v", err)
 	}
-	mock.invokeErr = nil
-	mock.invokeFn = func(_ context.Context, _ []*Message, _ []*Tool, ch chan<- LLMResponseChunk) {
+	mock.InvokeErr = nil
+	mock.InvokeFn = func(_ context.Context, _ []*Message, _ []*Tool, ch chan<- LLMResponseChunk) {
 		ch <- LLMResponseChunk{Type: StreamEventError, Error: errors.New("provider"), IsComplete: true}
 	}
 	if _, err := h.runInference(t.Context(), &TurnState{HadToolRound: true}, out); err == nil {
 		t.Fatal("want after-tools stream error")
 	}
-	prompt := strings.Join(mock.systemPrompts, "\n")
+	prompt := strings.Join(mock.SystemPrompts, "\n")
 	if !strings.Contains(prompt, "pack") {
 		t.Fatal("system prompt missing skill catalog")
 	}

@@ -223,6 +223,12 @@ func (h *TurnManager) finishInit(ctx context.Context, specialists []*Specialist)
 		h.initVFSIndexBridge()
 	}
 	h.injectBuiltinTools()
+	if s, ok := h.model.(interface{ SetPromptCacheKey(string) }); ok && h.sessionId != "" {
+		s.SetPromptCacheKey(h.sessionId)
+	}
+	if s, ok := h.model.(interface{ SetSystemPrompt(string) }); ok {
+		s.SetSystemPrompt(h.constructSystemPrompt())
+	}
 	return nil
 }
 
@@ -321,7 +327,7 @@ func (a *TurnManager) initSkills(ctx context.Context) error {
 func (a *TurnManager) skillTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "read_skill",
-		Description: "Load the full instructions for an available skill.",
+		Description: "Load the full instructions for a skill listed in the skills catalog. Call when that method should shape the current work. Returns the skill body. Fails if the name is not in the catalog.",
 		Handler: func(ctx context.Context, args struct {
 			Name string `json:"name" desc:"Skill name from the available skills catalog"`
 		}) (string, error) {

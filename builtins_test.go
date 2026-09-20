@@ -405,7 +405,7 @@ func TestListPlanTool_exactListing(t *testing.T) {
 }
 
 func TestTurnManager_installPlanDocumentRequiresWindow(t *testing.T) {
-	h := mustNewTurnManager(t, AgentOptions{Model: &mockStrategy{}, Config: Config{MaxWindowSize: 8192}})
+	h := mustNewTurnManager(t, AgentOptions{Model: &scriptedModel{}, Config: Config{MaxWindowSize: 8192}})
 	t.Cleanup(h.Close)
 	h.session.Plan.SetDocument("PROJECT PLAN")
 	err := h.applyBatchToolResultEffect(context.Background(), EffectInstallPlanDocument)

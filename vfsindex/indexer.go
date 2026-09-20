@@ -54,7 +54,7 @@ type IndexOpts struct {
 // Stats summarizes IndexPrefix work.
 type Stats struct {
 	Indexed int // files written or re-chunked
-	Skipped int // hash match, binary, non-text, or empty skip
+	Skipped int // hash match, binary, non-text, or PolicyNone
 	Removed int // missing paths soft-deleted from brain
 }
 
@@ -98,7 +98,7 @@ type PathIndexResult string
 const (
 	// PathIndexed means Document/Chunks were written or re-chunked.
 	PathIndexed PathIndexResult = "indexed"
-	// PathSkipped means hash match, binary, non-text, or empty skip.
+	// PathSkipped means hash match, binary, non-text, or PolicyNone.
 	PathSkipped PathIndexResult = "skipped"
 	// PathRemoved means the path was missing and any brain mirror was soft-deleted.
 	PathRemoved PathIndexResult = "removed"
@@ -117,9 +117,6 @@ func (x *MountIndexer) IndexPathResult(ctx context.Context, virtualPath string) 
 	return x.indexPath(ctx, virtualPath)
 }
 
-// IndexFileResult indexes a path already known to be an existing file (caller Stat'd).
-// Skips a second Stat round-trip — useful for remote mounts and batch tools that
-// pre-validate paths before any write work.
 func (x *MountIndexer) readyPath(ctx context.Context, virtualPath string) (string, PathIndexResult, error) {
 	if err := ctx.Err(); err != nil {
 		return "", "", err
@@ -134,6 +131,8 @@ func (x *MountIndexer) readyPath(ctx context.Context, virtualPath string) (strin
 	return cleaned, "", nil
 }
 
+// IndexFileResult indexes a path already known to exist (caller Stat'd).
+// It does not Stat again, so batch tools can validate once then index.
 func (x *MountIndexer) IndexFileResult(ctx context.Context, virtualPath string, st vfs.FileInfo) (PathIndexResult, error) {
 	cleaned, skip, err := x.readyPath(ctx, virtualPath)
 	if err != nil {
@@ -274,6 +273,14 @@ func (x *MountIndexer) indexFile(ctx context.Context, vpath string, st vfs.FileI
 	// Session IR when available: hash-check before chunking; Structured → block chunks.
 	if doc, err := x.VFS.ReadText(ctx, vpath); err == nil {
 		body := doc.Text()
+		if isBinaryPrefix(body) {
+			return PathSkipped, nil
+		}
+		nBytes := int64(len(body))
+		truncated := nBytes > maxBytes
+		if truncated {
+			body = body[:maxBytes]
+		}
 		hash := vfs.ContentToken(doc)
 		mediaType := doc.MediaType()
 		if mediaType == "" {
@@ -287,19 +294,21 @@ func (x *MountIndexer) indexFile(ctx context.Context, vpath string, st vfs.FileI
 			return PathSkipped, nil
 		}
 		var chunks []chunkDraft
-		if s, ok := doc.(vfs.Structured); ok {
-			if blocks := s.Blocks(); len(blocks) > 0 {
-				if vfs.IsProjected(mediaType) {
-					chunks = chunksFromBlockText(base, blocks, parentID)
-				} else {
-					chunks = chunksFromBlocks(base, body, blocks, parentID)
+		if !truncated {
+			if s, ok := doc.(vfs.Structured); ok {
+				if blocks := s.Blocks(); len(blocks) > 0 {
+					if vfs.IsProjected(mediaType) {
+						chunks = chunksFromBlockText(base, blocks, parentID)
+					} else {
+						chunks = chunksFromBlocks(base, body, blocks, parentID)
+					}
 				}
 			}
 		}
 		if len(chunks) == 0 {
 			chunks = lineChunksFromText(body, linesPer)
 		}
-		return x.putFileIndex(ctx, vpath, base, st, parentID, docKind, chunkKind, mediaType, hash, int64(len(body)), chunks)
+		return x.putFileIndex(ctx, vpath, base, st, parentID, docKind, chunkKind, mediaType, hash, nBytes, chunks)
 	}
 
 	// One-pass stream: hash while chunking (re-open for hash-only would double IO
@@ -318,7 +327,7 @@ func (x *MountIndexer) indexFile(ctx context.Context, vpath string, st vfs.FileI
 		return "", err
 	}
 	if chunks == nil && hash == "" {
-		return PathSkipped, nil // binary skip
+		return PathSkipped, nil
 	}
 	unchanged, err := x.contentHashUnchanged(ctx, parentID, hash)
 	if err != nil {
@@ -638,9 +647,8 @@ func streamChunks(ctx context.Context, r io.Reader, linesPerChunk int, maxBytes 
 			if n > 512 {
 				n = 512
 			}
-			sample := []byte(s[:n])
-			if bytes.IndexByte(sample, 0) >= 0 || !utf8.Valid(sample) {
-				return nil, "", 0, nil // binary skip
+			if isBinarySample([]byte(s[:n])) {
+				return nil, "", 0, nil
 			}
 		}
 		scanned += int64(len(s))
@@ -677,6 +685,24 @@ func streamChunks(ctx context.Context, r io.Reader, linesPerChunk int, maxBytes 
 	flush()
 	sum := hex.EncodeToString(h.Sum(nil))
 	return out, sum, scanned, nil
+}
+
+func isBinaryPrefix(s string) bool {
+	n := len(s)
+	if n > 512 {
+		n = 512
+	}
+	if n == 0 {
+		return false
+	}
+	return isBinarySample([]byte(s[:n]))
+}
+
+func isBinarySample(sample []byte) bool {
+	if len(sample) > 512 {
+		sample = sample[:512]
+	}
+	return len(sample) > 0 && (bytes.IndexByte(sample, 0) >= 0 || !utf8.Valid(sample))
 }
 
 func chunkID(parent uuid.UUID, pos int) uuid.UUID {
