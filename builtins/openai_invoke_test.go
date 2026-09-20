@@ -552,3 +552,66 @@ func TestInvoke_promptCacheGPT56BreakpointsAndToolChoiceNone(t *testing.T) {
 		t.Fatalf("want breakpoints on system, plan, last tool output: %s", inRaw)
 	}
 }
+
+func TestPromptCache_grokAndGPTShapes(t *testing.T) {
+	grok := newPromptCache("grok-4.6", "https://api.x.ai/v1", "")
+	if grok.breakpoints() {
+		t.Fatal("grok breakpoints")
+	}
+	req := &responsesRequest{}
+	h := make(http.Header)
+	grok.apply(req)
+	grok.headers(h)
+	if req.PromptCache != nil || h.Get("x-grok-conv-id") != "" {
+		t.Fatalf("empty grok key leaked: %+v %v", req.PromptCache, h)
+	}
+	newPromptCache("grok-4.6", "https://us.api.x.ai/v1", "sess").headers(h)
+	if h.Get("x-grok-conv-id") != "sess" {
+		t.Fatalf("header = %q", h.Get("x-grok-conv-id"))
+	}
+
+	gpt := newPromptCache("gpt-5.6", "https://api.openai.com/v1", "sess")
+	if !gpt.breakpoints() {
+		t.Fatal("gpt breakpoints")
+	}
+	req = &responsesRequest{}
+	gpt.apply(req)
+	gpt.headers(h)
+	if req.PromptCacheKey != "sess" || req.PromptCache == nil || req.PromptCache.Mode != "implicit" || req.PromptCache.TTL != "30m" {
+		t.Fatalf("gpt cache = %+v", req)
+	}
+
+	s := NewOpenAIInferenceStrategy(nil).WithModel("gpt-5.6-sol")
+	s.SetPromptCacheKey("  abc  ")
+	if s.CacheKey != "abc" {
+		t.Fatalf("CacheKey = %q", s.CacheKey)
+	}
+	n, err := s.MaxContextWindow()
+	if err != nil || n != 1000000 {
+		t.Fatalf("gpt-5 window = %d %v", n, err)
+	}
+	s.WithModel("o3-mini")
+	n, err = s.MaxContextWindow()
+	if err != nil || n != 200000 {
+		t.Fatalf("o3 window = %d %v", n, err)
+	}
+	s.WithReasoningSummary("auto")
+	s.WithReasoningSummary("")
+
+	orphans := marshalMessagesToInput([]*tacklr.Message{
+		{Role: tacklr.RoleTool, ToolCallID: "orphan", Content: "x"},
+	}, "", false)
+	if len(orphans) != 0 {
+		t.Fatalf("orphan tool output = %d", len(orphans))
+	}
+	ns := marshalMessagesToInput([]*tacklr.Message{
+		{Role: tacklr.RoleAssistant, ToolCalls: []tacklr.ToolCall{
+			{ID: "call_1", CallID: "call_1", Name: "echo", Namespace: "svc", Arguments: "{}"},
+		}},
+		{Role: tacklr.RoleTool, ToolCallID: "call_1", Content: "ok"},
+	}, "sys", true)
+	joined := string(ns[0]) + string(ns[1]) + string(ns[2])
+	if !strings.Contains(joined, "svc__echo") || !strings.Contains(joined, "prompt_cache_breakpoint") {
+		t.Fatalf("namespaced call = %s", joined)
+	}
+}
