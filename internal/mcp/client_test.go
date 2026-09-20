@@ -218,8 +218,16 @@ func TestBuildTransportStdioDefaultWhenTypeEmpty(t *testing.T) {
 		if err != nil {
 			t.Fatalf("buildTransport(type=%q): %v", typ, err)
 		}
-		if _, ok := transport.(*mcpsdk.CommandTransport); !ok {
-			t.Errorf("type=%q: expected *CommandTransport, got %T", typ, transport)
+		ct, ok := transport.(*mcpsdk.CommandTransport)
+		if !ok || ct.Command == nil {
+			t.Fatalf("type=%q: got %T", typ, transport)
+		}
+		cmd := ct.Command.Path
+		if len(ct.Command.Args) > 0 {
+			cmd = ct.Command.Args[0]
+		}
+		if !strings.Contains(cmd, "server") {
+			t.Fatalf("type=%q command = %q args=%v", typ, ct.Command.Path, ct.Command.Args)
 		}
 	}
 }

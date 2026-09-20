@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/telemetry"
 )
 
 var _ tacklr.InferenceStrategy = (*ScriptedModel)(nil)
@@ -15,10 +16,11 @@ var _ tacklr.InferenceStrategy = (*ScriptedModel)(nil)
 // Default CountTokens is sum of message content lengths (not zero), so window-pressure
 // paths can fire when MaxWindowSize is small. Override CountTokensFn to customize.
 type ScriptedModel struct {
-	InvokeFn      func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk)
-	InvokeErr     error
-	InvokeErrFn   func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool) error
-	CountTokensFn func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool) (int, error)
+	InvokeFn       func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk)
+	InvokeErr      error
+	InvokeErrFn    func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool) error
+	CountTokensFn  func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool) (int, error)
+	SupportsMIMEFn func(string) bool
 
 	CallNum         atomic.Int64
 	mu              sync.Mutex
@@ -27,8 +29,14 @@ type ScriptedModel struct {
 	LastInvokeTools []*tacklr.Tool
 }
 
+func (m *ScriptedModel) ModelTelemetryIdentity() telemetry.ModelIdentity {
+	return telemetry.ModelIdentity{Provider: "unknown", Model: "scripted"}
+}
+
 func (m *ScriptedModel) SupportsMIME(mimeType string) bool {
-	// Scripted models accept common binary types unless overridden later.
+	if m.SupportsMIMEFn != nil {
+		return m.SupportsMIMEFn(mimeType)
+	}
 	return true
 }
 func (m *ScriptedModel) MaxContextWindow() (int, error) {

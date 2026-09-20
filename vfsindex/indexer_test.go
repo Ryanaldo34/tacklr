@@ -482,29 +482,27 @@ func TestMountIndexer_IndexFileResultAndDefaults(t *testing.T) {
 		t.Fatalf("nested search: %+v err=%v", page.Objects, err)
 	}
 
-	// Null byte in a .txt file → stream binary skip (not indexed as text)
 	if err := ms.WriteFile(ctx, "/workspace/work/binlike.txt", []byte("ok\x00null")); err != nil {
 		t.Fatal(err)
 	}
 	res, err = idx.IndexPathResult(ctx, "/workspace/work/binlike.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	// skipped or indexed empty — either way no crash; prefer skipped
-	if res != vfsindex.PathSkipped && res != vfsindex.PathIndexed {
-		t.Fatalf("binary-ish: %q", res)
+	if err != nil || res != vfsindex.PathSkipped {
+		t.Fatalf("NUL in text-like file: res=%q err=%v", res, err)
 	}
 
-	// MaxIndexBytes truncates stream chunking
 	idx.MaxIndexBytes = 32
 	idx.LinesPerChunk = 2
-	long := strings.Repeat("wordline\n", 40)
+	long := "head-unique-token\n" + strings.Repeat("wordline\n", 40) + "tail-unique-token\n"
 	if err := ms.WriteFile(ctx, "/workspace/work/long.txt", []byte(long)); err != nil {
 		t.Fatal(err)
 	}
 	res, err = idx.IndexPathResult(ctx, "/workspace/work/long.txt")
-	if err != nil || (res != vfsindex.PathIndexed && res != vfsindex.PathSkipped) {
+	if err != nil || res != vfsindex.PathIndexed {
 		t.Fatalf("long file: res=%q err=%v", res, err)
+	}
+	page, err = eng.Search(ctx, scope, brain.SearchRequest{Query: "head-unique-token"}, brain.NewSearchContext())
+	if err != nil || len(page.Objects) == 0 {
+		t.Fatalf("truncated file should still index the prefix: %+v err=%v", page.Objects, err)
 	}
 
 	// PolicyNone member: IndexPath / IndexPrefix report skipped (no Document written).
@@ -688,4 +686,13 @@ func (p richProvider) OpenDocument(_ context.Context, _ string, _ *vfs.ContentRe
 }
 func (richProvider) WriteDocument(context.Context, string, vfs.Document) error {
 	return vfs.ErrNotSupported
+}
+
+func mustNS(t testing.TB, nv ...string) brain.Namespace {
+	t.Helper()
+	ns, err := brain.ParseNamespace(nv...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ns
 }

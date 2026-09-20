@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/ryanaldo34/tacklr/durable"
+	"github.com/ryanaldo34/tacklr/internal/testkit"
 	tacklrsecurity "github.com/ryanaldo34/tacklr/security"
 )
 
@@ -40,7 +41,7 @@ func TestACPAuthentication_ownsSessionsByGenericPrincipal(t *testing.T) {
 		Description: "Authenticate with the host",
 		Scheme:      "host-login",
 	}}, true)
-	k := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	k := newTestRuntime(t, &testkit.ScriptedModel{}, durable.AgentSpec{})
 	connection := &Conn{}
 	env := ProtocolEnv{Runtime: k.Runtime, Catalog: k.Catalog, Conn: connection, Security: service}
 	call := func(body string) map[string]any {
@@ -116,7 +117,7 @@ func TestServer_WithSecurity_authenticatesHTTPRequests(t *testing.T) {
 			return tacklrsecurity.NewPrincipal(string(attempt.Credential.Bytes()))
 		}),
 	}
-	k := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	k := newTestRuntime(t, &testkit.ScriptedModel{}, durable.AgentSpec{})
 	srv := NewServer(k.Runtime, k.Catalog, healthProtocol{}).WithSecurity(service, func(r *http.Request) (tacklrsecurity.Attempt, bool) {
 		if token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "); token != r.Header.Get("Authorization") {
 			return tacklrsecurity.Attempt{Scheme: "bearer", Credential: tacklrsecurity.NewSecret([]byte(token))}, true

@@ -12,6 +12,7 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
+	"github.com/ryanaldo34/tacklr/internal/testkit"
 	"github.com/ryanaldo34/tacklr/interrupt"
 )
 
@@ -120,8 +121,8 @@ func TestACP_elicitationForm_resolvesInterruptAndCompletes(t *testing.T) {
 	})
 
 	var invokeCount atomic.Int32
-	strategy := &mockInferenceStrategy{
-		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+	strategy := &testkit.ScriptedModel{
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 			n := invokeCount.Add(1)
 			if n == 1 {
 				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventFunctionCall, ToolCalls: []tacklr.ToolCall{
@@ -259,8 +260,8 @@ func TestACP_requestPermission_rejectFailsToolAndCompletes(t *testing.T) {
 		},
 	})
 	var invokeCount int
-	strategy := &mockInferenceStrategy{
-		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+	strategy := &testkit.ScriptedModel{
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 			invokeCount++
 			if invokeCount == 1 {
 				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventFunctionCall, ToolCalls: []tacklr.ToolCall{
@@ -376,8 +377,8 @@ func TestACP_requestPermission_cancelledEndsPrompt(t *testing.T) {
 		OnCall:  []tacklr.OnCallFunc{tacklr.ToolPermissionOnCall},
 		Handler: func(ctx context.Context) (string, error) { return "nope", nil },
 	})
-	strategy := &mockInferenceStrategy{
-		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+	strategy := &testkit.ScriptedModel{
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventFunctionCall, ToolCalls: []tacklr.ToolCall{
 				{ID: "c1", CallID: "c1", Name: "sensitive", Arguments: `{}`},
 			}, IsComplete: true}
@@ -430,10 +431,10 @@ func TestACP_requestPermission_cancelledEndsPrompt(t *testing.T) {
 	}
 }
 
-func parkOnceStrategy(name string) *mockInferenceStrategy {
+func parkOnceStrategy(name string) *testkit.ScriptedModel {
 	var n atomic.Int32
-	return &mockInferenceStrategy{
-		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+	return &testkit.ScriptedModel{
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 			if n.Add(1) == 1 {
 				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventFunctionCall, ToolCalls: []tacklr.ToolCall{
 					{ID: "p1", CallID: "p1", Name: name, Arguments: `{}`},
@@ -661,7 +662,7 @@ func TestACP_interruptClientOutcomes(t *testing.T) {
 	})
 }
 
-func interruptCallWriteFails(t *testing.T, tool *tacklr.Tool, strategy *mockInferenceStrategy, needle string, form bool) {
+func interruptCallWriteFails(t *testing.T, tool *tacklr.Tool, strategy *testkit.ScriptedModel, needle string, form bool) {
 	t.Helper()
 	r := newTestRuntime(t, strategy, durable.AgentSpec{Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{tool}}})
 	w := &failOnRPCWriter{needle: needle}
@@ -700,7 +701,7 @@ func (f *failOnRPCWriter) WriteFrame(data []byte) error {
 	return f.recordingMessageWriter.WriteFrame(data)
 }
 
-func promptInterruptReply(t *testing.T, tool *tacklr.Tool, strategy *mockInferenceStrategy, initParams, method string, reply func(id any) map[string]any) {
+func promptInterruptReply(t *testing.T, tool *tacklr.Tool, strategy *testkit.ScriptedModel, initParams, method string, reply func(id any) map[string]any) {
 	t.Helper()
 	r := newTestRuntime(t, strategy, durable.AgentSpec{Options: tacklr.AgentOptions{Tools: []*tacklr.Tool{tool}}})
 	srv := NewServer(r.Runtime, r.Catalog, NewACPProtocol(NewMemoryWireStore()))
@@ -739,8 +740,8 @@ func promptInterruptReply(t *testing.T, tool *tacklr.Tool, strategy *mockInferen
 // TestACP_createPlan_streamsPlanUpdate: create_plan streams plan sessionUpdate over ACP.
 func TestACP_createPlan_streamsPlanUpdate(t *testing.T) {
 	var n int
-	strategy := &mockInferenceStrategy{
-		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+	strategy := &testkit.ScriptedModel{
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 			n++
 			if n == 1 {
 				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventFunctionCall, ToolCalls: []tacklr.ToolCall{
@@ -786,8 +787,8 @@ func TestACP_sessionCheckpoint_secondPromptContinuesPlan(t *testing.T) {
 	phase := "turn1"
 	var turn1Steps, turn2Steps int
 
-	strategy := &mockInferenceStrategy{
-		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+	strategy := &testkit.ScriptedModel{
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 			mu.Lock()
 			p := phase
 			mu.Unlock()

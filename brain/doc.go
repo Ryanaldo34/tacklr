@@ -116,7 +116,7 @@
 //	eng, err := brain.NewEngine(store, brain.WithEmbedder(emb), brain.WithGraph(g))
 //	if err := eng.LoadKindsFromStore(ctx); err != nil { return err }
 //
-// Integration tests (skipped under -short / without Docker):
+// Integration tests (skipped without Docker):
 //   - postgres.Store: Testcontainers + brain/testdata/Dockerfile.postgres
 //   - helixgraph: Testcontainers + ghcr.io/helixdb/enterprise-dev (in-memory)
 package brain

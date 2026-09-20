@@ -15,7 +15,7 @@ type Document interface {
 }
 
 // Textual is document content that has a plaintext form (source, Markdown,
-// Engrams, later Word/Docs/PDF extracts). Images and other binaries do not
+// Engrams, Word, Google Docs). Images and other binaries do not
 // implement it — callers use a comma-ok assert.
 //
 // Text() is that plaintext (FUSE / encode). Line numbers are

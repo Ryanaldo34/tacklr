@@ -22,7 +22,7 @@ var visionModelPrefixes = []string{
 	"computer-use",
 }
 
-// PDF / document file input (Responses input_file) — same family as vision for now.
+// Model prefixes that accept PDF / document file input (Responses input_file).
 var pdfModelPrefixes = []string{
 	"gpt-4o",
 	"gpt-4.1",

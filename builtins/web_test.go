@@ -355,8 +355,9 @@ func TestWebFetch_highlightsAndProviderFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := both.Highlights.(HighlightsOptions); !ok {
-		t.Fatalf("both highlights: %#v", both.Highlights)
+	h, _ := both.Highlights.(HighlightsOptions)
+	if h.Query != "setbacks" {
+		t.Fatalf("both highlights query: %#v", both.Highlights)
 	}
 	fail := newExaTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)

@@ -23,7 +23,7 @@ const (
 	DefaultMountPoint = "/workspace/engram"
 	ModePrefix        = "prefix"
 	ModeRoots         = "roots"
-	// MaxEngramReadDir caps Provider ReadDir / ListByKind listings (paginate later).
+	// MaxEngramReadDir is the hard cap on Provider ReadDir and ListByKind listings.
 	MaxEngramReadDir = 500
 )
 

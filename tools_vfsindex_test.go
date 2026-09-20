@@ -79,8 +79,8 @@ func waitSearchHit(t *testing.T, eng *brain.Engine, scope brain.Scope, query str
 
 // TestVFSIndexTools_indexSearchUnindex: index_file → searchable vfs_path;
 // hash skip; unindex soft-deletes mirror; VFS file remains.
-// WriteFile may race with AfterPersist async index, so index_file may return
-// indexed or skipped; search + unindex outcomes are the contract.
+// The work mount is selective (empty IndexPolicy), so WriteFile does not
+// auto-index; the first index_file writes, the second is a hash skip.
 func TestVFSIndexTools_indexSearchUnindex(t *testing.T) {
 	h, ms, eng, ns := vfsIndexHarness(t, true)
 	activatePlan(t, h)
@@ -106,7 +106,7 @@ func TestVFSIndexTools_indexSearchUnindex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "indexed path=/workspace/work/note.txt") && !strings.Contains(out, "skipped path=/workspace/work/note.txt") {
+	if !strings.Contains(out, "indexed path=/workspace/work/note.txt") {
 		t.Fatalf("index: %q", out)
 	}
 
@@ -115,7 +115,6 @@ func TestVFSIndexTools_indexSearchUnindex(t *testing.T) {
 		t.Fatalf("vfs_path: %+v", hit.Properties)
 	}
 
-	// Second index same hash → skipped (async or explicit already wrote).
 	out, err = runWriteTool(t, h, indexTool, `{"path":"/workspace/work/note.txt"}`)
 	if err != nil {
 		t.Fatal(err)

@@ -2,8 +2,14 @@ package interrupt
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
+)
+
+var (
+	ErrInterruptNotFound = errors.New("interrupt not found")
+	ErrInvalidPayload    = errors.New("invalid payload")
 )
 
 // Interrupt represents a pending interrupt in an agent workflow requesting
@@ -320,23 +326,22 @@ func New(typeName string) (Interrupt, bool) {
 }
 
 // Clone returns a deep copy via JSON for checkpoint snapshots.
-// Returns nil if the type is unknown or serialization fails (best-effort).
-func Clone(intr Interrupt) Interrupt {
+func Clone(intr Interrupt) (Interrupt, error) {
 	if intr == nil {
-		return nil
+		return nil, nil
 	}
 	cp, ok := New(intr.TypeName())
 	if !ok {
-		return nil
+		return nil, fmt.Errorf("interrupt: unknown type %q", intr.TypeName())
 	}
-	// Success-only path: avoid "err != nil then return nil" (nilerr).
 	data, err := json.Marshal(intr)
-	if err == nil {
-		if err = json.Unmarshal(data, cp); err == nil {
-			return cp
-		}
+	if err != nil {
+		return nil, fmt.Errorf("interrupt: clone %s: %w", intr.TypeName(), err)
 	}
-	return nil
+	if err := json.Unmarshal(data, cp); err != nil {
+		return nil, fmt.Errorf("interrupt: clone %s: %w", intr.TypeName(), err)
+	}
+	return cp, nil
 }
 
 // PayloadInitializer is an optional capability Interrupt types implement

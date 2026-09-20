@@ -721,8 +721,9 @@ Optional knobs: `WithReranker` (post-hydrate product scoring),
 `WithExpandRecipes` (named expand templates), `WithConfig` (candidate *k*, decay, limits).
 
 Integration tests that need real backends use Testcontainers (Postgres image
-under `brain/testdata`, Helix `enterprise-dev`). They skip under `-short`.
-Tests call `store.Setup` (embedding dim 3) instead of loading SQL files.
+under `brain/testdata`, Helix `enterprise-dev`). They skip when Docker is
+unavailable. Tests call `store.Setup` (embedding dim 3) instead of loading SQL
+files.
 
 ---
 

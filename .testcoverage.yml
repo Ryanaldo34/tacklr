@@ -13,7 +13,7 @@ threshold:
   # coverage tool. Floor 70% covers tools_brain/web without live backends.
   package: 70
   # Library total after excludes (cmd/, testkit, live helpers).
-  # Helixgraph is included: CI runs Testcontainers Helix (enterprise-dev) without -short.
+  # Helixgraph is included: CI runs Testcontainers Helix (enterprise-dev).
   total: 90
 
 # First matching override wins (specific packages first).
@@ -34,13 +34,13 @@ override:
     threshold: 90
   - path: github.com/ryanaldo34/tacklr/brain$
     threshold: 85
-  # Live Testcontainers Helix (CI pulls enterprise-dev; never -short in CI).
+  # Live Testcontainers Helix (CI pulls enterprise-dev).
   - path: github.com/ryanaldo34/tacklr/brain/helixgraph$
     threshold: 90
-  # Live Testcontainers Postgres (CI builds tacklr-pg-brain; never -short in CI).
+  # Live Testcontainers Postgres (CI builds tacklr-pg-brain).
   - path: github.com/ryanaldo34/tacklr/brain/postgres$
     threshold: 95
-  # VFS/S3 unit surface + fake API; integration (MinIO) is separate.
+  # VFS including MinIO/Azurite Testcontainers.
   - path: github.com/ryanaldo34/tacklr/vfs$
     threshold: 85
   - path: github.com/ryanaldo34/tacklr/vfsindex$
@@ -52,8 +52,9 @@ exclude:
   paths:
     - cmd/
     - internal/testkit
+    - internal/testdrive
+    - internal/testhttp
     - internal/durtest
-    - internal/temporallive
     - internal/livesess
     # Exporter constructors, not product outcomes.
     - telemetry/otel.go

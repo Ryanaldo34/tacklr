@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net/http"
 	"path"
 	"strings"
 	"sync"
 	"time"
 
 	"golang.org/x/oauth2"
+	"google.golang.org/api/option"
 )
 
 // ProviderGoogleDrive is the bind kind for Drive.
@@ -503,4 +505,24 @@ func (s *SessionAuth) HasBindings(sessionID string) bool {
 	defer s.mu.Unlock()
 	sess, ok := s.byID[sessionID]
 	return ok && len(sess.list) > 0
+}
+
+func googleAPIOptions(holder *TokenHolder, base string, httpClient *http.Client) ([]option.ClientOption, error) {
+	if holder == nil {
+		return nil, fmt.Errorf("vfs: token required")
+	}
+	var opts []option.ClientOption
+	if httpClient != nil {
+		hc := &http.Client{
+			Transport: &oauth2.Transport{Source: holder, Base: httpClient.Transport},
+			Timeout:   httpClient.Timeout,
+		}
+		opts = append(opts, option.WithHTTPClient(hc))
+	} else {
+		opts = append(opts, option.WithTokenSource(holder))
+	}
+	if base != "" {
+		opts = append(opts, option.WithEndpoint(base))
+	}
+	return opts, nil
 }

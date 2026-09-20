@@ -18,6 +18,8 @@ import (
 	"github.com/ryanaldo34/tacklr/mcp"
 )
 
+var errTransportNotSupported = errors.New("mcp transport not supported")
+
 // toolSession is the subset of MCP session methods used after connect.
 // Tests inject fakes for pagination, structured content, and close behavior.
 type toolSession interface {

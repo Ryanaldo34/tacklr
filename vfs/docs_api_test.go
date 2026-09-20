@@ -8,10 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"golang.org/x/oauth2"
 	"google.golang.org/api/docs/v1"
 	"google.golang.org/api/googleapi"
-	"google.golang.org/api/option"
 )
 
 func TestMapDocsError(t *testing.T) {
@@ -242,12 +240,10 @@ func TestGoogleDocs_httpGetBatchUpdate(t *testing.T) {
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
 	holder := NewTokenHolder(Credential{Token: "tok"})
-	hc := &http.Client{Transport: &oauth2.Transport{Source: holder, Base: ts.Client().Transport}}
-	svc, err := docs.NewService(ctx, option.WithHTTPClient(hc), option.WithEndpoint(ts.URL+"/"))
+	api, err := NewGoogleDocsHTTP(ctx, holder, ts.URL+"/", ts.Client())
 	if err != nil {
 		t.Fatal(err)
 	}
-	api := googleDocs{service: svc}
 	snap, err := api.Get(ctx, "doc1")
 	if err != nil || snap.DocumentID != "doc1" {
 		t.Fatalf("Get = %+v err=%v", snap, err)
@@ -267,7 +263,10 @@ func TestGoogleDocs_httpGetBatchUpdate(t *testing.T) {
 	if err != nil || res.RevisionID != "R1" || !sawWriteControl {
 		t.Fatalf("BatchUpdate = %+v saw=%v err=%v", res, sawWriteControl, err)
 	}
-	if _, err := newGoogleDocs(ctx, nil); err == nil {
+	if _, err := NewGoogleDocs(ctx, nil); err == nil {
 		t.Fatal("nil holder")
+	}
+	if _, err := NewGoogleDocsHTTP(ctx, nil, "", nil); err == nil {
+		t.Fatal("nil HTTP holder")
 	}
 }

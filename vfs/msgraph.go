@@ -12,8 +12,8 @@ import (
 	"time"
 )
 
-// GraphAPI is the OneDrive/SharePoint subset. Tests inject a fake; hosts
-// call NewGraph (no Microsoft SDK import).
+// GraphAPI is the OneDrive/SharePoint subset. Hosts call NewGraph
+// (no Microsoft SDK import). Tests pass an httptest base URL.
 type GraphAPI interface {
 	ResolveRoot(ctx context.Context, driveID, itemID, siteID, account string) (driveIDOut, itemIDOut string, err error)
 	GetItem(ctx context.Context, driveID, itemID string) (graphItem, error)

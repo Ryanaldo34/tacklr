@@ -12,6 +12,7 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/durable"
+	"github.com/ryanaldo34/tacklr/internal/testkit"
 )
 
 const wirePgImage = "tacklr-pg-brain:test"
@@ -26,9 +27,6 @@ var (
 // TestPostgresWireStore_putGetDelete is the real-Postgres outcome for protocol
 // wire envelopes (durable session/load storage separate from harness checkpoints).
 func TestPostgresWireStore_putGetDelete(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping postgres wire store integration in -short mode")
-	}
 	ctx := context.Background()
 	conn := wireConn(t)
 	ws := NewPostgresWireStore(conn, "")
@@ -86,14 +84,11 @@ func TestPostgresWireStore_putGetDelete(t *testing.T) {
 // TestPostgresWireStore_acpLoadAfterRestart: create via protocol, new protocol
 // with the same Postgres wire store, load + prompt succeed.
 func TestPostgresWireStore_acpLoadAfterRestart(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping postgres wire store integration in -short mode")
-	}
 	conn := wireConn(t)
 	wire := NewPostgresWireStore(conn, "acp")
 
-	strategy := &mockInferenceStrategy{
-		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+	strategy := &testkit.ScriptedModel{
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "ok", IsComplete: true}
 		},
 	}

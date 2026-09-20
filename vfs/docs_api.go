@@ -4,15 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 
 	"google.golang.org/api/docs/v1"
 	"google.golang.org/api/googleapi"
-	"google.golang.org/api/option"
 )
 
-// DocsAPI is the Docs subset used by the provider. Tests inject a fake.
+// DocsAPI is the Docs subset used by the provider.
 type DocsAPI interface {
 	Get(ctx context.Context, documentID string) (DocsSnapshot, error)
 	BatchUpdate(ctx context.Context, documentID string, req DocsBatch) (DocsBatchResult, error)
@@ -85,14 +85,20 @@ type googleDocs struct {
 
 // NewGoogleDocs builds a DocsAPI from a user token holder.
 func NewGoogleDocs(ctx context.Context, holder *TokenHolder) (DocsAPI, error) {
-	return newGoogleDocs(ctx, holder)
+	return newGoogleDocs(ctx, holder, "", nil)
 }
 
-func newGoogleDocs(ctx context.Context, holder *TokenHolder) (*googleDocs, error) {
-	if holder == nil {
+// NewGoogleDocsHTTP points the Docs SDK at base with httpClient (custom endpoint).
+func NewGoogleDocsHTTP(ctx context.Context, holder *TokenHolder, base string, httpClient *http.Client) (DocsAPI, error) {
+	return newGoogleDocs(ctx, holder, base, httpClient)
+}
+
+func newGoogleDocs(ctx context.Context, holder *TokenHolder, base string, httpClient *http.Client) (*googleDocs, error) {
+	opts, err := googleAPIOptions(holder, base, httpClient)
+	if err != nil {
 		return nil, fmt.Errorf("vfs: docs token required")
 	}
-	svc, err := docs.NewService(ctx, option.WithTokenSource(holder))
+	svc, err := docs.NewService(ctx, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("vfs: docs service: %w", err)
 	}

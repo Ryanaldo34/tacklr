@@ -7,10 +7,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"golang.org/x/oauth2"
-	"google.golang.org/api/option"
-	"google.golang.org/api/sheets/v4"
 )
 
 func TestGoogleSheets_httpGetBatchUpdate(t *testing.T) {
@@ -131,12 +127,10 @@ func TestGoogleSheets_httpGetBatchUpdate(t *testing.T) {
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
 	holder := NewTokenHolder(Credential{Token: "tok"})
-	hc := &http.Client{Transport: &oauth2.Transport{Source: holder, Base: ts.Client().Transport}}
-	svc, err := sheets.NewService(ctx, option.WithHTTPClient(hc), option.WithEndpoint(ts.URL+"/"))
+	api, err := NewGoogleSheetsHTTP(ctx, holder, ts.URL+"/", ts.Client())
 	if err != nil {
 		t.Fatal(err)
 	}
-	api := googleSheets{service: svc}
 
 	if _, err := api.Get(ctx, "missing"); err == nil {
 		t.Fatal("Get missing")
@@ -264,5 +258,8 @@ func TestGoogleSheets_httpGetBatchUpdate(t *testing.T) {
 	if !strings.Contains(valuesBody, "USER_ENTERED") || !strings.Contains(valuesBody, "99") ||
 		!strings.Contains(valuesBody, "Budget!B2") {
 		t.Fatalf("BatchUpdateValues body = %s", valuesBody)
+	}
+	if _, err := NewGoogleSheetsHTTP(ctx, nil, "", nil); err == nil {
+		t.Fatal("nil HTTP holder")
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/ryanaldo34/tacklr/durable"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/internal/testkit"
 )
 
 // ---------------------------------------------------------------------------
@@ -125,7 +126,7 @@ func acpRPCError(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
 // path once (success shapes + error strings). Integration HandleRPC tests exercise
 // the same code via the wire; this keeps parse-edge coverage without N micro-tests.
 func TestHandleRPC_sessionNew(t *testing.T) {
-	r := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	r := newTestRuntime(t, &testkit.ScriptedModel{}, durable.AgentSpec{})
 
 	rec := serveACPRaw(t, r, `{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp"}}`)
 
@@ -150,7 +151,7 @@ func TestHandleRPC_sessionNew(t *testing.T) {
 }
 
 func TestHandleRPC_sessionNew_stripsMCPSecretsFromWire(t *testing.T) {
-	r := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	r := newTestRuntime(t, &testkit.ScriptedModel{}, durable.AgentSpec{})
 	srv := newACPTestServer(t, r)
 	rec := srv.rpc(`{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/home/user","mcpServers":[{"name":"fs","command":"npx","env":[{"name":"API_KEY","value":"never-store"}]}]}}`)
 	sessionID, _ := acpRPCResult(t, rec)["sessionId"].(string)
@@ -167,7 +168,7 @@ func TestHandleRPC_sessionNew_stripsMCPSecretsFromWire(t *testing.T) {
 }
 
 func TestHandleRPC_sessionClose_thenLoadNotFound(t *testing.T) {
-	r := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	r := newTestRuntime(t, &testkit.ScriptedModel{}, durable.AgentSpec{})
 	srv := newACPTestServer(t, r)
 
 	rec1 := srv.rpc(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
@@ -188,8 +189,8 @@ func TestHandleRPC_sessionClose_thenLoadNotFound(t *testing.T) {
 func TestHandleRPC_sessionLoad_fromStoreAfterRestart(t *testing.T) {
 	wire := NewMemoryWireStore()
 
-	strategy := &mockInferenceStrategy{
-		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+	strategy := &testkit.ScriptedModel{
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "after-restart", IsComplete: true}
 		},
 	}
@@ -271,8 +272,9 @@ func TestHandleRPC_noAgentConfigured_onPrompt(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestHandleRPC_sessionPrompt_streamsEvents(t *testing.T) {
-	strategy := &mockInferenceStrategy{
-		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+	strategy := &testkit.ScriptedModel{
+		SupportsMIMEFn: tacklr.IsTextMIME,
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventReasoning, Content: "", IsComplete: false}
 			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventReasoning, Content: "thinking", IsComplete: false}
 			ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "", IsComplete: false}
@@ -342,10 +344,10 @@ func TestHandleRPC_sessionPrompt_toolTitleAndName(t *testing.T) {
 			return "ok:" + args.Title, nil
 		},
 	})
-	var strategy *mockInferenceStrategy
-	strategy = &mockInferenceStrategy{
-		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
-			if strategy.callNum.Load() > 1 {
+	var strategy *testkit.ScriptedModel
+	strategy = &testkit.ScriptedModel{
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			if strategy.CallNum.Load() > 1 {
 				ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "done", IsComplete: true}
 				return
 			}
@@ -406,12 +408,12 @@ func TestHandleRPC_sessionPrompt_toolTitleAndName(t *testing.T) {
 
 func TestHandleRPC_sessionPrompt_usesConfigAgent(t *testing.T) {
 	var customInvoked bool
-	r := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	r := newTestRuntime(t, &testkit.ScriptedModel{}, durable.AgentSpec{})
 	r.Catalog.Register("default", durable.AgentSpec{
 		Options: tacklr.AgentOptions{
 			Config: tacklr.Config{MaxWindowSize: 8192, SystemPrompt: "default-prompt"},
-			Model: &mockInferenceStrategy{
-				invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			Model: &testkit.ScriptedModel{
+				InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 					ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "from-default", IsComplete: true}
 				},
 			},
@@ -420,8 +422,8 @@ func TestHandleRPC_sessionPrompt_usesConfigAgent(t *testing.T) {
 	r.Catalog.Register("custom", durable.AgentSpec{
 		Options: tacklr.AgentOptions{
 			Config: tacklr.Config{MaxWindowSize: 8192, SystemPrompt: "custom-prompt"},
-			Model: &mockInferenceStrategy{
-				invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+			Model: &testkit.ScriptedModel{
+				InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 					customInvoked = true
 					ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "from-custom", IsComplete: true}
 				},
@@ -469,11 +471,11 @@ func TestHandleRPC_sessionPrompt_usesConfigAgent(t *testing.T) {
 
 func TestHandleRPC_sessionPrompt_acpContentBlocks(t *testing.T) {
 	var sawLink, sawImage, sawPDF bool
-	strategy := &mockInferenceStrategy{
-		supportsMIMEFn: func(mimeType string) bool {
+	strategy := &testkit.ScriptedModel{
+		SupportsMIMEFn: func(mimeType string) bool {
 			return tacklr.IsTextMIME(mimeType) || strings.HasPrefix(mimeType, "image/") || mimeType == "application/pdf"
 		},
-		invokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+		InvokeFn: func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
 			if n := len(msgs); n > 0 {
 				last := msgs[n-1]
 				if last != nil && strings.Contains(last.Content, "[Resource link] name=spec") {
@@ -552,7 +554,7 @@ func TestHandleRPC_sessionPrompt_acpContentBlocks(t *testing.T) {
 }
 
 func TestHandleRPC_sessionLoad_cwdMismatch(t *testing.T) {
-	r := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	r := newTestRuntime(t, &testkit.ScriptedModel{}, durable.AgentSpec{})
 	srv := newACPTestServer(t, r)
 	rec := srv.rpc(`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/proj"}}`)
 	sessionID := acpRPCResult(t, rec)["sessionId"].(string)

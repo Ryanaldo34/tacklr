@@ -159,17 +159,6 @@ func TestHeaderTransportPropagatesRoundTripError(t *testing.T) {
 	}
 }
 
-func TestBuildHTTPClientAlwaysWrapsTransport(t *testing.T) {
-	cfg := mcp.MCPConfig{Name: "plain"}
-	client := buildHTTPClient(cfg)
-	if client.Transport == nil {
-		t.Fatal("expected non-nil transport")
-	}
-	if _, ok := client.Transport.(*headerTransport); !ok {
-		t.Errorf("expected *headerTransport, got %T", client.Transport)
-	}
-}
-
 func TestBuildHTTPClientWrapsWithHeaders(t *testing.T) {
 	cfg := mcp.MCPConfig{Name: "plain", Headers: []mcp.HTTPHeader{{Name: "X-Foo", Value: "bar"}}}
 	client := buildHTTPClient(cfg)

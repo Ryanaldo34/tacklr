@@ -8,10 +8,11 @@ import (
 	"time"
 
 	"github.com/ryanaldo34/tacklr/durable"
+	"github.com/ryanaldo34/tacklr/internal/testkit"
 )
 
 func TestServeHTTP_respectsContextCancel(t *testing.T) {
-	r := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	r := newTestRuntime(t, &testkit.ScriptedModel{}, durable.AgentSpec{})
 	srv := NewServer(r.Runtime, r.Catalog, NewACPProtocol(nil)).AllowAnonymousNetwork()
 
 	ctx, cancel := context.WithCancel(context.Background())

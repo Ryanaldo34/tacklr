@@ -22,9 +22,6 @@ const (
 
 // TestMountSession_azureBlobAzurite exercises real Blob path I/O against Azurite (no mocks).
 func TestMountSession_azureBlobAzurite(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping Azurite integration test in -short mode")
-	}
 	ctx := t.Context()
 	client, container := startAzurite(ctx, t)
 

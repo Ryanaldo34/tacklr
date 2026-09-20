@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -14,7 +15,6 @@ import (
 
 	"google.golang.org/api/drive/v3"
 	"google.golang.org/api/googleapi"
-	"google.golang.org/api/option"
 )
 
 const (
@@ -36,7 +36,7 @@ type DriveMeta struct {
 	TargetMime string
 }
 
-// DriveAPI is the Drive subset used by the provider. Tests inject a fake.
+// DriveAPI is the Drive subset used by the provider. Hosts pass NewGoogleDrive.
 type DriveAPI interface {
 	GetMeta(ctx context.Context, fileID string) (DriveMeta, error)
 	GetMedia(ctx context.Context, fileID string) (io.ReadCloser, int64, error)
@@ -56,14 +56,20 @@ type googleDrive struct {
 // NewGoogleDrive builds a DriveAPI from a user token holder. Call from OpenVFS
 // when a drive bind arrives, then pass the result to Drive.
 func NewGoogleDrive(ctx context.Context, holder *TokenHolder) (DriveAPI, error) {
-	return newGoogleDrive(ctx, holder)
+	return newGoogleDrive(ctx, holder, "", nil)
 }
 
-func newGoogleDrive(ctx context.Context, holder *TokenHolder) (*googleDrive, error) {
-	if holder == nil {
+// NewGoogleDriveHTTP points the Drive SDK at base with httpClient (custom endpoint).
+func NewGoogleDriveHTTP(ctx context.Context, holder *TokenHolder, base string, httpClient *http.Client) (DriveAPI, error) {
+	return newGoogleDrive(ctx, holder, base, httpClient)
+}
+
+func newGoogleDrive(ctx context.Context, holder *TokenHolder, base string, httpClient *http.Client) (*googleDrive, error) {
+	opts, err := googleAPIOptions(holder, base, httpClient)
+	if err != nil {
 		return nil, fmt.Errorf("vfs: drive token required")
 	}
-	svc, err := drive.NewService(ctx, option.WithTokenSource(holder))
+	svc, err := drive.NewService(ctx, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("vfs: drive service: %w", err)
 	}
@@ -289,8 +295,8 @@ func mapDriveError(err error) error {
 	return err
 }
 
-// Drive opens a Google Drive folder. api is required (host-built SDK or a test
-// fake). folderId and writable come from this turn's Binding.
+// Drive opens a Google Drive folder. api is required (NewGoogleDrive).
+// folderId and writable come from this turn's Binding.
 func Drive(api DriveAPI) Open {
 	return DriveWith(api, nil, nil)
 }

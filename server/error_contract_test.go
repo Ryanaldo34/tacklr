@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/durable/inprocess"
+	"github.com/ryanaldo34/tacklr/internal/testkit"
 	tacklrsecurity "github.com/ryanaldo34/tacklr/security"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
@@ -40,28 +42,28 @@ func TestHandleInbound_errorContract(t *testing.T) {
 	}
 
 	t.Run("methodNotFound", func(t *testing.T) {
-		k := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+		k := newTestRuntime(t, &testkit.ScriptedModel{}, durable.AgentSpec{})
 		err := inboundWrittenError(t, NewACPProtocol(nil), ProtocolEnv{Runtime: k.Runtime, Catalog: k.Catalog},
 			`{"jsonrpc":"2.0","id":1,"method":"session/foo","params":{}}`)
 		assert(t, err, ErrMethodNotFound, jsonRPCCodeMethodNotFound, ErrMethodNotFound)
 	})
 
 	t.Run("invalidRequest", func(t *testing.T) {
-		k := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+		k := newTestRuntime(t, &testkit.ScriptedModel{}, durable.AgentSpec{})
 		err := inboundWrittenError(t, NewACPProtocol(nil), ProtocolEnv{Runtime: k.Runtime, Catalog: k.Catalog},
 			`{"jsonrpc":"2.0","id":1,"method":"session/load","params":{}}`)
 		assert(t, err, ErrInvalidRequest, jsonRPCCodeInvalidRequest, ErrInvalidRequest)
 	})
 
 	t.Run("sessionNotFound", func(t *testing.T) {
-		k := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+		k := newTestRuntime(t, &testkit.ScriptedModel{}, durable.AgentSpec{})
 		err := inboundWrittenError(t, NewACPProtocol(nil), ProtocolEnv{Runtime: k.Runtime, Catalog: k.Catalog},
 			`{"jsonrpc":"2.0","id":1,"method":"session/load","params":{"sessionId":"missing"}}`)
 		assert(t, err, ErrSessionNotFound, jsonRPCCodeApplication, ErrSessionNotFound)
 	})
 
 	t.Run("agentNotFound", func(t *testing.T) {
-		k := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+		k := newTestRuntime(t, &testkit.ScriptedModel{}, durable.AgentSpec{})
 		proto := NewACPProtocol(nil)
 		env := ProtocolEnv{Runtime: k.Runtime, Catalog: k.Catalog}
 		sid := acpSessionID(t, serveACPInbound(t, k, proto, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`))
@@ -71,7 +73,7 @@ func TestHandleInbound_errorContract(t *testing.T) {
 	})
 
 	t.Run("authenticationRequired", func(t *testing.T) {
-		k := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+		k := newTestRuntime(t, &testkit.ScriptedModel{}, durable.AgentSpec{})
 		proto := NewACPProtocolWithAuth(nil, []ACPAuthMethod{{ID: "login", Name: "Login", Scheme: "host"}}, false)
 		err := inboundWrittenError(t, proto, ProtocolEnv{Runtime: k.Runtime, Catalog: k.Catalog},
 			`{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
@@ -79,7 +81,7 @@ func TestHandleInbound_errorContract(t *testing.T) {
 	})
 
 	t.Run("authenticationFailed", func(t *testing.T) {
-		k := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+		k := newTestRuntime(t, &testkit.ScriptedModel{}, durable.AgentSpec{})
 		service := &tacklrsecurity.Service{
 			Authenticator: testAuthenticator(func(context.Context, tacklrsecurity.Attempt) (tacklrsecurity.Principal, error) {
 				return tacklrsecurity.Principal{}, tacklrsecurity.ErrAuthenticationFailed
@@ -109,7 +111,7 @@ func TestHandleInbound_errorContract(t *testing.T) {
 				return nil
 			}),
 		}
-		k := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+		k := newTestRuntime(t, &testkit.ScriptedModel{}, durable.AgentSpec{})
 		proto := NewACPProtocolWithAuth(nil, []ACPAuthMethod{{ID: "login", Name: "Login", Scheme: "host"}}, false)
 		aliceCtx := tacklrsecurity.Context{Principal: alice}
 		env := ProtocolEnv{Runtime: k.Runtime, Catalog: k.Catalog, Security: service, Conn: &Conn{Security: &aliceCtx}}
@@ -120,7 +122,7 @@ func TestHandleInbound_errorContract(t *testing.T) {
 	})
 
 	t.Run("cancelledContext", func(t *testing.T) {
-		k := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+		k := newTestRuntime(t, &testkit.ScriptedModel{}, durable.AgentSpec{})
 		w := &recordingMessageWriter{}
 		ctx, cancel := context.WithCancel(t.Context())
 		cancel()
@@ -143,7 +145,7 @@ func TestHandleInbound_errorContract(t *testing.T) {
 	})
 
 	t.Run("internalProviderFailure", func(t *testing.T) {
-		k := newTestRuntime(t, &mockInferenceStrategy{invokeErr: errors.New("provider down")}, durable.AgentSpec{})
+		k := newTestRuntime(t, &testkit.ScriptedModel{InvokeErr: errors.New("provider down")}, durable.AgentSpec{})
 		proto := NewACPProtocol(nil)
 		sid := acpSessionID(t, serveACPInbound(t, k, proto, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`))
 		w := &recordingMessageWriter{}
@@ -178,7 +180,7 @@ func TestHandleInbound_errorContract(t *testing.T) {
 }
 
 func TestHandleInbound_sessionWireOutcomes(t *testing.T) {
-	k := newTestRuntime(t, &mockInferenceStrategy{}, durable.AgentSpec{})
+	k := newTestRuntime(t, &testkit.ScriptedModel{}, durable.AgentSpec{})
 	proto := NewACPProtocol(nil)
 	env := ProtocolEnv{Runtime: k.Runtime, Catalog: k.Catalog}
 	sid := sessionIDFromInbound(t, proto, env, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
@@ -195,8 +197,15 @@ func TestHandleInbound_sessionWireOutcomes(t *testing.T) {
 	}
 	w := &recordingMessageWriter{}
 	if err := proto.HandleInbound(t.Context(), ProtocolEnv{Runtime: k.Runtime, Catalog: k.Catalog, Conn: &Conn{Writer: w}},
-		[]byte(`{"jsonrpc":"2.0","id":5,"method":"session/resume","params":{"sessionId":"`+sid+`","responses":{"intr-1":"{}"}}}`)); err == nil && len(w.Errors) == 0 {
-		// idle resume may complete or fail the turn; either is a session/resume outcome
+		[]byte(`{"jsonrpc":"2.0","id":5,"method":"session/resume","params":{"sessionId":"`+sid+`","responses":{"intr-1":"{}"}}}`)); err != nil {
+		t.Fatalf("session/resume: %v", err)
+	}
+	var frames strings.Builder
+	for _, f := range w.Frames {
+		frames.Write(f)
+	}
+	if !strings.Contains(frames.String(), "intr-1") {
+		t.Fatalf("idle resume should report unknown interrupt, frames=%s errors=%v", frames.String(), w.Errors)
 	}
 
 	authProto := NewACPProtocolWithAuth(nil, []ACPAuthMethod{{ID: "login", Name: "Login", Scheme: "host"}}, true)

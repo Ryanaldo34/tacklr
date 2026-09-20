@@ -179,7 +179,10 @@ func TestRegister_New_Clone(t *testing.T) {
 	if err := perm.Return([]byte(`{"optionId":"allow-once"}`)); err != nil {
 		t.Fatal(err)
 	}
-	cpPerm := interrupt.Clone(perm)
+	cpPerm, err := interrupt.Clone(perm)
+	if err != nil {
+		t.Fatal(err)
+	}
 	clonedPerm, ok := cpPerm.(*interrupt.ToolPermissionInterrupt)
 	if !ok || !clonedPerm.Allowed || clonedPerm.SelectedOptionID != "allow-once" || clonedPerm.SelectedKind != interrupt.PermissionAllowOnce {
 		t.Fatalf("clone lost permission resolution: %+v", cpPerm)
@@ -195,9 +198,9 @@ func TestRegister_New_Clone(t *testing.T) {
 	src := &interrupt.UserSelectionInterrupt{
 		Options: []interrupt.UserChoice{{Title: "A"}},
 	}
-	cp := interrupt.Clone(src)
-	if cp == nil {
-		t.Fatal("clone")
+	cp, err := interrupt.Clone(src)
+	if err != nil {
+		t.Fatal(err)
 	}
 	cloned, ok := cp.(*interrupt.UserSelectionInterrupt)
 	if !ok || len(cloned.Options) != 1 || cloned.Options[0].Title != "A" {
@@ -209,14 +212,23 @@ func TestRegister_New_Clone(t *testing.T) {
 		t.Fatal("clone should be independent")
 	}
 
-	if interrupt.Clone(nil) != nil {
-		t.Fatal("nil clone")
+	got, err := interrupt.Clone(nil)
+	if got != nil || err != nil {
+		t.Fatalf("nil clone: %v %v", got, err)
 	}
 
-	// Unregistered type name via fake interrupt.
 	fake := fakeInterrupt{name: "not_in_registry"}
-	if interrupt.Clone(fake) != nil {
+	if _, err := interrupt.Clone(fake); err == nil {
 		t.Fatal("clone unknown type")
+	}
+
+	interrupt.Register(func() interrupt.Interrupt { return marshalBoom{} })
+	if _, err := interrupt.Clone(marshalBoom{}); err == nil {
+		t.Fatal("clone marshal error")
+	}
+	interrupt.Register(func() interrupt.Interrupt { return unmarshalBoom{} })
+	if _, err := interrupt.Clone(unmarshalBoom{}); err == nil {
+		t.Fatal("clone unmarshal error")
 	}
 
 	// Double-register panics.
@@ -235,6 +247,26 @@ func (f fakeInterrupt) TypeName() string           { return f.name }
 func (f fakeInterrupt) Serialize() ([]byte, error) { return []byte(`{}`), nil }
 func (f fakeInterrupt) Return([]byte) error        { return nil }
 func (f fakeInterrupt) Error() string              { return f.name }
+
+type marshalBoom struct{}
+
+func (marshalBoom) TypeName() string           { return "marshal_boom" }
+func (marshalBoom) Serialize() ([]byte, error) { return []byte(`{}`), nil }
+func (marshalBoom) Return([]byte) error        { return nil }
+func (marshalBoom) Error() string              { return "marshal_boom" }
+func (marshalBoom) MarshalJSON() ([]byte, error) {
+	return nil, errors.New("marshal boom")
+}
+
+type unmarshalBoom struct{}
+
+func (unmarshalBoom) TypeName() string           { return "unmarshal_boom" }
+func (unmarshalBoom) Serialize() ([]byte, error) { return []byte(`{}`), nil }
+func (unmarshalBoom) Return([]byte) error        { return nil }
+func (unmarshalBoom) Error() string              { return "unmarshal_boom" }
+func (unmarshalBoom) MarshalJSON() ([]byte, error) {
+	return []byte(`"x"`), nil
+}
 
 func TestChildWaiting_typeNameAndError(t *testing.T) {
 	empty := &interrupt.ChildWaiting{}

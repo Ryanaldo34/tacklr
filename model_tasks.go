@@ -400,7 +400,8 @@ Relevant Context for Remaining Todos: Only information the next todos are likely
 		}
 	}
 
-	// Reuse window[0] pointer (original user). Cap 4: user, plan?, handoff, nudge?
+	// Keep window[0] (the original user message), then plan document, handoff,
+	// and a continue nudge when open todos remain.
 	out := make([]*Message, 0, 4)
 	out = append(out, window[0])
 	if planDoc != "" {
