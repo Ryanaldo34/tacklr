@@ -171,17 +171,18 @@ func documentJSON(snap vfs.DocsSnapshot) map[string]any {
 	}
 	var tabs []any
 	for _, tab := range snap.Tabs {
-		item := map[string]any{
-			"tabProperties": map[string]any{"tabId": tab.ID, "title": tab.Title, "index": tab.Index},
-			"documentTab": map[string]any{
-				"body": map[string]any{"content": spansJSON(snap.Body, tab.ID)},
-			},
+		docTab := map[string]any{
+			"body": map[string]any{"content": spansJSON(snap.Body, tab.ID)},
 		}
 		if lists := listsJSON(snap); lists != nil {
-			item["documentTab"].(map[string]any)["lists"] = lists
+			docTab["lists"] = lists
 		}
 		if objs := objectsJSON(snap.Body); objs != nil {
-			item["documentTab"].(map[string]any)["inlineObjects"] = objs
+			docTab["inlineObjects"] = objs
+		}
+		item := map[string]any{
+			"tabProperties": map[string]any{"tabId": tab.ID, "title": tab.Title, "index": tab.Index},
+			"documentTab":   docTab,
 		}
 		tabs = append(tabs, item)
 	}
@@ -452,14 +453,16 @@ func applyDocsBatch(s *vfs.DocsSnapshot, req vfs.DocsBatch) {
 				}
 			}
 			end := base + rows*cols*2
-			s.Body = append(s.Body, vfs.DocsSpan{
-				TabID: tab, StartIndex: idx, EndIndex: end,
-				Kind: "table", Cells: cells,
-			})
-			s.Body = append(s.Body, vfs.DocsSpan{
-				TabID: tab, StartIndex: end, EndIndex: end + 1,
-				Kind: "paragraph",
-			})
+			s.Body = append(s.Body,
+				vfs.DocsSpan{
+					TabID: tab, StartIndex: idx, EndIndex: end,
+					Kind: "table", Cells: cells,
+				},
+				vfs.DocsSpan{
+					TabID: tab, StartIndex: end, EndIndex: end + 1,
+					Kind: "paragraph",
+				},
+			)
 		}
 	}
 }

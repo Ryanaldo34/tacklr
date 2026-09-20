@@ -114,7 +114,6 @@ var (
 // TestPostgresStore_liveRetrievalChannels is the real-Postgres outcome for
 // scoped reads, ordered children, BM25 lexical, dense vector, and trigram search.
 func TestPostgresStore_liveRetrievalChannels(t *testing.T) {
-
 	ctx := context.Background()
 	pool := sharedPostgresPool(t)
 	mustExec(t, pool, `TRUNCATE objects, object_kinds CASCADE`)

@@ -198,9 +198,9 @@ func TestMountSession_s3MinIO(t *testing.T) {
 		t.Fatalf("SpecAt: %+v err=%v", spec, err)
 	}
 
-	putTyped(t, ctx, client, bucket, "runs/1/notes", "# title\n\nbody\n", "text/markdown; charset=utf-8")
-	putTyped(t, ctx, client, bucket, "runs/1/blob", "looks like utf8 text", "image/png")
-	putTyped(t, ctx, client, bucket, "runs/1/main.go", "package main\n", "application/octet-stream")
+	putTyped(ctx, t, client, bucket, "runs/1/notes", "# title\n\nbody\n", "text/markdown; charset=utf-8")
+	putTyped(ctx, t, client, bucket, "runs/1/blob", "looks like utf8 text", "image/png")
+	putTyped(ctx, t, client, bucket, "runs/1/main.go", "package main\n", "application/octet-stream")
 	st, err = ms.Stat(ctx, "/workspace/data/notes")
 	if err != nil || st.MediaType != "text/markdown" {
 		t.Fatalf("Stat MediaType=%q err=%v", st.MediaType, err)
@@ -304,7 +304,7 @@ func TestMountSession_s3MinIO(t *testing.T) {
 	}
 }
 
-func putTyped(t *testing.T, ctx context.Context, client *s3.Client, bucket, key, body, contentType string) {
+func putTyped(ctx context.Context, t *testing.T, client *s3.Client, bucket, key, body, contentType string) {
 	t.Helper()
 	_, err := client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:        aws.String(bucket),
