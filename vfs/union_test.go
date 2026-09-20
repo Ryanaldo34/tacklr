@@ -224,3 +224,29 @@ func TestMountSession_workAndSkills(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestUnion_providerRejectsWritesAndInvalidPaths(t *testing.T) {
+	ctx := t.Context()
+	p, err := vfs.Union(builtins.Local(t.TempDir()))(ctx, t.Name(), vfs.Binding{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Remove(ctx, "x"); !errors.Is(err, vfs.ErrReadOnly) {
+		t.Fatalf("Remove = %v", err)
+	}
+	if err := p.MkdirAll(ctx, "x", 0o755); !errors.Is(err, vfs.ErrReadOnly) {
+		t.Fatalf("MkdirAll = %v", err)
+	}
+	if _, err := p.OpenFile(ctx, "x", os.O_WRONLY, 0); !errors.Is(err, vfs.ErrReadOnly) {
+		t.Fatalf("OpenFile write = %v", err)
+	}
+	if _, err := p.Stat(ctx, ".."); err == nil {
+		t.Fatal("Stat invalid")
+	}
+	if _, err := p.OpenFile(ctx, "..", os.O_RDONLY, 0); err == nil {
+		t.Fatal("OpenFile invalid")
+	}
+	if _, err := p.ReadDir(ctx, ".."); err == nil {
+		t.Fatal("ReadDir invalid")
+	}
+}
