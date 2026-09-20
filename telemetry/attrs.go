@@ -49,11 +49,13 @@ const (
 
 	// OpenTelemetry GenAI semantic conventions (stable keys).
 	// https://opentelemetry.io/docs/specs/semconv/gen-ai/
-	AttrGenAIOperationName = "gen_ai.operation.name"
-	AttrGenAIProviderName  = "gen_ai.provider.name"
-	AttrGenAIRequestModel  = "gen_ai.request.model"
-	AttrGenAIInputTokens   = "gen_ai.usage.input_tokens"
-	AttrGenAIOutputTokens  = "gen_ai.usage.output_tokens"
+	AttrGenAIOperationName    = "gen_ai.operation.name"
+	AttrGenAIProviderName     = "gen_ai.provider.name"
+	AttrGenAIRequestModel     = "gen_ai.request.model"
+	AttrGenAIInputTokens      = "gen_ai.usage.input_tokens"
+	AttrGenAIOutputTokens     = "gen_ai.usage.output_tokens"
+	AttrGenAICachedTokens     = "gen_ai.usage.cached_tokens"
+	AttrGenAICacheWriteTokens = "gen_ai.usage.cache_write_tokens"
 )
 
 // Turn kind values for AttrTurnKind (closed enum).

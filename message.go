@@ -168,9 +168,11 @@ type LLMResponseChunk struct {
 
 	// Token usage when the provider reports it (typically on StreamEventComplete
 	// after response.completed). Zero means unknown / not reported.
-	InputTokens     int
-	OutputTokens    int
-	ReasoningTokens int
+	InputTokens      int
+	OutputTokens     int
+	ReasoningTokens  int
+	CachedTokens     int
+	CacheWriteTokens int
 
 	// EncryptedContent is Responses reasoning.encrypted_content. Provider parse
 	// only; copied onto Message so the next turn can replay the item statelessly.

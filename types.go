@@ -58,6 +58,21 @@ type InferenceStrategy interface {
 	SupportsMIME(mimeType string) bool
 }
 
+type toolChoiceNoneKey struct{}
+
+// ContextWithToolChoiceNone asks the provider to keep tool definitions on the
+// wire but not call them (Responses tool_choice=none). Handoff and compress
+// use this so the cached tools prefix matches a normal turn.
+func ContextWithToolChoiceNone(ctx context.Context) context.Context {
+	return context.WithValue(ctx, toolChoiceNoneKey{}, true)
+}
+
+// ToolChoiceNone reports whether ctx was wrapped with ContextWithToolChoiceNone.
+func ToolChoiceNone(ctx context.Context) bool {
+	v, _ := ctx.Value(toolChoiceNoneKey{}).(bool)
+	return v
+}
+
 // UnsupportedMIMEs returns mimes for which s.SupportsMIME is false (first-seen order).
 func UnsupportedMIMEs(s InferenceStrategy, mimes []string) []string {
 	if s == nil || len(mimes) == 0 {

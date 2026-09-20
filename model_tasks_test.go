@@ -122,7 +122,7 @@ func TestDefaultModelTasks_absorbFitCompressesOverMaxWindow(t *testing.T) {
 			return total, nil
 		},
 		InvokeFn: func(_ context.Context, msgs []*Message, tools []*Tool, ch chan<- LLMResponseChunk) {
-			if tools == nil {
+			if len(msgs) > 0 && msgs[len(msgs)-1] != nil && strings.Contains(msgs[len(msgs)-1].Content, "Summarize the entire message history") {
 				compressInvoked = true
 				ch <- LLMResponseChunk{Type: StreamEventMessage, Content: "summary", IsComplete: true}
 				return
@@ -244,7 +244,7 @@ func TestDefaultModelTasks_handoffUsesFallbackOnEmptyStream(t *testing.T) {
 
 func TestHandoffGenerate_rejectsEmptyWindow(t *testing.T) {
 	// Act
-	_, _, err := handoffGenerate(context.Background(), nil, nil, "", &scriptedModel{}, nil)
+	_, _, err := handoffGenerate(context.Background(), nil, nil, "", &scriptedModel{}, nil, "")
 
 	// Assert
 	if err == nil || !strings.Contains(err.Error(), "empty window") {

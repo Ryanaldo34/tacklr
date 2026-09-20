@@ -223,6 +223,12 @@ func (h *TurnManager) finishInit(ctx context.Context, specialists []*Specialist)
 		h.initVFSIndexBridge()
 	}
 	h.injectBuiltinTools()
+	if s, ok := h.model.(interface{ SetPromptCacheKey(string) }); ok && h.sessionId != "" {
+		s.SetPromptCacheKey(h.sessionId)
+	}
+	if s, ok := h.model.(interface{ SetSystemPrompt(string) }); ok {
+		s.SetSystemPrompt(h.constructSystemPrompt())
+	}
 	return nil
 }
 

@@ -130,7 +130,7 @@ func (t *defaultModelTasks) Absorb(ctx context.Context, msg *Message, tools []*T
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	window, chunks, compressed, discarded, summary, err := t.absorbFit(ctx, t.context.Messages(), msg, tools)
+	window, chunks, compressed, discarded, summary, err := t.absorbFit(ctx, t.context.Messages(), msg, tools, systemPrompt)
 	if err != nil {
 		return AbsorbResult{}, err
 	}
@@ -149,7 +149,7 @@ func (t *defaultModelTasks) Handoff(ctx context.Context, plan []Todo, planDoc st
 	}
 	ctx, span := telemetry.StartHandoffSpan(ctx, open)
 
-	window, usedFallback, err := handoffGenerate(ctx, t.context.Messages(), plan, planDoc, t.model, tools)
+	window, usedFallback, err := handoffGenerate(ctx, t.context.Messages(), plan, planDoc, t.model, tools, systemPrompt)
 	if err != nil {
 		span.End(telemetry.HandoffOutcomeError, err)
 		return err
@@ -170,6 +170,7 @@ func (t *defaultModelTasks) absorbFit(
 	window []*Message,
 	newMsg *Message,
 	tools []*Tool,
+	systemPrompt string,
 ) (out []*Message, chunks []LLMResponseChunk, compressed bool, discarded []*Message, summary string, err error) {
 	model := t.model
 	policy := t.policy
@@ -245,15 +246,21 @@ func (t *defaultModelTasks) absorbFit(
 		numMessagesToCompress = len(unprotected)
 	}
 
-	// Compress unprotected history only; no tools on the summarize call.
+	// Compress unprotected history. Keep tools and the live system prompt so
+	// the request prefix matches a normal turn; tool_choice=none prevents calls.
 	compressSrc := unprotected[:numMessagesToCompress]
 	t.modelSeq++
 	mctx := ctx
 	if src, ok := model.(modelIdentityProvider); ok {
 		mctx = telemetry.ContextWithModelIdentity(ctx, src.ModelTelemetryIdentity())
 	}
-	mctx, mspan := telemetry.StartModelSpan(mctx, telemetry.ModelPhaseCompress, t.modelSeq, windowShape(compressSrc))
-	events, err := model.Invoke(mctx, compressSrc, nil, sumPrompt.String())
+	task := &Message{Role: RoleDeveloper, Content: sumPrompt.String()}
+	invokeMsgs := make([]*Message, 0, len(anchors)+len(compressSrc)+1)
+	invokeMsgs = append(invokeMsgs, anchors...)
+	invokeMsgs = append(invokeMsgs, compressSrc...)
+	invokeMsgs = append(invokeMsgs, task)
+	mctx, mspan := telemetry.StartModelSpan(mctx, telemetry.ModelPhaseCompress, t.modelSeq, windowShape(invokeMsgs))
+	events, err := model.Invoke(ContextWithToolChoiceNone(mctx), invokeMsgs, tools, systemPrompt)
 	if err != nil {
 		mspan.End(err, telemetry.TokenUsage{})
 		return nil, nil, true, nil, "", fmt.Errorf("context compress invoke failed: %w", err)
@@ -314,6 +321,7 @@ func handoffGenerate(
 	planDoc string,
 	model InferenceStrategy,
 	tools []*Tool,
+	systemPrompt string,
 ) ([]*Message, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, false, err
@@ -351,14 +359,16 @@ Relevant Context for Remaining Todos: Only information the next todos are likely
 	prompt.WriteString(planB.String())
 	prompt.WriteString("</current_plan>")
 
-	// Handoff is a pure writing task — no tools. On model failure, install a
-	// plan-derived handoff so ACM still rebuilds context.
+	// Keep tools and the live system prompt so the cached prefix matches a
+	// normal turn. The handoff task is an extra developer message; tool_choice
+	// none prevents calls. On model failure, install a plan-derived handoff.
 	mctx := ctx
 	if src, ok := model.(modelIdentityProvider); ok {
 		mctx = telemetry.ContextWithModelIdentity(ctx, src.ModelTelemetryIdentity())
 	}
-	mctx, mspan := telemetry.StartModelSpan(mctx, telemetry.ModelPhaseHandoff, 0, windowShape(window))
-	events, err := model.Invoke(mctx, window, nil, prompt.String())
+	invokeWindow := append(slices.Clone(window), &Message{Role: RoleDeveloper, Content: prompt.String()})
+	mctx, mspan := telemetry.StartModelSpan(mctx, telemetry.ModelPhaseHandoff, 0, windowShape(invokeWindow))
+	events, err := model.Invoke(ContextWithToolChoiceNone(mctx), invokeWindow, tools, systemPrompt)
 	var lastCompletedMessage string
 	usedFallback := false
 	if err != nil {
@@ -436,6 +446,12 @@ func mergeTokenUsage(u *telemetry.TokenUsage, chunk LLMResponseChunk) {
 	}
 	if chunk.ReasoningTokens > 0 {
 		u.Reasoning = chunk.ReasoningTokens
+	}
+	if chunk.CachedTokens > 0 {
+		u.Cached = chunk.CachedTokens
+	}
+	if chunk.CacheWriteTokens > 0 {
+		u.CacheWrite = chunk.CacheWriteTokens
 	}
 }
 

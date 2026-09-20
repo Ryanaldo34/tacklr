@@ -3,6 +3,10 @@ package mcpruntime
 import (
 	"context"
 	"log/slog"
+	"slices"
+	"strings"
+
+	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/ryanaldo34/tacklr/mcp"
 )
@@ -54,6 +58,9 @@ func registerClientTools(ctx context.Context, c *client, namespace string, regis
 		return err
 	}
 	slog.Info("discovered MCP tools", "server", c.config.Name, "count", len(mcpTools))
+	slices.SortFunc(mcpTools, func(a, b *mcpsdk.Tool) int {
+		return strings.Compare(a.Name, b.Name)
+	})
 	for _, mcpTool := range mcpTools {
 		name := mcpTool.Name
 		description := mcpTool.Description

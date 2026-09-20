@@ -92,14 +92,13 @@ func TestInvoke_streamsMessageAndMapsDeveloperToSystem(t *testing.T) {
 	if sawBody["model"] != "test-model" {
 		t.Errorf("model = %v", sawBody["model"])
 	}
-	if sawBody["instructions"] != "sys instructions" {
-		t.Errorf("instructions = %v", sawBody["instructions"])
+	if _, ok := sawBody["instructions"]; ok {
+		t.Errorf("instructions must be omitted so the system prefix is the first input item")
 	}
 	if sawBody["stream"] != true {
 		t.Errorf("stream = %v, want true", sawBody["stream"])
 	}
 
-	// Developer messages must wire as system so Foundry treats handoff as instruction.
 	inputRaw, _ := json.Marshal(sawBody["input"])
 	var input []map[string]any
 	if err := json.Unmarshal(inputRaw, &input); err != nil {
@@ -111,8 +110,8 @@ func TestInvoke_streamsMessageAndMapsDeveloperToSystem(t *testing.T) {
 			roles = append(roles, role)
 		}
 	}
-	if len(roles) < 2 || roles[0] != "user" || roles[1] != "system" {
-		t.Fatalf("input roles = %v, want [user system] (developer→system)", roles)
+	if len(roles) < 3 || roles[0] != "developer" || roles[1] != "user" || roles[2] != "developer" {
+		t.Fatalf("input roles = %v, want [developer user developer]", roles)
 	}
 
 	toolsRaw, _ := json.Marshal(sawBody["tools"])
@@ -187,8 +186,12 @@ func TestCountTokens_usesAPIWhenAvailable(t *testing.T) {
 	if n != 42 {
 		t.Fatalf("tokens = %d, want 42", n)
 	}
-	if saw["instructions"] != "count me" {
-		t.Errorf("instructions = %v", saw["instructions"])
+	if _, ok := saw["instructions"]; ok {
+		t.Errorf("instructions must be omitted")
+	}
+	inRaw, _ := json.Marshal(saw["input"])
+	if !strings.Contains(string(inRaw), "count me") {
+		t.Errorf("system prefix missing from input: %s", inRaw)
 	}
 	toolsRaw, _ := json.Marshal(saw["tools"])
 	if !strings.Contains(string(toolsRaw), `"name":"t"`) {
@@ -429,5 +432,123 @@ func TestInvoke_transportErrorClosesStream(t *testing.T) {
 	}
 	if !sawErr {
 		t.Fatal("want StreamEventError")
+	}
+}
+
+func TestInvoke_promptCacheGrokCompat(t *testing.T) {
+	var saw map[string]any
+	var grokConv string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		grokConv = r.Header.Get("x-grok-conv-id")
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &saw)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, strings.Join([]string{
+			`data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":10,"output_tokens":1,"input_tokens_details":{"cached_tokens":8}}}}`,
+			`data: [DONE]`,
+			"",
+		}, "\n"))
+	}))
+	t.Cleanup(srv.Close)
+
+	s := NewOpenAIInferenceStrategy(srv.Client()).
+		WithApiKey("k").
+		WithModel("grok-4.6").
+		WithURL(srv.URL)
+	s.CacheKey = "sess-grok-1"
+	s.SetSystemPrompt("stable system")
+
+	ch, err := s.Invoke(context.Background(), []*tacklr.Message{
+		{Role: tacklr.RoleUser, Content: "ask"},
+		{Role: tacklr.RoleDeveloper, Content: "PROJECT PLAN\n────────────\nDo the work"},
+	}, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var usage tacklr.LLMResponseChunk
+	for c := range ch {
+		if c.Type == tacklr.StreamEventComplete {
+			usage = c
+		}
+		if c.Type == tacklr.StreamEventError {
+			t.Fatalf("stream: %s", c.Content)
+		}
+	}
+	if usage.CachedTokens != 8 {
+		t.Fatalf("cached = %d", usage.CachedTokens)
+	}
+	if grokConv != "sess-grok-1" {
+		t.Fatalf("x-grok-conv-id = %q", grokConv)
+	}
+	if saw["prompt_cache_key"] != "sess-grok-1" {
+		t.Fatalf("prompt_cache_key = %v", saw["prompt_cache_key"])
+	}
+	if _, ok := saw["prompt_cache_options"]; ok {
+		t.Fatalf("xAI must not receive prompt_cache_options: %v", saw["prompt_cache_options"])
+	}
+	inRaw, _ := json.Marshal(saw["input"])
+	if strings.Contains(string(inRaw), "prompt_cache_breakpoint") {
+		t.Fatalf("xAI must not receive breakpoints: %s", inRaw)
+	}
+}
+
+func TestInvoke_promptCacheGPT56BreakpointsAndToolChoiceNone(t *testing.T) {
+	var saw map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &saw)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, strings.Join([]string{
+			`data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":20,"output_tokens":2,"input_tokens_details":{"cached_tokens":12,"cache_write_tokens":8}}}}`,
+			`data: [DONE]`,
+			"",
+		}, "\n"))
+	}))
+	t.Cleanup(srv.Close)
+
+	s := NewOpenAIInferenceStrategy(srv.Client()).
+		WithApiKey("k").
+		WithModel("gpt-5.6").
+		WithURL(srv.URL)
+	s.CacheKey = "sess-oai-1"
+	tool := tacklr.NewTool(tacklr.ToolConfig{Name: "echo", Handler: func(context.Context) (string, error) { return "ok", nil }})
+
+	ctx := tacklr.ContextWithToolChoiceNone(context.Background())
+	ch, err := s.Invoke(ctx, []*tacklr.Message{
+		{Role: tacklr.RoleUser, Content: "ask"},
+		{Role: tacklr.RoleDeveloper, Content: "PROJECT PLAN\n────────────\nDo the work"},
+		{Role: tacklr.RoleAssistant, ToolCalls: []tacklr.ToolCall{
+			{ID: "call_1", CallID: "call_1", Name: "echo", Arguments: "{}"},
+		}},
+		{Role: tacklr.RoleTool, ToolCallID: "call_1", Content: "tool-out"},
+	}, []*tacklr.Tool{tool}, "stable system")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var usage tacklr.LLMResponseChunk
+	for c := range ch {
+		if c.Type == tacklr.StreamEventComplete {
+			usage = c
+		}
+		if c.Type == tacklr.StreamEventError {
+			t.Fatalf("stream: %s", c.Content)
+		}
+	}
+	if usage.CachedTokens != 12 || usage.CacheWriteTokens != 8 {
+		t.Fatalf("usage cached=%d write=%d", usage.CachedTokens, usage.CacheWriteTokens)
+	}
+	if saw["prompt_cache_key"] != "sess-oai-1" {
+		t.Fatalf("prompt_cache_key = %v", saw["prompt_cache_key"])
+	}
+	opts, _ := saw["prompt_cache_options"].(map[string]any)
+	if opts["mode"] != "implicit" || opts["ttl"] != "30m" {
+		t.Fatalf("prompt_cache_options = %v", saw["prompt_cache_options"])
+	}
+	if saw["tool_choice"] != "none" {
+		t.Fatalf("tool_choice = %v", saw["tool_choice"])
+	}
+	inRaw, _ := json.Marshal(saw["input"])
+	if strings.Count(string(inRaw), `"prompt_cache_breakpoint"`) < 3 {
+		t.Fatalf("want breakpoints on system, plan, last tool output: %s", inRaw)
 	}
 }

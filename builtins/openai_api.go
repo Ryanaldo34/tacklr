@@ -3,6 +3,7 @@ package builtins
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/ryanaldo34/tacklr"
@@ -140,23 +141,70 @@ func isMaxTokensSignal(lower string) bool {
 }
 
 type countTokensRequest struct {
-	Model        string          `json:"model"`
-	Input        json.RawMessage `json:"input"`
-	Instructions *string         `json:"instructions,omitempty"`
-	Tools        json.RawMessage `json:"tools,omitempty"`
+	Model string          `json:"model"`
+	Input json.RawMessage `json:"input"`
+	Tools json.RawMessage `json:"tools,omitempty"`
 }
 
 type responsesRequest struct {
-	Model        string           `json:"model"`
-	Input        json.RawMessage  `json:"input"`
-	Instructions *string          `json:"instructions,omitempty"`
-	Tools        json.RawMessage  `json:"tools,omitempty"`
-	Stream       bool             `json:"stream,omitempty"`
-	Reasoning    *reasoningDetail `json:"reasoning,omitempty"`
+	Model          string              `json:"model"`
+	Input          json.RawMessage     `json:"input"`
+	Tools          json.RawMessage     `json:"tools,omitempty"`
+	ToolChoice     string              `json:"tool_choice,omitempty"`
+	Stream         bool                `json:"stream,omitempty"`
+	Reasoning      *reasoningDetail    `json:"reasoning,omitempty"`
+	PromptCacheKey string              `json:"prompt_cache_key,omitempty"`
+	PromptCache    *promptCacheOptions `json:"prompt_cache_options,omitempty"`
 	// Include asks the provider for extra output fields. reasoning.encrypted_content
 	// is required to replay reasoning items statelessly (OpenAI ZDR / Azure store=false).
 	Include []string `json:"include,omitempty"`
 }
+
+// promptCacheOptions is GPT-5.6+ Responses cache policy. Not sent to xAI
+// (ModelRequest has no this field; extra properties can 400).
+type promptCacheOptions struct {
+	Mode string `json:"mode"`
+	TTL  string `json:"ttl,omitempty"`
+}
+
+type promptCacheBreakpoint struct {
+	Mode string `json:"mode"`
+}
+
+// promptCache shapes a Responses request for one model family before send.
+// GPT-5.6+ gets implicit options + content-block breakpoints. xAI/Grok gets
+// prompt_cache_key plus x-grok-conv-id and must not see GPT-5.6-only fields.
+type promptCache interface {
+	apply(*responsesRequest)
+	headers(http.Header)
+	breakpoints() bool
+}
+
+func newPromptCache(model, baseURL, key string) promptCache {
+	if strings.Contains(strings.ToLower(baseURL), "x.ai") || strings.HasPrefix(strings.ToLower(model), "grok") {
+		return grokCache{key: key}
+	}
+	return gptCache{key: key}
+}
+
+type grokCache struct{ key string }
+
+func (c grokCache) apply(req *responsesRequest) { req.PromptCacheKey = c.key }
+func (c grokCache) headers(h http.Header) {
+	if c.key != "" {
+		h.Set("x-grok-conv-id", c.key)
+	}
+}
+func (c grokCache) breakpoints() bool { return false }
+
+type gptCache struct{ key string }
+
+func (c gptCache) apply(req *responsesRequest) {
+	req.PromptCacheKey = c.key
+	req.PromptCache = &promptCacheOptions{Mode: "implicit", TTL: "30m"}
+}
+func (gptCache) headers(http.Header) {}
+func (gptCache) breakpoints() bool   { return true }
 
 // reasoningDetail is the Responses API reasoning config.
 // Azure OpenAI / Foundry and OpenAI stream shareable thought text via
@@ -180,8 +228,9 @@ type multiInputRequest struct {
 
 // Responses API content parts (array form of message content).
 type inputTextPart struct {
-	Type string `json:"type"` // input_text
-	Text string `json:"text"`
+	Type                  string                 `json:"type"` // input_text
+	Text                  string                 `json:"text"`
+	PromptCacheBreakpoint *promptCacheBreakpoint `json:"prompt_cache_breakpoint,omitempty"`
 }
 
 // inputImagePart: image_url is a string data/https URL (not a nested object).
@@ -212,7 +261,7 @@ type functionCallInputRequest struct {
 type functionCallOutputRequest struct {
 	Type   string `json:"type"`
 	CallID string `json:"call_id"`
-	Output string `json:"output"`
+	Output any    `json:"output"`
 	Status string `json:"status"`
 }
 

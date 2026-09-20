@@ -77,7 +77,7 @@ func TestMarshalMessagesToInput_multimodal(t *testing.T) {
 			},
 		},
 	}
-	items := marshalMessagesToInput(msgs)
+	items := marshalMessagesToInput(msgs, "", false)
 	if len(items) != 1 {
 		t.Fatalf("items=%d", len(items))
 	}
@@ -88,7 +88,7 @@ func TestMarshalMessagesToInput_multimodal(t *testing.T) {
 		}
 	}
 	// Text-only unchanged shape
-	plain := marshalMessagesToInput([]*tacklr.Message{{Role: tacklr.RoleUser, Content: "hi"}})
+	plain := marshalMessagesToInput([]*tacklr.Message{{Role: tacklr.RoleUser, Content: "hi"}}, "", false)
 	if !strings.Contains(string(plain[0]), `"content":"hi"`) {
 		t.Fatalf("plain = %s", plain[0])
 	}
