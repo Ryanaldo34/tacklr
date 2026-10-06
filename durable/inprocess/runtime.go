@@ -373,6 +373,7 @@ func (r *Runtime) Close(ctx context.Context, sessionID durable.SessionID) error 
 	}
 	p.mu.Lock()
 	already := p.closed
+	agentID := p.agentID
 	p.closed = true
 	p.inbox.Drop()
 	p.nextAgentID = ""
@@ -395,6 +396,7 @@ func (r *Runtime) Close(ctx context.Context, sessionID durable.SessionID) error 
 		}
 	case <-ctx.Done():
 	}
+	durable.DeleteSessionMessages(ctx, r.catalog, agentID, sessionID)
 	_ = r.snapshots.Delete(ctx, sessionID)
 	_ = r.events.CloseSession(ctx, sessionID)
 	r.mu.Lock()

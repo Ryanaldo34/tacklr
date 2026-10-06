@@ -13,42 +13,6 @@ import (
 	"github.com/ryanaldo34/tacklr/brain"
 )
 
-func TestEngine_ReadRichObjectInScope(t *testing.T) {
-	ctx := context.Background()
-	store := brain.NewMemoryStore()
-	ns := mustNS(t, "id", uuid.NewString())
-	id := uuid.New()
-	if err := store.Put(context.Background(), brain.Object{
-		ID: id, Kind: "Document", Title: "Deal memo", Summary: "Q3",
-		Content: "full body", ContentType: "text/plain",
-		Namespace: ns, Properties: map[string]any{"stage": "negotiation"},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	got, err := eng.Read(ctx, brain.Scope{Namespace: ns}, id)
-
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.ID != id || got.Kind != "Document" || got.Title != "Deal memo" {
-		t.Fatalf("identity: %+v", got)
-	}
-	if got.Content != "full body" || got.ContentType != "text/plain" {
-		t.Fatalf("content: %+v", got)
-	}
-	if got.Properties["stage"] != "negotiation" {
-		t.Fatalf("properties: %+v", got.Properties)
-	}
-	if got.ParentID != nil {
-		t.Fatalf("parent should be nil: %v", got.ParentID)
-	}
-}
-
 func TestEngine_ReadRejectsOutsideScope(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()

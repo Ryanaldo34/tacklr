@@ -272,12 +272,25 @@ func (r *Runtime) Close(ctx context.Context, sessionID durable.SessionID) error 
 	r.markClosed(sessionID)
 	_ = r.signal(ctx, sessionID, signalClose, nil)
 	for _, k := range kids {
+		deleteSessionMessages(ctx, r.catalog, r.snapshots, k)
 		_ = r.secrets.Delete(ctx, k)
 	}
+	deleteSessionMessages(ctx, r.catalog, r.snapshots, sessionID)
 	_ = r.secrets.Delete(ctx, sessionID)
 	_ = r.snapshots.Delete(ctx, sessionID)
 	_ = r.fallback.CloseSession(ctx, sessionID)
 	return nil
+}
+
+func deleteSessionMessages(ctx context.Context, cat durable.Catalog, snaps durable.SnapshotStore, id durable.SessionID) {
+	if snaps == nil {
+		return
+	}
+	snap, _, err := snaps.Load(ctx, id)
+	if err != nil {
+		return
+	}
+	durable.DeleteSessionMessages(ctx, cat, snap.AgentID, id)
 }
 
 type sub struct {

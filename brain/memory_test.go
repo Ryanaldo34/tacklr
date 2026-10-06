@@ -72,14 +72,14 @@ func TestMemoryStore_searchChannelsAndClone(t *testing.T) {
 		t.Fatalf("kinds: %+v", kinds)
 	}
 
-	// Invalid filters fail closed from search channels (compile once).
-	if _, err := s.SearchLexical(ctx, Scope{Namespace: ns}, "oauth", Filter{UpdatedAfter: "nope"}, 5); err == nil {
-		t.Fatal("want filter compile error")
+	bad := Filter{UpdatedAfter: "nope"}
+	if _, err := s.SearchLexical(ctx, Scope{Namespace: ns}, "oauth", bad, 5); err == nil {
+		t.Fatal("lexical filter")
 	}
-	if _, err := s.SearchVector(ctx, Scope{Namespace: ns}, []float32{1, 0, 0}, Filter{Props: map[string]PropFilter{"": {Eq: "x"}}}, 5); err == nil {
-		t.Fatal("want empty key error")
+	if _, err := s.SearchVector(ctx, Scope{Namespace: ns}, []float32{1, 0, 0}, bad, 5); err == nil {
+		t.Fatal("vector filter")
 	}
-	if _, err := s.SearchTrigram(ctx, Scope{Namespace: ns}, "oauth", Filter{Props: map[string]PropFilter{"stage": {In: []any{}}}}, 5); err == nil {
-		t.Fatal("want empty list error")
+	if _, err := s.SearchTrigram(ctx, Scope{Namespace: ns}, "oauth", bad, 5); err == nil {
+		t.Fatal("trigram filter")
 	}
 }

@@ -7,6 +7,8 @@ import (
 )
 
 // ObjectReader is the read port for knowledge objects.
+// When Scope.SessionID is set, Get and GetMany also return a session_messages
+// row for that session if the id is not an object.
 type ObjectReader interface {
 	Get(ctx context.Context, scope Scope, id uuid.UUID) (Object, error)
 	// GetMany returns objects for ids in the same order. Missing/out-of-scope ids are omitted.
@@ -28,12 +30,15 @@ type KindWriter interface {
 	PutKind(ctx context.Context, k ObjectKind) error
 }
 
-// ObjectWriter persists knowledge objects (Engine.Put / SoftDelete).
+// ObjectWriter persists knowledge objects (Engine.Put / SoftDelete) and
+// session messages (Engine.SaveSessionMessages / DeleteSessionMessages).
 // MemoryStore and postgres.Store implement it. Custom backends implement
 // ObjectWriter for other deployments. Not required for read-only engines.
 type ObjectWriter interface {
 	Put(ctx context.Context, obj Object) error
 	SoftDelete(ctx context.Context, scope Scope, id uuid.UUID) error
+	SaveSessionMessages(ctx context.Context, host Namespace, sessionID, generationKey string, messages []SessionMessage) (int, error)
+	DeleteSessionMessages(ctx context.Context, sessionID string) error
 }
 
 // ObjectLister lists first-class objects by kind and looks up a property value
@@ -46,8 +51,10 @@ type ObjectLister interface {
 
 // PartSearcher is corpus retrieval over the store: parts only (parent_id set).
 // Query text matches part title, summary, and content. Filters apply to the
-// part row. Engine.Search promotes hits to the parent. Entity search over
-// parent records is GraphObjectSearcher (FindObjects), not this port.
+// part row. When Scope.SessionID is set, the same call also ranks that
+// session's rows in session_messages and fuses the two lists. Engine.Search
+// promotes hits to the parent. Entity search over parent records is
+// GraphObjectSearcher (FindObjects), not this port.
 type PartSearcher interface {
 	SearchLexical(ctx context.Context, scope Scope, query string, filters Filter, k int) ([]ScoredID, error)
 	SearchVector(ctx context.Context, scope Scope, embedding []float32, filters Filter, k int) ([]ScoredID, error)

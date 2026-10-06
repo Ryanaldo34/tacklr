@@ -1,6 +1,7 @@
 package durable
 
 import (
+	"context"
 	"fmt"
 	"maps"
 	"slices"
@@ -35,6 +36,19 @@ type Catalog interface {
 	Lookup(agentID string) (AgentSpec, bool)
 	DefaultID() string
 	IDs() []string
+}
+
+// DeleteSessionMessages removes this session's saved messages from the agent brain.
+// A missing agent or a nil brain is a no-op.
+func DeleteSessionMessages(ctx context.Context, cat Catalog, agentID string, sessionID SessionID) {
+	if cat == nil || strings.TrimSpace(agentID) == "" || sessionID == "" {
+		return
+	}
+	spec, ok := cat.Lookup(agentID)
+	if !ok || spec.Options.Brain == nil {
+		return
+	}
+	_ = spec.Options.Brain.DeleteSessionMessages(ctx, string(sessionID))
 }
 
 // MemoryCatalog is an in-process Catalog.

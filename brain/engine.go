@@ -236,6 +236,7 @@ func (e *Engine) Catalog() *KindCatalog {
 }
 
 // Read returns the full rich object for id under scope.
+// The store returns a session_messages row when SessionID is set and the id is not an object.
 func (e *Engine) Read(ctx context.Context, scope Scope, id uuid.UUID) (RichObject, error) {
 	if id == uuid.Nil {
 		return RichObject{}, fmt.Errorf("%w: object id is required", ErrInvalid)
@@ -368,6 +369,7 @@ func (e *Engine) objectLister() (ObjectLister, error) {
 }
 
 // Get returns the stored object (including Content) under scope.
+// The store returns a session_messages row when SessionID is set and the id is not an object.
 func (e *Engine) Get(ctx context.Context, scope Scope, id uuid.UUID) (Object, error) {
 	if id == uuid.Nil {
 		return Object{}, fmt.Errorf("%w: object id is required", ErrInvalid)

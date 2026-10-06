@@ -254,7 +254,7 @@ func (a *TurnManager) injectBuiltinTools() {
 		if br != nil {
 			idx = br.Indexer
 		}
-		a.tools = append(a.tools, newBrainTools(a.brain, a.session.Search, a.brainWriteKinds, brainToolDeps{
+		a.tools = append(a.tools, newBrainTools(a.brain, a.session.Search, a.sessionId, a.brainWriteKinds, brainToolDeps{
 			VFS:     a.session.VFS,
 			Indexer: idx,
 		})...)

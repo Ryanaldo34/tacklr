@@ -2,8 +2,11 @@ package tacklr
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"maps"
 	"slices"
@@ -188,7 +191,7 @@ If an active to-do is sufficiently large and parallel work would improve efficie
 	b.WriteString("<context>\n")
 	b.WriteString(`As work proceeds, earlier messages may be summarized. The original request and the plan remain. If a detail you need is no longer in view, look it up rather than guessing or reconstructing it. Do not stop work early because the conversation is long.`)
 	if a.brain != nil {
-		b.WriteString(` Findings that should survive later steps belong in the knowledge store as durable facts. When starting a new plan, search the knowledge store for material related to the task. After a handoff, search it again for durable facts saved during earlier work.`)
+		b.WriteString(` Findings that should survive later steps belong in the knowledge store as durable facts. When starting a new plan, search the knowledge store for material related to the task. After a handoff, search it again for durable facts saved during earlier work. A search returns knowledge saved for this agent and earlier messages from this session. Knowledge saved for later sessions uses the namespace configured for the agent.`)
 	}
 	b.WriteString("\n</context>\n")
 	if len(a.skillByName) > 0 {
@@ -269,17 +272,81 @@ func (a *TurnManager) applyBatchToolResultEffect(ctx context.Context, effect Too
 		span.End(err)
 		return err
 	}
-	todos := a.session.Plan.Get()
-	doc := a.session.Plan.Document()
-	err := a.tasks.Handoff(ctx, todos, doc, a.tools, a.constructSystemPrompt())
-	if err != nil {
+	if err := a.saveSessionMessages(ctx); err != nil {
 		return err
 	}
-	a.retainCollapse(ctx, collapseEvent{
-		Trigger: triggerHandoff,
-		Body:    handoffBodyFromWindow(a.context.Messages()),
-	})
+	todos := a.session.Plan.Get()
+	doc := a.session.Plan.Document()
+	return a.tasks.Handoff(ctx, todos, doc, a.tools, a.constructSystemPrompt())
+}
+
+// saveSessionMessages stores the live window before a plan handoff replaces it.
+// A nil brain or empty session id skips the save. A store error stops the handoff.
+func (a *TurnManager) saveSessionMessages(ctx context.Context) error {
+	if a == nil || a.brain == nil || strings.TrimSpace(a.sessionId) == "" {
+		return nil
+	}
+	window := a.context.Messages()
+	if len(window) == 0 {
+		return fmt.Errorf("save session messages: empty window")
+	}
+	if err := ValidateMessages(window); err != nil {
+		return fmt.Errorf("save session messages: %w", err)
+	}
+	msgs := make([]brain.SessionMessage, 0, len(window))
+	hash := sha256.New()
+	for _, m := range window {
+		raw, err := json.Marshal(m)
+		if err != nil {
+			return fmt.Errorf("save session messages: %w", err)
+		}
+		_, _ = hash.Write(raw)
+		_, _ = hash.Write([]byte{0})
+		msgs = append(msgs, brain.SessionMessage{
+			Role:       string(m.Role),
+			Body:       raw,
+			SearchText: messageSearchText(m),
+		})
+	}
+	host, _ := a.session.Search.Namespace()
+	if _, err := a.brain.SaveSessionMessages(ctx, host, a.sessionId, hex.EncodeToString(hash.Sum(nil)), msgs); err != nil {
+		return fmt.Errorf("save session messages: %w", err)
+	}
 	return nil
+}
+
+func messageSearchText(m *Message) string {
+	if m == nil {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(string(m.Role))
+	b.WriteByte('\n')
+	if m.Content != "" {
+		b.WriteString(m.Content)
+		b.WriteByte('\n')
+	}
+	for _, p := range m.ContentParts {
+		if p.Type != ContentTypeOutputText && p.Type != ContentTypeInputText {
+			continue
+		}
+		if p.Text == "" {
+			continue
+		}
+		b.WriteString(p.Text)
+		b.WriteByte('\n')
+	}
+	for _, tc := range m.ToolCalls {
+		if tc.Name != "" {
+			b.WriteString(tc.Name)
+			b.WriteByte('\n')
+		}
+		if tc.Arguments != "" {
+			b.WriteString(tc.Arguments)
+			b.WriteByte('\n')
+		}
+	}
+	return b.String()
 }
 
 func (a *TurnManager) findTool(name, namespace string) *Tool {
@@ -482,7 +549,6 @@ const (
 	KindEpisode      = "Episode"
 	KindEpisodeChunk = "EpisodeChunk"
 
-	triggerHandoff    = "handoff"
 	triggerCompress   = "compress"
 	triggerSpecialist = "specialist"
 	maxDiscardedMsgs  = 20
@@ -660,12 +726,4 @@ func splitEpisodeBody(body string) []episodeChunk {
 		return []episodeChunk{{title: "episode", body: body}}
 	}
 	return out
-}
-
-func handoffBodyFromWindow(window []*Message) string {
-	start := protectedPrefixLen(window)
-	if start >= len(window) || window[start] == nil {
-		return ""
-	}
-	return window[start].Content
 }

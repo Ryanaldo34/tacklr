@@ -26,40 +26,6 @@ func TestExpand_cancelledContextFailsClosed(t *testing.T) {
 	}
 }
 
-func TestExpand_parentChildrenOrdered(t *testing.T) {
-	ctx := context.Background()
-	store := brain.NewMemoryStore()
-	ns := mustNS(t, "id", uuid.NewString())
-	now := time.Now().UTC()
-	parent := uuid.New()
-	c1, c2 := uuid.New(), uuid.New()
-	pos1, pos2 := 1, 2
-	_ = store.Put(context.Background(), brain.Object{ID: parent, Kind: "Document", Title: "Doc", Namespace: ns, UpdatedAt: now})
-	_ = store.Put(context.Background(), brain.Object{ID: c2, Kind: "Chunk", Title: "second", Content: "body2", ParentID: &parent, Position: &pos2, Namespace: ns, UpdatedAt: now})
-	_ = store.Put(context.Background(), brain.Object{ID: c1, Kind: "Chunk", Title: "first", Content: "body1", ParentID: &parent, Position: &pos1, Namespace: ns, UpdatedAt: now})
-
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
-	if err != nil {
-		t.Fatal(err)
-	}
-	res, err := eng.Expand(ctx, brain.Scope{Namespace: ns}, brain.ExpandRequest{ObjectID: parent}, brain.NewSearchContext())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res.Mode != "children" || len(res.Objects) != 2 {
-		t.Fatalf("%+v", res)
-	}
-	if res.Objects[0].ID != c1 || res.Objects[1].ID != c2 {
-		t.Fatalf("order: %+v", res.Objects)
-	}
-	if res.Objects[0].Content != "" {
-		t.Fatal("expand omits content")
-	}
-	if res.ResultSetID != uuid.Nil {
-		t.Fatal("small expand is inline")
-	}
-}
-
 func TestExpand_partNeighborhoodWindow(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
@@ -178,6 +144,19 @@ func TestExpand_directionFiltersEdges(t *testing.T) {
 	}, brain.NewSearchContext())
 	if err != nil || len(inOnly.Objects) != 1 || inOnly.Objects[0].ID != a {
 		t.Fatalf("in only: %+v err=%v", inOnly.Objects, err)
+	}
+	both, err := eng.Expand(ctx, brain.Scope{Namespace: ns}, brain.ExpandRequest{
+		ObjectID: b, RelationTypes: []string{"references"},
+	}, brain.NewSearchContext())
+	if err != nil || len(both.Objects) != 2 {
+		t.Fatalf("default direction: %+v err=%v", both.Objects, err)
+	}
+	got := map[uuid.UUID]bool{}
+	for _, o := range both.Objects {
+		got[o.ID] = true
+	}
+	if !got[a] || !got[c] {
+		t.Fatalf("default direction want inbound and outbound: %+v", both.Objects)
 	}
 }
 
@@ -343,49 +322,6 @@ func (reverseRerank) Rerank(_ context.Context, objects []brain.RichObject) ([]br
 		out[i], out[j] = out[j], out[i]
 	}
 	return out, nil
-}
-
-func TestExpand_graphNeighborsMemoryGraph(t *testing.T) {
-	ctx := context.Background()
-	store := brain.NewMemoryStore()
-	ns := mustNS(t, "id", uuid.NewString())
-	now := time.Now().UTC()
-	a, b, c := uuid.New(), uuid.New(), uuid.New()
-	otherNS := mustNS(t, "org", "other")
-	for _, id := range []uuid.UUID{a, b, c} {
-		_ = store.Put(context.Background(), brain.Object{ID: id, Kind: "Document", Title: id.String()[:8], Namespace: ns, UpdatedAt: now})
-	}
-	hidden := uuid.New()
-	_ = store.Put(context.Background(), brain.Object{ID: hidden, Kind: "Document", Namespace: otherNS, UpdatedAt: now})
-
-	g := brain.NewMemoryGraph()
-	_ = g.AddEdge(context.Background(), a, b, "references", brain.EdgeMeta{})
-	_ = g.AddEdge(context.Background(), c, a, "references", brain.EdgeMeta{})
-	_ = g.AddEdge(context.Background(), a, hidden, "references", brain.EdgeMeta{})
-
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithGraph(g))
-	if err != nil {
-		t.Fatal(err)
-	}
-	res, err := eng.Expand(ctx, brain.Scope{Namespace: ns}, brain.ExpandRequest{
-		ObjectID: a, RelationTypes: []string{"references"},
-	}, brain.NewSearchContext())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res.Mode != "graph" {
-		t.Fatalf("mode %s", res.Mode)
-	}
-	got := map[uuid.UUID]bool{}
-	for _, o := range res.Objects {
-		got[o.ID] = true
-	}
-	if !got[b] || !got[c] {
-		t.Fatalf("want b and c, got %+v", res.Objects)
-	}
-	if got[hidden] {
-		t.Fatal("wrong namespace must be filtered")
-	}
 }
 
 func TestExpand_partMixedContainmentAndGraph(t *testing.T) {

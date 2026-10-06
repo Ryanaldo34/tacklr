@@ -76,7 +76,7 @@ func (e *Engine) Continue(ctx context.Context, scope Scope, resultSetID uuid.UUI
 		return page, err
 	}
 	if !set.Namespace.Empty() {
-		scope = Scope{Namespace: set.Namespace}
+		scope.Namespace = set.Namespace
 	}
 	start, end := sliceBounds(set.Offset, limit, len(set.ObjectIDs))
 	objs, err := e.hydrateIDs(ctx, scope, set.ObjectIDs[start:end])
@@ -154,13 +154,16 @@ func (e *Engine) hybridCandidates(ctx context.Context, scope Scope, req SearchRe
 	}
 	query := strings.TrimSpace(req.Query)
 	k := e.cfg.CandidateK
+	scope.SessionID = sessionSearchID(scope, req.Filters)
 	lex, err := e.store.SearchLexical(ctx, scope, query, filters, k)
 	if err != nil {
 		return nil, err
 	}
 	lists := [][]ScoredID{lex}
+	var emb []float32
 	if e.embedder != nil {
-		emb, embErr := e.embedder.Embed(ctx, query)
+		var embErr error
+		emb, embErr = e.embedder.Embed(ctx, query)
 		if embErr != nil {
 			if !e.cfg.allowEmbedderDegrade() {
 				return nil, fmt.Errorf("brain: embed query: %w", embErr)
@@ -204,6 +207,7 @@ func (e *Engine) exactCandidates(ctx context.Context, scope Scope, req SearchReq
 	}
 
 	k := e.cfg.CandidateK
+	scope.SessionID = sessionSearchID(scope, req.Filters)
 	lex, err := e.store.SearchLexical(ctx, scope, query, filters, k)
 	if err != nil {
 		return nil, err
@@ -212,7 +216,6 @@ func (e *Engine) exactCandidates(ctx context.Context, scope Scope, req SearchReq
 	if err != nil {
 		return nil, err
 	}
-
 	fused := rrfFuse([][]ScoredID{lex, tri}, e.cfg.RRFk)
 	q := strings.ToLower(query)
 	// Prefer exact title matches (boost), then remaining fused candidates.

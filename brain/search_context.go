@@ -20,7 +20,7 @@ type SearchContext struct {
 	current   *ResultSet
 }
 
-// searchContextExport is the checkpoint envelope (namespace + optional result set).
+// searchContextExport is the harness checkpoint envelope (namespace + optional result set).
 type searchContextExport struct {
 	Namespace Namespace  `json:"namespace,omitempty"`
 	ResultSet *ResultSet `json:"result_set,omitempty"`
@@ -97,7 +97,7 @@ func cloneResultSet(set ResultSet) ResultSet {
 	return cp
 }
 
-// Export serializes namespace + active ResultSet for session checkpoints.
+// Export serializes namespace + active ResultSet into the harness checkpoint.
 func (c *SearchContext) Export() ([]byte, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

@@ -13,7 +13,9 @@ Tacklr’s session API is `durable.Runtime`. A `server.Protocol` maps wire frame
 | **Child** | Nested session job. Agent tools `list_children` / `cancel_child` |
 | **Park** | Session idle waiting for `Resume`. Parent-facing `Status` stays `running`; `Waiting` is true until the interrupt is resolved. Parent park does not stop children |
 | **Cancel** | Abort the in-flight turn and stop child sessions (`Runtime.Cancel`, original Prompt/Resume context cancel, client stop). The parent session stays open for a later Prompt |
-| **Close** | Destroy the session and recursively stop children |
+| **Checkpoint** | Live harness state inside the snapshot: the current context window, plan, and parked interrupts. `SessionCheckpoint`. Overwritten on each save |
+| **Session messages** | Earlier context windows saved in the brain before a plan handoff, searchable for this session only. Not the checkpoint. Deleted on Close |
+| **Close** | Destroy the session, stop children, and delete its session messages |
 | **Turn locality** | Optional: keep a turn’s Temporal activities on one process (`Config.TurnLocality`) so VFS stays put |
 
 The host API is `durable.Runtime` (`inprocess.New` or `temporal.New`). Tests use the same API. `TurnManager` is not a host type.
@@ -114,7 +116,7 @@ Child HITL does not change parent-facing `Status.State` from `running`. `Waiting
 |-------|----------|
 | Parent parks (HITL on the parent) | Keep running. Child Prompt uses the session kids context, not the parent turn |
 | `Runtime.Cancel`, original Prompt/Resume context cancel, client stop | Stop all children, then abort the parent turn. The parent session stays open for a later Prompt |
-| `Runtime.Close` | Recursively stop and destroy children |
+| `Runtime.Close` | Recursively stop and destroy children. Deletes that session's messages from the brain |
 
 A later `Prompt` on a session that was cancelled does not resurrect killed children.
 
@@ -202,7 +204,9 @@ Three stores. Do not add a fourth. Do not copy a field from one into another exc
 
 In-process leftover tools stay in the checkpoint (one harness, one batch). Temporal leftover tools stay on the workflow (`rest`) because later calls in the batch have not run yet. Conversation is always SnapshotStore.
 
-`Close` deletes the snapshot and the secret bag. A new session id does not load a previous snapshot. `Save` takes the `Revision` from the last `Load` (zero on first write) so two workers cannot overwrite each other.
+`Close` deletes the snapshot, the secret bag, and that session's messages from the brain. A new session id does not load a previous snapshot. `Save` takes the `Revision` from the last `Load` (zero on first write) so two workers cannot overwrite each other.
+
+Session messages live in the brain table `session_messages`, not in SnapshotStore. A plan handoff writes the exact context window there so this session can search it later. They are not the checkpoint.
 
 ## Map to Azure / Lambda (later)
 

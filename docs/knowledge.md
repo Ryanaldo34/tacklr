@@ -48,11 +48,25 @@ graph-aware when a graph is attached, and scoped to a namespace. The agent
 queries when it needs a fact; the harness does not dump a static result list
 into every prompt.
 
-Context handoff and compress may write **Episode** objects (session residue:
-the handoff text, compress summary, and capped discarded messages). Those are
-not product kinds (Fact, Memory, Discovery). Hosts with a non-empty catalog
-should register `EpisodeKinds()` alongside `vfsindex.MountIndexKinds()`.
-A failed Episode write does not block the window rebuild.
+A plan handoff saves the exact context window as **session messages** in
+`session_messages` before the window is replaced. Each row's namespace is the
+host `SearchNamespace` with the session id appended as the last attribute
+(`session`). `search` and `find_exact` return those messages together with
+knowledge rows under the host namespace. Another session's tail is a different
+namespace, so its messages are not in the page. `save_fact`, `save_memory`, and
+`save_discovery` do not append the session attribute. Closing the session
+deletes its session messages.
+
+Session messages are not the harness checkpoint. The checkpoint
+(`SessionCheckpoint`) is the live window the runtime saves and restores.
+Session messages are earlier windows kept for search.
+
+Compress and a specialist result may still write **Episode** objects (a summary
+and capped discarded text) into the knowledge store. Those are not product kinds
+(Fact, Memory, Discovery). Hosts with a non-empty catalog should register
+`EpisodeKinds()` alongside `vfsindex.MountIndexKinds()`. A failed Episode write
+does not block the window rebuild. A failed session-message save does stop the
+handoff, and the live window stays.
 
 ---
 

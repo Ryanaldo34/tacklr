@@ -236,7 +236,9 @@ func (a *TurnManager) runToolCall(ctx context.Context, tc ToolCall, out chan Str
 		_ = a.addToContext(ctx, msg, out)
 	}
 	if effect := effects.resolved(); effect != EffectNone {
-		_ = a.applyBatchToolResultEffect(ctx, effect)
+		if err := a.applyBatchToolResultEffect(ctx, effect); err != nil {
+			return ToolStep{}, err
+		}
 	}
 	return ToolStep{}, nil
 }

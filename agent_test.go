@@ -22,38 +22,34 @@ func TestSystemPrompt_knowledgeGuidanceWhenBrainSet(t *testing.T) {
 	})
 	t.Cleanup(h.Close)
 	prompt := h.constructSystemPrompt()
-	if !strings.Contains(prompt, "knowledge store") {
+	if !strings.Contains(prompt, "knowledge store") || !strings.Contains(prompt, "earlier messages from this session") {
 		t.Fatalf("want knowledge-store guidance when Brain is set:\n%s", prompt)
 	}
 }
 
-func TestHandoff_retainsSearchableEpisode(t *testing.T) {
+func TestHandoff_savesSessionMessagesForSearch(t *testing.T) {
 	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := eng.ApplyKinds(t.Context(), EpisodeKinds()...); err != nil {
-		t.Fatal(err)
-	}
 	ns := mustNS(t, "org", "acme")
-	const token = "unique-retain-handoff-token"
+	const (
+		sessionID = "sess-handoff"
+		token     = "unique-retain-handoff-token"
+		callID    = "call-session-1"
+	)
 	h := mustNewTurnManager(t, AgentOptions{
-		SessionID:       "sess-handoff",
+		SessionID:       sessionID,
 		Config:          Config{MaxWindowSize: 8192},
 		SearchNamespace: ns,
 		Brain:           eng,
-		Model: &scriptedModel{
-			InvokeFn: func(_ context.Context, _ []*Message, _ []*Tool, ch chan<- LLMResponseChunk) {
-				ch <- LLMResponseChunk{
-					Type:       StreamEventMessage,
-					Content:    "Objective: ship\nDiscoveries: " + token + " was learned.\n",
-					IsComplete: true,
-				}
-			},
-		},
+		Model:           &scriptedModel{},
 	})
 	t.Cleanup(h.Close)
-	h.context.Restore([]*Message{{Role: RoleUser, Content: "do the work"}})
+	h.context.Restore([]*Message{
+		{Role: RoleUser, Content: "do the work"},
+		{Role: RoleTool, ToolCallID: callID, Content: token},
+	})
 	h.session.Plan.SetDocument("plan body")
 	h.session.Plan.Set([]Todo{
 		{Title: "A", Status: TodoStatusCompleted, Description: "done"},
@@ -63,12 +59,18 @@ func TestHandoff_retainsSearchableEpisode(t *testing.T) {
 	if err := h.applyBatchToolResultEffect(t.Context(), EffectHandoff); err != nil {
 		t.Fatal(err)
 	}
-	window := h.context.Messages()
-	if len(window) < 3 || window[0].Role != RoleUser {
-		t.Fatalf("window after handoff = %+v", window)
-	}
 
-	mustSearchKind(t, eng, ns, token, KindEpisode)
+	page := mustSearch(t, eng, brain.Scope{Namespace: ns, SessionID: sessionID}, token)
+	if len(page.Objects) != 1 || page.Objects[0].Kind != brain.KindSessionMessage {
+		t.Fatalf("search = %+v", page.Objects)
+	}
+	got, err := eng.Read(t.Context(), brain.Scope{Namespace: ns, SessionID: sessionID}, page.Objects[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got.Content, callID) || !strings.Contains(got.Content, token) {
+		t.Fatalf("session message = %s", got.Content)
+	}
 }
 
 func TestAbsorb_retainsCompressedEpisode(t *testing.T) {
@@ -108,18 +110,43 @@ func TestAbsorb_retainsCompressedEpisode(t *testing.T) {
 	mustSearchKind(t, eng, ns, token, KindEpisode)
 }
 
-func TestHandoff_retainFailureLeavesWindowRebuilt(t *testing.T) {
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly())
+func TestHandoff_sessionMessageSaveErrorKeepsWindow(t *testing.T) {
+	store := brain.NewMemoryStore()
+	eng, err := brain.NewEngine(failSessionSave{MemoryStore: store}, brain.WithLexicalOnly())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := eng.ApplyKinds(t.Context(), brain.KindSpec{Kind: "Fact", IsParent: true}); err != nil {
-		t.Fatal(err)
-	}
 	h := mustNewTurnManager(t, AgentOptions{
-		SessionID: "sess-failopen",
+		SessionID:       "sess-save-fail",
+		Config:          Config{MaxWindowSize: 8192},
+		SearchNamespace: mustNS(t, "org", "acme"),
+		Brain:           eng,
+		Model:           &scriptedModel{},
+	})
+	t.Cleanup(h.Close)
+	h.context.Restore([]*Message{
+		{Role: RoleUser, Content: "do the work"},
+		{Role: RoleAssistant, Content: "kept-detail"},
+	})
+	h.session.Plan.SetDocument("plan body")
+	h.session.Plan.Set([]Todo{
+		{Title: "A", Status: TodoStatusCompleted, Description: "done"},
+		{Title: "B", Status: TodoStatusPending, Description: "next"},
+	})
+	err = h.applyBatchToolResultEffect(t.Context(), EffectHandoff)
+	if err == nil || !strings.Contains(err.Error(), "session messages down") {
+		t.Fatalf("err = %v", err)
+	}
+	window := h.context.Messages()
+	if len(window) != 2 || window[1].Content != "kept-detail" {
+		t.Fatalf("window = %+v", window)
+	}
+}
+
+func TestHandoff_nilBrainReplacesWindow(t *testing.T) {
+	h := mustNewTurnManager(t, AgentOptions{
+		SessionID: "sess-no-brain",
 		Config:    Config{MaxWindowSize: 8192},
-		Brain:     eng,
 		Model:     &scriptedModel{},
 	})
 	t.Cleanup(h.Close)
@@ -136,6 +163,14 @@ func TestHandoff_retainFailureLeavesWindowRebuilt(t *testing.T) {
 	if len(window) < 3 || window[0].Content != "do the work" {
 		t.Fatalf("window = %+v", window)
 	}
+}
+
+type failSessionSave struct {
+	*brain.MemoryStore
+}
+
+func (failSessionSave) SaveSessionMessages(context.Context, brain.Namespace, string, string, []brain.SessionMessage) (int, error) {
+	return 0, errors.New("session messages down")
 }
 
 func TestSpecialist_retainsResultEpisode(t *testing.T) {
@@ -179,12 +214,18 @@ func TestSpecialist_retainsResultEpisode(t *testing.T) {
 	mustSearchKind(t, eng, ns, token, KindEpisode)
 }
 
-func mustSearchKind(t *testing.T, eng *brain.Engine, ns brain.Namespace, query, kind string) brain.RichObject {
+func mustSearch(t *testing.T, eng *brain.Engine, scope brain.Scope, query string) brain.SearchPage {
 	t.Helper()
-	page, err := eng.Search(t.Context(), brain.Scope{Namespace: ns}, brain.SearchRequest{Query: query}, brain.NewSearchContext())
+	page, err := eng.Search(t.Context(), scope, brain.SearchRequest{Query: query}, brain.NewSearchContext())
 	if err != nil {
 		t.Fatal(err)
 	}
+	return page
+}
+
+func mustSearchKind(t *testing.T, eng *brain.Engine, ns brain.Namespace, query, kind string) brain.RichObject {
+	t.Helper()
+	page := mustSearch(t, eng, brain.Scope{Namespace: ns}, query)
 	if len(page.Objects) == 0 {
 		t.Fatalf("search %q: no hits", query)
 	}

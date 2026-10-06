@@ -127,7 +127,7 @@ func ParseNamespace(nameValues ...string) (Namespace, error) {
 		return nil, fmt.Errorf("brain: namespace name/value pairs are uneven")
 	}
 	ns := make(Namespace, 0, len(nameValues)/2)
-	for i := 0; i < len(nameValues); i += 2 {
+	for i := 0; i+1 < len(nameValues); i += 2 {
 		ns = append(ns, Attr{
 			Name:  strings.TrimSpace(nameValues[i]),
 			Value: strings.TrimSpace(nameValues[i+1]),

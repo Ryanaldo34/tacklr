@@ -58,7 +58,15 @@ func (s *Store) Get(ctx context.Context, scope brain.Scope, id uuid.UUID) (brain
 	q := `SELECT ` + objectSelectCols + ` FROM objects WHERE id = $1 AND deleted_at IS NULL`
 	args := []any{id}
 	q, args = appendNamespaceSQL(q, args, scope)
-	return s.scanObject(s.db.QueryRow(ctx, q, args...))
+	obj, err := s.scanObject(s.db.QueryRow(ctx, q, args...))
+	if err == nil || strings.TrimSpace(scope.SessionID) == "" || !errors.Is(err, brain.ErrNotFound) {
+		return obj, err
+	}
+	saved, readErr := s.readSessionMessage(ctx, scope.SessionID, id)
+	if errors.Is(readErr, brain.ErrNotFound) {
+		return brain.Object{}, err
+	}
+	return saved, readErr
 }
 
 // GetMany implements ObjectReader.
@@ -84,6 +92,23 @@ func (s *Store) GetMany(ctx context.Context, scope brain.Scope, ids []uuid.UUID)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("postgres: get many: %w", err)
+	}
+	if sid := strings.TrimSpace(scope.SessionID); sid != "" && len(byID) < len(ids) {
+		missing := make([]uuid.UUID, 0, len(ids)-len(byID))
+		for _, id := range ids {
+			if _, ok := byID[id]; !ok && id != uuid.Nil {
+				missing = append(missing, id)
+			}
+		}
+		if len(missing) > 0 {
+			extra, err := s.readSessionMessages(ctx, sid, missing)
+			if err != nil {
+				return nil, err
+			}
+			for _, obj := range extra {
+				byID[obj.ID] = obj
+			}
+		}
 	}
 	out := make([]brain.Object, 0, len(byID))
 	for _, id := range ids {
@@ -415,7 +440,12 @@ func (s *Store) SearchLexical(ctx context.Context, scope brain.Scope, query stri
 		WHERE deleted_at IS NULL AND parent_id IS NOT NULL%s
 		ORDER BY search_text <@> to_bm25query($1, 'idx_objects_bm25')
 		LIMIT $%d`, where, limitPos)
-	return s.queryScored(ctx, q, args, true)
+	hits, err := s.queryScored(ctx, q, args, true)
+	if err != nil || strings.TrimSpace(scope.SessionID) == "" {
+		return hits, err
+	}
+	extra, err := s.sessionLexical(ctx, scope, query, k)
+	return mergeRanked(hits, extra, err)
 }
 
 // SearchVector implements PartSearcher using pgvector cosine distance over parts.
@@ -438,7 +468,12 @@ func (s *Store) SearchVector(ctx context.Context, scope brain.Scope, embedding [
 		  AND embedding IS NOT NULL%s
 		ORDER BY embedding <=> $1::vector
 		LIMIT $%d`, where, limitPos)
-	return s.queryScored(ctx, q, args, false)
+	hits, err := s.queryScored(ctx, q, args, false)
+	if err != nil || strings.TrimSpace(scope.SessionID) == "" {
+		return hits, err
+	}
+	extra, err := s.sessionVector(ctx, scope, embedding, k)
+	return mergeRanked(hits, extra, err)
 }
 
 // SearchTrigram implements PartSearcher using pg_trgm similarity over parts.
@@ -464,7 +499,12 @@ func (s *Store) SearchTrigram(ctx context.Context, scope brain.Scope, query stri
 		  )%s
 		ORDER BY score DESC
 		LIMIT $%d`, where, limitPos)
-	return s.queryScored(ctx, q, args, false)
+	hits, err := s.queryScored(ctx, q, args, false)
+	if err != nil || strings.TrimSpace(scope.SessionID) == "" {
+		return hits, err
+	}
+	extra, err := s.sessionTrigram(ctx, scope, query, k)
+	return mergeRanked(hits, extra, err)
 }
 
 func (s *Store) queryScored(ctx context.Context, q string, args []any, invertBM25 bool) ([]brain.ScoredID, error) {

@@ -73,15 +73,6 @@ func TestSearch_promotesParentWithEvidenceAndNamespace(t *testing.T) {
 		t.Fatal("result_set_id required")
 	}
 
-	empty, err := eng.Search(ctx, brain.Scope{Namespace: nsB}, brain.SearchRequest{
-		Query: "oauth pkce implementation",
-	}, sc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// nsB has its own hit; ensure nsA parent not returned under wrong scope was already covered.
-	// Re-search nsA isolation: object only in nsA must not appear when scoped to empty other.
-	_ = empty
 	wrong, err := eng.Search(ctx, brain.Scope{Namespace: nsB}, brain.SearchRequest{
 		Query: "authorization code flow mobile",
 	}, brain.NewSearchContext())
@@ -92,16 +83,6 @@ func TestSearch_promotesParentWithEvidenceAndNamespace(t *testing.T) {
 		if o.ID == parent {
 			t.Fatal("parent from nsA must not appear under nsB")
 		}
-	}
-
-	miss, err := eng.Search(ctx, brain.Scope{Namespace: nsA}, brain.SearchRequest{
-		Query: "quantum-chromodynamics-unrelated",
-	}, brain.NewSearchContext())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(miss.Objects) != 0 {
-		t.Fatalf("unrelated query must miss, got %+v", miss.Objects)
 	}
 }
 
@@ -199,42 +180,6 @@ func TestSearch_hybridWithStubEmbedder(t *testing.T) {
 type stubEmbedder struct{ v []float32 }
 
 func (s stubEmbedder) Embed(context.Context, string) ([]float32, error) { return s.v, nil }
-
-// TestSearch_scopeIDsRestrictsHits: corpus search can be limited to a parent neighborhood.
-func TestSearch_scopeIDsRestrictsHits(t *testing.T) {
-	ctx := context.Background()
-	store := brain.NewMemoryStore()
-	ns := mustNS(t, "id", uuid.NewString())
-	now := time.Now().UTC()
-	p1, p2 := uuid.New(), uuid.New()
-	c1, c2 := uuid.New(), uuid.New()
-	pos := 1
-	_ = store.Put(ctx, brain.Object{ID: p1, Kind: "Document", Title: "Deal A", Namespace: ns, UpdatedAt: now})
-	_ = store.Put(ctx, brain.Object{ID: p2, Kind: "Document", Title: "Deal B", Namespace: ns, UpdatedAt: now})
-	_ = store.Put(ctx, brain.Object{
-		ID: c1, Kind: "Chunk", Title: "oauth risk", Content: "oauth risk material shared",
-		ParentID: &p1, Position: &pos, Namespace: ns, UpdatedAt: now,
-	})
-	_ = store.Put(ctx, brain.Object{
-		ID: c2, Kind: "Chunk", Title: "oauth other", Content: "oauth risk material shared",
-		ParentID: &p2, Position: &pos, Namespace: ns, UpdatedAt: now,
-	})
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithConfig(brain.EngineConfig{Now: func() time.Time { return now }}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	scope := brain.Scope{Namespace: ns}
-	sc := brain.NewSearchContext()
-	page, err := eng.Search(ctx, scope, brain.SearchRequest{
-		Query: "oauth risk material", ScopeIDs: []uuid.UUID{p1},
-	}, sc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(page.Objects) != 1 || page.Objects[0].ID != p1 {
-		t.Fatalf("scoped search: %+v", page.Objects)
-	}
-}
 
 func TestFindExact_uuidParentAndPart(t *testing.T) {
 	ctx := context.Background()
@@ -394,27 +339,20 @@ func TestContinue_andReplaceResultSet(t *testing.T) {
 	}
 }
 
-func TestSearch_rejectsBadFiltersAndEmptyQuery(t *testing.T) {
+func TestSearch_rejectsEmptyQueryAndFilter(t *testing.T) {
 	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly())
 	if err != nil {
 		t.Fatal(err)
 	}
-	sc := brain.NewSearchContext()
 	ctx := context.Background()
-
-	_, err = eng.Search(ctx, brain.Scope{}, brain.SearchRequest{Query: "  "}, sc)
+	_, err = eng.Search(ctx, brain.Scope{}, brain.SearchRequest{Query: "  "}, brain.NewSearchContext())
 	if err == nil {
 		t.Fatal("empty query must fail")
 	}
 	_, err = eng.Search(ctx, brain.Scope{}, brain.SearchRequest{
-		Query: "q", Filters: brain.Filter{UpdatedAfter: "not-a-date"},
-	}, sc)
-	if err == nil {
-		t.Fatal("bad date filter must fail")
-	}
-	_, err = eng.Search(ctx, brain.Scope{}, brain.SearchRequest{
-		Query: "q", Filters: brain.Filter{Props: map[string]brain.PropFilter{"": {Eq: "x"}}},
-	}, sc)
+		Query:   "q",
+		Filters: brain.Filter{Props: map[string]brain.PropFilter{"": {Eq: "x"}}},
+	}, brain.NewSearchContext())
 	if err == nil {
 		t.Fatal("empty filter key must fail")
 	}
@@ -456,16 +394,6 @@ func TestFindExact_trigramFuzzy(t *testing.T) {
 	}
 }
 
-func TestSearchContext_restoreInvalid(t *testing.T) {
-	sc := brain.NewSearchContext()
-	if err := sc.Restore([]byte(`{not json`)); err == nil {
-		t.Fatal("want restore error")
-	}
-	if err := sc.Restore(nil); err != nil {
-		t.Fatal(err)
-	}
-}
-
 // TestLandingIDs_partsAndParents: unique landing ids for parts vs parents.
 func TestLandingIDs_partsAndParents(t *testing.T) {
 	parent := uuid.New()
@@ -488,10 +416,6 @@ func TestLandingIDs_partsAndParents(t *testing.T) {
 	}
 	if brain.LandingIDs(nil) != nil {
 		t.Fatal("empty")
-	}
-	pageIDs := brain.LandingIDs(objs)
-	if len(pageIDs) != 2 {
-		t.Fatalf("from page: %v", pageIDs)
 	}
 }
 

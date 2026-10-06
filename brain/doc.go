@@ -42,8 +42,12 @@
 // # Explicit writes (no handoff side effects)
 //
 // Durable product objects are written via Engine.Put / SoftDelete / ReplaceParts
-// (host SDK) or kind-scoped agent tools. Context handoff and compress may write
-// session residue (kind Episode); they never write host product kinds.
+// (host SDK) or kind-scoped agent tools. A plan handoff saves the exact live
+// window with Engine.SaveSessionMessages into session_messages (host namespace
+// plus the session id at the tail). Those rows are not the harness checkpoint.
+// Search and find_exact return them together with host-namespace knowledge for
+// the active session. Compress and specialist results may still
+// write session residue (kind Episode). They never write host product kinds.
 // ReplaceParts is how a host attaches corpus chunks under a parent; Engram
 // files stay parent-only.
 //

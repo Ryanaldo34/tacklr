@@ -91,5 +91,30 @@ func schemaStatements(dim int) []string {
 		`CREATE TRIGGER trg_objects_updated_at
 			BEFORE UPDATE ON objects
 			FOR EACH ROW EXECUTE FUNCTION tacklr_objects_set_updated_at()`,
+		`CREATE TABLE IF NOT EXISTS session_messages (
+			id              uuid PRIMARY KEY,
+			session_id      text NOT NULL,
+			namespace       jsonb NOT NULL,
+			generation      integer NOT NULL,
+			generation_key  text NOT NULL,
+			position        integer NOT NULL,
+			role            text NOT NULL,
+			body            jsonb NOT NULL,
+			search_text     text NOT NULL DEFAULT '',
+			embedding       vector(` + d + `),
+			created_at      timestamptz NOT NULL DEFAULT now(),
+			updated_at      timestamptz NOT NULL DEFAULT now(),
+			UNIQUE (session_id, generation, position),
+			UNIQUE (session_id, generation_key, position)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_session_messages_session ON session_messages (session_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_session_messages_trgm ON session_messages USING GIN (search_text gin_trgm_ops)`,
+		`CREATE INDEX IF NOT EXISTS idx_session_messages_embedding_hnsw ON session_messages
+			USING hnsw (embedding vector_cosine_ops)
+			WITH (m = 16, ef_construction = 64)
+			WHERE embedding IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_session_messages_bm25 ON session_messages
+			USING bm25 (search_text)
+			WITH (text_config = 'english')`,
 	}
 }

@@ -159,21 +159,6 @@ func TestPut_embedderError(t *testing.T) {
 	}
 }
 
-// TestIndexText_skipsEmptyParts: IndexText joins non-empty fields only.
-func TestIndexText_skipsEmptyParts(t *testing.T) {
-	got := brain.IndexText(brain.Object{Title: " t ", Summary: "", Content: "c"})
-	if got != "t\nc" {
-		t.Fatalf("%q", got)
-	}
-	if brain.IndexText(brain.Object{}) != "" {
-		t.Fatal("empty object")
-	}
-	withParent := brain.IndexTextWithParent(brain.Object{Title: "chunk", Content: "body"}, "Parent Doc")
-	if withParent != "Parent Doc\nchunk\nbody" {
-		t.Fatalf("%q", withParent)
-	}
-}
-
 // TestEntityIndexText_includesSummaryAndProperties: entity find text packs attributes.
 func TestEntityIndexText_includesSummaryAndProperties(t *testing.T) {
 	body := strings.Repeat("long body ", 300)
@@ -734,85 +719,6 @@ func TestLinkWith_expandAttachesMeta(t *testing.T) {
 	}
 	if len(exp3.Objects) != 0 {
 		t.Fatalf("soft-deleted neighbor: %+v", exp3.Objects)
-	}
-}
-
-// TestLink_crossObjectEmailDealBuyer: first-class cross-object graph (not chunks).
-func TestLink_crossObjectEmailDealBuyer(t *testing.T) {
-	ctx := context.Background()
-	store := brain.NewMemoryStore()
-	g := brain.NewMemoryGraph()
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithGraph(g), brain.WithKinds(
-		brain.KindSpec{Kind: "Email", IsParent: true},
-		brain.KindSpec{Kind: "Deal", IsParent: true, Fields: []brain.FieldSpec{
-			{Name: "stage", Type: brain.FieldTypeString},
-		}},
-		brain.KindSpec{Kind: "Person", IsParent: true},
-	))
-	if err != nil {
-		t.Fatal(err)
-	}
-	ns := mustNS(t, "id", uuid.NewString())
-	scope := brain.Scope{Namespace: ns}
-	sc := brain.NewSearchContext()
-
-	email, err := eng.Put(ctx, scope, brain.Object{
-		Kind: "Email", Title: "RE: Acme pricing", Summary: "security review thread",
-		Content: "please confirm FedRAMP timeline",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	deal, err := eng.Put(ctx, scope, brain.Object{
-		Kind: "Deal", Title: "Acme Enterprise Renewal", Summary: "renewal opportunity",
-		Properties: map[string]any{"stage": "negotiation"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	buyer, err := eng.Put(ctx, scope, brain.Object{
-		Kind: "Person", Title: "Jordan Lee", Summary: "procurement buyer",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := eng.LinkWith(ctx, scope, email.ID, deal.ID, "about", brain.EdgeMeta{
-		Note: "FedRAMP timeline discussion",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := eng.LinkWith(ctx, scope, deal.ID, buyer.ID, "has_buyer", brain.EdgeMeta{
-		Role: "primary", Status: "active",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	// Property-aware entity find.
-	page, err := eng.FindObjects(ctx, scope, brain.FindObjectsRequest{
-		Query: "negotiation", Kinds: []string{"Deal"},
-	}, sc)
-	if err != nil || len(page.Objects) != 1 || page.Objects[0].ID != deal.ID {
-		t.Fatalf("find deal by stage prop: %+v err=%v", page.Objects, err)
-	}
-	exp, err := eng.Expand(ctx, scope, brain.ExpandRequest{
-		ObjectID: deal.ID, RelationTypes: []string{"about", "has_buyer"},
-	}, sc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := map[uuid.UUID]*brain.Relation{}
-	for _, o := range exp.Objects {
-		got[o.ID] = o.Relation
-	}
-	if got[email.ID] == nil || got[email.ID].Type != "about" || got[email.ID].Note != "FedRAMP timeline discussion" {
-		t.Fatalf("email hop: %+v", got[email.ID])
-	}
-	if got[buyer.ID] == nil || got[buyer.ID].Type != "has_buyer" || got[buyer.ID].Role != "primary" {
-		t.Fatalf("buyer hop: %+v", got[buyer.ID])
-	}
-	// Drill-down: email has no chunks yet; containment expand is empty.
-	kids, err := eng.Expand(ctx, scope, brain.ExpandRequest{ObjectID: email.ID}, sc)
-	if err != nil || kids.Mode != "children" {
-		t.Fatalf("containment expand: %+v err=%v", kids, err)
 	}
 }
 

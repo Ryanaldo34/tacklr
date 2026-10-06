@@ -26,8 +26,11 @@ var (
 // Scope is optional retrieval isolation for Engine methods.
 // Empty Namespace means no isolation. Non-empty applies application RLS
 // (Namespace.Covers) so a broader scope sees objects with extra attrs.
+// SessionID is harness-owned. When set, search and get also read this session's
+// rows in session_messages (Namespace plus the session attribute). The model cannot set it.
 type Scope struct {
 	Namespace Namespace
+	SessionID string
 }
 
 // Object is one row from the generic objects store (parent or part).

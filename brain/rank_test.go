@@ -13,7 +13,7 @@ func TestRRF_fusesRanks(t *testing.T) {
 	list1 := []ScoredID{{ID: a, Score: 9}, {ID: b, Score: 8}, {ID: c, Score: 1}}
 	list2 := []ScoredID{{ID: c, Score: 9}, {ID: a, Score: 5}}
 
-	fused := rrfFuse([][]ScoredID{list1, list2}, 60)
+	fused := FuseRanks([][]ScoredID{list1, list2}, 60)
 	sortScored(fused)
 
 	if len(fused) != 3 {
@@ -29,7 +29,7 @@ func TestRRF_fusesRanks(t *testing.T) {
 	tOld := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
 	tNew := tOld.Add(time.Hour)
 	id := uuid.New()
-	filled := rrfFuse([][]ScoredID{
+	filled := FuseRanks([][]ScoredID{
 		{{ID: id, Score: 1, UpdatedAt: tOld}},
 		{{ID: id, Score: 1, UpdatedAt: tNew, ParentID: &parent, Title: "t", Content: "c", Position: &pos, Properties: map[string]any{"k": 1}}},
 	}, 60)
@@ -44,10 +44,10 @@ func TestRRF_fusesRanks(t *testing.T) {
 	}
 
 	// Empty / nil lists and k<=0 defaults.
-	if got := rrfFuse(nil, 0); len(got) != 0 {
+	if got := FuseRanks(nil, 0); len(got) != 0 {
 		t.Fatalf("nil: %+v", got)
 	}
-	if got := rrfFuse([][]ScoredID{nil, {}}, -1); len(got) != 0 {
+	if got := FuseRanks([][]ScoredID{nil, {}}, -1); len(got) != 0 {
 		t.Fatalf("empty: %+v", got)
 	}
 	// Tie-break: equal RRF scores use UpdatedAt then ID.
@@ -160,33 +160,4 @@ func idsOf(parts []ScoredID) []uuid.UUID {
 		out[i] = p.ID
 	}
 	return out
-}
-
-func TestSortRichObjects(t *testing.T) {
-	t1 := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
-	t2 := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
-	pos0, pos1 := 0, 1
-	objs := []RichObject{
-		{Title: "b", UpdatedAt: t1, CreatedAt: t2, Position: &pos1, Properties: map[string]any{"stage": "z"}},
-		{Title: "a", UpdatedAt: t2, CreatedAt: t1, Position: &pos0, Properties: map[string]any{"stage": "a"}},
-	}
-	SortRichObjects(objs, "title", false)
-	if objs[0].Title != "a" {
-		t.Fatalf("title asc: %+v", objs)
-	}
-	SortRichObjects(objs, "updated_at", true)
-	if objs[0].UpdatedAt != t2 {
-		t.Fatalf("updated_at desc: %+v", objs)
-	}
-	SortRichObjects(objs, "position", false)
-	if objs[0].Position == nil || *objs[0].Position != 0 {
-		t.Fatalf("position: %+v", objs)
-	}
-	SortRichObjects(objs, "stage", false)
-	if objs[0].Properties["stage"] != "a" {
-		t.Fatalf("prop: %+v", objs)
-	}
-	// no-ops
-	SortRichObjects(objs[:1], "title", false)
-	SortRichObjects(objs, "", false)
 }

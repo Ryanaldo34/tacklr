@@ -12,6 +12,12 @@ import (
 
 const defaultRRFk = 60
 
+// FuseRanks merges best-first lists with reciprocal rank fusion.
+// k <= 0 selects the default fusion constant. Channel scores are ignored.
+func FuseRanks(lists [][]ScoredID, k int) []ScoredID {
+	return rrfFuse(lists, k)
+}
+
 // rrfFuse merges ranked lists with Reciprocal Rank Fusion.
 // Each input list must already be ordered best-first. Channel scores are ignored.
 func rrfFuse(lists [][]ScoredID, k int) []ScoredID {

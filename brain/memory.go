@@ -26,16 +26,20 @@ var (
 
 // MemoryStore is an in-process Store (tests, fixtures, and ObjectWriter for Engine.Put).
 type MemoryStore struct {
-	mu      sync.RWMutex
-	objects map[uuid.UUID]Object
-	kinds   map[string]ObjectKind
+	mu          sync.RWMutex
+	objects     map[uuid.UUID]Object
+	kinds       map[string]ObjectKind
+	sessionMsgs map[uuid.UUID]sessionRow
+	sessionKeys map[string]map[string]int
 }
 
 // NewMemoryStore returns an empty memory-backed store.
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		objects: make(map[uuid.UUID]Object),
-		kinds:   make(map[string]ObjectKind),
+		objects:     make(map[uuid.UUID]Object),
+		kinds:       make(map[string]ObjectKind),
+		sessionMsgs: make(map[uuid.UUID]sessionRow),
+		sessionKeys: make(map[string]map[string]int),
 	}
 }
 
@@ -123,14 +127,15 @@ func (s *MemoryStore) GetMany(_ context.Context, scope Scope, ids []uuid.UUID) (
 }
 
 func (s *MemoryStore) getLocked(scope Scope, id uuid.UUID) (Object, error) {
-	obj, ok := s.objects[id]
-	if !ok || obj.DeletedAt != nil {
-		return Object{}, fmt.Errorf("%w: %s", ErrNotFound, id)
+	if obj, ok := s.objects[id]; ok && obj.DeletedAt == nil && scope.Namespace.Covers(obj.Namespace) {
+		return cloneObject(obj), nil
 	}
-	if !scope.Namespace.Covers(obj.Namespace) {
-		return Object{}, fmt.Errorf("%w: %s", ErrNotFound, id)
+	if sid := strings.TrimSpace(scope.SessionID); sid != "" && s.sessionMsgs != nil {
+		if row, ok := s.sessionMsgs[id]; ok && row.sessionID == sid {
+			return row.object(), nil
+		}
 	}
-	return cloneObject(obj), nil
+	return Object{}, fmt.Errorf("%w: %s", ErrNotFound, id)
 }
 
 // ListByKind implements ObjectLister (first-class objects only).
@@ -292,6 +297,7 @@ func (s *MemoryStore) SearchLexical(_ context.Context, scope Scope, query string
 	if err != nil {
 		return nil, err
 	}
+	parts = s.appendSessionParts(scope, parts)
 	type doc struct {
 		obj    Object
 		tokens map[string]int
@@ -313,25 +319,24 @@ func (s *MemoryStore) SearchLexical(_ context.Context, scope Scope, query string
 		}
 		docs = append(docs, doc{obj: obj, tokens: tf, len: len(toks)})
 	}
-	n := float64(len(docs))
-	if n == 0 {
-		return nil, nil
-	}
-	scored := make([]ScoredID, 0, len(docs))
-	for _, d := range docs {
-		var score float64
-		for _, qt := range qTokens {
-			tf := float64(d.tokens[qt])
-			if tf == 0 {
+	var scored []ScoredID
+	if n := float64(len(docs)); n > 0 {
+		scored = make([]ScoredID, 0, len(docs))
+		for _, d := range docs {
+			var score float64
+			for _, qt := range qTokens {
+				tf := float64(d.tokens[qt])
+				if tf == 0 {
+					continue
+				}
+				idf := math.Log(1 + n/float64(1+df[qt]))
+				score += (tf / float64(d.len)) * idf
+			}
+			if score <= 0 {
 				continue
 			}
-			idf := math.Log(1 + n/float64(1+df[qt]))
-			score += (tf / float64(d.len)) * idf
+			scored = append(scored, scoredFromObject(d.obj, score))
 		}
-		if score <= 0 {
-			continue
-		}
-		scored = append(scored, scoredFromObject(d.obj, score))
 	}
 	return topKScored(scored, k), nil
 }
@@ -347,6 +352,7 @@ func (s *MemoryStore) SearchVector(_ context.Context, scope Scope, embedding []f
 	if err != nil {
 		return nil, err
 	}
+	parts = s.appendSessionParts(scope, parts)
 	scored := make([]ScoredID, 0, len(parts))
 	for _, obj := range parts {
 		if len(obj.Embedding) != len(embedding) {
@@ -373,6 +379,7 @@ func (s *MemoryStore) SearchTrigram(_ context.Context, scope Scope, query string
 	if err != nil {
 		return nil, err
 	}
+	parts = s.appendSessionParts(scope, parts)
 	qTri := trigrams(q)
 	scored := make([]ScoredID, 0, len(parts))
 	for _, obj := range parts {

@@ -163,7 +163,7 @@ func newCompleteTodoTool(sm *sessionManager) *Tool {
 	return NewTool(ToolConfig{
 		Name:        "complete_todo",
 		DisplayName: "Complete {title}",
-		Description: "Mark a todo completed when its acceptance criteria are met. Before closing a research or discovery todo, durable findings and indexed files should already be saved so later work can find them. If open todos remain, the next incomplete item is marked in-progress, a handoff is written into context, and the return names the todo now starting. If this was the last open todo, returns that all todos completed and leaves context intact so you can give the user-facing answer. Fails if no plan exists, the title is missing from the plan, or the todo is already completed.",
+		Description: "Mark a todo completed when its acceptance criteria are met. Before closing a research or discovery todo, durable findings and indexed files should already be saved so later work can find them. If open todos remain, the next incomplete item is marked in-progress, a handoff is written into context, and the return names the todo now starting. If this was the last open todo, returns that all todos completed and leaves context intact so you can give the user-facing answer. Fails if no plan exists, the title is missing from the plan, or the todo is already completed. If the handoff cannot save the current window as session messages, the todo stays completed and the current window stays in place.",
 		Category:    ToolCategoryEdit,
 		Handler: func(ctx context.Context, args completeTodoArgs) (ToolOutcome, error) {
 			plan := sm.Plan.Get()

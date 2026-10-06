@@ -24,9 +24,10 @@ type brainToolDeps struct {
 
 // brainTools closes over the engine and SearchContext (host ceiling + result set).
 type brainTools struct {
-	engine *brain.Engine
-	sc     *brain.SearchContext
-	deps   brainToolDeps
+	engine    *brain.Engine
+	sc        *brain.SearchContext
+	deps      brainToolDeps
+	sessionID string
 }
 
 type namespaceArg struct {
@@ -34,12 +35,17 @@ type namespaceArg struct {
 }
 
 func (b brainTools) scope(call []brain.Attr) (brain.Scope, error) {
+	for _, attr := range call {
+		if strings.TrimSpace(attr.Name) == brain.SessionTailName {
+			return brain.Scope{}, fmt.Errorf("%w: namespace attr %q is reserved", brain.ErrInvalid, brain.SessionTailName)
+		}
+	}
 	ceiling, _ := b.sc.Namespace()
 	ns, err := ceiling.Bind(call)
 	if err != nil {
 		return brain.Scope{}, err
 	}
-	return brain.Scope{Namespace: ns}, nil
+	return brain.Scope{Namespace: ns, SessionID: b.sessionID}, nil
 }
 
 func (b brainTools) brainMountForKind(kind string) (vfs.MountSpec, bool) {
@@ -58,7 +64,7 @@ func (b brainTools) newReadObjectTool() *Tool {
 	return NewTool(ToolConfig{
 		Name:        "read_object",
 		DisplayName: "Read object {object_id}",
-		Description: `Read a knowledge record by UUID and return its full stored body as JSON (id, kind, title, summary, content, properties). Call when you have an id from a prior knowledge result and need the complete record. Fails if object_id is missing, invalid, or not visible in the current namespace.`,
+		Description: `Read a knowledge record or an earlier message from this session by UUID and return its full stored body as JSON (id, kind, title, summary, content, properties). Call when you have an id from a prior knowledge result and need the complete record. Fails if object_id is missing, invalid, or not visible in this session.`,
 		Category:    ToolCategoryRead,
 		Access:      ToolReadAccess,
 		Timeout:     30 * time.Second,
@@ -116,9 +122,9 @@ func (b brainTools) newSearchTool() *Tool {
 	return b.newQueryTool(ToolConfig{
 		Name:        "search",
 		DisplayName: "Search knowledge: {query}",
-		Description: `Search notes and indexed files by meaning. Call when starting a new plan to find durable facts related to the task, and after a handoff when a needed detail is missing from the current notes.
+		Description: `Search notes, indexed files, and earlier messages from this session by meaning. Call when starting a new plan to find durable facts related to the task, and after a handoff when a needed detail is missing from the current notes.
 
-Returns a page of ranked parent records with evidence snippets (optional vfs_path, start_line, block_id), a result_set_id, and has_more. Replaces the active result set. Fails on invalid filters or namespace.`,
+Returns a page of ranked records with evidence snippets (optional vfs_path, start_line, block_id), a result_set_id, and has_more. The page includes knowledge records and earlier messages saved for this session when the text matches. Knowledge records saved for later sessions stay in those results. Replaces the active result set. Fails on invalid filters or namespace.`,
 		Category: ToolCategorySearch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
@@ -129,9 +135,9 @@ func (b brainTools) newFindExactTool() *Tool {
 	return b.newQueryTool(ToolConfig{
 		Name:        "find_exact",
 		DisplayName: "Find exact: {query}",
-		Description: `Find a record by exact or near-exact string. Call when you already have the identifier or a precise phrase.
+		Description: `Find a record by exact or near-exact string. Call when you already have the identifier or a precise phrase. Matches include knowledge records and earlier messages from this session.
 
-Returns a page of ranked parent records with evidence, a result_set_id, and has_more. A UUID query loads that object directly. Replaces the active result set. Fails on invalid filters or namespace.`,
+Returns a page of ranked records with evidence, a result_set_id, and has_more. A UUID query loads that object directly. Replaces the active result set. Fails on invalid filters or namespace.`,
 		Category: ToolCategorySearch,
 		Access:   ToolReadAccess,
 		Timeout:  30 * time.Second,
@@ -193,7 +199,9 @@ Returns the next page of records, has_more, and the same result_set_id. Fails if
 				return "", fmt.Errorf("continue: %w", err)
 			}
 			runtime.EmitUpdate("Loading more results…")
-			page, err := b.engine.Continue(ctx, b.sc.Scope(), id, args.Limit, b.sc)
+			scope := b.sc.Scope()
+			scope.SessionID = b.sessionID
+			page, err := b.engine.Continue(ctx, scope, id, args.Limit, b.sc)
 			if err != nil {
 				if errors.Is(err, brain.ErrNotFound) {
 					return "", fmt.Errorf("continue: result set not found; run search or find_exact again: %w", err)
@@ -800,8 +808,8 @@ func parseOptionalUUIDList(raw []string, field string) ([]uuid.UUID, error) {
 // save_* tools are registered only for non-empty WriteKinds fields; link only with GraphWriter;
 // find_objects only when GraphObjectSearcher is available; find_links when GraphEdgeSearcher is available.
 // When a brain Provider is mounted, save_* write Engram Markdown; link/expand accept paths.
-func newBrainTools(engine *brain.Engine, sc *brain.SearchContext, kinds brain.WriteKinds, deps brainToolDeps) []*Tool {
-	b := brainTools{engine: engine, sc: sc, deps: deps}
+func newBrainTools(engine *brain.Engine, sc *brain.SearchContext, sessionID string, kinds brain.WriteKinds, deps brainToolDeps) []*Tool {
+	b := brainTools{engine: engine, sc: sc, deps: deps, sessionID: sessionID}
 	tools := []*Tool{
 		b.newReadObjectTool(),
 		b.newSchemaTool(),

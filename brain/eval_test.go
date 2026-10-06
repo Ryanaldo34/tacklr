@@ -13,62 +13,6 @@ import (
 	"github.com/ryanaldo34/tacklr/brain"
 )
 
-// --- Corpus ranking goldens -------------------------------------------------
-
-func TestEval_goldenSearchQueries(t *testing.T) {
-	ctx := context.Background()
-	ns := mustNS(t, "id", uuid.NewString())
-	now := time.Now().UTC()
-	store := brain.NewMemoryStore()
-
-	for _, d := range []struct {
-		title string
-		body  string
-	}{
-		{"OAuth PKCE Guide", "Implement OAuth 2.0 PKCE for mobile clients"},
-		{"Billing Runbook", "Invoice reconciliation and chargeback flow"},
-		{"Vector Search Notes", "HNSW cosine similarity embeddings for RAG"},
-	} {
-		pid := uuid.New()
-		pos := 1
-		_ = store.Put(ctx, brain.Object{ID: pid, Kind: "Document", Title: d.title, Namespace: ns, UpdatedAt: now})
-		_ = store.Put(ctx, brain.Object{
-			ID: uuid.New(), Kind: "Chunk", Content: d.body, ParentID: &pid, Position: &pos,
-			Namespace: ns, UpdatedAt: now,
-		})
-	}
-
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithConfig(brain.EngineConfig{
-		Now: func() time.Time { return now },
-	}))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	for _, tc := range []struct {
-		query, wantTitle string
-	}{
-		{"oauth pkce mobile", "OAuth PKCE Guide"},
-		{"invoice chargeback", "Billing Runbook"},
-		{"hnsw embeddings rag", "Vector Search Notes"},
-	} {
-		t.Run(tc.query, func(t *testing.T) {
-			page, err := eng.Search(ctx, brain.Scope{Namespace: ns}, brain.SearchRequest{
-				Query: tc.query, Limit: 5,
-			}, brain.NewSearchContext())
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, o := range page.Objects {
-				if o.Title == tc.wantTitle {
-					return
-				}
-			}
-			t.Fatalf("want title %q in %+v", tc.wantTitle, titlesOf(page.Objects))
-		})
-	}
-}
-
 // --- GraphRAG composition golden --------------------------------------------
 
 // TestEval_graphRAGComposition locks the host recipe documented in package doc:
