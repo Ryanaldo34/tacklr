@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ryanaldo34/tacklr"
+	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/builtins"
 	"github.com/ryanaldo34/tacklr/durable"
 	"github.com/ryanaldo34/tacklr/internal/durtest"
@@ -633,9 +634,20 @@ func TestCancelWhileRunningEndsSubscriptionThenNextPromptRuns(t *testing.T) {
 
 func TestCloseDeletesSnapshotPromptNotFound(t *testing.T) {
 	ctx := t.Context()
-	rt := New(Config{Catalog: newCatalog(t, scriptedComplete("x"), durable.AgentSpec{}), Snapshots: NewMemorySnapshot(), Projection: vfs.DirectProjection{}})
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt := New(Config{Catalog: newCatalog(t, scriptedComplete("x"), durable.AgentSpec{
+		Options: tacklr.AgentOptions{Brain: eng},
+	}), Snapshots: NewMemorySnapshot(), Projection: vfs.DirectProjection{}})
 	id, err := rt.CreateSession(ctx, durable.CreateSession{AgentID: "default"})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := eng.SaveSessionMessages(ctx, nil, string(id), "close-key", []brain.SessionMessage{{
+		Role: "user", Body: []byte(`{"role":"user","content":"closeme"}`), SearchText: "closeme",
+	}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := rt.Prompt(ctx, id, durable.Prompt{Text: "hi"}); err != nil {
@@ -648,6 +660,10 @@ func TestCloseDeletesSnapshotPromptNotFound(t *testing.T) {
 	_ = waitEvents(t, rt, id, sub, 5*time.Second)
 	if err := rt.Close(ctx, id); err != nil {
 		t.Fatal(err)
+	}
+	gone, err := eng.Search(ctx, brain.Scope{SessionID: string(id)}, brain.SearchRequest{Query: "closeme"}, brain.NewSearchContext())
+	if err != nil || len(gone.Objects) != 0 {
+		t.Fatalf("session messages after close = %+v err=%v", gone.Objects, err)
 	}
 	_, _, err = rt.snapshots.Load(ctx, id)
 	if !errors.Is(err, durable.ErrSessionNotFound) {

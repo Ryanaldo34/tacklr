@@ -275,6 +275,9 @@ func TestBrainTools_searchFindExactContinueAndCheckpoint(t *testing.T) {
 		t.Fatal("search, find_exact, continue required")
 	}
 
+	if _, err := searchTool.invoke(ctx, `{"query":"knowledge","namespace":[{"name":"session","value":"x"}]}`, turnRuntime(h)); err == nil {
+		t.Fatal("reserved session attr")
+	}
 	out, err := searchTool.invoke(ctx, `{"query":"knowledge base retrieval","limit":2}`, turnRuntime(h))
 	if err != nil {
 		t.Fatal(err)

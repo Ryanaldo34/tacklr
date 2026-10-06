@@ -9,6 +9,7 @@ import (
 )
 
 func TestMemoryCatalog_lookupDefaultAndIDs(t *testing.T) {
+	DeleteSessionMessages(t.Context(), nil, "", "")
 	var none *MemoryCatalog
 	if _, ok := none.Lookup("x"); ok || none.DefaultID() != "" || none.IDs() != nil {
 		t.Fatal("nil catalog")

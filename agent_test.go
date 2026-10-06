@@ -46,6 +46,30 @@ func TestHandoff_savesSessionMessagesForSearch(t *testing.T) {
 		Model:           &scriptedModel{},
 	})
 	t.Cleanup(h.Close)
+	if messageSearchText(nil) != "" {
+		t.Fatal("nil message")
+	}
+	text := messageSearchText(&Message{
+		Role:    RoleAssistant,
+		Content: "body",
+		ContentParts: []ContentPart{
+			{Type: ContentTypeOutputText, Text: "out"},
+			{Type: ContentTypeInputText, Text: ""},
+			{Type: ContentTypeInputImage},
+		},
+		ToolCalls: []ToolCall{
+			{Name: "search", Arguments: `{"q":"1"}`},
+			{},
+		},
+	})
+	for _, want := range []string{"assistant", "body", "out", "search", `{"q":"1"}`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("search text %q missing %q", text, want)
+		}
+	}
+	if err := h.applyBatchToolResultEffect(t.Context(), EffectHandoff); err == nil || !strings.Contains(err.Error(), "empty window") {
+		t.Fatalf("empty window = %v", err)
+	}
 	h.context.Restore([]*Message{
 		{Role: RoleUser, Content: "do the work"},
 		{Role: RoleTool, ToolCallID: callID, Content: token},
