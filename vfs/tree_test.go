@@ -193,7 +193,7 @@ func TestTree_indexedPolicyOnMember(t *testing.T) {
 }
 
 func TestTree_memberProfileAndBindParams(t *testing.T) {
-	ms, err := vfs.Tree(vfs.At("discovery", vfs.Memory()).Profile("brain"))(t.Context(), t.Name(), vfs.Request{
+	ms, err := vfs.Tree(vfs.At("discovery", vfs.Local(t.TempDir())).Profile("brain"))(t.Context(), t.Name(), vfs.Request{
 		Bindings: []vfs.Binding{{
 			Params: map[string]string{vfs.ParamName: "discovery", "mode": "roots", "kind": "Discovery"},
 		}},

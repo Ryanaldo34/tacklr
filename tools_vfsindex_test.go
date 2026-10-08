@@ -10,7 +10,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
-	"github.com/ryanaldo34/tacklr/brain/engram"
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfsindex"
 )
@@ -268,8 +267,8 @@ func TestVFSIndexTools_prefixAutoIndex(t *testing.T) {
 	_ = waitSearchHit(t, eng, brain.Scope{Namespace: ns}, "prefix-auto-phrase-xyz", 3*time.Second)
 }
 
-// TestKnowledgeSaveSearchRead: save_* writes an Engram on the brain Provider
-// (not scratch /memory). Update-by-object_id rewrites the same path.
+// TestKnowledgeSaveSearchRead: save_* writes a brain record. Update-by-object_id
+// rewrites that record. search and read_object return it.
 func TestKnowledgeSaveSearchRead(t *testing.T) {
 	ctx := context.Background()
 	g := brain.NewMemoryGraph()
@@ -287,14 +286,10 @@ func TestKnowledgeSaveSearchRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	ns := mustNS(t, "id", uuid.NewString())
-	ms := mustMountTree(t, "save-mem",
-		vfs.At("work", vfs.Local(t.TempDir())),
-		engram.Mount(eng, brain.Scope{Namespace: ns}),
-	)
 	h := mustNewTurnManager(t, AgentOptions{
-		sessionID:    "save-mem",
-		mountSession: ms, Model: &scriptedModel{},
-		Brain: eng, SearchNamespace: ns,
+		sessionID: "save-mem",
+		Model:     &scriptedModel{},
+		Brain:     eng, SearchNamespace: ns,
 		BrainWriteKinds: brain.WriteKinds{Discovery: "Discovery", Fact: "Fact"},
 	})
 	t.Cleanup(h.Close)
@@ -312,27 +307,18 @@ func TestKnowledgeSaveSearchRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	var res struct {
-		Path     string `json:"path"`
-		Rev      string `json:"rev"`
-		ObjectID string `json:"object_id"`
-		Kind     string `json:"kind"`
+		ID      string `json:"id"`
+		Kind    string `json:"kind"`
+		Title   string `json:"title"`
+		Content string `json:"content"`
 	}
 	if err := json.Unmarshal([]byte(out.output), &res); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(res.Path, "/workspace/engram/discovery/") || res.Rev == "" || res.ObjectID == "" || res.Kind != "Discovery" {
+	if res.ID == "" || res.Kind != "Discovery" || res.Title != "latency finding" || !strings.Contains(res.Content, "p99 under 40ms") {
 		t.Fatalf("save result: %+v raw=%s", res, out.output)
 	}
-
-	body, err := ms.Route(ctx, res.Path).
-		ReadFile(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(body), "p99 under 40ms") || !strings.Contains(string(body), "domain: Discovery") {
-		t.Fatalf("VFS body: %s", body)
-	}
-	id, err := uuid.Parse(res.ObjectID)
+	id, err := uuid.Parse(res.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,19 +326,26 @@ func TestKnowledgeSaveSearchRead(t *testing.T) {
 	if err != nil || !strings.Contains(obj.Content, "p99 under 40ms in canary") || obj.Kind != "Discovery" {
 		t.Fatalf("engine object: %+v err=%v", obj, err)
 	}
-
-	readTool := h.findTool("read", "")
-	rl, err := readTool.invoke(ctx, `{"path":`+jsonString(res.Path)+`,"start":1,"end":20}`, turnRuntime(h))
-	if err != nil {
-		t.Fatal(err)
+	readObj := h.findTool("read_object", "")
+	if readObj == nil {
+		t.Fatal("read_object required")
 	}
-	if !strings.Contains(rl.output, "p99 under 40ms") {
-		t.Fatalf("read: %s", rl.output)
+	rl, err := readObj.invoke(ctx, `{"object_id":"`+res.ID+`"}`, turnRuntime(h))
+	if err != nil || !strings.Contains(rl.output, "p99 under 40ms") {
+		t.Fatalf("read_object: %v %s", err, rl.output)
+	}
+	found := h.findTool("find_objects", "")
+	if found == nil {
+		t.Fatal("find_objects required")
+	}
+	fpage, err := found.invoke(ctx, `{"query":"latency finding"}`, turnRuntime(h))
+	if err != nil || !strings.Contains(fpage.output, res.ID) {
+		t.Fatalf("find_objects: %v %s", err, fpage.output)
 	}
 
 	updArgs, err := json.Marshal(map[string]any{
 		"title":     "latency finding",
-		"object_id": res.ObjectID,
+		"object_id": res.ID,
 		"content":   "p95 under 20ms after fix",
 	})
 	if err != nil {
@@ -363,102 +356,18 @@ func TestKnowledgeSaveSearchRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	var res2 struct {
-		Path     string `json:"path"`
-		ObjectID string `json:"object_id"`
+		ID      string `json:"id"`
+		Content string `json:"content"`
 	}
 	if err := json.Unmarshal([]byte(out2.output), &res2); err != nil {
 		t.Fatal(err)
 	}
-	if res2.Path != res.Path || res2.ObjectID != res.ObjectID {
-		t.Fatalf("update path/id changed: create=%+v update=%+v", res, res2)
-	}
-
-	body2, err := ms.Route(ctx, res.Path).
-		ReadFile(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(body2), "p95 under 20ms") {
-		t.Fatalf("updated VFS body: %s", body2)
+	if res2.ID != res.ID || !strings.Contains(res2.Content, "p95 under 20ms") {
+		t.Fatalf("update: %+v", res2)
 	}
 	obj2, err := eng.Get(ctx, brain.Scope{Namespace: ns}, id)
 	if err != nil || !strings.Contains(obj2.Content, "p95 under 20ms") {
 		t.Fatalf("updated engine: %+v err=%v", obj2, err)
-	}
-	rl2, err := readTool.invoke(ctx, `{"path":`+jsonString(res.Path)+`,"start":1,"end":20}`, turnRuntime(h))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(rl2.output, "p95 under 20ms") {
-		t.Fatalf("read after update: %s", rl2.output)
-	}
-}
-
-// TestKnowledgeSave_rootsMount: save_discovery writes /discovery/{slug}.md (ModeRoots).
-func TestKnowledgeSave_rootsMount(t *testing.T) {
-	ctx := context.Background()
-	g := brain.NewMemoryGraph()
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly(), brain.WithGraph(g), brain.WithKinds(
-		brain.KindSpec{Kind: "Discovery", IsParent: true},
-	))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := eng.ApplyKinds(ctx, append(vfsindex.MountIndexKinds(),
-		brain.KindSpec{Kind: "Discovery", IsParent: true},
-	)...); err != nil {
-		t.Fatal(err)
-	}
-	ns := mustNS(t, "id", uuid.NewString())
-	ms := mustMountTreeReq(t, "save-roots", vfs.Request{Bindings: []vfs.Binding{{
-		Params: map[string]string{
-			vfs.ParamName: "discovery",
-			"mode":        engram.ModeRoots,
-			"kind":        "Discovery",
-		},
-	}}},
-		vfs.At("work", vfs.Local(t.TempDir())),
-		vfs.At("discovery", engram.Open(eng, brain.Scope{Namespace: ns})).Profile("brain").Indexed(vfsindex.PolicyNone),
-	)
-	h := mustNewTurnManager(t, AgentOptions{
-		sessionID:    "save-roots",
-		mountSession: ms, Model: &scriptedModel{},
-		Brain: eng, SearchNamespace: ns,
-		BrainWriteKinds: brain.WriteKinds{Discovery: "Discovery"},
-	})
-	t.Cleanup(h.Close)
-	activatePlan(t, h)
-
-	save := h.findTool("save_discovery", "")
-	if save == nil {
-		t.Fatal("save_discovery required")
-	}
-	out, err := save.invoke(ctx, `{"title":"latency finding","content":"p99 under 40ms in canary"}`, turnRuntime(h))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var res struct {
-		Path     string `json:"path"`
-		ObjectID string `json:"object_id"`
-	}
-	if err := json.Unmarshal([]byte(out.output), &res); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.HasPrefix(res.Path, "/workspace/discovery/") || !strings.HasSuffix(res.Path, ".md") {
-		t.Fatalf("roots save path: %+v", res)
-	}
-
-	if body, err := ms.Route(ctx, res.Path).
-		ReadFile(ctx); err != nil || !strings.Contains(string(body), "p99 under 40ms") {
-		t.Fatalf("ReadFile: %s err=%v", body, err)
-	}
-	id, err := uuid.Parse(res.ObjectID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	obj, err := eng.Get(ctx, brain.Scope{Namespace: ns}, id)
-	if err != nil || !strings.Contains(obj.Content, "p99 under 40ms") || obj.Kind != "Discovery" {
-		t.Fatalf("engine object: %+v err=%v", obj, err)
 	}
 }
 
@@ -479,10 +388,7 @@ func TestRun_workspaceResearchTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 	ns := mustNS(t, "id", uuid.NewString())
-	ms := mustMountTree(t, "research-turn",
-		vfs.At("work", vfs.Local(t.TempDir())),
-		engram.Mount(eng, brain.Scope{Namespace: ns}),
-	)
+	ms := mustMountTree(t, "research-turn", vfs.At("work", vfs.Local(t.TempDir())))
 
 	wd := &recordingWatchdog{}
 	strategy := &scriptedModel{}
@@ -595,7 +501,7 @@ func TestRun_workspaceResearchTurn(t *testing.T) {
 	}
 	mustInvoke("search", `{"query":"unique-research-token"}`)
 	save := mustInvoke("save_discovery", `{"title":"research token","content":"unique-research-token lives in /work/research.md"}`)
-	if !strings.Contains(save, "object_id") {
+	if !strings.Contains(save, `"id"`) || !strings.Contains(save, "research token") {
 		t.Fatalf("save: %s", save)
 	}
 

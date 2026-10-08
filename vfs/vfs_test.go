@@ -198,11 +198,10 @@ func TestMountSession_localSession(t *testing.T) {
 	}
 }
 
-// TestMountSession_memoryWriteAndLimits: Memory has no PutFile, so WriteFile
-// copies through OpenFile; oversize writes and unmounted/invalid paths fail closed.
-func TestMountSession_memoryWriteAndLimits(t *testing.T) {
+// TestMountSession_writeLimits: oversize writes and unmounted or invalid paths fail closed.
+func TestMountSession_writeLimits(t *testing.T) {
 	ctx := t.Context()
-	ms, err := vfs.Tree(vfs.At("mem", vfs.Memory()))(ctx, "mem-sess", vfs.Request{})
+	ms, err := vfs.Tree(vfs.At("mem", vfs.Local(t.TempDir())))(ctx, "mem-sess", vfs.Request{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -4,7 +4,7 @@
 // registration, conversation types (Message, StreamEvent, Todo), and
 // the session checkpoint blob. Domain packages:
 //   - brain owns knowledge retrieval. brain/postgres, brain/helixgraph, and
-//     brain/engram are the store, graph, and file-mount adapters.
+//     brain/postgres and brain/helixgraph are the store and graph adapters.
 //   - vfs owns virtual filesystem mounts and the backend constructors.
 //   - openai, email, and web are optional host tools and the model client.
 //   - mcp owns MCP connection configuration.

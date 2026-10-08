@@ -321,8 +321,8 @@ func (e *Engine) normalizeLimit(limit int) int {
 	return min(limit, e.cfg.MaxLimit)
 }
 
-// MaxEngramReadDir is the hard cap on ListByKind and on an engram directory listing.
-const MaxEngramReadDir = 500
+// maxListByKind is the hard cap on ListByKind.
+const maxListByKind = 500
 
 // ListByKind returns first-class objects of kind (parent_id unset), newest-title order left to the store.
 func (e *Engine) ListByKind(ctx context.Context, scope Scope, kind string, limit int) ([]Object, error) {
@@ -333,8 +333,8 @@ func (e *Engine) ListByKind(ctx context.Context, scope Scope, kind string, limit
 	if err != nil {
 		return nil, err
 	}
-	if limit <= 0 || limit > MaxEngramReadDir {
-		limit = MaxEngramReadDir
+	if limit <= 0 || limit > maxListByKind {
+		limit = maxListByKind
 	}
 	return l.ListByKind(ctx, scope, kind, limit)
 }

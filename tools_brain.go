@@ -5,19 +5,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"path"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
-	"github.com/ryanaldo34/tacklr/brain/engram"
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfsindex"
 )
 
-// brainToolDeps optional VFS+index wiring so save_* / path-native graph can use files.
+// brainToolDeps wires indexed file paths into link and expand.
 type brainToolDeps struct {
 	VFS     *vfs.MountSession
 	Indexer *vfsindex.MountIndexer
@@ -47,13 +45,6 @@ func (b brainTools) scope(call []brain.Attr) (brain.Scope, error) {
 		return brain.Scope{}, err
 	}
 	return brain.Scope{Namespace: ns, SessionID: b.sessionID}, nil
-}
-
-func (b brainTools) brainMountForKind(kind string) (vfs.MountSpec, bool) {
-	if b.deps.VFS == nil {
-		return vfs.MountSpec{}, false
-	}
-	return engram.MountForKind(b.deps.VFS.Specs(), kind)
 }
 
 type readObjectArgs struct {
@@ -271,16 +262,9 @@ type saveObjectArgs struct {
 }
 
 func (b brainTools) newSaveTool(name, display, kind, roleDesc string) *Tool {
-	desc := `Save a ` + roleDesc + ` as kind ` + kind + `.`
-	if _, ok := b.brainMountForKind(""); ok {
-		desc = `Save a ` + roleDesc + ` (kind ` + kind + `) as a Markdown file so it survives later steps as a durable record.
+	desc := `Save a ` + roleDesc + ` as kind ` + kind + `. Call when a finding should survive later steps as a durable record.
 
-On success returns path, id, kind, and title. Fails if title is empty, the kind is invalid, or required properties are missing.`
-	} else {
-		desc += ` Call when a finding should survive later steps as a durable record.
-
-On success returns the full record (id, kind, title, summary, content, properties). Fails if the kind is invalid or required properties are missing.`
-	}
+On success returns the full record (id, kind, title, summary, content, properties). Fails if title is empty, the kind is invalid, or required properties are missing.`
 	return NewTool(ToolConfig{
 		Name:        name,
 		DisplayName: display,
@@ -290,12 +274,8 @@ On success returns the full record (id, kind, title, summary, content, propertie
 		Timeout:     30 * time.Second,
 		Handler: func(ctx context.Context, args saveObjectArgs, runtime HarnessRuntime) (string, error) {
 			runtime.EmitUpdate("Saving knowledge…")
-			if _, ok := b.brainMountForKind(""); ok {
-				out, err := b.saveAsFile(ctx, kind, args)
-				if err != nil {
-					return "", fmt.Errorf("%s: %w", name, err)
-				}
-				return formatBrainJSON(out)
+			if strings.TrimSpace(args.Title) == "" {
+				return "", fmt.Errorf("%s: title is required", name)
 			}
 			obj, err := b.putFromArgs(ctx, kind, args)
 			if err != nil {
@@ -504,15 +484,6 @@ type linkResult struct {
 	EvidenceID   string  `json:"evidence_id,omitempty"`
 }
 
-// saveFileResult is returned by file-backed save_* tools.
-type saveFileResult struct {
-	Path     string    `json:"path"`
-	Rev      string    `json:"rev"`
-	ObjectID uuid.UUID `json:"object_id"`
-	Kind     string    `json:"kind"`
-	Title    string    `json:"title"`
-}
-
 // findLinksResultView adds path fields for agent-facing find_links output.
 type findLinksResultView struct {
 	Links []findLinkHitView `json:"links"`
@@ -578,107 +549,7 @@ func (b brainTools) putFromArgs(ctx context.Context, kind string, args saveObjec
 	return b.engine.Put(ctx, scope, obj)
 }
 
-// saveAsFile writes an Engram Markdown file on the brain Provider mount.
-func (b brainTools) saveAsFile(ctx context.Context, kind string, args saveObjectArgs) (saveFileResult, error) {
-	kind = strings.TrimSpace(kind)
-	if kind == "" {
-		return saveFileResult{}, fmt.Errorf("kind is not configured for this tool; use the matching save_* tool")
-	}
-	title := strings.TrimSpace(args.Title)
-	if title == "" {
-		return saveFileResult{}, fmt.Errorf("title is required; pass a non-empty title")
-	}
-	body := args.Content
-	if body == "" {
-		body = args.Summary
-	}
-	vpath, err := b.resolveEngramSavePath(ctx, kind, title, args.ObjectID, args.Namespace)
-	if err != nil {
-		return saveFileResult{}, err
-	}
-
-	if err := b.deps.VFS.Route(ctx, path.Dir(vpath)).
-		MkdirAll(ctx); err != nil {
-		return saveFileResult{}, err
-	}
-
-	f := engram.EngramFile{
-		Kind:       kind,
-		Slug:       engram.Slugify(title),
-		Title:      title,
-		Properties: args.Properties,
-		Body:       body,
-	}
-	if id, err := parseOptionalUUID(args.ObjectID, "object_id"); err != nil {
-		return saveFileResult{}, err
-	} else if id != nil {
-		f.ID = *id
-	} else {
-		// Allocate before write so commit skips vfs_path lookup and we skip a post-write Get.
-		f.ID = uuid.New()
-	}
-	raw, err := engram.FormatEngram(f)
-	if err != nil {
-		return saveFileResult{}, err
-	}
-
-	if err := b.deps.VFS.Route(ctx, vpath).
-		WriteFile(ctx, raw); err != nil {
-		return saveFileResult{}, err
-	}
-
-	return saveFileResult{
-		Path:     vpath,
-		Rev:      vfs.ContentHash(string(raw)),
-		ObjectID: f.ID,
-		Kind:     kind,
-		Title:    title,
-	}, nil
-}
-
-func (b brainTools) resolveEngramSavePath(ctx context.Context, kind, title, objectID string, ns []brain.Attr) (string, error) {
-	spec, ok := b.brainMountForKind(kind)
-	if !ok {
-		return "", fmt.Errorf("brain files are not mounted; save as a knowledge object instead of a file, or ask the host to mount the brain VFS")
-	}
-	if id, err := parseOptionalUUID(objectID, "object_id"); err != nil {
-		return "", err
-	} else if id != nil {
-		scope, err := b.scope(ns)
-		if err != nil {
-			return "", err
-		}
-		obj, err := b.engine.Read(ctx, scope, *id)
-		if err != nil {
-			return "", err
-		}
-		if p := vfsPathFromProps(obj.Properties); p != "" {
-			return vfs.CleanPath(p)
-		}
-		return "", fmt.Errorf("object_id %s has no vfs_path; cannot update as file", id)
-	}
-	slug := engram.Slugify(title)
-	if slug == "" {
-		slug = "note"
-	}
-	mode := engram.ModePrefix
-	if spec.Params != nil && spec.Params["mode"] != "" {
-		mode = spec.Params["mode"]
-	}
-	base := engram.EngramPath(spec.Point, mode, kind, slug)
-
-	if _, err := b.deps.VFS.Route(ctx, base).
-		Stat(ctx); err == nil {
-		base = strings.TrimSuffix(base, ".md") + "-" + uuid.New().String()[:8] + ".md"
-	} else if !errors.Is(err, vfs.ErrNotExist) {
-		return "", err
-	}
-
-	return base, nil
-}
-
-// resolveFileRef resolves path (preferred) or object_id to a first-class UUID.
-// Engram paths resolve via object vfs_path; artifact paths need an indexed Document.
+// resolveFileRef resolves an indexed file path or an object id to a first-class UUID.
 func (b brainTools) resolveFileRef(ctx context.Context, scope brain.Scope, pathStr, idStr, field string, requireFirstClass bool) (uuid.UUID, string, error) {
 	p := strings.TrimSpace(pathStr)
 	if p != "" {
@@ -710,7 +581,7 @@ func (b brainTools) resolveFileRef(ctx context.Context, scope brain.Scope, pathS
 			}
 			return id, abs, nil
 		}
-		return uuid.Nil, "", fmt.Errorf("%s path %s is not an Engram and is not indexed (index_file first)", field, abs)
+		return uuid.Nil, "", fmt.Errorf("%s path %s is not indexed (index_file first)", field, abs)
 	}
 	idLabel := "object_id"
 	if field != "expand" {
@@ -817,7 +688,7 @@ func parseOptionalUUIDList(raw []string, field string) ([]uuid.UUID, error) {
 // newBrainTools builds knowledge tools. Caller must pass a non-nil engine and SearchContext.
 // save_* tools are registered only for non-empty WriteKinds fields; link only with GraphWriter;
 // find_objects only when GraphObjectSearcher is available; find_links when GraphEdgeSearcher is available.
-// When a brain Provider is mounted, save_* write Engram Markdown; link/expand accept paths.
+// link and expand accept an indexed file path or an object id. save_* calls Engine.Put.
 func newBrainTools(engine *brain.Engine, sc *brain.SearchContext, sessionID string, kinds brain.WriteKinds, deps brainToolDeps) []*Tool {
 	b := brainTools{engine: engine, sc: sc, deps: deps, sessionID: sessionID}
 	tools := []*Tool{

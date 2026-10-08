@@ -42,7 +42,7 @@ func validAlias(name string) error {
 		return err
 	}
 	switch name {
-	case "work", "engram", "skills", "workspace":
+	case "work", "skills", "workspace":
 		return fmt.Errorf("%w: alias %q is reserved", ErrInvalidPath, name)
 	}
 	return nil

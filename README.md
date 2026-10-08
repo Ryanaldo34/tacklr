@@ -78,7 +78,6 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/brain"
-	"github.com/ryanaldo34/tacklr/brain/engram"
 	"github.com/ryanaldo34/tacklr/brain/helixgraph"
 	"github.com/ryanaldo34/tacklr/brain/postgres"
 	"github.com/ryanaldo34/tacklr/session"
@@ -168,7 +167,7 @@ func main() {
 			web.WebSearch(client),
 			web.WebFetch(client),
 		},
-		OpenVFS:    openVFS(jail, eng, ns),
+		OpenVFS:    openVFS(jail),
 		SkillsPath: "/workspace/skills",
 	}
 
@@ -193,12 +192,10 @@ func main() {
 	}
 }
 
-func openVFS(jail string, eng *brain.Engine, ns brain.Namespace) vfs.OpenVFS {
+func openVFS(jail string) vfs.OpenVFS {
 	return func(ctx context.Context, sessionID string, req vfs.Request) (*vfs.MountSession, error) {
 		members := []vfs.Member{
 			vfs.At("work", vfs.Local(jail)),
-			vfs.At("engram", engram.Open(eng, brain.Scope{Namespace: ns})),
-			vfs.At("memory", vfs.Memory()),
 		}
 		if b, ok := vfs.BindingByName(req.Bindings, "drive"); ok && strings.TrimSpace(b.Auth.Token) != "" {
 			h := vfs.NewTokenHolder(b.Auth)
@@ -245,7 +242,7 @@ w := rt.StartWorker()
 
 ACP `_tacklr/vfs/bind` still maps onto `Prompt.Auth`. The worker never sees those tokens in workflow history.
 
-Importing `tacklr` registers built-in interrupts, Word/Excel codecs, and the durable driver adapter. The agent sees `/workspace/work`, `/workspace/engram`. Skills load from `SkillsPath` and reach the model only through `read_skill`. A Drive or SharePoint bind on the prompt adds `/workspace/drive` or `/workspace/sharepoint` for that turn. Tests point the Drive/Graph SDKs at httptest servers with documented REST shapes (`NewGoogleDriveHTTP`, `NewGraph` + `vfs/testhttp`). `WithLexicalOnly` is the explicit no-embedder choice; production hosts pass `brain.WithEmbedder`.
+Importing `tacklr` registers built-in interrupts, Word/Excel codecs, and the durable driver adapter. The agent sees `/workspace/work`. Skills load from `SkillsPath` and reach the model only through `read_skill`. Knowledge records are brain rows, found with `search` and written with `save_*`. A Drive or SharePoint bind on the prompt adds `/workspace/drive` or `/workspace/sharepoint` for that turn. Tests point the Drive/Graph SDKs at httptest servers with documented REST shapes (`NewGoogleDriveHTTP`, `NewGraph` + `vfs/testhttp`). `WithLexicalOnly` is the explicit no-embedder choice; production hosts pass `brain.WithEmbedder`.
 
 `telemetry.Init` installs the process-wide OpenTelemetry providers. With `OTLPEndpoint` (or `OTEL_EXPORTER_OTLP_ENDPOINT`) it exports traces, metrics, and logs over OTLP (gRPC by default, or HTTP). Without an endpoint the tracer does not export. `session/temporal.Dial` replaces that tracer with a replay-safe one that keeps the same export configuration, so workflow replay does not leak spans. Each Prompt or Resume is one `tacklr.turn` span; inference, tools, hand-off, and compress nest under it. `postgres.Store` Query/Exec spans join that same trace. Hosts must not start `tacklr.*` spans themselves. Metrics include turn duration and count, tool calls, model tokens, interrupts, hand-offs, compress, sessions, and checkpoints. Call `Init` before `Dial` when traces should be exported. Details: [`telemetry`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/telemetry).
 
@@ -304,7 +301,7 @@ Register nested agents on `AgentOptions.Specialists`. Tools start work through `
 | Server | `Protocol` over Runtime; ACP is the native option | [`server`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/server) |
 | Telemetry | `telemetry.Init`: OTLP traces/metrics/logs; one `tacklr.turn` span per prompt or resume | [`telemetry`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/telemetry) |
 
-When VFS is wired, the harness injects file tools over virtual paths only. `run_command` requires permission by default. Live names and grep go through `run_command` (`ls` / `fd` / `rg`). With Brain + VFS + a search namespace, knowledge tools attach to `/workspace/engram`. Details: [docs/vfs.md](docs/vfs.md) and [docs/knowledge.md](docs/knowledge.md).
+When VFS is wired, the harness injects file tools over virtual paths only. `run_command` requires permission by default. Live names and grep go through `run_command` (`ls` / `fd` / `rg`). With Brain and a search namespace, knowledge tools call the engine. Details: [docs/vfs.md](docs/vfs.md) and [docs/knowledge.md](docs/knowledge.md).
 
 ---
 
@@ -332,7 +329,7 @@ When VFS is wired, the harness injects file tools over virtual paths only. `run_
 | `brain` | Knowledge engine, store/graph interfaces, in-memory backends |
 | `brain/postgres` | Optional Postgres `brain.Store` |
 | `brain/helixgraph` | Optional Helix graph adapter |
-| `brain/engram` | Optional brain store mounted as files |
+| `brain` | Knowledge records, hybrid search, and the graph |
 | `openai` | OpenAI-compatible model client |
 | `email` | Optional inbox and send tools. `email/gmail` and `email/outlook` are the adapters |
 | `web` | Optional web search and fetch. Exa is the current client |

@@ -94,7 +94,7 @@ func TestPut_catalogEnforced(t *testing.T) {
 			"amount":   10,
 			"when":     time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC),
 			"slug":     "memo",
-			"vfs_path": "/engram/document/memo.md",
+			"vfs_path": "/workspace/work/memo.md",
 		},
 	})
 	if err != nil {

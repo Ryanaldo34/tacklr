@@ -20,16 +20,8 @@
 // postgres, helixgraph, the harness, session, or telemetry; Scope is passed
 // in by the caller.
 //
-// # Engrams as files (vfs.Provider)
-//
-// brain/engram.Open returns a vfs.Open so first-class objects appear as Markdown + YAML
-// files. This package does not import vfs. Layout is host-chosen:
-// mode=prefix (default /engram/<kind-slug>/<slug>.md) or mode=roots (/deal/acme.md).
-// Kind names are host KindSpecs and must be path-safe (no '/' or '..'). Only parent
-// kinds are directories; parts/chunks are not files. Write/Close/PutFile parse,
-// validate, and Put (fail closed). Rename is delete+create. Graph edges stay in
-// the graph backend and show up through path-native link/expand/find_links — not
-// sidecar files.
+// Knowledge records are store rows. Hosts and save_* tools write them with Put.
+// Search and find_exact retrieve them. They are not files on the VFS.
 //
 // SearchContext is the retrieval session surface: host namespace + active ResultSet
 // for continue (replaced on each search, find_exact, find_objects, or large expand).

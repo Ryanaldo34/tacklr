@@ -139,7 +139,7 @@ func TestPostgresStore_liveRetrievalChannels(t *testing.T) {
 	mustExec(t, pool, `
 		INSERT INTO objects (id, kind, title, summary, properties, content, parent_id, position, embedding, namespace, created_at, updated_at)
 		VALUES
-			($1, 'Document', 'OAuth Guide', 'parent', '{"vfs_path":"/engram/document/oauth.md"}', NULL, NULL, NULL, NULL, $2, $3, $3),
+			($1, 'Document', 'OAuth Guide', 'parent', '{"vfs_path":"/workspace/work/oauth.md"}', NULL, NULL, NULL, NULL, $2, $3, $3),
 			($4, 'Chunk', 'pkce flow', '', '{"stage":"open"}', 'oauth pkce implementation details', $1, 1, '[1,0,0]'::vector, $2, $3, $3),
 			($5, 'Chunk', 'unrelated', '', '{}', 'cooking recipes and pasta', $1, 2, '[0,1,0]'::vector, $2, $3, $3),
 			($6, 'Chunk', 'gone', '', '{}', 'soft deleted oauth', $1, 3, '[1,0,0]'::vector, $2, $3, $3)
@@ -157,7 +157,7 @@ func TestPostgresStore_liveRetrievalChannels(t *testing.T) {
 	if err != nil || len(listed) != 1 || listed[0].ID != parentID {
 		t.Fatalf("list by kind: %+v err=%v", listed, err)
 	}
-	byProp, err := store.GetByProperty(ctx, scopeA, brain.PropVFSPath, "/engram/document/oauth.md")
+	byProp, err := store.GetByProperty(ctx, scopeA, brain.PropVFSPath, "/workspace/work/oauth.md")
 	if err != nil || byProp.ID != parentID {
 		t.Fatalf("get by vfs_path: %+v err=%v", byProp, err)
 	}

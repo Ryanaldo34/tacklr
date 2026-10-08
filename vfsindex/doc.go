@@ -68,8 +68,7 @@
 //
 // The tacklr harness creates MountIndexer + AsyncScheduler and registers
 // index_file / unindex when Brain + VFS + search namespace are set.
-// It skips mounts with IndexPolicy=none (engram.Mount sets this) and never
-// remirrors those paths. vfs.MemoryMount is /workspace/memory with policy watch.
+// It skips mounts with IndexPolicy=none.
 //
 // # Kinds
 //

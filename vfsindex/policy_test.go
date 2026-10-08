@@ -21,7 +21,7 @@ func TestBridge_policyAndTrack(t *testing.T) {
 		vfs.At("auto", vfs.Local(t.TempDir())).Indexed("prefix"),
 		vfs.At("off", vfs.Local(t.TempDir())).Indexed("none"),
 		vfs.At("odd", vfs.Local(t.TempDir())).Indexed("unknown-policy"),
-		vfs.MemoryMount(),
+		vfs.At("scratch", vfs.Local(t.TempDir())).Indexed("watch"),
 	)(ctx, "br", vfs.Request{})
 	if err != nil {
 		t.Fatal(err)
@@ -53,9 +53,8 @@ func TestBridge_policyAndTrack(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = br.Close() })
 
-	if _, err := ms.Route(ctx, MemoryPoint).
-		Stat(ctx); err != nil {
-		t.Fatalf("/workspace/memory: %v", err)
+	if br.PolicyAt("/workspace/scratch/a.txt") != PolicyWatch {
+		t.Fatalf("watch: %s", br.PolicyAt("/workspace/scratch/a.txt"))
 	}
 
 	if br.PolicyAt("/workspace/work/a.txt") != PolicySelective {
@@ -84,15 +83,11 @@ func TestBridge_policyAndTrack(t *testing.T) {
 		t.Fatal("tracked path")
 	}
 
-	if err := ms.Route(ctx, "/workspace/memory/strict.txt").
-		WriteFile(ctx, []byte("strict-memory-phrase\n")); err != nil {
+	if err := ms.Route(ctx, "/workspace/scratch/strict.txt").
+		WriteFile(ctx, []byte("strict-watch-phrase\n")); err != nil {
 		t.Fatal(err)
 	}
-
-	page, err := eng.Search(ctx, scope, brain.SearchRequest{Query: "strict-memory-phrase"}, brain.NewSearchContext())
-	if err != nil || len(page.Objects) == 0 {
-		t.Fatalf("strict memory index: page=%+v err=%v", page, err)
-	}
+	waitIndexed(t, eng, scope, "strict-watch-phrase")
 
 	if err := ms.Route(ctx, "/workspace/auto/live.txt").
 		WriteFile(ctx, []byte("live-auto-phrase\n")); err != nil {

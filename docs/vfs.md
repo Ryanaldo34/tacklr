@@ -1,6 +1,6 @@
 # Virtual filesystem (`vfs`)
 
-Tacklr’s virtual filesystem gives agents one path-based interface over storage backends (local disk, S3, **brain Engrams**, Google Drive / Docs, and Microsoft Graph files). Hosts build a turn tree with `vfs.Tree` / `vfs.At`; the client supplies credentials before a turn; agents only see virtual paths under `/workspace` (`/workspace/work/main.go`, `/workspace/engram/deal/acme.md`, `/workspace/contracts/nda.pdf`).
+Tacklr’s virtual filesystem gives agents one path-based interface over storage backends (local disk, S3, Google Drive / Docs, and Microsoft Graph files). Hosts build a turn tree with `vfs.Tree` / `vfs.At`; the client supplies credentials before a turn; agents only see virtual paths under `/workspace` (`/workspace/work/main.go`, `/workspace/contracts/nda.pdf`). Knowledge records stay in the brain and are not a mount.
 
 Package: [`github.com/ryanaldo34/tacklr/vfs`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/vfs).
 
@@ -63,7 +63,6 @@ The only top-level mount is **`/workspace`**. Hosts close over clients in `vfs.O
 ```go
 open := vfs.Tree(
 	vfs.At("work", vfs.Local("/var/agent/scratch")),
-	vfs.At("engram", engram.Open(eng, scope)),
 )
 ms, err := open(ctx, "sess-1", vfs.Request{})
 ```
@@ -403,51 +402,14 @@ Full model, search, and graph: **[docs/knowledge.md](knowledge.md)**.
 
 | Job | Store | Sync |
 |-----|--------|------|
-| **Artifact file** (`/work`, `/workspace`, S3, …) | Local/S3/Drive/Graph bytes | **IndexPath** (hash, Document+Chunk) |
-| **Engram** | Engine object | **brain.Provider** read/write (Markdown + YAML) |
+| **Workspace file** | Local/S3/Drive/Graph bytes | **IndexPath** (hash, Document+Chunk) |
+| **Knowledge record** | Brain row | `save_*` calls `Engine.Put`. Search reads the store |
 
-`vfs` never imports `brain`. Brain implements `vfs.Provider`. Package
-[`vfsindex`](../vfsindex) indexes **non-brain** mounts only.
+`vfs` never imports `brain`. Package
+[`vfsindex`](../vfsindex) copies mounted files into brain Documents and Chunks.
 
-### Engrams as files (`brain.Provider`)
-
-Host-defined `KindSpec`s are domains (Deal, Person are examples, not product types).
-Kind names must be path-safe: no `/` or `..`. Only **parent** kinds become directories;
-parts/chunks are never files. See [knowledge.md](knowledge.md) for the file format,
-write-through sequence, and `save_*` behavior.
-
-**Factory params** (`MountSpec.Profile == "brain"`):
-
-| Param | Meaning |
-|-------|---------|
-| `mode` | `prefix` (default) or `roots` |
-| `kind` | Required for `roots` — one kind per mount (`/deal/acme.md`) |
-| `kinds` | Comma allow-list. Empty catalog: pass `kinds=` or list kinds that already have objects |
-
-```text
-# default harness mount when Brain + VFS + namespace and no host brain mount
-Mount { Point: "/engram", Profile: "brain", IndexPolicy: none, Params: { mode: prefix } }
-→ /engram/deal/acme.md
-
-# host roots layout
-Mount { Point: "/deal", Profile: "brain", Params: { mode: roots, kind: Deal } }
-→ /deal/acme.md
-```
-
-File format is **Markdown + YAML front matter** (`id`, `domain`/`kind`, `slug`, `title`,
-then kind fields). Body → `Object.Content`. A `---` line inside the YAML block ends
-front matter (standard limitation). `vfs_path` is stored on the object, not in the file.
-
-First save without `id` allocates a UUID and rewrites front matter on the next read.
-**Rename** is not a move: delete + create + re-link.
-
-`save_*` writes the Engram file on the Provider when one is mounted; otherwise it
-falls back to `Engine.Put`. Scratch `/memory` is **not** attached when a brain
-Provider mount exists (deprecated for discoveries).
-
-**Shape A graph tools:** `link` / `unlink` / `expand` / `find_links` speak **paths**.
-There are no `.links` directories; `ls` never lists edges. Artifact paths
-must be indexed (`index_file` / prefix policy) before they can be linked.
+`link` / `unlink` / `expand` accept an indexed file path or an object id.
+There are no `.links` directories. A workspace path must be indexed (`index_file` or a prefix/watch policy) before it can be linked. Knowledge records are written with `save_*` and read with `search` and `read_object`.
 
 ### Index policy
 
@@ -465,11 +427,10 @@ Empty → **selective**.
 ```text
   index_file ──┐
   IndexPrefix ─┼──► IndexPath ──► brain Document+Chunks (hash skip)
-  AfterPersist ┘       │  (never walks Profile=="brain")
+  AfterPersist ┘
 ```
 
-Brain-profile mounts set `IndexPolicy=none` automatically and are never re-indexed
-as Document/Chunk artifacts. Engram writes go through the Provider (`Put`), not IndexPath.
+A mount with `IndexPolicy=none` is not indexed. Knowledge records are not files, so they are not indexed here.
 
 ### Decoupling
 
@@ -478,7 +439,7 @@ as Document/Chunk artifacts. Engram writes go through the Provider (`Put`), not 
 | `vfs` | Specs (incl. IndexPolicy string), `AfterPersist` hook only |
 | `brain` | Objects/props only; no VFS |
 | `vfsindex` | Both; owns `IndexPath` / `IndexPrefix` / schedulers / policy helpers |
-| harness (`tacklr`) | engram.Open + `/engram` default, skip-index on brain profile, tools |
+| harness (`tacklr`) | file tools and knowledge tools |
 
 ### Host wiring
 

@@ -4,15 +4,11 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"strings"
 	"sync"
 
 	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
-
-// MemoryPoint is the scratch knowledge alias when no brain Provider exists.
-const MemoryPoint = "/workspace/memory"
 
 // Bridge owns mount→brain index lifecycle: indexer, async reindex, selective
 // track set, prefix/watch warm-up. Harness holds this; it is not the agent loop.
@@ -57,11 +53,8 @@ func Start(ms *vfs.MountSession, eng *brain.Engine, scope brain.Scope) (*Bridge,
 		if !b.ShouldIndex(path) {
 			return nil
 		}
-		if path == MemoryPoint || strings.HasPrefix(path, MemoryPoint+"/") {
-			return b.Indexer.IndexPath(ctx, path)
-		}
-		// Eventual-consistency mounts report queue failures through Observer;
-		// the backend write has already committed and is not rolled back.
+		// Queue failures are reported through Observer. The backend write
+		// has already committed and is not rolled back.
 		_ = b.sched.Notify(ctx, path, ReasonSync)
 		return nil
 	})
