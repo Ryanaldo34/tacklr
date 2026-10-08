@@ -66,10 +66,9 @@ The host runs:
 ```go
 c, err := tacklrtemporal.Dial(client.Options{HostPort: temporalHost})
 cfg := tacklrtemporal.Config{
-	Agent:      agent,
-	Snapshots:  snaps,   // optional; zero is memory
-	Secrets:    secrets, // optional; zero is memory
-	Projection: vfs.DirectProjection{},
+	Agent:     agent,
+	Snapshots: snaps,   // optional; zero is memory
+	Secrets:   secrets, // optional; zero is memory
 }
 rt := tacklrtemporal.Open(c, cfg)
 w := rt.StartWorker()

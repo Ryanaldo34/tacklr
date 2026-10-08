@@ -21,7 +21,7 @@ func TestBridge_policyAndTrack(t *testing.T) {
 		vfs.At("auto", vfs.Local(t.TempDir())).Indexed("prefix"),
 		vfs.At("off", vfs.Local(t.TempDir())).Indexed("none"),
 		vfs.At("odd", vfs.Local(t.TempDir())).Indexed("unknown-policy"),
-		vfs.At("memory", vfs.Memory()),
+		vfs.MemoryMount(),
 	)(ctx, "br", vfs.Request{})
 	if err != nil {
 		t.Fatal(err)
@@ -32,7 +32,9 @@ func TestBridge_policyAndTrack(t *testing.T) {
 		composed = append(composed, path)
 		return nil
 	})
-	if err := ms.WriteFile(ctx, "/workspace/auto/seed.txt", []byte("warmup-phrase-xyz\n")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/auto/seed.txt").
+		WriteFile(ctx, []byte("warmup-phrase-xyz\n")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -51,9 +53,11 @@ func TestBridge_policyAndTrack(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = br.Close() })
 
-	if _, err := ms.Stat(ctx, MemoryPoint); err != nil {
+	if _, err := ms.Route(ctx, MemoryPoint).
+		Stat(ctx); err != nil {
 		t.Fatalf("/workspace/memory: %v", err)
 	}
+
 	if br.PolicyAt("/workspace/work/a.txt") != PolicySelective {
 		t.Fatalf("default policy: %s", br.PolicyAt("/workspace/work/a.txt"))
 	}
@@ -79,34 +83,43 @@ func TestBridge_policyAndTrack(t *testing.T) {
 	if !br.ShouldIndex("/workspace/work/a.txt") {
 		t.Fatal("tracked path")
 	}
-	if err := ms.WriteFile(ctx, "/workspace/memory/strict.txt", []byte("strict-memory-phrase\n")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/memory/strict.txt").
+		WriteFile(ctx, []byte("strict-memory-phrase\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	page, err := eng.Search(ctx, scope, brain.SearchRequest{Query: "strict-memory-phrase"}, brain.NewSearchContext())
 	if err != nil || len(page.Objects) == 0 {
 		t.Fatalf("strict memory index: page=%+v err=%v", page, err)
 	}
 
-	if err := ms.WriteFile(ctx, "/workspace/auto/live.txt", []byte("live-auto-phrase\n")); err != nil {
+	if err := ms.Route(ctx, "/workspace/auto/live.txt").
+		WriteFile(ctx, []byte("live-auto-phrase\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	if len(composed) == 0 {
 		t.Fatal("expected composed AfterPersist")
 	}
 	waitIndexed(t, eng, scope, "live-auto-phrase")
 	waitIndexed(t, eng, scope, "warmup-phrase-xyz")
 
-	if err := ms.WriteFile(ctx, "/workspace/off/secret.txt", []byte("off-secret-token\n")); err != nil {
+	if err := ms.Route(ctx, "/workspace/off/secret.txt").
+		WriteFile(ctx, []byte("off-secret-token\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	res, err := br.Indexer.IndexPathResult(ctx, "/workspace/off/secret.txt")
 	if err != nil || res != PathSkipped {
 		t.Fatalf("none IndexPath: res=%q err=%v", res, err)
 	}
 
-	if err := ms.WriteFile(ctx, "/workspace/work/a.txt", []byte("tracked-selective-phrase\n")); err != nil {
+	if err := ms.Route(ctx, "/workspace/work/a.txt").
+		WriteFile(ctx, []byte("tracked-selective-phrase\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	waitIndexed(t, eng, scope, "tracked-selective-phrase")
 
 	br.Untrack("/workspace/work/a.txt")

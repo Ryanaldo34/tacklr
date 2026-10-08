@@ -98,7 +98,7 @@ func (a *activities) Inference(ctx context.Context, in session.InferenceInput) (
 	if attempt > 1 {
 		_ = a.publish(ctx, stream, in.SessionID, session.TopicRetry, tacklr.StreamEvent{Type: tacklr.StreamEventError, Content: "retry"}, true)
 	}
-	h, ms, skillsMS, rev, err := a.harness(ctx, in.SessionID, in.Rec, in.MCPServers, in.State)
+	h, ms, rev, err := a.harness(ctx, in.SessionID, in.Rec, in.MCPServers, in.State)
 	if err != nil {
 		pub := err
 		if err := ctx.Err(); err != nil {
@@ -109,7 +109,7 @@ func (a *activities) Inference(ctx context.Context, in session.InferenceInput) (
 	}
 	defer func() {
 		h.Close()
-		adapter.CloseTurnTrees(ms, skillsMS)
+		adapter.CloseTurnVFS(ms)
 	}()
 	eng := h.Drive()
 	out, stop := tacklr.PipeStreamEvents(a.emitter(ctx, stream, in.SessionID))
@@ -184,14 +184,14 @@ func (a *activities) Tool(ctx context.Context, in session.ToolInput) (session.To
 	if attempt > 1 {
 		_ = a.publish(ctx, stream, in.SessionID, session.TopicRetry, tacklr.StreamEvent{Type: tacklr.StreamEventError, Content: "retry"}, true)
 	}
-	h, ms, skillsMS, rev, err := a.harness(ctx, in.SessionID, in.Rec, in.MCPServers, in.State)
+	h, ms, rev, err := a.harness(ctx, in.SessionID, in.Rec, in.MCPServers, in.State)
 	if err != nil {
 		slog.ErrorContext(ctx, "tool harness", "area", telemetry.AreaHarness, "error", err)
 		return session.ToolOutput{}, activityError(ctx, err)
 	}
 	defer func() {
 		h.Close()
-		adapter.CloseTurnTrees(ms, skillsMS)
+		adapter.CloseTurnVFS(ms)
 	}()
 	kids := &activityChildren{
 		parent: in.SessionID,
@@ -255,13 +255,13 @@ func (a *activities) RunJob(ctx context.Context, in runJobInput) (string, error)
 }
 
 func (a *activities) CommitToolOutput(ctx context.Context, in session.CommitInput) (session.ToolOutput, error) {
-	h, ms, skillsMS, rev, err := a.harness(ctx, in.SessionID, in.Rec, in.MCPServers, in.State)
+	h, ms, rev, err := a.harness(ctx, in.SessionID, in.Rec, in.MCPServers, in.State)
 	if err != nil {
 		return session.ToolOutput{}, activityError(ctx, err)
 	}
 	defer func() {
 		h.Close()
-		adapter.CloseTurnTrees(ms, skillsMS)
+		adapter.CloseTurnVFS(ms)
 	}()
 	h.Drive().RecordToolResult(in.Call, in.Output)
 	if _, err = a.save(ctx, in.SessionID, h, rev, in.Rec); err != nil {
@@ -280,39 +280,35 @@ func (a *activities) CommitToolOutput(ctx context.Context, in session.CommitInpu
 	return session.ToolOutput{}, nil
 }
 
-func (a *activities) harness(ctx context.Context, id session.SessionID, rec session.Snapshot, extraMCP []mcp.MCPConfig, state map[string]any) (*tacklr.TurnManager, *vfs.MountSession, *vfs.MountSession, session.Revision, error) {
+func (a *activities) harness(ctx context.Context, id session.SessionID, rec session.Snapshot, extraMCP []mcp.MCPConfig, state map[string]any) (*tacklr.TurnManager, *vfs.MountSession, session.Revision, error) {
 	sec, err := a.Secrets.Get(ctx, id)
 	if err != nil {
-		return nil, nil, nil, "", err
+		return nil, nil, "", err
 	}
 	if len(sec.Auth.Bindings) == 0 && rec.Parent != "" {
 		sec, err = a.Secrets.Get(ctx, rec.Parent)
 		if err != nil {
-			return nil, nil, nil, "", err
+			return nil, nil, "", err
 		}
 	}
 	spec := a.Agent
 	if rec.Specialist != "" {
 		over, err := adapter.OverlaySpecialist(spec, rec.Specialist)
 		if err != nil {
-			return nil, nil, nil, "", err
+			return nil, nil, "", err
 		}
 		spec = over
 	}
-	proj := a.Projection
-	if proj == nil {
-		proj = vfs.DirectProjection{}
-	}
-	h, ms, skillsMS, err := adapter.ConstructTurn(ctx, spec, string(id), session.BindingsForTurn(rec.Mounts, sec.Auth), proj, extraMCP)
+	h, ms, err := adapter.ConstructTurn(ctx, spec, string(id), session.BindingsForTurn(rec.Mounts, sec.Auth), a.Projection, extraMCP)
 	if err != nil {
-		return nil, nil, nil, "", err
+		return nil, nil, "", err
 	}
 	rev, err := adapter.RestoreTurn(ctx, a.Snapshots, id, h, state)
 	if err != nil {
-		adapter.AbandonTurn(h, ms, skillsMS)
-		return nil, nil, nil, "", err
+		adapter.AbandonTurn(h, ms)
+		return nil, nil, "", err
 	}
-	return h, ms, skillsMS, rev, nil
+	return h, ms, rev, nil
 }
 
 func (a *activities) save(ctx context.Context, id session.SessionID, h *tacklr.TurnManager, expected session.Revision, rec session.Snapshot) (session.Revision, error) {

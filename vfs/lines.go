@@ -45,7 +45,7 @@ type LineWindow struct {
 //
 // If the file ends before end, the available lines are returned with EOF=true
 // (not ErrLineOutOfRange). ErrLineOutOfRange only when start is past EOF.
-func (m *MountSession) ReadLines(ctx context.Context, virtualPath string, start, end int) (LineWindow, error) {
+func (r Route) ReadLines(ctx context.Context, start, end int) (LineWindow, error) {
 	if start < 1 || end < start {
 		return LineWindow{}, ErrLineOutOfRange
 	}
@@ -53,18 +53,17 @@ func (m *MountSession) ReadLines(ctx context.Context, virtualPath string, start,
 		end = start + MaxLinesPerWindow
 	}
 
-	cleaned, err := cleanVirtualPath(virtualPath)
-	if err != nil {
-		return LineWindow{}, err
+	if r.err != nil {
+		return LineWindow{}, r.err
 	}
-	// Prefer full IR when the object is within the materialize cap.
-	if fi, stErr := m.Stat(ctx, cleaned); stErr == nil && !fi.IsDir && fi.Size >= 0 && fi.Size <= int64(MaxReadFileBytes) {
-		if doc, rerr := m.ReadText(ctx, cleaned); rerr == nil {
+	cleaned := r.virtual()
+	if fi, stErr := r.Stat(ctx); stErr == nil && !fi.IsDir && fi.Size >= 0 && fi.Size <= int64(MaxReadFileBytes) {
+		if doc, rerr := r.ReadText(ctx); rerr == nil {
 			return lineWindowFromDoc(cleaned, doc, start, end)
 		}
 	}
 
-	f, err := m.Open(ctx, cleaned)
+	f, err := r.Open(ctx)
 	if err != nil {
 		return LineWindow{}, err
 	}
@@ -73,11 +72,11 @@ func (m *MountSession) ReadLines(ctx context.Context, virtualPath string, start,
 	if start == 1 && end == 1 {
 		return LineWindow{Path: cleaned, Start: 1, End: 1, NextStart: 1}, nil
 	}
-	r, ok := f.(io.Reader)
+	rd, ok := f.(io.Reader)
 	if !ok {
 		return LineWindow{}, fmt.Errorf("vfs: file is not readable")
 	}
-	return readLineRange(r, cleaned, start, end)
+	return readLineRange(rd, cleaned, start, end)
 }
 
 func lineWindowFromDoc(path string, doc Textual, start, end int) (LineWindow, error) {

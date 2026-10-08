@@ -73,32 +73,44 @@ func TestMountSession_azureBlobAzurite(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = ms.Close() })
 
-	if err := ms.WriteFile(ctx, "/workspace/data/hello.go", []byte("package main\n")); err != nil {
+	if err := ms.Route(ctx, "/workspace/data/hello.go").
+		WriteFile(ctx, []byte("package main\n")); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	b, err := ms.ReadFile(ctx, "/workspace/data/hello.go")
+
+	b, err := ms.Route(ctx, "/workspace/data/hello.go").
+		ReadFile(ctx)
 	if err != nil || string(b) != "package main\n" {
 		t.Fatalf("ReadFile = %q err=%v", b, err)
 	}
-	st, err := ms.Stat(ctx, "/workspace/data/hello.go")
+
+	st, err := ms.Route(ctx, "/workspace/data/hello.go").
+		Stat(ctx)
 	if err != nil || st.IsDir || st.Size != int64(len("package main\n")) {
 		t.Fatalf("Stat file = %+v err=%v", st, err)
 	}
 
-	if err := ms.MkdirAll(ctx, "/workspace/data/sub/dir"); err != nil {
+	if err := ms.Route(ctx, "/workspace/data/sub/dir").
+		MkdirAll(ctx); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
-	if err := ms.WriteFile(ctx, "/workspace/data/sub/dir/a.txt", []byte("a")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/data/sub/dir/a.txt").
+		WriteFile(ctx, []byte("a")); err != nil {
 		t.Fatalf("WriteFile nested: %v", err)
 	}
-	ents, err := ms.ReadDir(ctx, "/workspace/data/sub/dir")
+
+	ents, err := ms.Route(ctx, "/workspace/data/sub/dir").
+		ReadDir(ctx)
 	if err != nil {
 		t.Fatalf("ReadDir: %v", err)
 	}
 	if len(ents) != 1 || ents[0].Name != "a.txt" || ents[0].IsDir {
 		t.Fatalf("ReadDir = %+v", ents)
 	}
-	ents, err = ms.ReadDir(ctx, "/workspace/data/sub")
+
+	ents, err = ms.Route(ctx, "/workspace/data/sub").
+		ReadDir(ctx)
 	if err != nil {
 		t.Fatalf("ReadDir sub: %v", err)
 	}
@@ -112,30 +124,38 @@ func TestMountSession_azureBlobAzurite(t *testing.T) {
 		t.Fatalf("expected dir in /data/sub: %+v", ents)
 	}
 
-	if err := ms.Remove(ctx, "/workspace/data/sub/dir/a.txt"); err != nil {
+	if err := ms.Route(ctx, "/workspace/data/sub/dir/a.txt").
+		Remove(ctx); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
-	if _, err := ms.Stat(ctx, "/workspace/data/sub/dir/a.txt"); !errors.Is(err, vfs.ErrNotExist) {
+
+	if _, err := ms.Route(ctx, "/workspace/data/sub/dir/a.txt").
+		Stat(ctx); !errors.Is(err, vfs.ErrNotExist) {
 		t.Fatalf("after remove: %v", err)
 	}
 
-	if err := ms.WriteFile(ctx, "/workspace/ro/x.txt", []byte("no")); !errors.Is(err, vfs.ErrReadOnly) {
+	if err := ms.Route(ctx, "/workspace/ro/x.txt").
+		WriteFile(ctx, []byte("no")); !errors.Is(err, vfs.ErrReadOnly) {
 		t.Fatalf("ro write: %v", err)
 	}
 
-	if err := ms.WriteFile(ctx, "/workspace/data/excl.txt", []byte("1")); err != nil {
+	if err := ms.Route(ctx, "/workspace/data/excl.txt").
+		WriteFile(ctx, []byte("1")); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.WriteFile(ctx, "/workspace/data/excl.txt", []byte("2")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/data/excl.txt").
+		WriteFile(ctx, []byte("2")); err != nil {
 		t.Fatal(err)
 	}
-	b, err = ms.ReadFile(ctx, "/workspace/data/excl.txt")
-	if err != nil || string(b) != "2" {
+
+	if b, err := ms.Route(ctx, "/workspace/data/excl.txt").
+		ReadFile(ctx); err != nil || string(b) != "2" {
 		t.Fatalf("overwrite: %q %v", b, err)
 	}
 
-	st, err = ms.Stat(ctx, "/workspace/data/sub/dir")
-	if err != nil || !st.IsDir {
+	if st, err := ms.Route(ctx, "/workspace/data/sub/dir").
+		Stat(ctx); err != nil || !st.IsDir {
 		t.Fatalf("Stat dir = %+v err=%v", st, err)
 	}
 }

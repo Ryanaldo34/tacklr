@@ -14,7 +14,6 @@ import (
 	"github.com/ryanaldo34/tacklr/session"
 	"github.com/ryanaldo34/tacklr/session/temporal"
 	"github.com/ryanaldo34/tacklr/telemetry"
-	"github.com/ryanaldo34/tacklr/vfs"
 )
 
 var traceOnce sync.Once
@@ -43,7 +42,6 @@ func Runtime(t testing.TB, agent tacklr.AgentOptions) session.Runtime {
 		Snapshots:      session.NewMemorySnapshot(),
 		Fallback:       session.NewMemoryEventLog(),
 		Secrets:        session.NewMemorySecretStorage(),
-		Projection:     vfs.DirectProjection{},
 		DisableStreams: true,
 	}
 	rt := temporal.Open(c, cfg)

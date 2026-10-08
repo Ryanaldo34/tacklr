@@ -45,67 +45,13 @@ func decodeProviderDocument(ctx context.Context, name string, fi FileInfo, data 
 	return reg.Decode(ctx, name, mt, data)
 }
 
-// OpenDocument loads a virtual path into a Document IR via the mount's provider.
-// The returned Textual is a fresh decode (safe to edit). reg nil uses DefaultContentRegistry().
-func (m *MountSession) OpenDocument(ctx context.Context, virtualPath string, reg *ContentRegistry) (Document, error) {
-	cleaned, err := cleanVirtualPath(virtualPath)
-	if err != nil {
-		return nil, err
-	}
-	p, rel, err := m.at(ctx, cleaned, false)
-	if err != nil {
-		return nil, err
-	}
-	db, ok := p.(documentBackend)
-	if !ok {
-		return nil, ErrNotSupported
-	}
-	if reg == nil {
-		reg = DefaultContentRegistry()
-	}
-	doc, err := db.OpenDocument(ctx, rel, reg)
-	if err != nil {
-		return nil, err
-	}
-	return bindDocument(doc, cleaned), nil
-}
-
-// ReadText opens a virtual path as Textual IR (clone; safe to edit).
-func (m *MountSession) ReadText(ctx context.Context, virtualPath string) (Textual, error) {
-	doc, err := m.OpenDocument(ctx, virtualPath, nil)
-	if err != nil {
-		return nil, err
-	}
-	t, ok := doc.(Textual)
-	if !ok {
-		return nil, ErrNotTextual
-	}
-	m.rememberRev(t.Path(), ContentToken(t))
-	return t, nil
-}
-
-// WriteDocument asks the mount's provider to translate IR and persist now.
+// WriteDocument asks the provider for the document path to translate IR and persist.
 func (m *MountSession) WriteDocument(ctx context.Context, doc Document) error {
 	t, ok := doc.(Textual)
 	if !ok {
 		return ErrNotTextual
 	}
-	cleaned, err := cleanVirtualPath(t.Path())
-	if err != nil {
-		return err
-	}
-	p, rel, err := m.at(ctx, cleaned, true)
-	if err != nil {
-		return err
-	}
-	db, ok := p.(documentBackend)
-	if !ok {
-		return ErrNotSupported
-	}
-	if err := db.WriteDocument(ctx, rel, doc); err != nil {
-		return err
-	}
-	return m.fireAfterPersist(ctx, cleaned)
+	return m.Route(ctx, t.Path()).WriteDocument(ctx, doc)
 }
 
 func bindDocument(doc Document, virtual string) Document {

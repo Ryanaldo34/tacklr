@@ -43,18 +43,18 @@ func ContentToken(t Textual) string {
 // ContentRev hashes the session-visible body: ReadText when textual (same
 // bytes FUSE and the read tool show), otherwise ReadFile.
 func (m *MountSession) ContentRev(ctx context.Context, virtualPath string) (ContentRev, error) {
-	cleaned, err := cleanVirtualPath(virtualPath)
+	cleaned, err := CleanPath(virtualPath)
 	if err != nil {
 		return ContentRev{}, err
 	}
-	t, err := m.ReadText(ctx, cleaned)
+	t, err := m.Route(ctx, cleaned).ReadText(ctx)
 	if err == nil {
 		return ContentRev{Path: cleaned, Hash: ContentToken(t)}, nil
 	}
 	if !errors.Is(err, ErrNoCodec) && !errors.Is(err, ErrNotTextual) && !errors.Is(err, ErrNotSupported) {
 		return ContentRev{}, err
 	}
-	raw, err := m.ReadFile(ctx, cleaned)
+	raw, err := m.Route(ctx, cleaned).ReadFile(ctx)
 	if err != nil {
 		return ContentRev{}, err
 	}

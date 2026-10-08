@@ -1436,7 +1436,7 @@ func TestSessionWorkflow_readSkillReturnsTheSkillBody(t *testing.T) {
 	env := newTestWorkflow(t)
 	agent := tacklr.AgentOptions{
 		Model: model, MaxWindowSize: 8192,
-		OpenSkills: vfs.Tree(vfs.At("skills", vfs.Local(pack))),
+		SkillsPath: pack,
 	}
 	_, log := registerSession(env, agent)
 	id := session.SessionID("sess-skill")

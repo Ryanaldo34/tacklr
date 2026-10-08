@@ -80,7 +80,9 @@ func (ms *MountSession) Apply(ctx context.Context, virtualPath string, mut Mutat
 		return ApplyResult{}, fmt.Errorf("write: pass only one change: content, line range, or block_id")
 	}
 
-	fi, err := ms.Stat(ctx, p)
+	fi, err := ms.Route(ctx, p).
+		Stat(ctx)
+
 	exists := err == nil
 	if err != nil && !errors.Is(err, ErrNotExist) {
 		return ApplyResult{}, err
@@ -177,29 +179,19 @@ func (ms *MountSession) createMediaType(p, requested string, sample []byte) stri
 }
 
 func (ms *MountSession) nativeRichMediaType(p string) string {
-	e, _, rel, err := ms.table().resolveEntry(p)
+	rt, err := ms.lookup(p)
 	if err != nil {
 		return ""
 	}
-	return nativeRichOf(e.provider, rel)
+	return nativeRichOf(rt.Provider)
 }
 
-func nativeRichOf(p Provider, rel string) string {
-	switch t := p.(type) {
+func nativeRichOf(p Provider) string {
+	switch p.(type) {
 	case *driveProvider:
 		return mimeGoogleDocument
 	case *graphProvider:
 		return extMediaTypes[".docx"]
-	case workspaceProvider:
-		alias, rest, err := splitAlias(rel)
-		if err != nil || alias == "" {
-			return ""
-		}
-		m, err := t.lookup(alias)
-		if err != nil {
-			return ""
-		}
-		return nativeRichOf(m.inner, rest)
 	default:
 		return ""
 	}
@@ -219,7 +211,8 @@ func (ms *MountSession) applySubstring(ctx context.Context, p string, mut Mutati
 	if strings.TrimSpace(mut.Rev) != "" {
 		doc, err = ms.checkout(ctx, p, mut.Rev)
 	} else {
-		doc, err = ms.ReadText(ctx, p)
+
+		doc, err = ms.Route(ctx, p).ReadText(ctx)
 	}
 	if err != nil {
 		return ApplyResult{}, err
@@ -446,13 +439,13 @@ func (ms *MountSession) checkout(ctx context.Context, p, rev string) (Textual, e
 		expected = ms.storedRev(p)
 	}
 	if expected == "" {
-		return ms.ReadText(ctx, p)
+		return ms.Route(ctx, p).ReadText(ctx)
 	}
 	return ms.loadMatching(ctx, p, expected)
 }
 
 func (ms *MountSession) loadMatching(ctx context.Context, p, expected string) (Textual, error) {
-	doc, err := ms.OpenDocument(ctx, p, nil)
+	doc, err := ms.Route(ctx, p).OpenDocument(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -492,41 +485,19 @@ func (ms *MountSession) retryRichPersist(ctx context.Context, doc Textual) (Text
 	if _, ok := AsRich(doc); !ok {
 		return nil, ErrStaleContent
 	}
-	fresh, err := ms.ReadText(ctx, doc.Path())
+
+	fresh, err := ms.Route(ctx, doc.Path()).ReadText(ctx)
 	if err != nil {
-		return nil, persistWriteErr(err)
+		return nil, err
 	}
 	d, ok := asIR(doc)
 	f, fok := asIR(fresh)
 	if !ok || !fok {
-		return nil, persistWriteErr(ErrConflict)
+		return nil, ErrConflict
 	}
 	d.hint = f.hint
 	if err := ms.WriteDocument(ctx, d); err != nil {
-		return nil, persistWriteErr(err)
+		return nil, err
 	}
 	return d, nil
-}
-
-func persistWriteErr(err error) error {
-	if err == nil {
-		return nil
-	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return err
-	}
-	switch {
-	case errors.Is(err, ErrInvalidWrite),
-		errors.Is(err, ErrNotExist),
-		errors.Is(err, ErrAuthExpired),
-		errors.Is(err, ErrPermission),
-		errors.Is(err, ErrNotSupported),
-		errors.Is(err, ErrReadOnly),
-		errors.Is(err, ErrTooLarge),
-		errors.Is(err, ErrStaleContent),
-		errors.Is(err, ErrUseHTML),
-		errors.Is(err, ErrProjected):
-		return err
-	}
-	return ErrInvalidWrite
 }

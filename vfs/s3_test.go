@@ -70,32 +70,44 @@ func TestMountSession_s3MinIO(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = ms.Close() })
 
-	if err := ms.WriteFile(ctx, "/workspace/data/hello.go", []byte("package main\n")); err != nil {
+	if err := ms.Route(ctx, "/workspace/data/hello.go").
+		WriteFile(ctx, []byte("package main\n")); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	b, err := ms.ReadFile(ctx, "/workspace/data/hello.go")
+
+	b, err := ms.Route(ctx, "/workspace/data/hello.go").
+		ReadFile(ctx)
 	if err != nil || string(b) != "package main\n" {
 		t.Fatalf("ReadFile = %q err=%v", b, err)
 	}
-	st, err := ms.Stat(ctx, "/workspace/data/hello.go")
+
+	st, err := ms.Route(ctx, "/workspace/data/hello.go").
+		Stat(ctx)
 	if err != nil || st.IsDir || st.Size != int64(len("package main\n")) {
 		t.Fatalf("Stat file = %+v err=%v", st, err)
 	}
 
-	if err := ms.MkdirAll(ctx, "/workspace/data/sub/dir"); err != nil {
+	if err := ms.Route(ctx, "/workspace/data/sub/dir").
+		MkdirAll(ctx); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
-	if err := ms.WriteFile(ctx, "/workspace/data/sub/dir/a.txt", []byte("a")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/data/sub/dir/a.txt").
+		WriteFile(ctx, []byte("a")); err != nil {
 		t.Fatalf("WriteFile nested: %v", err)
 	}
-	ents, err := ms.ReadDir(ctx, "/workspace/data/sub/dir")
+
+	ents, err := ms.Route(ctx, "/workspace/data/sub/dir").
+		ReadDir(ctx)
 	if err != nil {
 		t.Fatalf("ReadDir: %v", err)
 	}
 	if len(ents) != 1 || ents[0].Name != "a.txt" || ents[0].IsDir {
 		t.Fatalf("ReadDir = %+v", ents)
 	}
-	ents, err = ms.ReadDir(ctx, "/workspace/data/sub")
+
+	ents, err = ms.Route(ctx, "/workspace/data/sub").
+		ReadDir(ctx)
 	if err != nil {
 		t.Fatalf("ReadDir sub: %v", err)
 	}
@@ -109,38 +121,51 @@ func TestMountSession_s3MinIO(t *testing.T) {
 		t.Fatalf("expected dir in /data/sub: %+v", ents)
 	}
 
-	if err := ms.Remove(ctx, "/workspace/data/sub/dir/a.txt"); err != nil {
+	if err := ms.Route(ctx, "/workspace/data/sub/dir/a.txt").
+		Remove(ctx); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
-	if _, err := ms.Stat(ctx, "/workspace/data/sub/dir/a.txt"); !errors.Is(err, vfs.ErrNotExist) {
+
+	if _, err := ms.Route(ctx, "/workspace/data/sub/dir/a.txt").
+		Stat(ctx); !errors.Is(err, vfs.ErrNotExist) {
 		t.Fatalf("after remove: %v", err)
 	}
 
-	if err := ms.WriteFile(ctx, "/workspace/ro/x.txt", []byte("no")); !errors.Is(err, vfs.ErrReadOnly) {
+	if err := ms.Route(ctx, "/workspace/ro/x.txt").
+		WriteFile(ctx, []byte("no")); !errors.Is(err, vfs.ErrReadOnly) {
 		t.Fatalf("ro write: %v", err)
 	}
 
-	if err := ms.WriteFile(ctx, "/workspace/data/excl.txt", []byte("1")); err != nil {
+	if err := ms.Route(ctx, "/workspace/data/excl.txt").
+		WriteFile(ctx, []byte("1")); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.WriteFile(ctx, "/workspace/data/excl.txt", []byte("2")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/data/excl.txt").
+		WriteFile(ctx, []byte("2")); err != nil {
 		t.Fatal(err)
 	}
-	b, err = ms.ReadFile(ctx, "/workspace/data/excl.txt")
+
+	b, err = ms.Route(ctx, "/workspace/data/excl.txt").
+		ReadFile(ctx)
 	if err != nil || string(b) != "2" {
 		t.Fatalf("overwrite: %q %v", b, err)
 	}
 
-	st, err = ms.Stat(ctx, "/workspace/data/sub/dir")
+	st, err = ms.Route(ctx, "/workspace/data/sub/dir").
+		Stat(ctx)
 	if err != nil || !st.IsDir {
 		t.Fatalf("Stat dir = %+v err=%v", st, err)
 	}
-	st, err = ms.Stat(ctx, "/workspace/data")
+
+	st, err = ms.Route(ctx, "/workspace/data").
+		Stat(ctx)
 	if err != nil || !st.IsDir {
 		t.Fatalf("stat mount root: %+v err=%v", st, err)
 	}
 
-	f, err := ms.Open(ctx, "/workspace/data/hello.go")
+	f, err := ms.Route(ctx, "/workspace/data/hello.go").
+		Open(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,30 +178,43 @@ func TestMountSession_s3MinIO(t *testing.T) {
 		t.Fatalf("Open read: %q err=%v", gotOpen, err)
 	}
 
-	if err := ms.Remove(ctx, "/workspace/data/sub/dir"); err != nil {
+	if err := ms.Route(ctx, "/workspace/data/sub/dir").
+		Remove(ctx); err != nil {
 		t.Fatalf("empty dir remove: %v", err)
 	}
-	if err := ms.WriteFile(ctx, "/workspace/data/sub/keep.txt", []byte("k")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/data/sub/keep.txt").
+		WriteFile(ctx, []byte("k")); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.Remove(ctx, "/workspace/data/sub"); err == nil {
+
+	if err := ms.Route(ctx, "/workspace/data/sub").
+		Remove(ctx); err == nil {
 		t.Fatal("non-empty dir remove")
 	}
-	if err := ms.Remove(ctx, "/workspace/data/missing"); !errors.Is(err, vfs.ErrNotExist) {
+
+	if err := ms.Route(ctx, "/workspace/data/missing").
+		Remove(ctx); !errors.Is(err, vfs.ErrNotExist) {
 		t.Fatalf("remove missing: %v", err)
 	}
 
-	if _, err := ms.ReadDir(ctx, "/workspace/data/hello.go"); err == nil {
+	if _, err := ms.Route(ctx, "/workspace/data/hello.go").
+		ReadDir(ctx); err == nil {
 		t.Fatal("ReadDir file")
 	}
-	if err := ms.MkdirAll(ctx, "/workspace/data/hello.go/nested"); err == nil {
+
+	if err := ms.Route(ctx, "/workspace/data/hello.go/nested").
+		MkdirAll(ctx); err == nil {
 		t.Fatal("MkdirAll through file")
 	}
-	if _, err := ms.ReadText(ctx, "/workspace/data/sub"); err == nil {
+
+	if _, err := ms.Route(ctx, "/workspace/data/sub").
+		ReadText(ctx); err == nil {
 		t.Fatal("ReadText dir")
 	}
 
-	doc, err := ms.ReadText(ctx, "/workspace/data/hello.go")
+	doc, err := ms.Route(ctx, "/workspace/data/hello.go").
+		ReadText(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,8 +224,9 @@ func TestMountSession_s3MinIO(t *testing.T) {
 	if err := ms.WriteDocument(ctx, doc); err != nil {
 		t.Fatal(err)
 	}
-	body, err := ms.ReadFile(ctx, "/workspace/data/hello.go")
-	if err != nil || !strings.Contains(string(body), "edited") {
+
+	if body, err := ms.Route(ctx, "/workspace/data/hello.go").
+		ReadFile(ctx); err != nil || !strings.Contains(string(body), "edited") {
 		t.Fatalf("ReadFile after WriteDocument: %q err=%v", body, err)
 	}
 	if mt, err := ms.Classify(ctx, "/workspace/data/hello.go", nil); err != nil || mt == "" {
@@ -200,19 +239,25 @@ func TestMountSession_s3MinIO(t *testing.T) {
 	putTyped(ctx, t, client, bucket, "runs/1/notes", "# title\n\nbody\n", "text/markdown; charset=utf-8")
 	putTyped(ctx, t, client, bucket, "runs/1/blob", "looks like utf8 text", "image/png")
 	putTyped(ctx, t, client, bucket, "runs/1/main.go", "package main\n", "application/octet-stream")
-	st, err = ms.Stat(ctx, "/workspace/data/notes")
+
+	st, err = ms.Route(ctx, "/workspace/data/notes").
+		Stat(ctx)
 	if err != nil || st.MediaType != "text/markdown" {
 		t.Fatalf("Stat MediaType=%q err=%v", st.MediaType, err)
 	}
-	md, err := ms.ReadText(ctx, "/workspace/data/notes")
-	if err != nil || md.MediaType() != "text/markdown" {
+
+	if md, err := ms.Route(ctx, "/workspace/data/notes").
+		ReadText(ctx); err != nil || md.MediaType() != "text/markdown" {
 		t.Fatalf("hinted markdown: mt=%q err=%v", mediaOf(md), err)
 	}
-	if _, err := ms.OpenDocument(ctx, "/workspace/data/blob", nil); !errors.Is(err, vfs.ErrNoCodec) {
+
+	if _, err := ms.Route(ctx, "/workspace/data/blob").
+		OpenDocument(ctx, nil); !errors.Is(err, vfs.ErrNoCodec) {
 		t.Fatalf("image/png hint should skip sniff: %v", err)
 	}
-	st, err = ms.Stat(ctx, "/workspace/data/main.go")
-	if err != nil || st.MediaType != "text/x-go" {
+
+	if st, err := ms.Route(ctx, "/workspace/data/main.go").
+		Stat(ctx); err != nil || st.MediaType != "text/x-go" {
 		t.Fatalf("octet-stream + .go key: Stat MediaType=%q err=%v", st.MediaType, err)
 	}
 
@@ -270,34 +315,50 @@ func TestMountSession_s3MinIO(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = blobMS.Close() })
-	if err := blobMS.WriteFile(ctx, "/workspace/data/hello.go", []byte("package main\n")); err != nil {
+
+	if err := blobMS.Route(ctx, "/workspace/data/hello.go").
+		WriteFile(ctx, []byte("package main\n")); err != nil {
 		t.Fatal(err)
 	}
-	b, err = blobMS.ReadFile(ctx, "/workspace/data/hello.go")
-	if err != nil || string(b) != "package main\n" {
+
+	if b, err := blobMS.Route(ctx, "/workspace/data/hello.go").
+		ReadFile(ctx); err != nil || string(b) != "package main\n" {
 		t.Fatalf("Blob container param: %q err=%v", b, err)
 	}
 
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
-	if _, err := ms.Stat(canceled, "/workspace/data/hello.go"); !errors.Is(err, context.Canceled) {
+
+	if _, err := ms.Route(canceled, "/workspace/data/hello.go").
+		Stat(canceled); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Stat cancel: %v", err)
 	}
-	if _, err := ms.Open(canceled, "/workspace/data/hello.go"); !errors.Is(err, context.Canceled) {
+
+	if _, err := ms.Route(canceled, "/workspace/data/hello.go").
+		Open(canceled); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Open cancel: %v", err)
 	}
-	if _, err := ms.ReadDir(canceled, "/workspace/data/sub"); !errors.Is(err, context.Canceled) {
+
+	if _, err := ms.Route(canceled, "/workspace/data/sub").
+		ReadDir(canceled); !errors.Is(err, context.Canceled) {
 		t.Fatalf("ReadDir cancel: %v", err)
 	}
-	if err := ms.Remove(canceled, "/workspace/data/excl.txt"); !errors.Is(err, context.Canceled) {
+
+	if err := ms.Route(canceled, "/workspace/data/excl.txt").
+		Remove(canceled); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Remove cancel: %v", err)
 	}
-	if err := ms.MkdirAll(canceled, "/workspace/data/newdir"); !errors.Is(err, context.Canceled) {
+
+	if err := ms.Route(canceled, "/workspace/data/newdir").
+		MkdirAll(canceled); !errors.Is(err, context.Canceled) {
 		t.Fatalf("MkdirAll cancel: %v", err)
 	}
-	if _, err := ms.ReadText(canceled, "/workspace/data/hello.go"); !errors.Is(err, context.Canceled) {
+
+	if _, err := ms.Route(canceled, "/workspace/data/hello.go").
+		ReadText(canceled); !errors.Is(err, context.Canceled) {
 		t.Fatalf("ReadText cancel: %v", err)
 	}
+
 	if err := p.Validate(canceled); err == nil {
 		t.Fatal("Validate canceled")
 	}

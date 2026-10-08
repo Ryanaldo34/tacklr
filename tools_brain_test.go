@@ -636,7 +636,7 @@ func TestBrainTools_engramPathGraph(t *testing.T) {
 	ns := mustNS(t, "id", uuid.NewString())
 	ms := mustMountTree(t, "engram-graph",
 		vfs.At("work", vfs.Local(t.TempDir())),
-		vfs.At("engram", engram.Open(eng, brain.Scope{Namespace: ns})),
+		engram.Mount(eng, brain.Scope{Namespace: ns}),
 	)
 	h := mustNewTurnManager(t, AgentOptions{
 		sessionID:    "engram-graph",
@@ -646,10 +646,13 @@ func TestBrainTools_engramPathGraph(t *testing.T) {
 	t.Cleanup(h.Close)
 	activatePlan(t, h)
 
-	if err := ms.WriteFile(ctx, "/workspace/engram/deal/acme.md", []byte("---\ndomain: Deal\nslug: acme\n---\n\nDeal body.\n")); err != nil {
+	if err := ms.Route(ctx, "/workspace/engram/deal/acme.md").
+		WriteFile(ctx, []byte("---\ndomain: Deal\nslug: acme\n---\n\nDeal body.\n")); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.WriteFile(ctx, "/workspace/engram/person/sam.md", []byte("---\ndomain: Person\nslug: sam\n---\n\nBuyer.\n")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/engram/person/sam.md").
+		WriteFile(ctx, []byte("---\ndomain: Person\nslug: sam\n---\n\nBuyer.\n")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -686,9 +689,11 @@ func TestBrainTools_engramPathGraph(t *testing.T) {
 		t.Fatalf("find_links endpoints: %s", fout.output)
 	}
 
-	if err := ms.WriteFile(ctx, "/workspace/work/doc.md", []byte("# Doc\n\nartifact\n")); err != nil {
+	if err := ms.Route(ctx, "/workspace/work/doc.md").
+		WriteFile(ctx, []byte("# Doc\n\nartifact\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	_, err = link.invoke(ctx, `{
 		"from":"/workspace/work/doc.md","to":"/workspace/engram/deal/acme.md","relation_type":"about"
 	}`, turnRuntime(h))

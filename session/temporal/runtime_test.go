@@ -61,7 +61,7 @@ func newLiveStack(t *testing.T, agent tacklr.AgentOptions) *liveStack {
 	snaps := session.NewMemorySnapshot()
 	log := session.NewMemoryEventLog()
 	secrets := session.NewMemorySecretStorage()
-	cfg := Config{Agent: agent, TaskQueue: tq, Snapshots: snaps, Fallback: log, Projection: vfs.DirectProjection{}, Secrets: secrets}
+	cfg := Config{Agent: agent, TaskQueue: tq, Snapshots: snaps, Fallback: log, Secrets: secrets}
 	rt := Open(c, cfg)
 	w := rt.StartWorker()
 	if err := w.Start(); err != nil {
@@ -506,7 +506,6 @@ func newActs(agent tacklr.AgentOptions, log session.EventLog, disableStreams boo
 	return &activities{
 		Agent:          agent,
 		Snapshots:      session.NewMemorySnapshot(),
-		Projection:     vfs.DirectProjection{},
 		Fallback:       log,
 		DisableStreams: disableStreams,
 		Secrets:        session.NewMemorySecretStorage(),

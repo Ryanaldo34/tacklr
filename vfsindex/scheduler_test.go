@@ -37,7 +37,9 @@ func TestAsyncScheduler_notifyCoalesceAndEventualIndex(t *testing.T) {
 	}
 
 	body := "async uniquephrase alpha\n"
-	if err := ms.WriteFile(ctx, "/workspace/work/a.txt", []byte(body)); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/a.txt").
+		WriteFile(ctx, []byte(body)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -93,9 +95,11 @@ func TestIndexPathResult_andUnindex(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := ms.WriteFile(ctx, "/workspace/work/x.txt", []byte("hello world\n")); err != nil {
+	if err := ms.Route(ctx, "/workspace/work/x.txt").
+		WriteFile(ctx, []byte("hello world\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	res, err := idx.IndexPathResult(ctx, "/workspace/work/x.txt")
 	if err != nil || res != vfsindex.PathIndexed {
 		t.Fatalf("indexed: res=%q err=%v", res, err)
@@ -113,9 +117,12 @@ func TestIndexPathResult_andUnindex(t *testing.T) {
 	if err != nil || !removed {
 		t.Fatalf("unindex: removed=%v err=%v", removed, err)
 	}
-	if _, err := ms.Stat(ctx, "/workspace/work/x.txt"); err != nil {
+
+	if _, err := ms.Route(ctx, "/workspace/work/x.txt").
+		Stat(ctx); err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := eng.Read(ctx, scope, idx.DocumentID("/workspace/work/x.txt")); !errors.Is(err, brain.ErrNotFound) {
 		t.Fatalf("expected soft-deleted parent, got %v", err)
 	}

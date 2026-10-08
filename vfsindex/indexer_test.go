@@ -49,7 +49,9 @@ func TestMountIndexer_indexSearchAndNotify(t *testing.T) {
 	idx.LinesPerChunk = 2
 
 	body := "alpha line\nbeta TODO findme\ngamma line\ndelta line\n"
-	if err := ms.WriteFile(ctx, "/workspace/work/note.txt", []byte(body)); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/note.txt").
+		WriteFile(ctx, []byte(body)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -110,9 +112,12 @@ func TestMountIndexer_indexSearchAndNotify(t *testing.T) {
 	ms.SetAfterPersist(func(ctx context.Context, path string) error {
 		return sched.Notify(ctx, path, vfsindex.ReasonSync)
 	})
-	if err := ms.WriteFile(ctx, "/workspace/work/note.txt", []byte("rewritten uniquephrase\n")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/note.txt").
+		WriteFile(ctx, []byte("rewritten uniquephrase\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	page, err = eng.Search(ctx, scope, brain.SearchRequest{Query: "uniquephrase"}, brain.NewSearchContext())
 	if err != nil {
 		t.Fatal(err)
@@ -130,9 +135,12 @@ func TestMountIndexer_indexSearchAndNotify(t *testing.T) {
 	}
 
 	// Remove file → soft-delete index
-	if err := ms.Remove(ctx, "/workspace/work/note.txt"); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/note.txt").
+		Remove(ctx); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := idx.IndexPath(ctx, "/workspace/work/note.txt"); err != nil {
 		t.Fatal(err)
 	}
@@ -141,18 +149,24 @@ func TestMountIndexer_indexSearchAndNotify(t *testing.T) {
 	}
 
 	// Binary skip by extension
-	if err := ms.WriteFile(ctx, "/workspace/work/pic.png", []byte{0x89, 'P', 'N', 'G', 0, 1, 2}); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/pic.png").
+		WriteFile(ctx, []byte{0x89, 'P', 'N', 'G', 0, 1, 2}); err != nil {
 		t.Fatal(err)
 	}
+
 	stats, err = idx.IndexPrefix(ctx, "/workspace/work", vfsindex.IndexOpts{})
 	if err != nil || stats.Indexed != 0 {
 		t.Fatalf("png skip: %+v err=%v", stats, err)
 	}
 
 	// MaxFiles
-	if err := ms.WriteFile(ctx, "/workspace/work/c.txt", []byte("c\n")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/c.txt").
+		WriteFile(ctx, []byte("c\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	stats, err = idx.IndexPrefix(ctx, "/workspace/work", vfsindex.IndexOpts{MaxFiles: 1})
 	if err != nil || stats.Indexed+stats.Skipped < 1 {
 		t.Fatalf("max files: %+v err=%v", stats, err)
@@ -197,9 +211,12 @@ func TestMountIndexer_markdownBlocksChunks(t *testing.T) {
 	}
 
 	md := "intro line\n\n# Title\n\n## Install\n\npip install x\n\n## API\n\ncall me\n"
-	if err := ms.WriteFile(ctx, "/workspace/work/guide.md", []byte(md)); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/guide.md").
+		WriteFile(ctx, []byte(md)); err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := idx.IndexPrefix(ctx, "/workspace/work", vfsindex.IndexOpts{}); err != nil {
 		t.Fatal(err)
 	}
@@ -266,9 +283,12 @@ func TestMountIndexer_markdownBlocksChunks(t *testing.T) {
 	}
 	oldHash, _ := parent.Properties[vfsindex.PropContentHash].(string)
 	md2 := "intro line\n\n# Title\n\n## Install\n\npip install y\n\n## API\n\ncall me\n"
-	if err := ms.WriteFile(ctx, "/workspace/work/guide.md", []byte(md2)); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/guide.md").
+		WriteFile(ctx, []byte(md2)); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := idx.IndexPath(ctx, "/workspace/work/guide.md"); err != nil {
 		t.Fatal(err)
 	}
@@ -315,9 +335,12 @@ func TestMountIndexer_emptyMarkdownLineChunks(t *testing.T) {
 	idx.LinesPerChunk = 2
 
 	// Empty body → Blocks() nil → line-window path (no preamble block).
-	if err := ms.WriteFile(ctx, "/workspace/work/empty.md", nil); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/empty.md").
+		WriteFile(ctx, nil); err != nil {
 		t.Fatal(err)
 	}
+
 	res, err := idx.IndexPathResult(ctx, "/workspace/work/empty.md")
 	if err != nil || res != vfsindex.PathIndexed {
 		t.Fatalf("empty md index: res=%q err=%v", res, err)
@@ -343,9 +366,12 @@ func TestMountIndexer_emptyMarkdownLineChunks(t *testing.T) {
 	}
 
 	// Non-empty, no headings → single preamble block (structure path, not lineChunks).
-	if err := ms.WriteFile(ctx, "/workspace/work/plain.md", []byte("line one\nline two\nline three\n")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/plain.md").
+		WriteFile(ctx, []byte("line one\nline two\nline three\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := idx.IndexPath(ctx, "/workspace/work/plain.md"); err != nil {
 		t.Fatal(err)
 	}
@@ -397,10 +423,13 @@ func TestMountIndexer_IndexFileResultAndDefaults(t *testing.T) {
 	idx.DocumentKind = ""
 	idx.ChunkKind = ""
 
-	if err := ms.WriteFile(ctx, "/workspace/work/a.txt", []byte("hello searchable-phrase\n")); err != nil {
+	if err := ms.Route(ctx, "/workspace/work/a.txt").
+		WriteFile(ctx, []byte("hello searchable-phrase\n")); err != nil {
 		t.Fatal(err)
 	}
-	st, err := ms.Stat(ctx, "/workspace/work/a.txt")
+
+	st, err := ms.Route(ctx, "/workspace/work/a.txt").
+		Stat(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -412,9 +441,10 @@ func TestMountIndexer_IndexFileResultAndDefaults(t *testing.T) {
 	if err != nil || res != vfsindex.PathSkipped {
 		t.Fatalf("hash skip via IndexFileResult: res=%q err=%v", res, err)
 	}
-
 	// Directory FileInfo
-	dst, err := ms.Stat(ctx, "/workspace/work")
+
+	dst, err := ms.Route(ctx, "/workspace/work").
+		Stat(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -423,14 +453,20 @@ func TestMountIndexer_IndexFileResultAndDefaults(t *testing.T) {
 		t.Fatalf("dir IndexFileResult: res=%q err=%v", res, err)
 	}
 
-	if err := ms.WriteFile(ctx, "/workspace/work/pic.bin", []byte{0x00, 0x01, 0xff}); err != nil {
+	if err := ms.Route(ctx, "/workspace/work/pic.bin").
+		WriteFile(ctx, []byte{0x00, 0x01, 0xff}); err != nil {
 		t.Fatal(err)
 	}
+
 	// .bin may still be text-like via detect; use .png extension gate
-	if err := ms.WriteFile(ctx, "/workspace/work/x.png", []byte{0x89, 'P', 'N', 'G'}); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/x.png").
+		WriteFile(ctx, []byte{0x89, 'P', 'N', 'G'}); err != nil {
 		t.Fatal(err)
 	}
-	pst, err := ms.Stat(ctx, "/workspace/work/x.png")
+
+	pst, err := ms.Route(ctx, "/workspace/work/x.png").
+		Stat(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -466,12 +502,17 @@ func TestMountIndexer_IndexFileResultAndDefaults(t *testing.T) {
 	}
 
 	// Nested walk under prefix
-	if err := ms.MkdirAll(ctx, "/workspace/work/sub"); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/sub").
+		MkdirAll(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.WriteFile(ctx, "/workspace/work/sub/nested.txt", []byte("nested-unique-token\n")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/sub/nested.txt").
+		WriteFile(ctx, []byte("nested-unique-token\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	stats, err := idx.IndexPrefix(ctx, "/workspace/work/sub", vfsindex.IndexOpts{})
 	if err != nil || stats.Indexed < 1 {
 		t.Fatalf("nested prefix: %+v err=%v", stats, err)
@@ -481,9 +522,11 @@ func TestMountIndexer_IndexFileResultAndDefaults(t *testing.T) {
 		t.Fatalf("nested search: %+v err=%v", page.Objects, err)
 	}
 
-	if err := ms.WriteFile(ctx, "/workspace/work/binlike.txt", []byte("ok\x00null")); err != nil {
+	if err := ms.Route(ctx, "/workspace/work/binlike.txt").
+		WriteFile(ctx, []byte("ok\x00null")); err != nil {
 		t.Fatal(err)
 	}
+
 	res, err = idx.IndexPathResult(ctx, "/workspace/work/binlike.txt")
 	if err != nil || res != vfsindex.PathSkipped {
 		t.Fatalf("NUL in text-like file: res=%q err=%v", res, err)
@@ -492,9 +535,12 @@ func TestMountIndexer_IndexFileResultAndDefaults(t *testing.T) {
 	idx.MaxIndexBytes = 32
 	idx.LinesPerChunk = 2
 	long := "head-unique-token\n" + strings.Repeat("wordline\n", 40) + "tail-unique-token\n"
-	if err := ms.WriteFile(ctx, "/workspace/work/long.txt", []byte(long)); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/long.txt").
+		WriteFile(ctx, []byte(long)); err != nil {
 		t.Fatal(err)
 	}
+
 	res, err = idx.IndexPathResult(ctx, "/workspace/work/long.txt")
 	if err != nil || res != vfsindex.PathIndexed {
 		t.Fatalf("long file: res=%q err=%v", res, err)
@@ -505,9 +551,12 @@ func TestMountIndexer_IndexFileResultAndDefaults(t *testing.T) {
 	}
 
 	// PolicyNone member: IndexPath / IndexPrefix report skipped (no Document written).
-	if err := ms.WriteFile(ctx, "/workspace/off/hidden.txt", []byte("hidden-none-token\n")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/off/hidden.txt").
+		WriteFile(ctx, []byte("hidden-none-token\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	res, err = idx.IndexPathResult(ctx, "/workspace/off/hidden.txt")
 	if err != nil || res != vfsindex.PathSkipped {
 		t.Fatalf("policy none: res=%q err=%v", res, err)
@@ -622,7 +671,9 @@ func TestMountIndexer_docsBlockText(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	st, err := ms.Stat(ctx, "/workspace/docs/Spec")
+
+	st, err := ms.Route(ctx, "/workspace/docs/Spec").
+		Stat(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -669,9 +720,12 @@ func TestMountIndexer_unindexLeavesFileThenReindexRecovers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.WriteFile(ctx, "/workspace/work/a.txt", []byte("recoverable-phrase\n")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/a.txt").
+		WriteFile(ctx, []byte("recoverable-phrase\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := idx.IndexPath(ctx, "/workspace/work/a.txt"); err != nil {
 		t.Fatal(err)
 	}
@@ -679,9 +733,12 @@ func TestMountIndexer_unindexLeavesFileThenReindexRecovers(t *testing.T) {
 	if err != nil || !removed {
 		t.Fatalf("unindex: removed=%v err=%v", removed, err)
 	}
-	if _, err := ms.ReadFile(ctx, "/workspace/work/a.txt"); err != nil {
+
+	if _, err := ms.Route(ctx, "/workspace/work/a.txt").
+		ReadFile(ctx); err != nil {
 		t.Fatalf("vfs file must remain: %v", err)
 	}
+
 	page, err := eng.Search(ctx, scope, brain.SearchRequest{Query: "recoverable-phrase"}, brain.NewSearchContext())
 	if err != nil || len(page.Objects) != 0 {
 		t.Fatalf("search after unindex: %+v err=%v", page, err)
@@ -712,15 +769,22 @@ func TestMountIndexer_nonePolicySkippedAndMaxFilesStops(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.WriteFile(ctx, "/workspace/work/a.txt", []byte("one\n")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/a.txt").
+		WriteFile(ctx, []byte("one\n")); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.WriteFile(ctx, "/workspace/work/b.txt", []byte("two\n")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/b.txt").
+		WriteFile(ctx, []byte("two\n")); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.WriteFile(ctx, "/workspace/off/x.txt", []byte("hidden\n")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/off/x.txt").
+		WriteFile(ctx, []byte("hidden\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	stats, err := idx.IndexPrefix(ctx, "/workspace/off", vfsindex.IndexOpts{})
 	if err != nil || stats.Indexed != 0 {
 		t.Fatalf("none prefix: %+v err=%v", stats, err)

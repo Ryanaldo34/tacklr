@@ -41,9 +41,9 @@ The **agent file catalog** is collapsed. Discovery (`find_files`, `find_content`
 | FUSE | Runtime via `vfs.Projection.Attach` | Attach after construct; skip if `HostDir() != ""` |
 | TurnManager | Turn | `NewTurnManager` with `MountSession` set; `Close` parks MCP/vfsindex — **does not** unmount FUSE (workers inherit) |
 | IR | Provider | `WriteDocument` / `WriteFile` persist now. There is no session dirty cache (`vfs/cache.go` is gone). `ReadText` is provider plaintext. |
-| Tests without `/dev/fuse` | `DirectProjection` | `Available()==true`, `Attach` is a no-op; VFS tools work; `run_command` still needs `HostDir` |
+| Tests and in-process hosts | nil `Projection` | `MountSession` is the tree; `run_command` still needs `HostDir` |
 
-**Production without a FUSE device.** `OpenTurnVFS` returns nil when `!projection.Available()`. There is no MountSession, so no VFS tools and no `run_command`. Tests that need the tree inject `DirectProjection`. Embedders that want the same in-process tree pass a `MountSession` themselves.
+**In-process tree.** A nil `Projection` still builds the `MountSession`. VFS tools work. `run_command` needs `HostDir`, which `FuseProjection` sets. `FuseMount` returns the kernel error when the mount cannot start.
 
 **Path identity (shipped).** FUSE root is virtual `/`. The only `Specs()` point is `/workspace`. `FuseMount` rejects multi-segment points. Hosts `At("work", vfs.Local(jail))`. Agent tools take `/workspace/work/note.md`. Host commands take `workspace/work/note.md` relative to `HostDir()`.
 
@@ -57,13 +57,13 @@ The **agent file catalog** is collapsed. Discovery (`find_files`, `find_content`
 
 | Item | Where |
 |------|--------|
-| Zero FUSE TTLs; single-segment reject; `HostDir`; `FuseAvailable`; `ErrFuseNotMounted` | `vfs/fuse_node.go`, `vfs/errors.go` |
+| Zero FUSE TTLs; single-segment reject; `HostDir`; `FuseMount` error; `ErrFuseNotMounted` | `vfs/fuse_node.go`, `vfs/errors.go` |
 | Kernel identity smoke (skip without device) | `vfs/fuse_test.go` |
 | `VFSProjection` / `FuseProjection` / `DirectProjection` | `server/projection.go` |
 | FUSE attach; fail-hard on device + mount fail; skip remount if `HostDir` set | `OpenTurnVFS` in `session/internal/vfs.go` |
 | Turn-scoped mounts; TurnManager Close does not unmount | `openTurnVFS`, `EventStream.Close`, `TurnManager.Close` |
 | host `/workspace/work` | `OpenVFS` `At("work", Local(jail))` |
-| host skills packs | `OpenSkills` (host-only Tree; not on the agent `/workspace`) |
+| skills directory | `SkillsPath` (on the workspace when mounted, otherwise a local directory) |
 | `run_command` | `tools_vfs.go` |
 | Fuse mount metrics / events | `telemetry` + Registry |
 | go-fuse as a direct module | `go.mod` |
@@ -198,7 +198,7 @@ Update `docs/vfs.md`, `docs/knowledge.md`, `README.md`, `vfs/doc.go` so they mat
 2. Harness tools, `MountInfo`, `Specs`, and checkpoints never print `HostDir`. Linux child `pwd` is `/session`; macOS/Windows child `pwd` is HostDir.
 3. `run_command` is `/bin/sh -c` with cwd at the FUSE root. On Linux the child is jailed there (user+mount+pid namespace + chroot). Missing user namespaces panic when `run_command` is registered, not when the model first calls it. macOS/Windows stay cwd-only.
 4. Registry `run_command` is `PermissionRequired: true` by default.
-5. `list` / `stat` stay whenever a `MountSession` exists. Do not gate them on `FuseAvailable()`.
+5. `list` / `stat` stay whenever a `MountSession` exists. Do not gate them on whether `FuseMount` succeeded.
 6. `write` modes are counted by field presence. IR body field is `ir_text`.
 7. Tests assert positive outcomes. Kernel and host-exec tests `Skip` without a FUSE device.
 8. stdlib plus existing go-fuse. No new module.
@@ -262,7 +262,7 @@ Each PR is independently reviewable. Do not combine Phase 3 removal with the `wr
 ## References
 
 - `vfs/session.go` — host-owned path I/O; no dirty cache
-- `vfs/fuse_node.go` — `FuseMount`, `Close`, `HostDir`, `FuseAvailable`
+- `vfs/fuse_node.go` — `FuseMount`, `FuseProbe`, `Close`, `HostDir`
 - `vfs/fuse_test.go` — kernel identity smoke
 - `vfs/document_session.go` — write-through `WriteDocument`
 - `server/projection.go` — `VFSProjection`

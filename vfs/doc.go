@@ -4,12 +4,13 @@
 //
 //   - Tree / At / Union / OpenVFS — host builds one /workspace tree per turn
 //     (agent-visible). Union merges Opens at one alias. Skill catalogs use a
-//     second host-only Tree (AgentOptions.OpenSkills); they are not a workspace member.
+//     SkillsPath on that tree (empty means /workspace/skills). With no workspace,
+//     SkillsPath is a local directory.
 //   - MountSession — path I/O, ReadText / WriteDocument, ReadLines, FuseMount / Close, HostDir
-//   - FuseAvailable — process can mount a kernel tree (/dev/fuse or /dev/macfuse*)
+//   - FuseMount / FuseProbe — kernel tree; the mount error means FUSE is unavailable
 //   - ContentRev / ContentHash — session-visible content identity (for tools)
 //   - SessionAuth + TokenHolder + Binding — session-scoped user-owned credentials (never on MountSpec)
-//   - MountSpec — durable mount description (checkpoint-safe; Members = /workspace aliases)
+//   - MountSpec — durable mount description (checkpoint-safe; one record per /workspace/<name>)
 //   - WorkspacePoint — /workspace (the only top-level mount)
 //   - Provider / Open / S3API / DriveAPI / GraphAPI — custom backends (Blob uses S3API).
 //     Hosts construct default backends from this package (Local, S3, Blob,
@@ -33,8 +34,8 @@
 // vfsindex (imports both; skips Profile=="brain"). FUSE / host rg read
 // ReadText (provider IR plaintext). This package does not ship a grep tool.
 //
-// Hosts should not need anything else. Mount tables, host roots, and bucket
-// details stay inside providers and the unexported mount table.
+// Hosts should not need anything else. Host paths and bucket details stay
+// inside providers. MountSession only keeps the mount map and routes paths.
 //
 // # Path I/O
 //
@@ -56,14 +57,15 @@
 // Raw ops stay byte-oriented. Content access:
 //
 //	// Progressive page (large files OK; EOF/NextStart for paging)
-//	win, err := ms.ReadLines(ctx, "/workspace/work/main.go", 1, 51)
+//	file := ms.Route(ctx, "/workspace/work/main.go")
+//	win, err := file.ReadLines(ctx, 1, 51)
 //	// win.Rev.Hash is the session-visible content identity when available
 //
-//	// Full IR for edit; WriteDocument persists through the provider now
-//	text, err := ms.ReadText(ctx, "/workspace/work/main.go") // Textual
+//	// Full IR for edit; the provider persists WriteDocument
+//	text, err := file.ReadText(ctx) // Textual
 //	rev := vfs.ContentRev{Path: text.Path(), Hash: vfs.ContentHash(text.Text())}
 //	_ = text.SetLine(2, "changed")
-//	_ = ms.WriteDocument(ctx, text)
+//	_ = file.WriteDocument(ctx, text)
 //	_ = rev // tools compare expected rev before WriteDocument
 //
 // Longer guide: docs/vfs.md in the repo root.

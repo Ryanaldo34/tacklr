@@ -180,7 +180,9 @@ func TestMountSession_xlsxCreateFormatPersists(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	doc, err := ms.ReadText(ctx, "/workspace/work/Budget.xlsx")
+
+	doc, err := ms.Route(ctx, "/workspace/work/Budget.xlsx").
+		ReadText(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +199,9 @@ func TestMountSession_xlsxCreateFormatPersists(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := ms.ReadText(ctx, "/workspace/work/Budget.xlsx")
+
+	got, err := ms.Route(ctx, "/workspace/work/Budget.xlsx").
+		ReadText(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,23 +217,28 @@ func TestMountSession_xlsxCreateFormatPersists(t *testing.T) {
 	if _, err := ms.Apply(ctx, "/workspace/work/notes.html", vfs.Mutation{Content: &html}); err != nil {
 		t.Fatal(err)
 	}
-	st, err := ms.Stat(ctx, "/workspace/work/notes.html")
+
+	st, err := ms.Route(ctx, "/workspace/work/notes.html").
+		Stat(ctx)
 	if err != nil || st.MediaType != HTMLMediaType {
 		t.Fatalf("notes.html Stat=%+v err=%v", st, err)
 	}
-	raw, err := ms.ReadText(ctx, "/workspace/work/notes.html")
-	if err != nil || raw.Text() != html {
+
+	if raw, err := ms.Route(ctx, "/workspace/work/notes.html").
+		ReadText(ctx); err != nil || raw.Text() != html {
 		t.Fatalf("notes.html body=%q err=%v", raw.Text(), err)
 	}
 	if _, err := ms.Apply(ctx, "/workspace/work/SPIKE", vfs.Mutation{Content: &html}); err != nil {
 		t.Fatal(err)
 	}
-	st, err = ms.Stat(ctx, "/workspace/work/SPIKE")
-	if err != nil || st.MediaType != HTMLMediaType {
+
+	if st, err := ms.Route(ctx, "/workspace/work/SPIKE").
+		Stat(ctx); err != nil || st.MediaType != HTMLMediaType {
 		t.Fatalf("SPIKE Stat=%+v err=%v", st, err)
 	}
-	spike, err := ms.ReadText(ctx, "/workspace/work/SPIKE")
-	if err != nil || spike.Text() != html {
+
+	if spike, err := ms.Route(ctx, "/workspace/work/SPIKE").
+		ReadText(ctx); err != nil || spike.Text() != html {
 		t.Fatalf("SPIKE body=%q err=%v", spike.Text(), err)
 	}
 }

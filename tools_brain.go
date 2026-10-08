@@ -596,9 +596,12 @@ func (b brainTools) saveAsFile(ctx context.Context, kind string, args saveObject
 	if err != nil {
 		return saveFileResult{}, err
 	}
-	if err := b.deps.VFS.MkdirAll(ctx, path.Dir(vpath)); err != nil {
+
+	if err := b.deps.VFS.Route(ctx, path.Dir(vpath)).
+		MkdirAll(ctx); err != nil {
 		return saveFileResult{}, err
 	}
+
 	f := engram.EngramFile{
 		Kind:       kind,
 		Slug:       engram.Slugify(title),
@@ -618,9 +621,12 @@ func (b brainTools) saveAsFile(ctx context.Context, kind string, args saveObject
 	if err != nil {
 		return saveFileResult{}, err
 	}
-	if err := b.deps.VFS.WriteFile(ctx, vpath, raw); err != nil {
+
+	if err := b.deps.VFS.Route(ctx, vpath).
+		WriteFile(ctx, raw); err != nil {
 		return saveFileResult{}, err
 	}
+
 	return saveFileResult{
 		Path:     vpath,
 		Rev:      vfs.ContentHash(string(raw)),
@@ -660,11 +666,14 @@ func (b brainTools) resolveEngramSavePath(ctx context.Context, kind, title, obje
 		mode = spec.Params["mode"]
 	}
 	base := engram.EngramPath(spec.Point, mode, kind, slug)
-	if _, err := b.deps.VFS.Stat(ctx, base); err == nil {
+
+	if _, err := b.deps.VFS.Route(ctx, base).
+		Stat(ctx); err == nil {
 		base = strings.TrimSuffix(base, ".md") + "-" + uuid.New().String()[:8] + ".md"
 	} else if !errors.Is(err, vfs.ErrNotExist) {
 		return "", err
 	}
+
 	return base, nil
 }
 

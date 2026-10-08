@@ -7,21 +7,14 @@ import (
 	"syscall"
 )
 
-// Projection publishes a MountSession to the host.
-//
-// Production uses FuseProjection (kernel tree). Tests use DirectProjection
-// (in-process only; no /dev/fuse). If Available is false, Runtime does not
-// inject a MountSession and VFS tools are not added.
+// Projection publishes a MountSession on the host kernel.
+// Nil means the MountSession is the tree and nothing is mounted.
 type Projection interface {
-	Available() bool
 	Attach(ms *MountSession, sessionID string) error
 }
 
 // FuseProjection mounts the session via MountSession.FuseMount.
 type FuseProjection struct{}
-
-// Available reports whether this process can mount a FUSE tree.
-func (FuseProjection) Available() bool { return FuseAvailable() }
 
 // Attach projects ms under /tmp/tacklr-fuse/<sessionID>.
 func (FuseProjection) Attach(ms *MountSession, sessionID string) error {
@@ -37,15 +30,6 @@ func (FuseProjection) Attach(ms *MountSession, sessionID string) error {
 	return nil
 }
 
-// DirectProjection attaches VFS in-process with no kernel mount.
-type DirectProjection struct{}
-
-// Available is always true.
-func (DirectProjection) Available() bool { return true }
-
-// Attach is a no-op: the MountSession is already the agent-facing tree.
-func (DirectProjection) Attach(*MountSession, string) error { return nil }
-
 func sanitizeFuseSessionID(id string) string {
 	return strings.Map(func(r rune) rune {
 		if r == '/' || r == '\\' {
@@ -55,7 +39,4 @@ func sanitizeFuseSessionID(id string) string {
 	}, id)
 }
 
-var (
-	_ Projection = FuseProjection{}
-	_ Projection = DirectProjection{}
-)
+var _ Projection = FuseProjection{}

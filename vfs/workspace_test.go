@@ -26,23 +26,31 @@ func TestWorkspace_namedUnionListsAndReadsAliases(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = ms.Close() })
 
-	ents, err := ms.ReadDir(ctx, vfs.WorkspacePoint)
-	if err != nil || len(ents) != 2 || ents[0].Name != "contracts" || ents[1].Name != "notes" || !ents[0].IsDir {
+	if ents, err := ms.Route(ctx, vfs.WorkspacePoint).
+		ReadDir(ctx); err != nil || len(ents) != 2 || ents[0].Name != "contracts" || ents[1].Name != "notes" || !ents[0].IsDir {
 		t.Fatalf("ReadDir /workspace = %+v err=%v", ents, err)
 	}
-	got, err := ms.ReadFile(ctx, "/workspace/contracts/nda.pdf")
-	if err != nil || string(got) != "%PDF" {
+
+	if got, err := ms.Route(ctx, "/workspace/contracts/nda.pdf").
+		ReadFile(ctx); err != nil || string(got) != "%PDF" {
 		t.Fatalf("ReadFile = %q err=%v", got, err)
 	}
-	if _, err := ms.ReadFile(ctx, "/contracts/nda.pdf"); !errors.Is(err, vfs.ErrNotMounted) {
+
+	if _, err := ms.Route(ctx, "/contracts/nda.pdf").
+		ReadFile(ctx); !errors.Is(err, vfs.ErrNotMounted) {
 		t.Fatalf("old /contracts path: %v", err)
 	}
-	if err := ms.MkdirAll(ctx, "/workspace/nope"); !errors.Is(err, vfs.ErrNotSupported) {
+
+	if err := ms.Route(ctx, "/workspace/nope").
+		MkdirAll(ctx); !errors.Is(err, vfs.ErrNotSupported) {
 		t.Fatalf("mkdir alias: %v", err)
 	}
-	if err := ms.Remove(ctx, "/workspace/contracts"); !errors.Is(err, vfs.ErrInvalidPath) {
+
+	if err := ms.Route(ctx, "/workspace/contracts").
+		Remove(ctx); !errors.Is(err, vfs.ErrInvalidPath) {
 		t.Fatalf("remove alias: %v", err)
 	}
+
 }
 
 func TestWorkspace_duplicateAliasIsAmbiguous(t *testing.T) {
@@ -67,41 +75,65 @@ func TestWorkspace_writableMemberAndReadOnlyMember(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ms.Close() })
-	if err := ms.WriteFile(ctx, "/workspace/legal/b.txt", []byte("two")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/legal/b.txt").
+		WriteFile(ctx, []byte("two")); err != nil {
 		t.Fatal(err)
 	}
-	got, err := ms.ReadFile(ctx, "/workspace/legal/b.txt")
-	if err != nil || string(got) != "two" {
+
+	if got, err := ms.Route(ctx, "/workspace/legal/b.txt").
+		ReadFile(ctx); err != nil || string(got) != "two" {
 		t.Fatalf("write legal = %q err=%v", got, err)
 	}
-	if err := ms.WriteFile(ctx, "/workspace/ro/a.txt", []byte("nope")); !errors.Is(err, vfs.ErrReadOnly) {
+
+	if err := ms.Route(ctx, "/workspace/ro/a.txt").
+		WriteFile(ctx, []byte("nope")); !errors.Is(err, vfs.ErrReadOnly) {
 		t.Fatalf("ro write = %v", err)
 	}
-	if err := ms.MkdirAll(ctx, "/workspace/ro/sub"); !errors.Is(err, vfs.ErrReadOnly) {
+
+	if err := ms.Route(ctx, "/workspace/ro/sub").
+		MkdirAll(ctx); !errors.Is(err, vfs.ErrReadOnly) {
 		t.Fatalf("ro mkdir = %v", err)
 	}
-	if err := ms.Remove(ctx, "/workspace/ro/a.txt"); !errors.Is(err, vfs.ErrReadOnly) {
+
+	if err := ms.Route(ctx, "/workspace/ro/a.txt").
+		Remove(ctx); !errors.Is(err, vfs.ErrReadOnly) {
 		t.Fatalf("ro remove = %v", err)
 	}
-	if err := ms.MkdirAll(ctx, "/workspace"); err != nil {
+
+	if err := ms.Route(ctx, "/workspace").
+		MkdirAll(ctx); err != nil {
 		t.Fatalf("mkdir workspace root: %v", err)
 	}
-	if err := ms.WriteFile(ctx, "/workspace/root.txt", []byte("x")); !errors.Is(err, vfs.ErrNotExist) && !errors.Is(err, vfs.ErrNotSupported) {
+
+	if err := ms.Route(ctx, "/workspace/root.txt").
+		WriteFile(ctx, []byte("x")); !errors.Is(err, vfs.ErrNotExist) {
 		t.Fatalf("write at workspace file = %v", err)
 	}
-	if _, err := ms.Open(ctx, "/workspace"); err == nil {
+
+	if _, err := ms.Route(ctx, "/workspace").
+		Open(ctx); err == nil {
 		t.Fatal("open workspace root as file")
 	}
-	if _, err := ms.Open(ctx, "/workspace/missing/x"); !errors.Is(err, vfs.ErrNotExist) {
+
+	if _, err := ms.Route(ctx, "/workspace/missing/x").
+		Open(ctx); !errors.Is(err, vfs.ErrNotExist) {
 		t.Fatalf("open missing = %v", err)
 	}
-	if _, err := ms.OpenDocument(ctx, "/workspace", nil); err == nil {
+
+	if _, err := ms.Route(ctx, "/workspace").
+		OpenDocument(ctx, nil); err == nil {
 		t.Fatal("opendoc workspace root")
 	}
-	if _, err := ms.OpenDocument(ctx, "/workspace/missing/x", nil); !errors.Is(err, vfs.ErrNotExist) {
+
+	if _, err := ms.Route(ctx, "/workspace/missing/x").
+		OpenDocument(ctx, nil); !errors.Is(err, vfs.ErrNotExist) {
 		t.Fatalf("opendoc missing = %v", err)
 	}
-	if _, err := ms.OpenDocument(ctx, "/workspace/legal/a.txt", nil); err != nil && !errors.Is(err, vfs.ErrNotSupported) {
+
+	if _, err := ms.Route(ctx, "/workspace/legal/a.txt").
+		OpenDocument(ctx, nil); err != nil && !errors.Is(err, vfs.ErrNotSupported) {
 		t.Fatalf("opendoc local = %v", err)
 	}
+
 }

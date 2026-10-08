@@ -120,21 +120,6 @@ func TestLoader_catalogAndFailurePaths(t *testing.T) {
 		}
 	})
 
-	t.Run("oversized skill file", func(t *testing.T) {
-		r := t.TempDir()
-		d := filepath.Join(r, "big")
-		if err := os.Mkdir(d, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		huge := strings.Repeat("x", maxSkillFileSize+1)
-		if err := os.WriteFile(filepath.Join(d, "SKILL.md"), []byte(huge), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := (Loader{Session: mountSkills(t, r)}).Load(context.Background()); err == nil || !strings.Contains(err.Error(), "exceeds") {
-			t.Fatalf("err = %v", err)
-		}
-	})
-
 	t.Run("duplicate skill names across packs", func(t *testing.T) {
 		r1, r2 := t.TempDir(), t.TempDir()
 		writeSkill(t, r1, "a", "dup", "D1", "Body one.")

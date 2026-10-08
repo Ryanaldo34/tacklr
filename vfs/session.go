@@ -1,13 +1,12 @@
 package vfs
 
 import (
-	"bytes"
 	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"io"
-	"os"
+	"io/fs"
 	"path"
 	"slices"
 	"strings"
@@ -36,18 +35,23 @@ type filePutter interface {
 // importing them. Errors from the hook are ignored so persist never rolls back.
 type AfterPersistFunc func(ctx context.Context, virtualPath string) error
 
-// MountSession is one isolated virtual filesystem: mount table + path I/O.
-// It routes document I/O to the provider; it does not encode IR or cache dirty
-// documents. Tree (or an embedder) creates it, Attachs /workspace, optionally
-// FuseMounts, and Closes it. The agent harness only borrows the pointer.
+// MountSession groups providers for one session. Route returns the provider
+// for a path. The provider reads, writes, and returns the error.
+// Tree creates the session, mounts /workspace, optionally FuseMounts, and
+// Closes it. The agent harness only borrows the pointer.
 type MountSession struct {
 	mu           sync.Mutex
 	id           string
-	tab          *mountTable
+	mounts       map[string]mountEntry
 	afterPersist AfterPersistFunc
 	fuse         *gofuse.Server
 	hostDir      string
 	lastRev      map[string]string
+}
+
+type mountEntry struct {
+	provider Provider
+	spec     MountSpec
 }
 
 // SetAfterPersist registers a hook after successful backend writes.
@@ -99,18 +103,33 @@ func NewMountSession(sessionID string) (*MountSession, error) {
 	if strings.TrimSpace(sessionID) == "" {
 		return nil, fmt.Errorf("%w: session id is required", ErrInvalidPath)
 	}
-	return &MountSession{id: sessionID, tab: newMountTable()}, nil
+	return &MountSession{id: sessionID, mounts: map[string]mountEntry{}}, nil
 }
 
-// Attach puts an already-opened Provider at spec.Point. Tree uses this.
-func (m *MountSession) Attach(ctx context.Context, spec MountSpec, p Provider) error {
+// mount puts p at spec.Point.
+func (m *MountSession) mount(ctx context.Context, spec MountSpec, p Provider) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if p == nil {
-		return fmt.Errorf("vfs: provider required")
+	if p == nil || strings.TrimSpace(spec.Profile) == "" {
+		return ErrInvalidProvider
 	}
-	return m.table().mount(ctx, spec, p)
+	cleaned, err := CleanPath(spec.Point)
+	if err != nil {
+		return err
+	}
+	if err := p.Validate(ctx); err != nil {
+		return err
+	}
+	stored := cloneSpec(spec)
+	stored.Point = cleaned
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, exists := m.mounts[cleaned]; exists {
+		return ErrAlreadyMounted
+	}
+	m.mounts[cleaned] = mountEntry{provider: p, spec: stored}
+	return nil
 }
 
 // HostDir is the directory last passed to FuseMount, or "".
@@ -123,311 +142,130 @@ func (m *MountSession) HostDir() string {
 	return m.hostDir
 }
 
-func (m *MountSession) table() *mountTable {
+// Unmount detaches the mount at point and every mount under it.
+func (m *MountSession) Unmount(point string) error {
+	cleaned, err := CleanPath(point)
+	if err != nil {
+		return err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.tab
-}
-
-// Unmount detaches the mount at point.
-func (m *MountSession) Unmount(point string) error {
-	return m.table().unmount(point)
-}
-
-// Specs returns the durable mount table (checkpoint-safe; no host paths or secrets).
-func (m *MountSession) Specs() []MountSpec {
-	return m.table().specs()
-}
-
-// SpecAt returns the durable MountSpec for the mount that owns virtualPath
-// (longest matching point). Under /workspace, the alias member spec is
-// returned so IndexPolicy is per backend. Clone is safe to retain; no secrets.
-func (m *MountSession) SpecAt(virtualPath string) (MountSpec, error) {
-	e, point, rel, err := m.table().resolveEntry(virtualPath)
-	if err != nil {
-		return MountSpec{}, err
-	}
-	spec := cloneSpec(e.spec)
-	if len(spec.Members) == 0 || rel == "" {
-		return spec, nil
-	}
-	alias, _, _ := strings.Cut(rel, "/")
-	for _, mem := range spec.Members {
-		name := strings.TrimSpace(mem.Params[ParamName])
-		if name == "" {
-			name = strings.TrimSpace(mem.Profile)
-		}
-		if name == alias {
-			out := cloneSpec(mem)
-			out.Point = point + "/" + alias
-			return out, nil
+	removed := false
+	for mp := range m.mounts {
+		if mp == cleaned || strings.HasPrefix(mp, cleaned+"/") {
+			delete(m.mounts, mp)
+			removed = true
 		}
 	}
-	return spec, nil
-}
-
-// Classify returns the media type for virtualPath.
-// Existing files use Stat.MediaType. New names use DetectMediaType.
-func (m *MountSession) Classify(ctx context.Context, virtualPath string, sample []byte) (string, error) {
-	cleaned, err := cleanVirtualPath(virtualPath)
-	if err != nil {
-		return "", err
-	}
-	if fi, err := m.Stat(ctx, cleaned); err == nil && !fi.IsDir && fi.MediaType != "" {
-		return fi.MediaType, nil
-	} else if err != nil && !errors.Is(err, ErrNotExist) {
-		return "", err
-	}
-	// Stat NotExist already resolved a mount; classify the new name from bytes.
-	return DetectMediaType(path.Base(cleaned), sample), nil
-}
-
-func (m *MountSession) at(ctx context.Context, virtualPath string, write bool) (Provider, string, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, "", err
-	}
-	p, _, rel, ro, err := m.table().resolve(virtualPath)
-	if err != nil {
-		return nil, "", err
-	}
-	if write && ro {
-		return nil, "", ErrReadOnly
-	}
-	return p, rel, nil
-}
-
-// Stat returns info for a virtual path.
-func (m *MountSession) Stat(ctx context.Context, virtualPath string) (FileInfo, error) {
-	cleaned, err := cleanVirtualPath(virtualPath)
-	if err != nil {
-		return FileInfo{}, err
-	}
-	p, rel, err := m.at(ctx, cleaned, false)
-	if err != nil {
-		return FileInfo{}, err
-	}
-	return p.Stat(ctx, rel)
-}
-
-// Open opens a virtual path for reading.
-func (m *MountSession) Open(ctx context.Context, virtualPath string) (File, error) {
-	cleaned, err := cleanVirtualPath(virtualPath)
-	if err != nil {
-		return nil, err
-	}
-	p, rel, err := m.at(ctx, cleaned, false)
-	if err != nil {
-		return nil, err
-	}
-	return p.OpenFile(ctx, rel, os.O_RDONLY, 0)
-}
-
-// ReadFile reads an entire file (capped at MaxReadFileBytes).
-//
-// When File.Stat reports a size, the buffer is allocated once and oversize files
-// are rejected without reading the body. Unknown sizes fall back to a limited
-// streaming read.
-func (m *MountSession) ReadFile(ctx context.Context, virtualPath string) ([]byte, error) {
-	cleaned, err := cleanVirtualPath(virtualPath)
-	if err != nil {
-		return nil, err
-	}
-
-	f, err := m.Open(ctx, cleaned)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-
-	if fi, stErr := f.Stat(); stErr == nil && fi.Size >= 0 {
-		if fi.Size > int64(MaxReadFileBytes) {
-			return nil, errFileExceeds(MaxReadFileBytes)
-		}
-		if fi.Size == 0 {
-			return []byte{}, nil
-		}
-		r, ok := f.(io.Reader)
-		if !ok {
-			return nil, fmt.Errorf("vfs: file is not readable")
-		}
-		data := make([]byte, fi.Size)
-		if _, err := io.ReadFull(r, data); err != nil {
-			return nil, err
-		}
-		return data, nil
-	}
-
-	r, ok := f.(io.Reader)
-	if !ok {
-		return nil, fmt.Errorf("vfs: file is not readable")
-	}
-	data, err := io.ReadAll(io.LimitReader(r, int64(MaxReadFileBytes)+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(data) > MaxReadFileBytes {
-		return nil, errFileExceeds(MaxReadFileBytes)
-	}
-	return data, nil
-}
-
-// WriteFile creates or truncates a file (fails on read-only mounts).
-// Write-through to the backend.
-func (m *MountSession) WriteFile(ctx context.Context, virtualPath string, data []byte) error {
-	cleaned, err := cleanVirtualPath(virtualPath)
-	if err != nil {
-		return err
-	}
-	if err := m.writeContents(ctx, cleaned, bytes.NewReader(data), int64(len(data))); err != nil {
-		return err
-	}
-	return m.fireAfterPersist(ctx, cleaned)
-}
-
-// writeContents writes exactly size bytes from r to virtualPath (must be cleaned).
-func (m *MountSession) writeContents(ctx context.Context, virtualPath string, r io.Reader, size int64) error {
-	if size > int64(MaxReadFileBytes) {
-		return errFileExceeds(MaxReadFileBytes)
-	}
-	p, rel, err := m.at(ctx, virtualPath, true)
-	if err != nil {
-		return err
-	}
-	if putter, ok := p.(filePutter); ok {
-		return putter.PutFile(ctx, rel, r, size)
-	}
-	f, err := p.OpenFile(ctx, rel, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	if size == 0 {
-		return nil
-	}
-	w, ok := f.(io.Writer)
-	if !ok {
-		return ErrReadOnly
-	}
-	if _, err := io.Copy(w, io.LimitReader(r, size)); err != nil {
-		return err
-	}
-	return nil
-}
-
-// ReadDir lists a directory.
-func (m *MountSession) ReadDir(ctx context.Context, virtualPath string) ([]DirEntry, error) {
-	cleaned, err := cleanVirtualPath(virtualPath)
-	if err != nil {
-		return nil, err
-	}
-	p, rel, err := m.at(ctx, cleaned, false)
-	if err != nil {
-		return nil, err
-	}
-	return p.ReadDir(ctx, rel)
-}
-
-// Remove removes a file or empty directory.
-func (m *MountSession) Remove(ctx context.Context, virtualPath string) error {
-	cleaned, err := cleanVirtualPath(virtualPath)
-	if err != nil {
-		return err
-	}
-	p, rel, err := m.at(ctx, cleaned, true)
-	if err != nil {
-		return err
-	}
-	return p.Remove(ctx, rel)
-}
-
-// MkdirAll creates a directory and parents.
-func (m *MountSession) MkdirAll(ctx context.Context, virtualPath string) error {
-	p, rel, err := m.at(ctx, virtualPath, true)
-	if err != nil {
-		return err
-	}
-	return p.MkdirAll(ctx, rel, 0o755)
-}
-
-// mountTable is the session mount namespace. Hosts use MountSession only.
-type mountTable struct {
-	mu     sync.RWMutex
-	mounts map[string]mountEntry // key: cleaned virtual mount point
-}
-
-type mountEntry struct {
-	provider Provider
-	spec     MountSpec
-}
-
-func newMountTable() *mountTable {
-	return &mountTable{mounts: make(map[string]mountEntry)}
-}
-
-func (t *mountTable) mount(ctx context.Context, spec MountSpec, provider Provider) error {
-	if provider == nil || strings.TrimSpace(spec.Profile) == "" {
-		return ErrInvalidProvider
-	}
-	cleaned, err := cleanVirtualPath(spec.Point)
-	if err != nil {
-		return err
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if err := provider.Validate(ctx); err != nil {
-		return err
-	}
-
-	stored := cloneSpec(spec)
-	stored.Point = cleaned
-
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if _, exists := t.mounts[cleaned]; exists {
-		return ErrAlreadyMounted
-	}
-	t.mounts[cleaned] = mountEntry{provider: provider, spec: stored}
-	return nil
-}
-
-func (t *mountTable) unmount(point string) error {
-	cleaned, err := cleanVirtualPath(point)
-	if err != nil {
-		return err
-	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if _, exists := t.mounts[cleaned]; !exists {
+	if !removed {
 		return ErrNotMounted
 	}
-	delete(t.mounts, cleaned)
 	return nil
 }
 
-func (t *mountTable) specs() []MountSpec {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	out := make([]MountSpec, 0, len(t.mounts))
-	for _, e := range t.mounts {
+// Specs returns the durable mount records (checkpoint-safe; no host paths or secrets).
+func (m *MountSession) Specs() []MountSpec {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]MountSpec, 0, len(m.mounts))
+	for _, e := range m.mounts {
 		out = append(out, cloneSpec(e.spec))
 	}
 	slices.SortFunc(out, func(a, b MountSpec) int { return cmp.Compare(a.Point, b.Point) })
 	return out
 }
 
-func (t *mountTable) resolveEntry(virtualPath string) (e mountEntry, point, rel string, err error) {
-	cleaned, err := cleanVirtualPath(virtualPath)
+// SpecAt returns the MountSpec for the backend that owns virtualPath.
+// Clone is safe to retain; no secrets.
+func (m *MountSession) SpecAt(virtualPath string) (MountSpec, error) {
+	rt, err := m.lookup(virtualPath)
 	if err != nil {
-		return mountEntry{}, "", "", err
+		return MountSpec{}, err
 	}
-	t.mu.RLock()
-	defer t.mu.RUnlock()
+	if rt.Provider == nil {
+		return MountSpec{}, ErrNotMounted
+	}
+	return cloneSpec(rt.Spec), nil
+}
 
+// memberEntries lists the /workspace/<name> backends.
+func (m *MountSession) memberEntries() []DirEntry {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	prefix := WorkspacePoint + "/"
+	out := make([]DirEntry, 0, len(m.mounts))
+	for mp := range m.mounts {
+		name := strings.TrimPrefix(mp, prefix)
+		if name == mp || strings.Contains(name, "/") {
+			continue
+		}
+		out = append(out, DirEntry{Name: name, IsDir: true, Type: fs.ModeDir})
+	}
+	slices.SortFunc(out, func(a, b DirEntry) int { return cmp.Compare(a.Name, b.Name) })
+	return out
+}
+
+// Classify returns the media type for virtualPath.
+// Existing files use Stat.MediaType. New names use DetectMediaType.
+func (m *MountSession) Classify(ctx context.Context, virtualPath string, sample []byte) (string, error) {
+	cleaned, err := CleanPath(virtualPath)
+	if err != nil {
+		return "", err
+	}
+	if fi, err := m.Route(ctx, cleaned).Stat(ctx); err == nil && !fi.IsDir && fi.MediaType != "" {
+		return fi.MediaType, nil
+	} else if err != nil && !errors.Is(err, ErrNotExist) {
+		return "", err
+	}
+	return DetectMediaType(path.Base(cleaned), sample), nil
+}
+
+// Route is the provider for one virtual path. MountSession only chooses it.
+// The provider does the file work and returns its own errors.
+type Route struct {
+	Provider Provider
+	Spec     MountSpec
+	Point    string
+	Rel      string
+	sess     *MountSession
+	err      error
+}
+
+// Route returns the provider mounted at virtualPath.
+// A failed lookup is stored on Route and returned by the file methods.
+func (m *MountSession) Route(ctx context.Context, virtualPath string) Route {
+	if err := ctx.Err(); err != nil {
+		return Route{err: err}
+	}
+	rt, err := m.lookup(virtualPath)
+	if err != nil {
+		return Route{err: err}
+	}
+	rt.sess = m
+	return rt
+}
+
+func (r Route) virtual() string {
+	if r.Rel == "" {
+		return r.Point
+	}
+	return r.Point + "/" + r.Rel
+}
+
+func (m *MountSession) lookup(virtualPath string) (Route, error) {
+	cleaned, err := CleanPath(virtualPath)
+	if err != nil {
+		return Route{}, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	var bestPoint string
 	var best mountEntry
 	found := false
-	for mp, ent := range t.mounts {
+	for mp, ent := range m.mounts {
 		if mp != "/" && cleaned != mp && !strings.HasPrefix(cleaned, mp+"/") {
 			continue
 		}
@@ -435,19 +273,38 @@ func (t *mountTable) resolveEntry(virtualPath string) (e mountEntry, point, rel 
 			bestPoint, best, found = mp, ent, true
 		}
 	}
-	if !found {
-		return mountEntry{}, "", "", ErrNotMounted
+	if found {
+		return Route{
+			Provider: best.provider,
+			Spec:     best.spec,
+			Point:    bestPoint,
+			Rel:      strings.TrimPrefix(strings.TrimPrefix(cleaned, bestPoint), "/"),
+		}, nil
 	}
-	rel = strings.TrimPrefix(strings.TrimPrefix(cleaned, bestPoint), "/")
-	return best, bestPoint, rel, nil
+	if cleaned == "/" {
+		return Route{Point: "/"}, nil
+	}
+	if !m.hasWorkspaceLocked() {
+		return Route{}, ErrNotMounted
+	}
+	if cleaned == WorkspacePoint {
+		return Route{Point: WorkspacePoint}, nil
+	}
+	if strings.HasPrefix(cleaned, WorkspacePoint+"/") {
+		return Route{
+			Point: WorkspacePoint,
+			Rel:   strings.TrimPrefix(cleaned, WorkspacePoint+"/"),
+		}, nil
+	}
+	return Route{}, ErrNotMounted
 }
 
-func (t *mountTable) resolve(virtualPath string) (p Provider, point, rel string, readOnly bool, err error) {
-	e, point, rel, err := t.resolveEntry(virtualPath)
-	if err != nil {
-		return nil, "", "", false, err
+func (m *MountSession) hasWorkspaceLocked() bool {
+	prefix := WorkspacePoint + "/"
+	for mp := range m.mounts {
+		if mp == WorkspacePoint || strings.HasPrefix(mp, prefix) {
+			return true
+		}
 	}
-	return e.provider, point, rel, e.spec.ReadOnly, nil
+	return false
 }
-
-func cleanVirtualPath(s string) (string, error) { return CleanPath(s) }

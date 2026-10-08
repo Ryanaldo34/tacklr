@@ -184,7 +184,9 @@ func (x *MountIndexer) indexPath(ctx context.Context, virtualPath string) (PathI
 	if skip != "" {
 		return skip, nil
 	}
-	st, err := x.VFS.Stat(ctx, cleaned)
+
+	st, err := x.VFS.Route(ctx, cleaned).
+		Stat(ctx)
 	if err != nil {
 		if errors.Is(err, vfs.ErrNotExist) {
 			if err := x.removeIndex(ctx, cleaned); err != nil {
@@ -271,7 +273,9 @@ func (x *MountIndexer) indexFile(ctx context.Context, vpath string, st vfs.FileI
 	base := path.Base(vpath)
 
 	// Session IR when available: hash-check before chunking; Structured → block chunks.
-	if doc, err := x.VFS.ReadText(ctx, vpath); err == nil {
+
+	if doc, err := x.VFS.Route(ctx, vpath).
+		ReadText(ctx); err == nil {
 		body := doc.Text()
 		if isBinaryPrefix(body) {
 			return PathSkipped, nil
@@ -313,7 +317,9 @@ func (x *MountIndexer) indexFile(ctx context.Context, vpath string, st vfs.FileI
 
 	// One-pass stream: hash while chunking (re-open for hash-only would double IO
 	// on the common AfterPersist "content changed" path).
-	f, err := x.VFS.Open(ctx, vpath)
+
+	f, err := x.VFS.Route(ctx, vpath).
+		Open(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -718,7 +724,9 @@ func walk(ctx context.Context, ms *vfs.MountSession, vpath string, fn func(vpath
 		return err
 	}
 	// Root only: one Stat. Descendants reuse DirEntry.IsDir (no re-Stat per dir).
-	st, err := ms.Stat(ctx, vpath)
+
+	st, err := ms.Route(ctx, vpath).
+		Stat(ctx)
 	if err != nil {
 		return err
 	}
@@ -735,7 +743,9 @@ func walkKnown(ctx context.Context, ms *vfs.MountSession, vpath string, isDir bo
 	if err := fn(vpath, true); err != nil {
 		return err
 	}
-	ents, err := ms.ReadDir(ctx, vpath)
+
+	ents, err := ms.Route(ctx, vpath).
+		ReadDir(ctx)
 	if err != nil {
 		return err
 	}

@@ -32,28 +32,42 @@ func TestMountSession_localSession(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = ms.Close() })
 	specs := ms.Specs()
-	if len(specs) != 1 || specs[0].Point != vfs.WorkspacePoint || len(specs[0].Members) != 3 {
+	if len(specs) != 3 {
 		t.Fatalf("Specs = %+v", specs)
 	}
+	for _, spec := range specs {
+		if spec.Point != "/workspace/work" && spec.Point != "/workspace/nested" && spec.Point != "/workspace/ab" {
+			t.Fatalf("Specs = %+v", specs)
+		}
+	}
 
-	if err := ms.WriteFile(ctx, "/workspace/work/hello.go", []byte("package main\n")); err != nil {
+	if err := ms.Route(ctx, "/workspace/work/hello.go").
+		WriteFile(ctx, []byte("package main\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	if mt, err := ms.Classify(ctx, "/workspace/work/hello.go", nil); err != nil || mt != "text/x-go" {
 		t.Fatalf("Classify: %q err=%v", mt, err)
 	}
 	if spec, err := ms.SpecAt("/workspace/work/hello.go"); err != nil || spec.Point != "/workspace/work" {
 		t.Fatalf("SpecAt: %+v err=%v", spec, err)
 	}
+
 	// empty write-through
-	if err := ms.WriteFile(ctx, "/workspace/work/empty.txt", nil); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/empty.txt").
+		WriteFile(ctx, nil); err != nil {
 		t.Fatal(err)
 	}
-	if b, err := ms.ReadFile(ctx, "/workspace/work/empty.txt"); err != nil || len(b) != 0 {
+
+	b, err := ms.Route(ctx, "/workspace/work/empty.txt").
+		ReadFile(ctx)
+	if err != nil || len(b) != 0 {
 		t.Fatalf("empty = %q err=%v", b, err)
 	}
 
-	f, err := ms.Open(ctx, "/workspace/work/hello.go")
+	f, err := ms.Route(ctx, "/workspace/work/hello.go").
+		Open(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,35 +76,50 @@ func TestMountSession_localSession(t *testing.T) {
 	if err != nil || fi.Name != "hello.go" {
 		t.Fatalf("Open/Stat handle: %+v err=%v", fi, err)
 	}
-	if err := ms.WriteFile(ctx, "/workspace/nested/x.txt", []byte("no")); !errors.Is(err, vfs.ErrReadOnly) {
+
+	if err := ms.Route(ctx, "/workspace/nested/x.txt").
+		WriteFile(ctx, []byte("no")); !errors.Is(err, vfs.ErrReadOnly) {
 		t.Fatalf("ro nested write: %v", err)
 	}
-	if err := ms.WriteFile(ctx, "/workspace/work/other.txt", []byte("ok")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/other.txt").
+		WriteFile(ctx, []byte("ok")); err != nil {
 		t.Fatal(err)
 	}
-	b, err := ms.ReadFile(ctx, "/workspace/work/hello.go")
+
+	b, err = ms.Route(ctx, "/workspace/work/hello.go").
+		ReadFile(ctx)
 	if err != nil || string(b) != "package main\n" {
 		t.Fatalf("ReadFile = %q err=%v", b, err)
 	}
-	info, err := ms.Stat(ctx, "/workspace/work/hello.go")
-	if err != nil || info.IsDir || info.Name != "hello.go" {
+
+	if info, err := ms.Route(ctx, "/workspace/work/hello.go").
+		Stat(ctx); err != nil || info.IsDir || info.Name != "hello.go" {
 		t.Fatalf("Stat = %+v err=%v", info, err)
 	}
 
-	if err := ms.MkdirAll(ctx, "/workspace/work/sub/dir"); err != nil {
+	if err := ms.Route(ctx, "/workspace/work/sub/dir").
+		MkdirAll(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.WriteFile(ctx, "/workspace/work/sub/dir/a.txt", []byte("a")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/sub/dir/a.txt").
+		WriteFile(ctx, []byte("a")); err != nil {
 		t.Fatal(err)
 	}
-	ents, err := ms.ReadDir(ctx, "/workspace/work/sub/dir")
-	if err != nil || len(ents) != 1 || ents[0].Name != "a.txt" {
+
+	if ents, err := ms.Route(ctx, "/workspace/work/sub/dir").
+		ReadDir(ctx); err != nil || len(ents) != 1 || ents[0].Name != "a.txt" {
 		t.Fatalf("ReadDir = %+v err=%v", ents, err)
 	}
-	if err := ms.Remove(ctx, "/workspace/work/sub/dir/a.txt"); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/sub/dir/a.txt").
+		Remove(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ms.Stat(ctx, "/workspace/work/sub/dir/a.txt"); !errors.Is(err, vfs.ErrNotExist) {
+
+	if _, err := ms.Route(ctx, "/workspace/work/sub/dir/a.txt").
+		Stat(ctx); !errors.Is(err, vfs.ErrNotExist) {
 		t.Fatalf("after remove: %v", err)
 	}
 
@@ -103,10 +132,13 @@ func TestMountSession_localSession(t *testing.T) {
 		t.Fatalf("SpecAt /workspace/ab: %+v err=%v", spec, err)
 	}
 
-	if err := ms.WriteFile(ctx, "/workspace/work/foo/../../etc/passwd", []byte("x")); err == nil {
+	if err := ms.Route(ctx, "/workspace/work/foo/../../etc/passwd").
+		WriteFile(ctx, []byte("x")); err == nil {
 		t.Fatal("escape")
 	}
-	if _, err := ms.ReadFile(ctx, "/nosuch/x"); !errors.Is(err, vfs.ErrNotMounted) {
+
+	if _, err := ms.Route(ctx, "/nosuch/x").
+		ReadFile(ctx); !errors.Is(err, vfs.ErrNotMounted) {
 		t.Fatalf("not mounted: %v", err)
 	}
 
@@ -116,28 +148,35 @@ func TestMountSession_localSession(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, _ = ms.ReadFile(ctx, "/workspace/work/hello.go")
+			_, _ = ms.Route(ctx, "/workspace/work/hello.go").ReadFile(ctx)
 		}()
 	}
 	wg.Wait()
 
-	if err := ms.WriteFile(ctx, "/workspace/ab/c.txt", []byte("cached\n")); err != nil {
+	if err := ms.Route(ctx, "/workspace/ab/c.txt").
+		WriteFile(ctx, []byte("cached\n")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ms.ReadText(ctx, "/workspace/ab/c.txt"); err != nil {
+
+	if _, err := ms.Route(ctx, "/workspace/ab/c.txt").
+		ReadText(ctx); err != nil {
 		t.Fatal(err)
 	}
 
 	cctx, cancel := context.WithCancel(ctx)
 	cancel()
-	if _, err := ms.ReadFile(cctx, "/workspace/work/hello.go"); !errors.Is(err, context.Canceled) {
+
+	if _, err := ms.Route(cctx, "/workspace/work/hello.go").
+		ReadFile(cctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled: %v", err)
 	}
 
 	if err := ms.Unmount("/workspace"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ms.ReadFile(ctx, "/workspace/ab/c.txt"); !errors.Is(err, vfs.ErrNotMounted) {
+
+	if _, err := ms.Route(ctx, "/workspace/ab/c.txt").
+		ReadFile(ctx); !errors.Is(err, vfs.ErrNotMounted) {
 		t.Fatalf("after unmount: %v", err)
 	}
 
@@ -146,8 +185,9 @@ func TestMountSession_localSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ms2.Close() })
-	b, err = ms2.ReadFile(ctx, "/workspace/work/hello.go")
-	if err != nil || string(b) != "package main\n" {
+
+	if b, err := ms2.Route(ctx, "/workspace/work/hello.go").
+		ReadFile(ctx); err != nil || string(b) != "package main\n" {
 		t.Fatalf("remount ReadFile = %q err=%v", b, err)
 	}
 	if err := ms2.Unmount("/workspace"); err != nil {
@@ -167,25 +207,35 @@ func TestMountSession_memoryWriteAndLimits(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ms.Close() })
-	if err := ms.WriteFile(ctx, "/workspace/mem/a.txt", []byte("hello-mem\n")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/mem/a.txt").
+		WriteFile(ctx, []byte("hello-mem\n")); err != nil {
 		t.Fatal(err)
 	}
-	got, err := ms.ReadFile(ctx, "/workspace/mem/a.txt")
-	if err != nil || string(got) != "hello-mem\n" {
+
+	if got, err := ms.Route(ctx, "/workspace/mem/a.txt").
+		ReadFile(ctx); err != nil || string(got) != "hello-mem\n" {
 		t.Fatalf("ReadFile=%q err=%v", got, err)
 	}
 	if rev, err := ms.ContentRev(ctx, "/workspace/mem/a.txt"); err != nil || rev.Hash != vfs.ContentHash("hello-mem\n") {
 		t.Fatalf("ContentRev: %+v err=%v", rev, err)
 	}
-	if err := ms.WriteFile(ctx, "/workspace/mem/empty.txt", nil); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/mem/empty.txt").
+		WriteFile(ctx, nil); err != nil {
 		t.Fatal(err)
 	}
-	if b, err := ms.ReadFile(ctx, "/workspace/mem/empty.txt"); err != nil || len(b) != 0 {
+
+	if b, err := ms.Route(ctx, "/workspace/mem/empty.txt").
+		ReadFile(ctx); err != nil || len(b) != 0 {
 		t.Fatalf("empty: %q err=%v", b, err)
 	}
-	if err := ms.WriteFile(ctx, "/workspace/mem/too-big", bytes.Repeat([]byte("x"), vfs.MaxReadFileBytes+1)); err == nil {
+
+	if err := ms.Route(ctx, "/workspace/mem/too-big").
+		WriteFile(ctx, bytes.Repeat([]byte("x"), vfs.MaxReadFileBytes+1)); err == nil {
 		t.Fatal("oversize write")
 	}
+
 	if _, err := ms.ContentRev(ctx, "rel"); err == nil {
 		t.Fatal("ContentRev relative")
 	}
@@ -193,31 +243,49 @@ func TestMountSession_memoryWriteAndLimits(t *testing.T) {
 		t.Fatal("Classify unmounted")
 	}
 	for _, p := range []string{"", "rel", "/has\x00x"} {
-		if _, err := ms.Stat(ctx, p); !errors.Is(err, vfs.ErrInvalidPath) {
+
+		if _, err := ms.Route(ctx, p).
+			Stat(ctx); !errors.Is(err, vfs.ErrInvalidPath) {
 			t.Fatalf("Stat %q: %v", p, err)
 		}
-		if _, err := ms.Open(ctx, p); !errors.Is(err, vfs.ErrInvalidPath) {
+
+		if _, err := ms.Route(ctx, p).
+			Open(ctx); !errors.Is(err, vfs.ErrInvalidPath) {
 			t.Fatalf("Open %q: %v", p, err)
 		}
-		if _, err := ms.ReadFile(ctx, p); !errors.Is(err, vfs.ErrInvalidPath) {
+
+		if _, err := ms.Route(ctx, p).
+			ReadFile(ctx); !errors.Is(err, vfs.ErrInvalidPath) {
 			t.Fatalf("ReadFile %q: %v", p, err)
 		}
-		if err := ms.WriteFile(ctx, p, []byte("x")); !errors.Is(err, vfs.ErrInvalidPath) {
+
+		if err := ms.Route(ctx, p).
+			WriteFile(ctx, []byte("x")); !errors.Is(err, vfs.ErrInvalidPath) {
 			t.Fatalf("WriteFile %q: %v", p, err)
 		}
-		if _, err := ms.ReadDir(ctx, p); !errors.Is(err, vfs.ErrInvalidPath) {
+
+		if _, err := ms.Route(ctx, p).
+			ReadDir(ctx); !errors.Is(err, vfs.ErrInvalidPath) {
 			t.Fatalf("ReadDir %q: %v", p, err)
 		}
-		if err := ms.Remove(ctx, p); !errors.Is(err, vfs.ErrInvalidPath) {
+
+		if err := ms.Route(ctx, p).
+			Remove(ctx); !errors.Is(err, vfs.ErrInvalidPath) {
 			t.Fatalf("Remove %q: %v", p, err)
 		}
+
 	}
-	if err := ms.MkdirAll(ctx, "/nomount/dir"); !errors.Is(err, vfs.ErrNotMounted) {
+
+	if err := ms.Route(ctx, "/nomount/dir").
+		MkdirAll(ctx); !errors.Is(err, vfs.ErrNotMounted) {
 		t.Fatalf("MkdirAll unmounted: %v", err)
 	}
-	if err := ms.Remove(ctx, "/nomount/x"); !errors.Is(err, vfs.ErrNotMounted) {
+
+	if err := ms.Route(ctx, "/nomount/x").
+		Remove(ctx); !errors.Is(err, vfs.ErrNotMounted) {
 		t.Fatalf("Remove unmounted: %v", err)
 	}
+
 }
 
 // TestDocument_session: IR persist, revalidation, codec rejects, RO.
@@ -241,31 +309,42 @@ func TestDocument_session(t *testing.T) {
 		b.WriteString(strconv.Itoa(i))
 		b.WriteByte('\n')
 	}
-	if err := ms.WriteFile(ctx, "/workspace/work/big.txt", []byte(b.String())); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/big.txt").
+		WriteFile(ctx, []byte(b.String())); err != nil {
 		t.Fatal(err)
 	}
-	win, err := ms.ReadLines(ctx, "/workspace/work/big.txt", 10, 13)
+
+	win, err := ms.Route(ctx, "/workspace/work/big.txt").
+		ReadLines(ctx, 10, 13)
 	if err != nil || win.Returned != 3 || win.Lines[0] != "L10" || win.Lines[2] != "L12" || win.EOF || win.NextStart != 13 {
 		t.Fatalf("ReadLines = %+v err=%v", win, err)
 	}
 	// Soft EOF: request past last line ("L1\n"…"L100\n" → 101 segments with trailing empty)
-	win, err = ms.ReadLines(ctx, "/workspace/work/big.txt", 100, 200)
-	if err != nil || win.Returned < 1 || !win.EOF {
+
+	if win, err := ms.Route(ctx, "/workspace/work/big.txt").
+		ReadLines(ctx, 100, 200); err != nil || win.Returned < 1 || !win.EOF {
 		t.Fatalf("soft EOF = %+v err=%v", win, err)
 	}
 	// empty requested range
-	empty, err := ms.ReadLines(ctx, "/workspace/work/big.txt", 5, 5)
-	if err != nil || empty.Returned != 0 {
+
+	if empty, err := ms.Route(ctx, "/workspace/work/big.txt").
+		ReadLines(ctx, 5, 5); err != nil || empty.Returned != 0 {
 		t.Fatalf("empty range = %+v err=%v", empty, err)
 	}
-	if _, err := ms.ReadLines(ctx, "/workspace/work/big.txt", 500, 501); !errors.Is(err, vfs.ErrLineOutOfRange) {
+
+	if _, err := ms.Route(ctx, "/workspace/work/big.txt").
+		ReadLines(ctx, 500, 501); !errors.Is(err, vfs.ErrLineOutOfRange) {
 		t.Fatalf("ReadLines OOR: %v", err)
 	}
+
 	// page until EOF
 	start := 1
 	pages := 0
 	for {
-		w, err := ms.ReadLines(ctx, "/workspace/work/big.txt", start, start+20)
+
+		w, err := ms.Route(ctx, "/workspace/work/big.txt").
+			ReadLines(ctx, start, start+20)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -279,10 +358,13 @@ func TestDocument_session(t *testing.T) {
 		}
 	}
 
-	if err := ms.WriteFile(ctx, "/workspace/work/note.txt", []byte("a\nb\nc\n")); err != nil {
+	if err := ms.Route(ctx, "/workspace/work/note.txt").
+		WriteFile(ctx, []byte("a\nb\nc\n")); err != nil {
 		t.Fatal(err)
 	}
-	text, err := ms.ReadText(ctx, "/workspace/work/note.txt")
+
+	text, err := ms.Route(ctx, "/workspace/work/note.txt").
+		ReadText(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -298,14 +380,21 @@ func TestDocument_session(t *testing.T) {
 	if err := ms.WriteDocument(ctx, text); err != nil {
 		t.Fatal(err)
 	}
-	raw, err := ms.ReadFile(ctx, "/workspace/work/note.txt")
+
+	raw, err := ms.Route(ctx, "/workspace/work/note.txt").
+		ReadFile(ctx)
 	if err != nil || string(raw) != "a\nB\nC\nD\n" {
 		t.Fatalf("ReadFile after WriteDocument = %q err=%v", raw, err)
 	}
-	if w, err := ms.ReadLines(ctx, "/workspace/work/note.txt", 1, 3); err != nil || w.Returned != 2 || w.Lines[1] != "B" {
+
+	w, err := ms.Route(ctx, "/workspace/work/note.txt").
+		ReadLines(ctx, 1, 3)
+	if err != nil || w.Returned != 2 || w.Lines[1] != "B" {
 		t.Fatalf("ReadLines = %+v err=%v", w, err)
 	}
-	text2, err := ms.ReadText(ctx, "/workspace/work/note.txt")
+
+	text2, err := ms.Route(ctx, "/workspace/work/note.txt").
+		ReadText(ctx)
 	if err != nil || text2.Text() != "a\nB\nC\nD\n" {
 		t.Fatalf("reread = %q err=%v", text2.Text(), err)
 	}
@@ -313,7 +402,9 @@ func TestDocument_session(t *testing.T) {
 	if err := ms.WriteDocument(ctx, text2); err != nil {
 		t.Fatal(err)
 	}
-	raw, err = ms.ReadFile(ctx, "/workspace/work/note.txt")
+
+	raw, err = ms.Route(ctx, "/workspace/work/note.txt").
+		ReadFile(ctx)
 	if err != nil || string(raw) != "A\nB\nC\nD\n" {
 		t.Fatalf("after second write = %q err=%v", raw, err)
 	}
@@ -332,95 +423,152 @@ func TestDocument_session(t *testing.T) {
 		t.Fatalf("nested disk = %q err=%v", raw, err)
 	}
 
-	if _, err := ms.ReadText(ctx, "/workspace/work"); err == nil {
+	if _, err := ms.Route(ctx, "/workspace/work").
+		ReadText(ctx); err == nil {
 		t.Fatal("ReadText on directory")
 	}
-	if _, err := ms.ReadLines(ctx, "/workspace/work/big.txt", 0, 1); !errors.Is(err, vfs.ErrLineOutOfRange) {
+
+	if _, err := ms.Route(ctx, "/workspace/work/big.txt").
+		ReadLines(ctx, 0, 1); !errors.Is(err, vfs.ErrLineOutOfRange) {
 		t.Fatalf("ReadLines start 0: %v", err)
 	}
-	if w, err := ms.ReadLines(ctx, "/workspace/work/big.txt", 1, 10000); err != nil || w.Returned > 500 {
+
+	w, err = ms.Route(ctx, "/workspace/work/big.txt").
+		ReadLines(ctx, 1, 10000)
+	if err != nil || w.Returned > 500 {
 		t.Fatalf("clamp: returned=%d err=%v", w.Returned, err)
 	}
+
 	long := strings.Repeat("y", vfs.MaxLineBytes+2) + "\n"
-	if err := ms.WriteFile(ctx, "/workspace/work/long.txt", []byte(long)); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/long.txt").
+		WriteFile(ctx, []byte(long)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ms.ReadLines(ctx, "/workspace/work/long.txt", 1, 2); !errors.Is(err, vfs.ErrLineTooLong) {
+
+	if _, err := ms.Route(ctx, "/workspace/work/long.txt").
+		ReadLines(ctx, 1, 2); !errors.Is(err, vfs.ErrLineTooLong) {
 		t.Fatalf("long line: %v", err)
 	}
 
 	// Revalidation
-	if err := ms.WriteFile(ctx, "/workspace/work/ext.txt", []byte("one\n")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/ext.txt").
+		WriteFile(ctx, []byte("one\n")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ms.ReadText(ctx, "/workspace/work/ext.txt"); err != nil {
+
+	if _, err := ms.Route(ctx, "/workspace/work/ext.txt").
+		ReadText(ctx); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := os.WriteFile(filepath.Join(base, "ext.txt"), []byte("two-lines\nlonger\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if again, err := ms.ReadText(ctx, "/workspace/work/ext.txt"); err != nil || again.Text() != "two-lines\nlonger\n" {
+
+	if again, err := ms.Route(ctx, "/workspace/work/ext.txt").
+		ReadText(ctx); err != nil || again.Text() != "two-lines\nlonger\n" {
 		t.Fatalf("revalidate = %q err=%v", again.Text(), err)
 	}
 
-	if err := ms.WriteFile(ctx, "/workspace/work/main.go", []byte("package main\n")); err != nil {
+	if err := ms.Route(ctx, "/workspace/work/main.go").
+		WriteFile(ctx, []byte("package main\n")); err != nil {
 		t.Fatal(err)
 	}
-	if goDoc, err := ms.ReadText(ctx, "/workspace/work/main.go"); err != nil || goDoc.MediaType() != "text/x-go" {
+
+	if goDoc, err := ms.Route(ctx, "/workspace/work/main.go").
+		ReadText(ctx); err != nil || goDoc.MediaType() != "text/x-go" {
 		t.Fatalf("go: %v", err)
 	}
-	if err := ms.Remove(ctx, "/workspace/work/main.go"); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/main.go").
+		Remove(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ms.ReadText(ctx, "/workspace/work/main.go"); !errors.Is(err, vfs.ErrNotExist) {
+
+	if _, err := ms.Route(ctx, "/workspace/work/main.go").
+		ReadText(ctx); !errors.Is(err, vfs.ErrNotExist) {
 		t.Fatalf("after remove: %v", err)
 	}
 
 	png := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0, 0, 0, 0}
-	if err := ms.WriteFile(ctx, "/workspace/work/pic.bin", png); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/pic.bin").
+		WriteFile(ctx, png); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ms.OpenDocument(ctx, "/workspace/work/pic.bin", nil); !errors.Is(err, vfs.ErrNoCodec) {
+
+	if _, err := ms.Route(ctx, "/workspace/work/pic.bin").
+		OpenDocument(ctx, nil); !errors.Is(err, vfs.ErrNoCodec) {
 		t.Fatalf("binary: %v", err)
 	}
-	if err := ms.WriteFile(ctx, "/workspace/work/blob.bin", []byte("hello\nworld\x00\n")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/blob.bin").
+		WriteFile(ctx, []byte("hello\nworld\x00\n")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ms.ReadText(ctx, "/workspace/work/blob.bin"); !errors.Is(err, vfs.ErrNoCodec) {
+
+	if _, err := ms.Route(ctx, "/workspace/work/blob.bin").
+		ReadText(ctx); !errors.Is(err, vfs.ErrNoCodec) {
 		t.Fatalf("blob IR: %v", err)
 	}
+
 	// No IR codec; ReadLines still pages the UTF-8 body.
-	if w, err := ms.ReadLines(ctx, "/workspace/work/blob.bin", 1, 4); err != nil || w.Returned != 2 || w.Lines[0] != "hello" {
+
+	w, err = ms.Route(ctx, "/workspace/work/blob.bin").
+		ReadLines(ctx, 1, 4)
+	if err != nil || w.Returned != 2 || w.Lines[0] != "hello" {
 		t.Fatalf("ReadLines blob: %+v err=%v", w, err)
 	}
-	if w, err := ms.ReadLines(ctx, "/workspace/work/blob.bin", 1, 1); err != nil || w.Returned != 0 {
+
+	if w, err := ms.Route(ctx, "/workspace/work/blob.bin").
+		ReadLines(ctx, 1, 1); err != nil || w.Returned != 0 {
 		t.Fatalf("empty stream window: %+v err=%v", w, err)
 	}
-	if _, err := ms.ReadLines(ctx, "rel", 1, 2); err == nil {
+
+	if _, err := ms.Route(ctx, "rel").
+		ReadLines(ctx, 1, 2); err == nil {
 		t.Fatal("ReadLines relative")
 	}
-	if _, err := ms.ReadLines(ctx, "/workspace/work/missing.txt", 1, 2); !errors.Is(err, vfs.ErrNotExist) {
+
+	if _, err := ms.Route(ctx, "/workspace/work/missing.txt").
+		ReadLines(ctx, 1, 2); !errors.Is(err, vfs.ErrNotExist) {
 		t.Fatalf("ReadLines missing: %v", err)
 	}
-	if err := ms.WriteFile(ctx, "/workspace/work/bad.bin", []byte("ok\n\xff\xfe\n")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/bad.bin").
+		WriteFile(ctx, []byte("ok\n\xff\xfe\n")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ms.ReadLines(ctx, "/workspace/work/bad.bin", 1, 3); !errors.Is(err, vfs.ErrInvalidUTF8) {
+
+	if _, err := ms.Route(ctx, "/workspace/work/bad.bin").
+		ReadLines(ctx, 1, 3); !errors.Is(err, vfs.ErrInvalidUTF8) {
 		t.Fatalf("stream utf8: %v", err)
 	}
-	if err := ms.WriteFile(ctx, "/workspace/work/README", []byte("hello from readme\n")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/README").
+		WriteFile(ctx, []byte("hello from readme\n")); err != nil {
 		t.Fatal(err)
 	}
-	if st, err := ms.Stat(ctx, "/workspace/work/README"); err != nil || st.MediaType != "text/plain" {
+
+	if st, err := ms.Route(ctx, "/workspace/work/README").
+		Stat(ctx); err != nil || st.MediaType != "text/plain" {
 		t.Fatalf("local no-ext Stat: %+v err=%v", st, err)
 	}
-	if doc, err := ms.ReadText(ctx, "/workspace/work/README"); err != nil || doc.MediaType() != "text/plain" {
+
+	if doc, err := ms.Route(ctx, "/workspace/work/README").
+		ReadText(ctx); err != nil || doc.MediaType() != "text/plain" {
 		t.Fatalf("local no-ext IR: %v", err)
 	}
-	if err := ms.WriteFile(ctx, "/workspace/work/bad.txt", []byte{0xff, 0xfe, 0xfd}); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/bad.txt").
+		WriteFile(ctx, []byte{0xff, 0xfe, 0xfd}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ms.OpenDocument(ctx, "/workspace/work/bad.txt", nil); !errors.Is(err, vfs.ErrInvalidUTF8) {
+
+	if _, err := ms.Route(ctx, "/workspace/work/bad.txt").
+		OpenDocument(ctx, nil); !errors.Is(err, vfs.ErrInvalidUTF8) {
 		t.Fatalf("utf8: %v", err)
 	}
 
@@ -430,7 +578,9 @@ func TestDocument_session(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(base, "ro", "f.txt"), []byte("seed\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	ro, err := ms.ReadText(ctx, "/workspace/ro/f.txt")
+
+	ro, err := ms.Route(ctx, "/workspace/ro/f.txt").
+		ReadText(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -446,7 +596,9 @@ func TestDocument_session(t *testing.T) {
 	if err := ms.WriteDocument(ctx, huge); !errors.Is(err, vfs.ErrTooLarge) {
 		t.Fatalf("oversize write: %v", err)
 	}
-	note, err := ms.ReadText(ctx, "/workspace/work/note.txt")
+
+	note, err := ms.Route(ctx, "/workspace/work/note.txt").
+		ReadText(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -476,9 +628,11 @@ func TestDocument_session(t *testing.T) {
 		t.Fatal("Classify relative")
 	}
 
-	if _, err := ms.ReadText(ctx, "/workspace/work/note.txt"); err != nil {
+	if _, err := ms.Route(ctx, "/workspace/work/note.txt").
+		ReadText(ctx); err != nil {
 		t.Fatal(err)
 	}
+
 }
 
 // TestTextDocument_lines is pure IR: index, edit, join (no mount).
@@ -547,19 +701,12 @@ func TestTextDocument_lines(t *testing.T) {
 	}
 }
 
-// TestMountSession_configErrors covers Attach, SpecAt, and codec registry.
+// TestMountSession_configErrors covers SpecAt and the codec registry.
 func TestMountSession_configErrors(t *testing.T) {
 	ctx := t.Context()
-	p, err := vfs.Local(t.TempDir())(ctx, "s", vfs.Binding{})
-	if err != nil {
-		t.Fatal(err)
-	}
 	ms, err := vfs.NewMountSession("s")
 	if err != nil {
 		t.Fatal(err)
-	}
-	if err := ms.Attach(ctx, vfs.MountSpec{Point: "/x"}, p); !errors.Is(err, vfs.ErrInvalidProvider) {
-		t.Fatalf("empty profile: %v", err)
 	}
 	if _, err := ms.SpecAt(""); !errors.Is(err, vfs.ErrInvalidPath) {
 		t.Fatalf("empty path: %v", err)
@@ -567,20 +714,11 @@ func TestMountSession_configErrors(t *testing.T) {
 	if _, err := ms.SpecAt("/has\x00x"); !errors.Is(err, vfs.ErrInvalidPath) {
 		t.Fatalf("nul path: %v", err)
 	}
-	if err := ms.Attach(ctx, vfs.MountSpec{Point: vfs.WorkspacePoint, Profile: "workspace"}, p); err != nil {
-		t.Fatal(err)
-	}
-	if err := ms.Attach(ctx, vfs.MountSpec{Point: vfs.WorkspacePoint, Profile: "workspace"}, p); !errors.Is(err, vfs.ErrAlreadyMounted) {
-		t.Fatalf("dup mount: %v", err)
-	}
 	if err := ms.Unmount("/missing"); !errors.Is(err, vfs.ErrNotMounted) {
 		t.Fatalf("unmount missing: %v", err)
 	}
 	if _, err := vfs.NewMountSession(""); err == nil {
 		t.Fatal("empty session id construct")
-	}
-	if err := ms.Attach(ctx, vfs.MountSpec{Point: "/z", Profile: "z"}, nil); err == nil {
-		t.Fatal("nil provider")
 	}
 	creg := vfs.NewContentRegistry()
 	if err := creg.Register(nil); err == nil {
@@ -601,25 +739,6 @@ func TestMountSession_configErrors(t *testing.T) {
 	cancel()
 	if _, err := (vfs.TextCodec{}).Decode(cctx, "/x", "text/plain", []byte("a")); !errors.Is(err, context.Canceled) {
 		t.Fatalf("codec cancel: %v", err)
-	}
-	ms3, err := vfs.NewMountSession("s3")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := ms3.Attach(ctx, vfs.MountSpec{Point: vfs.WorkspacePoint, Profile: "workspace"}, p); err != nil {
-		t.Fatal(err)
-	}
-	if err := ms3.Attach(ctx, vfs.MountSpec{Point: vfs.WorkspacePoint, Profile: "workspace"}, p); !errors.Is(err, vfs.ErrAlreadyMounted) {
-		t.Fatalf("attach dup: %v", err)
-	}
-	cctx2, cancel2 := context.WithCancel(ctx)
-	cancel2()
-	ms4, err := vfs.NewMountSession("s4")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := ms4.Attach(cctx2, vfs.MountSpec{Point: vfs.WorkspacePoint, Profile: "workspace"}, p); !errors.Is(err, context.Canceled) {
-		t.Fatalf("attach cancel: %v", err)
 	}
 }
 

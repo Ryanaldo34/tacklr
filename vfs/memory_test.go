@@ -17,31 +17,45 @@ func TestMemoryFactory_fileAndDirOps(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ms.Close() })
-	if err := ms.WriteFile(ctx, "/workspace/mem/a/hello.txt", []byte("hi")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/mem/a/hello.txt").
+		WriteFile(ctx, []byte("hi")); err != nil {
 		t.Fatal(err)
 	}
-	got, err := ms.ReadFile(ctx, "/workspace/mem/a/hello.txt")
+
+	got, err := ms.Route(ctx, "/workspace/mem/a/hello.txt").
+		ReadFile(ctx)
 	if err != nil || string(got) != "hi" {
 		t.Fatalf("read = %q err=%v", got, err)
 	}
-	ents, err := ms.ReadDir(ctx, "/workspace/mem/a")
-	if err != nil || len(ents) != 1 || ents[0].Name != "hello.txt" {
+
+	if ents, err := ms.Route(ctx, "/workspace/mem/a").
+		ReadDir(ctx); err != nil || len(ents) != 1 || ents[0].Name != "hello.txt" {
 		t.Fatalf("readdir = %+v err=%v", ents, err)
 	}
-	st, err := ms.Stat(ctx, "/workspace/mem/a")
-	if err != nil || !st.IsDir {
+
+	if st, err := ms.Route(ctx, "/workspace/mem/a").
+		Stat(ctx); err != nil || !st.IsDir {
 		t.Fatalf("stat dir = %+v err=%v", st, err)
 	}
-	if err := ms.MkdirAll(ctx, "/workspace/mem/b/c"); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/mem/b/c").
+		MkdirAll(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.Remove(ctx, "/workspace/mem/a/hello.txt"); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/mem/a/hello.txt").
+		Remove(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ms.ReadFile(ctx, "/workspace/mem/a/hello.txt"); !errors.Is(err, vfs.ErrNotExist) {
+
+	if _, err := ms.Route(ctx, "/workspace/mem/a/hello.txt").
+		ReadFile(ctx); !errors.Is(err, vfs.ErrNotExist) {
 		t.Fatalf("removed file: %v", err)
 	}
-	if err := ms.Remove(ctx, "/workspace/mem/missing"); !errors.Is(err, vfs.ErrNotExist) {
+
+	if err := ms.Route(ctx, "/workspace/mem/missing").
+		Remove(ctx); !errors.Is(err, vfs.ErrNotExist) {
 		t.Fatalf("remove missing: %v", err)
 	}
 
@@ -68,11 +82,14 @@ func TestMemoryFactory_fileAndDirOps(t *testing.T) {
 	if _, err := p.Stat(ctx, "nope"); !errors.Is(err, vfs.ErrNotExist) {
 		t.Fatalf("stat missing: %v", err)
 	}
-	if err := ms.WriteFile(ctx, "/workspace/mem/w.txt", []byte("ab")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/mem/w.txt").
+		WriteFile(ctx, []byte("ab")); err != nil {
 		t.Fatal(err)
 	}
-	got, err = ms.ReadFile(ctx, "/workspace/mem/w.txt")
-	if err != nil || !bytes.Equal(got, []byte("ab")) {
+
+	if got, err := ms.Route(ctx, "/workspace/mem/w.txt").
+		ReadFile(ctx); err != nil || !bytes.Equal(got, []byte("ab")) {
 		t.Fatalf("readback = %q err=%v", got, err)
 	}
 	if _, err := p.ReadDir(ctx, "w.txt"); !errors.Is(err, vfs.ErrNotDir) {

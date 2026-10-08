@@ -10,7 +10,7 @@ Knowledge objects, search, and the graph are documented in **[docs/knowledge.md]
 
 ```text
   Host OpenVFS (Tree/At); client binds credentials before the turn
-  Host OpenSkills (separate Tree); loader only — never session.VFS
+  SkillsPath is a directory on that tree, or a local directory when no tree is mounted
            │
            ▼
   MountSession (injected if configured)  ── /workspace/work/main.go
@@ -91,7 +91,7 @@ Tests point the official SDKs at httptest: `NewGoogleDriveHTTP` and `NewGraph(ho
 |------|---------|
 | `At(name, open)` | One `/workspace/<name>` backend |
 | `Tree(...)` | One `/workspace` mount whose members are the At list |
-| `Union(...)` | Read-only merge of Opens (skill packs on `OpenSkills`: `Tree(At("skills", Union(Local(a), Local(b))))`) |
+| `Union(...)` | Read-only merge of Opens (`At("skills", Union(Local(a), Local(b)))` on the workspace) |
 | `MountSpec` | Durable description (point `/workspace`, members, **indexPolicy**). Checkpoint-safe; no secrets. |
 | `IndexPolicy` | `none` \| `selective` \| `prefix` \| `watch` (empty → selective when the index bridge is on) |
 
@@ -99,7 +99,7 @@ Tests point the official SDKs at httptest: `NewGoogleDriveHTTP` and `NewGraph(ho
 
 ### Skills
 
-Playbooks are **not** on the agent `/workspace` tree. Hosts set `AgentOptions.OpenSkills` to a separate `vfs.Tree` (often `At("skills", vfs.Union(...))`). Overlapping first-level names in a Union are `ErrAmbiguous`. The loader walks `SkillsRoot` (empty means `/workspace/skills` on that host-only session). The agent never sees those paths. Full instructions load only through `read_skill`.
+`SkillsPath` is one directory. When the turn has a workspace, it is a virtual path (empty means `/workspace/skills` on that tree). When it does not, it is a local directory. Full instructions load only through `read_skill`. A `Union` of skill packs is just a member of the workspace, for example `At("skills", vfs.Union(...))`. Overlapping first-level names in a Union are `ErrAmbiguous`.
 
 Host-owned roots and secrets (local jail, S3 / Azure Blob client) live in the Open closures, not on mounts or checkpoints.
 
@@ -256,9 +256,9 @@ Tool guidance:
 
 `DetectMediaType` is a helper **providers** call when filling `MediaType`. Empty / missing type is treated as `application/octet-stream` (no IR).
 
-FUSE: hosts call `MountSession.FuseMount(dir)` for a kernel tree. **The only mount point is `/workspace`**. Multi-segment points (`/tmp/tacklr`) fail `FuseMount`. If `ReadText` succeeds (`Textual`), `getattr`/`Read` use that plaintext (so `cat`/`rg` see the projection). Otherwise `Stat.Size` + `io.ReaderAt`. Kernel writes persist through `WriteFile` only when `KernelWritable` (`IdentityCodec`). Projected textual types (Word, Notion, Docs) are **read-only** on the kernel (`EROFS`); the agent `write` tool still uses `WriteDocument`. `Tree` attaches `/workspace`; `FuseMount` is the host kernel mount. `HostDir()` is the last mount directory (host-facing only). `FuseAvailable()` probes `/dev/fuse` and `/dev/macfuse*`. `Close` unmounts. Host `ls`/`rg` from HostDir see `workspace/work/…`.
+FUSE: hosts call `MountSession.FuseMount(dir)` for a kernel tree. **The only mount point is `/workspace`**. Multi-segment points (`/tmp/tacklr`) fail `FuseMount`. If `ReadText` succeeds (`Textual`), `getattr`/`Read` use that plaintext (so `cat`/`rg` see the projection). Otherwise `Stat.Size` + `io.ReaderAt`. Kernel writes persist through `WriteFile` only when `KernelWritable` (`IdentityCodec`). Projected textual types (Word, Notion, Docs) are **read-only** on the kernel (`EROFS`); the agent `write` tool still uses `WriteDocument`. `Tree` attaches `/workspace`; `FuseMount` is the host kernel mount. `HostDir()` is the last mount directory (host-facing only). `FuseMount` returns the kernel error when FUSE is unavailable. `Close` unmounts. Host `ls`/`rg` from HostDir see `workspace/work/…`.
 
-`session.Runtime` injects a **turn-scoped** `MountSession` from `AgentOptions.OpenVFS` and attaches FUSE for that slice: `$TMP/tacklr-fuse/<session>` mode `0700`. `OpenSkills` is a second session with no FUSE projection; the agent never receives it. The activity (or in-process turn slice) closes both trees when the step ends. Bind/unbind only record credentials; they do not keep a live tree between prompts. Production without a device has **no** `MountSession` (no VFS tools, no `run_command`). Tests inject `vfs.DirectProjection` so `read`/`write` still work and `run_command` returns `ErrFuseNotMounted` until `HostDir` is set. Device present and mount fails after one suffix retry → fail-hard. Workers reconstruct a `MountSession` per activity; they do not hold a parent pointer.
+`session.Runtime` injects a **turn-scoped** `MountSession` from `AgentOptions.OpenVFS`. A nil `Projection` leaves that session in-process. `vfs.FuseProjection` mounts it at `$TMP/tacklr-fuse/<session>` mode `0700`, and `FuseMount`'s error is how the host learns the kernel mount failed. The activity closes that tree when the step ends. Bind/unbind only record credentials; they do not keep a live tree between prompts. Workers reconstruct a `MountSession` per activity; they do not hold a parent pointer.
 
 `TextCodec` requires valid UTF-8 and builds a `TextDocument` labeled with the caller’s media type.
 

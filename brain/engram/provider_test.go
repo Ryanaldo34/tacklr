@@ -65,17 +65,21 @@ func TestBrainProvider_prefixWriteReadDirRemoveAndIR(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ms := treeSession(t, vfs.At("engram", engram.Open(eng, brain.Scope{Namespace: ns})))
+	ms := treeSession(t, engram.Mount(eng, brain.Scope{Namespace: ns}))
 	spec, ok := engram.MountForKind(ms.Specs(), "Deal")
 	if !ok || spec.Point != engram.DefaultMountPoint || spec.Profile != engram.DefaultProfile {
 		t.Fatalf("MountForKind: %+v ok=%v", spec, ok)
 	}
 
 	md := []byte("---\ndomain: Deal\nslug: acme\nstage: open\n---\n\nHello Acme.\n")
-	if err := ms.WriteFile(ctx, "/workspace/engram/deal/acme.md", md); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/engram/deal/acme.md").
+		WriteFile(ctx, md); err != nil {
 		t.Fatal(err)
 	}
-	got, err := ms.ReadFile(ctx, "/workspace/engram/deal/acme.md")
+
+	got, err := ms.Route(ctx, "/workspace/engram/deal/acme.md").
+		ReadFile(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,14 +101,17 @@ func TestBrainProvider_prefixWriteReadDirRemoveAndIR(t *testing.T) {
 		t.Fatalf("id/slug: %+v", obj)
 	}
 
-	ents, err := ms.ReadDir(ctx, "/workspace/engram/deal")
+	ents, err := ms.Route(ctx, "/workspace/engram/deal").
+		ReadDir(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(ents) != 1 || ents[0].Name != "acme.md" || ents[0].IsDir {
 		t.Fatalf("ReadDir files: %+v", ents)
 	}
-	roots, err := ms.ReadDir(ctx, "/workspace/engram")
+
+	roots, err := ms.Route(ctx, "/workspace/engram").
+		ReadDir(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,85 +119,123 @@ func TestBrainProvider_prefixWriteReadDirRemoveAndIR(t *testing.T) {
 		t.Fatalf("ReadDir kinds (parents only): %+v", roots)
 	}
 
-	rootInfo, err := ms.Stat(ctx, "/workspace/engram")
-	if err != nil || !rootInfo.IsDir {
+	if rootInfo, err := ms.Route(ctx, "/workspace/engram").
+		Stat(ctx); err != nil || !rootInfo.IsDir {
 		t.Fatalf("stat mount root: %+v err=%v", rootInfo, err)
 	}
-	kindInfo, err := ms.Stat(ctx, "/workspace/engram/deal")
-	if err != nil || !kindInfo.IsDir || kindInfo.Name != "deal" {
+
+	if kindInfo, err := ms.Route(ctx, "/workspace/engram/deal").
+		Stat(ctx); err != nil || !kindInfo.IsDir || kindInfo.Name != "deal" {
 		t.Fatalf("stat kind dir: %+v err=%v", kindInfo, err)
 	}
-	if _, err := ms.Stat(ctx, "/workspace/engram/nope"); !errors.Is(err, vfs.ErrNotExist) {
+
+	if _, err := ms.Route(ctx, "/workspace/engram/nope").
+		Stat(ctx); !errors.Is(err, vfs.ErrNotExist) {
 		t.Fatalf("stat unknown kind: %v", err)
 	}
-	if err := ms.MkdirAll(ctx, "/workspace/engram/deal"); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/engram/deal").
+		MkdirAll(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.MkdirAll(ctx, "/workspace/engram"); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/engram").
+		MkdirAll(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ms.Open(ctx, "/workspace/engram/deal"); err == nil {
+
+	if _, err := ms.Route(ctx, "/workspace/engram/deal").
+		Open(ctx); err == nil {
 		t.Fatal("open kind dir")
 	}
-	if err := ms.Remove(ctx, "/workspace/engram/deal"); err == nil {
+
+	if err := ms.Route(ctx, "/workspace/engram/deal").
+		Remove(ctx); err == nil {
 		t.Fatal("remove kind dir")
 	}
-	if _, err := ms.ReadDir(ctx, "/workspace/engram/deal/acme.md"); err == nil {
+
+	if _, err := ms.Route(ctx, "/workspace/engram/deal/acme.md").
+		ReadDir(ctx); err == nil {
 		t.Fatal("ReadDir file")
 	}
-	if _, err := ms.ReadText(ctx, "/workspace/engram"); err == nil {
+
+	if _, err := ms.Route(ctx, "/workspace/engram").
+		ReadText(ctx); err == nil {
 		t.Fatal("ReadText mount root")
 	}
+
 	if err := ms.WriteDocument(ctx, bareDoc{path: "/workspace/engram/deal/x.md"}); !errors.Is(err, vfs.ErrNotTextual) {
 		t.Fatalf("bare WriteDocument: %v", err)
 	}
 	cctx, cancel := context.WithCancel(ctx)
 	cancel()
-	if _, err := ms.Stat(cctx, "/workspace/engram/deal/acme.md"); !errors.Is(err, context.Canceled) {
+
+	if _, err := ms.Route(cctx, "/workspace/engram/deal/acme.md").
+		Stat(cctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("stat cancel: %v", err)
 	}
-	if _, err := ms.ReadDir(cctx, "/workspace/engram"); !errors.Is(err, context.Canceled) {
+
+	if _, err := ms.Route(cctx, "/workspace/engram").
+		ReadDir(cctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("ReadDir cancel: %v", err)
 	}
-	if _, err := ms.Open(cctx, "/workspace/engram/deal/acme.md"); !errors.Is(err, context.Canceled) {
+
+	if _, err := ms.Route(cctx, "/workspace/engram/deal/acme.md").
+		Open(cctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Open cancel: %v", err)
 	}
-	if err := ms.Remove(cctx, "/workspace/engram/deal/acme.md"); !errors.Is(err, context.Canceled) {
+
+	if err := ms.Route(cctx, "/workspace/engram/deal/acme.md").
+		Remove(cctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Remove cancel: %v", err)
 	}
-	if err := ms.MkdirAll(cctx, "/workspace/engram/deal"); !errors.Is(err, context.Canceled) {
+
+	if err := ms.Route(cctx, "/workspace/engram/deal").
+		MkdirAll(cctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("MkdirAll cancel: %v", err)
 	}
-	if _, err := ms.ReadText(cctx, "/workspace/engram/deal/acme.md"); !errors.Is(err, context.Canceled) {
+
+	if _, err := ms.Route(cctx, "/workspace/engram/deal/acme.md").
+		ReadText(cctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("ReadText cancel: %v", err)
 	}
-	if err := ms.WriteFile(cctx, "/workspace/engram/deal/x.md", []byte("x")); !errors.Is(err, context.Canceled) {
+
+	if err := ms.Route(cctx, "/workspace/engram/deal/x.md").
+		WriteFile(cctx, []byte("x")); !errors.Is(err, context.Canceled) {
 		t.Fatalf("WriteFile cancel: %v", err)
 	}
+
 	if err := ms.WriteDocument(cctx, vfs.NewTextDocument("/workspace/engram/deal/y.md", "text/markdown", "utf-8", "y")); !errors.Is(err, context.Canceled) {
 		t.Fatalf("WriteDocument cancel: %v", err)
 	}
 
 	// Second write of the same path without id keeps Object.ID.
 	rewrite := []byte("---\ndomain: Deal\nslug: acme\nstage: won\n---\n\nUpdated Acme.\n")
-	if err := ms.WriteFile(ctx, "/workspace/engram/deal/acme.md", rewrite); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/engram/deal/acme.md").
+		WriteFile(ctx, rewrite); err != nil {
 		t.Fatal(err)
 	}
+
 	rewritten, err := eng.GetByProperty(ctx, brain.Scope{Namespace: ns}, brain.PropVFSPath, "/workspace/engram/deal/acme.md")
 	if err != nil || rewritten.ID != obj.ID || !strings.Contains(rewritten.Content, "Updated Acme.") {
 		t.Fatalf("overwrite without id: %+v err=%v", rewritten, err)
 	}
 
 	renewal := []byte("---\ndomain: Deal\ntitle: Acme Renewal!\nstage: open\n---\n\nRenewal body.\n")
-	if err := ms.WriteFile(ctx, "/workspace/engram/deal/acme-renewal.md", renewal); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/engram/deal/acme-renewal.md").
+		WriteFile(ctx, renewal); err != nil {
 		t.Fatal(err)
 	}
-	ents, err = ms.ReadDir(ctx, "/workspace/engram/deal")
+
+	deal, err := ms.Route(ctx, "/workspace/engram/deal").
+		ReadDir(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var names []string
-	for _, e := range ents {
+	for _, e := range deal {
 		names = append(names, e.Name)
 	}
 	if !strings.Contains(strings.Join(names, ","), "acme-renewal.md") {
@@ -199,27 +244,37 @@ func TestBrainProvider_prefixWriteReadDirRemoveAndIR(t *testing.T) {
 
 	// Required field missing: fail closed, no leftover object.
 	bad := []byte("---\ndomain: Deal\nslug: leftover\n---\n\nno stage\n")
-	if err := ms.WriteFile(ctx, "/workspace/engram/deal/leftover.md", bad); err == nil || !strings.Contains(err.Error(), "required") {
+
+	if err := ms.Route(ctx, "/workspace/engram/deal/leftover.md").
+		WriteFile(ctx, bad); err == nil || !strings.Contains(err.Error(), "required") {
 		t.Fatalf("want required-field error, got %v", err)
 	}
+
 	if _, err := eng.GetByProperty(ctx, brain.Scope{Namespace: ns}, brain.PropVFSPath, "/workspace/engram/deal/leftover.md"); !errors.Is(err, brain.ErrNotFound) {
 		t.Fatalf("leftover object: %v", err)
 	}
-	ents, err = ms.ReadDir(ctx, "/workspace/engram/deal")
-	if err != nil || len(ents) != 2 {
+
+	if ents, err := ms.Route(ctx, "/workspace/engram/deal").
+		ReadDir(ctx); err != nil || len(ents) != 2 {
 		t.Fatalf("dir after failed write: %+v err=%v", ents, err)
 	}
 
 	mismatch := []byte("---\ndomain: Person\nslug: x\nstage: open\n---\n\nnope\n")
-	if err := ms.WriteFile(ctx, "/workspace/engram/deal/x.md", mismatch); err == nil || !strings.Contains(err.Error(), "does not match path kind") {
+
+	if err := ms.Route(ctx, "/workspace/engram/deal/x.md").
+		WriteFile(ctx, mismatch); err == nil || !strings.Contains(err.Error(), "does not match path kind") {
 		t.Fatalf("kind mismatch: %v", err)
 	}
+
 	if _, err := eng.GetByProperty(ctx, brain.Scope{Namespace: ns}, brain.PropVFSPath, "/workspace/engram/deal/x.md"); !errors.Is(err, brain.ErrNotFound) {
 		t.Fatalf("mismatch leftover: %v", err)
 	}
-	if err := ms.WriteFile(ctx, "/workspace/engram/unknown/y.md", []byte("---\ndomain: Unknown\nslug: y\n---\n\nnope\n")); err == nil || !strings.Contains(err.Error(), "not allowed") {
+
+	if err := ms.Route(ctx, "/workspace/engram/unknown/y.md").
+		WriteFile(ctx, []byte("---\ndomain: Unknown\nslug: y\n---\n\nnope\n")); err == nil || !strings.Contains(err.Error(), "not allowed") {
 		t.Fatalf("unknown kind: %v", err)
 	}
+
 	if _, err := eng.GetByProperty(ctx, brain.Scope{Namespace: ns}, brain.PropVFSPath, "/workspace/engram/unknown/y.md"); !errors.Is(err, brain.ErrNotFound) {
 		t.Fatalf("unknown leftover: %v", err)
 	}
@@ -233,16 +288,20 @@ func TestBrainProvider_prefixWriteReadDirRemoveAndIR(t *testing.T) {
 		{"not uuid", "/workspace/engram/deal/bad-id.md", "engram id", []byte("---\nid: not-a-uuid\nstage: open\n---\n")},
 		{"non-string domain", "/workspace/engram/deal/bad-domain.md", "must be a string", []byte("---\ndomain: [1]\nstage: open\n---\n")},
 	} {
-		if err := ms.WriteFile(ctx, tc.path, tc.raw); err == nil || !strings.Contains(err.Error(), tc.want) {
+
+		if err := ms.Route(ctx, tc.path).
+			WriteFile(ctx, tc.raw); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Fatalf("%s: got %v, want containing %q", tc.name, err, tc.want)
 		}
+
 		if _, err := eng.GetByProperty(ctx, brain.Scope{Namespace: ns}, brain.PropVFSPath, tc.path); !errors.Is(err, brain.ErrNotFound) {
 			t.Fatalf("%s leftover: %v", tc.name, err)
 		}
 	}
-
 	// IR replace_lines then Sync updates Content.
-	doc, err := ms.ReadText(ctx, "/workspace/engram/deal/acme.md")
+
+	doc, err := ms.Route(ctx, "/workspace/engram/deal/acme.md").
+		ReadText(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,15 +315,20 @@ func TestBrainProvider_prefixWriteReadDirRemoveAndIR(t *testing.T) {
 		t.Fatalf("after IR sync: %+v err=%v", obj2, err)
 	}
 
-	if err := ms.Remove(ctx, "/workspace/engram/deal/acme.md"); err != nil {
+	if err := ms.Route(ctx, "/workspace/engram/deal/acme.md").
+		Remove(ctx); err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := eng.Get(ctx, brain.Scope{Namespace: ns}, obj.ID); !errors.Is(err, brain.ErrNotFound) {
 		t.Fatalf("soft-delete: %v", err)
 	}
-	if _, err := ms.ReadFile(ctx, "/workspace/engram/deal/acme.md"); !errors.Is(err, vfs.ErrNotExist) {
+
+	if _, err := ms.Route(ctx, "/workspace/engram/deal/acme.md").
+		ReadFile(ctx); !errors.Is(err, vfs.ErrNotExist) {
 		t.Fatalf("read after remove: %v", err)
 	}
+
 }
 
 type bareDoc struct{ path string }
@@ -287,28 +351,38 @@ func TestBrainProvider_rootsLayout(t *testing.T) {
 		map[string]string{"mode": "roots", "kind": "Person"},
 	)))
 	body := []byte("---\ntitle: Sam\n---\n\nBuyer.\n")
-	if err := ms.WriteFile(ctx, "/workspace/person/sam.md", body); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/person/sam.md").
+		WriteFile(ctx, body); err != nil {
 		t.Fatal(err)
 	}
-	ents, err := ms.ReadDir(ctx, "/workspace/person")
-	if err != nil || len(ents) != 1 || ents[0].Name != "sam.md" {
+
+	if ents, err := ms.Route(ctx, "/workspace/person").
+		ReadDir(ctx); err != nil || len(ents) != 1 || ents[0].Name != "sam.md" {
 		t.Fatalf("roots listing: %+v err=%v", ents, err)
 	}
 	obj, err := eng.GetByProperty(ctx, brain.Scope{Namespace: ns}, brain.PropVFSPath, "/workspace/person/sam.md")
 	if err != nil || obj.Kind != "Person" || obj.Content != "Buyer.\n" {
 		t.Fatalf("roots object: %+v err=%v", obj, err)
 	}
-	if _, err := ms.Stat(ctx, "/workspace/person/nested/sam.md"); !errors.Is(err, vfs.ErrNotExist) {
+
+	if _, err := ms.Route(ctx, "/workspace/person/nested/sam.md").
+		Stat(ctx); !errors.Is(err, vfs.ErrNotExist) {
 		t.Fatalf("roots nested: %v", err)
 	}
-	if err := ms.MkdirAll(ctx, "/workspace/person/extra"); err == nil {
+
+	if err := ms.Route(ctx, "/workspace/person/extra").
+		MkdirAll(ctx); err == nil {
 		t.Fatal("roots mkdir")
 	}
-	if _, err := ms.ReadDir(ctx, "/workspace/person/sam.md"); err == nil {
+
+	if _, err := ms.Route(ctx, "/workspace/person/sam.md").
+		ReadDir(ctx); err == nil {
 		t.Fatal("roots ReadDir file")
 	}
-	doc, err := ms.ReadText(ctx, "/workspace/person/sam.md")
-	if err != nil || !strings.Contains(doc.Text(), "Buyer.") {
+
+	if doc, err := ms.Route(ctx, "/workspace/person/sam.md").
+		ReadText(ctx); err != nil || !strings.Contains(doc.Text(), "Buyer.") {
 		t.Fatalf("roots IR: %v", err)
 	}
 }
@@ -320,22 +394,30 @@ func TestBrainProvider_openCatalogListsKindsInUseAndMkdir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ms := treeSession(t, vfs.At("engram", engram.Open(eng, brain.Scope{Namespace: ns})))
-	if err := ms.MkdirAll(ctx, "/workspace/engram/note"); err != nil {
+	ms := treeSession(t, engram.Mount(eng, brain.Scope{Namespace: ns}))
+
+	if err := ms.Route(ctx, "/workspace/engram/note").
+		MkdirAll(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.MkdirAll(ctx, "/workspace/engram/note/nested"); err == nil {
+
+	if err := ms.Route(ctx, "/workspace/engram/note/nested").
+		MkdirAll(ctx); err == nil {
 		t.Fatal("arbitrary dirs must fail")
 	}
-	if err := ms.WriteFile(ctx, "/workspace/engram/note/hello.md", []byte("hello body\n")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/engram/note/hello.md").
+		WriteFile(ctx, []byte("hello body\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	kinds, err := eng.KindsWithObjects(ctx, brain.Scope{Namespace: ns})
 	if err != nil || len(kinds) != 1 || kinds[0] != "note" {
 		t.Fatalf("kinds in use: %v err=%v", kinds, err)
 	}
-	ents, err := ms.ReadDir(ctx, "/workspace/engram")
-	if err != nil || len(ents) != 1 || ents[0].Name != "note" || !ents[0].IsDir {
+
+	if ents, err := ms.Route(ctx, "/workspace/engram").
+		ReadDir(ctx); err != nil || len(ents) != 1 || ents[0].Name != "note" || !ents[0].IsDir {
 		t.Fatalf("open catalog dirs: %+v err=%v", ents, err)
 	}
 	obj, err := eng.GetByProperty(ctx, brain.Scope{Namespace: ns}, brain.PropVFSPath, "/workspace/engram/note/hello.md")
@@ -399,9 +481,12 @@ func TestBrainOpen_rejectsInvalidConfig(t *testing.T) {
 	ms := treeSession(t, vfs.At("person", withParams(valid, "/workspace/person", map[string]string{
 		"mode": "roots", "kinds": "Note",
 	})))
-	if err := ms.WriteFile(ctx, "/workspace/person/hello.md", []byte("---\ntitle: Hello\n---\n\nNote body.\n")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/person/hello.md").
+		WriteFile(ctx, []byte("---\ntitle: Hello\n---\n\nNote body.\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	obj, err := eng.GetByProperty(ctx, brain.Scope{Namespace: ns}, brain.PropVFSPath, "/workspace/person/hello.md")
 	if err != nil || obj.Kind != "Note" || !strings.Contains(obj.Content, "Note body.") {
 		t.Fatalf("roots kinds= inference: %+v err=%v", obj, err)
@@ -455,12 +540,15 @@ func TestBrainOpen_rejectsInvalidConfig(t *testing.T) {
 	// prefix kinds= allow-list: ReadDir lists only the allowed kind after a write.
 	ms2 := treeSession(t, vfs.At("engram", withParams(valid, "", map[string]string{
 		"mode": "prefix", "kinds": "Note",
-	})))
-	if err := ms2.WriteFile(ctx, "/workspace/engram/note/n.md", []byte("---\ndomain: Note\nslug: n\n---\n\nallow.\n")); err != nil {
+	})).Profile(engram.DefaultProfile).Indexed("none"))
+
+	if err := ms2.Route(ctx, "/workspace/engram/note/n.md").
+		WriteFile(ctx, []byte("---\ndomain: Note\nslug: n\n---\n\nallow.\n")); err != nil {
 		t.Fatal(err)
 	}
-	ents, err := ms2.ReadDir(ctx, "/workspace/engram")
-	if err != nil || len(ents) != 1 || ents[0].Name != "note" {
+
+	if ents, err := ms2.Route(ctx, "/workspace/engram").
+		ReadDir(ctx); err != nil || len(ents) != 1 || ents[0].Name != "note" {
 		t.Fatalf("kinds= allow-list dirs: %+v err=%v", ents, err)
 	}
 }

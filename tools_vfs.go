@@ -83,7 +83,8 @@ Fails if the path is missing, the range is invalid, or block_id is unknown.`,
 			}
 			rt.EmitUpdate("Reading " + p)
 
-			fi, err := v.ms.Stat(ctx, p)
+			fi, err := v.ms.Route(ctx, p).
+				Stat(ctx)
 			if err != nil {
 				return "", vfsToolErr("read", p, err)
 			}
@@ -109,7 +110,9 @@ Fails if the path is missing, the range is invalid, or block_id is unknown.`,
 			if args.Start < 1 || args.End < args.Start {
 				return "", Correctionf(vfs.ErrLineOutOfRange, "read: invalid range start=%d end=%d. Use 1-based half-open start/end, or omit them to read the first page, or pass block_id / outline", args.Start, args.End)
 			}
-			win, err := v.ms.ReadLines(ctx, p, args.Start, args.End)
+
+			win, err := v.ms.Route(ctx, p).
+				ReadLines(ctx, args.Start, args.End)
 			if err != nil {
 				return "", vfsToolErr("read", p, err)
 			}
@@ -126,7 +129,9 @@ Fails if the path is missing, the range is invalid, or block_id is unknown.`,
 }
 
 func (v vfsTools) readStructured(ctx context.Context, p string, args readArgs) (string, error) {
-	doc, err := v.ms.ReadText(ctx, p)
+
+	doc, err := v.ms.Route(ctx, p).
+		ReadText(ctx)
 	if err != nil {
 		return "", vfsToolErr("read", p, err)
 	}
@@ -453,7 +458,9 @@ func (v vfsTools) applyWrite(ctx context.Context, tool, p string, mut vfs.Mutati
 
 // requireWriteFamily allows create (path missing). An existing file must match tool.
 func (v vfsTools) requireWriteFamily(ctx context.Context, p, tool string) (exists bool, err error) {
-	fi, err := v.ms.Stat(ctx, p)
+
+	fi, err := v.ms.Route(ctx, p).
+		Stat(ctx)
 	if errors.Is(err, vfs.ErrNotExist) {
 		return false, nil
 	}

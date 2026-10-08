@@ -157,21 +157,8 @@ func (b *Bridge) Untrack(virtualPath string) {
 func autoIndexPoints(specs []vfs.MountSpec) []string {
 	var points []string
 	for _, spec := range specs {
-		if len(spec.Members) == 0 {
-			if AutoIndex(spec.IndexPolicy) {
-				points = append(points, spec.Point)
-			}
-			continue
-		}
-		for _, m := range spec.Members {
-			if !AutoIndex(m.IndexPolicy) {
-				continue
-			}
-			name := strings.TrimSpace(m.Params[vfs.ParamName])
-			if name == "" {
-				name = strings.TrimSpace(m.Profile)
-			}
-			points = append(points, spec.Point+"/"+name)
+		if AutoIndex(spec.IndexPolicy) {
+			points = append(points, spec.Point)
 		}
 	}
 	return points

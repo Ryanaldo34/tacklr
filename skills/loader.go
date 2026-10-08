@@ -1,8 +1,8 @@
 // Package skills discovers and parses application-owned SKILL.md files.
 //
-// Discovery walks a host-only MountSession (AgentOptions.OpenSkills). That
-// session is not the agent /workspace tree. The agent reads instructions
-// only through read_skill.
+// SkillsPath is one directory. When the turn has a MountSession, that path
+// is on the VFS. When it does not, the path is on the local machine.
+// The agent reads instructions only through read_skill.
 package skills
 
 import (
@@ -11,14 +11,14 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path"
+	"path/filepath"
 	"slices"
 	"strings"
 
 	"github.com/ryanaldo34/tacklr/vfs"
 )
-
-const maxSkillFileSize = 1024 * 1024
 
 // DefaultRoot is the virtual directory the loader walks when Root is empty.
 const DefaultRoot = vfs.WorkspacePoint + "/skills"
@@ -40,12 +40,11 @@ type SkillLoader interface {
 var _ SkillLoader = Loader{}
 
 // Loader loads one skill per immediate child of Root.
-// A nil session or missing Root directory loads nothing.
+// Session set means Root is a virtual path (empty Root is DefaultRoot).
+// Session nil means Root is a local directory. An empty local Root loads nothing.
 type Loader struct {
 	Session *vfs.MountSession
-	// Root is the virtual directory that holds one child folder per skill.
-	// Empty means DefaultRoot (/workspace/skills).
-	Root string
+	Root    string
 }
 
 // Load implements SkillLoader.
@@ -54,13 +53,15 @@ func (l Loader) Load(ctx context.Context) ([]Skill, error) {
 		return nil, err
 	}
 	if l.Session == nil {
-		return nil, nil
+		return l.loadLocal(ctx)
 	}
 	dir := strings.TrimSpace(l.Root)
 	if dir == "" {
 		dir = DefaultRoot
 	}
-	entries, err := l.Session.ReadDir(ctx, dir)
+
+	entries, err := l.Session.Route(ctx, dir).
+		ReadDir(ctx)
 	if err != nil {
 		if errors.Is(err, vfs.ErrNotMounted) || errors.Is(err, vfs.ErrNotExist) {
 			return nil, nil
@@ -89,15 +90,52 @@ func (l Loader) Load(ctx context.Context) ([]Skill, error) {
 	return loaded, nil
 }
 
-func readSkill(ctx context.Context, ms *vfs.MountSession, skillPath, label string) (Skill, error) {
-	info, err := ms.Stat(ctx, skillPath)
+func (l Loader) loadLocal(ctx context.Context) ([]Skill, error) {
+	dir := strings.TrimSpace(l.Root)
+	if dir == "" {
+		return nil, nil
+	}
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return Skill{}, fmt.Errorf("skill %q: read SKILL.md: %w", label, err)
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read skills directory %q: %w", dir, err)
 	}
-	if info.Size > maxSkillFileSize {
-		return Skill{}, fmt.Errorf("skill %q: SKILL.md exceeds %d bytes", label, maxSkillFileSize)
+	slices.SortFunc(entries, func(a, b os.DirEntry) int { return cmp.Compare(a.Name(), b.Name()) })
+	var loaded []Skill
+	seen := map[string]bool{}
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if !entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		skillPath := filepath.Join(dir, entry.Name(), "SKILL.md")
+		data, err := os.ReadFile(skillPath)
+		if err != nil {
+			return nil, fmt.Errorf("skill %q: read SKILL.md: %w", entry.Name(), err)
+		}
+		skill, err := parse(string(data))
+		if err != nil {
+			return nil, fmt.Errorf("skill %q: %w", entry.Name(), err)
+		}
+		if seen[skill.Name] {
+			return nil, fmt.Errorf("duplicate skill name %q", skill.Name)
+		}
+		seen[skill.Name] = true
+		skill.Path = skillPath
+		loaded = append(loaded, skill)
 	}
-	data, err := ms.ReadFile(ctx, skillPath)
+	slices.SortFunc(loaded, func(a, b Skill) int { return cmp.Compare(a.Name, b.Name) })
+	return loaded, nil
+}
+
+func readSkill(ctx context.Context, ms *vfs.MountSession, skillPath, label string) (Skill, error) {
+
+	data, err := ms.Route(ctx, skillPath).
+		ReadFile(ctx)
 	if err != nil {
 		return Skill{}, fmt.Errorf("skill %q: read SKILL.md: %w", label, err)
 	}

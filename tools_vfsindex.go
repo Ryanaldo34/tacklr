@@ -64,7 +64,9 @@ Requires an active plan. Returns one status line per path: indexed, skipped (unc
 				if policy == vfsindex.PolicyNone {
 					return "", fmt.Errorf("index_file: indexing disabled for mount of %s (IndexPolicy=none)", p)
 				}
-				st, err := v.br.Indexer.VFS.Stat(ctx, p)
+
+				st, err := v.br.Indexer.VFS.Route(ctx, p).
+					Stat(ctx)
 				if err != nil {
 					return "", fmt.Errorf("index_file: %s: %w", p, err)
 				}

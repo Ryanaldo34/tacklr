@@ -13,12 +13,14 @@ import (
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
-// TestVFSTools_readWrite: read/write outcomes over a DirectProjection mount.
+// TestVFSTools_readWrite: read/write outcomes over an in-process mount.
 func TestVFSTools_readWrite(t *testing.T) {
 	ctx := context.Background()
 	base := t.TempDir()
 	ms := mustMountTree(t, "tools-vfs", vfs.At("work", vfs.Local(base)))
-	if err := ms.WriteFile(ctx, "/workspace/work/a.go", []byte("package a\n// old\nfunc A() {}\n")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/a.go").
+		WriteFile(ctx, []byte("package a\n// old\nfunc A() {}\n")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -46,9 +48,12 @@ func TestVFSTools_readWrite(t *testing.T) {
 	for i := 1; i <= vfs.MaxLinesPerWindow+1; i++ {
 		fmt.Fprintf(&page, "%d\n", i)
 	}
-	if err := ms.WriteFile(ctx, "/workspace/work/page.txt", []byte(page.String())); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/page.txt").
+		WriteFile(ctx, []byte(page.String())); err != nil {
 		t.Fatal(err)
 	}
+
 	res, err := tools["read"].invoke(ctx, `{"path":"/workspace/work/page.txt"}`, rt)
 	if err != nil {
 		t.Fatal(err)
@@ -71,14 +76,18 @@ func TestVFSTools_readWrite(t *testing.T) {
 		t.Fatalf("read window: %s", res.output)
 	}
 
-	if err := ms.WriteFile(ctx, "/workspace/work/a.go", []byte("package a\n// changed\nfunc A() {}\n")); err != nil {
+	if err := ms.Route(ctx, "/workspace/work/a.go").
+		WriteFile(ctx, []byte("package a\n// changed\nfunc A() {}\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	_, err = tools["write"].invoke(ctx, `{"path":"/workspace/work/a.go","start":2,"end":3,"lines":["// x"]}`, rt)
 	if !errors.Is(err, vfs.ErrStaleContent) || !strings.Contains(err.Error(), "changed since you last read") {
 		t.Fatalf("stale write: %v", err)
 	}
-	if err := ms.WriteFile(ctx, "/workspace/work/a.go", []byte("package a\n// old\nfunc A() {}\n")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/a.go").
+		WriteFile(ctx, []byte("package a\n// old\nfunc A() {}\n")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -92,7 +101,9 @@ func TestVFSTools_readWrite(t *testing.T) {
 	if fieldKV(res.output, "path") != "/workspace/work/a.go" || fieldKV(res.output, "line_count") == "" {
 		t.Fatalf("write lines: %s", res.output)
 	}
-	got, err := ms.ReadText(ctx, "/workspace/work/a.go")
+
+	got, err := ms.Route(ctx, "/workspace/work/a.go").
+		ReadText(ctx)
 	if err != nil || !strings.Contains(got.Text(), "// new") || !strings.Contains(got.Text(), "func A()") {
 		t.Fatalf("lines-mode body: %q err=%v", got.Text(), err)
 	}
@@ -104,14 +115,18 @@ func TestVFSTools_readWrite(t *testing.T) {
 	if err != nil || !strings.Contains(res.output, "replacements=1") {
 		t.Fatalf("write substring: %q err=%v", res.output, err)
 	}
-	got, err = ms.ReadText(ctx, "/workspace/work/a.go")
+
+	got, err = ms.Route(ctx, "/workspace/work/a.go").
+		ReadText(ctx)
 	if err != nil || !strings.Contains(got.Text(), "func A() { return }") {
 		t.Fatalf("substring body: %q err=%v", got.Text(), err)
 	}
 
-	if err := ms.WriteFile(ctx, "/workspace/work/dup.txt", []byte("aa aa\n")); err != nil {
+	if err := ms.Route(ctx, "/workspace/work/dup.txt").
+		WriteFile(ctx, []byte("aa aa\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	body, _ = json.Marshal(map[string]any{
 		"path": "/workspace/work/dup.txt", "old": "aa", "new": "bb", "replace_all": true,
 	})
@@ -119,20 +134,27 @@ func TestVFSTools_readWrite(t *testing.T) {
 	if err != nil || !strings.Contains(res.output, "replacements=2") {
 		t.Fatalf("replace_all: %q err=%v", res.output, err)
 	}
-	got, err = ms.ReadText(ctx, "/workspace/work/dup.txt")
+
+	got, err = ms.Route(ctx, "/workspace/work/dup.txt").
+		ReadText(ctx)
 	if err != nil || got.Text() != "bb bb\n" {
 		t.Fatalf("replace_all body: %q err=%v", got.Text(), err)
 	}
 
-	if err := ms.WriteFile(ctx, "/workspace/work/cas.txt", []byte("keep-me\nchange-me\n")); err != nil {
+	if err := ms.Route(ctx, "/workspace/work/cas.txt").
+		WriteFile(ctx, []byte("keep-me\nchange-me\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err = tools["read"].invoke(ctx, `{"path":"/workspace/work/cas.txt"}`, rt); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.WriteFile(ctx, "/workspace/work/cas.txt", []byte("keep-me\nchanged\n")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/cas.txt").
+		WriteFile(ctx, []byte("keep-me\nchanged\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	body, _ = json.Marshal(map[string]any{
 		"path": "/workspace/work/cas.txt", "old": "keep-me", "new": "kept",
 	})
@@ -179,9 +201,12 @@ func TestVFSTools_readWrite(t *testing.T) {
 		`{"path":"/workspace/work/a.go","old":"","new":"y"}`, "old is required")
 
 	md := "# Hello\n\n## Install\n\nold\n"
-	if err := ms.WriteFile(ctx, "/workspace/work/README.md", []byte(md)); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/README.md").
+		WriteFile(ctx, []byte(md)); err != nil {
 		t.Fatal(err)
 	}
+
 	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/work/README.md","outline":true}`, rt)
 	if err != nil || !strings.Contains(res.output, "outline:") ||
 		!strings.Contains(res.output, "hello/install") || !strings.Contains(res.output, "kind=heading") ||
@@ -220,7 +245,9 @@ func TestVFSTools_readWrite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("replace markdown body: %v out=%s", err, res.output)
 	}
-	got, err = ms.ReadText(ctx, "/workspace/work/README.md")
+
+	got, err = ms.Route(ctx, "/workspace/work/README.md").
+		ReadText(ctx)
 	if err != nil || !strings.Contains(got.Text(), "new body") || !strings.Contains(got.Text(), "## Install") {
 		t.Fatalf("after markdown replace: %q err=%v", got.Text(), err)
 	}
@@ -229,9 +256,12 @@ func TestVFSTools_readWrite(t *testing.T) {
 		"Use write")
 
 	md2 := "# Top\n\n## Sec\n\nkeep\n"
-	if err := ms.WriteFile(ctx, "/workspace/work/head.md", []byte(md2)); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/head.md").
+		WriteFile(ctx, []byte(md2)); err != nil {
 		t.Fatal(err)
 	}
+
 	revHead, err := ms.ContentRev(ctx, "/workspace/work/head.md")
 	if err != nil {
 		t.Fatal(err)
@@ -242,14 +272,17 @@ func TestVFSTools_readWrite(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("include_heading replace: %v", err)
 	}
-	got, err = ms.ReadText(ctx, "/workspace/work/head.md")
-	if err != nil || !strings.Contains(got.Text(), "## Renamed") || strings.Contains(got.Text(), "## Sec") {
+
+	if got, err := ms.Route(ctx, "/workspace/work/head.md").
+		ReadText(ctx); err != nil || !strings.Contains(got.Text(), "## Renamed") || strings.Contains(got.Text(), "## Sec") {
 		t.Fatalf("include_heading body: %q err=%v", got.Text(), err)
 	}
 
-	if err := ms.WriteFile(ctx, "/workspace/work/plain.txt", []byte("no structure\n")); err != nil {
+	if err := ms.Route(ctx, "/workspace/work/plain.txt").
+		WriteFile(ctx, []byte("no structure\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	res, err = tools["read"].invoke(ctx, `{"path":"/workspace/work/plain.txt","outline":true}`, rt)
 	if err != nil || !strings.Contains(res.output, "media_type=") ||
 		!strings.Contains(res.output, "line_count=") {
@@ -282,9 +315,12 @@ func TestVFSTools_readWrite(t *testing.T) {
 	if gotText(t, ms, "/workspace/work/empty.txt") != "" {
 		t.Fatalf("empty create: %q", gotText(t, ms, "/workspace/work/empty.txt"))
 	}
-	if err := ms.WriteFile(ctx, "/workspace/work/empty.txt", []byte("keep\n")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/empty.txt").
+		WriteFile(ctx, []byte("keep\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	bodyEmpty, _ := json.Marshal(map[string]any{"path": "/workspace/work/empty.txt", "content": ""})
 	if _, err = tools["write"].invoke(ctx, string(bodyEmpty), rt); err != nil {
 		t.Fatal(err)
@@ -293,9 +329,11 @@ func TestVFSTools_readWrite(t *testing.T) {
 		t.Fatalf("empty overwrite: %q", gotText(t, ms, "/workspace/work/empty.txt"))
 	}
 
-	if err := ms.WriteFile(ctx, "/workspace/work/cut.txt", []byte("keep UNIQUE-CUT rest\n")); err != nil {
+	if err := ms.Route(ctx, "/workspace/work/cut.txt").
+		WriteFile(ctx, []byte("keep UNIQUE-CUT rest\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	bodyNilNew, _ := json.Marshal(map[string]any{
 		"path": "/workspace/work/cut.txt", "old": " UNIQUE-CUT",
 	})
@@ -326,9 +364,12 @@ func TestVFSTools_readWrite(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "no structured blocks") {
 		t.Fatalf("block on plain: %v", err)
 	}
-	if err := ms.WriteFile(ctx, "/workspace/work/pic.bin", []byte{0x89, 'P', 'N', 'G'}); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/pic.bin").
+		WriteFile(ctx, []byte{0x89, 'P', 'N', 'G'}); err != nil {
 		t.Fatal(err)
 	}
+
 	revBin, err := ms.ContentRev(ctx, "/workspace/work/pic.bin")
 	if err != nil || revBin.Hash == "" {
 		t.Fatalf("binary ContentRev: %+v err=%v", revBin, err)
@@ -337,7 +378,9 @@ func TestVFSTools_readWrite(t *testing.T) {
 
 func gotText(t *testing.T, ms *vfs.MountSession, path string) string {
 	t.Helper()
-	doc, err := ms.ReadText(context.Background(), path)
+
+	doc, err := ms.Route(context.Background(), path).
+		ReadText(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -489,7 +532,9 @@ func TestVFSTools_projectedDocOutlineAndBlocks(t *testing.T) {
 	if _, err = tools["write"].invoke(ctx, fmt.Sprintf(`{"path":"/workspace/contracts/notes.md","content":%q}`, mdHTML), rt); err != nil {
 		t.Fatal(err)
 	}
-	st, err := ms.Stat(ctx, "/workspace/contracts/notes.md")
+
+	st, err := ms.Route(ctx, "/workspace/contracts/notes.md").
+		Stat(ctx)
 	if err != nil || st.MediaType != "text/markdown" {
 		t.Fatalf("notes.md Stat = %+v err=%v", st, err)
 	}
@@ -502,7 +547,9 @@ func TestVFSTools_projectedDocOutlineAndBlocks(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	lifted, err := ms.ReadText(ctx, "/workspace/contracts/Lifted")
+
+	lifted, err := ms.Route(ctx, "/workspace/contracts/Lifted").
+		ReadText(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -515,15 +562,18 @@ func TestVFSTools_projectedDocOutlineAndBlocks(t *testing.T) {
 	if strings.Join(paras, ",") != "Hello,World" {
 		t.Fatalf("lifted blocks = %v", paras)
 	}
-	st, err = ms.Stat(ctx, "/workspace/contracts/Lifted")
+
+	st, err = ms.Route(ctx, "/workspace/contracts/Lifted").
+		Stat(ctx)
 	if err != nil || st.MediaType != "application/vnd.google-apps.document" {
 		t.Fatalf("Lifted Stat = %+v err=%v", st, err)
 	}
 	if _, err = tools["write_document"].invoke(ctx, `{"path":"/workspace/contracts/CRESPIKE","content":"<h1>CRE SPIKE</h1><p>Intro</p>"}`, rt); err != nil {
 		t.Fatalf("extensionless HTML create: %v", err)
 	}
-	st, err = ms.Stat(ctx, "/workspace/contracts/CRESPIKE")
-	if err != nil || st.MediaType != "application/vnd.google-apps.document" {
+
+	if st, err := ms.Route(ctx, "/workspace/contracts/CRESPIKE").
+		Stat(ctx); err != nil || st.MediaType != "application/vnd.google-apps.document" {
 		t.Fatalf("CRESPIKE Stat = %+v err=%v", st, err)
 	}
 	api.FailDocBatch()
@@ -708,8 +758,9 @@ func TestVFSTools_projectedSheetReadWrite(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	st, err := ms.Stat(ctx, "/workspace/contracts/Ledger")
-	if err != nil || st.MediaType != "application/vnd.google-apps.spreadsheet" {
+
+	if st, err := ms.Route(ctx, "/workspace/contracts/Ledger").
+		Stat(ctx); err != nil || st.MediaType != "application/vnd.google-apps.spreadsheet" {
 		t.Fatalf("create-as-Sheet Stat = %+v err=%v", st, err)
 	}
 
@@ -743,24 +794,33 @@ func TestVFSTools_projectedSheetReadWrite(t *testing.T) {
 
 // TestVFSTools_runCommandLiveNames: host ls/find on a FUSE tree match session ReadDir.
 func TestVFSTools_runCommandLiveNames(t *testing.T) {
-	if !vfs.FuseAvailable() {
-		t.Skip("no /dev/fuse or /dev/macfuse*")
+	if err := vfs.FuseProbe(t.TempDir()); err != nil {
+		t.Skip(err.Error())
 	}
 	ctx := context.Background()
 	base := t.TempDir()
 	ms := mustMountTree(t, "live-names", vfs.At("work", vfs.Local(base)))
-	if err := ms.MkdirAll(ctx, "/workspace/work/sub"); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/sub").
+		MkdirAll(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.WriteFile(ctx, "/workspace/work/a.go", []byte("package a\n")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/a.go").
+		WriteFile(ctx, []byte("package a\n")); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.WriteFile(ctx, "/workspace/work/sub/b.go", []byte("package b\n")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/sub/b.go").
+		WriteFile(ctx, []byte("package b\n")); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.WriteFile(ctx, "/workspace/work/readme.md", []byte("# r\n")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/readme.md").
+		WriteFile(ctx, []byte("# r\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := ms.FuseMount(t.TempDir()); err != nil {
 		t.Fatal(err)
 	}
@@ -774,7 +834,9 @@ func TestVFSTools_runCommandLiveNames(t *testing.T) {
 	if tool == nil {
 		t.Fatal("run_command required")
 	}
-	ents, err := ms.ReadDir(ctx, "/workspace/work")
+
+	ents, err := ms.Route(ctx, "/workspace/work").
+		ReadDir(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}

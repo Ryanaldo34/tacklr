@@ -50,8 +50,7 @@ func (m Member) Indexed(policy string) Member {
 	return m
 }
 
-// Profile sets MountSpec.Profile. Empty keeps the At name. Tree still
-// sets Profile "brain" when name is "engram".
+// Profile sets MountSpec.Profile. Empty keeps the At name.
 func (m Member) Profile(profile string) Member {
 	m.profile = strings.TrimSpace(profile)
 	return m
@@ -65,8 +64,6 @@ func Tree(members ...Member) OpenVFS {
 		if err != nil {
 			return nil, err
 		}
-		ws := workspaceProvider{}
-		specs := make([]MountSpec, 0, len(members))
 		seen := make(map[string]struct{}, len(members))
 		for _, m := range members {
 			if m.name == "" || m.open == nil {
@@ -91,9 +88,6 @@ func Tree(members ...Member) OpenVFS {
 				continue
 			}
 			writable := memberWritable(m, b)
-			ws.members = append(ws.members, workspaceMember{
-				name: m.name, writable: writable, inner: p,
-			})
 			params := maps.Clone(b.Params)
 			if params == nil {
 				params = map[string]string{}
@@ -103,24 +97,16 @@ func Tree(members ...Member) OpenVFS {
 			if m.profile != "" {
 				profile = m.profile
 			}
-			if m.name == "engram" {
-				profile = "brain"
-			}
 			spec := MountSpec{
+				Point:       WorkspacePoint + "/" + m.name,
 				Params:      params,
 				ReadOnly:    !writable,
 				Profile:     profile,
-				IndexPolicy: memberIndexPolicy(m),
+				IndexPolicy: m.indexPolicy,
 			}
-			specs = append(specs, spec)
-		}
-		root := MountSpec{
-			Point:   WorkspacePoint,
-			Profile: workspaceProfile,
-			Members: specs,
-		}
-		if err := ms.Attach(ctx, root, ws); err != nil {
-			return nil, err
+			if err := ms.mount(ctx, spec, p); err != nil {
+				return nil, err
+			}
 		}
 		return ms, nil
 	}
@@ -131,20 +117,6 @@ func memberWritable(m Member, b Binding) bool {
 		return b.Writable
 	}
 	return !m.readOnly
-}
-
-func memberIndexPolicy(m Member) string {
-	if m.indexPolicy != "" {
-		return m.indexPolicy
-	}
-	switch m.name {
-	case "engram", "skills":
-		return "none"
-	case "memory":
-		return "watch"
-	default:
-		return ""
-	}
 }
 
 // BindingByName returns the bind whose alias or provider matches name.

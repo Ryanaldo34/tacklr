@@ -13,16 +13,20 @@ import (
 )
 
 func TestRunCommand_catDirtyAndFalseExit(t *testing.T) {
-	if !vfs.FuseAvailable() {
-		t.Skip("no /dev/fuse or /dev/macfuse*")
+	if err := vfs.FuseProbe(t.TempDir()); err != nil {
+		t.Skip(err.Error())
 	}
 	ctx := context.Background()
 	ms, rt := newRunCommandSession(t)
 	const body = "dirty body unique phrase xyzzy-tacklr\n"
-	if err := ms.WriteFile(ctx, "/workspace/work/note.md", []byte("old\n")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/note.md").
+		WriteFile(ctx, []byte("old\n")); err != nil {
 		t.Fatal(err)
 	}
-	doc, err := ms.ReadText(ctx, "/workspace/work/note.md")
+
+	doc, err := ms.Route(ctx, "/workspace/work/note.md").
+		ReadText(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,8 +75,9 @@ func TestRunCommand_catDirtyAndFalseExit(t *testing.T) {
 	if err != nil || !strings.Contains(res.output, "exit=0") {
 		t.Fatalf("host write: %s err=%v", res.output, err)
 	}
-	got, err := ms.ReadText(ctx, "/workspace/work/fromsh/x.txt")
-	if err != nil || got.Text() != "from-sh\n" {
+
+	if got, err := ms.Route(ctx, "/workspace/work/fromsh/x.txt").
+		ReadText(ctx); err != nil || got.Text() != "from-sh\n" {
 		body := ""
 		if got != nil {
 			body = got.Text()
@@ -92,8 +97,8 @@ func TestRunCommand_catDirtyAndFalseExit(t *testing.T) {
 }
 
 func TestRunCommand_deadlineKillsProcess(t *testing.T) {
-	if !vfs.FuseAvailable() {
-		t.Skip("no /dev/fuse or /dev/macfuse*")
+	if err := vfs.FuseProbe(t.TempDir()); err != nil {
+		t.Skip(err.Error())
 	}
 	ms, rt := newRunCommandSession(t)
 	if err := ms.FuseMount(t.TempDir()); err != nil {
@@ -111,8 +116,8 @@ func TestRunCommand_deadlineKillsProcess(t *testing.T) {
 }
 
 func TestRunCommand_truncatesOver1MiB(t *testing.T) {
-	if !vfs.FuseAvailable() {
-		t.Skip("no /dev/fuse or /dev/macfuse*")
+	if err := vfs.FuseProbe(t.TempDir()); err != nil {
+		t.Skip(err.Error())
 	}
 	ms, rt := newRunCommandSession(t)
 	if err := ms.FuseMount(t.TempDir()); err != nil {

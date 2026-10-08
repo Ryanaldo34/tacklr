@@ -12,21 +12,21 @@ import (
 
 // ConstructTurn opens VFS trees and builds a TurnManager. On NewTurnManager
 // failure the trees are closed.
-func ConstructTurn(ctx context.Context, agent tacklr.AgentOptions, threadID string, bindings []vfs.Binding, proj vfs.Projection, extraMCP []mcp.MCPConfig) (*tacklr.TurnManager, *vfs.MountSession, *vfs.MountSession, error) {
-	ms, skills, err := OpenTurnSessions(ctx, threadID, agent, bindings, proj)
+func ConstructTurn(ctx context.Context, agent tacklr.AgentOptions, threadID string, bindings []vfs.Binding, proj vfs.Projection, extraMCP []mcp.MCPConfig) (*tacklr.TurnManager, *vfs.MountSession, error) {
+	ms, err := OpenTurnVFS(ctx, threadID, agent, bindings, proj)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
-	opts := tacklr.BindTurn(agent, threadID, ms, skills)
+	opts := tacklr.BindTurn(agent, threadID, ms)
 	if len(extraMCP) > 0 {
 		opts.MCPConfigs = append(append([]mcp.MCPConfig(nil), agent.MCPConfigs...), extraMCP...)
 	}
 	h, err := tacklr.NewTurnManager(ctx, opts)
 	if err != nil {
-		CloseTurnTrees(ms, skills)
-		return nil, nil, nil, err
+		CloseTurnVFS(ms)
+		return nil, nil, err
 	}
-	return h, ms, skills, nil
+	return h, ms, nil
 }
 
 // RestoreTurn reloads a snapshot (if any) and applies host session state.
@@ -49,9 +49,9 @@ func RestoreTurn(ctx context.Context, store session.SnapshotStore, id session.Se
 }
 
 // AbandonTurn closes a harness and its turn-scoped trees after a failed construct.
-func AbandonTurn(h *tacklr.TurnManager, workspace, skills *vfs.MountSession) {
+func AbandonTurn(h *tacklr.TurnManager, workspace *vfs.MountSession) {
 	if h != nil {
 		h.Close()
 	}
-	CloseTurnTrees(workspace, skills)
+	CloseTurnVFS(workspace)
 }

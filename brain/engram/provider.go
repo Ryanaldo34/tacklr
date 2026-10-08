@@ -24,12 +24,18 @@ const (
 	DefaultMountPoint = "/workspace/engram"
 	ModePrefix        = "prefix"
 	ModeRoots         = "roots"
+	indexNone         = "none"
 )
+
+// Mount is the engram member at /workspace/engram.
+// Profile is brain and the index policy is none: these objects are already in the brain.
+func Mount(eng *brain.Engine, scope brain.Scope) vfs.Member {
+	return vfs.At("engram", Open(eng, scope)).Profile(DefaultProfile).Indexed(indexNone)
+}
 
 // MountForKind selects the roots mount for kind, then a prefix mount, then any
 // brain mount. Harness tool adapters use this canonical layout resolver.
 func MountForKind(specs []vfs.MountSpec, kind string) (vfs.MountSpec, bool) {
-	specs = flattenMountSpecs(specs)
 	var prefix vfs.MountSpec
 	var hasPrefix bool
 	for _, spec := range specs {
@@ -55,30 +61,7 @@ func MountForKind(specs []vfs.MountSpec, kind string) (vfs.MountSpec, bool) {
 	return vfs.MountSpec{}, false
 }
 
-func flattenMountSpecs(specs []vfs.MountSpec) []vfs.MountSpec {
-	var out []vfs.MountSpec
-	for _, spec := range specs {
-		if len(spec.Members) == 0 {
-			out = append(out, spec)
-			continue
-		}
-		for _, m := range spec.Members {
-			cp := m
-			if strings.TrimSpace(cp.Point) == "" {
-				name := strings.TrimSpace(m.Params[vfs.ParamName])
-				if name == "" {
-					name = strings.TrimSpace(m.Profile)
-				}
-				cp.Point = spec.Point + "/" + name
-			}
-			out = append(out, cp)
-		}
-	}
-	return out
-}
-
 // Open returns a vfs.Open over brain.Engine objects (Engrams as Markdown files).
-// Hosts pass At("engram", engram.Open(eng, scope)).
 func Open(eng *brain.Engine, scope brain.Scope) vfs.Open {
 	return func(_ context.Context, _ string, b vfs.Binding) (vfs.Provider, error) {
 		return newEngramProvider(eng, scope, vfs.MountSpec{Params: b.Params, Point: b.Point})

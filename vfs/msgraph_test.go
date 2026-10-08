@@ -365,11 +365,15 @@ func TestGraph_readWriteMkdirTrashRefreshAndErrors(t *testing.T) {
 	fx.base = srv.URL
 
 	ms, holder := mountGraphHTTP(t, srv, true)
-	got, err := ms.ReadFile(ctx, "/workspace/legal/a.txt")
+
+	got, err := ms.Route(ctx, "/workspace/legal/a.txt").
+		ReadFile(ctx)
 	if err != nil || string(got) != "one" {
 		t.Fatalf("read = %q err=%v", got, err)
 	}
-	ents, err := ms.ReadDir(ctx, "/workspace/legal")
+
+	ents, err := ms.Route(ctx, "/workspace/legal").
+		ReadDir(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -382,71 +386,104 @@ func TestGraph_readWriteMkdirTrashRefreshAndErrors(t *testing.T) {
 			t.Fatalf("ReadDir = %+v", ents)
 		}
 	}
-	if _, err := ms.ReadDir(ctx, "/workspace/legal/a.txt"); !errors.Is(err, vfs.ErrNotDir) {
+
+	if _, err := ms.Route(ctx, "/workspace/legal/a.txt").
+		ReadDir(ctx); !errors.Is(err, vfs.ErrNotDir) {
 		t.Fatalf("file ReadDir: %v", err)
 	}
-	if _, err := ms.Open(ctx, "/workspace/legal"); err == nil || !errors.Is(err, vfs.ErrIsDir) {
+
+	if _, err := ms.Route(ctx, "/workspace/legal").
+		Open(ctx); err == nil || !errors.Is(err, vfs.ErrIsDir) {
 		t.Fatalf("open dir: %v", err)
 	}
 
-	if err := ms.WriteFile(ctx, "/workspace/legal/a.txt", []byte("two")); err != nil {
+	if err := ms.Route(ctx, "/workspace/legal/a.txt").
+		WriteFile(ctx, []byte("two")); err != nil {
 		t.Fatal(err)
 	}
+
 	fx.mu.Lock()
 	fx.onceStatus["/drives/drv/items/f1/content"] = http.StatusUnauthorized
 	fx.mu.Unlock()
 	holder.SetRefresh(func(context.Context) (vfs.Credential, error) {
 		return vfs.Credential{Token: "fresh"}, nil
 	})
-	got, err = ms.ReadFile(ctx, "/workspace/legal/a.txt")
+
+	got, err = ms.Route(ctx, "/workspace/legal/a.txt").
+		ReadFile(ctx)
 	if err != nil || string(got) != "two" {
 		t.Fatalf("refresh read = %q err=%v", got, err)
 	}
 
-	if err := ms.MkdirAll(ctx, "/workspace/legal/sub/dir"); err != nil {
+	if err := ms.Route(ctx, "/workspace/legal/sub/dir").
+		MkdirAll(ctx); err != nil {
 		t.Fatal(err)
 	}
-	st, err := ms.Stat(ctx, "/workspace/legal/sub/dir")
+
+	st, err := ms.Route(ctx, "/workspace/legal/sub/dir").
+		Stat(ctx)
 	if err != nil || !st.IsDir {
 		t.Fatalf("mkdir stat = %+v err=%v", st, err)
 	}
-	if err := ms.WriteFile(ctx, "/workspace/legal/sub/dir/c.txt", []byte("nested")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/legal/sub/dir/c.txt").
+		WriteFile(ctx, []byte("nested")); err != nil {
 		t.Fatal(err)
 	}
-	got, err = ms.ReadFile(ctx, "/workspace/legal/sub/dir/c.txt")
+
+	got, err = ms.Route(ctx, "/workspace/legal/sub/dir/c.txt").
+		ReadFile(ctx)
 	if err != nil || string(got) != "nested" {
 		t.Fatalf("nested write = %q err=%v", got, err)
 	}
-	if err := ms.WriteFile(ctx, "/workspace/legal/my file.txt", []byte("hello")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/legal/my file.txt").
+		WriteFile(ctx, []byte("hello")); err != nil {
 		t.Fatal(err)
 	}
-	got, err = ms.ReadFile(ctx, "/workspace/legal/my file.txt")
+
+	got, err = ms.Route(ctx, "/workspace/legal/my file.txt").
+		ReadFile(ctx)
 	if err != nil || string(got) != "hello" {
 		t.Fatalf("create space = %q err=%v", got, err)
 	}
 
-	if err := ms.Remove(ctx, "/workspace/legal/a.txt"); err != nil {
+	if err := ms.Route(ctx, "/workspace/legal/a.txt").
+		Remove(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ms.ReadFile(ctx, "/workspace/legal/a.txt"); !errors.Is(err, vfs.ErrNotExist) {
+
+	if _, err := ms.Route(ctx, "/workspace/legal/a.txt").
+		ReadFile(ctx); !errors.Is(err, vfs.ErrNotExist) {
 		t.Fatalf("trashed: %v", err)
 	}
-	if _, err := ms.ReadText(ctx, "/workspace/legal/Notebook"); !errors.Is(err, vfs.ErrNoCodec) {
+
+	if _, err := ms.Route(ctx, "/workspace/legal/Notebook").
+		ReadText(ctx); !errors.Is(err, vfs.ErrNoCodec) {
 		t.Fatalf("onenote: %v", err)
 	}
-	if _, err := ms.ReadFile(ctx, "/workspace/legal/gone.txt"); !errors.Is(err, vfs.ErrNotExist) {
+
+	if _, err := ms.Route(ctx, "/workspace/legal/gone.txt").
+		ReadFile(ctx); !errors.Is(err, vfs.ErrNotExist) {
 		t.Fatalf("content 404: %v", err)
 	}
-	if _, err := ms.ReadFile(ctx, "/workspace/legal/exp.txt"); !errors.Is(err, vfs.ErrAuthExpired) {
+
+	if _, err := ms.Route(ctx, "/workspace/legal/exp.txt").
+		ReadFile(ctx); !errors.Is(err, vfs.ErrAuthExpired) {
 		t.Fatalf("content 401: %v", err)
 	}
-	if err := ms.WriteFile(ctx, "/workspace/legal/huge.bin", make([]byte, vfs.MaxReadFileBytes+1)); !errors.Is(err, vfs.ErrTooLarge) {
+
+	if err := ms.Route(ctx, "/workspace/legal/huge.bin").
+		WriteFile(ctx, make([]byte, vfs.MaxReadFileBytes+1)); !errors.Is(err, vfs.ErrTooLarge) {
 		t.Fatalf("oversize put: %v", err)
 	}
+
 	if err := ms.WriteDocument(ctx, vfs.NewTextDocument("/workspace/legal/note.md", "text/markdown", "utf-8", "# hi\n")); err != nil {
 		t.Fatal(err)
 	}
-	got, err = ms.ReadFile(ctx, "/workspace/legal/note.md")
+
+	got, err = ms.Route(ctx, "/workspace/legal/note.md").
+		ReadFile(ctx)
 	if err != nil || !strings.Contains(string(got), "# hi") {
 		t.Fatalf("WriteDocument = %q err=%v", got, err)
 	}
@@ -457,11 +494,14 @@ func TestGraph_readWriteMkdirTrashRefreshAndErrors(t *testing.T) {
 	if _, err := ms.Apply(ctx, "/workspace/legal/SPIKE", vfs.Mutation{Content: &html}); err != nil {
 		t.Fatal(err)
 	}
-	st, err = ms.Stat(ctx, "/workspace/legal/SPIKE")
-	if err != nil || st.MediaType != adapters.DOCXMediaType {
+
+	if st, err := ms.Route(ctx, "/workspace/legal/SPIKE").
+		Stat(ctx); err != nil || st.MediaType != adapters.DOCXMediaType {
 		t.Fatalf("extensionless HTML graph Stat=%+v err=%v", st, err)
 	}
-	word, err := ms.ReadText(ctx, "/workspace/legal/SPIKE")
+
+	word, err := ms.Route(ctx, "/workspace/legal/SPIKE").
+		ReadText(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -469,18 +509,24 @@ func TestGraph_readWriteMkdirTrashRefreshAndErrors(t *testing.T) {
 	if !ok || len(rd.Blocks()) == 0 || rd.Blocks()[0].Text != "x" {
 		t.Fatalf("graph Word IR = %+v ok=%v", word, ok)
 	}
-	if err := ms.MkdirAll(ctx, "/workspace/legal/Budget.xlsx/nope"); err == nil || !errors.Is(err, vfs.ErrNotSupported) {
+
+	if err := ms.Route(ctx, "/workspace/legal/Budget.xlsx/nope").
+		MkdirAll(ctx); err == nil || !errors.Is(err, vfs.ErrNotSupported) {
 		t.Fatalf("mkdir through file: %v", err)
 	}
 
 	ro, _ := mountGraphHTTP(t, srv, false)
-	got, err = ro.ReadFile(ctx, "/workspace/legal/c.txt")
-	if err != nil || string(got) != "c" {
+
+	if got, err := ro.Route(ctx, "/workspace/legal/c.txt").
+		ReadFile(ctx); err != nil || string(got) != "c" {
 		t.Fatalf("ro read = %q err=%v", got, err)
 	}
-	if err := ro.WriteFile(ctx, "/workspace/legal/c.txt", []byte("nope")); !errors.Is(err, vfs.ErrReadOnly) {
+
+	if err := ro.Route(ctx, "/workspace/legal/c.txt").
+		WriteFile(ctx, []byte("nope")); !errors.Is(err, vfs.ErrReadOnly) {
 		t.Fatalf("ro put: %v", err)
 	}
+
 }
 
 func TestGraph_xlsxCodecCellOverlayPersists(t *testing.T) {
@@ -505,7 +551,8 @@ func TestGraph_xlsxCodecCellOverlayPersists(t *testing.T) {
 	fx.base = srv.URL
 	ms, _ := mountGraphHTTP(t, srv, true)
 
-	doc, err := ms.ReadText(ctx, "/workspace/legal/Budget.xlsx")
+	doc, err := ms.Route(ctx, "/workspace/legal/Budget.xlsx").
+		ReadText(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -518,7 +565,9 @@ func TestGraph_xlsxCodecCellOverlayPersists(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	got, err := ms.ReadText(ctx, "/workspace/legal/Budget.xlsx")
+
+	got, err := ms.Route(ctx, "/workspace/legal/Budget.xlsx").
+		ReadText(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -563,18 +612,25 @@ func TestGraphAndDrive_writesStayOnMatchingProviders(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ms.Close() })
-	if err := ms.WriteFile(ctx, "/workspace/contracts/new.txt", []byte("drive")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/contracts/new.txt").
+		WriteFile(ctx, []byte("drive")); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.WriteFile(ctx, "/workspace/legal/b.txt", []byte("graph")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/legal/b.txt").
+		WriteFile(ctx, []byte("graph")); err != nil {
 		t.Fatal(err)
 	}
-	got, err := ms.ReadFile(ctx, "/workspace/legal/b.txt")
+
+	got, err := ms.Route(ctx, "/workspace/legal/b.txt").
+		ReadFile(ctx)
 	if err != nil || string(got) != "graph" {
 		t.Fatalf("graph read = %q err=%v", got, err)
 	}
-	got, err = ms.ReadFile(ctx, "/workspace/contracts/new.txt")
-	if err != nil || string(got) != "drive" {
+
+	if got, err := ms.Route(ctx, "/workspace/contracts/new.txt").
+		ReadFile(ctx); err != nil || string(got) != "drive" {
 		t.Fatalf("drive read = %q err=%v", got, err)
 	}
 	if err := auth.Refresh("s", "gdrive", vfs.Credential{Token: "gd2"}); err != nil {
@@ -606,8 +662,9 @@ func TestGraphFactory_openRequiresFolderTokenAndId(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = siteMS.Close() })
-	got, err := siteMS.ReadFile(ctx, "/workspace/lib/note.txt")
-	if err != nil || string(got) != "from-site" {
+
+	if got, err := siteMS.Route(ctx, "/workspace/lib/note.txt").
+		ReadFile(ctx); err != nil || string(got) != "from-site" {
 		t.Fatalf("site bind = %q err=%v", got, err)
 	}
 

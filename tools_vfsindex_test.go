@@ -95,7 +95,9 @@ func TestVFSIndexTools_indexSearchUnindex(t *testing.T) {
 	}
 
 	body := "alpha line\nbeta TODO findme-xyz\ngamma\n"
-	if err := ms.WriteFile(ctx, "/workspace/work/note.txt", []byte(body)); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/note.txt").
+		WriteFile(ctx, []byte(body)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -131,7 +133,9 @@ func TestVFSIndexTools_indexSearchUnindex(t *testing.T) {
 	if !strings.Contains(out, "unindexed path=/workspace/work/note.txt") {
 		t.Fatalf("unindex: %q", out)
 	}
-	if _, err := ms.Stat(ctx, "/workspace/work/note.txt"); err != nil {
+
+	if _, err := ms.Route(ctx, "/workspace/work/note.txt").
+		Stat(ctx); err != nil {
 		t.Fatal("VFS file must remain after unindex")
 	}
 
@@ -157,9 +161,12 @@ func TestVFSIndexTools_indexSearchUnindex(t *testing.T) {
 	}
 
 	// Directory in a batch rejects before any IndexPath (no partial index).
-	if err := ms.WriteFile(ctx, "/workspace/work/batch-only.txt", []byte("batch-unique-phrase-zzz\n")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/batch-only.txt").
+		WriteFile(ctx, []byte("batch-unique-phrase-zzz\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	_, err = runWriteTool(t, h, indexTool, `{"paths":["/workspace/work/batch-only.txt","/workspace/work"]}`)
 	if err == nil || !strings.Contains(err.Error(), "directory") {
 		t.Fatalf("index_file directory in batch: %v", err)
@@ -190,7 +197,9 @@ func TestVFSIndexTools_selectiveIndexSearchReadAndTrack(t *testing.T) {
 	}
 
 	body := "line one\nline two unique-phrase-selective-aaa\nline three\n"
-	if err := ms.WriteFile(ctx, "/workspace/work/sel.txt", []byte(body)); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/sel.txt").
+		WriteFile(ctx, []byte(body)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -224,9 +233,11 @@ func TestVFSIndexTools_selectiveIndexSearchReadAndTrack(t *testing.T) {
 		t.Fatalf("read after search: %s", readOut.output)
 	}
 
-	if err := ms.WriteFile(ctx, "/workspace/work/sel.txt", []byte("unique-phrase-selective-bbb\n")); err != nil {
+	if err := ms.Route(ctx, "/workspace/work/sel.txt").
+		WriteFile(ctx, []byte("unique-phrase-selective-bbb\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	_ = waitSearchHit(t, eng, scope, "unique-phrase-selective-bbb", 3*time.Second)
 }
 
@@ -249,9 +260,11 @@ func TestVFSIndexTools_prefixAutoIndex(t *testing.T) {
 	})
 	t.Cleanup(h.Close)
 
-	if err := ms.WriteFile(ctx, "/workspace/work/auto.txt", []byte("prefix-auto-phrase-xyz\n")); err != nil {
+	if err := ms.Route(ctx, "/workspace/work/auto.txt").
+		WriteFile(ctx, []byte("prefix-auto-phrase-xyz\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	_ = waitSearchHit(t, eng, brain.Scope{Namespace: ns}, "prefix-auto-phrase-xyz", 3*time.Second)
 }
 
@@ -276,7 +289,7 @@ func TestKnowledgeSaveSearchRead(t *testing.T) {
 	ns := mustNS(t, "id", uuid.NewString())
 	ms := mustMountTree(t, "save-mem",
 		vfs.At("work", vfs.Local(t.TempDir())),
-		vfs.At("engram", engram.Open(eng, brain.Scope{Namespace: ns})),
+		engram.Mount(eng, brain.Scope{Namespace: ns}),
 	)
 	h := mustNewTurnManager(t, AgentOptions{
 		sessionID:    "save-mem",
@@ -310,7 +323,9 @@ func TestKnowledgeSaveSearchRead(t *testing.T) {
 	if !strings.HasPrefix(res.Path, "/workspace/engram/discovery/") || res.Rev == "" || res.ObjectID == "" || res.Kind != "Discovery" {
 		t.Fatalf("save result: %+v raw=%s", res, out.output)
 	}
-	body, err := ms.ReadFile(ctx, res.Path)
+
+	body, err := ms.Route(ctx, res.Path).
+		ReadFile(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -357,7 +372,9 @@ func TestKnowledgeSaveSearchRead(t *testing.T) {
 	if res2.Path != res.Path || res2.ObjectID != res.ObjectID {
 		t.Fatalf("update path/id changed: create=%+v update=%+v", res, res2)
 	}
-	body2, err := ms.ReadFile(ctx, res.Path)
+
+	body2, err := ms.Route(ctx, res.Path).
+		ReadFile(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -430,8 +447,9 @@ func TestKnowledgeSave_rootsMount(t *testing.T) {
 	if !strings.HasPrefix(res.Path, "/workspace/discovery/") || !strings.HasSuffix(res.Path, ".md") {
 		t.Fatalf("roots save path: %+v", res)
 	}
-	body, err := ms.ReadFile(ctx, res.Path)
-	if err != nil || !strings.Contains(string(body), "p99 under 40ms") {
+
+	if body, err := ms.Route(ctx, res.Path).
+		ReadFile(ctx); err != nil || !strings.Contains(string(body), "p99 under 40ms") {
 		t.Fatalf("ReadFile: %s err=%v", body, err)
 	}
 	id, err := uuid.Parse(res.ObjectID)
@@ -463,7 +481,7 @@ func TestRun_workspaceResearchTurn(t *testing.T) {
 	ns := mustNS(t, "id", uuid.NewString())
 	ms := mustMountTree(t, "research-turn",
 		vfs.At("work", vfs.Local(t.TempDir())),
-		vfs.At("engram", engram.Open(eng, brain.Scope{Namespace: ns})),
+		engram.Mount(eng, brain.Scope{Namespace: ns}),
 	)
 
 	wd := &recordingWatchdog{}
@@ -580,9 +598,12 @@ func TestRun_workspaceResearchTurn(t *testing.T) {
 	if !strings.Contains(save, "object_id") {
 		t.Fatalf("save: %s", save)
 	}
-	if body, err := ms.ReadFile(ctx, "/workspace/work/research.md"); err != nil || !strings.Contains(string(body), "unique-research-token") {
+
+	if body, err := ms.Route(ctx, "/workspace/work/research.md").
+		ReadFile(ctx); err != nil || !strings.Contains(string(body), "unique-research-token") {
 		t.Fatalf("vfs body: %s err=%v", body, err)
 	}
+
 	_ = waitSearchHit(t, eng, brain.Scope{Namespace: ns}, "unique-research-token", 3*time.Second)
 	if h.session.Plan.Document() != "index then wrap up" {
 		t.Fatalf("plan doc: %q", h.session.Plan.Document())
@@ -615,12 +636,16 @@ func TestPathNativeGraphLinkExpand(t *testing.T) {
 	t.Cleanup(h.Close)
 	activatePlan(t, h)
 
-	if err := ms.WriteFile(ctx, "/workspace/work/a.md", []byte("# A\n\napi doc\n")); err != nil {
+	if err := ms.Route(ctx, "/workspace/work/a.md").
+		WriteFile(ctx, []byte("# A\n\napi doc\n")); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.WriteFile(ctx, "/workspace/work/b.md", []byte("# B\n\nauth fact\n")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/b.md").
+		WriteFile(ctx, []byte("# B\n\nauth fact\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	idx := h.findTool("index_file", "")
 	if _, err := runWriteTool(t, h, idx, `{"paths":["/workspace/work/a.md","/workspace/work/b.md"]}`); err != nil {
 		t.Fatal(err)

@@ -169,7 +169,7 @@ func main() {
 			web.WebFetch(client),
 		},
 		OpenVFS:    openVFS(jail, eng, ns),
-		OpenSkills: vfs.Tree(vfs.At("skills", vfs.Union(vfs.Local(filepath.Join(jail, "skills"))))),
+		SkillsPath: "/workspace/skills",
 	}
 
 	c, err := temporal.Dial(client.Options{HostPort: os.Getenv("TEMPORAL_ADDRESS")})
@@ -178,8 +178,7 @@ func main() {
 	}
 	defer c.Close()
 	cfg := temporal.Config{
-		Agent:      agent,
-		Projection: vfs.DirectProjection{},
+		Agent: agent,
 	}
 	rt := temporal.Open(c, cfg)
 	w := rt.StartWorker()
@@ -236,10 +235,9 @@ if err != nil {
 	log.Fatal(err)
 }
 cfg := tacklrtemporal.Config{
-	Agent:      agent,
-	Snapshots:  snaps,   // production: shared store
-	Secrets:    secrets, // production: Redis / Postgres / Vault
-	Projection: vfs.DirectProjection{},
+	Agent:     agent,
+	Snapshots: snaps,   // production: shared store
+	Secrets:   secrets, // production: Redis / Postgres / Vault
 }
 rt := tacklrtemporal.Open(c, cfg)
 w := rt.StartWorker()
@@ -247,7 +245,7 @@ w := rt.StartWorker()
 
 ACP `_tacklr/vfs/bind` still maps onto `Prompt.Auth`. The worker never sees those tokens in workflow history.
 
-Importing `tacklr` registers built-in interrupts, Word/Excel codecs, and the durable driver adapter. The agent sees `/workspace/work`, `/workspace/engram`. Skills load from `OpenSkills` and reach the model only through `read_skill`. A Drive or SharePoint bind on the prompt adds `/workspace/drive` or `/workspace/sharepoint` for that turn. Tests point the Drive/Graph SDKs at httptest servers with documented REST shapes (`NewGoogleDriveHTTP`, `NewGraph` + `vfs/testhttp`). `WithLexicalOnly` is the explicit no-embedder choice; production hosts pass `brain.WithEmbedder`.
+Importing `tacklr` registers built-in interrupts, Word/Excel codecs, and the durable driver adapter. The agent sees `/workspace/work`, `/workspace/engram`. Skills load from `SkillsPath` and reach the model only through `read_skill`. A Drive or SharePoint bind on the prompt adds `/workspace/drive` or `/workspace/sharepoint` for that turn. Tests point the Drive/Graph SDKs at httptest servers with documented REST shapes (`NewGoogleDriveHTTP`, `NewGraph` + `vfs/testhttp`). `WithLexicalOnly` is the explicit no-embedder choice; production hosts pass `brain.WithEmbedder`.
 
 `telemetry.Init` installs the process-wide OpenTelemetry providers. With `OTLPEndpoint` (or `OTEL_EXPORTER_OTLP_ENDPOINT`) it exports traces, metrics, and logs over OTLP (gRPC by default, or HTTP). Without an endpoint the tracer does not export. `session/temporal.Dial` replaces that tracer with a replay-safe one that keeps the same export configuration, so workflow replay does not leak spans. Each Prompt or Resume is one `tacklr.turn` span; inference, tools, hand-off, and compress nest under it. `postgres.Store` Query/Exec spans join that same trace. Hosts must not start `tacklr.*` spans themselves. Metrics include turn duration and count, tool calls, model tokens, interrupts, hand-offs, compress, sessions, and checkpoints. Call `Init` before `Dial` when traces should be exported. Details: [`telemetry`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/telemetry).
 
@@ -264,7 +262,7 @@ Built-in tools that need a client use the same pattern. You construct them and p
 | `email.ReadInbox` / `email.SendEmail` | `read_inbox`, `send_email` |
 | `web.WebSearch` / `web.WebFetch` | `web_search`, `web_fetch` |
 | `MountSession` | `read`, `write`, `write_document`, `write_spreadsheet`, `run_command` |
-| `SkillsSession` (`OpenSkills`) | `read_skill` |
+| `SkillsPath` | `read_skill` |
 | `Brain` | knowledge tools (`search`, `save_*`, …) |
 | index bridge (from Brain + VFS) | `index_file`, `unindex` |
 
@@ -299,7 +297,7 @@ Register nested agents on `AgentOptions.Specialists`. Tools start work through `
 | Brain | Host-owned knowledge: Engrams, search, optional graph | [docs/knowledge.md](docs/knowledge.md) |
 | Host tools | Your functions; close over clients in the constructor | [docs/tools.md](docs/tools.md) |
 | MCP | External tool servers | [`mcp`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/mcp) |
-| Skills | `SKILL.md` catalogs from `OpenSkills`; the model reads them only through `read_skill` | [`skills`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/skills) |
+| Skills | `SKILL.md` catalogs from `SkillsPath`; the model reads them only through `read_skill` | [`skills`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/skills) |
 | Model | `tacklr.InferenceStrategy`; OpenAI-compatible client is `openai.NewOpenAIInferenceStrategy` | [`openai`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/openai) |
 | Web | `web_search` and `web_fetch` via `web.WebSearch` / `web.WebFetch` | [`web`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/web) |
 | Email | `read_inbox` and permission-gated `send_email` via `email.ReadInbox` / `email.SendEmail` | [`email`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/email) |
@@ -342,7 +340,7 @@ When VFS is wired, the harness injects file tools over virtual paths only. `run_
 | `durable` | Session Runtime, SnapshotStore, SecretStorage |
 | `interrupt` | Pause / resume types |
 | `mcp` | MCP config types |
-| `skills` | Skill loading from the host-only `OpenSkills` tree |
+| `skills` | Skill loading from `SkillsPath` |
 | `telemetry` | OpenTelemetry helpers |
 
 ---

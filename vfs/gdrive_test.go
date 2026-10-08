@@ -38,29 +38,33 @@ func TestMountSession_gdriveReadOnlySession(t *testing.T) {
 	t.Cleanup(func() { _ = ms.Close() })
 
 	specs := ms.Specs()
-	if len(specs) != 1 || specs[0].Point != vfs.WorkspacePoint || len(specs[0].Members) != 2 {
+	if len(specs) != 2 {
 		t.Fatalf("Specs = %+v", specs)
 	}
-	for _, m := range specs[0].Members {
-		if !m.ReadOnly || m.Params[vfs.ParamName] == "" {
+	for _, m := range specs {
+		if !m.ReadOnly || m.Params[vfs.ParamName] == "" || (m.Point != "/workspace/contracts" && m.Point != "/workspace/notes") {
 			t.Fatalf("member = %+v", m)
 		}
 	}
 
-	st, err := ms.Stat(ctx, "/workspace/contracts/nda.pdf")
-	if err != nil || st.IsDir || st.MediaType != "application/pdf" || st.Size != 4 {
+	if st, err := ms.Route(ctx, "/workspace/contracts/nda.pdf").
+		Stat(ctx); err != nil || st.IsDir || st.MediaType != "application/pdf" || st.Size != 4 {
 		t.Fatalf("Stat nda = %+v err=%v", st, err)
 	}
-	raw, err := ms.ReadFile(ctx, "/workspace/contracts/nda.pdf")
+
+	raw, err := ms.Route(ctx, "/workspace/contracts/nda.pdf").
+		ReadFile(ctx)
 	if err != nil || string(raw) != "%PDF" {
 		t.Fatalf("ReadFile nda = %q err=%v", raw, err)
 	}
-	text, err := ms.ReadText(ctx, "/workspace/contracts/acme/note.md")
-	if err != nil || !strings.Contains(text.Text(), "# hi") {
+
+	if text, err := ms.Route(ctx, "/workspace/contracts/acme/note.md").
+		ReadText(ctx); err != nil || !strings.Contains(text.Text(), "# hi") {
 		t.Fatalf("ReadText note = %v err=%v", text, err)
 	}
 
-	ents, err := ms.ReadDir(ctx, "/workspace/contracts")
+	ents, err := ms.Route(ctx, "/workspace/contracts").
+		ReadDir(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,35 +80,48 @@ func TestMountSession_gdriveReadOnlySession(t *testing.T) {
 		t.Fatalf("ReadDir names = %+v", ents)
 	}
 
-	if _, err := ms.ReadFile(ctx, "/workspace/contracts/dup.txt"); !errors.Is(err, vfs.ErrAmbiguous) {
+	if _, err := ms.Route(ctx, "/workspace/contracts/dup.txt").
+		ReadFile(ctx); !errors.Is(err, vfs.ErrAmbiguous) {
 		t.Fatalf("collision: %v", err)
 	}
-	if _, err := ms.ReadFile(ctx, "/workspace/contracts/missing"); !errors.Is(err, vfs.ErrNotExist) {
+
+	if _, err := ms.Route(ctx, "/workspace/contracts/missing").
+		ReadFile(ctx); !errors.Is(err, vfs.ErrNotExist) {
 		t.Fatalf("missing: %v", err)
 	}
-	if err := ms.WriteFile(ctx, "/workspace/contracts/nda.pdf", []byte("x")); !errors.Is(err, vfs.ErrReadOnly) {
+
+	if err := ms.Route(ctx, "/workspace/contracts/nda.pdf").
+		WriteFile(ctx, []byte("x")); !errors.Is(err, vfs.ErrReadOnly) {
 		t.Fatalf("write: %v", err)
 	}
-	if err := ms.MkdirAll(ctx, "/workspace/contracts/new"); !errors.Is(err, vfs.ErrReadOnly) {
+
+	if err := ms.Route(ctx, "/workspace/contracts/new").
+		MkdirAll(ctx); !errors.Is(err, vfs.ErrReadOnly) {
 		t.Fatalf("mkdir: %v", err)
 	}
-	if err := ms.Remove(ctx, "/workspace/contracts/nda.pdf"); !errors.Is(err, vfs.ErrReadOnly) {
+
+	if err := ms.Route(ctx, "/workspace/contracts/nda.pdf").
+		Remove(ctx); !errors.Is(err, vfs.ErrReadOnly) {
 		t.Fatalf("remove: %v", err)
 	}
 
 	// Shortcut to a folder is walkable by the shortcut name.
-	got, err := ms.ReadFile(ctx, "/workspace/notes/alias/note.md")
-	if err != nil || string(got) != "# hi\n\n" {
+
+	if got, err := ms.Route(ctx, "/workspace/notes/alias/note.md").
+		ReadFile(ctx); err != nil || string(got) != "# hi\n\n" {
 		t.Fatalf("shortcut walk = %q err=%v", got, err)
 	}
 
-	if _, err := ms.ReadFile(ctx, "/workspace/contracts/huge.bin"); !errors.Is(err, vfs.ErrTooLarge) {
+	if _, err := ms.Route(ctx, "/workspace/contracts/huge.bin").
+		ReadFile(ctx); !errors.Is(err, vfs.ErrTooLarge) {
 		t.Fatalf("huge: %v", err)
 	}
 
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
-	if _, err := ms.Stat(canceled, "/workspace/contracts/nda.pdf"); !errors.Is(err, context.Canceled) {
+
+	if _, err := ms.Route(canceled, "/workspace/contracts/nda.pdf").
+		Stat(canceled); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled: %v", err)
 	}
 
@@ -115,7 +132,9 @@ func TestMountSession_gdriveReadOnlySession(t *testing.T) {
 		proactiveRefreshes++
 		return vfs.Credential{Token: "proactive", ExpiresAt: time.Now().Add(time.Hour)}, nil
 	})
-	raw, err = ms.ReadFile(ctx, "/workspace/notes/readme.txt")
+
+	raw, err = ms.Route(ctx, "/workspace/notes/readme.txt").
+		ReadFile(ctx)
 	if err != nil || string(raw) != "hello" || proactiveRefreshes != 1 {
 		t.Fatalf("proactive refresh read = %q refreshes=%d err=%v", raw, proactiveRefreshes, err)
 	}
@@ -125,17 +144,21 @@ func TestMountSession_gdriveReadOnlySession(t *testing.T) {
 	holder.SetRefresh(func(context.Context) (vfs.Credential, error) {
 		return vfs.Credential{Token: "fresh"}, nil
 	})
-	raw, err = ms.ReadFile(ctx, "/workspace/notes/readme.txt")
-	if err != nil || string(raw) != "hello" {
+
+	if raw, err := ms.Route(ctx, "/workspace/notes/readme.txt").
+		ReadFile(ctx); err != nil || string(raw) != "hello" {
 		t.Fatalf("refresh read = %q err=%v", raw, err)
 	}
 
 	// 401 without refresh stays expired.
 	api.FailMeta(http.StatusUnauthorized)
 	holder.SetRefresh(nil)
-	if _, err := ms.Stat(ctx, "/workspace/notes/readme.txt"); !errors.Is(err, vfs.ErrAuthExpired) {
+
+	if _, err := ms.Route(ctx, "/workspace/notes/readme.txt").
+		Stat(ctx); !errors.Is(err, vfs.ErrAuthExpired) {
 		t.Fatalf("expired: %v", err)
 	}
+
 }
 
 func TestDrive_requiresClient(t *testing.T) {
@@ -159,16 +182,24 @@ func TestMountSession_gdriveDirectoryAndWriteDocument(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ms.Close() })
-	if _, err := ms.ReadFile(ctx, "/workspace/contracts/acme"); err == nil {
+
+	if _, err := ms.Route(ctx, "/workspace/contracts/acme").
+		ReadFile(ctx); err == nil {
 		t.Fatal("ReadFile on directory")
 	}
-	if _, err := ms.ReadText(ctx, "/workspace/contracts/acme"); err == nil {
+
+	if _, err := ms.Route(ctx, "/workspace/contracts/acme").
+		ReadText(ctx); err == nil {
 		t.Fatal("ReadText on directory")
 	}
-	if _, err := ms.ReadDir(ctx, "/workspace/contracts/nda.pdf"); err == nil {
+
+	if _, err := ms.Route(ctx, "/workspace/contracts/nda.pdf").
+		ReadDir(ctx); err == nil {
 		t.Fatal("ReadDir on file")
 	}
-	doc, err := ms.OpenDocument(ctx, "/workspace/contracts/acme/note.md", nil)
+
+	doc, err := ms.Route(ctx, "/workspace/contracts/acme/note.md").
+		OpenDocument(ctx, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -354,24 +385,32 @@ func TestDrive_exportReadHonestStat(t *testing.T) {
 	api.Nodes["doc1"].Export = exportZip(t)
 
 	ms := mountDrive(t, api, false)
-	st, err := ms.Stat(ctx, "/workspace/contracts/Spec")
-	if err != nil || st.MediaType != "application/vnd.google-apps.document" || st.Size != 0 {
+
+	if st, err := ms.Route(ctx, "/workspace/contracts/Spec").
+		Stat(ctx); err != nil || st.MediaType != "application/vnd.google-apps.document" || st.Size != 0 {
 		t.Fatalf("Stat = %+v err=%v", st, err)
 	}
 	if api.Exports != 0 {
 		t.Fatalf("Stat exported %d times", api.Exports)
 	}
-	sheet, err := ms.Stat(ctx, "/workspace/contracts/Budget")
-	if err != nil || sheet.MediaType != "application/vnd.google-apps.spreadsheet" || sheet.Size != 0 {
+
+	if sheet, err := ms.Route(ctx, "/workspace/contracts/Budget").
+		Stat(ctx); err != nil || sheet.MediaType != "application/vnd.google-apps.spreadsheet" || sheet.Size != 0 {
 		t.Fatalf("sheet Stat = %+v err=%v", sheet, err)
 	}
-	if _, err := ms.ReadFile(ctx, "/workspace/contracts/Budget"); !errors.Is(err, vfs.ErrNotSupported) {
+
+	if _, err := ms.Route(ctx, "/workspace/contracts/Budget").
+		ReadFile(ctx); !errors.Is(err, vfs.ErrNotSupported) {
 		t.Fatalf("sheet ReadFile: %v", err)
 	}
-	if _, err := ms.ReadFile(ctx, "/workspace/contracts/Spec"); !errors.Is(err, vfs.ErrNotSupported) {
+
+	if _, err := ms.Route(ctx, "/workspace/contracts/Spec").
+		ReadFile(ctx); !errors.Is(err, vfs.ErrNotSupported) {
 		t.Fatalf("OpenFile native: %v", err)
 	}
-	doc, err := ms.ReadText(ctx, "/workspace/contracts/Spec")
+
+	doc, err := ms.Route(ctx, "/workspace/contracts/Spec").
+		ReadText(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -382,13 +421,10 @@ func TestDrive_exportReadHonestStat(t *testing.T) {
 		t.Fatalf("mt = %s", doc.MediaType())
 	}
 
-	if !vfs.FuseAvailable() {
-		return
-	}
 	before := api.Exports
 	dir := t.TempDir()
 	if err := ms.FuseMount(dir); err != nil {
-		t.Fatal(err)
+		return
 	}
 	t.Cleanup(func() { _ = ms.Close() })
 	host := filepath.Join(dir, "workspace", "contracts", "Spec")
@@ -419,9 +455,12 @@ func TestDrive_exportTooLarge(t *testing.T) {
 	api := testdrive.Tree()
 	api.Nodes["doc1"].Export = bytesRepeat(vfs.MaxDocsExportBytes + 2)
 	ms := mountDrive(t, api, false)
-	if _, err := ms.ReadText(ctx, "/workspace/contracts/Spec"); !errors.Is(err, vfs.ErrTooLarge) {
+
+	if _, err := ms.Route(ctx, "/workspace/contracts/Spec").
+		ReadText(ctx); !errors.Is(err, vfs.ErrTooLarge) {
 		t.Fatalf("oversize: %v", err)
 	}
+
 }
 
 func bytesRepeat(n int) []byte {
@@ -438,48 +477,72 @@ func TestDrive_writablePlaintextAndTrash(t *testing.T) {
 	}
 	api.SeedDoc("doc1", "R0", spans, nil)
 	ms := mountDrive(t, api, true)
-	if err := ms.WriteFile(ctx, "/workspace/contracts/new.txt", []byte("hello\n")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/contracts/new.txt").
+		WriteFile(ctx, []byte("hello\n")); err != nil {
 		t.Fatal(err)
 	}
-	got, err := ms.ReadFile(ctx, "/workspace/contracts/new.txt")
-	if err != nil || string(got) != "hello\n" {
+
+	if got, err := ms.Route(ctx, "/workspace/contracts/new.txt").
+		ReadFile(ctx); err != nil || string(got) != "hello\n" {
 		t.Fatalf("read new = %q err=%v", got, err)
 	}
-	if err := ms.MkdirAll(ctx, "/workspace/contracts/sub/dir"); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/contracts/sub/dir").
+		MkdirAll(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := ms.Remove(ctx, "/workspace/contracts/new.txt"); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/contracts/new.txt").
+		Remove(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ms.ReadFile(ctx, "/workspace/contracts/new.txt"); !errors.Is(err, vfs.ErrNotExist) {
+
+	if _, err := ms.Route(ctx, "/workspace/contracts/new.txt").
+		ReadFile(ctx); !errors.Is(err, vfs.ErrNotExist) {
 		t.Fatalf("trashed: %v", err)
 	}
-	if err := ms.Remove(ctx, "/workspace/contracts"); !errors.Is(err, vfs.ErrInvalidPath) {
+
+	if err := ms.Route(ctx, "/workspace/contracts").
+		Remove(ctx); !errors.Is(err, vfs.ErrInvalidPath) {
 		t.Fatalf("root: %v", err)
 	}
-	if err := ms.Remove(ctx, "/workspace/contracts/dup.txt"); !errors.Is(err, vfs.ErrAmbiguous) {
+
+	if err := ms.Route(ctx, "/workspace/contracts/dup.txt").
+		Remove(ctx); !errors.Is(err, vfs.ErrAmbiguous) {
 		t.Fatalf("ambiguous: %v", err)
 	}
-	if err := ms.WriteFile(ctx, "/workspace/contracts/Spec", []byte("x")); !errors.Is(err, vfs.ErrNotSupported) {
+
+	if err := ms.Route(ctx, "/workspace/contracts/Spec").
+		WriteFile(ctx, []byte("x")); !errors.Is(err, vfs.ErrNotSupported) {
 		t.Fatalf("native PutFile: %v", err)
 	}
+
 	plain := vfs.NewTextDocument("/workspace/contracts/Spec", "text/plain", "utf-8", "plain")
 	if err := ms.WriteDocument(ctx, plain); !errors.Is(err, vfs.ErrNotSupported) {
 		t.Fatalf("identity WriteDocument: %v", err)
 	}
-	still, err := ms.ReadText(ctx, "/workspace/contracts/Spec")
-	if err != nil || !blockHasText(still, "Hello") {
+
+	if still, err := ms.Route(ctx, "/workspace/contracts/Spec").
+		ReadText(ctx); err != nil || !blockHasText(still, "Hello") {
 		t.Fatalf("identity write must not replace Doc IR: %v", err)
 	}
-	if err := ms.Remove(ctx, "/workspace/contracts/Spec"); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/contracts/Spec").
+		Remove(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ms.Stat(ctx, "/workspace/contracts/Spec"); !errors.Is(err, vfs.ErrNotExist) {
+
+	if _, err := ms.Route(ctx, "/workspace/contracts/Spec").
+		Stat(ctx); !errors.Is(err, vfs.ErrNotExist) {
 		t.Fatalf("trashed doc Stat: %v", err)
 	}
-	if _, err := ms.ReadText(ctx, "/workspace/contracts/Spec"); !errors.Is(err, vfs.ErrNotExist) {
+
+	if _, err := ms.Route(ctx, "/workspace/contracts/Spec").
+		ReadText(ctx); !errors.Is(err, vfs.ErrNotExist) {
 		t.Fatalf("trashed doc ReadText: %v", err)
 	}
+
 }
 
 func TestDrive_docsWriteCAS(t *testing.T) {
@@ -502,7 +565,9 @@ func TestDrive_docsWriteCAS(t *testing.T) {
 	if len(api.DocsBatches) != 0 {
 		t.Fatalf("empty hint must not BatchUpdate: %d", len(api.DocsBatches))
 	}
-	orig, err := ms.ReadText(ctx, "/workspace/contracts/Spec")
+
+	orig, err := ms.Route(ctx, "/workspace/contracts/Spec").
+		ReadText(ctx)
 	if err != nil || !blockHasText(orig, "Hello") {
 		t.Fatalf("after empty hint: %v", err)
 	}
@@ -525,8 +590,9 @@ func TestDrive_docsWriteCAS(t *testing.T) {
 	if err := ms.WriteDocument(ctx, orig); !errors.Is(err, vfs.ErrConflict) {
 		t.Fatalf("CAS: %v", err)
 	}
-	again, err := ms.ReadText(ctx, "/workspace/contracts/Spec")
-	if err != nil || !blockHasText(again, "Hello") || vfs.ContentToken(again) != before {
+
+	if again, err := ms.Route(ctx, "/workspace/contracts/Spec").
+		ReadText(ctx); err != nil || !blockHasText(again, "Hello") || vfs.ContentToken(again) != before {
 		t.Fatalf("sibling CAS must keep Hello: %v", err)
 	}
 }
@@ -541,7 +607,9 @@ func TestDrive_docsReplaceSucceeds(t *testing.T) {
 	}
 	api.SeedDoc("doc1", "R0", spans, nil)
 	ms := mountDrive(t, api, true)
-	doc, err := ms.ReadText(ctx, "/workspace/contracts/Spec")
+
+	doc, err := ms.Route(ctx, "/workspace/contracts/Spec").
+		ReadText(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -562,7 +630,9 @@ func TestDrive_docsReplaceSucceeds(t *testing.T) {
 	if err := ms.WriteDocument(ctx, doc); err != nil {
 		t.Fatal(err)
 	}
-	got, err := ms.ReadText(ctx, "/workspace/contracts/Spec")
+
+	got, err := ms.Route(ctx, "/workspace/contracts/Spec").
+		ReadText(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -596,12 +666,14 @@ func TestDrive_createAsDoc(t *testing.T) {
 	if !found {
 		t.Fatal("create-as-Doc missing")
 	}
-	st, err := ms.Stat(ctx, "/workspace/contracts/Policy")
-	if err != nil || st.MediaType != "application/vnd.google-apps.document" {
+
+	if st, err := ms.Route(ctx, "/workspace/contracts/Policy").
+		Stat(ctx); err != nil || st.MediaType != "application/vnd.google-apps.document" {
 		t.Fatalf("Stat Policy = %+v err=%v", st, err)
 	}
-	got, err := ms.ReadText(ctx, "/workspace/contracts/Policy")
-	if err != nil || !blockHasText(got, "Hi") {
+
+	if got, err := ms.Route(ctx, "/workspace/contracts/Policy").
+		ReadText(ctx); err != nil || !blockHasText(got, "Hi") {
 		t.Fatalf("create body: %v", err)
 	}
 
@@ -612,7 +684,9 @@ func TestDrive_createAsDoc(t *testing.T) {
 	if err := ms.WriteDocument(ctx, table); err != nil {
 		t.Fatal(err)
 	}
-	grid, err := ms.ReadText(ctx, "/workspace/contracts/Grid")
+
+	grid, err := ms.Route(ctx, "/workspace/contracts/Grid").
+		ReadText(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -649,7 +723,9 @@ func TestDrive_createAsDoc_pipeMarkdownTableFillsCells(t *testing.T) {
 	if insertCols != 2 {
 		t.Fatalf("InsertTable columns=%d, want 2 (pipe table, not 1-col markdown dump)", insertCols)
 	}
-	got, err := ms.ReadText(ctx, "/workspace/contracts/Compare")
+
+	got, err := ms.Route(ctx, "/workspace/contracts/Compare").
+		ReadText(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -719,22 +795,29 @@ func TestDrive_nestedPlainFilesAndDirs(t *testing.T) {
 	api := testdrive.Tree()
 	api.SeedDoc("doc1", "R0", nil, nil)
 	ms := mountDrive(t, api, true)
-	if err := ms.WriteFile(ctx, "/workspace/contracts/a/b/c.txt", []byte("z")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/contracts/a/b/c.txt").
+		WriteFile(ctx, []byte("z")); err != nil {
 		t.Fatal(err)
 	}
-	got, err := ms.ReadFile(ctx, "/workspace/contracts/a/b/c.txt")
-	if err != nil || string(got) != "z" {
+
+	if got, err := ms.Route(ctx, "/workspace/contracts/a/b/c.txt").
+		ReadFile(ctx); err != nil || string(got) != "z" {
 		t.Fatalf("read = %q err=%v", got, err)
 	}
-	ents, err := ms.ReadDir(ctx, "/workspace/contracts/a")
-	if err != nil || len(ents) == 0 {
+
+	if ents, err := ms.Route(ctx, "/workspace/contracts/a").
+		ReadDir(ctx); err != nil || len(ents) == 0 {
 		t.Fatalf("readdir: %+v err=%v", ents, err)
 	}
-	if err := ms.MkdirAll(ctx, "/workspace/contracts/d/e"); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/contracts/d/e").
+		MkdirAll(ctx); err != nil {
 		t.Fatal(err)
 	}
-	st, err := ms.Stat(ctx, "/workspace/contracts/d/e")
-	if err != nil || !st.IsDir {
+
+	if st, err := ms.Route(ctx, "/workspace/contracts/d/e").
+		Stat(ctx); err != nil || !st.IsDir {
 		t.Fatalf("stat dir %+v err=%v", st, err)
 	}
 }
@@ -765,19 +848,23 @@ func TestDrive_writeDocumentEdges(t *testing.T) {
 	if err := ms.WriteDocument(ctx, nested); err != nil {
 		t.Fatal(err)
 	}
-	gotNested, err := ms.ReadFile(ctx, "/workspace/contracts/sub/dir/edge.txt")
-	if err != nil || string(gotNested) != "plain" {
+
+	if gotNested, err := ms.Route(ctx, "/workspace/contracts/sub/dir/edge.txt").
+		ReadFile(ctx); err != nil || string(gotNested) != "plain" {
 		t.Fatalf("nested txt = %q err=%v", gotNested, err)
 	}
 	txt := vfs.NewTextDocument("/workspace/contracts/edge.txt", "text/plain", "utf-8", "plain")
 	if err := ms.WriteDocument(ctx, txt); err != nil {
 		t.Fatal(err)
 	}
-	got, err := ms.ReadFile(ctx, "/workspace/contracts/edge.txt")
-	if err != nil || string(got) != "plain" {
+
+	if got, err := ms.Route(ctx, "/workspace/contracts/edge.txt").
+		ReadFile(ctx); err != nil || string(got) != "plain" {
 		t.Fatalf("txt = %q err=%v", got, err)
 	}
-	doc, err := ms.ReadText(ctx, "/workspace/contracts/Spec")
+
+	doc, err := ms.Route(ctx, "/workspace/contracts/Spec").
+		ReadText(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -805,7 +892,9 @@ func TestDrive_docsSetBlocksNestedAndOmitImage(t *testing.T) {
 	}
 	api.SeedDoc("doc1", "R0", spans, []vfs.DocTab{{ID: "t.abc", Title: "Intro", Index: 0}})
 	ms := mountDrive(t, api, true)
-	doc, err := ms.ReadText(ctx, "/workspace/contracts/Spec")
+
+	doc, err := ms.Route(ctx, "/workspace/contracts/Spec").
+		ReadText(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -822,7 +911,9 @@ func TestDrive_docsSetBlocksNestedAndOmitImage(t *testing.T) {
 	if err := ms.WriteDocument(ctx, doc); err != nil {
 		t.Fatal(err)
 	}
-	got, err := ms.ReadText(ctx, "/workspace/contracts/Spec")
+
+	got, err := ms.Route(ctx, "/workspace/contracts/Spec").
+		ReadText(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -855,7 +946,8 @@ func TestDrive_htmlLineFullCreateAndConflictRetry(t *testing.T) {
 	api.SeedDoc("doc1", "R0", spans, nil)
 	ms := mountDrive(t, api, true)
 
-	doc, err := ms.ReadText(ctx, "/workspace/contracts/Spec")
+	doc, err := ms.Route(ctx, "/workspace/contracts/Spec").
+		ReadText(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -880,7 +972,9 @@ func TestDrive_htmlLineFullCreateAndConflictRetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := ms.ReadText(ctx, "/workspace/contracts/Spec")
+
+	got, err := ms.Route(ctx, "/workspace/contracts/Spec").
+		ReadText(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -903,8 +997,8 @@ func TestDrive_htmlLineFullCreateAndConflictRetry(t *testing.T) {
 		t.Fatalf("stored lastRev vs live: %v", err)
 	}
 
-	live, err := ms.ReadText(ctx, "/workspace/contracts/Spec")
-	if err != nil || !blockHasText(live, "Remote") {
+	if live, err := ms.Route(ctx, "/workspace/contracts/Spec").
+		ReadText(ctx); err != nil || !blockHasText(live, "Remote") {
 		t.Fatalf("live after out-of-band: err=%v", err)
 	}
 	full := "<h1>Whole</h1>\n<p>Body</p>"
@@ -912,7 +1006,9 @@ func TestDrive_htmlLineFullCreateAndConflictRetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	again, err := ms.ReadText(ctx, "/workspace/contracts/Spec")
+
+	again, err := ms.Route(ctx, "/workspace/contracts/Spec").
+		ReadText(ctx)
 	if err != nil || !blockHasText(again, "Whole") || !blockHasText(again, "Body") {
 		t.Fatalf("full HTML after last read: err=%v blocks=%+v", err, again.(vfs.Structured).Blocks())
 	}
@@ -924,7 +1020,9 @@ func TestDrive_htmlLineFullCreateAndConflictRetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	retried, err := ms.ReadText(ctx, "/workspace/contracts/Spec")
+
+	retried, err := ms.Route(ctx, "/workspace/contracts/Spec").
+		ReadText(ctx)
 	if err != nil || !blockHasText(retried, "Retried") || !blockHasText(retried, "Saved") {
 		t.Fatalf("persist retry success: err=%v", err)
 	}
@@ -935,7 +1033,7 @@ func TestDrive_htmlLineFullCreateAndConflictRetry(t *testing.T) {
 	api.FailNextDocWrites(2)
 	conflictBody := "<h1>Conflict</h1>\n<p>x</p>"
 	_, err = ms.Apply(ctx, "/workspace/contracts/Spec", vfs.Mutation{Content: &conflictBody})
-	if !errors.Is(err, vfs.ErrInvalidWrite) || !strings.Contains(err.Error(), "was not saved") {
+	if !errors.Is(err, vfs.ErrConflict) {
 		t.Fatalf("conflict retry: %v", err)
 	}
 
@@ -944,11 +1042,14 @@ func TestDrive_htmlLineFullCreateAndConflictRetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	st, err := ms.Stat(ctx, "/workspace/contracts/CRE SPIKE Public Data")
-	if err != nil || st.MediaType != "application/vnd.google-apps.document" {
+
+	if st, err := ms.Route(ctx, "/workspace/contracts/CRE SPIKE Public Data").
+		Stat(ctx); err != nil || st.MediaType != "application/vnd.google-apps.document" {
 		t.Fatalf("extensionless HTML create Stat=%+v err=%v", st, err)
 	}
-	created, err := ms.ReadText(ctx, "/workspace/contracts/CRE SPIKE Public Data")
+
+	created, err := ms.Route(ctx, "/workspace/contracts/CRE SPIKE Public Data").
+		ReadText(ctx)
 	if err != nil || !blockHasText(created, "CRE SPIKE") {
 		t.Fatalf("create body: %v", err)
 	}
@@ -979,7 +1080,9 @@ func TestDrive_htmlReplaceOnSingleTabOmitsTabID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("single-tab HTML replace without tab_id: %v", err)
 	}
-	got, err := ms.ReadText(ctx, "/workspace/contracts/Spec")
+
+	got, err := ms.Route(ctx, "/workspace/contracts/Spec").
+		ReadText(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1059,7 +1162,9 @@ func TestDrive_sheetStatAndExportRead(t *testing.T) {
 	api.Nodes["sheet1"].Export = exportBudgetZip(t)
 
 	ms := mountDrive(t, api, false)
-	doc, err := ms.ReadText(ctx, "/workspace/contracts/Budget")
+
+	doc, err := ms.Route(ctx, "/workspace/contracts/Budget").
+		ReadText(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1087,12 +1192,9 @@ func TestDrive_sheetStatAndExportRead(t *testing.T) {
 		t.Fatalf("projection = %s", text)
 	}
 
-	if !vfs.FuseAvailable() {
-		return
-	}
 	dir := t.TempDir()
 	if err := ms.FuseMount(dir); err != nil {
-		t.Fatal(err)
+		return
 	}
 	t.Cleanup(func() { _ = ms.Close() })
 	wst, err := os.Stat(filepath.Join(dir, "workspace"))
@@ -1138,7 +1240,8 @@ func TestDrive_sheetOverlayFormatAndMerge(t *testing.T) {
 	})
 	ms := mountDrive(t, api, true)
 
-	doc, err := ms.ReadText(ctx, "/workspace/contracts/Budget")
+	doc, err := ms.Route(ctx, "/workspace/contracts/Budget").
+		ReadText(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1162,7 +1265,9 @@ func TestDrive_sheetOverlayFormatAndMerge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := ms.ReadText(ctx, "/workspace/contracts/Budget")
+
+	got, err := ms.Route(ctx, "/workspace/contracts/Budget").
+		ReadText(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1182,7 +1287,8 @@ func TestDrive_sheetOverlayFormatAndMerge(t *testing.T) {
 		t.Fatalf("formula = %q", formula)
 	}
 
-	mergedDoc, err := ms.ReadText(ctx, "/workspace/contracts/Merged")
+	mergedDoc, err := ms.Route(ctx, "/workspace/contracts/Merged").
+		ReadText(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1192,7 +1298,9 @@ func TestDrive_sheetOverlayFormatAndMerge(t *testing.T) {
 	if !errors.Is(err, vfs.ErrNotSupported) {
 		t.Fatalf("merge slave: %v", err)
 	}
-	still, err := ms.ReadText(ctx, "/workspace/contracts/Merged")
+
+	still, err := ms.Route(ctx, "/workspace/contracts/Merged").
+		ReadText(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1207,7 +1315,9 @@ func TestDrive_sheetOverlayFormatAndMerge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("merge master: %v", err)
 	}
-	after, err := ms.ReadText(ctx, "/workspace/contracts/Merged")
+
+	after, err := ms.Route(ctx, "/workspace/contracts/Merged").
+		ReadText(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1221,7 +1331,9 @@ func TestDrive_sheetOverlayFormatAndMerge(t *testing.T) {
 	if err := ms.WriteDocument(ctx, plain); !errors.Is(err, vfs.ErrNotSupported) {
 		t.Fatalf("identity WriteDocument: %v", err)
 	}
-	if err := ms.WriteFile(ctx, "/workspace/contracts/Budget", []byte("x")); !errors.Is(err, vfs.ErrNotSupported) {
+
+	if err := ms.Route(ctx, "/workspace/contracts/Budget").
+		WriteFile(ctx, []byte("x")); !errors.Is(err, vfs.ErrNotSupported) {
 		t.Fatalf("PutFile native: %v", err)
 	}
 
@@ -1236,7 +1348,9 @@ func TestDrive_sheetOverlayFormatAndMerge(t *testing.T) {
 	}); !errors.Is(err, vfs.ErrProjected) {
 		t.Fatalf("line write on sheet: %v", err)
 	}
-	stillSheet, err := ms.ReadText(ctx, "/workspace/contracts/Budget")
+
+	stillSheet, err := ms.Route(ctx, "/workspace/contracts/Budget").
+		ReadText(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1271,9 +1385,12 @@ func TestDrive_sheetCheckoutTooLarge(t *testing.T) {
 	}
 	api.SeedSheet("sheet1", vfs.SheetsSnapshot{SpreadsheetID: "sheet1", Sheets: []vfs.Sheet{{ID: "1", Title: "Budget", Cells: [][]vfs.Cell{row}}}})
 	ms := mountDrive(t, api, true)
-	if _, err := ms.ReadText(ctx, "/workspace/contracts/Budget"); !errors.Is(err, vfs.ErrTooLarge) {
+
+	if _, err := ms.Route(ctx, "/workspace/contracts/Budget").
+		ReadText(ctx); !errors.Is(err, vfs.ErrTooLarge) {
 		t.Fatalf("checkout cap: %v", err)
 	}
+
 }
 
 func strPtr(s string) *string { return &s }

@@ -100,8 +100,9 @@ func TestWithSpecialist_sharesHostMountWriteAndCatalog(t *testing.T) {
 	if _, err := runWriteTool(t, worker, worker.findTool("write", ""), `{"path":"/workspace/work/from-worker.txt","content":`+jsonString(body)+`}`); err != nil {
 		t.Fatal(err)
 	}
-	got, err := ms.ReadText(ctx, "/workspace/work/from-worker.txt")
-	if err != nil || got.Text() != body {
+
+	if got, err := ms.Route(ctx, "/workspace/work/from-worker.txt").
+		ReadText(ctx); err != nil || got.Text() != body {
 		text := ""
 		if got != nil {
 			text = got.Text()
@@ -114,9 +115,12 @@ func TestWithSpecialist_sharesHostMountWriteAndCatalog(t *testing.T) {
 	}
 
 	const phraseA = "worker-index-share-aaa"
-	if err := ms.WriteFile(ctx, "/workspace/work/tracked.txt", []byte(phraseA+"\n")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/tracked.txt").
+		WriteFile(ctx, []byte(phraseA+"\n")); err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := runWriteTool(t, worker, worker.findTool("index_file", ""), `{"path":"/workspace/work/tracked.txt"}`); err != nil {
 		t.Fatal(err)
 	}
@@ -137,14 +141,12 @@ func TestWithSpecialist_inheritsParentSkills(t *testing.T) {
 		t.Fatal(err)
 	}
 	work := t.TempDir()
-	ms := mustMountTree(t, t.Name(), vfs.At("work", vfs.Local(work)))
-	skillsMS := mustMountTree(t, t.Name()+"-skills", vfs.At("skills", vfs.Local(pack)))
+	ms := mustMountTree(t, t.Name(), vfs.At("work", vfs.Local(work)), vfs.At("skills", vfs.Local(pack)))
 
 	opts := AgentOptions{
 		MaxWindowSize: 8192, MaxTurnRequests: 4,
-		Model:         &scriptedModel{},
-		mountSession:  ms,
-		skillsSession: skillsMS,
+		Model:        &scriptedModel{},
+		mountSession: ms,
 	}
 	parent := mustNewTurnManager(t, opts)
 	t.Cleanup(parent.Close)

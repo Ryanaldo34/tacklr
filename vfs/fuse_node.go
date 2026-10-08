@@ -3,12 +3,9 @@ package vfs
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"path"
-	"path/filepath"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -17,14 +14,15 @@ import (
 	gofuse "github.com/hanwen/go-fuse/v2/fuse"
 )
 
-// FuseAvailable reports whether this process can mount a FUSE tree.
-// Probes /dev/fuse and /dev/macfuse* only (not /dev/osxfuse*).
-func FuseAvailable() bool {
-	if _, err := os.Stat("/dev/fuse"); err == nil {
-		return true
+// FuseProbe mounts an empty session at dir and unmounts it.
+// Callers use the error to learn that this process cannot mount FUSE.
+func FuseProbe(dir string) error {
+	ms, err := NewMountSession("fuse-probe")
+	if err != nil {
+		return err
 	}
-	matches, err := filepath.Glob("/dev/macfuse*")
-	return err == nil && len(matches) > 0
+	defer ms.Close()
+	return ms.FuseMount(dir)
 }
 
 // FuseMount projects the session as a host tree at dir.
@@ -32,16 +30,9 @@ func FuseAvailable() bool {
 // Read use the projection. Kernel writes stay EROFS unless kernelWritable
 // (IdentityCodec). Otherwise Open uses Stat + ReaderAt (binaries).
 // session.Mount attaches a provider; FuseMount is the host kernel mount.
-// Every live Specs() point must be a single path segment (/work, /engram).
 func (m *MountSession) FuseMount(dir string) error {
 	if dir == "" {
 		return errors.New("vfs: fuse mountpoint required")
-	}
-	for _, spec := range m.Specs() {
-		name := strings.TrimPrefix(spec.Point, "/")
-		if name == "" || strings.Contains(name, "/") {
-			return fmt.Errorf("vfs: fuse requires single-segment mount points (got %q); use /work and /engram", spec.Point)
-		}
 	}
 	m.mu.Lock()
 	if m.fuse != nil && m.hostDir == dir {
@@ -113,21 +104,7 @@ func (n *fuseNode) Lookup(ctx context.Context, name string, out *gofuse.EntryOut
 }
 
 func (n *fuseNode) Readdir(ctx context.Context) (fusefs.DirStream, syscall.Errno) {
-	var ents []DirEntry
-	var err error
-	if n.path == "/" {
-		specs := n.sess.Specs()
-		ents = make([]DirEntry, 0, len(specs))
-		for _, spec := range specs {
-			name := strings.TrimPrefix(spec.Point, "/")
-			if name == "" || strings.Contains(name, "/") {
-				continue
-			}
-			ents = append(ents, DirEntry{Name: name, IsDir: true})
-		}
-	} else {
-		ents, err = n.sess.ReadDir(ctx, n.path)
-	}
+	ents, err := n.sess.Route(ctx, n.path).ReadDir(ctx)
 	if err != nil {
 		return nil, fuseErrno(err)
 	}
@@ -181,9 +158,12 @@ func (n *fuseNode) Create(ctx context.Context, name string, flags uint32, mode u
 	if !kernelCreateOK(name) {
 		return nil, nil, 0, syscall.EROFS
 	}
-	if err := n.sess.WriteFile(ctx, p, nil); err != nil {
+
+	if err := n.sess.Route(ctx, p).
+		WriteFile(ctx, nil); err != nil {
 		return nil, nil, 0, fuseErrno(err)
 	}
+
 	st, err := n.stat(ctx, p)
 	if err != nil {
 		return nil, nil, 0, fuseErrno(err)
@@ -202,9 +182,12 @@ func (n *fuseNode) Mkdir(ctx context.Context, name string, _ uint32, out *gofuse
 		return nil, syscall.EPERM
 	}
 	p := n.childPath(name)
-	if err := n.sess.MkdirAll(ctx, p); err != nil {
+
+	if err := n.sess.Route(ctx, p).
+		MkdirAll(ctx); err != nil {
 		return nil, fuseErrno(err)
 	}
+
 	st, err := n.stat(ctx, p)
 	if err != nil {
 		return nil, fuseErrno(err)
@@ -218,7 +201,7 @@ func (n *fuseNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	if n.path == "/" {
 		return syscall.EPERM
 	}
-	return fuseErrno(n.sess.Remove(ctx, n.childPath(name)))
+	return fuseErrno(n.sess.Route(ctx, n.childPath(name)).Remove(ctx))
 }
 
 func (n *fuseNode) Rmdir(ctx context.Context, name string) syscall.Errno {
@@ -235,14 +218,18 @@ func (n *fuseNode) Rename(ctx context.Context, name string, newParent fusefs.Ino
 	}
 	src := n.childPath(name)
 	dst := np.childPath(newName)
-	data, err := n.sess.ReadFile(ctx, src)
+
+	data, err := n.sess.Route(ctx, src).ReadFile(ctx)
 	if err != nil {
 		return fuseErrno(err)
 	}
-	if err := n.sess.WriteFile(ctx, dst, data); err != nil {
+
+	if err := n.sess.Route(ctx, dst).
+		WriteFile(ctx, data); err != nil {
 		return fuseErrno(err)
 	}
-	return fuseErrno(n.sess.Remove(ctx, src))
+
+	return fuseErrno(n.sess.Route(ctx, src).Remove(ctx))
 }
 
 func (n *fuseNode) Setattr(ctx context.Context, f fusefs.FileHandle, in *gofuse.SetAttrIn, out *gofuse.AttrOut) syscall.Errno {
@@ -272,19 +259,19 @@ func (n *fuseNode) Setattr(ctx context.Context, f fusefs.FileHandle, in *gofuse.
 	if nsize < len(b) {
 		b = b[:nsize]
 	}
-	if err := n.sess.WriteFile(ctx, n.path, b); err != nil {
+
+	if err := n.sess.Route(ctx, n.path).
+		WriteFile(ctx, b); err != nil {
 		return fuseErrno(err)
 	}
+
 	st.Size = int64(len(b))
 	fillFuseAttr(&out.Attr, st)
 	return 0
 }
 
 func (n *fuseNode) stat(ctx context.Context, virtualPath string) (FileInfo, error) {
-	if virtualPath == "/" {
-		return FileInfo{Name: "/", IsDir: true}, nil
-	}
-	st, err := n.sess.Stat(ctx, virtualPath)
+	st, err := n.sess.Route(ctx, virtualPath).Stat(ctx)
 	if err != nil {
 		return FileInfo{}, err
 	}
@@ -294,7 +281,8 @@ func (n *fuseNode) stat(ctx context.Context, virtualPath string) (FileInfo, erro
 	if st.Size == 0 && !kernelWritable(st.MediaType) {
 		return st, nil
 	}
-	t, err := n.sess.ReadText(ctx, virtualPath)
+
+	t, err := n.sess.Route(ctx, virtualPath).ReadText(ctx)
 	if err == nil {
 		st.Size = int64(len(t.Text()))
 		return st, nil
@@ -333,7 +321,8 @@ func openFuseFile(ctx context.Context, sess *MountSession, virtualPath string, s
 	} else if writable {
 		return &fuseFile{sess: sess, path: virtualPath, writable: true, oappend: oappend}, 0
 	}
-	h, err := sess.Open(ctx, virtualPath)
+
+	h, err := sess.Route(ctx, virtualPath).Open(ctx)
 	if err != nil {
 		return nil, fuseErrno(err)
 	}
@@ -346,7 +335,8 @@ func openFuseFile(ctx context.Context, sess *MountSession, virtualPath string, s
 }
 
 func fusePlaintext(ctx context.Context, sess *MountSession, virtualPath string) (string, error) {
-	t, err := sess.ReadText(ctx, virtualPath)
+
+	t, err := sess.Route(ctx, virtualPath).ReadText(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -413,9 +403,12 @@ func (f *fuseFile) persist(ctx context.Context) syscall.Errno {
 	if !f.dirty {
 		return 0
 	}
-	if err := f.sess.WriteFile(ctx, f.path, f.body); err != nil {
+
+	if err := f.sess.Route(ctx, f.path).
+		WriteFile(ctx, f.body); err != nil {
 		return fuseErrno(err)
 	}
+
 	f.dirty = false
 	return 0
 }

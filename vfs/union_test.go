@@ -54,58 +54,80 @@ func TestMountSession_unionMergesBackends(t *testing.T) {
 	t.Cleanup(func() { _ = ms.Close() })
 
 	specs := ms.Specs()
-	if len(specs) != 1 || specs[0].Point != vfs.WorkspacePoint || len(specs[0].Members) != 1 {
+	if len(specs) != 1 || specs[0].Point != "/workspace/skills" {
 		t.Fatalf("Specs = %+v", specs)
 	}
-	mem := specs[0].Members[0]
-	if mem.Profile != "skills" || !mem.ReadOnly || mem.IndexPolicy != "none" {
+	mem := specs[0]
+	if mem.Profile != "skills" || !mem.ReadOnly || mem.IndexPolicy != "" {
 		t.Fatalf("skills member = %+v", mem)
 	}
-	if spec, err := ms.SpecAt("/workspace/skills/alpha/SKILL.md"); err != nil || spec.Point != "/workspace/skills" || spec.Profile != "skills" || !spec.ReadOnly || spec.IndexPolicy != "none" {
+	if spec, err := ms.SpecAt("/workspace/skills/alpha/SKILL.md"); err != nil || spec.Point != "/workspace/skills" || spec.Profile != "skills" || !spec.ReadOnly || spec.IndexPolicy != "" {
 		t.Fatalf("SpecAt: %+v err=%v", spec, err)
 	}
-	ents, err := ms.ReadDir(ctx, "/workspace/skills")
+
+	ents, err := ms.Route(ctx, "/workspace/skills").
+		ReadDir(ctx)
 	if err != nil || len(ents) != 2 || ents[0].Name != "alpha" || ents[1].Name != "zeta" {
 		t.Fatalf("ReadDir = %+v err=%v", ents, err)
 	}
-	got, err := ms.ReadFile(ctx, "/workspace/skills/alpha/SKILL.md")
+
+	got, err := ms.Route(ctx, "/workspace/skills/alpha/SKILL.md").
+		ReadFile(ctx)
 	if err != nil || string(got) != "---\nname: alpha\ndescription: A\n---\n\nA" {
 		t.Fatalf("ReadFile alpha = %q err=%v", got, err)
 	}
-	got, err = ms.ReadFile(ctx, "/workspace/skills/zeta/SKILL.md")
-	if err != nil || string(got) != "---\nname: zeta\ndescription: Z\n---\n\nZ" {
+
+	if got, err := ms.Route(ctx, "/workspace/skills/zeta/SKILL.md").
+		ReadFile(ctx); err != nil || string(got) != "---\nname: zeta\ndescription: Z\n---\n\nZ" {
 		t.Fatalf("ReadFile zeta = %q err=%v", got, err)
 	}
-	text, err := ms.ReadText(ctx, "/workspace/skills/alpha/SKILL.md")
+
+	text, err := ms.Route(ctx, "/workspace/skills/alpha/SKILL.md").
+		ReadText(ctx)
 	if err != nil || text.Path() != "/workspace/skills/alpha/SKILL.md" {
 		t.Fatalf("ReadText: %+v err=%v", text, err)
 	}
-	ents, err = ms.ReadDir(ctx, "/workspace/skills/alpha")
-	if err != nil || len(ents) != 1 || ents[0].Name != "SKILL.md" {
+
+	if ents, err := ms.Route(ctx, "/workspace/skills/alpha").
+		ReadDir(ctx); err != nil || len(ents) != 1 || ents[0].Name != "SKILL.md" {
 		t.Fatalf("ReadDir child = %+v err=%v", ents, err)
 	}
-	st, err := ms.Stat(ctx, "/workspace/skills")
+
+	st, err := ms.Route(ctx, "/workspace/skills").
+		Stat(ctx)
 	if err != nil || !st.IsDir {
 		t.Fatalf("Stat root = %+v err=%v", st, err)
 	}
-	if st, err = ms.Stat(ctx, "/workspace/skills/alpha/SKILL.md"); err != nil || st.IsDir {
+
+	if st, err := ms.Route(ctx, "/workspace/skills/alpha/SKILL.md").
+		Stat(ctx); err != nil || st.IsDir {
 		t.Fatalf("Stat file = %+v err=%v", st, err)
 	}
-	if _, err := ms.OpenDocument(ctx, "/workspace/skills/alpha/SKILL.md", nil); err != nil {
+
+	if _, err := ms.Route(ctx, "/workspace/skills/alpha/SKILL.md").
+		OpenDocument(ctx, nil); err != nil {
 		t.Fatalf("OpenDocument local = %v", err)
 	}
+
 	if err := ms.WriteDocument(ctx, text); !errors.Is(err, vfs.ErrReadOnly) {
 		t.Fatalf("WriteDocument = %v", err)
 	}
-	if err := ms.WriteFile(ctx, "/workspace/skills/new.md", []byte("x")); !errors.Is(err, vfs.ErrReadOnly) {
+
+	if err := ms.Route(ctx, "/workspace/skills/new.md").
+		WriteFile(ctx, []byte("x")); !errors.Is(err, vfs.ErrReadOnly) {
 		t.Fatalf("WriteFile = %v", err)
 	}
-	if err := ms.Remove(ctx, "/workspace/skills/alpha/SKILL.md"); !errors.Is(err, vfs.ErrReadOnly) {
+
+	if err := ms.Route(ctx, "/workspace/skills/alpha/SKILL.md").
+		Remove(ctx); !errors.Is(err, vfs.ErrReadOnly) {
 		t.Fatalf("Remove = %v", err)
 	}
-	if err := ms.MkdirAll(ctx, "/workspace/skills/new"); !errors.Is(err, vfs.ErrReadOnly) {
+
+	if err := ms.Route(ctx, "/workspace/skills/new").
+		MkdirAll(ctx); !errors.Is(err, vfs.ErrReadOnly) {
 		t.Fatalf("MkdirAll = %v", err)
 	}
+
 }
 
 func TestMountSession_unionNameCollisionAtMount(t *testing.T) {
@@ -124,12 +146,17 @@ func TestMountSession_unionNameCollisionAfterMount(t *testing.T) {
 	writeUnionTree(t, b, map[string]string{"zeta/SKILL.md": "b"})
 	ms := unionSession(t, a, b)
 	writeUnionTree(t, b, map[string]string{"alpha/SKILL.md": "late"})
-	if _, err := ms.ReadDir(t.Context(), "/workspace/skills"); !errors.Is(err, vfs.ErrAmbiguous) {
+
+	if _, err := ms.Route(t.Context(), "/workspace/skills").
+		ReadDir(t.Context()); !errors.Is(err, vfs.ErrAmbiguous) {
 		t.Fatalf("ReadDir = %v", err)
 	}
-	if _, err := ms.Stat(t.Context(), "/workspace/skills/alpha/SKILL.md"); !errors.Is(err, vfs.ErrAmbiguous) {
+
+	if _, err := ms.Route(t.Context(), "/workspace/skills/alpha/SKILL.md").
+		Stat(t.Context()); !errors.Is(err, vfs.ErrAmbiguous) {
 		t.Fatalf("Stat = %v", err)
 	}
+
 }
 
 func TestUnion_constructErrors(t *testing.T) {
@@ -158,42 +185,65 @@ func TestUnion_constructErrors(t *testing.T) {
 func TestMountSession_unionMissingAndCanceled(t *testing.T) {
 	ms := unionSession(t, t.TempDir())
 	ctx := t.Context()
-	if _, err := ms.Stat(ctx, "/workspace/skills/nope"); !errors.Is(err, vfs.ErrNotExist) {
+
+	if _, err := ms.Route(ctx, "/workspace/skills/nope").
+		Stat(ctx); !errors.Is(err, vfs.ErrNotExist) {
 		t.Fatalf("Stat = %v", err)
 	}
-	if _, err := ms.ReadDir(ctx, "/workspace/skills/nope"); !errors.Is(err, vfs.ErrNotExist) {
+
+	if _, err := ms.Route(ctx, "/workspace/skills/nope").
+		ReadDir(ctx); !errors.Is(err, vfs.ErrNotExist) {
 		t.Fatalf("ReadDir = %v", err)
 	}
-	if _, err := ms.Open(ctx, "/workspace/skills"); err == nil {
+
+	if _, err := ms.Route(ctx, "/workspace/skills").
+		Open(ctx); err == nil {
 		t.Fatal("open root")
 	}
-	if _, err := ms.OpenDocument(ctx, "/workspace/skills/nope.md", nil); err == nil {
+
+	if _, err := ms.Route(ctx, "/workspace/skills/nope.md").
+		OpenDocument(ctx, nil); err == nil {
 		t.Fatal("OpenDocument missing")
 	}
-	if _, err := ms.Open(ctx, "/workspace/skills/nope"); !errors.Is(err, vfs.ErrNotExist) {
+
+	if _, err := ms.Route(ctx, "/workspace/skills/nope").
+		Open(ctx); !errors.Is(err, vfs.ErrNotExist) {
 		t.Fatalf("Open missing = %v", err)
 	}
-	if _, err := ms.ReadText(ctx, "/workspace/skills"); err == nil {
+
+	if _, err := ms.Route(ctx, "/workspace/skills").
+		ReadText(ctx); err == nil {
 		t.Fatal("ReadText root")
 	}
-	if _, err := ms.ReadText(ctx, "/workspace/skills/nope"); !errors.Is(err, vfs.ErrNotExist) {
+
+	if _, err := ms.Route(ctx, "/workspace/skills/nope").
+		ReadText(ctx); !errors.Is(err, vfs.ErrNotExist) {
 		t.Fatalf("ReadText missing = %v", err)
 	}
 
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
-	if _, err := ms.Stat(canceled, "/workspace/skills"); err == nil {
+
+	if _, err := ms.Route(canceled, "/workspace/skills").
+		Stat(canceled); err == nil {
 		t.Fatal("Stat canceled")
 	}
-	if _, err := ms.ReadDir(canceled, "/workspace/skills"); err == nil {
+
+	if _, err := ms.Route(canceled, "/workspace/skills").
+		ReadDir(canceled); err == nil {
 		t.Fatal("ReadDir canceled")
 	}
-	if _, err := ms.Open(canceled, "/workspace/skills/x"); err == nil {
+
+	if _, err := ms.Route(canceled, "/workspace/skills/x").
+		Open(canceled); err == nil {
 		t.Fatal("Open canceled")
 	}
-	if _, err := ms.ReadText(canceled, "/workspace/skills/x"); err == nil {
+
+	if _, err := ms.Route(canceled, "/workspace/skills/x").
+		ReadText(canceled); err == nil {
 		t.Fatal("ReadText canceled")
 	}
+
 	if _, err := vfs.Tree(vfs.At("skills", vfs.Union(vfs.Local(t.TempDir()))))(canceled, "union-cancel", vfs.Request{}); err == nil {
 		t.Fatal("Tree canceled")
 	}
@@ -212,16 +262,20 @@ func TestMountSession_workAndSkills(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = ms.Close() })
 	spec, err := ms.SpecAt("/workspace/skills/alpha/SKILL.md")
-	if err != nil || spec.Point != "/workspace/skills" || !spec.ReadOnly || spec.IndexPolicy != "none" {
+	if err != nil || spec.Point != "/workspace/skills" || !spec.ReadOnly || spec.IndexPolicy != "" {
 		t.Fatalf("SpecAt /workspace/skills: %+v err=%v", spec, err)
 	}
-	got, err := ms.ReadFile(ctx, "/workspace/skills/alpha/SKILL.md")
-	if err != nil || !strings.Contains(string(got), "name: alpha") {
+
+	if got, err := ms.Route(ctx, "/workspace/skills/alpha/SKILL.md").
+		ReadFile(ctx); err != nil || !strings.Contains(string(got), "name: alpha") {
 		t.Fatalf("ReadFile = %q err=%v", got, err)
 	}
-	if err := ms.WriteFile(ctx, "/workspace/work/note.txt", []byte("ok")); err != nil {
+
+	if err := ms.Route(ctx, "/workspace/work/note.txt").
+		WriteFile(ctx, []byte("ok")); err != nil {
 		t.Fatal(err)
 	}
+
 }
 
 func TestUnion_providerRejectsWritesAndInvalidPaths(t *testing.T) {

@@ -12,8 +12,14 @@ import (
 	"time"
 )
 
-// Memory is an ephemeral, session-scoped backend. Hosts At("memory", Memory());
-// WriteFile stores bytes under /workspace/memory. It is not a durable store.
+// MemoryMount is the scratch member at /workspace/memory.
+// IndexPolicy is watch so a bridge reindexes writes.
+func MemoryMount() Member {
+	return At("memory", Memory()).Indexed("watch")
+}
+
+// Memory is an ephemeral, session-scoped backend.
+// WriteFile stores bytes under the alias the host chose. It is not a durable store.
 func Memory() Open {
 	var mu sync.Mutex
 	bySession := map[string]*memoryProvider{}
@@ -75,8 +81,12 @@ func (p *memoryProvider) OpenFile(_ context.Context, name string, flag int, _ fs
 		b = nil
 		p.files[name] = nil
 	}
+	info := FileInfo{
+		Name: path.Base(name), Size: int64(len(b)), Mode: 0o644,
+		MediaType: DetectMediaType(path.Base(name), b),
+	}
 	p.mu.Unlock()
-	return &memoryFile{provider: p, name: name, reader: bytes.NewReader(b), write: write, data: append([]byte(nil), b...)}, nil
+	return &memoryFile{provider: p, name: name, reader: bytes.NewReader(b), write: write, data: append([]byte(nil), b...), info: info}, nil
 }
 
 func (p *memoryProvider) ReadDir(_ context.Context, name string) ([]DirEntry, error) {
@@ -159,6 +169,7 @@ type memoryFile struct {
 	data     []byte
 	write    bool
 	closed   bool
+	info     FileInfo
 }
 
 func (f *memoryFile) Read(b []byte) (int, error) {
@@ -187,4 +198,4 @@ func (f *memoryFile) Close() error {
 	}
 	return nil
 }
-func (f *memoryFile) Stat() (FileInfo, error) { return f.provider.Stat(context.Background(), f.name) }
+func (f *memoryFile) Stat() (FileInfo, error) { return f.info, nil }

@@ -66,8 +66,10 @@ type Config struct {
 	TaskQueue string
 	// Snapshots is the session record. Zero uses an in-memory store.
 	// Tokens never go here. StartWorker uses this same store.
-	Snapshots  session.SnapshotStore
-	Fallback   session.EventLog
+	Snapshots session.SnapshotStore
+	Fallback  session.EventLog
+	// Projection mounts the turn tree on the host kernel.
+	// Nil leaves the MountSession in-process.
 	Projection vfs.Projection
 	// DisableStreams uses the fallback EventLog instead of Workflow Streams.
 	DisableStreams bool
@@ -432,14 +434,10 @@ func (r *Runtime) StartWorker() worker.Worker {
 		EnableSessionWorker:               true,
 		MaxConcurrentSessionExecutionSize: 1000,
 	})
-	proj := r.projection
-	if proj == nil {
-		proj = vfs.FuseProjection{}
-	}
 	acts := &activities{
 		Agent:          r.agent,
 		Snapshots:      r.snapshots,
-		Projection:     proj,
+		Projection:     r.projection,
 		Fallback:       r.fallback,
 		DisableStreams: r.disableStreams,
 		Secrets:        r.secrets,
