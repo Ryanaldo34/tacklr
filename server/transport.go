@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/ryanaldo34/tacklr"
-	tacklrsecurity "github.com/ryanaldo34/tacklr/security"
 	"github.com/ryanaldo34/tacklr/session"
 )
 
@@ -23,7 +22,7 @@ type Server struct {
 	// Custom protocols may ignore it.
 	Connections *ConnectionRegistry
 	// Security is protocol-neutral authentication and authorization supplied by the host.
-	Security *tacklrsecurity.Service
+	Security *Service
 	// HTTPAttempt translates request credentials at the HTTP transport edge.
 	HTTPAttempt HTTPAttemptExtractor
 

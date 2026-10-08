@@ -288,7 +288,7 @@ Register nested agents on `AgentOptions.Specialists`. Tools start work through `
 | Piece | What it does | Where to read |
 |-------|----------------|---------------|
 | Planning | `create_plan`, todos, hand-off on complete | this README · [`tacklr`](https://pkg.go.dev/github.com/ryanaldo34/tacklr) |
-| Interrupts | Park a tool, collect structured input, `Resume` | [`interrupt`](https://pkg.go.dev/github.com/ryanaldo34/tacklr/interrupt) · [docs/session.md](docs/session.md) |
+| Interrupts | Park a tool, collect structured input, `Resume` | [docs/session.md](docs/session.md) |
 | Specialists | Nested sessions (`spawn_specialist` and children) | [docs/session.md](docs/session.md) |
 | VFS | Mounts and content IR; file tools `read` / `write` / `run_command` | [docs/vfs.md](docs/vfs.md) |
 | Brain | Host-owned knowledge: Engrams, search, optional graph | [docs/knowledge.md](docs/knowledge.md) |

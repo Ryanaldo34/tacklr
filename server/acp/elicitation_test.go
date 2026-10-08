@@ -15,7 +15,6 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
-	"github.com/ryanaldo34/tacklr/interrupt"
 )
 
 // acpRPC is an in-process ACP connection: HandleInbound plus acp.ClientBridge
@@ -117,7 +116,7 @@ func TestACP_elicitationForm_resolvesInterruptAndCompletes(t *testing.T) {
 			if err != nil {
 				return "", err
 			}
-			choice := intr.(*interrupt.UserSelectionInterrupt).ConfirmedChoice
+			choice := intr.(*tacklr.UserSelectionInterrupt).ConfirmedChoice
 			return "selected: " + choice.Title, nil
 		},
 	})

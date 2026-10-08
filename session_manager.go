@@ -7,7 +7,6 @@ import (
 	"sync"
 
 	"github.com/ryanaldo34/tacklr/brain"
-	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
@@ -67,7 +66,7 @@ func (s *sessionManager) StateDelete(key string) {
 }
 
 // PendingInterrupt returns an open interrupt for id if any.
-func (s *sessionManager) PendingInterrupt(id string) (interrupt.Interrupt, bool) {
+func (s *sessionManager) PendingInterrupt(id string) (Interrupt, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	intr, ok := s.pending[id]
@@ -100,7 +99,7 @@ func (s *sessionManager) DropInterrupt(id string) {
 
 // Park is the only writer of pending. It stores intr under callID and returns
 // that interrupt as the error tools propagate (`return "", err`).
-func (s *sessionManager) Park(callID string, intr interrupt.Interrupt) error {
+func (s *sessionManager) Park(callID string, intr Interrupt) error {
 	if intr == nil {
 		return fmt.Errorf("park: interrupt is nil")
 	}
@@ -115,12 +114,12 @@ func (s *sessionManager) Park(callID string, intr interrupt.Interrupt) error {
 
 // Resume validates via Interrupt.Return, then moves pending → resolved.
 // An invalid payload leaves the park in place.
-func (s *sessionManager) Resume(callID string, payload []byte) (interrupt.Interrupt, error) {
+func (s *sessionManager) Resume(callID string, payload []byte) (Interrupt, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	intr, ok := s.pending[callID]
 	if !ok {
-		return nil, fmt.Errorf("interrupt %q: %w", callID, interrupt.ErrInterruptNotFound)
+		return nil, fmt.Errorf("interrupt %q: %w", callID, ErrInterruptNotFound)
 	}
 	if err := intr.Return(payload); err != nil {
 		return nil, err
@@ -131,7 +130,7 @@ func (s *sessionManager) Resume(callID string, payload []byte) (interrupt.Interr
 }
 
 // TakeResolved removes and returns a resolved interrupt if present (re-entry after Resume).
-func (s *sessionManager) TakeResolved(id string) (interrupt.Interrupt, bool) {
+func (s *sessionManager) TakeResolved(id string) (Interrupt, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	intr, ok := s.resolved[id]
@@ -143,7 +142,7 @@ func (s *sessionManager) TakeResolved(id string) (interrupt.Interrupt, bool) {
 }
 
 // Pending returns a clone of open interrupts (checkpoint / ACP translators).
-func (s *sessionManager) Pending() map[string]interrupt.Interrupt {
+func (s *sessionManager) Pending() map[string]Interrupt {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out, err := cloneInterruptMap(s.pending)

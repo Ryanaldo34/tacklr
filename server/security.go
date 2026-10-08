@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-
-	tacklrsecurity "github.com/ryanaldo34/tacklr/security"
 )
 
 // ErrNetworkSecurityPolicyRequired prevents accidental anonymous listeners.
@@ -13,12 +11,12 @@ var ErrNetworkSecurityPolicyRequired = errors.New("server: configure security or
 
 // HTTPAttemptExtractor translates transport credential evidence into the
 // protocol-neutral security model. It is an edge adapter, not part of the core.
-type HTTPAttemptExtractor func(*http.Request) (tacklrsecurity.Attempt, bool)
+type HTTPAttemptExtractor func(*http.Request) (Attempt, bool)
 
 // WithSecurity installs host authentication and optional HTTP credential
 // extraction. Protocol-native flows such as ACP authenticate can use service
 // without an extractor.
-func (s *Server) WithSecurity(service *tacklrsecurity.Service, extract HTTPAttemptExtractor) *Server {
+func (s *Server) WithSecurity(service *Service, extract HTTPAttemptExtractor) *Server {
 	if s == nil {
 		panic("server: nil Server")
 	}
@@ -45,12 +43,12 @@ func (s *Server) AllowAnonymousNetwork() *Server {
 	return s
 }
 
-func (s *Server) networkContext(ctx context.Context, r *http.Request, allowUnauthenticated bool) (*tacklrsecurity.Context, int) {
+func (s *Server) networkContext(ctx context.Context, r *http.Request, allowUnauthenticated bool) (*Context, int) {
 	if s.Security == nil {
-		principal, _ := tacklrsecurity.NewPrincipal("anonymous")
-		return &tacklrsecurity.Context{
+		principal, _ := NewPrincipal("anonymous")
+		return &Context{
 			Principal: principal,
-			Binding:   tacklrsecurity.ChannelBinding{Kind: "network"},
+			Binding:   ChannelBinding{Kind: "network"},
 		}, 0
 	}
 	if s.HTTPAttempt != nil {
@@ -63,7 +61,7 @@ func (s *Server) networkContext(ctx context.Context, r *http.Request, allowUnaut
 		}
 	}
 	if allowUnauthenticated {
-		return new(tacklrsecurity.Context), 0
+		return new(Context), 0
 	}
 	return nil, http.StatusUnauthorized
 }

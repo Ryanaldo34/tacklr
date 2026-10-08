@@ -8,8 +8,6 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 
-	"github.com/ryanaldo34/tacklr/interrupt"
-	tacklrsecurity "github.com/ryanaldo34/tacklr/security"
 	"github.com/ryanaldo34/tacklr/session"
 )
 
@@ -20,20 +18,20 @@ type Ask interface {
 	Ready(ctx context.Context) error
 	NoteHello(params json.RawMessage)
 	FormSupported() bool
-	Permission(ctx context.Context, sessionID, messageID string, perm interrupt.ToolPermissionInterrupt) (resolution []byte, cancelled bool, err error)
-	Elicit(ctx context.Context, sessionID, messageID, question string, opts []interrupt.UserChoice) (action string, resolution []byte, err error)
+	Permission(ctx context.Context, sessionID, messageID string, perm tacklr.ToolPermissionInterrupt) (resolution []byte, cancelled bool, err error)
+	Elicit(ctx context.Context, sessionID, messageID, question string, opts []tacklr.UserChoice) (action string, resolution []byte, err error)
 }
 
 // Conn is one connection for the turn that is running now.
 type Conn struct {
 	Writer      MessageWriter
 	Ask         Ask
-	Security    *tacklrsecurity.Context
-	SetSecurity func(tacklrsecurity.Context)
+	Security    *Context
+	SetSecurity func(Context)
 }
 
 // EstablishSecurity stores the authenticated context and notifies SetSecurity.
-func (c *Conn) EstablishSecurity(securityContext tacklrsecurity.Context) {
+func (c *Conn) EstablishSecurity(securityContext Context) {
 	c.Security = &securityContext
 	if c.SetSecurity != nil {
 		c.SetSecurity(securityContext)
@@ -47,7 +45,7 @@ type ProtocolEnv struct {
 	Conn    *Conn
 	// Security is protocol-neutral. Implementations map wire credentials into
 	// this service and store the resulting Context on Conn.
-	Security *tacklrsecurity.Service
+	Security *Service
 	// Connections is optional connection tracking (ACP WebSocket uses it).
 	// Custom protocols may leave it unused.
 	Connections *ConnectionRegistry

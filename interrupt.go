@@ -1,4 +1,4 @@
-package interrupt
+package tacklr
 
 import (
 	"encoding/json"
@@ -294,20 +294,19 @@ var (
 )
 
 // RegisterDefaults registers the built-in interrupt types. Safe to call
-// more than once. tacklr.init calls this; New also ensures defaults so
-// checkpoint rehydrate works without importing the root package.
+// more than once. init calls this. NewInterrupt also ensures defaults so
+// a checkpoint can rehydrate before any tool runs.
 func RegisterDefaults() {
 	defaultsOnce.Do(func() {
-		Register(func() Interrupt { return &UserSelectionInterrupt{} })
-		Register(func() Interrupt { return &ToolPermissionInterrupt{} })
-		Register(func() Interrupt { return &ChildWaiting{Kind: TypeChildWaiting} })
-		Register(func() Interrupt { return &AuthExpired{} })
+		registerInterrupt(func() Interrupt { return &UserSelectionInterrupt{} })
+		registerInterrupt(func() Interrupt { return &ToolPermissionInterrupt{} })
+		registerInterrupt(func() Interrupt { return &ChildWaiting{Kind: TypeChildWaiting} })
+		registerInterrupt(func() Interrupt { return &AuthExpired{} })
 	})
 }
 
-// Register adds a factory for an Interrupt type under its TypeName.
-// Call at init for custom interrupts so checkpoints can rehydrate them.
-func Register(factory func() Interrupt) {
+// registerInterrupt adds a factory under the interrupt's TypeName.
+func registerInterrupt(factory func() Interrupt) {
 	intr := factory()
 	name := intr.TypeName()
 	if _, ok := interruptFactories[name]; ok {
@@ -316,8 +315,8 @@ func Register(factory func() Interrupt) {
 	interruptFactories[name] = factory
 }
 
-// New returns a fresh Interrupt for a registered type name.
-func New(typeName string) (Interrupt, bool) {
+// NewInterrupt returns a fresh Interrupt for a registered type name.
+func NewInterrupt(typeName string) (Interrupt, bool) {
 	RegisterDefaults()
 	f, ok := interruptFactories[typeName]
 	if !ok {
@@ -327,11 +326,11 @@ func New(typeName string) (Interrupt, bool) {
 }
 
 // Clone returns a deep copy via JSON for checkpoint snapshots.
-func Clone(intr Interrupt) (Interrupt, error) {
+func CloneInterrupt(intr Interrupt) (Interrupt, error) {
 	if intr == nil {
 		return nil, nil
 	}
-	cp, ok := New(intr.TypeName())
+	cp, ok := NewInterrupt(intr.TypeName())
 	if !ok {
 		return nil, fmt.Errorf("interrupt: unknown type %q", intr.TypeName())
 	}

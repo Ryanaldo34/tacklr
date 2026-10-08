@@ -7,7 +7,6 @@ import (
 	"slices"
 
 	"github.com/ryanaldo34/tacklr/brain"
-	"github.com/ryanaldo34/tacklr/interrupt"
 )
 
 const (
@@ -174,7 +173,7 @@ func decodeModule(modules map[string]json.RawMessage, name string, target any) e
 func cloneInterruptMap(values interruptMap) (interruptMap, error) {
 	out := make(interruptMap, len(values))
 	for key, value := range values {
-		cloned, err := interrupt.Clone(value)
+		cloned, err := CloneInterrupt(value)
 		if err != nil {
 			return nil, err
 		}

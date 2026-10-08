@@ -1,4 +1,4 @@
-package interrupt_test
+package tacklr_test
 
 import (
 	"encoding/json"
@@ -6,13 +6,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ryanaldo34/tacklr/interrupt"
+	"github.com/ryanaldo34/tacklr"
 )
 
 // TestUserSelection_fullLifecycle covers serialize, validate, return, and error string.
 func TestUserSelection_fullLifecycle(t *testing.T) {
-	usi := &interrupt.UserSelectionInterrupt{
-		Options: []interrupt.UserChoice{
+	usi := &tacklr.UserSelectionInterrupt{
+		Options: []tacklr.UserChoice{
 			{Title: "A", Description: "first", IsRecommended: true},
 			{Title: "B", Description: "second"},
 		},
@@ -28,10 +28,10 @@ func TestUserSelection_fullLifecycle(t *testing.T) {
 		t.Fatal("error string")
 	}
 
-	if err := usi.ValidatePayload([]byte(`not-json`)); err == nil || !errors.Is(err, interrupt.ErrInvalidPayload) {
+	if err := usi.ValidatePayload([]byte(`not-json`)); err == nil || !errors.Is(err, tacklr.ErrInvalidPayload) {
 		t.Fatalf("invalid json: %v", err)
 	}
-	if err := usi.ValidatePayload([]byte(`{}`)); err == nil || !errors.Is(err, interrupt.ErrInvalidPayload) || !strings.Contains(err.Error(), "selectionIdx") {
+	if err := usi.ValidatePayload([]byte(`{}`)); err == nil || !errors.Is(err, tacklr.ErrInvalidPayload) || !strings.Contains(err.Error(), "selectionIdx") {
 		t.Fatalf("missing field: %v", err)
 	}
 	if err := usi.ValidatePayload([]byte(`{"selectionIdx":99}`)); err == nil {
@@ -58,7 +58,7 @@ func TestUserSelection_fullLifecycle(t *testing.T) {
 	}
 
 	// InitFromPayload replaces options list.
-	fresh := &interrupt.UserSelectionInterrupt{}
+	fresh := &tacklr.UserSelectionInterrupt{}
 	if err := fresh.InitFromPayload([]byte(`[{"title":"only"}]`)); err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ func TestUserSelection_fullLifecycle(t *testing.T) {
 
 // TestToolPermission_allKinds covers init, validate, allow/reject, and unknown option.
 func TestToolPermission_allKinds(t *testing.T) {
-	p := &interrupt.ToolPermissionInterrupt{}
+	p := &tacklr.ToolPermissionInterrupt{}
 	if p.SelectedKind != "" {
 		t.Fatal("zero value has no selected kind")
 	}
@@ -138,13 +138,13 @@ func TestToolPermission_allKinds(t *testing.T) {
 		allowed bool
 		kind    string
 	}{
-		{"allow-once", true, interrupt.PermissionAllowOnce},
-		{"allow-always", true, interrupt.PermissionAllowAlways},
-		{"reject-once", false, interrupt.PermissionRejectOnce},
-		{"reject-always", false, interrupt.PermissionRejectAlways},
+		{"allow-once", true, tacklr.PermissionAllowOnce},
+		{"allow-always", true, tacklr.PermissionAllowAlways},
+		{"reject-once", false, tacklr.PermissionRejectOnce},
+		{"reject-always", false, tacklr.PermissionRejectAlways},
 	}
 	for _, tc := range cases {
-		p2 := &interrupt.ToolPermissionInterrupt{Options: interrupt.DefaultPermissionOptions()}
+		p2 := &tacklr.ToolPermissionInterrupt{Options: tacklr.DefaultPermissionOptions()}
 		payload, _ := json.Marshal(map[string]string{"optionId": tc.id})
 		if err := p2.Return(payload); err != nil {
 			t.Fatal(err)
@@ -155,8 +155,8 @@ func TestToolPermission_allKinds(t *testing.T) {
 	}
 
 	// Unknown kind on a custom option.
-	p3 := &interrupt.ToolPermissionInterrupt{
-		Options: []interrupt.PermissionOption{{OptionID: "weird", Name: "W", Kind: "nope"}},
+	p3 := &tacklr.ToolPermissionInterrupt{
+		Options: []tacklr.PermissionOption{{OptionID: "weird", Name: "W", Kind: "nope"}},
 	}
 	if err := p3.Return([]byte(`{"optionId":"weird"}`)); err == nil {
 		t.Fatal("unknown kind")
@@ -165,26 +165,26 @@ func TestToolPermission_allKinds(t *testing.T) {
 
 // TestRegister_New_Clone covers registry and deep clone outcomes.
 func TestRegister_New_Clone(t *testing.T) {
-	if _, ok := interrupt.New("user_selection_choice"); !ok {
+	if _, ok := tacklr.NewInterrupt("user_selection_choice"); !ok {
 		t.Fatal("builtin selection")
 	}
-	if _, ok := interrupt.New("tool_permission"); !ok {
+	if _, ok := tacklr.NewInterrupt("tool_permission"); !ok {
 		t.Fatal("builtin permission")
 	}
-	if _, ok := interrupt.New("missing_type"); ok {
+	if _, ok := tacklr.NewInterrupt("missing_type"); ok {
 		t.Fatal("unknown type")
 	}
 
-	perm := &interrupt.ToolPermissionInterrupt{Options: interrupt.DefaultPermissionOptions()}
+	perm := &tacklr.ToolPermissionInterrupt{Options: tacklr.DefaultPermissionOptions()}
 	if err := perm.Return([]byte(`{"optionId":"allow-once"}`)); err != nil {
 		t.Fatal(err)
 	}
-	cpPerm, err := interrupt.Clone(perm)
+	cpPerm, err := tacklr.CloneInterrupt(perm)
 	if err != nil {
 		t.Fatal(err)
 	}
-	clonedPerm, ok := cpPerm.(*interrupt.ToolPermissionInterrupt)
-	if !ok || !clonedPerm.Allowed || clonedPerm.SelectedOptionID != "allow-once" || clonedPerm.SelectedKind != interrupt.PermissionAllowOnce {
+	clonedPerm, ok := cpPerm.(*tacklr.ToolPermissionInterrupt)
+	if !ok || !clonedPerm.Allowed || clonedPerm.SelectedOptionID != "allow-once" || clonedPerm.SelectedKind != tacklr.PermissionAllowOnce {
 		t.Fatalf("clone lost permission resolution: %+v", cpPerm)
 	}
 	wire, err := perm.Serialize()
@@ -195,14 +195,14 @@ func TestRegister_New_Clone(t *testing.T) {
 		t.Fatalf("serialize leaked resolution: %s", wire)
 	}
 
-	src := &interrupt.UserSelectionInterrupt{
-		Options: []interrupt.UserChoice{{Title: "A"}},
+	src := &tacklr.UserSelectionInterrupt{
+		Options: []tacklr.UserChoice{{Title: "A"}},
 	}
-	cp, err := interrupt.Clone(src)
+	cp, err := tacklr.CloneInterrupt(src)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cloned, ok := cp.(*interrupt.UserSelectionInterrupt)
+	cloned, ok := cp.(*tacklr.UserSelectionInterrupt)
 	if !ok || len(cloned.Options) != 1 || cloned.Options[0].Title != "A" {
 		t.Fatalf("%+v", cp)
 	}
@@ -212,22 +212,22 @@ func TestRegister_New_Clone(t *testing.T) {
 		t.Fatal("clone should be independent")
 	}
 
-	got, err := interrupt.Clone(nil)
+	got, err := tacklr.CloneInterrupt(nil)
 	if got != nil || err != nil {
 		t.Fatalf("nil clone: %v %v", got, err)
 	}
 
 	fake := fakeInterrupt{name: "not_in_registry"}
-	if _, err := interrupt.Clone(fake); err == nil {
+	if _, err := tacklr.CloneInterrupt(fake); err == nil {
 		t.Fatal("clone unknown type")
 	}
 
-	interrupt.Register(func() interrupt.Interrupt { return marshalBoom{} })
-	if _, err := interrupt.Clone(marshalBoom{}); err == nil {
+	tacklr.RegisterInterrupt(func() tacklr.Interrupt { return marshalBoom{} })
+	if _, err := tacklr.CloneInterrupt(marshalBoom{}); err == nil {
 		t.Fatal("clone marshal error")
 	}
-	interrupt.Register(func() interrupt.Interrupt { return unmarshalBoom{} })
-	if _, err := interrupt.Clone(unmarshalBoom{}); err == nil {
+	tacklr.RegisterInterrupt(func() tacklr.Interrupt { return unmarshalBoom{} })
+	if _, err := tacklr.CloneInterrupt(unmarshalBoom{}); err == nil {
 		t.Fatal("clone unmarshal error")
 	}
 
@@ -237,8 +237,8 @@ func TestRegister_New_Clone(t *testing.T) {
 			t.Fatal("want panic on double register")
 		}
 	}()
-	interrupt.Register(func() interrupt.Interrupt { return fakeInterrupt{name: "dup_once"} })
-	interrupt.Register(func() interrupt.Interrupt { return fakeInterrupt{name: "dup_once"} })
+	tacklr.RegisterInterrupt(func() tacklr.Interrupt { return fakeInterrupt{name: "dup_once"} })
+	tacklr.RegisterInterrupt(func() tacklr.Interrupt { return fakeInterrupt{name: "dup_once"} })
 }
 
 type fakeInterrupt struct{ name string }
@@ -269,8 +269,8 @@ func (unmarshalBoom) MarshalJSON() ([]byte, error) {
 }
 
 func TestChildWaiting_typeNameAndError(t *testing.T) {
-	empty := &interrupt.ChildWaiting{}
-	if empty.TypeName() != interrupt.TypeChildWaiting {
+	empty := &tacklr.ChildWaiting{}
+	if empty.TypeName() != tacklr.TypeChildWaiting {
 		t.Fatalf("default type: %s", empty.TypeName())
 	}
 	if empty.Error() != "child session awaiting input" {
@@ -287,25 +287,25 @@ func TestChildWaiting_typeNameAndError(t *testing.T) {
 		t.Fatalf("serialize: %v %s", err, raw)
 	}
 
-	named := &interrupt.ChildWaiting{Kind: "spawn_wait", Message: "waiting on researcher"}
+	named := &tacklr.ChildWaiting{Kind: "spawn_wait", Message: "waiting on researcher"}
 	if named.TypeName() != "spawn_wait" {
 		t.Fatalf("kind: %s", named.TypeName())
 	}
 	if named.Error() != "waiting on researcher" {
 		t.Fatalf("message: %s", named.Error())
 	}
-	got, ok := interrupt.New(interrupt.TypeChildWaiting)
+	got, ok := tacklr.NewInterrupt(tacklr.TypeChildWaiting)
 	if !ok {
 		t.Fatal("child_waiting not registered")
 	}
-	if got.TypeName() != interrupt.TypeChildWaiting {
+	if got.TypeName() != tacklr.TypeChildWaiting {
 		t.Fatalf("new: %s", got.TypeName())
 	}
 }
 
 func TestAuthExpired_typeNameAndResume(t *testing.T) {
-	empty := &interrupt.AuthExpired{}
-	if empty.TypeName() != interrupt.TypeAuthExpired {
+	empty := &tacklr.AuthExpired{}
+	if empty.TypeName() != tacklr.TypeAuthExpired {
 		t.Fatalf("type: %s", empty.TypeName())
 	}
 	if empty.Error() != "credentials expired" {
@@ -314,27 +314,27 @@ func TestAuthExpired_typeNameAndResume(t *testing.T) {
 	if err := empty.Return([]byte(`{}`)); err != nil {
 		t.Fatal(err)
 	}
-	named := &interrupt.AuthExpired{Tool: "read"}
+	named := &tacklr.AuthExpired{Tool: "read"}
 	if named.Error() != "read: credentials expired" {
 		t.Fatalf("named: %s", named.Error())
 	}
-	got, ok := interrupt.New(interrupt.TypeAuthExpired)
+	got, ok := tacklr.NewInterrupt(tacklr.TypeAuthExpired)
 	if !ok {
 		t.Fatal("auth_expired not registered")
 	}
-	if got.TypeName() != interrupt.TypeAuthExpired {
+	if got.TypeName() != tacklr.TypeAuthExpired {
 		t.Fatalf("new: %s", got.TypeName())
 	}
 }
 
 // TestInterrupt_asError confirms errors.As works for tool return paths.
 func TestInterrupt_asError(t *testing.T) {
-	var err error = &interrupt.UserSelectionInterrupt{Options: []interrupt.UserChoice{{Title: "A"}}}
-	var target interrupt.Interrupt
+	var err error = &tacklr.UserSelectionInterrupt{Options: []tacklr.UserChoice{{Title: "A"}}}
+	var target tacklr.Interrupt
 	if !errors.As(err, &target) {
 		t.Fatal("errors.As")
 	}
-	if !errors.Is(interrupt.ErrInterruptNotFound, interrupt.ErrInterruptNotFound) {
+	if !errors.Is(tacklr.ErrInterruptNotFound, tacklr.ErrInterruptNotFound) {
 		t.Fatal("sentinel")
 	}
 }

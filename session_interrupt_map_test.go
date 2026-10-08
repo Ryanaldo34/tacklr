@@ -3,8 +3,6 @@ package tacklr
 import (
 	"encoding/json"
 	"testing"
-
-	"github.com/ryanaldo34/tacklr/interrupt"
 )
 
 func TestInterruptMap_marshalNilAndRoundTrip(t *testing.T) {
@@ -22,7 +20,7 @@ func TestInterruptMap_marshalNilAndRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	intr, ok := interrupt.New("tool_permission")
+	intr, ok := NewInterrupt("tool_permission")
 	if !ok {
 		t.Fatal("tool_permission not registered")
 	}

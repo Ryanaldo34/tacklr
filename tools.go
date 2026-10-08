@@ -10,8 +10,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
-
-	"github.com/ryanaldo34/tacklr/interrupt"
 )
 
 // Tool definitions, JSON schema, and post-tool ACM result hooks.
@@ -105,7 +103,7 @@ type ToolConfig struct {
 	Handler any
 }
 
-// OnCallFunc builds a pre-invoke interrupt. Return nil to skip that layer.
+// OnCallFunc builds a pre-invoke  Return nil to skip that layer.
 type OnCallFunc func(ToolInvocation) Interrupt
 
 type mcpToolConfig struct {
@@ -196,7 +194,7 @@ func NewTool(cfg ToolConfig) *Tool {
 			continue
 		}
 		if sample := ctor(ToolInvocation{Tool: t}); sample != nil {
-			if _, ok := interrupt.New(sample.TypeName()); !ok {
+			if _, ok := NewInterrupt(sample.TypeName()); !ok {
 				panic(fmt.Sprintf("tool %q: OnCall type %q is not registered", cfg.Name, sample.TypeName()))
 			}
 		}
@@ -714,7 +712,7 @@ func Correctionf(cause error, format string, args ...any) error {
 // presentToolError is the turn processor table: interrupt (yield), cancel,
 // already Correction, ErrFailed (service), else Correction(err, err.Error()).
 func presentToolError(name string, err error) error {
-	var intr interrupt.Interrupt
+	var intr Interrupt
 	if errors.As(err, &intr) || errors.Is(err, context.Canceled) || errors.Is(err, ErrCorrection) || errors.Is(err, ErrFailed) {
 		return err
 	}

@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/mcp"
 	"github.com/ryanaldo34/tacklr/skills"
 	"github.com/ryanaldo34/tacklr/vfs"
@@ -287,8 +286,8 @@ func TestTurnManager_checkpointAfterRun(t *testing.T) {
 		t.Fatal("unknown interrupt id")
 	}
 	parkID := "ask1"
-	_ = h.session.Park(parkID, &interrupt.UserSelectionInterrupt{
-		Options: []interrupt.UserChoice{{Title: "a"}, {Title: "b"}},
+	_ = h.session.Park(parkID, &UserSelectionInterrupt{
+		Options: []UserChoice{{Title: "a"}, {Title: "b"}},
 	})
 	h.pendingToolCalls[parkID] = PendingToolCall{
 		ToolCall: &ToolCall{ID: parkID, CallID: parkID, Name: "ask_user_choice"}, InterruptActive: true,

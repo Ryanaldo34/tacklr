@@ -2,8 +2,6 @@ package tacklr
 
 import (
 	"fmt"
-
-	"github.com/ryanaldo34/tacklr/interrupt"
 )
 
 // sessionRuntime is the tool-facing hook for one harness turn:
@@ -70,15 +68,15 @@ func (rt sessionRuntime) StateDelete(key string) {
 
 // Park writes pending for this tool call and returns the interrupt as error.
 // After Resume, re-entry returns the resolved interrupt with a nil error.
-func (rt sessionRuntime) Park(kind string, payload []byte) (interrupt.Interrupt, error) {
+func (rt sessionRuntime) Park(kind string, payload []byte) (Interrupt, error) {
 	if resolved, ok := rt.session.TakeResolved(rt.toolCallID); ok {
 		return resolved, nil
 	}
-	intr, ok := interrupt.New(kind)
+	intr, ok := NewInterrupt(kind)
 	if !ok {
 		return nil, fmt.Errorf("%q is not a valid interrupt type", kind)
 	}
-	if init, ok := intr.(interrupt.PayloadInitializer); ok {
+	if init, ok := intr.(PayloadInitializer); ok {
 		_ = init.InitFromPayload(payload)
 	}
 	return nil, rt.session.Park(rt.toolCallID, intr)

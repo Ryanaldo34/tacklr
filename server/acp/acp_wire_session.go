@@ -14,7 +14,6 @@ import (
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/mcp"
-	tacklrsecurity "github.com/ryanaldo34/tacklr/security"
 	"github.com/ryanaldo34/tacklr/session"
 	"github.com/ryanaldo34/tacklr/telemetry"
 )
@@ -267,7 +266,7 @@ func authorizeOperation(ctx context.Context, env server.ProtocolEnv, action, res
 	if env.Conn == nil || env.Conn.Security == nil || !env.Conn.Security.Authenticated() {
 		return server.Errorf(server.ErrAuthenticationRequired, "authentication required")
 	}
-	if err := env.Security.Authorize(ctx, *env.Conn.Security, tacklrsecurity.Operation{
+	if err := env.Security.Authorize(ctx, *env.Conn.Security, server.Operation{
 		Action:   action,
 		Resource: resource,
 	}); err != nil {

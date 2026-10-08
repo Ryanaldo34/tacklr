@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
-
-	"github.com/ryanaldo34/tacklr/interrupt"
 )
 
 // TestCheckpointer_roundTrip is the durable session outcome: plan, user state,
@@ -60,9 +58,9 @@ func TestCheckpointer_roundTrip(t *testing.T) {
 // the harness between ApplyResume and RunToolCall; Allowed must survive.
 func TestCheckpointer_resolvedToolPermissionKeepsAllowed(t *testing.T) {
 	sm := newSessionManager()
-	parked := &interrupt.ToolPermissionInterrupt{
+	parked := &ToolPermissionInterrupt{
 		ToolName: "sensitive",
-		Options:  interrupt.DefaultPermissionOptions(),
+		Options:  DefaultPermissionOptions(),
 	}
 	if err := sm.Park("call_sens", parked); err == nil {
 		t.Fatal("park should return interrupt as error")
@@ -94,7 +92,7 @@ func TestCheckpointer_resolvedToolPermissionKeepsAllowed(t *testing.T) {
 	if !ok {
 		t.Fatal("re-entry TakeResolved")
 	}
-	perm, ok := got.(*interrupt.ToolPermissionInterrupt)
+	perm, ok := got.(*ToolPermissionInterrupt)
 	if !ok || !perm.Allowed || perm.SelectedOptionID != "allow-once" {
 		t.Fatalf("Allowed lost across checkpoint: %+v", got)
 	}
@@ -312,7 +310,7 @@ func TestSession_interrupts_parkResumeReentry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	usi, ok := got.(*interrupt.UserSelectionInterrupt)
+	usi, ok := got.(*UserSelectionInterrupt)
 	if !ok || usi.ConfirmedChoice == nil || usi.ConfirmedChoice.Title != "B" {
 		t.Fatalf("choice = %+v", got)
 	}
@@ -338,7 +336,7 @@ func TestSession_interrupts_parkResumeReentry(t *testing.T) {
 		t.Fatalf("want resolved return, err=%v intr=%v", err, intr)
 	}
 
-	parked := &interrupt.UserSelectionInterrupt{Options: []interrupt.UserChoice{{Title: "Z"}}}
+	parked := &UserSelectionInterrupt{Options: []UserChoice{{Title: "Z"}}}
 	if err = sm.Park("tc3", parked); err == nil {
 		t.Fatal("Park returns interrupt as error")
 	}

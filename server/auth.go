@@ -1,8 +1,8 @@
-// Package security defines protocol-neutral authentication and authorization
-// capabilities for Tacklr servers. server.Protocol implementations translate
-// their wire formats into Attempt and Operation values; this package never
-// interprets ACP, JSON-RPC, or HTTP types.
-package security
+package server
+
+// Authentication is protocol-neutral. A Protocol translates its wire
+// credentials into Attempt and Operation values. This file does not
+// interpret ACP, JSON-RPC, or HTTP.
 
 import (
 	"context"

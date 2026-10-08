@@ -16,8 +16,6 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/ryanaldo34/tacklr/interrupt"
-	tacklrsecurity "github.com/ryanaldo34/tacklr/security"
 	"github.com/ryanaldo34/tacklr/session"
 )
 
@@ -212,7 +210,7 @@ func (p *acpProtocol) dispatch(ctx context.Context, env server.ProtocolEnv, pr *
 		}
 		return map[string]any{}, nil
 	case "logout":
-		env.Conn.EstablishSecurity(tacklrsecurity.Context{})
+		env.Conn.EstablishSecurity(server.Context{})
 		return map[string]any{}, nil
 	case "session/new":
 		if err := p.requireAuthentication(env); err != nil {
@@ -260,20 +258,20 @@ func (p *acpProtocol) authenticate(ctx context.Context, env server.ProtocolEnv, 
 	if env.Security == nil {
 		return server.Errorf(server.ErrAuthenticationRequired, "authentication required")
 	}
-	binding := tacklrsecurity.ChannelBinding{Kind: "acp"}
+	binding := server.ChannelBinding{Kind: "acp"}
 	if env.Conn.Security != nil {
 		binding = env.Conn.Security.Binding
 		if binding.Kind == "" {
 			binding.Kind = "acp"
 		}
 	}
-	securityContext, err := env.Security.Authenticate(ctx, tacklrsecurity.Attempt{
+	securityContext, err := env.Security.Authenticate(ctx, server.Attempt{
 		Scheme:  method.Scheme,
 		Binding: binding,
 	})
 	if err != nil {
 		sent := server.ErrAuthenticationRequired
-		if errors.Is(err, tacklrsecurity.ErrAuthenticationFailed) {
+		if errors.Is(err, server.ErrAuthenticationFailed) {
 			sent = server.ErrAuthenticationFailed
 		}
 		return server.ErrorCause(sent, err, "%s", sent.Error())
@@ -401,7 +399,7 @@ func connElicitationForm(c *server.Conn) bool {
 }
 
 func resolvePermissionViaRequest(ctx context.Context, env server.ProtocolEnv, threadID string, envl InterruptEventEnvelope, messageID string) (map[string][]byte, error) {
-	var perm interrupt.ToolPermissionInterrupt
+	var perm tacklr.ToolPermissionInterrupt
 	_ = json.Unmarshal(envl.Data, &perm)
 	resolution, cancelled, err := env.Conn.Ask.Permission(ctx, threadID, messageID, perm)
 	if err != nil {
@@ -414,7 +412,7 @@ func resolvePermissionViaRequest(ctx context.Context, env server.ProtocolEnv, th
 }
 
 func resolveSelectionViaElicitation(ctx context.Context, env server.ProtocolEnv, threadID string, envl InterruptEventEnvelope, messageID string) (map[string][]byte, error) {
-	var usi interrupt.UserSelectionInterrupt
+	var usi tacklr.UserSelectionInterrupt
 	_ = json.Unmarshal(envl.Data, &usi)
 	action, resolution, err := env.Conn.Ask.Elicit(ctx, threadID, messageID, usi.Question, usi.Options)
 	if err != nil {

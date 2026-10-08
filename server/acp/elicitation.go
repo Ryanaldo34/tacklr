@@ -6,7 +6,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/ryanaldo34/tacklr/interrupt"
+	"github.com/ryanaldo34/tacklr"
 )
 
 // ElicitationResult is the Client response to elicitation/create.
@@ -17,7 +17,7 @@ type ElicitationResult struct {
 
 // SelectionToElicitationParams builds form-mode elicitation/create params from
 // a user-selection interrupt. ask_user_choice already requires ≥2 titled options.
-func SelectionToElicitationParams(sessionID, toolCallID, question string, opts []interrupt.UserChoice) map[string]any {
+func SelectionToElicitationParams(sessionID, toolCallID, question string, opts []tacklr.UserChoice) map[string]any {
 	titles := make([]string, 0, len(opts))
 	var msg strings.Builder
 	if question != "" {
@@ -79,7 +79,7 @@ func parseElicitationResult(raw json.RawMessage) (ElicitationResult, error) {
 
 // ElicitationResultToSelectionPayload maps an accept response to the harness
 // interrupt resolution payload. Returns action and optional selection JSON.
-func ElicitationResultToSelectionPayload(raw json.RawMessage, opts []interrupt.UserChoice) (action string, resolution []byte, err error) {
+func ElicitationResultToSelectionPayload(raw json.RawMessage, opts []tacklr.UserChoice) (action string, resolution []byte, err error) {
 	res, err := parseElicitationResult(raw)
 	if err != nil {
 		return "", nil, err
@@ -92,7 +92,7 @@ func ElicitationResultToSelectionPayload(raw json.RawMessage, opts []interrupt.U
 	if choice == "" {
 		return action, nil, fmt.Errorf("accept missing content.choice")
 	}
-	idx := slices.IndexFunc(opts, func(o interrupt.UserChoice) bool {
+	idx := slices.IndexFunc(opts, func(o tacklr.UserChoice) bool {
 		return o.Title == choice
 	})
 	if idx < 0 {
@@ -110,7 +110,7 @@ type InterruptEventEnvelope struct {
 }
 
 // PermissionToACPParams builds session/request_permission params.
-func PermissionToACPParams(sessionID, toolCallID string, perm interrupt.ToolPermissionInterrupt) map[string]any {
+func PermissionToACPParams(sessionID, toolCallID string, perm tacklr.ToolPermissionInterrupt) map[string]any {
 	options := make([]map[string]any, 0, len(perm.Options))
 	for _, o := range perm.Options {
 		options = append(options, map[string]any{
@@ -160,7 +160,7 @@ func RequestPermissionResultToPayload(raw json.RawMessage) (resolution []byte, c
 		if res.Outcome.OptionID == "" {
 			return nil, false, fmt.Errorf("selected outcome missing optionId")
 		}
-		resolution, err = json.Marshal(interrupt.ToolPermissionPayload{OptionID: res.Outcome.OptionID})
+		resolution, err = json.Marshal(tacklr.ToolPermissionPayload{OptionID: res.Outcome.OptionID})
 		return resolution, false, err
 	default:
 		return nil, false, fmt.Errorf("unknown permission outcome %q", res.Outcome.Outcome)

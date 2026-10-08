@@ -6,8 +6,6 @@ import (
 	"errors"
 	"strings"
 	"testing"
-
-	"github.com/ryanaldo34/tacklr/interrupt"
 )
 
 // planToolsFixture holds builtin plan tools sharing one PlanStore.
@@ -343,11 +341,11 @@ func TestAskUserChoiceTool_raiseAndResume(t *testing.T) {
 	if err == nil {
 		t.Fatal("first invoke should raise interrupt")
 	}
-	var intr interrupt.Interrupt
+	var intr Interrupt
 	if !errors.As(err, &intr) {
 		t.Fatalf("expected Interrupt, got %T %v", err, err)
 	}
-	var usi *interrupt.UserSelectionInterrupt
+	var usi *UserSelectionInterrupt
 	if !errors.As(err, &usi) || usi.Question != "Which approach?" {
 		t.Errorf("interrupt question = %+v", usi)
 	}

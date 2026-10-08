@@ -5,8 +5,6 @@ import (
 	"sync"
 
 	"github.com/google/uuid"
-
-	tacklrsecurity "github.com/ryanaldo34/tacklr/security"
 )
 
 // Connection is one WebSocket. Harness sessions live on session.Runtime.
@@ -18,16 +16,16 @@ type Connection struct {
 	cancel context.CancelFunc
 
 	mu       sync.Mutex
-	security tacklrsecurity.Context
+	security Context
 }
 
-func (c *Connection) SecurityContext() tacklrsecurity.Context {
+func (c *Connection) SecurityContext() Context {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.security
 }
 
-func (c *Connection) SetSecurityContext(securityContext tacklrsecurity.Context) {
+func (c *Connection) SetSecurityContext(securityContext Context) {
 	c.mu.Lock()
 	c.security = securityContext
 	c.mu.Unlock()

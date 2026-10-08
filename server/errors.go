@@ -4,20 +4,16 @@ import (
 	"errors"
 	"fmt"
 
-	tacklrsecurity "github.com/ryanaldo34/tacklr/security"
 	"github.com/ryanaldo34/tacklr/session"
 )
 
-// Wire-facing sentinels. Session/agent/auth groups are the owning package's
-// sentinels (same pointer) so errors.Is is one check.
+// Wire-facing sentinels. Session errors are the owning package's sentinels
+// (same pointer) so errors.Is is one check. Authentication sentinels live in auth.go.
 var (
-	ErrInvalidRequest         = errors.New("invalid request")
-	ErrMethodNotFound         = errors.New("method not found")
-	ErrInternal               = errors.New("internal server error")
-	ErrSessionNotFound        = session.ErrSessionNotFound
-	ErrAuthenticationRequired = tacklrsecurity.ErrAuthenticationRequired
-	ErrAuthenticationFailed   = tacklrsecurity.ErrAuthenticationFailed
-	ErrAuthorizationDenied    = tacklrsecurity.ErrAuthorizationDenied
+	ErrInvalidRequest  = errors.New("invalid request")
+	ErrMethodNotFound  = errors.New("method not found")
+	ErrInternal        = errors.New("internal server error")
+	ErrSessionNotFound = session.ErrSessionNotFound
 )
 
 // clientError is a caller-facing error that unwraps to a sentinel.

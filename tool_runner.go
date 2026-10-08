@@ -3,8 +3,6 @@ package tacklr
 import (
 	"context"
 	"fmt"
-
-	"github.com/ryanaldo34/tacklr/interrupt"
 )
 
 // ToolInvocation is one tool call in the interceptor chain.
@@ -62,10 +60,10 @@ func toolNameOf(inv ToolInvocation) string {
 // Session allow-always / reject-always are applied by on-call middleware.
 func ToolPermissionOnCall(inv ToolInvocation) Interrupt {
 	name := toolNameOf(inv)
-	return &interrupt.ToolPermissionInterrupt{
+	return &ToolPermissionInterrupt{
 		ToolName: name,
 		Title:    ResolveToolTitle(inv.Tool.displayName, name, inv.ArgsJSON),
-		Options:  interrupt.DefaultPermissionOptions(),
+		Options:  DefaultPermissionOptions(),
 	}
 }
 
@@ -96,13 +94,13 @@ func applyOnCallLayer(inv *ToolInvocation, ctor OnCallFunc, sm *sessionManager) 
 	callID := inv.Runtime.CurrentToolCallID()
 	if resolved, ok := sm.TakeResolved(callID); ok {
 		denied := false
-		if perm, ok := resolved.(*interrupt.ToolPermissionInterrupt); ok {
+		if perm, ok := resolved.(*ToolPermissionInterrupt); ok {
 			rememberPermission(&sm.Permissions, perm)
 			denied = !perm.Allowed
 		}
 		return finishOnCallLayer(inv, resolved.TypeName(), denied, sm)
 	}
-	if perm, ok := intr.(*interrupt.ToolPermissionInterrupt); ok {
+	if perm, ok := intr.(*ToolPermissionInterrupt); ok {
 		switch sm.Permissions.Decision(perm.ToolName) {
 		case permDenyAlways:
 			return finishOnCallLayer(inv, perm.TypeName(), true, sm)
@@ -133,11 +131,11 @@ func finishOnCallLayer(inv *ToolInvocation, typeName string, denied bool, sm *se
 	return nil
 }
 
-func rememberPermission(perms *permissions, perm *interrupt.ToolPermissionInterrupt) {
+func rememberPermission(perms *permissions, perm *ToolPermissionInterrupt) {
 	switch perm.SelectedKind {
-	case interrupt.PermissionAllowAlways:
+	case PermissionAllowAlways:
 		perms.Remember(perm.ToolName, permAllowAlways)
-	case interrupt.PermissionRejectAlways:
+	case PermissionRejectAlways:
 		perms.Remember(perm.ToolName, permDenyAlways)
 	}
 }

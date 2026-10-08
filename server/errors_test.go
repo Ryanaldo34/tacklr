@@ -14,7 +14,6 @@ import (
 	"github.com/ryanaldo34/tacklr/server/acp"
 
 	"github.com/ryanaldo34/tacklr/internal/testkit"
-	tacklrsecurity "github.com/ryanaldo34/tacklr/security"
 	"github.com/ryanaldo34/tacklr/session"
 )
 
@@ -84,29 +83,29 @@ func TestHandleInbound_errorContract(t *testing.T) {
 
 	t.Run("authenticationFailed", func(t *testing.T) {
 		k := fakeHost(t)
-		service := &tacklrsecurity.Service{
-			Authenticator: testAuthenticator(func(context.Context, tacklrsecurity.Attempt) (tacklrsecurity.Principal, error) {
-				return tacklrsecurity.Principal{}, tacklrsecurity.ErrAuthenticationFailed
+		service := &server.Service{
+			Authenticator: testAuthenticator(func(context.Context, server.Attempt) (server.Principal, error) {
+				return server.Principal{}, server.ErrAuthenticationFailed
 			}),
 		}
 		proto := acp.NewWithAuth(nil, []acp.ACPAuthMethod{{ID: "login", Name: "Login", Scheme: "host"}}, false)
 		err := inboundWrittenError(t, proto, server.ProtocolEnv{
 			Runtime: k.Runtime, Agent: k.Agent, Security: service,
-			Conn: &server.Conn{Security: &tacklrsecurity.Context{}},
+			Conn: &server.Conn{Security: &server.Context{}},
 		}, `{"jsonrpc":"2.0","id":1,"method":"authenticate","params":{"methodId":"login"}}`)
 		assert(t, err, server.ErrAuthenticationFailed, acp.CodeApplication, server.ErrAuthenticationFailed)
 	})
 
 	t.Run("authorizationDenied", func(t *testing.T) {
-		alice, err := tacklrsecurity.NewPrincipal("alice")
+		alice, err := server.NewPrincipal("alice")
 		if err != nil {
 			t.Fatal(err)
 		}
-		service := &tacklrsecurity.Service{
-			Authenticator: testAuthenticator(func(context.Context, tacklrsecurity.Attempt) (tacklrsecurity.Principal, error) {
+		service := &server.Service{
+			Authenticator: testAuthenticator(func(context.Context, server.Attempt) (server.Principal, error) {
 				return alice, nil
 			}),
-			Authorizer: testAuthorizer(func(_ context.Context, _ tacklrsecurity.Principal, op tacklrsecurity.Operation) error {
+			Authorizer: testAuthorizer(func(_ context.Context, _ server.Principal, op server.Operation) error {
 				if op.Action == "session.load" {
 					return errors.New("denied")
 				}
@@ -115,7 +114,7 @@ func TestHandleInbound_errorContract(t *testing.T) {
 		}
 		k := fakeHost(t)
 		proto := acp.NewWithAuth(nil, []acp.ACPAuthMethod{{ID: "login", Name: "Login", Scheme: "host"}}, false)
-		aliceCtx := tacklrsecurity.Context{Principal: alice}
+		aliceCtx := server.Context{Principal: alice}
 		env := server.ProtocolEnv{Runtime: k.Runtime, Agent: k.Agent, Security: service, Conn: &server.Conn{Security: &aliceCtx}}
 		sid := sessionIDFromInbound(t, proto, env, `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}`)
 		got := inboundWrittenError(t, proto, env,
@@ -330,34 +329,34 @@ func TestHandleInbound_sessionWireOutcomes(t *testing.T) {
 		t.Fatal("want load persist failure")
 	}
 
-	alice, err := tacklrsecurity.NewPrincipal("alice")
+	alice, err := server.NewPrincipal("alice")
 	if err != nil {
 		t.Fatal(err)
 	}
-	denyCreate := &tacklrsecurity.Service{
-		Authenticator: testAuthenticator(func(context.Context, tacklrsecurity.Attempt) (tacklrsecurity.Principal, error) {
+	denyCreate := &server.Service{
+		Authenticator: testAuthenticator(func(context.Context, server.Attempt) (server.Principal, error) {
 			return alice, nil
 		}),
-		Authorizer: testAuthorizer(func(_ context.Context, _ tacklrsecurity.Principal, op tacklrsecurity.Operation) error {
+		Authorizer: testAuthorizer(func(_ context.Context, _ server.Principal, op server.Operation) error {
 			if op.Action == "session.create" {
 				return errors.New("denied")
 			}
 			return nil
 		}),
 	}
-	aliceCtx := tacklrsecurity.Context{Principal: alice}
+	aliceCtx := server.Context{Principal: alice}
 	if err := inboundWrittenError(t, acp.New(nil), server.ProtocolEnv{
 		Runtime: k.Runtime, Agent: k.Agent, Security: denyCreate, Conn: &server.Conn{Security: &aliceCtx},
 	}, `{"jsonrpc":"2.0","id":30,"method":"session/new","params":{"cwd":"/tmp"}}`); err == nil {
 		t.Fatal("want session.create denied")
 	}
 	if err := inboundWrittenError(t, acp.New(nil), server.ProtocolEnv{
-		Runtime: k.Runtime, Agent: k.Agent, Security: denyCreate, Conn: &server.Conn{Security: &tacklrsecurity.Context{}},
+		Runtime: k.Runtime, Agent: k.Agent, Security: denyCreate, Conn: &server.Conn{Security: &server.Context{}},
 	}, `{"jsonrpc":"2.0","id":31,"method":"session/new","params":{"cwd":"/tmp"}}`); err == nil {
 		t.Fatal("want unauthenticated session.create")
 	}
 	if err := inboundWrittenError(t, proto, server.ProtocolEnv{
-		Runtime: k.Runtime, Agent: k.Agent, Security: denyCreate, Conn: &server.Conn{Security: &tacklrsecurity.Context{}},
+		Runtime: k.Runtime, Agent: k.Agent, Security: denyCreate, Conn: &server.Conn{Security: &server.Context{}},
 	}, `{"jsonrpc":"2.0","id":38,"method":"session/load","params":{"sessionId":"`+sid+`"}}`); err == nil {
 		t.Fatal("want unauthenticated session.load")
 	}
@@ -376,16 +375,16 @@ func TestHandleInbound_sessionWireOutcomes(t *testing.T) {
 	}
 
 	schemeProto := acp.NewWithAuth(nil, []acp.ACPAuthMethod{{ID: "login", Name: "Login"}}, false)
-	loginOK := &tacklrsecurity.Service{
-		Authenticator: testAuthenticator(func(_ context.Context, attempt tacklrsecurity.Attempt) (tacklrsecurity.Principal, error) {
+	loginOK := &server.Service{
+		Authenticator: testAuthenticator(func(_ context.Context, attempt server.Attempt) (server.Principal, error) {
 			if attempt.Scheme != "login" {
-				return tacklrsecurity.Principal{}, fmt.Errorf("scheme %q", attempt.Scheme)
+				return server.Principal{}, fmt.Errorf("scheme %q", attempt.Scheme)
 			}
 			return alice, nil
 		}),
 	}
-	var stored tacklrsecurity.Context
-	authConn := &server.Conn{Writer: &recordingMessageWriter{}, SetSecurity: func(c tacklrsecurity.Context) { stored = c }}
+	var stored server.Context
+	authConn := &server.Conn{Writer: &recordingMessageWriter{}, SetSecurity: func(c server.Context) { stored = c }}
 	if err := schemeProto.HandleInbound(t.Context(), server.ProtocolEnv{
 		Runtime: k.Runtime, Agent: k.Agent, Security: loginOK, Conn: authConn,
 	}, []byte(`{"jsonrpc":"2.0","id":35,"method":"authenticate","params":{"methodId":"login"}}`)); err != nil {

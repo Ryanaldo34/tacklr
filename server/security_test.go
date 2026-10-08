@@ -14,28 +14,27 @@ import (
 	"github.com/ryanaldo34/tacklr/server/acp"
 
 	"github.com/ryanaldo34/tacklr/internal/testkit"
-	tacklrsecurity "github.com/ryanaldo34/tacklr/security"
 )
 
-type testAuthenticator func(context.Context, tacklrsecurity.Attempt) (tacklrsecurity.Principal, error)
+type testAuthenticator func(context.Context, server.Attempt) (server.Principal, error)
 
-func (f testAuthenticator) Authenticate(ctx context.Context, attempt tacklrsecurity.Attempt) (tacklrsecurity.Principal, error) {
+func (f testAuthenticator) Authenticate(ctx context.Context, attempt server.Attempt) (server.Principal, error) {
 	return f(ctx, attempt)
 }
 
-type testAuthorizer func(context.Context, tacklrsecurity.Principal, tacklrsecurity.Operation) error
+type testAuthorizer func(context.Context, server.Principal, server.Operation) error
 
-func (f testAuthorizer) Authorize(ctx context.Context, principal tacklrsecurity.Principal, operation tacklrsecurity.Operation) error {
+func (f testAuthorizer) Authorize(ctx context.Context, principal server.Principal, operation server.Operation) error {
 	return f(ctx, principal, operation)
 }
 
 func TestACPAuthentication_ownsSessionsByGenericPrincipal(t *testing.T) {
-	service := &tacklrsecurity.Service{
-		Authenticator: testAuthenticator(func(_ context.Context, attempt tacklrsecurity.Attempt) (tacklrsecurity.Principal, error) {
+	service := &server.Service{
+		Authenticator: testAuthenticator(func(_ context.Context, attempt server.Attempt) (server.Principal, error) {
 			if attempt.Scheme != "host-login" {
-				return tacklrsecurity.Principal{}, errors.New("unexpected scheme")
+				return server.Principal{}, errors.New("unexpected scheme")
 			}
-			return tacklrsecurity.NewPrincipal("alice")
+			return server.NewPrincipal("alice")
 		}),
 	}
 	protocol := acp.NewWithAuth(nil, []acp.ACPAuthMethod{{
@@ -77,11 +76,11 @@ func TestACPAuthentication_ownsSessionsByGenericPrincipal(t *testing.T) {
 	}
 	sessionID := created["result"].(map[string]any)["sessionId"].(string)
 
-	bob, err := tacklrsecurity.NewPrincipal("bob")
+	bob, err := server.NewPrincipal("bob")
 	if err != nil {
 		t.Fatal(err)
 	}
-	bobContext := tacklrsecurity.Context{Principal: bob}
+	bobContext := server.Context{Principal: bob}
 	bobConnection := &server.Conn{Security: &bobContext}
 	bobRecorder := httptest.NewRecorder()
 	bobConnection.Writer = acp.HTTPWriter(bobRecorder)
@@ -115,17 +114,17 @@ func TestServer_networkPolicyMustBeExplicit(t *testing.T) {
 }
 
 func TestServer_WithSecurity_authenticatesHTTPRequests(t *testing.T) {
-	service := &tacklrsecurity.Service{
-		Authenticator: testAuthenticator(func(_ context.Context, attempt tacklrsecurity.Attempt) (tacklrsecurity.Principal, error) {
-			return tacklrsecurity.NewPrincipal(string(attempt.Credential.Bytes()))
+	service := &server.Service{
+		Authenticator: testAuthenticator(func(_ context.Context, attempt server.Attempt) (server.Principal, error) {
+			return server.NewPrincipal(string(attempt.Credential.Bytes()))
 		}),
 	}
 	k := newTestRuntime(t, testkit.HTTPModel(t, nil), tacklr.AgentOptions{})
-	srv := server.NewServer(k.Runtime, k.Agent, healthProtocol{}).WithSecurity(service, func(r *http.Request) (tacklrsecurity.Attempt, bool) {
+	srv := server.NewServer(k.Runtime, k.Agent, healthProtocol{}).WithSecurity(service, func(r *http.Request) (server.Attempt, bool) {
 		if token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "); token != r.Header.Get("Authorization") {
-			return tacklrsecurity.Attempt{Scheme: "bearer", Credential: tacklrsecurity.NewSecret([]byte(token))}, true
+			return server.Attempt{Scheme: "bearer", Credential: server.NewSecret([]byte(token))}, true
 		}
-		return tacklrsecurity.Attempt{}, false
+		return server.Attempt{}, false
 	})
 
 	authorized := httptest.NewRecorder()
@@ -146,26 +145,26 @@ func TestServer_WithSecurity_authenticatesHTTPRequests(t *testing.T) {
 	denied := httptest.NewRecorder()
 	badReq := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	badReq.Header.Set("Authorization", "Bearer bad")
-	failAuth := server.NewServer(k.Runtime, k.Agent, healthProtocol{}).WithSecurity(&tacklrsecurity.Service{
-		Authenticator: testAuthenticator(func(_ context.Context, attempt tacklrsecurity.Attempt) (tacklrsecurity.Principal, error) {
+	failAuth := server.NewServer(k.Runtime, k.Agent, healthProtocol{}).WithSecurity(&server.Service{
+		Authenticator: testAuthenticator(func(_ context.Context, attempt server.Attempt) (server.Principal, error) {
 			if string(attempt.Credential.Bytes()) == "bad" {
-				return tacklrsecurity.Principal{}, errors.New("nope")
+				return server.Principal{}, errors.New("nope")
 			}
-			return tacklrsecurity.NewPrincipal(string(attempt.Credential.Bytes()))
+			return server.NewPrincipal(string(attempt.Credential.Bytes()))
 		}),
-	}, func(r *http.Request) (tacklrsecurity.Attempt, bool) {
+	}, func(r *http.Request) (server.Attempt, bool) {
 		if token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "); token != r.Header.Get("Authorization") {
-			return tacklrsecurity.Attempt{Scheme: "bearer", Credential: tacklrsecurity.NewSecret([]byte(token))}, true
+			return server.Attempt{Scheme: "bearer", Credential: server.NewSecret([]byte(token))}, true
 		}
-		return tacklrsecurity.Attempt{}, false
+		return server.Attempt{}, false
 	})
 	failAuth.HTTPMux().ServeHTTP(denied, badReq)
 	if denied.Code != http.StatusUnauthorized {
 		t.Fatalf("failed authenticate status = %d", denied.Code)
 	}
 
-	acp := server.NewServer(k.Runtime, k.Agent, acp.New(nil)).WithSecurity(service, func(*http.Request) (tacklrsecurity.Attempt, bool) {
-		return tacklrsecurity.Attempt{}, false
+	acp := server.NewServer(k.Runtime, k.Agent, acp.New(nil)).WithSecurity(service, func(*http.Request) (server.Attempt, bool) {
+		return server.Attempt{}, false
 	})
 	open := httptest.NewRecorder()
 	acp.HTTPMux().ServeHTTP(open, httptest.NewRequest(http.MethodGet, "/acp", nil))

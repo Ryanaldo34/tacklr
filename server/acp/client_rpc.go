@@ -7,9 +7,8 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/server"
-
-	"github.com/ryanaldo34/tacklr/interrupt"
 )
 
 // ClientCapabilities captures client features from initialize.
@@ -130,7 +129,7 @@ func (b *ClientBridge) NoteHello(params json.RawMessage) {
 func (b *ClientBridge) FormSupported() bool { return b.GetCaps().ElicitationForm }
 
 // Permission asks the peer to allow or deny one tool call.
-func (b *ClientBridge) Permission(ctx context.Context, sessionID, messageID string, perm interrupt.ToolPermissionInterrupt) ([]byte, bool, error) {
+func (b *ClientBridge) Permission(ctx context.Context, sessionID, messageID string, perm tacklr.ToolPermissionInterrupt) ([]byte, bool, error) {
 	raw, err := b.Call(ctx, "session/request_permission", PermissionToACPParams(sessionID, messageID, perm))
 	if err != nil {
 		return nil, false, fmt.Errorf("session/request_permission: %w", err)
@@ -139,7 +138,7 @@ func (b *ClientBridge) Permission(ctx context.Context, sessionID, messageID stri
 }
 
 // Elicit asks the peer to answer one selection.
-func (b *ClientBridge) Elicit(ctx context.Context, sessionID, messageID, question string, opts []interrupt.UserChoice) (string, []byte, error) {
+func (b *ClientBridge) Elicit(ctx context.Context, sessionID, messageID, question string, opts []tacklr.UserChoice) (string, []byte, error) {
 	raw, err := b.Call(ctx, "elicitation/create", SelectionToElicitationParams(sessionID, messageID, question, opts))
 	if err != nil {
 		return "", nil, fmt.Errorf("elicitation/create: %w", err)

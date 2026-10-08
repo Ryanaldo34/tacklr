@@ -3,13 +3,12 @@ package tacklr
 import (
 	"context"
 
-	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/vfs"
 	"github.com/ryanaldo34/tacklr/vfs/adapters"
 )
 
 func init() {
-	interrupt.RegisterDefaults()
+	RegisterDefaults()
 	_ = adapters.RegisterCommon(vfs.DefaultContentRegistry())
 }
 

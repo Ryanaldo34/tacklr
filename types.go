@@ -3,11 +3,9 @@ package tacklr
 import (
 	"context"
 	"errors"
-
-	"github.com/ryanaldo34/tacklr/interrupt"
 )
 
-// Shared errors, inference contract, and interrupt re-exports for harness hosts.
+// Shared errors and the inference contract for harness hosts.
 // Message, StreamEvent, Todo, and related conversation types live in this package.
 
 // Coarse categories for errors.Is. Wrap a specific message at the call site
@@ -187,32 +185,7 @@ type SpecialistResult struct {
 	WaitFor string
 }
 
-// Interrupt types re-exported for tool authors.
-type (
-	Interrupt               = interrupt.Interrupt
-	PayloadValidator        = interrupt.PayloadValidator
-	UserChoice              = interrupt.UserChoice
-	UserSelectionInterrupt  = interrupt.UserSelectionInterrupt
-	ToolPermissionInterrupt = interrupt.ToolPermissionInterrupt
-	PermissionOption        = interrupt.PermissionOption
-	AuthExpired             = interrupt.AuthExpired
-)
-
-var (
-	ErrInterruptNotFound     = interrupt.ErrInterruptNotFound
-	ErrInvalidPayload        = interrupt.ErrInvalidPayload
-	DefaultPermissionOptions = interrupt.DefaultPermissionOptions
-)
-
-const (
-	PermissionAllowOnce    = interrupt.PermissionAllowOnce
-	PermissionAllowAlways  = interrupt.PermissionAllowAlways
-	PermissionRejectOnce   = interrupt.PermissionRejectOnce
-	PermissionRejectAlways = interrupt.PermissionRejectAlways
-	TypeAuthExpired        = interrupt.TypeAuthExpired
-)
-
 // RegisterInterrupt registers a custom interrupt factory for session rehydrate.
 func RegisterInterrupt(factory func() Interrupt) {
-	interrupt.Register(factory)
+	registerInterrupt(factory)
 }

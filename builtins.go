@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"slices"
 	"strings"
-
-	"github.com/ryanaldo34/tacklr/interrupt"
 )
 
 type createTodosArgs struct {
@@ -54,7 +52,7 @@ var askUserChoiceTool = NewTool(ToolConfig{
 			return "", fmt.Errorf("at least 2 choices are required")
 		}
 		seen := make(map[string]struct{}, len(args.Choices))
-		options := make([]interrupt.UserChoice, 0, len(args.Choices))
+		options := make([]UserChoice, 0, len(args.Choices))
 		for i, c := range args.Choices {
 			title := strings.TrimSpace(c.Title)
 			if title == "" {
@@ -64,15 +62,15 @@ var askUserChoiceTool = NewTool(ToolConfig{
 				return "", fmt.Errorf("duplicate choice title %q", title)
 			}
 			seen[title] = struct{}{}
-			options = append(options, interrupt.UserChoice{
+			options = append(options, UserChoice{
 				Title:         title,
 				Description:   c.Description,
 				IsRecommended: c.IsRecommended,
 			})
 		}
 		payload, err := json.Marshal(struct {
-			Question string                 `json:"question"`
-			Options  []interrupt.UserChoice `json:"options"`
+			Question string       `json:"question"`
+			Options  []UserChoice `json:"options"`
 		}{Question: args.Question, Options: options})
 		if err != nil {
 			return "", fmt.Errorf("marshal choices: %w", err)
@@ -82,7 +80,7 @@ var askUserChoiceTool = NewTool(ToolConfig{
 		if err != nil {
 			return "", err
 		}
-		usi, ok := intr.(*interrupt.UserSelectionInterrupt)
+		usi, ok := intr.(*UserSelectionInterrupt)
 		if !ok || usi.ConfirmedChoice == nil {
 			return "", fmt.Errorf("user selection missing confirmed choice")
 		}

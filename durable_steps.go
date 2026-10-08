@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ryanaldo34/tacklr/interrupt"
 	"github.com/ryanaldo34/tacklr/telemetry"
 	"github.com/ryanaldo34/tacklr/vfs"
 )
@@ -174,9 +173,9 @@ func (a *TurnManager) runToolCall(ctx context.Context, tc ToolCall, out chan Str
 		ArgsJSON: tc.Arguments,
 		Runtime:  runtimeCopy,
 	})
-	var parked interrupt.Interrupt
+	var parked Interrupt
 	if err != nil && !errors.As(err, &parked) && (errors.Is(err, ErrAuthExpired) || errors.Is(err, vfs.ErrAuthExpired)) {
-		err = a.session.Park(tcKey, &interrupt.AuthExpired{Tool: tc.Name})
+		err = a.session.Park(tcKey, &AuthExpired{Tool: tc.Name})
 	}
 	if errors.As(err, &parked) {
 		serialized, _ := parked.Serialize()
@@ -253,7 +252,7 @@ func (a *TurnManager) applyResume(finishedInterrupts map[string][]byte) error {
 	for id, payload := range finishedInterrupts {
 		tc, ok := a.pendingToolCalls[id]
 		if !ok {
-			return fmt.Errorf("no tool call id found for interrupt %s: %w", id, interrupt.ErrInterruptNotFound)
+			return fmt.Errorf("no tool call id found for interrupt %s: %w", id, ErrInterruptNotFound)
 		}
 		if _, err := a.session.Resume(id, payload); err != nil {
 			return fmt.Errorf("return from interrupt %q: %w", id, err)

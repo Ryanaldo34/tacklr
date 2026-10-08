@@ -3,8 +3,6 @@ package tacklr
 import (
 	"encoding/json"
 	"fmt"
-
-	"github.com/ryanaldo34/tacklr/interrupt"
 )
 
 type interruptEnvelope struct {
@@ -12,8 +10,8 @@ type interruptEnvelope struct {
 	Data json.RawMessage `json:"data"`
 }
 
-// interruptMap is a map[string]interrupt.Interrupt with polymorphic JSON.
-type interruptMap map[string]interrupt.Interrupt
+// interruptMap is a map[string]Interrupt with polymorphic JSON.
+type interruptMap map[string]Interrupt
 
 func (m interruptMap) MarshalJSON() ([]byte, error) {
 	if m == nil {
@@ -38,7 +36,7 @@ func (m *interruptMap) UnmarshalJSON(b []byte) error {
 	}
 	*m = make(interruptMap, len(envelopes))
 	for k, env := range envelopes {
-		intr, ok := interrupt.New(env.Type)
+		intr, ok := NewInterrupt(env.Type)
 		if !ok {
 			return fmt.Errorf("unknown interrupt type: %s", env.Type)
 		}
