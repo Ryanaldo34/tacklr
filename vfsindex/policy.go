@@ -28,8 +28,8 @@ func NormalizePolicy(raw string) string {
 	}
 }
 
-// AutoIndex reports whether AfterPersist / IndexPrefix should run for policy.
-// prefix and watch both auto-index; selective and none do not (except track set).
+// AutoIndex reports whether a host-built pipeline would treat the policy as
+// automatic. prefix and watch return true. The turn does not run that pipeline.
 func AutoIndex(policy string) bool {
 	switch NormalizePolicy(policy) {
 	case PolicyPrefix, PolicyWatch:

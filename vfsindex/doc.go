@@ -8,67 +8,58 @@
 //
 // # Model
 //
-// Each text-like virtual file becomes a brain Document (parent) with Chunk parts:
+// Each text-like virtual file becomes a brain Document (parent) with Chunk parts.
+// The row contract (ids, property types, content_hash, and replace rules) is
+// "File mirror rows" in docs/knowledge.md. In-process writers should call
+// IndexPath or DocumentID rather than insert rows themselves.
 //
-//	Document.properties.vfs_path  = virtual path
-//	Document.properties.content_hash, size, mtime, media_type
+//	Document id = UUID v5, namespace a1b2c3d4-e5f6-7890-abcd-ef1234567890,
+//	              name = Namespace.String() + 0x00 + virtual path
+//	Document.properties.vfs_path, content_hash, size, mtime, media_type
+//	Chunk id    = UUID v5 under the Document id, name "chunk:<position>"
+//	              or "block:<block id>"
 //	Chunk.properties.start_line, end_line, byte_start, byte_end
-//	Chunk.properties.block_id, heading_path  = when chunked from Structured IR
-//	Chunk.Content                 = chunk body (heading blocks for Markdown; line windows otherwise)
+//	Chunk.properties.block_id, heading_path = the block id, when structured
+//	Chunk.Content = chunk body
 //
-// Live VFS bytes remain source of truth. The index is derived and may lag until
-// re-index (IndexPath / IndexScheduler.Notify). Parent Documents keep metadata and
-// content_hash — not a second agent-editable full-file body.
+// Replacing a file puts the parent, soft-deletes the previous chunks, then
+// puts the new chunks. content_hash is lowercase hex SHA-256. The same hash
+// skips the write. Live file bytes stay the source of truth.
 //
 // # Index policy (MountSpec.IndexPolicy)
 //
-//	none       — no auto jobs; index_file errors
-//	selective  — only index_file / host IndexPath (optional track set after index_file)
-//	prefix     — IndexPrefix at bridge start + AfterPersist under the mount
-//	watch      — same auto triggers as prefix (host-facing name)
+//	none       — index_file errors
+//	selective  — index_file / host IndexPath
+//	prefix     — host may walk the mount with IndexPrefix
+//	watch      — same host hint as prefix
 //
 // Empty policy normalizes to selective (NormalizePolicy / AutoIndex helpers).
+// AutoIndex is for a pipeline the host builds. The turn does not walk mounts,
+// subscribe to remote changes, or re-index after WriteFile.
 //
 // # Single pipeline
 //
-// All file→brain content updates go through IndexPath (or UnindexPath). Triggers
-// fan in via IndexScheduler.Notify (AfterPersist), index_file, IndexPrefix, or
-// host IndexPath API. content_hash skip returns PathSkipped without re-chunking.
+// File bytes become brain chunks only through IndexPath (or UnindexPath).
+// The turn calls that from index_file and unindex. A host calls IndexPath
+// or IndexPrefix from its own system. content_hash skip returns PathSkipped
+// without re-chunking.
 //
 // # Session-visible body
 //
 // IndexPath uses MountSession.ReadText (markdown) and MountSession.Open (other
-// text). Writes are write-through, so index_file / IndexPath see the last
-// persist. AfterPersist still drives background reindex when policy allows.
+// text). Writes are write-through, so a later index_file sees the last persist.
 //
 // # Schedulers
 //
-// Hosts wire Notify after writes via vfs.MountSession.SetAfterPersist, gated by
-// policy:
+// SyncScheduler runs IndexPath inline. AsyncScheduler enqueues with coalesce
+// (last reason wins), a bounded pending set, and a background worker. Notify
+// never blocks on re-chunk. Start creates an AsyncScheduler and does not
+// call Notify.
 //
-//	br, err := vfsindex.Start(ms, eng, scope)
-//	defer br.Close()
-//	// Or wire by hand:
-//	idx, err := vfsindex.NewMountIndexer(ms, eng, scope)
-//	sched := vfsindex.NewAsyncScheduler(idx) // or NewSyncScheduler for inline
-//	prev := ms.GetAfterPersist()
-//	ms.SetAfterPersist(func(ctx context.Context, path string) error {
-//	    if prev != nil {
-//	        _ = prev(ctx, path)
-//	    }
-//	    // harness: only Notify when AutoIndex(spec) or selective track set
-//	    return sched.Notify(ctx, path, vfsindex.ReasonSync)
-//	})
-//	defer sched.Close()
-//	_ = idx.IndexPrefix(ctx, "/work", vfsindex.IndexOpts{})
-//
-// SyncScheduler runs IndexPath inline (tests / hosts that want blocking reindex).
-// AsyncScheduler enqueues with coalesce (last reason wins), bounded pending set,
-// and a background worker; Notify never blocks on re-chunk.
-//
-// The tacklr harness creates MountIndexer + AsyncScheduler and registers
-// index_file / unindex when Brain + VFS + search namespace are set.
-// It skips mounts with IndexPolicy=none.
+// A turn with a brain, a workspace, and a search namespace starts a Bridge
+// and registers index_file / unindex. Mounts with IndexPolicy=none are skipped
+// by index_file. Keeping those chunks current after the sandbox exits is the
+// host's storage pipeline, not this package.
 //
 // # Kinds
 //

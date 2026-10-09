@@ -83,8 +83,6 @@ type AgentOptions struct {
 	// UnattendedRunCommand injects run_command without ToolPermissionOnCall.
 	// Default false: run_command parks for permission.
 	UnattendedRunCommand bool
-	// shareIndexBridge is the parent index bridge. Nil means Start a new bridge.
-	shareIndexBridge *vfsindex.Bridge
 	// skipPlanningLock is set only by WithSpecialist. The parent session always
 	// gates write tools on an active plan.
 	skipPlanningLock bool
@@ -127,7 +125,6 @@ func NewTurnManager(ctx context.Context, opts AgentOptions) (*TurnManager, error
 		contextPolicy:         opts.ContextPolicy,
 		runCommandUnattended:  opts.UnattendedRunCommand,
 		writeUnattended:       opts.UnattendedWrite,
-		vfsBridge:             opts.shareIndexBridge,
 	}
 	if opts.mountSession != nil {
 		sm.VFS = opts.mountSession
@@ -257,9 +254,8 @@ func (a *TurnManager) injectBuiltinTools() {
 	a.builtinsInjected = true
 }
 
-// initVFSIndexBridge starts a new vfsindex.Bridge when Brain + VFS + namespace
-// are set. Call only when vfsBridge is nil (this harness owns the lifecycle).
-// Hosts with a non-empty kind catalog should register vfsindex.MountIndexKinds().
+// initVFSIndexBridge starts the explicit file indexer when Brain, a workspace,
+// and a search namespace are set. It does not walk the mount or re-index writes.
 func (a *TurnManager) initVFSIndexBridge() {
 	if a.brain == nil || a.session.VFS == nil {
 		return

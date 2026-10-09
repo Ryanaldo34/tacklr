@@ -256,53 +256,115 @@ the serialized Markdown is parsed and `Put`.
 
 ### Artifacts — the file stays where it is
 
-A file on `/work` or S3 is **not** an Engram. Indexing makes a *mirror* in the
+A file on a mount is not a knowledge record. Indexing makes a mirror in the
 store so `search` can find it.
 
 ```text
-/work/contract.md     ← live bytes (source of truth)
+/workspace/work/contract.md     ← live bytes (source of truth)
         │
-        ▼ IndexPath
-  Document   id = SHA1(namespace + virtual path)
-             props: vfs_path, content_hash, size, mtime
-    ├─ Chunk  lines 1–40     start_line, end_line, block_id, heading_path
-    └─ Chunk  lines 41–80
+        ▼ IndexPath  or a host pipeline that writes the same rows
+  Document   id = DocumentID(scope, path)
+             props: vfs_path, content_hash, size, mtime, media_type
+    ├─ Chunk  lines 1–40     start_line, end_line, byte_start, byte_end
+    └─ Chunk  heading block  block_id, heading_path
 ```
 
-Markdown is chunked by heading/preamble blocks when the VFS IR exposes them;
-other text uses fixed line windows (default 40 lines).
+A pipeline that can import this module should call `MountIndexer.IndexPath` or `Engine.Put`. Those calls embed the row and, for a parent, update the graph node. The tables below are the row contract for a writer that does not call them. A raw store insert that skips `Put` does not embed and does not update the graph, so `search` and `find_objects` will not see it.
+
+### File mirror rows
+
+Kinds default to `Document` (parent) and `Chunk` (part). `MountIndexKinds()` registers those names and the properties below. `MountIndexer.DocumentKind` and `ChunkKind` can rename them. A pipeline must use the same names the engine was given.
+
+`DocumentID` is the stable parent id. `Namespace.String()` joins the scope's attribute values with `.` (names are not included). The id is UUID version 5 (SHA-1) using namespace `a1b2c3d4-e5f6-7890-abcd-ef1234567890` and the name `namespaceString`, a zero byte, then the absolute virtual path:
+
+```go
+ns := uuid.MustParse("a1b2c3d4-e5f6-7890-abcd-ef1234567890")
+buf := append([]byte(scope.Namespace.String()), 0)
+buf = append(buf, []byte(virtualPath)...)
+id := uuid.NewSHA1(ns, buf)
+```
+
+In-process code should call `MountIndexer.DocumentID` instead of copying that. The same path in another namespace is a different id. `link` and `expand` resolve a workspace path by reading the parent with this id and using its `vfs_path`.
+
+Chunk ids are also UUID version 5, with the parent id as the namespace:
+
+| Chunk | Name hashed under the parent id |
+|-------|----------------------------------|
+| Line window, position `n` starting at 1 | `chunk:` plus the decimal position, for example `chunk:1` |
+| Heading or preamble block | `block:` plus the block id, for example `block:title/install` |
+
+`IndexPath` uses the block id when the file is structured. Otherwise it uses `chunk:` plus the 1-based position in the chunk list.
+
+Parent row (`Engine.Put`):
+
+| Field | Value |
+|-------|--------|
+| `id` | `DocumentID` |
+| `kind` | `Document` |
+| `title` | Base name of the virtual path (`contract.md`) |
+| `summary` | Absolute virtual path |
+| `content` | Empty. The body lives on the chunks. |
+| `content_type` | Media type (`text/markdown`, `text/plain`, …) |
+| `parent_id` | Unset |
+| `properties.vfs_path` | Absolute virtual path, string |
+| `properties.content_hash` | Hex SHA-256, lowercase, no prefix. See below. |
+| `properties.size` | Byte length as a number. `FileInfo.Size` when it is non-zero, otherwise the number of bytes read. |
+| `properties.mtime` | UTC `time.RFC3339` from `FileInfo.ModTime`. Omitted when the mod time is zero. |
+| `properties.media_type` | Same string as `content_type` |
+
+`vfs_path` is omitted from the parent's graph search text (`EntityIndexText`). The other scalar properties are included.
+
+Chunk row (`Engine.Put`), one per window or block, in order:
+
+| Field | Value |
+|-------|--------|
+| `id` | Chunk id from the table above |
+| `kind` | `Chunk` |
+| `parent_id` | The Document id |
+| `position` | 1-based index in this write (`1`, `2`, …). This is list order, not the start line. |
+| `content` | Chunk text. This is what `search` matches. |
+| `title` | Line window: `contract.md:1-40`. Heading block: `contract.md#` plus the block id. |
+| `properties.start_line`, `end_line` | 1-based inclusive line numbers, stored as numbers |
+| `properties.byte_start`, `byte_end` | Byte offsets of a line window, stored as numbers. Heading chunks are written as `0`. |
+| `properties.block_id`, `heading_path` | Set only for a structured block. Both strings are the block id (`title/install`, `preamble`). Absent on a line window. |
+
+Heading chunk `content` is three lines joined by `\n`: the file base name, the heading text (or the block id when that text is empty), and the block's line span. A projected document, such as a Google Doc export, uses the block text as that third line instead of the line span. Line-window `content` is the window's lines joined by `\n`, without a trailing newline. The default window is 40 lines (`DefaultLinesPerChunk`). A file larger than 64 MiB (`DefaultMaxIndexBytes`) is cut at that size, and a cut Markdown file uses line windows instead of heading blocks.
+
+`content_hash` is what the next index compares. The same hash skips the write (`PathSkipped`).
+
+| How the bytes were read | Hash input |
+|-------------------------|------------|
+| `ReadText` succeeded | Hex SHA-256 of that text. An IR document hashes its stored payload, which is the text `ReadText` returns. |
+| Otherwise `Open` | Hex SHA-256 of the bytes read from the file, including newlines as they appear in the stream. |
+
+A pipeline that does not use those readers should store the hex SHA-256 of the text it chunked. A later `IndexPath` rewrites the rows when that string differs from the token it computes.
+
+Replace, do not append. `IndexPath` puts the parent (same id, so existing graph edges stay), soft-deletes every current child, then puts the new chunks. Inserting one new chunk and leaving the old ones makes `search` return both. A missing file soft-deletes the children and then the parent (`PathRemoved`). A binary or empty file is left unchanged (`PathSkipped`); clearing it from search is a separate soft-delete.
 
 ```mermaid
 flowchart TD
-    A[index_file tool] --> IP[IndexPath]
-    B[IndexPrefix at session start] --> IP
-    C[AfterPersist on write] --> IP
-    IP --> Skip{brain profile<br/>or same content_hash<br/>or binary / empty?}
+    A[index_file] --> IP[IndexPath]
+    B[host IndexPath or IndexPrefix] --> IP
+    IP --> Skip{same content_hash or binary or empty?}
     Skip -->|yes| Out[PathSkipped]
     Skip -->|no| Doc[Put Document parent]
-    Doc --> Chunks[Put Chunk parts]
-    Chunks --> Emb[embed IndexText prefixed with parent title]
+    Doc --> Drop[SoftDelete previous Chunks]
+    Drop --> Chunks[Put Chunk parts]
+    Chunks --> Emb[Put embeds the chunk]
 ```
 
-The parent Document holds metadata and a content hash — not a second
-agent-editable full-file body. After search, the agent opens the **live** path
-with `read` using `vfs_path` + `start_line` / `block_id`.
+The parent holds metadata and `content_hash`, not a second copy of the file. After search, the agent opens the live path with `read` using `vfs_path` plus `start_line` or `block_id`.
 
-**Index policies** (set on the mount; empty means `selective` when the index
-bridge is on):
+**Index policies** (set on the mount; empty means `selective`):
 
 | Policy | When indexing runs |
 |--------|--------------------|
-| `none` | Never automatically; `index_file` **errors**. Brain mounts get this. |
-| `selective` | Only `index_file` / a host `IndexPath` call. After a successful `index_file`, later writes reindex that path. |
-| `prefix` | Walk the mount at bridge start, then reindex on persist. |
-| `watch` | Same triggers as `prefix` (host-facing name). |
+| `none` | `index_file` returns an error. |
+| `selective` | `index_file` or a host `IndexPath`. A later write does not re-index the file. |
+| `prefix` | Hint for a host pipeline that walks the mount. The turn does not. |
+| `watch` | Same hint as `prefix`. The turn does not subscribe to the remote system. |
 
-Same `content_hash` → skip (no re-chunk). Missing file → soft-delete the mirror
-(`PathRemoved`). `unindex` removes the mirror without touching the VFS file.
-
-Brain-profile mounts are never walked. Engram writes go through the Provider,
-not `IndexPath`.
+Knowledge records are not this schema. The host registers their kinds. `save_fact` and the other save tools call `Engine.Put` with the title required and the host's properties. A parent that has no chunks does not appear in `search`; `find_objects` reads the parent on the graph. A pipeline for those records follows the host `KindSpec` and `Engine.Put`, not `Document` / `Chunk`.
 
 ---
 
@@ -642,8 +704,9 @@ if err := eng.LoadKindsFromStore(ctx); err != nil { /* ... */ }
 //   SearchNamespace: from brain.ParseNamespace("org", orgID)
 //   OpenVFS:         workspace files only. Knowledge is not a mount.
 //
-// Harness then starts vfsindex.Bridge when a workspace and a brain are both set,
-// and injects file tools plus knowledge tools.
+// A turn with Brain, a workspace, and SearchNamespace registers index_file
+// and unindex. It does not re-index writes or subscribe to Drive or bucket
+// events. The host's own pipeline keeps brain rows current.
 ```
 
 Optional knobs: `WithReranker` (reorders up to `CandidateK` parents before the page cut),

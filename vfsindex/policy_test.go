@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/google/uuid"
 
@@ -12,8 +11,8 @@ import (
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
-// TestBridge_policyAndTrack: Start warms prefix members, composes AfterPersist,
-// and Track makes a selective path searchable after write.
+// TestBridge_policyAndTrack: policy strings normalize, a none mount skips
+// IndexPath, and Track is only a selective-path record. Writes are not indexed.
 func TestBridge_policyAndTrack(t *testing.T) {
 	ctx := context.Background()
 	ms, err := vfs.Tree(
@@ -83,22 +82,13 @@ func TestBridge_policyAndTrack(t *testing.T) {
 		t.Fatal("tracked path")
 	}
 
-	if err := ms.Route(ctx, "/workspace/scratch/strict.txt").
-		WriteFile(ctx, []byte("strict-watch-phrase\n")); err != nil {
-		t.Fatal(err)
-	}
-	waitIndexed(t, eng, scope, "strict-watch-phrase")
-
 	if err := ms.Route(ctx, "/workspace/auto/live.txt").
 		WriteFile(ctx, []byte("live-auto-phrase\n")); err != nil {
 		t.Fatal(err)
 	}
-
 	if len(composed) == 0 {
-		t.Fatal("expected composed AfterPersist")
+		t.Fatal("host AfterPersist did not run")
 	}
-	waitIndexed(t, eng, scope, "live-auto-phrase")
-	waitIndexed(t, eng, scope, "warmup-phrase-xyz")
 
 	if err := ms.Route(ctx, "/workspace/off/secret.txt").
 		WriteFile(ctx, []byte("off-secret-token\n")); err != nil {
@@ -110,13 +100,6 @@ func TestBridge_policyAndTrack(t *testing.T) {
 		t.Fatalf("none IndexPath: res=%q err=%v", res, err)
 	}
 
-	if err := ms.Route(ctx, "/workspace/work/a.txt").
-		WriteFile(ctx, []byte("tracked-selective-phrase\n")); err != nil {
-		t.Fatal(err)
-	}
-
-	waitIndexed(t, eng, scope, "tracked-selective-phrase")
-
 	br.Untrack("/workspace/work/a.txt")
 	if br.ShouldIndex("/workspace/work/a.txt") {
 		t.Fatal("after untrack")
@@ -127,23 +110,6 @@ func TestBridge_policyAndTrack(t *testing.T) {
 	if err := br.Close(); err != nil {
 		t.Fatal(err)
 	}
-}
-
-func waitIndexed(t *testing.T, eng *brain.Engine, scope brain.Scope, query string) {
-	t.Helper()
-	ctx := context.Background()
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		page, err := eng.Search(ctx, scope, brain.SearchRequest{Query: query}, brain.NewSearchContext())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(page.Objects) > 0 {
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatalf("search %q: no hit", query)
 }
 
 func mustNS(t testing.TB, nv ...string) brain.Namespace {
@@ -160,7 +126,7 @@ func TestAsyncScheduler_reportsQueueAndClosedOutcomes(t *testing.T) {
 	var events []SchedulerEvent
 	scheduler := &AsyncScheduler{
 		QueueCap: 1,
-		pending:  map[string]struct{}{"/queued": {}},
+		pending:  map[string]IndexReason{"/queued": ReasonSync},
 		wake:     make(chan struct{}, 1),
 	}
 	scheduler.SetObserver(func(event SchedulerEvent) {

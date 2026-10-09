@@ -13,10 +13,9 @@ type MountSpec struct {
 	Profile  string            `json:"profile"`
 	ReadOnly bool              `json:"readOnly,omitempty"`
 	Params   map[string]string `json:"params,omitempty"`
-	// IndexPolicy controls when the optional vfsindex pipeline runs for paths
-	// under this mount: none | selective | prefix | watch. Empty means selective
-	// when the harness bridge is enabled. vfs stores the string only; interpretation
-	// lives in vfsindex/harness.
+	// IndexPolicy is a host hint for an external indexer: none | selective | prefix | watch.
+	// Empty means selective. vfs stores the string only. The turn does not
+	// subscribe to the mount or re-index files after writes.
 	IndexPolicy string `json:"indexPolicy,omitempty"`
 }
 

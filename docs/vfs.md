@@ -416,9 +416,9 @@ There are no `.links` directories. A workspace path must be indexed (`index_file
 | Policy | Pipeline triggers |
 |--------|-------------------|
 | `none` | No auto jobs; `index_file` **errors** |
-| `selective` | Only `index_file` / host IndexPath; after a successful `index_file`, AfterPersist reindexes that path (track set) |
-| `prefix` | IndexPrefix at bridge start + AfterPersist under the mount |
-| `watch` | Same auto triggers as `prefix` |
+| `selective` | `index_file` or a host `IndexPath` |
+| `prefix` | Host may call `IndexPrefix`. The turn does not walk or re-index writes |
+| `watch` | Same as `prefix`. The turn does not subscribe to the provider |
 
 Empty → **selective**.
 
@@ -426,8 +426,8 @@ Empty → **selective**.
 
 ```text
   index_file ──┐
-  IndexPrefix ─┼──► IndexPath ──► brain Document+Chunks (hash skip)
-  AfterPersist ┘
+  host IndexPath ┼──► IndexPath ──► brain Document+Chunks (hash skip)
+  IndexPrefix ──┘
 ```
 
 A mount with `IndexPolicy=none` is not indexed. Knowledge records are not files, so they are not indexed here.
@@ -461,10 +461,14 @@ ms.SetAfterPersist(func(ctx context.Context, path string) error {
 defer sched.Close()
 ```
 
-### Agent tools (default on when prerequisites hold)
+### Agent tools
 
-When the harness has **Brain + MountSession + search namespace**, it owns a
-`MountIndexer` + `AsyncScheduler`, composes policy-gated `AfterPersist`, and registers:
+A turn with a brain, a workspace, and a search namespace registers `index_file`
+and `unindex`. Those tools write the brain when the agent calls them. The turn
+does not re-index a file because it was written, and it does not listen for
+provider events. A host pipeline that already updates the brain should keep
+doing that. Omit Brain to leave knowledge tools off. Omit the workspace or
+the namespace to leave `index_file` off.
 
 | Tool | Role |
 |------|------|
@@ -475,14 +479,13 @@ When the harness has **Brain + MountSession + search namespace**, it owns a
 | `save_*` | Write the Engram file on the brain Provider (or `Engine.Put` if no brain mount) |
 | `link` / `expand` / `find_links` | Path-native graph (G1): prefer virtual paths; surface neighbor `vfs_path` |
 
-Omit Brain, VFS, or namespace to opt out (no tools, no harness indexer, no async hook).
+Omit the workspace or the search namespace to leave `index_file` off. Omit Brain to leave knowledge tools off.
 
 ### Session-visible body vs AfterPersist
 
 `IndexPath` uses `MountSession.ReadText` / `Open`. Writes are write-through, so
-`index_file` after `write` indexes the last persist. `AfterPersist` (fired by
-`WriteFile` / `WriteDocument`) drives background reindex when policy (or selective
-track) allows. Write success is never blocked by reindex failures.
+`index_file` after `write` indexes the last persist. A write by itself does not
+update the brain.
 
 Markdown files are chunked by **heading/preamble blocks** (`block_id` and `heading_path` properties) when `Blocks()` is non-empty; other text still uses line windows.
 

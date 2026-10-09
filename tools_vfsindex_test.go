@@ -90,7 +90,7 @@ func TestVFSIndexTools_indexSearchUnindex(t *testing.T) {
 	indexTool := h.findTool("index_file", "")
 	unindexTool := h.findTool("unindex", "")
 	if indexTool == nil || unindexTool == nil {
-		t.Fatal("index_file and unindex required when Brain+VFS+ns")
+		t.Fatal("index_file and unindex required when Brain, VFS, and namespace are set")
 	}
 
 	body := "alpha line\nbeta TODO findme-xyz\ngamma\n"
@@ -179,8 +179,9 @@ func TestVFSIndexTools_indexSearchUnindex(t *testing.T) {
 	}
 }
 
-// TestVFSIndexTools_selectiveIndexSearchReadAndTrack: index_file → search vfs_path
-// → read live text; WriteFile after track reindexes the new phrase.
+// TestVFSIndexTools_selectiveIndexSearchReadAndTrack: index_file makes the
+// file searchable. A later write is visible through read. The turn does not
+// re-index that write.
 func TestVFSIndexTools_selectiveIndexSearchReadAndTrack(t *testing.T) {
 	h, ms, eng, ns := vfsIndexHarness(t, true)
 	activatePlan(t, h)
@@ -236,35 +237,10 @@ func TestVFSIndexTools_selectiveIndexSearchReadAndTrack(t *testing.T) {
 		WriteFile(ctx, []byte("unique-phrase-selective-bbb\n")); err != nil {
 		t.Fatal(err)
 	}
-
-	_ = waitSearchHit(t, eng, scope, "unique-phrase-selective-bbb", 3*time.Second)
-}
-
-// TestVFSIndexTools_prefixAutoIndex: prefix policy indexes on persist without index_file.
-func TestVFSIndexTools_prefixAutoIndex(t *testing.T) {
-	ctx := context.Background()
-	ms := mustMountTree(t, "policy-prefix", vfs.At("work", vfs.Local(t.TempDir())).Indexed("  Prefix  "))
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly())
-	if err != nil {
-		t.Fatal(err)
+	readOut, err = readTool.invoke(ctx, `{"path":"/workspace/work/sel.txt","start":1,"end":10}`, turnRuntime(h))
+	if err != nil || !strings.Contains(readOut.output, "unique-phrase-selective-bbb") {
+		t.Fatalf("read after write: %v %s", err, readOut.output)
 	}
-	if err := eng.ApplyKinds(ctx, vfsindex.MountIndexKinds()...); err != nil {
-		t.Fatal(err)
-	}
-	ns := mustNS(t, "id", uuid.NewString())
-	h := mustNewTurnManager(t, AgentOptions{
-		sessionID:    "policy-prefix",
-		mountSession: ms, Model: &scriptedModel{},
-		Brain: eng, SearchNamespace: ns,
-	})
-	t.Cleanup(h.Close)
-
-	if err := ms.Route(ctx, "/workspace/work/auto.txt").
-		WriteFile(ctx, []byte("prefix-auto-phrase-xyz\n")); err != nil {
-		t.Fatal(err)
-	}
-
-	_ = waitSearchHit(t, eng, brain.Scope{Namespace: ns}, "prefix-auto-phrase-xyz", 3*time.Second)
 }
 
 // TestKnowledgeSaveSearchRead: save_* writes a brain record. Update-by-object_id

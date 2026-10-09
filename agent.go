@@ -52,9 +52,8 @@ type TurnManager struct {
 	brainWriteKinds      brain.WriteKinds
 	runCommandUnattended bool
 	writeUnattended      bool
-	// vfsBridge is the mount→brain index lifecycle (not the agent turn loop).
-	// Workers receive the parent pointer at construct; ownsVFSBridge is set
-	// only when this harness called vfsindex.Start.
+	// vfsBridge indexes files only when index_file or unindex is called.
+	// ownsVFSBridge is set when this turn started it.
 	vfsBridge        *vfsindex.Bridge
 	ownsVFSBridge    bool
 	mcpCleanup       func()
@@ -530,10 +529,9 @@ func (a *TurnManager) initMCP(ctx context.Context) {
 	})
 }
 
-// Close dumps session state then releases turn resources (MCP, owned vfsindex).
-// Shared worker bridges are not closed. MountSession is closed by the turn
-// owner (session.Runtime activity preamble), not here — workers inherit the same tree.
-// Call after the Run events channel is drained, or when construct/runHarness fails.
+// Close releases turn resources (MCP and the indexer this turn started).
+// The MountSession is closed by the session runtime. Call after the Run
+// events channel is drained, or when construct fails.
 func (a *TurnManager) Close() {
 	if a.mcpCleanup != nil {
 		a.mcpCleanup()

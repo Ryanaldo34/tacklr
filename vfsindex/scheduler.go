@@ -73,7 +73,7 @@ type AsyncScheduler struct {
 	Timeout  time.Duration // per-path IndexPath timeout; default DefaultAsyncTimeout
 
 	mu       sync.Mutex
-	pending  map[string]struct{}
+	pending  map[string]IndexReason
 	closed   bool
 	observer func(SchedulerEvent)
 	wake     chan struct{}
@@ -101,7 +101,7 @@ func NewAsyncScheduler(idx *MountIndexer) *AsyncScheduler {
 		Indexer:  idx,
 		QueueCap: DefaultAsyncQueueCap,
 		Timeout:  DefaultAsyncTimeout,
-		pending:  make(map[string]struct{}),
+		pending:  make(map[string]IndexReason),
 		wake:     make(chan struct{}, 1),
 		cancel:   cancel,
 	}
@@ -123,7 +123,8 @@ func (s *AsyncScheduler) Notify(ctx context.Context, virtualPath string, reason 
 		return ErrSchedulerClosed
 	}
 	if _, ok := s.pending[virtualPath]; ok {
-		// Already coalesced; worker will process without another wake.
+		// Already coalesced; the latest reason is what the worker logs.
+		s.pending[virtualPath] = reason
 		s.mu.Unlock()
 		return nil
 	}
@@ -137,7 +138,7 @@ func (s *AsyncScheduler) Notify(ctx context.Context, virtualPath string, reason 
 		s.report(SchedulerEvent{Path: virtualPath, Reason: reason, Err: ErrQueueFull})
 		return ErrQueueFull
 	}
-	s.pending[virtualPath] = struct{}{}
+	s.pending[virtualPath] = reason
 	s.mu.Unlock()
 	select {
 	case s.wake <- struct{}{}:
@@ -175,35 +176,36 @@ func (s *AsyncScheduler) loop(ctx context.Context) {
 			return
 		case <-s.wake:
 			for {
-				path, ok := s.takeOne()
+				path, reason, ok := s.takeOne()
 				if !ok {
 					break
 				}
 				if ctx.Err() != nil {
 					return
 				}
-				s.runIndex(ctx, path)
+				s.runIndex(ctx, path, reason)
 			}
 		}
 	}
 }
 
-func (s *AsyncScheduler) takeOne() (string, bool) {
+func (s *AsyncScheduler) takeOne() (string, IndexReason, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if len(s.pending) == 0 {
-		return "", false
+		return "", 0, false
 	}
 	// Map iteration order is random; any one path is fine (coalesced).
 	var p string
 	for p = range s.pending {
 		break
 	}
+	reason := s.pending[p]
 	delete(s.pending, p)
-	return p, true
+	return p, reason, true
 }
 
-func (s *AsyncScheduler) runIndex(parent context.Context, path string) {
+func (s *AsyncScheduler) runIndex(parent context.Context, path string, reason IndexReason) {
 	timeout := s.Timeout
 	if timeout <= 0 {
 		timeout = DefaultAsyncTimeout
@@ -211,7 +213,7 @@ func (s *AsyncScheduler) runIndex(parent context.Context, path string) {
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	if err := s.Indexer.IndexPath(ctx, path); err != nil {
-		s.report(SchedulerEvent{Path: path, Err: err})
+		s.report(SchedulerEvent{Path: path, Reason: reason, Err: err})
 	}
 }
 

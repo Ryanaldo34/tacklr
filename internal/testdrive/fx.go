@@ -52,12 +52,13 @@ type FX struct {
 
 // New returns an empty fixture.
 func New() *FX {
-	return &FX{
+	d := &FX{
 		Nodes:     make(map[string]*Node),
 		onceMedia: make(map[string]int),
 		docs:      make(map[string]*docState),
 		books:     vfs.NewMemorySheets(),
 	}
+	return d
 }
 
 // Tree is the shared Drive fixture used by mount tests.

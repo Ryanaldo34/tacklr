@@ -39,7 +39,7 @@ The **agent file catalog** is collapsed. Discovery (`find_files`, `find_content`
 |-------|--------|------|
 | `MountSession` | Injector (`OpenTurnVFS`, or embedder) | Fresh `/workspace` tree each turn from `OpenVFS` + bind tokens |
 | FUSE | Runtime via `vfs.Projection.Attach` | Attach after construct; skip if `HostDir() != ""` |
-| TurnManager | Turn | `NewTurnManager` with `MountSession` set; `Close` parks MCP/vfsindex — **does not** unmount FUSE (workers inherit) |
+| TurnManager | Turn | `NewTurnManager` with `MountSession` set; `Close` parks MCP and the turn indexer — **does not** unmount FUSE |
 | IR | Provider | `WriteDocument` / `WriteFile` persist now. There is no session dirty cache (`vfs/cache.go` is gone). `ReadText` is provider plaintext. |
 | Tests and in-process hosts | nil `Projection` | `MountSession` is the tree; `run_command` still needs `HostDir` |
 

@@ -261,7 +261,7 @@ Built-in tools that need a client use the same pattern. You construct them and p
 | `MountSession` | `read`, `write`, `write_document`, `write_spreadsheet`, `run_command` |
 | `SkillsPath` | `read_skill` |
 | `Brain` | knowledge tools (`search`, `save_*`, …) |
-| index bridge (from Brain + VFS) | `index_file`, `unindex` |
+| Brain + workspace + search namespace | `index_file`, `unindex` |
 
 Put optional tools on `AgentOptions.Tools`. Swap the fake the same way: `Tools: []*tacklr.Tool{email.ReadInbox(fakeMail)}`, `Brain: testEngine`, a temp `MountSession`. Details: [docs/tools.md](docs/tools.md).
 

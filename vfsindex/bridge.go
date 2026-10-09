@@ -2,7 +2,6 @@ package vfsindex
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"sync"
 
@@ -10,21 +9,21 @@ import (
 	"github.com/ryanaldo34/tacklr/vfs"
 )
 
-// Bridge owns mount→brain index lifecycle: indexer, async reindex, selective
-// track set, prefix/watch warm-up. Harness holds this; it is not the agent loop.
+// Bridge is the explicit file indexer for one mount session: IndexPath and
+// the selective track set. It does not watch the mount, walk it at start,
+// or re-index after a write. A host that keeps the brain current does that
+// in its own system.
 type Bridge struct {
 	Indexer *MountIndexer
 
-	sched  *AsyncScheduler
-	ms     *vfs.MountSession
-	track  map[string]struct{}
-	mu     sync.Mutex
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	sched *AsyncScheduler
+	ms    *vfs.MountSession
+	track map[string]struct{}
+	mu    sync.Mutex
 }
 
-// Start builds an indexer, wires AfterPersist (composing any existing hook),
-// and warms prefix/watch members under /workspace.
+// Start builds an indexer and an idle async scheduler. It does not register
+// AfterPersist and it does not read the mount.
 func Start(ms *vfs.MountSession, eng *brain.Engine, scope brain.Scope) (*Bridge, error) {
 	idx, err := NewMountIndexer(ms, eng, scope)
 	if err != nil {
@@ -43,32 +42,6 @@ func Start(ms *vfs.MountSession, eng *brain.Engine, scope brain.Scope) (*Bridge,
 			"error", event.Err,
 		)
 	})
-	prev := ms.GetAfterPersist()
-	ms.SetAfterPersist(func(ctx context.Context, path string) error {
-		if prev != nil {
-			if err := prev(ctx, path); err != nil {
-				return err
-			}
-		}
-		if !b.ShouldIndex(path) {
-			return nil
-		}
-		// Queue failures are reported through Observer. The backend write
-		// has already committed and is not rolled back.
-		_ = b.sched.Notify(ctx, path, ReasonSync)
-		return nil
-	})
-	warmCtx, cancel := context.WithCancel(context.Background())
-	b.cancel = cancel
-	for _, point := range autoIndexPoints(ms.Specs()) {
-		b.wg.Add(1)
-		go func() {
-			defer b.wg.Done()
-			if _, err := idx.IndexPrefix(warmCtx, point, IndexOpts{}); err != nil && !errors.Is(err, context.Canceled) {
-				b.sched.report(SchedulerEvent{Path: point, Reason: ReasonSync, Err: err})
-			}
-		}()
-	}
 	return b, nil
 }
 
@@ -80,22 +53,14 @@ func (b *Bridge) SetObserver(observer func(SchedulerEvent)) {
 	b.sched.SetObserver(observer)
 }
 
-// Close stops warm-up and the async scheduler.
+// Close stops the async scheduler.
 func (b *Bridge) Close() error {
-	if b == nil {
+	if b == nil || b.sched == nil {
 		return nil
 	}
-	if b.cancel != nil {
-		b.cancel()
-		b.cancel = nil
-	}
-	b.wg.Wait()
-	if b.sched != nil {
-		err := b.sched.Close()
-		b.sched = nil
-		return err
-	}
-	return nil
+	err := b.sched.Close()
+	b.sched = nil
+	return err
 }
 
 // PolicyAt is the normalized IndexPolicy for a virtual path (selective if unknown).
@@ -107,7 +72,8 @@ func (b *Bridge) PolicyAt(virtualPath string) string {
 	return NormalizePolicy(spec.IndexPolicy)
 }
 
-// ShouldIndex reports whether AfterPersist should enqueue path.
+// ShouldIndex reports whether a host pipeline should enqueue path.
+// The turn does not call this after writes.
 func (b *Bridge) ShouldIndex(virtualPath string) bool {
 	spec, err := b.ms.SpecAt(virtualPath)
 	if err != nil {
@@ -130,7 +96,7 @@ func (b *Bridge) tracked(virtualPath string) bool {
 	return ok
 }
 
-// Track records a selective path so later persists reindex it.
+// Track records a selective path. The turn does not re-index it on write.
 func (b *Bridge) Track(virtualPath string) {
 	if virtualPath == "" {
 		return
@@ -145,14 +111,4 @@ func (b *Bridge) Untrack(virtualPath string) {
 	b.mu.Lock()
 	delete(b.track, virtualPath)
 	b.mu.Unlock()
-}
-
-func autoIndexPoints(specs []vfs.MountSpec) []string {
-	var points []string
-	for _, spec := range specs {
-		if AutoIndex(spec.IndexPolicy) {
-			points = append(points, spec.Point)
-		}
-	}
-	return points
 }
