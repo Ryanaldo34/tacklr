@@ -133,7 +133,6 @@ func (l Loader) loadLocal(ctx context.Context) ([]Skill, error) {
 }
 
 func readSkill(ctx context.Context, ms *vfs.MountSession, skillPath, label string) (Skill, error) {
-
 	data, err := ms.Route(ctx, skillPath).
 		ReadFile(ctx)
 	if err != nil {

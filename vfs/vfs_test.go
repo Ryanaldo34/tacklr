@@ -242,7 +242,6 @@ func TestMountSession_writeLimits(t *testing.T) {
 		t.Fatal("Classify unmounted")
 	}
 	for _, p := range []string{"", "rel", "/has\x00x"} {
-
 		if _, err := ms.Route(ctx, p).
 			Stat(ctx); !errors.Is(err, vfs.ErrInvalidPath) {
 			t.Fatalf("Stat %q: %v", p, err)
@@ -272,7 +271,6 @@ func TestMountSession_writeLimits(t *testing.T) {
 			Remove(ctx); !errors.Is(err, vfs.ErrInvalidPath) {
 			t.Fatalf("Remove %q: %v", p, err)
 		}
-
 	}
 
 	if err := ms.Route(ctx, "/nomount/dir").
@@ -284,7 +282,6 @@ func TestMountSession_writeLimits(t *testing.T) {
 		Remove(ctx); !errors.Is(err, vfs.ErrNotMounted) {
 		t.Fatalf("Remove unmounted: %v", err)
 	}
-
 }
 
 // TestDocument_session: IR persist, revalidation, codec rejects, RO.
@@ -341,7 +338,6 @@ func TestDocument_session(t *testing.T) {
 	start := 1
 	pages := 0
 	for {
-
 		w, err := ms.Route(ctx, "/workspace/work/big.txt").
 			ReadLines(ctx, start, start+20)
 		if err != nil {
@@ -631,7 +627,6 @@ func TestDocument_session(t *testing.T) {
 		ReadText(ctx); err != nil {
 		t.Fatal(err)
 	}
-
 }
 
 // TestTextDocument_lines is pure IR: index, edit, join (no mount).

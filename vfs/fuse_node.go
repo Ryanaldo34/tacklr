@@ -335,7 +335,6 @@ func openFuseFile(ctx context.Context, sess *MountSession, virtualPath string, s
 }
 
 func fusePlaintext(ctx context.Context, sess *MountSession, virtualPath string) (string, error) {
-
 	t, err := sess.Route(ctx, virtualPath).ReadText(ctx)
 	if err != nil {
 		return "", err

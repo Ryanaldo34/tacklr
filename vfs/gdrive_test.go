@@ -158,7 +158,6 @@ func TestMountSession_gdriveReadOnlySession(t *testing.T) {
 		Stat(ctx); !errors.Is(err, vfs.ErrAuthExpired) {
 		t.Fatalf("expired: %v", err)
 	}
-
 }
 
 func TestDrive_requiresClient(t *testing.T) {
@@ -460,7 +459,6 @@ func TestDrive_exportTooLarge(t *testing.T) {
 		ReadText(ctx); !errors.Is(err, vfs.ErrTooLarge) {
 		t.Fatalf("oversize: %v", err)
 	}
-
 }
 
 func bytesRepeat(n int) []byte {
@@ -542,7 +540,6 @@ func TestDrive_writablePlaintextAndTrash(t *testing.T) {
 		ReadText(ctx); !errors.Is(err, vfs.ErrNotExist) {
 		t.Fatalf("trashed doc ReadText: %v", err)
 	}
-
 }
 
 func TestDrive_docsWriteCAS(t *testing.T) {
@@ -1390,7 +1387,6 @@ func TestDrive_sheetCheckoutTooLarge(t *testing.T) {
 		ReadText(ctx); !errors.Is(err, vfs.ErrTooLarge) {
 		t.Fatalf("checkout cap: %v", err)
 	}
-
 }
 
 func strPtr(s string) *string { return &s }

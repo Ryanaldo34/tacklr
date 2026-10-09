@@ -211,7 +211,6 @@ func (ms *MountSession) applySubstring(ctx context.Context, p string, mut Mutati
 	if strings.TrimSpace(mut.Rev) != "" {
 		doc, err = ms.checkout(ctx, p, mut.Rev)
 	} else {
-
 		doc, err = ms.Route(ctx, p).ReadText(ctx)
 	}
 	if err != nil {

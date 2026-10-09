@@ -36,7 +36,6 @@ func TestTree_hostMembersUnderWorkspace(t *testing.T) {
 		WriteFile(ctx, []byte("new")); err != nil {
 		t.Fatal(err)
 	}
-
 }
 
 func TestTree_duplicateAtIsAmbiguous(t *testing.T) {
@@ -85,7 +84,6 @@ func TestTree_readOnlyHostMember(t *testing.T) {
 		WriteFile(ctx, []byte("no")); !errors.Is(err, vfs.ErrReadOnly) {
 		t.Fatalf("write ro: %v", err)
 	}
-
 }
 
 func TestTree_driveHTTPInjected(t *testing.T) {
@@ -119,7 +117,6 @@ func TestTree_driveHTTPInjected(t *testing.T) {
 		WriteFile(ctx, []byte("x")); !errors.Is(err, vfs.ErrReadOnly) {
 		t.Fatalf("default bind is read-only: %v", err)
 	}
-
 }
 
 func TestTree_driveWritableBind(t *testing.T) {
@@ -139,7 +136,6 @@ func TestTree_driveWritableBind(t *testing.T) {
 		WriteFile(ctx, []byte("ok")); err != nil {
 		t.Fatal(err)
 	}
-
 }
 
 func TestTree_unionSkills(t *testing.T) {

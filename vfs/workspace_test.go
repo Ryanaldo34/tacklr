@@ -50,7 +50,6 @@ func TestWorkspace_namedUnionListsAndReadsAliases(t *testing.T) {
 		Remove(ctx); !errors.Is(err, vfs.ErrInvalidPath) {
 		t.Fatalf("remove alias: %v", err)
 	}
-
 }
 
 func TestWorkspace_duplicateAliasIsAmbiguous(t *testing.T) {
@@ -135,5 +134,4 @@ func TestWorkspace_writableMemberAndReadOnlyMember(t *testing.T) {
 		OpenDocument(ctx, nil); err != nil && !errors.Is(err, vfs.ErrNotSupported) {
 		t.Fatalf("opendoc local = %v", err)
 	}
-
 }

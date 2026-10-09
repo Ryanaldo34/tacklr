@@ -526,7 +526,6 @@ func TestGraph_readWriteMkdirTrashRefreshAndErrors(t *testing.T) {
 		WriteFile(ctx, []byte("nope")); !errors.Is(err, vfs.ErrReadOnly) {
 		t.Fatalf("ro put: %v", err)
 	}
-
 }
 
 func TestGraph_xlsxCodecCellOverlayPersists(t *testing.T) {

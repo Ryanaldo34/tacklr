@@ -129,7 +129,6 @@ Fails if the path is missing, the range is invalid, or block_id is unknown.`,
 }
 
 func (v vfsTools) readStructured(ctx context.Context, p string, args readArgs) (string, error) {
-
 	doc, err := v.ms.Route(ctx, p).
 		ReadText(ctx)
 	if err != nil {
@@ -458,7 +457,6 @@ func (v vfsTools) applyWrite(ctx context.Context, tool, p string, mut vfs.Mutati
 
 // requireWriteFamily allows create (path missing). An existing file must match tool.
 func (v vfsTools) requireWriteFamily(ctx context.Context, p, tool string) (exists bool, err error) {
-
 	fi, err := v.ms.Route(ctx, p).
 		Stat(ctx)
 	if errors.Is(err, vfs.ErrNotExist) {

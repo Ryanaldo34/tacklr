@@ -127,7 +127,6 @@ func TestMountSession_unionMergesBackends(t *testing.T) {
 		MkdirAll(ctx); !errors.Is(err, vfs.ErrReadOnly) {
 		t.Fatalf("MkdirAll = %v", err)
 	}
-
 }
 
 func TestMountSession_unionNameCollisionAtMount(t *testing.T) {
@@ -156,7 +155,6 @@ func TestMountSession_unionNameCollisionAfterMount(t *testing.T) {
 		Stat(t.Context()); !errors.Is(err, vfs.ErrAmbiguous) {
 		t.Fatalf("Stat = %v", err)
 	}
-
 }
 
 func TestUnion_constructErrors(t *testing.T) {
@@ -275,7 +273,6 @@ func TestMountSession_workAndSkills(t *testing.T) {
 		WriteFile(ctx, []byte("ok")); err != nil {
 		t.Fatal(err)
 	}
-
 }
 
 func TestUnion_providerRejectsWritesAndInvalidPaths(t *testing.T) {
