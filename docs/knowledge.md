@@ -100,7 +100,7 @@ Almost every design mistake in this area comes from treating these as the same t
          │ or memory  │ or MemoryGraph│
          │            │              │
          │ full rows  │ parent nodes │
-         │ BM25+vector│ + edges      │
+         │ text+vector│ + edges      │
          │ children   │ (no chunks)  │
          └────────────┴──────────────┘
 ```
@@ -379,7 +379,7 @@ flowchart TB
     subgraph Store["Store — Postgres or MemoryStore"]
         Rows[Full object rows]
         Parts[parent_id containment]
-        BM25[Lexical / BM25]
+        Lex[Lexical / full-text]
         Vec[Dense vectors]
         Tri[Trigram]
         Soft[Soft-delete + namespace]
@@ -492,7 +492,7 @@ sequenceDiagram
 
     T->>E: query + filters + optional scope_ids
     E->>E: validate filters against kind catalog
-    E->>S: lexical / BM25, k candidates
+    E->>S: lexical search, k candidates
     alt embedder configured
         E->>Emb: embed query
         E->>S: vector search, k candidates
@@ -659,7 +659,7 @@ The host registered kinds `Deal` and `Person` and wired Postgres + Helix.
 4. `link from=/workspace/work/nda.md to_id=<deal> relation_type=about` fails until step 3, because an unindexed file has no object id.
 5. `find_objects "acme renewal"` hits the Deal node and hydrates the Postgres row.
 6. `expand object_id=<deal> relation_types=["has_contact"]` returns the Person.
-7. `search "indemnity"` with `scope_ids` of those parents runs BM25 + vector on chunks and attaches evidence.
+7. `search "indemnity"` with `scope_ids` of those parents runs lexical + vector on chunks and attaches evidence.
 8. The agent calls `read` on the NDA path from that evidence. The live file is not the chunk snapshot.
 
 ---
@@ -679,12 +679,20 @@ eng, err := brain.NewEngine(store, brain.WithKinds(
 // The harness closes `eng` into those tool handlers (same pattern as host tools).
 ```
 
-Production-shaped. `postgres.Store.Setup` creates extensions, tables, and
+Production-shaped. `postgres.Store.Setup` creates the `tacklr` schema, extensions, tables, and
 indexes, then upserts the kinds you pass. Set `EmbeddingDim` to match the
 embedder (zero means 1536). Setup does not change an existing vector column.
+`Store.Schema` overrides the schema name. `postgres.PoolConfig` sets `search_path`
+to that schema, then `public`. Connect on port 5432 (direct or session mode).
+Port 6543 is a transaction-mode pooler and is rejected.
+
+Lexical search reads the stored `search_tsv` column on `objects`: title weight A, summary weight B, body weight C. A partial GIN index covers live parts. Rank is `ts_rank_cd` with normalization 32. The first query is `websearch_to_tsquery` (every term). A page shorter than requested runs a second query that ORs those terms. Vector search uses HNSW. Namespace containment, child listing, and parent-by-kind each have one index. Property filters, trigram similarity, and created/updated ranges do not: those predicates are applied on top of the index the query already uses. Session messages stay on their unique keys. `pg_trgm` and `pgvector` are always created.
+
 Helix is an optional graph. Inject both; `brain` does not import either package.
 
 ```go
+cfg, err := postgres.PoolConfig(os.Getenv("DATABASE_URL"), "") // schema "tacklr"; port 5432
+pool, err := pgxpool.NewWithConfig(ctx, cfg)
 store, err := postgres.New(pool)
 store.EmbeddingDim = 1536
 kinds := append([]brain.KindSpec{dealSpec, personSpec}, vfsindex.MountIndexKinds()...)

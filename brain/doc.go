@@ -53,7 +53,7 @@
 // # Store vs graph
 //
 // The Store is the source of truth and the document corpus: full rows,
-// parts/chunks, BM25 + dense hybrid search, property filters, soft-delete,
+// parts/chunks, lexical + dense hybrid search, property filters, soft-delete,
 // containment (parent_id). Search and FindExact query parts (title, summary,
 // content) and promote hits to the parent. Tools: search, find_exact, read;
 // expand children. search may pass ScopeIDs to limit hits to a neighborhood.

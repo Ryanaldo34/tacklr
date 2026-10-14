@@ -9,7 +9,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// Search is corpus retrieval: hybrid BM25 + optional vector over store parts,
+// Search is corpus retrieval: hybrid lexical + optional vector over store parts,
 // RRF, temporal decay, parent promotion, then a ResultSet page.
 // Query text matches part title, summary, and content. Structured fields on
 // the parent belong in FindObjects filters (or here only if the part row

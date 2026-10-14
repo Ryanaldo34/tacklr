@@ -81,16 +81,20 @@ func (s *Store) sessionLexical(ctx context.Context, scope brain.Scope, query str
 	if err != nil {
 		return nil, err
 	}
-	q := `
+	args := []any{query, strings.TrimSpace(scope.SessionID), raw, k}
+	return s.searchFTS(ctx, sessionLexicalSQL(true), sessionLexicalSQL(false), args, k)
+}
+
+func sessionLexicalSQL(matchAll bool) string {
+	return fmt.Sprintf(`
 		SELECT id, role, search_text, id, position, updated_at,
-		       search_text <@> to_bm25query($1, 'idx_session_messages_bm25') AS score
+		       ts_rank_cd(search_tsv, tacklr_web_terms($1, %t), %d) AS score
 		FROM session_messages
-		WHERE namespace = $2::jsonb
-		  AND tacklr_any_term($1) IS NOT NULL
-		  AND to_tsvector('english', search_text) @@ tacklr_any_term($1)
-		ORDER BY search_text <@> to_bm25query($1, 'idx_session_messages_bm25')
-		LIMIT $3`
-	return s.queryScored(ctx, q, []any{query, raw, k}, true)
+		WHERE session_id = $2 AND namespace = $3::jsonb
+		  AND tacklr_web_terms($1, %t) IS NOT NULL
+		  AND search_tsv @@ tacklr_web_terms($1, %t)
+		ORDER BY score DESC
+		LIMIT $4`, matchAll, ftsRankNorm, matchAll, matchAll)
 }
 
 func (s *Store) sessionVector(ctx context.Context, scope brain.Scope, embedding []float32, k int) ([]brain.ScoredID, error) {
@@ -105,10 +109,10 @@ func (s *Store) sessionVector(ctx context.Context, scope brain.Scope, embedding 
 		SELECT id, role, search_text, id, position, updated_at,
 		       1 - (embedding <=> $1::vector) AS score
 		FROM session_messages
-		WHERE namespace = $2::jsonb AND embedding IS NOT NULL
+		WHERE session_id = $2 AND namespace = $3::jsonb AND embedding IS NOT NULL
 		ORDER BY embedding <=> $1::vector
-		LIMIT $3`
-	return s.queryScored(ctx, q, []any{formatVectorLiteral(embedding), raw, k}, false)
+		LIMIT $4`
+	return s.queryScored(ctx, q, []any{formatVectorLiteral(embedding), strings.TrimSpace(scope.SessionID), raw, k})
 }
 
 func (s *Store) sessionTrigram(ctx context.Context, scope brain.Scope, query string, k int) ([]brain.ScoredID, error) {
@@ -123,7 +127,7 @@ func (s *Store) sessionTrigram(ctx context.Context, scope brain.Scope, query str
 		SELECT id, role, search_text, id, position, updated_at,
 		       GREATEST(similarity(role, $1), word_similarity($1, search_text)) AS score
 		FROM session_messages
-		WHERE namespace = $2::jsonb
+		WHERE session_id = $2 AND namespace = $3::jsonb
 		  AND (
 		    strpos(lower(role), lower($1)) > 0
 		    OR strpos(lower(search_text), lower($1)) > 0
@@ -131,8 +135,8 @@ func (s *Store) sessionTrigram(ctx context.Context, scope brain.Scope, query str
 		    OR word_similarity($1, search_text) > 0.3
 		  )
 		ORDER BY score DESC
-		LIMIT $3`
-	return s.queryScored(ctx, q, []any{query, raw, k}, false)
+		LIMIT $4`
+	return s.queryScored(ctx, q, []any{query, strings.TrimSpace(scope.SessionID), raw, k})
 }
 
 func (s *Store) readSessionMessage(ctx context.Context, sessionID string, id uuid.UUID) (brain.Object, error) {

@@ -1,10 +1,12 @@
 package postgres
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -33,10 +35,17 @@ var (
 
 // Store is the optional Postgres brain.Store. Hosts inject it into NewEngine.
 // Call Setup once per database. Setup does not migrate an existing vector column.
+//
+// Schema is the Postgres schema for objects, object_kinds, and session_messages.
+// Empty means DefaultSchema. Build the pool with PoolConfig so each connection
+// starts with SearchPath. Use a direct connection or a session-mode pooler
+// (port 5432). Port 6543 is a transaction-mode pooler and breaks pgx prepared statements.
 type Store struct {
 	// EmbeddingDim is the pgvector size Setup uses. Zero means DefaultEmbeddingDim.
 	EmbeddingDim int
-	db           PgxDB
+	// Schema is the Postgres schema for tacklr tables. Empty means DefaultSchema.
+	Schema string
+	db     PgxDB
 }
 
 // New wraps a pgx pool or connection. Query/Exec emit otelpgx
@@ -420,8 +429,9 @@ func (s *Store) scanObject(row scannable) (brain.Object, error) {
 	return o, nil
 }
 
-// SearchLexical implements PartSearcher using pg_textsearch BM25 over parts
-// (parent_id set). search_text is title, summary, and content.
+// SearchLexical implements PartSearcher over parts (parent_id set).
+// Score is ts_rank_cd on search_tsv (title A, summary B, body C).
+// websearch_to_tsquery runs first (every term). A short page then ORs those terms.
 func (s *Store) SearchLexical(ctx context.Context, scope brain.Scope, query string, filters brain.Filter, k int) ([]brain.ScoredID, error) {
 	if k <= 0 || strings.TrimSpace(query) == "" {
 		return nil, nil
@@ -433,21 +443,63 @@ func (s *Store) SearchLexical(ctx context.Context, scope brain.Scope, query stri
 	args := append([]any{query}, fargs...)
 	limitPos := len(args) + 1
 	args = append(args, k)
-	q := fmt.Sprintf(`
-		SELECT id, title, content, parent_id, position, updated_at,
-		       search_text <@> to_bm25query($1, 'idx_objects_bm25') AS score
-		FROM objects
-		WHERE deleted_at IS NULL AND parent_id IS NOT NULL
-		  AND tacklr_any_term($1) IS NOT NULL
-		  AND to_tsvector('english', search_text) @@ tacklr_any_term($1)%s
-		ORDER BY search_text <@> to_bm25query($1, 'idx_objects_bm25')
-		LIMIT $%d`, where, limitPos)
-	hits, err := s.queryScored(ctx, q, args, true)
+	hits, err := s.searchFTS(ctx, objectsLexicalSQL(where, limitPos, true), objectsLexicalSQL(where, limitPos, false), args, k)
 	if err != nil || strings.TrimSpace(scope.SessionID) == "" {
 		return hits, err
 	}
 	extra, err := s.sessionLexical(ctx, scope, query, k)
 	return mergeRanked(hits, extra, err)
+}
+
+func objectsLexicalSQL(where string, limitPos int, matchAll bool) string {
+	return fmt.Sprintf(`
+		SELECT id, title, content, parent_id, position, updated_at,
+		       ts_rank_cd(search_tsv, tacklr_web_terms($1, %t), %d) AS score
+		FROM objects
+		WHERE deleted_at IS NULL AND parent_id IS NOT NULL
+		  AND tacklr_web_terms($1, %t) IS NOT NULL
+		  AND search_tsv @@ tacklr_web_terms($1, %t)%s
+		ORDER BY score DESC
+		LIMIT $%d`, matchAll, ftsRankNorm, matchAll, matchAll, where, limitPos)
+}
+
+// searchFTS runs the every-term query, then the any-term query when that page is shorter than k.
+func (s *Store) searchFTS(ctx context.Context, matchAll, matchAny string, args []any, k int) ([]brain.ScoredID, error) {
+	hits, err := s.queryScored(ctx, matchAll, args)
+	if err != nil || len(hits) >= k {
+		return hits, err
+	}
+	extra, err := s.queryScored(ctx, matchAny, args)
+	if err != nil {
+		return nil, err
+	}
+	return mergeLex(hits, extra, k), nil
+}
+
+func mergeLex(primary, extra []brain.ScoredID, k int) []brain.ScoredID {
+	if len(extra) == 0 {
+		return primary
+	}
+	seen := make(map[uuid.UUID]struct{}, len(primary)+len(extra))
+	out := make([]brain.ScoredID, 0, len(primary)+len(extra))
+	for _, hit := range primary {
+		seen[hit.ID] = struct{}{}
+		out = append(out, hit)
+	}
+	for _, hit := range extra {
+		if _, ok := seen[hit.ID]; ok {
+			continue
+		}
+		seen[hit.ID] = struct{}{}
+		out = append(out, hit)
+	}
+	slices.SortStableFunc(out, func(a, b brain.ScoredID) int {
+		return cmp.Compare(b.Score, a.Score)
+	})
+	if k > 0 && len(out) > k {
+		out = out[:k]
+	}
+	return out
 }
 
 // SearchVector implements PartSearcher using pgvector cosine distance over parts.
@@ -470,7 +522,7 @@ func (s *Store) SearchVector(ctx context.Context, scope brain.Scope, embedding [
 		  AND embedding IS NOT NULL%s
 		ORDER BY embedding <=> $1::vector
 		LIMIT $%d`, where, limitPos)
-	hits, err := s.queryScored(ctx, q, args, false)
+	hits, err := s.queryScored(ctx, q, args)
 	if err != nil {
 		return nil, err
 	}
@@ -509,7 +561,7 @@ func (s *Store) SearchTrigram(ctx context.Context, scope brain.Scope, query stri
 		  )%s
 		ORDER BY score DESC
 		LIMIT $%d`, where, limitPos)
-	hits, err := s.queryScored(ctx, q, args, false)
+	hits, err := s.queryScored(ctx, q, args)
 	if err != nil || strings.TrimSpace(scope.SessionID) == "" {
 		return hits, err
 	}
@@ -517,7 +569,7 @@ func (s *Store) SearchTrigram(ctx context.Context, scope brain.Scope, query stri
 	return mergeRanked(hits, extra, err)
 }
 
-func (s *Store) queryScored(ctx context.Context, q string, args []any, invertBM25 bool) ([]brain.ScoredID, error) {
+func (s *Store) queryScored(ctx context.Context, q string, args []any) ([]brain.ScoredID, error) {
 	rows, err := s.db.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: search query: %w", err)
@@ -536,9 +588,6 @@ func (s *Store) queryScored(ctx context.Context, q string, args []any, invertBM2
 		)
 		if err := rows.Scan(&id, &title, &content, &parentID, &position, &updated, &score); err != nil {
 			return nil, fmt.Errorf("postgres: search scan: %w", err)
-		}
-		if invertBM25 {
-			score = -score
 		}
 		item := brain.ScoredID{ID: id, Score: score, UpdatedAt: updated, ParentID: parentID}
 		if title != nil {

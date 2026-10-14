@@ -109,7 +109,11 @@ func main() {
 		WithApiKey(os.Getenv("OPENAI_API_KEY")).
 		WithModel(os.Getenv("OPENAI_MODEL"))
 
-	pool, err := pgxpool.New(ctx, os.Getenv("DATABASE_URL"))
+	cfg, err := postgres.PoolConfig(os.Getenv("DATABASE_URL"), "")
+	if err != nil {
+		log.Fatal(err)
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		log.Fatal(err)
 	}

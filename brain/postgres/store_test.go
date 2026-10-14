@@ -3,6 +3,7 @@ package postgres_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -21,6 +22,43 @@ import (
 func TestNew_requiresDB(t *testing.T) {
 	if _, err := postgres.New(nil); err == nil {
 		t.Fatal("want error")
+	}
+}
+
+func TestPoolConfig_sessionPoolerSetsSearchPath(t *testing.T) {
+	cfg, err := postgres.PoolConfig("postgres://u:p@db.example.com:5432/postgres", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ConnConfig.Port != 5432 {
+		t.Fatalf("port = %d", cfg.ConnConfig.Port)
+	}
+	if got := cfg.ConnConfig.RuntimeParams["search_path"]; got != "tacklr, public" {
+		t.Fatalf("search_path = %q", got)
+	}
+	cfg, err = postgres.PoolConfig("postgres://u:p@db.example.com:5432/postgres", "brain_app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.ConnConfig.RuntimeParams["search_path"]; got != "brain_app, public" {
+		t.Fatalf("search_path = %q", got)
+	}
+}
+
+func TestPoolConfig_rejectsTransactionPoolerAndBadSchema(t *testing.T) {
+	if _, err := postgres.PoolConfig("postgres://u:p@db.example.com:6543/postgres", ""); err == nil || !strings.Contains(err.Error(), "6543") {
+		t.Fatalf("transaction pooler: %v", err)
+	}
+	if _, err := postgres.PoolConfig("postgres://u:p@db.example.com:5432/postgres", "public;drop"); err == nil {
+		t.Fatal("want invalid schema")
+	}
+	store, err := postgres.New(failDB{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.Schema = "nope-schema"
+	if err := store.Setup(context.Background()); err == nil {
+		t.Fatal("want setup schema error")
 	}
 }
 
@@ -77,6 +115,9 @@ func TestStore_clientAndQueryFailures(t *testing.T) {
 	}
 	if _, err := store.SearchLexical(ctx, scope, "q", brain.Filter{UpdatedAfter: "not-a-time"}, 5); err == nil {
 		t.Fatal("want invalid filter")
+	}
+	if _, err := store.SearchLexical(ctx, scope, "q", brain.Filter{}, 5); err == nil {
+		t.Fatal("want lexical lookup error")
 	}
 	if _, err := store.SearchVector(ctx, scope, []float32{1}, brain.Filter{UpdatedAfter: "not-a-time"}, 5); err == nil {
 		t.Fatal("want invalid vector filter")
@@ -236,7 +277,6 @@ func TestPostgresStore_liveRetrievalChannels(t *testing.T) {
 	if lex[0].ParentID == nil || *lex[0].ParentID != parentID {
 		t.Fatalf("lexical parent: %+v", lex[0])
 	}
-	// Score invert: pg_textsearch returns negative; store flips so higher is better.
 	if lex[0].Score <= 0 {
 		t.Fatalf("lexical score after invert should be > 0: %+v", lex[0])
 	}
@@ -374,7 +414,13 @@ func sharedPostgresPool(t *testing.T) *pgxpool.Pool {
 			_ = ctr.Terminate(ctx)
 			return
 		}
-		pool, err := pgxpool.New(ctx, connStr)
+		cfg, err := postgres.PoolConfig(connStr, "")
+		if err != nil {
+			pgStart = err
+			_ = ctr.Terminate(ctx)
+			return
+		}
+		pool, err := pgxpool.NewWithConfig(ctx, cfg)
 		if err != nil {
 			pgStart = err
 			_ = ctr.Terminate(ctx)
@@ -396,15 +442,21 @@ func sharedPostgresPool(t *testing.T) *pgxpool.Pool {
 		}
 		var n int
 		if err := pool.QueryRow(ctx, `
-			SELECT count(*) FROM pg_extension WHERE extname IN ('vector', 'pg_trgm', 'pg_textsearch')
-		`).Scan(&n); err != nil || n != 3 {
-			pgStart = errors.New("expected vector, pg_trgm, and pg_textsearch extensions")
+			SELECT count(*) FROM pg_extension WHERE extname IN ('vector', 'pg_trgm')
+		`).Scan(&n); err != nil || n != 2 {
+			pgStart = errors.New("expected vector and pg_trgm extensions")
 			pool.Close()
 			_ = ctr.Terminate(ctx)
 			return
 		}
-		if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_indexes WHERE indexname = 'idx_objects_bm25'`).Scan(&n); err != nil || n != 1 {
-			pgStart = errors.New("bm25 index idx_objects_bm25 missing")
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_indexes WHERE schemaname = 'tacklr' AND indexname IN ('idx_objects_fts', 'idx_objects_embedding_hnsw')`).Scan(&n); err != nil || n != 2 {
+			pgStart = errors.New("fts or hnsw index missing")
+			pool.Close()
+			_ = ctr.Terminate(ctx)
+			return
+		}
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'objects'`).Scan(&n); err != nil || n != 0 {
+			pgStart = errors.New("objects table must not sit in public")
 			pool.Close()
 			_ = ctr.Terminate(ctx)
 			return
@@ -826,5 +878,80 @@ func TestPostgresStore_setupRegistersKinds(t *testing.T) {
 	got, err := store.GetKind(ctx, "Deal")
 	if err != nil || got.Description != "sales" || !got.IsParent {
 		t.Fatalf("kind: %+v err=%v", got, err)
+	}
+}
+
+// TestPostgresStore_lexicalRanksTitleAboveBody: a title hit outranks a body hit,
+// a partial term match fills the page, and a stopword matches nothing.
+func TestPostgresStore_lexicalRanksTitleAboveBody(t *testing.T) {
+	ctx := context.Background()
+	pool := sharedPostgresPool(t)
+	mustExec(t, pool, `TRUNCATE objects, object_kinds, session_messages`)
+	store, err := postgres.New(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ns := mustNS(t, "org", "fts")
+	parent := uuid.New()
+	titleHit := uuid.New()
+	bodyHit := uuid.New()
+	bothHit := uuid.New()
+	onlyA := uuid.New()
+	onlyB := uuid.New()
+	now := time.Now().UTC()
+	mustExec(t, pool, `
+		INSERT INTO objects (id, kind, title, summary, content, parent_id, position, namespace, created_at, updated_at)
+		VALUES
+			($1, 'Document', 'Guide', '', NULL, NULL, NULL, $2, $3, $3),
+			($4, 'Chunk', $5, '', 'shipping notes', $1, 1, $2, $3, $3),
+			($6, 'Chunk', 'weekly', '', 'zymurgy', $1, 2, $2, $3, $3),
+			($7, 'Chunk', 'alphaonlyterm betaonlyterm', '', 'paired', $1, 3, $2, $3, $3),
+			($8, 'Chunk', 'notes', '', 'alphaonlyterm', $1, 4, $2, $3, $3),
+			($9, 'Chunk', 'notes', '', 'betaonlyterm', $1, 5, $2, $3, $3)
+	`, parent, ns, now, titleHit, "zymurgy "+strings.Repeat("filler ", 100), bodyHit, bothHit, onlyA, onlyB)
+
+	scope := brain.Scope{Namespace: ns}
+	top, err := store.SearchLexical(ctx, scope, "zymurgy", brain.Filter{}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(top) != 1 || top[0].ID != titleHit || top[0].Score <= 0 {
+		t.Fatalf("title page: %+v", top)
+	}
+	ranked, err := store.SearchLexical(ctx, scope, "zymurgy", brain.Filter{}, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ranked) < 2 || ranked[0].ID != titleHit || ranked[0].Score <= ranked[1].Score {
+		t.Fatalf("title should outrank body: %+v", ranked)
+	}
+	filled, err := store.SearchLexical(ctx, scope, "alphaonlyterm betaonlyterm", brain.Filter{}, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(filled) != 3 || filled[0].ID != bothHit {
+		t.Fatalf("any-term fill: %+v", filled)
+	}
+	if got, err := store.SearchLexical(ctx, scope, "the", brain.Filter{}, 5); err != nil || got != nil {
+		t.Fatalf("stopword: %+v err=%v", got, err)
+	}
+	if _, err := store.SaveSessionMessages(ctx, ns, "sess/1", "g1", []brain.SessionMessage{{
+		Role: "user", Body: []byte(`{"role":"user","content":"quillwort"}`), SearchText: "quillwort grows in the margin",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	msgScope := brain.Scope{Namespace: ns, SessionID: "sess/1"}
+	msgs, err := store.SearchLexical(ctx, msgScope, "quillwort", brain.Filter{}, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saw bool
+	for _, hit := range msgs {
+		if strings.Contains(hit.Content, "quillwort") {
+			saw = true
+		}
+	}
+	if !saw {
+		t.Fatalf("session message: %+v", msgs)
 	}
 }
