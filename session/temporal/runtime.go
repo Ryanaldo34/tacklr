@@ -195,11 +195,13 @@ func (r *Runtime) isClosed(id session.SessionID) bool {
 	return ok
 }
 
-func (r *Runtime) signal(ctx context.Context, id session.SessionID, name string, arg any) error {
-	if name != signalClose && r.isClosed(id) {
+// wake sends one session.Wake. All wakes share signalWake so the workflow
+// sees them in the order they were sent.
+func (r *Runtime) wake(ctx context.Context, id session.SessionID, wake session.Wake) error {
+	if wake.Kind != session.WakeClose && r.isClosed(id) {
 		return session.ErrSessionNotFound
 	}
-	if err := r.client.SignalWorkflow(ctx, string(id), "", name, arg); err != nil {
+	if err := r.client.SignalWorkflow(ctx, string(id), "", signalWake, wake); err != nil {
 		return session.ErrSessionNotFound
 	}
 	return nil
@@ -213,13 +215,13 @@ func (r *Runtime) Prompt(ctx context.Context, sessionID session.SessionID, msg s
 	if err := r.secrets.Put(ctx, sessionID, session.Secrets{Auth: msg.Auth}); err != nil {
 		return err
 	}
-	return r.signal(ctx, sessionID, signalPrompt, session.PromptIn{
+	return r.wake(ctx, sessionID, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{
 		Text:        msg.Text,
 		UserMessage: msg.UserMessage,
 		MCPServers:  mcp.DurableConfigs(msg.MCPServers),
 		Auth:        msg.Auth.WithoutSecrets(),
 		State:       encoded,
-	})
+	}})
 }
 
 func (r *Runtime) Resume(ctx context.Context, sessionID session.SessionID, resume session.Resume) error {
@@ -230,24 +232,24 @@ func (r *Runtime) Resume(ctx context.Context, sessionID session.SessionID, resum
 	if err := r.secrets.Put(ctx, sessionID, session.Secrets{Auth: resume.Auth}); err != nil {
 		return err
 	}
-	return r.signal(ctx, sessionID, signalResume, session.ResumeIn{
+	return r.wake(ctx, sessionID, session.Wake{Kind: session.WakeResume, Resume: session.ResumeIn{
 		Responses: resume.Responses,
 		Auth:      resume.Auth.WithoutSecrets(),
 		State:     encoded,
-	})
+	}})
 }
 
 // Cancel implements session.Runtime.
 func (r *Runtime) Cancel(ctx context.Context, sessionID session.SessionID) error {
 	cancelLiveTurn(sessionID)
-	return r.signal(ctx, sessionID, signalCancel, nil)
+	return r.wake(ctx, sessionID, session.Wake{Kind: session.WakeCancel})
 }
 
 // Close implements session.Runtime.
 func (r *Runtime) Close(ctx context.Context, sessionID session.SessionID) error {
 	kids, _ := r.Children(ctx, sessionID)
 	r.markClosed(sessionID)
-	_ = r.signal(ctx, sessionID, signalClose, nil)
+	_ = r.wake(ctx, sessionID, session.Wake{Kind: session.WakeClose})
 	for _, k := range kids {
 		session.DeleteSessionMessages(ctx, r.agent, k)
 		_ = r.secrets.Delete(ctx, k)

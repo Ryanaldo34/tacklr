@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"slices"
 	"time"
 
 	"go.temporal.io/sdk/contrib/workflowstreams"
@@ -25,10 +26,7 @@ func SessionWorkflow(ctx workflow.Context, in workflowInput) (string, error) {
 	}
 
 	var spawned []childRun
-	promptCh := workflow.GetSignalChannel(ctx, signalPrompt)
-	resumeCh := workflow.GetSignalChannel(ctx, signalResume)
-	cancelCh := workflow.GetSignalChannel(ctx, signalCancel)
-	closeCh := workflow.GetSignalChannel(ctx, signalClose)
+	wakeCh := workflow.GetSignalChannel(ctx, signalWake)
 	childWaitCh := workflow.GetSignalChannel(ctx, signalChildWaiting)
 
 	sess := &session.Session{
@@ -49,10 +47,7 @@ func SessionWorkflow(ctx workflow.Context, in workflowInput) (string, error) {
 		in:          in,
 		turn:        &sess.Turn,
 		opts:        activityOptions(in),
-		promptCh:    promptCh,
-		resumeCh:    resumeCh,
-		cancelCh:    cancelCh,
-		closeCh:     closeCh,
+		wakeCh:      wakeCh,
 		childWaitCh: childWaitCh,
 		spawned:     &spawned,
 	}
@@ -102,6 +97,10 @@ func activityOptions(in workflowInput) workflow.ActivityOptions {
 
 // wfExec is the Temporal driver for one session. It implements session.Step,
 // session.Mailbox, and session.Ledger.
+//
+// Every wake arrives on wakeCh and moves into queue in arrival order. Readers
+// take from the front of queue, so a cancel sent before a prompt or resume is
+// always handled before it.
 type wfExec struct {
 	ctx         workflow.Context
 	sessionCtx  workflow.Context
@@ -111,11 +110,9 @@ type wfExec struct {
 	in          workflowInput
 	turn        *session.Turn
 	opts        workflow.ActivityOptions
-	promptCh    workflow.ReceiveChannel
-	resumeCh    workflow.ReceiveChannel
-	cancelCh    workflow.ReceiveChannel
-	closeCh     workflow.ReceiveChannel
+	wakeCh      workflow.ReceiveChannel
 	childWaitCh workflow.ReceiveChannel
+	queue       []session.Wake
 	spawned     *[]childRun
 }
 
@@ -202,24 +199,28 @@ func (w *wfExec) waitActivity(activity any, in, out any) error {
 	defer cancelAct()
 	fut := workflow.ExecuteActivity(cctx, activity, in)
 	var err error
-	sel := workflow.NewSelector(w.ctx)
-	sel.AddFuture(fut, func(f workflow.Future) { err = f.Get(w.ctx, out) })
-	sel.AddReceive(w.cancelCh, func(c workflow.ReceiveChannel, more bool) {
-		c.Receive(w.ctx, nil)
-		cancelAct()
-		err = fut.Get(w.ctx, out)
-	})
-	sel.AddReceive(cctx.Done(), func(c workflow.ReceiveChannel, more bool) {
-		c.Receive(w.ctx, nil)
-		cancelAct()
-		err = fut.Get(w.ctx, out)
-	})
-	sel.Select(w.ctx)
-	for w.cancelCh.ReceiveAsync(nil) {
+	done := false
+	w.fill()
+	cancelled := w.takeCancel()
+	for !done && !cancelled {
+		sel := workflow.NewSelector(w.ctx)
+		sel.AddFuture(fut, func(f workflow.Future) {
+			err = f.Get(w.ctx, out)
+			done = true
+		})
+		sel.AddReceive(w.wakeCh, func(c workflow.ReceiveChannel, more bool) {
+			w.receive(c)
+			cancelled = w.takeCancel()
+		})
+		sel.AddReceive(cctx.Done(), func(c workflow.ReceiveChannel, more bool) {
+			c.Receive(w.ctx, nil)
+			cancelled = true
+		})
+		sel.Select(w.ctx)
 	}
-	if turnCanceled(w.ctx, err) {
-		for w.promptCh.ReceiveAsync(nil) {
-		}
+	if !done {
+		cancelAct()
+		err = fut.Get(w.ctx, out)
 	}
 	if err == nil || turnCanceled(w.ctx, err) {
 		if err != nil {
@@ -230,12 +231,14 @@ func (w *wfExec) waitActivity(activity any, in, out any) error {
 	return errors.New(failureText(err))
 }
 
+// Prompts returns the prompts at the front of the queue. A prompt queued after
+// a cancel or another wake stays queued until that wake is handled.
 func (w *wfExec) Prompts() []session.PromptIn {
+	w.fill()
 	var out []session.PromptIn
-	var p session.PromptIn
-	for w.promptCh.ReceiveAsync(&p) {
-		out = append(out, p)
-		p = session.PromptIn{}
+	for len(w.queue) > 0 && w.queue[0].Kind == session.WakePrompt {
+		out = append(out, w.queue[0].Prompt)
+		w.queue = w.queue[1:]
 	}
 	return out
 }
@@ -279,67 +282,61 @@ func (w *wfExec) Ready() []*tacklr.Message {
 	}
 }
 
+// Recv returns the oldest queued wake, blocking until one arrives.
 func (w *wfExec) Recv() session.Wake {
 	ctx := w.ctx
 	for {
-		var out session.Wake
+		w.fill()
+		if len(w.queue) > 0 {
+			wake := w.queue[0]
+			w.queue = w.queue[1:]
+			return wake
+		}
 		sel := workflow.NewSelector(ctx)
-		sel.AddReceive(w.promptCh, func(c workflow.ReceiveChannel, more bool) {
-			c.Receive(ctx, &out.Prompt)
-			out.Kind = session.WakePrompt
-		})
-		sel.AddReceive(w.resumeCh, func(c workflow.ReceiveChannel, more bool) {
-			c.Receive(ctx, &out.Resume)
-			out.Kind = session.WakeResume
-		})
-		sel.AddReceive(w.cancelCh, func(c workflow.ReceiveChannel, more bool) {
-			c.Receive(ctx, nil)
-			for w.promptCh.ReceiveAsync(nil) {
-			}
-			out.Kind = session.WakeCancel
-		})
-		sel.AddReceive(w.closeCh, func(c workflow.ReceiveChannel, more bool) {
-			c.Receive(ctx, nil)
-			out.Kind = session.WakeClose
-		})
+		sel.AddReceive(w.wakeCh, func(c workflow.ReceiveChannel, more bool) { w.receive(c) })
 		sel.AddReceive(w.childWaitCh, func(c workflow.ReceiveChannel, more bool) {
 			c.Receive(ctx, nil)
 		})
 		sel.Select(ctx)
-		if out.Kind != "" {
-			return out
-		}
 	}
 }
 
+// Wait blocks a turn that waits on children until a child finishes, a cancel
+// is queued, or a prompt is at the front of the queue. Other wakes stay
+// queued for Recv.
 func (w *wfExec) Wait() session.Wake {
 	ctx := w.ctx
-	var wake session.Wake
-	sel := workflow.NewSelector(ctx)
-	for _, c := range *w.spawned {
-		if c.done {
-			continue
+	for {
+		w.fill()
+		if w.takeCancel() {
+			return session.Wake{Kind: session.WakeCancel}
 		}
-		id := c.id
-		sel.AddFuture(c.fut, func(f workflow.Future) {
-			var result string
-			err := f.Get(ctx, &result)
-			if msg := markChildDone(w.spawned, id, result, err); msg != nil {
-				wake = session.Wake{Kind: session.WakeChild, Child: msg}
+		if len(w.queue) > 0 && w.queue[0].Kind == session.WakePrompt {
+			wake := w.queue[0]
+			w.queue = w.queue[1:]
+			return wake
+		}
+		var wake session.Wake
+		sel := workflow.NewSelector(ctx)
+		for _, c := range *w.spawned {
+			if c.done {
+				continue
 			}
-		})
+			id := c.id
+			sel.AddFuture(c.fut, func(f workflow.Future) {
+				var result string
+				err := f.Get(ctx, &result)
+				if msg := markChildDone(w.spawned, id, result, err); msg != nil {
+					wake = session.Wake{Kind: session.WakeChild, Child: msg}
+				}
+			})
+		}
+		sel.AddReceive(w.wakeCh, func(c workflow.ReceiveChannel, more bool) { w.receive(c) })
+		sel.Select(ctx)
+		if wake.Kind != "" {
+			return wake
+		}
 	}
-	sel.AddReceive(w.promptCh, func(c workflow.ReceiveChannel, more bool) {
-		var p session.PromptIn
-		c.Receive(ctx, &p)
-		wake = session.Wake{Kind: session.WakePrompt, Prompt: p}
-	})
-	sel.AddReceive(w.cancelCh, func(c workflow.ReceiveChannel, more bool) {
-		c.Receive(ctx, nil)
-		wake = session.Wake{Kind: session.WakeCancel}
-	})
-	sel.Select(ctx)
-	return wake
 }
 
 func (w *wfExec) IDs() []session.SessionID {
@@ -381,7 +378,12 @@ func (w *wfExec) Await(id session.SessionID) (string, error) {
 		if (*w.spawned)[i].done {
 			break
 		}
-		cancelled := false
+		w.fill()
+		cancelled := w.takeCancel()
+		if cancelled {
+			w.CancelAll()
+			return "", context.Canceled
+		}
 		sel := workflow.NewSelector(ctx)
 		sel.AddFuture((*w.spawned)[i].fut, func(f workflow.Future) {
 			var result string
@@ -396,13 +398,13 @@ func (w *wfExec) Await(id session.SessionID) (string, error) {
 				(*w.spawned)[j].err = err.Error()
 			}
 		})
-		sel.AddReceive(w.cancelCh, func(c workflow.ReceiveChannel, more bool) {
-			c.Receive(ctx, nil)
-			w.CancelAll()
-			cancelled = true
+		sel.AddReceive(w.wakeCh, func(c workflow.ReceiveChannel, more bool) {
+			w.receive(c)
+			cancelled = w.takeCancel()
 		})
 		sel.Select(ctx)
 		if cancelled {
+			w.CancelAll()
 			return "", context.Canceled
 		}
 	}
@@ -431,6 +433,41 @@ func (w *wfExec) CancelAll() {
 		}
 	}
 	*w.spawned = nil
+}
+
+// fill moves every wake already delivered on wakeCh into the queue, in
+// arrival order.
+func (w *wfExec) fill() {
+	var wake session.Wake
+	for w.wakeCh.ReceiveAsync(&wake) {
+		w.queue = append(w.queue, wake)
+		wake = session.Wake{}
+	}
+}
+
+// receive queues one wake from c. Selectors call it when wakeCh is ready.
+func (w *wfExec) receive(c workflow.ReceiveChannel) {
+	var wake session.Wake
+	c.Receive(w.ctx, &wake)
+	w.queue = append(w.queue, wake)
+}
+
+// takeCancel reports whether a cancel is queued and removes the first one,
+// together with the prompts queued before it: those were steering for the
+// turn the cancel ends. Wakes queued after the cancel stay, in order.
+func (w *wfExec) takeCancel() bool {
+	i := slices.IndexFunc(w.queue, func(wake session.Wake) bool { return wake.Kind == session.WakeCancel })
+	if i < 0 {
+		return false
+	}
+	kept := make([]session.Wake, 0, len(w.queue)-1)
+	for j, wake := range w.queue {
+		if j > i || (j < i && wake.Kind != session.WakePrompt) {
+			kept = append(kept, wake)
+		}
+	}
+	w.queue = kept
+	return true
 }
 
 // failureText reads ApplicationError.Message. Error() appends the cause,

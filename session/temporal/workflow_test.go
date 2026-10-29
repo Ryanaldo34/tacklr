@@ -38,10 +38,10 @@ func TestSessionWorkflow_inferenceRefusedFailsTurn(t *testing.T) {
 
 	id := session.SessionID("sess-model-refused")
 	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(signalPrompt, session.PromptIn{Text: "hi"})
+		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "hi"}})
 	}, time.Millisecond)
 	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(signalClose, nil)
+		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakeClose})
 	}, 50*time.Millisecond)
 
 	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id, ActivityAttempts: 3})
@@ -80,10 +80,10 @@ func TestSessionWorkflow_permanentInferenceDoesNotRetry(t *testing.T) {
 
 	id := session.SessionID("sess-permanent")
 	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(signalPrompt, session.PromptIn{Text: "hi"})
+		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "hi"}})
 	}, time.Millisecond)
 	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(signalClose, nil)
+		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakeClose})
 	}, 50*time.Millisecond)
 
 	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id, ActivityAttempts: 5})
@@ -128,10 +128,10 @@ func TestSessionWorkflow_activityRetryThenCompletes(t *testing.T) {
 
 	id := session.SessionID("sess-retry")
 	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(signalPrompt, session.PromptIn{Text: "hi"})
+		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "hi"}})
 	}, time.Millisecond)
 	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(signalClose, nil)
+		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakeClose})
 	}, 80*time.Millisecond)
 
 	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id})
@@ -186,13 +186,13 @@ func TestSessionWorkflow_authExpiredYieldThenResume(t *testing.T) {
 
 	id := session.SessionID("sess-auth")
 	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(signalPrompt, session.PromptIn{Text: "read"})
+		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "read"}})
 	}, time.Millisecond)
 	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(signalResume, session.ResumeIn{Responses: map[string][]byte{"c1": []byte(`{}`)}})
+		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakeResume, Resume: session.ResumeIn{Responses: map[string][]byte{"c1": []byte(`{}`)}}})
 	}, 20*time.Millisecond)
 	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(signalClose, nil)
+		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakeClose})
 	}, 80*time.Millisecond)
 
 	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id})
@@ -259,14 +259,14 @@ func TestSessionWorkflow_parallelBatchHitlRunsRemainder(t *testing.T) {
 
 	id := session.SessionID("sess-parallel-hitl")
 	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(signalPrompt, session.PromptIn{Text: "batch"})
+		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "batch"}})
 	}, time.Millisecond)
 	env.RegisterDelayedCallback(func() {
 		payload, _ := json.Marshal(map[string]string{"optionId": "allow-once"})
-		env.SignalWorkflow(signalResume, session.ResumeIn{Responses: map[string][]byte{"fc_gate": payload}})
+		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakeResume, Resume: session.ResumeIn{Responses: map[string][]byte{"fc_gate": payload}}})
 	}, 20*time.Millisecond)
 	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(signalClose, nil)
+		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakeClose})
 	}, 80*time.Millisecond)
 
 	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id})
@@ -299,7 +299,7 @@ func TestSessionWorkflow_hitlCancel(t *testing.T) {
 
 	id := session.SessionID("sess-hitl-cancel")
 	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(signalPrompt, session.PromptIn{Text: "ask"})
+		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "ask"}})
 	}, time.Millisecond)
 	// Cancel only after the turn has parked. A fixed delay races the tool
 	// activity under the race detector and drops the yield event.
@@ -309,9 +309,9 @@ func TestSessionWorkflow_hitlCancel(t *testing.T) {
 			env.RegisterDelayedCallback(cancelWhenParked, 15*time.Millisecond)
 			return
 		}
-		env.SignalWorkflow(signalCancel, nil)
+		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakeCancel})
 		env.RegisterDelayedCallback(func() {
-			env.SignalWorkflow(signalClose, nil)
+			env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakeClose})
 		}, 20*time.Millisecond)
 	}
 	env.RegisterDelayedCallback(cancelWhenParked, 15*time.Millisecond)
@@ -372,8 +372,10 @@ func TestSessionWorkflow_mixedBatchPairsBeforeNextRound(t *testing.T) {
 		}}
 	_, fallback := registerSession(env, agent)
 	id := session.SessionID("sess-mixed-spawn")
-	env.RegisterDelayedCallback(func() { env.SignalWorkflow(signalPrompt, session.PromptIn{Text: "go"}) }, time.Millisecond)
-	env.RegisterDelayedCallback(func() { env.SignalWorkflow(signalClose, nil) }, 120*time.Millisecond)
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "go"}})
+	}, time.Millisecond)
+	env.RegisterDelayedCallback(func() { env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakeClose}) }, 120*time.Millisecond)
 	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
@@ -445,10 +447,10 @@ func TestSessionWorkflow_asyncSpawnDoesNotWaitForChild(t *testing.T) {
 		childStarted.Store(true)
 	})
 	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(signalPrompt, session.PromptIn{Text: "go"})
+		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "go"}})
 	}, time.Millisecond)
 	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(signalClose, nil)
+		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakeClose})
 	}, 80*time.Millisecond)
 	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id})
 	if err := env.GetWorkflowError(); err != nil {
@@ -530,8 +532,10 @@ func TestSessionWorkflow_listChildren(t *testing.T) {
 	_, fallback := registerSession(env, agent)
 	env.OnRequestCancelExternalWorkflow(mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	id := session.SessionID("sess-list-children")
-	env.RegisterDelayedCallback(func() { env.SignalWorkflow(signalPrompt, session.PromptIn{Text: "go"}) }, time.Millisecond)
-	env.RegisterDelayedCallback(func() { env.SignalWorkflow(signalClose, nil) }, 120*time.Millisecond)
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "go"}})
+	}, time.Millisecond)
+	env.RegisterDelayedCallback(func() { env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakeClose}) }, 120*time.Millisecond)
 	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
@@ -593,7 +597,7 @@ func TestSessionWorkflow_cancelStopsAsyncChild(t *testing.T) {
 	var childErr error
 	env.SetOnChildWorkflowStartedListener(func(info *workflow.Info, ctx workflow.Context, args converter.EncodedValues) {
 		childStarted.Store(true)
-		env.SignalWorkflow(signalCancel, nil)
+		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakeCancel})
 	})
 	env.SetOnChildWorkflowCompletedListener(func(info *workflow.Info, result converter.EncodedValue, err error) {
 		childErr = err
@@ -601,10 +605,10 @@ func TestSessionWorkflow_cancelStopsAsyncChild(t *testing.T) {
 	id := session.SessionID("sess-cancel-child")
 	childID := session.ChildSessionID(id, "researcher", "sp1")
 	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(signalPrompt, session.PromptIn{Text: "go"})
+		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "go"}})
 	}, time.Millisecond)
 	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(signalClose, nil)
+		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakeClose})
 	}, 80*time.Millisecond)
 	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id})
 	if err := env.GetWorkflowError(); err != nil {
@@ -670,7 +674,7 @@ func TestSessionWorkflow_steerDuringYieldKeepsPark(t *testing.T) {
 	_, fallback := registerSession(env, agent)
 	id := session.SessionID("sess-steer-yield")
 	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(signalPrompt, session.PromptIn{Text: "ask"})
+		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "ask"}})
 	}, time.Millisecond)
 	var steerWhenParked func()
 	steerWhenParked = func() {
@@ -678,7 +682,7 @@ func TestSessionWorkflow_steerDuringYieldKeepsPark(t *testing.T) {
 			env.RegisterDelayedCallback(steerWhenParked, 15*time.Millisecond)
 			return
 		}
-		env.SignalWorkflow(signalPrompt, session.PromptIn{Text: "steer"})
+		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "steer"}})
 		if !querySession(t, env).Waiting {
 			t.Error("steer must keep the park")
 		}
@@ -688,9 +692,9 @@ func TestSessionWorkflow_steerDuringYieldKeepsPark(t *testing.T) {
 		env.RegisterDelayedCallback(func() {
 			resumed.Store(true)
 			payload, _ := json.Marshal(map[string]any{"selectionIdx": 0})
-			env.SignalWorkflow(signalResume, session.ResumeIn{Responses: map[string][]byte{"ask1": payload}})
+			env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakeResume, Resume: session.ResumeIn{Responses: map[string][]byte{"ask1": payload}}})
 			env.RegisterDelayedCallback(func() {
-				env.SignalWorkflow(signalClose, nil)
+				env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakeClose})
 			}, 20*time.Millisecond)
 		}, 20*time.Millisecond)
 	}
@@ -763,10 +767,10 @@ func TestSessionWorkflow_failedAsyncChildJobAbsorbed(t *testing.T) {
 		}}}
 	_, fallback := registerSession(env, agent)
 	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(signalPrompt, session.PromptIn{Text: "go"})
+		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "go"}})
 	}, time.Millisecond)
 	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(signalClose, nil)
+		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakeClose})
 	}, 80*time.Millisecond)
 	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id})
 	if err := env.GetWorkflowError(); err != nil {
@@ -850,10 +854,10 @@ func TestSessionWorkflow_workerChildCompletesParent(t *testing.T) {
 		childStarted.Store(true)
 	})
 	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(signalPrompt, session.PromptIn{Text: "go"})
+		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "go"}})
 	}, time.Millisecond)
 	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(signalClose, nil)
+		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakeClose})
 	}, 80*time.Millisecond)
 	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id})
 	if err := env.GetWorkflowError(); err != nil {
@@ -898,8 +902,10 @@ func TestSessionWorkflow_toolFailureStaysInTheWindow(t *testing.T) {
 	agent := tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, Tools: []*tacklr.Tool{boom}}
 	_, fallback := registerSession(env, agent)
 	id := session.SessionID("sess-tool-failed")
-	env.RegisterDelayedCallback(func() { env.SignalWorkflow(signalPrompt, session.PromptIn{Text: "go"}) }, time.Millisecond)
-	env.RegisterDelayedCallback(func() { env.SignalWorkflow(signalClose, nil) }, 80*time.Millisecond)
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "go"}})
+	}, time.Millisecond)
+	env.RegisterDelayedCallback(func() { env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakeClose}) }, 80*time.Millisecond)
 	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
@@ -941,8 +947,10 @@ func TestSessionWorkflow_missingPathIsACorrection(t *testing.T) {
 	}
 	_, fallback := registerSession(env, agent)
 	id := session.SessionID("sess-missing-path")
-	env.RegisterDelayedCallback(func() { env.SignalWorkflow(signalPrompt, session.PromptIn{Text: "read"}) }, time.Millisecond)
-	env.RegisterDelayedCallback(func() { env.SignalWorkflow(signalClose, nil) }, 80*time.Millisecond)
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "read"}})
+	}, time.Millisecond)
+	env.RegisterDelayedCallback(func() { env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakeClose}) }, 80*time.Millisecond)
 	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
@@ -981,16 +989,16 @@ func TestSessionWorkflow_badWorkspaceBindingFailsTurn(t *testing.T) {
 	_, fallback := registerSession(env, agent)
 	id := session.SessionID("sess-bad-binding")
 	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(signalPrompt, session.PromptIn{
+		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{
 			Text: "read",
 			Auth: session.AuthContext{Bindings: []vfs.Binding{{
 				Provider: "local",
 				Params:   map[string]string{vfs.ParamName: "docs"},
 				Auth:     vfs.Credential{Token: "x"},
 			}}},
-		})
+		}})
 	}, time.Millisecond)
-	env.RegisterDelayedCallback(func() { env.SignalWorkflow(signalClose, nil) }, 80*time.Millisecond)
+	env.RegisterDelayedCallback(func() { env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakeClose}) }, 80*time.Millisecond)
 	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
@@ -1054,8 +1062,10 @@ func TestSessionWorkflow_grandchildResultReachesParent(t *testing.T) {
 	}
 	_, fallback := registerSession(env, agent)
 	id := session.SessionID("sess-grandchild")
-	env.RegisterDelayedCallback(func() { env.SignalWorkflow(signalPrompt, session.PromptIn{Text: "go"}) }, time.Millisecond)
-	env.RegisterDelayedCallback(func() { env.SignalWorkflow(signalClose, nil) }, 150*time.Millisecond)
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "go"}})
+	}, time.Millisecond)
+	env.RegisterDelayedCallback(func() { env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakeClose}) }, 150*time.Millisecond)
 	env.ExecuteWorkflow(SessionWorkflow, workflowInput{SessionID: id})
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatal(err)
@@ -1120,7 +1130,9 @@ func TestSessionWorkflow_parkedParentLeavesAsyncChildRunning(t *testing.T) {
 	id := session.SessionID("sess-park-child")
 	childID := session.ChildSessionID(id, "researcher", "sp1")
 	var sawChild bool
-	env.RegisterDelayedCallback(func() { env.SignalWorkflow(signalPrompt, session.PromptIn{Text: "go"}) }, time.Millisecond)
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "go"}})
+	}, time.Millisecond)
 	var observeWhenParked func()
 	observeWhenParked = func() {
 		if !querySession(t, env).Waiting {
@@ -1142,10 +1154,10 @@ func TestSessionWorkflow_parkedParentLeavesAsyncChildRunning(t *testing.T) {
 		}
 		once.Do(func() { close(release) })
 		env.RegisterDelayedCallback(func() {
-			env.SignalWorkflow(signalResume, session.ResumeIn{
+			env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakeResume, Resume: session.ResumeIn{
 				Responses: map[string][]byte{"ask1": []byte(`{"selectionIdx":0}`)},
-			})
-			env.RegisterDelayedCallback(func() { env.SignalWorkflow(signalClose, nil) }, 20*time.Millisecond)
+			}})
+			env.RegisterDelayedCallback(func() { env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakeClose}) }, 20*time.Millisecond)
 		}, 20*time.Millisecond)
 	}
 	env.RegisterDelayedCallback(observeWhenParked, 15*time.Millisecond)
@@ -1183,9 +1195,9 @@ func registerSession(env *testsuite.TestWorkflowEnvironment, agent tacklr.AgentO
 	return acts, log
 }
 
-func signalAt(env *testsuite.TestWorkflowEnvironment, at time.Duration, name string, arg any) {
+func signalAt(env *testsuite.TestWorkflowEnvironment, at time.Duration, wake session.Wake) {
 	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(name, arg)
+		env.SignalWorkflow(signalWake, wake)
 	}, at)
 }
 
@@ -1246,10 +1258,10 @@ func TestSessionWorkflow_steerDuringInferenceJoinsTheNextReply(t *testing.T) {
 	agent := tacklr.AgentOptions{Model: model, MaxWindowSize: 8192}
 	_, log := registerSession(env, agent)
 	id := session.SessionID("sess-steer-infer")
-	signalAt(env, time.Millisecond, signalPrompt, session.PromptIn{Text: "go"})
-	signalAt(env, 20*time.Millisecond, signalPrompt, session.PromptIn{Text: "meanwhile"})
+	signalAt(env, time.Millisecond, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "go"}})
+	signalAt(env, 20*time.Millisecond, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "meanwhile"}})
 	env.RegisterDelayedCallback(let, 30*time.Millisecond)
-	signalAt(env, 90*time.Millisecond, signalClose, nil)
+	signalAt(env, 90*time.Millisecond, session.Wake{Kind: session.WakeClose})
 	got := finishSession(t, env, log, id)
 	if !strings.Contains(visibleText(got), "saw-meanwhile") {
 		t.Fatalf("steer during inference must show up in the next reply, got %s", visibleText(got))
@@ -1292,10 +1304,10 @@ func TestSessionWorkflow_steerDuringToolJoinsTheNextReply(t *testing.T) {
 	agent := tacklr.AgentOptions{Model: model, MaxWindowSize: 8192, Tools: []*tacklr.Tool{hold}}
 	_, log := registerSession(env, agent)
 	id := session.SessionID("sess-steer-tool")
-	signalAt(env, time.Millisecond, signalPrompt, session.PromptIn{Text: "go"})
-	signalAt(env, 20*time.Millisecond, signalPrompt, session.PromptIn{Text: "after-tool"})
+	signalAt(env, time.Millisecond, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "go"}})
+	signalAt(env, 20*time.Millisecond, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "after-tool"}})
 	env.RegisterDelayedCallback(let, 30*time.Millisecond)
-	signalAt(env, 90*time.Millisecond, signalClose, nil)
+	signalAt(env, 90*time.Millisecond, session.Wake{Kind: session.WakeClose})
 	got := finishSession(t, env, log, id)
 	if !strings.Contains(visibleText(got), "saw-after-tool") {
 		t.Fatalf("steer during a tool must show up in the next reply, got %s", visibleText(got))
@@ -1323,15 +1335,44 @@ func TestSessionWorkflow_cancelDropsUnreadPromptThenNextPromptRuns(t *testing.T)
 	agent := tacklr.AgentOptions{Model: model, MaxWindowSize: 8192}
 	_, log := registerSession(env, agent)
 	id := session.SessionID("sess-cancel-unread")
-	signalAt(env, time.Millisecond, signalPrompt, session.PromptIn{Text: "go"})
-	signalAt(env, 15*time.Millisecond, signalPrompt, session.PromptIn{Text: "do-not-keep"})
-	signalAt(env, 20*time.Millisecond, signalCancel, nil)
-	signalAt(env, 40*time.Millisecond, signalPrompt, session.PromptIn{Text: "keep-this"})
-	signalAt(env, 90*time.Millisecond, signalClose, nil)
+	signalAt(env, time.Millisecond, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "go"}})
+	signalAt(env, 15*time.Millisecond, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "do-not-keep"}})
+	signalAt(env, 20*time.Millisecond, session.Wake{Kind: session.WakeCancel})
+	signalAt(env, 40*time.Millisecond, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "keep-this"}})
+	signalAt(env, 90*time.Millisecond, session.Wake{Kind: session.WakeClose})
 	got := finishSession(t, env, log, id)
 	text := visibleText(got)
 	if strings.Contains(text, "do-not-keep") || !strings.Contains(text, "reply:keep-this") {
 		t.Fatalf("cancel must drop the unread prompt and run the next one, got %s", text)
+	}
+}
+
+func TestSessionWorkflow_idleCancelThenPromptSentTogetherRunsThePrompt(t *testing.T) {
+	// Arrange
+	model := testkit.HTTPModel(t, func(ctx context.Context, msgs []*tacklr.Message, tools []*tacklr.Tool, ch chan<- tacklr.LLMResponseChunk) {
+		text := ""
+		if last := lastMsg(msgs); last != nil {
+			text = last.Content
+		}
+		ch <- tacklr.LLMResponseChunk{Type: tacklr.StreamEventMessage, Content: "reply:" + text, IsComplete: true}
+	})
+	env := newTestWorkflow(t)
+	_, log := registerSession(env, tacklr.AgentOptions{Model: model, MaxWindowSize: 8192})
+	id := session.SessionID("sess-cancel-then-prompt")
+	// At time zero both wakes are queued before the workflow's first task, as
+	// when a client cancels and prompts faster than the worker picks them up.
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakeCancel})
+		env.SignalWorkflow(signalWake, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "after-cancel"}})
+	}, 0)
+	signalAt(env, 60*time.Millisecond, session.Wake{Kind: session.WakeClose})
+
+	// Act
+	got := finishSession(t, env, log, id)
+
+	// Assert
+	if text := visibleText(got); !strings.Contains(text, "reply:after-cancel") {
+		t.Fatalf("a cancel sent before a prompt must not cancel that prompt's turn, got %s", text)
 	}
 }
 
@@ -1357,8 +1398,8 @@ func TestSessionWorkflow_unknownSpecialistStaysInTheWindow(t *testing.T) {
 	}
 	_, log := registerSession(env, agent)
 	id := session.SessionID("sess-unknown-spec")
-	signalAt(env, time.Millisecond, signalPrompt, session.PromptIn{Text: "go"})
-	signalAt(env, 40*time.Millisecond, signalClose, nil)
+	signalAt(env, time.Millisecond, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "go"}})
+	signalAt(env, 40*time.Millisecond, session.Wake{Kind: session.WakeClose})
 	got := finishSession(t, env, log, id)
 	if !strings.Contains(visibleText(got), "no-such-specialist") {
 		t.Fatalf("unknown specialist must come back as a correction the model can answer, got %s", visibleText(got))
@@ -1402,8 +1443,8 @@ func TestSessionWorkflow_failedWorkerEndsTheChild(t *testing.T) {
 		"ci": func(context.Context, string) (string, error) { return "", errors.New("ci broke") },
 	}
 	id := session.SessionID("sess-worker-fail")
-	signalAt(env, time.Millisecond, signalPrompt, session.PromptIn{Text: "go"})
-	signalAt(env, 80*time.Millisecond, signalClose, nil)
+	signalAt(env, time.Millisecond, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "go"}})
+	signalAt(env, 80*time.Millisecond, session.Wake{Kind: session.WakeClose})
 	got := finishSession(t, env, log, id)
 	if !strings.Contains(visibleText(got), "parent-saw-failure") {
 		t.Fatalf("a failed worker must reach the parent as a failed job, got %s", visibleText(got))
@@ -1440,8 +1481,8 @@ func TestSessionWorkflow_readSkillReturnsTheSkillBody(t *testing.T) {
 	}
 	_, log := registerSession(env, agent)
 	id := session.SessionID("sess-skill")
-	signalAt(env, time.Millisecond, signalPrompt, session.PromptIn{Text: "go"})
-	signalAt(env, 40*time.Millisecond, signalClose, nil)
+	signalAt(env, time.Millisecond, session.Wake{Kind: session.WakePrompt, Prompt: session.PromptIn{Text: "go"}})
+	signalAt(env, 40*time.Millisecond, session.Wake{Kind: session.WakeClose})
 	got := finishSession(t, env, log, id)
 	if !strings.Contains(visibleText(got), "skill-loaded") {
 		t.Fatalf("read_skill must return the skill body, got %s", visibleText(got))

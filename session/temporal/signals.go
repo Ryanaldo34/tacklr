@@ -8,10 +8,9 @@ import (
 )
 
 const (
-	signalPrompt = session.WakePrompt
-	signalResume = session.WakeResume
-	signalCancel = session.WakeCancel
-	signalClose  = session.WakeClose
+	// signalWake carries every session.Wake (prompt, resume, cancel, close) on
+	// one channel, so the workflow handles them in the order they were sent.
+	signalWake = "tacklr_wake"
 
 	queryStatus   = "tacklr_status"
 	queryChildren = "tacklr_children"
