@@ -16,7 +16,6 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
-	"go.opentelemetry.io/otel/log/global"
 	lognoop "go.opentelemetry.io/otel/log/noop"
 	"go.opentelemetry.io/otel/propagation"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
@@ -81,7 +80,7 @@ func Init(ctx context.Context, cfg Config) (func(context.Context) error, error) 
 
 	if endpoint == "" {
 		SetMeterProvider(nil)
-		global.SetLoggerProvider(lognoop.NewLoggerProvider())
+		otel.SetLoggerProvider(lognoop.NewLoggerProvider())
 		return traces.shutdownAll(nil, nil), nil
 	}
 
@@ -109,7 +108,7 @@ func Init(ctx context.Context, cfg Config) (func(context.Context) error, error) 
 			_ = tp.Shutdown(ctx)
 			return nil, err
 		}
-		global.SetLoggerProvider(lp)
+		otel.SetLoggerProvider(lp)
 	}
 
 	return traces.shutdownAll(mp, lp), nil

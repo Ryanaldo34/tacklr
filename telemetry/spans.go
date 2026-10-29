@@ -6,7 +6,6 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -76,9 +75,9 @@ func (t *TurnSpan) End(outcome string) {
 	t.span.SetAttributes(attribute.String(AttrOutcome, outcome))
 	t.span.End()
 	if outcome == OutcomeYield {
-		EmitEvent(t.ctx, EventTurnYielded, log.String(EventAttrOutcome, outcome))
+		EmitEvent(t.ctx, EventTurnYielded, attribute.String(EventAttrOutcome, outcome))
 	} else {
-		EmitEvent(t.ctx, EventTurnEnded, log.String(EventAttrOutcome, outcome))
+		EmitEvent(t.ctx, EventTurnEnded, attribute.String(EventAttrOutcome, outcome))
 	}
 	InstrumentsFromContext(t.ctx).RecordTurnEnd(
 		t.ctx, t.agentID, t.turnKind, outcome, time.Since(t.start),

@@ -3,7 +3,7 @@ package telemetry
 import (
 	"context"
 
-	"go.opentelemetry.io/otel/log"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // BindTurnContext attaches agent/session identity so child spans and metrics
@@ -17,10 +17,10 @@ func BindTurnContext(ctx context.Context, agentID, sessionID string) context.Con
 // EmitTurnReceived logs prompt.received or resume.received with dynamic sizes.
 func EmitTurnReceived(ctx context.Context, kind string, promptLen, resumeCount int) {
 	if kind == TurnKindResume {
-		EmitEvent(ctx, EventResumeReceived, log.Int(EventAttrResumeInterruptCount, resumeCount))
+		EmitEvent(ctx, EventResumeReceived, attribute.Int(EventAttrResumeInterruptCount, resumeCount))
 		return
 	}
-	EmitEvent(ctx, EventPromptReceived, log.Int(EventAttrPromptLen, promptLen))
+	EmitEvent(ctx, EventPromptReceived, attribute.Int(EventAttrPromptLen, promptLen))
 }
 
 // RecordCheckpointAttempt records one harness snapshot persist (ok or error).

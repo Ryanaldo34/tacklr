@@ -4,23 +4,24 @@ import (
 	"context"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/log"
-	"go.opentelemetry.io/otel/log/global"
 )
 
 // Logger returns the package Logger from the global LoggerProvider (noop-safe).
 func Logger() log.Logger {
-	return global.GetLoggerProvider().Logger(InstrumentationName)
+	return otel.GetLoggerProvider().Logger(InstrumentationName)
 }
 
 // EmitEvent emits an OTel log record with EventName set (span-correlated).
 // Severity defaults to Info; use EmitEventSeverity for errors.
-func EmitEvent(ctx context.Context, name string, attrs ...log.KeyValue) {
+func EmitEvent(ctx context.Context, name string, attrs ...attribute.KeyValue) {
 	EmitEventSeverity(ctx, name, log.SeverityInfo, attrs...)
 }
 
 // EmitEventSeverity is EmitEvent with an explicit severity.
-func EmitEventSeverity(ctx context.Context, name string, severity log.Severity, attrs ...log.KeyValue) {
+func EmitEventSeverity(ctx context.Context, name string, severity log.Severity, attrs ...attribute.KeyValue) {
 	if name == "" {
 		return
 	}
@@ -29,7 +30,7 @@ func EmitEventSeverity(ctx context.Context, name string, severity log.Severity, 
 	rec.SetObservedTimestamp(time.Now())
 	rec.SetEventName(name)
 	rec.SetSeverity(severity)
-	rec.SetBody(log.StringValue(name))
+	rec.SetBody(attribute.StringValue(name))
 	if len(attrs) > 0 {
 		rec.AddAttributes(attrs...)
 	}

@@ -8,7 +8,6 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -140,7 +139,7 @@ func StartModelSpan(ctx context.Context, phase string, seq int, shape WindowShap
 	}
 	afterTools := afterToolsFromContext(ctx)
 	if afterTools {
-		EmitEvent(ctx, EventModelAfterTools, log.Bool(AttrAfterTools, true))
+		EmitEvent(ctx, EventModelAfterTools, attribute.Bool(AttrAfterTools, true))
 	}
 
 	attrs := []attribute.KeyValue{

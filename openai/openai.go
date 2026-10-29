@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/pkoukk/tiktoken-go"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/log"
 
 	"github.com/ryanaldo34/tacklr"
@@ -657,15 +658,15 @@ func emitProviderFailed(ctx context.Context, err error, httpStatus int, inputIte
 			code = api.Code
 		}
 	}
-	attrs := []log.KeyValue{
-		log.String(telemetry.EventAttrInputItems, inputItems),
-		log.String(telemetry.AttrErrorClass, telemetry.ClassifyErrorClass(err, httpStatus)),
+	attrs := []attribute.KeyValue{
+		attribute.String(telemetry.EventAttrInputItems, inputItems),
+		attribute.String(telemetry.AttrErrorClass, telemetry.ClassifyErrorClass(err, httpStatus)),
 	}
 	if httpStatus > 0 {
-		attrs = append(attrs, log.Int(telemetry.AttrHTTPStatus, httpStatus))
+		attrs = append(attrs, attribute.Int(telemetry.AttrHTTPStatus, httpStatus))
 	}
 	if code != "" {
-		attrs = append(attrs, log.String(telemetry.AttrErrorCode, code))
+		attrs = append(attrs, attribute.String(telemetry.AttrErrorCode, code))
 	}
 	telemetry.EmitEventSeverity(ctx, telemetry.EventProviderFailed, log.SeverityError, attrs...)
 }

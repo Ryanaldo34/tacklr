@@ -4,7 +4,7 @@ import (
 	"context"
 	"os"
 
-	"go.opentelemetry.io/otel/log"
+	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/telemetry"
@@ -45,7 +45,7 @@ func OpenTurnVFS(ctx context.Context, threadID string, agent tacklr.AgentOptions
 		return nil, err
 	}
 	telemetry.EmitEvent(ctx, telemetry.EventFuseMount,
-		log.String(telemetry.AttrSessionID, threadID),
+		attribute.String(telemetry.AttrSessionID, threadID),
 	)
 	telemetry.InstrumentsFromContext(ctx).RecordFuseMount(ctx, telemetry.FuseMountOutcomeOK)
 	return ms, nil
