@@ -247,6 +247,15 @@ func cleanRel(name string) (string, error) {
 	return cleaned, nil
 }
 
+// safeSegment rejects a session id or member name that would leave its
+// parent directory when used as one host path segment.
+func safeSegment(seg string) error {
+	if seg == "" || strings.ContainsAny(seg, `/\`) || seg == ".." || seg == "." {
+		return fmt.Errorf("vfs: unsafe path segment %q", seg)
+	}
+	return nil
+}
+
 func within(root, full string) bool {
 	rel, err := filepath.Rel(root, filepath.Clean(full))
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
@@ -355,8 +364,8 @@ func Local(base string) Open {
 			root = joined
 		}
 		if b.Params["session_scoped"] == "true" && sessionID != "" {
-			if strings.ContainsAny(sessionID, `/\`) || sessionID == ".." || sessionID == "." {
-				return nil, fmt.Errorf("vfs: unsafe session id for path")
+			if err := safeSegment(sessionID); err != nil {
+				return nil, err
 			}
 			root = filepath.Join(root, sessionID)
 		}

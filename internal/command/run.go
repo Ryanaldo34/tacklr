@@ -24,9 +24,11 @@ const (
 // outcomes; startup and context failures are errors.
 //
 // On Linux the shell is jailed to dir with a user+mount+pid namespace so it
-// cannot see sibling session mounts.
+// cannot see sibling session mounts, and host system directories are
+// read-only. The shell gets only shellEnv, never the worker's environment.
 func Run(ctx context.Context, dir, command string) (string, error) {
 	cmd := jailCommand(ctx, dir, command)
+	cmd.Env = shellEnv()
 	cmd.Stdin = bytes.NewReader(nil)
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
