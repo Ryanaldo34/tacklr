@@ -56,6 +56,8 @@ exclude:
     - internal/testhttp
     - internal/durtest
     - internal/livesess
+    # In-process git host (HTTP + SSH) for vfs.Git tests.
+    - internal/testgit
     # Docker bootstrap for live Temporal tests. Failure branches are the
     # container runtime, not a product outcome.
     - internal/temporaldocker

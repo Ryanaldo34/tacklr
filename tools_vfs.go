@@ -590,7 +590,7 @@ func newRunCommand(ms *vfs.MountSession, permissionRequired bool) *Tool {
 	cfg := ToolConfig{
 		Name:        "run_command",
 		DisplayName: "Run {command}",
-		Description: `Run a host shell command as /bin/sh -c with cwd at this session's workspace root. Call for directory listings, grep, and other shell work. On Linux the shell cannot see other session mounts.
+		Description: `Run a host shell command as /bin/sh -c with cwd at this session's workspace root. Call for directory listings, grep, and other shell work. On Linux the shell cannot see other session mounts, system directories are read-only, and each command starts with only PATH, HOME=/tmp and TMPDIR=/tmp (HOME is not kept between commands).
 
 May pause for execute permission. Returns stdout/stderr. A non-zero process exit is still a successful tool result (exit=N in the output). Fails if no command is given or the workspace is not mounted.`,
 		Category: ToolCategoryExecute,

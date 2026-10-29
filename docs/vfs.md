@@ -367,6 +367,46 @@ Write:  WriteDocument              // PutObject / UploadStream with Text() bytes
 
 The agent always uses `/data/app.go`. It never sees the bucket or container name.
 
+### Git repositories
+
+`vfs.Git` clones one remote onto worker disk with the `git` CLI and mounts the working tree like `Local`: reads and writes go to the checkout. The agent runs every git command (`status`, `diff`, `commit`, `push`, …) itself through `run_command`. Use one `At` member for each repository.
+
+```go
+api := vfs.GitRepo{
+	URL:   "https://github.com/acme/api.git",
+	Auth:  vfs.GitToken("x-access-token", tokenFromVault), // called once per clone
+	Ref:   "main",              // empty = remote HEAD
+	Depth: 1,                   // 0 = full history
+	Dir:   "/var/lib/tacklr/git", // worker disk
+}
+docs := vfs.GitRepo{
+	URL:  "git@github.com:acme/docs.git",
+	Auth: vfs.GitSSHKey(deployKeyPEM, knownHosts), // unencrypted key; known_hosts is required
+	Dir:  "/var/lib/tacklr/git",
+}
+
+open := vfs.Tree(
+	vfs.At("api", vfs.Git(api)),
+	vfs.At("docs", vfs.Git(docs)).ReadOnly(),
+)
+```
+
+| Rule | Behavior |
+|------|----------|
+| Checkout | `Dir/<sessionID>/<member name>`. The first open for a session clones (into a temp directory, then renamed, so a failed clone leaves nothing). Later opens on the same worker reuse the checkout as the agent left it. |
+| Clone credential | Passed to `git clone` through the process environment (HTTPS header) or temp key files (SSH) that are removed after the clone. It is not written to `.git/config`, and the worker's own credential helpers are turned off for the clone. |
+| Git commands | The environment must have `git` (and `ssh` for SSH remotes). The SDK does not commit or push. Pushing from the agent's shell needs credentials the environment gives that shell, and anything the shell can use, the agent can read. |
+| Durability | The checkout lives on one worker's disk. Work that is not pushed is lost when a session moves to another worker or microVM. |
+
+------|----------|
+| Branch | The session reads and writes `tacklr/<sessionID>` (override with `GitRepo.Branch`). Before the first write it reads `Base`. The mount never pushes to `Base`; the host opens the pull request. |
+| Write | Each `WriteFile`, `WriteDocument` or `Remove` is one commit, pushed before the call returns. The commit message is the changed path. Writing the same content makes no commit. |
+| Concurrent writers | A push never overwrites another writer. When the branch moved, the mount replays the one-path change on the new tip. If the other writer changed the same path, the write returns `ErrConflict` and the agent reads again. |
+| Directories | Git has no empty directories: `MkdirAll` only checks the path, and `Remove` on a directory fails. |
+| Cache | A depth-1 bare clone under `CacheDir`, shared by activities on one worker (flock). It is a cache, not state: a new worker or microVM pays one shallow fetch. On Firecracker, put `CacheDir` on the VM disk (not tmpfs) and bake a warm cache into the snapshot if cold starts matter. |
+| Params | `subpath` mounts one directory of the repository. |
+| Not supported | Git LFS (pointer files read as text), submodule contents (they list as empty directories). |
+
 ---
 
 ## Structured view (blocks)

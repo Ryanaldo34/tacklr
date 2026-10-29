@@ -10,11 +10,12 @@
 //   - FuseMount / FuseProbe — kernel tree; the mount error means FUSE is unavailable
 //   - ContentRev / ContentHash — session-visible content identity (for tools)
 //   - SessionAuth + TokenHolder + Binding — session-scoped user-owned credentials (never on MountSpec)
+//   - GitRepo + GitToken / GitSSHKey — git clone onto worker disk; the agent runs git itself
 //   - MountSpec — durable mount description (checkpoint-safe; one record per /workspace/<name>)
 //   - WorkspacePoint — /workspace (the only top-level mount)
 //   - Provider / Open / S3API / DriveAPI / GraphAPI — custom backends (Blob uses S3API).
 //     Hosts construct default backends from this package (Local, S3, Blob,
-//     Drive, Graph, Memory, NewGoogleDrive, NewGraph).
+//     Drive, Graph, Git, NewGoogleDrive, NewGraph).
 //   - File, FileInfo, DirEntry — I/O types (File is Close+Stat; io.Reader / io.ReaderAt / io.Writer via comma-ok)
 //   - Document / Textual / Structured / TextDocument — content IR
 //   - Block / StyleMeta / Span / FindBlock / BlockReplaceSpan — structured view
@@ -29,10 +30,9 @@
 // ReadText / TextDocument / WriteDocument. ContentRev is the stable token
 // those tools pass — not a large MountSession surface.
 //
-// This package never imports brain. Brain implements Provider in package brain
-// (Engrams as Markdown files). Optional artifact IndexPath lives in package
-// vfsindex (imports both; skips Profile=="brain"). FUSE / host rg read
-// ReadText (provider IR plaintext). This package does not ship a grep tool.
+// This package never imports brain; knowledge is not a mount. Optional
+// artifact indexing lives in package vfsindex (imports both). FUSE / host rg
+// read ReadText (provider IR plaintext). This package does not ship a grep tool.
 //
 // Hosts should not need anything else. Host paths and bucket details stay
 // inside providers. MountSession only keeps the mount map and routes paths.
