@@ -21,7 +21,7 @@ concurrency:
 
 env:
   GO_VERSION: "1.27.x"
-  GOLANGCI_LINT_VERSION: v2.13.2
+  GOLANGCI_LINT_VERSION: v2.14.0
   # Keep in sync with go install path used below.
   GO_TEST_COVERAGE_VERSION: v2.17.0
 

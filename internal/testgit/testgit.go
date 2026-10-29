@@ -5,6 +5,7 @@
 package testgit
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/pem"
@@ -12,7 +13,7 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/http/cgi"
+	"net/http/cgi" //nolint:gosec // G504: the Httpoxy CVE is Go < 1.6.3; this serves git http-backend in tests
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -129,7 +130,7 @@ func (s *Server) startSSH(t testing.TB) {
 	must(t, err)
 
 	cfg := &ssh.ServerConfig{PublicKeyCallback: func(_ ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
-		if string(key.Marshal()) == string(authorized.Marshal()) {
+		if bytes.Equal(key.Marshal(), authorized.Marshal()) {
 			return &ssh.Permissions{}, nil
 		}
 		return nil, errors.New("unknown key")
@@ -192,7 +193,7 @@ func (s *Server) serveSession(ch ssh.Channel, reqs <-chan *ssh.Request) {
 		}
 		_ = req.Reply(true, nil)
 		repo := filepath.Join(s.root, filepath.Base(strings.Trim(arg, "'\"/")))
-		cmd := exec.Command("git", strings.TrimPrefix(svc, "git-"), repo)
+		cmd := exec.Command("git", strings.TrimPrefix(svc, "git-"), repo) //nolint:gosec // G204: svc is one of two fixed services; repo is under the test root
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = ch, ch, ch.Stderr()
 		status := uint32(0)
 		if err := cmd.Run(); err != nil {
