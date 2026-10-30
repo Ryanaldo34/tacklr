@@ -18,7 +18,7 @@ func TestEngine_ReadRejectsOutsideScope(t *testing.T) {
 	store := brain.NewMemoryStore()
 	nsA, nsB := mustNS(t, "org", "a"), mustNS(t, "org", "b")
 	id := uuid.New()
-	if err := store.Put(context.Background(), brain.Object{
+	if err := putFixture(store, brain.Object{
 		ID: id, Kind: "Document", Content: "secret", Namespace: nsA,
 	}); err != nil {
 		t.Fatal(err)
@@ -34,19 +34,19 @@ func TestEngine_ReadRejectsOutsideScope(t *testing.T) {
 	}
 
 	deleted := time.Now().UTC()
-	if err := store.Put(context.Background(), brain.Object{
+	if err := putFixture(store, brain.Object{
 		ID: id, Kind: "Document", Namespace: nsA, DeletedAt: &deleted,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	_, err = eng.Read(ctx, brain.Scope{}, id)
+	_, err = eng.Read(ctx, brain.Scope{Namespace: nsA}, id)
 	if !errors.Is(err, brain.ErrNotFound) {
 		t.Fatalf("soft-deleted: %v", err)
 	}
 
 	objNS := mustNS(t, "org", "acme", "workspace", "west")
 	hid := uuid.New()
-	if err := store.Put(context.Background(), brain.Object{
+	if err := putFixture(store, brain.Object{
 		ID: hid, Kind: "Document", Content: "nested", Namespace: objNS,
 	}); err != nil {
 		t.Fatal(err)
@@ -85,31 +85,31 @@ func TestEngine_SchemaAndOrderedChildren(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Put(context.Background(), brain.Object{
+	if err := putFixture(store, brain.Object{
 		ID: parentID, Kind: "Document", Title: "Parent", Namespace: ns,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Put(context.Background(), brain.Object{
+	if err := putFixture(store, brain.Object{
 		ID: c2, Kind: "Chunk", Title: "second", Namespace: ns,
 		ParentID: &parentID, Position: &pos2, Content: "c2-body",
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Put(context.Background(), brain.Object{
+	if err := putFixture(store, brain.Object{
 		ID: c1, Kind: "Chunk", Title: "first", Namespace: ns,
 		ParentID: &parentID, Position: &pos1, Content: "c1-body",
 	}); err != nil {
 		t.Fatal(err)
 	}
 	deleted := time.Now().UTC()
-	if err := store.Put(context.Background(), brain.Object{
+	if err := putFixture(store, brain.Object{
 		ID: uuid.New(), Kind: "Chunk", Title: "gone", Namespace: ns,
 		ParentID: &parentID, Position: &pos1, DeletedAt: &deleted,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Put(context.Background(), brain.Object{
+	if err := putFixture(store, brain.Object{
 		ID: uuid.New(), Kind: "Chunk", Title: "other-ns", Namespace: mustNS(t, "id", uuid.NewString()),
 		ParentID: &parentID, Position: &pos1,
 	}); err != nil {
@@ -175,7 +175,7 @@ func TestEngine_ListChildrenRequiresVisibleParent(t *testing.T) {
 	store := brain.NewMemoryStore()
 	ns := mustNS(t, "id", uuid.NewString())
 	parentID := uuid.New()
-	if err := store.Put(context.Background(), brain.Object{
+	if err := putFixture(store, brain.Object{
 		ID: parentID, Kind: "Document", Namespace: ns,
 	}); err != nil {
 		t.Fatal(err)
@@ -209,10 +209,10 @@ func TestMemoryStore_PutRequiresIdentity(t *testing.T) {
 		name string
 		fn   func() error
 	}{
-		{"empty object", func() error { return s.Put(context.Background(), brain.Object{}) }},
-		{"missing kind", func() error { return s.Put(context.Background(), brain.Object{ID: uuid.New()}) }},
+		{"empty object", func() error { return putFixture(s, brain.Object{}) }},
+		{"missing kind", func() error { return putFixture(s, brain.Object{ID: uuid.New()}) }},
 		{"missing namespace", func() error {
-			return s.Put(context.Background(), brain.Object{ID: uuid.New(), Kind: "X"})
+			return putFixture(s, brain.Object{ID: uuid.New(), Kind: "X"})
 		}},
 		{"empty kind registry", func() error { return s.PutKind(context.Background(), brain.ObjectKind{}) }},
 	}
@@ -275,7 +275,9 @@ func TestNewEngine_embedderOrLexicalOnly(t *testing.T) {
 
 type nopEmbed struct{}
 
-func (nopEmbed) Embed(context.Context, string) ([]float32, error) { return []float32{1}, nil }
+func (nopEmbed) Embed(_ context.Context, texts []string) ([][]float32, error) {
+	return repeatVector([]float32{1}, len(texts)), nil
+}
 
 // TestNewEngine_options: WithReranker/ExpandRecipes/Kinds construct path.
 func TestNewEngine_options(t *testing.T) {
@@ -309,8 +311,8 @@ func TestNewEngine_options(t *testing.T) {
 	ns := mustNS(t, "id", uuid.NewString())
 	now := time.Now().UTC()
 	pos := 1
-	_ = store.Put(ctx, brain.Object{ID: parent, Kind: "Document", Title: "p", Namespace: ns, UpdatedAt: now})
-	_ = store.Put(ctx, brain.Object{ID: child, Kind: "Chunk", Title: "c", ParentID: &parent, Position: &pos, Namespace: ns, UpdatedAt: now})
+	_ = putFixture(store, brain.Object{ID: parent, Kind: "Document", Title: "p", Namespace: ns, UpdatedAt: now})
+	_ = putFixture(store, brain.Object{ID: child, Kind: "Chunk", Title: "c", ParentID: &parent, Position: &pos, Namespace: ns, UpdatedAt: now})
 	scope := brain.Scope{Namespace: ns}
 	res, err := eng.ExpandByRecipe(ctx, scope, parent, "kids", brain.NewSearchContext())
 	if err != nil {
@@ -328,15 +330,22 @@ func TestNewEngine_options(t *testing.T) {
 	if eng.HasEdgeSearch() {
 		t.Fatal("memory store has no edge search")
 	}
-	if _, err := eng.FindLinks(ctx, brain.Scope{}, brain.FindLinksRequest{
+	if _, err := eng.FindLinks(ctx, brain.Scope{Namespace: mustNS(t, "org", "a")}, brain.FindLinksRequest{
 		RelationType: "about", Query: "x",
 	}); !errors.Is(err, brain.ErrUnsupported) {
 		t.Fatalf("FindLinks without graph: %v", err)
 	}
-	if _, err := eng.FindObjects(ctx, brain.Scope{}, brain.FindObjectsRequest{Query: "x"}, brain.NewSearchContext()); !errors.Is(err, brain.ErrUnsupported) {
+	if _, err := eng.FindObjects(ctx, brain.Scope{Namespace: mustNS(t, "org", "a")}, brain.FindObjectsRequest{Query: "x"}, brain.NewSearchContext()); !errors.Is(err, brain.ErrUnsupported) {
 		t.Fatalf("FindObjects without graph: %v", err)
 	}
 	if eng.HasObjectSearch() {
 		// optional — only when graph object searcher is set
 	}
+}
+
+func (nopEmbed) Model() string { return "test-model" }
+
+// putFixture writes obj straight to the store under its own namespace.
+func putFixture(w brain.ObjectWriter, obj brain.Object) error {
+	return w.Put(context.Background(), brain.Scope{Namespace: obj.Namespace}, obj)
 }

@@ -273,15 +273,15 @@ func TestEval_graphRAGScopeSafeMultiHop(t *testing.T) {
 	now := time.Now().UTC()
 	// a --refs--> bridge(nsB) --refs--> c(nsA). Hop-2 must not reach c via bridge.
 	a, bridge, c := uuid.New(), uuid.New(), uuid.New()
-	_ = store.Put(ctx, brain.Object{ID: a, Kind: "Document", Title: "seed", Namespace: nsA, UpdatedAt: now})
-	_ = store.Put(ctx, brain.Object{ID: bridge, Kind: "Document", Title: "bridge", Namespace: nsB, UpdatedAt: now})
-	_ = store.Put(ctx, brain.Object{ID: c, Kind: "Document", Title: "target", Namespace: nsA, UpdatedAt: now})
+	_ = putFixture(store, brain.Object{ID: a, Kind: "Document", Title: "seed", Namespace: nsA, UpdatedAt: now})
+	_ = putFixture(store, brain.Object{ID: bridge, Kind: "Document", Title: "bridge", Namespace: nsB, UpdatedAt: now})
+	_ = putFixture(store, brain.Object{ID: c, Kind: "Document", Title: "target", Namespace: nsA, UpdatedAt: now})
 	_ = g.AddEdge(ctx, a, bridge, "references", brain.EdgeMeta{})
 	_ = g.AddEdge(ctx, bridge, c, "references", brain.EdgeMeta{})
 	// In-scope path of length 2 for a positive outcome.
 	mid, leaf := uuid.New(), uuid.New()
-	_ = store.Put(ctx, brain.Object{ID: mid, Kind: "Document", Title: "mid", Namespace: nsA, UpdatedAt: now})
-	_ = store.Put(ctx, brain.Object{ID: leaf, Kind: "Document", Title: "leaf", Namespace: nsA, UpdatedAt: now})
+	_ = putFixture(store, brain.Object{ID: mid, Kind: "Document", Title: "mid", Namespace: nsA, UpdatedAt: now})
+	_ = putFixture(store, brain.Object{ID: leaf, Kind: "Document", Title: "leaf", Namespace: nsA, UpdatedAt: now})
 	_ = g.AddEdge(ctx, a, mid, "references", brain.EdgeMeta{})
 	_ = g.AddEdge(ctx, mid, leaf, "references", brain.EdgeMeta{})
 
@@ -324,10 +324,10 @@ func TestEval_degradeEmbedderKeepsLexical(t *testing.T) {
 	now := time.Now().UTC()
 	parent, part := uuid.New(), uuid.New()
 	pos := 1
-	_ = store.Put(ctx, brain.Object{ID: parent, Kind: "Document", Title: "Widgets", Namespace: ns, UpdatedAt: now})
-	_ = store.Put(ctx, brain.Object{
+	_ = putFixture(store, brain.Object{ID: parent, Kind: "Document", Title: "Widgets", Namespace: ns, UpdatedAt: now})
+	_ = putFixture(store, brain.Object{
 		ID: part, Kind: "Chunk", Content: "unique-widget-token alpha", ParentID: &parent, Position: &pos,
-		Namespace: ns, UpdatedAt: now, Embedding: []float32{1, 0},
+		Namespace: ns, UpdatedAt: now, Embedding: []float32{1, 0}, EmbeddingModel: "test-model",
 	})
 	eng, err := brain.NewEngine(store,
 		brain.WithEmbedder(failEmbedder{}),
@@ -354,8 +354,8 @@ func TestEval_degradeGraphKeepsContainment(t *testing.T) {
 	now := time.Now().UTC()
 	parent, child := uuid.New(), uuid.New()
 	pos := 1
-	_ = store.Put(ctx, brain.Object{ID: parent, Kind: "Document", Namespace: ns, UpdatedAt: now})
-	_ = store.Put(ctx, brain.Object{
+	_ = putFixture(store, brain.Object{ID: parent, Kind: "Document", Namespace: ns, UpdatedAt: now})
+	_ = putFixture(store, brain.Object{
 		ID: child, Kind: "Chunk", Content: "c", ParentID: &parent, Position: &pos,
 		Namespace: ns, UpdatedAt: now,
 	})
@@ -385,11 +385,11 @@ func TestConcurrent_searchAndExpand(t *testing.T) {
 	ns := mustNS(t, "id", uuid.NewString())
 	now := time.Now().UTC()
 	parent := uuid.New()
-	_ = store.Put(ctx, brain.Object{ID: parent, Kind: "Document", Title: "Doc", Namespace: ns, UpdatedAt: now})
+	_ = putFixture(store, brain.Object{ID: parent, Kind: "Document", Title: "Doc", Namespace: ns, UpdatedAt: now})
 	for i := 1; i <= 8; i++ {
 		id := uuid.New()
 		pos := i
-		_ = store.Put(ctx, brain.Object{
+		_ = putFixture(store, brain.Object{
 			ID: id, Kind: "Chunk", Content: "concurrent retrieval token",
 			ParentID: &parent, Position: &pos, Namespace: ns, UpdatedAt: now,
 		})
@@ -458,7 +458,7 @@ func containsUUID(ids []uuid.UUID, want uuid.UUID) bool {
 // failEmbedder is only used for soft-degrade goldens (embed channel down, lexical stays).
 type failEmbedder struct{}
 
-func (failEmbedder) Embed(context.Context, string) ([]float32, error) {
+func (failEmbedder) Embed(context.Context, []string) ([][]float32, error) {
 	return nil, errString("embed down")
 }
 
@@ -476,3 +476,5 @@ func (failGraph) SearchEdgesText(context.Context, string, string, int) ([]brain.
 type errString string
 
 func (e errString) Error() string { return string(e) }
+
+func (failEmbedder) Model() string { return "test-model" }

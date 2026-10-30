@@ -49,6 +49,10 @@ type FileInfo struct {
 	ModTime   time.Time
 	IsDir     bool
 	MediaType string
+	// Version changes whenever the file's content changes (an ETag, a
+	// content tag, or size+mtime+inode on disk). Empty when the backend
+	// cannot tell; callers then read the content to detect a change.
+	Version string
 }
 
 // DirEntry is a single directory entry.

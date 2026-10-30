@@ -72,8 +72,8 @@ func TestAsyncScheduler_notifyCoalesceAndEventualIndex(t *testing.T) {
 	}
 }
 
-// TestIndexPathResult_andUnindex: public helpers return compact outcomes.
-func TestIndexPathResult_andUnindex(t *testing.T) {
+// TestIndexPath_andUnindex: public helpers return compact outcomes.
+func TestIndexPath_andUnindex(t *testing.T) {
 	ctx := context.Background()
 	ms, err := vfs.Tree(vfs.At("work", vfs.Local(t.TempDir())))(ctx, "result-unindex", vfs.Request{})
 	if err != nil {
@@ -100,15 +100,15 @@ func TestIndexPathResult_andUnindex(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := idx.IndexPathResult(ctx, "/workspace/work/x.txt")
+	res, err := idx.IndexPath(ctx, "/workspace/work/x.txt")
 	if err != nil || res != vfsindex.PathIndexed {
 		t.Fatalf("indexed: res=%q err=%v", res, err)
 	}
-	res, err = idx.IndexPathResult(ctx, "/workspace/work/x.txt")
+	res, err = idx.IndexPath(ctx, "/workspace/work/x.txt")
 	if err != nil || res != vfsindex.PathSkipped {
 		t.Fatalf("skipped: res=%q err=%v", res, err)
 	}
-	res, err = idx.IndexPathResult(ctx, "/workspace/work")
+	res, err = idx.IndexPath(ctx, "/workspace/work")
 	if err != nil || res != vfsindex.PathDirectory {
 		t.Fatalf("directory: res=%q err=%v", res, err)
 	}
@@ -131,8 +131,8 @@ func TestIndexPathResult_andUnindex(t *testing.T) {
 		t.Fatalf("noop unindex: removed=%v err=%v", removed, err)
 	}
 
-	// Missing path IndexPathResult → removed (no mirror left)
-	res, err = idx.IndexPathResult(ctx, "/workspace/work/missing.txt")
+	// Missing path IndexPath → removed (no mirror left)
+	res, err = idx.IndexPath(ctx, "/workspace/work/missing.txt")
 	if err != nil || res != vfsindex.PathRemoved {
 		t.Fatalf("removed missing: res=%q err=%v", res, err)
 	}
@@ -142,7 +142,7 @@ func TestIndexPathResult_andUnindex(t *testing.T) {
 	if err := ms.WriteDocument(ctx, doc); err != nil {
 		t.Fatal(err)
 	}
-	res, err = idx.IndexPathResult(ctx, "/workspace/work/dirty.txt")
+	res, err = idx.IndexPath(ctx, "/workspace/work/dirty.txt")
 	if err != nil || res != vfsindex.PathIndexed {
 		t.Fatalf("dirty index: res=%q err=%v", res, err)
 	}

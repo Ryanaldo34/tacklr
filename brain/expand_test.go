@@ -3,6 +3,7 @@ package brain_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -32,13 +33,13 @@ func TestExpand_partNeighborhoodWindow(t *testing.T) {
 	ns := mustNS(t, "id", uuid.NewString())
 	now := time.Now().UTC()
 	parent := uuid.New()
-	_ = store.Put(context.Background(), brain.Object{ID: parent, Kind: "Document", Title: "Doc", Namespace: ns, UpdatedAt: now})
+	_ = putFixture(store, brain.Object{ID: parent, Kind: "Document", Title: "Doc", Namespace: ns, UpdatedAt: now})
 	var parts []uuid.UUID
 	for i := 1; i <= 7; i++ {
 		id := uuid.New()
 		parts = append(parts, id)
 		pos := i
-		_ = store.Put(context.Background(), brain.Object{
+		_ = putFixture(store, brain.Object{
 			ID: id, Kind: "Chunk", Title: "p", Content: "c",
 			ParentID: &parent, Position: &pos, Namespace: ns, UpdatedAt: now,
 		})
@@ -75,11 +76,11 @@ func TestExpand_highCardinalityResultSetAndContinue(t *testing.T) {
 	ns := mustNS(t, "id", uuid.NewString())
 	now := time.Now().UTC()
 	parent := uuid.New()
-	_ = store.Put(context.Background(), brain.Object{ID: parent, Kind: "Document", Namespace: ns, UpdatedAt: now})
+	_ = putFixture(store, brain.Object{ID: parent, Kind: "Document", Namespace: ns, UpdatedAt: now})
 	for i := 1; i <= 30; i++ {
 		id := uuid.New()
 		pos := i
-		_ = store.Put(context.Background(), brain.Object{
+		_ = putFixture(store, brain.Object{
 			ID: id, Kind: "Chunk", Content: "c", ParentID: &parent, Position: &pos,
 			Namespace: ns, UpdatedAt: now,
 		})
@@ -124,7 +125,7 @@ func TestExpand_directionFiltersEdges(t *testing.T) {
 	now := time.Now().UTC()
 	a, b, c := uuid.New(), uuid.New(), uuid.New()
 	for _, id := range []uuid.UUID{a, b, c} {
-		_ = store.Put(ctx, brain.Object{ID: id, Kind: "Document", Title: id.String()[:8], Namespace: ns, UpdatedAt: now})
+		_ = putFixture(store, brain.Object{ID: id, Kind: "Document", Title: id.String()[:8], Namespace: ns, UpdatedAt: now})
 	}
 	_ = g.AddEdge(ctx, a, b, "references", brain.EdgeMeta{})
 	_ = g.AddEdge(ctx, b, c, "references", brain.EdgeMeta{})
@@ -168,10 +169,10 @@ func TestExpand_graphContinuePreservesRelation(t *testing.T) {
 	ns := mustNS(t, "id", uuid.NewString())
 	now := time.Now().UTC()
 	root := uuid.New()
-	_ = store.Put(ctx, brain.Object{ID: root, Kind: "Document", Title: "root", Namespace: ns, UpdatedAt: now})
+	_ = putFixture(store, brain.Object{ID: root, Kind: "Document", Title: "root", Namespace: ns, UpdatedAt: now})
 	for i := 0; i < 8; i++ {
 		id := uuid.New()
-		_ = store.Put(ctx, brain.Object{ID: id, Kind: "Document", Title: id.String()[:8], Namespace: ns, UpdatedAt: now})
+		_ = putFixture(store, brain.Object{ID: id, Kind: "Document", Title: id.String()[:8], Namespace: ns, UpdatedAt: now})
 		_ = g.AddEdge(ctx, root, id, "references", brain.EdgeMeta{Note: "hop-" + id.String()[:4]})
 	}
 	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithGraph(g), brain.WithConfig(brain.EngineConfig{
@@ -226,7 +227,7 @@ func TestExpandMany_landingsAndBudget(t *testing.T) {
 		{ID: c2, Kind: "Chunk", Title: "c2", ParentID: &p2, Namespace: ns, UpdatedAt: now},
 		{ID: n1, Kind: "Document", Title: "neighbor", Namespace: ns, UpdatedAt: now},
 	} {
-		if err := store.Put(ctx, o); err != nil {
+		if err := putFixture(store, o); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -292,13 +293,13 @@ func TestSearch_withReranker(t *testing.T) {
 	strong, weak := uuid.New(), uuid.New()
 	strongPart, weakPart := uuid.New(), uuid.New()
 	pos := 1
-	_ = store.Put(ctx, brain.Object{ID: strong, Kind: "Document", Title: "strong", Namespace: ns, UpdatedAt: now})
-	_ = store.Put(ctx, brain.Object{
+	_ = putFixture(store, brain.Object{ID: strong, Kind: "Document", Title: "strong", Namespace: ns, UpdatedAt: now})
+	_ = putFixture(store, brain.Object{
 		ID: strongPart, Kind: "Chunk", Content: "alpha alpha alpha",
 		ParentID: &strong, Position: &pos, Namespace: ns, UpdatedAt: now,
 	})
-	_ = store.Put(ctx, brain.Object{ID: weak, Kind: "Document", Title: "weak", Namespace: ns, UpdatedAt: now})
-	_ = store.Put(ctx, brain.Object{
+	_ = putFixture(store, brain.Object{ID: weak, Kind: "Document", Title: "weak", Namespace: ns, UpdatedAt: now})
+	_ = putFixture(store, brain.Object{
 		ID: weakPart, Kind: "Chunk", Content: "alpha beta beta beta beta beta beta beta beta",
 		ParentID: &weak, Position: &pos, Namespace: ns, UpdatedAt: now,
 	})
@@ -338,10 +339,10 @@ func TestSearch_optInDecayReorders(t *testing.T) {
 	pos := 1
 	put := func(parent, part uuid.UUID, content string) {
 		t.Helper()
-		if err := store.Put(ctx, brain.Object{ID: parent, Kind: "Document", Namespace: ns, UpdatedAt: now}); err != nil {
+		if err := putFixture(store, brain.Object{ID: parent, Kind: "Document", Namespace: ns, UpdatedAt: now}); err != nil {
 			t.Fatal(err)
 		}
-		if err := store.Put(ctx, brain.Object{
+		if err := putFixture(store, brain.Object{
 			ID: part, Kind: "Chunk", Content: content, ParentID: &parent, Position: &pos,
 			Namespace: ns, UpdatedAt: now,
 		}); err != nil {
@@ -379,12 +380,12 @@ func TestExpand_partMixedContainmentAndGraph(t *testing.T) {
 	part := uuid.New()
 	linked := uuid.New()
 	pos := 1
-	_ = store.Put(context.Background(), brain.Object{ID: parent, Kind: "Document", Namespace: ns, UpdatedAt: now})
-	_ = store.Put(context.Background(), brain.Object{
+	_ = putFixture(store, brain.Object{ID: parent, Kind: "Document", Namespace: ns, UpdatedAt: now})
+	_ = putFixture(store, brain.Object{
 		ID: part, Kind: "Chunk", Content: "c", ParentID: &parent, Position: &pos,
 		Namespace: ns, UpdatedAt: now,
 	})
-	_ = store.Put(context.Background(), brain.Object{ID: linked, Kind: "Document", Title: "ref", Namespace: ns, UpdatedAt: now})
+	_ = putFixture(store, brain.Object{ID: linked, Kind: "Document", Title: "ref", Namespace: ns, UpdatedAt: now})
 
 	g := brain.NewMemoryGraph()
 	_ = g.AddEdge(context.Background(), part, linked, "references", brain.EdgeMeta{})
@@ -415,13 +416,10 @@ func TestExpand_partMixedContainmentAndGraph(t *testing.T) {
 }
 
 func TestExpand_graphStoreErrorSurfaces(t *testing.T) {
-	store := &errAfterGetStore{
-		ok:     brain.NewMemoryStore(),
-		failID: uuid.New(),
-	}
+	store := &failingReads{MemoryStore: brain.NewMemoryStore(), failID: uuid.New()}
 	ns := mustNS(t, "id", uuid.NewString())
 	root := uuid.New()
-	_ = store.ok.Put(context.Background(), brain.Object{ID: root, Kind: "Document", Namespace: ns})
+	_ = putFixture(store.MemoryStore, brain.Object{ID: root, Kind: "Document", Namespace: ns})
 
 	g := brain.NewMemoryGraph()
 	_ = g.AddEdge(context.Background(), root, store.failID, "references", brain.EdgeMeta{})
@@ -438,55 +436,31 @@ func TestExpand_graphStoreErrorSurfaces(t *testing.T) {
 	}
 }
 
-type errAfterGetStore struct {
-	ok     *brain.MemoryStore
+// failingReads is a store whose reads of failID fail, as a database does.
+type failingReads struct {
+	*brain.MemoryStore
 	failID uuid.UUID
 }
 
-func (s *errAfterGetStore) Get(ctx context.Context, scope brain.Scope, id uuid.UUID) (brain.Object, error) {
+func (s *failingReads) Get(ctx context.Context, scope brain.Scope, id uuid.UUID) (brain.Object, error) {
 	if id == s.failID {
 		return brain.Object{}, errors.New("boom")
 	}
-	return s.ok.Get(ctx, scope, id)
+	return s.MemoryStore.Get(ctx, scope, id)
 }
-func (s *errAfterGetStore) ListChildren(ctx context.Context, scope brain.Scope, parentID uuid.UUID) ([]brain.Object, error) {
-	return s.ok.ListChildren(ctx, scope, parentID)
-}
-func (s *errAfterGetStore) GetKind(ctx context.Context, kind string) (brain.ObjectKind, error) {
-	return s.ok.GetKind(ctx, kind)
-}
-func (s *errAfterGetStore) ListKinds(ctx context.Context) ([]brain.ObjectKind, error) {
-	return s.ok.ListKinds(ctx)
-}
-func (s *errAfterGetStore) SearchLexical(ctx context.Context, scope brain.Scope, query string, filters brain.Filter, k int) ([]brain.ScoredID, error) {
-	return s.ok.SearchLexical(ctx, scope, query, filters, k)
-}
-func (s *errAfterGetStore) SearchVector(ctx context.Context, scope brain.Scope, emb []float32, filters brain.Filter, k int) ([]brain.ScoredID, error) {
-	return s.ok.SearchVector(ctx, scope, emb, filters, k)
-}
-func (s *errAfterGetStore) SearchTrigram(ctx context.Context, scope brain.Scope, query string, filters brain.Filter, k int) ([]brain.ScoredID, error) {
-	return s.ok.SearchTrigram(ctx, scope, query, filters, k)
-}
-func (s *errAfterGetStore) GetMany(ctx context.Context, scope brain.Scope, ids []uuid.UUID) ([]brain.Object, error) {
-	var out []brain.Object
-	for _, id := range ids {
-		o, err := s.Get(ctx, scope, id)
-		if err != nil {
-			if errors.Is(err, brain.ErrNotFound) {
-				continue
-			}
-			return nil, err
-		}
-		out = append(out, o)
+
+func (s *failingReads) GetMany(ctx context.Context, scope brain.Scope, ids []uuid.UUID) ([]brain.Object, error) {
+	if slices.Contains(ids, s.failID) {
+		return nil, errors.New("boom")
 	}
-	return out, nil
+	return s.MemoryStore.GetMany(ctx, scope, ids)
 }
 
 func TestExpand_graphRequiresBackend(t *testing.T) {
 	store := brain.NewMemoryStore()
 	ns := mustNS(t, "id", uuid.NewString())
 	id := uuid.New()
-	_ = store.Put(context.Background(), brain.Object{ID: id, Kind: "Document", Namespace: ns})
+	_ = putFixture(store, brain.Object{ID: id, Kind: "Document", Namespace: ns})
 	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
 	if err != nil {
 		t.Fatal(err)
@@ -504,7 +478,7 @@ func TestExpand_missingObject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = eng.Expand(context.Background(), brain.Scope{}, brain.ExpandRequest{ObjectID: uuid.New()}, brain.NewSearchContext())
+	_, err = eng.Expand(context.Background(), brain.Scope{Namespace: mustNS(t, "org", "a")}, brain.ExpandRequest{ObjectID: uuid.New()}, brain.NewSearchContext())
 	if !errors.Is(err, brain.ErrNotFound) {
 		t.Fatalf("got %v", err)
 	}

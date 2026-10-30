@@ -5,6 +5,7 @@ package temporaldocker
 import (
 	"context"
 	"fmt"
+	"net"
 	"strings"
 	"sync"
 	"testing"
@@ -71,6 +72,25 @@ func stop() {
 		_ = netw.Remove(context.Background())
 		netw = nil
 	}
+}
+
+// ipEndpoint is the container's mapped frontend port on an IP literal. gRPC
+// looks up a DNS TXT record for every host name it dials, and a slow lookup
+// can outlast the SDK's 5s connect check.
+func ipEndpoint(ctx context.Context, c testcontainers.Container) (string, error) {
+	host, err := c.Host(ctx)
+	if err != nil {
+		return "", err
+	}
+	port, err := c.MappedPort(ctx, "7233/tcp")
+	if err != nil {
+		return "", err
+	}
+	ips, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+	if err != nil {
+		return "", err
+	}
+	return net.JoinHostPort(ips[0].String(), port.Port()), nil
 }
 
 func start() error {
@@ -159,7 +179,7 @@ temporal-sql-tool --plugin postgres12 --ep postgresql -u temporal -p 5432 --db t
 		stop()
 		return err
 	}
-	got, err := server.PortEndpoint(ctx, "7233/tcp", "")
+	got, err := ipEndpoint(ctx, server)
 	if err != nil {
 		_ = server.Terminate(context.Background())
 		stop()

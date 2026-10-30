@@ -14,15 +14,15 @@ func TestMemoryStore_searchChannelsAndClone(t *testing.T) {
 	ns := mustNS(t, "id", uuid.NewString())
 	now := time.Now().UTC()
 	parent := uuid.New()
-	_ = s.Put(context.Background(), Object{ID: parent, Kind: "Document", Title: "Doc", Namespace: ns, UpdatedAt: now})
+	_ = putFixture(s, Object{ID: parent, Kind: "Document", Title: "Doc", Namespace: ns, UpdatedAt: now})
 	p1, p2 := uuid.New(), uuid.New()
 	pos1, pos2 := 1, 2
-	_ = s.Put(context.Background(), Object{
+	_ = putFixture(s, Object{
 		ID: p1, Kind: "Chunk", Title: "alpha", Content: "oauth pkce flow",
 		ParentID: &parent, Position: &pos1, Namespace: ns, UpdatedAt: now,
 		Embedding: []float32{1, 0, 0},
 	})
-	_ = s.Put(context.Background(), Object{
+	_ = putFixture(s, Object{
 		ID: p2, Kind: "Chunk", Title: "beta", Content: "pasta recipes",
 		ParentID: &parent, Position: &pos2, Namespace: ns, UpdatedAt: now,
 		Embedding: []float32{0, 1, 0},
@@ -34,7 +34,7 @@ func TestMemoryStore_searchChannelsAndClone(t *testing.T) {
 	if err != nil || len(lex) == 0 || lex[0].ID != p1 {
 		t.Fatalf("lex: %+v %v", lex, err)
 	}
-	vec, err := s.SearchVector(ctx, Scope{Namespace: ns}, []float32{0.9, 0.1, 0}, Filter{}, 5)
+	vec, err := s.SearchVector(ctx, Scope{Namespace: ns}, "", []float32{0.9, 0.1, 0}, Filter{}, 5)
 	if err != nil || len(vec) == 0 || vec[0].ID != p1 {
 		t.Fatalf("vec: %+v %v", vec, err)
 	}
@@ -43,7 +43,7 @@ func TestMemoryStore_searchChannelsAndClone(t *testing.T) {
 		t.Fatalf("tri: %+v %v", tri, err)
 	}
 	// Empty channels
-	if got, _ := s.SearchVector(ctx, Scope{}, nil, Filter{}, 5); got != nil {
+	if got, _ := s.SearchVector(ctx, Scope{}, "", nil, Filter{}, 5); got != nil {
 		t.Fatal(got)
 	}
 	if got, _ := s.SearchTrigram(ctx, Scope{}, "", Filter{}, 5); got != nil {
@@ -59,7 +59,7 @@ func TestMemoryStore_searchChannelsAndClone(t *testing.T) {
 	}
 	// Position nil sorts as 0 without panicking.
 	p0 := uuid.New()
-	_ = s.Put(context.Background(), Object{
+	_ = putFixture(s, Object{
 		ID: p0, Kind: "Chunk", Title: "nil-pos", Content: "z",
 		ParentID: &parent, Namespace: ns, UpdatedAt: now,
 	})
@@ -76,10 +76,15 @@ func TestMemoryStore_searchChannelsAndClone(t *testing.T) {
 	if _, err := s.SearchLexical(ctx, Scope{Namespace: ns}, "oauth", bad, 5); err == nil {
 		t.Fatal("lexical filter")
 	}
-	if _, err := s.SearchVector(ctx, Scope{Namespace: ns}, []float32{1, 0, 0}, bad, 5); err == nil {
+	if _, err := s.SearchVector(ctx, Scope{Namespace: ns}, "", []float32{1, 0, 0}, bad, 5); err == nil {
 		t.Fatal("vector filter")
 	}
 	if _, err := s.SearchTrigram(ctx, Scope{Namespace: ns}, "oauth", bad, 5); err == nil {
 		t.Fatal("trigram filter")
 	}
+}
+
+// putFixture writes obj straight to the store under its own namespace.
+func putFixture(w ObjectWriter, obj Object) error {
+	return w.Put(context.Background(), Scope{Namespace: obj.Namespace}, obj)
 }

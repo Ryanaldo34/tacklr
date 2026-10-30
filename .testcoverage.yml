@@ -56,6 +56,10 @@ exclude:
     - internal/testhttp
     - internal/durtest
     - internal/livesess
+    # Store isolation contract, run from each store's tests.
+    - brain/storetest
+    - vfs/internal/vfstest
+    - brain/graphtest
     # In-process git host (HTTP + SSH) for vfs.Git tests.
     - internal/testgit
     # Docker bootstrap for live Temporal tests. Failure branches are the

@@ -10,7 +10,9 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 )
 
 // localProvider is a host directory as a mount source (unexported host root).
@@ -59,9 +61,17 @@ func (p localProvider) Stat(ctx context.Context, name string) (FileInfo, error) 
 		return FileInfo{}, mapOSError(err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
-		if _, err := p.follow(host); err != nil {
+		resolved, err := p.follow(host)
+		if err != nil {
 			return FileInfo{}, err
 		}
+		target, err := os.Stat(resolved)
+		if err != nil {
+			return FileInfo{}, mapOSError(err)
+		}
+		fi := localFileInfo(resolved, target)
+		fi.Name = info.Name()
+		return fi, nil
 	}
 	return localFileInfo(host, info), nil
 }
@@ -85,6 +95,11 @@ func (p localProvider) OpenFile(ctx context.Context, name string, flag int, perm
 	f, err := os.OpenFile(host, flag, perm)
 	if err != nil {
 		return nil, mapOSError(err)
+	}
+	// A directory is no file to read, as on every other backend.
+	if fi, err := f.Stat(); err == nil && fi.IsDir() {
+		_ = f.Close()
+		return nil, fmt.Errorf("%w: %s", ErrIsDir, name)
 	}
 	return &localFile{File: f}, nil
 }
@@ -280,13 +295,28 @@ func canonicalizeDir(dir string) (string, error) {
 }
 
 func fileInfoFromOS(info os.FileInfo) FileInfo {
-	return FileInfo{
+	fi := FileInfo{
 		Name:    info.Name(),
 		Size:    info.Size(),
 		Mode:    info.Mode(),
 		ModTime: info.ModTime(),
 		IsDir:   info.IsDir(),
 	}
+	if !fi.IsDir {
+		fi.Version = localVersion(info)
+	}
+	return fi
+}
+
+// localVersion is size, mtime in nanoseconds and inode (where the OS has
+// one), base 36. A write changes the size or mtime; a replace by rename
+// changes the inode.
+func localVersion(info os.FileInfo) string {
+	v := strconv.FormatInt(info.Size(), 36) + "-" + strconv.FormatInt(info.ModTime().UnixNano(), 36)
+	if st, ok := info.Sys().(*syscall.Stat_t); ok {
+		v += "-" + strconv.FormatUint(st.Ino, 36)
+	}
+	return v
 }
 
 func localFileInfo(host string, info os.FileInfo) FileInfo {

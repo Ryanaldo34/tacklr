@@ -72,6 +72,8 @@ func TestValidateFiltersAgainst_catalogRules(t *testing.T) {
 			Fields: []brain.FieldSpec{
 				{Name: "stage", Type: brain.FieldTypeString},
 				{Name: "amount", Type: brain.FieldTypeNumber},
+				{Name: "signed", Type: brain.FieldTypeBoolean},
+				{Name: "due", Type: brain.FieldTypeDateTime},
 			},
 		},
 		brain.KindSpec{
@@ -94,6 +96,13 @@ func TestValidateFiltersAgainst_catalogRules(t *testing.T) {
 		{"unregistered kind", mustFilter(t, map[string]any{"kind": "Orphan"}), "not registered"},
 		{"unknown property", mustFilter(t, map[string]any{"kind": "Document", "unknown": "x"}), "not filterable"},
 		{"wrong type", mustFilter(t, map[string]any{"kind": "Document", "stage": 1}), "want string"},
+		{"a number field given text", mustFilter(t, map[string]any{"kind": "Document", "amount": "many"}), "want number"},
+		{"a boolean field given text", mustFilter(t, map[string]any{"kind": "Document", "signed": "yes"}), "want boolean"},
+		{"a boolean field given a list", mustFilter(t, map[string]any{"kind": "Document", "signed": []any{true}}), "list values"},
+		{"a datetime field given a number", mustFilter(t, map[string]any{"kind": "Document", "due": 5}), "want datetime"},
+		{"a datetime field given an empty string", mustFilter(t, map[string]any{"kind": "Document", "due": ""}), "empty time"},
+		{"a list item of the wrong type", mustFilter(t, map[string]any{"kind": "Document", "stage": []any{"open", 2}}), "list[1]"},
+		{"valid datetime and boolean", mustFilter(t, map[string]any{"kind": "Document", "due": "2026-01-02", "signed": true}), ""},
 		{"kind list intersection", mustFilter(t, map[string]any{"kind": []any{"Document", "Deal"}, "stage": "open"}), "not filterable"},
 		{"valid single kind", mustFilter(t, map[string]any{"kind": "Document", "stage": "open"}), ""},
 		{"valid list filter", mustFilter(t, map[string]any{"kind": "Document", "stage": []any{"open", "closed"}}), ""},
@@ -109,8 +118,8 @@ func TestValidateFiltersAgainst_catalogRules(t *testing.T) {
 				}
 				return
 			}
-			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-				t.Fatalf("got %v, want containing %q", err, tc.wantErr)
+			if !errors.Is(err, brain.ErrInvalid) || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("got %v, want ErrInvalid containing %q", err, tc.wantErr)
 			}
 		})
 	}
@@ -205,23 +214,23 @@ func TestSearch_catalogRestrictsKindsAndAllowsFilteredHit(t *testing.T) {
 	orphanParent := uuid.New()
 	pos := 1
 
-	if err := store.Put(context.Background(), brain.Object{
+	if err := putFixture(store, brain.Object{
 		ID: docID, Kind: "Document", Title: "Deal memo", Namespace: ns, UpdatedAt: now,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Put(context.Background(), brain.Object{
+	if err := putFixture(store, brain.Object{
 		ID: uuid.New(), Kind: "Chunk", Title: "chunk", Content: "negotiation terms",
 		Namespace: ns, UpdatedAt: now, ParentID: &docID, Position: &pos,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Put(context.Background(), brain.Object{
+	if err := putFixture(store, brain.Object{
 		ID: orphanParent, Kind: "OrphanKind", Title: "orphan parent", Namespace: ns, UpdatedAt: now,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Put(context.Background(), brain.Object{
+	if err := putFixture(store, brain.Object{
 		ID: uuid.New(), Kind: "OrphanKind", Title: "orphan part", Content: "zzzxorphanonlyphrase",
 		Namespace: ns, UpdatedAt: now, ParentID: &orphanParent, Position: &pos,
 	}); err != nil {

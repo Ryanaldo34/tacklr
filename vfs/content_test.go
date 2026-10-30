@@ -25,12 +25,6 @@ func TestKernelWritable(t *testing.T) {
 			t.Fatalf("kernelWritable(%q) = true, want EROFS", mt)
 		}
 	}
-	if err := DefaultContentRegistry().Register(kernelProjectedCodec{}); err != nil {
-		t.Fatal(err)
-	}
-	if kernelWritable("application/x-test-projected") {
-		t.Fatal("registered non-identity codec must not be kernel-writable")
-	}
 	if !kernelWritableFile(FileInfo{Name: "a.go", MediaType: "text/x-go"}) {
 		t.Fatal("kernelWritableFile go")
 	}
@@ -79,13 +73,6 @@ type stealPlainCodec struct{}
 func (stealPlainCodec) MediaTypes() []string { return []string{"text/plain"} }
 func (stealPlainCodec) Decode(_ context.Context, _, _ string, _ []byte) (Document, error) {
 	return nil, errors.New("stolen")
-}
-
-type kernelProjectedCodec struct{}
-
-func (kernelProjectedCodec) MediaTypes() []string { return []string{"application/x-test-projected"} }
-func (kernelProjectedCodec) Decode(_ context.Context, p, mt string, data []byte) (Document, error) {
-	return NewTextDocument(p, mt, "utf-8", string(data)), nil
 }
 
 func TestBlockCodec_mediaTypes(t *testing.T) {

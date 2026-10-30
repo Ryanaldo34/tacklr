@@ -163,6 +163,13 @@ func TestToolPermission_allKinds(t *testing.T) {
 	}
 }
 
+// The registry is process-wide, so test-only types register once per test
+// binary; registering them inside a test panics when it runs again.
+func init() {
+	tacklr.RegisterInterrupt(func() tacklr.Interrupt { return marshalBoom{} })
+	tacklr.RegisterInterrupt(func() tacklr.Interrupt { return unmarshalBoom{} })
+}
+
 // TestRegister_New_Clone covers registry and deep clone outcomes.
 func TestRegister_New_Clone(t *testing.T) {
 	if _, ok := tacklr.NewInterrupt("user_selection_choice"); !ok {
@@ -222,11 +229,9 @@ func TestRegister_New_Clone(t *testing.T) {
 		t.Fatal("clone unknown type")
 	}
 
-	tacklr.RegisterInterrupt(func() tacklr.Interrupt { return marshalBoom{} })
 	if _, err := tacklr.CloneInterrupt(marshalBoom{}); err == nil {
 		t.Fatal("clone marshal error")
 	}
-	tacklr.RegisterInterrupt(func() tacklr.Interrupt { return unmarshalBoom{} })
 	if _, err := tacklr.CloneInterrupt(unmarshalBoom{}); err == nil {
 		t.Fatal("clone unmarshal error")
 	}

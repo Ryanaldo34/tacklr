@@ -205,12 +205,12 @@ func (a AuthContext) WithoutSecrets() AuthContext {
 }
 
 // DeleteSessionMessages removes this session's saved messages from the agent's brain.
-// A nil brain is a no-op.
-func DeleteSessionMessages(ctx context.Context, agent tacklr.AgentOptions, sessionID SessionID) {
-	if agent.Brain == nil || sessionID == "" {
-		return
+// An agent without a brain has none.
+func DeleteSessionMessages(ctx context.Context, agent tacklr.AgentOptions, sessionID SessionID) error {
+	if agent.Brain == nil {
+		return nil
 	}
-	_ = agent.Brain.DeleteSessionMessages(ctx, string(sessionID))
+	return agent.Brain.DeleteSessionMessages(ctx, agent.SearchNamespace, string(sessionID))
 }
 
 func cloneAuth(a AuthContext) AuthContext {

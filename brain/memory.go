@@ -18,10 +18,12 @@ import (
 )
 
 var (
-	_ Store        = (*MemoryStore)(nil)
-	_ ObjectWriter = (*MemoryStore)(nil)
-	_ ObjectLister = (*MemoryStore)(nil)
-	_ KindWriter   = (*MemoryStore)(nil)
+	_ Store         = (*MemoryStore)(nil)
+	_ ObjectWriter  = (*MemoryStore)(nil)
+	_ SessionWriter = (*MemoryStore)(nil)
+	_ Purger        = (*MemoryStore)(nil)
+	_ ObjectLister  = (*MemoryStore)(nil)
+	_ KindWriter    = (*MemoryStore)(nil)
 )
 
 // MemoryStore is an in-process Store (tests, fixtures, and ObjectWriter for Engine.Put).
@@ -31,6 +33,16 @@ type MemoryStore struct {
 	kinds       map[string]ObjectKind
 	sessionMsgs map[uuid.UUID]sessionRow
 	sessionKeys map[string]map[string]int
+	treeRevs    map[uuid.UUID]int64
+	staged      map[uuid.UUID]stagedRun
+}
+
+// stagedRun is one uncommitted tree write.
+type stagedRun struct {
+	at    time.Time
+	ns    Namespace // the scope the run was staged under
+	parts []TreePart
+	ids   map[uuid.UUID]struct{}
 }
 
 // NewMemoryStore returns an empty memory-backed store.
@@ -40,15 +52,137 @@ func NewMemoryStore() *MemoryStore {
 		kinds:       make(map[string]ObjectKind),
 		sessionMsgs: make(map[uuid.UUID]sessionRow),
 		sessionKeys: make(map[string]map[string]int),
+		treeRevs:    make(map[uuid.UUID]int64),
+		staged:      make(map[uuid.UUID]stagedRun),
 	}
 }
 
 // Put implements ObjectWriter. Soft-deleted rows may be stored; Get hides them.
 // Clones maps/slices so callers cannot mutate the store through shared references.
-func (s *MemoryStore) Put(_ context.Context, obj Object) error {
+func (s *MemoryStore) Put(_ context.Context, scope Scope, obj Object) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.checkPutLocked(scope, obj); err != nil {
+		return err
+	}
+	s.storeLocked(obj)
+	return nil
+}
+
+// TreeState implements ObjectWriter.
+func (s *MemoryStore) TreeState(_ context.Context, scope Scope, parentID uuid.UUID) (TreeState, error) {
+	if err := scope.Namespace.Validate(); err != nil {
+		return TreeState{}, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	st := TreeState{Live: map[uuid.UUID]struct{}{}}
+	if p, ok := s.objects[parentID]; ok && scope.CanRead(p) {
+		st.Rev = s.treeRevs[parentID]
+	}
+	for id, obj := range s.objects {
+		if obj.ParentID != nil && *obj.ParentID == parentID && obj.DeletedAt == nil && scope.CanRead(obj) {
+			st.Live[id] = struct{}{}
+		}
+	}
+	return st, nil
+}
+
+// StageParts implements ObjectWriter.
+func (s *MemoryStore) StageParts(_ context.Context, scope Scope, run uuid.UUID, parts []TreePart) error {
+	if err := scope.Namespace.Validate(); err != nil {
+		return err
+	}
+	if run == uuid.Nil {
+		return fmt.Errorf("%w: run id is required", ErrInvalid)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r := s.staged[run]
+	if r.ids == nil {
+		r.ns, r.ids = scope.Namespace.Clone(), make(map[uuid.UUID]struct{}, len(parts))
+	}
+	for _, p := range parts {
+		if err := ValidateTreePart(p); err != nil {
+			return err
+		}
+		if !scope.Namespace.Covers(p.Object.Namespace) {
+			return fmt.Errorf("%w: part namespace is outside scope", ErrInvalid)
+		}
+		if _, dup := r.ids[p.Object.ID]; dup {
+			return fmt.Errorf("%w: part %s staged twice", ErrInvalid, p.Object.ID)
+		}
+		r.ids[p.Object.ID] = struct{}{}
+		r.parts = append(r.parts, TreePart{Object: cloneObject(p.Object), Reused: p.Reused})
+	}
+	r.at = time.Now().UTC()
+	s.staged[run] = r
+	return nil
+}
+
+// CommitTree implements ObjectWriter.
+func (s *MemoryStore) CommitTree(_ context.Context, scope Scope, run uuid.UUID, rev int64, parent Object) error {
+	if run == uuid.Nil {
+		return fmt.Errorf("%w: run id is required", ErrInvalid)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.checkPutLocked(scope, parent); err != nil {
+		return err
+	}
+	if s.treeRevs[parent.ID] != rev {
+		return fmt.Errorf("%w: tree %s changed since revision %d", ErrConflict, parent.ID, rev)
+	}
+	r := s.staged[run]
+	if r.ids != nil && !scope.Namespace.Covers(r.ns) {
+		return fmt.Errorf("%w: staged parts lie outside scope", ErrInvalid)
+	}
+	for _, p := range r.parts {
+		if old, ok := s.objects[p.Object.ID]; p.Reused && (!ok || old.ParentID == nil || *old.ParentID != parent.ID) {
+			return fmt.Errorf("%w: reused part %s is gone", ErrConflict, p.Object.ID)
+		}
+	}
+	for id, obj := range s.objects {
+		if _, ok := r.ids[id]; !ok && obj.ParentID != nil && *obj.ParentID == parent.ID {
+			delete(s.objects, id)
+		}
+	}
+	s.storeLocked(parent)
+	for _, p := range r.parts {
+		obj := p.Object
+		if p.Reused {
+			old := s.objects[obj.ID]
+			old.Position, old.Properties, old.DeletedAt = obj.Position, obj.Properties, nil
+			obj = old
+		}
+		obj.Namespace, obj.Readers = parent.Namespace.Clone(), slices.Clone(parent.Readers)
+		s.storeLocked(obj)
+	}
+	s.treeRevs[parent.ID] = rev + 1
+	delete(s.staged, run)
+	return nil
+}
+
+// checkPutLocked enforces the ObjectWriter guard: obj lies inside scope, and
+// a row that already holds obj.ID is visible under scope.
+func (s *MemoryStore) checkPutLocked(scope Scope, obj Object) error {
+	if err := scope.Namespace.Validate(); err != nil {
+		return err
+	}
 	if err := ValidateObjectIdentity(obj); err != nil {
 		return err
 	}
+	if !scope.Namespace.Covers(obj.Namespace) {
+		return fmt.Errorf("%w: object namespace is outside scope", ErrInvalid)
+	}
+	if old, ok := s.objects[obj.ID]; ok && !scope.CanRead(old) {
+		return fmt.Errorf("%w: %s", ErrNotFound, obj.ID)
+	}
+	return nil
+}
+
+// storeLocked writes a copy of an already-checked obj.
+func (s *MemoryStore) storeLocked(obj Object) {
 	obj = cloneObject(obj)
 	if obj.Properties == nil {
 		obj.Properties = map[string]any{}
@@ -60,10 +194,7 @@ func (s *MemoryStore) Put(_ context.Context, obj Object) error {
 	if obj.UpdatedAt.IsZero() {
 		obj.UpdatedAt = now
 	}
-	s.mu.Lock()
 	s.objects[obj.ID] = obj
-	s.mu.Unlock()
-	return nil
 }
 
 // SoftDelete implements ObjectWriter.
@@ -71,20 +202,79 @@ func (s *MemoryStore) SoftDelete(_ context.Context, scope Scope, id uuid.UUID) e
 	if id == uuid.Nil {
 		return fmt.Errorf("%w: object id is required", ErrInvalid)
 	}
+	if err := scope.Namespace.Validate(); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	obj, ok := s.objects[id]
-	if !ok || obj.DeletedAt != nil {
-		return fmt.Errorf("%w: %s", ErrNotFound, id)
-	}
-	if !scope.Namespace.Covers(obj.Namespace) {
+	if !ok || obj.DeletedAt != nil || !scope.CanRead(obj) {
 		return fmt.Errorf("%w: %s", ErrNotFound, id)
 	}
 	now := time.Now().UTC()
-	obj.DeletedAt = &now
-	obj.UpdatedAt = now
-	s.objects[id] = obj
+	for cid, c := range s.objects {
+		if cid == id || (c.ParentID != nil && *c.ParentID == id && c.DeletedAt == nil) {
+			c.DeletedAt = &now
+			c.UpdatedAt = now
+			s.objects[cid] = c
+		}
+	}
 	return nil
+}
+
+// PurgeDeleted implements Purger.
+func (s *MemoryStore) PurgeDeleted(_ context.Context, scope Scope, before time.Time) (int, error) {
+	if err := scope.Namespace.Validate(); err != nil {
+		return 0, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for id, obj := range s.objects {
+		if obj.DeletedAt != nil && obj.DeletedAt.Before(before) && scope.Namespace.Covers(obj.Namespace) {
+			delete(s.objects, id)
+			delete(s.treeRevs, id)
+			n++
+		}
+	}
+	s.dropStagedLocked(scope, func(r stagedRun) bool { return r.at.Before(before) })
+	return n, nil
+}
+
+// Erase implements Purger.
+func (s *MemoryStore) Erase(_ context.Context, scope Scope) ([]uuid.UUID, error) {
+	if err := scope.Namespace.Validate(); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var parents []uuid.UUID
+	for id, obj := range s.objects {
+		if !scope.CanRead(obj) {
+			continue
+		}
+		if obj.ParentID == nil {
+			parents = append(parents, id)
+		}
+		delete(s.objects, id)
+		delete(s.treeRevs, id)
+	}
+	for id, row := range s.sessionMsgs {
+		if scope.Namespace.Covers(row.namespace) {
+			delete(s.sessionMsgs, id)
+		}
+	}
+	s.dropStagedLocked(scope, func(stagedRun) bool { return true })
+	return parents, nil
+}
+
+// dropStagedLocked removes the runs staged under scope that match.
+func (s *MemoryStore) dropStagedLocked(scope Scope, match func(stagedRun) bool) {
+	for run, r := range s.staged {
+		if match(r) && scope.Namespace.Covers(r.ns) {
+			delete(s.staged, run)
+		}
+	}
 }
 
 // PutKind implements KindWriter.
@@ -103,6 +293,9 @@ func (s *MemoryStore) PutKind(_ context.Context, k ObjectKind) error {
 
 // Get implements ObjectReader.
 func (s *MemoryStore) Get(_ context.Context, scope Scope, id uuid.UUID) (Object, error) {
+	if err := scope.Namespace.Validate(); err != nil {
+		return Object{}, err
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.getLocked(scope, id)
@@ -110,6 +303,9 @@ func (s *MemoryStore) Get(_ context.Context, scope Scope, id uuid.UUID) (Object,
 
 // GetMany implements ObjectReader.
 func (s *MemoryStore) GetMany(_ context.Context, scope Scope, ids []uuid.UUID) ([]Object, error) {
+	if err := scope.Namespace.Validate(); err != nil {
+		return nil, err
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make([]Object, 0, len(ids))
@@ -127,7 +323,7 @@ func (s *MemoryStore) GetMany(_ context.Context, scope Scope, ids []uuid.UUID) (
 }
 
 func (s *MemoryStore) getLocked(scope Scope, id uuid.UUID) (Object, error) {
-	if obj, ok := s.objects[id]; ok && obj.DeletedAt == nil && scope.Namespace.Covers(obj.Namespace) {
+	if obj, ok := s.objects[id]; ok && obj.DeletedAt == nil && scope.CanRead(obj) {
 		return cloneObject(obj), nil
 	}
 	if sid := strings.TrimSpace(scope.SessionID); sid != "" && s.sessionMsgs != nil {
@@ -140,6 +336,9 @@ func (s *MemoryStore) getLocked(scope Scope, id uuid.UUID) (Object, error) {
 
 // ListByKind implements ObjectLister (first-class objects only).
 func (s *MemoryStore) ListByKind(_ context.Context, scope Scope, kind string, limit int) ([]Object, error) {
+	if err := scope.Namespace.Validate(); err != nil {
+		return nil, err
+	}
 	kind = strings.TrimSpace(kind)
 	if kind == "" || limit <= 0 {
 		return nil, nil
@@ -151,7 +350,7 @@ func (s *MemoryStore) ListByKind(_ context.Context, scope Scope, kind string, li
 		if obj.DeletedAt != nil || obj.ParentID != nil {
 			continue
 		}
-		if !scope.Namespace.Covers(obj.Namespace) {
+		if !scope.CanRead(obj) {
 			continue
 		}
 		if obj.Kind != kind {
@@ -177,6 +376,9 @@ func (s *MemoryStore) ListByKind(_ context.Context, scope Scope, kind string, li
 
 // GetByProperty implements ObjectLister.
 func (s *MemoryStore) GetByProperty(_ context.Context, scope Scope, key, value string) (Object, error) {
+	if err := scope.Namespace.Validate(); err != nil {
+		return Object{}, err
+	}
 	key = strings.TrimSpace(key)
 	if key == "" {
 		return Object{}, fmt.Errorf("brain: property key is required")
@@ -187,7 +389,7 @@ func (s *MemoryStore) GetByProperty(_ context.Context, scope Scope, key, value s
 		if obj.DeletedAt != nil {
 			continue
 		}
-		if !scope.Namespace.Covers(obj.Namespace) {
+		if !scope.CanRead(obj) {
 			continue
 		}
 		if obj.Properties == nil {
@@ -208,6 +410,9 @@ func (s *MemoryStore) GetByProperty(_ context.Context, scope Scope, key, value s
 
 // KindsWithObjects implements ObjectLister.
 func (s *MemoryStore) KindsWithObjects(_ context.Context, scope Scope) ([]string, error) {
+	if err := scope.Namespace.Validate(); err != nil {
+		return nil, err
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	seen := map[string]struct{}{}
@@ -215,7 +420,7 @@ func (s *MemoryStore) KindsWithObjects(_ context.Context, scope Scope) ([]string
 		if obj.DeletedAt != nil || obj.ParentID != nil {
 			continue
 		}
-		if !scope.Namespace.Covers(obj.Namespace) {
+		if !scope.CanRead(obj) {
 			continue
 		}
 		if obj.Kind == "" {
@@ -228,6 +433,9 @@ func (s *MemoryStore) KindsWithObjects(_ context.Context, scope Scope) ([]string
 
 // ListChildren implements ObjectReader.
 func (s *MemoryStore) ListChildren(_ context.Context, scope Scope, parentID uuid.UUID) ([]Object, error) {
+	if err := scope.Namespace.Validate(); err != nil {
+		return nil, err
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	var out []Object
@@ -238,7 +446,7 @@ func (s *MemoryStore) ListChildren(_ context.Context, scope Scope, parentID uuid
 		if obj.ParentID == nil || *obj.ParentID != parentID {
 			continue
 		}
-		if !scope.Namespace.Covers(obj.Namespace) {
+		if !scope.CanRead(obj) {
 			continue
 		}
 		out = append(out, cloneObject(obj))
@@ -342,7 +550,7 @@ func (s *MemoryStore) SearchLexical(_ context.Context, scope Scope, query string
 }
 
 // SearchVector implements PartSearcher over part embeddings only.
-func (s *MemoryStore) SearchVector(_ context.Context, scope Scope, embedding []float32, filters Filter, k int) ([]ScoredID, error) {
+func (s *MemoryStore) SearchVector(_ context.Context, scope Scope, model string, embedding []float32, filters Filter, k int) ([]ScoredID, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if len(embedding) == 0 || k <= 0 {
@@ -355,7 +563,7 @@ func (s *MemoryStore) SearchVector(_ context.Context, scope Scope, embedding []f
 	parts = s.appendSessionParts(scope, parts)
 	scored := make([]ScoredID, 0, len(parts))
 	for _, obj := range parts {
-		if len(obj.Embedding) != len(embedding) {
+		if obj.EmbeddingModel != model || len(obj.Embedding) != len(embedding) {
 			continue
 		}
 		sim := cosine(embedding, obj.Embedding)
@@ -404,6 +612,9 @@ func (s *MemoryStore) SearchTrigram(_ context.Context, scope Scope, query string
 // candidateParts returns live parts (parent_id set) under the caller's lock.
 // Do not retain the slice across unlock.
 func (s *MemoryStore) candidateParts(scope Scope, filters Filter) ([]Object, error) {
+	if err := scope.Namespace.Validate(); err != nil {
+		return nil, err
+	}
 	plan, err := compileFilters(filters)
 	if err != nil {
 		return nil, err
@@ -413,7 +624,7 @@ func (s *MemoryStore) candidateParts(scope Scope, filters Filter) ([]Object, err
 		if obj.DeletedAt != nil || obj.ParentID == nil {
 			continue
 		}
-		if !scope.Namespace.Covers(obj.Namespace) {
+		if !scope.CanRead(obj) {
 			continue
 		}
 		if !plan.match(obj) {
@@ -524,6 +735,7 @@ func cloneObject(o Object) Object {
 	if o.Embedding != nil {
 		cp.Embedding = slices.Clone(o.Embedding)
 	}
+	cp.Readers = slices.Clone(o.Readers)
 	cp.Namespace = o.Namespace.Clone()
 	return cp
 }

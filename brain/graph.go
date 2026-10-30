@@ -267,7 +267,7 @@ func (g *MemoryGraph) AddEdge(ctx context.Context, from, to uuid.UUID, relationT
 	}
 	rel := strings.TrimSpace(relationType)
 	if from == uuid.Nil || to == uuid.Nil || rel == "" {
-		return fmt.Errorf("brain: from, to, and relation type are required")
+		return fmt.Errorf("%w: from, to, and relation type are required", ErrInvalid)
 	}
 	now := time.Now().UTC()
 	key := edgeKey{from: from, to: to, rel: rel}
@@ -301,7 +301,7 @@ func (g *MemoryGraph) RemoveEdge(ctx context.Context, from, to uuid.UUID, relati
 	}
 	rel := strings.TrimSpace(relationType)
 	if from == uuid.Nil || to == uuid.Nil || rel == "" {
-		return fmt.Errorf("brain: from, to, and relation type are required")
+		return fmt.Errorf("%w: from, to, and relation type are required", ErrInvalid)
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()

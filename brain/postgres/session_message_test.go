@@ -8,17 +8,12 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ryanaldo34/tacklr/brain"
-	"github.com/ryanaldo34/tacklr/brain/postgres"
 )
 
 func TestSessionMessages_liveSearchUnion(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
-	pool := sharedPostgresPool(t)
-	mustExec(t, pool, `TRUNCATE objects, object_kinds, session_messages`)
-	store, err := postgres.New(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
+	store, _ := testDB(t)
 	eng, err := brain.NewEngine(store, brain.WithEmbedder(liveStubEmbedder{v: []float32{1, 0, 0}}))
 	if err != nil {
 		t.Fatal(err)
@@ -44,8 +39,8 @@ func TestSessionMessages_liveSearchUnion(t *testing.T) {
 	if _, err := store.SaveSessionMessages(ctx, ns, sessionID, "k", nil); err == nil {
 		t.Fatal("empty window")
 	}
-	if err := store.DeleteSessionMessages(ctx, ""); err != nil {
-		t.Fatal(err)
+	if err := store.DeleteSessionMessages(ctx, nil, sessionID); err == nil {
+		t.Fatal("unscoped delete")
 	}
 	if _, err := eng.SaveSessionMessages(ctx, ns, sessionID, "blank", []brain.SessionMessage{{
 		Role: "user", SearchText: "blankbody",
@@ -71,7 +66,7 @@ func TestSessionMessages_liveSearchUnion(t *testing.T) {
 	if _, err := store.SaveSessionMessages(stopped, ns, sessionID, "cancel-key", msg); err == nil {
 		t.Fatal("cancelled save")
 	}
-	if err := store.DeleteSessionMessages(stopped, sessionID); err == nil {
+	if err := store.DeleteSessionMessages(stopped, ns, sessionID); err == nil {
 		t.Fatal("cancelled delete")
 	}
 	if _, err := store.Get(ctx, scope, uuid.Nil); err == nil {
@@ -169,7 +164,7 @@ func TestSessionMessages_liveSearchUnion(t *testing.T) {
 			t.Fatalf("other session = %+v", other.Objects)
 		}
 	}
-	if err := eng.DeleteSessionMessages(ctx, sessionID); err != nil {
+	if err := eng.DeleteSessionMessages(ctx, ns, sessionID); err != nil {
 		t.Fatal(err)
 	}
 	gone, err := eng.Search(ctx, scope, brain.SearchRequest{Query: token}, brain.NewSearchContext())
@@ -188,5 +183,27 @@ func TestSessionMessages_liveSearchUnion(t *testing.T) {
 	restart, err := eng.SaveSessionMessages(ctx, ns, sessionID, "key-3", msg)
 	if err != nil || restart != 1 {
 		t.Fatalf("generation after delete = %d err = %v", restart, err)
+	}
+}
+
+func TestSessionMessages_aWindowWithAMalformedBodySavesNothing(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	store, _ := testDB(t)
+	host := mustNS(t, "org", "a")
+	window := []brain.SessionMessage{
+		{Role: "user", Body: []byte(`{"role":"user","content":"ok"}`), SearchText: "ok"},
+		{Role: "user", Body: []byte(`{not json`), SearchText: "broken"},
+	}
+
+	_, badErr := store.SaveSessionMessages(ctx, host, "s1", "k1", window)
+	gen, err := store.SaveSessionMessages(ctx, host, "s1", "k2", window[:1])
+
+	if badErr == nil {
+		t.Error("a window with a malformed body saved")
+	}
+	// The failed window left no generation behind.
+	if err != nil || gen != 1 {
+		t.Errorf("next save = generation %d %v, want 1", gen, err)
 	}
 }

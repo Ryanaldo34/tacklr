@@ -149,7 +149,7 @@ func TestBrainTools_hostNamespaceScopedRead(t *testing.T) {
 	other := mustNS(t, "org", "other")
 	docID := uuid.New()
 
-	if err := store.Put(context.Background(), brain.Object{
+	if err := putFixture(store, brain.Object{
 		ID: docID, Kind: "Document", Title: "Deal memo",
 		Summary: "Q3", Content: "full body", ContentType: "text/plain",
 		Namespace: ns, Properties: map[string]any{"stage": "negotiation"},
@@ -203,13 +203,10 @@ func TestBrainTools_hostNamespaceScopedRead(t *testing.T) {
 	}
 
 	h.session.Search.ClearNamespace()
-	out, err = readTool.invoke(ctx, `{"object_id":"`+docID.String()+`"}`, turnRuntime(h))
-	if err != nil {
-		t.Fatal(err)
+	if _, err := readTool.invoke(ctx, `{"object_id":"`+docID.String()+`"}`, turnRuntime(h)); !errors.Is(err, brain.ErrInvalid) {
+		t.Fatalf("read without a host namespace must fail closed, got %v", err)
 	}
-	if !strings.Contains(out.output, "full body") {
-		t.Fatalf("cleared namespace read: %s", out.output)
-	}
+	h.session.Search.SetNamespace(ns)
 
 	sout, err := schemaTool.invoke(ctx, `{"kind":"Document"}`, turnRuntime(h))
 	if err != nil {
@@ -242,12 +239,12 @@ func TestBrainTools_searchFindExactContinueAndCheckpoint(t *testing.T) {
 		}
 		part := uuid.New()
 		pos := 1
-		if err := store.Put(context.Background(), brain.Object{
+		if err := putFixture(store, brain.Object{
 			ID: parent, Kind: "Document", Title: "Doc", Namespace: ns, UpdatedAt: now,
 		}); err != nil {
 			t.Fatal(err)
 		}
-		if err := store.Put(context.Background(), brain.Object{
+		if err := putFixture(store, brain.Object{
 			ID: part, Kind: "Chunk", Title: "knowledge-chunk", Content: "shared knowledge base retrieval material item",
 			ParentID: &parent, Position: &pos, Namespace: ns, UpdatedAt: now,
 		}); err != nil {
@@ -360,8 +357,8 @@ func TestBrainTools_expandChildren(t *testing.T) {
 	parent := uuid.New()
 	child := uuid.New()
 	pos := 1
-	_ = store.Put(context.Background(), brain.Object{ID: parent, Kind: "Document", Title: "P", Namespace: ns, UpdatedAt: now})
-	_ = store.Put(context.Background(), brain.Object{
+	_ = putFixture(store, brain.Object{ID: parent, Kind: "Document", Title: "P", Namespace: ns, UpdatedAt: now})
+	_ = putFixture(store, brain.Object{
 		ID: child, Kind: "Chunk", Title: "C", Content: "secret",
 		ParentID: &parent, Position: &pos, Namespace: ns, UpdatedAt: now,
 	})
@@ -407,7 +404,7 @@ func TestBrainTools_expandMultiHopAndFindLinks(t *testing.T) {
 		{ID: dealID, Kind: "Deal", Title: "Acme", Namespace: ns, UpdatedAt: now},
 		{ID: buyerID, Kind: "Person", Title: "Pat Buyer", Namespace: ns, UpdatedAt: now},
 	} {
-		if err := store.Put(ctx, o); err != nil {
+		if err := putFixture(store, o); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -477,8 +474,8 @@ func TestBrainTools_searchNamespaceIsolation(t *testing.T) {
 	secretParent := uuid.New()
 	secretPart := uuid.New()
 	pos := 1
-	_ = store.Put(ctx, brain.Object{ID: secretParent, Kind: "Document", Title: "Secret deal", Namespace: nsA, UpdatedAt: now})
-	_ = store.Put(ctx, brain.Object{
+	_ = putFixture(store, brain.Object{ID: secretParent, Kind: "Document", Title: "Secret deal", Namespace: nsA, UpdatedAt: now})
+	_ = putFixture(store, brain.Object{
 		ID: secretPart, Kind: "Chunk", Title: "chunk", Content: "namespace isolation secret token xyzzy",
 		ParentID: &secretParent, Position: &pos, Namespace: nsA, UpdatedAt: now,
 	})
@@ -510,8 +507,8 @@ func TestBrainTools_searchNamespaceIsolation(t *testing.T) {
 
 	westParent := uuid.New()
 	westPart := uuid.New()
-	_ = store.Put(ctx, brain.Object{ID: westParent, Kind: "Document", Title: "West deal", Namespace: mustNS(t, "org", "b", "workspace", "west"), UpdatedAt: now})
-	_ = store.Put(ctx, brain.Object{
+	_ = putFixture(store, brain.Object{ID: westParent, Kind: "Document", Title: "West deal", Namespace: mustNS(t, "org", "b", "workspace", "west"), UpdatedAt: now})
+	_ = putFixture(store, brain.Object{
 		ID: westPart, Kind: "Chunk", Title: "chunk", Content: "per-call workspace west token plugh",
 		ParentID: &westParent, Position: &pos, Namespace: mustNS(t, "org", "b", "workspace", "west"), UpdatedAt: now,
 	})
@@ -539,7 +536,7 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 	store := brain.NewMemoryStore()
 	ns := mustNS(t, "id", uuid.NewString())
 	docID := uuid.New()
-	if err := store.Put(context.Background(), brain.Object{
+	if err := putFixture(store, brain.Object{
 		ID: docID, Kind: "Document", Title: "Shared", Content: "worker-visible",
 		Namespace: ns,
 	}); err != nil {
@@ -549,8 +546,8 @@ func TestWorkerInheritsBrainAndNamespace(t *testing.T) {
 	parent := uuid.New()
 	part := uuid.New()
 	pos := 1
-	_ = store.Put(context.Background(), brain.Object{ID: parent, Kind: "Document", Title: "P", Namespace: ns})
-	_ = store.Put(context.Background(), brain.Object{
+	_ = putFixture(store, brain.Object{ID: parent, Kind: "Document", Title: "P", Namespace: ns})
+	_ = putFixture(store, brain.Object{
 		ID: part, Kind: "Chunk", Content: "worker search isolation token",
 		ParentID: &parent, Position: &pos, Namespace: ns,
 	})
@@ -720,9 +717,10 @@ func TestBrainTools_expandAndUnlinkValidationErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := mustNewTurnManager(t, AgentOptions{
-		MaxWindowSize: 1024,
-		Model:         &scriptedModel{},
-		Brain:         eng,
+		MaxWindowSize:   1024,
+		Model:           &scriptedModel{},
+		Brain:           eng,
+		SearchNamespace: mustNS(t, "org", "acme"),
 	})
 	expand := h.findTool("expand", "")
 	unlink := h.findTool("unlink", "")
@@ -761,7 +759,7 @@ func TestBrainTools_resolveFileRefPropagatesStoreFailure(t *testing.T) {
 	mem := brain.NewMemoryStore()
 	ns := mustNS(t, "id", uuid.NewString())
 	id := uuid.New()
-	if err := mem.Put(ctx, brain.Object{
+	if err := putFixture(mem, brain.Object{
 		ID: id, Kind: "Document", Title: "memo", Namespace: ns, UpdatedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatal(err)
@@ -784,4 +782,9 @@ func TestBrainTools_resolveFileRefPropagatesStoreFailure(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "brain store down") {
 		t.Fatalf("want store failure propagated, got %v", err)
 	}
+}
+
+// putFixture writes obj straight to the store under its own namespace.
+func putFixture(w brain.ObjectWriter, obj brain.Object) error {
+	return w.Put(context.Background(), brain.Scope{Namespace: obj.Namespace}, obj)
 }

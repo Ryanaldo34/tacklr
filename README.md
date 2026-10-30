@@ -73,7 +73,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"go.temporal.io/sdk/client"
 
 	"github.com/ryanaldo34/tacklr"
@@ -109,23 +108,15 @@ func main() {
 		WithApiKey(os.Getenv("OPENAI_API_KEY")).
 		WithModel(os.Getenv("OPENAI_MODEL"))
 
-	cfg, err := postgres.PoolConfig(os.Getenv("DATABASE_URL"), "")
+	store, err := postgres.Open(ctx, os.Getenv("DATABASE_URL"), postgres.Options{})
 	if err != nil {
 		log.Fatal(err)
 	}
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer pool.Close()
+	defer store.Close()
 	kinds := []brain.KindSpec{
 		{Kind: "Discovery", Description: "Research finding", IsParent: true},
 		{Kind: "Fact", Description: "Verified fact", IsParent: true},
 		{Kind: "Memory", Description: "Durable memory", IsParent: true},
-	}
-	store, err := postgres.New(pool)
-	if err != nil {
-		log.Fatal(err)
 	}
 	if err := store.Setup(ctx, kinds...); err != nil {
 		log.Fatal(err)
@@ -134,7 +125,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if err := g.Bootstrap(ctx, false); err != nil {
+	if err := g.Bootstrap(ctx); err != nil {
 		log.Fatal(err)
 	}
 	eng, err := brain.NewEngine(store, brain.WithGraph(g), brain.WithLexicalOnly())

@@ -36,10 +36,10 @@ func TestS3_rejectsBadConfig(t *testing.T) {
 		t.Fatal("bad prefix")
 	}
 	var aws vfs.AWSS3
-	if _, _, _, err := aws.Head(ctx, "b", "k"); err == nil {
+	if _, err := aws.Head(ctx, "b", "k"); err == nil {
 		t.Fatal("nil AWS Head")
 	}
-	if _, _, _, err := aws.Get(ctx, "b", "k"); err == nil {
+	if _, err := aws.Get(ctx, "b", "k", 0, -1); err == nil {
 		t.Fatal("nil AWS Get")
 	}
 	if err := aws.Put(ctx, "b", "k", bytes.NewReader(nil), 0); err == nil {

@@ -13,11 +13,14 @@ import (
 )
 
 // SearchContext is the single retrieval session surface for one agent thread:
-// host namespace isolation + the active ResultSet for continue.
+// host namespace isolation, the caller's principals, and the active ResultSet
+// for continue. Principals are not exported: the host sets them every turn, so
+// a revoked group membership applies on the next turn.
 type SearchContext struct {
-	mu        sync.Mutex
-	namespace Namespace
-	current   *ResultSet
+	mu         sync.Mutex
+	namespace  Namespace
+	principals []string
+	current    *ResultSet
 }
 
 // searchContextExport is the harness checkpoint envelope (namespace + optional result set).
@@ -35,7 +38,14 @@ func NewSearchContext() *SearchContext {
 func (c *SearchContext) Scope() Scope {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return Scope{Namespace: c.namespace.Clone()}
+	return Scope{Namespace: c.namespace.Clone(), Principals: slices.Clone(c.principals)}
+}
+
+// SetPrincipals sets the caller identities checked against object Readers.
+func (c *SearchContext) SetPrincipals(principals []string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.principals = slices.Clone(principals)
 }
 
 // SetNamespace sets host retrieval isolation.

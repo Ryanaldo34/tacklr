@@ -1,8 +1,8 @@
 // Package helixgraph adapts HelixDB to brain.GraphReader / GraphWriter / searchers.
 //
-// Host surface: New / NewFromClient, Bootstrap (preferred boot), EnsureSearchIndexes,
+// Host surface: New / NewFromClient, Bootstrap,
 // EnsureEdgeTextIndex (required per relation label before find_links), Client
-// (escape hatch for host seeding), ObjectSearchReady / TenantEnabled, and the
+// (escape hatch for host seeding), ObjectSearchReady, and the
 // GraphWriter / searcher methods used via brain.WithGraph.
 //
 // Helix owns topology, text/vector indexes, edge props, and $distance ranking;
@@ -12,6 +12,7 @@ package helixgraph
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -32,9 +33,8 @@ var (
 
 // Graph implements brain.GraphWriter via HelixDB.
 type Graph struct {
-	client        *helix.Client
-	searchReady   bool // true after successful Bootstrap / EnsureSearchIndexes
-	tenantEnabled bool // true when indexes were created with namespace tenant
+	client      *helix.Client
+	searchReady bool // true after a successful Bootstrap
 }
 
 // New builds a client. Empty baseURL defaults to http://localhost:6969.
@@ -97,64 +97,38 @@ func (g *Graph) ensureObjectIndex(ctx context.Context) error {
 	return nil
 }
 
-// Bootstrap prepares Helix native indexes for entity search and marks the graph ready.
-// withNamespaceTenant enables Helix tenant-scoped text/vector indexes on namespace
-// (prefer this when the Helix image supports it so Search* filters in-engine).
-// Call once at process start when using Helix.
-func (g *Graph) Bootstrap(ctx context.Context, withNamespaceTenant bool) error {
+// Bootstrap creates the Helix indexes entity search uses (object id
+// equality, kind equality, text and vector) and marks the graph ready. Search
+// keeps only nodes the caller's namespace covers. Call it once at process start.
+func (g *Graph) Bootstrap(ctx context.Context) error {
+	g.searchReady = false
 	if err := ctx.Err(); err != nil {
-		g.searchReady = false
 		return err
 	}
-	if err := g.EnsureSearchIndexes(ctx, withNamespaceTenant); err != nil {
-		g.searchReady = false
-		return err
-	}
-	g.searchReady = true
-	return nil
-}
-
-// ObjectSearchReady reports whether Bootstrap (or EnsureSearchIndexes) succeeded.
-func (g *Graph) ObjectSearchReady() bool { return g.searchReady }
-
-// TenantEnabled reports whether search indexes were created with a namespace tenant property.
-func (g *Graph) TenantEnabled() bool { return g.tenantEnabled }
-
-// EnsureSearchIndexes creates Helix native equality + text + vector indexes for find_objects.
-// Prefer Bootstrap, which also sets ObjectSearchReady.
-func (g *Graph) EnsureSearchIndexes(ctx context.Context, withNamespaceTenant bool) error {
 	if err := g.ensureObjectIndex(ctx); err != nil {
 		return err
 	}
-	var textIdx, vecIdx helix.IndexSpec
-	if withNamespaceTenant {
-		textIdx = helix.NodeTextIndex(nodeLabel, propSearchText, propNamespace)
-		vecIdx = helix.NodeVectorIndex(nodeLabel, propEmbedding, propNamespace)
-	} else {
-		textIdx = helix.NodeTextIndex(nodeLabel, propSearchText)
-		vecIdx = helix.NodeVectorIndex(nodeLabel, propEmbedding)
-	}
-	// Equality on kind supports Has/Where filters after search without app-side maps.
-	kindIdx := helix.NodeEqualityIndex(nodeLabel, propKind)
 	req := helix.WriteQuery("brain_ensure_search_indexes").
-		VarAs("text", helix.G().CreateIndexIfNotExists(textIdx)).
-		VarAs("vec", helix.G().CreateIndexIfNotExists(vecIdx)).
-		VarAs("kind", helix.G().CreateIndexIfNotExists(kindIdx)).
+		VarAs("text", helix.G().CreateIndexIfNotExists(helix.NodeTextIndex(nodeLabel, propSearchText))).
+		VarAs("vec", helix.G().CreateIndexIfNotExists(helix.NodeVectorIndex(nodeLabel, propEmbedding))).
+		VarAs("kind", helix.G().CreateIndexIfNotExists(helix.NodeEqualityIndex(nodeLabel, propKind))).
 		Returning()
 	if err := g.client.Exec(ctx, req, nil, helix.WriterOnly()); err != nil {
 		return fmt.Errorf("helixgraph: ensure search indexes: %w", err)
 	}
-	g.tenantEnabled = withNamespaceTenant
 	g.searchReady = true
 	return nil
 }
+
+// ObjectSearchReady reports whether Bootstrap succeeded.
+func (g *Graph) ObjectSearchReady() bool { return g.searchReady }
 
 // EnsureEdgeTextIndex creates a Helix EdgeText index on note for a relation label.
 // Relation labels are dynamic (about, has_buyer, …); hosts call this for labels they search.
 func (g *Graph) EnsureEdgeTextIndex(ctx context.Context, relationLabel string) error {
 	rel := strings.TrimSpace(relationLabel)
 	if rel == "" {
-		return fmt.Errorf("helixgraph: relation label is required")
+		return fmt.Errorf("%w: relation label is required", brain.ErrInvalid)
 	}
 	req := helix.WriteQuery("brain_ensure_edge_text_"+rel).
 		VarAs("idx", helix.G().CreateIndexIfNotExists(
@@ -190,37 +164,75 @@ func (g *Graph) RemoveObject(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
 
-// SearchText implements brain.GraphObjectSearcher via Helix TextSearchNodes.
-// Helix is unscoped; Engine hydrates under Scope (Namespace.Covers).
+// SearchText implements brain.GraphObjectSearcher via Helix TextSearchNodes,
+// keeping only nodes namespace covers.
 func (g *Graph) SearchText(ctx context.Context, query string, limit int, namespace brain.Namespace) ([]brain.ScoredID, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	query = strings.TrimSpace(query)
-	if query == "" || limit <= 0 {
+	if query == "" {
 		return nil, nil
 	}
-	q := helix.ReadQuery("brain_text_search_nodes")
-	qt := q.ParamString("query", query)
-	lim := q.ParamI64("limit", int64(limit))
-	trav := g.textSearchTrav(qt, lim)
-	req := q.VarAs("hits", trav.ValueMap(propObjectID, "$distance")).Returning("hits")
-	return g.execSearchHits(ctx, req, "text search")
+	return g.scopedSearch(ctx, "text search", limit, namespace, func(k int64) helix.Request {
+		q := helix.ReadQuery("brain_text_search_nodes")
+		trav := helix.G().TextSearchNodes(nodeLabel, propSearchText, q.ParamString("query", query), q.ParamI64("limit", k))
+		return q.VarAs("hits", trav.ValueMap(propObjectID, propNamespace, "$distance")).Returning("hits")
+	})
 }
 
-// SearchVector implements brain.GraphObjectSearcher via Helix VectorSearchNodes.
+// SearchVector implements brain.GraphObjectSearcher via Helix VectorSearchNodes,
+// keeping only nodes namespace covers.
 func (g *Graph) SearchVector(ctx context.Context, embedding []float32, limit int, namespace brain.Namespace) ([]brain.ScoredID, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if len(embedding) == 0 || limit <= 0 {
+	if len(embedding) == 0 {
 		return nil, nil
 	}
-	q := helix.ReadQuery("brain_vector_search_nodes")
-	lim := q.ParamI64("limit", int64(limit))
-	trav := g.vectorSearchTrav(embedding, lim)
-	req := q.VarAs("hits", trav.ValueMap(propObjectID, "$distance")).Returning("hits")
-	return g.execSearchHits(ctx, req, "vector search")
+	return g.scopedSearch(ctx, "vector search", limit, namespace, func(k int64) helix.Request {
+		q := helix.ReadQuery("brain_vector_search_nodes")
+		trav := helix.G().VectorSearchNodes(nodeLabel, propEmbedding, embedding, q.ParamI64("limit", k))
+		return q.VarAs("hits", trav.ValueMap(propObjectID, propNamespace, "$distance")).Returning("hits")
+	})
+}
+
+// maxSearchK caps how many hits scopedSearch asks Helix for.
+const maxSearchK = 4096
+
+// scopedSearch runs search, keeping hits whose node namespace covers. Helix
+// ranks every tenant's nodes together, so when other tenants fill the page
+// it asks again for four times as many, until limit hits are in scope or
+// Helix has no more.
+func (g *Graph) scopedSearch(ctx context.Context, label string, limit int, namespace brain.Namespace, search func(k int64) helix.Request) ([]brain.ScoredID, error) {
+	if limit <= 0 || namespace.Empty() {
+		return nil, nil
+	}
+	for k := limit; ; k = min(k*4, maxSearchK) {
+		rows, err := g.searchRows(ctx, search(int64(k)), label)
+		if err != nil {
+			return nil, err
+		}
+		var out []brain.ScoredID
+		for i, row := range rows {
+			id, err := uuid.Parse(strings.TrimSpace(row.ObjectID))
+			if err != nil || !namespace.Covers(row.namespace()) {
+				continue
+			}
+			// Prefer Helix $distance; fall back to an order-preserving rank score.
+			score := float64(len(rows) - i)
+			if row.Distance != nil {
+				score = 1.0 / (1.0 + *row.Distance)
+			}
+			out = append(out, brain.ScoredID{ID: id, Score: score})
+			if len(out) == limit {
+				return out, nil
+			}
+		}
+		if len(rows) < k || k == maxSearchK {
+			return out, nil
+		}
+	}
 }
 
 // SearchEdgesText implements brain.GraphEdgeSearcher via Helix TextSearchEdges on note.
@@ -291,17 +303,17 @@ func (g *Graph) SearchEdgesText(ctx context.Context, relationLabel, query string
 	return out, nil
 }
 
-func (g *Graph) textSearchTrav(query helix.ParamRef, lim helix.ParamRef) *helix.Traversal {
-	return helix.G().TextSearchNodes(nodeLabel, propSearchText, query, lim)
-}
-
-func (g *Graph) vectorSearchTrav(embedding []float32, lim helix.ParamRef) *helix.Traversal {
-	return helix.G().VectorSearchNodes(nodeLabel, propEmbedding, embedding, lim)
-}
-
 type searchHitRow struct {
-	ObjectID string   `json:"object_id"`
-	Distance *float64 `json:"$distance"`
+	ObjectID  string   `json:"object_id"`
+	Namespace string   `json:"namespace"`
+	Distance  *float64 `json:"$distance"`
+}
+
+// namespace decodes the node's namespace; a node without one is in none.
+func (r searchHitRow) namespace() brain.Namespace {
+	var ns brain.Namespace
+	_ = json.Unmarshal([]byte(r.Namespace), &ns)
+	return ns
 }
 
 // edgePropRow is Helix EdgeProperties / TextSearchEdges payload.
@@ -314,11 +326,13 @@ type edgePropRow struct {
 	Role       string   `json:"role,omitempty"`
 	Confidence *float64 `json:"confidence,omitempty"`
 	EvidenceID string   `json:"evidence_id,omitempty"`
+	CreatedAt  string   `json:"created_at,omitempty"`
+	UpdatedAt  string   `json:"updated_at,omitempty"`
 	Score      *float64 `json:"$score,omitempty"`
 	Distance   *float64 `json:"$distance,omitempty"`
 }
 
-func (g *Graph) execSearchHits(ctx context.Context, req helix.Request, label string) ([]brain.ScoredID, error) {
+func (g *Graph) searchRows(ctx context.Context, req helix.Request, label string) ([]searchHitRow, error) {
 	var raw struct {
 		Hits struct {
 			Properties []searchHitRow `json:"properties"`
@@ -327,20 +341,7 @@ func (g *Graph) execSearchHits(ctx context.Context, req helix.Request, label str
 	if err := g.client.Exec(ctx, req, &raw); err != nil {
 		return nil, fmt.Errorf("helixgraph: %s: %w", label, err)
 	}
-	out := make([]brain.ScoredID, 0, len(raw.Hits.Properties))
-	for i, row := range raw.Hits.Properties {
-		id, err := uuid.Parse(strings.TrimSpace(row.ObjectID))
-		if err != nil {
-			continue
-		}
-		// Prefer Helix $distance; fall back to order-preserving rank score for fusion.
-		score := float64(len(raw.Hits.Properties) - i)
-		if row.Distance != nil {
-			score = 1.0 / (1.0 + *row.Distance)
-		}
-		out = append(out, brain.ScoredID{ID: id, Score: score})
-	}
-	return out, nil
+	return raw.Hits.Properties, nil
 }
 
 func edgeMetaFromPropRow(row edgePropRow) brain.EdgeMeta {
@@ -357,6 +358,8 @@ func edgeMetaFromPropRow(row edgePropRow) brain.EdgeMeta {
 			meta.EvidenceID = &u
 		}
 	}
+	meta.CreatedAt, _ = time.Parse(time.RFC3339Nano, row.CreatedAt)
+	meta.UpdatedAt, _ = time.Parse(time.RFC3339Nano, row.UpdatedAt)
 	return meta
 }
 
@@ -491,7 +494,8 @@ func objectPropPairs(obj brain.Object, searchText string) []namedProp {
 		props = append(props, namedProp{propSearchText, st})
 	}
 	if !obj.Namespace.Empty() {
-		props = append(props, namedProp{propNamespace, obj.Namespace.String()})
+		ns, _ := obj.Namespace.Value()
+		props = append(props, namedProp{propNamespace, ns})
 	}
 	if !obj.CreatedAt.IsZero() {
 		props = append(props, namedProp{"created_at", obj.CreatedAt.UTC().Format(time.RFC3339Nano)})
@@ -558,7 +562,7 @@ func (g *Graph) AddEdge(ctx context.Context, from, to uuid.UUID, relationType st
 	}
 	rel := strings.TrimSpace(relationType)
 	if from == uuid.Nil || to == uuid.Nil || rel == "" {
-		return fmt.Errorf("helixgraph: from, to, and relation type are required")
+		return fmt.Errorf("%w: from, to, and relation type are required", brain.ErrInvalid)
 	}
 	now := time.Now().UTC()
 	if meta.CreatedAt.IsZero() {
@@ -590,7 +594,7 @@ func (g *Graph) RemoveEdge(ctx context.Context, from, to uuid.UUID, relationType
 	}
 	rel := strings.TrimSpace(relationType)
 	if from == uuid.Nil || to == uuid.Nil || rel == "" {
-		return fmt.Errorf("helixgraph: from, to, and relation type are required")
+		return fmt.Errorf("%w: from, to, and relation type are required", brain.ErrInvalid)
 	}
 	q := helix.WriteQuery("brain_remove_edge")
 	fromOID := q.ParamString("from_oid", from.String())
@@ -639,15 +643,9 @@ func (g *Graph) Neighbors(ctx context.Context, objectID uuid.UUID, relationTypes
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if objectID == uuid.Nil {
-		return nil, nil
-	}
 	labels := brain.NormalizeRelationTypes(relationTypes)
-	if len(labels) == 0 {
+	if objectID == uuid.Nil || len(labels) == 0 || limit <= 0 {
 		return nil, nil
-	}
-	if limit <= 0 {
-		limit = 50
 	}
 
 	var out []brain.GraphNeighbor

@@ -14,7 +14,7 @@ import (
 func seedDocWithParts(t *testing.T, store *brain.MemoryStore, ns brain.Namespace, title string, partBodies []string, updated time.Time) (parentID uuid.UUID) {
 	t.Helper()
 	parentID = uuid.New()
-	if err := store.Put(context.Background(), brain.Object{
+	if err := putFixture(store, brain.Object{
 		ID: parentID, Kind: "Document", Title: title, Summary: title,
 		Namespace: ns, UpdatedAt: updated, CreatedAt: updated,
 	}); err != nil {
@@ -23,7 +23,7 @@ func seedDocWithParts(t *testing.T, store *brain.MemoryStore, ns brain.Namespace
 	for i, body := range partBodies {
 		pid := uuid.New()
 		pos := i + 1
-		if err := store.Put(context.Background(), brain.Object{
+		if err := putFixture(store, brain.Object{
 			ID: pid, Kind: "Chunk", Title: title + " part", Content: body,
 			ParentID: &parentID, Position: &pos,
 			Namespace: ns, UpdatedAt: updated, CreatedAt: updated,
@@ -96,12 +96,12 @@ func TestSearch_filtersProperty(t *testing.T) {
 	p2 := uuid.New()
 	part := uuid.New()
 	pos := 1
-	if err := store.Put(context.Background(), brain.Object{
+	if err := putFixture(store, brain.Object{
 		ID: p2, Kind: "Document", Title: "Deal B", Namespace: ns, UpdatedAt: now,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Put(context.Background(), brain.Object{
+	if err := putFixture(store, brain.Object{
 		ID: part, Kind: "Chunk", Title: "chunk", Content: "pipeline revenue forecast",
 		ParentID: &p2, Position: &pos, Namespace: ns, UpdatedAt: now,
 		Properties: map[string]any{"stage": "negotiation"},
@@ -140,15 +140,15 @@ func TestSearch_hybridWithStubEmbedder(t *testing.T) {
 		{
 			ID: lexPart, Kind: "Chunk", Content: "banana banana banana unique-token-xyz",
 			ParentID: &lexParent, Position: &pos, Namespace: ns, UpdatedAt: now,
-			Embedding: []float32{0, 1},
+			Embedding: []float32{0, 1}, EmbeddingModel: "test-model",
 		},
 		{
 			ID: vecPart, Kind: "Chunk", Content: "unrelated body text",
 			ParentID: &vecParent, Position: &pos, Namespace: ns, UpdatedAt: now,
-			Embedding: []float32{1, 0},
+			Embedding: []float32{1, 0}, EmbeddingModel: "test-model",
 		},
 	} {
-		if err := store.Put(context.Background(), o); err != nil {
+		if err := putFixture(store, o); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -179,7 +179,9 @@ func TestSearch_hybridWithStubEmbedder(t *testing.T) {
 
 type stubEmbedder struct{ v []float32 }
 
-func (s stubEmbedder) Embed(context.Context, string) ([]float32, error) { return s.v, nil }
+func (s stubEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+	return repeatVector(s.v, len(texts)), nil
+}
 
 func TestFindExact_uuidParentAndPart(t *testing.T) {
 	ctx := context.Background()
@@ -189,12 +191,12 @@ func TestFindExact_uuidParentAndPart(t *testing.T) {
 	parent := uuid.New()
 	part := uuid.New()
 	pos := 1
-	if err := store.Put(context.Background(), brain.Object{
+	if err := putFixture(store, brain.Object{
 		ID: parent, Kind: "Document", Title: "Direct", Namespace: ns, UpdatedAt: now,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Put(context.Background(), brain.Object{
+	if err := putFixture(store, brain.Object{
 		ID: part, Kind: "Chunk", Title: "child", Content: "body",
 		ParentID: &parent, Position: &pos, Namespace: ns, UpdatedAt: now,
 	}); err != nil {
@@ -238,12 +240,12 @@ func TestFindExact_titleMatch(t *testing.T) {
 	parent := uuid.New()
 	part := uuid.New()
 	pos := 1
-	if err := store.Put(context.Background(), brain.Object{
+	if err := putFixture(store, brain.Object{
 		ID: parent, Kind: "Document", Title: "Parent", Namespace: ns, UpdatedAt: now,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Put(context.Background(), brain.Object{
+	if err := putFixture(store, brain.Object{
 		ID: part, Kind: "Chunk", Title: "exact-filename.go", Content: "package main",
 		ParentID: &parent, Position: &pos, Namespace: ns, UpdatedAt: now,
 	}); err != nil {
@@ -366,13 +368,13 @@ func TestFindExact_trigramFuzzy(t *testing.T) {
 	parent := uuid.New()
 	part := uuid.New()
 	pos := 1
-	if err := store.Put(context.Background(), brain.Object{
+	if err := putFixture(store, brain.Object{
 		ID: parent, Kind: "Document", Title: "P", Namespace: ns, UpdatedAt: now,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	// No exact title match and no full substring of the query — only trigram overlap.
-	if err := store.Put(context.Background(), brain.Object{
+	if err := putFixture(store, brain.Object{
 		ID: part, Kind: "Chunk", Title: "chunk-title",
 		Content:  "abcdefghijklmnopqrstuvwxyz",
 		ParentID: &parent, Position: &pos, Namespace: ns, UpdatedAt: now,
@@ -487,3 +489,5 @@ func TestSortRichObjects_keys(t *testing.T) {
 	}
 	brain.SortRichObjects(typed, "k", false)
 }
+
+func (stubEmbedder) Model() string { return "test-model" }

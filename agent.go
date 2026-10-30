@@ -50,6 +50,7 @@ type TurnManager struct {
 	hostResultHooks      map[string]ToolResultHook
 	brain                *brain.Engine
 	brainWriteKinds      brain.WriteKinds
+	indexReaders         vfsindex.ReadersFunc
 	runCommandUnattended bool
 	writeUnattended      bool
 	// vfsBridge indexes files only when index_file or unindex is called.
@@ -589,13 +590,13 @@ func (a *TurnManager) retainCollapse(ctx context.Context, ev collapseEvent) {
 	if body == "" && len(ev.Discarded) == 0 {
 		return
 	}
-	ns, _ := a.session.Search.Namespace()
-	ns = ns.Clone()
+	scope := a.session.Search.Scope()
+	ns := scope.Namespace
 	if sid := a.sessionId; sid != "" && !strings.Contains(sid, ".") {
-		ns = append(ns, brain.Attr{Name: "session", Value: sid})
+		ns = append(ns, brain.Attr{Name: brain.SessionTailName, Value: sid})
 	}
-	scope := brain.Scope{Namespace: ns}
-	id := episodeID(a.sessionId, ev.Trigger, body)
+	scope.Namespace = ns
+	id := episodeID(ns, ev.Trigger, body)
 	obj := brain.Object{
 		ID:        id,
 		Kind:      KindEpisode,
@@ -608,21 +609,13 @@ func (a *TurnManager) retainCollapse(ctx context.Context, ev collapseEvent) {
 			"session_id": a.sessionId,
 		},
 	}
-	if _, err := a.brain.Put(ctx, scope, obj); err != nil {
+	if _, err := a.brain.PutTree(ctx, scope, obj, brain.Parts(episodeParts(ns, body, ev.Discarded)...)); err != nil {
 		slog.ErrorContext(ctx, "collapse retain put failed", "area", telemetry.AreaModelTasks, "error", err)
-		return
-	}
-	parts := episodeParts(ns, body, ev.Discarded)
-	if len(parts) == 0 {
-		return
-	}
-	if err := a.brain.ReplaceParts(ctx, scope, id, parts); err != nil {
-		slog.ErrorContext(ctx, "collapse retain parts failed", "area", telemetry.AreaModelTasks, "error", err)
 	}
 }
 
-func episodeID(session, trigger, body string) uuid.UUID {
-	return uuid.NewSHA1(uuid.NameSpaceURL, []byte("tacklr.episode:"+session+":"+trigger+":"+body))
+func episodeID(ns brain.Namespace, trigger, body string) uuid.UUID {
+	return uuid.NewSHA1(uuid.NameSpaceURL, []byte("tacklr.episode:"+ns.Key()+":"+trigger+":"+body))
 }
 
 func episodeParts(ns brain.Namespace, body string, discarded []*Message) []brain.Object {

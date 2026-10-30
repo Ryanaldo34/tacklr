@@ -7,75 +7,53 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ryanaldo34/tacklr/brain"
 )
 
-// PgxDB is satisfied by *pgx.Conn and *pgxpool.Pool.
-type PgxDB interface {
-	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
-	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
-	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
-}
-
-var (
-	_ brain.Store        = (*Store)(nil)
-	_ brain.ObjectWriter = (*Store)(nil)
-	_ brain.ObjectLister = (*Store)(nil)
-	_ brain.KindWriter   = (*Store)(nil)
-	_ PgxDB              = tracedDB{}
-)
-
-// Store is the optional Postgres brain.Store. Hosts inject it into NewEngine.
-// Call Setup once per database. Setup does not migrate an existing vector column.
-//
-// Schema is the Postgres schema for objects, object_kinds, and session_messages.
-// Empty means DefaultSchema. Build the pool with PoolConfig so each connection
-// starts with SearchPath. Use a direct connection or a session-mode pooler
-// (port 5432). Port 6543 is a transaction-mode pooler and breaks pgx prepared statements.
+// Store is the Postgres brain.Store. Hosts open it with Open and inject it
+// into brain.NewEngine. Run Setup before serving (a deploy or migration
+// step); it applies pending schema migrations and is safe to run from many
+// processes at once.
 type Store struct {
-	// EmbeddingDim is the pgvector size Setup uses. Zero means DefaultEmbeddingDim.
-	EmbeddingDim int
-	// Schema is the Postgres schema for tacklr tables. Empty means DefaultSchema.
-	Schema string
-	db     PgxDB
+	db     *pgxpool.Pool
+	schema string
+	dim    int
 }
 
-// New wraps a pgx pool or connection. Query/Exec emit otelpgx
-// client spans as children of ctx (after telemetry.Init).
-func New(db PgxDB) (*Store, error) {
-	if db == nil {
-		return nil, fmt.Errorf("postgres: db is required")
-	}
-	return &Store{db: newTracedDB(db)}, nil
-}
-
+// objectSelectCols are the columns scanObject reads, in order.
 const objectSelectCols = `
-	id, kind, title, summary, properties, content, content_type,
-	parent_id, position, namespace, created_at, updated_at, deleted_at
+	id, kind, coalesce(title, ''), coalesce(summary, ''), properties,
+	coalesce(content, ''), coalesce(content_type, ''), parent_id, position,
+	namespace, readers, coalesce(embedding_model, ''), created_at, updated_at, deleted_at
 `
 
 // Get implements ObjectReader.
 func (s *Store) Get(ctx context.Context, scope brain.Scope, id uuid.UUID) (brain.Object, error) {
-	q := `SELECT ` + objectSelectCols + ` FROM objects WHERE id = $1 AND deleted_at IS NULL`
-	args := []any{id}
-	q, args = appendNamespaceSQL(q, args, scope)
-	obj, err := s.scanObject(s.db.QueryRow(ctx, q, args...))
-	if err == nil || strings.TrimSpace(scope.SessionID) == "" || !errors.Is(err, brain.ErrNotFound) {
-		return obj, err
-	}
-	saved, readErr := s.readSessionMessage(ctx, scope.SessionID, id)
-	if errors.Is(readErr, brain.ErrNotFound) {
+	if err := scope.Namespace.Validate(); err != nil {
 		return brain.Object{}, err
 	}
-	return saved, readErr
+	obj, err := scanObject(s.db.QueryRow(ctx, `SELECT `+objectSelectCols+` FROM objects
+		WHERE id = $1 AND deleted_at IS NULL
+		  AND namespace @> $2::jsonb AND (cardinality(readers) = 0 OR readers && $3::text[])`,
+		id, scope.Namespace, scope.Principals))
+	if !errors.Is(err, brain.ErrNotFound) || strings.TrimSpace(scope.SessionID) == "" {
+		return obj, err
+	}
+	saved, err := s.readSessionMessages(ctx, scope, []uuid.UUID{id})
+	if err != nil {
+		return brain.Object{}, err
+	}
+	if len(saved) == 0 {
+		return brain.Object{}, fmt.Errorf("%w: %s", brain.ErrNotFound, id)
+	}
+	return saved[0], nil
 }
 
 // GetMany implements ObjectReader.
@@ -83,24 +61,19 @@ func (s *Store) GetMany(ctx context.Context, scope brain.Scope, ids []uuid.UUID)
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	q := `SELECT ` + objectSelectCols + ` FROM objects WHERE id = ANY($1) AND deleted_at IS NULL`
-	args := []any{ids}
-	q, args = appendNamespaceSQL(q, args, scope)
-	rows, err := s.db.Query(ctx, q, args...)
+	if err := scope.Namespace.Validate(); err != nil {
+		return nil, err
+	}
+	found, err := s.queryObjects(ctx, `SELECT `+objectSelectCols+` FROM objects
+		WHERE id = ANY($1) AND deleted_at IS NULL
+		  AND namespace @> $2::jsonb AND (cardinality(readers) = 0 OR readers && $3::text[])`,
+		ids, scope.Namespace, scope.Principals)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: get many: %w", err)
 	}
-	defer rows.Close()
-	byID := make(map[uuid.UUID]brain.Object, len(ids))
-	for rows.Next() {
-		obj, err := s.scanObject(rows)
-		if err != nil {
-			return nil, err
-		}
+	byID := make(map[uuid.UUID]brain.Object, len(found))
+	for _, obj := range found {
 		byID[obj.ID] = obj
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("postgres: get many: %w", err)
 	}
 	if sid := strings.TrimSpace(scope.SessionID); sid != "" && len(byID) < len(ids) {
 		missing := make([]uuid.UUID, 0, len(ids)-len(byID))
@@ -110,7 +83,7 @@ func (s *Store) GetMany(ctx context.Context, scope brain.Scope, ids []uuid.UUID)
 			}
 		}
 		if len(missing) > 0 {
-			extra, err := s.readSessionMessages(ctx, sid, missing)
+			extra, err := s.readSessionMessages(ctx, scope, missing)
 			if err != nil {
 				return nil, err
 			}
@@ -130,45 +103,64 @@ func (s *Store) GetMany(ctx context.Context, scope brain.Scope, ids []uuid.UUID)
 
 // ListChildren implements ObjectReader.
 func (s *Store) ListChildren(ctx context.Context, scope brain.Scope, parentID uuid.UUID) ([]brain.Object, error) {
-	q := `SELECT ` + objectSelectCols + `
-		FROM objects
-		WHERE parent_id = $1 AND deleted_at IS NULL`
-	args := []any{parentID}
-	q, args = appendNamespaceSQL(q, args, scope)
-	q += ` ORDER BY position ASC NULLS LAST, id ASC`
-	return s.scanObjectRows(ctx, q, args, "list children", 0)
+	if err := scope.Namespace.Validate(); err != nil {
+		return nil, err
+	}
+	kids, err := s.queryObjects(ctx, `SELECT `+objectSelectCols+` FROM objects
+		WHERE parent_id = $1 AND deleted_at IS NULL
+		  AND namespace @> $2::jsonb AND (cardinality(readers) = 0 OR readers && $3::text[])
+		ORDER BY position ASC NULLS LAST, id ASC`,
+		parentID, scope.Namespace, scope.Principals)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list children: %w", err)
+	}
+	return kids, nil
 }
 
-// Put implements ObjectWriter (full-column upsert; clears soft-delete on revive).
-func (s *Store) Put(ctx context.Context, obj brain.Object) error {
-	if err := brain.ValidateObjectIdentity(obj); err != nil {
+// Put implements ObjectWriter: a full-column upsert that clears a soft
+// delete. The conflict update only applies to a row visible under scope, so
+// an id held outside scope updates nothing (ErrNotFound).
+func (s *Store) Put(ctx context.Context, scope brain.Scope, obj brain.Object) error {
+	q, args, err := upsertObject(scope, obj)
+	if err != nil {
 		return err
 	}
-	if obj.Properties == nil {
-		obj.Properties = map[string]any{}
-	}
-	propsJSON, err := json.Marshal(obj.Properties)
+	tag, err := s.db.Exec(ctx, q, args...)
 	if err != nil {
-		return fmt.Errorf("postgres: marshal properties: %w", err)
+		return fmt.Errorf("postgres: put object: %w", err)
 	}
-	var emb any
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: %s", brain.ErrNotFound, obj.ID)
+	}
+	return nil
+}
+
+// upsertObject is the statement Put and CommitTree run to write obj. It
+// affects no row when obj.ID is held by a row outside scope.
+func upsertObject(scope brain.Scope, obj brain.Object) (string, []any, error) {
+	if err := brain.ValidateObjectIdentity(obj); err != nil {
+		return "", nil, err
+	}
+	if err := scope.Namespace.Validate(); err != nil {
+		return "", nil, err
+	}
+	if !scope.Namespace.Covers(obj.Namespace) {
+		return "", nil, fmt.Errorf("%w: object namespace is outside scope", brain.ErrInvalid)
+	}
+	var model *string
 	if len(obj.Embedding) > 0 {
-		emb = formatVectorLiteral(obj.Embedding)
+		model = &obj.EmbeddingModel
 	}
 	now := time.Now().UTC()
-	if obj.CreatedAt.IsZero() {
-		obj.CreatedAt = now
-	}
-	if obj.UpdatedAt.IsZero() {
-		obj.UpdatedAt = now
-	}
-	const q = `
+	return `
 		INSERT INTO objects (
 			id, kind, title, summary, properties, content, content_type,
-			parent_id, position, embedding, namespace, created_at, updated_at, deleted_at
+			parent_id, position, embedding, embedding_model, embedding_updated_at,
+			namespace, readers, created_at, updated_at, deleted_at
 		) VALUES (
-			$1, $2, $3, $4, $5::jsonb, $6, $7,
-			$8, $9, $10::vector, $11::jsonb, $12, $13, NULL
+			$1, $2, $3, $4, coalesce($5::jsonb, '{}'), $6, $7,
+			$8, $9, $10::real[]::vector, $11, CASE WHEN $11::text IS NULL THEN NULL ELSE $15::timestamptz END,
+			$12::jsonb, COALESCE($13::text[], '{}'), $14, $15, NULL
 		)
 		ON CONFLICT (id) DO UPDATE SET
 			kind = EXCLUDED.kind,
@@ -180,33 +172,81 @@ func (s *Store) Put(ctx context.Context, obj brain.Object) error {
 			parent_id = EXCLUDED.parent_id,
 			position = EXCLUDED.position,
 			embedding = EXCLUDED.embedding,
+			embedding_model = EXCLUDED.embedding_model,
+			embedding_updated_at = EXCLUDED.embedding_updated_at,
 			namespace = EXCLUDED.namespace,
+			readers = EXCLUDED.readers,
 			updated_at = EXCLUDED.updated_at,
-			deleted_at = NULL`
-	nsJSON, _ := obj.Namespace.Value()
-	if _, err := s.db.Exec(ctx, q,
-		obj.ID, obj.Kind, obj.Title, obj.Summary, propsJSON, obj.Content, obj.ContentType,
-		obj.ParentID, obj.Position, emb, nsJSON, obj.CreatedAt, obj.UpdatedAt,
-	); err != nil {
-		return fmt.Errorf("postgres: put object: %w", err)
-	}
-	return nil
+			deleted_at = NULL
+		WHERE objects.namespace @> $16::jsonb
+		  AND (cardinality(objects.readers) = 0 OR objects.readers && $17::text[])`, []any{
+		obj.ID, obj.Kind, obj.Title, obj.Summary, obj.Properties, obj.Content, obj.ContentType,
+		obj.ParentID, obj.Position, obj.Embedding, model, obj.Namespace, obj.Readers,
+		cmp.Or(obj.CreatedAt, now), cmp.Or(obj.UpdatedAt, now), scope.Namespace, scope.Principals,
+	}, nil
 }
 
-// SoftDelete implements ObjectWriter.
+// SoftDelete implements ObjectWriter: id and its parts.
 func (s *Store) SoftDelete(ctx context.Context, scope brain.Scope, id uuid.UUID) error {
 	if id == uuid.Nil {
 		return fmt.Errorf("%w: object id is required", brain.ErrInvalid)
 	}
-	q := `UPDATE objects SET deleted_at = $1, updated_at = $1 WHERE id = $2 AND deleted_at IS NULL`
-	args := []any{time.Now().UTC(), id}
-	q, args = appendNamespaceSQL(q, args, scope)
-	tag, err := s.db.Exec(ctx, q, args...)
+	if err := scope.Namespace.Validate(); err != nil {
+		return err
+	}
+	tag, err := s.db.Exec(ctx, `UPDATE objects SET deleted_at = $1, updated_at = $1
+		WHERE (id = $2 OR parent_id = $2) AND deleted_at IS NULL
+		  AND namespace @> $3::jsonb AND (cardinality(readers) = 0 OR readers && $4::text[])`,
+		time.Now().UTC(), id, scope.Namespace, scope.Principals)
 	if err != nil {
 		return fmt.Errorf("postgres: soft delete: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("%w: %s", brain.ErrNotFound, id)
+	}
+	return nil
+}
+
+// PurgeDeleted implements Purger. It also drops parts staged by tree writes
+// that never committed.
+func (s *Store) PurgeDeleted(ctx context.Context, scope brain.Scope, before time.Time) (int, error) {
+	if err := scope.Namespace.Validate(); err != nil {
+		return 0, err
+	}
+	tag, err := s.db.Exec(ctx, `
+		WITH staged AS (DELETE FROM objects_staging WHERE staged_at < $1 AND namespace @> $2::jsonb)
+		DELETE FROM objects WHERE deleted_at < $1 AND namespace @> $2::jsonb`, before, scope.Namespace)
+	if err != nil {
+		return 0, fmt.Errorf("postgres: purge deleted: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
+// Erase implements Purger in one statement.
+func (s *Store) Erase(ctx context.Context, scope brain.Scope) ([]uuid.UUID, error) {
+	if err := scope.Namespace.Validate(); err != nil {
+		return nil, err
+	}
+	rows, _ := s.db.Query(ctx, `
+		WITH gone AS (DELETE FROM objects WHERE namespace @> $1::jsonb RETURNING id, parent_id),
+		     sessions AS (DELETE FROM session_messages WHERE namespace @> $1::jsonb),
+		     staged AS (DELETE FROM objects_staging WHERE namespace @> $1::jsonb)
+		SELECT id FROM gone WHERE parent_id IS NULL`, scope.Namespace)
+	parents, err := pgx.CollectRows(rows, pgx.RowTo[uuid.UUID])
+	if err != nil {
+		return nil, fmt.Errorf("postgres: erase: %w", err)
+	}
+	return parents, nil
+}
+
+// Record is a brain.AuditFunc that appends ev to audit_events.
+func (s *Store) Record(ctx context.Context, ev brain.AuditEvent) error {
+	if _, err := s.db.Exec(ctx, `
+		INSERT INTO audit_events (at, op, namespace, principals, session_id, object_ids, count)
+		VALUES ($1, $2, $3::jsonb, COALESCE($4::text[], '{}'), NULLIF($5, ''), COALESCE($6::uuid[], '{}'), $7)`,
+		ev.Time, string(ev.Op), ev.Namespace, ev.Principals, ev.SessionID, ev.ObjectIDs, ev.Count,
+	); err != nil {
+		return fmt.Errorf("postgres: audit: %w", err)
 	}
 	return nil
 }
@@ -234,57 +274,30 @@ func (s *Store) PutKind(ctx context.Context, k brain.ObjectKind) error {
 	return nil
 }
 
+// kindSelect reads object_kinds rows in brain.ObjectKind field order.
+const kindSelect = `SELECT kind, coalesce(description, ''), is_part, is_parent, filterable_fields FROM object_kinds`
+
 // GetKind implements KindReader.
 func (s *Store) GetKind(ctx context.Context, kind string) (brain.ObjectKind, error) {
-	const q = `
-		SELECT kind, description, is_part, is_parent, filterable_fields
-		FROM object_kinds WHERE kind = $1`
-	var k brain.ObjectKind
-	var desc *string
-	var fields []byte
-	err := s.db.QueryRow(ctx, q, kind).Scan(&k.Kind, &desc, &k.IsPart, &k.IsParent, &fields)
+	rows, _ := s.db.Query(ctx, kindSelect+` WHERE kind = $1`, kind)
+	k, err := pgx.CollectExactlyOneRow(rows, pgx.RowToStructByPos[brain.ObjectKind])
+	if errors.Is(err, pgx.ErrNoRows) {
+		return brain.ObjectKind{}, fmt.Errorf("%w: kind %q", brain.ErrNotFound, kind)
+	}
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return brain.ObjectKind{}, fmt.Errorf("%w: kind %q", brain.ErrNotFound, kind)
-		}
 		return brain.ObjectKind{}, fmt.Errorf("postgres: get kind: %w", err)
 	}
-	if desc != nil {
-		k.Description = *desc
-	}
-	k.FilterableFields = json.RawMessage(fields)
 	return k, nil
 }
 
 // ListKinds implements KindReader.
 func (s *Store) ListKinds(ctx context.Context) ([]brain.ObjectKind, error) {
-	const q = `
-		SELECT kind, description, is_part, is_parent, filterable_fields
-		FROM object_kinds ORDER BY kind ASC`
-	rows, err := s.db.Query(ctx, q)
+	rows, _ := s.db.Query(ctx, kindSelect+` ORDER BY kind ASC`)
+	kinds, err := pgx.CollectRows(rows, pgx.RowToStructByPos[brain.ObjectKind])
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list kinds: %w", err)
 	}
-	defer rows.Close()
-
-	var out []brain.ObjectKind
-	for rows.Next() {
-		var k brain.ObjectKind
-		var desc *string
-		var fields []byte
-		if err := rows.Scan(&k.Kind, &desc, &k.IsPart, &k.IsParent, &fields); err != nil {
-			return nil, fmt.Errorf("postgres: list kinds: %w", err)
-		}
-		if desc != nil {
-			k.Description = *desc
-		}
-		k.FilterableFields = json.RawMessage(fields)
-		out = append(out, k)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("postgres: list kinds: %w", err)
-	}
-	return out, nil
+	return kinds, nil
 }
 
 // ListByKind implements ObjectLister (first-class objects only).
@@ -293,14 +306,19 @@ func (s *Store) ListByKind(ctx context.Context, scope brain.Scope, kind string, 
 	if kind == "" || limit <= 0 {
 		return nil, nil
 	}
-	q := `SELECT ` + objectSelectCols + `
-		FROM objects
-		WHERE kind = $1 AND deleted_at IS NULL AND parent_id IS NULL`
-	args := []any{kind}
-	q, args = appendNamespaceSQL(q, args, scope)
-	q += fmt.Sprintf(` ORDER BY title ASC NULLS LAST, id ASC LIMIT $%d`, len(args)+1)
-	args = append(args, limit)
-	return s.scanObjectRows(ctx, q, args, "list by kind", limit)
+	if err := scope.Namespace.Validate(); err != nil {
+		return nil, err
+	}
+	objs, err := s.queryObjects(ctx, `SELECT `+objectSelectCols+` FROM objects
+		WHERE kind = $1 AND deleted_at IS NULL AND parent_id IS NULL
+		  AND namespace @> $2::jsonb AND (cardinality(readers) = 0 OR readers && $3::text[])
+		ORDER BY title ASC NULLS LAST, id ASC
+		LIMIT $4`,
+		kind, scope.Namespace, scope.Principals, limit)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list by kind: %w", err)
+	}
+	return objs, nil
 }
 
 // GetByProperty implements ObjectLister.
@@ -309,122 +327,52 @@ func (s *Store) GetByProperty(ctx context.Context, scope brain.Scope, key, value
 	if key == "" {
 		return brain.Object{}, fmt.Errorf("postgres: property key is required")
 	}
-	q := `SELECT ` + objectSelectCols + `
-		FROM objects
-		WHERE deleted_at IS NULL AND properties->>$1 = $2`
-	args := []any{key, value}
-	q, args = appendNamespaceSQL(q, args, scope)
-	q += ` LIMIT 1`
-	return s.scanObject(s.db.QueryRow(ctx, q, args...))
+	if err := scope.Namespace.Validate(); err != nil {
+		return brain.Object{}, err
+	}
+	return scanObject(s.db.QueryRow(ctx, `SELECT `+objectSelectCols+` FROM objects
+		WHERE deleted_at IS NULL AND properties->>$1 = $2
+		  AND namespace @> $3::jsonb AND (cardinality(readers) = 0 OR readers && $4::text[])
+		LIMIT 1`,
+		key, value, scope.Namespace, scope.Principals))
 }
 
 // KindsWithObjects implements ObjectLister.
 func (s *Store) KindsWithObjects(ctx context.Context, scope brain.Scope) ([]string, error) {
-	q := `SELECT DISTINCT kind FROM objects WHERE deleted_at IS NULL AND parent_id IS NULL`
-	var args []any
-	q, args = appendNamespaceSQL(q, args, scope)
-	q += ` ORDER BY kind ASC`
-	rows, err := s.db.Query(ctx, q, args...)
+	if err := scope.Namespace.Validate(); err != nil {
+		return nil, err
+	}
+	rows, _ := s.db.Query(ctx, `SELECT DISTINCT kind FROM objects
+		WHERE deleted_at IS NULL AND parent_id IS NULL AND kind <> ''
+		  AND namespace @> $1::jsonb AND (cardinality(readers) = 0 OR readers && $2::text[])
+		ORDER BY kind ASC`,
+		scope.Namespace, scope.Principals)
+	kinds, err := pgx.CollectRows(rows, pgx.RowTo[string])
 	if err != nil {
 		return nil, fmt.Errorf("postgres: kinds with objects: %w", err)
 	}
-	defer rows.Close()
-	var out []string
-	for rows.Next() {
-		var k string
-		if err := rows.Scan(&k); err != nil {
-			return nil, fmt.Errorf("postgres: kinds with objects: %w", err)
-		}
-		if k != "" {
-			out = append(out, k)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("postgres: kinds with objects: %w", err)
-	}
-	return out, nil
+	return kinds, nil
 }
 
-func (s *Store) scanObjectRows(ctx context.Context, q string, args []any, label string, capHint int) ([]brain.Object, error) {
-	rows, err := s.db.Query(ctx, q, args...)
+// queryObjects runs a query that selects objectSelectCols.
+func (s *Store) queryObjects(ctx context.Context, q string, args ...any) ([]brain.Object, error) {
+	rows, _ := s.db.Query(ctx, q, args...)
+	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (brain.Object, error) { return scanObject(row) })
+}
+
+// scanObject reads one objectSelectCols row. No row is brain.ErrNotFound.
+func scanObject(row pgx.Row) (brain.Object, error) {
+	var o brain.Object
+	err := row.Scan(&o.ID, &o.Kind, &o.Title, &o.Summary, &o.Properties, &o.Content, &o.ContentType,
+		&o.ParentID, &o.Position, &o.Namespace, &o.Readers, &o.EmbeddingModel, &o.CreatedAt, &o.UpdatedAt, &o.DeletedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return brain.Object{}, brain.ErrNotFound
+	}
 	if err != nil {
-		return nil, fmt.Errorf("postgres: %s: %w", label, err)
-	}
-	defer rows.Close()
-	out := make([]brain.Object, 0, capHint)
-	for rows.Next() {
-		obj, err := s.scanObject(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, obj)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("postgres: %s: %w", label, err)
-	}
-	return out, nil
-}
-
-type scannable interface {
-	Scan(dest ...any) error
-}
-
-func (s *Store) scanObject(row scannable) (brain.Object, error) {
-	var (
-		o           brain.Object
-		title       *string
-		summary     *string
-		propsRaw    []byte
-		content     *string
-		contentType *string
-		parentID    *uuid.UUID
-		position    *int32
-		deletedAt   *time.Time
-	)
-	err := row.Scan(
-		&o.ID,
-		&o.Kind,
-		&title,
-		&summary,
-		&propsRaw,
-		&content,
-		&contentType,
-		&parentID,
-		&position,
-		&o.Namespace,
-		&o.CreatedAt,
-		&o.UpdatedAt,
-		&deletedAt,
-	)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return brain.Object{}, brain.ErrNotFound
-		}
 		return brain.Object{}, fmt.Errorf("postgres: scan object: %w", err)
 	}
-	if title != nil {
-		o.Title = *title
-	}
-	if summary != nil {
-		o.Summary = *summary
-	}
-	if content != nil {
-		o.Content = *content
-	}
-	if contentType != nil {
-		o.ContentType = *contentType
-	}
-	o.ParentID = parentID
-	if position != nil {
-		p := int(*position)
-		o.Position = &p
-	}
-	o.DeletedAt = deletedAt
-	o.Properties = map[string]any{}
-	if len(propsRaw) > 0 {
-		if err := json.Unmarshal(propsRaw, &o.Properties); err != nil {
-			return brain.Object{}, fmt.Errorf("postgres: properties json: %w", err)
-		}
+	if len(o.Readers) == 0 {
+		o.Readers = nil
 	}
 	return o, nil
 }
@@ -436,29 +384,36 @@ func (s *Store) SearchLexical(ctx context.Context, scope brain.Scope, query stri
 	if k <= 0 || strings.TrimSpace(query) == "" {
 		return nil, nil
 	}
-	where, fargs, err := brain.FilterSQL(scope, filters, 2)
+	if err := scope.Namespace.Validate(); err != nil {
+		return nil, err
+	}
+	where, fargs, err := brain.FilterSQL(filters, 4)
 	if err != nil {
 		return nil, err
 	}
-	args := append([]any{query}, fargs...)
-	limitPos := len(args) + 1
+	args := append([]any{query, scope.Namespace, scope.Principals}, fargs...)
 	args = append(args, k)
+	limitPos := len(args)
 	hits, err := s.searchFTS(ctx, objectsLexicalSQL(where, limitPos, true), objectsLexicalSQL(where, limitPos, false), args, k)
 	if err != nil || strings.TrimSpace(scope.SessionID) == "" {
 		return hits, err
 	}
 	extra, err := s.sessionLexical(ctx, scope, query, k)
-	return mergeRanked(hits, extra, err)
+	if err != nil {
+		return nil, err
+	}
+	return mergeRanked(hits, extra), nil
 }
 
 func objectsLexicalSQL(where string, limitPos int, matchAll bool) string {
 	return fmt.Sprintf(`
-		SELECT id, title, content, parent_id, position, updated_at,
+		SELECT id, coalesce(title, ''), coalesce(content, ''), parent_id, position, updated_at,
 		       ts_rank_cd(search_tsv, tacklr_web_terms($1, %t), %d) AS score
 		FROM objects
 		WHERE deleted_at IS NULL AND parent_id IS NOT NULL
 		  AND tacklr_web_terms($1, %t) IS NOT NULL
-		  AND search_tsv @@ tacklr_web_terms($1, %t)%s
+		  AND search_tsv @@ tacklr_web_terms($1, %t)
+		  AND namespace @> $2::jsonb AND (cardinality(readers) = 0 OR readers && $3::text[])%s
 		ORDER BY score DESC
 		LIMIT $%d`, matchAll, ftsRankNorm, matchAll, matchAll, where, limitPos)
 }
@@ -503,24 +458,28 @@ func mergeLex(primary, extra []brain.ScoredID, k int) []brain.ScoredID {
 }
 
 // SearchVector implements PartSearcher using pgvector cosine distance over parts.
-func (s *Store) SearchVector(ctx context.Context, scope brain.Scope, embedding []float32, filters brain.Filter, k int) ([]brain.ScoredID, error) {
+func (s *Store) SearchVector(ctx context.Context, scope brain.Scope, model string, embedding []float32, filters brain.Filter, k int) ([]brain.ScoredID, error) {
 	if k <= 0 || len(embedding) == 0 {
 		return nil, nil
 	}
-	where, fargs, err := brain.FilterSQL(scope, filters, 2)
+	if err := scope.Namespace.Validate(); err != nil {
+		return nil, err
+	}
+	where, fargs, err := brain.FilterSQL(filters, 5)
 	if err != nil {
 		return nil, err
 	}
-	args := append([]any{formatVectorLiteral(embedding)}, fargs...)
-	limitPos := len(args) + 1
+	args := append([]any{embedding, model, scope.Namespace, scope.Principals}, fargs...)
 	args = append(args, k)
+	limitPos := len(args)
 	q := fmt.Sprintf(`
-		SELECT id, title, content, parent_id, position, updated_at,
-		       1 - (embedding <=> $1::vector) AS score
+		SELECT id, coalesce(title, ''), coalesce(content, ''), parent_id, position, updated_at,
+		       1 - (embedding <=> $1::real[]::vector) AS score
 		FROM objects
 		WHERE deleted_at IS NULL AND parent_id IS NOT NULL
-		  AND embedding IS NOT NULL%s
-		ORDER BY embedding <=> $1::vector
+		  AND embedding IS NOT NULL AND embedding_model = $2
+		  AND namespace @> $3::jsonb AND (cardinality(readers) = 0 OR readers && $4::text[])%s
+		ORDER BY embedding <=> $1::real[]::vector
 		LIMIT $%d`, where, limitPos)
 	hits, err := s.queryScored(ctx, q, args)
 	if err != nil {
@@ -529,7 +488,7 @@ func (s *Store) SearchVector(ctx context.Context, scope brain.Scope, embedding [
 	if strings.TrimSpace(scope.SessionID) == "" {
 		return brain.TopScores(hits, k), nil
 	}
-	extra, err := s.sessionVector(ctx, scope, embedding, k)
+	extra, err := s.sessionVector(ctx, scope, model, embedding, k)
 	if err != nil {
 		return nil, err
 	}
@@ -541,15 +500,18 @@ func (s *Store) SearchTrigram(ctx context.Context, scope brain.Scope, query stri
 	if k <= 0 || strings.TrimSpace(query) == "" {
 		return nil, nil
 	}
-	where, fargs, err := brain.FilterSQL(scope, filters, 2)
+	if err := scope.Namespace.Validate(); err != nil {
+		return nil, err
+	}
+	where, fargs, err := brain.FilterSQL(filters, 4)
 	if err != nil {
 		return nil, err
 	}
-	args := append([]any{query}, fargs...)
-	limitPos := len(args) + 1
+	args := append([]any{query, scope.Namespace, scope.Principals}, fargs...)
 	args = append(args, k)
+	limitPos := len(args)
 	q := fmt.Sprintf(`
-		SELECT id, title, content, parent_id, position, updated_at,
+		SELECT id, coalesce(title, ''), coalesce(content, ''), parent_id, position, updated_at,
 		       GREATEST(similarity(coalesce(title,''), $1), word_similarity($1, coalesce(content,''))) AS score
 		FROM objects
 		WHERE deleted_at IS NULL AND parent_id IS NOT NULL
@@ -558,7 +520,8 @@ func (s *Store) SearchTrigram(ctx context.Context, scope brain.Scope, query stri
 		    OR strpos(lower(coalesce(content,'')), lower($1)) > 0
 		    OR similarity(coalesce(title,''), $1) > 0.3
 		    OR word_similarity($1, coalesce(content,'')) > 0.3
-		  )%s
+		  )
+		  AND namespace @> $2::jsonb AND (cardinality(readers) = 0 OR readers && $3::text[])%s
 		ORDER BY score DESC
 		LIMIT $%d`, where, limitPos)
 	hits, err := s.queryScored(ctx, q, args)
@@ -566,67 +529,21 @@ func (s *Store) SearchTrigram(ctx context.Context, scope brain.Scope, query stri
 		return hits, err
 	}
 	extra, err := s.sessionTrigram(ctx, scope, query, k)
-	return mergeRanked(hits, extra, err)
+	if err != nil {
+		return nil, err
+	}
+	return mergeRanked(hits, extra), nil
 }
 
 func (s *Store) queryScored(ctx context.Context, q string, args []any) ([]brain.ScoredID, error) {
-	rows, err := s.db.Query(ctx, q, args...)
+	rows, _ := s.db.Query(ctx, q, args...)
+	hits, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (brain.ScoredID, error) {
+		var h brain.ScoredID
+		err := row.Scan(&h.ID, &h.Title, &h.Content, &h.ParentID, &h.Position, &h.UpdatedAt, &h.Score)
+		return h, err
+	})
 	if err != nil {
-		return nil, fmt.Errorf("postgres: search query: %w", err)
+		return nil, fmt.Errorf("postgres: search: %w", err)
 	}
-	defer rows.Close()
-	var out []brain.ScoredID
-	for rows.Next() {
-		var (
-			id       uuid.UUID
-			title    *string
-			content  *string
-			parentID *uuid.UUID
-			position *int32
-			updated  time.Time
-			score    float64
-		)
-		if err := rows.Scan(&id, &title, &content, &parentID, &position, &updated, &score); err != nil {
-			return nil, fmt.Errorf("postgres: search scan: %w", err)
-		}
-		item := brain.ScoredID{ID: id, Score: score, UpdatedAt: updated, ParentID: parentID}
-		if title != nil {
-			item.Title = *title
-		}
-		if content != nil {
-			item.Content = *content
-		}
-		if position != nil {
-			p := int(*position)
-			item.Position = &p
-		}
-		out = append(out, item)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("postgres: search rows: %w", err)
-	}
-	return out, nil
-}
-
-func appendNamespaceSQL(q string, args []any, scope brain.Scope) (string, []any) {
-	if scope.Namespace.Empty() {
-		return q, args
-	}
-	raw, _ := scope.Namespace.Value()
-	q += fmt.Sprintf(` AND namespace @> $%d::jsonb`, len(args)+1)
-	return q, append(args, raw)
-}
-
-func formatVectorLiteral(v []float32) string {
-	var b strings.Builder
-	b.Grow(2 + len(v)*8)
-	b.WriteByte('[')
-	for i, f := range v {
-		if i > 0 {
-			b.WriteByte(',')
-		}
-		b.WriteString(strconv.FormatFloat(float64(f), 'g', -1, 32))
-	}
-	b.WriteByte(']')
-	return b.String()
+	return hits, nil
 }

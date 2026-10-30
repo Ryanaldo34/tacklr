@@ -31,8 +31,8 @@ func TestNamespace_coversHierarchicalRLS(t *testing.T) {
 	wsOnly := mustNS(t, "workspace", "west")
 
 	var open Namespace
-	if !open.Covers(obj) {
-		t.Fatal("empty scope covers all")
+	if open.Covers(obj) {
+		t.Fatal("empty scope must cover nothing")
 	}
 	if !org.Covers(obj) || !ws.Covers(obj) || !exact.Covers(obj) {
 		t.Fatal("prefix attrs must cover")

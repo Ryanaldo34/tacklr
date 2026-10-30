@@ -16,6 +16,9 @@ import (
 // carries them). A parent with no parts does not appear. Entity search is
 // FindObjects.
 func (e *Engine) Search(ctx context.Context, scope Scope, req SearchRequest, results ResultSetStore) (SearchPage, error) {
+	if err := scope.Namespace.Validate(); err != nil {
+		return SearchPage{}, err
+	}
 	ranked, err := e.hybridCandidates(ctx, scope, req)
 	if err != nil {
 		return SearchPage{}, err
@@ -28,6 +31,9 @@ func (e *Engine) Search(ctx context.Context, scope Scope, req SearchRequest, res
 // lexical + trigram fusion, promotion, and ResultSet materialization.
 // Same part-only candidate rule as Search. UUID lookup may return a parent.
 func (e *Engine) FindExact(ctx context.Context, scope Scope, req SearchRequest, results ResultSetStore) (SearchPage, error) {
+	if err := scope.Namespace.Validate(); err != nil {
+		return SearchPage{}, err
+	}
 	ranked, err := e.exactCandidates(ctx, scope, req)
 	if err != nil {
 		return SearchPage{}, err
@@ -67,6 +73,9 @@ func filterScoredByScopeIDs(ranked []ScoredID, allow []uuid.UUID) []ScoredID {
 
 // Continue returns the next page of a prior ResultSet under scope.
 func (e *Engine) Continue(ctx context.Context, scope Scope, resultSetID uuid.UUID, limit int, results ResultSetStore) (page SearchPage, err error) {
+	if err := scope.Namespace.Validate(); err != nil {
+		return page, err
+	}
 	if resultSetID == uuid.Nil {
 		return page, fmt.Errorf("%w: result_set_id is required", ErrInvalid)
 	}
@@ -81,6 +90,9 @@ func (e *Engine) Continue(ctx context.Context, scope Scope, resultSetID uuid.UUI
 	start, end := sliceBounds(set.Offset, limit, len(set.ObjectIDs))
 	objs, err := e.hydrateIDs(ctx, scope, set.ObjectIDs[start:end])
 	if err != nil {
+		return page, err
+	}
+	if err := e.recordRead(ctx, scope, richIDs(objs)); err != nil {
 		return page, err
 	}
 	attachRelations(objs, set.Relations)
@@ -219,13 +231,13 @@ func (e *Engine) hybridCandidates(ctx context.Context, scope Scope, req SearchRe
 	var emb []float32
 	if e.embedder != nil {
 		var embErr error
-		emb, embErr = e.embedder.Embed(ctx, query)
+		emb, embErr = e.embedOne(ctx, query)
 		if embErr != nil {
 			if !e.cfg.allowEmbedderDegrade() {
 				return nil, fmt.Errorf("brain: embed query: %w", embErr)
 			}
 		} else if len(emb) > 0 {
-			vec, err := e.store.SearchVector(ctx, scope, emb, filters, k)
+			vec, err := e.store.SearchVector(ctx, scope, e.embedder.Model(), emb, filters, k)
 			if err != nil {
 				if !e.cfg.allowEmbedderDegrade() {
 					return nil, err
@@ -330,6 +342,9 @@ func (e *Engine) pageIDs(ctx context.Context, scope Scope, ids []uuid.UUID, limi
 	_, end := sliceBounds(0, limit, len(ids))
 	pageObjs, err := e.hydrateIDs(ctx, scope, ids[:end])
 	if err != nil {
+		return SearchPage{}, err
+	}
+	if err := e.recordRead(ctx, scope, richIDs(pageObjs)); err != nil {
 		return SearchPage{}, err
 	}
 	attachRelations(pageObjs, relations)

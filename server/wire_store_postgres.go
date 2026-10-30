@@ -5,33 +5,26 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/exaring/otelpgx"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // PostgresWireStore implements ProtocolWireStore against Postgres.
-// Call Setup once per database. Shares a *pgx.Conn with a brain store when
-// desired; the table is separate from harness session checkpoints.
+// Call Setup once per database. The table is separate from harness session
+// checkpoints. Tracing
+// is the pool's own (ConnConfig.Tracer).
 type PostgresWireStore struct {
-	conn     *pgx.Conn
+	pool     *pgxpool.Pool
 	protocol string // stored in protocol column; default "acp"
-	tr       *otelpgx.Tracer
 }
 
-// NewPostgresWireStore wraps an existing pgx connection.
+// NewPostgresWireStore stores envelopes through pool.
 // protocolKey labels rows (e.g. "acp"); empty defaults to "acp".
-func NewPostgresWireStore(conn *pgx.Conn, protocolKey string) *PostgresWireStore {
+func NewPostgresWireStore(pool *pgxpool.Pool, protocolKey string) *PostgresWireStore {
 	if protocolKey == "" {
 		protocolKey = "acp"
 	}
-	return &PostgresWireStore{
-		conn:     conn,
-		protocol: protocolKey,
-		tr: otelpgx.NewTracer(
-			otelpgx.WithTrimSQLInSpanName(),
-			otelpgx.WithDisableAcquireTracer(),
-		),
-	}
+	return &PostgresWireStore{pool: pool, protocol: protocolKey}
 }
 
 // Setup creates public.protocol_wire_session (idempotent).
@@ -43,9 +36,7 @@ func (s *PostgresWireStore) Setup(ctx context.Context) error {
 			payload      jsonb NOT NULL,
 			updated_at   timestamptz NOT NULL DEFAULT now()
 		)`
-	ctx = s.tr.TraceQueryStart(ctx, s.conn, pgx.TraceQueryStartData{SQL: q})
-	_, err := s.conn.Exec(ctx, q)
-	s.tr.TraceQueryEnd(ctx, s.conn, pgx.TraceQueryEndData{Err: err})
+	_, err := s.pool.Exec(ctx, q)
 	if err != nil {
 		return fmt.Errorf("wire setup: %w", err)
 	}
@@ -63,9 +54,7 @@ func (s *PostgresWireStore) Put(ctx context.Context, sessionID string, payload [
 		SET protocol = EXCLUDED.protocol,
 		    payload = EXCLUDED.payload,
 		    updated_at = now()`
-	ctx = s.tr.TraceQueryStart(ctx, s.conn, pgx.TraceQueryStartData{SQL: q, Args: []any{sessionID, s.protocol, payload}})
-	_, err := s.conn.Exec(ctx, q, sessionID, s.protocol, payload)
-	s.tr.TraceQueryEnd(ctx, s.conn, pgx.TraceQueryEndData{Err: err})
+	_, err := s.pool.Exec(ctx, q, sessionID, s.protocol, payload)
 	if err != nil {
 		return fmt.Errorf("wire put %q: %w", sessionID, err)
 	}
@@ -75,9 +64,7 @@ func (s *PostgresWireStore) Put(ctx context.Context, sessionID string, payload [
 func (s *PostgresWireStore) Get(ctx context.Context, sessionID string) ([]byte, error) {
 	const q = `SELECT payload FROM public.protocol_wire_session WHERE session_id = $1`
 	var payload []byte
-	ctx = s.tr.TraceQueryStart(ctx, s.conn, pgx.TraceQueryStartData{SQL: q, Args: []any{sessionID}})
-	err := s.conn.QueryRow(ctx, q, sessionID).Scan(&payload)
-	s.tr.TraceQueryEnd(ctx, s.conn, pgx.TraceQueryEndData{Err: err})
+	err := s.pool.QueryRow(ctx, q, sessionID).Scan(&payload)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("wire session %q: %w", sessionID, ErrSessionNotFound)
@@ -89,9 +76,7 @@ func (s *PostgresWireStore) Get(ctx context.Context, sessionID string) ([]byte, 
 
 func (s *PostgresWireStore) Delete(ctx context.Context, sessionID string) error {
 	const q = `DELETE FROM public.protocol_wire_session WHERE session_id = $1`
-	ctx = s.tr.TraceQueryStart(ctx, s.conn, pgx.TraceQueryStartData{SQL: q, Args: []any{sessionID}})
-	_, err := s.conn.Exec(ctx, q, sessionID)
-	s.tr.TraceQueryEnd(ctx, s.conn, pgx.TraceQueryEndData{Err: err})
+	_, err := s.pool.Exec(ctx, q, sessionID)
 	if err != nil {
 		return fmt.Errorf("wire delete %q: %w", sessionID, err)
 	}

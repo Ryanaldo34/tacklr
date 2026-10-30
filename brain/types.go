@@ -3,6 +3,7 @@ package brain
 import (
 	"encoding/json"
 	"errors"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -17,20 +18,45 @@ var (
 	ErrInvalid = errors.New("brain: invalid")
 	// ErrUnsupported groups missing backend capabilities (no writer, no graph, no listing).
 	ErrUnsupported = errors.New("brain: unsupported")
+	// ErrConflict is returned when another write changed the object first.
+	// Nothing was written; retry from a fresh read.
+	ErrConflict = errors.New("brain: conflict")
 	// ErrGraphEnsure / ErrGraphRemove are dual-write failures. Callers re-Put
 	// after fixing the graph; store row is the source of truth.
 	ErrGraphEnsure = errors.New("brain: graph ensure object")
 	ErrGraphRemove = errors.New("brain: graph remove object")
 )
 
-// Scope is optional retrieval isolation for Engine methods.
-// Empty Namespace means no isolation. Non-empty applies application RLS
-// (Namespace.Covers) so a broader scope sees objects with extra attrs.
-// SessionID is harness-owned. When set, search and get also read this session's
-// rows in session_messages (Namespace plus the session attribute). The model cannot set it.
+// Scope is the isolation every Engine and store call runs under. Namespace is
+// required: a call with an empty namespace fails, so no code path reads or
+// writes across tenants by default. A scope sees an object when every scope
+// attr is on the object (Namespace.Covers), so a broader scope sees objects
+// with extra attrs.
+//
+// Principals are the caller's identities (user and group ids from the host's
+// identity provider). An object with Readers is visible only to a scope that
+// shares at least one principal with it. An object without Readers is visible
+// to every scope that covers its namespace.
+//
+// SessionID is harness-owned. When set, search and get also read this
+// session's rows in session_messages (Namespace plus the session attribute).
+// The model cannot set it.
 type Scope struct {
-	Namespace Namespace
-	SessionID string
+	Namespace  Namespace
+	Principals []string
+	SessionID  string
+}
+
+// CanRead reports whether obj is visible under s: s covers its namespace,
+// and obj has no Readers or shares a principal with s.
+func (s Scope) CanRead(obj Object) bool {
+	if !s.Namespace.Covers(obj.Namespace) {
+		return false
+	}
+	if len(obj.Readers) == 0 {
+		return true
+	}
+	return slices.ContainsFunc(obj.Readers, func(r string) bool { return slices.Contains(s.Principals, r) })
 }
 
 // Object is one row from the generic objects store (parent or part).
@@ -47,8 +73,14 @@ type Object struct {
 	// Embedding is the dense vector stored on the row. Store search reads it
 	// on parts. Parent embeddings are copied to the graph for FindObjects.
 	Embedding []float32
+	// EmbeddingModel names the model that made Embedding. Vector search only
+	// compares rows from the query's model.
+	EmbeddingModel string
 	// Namespace is the ordered named isolation attrs stored on the row.
 	Namespace Namespace
+	// Readers, when set, limits visibility to scopes holding one of these
+	// principals (source ACLs, such as Drive or SharePoint sharing).
+	Readers   []string
 	CreatedAt time.Time
 	UpdatedAt time.Time
 	DeletedAt *time.Time

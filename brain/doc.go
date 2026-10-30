@@ -33,15 +33,28 @@
 //
 // # Explicit writes (no handoff side effects)
 //
-// Durable product objects are written via Engine.Put / SoftDelete / ReplaceParts
+// Durable product objects are written via Engine.Put / PutTree / SoftDelete
 // (host SDK) or kind-scoped agent tools. A plan handoff saves the exact live
 // window with Engine.SaveSessionMessages into session_messages (host namespace
 // plus the session id at the tail). Those rows are not the harness checkpoint.
 // Search and find_exact return them together with host-namespace knowledge for
 // the active session. Compress and specialist results may still
 // write session residue (kind Episode). They never write host product kinds.
-// ReplaceParts is how a host attaches corpus chunks under a parent; Engram
-// files stay parent-only.
+// PutTree is how a host attaches corpus chunks under a parent. It streams the
+// parts, embeds only those whose content changed (part ids come from
+// content), stages them in batches, and swaps them in with one atomic
+// commit. Engram files stay parent-only.
+//
+// # Isolation
+//
+// Every Engine and store call takes a Scope with a non-empty Namespace; an
+// empty one fails with ErrInvalid. Writes are guarded: an object must lie
+// inside the scope, and an id already held outside the scope returns
+// ErrNotFound, so a tenant cannot overwrite another tenant's row. Objects with
+// Readers (source ACLs) are visible only to scopes holding one of those
+// Principals. PurgeDeleted, Erase, and PurgeSessionMessages hard-delete for
+// retention and erasure. WithAudit records every served read and write.
+// storetest.Run is the isolation contract a store must pass.
 //
 // Hosts map save_* tools via AgentOptions.BrainWriteKinds. Write for retrieval:
 // fill title and summary (and useful properties) so search and find_objects work.
@@ -98,17 +111,16 @@
 // EntityIndexText; parts embed IndexText with parent title prefix (corpus only).
 // WithIndexText rewrites that document at Put without changing the stored object.
 // One embedding dimension per process.
-// Helix hosts must call helixgraph.Graph.Bootstrap (or EnsureSearchIndexes) so
+// Helix hosts must call helixgraph.Graph.Bootstrap so
 // HasObjectSearch is true; MemoryGraph is always ready when attached.
-// Bootstrap(true) enables Helix tenant filtering when the image supports it.
 //
 // # Boot sketch
 //
-//	store, err := postgres.New(pool)
-//	store.EmbeddingDim = 1536 // optional; default 1536
+//	store, err := postgres.Open(ctx, dsn, postgres.Options{EmbeddingDim: 1536})
+//	defer store.Close()
 //	if err := store.Setup(ctx, specs...); err != nil { return err }
 //	g, err := helixgraph.New(helixURL)
-//	if err := g.Bootstrap(ctx, false); err != nil { return err }
+//	if err := g.Bootstrap(ctx); err != nil { return err }
 //	eng, err := brain.NewEngine(store, brain.WithEmbedder(emb), brain.WithGraph(g))
 //	if err := eng.LoadKindsFromStore(ctx); err != nil { return err }
 //

@@ -227,6 +227,21 @@ Raw `ReadFile` / `WriteFile` stay byte-only and do not build IR.
 | **WriteFile** | Byte write-through to the provider |
 | **AfterPersist** | Optional host hook after successful backend write (`WriteFile` / `WriteDocument`) |
 | **ContentRev** | Session-visible content identity (`Path` + SHA-256 hex of body); `LineWindow.Rev` when known |
+| **Open (read)** | Streams on every backend, with no size cap. Local and Git return the file. S3, Azure Blob, Drive and Graph return a remote handle: `Read` streams one download; `ReadAt` uses HTTP range requests through a 1 MiB read-ahead window, so sequential offset reads (FUSE) cost one request per window |
+| **FileInfo.Version** | Changes when the content changes; equal values mean unchanged content. Read it from `Stat` to skip unchanged files without opening them (see below) |
+
+#### `FileInfo.Version`
+
+Each backend fills `Version` from metadata it already returns, so `Stat` costs no extra request:
+
+| Backend | Version |
+|---------|---------|
+| Local, Git | size, mtime in nanoseconds and inode (base 36, `-` separated). A symlink reports its target |
+| S3, Azure Blob | ETag |
+| Google Drive | `md5Checksum`; Google-native files (no checksum) use `version` |
+| Microsoft Graph | `cTag` (changes on content edits, not on renames) |
+
+Directories have no version. A custom `Provider` that leaves `Version` empty forces callers to read the content to detect a change.
 
 Tool guidance:
 
@@ -361,11 +376,14 @@ Lifecycle as a diagram:
 ```text
 Mount:  /data  →  vfs.S3 (bucket + prefix) or vfs.Blob (container + prefix)
 Read:   ReadText("/data/app.go")   // GetObject / DownloadStream → TextDocument
+Stream: Open("/data/big.log")      // Read streams one GET; ReadAt sends ranged GETs
 Edit:   SetLine / ReplaceLines
 Write:  WriteDocument              // PutObject / UploadStream with Text() bytes
 ```
 
 The agent always uses `/data/app.go`. It never sees the bucket or container name.
+
+A custom `S3API` implements `Head` (returns `S3Object` with size, mtime, content type and ETag) and `Get(ctx, bucket, key, off, n)`, which opens `n` bytes from `off` (`n < 0` reads to the end). `AWSS3` sends `Range: bytes=…`; `AzureBlob` sets `DownloadStreamOptions.Range`.
 
 ### Git repositories
 

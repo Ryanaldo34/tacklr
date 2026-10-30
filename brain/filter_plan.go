@@ -47,10 +47,7 @@ func compileFilters(f Filter) (filterPlan, error) {
 		if strings.TrimSpace(bound.raw) == "" {
 			continue
 		}
-		t, err := parseFilterTime(bound.raw)
-		if err != nil {
-			return filterPlan{}, err
-		}
+		t, _ := parseFilterTime(bound.raw) // ValidateFilters parsed it above
 		op := "lt"
 		if bound.after {
 			op = "gte"
@@ -58,11 +55,7 @@ func compileFilters(f Filter) (filterPlan, error) {
 		preds = append(preds, filterPred{field: bound.field, op: op, timeVal: t})
 	}
 	for key, pf := range f.Props {
-		col := sanitizeJSONKey(key)
-		if col == "" {
-			return filterPlan{}, fmt.Errorf("brain: filter %q is not a valid property key", key)
-		}
-		preds = append(preds, propPred("prop:"+col, pf))
+		preds = append(preds, propPred("prop:"+key, pf)) // ValidateFilters checked key
 	}
 	return filterPlan{preds: preds}, nil
 }
@@ -122,17 +115,13 @@ func matchWant(got any, p filterPred) bool {
 }
 
 func matchTime(got time.Time, p filterPred) bool {
-	switch p.op {
-	case "gte":
+	if p.op == "gte" {
 		return !got.Before(p.timeVal)
-	case "lt":
-		return got.Before(p.timeVal)
-	default:
-		return false
 	}
+	return got.Before(p.timeVal)
 }
 
-func (p filterPlan) sql(scope Scope, startArg int) (string, []any, error) {
+func (p filterPlan) sql(startArg int) (string, []any) {
 	var b strings.Builder
 	var args []any
 	n := startArg
@@ -143,9 +132,6 @@ func (p filterPlan) sql(scope Scope, startArg int) (string, []any, error) {
 		n++
 	}
 	addIn := func(col string, vals []any) {
-		if len(vals) == 0 {
-			return
-		}
 		b.WriteString(" AND ")
 		b.WriteString(col)
 		b.WriteString(" IN (")
@@ -160,13 +146,6 @@ func (p filterPlan) sql(scope Scope, startArg int) (string, []any, error) {
 		b.WriteString(")")
 	}
 
-	if !scope.Namespace.Empty() {
-		raw, err := scope.Namespace.Value()
-		if err != nil {
-			return "", nil, fmt.Errorf("brain: marshal namespace: %w", err)
-		}
-		add("namespace @> $%d::jsonb", raw)
-	}
 	for _, pred := range p.preds {
 		switch pred.field {
 		case filterKind, filterTitle:
@@ -193,25 +172,21 @@ func (p filterPlan) sql(scope Scope, startArg int) (string, []any, error) {
 			}
 		}
 	}
-	return b.String(), args, nil
+	return b.String(), args
 }
 
+// filterSQLValue is v as the text that properties->>'key' and the text
+// columns compare against.
 func filterSQLValue(v any) any {
-	switch x := v.(type) {
-	case string, bool:
-		return x
-	default:
-		return fmt.Sprint(v)
+	if s, ok := v.(string); ok {
+		return s
 	}
+	return fmt.Sprint(v)
 }
 
-func objectMatchesFilters(obj Object, f Filter) bool {
-	plan, err := compileFilters(f)
-	if err != nil {
-		return false
-	}
-	return plan.match(obj)
-}
+// validPropertyKey reports whether k is a non-empty run of letters, digits
+// and underscores: a property key a filter can name, and safe in SQL.
+func validPropertyKey(k string) bool { return k != "" && sanitizeJSONKey(k) == k }
 
 func sanitizeJSONKey(k string) string {
 	return strings.Map(func(r rune) rune {
@@ -223,12 +198,14 @@ func sanitizeJSONKey(k string) string {
 }
 
 // FilterSQL compiles filters into a WHERE fragment and bound args for a
-// relational store. startArg is the first $N placeholder (usually 2 when $1
-// is the query). The fragment begins with AND when non-empty.
-func FilterSQL(scope Scope, filters Filter, startArg int) (string, []any, error) {
+// relational store. startArg is the first $N placeholder. The fragment
+// begins with AND when non-empty. Scope isolation is the store's own
+// predicate, joined in front of this one.
+func FilterSQL(filters Filter, startArg int) (string, []any, error) {
 	plan, err := compileFilters(filters)
 	if err != nil {
 		return "", nil, err
 	}
-	return plan.sql(scope, startArg)
+	frag, args := plan.sql(startArg)
+	return frag, args, nil
 }

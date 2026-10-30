@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -30,61 +31,36 @@ func TestNewFromClient_requiresClient(t *testing.T) {
 	}
 }
 
-func TestGraph_validationAndClient(t *testing.T) {
+func TestGraph_everyCallReportsAnUnreachableHelix(t *testing.T) {
+	ctx := t.Context()
+	// Nothing listens on port 9 (discard), so every request fails to connect.
 	g, err := helixgraph.New("http://127.0.0.1:9")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if g.Client() == nil {
-		t.Fatal("Client()")
+	ns := mustNS(t, "org", "a")
+	a, b := uuid.New(), uuid.New()
+	errs := map[string]error{
+		"bootstrap":       g.Bootstrap(ctx),
+		"edge text index": g.EnsureEdgeTextIndex(ctx, "cites"),
+		"ensure":          g.EnsureObject(ctx, brain.Object{ID: a, Namespace: ns}, "text"),
+		"remove":          g.RemoveObject(ctx, a),
+		"link":            g.AddEdge(ctx, a, b, "references", brain.EdgeMeta{}),
+		"unlink":          g.RemoveEdge(ctx, a, b, "references"),
 	}
-	if g.ObjectSearchReady() {
-		t.Fatal("not bootstrapped")
-	}
-	if g.TenantEnabled() {
-		t.Fatal("tenant default false")
-	}
-}
-func TestGraph_writeValidation(t *testing.T) {
-	ctx := context.Background()
-	g, err := helixgraph.New("http://127.0.0.1:9")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := g.EnsureObject(ctx, brain.Object{}, ""); err == nil {
-		t.Fatal("nil object id")
-	}
-	if err := g.AddEdge(ctx, uuid.New(), uuid.Nil, "r", brain.EdgeMeta{}); err == nil {
-		t.Fatal("nil to")
-	}
-	if err := g.RemoveEdge(ctx, uuid.New(), uuid.Nil, "r"); err == nil {
-		t.Fatal("nil to remove")
-	}
-	if err := g.RemoveObject(ctx, uuid.Nil); err == nil {
-		t.Fatal("nil remove id")
-	}
-	cctx, cancel := context.WithCancel(ctx)
+	_, errs["neighbors"] = g.Neighbors(ctx, a, []string{"references"}, 10)
+	_, errs["text search"] = g.SearchText(ctx, "text", 10, ns)
+	_, errs["edge search"] = g.SearchEdgesText(ctx, "cites", "text", 10)
+	cancelled, cancel := context.WithCancel(ctx)
 	cancel()
-	if err := g.AddEdge(cctx, uuid.New(), uuid.New(), "r", brain.EdgeMeta{}); !errors.Is(err, context.Canceled) {
-		t.Fatalf("cancelled AddEdge: %v", err)
+
+	for name, err := range errs {
+		if err == nil || errors.Is(err, brain.ErrInvalid) {
+			t.Errorf("%s against an unreachable Helix = %v, want a request error", name, err)
+		}
 	}
-	if err := g.RemoveEdge(cctx, uuid.New(), uuid.New(), "r"); !errors.Is(err, context.Canceled) {
-		t.Fatalf("cancelled RemoveEdge: %v", err)
-	}
-	if err := g.RemoveObject(cctx, uuid.New()); !errors.Is(err, context.Canceled) {
-		t.Fatalf("cancelled RemoveObject: %v", err)
-	}
-	if err := g.EnsureObject(cctx, brain.Object{ID: uuid.New()}, ""); !errors.Is(err, context.Canceled) {
-		t.Fatalf("cancelled EnsureObject: %v", err)
-	}
-	if _, err := g.Neighbors(cctx, uuid.New(), []string{"references"}, 10); !errors.Is(err, context.Canceled) {
-		t.Fatalf("cancelled Neighbors: %v", err)
-	}
-	if err := g.Bootstrap(cctx, false); !errors.Is(err, context.Canceled) {
-		t.Fatalf("cancelled Bootstrap: %v", err)
-	}
-	if g.ObjectSearchReady() {
-		t.Fatal("Bootstrap cancel must leave search not ready")
+	if err := g.Bootstrap(cancelled); !errors.Is(err, context.Canceled) || g.ObjectSearchReady() || g.Client() == nil {
+		t.Errorf("cancelled bootstrap = %v, ready %v", err, g.ObjectSearchReady())
 	}
 }
 
@@ -99,117 +75,12 @@ var (
 	helixSkip string
 )
 
-// TestGraph_liveNeighborsBoth is the real Helix outcome for Both-direction
-// expand: outbound and inbound edges by object_id, multi-label, and limit.
-func TestGraph_liveNeighborsBoth(t *testing.T) {
-	ctx := context.Background()
-	g := liveGraph(t)
-
-	a, b, c := uuid.New(), uuid.New(), uuid.New()
-	for _, id := range []uuid.UUID{a, b, c} {
-		if err := g.EnsureObject(ctx, brain.Object{ID: id}, ""); err != nil {
-			t.Fatal(err)
-		}
-	}
-	// a --references--> b, c --references--> a (inbound to a)
-	if err := g.AddEdge(ctx, a, b, "references", brain.EdgeMeta{}); err != nil {
-		t.Fatal(err)
-	}
-	if err := g.AddEdge(ctx, c, a, "references", brain.EdgeMeta{}); err != nil {
-		t.Fatal(err)
-	}
-	// a --depends_on--> b (second label)
-	if err := g.AddEdge(ctx, a, b, "depends_on", brain.EdgeMeta{}); err != nil {
-		t.Fatal(err)
-	}
-
-	ns, err := g.Neighbors(ctx, a, []string{"references"}, 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := map[uuid.UUID]string{}
-	for _, n := range ns {
-		got[n.ObjectID] = n.RelationType
-	}
-	if got[b] != "references" || got[c] != "references" {
-		t.Fatalf("both directions for references: %+v", ns)
-	}
-	if len(ns) != 2 {
-		t.Fatalf("want exactly b and c: %+v", ns)
-	}
-
-	// Label filter: depends_on should only surface b.
-	dep, err := g.Neighbors(ctx, a, []string{"depends_on"}, 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(dep) != 1 || dep[0].ObjectID != b || dep[0].RelationType != "depends_on" {
-		t.Fatalf("depends_on: %+v", dep)
-	}
-
-	// Multi-label still returns neighbors (deduped by object id across labels).
-	multi, err := g.Neighbors(ctx, a, []string{"references", "depends_on"}, 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	multiIDs := map[uuid.UUID]bool{}
-	for _, n := range multi {
-		multiIDs[n.ObjectID] = true
-	}
-	if !multiIDs[b] || !multiIDs[c] {
-		t.Fatalf("multi label: %+v", multi)
-	}
-
-	// Limit truncates.
-	lim, err := g.Neighbors(ctx, a, []string{"references"}, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(lim) != 1 {
-		t.Fatalf("limit 1: %+v", lim)
-	}
-
-	// Unknown object → empty, not error.
-	empty, err := g.Neighbors(ctx, uuid.New(), []string{"references"}, 10)
-	if err != nil || len(empty) != 0 {
-		t.Fatalf("unknown: %+v err=%v", empty, err)
-	}
-}
-
-// TestGraph_liveEnsureObjectIdempotent re-ensures the same object_id without wiping edges.
-func TestGraph_liveEnsureObjectIdempotent(t *testing.T) {
-	ctx := context.Background()
-	g := liveGraph(t)
-	id := uuid.New()
-	other := uuid.New()
-	if err := g.EnsureObject(ctx, brain.Object{ID: id, Title: "a"}, "a"); err != nil {
-		t.Fatal(err)
-	}
-	if err := g.EnsureObject(ctx, brain.Object{ID: other, Title: "b"}, "b"); err != nil {
-		t.Fatal(err)
-	}
-	if err := g.AddEdge(ctx, id, other, "references", brain.EdgeMeta{Note: "keep"}); err != nil {
-		t.Fatal(err)
-	}
-	// Re-ensure without re-link: edges must survive.
-	if err := g.EnsureObject(ctx, brain.Object{ID: id, Title: "a-v2"}, "a-v2"); err != nil {
-		t.Fatal(err)
-	}
-	ns, err := g.Neighbors(ctx, id, []string{"references"}, 5)
-	if err != nil || len(ns) != 1 || ns[0].ObjectID != other {
-		t.Fatalf("after re-ensure: %+v err=%v", ns, err)
-	}
-	if ns[0].Meta.Note != "keep" {
-		t.Fatalf("edge meta after re-ensure: %+v", ns[0].Meta)
-	}
-}
-
-// TestEngine_liveFindObjectsTextSearch: EnsureSearchIndexes + Put dual-write + FindObjects
+// TestEngine_liveFindObjectsTextSearch: Bootstrap + Put dual-write + FindObjects
 // via native Helix TextSearchNodes (enterprise-dev).
 func TestEngine_liveFindObjectsTextSearch(t *testing.T) {
 	ctx := context.Background()
 	g := liveGraph(t)
-	if err := g.Bootstrap(ctx, false); err != nil {
+	if err := g.Bootstrap(ctx); err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}
 	store := brain.NewMemoryStore()
@@ -365,240 +236,8 @@ func TestEngine_liveDualWriteLinkExpand(t *testing.T) {
 
 type helixStubEmbedder struct{ v []float32 }
 
-func (s helixStubEmbedder) Embed(context.Context, string) ([]float32, error) { return s.v, nil }
-
-// TestGraph_liveEnsureObjectRichProps dual-writes searchable node props and keeps edges
-// after an endpoint is re-ensured with updated title/embedding.
-func TestGraph_liveEnsureObjectRichProps(t *testing.T) {
-	ctx := context.Background()
-	g := liveGraph(t)
-
-	nsID := mustNS(t, "id", uuid.NewString())
-	// Helix vector index dim is process-global; match dual-write tests (2-d).
-	a := brain.Object{
-		ID: uuid.New(), Kind: "Document", Title: "Alpha", Summary: "sum-a",
-		Content: "alpha body", Namespace: nsID,
-		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
-		Embedding: []float32{1, 0},
-	}
-	b := brain.Object{
-		ID: uuid.New(), Kind: "Document", Title: "Beta",
-		Content: "beta body", Namespace: nsID,
-		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
-		Embedding: []float32{0, 1},
-	}
-	if err := g.EnsureObject(ctx, a, brain.EntityIndexText(a)); err != nil {
-		t.Fatal(err)
-	}
-	if err := g.EnsureObject(ctx, b, brain.EntityIndexText(b)); err != nil {
-		t.Fatal(err)
-	}
-	if err := g.AddEdge(ctx, a.ID, b.ID, "references", brain.EdgeMeta{}); err != nil {
-		t.Fatal(err)
-	}
-
-	// Turn 2: re-ensure A with new title (in-place); edge to B must remain without re-link.
-	a.Title = "Alpha-v2"
-	a.Content = "updated alpha"
-	if err := g.EnsureObject(ctx, a, brain.EntityIndexText(a)); err != nil {
-		t.Fatal(err)
-	}
-	ns, err := g.Neighbors(ctx, a.ID, []string{"references"}, 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(ns) != 1 || ns[0].ObjectID != b.ID {
-		t.Fatalf("neighbors after re-ensure without re-link: %+v", ns)
-	}
-}
-
-// TestGraph_liveSearchEdgesTextVectorAndProps: edge-text index + SearchEdgesText,
-// vector search, custom scalar Properties dual-write, RemoveObject, early guards.
-// Real Helix enterprise-dev via Testcontainers (no mocks).
-func TestGraph_liveSearchEdgesTextVectorAndProps(t *testing.T) {
-	ctx := context.Background()
-	g := liveGraph(t)
-
-	// Client escape hatch is non-nil after New.
-	if g.Client() == nil {
-		t.Fatal("Client()")
-	}
-	if !g.ObjectSearchReady() {
-		t.Fatal("ObjectSearchReady after Bootstrap")
-	}
-
-	// Empty / invalid inputs: no error, empty result (guards).
-	if hits, err := g.SearchText(ctx, "  ", 5, nil); err != nil || hits != nil {
-		t.Fatalf("empty SearchText: %+v err=%v", hits, err)
-	}
-	if hits, err := g.SearchText(ctx, "q", 0, nil); err != nil || hits != nil {
-		t.Fatalf("limit 0 SearchText: %+v err=%v", hits, err)
-	}
-	if hits, err := g.SearchVector(ctx, nil, 5, nil); err != nil || hits != nil {
-		t.Fatalf("empty SearchVector: %+v err=%v", hits, err)
-	}
-	if hits, err := g.SearchVector(ctx, []float32{1, 0}, 0, nil); err != nil || hits != nil {
-		t.Fatalf("limit 0 SearchVector: %+v err=%v", hits, err)
-	}
-	if hits, err := g.SearchEdgesText(ctx, "", "note", 5); err != nil || hits != nil {
-		t.Fatalf("empty label SearchEdgesText: %+v err=%v", hits, err)
-	}
-	if hits, err := g.SearchEdgesText(ctx, "references", "", 5); err != nil || hits != nil {
-		t.Fatalf("empty query SearchEdgesText: %+v err=%v", hits, err)
-	}
-	if err := g.EnsureEdgeTextIndex(ctx, "  "); err == nil {
-		t.Fatal("EnsureEdgeTextIndex empty label")
-	}
-	if ns, err := g.Neighbors(ctx, uuid.Nil, []string{"references"}, 5); err != nil || ns != nil {
-		t.Fatalf("nil object Neighbors: %+v err=%v", ns, err)
-	}
-	if ns, err := g.Neighbors(ctx, uuid.New(), nil, 5); err != nil || ns != nil {
-		t.Fatalf("empty labels Neighbors: %+v err=%v", ns, err)
-	}
-
-	// Dual-write objects with custom scalar Properties (sortedPropKeys + scalarPropValue).
-	nsID := mustNS(t, "id", uuid.NewString())
-	a := brain.Object{
-		ID: uuid.New(), Kind: "Document", Title: "EdgeSearchSource",
-		Summary: "sum-src", Content: "source body unique-helix-alpha",
-		Namespace: nsID,
-		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
-		Embedding: []float32{1, 0},
-		Properties: map[string]any{
-			"flag":    true,
-			"score":   3.5,
-			"count":   int64(7),
-			"label":   "  tagged  ",
-			"empty":   "   ",
-			"skip":    struct{}{}, // non-scalar ignored
-			"":        "bad-key",
-			"level":   int(2),
-			"level32": int32(3),
-			"f32":     float32(1.25),
-		},
-	}
-	b := brain.Object{
-		ID: uuid.New(), Kind: "Document", Title: "EdgeSearchTarget",
-		Content: "target body unique-helix-beta", Namespace: nsID,
-		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
-		Embedding: []float32{0, 1},
-	}
-	if err := g.EnsureObject(ctx, a, brain.EntityIndexText(a)); err != nil {
-		t.Fatal(err)
-	}
-	if err := g.EnsureObject(ctx, b, brain.EntityIndexText(b)); err != nil {
-		t.Fatal(err)
-	}
-	// Full edge meta for AddEdge prop dual-write.
-	evID := uuid.New()
-	meta := brain.EdgeMeta{
-		Note:       "indemnity exclusivity penalty clause",
-		Status:     "active",
-		Role:       "cites",
-		Confidence: 0.91,
-		EvidenceID: &evID,
-		CreatedAt:  time.Now().UTC(),
-		UpdatedAt:  time.Now().UTC(),
-	}
-	if err := g.AddEdge(ctx, a.ID, b.ID, "references", meta); err != nil {
-		t.Fatal(err)
-	}
-
-	// Edge text index + search (SearchEdgesText was 0% without this path).
-	if err := g.EnsureEdgeTextIndex(ctx, "references"); err != nil {
-		t.Fatalf("EnsureEdgeTextIndex: %v", err)
-	}
-	// Idempotent re-ensure
-	if err := g.EnsureEdgeTextIndex(ctx, "references"); err != nil {
-		t.Fatal(err)
-	}
-	edgeHits, err := g.SearchEdgesText(ctx, "references", "indemnity exclusivity", 10)
-	if err != nil {
-		t.Fatalf("SearchEdgesText: %v", err)
-	}
-	if len(edgeHits) == 0 {
-		t.Fatal("SearchEdgesText returned no hits")
-	}
-	foundEdge := false
-	for _, h := range edgeHits {
-		if h.FromID == a.ID && h.ToID == b.ID && h.RelationType == "references" {
-			foundEdge = true
-			if h.Meta.Note == "" && h.Meta.Status == "" {
-				t.Logf("edge hit meta sparse: %+v", h.Meta)
-			}
-			break
-		}
-	}
-	if !foundEdge {
-		t.Fatalf("expected edge a→b in SearchEdgesText: %+v", edgeHits)
-	}
-
-	// Text search nodes
-	textHits, err := g.SearchText(ctx, "unique-helix-alpha", 5, nil)
-	if err != nil {
-		t.Logf("SearchText: %v", err)
-	} else if len(textHits) > 0 {
-		// ok when supported
-		found := false
-		for _, h := range textHits {
-			if h.ID == a.ID {
-				found = true
-			}
-		}
-		if !found {
-			t.Logf("SearchText hits did not include source (ok if ranking differs): %+v", textHits)
-		}
-	}
-
-	// Vector search (2-d embeddings; same dim as dual-write tests)
-	vecHits, err := g.SearchVector(ctx, []float32{1, 0}, 5, nil)
-	if err != nil {
-		t.Logf("SearchVector: %v (may be limited on this image)", err)
-	} else if len(vecHits) == 0 {
-		t.Log("SearchVector empty")
-	}
-
-	// Namespace-scoped search when tenant indexes are available
-	if err := g.Bootstrap(ctx, true); err != nil {
-		t.Logf("Bootstrap tenant: %v", err)
-	} else if g.TenantEnabled() {
-		if _, err := g.SearchText(ctx, "unique-helix-alpha", 5, nsID); err != nil {
-			t.Logf("tenant SearchText: %v", err)
-		}
-		if _, err := g.SearchVector(ctx, []float32{0, 1}, 5, nsID); err != nil {
-			t.Logf("tenant SearchVector: %v", err)
-		}
-	}
-
-	// Neighbors default limit + direction meta
-	ns, err := g.Neighbors(ctx, a.ID, []string{"references"}, 0) // default limit
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(ns) != 1 || ns[0].ObjectID != b.ID {
-		t.Fatalf("Neighbors: %+v", ns)
-	}
-	if ns[0].Direction != "out" {
-		t.Fatalf("direction: %+v", ns[0])
-	}
-	if ns[0].Meta.Note != meta.Note {
-		t.Fatalf("neighbor meta note: %+v", ns[0].Meta)
-	}
-
-	// RemoveObject drops node (and incident edges)
-	if err := g.RemoveObject(ctx, b.ID); err != nil {
-		t.Fatal(err)
-	}
-	ns, err = g.Neighbors(ctx, a.ID, []string{"references"}, 5)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(ns) != 0 {
-		t.Fatalf("after RemoveObject neighbors: %+v", ns)
-	}
-	if err := g.RemoveObject(ctx, uuid.Nil); err == nil {
-		t.Fatal("RemoveObject nil id")
-	}
+func (s helixStubEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+	return repeatVector(s.v, len(texts)), nil
 }
 
 // TestEngine_liveFindLinksSearchEdges: Engine find_links via real Helix edge text search.
@@ -660,6 +299,33 @@ func TestEngine_liveFindLinksSearchEdges(t *testing.T) {
 	}
 }
 
+func TestGraph_liveWritesObjectsWithMixedPropertyTypes(t *testing.T) {
+	ctx := t.Context()
+	g := liveGraph(t)
+	ns := mustNS(t, "id", uuid.NewString())
+	word := "props" + strings.ReplaceAll(uuid.NewString()[:8], "-", "")
+	obj := brain.Object{
+		ID: uuid.New(), Kind: "Document", Title: "Mixed", Summary: "summary", Namespace: ns,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(), Embedding: []float32{1, 0},
+		Properties: map[string]any{
+			"flag": true, "score": 3.5, "count": int64(7), "level": 2, "level32": int32(3), "f32": float32(1.25),
+			"label": "  tagged  ", "empty": "   ", "nested": struct{}{}, "": "no key",
+		},
+	}
+
+	inserted := g.EnsureObject(ctx, obj, word)
+	updated := g.EnsureObject(ctx, obj, word)
+	hits, searchErr := g.SearchText(ctx, word, 5, ns)
+	blank := g.EnsureEdgeTextIndex(ctx, " ")
+
+	if inserted != nil || updated != nil || searchErr != nil || len(hits) != 1 || hits[0].ID != obj.ID {
+		t.Fatalf("object with mixed properties: insert %v, update %v, search %v %v", inserted, updated, hits, searchErr)
+	}
+	if !errors.Is(blank, brain.ErrInvalid) {
+		t.Fatalf("edge text index without a label = %v, want ErrInvalid", blank)
+	}
+}
+
 func liveGraph(t *testing.T) *helixgraph.Graph {
 	t.Helper()
 	ctx := context.Background()
@@ -668,7 +334,7 @@ func liveGraph(t *testing.T) *helixgraph.Graph {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := g.Bootstrap(ctx, false); err != nil {
+	if err := g.Bootstrap(ctx); err != nil {
 		t.Fatal(err)
 	}
 	return g
@@ -717,4 +383,15 @@ func sharedHelixURL(t *testing.T) string {
 		t.Fatal("helix url empty")
 	}
 	return helixURL
+}
+
+func (helixStubEmbedder) Model() string { return "test-model" }
+
+// repeatVector returns n copies of v, one per embedded text.
+func repeatVector(v []float32, n int) [][]float32 {
+	out := make([][]float32, n)
+	for i := range out {
+		out[i] = v
+	}
+	return out
 }

@@ -16,9 +16,10 @@ func TestSystemPrompt_knowledgeGuidanceWhenBrainSet(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := mustNewTurnManager(t, AgentOptions{
-		MaxWindowSize: 8192,
-		Model:         &scriptedModel{},
-		Brain:         eng,
+		MaxWindowSize:   8192,
+		Model:           &scriptedModel{},
+		Brain:           eng,
+		SearchNamespace: mustNS(t, "org", "acme"),
 	})
 	t.Cleanup(h.Close)
 	prompt := h.constructSystemPrompt()

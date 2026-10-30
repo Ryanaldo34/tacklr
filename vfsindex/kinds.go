@@ -4,17 +4,17 @@ import "github.com/ryanaldo34/tacklr/brain"
 
 // Property keys written on mount-indexed objects.
 const (
-	PropVFSPath     = "vfs_path"
-	PropSize        = "size"
-	PropMTime       = "mtime"
-	PropContentHash = "content_hash"
-	PropMediaType   = "media_type"
-	PropStartLine   = "start_line"
-	PropEndLine     = "end_line"
-	PropByteStart   = "byte_start"
-	PropByteEnd     = "byte_end"
-	PropBlockID     = "block_id"
-	PropHeadingPath = "heading_path"
+	PropVFSPath       = "vfs_path"
+	PropSize          = "size"
+	PropMTime         = "mtime"
+	PropSourceVersion = "source_version"
+	PropMediaType     = "media_type"
+	PropStartLine     = "start_line"
+	PropEndLine       = "end_line"
+	PropByteStart     = "byte_start"
+	PropByteEnd       = "byte_end"
+	PropBlockID       = "block_id"
+	PropHeadingPath   = "heading_path"
 )
 
 // Default kind names (host may override on MountIndexer).
@@ -33,9 +33,9 @@ func MountIndexKinds() []brain.KindSpec {
 			IsParent:    true,
 			Fields: []brain.FieldSpec{
 				{Name: PropVFSPath, Type: brain.FieldTypeString, Description: "Virtual path when indexed from a mount"},
-				{Name: PropSize, Type: brain.FieldTypeNumber},
-				{Name: PropMTime, Type: brain.FieldTypeDateTime},
-				{Name: PropContentHash, Type: brain.FieldTypeString},
+				{Name: PropSize, Type: brain.FieldTypeNumber, SkipIndex: true},
+				{Name: PropMTime, Type: brain.FieldTypeDateTime, SkipIndex: true},
+				{Name: PropSourceVersion, Type: brain.FieldTypeString, SkipIndex: true, Description: "vfs.FileInfo.Version when the file was indexed"},
 				{Name: PropMediaType, Type: brain.FieldTypeString},
 			},
 		},

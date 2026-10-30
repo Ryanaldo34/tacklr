@@ -77,7 +77,7 @@ func TestSystemPrompt_listsSpecialistsSorted(t *testing.T) {
 }
 
 func TestWithSpecialist_sharesHostMountWriteAndCatalog(t *testing.T) {
-	parent, ms, eng, ns := vfsIndexHarness(t, true)
+	parent, ms, eng, ns := vfsIndexHarness(t, nil)
 	_ = parent
 	worker := mustNewTurnManager(t, AgentOptions{
 		mountSession:    ms,

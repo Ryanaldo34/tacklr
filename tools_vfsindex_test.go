@@ -14,7 +14,9 @@ import (
 	"github.com/ryanaldo34/tacklr/vfsindex"
 )
 
-func vfsIndexHarness(t *testing.T, withNS bool) (*TurnManager, *vfs.MountSession, *brain.Engine, brain.Namespace) {
+// vfsIndexHarness builds a turn with Brain, a workspace, and a SearchNamespace.
+// edit, when set, changes the options before the turn is built.
+func vfsIndexHarness(t *testing.T, edit func(*AgentOptions)) (*TurnManager, *vfs.MountSession, *brain.Engine, brain.Namespace) {
 	t.Helper()
 	store := brain.NewMemoryStore()
 	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
@@ -31,10 +33,11 @@ func vfsIndexHarness(t *testing.T, withNS bool) (*TurnManager, *vfs.MountSession
 		mountSession:    ms,
 		Model:           &scriptedModel{},
 		Brain:           eng,
+		SearchNamespace: ns,
 		UnattendedWrite: true,
 	}
-	if withNS {
-		opts.SearchNamespace = ns
+	if edit != nil {
+		edit(&opts)
 	}
 	h := mustNewTurnManager(t, opts)
 	t.Cleanup(h.Close)
@@ -82,7 +85,7 @@ func waitSearchHit(t *testing.T, eng *brain.Engine, scope brain.Scope, query str
 // The work mount is selective (empty IndexPolicy), so WriteFile does not
 // auto-index; the first index_file writes, the second is a hash skip.
 func TestVFSIndexTools_indexSearchUnindex(t *testing.T) {
-	h, ms, eng, ns := vfsIndexHarness(t, true)
+	h, ms, eng, ns := vfsIndexHarness(t, nil)
 	activatePlan(t, h)
 	ctx := context.Background()
 	scope := brain.Scope{Namespace: ns}
@@ -183,7 +186,7 @@ func TestVFSIndexTools_indexSearchUnindex(t *testing.T) {
 // file searchable. A later write is visible through read. The turn does not
 // re-index that write.
 func TestVFSIndexTools_selectiveIndexSearchReadAndTrack(t *testing.T) {
-	h, ms, eng, ns := vfsIndexHarness(t, true)
+	h, ms, eng, ns := vfsIndexHarness(t, nil)
 	activatePlan(t, h)
 	ctx := context.Background()
 	scope := brain.Scope{Namespace: ns}
@@ -576,5 +579,48 @@ func TestPathNativeGraphLinkExpand(t *testing.T) {
 	}
 	if _, err := fl.invoke(ctx, `{"relation_type":"references","query":""}`, turnRuntime(h)); err == nil {
 		t.Fatal("find_links requires query")
+	}
+}
+
+// TestVFSIndexTools_indexedFileACLFollowsSearchPrincipals: IndexReaders puts
+// the file's source sharing on the index, and search returns it only to a
+// session whose SearchPrincipals include one of those readers.
+func TestVFSIndexTools_indexedFileACLFollowsSearchPrincipals(t *testing.T) {
+	ctx := context.Background()
+	readers := func(context.Context, string, vfs.FileInfo) ([]string, error) { return []string{"group:legal"}, nil }
+	h, ms, eng, ns := vfsIndexHarness(t, func(o *AgentOptions) {
+		o.IndexReaders = readers
+		o.SearchPrincipals = []string{"user:ann", "group:legal"}
+	})
+	activatePlan(t, h)
+	if err := ms.Route(ctx, "/workspace/work/nda.txt").WriteFile(ctx, []byte("mutual nda terms\n")); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := runWriteTool(t, h, h.findTool("index_file", ""), `{"path":"/workspace/work/nda.txt"}`); err != nil {
+		t.Fatal(err)
+	}
+	legal, err := h.findTool("search", "").invoke(ctx, `{"query":"nda terms"}`, turnRuntime(h))
+	outsider, _ := eng.Search(ctx, brain.Scope{Namespace: ns, Principals: []string{"user:mallory"}}, brain.SearchRequest{Query: "nda terms"}, brain.NewSearchContext())
+
+	if err != nil || !strings.Contains(legal.output, "nda.txt") {
+		t.Fatalf("legal search: %v %s", err, legal.output)
+	}
+	if len(outsider.Objects) != 0 {
+		t.Fatalf("outsider search = %+v", outsider.Objects)
+	}
+}
+
+func TestAgentOptions_brainRequiresASearchNamespace(t *testing.T) {
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly())
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := AgentOptions{MaxWindowSize: 1024, Model: &scriptedModel{}, Brain: eng}
+
+	err = opts.Validate()
+
+	if err == nil || !strings.Contains(err.Error(), "SearchNamespace is required") {
+		t.Fatalf("validate = %v", err)
 	}
 }

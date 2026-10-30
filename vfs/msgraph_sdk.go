@@ -1,7 +1,6 @@
 package vfs
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -24,6 +23,9 @@ const graphAPIRoot = "https://graph.microsoft.com/v1.0"
 // graphSDK is the official msgraph-sdk-go client used by graphProvider.
 type graphSDK struct {
 	client *msgraphsdk.GraphServiceClient
+	// http and auth send content downloads, which the SDK cannot stream.
+	http *http.Client
+	auth *graphTokenAuth
 }
 
 // graphTokenAuth sends the live TokenHolder bearer token on each Graph request.
@@ -35,15 +37,23 @@ func (a *graphTokenAuth) AuthenticateRequest(ctx context.Context, request *abstr
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	bearer, err := a.bearer()
+	if err != nil {
+		return err
+	}
+	request.Headers.Add("Authorization", bearer)
+	return nil
+}
+
+func (a *graphTokenAuth) bearer() (string, error) {
 	tok := ""
 	if a.holder != nil {
 		tok = a.holder.Current().Token
 	}
 	if tok == "" {
-		return ErrAuthExpired
+		return "", ErrAuthExpired
 	}
-	request.Headers.Add("Authorization", "Bearer "+tok)
-	return nil
+	return "Bearer " + tok, nil
 }
 
 // NewGraph builds a GraphAPI from a user token holder. Hosts pass the result
@@ -64,8 +74,9 @@ func newGraphSDK(holder *TokenHolder, base string, httpClient *http.Client) (*gr
 		Transport: khttp.NewCustomTransportWithParentTransport(parent, msgraphgocore.GetDefaultMiddlewaresWithOptions(&opts)...),
 		Timeout:   httpClientTimeout(httpClient),
 	}
+	auth := &graphTokenAuth{holder: holder}
 	adapter, err := msgraphsdk.NewGraphRequestAdapterWithParseNodeFactoryAndSerializationWriterFactoryAndHttpClient(
-		&graphTokenAuth{holder: holder}, nil, nil, client)
+		auth, nil, nil, client)
 	if err != nil {
 		return nil, fmt.Errorf("vfs: msgraph client: %w", err)
 	}
@@ -74,7 +85,7 @@ func newGraphSDK(holder *TokenHolder, base string, httpClient *http.Client) (*gr
 	} else {
 		adapter.SetBaseUrl(graphAPIRoot)
 	}
-	return &graphSDK{client: msgraphsdk.NewGraphServiceClient(adapter)}, nil
+	return &graphSDK{client: msgraphsdk.NewGraphServiceClient(adapter), http: client, auth: auth}, nil
 }
 
 func httpClientTimeout(httpClient *http.Client) time.Duration {
@@ -196,12 +207,33 @@ func (g *graphSDK) ListChildren(ctx context.Context, driveID, itemID string) ([]
 	return out, nil
 }
 
-func (g *graphSDK) GetContent(ctx context.Context, driveID, itemID string) (io.ReadCloser, int64, error) {
-	data, err := g.item(driveID, itemID).Content().Get(ctx, nil)
+// GetContent streams the item's content.
+func (g *graphSDK) GetContent(ctx context.Context, driveID, itemID string, off, n int64) (io.ReadCloser, error) {
+	u := g.absURL("/drives/" + url.PathEscape(driveID) + "/items/" + url.PathEscape(itemID) + "/content")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return nil, 0, mapGraphError(err)
+		return nil, err
 	}
-	return io.NopCloser(bytes.NewReader(data)), int64(len(data)), nil
+	bearer, err := g.auth.bearer()
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", bearer)
+	if r := rangeHeader(off, n); r != "" {
+		req.Header.Set("Range", r)
+	}
+	resp, err := g.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= http.StatusBadRequest {
+		_ = resp.Body.Close()
+		if err := graphStatusError(resp.StatusCode); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("vfs: msgraph content: HTTP %d", resp.StatusCode)
+	}
+	return rangedBody(resp, off, n)
 }
 
 func (g *graphSDK) PutContent(ctx context.Context, driveID, itemID, name, parentID string, r io.Reader, size int64) (graphItem, error) {
@@ -265,6 +297,9 @@ func graphItemFrom(item models.DriveItemable) graphItem {
 	if size := item.GetSize(); size != nil {
 		g.Size = *size
 	}
+	if ctag := item.GetCTag(); ctag != nil {
+		g.CTag = *ctag
+	}
 	if lm := item.GetLastModifiedDateTime(); lm != nil {
 		g.LastModified = lm.UTC().Format(time.RFC3339)
 	}
@@ -288,16 +323,24 @@ func graphItemFrom(item models.DriveItemable) graphItem {
 func mapGraphError(err error) error {
 	var sc interface{ GetStatusCode() int }
 	if errors.As(err, &sc) {
-		switch sc.GetStatusCode() {
-		case http.StatusUnauthorized:
-			return ErrAuthExpired
-		case http.StatusNotFound:
-			return ErrNotExist
-		case http.StatusForbidden:
-			return ErrPermission
-		case http.StatusConflict:
-			return ErrExist
+		if mapped := graphStatusError(sc.GetStatusCode()); mapped != nil {
+			return mapped
 		}
 	}
 	return err
+}
+
+// graphStatusError is the vfs error for a Graph HTTP status, or nil.
+func graphStatusError(status int) error {
+	switch status {
+	case http.StatusUnauthorized:
+		return ErrAuthExpired
+	case http.StatusNotFound:
+		return ErrNotExist
+	case http.StatusForbidden:
+		return ErrPermission
+	case http.StatusConflict:
+		return ErrExist
+	}
+	return nil
 }

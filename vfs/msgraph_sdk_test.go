@@ -74,6 +74,8 @@ func TestGraphSDK_adapterMapsStatusesTokenAndRedirect(t *testing.T) {
 			writeJSON(w, 200, map[string]any{"value": []any{}, "@odata.nextLink": srv.URL + "/drives/drv/items/boom"})
 		case strings.HasSuffix(p, "/redir/content"):
 			http.Redirect(w, r, "/drives/drv/items/blob/content", http.StatusFound)
+		case strings.HasSuffix(p, "/boom/content"):
+			w.WriteHeader(http.StatusInternalServerError)
 		case strings.HasSuffix(p, "/blob/content"):
 			_, _ = w.Write([]byte("blob"))
 		default:
@@ -119,14 +121,37 @@ func TestGraphSDK_adapterMapsStatusesTokenAndRedirect(t *testing.T) {
 		t.Fatalf("empty children page = %v err=%v", kids, err)
 	}
 
-	body, n, err := api.GetContent(ctx, "drv", "redir")
+	body, err := api.GetContent(ctx, "drv", "redir", 0, -1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	data, _ := io.ReadAll(body)
 	_ = body.Close()
-	if string(data) != "blob" || n != 4 {
-		t.Fatalf("redirect content = %q n=%d", data, n)
+	if string(data) != "blob" {
+		t.Fatalf("redirect content = %q", data)
+	}
+	// The fake ignores Range and answers 200 with the whole body.
+	if _, err := api.GetContent(ctx, "drv", "blob", 1, 2); err == nil || !strings.Contains(err.Error(), "HTTP 200") {
+		t.Fatalf("range answered with the whole body: %v", err)
+	}
+	if _, err := api.GetContent(ctx, "drv", "missing", 0, -1); !errors.Is(err, ErrNotExist) {
+		t.Fatalf("content 404: %v", err)
+	}
+	if _, err := api.GetContent(ctx, "drv", "boom", 0, -1); err == nil || !strings.Contains(err.Error(), "HTTP 500") {
+		t.Fatalf("content 500: %v", err)
+	}
+	down := httptest.NewServer(http.NotFoundHandler())
+	down.Close()
+	offline, err := newGraphSDK(holder, down.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := offline.GetContent(ctx, "drv", "blob", 0, -1); err == nil {
+		t.Fatal("content from a stopped server succeeded")
+	}
+	expired := &graphSDK{client: api.client, http: api.http, auth: &graphTokenAuth{}}
+	if _, err := expired.GetContent(ctx, "drv", "blob", 0, -1); !errors.Is(err, ErrAuthExpired) {
+		t.Fatalf("no token: %v", err)
 	}
 
 	holder.Set(Credential{Token: "tok-2"})
@@ -363,8 +388,11 @@ func TestGraphProvider_returnPaths(t *testing.T) {
 	if _, err := p.OpenFile(ctx, "bare.bin", os.O_RDONLY, 0); !errors.Is(err, ErrNoCodec) {
 		t.Fatalf("bare open: %v", err)
 	}
-	if _, err := p.OpenFile(ctx, "huge.bin", os.O_RDONLY, 0); !errors.Is(err, ErrTooLarge) {
-		t.Fatalf("huge open: %v", err)
+	if _, err := p.OpenDocument(ctx, "bare.bin", nil); !errors.Is(err, ErrNoCodec) {
+		t.Fatalf("bare document: %v", err)
+	}
+	if _, err := p.OpenDocument(ctx, "huge.bin", nil); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("huge document: %v", err)
 	}
 	if _, err := p.OpenFile(ctx, "a.txt", os.O_WRONLY, 0); !errors.Is(err, ErrNotSupported) {
 		t.Fatalf("write open: %v", err)
@@ -485,9 +513,14 @@ func TestGraphProvider_returnPaths(t *testing.T) {
 	}
 
 	holder.Set(Credential{Token: "stale"})
-	if _, err := p.OpenFile(ctx, "a.txt", os.O_RDONLY, 0); !errors.Is(err, ErrAuthExpired) {
+	stale, err := p.OpenFile(ctx, "a.txt", os.O_RDONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadAll(stale.(io.Reader)); !errors.Is(err, ErrAuthExpired) {
 		t.Fatalf("refresh missing: %v", err)
 	}
+	_ = stale.Close()
 	holder.Set(Credential{})
 	if _, err := p.Stat(ctx, "a.txt"); !errors.Is(err, ErrAuthExpired) {
 		t.Fatalf("ensure valid: %v", err)

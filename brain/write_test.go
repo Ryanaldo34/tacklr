@@ -77,6 +77,7 @@ func TestPut_catalogEnforced(t *testing.T) {
 		{"parent with parent_id", brain.Object{Kind: "Document", ParentID: &pid, Properties: map[string]any{"stage": "open"}}, "must not have parent_id"},
 		{"part without parent", brain.Object{Kind: "Chunk"}, "requires parent_id"},
 		{"bad datetime", brain.Object{Kind: "Document", Properties: map[string]any{"stage": "open", "when": "nope"}}, "RFC3339"},
+		{"zero datetime", brain.Object{Kind: "Document", Properties: map[string]any{"stage": "open", "when": time.Time{}}}, "zero time"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -401,8 +402,12 @@ type captureEmbedder struct {
 	fn func(string) []float32
 }
 
-func (c captureEmbedder) Embed(_ context.Context, text string) ([]float32, error) {
-	return c.fn(text), nil
+func (c captureEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+	out := make([][]float32, len(texts))
+	for i, t := range texts {
+		out[i] = c.fn(t)
+	}
+	return out, nil
 }
 
 // TestPut_multiTurnMemoryGraph spans put dual-write, link, expand, soft-delete hydrate
@@ -722,7 +727,7 @@ func TestLinkWith_expandAttachesMeta(t *testing.T) {
 	}
 }
 
-func TestReplaceParts_searchHitsNewChunks(t *testing.T) {
+func TestPutTree_searchHitsNewChunks(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
 	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithKinds(
@@ -734,14 +739,11 @@ func TestReplaceParts_searchHitsNewChunks(t *testing.T) {
 	}
 	ns := mustNS(t, "id", uuid.NewString())
 	scope := brain.Scope{Namespace: ns}
-	parent, err := eng.Put(ctx, scope, brain.Object{Kind: "Document", Title: "Memo"})
+	parent, err := eng.PutTree(ctx, scope, brain.Object{Kind: "Document", Title: "Memo"}, brain.Parts(
+		brain.Object{Kind: "Chunk", Title: "a", Content: "pkceflow"},
+		brain.Object{Kind: "Chunk", Title: "b", Content: "neighbor"},
+	))
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := eng.ReplaceParts(ctx, scope, parent.ID, []brain.Object{
-		{Kind: "Chunk", Title: "a", Content: "pkceflow"},
-		{Kind: "Chunk", Title: "b", Content: "neighbor"},
-	}); err != nil {
 		t.Fatal(err)
 	}
 	kids, err := eng.ListChildren(ctx, scope, parent.ID)
@@ -753,9 +755,9 @@ func TestReplaceParts_searchHitsNewChunks(t *testing.T) {
 	if err != nil || len(page.Objects) != 1 || page.Objects[0].ID != parent.ID {
 		t.Fatalf("search new chunk: %+v err=%v", page.Objects, err)
 	}
-	if err := eng.ReplaceParts(ctx, scope, parent.ID, []brain.Object{
-		{Kind: "Chunk", Title: "c", Content: "indemnityclause"},
-	}); err != nil {
+	if _, err := eng.PutTree(ctx, scope, parent, brain.Parts(
+		brain.Object{Kind: "Chunk", Title: "c", Content: "indemnityclause"},
+	)); err != nil {
 		t.Fatal(err)
 	}
 	kids, err = eng.ListChildren(ctx, scope, parent.ID)
@@ -775,7 +777,7 @@ func TestReplaceParts_searchHitsNewChunks(t *testing.T) {
 	}
 }
 
-func TestReplaceParts_rejectsPartParent(t *testing.T) {
+func TestPutTree_rejectsPartParent(t *testing.T) {
 	ctx := context.Background()
 	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly(), brain.WithKinds(
 		brain.KindSpec{Kind: "Document", IsParent: true},
@@ -797,11 +799,10 @@ func TestReplaceParts_rejectsPartParent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = eng.ReplaceParts(ctx, scope, part.ID, nil)
+	_, err = eng.PutTree(ctx, scope, part, nil)
 	if err == nil || !strings.Contains(err.Error(), "first-class") {
 		t.Fatalf("got %v", err)
 	}
-	if err := eng.ReplaceParts(ctx, scope, uuid.Nil, nil); err == nil {
-		t.Fatal("nil parent")
-	}
 }
+
+func (captureEmbedder) Model() string { return "test-model" }

@@ -9,22 +9,24 @@
 // # Model
 //
 // Each text-like virtual file becomes a brain Document (parent) with Chunk parts.
-// The row contract (ids, property types, content_hash, and replace rules) is
+// The row contract (ids, property types, versions, and replace rules) is
 // "File mirror rows" in docs/knowledge.md. In-process writers should call
 // IndexPath or DocumentID rather than insert rows themselves.
 //
 //	Document id = UUID v5, namespace a1b2c3d4-e5f6-7890-abcd-ef1234567890,
 //	              name = Namespace.String() + 0x00 + virtual path
-//	Document.properties.vfs_path, content_hash, size, mtime, media_type
-//	Chunk id    = UUID v5 under the Document id, name "chunk:<position>"
-//	              or "block:<block id>"
+//	Document.properties.vfs_path, source_version, size, mtime, media_type
+//	Chunk id    = from the chunk's content (Engine.PutTree)
 //	Chunk.properties.start_line, end_line, byte_start, byte_end
 //	Chunk.properties.block_id, heading_path = the block id, when structured
 //	Chunk.Content = chunk body
 //
-// Replacing a file puts the parent, soft-deletes the previous chunks, then
-// puts the new chunks. content_hash is lowercase hex SHA-256. The same hash
-// skips the write. Live file bytes stay the source of truth.
+// Plain text streams through content-defined chunking (ChunkSizes): a
+// boundary depends only on nearby bytes, so an edit changes only the chunks
+// around it. Markdown, Docs and Sheets chunk by block. A file whose
+// FileInfo.Version and readers match the Document is not opened. A re-index
+// embeds and writes only chunks whose text changed. Live file bytes stay the
+// source of truth.
 //
 // # Index policy (MountSpec.IndexPolicy)
 //
@@ -41,13 +43,13 @@
 //
 // File bytes become brain chunks only through IndexPath (or UnindexPath).
 // The turn calls that from index_file and unindex. A host calls IndexPath
-// or IndexPrefix from its own system. content_hash skip returns PathSkipped
-// without re-chunking.
+// or IndexPrefix from its own system. A version match returns PathSkipped
+// without reading the file.
 //
 // # Session-visible body
 //
-// IndexPath uses MountSession.ReadText (markdown) and MountSession.Open (other
-// text). Writes are write-through, so a later index_file sees the last persist.
+// IndexPath uses MountSession.ReadText (structured types) and MountSession.Open
+// (other text). Writes are write-through, so a later index_file sees the last persist.
 //
 // # Schedulers
 //

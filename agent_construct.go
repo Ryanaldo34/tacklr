@@ -71,10 +71,19 @@ type AgentOptions struct {
 	// Empty fields skip that tool. Kinds should be registered via brain.ApplyKinds / WithKinds.
 	// Ignored when Brain is nil.
 	BrainWriteKinds brain.WriteKinds
-	// SearchNamespace is the host ceiling for brain tools (session-owned, checkpointed).
-	// Each tool call may add attrs to narrow the search; it cannot change ceiling values.
-	// Empty means no ceiling. Workers get a copy at spawn.
+	// SearchNamespace is the host ceiling for brain tools (session-owned, checkpointed):
+	// the widest namespace this session may read or write. Each tool call may add
+	// attrs to narrow it; it cannot change ceiling values. Required when Brain is
+	// set. Workers get a copy at spawn.
 	SearchNamespace brain.Namespace
+	// SearchPrincipals are the caller's identities (user and group ids) checked
+	// against object Readers, so search only returns source files the caller can
+	// open at the source. Set them from the host's identity provider each turn.
+	SearchPrincipals []string
+	// IndexReaders resolves a workspace file's source ACL when index_file
+	// indexes it (see vfsindex.MountIndexer.Readers). Nil indexes files visible
+	// to the whole SearchNamespace.
+	IndexReaders vfsindex.ReadersFunc
 	// OpenVFS builds the /workspace tree for each turn. Nil means no VFS.
 	OpenVFS vfs.OpenVFS
 	// mountSession is that tree for this turn. BindTurn sets it from the
@@ -118,6 +127,7 @@ func NewTurnManager(ctx context.Context, opts AgentOptions) (*TurnManager, error
 		hostResultHooks:       maps.Clone(opts.ToolResultHooks),
 		brain:                 opts.Brain,
 		brainWriteKinds:       opts.BrainWriteKinds,
+		indexReaders:          opts.IndexReaders,
 		sessionId:             opts.sessionID,
 		specialists:           make(map[string]*Specialist),
 		pendingToolCalls:      make(map[string]PendingToolCall),
@@ -132,6 +142,7 @@ func NewTurnManager(ctx context.Context, opts AgentOptions) (*TurnManager, error
 	if !opts.SearchNamespace.Empty() {
 		sm.Search.SetNamespace(opts.SearchNamespace)
 	}
+	sm.Search.SetPrincipals(opts.SearchPrincipals)
 	def := DefaultContextPolicy()
 	if h.contextPolicy.PressureRatio <= 0 {
 		h.contextPolicy.PressureRatio = def.PressureRatio
@@ -171,6 +182,11 @@ func (opts *AgentOptions) Validate() error {
 	}
 	if err := opts.ContextPolicy.Validate(); err != nil {
 		return err
+	}
+	if opts.Brain != nil {
+		if err := opts.SearchNamespace.Validate(); err != nil {
+			return fmt.Errorf("tacklr: AgentOptions.SearchNamespace is required with Brain: %w", err)
+		}
 	}
 	for i, tool := range opts.Tools {
 		if tool == nil {
@@ -260,14 +276,11 @@ func (a *TurnManager) initVFSIndexBridge() {
 	if a.brain == nil || a.session.VFS == nil {
 		return
 	}
-	ns, ok := a.session.Search.Namespace()
-	if !ok {
-		return
-	}
-	br, err := vfsindex.Start(a.session.VFS, a.brain, brain.Scope{Namespace: ns})
+	br, err := vfsindex.Start(a.session.VFS, a.brain, a.session.Search.Scope())
 	if err != nil {
 		return
 	}
+	br.Indexer.Readers = a.indexReaders
 	a.vfsBridge = br
 	a.ownsVFSBridge = true
 }

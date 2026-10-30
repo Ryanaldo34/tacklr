@@ -35,6 +35,9 @@ func (e *Engine) FindLinks(ctx context.Context, scope Scope, req FindLinksReques
 		err = e
 		return res, err
 	}
+	if err := scope.Namespace.Validate(); err != nil {
+		return res, err
+	}
 	if e.graphE == nil {
 		return res, fmt.Errorf("%w: graph edge search is not available", ErrUnsupported)
 	}
@@ -80,6 +83,13 @@ func (e *Engine) FindLinks(ctx context.Context, scope Scope, req FindLinksReques
 		if len(out) >= limit {
 			break
 		}
+	}
+	ids = ids[:0]
+	for _, l := range out {
+		ids = append(ids, l.From.ID, l.To.ID)
+	}
+	if err := e.recordRead(ctx, scope, uniqueUUIDs(ids)); err != nil {
+		return res, err
 	}
 	res.Links = out
 	return res, nil

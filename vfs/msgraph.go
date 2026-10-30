@@ -19,7 +19,9 @@ type GraphAPI interface {
 	GetItem(ctx context.Context, driveID, itemID string) (graphItem, error)
 	GetByPath(ctx context.Context, driveID, itemID, rel string) (graphItem, error)
 	ListChildren(ctx context.Context, driveID, itemID string) ([]graphItem, error)
-	GetContent(ctx context.Context, driveID, itemID string) (io.ReadCloser, int64, error)
+	// GetContent opens n bytes of the item's content from off. n < 0 reads
+	// to the end; n is never 0.
+	GetContent(ctx context.Context, driveID, itemID string, off, n int64) (io.ReadCloser, error)
 	PutContent(ctx context.Context, driveID, itemID, name, parentID string, r io.Reader, size int64) (graphItem, error)
 	CreateFolder(ctx context.Context, driveID, parentID, name string) (graphItem, error)
 	Delete(ctx context.Context, driveID, itemID string) error
@@ -31,6 +33,7 @@ type graphItem struct {
 	Size                     int64
 	IsDir                    bool
 	LastModified             string
+	CTag                     string // changes only when the content changes
 }
 
 // Graph opens OneDrive / SharePoint. api is a NewGraph result or a test fake.
@@ -194,7 +197,16 @@ func graphFileInfo(item graphItem) FileInfo {
 		ModTime:   mod,
 		IsDir:     item.IsDir,
 		MediaType: mt,
+		Version:   graphVersion(item),
 	}
+}
+
+// graphVersion is the item's cTag. Folders have no version.
+func graphVersion(item graphItem) string {
+	if item.IsDir {
+		return ""
+	}
+	return item.CTag
 }
 
 func (p *graphProvider) Validate(ctx context.Context) error {
@@ -240,20 +252,22 @@ func (p *graphProvider) OpenFile(ctx context.Context, name string, flag int, per
 	if item.IsDir {
 		return nil, fmt.Errorf("%w: %s", ErrIsDir, name)
 	}
-	data, err := p.readBytes(ctx, item)
-	if err != nil {
-		return nil, err
+	if !item.hasContent() {
+		return nil, ErrNoCodec
 	}
-	fi := graphFileInfo(item)
-	fi.Size = int64(len(data))
-	return &s3ReadFile{Reader: bytes.NewReader(data), info: fi}, nil
+	return newRemoteFile(ctx, graphFileInfo(item), func(ctx context.Context, off, n int64) (io.ReadCloser, error) {
+		return p.getContent(ctx, item, off, n)
+	}), nil
 }
 
 func (p *graphProvider) readBytes(ctx context.Context, item graphItem) ([]byte, error) {
 	if item.Size > int64(MaxReadFileBytes) {
 		return nil, errFileExceeds(MaxReadFileBytes)
 	}
-	body, _, err := p.getContent(ctx, item)
+	if !item.hasContent() {
+		return nil, ErrNoCodec
+	}
+	body, err := p.getContent(ctx, item, 0, -1)
 	if err != nil {
 		return nil, err
 	}
@@ -268,19 +282,20 @@ func (p *graphProvider) readBytes(ctx context.Context, item graphItem) ([]byte, 
 	return data, nil
 }
 
-func (p *graphProvider) getContent(ctx context.Context, item graphItem) (io.ReadCloser, int64, error) {
-	if item.Mime == "" && !item.IsDir {
-		// OneNote / loop / shortcut: listed, no file bytes.
-		return nil, 0, ErrNoCodec
-	}
+// hasContent reports whether the item has file bytes. OneNote, Loop and
+// shortcut items are listed with no MIME type and no content.
+func (item graphItem) hasContent() bool {
+	return item.Mime != "" || item.IsDir
+}
+
+func (p *graphProvider) getContent(ctx context.Context, item graphItem, off, n int64) (io.ReadCloser, error) {
 	var body io.ReadCloser
-	var size int64
 	err := p.call(ctx, func() error {
 		var err error
-		body, size, err = p.api.GetContent(ctx, p.driveID, item.ID)
+		body, err = p.api.GetContent(ctx, p.driveID, item.ID, off, n)
 		return err
 	})
-	return body, size, err
+	return body, err
 }
 
 func (p *graphProvider) ReadDir(ctx context.Context, name string) ([]DirEntry, error) {

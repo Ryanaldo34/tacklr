@@ -3,13 +3,14 @@ package postgres_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -17,82 +18,108 @@ import (
 
 	"github.com/ryanaldo34/tacklr/brain"
 	"github.com/ryanaldo34/tacklr/brain/postgres"
+	"github.com/ryanaldo34/tacklr/brain/storetest"
 )
 
-func TestNew_requiresDB(t *testing.T) {
-	if _, err := postgres.New(nil); err == nil {
-		t.Fatal("want error")
+func TestOpen_rejectsABadSchemaOrConnectionString(t *testing.T) {
+	t.Parallel()
+	_, schemaErr := postgres.Open(t.Context(), "postgres://u:p@db.example.com:5432/postgres", postgres.Options{Schema: "public;drop"})
+	_, connErr := postgres.Open(t.Context(), "://bad", postgres.Options{})
+
+	if schemaErr == nil || connErr == nil {
+		t.Fatalf("bad schema = %v, bad connection string = %v, want both rejected", schemaErr, connErr)
 	}
 }
 
-func TestPoolConfig_sessionPoolerSetsSearchPath(t *testing.T) {
-	cfg, err := postgres.PoolConfig("postgres://u:p@db.example.com:5432/postgres", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.ConnConfig.Port != 5432 {
-		t.Fatalf("port = %d", cfg.ConnConfig.Port)
-	}
-	if got := cfg.ConnConfig.RuntimeParams["search_path"]; got != "tacklr, public" {
-		t.Fatalf("search_path = %q", got)
-	}
-	cfg, err = postgres.PoolConfig("postgres://u:p@db.example.com:5432/postgres", "brain_app")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := cfg.ConnConfig.RuntimeParams["search_path"]; got != "brain_app, public" {
-		t.Fatalf("search_path = %q", got)
+func TestStore_aStatementStuckPastTheTimeoutIsCancelledByTheServer(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		timeout time.Duration
+		want    func(error) bool
+	}{
+		"with a timeout": {100 * time.Millisecond, func(err error) bool {
+			var pgErr *pgconn.PgError
+			return errors.As(err, &pgErr) && pgErr.Code == "57014" // query_canceled
+		}},
+		"with the timeout off": {-1, func(err error) bool { return errors.Is(err, context.DeadlineExceeded) }},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			store, pool := testDBWith(t, postgres.Options{StatementTimeout: tc.timeout})
+			scope := brain.Scope{Namespace: mustNS(t, "org", "a")}
+			doc := brain.Object{ID: uuid.New(), Kind: "Document", Namespace: scope.Namespace}
+			if err := store.Put(t.Context(), scope, doc); err != nil {
+				t.Fatal(err)
+			}
+			// Another transaction holds the row; the write waits behind it.
+			holder, err := pool.Begin(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = holder.Rollback(context.Background()) })
+			if _, err := holder.Exec(t.Context(), `SELECT 1 FROM objects WHERE id = $1 FOR UPDATE`, doc.ID); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+
+			err = store.Put(ctx, scope, doc)
+
+			if !tc.want(err) {
+				t.Fatalf("blocked write = %v", err)
+			}
+		})
 	}
 }
 
-func TestPoolConfig_rejectsTransactionPoolerAndBadSchema(t *testing.T) {
-	if _, err := postgres.PoolConfig("postgres://u:p@db.example.com:6543/postgres", ""); err == nil || !strings.Contains(err.Error(), "6543") {
-		t.Fatalf("transaction pooler: %v", err)
+func TestStore_everyCallReportsADatabaseFailure(t *testing.T) {
+	t.Parallel()
+	store, _ := testDB(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	scope := brain.Scope{Namespace: mustNS(t, "org", "a"), SessionID: "s1"}
+	ns, id := scope.Namespace, uuid.New()
+	doc := brain.Object{ID: id, Kind: "Document", Namespace: ns}
+	part := brain.TreePart{Object: brain.Object{ID: uuid.New(), Kind: "Chunk", ParentID: &id, Namespace: ns}}
+	errs := map[string]error{
+		"put":            store.Put(ctx, scope, doc),
+		"soft delete":    store.SoftDelete(ctx, scope, id),
+		"put kind":       store.PutKind(ctx, brain.ObjectKind{Kind: "Document"}),
+		"record":         store.Record(ctx, brain.AuditEvent{Op: brain.AuditRead, Namespace: ns}),
+		"stage parts":    store.StageParts(ctx, scope, uuid.New(), []brain.TreePart{part}),
+		"commit tree":    store.CommitTree(ctx, scope, uuid.New(), 0, doc),
+		"delete session": store.DeleteSessionMessages(ctx, ns, "s1"),
+		"setup":          store.Setup(ctx),
 	}
-	if _, err := postgres.PoolConfig("postgres://u:p@db.example.com:5432/postgres", "public;drop"); err == nil {
-		t.Fatal("want invalid schema")
-	}
-	store, err := postgres.New(failDB{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	store.Schema = "nope-schema"
-	if err := store.Setup(context.Background()); err == nil {
-		t.Fatal("want setup schema error")
+	_, errs["get"] = store.Get(ctx, scope, id)
+	_, errs["get many"] = store.GetMany(ctx, scope, []uuid.UUID{id})
+	_, errs["list children"] = store.ListChildren(ctx, scope, id)
+	_, errs["purge deleted"] = store.PurgeDeleted(ctx, scope, time.Now())
+	_, errs["erase"] = store.Erase(ctx, scope)
+	_, errs["get kind"] = store.GetKind(ctx, "Document")
+	_, errs["list kinds"] = store.ListKinds(ctx)
+	_, errs["list by kind"] = store.ListByKind(ctx, scope, "Document", 5)
+	_, errs["get by property"] = store.GetByProperty(ctx, scope, "path", "/a")
+	_, errs["kinds with objects"] = store.KindsWithObjects(ctx, scope)
+	_, errs["lexical"] = store.SearchLexical(ctx, scope, "q", brain.Filter{}, 5)
+	_, errs["vector"] = store.SearchVector(ctx, scope, "m", []float32{1, 0, 0}, brain.Filter{}, 5)
+	_, errs["trigram"] = store.SearchTrigram(ctx, scope, "q", brain.Filter{}, 5)
+	_, errs["tree state"] = store.TreeState(ctx, scope, id)
+	_, errs["save session"] = store.SaveSessionMessages(ctx, ns, "s1", "k", []brain.SessionMessage{{Role: "user"}})
+	_, errs["purge session"] = store.PurgeSessionMessages(ctx, ns, time.Now())
+
+	for name, err := range errs {
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("%s with a cancelled context = %v, want context.Canceled", name, err)
+		}
 	}
 }
 
-type failDB struct{}
-
-func (failDB) Query(context.Context, string, ...any) (pgx.Rows, error) {
-	return nil, errors.New("query down")
-}
-func (failDB) QueryRow(context.Context, string, ...any) pgx.Row { return failRow{} }
-func (failDB) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
-	return pgconn.CommandTag{}, errors.New("exec down")
-}
-
-type failRow struct{}
-
-func (failRow) Scan(...any) error { return pgx.ErrNoRows }
-
-func TestStore_setupReportsExecError(t *testing.T) {
-	store, err := postgres.New(failDB{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Setup(context.Background()); err == nil {
-		t.Fatal("want setup error")
-	}
-}
-
-func TestStore_clientAndQueryFailures(t *testing.T) {
-	store, err := postgres.New(failDB{})
-	if err != nil {
-		t.Fatal(err)
-	}
+func TestStore_rejectsInvalidArgumentsBeforeQuerying(t *testing.T) {
+	t.Parallel()
+	store, _ := testDB(t)
 	ctx := context.Background()
-	scope := brain.Scope{}
+	scope := brain.Scope{Namespace: mustNS(t, "org", "a")}
 	id := uuid.New()
 
 	if got, err := store.GetMany(ctx, scope, nil); err != nil || got != nil {
@@ -101,29 +128,17 @@ func TestStore_clientAndQueryFailures(t *testing.T) {
 	if err := store.SoftDelete(ctx, scope, uuid.Nil); !errors.Is(err, brain.ErrInvalid) {
 		t.Fatalf("nil id: %v", err)
 	}
-	if err := store.Put(ctx, brain.Object{}); !errors.Is(err, brain.ErrInvalid) {
+	if err := putFixture(store, brain.Object{}); !errors.Is(err, brain.ErrInvalid) {
 		t.Fatalf("invalid put: %v", err)
 	}
-	if _, err := store.GetKind(ctx, "ghost"); !errors.Is(err, brain.ErrNotFound) {
-		t.Fatalf("missing kind: %v", err)
+	if _, err := store.SearchLexical(ctx, scope, "q", brain.Filter{UpdatedAfter: "not-a-time"}, 5); !errors.Is(err, brain.ErrInvalid) {
+		t.Fatalf("invalid lexical filter = %v, want ErrInvalid", err)
 	}
-	if _, err := store.GetMany(ctx, scope, []uuid.UUID{id}); err == nil {
-		t.Fatal("want query failure")
+	if _, err := store.SearchVector(ctx, scope, "", []float32{1}, brain.Filter{UpdatedAfter: "not-a-time"}, 5); !errors.Is(err, brain.ErrInvalid) {
+		t.Fatalf("invalid vector filter = %v, want ErrInvalid", err)
 	}
-	if err := store.Put(ctx, brain.Object{ID: id, Kind: "Document", Namespace: mustNS(t, "org", "a")}); err == nil {
-		t.Fatal("want exec failure")
-	}
-	if _, err := store.SearchLexical(ctx, scope, "q", brain.Filter{UpdatedAfter: "not-a-time"}, 5); err == nil {
-		t.Fatal("want invalid filter")
-	}
-	if _, err := store.SearchLexical(ctx, scope, "q", brain.Filter{}, 5); err == nil {
-		t.Fatal("want lexical lookup error")
-	}
-	if _, err := store.SearchVector(ctx, scope, []float32{1}, brain.Filter{UpdatedAfter: "not-a-time"}, 5); err == nil {
-		t.Fatal("want invalid vector filter")
-	}
-	if _, err := store.SearchTrigram(ctx, scope, "q", brain.Filter{UpdatedAfter: "not-a-time"}, 5); err == nil {
-		t.Fatal("want invalid trigram filter")
+	if _, err := store.SearchTrigram(ctx, scope, "q", brain.Filter{UpdatedAfter: "not-a-time"}, 5); !errors.Is(err, brain.ErrInvalid) {
+		t.Fatalf("invalid trigram filter = %v, want ErrInvalid", err)
 	}
 	if err := store.PutKind(ctx, brain.ObjectKind{}); err == nil {
 		t.Fatal("want empty kind")
@@ -134,7 +149,7 @@ func TestStore_clientAndQueryFailures(t *testing.T) {
 	if got, err := store.ListByKind(ctx, scope, "", 10); err != nil || got != nil {
 		t.Fatalf("empty kind list: %v %v", got, err)
 	}
-	if err := store.Put(ctx, brain.Object{
+	if err := putFixture(store, brain.Object{
 		ID: id, Kind: "Document", Namespace: mustNS(t, "org", "a"),
 		Properties: map[string]any{"ch": make(chan int)},
 	}); err == nil {
@@ -146,22 +161,20 @@ func TestStore_clientAndQueryFailures(t *testing.T) {
 const brainPgImage = "tacklr-pg-brain:test"
 
 var (
-	pgOnce  sync.Once
-	pgPool  *pgxpool.Pool
-	pgStart error
-	pgSkip  string
+	pgOnce    sync.Once
+	pgAdmin   *pgxpool.Pool // the container's default schema: creates and drops test schemas
+	pgConn    string        // the container's connection string
+	pgStart   error
+	pgSkip    string
+	pgSchemas atomic.Int64
 )
 
 // TestPostgresStore_liveRetrievalChannels is the real-Postgres outcome for
 // scoped reads, ordered children, BM25 lexical, dense vector, and trigram search.
 func TestPostgresStore_liveRetrievalChannels(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
-	pool := sharedPostgresPool(t)
-	mustExec(t, pool, `TRUNCATE objects, object_kinds CASCADE`)
-	store, err := postgres.New(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
+	store, pool := testDB(t)
 
 	nsA := mustNS(t, "org", "a")
 	nsB := mustNS(t, "org", "b")
@@ -186,6 +199,7 @@ func TestPostgresStore_liveRetrievalChannels(t *testing.T) {
 			($6, 'Chunk', 'gone', '', '{}', 'soft deleted oauth', $1, 3, '[1,0,0]'::vector, $2, $3, $3)
 	`, parentID, nsA, now, chunkOAuth, chunkOther, chunkDeleted)
 	mustExec(t, pool, `UPDATE objects SET deleted_at = $1 WHERE id = $2`, now, chunkDeleted)
+	mustExec(t, pool, `UPDATE objects SET embedding_model = 'test-model' WHERE embedding IS NOT NULL`)
 	docB := uuid.New()
 	mustExec(t, pool, `
 		INSERT INTO objects (id, kind, title, namespace, created_at, updated_at)
@@ -224,7 +238,7 @@ func TestPostgresStore_liveRetrievalChannels(t *testing.T) {
 		t.Fatalf("chunk must be invisible outside its namespace: %v", err)
 	}
 	nestedID := uuid.New()
-	if err := store.Put(ctx, brain.Object{
+	if err := putFixture(store, brain.Object{
 		ID: nestedID, Kind: "Document", Title: "nested",
 		Namespace: mustNS(t, "org", "a", "workspace", "west"),
 	}); err != nil {
@@ -291,7 +305,7 @@ func TestPostgresStore_liveRetrievalChannels(t *testing.T) {
 	}
 
 	// Vector: query near [1,0,0] should rank oauth chunk first.
-	vec, err := store.SearchVector(ctx, scopeA, []float32{0.95, 0.05, 0}, mustFilter(t, map[string]any{"kind": "Chunk"}), 5)
+	vec, err := store.SearchVector(ctx, scopeA, "test-model", []float32{0.95, 0.05, 0}, mustFilter(t, map[string]any{"kind": "Chunk"}), 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -302,7 +316,7 @@ func TestPostgresStore_liveRetrievalChannels(t *testing.T) {
 		t.Fatalf("vector parent: %+v", vec[0])
 	}
 
-	vecOpen, err := store.SearchVector(ctx, scopeA, []float32{0.5, 0.5, 0}, mustFilter(t, map[string]any{"stage": "open"}), 5)
+	vecOpen, err := store.SearchVector(ctx, scopeA, "test-model", []float32{0.5, 0.5, 0}, mustFilter(t, map[string]any{"stage": "open"}), 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -323,7 +337,7 @@ func TestPostgresStore_liveRetrievalChannels(t *testing.T) {
 		t.Fatalf("trigram phrase inside long body: %+v err=%v", grace, err)
 	}
 
-	vecB, err := store.SearchVector(ctx, brain.Scope{Namespace: nsB}, []float32{1, 0, 0}, brain.Filter{}, 5)
+	vecB, err := store.SearchVector(ctx, brain.Scope{Namespace: nsB}, "", []float32{1, 0, 0}, brain.Filter{}, 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -368,14 +382,11 @@ func TestPostgresStore_liveRetrievalChannels(t *testing.T) {
 // TestPostgresStore_liveEmptyChannels is the zero-candidate outcome for
 // empty query / empty embedding / k<=0 without hitting the database error path.
 func TestPostgresStore_liveEmptyChannels(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
-	pool := sharedPostgresPool(t)
-	store, err := postgres.New(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
+	store, _ := testDB(t)
 	scope := brain.Scope{}
-	if got, err := store.SearchVector(ctx, scope, nil, brain.Filter{}, 10); err != nil || got != nil {
+	if got, err := store.SearchVector(ctx, scope, "", nil, brain.Filter{}, 10); err != nil || got != nil {
 		t.Fatalf("empty embedding: got=%v err=%v", got, err)
 	}
 	if got, err := store.SearchTrigram(ctx, scope, "", brain.Filter{}, 10); err != nil || got != nil {
@@ -389,13 +400,12 @@ func TestPostgresStore_liveEmptyChannels(t *testing.T) {
 	}
 }
 
-// sharedPostgresPool starts one container for the package process.
-// Requires image tacklr-pg-brain:test (make brain-pg-image / CI prepare step).
-// Tests that need a clean slate TRUNCATE their tables.
-func sharedPostgresPool(t *testing.T) *pgxpool.Pool {
+// startPostgres starts one container for the test binary and installs the
+// extensions in public, where every test schema's Setup finds them.
+func startPostgres(t *testing.T) {
 	t.Helper()
-	ctx := context.Background()
 	pgOnce.Do(func() {
+		ctx := context.Background()
 		ctr, err := tcpostgres.Run(ctx, brainPgImage,
 			tcpostgres.WithDatabase("brain"),
 			tcpostgres.WithUsername("brain"),
@@ -407,61 +417,19 @@ func sharedPostgresPool(t *testing.T) *pgxpool.Pool {
 			pgSkip = err.Error() + " (build image: make brain-pg-image)"
 			return
 		}
-		// Keep container for process lifetime; Ryuk reaps on exit.
-		connStr, err := ctr.ConnectionString(ctx, "sslmode=disable")
-		if err != nil {
+		// The container lives for the process; Ryuk reaps it on exit.
+		if pgConn, err = ctr.ConnectionString(ctx, "sslmode=disable"); err != nil {
 			pgStart = err
-			_ = ctr.Terminate(ctx)
 			return
 		}
-		cfg, err := postgres.PoolConfig(connStr, "")
-		if err != nil {
+		if pgAdmin, err = pgxpool.New(ctx, pgConn); err != nil {
 			pgStart = err
-			_ = ctr.Terminate(ctx)
 			return
 		}
-		pool, err := pgxpool.NewWithConfig(ctx, cfg)
-		if err != nil {
-			pgStart = err
-			_ = ctr.Terminate(ctx)
-			return
-		}
-		store, err := postgres.New(pool)
-		if err != nil {
-			pgStart = err
-			pool.Close()
-			_ = ctr.Terminate(ctx)
-			return
-		}
-		store.EmbeddingDim = 3
-		if err := store.Setup(ctx); err != nil {
-			pgStart = err
-			pool.Close()
-			_ = ctr.Terminate(ctx)
-			return
-		}
-		var n int
-		if err := pool.QueryRow(ctx, `
-			SELECT count(*) FROM pg_extension WHERE extname IN ('vector', 'pg_trgm')
-		`).Scan(&n); err != nil || n != 2 {
-			pgStart = errors.New("expected vector and pg_trgm extensions")
-			pool.Close()
-			_ = ctr.Terminate(ctx)
-			return
-		}
-		if err := pool.QueryRow(ctx, `SELECT count(*) FROM pg_indexes WHERE schemaname = 'tacklr' AND indexname IN ('idx_objects_fts', 'idx_objects_embedding_hnsw')`).Scan(&n); err != nil || n != 2 {
-			pgStart = errors.New("fts or hnsw index missing")
-			pool.Close()
-			_ = ctr.Terminate(ctx)
-			return
-		}
-		if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'objects'`).Scan(&n); err != nil || n != 0 {
-			pgStart = errors.New("objects table must not sit in public")
-			pool.Close()
-			_ = ctr.Terminate(ctx)
-			return
-		}
-		pgPool = pool
+		_, pgStart = pgAdmin.Exec(ctx, `
+			CREATE EXTENSION IF NOT EXISTS pgcrypto SCHEMA public;
+			CREATE EXTENSION IF NOT EXISTS vector SCHEMA public;
+			CREATE EXTENSION IF NOT EXISTS pg_trgm SCHEMA public;`)
 	})
 	if pgSkip != "" {
 		t.Skipf("postgres container unavailable (need Docker API runtime): %s", pgSkip)
@@ -469,10 +437,46 @@ func sharedPostgresPool(t *testing.T) *pgxpool.Pool {
 	if pgStart != nil {
 		t.Fatal(pgStart)
 	}
-	if pgPool == nil {
-		t.Fatal("postgres pool not initialized")
+}
+
+// testSchema is a schema name no other test uses; it is dropped when t ends.
+func testSchema(t *testing.T) string {
+	t.Helper()
+	startPostgres(t)
+	name := fmt.Sprintf("test_%d", pgSchemas.Add(1))
+	t.Cleanup(func() {
+		if _, err := pgAdmin.Exec(context.Background(), "DROP SCHEMA IF EXISTS "+name+" CASCADE"); err != nil {
+			t.Errorf("drop %s: %v", name, err)
+		}
+	})
+	return name
+}
+
+// testDB is a set-up store over its own schema, so a test never sees or
+// resets another test's rows. pool reaches the same schema.
+func testDB(t *testing.T) (*postgres.Store, *pgxpool.Pool) {
+	t.Helper()
+	return testDBWith(t, postgres.Options{})
+}
+
+// testDBWith is testDB with opts; Schema and EmbeddingDim are the test's own.
+func testDBWith(t *testing.T, opts postgres.Options) (*postgres.Store, *pgxpool.Pool) {
+	t.Helper()
+	opts.Schema, opts.EmbeddingDim = testSchema(t), 3
+	store, err := postgres.Open(t.Context(), pgConn, opts)
+	if err != nil {
+		t.Fatal(err)
 	}
-	return pgPool
+	t.Cleanup(store.Close)
+	if err := store.Setup(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	pool, err := pgxpool.New(t.Context(), pgConn+"&search_path="+opts.Schema+",public")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	return store, pool
 }
 
 func mustNS(t testing.TB, nv ...string) brain.Namespace {
@@ -485,17 +489,13 @@ func mustNS(t testing.TB, nv ...string) brain.Namespace {
 }
 
 func TestPostgresStore_notFoundAndCorruptProperties(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
-	pool := sharedPostgresPool(t)
-	mustExec(t, pool, `TRUNCATE objects, object_kinds CASCADE`)
-	store, err := postgres.New(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
+	store, pool := testDB(t)
 	ns := mustNS(t, "org", "a")
 	scope := brain.Scope{Namespace: ns}
 	id := uuid.New()
-	if err := store.Put(ctx, brain.Object{ID: id, Kind: "Document", Title: "doc", Namespace: ns}); err != nil {
+	if err := putFixture(store, brain.Object{ID: id, Kind: "Document", Title: "doc", Namespace: ns}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.SoftDelete(ctx, scope, uuid.New()); !errors.Is(err, brain.ErrNotFound) {
@@ -512,7 +512,7 @@ func TestPostgresStore_notFoundAndCorruptProperties(t *testing.T) {
 		t.Fatal(err)
 	}
 	revived := brain.Object{ID: id, Kind: "Document", Title: "revived", Namespace: ns}
-	if err := store.Put(ctx, revived); err != nil {
+	if err := putFixture(store, revived); err != nil {
 		t.Fatal(err)
 	}
 	got, err := store.Get(ctx, scope, id)
@@ -529,51 +529,6 @@ func TestPostgresStore_notFoundAndCorruptProperties(t *testing.T) {
 		badID, nsJSON)
 	if _, err := store.Get(ctx, scope, badID); err == nil {
 		t.Fatal("want corrupt properties error")
-	}
-}
-
-func TestPostgresStore_canceledContext(t *testing.T) {
-	pool := sharedPostgresPool(t)
-	store, err := postgres.New(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-	scope := brain.Scope{Namespace: mustNS(t, "org", "a")}
-	id := uuid.New()
-	if _, err := store.GetMany(ctx, scope, []uuid.UUID{id}); err == nil {
-		t.Fatal("get many")
-	}
-	if _, err := store.ListChildren(ctx, scope, id); err == nil {
-		t.Fatal("list children")
-	}
-	if _, err := store.ListKinds(ctx); err == nil {
-		t.Fatal("list kinds")
-	}
-	if _, err := store.KindsWithObjects(ctx, scope); err == nil {
-		t.Fatal("kinds with objects")
-	}
-	if _, err := store.ListByKind(ctx, scope, "Document", 10); err == nil {
-		t.Fatal("list by kind")
-	}
-	if _, err := store.GetKind(ctx, "Document"); err == nil {
-		t.Fatal("get kind")
-	}
-	if _, err := store.Get(ctx, scope, id); err == nil {
-		t.Fatal("get")
-	}
-	if err := store.Put(ctx, brain.Object{ID: id, Kind: "Document", Namespace: scope.Namespace}); err == nil {
-		t.Fatal("put")
-	}
-	if err := store.PutKind(ctx, brain.ObjectKind{Kind: "Document"}); err == nil {
-		t.Fatal("put kind")
-	}
-	if err := store.SoftDelete(ctx, scope, id); err == nil {
-		t.Fatal("soft delete")
-	}
-	if _, err := store.SearchLexical(ctx, scope, "q", brain.Filter{}, 5); err == nil {
-		t.Fatal("search")
 	}
 }
 
@@ -597,14 +552,9 @@ func mustExec(t *testing.T, pool *pgxpool.Pool, sql string, args ...any) {
 // real Postgres: ApplyKinds → Put (parent+parts with vectors) → hybrid search →
 // continue → find_exact → expand children → soft-delete → revive Put → namespace isolation.
 func TestEngine_livePostgresMultiTurnWriteSearch(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
-	pool := sharedPostgresPool(t)
-	mustExec(t, pool, `TRUNCATE objects, object_kinds CASCADE`)
-
-	store, err := postgres.New(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
+	store, _ := testDB(t)
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	eng, err := brain.NewEngine(store,
 		brain.WithEmbedder(liveStubEmbedder{v: []float32{1, 0, 0}}),
@@ -776,20 +726,17 @@ func TestEngine_livePostgresMultiTurnWriteSearch(t *testing.T) {
 // liveStubEmbedder is a deterministic dense embedder for live Postgres hybrid search.
 type liveStubEmbedder struct{ v []float32 }
 
-func (s liveStubEmbedder) Embed(context.Context, string) ([]float32, error) { return s.v, nil }
+func (s liveStubEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+	return repeatVector(s.v, len(texts)), nil
+}
 
 // TestApplyKinds_livePostgresMigration is the durable KindRegistry outcome:
 // host ApplyKinds upserts object_kinds, a new Engine LoadKindsFromStore adopts
 // them, and schema() / filter validation use the catalog.
 func TestApplyKinds_livePostgresMigration(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
-	pool := sharedPostgresPool(t)
-	mustExec(t, pool, `TRUNCATE objects, object_kinds CASCADE`)
-
-	store, err := postgres.New(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
+	store, _ := testDB(t)
 	// Compile-time / runtime: postgres.Store is a KindRegistry.
 	var _ brain.KindRegistry = store
 
@@ -824,6 +771,9 @@ func TestApplyKinds_livePostgresMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	if _, err := store.GetKind(ctx, "Ghost"); !errors.Is(err, brain.ErrNotFound) {
+		t.Fatalf("missing kind: %v", err)
+	}
 	row, err := store.GetKind(ctx, "Document")
 	if err != nil || row.Description != "parent docs v2" {
 		t.Fatalf("upserted document: %+v err=%v", row, err)
@@ -859,15 +809,9 @@ func TestApplyKinds_livePostgresMigration(t *testing.T) {
 // TestPostgresStore_setupRegistersKinds is the host boot path: Setup is
 // idempotent and upserts configured kinds into object_kinds.
 func TestPostgresStore_setupRegistersKinds(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
-	pool := sharedPostgresPool(t)
-	mustExec(t, pool, `TRUNCATE objects, object_kinds CASCADE`)
-
-	store, err := postgres.New(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
-	store.EmbeddingDim = 3
+	store, _ := testDB(t)
 	deal := brain.KindSpec{Kind: "Deal", IsParent: true, Description: "sales"}
 	if err := store.Setup(ctx, deal); err != nil {
 		t.Fatal(err)
@@ -884,13 +828,9 @@ func TestPostgresStore_setupRegistersKinds(t *testing.T) {
 // TestPostgresStore_lexicalRanksTitleAboveBody: a title hit outranks a body hit,
 // a partial term match fills the page, and a stopword matches nothing.
 func TestPostgresStore_lexicalRanksTitleAboveBody(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
-	pool := sharedPostgresPool(t)
-	mustExec(t, pool, `TRUNCATE objects, object_kinds, session_messages`)
-	store, err := postgres.New(pool)
-	if err != nil {
-		t.Fatal(err)
-	}
+	store, pool := testDB(t)
 	ns := mustNS(t, "org", "fts")
 	parent := uuid.New()
 	titleHit := uuid.New()
@@ -932,7 +872,7 @@ func TestPostgresStore_lexicalRanksTitleAboveBody(t *testing.T) {
 	if len(filled) != 3 || filled[0].ID != bothHit {
 		t.Fatalf("any-term fill: %+v", filled)
 	}
-	if got, err := store.SearchLexical(ctx, scope, "the", brain.Filter{}, 5); err != nil || got != nil {
+	if got, err := store.SearchLexical(ctx, scope, "the", brain.Filter{}, 5); err != nil || len(got) != 0 {
 		t.Fatalf("stopword: %+v err=%v", got, err)
 	}
 	if _, err := store.SaveSessionMessages(ctx, ns, "sess/1", "g1", []brain.SessionMessage{{
@@ -954,4 +894,122 @@ func TestPostgresStore_lexicalRanksTitleAboveBody(t *testing.T) {
 	if !saw {
 		t.Fatalf("session message: %+v", msgs)
 	}
+}
+
+func (liveStubEmbedder) Model() string { return "test-model" }
+
+// putFixture writes obj straight to the store under its own namespace.
+func putFixture(w brain.ObjectWriter, obj brain.Object) error {
+	return w.Put(context.Background(), brain.Scope{Namespace: obj.Namespace}, obj)
+}
+
+func TestPostgresStore_isolationContract(t *testing.T) {
+	t.Parallel()
+	storetest.Run(t, func(t *testing.T) storetest.Store {
+		store, _ := testDB(t)
+		return store
+	})
+}
+
+func TestStore_concurrentSetupMigratesOnceAndRejectsADimensionChange(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	schema := testSchema(t)
+	newStore := func(dim int) *postgres.Store {
+		store, err := postgres.Open(ctx, pgConn, postgres.Options{Schema: schema, EmbeddingDim: dim})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(store.Close)
+		return store
+	}
+
+	var wg sync.WaitGroup
+	errs := make([]error, 4)
+	for i := range errs {
+		wg.Go(func() { errs[i] = newStore(3).Setup(ctx) })
+	}
+	wg.Wait()
+	resized := newStore(5).Setup(ctx)
+	var applied, version int
+	if err := pgAdmin.QueryRow(ctx, `SELECT count(*), max(version) FROM `+schema+`.schema_migrations`).Scan(&applied, &version); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := errors.Join(errs...); err != nil {
+		t.Fatalf("concurrent setup: %v", err)
+	}
+	if applied == 0 || applied != version {
+		t.Fatalf("migrations applied = %d, version = %d, want each version applied once", applied, version)
+	}
+	if resized == nil || !strings.Contains(resized.Error(), "EmbeddingDim") {
+		t.Fatalf("setup with a new dimension = %v", resized)
+	}
+}
+
+func TestStore_auditEventsArePersisted(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, pool := testDB(t)
+	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithAudit(store.Record))
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := brain.Scope{Namespace: mustNS(t, "org", "a"), Principals: []string{"user:ann"}, SessionID: "s1"}
+
+	obj, err := eng.Put(ctx, scope, brain.Object{Kind: "Note", Title: "n"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var (
+		op         string
+		principals []string
+		session    string
+		ids        []uuid.UUID
+	)
+	err = pool.QueryRow(ctx, `SELECT op, principals, session_id, object_ids FROM audit_events WHERE namespace @> '[{"name":"org","value":"a"}]'`).
+		Scan(&op, &principals, &session, &ids)
+
+	if err != nil || brain.AuditOp(op) != brain.AuditPut || principals[0] != "user:ann" || session != "s1" || len(ids) != 1 || ids[0] != obj.ID {
+		t.Fatalf("audit row = %s %v %s %v err=%v", op, principals, session, ids, err)
+	}
+}
+
+func TestStore_setupWaitsForAnotherSetupPastTheStatementTimeout(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	schema := testSchema(t)
+	store, err := postgres.Open(ctx, pgConn, postgres.Options{Schema: schema, EmbeddingDim: 3, StatementTimeout: 50 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(store.Close)
+	// Another deploy holds the Setup lock for longer than the statement timeout.
+	holder, err := pgAdmin.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := holder.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('tacklr.setup:' || $1))`, schema); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+
+	go func() { done <- store.Setup(ctx) }()
+	time.Sleep(300 * time.Millisecond)
+	if err := holder.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := <-done; err != nil {
+		t.Fatalf("setup after waiting for the lock: %v", err)
+	}
+}
+
+// repeatVector returns n copies of v, one per embedded text.
+func repeatVector(v []float32, n int) [][]float32 {
+	out := make([][]float32, n)
+	for i := range out {
+		out[i] = v
+	}
+	return out
 }

@@ -54,7 +54,8 @@ func NewSyncScheduler(idx *MountIndexer) *SyncScheduler {
 // Notify implements IndexScheduler.
 func (s *SyncScheduler) Notify(ctx context.Context, virtualPath string, reason IndexReason) error {
 	_ = reason
-	return s.Indexer.IndexPath(ctx, virtualPath)
+	_, err := s.Indexer.IndexPath(ctx, virtualPath)
+	return err
 }
 
 // Defaults for AsyncScheduler.
@@ -212,7 +213,7 @@ func (s *AsyncScheduler) runIndex(parent context.Context, path string, reason In
 	}
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
-	if err := s.Indexer.IndexPath(ctx, path); err != nil {
+	if _, err := s.Indexer.IndexPath(ctx, path); err != nil {
 		s.report(SchedulerEvent{Path: path, Reason: reason, Err: err})
 	}
 }

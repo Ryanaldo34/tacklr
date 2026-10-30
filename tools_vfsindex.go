@@ -52,7 +52,7 @@ Requires an active plan. Returns one status line per path: indexed, skipped (unc
 			}
 			// Validate all paths before any index write so directory / missing
 			// rejects do not partially index earlier paths in the batch.
-			// One policy lookup + Stat per path; IndexFileResult reuses Stat.
+			// One policy lookup + Stat per path; IndexFile reuses Stat.
 			type job struct {
 				path   string
 				st     vfs.FileInfo
@@ -82,7 +82,7 @@ Requires an active plan. Returns one status line per path: indexed, skipped (unc
 				if i > 0 {
 					b.WriteByte('\n')
 				}
-				res, err := v.br.Indexer.IndexFileResult(ctx, j.path, j.st)
+				res, err := v.br.Indexer.IndexFile(ctx, j.path, j.st)
 				if err != nil {
 					fmt.Fprintf(&b, "error path=%s: %v", j.path, err)
 					continue

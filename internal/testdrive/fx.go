@@ -2,6 +2,8 @@
 package testdrive
 
 import (
+	"bytes"
+	"crypto/md5" //nolint:gosec // G501: Drive reports md5Checksum; the fake matches it
 	"encoding/json"
 	"fmt"
 	"io"
@@ -94,7 +96,17 @@ func (d *FX) Add(parent string, meta vfs.DriveMeta, body []byte) {
 		meta.Version = "1"
 	}
 	meta.IsDir = meta.MimeType == folderMIME
+	meta.MD5 = checksum(meta.MimeType, body)
 	d.Nodes[meta.ID] = &Node{Meta: meta, Parent: parent, Body: append([]byte(nil), body...)}
+}
+
+// checksum is Drive's md5Checksum: set for files with bytes, never for
+// folders or Google-native files.
+func checksum(mimeType string, body []byte) string {
+	if len(body) == 0 || strings.HasPrefix(mimeType, "application/vnd.google-apps.") {
+		return ""
+	}
+	return fmt.Sprintf("%x", md5.Sum(body)) //nolint:gosec // G401: Drive's checksum is md5
 }
 
 // OnceMedia makes the next media GET for id return HTTP status.
@@ -165,7 +177,7 @@ func (d *FX) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		id := strings.TrimPrefix(p, "/files/")
 		id = strings.TrimSuffix(id, "/")
 		if r.URL.Query().Get("alt") == "media" {
-			d.serveMedia(w, id)
+			d.serveMedia(w, r, id)
 			return
 		}
 		switch r.Method {
@@ -223,7 +235,7 @@ func (d *FX) serveMeta(w http.ResponseWriter, id string) {
 	writeDriveJSON(w, http.StatusOK, fileJSON(n))
 }
 
-func (d *FX) serveMedia(w http.ResponseWriter, id string) {
+func (d *FX) serveMedia(w http.ResponseWriter, r *http.Request, id string) {
 	if status, ok := d.onceMedia[id]; ok {
 		delete(d.onceMedia, id)
 		writeDriveErr(w, status, "unauthorized")
@@ -235,9 +247,7 @@ func (d *FX) serveMedia(w http.ResponseWriter, id string) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Length", strconv.Itoa(len(n.Body)))
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(n.Body)
+	http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(n.Body))
 }
 
 func (d *FX) serveExport(w http.ResponseWriter, id string) {
@@ -273,7 +283,7 @@ func (d *FX) serveCreate(w http.ResponseWriter, r *http.Request) {
 		Meta: vfs.DriveMeta{
 			ID: id, Name: name, MimeType: mimeType,
 			Size: int64(len(media)), ModTime: time.Now().UTC(), Version: "1",
-			IsDir: mimeType == folderMIME,
+			IsDir: mimeType == folderMIME, MD5: checksum(mimeType, media),
 		},
 	}
 	d.Nodes[id] = n
@@ -302,6 +312,7 @@ func (d *FX) servePatch(w http.ResponseWriter, r *http.Request, id string) {
 		n.Body = media
 		n.Meta.Size = int64(len(media))
 		n.Meta.ModTime = time.Now().UTC()
+		n.Meta.MD5 = checksum(n.Meta.MimeType, media)
 	}
 	writeDriveJSON(w, http.StatusOK, fileJSON(n))
 }
@@ -316,6 +327,9 @@ func fileJSON(n *Node) map[string]any {
 	}
 	if n.Meta.Version != "" {
 		out["version"] = n.Meta.Version
+	}
+	if n.Meta.MD5 != "" {
+		out["md5Checksum"] = n.Meta.MD5
 	}
 	if n.Meta.TargetID != "" {
 		out["shortcutDetails"] = map[string]any{

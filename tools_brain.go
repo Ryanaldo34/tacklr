@@ -39,12 +39,13 @@ func (b brainTools) scope(call []brain.Attr) (brain.Scope, error) {
 			return brain.Scope{}, fmt.Errorf("%w: namespace attr %q is reserved", brain.ErrInvalid, brain.SessionTailName)
 		}
 	}
-	ceiling, _ := b.sc.Namespace()
-	ns, err := ceiling.Bind(call)
+	scope := b.sc.Scope()
+	ns, err := scope.Namespace.Bind(call)
 	if err != nil {
 		return brain.Scope{}, err
 	}
-	return brain.Scope{Namespace: ns, SessionID: b.sessionID}, nil
+	scope.Namespace, scope.SessionID = ns, b.sessionID
+	return scope, nil
 }
 
 type readObjectArgs struct {

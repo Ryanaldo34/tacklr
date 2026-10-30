@@ -29,7 +29,7 @@ func TestSessionMessages_searchKindFilterIdempotentDelete(t *testing.T) {
 	if _, err := eng.SaveSessionMessages(stopped, ns, sessionID, "k", []SessionMessage{{Role: "user", SearchText: "x"}}); err == nil {
 		t.Fatal("cancelled save")
 	}
-	if err := eng.DeleteSessionMessages(stopped, sessionID); err == nil {
+	if err := eng.DeleteSessionMessages(stopped, ns, sessionID); err == nil {
 		t.Fatal("cancelled delete")
 	}
 	if _, err := store.SaveSessionMessages(ctx, ns, "", "k", []SessionMessage{{Role: "user"}}); err == nil {
@@ -41,11 +41,11 @@ func TestSessionMessages_searchKindFilterIdempotentDelete(t *testing.T) {
 	if _, err := store.SaveSessionMessages(ctx, ns, sessionID, "k", nil); err == nil {
 		t.Fatal("empty window")
 	}
-	if err := store.DeleteSessionMessages(ctx, " "); err != nil {
-		t.Fatal(err)
+	if err := eng.DeleteSessionMessages(ctx, ns, " "); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("blank session delete = %v", err)
 	}
-	if err := eng.DeleteSessionMessages(ctx, " "); err != nil {
-		t.Fatal(err)
+	if err := eng.DeleteSessionMessages(ctx, nil, sessionID); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("unscoped delete = %v", err)
 	}
 	blank := &MemoryStore{}
 	if _, err := blank.SaveSessionMessages(ctx, ns, sessionID, "blank-store", []SessionMessage{{Role: "user", SearchText: marker}}); err != nil {
@@ -111,7 +111,7 @@ func TestSessionMessages_searchKindFilterIdempotentDelete(t *testing.T) {
 		t.Fatalf("kind filter = %+v", filtered.Objects)
 	}
 
-	if err := eng.DeleteSessionMessages(ctx, sessionID); err != nil {
+	if err := eng.DeleteSessionMessages(ctx, ns, sessionID); err != nil {
 		t.Fatal(err)
 	}
 	factPage, err := eng.Search(ctx, scope, SearchRequest{Query: "durable-fact"}, NewSearchContext())
@@ -143,15 +143,16 @@ func TestSessionMessages_searchKindFilterIdempotentDelete(t *testing.T) {
 		}
 	}
 
-	reader, err := NewEngine(memReader{}, WithLexicalOnly())
+	// A store with reads only: the struct hides MemoryStore's session writes.
+	reader, err := NewEngine(struct{ Store }{NewMemoryStore()}, WithLexicalOnly())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := reader.SaveSessionMessages(ctx, ns, sessionID, "k", msg); !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("reader save = %v", err)
 	}
-	if err := reader.DeleteSessionMessages(ctx, sessionID); err != nil {
-		t.Fatal(err)
+	if err := reader.DeleteSessionMessages(ctx, ns, sessionID); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("reader delete = %v", err)
 	}
 	embedFail, err := NewEngine(NewMemoryStore(), WithEmbedder(errEmbed{}))
 	if err != nil {
@@ -164,31 +165,8 @@ func TestSessionMessages_searchKindFilterIdempotentDelete(t *testing.T) {
 
 type errEmbed struct{}
 
-func (errEmbed) Embed(context.Context, string) ([]float32, error) {
+func (errEmbed) Embed(context.Context, []string) ([][]float32, error) {
 	return nil, errors.New("embed down")
 }
 
-type memReader struct{}
-
-func (memReader) Get(context.Context, Scope, uuid.UUID) (Object, error) {
-	return Object{}, ErrNotFound
-}
-func (memReader) GetMany(context.Context, Scope, []uuid.UUID) ([]Object, error) {
-	return nil, nil
-}
-func (memReader) ListChildren(context.Context, Scope, uuid.UUID) ([]Object, error) {
-	return nil, nil
-}
-func (memReader) GetKind(context.Context, string) (ObjectKind, error) {
-	return ObjectKind{}, ErrNotFound
-}
-func (memReader) ListKinds(context.Context) ([]ObjectKind, error) { return nil, nil }
-func (memReader) SearchLexical(context.Context, Scope, string, Filter, int) ([]ScoredID, error) {
-	return nil, nil
-}
-func (memReader) SearchVector(context.Context, Scope, []float32, Filter, int) ([]ScoredID, error) {
-	return nil, nil
-}
-func (memReader) SearchTrigram(context.Context, Scope, string, Filter, int) ([]ScoredID, error) {
-	return nil, nil
-}
+func (errEmbed) Model() string { return "test-model" }

@@ -11,10 +11,17 @@ import (
 	"github.com/google/uuid"
 )
 
-// QueryEmbedder embeds a query string for the dense search channel.
-// NewEngine requires WithEmbedder or WithLexicalOnly.
+// QueryEmbedder embeds text for the dense search channel and for stored
+// objects. NewEngine requires WithEmbedder or WithLexicalOnly.
 type QueryEmbedder interface {
-	Embed(ctx context.Context, text string) ([]float32, error)
+	// Embed returns one vector per text, in order. A search passes one
+	// text; PutTree passes up to EngineConfig.EmbedBatchSize texts.
+	Embed(ctx context.Context, texts []string) ([][]float32, error)
+	// Model names the model and version (for example
+	// "text-embedding-3-small"). It is stored on every embedded row, and
+	// vector search only compares rows from the same model, so changing
+	// models never mixes incompatible vectors.
+	Model() string
 }
 
 // Reranker optionally reorders/filters hydrated rich objects after search or find_objects.
@@ -28,6 +35,9 @@ type Reranker interface {
 // channel before fusion. Explicit 0 stays 0.
 // SnippetCap is the evidence quote length in runes. 0 selects 240.
 // FailOn* false (default) soft-degrades embedder/graph failures; true surfaces errors.
+// EmbedBatchSize is the most texts per Embed call (default 128).
+// EmbedConcurrency is the most Embed calls PutTree runs at once (default 2);
+// together they bound how many new parts a tree write holds in memory.
 type EngineConfig struct {
 	CandidateK          int
 	RRFk                int
@@ -42,6 +52,8 @@ type EngineConfig struct {
 	MaxExpandHops       int // max MaxHops on expand (default 4)
 	MaxGraphExpandRPCs  int // cap Neighbors calls per multi-hop expand (default 64)
 	MaxResultSetSize    int
+	EmbedBatchSize      int
+	EmbedConcurrency    int
 	FailOnEmbedderError bool
 	FailOnGraphError    bool
 	Now                 func() time.Time
@@ -65,6 +77,8 @@ func DefaultEngineConfig() EngineConfig {
 		MaxExpandHops:      4,
 		MaxGraphExpandRPCs: 64,
 		MaxResultSetSize:   1000,
+		EmbedBatchSize:     128,
+		EmbedConcurrency:   2,
 		Now:                func() time.Time { return time.Now().UTC() },
 	}
 }
@@ -83,6 +97,8 @@ func (c EngineConfig) withDefaults() EngineConfig {
 	c.MaxExpandHops = cmp.Or(c.MaxExpandHops, d.MaxExpandHops)
 	c.MaxGraphExpandRPCs = cmp.Or(c.MaxGraphExpandRPCs, d.MaxGraphExpandRPCs)
 	c.MaxResultSetSize = cmp.Or(c.MaxResultSetSize, d.MaxResultSetSize)
+	c.EmbedBatchSize = cmp.Or(c.EmbedBatchSize, d.EmbedBatchSize)
+	c.EmbedConcurrency = cmp.Or(c.EmbedConcurrency, d.EmbedConcurrency)
 	if c.Lambda == nil {
 		c.Lambda = d.Lambda
 	}
@@ -179,6 +195,7 @@ type Engine struct {
 	graphS      GraphObjectSearcher // optional find_objects (resolved in WithGraph)
 	graphE      GraphEdgeSearcher   // optional edge text search (resolved in WithGraph)
 	reranker    Reranker
+	audit       AuditFunc
 	recipeMu    sync.RWMutex
 	recipes     map[string]ExpandRecipe // guarded by recipeMu
 	cfg         EngineConfig
@@ -212,6 +229,9 @@ func NewEngine(store Store, opts ...EngineOption) (*Engine, error) {
 	if e.embedder == nil && !e.lexicalOnly {
 		return nil, fmt.Errorf("%w: WithEmbedder is required (or WithLexicalOnly to opt out)", ErrInvalid)
 	}
+	if e.embedder != nil && strings.TrimSpace(e.embedder.Model()) == "" {
+		return nil, fmt.Errorf("%w: embedder Model is required", ErrInvalid)
+	}
 	e.cfg = e.cfg.withDefaults()
 	return e, nil
 }
@@ -238,10 +258,7 @@ func (e *Engine) Catalog() *KindCatalog {
 // Read returns the full rich object for id under scope.
 // The store returns a session_messages row when SessionID is set and the id is not an object.
 func (e *Engine) Read(ctx context.Context, scope Scope, id uuid.UUID) (RichObject, error) {
-	if id == uuid.Nil {
-		return RichObject{}, fmt.Errorf("%w: object id is required", ErrInvalid)
-	}
-	obj, err := e.store.Get(ctx, scope, id)
+	obj, err := e.Get(ctx, scope, id)
 	if err != nil {
 		return RichObject{}, err
 	}
@@ -297,6 +314,9 @@ func schemaFromStore(ctx context.Context, store KindReader, kind string) (Schema
 
 // ListChildren returns ordered children for a parent visible under scope.
 func (e *Engine) ListChildren(ctx context.Context, scope Scope, parentID uuid.UUID) ([]RichObject, error) {
+	if err := scope.Namespace.Validate(); err != nil {
+		return nil, err
+	}
 	if parentID == uuid.Nil {
 		return nil, fmt.Errorf("brain: parent id is required")
 	}
@@ -310,6 +330,9 @@ func (e *Engine) ListChildren(ctx context.Context, scope Scope, parentID uuid.UU
 	out := make([]RichObject, 0, len(parts))
 	for _, p := range parts {
 		out = append(out, RichFromObject(p, false))
+	}
+	if err := e.recordRead(ctx, scope, richIDs(out)); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
@@ -326,56 +349,63 @@ const maxListByKind = 500
 
 // ListByKind returns first-class objects of kind (parent_id unset), newest-title order left to the store.
 func (e *Engine) ListByKind(ctx context.Context, scope Scope, kind string, limit int) ([]Object, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	l, err := e.objectLister()
+	l, err := capability[ObjectLister](ctx, e, scope.Namespace, "object listing")
 	if err != nil {
 		return nil, err
 	}
 	if limit <= 0 || limit > maxListByKind {
 		limit = maxListByKind
 	}
-	return l.ListByKind(ctx, scope, kind, limit)
+	objs, err := l.ListByKind(ctx, scope, kind, limit)
+	if err != nil {
+		return nil, err
+	}
+	if err := e.recordRead(ctx, scope, objectIDs(objs...)); err != nil {
+		return nil, err
+	}
+	return objs, nil
 }
 
 // GetByProperty returns the first live object whose properties[key] equals value.
 func (e *Engine) GetByProperty(ctx context.Context, scope Scope, key, value string) (Object, error) {
-	if err := ctx.Err(); err != nil {
-		return Object{}, err
-	}
-	l, err := e.objectLister()
+	l, err := capability[ObjectLister](ctx, e, scope.Namespace, "object listing")
 	if err != nil {
 		return Object{}, err
 	}
-	return l.GetByProperty(ctx, scope, key, value)
+	obj, err := l.GetByProperty(ctx, scope, key, value)
+	if err != nil {
+		return Object{}, err
+	}
+	if err := e.recordRead(ctx, scope, objectIDs(obj)); err != nil {
+		return Object{}, err
+	}
+	return obj, nil
 }
 
 // KindsWithObjects lists distinct parent-kind names that already have objects under scope.
 func (e *Engine) KindsWithObjects(ctx context.Context, scope Scope) ([]string, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	l, err := e.objectLister()
+	l, err := capability[ObjectLister](ctx, e, scope.Namespace, "object listing")
 	if err != nil {
 		return nil, err
 	}
 	return l.KindsWithObjects(ctx, scope)
 }
 
-func (e *Engine) objectLister() (ObjectLister, error) {
-	l, ok := e.store.(ObjectLister)
-	if !ok {
-		return nil, fmt.Errorf("%w: store does not support object listing", ErrUnsupported)
-	}
-	return l, nil
-}
-
 // Get returns the stored object (including Content) under scope.
 // The store returns a session_messages row when SessionID is set and the id is not an object.
 func (e *Engine) Get(ctx context.Context, scope Scope, id uuid.UUID) (Object, error) {
+	if err := scope.Namespace.Validate(); err != nil {
+		return Object{}, err
+	}
 	if id == uuid.Nil {
 		return Object{}, fmt.Errorf("%w: object id is required", ErrInvalid)
 	}
-	return e.store.Get(ctx, scope, id)
+	obj, err := e.store.Get(ctx, scope, id)
+	if err != nil {
+		return Object{}, err
+	}
+	if err := e.recordRead(ctx, scope, objectIDs(obj)); err != nil {
+		return Object{}, err
+	}
+	return obj, nil
 }

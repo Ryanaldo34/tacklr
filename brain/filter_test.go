@@ -1,182 +1,38 @@
-package brain
+package brain_test
 
 import (
-	"encoding/json"
-	"strings"
+	"errors"
 	"testing"
-	"time"
 
-	"github.com/google/uuid"
+	"github.com/ryanaldo34/tacklr/brain"
 )
 
-func TestValidateFilters_andMatch(t *testing.T) {
-	if err := ValidateFilters(Filter{}); err != nil {
-		t.Fatal(err)
+func TestFilters_malformedInputIsInvalid(t *testing.T) {
+	decode := func(m map[string]any) error {
+		_, err := brain.DecodeFilter(m)
+		return err
 	}
-	if err := ValidateFilters(mustFilter(t, map[string]any{"kind": "Document", "stage": "open"})); err != nil {
-		t.Fatal(err)
-	}
-	if err := ValidateFilters(mustFilter(t, map[string]any{"updated_after": "2024-01-01T00:00:00Z"})); err != nil {
-		t.Fatal(err)
-	}
-	if err := ValidateFilters(mustFilter(t, map[string]any{"created_before": "2024-06-01"})); err != nil {
-		t.Fatal(err)
-	}
-	if err := ValidateFilters(mustFilter(t, map[string]any{"tags": []any{"a", "b"}})); err != nil {
-		t.Fatal(err)
-	}
-	if err := ValidateFilters(Filter{UpdatedAfter: "nope"}); err == nil {
-		t.Fatal("bad time")
-	}
-	if _, err := DecodeFilter(map[string]any{"": "x"}); err == nil {
-		t.Fatal("empty key")
-	}
-	if _, err := DecodeFilter(map[string]any{"x": map[string]any{"nested": 1}}); err == nil {
-		t.Fatal("nested map")
-	}
-	if _, err := DecodeFilter(map[string]any{"kind": nil}); err == nil {
-		t.Fatal("nil value")
-	}
-	if _, err := DecodeFilter(map[string]any{"kind": []any{}}); err == nil {
-		t.Fatal("empty list validate")
-	}
-	if _, err := DecodeFilter(map[string]any{"kind": []any{1}}); err == nil {
-		t.Fatal("kind list non-string")
-	}
-	if _, err := parseFilterTime(""); err == nil {
-		t.Fatal("empty time")
-	}
-
-	ns := mustNS(t, "id", uuid.NewString())
-	now := time.Date(2024, 6, 15, 0, 0, 0, 0, time.UTC)
-	obj := Object{
-		ID: uuid.New(), Kind: "Document", Title: "T",
-		Namespace: ns, UpdatedAt: now, CreatedAt: now,
-		Properties: map[string]any{"stage": "negotiation", "amount": 10.0},
-	}
-	if !objectMatchesFilters(obj, mustFilter(t, map[string]any{"kind": "Document", "stage": "negotiation"})) {
-		t.Fatal("should match")
-	}
-	if objectMatchesFilters(obj, mustFilter(t, map[string]any{"stage": "closed"})) {
-		t.Fatal("should not match stage")
-	}
-	if !objectMatchesFilters(obj, mustFilter(t, map[string]any{"updated_after": "2024-01-01T00:00:00Z"})) {
-		t.Fatal("updated_after")
-	}
-	if objectMatchesFilters(obj, mustFilter(t, map[string]any{"updated_before": "2024-01-01T00:00:00Z"})) {
-		t.Fatal("updated_before")
-	}
-	if !objectMatchesFilters(obj, mustFilter(t, map[string]any{"amount": []any{10, 20}})) {
-		t.Fatal("list match")
-	}
-	if objectMatchesFilters(obj, mustFilter(t, map[string]any{"title": "Other"})) {
-		t.Fatal("title mismatch")
-	}
-	if !objectMatchesFilters(obj, mustFilter(t, map[string]any{"created_after": "2024-01-01", "created_before": "2025-01-01"})) {
-		t.Fatal("created bounds")
-	}
-	if objectMatchesFilters(obj, mustFilter(t, map[string]any{"missing": "x"})) {
-		t.Fatal("missing property")
-	}
-
-	obj.Properties["n"] = 3
-	obj.Properties["b"] = true
-	obj.Properties["s"] = "hi"
-	if !objectMatchesFilters(obj, mustFilter(t, map[string]any{"n": 3, "b": true, "s": "hi"})) {
-		t.Fatal("scalar eq")
-	}
-	if !objectMatchesFilters(obj, mustFilter(t, map[string]any{"n": int64(3)})) {
-		t.Fatal("int64 eq")
-	}
-	if !objectMatchesFilters(obj, mustFilter(t, map[string]any{"n": float32(3)})) {
-		t.Fatal("float32 eq")
-	}
-	if objectMatchesFilters(obj, mustFilter(t, map[string]any{"n": "nope"})) {
-		t.Fatal("type mismatch")
-	}
-	if objectMatchesFilters(obj, Filter{Props: map[string]PropFilter{"stage": {In: []any{}}}}) {
-		t.Fatal("empty list")
-	}
-	if objectMatchesFilters(obj, Filter{UpdatedAfter: "bogus"}) {
-		t.Fatal("bad date match")
-	}
-}
-
-func TestCheckFieldValue_types(t *testing.T) {
-	if err := checkFieldValue("ok", FieldTypeString); err != nil {
-		t.Fatal(err)
-	}
-	if err := checkFieldValue(true, FieldTypeBoolean); err != nil {
-		t.Fatal(err)
-	}
-	if err := checkFieldValue(json.Number("1.5"), FieldTypeNumber); err != nil {
-		t.Fatal(err)
-	}
-	if err := checkFieldValue(int32(2), FieldTypeNumber); err != nil {
-		t.Fatal(err)
-	}
-	if err := checkFieldValue(time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), FieldTypeDateTime); err != nil {
-		t.Fatal(err)
-	}
-	if err := checkFieldValue(time.Time{}, FieldTypeDateTime); err == nil {
-		t.Fatal("zero time")
-	}
-	if err := checkFieldValue(3, FieldTypeString); err == nil || !strings.Contains(err.Error(), "string") {
-		t.Fatalf("%v", err)
-	}
-	if err := checkFieldValue("x", FieldTypeBoolean); err == nil {
-		t.Fatal("bool")
-	}
-	if err := checkFieldValue(struct{}{}, FieldTypeNumber); err == nil {
-		t.Fatal("number")
-	}
-	if err := checkFieldValue(1, FieldType("nope")); err == nil {
-		t.Fatal("unknown type")
-	}
-}
-
-func mustNS(t testing.TB, nv ...string) Namespace {
-	t.Helper()
-	ns, err := ParseNamespace(nv...)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return ns
-}
-
-func mustFilter(t testing.TB, m map[string]any) Filter {
-	t.Helper()
-	f, err := DecodeFilter(m)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return f
-}
-
-func TestFilterPlan_listAndSQLParity(t *testing.T) {
-	ns := mustNS(t, "id", uuid.NewString())
-	now := time.Date(2024, 6, 15, 0, 0, 0, 0, time.UTC)
-	obj := Object{
-		ID: uuid.New(), Kind: "Chunk", Title: "t",
-		Namespace: ns, CreatedAt: now, UpdatedAt: now,
-		Properties: map[string]any{"stage": "open"},
-	}
-	f := mustFilter(t, map[string]any{"kind": []any{"Chunk", "Doc"}, "stage": []any{"open", "closed"}})
-	plan, err := compileFilters(f)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !plan.match(obj) {
-		t.Fatal("memory match list")
-	}
-	sql, args, err := FilterSQL(Scope{Namespace: ns}, f, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(sql, "kind IN") || !strings.Contains(sql, "properties->>'stage' IN") || !strings.Contains(sql, "namespace @>") {
-		t.Fatalf("sql: %s", sql)
-	}
-	if len(args) < 3 {
-		t.Fatalf("args: %v", args)
+	for name, err := range map[string]error{
+		"an empty key":                  decode(map[string]any{" ": "x"}),
+		"a nested object":               decode(map[string]any{"stage": map[string]any{"nested": 1}}),
+		"a missing value":               decode(map[string]any{"kind": nil}),
+		"an empty list":                 decode(map[string]any{"stage": []any{}}),
+		"a list of objects":             decode(map[string]any{"stage": []any{map[string]any{}}}),
+		"a kind list with a number":     decode(map[string]any{"kind": []any{"Document", 1}}),
+		"a title that is no string":     decode(map[string]any{"title": true}),
+		"a date that is no string":      decode(map[string]any{"updated_after": 2024}),
+		"a date in no known format":     decode(map[string]any{"created_before": "June 1st"}),
+		"a hand-built bad date":         brain.ValidateFilters(brain.Filter{UpdatedAfter: "nope"}),
+		"a hand-built empty key":        brain.ValidateFilters(brain.Filter{Props: map[string]brain.PropFilter{"": {Eq: "x"}}}),
+		"a hand-built empty list":       brain.ValidateFilters(brain.Filter{Props: map[string]brain.PropFilter{"stage": {In: []any{nil}}}}),
+		"a hand-built missing value":    brain.ValidateFilters(brain.Filter{Props: map[string]brain.PropFilter{"stage": {}}}),
+		"a key with no usable letters":  decode(map[string]any{"!!": "x"}),
+		"a key with a dash":             decode(map[string]any{"due-date": "x"}),
+		"a hand-built key with a space": brain.ValidateFilters(brain.Filter{Props: map[string]brain.PropFilter{"due date": {Eq: "x"}}}),
+		"a bad filter under a catalog":  brain.ValidateFiltersAgainst(brain.Filter{UpdatedAfter: "nope"}, nil),
+	} {
+		if !errors.Is(err, brain.ErrInvalid) {
+			t.Errorf("%s = %v, want ErrInvalid", name, err)
+		}
 	}
 }

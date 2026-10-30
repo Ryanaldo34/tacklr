@@ -220,13 +220,13 @@ func TestFindObjects_optInDecayUsesStoreTime(t *testing.T) {
 		t.Fatal(err)
 	}
 	oldID, newID := uuid.New(), uuid.New()
-	if err := store.Put(ctx, brain.Object{ID: oldID, Kind: "Fact", Title: "policy", Namespace: ns, UpdatedAt: oldT}); err != nil {
+	if err := putFixture(store, brain.Object{ID: oldID, Kind: "Fact", Title: "policy", Namespace: ns, UpdatedAt: oldT}); err != nil {
 		t.Fatal(err)
 	}
 	if err := g.EnsureObject(ctx, brain.Object{ID: oldID, Kind: "Fact", Title: "policy", Namespace: ns, Embedding: emb}, "policy"); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Put(ctx, brain.Object{
+	if err := putFixture(store, brain.Object{
 		ID: newID, Kind: "Fact", Title: "note", Content: "policy detail", Namespace: ns, UpdatedAt: newT,
 	}); err != nil {
 		t.Fatal(err)
@@ -252,7 +252,7 @@ func TestFindObjects_decayStoreError(t *testing.T) {
 		t.Fatal(err)
 	}
 	lam := 0.02
-	eng, err := brain.NewEngine(&errAfterGetStore{ok: brain.NewMemoryStore(), failID: id},
+	eng, err := brain.NewEngine(&failingReads{MemoryStore: brain.NewMemoryStore(), failID: id},
 		brain.WithGraph(g), brain.WithLexicalOnly(),
 		brain.WithConfig(brain.EngineConfig{Lambda: &lam}),
 	)

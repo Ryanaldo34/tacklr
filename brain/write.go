@@ -14,111 +14,104 @@ import (
 )
 
 // Put upserts a knowledge object under scope.
-// Catalog non-empty → ValidateObject. Namespace filled from scope when missing.
-// ID generated when nil. Put refuses objects that already have DeletedAt set.
+// Catalog non-empty → ValidateObject. Namespace filled from scope when missing;
+// a namespace outside scope is invalid. A part's parent must be visible under
+// scope. ID generated when nil. An id already held by a row outside scope
+// returns ErrNotFound and changes nothing. Put refuses objects that already
+// have DeletedAt set.
 // When WithEmbedder is set and index text is non-empty, embeds and stores the vector;
 // embed errors fail the Put (fail closed).
 // Parent Puts dual-write the graph node (in-place upsert; edges preserved).
 // If the graph Ensure fails after a successful store write, the store row remains
 // (source of truth); callers should re-Put after fixing the graph.
 func (e *Engine) Put(ctx context.Context, scope Scope, obj Object) (Object, error) {
-	if err := ctx.Err(); err != nil {
-		return Object{}, err
-	}
-	w, err := e.objectWriter()
+	w, err := capability[ObjectWriter](ctx, e, scope.Namespace, "object writes")
 	if err != nil {
 		return Object{}, err
 	}
-	if obj.DeletedAt != nil {
-		return Object{}, fmt.Errorf("%w: put refuses soft-deleted objects; use SoftDelete", ErrInvalid)
-	}
-	obj = preparePut(scope, obj, e.cfg.Now())
-	if err := ValidateObject(obj, e.catalog); err != nil {
+	obj, text, err := e.preparePut(ctx, scope, obj, nil)
+	if err != nil {
 		return Object{}, err
 	}
-	indexText := e.indexTextForEmbed(ctx, scope, obj)
-	if e.embedder != nil && indexText != "" {
-		vec, err := e.embedder.Embed(ctx, indexText)
-		if err != nil {
-			return Object{}, fmt.Errorf("brain: embed object: %w", err)
-		}
-		obj.Embedding = slices.Clone(vec)
-	}
-	if err := w.Put(ctx, obj); err != nil {
+	if err := w.Put(ctx, scope, obj); err != nil {
 		return Object{}, err
 	}
-	// Dual-write first-class objects only (no parent_id). Each Put refreshes node props.
-	if obj.ParentID == nil && e.graphW != nil {
-		if err := e.graphW.EnsureObject(ctx, obj, indexText); err != nil {
-			return Object{}, fmt.Errorf("%w: %w", ErrGraphEnsure, err)
-		}
+	if err := e.ensureGraph(ctx, obj, text); err != nil {
+		return Object{}, err
 	}
-	return obj, nil
+	return obj, e.record(ctx, scope, AuditEvent{Op: AuditPut, ObjectIDs: []uuid.UUID{obj.ID}})
 }
 
-// ReplaceParts replaces all children of a first-class parent.
-// Existing parts are soft-deleted, then each item is Put with ParentID set
-// (Position defaults to the slice index). Search looks at these parts; the
-// parent Engram body is not a corpus document. vfsindex remains the path for
-// workspace files.
-func (e *Engine) ReplaceParts(ctx context.Context, scope Scope, parentID uuid.UUID, parts []Object) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if parentID == uuid.Nil {
-		return fmt.Errorf("%w: parent id is required", ErrInvalid)
-	}
-	parent, err := e.store.Get(ctx, scope, parentID)
-	if err != nil {
-		return err
-	}
-	if parent.ParentID != nil {
-		return fmt.Errorf("%w: parent must be a first-class object", ErrInvalid)
-	}
-	old, err := e.store.ListChildren(ctx, scope, parentID)
-	if err != nil {
-		return err
-	}
-	for _, c := range old {
-		if err := e.SoftDelete(ctx, scope, c.ID); err != nil {
-			return err
-		}
-	}
-	for i, p := range parts {
-		pid := parentID
-		p.ParentID = &pid
-		if p.Position == nil {
-			pos := i
-			p.Position = &pos
-		}
-		if _, err := e.Put(ctx, scope, p); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// SoftDelete removes the graph node first (when present), then marks the store row deleted.
-// Graph-first keeps store intact if graph removal fails. If store SoftDelete fails after a
-// successful graph remove, re-Put re-creates the graph node.
+// SoftDelete marks an object and its parts deleted. It removes the graph node
+// first (when present): graph-first keeps the store intact if graph removal
+// fails. If the store SoftDelete fails after a successful graph remove,
+// re-Put re-creates the graph node.
 func (e *Engine) SoftDelete(ctx context.Context, scope Scope, id uuid.UUID) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	w, err := e.objectWriter()
+	w, err := capability[ObjectWriter](ctx, e, scope.Namespace, "object writes")
 	if err != nil {
 		return err
 	}
 	// Validate visibility under scope before mutating graph (so wrong-ns cannot drop graph).
-	if _, err := e.store.Get(ctx, scope, id); err != nil {
+	obj, err := e.store.Get(ctx, scope, id)
+	if err != nil {
 		return err
 	}
-	if e.graphW != nil {
+	if obj.ParentID == nil && e.graphW != nil {
 		if err := e.graphW.RemoveObject(ctx, id); err != nil {
 			return fmt.Errorf("%w: %w", ErrGraphRemove, err)
 		}
 	}
-	return w.SoftDelete(ctx, scope, id)
+	if err := w.SoftDelete(ctx, scope, id); err != nil {
+		return err
+	}
+	return e.record(ctx, scope, AuditEvent{Op: AuditDelete, ObjectIDs: []uuid.UUID{id}})
+}
+
+// PurgeDeleted hard-deletes objects under scope that were soft-deleted
+// before cutoff (retention). It returns how many rows it removed.
+func (e *Engine) PurgeDeleted(ctx context.Context, scope Scope, before time.Time) (int, error) {
+	p, err := capability[Purger](ctx, e, scope.Namespace, "purge")
+	if err != nil {
+		return 0, err
+	}
+	n, err := p.PurgeDeleted(ctx, scope, before)
+	if err != nil {
+		return 0, err
+	}
+	return n, e.record(ctx, scope, AuditEvent{Op: AuditPurge, Count: n})
+}
+
+// Erase hard-deletes every object and saved session message under scope,
+// then removes the graph nodes of the erased first-class objects (erasure
+// requests and tenant offboarding). Readers do not limit Erase.
+func (e *Engine) Erase(ctx context.Context, scope Scope) error {
+	p, err := capability[Purger](ctx, e, scope.Namespace, "purge")
+	if err != nil {
+		return err
+	}
+	ids, err := p.Erase(ctx, scope)
+	if err != nil {
+		return err
+	}
+	if e.graphW != nil {
+		for _, id := range ids {
+			if err := e.graphW.RemoveObject(ctx, id); err != nil {
+				return fmt.Errorf("%w: %w", ErrGraphRemove, err)
+			}
+		}
+	}
+	return e.record(ctx, scope, AuditEvent{Op: AuditErase, ObjectIDs: ids, Count: len(ids)})
+}
+
+func (e *Engine) ensureGraph(ctx context.Context, obj Object, indexText string) error {
+	// Dual-write first-class objects only (no parent_id). Each Put refreshes node props.
+	if obj.ParentID != nil || e.graphW == nil {
+		return nil
+	}
+	if err := e.graphW.EnsureObject(ctx, obj, indexText); err != nil {
+		return fmt.Errorf("%w: %w", ErrGraphEnsure, err)
+	}
+	return nil
 }
 
 // Link creates a non-containment edge from→to between first-class, visible objects.
@@ -133,6 +126,9 @@ func (e *Engine) LinkWith(ctx context.Context, scope Scope, from, to uuid.UUID, 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if err := scope.Namespace.Validate(); err != nil {
+		return err
+	}
 	if e.graphW == nil {
 		return fmt.Errorf("%w: graph writer is required for Link", ErrUnsupported)
 	}
@@ -146,7 +142,10 @@ func (e *Engine) LinkWith(ctx context.Context, scope Scope, from, to uuid.UUID, 
 	if err := e.requireLinkEndpoint(ctx, scope, to, "to"); err != nil {
 		return err
 	}
-	return e.graphW.AddEdge(ctx, from, to, rel, meta)
+	if err := e.graphW.AddEdge(ctx, from, to, rel, meta); err != nil {
+		return err
+	}
+	return e.record(ctx, scope, AuditEvent{Op: AuditLink, ObjectIDs: []uuid.UUID{from, to}})
 }
 
 // Unlink removes a non-containment edge from→to. Endpoints must be visible first-class objects.
@@ -154,6 +153,9 @@ func (e *Engine) Unlink(ctx context.Context, scope Scope, from, to uuid.UUID, re
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if err := scope.Namespace.Validate(); err != nil {
+		return err
+	}
 	if e.graphW == nil {
 		return fmt.Errorf("%w: graph writer is required for Link", ErrUnsupported)
 	}
@@ -167,7 +169,10 @@ func (e *Engine) Unlink(ctx context.Context, scope Scope, from, to uuid.UUID, re
 	if err := e.requireLinkEndpoint(ctx, scope, to, "to"); err != nil {
 		return err
 	}
-	return e.graphW.RemoveEdge(ctx, from, to, rel)
+	if err := e.graphW.RemoveEdge(ctx, from, to, rel); err != nil {
+		return err
+	}
+	return e.record(ctx, scope, AuditEvent{Op: AuditUnlink, ObjectIDs: []uuid.UUID{from, to}})
 }
 
 func (e *Engine) requireLinkEndpoint(ctx context.Context, scope Scope, id uuid.UUID, label string) error {
@@ -186,19 +191,18 @@ func (e *Engine) HasGraphWriter() bool {
 	return e.graphW != nil
 }
 
-func (e *Engine) objectWriter() (ObjectWriter, error) {
-	w, ok := e.store.(ObjectWriter)
-	if !ok {
-		return nil, fmt.Errorf("%w: store does not support object writes", ErrUnsupported)
+// preparePut fills defaults, validates obj against scope and the catalog, and
+// embeds its index text. parent is the in-flight parent for PutTree parts;
+// nil means a part's parent is read from the store and must be visible.
+func (e *Engine) preparePut(ctx context.Context, scope Scope, obj Object, parent *Object) (Object, string, error) {
+	if obj.DeletedAt != nil {
+		return Object{}, "", fmt.Errorf("%w: put refuses soft-deleted objects; use SoftDelete", ErrInvalid)
 	}
-	return w, nil
-}
-
-func preparePut(scope Scope, obj Object, now time.Time) Object {
+	now := e.cfg.Now()
 	if obj.ID == uuid.Nil {
 		obj.ID = uuid.New()
 	}
-	if obj.Namespace.Empty() && !scope.Namespace.Empty() {
+	if obj.Namespace.Empty() {
 		obj.Namespace = scope.Namespace.Clone()
 	}
 	if obj.Properties == nil {
@@ -209,7 +213,56 @@ func preparePut(scope Scope, obj Object, now time.Time) Object {
 	}
 	obj.UpdatedAt = now
 	obj.Kind = strings.TrimSpace(obj.Kind)
-	return obj
+	if err := ValidateObject(obj, e.catalog); err != nil {
+		return Object{}, "", err
+	}
+	if !scope.Namespace.Covers(obj.Namespace) {
+		return Object{}, "", fmt.Errorf("%w: object namespace %s is outside scope %s", ErrInvalid, obj.Namespace, scope.Namespace)
+	}
+	if obj.ParentID != nil && parent == nil {
+		p, err := e.store.Get(ctx, scope, *obj.ParentID)
+		if err != nil {
+			return Object{}, "", fmt.Errorf("brain: parent %s: %w", *obj.ParentID, err)
+		}
+		if p.ParentID != nil {
+			return Object{}, "", fmt.Errorf("%w: parent must be a first-class object", ErrInvalid)
+		}
+		parent = &p
+	}
+	text := e.indexText(obj, parent)
+	if e.embedder != nil && text != "" {
+		vec, err := e.embedOne(ctx, text)
+		if err != nil {
+			return Object{}, "", fmt.Errorf("brain: embed object: %w", err)
+		}
+		obj.Embedding = vec
+		obj.EmbeddingModel = e.embedder.Model()
+	}
+	return obj, text, nil
+}
+
+// embed returns one vector per text, cloned so the embedder cannot change
+// stored vectors later.
+func (e *Engine) embed(ctx context.Context, texts []string) ([][]float32, error) {
+	vecs, err := e.embedder.Embed(ctx, texts)
+	if err != nil {
+		return nil, err
+	}
+	if len(vecs) != len(texts) {
+		return nil, fmt.Errorf("embedder returned %d vectors for %d texts", len(vecs), len(texts))
+	}
+	for i, v := range vecs {
+		vecs[i] = slices.Clone(v)
+	}
+	return vecs, nil
+}
+
+func (e *Engine) embedOne(ctx context.Context, text string) ([]float32, error) {
+	vecs, err := e.embed(ctx, []string{text})
+	if err != nil {
+		return nil, err
+	}
+	return vecs[0], nil
 }
 
 // IndexText joins non-empty title, summary, and content for corpus part embeds.
@@ -332,22 +385,14 @@ func capRunes(s string, maxRunes int) string {
 	return s
 }
 
-// indexTextForEmbed: parents use entity index text; parts use parent-prefixed corpus IndexText.
-func (e *Engine) indexTextForEmbed(ctx context.Context, scope Scope, obj Object) string {
+// indexText: parents use entity index text; parts use parent-prefixed corpus IndexText.
+func (e *Engine) indexText(obj Object, parent *Object) string {
 	var text string
-	if obj.ParentID == nil {
-		spec, ok := KindSpec{}, false
-		if e.catalog != nil {
-			spec, ok = e.catalog.Get(obj.Kind)
-		}
+	if parent == nil {
+		spec, ok := e.catalog.Get(obj.Kind)
 		text = entityIndexText(obj, spec, ok)
 	} else {
-		parent, err := e.store.Get(ctx, scope, *obj.ParentID)
-		if err != nil {
-			text = IndexText(obj)
-		} else {
-			text = IndexTextWithParent(obj, parent.Title)
-		}
+		text = IndexTextWithParent(obj, parent.Title)
 	}
 	if e.indexTextFn != nil {
 		text = strings.TrimSpace(e.indexTextFn(obj, text))
@@ -455,10 +500,7 @@ func ValidateObjectIdentity(obj Object) error {
 	if strings.TrimSpace(obj.Kind) == "" {
 		return fmt.Errorf("%w: object kind is required", ErrInvalid)
 	}
-	if err := obj.Namespace.Validate(); err != nil {
-		return fmt.Errorf("%w: %w", ErrInvalid, err)
-	}
-	return nil
+	return obj.Namespace.Validate()
 }
 
 // WriteKinds maps agent save_* tools to host kind names.

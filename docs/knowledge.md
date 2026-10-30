@@ -176,7 +176,7 @@ classDiagram
 | **Part / Chunk** | `parent_id` is set | Never | Never |
 
 Parts are not files. `search` looks at parts (indexed workspace files, or
-chunks the host writes with `ReplaceParts`). The Engram Markdown body lives
+chunks the host writes with `PutTree`). The Engram Markdown body lives
 on the parent and is found with `find_objects` until parts exist.
 
 **Kinds** are defined by the **host**, not by Tacklr. `Deal` and `Person` in tests
@@ -264,8 +264,8 @@ store so `search` can find it.
         │
         ▼ IndexPath  or a host pipeline that writes the same rows
   Document   id = DocumentID(scope, path)
-             props: vfs_path, content_hash, size, mtime, media_type
-    ├─ Chunk  lines 1–40     start_line, end_line, byte_start, byte_end
+             props: vfs_path, source_version, size, mtime, media_type
+    ├─ Chunk  about 2 KiB    start_line, end_line, byte_start, byte_end
     └─ Chunk  heading block  block_id, heading_path
 ```
 
@@ -286,14 +286,7 @@ id := uuid.NewSHA1(ns, buf)
 
 In-process code should call `MountIndexer.DocumentID` instead of copying that. The same path in another namespace is a different id. `link` and `expand` resolve a workspace path by reading the parent with this id and using its `vfs_path`.
 
-Chunk ids are also UUID version 5, with the parent id as the namespace:
-
-| Chunk | Name hashed under the parent id |
-|-------|----------------------------------|
-| Line window, position `n` starting at 1 | `chunk:` plus the decimal position, for example `chunk:1` |
-| Heading or preamble block | `block:` plus the block id, for example `block:title/install` |
-
-`IndexPath` uses the block id when the file is structured. Otherwise it uses `chunk:` plus the 1-based position in the chunk list.
+Chunk ids come from content. `Engine.PutTree` computes each id from the parent id, the embedding model, and the chunk's kind, title, summary, content and index text. A repeated chunk text in one file gets a counter, so each id stays unique. A chunk with the same text keeps its id, row and vector across re-indexes. Line numbers are not in the id or the title, so a chunk that only moves keeps its id too. A writer outside this module cannot reproduce these ids; it must call `PutTree` with parts that have no id.
 
 Parent row (`Engine.Put`):
 
@@ -307,53 +300,52 @@ Parent row (`Engine.Put`):
 | `content_type` | Media type (`text/markdown`, `text/plain`, …) |
 | `parent_id` | Unset |
 | `properties.vfs_path` | Absolute virtual path, string |
-| `properties.content_hash` | Hex SHA-256, lowercase, no prefix. See below. |
-| `properties.size` | Byte length as a number. `FileInfo.Size` when it is non-zero, otherwise the number of bytes read. |
+| `properties.source_version` | `vfs.FileInfo.Version` when the file was read. Omitted when the backend gives no version. |
+| `properties.size` | `FileInfo.Size` as a number |
 | `properties.mtime` | UTC `time.RFC3339` from `FileInfo.ModTime`. Omitted when the mod time is zero. |
 | `properties.media_type` | Same string as `content_type` |
 
-`vfs_path` is omitted from the parent's graph search text (`EntityIndexText`). The other scalar properties are included.
+`vfs_path` is omitted from the parent's graph search text (`EntityIndexText`). `MountIndexKinds` also marks `source_version`, `size` and `mtime` `SkipIndex`, so they do not change the parent's embedding.
 
-Chunk row (`Engine.Put`), one per window or block, in order:
+Chunk row, one per chunk or block, in order:
 
 | Field | Value |
 |-------|--------|
-| `id` | Chunk id from the table above |
+| `id` | Content id (see above) |
 | `kind` | `Chunk` |
 | `parent_id` | The Document id |
-| `position` | 1-based index in this write (`1`, `2`, …). This is list order, not the start line. |
+| `position` | 0-based index in the file's chunk list. This is list order, not the start line. |
 | `content` | Chunk text. This is what `search` matches. |
-| `title` | Line window: `contract.md:1-40`. Heading block: `contract.md#` plus the block id. |
+| `title` | Empty for a plain-text chunk. Heading block: `contract.md#` plus the block id. |
 | `properties.start_line`, `end_line` | 1-based inclusive line numbers, stored as numbers |
-| `properties.byte_start`, `byte_end` | Byte offsets of a line window, stored as numbers. Heading chunks are written as `0`. |
-| `properties.block_id`, `heading_path` | Set only for a structured block. Both strings are the block id (`title/install`, `preamble`). Absent on a line window. |
+| `properties.byte_start`, `byte_end` | Half-open byte range in the file (in the block text for a projected document) |
+| `properties.block_id`, `heading_path` | Set only for a structured block. Both strings are the block id (`title/install`, `preamble`). |
 
-Heading chunk `content` is three lines joined by `\n`: the file base name, the heading text (or the block id when that text is empty), and the block's line span. A projected document, such as a Google Doc export, uses the block text as that third line instead of the line span. Line-window `content` is the window's lines joined by `\n`, without a trailing newline. The default window is 40 lines (`DefaultLinesPerChunk`). A file larger than 64 MiB (`DefaultMaxIndexBytes`) is cut at that size, and a cut Markdown file uses line windows instead of heading blocks.
+**How a file is chunked.** Plain text and code stream from `OpenFile`: the file is never held in memory whole. Content-defined chunking picks each boundary: a rolling (Gear) hash over the last 64 bytes marks a cut point, and the chunk ends at the next line end. A boundary depends only on the bytes near it, so an edit changes the chunks around it and the other chunks keep their text. `MountIndexer.Chunking` sets the sizes (`DefaultChunkSizes`: 1 KiB minimum, 2 KiB average, 8 KiB maximum, about 500 tokens a chunk). A chunk that reaches the maximum ends at its last line end, or inside the line, on a rune boundary, when it has no line end. Blank chunks are dropped. A file larger than `MaxIndexBytes` (64 MiB) is indexed up to that size.
 
-`content_hash` is what the next index compares. The same hash skips the write (`PathSkipped`).
+Markdown, Docs and Sheets need their block tree, so `IndexPath` reads them whole with `ReadText`, up to `vfs.MaxReadFileBytes` (32 MiB). Each block is one chunk; a block larger than the maximum chunk size is split with the same chunker. A structured file that `ReadText` cannot read (for example, a Markdown file over 32 MiB) streams as plain text.
 
-| How the bytes were read | Hash input |
-|-------------------------|------------|
-| `ReadText` succeeded | Hex SHA-256 of that text. An IR document hashes its stored payload, which is the text `ReadText` returns. |
-| Otherwise `Open` | Hex SHA-256 of the bytes read from the file, including newlines as they appear in the stream. |
+**When a file is read.** `IndexPath` compares `FileInfo.Version` (an ETag, a content tag, or size, mtime and inode on disk) and the readers with the stored parent. When both match, it returns `PathSkipped` and does not open the file. When the backend gives no version, the file is read every time; unchanged chunks then write nothing.
 
-A pipeline that does not use those readers should store the hex SHA-256 of the text it chunked. A later `IndexPath` rewrites the rows when that string differs from the token it computes.
+**How a re-index writes.** `PutTree` streams the chunks. It embeds only chunks whose id is not live, in batches of `EngineConfig.EmbedBatchSize` (128), with at most `EmbedConcurrency` (2) batches at a time. Each batch is staged as it finishes. One short commit then makes the staged chunks the parent's only parts: it inserts the new chunks, moves the reused ones (position and line numbers), and deletes the rest. Until the commit, `search` sees the previous chunks. A failure leaves them in place. A one-line edit therefore embeds and writes about one chunk, whatever the file size, and memory holds a few batches plus the live chunk ids. When two indexers write one file, the one that commits second gets `ErrConflict`, and `IndexPath` reads the file again (up to three times).
 
-Replace, do not append. `IndexPath` puts the parent (same id, so existing graph edges stay), soft-deletes every current child, then puts the new chunks. Inserting one new chunk and leaving the old ones makes `search` return both. A missing file soft-deletes the children and then the parent (`PathRemoved`). A binary or empty file is left unchanged (`PathSkipped`); clearing it from search is a separate soft-delete.
+A missing file soft-deletes the parent and its chunks (`PathRemoved`). A binary file is left unchanged (`PathSkipped`).
 
 ```mermaid
 flowchart TD
     A[index_file] --> IP[IndexPath]
     B[host IndexPath or IndexPrefix] --> IP
-    IP --> Skip{same content_hash or binary or empty?}
+    IP --> Skip{same version and readers, or binary?}
     Skip -->|yes| Out[PathSkipped]
-    Skip -->|no| Doc[Put Document parent]
-    Doc --> Drop[SoftDelete previous Chunks]
-    Drop --> Chunks[Put Chunk parts]
-    Chunks --> Emb[Put embeds the chunk]
+    Skip -->|no| Read[stream chunks]
+    Read --> Known{chunk id live?}
+    Known -->|yes| Ref[stage a reference]
+    Known -->|no| Emb[embed in a batch, then stage]
+    Ref --> Commit[commit: insert new, move reused, delete the rest]
+    Emb --> Commit
 ```
 
-The parent holds metadata and `content_hash`, not a second copy of the file. After search, the agent opens the live path with `read` using `vfs_path` plus `start_line` or `block_id`.
+The parent holds metadata and `source_version`, not a second copy of the file. After search, the agent opens the live path with `read` using `vfs_path` plus `start_line` or `block_id`.
 
 **Index policies** (set on the mount; empty means `selective`):
 
@@ -446,7 +438,7 @@ So `find_objects "open renewal"` can match a Deal whose `stage` property is
 `open`, not only the narrative body. Corpus `search` still matches chunk text,
 not those parent fields.
 
-A host that uses Helix must `Bootstrap` (or `EnsureSearchIndexes`) so object
+A host that uses Helix must `Bootstrap` so object
 search is actually on. `MemoryGraph` is always ready and is what tests use.
 
 ---
@@ -679,37 +671,45 @@ eng, err := brain.NewEngine(store, brain.WithKinds(
 // The harness closes `eng` into those tool handlers (same pattern as host tools).
 ```
 
-Production-shaped. `postgres.Store.Setup` creates the `tacklr` schema, extensions, tables, and
-indexes, then upserts the kinds you pass. Set `EmbeddingDim` to match the
-embedder (zero means 1536). Setup does not change an existing vector column.
-`Store.Schema` overrides the schema name. `postgres.PoolConfig` sets `search_path`
-to that schema, then `public`. Connect on port 5432 (direct or session mode).
-Port 6543 is a transaction-mode pooler and is rejected.
+Production-shaped. `postgres.Store.Setup` applies versioned migrations (recorded
+in `schema_migrations`) under an advisory lock, then upserts the kinds you pass.
+Run it as a deploy step; concurrent runs are safe. `postgres.Open` takes the
+connection string and `Options`: `EmbeddingDim` must match the embedder (zero
+means 1536), and Setup fails when the existing vector column has another size.
+`Schema` names the schema (default `tacklr`); every connection's `search_path`
+is that schema, then `public`, with a server-side `statement_timeout`
+(`StatementTimeout`, default 30s). Pool settings ride in the connection string
+(`pool_max_conns`, …). A
+transaction-mode pooler (port 6543 on hosted Postgres) must support prepared
+statements and forward those startup parameters; otherwise use 5432.
 
 Lexical search reads the stored `search_tsv` column on `objects`: title weight A, summary weight B, body weight C. A partial GIN index covers live parts. Rank is `ts_rank_cd` with normalization 32. The first query is `websearch_to_tsquery` (every term). A page shorter than requested runs a second query that ORs those terms. Vector search uses HNSW. Namespace containment, child listing, and parent-by-kind each have one index. Property filters, trigram similarity, and created/updated ranges do not: those predicates are applied on top of the index the query already uses. Session messages stay on their unique keys. `pg_trgm` and `pgvector` are always created.
 
 Helix is an optional graph. Inject both; `brain` does not import either package.
 
 ```go
-cfg, err := postgres.PoolConfig(os.Getenv("DATABASE_URL"), "") // schema "tacklr"; port 5432
-pool, err := pgxpool.NewWithConfig(ctx, cfg)
-store, err := postgres.New(pool)
-store.EmbeddingDim = 1536
+store, err := postgres.Open(ctx, os.Getenv("DATABASE_URL"), postgres.Options{EmbeddingDim: 1536}) // schema "tacklr"
+defer store.Close()
 kinds := append([]brain.KindSpec{dealSpec, personSpec}, vfsindex.MountIndexKinds()...)
 if err := store.Setup(ctx, kinds...); err != nil { /* ... */ }
 g, err := helixgraph.New(helixURL)
-if err := g.Bootstrap(ctx, false); err != nil { /* ... */ }
+if err := g.Bootstrap(ctx); err != nil { /* ... */ }
 
 eng, err := brain.NewEngine(store,
     brain.WithEmbedder(emb),          // hybrid search + Put embeddings
     brain.WithGraph(g),               // link / find_objects / named expand
 )
 // Pass WithLexicalOnly() instead of WithEmbedder when you want keyword search only.
+// emb implements brain.QueryEmbedder: Embed(ctx, texts) returns one vector per
+// text (PutTree sends up to EngineConfig.EmbedBatchSize at once), and Model()
+// names the model stored on every row.
 if err := eng.LoadKindsFromStore(ctx); err != nil { /* ... */ }
 
 // AgentOptions:
 //   Brain:           eng
-//   SearchNamespace: from brain.ParseNamespace("org", orgID)
+//   SearchNamespace:  from brain.ParseNamespace("org", orgID) (required with Brain)
+//   SearchPrincipals: the caller's user and group ids (checked against Readers)
+//   IndexReaders:     a file's source ACL for index_file (optional)
 //   OpenVFS:         workspace files only. Knowledge is not a mount.
 //
 // A turn with Brain, a workspace, and SearchNamespace registers index_file
@@ -731,7 +731,15 @@ files.
 
 | Situation | Behavior |
 |-----------|----------|
+| Empty namespace | Every Engine and store call fails with `ErrInvalid`. `AgentOptions.Validate` rejects `Brain` without `SearchNamespace`. |
 | Wrong namespace | `Get` / search look like not found. Graph ids that fail hydrate are dropped. A coarser scope (fewer attrs) sees objects with extra attrs. |
+| Id held by another tenant | `Put` / `PutTree` / `SoftDelete` return `ErrNotFound` and change nothing. |
+| Object with `Readers` | Visible only to a scope whose `Principals` include one of them. `vfsindex.MountIndexer.Readers` (or `AgentOptions.IndexReaders`) sets them from source sharing; a sharing change re-indexes the file. |
+| Re-index fails midway | `PutTree` stages new parts, which no read or search sees, and swaps them in with one short commit, so the previous version stays. `PurgeDeleted` drops staged parts that never committed. |
+| Two writes of one tree | The commit that reads an older tree revision returns `ErrConflict` and changes nothing. |
+| Embedding model change | Vector search only compares rows from `QueryEmbedder.Model()`. Rows from the old model drop out of the dense channel until re-indexed. |
+| Retention and erasure | `PurgeDeleted`, `PurgeSessionMessages`, and `Erase` hard-delete under a scope. |
+| Audit | `WithAudit(store.Record)` records every served read and write; a failed record fails the operation. |
 | Soft-deleted object | Hidden from Get, search, find_exact, and find_objects. `unindex` does this for an indexed file. There is no separate expired flag. A row stays in search until that delete, or until a property filter excludes it. |
 | No embedder at construct | `NewEngine` fails unless you pass `WithEmbedder` or `WithLexicalOnly`. |
 | Embedder down at **query** time | `search` / `find_objects` can run lexical-only (default). Set `FailOnEmbedderError` to surface the error. |

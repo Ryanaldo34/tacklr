@@ -25,6 +25,9 @@ type FindObjectsRequest struct {
 // on parent rows. Requires a graph. Not corpus Search: no part evidence path.
 // A parent with no parts is visible here and invisible to Search.
 func (e *Engine) FindObjects(ctx context.Context, scope Scope, req FindObjectsRequest, results ResultSetStore) (page SearchPage, err error) {
+	if err := scope.Namespace.Validate(); err != nil {
+		return page, err
+	}
 	if e.graphS == nil {
 		return page, fmt.Errorf("%w: graph object search is not available", ErrUnsupported)
 	}
@@ -56,7 +59,7 @@ func (e *Engine) FindObjects(ctx context.Context, scope Scope, req FindObjectsRe
 		lists = append(lists, textHits)
 	}
 	if e.embedder != nil {
-		emb, embErr := e.embedder.Embed(ctx, query)
+		emb, embErr := e.embedOne(ctx, query)
 		if embErr != nil {
 			if !e.cfg.allowEmbedderDegrade() {
 				return page, fmt.Errorf("brain: embed query: %w", embErr)
@@ -142,6 +145,9 @@ func (e *Engine) FindObjects(ctx context.Context, scope Scope, req FindObjectsRe
 	}
 	if e := results.Put(ctx, set); e != nil {
 		err = e
+		return page, err
+	}
+	if err := e.recordRead(ctx, scope, richIDs(rich[:end])); err != nil {
 		return page, err
 	}
 	return SearchPage{

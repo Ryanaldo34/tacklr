@@ -63,6 +63,9 @@ func (e *Engine) Expand(ctx context.Context, scope Scope, req ExpandRequest, res
 		err = e
 		return res, err
 	}
+	if err := scope.Namespace.Validate(); err != nil {
+		return res, err
+	}
 	if req.ObjectID == uuid.Nil {
 		return res, fmt.Errorf("%w: object id is required", ErrInvalid)
 	}
@@ -127,6 +130,9 @@ func (e *Engine) Expand(ctx context.Context, scope Scope, req ExpandRequest, res
 		if hErr != nil {
 			return res, hErr
 		}
+		if err := e.recordRead(ctx, scope, richIDs(objs)); err != nil {
+			return res, err
+		}
 		attachRelations(objs, relByID)
 		return ExpandResult{Objects: objs, Mode: mode}, nil
 	}
@@ -147,6 +153,9 @@ func (e *Engine) Expand(ctx context.Context, scope Scope, req ExpandRequest, res
 func (e *Engine) ExpandMany(ctx context.Context, scope Scope, req ExpandManyRequest) (res ExpandManyResult, err error) {
 	if e := ctx.Err(); e != nil {
 		err = e
+		return res, err
+	}
+	if err := scope.Namespace.Validate(); err != nil {
 		return res, err
 	}
 	if len(req.ObjectIDs) == 0 {
@@ -225,11 +234,11 @@ func (e *Engine) ExpandMany(ctx context.Context, scope Scope, req ExpandManyRequ
 			o.Relation.SourceID = &sid
 			out = append(out, o)
 			if len(out) >= budget {
-				return ExpandManyResult{Objects: out}, nil
+				return ExpandManyResult{Objects: out}, e.recordRead(ctx, scope, richIDs(out))
 			}
 		}
 	}
-	return ExpandManyResult{Objects: out}, nil
+	return ExpandManyResult{Objects: out}, e.recordRead(ctx, scope, richIDs(out))
 }
 
 // ExpandByRecipe looks up a host-registered ExpandRecipe and runs Expand with it.
