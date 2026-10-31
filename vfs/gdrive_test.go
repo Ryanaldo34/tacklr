@@ -255,8 +255,7 @@ func TestGoogleDrive_sdkAdapter(t *testing.T) {
 		}
 		switch {
 		case r.URL.Query().Get("alt") == "media" && strings.HasSuffix(p, "/bin1"):
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("blob"))
+			http.ServeContent(w, r, "a.txt", time.Time{}, strings.NewReader("blob"))
 		case strings.HasSuffix(p, "/export") && strings.Contains(p, "/doczip"):
 			w.Header().Set("Content-Type", "application/zip")
 			w.WriteHeader(http.StatusOK)
@@ -309,14 +308,23 @@ func TestGoogleDrive_sdkAdapter(t *testing.T) {
 	if !strings.Contains(lastListQ, "trashed = false") || strings.Contains(lastListQ, "name =") {
 		t.Fatalf("List q = %q", lastListQ)
 	}
-	body, size, err := api.GetMedia(ctx, "bin1")
+	body, err := api.GetMedia(ctx, "bin1", 0, -1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	data, _ := io.ReadAll(body)
 	_ = body.Close()
-	if string(data) != "blob" || size != 4 && size != int64(len(data)) {
-		t.Fatalf("GetMedia = %q size=%d", data, size)
+	if string(data) != "blob" {
+		t.Fatalf("GetMedia = %q", data)
+	}
+	body, err = api.GetMedia(ctx, "bin1", 1, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ = io.ReadAll(body)
+	_ = body.Close()
+	if string(data) != "lo" {
+		t.Fatalf("GetMedia range = %q", data)
 	}
 
 	if _, err := api.GetMeta(ctx, "missing"); !errors.Is(err, vfs.ErrNotExist) {

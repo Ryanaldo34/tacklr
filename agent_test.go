@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -11,14 +12,15 @@ import (
 )
 
 func TestSystemPrompt_knowledgeGuidanceWhenBrainSet(t *testing.T) {
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly())
+	eng, err := brain.NewEngine(brain.NewMemoryStore())
 	if err != nil {
 		t.Fatal(err)
 	}
 	h := mustNewTurnManager(t, AgentOptions{
-		MaxWindowSize: 8192,
-		Model:         &scriptedModel{},
-		Brain:         eng,
+		MaxWindowSize:   8192,
+		Model:           &scriptedModel{},
+		Brain:           eng,
+		SearchNamespace: mustNS(t, "org", "acme"),
 	})
 	t.Cleanup(h.Close)
 	prompt := h.constructSystemPrompt()
@@ -28,7 +30,7 @@ func TestSystemPrompt_knowledgeGuidanceWhenBrainSet(t *testing.T) {
 }
 
 func TestHandoff_savesSessionMessagesForSearch(t *testing.T) {
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly())
+	eng, err := brain.NewEngine(brain.NewMemoryStore())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,10 +87,10 @@ func TestHandoff_savesSessionMessagesForSearch(t *testing.T) {
 	}
 
 	page := mustSearch(t, eng, brain.Scope{Namespace: ns, SessionID: sessionID}, token)
-	if len(page.Objects) != 1 || page.Objects[0].Kind != brain.KindSessionMessage {
-		t.Fatalf("search = %+v", page.Objects)
+	if len(slices.Collect(page.Results.Objects())) != 1 || slices.Collect(page.Results.Objects())[0].Kind != brain.KindSessionMessage {
+		t.Fatalf("search = %+v", slices.Collect(page.Results.Objects()))
 	}
-	got, err := eng.Read(t.Context(), brain.Scope{Namespace: ns, SessionID: sessionID}, page.Objects[0].ID)
+	got, err := eng.Get(t.Context(), brain.Scope{Namespace: ns, SessionID: sessionID}, slices.Collect(page.Results.Objects())[0].ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +100,7 @@ func TestHandoff_savesSessionMessagesForSearch(t *testing.T) {
 }
 
 func TestAbsorb_retainsCompressedEpisode(t *testing.T) {
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly())
+	eng, err := brain.NewEngine(brain.NewMemoryStore())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,8 +137,9 @@ func TestAbsorb_retainsCompressedEpisode(t *testing.T) {
 }
 
 func TestHandoff_sessionMessageSaveErrorKeepsWindow(t *testing.T) {
-	store := brain.NewMemoryStore()
-	eng, err := brain.NewEngine(failSessionSave{MemoryStore: store}, brain.WithLexicalOnly())
+	// The store embeds the window, so a cancelled handoff fails its save.
+	store := brain.NewMemoryStore(brain.WithMemoryEmbedding(brain.Embedding{Embedder: vectorEmbedder{}}))
+	eng, err := brain.NewEngine(store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,9 +160,13 @@ func TestHandoff_sessionMessageSaveErrorKeepsWindow(t *testing.T) {
 		{Title: "A", Status: TodoStatusCompleted, Description: "done"},
 		{Title: "B", Status: TodoStatusPending, Description: "next"},
 	})
-	err = h.applyBatchToolResultEffect(t.Context(), EffectHandoff)
-	if err == nil || !strings.Contains(err.Error(), "session messages down") {
-		t.Fatalf("err = %v", err)
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	err = h.applyBatchToolResultEffect(cancelled, EffectHandoff)
+
+	if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "save session messages") {
+		t.Fatalf("handoff with a failing save = %v, want the save's error", err)
 	}
 	window := h.context.Messages()
 	if len(window) != 2 || window[1].Content != "kept-detail" {
@@ -189,16 +196,21 @@ func TestHandoff_nilBrainReplacesWindow(t *testing.T) {
 	}
 }
 
-type failSessionSave struct {
-	*brain.MemoryStore
+// vectorEmbedder embeds every text as one fixed vector.
+type vectorEmbedder struct{}
+
+func (vectorEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+	out := make([][]float32, len(texts))
+	for i := range out {
+		out[i] = []float32{1, 0}
+	}
+	return out, nil
 }
 
-func (failSessionSave) SaveSessionMessages(context.Context, brain.Namespace, string, string, []brain.SessionMessage) (int, error) {
-	return 0, errors.New("session messages down")
-}
+func (vectorEmbedder) Model() string { return "vector-model" }
 
 func TestSpecialist_retainsResultEpisode(t *testing.T) {
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly())
+	eng, err := brain.NewEngine(brain.NewMemoryStore())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,9 +250,9 @@ func TestSpecialist_retainsResultEpisode(t *testing.T) {
 	mustSearchKind(t, eng, ns, token, KindEpisode)
 }
 
-func mustSearch(t *testing.T, eng *brain.Engine, scope brain.Scope, query string) brain.SearchPage {
+func mustSearch(t *testing.T, eng *brain.Engine, scope brain.Scope, query string) brain.Page {
 	t.Helper()
-	page, err := eng.Search(t.Context(), scope, brain.SearchRequest{Query: query}, brain.NewSearchContext())
+	page, err := eng.Search(t.Context(), scope, brain.SearchRequest{Query: query})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,13 +262,13 @@ func mustSearch(t *testing.T, eng *brain.Engine, scope brain.Scope, query string
 func mustSearchKind(t *testing.T, eng *brain.Engine, ns brain.Namespace, query, kind string) brain.RichObject {
 	t.Helper()
 	page := mustSearch(t, eng, brain.Scope{Namespace: ns}, query)
-	if len(page.Objects) == 0 {
+	if len(slices.Collect(page.Results.Objects())) == 0 {
 		t.Fatalf("search %q: no hits", query)
 	}
-	if page.Objects[0].Kind != kind {
-		t.Fatalf("kind = %q, want %s", page.Objects[0].Kind, kind)
+	if slices.Collect(page.Results.Objects())[0].Kind != kind {
+		t.Fatalf("kind = %q, want %s", slices.Collect(page.Results.Objects())[0].Kind, kind)
 	}
-	return page.Objects[0]
+	return slices.Collect(page.Results.Objects())[0]
 }
 
 type stubJobHost struct {

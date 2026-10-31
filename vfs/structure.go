@@ -6,6 +6,12 @@ import (
 	"unicode"
 )
 
+// HasStructure reports whether documents of mediaType expose a block tree
+// (Structured.Blocks): Markdown headings, or a projected rich or grid codec.
+func HasStructure(mediaType string) bool {
+	return normalizeMediaType(mediaType) == "text/markdown" || IsProjected(mediaType)
+}
+
 // structureFor attaches a block view for known media types (internal projectors).
 // Uses the document line index so large files are not re-split into []string.
 func structureFor(mediaType, text string, starts []int) []Block {

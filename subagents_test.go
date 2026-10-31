@@ -77,7 +77,7 @@ func TestSystemPrompt_listsSpecialistsSorted(t *testing.T) {
 }
 
 func TestWithSpecialist_sharesHostMountWriteAndCatalog(t *testing.T) {
-	parent, ms, eng, ns := vfsIndexHarness(t, true)
+	parent, ms, eng, ns := vfsIndexHarness(t, nil)
 	_ = parent
 	worker := mustNewTurnManager(t, AgentOptions{
 		mountSession:    ms,
@@ -90,7 +90,7 @@ func TestWithSpecialist_sharesHostMountWriteAndCatalog(t *testing.T) {
 	ctx := context.Background()
 	scope := brain.Scope{Namespace: ns}
 
-	for _, name := range []string{"read", "write", "run_command", "read_object", "search", "index_file"} {
+	for _, name := range []string{"read", "write", "run_command", "open", "search", "related", "index_file"} {
 		if worker.findTool(name, "") == nil {
 			t.Fatalf("worker catalog missing %s", name)
 		}

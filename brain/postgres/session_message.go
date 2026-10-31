@@ -1,9 +1,10 @@
 package postgres
 
 import (
+	"cmp"
 	"context"
-	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -13,7 +14,9 @@ import (
 	"github.com/ryanaldo34/tacklr/brain"
 )
 
-// SaveSessionMessages implements brain.ObjectWriter.
+// SaveSessionMessages implements brain.Store in one transaction. It embeds
+// every message's SearchText in one call first; when that fails the window
+// is saved without vectors, so it is still found by its words.
 func (s *Store) SaveSessionMessages(ctx context.Context, host brain.Namespace, sessionID, generationKey string, messages []brain.SessionMessage) (int, error) {
 	sessionID = strings.TrimSpace(sessionID)
 	generationKey = strings.TrimSpace(generationKey)
@@ -26,201 +29,112 @@ func (s *Store) SaveSessionMessages(ctx context.Context, host brain.Namespace, s
 	if len(messages) == 0 {
 		return 0, fmt.Errorf("%w: window is empty", brain.ErrInvalid)
 	}
-	ns := brain.NamespaceForSession(host, sessionID)
-	rawNS, err := ns.Value()
+	if err := host.Validate(); err != nil {
+		return 0, err
+	}
+	ns := host.ForSession(sessionID)
+	texts := make([]string, len(messages))
+	for i, msg := range messages {
+		texts[i] = msg.SearchText
+	}
+	vecs, err := s.embedding.Embed(ctx, texts)
 	if err != nil {
-		return 0, fmt.Errorf("postgres: session namespace: %w", err)
+		slog.WarnContext(ctx, "session embed failed; saving without vectors", "error", err)
+		vecs = nil
 	}
-	var existing int
-	err = s.db.QueryRow(ctx, `
-		SELECT generation FROM session_messages
-		WHERE session_id = $1 AND generation_key = $2
-		LIMIT 1`, sessionID, generationKey).Scan(&existing)
-	if err == nil {
-		return existing, nil
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		return 0, fmt.Errorf("postgres: session generation: %w", err)
+	var model *string
+	if vecs != nil {
+		model = new(s.embedding.Model())
 	}
 	var gen int
-	if err := s.db.QueryRow(ctx, `
-		SELECT COALESCE(MAX(generation), 0) + 1 FROM session_messages WHERE session_id = $1`,
-		sessionID).Scan(&gen); err != nil {
-		return 0, fmt.Errorf("postgres: session generation next: %w", err)
-	}
-	for i, msg := range messages {
-		body := msg.Body
-		if len(body) == 0 {
-			body = []byte("{}")
+	err = pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		// The whole save is one round trip. One saver per session at a time,
+		// so two workers cannot both take the next generation. Each row takes
+		// the generation its key already has, or the next one; a retry of a
+		// saved window inserts nothing.
+		b := &pgx.Batch{}
+		b.Queue(`SELECT pg_advisory_xact_lock(hashtext('tacklr.session:' || $1))`, sessionID)
+		for i, msg := range messages {
+			var vec []float32
+			if vecs != nil {
+				vec = vecs[i]
+			}
+			b.Queue(`
+				INSERT INTO session_messages (
+					id, session_id, namespace, generation, generation_key, position, role, body, search_text, embedding, embedding_model
+				) VALUES (
+					$1, $2, $3::jsonb,
+					coalesce(
+						(SELECT generation FROM session_messages WHERE session_id = $2 AND namespace = $3::jsonb AND generation_key = $4 LIMIT 1),
+						(SELECT coalesce(max(generation), 0) + 1 FROM session_messages WHERE session_id = $2)),
+					$4, $5, $6, $7::jsonb, $8, $9::real[]::vector, $10)
+				ON CONFLICT (session_id, namespace, generation_key, position) DO NOTHING`,
+				uuid.New(), sessionID, ns, generationKey, i, msg.Role, cmp.Or(string(msg.Body), "{}"), msg.SearchText, vec, model)
 		}
-		var emb any
-		if len(msg.Embedding) > 0 {
-			emb = formatVectorLiteral(msg.Embedding)
+		b.Queue(`SELECT generation FROM session_messages WHERE session_id = $1 AND namespace = $2::jsonb AND generation_key = $3 LIMIT 1`,
+			sessionID, ns, generationKey)
+		br := tx.SendBatch(ctx, b)
+		errs := make([]error, 0, len(messages)+3)
+		for range len(messages) + 1 {
+			_, err := br.Exec()
+			errs = append(errs, err)
 		}
-		if _, err := s.db.Exec(ctx, `
-			INSERT INTO session_messages (
-				id, session_id, namespace, generation, generation_key, position, role, body, search_text, embedding
-			) VALUES (
-				$1, $2, $3::jsonb, $4, $5, $6, $7, $8::jsonb, $9,
-				CASE WHEN $10::text IS NULL THEN NULL ELSE $10::vector END
-			)`,
-			uuid.New(), sessionID, rawNS, gen, generationKey, i, msg.Role, body, msg.SearchText, emb,
-		); err != nil {
-			_, _ = s.db.Exec(ctx, `DELETE FROM session_messages WHERE session_id = $1 AND generation_key = $2`, sessionID, generationKey)
-			return 0, fmt.Errorf("postgres: session insert: %w", err)
+		errs = append(errs, br.QueryRow().Scan(&gen), br.Close())
+		if err := cmp.Or(errs...); err != nil {
+			return fmt.Errorf("postgres: session save: %w", err)
 		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
 	}
 	return gen, nil
 }
 
-func (s *Store) sessionLexical(ctx context.Context, scope brain.Scope, query string, k int) ([]brain.ScoredID, error) {
-	if k <= 0 || strings.TrimSpace(query) == "" || strings.TrimSpace(scope.SessionID) == "" {
-		return nil, nil
-	}
-	raw, err := brain.NamespaceForSession(scope.Namespace, scope.SessionID).Value()
-	if err != nil {
-		return nil, err
-	}
-	args := []any{query, strings.TrimSpace(scope.SessionID), raw, k}
-	return s.searchFTS(ctx, sessionLexicalSQL(true), sessionLexicalSQL(false), args, k)
-}
-
-func sessionLexicalSQL(matchAll bool) string {
-	return fmt.Sprintf(`
-		SELECT id, role, search_text, id, position, updated_at,
-		       ts_rank_cd(search_tsv, tacklr_web_terms($1, %t), %d) AS score
-		FROM session_messages
-		WHERE session_id = $2 AND namespace = $3::jsonb
-		  AND tacklr_web_terms($1, %t) IS NOT NULL
-		  AND search_tsv @@ tacklr_web_terms($1, %t)
-		ORDER BY score DESC
-		LIMIT $4`, matchAll, ftsRankNorm, matchAll, matchAll)
-}
-
-func (s *Store) sessionVector(ctx context.Context, scope brain.Scope, embedding []float32, k int) ([]brain.ScoredID, error) {
-	if k <= 0 || len(embedding) == 0 || strings.TrimSpace(scope.SessionID) == "" {
-		return nil, nil
-	}
-	raw, err := brain.NamespaceForSession(scope.Namespace, scope.SessionID).Value()
-	if err != nil {
-		return nil, err
-	}
-	q := `
-		SELECT id, role, search_text, id, position, updated_at,
-		       1 - (embedding <=> $1::vector) AS score
-		FROM session_messages
-		WHERE session_id = $2 AND namespace = $3::jsonb AND embedding IS NOT NULL
-		ORDER BY embedding <=> $1::vector
-		LIMIT $4`
-	return s.queryScored(ctx, q, []any{formatVectorLiteral(embedding), strings.TrimSpace(scope.SessionID), raw, k})
-}
-
-func (s *Store) sessionTrigram(ctx context.Context, scope brain.Scope, query string, k int) ([]brain.ScoredID, error) {
-	if k <= 0 || strings.TrimSpace(query) == "" || strings.TrimSpace(scope.SessionID) == "" {
-		return nil, nil
-	}
-	raw, err := brain.NamespaceForSession(scope.Namespace, scope.SessionID).Value()
-	if err != nil {
-		return nil, err
-	}
-	q := `
-		SELECT id, role, search_text, id, position, updated_at,
-		       GREATEST(similarity(role, $1), word_similarity($1, search_text)) AS score
-		FROM session_messages
-		WHERE session_id = $2 AND namespace = $3::jsonb
-		  AND (
-		    strpos(lower(role), lower($1)) > 0
-		    OR strpos(lower(search_text), lower($1)) > 0
-		    OR similarity(role, $1) > 0.3
-		    OR word_similarity($1, search_text) > 0.3
-		  )
-		ORDER BY score DESC
-		LIMIT $4`
-	return s.queryScored(ctx, q, []any{query, strings.TrimSpace(scope.SessionID), raw, k})
-}
-
-func (s *Store) readSessionMessage(ctx context.Context, sessionID string, id uuid.UUID) (brain.Object, error) {
-	if id == uuid.Nil {
-		return brain.Object{}, fmt.Errorf("%w: object id is required", brain.ErrInvalid)
-	}
-	objs, err := s.readSessionMessages(ctx, sessionID, []uuid.UUID{id})
-	if err != nil {
-		return brain.Object{}, err
-	}
-	if len(objs) == 0 {
-		return brain.Object{}, fmt.Errorf("%w: %s", brain.ErrNotFound, id)
-	}
-	return objs[0], nil
-}
-
-func (s *Store) readSessionMessages(ctx context.Context, sessionID string, ids []uuid.UUID) ([]brain.Object, error) {
-	if len(ids) == 0 || strings.TrimSpace(sessionID) == "" {
-		return nil, nil
-	}
-	rows, err := s.db.Query(ctx, `
+// readSessionMessages reads ids from the scope's own session rows.
+func (s *Store) readSessionMessages(ctx context.Context, scope brain.Scope, ids []uuid.UUID) ([]brain.Object, error) {
+	sid := strings.TrimSpace(scope.SessionID)
+	rows, _ := s.db.Query(ctx, `
 		SELECT id, role, body, position, generation, namespace, created_at, updated_at
 		FROM session_messages
-		WHERE session_id = $1 AND id = ANY($2)`, sessionID, ids)
+		WHERE session_id = $1 AND namespace = $2::jsonb AND id = ANY($3)`,
+		sid, scope.Namespace.ForSession(sid), ids)
+	out, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (brain.Object, error) {
+		var role, body string
+		var position, gen int
+		o := brain.Object{Kind: brain.KindSessionMessage}
+		err := row.Scan(&o.ID, &role, &body, &position, &gen, &o.Namespace, &o.CreatedAt, &o.UpdatedAt)
+		o.Title, o.Content, o.Position = role, body, &position
+		o.Properties = map[string]any{"role": role, "generation": gen, "index": position}
+		return o, err
+	})
 	if err != nil {
-		return nil, fmt.Errorf("postgres: session read: %w", err)
-	}
-	defer rows.Close()
-	var out []brain.Object
-	for rows.Next() {
-		var (
-			id       uuid.UUID
-			role     string
-			body     []byte
-			position int
-			gen      int
-			ns       brain.Namespace
-			created  time.Time
-			updated  time.Time
-		)
-		if err := rows.Scan(&id, &role, &body, &position, &gen, &ns, &created, &updated); err != nil {
-			return nil, fmt.Errorf("postgres: session read: %w", err)
-		}
-		pos := position
-		out = append(out, brain.Object{
-			ID:      id,
-			Kind:    brain.KindSessionMessage,
-			Title:   role,
-			Content: string(body),
-			Properties: map[string]any{
-				"role":       role,
-				"generation": gen,
-				"index":      position,
-			},
-			Position:  &pos,
-			Namespace: ns,
-			CreatedAt: created,
-			UpdatedAt: updated,
-		})
-	}
-	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("postgres: session read: %w", err)
 	}
 	return out, nil
 }
 
-func mergeRanked(hits, extra []brain.ScoredID, err error) ([]brain.ScoredID, error) {
-	if err != nil || len(extra) == 0 {
-		return hits, err
+// DeleteSessionMessages implements brain.Store.
+func (s *Store) DeleteSessionMessages(ctx context.Context, host brain.Namespace, sessionID string) error {
+	if err := host.Validate(); err != nil {
+		return err
 	}
-	if len(hits) == 0 {
-		return extra, nil
-	}
-	return brain.FuseRanks([][]brain.ScoredID{hits, extra}, 0), nil
-}
-
-// DeleteSessionMessages implements brain.ObjectWriter.
-func (s *Store) DeleteSessionMessages(ctx context.Context, sessionID string) error {
 	sessionID = strings.TrimSpace(sessionID)
-	if sessionID == "" {
-		return nil
-	}
-	if _, err := s.db.Exec(ctx, `DELETE FROM session_messages WHERE session_id = $1`, sessionID); err != nil {
+	if _, err := s.db.Exec(ctx, `DELETE FROM session_messages WHERE session_id = $1 AND namespace = $2::jsonb`,
+		sessionID, host.ForSession(sessionID)); err != nil {
 		return fmt.Errorf("postgres: session delete: %w", err)
 	}
 	return nil
+}
+
+// PurgeSessionMessages implements brain.Store.
+func (s *Store) PurgeSessionMessages(ctx context.Context, host brain.Namespace, before time.Time) (int, error) {
+	if err := host.Validate(); err != nil {
+		return 0, err
+	}
+	tag, err := s.db.Exec(ctx, `DELETE FROM session_messages WHERE created_at < $1 AND tenant = ($2::jsonb)->0 AND namespace @> $2::jsonb`, before, host)
+	if err != nil {
+		return 0, fmt.Errorf("postgres: session purge: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
 }

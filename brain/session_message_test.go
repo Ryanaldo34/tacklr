@@ -3,6 +3,7 @@ package brain
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/google/uuid"
@@ -10,7 +11,7 @@ import (
 
 func TestSessionMessages_searchKindFilterIdempotentDelete(t *testing.T) {
 	store := NewMemoryStore()
-	eng, err := NewEngine(store, WithLexicalOnly())
+	eng, err := NewEngine(store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -29,7 +30,7 @@ func TestSessionMessages_searchKindFilterIdempotentDelete(t *testing.T) {
 	if _, err := eng.SaveSessionMessages(stopped, ns, sessionID, "k", []SessionMessage{{Role: "user", SearchText: "x"}}); err == nil {
 		t.Fatal("cancelled save")
 	}
-	if err := eng.DeleteSessionMessages(stopped, sessionID); err == nil {
+	if err := eng.DeleteSessionMessages(stopped, ns, sessionID); err == nil {
 		t.Fatal("cancelled delete")
 	}
 	if _, err := store.SaveSessionMessages(ctx, ns, "", "k", []SessionMessage{{Role: "user"}}); err == nil {
@@ -41,23 +42,23 @@ func TestSessionMessages_searchKindFilterIdempotentDelete(t *testing.T) {
 	if _, err := store.SaveSessionMessages(ctx, ns, sessionID, "k", nil); err == nil {
 		t.Fatal("empty window")
 	}
-	if err := store.DeleteSessionMessages(ctx, " "); err != nil {
-		t.Fatal(err)
+	if err := eng.DeleteSessionMessages(ctx, ns, " "); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("blank session delete = %v", err)
 	}
-	if err := eng.DeleteSessionMessages(ctx, " "); err != nil {
-		t.Fatal(err)
+	if err := eng.DeleteSessionMessages(ctx, nil, sessionID); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("unscoped delete = %v", err)
 	}
 	blank := &MemoryStore{}
 	if _, err := blank.SaveSessionMessages(ctx, ns, sessionID, "blank-store", []SessionMessage{{Role: "user", SearchText: marker}}); err != nil {
 		t.Fatal(err)
 	}
 	factID := uuid.New()
-	if _, err := eng.Put(ctx, Scope{Namespace: ns}, Object{
+	if _, err := eng.Save(ctx, Scope{Namespace: ns}, Object{
 		ID: factID, Kind: "Fact", Title: "fact", Content: "durable",
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := eng.Put(ctx, Scope{Namespace: ns}, Object{
+	if _, err := eng.Save(ctx, Scope{Namespace: ns}, Object{
 		Kind: "Fact", ParentID: &factID, Title: "chunk", Content: marker + " durable-fact",
 	}); err != nil {
 		t.Fatal(err)
@@ -83,12 +84,12 @@ func TestSessionMessages_searchKindFilterIdempotentDelete(t *testing.T) {
 	}
 
 	scope := Scope{Namespace: ns, SessionID: sessionID}
-	page, err := eng.Search(ctx, scope, SearchRequest{Query: marker}, NewSearchContext())
+	page, err := eng.Search(ctx, scope, SearchRequest{Query: marker})
 	if err != nil {
 		t.Fatal(err)
 	}
 	var facts, messages int
-	for _, obj := range page.Objects {
+	for _, obj := range slices.Collect(page.Results.Objects()) {
 		switch obj.Kind {
 		case "Fact":
 			facts++
@@ -96,64 +97,54 @@ func TestSessionMessages_searchKindFilterIdempotentDelete(t *testing.T) {
 			messages++
 		}
 	}
-	if len(page.Objects) != 2 || facts != 1 || messages != 1 {
-		t.Fatalf("merged search = %+v", page.Objects)
+	if len(slices.Collect(page.Results.Objects())) != 2 || facts != 1 || messages != 1 {
+		t.Fatalf("merged search = %+v", slices.Collect(page.Results.Objects()))
 	}
 
 	filtered, err := eng.Search(ctx, scope, SearchRequest{
 		Query:   marker,
 		Filters: Filter{Kind: StringMatch{Eq: "Fact"}},
-	}, NewSearchContext())
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(filtered.Objects) != 1 || filtered.Objects[0].Kind != "Fact" {
-		t.Fatalf("kind filter = %+v", filtered.Objects)
+	if len(slices.Collect(filtered.Results.Objects())) != 1 || slices.Collect(filtered.Results.Objects())[0].Kind != "Fact" {
+		t.Fatalf("kind filter = %+v", slices.Collect(filtered.Results.Objects()))
 	}
 
-	if err := eng.DeleteSessionMessages(ctx, sessionID); err != nil {
+	if err := eng.DeleteSessionMessages(ctx, ns, sessionID); err != nil {
 		t.Fatal(err)
 	}
-	factPage, err := eng.Search(ctx, scope, SearchRequest{Query: "durable-fact"}, NewSearchContext())
-	if err != nil || len(factPage.Objects) != 1 || factPage.Objects[0].Kind != "Fact" {
-		t.Fatalf("fact after delete = %+v err=%v", factPage.Objects, err)
+	factPage, err := eng.Search(ctx, scope, SearchRequest{Query: "durable-fact"})
+	if err != nil || len(slices.Collect(factPage.Results.Objects())) != 1 || slices.Collect(factPage.Results.Objects())[0].Kind != "Fact" {
+		t.Fatalf("fact after delete = %+v err=%v", slices.Collect(factPage.Results.Objects()), err)
 	}
 
 	restart, err := eng.SaveSessionMessages(ctx, ns, sessionID, "key-3", msg)
 	if err != nil || restart != 1 {
 		t.Fatalf("generation after delete = %d err = %v", restart, err)
 	}
-	other, err := eng.Search(ctx, Scope{Namespace: ns, SessionID: "other"}, SearchRequest{Query: token}, NewSearchContext())
+	other, err := eng.Search(ctx, Scope{Namespace: ns, SessionID: "other"}, SearchRequest{Query: token})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(other.Objects) != 0 {
-		t.Fatalf("other session = %+v", other.Objects)
+	if len(slices.Collect(other.Results.Objects())) != 0 {
+		t.Fatalf("other session = %+v", slices.Collect(other.Results.Objects()))
 	}
 	hidden, err := eng.Search(ctx, scope, SearchRequest{
 		Query:   marker,
 		Filters: Filter{Title: StringMatch{Eq: "nope"}},
-	}, NewSearchContext())
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, obj := range hidden.Objects {
+	for _, obj := range slices.Collect(hidden.Results.Objects()) {
 		if obj.Kind == KindSessionMessage {
-			t.Fatalf("title filter = %+v", hidden.Objects)
+			t.Fatalf("title filter = %+v", slices.Collect(hidden.Results.Objects()))
 		}
 	}
 
-	reader, err := NewEngine(memReader{}, WithLexicalOnly())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := reader.SaveSessionMessages(ctx, ns, sessionID, "k", msg); !errors.Is(err, ErrUnsupported) {
-		t.Fatalf("reader save = %v", err)
-	}
-	if err := reader.DeleteSessionMessages(ctx, sessionID); err != nil {
-		t.Fatal(err)
-	}
-	embedFail, err := NewEngine(NewMemoryStore(), WithEmbedder(errEmbed{}))
+	embedFail, err := NewEngine(NewMemoryStore(WithMemoryEmbedding(Embedding{Embedder: errEmbed{}})))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,31 +155,8 @@ func TestSessionMessages_searchKindFilterIdempotentDelete(t *testing.T) {
 
 type errEmbed struct{}
 
-func (errEmbed) Embed(context.Context, string) ([]float32, error) {
+func (errEmbed) Embed(context.Context, []string) ([][]float32, error) {
 	return nil, errors.New("embed down")
 }
 
-type memReader struct{}
-
-func (memReader) Get(context.Context, Scope, uuid.UUID) (Object, error) {
-	return Object{}, ErrNotFound
-}
-func (memReader) GetMany(context.Context, Scope, []uuid.UUID) ([]Object, error) {
-	return nil, nil
-}
-func (memReader) ListChildren(context.Context, Scope, uuid.UUID) ([]Object, error) {
-	return nil, nil
-}
-func (memReader) GetKind(context.Context, string) (ObjectKind, error) {
-	return ObjectKind{}, ErrNotFound
-}
-func (memReader) ListKinds(context.Context) ([]ObjectKind, error) { return nil, nil }
-func (memReader) SearchLexical(context.Context, Scope, string, Filter, int) ([]ScoredID, error) {
-	return nil, nil
-}
-func (memReader) SearchVector(context.Context, Scope, []float32, Filter, int) ([]ScoredID, error) {
-	return nil, nil
-}
-func (memReader) SearchTrigram(context.Context, Scope, string, Filter, int) ([]ScoredID, error) {
-	return nil, nil
-}
+func (errEmbed) Model() string { return "test-model" }

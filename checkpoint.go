@@ -68,13 +68,6 @@ func (c SessionCheckpoint) PendingToolCalls() map[string]PendingToolCall {
 func (c SessionCheckpoint) PendingInterrupts() []byte  { return c.state.PendingInterrupts }
 func (c SessionCheckpoint) ResolvedInterrupts() []byte { return c.state.ResolvedInterrupts }
 
-// WithVersion returns a copy with the schema version set. Tests use this to
-// exercise apply reject paths.
-func (c SessionCheckpoint) WithVersion(v int) SessionCheckpoint {
-	c.state.Version = v
-	return c
-}
-
 // WithModule returns a copy with one harness module blob replaced.
 func (c SessionCheckpoint) WithModule(name string, raw json.RawMessage) SessionCheckpoint {
 	mods := cloneRawMap(c.state.Modules)

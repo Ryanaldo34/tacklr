@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +23,7 @@ import (
 	"go.temporal.io/sdk/contrib/workflowstreams"
 	"go.temporal.io/sdk/converter"
 	"go.temporal.io/sdk/worker"
+	"google.golang.org/grpc"
 
 	"github.com/ryanaldo34/tacklr/telemetry"
 
@@ -245,20 +247,19 @@ func (r *Runtime) Cancel(ctx context.Context, sessionID session.SessionID) error
 	return r.wake(ctx, sessionID, session.Wake{Kind: session.WakeCancel})
 }
 
-// Close implements session.Runtime.
+// Close implements session.Runtime. Every cleanup step runs even when an
+// earlier one fails, and the failures are returned together. A part already
+// gone (ErrSessionNotFound) is not a failure, so Close is safe to repeat.
 func (r *Runtime) Close(ctx context.Context, sessionID session.SessionID) error {
-	kids, _ := r.Children(ctx, sessionID)
+	kids, err := r.Children(ctx, sessionID)
+	errs := []error{err}
 	r.markClosed(sessionID)
-	_ = r.wake(ctx, sessionID, session.Wake{Kind: session.WakeClose})
-	for _, k := range kids {
-		session.DeleteSessionMessages(ctx, r.agent, k)
-		_ = r.secrets.Delete(ctx, k)
+	errs = append(errs, r.wake(ctx, sessionID, session.Wake{Kind: session.WakeClose}))
+	for _, id := range append(kids, sessionID) {
+		errs = append(errs, session.DeleteSessionMessages(ctx, r.agent, id), r.secrets.Delete(ctx, id))
 	}
-	session.DeleteSessionMessages(ctx, r.agent, sessionID)
-	_ = r.secrets.Delete(ctx, sessionID)
-	_ = r.snapshots.Delete(ctx, sessionID)
-	_ = r.fallback.CloseSession(ctx, sessionID)
-	return nil
+	errs = append(errs, r.snapshots.Delete(ctx, sessionID), r.fallback.CloseSession(ctx, sessionID))
+	return errors.Join(slices.DeleteFunc(errs, func(err error) bool { return errors.Is(err, session.ErrSessionNotFound) })...)
 }
 
 type sub struct {
@@ -407,7 +408,8 @@ func (r *Runtime) Status(ctx context.Context, id session.SessionID) (session.Ses
 }
 
 // Dial is client.Dial with Temporal's OpenTelemetry v2 plugin prepended.
-// It installs a replay-safe tracer on the process. When telemetry.Init has
+// It installs a replay-safe tracer on the process and ignores DNS-provided
+// gRPC service configs. When telemetry.Init has
 // already run, that tracer keeps the same export configuration.
 func Dial(opts client.Options) (client.Client, error) {
 	if _, ok := otel.GetTracerProvider().(*temporalotel.ReplaySafeTracerProvider); !ok {
@@ -425,6 +427,10 @@ func Dial(opts client.Options) (client.Client, error) {
 		return nil, err
 	}
 	opts.Plugins = append([]client.Plugin{plugin}, opts.Plugins...)
+	// gRPC otherwise looks up a DNS TXT record for every host name it
+	// dials; a slow lookup can outlast the SDK's connect check. The SDK's
+	// own default service config still applies.
+	opts.ConnectionOptions.DialOptions = append(opts.ConnectionOptions.DialOptions, grpc.WithDisableServiceConfig())
 	return client.Dial(opts)
 }
 

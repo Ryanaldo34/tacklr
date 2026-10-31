@@ -1,15 +1,82 @@
 package brain
 
 import (
-	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
 
-// filterPlan is the single compiled form of Filter used by MemoryStore and
-// relational stores (via FilterSQL).
-type filterPlan struct {
+// FilterPlan is the compiled form of a Filter. A backend evaluates it in
+// process with Match, or translates its Conditions into its own query
+// language (brain/postgres does so for SQL).
+type FilterPlan struct {
 	preds []filterPred
+}
+
+// FilterCondition is one condition of a FilterPlan; an object passes the
+// plan when it meets every condition.
+type FilterCondition struct {
+	// Field is FieldKind, FieldTitle, FieldCreatedAt, FieldUpdatedAt, or a
+	// property key when Property is set.
+	Field    string
+	Property bool
+	// Op is OpEq (Values has one value), OpIn (any of Values), OpGte or
+	// OpLt (against Time). Values keep their JSON types: a property matches
+	// only a value of the same type (string, bool, or a number compared as
+	// float64).
+	Op     string
+	Values []any
+	Time   time.Time
+}
+
+// Filter condition fields and operators.
+const (
+	FieldKind      = "kind"
+	FieldTitle     = "title"
+	FieldCreatedAt = "created_at"
+	FieldUpdatedAt = "updated_at"
+
+	OpEq  = "eq"
+	OpIn  = "in"
+	OpGte = "gte"
+	OpLt  = "lt"
+)
+
+// FilterValueKey is the canonical typed form of a scalar filter or property
+// value: values a filter treats as equal (the same string, the same bool, or
+// numbers equal as float64) have equal keys, and values of other types never
+// do. A backend can index property values by key to match filters natively.
+// A non-scalar value has no key.
+func FilterValueKey(v any) (string, bool) {
+	switch x := v.(type) {
+	case string:
+		return "s:" + x, true
+	case bool:
+		return "b:" + strconv.FormatBool(x), true
+	}
+	if f, ok := asFloat64(v); ok {
+		return "n:" + strconv.FormatFloat(f, 'g', -1, 64), true
+	}
+	return "", false
+}
+
+// Conditions lists the plan's conditions.
+func (p FilterPlan) Conditions() []FilterCondition {
+	out := make([]FilterCondition, len(p.preds))
+	for i, pred := range p.preds {
+		c := FilterCondition{Field: pred.field, Op: pred.op, Time: pred.timeVal}
+		if key, ok := strings.CutPrefix(pred.field, "prop:"); ok {
+			c.Field, c.Property = key, true
+		}
+		switch pred.op {
+		case OpEq:
+			c.Values = []any{pred.want}
+		case OpIn:
+			c.Values = pred.wantIn
+		}
+		out[i] = c
+	}
+	return out
 }
 
 type filterPred struct {
@@ -20,12 +87,13 @@ type filterPred struct {
 	timeVal time.Time
 }
 
-func compileFilters(f Filter) (filterPlan, error) {
-	if err := ValidateFilters(f); err != nil {
-		return filterPlan{}, err
+// Compile validates f and compiles it.
+func (f Filter) Compile() (FilterPlan, error) {
+	if err := f.Validate(); err != nil {
+		return FilterPlan{}, err
 	}
 	if f.empty() {
-		return filterPlan{}, nil
+		return FilterPlan{}, nil
 	}
 	preds := make([]filterPred, 0, 6+len(f.Props))
 	if f.Kind.set() {
@@ -47,10 +115,7 @@ func compileFilters(f Filter) (filterPlan, error) {
 		if strings.TrimSpace(bound.raw) == "" {
 			continue
 		}
-		t, err := parseFilterTime(bound.raw)
-		if err != nil {
-			return filterPlan{}, err
-		}
+		t, _ := parseFilterTime(bound.raw) // ValidateFilters parsed it above
 		op := "lt"
 		if bound.after {
 			op = "gte"
@@ -58,13 +123,9 @@ func compileFilters(f Filter) (filterPlan, error) {
 		preds = append(preds, filterPred{field: bound.field, op: op, timeVal: t})
 	}
 	for key, pf := range f.Props {
-		col := sanitizeJSONKey(key)
-		if col == "" {
-			return filterPlan{}, fmt.Errorf("brain: filter %q is not a valid property key", key)
-		}
-		preds = append(preds, propPred("prop:"+col, pf))
+		preds = append(preds, propPred("prop:"+key, pf)) // ValidateFilters checked key
 	}
-	return filterPlan{preds: preds}, nil
+	return FilterPlan{preds: preds}, nil
 }
 
 func stringMatchPred(field string, s StringMatch) filterPred {
@@ -85,7 +146,8 @@ func propPred(field string, pf PropFilter) filterPred {
 	return filterPred{field: field, op: "eq", want: pf.Eq}
 }
 
-func (p filterPlan) match(obj Object) bool {
+// Match reports whether obj meets every condition.
+func (p FilterPlan) Match(obj Object) bool {
 	for _, pred := range p.preds {
 		if !pred.match(obj) {
 			return false
@@ -122,96 +184,15 @@ func matchWant(got any, p filterPred) bool {
 }
 
 func matchTime(got time.Time, p filterPred) bool {
-	switch p.op {
-	case "gte":
+	if p.op == "gte" {
 		return !got.Before(p.timeVal)
-	case "lt":
-		return got.Before(p.timeVal)
-	default:
-		return false
 	}
+	return got.Before(p.timeVal)
 }
 
-func (p filterPlan) sql(scope Scope, startArg int) (string, []any, error) {
-	var b strings.Builder
-	var args []any
-	n := startArg
-	add := func(frag string, v any) {
-		args = append(args, v)
-		b.WriteString(" AND ")
-		b.WriteString(fmt.Sprintf(frag, n))
-		n++
-	}
-	addIn := func(col string, vals []any) {
-		if len(vals) == 0 {
-			return
-		}
-		b.WriteString(" AND ")
-		b.WriteString(col)
-		b.WriteString(" IN (")
-		for i, v := range vals {
-			if i > 0 {
-				b.WriteString(", ")
-			}
-			args = append(args, filterSQLValue(v))
-			b.WriteString(fmt.Sprintf("$%d", n))
-			n++
-		}
-		b.WriteString(")")
-	}
-
-	if !scope.Namespace.Empty() {
-		raw, err := scope.Namespace.Value()
-		if err != nil {
-			return "", nil, fmt.Errorf("brain: marshal namespace: %w", err)
-		}
-		add("namespace @> $%d::jsonb", raw)
-	}
-	for _, pred := range p.preds {
-		switch pred.field {
-		case filterKind, filterTitle:
-			col := pred.field
-			if pred.op == "in" {
-				addIn(col, pred.wantIn)
-			} else {
-				add(col+" = $%d", filterSQLValue(pred.want))
-			}
-		case "created_at", "updated_at":
-			switch pred.op {
-			case "gte":
-				add(pred.field+" >= $%d", pred.timeVal)
-			case "lt":
-				add(pred.field+" < $%d", pred.timeVal)
-			}
-		default:
-			col := strings.TrimPrefix(pred.field, "prop:")
-			expr := "properties->>'" + col + "'"
-			if pred.op == "in" {
-				addIn(expr, pred.wantIn)
-			} else {
-				add(expr+" = $%d", filterSQLValue(pred.want))
-			}
-		}
-	}
-	return b.String(), args, nil
-}
-
-func filterSQLValue(v any) any {
-	switch x := v.(type) {
-	case string, bool:
-		return x
-	default:
-		return fmt.Sprint(v)
-	}
-}
-
-func objectMatchesFilters(obj Object, f Filter) bool {
-	plan, err := compileFilters(f)
-	if err != nil {
-		return false
-	}
-	return plan.match(obj)
-}
+// validPropertyKey reports whether k is a non-empty run of letters, digits
+// and underscores: a property key a filter can name, and safe in SQL.
+func validPropertyKey(k string) bool { return k != "" && sanitizeJSONKey(k) == k }
 
 func sanitizeJSONKey(k string) string {
 	return strings.Map(func(r rune) rune {
@@ -220,15 +201,4 @@ func sanitizeJSONKey(k string) string {
 		}
 		return -1
 	}, k)
-}
-
-// FilterSQL compiles filters into a WHERE fragment and bound args for a
-// relational store. startArg is the first $N placeholder (usually 2 when $1
-// is the query). The fragment begins with AND when non-empty.
-func FilterSQL(scope Scope, filters Filter, startArg int) (string, []any, error) {
-	plan, err := compileFilters(filters)
-	if err != nil {
-		return "", nil, err
-	}
-	return plan.sql(scope, startArg)
 }

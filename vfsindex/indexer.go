@@ -2,18 +2,16 @@ package vfsindex
 
 import (
 	"bufio"
-	"bytes"
+	"cmp"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"iter"
 	"path"
-	"strconv"
+	"slices"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -24,11 +22,11 @@ import (
 // Stable UUID namespace for path-derived document ids (not a secret).
 var documentIDNS = uuid.MustParse("a1b2c3d4-e5f6-7890-abcd-ef1234567890")
 
-// Defaults for streaming index.
-const (
-	DefaultLinesPerChunk = 40
-	DefaultMaxIndexBytes = 64 << 20 // 64 MiB per file
-)
+// DefaultMaxIndexBytes caps how much of a plain-text file is indexed.
+const DefaultMaxIndexBytes = 64 << 20 // 64 MiB per file
+
+// maxConflictRetries bounds re-indexing a file another indexer committed first.
+const maxConflictRetries = 3
 
 // MountIndexer streams text-like mount files into brain Document + Chunk objects.
 type MountIndexer struct {
@@ -36,14 +34,25 @@ type MountIndexer struct {
 	Brain *brain.Engine
 	Scope brain.Scope
 
-	DocumentKind  string // default Document
-	ChunkKind     string // default Chunk
-	LinesPerChunk int    // default DefaultLinesPerChunk
-	MaxIndexBytes int64  // default DefaultMaxIndexBytes
+	DocumentKind string // default Document
+	ChunkKind    string // default Chunk
+	// Chunking sizes the chunks; zero fields take DefaultChunkSizes.
+	Chunking ChunkSizes
+	// MaxIndexBytes caps how much of a plain-text file is read and indexed
+	// (default DefaultMaxIndexBytes). Structured files (Markdown, Docs,
+	// Sheets) are read whole, up to vfs.MaxReadFileBytes.
+	MaxIndexBytes int64
 
-	// nsKey is Scope.Namespace.String() cached for DocumentID (avoids per-call alloc).
-	nsKey string
+	// Readers returns the source ACL for a file: the principals allowed to
+	// read it (for example from Drive or SharePoint sharing). Its result is
+	// stored on the Document and every Chunk, so search only shows the file
+	// to scopes holding one of those principals. Nil, or an empty result,
+	// leaves the file visible to every scope that covers Scope.Namespace.
+	Readers ReadersFunc
 }
+
+// ReadersFunc resolves the principals that may read virtualPath at its source.
+type ReadersFunc func(ctx context.Context, virtualPath string, st vfs.FileInfo) ([]string, error)
 
 // IndexOpts configures a tree walk.
 type IndexOpts struct {
@@ -54,7 +63,7 @@ type IndexOpts struct {
 // Stats summarizes IndexPrefix work.
 type Stats struct {
 	Indexed int // files written or re-chunked
-	Skipped int // hash match, binary, non-text, or PolicyNone
+	Skipped int // version match, binary, non-text, or PolicyNone
 	Removed int // missing paths soft-deleted from brain
 }
 
@@ -70,25 +79,12 @@ func NewMountIndexer(ms *vfs.MountSession, eng *brain.Engine, scope brain.Scope)
 	if err := scope.Namespace.Validate(); err != nil {
 		return nil, fmt.Errorf("vfsindex: scope namespace: %w", err)
 	}
-	return &MountIndexer{
-		VFS:           ms,
-		Brain:         eng,
-		Scope:         scope,
-		DocumentKind:  DefaultDocumentKind,
-		ChunkKind:     DefaultChunkKind,
-		LinesPerChunk: DefaultLinesPerChunk,
-		MaxIndexBytes: DefaultMaxIndexBytes,
-		nsKey:         scope.Namespace.String(),
-	}, nil
+	return &MountIndexer{VFS: ms, Brain: eng, Scope: scope}, nil
 }
 
 // DocumentID returns the stable brain id for a virtual path under this scope.
 func (x *MountIndexer) DocumentID(virtualPath string) uuid.UUID {
-	buf := make([]byte, 0, len(x.nsKey)+1+len(virtualPath))
-	buf = append(buf, x.nsKey...)
-	buf = append(buf, 0)
-	buf = append(buf, virtualPath...)
-	return uuid.NewSHA1(documentIDNS, buf)
+	return uuid.NewSHA1(documentIDNS, []byte(x.Scope.Namespace.Key()+"\x00"+virtualPath))
 }
 
 // PathIndexResult is a compact outcome of indexing one path
@@ -98,24 +94,13 @@ type PathIndexResult string
 const (
 	// PathIndexed means Document/Chunks were written or re-chunked.
 	PathIndexed PathIndexResult = "indexed"
-	// PathSkipped means hash match, binary, non-text, or PolicyNone.
+	// PathSkipped means version match, binary, non-text, or PolicyNone.
 	PathSkipped PathIndexResult = "skipped"
 	// PathRemoved means the path was missing and any brain mirror was soft-deleted.
 	PathRemoved PathIndexResult = "removed"
-	// PathDirectory means the path is a directory (IndexPath is a no-op for dirs).
+	// PathDirectory means the path is a directory (IndexPath does nothing for a directory).
 	PathDirectory PathIndexResult = "directory"
 )
-
-// IndexPath indexes one virtual file (or removes the brain mirror if missing).
-func (x *MountIndexer) IndexPath(ctx context.Context, virtualPath string) error {
-	_, err := x.indexPath(ctx, virtualPath)
-	return err
-}
-
-// IndexPathResult indexes one path and returns a compact outcome for tools/hosts.
-func (x *MountIndexer) IndexPathResult(ctx context.Context, virtualPath string) (PathIndexResult, error) {
-	return x.indexPath(ctx, virtualPath)
-}
 
 func (x *MountIndexer) readyPath(ctx context.Context, virtualPath string) (string, PathIndexResult, error) {
 	if err := ctx.Err(); err != nil {
@@ -131,9 +116,9 @@ func (x *MountIndexer) readyPath(ctx context.Context, virtualPath string) (strin
 	return cleaned, "", nil
 }
 
-// IndexFileResult indexes a path already known to exist (caller Stat'd).
+// IndexFile indexes a path already known to exist (caller Stat'd).
 // It does not Stat again, so batch tools can validate once then index.
-func (x *MountIndexer) IndexFileResult(ctx context.Context, virtualPath string, st vfs.FileInfo) (PathIndexResult, error) {
+func (x *MountIndexer) IndexFile(ctx context.Context, virtualPath string, st vfs.FileInfo) (PathIndexResult, error) {
 	cleaned, skip, err := x.readyPath(ctx, virtualPath)
 	if err != nil {
 		return "", err
@@ -159,7 +144,7 @@ func (x *MountIndexer) UnindexPath(ctx context.Context, virtualPath string) (boo
 		return false, err
 	}
 	parentID := x.DocumentID(cleaned)
-	if _, err := x.Brain.Read(ctx, x.Scope, parentID); err != nil {
+	if _, err := x.Brain.Get(ctx, x.Scope, parentID); err != nil {
 		if errors.Is(err, brain.ErrNotFound) {
 			return false, nil
 		}
@@ -176,7 +161,8 @@ func (x *MountIndexer) skipIndex(virtualPath string) bool {
 	return err == nil && NormalizePolicy(spec.IndexPolicy) == PolicyNone
 }
 
-func (x *MountIndexer) indexPath(ctx context.Context, virtualPath string) (PathIndexResult, error) {
+// IndexPath indexes one virtual file, or removes its mirror when the file is missing.
+func (x *MountIndexer) IndexPath(ctx context.Context, virtualPath string) (PathIndexResult, error) {
 	cleaned, skip, err := x.readyPath(ctx, virtualPath)
 	if err != nil {
 		return "", err
@@ -221,7 +207,7 @@ func (x *MountIndexer) IndexPrefix(ctx context.Context, prefix string, opts Inde
 			return errIndexLimit
 		}
 		files++
-		out, err := x.indexPath(ctx, vpath)
+		out, err := x.IndexPath(ctx, vpath)
 		if err != nil {
 			return err
 		}
@@ -244,295 +230,227 @@ func (x *MountIndexer) IndexPrefix(ctx context.Context, prefix string, opts Inde
 var errIndexLimit = errors.New("vfsindex: file limit")
 
 func (x *MountIndexer) indexFile(ctx context.Context, vpath string, st vfs.FileInfo) (PathIndexResult, error) {
-	linesPer := x.LinesPerChunk
-	if linesPer <= 0 {
-		linesPer = DefaultLinesPerChunk
-	}
-	maxBytes := x.MaxIndexBytes
-	if maxBytes <= 0 {
-		maxBytes = DefaultMaxIndexBytes
-	}
-	docKind := x.DocumentKind
-	if docKind == "" {
-		docKind = DefaultDocumentKind
-	}
-	chunkKind := x.ChunkKind
-	if chunkKind == "" {
-		chunkKind = DefaultChunkKind
-	}
-
-	mt := st.MediaType
-	if mt == "" {
-		mt = "application/octet-stream"
-	}
+	mt := cmp.Or(st.MediaType, "application/octet-stream")
 	if !vfs.IsTextLike(mt) && !vfs.IsProjected(mt) {
 		return PathSkipped, nil
 	}
-
-	parentID := x.DocumentID(vpath)
-	base := path.Base(vpath)
-
-	// Session IR when available: hash-check before chunking; Structured → block chunks.
-
-	if doc, err := x.VFS.Route(ctx, vpath).
-		ReadText(ctx); err == nil {
-		body := doc.Text()
-		if isBinaryPrefix(body) {
-			return PathSkipped, nil
-		}
-		nBytes := int64(len(body))
-		truncated := nBytes > maxBytes
-		if truncated {
-			body = body[:maxBytes]
-		}
-		hash := vfs.ContentToken(doc)
-		mediaType := doc.MediaType()
-		if mediaType == "" {
-			mediaType = mt
-		}
-		unchanged, err := x.contentHashUnchanged(ctx, parentID, hash)
-		if err != nil {
-			return "", err
-		}
-		if unchanged {
-			return PathSkipped, nil
-		}
-		var chunks []chunkDraft
-		if !truncated {
-			if s, ok := doc.(vfs.Structured); ok {
-				if blocks := s.Blocks(); len(blocks) > 0 {
-					if vfs.IsProjected(mediaType) {
-						chunks = chunksFromBlockText(base, blocks, parentID)
-					} else {
-						chunks = chunksFromBlocks(base, body, blocks, parentID)
-					}
-				}
-			}
-		}
-		if len(chunks) == 0 {
-			chunks = lineChunksFromText(body, linesPer)
-		}
-		return x.putFileIndex(ctx, vpath, base, st, parentID, docKind, chunkKind, mediaType, hash, nBytes, chunks)
-	}
-
-	// One-pass stream: hash while chunking (re-open for hash-only would double IO
-	// on the common AfterPersist "content changed" path).
-
-	f, err := x.VFS.Route(ctx, vpath).
-		Open(ctx)
+	sizes, err := x.Chunking.withDefaults()
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
-	r, ok := f.(io.Reader)
-	if !ok {
-		return "", fmt.Errorf("vfsindex: file is not readable")
-	}
-	chunks, hash, nBytes, err := streamChunks(ctx, r, linesPer, maxBytes)
+	readers, err := x.readers(ctx, vpath, st)
 	if err != nil {
 		return "", err
 	}
-	if chunks == nil && hash == "" {
-		return PathSkipped, nil
-	}
-	unchanged, err := x.contentHashUnchanged(ctx, parentID, hash)
+	doc := x.document(vpath, st, mt, readers)
+	unchanged, err := x.unchanged(ctx, doc.ID, st.Version, readers)
 	if err != nil {
 		return "", err
 	}
 	if unchanged {
 		return PathSkipped, nil
 	}
-	return x.putFileIndex(ctx, vpath, base, st, parentID, docKind, chunkKind, mt, hash, nBytes, chunks)
-}
-
-// contentHashUnchanged reports whether the parent Document already has hash.
-func (x *MountIndexer) contentHashUnchanged(ctx context.Context, parentID uuid.UUID, hash string) (bool, error) {
-	existing, err := x.Brain.Read(ctx, x.Scope, parentID)
-	if err != nil {
-		if errors.Is(err, brain.ErrNotFound) {
-			return false, nil
+	for attempt := 1; ; attempt++ {
+		out, err := x.writeFile(ctx, vpath, doc, sizes)
+		if !errors.Is(err, brain.ErrConflict) || attempt == maxConflictRetries {
+			return out, err
 		}
-		return false, err
 	}
-	h, _ := existing.Properties[PropContentHash].(string)
-	return h == hash, nil
 }
 
-// putFileIndex writes parent Document and replaces Chunk children.
-func (x *MountIndexer) putFileIndex(
-	ctx context.Context,
-	vpath, base string,
-	st vfs.FileInfo,
-	parentID uuid.UUID,
-	docKind, chunkKind, mediaType, hash string,
-	nBytes int64,
-	chunks []chunkDraft,
-) (PathIndexResult, error) {
-	mtime := ""
-	if !st.ModTime.IsZero() {
-		mtime = st.ModTime.UTC().Format(time.RFC3339)
+// readers resolves the file's source ACL, sorted so a re-index can compare it.
+func (x *MountIndexer) readers(ctx context.Context, vpath string, st vfs.FileInfo) ([]string, error) {
+	if x.Readers == nil {
+		return nil, nil
 	}
-	size := float64(nBytes)
-	if st.Size > 0 {
-		size = float64(st.Size)
+	got, err := x.Readers(ctx, vpath, st)
+	if err != nil {
+		return nil, fmt.Errorf("vfsindex: readers for %s: %w", vpath, err)
 	}
+	if len(got) == 0 {
+		return nil, nil
+	}
+	return slices.Compact(slices.Sorted(slices.Values(got))), nil
+}
 
-	parent := brain.Object{
-		ID:          parentID,
-		Kind:        docKind,
-		Title:       base,
+// document is the Document object that mirrors the file at vpath.
+func (x *MountIndexer) document(vpath string, st vfs.FileInfo, mt string, readers []string) brain.Object {
+	doc := brain.Object{
+		ID:          x.DocumentID(vpath),
+		Kind:        cmp.Or(x.DocumentKind, DefaultDocumentKind),
+		Title:       path.Base(vpath),
 		Summary:     vpath,
-		ContentType: mediaType,
+		ContentType: mt,
+		Readers:     readers,
 		Properties: map[string]any{
-			PropVFSPath:     vpath,
-			PropSize:        size,
-			PropContentHash: hash,
-			PropMediaType:   mediaType,
+			PropVFSPath:   vpath,
+			PropSize:      float64(st.Size),
+			PropMediaType: mt,
 		},
 	}
-	if mtime != "" {
-		parent.Properties[PropMTime] = mtime
+	if st.Version != "" {
+		doc.Properties[PropSourceVersion] = st.Version
 	}
-	if _, err := x.Brain.Put(ctx, x.Scope, parent); err != nil {
-		return "", err
+	if !st.ModTime.IsZero() {
+		doc.Properties[PropMTime] = st.ModTime.UTC().Format(time.RFC3339)
 	}
+	return doc
+}
 
-	old, err := x.Brain.ListChildren(ctx, x.Scope, parentID)
+// unchanged reports whether the Document already mirrors this version of
+// the file with these readers, so the file is not opened at all. A backend
+// without versions always reads; unchanged chunks then write nothing.
+func (x *MountIndexer) unchanged(ctx context.Context, id uuid.UUID, version string, readers []string) (bool, error) {
+	if version == "" {
+		return false, nil
+	}
+	existing, err := x.Brain.Get(ctx, x.Scope, id)
+	if errors.Is(err, brain.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	v, _ := existing.Properties[PropSourceVersion].(string)
+	return v == version && slices.Equal(existing.Readers, readers), nil
+}
+
+// writeFile reads the file once and replaces doc's Chunks with one PutTree.
+// Chunks stream into PutTree, which embeds and writes only the ones whose
+// text changed; a failure leaves the previous version in place.
+func (x *MountIndexer) writeFile(ctx context.Context, vpath string, doc brain.Object, sizes ChunkSizes) (PathIndexResult, error) {
+	kind := cmp.Or(x.ChunkKind, DefaultChunkKind)
+	structured, err := x.readStructured(ctx, vpath, doc.ContentType)
 	if err != nil {
 		return "", err
 	}
-	for _, c := range old {
-		if err := x.Brain.SoftDelete(ctx, x.Scope, c.ID); err != nil && !errors.Is(err, brain.ErrNotFound) {
+	var parts iter.Seq2[brain.Object, error]
+	if structured != nil {
+		if text := structured.Text(); isBinarySample([]byte(text[:min(len(text), 512)])) {
+			return PathSkipped, nil
+		}
+		doc.ContentType = cmp.Or(structured.MediaType(), doc.ContentType)
+		doc.Properties[PropMediaType] = doc.ContentType
+		parts = blockParts(ctx, doc.Title, kind, structured, sizes)
+	} else {
+		f, err := x.VFS.Route(ctx, vpath).Open(ctx)
+		if err != nil {
 			return "", err
 		}
+		defer f.Close()
+		r, ok := f.(io.Reader)
+		if !ok {
+			return "", fmt.Errorf("vfsindex: file is not readable")
+		}
+		br := bufio.NewReaderSize(r, 64<<10)
+		if sample, _ := br.Peek(512); isBinarySample(sample) {
+			return PathSkipped, nil
+		}
+		parts = streamParts(chunks(ctx, br, sizes, cmp.Or(x.MaxIndexBytes, DefaultMaxIndexBytes)), kind)
 	}
-
-	for i, ch := range chunks {
-		pos := i + 1
-		id := ch.ID
-		if id == uuid.Nil {
-			id = chunkID(parentID, pos)
-		}
-		title := ch.Title
-		if title == "" {
-			title = base + ":" + strconv.Itoa(ch.StartLine) + "-" + strconv.Itoa(ch.EndLine)
-		}
-		obj := brain.Object{
-			ID:       id,
-			Kind:     chunkKind,
-			Title:    title,
-			Content:  ch.Text,
-			ParentID: &parentID,
-			Position: &pos,
-			Properties: map[string]any{
-				PropStartLine: float64(ch.StartLine),
-				PropEndLine:   float64(ch.EndLine),
-				PropByteStart: float64(ch.ByteStart),
-				PropByteEnd:   float64(ch.ByteEnd),
-			},
-		}
-		if ch.BlockID != "" {
-			obj.Properties[PropBlockID] = ch.BlockID
-			obj.Properties[PropHeadingPath] = ch.BlockID
-		}
-		if _, err := x.Brain.Put(ctx, x.Scope, obj); err != nil {
-			return "", err
-		}
+	if _, err := x.Brain.PutTree(ctx, x.Scope, doc, parts); err != nil {
+		return "", err
 	}
 	return PathIndexed, nil
 }
 
-func chunksFromBlockText(fileTitle string, blocks []vfs.Block, parentID uuid.UUID) []chunkDraft {
-	out := make([]chunkDraft, 0, len(blocks))
-	var textBuf strings.Builder
-	for _, b := range blocks {
-		title := b.Text
-		if title == "" {
-			title = b.ID
-		}
-		textBuf.Reset()
-		textBuf.Grow(len(fileTitle) + 1 + len(title) + 1 + len(b.Text))
-		textBuf.WriteString(fileTitle)
-		textBuf.WriteByte('\n')
-		textBuf.WriteString(title)
-		textBuf.WriteByte('\n')
-		textBuf.WriteString(b.Text)
-		start, end := b.Style.Span.StartLine, b.Style.Span.EndLine
-		out = append(out, chunkDraft{
-			ID:        chunkIDByKey(parentID, b.ID),
-			Title:     fileTitle + "#" + b.ID,
-			Text:      textBuf.String(),
-			StartLine: start,
-			EndLine:   end,
-			BlockID:   b.ID,
-		})
+// readStructured decodes a file whose media type has a block tree. It
+// returns nil, so the file streams as plain text, for other types and for
+// files the document path cannot read: over vfs.MaxReadFileBytes, not
+// UTF-8, or on a backend without documents.
+func (x *MountIndexer) readStructured(ctx context.Context, vpath, mt string) (vfs.Textual, error) {
+	if !vfs.HasStructure(mt) {
+		return nil, nil
 	}
-	return out
+	doc, err := x.VFS.Route(ctx, vpath).ReadText(ctx)
+	if errors.Is(err, vfs.ErrTooLarge) || errors.Is(err, vfs.ErrInvalidUTF8) || errors.Is(err, vfs.ErrNotSupported) {
+		return nil, nil
+	}
+	return doc, err
 }
 
-func chunksFromBlocks(fileTitle, body string, blocks []vfs.Block, parentID uuid.UUID) []chunkDraft {
-	// One line-start scan; span text is a body substring (no Split/Join copies).
-	starts := lineStarts(body)
-	nLines := len(starts)
-	out := make([]chunkDraft, 0, len(blocks))
-	var textBuf strings.Builder
-	for _, b := range blocks {
-		start, end := b.Style.Span.StartLine, b.Style.Span.EndLine
-		if start < 1 {
-			continue
+// streamParts maps streamed chunks to Chunk parts. Blank chunks are dropped.
+func streamParts(src iter.Seq2[chunk, error], kind string) iter.Seq2[brain.Object, error] {
+	return func(yield func(brain.Object, error) bool) {
+		for ch, err := range src {
+			if err != nil {
+				yield(brain.Object{}, err)
+				return
+			}
+			if strings.TrimSpace(ch.Text) == "" {
+				continue
+			}
+			if !yield(chunkPart(kind, "", "", ch), nil) {
+				return
+			}
 		}
-		if end > nLines+1 {
-			end = nLines + 1
-		}
-		if start > end {
-			continue
-		}
-		seg := lineSpan(body, starts, start, end)
-		title := b.Text
-		if title == "" {
-			title = b.ID
-		}
-		textBuf.Reset()
-		textBuf.Grow(len(fileTitle) + 1 + len(title) + 1 + len(seg))
-		textBuf.WriteString(fileTitle)
-		textBuf.WriteByte('\n')
-		textBuf.WriteString(title)
-		textBuf.WriteByte('\n')
-		textBuf.WriteString(seg)
-		out = append(out, chunkDraft{
-			ID:        chunkIDByKey(parentID, b.ID),
-			Title:     fileTitle + "#" + b.ID,
-			Text:      textBuf.String(),
-			StartLine: start,
-			EndLine:   end,
-			BlockID:   b.ID,
-		})
 	}
-	return out
 }
 
-func lineChunksFromText(body string, linesPer int) []chunkDraft {
-	starts := lineStarts(body)
-	n := len(starts)
-	out := make([]chunkDraft, 0, (n+linesPer-1)/linesPer)
-	var byteOff int64
-	for i := 0; i < n; {
-		end := i + linesPer
-		if end > n {
-			end = n
-		}
-		seg := lineSpan(body, starts, i+1, end+1)
-		out = append(out, chunkDraft{
-			Text:      seg,
-			StartLine: i + 1,
-			EndLine:   end, // inclusive, same as streamChunks
-			ByteStart: byteOff,
-			ByteEnd:   byteOff + int64(len(seg)),
-		})
-		byteOff += int64(len(seg)) + 1
-		i = end
+// blockParts yields one Chunk per block of doc; a block over sizes.Max is
+// split into content-defined chunks. A document without blocks is chunked
+// like a plain-text file.
+func blockParts(ctx context.Context, base, kind string, doc vfs.Textual, sizes ChunkSizes) iter.Seq2[brain.Object, error] {
+	body := doc.Text()
+	var blocks []vfs.Block
+	if s, ok := doc.(vfs.Structured); ok {
+		blocks = s.Blocks()
 	}
-	return out
+	if len(blocks) == 0 {
+		return streamParts(chunks(ctx, strings.NewReader(body), sizes, 0), kind)
+	}
+	projected := vfs.IsProjected(doc.MediaType())
+	var starts []int
+	if !projected {
+		starts = lineStarts(body)
+	}
+	return func(yield func(brain.Object, error) bool) {
+		for _, b := range blocks {
+			start, end := b.Style.Span.StartLine, b.Style.Span.EndLine
+			seg, offset := b.Text, int64(0)
+			if !projected {
+				// Clamp the span to the body, so a malformed block reads as empty.
+				start = min(max(start, 1), len(starts))
+				end = min(max(end, start), len(starts)+1)
+				seg, offset = lineSpan(body, starts, start, end), int64(starts[start-1])
+			}
+			title := base + "#" + b.ID
+			if len(seg) <= sizes.Max {
+				ch := chunk{Text: seg, StartLine: start, EndLine: end, ByteStart: offset, ByteEnd: offset + int64(len(seg))}
+				if !yield(chunkPart(kind, title, b.ID, ch), nil) {
+					return
+				}
+				continue
+			}
+			for ch, err := range chunks(ctx, strings.NewReader(seg), sizes, 0) {
+				if err != nil {
+					yield(brain.Object{}, err)
+					return
+				}
+				ch.StartLine, ch.EndLine = ch.StartLine+start-1, ch.EndLine+start-1
+				ch.ByteStart, ch.ByteEnd = ch.ByteStart+offset, ch.ByteEnd+offset
+				if !yield(chunkPart(kind, title, b.ID, ch), nil) {
+					return
+				}
+			}
+		}
+	}
+}
+
+// chunkPart is the Chunk object for ch. Line and byte ranges live in
+// properties, not the title, so moving a chunk never changes its embedding.
+func chunkPart(kind, title, blockID string, ch chunk) brain.Object {
+	props := map[string]any{
+		PropStartLine: float64(ch.StartLine),
+		PropEndLine:   float64(ch.EndLine),
+		PropByteStart: float64(ch.ByteStart),
+		PropByteEnd:   float64(ch.ByteEnd),
+	}
+	if blockID != "" {
+		props[PropBlockID] = blockID
+		props[PropHeadingPath] = blockID
+	}
+	return brain.Object{Kind: kind, Title: title, Content: ch.Text, Properties: props}
 }
 
 // lineStarts returns byte offsets of each line start (matches strings.Split count).
@@ -569,154 +487,10 @@ func lineSpan(body string, starts []int, start, end int) string {
 }
 
 func (x *MountIndexer) removeIndex(ctx context.Context, vpath string) error {
-	parentID := x.DocumentID(vpath)
-	children, err := x.Brain.ListChildren(ctx, x.Scope, parentID)
-	if err != nil && !errors.Is(err, brain.ErrNotFound) {
-		// ListChildren may fail if parent missing — treat as gone.
-		if _, rerr := x.Brain.Read(ctx, x.Scope, parentID); errors.Is(rerr, brain.ErrNotFound) {
-			return nil
-		}
-		return err
-	}
-	for _, c := range children {
-		if err := x.Brain.SoftDelete(ctx, x.Scope, c.ID); err != nil && !errors.Is(err, brain.ErrNotFound) {
-			return err
-		}
-	}
-	if err := x.Brain.SoftDelete(ctx, x.Scope, parentID); err != nil && !errors.Is(err, brain.ErrNotFound) {
+	if err := x.Brain.SoftDelete(ctx, x.Scope, x.DocumentID(vpath)); err != nil && !errors.Is(err, brain.ErrNotFound) {
 		return err
 	}
 	return nil
-}
-
-type chunkDraft struct {
-	ID        uuid.UUID
-	Title     string
-	Text      string
-	StartLine int
-	EndLine   int
-	ByteStart int64
-	ByteEnd   int64
-	BlockID   string
-}
-
-func chunkIDByKey(parent uuid.UUID, key string) uuid.UUID {
-	return uuid.NewSHA1(parent, []byte("block:"+key))
-}
-
-func streamChunks(ctx context.Context, r io.Reader, linesPerChunk int, maxBytes int64) ([]chunkDraft, string, int64, error) {
-	h := sha256.New()
-	br := bufio.NewReaderSize(io.TeeReader(r, h), 64*1024)
-	var (
-		out            []chunkDraft
-		buf            strings.Builder
-		linesInChunk   int
-		chunkStart     = 1
-		chunkByteStart int64
-		byteOff        int64
-		scanned        int64
-		checkedBinary  bool
-	)
-	if linesPerChunk > 0 {
-		buf.Grow(linesPerChunk * 64)
-	}
-	flush := func() {
-		if linesInChunk == 0 {
-			return
-		}
-		text := buf.String()
-		endLine := chunkStart + linesInChunk - 1
-		out = append(out, chunkDraft{
-			Text:      text,
-			StartLine: chunkStart,
-			EndLine:   endLine,
-			ByteStart: chunkByteStart,
-			ByteEnd:   byteOff,
-		})
-		buf.Reset()
-		linesInChunk = 0
-		chunkStart = endLine + 1
-		chunkByteStart = byteOff
-	}
-
-	for {
-		if err := ctx.Err(); err != nil {
-			return nil, "", 0, err
-		}
-		s, err := br.ReadString('\n')
-		if len(s) == 0 && errors.Is(err, io.EOF) {
-			break
-		}
-		if !checkedBinary {
-			checkedBinary = true
-			n := len(s)
-			if n > 512 {
-				n = 512
-			}
-			if isBinarySample([]byte(s[:n])) {
-				return nil, "", 0, nil
-			}
-		}
-		scanned += int64(len(s))
-		if scanned > maxBytes {
-			flush()
-			break
-		}
-		line := s
-		if len(line) > 0 && line[len(line)-1] == '\n' {
-			line = line[:len(line)-1]
-		}
-		if len(line) > 0 && line[len(line)-1] == '\r' {
-			line = line[:len(line)-1]
-		}
-		if len(line) > vfs.MaxLineBytes {
-			line = line[:vfs.MaxLineBytes]
-		}
-		if linesInChunk > 0 {
-			buf.WriteByte('\n')
-		}
-		buf.WriteString(line)
-		linesInChunk++
-		byteOff += int64(len(s))
-		if linesInChunk >= linesPerChunk {
-			flush()
-		}
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return nil, "", 0, err
-		}
-	}
-	flush()
-	sum := hex.EncodeToString(h.Sum(nil))
-	return out, sum, scanned, nil
-}
-
-func isBinaryPrefix(s string) bool {
-	n := len(s)
-	if n > 512 {
-		n = 512
-	}
-	if n == 0 {
-		return false
-	}
-	return isBinarySample([]byte(s[:n]))
-}
-
-func isBinarySample(sample []byte) bool {
-	if len(sample) > 512 {
-		sample = sample[:512]
-	}
-	return len(sample) > 0 && (bytes.IndexByte(sample, 0) >= 0 || !utf8.Valid(sample))
-}
-
-func chunkID(parent uuid.UUID, pos int) uuid.UUID {
-	// "chunk:" + decimal pos; 24 bytes covers typical positions without growth.
-	buf := make([]byte, 0, 24)
-	buf = append(buf, "chunk:"...)
-	buf = strconv.AppendInt(buf, int64(pos), 10)
-	return uuid.NewSHA1(parent, buf)
 }
 
 func walk(ctx context.Context, ms *vfs.MountSession, vpath string, fn func(vpath string, isDir bool) error) error {

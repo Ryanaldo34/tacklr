@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -13,7 +15,7 @@ import (
 	"github.com/ryanaldo34/tacklr/brain"
 )
 
-func TestNormalizeKindSpec_rejectsInvalidFields(t *testing.T) {
+func TestKindSpecNormalize_rejectsInvalidFields(t *testing.T) {
 	cases := []struct {
 		name string
 		spec brain.KindSpec
@@ -56,7 +58,7 @@ func TestNormalizeKindSpec_rejectsInvalidFields(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := brain.NormalizeKindSpec(tc.spec)
+			_, err := tc.spec.Normalize()
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("got %v, want containing %q", err, tc.want)
 			}
@@ -64,14 +66,16 @@ func TestNormalizeKindSpec_rejectsInvalidFields(t *testing.T) {
 	}
 }
 
-func TestValidateFiltersAgainst_catalogRules(t *testing.T) {
+func TestFilterValidateAgainst_catalogRules(t *testing.T) {
 	store := brain.NewMemoryStore()
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithKinds(
+	eng, err := brain.NewEngine(store, brain.WithKinds(
 		brain.KindSpec{
 			Kind: "Document", IsParent: true,
 			Fields: []brain.FieldSpec{
 				{Name: "stage", Type: brain.FieldTypeString},
 				{Name: "amount", Type: brain.FieldTypeNumber},
+				{Name: "signed", Type: brain.FieldTypeBoolean},
+				{Name: "due", Type: brain.FieldTypeDateTime},
 			},
 		},
 		brain.KindSpec{
@@ -90,11 +94,18 @@ func TestValidateFiltersAgainst_catalogRules(t *testing.T) {
 		filters brain.Filter
 		wantErr string // empty ⇒ expect success
 	}{
-		{"property requires kind", mustFilter(t, map[string]any{"stage": "open"}), "require a kind"},
-		{"unregistered kind", mustFilter(t, map[string]any{"kind": "Orphan"}), "not registered"},
-		{"unknown property", mustFilter(t, map[string]any{"kind": "Document", "unknown": "x"}), "not filterable"},
+		{"property requires kind", mustFilter(t, map[string]any{"stage": "open"}), "filter \"stage\" needs a kind; kinds: Deal, Document"},
+		{"unregistered kind", mustFilter(t, map[string]any{"kind": "Orphan"}), "unknown kind \"Orphan\"; kinds: Deal, Document"},
+		{"unknown property", mustFilter(t, map[string]any{"kind": "Document", "unknown": "x"}), "unknown filter \"unknown\" for Document; filterable: amount, due, signed, stage"},
 		{"wrong type", mustFilter(t, map[string]any{"kind": "Document", "stage": 1}), "want string"},
-		{"kind list intersection", mustFilter(t, map[string]any{"kind": []any{"Document", "Deal"}, "stage": "open"}), "not filterable"},
+		{"a number field given text", mustFilter(t, map[string]any{"kind": "Document", "amount": "many"}), "want number"},
+		{"a boolean field given text", mustFilter(t, map[string]any{"kind": "Document", "signed": "yes"}), "want boolean"},
+		{"a boolean field given a list", mustFilter(t, map[string]any{"kind": "Document", "signed": []any{true}}), "list values"},
+		{"a datetime field given a number", mustFilter(t, map[string]any{"kind": "Document", "due": 5}), "want datetime"},
+		{"a datetime field given an empty string", mustFilter(t, map[string]any{"kind": "Document", "due": ""}), "empty time"},
+		{"a list item of the wrong type", mustFilter(t, map[string]any{"kind": "Document", "stage": []any{"open", 2}}), "list[1]"},
+		{"valid datetime and boolean", mustFilter(t, map[string]any{"kind": "Document", "due": "2026-01-02", "signed": true}), ""},
+		{"kind list intersection", mustFilter(t, map[string]any{"kind": []any{"Document", "Deal"}, "stage": "open"}), "unknown filter \"stage\" for Deal; filterable: amount"},
 		{"valid single kind", mustFilter(t, map[string]any{"kind": "Document", "stage": "open"}), ""},
 		{"valid list filter", mustFilter(t, map[string]any{"kind": "Document", "stage": []any{"open", "closed"}}), ""},
 		{"valid shared field on one kind", mustFilter(t, map[string]any{"kind": "Deal", "amount": 42}), ""},
@@ -102,21 +113,21 @@ func TestValidateFiltersAgainst_catalogRules(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := brain.ValidateFiltersAgainst(tc.filters, cat)
+			err := tc.filters.ValidateAgainst(cat)
 			if tc.wantErr == "" {
 				if err != nil {
 					t.Fatal(err)
 				}
 				return
 			}
-			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-				t.Fatalf("got %v, want containing %q", err, tc.wantErr)
+			if !errors.Is(err, brain.ErrInvalid) || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("got %v, want ErrInvalid containing %q", err, tc.wantErr)
 			}
 		})
 	}
 }
 
-func TestEmptyCatalog_openFiltersAndStoreSchema(t *testing.T) {
+func TestEmptyCatalog_openFiltersAndTheStoresKinds(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
 	if err := store.PutKind(ctx, brain.ObjectKind{
@@ -125,28 +136,32 @@ func TestEmptyCatalog_openFiltersAndStoreSchema(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
+	eng, err := brain.NewEngine(store)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !eng.Catalog().Empty() {
 		t.Fatal("catalog should be empty")
 	}
-	res, err := eng.Schema(ctx, "Document")
-	if err != nil || len(res.Kinds) != 1 || res.Kinds[0].Description != "from store" {
-		t.Fatalf("store schema: %+v err=%v", res, err)
+	doc := brain.Object{ID: uuid.New(), Kind: "Document", Title: "d", Namespace: tenant(t)}
+	if err := putFixture(store, doc); err != nil {
+		t.Fatal(err)
 	}
-	if err := brain.ValidateFiltersAgainst(mustFilter(t, map[string]any{"stage": "open"}), eng.Catalog()); err != nil {
+	res, err := eng.Open(ctx, brain.Scope{Namespace: doc.Namespace}, doc.ID)
+	if err != nil || res.Kind == nil || res.Kind.Description != "from store" {
+		t.Fatalf("open's kind from the store: %+v err=%v", res.Kind, err)
+	}
+	if err := mustFilter(t, map[string]any{"stage": "open"}).ValidateAgainst(eng.Catalog()); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestSchema_prefersCatalog(t *testing.T) {
+func TestOpen_takesTheKindFromTheCatalogOverTheStore(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
 	// Store has different description; catalog wins when non-empty.
 	_ = store.PutKind(ctx, brain.ObjectKind{Kind: "Document", Description: "store copy", IsParent: true})
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithKinds(
+	eng, err := brain.NewEngine(store, brain.WithKinds(
 		brain.KindSpec{
 			Kind: "Document", Description: "catalog copy", IsParent: true,
 			Fields: []brain.FieldSpec{{Name: "stage", Type: brain.FieldTypeString}},
@@ -157,42 +172,18 @@ func TestSchema_prefersCatalog(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	all, err := eng.Schema(ctx, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(all.Kinds) != 2 || all.Kinds[0].Kind != "Chunk" || all.Kinds[1].Kind != "Document" {
-		t.Fatalf("schema list: %+v", all.Kinds)
-	}
-	one, err := eng.Schema(ctx, "Document")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if one.Kinds[0].Description != "catalog copy" {
-		t.Fatalf("catalog should win: %+v", one)
-	}
-	// Agents must see which tools share filterable_fields (incl. find_objects).
-	if len(one.FilterUsage.Tools) < 3 || !strings.Contains(strings.Join(one.FilterUsage.Tools, ","), "find_objects") {
-		t.Fatalf("filter_usage.tools: %+v", one.FilterUsage)
-	}
-	if !strings.Contains(one.FilterUsage.Note, "filterable_fields") || !strings.Contains(one.FilterUsage.Note, "columns") {
-		t.Fatalf("filter_usage.note: %s", one.FilterUsage.Note)
-	}
-	if got := one.Kinds[0].Columns; len(got) != 3 || got[0].Name != "title" || !got[0].Filter || got[1].Name != "summary" || got[2].Name != "content" {
-		t.Fatalf("columns: %+v", got)
-	}
-	if !strings.Contains(one.FilterUsage.Note, "enum") {
-		t.Fatalf("filter_usage.note should mention enum: %s", one.FilterUsage.Note)
+	scope := brain.Scope{Namespace: tenant(t)}
+	doc := save(t, eng, scope, brain.Object{Kind: "Document", Title: "d"})
+	one, err := eng.Open(ctx, scope, doc.ID)
+	if err != nil || one.Kind == nil || one.Kind.Description != "catalog copy" {
+		t.Fatalf("catalog should win: %+v %v", one.Kind, err)
 	}
 	var fields []brain.FieldSpec
-	if err := json.Unmarshal(one.Kinds[0].FilterableFields, &fields); err != nil {
+	if err := json.Unmarshal(one.Kind.FilterableFields, &fields); err != nil {
 		t.Fatal(err)
 	}
 	if len(fields) != 1 || fields[0].Name != "stage" {
 		t.Fatalf("fields: %+v", fields)
-	}
-	if _, err := eng.Schema(ctx, "Missing"); !errors.Is(err, brain.ErrNotFound) {
-		t.Fatalf("missing: %v", err)
 	}
 }
 
@@ -205,56 +196,53 @@ func TestSearch_catalogRestrictsKindsAndAllowsFilteredHit(t *testing.T) {
 	orphanParent := uuid.New()
 	pos := 1
 
-	if err := store.Put(context.Background(), brain.Object{
+	if err := putFixture(store, brain.Object{
 		ID: docID, Kind: "Document", Title: "Deal memo", Namespace: ns, UpdatedAt: now,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Put(context.Background(), brain.Object{
+	if err := putFixture(store, brain.Object{
 		ID: uuid.New(), Kind: "Chunk", Title: "chunk", Content: "negotiation terms",
 		Namespace: ns, UpdatedAt: now, ParentID: &docID, Position: &pos,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Put(context.Background(), brain.Object{
+	if err := putFixture(store, brain.Object{
 		ID: orphanParent, Kind: "OrphanKind", Title: "orphan parent", Namespace: ns, UpdatedAt: now,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Put(context.Background(), brain.Object{
+	if err := putFixture(store, brain.Object{
 		ID: uuid.New(), Kind: "OrphanKind", Title: "orphan part", Content: "zzzxorphanonlyphrase",
 		Namespace: ns, UpdatedAt: now, ParentID: &orphanParent, Position: &pos,
 	}); err != nil {
 		t.Fatal(err)
 	}
 
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithKinds(
+	eng, err := brain.NewEngine(store, brain.WithKinds(
 		brain.KindSpec{Kind: "Document", IsParent: true},
 		brain.KindSpec{Kind: "Chunk", IsPart: true},
 	))
 	if err != nil {
 		t.Fatal(err)
 	}
-	sc := brain.NewSearchContext()
 	scope := brain.Scope{Namespace: ns}
 
-	page, err := eng.Search(ctx, scope, brain.SearchRequest{
-		Query: "negotiation", Filters: mustFilter(t, map[string]any{"kind": "Chunk"}),
-	}, sc)
+	page, err := eng.Search(ctx, scope, brain.SearchRequest{Query: "negotiation", Kind: "Document"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(page.Objects) != 1 || page.Objects[0].ID != docID {
-		t.Fatalf("want Document parent via Chunk hit, got %+v", page.Objects)
+	if len(slices.Collect(page.Results.Objects())) != 1 || slices.Collect(page.Results.Objects())[0].ID != docID {
+		t.Fatalf("want the Document through its Chunk's hit, got %+v", slices.Collect(page.Results.Objects()))
 	}
 
 	// Orphan-only phrase: catalog allow-list yields no hits (only registered kinds searched).
-	page, err = eng.Search(ctx, scope, brain.SearchRequest{Query: "zzzxorphanonlyphrase"}, sc)
+	page, err = eng.Search(ctx, scope, brain.SearchRequest{Query: "zzzxorphanonlyphrase"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(page.Objects) != 0 {
-		t.Fatalf("want no hits for orphan-only content under catalog, got %+v", page.Objects)
+	if len(slices.Collect(page.Results.Objects())) != 0 {
+		t.Fatalf("want no hits for orphan-only content under catalog, got %+v", slices.Collect(page.Results.Objects()))
 	}
 
 	// Successful search freezes the catalog; further RegisterKinds fails.
@@ -266,7 +254,7 @@ func TestSearch_catalogRestrictsKindsAndAllowsFilteredHit(t *testing.T) {
 func TestApplyKinds_migrationAddAndModify(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
+	eng, err := brain.NewEngine(store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,7 +272,7 @@ func TestApplyKinds_migrationAddAndModify(t *testing.T) {
 	if eng.Catalog().Empty() || len(eng.Catalog().Names()) != 2 {
 		t.Fatalf("catalog after v1: %v", eng.Catalog().Names())
 	}
-	row, err := store.GetKind(ctx, "Document")
+	row, err := kindNamed(ctx, store, "Document")
 	if err != nil || row.Description != "docs v1" {
 		t.Fatalf("durable v1: %+v err=%v", row, err)
 	}
@@ -316,13 +304,13 @@ func TestApplyKinds_migrationAddAndModify(t *testing.T) {
 	if len(eng.Catalog().Names()) != 3 {
 		t.Fatalf("names: %v", eng.Catalog().Names())
 	}
-	row, err = store.GetKind(ctx, "Document")
+	row, err = kindNamed(ctx, store, "Document")
 	if err != nil || row.Description != "docs v2" {
 		t.Fatalf("durable v2: %+v err=%v", row, err)
 	}
 
 	// New process adopts durable state via LoadKindsFromStore.
-	eng2, err := brain.NewEngine(store, brain.WithLexicalOnly())
+	eng2, err := brain.NewEngine(store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,13 +328,13 @@ func TestApplyKinds_migrationAddAndModify(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.GetKind(ctx, "Note"); err != nil {
+	if _, err := kindNamed(ctx, store, "Note"); err != nil {
 		t.Fatal(err)
 	}
 
 	// SyncKindsToStore flushes WithKinds catalog to a durable writer.
 	mem := brain.NewMemoryStore()
-	engSync, err := brain.NewEngine(mem, brain.WithLexicalOnly(), brain.WithKinds(
+	engSync, err := brain.NewEngine(mem, brain.WithKinds(
 		brain.KindSpec{Kind: "Synced", IsParent: true, Description: "via sync"},
 	))
 	if err != nil {
@@ -355,7 +343,7 @@ func TestApplyKinds_migrationAddAndModify(t *testing.T) {
 	if err := engSync.SyncKindsToStore(ctx); err != nil {
 		t.Fatal(err)
 	}
-	row, err = mem.GetKind(ctx, "Synced")
+	row, err = kindNamed(ctx, mem, "Synced")
 	if err != nil || row.Description != "via sync" {
 		t.Fatalf("sync: %+v err=%v", row, err)
 	}
@@ -372,7 +360,7 @@ func TestApplyKinds_migrationAddAndModify(t *testing.T) {
 func TestApplyKinds_invalidBatchFailsClosed(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
+	eng, err := brain.NewEngine(store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -386,28 +374,28 @@ func TestApplyKinds_invalidBatchFailsClosed(t *testing.T) {
 	if !eng.Catalog().Empty() {
 		t.Fatal("catalog must stay empty on failed migration")
 	}
-	if _, err := store.GetKind(ctx, "Document"); !errors.Is(err, brain.ErrNotFound) {
+	if _, err := kindNamed(ctx, store, "Document"); !errors.Is(err, brain.ErrNotFound) {
 		t.Fatalf("no partial durable write on batch validate fail: %v", err)
 	}
 }
 
 func TestWithKinds_invalidFailsNewEngine(t *testing.T) {
-	_, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly(), brain.WithKinds(brain.KindSpec{}))
+	_, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithKinds(brain.KindSpec{}))
 	if err == nil {
 		t.Fatal("want error")
 	}
 }
 
-func TestObjectKindFromSpec_roundTrip(t *testing.T) {
-	row, err := brain.ObjectKindFromSpec(brain.KindSpec{
-		Kind: "Doc", IsParent: true, Description: "d",
-		Fields: []brain.FieldSpec{{Name: "stage", Type: brain.FieldTypeString}},
-	})
-	if err != nil || row.Kind != "Doc" || !row.IsParent {
-		t.Fatalf("%+v err=%v", row, err)
+// kindNamed is kind's row in the store's kind registry.
+func kindNamed(ctx context.Context, s brain.Store, kind string) (brain.ObjectKind, error) {
+	kinds, err := s.ListKinds(ctx)
+	if err != nil {
+		return brain.ObjectKind{}, err
 	}
-	spec, err := brain.KindSpecFromObjectKind(row)
-	if err != nil || len(spec.Fields) != 1 || spec.Fields[0].Name != "stage" {
-		t.Fatalf("%+v err=%v", spec, err)
+	for _, k := range kinds {
+		if k.Kind == kind {
+			return k, nil
+		}
 	}
+	return brain.ObjectKind{}, fmt.Errorf("%w: kind %q", brain.ErrNotFound, kind)
 }

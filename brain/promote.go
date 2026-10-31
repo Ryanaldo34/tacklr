@@ -22,16 +22,14 @@ type promotedParent struct {
 	Evidence []Evidence
 }
 
-// promoteParents groups hits by parent. A hit with no parent_id is itself a parent
-// (no evidence). Part hits attach as evidence under parent_id.
-// When a parent has evidence, its score is the sum of the kept evidence scores.
-// A parent with no parts keeps its own score. A zero evidenceN selects 3.
-// A zero snippetCap selects defaultSnippetCap. query places the quote on the match.
+// promoteParents groups hits by parent. A hit with no parent_id is the
+// record itself; part hits attach as evidence under parent_id. A record
+// scores its own hit plus its kept evidence, so one whose own text matches
+// ranks above one that matches only through a part. A record keeps its
+// evidenceN best parts, each quoted in at most snippetCap runes around query.
 func promoteParents(parts []ScoredID, evidenceN int, query string, snippetCap int) []promotedParent {
-	evidenceN = cmp.Or(evidenceN, 3)
-	snippetCap = cmp.Or(snippetCap, defaultSnippetCap)
 	type bucket struct {
-		score    float64
+		own      float64 // the record's own hit
 		evidence []Evidence
 	}
 	byParent := make(map[uuid.UUID]bucket, len(parts))
@@ -45,12 +43,11 @@ func promoteParents(parts []ScoredID, evidenceN int, query string, snippetCap in
 		}
 		b, ok := byParent[pid]
 		if !ok {
-			b = bucket{score: p.Score}
 			order = append(order, pid)
-		} else if p.Score > b.score {
-			b.score = p.Score
 		}
-		if isPart {
+		if !isPart {
+			b.own = max(b.own, p.Score)
+		} else {
 			b.evidence = append(b.evidence, Evidence{
 				PartID:     p.ID,
 				Title:      p.Title,
@@ -75,15 +72,13 @@ func promoteParents(parts []ScoredID, evidenceN int, query string, snippetCap in
 		if len(b.evidence) > evidenceN {
 			b.evidence = b.evidence[:evidenceN]
 		}
-		if len(b.evidence) > 0 {
-			b.score = 0
-			for _, ev := range b.evidence {
-				b.score += ev.Score
-			}
+		score := b.own
+		for _, ev := range b.evidence {
+			score += ev.Score
 		}
 		out = append(out, promotedParent{
 			ParentID: pid,
-			Score:    b.score,
+			Score:    score,
 			Evidence: b.evidence,
 		})
 	}
@@ -101,7 +96,7 @@ func promoteParents(parts []ScoredID, evidenceN int, query string, snippetCap in
 // keeps the prefix. A window that is not the full text gains an ellipsis on the cut side.
 func snippetAround(s, query string, maxRunes int) string {
 	s = strings.TrimSpace(s)
-	if s == "" || maxRunes <= 0 {
+	if s == "" {
 		return s
 	}
 	folded := strings.ToLower(s)

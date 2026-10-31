@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -15,18 +16,30 @@ type Attr struct {
 	Value string `json:"value" desc:"Attribute value. Must not contain '.'."`
 }
 
-// Namespace is ordered named isolation attrs. Empty Scope means no isolation.
-// Covers: every scope attr is present on the object with the same value.
+// Namespace is ordered named isolation attrs. The first attr is the tenant:
+// the boundary every store filters on by equality, so no scope ever reaches
+// another tenant's rows. Every Scope needs a namespace; an empty one covers
+// nothing.
 type Namespace []Attr
 
-// Empty reports whether n has no attributes (no isolation when used as a Scope).
+// Empty reports whether n has no attributes.
 func (n Namespace) Empty() bool { return len(n) == 0 }
 
-// String joins attribute values with ".".
-func (n Namespace) String() string {
-	if len(n) == 0 {
-		return ""
+// Key is a canonical, collision-free encoding of n (names and values), for
+// deriving stable ids. Unlike String, {a=x.y} and {a=x, b=y} differ.
+func (n Namespace) Key() string {
+	var b strings.Builder
+	for _, a := range n {
+		b.WriteString(strconv.Quote(a.Name))
+		b.WriteByte('=')
+		b.WriteString(strconv.Quote(a.Value))
+		b.WriteByte(';')
 	}
+	return b.String()
+}
+
+// String joins attribute values with "." for display.
+func (n Namespace) String() string {
 	parts := make([]string, len(n))
 	for i, a := range n {
 		parts[i] = a.Value
@@ -40,34 +53,38 @@ func (n Namespace) Clone() Namespace { return slices.Clone(n) }
 // Equal reports whether n and o have the same attrs in the same order.
 func (n Namespace) Equal(o Namespace) bool { return slices.Equal(n, o) }
 
-// Covers reports whether obj is visible under this scope.
-// Empty scope covers all.
+// Covers reports whether obj is visible under this scope: both have the same
+// tenant (first attr), and every other scope attr is on obj with the same
+// value. An empty scope covers nothing.
 func (scope Namespace) Covers(obj Namespace) bool {
-	if len(scope) == 0 {
-		return true
+	if len(scope) == 0 || len(obj) == 0 || scope[0] != obj[0] {
+		return false
 	}
-	om := make(map[string]string, len(obj))
-	for _, a := range obj {
-		om[a.Name] = a.Value
-	}
-	for _, a := range scope {
-		if om[a.Name] != a.Value {
+	for _, a := range scope[1:] {
+		if !slices.Contains(obj, a) {
 			return false
 		}
 	}
 	return true
 }
 
-// Bind merges a per-call namespace onto this host ceiling.
-// Call may add attrs. A call value that disagrees with a ceiling attr is invalid.
+// Tenant is n's first attr as a namespace of its own (nil for an empty n).
+func (n Namespace) Tenant() Namespace {
+	return n[:min(len(n), 1)]
+}
+
+// Bind merges a per-call namespace onto this host ceiling: the widest
+// namespace the host lets a caller reach. The ceiling is required. Call may
+// add attrs to narrow it. A call value that disagrees with a ceiling attr is
+// invalid.
 func (ceiling Namespace) Bind(call Namespace) (Namespace, error) {
+	if err := ceiling.Validate(); err != nil {
+		return nil, fmt.Errorf("host ceiling: %w", err)
+	}
 	if len(call) > 0 {
 		if err := call.Validate(); err != nil {
 			return nil, err
 		}
-	}
-	if ceiling.Empty() {
-		return call.Clone(), nil
 	}
 	if call.Empty() {
 		return ceiling.Clone(), nil
@@ -90,28 +107,27 @@ func (ceiling Namespace) Bind(call Namespace) (Namespace, error) {
 }
 
 // Validate checks names, values, uniqueness, and that n is non-empty.
+// Every failure wraps ErrInvalid.
 func (n Namespace) Validate() error {
 	if len(n) == 0 {
-		return fmt.Errorf("brain: namespace is required")
+		return fmt.Errorf("%w: namespace is required", ErrInvalid)
 	}
 	seen := make(map[string]struct{}, len(n))
 	for i, a := range n {
 		name := strings.TrimSpace(a.Name)
 		val := strings.TrimSpace(a.Value)
-		if name == "" {
-			return fmt.Errorf("brain: namespace attr %d: name is required", i)
-		}
-		if val == "" {
-			return fmt.Errorf("brain: namespace attr %q: value is required", name)
-		}
-		if strings.Contains(name, ".") || strings.Contains(val, ".") {
-			return fmt.Errorf("brain: namespace attr %q: name and value must not contain '.'", name)
-		}
-		if name != a.Name || val != a.Value {
-			return fmt.Errorf("brain: namespace attr %q: name and value must not have surrounding space", name)
+		switch {
+		case name == "":
+			return fmt.Errorf("%w: namespace attr %d: name is required", ErrInvalid, i)
+		case val == "":
+			return fmt.Errorf("%w: namespace attr %q: value is required", ErrInvalid, name)
+		case strings.Contains(name, ".") || strings.Contains(val, "."):
+			return fmt.Errorf("%w: namespace attr %q: name and value must not contain '.'", ErrInvalid, name)
+		case name != a.Name || val != a.Value:
+			return fmt.Errorf("%w: namespace attr %q: name and value must not have surrounding space", ErrInvalid, name)
 		}
 		if _, ok := seen[name]; ok {
-			return fmt.Errorf("brain: namespace attr %q is duplicated", name)
+			return fmt.Errorf("%w: namespace attr %q is duplicated", ErrInvalid, name)
 		}
 		seen[name] = struct{}{}
 	}
@@ -120,11 +136,8 @@ func (n Namespace) Validate() error {
 
 // ParseNamespace builds a Namespace from name, value, name, value, ….
 func ParseNamespace(nameValues ...string) (Namespace, error) {
-	if len(nameValues) == 0 {
-		return nil, fmt.Errorf("brain: namespace is required")
-	}
 	if len(nameValues)%2 != 0 {
-		return nil, fmt.Errorf("brain: namespace name/value pairs are uneven")
+		return nil, fmt.Errorf("%w: namespace name/value pairs are uneven", ErrInvalid)
 	}
 	ns := make(Namespace, 0, len(nameValues)/2)
 	for i := 0; i+1 < len(nameValues); i += 2 {
@@ -139,12 +152,10 @@ func ParseNamespace(nameValues ...string) (Namespace, error) {
 	return ns, nil
 }
 
-// Value implements driver.Valuer (jsonb array of {name,value}).
+// Value implements driver.Valuer (jsonb array of {name,value}, as text).
 func (n Namespace) Value() (driver.Value, error) {
-	if n == nil {
-		return []byte("[]"), nil
-	}
-	return json.Marshal(n)
+	b, err := json.Marshal(n)
+	return string(b), err
 }
 
 // Scan implements sql.Scanner.
@@ -160,10 +171,6 @@ func (n *Namespace) Scan(src any) error {
 		return nil
 	default:
 		return fmt.Errorf("brain: cannot scan %T into Namespace", src)
-	}
-	if len(b) == 0 {
-		*n = nil
-		return nil
 	}
 	return json.Unmarshal(b, n)
 }

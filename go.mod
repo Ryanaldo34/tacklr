@@ -12,8 +12,8 @@ require (
 	github.com/coder/websocket v1.8.15
 	github.com/exaring/otelpgx v0.11.1
 	github.com/google/uuid v1.6.0
-	github.com/hanwen/go-fuse/v2 v2.11.0
-	github.com/helixdb/helix-db/sdks/go v0.1.3
+	github.com/hanwen/go-fuse/v2 v2.12.1
+	github.com/helixdb/helix-db/sdks/go v0.3.1
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/microsoft/kiota-abstractions-go v1.9.4
 	github.com/microsoft/kiota-http-go v1.5.6
@@ -48,6 +48,7 @@ require (
 	golang.org/x/net v0.62.0
 	golang.org/x/oauth2 v0.37.0
 	google.golang.org/api v0.293.0
+	google.golang.org/grpc v1.83.2
 	google.golang.org/protobuf v1.36.12
 )
 
@@ -151,5 +152,4 @@ require (
 	golang.org/x/time v0.15.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260928230214-8a89bd6388cc // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260928230214-8a89bd6388cc // indirect
-	google.golang.org/grpc v1.83.2 // indirect
 )

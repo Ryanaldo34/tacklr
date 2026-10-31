@@ -291,12 +291,6 @@ func TestFuseMount_projectedTextualReadOnly(t *testing.T) {
 	if err := FuseProbe(t.TempDir()); err != nil {
 		t.Skip(err.Error())
 	}
-	const media = "application/x-fuse-projected"
-	extMediaTypes[".proj"] = media
-	t.Cleanup(func() { delete(extMediaTypes, ".proj") })
-	if err := defaultContentRegistry.Register(fuseProjectedCodec{}); err != nil {
-		t.Fatal(err)
-	}
 
 	ctx := t.Context()
 	ms := mustTree(t, At("work", Local(t.TempDir())))
@@ -343,6 +337,15 @@ func TestFuseMount_projectedTextualReadOnly(t *testing.T) {
 		if err != nil || !strings.Contains(string(out), "EXTRACTED:container-bytes") {
 			t.Fatalf("rg projection: %v out=%s", err, out)
 		}
+	}
+}
+
+// The test binary registers a projected codec for ".proj" once, before any
+// test runs, so no test mutates the process-wide registry or extension map.
+func init() {
+	extMediaTypes[".proj"] = "application/x-fuse-projected"
+	if err := defaultContentRegistry.Register(fuseProjectedCodec{}); err != nil {
+		panic(err)
 	}
 }
 

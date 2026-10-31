@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ryanaldo34/tacklr/internal/testdrive"
 	"github.com/ryanaldo34/tacklr/internal/testhttp"
@@ -82,6 +85,7 @@ func (g *graphFX) json(n *graphNode) map[string]any {
 		"id": n.id, "name": n.name, "size": n.size,
 		"lastModifiedDateTime": n.lastMod,
 		"parentReference":      map[string]any{"id": n.parent},
+		"cTag":                 fmt.Sprintf("%x", sha256.Sum256(n.body)),
 	}
 	switch {
 	case n.folder:
@@ -261,7 +265,7 @@ func (g *graphFX) serveContent(w http.ResponseWriter, r *http.Request, itemID, r
 		http.Redirect(w, r, "/drives/drv/items/redir/content?direct=1", http.StatusFound)
 		return
 	}
-	_, _ = w.Write(n.body)
+	http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(n.body))
 }
 
 func (g *graphFX) serveChildren(w http.ResponseWriter, r *http.Request, itemID string) {

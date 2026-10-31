@@ -37,7 +37,7 @@ func TestBridge_policyAndTrack(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly())
+	eng, err := brain.NewEngine(brain.NewMemoryStore())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +95,7 @@ func TestBridge_policyAndTrack(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := br.Indexer.IndexPathResult(ctx, "/workspace/off/secret.txt")
+	res, err := br.Indexer.IndexPath(ctx, "/workspace/off/secret.txt")
 	if err != nil || res != PathSkipped {
 		t.Fatalf("none IndexPath: res=%q err=%v", res, err)
 	}

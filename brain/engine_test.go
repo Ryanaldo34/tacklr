@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"strings"
+	"slices"
 	"testing"
 	"time"
 
@@ -13,330 +13,139 @@ import (
 	"github.com/ryanaldo34/tacklr/brain"
 )
 
-func TestEngine_ReadRejectsOutsideScope(t *testing.T) {
+func TestEngine_openReadsTheObjectItsKindAndItsFirstChildren(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	nsA, nsB := mustNS(t, "org", "a"), mustNS(t, "org", "b")
-	id := uuid.New()
-	if err := store.Put(context.Background(), brain.Object{
-		ID: id, Kind: "Document", Content: "secret", Namespace: nsA,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	_, err = eng.Read(ctx, brain.Scope{Namespace: nsB}, id)
-	if !errors.Is(err, brain.ErrNotFound) {
-		t.Fatalf("wrong namespace: %v", err)
-	}
-
-	deleted := time.Now().UTC()
-	if err := store.Put(context.Background(), brain.Object{
-		ID: id, Kind: "Document", Namespace: nsA, DeletedAt: &deleted,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	_, err = eng.Read(ctx, brain.Scope{}, id)
-	if !errors.Is(err, brain.ErrNotFound) {
-		t.Fatalf("soft-deleted: %v", err)
-	}
-
-	objNS := mustNS(t, "org", "acme", "workspace", "west")
-	hid := uuid.New()
-	if err := store.Put(context.Background(), brain.Object{
-		ID: hid, Kind: "Document", Content: "nested", Namespace: objNS,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	got, err := eng.Read(ctx, brain.Scope{Namespace: mustNS(t, "org", "acme")}, hid)
-	if err != nil || got.Content != "nested" {
-		t.Fatalf("org scope should see workspace object: %v %+v", err, got)
-	}
-	_, err = eng.Read(ctx, brain.Scope{Namespace: mustNS(t, "org", "acme", "workspace", "east")}, hid)
-	if !errors.Is(err, brain.ErrNotFound) {
-		t.Fatalf("other workspace: %v", err)
-	}
-
-	_, err = eng.Read(ctx, brain.Scope{}, uuid.Nil)
-	if err == nil {
-		t.Fatal("nil object id must fail")
-	}
-}
-
-func TestEngine_SchemaAndOrderedChildren(t *testing.T) {
-	ctx := context.Background()
-	store := brain.NewMemoryStore()
-	ns := mustNS(t, "id", uuid.NewString())
-	parentID := uuid.New()
-	c1, c2 := uuid.New(), uuid.New()
-	pos1, pos2 := 1, 2
-
-	if err := store.PutKind(ctx, brain.ObjectKind{
-		Kind: "Chunk", IsPart: true,
-	}); err != nil {
-		t.Fatal(err)
-	}
+	ns := tenant(t)
+	scope := brain.Scope{Namespace: ns}
 	if err := store.PutKind(ctx, brain.ObjectKind{
 		Kind: "Document", Description: "A parent doc", IsParent: true,
 		FilterableFields: json.RawMessage(`[{"name":"status","type":"string","operators":["eq"]}]`),
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Put(context.Background(), brain.Object{
-		ID: parentID, Kind: "Document", Title: "Parent", Namespace: ns,
-	}); err != nil {
+	parent := brain.Object{ID: uuid.New(), Kind: "Document", Title: "Parent", Content: "the body", Namespace: ns,
+		Properties: map[string]any{brain.PropVFSPath: "/workspace/doc.md"}}
+	if err := putFixture(store, parent); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Put(context.Background(), brain.Object{
-		ID: c2, Kind: "Chunk", Title: "second", Namespace: ns,
-		ParentID: &parentID, Position: &pos2, Content: "c2-body",
-	}); err != nil {
-		t.Fatal(err)
+	var firstPart uuid.UUID
+	for i := range 12 {
+		pos := 11 - i // written in reverse; Open lists them by position
+		part := brain.Object{ID: uuid.New(), Kind: "Chunk", Title: "part", Content: "c", Namespace: ns, ParentID: &parent.ID, Position: &pos}
+		if pos == 0 {
+			firstPart = part.ID
+		}
+		if err := putFixture(store, part); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if err := store.Put(context.Background(), brain.Object{
-		ID: c1, Kind: "Chunk", Title: "first", Namespace: ns,
-		ParentID: &parentID, Position: &pos1, Content: "c1-body",
-	}); err != nil {
-		t.Fatal(err)
-	}
+	nested := brain.Object{ID: uuid.New(), Kind: "Note", Title: "nested", Namespace: append(ns.Clone(), brain.Attr{Name: "workspace", Value: "west"})}
 	deleted := time.Now().UTC()
-	if err := store.Put(context.Background(), brain.Object{
-		ID: uuid.New(), Kind: "Chunk", Title: "gone", Namespace: ns,
-		ParentID: &parentID, Position: &pos1, DeletedAt: &deleted,
-	}); err != nil {
-		t.Fatal(err)
+	gone := brain.Object{ID: uuid.New(), Kind: "Note", Namespace: ns, DeletedAt: &deleted}
+	for _, o := range []brain.Object{nested, gone} {
+		if err := putFixture(store, o); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if err := store.Put(context.Background(), brain.Object{
-		ID: uuid.New(), Kind: "Chunk", Title: "other-ns", Namespace: mustNS(t, "id", uuid.NewString()),
-		ParentID: &parentID, Position: &pos1,
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
+	eng, err := brain.NewEngine(store)
 	if err != nil {
 		t.Fatal(err)
 	}
+	east := brain.Scope{Namespace: append(ns.Clone(), brain.Attr{Name: "workspace", Value: "east"})}
 
-	all, err := eng.Schema(ctx, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(all.Kinds) != 2 || all.Kinds[0].Kind != "Chunk" || all.Kinds[1].Kind != "Document" {
-		t.Fatalf("kinds sorted: %+v", all.Kinds)
-	}
+	opened, openErr := eng.Open(ctx, scope, parent.ID)
+	part, partErr := eng.Open(ctx, scope, firstPart)
+	fromOrg, nestedErr := eng.Open(ctx, scope, nested.ID)
+	_, eastErr := eng.Open(ctx, east, nested.ID)
+	_, goneErr := eng.Open(ctx, scope, gone.ID)
+	_, otherErr := eng.Open(ctx, brain.Scope{Namespace: tenant(t)}, parent.ID)
+	_, nilErr := eng.Open(ctx, scope, uuid.Nil)
+	byPath, pathErr := eng.Resolve(ctx, scope, brain.Ref{Path: "/workspace/doc.md"})
+	byID, idErr := eng.Resolve(ctx, scope, brain.Ref{ID: nested.ID})
+	_, unindexedErr := eng.Resolve(ctx, scope, brain.Ref{Path: "/workspace/other.md"})
+	_, emptyErr := eng.Resolve(ctx, scope, brain.Ref{})
+	raw, rawErr := eng.Get(ctx, scope, parent.ID)
+	_, rawNilErr := eng.Get(ctx, scope, uuid.Nil)
 
-	one, err := eng.Schema(ctx, "Document")
-	if err != nil {
-		t.Fatal(err)
+	if openErr != nil || opened.Object.Content != "the body" || opened.Kind == nil || opened.Kind.Description != "A parent doc" || len(opened.Kind.FilterableFields) == 0 {
+		t.Errorf("open = %+v %v, want the content and the store's kind with its fields", opened, openErr)
 	}
-	if len(one.Kinds) != 1 || one.Kinds[0].Description != "A parent doc" {
-		t.Fatalf("single kind: %+v", one)
+	if len(opened.Children) != 10 || !opened.MoreChildren || opened.Children[0].ID != firstPart || opened.Children[0].Content != "" {
+		t.Errorf("open children = %d (more %v), want the first 10 by position, without content", len(opened.Children), opened.MoreChildren)
 	}
-	if string(one.Kinds[0].FilterableFields) == "" {
-		t.Fatal("filterable fields required on Document")
+	if partErr != nil || len(part.Children) != 0 || part.Kind != nil {
+		t.Errorf("open a part = %+v %v, want no children and no registered kind", part, partErr)
 	}
-
-	children, err := eng.ListChildren(ctx, brain.Scope{Namespace: ns}, parentID)
-	if err != nil {
-		t.Fatal(err)
+	if nestedErr != nil || fromOrg.Object.Title != "nested" || !errors.Is(eastErr, brain.ErrNotFound) {
+		t.Errorf("a workspace object from its org = %v, from another workspace = %v, want visible and not found", nestedErr, eastErr)
 	}
-	if len(children) != 2 || children[0].ID != c1 || children[1].ID != c2 {
-		t.Fatalf("ordered children: %+v", children)
+	for name, err := range map[string]error{"soft-deleted": goneErr, "another tenant": otherErr, "an unindexed path": unindexedErr} {
+		if !errors.Is(err, brain.ErrNotFound) {
+			t.Errorf("open %s = %v, want ErrNotFound", name, err)
+		}
 	}
-	if children[0].Content != "" || children[1].Content != "" {
-		t.Fatalf("list payload omits content: %+v", children)
+	if !errors.Is(nilErr, brain.ErrInvalid) || !errors.Is(emptyErr, brain.ErrInvalid) || !errors.Is(rawNilErr, brain.ErrInvalid) {
+		t.Errorf("no id: open %v, resolve %v, get %v, want ErrInvalid", nilErr, emptyErr, rawNilErr)
 	}
-	if children[0].Title != "first" {
-		t.Fatalf("title: %q", children[0].Title)
+	if pathErr != nil || byPath != parent.ID || idErr != nil || byID != nested.ID {
+		t.Errorf("resolve by path = %s %v, by id = %s %v", byPath, pathErr, byID, idErr)
+	}
+	if rawErr != nil || raw.Properties[brain.PropVFSPath] != "/workspace/doc.md" {
+		t.Errorf("get = %+v %v, want the stored object", raw, rawErr)
 	}
 }
 
-func TestEngine_SchemaUnknownKind(t *testing.T) {
-	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithLexicalOnly())
-	if err != nil {
-		t.Fatal(err)
-	}
-	empty, err := eng.Schema(context.Background(), "")
-	if err != nil || len(empty.Kinds) != 0 {
-		t.Fatalf("empty registry: %+v err=%v", empty, err)
-	}
-	_, err = eng.Schema(context.Background(), "Missing")
-	if !errors.Is(err, brain.ErrNotFound) {
-		t.Fatalf("got %v", err)
-	}
-}
-
-func TestEngine_ListChildrenRequiresVisibleParent(t *testing.T) {
+func TestEngine_openTakesTheKindFromTheCatalogWhenKindsAreRegistered(t *testing.T) {
 	ctx := context.Background()
 	store := brain.NewMemoryStore()
-	ns := mustNS(t, "id", uuid.NewString())
-	parentID := uuid.New()
-	if err := store.Put(context.Background(), brain.Object{
-		ID: parentID, Kind: "Document", Namespace: ns,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
+	eng, err := brain.NewEngine(store, brain.WithKinds(brain.KindSpec{Kind: "Deal", Description: "A sale", IsParent: true,
+		Fields: []brain.FieldSpec{{Name: "stage", Type: brain.FieldTypeString}}}))
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	other := mustNS(t, "org", "other")
-	_, err = eng.ListChildren(ctx, brain.Scope{Namespace: other}, parentID)
-	if !errors.Is(err, brain.ErrNotFound) {
-		t.Fatalf("got %v", err)
+	scope := brain.Scope{Namespace: tenant(t)}
+	deal := save(t, eng, scope, brain.Object{Kind: "Deal", Title: "Acme"})
+	stray := brain.Object{ID: uuid.New(), Kind: "Unregistered", Namespace: scope.Namespace}
+	if err := putFixture(store, stray); err != nil {
+		t.Fatal(err)
 	}
 
-	_, err = eng.ListChildren(ctx, brain.Scope{}, uuid.Nil)
-	if err == nil {
-		t.Fatal("nil parent id must fail")
+	opened, err := eng.Open(ctx, scope, deal.ID)
+	strayOpened, strayErr := eng.Open(ctx, scope, stray.ID)
+
+	if err != nil || opened.Kind == nil || opened.Kind.Description != "A sale" || !json.Valid(opened.Kind.FilterableFields) {
+		t.Errorf("open a registered kind = %+v %v, want the catalog's kind", opened.Kind, err)
+	}
+	if strayErr != nil || strayOpened.Kind != nil {
+		t.Errorf("open an unregistered kind = %+v %v, want no kind", strayOpened.Kind, strayErr)
 	}
 }
 
-func TestNewEngine_requiresStore(t *testing.T) {
-	if _, err := brain.NewEngine(nil); err == nil {
-		t.Fatal("want error")
+func TestNewEngine_requiresAStoreAndValidKinds(t *testing.T) {
+	_, noStore := brain.NewEngine(nil)
+	_, badKind := brain.NewEngine(brain.NewMemoryStore(), brain.WithKinds(brain.KindSpec{Kind: ""}))
+	eng, err := brain.NewEngine(brain.NewMemoryStore(), brain.WithKinds(brain.KindSpec{Kind: "Note"}), brain.WithConfig(brain.EngineConfig{Now: time.Now}))
+
+	if noStore == nil || badKind == nil {
+		t.Errorf("no store %v, bad kind %v, want errors", noStore, badKind)
+	}
+	if err != nil || eng.HasGraph() || !slices.Equal(eng.Catalog().RecordKinds(), []string{"Note"}) {
+		t.Errorf("engine = %v, graph %v, kinds %v", err, eng.HasGraph(), eng.Catalog().RecordKinds())
 	}
 }
 
 func TestMemoryStore_PutRequiresIdentity(t *testing.T) {
 	s := brain.NewMemoryStore()
-	cases := []struct {
-		name string
-		fn   func() error
-	}{
-		{"empty object", func() error { return s.Put(context.Background(), brain.Object{}) }},
-		{"missing kind", func() error { return s.Put(context.Background(), brain.Object{ID: uuid.New()}) }},
-		{"missing namespace", func() error {
-			return s.Put(context.Background(), brain.Object{ID: uuid.New(), Kind: "X"})
-		}},
-		{"empty kind registry", func() error { return s.PutKind(context.Background(), brain.ObjectKind{}) }},
+	cases := map[string]func() error{
+		"empty object":      func() error { return putFixture(s, brain.Object{}) },
+		"missing kind":      func() error { return putFixture(s, brain.Object{ID: uuid.New()}) },
+		"missing namespace": func() error { return putFixture(s, brain.Object{ID: uuid.New(), Kind: "X"}) },
+		"empty kind":        func() error { return s.PutKind(context.Background(), brain.ObjectKind{}) },
 	}
-	for _, tc := range cases {
-		if err := tc.fn(); err == nil {
-			t.Fatalf("%s: want error", tc.name)
+	for name, fn := range cases {
+		if err := fn(); err == nil {
+			t.Errorf("%s: want error", name)
 		}
-	}
-}
-
-func mustNS(t testing.TB, nv ...string) brain.Namespace {
-	t.Helper()
-	ns, err := brain.ParseNamespace(nv...)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return ns
-}
-
-func mustFilter(t testing.TB, m map[string]any) brain.Filter {
-	t.Helper()
-	f, err := brain.DecodeFilter(m)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return f
-}
-
-type nopRerank struct{}
-
-func (nopRerank) Rerank(context.Context, []brain.RichObject) ([]brain.RichObject, error) {
-	return nil, nil
-}
-
-func TestNewEngine_embedderOrLexicalOnly(t *testing.T) {
-	store := brain.NewMemoryStore()
-	_, err := brain.NewEngine(store)
-	if err == nil || !errors.Is(err, brain.ErrInvalid) || !strings.Contains(err.Error(), "WithEmbedder") || !strings.Contains(err.Error(), "WithLexicalOnly") {
-		t.Fatalf("neither option: %v", err)
-	}
-	_, err = brain.NewEngine(store, brain.WithEmbedder(nopEmbed{}), brain.WithLexicalOnly())
-	if err == nil || !errors.Is(err, brain.ErrInvalid) || !strings.Contains(err.Error(), "mutually exclusive") {
-		t.Fatalf("both options: %v", err)
-	}
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
-	if err != nil {
-		t.Fatal(err)
-	}
-	ns := mustNS(t, "id", uuid.NewString())
-	got, err := eng.Put(context.Background(), brain.Scope{Namespace: ns}, brain.Object{
-		Kind: "Note", Title: "hello", Content: "body",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got.Embedding) != 0 {
-		t.Fatalf("lexical-only put must not embed: %+v", got.Embedding)
-	}
-}
-
-type nopEmbed struct{}
-
-func (nopEmbed) Embed(context.Context, string) ([]float32, error) { return []float32{1}, nil }
-
-// TestNewEngine_options: WithReranker/ExpandRecipes/Kinds construct path.
-func TestNewEngine_options(t *testing.T) {
-	ctx := context.Background()
-	store := brain.NewMemoryStore()
-	if _, err := brain.NewEngine(store, brain.WithLexicalOnly(), brain.WithExpandRecipes(brain.ExpandRecipe{Name: ""})); err == nil || !errors.Is(err, brain.ErrInvalid) {
-		t.Fatalf("empty expand recipe name must fail construct: %v", err)
-	}
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly(),
-		brain.WithReranker(nopRerank{}),
-		brain.WithExpandRecipes(
-			brain.ExpandRecipe{Name: "kids", MaxHops: 1, WantContainment: true},
-		),
-		brain.WithKinds(brain.KindSpec{
-			Kind: "Note",
-			Fields: []brain.FieldSpec{
-				{Name: "tag", Type: brain.FieldTypeString},
-			},
-		}),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// ExpandByRecipe missing name
-	if _, err := eng.ExpandByRecipe(ctx, brain.Scope{}, uuid.Nil, "nope", brain.NewSearchContext()); err == nil {
-		t.Fatal("missing recipe")
-	}
-	// Register + expand containment kids
-	parent := uuid.New()
-	child := uuid.New()
-	ns := mustNS(t, "id", uuid.NewString())
-	now := time.Now().UTC()
-	pos := 1
-	_ = store.Put(ctx, brain.Object{ID: parent, Kind: "Document", Title: "p", Namespace: ns, UpdatedAt: now})
-	_ = store.Put(ctx, brain.Object{ID: child, Kind: "Chunk", Title: "c", ParentID: &parent, Position: &pos, Namespace: ns, UpdatedAt: now})
-	scope := brain.Scope{Namespace: ns}
-	res, err := eng.ExpandByRecipe(ctx, scope, parent, "kids", brain.NewSearchContext())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(res.Objects) < 1 {
-		t.Fatalf("kids expand: %+v", res.Objects)
-	}
-	if err := eng.RegisterExpandRecipe(brain.ExpandRecipe{Name: ""}); err == nil {
-		t.Fatal("empty recipe name")
-	}
-	if err := eng.RegisterExpandRecipe(brain.ExpandRecipe{Name: " extra ", WantContainment: true}); err != nil {
-		t.Fatal(err)
-	}
-	if eng.HasEdgeSearch() {
-		t.Fatal("memory store has no edge search")
-	}
-	if _, err := eng.FindLinks(ctx, brain.Scope{}, brain.FindLinksRequest{
-		RelationType: "about", Query: "x",
-	}); !errors.Is(err, brain.ErrUnsupported) {
-		t.Fatalf("FindLinks without graph: %v", err)
-	}
-	if _, err := eng.FindObjects(ctx, brain.Scope{}, brain.FindObjectsRequest{Query: "x"}, brain.NewSearchContext()); !errors.Is(err, brain.ErrUnsupported) {
-		t.Fatalf("FindObjects without graph: %v", err)
-	}
-	if eng.HasObjectSearch() {
-		// optional — only when graph object searcher is set
 	}
 }

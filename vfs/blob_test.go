@@ -34,10 +34,10 @@ func TestBlob_rejectsBadConfig(t *testing.T) {
 		t.Fatal("bad prefix")
 	}
 	var azure vfs.AzureBlob
-	if _, _, _, err := azure.Head(ctx, "c", "k"); err == nil {
+	if _, err := azure.Head(ctx, "c", "k"); err == nil {
 		t.Fatal("nil Azure Head")
 	}
-	if _, _, _, err := azure.Get(ctx, "c", "k"); err == nil {
+	if _, err := azure.Get(ctx, "c", "k", 0, -1); err == nil {
 		t.Fatal("nil Azure Get")
 	}
 	if err := azure.Put(ctx, "c", "k", bytes.NewReader(nil), 0); err == nil {

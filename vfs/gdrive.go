@@ -1,7 +1,7 @@
 package vfs
 
 import (
-	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	driveMetaFields  = "id,name,mimeType,modifiedTime,size,shortcutDetails,version"
+	driveMetaFields  = "id,name,mimeType,modifiedTime,size,shortcutDetails,version,md5Checksum"
 	driveListFields  = "nextPageToken,files(" + driveMetaFields + ")"
 	driveMyDriveRoot = "root" // Google Drive alias for the caller's My Drive.
 )
@@ -31,6 +31,7 @@ type DriveMeta struct {
 	Size       int64
 	ModTime    time.Time
 	Version    string
+	MD5        string // content checksum; empty for folders and Google-native files
 	IsDir      bool
 	TargetID   string
 	TargetMime string
@@ -39,7 +40,9 @@ type DriveMeta struct {
 // DriveAPI is the Drive subset used by the provider. Hosts pass NewGoogleDrive.
 type DriveAPI interface {
 	GetMeta(ctx context.Context, fileID string) (DriveMeta, error)
-	GetMedia(ctx context.Context, fileID string) (io.ReadCloser, int64, error)
+	// GetMedia opens n bytes of the file's content from off. n < 0 reads to
+	// the end; n is never 0.
+	GetMedia(ctx context.Context, fileID string, off, n int64) (io.ReadCloser, error)
 	List(ctx context.Context, folderID string) ([]DriveMeta, error)
 	Export(ctx context.Context, fileID, mimeType string) (io.ReadCloser, int64, error)
 	PutMedia(ctx context.Context, fileID, mediaMIME string, r io.Reader, size int64) (DriveMeta, error)
@@ -100,19 +103,21 @@ func (g googleDrive) GetMeta(ctx context.Context, fileID string) (DriveMeta, err
 }
 
 // GetMedia implements DriveAPI.
-func (g googleDrive) GetMedia(ctx context.Context, fileID string) (io.ReadCloser, int64, error) {
+func (g googleDrive) GetMedia(ctx context.Context, fileID string, off, n int64) (io.ReadCloser, error) {
 	if err := g.require(); err != nil {
-		return nil, 0, err
+		return nil, err
 	}
-	res, err := g.service.Files.Get(fileID).
+	call := g.service.Files.Get(fileID).
 		SupportsAllDrives(true).
-		Context(ctx).
-		Download()
-	if err != nil {
-		return nil, 0, mapDriveError(err)
+		Context(ctx)
+	if r := rangeHeader(off, n); r != "" {
+		call.Header().Set("Range", r)
 	}
-	size := res.ContentLength
-	return res.Body, size, nil
+	res, err := call.Download()
+	if err != nil {
+		return nil, mapDriveError(err)
+	}
+	return rangedBody(res, off, n)
 }
 
 // Export implements DriveAPI (official HTML export is application/zip).
@@ -232,6 +237,7 @@ func fileToMeta(f *drive.File) DriveMeta {
 		Name:     f.Name,
 		MimeType: f.MimeType,
 		Size:     f.Size,
+		MD5:      f.Md5Checksum,
 		IsDir:    f.MimeType == mimeGoogleFolder,
 	}
 	if f.Version != 0 {
@@ -370,15 +376,14 @@ func (p *driveProvider) getMeta(ctx context.Context, id string) (DriveMeta, erro
 	return meta, err
 }
 
-func (p *driveProvider) getMedia(ctx context.Context, id string) (io.ReadCloser, int64, error) {
+func (p *driveProvider) getMedia(ctx context.Context, id string, off, n int64) (io.ReadCloser, error) {
 	var body io.ReadCloser
-	var size int64
 	err := p.call(ctx, func() error {
 		var err error
-		body, size, err = p.api.GetMedia(ctx, id)
+		body, err = p.api.GetMedia(ctx, id, off, n)
 		return err
 	})
-	return body, size, err
+	return body, err
 }
 
 func (p *driveProvider) list(ctx context.Context, folderID string) ([]DriveMeta, error) {
@@ -531,7 +536,17 @@ func driveFileInfo(meta DriveMeta) FileInfo {
 		ModTime:   meta.ModTime,
 		IsDir:     meta.dir(),
 		MediaType: mt,
+		Version:   driveVersion(meta),
 	}
+}
+
+// driveVersion is the content checksum, or the revision for Google-native
+// files, which have no checksum. Folders have no version.
+func driveVersion(m DriveMeta) string {
+	if m.dir() {
+		return ""
+	}
+	return cmp.Or(m.MD5, driveRevision(m))
 }
 
 // Validate implements Provider.
@@ -588,21 +603,9 @@ func (p *driveProvider) OpenFile(ctx context.Context, name string, flag int, per
 	if isGoogleNativeFile(meta.MimeType) {
 		return nil, ErrNotSupported
 	}
-	body, _, err := p.getMedia(ctx, meta.ID)
-	if err != nil {
-		return nil, err
-	}
-	data, err := readCapped(body, MaxReadFileBytes, meta.Size)
-	_ = body.Close()
-	if err != nil {
-		return nil, err
-	}
-	if len(data) > MaxReadFileBytes {
-		return nil, errFileExceeds(MaxReadFileBytes)
-	}
-	fi := driveFileInfo(meta)
-	fi.Size = int64(len(data))
-	return &s3ReadFile{Reader: bytes.NewReader(data), info: fi}, nil
+	return newRemoteFile(ctx, driveFileInfo(meta), func(ctx context.Context, off, n int64) (io.ReadCloser, error) {
+		return p.getMedia(ctx, meta.ID, off, n)
+	}), nil
 }
 
 // ReadDir implements Provider.
@@ -700,7 +703,7 @@ func (p *driveProvider) OpenDocument(ctx context.Context, name string, reg *Cont
 	if meta.Size > int64(MaxReadFileBytes) {
 		return nil, errFileExceeds(MaxReadFileBytes)
 	}
-	body, _, err := p.getMedia(ctx, meta.ID)
+	body, err := p.getMedia(ctx, meta.ID, 0, -1)
 	if err != nil {
 		return nil, err
 	}

@@ -7,20 +7,19 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/ryanaldo34/tacklr/server"
-
-	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 
 	"github.com/ryanaldo34/tacklr"
 	"github.com/ryanaldo34/tacklr/internal/testkit"
+	"github.com/ryanaldo34/tacklr/server"
 )
 
 const wirePgImage = "tacklr-pg-brain:test"
 
 var (
 	wireOnce sync.Once
-	wireURL  string
+	wirePool *pgxpool.Pool
 	wireErr  error
 	wireSkip string
 )
@@ -121,7 +120,7 @@ func TestPostgresWireStore_acpLoadAfterRestart(t *testing.T) {
 	}
 }
 
-func wireConn(t *testing.T) *pgx.Conn {
+func wireConn(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	ctx := context.Background()
 	wireOnce.Do(func() {
@@ -142,20 +141,14 @@ func wireConn(t *testing.T) *pgx.Conn {
 			_ = ctr.Terminate(ctx)
 			return
 		}
-		conn, err := pgx.Connect(ctx, url)
+		pool, err := pgxpool.New(ctx, url)
 		if err != nil {
 			wireErr = err
-			_ = ctr.Terminate(ctx)
 			return
 		}
-		if err := server.NewPostgresWireStore(conn, "acp").Setup(ctx); err != nil {
-			wireErr = err
-			_ = conn.Close(ctx)
-			_ = ctr.Terminate(ctx)
-			return
+		if wireErr = server.NewPostgresWireStore(pool, "acp").Setup(ctx); wireErr == nil {
+			wirePool = pool
 		}
-		_ = conn.Close(ctx)
-		wireURL = url
 	})
 	if wireSkip != "" {
 		t.Skipf("postgres unavailable: %s", wireSkip)
@@ -163,10 +156,5 @@ func wireConn(t *testing.T) *pgx.Conn {
 	if wireErr != nil {
 		t.Fatal(wireErr)
 	}
-	conn, err := pgx.Connect(ctx, wireURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = conn.Close(ctx) })
-	return conn
+	return wirePool
 }

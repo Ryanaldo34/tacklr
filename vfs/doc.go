@@ -16,7 +16,9 @@
 //   - Provider / Open / S3API / DriveAPI / GraphAPI — custom backends (Blob uses S3API).
 //     Hosts construct default backends from this package (Local, S3, Blob,
 //     Drive, Graph, Git, NewGoogleDrive, NewGraph).
-//   - File, FileInfo, DirEntry — I/O types (File is Close+Stat; io.Reader / io.ReaderAt / io.Writer via comma-ok)
+//   - File, FileInfo, DirEntry — I/O types (File is Close+Stat; io.Reader / io.ReaderAt / io.Writer via comma-ok).
+//     FileInfo.Version changes when the content changes (ETag, md5Checksum, cTag, or local size+mtime+inode).
+//     Read handles stream on every backend; remote ReadAt uses range requests with read-ahead.
 //   - Document / Textual / Structured / TextDocument — content IR
 //   - Block / StyleMeta / Span / FindBlock / BlockReplaceSpan — structured view
 //   - ContentRegistry + Codec + TextCodec + IdentityCodec — optional custom decode

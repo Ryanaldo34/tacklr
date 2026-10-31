@@ -3,6 +3,7 @@ package brain
 import (
 	"encoding/json"
 	"errors"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -17,20 +18,46 @@ var (
 	ErrInvalid = errors.New("brain: invalid")
 	// ErrUnsupported groups missing backend capabilities (no writer, no graph, no listing).
 	ErrUnsupported = errors.New("brain: unsupported")
-	// ErrGraphEnsure / ErrGraphRemove are dual-write failures. Callers re-Put
-	// after fixing the graph; store row is the source of truth.
-	ErrGraphEnsure = errors.New("brain: graph ensure object")
-	ErrGraphRemove = errors.New("brain: graph remove object")
+	// ErrConflict is returned when another write changed the object first.
+	// Nothing was written; retry from a fresh read.
+	ErrConflict = errors.New("brain: conflict")
+	// ErrIndexPut and ErrIndexRemove are index write failures (a graph is an
+	// index). The store row is the source of truth: re-Put after fixing the
+	// index.
+	ErrIndexPut    = errors.New("brain: index put")
+	ErrIndexRemove = errors.New("brain: index remove")
 )
 
-// Scope is optional retrieval isolation for Engine methods.
-// Empty Namespace means no isolation. Non-empty applies application RLS
-// (Namespace.Covers) so a broader scope sees objects with extra attrs.
-// SessionID is harness-owned. When set, search and get also read this session's
-// rows in session_messages (Namespace plus the session attribute). The model cannot set it.
+// Scope is the isolation every Engine and store call runs under. Namespace is
+// required: a call with an empty namespace fails, so no code path reads or
+// writes across tenants by default. A scope sees an object when every scope
+// attr is on the object (Namespace.Covers), so a broader scope sees objects
+// with extra attrs.
+//
+// Principals are the caller's identities (user and group ids from the host's
+// identity provider). An object with Readers is visible only to a scope that
+// shares at least one principal with it. An object without Readers is visible
+// to every scope that covers its namespace.
+//
+// SessionID is harness-owned. When set, search and get also read this
+// session's rows in session_messages (Namespace plus the session attribute).
+// The model cannot set it.
 type Scope struct {
-	Namespace Namespace
-	SessionID string
+	Namespace  Namespace
+	Principals []string
+	SessionID  string
+}
+
+// CanRead reports whether obj is visible under s: s covers its namespace,
+// and obj has no Readers or shares a principal with s.
+func (s Scope) CanRead(obj Object) bool {
+	if !s.Namespace.Covers(obj.Namespace) {
+		return false
+	}
+	if len(obj.Readers) == 0 {
+		return true
+	}
+	return slices.ContainsFunc(obj.Readers, func(r string) bool { return slices.Contains(s.Principals, r) })
 }
 
 // Object is one row from the generic objects store (parent or part).
@@ -47,8 +74,14 @@ type Object struct {
 	// Embedding is the dense vector stored on the row. Store search reads it
 	// on parts. Parent embeddings are copied to the graph for FindObjects.
 	Embedding []float32
+	// EmbeddingModel names the model that made Embedding. Vector search only
+	// compares rows from the query's model.
+	EmbeddingModel string
 	// Namespace is the ordered named isolation attrs stored on the row.
 	Namespace Namespace
+	// Readers, when set, limits visibility to scopes holding one of these
+	// principals (source ACLs, such as Drive or SharePoint sharing).
+	Readers   []string
 	CreatedAt time.Time
 	UpdatedAt time.Time
 	DeletedAt *time.Time
@@ -97,28 +130,20 @@ type RichObject struct {
 	UpdatedAt time.Time `json:"updated_at,omitempty"`
 }
 
-// Relation describes a non-containment hop used to reach a neighbor on expand.
-// EdgeMeta fields are embedded so agent JSON stays flat (note, status, role, …).
+// Relation is how a related object was reached: a child or parent, or an
+// edge. An edge hop says the object it was followed from (Via), so the hops
+// of one Related call with depth trace a path back to the start. EdgeMeta
+// fields are embedded so agent JSON stays flat (note, status, role, …).
 type Relation struct {
 	Type      string     `json:"type"`
-	Direction string     `json:"direction,omitempty"` // out | in
-	Depth     int        `json:"depth,omitempty"`     // hops from expand seed
-	SourceID  *uuid.UUID `json:"source_id,omitempty"` // ExpandMany landing id
+	Direction string     `json:"direction,omitempty"` // out | in, from Via
+	Depth     int        `json:"depth,omitempty"`     // hops from the start
+	Via       *uuid.UUID `json:"via,omitempty"`       // the object the edge was followed from
 	EdgeMeta
 }
 
-// RelationFromNeighbor maps a graph hop to the agent-facing Relation payload.
-func RelationFromNeighbor(n GraphNeighbor) Relation {
-	return Relation{
-		Type:      n.RelationType,
-		Direction: n.Direction,
-		Depth:     1,
-		EdgeMeta:  n.Meta,
-	}
-}
-
-// RichFromObject maps a stored object to a rich reference.
-func RichFromObject(o Object, includeContent bool) RichObject {
+// Rich maps a stored object to a rich reference.
+func (o Object) Rich(includeContent bool) RichObject {
 	r := RichObject{
 		ID:          o.ID,
 		Kind:        o.Kind,
@@ -137,58 +162,12 @@ func RichFromObject(o Object, includeContent bool) RichObject {
 	return r
 }
 
-// SchemaResult is the payload for the schema tool.
-type SchemaResult struct {
-	Kinds []ObjectKindInfo `json:"kinds"`
-	// FilterUsage tells agents which tools accept filterable_fields and how.
-	FilterUsage FilterUsage `json:"filter_usage"`
-}
-
-// FilterUsage is agent-facing guidance for structured filters (shared by corpus and entity find).
-type FilterUsage struct {
-	// Tools list knowledge tools that accept the same property filter keys as filterable_fields.
-	Tools []string `json:"tools"`
-	// Note is short instruction text for the agent.
-	Note string `json:"note"`
-}
-
-// DefaultFilterUsage is embedded in every SchemaResult.
-func DefaultFilterUsage() FilterUsage {
-	return FilterUsage{
-		Tools: []string{"search", "find_exact", "find_objects"},
-		Note: "Each kind lists columns (title, summary, content) and filterable_fields (host properties). " +
-			"search and find_exact take a free-text query over chunk title, summary, and content; " +
-			"put structured fields in filters. find_objects searches parent records; the same " +
-			"filterable_fields apply to the parent. When kinds are registered, property filters " +
-			"require a kind filter (or find_objects.kinds). Core filter keys: kind, title, " +
-			"created_after, created_before, updated_after, updated_before. Field examples are " +
-			"illustrations, not a closed set; enum on a string field is enforced on write. " +
-			"Call schema with a kind before filtering.",
-	}
-}
-
-// CoreColumn is a built-in object field shown next to filterable_fields in schema().
-type CoreColumn struct {
-	Name   string `json:"name"`
-	Filter bool   `json:"filter,omitempty"`
-}
-
-// CoreColumns is title, summary, and content — always present on every object.
-func CoreColumns() []CoreColumn {
-	return []CoreColumn{
-		{Name: "title", Filter: true},
-		{Name: "summary"},
-		{Name: "content"},
-	}
-}
-
 // ObjectKindInfo is the JSON form of ObjectKind for agents.
 type ObjectKindInfo struct {
 	Kind             string          `json:"kind"`
 	Description      string          `json:"description,omitempty"`
 	IsPart           bool            `json:"is_part"`
 	IsParent         bool            `json:"is_parent"`
-	Columns          []CoreColumn    `json:"columns"`
 	FilterableFields json.RawMessage `json:"filterable_fields,omitempty"`
 }
 
@@ -222,27 +201,6 @@ func (f Filter) empty() bool {
 		f.CreatedAfter == "" && f.CreatedBefore == "" &&
 		f.UpdatedAfter == "" && f.UpdatedBefore == "" &&
 		len(f.Props) == 0
-}
-
-// SearchRequest is the engine input for search and find_exact.
-// SearchRequest is corpus retrieval over store parts (Search / FindExact).
-// Query is free text against part title, summary, and content. Structured
-// fields belong in Filters on the part row, or in FindObjectsRequest when
-// they live on the parent.
-type SearchRequest struct {
-	Query   string
-	Filters Filter
-	Limit   int
-	// ScopeIDs, when non-empty, keeps only candidates whose id or parent_id is in the set.
-	// Use after expand/find_objects to restrict corpus search to a deal-local neighborhood.
-	ScopeIDs []uuid.UUID
-}
-
-// SearchPage is one page of ranked rich objects plus ResultSet identity.
-type SearchPage struct {
-	ResultSetID uuid.UUID    `json:"result_set_id"`
-	HasMore     bool         `json:"has_more"`
-	Objects     []RichObject `json:"objects"`
 }
 
 // ScoredID is a candidate from a retrieval channel before fusion.

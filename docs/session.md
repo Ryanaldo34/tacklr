@@ -223,7 +223,7 @@ Do not put Temporal `workflow.Context` on `session.Runtime`.
 
 The session loop starts `tacklr.turn`. Inference and tool steps inherit that span. Do not add extra wrapper spans around a step.
 
-Host setup: `telemetry.Init` installs the process-wide OpenTelemetry providers and, when an endpoint is set, the OTLP exporters. `Dial` replaces the tracer with a replay-safe one that keeps that export configuration, then prepends Temporal’s OpenTelemetry plugin. Postgres Query/Exec spans join the same trace because `postgres.Store` and `PostgresWireStore` run otelpgx against the caller context.
+Host setup: `telemetry.Init` installs the process-wide OpenTelemetry providers and, when an endpoint is set, the OTLP exporters. `Dial` replaces the tracer with a replay-safe one that keeps that export configuration, then prepends Temporal’s OpenTelemetry plugin. Postgres statement spans from `postgres.Store` join the same trace: `postgres.Open` sets pgx's otelpgx tracer (`ConnConfig.Tracer`). A host that builds its own pool for `server.PostgresWireStore` sets that tracer itself.
 
 ```go
 shutdown, err := telemetry.Init(ctx, telemetry.Config{

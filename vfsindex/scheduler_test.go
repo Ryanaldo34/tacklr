@@ -3,6 +3,7 @@ package vfsindex_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -23,7 +24,7 @@ func TestAsyncScheduler_notifyCoalesceAndEventualIndex(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = ms.Close() })
 	store := brain.NewMemoryStore()
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
+	eng, err := brain.NewEngine(store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,11 +58,11 @@ func TestAsyncScheduler_notifyCoalesceAndEventualIndex(t *testing.T) {
 	deadline := time.Now().Add(3 * time.Second)
 	var found bool
 	for time.Now().Before(deadline) {
-		page, err := eng.Search(ctx, brain.Scope{Namespace: ns}, brain.SearchRequest{Query: "uniquephrase"}, brain.NewSearchContext())
+		page, err := eng.Search(ctx, brain.Scope{Namespace: ns}, brain.SearchRequest{Query: "uniquephrase"})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(page.Objects) > 0 {
+		if len(slices.Collect(page.Results.Objects())) > 0 {
 			found = true
 			break
 		}
@@ -72,8 +73,8 @@ func TestAsyncScheduler_notifyCoalesceAndEventualIndex(t *testing.T) {
 	}
 }
 
-// TestIndexPathResult_andUnindex: public helpers return compact outcomes.
-func TestIndexPathResult_andUnindex(t *testing.T) {
+// TestIndexPath_andUnindex: public helpers return compact outcomes.
+func TestIndexPath_andUnindex(t *testing.T) {
 	ctx := context.Background()
 	ms, err := vfs.Tree(vfs.At("work", vfs.Local(t.TempDir())))(ctx, "result-unindex", vfs.Request{})
 	if err != nil {
@@ -81,7 +82,7 @@ func TestIndexPathResult_andUnindex(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = ms.Close() })
 	store := brain.NewMemoryStore()
-	eng, err := brain.NewEngine(store, brain.WithLexicalOnly())
+	eng, err := brain.NewEngine(store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,15 +101,15 @@ func TestIndexPathResult_andUnindex(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := idx.IndexPathResult(ctx, "/workspace/work/x.txt")
+	res, err := idx.IndexPath(ctx, "/workspace/work/x.txt")
 	if err != nil || res != vfsindex.PathIndexed {
 		t.Fatalf("indexed: res=%q err=%v", res, err)
 	}
-	res, err = idx.IndexPathResult(ctx, "/workspace/work/x.txt")
+	res, err = idx.IndexPath(ctx, "/workspace/work/x.txt")
 	if err != nil || res != vfsindex.PathSkipped {
 		t.Fatalf("skipped: res=%q err=%v", res, err)
 	}
-	res, err = idx.IndexPathResult(ctx, "/workspace/work")
+	res, err = idx.IndexPath(ctx, "/workspace/work")
 	if err != nil || res != vfsindex.PathDirectory {
 		t.Fatalf("directory: res=%q err=%v", res, err)
 	}
@@ -123,7 +124,7 @@ func TestIndexPathResult_andUnindex(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := eng.Read(ctx, scope, idx.DocumentID("/workspace/work/x.txt")); !errors.Is(err, brain.ErrNotFound) {
+	if _, err := eng.Get(ctx, scope, idx.DocumentID("/workspace/work/x.txt")); !errors.Is(err, brain.ErrNotFound) {
 		t.Fatalf("expected soft-deleted parent, got %v", err)
 	}
 	removed, err = idx.UnindexPath(ctx, "/workspace/work/x.txt")
@@ -131,8 +132,8 @@ func TestIndexPathResult_andUnindex(t *testing.T) {
 		t.Fatalf("noop unindex: removed=%v err=%v", removed, err)
 	}
 
-	// Missing path IndexPathResult → removed (no mirror left)
-	res, err = idx.IndexPathResult(ctx, "/workspace/work/missing.txt")
+	// Missing path IndexPath → removed (no mirror left)
+	res, err = idx.IndexPath(ctx, "/workspace/work/missing.txt")
 	if err != nil || res != vfsindex.PathRemoved {
 		t.Fatalf("removed missing: res=%q err=%v", res, err)
 	}
@@ -142,18 +143,18 @@ func TestIndexPathResult_andUnindex(t *testing.T) {
 	if err := ms.WriteDocument(ctx, doc); err != nil {
 		t.Fatal(err)
 	}
-	res, err = idx.IndexPathResult(ctx, "/workspace/work/dirty.txt")
+	res, err = idx.IndexPath(ctx, "/workspace/work/dirty.txt")
 	if err != nil || res != vfsindex.PathIndexed {
 		t.Fatalf("dirty index: res=%q err=%v", res, err)
 	}
-	page, err := eng.Search(ctx, scope, brain.SearchRequest{Query: "dirtyphrase-only-in-cache"}, brain.NewSearchContext())
+	page, err := eng.Search(ctx, scope, brain.SearchRequest{Query: "dirtyphrase-only-in-cache"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(page.Objects) == 0 {
+	if len(slices.Collect(page.Results.Objects())) == 0 {
 		t.Fatal("IndexPath should use session-visible dirty body")
 	}
-	if page.Objects[0].Properties[vfsindex.PropVFSPath] != "/workspace/work/dirty.txt" {
-		t.Fatalf("unexpected hit: %+v", page.Objects[0])
+	if slices.Collect(page.Results.Objects())[0].Properties[vfsindex.PropVFSPath] != "/workspace/work/dirty.txt" {
+		t.Fatalf("unexpected hit: %+v", slices.Collect(page.Results.Objects())[0])
 	}
 }

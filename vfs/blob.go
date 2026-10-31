@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
@@ -52,29 +51,37 @@ func (a AzureBlob) require() error {
 }
 
 // Head implements S3API.
-func (a AzureBlob) Head(ctx context.Context, bucket, key string) (int64, time.Time, string, error) {
+func (a AzureBlob) Head(ctx context.Context, bucket, key string) (S3Object, error) {
 	if err := a.require(); err != nil {
-		return 0, time.Time{}, "", err
+		return S3Object{}, err
 	}
 	props, err := a.Client.ServiceClient().NewContainerClient(bucket).NewBlobClient(key).GetProperties(ctx, nil)
 	if err != nil {
-		return 0, time.Time{}, "", mapBlobError(err)
+		return S3Object{}, mapBlobError(err)
 	}
-	size, mod, ct := blobMeta(props.ContentLength, props.LastModified, props.ContentType)
-	return size, mod, ct, nil
+	obj := S3Object{
+		Size:        deref(props.ContentLength),
+		ModTime:     deref(props.LastModified),
+		ContentType: deref(props.ContentType),
+	}
+	if props.ETag != nil {
+		obj.ETag = string(*props.ETag)
+	}
+	return obj, nil
 }
 
 // Get implements S3API.
-func (a AzureBlob) Get(ctx context.Context, bucket, key string) (io.ReadCloser, int64, time.Time, error) {
+func (a AzureBlob) Get(ctx context.Context, bucket, key string, off, n int64) (io.ReadCloser, error) {
 	if err := a.require(); err != nil {
-		return nil, 0, time.Time{}, err
+		return nil, err
 	}
-	out, err := a.Client.DownloadStream(ctx, bucket, key, nil)
+	out, err := a.Client.DownloadStream(ctx, bucket, key, &azblob.DownloadStreamOptions{
+		Range: azblob.HTTPRange{Offset: off, Count: max(n, 0)},
+	})
 	if err != nil {
-		return nil, 0, time.Time{}, mapBlobError(err)
+		return nil, mapBlobError(err)
 	}
-	size, mod, _ := blobMeta(out.ContentLength, out.LastModified, nil)
-	return out.Body, size, mod, nil
+	return out.Body, nil
 }
 
 // Put implements S3API. UploadStream reads body in blocks; size is unused.
@@ -127,20 +134,12 @@ func (a AzureBlob) List(ctx context.Context, bucket, prefix string) (keys []stri
 	return keys, dirs, nil
 }
 
-func blobMeta(size *int64, mod *time.Time, contentType *string) (int64, time.Time, string) {
-	var n int64
-	var t time.Time
-	var ct string
-	if size != nil {
-		n = *size
+func deref[T any](p *T) T {
+	if p == nil {
+		var zero T
+		return zero
 	}
-	if mod != nil {
-		t = *mod
-	}
-	if contentType != nil {
-		ct = *contentType
-	}
-	return n, t, ct
+	return *p
 }
 
 func mapBlobError(err error) error {
